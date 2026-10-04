@@ -108,6 +108,31 @@ func (s *AgentProfileSuite) TestCreateRejectsUnknownEngine() {
 	s.ErrorIs(err, ErrInvalidProfile)
 }
 
+func (s *AgentProfileSuite) TestValidateEngineKeepsExactMembershipAndDefault() {
+	for _, engine := range []models.AtomEngine{
+		models.AtomEngineDocker,
+		models.AtomEnginePodman,
+		models.AtomEngineKubernetes,
+	} {
+		got, err := validateEngine(engine)
+		s.Require().NoError(err)
+		s.Equal(engine, got)
+	}
+
+	for _, blank := range []models.AtomEngine{"", " ", "\t"} {
+		got, err := validateEngine(blank)
+		s.Require().NoError(err)
+		s.Equal(models.AtomEngineDocker, got)
+	}
+
+	for _, engine := range []models.AtomEngine{"Docker", " docker", "docker ", "lxc"} {
+		got, err := validateEngine(engine)
+		s.Empty(got)
+		s.Require().ErrorIs(err, ErrInvalidProfile)
+		s.Equal(`invalid agent profile: unsupported engine "`+string(engine)+`"`, err.Error())
+	}
+}
+
 func (s *AgentProfileSuite) TestCreateRejectsMalformedSecretRef() {
 	svc := s.svc()
 	_, err := svc.Create(&CreateRequest{

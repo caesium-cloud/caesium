@@ -14,6 +14,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/caesium-cloud/caesium/internal/enginekind"
 	"github.com/caesium-cloud/caesium/internal/incident"
 	"github.com/caesium-cloud/caesium/internal/jobdef/secret"
 	"github.com/caesium-cloud/caesium/internal/models"
@@ -297,12 +298,10 @@ func validateEngine(engine models.AtomEngine) (models.AtomEngine, error) {
 	if strings.TrimSpace(string(engine)) == "" {
 		return models.AtomEngineDocker, nil
 	}
-	switch engine {
-	case models.AtomEngineDocker, models.AtomEngineKubernetes, models.AtomEnginePodman:
+	if enginekind.IsSupported(string(engine)) {
 		return engine, nil
-	default:
-		return "", fmt.Errorf("%w: unsupported engine %q", ErrInvalidProfile, engine)
 	}
+	return "", fmt.Errorf("%w: unsupported engine %q", ErrInvalidProfile, engine)
 }
 
 // validateSecretRefs checks that every value is a syntactically valid

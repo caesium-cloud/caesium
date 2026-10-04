@@ -2,11 +2,10 @@ package notification
 
 import (
 	"errors"
-	"fmt"
 	"net/http"
 	"strconv"
-	"strings"
 
+	"github.com/caesium-cloud/caesium/api/rest/controller/internal/orderby"
 	svc "github.com/caesium-cloud/caesium/api/rest/service/notification"
 	"github.com/labstack/echo/v5"
 	"gorm.io/gorm"
@@ -58,7 +57,7 @@ func parseListRequest(c *echo.Context) (*svc.ListRequest, error) {
 	}
 
 	if orderBy := c.QueryParam("order_by"); orderBy != "" {
-		clauses, err := parseSafeOrderBy(orderBy)
+		clauses, err := orderby.Parse(orderBy, allowedOrderColumns)
 		if err != nil {
 			return nil, err
 		}
@@ -68,36 +67,8 @@ func parseListRequest(c *echo.Context) (*svc.ListRequest, error) {
 	return req, nil
 }
 
-// parseSafeOrderBy validates and sanitizes order_by terms against the allowlist.
-// Accepted format per term: "column" or "column asc" or "column desc".
+// parseSafeOrderBy keeps the package-local call surface while delegating the
+// grammar to the shared parser.
 func parseSafeOrderBy(raw string) ([]string, error) {
-	parts := strings.Split(raw, ",")
-	result := make([]string, 0, len(parts))
-	for _, part := range parts {
-		part = strings.TrimSpace(part)
-		if part == "" {
-			continue
-		}
-		tokens := strings.Fields(part)
-		col := strings.ToLower(tokens[0])
-		if _, ok := allowedOrderColumns[col]; !ok {
-			return nil, fmt.Errorf("invalid order_by column: %q", tokens[0])
-		}
-		dir := "asc"
-		if len(tokens) > 1 {
-			switch strings.ToLower(tokens[1]) {
-			case "asc":
-				dir = "asc"
-			case "desc":
-				dir = "desc"
-			default:
-				return nil, fmt.Errorf("invalid order_by direction: %q", tokens[1])
-			}
-		}
-		if len(tokens) > 2 {
-			return nil, fmt.Errorf("invalid order_by term: %q", part)
-		}
-		result = append(result, col+" "+dir)
-	}
-	return result, nil
+	return orderby.Parse(raw, allowedOrderColumns)
 }

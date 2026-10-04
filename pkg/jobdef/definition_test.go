@@ -8,9 +8,50 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/caesium-cloud/caesium/internal/enginekind"
 	"github.com/caesium-cloud/caesium/pkg/container"
 	"github.com/stretchr/testify/require"
 )
+
+func TestPublicEngineConstantsMatchSupportedKinds(t *testing.T) {
+	for _, engine := range []string{EngineDocker, EnginePodman, EngineKubernetes} {
+		if !enginekind.IsSupported(engine) {
+			t.Errorf("public engine constant %q is not supported by enginekind", engine)
+		}
+	}
+}
+
+func TestEngineValidatorsKeepTheirDiagnostics(t *testing.T) {
+	for _, engine := range []string{EngineDocker, EnginePodman, EngineKubernetes} {
+		if err := validateEngine(engine, "volumes[0].sources"); err != nil {
+			t.Errorf("validateEngine(%q) returned %v", engine, err)
+		}
+		steps := []Step{{Name: "task", Image: "example/image", Engine: engine, Type: StepTypeTask}}
+		if _, _, err := computeStepAdjacency(steps); err != nil {
+			t.Errorf("computeStepAdjacency engine %q returned %v", engine, err)
+		}
+	}
+	for _, engine := range []string{"", "Docker", " docker", "docker ", "lxc"} {
+		err := validateEngine(engine, "volumes[0].sources")
+		if err == nil || err.Error() != `volumes[0].sources has unknown engine "`+engine+`"` {
+			t.Errorf("validateEngine(%q) error = %v", engine, err)
+		}
+		steps := []Step{{Name: "task", Image: "example/image", Engine: engine, Type: StepTypeTask}}
+		_, _, err = computeStepAdjacency(steps)
+		if err == nil || err.Error() != "steps[0].engine must be one of [docker,kubernetes,podman]" {
+			t.Errorf("computeStepAdjacency engine %q error = %v", engine, err)
+		}
+	}
+
+	_, err := validateVolumes([]Volume{{Name: "data", Sources: map[string]VolumeSource{"Docker": {}}}})
+	if err == nil || err.Error() != `volumes[0].sources has unknown engine "Docker"` {
+		t.Errorf("validateVolumes error = %v", err)
+	}
+	_, err = validateVolumes([]Volume{{Name: "data", Sources: map[string]VolumeSource{" docker": {}}}})
+	if err == nil || err.Error() != `volumes[0].sources has invalid engine key " docker"` {
+		t.Errorf("validateVolumes whitespace error = %v", err)
+	}
+}
 
 var example1 = `
 $schema: https://yourorg.io/schemas/job.v1.json
