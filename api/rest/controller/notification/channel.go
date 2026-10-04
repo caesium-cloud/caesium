@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/caesium-cloud/caesium/api/internal/auditlog"
 	svc "github.com/caesium-cloud/caesium/api/rest/service/notification"
 	"github.com/caesium-cloud/caesium/internal/auth"
 	"github.com/caesium-cloud/caesium/internal/models"
