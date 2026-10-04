@@ -154,19 +154,20 @@ func TestUnresolvedJobIDPatternRetainsFilterButNotAlias(t *testing.T) {
 }
 
 func TestExistingJobIDsByAliasWrapperPreservesNilContextAndEmptyInput(t *testing.T) {
-	got, err := existingJobIDsByAlias(nil, nil, map[string]struct{}{"job": {}})
+	var nilContext context.Context
+	got, err := existingJobIDsByAlias(nilContext, nil, map[string]struct{}{"job": {}})
 	require.NoError(t, err)
 	require.Nil(t, got, "nil DB remains a no-op")
 
 	db := openTriggerCycleTestDB(t)
-	got, err = existingJobIDsByAlias(nil, db, nil)
+	got, err = existingJobIDsByAlias(nilContext, db, nil)
 	require.NoError(t, err)
 	require.Nil(t, got, "empty aliases remain a no-op")
 
 	trigger := triggerCycleCronModel(t, "job")
 	require.NoError(t, db.Create(trigger).Error)
 	jobID := createTriggerCycleJob(t, db, "job", trigger.ID)
-	got, err = existingJobIDsByAlias(nil, db, map[string]struct{}{"job": {}})
+	got, err = existingJobIDsByAlias(nilContext, db, map[string]struct{}{"job": {}})
 	require.NoError(t, err, "nil context is normalized before the delegated query")
 	require.Equal(t, map[string]uuid.UUID{"job": jobID}, got)
 }
