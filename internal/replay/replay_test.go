@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"github.com/caesium-cloud/caesium/internal/testutil"
 	"strings"
 	"testing"
 	"time"
@@ -816,16 +817,12 @@ func (f *replayVaultLogical) ReadWithDataWithContext(_ context.Context, path str
 
 func mustJSON(t *testing.T, v any) datatypes.JSON {
 	t.Helper()
-	data, err := json.Marshal(v)
-	require.NoError(t, err)
-	return datatypes.JSON(data)
+	return datatypes.JSON(testutil.MustJSONBytes(t, v))
 }
 
 func mustJSONString(t *testing.T, v any) string {
 	t.Helper()
-	data, err := json.Marshal(v)
-	require.NoError(t, err)
-	return string(data)
+	return string(testutil.MustJSONBytes(t, v))
 }
 
 func TestReplayUnresolvedPinnedBaselineReexecutesDespiteLegacyEntry(t *testing.T) {
