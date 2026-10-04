@@ -731,7 +731,11 @@ func (c *client) awaitRunStatus(ctx context.Context, jobID, runID string, want f
 // an explicit Last-Event-ID, and collects the persisted backlog. The stream is
 // long-lived by design, so the read ends on an idle window rather than EOF.
 func readEventBacklog(ctx context.Context, c *client, runID string, cursor uint64) ([]eventTuple, error) {
-	streamCtx, cancel := context.WithTimeout(ctx, eventHardLimit)
+	return readEventBacklogWithLimits(ctx, c, runID, cursor, eventIdleTimeout, eventHardLimit)
+}
+
+func readEventBacklogWithLimits(ctx context.Context, c *client, runID string, cursor uint64, idleTimeout, hardLimit time.Duration) ([]eventTuple, error) {
+	streamCtx, cancel := context.WithTimeout(ctx, hardLimit)
 	defer cancel()
 
 	req, err := http.NewRequestWithContext(streamCtx, http.MethodGet, c.base+"/v1/events?run_id="+runID, nil)
@@ -752,12 +756,16 @@ func readEventBacklog(ctx context.Context, c *client, runID string, cursor uint6
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
+		_ = resp.Body.Close()
 		return nil, fmt.Errorf("GET /v1/events?run_id=%s: status %d", runID, resp.StatusCode)
 	}
 
 	lines := make(chan string, 256)
 	readErr := make(chan error, 1)
+	readDone := make(chan struct{})
 	go func() {
+		defer close(readDone)
+		defer close(lines)
 		scanner := bufio.NewScanner(resp.Body)
 		scanner.Buffer(make([]byte, 0, 64*1024), 4<<20)
 		for scanner.Scan() {
@@ -768,26 +776,32 @@ func readEventBacklog(ctx context.Context, c *client, runID string, cursor uint6
 			}
 		}
 		readErr <- scanner.Err()
-		close(lines)
+	}()
+	defer func() {
+		cancel()
+		_ = resp.Body.Close()
+		<-readDone
 	}()
 
 	var (
 		tuples  []eventTuple
 		curData string
-		idle    = time.NewTimer(eventIdleTimeout)
+		hasData bool
+		idle    = time.NewTimer(idleTimeout)
 	)
 	defer idle.Stop()
 	for {
 		select {
 		case <-streamCtx.Done():
-			return tuples, nil
-		case err := <-readErr:
-			if err != nil && !errors.Is(err, context.Canceled) {
-				return tuples, err
-			}
-			return tuples, nil
+			return tuples, streamCtx.Err()
 		case line, ok := <-lines:
 			if !ok {
+				if err := <-readErr; err != nil {
+					return tuples, err
+				}
+				if hasData {
+					return tuples, errors.New("incomplete SSE event frame at end of stream")
+				}
 				return tuples, nil
 			}
 			if !idle.Stop() {
@@ -796,23 +810,31 @@ func readEventBacklog(ctx context.Context, c *client, runID string, cursor uint6
 				default:
 				}
 			}
-			idle.Reset(eventIdleTimeout)
+			idle.Reset(idleTimeout)
 			switch {
 			case strings.HasPrefix(line, ":"):
 				// heartbeat comment
 			case strings.HasPrefix(line, "data: "):
 				curData = strings.TrimPrefix(line, "data: ")
+				hasData = true
 			case line == "":
-				if curData != "" {
+				if hasData {
 					tuple, err := parseEventTuple(curData)
 					if err != nil {
 						return tuples, err
 					}
 					tuples = append(tuples, tuple)
 					curData = ""
+					hasData = false
 				}
 			}
 		case <-idle.C:
+			if err := streamCtx.Err(); err != nil {
+				return tuples, err
+			}
+			if hasData {
+				return tuples, errors.New("incomplete SSE event frame after idle timeout")
+			}
 			return tuples, nil
 		}
 	}
