@@ -168,33 +168,6 @@ func findPersisted(rows []persistedEvent, sequence uint64) (persistedEvent, bool
 	return persistedEvent{}, false
 }
 
-func anyInt64(v any) int64 {
-	switch t := v.(type) {
-	case int:
-		return int64(t)
-	case int64:
-		return t
-	case float64:
-		return int64(t)
-	case json.Number:
-		n, _ := t.Int64()
-		return n
-	case string:
-		var n int64
-		_, _ = fmt.Sscan(t, &n)
-		return n
-	case bool:
-		if t {
-			return 1
-		}
-		return 0
-	default:
-		var n int64
-		_, _ = fmt.Sscan(fmt.Sprint(t), &n)
-		return n
-	}
-}
-
 func persistedSequence(value any) (uint64, error) {
 	// Persisted event readers historically accept native bool cells as 0/1.
 	// Keep that adapter local; other strict SQL counters reject bool cells.
