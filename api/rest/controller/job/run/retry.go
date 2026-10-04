@@ -8,7 +8,9 @@ import (
 	jsvc "github.com/caesium-cloud/caesium/api/rest/service/job"
 	runsvc "github.com/caesium-cloud/caesium/api/rest/service/run"
 	"github.com/caesium-cloud/caesium/internal/job"
+	"github.com/caesium-cloud/caesium/internal/models"
 	runstorage "github.com/caesium-cloud/caesium/internal/run"
+	"github.com/caesium-cloud/caesium/internal/runlife"
 	"github.com/caesium-cloud/caesium/pkg/log"
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v5"
@@ -29,7 +31,7 @@ func Retry(c *echo.Context) error {
 		return echo.NewHTTPError(http.StatusBadRequest, "bad request").Wrap(err)
 	}
 
-	j, err := jsvc.Service(ctx).Get(jobID)
+	j, err := retryGetJob(ctx, jobID)
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return echo.ErrNotFound
@@ -37,7 +39,7 @@ func Retry(c *echo.Context) error {
 		return echo.NewHTTPError(http.StatusInternalServerError, "internal server error").Wrap(err)
 	}
 
-	runEntry, err := runsvc.New(ctx).Get(runID)
+	runEntry, err := retryGetRun(ctx, runID)
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return echo.ErrNotFound
@@ -49,22 +51,41 @@ func Retry(c *echo.Context) error {
 		return echo.ErrNotFound
 	}
 
-	store := runstorage.Default()
-	r, err := store.RetryFromFailure(runID)
+	workCtx, releaseWork, err := runlife.FromContext(ctx).Reserve(ctx)
+	if err != nil {
+		return echo.NewHTTPError(http.StatusServiceUnavailable, err.Error()).Wrap(err)
+	}
+	cancelCtx, releaseCancel := job.RegisterRunCancel(workCtx, runID)
+	transferred := false
+	release := func() { releaseCancel(); releaseWork() }
+	defer func() {
+		if !transferred {
+			release()
+		}
+	}()
+	r, err := retryFromFailure(runID)
 	if err != nil {
 		return echo.NewHTTPError(http.StatusConflict, err.Error())
 	}
+	retryLaunch(cancelCtx, j, r, release)
+	transferred = true
 
+	return c.JSON(http.StatusAccepted, r)
+}
+
+var (
+	retryGetJob      = func(ctx context.Context, id uuid.UUID) (*models.Job, error) { return jsvc.Service(ctx).Get(id) }
+	retryGetRun      = func(ctx context.Context, id uuid.UUID) (*runstorage.JobRun, error) { return runsvc.New(ctx).Get(id) }
+	retryFromFailure = func(id uuid.UUID) (*runstorage.JobRun, error) { return runstorage.Default().RetryFromFailure(id) }
+	retryLaunch      = launchWholeRunRetry
+)
+
+func launchWholeRunRetry(ctx context.Context, j *models.Job, r *runstorage.JobRun, release func()) {
 	go func() {
-		// Registered like the manual-run kickoff: a cancel issued DURING a retry
-		// must reach the retry's containers too.
-		cancelCtx, release := job.RegisterRunCancel(context.Background(), r.ID)
 		defer release()
-		runCtx := runstorage.WithContext(cancelCtx, r.ID)
-		if err := job.New(j, job.WithTriggerID(nil), job.WithParams(r.Params)).Run(runCtx); err != nil {
+		runCtx := runstorage.WithContext(ctx, r.ID)
+		if err := runExecution(runCtx, j, r.Params); err != nil {
 			log.Error("job retry run failure", "id", j.ID, "run_id", r.ID, "error", err)
 		}
 	}()
-
-	return c.JSON(http.StatusAccepted, r)
 }

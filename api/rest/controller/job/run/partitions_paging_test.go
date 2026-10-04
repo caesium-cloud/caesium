@@ -142,7 +142,8 @@ func TestRetryPartitionKicksOffResumeWhenRunIsTerminal(t *testing.T) {
 		kickCount  int
 		kickedJobM *models.Job
 	)
-	partitionKickoff = func(j *models.Job, runID uuid.UUID, _ map[string]string) {
+	partitionKickoff = func(_ context.Context, j *models.Job, runID uuid.UUID, _ map[string]string, release func()) {
+		defer release()
 		kickCount++
 		kickedJobM = j
 		if j != nil {
@@ -171,7 +172,10 @@ func TestRetryPartitionDoesNotKickOffWhileRunIsStillInFlight(t *testing.T) {
 	f.failPartition(t, 1)
 
 	kickCount := 0
-	partitionKickoff = func(*models.Job, uuid.UUID, map[string]string) { kickCount++ }
+	partitionKickoff = func(_ context.Context, _ *models.Job, _ uuid.UUID, _ map[string]string, release func()) {
+		defer release()
+		kickCount++
+	}
 
 	require.NoError(t, f.retry(t, 1))
 
@@ -198,7 +202,10 @@ func TestRetryPartitionStillRejectsSucceededInstance(t *testing.T) {
 		}).Error)
 
 	kickCount := 0
-	partitionKickoff = func(*models.Job, uuid.UUID, map[string]string) { kickCount++ }
+	partitionKickoff = func(_ context.Context, _ *models.Job, _ uuid.UUID, _ map[string]string, release func()) {
+		defer release()
+		kickCount++
+	}
 
 	err := f.retry(t, 1)
 	require.Error(t, err)
@@ -220,7 +227,10 @@ func TestRetryPartitionKicksOffWhenStoreReopenedDespiteStaleRunningSnapshot(t *t
 	// Fixture job run stays StatusRunning — the stale snapshot.
 
 	kickCount := 0
-	partitionKickoff = func(*models.Job, uuid.UUID, map[string]string) { kickCount++ }
+	partitionKickoff = func(_ context.Context, _ *models.Job, _ uuid.UUID, _ map[string]string, release func()) {
+		defer release()
+		kickCount++
+	}
 	partitionRetryInstance = func(_ context.Context, _, taskRunID uuid.UUID) (*runstorage.TaskRun, bool, error) {
 		return &runstorage.TaskRun{
 			ID: taskRunID, Status: runstorage.TaskStatusPending, PartitionValue: "p-1",
@@ -241,7 +251,10 @@ func TestRetryPartitionDoesNotKickOffWhenStoreDidNotReopen(t *testing.T) {
 	f.failPartition(t, 1)
 
 	kickCount := 0
-	partitionKickoff = func(*models.Job, uuid.UUID, map[string]string) { kickCount++ }
+	partitionKickoff = func(_ context.Context, _ *models.Job, _ uuid.UUID, _ map[string]string, release func()) {
+		defer release()
+		kickCount++
+	}
 	partitionRetryInstance = func(_ context.Context, _, taskRunID uuid.UUID) (*runstorage.TaskRun, bool, error) {
 		return &runstorage.TaskRun{
 			ID: taskRunID, Status: runstorage.TaskStatusPending, PartitionValue: "p-1",
@@ -263,7 +276,10 @@ func TestRetryPartitionKicksOffWhenStoreReopenedTerminalRun(t *testing.T) {
 	f.finishRun(t, string(runstorage.StatusFailed))
 
 	kickCount := 0
-	partitionKickoff = func(*models.Job, uuid.UUID, map[string]string) { kickCount++ }
+	partitionKickoff = func(_ context.Context, _ *models.Job, _ uuid.UUID, _ map[string]string, release func()) {
+		defer release()
+		kickCount++
+	}
 	partitionRetryInstance = func(_ context.Context, _, taskRunID uuid.UUID) (*runstorage.TaskRun, bool, error) {
 		return &runstorage.TaskRun{
 			ID: taskRunID, Status: runstorage.TaskStatusPending, PartitionValue: "p-1",
@@ -284,7 +300,10 @@ func TestRetryPartitionKicksOffWhenReopenedEvenIfTaskRunPayloadIsIncomplete(t *t
 	f.failPartition(t, 1)
 
 	kickCount := 0
-	partitionKickoff = func(*models.Job, uuid.UUID, map[string]string) { kickCount++ }
+	partitionKickoff = func(_ context.Context, _ *models.Job, _ uuid.UUID, _ map[string]string, release func()) {
+		defer release()
+		kickCount++
+	}
 	partitionRetryInstance = func(_ context.Context, _, _ uuid.UUID) (*runstorage.TaskRun, bool, error) {
 		return nil, true, errors.New("post-commit refresh failed")
 	}
@@ -395,7 +414,7 @@ func (f *partitionsFixture) retry(t *testing.T, index int) error {
 	target := fmt.Sprintf("/v1/jobs/%s/runs/%s/tasks/%s/partitions/%d/retry",
 		f.jobID, f.runID, f.taskID, index)
 	e := echo.New()
-	req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, target, nil)
+	req := httptest.NewRequestWithContext(supervisedRequestContext(t), http.MethodPost, target, nil)
 	rec := httptest.NewRecorder()
 	c := e.NewContext(req, rec)
 	c.SetPathValues(echo.PathValues{
@@ -435,7 +454,7 @@ func usePartitionTestDB(t *testing.T, db *gorm.DB) {
 	partitionRetryInstance = func(ctx context.Context, runID, taskRunID uuid.UUID) (*runstorage.TaskRun, bool, error) {
 		return store.RetryPartition(ctx, runID, taskRunID)
 	}
-	partitionKickoff = func(*models.Job, uuid.UUID, map[string]string) {}
+	partitionKickoff = func(_ context.Context, _ *models.Job, _ uuid.UUID, _ map[string]string, release func()) { release() }
 
 	t.Cleanup(func() {
 		partitionDB, partitionGetJob, partitionGetRun, partitionRetryInstance, partitionKickoff =

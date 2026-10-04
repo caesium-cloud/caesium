@@ -12,6 +12,7 @@ import (
 	"github.com/caesium-cloud/caesium/internal/job"
 	"github.com/caesium-cloud/caesium/internal/models"
 	runstorage "github.com/caesium-cloud/caesium/internal/run"
+	"github.com/caesium-cloud/caesium/internal/runlife"
 	"github.com/caesium-cloud/caesium/pkg/log"
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v5"
@@ -106,6 +107,16 @@ func Post(c *echo.Context) error {
 		return echo.NewHTTPError(http.StatusInternalServerError, "internal server error").Wrap(err)
 	}
 
+	workCtx, release, err := runlife.FromContext(ctx).Reserve(ctx)
+	if err != nil {
+		return echo.NewHTTPError(http.StatusServiceUnavailable, err.Error()).Wrap(err)
+	}
+	transferred := false
+	defer func() {
+		if !transferred {
+			release()
+		}
+	}()
 	if j.Paused {
 		// A retry of a start admitted before the pause still gets its
 		// original answer; only a new start is refused.
@@ -126,7 +137,8 @@ func Post(c *echo.Context) error {
 		return startError(err)
 	}
 	if result.Outcome == runstorage.StartOutcomeCreated && result.Run != nil && !result.Replayed {
-		postLaunchRun(j, result.Run)
+		postLaunchRun(workCtx, j, result.Run, release)
+		transferred = true
 	}
 	return writeStartResult(c, j.ID, result)
 }
@@ -166,16 +178,21 @@ func writeStartResult(c *echo.Context, jobID uuid.UUID, result runstorage.StartR
 	})
 }
 
-func launchRun(j *models.Job, r *runstorage.JobRun) {
+func launchRun(ctx context.Context, j *models.Job, r *runstorage.JobRun, releaseWork func()) {
+	cancelCtx, release := job.RegisterRunCancel(ctx, r.ID)
 	go func() {
+		defer releaseWork()
 		// Detached from the request context on purpose (the run outlives the
 		// HTTP call), but NOT uncancellable: RegisterRunCancel makes a later
 		// CancelRun / concurrency-replace reach this engine's containers.
-		cancelCtx, release := job.RegisterRunCancel(context.Background(), r.ID)
 		defer release()
 		runCtx := runstorage.WithContext(cancelCtx, r.ID)
-		if err := job.New(j, job.WithTriggerID(nil), job.WithParams(r.Params)).Run(runCtx); err != nil {
+		if err := runExecution(runCtx, j, r.Params); err != nil {
 			log.Error("job run failure", "id", j.ID, "run_id", r.ID, "error", err)
 		}
 	}()
+}
+
+var runExecution = func(ctx context.Context, j *models.Job, params map[string]string) error {
+	return job.New(j, job.WithTriggerID(nil), job.WithParams(params)).Run(ctx)
 }

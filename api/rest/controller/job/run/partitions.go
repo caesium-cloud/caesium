@@ -14,6 +14,7 @@ import (
 	"github.com/caesium-cloud/caesium/internal/job"
 	"github.com/caesium-cloud/caesium/internal/models"
 	runstorage "github.com/caesium-cloud/caesium/internal/run"
+	"github.com/caesium-cloud/caesium/internal/runlife"
 	"github.com/caesium-cloud/caesium/pkg/log"
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v5"
@@ -226,6 +227,16 @@ func RetryPartition(c *echo.Context) error {
 	// in-group indegree over non-terminal dependencies, re-open a finished run,
 	// and invalidate the owner checkpoints. Doing it here with a bare Updates()
 	// did none of that.
+	workCtx, release, err := runlife.FromContext(ctx).Reserve(ctx)
+	if err != nil {
+		return echo.NewHTTPError(http.StatusServiceUnavailable, err.Error()).Wrap(err)
+	}
+	transferred := false
+	defer func() {
+		if !transferred {
+			release()
+		}
+	}()
 	updated, reopened, err := partitionRetryInstance(ctx, runID, row.ID)
 	// Kickoff follows the transactional reopened flag, not the pre-tx
 	// runEntry.Status snapshot. A running local run can finish after
@@ -240,7 +251,8 @@ func RetryPartition(c *echo.Context) error {
 	// Run(); Store.Complete refusing a retry-reset pending partition covers
 	// the shutdown window.
 	if reopened {
-		partitionKickoff(j, runID, runEntry.Params)
+		partitionKickoff(workCtx, j, runID, runEntry.Params, release)
+		transferred = true
 	}
 	if err != nil {
 		return retryPartitionHTTPError(err)
@@ -266,17 +278,19 @@ func RetryPartition(c *echo.Context) error {
 // reset pending instance actually executes. In local mode that is the DAG loop
 // (rehydrating existing TaskRun rows, including the reset instance); in
 // distributed mode Run waits for workers, matching POST .../retry.
-func kickoffPartitionRetryRun(j *models.Job, runID uuid.UUID, params map[string]string) {
+func kickoffPartitionRetryRun(ctx context.Context, j *models.Job, runID uuid.UUID, params map[string]string, releaseWork func()) {
 	if j == nil {
+		releaseWork()
 		return
 	}
+	cancelCtx, release := job.RegisterRunCancel(ctx, runID)
 	go func() {
+		defer releaseWork()
 		// Registered like the manual-run kickoff: a cancel issued DURING a
 		// partition retry must reach the resumed engine's containers too.
-		cancelCtx, release := job.RegisterRunCancel(context.Background(), runID)
 		defer release()
 		runCtx := runstorage.WithContext(cancelCtx, runID)
-		if err := job.New(j, job.WithTriggerID(nil), job.WithParams(params)).Run(runCtx); err != nil {
+		if err := runExecution(runCtx, j, params); err != nil {
 			log.Error("partition retry run failure", "id", j.ID, "run_id", runID, "error", err)
 		}
 	}()
