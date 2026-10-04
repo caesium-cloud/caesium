@@ -12,6 +12,7 @@ import (
 	metrictest "github.com/caesium-cloud/caesium/internal/metrics/testutil"
 	"github.com/caesium-cloud/caesium/internal/models"
 	runstorage "github.com/caesium-cloud/caesium/internal/run"
+	"github.com/caesium-cloud/caesium/internal/testutil"
 	"github.com/google/uuid"
 	"gorm.io/datatypes"
 	"gorm.io/gorm"
@@ -508,25 +509,7 @@ func TestEvaluatorDoesNotAdoptAForeignRun(t *testing.T) {
 // the row back.
 func failJobRunReads(t *testing.T, db *gorm.DB, n int) {
 	t.Helper()
-	const name = "test:freshness_fail_job_run_reads"
-	remaining := n
-	if err := db.Callback().Query().Before("gorm:query").Register(name, func(tx *gorm.DB) {
-		if remaining <= 0 {
-			return
-		}
-		table := tx.Statement.Table
-		if table == "" && tx.Statement.Schema != nil {
-			table = tx.Statement.Schema.Table
-		}
-		if table != "job_runs" {
-			return
-		}
-		remaining--
-		tx.AddError(errors.New("database is locked"))
-	}); err != nil {
-		t.Fatalf("register query callback: %v", err)
-	}
-	t.Cleanup(func() { _ = db.Callback().Query().Remove(name) })
+	testutil.FailJobRunReads(t, db, n)
 }
 
 // TestEvaluatorHandsOffACommittedRunItCannotReadBack is the regression for

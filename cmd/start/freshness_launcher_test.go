@@ -9,6 +9,7 @@ import (
 	"github.com/caesium-cloud/caesium/internal/job"
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/caesium-cloud/caesium/internal/run"
+	"github.com/caesium-cloud/caesium/internal/testutil"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 	"gorm.io/driver/sqlite"
@@ -263,25 +264,9 @@ func TestLaunchDerivedRunSkipsTerminalRun(t *testing.T) {
 
 // failJobRunReads makes the first n reads of job_runs fail, simulating
 // transient database contention on the status fence.
-func failJobRunReads(t *testing.T, conn *gorm.DB, n int) {
+func failJobRunReads(t *testing.T, db *gorm.DB, n int) {
 	t.Helper()
-	const name = "test:fail_job_run_reads"
-	remaining := n
-	require.NoError(t, conn.Callback().Query().Before("gorm:query").Register(name, func(tx *gorm.DB) {
-		if remaining <= 0 {
-			return
-		}
-		table := tx.Statement.Table
-		if table == "" && tx.Statement.Schema != nil {
-			table = tx.Statement.Schema.Table
-		}
-		if table != "job_runs" {
-			return
-		}
-		remaining--
-		tx.AddError(errors.New("database is locked"))
-	}))
-	t.Cleanup(func() { _ = conn.Callback().Query().Remove(name) })
+	testutil.FailJobRunReads(t, db, n)
 }
 
 // TestLaunchDerivedRunFenceRetriesTransientStatusRead is the regression for a
