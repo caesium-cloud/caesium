@@ -308,6 +308,17 @@ Completed local gates (each applies only to the recorded candidate):
 - F4 standalone previous-release upgrade/readdress/rollback/shards/isolation at09b7f6c9 PASS; qualification.json resultpass, all phase exits0 and strict test-evidence passed (lifecycle-standalone-09b7f6c9.log). Image built by that clean invocation.
 - Final source09b7f6c9 fresh actual CLI/REST/local-runtime integration PASS305 scenarios/632.780s (local-integration-go-maintenance-09b7f6c9.log); runtime guards excluded auth/distributed/infra are separately hosted.
 - Pinned performance fixture test relocation at1c448427: original owner_state_test.go equalsbasebyte-for-byte; baselineharness4005c04frestored; internal/run race PASS. Production source identical09b7; live evidence unaffected by test relocation.
+- Run-service authoritative-store reuse atf3edd43c native race + tagged vet PASS; lint flagged seven nil-context test calls, narrow test correction pending (run-service-native-f3edd43c.log).
+- Authoritative run-service lazy binding/manual reuse ata66eefed: native race bothpackages, taggedvet andlint0issues PASS; independent Sol review no blocker. Real coverage/join gate pending.
+- Hosted lifecycle-cluster and core-robustness run37173776053 at0d54be67 PASS. Later lazy service/manual adapter change has focused native proof; final affected runtime evidence pending.
+
+Current qualification limits:
+
+- Standard hosted CI run37172950172 failed only coverage-ratchets and dependent ci-ok after successful one-time ARM image rerun; other standard jobs passed.
+- Enforcing short soak at1c448427 FAILED final drain: allfive faultfamilies passed, one completed taskpod/exitedcontainer retained after worker SIGKILL, matchesexisting issue598; freshbase comparison notrun. Reaper scope choice pending.
+- Enforcing original-base performance ata66eefed is running with allfamilies/10repeats/unchangedbudgets andfixedbaseline.
+- C100 live shutdown fixture passed source-level independent review corrections; actualsignal/runtime gate pending.
+- Coverage journey expansion and hermetic SSO/backend coverage remain in progress; coverage floors/policy unchanged.
 
 Complete-scope acceptance remains pending. Shared gates are scheduled by the coordinator; native builders and images have task-specific tags.
 
