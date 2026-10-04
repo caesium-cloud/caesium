@@ -357,15 +357,49 @@ func TestJitterRetryBackoffBounds(t *testing.T) {
 	}
 }
 
-// This pins the historical gap; W124 deliberately changes the result to the
-// wait context error, matching whole-transaction cancellation.
-func TestRetryPoolCancellationHistoricalGap(t *testing.T) {
+// Pool cancellation surfaces the wait error, matching whole-transaction retry.
+func TestRetryPoolSurfacesWaitCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	busy := errors.New("database is locked")
 	p := newRetryConnPool(newCountingPool(t, 0, nil))
 	calls := 0
 	err := p.retry(ctx, func() error { calls++; cancel(); return busy })
-	require.ErrorIs(t, err, busy)
+	require.ErrorIs(t, err, context.Canceled)
 	require.Equal(t, 1, calls)
+}
+
+func TestDatabaseRetryPathsUseInjectedWaitSchedule(t *testing.T) {
+	for _, wholeTransaction := range []bool{false, true} {
+		t.Run(map[bool]string{false: "pool", true: "transaction"}[wholeTransaction], func(t *testing.T) {
+			schedule := []time.Duration{17 * time.Millisecond, 31 * time.Millisecond}
+			var waits []time.Duration
+			wait := func(_ context.Context, d time.Duration) error { waits = append(waits, d); return nil }
+			calls := 0
+			operation := func() error {
+				calls++
+				if calls < 3 {
+					return errors.New("database is locked")
+				}
+				return nil
+			}
+			var err error
+			if wholeTransaction {
+				conn, openErr := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+				require.NoError(t, openErr)
+				sqlDB, dbErr := conn.DB()
+				require.NoError(t, dbErr)
+				t.Cleanup(func() { _ = sqlDB.Close() })
+				err = transactionWithPolicy(context.Background(), conn, busyRetryPolicy(schedule, wait), func(*gorm.DB) error { return operation() })
+			} else {
+				pool := newRetryConnPool(newCountingPool(t, 0, nil))
+				pool.backoffs = schedule
+				pool.wait = wait
+				err = pool.retry(context.Background(), operation)
+			}
+			require.NoError(t, err)
+			require.Equal(t, 3, calls)
+			require.Equal(t, schedule, waits)
+		})
+	}
 }
