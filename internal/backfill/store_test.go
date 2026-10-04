@@ -3,6 +3,7 @@ package backfill
 import (
 	"context"
 	"database/sql"
+	sqldriver "database/sql/driver"
 	"errors"
 	"testing"
 	"time"
@@ -256,9 +257,19 @@ type rollbackRecordingPool struct {
 func (p rollbackRecordingPool) ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error) {
 	if query == "ROLLBACK" {
 		*p.order = append(*p.order, "rollback")
-		return nil, p.rollbackErr
+		return sqldriver.RowsAffected(0), p.rollbackErr
 	}
 	return p.ConnPool.ExecContext(ctx, query, args...)
+}
+
+func (p rollbackRecordingPool) GetDBConn() (*sql.DB, error) {
+	if sqlDB, ok := p.ConnPool.(*sql.DB); ok {
+		return sqlDB, nil
+	}
+	if connector, ok := p.ConnPool.(gorm.GetDBConnector); ok {
+		return connector.GetDBConn()
+	}
+	return nil, gorm.ErrInvalidDB
 }
 
 func TestBackfillRetryRollbackOrderAndBudget(t *testing.T) {
