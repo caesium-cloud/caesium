@@ -124,7 +124,7 @@ func runTriggerRuleScenario(t *testing.T, tc triggerRuleRunScenario) {
 	for _, name := range tc.taskNames {
 		taskIDs[name] = uuid.New()
 		atomIDs[name] = uuid.New()
-		tasks = append(tasks, models.Task{
+		tasks = append(tasks, &models.Task{
 			ID: taskIDs[name], JobID: jobID, AtomID: atomIDs[name], TriggerRule: tc.triggerRules[name],
 		})
 		atoms[atomIDs[name]] = fakeModelAtom(atomIDs[name])
