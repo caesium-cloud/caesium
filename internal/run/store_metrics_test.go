@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/caesium-cloud/caesium/internal/metrics"
+	metrictestutil "github.com/caesium-cloud/caesium/internal/metrics/testutil"
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/google/uuid"
 	"github.com/prometheus/client_golang/prometheus"
@@ -391,35 +392,21 @@ func (s *StoreMetricsSuite) TestCacheHitCompletionWriteCounts() {
 }
 
 func (s *StoreMetricsSuite) dbWriteValue(category string) float64 {
-	var m dto.Metric
-	counter, err := metrics.DBWritesTotal.GetMetricWithLabelValues(category)
-	s.Require().NoError(err)
-	s.Require().NoError(counter.(prometheus.Metric).Write(&m))
-	return m.GetCounter().GetValue()
+	return metrictestutil.CounterValue(s.T(), metrics.DBWritesTotal, category)
 }
 
 func (s *StoreMetricsSuite) dbStatementValue(category string) float64 {
-	var m dto.Metric
-	counter, err := metrics.DBStatementsTotal.GetMetricWithLabelValues(category)
-	s.Require().NoError(err)
-	s.Require().NoError(counter.(prometheus.Metric).Write(&m))
-	return m.GetCounter().GetValue()
+	return metrictestutil.CounterValue(s.T(), metrics.DBStatementsTotal, category)
 }
 
 func (s *StoreMetricsSuite) counterValue(vec *prometheus.CounterVec, labels ...string) float64 {
-	var m dto.Metric
-	counter, err := vec.GetMetricWithLabelValues(labels...)
-	s.Require().NoError(err)
-	s.Require().NoError(counter.(prometheus.Metric).Write(&m))
-	return m.GetCounter().GetValue()
+	return metrictestutil.CounterValue(s.T(), vec, labels...)
 }
 
 func (s *StoreMetricsSuite) gaugeValue(vec *prometheus.GaugeVec, labels ...string) float64 {
-	var m dto.Metric
 	gauge, err := vec.GetMetricWithLabelValues(labels...)
 	s.Require().NoError(err)
-	s.Require().NoError(gauge.(prometheus.Metric).Write(&m))
-	return m.GetGauge().GetValue()
+	return metrictestutil.GaugeValue(s.T(), gauge)
 }
 
 func (s *StoreMetricsSuite) histogramValues(vec *prometheus.HistogramVec, labels ...string) (uint64, float64) {
