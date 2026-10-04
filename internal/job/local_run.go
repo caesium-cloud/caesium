@@ -4,6 +4,10 @@ import (
 	"cmp"
 	"context"
 	"fmt"
+	"slices"
+	"sync"
+	"time"
+
 	"github.com/caesium-cloud/caesium/internal/cache"
 	"github.com/caesium-cloud/caesium/internal/jobdef/secret"
 	"github.com/caesium-cloud/caesium/internal/models"
@@ -11,9 +15,6 @@ import (
 	"github.com/caesium-cloud/caesium/internal/run"
 	"github.com/caesium-cloud/caesium/pkg/env"
 	"github.com/google/uuid"
-	"slices"
-	"sync"
-	"time"
 )
 
 // localRun owns local execution state after durable registration. Its map
