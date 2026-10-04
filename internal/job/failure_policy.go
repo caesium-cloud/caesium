@@ -1,7 +1,6 @@
 package job
 
 import (
-	"strings"
 	"time"
 
 	"github.com/caesium-cloud/caesium/internal/models"
@@ -15,12 +14,7 @@ const (
 )
 
 func normalizeTaskFailurePolicy(value string) string {
-	switch strings.ToLower(strings.TrimSpace(value)) {
-	case taskFailurePolicyContinue:
-		return taskFailurePolicyContinue
-	default:
-		return taskFailurePolicyHalt
-	}
+	return run.NormalizeTaskFailurePolicy(value)
 }
 
 // computeRetryDelay returns the delay before the next retry attempt.

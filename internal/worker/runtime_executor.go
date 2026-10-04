@@ -36,7 +36,6 @@ import (
 )
 
 const (
-	taskFailurePolicyHalt     = "halt"
 	taskFailurePolicyContinue = "continue"
 )
 
@@ -1512,12 +1511,7 @@ func parseTaskCommand(raw string) []string {
 }
 
 func normalizeTaskFailurePolicy(value string) string {
-	switch strings.ToLower(strings.TrimSpace(value)) {
-	case taskFailurePolicyContinue:
-		return taskFailurePolicyContinue
-	default:
-		return taskFailurePolicyHalt
-	}
+	return run.NormalizeTaskFailurePolicy(value)
 }
 
 func collectDescendantsFromEdges(db *gorm.DB, start uuid.UUID) ([]uuid.UUID, error) {
