@@ -2,12 +2,12 @@ package auth
 
 import (
 	"fmt"
-	"io"
 	"net/http"
 	"net/url"
 	"strings"
 
 	"github.com/caesium-cloud/caesium/cmd/cliutil"
+	"github.com/caesium-cloud/caesium/internal/clihttp"
 	"github.com/spf13/cobra"
 )
 
@@ -45,26 +45,19 @@ var auditCmd = &cobra.Command{
 
 		reqURL := fmt.Sprintf("%s/v1/auth/audit?%s", server, params.Encode())
 
-		req, err := http.NewRequestWithContext(cmd.Context(), http.MethodGet, reqURL, nil)
-		if err != nil {
-			return err
-		}
+		headers := make(http.Header)
 		if apiKey != "" {
-			req.Header.Set("Authorization", "Bearer "+apiKey)
+			headers.Set("Authorization", "Bearer "+apiKey)
 		}
-
-		resp, err := http.DefaultClient.Do(req)
-		if err != nil {
-			return err
+		body, status, readErr := clihttp.Exchange(cmd.Context(), http.DefaultClient, http.MethodGet, reqURL, nil, headers)
+		if status == 0 && readErr != nil {
+			return readErr
 		}
-		defer func() { _ = resp.Body.Close() }()
-
-		body, readErr := io.ReadAll(resp.Body)
-		if resp.StatusCode >= http.StatusBadRequest {
+		if status >= http.StatusBadRequest {
 			if readErr != nil {
-				return fmt.Errorf("audit query failed (%d): %s (reading response: %w)", resp.StatusCode, strings.TrimSpace(string(body)), readErr)
+				return fmt.Errorf("audit query failed (%d): %s (reading response: %w)", status, strings.TrimSpace(string(body)), readErr)
 			}
-			return fmt.Errorf("audit query failed (%d): %s", resp.StatusCode, strings.TrimSpace(string(body)))
+			return fmt.Errorf("audit query failed (%d): %s", status, strings.TrimSpace(string(body)))
 		}
 		if readErr != nil {
 			return fmt.Errorf("reading audit query response: %w", readErr)

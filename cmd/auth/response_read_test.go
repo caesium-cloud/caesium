@@ -78,6 +78,11 @@ func TestResponseRequiresCompleteRead(t *testing.T) {
 			t.Run(tc.name+http.StatusText(status), func(t *testing.T) {
 				body := &responseReadBody{Reader: io.MultiReader(strings.NewReader(`{"partial":true}`), responseReadFailure{sentinel})}
 				http.DefaultClient = &http.Client{Transport: responseReadTransport(func(req *http.Request) (*http.Response, error) {
+					if tc.name == "create" || tc.name == "rotate" {
+						require.Equal(t, "application/json", req.Header.Get("Content-Type"))
+					} else {
+						require.Empty(t, req.Header.Get("Content-Type"))
+					}
 					return &http.Response{StatusCode: status, Body: body, Header: make(http.Header)}, nil
 				})}
 				var stdout, stderr bytes.Buffer

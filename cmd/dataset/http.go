@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/caesium-cloud/caesium/cmd/cliutil"
+	"github.com/caesium-cloud/caesium/internal/clihttp"
 	"github.com/spf13/cobra"
 )
 
@@ -25,29 +26,22 @@ func (e *httpStatusError) Error() string {
 }
 
 func request(cmd *cobra.Command, method, reqURL string, body io.Reader) ([]byte, error) {
-	req, err := http.NewRequestWithContext(cmd.Context(), method, reqURL, body)
-	if err != nil {
-		return nil, err
-	}
+	headers := make(http.Header)
 	if body != nil {
-		req.Header.Set("Content-Type", "application/json")
+		headers.Set("Content-Type", "application/json")
 	}
 	if apiKey := cliutil.ResolveAPIKey(cmd, apiKeyFlag, apiKeyEnvVar); apiKey != "" {
-		req.Header.Set("Authorization", "Bearer "+apiKey)
+		headers.Set("Authorization", "Bearer "+apiKey)
 	}
-
-	resp, err := httpClient.Do(req)
+	data, status, err := clihttp.Exchange(cmd.Context(), httpClient, method, reqURL, body, headers)
 	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = resp.Body.Close() }()
-
-	data, err := io.ReadAll(resp.Body)
-	if err != nil {
+		if status == 0 {
+			return nil, err
+		}
 		return nil, fmt.Errorf("reading dataset response: %w", err)
 	}
-	if resp.StatusCode >= http.StatusBadRequest {
-		return nil, &httpStatusError{StatusCode: resp.StatusCode, Body: strings.TrimSpace(string(data))}
+	if status >= http.StatusBadRequest {
+		return nil, &httpStatusError{StatusCode: status, Body: strings.TrimSpace(string(data))}
 	}
 	return data, nil
 }

@@ -3,11 +3,11 @@ package auth
 import (
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"strings"
 
 	"github.com/caesium-cloud/caesium/cmd/cliutil"
+	"github.com/caesium-cloud/caesium/internal/clihttp"
 	"github.com/spf13/cobra"
 )
 
@@ -37,27 +37,20 @@ var keyRotateCmd = &cobra.Command{
 			return err
 		}
 
-		req, err := http.NewRequestWithContext(cmd.Context(), http.MethodPost, url, strings.NewReader(string(payload)))
-		if err != nil {
-			return err
-		}
-		req.Header.Set("Content-Type", "application/json")
+		headers := make(http.Header)
+		headers.Set("Content-Type", "application/json")
 		if apiKey != "" {
-			req.Header.Set("Authorization", "Bearer "+apiKey)
+			headers.Set("Authorization", "Bearer "+apiKey)
 		}
-
-		resp, err := http.DefaultClient.Do(req)
-		if err != nil {
-			return err
+		respBody, status, readErr := clihttp.Exchange(cmd.Context(), http.DefaultClient, http.MethodPost, url, strings.NewReader(string(payload)), headers)
+		if status == 0 && readErr != nil {
+			return readErr
 		}
-		defer func() { _ = resp.Body.Close() }()
-
-		respBody, readErr := io.ReadAll(resp.Body)
-		if resp.StatusCode >= http.StatusBadRequest {
+		if status >= http.StatusBadRequest {
 			if readErr != nil {
-				return fmt.Errorf("key rotation failed (%d): %s (reading response: %w)", resp.StatusCode, strings.TrimSpace(string(respBody)), readErr)
+				return fmt.Errorf("key rotation failed (%d): %s (reading response: %w)", status, strings.TrimSpace(string(respBody)), readErr)
 			}
-			return fmt.Errorf("key rotation failed (%d): %s", resp.StatusCode, strings.TrimSpace(string(respBody)))
+			return fmt.Errorf("key rotation failed (%d): %s", status, strings.TrimSpace(string(respBody)))
 		}
 		if readErr != nil {
 			return fmt.Errorf("reading key rotation response: %w", readErr)
