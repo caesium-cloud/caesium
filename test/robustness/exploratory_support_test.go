@@ -4,6 +4,7 @@ package robustness
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
@@ -225,5 +226,62 @@ func TestCheckpointPollerCancelsInFlightQueryAndJoinsOnFailure(t *testing.T) {
 	case <-poller.done:
 	default:
 		t.Fatal("deferred poller stop returned before joining the query goroutine")
+	}
+}
+
+type scalarEvidenceTransport struct {
+	body  string
+	calls int
+	limit int
+}
+
+func (rt *scalarEvidenceTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	rt.calls++
+	var query struct {
+		Limit int `json:"limit"`
+	}
+	if err := json.NewDecoder(req.Body).Decode(&query); err != nil {
+		return nil, err
+	}
+	rt.limit = query.Limit
+	return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(rt.body)), Request: req}, nil
+}
+func TestScalarAndCheckpointUseExactReturnedBytesOnce(t *testing.T) {
+	const id = "7c39392d-d1bf-43fc-b803-fce7d606141f"
+	for _, tc := range []struct {
+		cell string
+		want int64
+		bad  bool
+	}{
+		{"1", 1, false}, {"9007199254740993", 9007199254740993, false}, {`" 2 "`, 2, false},
+		{"1.5", 0, true}, {"9223372036854775808", 0, true}, {`"bad"`, 0, true}, {"true", 0, true}, {"null", 0, true}, {"{}", 0, true},
+	} {
+		t.Run(tc.cell, func(t *testing.T) {
+			rt := &scalarEvidenceTransport{body: `{"row_count":1,"rows":[[` + tc.cell + `]]}`}
+			sr := &soakRunner{fe: &faultEnv{httpAPI: &cluster.HTTP{Client: &http.Client{Transport: rt}}}}
+			m := cluster.Member{IP: "192.0.2.10"}
+			got, err := sr.scalar(t.Context(), m, "SELECT counter")
+			if (err != nil) != tc.bad || (!tc.bad && got != tc.want) || rt.calls != 1 || rt.limit != 1 {
+				t.Fatalf("scalar %d %v calls=%d limit=%d", got, err, rt.calls, rt.limit)
+			}
+			if tc.bad && !strings.Contains(err.Error(), "SELECT counter") {
+				t.Fatal(err)
+			}
+			rt.calls = 0
+			seq, err := sr.checkpointSeqs(t.Context(), m, id)
+			if (err != nil) != tc.bad || (!tc.bad && (len(seq) != 1 || seq[0] != tc.want)) || rt.calls != 1 || rt.limit != 100 {
+				t.Fatalf("checkpoint %v %v calls=%d limit=%d", seq, err, rt.calls, rt.limit)
+			}
+			if tc.bad && !strings.Contains(err.Error(), id) {
+				t.Fatal(err)
+			}
+		})
+	}
+	for _, raw := range []string{`{"rows":[[]]}`, `{"truncated":true,"rows":[[1]]}`} {
+		rt := &scalarEvidenceTransport{body: raw}
+		sr := &soakRunner{fe: &faultEnv{httpAPI: &cluster.HTTP{Client: &http.Client{Transport: rt}}}}
+		if _, err := sr.checkpointSeqs(t.Context(), cluster.Member{IP: "192.0.2.10"}, id); err == nil {
+			t.Fatal("accepted incomplete checkpoint rows")
+		}
 	}
 }

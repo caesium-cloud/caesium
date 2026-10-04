@@ -63,6 +63,7 @@ import (
 	"github.com/caesium-cloud/caesium/test/robustness/cluster"
 	"github.com/caesium-cloud/caesium/test/robustness/faults"
 	"github.com/caesium-cloud/caesium/test/robustness/history"
+	"github.com/caesium-cloud/caesium/test/robustness/internal/sqlcell"
 	"github.com/caesium-cloud/caesium/test/robustness/recorder"
 	"github.com/google/uuid"
 	corev1 "k8s.io/api/core/v1"
@@ -1591,14 +1592,25 @@ func nilToEmpty(v []int) []int {
 // ---------------------------------------------------------------------------
 
 func (sr *soakRunner) scalar(ctx context.Context, m cluster.Member, sql string) (int64, error) {
-	resp, _, err := sr.fe.httpAPI.Query(ctx, m.HTTPBase(), sql, 1)
+	_, raw, err := sr.fe.httpAPI.Query(ctx, m.HTTPBase(), sql, 1)
 	if err != nil {
-		return 0, err
+		return 0, fmt.Errorf("scalar query %q: %w", sql, err)
+	}
+	var resp cluster.QueryResponse
+	if err := sqlcell.Decode(raw, &resp); err != nil {
+		return 0, fmt.Errorf("scalar query %q decode: %w", sql, err)
+	}
+	if resp.Truncated {
+		return 0, fmt.Errorf("scalar query %q returned truncated evidence", sql)
 	}
 	if len(resp.Rows) == 0 || len(resp.Rows[0]) == 0 {
 		return 0, fmt.Errorf("%q returned no row", sql)
 	}
-	return anyInt64(resp.Rows[0][0]), nil
+	n, err := sqlcell.Int64(resp.Rows[0][0])
+	if err != nil {
+		return 0, fmt.Errorf("scalar query %q cell: %w", sql, err)
+	}
+	return n, nil
 }
 
 func queryText(v any) string {
@@ -1621,16 +1633,27 @@ func (sr *soakRunner) checkpointSeqs(ctx context.Context, m cluster.Member, runI
 	if _, err := uuid.Parse(runID); err != nil {
 		return nil, err
 	}
-	resp, _, err := sr.fe.httpAPI.Query(ctx, m.HTTPBase(),
-		fmt.Sprintf("SELECT sequence_high FROM run_checkpoints WHERE run_id = '%s' ORDER BY sequence_high", runID), 100)
+	_, raw, err := sr.fe.httpAPI.Query(ctx, m.HTTPBase(), fmt.Sprintf("SELECT sequence_high FROM run_checkpoints WHERE run_id = '%s' ORDER BY sequence_high", runID), 100)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("checkpoint sequences for run %s: %w", runID, err)
+	}
+	var resp cluster.QueryResponse
+	if err := sqlcell.Decode(raw, &resp); err != nil {
+		return nil, fmt.Errorf("checkpoint sequences for run %s decode: %w", runID, err)
+	}
+	if resp.Truncated {
+		return nil, fmt.Errorf("checkpoint sequences for run %s returned truncated evidence", runID)
 	}
 	var out []int64
-	for _, row := range resp.Rows {
-		if len(row) > 0 {
-			out = append(out, anyInt64(row[0]))
+	for i, row := range resp.Rows {
+		if len(row) == 0 {
+			return nil, fmt.Errorf("checkpoint sequences for run %s row %d has no sequence cell", runID, i)
 		}
+		n, err := sqlcell.Int64(row[0])
+		if err != nil {
+			return nil, fmt.Errorf("checkpoint sequences for run %s row %d: %w", runID, i, err)
+		}
+		out = append(out, n)
 	}
 	return out, nil
 }
