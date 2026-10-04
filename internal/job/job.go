@@ -919,10 +919,10 @@ func (j *job) Run(ctx context.Context) (err error) {
 	// defer is armed (a secret resolver that cannot be built, a persistent
 	// store error) would leave the run running forever with nothing left to
 	// execute it. Finalize it here instead.
-	completionArmed := false
+	finalizationHandled := false
 	if resumeID, resuming := run.FromContext(ctx); resuming {
 		defer func() {
-			if completionArmed || err == nil {
+			if finalizationHandled || err == nil {
 				return
 			}
 			j.finalizeAbortedResume(ctx, store, resumeID, err)
@@ -1018,6 +1018,14 @@ func (j *job) Run(ctx context.Context) (err error) {
 	if snapshot == nil {
 		return nil
 	}
+	if snapshot.Status == run.StatusCancelled {
+		// Durable cancellation can precede delivery of its asynchronous event.
+		// A caller's earlier status read and live registered context are not
+		// authority to resume this row. Its terminal write already owns the
+		// original cause and callbacks; do not register tasks or finalize again.
+		finalizationHandled = true
+		return fmt.Errorf("run %s cancelled (%s): %w", snapshot.ID, snapshot.Error, context.Canceled)
+	}
 
 	runID := snapshot.ID
 	runQuarantined := snapshot.Quarantine
@@ -1044,7 +1052,7 @@ func (j *job) Run(ctx context.Context) (err error) {
 	ctx = run.WithContext(cancelCtx, runID)
 
 	var runErr error
-	completionArmed = true
+	finalizationHandled = true
 	defer func() {
 		// The run context is the authority for the whole-run deadline. It must
 		// win over an earlier ordinary task failure: with continue-on-failure a

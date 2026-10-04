@@ -38,9 +38,9 @@ func (e *manualObservedEngine) Create(*atom.EngineCreateRequest) (atom.Atom, err
 	return nil, errors.New("observed hermetic runtime creation")
 }
 
-func TestManualHTTPFencesCancellationCommittedBeforeKickoffRegistration(t *testing.T) {
-	for _, cancelBeforeRegistration := range []bool{true, false} {
-		t.Run(map[bool]string{true: "cancelled", false: "active-control"}[cancelBeforeRegistration], func(t *testing.T) {
+func TestManualHTTPFencesDurableCancellationAroundKickoff(t *testing.T) {
+	for _, mode := range []string{"before-registration", "after-fence-read", "active-control"} {
+		t.Run(mode, func(t *testing.T) {
 			conn := jobdeftestutil.OpenTestDB(t)
 			t.Cleanup(func() { jobdeftestutil.CloseDB(conn) })
 			store := runstorage.NewStore(conn)
@@ -50,7 +50,7 @@ func TestManualHTTPFencesCancellationCommittedBeforeKickoffRegistration(t *testi
 			require.NoError(t, conn.Create(&j).Error)
 			require.NoError(t, conn.Create(&a).Error)
 			require.NoError(t, conn.Create(&task).Error)
-			oldStore, oldJob, oldStart, oldExecution, oldLaunch := postRunStore, postGetJob, postStartRun, runExecution, postLaunchRun
+			oldStore, oldJob, oldStart, oldExecution, oldLaunch, oldGet := postRunStore, postGetJob, postStartRun, runExecution, postLaunchRun, postGetRun
 			postRunStore = func() *runstorage.Store { return store }
 			postGetJob = func(context.Context, uuid.UUID) (*models.Job, error) { return &j, nil }
 			engine := &manualObservedEngine{created: make(chan struct{}, 1)}
@@ -58,41 +58,73 @@ func TestManualHTTPFencesCancellationCommittedBeforeKickoffRegistration(t *testi
 			postLaunchRun = func(ctx context.Context, m *models.Job, r *runstorage.JobRun, release func()) {
 				oldLaunch(ctx, m, r, func() { release(); kickoffDone <- struct{}{} })
 			}
-			var executionCalls atomic.Int32
+			var executionCalls, callbackCalls atomic.Int32
+			resumeChecked := make(chan error, 1)
+			resumeReturn := make(chan struct{}, 1)
 			runExecution = func(ctx context.Context, m *models.Job, params map[string]string) error {
 				executionCalls.Add(1)
-				return job.New(m,
+				require.NoError(t, ctx.Err(), "durable cancellation must be observed without event delivery")
+				err := job.New(m,
 					job.WithParams(params), job.WithRunStoreFactory(func() *runstorage.Store { return store }),
 					job.WithEnvVariables(func() env.Environment { return env.Environment{ExecutionMode: "local", MaxParallelTasks: 1} }),
 					job.WithTaskServiceFactory(func(ctx context.Context) tasksvc.Task { return tasksvc.ServiceWithDB(ctx, conn) }),
 					job.WithAtomServiceFactory(func(ctx context.Context) atomsvc.Atom { return atomsvc.ServiceWithDB(ctx, conn) }),
 					job.WithTaskEdgeServiceFactory(func(ctx context.Context) edgesvc.TaskEdge { return edgesvc.ServiceWithDB(ctx, conn) }),
 					job.WithDockerEngineFactory(func(context.Context) atom.Engine { return engine }),
-					job.WithDispatchRunCallbacks(func(context.Context, uuid.UUID, uuid.UUID, error) error { return nil }),
+					job.WithDispatchRunCallbacks(func(context.Context, uuid.UUID, uuid.UUID, error) error {
+						callbackCalls.Add(1)
+						return nil
+					}),
 				).Run(ctx)
+				if mode == "after-fence-read" {
+					resumeChecked <- err
+					<-resumeReturn
+				}
+				return err
 			}
 			t.Cleanup(func() {
-				postRunStore, postGetJob, postStartRun, runExecution, postLaunchRun = oldStore, oldJob, oldStart, oldExecution, oldLaunch
+				postRunStore, postGetJob, postStartRun, runExecution, postLaunchRun, postGetRun = oldStore, oldJob, oldStart, oldExecution, oldLaunch, oldGet
 			})
 			var admitted uuid.UUID
 			var originalCause string
+			var originalCompletedAt *time.Time
 			postStartRun = func(ctx context.Context, id uuid.UUID, opts ...runstorage.StartOption) (runstorage.StartResult, error) {
 				result, err := oldStart(ctx, id, opts...)
 				if err == nil && result.Run != nil {
 					admitted = result.Run.ID
-					if cancelBeforeRegistration {
+					if mode == "before-registration" {
 						require.NoError(t, store.CancelRun(context.Background(), admitted))
 						require.Zero(t, job.CancelRunContexts(admitted), "cancellation must precede launcher registration")
 						current, getErr := store.Get(admitted)
 						require.NoError(t, getErr)
 						originalCause = current.Error
+						originalCompletedAt = current.CompletedAt
 					}
 				}
 				return result, err
 			}
+			postGetRun = func(id uuid.UUID) (*runstorage.JobRun, error) {
+				observed, err := store.Get(id)
+				if err == nil && mode == "after-fence-read" {
+					require.Equal(t, runstorage.StatusRunning, observed.Status)
+					// Commit after the controller observes running. No bus pump is
+					// installed on this real Store, so the registered ctx stays live.
+					require.NoError(t, store.CancelRun(context.Background(), id))
+					current, getErr := store.Get(id)
+					require.NoError(t, getErr)
+					require.Equal(t, runstorage.StatusCancelled, current.Status)
+					originalCause = current.Error
+					originalCompletedAt = current.CompletedAt
+				}
+				return observed, err
+			}
 			owner := runlife.New(context.Background())
 			t.Cleanup(func() {
 				owner.CloseAndCancel()
+				select {
+				case resumeReturn <- struct{}{}:
+				default:
+				}
 				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 				defer cancel()
 				require.NoError(t, owner.Wait(ctx))
@@ -104,12 +136,28 @@ func TestManualHTTPFencesCancellationCommittedBeforeKickoffRegistration(t *testi
 			req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
 			e.ServeHTTP(rec, req)
 			require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
-			if !cancelBeforeRegistration {
+			if mode == "active-control" {
 				select {
 				case <-engine.created:
 				case <-time.After(5 * time.Second):
 					t.Fatal("active control never reached real local runtime Create")
 				}
+			}
+			if mode == "after-fence-read" {
+				select {
+				case resumeErr := <-resumeChecked:
+					require.ErrorIs(t, resumeErr, context.Canceled)
+					require.Contains(t, resumeErr.Error(), originalCause)
+				case <-time.After(5 * time.Second):
+					t.Fatal("real engine did not reject the durable cancelled snapshot")
+				}
+				// The engine has already resolved durable cancellation while its
+				// context was live; closing the owner cannot hide a missing fence.
+				owner.CloseAndCancel()
+				expired, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+				require.ErrorIs(t, owner.Wait(expired), context.DeadlineExceeded, "kickoff still owns its responsibility until it returns")
+				cancel()
+				resumeReturn <- struct{}{}
 			}
 			// Keep the owner alive until the real launcher has finished fencing or
 			// executing. Server cancellation must not hide a missing durable fence.
@@ -124,16 +172,24 @@ func TestManualHTTPFencesCancellationCommittedBeforeKickoffRegistration(t *testi
 			require.NoError(t, owner.Wait(waitCtx))
 			row, err := store.Get(admitted)
 			require.NoError(t, err)
-			if cancelBeforeRegistration {
-				require.Zero(t, executionCalls.Load())
+			if mode != "active-control" {
+				if mode == "before-registration" {
+					require.Zero(t, executionCalls.Load())
+				} else {
+					require.EqualValues(t, 1, executionCalls.Load(), "controller passes its earlier active snapshot; engine owns the later durable fence")
+				}
+				require.Zero(t, callbackCalls.Load(), "cancelled resume must not dispatch completion callbacks")
 				require.Zero(t, engine.calls.Load())
 				require.Equal(t, runstorage.StatusCancelled, row.Status)
 				require.Equal(t, originalCause, row.Error)
+				require.NotNil(t, originalCompletedAt)
+				require.Equal(t, originalCompletedAt, row.CompletedAt, "resume must preserve the original terminal write")
 				var count int64
 				require.NoError(t, conn.Model(&models.TaskRun{}).Where("job_run_id = ?", admitted).Count(&count).Error)
 				require.Zero(t, count)
 			} else {
 				require.EqualValues(t, 1, engine.calls.Load())
+				require.EqualValues(t, 1, callbackCalls.Load())
 			}
 			require.Zero(t, job.CancelRunContexts(admitted))
 		})
