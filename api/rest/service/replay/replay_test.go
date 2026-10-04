@@ -9,9 +9,11 @@ import (
 
 	iauth "github.com/caesium-cloud/caesium/internal/auth"
 	"github.com/caesium-cloud/caesium/internal/cache"
+	jobrunner "github.com/caesium-cloud/caesium/internal/job"
 	"github.com/caesium-cloud/caesium/internal/jobdef/testutil"
 	"github.com/caesium-cloud/caesium/internal/models"
 	runstorage "github.com/caesium-cloud/caesium/internal/run"
+	"github.com/caesium-cloud/caesium/internal/runlife"
 	fixturejson "github.com/caesium-cloud/caesium/internal/testutil"
 	"github.com/caesium-cloud/caesium/pkg/container"
 	"github.com/google/uuid"
@@ -150,7 +152,7 @@ func TestReplayResumesPendingReservation(t *testing.T) {
 
 	dispatcher := &recordingDispatcher{}
 	result, err := (&Service{
-		ctx:        context.Background(),
+		ctx:        replayTestContext(t),
 		store:      store,
 		dispatcher: dispatcher,
 		executionMode: func() string {
@@ -178,7 +180,7 @@ func TestReplayConcurrentIdenticalRequestsReturnSingleReservation(t *testing.T) 
 	f.seedTask(t, true, "success")
 	key := "parallel-retry-key"
 	svc := (&Service{
-		ctx:        context.Background(),
+		ctx:        replayTestContext(t),
 		store:      f.store,
 		dispatcher: &recordingDispatcher{},
 	}).WithExecutionMode("local")
@@ -237,7 +239,7 @@ func TestReplayRetryResumesAfterDispatchFailure(t *testing.T) {
 
 	firstDispatcher := &recordingDispatcher{err: dispatchErr}
 	_, err := (&Service{
-		ctx:        context.Background(),
+		ctx:        replayTestContext(t),
 		store:      f.store,
 		dispatcher: firstDispatcher,
 	}).WithExecutionMode("distributed").Replay(req)
@@ -258,7 +260,7 @@ func TestReplayRetryResumesAfterDispatchFailure(t *testing.T) {
 
 	secondDispatcher := &completingDispatcher{store: f.store}
 	result, err := (&Service{
-		ctx:        context.Background(),
+		ctx:        replayTestContext(t),
 		store:      f.store,
 		dispatcher: secondDispatcher,
 	}).WithExecutionMode("distributed").Replay(req)
@@ -281,7 +283,7 @@ func TestReplayRefusesLocalModeWhenReplayWouldReexecute(t *testing.T) {
 	dispatcher := &recordingDispatcher{}
 
 	_, err := (&Service{
-		ctx:        context.Background(),
+		ctx:        replayTestContext(t),
 		store:      f.store,
 		dispatcher: dispatcher,
 	}).WithExecutionMode("local").Replay(Request{
@@ -338,7 +340,7 @@ func TestReplayExistingUnexpectedNonTerminalStatusIsCorrupt(t *testing.T) {
 
 	dispatcher := &recordingDispatcher{}
 	_, err = (&Service{
-		ctx:        context.Background(),
+		ctx:        replayTestContext(t),
 		store:      f.store,
 		dispatcher: dispatcher,
 	}).WithExecutionMode("distributed").Replay(Request{
@@ -398,7 +400,7 @@ func TestReplayUniqueViolationWithoutFingerprintMatchReturnsInsertError(t *testi
 	require.NoError(t, err)
 
 	_, err = (&Service{
-		ctx:        context.Background(),
+		ctx:        replayTestContext(t),
 		store:      f.store,
 		dispatcher: &recordingDispatcher{},
 	}).WithExecutionMode("local").Replay(Request{
@@ -623,4 +625,79 @@ func serviceJSON(t *testing.T, v any) datatypes.JSON {
 func serviceJSONString(t *testing.T, v any) string {
 	t.Helper()
 	return string(fixturejson.MustJSONBytes(t, v))
+}
+
+func replayTestContext(t *testing.T) context.Context {
+	t.Helper()
+	owner := runlife.New(context.Background())
+	t.Cleanup(func() {
+		owner.CloseAndCancel()
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		require.NoError(t, owner.Wait(ctx))
+	})
+	return runlife.WithSupervisor(t.Context(), owner)
+}
+
+func TestReplayRefusesOwnerBeforeMaterialization(t *testing.T) {
+	owner := runlife.New(context.Background())
+	owner.CloseAndCancel()
+	for _, ctx := range []context.Context{context.Background(), runlife.WithSupervisor(context.Background(), owner)} {
+		dispatcher := &recordingDispatcher{}
+		// A nonnil store with no DB panics if admission reaches database work.
+		svc := &Service{ctx: ctx, store: &runstorage.Store{}, dispatcher: dispatcher}
+		result, err := svc.Replay(Request{JobID: uuid.New(), BaselineRunID: uuid.New(), IdempotencyKey: "key"})
+		require.Nil(t, result)
+		require.True(t, errors.Is(err, runlife.ErrMissing) || errors.Is(err, runlife.ErrClosed))
+		require.Empty(t, dispatcher.calls)
+	}
+}
+func TestAsyncDispatcherFailureReleasesOwnerAndRunRegistration(t *testing.T) {
+	f := newServiceReplayFixture(t)
+	ctx := replayTestContext(t)
+	owner := runlife.FromContext(ctx)
+	runID := uuid.New()
+	err := NewAsyncDispatcher(f.store).DispatchReplay(ctx, runID)
+	require.ErrorIs(t, err, gorm.ErrRecordNotFound)
+	require.Zero(t, jobrunner.CancelRunContexts(runID))
+	owner.CloseAndCancel()
+	require.NoError(t, owner.Wait(context.Background()))
+}
+
+func TestReplayTransfersReservationThroughMaterializationToExecution(t *testing.T) {
+	f := newServiceReplayFixture(t)
+	f.seedTask(t, true, "success")
+	type key struct{}
+	owner := runlife.New(context.Background())
+	request, cancelRequest := context.WithCancel(runlife.WithSupervisor(context.WithValue(context.Background(), key{}, "value"), owner))
+	defer cancelRequest()
+	oldExecute := replayExecution
+	t.Cleanup(func() { replayExecution = oldExecute })
+	started := make(chan context.Context, 1)
+	finish := make(chan struct{})
+	replayExecution = func(ctx context.Context, j *models.Job, store *runstorage.Store) error {
+		started <- ctx
+		<-finish
+		return nil
+	}
+	svc := (&Service{ctx: request, store: f.store, dispatcher: NewAsyncDispatcher(f.store)}).WithExecutionMode("distributed")
+	result, err := svc.Replay(Request{JobID: f.jobID, BaselineRunID: f.runID, Set: map[string]string{"mode": "what-if"}, IdempotencyKey: "owned-replay", Principal: f.principal})
+	require.NoError(t, err)
+	require.True(t, result.Run.Quarantine)
+	running := <-started
+	cancelRequest()
+	require.NoError(t, running.Err())
+	require.Equal(t, "value", running.Value(key{}))
+	id, ok := runstorage.FromContext(running)
+	require.True(t, ok)
+	require.Equal(t, result.Run.ID, id)
+	require.Equal(t, 1, jobrunner.CancelRunContexts(id))
+	require.ErrorIs(t, running.Err(), context.Canceled)
+	owner.CloseAndCancel()
+	expired, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer cancel()
+	require.ErrorIs(t, owner.Wait(expired), context.DeadlineExceeded)
+	close(finish)
+	require.NoError(t, owner.Wait(context.Background()))
+	require.Zero(t, jobrunner.CancelRunContexts(id))
 }
