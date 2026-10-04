@@ -53,6 +53,9 @@ func TestRunWithSignalContextHelperProcess(t *testing.T) {
 				time.Sleep(time.Hour)
 			}
 		}
+		if mode == "error" {
+			return fmt.Errorf("specific role failure")
+		}
 		return nil // The wrapper must turn ctx.Err into a fail-closed result.
 	})
 	os.Exit(0)
@@ -183,5 +186,20 @@ func TestRunWithSignalContextSecondSignalForcesTermination(t *testing.T) {
 			}
 
 		})
+	}
+}
+
+func TestRunWithSignalContextKeepsRoleFailureOnCancellation(t *testing.T) {
+	p := startSignalProcess(t, "error")
+	p.waitFile(t, p.ready)
+	if err := p.cmd.Process.Signal(syscall.SIGTERM); err != nil {
+		t.Fatal(err)
+	}
+	p.wait(t)
+	if p.err == nil || p.cmd.ProcessState.ExitCode() != 1 || p.stdout.Len() != 0 {
+		t.Fatalf("role failure = %v, stdout=%s", p.err, p.stdout.String())
+	}
+	if !strings.Contains(p.stderr.String(), "signal-role: specific role failure") || strings.Contains(p.stderr.String(), "context canceled") {
+		t.Fatalf("role failure replaced: %s", p.stderr.String())
 	}
 }
