@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/stretchr/testify/require"
@@ -90,9 +91,13 @@ func TestAlterColumnPreservesRowsIndexesAndInlineConstraints(t *testing.T) {
 		Type string
 	}
 	require.NoError(t, db.Raw("PRAGMA table_info(migration_columns)").Scan(&types).Error)
+	require.Len(t, types, 3)
+	var names []string
 	for _, column := range types {
-		require.Equal(t, "blob", column.Type)
+		names = append(names, column.Name)
+		require.Equal(t, "BLOB", strings.ToUpper(column.Type))
 	}
+	require.Equal(t, []string{"first", "middle", "last"}, names)
 	require.Error(t, db.Exec("INSERT INTO migration_columns VALUES ('a','b','')").Error)
 	require.Error(t, db.Exec("INSERT INTO migration_columns VALUES ('a','b','KEEP')").Error)
 	require.Error(t, db.Exec("INSERT INTO migration_columns VALUES ('a','b',NULL)").Error)
@@ -135,24 +140,36 @@ func TestPopulatedSAMLReplayAutoMigrateAgain(t *testing.T) {
 	assertPopulatedSAMLReplayMigration(t, db)
 }
 
-func assertPopulatedSAMLReplayMigration(t *testing.T, db *gorm.DB) {
+func assertPopulatedSAMLReplayMigration(t *testing.T, db *gorm.DB) []string {
 	t.Helper()
 	require.NoError(t, db.AutoMigrate(&models.SAMLAssertionReplay{}))
 	require.NoError(t, db.Exec("INSERT INTO saml_assertion_ids VALUES (?, ?, ?, ?)", "issuer", "assertion", "2030-01-01T00:00:00Z", "2026-01-01T00:00:00Z").Error)
 	indexes := migrationIndexSQL(t, db, "saml_assertion_ids")
 	require.Len(t, indexes, 2)
+	assertSAMLReplayDates(t, db)
 	for range 2 {
 		require.NoError(t, db.AutoMigrate(&models.SAMLAssertionReplay{}))
+		assertSAMLReplayDates(t, db)
+		require.Equal(t, indexes, migrationIndexSQL(t, db, "saml_assertion_ids"))
 		require.NoError(t, db.Migrator().AlterColumn(&models.SAMLAssertionReplay{}, "CreatedAt"))
+		assertSAMLReplayDates(t, db)
 		require.Equal(t, indexes, migrationIndexSQL(t, db, "saml_assertion_ids"))
 	}
+	require.Error(t, db.Exec("INSERT INTO saml_assertion_ids VALUES (?, ?, ?, ?)", "issuer", "assertion", "2030-01-01T00:00:00Z", "2026-01-01T00:00:00Z").Error)
+	return indexes
+}
+
+func assertSAMLReplayDates(t *testing.T, db *gorm.DB) {
+	t.Helper()
+	var count int64
+	require.NoError(t, db.Model(&models.SAMLAssertionReplay{}).Count(&count).Error)
+	require.EqualValues(t, 1, count)
 	var row models.SAMLAssertionReplay
 	require.NoError(t, db.First(&row).Error)
 	require.Equal(t, "issuer", row.Issuer)
 	require.Equal(t, "assertion", row.AssertionID)
-	require.False(t, row.CreatedAt.IsZero())
-	require.False(t, row.ExpiresAt.IsZero())
-	require.Error(t, db.Exec("INSERT INTO saml_assertion_ids VALUES (?, ?, ?, ?)", "issuer", "assertion", "2030-01-01T00:00:00Z", "2026-01-01T00:00:00Z").Error)
+	require.Equal(t, time.Date(2026, time.January, 1, 0, 0, 0, 0, time.UTC), row.CreatedAt.UTC())
+	require.Equal(t, time.Date(2030, time.January, 1, 0, 0, 0, 0, time.UTC), row.ExpiresAt.UTC())
 }
 
 func TestDropColumnDoesNotRestoreIndexesForRemovedColumn(t *testing.T) {
