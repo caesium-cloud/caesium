@@ -5,7 +5,7 @@ import (
 	"net/http"
 	"strconv"
 
-	"github.com/caesium-cloud/caesium/api/rest/controller/internal/orderby"
+	"github.com/caesium-cloud/caesium/api/internal/orderby"
 	svc "github.com/caesium-cloud/caesium/api/rest/service/notification"
 	"github.com/labstack/echo/v5"
 	"gorm.io/gorm"

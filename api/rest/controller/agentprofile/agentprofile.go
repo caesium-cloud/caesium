@@ -10,7 +10,7 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/caesium-cloud/caesium/api/rest/controller/internal/orderby"
+	"github.com/caesium-cloud/caesium/api/internal/orderby"
 	svc "github.com/caesium-cloud/caesium/api/rest/service/agentprofile"
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/google/uuid"
