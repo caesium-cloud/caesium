@@ -4,8 +4,6 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
-
-	"github.com/caesium-cloud/caesium/internal/cache"
 )
 
 const datasetsJob = `
@@ -392,31 +390,7 @@ steps:
           watermark: { key: max_order_ts }
 `
 
-	hashFor := func(y string) string {
-		def, err := Parse([]byte(y))
-		if err != nil {
-			t.Fatalf("parse: %v", err)
-		}
-		step := &def.Steps[0]
-		spec, err := def.RuntimeSpecForStep(step)
-		if err != nil {
-			t.Fatalf("runtime spec: %v", err)
-		}
-		h := cache.HashInput{
-			JobAlias:             def.Metadata.Alias,
-			TaskName:             step.Name,
-			Image:                step.Image,
-			Command:              step.Command,
-			Env:                  spec.Env,
-			WorkDir:              spec.WorkDir,
-			Mounts:               spec.Mounts,
-			ResolvedVolumeMounts: spec.ResolvedVolumeMounts,
-			Kubernetes:           spec.Kubernetes,
-		}
-		return h.Compute()
-	}
-
-	if got, want := hashFor(withDatasets), hashFor(base); got != want {
+	if got, want := cacheHashForYAML(t, withDatasets), cacheHashForYAML(t, base); got != want {
 		t.Fatalf("datasets changed the cache hash: with=%s without=%s", got, want)
 	}
 }
