@@ -1635,6 +1635,55 @@ func (sr *soakRunner) checkpointSeqs(ctx context.Context, m cluster.Member, runI
 	return out, nil
 }
 
+type checkpointPoller struct {
+	cancel context.CancelFunc
+	done   chan struct{}
+	once   sync.Once
+}
+
+func startCheckpointPoller(parent context.Context, interval, queryTimeout time.Duration,
+	query func(context.Context) ([]int64, error), observe func([]int64, error),
+) *checkpointPoller {
+	ctx, cancel := context.WithCancel(parent)
+	poller := &checkpointPoller{cancel: cancel, done: make(chan struct{})}
+	go func() {
+		defer close(poller.done)
+		for {
+			if ctx.Err() != nil {
+				return
+			}
+			queryCtx, queryCancel := context.WithTimeout(ctx, queryTimeout)
+			seqs, err := query(queryCtx)
+			queryCancel()
+			if ctx.Err() != nil {
+				return
+			}
+			observe(seqs, err)
+
+			timer := time.NewTimer(interval)
+			select {
+			case <-ctx.Done():
+				if !timer.Stop() {
+					select {
+					case <-timer.C:
+					default:
+					}
+				}
+				return
+			case <-timer.C:
+			}
+		}
+	}()
+	return poller
+}
+
+func (p *checkpointPoller) stop() {
+	p.once.Do(func() {
+		p.cancel()
+		<-p.done
+	})
+}
+
 func (sr *soakRunner) episodeRetention(t *testing.T, ep SoakEpisode, rec *episodeRecord) {
 	ctx := context.Background()
 	cfg := sr.w.Retention
@@ -1659,27 +1708,20 @@ func (sr *soakRunner) episodeRetention(t *testing.T, ep SoakEpisode, rec *episod
 		sr.failf(t, rec, "long run not admitted: %+v", *long)
 	}
 	var obs []CheckpointObservation
-	pollStop := make(chan struct{})
-	pollDone := make(chan struct{})
 	var pollErrs int
-	go func() {
-		defer close(pollDone)
-		for {
-			pctx, pcancel := context.WithTimeout(ctx, 10*time.Second)
-			seqs, err := sr.checkpointSeqs(pctx, sr.leader(), long.RunID)
-			pcancel()
+	poller := startCheckpointPoller(ctx, time.Second, 10*time.Second,
+		func(pctx context.Context) ([]int64, error) {
+			return sr.checkpointSeqs(pctx, sr.leader(), long.RunID)
+		},
+		func(seqs []int64, err error) {
 			if err != nil {
 				pollErrs++
 			} else {
 				obs = append(obs, CheckpointObservation{At: time.Now().UTC(), Sequences: seqs})
 			}
-			select {
-			case <-pollStop:
-				return
-			case <-time.After(time.Second):
-			}
-		}
-	}()
+		},
+	)
+	defer poller.stop()
 
 	// Sustained burst, from several members at once.
 	var mu sync.Mutex
@@ -1721,8 +1763,7 @@ func (sr *soakRunner) episodeRetention(t *testing.T, ep SoakEpisode, rec *episod
 		}
 	}
 	time.Sleep(3 * time.Second)
-	close(pollStop)
-	<-pollDone
+	poller.stop()
 	if len(obs) < 3 {
 		sr.blockf(t, rec, "only %d checkpoint polls succeeded (%d errors)", len(obs), pollErrs)
 	}

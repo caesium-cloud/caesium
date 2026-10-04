@@ -4,11 +4,13 @@ package robustness
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/caesium-cloud/caesium/test/robustness/cluster"
 	corev1 "k8s.io/api/core/v1"
@@ -185,5 +187,43 @@ func TestFinalDrainEvidenceBlocksMissingMalformedAndEmbeddedErrorInventory(t *te
 	failures, gaps := finalDrainEvidence(observation, "token")
 	if len(failures) != 1 || len(gaps) != 2 {
 		t.Fatalf("last successful observation = failures %v, gaps %v; want retained leak plus missing pod/current host evidence", failures, gaps)
+	}
+}
+
+func TestCheckpointPollerCancelsInFlightQueryAndJoinsOnFailure(t *testing.T) {
+	queryStarted := make(chan struct{})
+	queryCanceled := make(chan struct{})
+	var poller *checkpointPoller
+	injectedFailure := errors.New("injected retention failure")
+	err := func() error {
+		poller = startCheckpointPoller(context.Background(), time.Hour, time.Minute,
+			func(ctx context.Context) ([]int64, error) {
+				close(queryStarted)
+				<-ctx.Done()
+				close(queryCanceled)
+				return nil, ctx.Err()
+			},
+			func([]int64, error) {},
+		)
+		defer poller.stop()
+		select {
+		case <-queryStarted:
+			return injectedFailure
+		case <-time.After(2 * time.Second):
+			return errors.New("checkpoint poll query did not start")
+		}
+	}()
+	if !errors.Is(err, injectedFailure) {
+		t.Fatalf("failure path returned %v, want injected failure", err)
+	}
+	select {
+	case <-queryCanceled:
+	default:
+		t.Fatal("deferred poller stop returned before canceling the in-flight query")
+	}
+	select {
+	case <-poller.done:
+	default:
+		t.Fatal("deferred poller stop returned before joining the query goroutine")
 	}
 }
