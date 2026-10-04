@@ -1,6 +1,6 @@
 # Go maintainability implementation
 
-Status: **in progress**. One aggregate PR will be published after the complete scope is implemented and validated; worker branches are local integration units.
+Status: **in progress**. [Aggregate draft PR #620](https://github.com/caesium-cloud/caesium/pull/620) contains all planned source edits. Acceptance remains pending while final runtime and hosted checks run; worker branches are local integration units.
 
 Base / verified audit target: `0b4cc4c4677f9cb28924366043ccb79cc4543e54` (#618 included). Both Go modules declare Go 1.27.1. The audit raised 142 findings, merged them into 107 independently verified candidates, and produced 253 work items. All confirmed items remain in scope, including low-value cleanup; item-sized PR suggestions are now local commit batches for one final PR.
 
@@ -306,6 +306,8 @@ Completed local gates (each applies only to the recorded candidate):
 - Final source09b7f6c9 native tagged vet, lint0issues, fullroot race/coverage PASS (final-native-fourth.log), changedGo gofmt-l empty. Reagents source identical to its previously qualified7b2a8f0f tree.
 - Focused source d7822d66 job/API/CLI + selected hermetic tagged lifecycle/robustness/performance/root fixtures race PASS (focused-final-followup.log); finalCLIcompensation subsequently covered fullroot09b7f6c9.
 - F4 standalone previous-release upgrade/readdress/rollback/shards/isolation at09b7f6c9 PASS; qualification.json resultpass, all phase exits0 and strict test-evidence passed (lifecycle-standalone-09b7f6c9.log). Image built by that clean invocation.
+- Final source09b7f6c9 fresh actual CLI/REST/local-runtime integration PASS305 scenarios/632.780s (local-integration-go-maintenance-09b7f6c9.log); runtime guards excluded auth/distributed/infra are separately hosted.
+- Pinned performance fixture test relocation at1c448427: original owner_state_test.go equalsbasebyte-for-byte; baselineharness4005c04frestored; internal/run race PASS. Production source identical09b7; live evidence unaffected by test relocation.
 
 Complete-scope acceptance remains pending. Shared gates are scheduled by the coordinator; native builders and images have task-specific tags.
 
