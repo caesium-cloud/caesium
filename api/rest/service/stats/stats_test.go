@@ -8,10 +8,10 @@ import (
 	"testing"
 	"time"
 
+	jobdeftestutil "github.com/caesium-cloud/caesium/internal/jobdef/testutil"
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/suite"
-	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 )
 
@@ -25,20 +25,11 @@ func TestStatsSuite(t *testing.T) {
 }
 
 func (s *StatsSuite) SetupTest() {
-	dsn := "file:" + uuid.NewString() + "?mode=memory&cache=shared"
-	db, err := gorm.Open(sqlite.Open(dsn), &gorm.Config{})
-	s.Require().NoError(err)
-	s.Require().NoError(db.AutoMigrate(models.All...))
-	s.db = db
+	s.db = jobdeftestutil.OpenTestDB(s.T())
 }
 
 func (s *StatsSuite) TearDownTest() {
-	if s.db != nil {
-		sqlDB, _ := s.db.DB()
-		if sqlDB != nil {
-			_ = sqlDB.Close()
-		}
-	}
+	jobdeftestutil.CloseDB(s.db)
 }
 
 func (s *StatsSuite) TestEmptyDatabaseReturnsZeros() {
