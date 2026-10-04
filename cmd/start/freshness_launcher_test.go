@@ -9,6 +9,7 @@ import (
 	"github.com/caesium-cloud/caesium/internal/job"
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/caesium-cloud/caesium/internal/run"
+	"github.com/caesium-cloud/caesium/internal/runlife"
 	"github.com/caesium-cloud/caesium/internal/testutil"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
@@ -197,7 +198,7 @@ func TestFreshnessRunLauncherFencesCancellationDuringLookup(t *testing.T) {
 		},
 	)
 
-	launcher(context.Background(), derived)
+	launcher(derivedTestSupervisorContext(t), derived)
 
 	select {
 	case <-lookupEntered:
@@ -380,5 +381,36 @@ func TestLaunchDerivedRunRetriesTransientLookupFailure(t *testing.T) {
 	if status := runStatus(t, conn, derived.ID); status != string(run.StatusRunning) {
 		t.Fatalf("run status = %q, want %q: a launched run is finalized by job.Run, not the launcher",
 			status, run.StatusRunning)
+	}
+}
+
+func derivedTestSupervisorContext(t *testing.T) context.Context {
+	t.Helper()
+	owner := runlife.New(context.Background())
+	t.Cleanup(func() {
+		owner.CloseAndCancel()
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		if err := owner.Wait(ctx); err != nil {
+			t.Errorf("derived work did not join: %v", err)
+		}
+	})
+	return runlife.WithSupervisor(t.Context(), owner)
+}
+
+func TestDerivedRunSubmissionRefusesMissingAndClosedOwner(t *testing.T) {
+	owner := runlife.New(context.Background())
+	owner.CloseAndCancel()
+	for _, ctx := range []context.Context{context.Background(), runlife.WithSupervisor(context.Background(), owner)} {
+		called := false
+		launcher := newFreshnessRunLauncher(nil, func(context.Context, uuid.UUID) (*models.Job, error) { called = true; return nil, nil }, func(context.Context, *models.Job, *run.JobRun) error { called = true; return nil })
+		id := uuid.New()
+		launcher(ctx, &run.JobRun{ID: id})
+		if called {
+			t.Fatal("refused submission entered lookup or execution")
+		}
+		if job.CancelRunContexts(id) != 0 {
+			t.Fatal("refused submission leaked a registration")
+		}
 	}
 }
