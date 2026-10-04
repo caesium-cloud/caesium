@@ -309,7 +309,6 @@ func (l *localRun) execute(initialCompletionErr error) (returnErr error, complet
 	// has not reached, and skipping it would record a container that ran as
 	// skipped.
 	l.dispatched = make(map[uuid.UUID]bool)
-	dispatched := l.dispatched
 
 	for (!halt && (len(l.queue) > 0 || len(deferred) > 0)) || l.active > 0 {
 		if !halt && l.moveDueDeferred() {
