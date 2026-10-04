@@ -14,12 +14,12 @@ import (
 	"github.com/caesium-cloud/caesium/internal/jobdef/testutil"
 	"github.com/caesium-cloud/caesium/internal/lineage"
 	"github.com/caesium-cloud/caesium/internal/metrics"
-	metricstestutil "github.com/caesium-cloud/caesium/internal/metrics/testutil"
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/caesium-cloud/caesium/pkg/container"
 	"github.com/caesium-cloud/caesium/pkg/jobdef"
 	"github.com/google/uuid"
 	"github.com/mattn/go-sqlite3"
+	dto "github.com/prometheus/client_model/go"
 	"github.com/stretchr/testify/require"
 	"gorm.io/datatypes"
 	"gorm.io/gorm"
@@ -2354,7 +2354,7 @@ func TestStoreBusyRetryPolicyPreservesBudgetClassificationAndJitter(t *testing.T
 			attempts := 0
 			var waits []time.Duration
 			bases := []time.Duration{10 * time.Millisecond, 20 * time.Millisecond}
-			before := metricstestutil.CounterValue(t, metrics.DBBusyRetriesTotal)
+			before := readStoreBusyRetryCounter(t)
 			policy := storeBusyRetryPolicy(bases, func(ctx context.Context, delay time.Duration) error {
 				require.NotNil(t, ctx)
 				waits = append(waits, delay)
@@ -2368,7 +2368,7 @@ func TestStoreBusyRetryPolicyPreservesBudgetClassificationAndJitter(t *testing.T
 				require.GreaterOrEqual(t, delay, bases[i]-bases[i]/5)
 				require.LessOrEqual(t, delay, bases[i])
 			}
-			require.Equal(t, float64(tc.retries), metricstestutil.CounterValue(t, metrics.DBBusyRetriesTotal)-before)
+			require.Equal(t, float64(tc.retries), readStoreBusyRetryCounter(t)-before)
 		})
 	}
 }
@@ -2391,4 +2391,11 @@ func TestStoreBusyRetryContextCancellationOrder(t *testing.T) {
 			}
 		})
 	}
+}
+
+func readStoreBusyRetryCounter(t *testing.T) float64 {
+	t.Helper()
+	var value dto.Metric
+	require.NoError(t, metrics.DBBusyRetriesTotal.Write(&value))
+	return value.GetCounter().GetValue()
 }

@@ -277,5 +277,5 @@ func TestOwnerManagerMalformedPersistedExpansionAbortsStagedCompletion(t *testin
 	require.ErrorContains(t, err, invalidID.String())
 	require.True(t, result.Owned)
 	require.Equal(t, int64(0), updates.Load(), "malformed adoption must abort before durable completion")
-	require.Equal(t, before, owned.state, "staged state must never replace the authoritative state")
+	require.Equal(t, before, owned.state.Clone(), "staged state must never replace the authoritative state")
 }

@@ -510,7 +510,7 @@ func TestRehydrateInGroupEdgesRejectsMalformedDependenciesAtomically(t *testing.
 			}
 			err := rs.RehydrateInGroupEdges(rows, []models.Task{{ID: group, Name: "group", FanOutConfig: datatypes.JSON(`{"maxParallel":3}`)}})
 			require.ErrorContains(t, err, invalidID.String())
-			require.Equal(t, before, rs, "failed reconstruction must not mutate any state")
+			require.Equal(t, before, rs.Clone(), "failed reconstruction must not mutate any state")
 			recovered, result, err := RecoverRunStateWithFanOut(b.build(), nil, []models.TaskRun{{TaskID: group, Status: string(TaskStatusSucceeded), TerminalSequence: 1}}, rows, nil)
 			require.ErrorContains(t, err, invalidID.String())
 			require.Nil(t, recovered)

@@ -216,6 +216,14 @@ func TestDataAssertionsCancellationDuringHoldFailsClosed(t *testing.T) {
 	declareProducesHold(t, db, jobID, name, "orders", "auto")
 	var row models.TaskRun
 	require.NoError(t, db.First(&row, "id = ?", rowID).Error)
+	// Keep the shared-memory fixture alive if database/sql discards the canceled
+	// transaction's connection during rollback. Only one other connection works.
+	sqlDB, err := db.DB()
+	require.NoError(t, err)
+	sqlDB.SetMaxOpenConns(2)
+	keeper, err := sqlDB.Conn(context.Background())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = keeper.Close() })
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	attempted := false
@@ -226,7 +234,7 @@ func TestDataAssertionsCancellationDuringHoldFailsClosed(t *testing.T) {
 		}
 	}))
 	t.Cleanup(func() { _ = db.Callback().Create().Remove("test:cancel_hold") })
-	err := EvaluateDataAssertions(ctx, store, row.JobRunID, taskID, rowID, CapturedMetrics([]pkgtask.DatasetMetricSample{{Dataset: "orders", Metric: "rowCount", Value: 12}}))
+	err = EvaluateDataAssertions(ctx, store, row.JobRunID, taskID, rowID, CapturedMetrics([]pkgtask.DatasetMetricSample{{Dataset: "orders", Metric: "rowCount", Value: 12}}))
 	require.True(t, attempted)
 	require.ErrorIs(t, err, context.Canceled)
 	require.ErrorContains(t, err, "hold could not be opened")
