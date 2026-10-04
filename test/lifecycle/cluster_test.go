@@ -1012,6 +1012,11 @@ func probeMixedProtocols(ctx context.Context, t *testing.T, h *cluster.HTTP, win
 	if err != nil {
 		return nil, fmt.Sprintf("cannot authenticate protocol probe: %v", err)
 	}
+	return probeMixedProtocolsWithClient(ctx, t, ic, window)
+}
+
+func probeMixedProtocolsWithClient(ctx context.Context, t *testing.T, ic *cluster.InternalClient, window map[string]mixedHeldMember) (map[string]mixedHeldMember, string) {
+	t.Helper()
 	probed := map[string]mixedHeldMember{}
 	for name, m := range window {
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, cluster.InternalBase(m.IP)+"/internal/capabilities", nil)
@@ -1023,8 +1028,11 @@ func probeMixedProtocols(ctx context.Context, t *testing.T, h *cluster.HTTP, win
 		if err != nil {
 			return nil, fmt.Sprintf("%s protocol probe: %v", name, err)
 		}
-		body, _ := io.ReadAll(resp.Body)
+		body, readErr := io.ReadAll(resp.Body)
 		resp.Body.Close()
+		if readErr != nil {
+			return nil, fmt.Sprintf("%s capabilities incomplete after status %d (%s): %v", name, resp.StatusCode, body, readErr)
+		}
 		if resp.StatusCode != http.StatusOK {
 			return nil, fmt.Sprintf("%s capabilities status %d: %s", name, resp.StatusCode, body)
 		}
