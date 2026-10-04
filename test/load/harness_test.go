@@ -132,6 +132,167 @@ func TestMalformedEnvironmentIsRejected(t *testing.T) {
 	}
 }
 
+func TestMalformedBooleanEnvironmentIsRejectedBeforeNetwork(t *testing.T) {
+	cases := []struct{ envName, flagName, baseline string }{
+		{"CAESIUM_LOAD_REQUIRE_SUSTAINED", "require-sustained", "false"},
+		{"CAESIUM_LOAD_ALLOW_RUN_FAILURES", "allow-run-failures", "false"},
+		{"CAESIUM_LOAD_LIFECYCLE", "lifecycle", "true"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.flagName, func(t *testing.T) {
+			t.Setenv("CAESIUM_LOAD_REQUIRE_SUSTAINED", "false")
+			t.Setenv("CAESIUM_LOAD_ALLOW_RUN_FAILURES", "false")
+			t.Setenv("CAESIUM_LOAD_LIFECYCLE", "true")
+			t.Setenv(tc.envName, "not-a-bool")
+
+			cfg := defaultConfig()
+			err := cfg.validate()
+			if err == nil || !strings.Contains(err.Error(), tc.envName) || !strings.Contains(err.Error(), tc.flagName) {
+				t.Fatalf("validation error = %v", err)
+			}
+
+			var requests atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				requests.Add(1)
+				w.WriteHeader(http.StatusOK)
+			}))
+			defer server.Close()
+			var stdout, stderr bytes.Buffer
+			code := runMain([]string{"-server", server.URL}, &stdout, &stderr)
+			if code == 0 || requests.Load() != 0 || !strings.Contains(stderr.String(), tc.envName) {
+				t.Fatalf("runMain code=%d requests=%d stderr=%q", code, requests.Load(), stderr.String())
+			}
+		})
+	}
+}
+
+func TestMalformedBooleanEnvironmentErrorsAreSorted(t *testing.T) {
+	t.Setenv("CAESIUM_LOAD_REQUIRE_SUSTAINED", "bad")
+	t.Setenv("CAESIUM_LOAD_ALLOW_RUN_FAILURES", "bad")
+	t.Setenv("CAESIUM_LOAD_LIFECYCLE", "bad")
+	err := defaultConfig().validate()
+	if err == nil || !strings.Contains(err.Error(), "allow-run-failures") || strings.Contains(err.Error(), "CAESIUM_LOAD_LIFECYCLE") {
+		t.Fatalf("unexpected first validation error: %v", err)
+	}
+}
+
+func TestBooleanEnvironmentErrorsClearedByExplicitFlags(t *testing.T) {
+	cases := []struct {
+		envName, flagName, value string
+		want                     bool
+	}{
+		{"CAESIUM_LOAD_REQUIRE_SUSTAINED", "require-sustained", "true", true},
+		{"CAESIUM_LOAD_ALLOW_RUN_FAILURES", "allow-run-failures", "false", false},
+		{"CAESIUM_LOAD_LIFECYCLE", "lifecycle", "false", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.flagName, func(t *testing.T) {
+			t.Setenv("CAESIUM_LOAD_REQUIRE_SUSTAINED", "false")
+			t.Setenv("CAESIUM_LOAD_ALLOW_RUN_FAILURES", "false")
+			t.Setenv("CAESIUM_LOAD_LIFECYCLE", "true")
+			t.Setenv(tc.envName, "malformed")
+			cfg := defaultConfig()
+			flags := newFlagSet(&cfg, io.Discard)
+			if err := flags.Parse([]string{"-" + tc.flagName + "=" + tc.value}); err != nil {
+				t.Fatal(err)
+			}
+			clearBoolEnvParseErrors(&cfg, flags)
+			if err := cfg.validate(); err != nil {
+				t.Fatalf("explicit flag did not replace malformed environment value: %v", err)
+			}
+			got := map[string]bool{
+				"require-sustained":  cfg.requireSustained,
+				"allow-run-failures": cfg.allowRunFailures,
+				"lifecycle":          cfg.lifecycle,
+			}[tc.flagName]
+			if got != tc.want {
+				t.Fatalf("-%s = %t, want %t", tc.flagName, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestBooleanEnvironmentErrorsClearedByCatalogValues(t *testing.T) {
+	cases := []struct {
+		envName, flagName string
+		value             bool
+	}{
+		{"CAESIUM_LOAD_REQUIRE_SUSTAINED", "require-sustained", true},
+		{"CAESIUM_LOAD_ALLOW_RUN_FAILURES", "allow-run-failures", true},
+		{"CAESIUM_LOAD_LIFECYCLE", "lifecycle", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.flagName, func(t *testing.T) {
+			t.Setenv("CAESIUM_LOAD_REQUIRE_SUSTAINED", "false")
+			t.Setenv("CAESIUM_LOAD_ALLOW_RUN_FAILURES", "false")
+			t.Setenv("CAESIUM_LOAD_LIFECYCLE", "true")
+			t.Setenv(tc.envName, "malformed")
+			catalogPath := filepath.Join(t.TempDir(), "catalog.json")
+			body, err := json.Marshal(catalog{SchemaVersion: catalogSchemaVersion, Workloads: []catalogEntry{{
+				Name: "selected", Driver: map[string]any{tc.flagName: tc.value}, Expect: map[string]any{"exit_code": float64(0)},
+			}}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(catalogPath, body, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			cfg := defaultConfig()
+			flags := newFlagSet(&cfg, io.Discard)
+			if err := flags.Parse([]string{"-catalog", catalogPath, "-catalog-workload", "selected"}); err != nil {
+				t.Fatal(err)
+			}
+			if err := applyCatalog(&cfg, flags); err != nil {
+				t.Fatal(err)
+			}
+			clearBoolEnvParseErrors(&cfg, flags)
+			if err := cfg.validate(); err != nil {
+				t.Fatalf("catalog value did not replace malformed environment setting: %v", err)
+			}
+			got := map[string]bool{
+				"require-sustained":  cfg.requireSustained,
+				"allow-run-failures": cfg.allowRunFailures,
+				"lifecycle":          cfg.lifecycle,
+			}[tc.flagName]
+			if got != tc.value {
+				t.Fatalf("catalog -%s = %t, want %t", tc.flagName, got, tc.value)
+			}
+		})
+	}
+}
+
+func TestCatalogDoesNotClearUnrelatedBooleanEnvironmentError(t *testing.T) {
+	t.Setenv("CAESIUM_LOAD_REQUIRE_SUSTAINED", "bad")
+	t.Setenv("CAESIUM_LOAD_ALLOW_RUN_FAILURES", "false")
+	t.Setenv("CAESIUM_LOAD_LIFECYCLE", "true")
+	catalogPath := filepath.Join(t.TempDir(), "catalog.json")
+	if err := os.WriteFile(catalogPath, []byte(`{"schema_version":1,"workloads":[{"name":"selected","driver":{"jobs":4},"expect":{"exit_code":0}}]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := defaultConfig()
+	flags := newFlagSet(&cfg, io.Discard)
+	if err := flags.Parse([]string{"-catalog", catalogPath, "-catalog-workload", "selected"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := applyCatalog(&cfg, flags); err != nil {
+		t.Fatal(err)
+	}
+	clearBoolEnvParseErrors(&cfg, flags)
+	err := cfg.validate()
+	if err == nil || !strings.Contains(err.Error(), "CAESIUM_LOAD_REQUIRE_SUSTAINED") {
+		t.Fatalf("unrelated malformed environment value was cleared: %v", err)
+	}
+}
+
+func TestConfigLiteralRemainsCompatibleWithMalformedBooleanEnvironment(t *testing.T) {
+	t.Setenv("CAESIUM_LOAD_REQUIRE_SUSTAINED", "bad")
+	t.Setenv("CAESIUM_LOAD_ALLOW_RUN_FAILURES", "bad")
+	t.Setenv("CAESIUM_LOAD_LIFECYCLE", "bad")
+	if err := fixtureConfig("http://127.0.0.1:1").validate(); err != nil {
+		t.Fatalf("legacy config literal became invalid: %v", err)
+	}
+}
+
 func TestDriverClassifiesEveryExpectedRun(t *testing.T) {
 	cases := []struct {
 		name, status, body string
@@ -2137,6 +2298,33 @@ func TestEndToEndLatencyUsesTheDriverClock(t *testing.T) {
 	if r.open.lifecycle == nil {
 		t.Fatal("no lifecycle report")
 	}
+}
+
+func TestBuildReportUsesNearestRankLatencyPercentiles(t *testing.T) {
+	t0 := time.Date(2026, time.January, 2, 3, 4, 5, 0, time.UTC)
+	t.Run("even p50 chooses lower rank", func(t *testing.T) {
+		results := []runResult{
+			{runID: "one", startedAt: t0, finishedAt: t0.Add(time.Second), status: "succeeded"},
+			{runID: "two", startedAt: t0, finishedAt: t0.Add(2 * time.Second), status: "succeeded"},
+		}
+		r := buildReport(fixtureConfig("http://127.0.0.1:1"), results, metricSample{}, metricSample{}, nil, 0)
+		if r.endToEndP50 != time.Second {
+			t.Fatalf("p50=%s, want lower nearest-rank observation %s", r.endToEndP50, time.Second)
+		}
+	})
+	t.Run("integral p99 rank boundary", func(t *testing.T) {
+		results := make([]runResult, 100)
+		for i := range results {
+			results[i] = runResult{
+				runID: fmt.Sprintf("run-%d", i), startedAt: t0,
+				finishedAt: t0.Add(time.Duration(i+1) * time.Second), status: "succeeded",
+			}
+		}
+		r := buildReport(fixtureConfig("http://127.0.0.1:1"), results, metricSample{}, metricSample{}, nil, 0)
+		if r.endToEndP99 != 99*time.Second {
+			t.Fatalf("p99=%s, want nearest-rank observation %s", r.endToEndP99, 99*time.Second)
+		}
+	})
 }
 
 // TestSubscribersThatEndEarlyAreLostAndReconnected: streamEvents returns nil on

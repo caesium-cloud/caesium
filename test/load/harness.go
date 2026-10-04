@@ -131,6 +131,9 @@ type config struct {
 	// whose whole point is a non-success terminal state (concurrency replace
 	// cancels the run it replaces) set it; everything else must not.
 	allowRunFailures bool
+	// envParseErrors retains malformed boolean environment values until a CLI
+	// flag or selected catalog entry explicitly overrides that setting.
+	envParseErrors map[string]error
 
 	// ---- E2: workload shape ---------------------------------------------
 	// concurrencyStrategy/maxRuns write metadata.concurrency on every applied
@@ -158,7 +161,10 @@ type config struct {
 }
 
 func defaultConfig() config {
-	return config{
+	requireSustained, requireSustainedErr := boolEnv("CAESIUM_LOAD_REQUIRE_SUSTAINED", false)
+	allowRunFailures, allowRunFailuresErr := boolEnv("CAESIUM_LOAD_ALLOW_RUN_FAILURES", false)
+	lifecycle, lifecycleErr := boolEnv("CAESIUM_LOAD_LIFECYCLE", true)
+	cfg := config{
 		serverURL:    envOrDefault("CAESIUM_LOAD_SERVER", "http://127.0.0.1:8080"),
 		jobCount:     envIntOrDefault("CAESIUM_LOAD_JOBS", 10),
 		fanOut:       envIntOrDefault("CAESIUM_LOAD_FAN_OUT", 4),
@@ -184,17 +190,32 @@ func defaultConfig() config {
 		drainTimeout:        envDurOrDefault("CAESIUM_LOAD_DRAIN_TIMEOUT", 5*time.Minute),
 		reconcileWorkers:    envIntOrDefault("CAESIUM_LOAD_RECONCILE_WORKERS", 8),
 		pollInterval:        envDurOrDefault("CAESIUM_LOAD_POLL_INTERVAL", time.Second),
-		requireSustained:    envBoolOrDefault("CAESIUM_LOAD_REQUIRE_SUSTAINED", false),
-		allowRunFailures:    envBoolOrDefault("CAESIUM_LOAD_ALLOW_RUN_FAILURES", false),
+		requireSustained:    requireSustained,
+		allowRunFailures:    allowRunFailures,
 		concurrencyStrategy: envOrDefault("CAESIUM_LOAD_CONCURRENCY_STRATEGY", ""),
 		maxRuns:             envNonNegIntOrDefault("CAESIUM_LOAD_MAX_RUNS", 0),
 		cacheMode:           envOrDefault("CAESIUM_LOAD_CACHE", cacheOff),
 		apiReadRate:         envNonNegFloatOrDefault("CAESIUM_LOAD_API_READ_RATE", 0),
 		subscribers:         envNonNegIntOrDefault("CAESIUM_LOAD_SUBSCRIBERS", 0),
-		lifecycle:           envBoolOrDefault("CAESIUM_LOAD_LIFECYCLE", true),
+		lifecycle:           lifecycle,
 		resourceContainer:   envOrDefault("CAESIUM_LOAD_RESOURCE_CONTAINER", ""),
 		dockerHost:          envOrDefault("CAESIUM_LOAD_DOCKER_HOST", envOrDefault("DOCKER_HOST", "unix:///var/run/docker.sock")),
 	}
+	cfg.envParseErrors = make(map[string]error)
+	for _, item := range []struct {
+		flagName string
+		envName  string
+		err      error
+	}{
+		{"require-sustained", "CAESIUM_LOAD_REQUIRE_SUSTAINED", requireSustainedErr},
+		{"allow-run-failures", "CAESIUM_LOAD_ALLOW_RUN_FAILURES", allowRunFailuresErr},
+		{"lifecycle", "CAESIUM_LOAD_LIFECYCLE", lifecycleErr},
+	} {
+		if item.err != nil {
+			cfg.envParseErrors[item.flagName] = fmt.Errorf("%s: %w", item.envName, item.err)
+		}
+	}
+	return cfg
 }
 
 // normalized fills the open-loop knobs on a configuration that predates them.
@@ -241,6 +262,15 @@ func (c config) totalArrivals() int {
 
 // validate runs before allocation, ticker creation, or any network side effect.
 func (c config) validate() error {
+	if len(c.envParseErrors) > 0 {
+		keys := make([]string, 0, len(c.envParseErrors))
+		for key := range c.envParseErrors {
+			keys = append(keys, key)
+		}
+		slices.Sort(keys)
+		key := keys[0]
+		return fmt.Errorf("invalid boolean setting -%s: %w", key, c.envParseErrors[key])
+	}
 	c = c.normalized()
 	u, err := url.Parse(c.serverURL)
 	if err != nil || u.Hostname() == "" || (u.Scheme != "http" && u.Scheme != "https") || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
@@ -3585,8 +3615,8 @@ func buildReport(
 	// End-to-end latency percentiles.
 	slices.Sort(durations)
 	if len(durations) > 0 {
-		r.endToEndP50 = durations[len(durations)/2]
-		r.endToEndP99 = durations[int(float64(len(durations))*0.99)]
+		r.endToEndP50 = percentile(durations, 50)
+		r.endToEndP99 = percentile(durations, 99)
 	}
 
 	// Delta row counts.
@@ -4489,6 +4519,7 @@ func runMain(args []string, stdout, stderr io.Writer) int {
 			return 2
 		}
 	}
+	clearBoolEnvParseErrors(&cfg, flags)
 	rep, err := newHarness(cfg).run(context.Background())
 	human := stdout
 	if cfg.jsonFile == "-" {
@@ -4601,15 +4632,23 @@ func envNonNegFloatOrDefault(key string, def float64) float64 {
 
 // envBoolOrDefault rejects malformed values by returning the inverse of the
 // default, which every caller's validation or semantics treats as explicit.
-func envBoolOrDefault(key string, def bool) bool {
-	if v, ok := os.LookupEnv(key); ok {
-		b, err := strconv.ParseBool(v)
-		if err != nil {
-			return false
-		}
-		return b
+func boolEnv(key string, def bool) (bool, error) {
+	v, ok := os.LookupEnv(key)
+	if !ok {
+		return def, nil
 	}
-	return def
+	b, err := strconv.ParseBool(v)
+	if err != nil {
+		return def, err
+	}
+	return b, nil
+}
+
+func clearBoolEnvParseErrors(cfg *config, flags *flag.FlagSet) {
+	if len(cfg.envParseErrors) == 0 {
+		return
+	}
+	flags.Visit(func(f *flag.Flag) { delete(cfg.envParseErrors, f.Name) })
 }
 
 // percentile returns the p-th percentile of an already-sorted slice using the
