@@ -606,17 +606,7 @@ steps:
 func (s *IntegrationTestSuite) taskStatusesByName(jobID string, run *runResponse) map[string]string {
 	s.T().Helper()
 
-	// Fetch task metadata to get names.
-	var tasks []struct {
-		ID   string `json:"ID"`
-		Name string `json:"Name"`
-	}
-	s.getJSON(fmt.Sprintf("/v1/jobs/%s/tasks", jobID), &tasks)
-
-	nameByID := make(map[string]string, len(tasks))
-	for _, t := range tasks {
-		nameByID[t.ID] = t.Name
-	}
+	nameByID := s.taskNamesByID(jobID)
 
 	result := make(map[string]string, len(run.Tasks))
 	for _, t := range run.Tasks {
