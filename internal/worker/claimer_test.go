@@ -18,6 +18,7 @@ import (
 	"github.com/caesium-cloud/caesium/pkg/jsonmap"
 	"github.com/google/uuid"
 	"github.com/mattn/go-sqlite3"
+	dto "github.com/prometheus/client_model/go"
 	"github.com/stretchr/testify/require"
 	"gorm.io/gorm"
 )
@@ -706,7 +707,12 @@ func TestReclaimExpiredPublishesOnlyCommittedAttempt(t *testing.T) {
 			claimer.busyRetryBackoffs = []time.Duration{0}
 			statusBefore := metrictestutil.CounterValue(t, metrics.DBWritesTotal, metrics.DBWriteCategoryTaskRunStatus)
 			eventBefore := metrictestutil.CounterValue(t, metrics.DBWritesTotal, metrics.DBWriteCategoryEventInsert)
-			retriesBefore := metrictestutil.CounterValue(t, metrics.DBBusyRetriesTotal)
+			readRetries := func() float64 {
+				var metric dto.Metric
+				require.NoError(t, metrics.DBBusyRetriesTotal.Write(&metric))
+				return metric.GetCounter().GetValue()
+			}
+			retriesBefore := readRetries()
 			sqlDB, err := conn.DB()
 			require.NoError(t, err)
 			pool := &commitFailurePool{DB: sqlDB, failCommits: 1}
@@ -721,7 +727,7 @@ func TestReclaimExpiredPublishesOnlyCommittedAttempt(t *testing.T) {
 			conn.Statement.ConnPool = pool
 			err = claimer.ReclaimExpired(ctx)
 			require.Equal(t, 2, pool.commits)
-			require.Equal(t, retriesBefore+1, metrictestutil.CounterValue(t, metrics.DBBusyRetriesTotal))
+			require.Equal(t, retriesBefore+1, readRetries())
 			require.Equal(t, float64(1), metrictestutil.CounterValue(t, metrics.WorkerClaimContentionTotal, nodeID))
 			var records []models.ExecutionEvent
 			require.NoError(t, conn.Where("run_id = ?", runID).Find(&records).Error)
