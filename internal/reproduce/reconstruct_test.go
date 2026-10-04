@@ -3,7 +3,6 @@ package reproduce
 import (
 	"context"
 	"errors"
-	"github.com/stretchr/testify/require"
 	"runtime"
 	"slices"
 	"strings"
@@ -11,6 +10,7 @@ import (
 
 	"github.com/caesium-cloud/caesium/internal/imagecheck"
 	"github.com/caesium-cloud/caesium/pkg/container"
+	"github.com/stretchr/testify/require"
 )
 
 func TestReconstructEnvLayeringAndSecretOmission(t *testing.T) {

@@ -6,7 +6,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"github.com/caesium-cloud/caesium/internal/strutil"
 	"maps"
 	"net/url"
 	"runtime"
@@ -17,6 +16,7 @@ import (
 
 	"github.com/caesium-cloud/caesium/internal/imagecheck"
 	jobdefruntime "github.com/caesium-cloud/caesium/internal/jobdef/runtime"
+	"github.com/caesium-cloud/caesium/internal/strutil"
 	"github.com/caesium-cloud/caesium/pkg/container"
 	pkgjobdef "github.com/caesium-cloud/caesium/pkg/jobdef"
 	pkgtask "github.com/caesium-cloud/caesium/pkg/task"

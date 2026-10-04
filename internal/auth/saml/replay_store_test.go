@@ -2,12 +2,12 @@ package saml
 
 import (
 	"errors"
-	"github.com/caesium-cloud/caesium/pkg/sqlerr"
 	"testing"
 	"time"
 
 	"github.com/caesium-cloud/caesium/internal/jobdef/testutil"
 	"github.com/caesium-cloud/caesium/internal/models"
+	"github.com/caesium-cloud/caesium/pkg/sqlerr"
 	"github.com/mattn/go-sqlite3"
 	"github.com/stretchr/testify/require"
 )

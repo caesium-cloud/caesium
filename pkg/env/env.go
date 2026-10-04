@@ -3,12 +3,12 @@ package env
 import (
 	"errors"
 	"fmt"
-	"github.com/caesium-cloud/caesium/internal/authmode"
 	"math"
 	"runtime"
 	"strings"
 	"time"
 
+	"github.com/caesium-cloud/caesium/internal/authmode"
 	"github.com/caesium-cloud/caesium/pkg/log"
 	"github.com/kelseyhightower/envconfig"
 )

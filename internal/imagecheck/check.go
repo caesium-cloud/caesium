@@ -3,8 +3,8 @@ package imagecheck
 
 import (
 	"context"
-	"github.com/containerd/errdefs"
 
+	"github.com/containerd/errdefs"
 	"github.com/docker/docker/client"
 )
 

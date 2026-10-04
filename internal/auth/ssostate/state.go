@@ -9,6 +9,8 @@ import (
 	"strings"
 )
 
+// ValidateReturnTo preserves local paths and restricts absolute URLs to publicOrigin.
+// Invalid targets retain the error identity supplied by the provider.
 func ValidateReturnTo(returnTo string, publicOrigin *url.URL, invalid error) (string, error) {
 	returnTo = strings.TrimSpace(returnTo)
 	if returnTo == "" {
@@ -55,6 +57,7 @@ func requestURI(u *url.URL) string {
 	return out
 }
 
+// RandomURLSafe encodes n cryptographically random bytes without base64 padding.
 func RandomURLSafe(n int) (string, error) {
 	b := make([]byte, n)
 	if _, err := rand.Read(b); err != nil {

@@ -6,7 +6,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"github.com/caesium-cloud/caesium/internal/strutil"
 	"io"
 	"net/http"
 	"os"
@@ -19,6 +18,7 @@ import (
 	internaljobdef "github.com/caesium-cloud/caesium/internal/jobdef"
 	lintpkg "github.com/caesium-cloud/caesium/internal/jobdef/lint"
 	"github.com/caesium-cloud/caesium/internal/jobdef/secret"
+	"github.com/caesium-cloud/caesium/internal/strutil"
 	"github.com/caesium-cloud/caesium/pkg/jobdef"
 	"github.com/spf13/cobra"
 )

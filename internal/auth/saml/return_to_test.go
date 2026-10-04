@@ -1,9 +1,10 @@
 package saml
 
 import (
-	"github.com/stretchr/testify/require"
 	"net/url"
 	"testing"
+
+	"github.com/stretchr/testify/require"
 )
 
 func TestReturnToPreservesProviderErrorIdentity(t *testing.T) {

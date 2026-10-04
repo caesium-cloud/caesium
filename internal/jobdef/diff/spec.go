@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/caesium-cloud/caesium/internal/jobdef/yamlpath"
 	"io"
 	"io/fs"
 	"maps"
@@ -15,6 +14,7 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/caesium-cloud/caesium/internal/jobdef/yamlpath"
 	"github.com/caesium-cloud/caesium/internal/models"
 	schema "github.com/caesium-cloud/caesium/pkg/jobdef"
 	"github.com/google/uuid"

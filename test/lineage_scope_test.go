@@ -4,7 +4,6 @@ package test
 
 import (
 	"encoding/json"
-	"github.com/caesium-cloud/caesium/internal/testutil"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -15,6 +14,7 @@ import (
 	lineagectrl "github.com/caesium-cloud/caesium/api/rest/controller/lineage"
 	iauth "github.com/caesium-cloud/caesium/internal/auth"
 	"github.com/caesium-cloud/caesium/internal/models"
+	"github.com/caesium-cloud/caesium/internal/testutil"
 	"github.com/caesium-cloud/caesium/pkg/db"
 	"github.com/caesium-cloud/caesium/pkg/env"
 	"github.com/labstack/echo/v5"

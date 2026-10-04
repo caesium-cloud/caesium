@@ -8,10 +8,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/caesium-cloud/caesium/internal/auth/ssostate"
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/caesium-cloud/caesium/internal/auth/ssostate"
 )
 
 var (

@@ -2,12 +2,12 @@ package middleware
 
 import (
 	"fmt"
-	"github.com/caesium-cloud/caesium/api/internal/auditlog"
 	"net/http"
 	"regexp"
 	"strings"
 	"time"
 
+	"github.com/caesium-cloud/caesium/api/internal/auditlog"
 	"github.com/caesium-cloud/caesium/internal/auth"
 	"github.com/caesium-cloud/caesium/internal/metrics"
 	"github.com/caesium-cloud/caesium/internal/models"

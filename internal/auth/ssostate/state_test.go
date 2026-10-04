@@ -3,9 +3,10 @@ package ssostate
 import (
 	"encoding/base64"
 	"errors"
-	"github.com/stretchr/testify/require"
 	"net/url"
 	"testing"
+
+	"github.com/stretchr/testify/require"
 )
 
 func TestValidateReturnTo(t *testing.T) {

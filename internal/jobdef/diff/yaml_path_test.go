@@ -1,10 +1,11 @@
 package diff
 
 import (
-	"github.com/stretchr/testify/require"
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/stretchr/testify/require"
 )
 
 func TestLoadDefinitionsAcceptsUppercaseYMLAndIgnoresOtherExtensions(t *testing.T) {

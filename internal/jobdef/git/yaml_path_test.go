@@ -1,8 +1,9 @@
 package git
 
 import (
-	"github.com/stretchr/testify/require"
 	"testing"
+
+	"github.com/stretchr/testify/require"
 )
 
 func TestDefaultSourceFilterUsesYAMLExtension(t *testing.T) {

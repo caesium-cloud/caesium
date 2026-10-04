@@ -2,12 +2,12 @@ package notification
 
 import (
 	"encoding/json"
-	"github.com/caesium-cloud/caesium/internal/testutil"
 	"testing"
 	"time"
 
 	"github.com/caesium-cloud/caesium/internal/event"
 	"github.com/caesium-cloud/caesium/internal/models"
+	"github.com/caesium-cloud/caesium/internal/testutil"
 	"github.com/google/uuid"
 )
 

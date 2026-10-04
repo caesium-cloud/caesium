@@ -2,10 +2,11 @@ package auth
 
 import (
 	"encoding/json"
+	"testing"
+
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
-	"testing"
 )
 
 func TestJobAliasNormalizationPreservesEmptyScopeSemantics(t *testing.T) {

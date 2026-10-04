@@ -3,12 +3,13 @@ package imagecheck
 import (
 	"errors"
 	"fmt"
-	"github.com/containerd/errdefs"
-	"github.com/stretchr/testify/require"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/containerd/errdefs"
+	"github.com/stretchr/testify/require"
 )
 
 func TestIsNotFoundUsesTypedClassification(t *testing.T) {

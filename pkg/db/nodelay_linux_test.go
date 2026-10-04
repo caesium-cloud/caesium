@@ -5,12 +5,12 @@ package db
 import (
 	"context"
 	"database/sql"
-	"github.com/caesium-cloud/caesium/internal/testutil"
 	"slices"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/caesium-cloud/caesium/internal/testutil"
 	dqliteapp "github.com/canonical/go-dqlite/v3/app"
 	"github.com/stretchr/testify/require"
 )

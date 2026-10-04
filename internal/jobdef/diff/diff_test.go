@@ -2,11 +2,11 @@ package diff
 
 import (
 	"context"
-	"github.com/caesium-cloud/caesium/internal/testutil"
 	"testing"
 	"time"
 
 	"github.com/caesium-cloud/caesium/internal/models"
+	"github.com/caesium-cloud/caesium/internal/testutil"
 	schema "github.com/caesium-cloud/caesium/pkg/jobdef"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
