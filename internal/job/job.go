@@ -1781,7 +1781,7 @@ func (j *job) Run(ctx context.Context) (err error) {
 					if _, ok := errors.AsType[*pkgtask.PartitionError](parseErr); ok && !secretLogDrainTimedOut {
 						stopErr := engine.Stop(&atom.EngineStopRequest{ID: a.ID(), Force: true})
 						if stopErr != nil {
-							return "", nil, nil, nil, run.MetricsCapture{}, nil, fmt.Errorf("%v (also failed to stop atom: %w)", parseErr, stopErr)
+							return "", nil, nil, nil, run.MetricsCapture{}, nil, fmt.Errorf("%w (also failed to stop atom: %w)", parseErr, stopErr)
 						}
 						return "", nil, nil, nil, run.MetricsCapture{}, nil, parseErr
 					}

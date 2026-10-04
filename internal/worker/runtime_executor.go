@@ -1096,6 +1096,10 @@ func (e *runtimeExecutor) executeTask(ctx context.Context, taskRun *models.TaskR
 		switch {
 		case parseErr != nil:
 			if _, ok := errors.AsType[*pkgtask.PartitionError](parseErr); ok && !secretLogDrainTimedOut {
+				stopErr := engine.Stop(&atom.EngineStopRequest{ID: a.ID(), Force: true})
+				if stopErr != nil {
+					return nil, fmt.Errorf("%w (also failed to stop atom: %w)", parseErr, stopErr)
+				}
 				return nil, parseErr
 			}
 			metricsCapture.Unreadable = true
