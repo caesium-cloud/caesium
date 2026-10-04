@@ -528,13 +528,26 @@ esac`,
 			manifest := fanOutManifest(job)
 			def, err := schema.Parse([]byte(manifest))
 			require.NoError(t, err, "generated manifest is not a valid job:\n%s", manifest)
-			require.Len(t, def.Steps, len(def.Steps))
+			wantStepCount := 2
+			if job.PublishCmd != "" {
+				wantStepCount++
+			}
+			require.Len(t, def.Steps, wantStepCount)
 
 			var fanned *schema.Step
+			publishCount := 0
 			for i := range def.Steps {
 				if def.Steps[i].Name == "process" {
 					fanned = &def.Steps[i]
 				}
+				if def.Steps[i].Name == "publish" {
+					publishCount++
+				}
+			}
+			if job.PublishCmd == "" {
+				require.Zero(t, publishCount, "builder must omit optional publish step:\n%s", manifest)
+			} else {
+				require.Equal(t, 1, publishCount, "builder must emit exactly one optional publish step:\n%s", manifest)
 			}
 			require.NotNil(t, fanned, "builder must emit the fanned `process` step:\n%s", manifest)
 			require.NotNil(t, fanned.FanOut, "fanOut must survive the round trip:\n%s", manifest)
