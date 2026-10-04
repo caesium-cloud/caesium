@@ -1410,7 +1410,7 @@ func TestEvaluatorTransfersReservationAcrossPostCommitRecovery(t *testing.T) {
 }
 
 func TestEvaluatorReleasesReservationForSynchronousInjectionAndDeclines(t *testing.T) {
-	for _, mode := range []string{"synchronous", "decline", "error"} {
+	for _, mode := range []string{"synchronous", "decline", "skip", "error"} {
 		t.Run(mode, func(t *testing.T) {
 			db := openRegistryDB(t)
 			now := t0.Add(3 * time.Hour)
@@ -1420,6 +1420,9 @@ func TestEvaluatorReleasesReservationForSynchronousInjectionAndDeclines(t *testi
 			starter := &fakeRunStarter{t: t, db: db, decline: mode == "decline"}
 			if mode == "error" {
 				starter.err = errors.New("admission failed")
+			}
+			if mode == "skip" {
+				starter.err = runstorage.ErrRunSkipped
 			}
 			owner := runlife.New(context.Background())
 			eval := NewEvaluator(Config{DB: db, RunStore: starter, LaunchRun: starter.launch,
