@@ -36,7 +36,7 @@ func (c *Atom) Result() atom.Result {
 	if env.Variables().ResourceStatsEnabled && c.ResourceOutcome().OOMKilled {
 		return atom.ResourceFailure
 	}
-	return atom.ResultForExitCode(int(c.metadata.State.ExitCode))
+	return atom.ResultForExitCode(c.metadata.State.ExitCode)
 }
 
 // ExitCode returns the raw Docker container exit code, preserved for the

@@ -9,7 +9,7 @@ import (
 )
 
 func TestJoinedCommandWaitsAndJoinsChildOutput(t *testing.T) {
-	cmd := exec.Command("sh", "-c", "printf child-output; exit 7")
+	cmd := exec.CommandContext(context.Background(), "sh", "-c", "printf child-output; exit 7")
 	out := &syncBuffer{}
 	cmd.Stdout = out
 	cmd.Stderr = out
@@ -35,7 +35,7 @@ func TestJoinedCommandWaitsAndJoinsChildOutput(t *testing.T) {
 }
 
 func TestJoinedCommandCleanupKillsAndReapsChild(t *testing.T) {
-	cmd := exec.Command("sh", "-c", "sleep 60")
+	cmd := exec.CommandContext(context.Background(), "sh", "-c", "sleep 60")
 	child, err := startJoinedCommand(cmd)
 	if err != nil {
 		t.Fatal(err)

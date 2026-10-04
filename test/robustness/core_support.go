@@ -60,12 +60,6 @@ func uniqueAlias(kind string) string {
 	return fmt.Sprintf("core-%s-%s", kind, strings.ReplaceAll(uuid.NewString(), "-", "")[:8])
 }
 
-func fingerprintRun(t *testing.T, ctx context.Context, fe *faultEnv, base, jobID, runID string) StateFingerprint {
-	return fingerprintRunWithDurable(t, ctx, fe, base, jobID, runID, false)
-}
-
-// fingerprintDurableRun requires the lease and every task recipe to be readable.
-// A missing SQL view cannot certify that a rejected completion was state-inert.
 func fingerprintDurableRun(t *testing.T, ctx context.Context, fe *faultEnv, base, jobID, runID string) StateFingerprint {
 	return fingerprintRunWithDurable(t, ctx, fe, base, jobID, runID, true)
 }
