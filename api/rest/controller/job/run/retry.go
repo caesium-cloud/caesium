@@ -65,6 +65,13 @@ func Retry(c *echo.Context) error {
 	}()
 	r, err := retryFromFailure(runID)
 	if err != nil {
+		if committedID, ok := runstorage.CommittedRunID(err); ok && committedID == runID && runEntry.ID == runID {
+			// Retry preserves durable params. The preloaded row supplies only
+			// launch identity/params; execution reloads the committed task resets.
+			fallback := &runstorage.JobRun{ID: runID, JobID: jobID, Status: runstorage.StatusRunning, Params: runEntry.Params, Quarantine: runEntry.Quarantine}
+			retryLaunch(cancelCtx, j, fallback, release)
+			transferred = true
+		}
 		return echo.NewHTTPError(http.StatusConflict, err.Error())
 	}
 	retryLaunch(cancelCtx, j, r, release)

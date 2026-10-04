@@ -98,7 +98,7 @@ var retryCmd = &cobra.Command{
 		}
 
 		store := runstorage.Default()
-		_, err = startLocalWholeRunRetry(ctx, j, runID, store.RetryFromFailure, launchLocalWholeRunRetry)
+		_, err = startLocalWholeRunRetry(ctx, j, runID, runEntry, store.RetryFromFailure, launchLocalWholeRunRetry)
 		if err != nil {
 			return fmt.Errorf("failed to retry run: %w", err)
 		}
@@ -110,7 +110,7 @@ var retryCmd = &cobra.Command{
 
 // Register before reopening the row: a cancellation during admission must reach
 // the context transferred to execution, even before its goroutine starts.
-func startLocalWholeRunRetry(parent context.Context, j *models.Job, runID uuid.UUID, admit func(uuid.UUID) (*runstorage.JobRun, error), launch func(context.Context, *models.Job, *runstorage.JobRun, func())) (*runstorage.JobRun, error) {
+func startLocalWholeRunRetry(parent context.Context, j *models.Job, runID uuid.UUID, runEntry *runstorage.JobRun, admit func(uuid.UUID) (*runstorage.JobRun, error), launch func(context.Context, *models.Job, *runstorage.JobRun, func())) (*runstorage.JobRun, error) {
 	ctx, release := job.RegisterRunCancel(context.WithoutCancel(parent), runID)
 	transferred := false
 	defer func() {
@@ -120,6 +120,13 @@ func startLocalWholeRunRetry(parent context.Context, j *models.Job, runID uuid.U
 	}()
 	r, err := admit(runID)
 	if err != nil {
+		if committedID, ok := runstorage.CommittedRunID(err); ok && committedID == runID && runEntry != nil && runEntry.ID == runID && runEntry.JobID == j.ID {
+			// The retry committed without changing params; reload task state in
+			// the engine while retaining the already registered cancellation.
+			fallback := &runstorage.JobRun{ID: runID, JobID: j.ID, Status: runstorage.StatusRunning, Params: runEntry.Params, Quarantine: runEntry.Quarantine}
+			launch(ctx, j, fallback, release)
+			transferred = true
+		}
 		return nil, err
 	}
 	launch(ctx, j, r, release)

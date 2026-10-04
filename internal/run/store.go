@@ -577,12 +577,12 @@ var (
 	ErrJobPaused = errors.New("run: cannot retry while job is paused")
 )
 
-// RunCommittedError reports a start that FAILED after its run was already
-// committed and live: the row exists, run_started has been published and the
-// lease is taken, but the record could not be read back.
+// RunCommittedError reports a start or retry that failed to read its run back
+// after committing admission or reopening. The row is live and its events and
+// active accounting have been published; callers still own execution or cleanup.
 //
 // It carries the exact run id so a caller can drive or finalize the run it
-// actually created. That identity matters: searching for "a matching running
+// actually admitted or reopened. That identity matters: searching for "a matching running
 // run" instead would, during a leader change, let one node adopt and execute a
 // run another node created and is already executing.
 type RunCommittedError struct {
@@ -597,7 +597,7 @@ func (e *RunCommittedError) Error() string {
 
 func (e *RunCommittedError) Unwrap() error { return e.Err }
 
-// CommittedRunID reports the run a failed start already committed, if any.
+// CommittedRunID reports the run a failed start or retry already committed, if any.
 func CommittedRunID(err error) (uuid.UUID, bool) {
 	if committed, ok := errors.AsType[*RunCommittedError](err); ok && committed.RunID != uuid.Nil {
 		return committed.RunID, true
@@ -7644,5 +7644,11 @@ func (s *Store) retryFromFailure(runID uuid.UUID, admit bool) (*JobRun, error) {
 		metrics.JobsActive.WithLabelValues(jobID.String()).Inc()
 	}
 
-	return s.loadRun(runID)
+	loaded, err := s.loadRun(runID)
+	if err != nil {
+		// The reopen and task resets are committed. Preserve their exact identity
+		// so a read-back failure cannot be mistaken for an unaccepted retry.
+		return nil, &RunCommittedError{RunID: runID, JobID: jobID, Err: err}
+	}
+	return loaded, nil
 }

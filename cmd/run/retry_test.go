@@ -462,7 +462,7 @@ func TestLocalWholeRetryRegistersDuringAdmissionAndBeforeDetachedLaunch(t *testi
 	launched := make(chan context.Context, 1)
 	gate := make(chan struct{})
 	done := make(chan bool, 1)
-	_, err := startLocalWholeRunRetry(context.Background(), &models.Job{}, runID,
+	_, err := startLocalWholeRunRetry(context.Background(), &models.Job{}, runID, &runstorage.JobRun{ID: runID},
 		func(id uuid.UUID) (*runstorage.JobRun, error) {
 			require.Equal(t, runID, id)
 			require.Equal(t, 1, job.CancelRunContexts(runID), "registration must precede reopen")
@@ -481,7 +481,7 @@ func TestLocalWholeRetryRegistersDuringAdmissionAndBeforeDetachedLaunch(t *testi
 func TestLocalWholeRetryAdmissionFailureReleasesRegistration(t *testing.T) {
 	runID := uuid.New()
 	fault := errors.New("admission failed")
-	_, err := startLocalWholeRunRetry(context.Background(), &models.Job{}, runID,
+	_, err := startLocalWholeRunRetry(context.Background(), &models.Job{}, runID, &runstorage.JobRun{ID: runID},
 		func(uuid.UUID) (*runstorage.JobRun, error) { return nil, fault },
 		func(context.Context, *models.Job, *runstorage.JobRun, func()) {
 			t.Fatal("must not launch refused retry")
