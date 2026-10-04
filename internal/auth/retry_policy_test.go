@@ -20,7 +20,7 @@ func TestRetryPoliciesKeepNarrowClassificationAndFixedBudget(t *testing.T) {
 		{"busy", errors.New("wrapped: database is busy"), 5},
 		{"schema lock", errors.New("database schema is locked"), 1},
 		{"checkpoint", errors.New("checkpoint in progress"), 1},
-		{"typed busy", sqlite3.Error{Code: sqlite3.ErrBusy}, 1},
+		{"typed busy lock message", sqlite3.Error{Code: sqlite3.ErrBusy}, 5},
 		{"poisoned", errors.New("cannot start a transaction within a transaction"), 1},
 	} {
 		for _, write := range []bool{false, true} {
