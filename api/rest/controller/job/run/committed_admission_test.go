@@ -20,6 +20,7 @@ import (
 	"github.com/labstack/echo/v5"
 	"github.com/stretchr/testify/require"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 func TestManualHTTPFinalizesCommittedAdmissionBeforeReleasingOwnership(t *testing.T) {
@@ -56,9 +57,30 @@ func TestManualHTTPFinalizesCommittedAdmissionBeforeReleasingOwnership(t *testin
 		}
 	}))
 	require.NoError(t, conn.Callback().Query().Before("gorm:query").Register(queryCallback, func(tx *gorm.DB) {
-		if tx.Statement.Schema != nil && tx.Statement.Schema.Name == "JobRun" && committedID != uuid.Nil && !injectedRead {
+		// loadRun uses a joined Table("job_runs").First into an anonymous
+		// projection; its parsed schema is not named JobRun. Match that exact
+		// qualified-ID read, and assert it is outside the insertion transaction.
+		if tx.Statement.Table != "job_runs" || len(tx.Statement.Joins) == 0 || committedID == uuid.Nil || injectedRead {
+			return
+		}
+		where, ok := tx.Statement.Clauses["WHERE"].Expression.(clause.Where)
+		if !ok {
+			return
+		}
+		for _, condition := range where.Exprs {
+			expr, ok := condition.(clause.Expr)
+			if !ok || expr.SQL != "job_runs.id = ?" || len(expr.Vars) != 1 {
+				continue
+			}
+			id, ok := expr.Vars[0].(uuid.UUID)
+			if !ok || id != committedID {
+				continue
+			}
+			_, insideTransaction := tx.Statement.ConnPool.(gorm.TxCommitter)
+			require.False(t, insideTransaction, "fault must follow the committed insertion")
 			injectedRead = true
 			_ = tx.AddError(injected)
+			return
 		}
 	}))
 	require.NoError(t, conn.Callback().Update().Before("gorm:update").Register(updateCallback, func(tx *gorm.DB) {
