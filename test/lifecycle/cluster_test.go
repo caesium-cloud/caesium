@@ -484,33 +484,12 @@ func rawCompletionMatchesTask(runID string, proof clusterTaskProof, events []rec
 func clusterPair(t *testing.T) pairMatrix {
 	t.Helper()
 	p := loadMatrix(t)
-	var raw struct {
-		Pairs []struct {
-			ID      string `json:"id"`
-			Cluster struct {
-				Replicas                int `json:"replicas"`
-				DatabaseShards          int `json:"database_shards"`
-				DatabaseVoters          int `json:"database_voters"`
-				DatabaseStandbys        int `json:"database_standbys"`
-				ExpectedProtocolVersion int `json:"expected_protocol_version"`
-			} `json:"cluster"`
-		} `json:"pairs"`
-	}
-	data, err := os.ReadFile(filepath.Join(artifactsDir(t), "versions.json"))
-	require.NoError(t, err)
-	require.NoError(t, json.Unmarshal(data, &raw))
-	for _, item := range raw.Pairs {
-		if item.ID == p.ID {
-			require.Equal(t, 3, item.Cluster.Replicas)
-			require.Equal(t, 1, item.Cluster.DatabaseShards)
-			require.Equal(t, 3, item.Cluster.DatabaseVoters)
-			require.Zero(t, item.Cluster.DatabaseStandbys)
-			require.Equal(t, 2, item.Cluster.ExpectedProtocolVersion)
-			return p
-		}
-	}
-	blockf(t, "cluster-version-matrix", "pair %s lacks an F2 cluster matrix", p.ID)
-	return pairMatrix{}
+	require.Equal(t, 3, p.Cluster.Replicas)
+	require.Equal(t, 1, p.Cluster.DatabaseShards)
+	require.Equal(t, 3, p.Cluster.DatabaseVoters)
+	require.Zero(t, p.Cluster.DatabaseStandbys)
+	require.Equal(t, 2, p.Cluster.ExpectedProtocolVersion)
+	return p
 }
 
 func clusterKube(t *testing.T) (string, *cluster.HTTP, cluster.Topology) {
@@ -1837,19 +1816,9 @@ func TestLifecycleClusterOrdinalZeroLoss(t *testing.T) {
 	var settleErr, rpcErr error
 	deadline := time.Now().Add(3 * time.Minute)
 	for {
-		var round []ordinalZeroView
-		rpcErr = nil
-		for _, m := range topo.Members {
-			ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
-			leader, members, err := cluster.QueryNode(ctx, m.DqliteAddr())
-			cancel()
-			if err != nil || leader == nil {
-				rpcErr = fmt.Errorf("%s: leader=%v err=%v", m.Name, leader, err)
-				break
-			}
-			round = append(round, newOrdinalZeroView(m.Name, m.DqliteAddr(), *leader, members))
-		}
-		if rpcErr == nil {
+		round, err := directViews(t, topo)
+		rpcErr = err
+		if rpcErr == nil && len(round) > 0 {
 			views = round
 			membership, settleErr = ordinalZeroSettled(views, info.ID, fresh.DqliteAddr(), liveAddrs, staleIDs)
 			if settleErr == nil {

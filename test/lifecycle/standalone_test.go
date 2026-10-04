@@ -214,10 +214,19 @@ type previousMatrix struct {
 	} `json:"schema"`
 }
 
+type clusterMatrix struct {
+	Replicas                int `json:"replicas"`
+	DatabaseShards          int `json:"database_shards"`
+	DatabaseVoters          int `json:"database_voters"`
+	DatabaseStandbys        int `json:"database_standbys"`
+	ExpectedProtocolVersion int `json:"expected_protocol_version"`
+}
+
 type pairMatrix struct {
 	ID         string           `json:"id"`
 	Previous   previousMatrix   `json:"previous"`
 	Standalone standaloneMatrix `json:"standalone"`
+	Cluster    clusterMatrix    `json:"cluster"`
 }
 
 type versionMatrix struct {
@@ -235,13 +244,33 @@ func loadMatrix(t *testing.T) pairMatrix {
 	var matrix versionMatrix
 	require.NoErrorf(t, json.Unmarshal(raw, &matrix), "versions.json is not valid JSON")
 	want := envOr("CAESIUM_LIFECYCLE_PAIR", "v0.1.0-to-candidate")
-	for _, pair := range matrix.Pairs {
-		if pair.ID == want {
-			return pair
-		}
+	if pair, ok := matrix.pair(want); ok {
+		return pair
 	}
 	blockf(t, "versions-matrix", "version matrix has no pair %q", want)
 	return pairMatrix{}
+}
+
+func (m versionMatrix) pair(id string) (pairMatrix, bool) {
+	for _, pair := range m.Pairs {
+		if pair.ID == id {
+			return pair, true
+		}
+	}
+	return pairMatrix{}, false
+}
+
+func TestVersionMatrixSelectsAndDecodesClusterPair(t *testing.T) {
+	const raw = `{"pairs":[{"id":"other","cluster":{"replicas":1}},{"id":"v0.1.0-to-candidate","cluster":{"replicas":3,"database_shards":1,"database_voters":3,"database_standbys":0,"expected_protocol_version":2}}]}`
+	var matrix versionMatrix
+	require.NoError(t, json.Unmarshal([]byte(raw), &matrix))
+
+	pair, ok := matrix.pair("v0.1.0-to-candidate")
+	require.True(t, ok)
+	require.Equal(t, clusterMatrix{
+		Replicas: 3, DatabaseShards: 1, DatabaseVoters: 3,
+		DatabaseStandbys: 0, ExpectedProtocolVersion: 2,
+	}, pair.Cluster)
 }
 
 // ---------------------------------------------------------------------------
