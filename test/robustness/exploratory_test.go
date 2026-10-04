@@ -760,14 +760,33 @@ func (sr *soakRunner) start(ctx context.Context, m cluster.Member, jobID, key st
 		return out
 	}
 	out.Outcome = parsed.Outcome
-	if parsed.Outcome == "created" {
+	switch parsed.Outcome {
+	case "created":
 		if _, err := uuid.Parse(parsed.ID); err != nil {
-			out.Err = "created outcome without a run id"
+			out.Err = "created outcome has an invalid run id"
 			return out
 		}
 		out.RunID = parsed.ID
+	case "queued", "dropped":
+		if parsed.QueueID != "" {
+			if _, err := uuid.Parse(parsed.QueueID); err != nil {
+				out.Err = parsed.Outcome + " outcome has an invalid queue id"
+				return out
+			}
+			out.QueueID = parsed.QueueID
+		}
+	case "skipped":
+		if parsed.RunID != "" {
+			if _, err := uuid.Parse(parsed.RunID); err != nil {
+				out.Err = "skipped outcome has an invalid run id"
+				return out
+			}
+			out.RunID = parsed.RunID
+		}
+	default:
+		out.Err = fmt.Sprintf("202 body has unsupported outcome %q", parsed.Outcome)
+		return out
 	}
-	out.QueueID = parsed.QueueID
 	return out
 }
 
@@ -793,11 +812,15 @@ func (sr *soakRunner) startTracked(ctx context.Context, m cluster.Member, jobID,
 // certain. A replay of a key the server never recorded admits the run now,
 // which is still a definite outcome for that key.
 func (sr *soakRunner) reconcile(ctx context.Context, e *soakRun) error {
+	return sr.reconcileWithRetry(ctx, e, 6, 5*time.Second)
+}
+
+func (sr *soakRunner) reconcileWithRetry(ctx context.Context, e *soakRun, maxAttempts int, retryDelay time.Duration) error {
 	var last startOutcome
-	for attempt := 0; attempt < 6; attempt++ {
+	for attempt := 0; attempt < maxAttempts; attempt++ {
 		members := sr.liveMembers()
 		if len(members) == 0 {
-			time.Sleep(5 * time.Second)
+			time.Sleep(retryDelay)
 			continue
 		}
 		m := members[attempt%len(members)]
@@ -809,7 +832,7 @@ func (sr *soakRunner) reconcile(ctx context.Context, e *soakRun) error {
 			sr.mu.Unlock()
 			return nil
 		}
-		time.Sleep(5 * time.Second)
+		time.Sleep(retryDelay)
 	}
 	return fmt.Errorf("start %s stayed uncertain after replays: %+v", e.Key, last)
 }
