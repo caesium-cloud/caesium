@@ -1203,7 +1203,7 @@ func (e *runtimeExecutor) executeTask(ctx context.Context, taskRun *models.TaskR
 	// same run and poison the median. The local executor cannot produce that
 	// (its seam runs only when execErr == nil), and the two executors must
 	// baseline a job identically.
-	if err := e.runDataAssertions(taskRun, metricsCapture); err != nil {
+	if err := e.runDataAssertions(ctx, taskRun, metricsCapture); err != nil {
 		return nil, err
 	}
 
@@ -1305,12 +1305,12 @@ func (e *runtimeExecutor) runSchemaValidation(taskRun *models.TaskRun, output ma
 // travel together and answer different questions — the claim decides whether
 // this attempt may record anything, the capture decides what a metric's
 // absence means if it may.
-func (e *runtimeExecutor) runDataAssertions(taskRun *models.TaskRun, capture run.MetricsCapture) error {
+func (e *runtimeExecutor) runDataAssertions(ctx context.Context, taskRun *models.TaskRun, capture run.MetricsCapture) error {
 	if taskRun == nil {
 		return nil
 	}
 	claim := &run.TaskClaim{ClaimedBy: taskRun.ClaimedBy, ClaimAttempt: taskRun.ClaimAttempt}
-	return run.EvaluateDataAssertionsClaimed(e.store, taskRun.JobRunID, taskRun.TaskID, taskRun.ID, claim, capture)
+	return run.EvaluateDataAssertionsClaimed(ctx, e.store, taskRun.JobRunID, taskRun.TaskID, taskRun.ID, claim, capture)
 }
 
 // storeCacheEntry reads back the completed task run and stores the result in the cache.

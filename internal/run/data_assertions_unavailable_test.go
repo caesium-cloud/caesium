@@ -1,6 +1,7 @@
 package run
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -117,7 +118,7 @@ func TestEvaluateDataAssertions_TruncatedStreamIsUnavailableNotMissing(t *testin
 
 	// The scan dropped rowCount but kept an unrelated sample, exactly as the
 	// accumulator behaves once it hits MaxMetricsBytes mid-stream.
-	err := EvaluateDataAssertions(store, taskRun.JobRunID, taskID, taskRunID, MetricsCapture{
+	err := EvaluateDataAssertions(context.Background(), store, taskRun.JobRunID, taskID, taskRunID, MetricsCapture{
 		Samples:   []pkgtask.DatasetMetricSample{{Dataset: "warehouse/orders", Metric: "filler", Value: 1}},
 		Truncated: true,
 	})
@@ -161,7 +162,7 @@ func TestEvaluateDataAssertions_UnreadableLogIsUnavailableNotMissing(t *testing.
 	var taskRun models.TaskRun
 	require.NoError(t, db.Where("id = ?", taskRunID).First(&taskRun).Error)
 
-	err := EvaluateDataAssertions(store, taskRun.JobRunID, taskID, taskRunID,
+	err := EvaluateDataAssertions(context.Background(), store, taskRun.JobRunID, taskID, taskRunID,
 		MetricsCapture{Unreadable: true})
 	require.NoError(t, err)
 
@@ -192,7 +193,7 @@ func TestEvaluateDataAssertions_CleanEmptyCaptureStaysMissing(t *testing.T) {
 	var taskRun models.TaskRun
 	require.NoError(t, db.Where("id = ?", taskRunID).First(&taskRun).Error)
 
-	err := EvaluateDataAssertions(store, taskRun.JobRunID, taskID, taskRunID, MetricsCapture{})
+	err := EvaluateDataAssertions(context.Background(), store, taskRun.JobRunID, taskID, taskRunID, MetricsCapture{})
 	require.Error(t, err, "a step that legitimately stops emitting a declared metric still fails its contract")
 	assert.Contains(t, err.Error(), "rowCount")
 
@@ -220,7 +221,7 @@ func TestEvaluateDataAssertions_LostStreamNeverOpensAHold(t *testing.T) {
 	var taskRun models.TaskRun
 	require.NoError(t, db.Where("id = ?", taskRunID).First(&taskRun).Error)
 
-	require.NoError(t, EvaluateDataAssertions(store, taskRun.JobRunID, taskID, taskRunID,
+	require.NoError(t, EvaluateDataAssertions(context.Background(), store, taskRun.JobRunID, taskID, taskRunID,
 		MetricsCapture{Truncated: true}))
 
 	assert.Empty(t, activeHolds(t, db, "warehouse/orders"),
@@ -249,7 +250,7 @@ func TestEvaluateDataAssertions_TruncationDoesNotLaunderARealBreach(t *testing.T
 	var taskRun models.TaskRun
 	require.NoError(t, db.Where("id = ?", taskRunID).First(&taskRun).Error)
 
-	err := EvaluateDataAssertions(store, taskRun.JobRunID, taskID, taskRunID, MetricsCapture{
+	err := EvaluateDataAssertions(context.Background(), store, taskRun.JobRunID, taskID, taskRunID, MetricsCapture{
 		Samples:   []pkgtask.DatasetMetricSample{{Dataset: "warehouse/orders", Metric: "rowCount", Value: 12}},
 		Truncated: true,
 	})
@@ -283,7 +284,7 @@ func TestEvaluateDataAssertions_LostStreamNeverReleasesAHold(t *testing.T) {
 	_, taskID2, taskRunID2, _ := seedTaskRunForJob(t, db, jobID, stepName, string(TaskStatusRunning))
 	var second models.TaskRun
 	require.NoError(t, db.Where("id = ?", taskRunID2).First(&second).Error)
-	require.NoError(t, EvaluateDataAssertions(store, second.JobRunID, taskID2, taskRunID2,
+	require.NoError(t, EvaluateDataAssertions(context.Background(), store, second.JobRunID, taskID2, taskRunID2,
 		MetricsCapture{Unreadable: true}))
 
 	assert.Len(t, activeHolds(t, db, "warehouse/orders"), 1,
@@ -318,7 +319,7 @@ func TestEvaluateDataAssertionsClaimed_StaleClaimRecordsNoUnavailableVerdict(t *
 	claimTaskRun(t, db, taskRunID, stale)
 	claimTaskRun(t, db, taskRunID, TaskClaim{ClaimedBy: "worker-b", ClaimAttempt: 2})
 
-	require.NoError(t, EvaluateDataAssertionsClaimed(store, row.JobRunID, taskID, taskRunID, &stale,
+	require.NoError(t, EvaluateDataAssertionsClaimed(context.Background(), store, row.JobRunID, taskID, taskRunID, &stale,
 		MetricsCapture{Unreadable: true}))
 
 	assert.Empty(t, metricRows(t, db))
@@ -351,7 +352,7 @@ func TestEvaluateDataAssertionsClaimed_LiveClaimStillRecordsUnavailable(t *testi
 	live := TaskClaim{ClaimedBy: "worker-a", ClaimAttempt: 1}
 	claimTaskRun(t, db, taskRunID, live)
 
-	require.NoError(t, EvaluateDataAssertionsClaimed(store, row.JobRunID, taskID, taskRunID, &live,
+	require.NoError(t, EvaluateDataAssertionsClaimed(context.Background(), store, row.JobRunID, taskID, taskRunID, &live,
 		MetricsCapture{Truncated: true}))
 
 	violations := dataViolationsOf(t, db, taskRunID)

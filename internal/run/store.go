@@ -3205,7 +3205,7 @@ func (s *Store) SaveSchemaViolations(runID, taskRef uuid.UUID, violations []pkgt
 // be addressed by its TaskRun ID, because assertions are evaluated PER
 // PARTITION and one bad partition must not make its N siblings look violating.
 func (s *Store) SaveDataViolations(runID, taskRef uuid.UUID, violations []DataViolation) error {
-	_, err := s.saveDataViolationsClaimed(runID, taskRef, nil, violations)
+	_, err := s.saveDataViolationsClaimed(context.Background(), runID, taskRef, nil, violations)
 	return err
 }
 
@@ -3218,7 +3218,7 @@ func (s *Store) SaveDataViolations(runID, taskRef uuid.UUID, violations []DataVi
 // read, so it is atomic with the write and needs no lock: a takeover that
 // commits first simply makes the statement match zero rows. A nil claim is the
 // local executor, which holds no claim and always writes.
-func (s *Store) saveDataViolationsClaimed(runID, taskRef uuid.UUID, claim *TaskClaim, violations []DataViolation) (bool, error) {
+func (s *Store) saveDataViolationsClaimed(ctx context.Context, runID, taskRef uuid.UUID, claim *TaskClaim, violations []DataViolation) (bool, error) {
 	if len(violations) == 0 {
 		return true, nil
 	}
@@ -3226,14 +3226,14 @@ func (s *Store) saveDataViolationsClaimed(runID, taskRef uuid.UUID, claim *TaskC
 	if err != nil {
 		return false, err
 	}
-	row, err := loadTaskRunByIDOrUnique(s.db, runID, taskRef)
+	row, err := loadTaskRunByIDOrUnique(s.db.WithContext(ctx), runID, taskRef)
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return false, nil
 		}
 		return false, err
 	}
-	q := s.db.Model(&models.TaskRun{}).Where("id = ?", row.ID)
+	q := s.db.WithContext(ctx).Model(&models.TaskRun{}).Where("id = ?", row.ID)
 	if claim != nil {
 		q = q.Where("claimed_by = ? AND claim_attempt = ?", claim.ClaimedBy, claim.ClaimAttempt)
 	}

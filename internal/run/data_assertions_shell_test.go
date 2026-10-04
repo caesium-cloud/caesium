@@ -92,7 +92,7 @@ func TestEvaluateDataAssertions_WarnRecordsTheViolationAndPublishesTheEvent(t *t
 	var taskRun models.TaskRun
 	require.NoError(t, db.Where("id = ?", taskRunID).First(&taskRun).Error)
 
-	err = EvaluateDataAssertions(store, taskRun.JobRunID, taskID, taskRunID, CapturedMetrics([]pkgtask.DatasetMetricSample{
+	err = EvaluateDataAssertions(context.Background(), store, taskRun.JobRunID, taskID, taskRunID, CapturedMetrics([]pkgtask.DatasetMetricSample{
 		{Dataset: "warehouse/orders", Metric: "rowCount", Value: 12},
 	}))
 	require.NoError(t, err, "warn mode records the violation without failing the task")
@@ -137,7 +137,7 @@ func TestEvaluateDataAssertions_FailEscalatesNamingTheContract(t *testing.T) {
 	var taskRun models.TaskRun
 	require.NoError(t, db.Where("id = ?", taskRunID).First(&taskRun).Error)
 
-	err := EvaluateDataAssertions(store, taskRun.JobRunID, taskID, taskRunID, CapturedMetrics([]pkgtask.DatasetMetricSample{
+	err := EvaluateDataAssertions(context.Background(), store, taskRun.JobRunID, taskID, taskRunID, CapturedMetrics([]pkgtask.DatasetMetricSample{
 		{Dataset: "warehouse/orders", Metric: "dedup_ratio", Value: 0.31},
 	}))
 	require.Error(t, err, "fail mode escalates exactly like schemaValidation: fail")
@@ -167,7 +167,7 @@ func TestEvaluateDataAssertions_MissingDeclaredMetricIsAViolation(t *testing.T) 
 	// A step that emits NOTHING at all must not silently pass its contract:
 	// this is the regression the "declared but never emitted" rule exists for,
 	// and the reason the seam no longer short-circuits on zero samples.
-	err := EvaluateDataAssertions(store, taskRun.JobRunID, taskID, taskRunID, MetricsCapture{})
+	err := EvaluateDataAssertions(context.Background(), store, taskRun.JobRunID, taskID, taskRunID, MetricsCapture{})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "rowCount")
 
@@ -198,7 +198,7 @@ func TestEvaluateDataAssertions_ColdStartDeltaIsSeedingAndNeverFails(t *testing.
 	var taskRun models.TaskRun
 	require.NoError(t, db.Where("id = ?", taskRunID).First(&taskRun).Error)
 
-	err := EvaluateDataAssertions(store, taskRun.JobRunID, taskID, taskRunID, CapturedMetrics([]pkgtask.DatasetMetricSample{
+	err := EvaluateDataAssertions(context.Background(), store, taskRun.JobRunID, taskID, taskRunID, CapturedMetrics([]pkgtask.DatasetMetricSample{
 		{Dataset: "warehouse/orders", Metric: "rowCount", Value: 10},
 	}))
 	require.NoError(t, err, "a seeding verdict never escalates, whatever onViolation says")
@@ -231,7 +231,7 @@ func TestEvaluateDataAssertions_SeededDeltaEnforcesAndExcludesItsOwnSample(t *te
 	var taskRun models.TaskRun
 	require.NoError(t, db.Where("id = ?", taskRunID).First(&taskRun).Error)
 
-	err := EvaluateDataAssertions(store, taskRun.JobRunID, taskID, taskRunID, CapturedMetrics([]pkgtask.DatasetMetricSample{
+	err := EvaluateDataAssertions(context.Background(), store, taskRun.JobRunID, taskID, taskRunID, CapturedMetrics([]pkgtask.DatasetMetricSample{
 		{Dataset: "warehouse/orders", Metric: "rowCount", Value: 10},
 	}))
 	require.Error(t, err, "past the cold-start floor a delta breach is a red run")
@@ -269,7 +269,7 @@ func TestEvaluateDataAssertions_HoldRecordsAsWarnUntilStreamC(t *testing.T) {
 	var taskRun models.TaskRun
 	require.NoError(t, db.Where("id = ?", taskRunID).First(&taskRun).Error)
 
-	err := EvaluateDataAssertions(store, taskRun.JobRunID, taskID, taskRunID, CapturedMetrics([]pkgtask.DatasetMetricSample{
+	err := EvaluateDataAssertions(context.Background(), store, taskRun.JobRunID, taskID, taskRunID, CapturedMetrics([]pkgtask.DatasetMetricSample{
 		{Dataset: "warehouse/orders", Metric: "rowCount", Value: 12},
 	}))
 	require.NoError(t, err, "hold lets the task succeed; the breaker itself is Stream C")
@@ -290,7 +290,7 @@ func TestEvaluateDataAssertions_SatisfiedContractRecordsNothing(t *testing.T) {
 	var taskRun models.TaskRun
 	require.NoError(t, db.Where("id = ?", taskRunID).First(&taskRun).Error)
 
-	err := EvaluateDataAssertions(store, taskRun.JobRunID, taskID, taskRunID, CapturedMetrics([]pkgtask.DatasetMetricSample{
+	err := EvaluateDataAssertions(context.Background(), store, taskRun.JobRunID, taskID, taskRunID, CapturedMetrics([]pkgtask.DatasetMetricSample{
 		{Dataset: "warehouse/orders", Metric: "rowCount", Value: 10400312},
 	}))
 	require.NoError(t, err)
@@ -312,7 +312,7 @@ func TestEvaluateDataAssertions_QuarantinedRunIsNeverEvaluated(t *testing.T) {
 	var taskRun models.TaskRun
 	require.NoError(t, db.Where("id = ?", taskRunID).First(&taskRun).Error)
 
-	err := EvaluateDataAssertions(store, taskRun.JobRunID, taskID, taskRunID, CapturedMetrics([]pkgtask.DatasetMetricSample{
+	err := EvaluateDataAssertions(context.Background(), store, taskRun.JobRunID, taskID, taskRunID, CapturedMetrics([]pkgtask.DatasetMetricSample{
 		{Dataset: "warehouse/orders", Metric: "rowCount", Value: 12},
 	}))
 	require.NoError(t, err, "a what-if must never trip an assertion")

@@ -2333,7 +2333,7 @@ func (j *job) Run(ctx context.Context) (err error) {
 				// Data-quality seam, beside schema validation and keyed on THIS
 				// instance's row: a fanned step records its samples per
 				// partition (see run.EvaluateDataAssertions).
-				if err := run.EvaluateDataAssertions(store, runID, taskID, taskRunID, metricsCapture); err != nil {
+				if err := run.EvaluateDataAssertions(ctx, store, runID, taskID, taskRunID, metricsCapture); err != nil {
 					execErr = err
 				}
 			}
@@ -3067,7 +3067,7 @@ func (j *job) Run(ctx context.Context) (err error) {
 				// Data-quality seam, beside schema validation. The unfanned
 				// path has one row per (run, task), so the catalog task id
 				// resolves it unambiguously.
-				if err := run.EvaluateDataAssertions(store, runID, taskID, uuid.Nil, metricsCapture); err != nil {
+				if err := run.EvaluateDataAssertions(ctx, store, runID, taskID, uuid.Nil, metricsCapture); err != nil {
 					if snapshotErr := store.SaveCapturedTaskLogSnapshot(runID, taskID, logSnapshot); snapshotErr != nil {
 						log.Warn("failed to persist task log snapshot", "job_id", j.id, "task_id", taskID, "error", snapshotErr)
 					}

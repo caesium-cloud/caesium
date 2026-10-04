@@ -1,6 +1,7 @@
 package run
 
 import (
+	"context"
 	"strconv"
 	"testing"
 
@@ -57,7 +58,7 @@ func TestEvaluateDataAssertions_PersistsSamplesAgainstTheInstanceRow(t *testing.
 	var taskRun models.TaskRun
 	require.NoError(t, db.Where("id = ?", taskRunID).First(&taskRun).Error)
 
-	err := EvaluateDataAssertions(store, taskRun.JobRunID, taskID, taskRunID, CapturedMetrics([]pkgtask.DatasetMetricSample{
+	err := EvaluateDataAssertions(context.Background(), store, taskRun.JobRunID, taskID, taskRunID, CapturedMetrics([]pkgtask.DatasetMetricSample{
 		{Dataset: "warehouse/orders", Metric: "rowCount", Value: 42},
 		// An undeclared METRIC is still recorded: free baseline history for an
 		// assertion added later.
@@ -90,7 +91,7 @@ func TestEvaluateDataAssertions_UnfannedPathResolvesByCatalogTask(t *testing.T) 
 	var taskRun models.TaskRun
 	require.NoError(t, db.Where("id = ?", taskRunID).First(&taskRun).Error)
 
-	require.NoError(t, EvaluateDataAssertions(store, taskRun.JobRunID, taskID, uuid.Nil,
+	require.NoError(t, EvaluateDataAssertions(context.Background(), store, taskRun.JobRunID, taskID, uuid.Nil,
 		CapturedMetrics([]pkgtask.DatasetMetricSample{{Metric: "rowCount", Value: 7}})))
 
 	rows := metricRows(t, db)
@@ -110,7 +111,7 @@ func TestEvaluateDataAssertions_AmbiguousSelectorDropsTheSample(t *testing.T) {
 	var taskRun models.TaskRun
 	require.NoError(t, db.Where("id = ?", taskRunID).First(&taskRun).Error)
 
-	require.NoError(t, EvaluateDataAssertions(store, taskRun.JobRunID, taskID, taskRunID,
+	require.NoError(t, EvaluateDataAssertions(context.Background(), store, taskRun.JobRunID, taskID, taskRunID,
 		CapturedMetrics([]pkgtask.DatasetMetricSample{
 			{Metric: "rowCount", Value: 7},
 			{Dataset: "warehouse/orders", Metric: "rowCount", Value: 9},
@@ -133,7 +134,7 @@ func TestEvaluateDataAssertions_QuarantinedRunRecordsNothing(t *testing.T) {
 	var taskRun models.TaskRun
 	require.NoError(t, db.Where("id = ?", taskRunID).First(&taskRun).Error)
 
-	require.NoError(t, EvaluateDataAssertions(store, taskRun.JobRunID, taskID, taskRunID,
+	require.NoError(t, EvaluateDataAssertions(context.Background(), store, taskRun.JobRunID, taskID, taskRunID,
 		CapturedMetrics([]pkgtask.DatasetMetricSample{{Dataset: "warehouse/orders", Metric: "rowCount", Value: 7}})))
 
 	assert.Empty(t, metricRows(t, db), "a what-if must never move a baseline")
@@ -151,7 +152,7 @@ func TestEvaluateDataAssertions_InertWhenFlagOff(t *testing.T) {
 	var taskRun models.TaskRun
 	require.NoError(t, db.Where("id = ?", taskRunID).First(&taskRun).Error)
 
-	require.NoError(t, EvaluateDataAssertions(store, taskRun.JobRunID, taskID, taskRunID,
+	require.NoError(t, EvaluateDataAssertions(context.Background(), store, taskRun.JobRunID, taskID, taskRunID,
 		CapturedMetrics([]pkgtask.DatasetMetricSample{{Dataset: "warehouse/orders", Metric: "rowCount", Value: 7}})))
 
 	assert.Empty(t, metricRows(t, db), "off means no metrics persistence at all")
@@ -159,7 +160,77 @@ func TestEvaluateDataAssertions_InertWhenFlagOff(t *testing.T) {
 
 func TestEvaluateDataAssertions_NilStoreAndNoSamplesAreNoOps(t *testing.T) {
 	setDataAssertions(t, true)
-	require.NoError(t, EvaluateDataAssertions(nil, uuid.New(), uuid.New(), uuid.New(),
+	require.NoError(t, EvaluateDataAssertions(context.Background(), nil, uuid.New(), uuid.New(), uuid.New(),
 		CapturedMetrics([]pkgtask.DatasetMetricSample{{Metric: "rowCount", Value: 1}})))
-	require.NoError(t, EvaluateDataAssertions(nil, uuid.New(), uuid.New(), uuid.New(), MetricsCapture{}))
+	require.NoError(t, EvaluateDataAssertions(context.Background(), nil, uuid.New(), uuid.New(), uuid.New(), MetricsCapture{}))
+}
+
+func TestDataAssertionsCanceledContextStopsInitialAcquisition(t *testing.T) {
+	setDataAssertions(t, true)
+	db := testutil.OpenTestDB(t)
+	t.Cleanup(func() { testutil.CloseDB(db) })
+	store := NewStore(db)
+	jobID, taskID, rowID, name := seedTaskRun(t, db, string(TaskStatusRunning), false)
+	declareProduces(t, db, jobID, name, "orders")
+	var row models.TaskRun
+	require.NoError(t, db.First(&row, "id = ?", rowID).Error)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	require.NoError(t, EvaluateDataAssertions(ctx, store, row.JobRunID, taskID, rowID, CapturedMetrics([]pkgtask.DatasetMetricSample{{Dataset: "orders", Metric: "rowCount", Value: 12}})))
+	require.Empty(t, metricRows(t, db))
+	require.Empty(t, dataViolationsOf(t, db, rowID))
+	written, err := store.saveDataViolationsClaimed(ctx, row.JobRunID, rowID, nil, []DataViolation{{Dataset: "orders", Assertion: AssertionMin}})
+	require.ErrorIs(t, err, context.Canceled)
+	require.False(t, written)
+}
+
+func TestDataViolationWriteCanceledAfterLookupLeavesOldEvidence(t *testing.T) {
+	db := testutil.OpenTestDB(t)
+	t.Cleanup(func() { testutil.CloseDB(db) })
+	store := NewStore(db)
+	_, _, rowID, _ := seedTaskRun(t, db, string(TaskStatusRunning), false)
+	var row models.TaskRun
+	require.NoError(t, db.First(&row, "id = ?", rowID).Error)
+	old := []DataViolation{{Dataset: "old", Assertion: AssertionMin}}
+	require.NoError(t, store.SaveDataViolations(row.JobRunID, rowID, old))
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	require.NoError(t, db.Callback().Query().After("gorm:query").Register("test:cancel_violation_update", func(tx *gorm.DB) {
+		if _, ok := tx.Statement.Dest.(*models.TaskRun); ok {
+			cancel()
+		}
+	}))
+	written, err := store.saveDataViolationsClaimed(ctx, row.JobRunID, rowID, nil, []DataViolation{{Dataset: "new", Assertion: AssertionMin}})
+	require.ErrorIs(t, err, context.Canceled)
+	require.False(t, written)
+	require.NoError(t, db.Callback().Query().Remove("test:cancel_violation_update"))
+	require.Equal(t, old, dataViolationsOf(t, db, rowID))
+}
+
+func TestDataAssertionsCancellationDuringHoldFailsClosed(t *testing.T) {
+	setDataAssertions(t, true)
+	db := testutil.OpenTestDB(t)
+	t.Cleanup(func() { testutil.CloseDB(db) })
+	store := NewStore(db)
+	jobID, taskID, rowID, name := seedTaskRun(t, db, string(TaskStatusRunning), false)
+	declareProducesHold(t, db, jobID, name, "orders", "auto")
+	var row models.TaskRun
+	require.NoError(t, db.First(&row, "id = ?", rowID).Error)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	attempted := false
+	require.NoError(t, db.Callback().Create().Before("gorm:create").Register("test:cancel_hold", func(tx *gorm.DB) {
+		if tx.Statement.Table == "dataset_holds" {
+			attempted = true
+			cancel()
+		}
+	}))
+	t.Cleanup(func() { _ = db.Callback().Create().Remove("test:cancel_hold") })
+	err := EvaluateDataAssertions(ctx, store, row.JobRunID, taskID, rowID, CapturedMetrics([]pkgtask.DatasetMetricSample{{Dataset: "orders", Metric: "rowCount", Value: 12}}))
+	require.True(t, attempted)
+	require.ErrorIs(t, err, context.Canceled)
+	require.ErrorContains(t, err, "hold could not be opened")
+	require.Empty(t, activeHolds(t, db, "orders"))
+	require.Empty(t, dataViolationsOf(t, db, rowID), "best-effort violation persistence can be lost after cancellation")
+	require.Len(t, metricRows(t, db), 1, "the sample committed before cancellation remains")
 }
