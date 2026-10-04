@@ -79,7 +79,7 @@ func (s *ReplayStore) Record(ctx context.Context, issuer, assertionID string, ex
 			ExpiresAt:   expiresAt,
 		}
 		if err := tx.Create(record).Error; err != nil {
-			if isUniqueConstraintError(err) {
+			if sqlerr.IsUniqueConstraint(err) {
 				return ErrAssertionReplay
 			}
 			return fmt.Errorf("record saml assertion id: %w", err)
@@ -99,8 +99,4 @@ func (s *ReplayStore) Reap(ctx context.Context) (int64, error) {
 		return 0, fmt.Errorf("reap expired saml assertions: %w", res.Error)
 	}
 	return res.RowsAffected, nil
-}
-
-func isUniqueConstraintError(err error) bool {
-	return sqlerr.IsUniqueConstraint(err)
 }

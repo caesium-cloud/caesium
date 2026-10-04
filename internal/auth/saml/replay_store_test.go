@@ -2,6 +2,7 @@ package saml
 
 import (
 	"errors"
+	"github.com/caesium-cloud/caesium/pkg/sqlerr"
 	"testing"
 	"time"
 
@@ -42,16 +43,16 @@ func TestReplayStoreReapsExpiredAssertions(t *testing.T) {
 }
 
 func TestIsUniqueConstraintErrorClassifiesNarrowDuplicateErrors(t *testing.T) {
-	require.True(t, isUniqueConstraintError(sqlite3.Error{
+	require.True(t, sqlerr.IsUniqueConstraint(sqlite3.Error{
 		Code:         sqlite3.ErrConstraint,
 		ExtendedCode: sqlite3.ErrConstraintUnique,
 	}))
-	require.True(t, isUniqueConstraintError(sqlite3.Error{
+	require.True(t, sqlerr.IsUniqueConstraint(sqlite3.Error{
 		Code:         sqlite3.ErrConstraint,
 		ExtendedCode: sqlite3.ErrConstraintPrimaryKey,
 	}))
-	require.True(t, isUniqueConstraintError(errors.New("UNIQUE constraint failed: saml_assertion_ids.issuer")))
-	require.True(t, isUniqueConstraintError(errors.New("pq: duplicate key value violates unique constraint")))
-	require.True(t, isUniqueConstraintError(errors.New("mysql: duplicate entry 'issuer/assertion' for key")))
-	require.False(t, isUniqueConstraintError(errors.New("duplicate assertion rejected before database insert")))
+	require.True(t, sqlerr.IsUniqueConstraint(errors.New("UNIQUE constraint failed: saml_assertion_ids.issuer")))
+	require.True(t, sqlerr.IsUniqueConstraint(errors.New("pq: duplicate key value violates unique constraint")))
+	require.True(t, sqlerr.IsUniqueConstraint(errors.New("mysql: duplicate entry 'issuer/assertion' for key")))
+	require.False(t, sqlerr.IsUniqueConstraint(errors.New("duplicate assertion rejected before database insert")))
 }

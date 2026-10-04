@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"strings"
+	"github.com/caesium-cloud/caesium/pkg/sqlerr"
 	"time"
 
 	"github.com/caesium-cloud/caesium/internal/models"
@@ -54,7 +54,7 @@ func (us *UserStore) upsert(ctx context.Context, ext *ExternalIdentity, role mod
 			LastLoginAt: &now,
 		}
 		if err := us.db.WithContext(ctx).Create(&user).Error; err != nil {
-			if isUniqueConstraintError(err) {
+			if sqlerr.IsUniqueConstraint(err) {
 				if existing, lookupErr := us.lookupByIdentity(ctx, ext); lookupErr == nil {
 					updated, err := us.updateExisting(ctx, &existing, ext, role, groupsJSON, now)
 					return updated, false, err
@@ -99,14 +99,4 @@ func (us *UserStore) updateExisting(ctx context.Context, user *models.User, ext 
 	user.Role = role
 	user.LastLoginAt = &now
 	return user, nil
-}
-
-func isUniqueConstraintError(err error) bool {
-	if err == nil {
-		return false
-	}
-	msg := strings.ToLower(err.Error())
-	return strings.Contains(msg, "unique constraint") ||
-		strings.Contains(msg, "constraint failed") ||
-		strings.Contains(msg, "duplicate")
 }
