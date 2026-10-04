@@ -6,12 +6,12 @@ import (
 	"errors"
 	"fmt"
 	"maps"
-	"path"
 	"slices"
 	"sort"
 	"strings"
 
 	"github.com/caesium-cloud/caesium/internal/event"
+	"github.com/caesium-cloud/caesium/internal/eventmatch"
 	"github.com/caesium-cloud/caesium/internal/models"
 	schema "github.com/caesium-cloud/caesium/pkg/jobdef"
 	"github.com/google/uuid"
@@ -25,12 +25,6 @@ type triggerChainNode struct {
 	alias         string
 	triggerType   string
 	configuration map[string]any
-}
-
-type triggerChainPattern struct {
-	eventType string
-	source    string
-	filter    map[string]string
 }
 
 func (i *Importer) ValidateBatch(ctx context.Context, defs []schema.Definition) error {
@@ -220,7 +214,7 @@ func triggerChainGraph(nodes []triggerChainNode) (map[string][]string, error) {
 		if node.triggerType != schema.TriggerEvent && node.triggerType != string(models.TriggerTypeEvent) {
 			continue
 		}
-		patterns, err := triggerChainPatterns(node.configuration)
+		patterns, err := eventmatch.ParseTriggerEventPatterns(node.configuration)
 		if err != nil {
 			return nil, fmt.Errorf("definition %s: %w", node.alias, err)
 		}
@@ -241,9 +235,9 @@ func triggerChainGraph(nodes []triggerChainNode) (map[string][]string, error) {
 	return graph, nil
 }
 
-func triggerChainPatternSourceAlias(pattern triggerChainPattern, aliasByJobID map[string]string) (string, bool) {
-	sourceAlias := strings.TrimSpace(pattern.filter["job_alias"])
-	sourceJobID := strings.TrimSpace(pattern.filter["job_id"])
+func triggerChainPatternSourceAlias(pattern eventmatch.EventPattern, aliasByJobID map[string]string) (string, bool) {
+	sourceAlias := strings.TrimSpace(pattern.Filter["job_alias"])
+	sourceJobID := strings.TrimSpace(pattern.Filter["job_id"])
 
 	if sourceAlias == "" && sourceJobID == "" {
 		return "", false
@@ -263,65 +257,17 @@ func triggerChainPatternSourceAlias(pattern triggerChainPattern, aliasByJobID ma
 	return sourceAlias, true
 }
 
-func triggerChainPatterns(cfg map[string]any) ([]triggerChainPattern, error) {
-	rawEvents, ok := cfg["events"]
-	if !ok || rawEvents == nil {
-		return nil, nil
-	}
-	events, ok := rawEvents.([]any)
-	if !ok {
-		return nil, fmt.Errorf("trigger.configuration.events must be a list")
-	}
-
-	patterns := make([]triggerChainPattern, 0, len(events))
-	for idx, rawEvent := range events {
-		eventMap, ok := rawEvent.(map[string]any)
-		if !ok {
-			return nil, fmt.Errorf("trigger.configuration.events[%d] must be an object", idx)
-		}
-		pattern := triggerChainPattern{filter: map[string]string{}}
-		pattern.eventType, _ = eventMap["type"].(string)
-		pattern.source, _ = eventMap["source"].(string)
-		if rawFilter, ok := eventMap["filter"]; ok && rawFilter != nil {
-			filter, ok := rawFilter.(map[string]any)
-			if !ok {
-				return nil, fmt.Errorf("trigger.configuration.events[%d].filter must be an object", idx)
-			}
-			for key, value := range filter {
-				if stringValue, ok := value.(string); ok {
-					pattern.filter[key] = stringValue
-				}
-			}
-		}
-		patterns = append(patterns, pattern)
-	}
-	return patterns, nil
-}
-
-func patternCanMatchCaesiumLifecycle(pattern triggerChainPattern) bool {
-	source := strings.TrimSpace(pattern.source)
+func patternCanMatchCaesiumLifecycle(pattern eventmatch.EventPattern) bool {
+	source := strings.TrimSpace(pattern.Source)
 	if source != "" && source != "caesium" {
 		return false
 	}
 	for _, lifecycleType := range []event.Type{event.TypeRunCompleted, event.TypeRunFailed, event.TypeRunTerminal} {
-		if matchesTriggerChainEventType(pattern.eventType, string(lifecycleType)) {
+		if eventmatch.MatchesEventType(pattern.Type, string(lifecycleType)) {
 			return true
 		}
 	}
 	return false
-}
-
-func matchesTriggerChainEventType(patternValue, eventType string) bool {
-	patternValue = strings.TrimSpace(patternValue)
-	eventType = strings.TrimSpace(eventType)
-	if patternValue == "" || eventType == "" {
-		return false
-	}
-	if !strings.ContainsAny(patternValue, "*?[") {
-		return patternValue == eventType
-	}
-	matched, err := path.Match(patternValue, eventType)
-	return err == nil && matched
 }
 
 func addTriggerChainEdge(graph map[string][]string, from, to string) {

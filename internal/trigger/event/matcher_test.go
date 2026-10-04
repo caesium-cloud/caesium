@@ -85,7 +85,7 @@ func TestEventPatternFilterCoercion(t *testing.T) {
 func TestExtractFieldRejectsMissingNestedPath(t *testing.T) {
 	t.Parallel()
 
-	if _, ok := extractField([]byte(`{"repository":{}}`), "repository.full_name"); ok {
+	if (EventPattern{Type: "push", Filter: map[string]string{"repository.full_name": ""}}).Matches(&models.IngestedEvent{Type: "push", Data: []byte(`{"repository":{}}`)}) {
 		t.Fatal("missing nested path should not extract")
 	}
 }
