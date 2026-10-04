@@ -12,6 +12,7 @@ import (
 	jobdeftestutil "github.com/caesium-cloud/caesium/internal/jobdef/testutil"
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/caesium-cloud/caesium/internal/run"
+	"github.com/caesium-cloud/caesium/internal/testutil"
 	"github.com/caesium-cloud/caesium/pkg/container"
 	"github.com/google/uuid"
 	vault "github.com/hashicorp/vault/api"
@@ -816,12 +817,12 @@ func (f *replayVaultLogical) ReadWithDataWithContext(_ context.Context, path str
 
 func mustJSON(t *testing.T, v any) datatypes.JSON {
 	t.Helper()
-	return datatypes.JSON(jobdeftestutil.MustJSONBytes(t, v))
+	return datatypes.JSON(testutil.MustJSONBytes(t, v))
 }
 
 func mustJSONString(t *testing.T, v any) string {
 	t.Helper()
-	return string(jobdeftestutil.MustJSONBytes(t, v))
+	return string(testutil.MustJSONBytes(t, v))
 }
 
 func TestReplayUnresolvedPinnedBaselineReexecutesDespiteLegacyEntry(t *testing.T) {
