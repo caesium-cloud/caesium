@@ -75,7 +75,7 @@ func (s *Store) RequestCancel(id uuid.UUID) error {
 	now := time.Now().UTC()
 	return s.withBusyRetry(func() error {
 		return s.db.Model(&models.Backfill{}).
-			Where("id = ? AND status = ?", id, string(models.BackfillStatusRunning)).
+			Where("id = ? AND status = ?", id, models.BackfillStatusRunning).
 			Updates(map[string]any{
 				"cancel_requested_at": now,
 			}).Error
@@ -88,9 +88,9 @@ func (s *Store) MarkCancelled(id uuid.UUID) error {
 	now := time.Now().UTC()
 	return s.withBusyRetry(func() error {
 		return s.db.Model(&models.Backfill{}).
-			Where("id = ? AND status = ?", id, string(models.BackfillStatusRunning)).
+			Where("id = ? AND status = ?", id, models.BackfillStatusRunning).
 			Updates(map[string]any{
-				"status":       string(models.BackfillStatusCancelled),
+				"status":       models.BackfillStatusCancelled,
 				"completed_at": now,
 			}).Error
 	})
@@ -104,7 +104,7 @@ func (s *Store) Complete(id uuid.UUID, failed bool) error {
 	}
 	return s.withBusyRetry(func() error {
 		return s.db.Model(&models.Backfill{}).
-			Where("id = ? AND status = ?", id, string(models.BackfillStatusRunning)).
+			Where("id = ? AND status = ?", id, models.BackfillStatusRunning).
 			Updates(map[string]any{
 				"status":       string(status),
 				"completed_at": now,
@@ -158,7 +158,7 @@ func (s *Store) IsRunning(id uuid.UUID) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	return b.Status == string(models.BackfillStatusRunning), nil
+	return b.Status == models.BackfillStatusRunning, nil
 }
 
 // IsCancelRequested returns true if a running backfill has a persisted cancel
@@ -172,7 +172,7 @@ func (s *Store) IsCancelRequested(id uuid.UUID) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	return b.Status == string(models.BackfillStatusRunning) && b.CancelRequestedAt != nil, nil
+	return b.Status == models.BackfillStatusRunning && b.CancelRequestedAt != nil, nil
 }
 
 // LatestRunForLogicalDate returns the status of the most recent run for a job

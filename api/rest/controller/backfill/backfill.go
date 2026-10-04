@@ -103,11 +103,11 @@ func Post(c *echo.Context) error {
 	b := &models.Backfill{
 		ID:            uuid.New(),
 		JobID:         jobID,
-		Status:        string(models.BackfillStatusRunning),
+		Status:        models.BackfillStatusRunning,
 		Start:         req.Start.UTC(),
 		End:           req.End.UTC(),
 		MaxConcurrent: maxConcurrent,
-		Reprocess:     reprocess,
+		Reprocess:     models.ReprocessPolicy(reprocess),
 	}
 
 	workCtx, release, err := runlife.FromContext(ctx).Reserve(ctx)
@@ -199,7 +199,7 @@ func Cancel(c *echo.Context) error {
 		return echo.NewHTTPError(http.StatusInternalServerError, "internal server error").Wrap(err)
 	}
 
-	if b.Status != string(models.BackfillStatusRunning) {
+	if b.Status != models.BackfillStatusRunning {
 		return echo.NewHTTPError(http.StatusConflict, "backfill is not running")
 	}
 

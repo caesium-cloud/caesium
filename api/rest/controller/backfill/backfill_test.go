@@ -85,3 +85,24 @@ func TestBackfillOwnershipAndCancellation(t *testing.T) {
 	other.CloseAndCancel()
 	require.NoError(t, other.Wait(context.Background()))
 }
+
+func TestBackfillRejectsUnknownRawReprocessBeforeAdmission(t *testing.T) {
+	oldJob, oldTrigger, oldCreate := backfillGetJob, backfillGetTrigger, backfillCreate
+	t.Cleanup(func() { backfillGetJob, backfillGetTrigger, backfillCreate = oldJob, oldTrigger, oldCreate })
+	jobID := uuid.New()
+	backfillGetJob = func(context.Context, uuid.UUID) (*models.Job, error) { return &models.Job{ID: jobID}, nil }
+	backfillGetTrigger = func(context.Context, uuid.UUID) (*models.Trigger, error) {
+		return &models.Trigger{Type: models.TriggerTypeCron, Configuration: `{"expression":"* * * * *"}`}, nil
+	}
+	backfillCreate = func(*models.Backfill) error { t.Fatal("invalid policy reached durable create"); return nil }
+	e := echo.New()
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/", strings.NewReader(`{"start":"2026-01-01T00:00:00Z","end":"2026-01-02T00:00:00Z","reprocess":"invalid"}`))
+	req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
+	c := e.NewContext(req, rec)
+	c.SetPathValues(echo.PathValues{{Name: "id", Value: jobID.String()}})
+	err := Post(c)
+	var he *echo.HTTPError
+	require.ErrorAs(t, err, &he)
+	require.Equal(t, http.StatusBadRequest, he.Code)
+}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	sqldriver "database/sql/driver"
+	"encoding/json"
 	"errors"
 	"testing"
 	"time"
@@ -14,6 +15,28 @@ import (
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 )
+
+func TestBackfillEnumStorageAndJSONRemainText(t *testing.T) {
+	_, db, id := newBackfillTestStore(t)
+	var stored models.Backfill
+	require.NoError(t, db.First(&stored, "id = ?", id).Error)
+	require.Equal(t, models.BackfillStatusRunning, stored.Status)
+	require.Equal(t, models.ReprocessNone, stored.Reprocess)
+	var row struct{ Status, Reprocess string }
+	require.NoError(t, db.Model(&models.Backfill{}).Select("status, reprocess").Where("id = ?", id).Scan(&row).Error)
+	require.Equal(t, "running", row.Status)
+	require.Equal(t, "none", row.Reprocess)
+	raw, err := json.Marshal(stored)
+	require.NoError(t, err)
+	var wire map[string]any
+	require.NoError(t, json.Unmarshal(raw, &wire))
+	require.Equal(t, "running", wire["status"])
+	require.Equal(t, "none", wire["reprocess"])
+	var decoded models.Backfill
+	require.NoError(t, json.Unmarshal(raw, &decoded))
+	require.Equal(t, stored.Status, decoded.Status)
+	require.Equal(t, stored.Reprocess, decoded.Reprocess)
+}
 
 func TestIsContentionErrRecognisesPoisonedConnection(t *testing.T) {
 	// `cannot start a transaction within a transaction` is the connection-state
@@ -145,7 +168,7 @@ func TestRequestCancelMarksIntentWithoutTerminalTransition(t *testing.T) {
 
 	var backfill models.Backfill
 	require.NoError(t, db.First(&backfill, "id = ?", backfillID).Error)
-	require.Equal(t, string(models.BackfillStatusRunning), backfill.Status)
+	require.Equal(t, models.BackfillStatusRunning, backfill.Status)
 	require.NotNil(t, backfill.CancelRequestedAt)
 
 	cancelRequested, err := store.IsCancelRequested(backfillID)
@@ -161,7 +184,7 @@ func TestMarkCancelledTransitionsRunningBackfill(t *testing.T) {
 
 	var backfill models.Backfill
 	require.NoError(t, db.First(&backfill, "id = ?", backfillID).Error)
-	require.Equal(t, string(models.BackfillStatusCancelled), backfill.Status)
+	require.Equal(t, models.BackfillStatusCancelled, backfill.Status)
 	require.NotNil(t, backfill.CancelRequestedAt)
 	require.NotNil(t, backfill.CompletedAt)
 
@@ -179,7 +202,7 @@ func TestCompleteDoesNotOverwriteCancelledBackfill(t *testing.T) {
 
 	var backfill models.Backfill
 	require.NoError(t, db.First(&backfill, "id = ?", backfillID).Error)
-	require.Equal(t, string(models.BackfillStatusCancelled), backfill.Status)
+	require.Equal(t, models.BackfillStatusCancelled, backfill.Status)
 	require.NotNil(t, backfill.CompletedAt)
 }
 
@@ -236,11 +259,11 @@ func newBackfillTestStore(t *testing.T) (*Store, *gorm.DB, uuid.UUID) {
 	require.NoError(t, db.Create(&models.Backfill{
 		ID:            backfillID,
 		JobID:         jobID,
-		Status:        string(models.BackfillStatusRunning),
+		Status:        models.BackfillStatusRunning,
 		Start:         time.Now().UTC().Add(-time.Hour),
 		End:           time.Now().UTC(),
 		MaxConcurrent: 1,
-		Reprocess:     string(models.ReprocessNone),
+		Reprocess:     models.ReprocessNone,
 		CreatedAt:     time.Now().UTC(),
 		UpdatedAt:     time.Now().UTC(),
 	}).Error)

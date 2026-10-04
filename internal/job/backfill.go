@@ -74,8 +74,8 @@ func EnumerateLogicalDates(schedule cron.Schedule, start, end time.Time, loc *ti
 //	"none"   — skip dates that have any existing run
 //	"failed" — skip dates whose latest run succeeded
 //	"all"    — keep all dates
-func FilterDates(store *backfillstore.Store, jobID uuid.UUID, dates []time.Time, reprocess string) ([]time.Time, error) {
-	if reprocess == string(models.ReprocessAll) {
+func FilterDates(store *backfillstore.Store, jobID uuid.UUID, dates []time.Time, reprocess models.ReprocessPolicy) ([]time.Time, error) {
+	if reprocess == models.ReprocessAll {
 		return dates, nil
 	}
 
@@ -88,11 +88,11 @@ func FilterDates(store *backfillstore.Store, jobID uuid.UUID, dates []time.Time,
 		}
 
 		switch reprocess {
-		case string(models.ReprocessNone):
+		case models.ReprocessNone:
 			if status != "" {
 				continue
 			}
-		case string(models.ReprocessFailed):
+		case models.ReprocessFailed:
 			if status == "succeeded" {
 				continue
 			}

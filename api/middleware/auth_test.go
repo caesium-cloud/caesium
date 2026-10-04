@@ -74,11 +74,11 @@ func seedJobFixtures(t *testing.T, db *gorm.DB, alias string) (uuid.UUID, uuid.U
 	require.NoError(t, db.Create(&models.Backfill{
 		ID:            backfillID,
 		JobID:         jobID,
-		Status:        string(models.BackfillStatusRunning),
+		Status:        models.BackfillStatusRunning,
 		Start:         now,
 		End:           now.Add(time.Hour),
 		MaxConcurrent: 1,
-		Reprocess:     string(models.ReprocessNone),
+		Reprocess:     models.ReprocessNone,
 		CreatedAt:     now,
 		UpdatedAt:     now,
 	}).Error)
