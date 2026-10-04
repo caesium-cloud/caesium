@@ -1,6 +1,8 @@
 package backfill
 
 import (
+	"context"
+	"database/sql"
 	"errors"
 	"testing"
 	"time"
@@ -243,4 +245,55 @@ func newBackfillTestStore(t *testing.T) (*Store, *gorm.DB, uuid.UUID) {
 	}).Error)
 
 	return NewStore(db), db, backfillID
+}
+
+type rollbackRecordingPool struct {
+	gorm.ConnPool
+	order       *[]string
+	rollbackErr error
+}
+
+func (p rollbackRecordingPool) ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error) {
+	if query == "ROLLBACK" {
+		*p.order = append(*p.order, "rollback")
+		return nil, p.rollbackErr
+	}
+	return p.ConnPool.ExecContext(ctx, query, args...)
+}
+
+func TestBackfillRetryRollbackOrderAndBudget(t *testing.T) {
+	old := busyRetryBackoffs
+	busyRetryBackoffs = []time.Duration{0, 0}
+	t.Cleanup(func() { busyRetryBackoffs = old })
+	for _, rollbackErr := range []error{nil, errors.New("rollback failed")} {
+		store, _, _ := newBackfillTestStore(t)
+		var order []string
+		pool := rollbackRecordingPool{store.db.Statement.ConnPool, &order, rollbackErr}
+		store.db.Statement.ConnPool = pool
+		calls := 0
+		poisoned := errors.New("cannot start a transaction within a transaction")
+		err := store.withBusyRetry(func() error { calls++; order = append(order, "attempt"); return poisoned })
+		require.ErrorIs(t, err, poisoned)
+		require.Equal(t, 3, calls)
+		require.Equal(t, []string{"attempt", "rollback", "attempt", "rollback", "attempt"}, order)
+	}
+}
+
+func TestBackfillRetryDoesNotCheckStoreContext(t *testing.T) {
+	old := busyRetryBackoffs
+	busyRetryBackoffs = []time.Duration{0}
+	t.Cleanup(func() { busyRetryBackoffs = old })
+	store, _, _ := newBackfillTestStore(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	store.db = store.db.WithContext(ctx)
+	calls := 0
+	require.NoError(t, store.withBusyRetry(func() error {
+		calls++
+		if calls == 1 {
+			return errors.New("database is locked")
+		}
+		return nil
+	}))
+	require.Equal(t, 2, calls)
 }

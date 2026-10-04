@@ -2,7 +2,10 @@ package worker
 
 import (
 	"context"
+	"database/sql"
+	"errors"
 	"fmt"
+	"github.com/caesium-cloud/caesium/internal/event"
 	"strings"
 	"testing"
 	"time"
@@ -646,4 +649,96 @@ func TestClaimerReclaimExpiredReclaimsExpiredLeaseRun(t *testing.T) {
 	require.Equal(t, string(run.TaskStatusPending), persisted.Status,
 		"ReclaimExpired must reset tasks in runs with expired leases (recovery)")
 	require.Equal(t, "", persisted.ClaimedBy)
+}
+
+// commitFailurePool lets an entire attempt reach its commit boundary, then
+// rolls it back to simulate contention. This catches accumulator/event leakage
+// that an error injected before writes cannot expose.
+type commitFailurePool struct {
+	*sql.DB
+	commits      int
+	failCommits  int
+	beforeCommit func()
+}
+
+func (p *commitFailurePool) BeginTx(ctx context.Context, opts *sql.TxOptions) (gorm.ConnPool, error) {
+	tx, err := p.DB.BeginTx(ctx, opts)
+	if err != nil {
+		return nil, err
+	}
+	return &commitFailureTx{Tx: tx, pool: p}, nil
+}
+
+type commitFailureTx struct {
+	*sql.Tx
+	pool *commitFailurePool
+}
+
+func (tx *commitFailureTx) Commit() error {
+	tx.pool.commits++
+	if tx.pool.beforeCommit != nil {
+		tx.pool.beforeCommit()
+	}
+	if tx.pool.commits <= tx.pool.failCommits {
+		_ = tx.Tx.Rollback()
+		return errors.New("database is locked")
+	}
+	return tx.Tx.Commit()
+}
+func (p *commitFailurePool) GetDBConn() (*sql.DB, error) { return p.DB, nil }
+
+func TestReclaimExpiredPublishesOnlyCommittedAttempt(t *testing.T) {
+	for _, exhaust := range []bool{false, true} {
+		t.Run(fmt.Sprint(exhaust), func(t *testing.T) {
+			conn := jobdeftestutil.OpenTestDB(t)
+			t.Cleanup(func() { jobdeftestutil.CloseDB(conn) })
+			runID := seedJobRun(t, conn, string(run.StatusRunning))
+			seedTaskRun(t, conn, seedTaskRunInput{status: string(run.TaskStatusRunning), jobRunID: &runID, claimedBy: "old", claimExpiresAt: new(time.Now().Add(-time.Minute)), createdAt: time.Now().Add(-time.Hour)})
+			store := run.NewStore(conn)
+			bus := event.New()
+			store.SetBus(bus)
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			events, err := bus.Subscribe(ctx, event.Filter{RunID: runID})
+			require.NoError(t, err)
+			nodeID := uuid.NewString()
+			claimer := NewClaimer(nodeID, store, time.Minute)
+			claimer.busyRetryBackoffs = []time.Duration{0}
+			statusBefore := metrictestutil.CounterValue(t, metrics.DBWritesTotal, metrics.DBWriteCategoryTaskRunStatus)
+			eventBefore := metrictestutil.CounterValue(t, metrics.DBWritesTotal, metrics.DBWriteCategoryEventInsert)
+			retriesBefore := metrictestutil.CounterValue(t, metrics.DBBusyRetriesTotal)
+			sqlDB, err := conn.DB()
+			require.NoError(t, err)
+			pool := &commitFailurePool{DB: sqlDB, failCommits: 1}
+			if exhaust {
+				pool.failCommits = 2
+			}
+			pool.beforeCommit = func() {
+				require.Equal(t, statusBefore, metrictestutil.CounterValue(t, metrics.DBWritesTotal, metrics.DBWriteCategoryTaskRunStatus))
+				require.Equal(t, eventBefore, metrictestutil.CounterValue(t, metrics.DBWritesTotal, metrics.DBWriteCategoryEventInsert))
+				require.Empty(t, events, "bus publication must follow successful commit")
+			}
+			conn.Statement.ConnPool = pool
+			err = claimer.ReclaimExpired(ctx)
+			require.Equal(t, 2, pool.commits)
+			require.Equal(t, retriesBefore+1, metrictestutil.CounterValue(t, metrics.DBBusyRetriesTotal))
+			require.Equal(t, float64(1), metrictestutil.CounterValue(t, metrics.WorkerClaimContentionTotal, nodeID))
+			var records []models.ExecutionEvent
+			require.NoError(t, conn.Where("run_id = ?", runID).Find(&records).Error)
+			if exhaust {
+				require.Error(t, err)
+				require.Empty(t, records)
+				require.Empty(t, events)
+				require.Equal(t, statusBefore, metrictestutil.CounterValue(t, metrics.DBWritesTotal, metrics.DBWriteCategoryTaskRunStatus))
+				require.Equal(t, eventBefore, metrictestutil.CounterValue(t, metrics.DBWritesTotal, metrics.DBWriteCategoryEventInsert))
+			} else {
+				require.NoError(t, err)
+				require.Len(t, records, 2)
+				require.Len(t, events, 2)
+				require.Equal(t, statusBefore+1, metrictestutil.CounterValue(t, metrics.DBWritesTotal, metrics.DBWriteCategoryTaskRunStatus))
+				require.Equal(t, eventBefore+2, metrictestutil.CounterValue(t, metrics.DBWritesTotal, metrics.DBWriteCategoryEventInsert))
+				require.Equal(t, float64(1), metrictestutil.CounterValue(t, metrics.WorkerLeaseExpirationsTotal, nodeID))
+			}
+		})
+	}
 }
