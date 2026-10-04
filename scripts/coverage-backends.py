@@ -198,7 +198,7 @@ def verify_outcome(run, case, marker):
     elif case == 'failure':
         require(run.get('status') == 'failed' and len(tasks) == 1 and tasks[0].get('status') == 'failed' and tasks[0].get('exit_code') == 17, 'deliberate exit17 was not observed; connection/pull failure is insufficient')
     else:
-        require(run.get('status') == 'failed' and len(tasks) == 1 and tasks[0].get('status') == 'failed' and tasks[0].get('completed_at') and 'deadline' in (run.get('error') or '').lower(), 'run/task terminal deadline cause missing')
+        require(run.get('status') == 'failed' and len(tasks) == 1 and tasks[0].get('status') == 'failed' and tasks[0].get('completed_at') and run.get('error') == 'run timed out after 15s', 'run/task terminal deadline cause missing')
     require(run.get('completed_at'), 'durable terminal completion missing')
 
 

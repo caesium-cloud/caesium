@@ -142,8 +142,11 @@ class BackendGuards(unittest.TestCase):
         b.verify_outcome(failure, 'failure', 'owned')
         with self.assertRaises(b.Refused):
             b.verify_outcome(dict(failure, tasks=[dict(task, status='failed', exit_code=None)]), 'failure', 'owned')
-        deadline = {'status': 'failed', 'completed_at': 'observed', 'error': 'run deadline exceeded', 'tasks': [dict(task, status='failed')]}
+        deadline = {'status': 'failed', 'completed_at': 'observed', 'error': 'run timed out after 15s', 'tasks': [dict(task, status='failed')]}
         b.verify_outcome(deadline, 'deadline', 'owned')
+        for cause in ('task timed out after 15s', 'run timed out after 10s', 'context deadline exceeded', 'engine connection failed', 'image pull failed'):
+            with self.assertRaises(b.Refused):
+                b.verify_outcome(dict(deadline, error=cause), 'deadline', 'owned')
         with self.assertRaises(b.Refused):
             b.verify_outcome(dict(deadline, tasks=[dict(task, status='running', completed_at=None)]), 'deadline', 'owned')
         for bad_task in (dict(task, runtime_id=''), dict(task, cache_hit=True)):
