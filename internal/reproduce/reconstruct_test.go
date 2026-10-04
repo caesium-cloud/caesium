@@ -3,7 +3,9 @@ package reproduce
 import (
 	"context"
 	"errors"
+	"github.com/stretchr/testify/require"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 
@@ -503,4 +505,36 @@ func testDescriptor(taskName, image string) *Descriptor {
 	desc.Baseline.TaskName = taskName
 	desc.Runtime.Image = image
 	return desc
+}
+
+func TestPredecessorProjectionPreservesFallbackAndDescriptorOwnership(t *testing.T) {
+	desc := testDescriptor("load", "alpine:3.23")
+	ref := containerOutputRef("/recorded/frame")
+	desc.DAG.Predecessors = []EdgeRef{{TaskID: "named-id", TaskName: "extract.step"}, {TaskID: "empty-id", TaskName: "empty"}, {TaskID: "no-name"}}
+	desc.DAG.PredecessorOutputs = map[string]map[string]string{
+		"named-id": {"frame-path": ref}, "orphan-id": {"frame-path": ref},
+		"no-name": {"value": "kept"}, "empty-id": {}, "unused-empty": nil,
+	}
+	expected := map[string]map[string]string{
+		"named-id": {"frame-path": ref}, "orphan-id": {"frame-path": ref},
+		"no-name": {"value": "kept"}, "empty-id": {}, "unused-empty": nil,
+	}
+	env, warnings, err := predecessorOutputEnv(desc)
+	require.NoError(t, err)
+	require.Equal(t, "/recorded/frame", env["CAESIUM_OUTPUT_EXTRACT_STEP_FRAME_PATH"])
+	require.Equal(t, "/recorded/frame", env["CAESIUM_OUTPUT_ORPHAN_ID_FRAME_PATH"])
+	require.Equal(t, "kept", env["CAESIUM_OUTPUT_NO_NAME_VALUE"])
+	require.Len(t, warnings, 3)
+	require.Equal(t, []Warning{
+		{Code: WarningOutputMissingName, Message: "predecessor output orphan-id had no matching predecessor name; using UUID in CAESIUM_OUTPUT_* env"},
+		{Code: WarningOutputRefUnresolved, Message: "output ref CAESIUM_OUTPUT_EXTRACT_STEP_FRAME_PATH points at recorded path /recorded/frame; ensure local storage is mounted or remapped"},
+		{Code: WarningOutputRefUnresolved, Message: "output ref CAESIUM_OUTPUT_ORPHAN_ID_FRAME_PATH points at recorded path /recorded/frame; ensure local storage is mounted or remapped"},
+	}, warnings)
+	details := outputRefFidelityDetails(desc)
+	require.Len(t, details, 2)
+	require.True(t, slices.IsSorted(details))
+	require.Contains(t, details[0], "CAESIUM_OUTPUT_EXTRACT_STEP_FRAME_PATH")
+	require.Contains(t, details[1], "CAESIUM_OUTPUT_ORPHAN_ID_FRAME_PATH")
+	env["CAESIUM_OUTPUT_EXTRACT_STEP_FRAME_PATH"] = "changed"
+	require.Equal(t, expected, desc.DAG.PredecessorOutputs)
 }
