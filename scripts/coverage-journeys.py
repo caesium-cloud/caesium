@@ -38,6 +38,7 @@ LABEL_RUN = "caesium.coverage.run"
 LABEL_LANE = "caesium.coverage.lane"
 KEY_RE = re.compile(r"csk_[A-Za-z0-9_-]+")
 DIGEST_RE = re.compile(r"[0-9a-f]{64}")
+UUID_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 MAX_PROTOCOL_LINE = 64 * 1024
 COUNT_KEYS = ("oidc_users", "saml_users", "oidc_sessions", "saml_sessions", "assertions")
 EXPECTED_CHECKS = (
@@ -986,10 +987,10 @@ class Collector:
         if len(matches) != 1:
             raise JourneyError("SSO public job list does not contain the unique shutdown job")
         job_id = matches[0].get("id")
-        if not isinstance(job_id, str) or not re.fullmatch(r"[0-9a-f-]{36}", job_id):
+        if not isinstance(job_id, str) or not UUID_RE.fullmatch(job_id):
             raise JourneyError("SSO shutdown job has no public UUID identity")
         run_id = self.candidate_cli("shutdown-start", "run", "start", "--job-id", job_id, "--server", self.sp_base, timeout=90)
-        if not re.fullmatch(r"[0-9a-f-]{36}", run_id):
+        if not UUID_RE.fullmatch(run_id):
             raise JourneyError("SSO candidate CLI did not return the shutdown run UUID")
         path = f"/v1/jobs/{job_id}/runs/{run_id}"
         deadline = time.monotonic() + 90
@@ -1008,7 +1009,7 @@ class Collector:
                 task_id = task.get("task_id")
                 if not isinstance(runtime_id, str) or not re.fullmatch(r"[0-9a-f]{64}", runtime_id):
                     raise JourneyError("SSO shutdown task did not expose an immutable runtime ID")
-                if not isinstance(task_id, str) or not re.fullmatch(r"[0-9a-f-]{36}", task_id):
+                if not isinstance(task_id, str) or not UUID_RE.fullmatch(task_id):
                     raise JourneyError("SSO shutdown task public identity is invalid")
                 if task.get("engine") != "docker" or task.get("image") != self.task_image_ref:
                     raise JourneyError("SSO shutdown task used a different backend or image")
@@ -1020,7 +1021,7 @@ class Collector:
                 task_run_id = instance.get("task_run_id")
                 if (
                     not isinstance(task_run_id, str)
-                    or not re.fullmatch(r"[0-9a-f-]{36}", task_run_id)
+                    or not UUID_RE.fullmatch(task_run_id)
                     or instance.get("status") != "running"
                     or instance.get("runtime_id") != runtime_id
                     or instance.get("completed_at")
@@ -1166,7 +1167,7 @@ class Collector:
             if isinstance(tasks, list) and len(tasks) == 1 and isinstance(tasks[0], dict):
                 task = tasks[0]
                 if record.get("status") == "failed" and task.get("status") == "failed":
-                    if record.get("error") != "context canceled" or task.get("error") != self.local_task_cancel_cause():
+                    if record.get("error") != "context canceled" or task.get("error") not in ("context canceled", self.local_task_cancel_cause()):
                         raise JourneyError("persisted shutdown run/task lacks the authoritative context cancellation cause")
                     if record.get("id") != self.shutdown_job["run_id"] or task.get("task_id") != self.shutdown_job["task_id"]:
                         raise JourneyError("persisted shutdown run/catalog identity changed across server restart")
@@ -1195,7 +1196,7 @@ class Collector:
                     if (
                         instance.get("task_run_id") != self.shutdown_job["task_run_id"]
                         or instance.get("status") != "failed"
-                        or instance.get("error") != self.local_task_cancel_cause()
+                        or instance.get("error") != task.get("error")
                         or instance.get("runtime_id") != self.shutdown_job["runtime_id"]
                     ):
                         raise JourneyError("persisted concrete TaskRun identity/status/cause changed across restart")

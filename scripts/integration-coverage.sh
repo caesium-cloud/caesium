@@ -378,13 +378,21 @@ build_image() {
 
 extract_audit() {
   require_cmd "$CONTAINER_CLI"
-  local cid
-  cid="$("$CONTAINER_CLI" create --platform "$PLATFORM" --entrypoint true "$IMAGE_ID")"
+  local cid audit_name="${ID}-audit-extract"
+  coverage_journey_require_absent container "$audit_name" || die "audit extraction name is not provably free"
+  COVERAGE_JOURNEY_PENDING_NAMES+=("$audit_name")
+  cid="$("$CONTAINER_CLI" create --platform "$PLATFORM" --name "$audit_name" \
+    --label "caesium.coverage.owner=$CANDIDATE_SHA" \
+    --label "caesium.coverage.run=$ID" \
+    --label caesium.coverage.lane=audit-extract \
+    --entrypoint true "$IMAGE_ID")" || die "audit extraction allocation outcome is unproved"
+  coverage_journey_track_id "$cid"
+  coverage_journey_resource owned container "$cid" >/dev/null || die "audit extraction ownership is unproved"
   if ! "$CONTAINER_CLI" cp "$cid":/usr/share/caesium-coverage/. "$AUDIT/"; then
-    "$CONTAINER_CLI" rm -f "$cid" >/dev/null 2>&1 || true
+    coverage_journey_remove_owned "$cid" || die "audit extraction copy failed and removal is unproved"
     die "cannot extract the pinned coverage image audit"
   fi
-  "$CONTAINER_CLI" rm -f "$cid" >/dev/null 2>&1 || true
+  coverage_journey_remove_owned "$cid" || die "audit extraction cleanup is unproved"
 }
 
 write_fixture() {

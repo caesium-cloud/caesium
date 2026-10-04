@@ -166,7 +166,11 @@ coverage_journey_untrack_id() {
   for id in "${COVERAGE_JOURNEY_ACTIVE_IDS[@]}"; do
     [[ "$id" == "$want" ]] || kept+=("$id")
   done
-  COVERAGE_JOURNEY_ACTIVE_IDS=("${kept[@]}")
+  if ((${#kept[@]})); then
+    COVERAGE_JOURNEY_ACTIVE_IDS=("${kept[@]}")
+  else
+    COVERAGE_JOURNEY_ACTIVE_IDS=()
+  fi
 }
 
 coverage_journey_resource() {
@@ -747,7 +751,7 @@ shutdown = record.get("shutdown_cancellation")
 if not isinstance(shutdown, dict):
     raise SystemExit("SSO shutdown cancellation evidence is missing")
 for field in ("job_id", "run_id", "task_id", "task_run_id"):
-    if not isinstance(shutdown.get(field), str) or not re.fullmatch(r"[0-9a-f-]{36}", shutdown[field]):
+    if not isinstance(shutdown.get(field), str) or not re.fullmatch(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", shutdown[field]):
         raise SystemExit("SSO shutdown run/task identity is invalid")
 if not isinstance(shutdown.get("runtime_id"), str) or not re.fullmatch(r"[0-9a-f]{64}", shutdown["runtime_id"]):
     raise SystemExit("SSO shutdown runtime identity is invalid")
@@ -762,9 +766,9 @@ if shutdown.get("native_runtime_removed") is not True or shutdown.get("verified_
 if (shutdown.get("final_run_status"), shutdown.get("final_task_status")) != ("failed", "failed"):
     raise SystemExit("SSO shutdown run/task did not persist as failed")
 task_cancel = "task " + shutdown["task_id"] + " cancelled: context canceled"
-if (shutdown.get("final_run_error"), shutdown.get("final_task_error")) != ("context canceled", task_cancel):
+if shutdown.get("final_run_error") != "context canceled" or shutdown.get("final_task_error") not in ("context canceled", task_cancel):
     raise SystemExit("SSO shutdown run/task did not preserve its whole-run cancellation cause")
-if shutdown.get("final_task_run_id") != shutdown.get("task_run_id") or shutdown.get("final_task_run_status") != "failed" or shutdown.get("final_task_run_error") != task_cancel:
+if shutdown.get("final_task_run_id") != shutdown.get("task_run_id") or shutdown.get("final_task_run_status") != "failed" or shutdown.get("final_task_run_error") != shutdown.get("final_task_error"):
     raise SystemExit("SSO concrete TaskRun identity/status/cause did not persist")
 native = shutdown.get("native_before_signal")
 if not isinstance(native, dict) or native.get("running") is not True:

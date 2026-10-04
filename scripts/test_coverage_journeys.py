@@ -317,8 +317,16 @@ if cleanup_coverage_journeys; then exit 9; fi
         record = self.tmp / "record.json"
         env = {**os.environ, "SSO_RECORD_RAW_ROOT": str(raw.resolve()), "SSO_RECORD_SHA": OWNER,
                "SSO_RECORD_IMAGE_ID": IMAGE, "SSO_RECORD_INPUTS_SHA256": digest}
-        for fault in (None, "native", "timestamp", "exit", "cause", "flush"):
+        for fault in (None, "plain", "native", "timestamp", "exit", "cause", "flush", "wrong-uuid", "substring"):
             value = copy.deepcopy(original)
+            if fault == "plain":
+                value["shutdown_cancellation"].update(final_task_error="context canceled", final_task_run_error="context canceled")
+            if fault == "wrong-uuid":
+                wrong = "task " + RUN + " cancelled: context canceled"
+                value["shutdown_cancellation"].update(final_task_error=wrong, final_task_run_error=wrong)
+            if fault == "substring":
+                wrong = "prefix context canceled suffix"
+                value["shutdown_cancellation"].update(final_task_error=wrong, final_task_run_error=wrong)
             if fault == "native": value["shutdown_cancellation"]["native_before_signal"]["running"] = False
             if fault == "timestamp": value["shutdown_cancellation"]["task_completed_at"] = "2026-10-04T12:00:03Z"
             if fault == "exit": value["server_generations"][0]["exit_code"] = 143
@@ -331,12 +339,91 @@ if cleanup_coverage_journeys; then exit 9; fi
             for path in (cli_list, server_list): path.unlink(missing_ok=True)
             result = subprocess.run(["python3", "-c", code, str(record), str(inputs), str(cli_list), str(server_list)],
                 env=env, capture_output=True)
-            if fault is None:
+            if fault in (None, "plain"):
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertEqual(cli_list.read_text().splitlines(), ["shutdown-apply", "shutdown-start"])
             else:
                 self.assertNotEqual(result.returncode, 0, fault)
                 self.assertFalse(cli_list.exists(), fault)
+
+    def test_live_shutdown_exact_cause_forms_must_agree_on_both_rows(self):
+        formatted = "task " + TASK + " cancelled: context canceled"
+        for collapsed, concrete, accepted in (
+            (formatted, formatted, True), ("context canceled", "context canceled", True),
+            (formatted, "context canceled", False), ("context canceled", formatted, False),
+            ("task " + RUN + " cancelled: context canceled", "task " + RUN + " cancelled: context canceled", False),
+            ("prefix context canceled suffix", "prefix context canceled suffix", False),
+        ):
+            c = self.collector()
+            c.shutdown_job = {"job_id": RUN, "run_id": RUN, "task_id": TASK, "task_run_id": TASK, "runtime_id": CID}
+            c.native_runtime_absent_generations = [1]
+            c.verify_runtime_absent = lambda generation: None
+            c.server_generations = [{"finished_at": "2026-10-04T12:00:02Z"}]
+            parent = {"id": RUN, "status": "failed", "error": "context canceled", "completed_at": "2026-10-04T12:00:01Z",
+                "tasks": [{"task_id": TASK, "status": "failed", "error": collapsed}]}
+            instances = {"total": 1, "partitions": [{"task_run_id": TASK, "runtime_id": CID, "status": "failed",
+                "error": concrete, "completed_at": "2026-10-04T12:00:01Z"}]}
+            c.api_json = lambda _, path: instances if "/partitions" in path else parent
+            if accepted:
+                c.verify_shutdown_job_failed("server")
+                self.assertEqual(c.shutdown_job["final_task_error"], concrete)
+            else:
+                with self.assertRaises(b.JourneyError): c.verify_shutdown_job_failed("server")
+
+    def test_shell_untrack_last_id_and_keep_another_under_nounset(self):
+        shell = '''set -eu
+source "$1/scripts/coverage-journeys.sh"
+coverage_journey_track_id first
+coverage_journey_untrack_id first
+[[ "${#COVERAGE_JOURNEY_ACTIVE_IDS[@]}" == 0 ]]
+coverage_journey_track_id first
+coverage_journey_track_id second
+coverage_journey_untrack_id first
+[[ "${#COVERAGE_JOURNEY_ACTIVE_IDS[@]}" == 1 && "${COVERAGE_JOURNEY_ACTIVE_IDS[0]}" == second ]]
+coverage_journey_untrack_id second
+[[ "${#COVERAGE_JOURNEY_ACTIVE_IDS[@]}" == 0 ]]
+'''
+        result = subprocess.run(["bash", "-c", shell, "hermetic", str(ROOT)], capture_output=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_audit_extraction_failure_keeps_ownership_and_cannot_pass(self):
+        source = (ROOT / "scripts/integration-coverage.sh").read_text()
+        start = source.index("extract_audit() {")
+        extract = source[start:source.index("\nwrite_fixture() {", start)]
+        shell = '''set -eu
+source "$1/scripts/coverage-journeys.sh"
+ROOT="$1"; ARTIFACTS="$2"; AUDIT="$2"; ID=owned; CANDIDATE_SHA=owner; IMAGE_ID=image; PLATFORM=linux/arm64
+CONTAINER_CLI=fake_docker; FAULT="$3"
+require_cmd() { :; }
+die() { exit 1; }
+log() { :; }
+coverage_journey_resource() {
+  [[ "$1" != remove || "$FAULT" == success ]] || return 1
+}
+fake_docker() {
+  case "$1" in
+    create)
+      [[ " $* " == *" --name owned-audit-extract "* && " $* " == *" --label caesium.coverage.owner=owner "* && " $* " == *" --label caesium.coverage.run=owned "* && " $* " == *" --label caesium.coverage.lane=audit-extract "* ]] || return 8
+      [[ "$FAULT" != create ]] || return 1
+      echo immutable-id
+      ;;
+    cp) [[ "$FAULT" != cp ]] ;;
+    *) return 9 ;;
+  esac
+}
+trap 'printf "%s\\n" "${COVERAGE_JOURNEY_PENDING_NAMES[*]}" >"$ARTIFACTS/names"; if ((${#COVERAGE_JOURNEY_ACTIVE_IDS[@]})); then printf "%s\\n" "${COVERAGE_JOURNEY_ACTIVE_IDS[@]}" >"$ARTIFACTS/ids"; fi' EXIT
+''' + extract + "\nextract_audit\nprintf PASS\n"
+        for fault in ("success", "create", "cp", "remove"):
+            case = self.tmp / fault; case.mkdir()
+            result = subprocess.run(["bash", "-c", shell, "hermetic", str(ROOT), str(case), fault], capture_output=True)
+            if fault == "success":
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stdout, b"PASS")
+            else:
+                self.assertNotEqual(result.returncode, 0, fault)
+                self.assertNotIn(b"PASS", result.stdout)
+                self.assertIn("owned-audit-extract", (case / "names").read_text())
+                if fault != "create": self.assertIn("immutable-id", (case / "ids").read_text())
 
     def test_network_rm_failure_retains_ledger(self):
         c = self.collector(); c.network_id, c.network_attempted = CID, True
