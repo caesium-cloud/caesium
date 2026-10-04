@@ -2698,7 +2698,7 @@ func (h *harness) offer(ctx context.Context, job appliedJob, index int, schedule
 		if !looksLikeUUID(partial.ID) {
 			partial.ID = ""
 		}
-		record(outcomeUncertain, "response body incomplete after HTTP "+strconv.Itoa(code)+": "+readErr.Error(), code, partial.ID)
+		record(outcomeUncertain, "response body incomplete after HTTP "+strconv.Itoa(code)+" (possible run "+partial.ID+"): "+readErr.Error(), code, "")
 		return
 	}
 	switch {

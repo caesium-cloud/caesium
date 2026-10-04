@@ -107,3 +107,24 @@ func TestCappedLoadEvidenceRejectsOverflowAndPreservesPartialStatus(t *testing.T
 		})
 	}
 }
+
+func TestUncertainOfferPossibleIdentityDoesNotCountAsAcknowledgedAdmission(t *testing.T) {
+	const id = "e2a55b78-4f0e-4903-a9eb-36a3ff647959"
+	calls := 0
+	failure := errors.New("incomplete admission")
+	h := &harness{client: evidenceClient(`{"id":"`+id+`"}`, http.StatusAccepted, failure, &calls)}
+	lg := newLedger(1)
+	h.offer(t.Context(), appliedJob{id: "job"}, 0, time.Now(), lg, make(chan reconcileItem, 1))
+	a := lg.arrivals[0]
+	if a.outcome != outcomeUncertain || a.runID != "" || !strings.Contains(a.reason, id) || a.statusCode != http.StatusAccepted || calls != 1 {
+		t.Fatalf("%+v calls=%d", a, calls)
+	}
+	results := ledgerResults(lg)
+	if results[0].runID != "" || results[0].status != outcomeUncertain {
+		t.Fatalf("%+v", results)
+	}
+	report := buildReport(config{jobCount: 1}, results, metricSample{}, metricSample{}, nil, time.Second)
+	if report.runsObserved != 0 || report.runsUncertain != 1 {
+		t.Fatalf("observed=%d uncertain=%d", report.runsObserved, report.runsUncertain)
+	}
+}

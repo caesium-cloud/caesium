@@ -66,13 +66,13 @@ func TestSoakStartIncompleteBodyReconcilesOnlyWithSameKey(t *testing.T) {
 				return &http.Response{StatusCode: http.StatusAccepted, Header: make(http.Header), Body: b, Request: req}, nil
 			})}
 			entry := sr.startTracked(t.Context(), sr.fe.topo.Members[0], "job", "same-key", nil, "", "test", nil, true)
-			if entry.Err == "" || entry.RunID != id || entry.HTTPStatus != http.StatusAccepted || calls != 1 {
+			if entry.Err == "" || !strings.Contains(entry.Err, id) || entry.RunID != "" || entry.HTTPStatus != http.StatusAccepted || calls != 1 || !entry.uncertainOrEmpty() {
 				t.Fatalf("%+v calls=%d", entry, calls)
 			}
 			if err := sr.reconcileWithRetry(t.Context(), entry, 1, 0); err != nil {
 				t.Fatal(err)
 			}
-			if calls != 2 || keys[0] != "same-key" || keys[1] != "same-key" || !entry.Reconciled || entry.RunID != id {
+			if calls != 2 || keys[0] != "same-key" || keys[1] != "same-key" || !entry.Reconciled || entry.RunID != id || entry.uncertainOrEmpty() {
 				t.Fatalf("%+v keys=%v", entry, keys)
 			}
 		})

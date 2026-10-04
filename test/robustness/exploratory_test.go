@@ -773,7 +773,7 @@ func (sr *soakRunner) start(ctx context.Context, m cluster.Member, jobID, key st
 				out.QueueID = partial.QueueID
 			}
 		}
-		out.Err = fmt.Sprintf("HTTP %d body incomplete, admission uncertain: %v", resp.StatusCode, readErr)
+		out.Err = fmt.Sprintf("HTTP %d body incomplete, admission uncertain (possible run %q, queue %q): %v", resp.StatusCode, out.RunID, out.QueueID, readErr)
 		return out
 	}
 	if resp.StatusCode != http.StatusAccepted {
@@ -823,11 +823,17 @@ func (sr *soakRunner) start(ctx context.Context, m cluster.Member, jobID, key st
 // startTracked admits a start and appends it to the ledger.
 func (sr *soakRunner) startTracked(ctx context.Context, m cluster.Member, jobID, key string, params map[string]string, priority, source string, steps []string, checked bool) *soakRun {
 	res := sr.start(ctx, m, jobID, key, params, priority)
+	// RunID and QueueID are acknowledged identities in the ledger. Possible
+	// identities from incomplete reads remain in Err until same-key replay.
+	runID, queueID := res.RunID, res.QueueID
+	if res.uncertain() {
+		runID, queueID = "", ""
+	}
 	entry := &soakRun{
 		Key: key, Source: source, JobID: jobID, Steps: steps, Member: m.Name,
 		Params: params, Priority: priority, AdmittedAt: time.Now().UTC(),
-		HTTPStatus: res.HTTPStatus, Outcome: res.Outcome, RunID: res.RunID,
-		QueueID: res.QueueID, Err: res.Err, Checked: checked,
+		HTTPStatus: res.HTTPStatus, Outcome: res.Outcome, RunID: runID,
+		QueueID: queueID, Err: res.Err, Checked: checked,
 	}
 	if res.uncertain() && entry.Err == "" {
 		entry.Err = fmt.Sprintf("HTTP %d: %s", res.HTTPStatus, res.Raw)
@@ -1901,7 +1907,7 @@ func (sr *soakRunner) episodeRetention(t *testing.T, ep SoakEpisode, rec *episod
 }
 
 func (e *soakRun) uncertainOrEmpty() bool {
-	return e.RunID == "" && (e.Err != "" || e.HTTPStatus == 0 || e.HTTPStatus >= 500)
+	return !e.Reconciled && (e.Err != "" || e.HTTPStatus == 0 || e.HTTPStatus >= 500)
 }
 
 // ---------------------------------------------------------------------------
@@ -2466,7 +2472,7 @@ func (sr *soakRunner) drain(t *testing.T) {
 
 	var uncertain, refused []string
 	for _, e := range ledger {
-		if e.RunID == "" && (e.Err != "" || e.HTTPStatus == 0 || e.HTTPStatus >= 500) {
+		if e.uncertainOrEmpty() {
 			if err := sr.reconcile(ctx, e); err != nil {
 				uncertain = append(uncertain, err.Error())
 			}
