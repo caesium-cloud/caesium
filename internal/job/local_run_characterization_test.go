@@ -93,7 +93,7 @@ func TestLocalRunUnresolvedDependenciesKeepCompletionErrorSeparate(t *testing.T)
 
 func TestLocalRunPreservedFailureSeedsCompletionError(t *testing.T) {
 	j, store, engine, tasks := characterizationJob(t, 2, [][2]int{{0, 1}})
-	snapshot, err := store.Start(j.id, uuid.Nil)
+	snapshot, err := store.Start(j.id, nil)
 	require.NoError(t, err)
 	inputs := make([]run.RegisterTaskInput, 0, len(tasks))
 	for i, task := range tasks {
