@@ -12,10 +12,7 @@ import (
 )
 
 func TestReconstructEnvLayeringAndSecretOmission(t *testing.T) {
-	desc := &Descriptor{}
-	desc.SchemaVersion = 1
-	desc.Baseline.TaskName = "transform"
-	desc.Runtime.Image = "registry.example.com/etl/transform:1"
+	desc := testDescriptor("transform", "registry.example.com/etl/transform:1")
 	desc.Runtime.ResolvedImageDigest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 	desc.ContainerSpec.Env = map[string]string{
 		"LITERAL_ENV":                 "fixture-literal",
@@ -74,10 +71,7 @@ func TestReconstructEnvLayeringAndSecretOmission(t *testing.T) {
 }
 
 func TestReconstructInterpolatesParamRefs(t *testing.T) {
-	desc := &Descriptor{}
-	desc.SchemaVersion = 1
-	desc.Baseline.TaskName = "checkout"
-	desc.Runtime.Image = "caesiumcloud/git-source:latest"
+	desc := testDescriptor("checkout", "caesiumcloud/git-source:latest")
 	desc.Runtime.ParamEnvInterpolation = true
 	desc.ContainerSpec.Env = map[string]string{
 		"GIT_REF": "${CAESIUM_PARAM_SHA}",
@@ -117,10 +111,7 @@ func TestReconstructInterpolatesParamRefs(t *testing.T) {
 }
 
 func TestReconstructLegacyDescriptorKeepsParamRefLiteral(t *testing.T) {
-	desc := &Descriptor{}
-	desc.SchemaVersion = 1
-	desc.Baseline.TaskName = "checkout"
-	desc.Runtime.Image = "caesiumcloud/git-source:latest"
+	desc := testDescriptor("checkout", "caesiumcloud/git-source:latest")
 	// ParamEnvInterpolation is intentionally omitted, as it is on descriptors
 	// captured before scheduler interpolation existed.
 	desc.ContainerSpec.Env = map[string]string{
@@ -141,10 +132,7 @@ func TestReconstructLegacyDescriptorKeepsParamRefLiteral(t *testing.T) {
 }
 
 func TestReconstructOutputRefUsesBuildOutputEnvShape(t *testing.T) {
-	desc := &Descriptor{}
-	desc.SchemaVersion = 1
-	desc.Baseline.TaskName = "load"
-	desc.Runtime.Image = "alpine:3.23"
+	desc := testDescriptor("load", "alpine:3.23")
 	desc.DAG.Predecessors = []EdgeRef{{TaskID: "22222222-2222-2222-2222-222222222222", TaskName: "extract.step"}}
 	ref := containerOutputRef("/data/out.parquet")
 	desc.DAG.PredecessorOutputs = map[string]map[string]string{
@@ -170,10 +158,7 @@ func TestReconstructOutputRefUsesBuildOutputEnvShape(t *testing.T) {
 }
 
 func TestReconstructImageOverrideMarksEnvelopeAndFidelity(t *testing.T) {
-	desc := &Descriptor{}
-	desc.SchemaVersion = 1
-	desc.Baseline.TaskName = "transform"
-	desc.Runtime.Image = "registry.example.com/team/app:prod"
+	desc := testDescriptor("transform", "registry.example.com/team/app:prod")
 	desc.Runtime.ResolvedImageDigest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 
 	env, err := Reconstruct(context.Background(), desc, ReconstructOptions{ImageOverride: "registry.example.com/team/app:candidate"})
@@ -202,10 +187,7 @@ func TestReconstructImageOverrideMarksEnvelopeAndFidelity(t *testing.T) {
 
 func TestReconstructLocalImageIDDoesNotPinNameAtDigest(t *testing.T) {
 	const configID = "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
-	desc := &Descriptor{}
-	desc.SchemaVersion = 1
-	desc.Baseline.TaskName = "build"
-	desc.Runtime.Image = "locally-built:dev"
+	desc := testDescriptor("build", "locally-built:dev")
 	desc.Runtime.ResolvedImageDigest = imagecheck.MarkImageIDDigest(configID)
 
 	env, err := Reconstruct(context.Background(), desc, ReconstructOptions{})
@@ -221,10 +203,7 @@ func TestReconstructLocalImageIDDoesNotPinNameAtDigest(t *testing.T) {
 }
 
 func TestReconstructResolveSecretsInjectsLocalValueBeforeSetEnvOverride(t *testing.T) {
-	desc := &Descriptor{}
-	desc.SchemaVersion = 1
-	desc.Baseline.TaskName = "transform"
-	desc.Runtime.Image = "alpine:3.23"
+	desc := testDescriptor("transform", "alpine:3.23")
 	desc.ContainerSpec.Env = map[string]string{
 		"SECRET_ENV": "secret://env/DB_PASSWORD",
 	}
@@ -273,10 +252,7 @@ func TestReconstructResolveSecretsInjectsLocalValueBeforeSetEnvOverride(t *testi
 }
 
 func TestReconstructResolveSecretsOmitOnFailureOrProviderMismatch(t *testing.T) {
-	desc := &Descriptor{}
-	desc.SchemaVersion = 1
-	desc.Baseline.TaskName = "transform"
-	desc.Runtime.Image = "alpine:3.23"
+	desc := testDescriptor("transform", "alpine:3.23")
 	desc.ContainerSpec.Env = map[string]string{
 		"MISSING_SECRET":  "secret://env/MISSING",
 		"MISMATCH_SECRET": "secret://vault/secret/data/db?field=password",
@@ -320,10 +296,7 @@ func TestReconstructResolveSecretsOmitOnFailureOrProviderMismatch(t *testing.T) 
 }
 
 func TestReconstructResolveSecretsWarnsOnComparableDrift(t *testing.T) {
-	desc := &Descriptor{}
-	desc.SchemaVersion = 1
-	desc.Baseline.TaskName = "transform"
-	desc.Runtime.Image = "alpine:3.23"
+	desc := testDescriptor("transform", "alpine:3.23")
 	desc.ContainerSpec.Env = map[string]string{
 		"VAULT_SECRET": "secret://vault/secret/data/db?field=password",
 		"K8S_SECRET":   "secret://k8s/default/db/password",
@@ -384,10 +357,7 @@ func TestReconstructResolveSecretsWarnsOnComparableDrift(t *testing.T) {
 }
 
 func TestReconstructMountRemapAndKubernetesSkip(t *testing.T) {
-	desc := &Descriptor{}
-	desc.SchemaVersion = 1
-	desc.Baseline.TaskName = "transform"
-	desc.Runtime.Image = "alpine:3.23"
+	desc := testDescriptor("transform", "alpine:3.23")
 	desc.ContainerSpec.Mounts = []container.Mount{{
 		Type:   container.MountTypeBind,
 		Source: "/prod/data",
@@ -420,10 +390,7 @@ func TestReconstructMountRemapAndKubernetesSkip(t *testing.T) {
 }
 
 func TestReconstructFidelitySummaryListsBestEffortDimensions(t *testing.T) {
-	desc := &Descriptor{}
-	desc.SchemaVersion = 1
-	desc.Baseline.TaskName = "transform"
-	desc.Runtime.Image = "registry.example.com/team/app:latest"
+	desc := testDescriptor("transform", "registry.example.com/team/app:latest")
 	desc.Runtime.Engine = "kubernetes"
 	desc.Runtime.NodeSelector = map[string]string{"disk": "ssd"}
 	desc.KubernetesSpec = &container.KubernetesSpec{
@@ -528,4 +495,12 @@ func (r *fakeSecretResolver) ResolveWithIdentity(_ context.Context, ref string) 
 		return "", SecretIdentity{}, errors.New("secret not found")
 	}
 	return value.value, value.identity, nil
+}
+
+func testDescriptor(taskName, image string) *Descriptor {
+	desc := &Descriptor{}
+	desc.SchemaVersion = 1
+	desc.Baseline.TaskName = taskName
+	desc.Runtime.Image = image
+	return desc
 }
