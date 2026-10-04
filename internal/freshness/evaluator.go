@@ -453,6 +453,15 @@ func (e *Evaluator) upstreamReady(ctx context.Context, outputState models.Datase
 		return true, map[string]string{}, "", nil
 	}
 
+	ids := make([]datasetIdentity, 0, len(consumes))
+	for _, consume := range consumes {
+		ids = append(ids, declarationIdentity(consume))
+	}
+	states, err := e.store.getMany(ctx, ids)
+	if err != nil {
+		return false, nil, "", err
+	}
+
 	lastConsumed := decodeConsumedWatermarks(outputState.ConsumedWatermarks)
 	current := make(map[string]string, len(consumes))
 	waiting := make([]string, 0)
@@ -465,10 +474,7 @@ func (e *Evaluator) upstreamReady(ctx context.Context, outputState models.Datase
 		// namespaces do not collide in the consumed-watermark snapshot. For the
 		// v1 default (empty namespace) this is just the name.
 		key := datasetParamName(consume.Namespace, name)
-		state, ok, err := e.store.Get(ctx, consume.Namespace, name)
-		if err != nil {
-			return false, nil, "", err
-		}
+		state, ok := states[declarationIdentity(consume)]
 		watermark := ""
 		observed := false
 		if ok {
@@ -1045,11 +1051,6 @@ func (e *Evaluator) runTriggerDepth(ctx context.Context, runID uuid.UUID) (int, 
 		return 0, nil
 	}
 	return depth, nil
-}
-
-type datasetIdentity struct {
-	namespace string
-	name      string
 }
 
 type registrySnapshot struct {

@@ -354,7 +354,7 @@ func (c *Capturer) stepOutputs(ctx context.Context, runID uuid.UUID) (map[string
 }
 
 // consumedSnapshot reads the current watermark of every consumed dataset in a
-// single query (no per-name N+1), keyed on the nil→"" namespace mapping.
+// bounded batch queries (no per-name N+1), keyed on the nil→"" namespace mapping.
 //
 // It is a point-in-time read of whenever it is called: StartParamsEnricher calls
 // it to freeze the run's input view at creation, and consumedForRun calls it
@@ -366,32 +366,20 @@ func (c *Capturer) stepOutputs(ctx context.Context, runID uuid.UUID) (map[string
 // means the view is UNKNOWN. Returning nil for both is what let a transient read
 // failure be written down as an authoritative empty view.
 func consumedSnapshot(ctx context.Context, db *gorm.DB, namespace *string, names []string) (map[string]string, error) {
-	if len(names) == 0 {
-		return nil, nil
+	ids := make([]datasetIdentity, 0, len(names))
+	for _, name := range names {
+		ids = append(ids, datasetIdentity{namespace: nsValue(namespace), name: name})
 	}
-	// Dedupe before the IN query.
-	seen := make(map[string]struct{}, len(names))
-	uniq := make([]string, 0, len(names))
-	for _, n := range names {
-		if _, dup := seen[n]; dup {
-			continue
-		}
-		seen[n] = struct{}{}
-		uniq = append(uniq, n)
-	}
-
-	var rows []models.DatasetState
-	if err := db.WithContext(ctx).
-		Where("namespace = ? AND name IN ?", nsValue(namespace), uniq).
-		Find(&rows).Error; err != nil {
+	rows, err := NewStore(db).getMany(ctx, ids)
+	if err != nil {
 		return nil, err
 	}
 	if len(rows) == 0 {
 		return nil, nil
 	}
 	snapshot := make(map[string]string, len(rows))
-	for i := range rows {
-		snapshot[rows[i].Name] = rows[i].Watermark
+	for id, row := range rows {
+		snapshot[id.name] = row.Watermark
 	}
 	return snapshot, nil
 }

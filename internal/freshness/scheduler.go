@@ -141,6 +141,15 @@ func (e *Evaluator) consumedWatermarksBlockSkip(ctx context.Context, outputState
 		return false, map[string]string{}, "", nil
 	}
 
+	ids := make([]datasetIdentity, 0, len(consumes))
+	for _, consume := range consumes {
+		ids = append(ids, declarationIdentity(consume))
+	}
+	states, err := e.store.getMany(ctx, ids)
+	if err != nil {
+		return false, nil, "", err
+	}
+
 	lastConsumed := decodeConsumedWatermarks(outputState.ConsumedWatermarks)
 	current := make(map[string]string, len(consumes))
 	advanced := make([]string, 0)
@@ -151,10 +160,7 @@ func (e *Evaluator) consumedWatermarksBlockSkip(ctx context.Context, outputState
 			continue
 		}
 		key := datasetParamName(consume.Namespace, name)
-		state, ok, err := e.store.Get(ctx, consume.Namespace, name)
-		if err != nil {
-			return false, nil, "", err
-		}
+		state, ok := states[declarationIdentity(consume)]
 		watermark := ""
 		if ok {
 			watermark = state.Watermark
