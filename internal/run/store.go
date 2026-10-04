@@ -3746,6 +3746,12 @@ type predecessorRef struct {
 // Replay: the descriptor's frozen predecessor refs, so a later apply cannot
 // change what a replay run considers its inputs.
 func (s *Store) resolvePredecessorsTx(tx *gorm.DB, runID, taskID uuid.UUID) ([]predecessorRef, error) {
+	return s.resolvePredecessorsWithPolicyTx(tx, runID, taskID, false)
+}
+
+// Strict name resolution is reserved for execution-input acquisition. Legacy
+// status and trigger readers retain their best-effort catalog policy.
+func (s *Store) resolvePredecessorsWithPolicyTx(tx *gorm.DB, runID, taskID uuid.UUID, strict bool) ([]predecessorRef, error) {
 	refs, replay, err := s.replayPredecessorRefsTx(tx, runID, taskID)
 	if err != nil {
 		return nil, err
@@ -3784,6 +3790,9 @@ func (s *Store) resolvePredecessorsTx(tx *gorm.DB, runID, taskID uuid.UUID) ([]p
 	namesByID := make(map[uuid.UUID]string, len(predTaskIDs))
 	var tasks []models.Task
 	if err := tx.Where("id IN ?", predTaskIDs).Find(&tasks).Error; err != nil {
+		if strict {
+			return nil, fmt.Errorf("resolve predecessor task names: %w", err)
+		}
 		log.Warn("failed to resolve predecessor task names", "run_id", runID, "task_id", taskID, "error", err)
 	} else {
 		for i := range tasks {
@@ -3794,6 +3803,9 @@ func (s *Store) resolvePredecessorsTx(tx *gorm.DB, runID, taskID uuid.UUID) ([]p
 	out := make([]predecessorRef, 0, len(edges))
 	for _, edge := range edges {
 		name, ok := namesByID[edge.FromTaskID]
+		if strict && !ok {
+			return nil, fmt.Errorf("predecessor task %s is missing from the live catalog", edge.FromTaskID)
+		}
 		out = append(out, predecessorRef{TaskID: edge.FromTaskID, Name: name, HasCatalogRow: ok})
 	}
 	return out, nil
@@ -6648,6 +6660,10 @@ func groupTaskRunsByTaskID(rows []models.TaskRun) map[uuid.UUID][]models.TaskRun
 // silently truncated fan-in contract is the failure mode
 // FanInAggregateTooLargeError exists to prevent.
 func predecessorGroupOutput(producer string, rows []models.TaskRun) (map[string]string, bool, error) {
+	return predecessorGroupOutputWithPolicy(producer, rows, false)
+}
+
+func predecessorGroupOutputWithPolicy(producer string, rows []models.TaskRun, strict bool) (map[string]string, bool, error) {
 	switch {
 	case len(rows) == 0:
 		return nil, false, nil
@@ -6657,6 +6673,9 @@ func predecessorGroupOutput(producer string, rows []models.TaskRun) (map[string]
 		}
 		var output map[string]string
 		if err := json.Unmarshal(rows[0].Output, &output); err != nil {
+			if strict {
+				return nil, false, fmt.Errorf("decode predecessor %s output: %w", producer, err)
+			}
 			log.Warn("failed to unmarshal predecessor task output", "predecessor_task_id", rows[0].TaskID, "error", err)
 			return nil, false, nil
 		}
@@ -6676,6 +6695,9 @@ func predecessorGroupOutput(producer string, rows []models.TaskRun) (map[string]
 			}
 			var output map[string]string
 			if err := json.Unmarshal(row.Output, &output); err != nil {
+				if strict {
+					return nil, false, fmt.Errorf("decode predecessor %s partition %q output: %w", producer, row.PartitionValue, err)
+				}
 				log.Warn("failed to unmarshal fan-out instance output", "predecessor_task_id", row.TaskID, "partition", row.PartitionValue, "error", err)
 				continue
 			}
