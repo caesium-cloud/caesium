@@ -205,9 +205,3 @@ func parseListRequest(c *echo.Context) (*svc.ListRequest, error) {
 
 	return req, nil
 }
-
-// parseSafeOrderBy remains a package-local adapter for existing callers and
-// tests; the shared parser owns the grammar.
-func parseSafeOrderBy(raw string) ([]string, error) {
-	return orderby.Parse(raw, allowedOrderColumns)
-}

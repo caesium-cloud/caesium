@@ -350,10 +350,6 @@ func extractDefaultParams(cfg map[string]any) (map[string]string, error) {
 	}
 }
 
-func (c *Cron) nextTick() time.Time {
-	return c.nextTickAt(time.Now())
-}
-
 func (c *Cron) nextTickAt(base time.Time) time.Time {
 	if c.location != nil {
 		base = base.In(c.location)
