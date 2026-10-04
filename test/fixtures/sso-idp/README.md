@@ -80,8 +80,13 @@ reads and read-only SQL queries with real `/auth/whoami` CSRF tokens.
 ```
 
 Whole journey deadline defaults to four minutes and cannot exceed four minutes;
-HTTP requests are bounded to ten seconds. The original SAML assertion is valid
-five minutes and state cookie ten minutes; do not delay the restart. Keep the
+HTTP requests are bounded to ten seconds. Assertion conditions last five minutes
+and the state cookie ten minutes, but crewjam rejects Response or Assertion
+IssueInstant older than its 90-second MaxIssueDelay before accessing the replay
+store. Both replay callbacks therefore require the original signed issue instants
+and monotonic elapsed time to remain strictly below 60 seconds before and after
+submission. The restart barrier has that same tighter bound; an aged 401 fails
+the journey instead of counting as durable replay evidence. Do not delay restart. Keep the
 journey process alive with stdout/stdin pipes through the barrier. Each stdout
 JSON line is written immediately, without a buffering wrapper.
 

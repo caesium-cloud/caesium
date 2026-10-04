@@ -6,8 +6,10 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"encoding/xml"
 	"errors"
 	"flag"
 	"html"
@@ -42,6 +44,9 @@ type login struct {
 	state                 *http.Cookie
 	callback, assertionID string
 	form                  url.Values
+	replayStartedAt       time.Time
+	responseIssuedAt      time.Time
+	assertionIssuedAt     time.Time
 }
 type counts struct {
 	OIDCUsers    int `json:"oidc_users"`
@@ -139,6 +144,7 @@ func (j *journey) begin(provider, returnTo, mode string) (login, error) {
 			return result, err
 		}
 	}
+	result.replayStartedAt = time.Now()
 	res, err = j.fetch(result.browser, "GET", target.String(), nil, nil, nil)
 	if err != nil {
 		return result, err
@@ -166,6 +172,10 @@ func (j *journey) begin(provider, returnTo, mode string) (login, error) {
 			result.form.Set(name, html.UnescapeString(string(match[1])))
 		}
 		result.assertionID = res.header.Get("X-Fixture-Assertion-ID")
+		result.responseIssuedAt, result.assertionIssuedAt, err = samlIssueInstants(result.form.Get("SAMLResponse"), result.assertionID)
+		if err != nil {
+			return result, err
+		}
 		if err = require(strings.HasPrefix(result.assertionID, "assertion-"), "assertion identity missing"); err != nil {
 			return result, err
 		}
@@ -474,9 +484,50 @@ func (j *journey) assertionCount(id string) (int, error) {
 	}
 	return int(v), nil
 }
+
+// crewjam checks both Response and Assertion IssueInstant against its default
+// 90-second MaxIssueDelay before invoking the replay store. Keep evidence well
+// inside that interval; a 401 from an expired envelope proves no replay access.
+const replayEvidenceMaxAge = 60 * time.Second
+
+func samlIssueInstants(encoded, assertionID string) (time.Time, time.Time, error) {
+	raw, err := base64.StdEncoding.DecodeString(encoded)
+	if err != nil {
+		return time.Time{}, time.Time{}, errors.New("invalid SAML evidence envelope")
+	}
+	var envelope struct {
+		XMLName      xml.Name  `xml:"urn:oasis:names:tc:SAML:2.0:protocol Response"`
+		IssueInstant time.Time `xml:"IssueInstant,attr"`
+		Assertion    struct {
+			ID           string    `xml:"ID,attr"`
+			IssueInstant time.Time `xml:"IssueInstant,attr"`
+		} `xml:"urn:oasis:names:tc:SAML:2.0:assertion Assertion"`
+	}
+	if xml.Unmarshal(raw, &envelope) != nil || envelope.IssueInstant.IsZero() || envelope.Assertion.IssueInstant.IsZero() || envelope.Assertion.ID != assertionID {
+		return time.Time{}, time.Time{}, errors.New("SAML evidence issue instant/identity missing")
+	}
+	return envelope.IssueInstant, envelope.Assertion.IssueInstant, nil
+}
+
+func requireFreshReplayEvidence(l login, now time.Time) error {
+	for _, issued := range []time.Time{l.replayStartedAt, l.responseIssuedAt, l.assertionIssuedAt} {
+		age := now.Sub(issued)
+		if issued.IsZero() || age < 0 || age >= replayEvidenceMaxAge {
+			return errors.New("SAML replay evidence exceeded strict issue-age bound")
+		}
+	}
+	return nil
+}
+
 func (j *journey) replay(l login, before counts) error {
+	if err := requireFreshReplayEvidence(l, time.Now()); err != nil {
+		return err
+	}
 	res, err := j.submit(l, "saml", true)
 	if err != nil {
+		return err
+	}
+	if err = requireFreshReplayEvidence(l, time.Now()); err != nil {
 		return err
 	}
 	if err = require(res.status == 401, "signed assertion replay accepted"); err != nil {
@@ -544,7 +595,11 @@ func (j *journey) saml() error {
 		}
 		barrier <- err
 	}()
+	replayTimer := time.NewTimer(replayEvidenceMaxAge - time.Since(l.replayStartedAt))
+	defer replayTimer.Stop()
 	select {
+	case <-replayTimer.C:
+		return errors.New("restart exceeded SAML replay evidence issue-age bound")
 	case <-j.ctx.Done():
 		return errors.New("restart barrier deadline exceeded")
 	case err := <-barrier:

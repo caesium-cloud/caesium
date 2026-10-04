@@ -200,3 +200,42 @@ func TestTamperCookieChangesSignificantSignatureByte(t *testing.T) {
 		t.Fatal("tamper did not change first significant byte")
 	}
 }
+
+func TestReplayEvidenceRefusesExpiredIssueInstantDespiteLongConditions(t *testing.T) {
+	now := time.Date(2026, 10, 4, 12, 0, 0, 0, time.UTC)
+	envelope := `<samlp:Response xmlns:samlp="urn:oasis:names:tc:SAML:2.0:protocol" IssueInstant="2026-10-04T11:59:01Z"><saml:Assertion xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion" ID="assertion-original" IssueInstant="2026-10-04T11:59:01Z"><saml:Conditions NotOnOrAfter="2026-10-04T12:04:01Z"/></saml:Assertion></samlp:Response>`
+	response, assertion, err := samlIssueInstants(base64.StdEncoding.EncodeToString([]byte(envelope)), "assertion-original")
+	if err != nil {
+		t.Fatal(err)
+	}
+	original := login{replayStartedAt: now.Add(-59 * time.Second), responseIssuedAt: response, assertionIssuedAt: assertion}
+	if err := requireFreshReplayEvidence(original, now); err != nil {
+		t.Fatal(err)
+	}
+	// A callback that begins inside the limit but returns at/after the limit
+	// cannot count its 401 as replay-store evidence, even with five-minute conditions.
+	if err := requireFreshReplayEvidence(original, now.Add(time.Second)); err == nil {
+		t.Fatal("aged signed envelope counted as replay evidence")
+	}
+	for _, field := range []string{"response", "assertion", "monotonic", "future", "missing"} {
+		stale := original
+		switch field {
+		case "response":
+			stale.responseIssuedAt = now.Add(-91 * time.Second)
+		case "assertion":
+			stale.assertionIssuedAt = now.Add(-91 * time.Second)
+		case "monotonic":
+			stale.replayStartedAt = now.Add(-time.Minute)
+		case "future":
+			stale.responseIssuedAt = now.Add(time.Second)
+		case "missing":
+			stale.assertionIssuedAt = time.Time{}
+		}
+		if err := requireFreshReplayEvidence(stale, now); err == nil {
+			t.Fatalf("%s age guard did not refuse", field)
+		}
+	}
+	if _, _, err := samlIssueInstants(base64.StdEncoding.EncodeToString([]byte(envelope)), "assertion-other"); err == nil {
+		t.Fatal("foreign assertion envelope accepted")
+	}
+}
