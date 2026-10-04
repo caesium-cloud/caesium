@@ -16,6 +16,7 @@ COVERAGE_JOURNEY_SERVER_DIRS=()
 COVERAGE_JOURNEY_NAMES=()
 COVERAGE_BACKEND_PRODUCER_INPUTS=""
 COVERAGE_BACKEND_PRODUCER_INPUTS_SHA256=""
+COVERAGE_BACKEND_MANIFEST_SHA256=""
 
 stage_coverage_backend_inputs() {
   local source="${CAESIUM_COVERAGE_BACKEND_INPUTS:-}"
@@ -26,6 +27,10 @@ stage_coverage_backend_inputs() {
   fi
   if [[ -e "$staged" || -L "$staged" ]]; then
     coverage_journey_fail "refusing pre-existing backend prereq artifact $staged"
+    return 1
+  fi
+  if [[ -e "$ARTIFACTS/backend-inputs.json" || -L "$ARTIFACTS/backend-inputs.json" ]]; then
+    coverage_journey_fail "refusing pre-existing final backend manifest $ARTIFACTS/backend-inputs.json"
     return 1
   fi
   COVERAGE_BACKEND_PRODUCER_INPUTS_SHA256="$(python3 - "$source" "$staged" <<'PY'
@@ -58,6 +63,77 @@ PY
     return 1
   }
   COVERAGE_BACKEND_PRODUCER_INPUTS="$staged"
+}
+
+coverage_journey_run_backends() {
+  local output="$RAW/journeys/backends"
+  local driver_log="$ARTIFACTS/journeys/backend-driver.log"
+  local rc=0 path
+  if [[ "$CONTAINER_CLI" != "docker" ]]; then
+    coverage_journey_fail "real backend coverage requires the same Docker daemon as the candidate image"
+    return 1
+  fi
+  if [[ ! "$COVERAGE_BACKEND_PRODUCER_INPUTS_SHA256" =~ ^[0-9a-f]{64}$ || ! "$PRODUCER_CONTEXT_SHA256" =~ ^[0-9a-f]{64}$ ]]; then
+    coverage_journey_fail "backend evidence is not bound to staged inputs and the verified producer context"
+    return 1
+  fi
+  if [[ -e "$output" || -L "$output" ]]; then
+    coverage_journey_fail "refusing pre-existing backend raw artifact path $output"
+    return 1
+  fi
+  log "running actual Kubernetes and Podman coverage journeys on $PLATFORM"
+  set +e
+  python3 "$ROOT/scripts/coverage-backends.py" \
+    --context "$PRODUCER_CONTEXT" \
+    --context-sha256 "$PRODUCER_CONTEXT_SHA256" \
+    --inputs "$COVERAGE_BACKEND_PRODUCER_INPUTS" \
+    --inputs-sha256 "$COVERAGE_BACKEND_PRODUCER_INPUTS_SHA256" \
+    --output "$output" \
+    --backend both \
+    --run >"$driver_log" 2>&1
+  rc=$?
+  set -e
+  if [[ "$rc" -ne 0 ]]; then
+    log "real backend coverage driver failed; sanitized diagnostic follows"
+    coverage_journey_log_redacted <"$driver_log" >&2
+    return 1
+  fi
+  if ! python3 "$ROOT/scripts/coverage-journeys.py" validate-backends \
+    --context "$PRODUCER_CONTEXT" \
+    --context-sha256 "$PRODUCER_CONTEXT_SHA256" \
+    --inputs "$COVERAGE_BACKEND_PRODUCER_INPUTS" \
+    --inputs-sha256 "$COVERAGE_BACKEND_PRODUCER_INPUTS_SHA256" \
+    --output "$output" \
+    --final-manifest "$ARTIFACTS/backend-inputs.json" \
+    --cli-list "$RAW/journeys/backend-cli-dirs.txt" \
+    --server-list "$RAW/journeys/backend-server-dirs.txt" \
+    --candidate-sha "$CANDIDATE_SHA" \
+    --image-id "$IMAGE_ID" \
+    --builder-image-id "$BUILDER_RUN_IMAGE" \
+    --platform "$PLATFORM" \
+    --run-id "$ID" \
+    --build-context "$BUILD_CONTEXT"; then
+    coverage_journey_fail "real backend coverage provenance or raw profiles failed validation"
+    return 1
+  fi
+  while IFS= read -r path; do
+    [[ -n "$path" ]] && COVERAGE_JOURNEY_CLI_DIRS+=("$output/$path")
+  done <"$RAW/journeys/backend-cli-dirs.txt"
+  while IFS= read -r path; do
+    [[ -n "$path" ]] && COVERAGE_JOURNEY_SERVER_DIRS+=("$output/$path")
+  done <"$RAW/journeys/backend-server-dirs.txt"
+  COVERAGE_BACKEND_MANIFEST_SHA256="$(python3 - "$ARTIFACTS/backend-inputs.json" <<'PY'
+import hashlib
+import pathlib
+import sys
+print(hashlib.sha256(pathlib.Path(sys.argv[1]).read_bytes()).hexdigest())
+PY
+)" || { coverage_journey_fail "cannot fingerprint validated backend manifest"; return 1; }
+  [[ "$COVERAGE_BACKEND_MANIFEST_SHA256" =~ ^[0-9a-f]{64}$ ]] || {
+    coverage_journey_fail "validated backend manifest digest is invalid"
+    return 1
+  }
+  COVERAGE_JOURNEY_NAMES+=(backend-kubernetes backend-podman)
 }
 
 coverage_journey_fail() {
@@ -573,6 +649,10 @@ PY
     --candidate-sha "$CANDIDATE_SHA" \
     --run-id "$ID" \
     --build-context "$BUILD_CONTEXT" \
+    --docker-socket "$SOCK" \
+    --socket-gid "$SOCK_GID" \
+    --backend-inputs "$COVERAGE_BACKEND_PRODUCER_INPUTS" \
+    --backend-inputs-sha256 "$COVERAGE_BACKEND_PRODUCER_INPUTS_SHA256" \
     --image-provenance "$IMAGE_PROVENANCE" \
     --verified "$IMAGE_VERIFIED" >"$sso_log" 2>&1
   sso_rc=$?
@@ -584,14 +664,26 @@ PY
   fi
   coverage_journey_log_redacted <"$sso_log"
   local sso_record="$RAW/journeys/sso/provenance.json"
+  local sso_cli_list="$RAW/journeys/sso/cli-dirs.txt"
+  local sso_server_list="$RAW/journeys/sso/server-dirs.txt"
   if ! SSO_RECORD_SHA="$CANDIDATE_SHA" SSO_RECORD_IMAGE_ID="$IMAGE_ID" \
-      python3 - "$sso_record" <<'PY'
+      SSO_RECORD_INPUTS_SHA256="$COVERAGE_BACKEND_PRODUCER_INPUTS_SHA256" \
+      SSO_RECORD_RAW_ROOT="$RAW" \
+      python3 - "$sso_record" "$COVERAGE_BACKEND_PRODUCER_INPUTS" "$sso_cli_list" "$sso_server_list" <<'PY'
+import hashlib
 import json
 import os
 import pathlib
+import re
 import sys
 
-record = json.loads(pathlib.Path(sys.argv[1]).read_text())
+record_path, inputs_path, cli_list_path, server_list_path = map(pathlib.Path, sys.argv[1:])
+raw_root = pathlib.Path(os.environ["SSO_RECORD_RAW_ROOT"]).resolve()
+record = json.loads(record_path.read_text())
+inputs_raw = inputs_path.read_bytes()
+inputs = json.loads(inputs_raw)
+if hashlib.sha256(inputs_raw).hexdigest() != os.environ["SSO_RECORD_INPUTS_SHA256"]:
+    raise SystemExit("SSO backend prerequisite digest changed")
 if record.get("complete") is not True or record.get("missing") is not False or record.get("killed") is not False:
     raise SystemExit("SSO record is incomplete")
 if record.get("candidate_sha") != os.environ["SSO_RECORD_SHA"]:
@@ -613,17 +705,134 @@ if not generations[0].get("container_id") or generations[0].get("container_id") 
 for field in ("database_mount_sha256", "server_environment_sha256"):
     if not generations[0].get(field) or generations[0].get(field) != generations[1].get(field):
         raise SystemExit("SSO server restart changed its persistent database or auth configuration")
+if record.get("backend_inputs_sha256") != os.environ["SSO_RECORD_INPUTS_SHA256"]:
+    raise SystemExit("SSO shutdown journey used a different backend prerequisite file")
+if record.get("task_image_id") != inputs.get("task_image_id") or record.get("task_image_ref") != inputs.get("task_image_ref"):
+    raise SystemExit("SSO shutdown task image differs from its immutable backend prerequisite")
+shutdown = record.get("shutdown_cancellation")
+if not isinstance(shutdown, dict):
+    raise SystemExit("SSO shutdown cancellation evidence is missing")
+for field in ("job_id", "run_id", "task_id", "task_run_id"):
+    if not isinstance(shutdown.get(field), str) or not re.fullmatch(r"[0-9a-f-]{36}", shutdown[field]):
+        raise SystemExit("SSO shutdown run/task identity is invalid")
+if not isinstance(shutdown.get("runtime_id"), str) or not re.fullmatch(r"[0-9a-f]{64}", shutdown["runtime_id"]):
+    raise SystemExit("SSO shutdown runtime identity is invalid")
+if shutdown.get("task_image_id") != record.get("task_image_id"):
+    raise SystemExit("SSO shutdown task image differs from its pinned backend prerequisite")
+if (shutdown.get("initial_run_status"), shutdown.get("initial_task_status")) != ("running", "running"):
+    raise SystemExit("SSO shutdown did not observe its exact run/task running before termination")
+if shutdown.get("native_runtime_removed") is not True or shutdown.get("verified_after_generation") != 2:
+    raise SystemExit("SSO shutdown did not prove native cleanup and same-database restart")
+if (shutdown.get("final_run_status"), shutdown.get("final_task_status")) != ("failed", "failed"):
+    raise SystemExit("SSO shutdown run/task did not persist as failed")
+if (shutdown.get("final_run_error"), shutdown.get("final_task_error")) != ("context canceled", "context canceled"):
+    raise SystemExit("SSO shutdown run/task did not preserve its whole-run cancellation cause")
+if shutdown.get("final_task_run_id") != shutdown.get("task_run_id") or shutdown.get("final_task_run_status") != "failed" or shutdown.get("final_task_run_error") != "context canceled":
+    raise SystemExit("SSO concrete TaskRun identity/status/cause did not persist")
+for field in ("run_completed_at", "task_completed_at"):
+    if not isinstance(shutdown.get(field), str) or not shutdown[field]:
+        raise SystemExit("SSO durable run/task lacks a terminal completion timestamp")
+if shutdown.get("native_runtime_absent_after_generation") != 2 or shutdown.get("native_runtime_absent_generations") != [1, 2]:
+    raise SystemExit("SSO native runtime absence was not verified after both server generations")
+elapsed = shutdown.get("replay_restart_elapsed_seconds")
+if not isinstance(elapsed, (int, float)) or isinstance(elapsed, bool) or not (0 <= elapsed < 55):
+    raise SystemExit("SSO shutdown/restart exceeded the existing replay-age budget")
+
+def profile_path(relative, label):
+    if not isinstance(relative, str) or not relative or "\\" in relative:
+        raise SystemExit("SSO " + label + " raw path is invalid")
+    rel = pathlib.PurePosixPath(relative)
+    if rel.is_absolute() or ".." in rel.parts:
+        raise SystemExit("SSO " + label + " raw path escapes collector output")
+    path = raw_root.joinpath(*rel.parts)
+    if any(part.is_symlink() for part in (path, *path.parents) if part != raw_root.parent):
+        raise SystemExit("SSO " + label + " raw path traverses a symlink")
+    resolved = path.resolve(strict=True)
+    if not resolved.is_relative_to(raw_root):
+        raise SystemExit("SSO " + label + " raw path resolves outside collector output")
+    return resolved, rel.as_posix()
+
+def validate_process(process, source, lane):
+    if not isinstance(process, dict) or process.get("source") != source or process.get("lane") != lane:
+        raise SystemExit("SSO " + lane + " process provenance identity is invalid")
+    for field, value in (("candidate_sha", os.environ["SSO_RECORD_SHA"]), ("image_id", os.environ["SSO_RECORD_IMAGE_ID"])):
+        if process.get(field) != value:
+            raise SystemExit("SSO " + lane + " process used a different candidate")
+    if process.get("kind") != "gocoverdir" or process.get("module") != "github.com/caesium-cloud/caesium" or process.get("complete") is not True or process.get("missing") is not False or process.get("killed") is not False:
+        raise SystemExit("SSO " + lane + " process is incomplete")
+    if process.get("oom_killed") is not False:
+        raise SystemExit("SSO " + lane + " process was OOM-killed")
+    if source == "cli" and process.get("exit_code") != 0:
+        raise SystemExit("SSO " + lane + " CLI process did not exit cleanly")
+    if source == "server" and process.get("exit_code") not in (0, 143):
+        raise SystemExit("SSO " + lane + " server did not exit after SIGTERM")
+    if not isinstance(process.get("container_id"), str) or not re.fullmatch(r"[0-9a-f]{64}", process["container_id"]):
+        raise SystemExit("SSO " + lane + " immutable container identity is invalid")
+    raw_dir, raw_rel = profile_path(process.get("raw_dir"), lane)
+    provenance_path, _ = profile_path(process.get("provenance_path"), lane + " provenance")
+    try:
+        saved_provenance = json.loads(provenance_path.read_text())
+    except (OSError, json.JSONDecodeError) as exc:
+        raise SystemExit("SSO " + lane + " saved process provenance is invalid") from exc
+    if saved_provenance != process:
+        raise SystemExit("SSO " + lane + " saved process provenance differs from the final record")
+    files = {}
+    for path in sorted(raw_dir.iterdir()):
+        if not path.is_file() or path.is_symlink() or path.stat().st_size <= 0 or not path.name.startswith(("covmeta.", "covcounters.")):
+            raise SystemExit("SSO " + lane + " raw profile contains missing or foreign files")
+        files[path.name] = hashlib.sha256(path.read_bytes()).hexdigest()
+    if not any(name.startswith("covmeta.") for name in files) or not any(name.startswith("covcounters.") for name in files) or process.get("files") != files:
+        raise SystemExit("SSO " + lane + " raw coverage hashes are incomplete or changed")
+    if source == "cli":
+        if process.get("flush") != "process-exit" or process.get("signal") is not None or process.get("stop_rc") is not None or process.get("flush_rc") is not None:
+            raise SystemExit("SSO " + lane + " CLI process-exit record is invalid")
+    else:
+        if process.get("flush") != "sigusr2" or process.get("signal") != "SIGTERM" or process.get("flush_rc") != 0 or process.get("stop_rc") != 0:
+            raise SystemExit("SSO " + lane + " server signal/flush record is invalid")
+    return raw_rel
+
+cli_processes = record.get("cli_processes")
+if not isinstance(cli_processes, list) or [p.get("lane") for p in cli_processes if isinstance(p, dict)] != ["shutdown-apply", "shutdown-start"]:
+    raise SystemExit("SSO shutdown apply/start CLI process inventory is incomplete")
+cli_dirs = [validate_process(item, "cli", item["lane"]) for item in cli_processes]
+if len(set(cli_dirs)) != 2:
+    raise SystemExit("SSO shutdown CLI processes reused a GOCOVERDIR")
+server_dirs = []
+for generation, item in enumerate(generations, start=1):
+    if item.get("complete") is not True or item.get("missing") is not False or item.get("killed") is not False:
+        raise SystemExit("SSO server generation lacks complete process coverage")
+    if item.get("schema_version") != 1 or item.get("source") != "server" or item.get("module") != "github.com/caesium-cloud/caesium" or item.get("candidate_sha") != os.environ["SSO_RECORD_SHA"]:
+        raise SystemExit("SSO server generation provenance schema is invalid")
+    if item.get("oom_killed") is not False:
+        raise SystemExit("SSO server generation was OOM-killed")
+    server_dirs.append(validate_process(item, "server", f"sso-server-g{generation}"))
+if len(set(server_dirs)) != 2 or set(cli_dirs) & set(server_dirs):
+    raise SystemExit("SSO server and CLI processes reused a GOCOVERDIR")
+for path in (cli_list_path, server_list_path):
+    if path.exists() or path.is_symlink():
+        raise SystemExit("refusing pre-existing SSO process profile list")
+for path, values in ((cli_list_path, cli_dirs), (server_list_path, server_dirs)):
+    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(descriptor, "w") as stream:
+        stream.writelines(value + "\n" for value in values)
 PY
   then
     coverage_journey_fail "persistent SSO provenance is missing or inconsistent"
     return 1
   fi
-  if ! gocoverdir_complete "$RAW/journeys/sso/server"; then
-    coverage_journey_fail "persistent SSO server generations did not produce coverage counters"
-    return 1
-  fi
-  COVERAGE_JOURNEY_SERVER_DIRS+=("$RAW/journeys/sso/server")
+  local process_dir
+  while IFS= read -r process_dir; do
+    [[ -n "$process_dir" ]] && COVERAGE_JOURNEY_CLI_DIRS+=("$RAW/$process_dir")
+  done <"$sso_cli_list"
+  while IFS= read -r process_dir; do
+    [[ -n "$process_dir" ]] && COVERAGE_JOURNEY_SERVER_DIRS+=("$RAW/$process_dir")
+  done <"$sso_server_list"
   COVERAGE_JOURNEY_NAMES+=(sso)
+
+  # Kubernetes and Podman contributions are produced as independent real
+  # public-surface journeys, then provenance-checked before their raw profiles
+  # join these exact candidate-image CLI/server merges.
+  coverage_journey_run_backends || return 1
 
   cli_raw="$RAW/cli-journeys-merged"
   server_raw="$RAW/server-journeys-merged"
@@ -640,6 +849,8 @@ PY
   JOURNEY_MANIFEST_BUILD_CONTEXT="$BUILD_CONTEXT" \
   JOURNEY_MANIFEST_PROVENANCE="$IMAGE_PROVENANCE" \
   JOURNEY_MANIFEST_VERIFIED="$IMAGE_VERIFIED" \
+  JOURNEY_MANIFEST_BACKEND_SHA256="$COVERAGE_BACKEND_MANIFEST_SHA256" \
+  JOURNEY_MANIFEST_BACKEND_PATH="$ARTIFACTS/backend-inputs.json" \
   python3 - "$RAW/journeys/manifest.json" "$RAW/journeys" <<'PY'
 import json
 import os
@@ -654,6 +865,9 @@ for lane in ("local", "auth", "distributed", "owner-memory", "sso"):
     if record["image_id"] != os.environ["JOURNEY_MANIFEST_IMAGE_ID"]:
         raise SystemExit("lane image differs from pinned candidate: " + lane)
     records.append(record)
+backend_digest = os.environ["JOURNEY_MANIFEST_BACKEND_SHA256"]
+if len(backend_digest) != 64 or any(ch not in "0123456789abcdef" for ch in backend_digest):
+    raise SystemExit("validated backend contribution digest is missing")
 manifest = {
     "schema_version": 1,
     "kind": "real-integration-coverage-journeys",
@@ -664,6 +878,13 @@ manifest = {
     "verified": os.environ["JOURNEY_MANIFEST_VERIFIED"] == "true",
     "complete": len(records) == 5,
     "lanes": records,
+    "backend_contribution": {
+        "path": os.environ["JOURNEY_MANIFEST_BACKEND_PATH"],
+        "sha256": backend_digest,
+        "complete": True,
+        "backends": ["kubernetes", "podman"],
+        "process_profiles": 14,
+    },
     "merged_into": ["cli", "server"],
 }
 pathlib.Path(sys.argv[1]).write_text(json.dumps(manifest, indent=2) + "\n")

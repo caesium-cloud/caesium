@@ -11,6 +11,7 @@ memory and communicates the SAML replay-store restart barrier over stdin/stdout.
 from __future__ import annotations
 
 import argparse
+import datetime
 import hashlib
 import json
 import os
@@ -25,6 +26,8 @@ import sys
 import tempfile
 import time
 from typing import Any
+from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen
 from urllib.parse import parse_qsl, urlsplit
 
 
@@ -89,6 +92,186 @@ def redact(text: str) -> str:
     return KEY_RE.sub("[REDACTED_API_KEY]", text)
 
 
+def validate_backend_contribution(args: argparse.Namespace) -> None:
+    def require(condition: bool, message: str) -> None:
+        if not condition:
+            raise JourneyError(message)
+
+    def read_json(path: pathlib.Path, label: str) -> tuple[dict[str, Any], bytes]:
+        try:
+            raw = path.read_bytes()
+            value = json.loads(raw)
+        except (OSError, json.JSONDecodeError) as exc:
+            raise JourneyError(f"backend {label} is unavailable or invalid JSON") from exc
+        require(isinstance(value, dict), f"backend {label} must be a JSON object")
+        return value, raw
+
+    def digest(raw: bytes) -> str:
+        return hashlib.sha256(raw).hexdigest()
+
+    context_source = pathlib.Path(args.context)
+    inputs_source = pathlib.Path(args.inputs)
+    output_source = pathlib.Path(args.output)
+    require(context_source.is_absolute() and inputs_source.is_absolute() and output_source.is_absolute(), "backend manifest and output paths must be absolute")
+    require(context_source.is_file() and not context_source.is_symlink() and inputs_source.is_file() and not inputs_source.is_symlink(), "backend manifests must be regular non-symlink files")
+    require(output_source.is_dir() and not output_source.is_symlink(), "backend output root must be a regular directory")
+    context_path = context_source.resolve(strict=True)
+    inputs_path = inputs_source.resolve(strict=True)
+    output_root = output_source.resolve(strict=True)
+    context, context_raw = read_json(context_path, "producer context")
+    inputs, inputs_raw = read_json(inputs_path, "producer prerequisites")
+    context_sha = digest(context_raw)
+    inputs_sha = digest(inputs_raw)
+    require(context_sha == args.context_sha256, "backend producer context digest changed")
+    require(inputs_sha == args.inputs_sha256, "backend prerequisite digest changed")
+    require(context.get("schema_version") == 1 and context.get("producer") == "scripts/integration-coverage.sh", "backend context has foreign producer identity")
+    require(context.get("candidate_sha") == args.candidate_sha and context.get("image_id") == args.image_id, "backend context differs from the active candidate")
+    require(context.get("builder_image_id") == args.builder_image_id and context.get("build_context") == args.build_context, "backend context differs from the pinned toolchain")
+    require(context.get("image_provenance") == "built-by-this-run" and context.get("verified") is True, "backend context is not verified built-by-this-run evidence")
+    require(context.get("platform") == args.platform and context.get("container_cli") == "docker", "backend context platform/container engine mismatch")
+    require(inputs.get("schema_version") == 1 and inputs.get("platform") == args.platform, "backend prerequisites use another schema or platform")
+    require(context.get("coverage_id") == args.run_id, "backend context belongs to another collection run")
+    require(isinstance(inputs.get("docker_socket"), str) and inputs["docker_socket"] == context.get("socket_path"), "backend prerequisite socket differs from the collector socket")
+    require(inputs.get("podman_privileged_approved") is True, "Podman privileged fixture approval is missing")
+
+    inventory_ref = context.get("source_inventory")
+    require(isinstance(inventory_ref, dict) and DIGEST_RE.fullmatch(inventory_ref.get("sha256", "")), "backend context source inventory binding is invalid")
+    inventory_value = pathlib.PurePosixPath(str(inventory_ref.get("path", "")))
+    artifact_dir = pathlib.Path(context.get("artifact_dir", ""))
+    require(artifact_dir.is_absolute(), "backend context artifact directory must be absolute")
+    require(not inventory_value.is_absolute() and ".." not in inventory_value.parts, "backend source inventory path escapes the artifact directory")
+    inventory_path = artifact_dir / pathlib.Path(*inventory_value.parts)
+    require(inventory_path.is_file() and not inventory_path.is_symlink(), "backend source inventory file is missing or unsafe")
+    inventory_raw = inventory_path.read_bytes()
+    require(digest(inventory_raw) == inventory_ref["sha256"], "backend source inventory digest changed")
+
+    result, _ = read_json(output_root / "result.json", "run result")
+    contribution, contribution_raw = read_json(output_root / "contribution.json", "contribution")
+    require(result.get("complete") is True and result.get("selected_complete") is True and result.get("coverage_contribution") is True, "backend runner did not complete both coverage backends")
+    require(result.get("candidate_sha") == args.candidate_sha and result.get("selected") == ["kubernetes", "podman"], "backend runner selected a different candidate/backend set")
+    expected_top = {"schema_version", "kind", "complete", "candidate_sha", "image_id", "builder_image_id", "build_context", "image_provenance", "verified", "lanes"}
+    require(set(contribution) == expected_top, "backend contribution has missing or unexpected fields")
+    require(contribution.get("schema_version") == 1 and contribution.get("kind") == "real-backend-coverage" and contribution.get("complete") is True, "backend contribution is incomplete")
+    for key in ("candidate_sha", "image_id", "builder_image_id", "build_context", "image_provenance", "verified"):
+        require(contribution.get(key) == context.get(key), f"backend contribution {key} differs from producer context")
+
+    reports = result.get("contributors")
+    require(isinstance(reports, list) and len(reports) == 2, "backend result is missing one or more contributor reports")
+    report_by_backend: dict[str, dict[str, Any]] = {}
+    for report in reports:
+        require(isinstance(report, dict), "backend contributor report is invalid")
+        backend = report.get("backend")
+        require(backend in ("kubernetes", "podman") and backend not in report_by_backend, "backend contributor identity is missing or duplicated")
+        report_by_backend[backend] = report
+        saved_report, _ = read_json(output_root / backend / "backend-result.json", f"{backend} report")
+        require(saved_report == report, f"{backend} saved report differs from the run manifest")
+        require(report.get("complete") is True and report.get("missing") is False and report.get("killed") is False, f"{backend} report is incomplete or killed")
+        require(not report.get("failed") and report.get("cleanup_errors") == [], f"{backend} failed or left owned resources behind")
+        require(report.get("candidate_sha") == args.candidate_sha and report.get("image_id") == args.image_id and report.get("builder_image_id") == args.builder_image_id, f"{backend} report belongs to another image/candidate")
+        cases = report.get("cases")
+        require(isinstance(cases, list) and [case.get("case") for case in cases] == ["success", "failure", "deadline"] and all(case.get("status") == "pass" for case in cases), f"{backend} did not pass all real task scenarios")
+        require(len(report.get("processes", [])) == 7, f"{backend} process inventory is incomplete")
+    require(set(report_by_backend) == {"kubernetes", "podman"}, "both real backend contributor reports are required")
+
+    lanes = contribution.get("lanes")
+    require(isinstance(lanes, list) and len(lanes) == 14, "backend contribution must contain all fourteen process profiles")
+    cli_dirs: list[str] = []
+    server_dirs: list[str] = []
+    seen_lanes: set[str] = set()
+    seen_paths: set[str] = set()
+    binary_hashes: set[str] = set()
+    process_counts = {"kubernetes": {"cli": 0, "server": 0}, "podman": {"cli": 0, "server": 0}}
+    expected_suite = {"run_pattern": "backend-success|failure|deadline", "minimum_passes": 3, "passed_scenarios": 3, "exit_code": 0}
+
+    def resolve_output_path(value: Any, label: str) -> tuple[pathlib.Path, str]:
+        require(isinstance(value, str) and value and "\\" not in value, f"backend {label} path is invalid")
+        relative = pathlib.PurePosixPath(value)
+        require(not relative.is_absolute() and ".." not in relative.parts and relative.parts, f"backend {label} path escapes its evidence root")
+        path = output_root.joinpath(*relative.parts)
+        require(not any(parent.is_symlink() for parent in (path, *path.parents) if parent != output_root.parent), f"backend {label} path traverses a symlink")
+        resolved = path.resolve(strict=True)
+        require(resolved.is_relative_to(output_root), f"backend {label} path resolves outside its evidence root")
+        return resolved, relative.as_posix()
+
+    for lane_ref in lanes:
+        require(isinstance(lane_ref, dict) and set(lane_ref) == {"backend", "lane", "source", "raw_dir", "provenance_path"}, "backend lane reference has missing or unexpected fields")
+        backend, lane, source = lane_ref["backend"], lane_ref["lane"], lane_ref["source"]
+        require(backend in report_by_backend and source in ("cli", "server"), "backend lane has an unknown backend or source")
+        require(isinstance(lane, str) and lane not in seen_lanes, "backend lane identity is missing or duplicated")
+        seen_lanes.add(lane)
+        raw_dir, raw_rel = resolve_output_path(lane_ref["raw_dir"], "raw")
+        provenance_path, provenance_rel = resolve_output_path(lane_ref["provenance_path"], "provenance")
+        require(raw_rel not in seen_paths and provenance_rel not in seen_paths, "backend contribution reuses a raw/provenance path")
+        seen_paths.update((raw_rel, provenance_rel))
+        provenance, _ = read_json(provenance_path, "process provenance")
+        report_processes = report_by_backend[backend].get("processes", [])
+        matching = [record for record in report_processes if record.get("lane") == lane]
+        require(len(matching) == 1, "backend lane does not match exactly one recorded process")
+        process_ref = matching[0]
+        require(process_ref.get("raw_dir") == raw_rel and process_ref.get("provenance_path") == provenance_rel, "backend process path differs from its persisted provenance")
+        require(provenance.get("source") == source and provenance.get("backend") == backend and provenance.get("lane") == lane, "backend process provenance identity mismatch")
+        for key in ("candidate_sha", "image_id", "builder_image_id", "build_context", "image_provenance", "verified"):
+            require(provenance.get(key) == context.get(key), f"backend process {key} differs from producer context")
+        require(provenance.get("schema_version") == 1 and provenance.get("kind") == "gocoverdir" and provenance.get("module") == MODULE, "backend process provenance schema/module mismatch")
+        require(provenance.get("complete") is True and provenance.get("missing") is False and provenance.get("killed") is False, "backend process provenance is incomplete or killed")
+        require(provenance.get("source_inventory_sha256") == inventory_ref["sha256"] and provenance.get("producer_context_sha256") == context_sha and provenance.get("producer_inputs_sha256") == inputs_sha, "backend process producer hashes do not match the staged evidence")
+        require(provenance.get("test_suite") == expected_suite, "backend process lacks the three passing real backend scenarios")
+        container_id = provenance.get("container_id")
+        require(isinstance(container_id, str) and re.fullmatch(r"[0-9a-f]{64}", container_id), "backend process immutable container ID is invalid")
+        require(provenance.get("oom_killed") is False, "backend process was OOM-killed")
+        if source == "server":
+            require(provenance.get("exit_code") in (0, 143), "backend server did not exit after SIGTERM")
+            require(provenance.get("flush") == "sigusr2" and provenance.get("signal") == "SIGTERM" and provenance.get("flush_rc") == 0 and provenance.get("stop_rc") == 0, "backend server did not flush and stop gracefully")
+        else:
+            require(provenance.get("exit_code") == 0, "backend CLI process did not exit cleanly")
+            require(provenance.get("flush") == "process-exit" and provenance.get("signal") is None and provenance.get("flush_rc") is None and provenance.get("stop_rc") is None, "backend CLI process-exit provenance is invalid")
+        receipts = provenance.get("backend_receipts")
+        receipt_key = "kind_image_id" if backend == "kubernetes" else "podman_service_image_id"
+        expected_receipt_fields = {"platform", "task_archive_sha256", "task_image_id", "task_image_ref", receipt_key}
+        if "task_docker_image_id" in inputs:
+            expected_receipt_fields.add("task_docker_image_id")
+        require(isinstance(receipts, dict) and set(receipts) == expected_receipt_fields, "backend process receipt fields are incomplete or unexpected")
+        for key in expected_receipt_fields:
+            require(receipts.get(key) == inputs.get(key), f"backend process receipt {key} differs from staged prerequisites")
+        binary_hash = provenance.get("binary_sha256")
+        require(isinstance(binary_hash, str) and DIGEST_RE.fullmatch(binary_hash), "backend candidate binary digest is invalid")
+        binary_hashes.add(binary_hash)
+
+        require(raw_dir.is_dir() and not raw_dir.is_symlink(), "backend raw profile directory is unavailable")
+        files: dict[str, str] = {}
+        for raw_file in sorted(raw_dir.iterdir()):
+            require(raw_file.is_file() and not raw_file.is_symlink() and raw_file.stat().st_size > 0 and raw_file.name.startswith(("covmeta.", "covcounters.")), "backend raw profile contains missing or foreign files")
+            files[raw_file.name] = digest(raw_file.read_bytes())
+        require(any(name.startswith("covmeta.") for name in files) and any(name.startswith("covcounters.") for name in files), "backend raw profile lacks Go metadata/counters")
+        require(provenance.get("files") == files, "backend raw profile bytes differ from the persisted digest inventory")
+        process_counts[backend][source] += 1
+        if source == "cli":
+            cli_dirs.append(raw_rel)
+        else:
+            server_dirs.append(raw_rel)
+
+    require(process_counts == {"kubernetes": {"cli": 6, "server": 1}, "podman": {"cli": 6, "server": 1}}, "backend profile source counts do not match the required six CLI and one server per backend")
+    require(len(binary_hashes) == 1, "backend contributors used different candidate binaries")
+    final_path = pathlib.Path(args.final_manifest)
+    cli_list = pathlib.Path(args.cli_list)
+    server_list = pathlib.Path(args.server_list)
+    require(all(path.is_absolute() for path in (final_path, cli_list, server_list)), "backend output manifest/path-list paths must be absolute")
+    for path in (final_path, cli_list, server_list):
+        require(path.parent.is_dir() and not path.parent.is_symlink(), "backend output parent must be an existing non-symlink directory")
+    require(not final_path.exists() and not final_path.is_symlink(), "refusing to overwrite a backend output manifest")
+    for path in (cli_list, server_list):
+        require(not path.exists() and not path.is_symlink(), "refusing to overwrite backend profile path lists")
+    for path, content, mode in (
+        (final_path, contribution_raw, 0o400),
+        (cli_list, "".join(f"{value}\n" for value in cli_dirs).encode(), 0o600),
+        (server_list, "".join(f"{value}\n" for value in server_dirs).encode(), 0o600),
+    ):
+        descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, mode)
+        with os.fdopen(descriptor, "wb") as stream:
+            stream.write(content)
+        path.chmod(mode)
+
+
 class Collector:
     def __init__(self, args: argparse.Namespace) -> None:
         self.args = args
@@ -97,7 +280,7 @@ class Collector:
         self.raw = pathlib.Path(args.raw).resolve()
         self.sso_artifacts = self.artifacts
         self.fixture_dir = self.artifacts / "fixture"
-        self.server_raw = self.raw / "journeys" / "sso" / "server"
+        self.server_raw_root = self.raw / "journeys" / "sso"
         self.database_dir: pathlib.Path | None = None
         self.secret_dir: pathlib.Path | None = None
         self.image = args.coverage_image
@@ -109,13 +292,29 @@ class Collector:
         self.image_provenance = args.image_provenance
         self.verified = args.verified == "true"
         self.docker = args.container_cli
+        self.docker_socket = args.docker_socket
+        self.socket_gid = args.socket_gid
+        self.docker_env = os.environ.copy()
+        for name in ("DOCKER_CONTEXT", "DOCKER_TLS_VERIFY", "DOCKER_CERT_PATH", "DOCKER_API_VERSION"):
+            self.docker_env.pop(name, None)
+        self.docker_env["DOCKER_HOST"] = "unix://" + self.docker_socket
+        self.backend_inputs_path = pathlib.Path(args.backend_inputs)
+        self.backend_inputs_sha256 = args.backend_inputs_sha256
+        self.backend_inputs: dict[str, Any] = {}
+        self.task_image_id = ""
+        self.task_image_ref = ""
         self.network_name = f"{self.run_id}-sso-net"
         self.network_id = ""
         self.ids: list[tuple[str, str]] = []
         self.secret_files: list[pathlib.Path] = []
         self.protocol_events: list[dict[str, Any]] = []
         self.server_generations: list[dict[str, Any]] = []
+        self.cli_processes: list[dict[str, Any]] = []
         self.server_environment_sha256 = ""
+        self.shutdown_job: dict[str, Any] | None = None
+        self.native_runtime_absent_generations: list[int] = []
+        self.bootstrap_key = ""
+        self.api_env_file: pathlib.Path | None = None
         self.helper_process: subprocess.Popen[bytes] | None = None
         self.helper_container_id = ""
 
@@ -133,6 +332,7 @@ class Collector:
         self.idp_ready_file = self.sso_artifacts / "idp-ready.json"
         self.binary_path = self.fixture_dir / "sso-idp"
         self.metadata_path = self.fixture_dir / "idp.xml"
+        self.job_path = self.artifacts / "shutdown.job.yaml"
 
     def docker_run(
         self,
@@ -149,6 +349,7 @@ class Collector:
                 text=True,
                 stdout=subprocess.PIPE if capture else None,
                 stderr=subprocess.PIPE if capture else None,
+                env=self.docker_env,
                 timeout=timeout,
             )
         except subprocess.TimeoutExpired as exc:
@@ -384,6 +585,7 @@ class Collector:
             "CAESIUM_AUTH_SAML_IDP_METADATA_FILE": "/fixture/idp.xml",
             "CAESIUM_DATABASE_CONSOLE_ENABLED": "true",
             "CAESIUM_DATABASE_PATH": "/var/lib/caesium/dqlite",
+            "DOCKER_HOST": "unix:///var/run/docker.sock",
             "CAESIUM_LOG_LEVEL": "info",
             "GOCOVERDIR": "/var/lib/caesium/coverage",
         }
@@ -398,6 +600,11 @@ class Collector:
 
     def start_server(self, generation: int) -> str:
         lane = f"sso-server-g{generation}"
+        server_raw = self.server_raw_root / f"server-g{generation}"
+        if server_raw.exists() or server_raw.is_symlink():
+            raise JourneyError(f"refusing pre-existing SSO server profile path {server_raw}")
+        server_raw.mkdir(parents=True, mode=0o777)
+        server_raw.chmod(0o777)
         if self.docker_run("container", "inspect", self.server_name, check=False).returncode == 0:
             raise JourneyError(f"refusing pre-existing container name {self.server_name}")
         environment = self.server_environment()
@@ -421,10 +628,16 @@ class Collector:
             self.app_alias,
             "--user",
             "10001:10001",
+            "--group-add",
+            str(self.socket_gid),
             "--env-file",
             str(self.server_env_file),
+            "-p",
+            "127.0.0.1::8080",
             "-v",
-            f"{self.server_raw}:/var/lib/caesium/coverage",
+            f"{self.docker_socket}:/var/run/docker.sock",
+            "-v",
+            f"{server_raw}:/var/lib/caesium/coverage",
             "-v",
             f"{self.database_dir}:/var/lib/caesium/dqlite",
             "-v",
@@ -442,6 +655,401 @@ class Collector:
             raise JourneyError(f"SSO server generation {generation} differs from the pinned coverage image")
         self.await_server(container_id)
         return container_id
+
+    def load_backend_prerequisites(self) -> None:
+        if not self.backend_inputs_path.is_absolute() or self.backend_inputs_path.is_symlink() or not self.backend_inputs_path.is_file():
+            raise JourneyError("SSO shutdown journey requires a regular staged backend prerequisite file")
+        raw = self.backend_inputs_path.read_bytes()
+        if hashlib.sha256(raw).hexdigest() != self.backend_inputs_sha256:
+            raise JourneyError("SSO backend prerequisite digest changed")
+        try:
+            inputs = json.loads(raw)
+        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+            raise JourneyError("SSO backend prerequisites are invalid JSON") from exc
+        if not isinstance(inputs, dict) or inputs.get("schema_version") != 1:
+            raise JourneyError("SSO backend prerequisite schema is unsupported")
+        if inputs.get("platform") != self.platform or inputs.get("docker_socket") != self.docker_socket:
+            raise JourneyError("SSO backend prerequisite platform or Docker socket differs from the producer")
+        task_image_id = inputs.get("task_image_id")
+        task_image_ref = inputs.get("task_image_ref")
+        if not isinstance(task_image_id, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", task_image_id):
+            raise JourneyError("SSO task image must have an immutable config identity")
+        if not isinstance(task_image_ref, str) or not re.fullmatch(r"[a-z0-9][a-z0-9./:_-]+", task_image_ref) or task_image_ref.endswith(":latest"):
+            raise JourneyError("SSO task image must use the exact pinned non-latest reference")
+        if not isinstance(inputs.get("task_archive_sha256"), str) or not DIGEST_RE.fullmatch(inputs["task_archive_sha256"]):
+            raise JourneyError("SSO task image archive digest is invalid")
+        if inputs.get("podman_privileged_approved") is not True:
+            raise JourneyError("SSO shutdown journey requires the staged privileged-fixture approval")
+        actual_id = self.docker_stdout("image", "inspect", "--format", "{{.Id}}", task_image_ref)
+        if actual_id != task_image_id:
+            raise JourneyError("preloaded Docker task image does not match the staged immutable identity")
+        self.backend_inputs = inputs
+        self.task_image_id = task_image_id
+        self.task_image_ref = task_image_ref
+
+    def bootstrap_admin_key(self, container_id: str) -> None:
+        logs = self.docker_stdout("container", "logs", container_id)
+        candidates = re.findall(r"(?m)^\s*(csk_[A-Za-z0-9_-]+)\s*$", logs)
+        del logs
+        if len(candidates) != 1:
+            raise JourneyError("fresh SSO database did not emit exactly one bootstrap API key")
+        self.bootstrap_key = candidates[0]
+        self.api_env_file = self.secret_dir / "candidate-cli.env"
+        self.api_env_file.write_text(f"CAESIUM_API_KEY={self.bootstrap_key}\n")
+        self.api_env_file.chmod(0o600)
+        self.secret_files.append(self.api_env_file)
+
+    def host_api_base(self, container_id: str) -> str:
+        mapping = self.docker_stdout("port", container_id, "8080/tcp")
+        match = re.fullmatch(r"127\.0\.0\.1:(\d+)", mapping.strip())
+        if not match:
+            raise JourneyError("SSO server did not expose its API on a loopback-only ephemeral port")
+        return f"http://127.0.0.1:{match.group(1)}"
+
+    def api_json(self, container_id: str, path: str) -> Any:
+        if not self.bootstrap_key:
+            raise JourneyError("SSO candidate API key is unavailable")
+        request = Request(
+            self.host_api_base(container_id) + path,
+            headers={"Authorization": "Bearer " + self.bootstrap_key, "Accept": "application/json"},
+        )
+        try:
+            with urlopen(request, timeout=10) as response:
+                if response.status != 200:
+                    raise JourneyError("SSO public API returned an unexpected status")
+                body = response.read(2 * 1024 * 1024 + 1)
+        except (HTTPError, URLError, TimeoutError) as exc:
+            raise JourneyError("SSO public API request failed") from exc
+        if len(body) > 2 * 1024 * 1024:
+            raise JourneyError("SSO public API response exceeded the evidence limit")
+        try:
+            return json.loads(body)
+        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+            raise JourneyError("SSO public API returned invalid JSON") from exc
+
+    def candidate_cli(self, lane: str, *args: str, timeout: int = 60) -> str:
+        if self.api_env_file is None:
+            raise JourneyError("SSO candidate CLI credential file is unavailable")
+        raw_dir = self.raw / "journeys" / "sso" / lane
+        if raw_dir.exists() or raw_dir.is_symlink():
+            raise JourneyError(f"refusing pre-existing SSO candidate CLI profile path {raw_dir}")
+        raw_dir.mkdir(parents=True, mode=0o777)
+        raw_dir.chmod(0o777)
+        container_name = f"{self.run_id}-sso-cli-{lane}"
+        self.require_absent_container(container_name)
+        result = self.docker_run(
+            "run",
+            "--pull=never",
+            "--platform",
+            self.platform,
+            "--name",
+            container_name,
+            *self.container_labels(f"sso-cli-{lane}"),
+            "--network",
+            self.network_name,
+            "--env-file",
+            str(self.api_env_file),
+            "-e",
+            "GOCOVERDIR=/coverage",
+            "-v",
+            f"{raw_dir}:/coverage",
+            "-v",
+            f"{self.job_path}:/coverage-shutdown.job.yaml:ro",
+            "--entrypoint",
+            "/bin/caesium",
+            self.image,
+            *args,
+            check=False,
+            timeout=timeout,
+        )
+        info = self.assert_owned(container_name, f"sso-cli-{lane}")
+        container_id = str(info.get("Id") or "")
+        if not re.fullmatch(r"[0-9a-f]{64}", container_id) or info.get("Image") != self.image:
+            raise JourneyError("SSO candidate CLI process did not use the immutable candidate image")
+        state = info.get("State") or {}
+        raw_files: dict[str, str] = {}
+        for path in sorted(raw_dir.iterdir()):
+            if not path.is_file() or path.is_symlink() or path.stat().st_size == 0 or not path.name.startswith(("covmeta.", "covcounters.")):
+                raise JourneyError("SSO candidate CLI profile contains missing or foreign files")
+            raw_files[path.name] = hashlib.sha256(path.read_bytes()).hexdigest()
+        has_meta = any(name.startswith("covmeta.") for name in raw_files)
+        has_counters = any(name.startswith("covcounters.") for name in raw_files)
+        relative_raw = raw_dir.relative_to(self.raw).as_posix()
+        record = {
+            "schema_version": 1,
+            "source": "cli",
+            "lane": lane,
+            "kind": "gocoverdir",
+            "module": MODULE,
+            "candidate_sha": self.sha,
+            "image_id": self.image,
+            "builder_image_id": self.builder,
+            "build_context": self.build_context,
+            "image_provenance": self.image_provenance,
+            "verified": self.verified,
+            "container_id": container_id,
+            "complete": result.returncode == 0 and state.get("ExitCode") == 0 and state.get("OOMKilled") is False and has_meta and has_counters,
+            "missing": not (has_meta and has_counters),
+            "killed": bool(state.get("OOMKilled")) or result.returncode >= 128,
+            "exit_code": state.get("ExitCode"),
+            "oom_killed": bool(state.get("OOMKilled")),
+            "flush": "process-exit",
+            "signal": None,
+            "stop_rc": None,
+            "flush_rc": None,
+            "files": raw_files,
+            "operation": args[0] if args else "",
+            "raw_dir": relative_raw,
+        }
+        provenance_dir = self.raw / "journeys" / "sso" / "process-provenance"
+        provenance_dir.mkdir(parents=True, exist_ok=True)
+        provenance_path = provenance_dir / f"{lane}.json"
+        if provenance_path.exists() or provenance_path.is_symlink():
+            raise JourneyError("refusing pre-existing SSO CLI process provenance path")
+        record["provenance_path"] = provenance_path.relative_to(self.raw).as_posix()
+        provenance_path.write_text(json.dumps(record, indent=2) + "\n")
+        self.cli_processes.append(record)
+        self.ids.append((container_id, f"sso-cli-{lane}"))
+        self.remove_owned(container_id, f"sso-cli-{lane}")
+        if self.docker_run("container", "inspect", container_id, check=False).returncode == 0:
+            raise JourneyError("SSO candidate CLI container did not clean up after process exit")
+        if not record["complete"]:
+            raise JourneyError(f"SSO candidate CLI {lane} failed or produced incomplete process-exit coverage")
+        return result.stdout.strip()
+
+    def start_shutdown_job(self, server_id: str) -> dict[str, Any]:
+        alias = f"coverage-shutdown-{self.run_id}"
+        marker = f"caesium-shutdown-{self.run_id}"
+        self.job_path = self.sso_artifacts / "shutdown.job.yaml"
+        self.job_path.write_text(
+            "\n".join(
+                (
+                    "apiVersion: v1",
+                    "kind: Job",
+                    "metadata:",
+                    f"  alias: {alias}",
+                    "trigger:",
+                    "  type: cron",
+                    "  configuration:",
+                    '    cron: "0 2 * * *"',
+                    "steps:",
+                    "  - name: cancel_probe",
+                    f"    image: {json.dumps(self.task_image_ref)}",
+                    "    engine: docker",
+                    f"    command: [{json.dumps('sh')}, {json.dumps('-c')}, {json.dumps('sleep 300; echo ' + marker)}]",
+                    "",
+                )
+            )
+        )
+        self.candidate_cli("shutdown-apply", "job", "apply", "--path", "/coverage-shutdown.job.yaml", "--server", self.sp_base)
+        jobs = self.api_json(server_id, "/v1/jobs")
+        if not isinstance(jobs, list):
+            raise JourneyError("SSO job list response is not a JSON array")
+        matches = [job for job in jobs if isinstance(job, dict) and job.get("alias") == alias]
+        if len(matches) != 1:
+            raise JourneyError("SSO public job list does not contain the unique shutdown job")
+        job_id = matches[0].get("id")
+        if not isinstance(job_id, str) or not re.fullmatch(r"[0-9a-f-]{36}", job_id):
+            raise JourneyError("SSO shutdown job has no public UUID identity")
+        run_id = self.candidate_cli("shutdown-start", "run", "start", "--job-id", job_id, "--server", self.sp_base, timeout=90)
+        if not re.fullmatch(r"[0-9a-f-]{36}", run_id):
+            raise JourneyError("SSO candidate CLI did not return the shutdown run UUID")
+        path = f"/v1/jobs/{job_id}/runs/{run_id}"
+        deadline = time.monotonic() + 90
+        observed: dict[str, Any] | None = None
+        while time.monotonic() < deadline:
+            run_record = self.api_json(server_id, path)
+            tasks = run_record.get("tasks") if isinstance(run_record, dict) else None
+            if not isinstance(tasks, list) or len(tasks) != 1:
+                time.sleep(0.25)
+                continue
+            task = tasks[0]
+            if not isinstance(task, dict):
+                raise JourneyError("SSO shutdown run contains an invalid task record")
+            if run_record.get("status") == "running" and task.get("status") == "running":
+                runtime_id = task.get("runtime_id")
+                task_id = task.get("task_id")
+                if not isinstance(runtime_id, str) or not re.fullmatch(r"[0-9a-f]{64}", runtime_id):
+                    raise JourneyError("SSO shutdown task did not expose an immutable runtime ID")
+                if not isinstance(task_id, str) or not re.fullmatch(r"[0-9a-f-]{36}", task_id):
+                    raise JourneyError("SSO shutdown task public identity is invalid")
+                if task.get("engine") != "docker" or task.get("image") != self.task_image_ref:
+                    raise JourneyError("SSO shutdown task used a different backend or image")
+                instances = self.api_json(server_id, f"/v1/jobs/{job_id}/runs/{run_id}/tasks/{task_id}/partitions?limit=2")
+                rows = instances.get("partitions") if isinstance(instances, dict) else None
+                if instances.get("total") != 1 or not isinstance(rows, list) or len(rows) != 1 or not isinstance(rows[0], dict):
+                    raise JourneyError("SSO shutdown task does not have exactly one concrete public TaskRun instance")
+                instance = rows[0]
+                task_run_id = instance.get("task_run_id")
+                if (
+                    not isinstance(task_run_id, str)
+                    or not re.fullmatch(r"[0-9a-f-]{36}", task_run_id)
+                    or instance.get("status") != "running"
+                    or instance.get("runtime_id") != runtime_id
+                    or instance.get("completed_at")
+                ):
+                    raise JourneyError("SSO public instance surface did not identify the exact running native TaskRun")
+                observed = {
+                    "job_id": job_id,
+                    "job_alias": alias,
+                    "run_id": run_id,
+                    "task_id": task_id,
+                    "task_run_id": task_run_id,
+                    "run_detail_task_catalog_id": task_id,
+                    "runtime_id": runtime_id,
+                    "task_image_id": self.task_image_id,
+                    "task_image_ref": self.task_image_ref,
+                    "server_generation": 1,
+                    "initial_run_status": "running",
+                    "initial_task_status": "running",
+                }
+                break
+            if run_record.get("status") in ("failed", "cancelled", "skipped", "succeeded"):
+                raise JourneyError("SSO shutdown job became terminal before the server restart")
+            time.sleep(0.25)
+        if observed is None:
+            raise JourneyError("SSO public run surface never observed the shutdown task running")
+        self.shutdown_job = observed
+        return observed
+
+    def verify_shutdown_job_running(self, server_id: str) -> None:
+        if self.shutdown_job is None:
+            raise JourneyError("SSO shutdown run evidence is unavailable")
+        record = self.api_json(server_id, f"/v1/jobs/{self.shutdown_job['job_id']}/runs/{self.shutdown_job['run_id']}")
+        tasks = record.get("tasks") if isinstance(record, dict) else None
+        if (
+            record.get("id") != self.shutdown_job["run_id"]
+            or record.get("status") != "running"
+            or not isinstance(tasks, list)
+            or len(tasks) != 1
+            or not isinstance(tasks[0], dict)
+            or tasks[0].get("task_id") != self.shutdown_job["task_id"]
+            or tasks[0].get("runtime_id") != self.shutdown_job["runtime_id"]
+            or tasks[0].get("status") != "running"
+        ):
+            raise JourneyError("SSO shutdown run/task stopped being the exact active runtime before SIGTERM")
+        instances = self.api_json(
+            server_id,
+            f"/v1/jobs/{self.shutdown_job['job_id']}/runs/{self.shutdown_job['run_id']}/tasks/{self.shutdown_job['task_id']}/partitions?limit=2",
+        )
+        rows = instances.get("partitions") if isinstance(instances, dict) else None
+        if (
+            instances.get("total") != 1
+            or not isinstance(rows, list)
+            or len(rows) != 1
+            or not isinstance(rows[0], dict)
+            or rows[0].get("task_run_id") != self.shutdown_job["task_run_id"]
+            or rows[0].get("runtime_id") != self.shutdown_job["runtime_id"]
+            or rows[0].get("status") != "running"
+            or rows[0].get("completed_at")
+        ):
+            raise JourneyError("SSO concrete TaskRun identity/status changed before SIGTERM")
+
+    def verify_runtime_absent(self, generation: int) -> None:
+        if self.shutdown_job is None:
+            raise JourneyError("SSO runtime cleanup evidence is unavailable")
+        runtime_id = self.shutdown_job["runtime_id"]
+        result = self.docker_run(
+            "container", "ls", "-a", "--no-trunc", "--filter", f"id={runtime_id}", "--format", "{{.ID}}", check=False
+        )
+        if result.returncode != 0:
+            raise JourneyError("Docker could not verify shutdown runtime cleanup")
+        found = [line for line in result.stdout.splitlines() if line]
+        if found:
+            if found != [runtime_id]:
+                raise JourneyError("Docker runtime lookup returned an unexpected identity")
+            info = self.inspect_container(runtime_id)
+            config = info.get("Config") or {}
+            command = config.get("Cmd") or []
+            state = info.get("State") or {}
+            marker = f"caesium-shutdown-{self.run_id}"
+            owned_runtime = (
+                info.get("Id") == runtime_id
+                and info.get("Image") == self.task_image_id
+                and config.get("Image") == self.task_image_ref
+                and any(marker in str(value) for value in command)
+            )
+            if not owned_runtime:
+                raise JourneyError("Docker runtime identity could not be proven as this shutdown task")
+            if state.get("Running"):
+                raise JourneyError("shutdown task container is still running after server termination")
+            self.docker_run("container", "rm", "-f", runtime_id)
+            raise JourneyError("shutdown task runtime stopped but was not removed by the server")
+        self.shutdown_job["native_runtime_removed"] = True
+        if generation not in self.native_runtime_absent_generations:
+            self.native_runtime_absent_generations.append(generation)
+
+    def verify_shutdown_job_failed(self, server_id: str) -> None:
+        if self.shutdown_job is None or 1 not in self.native_runtime_absent_generations:
+            raise JourneyError("shutdown cancellation was not preceded by native runtime cleanup")
+        self.verify_runtime_absent(2)
+        path = f"/v1/jobs/{self.shutdown_job['job_id']}/runs/{self.shutdown_job['run_id']}"
+        deadline = time.monotonic() + 90
+        while time.monotonic() < deadline:
+            record = self.api_json(server_id, path)
+            tasks = record.get("tasks") if isinstance(record, dict) else None
+            if isinstance(tasks, list) and len(tasks) == 1 and isinstance(tasks[0], dict):
+                task = tasks[0]
+                if record.get("status") == "failed" and task.get("status") == "failed":
+                    if record.get("error") != "context canceled" or task.get("error") != "context canceled":
+                        raise JourneyError("persisted shutdown run/task lacks the authoritative context cancellation cause")
+                    if record.get("id") != self.shutdown_job["run_id"] or task.get("task_id") != self.shutdown_job["task_id"]:
+                        raise JourneyError("persisted shutdown run/catalog identity changed across server restart")
+                    run_completed = record.get("completed_at")
+                    if not isinstance(run_completed, str) or not run_completed:
+                        raise JourneyError("persisted shutdown run lacks terminal completion time")
+                    try:
+                        run_completed_at = datetime.datetime.fromisoformat(run_completed.replace("Z", "+00:00"))
+                    except ValueError as exc:
+                        raise JourneyError("persisted shutdown run completion time is invalid") from exc
+                    if run_completed_at.tzinfo is None:
+                        raise JourneyError("persisted shutdown run completion time lacks a timezone")
+                    instances = self.api_json(
+                        server_id,
+                        f"/v1/jobs/{self.shutdown_job['job_id']}/runs/{self.shutdown_job['run_id']}/tasks/{self.shutdown_job['task_id']}/partitions?limit=2",
+                    )
+                    rows = instances.get("partitions") if isinstance(instances, dict) else None
+                    if (
+                        instances.get("total") != 1
+                        or not isinstance(rows, list)
+                        or len(rows) != 1
+                        or not isinstance(rows[0], dict)
+                    ):
+                        raise JourneyError("same-database restart did not expose exactly one concrete terminal TaskRun")
+                    instance = rows[0]
+                    if (
+                        instance.get("task_run_id") != self.shutdown_job["task_run_id"]
+                        or instance.get("status") != "failed"
+                        or instance.get("error") != "context canceled"
+                        or instance.get("runtime_id") != self.shutdown_job["runtime_id"]
+                    ):
+                        raise JourneyError("persisted concrete TaskRun identity/status/cause changed across restart")
+                    task_completed = instance.get("completed_at")
+                    if not isinstance(task_completed, str) or not task_completed:
+                        raise JourneyError("persisted concrete TaskRun lacks terminal completion time")
+                    try:
+                        task_completed_at = datetime.datetime.fromisoformat(task_completed.replace("Z", "+00:00"))
+                    except ValueError as exc:
+                        raise JourneyError("persisted TaskRun completion time is invalid") from exc
+                    if task_completed_at.tzinfo is None:
+                        raise JourneyError("persisted TaskRun completion time lacks a timezone")
+                    self.shutdown_job.update(
+                        final_run_status=record["status"],
+                        final_task_status=task["status"],
+                        final_run_error=record["error"],
+                        final_task_error=task["error"],
+                        final_task_run_id=instance["task_run_id"],
+                        final_task_run_status=instance["status"],
+                        final_task_run_error=instance["error"],
+                        run_completed_at=run_completed,
+                        task_completed_at=task_completed,
+                        verified_after_generation=2,
+                    )
+                    return
+                if record.get("status") in ("succeeded", "cancelled", "skipped") or task.get("status") in ("succeeded", "cancelled", "skipped"):
+                    raise JourneyError("persisted shutdown run/task has an unexpected terminal status")
+            time.sleep(0.25)
+        raise JourneyError("same-database restart did not persist the failed shutdown run/task")
 
     def await_server(self, container_id: str) -> None:
         deadline = time.monotonic() + 120
@@ -487,12 +1095,25 @@ class Collector:
         stop = self.docker_run("container", "stop", "-t", "60", container_id, check=False)
         final = self.inspect_container(container_id)
         state = final.get("State") or {}
+        raw_dir = self.server_raw_root / f"server-g{generation}"
+        files: dict[str, str] = {}
+        for path in sorted(raw_dir.iterdir()):
+            if not path.is_file() or path.is_symlink() or path.stat().st_size == 0 or not path.name.startswith(("covmeta.", "covcounters.")):
+                raise JourneyError(f"SSO server generation {generation} profile contains missing or foreign files")
+            files[path.name] = hashlib.sha256(path.read_bytes()).hexdigest()
+        has_meta = any(name.startswith("covmeta.") for name in files)
+        has_counters = any(name.startswith("covcounters.") for name in files)
         record = {
             "generation": generation,
             "container_id": container_id,
             "image_id": final.get("Image"),
+            "complete": has_meta and has_counters,
+            "missing": not (has_meta and has_counters),
+            "killed": bool(state.get("OOMKilled")) or state.get("ExitCode") == 137,
             "database_mount_sha256": hashlib.sha256(str(self.database_dir.resolve()).encode()).hexdigest(),
             "server_environment_sha256": self.server_environment_sha256,
+            "raw_dir": raw_dir.relative_to(self.raw).as_posix(),
+            "files": files,
             "flush_rc": flush_rc,
             "exit_code": state.get("ExitCode"),
             "stop_rc": stop.returncode,
@@ -505,8 +1126,32 @@ class Collector:
             or state.get("ExitCode") not in (0, 143)
             or state.get("OOMKilled") is not False
             or final.get("Image") != self.image
+            or not record["complete"]
         ):
             raise JourneyError(f"SSO server generation {generation} did not stop cleanly")
+        provenance_dir = self.raw / "journeys" / "sso" / "process-provenance"
+        provenance_dir.mkdir(parents=True, exist_ok=True)
+        provenance_path = provenance_dir / f"server-generation-{generation}.json"
+        if provenance_path.exists() or provenance_path.is_symlink():
+            raise JourneyError("refusing pre-existing SSO server process provenance path")
+        record.update(
+            schema_version=1,
+            source="server",
+            lane=f"sso-server-g{generation}",
+            kind="gocoverdir",
+            module=MODULE,
+            candidate_sha=self.sha,
+            builder_image_id=self.builder,
+            build_context=self.build_context,
+            image_provenance=self.image_provenance,
+            verified=self.verified,
+            oom_killed=bool(state.get("OOMKilled")),
+            flush="sigusr2",
+            signal="SIGTERM",
+            stop_rc=stop.returncode,
+            provenance_path=provenance_path.relative_to(self.raw).as_posix(),
+        )
+        provenance_path.write_text(json.dumps(record, indent=2) + "\n")
         self.server_generations.append(record)
         self.remove_owned(container_id, lane)
         return record
@@ -540,7 +1185,7 @@ class Collector:
             "--timeout",
             "4m",
         ]
-        created = subprocess.run(args, check=False, text=True, capture_output=True, timeout=60)
+        created = subprocess.run(args, check=False, text=True, capture_output=True, env=self.docker_env, timeout=60)
         if created.returncode != 0 or not created.stdout.strip():
             raise JourneyError("could not create SSO journey helper container")
         self.helper_container_id = created.stdout.strip()
@@ -554,6 +1199,7 @@ class Collector:
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
+                env=self.docker_env,
                 bufsize=0,
                 start_new_session=True,
             )
@@ -792,17 +1438,28 @@ class Collector:
     def run_journey(self) -> dict[str, Any]:
         process = self.start_journey_process()
         buffer = bytearray()
-        journey_deadline = time.monotonic() + 230
+        journey_deadline = time.monotonic() + 240
         event, buffer = self.read_protocol_event(process, buffer, journey_deadline)
         while event.get("event") == "check":
             self.safe_check_event(event)
             event, buffer = self.read_protocol_event(process, buffer, journey_deadline)
         self.safe_restart_event(event)
+        barrier_started = time.monotonic()
         first_id = next(cid for cid, lane in self.ids if lane == "sso-server-g1")
+        self.verify_shutdown_job_running(first_id)
         self.stop_server(first_id, 1)
+        self.verify_runtime_absent(1)
         second_id = self.start_server(2)
         if first_id == second_id:
             raise JourneyError("SSO server restart reused the original container identity")
+        self.verify_shutdown_job_failed(second_id)
+        replay_restart_elapsed = time.monotonic() - barrier_started
+        if replay_restart_elapsed >= 55:
+            raise JourneyError("SSO server shutdown/restart exceeded the existing replay-age budget")
+        assert self.shutdown_job is not None
+        self.shutdown_job["native_runtime_absent_after_generation"] = 2
+        self.shutdown_job["native_runtime_absent_generations"] = list(self.native_runtime_absent_generations)
+        self.shutdown_job["replay_restart_elapsed_seconds"] = round(replay_restart_elapsed, 3)
         self.send_restarted(process)
 
         event, buffer = self.read_protocol_event(process, buffer, journey_deadline)
@@ -853,14 +1510,22 @@ class Collector:
             "complete": True,
             "missing": False,
             "killed": False,
+            "backend_inputs_sha256": self.backend_inputs_sha256,
+            "task_image_id": self.task_image_id,
+            "task_image_ref": self.task_image_ref,
             "fixture_binary_sha256": binary_digest,
             "public_idp_metadata_sha256": metadata_digest,
             "idp_ready": json.loads(self.idp_ready_file.read_text()),
             "auth_status": json.loads(self.auth_status_file.read_text()),
             "server_generations": self.server_generations,
+            "shutdown_cancellation": self.shutdown_job,
+            "cli_processes": self.cli_processes,
             "helper_events": self.protocol_events,
             "verdict": final,
-            "raw": {"server": "server"},
+            "raw": {
+                "server_generations": [item["raw_dir"] for item in self.server_generations],
+                "cli_processes": [item["raw_dir"] for item in self.cli_processes],
+            },
             "collection": "oidc-saml-http-persistent-replay-restart",
         }
         (self.sso_artifacts / "provenance.json").write_text(json.dumps(record, indent=2) + "\n")
@@ -888,6 +1553,37 @@ class Collector:
                 self.remove_owned(self.helper_container_id, "sso-journey")
             except JourneyError as exc:
                 print(f"cleanup retained SSO journey container: {redact(str(exc))}", file=sys.stderr)
+        for container_id, lane in reversed(self.ids):
+            if not lane.startswith("sso-server-g"):
+                continue
+            try:
+                info = self.assert_owned(container_id, lane)
+                if (info.get("State") or {}).get("Running"):
+                    self.docker_run("container", "kill", "--signal=SIGUSR2", container_id, check=False)
+                    self.docker_run("container", "stop", "-t", "60", container_id, check=False, timeout=75)
+            except JourneyError as exc:
+                print(f"cleanup could not gracefully stop SSO server: {redact(str(exc))}", file=sys.stderr)
+        if self.shutdown_job is not None:
+            try:
+                runtime_id = self.shutdown_job["runtime_id"]
+                listed = self.docker_run(
+                    "container", "ls", "-a", "--no-trunc", "--filter", f"id={runtime_id}", "--format", "{{.ID}}", check=False
+                )
+                if listed.returncode == 0 and listed.stdout.strip() == runtime_id:
+                    info = self.inspect_container(runtime_id)
+                    config = info.get("Config") or {}
+                    command = config.get("Cmd") or []
+                    owned_runtime = (
+                        info.get("Id") == runtime_id
+                        and info.get("Image") == self.task_image_id
+                        and config.get("Image") == self.task_image_ref
+                        and any(f"caesium-shutdown-{self.run_id}" in str(value) for value in command)
+                    )
+                    if not owned_runtime:
+                        raise JourneyError("cleanup refused a task runtime without exact image and marker identity")
+                    self.docker_run("container", "rm", "-f", runtime_id, check=False)
+            except JourneyError as exc:
+                print(f"cleanup retained unverified SSO task runtime: {redact(str(exc))}", file=sys.stderr)
         for container_id, lane in list(reversed(self.ids)):
             try:
                 self.remove_owned(container_id, lane)
@@ -908,13 +1604,18 @@ class Collector:
                 path.unlink(missing_ok=True)
             except OSError:
                 pass
+        self.bootstrap_key = ""
         if self.secret_dir is not None and self.secret_dir.exists():
             shutil.rmtree(self.secret_dir, ignore_errors=True)
         if self.database_dir is not None and self.database_dir.exists():
             shutil.rmtree(self.database_dir, ignore_errors=True)
 
     def execute(self) -> None:
-        for path in (self.server_raw,):
+        for path in (
+            self.server_raw_root / "server-g1",
+            self.server_raw_root / "server-g2",
+            self.server_raw_root / "process-provenance",
+        ):
             if path.exists() or path.is_symlink():
                 raise JourneyError(f"refusing pre-existing SSO artifact path {path}")
         self.artifacts.mkdir(parents=True, exist_ok=True)
@@ -930,56 +1631,102 @@ class Collector:
         self.idp_ready_file = self.sso_artifacts / "idp-ready.json"
         self.binary_path = self.fixture_dir / "sso-idp"
         self.metadata_path = self.fixture_dir / "idp.xml"
+        self.job_path = self.sso_artifacts / "shutdown.job.yaml"
         self.database_dir = pathlib.Path(tempfile.mkdtemp(prefix=f"caesium-sso-db-{self.run_id}-"))
-        self.server_raw.mkdir(parents=True, mode=0o777)
-        self.server_raw.chmod(0o777)
         self.database_dir.chmod(0o777)
+        self.load_backend_prerequisites()
         self.create_network()
         self.build_fixture()
         self.write_secrets()
         self.start_idp()
         self.await_idp()
-        self.start_server(1)
+        first_id = self.start_server(1)
+        self.bootstrap_admin_key(first_id)
+        self.start_shutdown_job(first_id)
         final = self.run_journey()
         self.write_provenance(final)
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
-    parser.add_argument("mode", choices=("sso",))
-    parser.add_argument("--root", required=True)
-    parser.add_argument("--artifacts", required=True)
-    parser.add_argument("--raw", required=True)
-    parser.add_argument("--coverage-image", required=True)
-    parser.add_argument("--builder-image", required=True)
-    parser.add_argument("--platform", required=True)
-    parser.add_argument("--candidate-sha", required=True)
-    parser.add_argument("--run-id", required=True)
-    parser.add_argument("--build-context", required=True)
-    parser.add_argument("--image-provenance", required=True)
-    parser.add_argument("--verified", choices=("true", "false"), required=True)
-    parser.add_argument("--container-cli", default="docker")
+    modes = parser.add_subparsers(dest="mode", required=True)
+    sso = modes.add_parser("sso")
+    for name in ("root", "artifacts", "raw", "coverage-image", "builder-image", "platform", "candidate-sha", "run-id", "build-context", "image-provenance"):
+        sso.add_argument("--" + name, required=True)
+    sso.add_argument("--docker-socket", required=True)
+    sso.add_argument("--socket-gid", required=True, type=int)
+    sso.add_argument("--backend-inputs", required=True)
+    sso.add_argument("--backend-inputs-sha256", required=True)
+    sso.add_argument("--verified", choices=("true", "false"), required=True)
+    sso.add_argument("--container-cli", default="docker")
+
+    backends = modes.add_parser("validate-backends")
+    for name in ("context", "context-sha256", "inputs", "inputs-sha256", "output", "final-manifest", "cli-list", "server-list", "candidate-sha", "image-id", "builder-image-id", "platform", "run-id", "build-context"):
+        backends.add_argument("--" + name, required=True)
+
     args = parser.parse_args()
-    if not re.fullmatch(r"[0-9a-f]{40}", args.candidate_sha):
-        parser.error("candidate SHA must be a full lowercase Git SHA")
-    if not re.fullmatch(r"[a-z0-9]([a-z0-9-]{0,38}[a-z0-9])?", args.run_id):
-        parser.error("run ID must be a lowercase Docker-safe identifier")
-    for name in ("coverage_image", "builder_image"):
-        if not re.fullmatch(r"sha256:[0-9a-f]{64}", getattr(args, name)):
-            parser.error(f"{name.replace('_', ' ')} must be an immutable sha256 image ID")
-    try:
-        context = json.loads(args.build_context)
-    except json.JSONDecodeError as exc:
-        parser.error(f"build context must be JSON: {exc}")
-    if not isinstance(context, dict):
-        parser.error("build context must be a JSON object")
-    if args.image_provenance != "built-by-this-run" or args.verified != "true":
-        parser.error("SSO live journey requires a verified image built by this collection")
+    if args.mode == "sso":
+        if not re.fullmatch(r"[0-9a-f]{40}", args.candidate_sha):
+            parser.error("candidate SHA must be a full lowercase Git SHA")
+        if not re.fullmatch(r"[a-z0-9]([a-z0-9-]{0,38}[a-z0-9])?", args.run_id):
+            parser.error("run ID must be a lowercase Docker-safe identifier")
+        for name in ("coverage_image", "builder_image"):
+            if not re.fullmatch(r"sha256:[0-9a-f]{64}", getattr(args, name)):
+                parser.error(f"{name.replace('_', ' ')} must be an immutable sha256 image ID")
+        try:
+            context = json.loads(args.build_context)
+        except json.JSONDecodeError as exc:
+            parser.error(f"build context must be JSON: {exc}")
+        if not isinstance(context, dict):
+            parser.error("build context must be a JSON object")
+        if args.image_provenance != "built-by-this-run" or args.verified != "true":
+            parser.error("SSO live journey requires a verified image built by this collection")
+        if not pathlib.Path(args.docker_socket).is_absolute():
+            parser.error("SSO Docker socket path must be absolute")
+        if args.socket_gid < 0:
+            parser.error("SSO Docker socket group ID must be nonnegative")
+        if args.platform not in ("linux/amd64", "linux/arm64"):
+            parser.error("SSO journey requires a supported Linux platform")
+        if args.container_cli != "docker":
+            parser.error("SSO journey requires the Docker CLI bound to the staged socket")
+        if not pathlib.Path(args.backend_inputs).is_absolute():
+            parser.error("SSO backend prerequisite path must be absolute")
+        if not DIGEST_RE.fullmatch(args.backend_inputs_sha256):
+            parser.error("SSO backend prerequisite digest must be a lowercase SHA-256 value")
+    else:
+        for name in ("candidate_sha",):
+            if not re.fullmatch(r"[0-9a-f]{40}", getattr(args, name)):
+                parser.error("candidate SHA must be a full lowercase Git SHA")
+        for name in ("context_sha256", "inputs_sha256"):
+            if not DIGEST_RE.fullmatch(getattr(args, name)):
+                parser.error(f"{name.replace('_', ' ')} must be a lowercase SHA-256 digest")
+        for name in ("image_id", "builder_image_id"):
+            if not re.fullmatch(r"sha256:[0-9a-f]{64}", getattr(args, name)):
+                parser.error(f"{name.replace('_', ' ')} must be an immutable sha256 image ID")
+        if not re.fullmatch(r"[a-z0-9]([a-z0-9-]{0,38}[a-z0-9])?", args.run_id):
+            parser.error("run ID must be a lowercase Docker-safe identifier")
+        if args.platform not in ("linux/amd64", "linux/arm64"):
+            parser.error("backend platform must be a supported Linux architecture")
+        try:
+            context = json.loads(args.build_context)
+        except json.JSONDecodeError as exc:
+            parser.error(f"build context must be JSON: {exc}")
+        if not isinstance(context, dict):
+            parser.error("build context must be a JSON object")
+        args.build_context = context
     return args
 
 
 def main() -> int:
     args = parse_args()
+    if args.mode == "validate-backends":
+        try:
+            validate_backend_contribution(args)
+            print("real backend coverage contribution validated")
+            return 0
+        except (JourneyError, OSError, ValueError) as exc:
+            print(f"backend coverage contribution rejected: {redact(str(exc))}", file=sys.stderr)
+            return 1
     collector = Collector(args)
 
     def interrupted(signum: int, _frame: Any) -> None:
