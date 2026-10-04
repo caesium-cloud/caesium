@@ -20,6 +20,7 @@ import (
 	"github.com/caesium-cloud/caesium/pkg/env"
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v5"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/require"
 )
 
@@ -494,6 +495,10 @@ func (noopCredentialAuthenticator) Authenticate(context.Context, string, string)
 
 func prepareAPILifetimeTest(t *testing.T) {
 	t.Helper()
+	oldRegisterer, oldGatherer := prometheus.DefaultRegisterer, prometheus.DefaultGatherer
+	registry := prometheus.NewRegistry()
+	prometheus.DefaultRegisterer, prometheus.DefaultGatherer = registry, registry
+	t.Cleanup(func() { prometheus.DefaultRegisterer, prometheus.DefaultGatherer = oldRegisterer, oldGatherer })
 	t.Cleanup(func() { require.NoError(t, env.Process()) })
 	t.Setenv("CAESIUM_PORT", "0")
 	t.Setenv("CAESIUM_AUTH_MODE", "none")
