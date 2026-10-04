@@ -45,3 +45,15 @@ func TestCheckPreservesErrorsThatOnlyMentionMissingImages(t *testing.T) {
 	require.False(t, results[2].Available)
 	require.ErrorContains(t, results[2].Error, "No such image")
 }
+
+func TestCheckInspectErrorsDistinguishesWrappedAbsenceFromWording(t *testing.T) {
+	wrapped := fmt.Errorf("inspect failed: %w", errdefs.ErrNotFound)
+	ordinary := errors.New("No such image: unrelated transport failure")
+	results := checkImages([]string{"missing", "broken"}, func(image string) error {
+		if image == "missing" {
+			return wrapped
+		}
+		return ordinary
+	})
+	require.Equal(t, []Result{{Image: "missing", Available: false}, {Image: "broken", Error: ordinary}}, results)
+}
