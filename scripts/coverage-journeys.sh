@@ -12,6 +12,16 @@ COVERAGE_JOURNEY_ACTIVE_IDS=()
 COVERAGE_JOURNEY_BUILDER_IDS=()
 COVERAGE_JOURNEY_PENDING_NAMES=()
 COVERAGE_JOURNEY_BUILDER_PENDING_NAMES=()
+COVERAGE_JOURNEY_PREP_IDS=()
+COVERAGE_JOURNEY_PREP_ID_LANES=()
+COVERAGE_JOURNEY_PREP_PENDING_NAMES=()
+COVERAGE_JOURNEY_PREP_PENDING_LANES=()
+COVERAGE_JOURNEY_PREP_FAILED=false
+COVERAGE_JOURNEY_PREP_SIGNAL=""
+COVERAGE_JOURNEY_PREP_CLEANUP_ACTIVE=false
+COVERAGE_JOURNEY_PREP_SIGNAL_HANDLER_ACTIVE=false
+COVERAGE_JOURNEY_PREP_POLL_INTERVAL=0.5
+COVERAGE_JOURNEY_PREP_CLEANUP_POLL_LIMIT=120
 COVERAGE_JOURNEY_TEMP_DIRS=()
 COVERAGE_JOURNEY_SECRET_FILES=()
 COVERAGE_JOURNEY_CLI_DIRS=()
@@ -253,6 +263,287 @@ coverage_journey_stop_remove_owned_builder() {
   [[ "$proof_rc" -eq 0 ]]
 }
 
+coverage_journey_prep_mark_failed() {
+  COVERAGE_JOURNEY_PREP_FAILED=true
+}
+
+coverage_journey_prep_track_pending() {
+  COVERAGE_JOURNEY_PREP_PENDING_NAMES+=("$1")
+  COVERAGE_JOURNEY_PREP_PENDING_LANES+=("$2")
+}
+
+coverage_journey_prep_untrack_pending() {
+  local want="$1" kept_names=() kept_lanes=() index
+  for ((index = 0; index < ${#COVERAGE_JOURNEY_PREP_PENDING_NAMES[@]}; index++)); do
+    if [[ "${COVERAGE_JOURNEY_PREP_PENDING_NAMES[$index]}" != "$want" ]]; then
+      kept_names+=("${COVERAGE_JOURNEY_PREP_PENDING_NAMES[$index]}")
+      kept_lanes+=("${COVERAGE_JOURNEY_PREP_PENDING_LANES[$index]}")
+    fi
+  done
+  if ((${#kept_names[@]})); then
+    COVERAGE_JOURNEY_PREP_PENDING_NAMES=("${kept_names[@]}")
+    COVERAGE_JOURNEY_PREP_PENDING_LANES=("${kept_lanes[@]}")
+  else
+    COVERAGE_JOURNEY_PREP_PENDING_NAMES=()
+    COVERAGE_JOURNEY_PREP_PENDING_LANES=()
+  fi
+}
+
+coverage_journey_prep_track_id() {
+  COVERAGE_JOURNEY_PREP_IDS+=("$1")
+  COVERAGE_JOURNEY_PREP_ID_LANES+=("$2")
+}
+
+coverage_journey_prep_untrack_id() {
+  local want="$1" kept_ids=() kept_lanes=() index
+  for ((index = 0; index < ${#COVERAGE_JOURNEY_PREP_IDS[@]}; index++)); do
+    if [[ "${COVERAGE_JOURNEY_PREP_IDS[$index]}" != "$want" ]]; then
+      kept_ids+=("${COVERAGE_JOURNEY_PREP_IDS[$index]}")
+      kept_lanes+=("${COVERAGE_JOURNEY_PREP_ID_LANES[$index]}")
+    fi
+  done
+  if ((${#kept_ids[@]})); then
+    COVERAGE_JOURNEY_PREP_IDS=("${kept_ids[@]}")
+    COVERAGE_JOURNEY_PREP_ID_LANES=("${kept_lanes[@]}")
+  else
+    COVERAGE_JOURNEY_PREP_IDS=()
+    COVERAGE_JOURNEY_PREP_ID_LANES=()
+  fi
+}
+
+coverage_journey_prep_state_fields() {
+  local expected_id="$1"
+  python3 -c 'import json,sys; d=json.load(sys.stdin); state=d.get("State"); rid=d.get("Id"); running=state.get("Running") if isinstance(state,dict) else None; status=state.get("Status") if isinstance(state,dict) else None; code=state.get("ExitCode") if isinstance(state,dict) else None; oom=state.get("OOMKilled") if isinstance(state,dict) else None; finished=state.get("FinishedAt") if isinstance(state,dict) else None; restart=d.get("RestartCount"); ok=rid==sys.argv[1] and type(running) is bool and isinstance(status,str) and type(code) is int and type(oom) is bool and type(restart) is int and isinstance(finished,str); ok or sys.exit("builder preparation container state is malformed"); print("\t".join((str(rid),str(running).lower(),status,str(code),str(oom).lower(),str(restart),finished)))' "$expected_id"
+}
+
+coverage_journey_prep_snapshot() {
+  local reference="$1" lane="$2"
+  coverage_journey_resource owned container "$reference" "$BUILDER_RUN_IMAGE" "$lane"
+}
+
+coverage_journey_capture_prep_logs() {
+  local id="$1" log_path="$2"
+  "$CONTAINER_CLI" logs "$id" >"$log_path" 2>&1
+}
+
+coverage_journey_prep_wait_and_remove() {
+  local id="$1" lane="$2" wait_seconds="$3" log_path="$4"
+  local poll_limit attempt snapshot fields actual_id running status exit_code oom restarts finished_at
+  if [[ ! "$wait_seconds" =~ ^[1-9][0-9]*$ ]]; then
+    coverage_journey_prep_mark_failed
+    return 1
+  fi
+  poll_limit=$((wait_seconds * 2))
+  for ((attempt = 0; attempt < poll_limit; attempt++)); do
+    if [[ -n "$COVERAGE_JOURNEY_PREP_SIGNAL" ]]; then
+      coverage_journey_prep_mark_failed
+      return 1
+    fi
+    if ! snapshot="$(coverage_journey_prep_snapshot "$id" "$lane")"; then
+      coverage_journey_prep_mark_failed
+      return 1
+    fi
+    if ! fields="$(printf '%s' "$snapshot" | coverage_journey_prep_state_fields "$id")"; then
+      coverage_journey_prep_mark_failed
+      return 1
+    fi
+    IFS=$'\t' read -r actual_id running status exit_code oom restarts finished_at <<<"$fields"
+    if [[ "$running" == false ]]; then
+      if [[ "$actual_id" != "$id" || "$status" != exited || "$exit_code" != 0 || "$oom" != false \
+          || "$restarts" != 0 || -z "$finished_at" || "$finished_at" == 0001-01-01T00:00:00Z ]]; then
+        coverage_journey_capture_prep_logs "$id" "$log_path" || true
+        coverage_journey_prep_mark_failed
+        return 1
+      fi
+      if ! coverage_journey_capture_prep_logs "$id" "$log_path"; then
+        coverage_journey_prep_mark_failed
+        return 1
+      fi
+      if ! coverage_journey_resource remove container "$id" "$BUILDER_RUN_IMAGE" "$lane" >/dev/null; then
+        coverage_journey_prep_mark_failed
+        return 1
+      fi
+      coverage_journey_prep_untrack_id "$id"
+      return 0
+    fi
+    sleep "$COVERAGE_JOURNEY_PREP_POLL_INTERVAL" || {
+      coverage_journey_prep_mark_failed
+      return 1
+    }
+  done
+  coverage_journey_capture_prep_logs "$id" "$log_path" || true
+  coverage_journey_prep_mark_failed
+  return 1
+}
+
+coverage_journey_run_builder_prep() {
+  local name="$1" lane="$2" log_path="$3" wait_seconds="$4"
+  shift 4
+  local allocation_path="$ARTIFACTS/journeys/$name.container-id"
+  local launch_error="$log_path.launch-error" launch_rc=0 reported_id snapshot actual_id
+  if ! coverage_journey_require_absent container "$name"; then
+    coverage_journey_prep_mark_failed
+    return 1
+  fi
+  if [[ -e "$allocation_path" || -L "$allocation_path" || -e "$launch_error" || -L "$launch_error" \
+      || -e "$log_path" || -L "$log_path" ]]; then
+    coverage_journey_prep_mark_failed
+    coverage_journey_fail "refusing pre-existing builder preparation evidence path for '$name'"
+    return 1
+  fi
+  coverage_journey_prep_track_pending "$name" "$lane"
+  if "$CONTAINER_CLI" run -d --pull=never --platform "$PLATFORM" \
+      --name "$name" \
+      --label "caesium.coverage.owner=$CANDIDATE_SHA" \
+      --label "caesium.coverage.run=$ID" \
+      --label "caesium.coverage.lane=$lane" \
+      "$@" >"$allocation_path" 2>"$launch_error"; then
+    :
+  else
+    launch_rc=$?
+  fi
+  if [[ -n "$COVERAGE_JOURNEY_PREP_SIGNAL" || "$launch_rc" -ne 0 ]]; then
+    coverage_journey_prep_mark_failed
+    if [[ -s "$launch_error" ]]; then coverage_journey_log_redacted <"$launch_error" >&2; fi
+    return 1
+  fi
+  reported_id="$(cat "$allocation_path")"
+  if [[ ! "$reported_id" =~ ^[0-9a-f]{64}$ ]]; then
+    coverage_journey_prep_mark_failed
+    coverage_journey_fail "builder preparation '$name' did not return an immutable container ID"
+    return 1
+  fi
+  if ! snapshot="$(coverage_journey_prep_snapshot "$name" "$lane")"; then
+    coverage_journey_prep_mark_failed
+    return 1
+  fi
+  actual_id="$(printf '%s' "$snapshot" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d.get("Id", ""))')" || {
+    coverage_journey_prep_mark_failed
+    return 1
+  }
+  if [[ "$actual_id" != "$reported_id" ]]; then
+    coverage_journey_prep_mark_failed
+    coverage_journey_fail "builder preparation '$name' name resolved to a different immutable ID"
+    return 1
+  fi
+  coverage_journey_prep_track_id "$actual_id" "$lane"
+  coverage_journey_prep_untrack_pending "$name"
+  if ! coverage_journey_prep_wait_and_remove "$actual_id" "$lane" "$wait_seconds" "$log_path"; then
+    if [[ -s "$launch_error" ]]; then coverage_journey_log_redacted <"$launch_error" >&2; fi
+    if [[ -s "$log_path" ]]; then coverage_journey_log_redacted <"$log_path" >&2; fi
+    coverage_journey_fail "owned builder preparation '$name' did not finish and clean up successfully"
+    return 1
+  fi
+}
+
+coverage_journey_cleanup_prep_id() {
+  local id="$1" lane="$2" snapshot fields actual_id running status exit_code oom restarts finished_at
+  local stop_rc=0 attempt stopped=false
+  if ! snapshot="$(coverage_journey_prep_snapshot "$id" "$lane")"; then
+    return 1
+  fi
+  if ! fields="$(printf '%s' "$snapshot" | coverage_journey_prep_state_fields "$id")"; then
+    return 1
+  fi
+  IFS=$'\t' read -r actual_id running status exit_code oom restarts finished_at <<<"$fields"
+  if [[ "$running" == true ]]; then
+    "$CONTAINER_CLI" stop -t 60 "$id" >/dev/null || stop_rc=$?
+    for ((attempt = 0; attempt < COVERAGE_JOURNEY_PREP_CLEANUP_POLL_LIMIT; attempt++)); do
+      if snapshot="$(coverage_journey_prep_snapshot "$id" "$lane")" \
+          && fields="$(printf '%s' "$snapshot" | coverage_journey_prep_state_fields "$id")"; then
+        IFS=$'\t' read -r actual_id running status exit_code oom restarts finished_at <<<"$fields"
+        if [[ "$running" == false ]]; then stopped=true; break; fi
+      else
+        return 1
+      fi
+      sleep "$COVERAGE_JOURNEY_PREP_POLL_INTERVAL" || return 1
+    done
+    [[ "$stopped" == true ]] || return 1
+    [[ "$stop_rc" -eq 0 ]] || coverage_journey_prep_mark_failed
+  fi
+  if [[ "$running" != false || "$actual_id" != "$id" || "$status" != exited \
+      || "$finished_at" == "" || "$finished_at" == 0001-01-01T00:00:00Z ]]; then
+    return 1
+  fi
+  if [[ "$exit_code" != 0 || "$oom" != false || "$restarts" != 0 ]]; then
+    coverage_journey_prep_mark_failed
+  fi
+  coverage_journey_resource remove container "$id" "$BUILDER_RUN_IMAGE" "$lane" >/dev/null || return 1
+  coverage_journey_prep_untrack_id "$id"
+}
+
+coverage_journey_cleanup_prep_pending() {
+  local name="$1" lane="$2" snapshot id
+  if snapshot="$(coverage_journey_prep_snapshot "$name" "$lane")"; then
+    id="$(printf '%s' "$snapshot" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d.get("Id", ""))')" || return 1
+    [[ "$id" =~ ^[0-9a-f]{64}$ ]] || return 1
+    coverage_journey_prep_track_id "$id" "$lane"
+    coverage_journey_prep_untrack_pending "$name"
+    coverage_journey_cleanup_prep_id "$id" "$lane"
+    return $?
+  fi
+  if coverage_journey_resource absent container "$name" >/dev/null 2>&1; then
+    coverage_journey_prep_untrack_pending "$name"
+    return 0
+  fi
+  return 1
+}
+
+coverage_journey_cleanup_prep_resources() {
+  local rc=0 index name lane id
+  local pending_names=() pending_lanes=() ids=() lanes=()
+  [[ "$COVERAGE_JOURNEY_PREP_CLEANUP_ACTIVE" != true ]] || return 1
+  COVERAGE_JOURNEY_PREP_CLEANUP_ACTIVE=true
+  if ((${#COVERAGE_JOURNEY_PREP_PENDING_NAMES[@]})); then
+    pending_names=("${COVERAGE_JOURNEY_PREP_PENDING_NAMES[@]}")
+    pending_lanes=("${COVERAGE_JOURNEY_PREP_PENDING_LANES[@]}")
+    for ((index = 0; index < ${#pending_names[@]}; index++)); do
+      name="${pending_names[$index]}"
+      lane="${pending_lanes[$index]}"
+      coverage_journey_cleanup_prep_pending "$name" "$lane" || rc=1
+    done
+  fi
+  if ((${#COVERAGE_JOURNEY_PREP_IDS[@]})); then
+    ids=("${COVERAGE_JOURNEY_PREP_IDS[@]}")
+    lanes=("${COVERAGE_JOURNEY_PREP_ID_LANES[@]}")
+    for ((index = 0; index < ${#ids[@]}; index++)); do
+      id="${ids[$index]}"
+      lane="${lanes[$index]}"
+      coverage_journey_cleanup_prep_id "$id" "$lane" || rc=1
+    done
+  fi
+  COVERAGE_JOURNEY_PREP_CLEANUP_ACTIVE=false
+  return "$rc"
+}
+
+coverage_journey_prep_signal_handler() {
+  COVERAGE_JOURNEY_PREP_SIGNAL="$1"
+  coverage_journey_prep_mark_failed
+  if [[ "$COVERAGE_JOURNEY_PREP_SIGNAL_HANDLER_ACTIVE" != true ]]; then
+    COVERAGE_JOURNEY_PREP_SIGNAL_HANDLER_ACTIVE=true
+    cleanup_coverage_journeys || true
+    COVERAGE_JOURNEY_PREP_SIGNAL_HANDLER_ACTIVE=false
+  fi
+}
+
+coverage_journey_with_prep_signal_cleanup() {
+  local rc=0
+  if [[ -n "$(trap -p INT)" || -n "$(trap -p TERM)" ]]; then
+    coverage_journey_prep_mark_failed
+    coverage_journey_fail "cannot install bounded preparation signal cleanup over an existing signal trap"
+    return 1
+  fi
+  COVERAGE_JOURNEY_PREP_SIGNAL=""
+  trap 'coverage_journey_prep_signal_handler INT' INT
+  trap 'coverage_journey_prep_signal_handler TERM' TERM
+  if "$@"; then rc=0; else rc=$?; fi
+  trap - INT TERM
+  if [[ -n "$COVERAGE_JOURNEY_PREP_SIGNAL" || "$rc" -ne 0 ]]; then
+    coverage_journey_prep_mark_failed
+    return 1
+  fi
+}
+
 coverage_journey_require_absent() {
   coverage_journey_resource absent "$1" "$2" >/dev/null
 }
@@ -264,7 +555,7 @@ coverage_journey_remove_owned() {
 }
 
 cleanup_coverage_journeys() {
-  local id path rc=0
+  local id path rc=0 index
   if ((${#COVERAGE_JOURNEY_PENDING_NAMES[@]})); then
     for id in "${COVERAGE_JOURNEY_PENDING_NAMES[@]}"; do
       coverage_journey_resource remove container "$id" >/dev/null || rc=1
@@ -297,14 +588,18 @@ cleanup_coverage_journeys() {
       coverage_journey_stop_remove_owned_builder "$id" || rc=1
     done
   fi
+  coverage_journey_cleanup_prep_resources || rc=1
   if ((${#COVERAGE_JOURNEY_SECRET_FILES[@]})); then
     for path in "${COVERAGE_JOURNEY_SECRET_FILES[@]}"; do rm -f "$path" || rc=1; done
   fi
   if ((${#COVERAGE_JOURNEY_TEMP_DIRS[@]})); then
     for path in "${COVERAGE_JOURNEY_TEMP_DIRS[@]}"; do rm -rf "$path" || rc=1; done
   fi
-  if [[ "$rc" -eq 0 ]] && ((${#COVERAGE_JOURNEY_BUILDER_IDS[@]} == 0)) \
-      && ((${#COVERAGE_JOURNEY_BUILDER_PENDING_NAMES[@]} == 0)); then
+  if [[ "$rc" -eq 0 && "$COVERAGE_JOURNEY_PREP_FAILED" == false ]] \
+      && ((${#COVERAGE_JOURNEY_BUILDER_IDS[@]} == 0)) \
+      && ((${#COVERAGE_JOURNEY_BUILDER_PENDING_NAMES[@]} == 0)) \
+      && ((${#COVERAGE_JOURNEY_PREP_IDS[@]} == 0)) \
+      && ((${#COVERAGE_JOURNEY_PREP_PENDING_NAMES[@]} == 0)); then
     if ((${#COVERAGE_JOURNEY_GIT_TEMP_DIRS[@]})); then
       for path in "${COVERAGE_JOURNEY_GIT_TEMP_DIRS[@]}"; do rm -rf "$path" || rc=1; done
     fi
@@ -314,6 +609,21 @@ cleanup_coverage_journeys() {
     if ((${#COVERAGE_JOURNEY_GIT_TEMP_DIRS[@]})); then
       printf '%s\n' "${COVERAGE_JOURNEY_GIT_TEMP_DIRS[@]}" >"$ARTIFACTS/retained-owned-git-fixture-paths.txt"
     fi
+    {
+      printf 'preparation_failed=%s\n' "$COVERAGE_JOURNEY_PREP_FAILED"
+      printf 'signal=%s\n' "${COVERAGE_JOURNEY_PREP_SIGNAL:-none}"
+      for ((index = 0; index < ${#COVERAGE_JOURNEY_PREP_IDS[@]}; index++)); do
+        printf 'container_id=%s\tlane=%s\n' \
+          "${COVERAGE_JOURNEY_PREP_IDS[$index]}" "${COVERAGE_JOURNEY_PREP_ID_LANES[$index]}"
+      done
+      for ((index = 0; index < ${#COVERAGE_JOURNEY_PREP_PENDING_NAMES[@]}; index++)); do
+        printf 'pending_name=%s\tlane=%s\n' \
+          "${COVERAGE_JOURNEY_PREP_PENDING_NAMES[$index]}" "${COVERAGE_JOURNEY_PREP_PENDING_LANES[$index]}"
+      done
+      if ((${#COVERAGE_JOURNEY_GIT_TEMP_DIRS[@]})); then
+        printf 'fixture_path=%s\n' "${COVERAGE_JOURNEY_GIT_TEMP_DIRS[@]}"
+      fi
+    } >"$ARTIFACTS/retained-owned-git-preparation.txt"
   fi
   if [[ "$rc" -ne 0 ]]; then
     : >"$ARTIFACTS/retained-owned-container-ids.txt"
@@ -324,6 +634,12 @@ cleanup_coverage_journeys() {
     if ((${#COVERAGE_JOURNEY_BUILDER_IDS[@]})); then
       printf '%s\n' "${COVERAGE_JOURNEY_BUILDER_IDS[@]}" >"$ARTIFACTS/retained-owned-builder-container-ids.txt"
     fi
+    : >"$ARTIFACTS/retained-owned-preparation-container-ids.txt"
+    for ((index = 0; index < ${#COVERAGE_JOURNEY_PREP_IDS[@]}; index++)); do
+      printf '%s\t%s\n' \
+        "${COVERAGE_JOURNEY_PREP_IDS[$index]}" "${COVERAGE_JOURNEY_PREP_ID_LANES[$index]}" \
+        >>"$ARTIFACTS/retained-owned-preparation-container-ids.txt"
+    done
     : >"$ARTIFACTS/retained-owned-container-names.txt"
     if ((${#COVERAGE_JOURNEY_PENDING_NAMES[@]})); then
       printf '%s\n' "${COVERAGE_JOURNEY_PENDING_NAMES[@]}" >"$ARTIFACTS/retained-owned-container-names.txt"
@@ -332,6 +648,12 @@ cleanup_coverage_journeys() {
     if ((${#COVERAGE_JOURNEY_BUILDER_PENDING_NAMES[@]})); then
       printf '%s\n' "${COVERAGE_JOURNEY_BUILDER_PENDING_NAMES[@]}" >"$ARTIFACTS/retained-owned-builder-container-names.txt"
     fi
+    : >"$ARTIFACTS/retained-owned-preparation-container-names.txt"
+    for ((index = 0; index < ${#COVERAGE_JOURNEY_PREP_PENDING_NAMES[@]}; index++)); do
+      printf '%s\t%s\n' \
+        "${COVERAGE_JOURNEY_PREP_PENDING_NAMES[$index]}" "${COVERAGE_JOURNEY_PREP_PENDING_LANES[$index]}" \
+        >>"$ARTIFACTS/retained-owned-preparation-container-names.txt"
+    done
     coverage_journey_fail "owned cleanup incomplete; operator reconciliation required"
     return 1
   fi
@@ -584,7 +906,7 @@ coverage_journey_build_named_args() {
   done
 }
 
-coverage_journey_prepare_git_sync() {
+coverage_journey_prepare_git_sync_inner() {
   local lane_dir="$1"
   local helper_log="$ARTIFACTS/journeys/git-helper-build-$ID.log"
   local init_log="$ARTIFACTS/journeys/git-fixture-init-$ID.log"
@@ -651,35 +973,29 @@ PY
   fi
 
   log "building uninstrumented Git fixture helper in the pinned builder image"
-  set +e
-  "$CONTAINER_CLI" run --rm --pull=never --platform "$PLATFORM" --network none \
+  if ! coverage_journey_run_builder_prep "${ID}-journey-git-helper-build" git-prep-build "$helper_log" 900 \
+    --network none \
     -v "$ROOT:/source:ro" -v "$COVERAGE_GIT_HELPER_DIR:/fixture-bin" -w /source \
     -e GOTOOLCHAIN=local -e GOPROXY=off -e GOFLAGS=-buildvcs=false \
     "$BUILDER_RUN_IMAGE" go build -tags=integration -o /fixture-bin/git-source ./test/fixtures/git-source \
-    >"$helper_log" 2>&1
-  local build_rc=$?
-  set -e
-  if [[ "$build_rc" -ne 0 ]]; then
+  ; then
     log "Git fixture helper build failed; sanitized diagnostic follows"
-    coverage_journey_log_redacted <"$helper_log" >&2
+    if [[ -f "$helper_log" ]]; then coverage_journey_log_redacted <"$helper_log" >&2; fi
     return 1
   fi
   [[ -f "$COVERAGE_GIT_HELPER_DIR/git-source" && ! -L "$COVERAGE_GIT_HELPER_DIR/git-source" ]] \
     || { coverage_journey_fail "builder did not produce the owned Git fixture helper"; return 1; }
 
   log "creating the local Git source fixture with native Git in the pinned builder"
-  set +e
-  "$CONTAINER_CLI" run --rm --pull=never --platform "$PLATFORM" --network none \
+  if ! coverage_journey_run_builder_prep "${ID}-journey-git-fixture-init" git-prep-init "$init_log" 300 \
+    --network none \
     -v "$COVERAGE_GIT_HELPER_DIR:/fixture-bin:ro" -v "$COVERAGE_GIT_FIXTURE_ROOT:/fixture:rw" \
     --entrypoint /fixture-bin/git-source "$BUILDER_RUN_IMAGE" \
     init --repo /fixture/coverage.git --alias "$COVERAGE_GIT_SERVER_ALIAS" \
     --source-id "$COVERAGE_GIT_SOURCE_ID" --image "$COVERAGE_GIT_TASK_IMAGE_REF" \
-    --url "$COVERAGE_GIT_SOURCE_URL" >"$init_log" 2>&1
-  local init_rc=$?
-  set -e
-  if [[ "$init_rc" -ne 0 ]]; then
+    --url "$COVERAGE_GIT_SOURCE_URL"; then
     log "Git fixture initialization failed; sanitized diagnostic follows"
-    coverage_journey_log_redacted <"$init_log" >&2
+    if [[ -f "$init_log" ]]; then coverage_journey_log_redacted <"$init_log" >&2; fi
     return 1
   fi
   state_path="$COVERAGE_GIT_FIXTURE_ROOT/state.json"
@@ -758,25 +1074,27 @@ PY
     return 1
   }
 
-  for _ in $(seq 1 60); do
-    set +e
-    output="$("$CONTAINER_CLI" run --rm --pull=never --platform "$PLATFORM" \
+  if ! coverage_journey_run_builder_prep "${ID}-journey-git-probe" git-prep-probe "$probe_log" 30 \
       --network "$NETWORK" -v "$COVERAGE_GIT_HELPER_DIR:/fixture-bin:ro" \
       --entrypoint git "$BUILDER_RUN_IMAGE" -c protocol.version=0 ls-remote \
-      "$COVERAGE_GIT_SOURCE_URL" refs/heads/main 2>"$probe_log")"
-    local probe_rc=$?
-    set -e
-    if [[ "$probe_rc" -eq 0 && "$output" == "$COVERAGE_GIT_INITIAL_COMMIT$(printf '\t')refs/heads/main" ]]; then
-      probe_ready=1
-      break
-    fi
-    sleep 0.5
-  done
-  [[ "$probe_ready" -eq 1 ]] || {
+      "$COVERAGE_GIT_SOURCE_URL" refs/heads/main; then
     log "native Git protocol-v0 readiness probe did not return the exact initial commit"
-    coverage_journey_log_redacted <"$probe_log" >&2 || true
+    if [[ -f "$probe_log" ]]; then coverage_journey_log_redacted <"$probe_log" >&2; fi
     return 1
-  }
+  fi
+  output="$(cat "$probe_log")"
+  if [[ "$output" != "$COVERAGE_GIT_INITIAL_COMMIT$(printf '\t')refs/heads/main" ]]; then
+    coverage_journey_prep_mark_failed
+    log "native Git protocol-v0 readiness probe returned an unexpected ref"
+    coverage_journey_log_redacted <"$probe_log" >&2
+    return 1
+  fi
+  probe_ready=1
+  [[ "$probe_ready" -eq 1 ]]
+}
+
+coverage_journey_prepare_git_sync() {
+  coverage_journey_with_prep_signal_cleanup coverage_journey_prepare_git_sync_inner "$@"
 }
 
 coverage_journey_run_lane() {

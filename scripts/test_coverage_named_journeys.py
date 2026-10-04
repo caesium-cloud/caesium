@@ -11,6 +11,7 @@ import pathlib
 import re
 import subprocess
 import sys
+import tempfile
 import uuid
 import unittest
 from unittest import mock
@@ -299,9 +300,203 @@ class NamedJourneyGuardTests(unittest.TestCase):
                     check_git_receipt(pathlib.Path("receipt"), pathlib.Path("state"), "2026-10-04T16:00:01Z")
 
 
+PREP_LIFECYCLE_HARNESS = r"""set -u
+source "$1"
+ARTIFACTS="$2"
+FAKE_FIXTURE="$3"
+FAKE_MODE="$4"
+CANDIDATE_SHA=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+ID=run-prep-lifecycle
+BUILDER_RUN_IMAGE=sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+PLATFORM=linux/arm64
+CONTAINER_CLI=docker
+COVERAGE_JOURNEY_PREP_POLL_INTERVAL=0
+COVERAGE_JOURNEY_PREP_CLEANUP_POLL_LIMIT=2
+COVERAGE_JOURNEY_GIT_TEMP_DIRS=("$FAKE_FIXTURE")
+FAKE_PRESENT=false
+FAKE_RUNNING=false
+FAKE_STATUS=created
+FAKE_EXIT=0
+FAKE_NAME=
+FAKE_LANE=
+FAKE_ID=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+FAKE_REMOVE_FAIL=false
+[[ "$FAKE_MODE" == remove-fail ]] && FAKE_REMOVE_FAIL=true
+log() { :; }
+coverage_journey_fail() { return 1; }
+docker() {
+  local joined=" $* "
+  case "$1" in
+    run)
+      [[ "$joined" == *" --pull=never "* && "$joined" == *"--label caesium.coverage.owner=$CANDIDATE_SHA"* \
+        && "$joined" == *"--label caesium.coverage.run=$ID"* && "$joined" == *" --name "* \
+        && "$joined" != *" --rm "* && "$joined" == *" $BUILDER_RUN_IMAGE "* \
+        && ${#COVERAGE_JOURNEY_PREP_PENDING_NAMES[@]} -eq 1 ]] || return 91
+      shift
+      while (($#)); do
+        case "$1" in
+          --name) FAKE_NAME="$2"; shift 2 ;;
+          --label)
+            case "$2" in
+              caesium.coverage.lane=*) FAKE_LANE="$(printf '%s' "$2" | sed 's/^[^=]*=//')" ;;
+            esac
+            shift 2
+            ;;
+          *) shift ;;
+        esac
+      done
+      FAKE_PRESENT=true
+      FAKE_RUNNING=true
+      FAKE_STATUS=running
+      FAKE_EXIT=0
+      if [[ "$FAKE_MODE" == complete || "$FAKE_MODE" == remove-fail ]]; then
+        FAKE_RUNNING=false
+        FAKE_STATUS=exited
+      fi
+      if [[ "$FAKE_MODE" == interrupt ]]; then kill -TERM "$$"; fi
+      if [[ "$FAKE_MODE" == late-fail ]]; then return 47; fi
+      printf '%s\n' "$FAKE_ID"
+      ;;
+    stop)
+      [[ "$4" == "$FAKE_ID" ]] || return 92
+      FAKE_RUNNING=false
+      FAKE_STATUS=exited
+      FAKE_EXIT=143
+      ;;
+    logs)
+      [[ "$2" == "$FAKE_ID" ]] || return 93
+      printf 'fixture preparation output\n'
+      ;;
+    *) return 94 ;;
+  esac
+}
+coverage_journey_resource() {
+  local action="$1" kind="$2" reference="$3" image="" lane=""
+  if (($# >= 4)); then image="$4"; fi
+  if (($# >= 5)); then lane="$5"; fi
+  case "$action" in
+    absent)
+      [[ "$kind" == container && "$FAKE_PRESENT" == false ]] || return 1
+      printf '{"absent":true}\n'
+      ;;
+    owned)
+      [[ "$kind" == container && "$FAKE_PRESENT" == true && "$image" == "$BUILDER_RUN_IMAGE" \
+        && "$lane" == "$FAKE_LANE" && ( "$reference" == "$FAKE_NAME" || "$reference" == "$FAKE_ID" ) ]] || return 1
+      local running_json=false finished_at=2026-10-04T16:00:00Z
+      if [[ "$FAKE_RUNNING" == true ]]; then running_json=true; finished_at=0001-01-01T00:00:00Z; fi
+      printf '{"Id":"%s","Image":"%s","Config":{"Labels":{"caesium.coverage.owner":"%s","caesium.coverage.run":"%s","caesium.coverage.lane":"%s"}},"State":{"Running":%s,"Status":"%s","ExitCode":%s,"OOMKilled":false,"FinishedAt":"%s"},"RestartCount":0}\n' \
+        "$FAKE_ID" "$BUILDER_RUN_IMAGE" "$CANDIDATE_SHA" "$ID" "$FAKE_LANE" "$running_json" "$FAKE_STATUS" "$FAKE_EXIT" "$finished_at"
+      ;;
+    remove)
+      [[ "$kind" == container && "$reference" == "$FAKE_ID" && "$image" == "$BUILDER_RUN_IMAGE" \
+        && "$lane" == "$FAKE_LANE" && "$FAKE_RUNNING" == false && "$FAKE_REMOVE_FAIL" == false ]] || return 1
+      FAKE_PRESENT=false
+      printf '{"absent":true,"Id":"%s"}\n' "$FAKE_ID"
+      ;;
+    *) return 95 ;;
+  esac
+}
+mkdir -p "$ARTIFACTS/journeys"
+log_path="$ARTIFACTS/journeys/preparation.log"
+if coverage_journey_with_prep_signal_cleanup \
+  coverage_journey_run_builder_prep run-prep-lifecycle git-prep-test "$log_path" 1 \
+  --network none "$BUILDER_RUN_IMAGE" sh -c true; then
+  prep_rc=0
+else
+  prep_rc=$?
+fi
+cleanup_coverage_journeys || true
+if [[ "$FAKE_MODE" == complete ]]; then
+  [[ "$prep_rc" -eq 0 && "$COVERAGE_JOURNEY_PREP_FAILED" == false \
+    && "$FAKE_PRESENT" == false && ! -e "$FAKE_FIXTURE" \
+    && -f "$ARTIFACTS/journeys/preparation.log" ]] || exit 80
+  exit 0
+fi
+[[ "$prep_rc" -ne 0 && "$COVERAGE_JOURNEY_PREP_FAILED" == true ]] || exit 81
+[[ -d "$FAKE_FIXTURE" && -f "$ARTIFACTS/retained-owned-git-fixture-paths.txt" \
+  && -f "$ARTIFACTS/retained-owned-git-preparation.txt" ]] || exit 82
+grep -Fxq "fixture_path=$FAKE_FIXTURE" "$ARTIFACTS/retained-owned-git-preparation.txt" || exit 83
+if [[ "$FAKE_MODE" == remove-fail ]]; then
+  [[ "$FAKE_PRESENT" == true ]] || exit 84
+  grep -Fxq "$FAKE_ID"$'\t'git-prep-test "$ARTIFACTS/retained-owned-preparation-container-ids.txt" || exit 85
+else
+  [[ "$FAKE_PRESENT" == false ]] || exit 86
+fi
+if [[ "$FAKE_MODE" == interrupt ]]; then
+  grep -Fxq 'signal=TERM' "$ARTIFACTS/retained-owned-git-preparation.txt" || exit 87
+fi
+"""
+
+
+class BuilderPreparationLifecycleTests(unittest.TestCase):
+    def test_successful_preparation_is_checked_removed_before_fixture_cleanup(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="coverage-preparation-") as temporary:
+            root = pathlib.Path(temporary)
+            artifacts = root / "artifacts"
+            fixture = root / "fixture"
+            artifacts.mkdir()
+            fixture.mkdir()
+            shell_script = pathlib.Path(__file__).with_name("coverage-journeys.sh")
+            completed = subprocess.run(
+                [
+                    "bash",
+                    "-c",
+                    PREP_LIFECYCLE_HARNESS,
+                    "coverage-preparation-test",
+                    str(shell_script),
+                    str(artifacts),
+                    str(fixture),
+                    "complete",
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=20,
+            )
+            self.assertEqual(completed.returncode, 0, completed.stderr + completed.stdout)
+
+    def _exercise_failure(self, mode: str) -> None:
+        with tempfile.TemporaryDirectory(prefix="coverage-preparation-") as temporary:
+            root = pathlib.Path(temporary)
+            artifacts = root / "artifacts"
+            fixture = root / "fixture"
+            artifacts.mkdir()
+            fixture.mkdir()
+            shell_script = pathlib.Path(__file__).with_name("coverage-journeys.sh")
+            completed = subprocess.run(
+                [
+                    "bash",
+                    "-c",
+                    PREP_LIFECYCLE_HARNESS,
+                    "coverage-preparation-test",
+                    str(shell_script),
+                    str(artifacts),
+                    str(fixture),
+                    mode,
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=20,
+            )
+            self.assertEqual(completed.returncode, 0, completed.stderr + completed.stdout)
+
+    def test_interrupted_late_allocation_is_joined_before_fixture_retention(self) -> None:
+        self._exercise_failure("interrupt")
+
+    def test_failed_run_with_late_allocation_is_reconciled_by_name(self) -> None:
+        self._exercise_failure("late-fail")
+
+    def test_wait_timeout_joins_owned_preparation_before_retaining_paths(self) -> None:
+        self._exercise_failure("wait")
+
+    def test_remove_failure_cannot_pass_and_retains_identity_and_fixture(self) -> None:
+        self._exercise_failure("remove-fail")
+
+
 def main() -> int:
     if len(sys.argv) == 2 and sys.argv[1] == "--self-test":
-        suite = unittest.defaultTestLoader.loadTestsFromTestCase(NamedJourneyGuardTests)
+        suite = unittest.defaultTestLoader.loadTestsFromModule(sys.modules[__name__])
         result = unittest.TextTestRunner(verbosity=2).run(suite)
         return 0 if result.wasSuccessful() else 1
     if len(sys.argv) >= 2 and sys.argv[1] == "validate-git-receipt":
