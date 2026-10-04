@@ -91,26 +91,95 @@ func loadCatalog(t *testing.T) catalog {
 	return c
 }
 
-// selected returns the workloads this invocation should run.
-func selected(c catalog) ([]catalogEntry, string) {
+// selected returns the workloads this invocation should run and rejects every
+// nonempty selector token that does not match a catalog tier or entry name.
+func selected(c catalog) ([]catalogEntry, string, error) {
 	choice := strings.TrimSpace(os.Getenv("CAESIUM_PERF_WORKLOADS"))
 	if choice == "" {
 		choice = "smoke"
 	}
 	if choice == "all" {
-		return c.Workloads, choice
+		return c.Workloads, choice, nil
 	}
 	wanted := map[string]bool{}
-	for _, name := range strings.Split(choice, ",") {
-		wanted[strings.TrimSpace(name)] = true
+	tokens := strings.Split(choice, ",")
+	for _, token := range tokens {
+		if token = strings.TrimSpace(token); token != "" {
+			wanted[token] = true
+		}
 	}
+	known := map[string]bool{}
 	var out []catalogEntry
 	for _, entry := range c.Workloads {
+		known[entry.Name] = true
+		if entry.Tier != "" {
+			known[entry.Tier] = true
+		}
 		if wanted[entry.Tier] || wanted[entry.Name] {
 			out = append(out, entry)
 		}
 	}
-	return out, choice
+	var unknown []string
+	for _, token := range tokens {
+		if token = strings.TrimSpace(token); token != "" && !known[token] {
+			unknown = append(unknown, token)
+		}
+	}
+	if len(unknown) > 0 {
+		return nil, choice, fmt.Errorf("unknown workload selection token(s): %s", strings.Join(unknown, ", "))
+	}
+	if len(out) == 0 {
+		return nil, choice, fmt.Errorf("workload selection %q matched no catalog entries", choice)
+	}
+	return out, choice, nil
+}
+
+func TestSelectedWorkloadsRejectsUnknownTokensBeforeExecution(t *testing.T) {
+	c := catalog{Workloads: []catalogEntry{
+		{Name: "smoke-a", Tier: "smoke"},
+		{Name: "wide-run", Tier: "wide"},
+		{Name: "smoke-b", Tier: "smoke"},
+	}}
+	for _, tc := range []struct {
+		name, selection, wantChoice string
+		wantNames                   []string
+		wantErr                     string
+	}{
+		{name: "default smoke", wantChoice: "smoke", wantNames: []string{"smoke-a", "smoke-b"}},
+		{name: "exact all", selection: "all", wantChoice: "all", wantNames: []string{"smoke-a", "wide-run", "smoke-b"}},
+		{name: "trimmed mixed valid", selection: " wide , smoke-a ", wantChoice: "wide , smoke-a", wantNames: []string{"smoke-a", "wide-run"}},
+		{name: "mixed unknown", selection: "smoke,open-queu", wantChoice: "smoke,open-queu", wantErr: "open-queu"},
+		{name: "all mixed with another token", selection: "smoke,all", wantChoice: "smoke,all", wantErr: "all"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.selection == "" {
+				t.Setenv("CAESIUM_PERF_WORKLOADS", "")
+			} else {
+				t.Setenv("CAESIUM_PERF_WORKLOADS", tc.selection)
+			}
+			got, choice, err := selected(c)
+			if choice != tc.wantChoice {
+				t.Fatalf("choice=%q, want %q", choice, tc.wantChoice)
+			}
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) || len(got) != 0 {
+					t.Fatalf("selection = %v, %q, %v", got, choice, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(got) != len(tc.wantNames) {
+				t.Fatalf("selected %d entries, want %d", len(got), len(tc.wantNames))
+			}
+			for i, want := range tc.wantNames {
+				if got[i].Name != want {
+					t.Fatalf("entry %d = %q, want %q", i, got[i].Name, want)
+				}
+			}
+		})
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -499,7 +568,10 @@ func mustLookup(m map[string]any, path ...string) any {
 // machine-readable result.
 func TestLoadCatalogWorkloads(t *testing.T) {
 	c := loadCatalog(t)
-	entries, choice := selected(c)
+	entries, choice, err := selected(c)
+	if err != nil {
+		t.Fatalf("CAESIUM_PERF_WORKLOADS=%q: %v", choice, err)
+	}
 	if len(entries) == 0 {
 		t.Fatalf("CAESIUM_PERF_WORKLOADS=%q selected none of the %d catalog workloads", choice, len(c.Workloads))
 	}
