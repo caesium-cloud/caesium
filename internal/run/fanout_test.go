@@ -853,3 +853,77 @@ func TestFanOutGroupDurationIgnoresUnfannedTasks(t *testing.T) {
 	assert.Equal(t, before,
 		metricstestutil.HistogramSampleCount(t, metrics.FanOutGroupDurationSeconds, "fanout-fixture", "process"))
 }
+
+func TestMaterializeFanOutTaskRunPreservesAndResetsTemplateFields(t *testing.T) {
+	now := time.Now().UTC()
+	template := &models.TaskRun{ID: uuid.New(), TaskID: uuid.New(), JobRunID: uuid.New(), Status: string(TaskStatusRunning), ClaimedBy: "old-owner", RuntimeID: "old-runtime", StartedAt: &now, CompletedAt: &now, CreatedAt: now, ClaimAttempt: 3, Attempt: 2, Hash: "hash", OutstandingPredecessors: 7}
+	for _, partition := range []pkgtask.Partition{
+		{Key: "nil"},
+		{Key: "empty", Attributes: map[string]string{}, DependsOn: []string{}},
+		{Key: "values", Fingerprint: "fp", Attributes: map[string]string{"v": "one"}, DependsOn: []string{"a", "b"}},
+	} {
+		t.Run(partition.Key, func(t *testing.T) {
+			before := *template
+			inst := ExpandedInstance{TaskRunID: uuid.New(), TaskID: template.TaskID, PartitionIndex: 2, Partition: partition, OutstandingPredecessors: 9}
+			row, err := materializeFanOutTaskRun(template, inst, 4)
+			require.NoError(t, err)
+			require.Equal(t, before, *template)
+			require.Equal(t, inst.TaskRunID, row.ID)
+			require.Equal(t, 2, row.PartitionIndex)
+			require.Equal(t, 4, row.PartitionCount)
+			require.Equal(t, 9, row.OutstandingPredecessors)
+			require.Equal(t, now, row.CreatedAt)
+			require.Equal(t, partition.Fingerprint, row.PartitionFingerprint)
+			expectedAttrs, err := encodePartitionMap(partition.Attributes)
+			require.NoError(t, err)
+			expectedDeps, err := json.Marshal(partition.DependsOn)
+			require.NoError(t, err)
+			require.Equal(t, expectedAttrs, row.PartitionAttributes)
+			require.Equal(t, datatypes.JSON(expectedDeps), row.PartitionDependsOn)
+			require.Equal(t, string(TaskStatusPending), row.Status)
+			require.Empty(t, row.ClaimedBy)
+			require.Empty(t, row.RuntimeID)
+			require.Nil(t, row.StartedAt)
+			require.Nil(t, row.CompletedAt)
+			require.Equal(t, template.ClaimAttempt, row.ClaimAttempt)
+			require.Equal(t, template.Attempt, row.Attempt)
+			require.Equal(t, template.Hash, row.Hash)
+		})
+	}
+}
+
+func TestFanOutSQLAndOwnerMaterializationParity(t *testing.T) {
+	parts := []pkgtask.Partition{{Key: "a"}, {Key: "b", Attributes: map[string]string{}, DependsOn: []string{"a"}}}
+	for _, owner := range []bool{false, true} {
+		t.Run(map[bool]string{false: "sql", true: "owner"}[owner], func(t *testing.T) {
+			f := newFanOutFixture(t, &jobdefschema.FanOut{From: "discover", MaxPartitions: 16})
+			template, err := loadUniqueTaskRun(f.db, f.runID, f.consumer.ID)
+			require.NoError(t, err)
+			var expansion *FanOutExpansion
+			if owner {
+				expansion, err = f.store.PlanFanOutExpansion(f.runID, f.producer.ID, parts)
+				require.NoError(t, err)
+				require.NoError(t, f.db.Transaction(func(tx *gorm.DB) error {
+					var events []event.Event
+					var counts dbWriteCounts
+					return f.store.persistExpansionTx(tx, f.runID, expansion, &events, &counts)
+				}))
+			} else {
+				expansion, err = f.expand(t, parts)
+				require.NoError(t, err)
+			}
+			rows := f.instances(t)
+			require.Len(t, rows, 2)
+			for i, row := range rows {
+				require.Equal(t, expansion.Groups[0].Instances[i].TaskRunID, row.ID)
+				require.Equal(t, template.CreatedAt, row.CreatedAt)
+				require.Equal(t, i, row.PartitionIndex)
+				require.Equal(t, 2, row.PartitionCount)
+				require.Equal(t, template.OutstandingPredecessors+len(parts[i].DependsOn), row.OutstandingPredecessors)
+				require.Equal(t, string(TaskStatusPending), row.Status)
+			}
+			require.Equal(t, template.ID, rows[0].ID)
+			require.NotEqual(t, template.ID, rows[1].ID)
+		})
+	}
+}
