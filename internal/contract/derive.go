@@ -119,7 +119,7 @@ func (s GORMStore) ListContractJobs(ctx context.Context, incoming []schema.Defin
 		return jobs, nil
 	}
 
-	incomingJobIDs, err := s.existingJobIDsByAlias(ctx, incomingAliases)
+	incomingJobIDs, err := s.ExistingJobIDsByAlias(ctx, incomingAliases)
 	if err != nil {
 		return nil, err
 	}
@@ -167,7 +167,7 @@ func (s GORMStore) ListContractProducerSchemas(ctx context.Context, incoming []s
 		incomingAliases[alias] = struct{}{}
 	}
 
-	incomingJobIDs, err := s.existingJobIDsByAlias(ctx, incomingAliases)
+	incomingJobIDs, err := s.ExistingJobIDsByAlias(ctx, incomingAliases)
 	if err != nil {
 		return nil, err
 	}
@@ -392,7 +392,8 @@ func DeriveGraph(input DeriveInput) (Graph, error) {
 	return builder.graph(), nil
 }
 
-func (s GORMStore) existingJobIDsByAlias(ctx context.Context, incomingAliases map[string]struct{}) (map[string]uuid.UUID, error) {
+// ExistingJobIDsByAlias resolves active catalog aliases, normalizing returned aliases.
+func (s GORMStore) ExistingJobIDsByAlias(ctx context.Context, incomingAliases map[string]struct{}) (map[string]uuid.UUID, error) {
 	if len(incomingAliases) == 0 {
 		return nil, nil
 	}

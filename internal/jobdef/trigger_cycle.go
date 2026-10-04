@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/caesium-cloud/caesium/internal/contract"
 	"github.com/caesium-cloud/caesium/internal/event"
 	"github.com/caesium-cloud/caesium/internal/eventmatch"
 	"github.com/caesium-cloud/caesium/internal/models"
@@ -106,34 +107,7 @@ func existingJobIDsByAlias(ctx context.Context, conn *gorm.DB, incomingAliases m
 		ctx = context.Background()
 	}
 
-	aliases := make([]string, 0, len(incomingAliases))
-	for alias := range incomingAliases {
-		aliases = append(aliases, alias)
-	}
-
-	var rows []struct {
-		ID    uuid.UUID
-		Alias string
-	}
-	err := conn.WithContext(ctx).
-		Table("jobs").
-		Select("id, alias").
-		Where("deleted_at IS NULL").
-		Where("alias IN ?", aliases).
-		Find(&rows).Error
-	if err != nil {
-		return nil, err
-	}
-
-	ids := make(map[string]uuid.UUID, len(rows))
-	for _, row := range rows {
-		alias := strings.TrimSpace(row.Alias)
-		if alias == "" || row.ID == uuid.Nil {
-			continue
-		}
-		ids[alias] = row.ID
-	}
-	return ids, nil
+	return (contract.GORMStore{DB: conn}).ExistingJobIDsByAlias(ctx, incomingAliases)
 }
 
 func existingTriggerChainNodes(ctx context.Context, conn *gorm.DB, incomingAliases map[string]struct{}, incomingJobIDs map[uuid.UUID]struct{}) ([]triggerChainNode, error) {
