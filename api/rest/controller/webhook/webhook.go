@@ -14,6 +14,7 @@ import (
 	jsvc "github.com/caesium-cloud/caesium/api/rest/service/job"
 	triggersvc "github.com/caesium-cloud/caesium/api/rest/service/trigger"
 	"github.com/caesium-cloud/caesium/internal/auth"
+	"github.com/caesium-cloud/caesium/internal/bodylimit"
 	eventstore "github.com/caesium-cloud/caesium/internal/event"
 	freshnesspkg "github.com/caesium-cloud/caesium/internal/freshness"
 	"github.com/caesium-cloud/caesium/internal/job"
@@ -400,21 +401,12 @@ func stringJSONList(values []string) datatypes.JSON {
 	return datatypes.JSON(raw)
 }
 
-var errRequestTooLarge = errors.New("request body too large")
+var errRequestTooLarge = bodylimit.ErrTooLarge
 
 func readWebhookBody(body io.Reader) ([]byte, error) {
-	maxBytes := env.Variables().WebhookMaxBodySize.Int64()
-	if maxBytes <= 0 {
-		return io.ReadAll(body)
-	}
-
-	limited := io.LimitReader(body, maxBytes+1)
-	data, err := io.ReadAll(limited)
+	data, err := bodylimit.Read(body, env.Variables().WebhookMaxBodySize.Int64())
 	if err != nil {
 		return nil, err
-	}
-	if int64(len(data)) > maxBytes {
-		return nil, errRequestTooLarge
 	}
 	return data, nil
 }
