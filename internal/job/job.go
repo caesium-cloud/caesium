@@ -650,33 +650,58 @@ func (j *job) finalizeAbortedResume(ctx context.Context, store *run.Store, runID
 	// then refuses, and the classification is simply repeated, a bounded
 	// number of times, exactly as the normal completion path does.
 	var finalized bool
-	if ctx.Err() == context.Canceled {
+	terminationWon := func() bool {
+		if original := context.Cause(ctx); run.IsRunDeadlineError(original) {
+			cause = original
+		} else if ctx.Err() == context.Canceled {
+			cause = run.NewRunCancellationError(context.Cause(ctx))
+		} else {
+			return false
+		}
+		return true
+	}
+	complete := func() (bool, error) {
+		terminationWon()
+		return store.CompleteIfActive(runID, cause)
+	}
+	if terminationWon() {
 		// This resume already owns an admitted run, but cancellation won
 		// before the normal finalizer was armed. Settle its unfinished rows
 		// atomically instead of handing work to a closed owner supervisor.
-		cause = run.NewRunCancellationError(context.Cause(ctx))
 		if j.beforeComplete != nil {
 			j.beforeComplete(runID)
 		}
-		finalized, err = store.CompleteIfActive(runID, cause)
+		finalized, err = complete()
 		if err != nil {
 			log.Error("cancelled aborted resume could not be finalized", "job_id", j.id, "run_id", runID, "error", err)
 			return
 		}
 	} else {
 		for attempt := 0; ; attempt++ {
+			if terminationWon() {
+				finalized, err = complete()
+				break
+			}
 			if attempt >= 2 {
 				// Bounded like the normal completion path: the last word is a
 				// hand-off (itself retried), never a return that strands a retry.
 				for range 3 {
+					if terminationWon() {
+						finalized, err = complete()
+						break
+					}
 					handedOff, handoffErr := j.handOffPendingPartitionRetries(ctx, store, runID, j.params)
+					if terminationWon() {
+						finalized, err = complete()
+						break
+					}
 					if handedOff {
 						return
 					}
 					if handoffErr != nil {
 						cause = errors.Join(cause, handoffErr)
 					}
-					finalized, err = store.CompleteIfActive(runID, cause)
+					finalized, err = complete()
 					if !errors.Is(err, run.ErrRunHasPendingWork) {
 						break
 					}
@@ -688,7 +713,13 @@ func (j *job) finalizeAbortedResume(ctx context.Context, store *run.Store, runID
 				}
 				break
 			}
-			handedOff, updated, err := j.recoverPendingPartitionRetries(ctx, store, runID, j.params, cause)
+			var handedOff bool
+			var updated error
+			handedOff, updated, err = j.recoverPendingPartitionRetries(ctx, store, runID, j.params, cause)
+			if terminationWon() {
+				finalized, err = complete()
+				break
+			}
 			if err != nil {
 				log.Error("retry-reset instances of an aborted resume could not be resolved; leaving the run for an operator", "job_id", j.id, "run_id", runID, "error", err)
 				return
@@ -700,7 +731,7 @@ func (j *job) finalizeAbortedResume(ctx context.Context, store *run.Store, runID
 			if j.beforeComplete != nil {
 				j.beforeComplete(runID)
 			}
-			finalized, err = store.CompleteIfActive(runID, cause)
+			finalized, err = complete()
 			if errors.Is(err, run.ErrRunHasPendingWork) {
 				continue
 			}
@@ -710,6 +741,10 @@ func (j *job) finalizeAbortedResume(ctx context.Context, store *run.Store, runID
 			}
 			break
 		}
+	}
+	if err != nil {
+		log.Error("aborted resume completion persistence failure", "job_id", j.id, "run_id", runID, "error", err)
+		return
 	}
 	if !finalized {
 		// Another path finalized the run between the status read and this
@@ -1078,21 +1113,32 @@ func (j *job) Run(ctx context.Context) (err error) {
 		// the earlier error would leave that task and its pending siblings
 		// non-terminal. Per-task deadlines use child contexts and cannot enter
 		// this branch.
-		if cause := context.Cause(ctx); runTimeout > 0 && run.IsRunDeadlineError(cause) {
-			runErr = cause
-			err = cause
-		} else if ownerCtx.Err() == context.Canceled {
-			// Only cancellation of the whole-run owner has authority to settle
-			// every unfinished row. A canceled task/backend with a live owner
-			// remains an ordinary failure. Preserve a custom cancellation cause.
-			runErr = run.NewRunCancellationError(context.Cause(ownerCtx))
-			err = runErr
+		terminationWon := func() bool {
+			if cause := context.Cause(ctx); runTimeout > 0 && run.IsRunDeadlineError(cause) {
+				runErr = cause
+				err = cause
+			} else if ownerCtx.Err() == context.Canceled {
+				// Sample the owner, never the cleanup-canceled deadline child.
+				runErr = run.NewRunCancellationError(context.Cause(ownerCtx))
+				err = runErr
+			} else {
+				return false
+			}
+			return true
+		}
+		complete := func() error {
+			terminationWon()
+			return store.Complete(runID, runErr)
 		}
 		if j.beforeComplete != nil {
 			j.beforeComplete(runID)
 		}
-		completeErr := store.Complete(runID, runErr)
+		completeErr := complete()
 		for attempt := 0; errors.Is(completeErr, run.ErrRunHasPendingWork); attempt++ {
+			if terminationWon() {
+				completeErr = complete()
+				break
+			}
 			// A per-partition retry landed after the DAG finished and before
 			// this status write. HTTP kickoff only fires when reopened=true;
 			// the run was still running so the handler will not start an
@@ -1109,14 +1155,22 @@ func (j *job) Run(ctx context.Context) (err error) {
 				// examined, so alternate hand-off and completion a few times
 				// before conceding the run to an operator.
 				for range 3 {
+					if terminationWon() {
+						completeErr = complete()
+						break
+					}
 					handedOff, handoffErr := j.handOffPendingPartitionRetries(ctx, store, runID, snapshot.Params)
+					if terminationWon() {
+						completeErr = complete()
+						break
+					}
 					if handedOff {
 						return
 					}
 					if handoffErr != nil {
 						runErr = errors.Join(runErr, handoffErr)
 					}
-					completeErr = store.Complete(runID, runErr)
+					completeErr = complete()
 					if !errors.Is(completeErr, run.ErrRunHasPendingWork) {
 						break
 					}
@@ -1129,6 +1183,10 @@ func (j *job) Run(ctx context.Context) (err error) {
 				break
 			}
 			handedOff, updatedErr, recoverErr := j.recoverPendingPartitionRetries(ctx, store, runID, snapshot.Params, runErr)
+			if terminationWon() {
+				completeErr = complete()
+				break
+			}
 			if recoverErr != nil {
 				log.Error("run completion refused for a pending partition retry that could not be resolved; leaving the run for an operator",
 					"job_id", j.id, "run_id", runID, "error", recoverErr)
@@ -1138,7 +1196,7 @@ func (j *job) Run(ctx context.Context) (err error) {
 				return
 			}
 			runErr = updatedErr
-			completeErr = store.Complete(runID, runErr)
+			completeErr = complete()
 		}
 		if completeErr != nil {
 			log.Error("run completion persistence failure", "run_id", runID, "error", completeErr)
