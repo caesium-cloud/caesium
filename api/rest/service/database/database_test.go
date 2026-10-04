@@ -58,7 +58,7 @@ func TestSQLMaskPreservesBytePositions(t *testing.T) {
 		{"SELECT 'x", "SELECT   "},
 	} {
 		t.Run(tc.query, func(t *testing.T) {
-			if got := sanitizeSQL(tc.query); got != tc.masked || len(got) != len(tc.query) {
+			if got, _ := scanSQL(tc.query); got != tc.masked || len(got) != len(tc.query) {
 				t.Fatalf("mask = %q (%d bytes), want %q (%d bytes)", got, len(got), tc.masked, len(tc.query))
 			}
 		})
