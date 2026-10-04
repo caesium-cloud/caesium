@@ -49,7 +49,9 @@ func TestSupervisedKickoffsKeepRequestValuesAndRunCancellation(t *testing.T) {
 			case "manual":
 				launchRun(child, j, r, release)
 			case "whole retry":
-				launchWholeRunRetry(child, j, r, release)
+				// Retry registers cancellation before its durable retry mutation.
+				registered, unregister := job.RegisterRunCancel(child, runID)
+				launchWholeRunRetry(registered, j, r, func() { unregister(); release() })
 			default:
 				kickoffPartitionRetryRun(child, j, runID, nil, release)
 			}
