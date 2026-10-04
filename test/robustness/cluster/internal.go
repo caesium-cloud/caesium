@@ -243,7 +243,7 @@ func (c *InternalClient) Post(ctx context.Context, base, path string, payload an
 	}
 	resp, err := c.HTTP.Do(req)
 	if err != nil {
-		ex.Err = err.Error()
+		ex.Err = uncertainExchange("internal POST "+path, 0, &transportFailure{err}).Error()
 		return ex
 	}
 	defer func() { _ = resp.Body.Close() }()

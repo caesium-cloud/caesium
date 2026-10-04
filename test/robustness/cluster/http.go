@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -95,7 +96,7 @@ func (h *HTTP) Do(ctx context.Context, method, url string, body any) (status int
 	}
 	resp, err := h.Client.Do(req)
 	if err != nil {
-		return 0, nil, err
+		return 0, nil, &transportFailure{err}
 	}
 	defer func() { _ = resp.Body.Close() }()
 	raw, err = bodylimit.Read(resp.Body, 4<<20)
@@ -179,12 +180,19 @@ func (h *HTTP) TriggerRun(ctx context.Context, base, jobID string) (Run, []byte,
 
 func uncertainExchange(operation string, status int, err error) error {
 	if status == 0 {
-		// Preserve existing request/transport diagnostics. Only a received
-		// response with incomplete evidence is classified here.
-		return err
+		// Preflight failures cannot commit. A transport failure may happen
+		// after submission even when no response headers are available.
+		if _, ambiguous := errors.AsType[*transportFailure](err); !ambiguous {
+			return err
+		}
 	}
 	return fmt.Errorf("inconclusive: %s may have committed (response status %d): %w", operation, status, err)
 }
+
+type transportFailure struct{ cause error }
+
+func (e *transportFailure) Error() string { return e.cause.Error() }
+func (e *transportFailure) Unwrap() error { return e.cause }
 
 func (h *HTTP) ListJobTasks(ctx context.Context, base, jobID string) ([]CatalogTask, error) {
 	jid, err := uuid.Parse(jobID)

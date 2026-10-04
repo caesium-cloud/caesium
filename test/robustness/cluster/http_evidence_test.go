@@ -54,6 +54,40 @@ func TestTriggerReadFailureIsUncertainEvenWithValidAcceptedJSON(t *testing.T) {
 	}
 }
 
+func TestMutationTransportFailureIsUncertainButPreflightIsDefinitive(t *testing.T) {
+	const id = "e2a55b78-4f0e-4903-a9eb-36a3ff647959"
+	lost := errors.New("response lost after submission")
+	calls := 0
+	h := &HTTP{Client: &http.Client{Transport: queryRoundTripper(func(*http.Request) (*http.Response, error) {
+		calls++
+		return nil, lost
+	})}}
+	status, raw, err := h.TriggerRunRaw(context.Background(), "http://query.test", id)
+	if status != 0 || raw != nil || !errors.Is(err, lost) || !strings.Contains(err.Error(), "may have committed") || calls != 1 {
+		t.Fatalf("ambiguous submission: status=%d raw=%q calls=%d err=%v", status, raw, calls, err)
+	}
+	_, _, err = h.TriggerRunRaw(context.Background(), "%", id)
+	if err == nil || strings.Contains(err.Error(), "may have committed") || calls != 1 {
+		t.Fatalf("request preflight: calls=%d, %v", calls, err)
+	}
+	_, _, err = h.Do(context.Background(), http.MethodPost, "http://query.test", make(chan int))
+	if err == nil || calls != 1 {
+		t.Fatalf("marshal preflight: calls=%d, %v", calls, err)
+	}
+	if _, wrapped := errors.AsType[*transportFailure](err); wrapped {
+		t.Fatal("local failure classified as transport")
+	}
+	client := &InternalClient{HTTP: h.Client}
+	ex := client.Post(context.Background(), "http://query.test", "/internal/dispatch", nil)
+	if ex.Status != 0 || !strings.Contains(ex.Err, "may have committed") {
+		t.Fatalf("internal uncertain outcome: %+v", ex)
+	}
+	ex = client.Post(context.Background(), "http://query.test", "/internal/dispatch", make(chan int))
+	if ex.Err == "" || strings.Contains(ex.Err, "may have committed") {
+		t.Fatalf("internal local failure: %+v", ex)
+	}
+}
+
 func TestInternalPostRequiresCompleteBoundedEvidence(t *testing.T) {
 	readErr := errors.New("interrupted response")
 	for _, tc := range []struct {
