@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/caesium-cloud/caesium/pkg/jobdef"
+	"github.com/caesium-cloud/caesium/test/robustness/internal/sqlcell"
 	"github.com/google/uuid"
 )
 
@@ -234,18 +235,8 @@ func (h *HTTP) QueryLease(ctx context.Context, base, runID string) (Lease, error
 		return Lease{}, fmt.Errorf("lease query refused unvalidated run id %q: %w", runID, err)
 	}
 	sql := fmt.Sprintf("SELECT run_id, owner_node, generation, lease_expires_at FROM run_leases WHERE run_id = '%s'", id.String())
-	status, raw, err := h.Do(ctx, http.MethodPost, strings.TrimRight(base, "/")+"/v1/database/query", map[string]any{
-		"sql":   sql,
-		"limit": 1,
-	})
+	resp, _, err := h.query(ctx, base, sql, 1, queryDecoding{sqlcell.Decode, "lease query", ""})
 	if err != nil {
-		return Lease{}, err
-	}
-	if status != http.StatusOK {
-		return Lease{}, fmt.Errorf("lease query status %d: %s", status, truncate(raw, 1024))
-	}
-	var resp QueryResponse
-	if err := json.Unmarshal(raw, &resp); err != nil {
 		return Lease{}, err
 	}
 	if len(resp.Rows) == 0 {
@@ -255,40 +246,20 @@ func (h *HTTP) QueryLease(ctx context.Context, base, runID string) (Lease, error
 	if len(row) < 4 {
 		return Lease{}, fmt.Errorf("lease row has %d columns, want 4", len(row))
 	}
+	generation, err := sqlcell.Int64(row[2])
+	if err != nil {
+		return Lease{}, fmt.Errorf("lease generation: %w", err)
+	}
 	lease := Lease{
 		RunID:          fmt.Sprint(row[0]),
 		OwnerNode:      fmt.Sprint(row[1]),
-		Generation:     int64From(row[2]),
+		Generation:     generation,
 		LeaseExpiresAt: fmt.Sprint(row[3]),
 	}
 	if lease.RunID != id.String() {
 		return Lease{}, fmt.Errorf("lease run_id %s != %s", lease.RunID, id)
 	}
 	return lease, nil
-}
-
-func int64From(v any) int64 {
-	switch t := v.(type) {
-	case int:
-		return int64(t)
-	case int32:
-		return int64(t)
-	case int64:
-		return t
-	case float64:
-		return int64(t)
-	case json.Number:
-		n, _ := t.Int64()
-		return n
-	case string:
-		var n int64
-		_, _ = fmt.Sscan(t, &n)
-		return n
-	default:
-		var n int64
-		_, _ = fmt.Sscan(fmt.Sprint(t), &n)
-		return n
-	}
 }
 
 func truncate(b []byte, n int) string {
