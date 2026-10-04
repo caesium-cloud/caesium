@@ -360,13 +360,16 @@ func validateReadOnlyQuery(query string) error {
 	if strings.TrimSpace(query) == "" {
 		return ErrEmptyQuery
 	}
-	trimmed := trimLeadingComments(query)
-	normalized, semicolons := scanSQL(trimmed)
+	normalized, semicolons := scanSQL(query)
 	for _, offset := range semicolons {
-		if strings.TrimSpace(trimmed[offset+1:]) != "" {
+		if strings.TrimSpace(query[offset+1:]) != "" {
 			return ErrMultipleStatements
 		}
 	}
+	trimmed := trimLeadingComments(query)
+	// The legacy prefix helper returns a raw suffix with trailing whitespace
+	// removed. Locate that suffix without resetting the scanner's lexical state.
+	start := strings.LastIndex(query, trimmed)
 	trimmed = strings.TrimSuffix(trimmed, ";")
 	if trimmed == "" {
 		return ErrEmptyQuery
@@ -374,7 +377,7 @@ func validateReadOnlyQuery(query string) error {
 	// trimLeadingComments returns an already trimmed raw suffix. Only remove
 	// the same terminal semicolon from its position-preserving mask; trimming
 	// masked spaces would accidentally accept a quoted prefix before SELECT.
-	normalized = normalized[:len(trimmed)]
+	normalized = normalized[start : start+len(trimmed)]
 	upper := strings.ToUpper(normalized)
 	switch {
 	case strings.HasPrefix(upper, "SELECT "),

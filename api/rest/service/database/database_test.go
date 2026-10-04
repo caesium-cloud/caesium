@@ -39,6 +39,7 @@ func TestReadOnlyGuardLexicalStates(t *testing.T) {
 		{"'safe' SELECT 1", ErrUnsafeQuery},
 		{"SELECT 'backslash\\'; DELETE", ErrMultipleStatements},
 		{"SELECT INTO archive FROM jobs", ErrUnsafeQuery},
+		{"\n/*/*; VALUES ''foo1 \n;''''", ErrUnsafeQuery},
 	} {
 		t.Run(tc.query, func(t *testing.T) {
 			if got := validateReadOnlyQuery(tc.query); !errors.Is(got, tc.want) {
