@@ -302,6 +302,10 @@ Completed local gates (each applies only to the recorded candidate):
 - Root module full native race/coverage + tagged vet + lint and TestJoinedCommand hermetic regression at7b2a8f0f passed (root-unit-fourth.log); later source needs refreshed proof
 - Reagents native-container lint/vet at7b2a8f0f passed0issues (reagents-lint-second.log)
 - Actual real CLI/REST/local-runtime integration at36447dc5 passed305 scenario PASS lines, 703s; auth/distributed/infra guards expected and not counted as proof (local-integration-go-maintenance-36447dc5.log)
+- Root full native module race/coverage, vet -tags=integration, lint and tagged load/cluster/faults/sqlcell/catalog races at7d0ecc69 PASS; excluded live performance failure caused by missing server is not acceptance.
+- Final source09b7f6c9 native tagged vet, lint0issues, fullroot race/coverage PASS (final-native-fourth.log), changedGo gofmt-l empty. Reagents source identical to its previously qualified7b2a8f0f tree.
+- Focused source d7822d66 job/API/CLI + selected hermetic tagged lifecycle/robustness/performance/root fixtures race PASS (focused-final-followup.log); finalCLIcompensation subsequently covered fullroot09b7f6c9.
+- F4 standalone previous-release upgrade/readdress/rollback/shards/isolation at09b7f6c9 PASS; qualification.json resultpass, all phase exits0 and strict test-evidence passed (lifecycle-standalone-09b7f6c9.log). Image built by that clean invocation.
 
 Complete-scope acceptance remains pending. Shared gates are scheduled by the coordinator; native builders and images have task-specific tags.
 
