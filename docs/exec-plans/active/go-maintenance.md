@@ -20,88 +20,88 @@ Base / verified audit target: `0b4cc4c4677f9cb28924366043ccb79cc4543e54` (#618 i
 
 ## Progress
 
-Current item states: assigned=53, pending=200.
+Current item states: assigned=26, implemented=51, locally-verified=5, pending=171.
 
 | Item | Candidates | Work | State | Evidence |
 | --- | --- | --- | --- | --- |
 | W01 | C061, C058 | Pin CLI HTTP policies and separate output streams | pending | pending |
 | W02 | C105 | Characterize local execution state and completion handoff | pending | pending |
-| W249 | C032 | Pin predecessor projections and execution ownership | assigned | pending |
-| W250 | C003 | Prove native foreign keys on both pools and new connections | assigned | pending |
-| W03 | C002 | Pin caller-specific retry policies | assigned | pending |
-| W04 | C002 | Pin database retry policy before extraction | assigned | pending |
+| W249 | C032 | Pin predecessor projections and execution ownership | implemented | 7255aa8f..5b50c51d; run/job/worker race checks passed; native/runtime gates pending |
+| W250 | C003 | Prove native foreign keys on both pools and new connections | implemented | bb70101f..63d3dbae; focused container race checks passed |
+| W03 | C002 | Pin caller-specific retry policies | locally-verified | bb70101f..63d3dbae; focused container race checks passed |
+| W04 | C002 | Pin database retry policy before extraction | locally-verified | bb70101f..63d3dbae; focused container race checks passed |
 | W05 | C054 | Characterize the read-only SQL guard | pending | pending |
-| W06 | C097 | Use current standard-library idioms in api/rest/controller/jobdef | assigned | pending |
-| W07 | C096 | Use current standard-library idioms in api/rest/controller/replay | assigned | pending |
-| W08 | C096 | Use current standard-library idioms in api/rest/controller/system | assigned | pending |
-| W09 | C097 | Use current standard-library idioms in api/rest/service/contract | assigned | pending |
-| W10 | C097 | Use current standard-library idioms in api/rest/service/dataset | assigned | pending |
-| W11 | C005 | Use current standard-library idioms in api/rest/service/replay | assigned | pending |
-| W12 | C097 | Use current standard-library idioms in api/rest/service/system | assigned | pending |
-| W13 | C005 | Use current standard-library idioms in cmd/contract | assigned | pending |
-| W14 | C096 | Use current standard-library idioms in cmd/dataset | assigned | pending |
-| W15 | C005, C097 | Use current standard-library idioms in cmd/job | assigned | pending |
-| W16 | C005, C096 | Use current standard-library idioms in cmd/reproduce | assigned | pending |
-| W17 | C005 | Use current standard-library idioms in cmd/why | assigned | pending |
-| W18 | C096 | Use current standard-library idioms in internal/atom/kubernetes | assigned | pending |
-| W19 | C005 | Use current standard-library idioms in internal/cache | assigned | pending |
-| W20 | C005 | Use current standard-library idioms in internal/connector | assigned | pending |
-| W21 | C005 | Use current standard-library idioms in internal/contract | assigned | pending |
-| W22 | C005 | Use current standard-library idioms in internal/freshness | assigned | pending |
-| W23 | C005 | Use current standard-library idioms in internal/harness | assigned | pending |
-| W24 | C005 | Use current standard-library idioms in internal/incident | assigned | pending |
-| W25 | C005, C096 | Use current standard-library idioms in internal/jobdef | assigned | pending |
-| W26 | C005 | Use current standard-library idioms in internal/jobdef/runtime | assigned | pending |
-| W27 | C005 | Use current standard-library idioms in internal/lineage | assigned | pending |
-| W28 | C005 | Use current standard-library idioms in internal/reproduce | assigned | pending |
-| W29 | C005, C096 | Use current standard-library idioms in internal/run | pending | pending |
-| W30 | C005 | Use current standard-library idioms in internal/testfault | assigned | pending |
-| W31 | C005 | Use current standard-library idioms in internal/worker | assigned | pending |
-| W32 | C096 | Use current standard-library idioms in pkg/dqlite | assigned | pending |
-| W33 | C096 | Use current standard-library idioms in pkg/env | assigned | pending |
-| W34 | C005 | Use current standard-library idioms in pkg/jobdef/schemacompat | assigned | pending |
-| W35 | C005 | Use current standard-library idioms in pkg/task | assigned | pending |
-| W36 | C097 | Use current standard-library idioms in reagents/cmd/tf-discover | assigned | pending |
-| W37 | C005 | Use current standard-library idioms in reagents/cmd/tf-runner | assigned | pending |
-| W38 | C005 | Use current standard-library idioms in reagents/cmd/tf-warm | assigned | pending |
-| W39 | C097 | Use current standard-library idioms in reagents/internal/fingerprint | assigned | pending |
-| W40 | C005, C097 | Use current standard-library idioms in reagents/internal/protocol | assigned | pending |
-| W41 | C005, C097 | Use current standard-library idioms in reagents/internal/tf | assigned | pending |
-| W42 | C005, C096, C097 | Use current standard-library idioms in test | assigned | pending |
-| W43 | C005, C096, C097 | Use current standard-library idioms in test/lifecycle | assigned | pending |
-| W44 | C005, C097 | Use current standard-library idioms in test/model | assigned | pending |
-| W45 | C096 | Use current standard-library idioms in test/performance | assigned | pending |
-| W46 | C097 | Use current standard-library idioms in test/robustness | assigned | pending |
-| W47 | C005 | Use current standard-library idioms in test/robustness/faults | assigned | pending |
-| W48 | C005, C097 | Use current standard-library idioms in test/robustness/history | assigned | pending |
-| W251 | C003 | Remove redundant FK setup and clarify native PRAGMA policy | assigned | pending |
-| W49 | C001 | Reject byte-size suffix multiplication overflow | assigned | pending |
-| W50 | C044 | Reject malformed partition edges during recovery | pending | pending |
+| W06 | C097 | Use current standard-library idioms in api/rest/controller/jobdef | implemented | f6415b2a/f73a5901; focused host checks passed; container gates pending |
+| W07 | C096 | Use current standard-library idioms in api/rest/controller/replay | implemented | f6415b2a/f73a5901; focused host checks passed; container gates pending |
+| W08 | C096 | Use current standard-library idioms in api/rest/controller/system | implemented | f6415b2a/f73a5901; focused host checks passed; container gates pending |
+| W09 | C097 | Use current standard-library idioms in api/rest/service/contract | implemented | f6415b2a/f73a5901; focused host checks passed; container gates pending |
+| W10 | C097 | Use current standard-library idioms in api/rest/service/dataset | implemented | f6415b2a/f73a5901; focused host checks passed; container gates pending |
+| W11 | C005 | Use current standard-library idioms in api/rest/service/replay | implemented | f6415b2a/f73a5901; focused host checks passed; container gates pending |
+| W12 | C097 | Use current standard-library idioms in api/rest/service/system | implemented | f6415b2a/f73a5901; focused host checks passed; container gates pending |
+| W13 | C005 | Use current standard-library idioms in cmd/contract | implemented | f6415b2a/f73a5901; focused host checks passed; container gates pending |
+| W14 | C096 | Use current standard-library idioms in cmd/dataset | implemented | f6415b2a/f73a5901; focused host checks passed; container gates pending |
+| W15 | C005, C097 | Use current standard-library idioms in cmd/job | implemented | f6415b2a/f73a5901; focused host checks passed; container gates pending |
+| W16 | C005, C096 | Use current standard-library idioms in cmd/reproduce | implemented | f6415b2a/f73a5901; focused host checks passed; container gates pending |
+| W17 | C005 | Use current standard-library idioms in cmd/why | implemented | f6415b2a/f73a5901; focused host checks passed; container gates pending |
+| W18 | C096 | Use current standard-library idioms in internal/atom/kubernetes | implemented | f6415b2a/f73a5901; focused host checks passed; container gates pending |
+| W19 | C005 | Use current standard-library idioms in internal/cache | implemented | f6415b2a/f73a5901; focused host checks passed; container gates pending |
+| W20 | C005 | Use current standard-library idioms in internal/connector | implemented | f6415b2a/f73a5901; focused host checks passed; container gates pending |
+| W21 | C005 | Use current standard-library idioms in internal/contract | implemented | f6415b2a/f73a5901; focused host checks passed; container gates pending |
+| W22 | C005 | Use current standard-library idioms in internal/freshness | implemented | f6415b2a/f73a5901; focused host checks passed; container gates pending |
+| W23 | C005 | Use current standard-library idioms in internal/harness | implemented | f6415b2a/f73a5901; focused host checks passed; container gates pending |
+| W24 | C005 | Use current standard-library idioms in internal/incident | implemented | f6415b2a/f73a5901; focused host checks passed; container gates pending |
+| W25 | C005, C096 | Use current standard-library idioms in internal/jobdef | implemented | f6415b2a/f73a5901; focused host checks passed; container gates pending |
+| W26 | C005 | Use current standard-library idioms in internal/jobdef/runtime | implemented | f6415b2a/f73a5901; focused host checks passed; container gates pending |
+| W27 | C005 | Use current standard-library idioms in internal/lineage | implemented | f6415b2a/f73a5901; focused host checks passed; container gates pending |
+| W28 | C005 | Use current standard-library idioms in internal/reproduce | implemented | f6415b2a/f73a5901; focused host checks passed; container gates pending |
+| W29 | C005, C096 | Use current standard-library idioms in internal/run | assigned | pending |
+| W30 | C005 | Use current standard-library idioms in internal/testfault | implemented | f6415b2a/f73a5901; focused host checks passed; container gates pending |
+| W31 | C005 | Use current standard-library idioms in internal/worker | implemented | f6415b2a/f73a5901; focused host checks passed; container gates pending |
+| W32 | C096 | Use current standard-library idioms in pkg/dqlite | implemented | f6415b2a/f73a5901; focused host checks passed; container gates pending |
+| W33 | C096 | Use current standard-library idioms in pkg/env | implemented | f6415b2a/f73a5901; focused host checks passed; container gates pending |
+| W34 | C005 | Use current standard-library idioms in pkg/jobdef/schemacompat | implemented | f6415b2a/f73a5901; focused host checks passed; container gates pending |
+| W35 | C005 | Use current standard-library idioms in pkg/task | implemented | f6415b2a/f73a5901; focused host checks passed; container gates pending |
+| W36 | C097 | Use current standard-library idioms in reagents/cmd/tf-discover | implemented | f6415b2a/f73a5901; focused host checks passed; container gates pending |
+| W37 | C005 | Use current standard-library idioms in reagents/cmd/tf-runner | implemented | f6415b2a/f73a5901; focused host checks passed; container gates pending |
+| W38 | C005 | Use current standard-library idioms in reagents/cmd/tf-warm | implemented | f6415b2a/f73a5901; focused host checks passed; container gates pending |
+| W39 | C097 | Use current standard-library idioms in reagents/internal/fingerprint | implemented | f6415b2a/f73a5901; focused host checks passed; container gates pending |
+| W40 | C005, C097 | Use current standard-library idioms in reagents/internal/protocol | implemented | f6415b2a/f73a5901; focused host checks passed; container gates pending |
+| W41 | C005, C097 | Use current standard-library idioms in reagents/internal/tf | implemented | f6415b2a/f73a5901; focused host checks passed; container gates pending |
+| W42 | C005, C096, C097 | Use current standard-library idioms in test | implemented | f6415b2a/f73a5901; focused host checks passed; container gates pending |
+| W43 | C005, C096, C097 | Use current standard-library idioms in test/lifecycle | implemented | f6415b2a/f73a5901; focused host checks passed; container gates pending |
+| W44 | C005, C097 | Use current standard-library idioms in test/model | implemented | f6415b2a/f73a5901; focused host checks passed; container gates pending |
+| W45 | C096 | Use current standard-library idioms in test/performance | implemented | f6415b2a/f73a5901; focused host checks passed; container gates pending |
+| W46 | C097 | Use current standard-library idioms in test/robustness | implemented | f6415b2a/f73a5901; focused host checks passed; container gates pending |
+| W47 | C005 | Use current standard-library idioms in test/robustness/faults | implemented | f6415b2a/f73a5901; focused host checks passed; container gates pending |
+| W48 | C005, C097 | Use current standard-library idioms in test/robustness/history | implemented | f6415b2a/f73a5901; focused host checks passed; container gates pending |
+| W251 | C003 | Remove redundant FK setup and clarify native PRAGMA policy | implemented | bb70101f..63d3dbae; focused container race checks passed |
+| W49 | C001 | Reject byte-size suffix multiplication overflow | implemented | f6415b2a/f73a5901; focused host checks passed; container gates pending |
+| W50 | C044 | Reject malformed partition edges during recovery | assigned | pending |
 | W51 | C077 | Reject incomplete SSE event backlogs | pending | pending |
 | W52 | C079 | Reject malformed boolean environment values before load qualification | pending | pending |
 | W53 | C083 | Require durable snapshots before claiming rejected requests are state-inert | pending | pending |
 | W54 | C086 | Treat malformed accepted start outcomes as uncertain | pending | pending |
-| W55 | C098 | Stop the distributed atom before returning partition marker errors | assigned | pending |
+| W55 | C098 | Stop the distributed atom before returning partition marker errors | implemented | 7255aa8f..5b50c51d; run/job/worker race checks passed; native/runtime gates pending |
 | W56 | C099 | Register local whole-run retries before starting execution | pending | pending |
-| W57 | C014, C015, C016 | Keep cron recurrence alive and errors local | assigned | pending |
-| W252 | C032 | Read and project predecessor inputs from one strict snapshot | assigned | pending |
-| W253 | C032 | Fail before launch and reuse predecessor inputs across retries | assigned | pending |
+| W57 | C014, C015, C016 | Keep cron recurrence alive and errors local | locally-verified | bb70101f..63d3dbae; focused container race checks passed |
+| W252 | C032 | Read and project predecessor inputs from one strict snapshot | implemented | 7255aa8f..5b50c51d; run/job/worker race checks passed; native/runtime gates pending; 77aaf098: PostgreSQL read-view correction under test |
+| W253 | C032 | Fail before launch and reuse predecessor inputs across retries | implemented | 7255aa8f..5b50c51d; run/job/worker race checks passed; native/runtime gates pending |
 | W58 | C008 | Chunk wide lineage frontiers before building SQL predicates | pending | pending |
 | W59 | C009 | Share the repeated task lifecycle event mapping | pending | pending |
 | W60 | C010 | Reclaim expired job-cache entries | pending | pending |
-| W61 | C012 | Batch consumed-dataset state reads | pending | pending |
+| W61 | C012 | Batch consumed-dataset state reads | assigned | pending |
 | W62 | C018 | Classify Docker image absence with the typed error | pending | pending |
 | W63 | C019 | Share predecessor-output name reconstruction | pending | pending |
 | W64 | C024 | Normalize job aliases in one auth helper | pending | pending |
 | W65 | C026 | Share the SQL and in-memory dispatch batching loop | pending | pending |
 | W66 | C028 | Keep deterministic policy rules from dispatching approval-tier actions | pending | pending |
-| W67 | C033 | Use cache.HashInput directly for local hash inputs | pending | pending |
-| W68 | C040 | Share fan-out TaskRun materialization between SQL and owner paths | pending | pending |
-| W69 | C043 | Share schema-violation policy across catalog and instance validation | pending | pending |
-| W70 | C045 | Use one SQL set for terminal task statuses | pending | pending |
-| W71 | C046 | Propagate execution context through data-assertion evaluation | pending | pending |
-| W72 | C049 | Share run and partition page-bound parsing | pending | pending |
-| W73 | C053 | Propagate statistics query failures | pending | pending |
+| W67 | C033 | Use cache.HashInput directly for local hash inputs | assigned | pending |
+| W68 | C040 | Share fan-out TaskRun materialization between SQL and owner paths | assigned | pending |
+| W69 | C043 | Share schema-violation policy across catalog and instance validation | assigned | pending |
+| W70 | C045 | Use one SQL set for terminal task statuses | assigned | pending |
+| W71 | C046 | Propagate execution context through data-assertion evaluation | assigned | pending |
+| W72 | C049 | Share run and partition page-bound parsing | assigned | pending |
+| W73 | C053 | Propagate statistics query failures | assigned | pending |
 | W74 | C054 | Share the SQL quote and comment scanner | pending | pending |
 | W75 | C063 | Centralize tf-runner's plan-to-apply test wiring | pending | pending |
 | W76 | C073 | Reap developer-journey CLI children on early failures | pending | pending |
@@ -110,15 +110,15 @@ Current item states: assigned=53, pending=200.
 | W79 | C084 | Fail soak drain when owned task resources remain after grace | pending | pending |
 | W80 | C085 | Join the retention checkpoint poller on every exit | pending | pending |
 | W81 | C089 | Restrict the reserved actor check to the root action schema | pending | pending |
-| W82 | C095 | Scan worker aggregates into a typed result | pending | pending |
+| W82 | C095 | Scan worker aggregates into a typed result | assigned | pending |
 | W83 | C103 | Correlate SSE expectations with the triggered run | pending | pending |
 | W84 | C104 | Replace the fixed stagger in the concurrent warm test | pending | pending |
-| W85 | C038, C039 | Share completion field encoding and failure messages | pending | pending |
+| W85 | C038, C039 | Share completion field encoding and failure messages | assigned | pending |
 | W86 | C068, C075 | Wait on retry state instead of sleeps | pending | pending |
-| W87 | C048 | Reject malformed atom UUIDs before service calls | pending | pending |
-| W88 | C048 | Reject malformed trigger UUIDs before service calls | pending | pending |
+| W87 | C048 | Reject malformed atom UUIDs before service calls | assigned | pending |
+| W88 | C048 | Reject malformed trigger UUIDs before service calls | assigned | pending |
 | W89 | C006 | Share the duplicated cache-hash test setup | pending | pending |
-| W90 | C013 | Share dataset_advanced event construction | pending | pending |
+| W90 | C013 | Share dataset_advanced event construction | assigned | pending |
 | W91 | C020 | Centralize repeated reproduction descriptor test defaults | pending | pending |
 | W92 | C022 | Remove the no-op Kubernetes Atom constructor | pending | pending |
 | W93 | C030 | Share the failed-first task-run attribution selector | pending | pending |
@@ -137,7 +137,7 @@ Current item states: assigned=53, pending=200.
 | W106 | C058 | Consolidate helpers and error handling in cmd/reproduce | pending | pending |
 | W107 | C058 | Consolidate helpers and error handling in cmd/verify | pending | pending |
 | W108 | C058, C060 | Consolidate helpers and error handling in cmd/why | pending | pending |
-| W109 | C087 | Introduce strict internal SQL evidence decoding | pending | pending |
+| W109 | C087 | Introduce strict internal SQL evidence decoding | locally-verified | 8948da9a; host and container sqlcell race pass |
 | W110 | C087 | Migrate cluster strict query to the C087 helper | pending | pending |
 | W111 | C087 | Migrate robustness persisted evidence to the C087 helper | pending | pending |
 | W112 | C087 | Migrate robustness scalar and checkpoint evidence to the C087 helper | pending | pending |
@@ -152,14 +152,14 @@ Current item states: assigned=53, pending=200.
 | W121 | C057 | Consolidate helpers and error handling in cmd/test | pending | pending |
 | W122 | C102 | Consolidate helpers and error handling in reagents/cmd/tf-warm | pending | pending |
 | W123 | C102 | Consolidate helpers and error handling in test/lifecycle | pending | pending |
-| W124 | C002 | Introduce caller-configured database retry mechanics | assigned | pending |
-| W125 | C002 | Migrate auth to the C002 helper | pending | pending |
-| W126 | C002 | Migrate backfill to the C002 helper | pending | pending |
-| W127 | C002 | Migrate callback to the C002 helper | pending | pending |
-| W128 | C002 | Migrate freshness to the C002 helper | pending | pending |
-| W129 | C002 | Migrate jobdef importer to the C002 helper | pending | pending |
-| W130 | C002 | Migrate run store to the C002 helper | pending | pending |
-| W131 | C002 | Migrate worker to the C002 helper | pending | pending |
+| W124 | C002 | Introduce caller-configured database retry mechanics | locally-verified | bb70101f..63d3dbae; focused container race checks passed |
+| W125 | C002 | Migrate auth to the C002 helper | assigned | pending |
+| W126 | C002 | Migrate backfill to the C002 helper | assigned | pending |
+| W127 | C002 | Migrate callback to the C002 helper | assigned | pending |
+| W128 | C002 | Migrate freshness to the C002 helper | assigned | pending |
+| W129 | C002 | Migrate jobdef importer to the C002 helper | assigned | pending |
+| W130 | C002 | Migrate run store to the C002 helper | assigned | pending |
+| W131 | C002 | Migrate worker to the C002 helper | assigned | pending |
 | W132 | C017 | Consolidate event matching and scalar formatting | pending | pending |
 | W133 | C017 | Migrate HTTP trigger to the C017 helper | pending | pending |
 | W134 | C017 | Migrate contract matcher to the C017 helper | pending | pending |
@@ -181,18 +181,18 @@ Current item states: assigned=53, pending=200.
 | W150 | C035 | Migrate worker retry delay to the C035 helper | pending | pending |
 | W151 | C042 | Share fan-out group detection | pending | pending |
 | W152 | C042 | Migrate run fan-out groups to the C042 helper | pending | pending |
-| W153 | C050 | Introduce the bounded body reader | pending | pending |
+| W153 | C050 | Introduce the bounded body reader | implemented | 7283391e; bodylimit host race pass; endpoint gates pending |
 | W154 | C081 | Require complete HTTP evidence in test/lifecycle | pending | pending |
 | W155 | C081 | Require complete HTTP evidence in test/load | pending | pending |
 | W156 | C081 | Require complete HTTP evidence in test/performance | pending | pending |
 | W157 | C081 | Require complete HTTP evidence in test/robustness/cluster | pending | pending |
 | W158 | C081 | Require complete HTTP evidence in test/robustness/faults | pending | pending |
 | W159 | C081 | Require complete HTTP evidence in test/robustness | pending | pending |
-| W160 | C050 | Migrate webhook body limit to the C050 helper | pending | pending |
-| W161 | C051 | Share allowlisted order parsing | pending | pending |
-| W162 | C051 | Migrate notification ordering to the C051 helper | pending | pending |
-| W163 | C055 | Share exact engine membership | pending | pending |
-| W164 | C055 | Migrate agentprofile engines to the C055 helper | pending | pending |
+| W160 | C050 | Migrate webhook body limit to the C050 helper | implemented | 7283391e; bodylimit host race pass; endpoint gates pending |
+| W161 | C051 | Share allowlisted order parsing | assigned | pending |
+| W162 | C051 | Migrate notification ordering to the C051 helper | assigned | pending |
+| W163 | C055 | Share exact engine membership | assigned | pending |
+| W164 | C055 | Migrate agentprofile engines to the C055 helper | assigned | pending |
 | W165 | C061 | Share CLI HTTP transport | pending | pending |
 | W166 | C061 | Migrate auth HTTP to the C061 helper | pending | pending |
 | W167 | C061 | Migrate contract HTTP to the C061 helper | pending | pending |
@@ -280,7 +280,15 @@ Current item states: assigned=53, pending=200.
 
 ## Verification status
 
-No execution acceptance gate has yet passed. Shared gates are scheduled by the coordinator; native builders and images have task-specific tags.
+Completed local gates (each applies only to the recorded candidate):
+
+- builder image built: pinned Go/native headers/linter
+- native FK regression at acdbb43b: all3DBs/bothpools/replacementconnections
+- foundation dbretry/db/auth/freshness/cron/sqlcell race pass at e4addaa6
+- run/job/backfill race pass at0031eb3e
+- worker race pass at5b50c51d
+
+Complete-scope acceptance remains pending. Shared gates are scheduled by the coordinator; native builders and images have task-specific tags.
 
 Required baseline commands: `just lint`, `just unit-test`, `just reagents-lint`, `just reagents-test`, `just integration-test`, plus affected auth, distributed/owner-memory, Podman, lifecycle and infrastructure lanes named by the work items and current CI workflow. Commands run from the aggregate worktree and use repository containers.
 
