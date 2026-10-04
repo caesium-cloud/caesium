@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/caesium-cloud/caesium/internal/strutil"
 	"maps"
 	"sort"
 	"strings"
@@ -1624,14 +1625,7 @@ func fallbackTaskName(id uuid.UUID, name string) string {
 	return id.String()
 }
 
-func firstNonEmpty(values ...string) string {
-	for _, value := range values {
-		if strings.TrimSpace(value) != "" {
-			return value
-		}
-	}
-	return ""
-}
+func firstNonEmpty(values ...string) string { return strutil.FirstNonBlank(values...) }
 
 func shortHash(hash string) string {
 	if len(hash) <= 12 {

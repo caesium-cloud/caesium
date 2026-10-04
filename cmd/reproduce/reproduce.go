@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/caesium-cloud/caesium/internal/strutil"
 	"io"
 	"maps"
 	"net/http"
@@ -718,10 +719,5 @@ func envBool(key string, fallback bool) bool {
 }
 
 func firstNonEmptyString(values ...string) string {
-	for _, value := range values {
-		if trimmed := strings.TrimSpace(value); trimmed != "" {
-			return trimmed
-		}
-	}
-	return ""
+	return strings.TrimSpace(strutil.FirstNonBlank(values...))
 }

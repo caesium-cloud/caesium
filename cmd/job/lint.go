@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/caesium-cloud/caesium/internal/strutil"
 	"io"
 	"net/http"
 	"os"
@@ -533,14 +534,7 @@ func envBool(key string, fallback bool) bool {
 	return parsed
 }
 
-func firstNonEmpty(values ...string) string {
-	for _, v := range values {
-		if strings.TrimSpace(v) != "" {
-			return v
-		}
-	}
-	return ""
-}
+func firstNonEmpty(values ...string) string { return strutil.FirstNonBlank(values...) }
 
 // contractSummary returns a human-readable description of data contracts in a step list,
 // or "" if there are none.

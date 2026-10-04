@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/caesium-cloud/caesium/internal/strutil"
 	"maps"
 	"net/url"
 	"runtime"
@@ -1086,11 +1087,4 @@ func sortWarnings(warnings []Warning) {
 	})
 }
 
-func firstNonEmpty(values ...string) string {
-	for _, value := range values {
-		if strings.TrimSpace(value) != "" {
-			return value
-		}
-	}
-	return ""
-}
+func firstNonEmpty(values ...string) string { return strutil.FirstNonBlank(values...) }
