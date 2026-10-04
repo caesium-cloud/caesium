@@ -43,6 +43,7 @@ import (
 	"strconv"
 	"sync/atomic"
 
+	"github.com/caesium-cloud/caesium/internal/bodylimit"
 	"github.com/prometheus/common/expfmt"
 	"github.com/prometheus/common/model"
 	"os"
@@ -560,7 +561,10 @@ func (c *client) listJobs(ctx context.Context) ([]struct{ ID, Alias string }, er
 	if resp.StatusCode >= 300 {
 		return nil, fmt.Errorf("list jobs: HTTP %d", resp.StatusCode)
 	}
-	raw, _ := io.ReadAll(resp.Body)
+	raw, readErr := readLoadBody(resp, 0, "list jobs")
+	if readErr != nil {
+		return nil, readErr
+	}
 	var entries []struct {
 		ID    string `json:"id"`
 		Alias string `json:"alias"`
@@ -584,7 +588,10 @@ func (c *client) getRunStatus(ctx context.Context, jobID, runID string) (string,
 	}
 	defer resp.Body.Close()
 
-	raw, _ := io.ReadAll(resp.Body)
+	raw, readErr := readLoadBody(resp, 0, "get run status")
+	if readErr != nil {
+		return "", readErr
+	}
 	if resp.StatusCode >= 300 {
 		return "", fmt.Errorf("get run %s: HTTP %d: %s", runID, resp.StatusCode, strings.TrimSpace(string(raw)))
 	}
@@ -641,7 +648,10 @@ func (c *client) getRun(ctx context.Context, jobID, runID string) (runSnapshot, 
 		return runSnapshot{}, err
 	}
 	defer resp.Body.Close()
-	raw, _ := io.ReadAll(resp.Body)
+	raw, readErr := readLoadBody(resp, 0, "get run")
+	if readErr != nil {
+		return runSnapshot{}, readErr
+	}
 	if resp.StatusCode >= 300 {
 		return runSnapshot{}, fmt.Errorf("get run %s: HTTP %d: %s", runID, resp.StatusCode, strings.TrimSpace(string(raw)))
 	}
@@ -664,10 +674,13 @@ func (c *client) listRuns(ctx context.Context, jobID string, maxPages int) ([]ru
 		if err != nil {
 			return all, err
 		}
-		raw, _ := io.ReadAll(resp.Body)
+		raw, readErr := readLoadBody(resp, 0, "list runs")
 		next := resp.Header.Get("X-Caesium-Next-Offset")
 		code := resp.StatusCode
 		resp.Body.Close()
+		if readErr != nil {
+			return all, readErr
+		}
 		if code >= 300 {
 			return all, fmt.Errorf("list runs for job %s: HTTP %d: %s", jobID, code, strings.TrimSpace(string(raw)))
 		}
@@ -695,7 +708,10 @@ func (c *client) queueDepth(ctx context.Context, jobID string) (int, error) {
 		return 0, err
 	}
 	defer resp.Body.Close()
-	raw, _ := io.ReadAll(resp.Body)
+	raw, readErr := readLoadBody(resp, 0, "list queue")
+	if readErr != nil {
+		return 0, readErr
+	}
 	if resp.StatusCode >= 300 {
 		return 0, fmt.Errorf("list queue for job %s: HTTP %d", jobID, resp.StatusCode)
 	}
@@ -1292,7 +1308,10 @@ func (d *dockerStatsClient) sample(ctx context.Context, container string) (conta
 		return containerStats{}, err
 	}
 	defer resp.Body.Close()
-	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	raw, readErr := readLoadBody(resp, 1<<20, "container stats")
+	if readErr != nil {
+		return containerStats{}, readErr
+	}
 	if resp.StatusCode != http.StatusOK {
 		return containerStats{}, fmt.Errorf("container stats %s: HTTP %d: %s", container, resp.StatusCode, strings.TrimSpace(string(raw)))
 	}
@@ -1971,22 +1990,45 @@ func (h *harness) triggerAndWait(ctx context.Context, alias, jobID string) runRe
 // path (/v1/hooks/*) is not used because its 202 response carries no body,
 // which would make per-run tracking impossible. POST /v1/jobs/:id/run returns
 // the JobRun object including the run ID.
+// uncertainStartError retains a possible committed identity without accepting
+// incomplete response bytes as an acknowledged admission.
+type uncertainStartError struct {
+	status int
+	runID  string
+	raw    []byte
+	cause  error
+}
+
+func (e *uncertainStartError) Error() string {
+	return fmt.Sprintf("run admission inconclusive, possibly committed (HTTP %d, possible run %q, body %q): %v", e.status, e.runID, e.raw, e.cause)
+}
+func (e *uncertainStartError) Unwrap() error { return e.cause }
+
 func (h *harness) startRun(ctx context.Context, jobID string) (string, error) {
 	resp, err := h.client.do(ctx, http.MethodPost, "/v1/jobs/"+jobID+"/run", nil)
 	if err != nil {
-		return "", err
+		return "", &uncertainStartError{cause: err}
 	}
 	defer resp.Body.Close()
+	raw, readErr := readLoadBody(resp, 0, "run job "+jobID)
+	if readErr != nil {
+		var partial struct {
+			ID string `json:"id"`
+		}
+		_ = json.Unmarshal(raw, &partial)
+		if !looksLikeUUID(partial.ID) {
+			partial.ID = ""
+		}
+		return partial.ID, &uncertainStartError{status: resp.StatusCode, runID: partial.ID, raw: raw, cause: readErr}
+	}
 	if resp.StatusCode >= 300 {
-		raw, _ := io.ReadAll(resp.Body)
 		return "", fmt.Errorf("run job %s: HTTP %d: %s", jobID, resp.StatusCode, strings.TrimSpace(string(raw)))
 	}
-	raw, _ := io.ReadAll(resp.Body)
 	var result struct {
 		ID string `json:"id"`
 	}
-	if jErr := json.Unmarshal(raw, &result); jErr != nil {
-		return "", fmt.Errorf("parse run response: %w", jErr)
+	if err := json.Unmarshal(raw, &result); err != nil {
+		return "", fmt.Errorf("parse run response: %w", err)
 	}
 	if result.ID == "" {
 		return "", fmt.Errorf("run job %s: response missing id", jobID)
@@ -2644,12 +2686,19 @@ func (h *harness) offer(ctx context.Context, job appliedJob, index int, schedule
 		return
 	}
 	defer resp.Body.Close()
-	raw, readErr := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	raw, readErr := bodylimit.Read(resp.Body, 1<<20)
 	code := resp.StatusCode
 	if readErr != nil {
 		// Headers arrived but the body did not. The run may well have been
 		// created, so this is DT-QUORUM-01 uncertainty — not a queue/skip.
-		record(outcomeUncertain, "response body truncated after HTTP "+strconv.Itoa(code)+": "+readErr.Error(), code, "")
+		var partial struct {
+			ID string `json:"id"`
+		}
+		_ = json.Unmarshal(raw, &partial)
+		if !looksLikeUUID(partial.ID) {
+			partial.ID = ""
+		}
+		record(outcomeUncertain, "response body incomplete after HTTP "+strconv.Itoa(code)+": "+readErr.Error(), code, partial.ID)
 		return
 	}
 	switch {
@@ -4665,4 +4714,13 @@ func percentile(sorted []time.Duration, p float64) time.Duration {
 		idx = len(sorted) - 1
 	}
 	return sorted[idx]
+}
+
+// readLoadBody refuses partial evidence while retaining status and diagnostics.
+func readLoadBody(resp *http.Response, limit int64, operation string) ([]byte, error) {
+	raw, err := bodylimit.Read(resp.Body, limit)
+	if err != nil {
+		return raw, fmt.Errorf("%s: HTTP %d incomplete response (%s): %w", operation, resp.StatusCode, strings.TrimSpace(string(raw)), err)
+	}
+	return raw, nil
 }
