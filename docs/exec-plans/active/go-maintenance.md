@@ -318,6 +318,7 @@ Completed local gates (each applies only to the recorded candidate):
 - Native86b7beb5: all50closed-owner barrier race repetitions PASS, fullroot race/coverage +integrationtaggedvet +lint0issues PASS. Earlier5c6b failed only fixture async cancellation barrier; exactsource/test correction independentlyread, no productionchange. No unitprofilepromotion.
 - Collector source13befc independently accepted and integrated988baac9; 21actualguardfault testsPASS, Bash3last-ID regressionPASS, shellsyntax/AST/shellcheck/actionlintPASS. Alloriginalprocesscounters retained; cleanup required beforePASS. Native/live and strictfloorproof pending.
 - Fresh988 realGoscenarios134PASSwithcleanflushexit0: local38/auth9/distributed50/owner-memory37. Wholecoverage FAILEDSSOportlookup; noeligiblefinalcoverageclaim. Nativeinternalbridgevsprivatebridgeportprobeexactlyreproducedcausewithcleanup[].
+- SSOhostpublication narrowcorrectionff925 integrated230;23guardtestsPASS. Fresh230standalone diagnostics passedactualOIDCpositive/negatives +signedSAML/immediatereplay andgen1nativecancel/flush/stop/exit0, thenFAILEDexistingbaseidenticalmigrator final-column reconstruction atgen2startup; exactnativeerrorclause.Exprunsupported; bothinvocationsownedcleanupinventoryempty. No finalSSO/fullcoveragePASS.
 
 Current qualification limits:
 
@@ -329,6 +330,7 @@ Current qualification limits:
 - Fresh988baac9 coveragecohort FAILEDSSOfirsthostRESTportlookup after134realGoscenarioPASS(local38/auth9/distributed50/owner-memory37) andcleanflushexit0. NativeDockerprobe confirmsinternal-onlybridgepublishesnohostport; privatebridge publishesexactloopbackephemeral, cleanup[]. NarrowSSObridgecorrection pending, fullfreshcohortrequired; failedoriginalpreserved.
 - Inheritedfakecollectorharnessadaptation independentlyaccepted/integrated887d3a83: focused78/full117coverage testsPASS; sourcefloors/guardsunchanged. FinalfullPythonCItoolsrefreshpending newadditivefilter/Git/SSOfixes.
 - Coveragegapreadiness identifies omittedgenuinepublicCLI/localexecutor/incident/why/diff/receiptverify/contractgraph/GitSyncsurfaces. Addexistingnamedcasesandexactskipexclusionguard; realnativeGit-upload-packfixtureprotocolonprivateownednetwork, noaddedproductionruntimeGitdependency. Main253 acceptancepending strictfullfreshreport.
+- Fresh230standaloneSSO found existingbaseidenticalAlterColumn/recreateTable failure duringpersistedSAMLrestart: finalcolumndoesnotmatchtrailingcomma regex, unsupportedclause.Exprstruct bound. Narrowfixdesign/repeatedmigrationcharacterization pending; guards/replayagebudgetsunchanged.
 
 Complete-scope acceptance remains pending. Shared gates are scheduled by the coordinator; native builders and images have task-specific tags.
 
