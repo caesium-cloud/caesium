@@ -12,6 +12,7 @@ import (
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/caesium-cloud/caesium/internal/ratelimit"
 	"github.com/caesium-cloud/caesium/internal/run"
+	"github.com/caesium-cloud/caesium/internal/worker"
 	"github.com/caesium-cloud/caesium/pkg/env"
 	"github.com/google/uuid"
 )
@@ -55,6 +56,9 @@ type localRun struct {
 	cacheStore                  *cache.Store
 	cacheStoreOnce              sync.Once
 	rateLimiter                 *ratelimit.Limiter
+	taskPool                    *worker.Pool
+	results                     chan taskResult
+	active                      int
 }
 
 func (l *localRun) push(id uuid.UUID) {
