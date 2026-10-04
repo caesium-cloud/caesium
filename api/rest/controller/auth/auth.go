@@ -1,7 +1,6 @@
 package auth
 
 import (
-	"github.com/caesium-cloud/caesium/api/internal/auditlog"
 	iauth "github.com/caesium-cloud/caesium/internal/auth"
 )
 

@@ -48,7 +48,7 @@ func (ctrl *Controller) CreatePolicy(c *echo.Context) error {
 		return serviceError(err)
 	}
 
-	logAuditFailure(ctrl.auditor.Log(auth.AuditEntry{
+	auditlog.LogFailure(ctrl.auditor.Log(auth.AuditEntry{
 		Actor:        auditActor(c),
 		Action:       auth.ActionNotificationPolicyCreate,
 		ResourceType: "notification_policy",
@@ -81,7 +81,7 @@ func (ctrl *Controller) UpdatePolicy(c *echo.Context) error {
 		return serviceError(err)
 	}
 
-	logAuditFailure(ctrl.auditor.Log(auth.AuditEntry{
+	auditlog.LogFailure(ctrl.auditor.Log(auth.AuditEntry{
 		Actor:        auditActor(c),
 		Action:       auth.ActionNotificationPolicyUpdate,
 		ResourceType: "notification_policy",
@@ -124,7 +124,7 @@ func (ctrl *Controller) DeletePolicy(c *echo.Context) error {
 		return serviceError(err)
 	}
 
-	logAuditFailure(ctrl.auditor.Log(auth.AuditEntry{
+	auditlog.LogFailure(ctrl.auditor.Log(auth.AuditEntry{
 		Actor:        auditActor(c),
 		Action:       auth.ActionNotificationPolicyDelete,
 		ResourceType: "notification_policy",

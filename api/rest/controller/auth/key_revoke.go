@@ -3,6 +3,7 @@ package auth
 import (
 	"net/http"
 
+	"github.com/caesium-cloud/caesium/api/internal/auditlog"
 	"github.com/caesium-cloud/caesium/api/middleware"
 	iauth "github.com/caesium-cloud/caesium/internal/auth"
 	"github.com/google/uuid"
@@ -28,7 +29,7 @@ func (ctrl *Controller) RevokeKey(c *echo.Context) error {
 		actor = caller.KeyPrefix
 	}
 
-	logAuditFailure(ctrl.auditor.Log(iauth.AuditEntry{
+	auditlog.LogFailure(ctrl.auditor.Log(iauth.AuditEntry{
 		Actor:        actor,
 		Action:       iauth.ActionKeyRevoke,
 		ResourceType: "api_key",

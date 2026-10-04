@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/caesium-cloud/caesium/api/internal/auditlog"
 	"github.com/caesium-cloud/caesium/api/middleware"
 	"github.com/caesium-cloud/caesium/internal/auth"
 	"github.com/caesium-cloud/caesium/internal/models"
@@ -64,7 +65,7 @@ func (ctrl *Controller) CreateKey(c *echo.Context) error {
 		return echo.NewHTTPError(http.StatusInternalServerError, "failed to create api key").Wrap(err)
 	}
 
-	logAuditFailure(ctrl.auditor.Log(auth.AuditEntry{
+	auditlog.LogFailure(ctrl.auditor.Log(auth.AuditEntry{
 		Actor:        caller.KeyPrefix,
 		Action:       auth.ActionKeyCreate,
 		ResourceType: "api_key",

@@ -1,7 +1,6 @@
 package notification
 
 import (
-	"github.com/caesium-cloud/caesium/api/internal/auditlog"
 	"github.com/caesium-cloud/caesium/api/middleware"
 	"github.com/caesium-cloud/caesium/internal/auth"
 	"github.com/labstack/echo/v5"
@@ -19,9 +18,6 @@ type Controller struct {
 func New(auditor *auth.AuditLogger) *Controller {
 	return &Controller{auditor: auditor}
 }
-
-// logAuditFailure logs (but does not fail the request on) an error writing an
-// audit entry, matching api/rest/controller/auth.logAuditFailure.
 
 // auditActor extracts the caller's key prefix from the echo context for the
 // audit "actor" field, defaulting to "unknown" — the same fallback used by
