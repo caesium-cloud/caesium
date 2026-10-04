@@ -64,3 +64,26 @@ func TestSharedEventValuePolicies(t *testing.T) {
 		}
 	}
 }
+
+func TestEventDecodersRejectEmptyAndMalformedPayloads(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		data []byte
+	}{
+		{name: "empty"},
+		{name: "malformed", data: []byte(`{"n":`)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, ok := ExtractField(tc.data, "n"); ok {
+				t.Fatal("ExtractField accepted an undecodable payload")
+			}
+			if _, ok := ResolveJSONPathBytes(tc.data, "$"); ok {
+				t.Fatal("ResolveJSONPathBytes accepted an undecodable payload")
+			}
+			evt := &models.IngestedEvent{Type: "run_completed", Data: tc.data}
+			if (EventPattern{Type: "run_completed", Filter: map[string]string{"n": "1"}}).Matches(evt) {
+				t.Fatal("EventPattern matched an undecodable payload")
+			}
+		})
+	}
+}

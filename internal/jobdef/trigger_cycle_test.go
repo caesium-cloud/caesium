@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/caesium-cloud/caesium/internal/eventmatch"
 	"github.com/caesium-cloud/caesium/internal/models"
 	schema "github.com/caesium-cloud/caesium/pkg/jobdef"
 	"github.com/google/uuid"
@@ -133,6 +134,41 @@ func TestValidateTriggerChainsAllowsJobIDScopedNonCycle(t *testing.T) {
 		triggerChainDefinitionWithFilter("chain-b", map[string]any{"job_id": upstreamID.String()}),
 	})
 	require.NoError(t, err)
+}
+
+func TestUnresolvedJobIDPatternRetainsFilterButNotAlias(t *testing.T) {
+	missingJobID := uuid.NewString()
+	patterns, err := eventmatch.ParseTriggerEventPatterns(map[string]any{
+		"events": []any{map[string]any{
+			"type":   "run_completed",
+			"filter": map[string]any{"job_id": missingJobID},
+		}},
+	})
+	require.NoError(t, err)
+	require.Len(t, patterns, 1)
+	require.Equal(t, missingJobID, patterns[0].Filter["job_id"])
+
+	alias, scoped := triggerChainPatternSourceAlias(patterns[0], map[string]string{})
+	require.True(t, scoped)
+	require.Empty(t, alias)
+}
+
+func TestExistingJobIDsByAliasWrapperPreservesNilContextAndEmptyInput(t *testing.T) {
+	got, err := existingJobIDsByAlias(nil, nil, map[string]struct{}{"job": {}})
+	require.NoError(t, err)
+	require.Nil(t, got, "nil DB remains a no-op")
+
+	db := openTriggerCycleTestDB(t)
+	got, err = existingJobIDsByAlias(nil, db, nil)
+	require.NoError(t, err)
+	require.Nil(t, got, "empty aliases remain a no-op")
+
+	trigger := triggerCycleCronModel(t, "job")
+	require.NoError(t, db.Create(trigger).Error)
+	jobID := createTriggerCycleJob(t, db, "job", trigger.ID)
+	got, err = existingJobIDsByAlias(nil, db, map[string]struct{}{"job": {}})
+	require.NoError(t, err, "nil context is normalized before the delegated query")
+	require.Equal(t, map[string]uuid.UUID{"job": jobID}, got)
 }
 
 func TestValidateTriggerChainsRejectsUnfilteredLifecycleSelfCycle(t *testing.T) {
