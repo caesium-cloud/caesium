@@ -323,6 +323,7 @@ Current qualification limits:
 - C100 live shutdown ata66eefed: six local admission/retry/backfill/webhook/freshness cases passed. Distributed replay failed: successful process join/runtime removal left target TaskRun running after restart; timeout case not reached. Atomic task settlement with explicit whole-owner cancellation marker implemented and independently reviewed; final native/live rerun pending. Fresh finalsource df7c69c1 all-eight live rerun subsequently PASS; initial failedattempt preserved.
 - Coverage journey expansion and live SSO/backend coverage remain in progress; source SSO fixture is integrated with offline protocol tests passing. Coverage floors/policy unchanged.
 - Native Podman prerequisite smoke passed with verified cleanup; no coverage contribution. Kubernetes prerequisite smoke is under diagnosis; actual same-image backend processes/profile hits remain pending.
+- Final coverage collector source remains under Sol correction after independent review: retain original process counters through exit, separate aggregate destinations, exact image/cancellation/Running/timestamp evidence, checked flush and cleanup before eligible publication. Existing floors and source policy remain unchanged.
 
 Complete-scope acceptance remains pending. Shared gates are scheduled by the coordinator; native builders and images have task-specific tags.
 
