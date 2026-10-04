@@ -3,9 +3,12 @@ package start
 import (
 	"context"
 	"errors"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/caesium-cloud/caesium/internal/freshness"
 	"github.com/caesium-cloud/caesium/internal/job"
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/caesium-cloud/caesium/internal/run"
@@ -413,4 +416,113 @@ func TestDerivedRunSubmissionRefusesMissingAndClosedOwner(t *testing.T) {
 			t.Fatal("refused submission leaked a registration")
 		}
 	}
+}
+
+func TestLaunchDerivedRunFinalizesServerCancellationBeforeDispatch(t *testing.T) {
+	conn := openLauncherTestDB(t)
+	store := run.NewStore(conn)
+	derived, _ := seedRunningDerivedRun(t, conn)
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	executed := false
+	launchDerivedRun(ctx, store, derived,
+		func(_ context.Context, id uuid.UUID) (*models.Job, error) {
+			cancel()
+			return &models.Job{ID: id}, nil
+		}, func(context.Context, *models.Job, *run.JobRun) error { executed = true; return nil })
+	if executed {
+		t.Fatal("canceled run was dispatched")
+	}
+	row, err := store.Get(derived.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if row.Status != run.StatusFailed {
+		t.Fatalf("canceled admitted run status = %s", row.Status)
+	}
+	if !strings.Contains(row.Error, "canceled before dispatch") {
+		t.Fatalf("completion cause = %q", row.Error)
+	}
+}
+
+type closingFreshnessStarter struct {
+	*run.Store
+	owner *runlife.Supervisor
+}
+
+func (s closingFreshnessStarter) StartWithContext(ctx context.Context, jobID uuid.UUID, triggerID *uuid.UUID, opts ...run.StartOption) (*run.JobRun, error) {
+	r, err := s.Store.StartWithContext(ctx, jobID, triggerID, opts...)
+	if err == nil && r != nil {
+		s.owner.CloseAndCancel()
+	}
+	return r, err
+}
+
+// The evaluator and actual launcher must transfer the reservation: reserving a
+// second time after this committed start would be refused by the closed owner.
+func TestFreshnessAdmissionTransfersOwnershipToLauncherAcrossShutdown(t *testing.T) {
+	conn := openLauncherTestDB(t)
+	store := run.NewStore(conn)
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	old := now.Add(-2 * time.Hour)
+	trigger := models.Trigger{ID: uuid.New(), Alias: "owned-freshness-trigger", Type: models.TriggerTypeFreshness, Configuration: `{}`}
+	require.NoError(t, conn.Create(&trigger).Error)
+	j := models.Job{ID: uuid.New(), Alias: "owned-freshness-job", TriggerID: trigger.ID}
+	require.NoError(t, conn.Create(&j).Error)
+	decl := models.DatasetDeclaration{ID: uuid.New(), JobID: j.ID, JobAlias: j.Alias, StepName: "produce", Name: "owned-out",
+		Direction: models.DatasetDirectionProduces, Freshness: "1h", CreatedAt: old, UpdatedAt: old}
+	require.NoError(t, conn.Create(&decl).Error)
+	state := models.DatasetState{ID: uuid.New(), Name: decl.Name, Watermark: "100", AdvancedAt: &old,
+		Status: models.DatasetStatusUnknown, CreatedAt: old, UpdatedAt: old}
+	require.NoError(t, conn.Create(&state).Error)
+	owner := runlife.New(context.Background())
+	lookup := make(chan struct{}, 1)
+	finishLookup := make(chan struct{})
+	var once sync.Once
+	unblock := func() { once.Do(func() { close(finishLookup) }) }
+	t.Cleanup(func() {
+		owner.CloseAndCancel()
+		unblock()
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		require.NoError(t, owner.Wait(ctx))
+	})
+	executed := make(chan struct{}, 1)
+	launcher := newFreshnessRunLauncher(store,
+		func(ctx context.Context, _ uuid.UUID) (*models.Job, error) {
+			select {
+			case <-ctx.Done():
+			case <-time.After(time.Second):
+				return nil, errors.New("launch ignored server cancellation")
+			}
+			lookup <- struct{}{}
+			<-finishLookup
+			return &j, nil
+		}, func(context.Context, *models.Job, *run.JobRun) error { executed <- struct{}{}; return nil })
+	eval := freshness.NewEvaluator(freshness.Config{DB: conn, RunStore: closingFreshnessStarter{Store: store, owner: owner},
+		LaunchRun: launcher, MaxDerivationsPerTick: 50, Now: func() time.Time { return now }})
+	require.NoError(t, eval.EvaluateOnce(runlife.WithSupervisor(t.Context(), owner)))
+	select {
+	case <-lookup:
+	case <-time.After(5 * time.Second):
+		t.Fatal("committed admission was refused instead of transferring ownership")
+	}
+	expired, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer cancel()
+	require.ErrorIs(t, owner.Wait(expired), context.DeadlineExceeded)
+	unblock()
+	waitCtx, waitCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer waitCancel()
+	require.NoError(t, owner.Wait(waitCtx))
+	select {
+	case <-executed:
+		t.Fatal("shutdown run dispatched")
+	default:
+	}
+	var rows []models.JobRun
+	require.NoError(t, conn.Where("job_id = ?", j.ID).Find(&rows).Error)
+	require.Len(t, rows, 1)
+	require.Equal(t, string(run.StatusFailed), rows[0].Status)
+	require.Contains(t, rows[0].Error, "canceled before dispatch")
+	require.Zero(t, job.CancelRunContexts(rows[0].ID))
 }

@@ -135,7 +135,10 @@ func newFreshnessRunLauncher(
 		// context and the DAG would start anyway. This is the same reason the
 		// other kickoff sites register: to close the gap between the run row
 		// existing and Run being entered (internal/job/job.go).
-		workCtx, releaseWork, err := runlife.FromContext(ctx).Reserve(ctx)
+		workCtx, releaseWork, err := freshness.TakeRunReservation(ctx)
+		if errors.Is(err, freshness.ErrNoRunReservation) {
+			workCtx, releaseWork, err = runlife.FromContext(ctx).Reserve(ctx)
+		}
 		if err != nil {
 			log.Warn("freshness: derived run submission refused", "run_id", r.ID, "error", err)
 			return
@@ -185,6 +188,13 @@ func launchDerivedRun(
 	// its side effects first.
 	switch verdict, reason := derivedRunFence(ctx, store, r); verdict {
 	case fenceStop:
+		if ctx.Err() != nil {
+			cause := fmt.Errorf("freshness: derived execution canceled before dispatch: %w", context.Cause(ctx))
+			if _, completeErr := store.CompleteIfActive(r.ID, cause); completeErr != nil {
+				log.Error("freshness: canceled derived run could not be finalized; leaving it for an operator",
+					"job_id", r.JobID, "run_id", r.ID, "error", completeErr)
+			}
+		}
 		log.Info("freshness: derived run is no longer launchable; not executing",
 			"job_id", r.JobID, "run_id", r.ID, "reason", reason)
 		return

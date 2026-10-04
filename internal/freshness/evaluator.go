@@ -681,6 +681,14 @@ func (e *Evaluator) derive(ctx context.Context, decl models.DatasetDeclaration, 
 		return e.recordDerivation(ctx, decl, models.DatasetDecisionSkippedAdmission, "freshness run launcher not configured", consumed, nil)
 	}
 
+	// Own the eventual launch before admission can commit a run row.
+	admissionCtx, releaseReservation, err := reserveRunLaunch(ctx)
+	if err != nil {
+		return err
+	}
+	defer releaseReservation()
+	ctx = admissionCtx
+
 	// ErrRunHeldUpstream wraps ErrRunSkipped, so the data circuit breaker's
 	// refusal is recorded as an admission skip rather than aborting the tick.
 	runRecord, err := e.runStore.StartWithContext(ctx, decl.JobID, trigger.id, runstorage.WithStartParams(params))
