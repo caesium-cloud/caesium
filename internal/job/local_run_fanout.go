@@ -20,6 +20,16 @@ import (
 	"github.com/google/uuid"
 )
 
+// rehydrateFanOutGroups reconstructs already-expanded groups from the store.
+//
+// fanOutGroups is normally seeded by the producer's own completion, which
+// returns the expansion payload. A RETRIED or resumed run does not re-execute
+// the producer — RetryFromFailure keeps it terminal-successful — so that
+// payload never arrives, and without this the local loop would treat a fanned
+// step as one ordinary task and every store write keyed on the catalog task
+// id would match N instance rows (ErrAmbiguousTaskRun), failing the retry.
+// Instance rows are the durable record of the group; the payload is only an
+// optimization that saves this read on the first run.
 func (l *localRun) rehydrateFanOutGroups() {
 	store := l.store
 	tasksByID := l.tasksByID
@@ -80,6 +90,11 @@ func (l *localRun) rehydrateFanOutGroups() {
 	}
 }
 
+// registerExpansion is the SINGLE place an expansion payload becomes an
+// executable group. Two routes can expand a producer locally — a fresh
+// completion (CompleteTaskWithPartitions) and a cache hit
+// (CacheHitTaskWithPartitions) — and both funnel through here so they cannot
+// drift on what "the group is now runnable" means.
 func (l *localRun) registerExpansion(res *run.CompleteTaskResult) {
 	fanOutGroups := l.fanOutGroups
 	fanOutGroupsMu := &l.fanOutGroupsMu
@@ -95,6 +110,8 @@ func (l *localRun) registerExpansion(res *run.CompleteTaskResult) {
 	}
 }
 
+// lookupFanOutGroup is the only read of fanOutGroups once the run loop is
+// dispatching; rehydrateFanOutGroups above runs before any worker starts.
 func (l *localRun) lookupFanOutGroup(taskID uuid.UUID) (run.ExpandedGroup, bool) {
 	fanOutGroups := l.fanOutGroups
 	fanOutGroupsMu := &l.fanOutGroupsMu
@@ -104,6 +121,14 @@ func (l *localRun) lookupFanOutGroup(taskID uuid.UUID) (run.ExpandedGroup, bool)
 	return g, ok
 }
 
+// runFannedGroup executes one expanded fan-out group.
+//
+// Readiness is NOT tracked in memory here: it is read from each instance
+// row's outstanding_predecessors column, the same scalar the distributed
+// claimer gates on. The store seeds it at expansion (template value +
+// in-group indegree) and decrements/skips it transitively inside
+// completeTask/failTask, so both lanes share one ordering implementation and
+// a failed dependency skips its dependents instead of hanging the run.
 func (l *localRun) runFannedGroup(
 	taskID uuid.UUID,
 	runner *atomRunner,

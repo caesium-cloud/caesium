@@ -20,6 +20,15 @@ import (
 	"github.com/google/uuid"
 )
 
+// executeAtom creates, monitors, and stops a container for one execution attempt.
+// It returns the atom result string, any parsed task outputs, any branch
+// selections (for branch-type tasks), a persisted log snapshot, and any error.
+//
+// instanceID identifies the TaskRun row this attempt belongs to. It is
+// uuid.Nil for an unfanned step (whose single row is addressable by taskID)
+// and the instance's TaskRun primary key for a fan-out partition, where N
+// sibling rows share (runID, taskID) and every store write and container name
+// must therefore be keyed on the instance, not the catalog task.
 func (l *localRun) executeAtom(taskCtx context.Context, taskID, instanceID uuid.UUID, attempt int, attemptTimeout time.Duration, runner *atomRunner, extraEnv map[string]string) (string, map[string]string, []string, []pkgtask.Partition, run.MetricsCapture, *run.TaskLogSnapshot, error) {
 	j := l.j
 	store := l.store

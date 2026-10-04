@@ -19,6 +19,9 @@ func (l *localRun) getCacheStore() *cache.Store {
 	return l.cacheStore
 }
 
+// resolveTaskCacheIdentity computes the cache config plus the partition-free
+// hash-input args for a task. Shared by the unfanned path and every instance
+// of a fanned group so both fold in exactly the same fields.
 func (l *localRun) resolveTaskCacheIdentity(
 	taskID uuid.UUID,
 	taskModel *models.Task,
@@ -129,6 +132,21 @@ func (l *localRun) resolveTaskCacheIdentity(
 	}, predHashByID, nil
 }
 
+// acquireRateLimitFor consumes one rate-limit token for ONE UNIT OF WORK.
+//
+// taskID selects the RULE — declarations are per step, so every instance of a
+// fanned step shares one. taskRef is the row a rejection parks, and it is a
+// different thing: the catalog task id for an unfanned step, the instance's
+// own TaskRun id for a fan-out instance. RateLimitTask refuses a catalog id
+// that names N siblings (ErrAmbiguousTaskRun), so conflating the two both
+// halted the run and, before that, let a whole group through on one token.
+//
+// One token per instance is what makes the local lane agree with the
+// distributed ones: the claimer and the owner dispatcher each acquire per
+// TaskRun row against the same catalog rule, so a `2 per minute` rule means
+// two PARTITIONS a minute wherever the step runs. Acquiring once for the
+// group meant a 1000-partition step consumed a single token locally and a
+// thousand under a worker.
 func (l *localRun) acquireRateLimitFor(taskID, taskRef uuid.UUID, partition string) (bool, time.Time, error) {
 	ctx := l.ctx
 	j := l.j
