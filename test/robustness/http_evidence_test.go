@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -97,10 +98,10 @@ func TestNoKeyHealReadErrorPreservesPossibleIdentityAndStatus(t *testing.T) {
 }
 func TestHealThroughInterposerIncompleteResponseNeverBlindRetries(t *testing.T) {
 	const id = "e2a55b78-4f0e-4903-a9eb-36a3ff647959"
-	calls := 0
+	var calls atomic.Int32
 	body := `{"id":"` + id + `"}`
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		calls++
+		calls.Add(1)
 		if r.Header.Get("Idempotency-Key") != "" {
 			t.Error("unexpected key")
 		}
@@ -119,7 +120,7 @@ func TestHealThroughInterposerIncompleteResponseNeverBlindRetries(t *testing.T) 
 	defer func() { _ = interposer.Close(t.Context()) }()
 	op, run, err := probeInterposerHealed(t.Context(), &faultEnv{}, interposer, "job", 2*time.Second)
 	var uncertain *uncertainHealError
-	if !errors.As(err, &uncertain) || calls != 1 || !op.PossiblyCommitted || op.UpstreamStatus != http.StatusAccepted || !strings.Contains(op.UpstreamBody, id) {
-		t.Fatalf("op=%+v run=%+v err=%v calls=%d", op, run, err, calls)
+	if !errors.As(err, &uncertain) || calls.Load() != 1 || !op.PossiblyCommitted || op.UpstreamStatus != http.StatusAccepted || !strings.Contains(op.UpstreamBody, id) {
+		t.Fatalf("op=%+v run=%+v err=%v calls=%d", op, run, err, calls.Load())
 	}
 }
