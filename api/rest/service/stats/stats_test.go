@@ -2,6 +2,7 @@ package stats
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"strings"
 	"testing"
@@ -180,7 +181,80 @@ func (s *StatsSuite) TestTopFailingJobsRanked() {
 	s.Equal(jobA.String(), resp.TopFailing[0].JobID)
 	s.Equal("failing-a", resp.TopFailing[0].Alias)
 	s.Equal(int64(3), resp.TopFailing[0].FailureCount)
+	s.NotNil(resp.TopFailing[0].LastFailure)
+	s.Equal(now.Unix(), resp.TopFailing[0].LastFailure.Unix())
+	s.Equal(time.UTC, resp.TopFailing[0].LastFailure.Location())
 	s.Equal(int64(1), resp.TopFailing[1].FailureCount)
+}
+
+func (s *StatsSuite) TestTopFailingJobAllowsNullLatestFailure() {
+	jobID := s.createJob("failed-without-completion")
+	s.createJobRun(jobID, "failed", time.Now().UTC().Add(-time.Minute), nil)
+
+	resp, err := (&Service{ctx: context.Background(), db: s.db}).Summary("7d")
+	s.Require().NoError(err)
+	s.Require().Len(resp.TopFailing, 1)
+	s.Equal(int64(1), resp.TopFailing[0].FailureCount)
+	s.Nil(resp.TopFailing[0].LastFailure)
+}
+
+func (s *StatsSuite) TestSummaryReturnsMalformedLatestFailureTimestampError() {
+	jobID := s.createJob("bad-latest-failure")
+	completed := time.Now().UTC().Truncate(time.Second)
+	s.createJobRun(jobID, "failed", completed.Add(-time.Minute), &completed)
+	s.Require().NoError(s.db.Exec("UPDATE job_runs SET completed_at = ? WHERE job_id = ?", "not-a-timestamp", jobID.String()).Error)
+
+	resp, err := (&Service{ctx: context.Background(), db: s.db}).Summary("7d")
+	s.Nil(resp)
+	s.ErrorContains(err, "parse latest failure timestamp")
+	s.ErrorContains(err, "invalid timestamp")
+}
+
+func TestParseAggregateTime(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		value sql.NullString
+		want  time.Time
+		bad   bool
+	}{
+		{name: "null"},
+		{
+			name:  "sqlite dqlite naive UTC",
+			value: sql.NullString{String: "2025-01-02 03:04:05.123456789", Valid: true},
+			want:  time.Date(2025, time.January, 2, 3, 4, 5, 123456789, time.UTC),
+		},
+		{
+			name:  "postgres offset",
+			value: sql.NullString{String: "2025-01-02 03:04:05.123456-07:00", Valid: true},
+			want:  time.Date(2025, time.January, 2, 10, 4, 5, 123456000, time.UTC),
+		},
+		{
+			name:  "rfc3339",
+			value: sql.NullString{String: "2025-01-02T03:04:05.123456789+02:00", Valid: true},
+			want:  time.Date(2025, time.January, 2, 1, 4, 5, 123456789, time.UTC),
+		},
+		{name: "malformed", value: sql.NullString{String: "not-a-timestamp", Valid: true}, bad: true},
+		{name: "empty but non-null", value: sql.NullString{String: " ", Valid: true}, bad: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := parseAggregateTime(tc.value)
+			if tc.bad {
+				if err == nil || got != nil {
+					t.Fatalf("parseAggregateTime(%+v) = %v, %v; want error", tc.value, got, err)
+				}
+				return
+			}
+			if tc.value.Valid != (got != nil) {
+				t.Fatalf("parseAggregateTime(%+v) = %v, %v", tc.value, got, err)
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got != nil && (!got.Equal(tc.want) || got.Location() != time.UTC) {
+				t.Fatalf("timestamp = %s (%s), want %s (UTC)", got, got.Location(), tc.want)
+			}
+		})
+	}
 }
 
 func (s *StatsSuite) TestSlowestJobsRanked() {

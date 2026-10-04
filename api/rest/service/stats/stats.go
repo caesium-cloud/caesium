@@ -2,7 +2,10 @@ package stats
 
 import (
 	"context"
+	"database/sql"
 	"errors"
+	"fmt"
+	"strings"
 	"time"
 
 	"github.com/caesium-cloud/caesium/internal/models"
@@ -148,7 +151,7 @@ func (s *Service) Summary(window string) (*StatsResponse, error) {
 	type failRow struct {
 		JobID        string
 		FailureCount int64
-		LastFailure  *time.Time
+		LastFailure  sql.NullString
 	}
 	var failRows []failRow
 	if err := s.db.WithContext(s.ctx).Model(&models.JobRun{}).
@@ -163,6 +166,10 @@ func (s *Service) Summary(window string) (*StatsResponse, error) {
 
 	resp.TopFailing = make([]FailingJob, 0, len(failRows))
 	for _, row := range failRows {
+		lastFailure, err := parseAggregateTime(row.LastFailure)
+		if err != nil {
+			return nil, fmt.Errorf("parse latest failure timestamp for job %s: %w", row.JobID, err)
+		}
 		alias, err := s.lookupAlias(row.JobID)
 		if err != nil {
 			return nil, err
@@ -171,7 +178,7 @@ func (s *Service) Summary(window string) (*StatsResponse, error) {
 			JobID:        row.JobID,
 			Alias:        alias,
 			FailureCount: row.FailureCount,
-			LastFailure:  row.LastFailure,
+			LastFailure:  lastFailure,
 		})
 	}
 
@@ -318,4 +325,31 @@ func (s *Service) lookupAlias(jobID string) (string, error) {
 		return "", err
 	}
 	return job.Alias, nil
+}
+
+func parseAggregateTime(value sql.NullString) (*time.Time, error) {
+	if !value.Valid {
+		return nil, nil
+	}
+
+	raw := strings.TrimSpace(value.String)
+	layouts := [...]string{
+		time.RFC3339Nano,
+		"2006-01-02 15:04:05.999999999-07:00",
+		"2006-01-02 15:04:05.999999999",
+		"2006-01-02 15:04:05.999999",
+		"2006-01-02 15:04:05.999",
+		"2006-01-02 15:04:05",
+	}
+	for _, layout := range layouts {
+		if parsed, err := time.Parse(layout, raw); err == nil {
+			utc := parsed.UTC()
+			return &utc, nil
+		}
+		if parsed, err := time.ParseInLocation(layout, raw, time.UTC); err == nil {
+			utc := parsed.UTC()
+			return &utc, nil
+		}
+	}
+	return nil, fmt.Errorf("invalid timestamp %q", value.String)
 }
