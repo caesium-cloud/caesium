@@ -29,7 +29,7 @@ func runTerminalNoRegress(t *testing.T, fe *faultEnv) {
 	if !strings.EqualFold(final.Status, "succeeded") {
 		t.Fatalf("run %s ended %s, want succeeded", run.ID, final.Status)
 	}
-	before := fingerprintRun(t, ctx, fe, member.HTTPBase(), job.ID, run.ID)
+	before := fingerprintDurableRun(t, ctx, fe, member.HTTPBase(), job.ID, run.ID)
 	lease, err := fe.httpAPI.QueryLease(ctx, member.HTTPBase(), run.ID)
 	if err != nil {
 		t.Fatalf("lease after success: %v", err)
@@ -47,7 +47,7 @@ func runTerminalNoRegress(t *testing.T, fe *faultEnv) {
 		t.Fatalf("duplicate complete did not hit the terminal/claim fence: status=%d code=%q msg=%s",
 			ex.Status, code, RedactSecrets(msg))
 	}
-	after := fingerprintRun(t, ctx, fe, member.HTTPBase(), job.ID, run.ID)
+	after := fingerprintDurableRun(t, ctx, fe, member.HTTPBase(), job.ID, run.ID)
 	if !strings.EqualFold(after.Status, "succeeded") {
 		t.Fatalf("terminal outcome regressed from succeeded to %s", after.Status)
 	}
@@ -150,20 +150,20 @@ func runFrozenRetry(t *testing.T, fe *faultEnv) {
 		}
 	}
 
-	beforeReject := fingerprintRun(t, ctx, fe, member.HTTPBase(), job.ID, run.ID)
+	beforeReject := fingerprintDurableRun(t, ctx, fe, member.HTTPBase(), job.ID, run.ID)
 	runningJob, running, _ := applyBlockedRun(t, fe, member, "retry-running")
 	if !strings.EqualFold(running.Status, "running") {
 		t.Fatalf("rejected-retry control run %s is %s, want running", running.ID, running.Status)
 	}
-	beforeRunning := fingerprintRun(t, ctx, fe, member.HTTPBase(), runningJob.ID, running.ID)
+	beforeRunning := fingerprintDurableRun(t, ctx, fe, member.HTTPBase(), runningJob.ID, running.ID)
 	rejStatus, _, rejRaw, err := fe.httpAPI.RetryRun(ctx, member.HTTPBase(), runningJob.ID, running.ID)
 	if err != nil {
 		t.Fatalf("rejected retry transport: %v", err)
 	}
 	requireHTTPStatus(t, rejStatus, http.StatusConflict, string(rejRaw))
-	afterRunning := fingerprintRun(t, ctx, fe, member.HTTPBase(), runningJob.ID, running.ID)
+	afterRunning := fingerprintDurableRun(t, ctx, fe, member.HTTPBase(), runningJob.ID, running.ID)
 	requireNoMutation(t, beforeRunning, afterRunning, "retry of running run")
-	afterFailed := fingerprintRun(t, ctx, fe, member.HTTPBase(), job.ID, run.ID)
+	afterFailed := fingerprintDurableRun(t, ctx, fe, member.HTTPBase(), job.ID, run.ID)
 	requireNoMutation(t, beforeReject, afterFailed, "retry of a different run")
 
 	writeCoreRecord(t, fe, "frozen_retry_recipe", map[string]any{

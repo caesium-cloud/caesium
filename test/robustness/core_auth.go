@@ -16,7 +16,7 @@ func runWrongToken(t *testing.T, fe *faultEnv) {
 	ctx := context.Background()
 	member := fe.leader
 	job, run, lease := applyBlockedRun(t, fe, member, "auth-wrong")
-	before := fingerprintRun(t, ctx, fe, member.HTTPBase(), job.ID, run.ID)
+	before := fingerprintDurableRun(t, ctx, fe, member.HTTPBase(), job.ID, run.ID)
 	cli := wrongTokenClient(t, fe, member)
 	owner := memberByNode(t, fe, lease.OwnerNode)
 	target := cluster.InternalBase(owner.IP)
@@ -38,7 +38,7 @@ func runWrongToken(t *testing.T, fe *faultEnv) {
 	}
 	requireHTTPStatus(t, dispatchEx.Status, http.StatusUnauthorized, dispatchEx.Body)
 
-	after := fingerprintRun(t, ctx, fe, member.HTTPBase(), job.ID, run.ID)
+	after := fingerprintDurableRun(t, ctx, fe, member.HTTPBase(), job.ID, run.ID)
 	requireNoMutation(t, before, after, "wrong-token internal requests")
 
 	writeCoreRecord(t, fe, "wrong_token_internal", map[string]any{
@@ -59,7 +59,7 @@ func runInvalidMTLS(t *testing.T, fe *faultEnv) {
 	ctx := context.Background()
 	member := fe.leader
 	job, run, lease := applyBlockedRun(t, fe, member, "auth-mtls")
-	before := fingerprintRun(t, ctx, fe, member.HTTPBase(), job.ID, run.ID)
+	before := fingerprintDurableRun(t, ctx, fe, member.HTTPBase(), job.ID, run.ID)
 	owner := memberByNode(t, fe, lease.OwnerNode)
 	target := cluster.InternalBase(owner.IP)
 	payload := completePayload(t, fe, member.HTTPBase(), run, lease, "succeeded", lease.Generation)
@@ -77,7 +77,7 @@ func runInvalidMTLS(t *testing.T, fe *faultEnv) {
 	if !IsTLSHandshakeAlert(ex.Err) {
 		t.Fatalf("invalid peer cert did not produce a TLS alert (err=%q status=%d)", ex.Err, ex.Status)
 	}
-	afterInvalid := fingerprintRun(t, ctx, fe, member.HTTPBase(), job.ID, run.ID)
+	afterInvalid := fingerprintDurableRun(t, ctx, fe, member.HTTPBase(), job.ID, run.ID)
 	requireNoMutation(t, before, afterInvalid, "invalid mTLS peer")
 
 	control := validInternalClient(t, fe, owner)
