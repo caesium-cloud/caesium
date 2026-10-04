@@ -41,7 +41,7 @@ func (p EventPattern) Matches(evt *models.IngestedEvent) bool {
 		return false
 	}
 	for field, expected := range p.Filter {
-		actual, ok := extractField(evt.Data, field)
+		actual, ok := ExtractField(evt.Data, field)
 		if !ok || actual != expected {
 			return false
 		}
@@ -62,7 +62,8 @@ func MatchesEventType(pattern, eventType string) bool {
 	return err == nil && matched
 }
 
-func extractField(data []byte, fieldPath string) (string, bool) {
+// ExtractField reads a dotted object path using the event decoder policy.
+func ExtractField(data []byte, fieldPath string) (string, bool) {
 	fieldPath = strings.TrimSpace(fieldPath)
 	if fieldPath == "" {
 		return "", false
