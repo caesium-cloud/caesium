@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/caesium-cloud/caesium/internal/jobdef/yamlpath"
 	"io"
 	"io/fs"
 	"os"
@@ -638,14 +639,9 @@ func referenceNameOrDefault(ref string) plumbing.ReferenceName {
 	return plumbing.NewBranchReferenceName(ref)
 }
 
-func isYAML(path string) bool {
-	ext := strings.ToLower(filepath.Ext(path))
-	return ext == ".yaml" || ext == ".yml"
-}
-
 func (s *Source) shouldInclude(fullPath, relative string) bool {
 	if len(s.Globs) == 0 {
-		return isYAML(fullPath)
+		return yamlpath.IsYAML(fullPath)
 	}
 	rel := filepath.ToSlash(relative)
 	for _, pattern := range s.Globs {
