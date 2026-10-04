@@ -20,7 +20,7 @@ Base / verified audit target: `0b4cc4c4677f9cb28924366043ccb79cc4543e54` (#618 i
 
 ## Progress
 
-Current item states: assigned=46, implemented=187, pending=20.
+Current item states: assigned=12, implemented=230, pending=11.
 
 | Item | Candidates | Work | State | Evidence |
 | --- | --- | --- | --- | --- |
@@ -77,24 +77,24 @@ Current item states: assigned=46, implemented=187, pending=20.
 | W251 | C003 | Remove redundant FK setup and clarify native PRAGMA policy | implemented | bb70101f..63d3dbae; complete-scope acceptance pending |
 | W49 | C001 | Reject byte-size suffix multiplication overflow | implemented | f6415b2a/f73a5901; complete-scope acceptance pending |
 | W50 | C044 | Reject malformed partition edges during recovery | implemented | b4518a47..8ce50178; fixturef8cf3ac0; complete-scope acceptance pending |
-| W51 | C077 | Reject incomplete SSE event backlogs | implemented | 0e737290/9ca0b97a/1d292674/d7d2b65c/df8167d8; aggregate/real-surface acceptance pending |
-| W52 | C079 | Reject malformed boolean environment values before load qualification | implemented | 0e737290/9ca0b97a/1d292674/d7d2b65c/df8167d8; aggregate/real-surface acceptance pending |
+| W51 | C077 | Reject incomplete SSE event backlogs | implemented | Luna test hygiene integrated through 1dc686e6; host subset passed; native/integration acceptance pending |
+| W52 | C079 | Reject malformed boolean environment values before load qualification | implemented | Luna test hygiene integrated through 1dc686e6; host subset passed; native/integration acceptance pending |
 | W53 | C083 | Require durable snapshots before claiming rejected requests are state-inert | implemented | c04b6577/298dd8ee/3a14063e/bf18324a/3a4070dd/f5423c3f/03530cc2/a542984e; aggregate/real-surface acceptance pending |
-| W54 | C086 | Treat malformed accepted start outcomes as uncertain | implemented | 0e737290/9ca0b97a/1d292674/d7d2b65c/df8167d8; aggregate/real-surface acceptance pending |
+| W54 | C086 | Treat malformed accepted start outcomes as uncertain | implemented | Luna test hygiene integrated through 1dc686e6; host subset passed; native/integration acceptance pending |
 | W55 | C098 | Stop the distributed atom before returning partition marker errors | implemented | 7255aa8f..5b50c51d; PG snapshot77aaf098; complete-scope acceptance pending |
 | W56 | C099 | Register local whole-run retries before starting execution | implemented | 219bead1..12fc7e0e; metrics ec3a40c8; fixture cca78cea; aggregate/real-surface acceptance pending |
 | W57 | C014, C015, C016 | Keep cron recurrence alive and errors local | implemented | bb70101f..63d3dbae; complete-scope acceptance pending |
 | W252 | C032 | Read and project predecessor inputs from one strict snapshot | implemented | 7255aa8f..5b50c51d; PG snapshot77aaf098; complete-scope acceptance pending |
 | W253 | C032 | Fail before launch and reuse predecessor inputs across retries | implemented | 7255aa8f..5b50c51d; PG snapshot77aaf098; complete-scope acceptance pending |
-| W58 | C008 | Chunk wide lineage frontiers before building SQL predicates | assigned | pending |
-| W59 | C009 | Share the repeated task lifecycle event mapping | assigned | pending |
-| W60 | C010 | Reclaim expired job-cache entries | assigned | pending |
+| W58 | C008 | Chunk wide lineage frontiers before building SQL predicates | implemented | 26 items integrated through d7f1426c; domain-events-receipt.md, native/real surface acceptance pending |
+| W59 | C009 | Share the repeated task lifecycle event mapping | implemented | 26 items integrated through d7f1426c; domain-events-receipt.md, native/real surface acceptance pending |
+| W60 | C010 | Reclaim expired job-cache entries | implemented | 26 items integrated through d7f1426c; domain-events-receipt.md, native/real surface acceptance pending |
 | W61 | C012 | Batch consumed-dataset state reads | implemented | 97751615..b66a4c66; complete-scope acceptance pending |
-| W62 | C018 | Classify Docker image absence with the typed error | assigned | pending |
-| W63 | C019 | Share predecessor-output name reconstruction | assigned | pending |
-| W64 | C024 | Normalize job aliases in one auth helper | assigned | pending |
-| W65 | C026 | Share the SQL and in-memory dispatch batching loop | assigned | pending |
-| W66 | C028 | Keep deterministic policy rules from dispatching approval-tier actions | assigned | pending |
+| W62 | C018 | Classify Docker image absence with the typed error | implemented | 29 items integrated through 25bafffe/39e3dc77; auth-runtime-helpers-receipt.md, native/real surface acceptance pending |
+| W63 | C019 | Share predecessor-output name reconstruction | implemented | 29 items integrated through 25bafffe/39e3dc77; auth-runtime-helpers-receipt.md, native/real surface acceptance pending |
+| W64 | C024 | Normalize job aliases in one auth helper | implemented | 29 items integrated through 25bafffe/39e3dc77; auth-runtime-helpers-receipt.md, native/real surface acceptance pending |
+| W65 | C026 | Share the SQL and in-memory dispatch batching loop | implemented | 26 items integrated through d7f1426c; domain-events-receipt.md, native/real surface acceptance pending |
+| W66 | C028 | Keep deterministic policy rules from dispatching approval-tier actions | implemented | 26 items integrated through d7f1426c; domain-events-receipt.md, native/real surface acceptance pending |
 | W67 | C033 | Use cache.HashInput directly for local hash inputs | implemented | b4518a47..8ce50178; fixturef8cf3ac0; complete-scope acceptance pending |
 | W68 | C040 | Share fan-out TaskRun materialization between SQL and owner paths | implemented | b4518a47..8ce50178; fixturef8cf3ac0; complete-scope acceptance pending |
 | W69 | C043 | Share schema-violation policy across catalog and instance validation | implemented | b4518a47..8ce50178; fixturef8cf3ac0; complete-scope acceptance pending |
@@ -104,27 +104,27 @@ Current item states: assigned=46, implemented=187, pending=20.
 | W73 | C053 | Propagate statistics query failures | implemented | 2ab9b7cd/b6e456f9; stats correctiona52a7be0; complete-scope acceptance pending |
 | W74 | C054 | Share the SQL quote and comment scanner | implemented | c04b6577/298dd8ee/3a14063e/bf18324a/3a4070dd/f5423c3f/03530cc2/a542984e; aggregate/real-surface acceptance pending |
 | W75 | C063 | Centralize tf-runner's plan-to-apply test wiring | implemented | 592c0a14..9eb5734c; host focused race; real Terraform check underway; aggregate/real-surface acceptance pending |
-| W76 | C073 | Reap developer-journey CLI children on early failures | implemented | 0e737290/9ca0b97a/1d292674/d7d2b65c/df8167d8; aggregate/real-surface acceptance pending |
-| W77 | C080 | Reject unknown names in mixed performance workload selections | implemented | 0e737290/9ca0b97a/1d292674/d7d2b65c/df8167d8; aggregate/real-surface acceptance pending |
-| W78 | C082 | Use one percentile convention for end-to-end latency fields | implemented | 0e737290/9ca0b97a/1d292674/d7d2b65c/df8167d8; aggregate/real-surface acceptance pending |
-| W79 | C084 | Fail soak drain when owned task resources remain after grace | assigned | pending |
-| W80 | C085 | Join the retention checkpoint poller on every exit | assigned | pending |
+| W76 | C073 | Reap developer-journey CLI children on early failures | implemented | Luna test hygiene integrated through 1dc686e6; host subset passed; native/integration acceptance pending |
+| W77 | C080 | Reject unknown names in mixed performance workload selections | implemented | Luna test hygiene integrated through 1dc686e6; host subset passed; native/integration acceptance pending |
+| W78 | C082 | Use one percentile convention for end-to-end latency fields | implemented | Luna test hygiene integrated through 1dc686e6; host subset passed; native/integration acceptance pending |
+| W79 | C084 | Fail soak drain when owned task resources remain after grace | implemented | Luna test hygiene integrated through 1dc686e6; host subset passed; native/integration acceptance pending |
+| W80 | C085 | Join the retention checkpoint poller on every exit | implemented | Luna test hygiene integrated through 1dc686e6; host subset passed; native/integration acceptance pending |
 | W81 | C089 | Restrict the reserved actor check to the root action schema | implemented | c04b6577/298dd8ee/3a14063e/bf18324a/3a4070dd/f5423c3f/03530cc2/a542984e; aggregate/real-surface acceptance pending |
 | W82 | C095 | Scan worker aggregates into a typed result | implemented | 2ab9b7cd/b6e456f9; stats correctiona52a7be0; complete-scope acceptance pending |
-| W83 | C103 | Correlate SSE expectations with the triggered run | assigned | pending |
+| W83 | C103 | Correlate SSE expectations with the triggered run | implemented | Luna test hygiene integrated through 1dc686e6; host subset passed; native/integration acceptance pending |
 | W84 | C104 | Replace the fixed stagger in the concurrent warm test | implemented | 592c0a14..9eb5734c; host focused race; real Terraform check underway; aggregate/real-surface acceptance pending |
 | W85 | C038, C039 | Share completion field encoding and failure messages | implemented | b4518a47..8ce50178; fixturef8cf3ac0; complete-scope acceptance pending |
-| W86 | C068, C075 | Wait on retry state instead of sleeps | assigned | pending |
+| W86 | C068, C075 | Wait on retry state instead of sleeps | implemented | Luna test hygiene integrated through 1dc686e6; host subset passed; native/integration acceptance pending |
 | W87 | C048 | Reject malformed atom UUIDs before service calls | implemented | 2ab9b7cd/b6e456f9; stats correctiona52a7be0; complete-scope acceptance pending |
 | W88 | C048 | Reject malformed trigger UUIDs before service calls | implemented | 2ab9b7cd/b6e456f9; stats correctiona52a7be0; complete-scope acceptance pending |
-| W89 | C006 | Share the duplicated cache-hash test setup | assigned | pending |
+| W89 | C006 | Share the duplicated cache-hash test setup | implemented | Luna test hygiene integrated through 1dc686e6; host subset passed; native/integration acceptance pending |
 | W90 | C013 | Share dataset_advanced event construction | implemented | 97751615..b66a4c66; complete-scope acceptance pending |
-| W91 | C020 | Centralize repeated reproduction descriptor test defaults | assigned | pending |
-| W92 | C022 | Remove the no-op Kubernetes Atom constructor | assigned | pending |
-| W93 | C030 | Share the failed-first task-run attribution selector | assigned | pending |
-| W94 | C037 | Trigger-rule success and failure scenarios duplicate their DAG setup | assigned | pending |
-| W95 | C047 | Table-drive OIDC and SAML callback persistence coverage | assigned | pending |
-| W96 | C067 | Use the shared raw CLI runner for expected errors | assigned | pending |
+| W91 | C020 | Centralize repeated reproduction descriptor test defaults | implemented | 29 items integrated through 25bafffe/39e3dc77; auth-runtime-helpers-receipt.md, native/real surface acceptance pending |
+| W92 | C022 | Remove the no-op Kubernetes Atom constructor | implemented | 29 items integrated through 25bafffe/39e3dc77; auth-runtime-helpers-receipt.md, native/real surface acceptance pending |
+| W93 | C030 | Share the failed-first task-run attribution selector | implemented | 26 items integrated through d7f1426c; domain-events-receipt.md, native/real surface acceptance pending |
+| W94 | C037 | Trigger-rule success and failure scenarios duplicate their DAG setup | implemented | Luna test hygiene integrated through 1dc686e6; host subset passed; native/integration acceptance pending |
+| W95 | C047 | Table-drive OIDC and SAML callback persistence coverage | implemented | Luna test hygiene integrated through 1dc686e6; host subset passed; native/integration acceptance pending |
+| W96 | C067 | Use the shared raw CLI runner for expected errors | implemented | Luna test hygiene integrated through 1dc686e6; host subset passed; native/integration acceptance pending |
 | W97 | C071 | Share the task-ID-to-name index across integration helpers | assigned | pending |
 | W98 | C088 | Give the host-request encoder a concrete request type | assigned | pending |
 | W99 | C106 | Remove the unused bus dispatcher tuning options | implemented | 219bead1..12fc7e0e; metrics ec3a40c8; fixture cca78cea; aggregate/real-surface acceptance pending |
@@ -140,7 +140,7 @@ Current item states: assigned=46, implemented=187, pending=20.
 | W109 | C087 | Introduce strict internal SQL evidence decoding | implemented | 8948da9a/16586b50/1cb2cee7/7283391e/f7215821/008feae2; complete-scope acceptance pending |
 | W110 | C087 | Migrate cluster strict query to the C087 helper | implemented | 8948da9a/16586b50/1cb2cee7/7283391e/f7215821/008feae2; complete-scope acceptance pending |
 | W111 | C087 | Migrate robustness persisted evidence to the C087 helper | implemented | 8948da9a/16586b50/1cb2cee7/7283391e/f7215821/008feae2; complete-scope acceptance pending |
-| W112 | C087 | Migrate robustness scalar and checkpoint evidence to the C087 helper | pending | pending |
+| W112 | C087 | Migrate robustness scalar and checkpoint evidence to the C087 helper | assigned | pending |
 | W113 | C057 | Consolidate helpers and error handling in cmd/agentprofile | implemented | f9396f3c..4169b1ff; complete-scope acceptance pending |
 | W114 | C057 | Consolidate helpers and error handling in cmd/contract | implemented | f9396f3c..4169b1ff; complete-scope acceptance pending |
 | W115 | C102 | Consolidate helpers and error handling in cmd/dataset | implemented | f9396f3c..4169b1ff; complete-scope acceptance pending |
@@ -151,7 +151,7 @@ Current item states: assigned=46, implemented=187, pending=20.
 | W120 | C057, C102 | Consolidate helpers and error handling in cmd/start | implemented | 219bead1..12fc7e0e; metrics ec3a40c8; fixture cca78cea; aggregate/real-surface acceptance pending |
 | W121 | C057 | Consolidate helpers and error handling in cmd/test | implemented | f9396f3c..4169b1ff; complete-scope acceptance pending |
 | W122 | C102 | Consolidate helpers and error handling in reagents/cmd/tf-warm | implemented | 592c0a14..9eb5734c; host focused race; real Terraform check underway; aggregate/real-surface acceptance pending |
-| W123 | C102 | Consolidate helpers and error handling in test/lifecycle | pending | pending |
+| W123 | C102 | Consolidate helpers and error handling in test/lifecycle | assigned | pending |
 | W124 | C002 | Introduce caller-configured database retry mechanics | implemented | bb70101f..63d3dbae; complete-scope acceptance pending |
 | W125 | C002 | Migrate auth to the C002 helper | implemented | 97751615..b66a4c66; complete-scope acceptance pending |
 | W126 | C002 | Migrate backfill to the C002 helper | implemented | 97751615..b66a4c66; complete-scope acceptance pending |
@@ -160,34 +160,34 @@ Current item states: assigned=46, implemented=187, pending=20.
 | W129 | C002 | Migrate jobdef importer to the C002 helper | implemented | 97751615..b66a4c66; complete-scope acceptance pending |
 | W130 | C002 | Migrate run store to the C002 helper | implemented | b4518a47..8ce50178; fixturef8cf3ac0; complete-scope acceptance pending |
 | W131 | C002 | Migrate worker to the C002 helper | implemented | 97751615..b66a4c66; complete-scope acceptance pending |
-| W132 | C017 | Consolidate event matching and scalar formatting | assigned | pending |
-| W133 | C017 | Migrate HTTP trigger to the C017 helper | assigned | pending |
-| W134 | C017 | Migrate contract matcher to the C017 helper | assigned | pending |
-| W135 | C017 | Migrate jobdef matcher to the C017 helper | assigned | pending |
-| W136 | C021 | Share container state and exit-code mappings | assigned | pending |
-| W137 | C021 | Migrate Kubernetes to the C021 helper | assigned | pending |
-| W138 | C021 | Migrate Podman to the C021 helper | assigned | pending |
-| W139 | C023 | Use the SQL uniqueness classifier in user insertion | assigned | pending |
-| W140 | C023 | Migrate SAML assertions to the C023 helper | assigned | pending |
-| W141 | C025 | Share SSO return-target and random-state primitives | assigned | pending |
-| W142 | C025 | Migrate SAML state to the C025 helper | assigned | pending |
-| W143 | C029 | Share the active-authentication predicate | implemented | 923a2667..167743bb; aggregate/real-surface acceptance pending |
-| W144 | C029 | Migrate incident auth gate to the C029 helper | implemented | 923a2667..167743bb; aggregate/real-surface acceptance pending |
-| W145 | C031 | Share event subscription lifecycle | implemented | fbeb7491; aggregate/real-surface acceptance pending |
-| W146 | C031 | Migrate incident subscriber to the C031 helper | implemented | fbeb7491; aggregate/real-surface acceptance pending |
-| W147 | C031 | Migrate lineage subscriber to the C031 helper | implemented | fbeb7491; aggregate/real-surface acceptance pending |
-| W148 | C031 | Migrate notification subscriber to the C031 helper | implemented | fbeb7491; aggregate/real-surface acceptance pending |
+| W132 | C017 | Consolidate event matching and scalar formatting | implemented | 26 items integrated through d7f1426c; domain-events-receipt.md, native/real surface acceptance pending |
+| W133 | C017 | Migrate HTTP trigger to the C017 helper | implemented | 26 items integrated through d7f1426c; domain-events-receipt.md, native/real surface acceptance pending |
+| W134 | C017 | Migrate contract matcher to the C017 helper | implemented | 26 items integrated through d7f1426c; domain-events-receipt.md, native/real surface acceptance pending |
+| W135 | C017 | Migrate jobdef matcher to the C017 helper | implemented | 26 items integrated through d7f1426c; domain-events-receipt.md, native/real surface acceptance pending |
+| W136 | C021 | Share container state and exit-code mappings | implemented | 29 items integrated through 25bafffe/39e3dc77; auth-runtime-helpers-receipt.md, native/real surface acceptance pending |
+| W137 | C021 | Migrate Kubernetes to the C021 helper | implemented | 29 items integrated through 25bafffe/39e3dc77; auth-runtime-helpers-receipt.md, native/real surface acceptance pending |
+| W138 | C021 | Migrate Podman to the C021 helper | implemented | 29 items integrated through 25bafffe/39e3dc77; auth-runtime-helpers-receipt.md, native/real surface acceptance pending |
+| W139 | C023 | Use the SQL uniqueness classifier in user insertion | implemented | 29 items integrated through 25bafffe/39e3dc77; auth-runtime-helpers-receipt.md, native/real surface acceptance pending |
+| W140 | C023 | Migrate SAML assertions to the C023 helper | implemented | 29 items integrated through 25bafffe/39e3dc77; auth-runtime-helpers-receipt.md, native/real surface acceptance pending |
+| W141 | C025 | Share SSO return-target and random-state primitives | implemented | 29 items integrated through 25bafffe/39e3dc77; auth-runtime-helpers-receipt.md, native/real surface acceptance pending |
+| W142 | C025 | Migrate SAML state to the C025 helper | implemented | 29 items integrated through 25bafffe/39e3dc77; auth-runtime-helpers-receipt.md, native/real surface acceptance pending |
+| W143 | C029 | Share the active-authentication predicate | implemented | 29 items integrated through 25bafffe/39e3dc77; auth-runtime-helpers-receipt.md, native/real surface acceptance pending |
+| W144 | C029 | Migrate incident auth gate to the C029 helper | implemented | 29 items integrated through 25bafffe/39e3dc77; auth-runtime-helpers-receipt.md, native/real surface acceptance pending |
+| W145 | C031 | Share event subscription lifecycle | implemented | 26 items integrated through d7f1426c; domain-events-receipt.md, native/real surface acceptance pending |
+| W146 | C031 | Migrate incident subscriber to the C031 helper | implemented | 26 items integrated through d7f1426c; domain-events-receipt.md, native/real surface acceptance pending |
+| W147 | C031 | Migrate lineage subscriber to the C031 helper | implemented | 26 items integrated through d7f1426c; domain-events-receipt.md, native/real surface acceptance pending |
+| W148 | C031 | Migrate notification subscriber to the C031 helper | implemented | 26 items integrated through d7f1426c; domain-events-receipt.md, native/real surface acceptance pending |
 | W149 | C035 | Share execution retry-delay calculation | implemented | 5b2b7db6..58883905; complete-scope acceptance pending |
 | W150 | C035 | Migrate worker retry delay to the C035 helper | implemented | 5b2b7db6..58883905; complete-scope acceptance pending |
-| W151 | C042 | Share fan-out group detection | assigned | pending |
-| W152 | C042 | Migrate run fan-out groups to the C042 helper | assigned | pending |
+| W151 | C042 | Share fan-out group detection | implemented | 26 items integrated through d7f1426c; domain-events-receipt.md, native/real surface acceptance pending |
+| W152 | C042 | Migrate run fan-out groups to the C042 helper | implemented | 26 items integrated through d7f1426c; domain-events-receipt.md, native/real surface acceptance pending |
 | W153 | C050 | Introduce the bounded body reader | implemented | 8948da9a/16586b50/1cb2cee7/7283391e/f7215821/008feae2; complete-scope acceptance pending |
-| W154 | C081 | Require complete HTTP evidence in test/lifecycle | pending | pending |
-| W155 | C081 | Require complete HTTP evidence in test/load | pending | pending |
-| W156 | C081 | Require complete HTTP evidence in test/performance | pending | pending |
+| W154 | C081 | Require complete HTTP evidence in test/lifecycle | assigned | pending |
+| W155 | C081 | Require complete HTTP evidence in test/load | assigned | pending |
+| W156 | C081 | Require complete HTTP evidence in test/performance | assigned | pending |
 | W157 | C081 | Require complete HTTP evidence in test/robustness/cluster | implemented | 8948da9a/16586b50/1cb2cee7/7283391e/f7215821/008feae2; complete-scope acceptance pending |
 | W158 | C081 | Require complete HTTP evidence in test/robustness/faults | implemented | c04b6577/298dd8ee/3a14063e/bf18324a/3a4070dd/f5423c3f/03530cc2/a542984e; aggregate/real-surface acceptance pending |
-| W159 | C081 | Require complete HTTP evidence in test/robustness | pending | pending |
+| W159 | C081 | Require complete HTTP evidence in test/robustness | assigned | pending |
 | W160 | C050 | Migrate webhook body limit to the C050 helper | implemented | 8948da9a/16586b50/1cb2cee7/7283391e/f7215821/008feae2; complete-scope acceptance pending |
 | W161 | C051 | Share allowlisted order parsing | implemented | 2ab9b7cd/b6e456f9; stats correctiona52a7be0; complete-scope acceptance pending |
 | W162 | C051 | Migrate notification ordering to the C051 helper | implemented | 2ab9b7cd/b6e456f9; stats correctiona52a7be0; complete-scope acceptance pending |
@@ -201,18 +201,18 @@ Current item states: assigned=46, implemented=187, pending=20.
 | W170 | C065 | Share Terraform child-output routing | implemented | 592c0a14..9eb5734c; host focused race; real Terraform check underway; aggregate/real-surface acceptance pending |
 | W171 | C065 | Migrate tf-discover output to the C065 helper | implemented | 592c0a14..9eb5734c; host focused race; real Terraform check underway; aggregate/real-surface acceptance pending |
 | W172 | C065 | Migrate tf-warm output to the C065 helper | implemented | 592c0a14..9eb5734c; host focused race; real Terraform check underway; aggregate/real-surface acceptance pending |
-| W173 | C090 | Share trigger-pattern configuration parsing | assigned | pending |
-| W174 | C090 | Migrate contract pattern parser to the C090 helper | assigned | pending |
-| W175 | C091 | Expose the existing internal contract alias query | assigned | pending |
-| W176 | C091 | Migrate jobdef alias reads to the C091 helper | assigned | pending |
+| W173 | C090 | Share trigger-pattern configuration parsing | implemented | 26 items integrated through d7f1426c; domain-events-receipt.md, native/real surface acceptance pending |
+| W174 | C090 | Migrate contract pattern parser to the C090 helper | implemented | 26 items integrated through d7f1426c; domain-events-receipt.md, native/real surface acceptance pending |
+| W175 | C091 | Expose the existing internal contract alias query | implemented | 26 items integrated through d7f1426c; domain-events-receipt.md, native/real surface acceptance pending |
+| W176 | C091 | Migrate jobdef alias reads to the C091 helper | implemented | 26 items integrated through d7f1426c; domain-events-receipt.md, native/real surface acceptance pending |
 | W177 | C092 | Share Reagents environment-name normalization | implemented | 592c0a14..9eb5734c; host focused race; real Terraform check underway; aggregate/real-surface acceptance pending |
 | W178 | C092 | Migrate tf-runner names to the C092 helper | implemented | 592c0a14..9eb5734c; host focused race; real Terraform check underway; aggregate/real-surface acceptance pending |
-| W179 | C094 | Share Prometheus sample selection | assigned | pending |
-| W180 | C094 | Migrate robustness metrics to the C094 helper | assigned | pending |
+| W179 | C094 | Share Prometheus sample selection | implemented | 26 items integrated through d7f1426c; domain-events-receipt.md, native/real surface acceptance pending |
+| W180 | C094 | Migrate robustness metrics to the C094 helper | implemented | 26 items integrated through d7f1426c; domain-events-receipt.md, native/real surface acceptance pending |
 | W181 | C060, C062 | Consolidate helpers and error handling in cmd/blame | implemented | f9396f3c..4169b1ff; complete-scope acceptance pending |
-| W182 | C007 | Introduce a dependency-free YAML path leaf | implemented | 923a2667..167743bb; aggregate/real-surface acceptance pending |
-| W183 | C007 | Migrate jobdef Git to the C007 helper | implemented | 923a2667..167743bb; aggregate/real-surface acceptance pending |
-| W184 | C007 | Migrate jobdef diff to the C007 helper | implemented | 923a2667..167743bb; aggregate/real-surface acceptance pending |
+| W182 | C007 | Introduce a dependency-free YAML path leaf | implemented | 29 items integrated through 25bafffe/39e3dc77; auth-runtime-helpers-receipt.md, native/real surface acceptance pending |
+| W183 | C007 | Migrate jobdef Git to the C007 helper | implemented | 29 items integrated through 25bafffe/39e3dc77; auth-runtime-helpers-receipt.md, native/real surface acceptance pending |
+| W184 | C007 | Migrate jobdef diff to the C007 helper | implemented | 29 items integrated through 25bafffe/39e3dc77; auth-runtime-helpers-receipt.md, native/real surface acceptance pending |
 | W185 | C011 | Reuse OpenTestDB in the first lineage suite | pending | pending |
 | W186 | C011 | Migrate agentprofile tests to the C011 helper | pending | pending |
 | W187 | C011 | Migrate atom tests to the C011 helper | pending | pending |
@@ -224,34 +224,34 @@ Current item states: assigned=46, implemented=187, pending=20.
 | W193 | C011 | Migrate taskedge tests to the C011 helper | pending | pending |
 | W194 | C011 | Migrate trigger tests to the C011 helper | pending | pending |
 | W195 | C011 | Migrate worker tests to the C011 helper | pending | pending |
-| W196 | C027 | Reuse metric value helpers in dispatch tests | assigned | pending |
-| W197 | C027 | Migrate metrics tests to the C027 helper | assigned | pending |
-| W198 | C027 | Migrate run metrics tests to the C027 helper | assigned | pending |
+| W196 | C027 | Reuse metric value helpers in dispatch tests | implemented | 26 items integrated through d7f1426c; domain-events-receipt.md, native/real surface acceptance pending |
+| W197 | C027 | Migrate metrics tests to the C027 helper | implemented | 26 items integrated through d7f1426c; domain-events-receipt.md, native/real surface acceptance pending |
+| W198 | C027 | Migrate run metrics tests to the C027 helper | implemented | 26 items integrated through d7f1426c; domain-events-receipt.md, native/real surface acceptance pending |
 | W199 | C034 | Share run-parameter environment construction | implemented | 5b2b7db6..58883905; complete-scope acceptance pending |
 | W200 | C034 | Migrate worker params to the C034 helper | implemented | 5b2b7db6..58883905; complete-scope acceptance pending |
 | W201 | C036 | Share task-failure policy normalization | implemented | 5b2b7db6..58883905; complete-scope acceptance pending |
 | W202 | C036 | Migrate worker failure policy to the C036 helper | implemented | 5b2b7db6..58883905; complete-scope acceptance pending |
-| W203 | C052 | Share API audit-failure logging | implemented | 923a2667..167743bb; aggregate/real-surface acceptance pending |
-| W204 | C052 | Migrate auth audit warnings to the C052 helper | implemented | 923a2667..167743bb; aggregate/real-surface acceptance pending |
-| W205 | C052 | Migrate notification audit warnings to the C052 helper | implemented | 923a2667..167743bb; aggregate/real-surface acceptance pending |
+| W203 | C052 | Share API audit-failure logging | implemented | 29 items integrated through 25bafffe/39e3dc77; auth-runtime-helpers-receipt.md, native/real surface acceptance pending |
+| W204 | C052 | Migrate auth audit warnings to the C052 helper | implemented | 29 items integrated through 25bafffe/39e3dc77; auth-runtime-helpers-receipt.md, native/real surface acceptance pending |
+| W205 | C052 | Migrate notification audit warnings to the C052 helper | implemented | 29 items integrated through 25bafffe/39e3dc77; auth-runtime-helpers-receipt.md, native/real surface acceptance pending |
 | W206 | C056 | Share test JSON fixture encoding | implemented | 219bead1..12fc7e0e; metrics ec3a40c8; fixture cca78cea; aggregate/real-surface acceptance pending |
 | W207 | C056 | Migrate API replay JSON fixtures to the C056 helper | implemented | 219bead1..12fc7e0e; metrics ec3a40c8; fixture cca78cea; aggregate/real-surface acceptance pending |
-| W208 | C056 | Migrate incident JSON fixtures to the C056 helper | assigned | pending |
-| W209 | C056 | Migrate jobdef diff JSON fixtures to the C056 helper | implemented | 923a2667..167743bb; aggregate/real-surface acceptance pending |
-| W210 | C056 | Migrate notification JSON fixtures to the C056 helper | implemented | 923a2667..167743bb; aggregate/real-surface acceptance pending |
-| W211 | C056 | Migrate replay JSON fixtures to the C056 helper | implemented | 923a2667..167743bb; aggregate/real-surface acceptance pending |
-| W212 | C059 | Share first-nonblank string selection | implemented | 923a2667..167743bb; aggregate/real-surface acceptance pending |
-| W213 | C059 | Migrate job lint to the C059 helper | implemented | 923a2667..167743bb; aggregate/real-surface acceptance pending |
-| W214 | C059 | Migrate reproduce to the C059 helper | implemented | 923a2667..167743bb; aggregate/real-surface acceptance pending |
-| W215 | C059 | Migrate reproduce CLI to the C059 helper | implemented | 923a2667..167743bb; aggregate/real-surface acceptance pending |
-| W216 | C059 | Migrate run strings to the C059 helper | pending | pending |
+| W208 | C056 | Migrate incident JSON fixtures to the C056 helper | implemented | 26 items integrated through d7f1426c; domain-events-receipt.md, native/real surface acceptance pending |
+| W209 | C056 | Migrate jobdef diff JSON fixtures to the C056 helper | implemented | 29 items integrated through 25bafffe/39e3dc77; auth-runtime-helpers-receipt.md, native/real surface acceptance pending |
+| W210 | C056 | Migrate notification JSON fixtures to the C056 helper | implemented | 29 items integrated through 25bafffe/39e3dc77; auth-runtime-helpers-receipt.md, native/real surface acceptance pending |
+| W211 | C056 | Migrate replay JSON fixtures to the C056 helper | implemented | 29 items integrated through 25bafffe/39e3dc77; auth-runtime-helpers-receipt.md, native/real surface acceptance pending |
+| W212 | C059 | Share first-nonblank string selection | implemented | 29 items integrated through 25bafffe/39e3dc77; auth-runtime-helpers-receipt.md, native/real surface acceptance pending |
+| W213 | C059 | Migrate job lint to the C059 helper | implemented | 29 items integrated through 25bafffe/39e3dc77; auth-runtime-helpers-receipt.md, native/real surface acceptance pending |
+| W214 | C059 | Migrate reproduce to the C059 helper | implemented | 29 items integrated through 25bafffe/39e3dc77; auth-runtime-helpers-receipt.md, native/real surface acceptance pending |
+| W215 | C059 | Migrate reproduce CLI to the C059 helper | implemented | 29 items integrated through 25bafffe/39e3dc77; auth-runtime-helpers-receipt.md, native/real surface acceptance pending |
+| W216 | C059 | Migrate run strings to the C059 helper | implemented | 475dbf1a integrated; native regression pending |
 | W217 | C064 | Share Terraform environment copying | implemented | 592c0a14..9eb5734c; host focused race; real Terraform check underway; aggregate/real-surface acceptance pending |
 | W218 | C064 | Migrate tf-warm environment to the C064 helper | implemented | 592c0a14..9eb5734c; host focused race; real Terraform check underway; aggregate/real-surface acceptance pending |
 | W219 | C066 | Share deterministic Git fixture commands | implemented | 592c0a14..9eb5734c; host focused race; real Terraform check underway; aggregate/real-surface acceptance pending |
 | W220 | C066 | Migrate tf Git fixtures to the C066 helper | implemented | 592c0a14..9eb5734c; host focused race; real Terraform check underway; aggregate/real-surface acceptance pending |
 | W221 | C066 | Migrate tf-discover Git fixtures to the C066 helper | implemented | 592c0a14..9eb5734c; host focused race; real Terraform check underway; aggregate/real-surface acceptance pending |
-| W222 | C072 | Share the loopback-address fixture | implemented | 923a2667..167743bb; aggregate/real-surface acceptance pending |
-| W223 | C072 | Migrate Linux nodelay fixture to the C072 helper | implemented | 923a2667..167743bb; aggregate/real-surface acceptance pending |
+| W222 | C072 | Share the loopback-address fixture | implemented | 29 items integrated through 25bafffe/39e3dc77; auth-runtime-helpers-receipt.md, native/real surface acceptance pending |
+| W223 | C072 | Migrate Linux nodelay fixture to the C072 helper | implemented | 29 items integrated through 25bafffe/39e3dc77; auth-runtime-helpers-receipt.md, native/real surface acceptance pending |
 | W224 | C107 | Share the scoped GORM fault fixture | implemented | 5b2b7db6..58883905; complete-scope acceptance pending |
 | W225 | C107 | Migrate freshness failure fixtures to the C107 helper | implemented | 5b2b7db6..58883905; complete-scope acceptance pending |
 | W226 | C041 | Replace typed union-key copies with one generic helper | implemented | 5b2b7db6..58883905; complete-scope acceptance pending |
@@ -275,8 +275,8 @@ Current item states: assigned=46, implemented=187, pending=20.
 | W244 | C101 | Migrate tf-warm signals to the C101 helper | implemented | 592c0a14..9eb5734c; host focused race; real Terraform check underway; aggregate/real-surface acceptance pending |
 | W245 | C004 | Use the declared backfill enum types in the model | implemented | c04b6577/298dd8ee/3a14063e/bf18324a/3a4070dd/f5423c3f/03530cc2/a542984e; aggregate/real-surface acceptance pending |
 | W246 | C093 | Introduce the shared workload catalogue schema | implemented | c04b6577/298dd8ee/3a14063e/bf18324a/3a4070dd/f5423c3f/03530cc2/a542984e; aggregate/real-surface acceptance pending |
-| W247 | C093 | Migrate load catalogue to the C093 helper | pending | pending |
-| W248 | C093 | Migrate performance catalogue to the C093 helper | pending | pending |
+| W247 | C093 | Migrate load catalogue to the C093 helper | assigned | pending |
+| W248 | C093 | Migrate performance catalogue to the C093 helper | assigned | pending |
 
 ## Verification status
 
@@ -298,6 +298,7 @@ Completed local gates (each applies only to the recorded candidate):
 - Interposer valid-JSON+error/cap+1/exactcap host race passed (interposer-evidence-host.log)
 - Strict workload schema20keys actualcatalog/false/zero/null/nested/unselected tests race passed atf5423c3f (catalog-foundation-host.log)
 - Missing lease/recipe SQL durable snapshot subprocess characterization host race passed (durable-snapshot-host.log)
+- Full Reagents race with actual Terraform at167743bb passed; two redundant conversions fixed d15c97a4; final lint pending
 
 Complete-scope acceptance remains pending. Shared gates are scheduled by the coordinator; native builders and images have task-specific tags.
 
