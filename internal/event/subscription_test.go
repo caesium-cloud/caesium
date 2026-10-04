@@ -79,3 +79,27 @@ func TestRunSubscriptionWithoutCleanup(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestRunSubscriptionWaitsForSynchronousHandler(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	ch := make(chan Event, 1)
+	ch <- Event{Type: TypeRunCompleted}
+	started := make(chan struct{})
+	release := make(chan struct{})
+	done := make(chan error, 1)
+	go func() {
+		done <- RunSubscription(ctx, &subscriptionBus{ch: ch}, Filter{}, nil, func(Event) { close(started); <-release }, nil)
+	}()
+	<-started
+	cancel()
+	select {
+	case <-done:
+		t.Fatal("subscription stopped before handler finished")
+	default:
+	}
+	close(release)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+}

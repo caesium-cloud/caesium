@@ -518,3 +518,24 @@ func (s *ImpactSuite) TestChunkedConsumerUnionAndGlobalOrdering() {
 	s.Equal("newer-consumer", nodes[0].JobAlias)
 	s.Equal("shared-consumer", nodes[1].JobAlias)
 }
+
+func (s *ImpactSuite) TestFailedTaskPersistsInputsAndPartialOutputs() {
+	job, _ := s.createJobAndRun("failed-lineage", "")
+	var jr models.JobRun
+	s.Require().NoError(s.db.Where("job_id = ?", job.ID).First(&jr).Error)
+	tr := s.createTaskWithRun(job.ID, jr.ID, "load", []byte(`{"extract":{"properties":{"rows":{"type":"string"}}}}`), nil)
+	mapped, err := newMapper("test", s.db).mapEvent(event.Event{
+		Type: event.TypeTaskFailed, JobID: job.ID, RunID: jr.ID, TaskID: tr.TaskID, Timestamp: time.Now().UTC(),
+		Payload: marshalFacet(taskRunPayload{ID: tr.ID, JobRunID: jr.ID, TaskID: tr.TaskID, Error: "failed after output", Output: map[string]string{"partial": "s3://bucket/partial.csv"}}),
+	})
+	s.Require().NoError(err)
+	s.Require().NotEmpty(mapped.Inputs)
+	s.Require().NotEmpty(mapped.Outputs)
+	for direction, datasets := range map[string][]Dataset{"input": mapped.Inputs, "output": mapped.Outputs} {
+		for _, ds := range datasets {
+			var count int64
+			s.Require().NoError(s.db.Model(&models.LineageDataset{}).Where("task_run_id = ? AND namespace = ? AND name = ? AND direction = ?", tr.ID, ds.Namespace, ds.Name, direction).Count(&count).Error)
+			s.Equal(int64(1), count, "%s %s must be persisted after failure", direction, ds.Name)
+		}
+	}
+}

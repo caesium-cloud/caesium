@@ -155,8 +155,8 @@ type datasetRef struct {
 // (direction='output') joined with job provenance.
 //
 // Using a subquery avoids loading intermediate task_run_id values into Go
-// memory and sidesteps the SQLite/dqlite 999-host-parameter limit that would
-// be hit by a large IN (?,?,…,?) list.
+// memory. Chunking the frontier also bounds each query's parameters and
+// expression width without assuming a backend-specific parameter limit.
 //
 // Results are ordered by (ld.created_at DESC, ld.id DESC) so that when the
 // same (namespace, name) output was produced by multiple task runs the most
