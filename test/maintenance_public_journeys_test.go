@@ -15,11 +15,11 @@ import (
 	"time"
 
 	"github.com/caesium-cloud/caesium/internal/incident"
+	"github.com/containerd/errdefs"
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/events"
 	"github.com/docker/docker/api/types/filters"
 	"github.com/docker/docker/client"
-	"github.com/docker/docker/errdefs"
 	"github.com/google/uuid"
 )
 
