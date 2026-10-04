@@ -24,7 +24,7 @@ func backfillLifetimeFixture(t *testing.T) (*models.Backfill, *models.Job, *back
 	j := &models.Job{ID: uuid.New(), Alias: "backfill-lifetime-" + uuid.NewString()}
 	require.NoError(t, db.Create(j).Error)
 	start := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
-	b := &models.Backfill{ID: uuid.New(), JobID: j.ID, Status: models.BackfillStatusRunning, Start: start, End: start.Add(time.Hour), MaxConcurrent: 1, Reprocess: models.ReprocessAll}
+	b := &models.Backfill{ID: uuid.New(), JobID: j.ID, Status: models.BackfillStatusRunning, Start: start, End: start.Add(2 * time.Hour), MaxConcurrent: 1, Reprocess: models.ReprocessAll}
 	bStore := backfillstore.NewStore(db)
 	require.NoError(t, bStore.Create(b))
 	return b, j, bStore, runstore.NewStore(db)
