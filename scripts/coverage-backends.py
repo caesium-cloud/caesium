@@ -501,7 +501,23 @@ class Driver:
         require(obj['Id'] == node['id'] and obj['Image'] == self.inputs['kind_image_id'] and obj.get('Config', {}).get('Labels', {}).get('io.x-k8s.kind.cluster') == self.cluster and obj.get('Config', {}).get('Labels', {}).get('io.x-k8s.kind.role') == node['role'], 'kind node ownership changed')
         return obj['Id']
 
-    def import_mapping(self, name):
+    def cri_image_mapping(self, node_id):
+        # The CRI alias may differ from ctr's archive manifest digest. It is
+        # accepted only as a relation to the exact imported immutable config,
+        # with the same tag/digest mapping returned by both config and tag reads.
+        mappings = []
+        for reference in (self.task_image, normalized_image_ref(self.task_ref)):
+            result = self.docker('exec', node_id, 'crictl', 'inspecti', reference)
+            image = json.loads(result.stdout).get('status', {})
+            tags, aliases = image.get('repoTags'), image.get('repoDigests')
+            require(image.get('id') == self.task_image and tags == [normalized_image_ref(self.task_ref)], 'CRI image config/tag differs from verified archive')
+            require(isinstance(aliases, list) and len(aliases) == 1 and isinstance(aliases[0], str) and
+                    re.fullmatch(r'[a-z0-9][a-z0-9._:/-]*@sha256:[a-f0-9]{64}', aliases[0]), 'CRI imported image alias is missing or ambiguous')
+            mappings.append({'config_id': image['id'], 'repo_tags': tags, 'repo_digests': aliases})
+        require(mappings[0] == mappings[1], 'CRI immutable config/tag mapping disagrees')
+        return mappings[0]
+
+    def import_mapping(self, name, *, recheck=False):
         node_id = self.node(name)
         listing = self.docker('exec', node_id, 'ctr', '-n', 'k8s.io', 'images', 'list').stdout
         lines = [line.split() for line in listing.splitlines() if line.split() and line.split()[0] in {self.task_ref, normalized_image_ref(self.task_ref)}]
@@ -516,7 +532,13 @@ class Driver:
             manifest = json.loads(self.docker('exec', node_id, 'ctr', '-n', 'k8s.io', 'content', 'get', platforms[0]['digest']).stdout)
         require(manifest.get('config', {}).get('digest') == self.task_image, 'kind imported task config differs from archive')
         digests.append(self.task_image)
-        self.nodes[name]['image_digests'] = digests
+        mapping = self.cri_image_mapping(node_id)
+        if recheck:
+            require(self.nodes[name]['image_digests'] == digests and self.nodes[name].get('cri_image') == mapping, 'imported ctr/CRI task mapping changed after preparation')
+        else:
+            self.nodes[name]['image_digests'] = digests
+            self.nodes[name]['cri_image'] = mapping
+        return node_id, mapping
 
     def prepare_kubernetes(self):
         self.image_check(self.inputs['kind_image_id'])
@@ -682,10 +704,42 @@ class Driver:
             return None
         node = spec.get('nodeName')
         require(node in self.nodes, 'task scheduled outside owned kind nodes')
-        image_id = status['containerStatuses'][0].get('imageID', '')
-        digest_match = re.search(r'sha256:[a-f0-9]{64}', image_id)
-        require(digest_match and digest_match.group() in self.nodes[node]['image_digests'], 'observed task image differs from verified imported content')
-        return {'run_id': run_id, 'task_id': task['task_id'], 'runtime_id': runtime, 'native_id': metadata['uid'], 'node': node, 'image_id': image_id, 'status': 'Running', 'engine': 'kubernetes'}
+        require(len(status['containerStatuses']) == 1, 'ambiguous native task container status')
+        pod_container = status['containerStatuses'][0]
+        require(container.get('name') == 'atom' and pod_container.get('name') == 'atom' and
+                pod_container.get('image') == normalized_image_ref(self.task_ref) and pod_container.get('restartCount') == 0,
+                'pod container name/image/restart identity mismatch')
+        if not pod_container.get('state', {}).get('running'):
+            return None
+        require(re.fullmatch(r'[a-f0-9]{64}', pod_container.get('containerID', '').removeprefix('containerd://')) and
+                pod_container.get('containerID', '').startswith('containerd://'), 'exact containerd task container ID required')
+        container_id = pod_container['containerID'].removeprefix('containerd://')
+        node_id, mapping = self.import_mapping(node, recheck=True)
+        image_id = pod_container.get('imageID', '')
+        require(image_id == mapping['config_id'] or image_id in mapping['repo_digests'], 'pod image alias not bound to the imported CRI config')
+        native = json.loads(self.docker('exec', node_id, 'crictl', 'inspect', container_id).stdout).get('status', {})
+        require(native.get('id') == container_id and native.get('metadata', {}).get('name') == 'atom' and
+                native.get('metadata', {}).get('attempt') == 0 and native.get('state') == 'CONTAINER_RUNNING' and
+                native.get('image', {}).get('image') == normalized_image_ref(self.task_ref) and native.get('imageRef') == image_id,
+                'concrete CRI container state/image identity mismatch')
+        labels = native.get('labels', {})
+        require(all(labels.get(key) == value for key, value in {
+            'io.kubernetes.pod.uid': metadata['uid'], 'io.kubernetes.pod.name': runtime,
+            'io.kubernetes.pod.namespace': self.namespace, 'io.kubernetes.container.name': 'atom',
+        }.items()), 'concrete CRI container is not bound to the exact owned pod')
+        namespace = json.loads(self.kubectl('get', 'namespace', self.namespace, '-o', 'json').stdout)['metadata']
+        require(namespace.get('uid') == self.namespace_uid and namespace.get('labels', {}).get('caesium.coverage.backend-owner') == self.owner,
+                'owned namespace changed during native witness')
+        # Re-read the exact pod after native reads so a replaced container/pod
+        # cannot borrow the original pod's public Running observation.
+        current = json.loads(self.kubectl('-n', self.namespace, 'get', 'pod', runtime, '-o', 'json').stdout)
+        require(current['metadata'].get('uid') == metadata['uid'] and current.get('spec', {}).get('nodeName') == node and
+                current.get('status', {}).get('phase') == 'Running' and len(current.get('status', {}).get('containerStatuses', [])) == 1 and
+                all(current['status']['containerStatuses'][0].get(key) == pod_container.get(key) for key in ('name', 'image', 'imageID', 'containerID', 'restartCount', 'state')), 'pod/container witness changed during CRI observation')
+        self.import_mapping(node, recheck=True)
+        return {'run_id': run_id, 'task_id': task['task_id'], 'runtime_id': runtime, 'native_id': metadata['uid'], 'node': node,
+                'node_id': node_id, 'cri_container_id': container_id, 'image_id': image_id, 'config_id': mapping['config_id'],
+                'cri_image': mapping, 'status': 'Running', 'engine': 'kubernetes'}
 
     def native_absent(self, runtime):
         if self.backend == 'podman':

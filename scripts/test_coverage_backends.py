@@ -249,6 +249,131 @@ class BackendGuards(unittest.TestCase):
         native['Name'], native['Id'] = 'catalog-task-run-id', 'b' * 64
         with self.assertRaises(b.Refused): driver.native('run-id', task)
 
+    def kube_identity_fixture(self, mutate_before_import=None):
+        # Captured Docker29/kind alias shape: the CRI repository alias is not
+        # ctr's manifest digest, but both CRI reads identify the archive config.
+        driver = object.__new__(b.Driver)
+        driver.backend, driver.owner, driver.cluster, driver.namespace = 'kubernetes', 'owned', 'owned', 'owned'
+        driver.namespace_uid = '12345678-1234-4234-8234-123456789012'
+        driver.task_ref, driver.task_image, driver.architecture = 'alpine:3.23', IMAGE, 'arm64'
+        driver.inputs = {'kind_image_id': BUILDER}
+        node_name, node_id = 'owned-worker', 'c' * 64
+        driver.nodes = {node_name: {'id': node_id, 'role': 'worker', 'image_digests': []}}
+        task = {'runtime_id': 'task-run-runtime', 'task_id': 'task'}
+        alias = 'docker.io/library/import-2026-10-04@sha256:' + 'b' * 64
+        image = {'id': IMAGE, 'repoTags': ['docker.io/library/alpine:3.23'], 'repoDigests': [alias]}
+        native_id = 'd' * 64
+        pod = {'metadata': {'uid': '22345678-1234-4234-8234-123456789012', 'namespace': 'owned', 'name': task['runtime_id']},
+               'spec': {'nodeName': node_name, 'containers': [{'name': 'atom', 'image': 'alpine:3.23',
+                        'env': [{'name': 'COVERAGE_BACKEND_OWNER', 'value': 'owned'}]}]},
+               'status': {'phase': 'Running', 'containerStatuses': [{'name': 'atom', 'image': 'docker.io/library/alpine:3.23',
+                          'imageID': alias, 'containerID': 'containerd://' + native_id, 'restartCount': 0,
+                          'state': {'running': {'startedAt': '2026-10-04T20:00:22Z'}}}]}}
+        native = {'id': native_id, 'metadata': {'name': 'atom', 'attempt': 0}, 'state': 'CONTAINER_RUNNING',
+                  'image': {'image': 'docker.io/library/alpine:3.23'}, 'imageRef': alias,
+                  'labels': {'io.kubernetes.pod.uid': pod['metadata']['uid'], 'io.kubernetes.pod.name': task['runtime_id'],
+                             'io.kubernetes.pod.namespace': 'owned', 'io.kubernetes.container.name': 'atom'}}
+        node = {'Id': node_id, 'Image': BUILDER, 'Config': {'Labels': {'io.x-k8s.kind.cluster': 'owned', 'io.x-k8s.kind.role': 'worker'}}}
+        state = {'image': image, 'native': native, 'pod': pod, 'node': node, 'unavailable': False,
+                 'config_image': image, 'pod_reads': 0, 'replacement': None}
+        def docker(*args):
+            self.assertEqual(args[:2], ('exec', node_id))
+            if args[2:4] == ('crictl', 'inspecti'):
+                if state['unavailable']:
+                    raise b.Refused('CRI unavailable')
+                self.assertIn(args[4], (IMAGE, 'docker.io/library/alpine:3.23'))
+                value = state['config_image'] if args[4] == IMAGE else state['image']
+                return subprocess.CompletedProcess(args, 0, json.dumps({'status': value}), '')
+            if args[2:4] == ('crictl', 'inspect'):
+                self.assertEqual(args[4], native_id)
+                return subprocess.CompletedProcess(args, 0, json.dumps({'status': state['native']}), '')
+            if args[2:] == ('ctr', '-n', 'k8s.io', 'images', 'list'):
+                return subprocess.CompletedProcess(args, 0, 'docker.io/library/alpine:3.23 manifest ' + INDEX, '')
+            self.assertEqual(args[2:], ('ctr', '-n', 'k8s.io', 'content', 'get', INDEX))
+            return subprocess.CompletedProcess(args, 0, json.dumps({'config': {'digest': IMAGE}}), '')
+        def kubectl(*args, **kwargs):
+            if args[:2] == ('get', 'namespace'):
+                value = {'metadata': {'uid': driver.namespace_uid, 'labels': {'caesium.coverage.backend-owner': 'owned'}}}
+            else:
+                self.assertEqual(args, ('-n', 'owned', 'get', 'pod', task['runtime_id'], '-o', 'json'))
+                state['pod_reads'] += 1
+                value = state['replacement'] if state['replacement'] is not None and state['pod_reads'] > 1 else state['pod']
+            return subprocess.CompletedProcess(args, 0, json.dumps(value), '')
+        driver.docker, driver.kubectl = docker, kubectl
+        driver.inspect = lambda kind, identity: state['node']
+        if mutate_before_import:
+            mutate_before_import(state)
+        driver.import_mapping(node_name)
+        return driver, task, state
+
+    def test_kube_actual_import_alias_binds_config_tag_node_and_container(self):
+        driver, task, state = self.kube_identity_fixture()
+        witness = driver.native('run', task)
+        self.assertNotIn(witness['image_id'].split('@')[1], driver.nodes['owned-worker']['image_digests'])
+        self.assertEqual(witness['config_id'], IMAGE)
+        self.assertEqual(witness['cri_container_id'], state['native']['id'])
+        self.assertEqual(witness['native_id'], state['pod']['metadata']['uid'])
+        self.assertEqual(witness['node_id'], driver.nodes['owned-worker']['id'])
+        # Direct config references remain exact immutable identity, never a
+        # suffix/substring match for an arbitrary reported digest.
+        state['pod']['status']['containerStatuses'][0]['imageID'] = IMAGE
+        state['native']['imageRef'] = IMAGE
+        self.assertEqual(driver.native('run', task)['image_id'], IMAGE)
+
+    def test_kube_preparation_refuses_wrong_or_unavailable_cri_mapping(self):
+        for mutation in (
+            lambda st: st['image'].update(id=INDEX),
+            lambda st: st.update(config_image=dict(st['image'], repoTags=['foreign:tag'])),
+            lambda st: st['image'].update(repoDigests=[]),
+            lambda st: st.update(unavailable=True),
+        ):
+            with self.assertRaises(b.Refused):
+                self.kube_identity_fixture(mutation)
+
+    def test_kube_wrong_config_unrelated_alias_or_changed_mapping_refuses(self):
+        mutations = [
+            lambda st: st['image'].update(id=INDEX),
+            lambda st: st['pod']['status']['containerStatuses'][0].update(imageID='foreign@' + INDEX),
+            lambda st: st['image'].update(repoDigests=['foreign@' + INDEX]),
+            lambda st: st['image'].update(repoTags=['docker.io/library/foreign:3.23']),
+            lambda st: st['image'].update(repoTags=['docker.io/library/alpine:3.23', 'docker.io/library/alpine:other']),
+            lambda st: st['image'].update(repoDigests=st['image']['repoDigests'] * 2),
+            lambda st: st.update(config_image=dict(st['image'], id=INDEX)),
+            lambda st: st.update(unavailable=True),
+        ]
+        for index, mutate in enumerate(mutations):
+            with self.subTest(mutation=index):
+                driver, task, state = self.kube_identity_fixture()
+                mutate(state)
+                with self.assertRaises(b.Refused):
+                    driver.native('run', task)
+
+    def test_kube_concrete_native_or_pod_identity_mismatch_refuses(self):
+        mutations = [
+            lambda st: st['node'].update(Id='e' * 64),
+            lambda st: st['native'].update(id='e' * 64),
+            lambda st: st['native'].update(state='CONTAINER_EXITED'),
+            lambda st: st['native']['metadata'].update(name='foreign'),
+            lambda st: st['native']['metadata'].update(attempt=1),
+            lambda st: st['native'].update(imageRef='foreign@' + INDEX),
+            lambda st: st['native']['labels'].update({'io.kubernetes.pod.uid': 'foreign'}),
+            lambda st: st['native']['labels'].update({'io.kubernetes.pod.namespace': 'foreign'}),
+            lambda st: st['native']['labels'].update({'io.kubernetes.pod.name': 'foreign'}),
+            lambda st: st['pod']['status']['containerStatuses'][0].update(containerID='docker://' + 'd' * 64),
+            lambda st: st['pod']['status']['containerStatuses'].append(copy.deepcopy(st['pod']['status']['containerStatuses'][0])),
+        ]
+        for index, mutate in enumerate(mutations):
+            with self.subTest(mutation=index):
+                driver, task, state = self.kube_identity_fixture()
+                mutate(state)
+                with self.assertRaises(b.Refused):
+                    driver.native('run', task)
+        driver, task, state = self.kube_identity_fixture()
+        state['replacement'] = copy.deepcopy(state['pod'])
+        state['replacement']['metadata']['uid'] = 'foreign'
+        with self.assertRaises(b.Refused):
+            driver.native('run', task)
+
     def test_raw_pair_does_not_accept_missing_empty_or_symlink_counters(self):
         raw = self.raw()
         self.assertEqual(len(b.coverage_files(raw)), 2)
