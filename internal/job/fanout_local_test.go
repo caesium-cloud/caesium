@@ -378,7 +378,7 @@ func TestFanOutLocalWritesCacheEntryPerPartition(t *testing.T) {
 // three partition fields. A drifting field list silently changes cache identity
 // for fanned steps only.
 func TestFanOutHashInputMatchesUnfannedPath(t *testing.T) {
-	args := taskHashInputArgs{
+	args := cache.HashInput{
 		JobAlias:            "alias",
 		TaskName:            "process",
 		Image:               "alpine:3.23",
@@ -392,8 +392,8 @@ func TestFanOutHashInputMatchesUnfannedPath(t *testing.T) {
 		CacheVersion:        3,
 	}
 
-	unfanned := buildTaskHashInput(args)
-	fanned := buildTaskHashInput(args)
+	unfanned := args
+	fanned := args
 
 	require.Equal(t, unfanned, fanned,
 		"an unpartitioned instance must hash identically to the unfanned path")
@@ -402,7 +402,7 @@ func TestFanOutHashInputMatchesUnfannedPath(t *testing.T) {
 	// Adding the partition fields must be the ONLY difference.
 	args.Partition = "a"
 	args.PartitionFingerprint = "sha256:" + fmt.Sprintf("%064d", 1)
-	withPartition := buildTaskHashInput(args)
+	withPartition := args
 	require.NotEqual(t, unfanned.Compute(), withPartition.Compute())
 
 	withPartition.Partition = ""

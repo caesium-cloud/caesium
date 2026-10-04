@@ -828,65 +828,9 @@ func buildParamEnv(runID uuid.UUID, jobAlias string, params map[string]string) m
 	return env
 }
 
-// taskHashInputArgs is the per-execution input to buildTaskHashInput.
-//
-// Both the unfanned local path and every fan-out instance construct their cache
-// identity through that single function, so the two can never drift on which
-// fields are folded into the hash — a drift that would silently give fanned
-// steps a different cache identity from every other step. A fan-out instance
-// sets the three Partition* fields on top; everything else is identical by
-// construction.
-type taskHashInputArgs struct {
-	JobAlias                string
-	TaskName                string
-	Image                   string
-	UnresolvedImageIdentity string
-	ResolvedImageDigest     string
-	Command                 []string
-	Env                     map[string]string
-	WorkDir                 string
-	Mounts                  []container.Mount
-	ResolvedVolumeMounts    []container.VolumeMount
-	Kubernetes              *container.KubernetesSpec
-	PredecessorHashes       []string
-	PredecessorOutputs      map[string]map[string]string
-	RunParams               map[string]string
-	CacheVersion            int
-	// Chain is the resolved cache.chain mode. Under CacheChainValues the
-	// PredecessorHashes above are carried for provenance but excluded from the
-	// key; see cache.HashInput.Chain.
-	Chain string
-
-	Partition            string
-	PartitionFingerprint string
-	PartitionAttributes  map[string]string
-}
-
-// buildTaskHashInput is the single construction site for cache.HashInput in the
-// local executor. See taskHashInputArgs for why it exists.
-func buildTaskHashInput(a taskHashInputArgs) cache.HashInput {
-	return cache.HashInput{
-		JobAlias:                a.JobAlias,
-		TaskName:                a.TaskName,
-		Image:                   a.Image,
-		ResolvedImageDigest:     a.ResolvedImageDigest,
-		UnresolvedImageIdentity: a.UnresolvedImageIdentity,
-		Command:                 a.Command,
-		Env:                     a.Env,
-		WorkDir:                 a.WorkDir,
-		Mounts:                  a.Mounts,
-		ResolvedVolumeMounts:    a.ResolvedVolumeMounts,
-		Kubernetes:              a.Kubernetes,
-		PredecessorHashes:       a.PredecessorHashes,
-		PredecessorOutputs:      a.PredecessorOutputs,
-		RunParams:               a.RunParams,
-		Chain:                   a.Chain,
-		Partition:               a.Partition,
-		PartitionFingerprint:    a.PartitionFingerprint,
-		PartitionAttributes:     a.PartitionAttributes,
-		CacheVersion:            a.CacheVersion,
-	}
-}
+// taskHashInputArgs is the shared cache identity input for local execution.
+// Source-specific command and partition decoding stays at each call site.
+type taskHashInputArgs = cache.HashInput
 
 // applyCacheHit marks a task cached, replaying a cached fan-out producer's
 // partition list into the same transaction when there is one, so the consumer's
@@ -2272,7 +2216,7 @@ func (j *job) Run(ctx context.Context) (err error) {
 			args.Partition = m.partition.Key
 			args.PartitionFingerprint = m.partition.Fingerprint
 			args.PartitionAttributes = m.partition.Attributes
-			hashInput := buildTaskHashInput(args)
+			hashInput := args
 			inputHash := hashInput.Compute()
 			hashInputBlob, blobErr := hashInput.CanonicalJSON(inputHash)
 			if blobErr != nil {
@@ -2949,7 +2893,7 @@ func (j *job) Run(ctx context.Context) (err error) {
 				taskName = taskModel.Name
 			}
 
-			hashInput := buildTaskHashInput(hashArgs)
+			hashInput := hashArgs
 			inputHash = hashInput.Compute()
 			// Serialize the decomposed input to a canonical, secret-redacted
 			// blob so `caesium why` can later diff this run field-by-field. A

@@ -21,8 +21,8 @@ import (
 // chainArgs is the hash input for a `mid` step consuming one `upstream`
 // predecessor, parameterized by the predecessor's own identity hash and by the
 // output value it published.
-func chainArgs(chain, predHash, predOutput string) taskHashInputArgs {
-	return taskHashInputArgs{
+func chainArgs(chain, predHash, predOutput string) cache.HashInput {
+	return cache.HashInput{
 		JobAlias:           "chain-job",
 		TaskName:           "mid",
 		Image:              "alpine:3.23",
@@ -41,8 +41,8 @@ func chainArgs(chain, predHash, predOutput string) taskHashInputArgs {
 // run param moved) but published the same output. Under chain: values `mid`'s
 // key is unchanged, so the second run is a cache hit.
 func TestLocalLane_ValuesChainSurvivesPredecessorRerun(t *testing.T) {
-	first := buildTaskHashInput(chainArgs(jobdefschema.CacheChainValues, "hash-run-1", "same-value")).Compute()
-	second := buildTaskHashInput(chainArgs(jobdefschema.CacheChainValues, "hash-run-2", "same-value")).Compute()
+	first := chainArgs(jobdefschema.CacheChainValues, "hash-run-1", "same-value").Compute()
+	second := chainArgs(jobdefschema.CacheChainValues, "hash-run-2", "same-value").Compute()
 
 	assert.Equal(t, first, second,
 		"under chain: values a predecessor that re-ran with unchanged outputs must leave the consumer's key intact")
@@ -52,8 +52,8 @@ func TestLocalLane_ValuesChainSurvivesPredecessorRerun(t *testing.T) {
 // still chain, so a changed upstream VALUE re-runs the consumer even though its
 // own definition is untouched.
 func TestLocalLane_ValuesChainStillBustsOnChangedOutput(t *testing.T) {
-	before := buildTaskHashInput(chainArgs(jobdefschema.CacheChainValues, "hash-run-1", "v1")).Compute()
-	after := buildTaskHashInput(chainArgs(jobdefschema.CacheChainValues, "hash-run-1", "v2")).Compute()
+	before := chainArgs(jobdefschema.CacheChainValues, "hash-run-1", "v1").Compute()
+	after := chainArgs(jobdefschema.CacheChainValues, "hash-run-1", "v2").Compute()
 
 	assert.NotEqual(t, before, after,
 		"a changed predecessor OUTPUT must still invalidate a values-mode consumer")
@@ -64,8 +64,8 @@ func TestLocalLane_ValuesChainStillBustsOnChangedOutput(t *testing.T) {
 // behaviour every existing pipeline depends on.
 func TestLocalLane_TransitiveChainStillCascades(t *testing.T) {
 	for _, chain := range []string{"", jobdefschema.CacheChainTransitive} {
-		first := buildTaskHashInput(chainArgs(chain, "hash-run-1", "same-value")).Compute()
-		second := buildTaskHashInput(chainArgs(chain, "hash-run-2", "same-value")).Compute()
+		first := chainArgs(chain, "hash-run-1", "same-value").Compute()
+		second := chainArgs(chain, "hash-run-2", "same-value").Compute()
 		assert.NotEqual(t, first, second,
 			"chain %q must keep cascading predecessor identity", chain)
 	}
@@ -73,8 +73,8 @@ func TestLocalLane_TransitiveChainStillCascades(t *testing.T) {
 	// And an unset Chain must hash identically to an explicit "transitive" —
 	// ResolveCacheConfig now always sets the latter, and existing cache entries
 	// were written by callers that set neither.
-	unset := buildTaskHashInput(chainArgs("", "hash-run-1", "v1")).Compute()
-	explicit := buildTaskHashInput(chainArgs(jobdefschema.CacheChainTransitive, "hash-run-1", "v1")).Compute()
+	unset := chainArgs("", "hash-run-1", "v1").Compute()
+	explicit := chainArgs(jobdefschema.CacheChainTransitive, "hash-run-1", "v1").Compute()
 	assert.Equal(t, unset, explicit,
 		"an explicit transitive chain must not change any existing cache key")
 }
@@ -82,7 +82,7 @@ func TestLocalLane_TransitiveChainStillCascades(t *testing.T) {
 // TestLocalLane_ChainReachesPersistedBlob: `caesium why` reads the blob, so the
 // mode has to be recorded on the way through the local construction site.
 func TestLocalLane_ChainReachesPersistedBlob(t *testing.T) {
-	in := buildTaskHashInput(chainArgs(jobdefschema.CacheChainValues, "hash-run-1", "v1"))
+	in := chainArgs(jobdefschema.CacheChainValues, "hash-run-1", "v1")
 	require.Equal(t, cache.ChainValues, in.Chain)
 
 	blob, err := in.CanonicalJSON(in.Compute())
@@ -93,7 +93,7 @@ func TestLocalLane_ChainReachesPersistedBlob(t *testing.T) {
 // partitionChainArgs is chainArgs plus the per-instance fields a fanned
 // consumer folds in. The two construction sites share buildTaskHashInput, so
 // this is the same composition the local dispatcher uses for every instance.
-func partitionChainArgs(chain, predHash, predOutput, key, fingerprint string) taskHashInputArgs {
+func partitionChainArgs(chain, predHash, predOutput, key, fingerprint string) cache.HashInput {
 	args := chainArgs(chain, predHash, predOutput)
 	args.TaskName = "process"
 	args.Partition = key
@@ -112,8 +112,8 @@ func testPartitionFingerprint(hexByte string) string {
 // churn the same way the default chain does.
 func TestLocalLane_ValuesChainPartitionSkipIgnoresPredecessorHash(t *testing.T) {
 	fp := testPartitionFingerprint("a1")
-	first := buildTaskHashInput(partitionChainArgs(jobdefschema.CacheChainValues, "hash-run-1", "same-value", "dim_customer", fp)).Compute()
-	second := buildTaskHashInput(partitionChainArgs(jobdefschema.CacheChainValues, "hash-run-2", "same-value", "dim_customer", fp)).Compute()
+	first := partitionChainArgs(jobdefschema.CacheChainValues, "hash-run-1", "same-value", "dim_customer", fp).Compute()
+	second := partitionChainArgs(jobdefschema.CacheChainValues, "hash-run-2", "same-value", "dim_customer", fp).Compute()
 	assert.Equal(t, first, second,
 		"under chain: values a producer re-run must not re-key an unchanged partition")
 }
@@ -122,8 +122,8 @@ func TestLocalLane_ValuesChainPartitionSkipIgnoresPredecessorHash(t *testing.T) 
 // change is always a miss. Values mode drops predecessor hashes, never the
 // per-unit content address — a stale hit here would replay the wrong work.
 func TestLocalLane_ValuesChainPartitionFingerprintIsAuthoritative(t *testing.T) {
-	before := buildTaskHashInput(partitionChainArgs(jobdefschema.CacheChainValues, "hash-run-1", "same-value", "dim_customer", testPartitionFingerprint("a1"))).Compute()
-	after := buildTaskHashInput(partitionChainArgs(jobdefschema.CacheChainValues, "hash-run-1", "same-value", "dim_customer", testPartitionFingerprint("b2"))).Compute()
+	before := partitionChainArgs(jobdefschema.CacheChainValues, "hash-run-1", "same-value", "dim_customer", testPartitionFingerprint("a1")).Compute()
+	after := partitionChainArgs(jobdefschema.CacheChainValues, "hash-run-1", "same-value", "dim_customer", testPartitionFingerprint("b2")).Compute()
 	assert.NotEqual(t, before, after,
 		"a changed partition fingerprint must miss even under chain: values")
 }
@@ -133,8 +133,8 @@ func TestLocalLane_ValuesChainPartitionFingerprintIsAuthoritative(t *testing.T) 
 func TestLocalLane_TransitiveChainPartitionStillCascades(t *testing.T) {
 	fp := testPartitionFingerprint("a1")
 	for _, chain := range []string{"", jobdefschema.CacheChainTransitive} {
-		first := buildTaskHashInput(partitionChainArgs(chain, "hash-run-1", "same-value", "dim_customer", fp)).Compute()
-		second := buildTaskHashInput(partitionChainArgs(chain, "hash-run-2", "same-value", "dim_customer", fp)).Compute()
+		first := partitionChainArgs(chain, "hash-run-1", "same-value", "dim_customer", fp).Compute()
+		second := partitionChainArgs(chain, "hash-run-2", "same-value", "dim_customer", fp).Compute()
 		assert.NotEqual(t, first, second,
 			"chain %q must keep cascading predecessor identity into every partition", chain)
 	}
