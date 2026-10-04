@@ -195,9 +195,15 @@ var Cmd = &cobra.Command{
 		}
 		defer func() { _ = resp.Body.Close() }()
 
-		body, _ := io.ReadAll(resp.Body)
+		body, readErr := io.ReadAll(resp.Body)
 		if resp.StatusCode >= http.StatusBadRequest {
+			if readErr != nil {
+				return fmt.Errorf("why failed (%d): %s (reading response: %w)", resp.StatusCode, strings.TrimSpace(string(body)), readErr)
+			}
 			return fmt.Errorf("why failed (%d): %s", resp.StatusCode, strings.TrimSpace(string(body)))
+		}
+		if readErr != nil {
+			return fmt.Errorf("reading why response: %w", readErr)
 		}
 
 		// NOTE: write machine-readable output via cmd.OutOrStdout(), NOT

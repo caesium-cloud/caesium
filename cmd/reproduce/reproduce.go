@@ -305,7 +305,13 @@ func fetchDescriptor(ctx context.Context, cmd *cobra.Command, server, jobID, run
 	body, readErr := io.ReadAll(resp.Body)
 	if resp.StatusCode >= http.StatusBadRequest {
 		if resp.StatusCode == http.StatusNotFound && strings.Contains(string(body), "descriptor unavailable") {
+			if readErr != nil {
+				return nil, fmt.Errorf("descriptor unavailable for run %s task %s (reading response: %w)", runID, task, readErr)
+			}
 			return nil, fmt.Errorf("descriptor unavailable for run %s task %s", runID, task)
+		}
+		if readErr != nil {
+			return nil, fmt.Errorf("fetch descriptor failed (%d): %s (reading response: %w)", resp.StatusCode, strings.TrimSpace(string(body)), readErr)
 		}
 		return nil, fmt.Errorf("fetch descriptor failed (%d): %s", resp.StatusCode, strings.TrimSpace(string(body)))
 	}
@@ -318,6 +324,9 @@ func fetchDescriptor(ctx context.Context, cmd *cobra.Command, server, jobID, run
 		return nil, fmt.Errorf("decode descriptor response: %w", err)
 	}
 	if len(out.Descriptor) == 0 {
+		if readErr != nil {
+			return nil, fmt.Errorf("descriptor unavailable for run %s task %s (reading response: %w)", runID, task, readErr)
+		}
 		return nil, fmt.Errorf("descriptor unavailable for run %s task %s", runID, task)
 	}
 	return &out, nil

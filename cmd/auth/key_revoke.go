@@ -40,9 +40,15 @@ var keyRevokeCmd = &cobra.Command{
 		}
 		defer func() { _ = resp.Body.Close() }()
 
-		body, _ := io.ReadAll(resp.Body)
+		body, readErr := io.ReadAll(resp.Body)
 		if resp.StatusCode >= http.StatusBadRequest {
+			if readErr != nil {
+				return fmt.Errorf("key revocation failed (%d): %s (reading response: %w)", resp.StatusCode, strings.TrimSpace(string(body)), readErr)
+			}
 			return fmt.Errorf("key revocation failed (%d): %s", resp.StatusCode, strings.TrimSpace(string(body)))
+		}
+		if readErr != nil {
+			return fmt.Errorf("reading key revocation response: %w", readErr)
 		}
 
 		// Machine-readable result → stdout (cobra's Print* goes to stderr).

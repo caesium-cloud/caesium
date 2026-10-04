@@ -46,9 +46,15 @@ var getCmd = &cobra.Command{
 		}
 		defer func() { _ = resp.Body.Close() }()
 
-		body, _ := io.ReadAll(resp.Body)
+		body, readErr := io.ReadAll(resp.Body)
 		if resp.StatusCode >= http.StatusBadRequest {
+			if readErr != nil {
+				return fmt.Errorf("receipt get failed (%d): %s (reading response: %w)", resp.StatusCode, strings.TrimSpace(string(body)), readErr)
+			}
 			return fmt.Errorf("receipt get failed (%d): %s", resp.StatusCode, strings.TrimSpace(string(body)))
+		}
+		if readErr != nil {
+			return fmt.Errorf("reading receipt get response: %w", readErr)
 		}
 
 		// Pretty-print canonically so the committed file is stable and diffable.

@@ -31,9 +31,15 @@ var pruneCmd = &cobra.Command{
 		}
 		defer func() { _ = resp.Body.Close() }()
 
-		body, _ := io.ReadAll(resp.Body)
+		body, readErr := io.ReadAll(resp.Body)
 		if resp.StatusCode >= http.StatusBadRequest {
+			if readErr != nil {
+				return fmt.Errorf("cache prune failed (%d): %s (reading response: %w)", resp.StatusCode, strings.TrimSpace(string(body)), readErr)
+			}
 			return fmt.Errorf("cache prune failed (%d): %s", resp.StatusCode, strings.TrimSpace(string(body)))
+		}
+		if readErr != nil {
+			return fmt.Errorf("reading cache prune response: %w", readErr)
 		}
 
 		var result struct {

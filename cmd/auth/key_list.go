@@ -37,9 +37,15 @@ var keyListCmd = &cobra.Command{
 		}
 		defer func() { _ = resp.Body.Close() }()
 
-		body, _ := io.ReadAll(resp.Body)
+		body, readErr := io.ReadAll(resp.Body)
 		if resp.StatusCode >= http.StatusBadRequest {
+			if readErr != nil {
+				return fmt.Errorf("key list failed (%d): %s (reading response: %w)", resp.StatusCode, strings.TrimSpace(string(body)), readErr)
+			}
 			return fmt.Errorf("key list failed (%d): %s", resp.StatusCode, strings.TrimSpace(string(body)))
+		}
+		if readErr != nil {
+			return fmt.Errorf("reading key list response: %w", readErr)
 		}
 
 		// Machine-readable listing → stdout, nothing else on it. cobra's Print*

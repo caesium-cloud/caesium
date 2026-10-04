@@ -80,9 +80,15 @@ Reprocess policies:
 		}
 		defer func() { _ = resp.Body.Close() }()
 
-		respBody, _ := io.ReadAll(resp.Body)
+		respBody, readErr := io.ReadAll(resp.Body)
 		if resp.StatusCode >= http.StatusBadRequest {
+			if readErr != nil {
+				return fmt.Errorf("backfill create failed (%d): %s (reading response: %w)", resp.StatusCode, strings.TrimSpace(string(respBody)), readErr)
+			}
 			return fmt.Errorf("backfill create failed (%d): %s", resp.StatusCode, strings.TrimSpace(string(respBody)))
+		}
+		if readErr != nil {
+			return fmt.Errorf("reading backfill create response: %w", readErr)
 		}
 
 		// stdout is the created record and NOTHING else, so

@@ -52,9 +52,15 @@ var keyRotateCmd = &cobra.Command{
 		}
 		defer func() { _ = resp.Body.Close() }()
 
-		respBody, _ := io.ReadAll(resp.Body)
+		respBody, readErr := io.ReadAll(resp.Body)
 		if resp.StatusCode >= http.StatusBadRequest {
+			if readErr != nil {
+				return fmt.Errorf("key rotation failed (%d): %s (reading response: %w)", resp.StatusCode, strings.TrimSpace(string(respBody)), readErr)
+			}
 			return fmt.Errorf("key rotation failed (%d): %s", resp.StatusCode, strings.TrimSpace(string(respBody)))
+		}
+		if readErr != nil {
+			return fmt.Errorf("reading key rotation response: %w", readErr)
 		}
 
 		// See key_create.go: stdout is the new key's record and nothing else,

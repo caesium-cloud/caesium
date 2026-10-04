@@ -63,9 +63,15 @@ var keyCreateCmd = &cobra.Command{
 		}
 		defer func() { _ = resp.Body.Close() }()
 
-		respBody, _ := io.ReadAll(resp.Body)
+		respBody, readErr := io.ReadAll(resp.Body)
 		if resp.StatusCode >= http.StatusBadRequest {
+			if readErr != nil {
+				return fmt.Errorf("key creation failed (%d): %s (reading response: %w)", resp.StatusCode, strings.TrimSpace(string(respBody)), readErr)
+			}
 			return fmt.Errorf("key creation failed (%d): %s", resp.StatusCode, strings.TrimSpace(string(respBody)))
+		}
+		if readErr != nil {
+			return fmt.Errorf("reading key creation response: %w", readErr)
 		}
 
 		// stdout is the created-key record and NOTHING else — the plaintext is
