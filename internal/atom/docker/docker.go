@@ -4,7 +4,6 @@ import (
 	"context"
 	"io"
 
-	"github.com/caesium-cloud/caesium/internal/atom"
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/image"
 	"github.com/docker/docker/api/types/network"
