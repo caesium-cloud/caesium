@@ -69,28 +69,13 @@ func (c *Capturer) Start(ctx context.Context) error {
 
 // StartWithReady is Start with a readiness signal for deterministic tests.
 func (c *Capturer) StartWithReady(ctx context.Context, ready chan<- struct{}) error {
-	ch, err := c.bus.Subscribe(ctx, event.Filter{Types: []event.Type{
+	return event.RunSubscription(ctx, c.bus, event.Filter{Types: []event.Type{
 		event.TypeRunCompleted,
-	}})
-	if err != nil {
-		return err
-	}
-	if ready != nil {
-		close(ready)
-	}
-	for {
-		select {
-		case <-ctx.Done():
-			return nil
-		case evt, ok := <-ch:
-			if !ok {
-				return nil
-			}
-			if evt.Type == event.TypeRunCompleted {
-				c.handleRunCompleted(ctx, evt)
-			}
+	}}, ready, func(evt event.Event) {
+		if evt.Type == event.TypeRunCompleted {
+			c.handleRunCompleted(ctx, evt)
 		}
-	}
+	}, nil)
 }
 
 // handleRunCompleted is the per-event capture. run_completed fires only for a

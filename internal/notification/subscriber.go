@@ -78,25 +78,9 @@ func (s *Subscriber) StartWithReady(ctx context.Context, ready chan<- struct{}) 
 		Types: notifiableTypes,
 	}
 
-	ch, err := s.bus.Subscribe(ctx, filter)
-	if err != nil {
-		return err
-	}
-	if ready != nil {
-		close(ready)
-	}
-
-	for {
-		select {
-		case <-ctx.Done():
-			return nil
-		case evt, ok := <-ch:
-			if !ok {
-				return nil
-			}
-			s.handleEvent(ctx, evt)
-		}
-	}
+	return event.RunSubscription(ctx, s.bus, filter, ready, func(evt event.Event) {
+		s.handleEvent(ctx, evt)
+	}, nil)
 }
 
 func (s *Subscriber) handleEvent(ctx context.Context, evt event.Event) {
