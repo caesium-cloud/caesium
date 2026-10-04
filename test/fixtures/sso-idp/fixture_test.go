@@ -239,3 +239,30 @@ func TestReplayEvidenceRefusesExpiredIssueInstantDespiteLongConditions(t *testin
 		t.Fatal("foreign assertion envelope accepted")
 	}
 }
+
+type failingMetadataReader struct{}
+
+func (failingMetadataReader) Read([]byte) (int, error) {
+	return 0, errors.New("metadata stream failed")
+}
+
+func TestSPMetadataRequiresCompletedBoundedTransport(t *testing.T) {
+	entity := "http://owned-sp/auth/sso/saml/metadata"
+	document := `<EntityDescriptor xmlns="urn:oasis:names:tc:SAML:2.0:metadata" entityID="` + entity + `"/>`
+	if _, err := readSPMetadata(strings.NewReader(document), entity); err != nil {
+		t.Fatal(err)
+	}
+	cases := map[string]io.Reader{
+		"read error after complete XML": io.MultiReader(strings.NewReader(document), failingMetadataReader{}),
+		"oversized trailing body":       strings.NewReader(document + strings.Repeat(" ", 1024*1024)),
+		"truncated XML":                 strings.NewReader(document[:len(document)-1]),
+		"foreign entity":                strings.NewReader(strings.Replace(document, entity, "http://foreign-sp/metadata", 1)),
+	}
+	for name, reader := range cases {
+		t.Run(name, func(t *testing.T) {
+			if _, err := readSPMetadata(reader, entity); err == nil {
+				t.Fatal("incomplete/foreign metadata accepted")
+			}
+		})
+	}
+}

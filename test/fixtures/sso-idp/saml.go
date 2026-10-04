@@ -80,16 +80,25 @@ func (s *samlFixture) spMetadata(ctx context.Context) (*crewsaml.EntityDescripto
 	if res.StatusCode != 200 {
 		return nil, errors.New("SP metadata refused")
 	}
+	return readSPMetadata(res.Body, s.spBase+"/auth/sso/saml/metadata")
+}
+
+func readSPMetadata(reader io.Reader, expectedEntity string) (*crewsaml.EntityDescriptor, error) {
+	const maxMetadataBytes = 1024 * 1024
+	body, err := io.ReadAll(io.LimitReader(reader, maxMetadataBytes+1))
+	if err != nil || len(body) > maxMetadataBytes {
+		return nil, errors.New("SP metadata transport incomplete/oversized")
+	}
 	var metadata crewsaml.EntityDescriptor
-	err = xml.NewDecoder(io.LimitReader(res.Body, 1024*1024)).Decode(&metadata)
-	if err != nil {
+	if err := xml.Unmarshal(body, &metadata); err != nil {
 		return nil, err
 	}
-	if metadata.EntityID != s.spBase+"/auth/sso/saml/metadata" {
+	if metadata.EntityID != expectedEntity {
 		return nil, errors.New("unexpected SP entity")
 	}
 	return &metadata, nil
 }
+
 func (s *samlFixture) response(ctx context.Context, request crewsaml.AuthnRequest, relay, mode string) (crewsaml.IdpAuthnRequestForm, string, error) {
 	var empty crewsaml.IdpAuthnRequestForm
 	if request.ID == "" || request.Version != "2.0" || request.Issuer == nil || request.Issuer.Value != s.spBase+"/auth/sso/saml/metadata" || request.AssertionConsumerServiceURL != s.spBase+"/auth/sso/saml/acs" || request.Destination != s.idp.SSOURL.String() || request.ProtocolBinding != crewsaml.HTTPPostBinding || relay == "" {
