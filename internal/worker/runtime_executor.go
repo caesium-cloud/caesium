@@ -259,6 +259,25 @@ func (e *runtimeExecutor) Execute(ctx context.Context, taskRun *models.TaskRun) 
 		atomSpec.Env = interpolatedEnv
 	}
 
+	// Capture execution inputs before any identity or cache work. The absolute
+	// run deadline applies to acquisition; the per-attempt timer starts only
+	// when executeTask begins an actual attempt.
+	acquisitionCtx, acquisitionCancel := runCompletionContext(ctx, timeouts)
+	inputs, inputErr := e.store.PredecessorExecutionInputs(acquisitionCtx, taskRun.JobRunID, taskRun.TaskID)
+	acquisitionCancel()
+	if inputErr != nil {
+		e.reportInputFailure(ctx, sink, taskRun, fmt.Errorf("acquire predecessor execution inputs: %w", inputErr), timeouts)
+		return
+	}
+	outputEnv, outputEnvErr := pkgtask.BuildOutputEnv(inputs.OutputsByName)
+	if outputEnvErr != nil {
+		e.reportInputFailure(ctx, sink, taskRun, outputEnvErr, timeouts)
+		return
+	}
+	if ctx.Err() != nil || e.deferRunDeadline(taskRun, timeouts, "after_input_acquisition", time.Now()) {
+		return
+	}
+
 	// Cache check: attempt to satisfy the task from cache before container execution.
 	var cacheStore *cache.Store
 	var cacheHash string
@@ -313,32 +332,10 @@ func (e *runtimeExecutor) Execute(ctx context.Context, taskRun *models.TaskRun) 
 		// Look up job alias for hash computation.
 		cacheJobAlias := resolveJobAlias()
 
-		// Fetch predecessor outputs for hash input.
-		predOutputs, predErr := e.store.PredecessorOutputs(taskRun.JobRunID, taskRun.TaskID)
-		if predErr != nil {
-			log.Warn("cache: failed to query predecessor outputs", "task_id", taskRun.TaskID, "error", predErr)
-		}
-		predHashes, predHashErr := e.store.PredecessorHashes(taskRun.JobRunID, taskRun.TaskID)
-		if predHashErr != nil {
-			log.Warn("cache: failed to query predecessor hashes", "task_id", taskRun.TaskID, "error", predHashErr)
-		}
-		descriptorPredOutputs, descriptorPredHashes, descriptorErr := e.store.PredecessorDescriptorInputs(taskRun.JobRunID, taskRun.TaskID)
-		if descriptorErr != nil {
-			log.Warn("cache: failed to query predecessor descriptor inputs", "task_id", taskRun.TaskID, "error", descriptorErr)
-		}
-
 		// Build merged env for hashing, excluding volatile per-run vars.
 		// atomSpec.Env is already ${CAESIUM_PARAM_*}-interpolated above.
 		mergedEnv := make(map[string]string, len(atomSpec.Env))
 		maps.Copy(mergedEnv, atomSpec.Env)
-		outputEnv, outputEnvErr := pkgtask.BuildOutputEnv(predOutputs)
-		if outputEnvErr != nil {
-			log.Error("failed to build predecessor output env for cache identity", "task_id", taskRun.TaskID, "error", outputEnvErr)
-			if persistErr := sink.Failed(ctx, taskRun, outputEnvErr); persistErr != nil && !errors.Is(persistErr, run.ErrTaskClaimMismatch) {
-				log.Error("failed to persist output env build failure", "run_id", taskRun.JobRunID, "task_id", taskRun.TaskID, "error", persistErr)
-			}
-			return
-		}
 		if len(outputEnv) > 0 {
 			maps.Copy(mergedEnv, outputEnv)
 		}
@@ -380,8 +377,8 @@ func (e *runtimeExecutor) Execute(ctx context.Context, taskRun *models.TaskRun) 
 			Mounts:                  atomSpec.Mounts,
 			ResolvedVolumeMounts:    atomSpec.ResolvedVolumeMounts,
 			Kubernetes:              atomSpec.Kubernetes,
-			PredecessorHashes:       predHashes,
-			PredecessorOutputs:      predOutputs,
+			PredecessorHashes:       inputs.Hashes,
+			PredecessorOutputs:      inputs.OutputsByName,
 			RunParams:               runParams,
 			Partition:               taskRun.PartitionValue,
 			PartitionFingerprint:    taskRun.PartitionFingerprint,
@@ -431,7 +428,7 @@ func (e *runtimeExecutor) Execute(ctx context.Context, taskRun *models.TaskRun) 
 			}
 			log.Warn("cache: failed to persist task hash", "task_id", taskRun.TaskID, "hash", cacheHash, "error", err)
 		}
-		if err := e.store.UpdateTaskExecutionDescriptorInputs(taskRun.JobRunID, taskRun.ID, descriptorPredOutputs, descriptorPredHashes, cacheHash, resolvedImageDigest, hashInputBlob); err != nil {
+		if err := e.store.UpdateTaskExecutionDescriptorInputs(taskRun.JobRunID, taskRun.ID, inputs.DescriptorOutputs, inputs.DescriptorHashes, cacheHash, resolvedImageDigest, hashInputBlob); err != nil {
 			if unresolvedImageIdentity != "" {
 				if persistErr := sink.Failed(ctx, taskRun, fmt.Errorf("persist unresolved image execution descriptor: %w", err)); persistErr != nil {
 					log.Error("failed to persist descriptor identity failure", "error", persistErr)
@@ -548,7 +545,7 @@ func (e *runtimeExecutor) Execute(ctx context.Context, taskRun *models.TaskRun) 
 
 	var lastErr error
 	for attempt := currentAttempt; attempt <= maxAttempts; attempt++ {
-		emitted, execErr := e.executeTask(ctx, taskRun, sink, atomSpec, runParams, resolveJobAlias(), descriptor, fanOut, resolvedImageDigest, timeouts, attempt >= maxAttempts)
+		emitted, execErr := e.executeTask(ctx, taskRun, sink, atomSpec, runParams, outputEnv, resolveJobAlias(), descriptor, fanOut, resolvedImageDigest, timeouts, attempt >= maxAttempts)
 		// executeTask performs log parsing, schema checks, and data assertions
 		// after the atom exits. Any of those can return an ordinary error after
 		// the absolute run budget expired. Classify at this central seam before
@@ -658,6 +655,22 @@ func (e *runtimeExecutor) Execute(ctx context.Context, taskRun *models.TaskRun) 
 	}
 
 	e.reportTaskFailure(ctx, sink, taskRun, lastErr, timeouts)
+}
+
+// reportInputFailure refuses terminal writes when acquisition outlived its
+// ownership or absolute run window. The owner remains authoritative for both.
+func (e *runtimeExecutor) reportInputFailure(ctx context.Context, sink CompletionSink, taskRun *models.TaskRun, failure error, timeouts executionTimeouts) {
+	if errors.Is(failure, run.ErrTaskClaimMismatch) || ctx.Err() != nil || e.deferRunDeadline(taskRun, timeouts, "input_failure", time.Now()) {
+		return
+	}
+	if err := e.store.EnsureTaskRunStartable(taskRun.JobRunID, taskRun.ID, taskRun.ClaimedBy); err != nil {
+		log.Info("worker input failure no longer has a startable claim", "task_run_id", taskRun.ID, "error", err)
+		return
+	}
+	if ctx.Err() != nil || e.deferRunDeadline(taskRun, timeouts, "input_failure_report", time.Now()) {
+		return
+	}
+	e.reportTaskFailure(ctx, sink, taskRun, failure, timeouts)
 }
 
 // reportTaskFailure retains the same claim and absolute run window when a
@@ -863,7 +876,7 @@ func buildRunParamEnv(runID uuid.UUID, jobAlias string, params map[string]string
 // failure is returned to the retry loop and NOTHING is persisted, so the row
 // stays this worker's to reset. A successful result is always reported: success
 // ends the task whatever the attempt budget said.
-func (e *runtimeExecutor) executeTask(ctx context.Context, taskRun *models.TaskRun, sink CompletionSink, atomSpec container.Spec, runParams map[string]string, jobAlias string, descriptor *models.TaskExecutionDescriptor, fanOut *jobdefschema.FanOut, resolvedImageDigest string, timeouts executionTimeouts, finalAttempt bool) ([]pkgtask.Partition, error) {
+func (e *runtimeExecutor) executeTask(ctx context.Context, taskRun *models.TaskRun, sink CompletionSink, atomSpec container.Spec, runParams map[string]string, outputEnv map[string]string, jobAlias string, descriptor *models.TaskExecutionDescriptor, fanOut *jobdefschema.FanOut, resolvedImageDigest string, timeouts executionTimeouts, finalAttempt bool) ([]pkgtask.Partition, error) {
 	taskCtx, cancel := timeouts.attemptContext(ctx, time.Now())
 	defer cancel()
 	if err := context.Cause(taskCtx); err != nil {
@@ -922,15 +935,7 @@ func (e *runtimeExecutor) executeTask(ctx context.Context, taskRun *models.TaskR
 		}
 	}
 
-	predOutputs, predErr := e.store.PredecessorOutputs(taskRun.JobRunID, taskRun.TaskID)
-	if predErr != nil {
-		log.Warn("failed to query predecessor outputs", "task_id", taskRun.TaskID, "error", predErr)
-	}
 	paramEnv := buildRunParamEnv(taskRun.JobRunID, jobAlias, runParams)
-	outputEnv, err := pkgtask.BuildOutputEnv(predOutputs)
-	if err != nil {
-		return nil, err
-	}
 	if len(spec.Env) > 0 || len(paramEnv) > 0 || len(outputEnv) > 0 || taskRun.PartitionValue != "" {
 		merged := make(map[string]string, len(spec.Env)+len(paramEnv)+len(outputEnv)+2)
 		maps.Copy(merged, spec.Env)

@@ -972,6 +972,8 @@ func TestRuntimeExecutorPartitionErrorForcesOneStop(t *testing.T) {
 	for _, stopErr := range []error{nil, errors.New("stop failed")} {
 		t.Run(fmt.Sprint(stopErr), func(t *testing.T) {
 			f := seedProducerTaskRun(t, "partition-error-stop")
+			f.taskRun.SchemaValidation = jobdef.SchemaValidationFail
+			f.taskRun.OutputSchema = datatypes.JSON(`{"type":"object","required":["value"],"properties":{"value":{"type":"string"}}}`)
 			sink := &fakeSink{}
 			engine := &captureCreateEngine{logs: "##caesium::partitions not-json\n", stopErr: stopErr}
 			(&runtimeExecutor{store: f.store, localSink: sink, engineFactory: func(context.Context, models.AtomEngine) (atom.Engine, error) { return engine, nil }}).Execute(context.Background(), f.taskRun)
@@ -980,6 +982,7 @@ func TestRuntimeExecutorPartitionErrorForcesOneStop(t *testing.T) {
 			require.Equal(t, "runtime", engine.stopReq.ID)
 			var partitionErr *pkgtask.PartitionError
 			require.ErrorAs(t, sink.lastErr, &partitionErr)
+			require.ErrorIs(t, sink.lastErr, partitionErr)
 			if stopErr != nil {
 				require.ErrorIs(t, sink.lastErr, stopErr)
 			}
