@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # G2 coverage collector: instrumented CLI/server binaries, labelled GOCOVERDIR
-# profiles, graceful shutdown + SIGUSR2 flush, merge, and check.
+# profiles, real local/auth/distributed/owner integration journeys, graceful
+# shutdown + SIGUSR2 flush, merge, and check.
 #
 # The script is the command (G6 owns any later justfile recipe). It never
 # starts caesium-server-test, publishes only an ephemeral loopback port for
-# its isolated Chromium journey, never runs just integration-up / ui-e2e /
-# performance, and never treats a killed
-# process or missing GOCOVERDIR as 0% success.
+# its isolated Chromium journey, never invokes just/builds or pulls images,
+# and never treats a killed process or missing GOCOVERDIR as 0% success.
 #
 #   CAESIUM_COVERAGE_ARTIFACTS=/tmp/cov \
 #   CANDIDATE_SHA=$(git rev-parse HEAD) \
@@ -408,6 +408,11 @@ steps:
 YAML
 }
 
+# Adds selected real integration-test journeys to the exact same candidate
+# image's CLI/server GOCOVERDIR profiles. The helper is sourced so it can use
+# the collector's pinned image identity, cleanup trap, and merge function.
+source "$ROOT/scripts/coverage-journeys.sh"
+
 KEEP_RESOURCES=0
 if [[ "${CAESIUM_COVERAGE_KEEP:-}" == "1" ]]; then
   KEEP_RESOURCES=1
@@ -416,6 +421,7 @@ fi
 # Invoked by the EXIT trap below.
 # shellcheck disable=SC2329
 cleanup() {
+  cleanup_coverage_journeys
   if [[ "$KEEP_RESOURCES" -eq 1 ]]; then
     log "CAESIUM_COVERAGE_KEEP=1; leaving $SERVER_NAME / $BROWSER_SERVER_NAME / $NETWORK in place"
     return
@@ -469,8 +475,8 @@ require_cmd "$CONTAINER_CLI"
 if [[ -n "${CAESIUM_COVERAGE_BROWSER_DIR:-}" || -n "${CAESIUM_COVERAGE_BROWSER_PROFILE:-}" ]]; then
   die "collect runs its own Chromium journey; external browser profiles are accepted only by check/merge"
 fi
-rm -rf "$RAW/cli" "$RAW/server" "$RAW/browser" "$RAW/integration"
-mkdir -p "$RAW/cli" "$RAW/server" "$RAW/browser" "$RAW/integration" "$PROFILES" "$AUDIT"
+rm -rf "$RAW/cli" "$RAW/server" "$RAW/browser" "$RAW/integration" "$RAW/journeys"
+mkdir -p "$RAW/cli" "$RAW/server" "$RAW/browser" "$RAW/integration" "$RAW/journeys" "$PROFILES" "$AUDIT"
 rm -f "$PROFILES"/*.out "$PROFILES"/*.provenance.json
 
 if [[ "${CAESIUM_COVERAGE_SKIP_BUILD:-}" == "1" ]]; then
@@ -631,6 +637,68 @@ SOCK="${CAESIUM_SOCK:-/var/run/docker.sock}"
 SOCK_GID="$("$CONTAINER_CLI" run --rm --platform "$PLATFORM" --user 0:0 --entrypoint stat \
   -v "$SOCK:/var/run/docker.sock" "$IMAGE_ID" -c '%g' /var/run/docker.sock 2>/dev/null || true)"
 [[ "$SOCK_GID" =~ ^[0-9]+$ ]] || die "could not determine the group of $SOCK inside a container; refusing to guess"
+
+# Bind future backend lanes to the exact same candidate/build/source inventory.
+# The backend helper receives the file and its digest; it cannot promote an
+# image or profile from a different producer run by matching only the Git SHA.
+PRODUCER_CONTEXT="$ARTIFACTS/producer-context.json"
+PRODUCER_CONTEXT_SHA256="$(
+  PRODUCER_CANDIDATE_SHA="$CANDIDATE_SHA" \
+  PRODUCER_IMAGE_ID="$IMAGE_ID" \
+  PRODUCER_BUILD_CONTEXT="$BUILD_CONTEXT" \
+  PRODUCER_BUILDER_IMAGE_ID="$BUILDER_RUN_IMAGE" \
+  PRODUCER_PLATFORM="$PLATFORM" \
+  PRODUCER_IMAGE_PROVENANCE="$IMAGE_PROVENANCE" \
+  PRODUCER_IMAGE_VERIFIED="$IMAGE_VERIFIED" \
+  PRODUCER_CONTAINER_CLI="$CONTAINER_CLI" \
+  PRODUCER_COVERAGE_ID="$ID" \
+  PRODUCER_SOCKET_PATH="$SOCK" \
+  PRODUCER_SOCKET_GID="$SOCK_GID" \
+  python3 - "$PRODUCER_CONTEXT" "$ARTIFACTS" "$ROOT" "$AUDIT/source-inventory.json" <<'PY'
+import hashlib
+import json
+import os
+import pathlib
+import sys
+
+destination, artifacts, root, inventory_path = map(pathlib.Path, sys.argv[1:])
+inventory = json.loads(inventory_path.read_text())
+context = inventory.get("build_context")
+if inventory.get("complete") is not True or inventory.get("candidate_sha") != os.environ["PRODUCER_CANDIDATE_SHA"]:
+    raise SystemExit("source inventory is incomplete or belongs to another candidate")
+if inventory.get("image_id") != os.environ["PRODUCER_IMAGE_ID"] or context != json.loads(os.environ["PRODUCER_BUILD_CONTEXT"]):
+    raise SystemExit("source inventory differs from the pinned candidate image/build context")
+if os.environ["PRODUCER_IMAGE_PROVENANCE"] != "built-by-this-run" or os.environ["PRODUCER_IMAGE_VERIFIED"] != "true":
+    raise SystemExit("real backend coverage requires the verified image built by this collection")
+if not os.environ["PRODUCER_BUILDER_IMAGE_ID"].startswith("sha256:"):
+    raise SystemExit("builder image identity is not immutable")
+source_digest = hashlib.sha256(inventory_path.read_bytes()).hexdigest()
+record = {
+    "schema_version": 1,
+    "producer": "scripts/integration-coverage.sh",
+    "candidate_sha": os.environ["PRODUCER_CANDIDATE_SHA"],
+    "image_id": os.environ["PRODUCER_IMAGE_ID"],
+    "builder_image_id": os.environ["PRODUCER_BUILDER_IMAGE_ID"],
+    "platform": os.environ["PRODUCER_PLATFORM"],
+    "build_context": context,
+    "image_provenance": os.environ["PRODUCER_IMAGE_PROVENANCE"],
+    "verified": os.environ["PRODUCER_IMAGE_VERIFIED"] == "true",
+    "container_cli": os.environ["PRODUCER_CONTAINER_CLI"],
+    "coverage_id": os.environ["PRODUCER_COVERAGE_ID"],
+    "repository_root": str(root),
+    "artifact_dir": str(artifacts),
+    "socket_path": os.environ["PRODUCER_SOCKET_PATH"],
+    "socket_gid": int(os.environ["PRODUCER_SOCKET_GID"]),
+    "source_inventory": {
+        "path": str(pathlib.Path("audit") / "source-inventory.json"),
+        "sha256": source_digest,
+    },
+}
+destination.write_text(json.dumps(record, indent=2) + "\n")
+print(hashlib.sha256(destination.read_bytes()).hexdigest())
+PY
+)" || die "could not write verified coverage producer context"
+[[ "$PRODUCER_CONTEXT_SHA256" =~ ^[0-9a-f]{64}$ ]] || die "coverage producer context digest is invalid"
 
 # CAESIUM_RESOURCE_STATS_ENABLED defaults to false; the journey's task run is
 # the only thing that reaches the resource sampler and its projections, so the
@@ -937,6 +1005,13 @@ sys.exit(0 if (a.get("status"), a.get("reason")) == ("refused", "not_a_member") 
   fi
 fi
 
+# Run selected existing integration scenarios through their public CLI/HTTP
+# surfaces before the base CLI/server profiles are finalized. The helper only
+# merges complete same-image lane profiles; it never adds unit-test counters.
+if [[ "$cli_rc" -eq 0 ]]; then
+  run_coverage_journeys
+fi
+
 cli_complete=false
 cli_missing=true
 cli_killed=false
@@ -951,7 +1026,7 @@ else
   cli_missing=$(gocoverdir_complete "$RAW/cli" && echo false || echo true)
 fi
 write_provenance "$PROFILES/cli.provenance.json" <<EOF
-{"schema_version":1,"source":"cli","kind":"gocoverdir","module":"github.com/caesium-cloud/caesium","candidate_sha":"$CANDIDATE_SHA","image_id":"$IMAGE_ID","build_context":$BUILD_CONTEXT,"image_provenance":"$IMAGE_PROVENANCE","verified":$IMAGE_VERIFIED,"complete":$cli_complete,"missing":$cli_missing,"killed":$cli_killed,"exit_code":$cli_rc,"collection":"cli-exit","flush":"process-exit"}
+{"schema_version":1,"source":"cli","kind":"gocoverdir","module":"github.com/caesium-cloud/caesium","candidate_sha":"$CANDIDATE_SHA","image_id":"$IMAGE_ID","build_context":$BUILD_CONTEXT,"image_provenance":"$IMAGE_PROVENANCE","verified":$IMAGE_VERIFIED,"complete":$cli_complete,"missing":$cli_missing,"killed":$cli_killed,"exit_code":$cli_rc,"collection":"cli-exit+real-integration-journeys","journey_manifest":"$RAW/journeys/manifest.json","flush":"process-exit"}
 EOF
 
 # Explicit flush while the server is still running, then graceful SIGTERM.
@@ -995,14 +1070,14 @@ elif gocoverdir_complete "$RAW/server"; then
   fi
 fi
 write_provenance "$PROFILES/server.provenance.json" <<EOF
-{"schema_version":1,"source":"server","kind":"gocoverdir","module":"github.com/caesium-cloud/caesium","candidate_sha":"$CANDIDATE_SHA","image_id":"$IMAGE_ID","build_context":$BUILD_CONTEXT,"image_provenance":"$IMAGE_PROVENANCE","verified":$IMAGE_VERIFIED,"complete":$server_complete,"missing":$server_missing,"killed":$killed,"exit_code":$exit_code,"stop_rc":$stop_rc,"signal":"$signal","oom_killed":$oom,"collection":"graceful-shutdown","flush":"sigusr2"}
+{"schema_version":1,"source":"server","kind":"gocoverdir","module":"github.com/caesium-cloud/caesium","candidate_sha":"$CANDIDATE_SHA","image_id":"$IMAGE_ID","build_context":$BUILD_CONTEXT,"image_provenance":"$IMAGE_PROVENANCE","verified":$IMAGE_VERIFIED,"complete":$server_complete,"missing":$server_missing,"killed":$killed,"exit_code":$exit_code,"stop_rc":$stop_rc,"signal":"$signal","oom_killed":$oom,"collection":"graceful-shutdown+real-integration-journeys","journey_manifest":"$RAW/journeys/manifest.json","flush":"sigusr2"}
 EOF
 
 if [[ "$cli_complete" == "true" && "$server_complete" == "true" ]]; then
   if merge_gocoverdirs "$RAW/integration" "$RAW/cli" "$RAW/server"; then
     textfmt_dir "$RAW/integration" "$PROFILES/integration.out" || true
     write_provenance "$PROFILES/integration.provenance.json" <<EOF
-{"schema_version":1,"source":"integration","kind":"gocoverdir","module":"github.com/caesium-cloud/caesium","candidate_sha":"$CANDIDATE_SHA","image_id":"$IMAGE_ID","build_context":$BUILD_CONTEXT,"image_provenance":"$IMAGE_PROVENANCE","verified":$IMAGE_VERIFIED,"complete":true,"missing":false,"killed":false,"sources":["cli","server"],"collection":"covdata-merge"}
+{"schema_version":1,"source":"integration","kind":"gocoverdir","module":"github.com/caesium-cloud/caesium","candidate_sha":"$CANDIDATE_SHA","image_id":"$IMAGE_ID","build_context":$BUILD_CONTEXT,"image_provenance":"$IMAGE_PROVENANCE","verified":$IMAGE_VERIFIED,"complete":true,"missing":false,"killed":false,"sources":["cli","server"],"journey_manifest":"$RAW/journeys/manifest.json","collection":"covdata-merge"}
 EOF
   fi
 fi
