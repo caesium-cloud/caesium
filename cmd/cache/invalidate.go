@@ -17,6 +17,7 @@ var (
 
 var invalidateCmd = &cobra.Command{
 	Use:   "invalidate",
+	Args:  cobra.NoArgs,
 	Short: "Invalidate cache entries for a job or task",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if invalidateJobID == "" {

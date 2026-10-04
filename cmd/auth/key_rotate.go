@@ -20,6 +20,7 @@ var (
 
 var keyRotateCmd = &cobra.Command{
 	Use:     "rotate",
+	Args:    cobra.NoArgs,
 	Short:   "Rotate an API key with a grace period for the old key",
 	Example: `  caesium auth key rotate --id <key-id> --grace-period 24h`,
 	RunE: func(cmd *cobra.Command, args []string) error {

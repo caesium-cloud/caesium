@@ -18,6 +18,7 @@ var (
 
 var keyRevokeCmd = &cobra.Command{
 	Use:     "revoke",
+	Args:    cobra.NoArgs,
 	Short:   "Revoke an API key",
 	Example: `  caesium auth key revoke --id <key-id>`,
 	RunE: func(cmd *cobra.Command, args []string) error {

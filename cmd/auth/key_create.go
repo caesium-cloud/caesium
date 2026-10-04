@@ -22,6 +22,7 @@ var (
 
 var keyCreateCmd = &cobra.Command{
 	Use:   "create",
+	Args:  cobra.NoArgs,
 	Short: "Create a new API key",
 	Example: `  caesium auth key create --role operator --description "CI deploy key" --expires 90d
   caesium auth key create --role runner --description "ETL runner" --scope-jobs etl-daily,etl-hourly`,

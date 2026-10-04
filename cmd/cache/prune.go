@@ -14,6 +14,7 @@ var pruneServer string
 
 var pruneCmd = &cobra.Command{
 	Use:   "prune",
+	Args:  cobra.NoArgs,
 	Short: "Prune expired cache entries",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		server := strings.TrimSuffix(pruneServer, "/")

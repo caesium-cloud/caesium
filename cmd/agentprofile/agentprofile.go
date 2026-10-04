@@ -41,6 +41,7 @@ var Cmd = &cobra.Command{
 
 var listCmd = &cobra.Command{
 	Use:   "list",
+	Args:  cobra.NoArgs,
 	Short: "List agent profiles",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		params := url.Values{}
@@ -94,6 +95,7 @@ var getCmd = &cobra.Command{
 
 var applyCmd = &cobra.Command{
 	Use:   "apply --path <file|-|stdin>",
+	Args:  cobra.NoArgs,
 	Short: "Create or update an agent profile",
 	Long: "Create an AgentProfile from a YAML or JSON document. " +
 		"Use --id to update an existing profile by ID; updates are sent with PATCH.",

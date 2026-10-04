@@ -17,6 +17,7 @@ var (
 
 var checkCmd = &cobra.Command{
 	Use:   "check --path jobs/",
+	Args:  cobra.NoArgs,
 	Short: "Check local job definitions against persisted contract state",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		defs, err := job.LoadDefinitions(checkPaths)

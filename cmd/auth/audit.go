@@ -22,6 +22,7 @@ var (
 
 var auditCmd = &cobra.Command{
 	Use:     "audit",
+	Args:    cobra.NoArgs,
 	Short:   "Query the audit log",
 	Example: `  caesium auth audit --since 24h --actor csk_live_a1b2`,
 	RunE: func(cmd *cobra.Command, args []string) error {

@@ -21,6 +21,7 @@ var (
 
 var getCmd = &cobra.Command{
 	Use:   "get",
+	Args:  cobra.NoArgs,
 	Short: "Fetch the reproducibility receipt for a run",
 	Long: "Fetch the content-addressed reproducibility receipt for a run from " +
 		"the server and print it (or write it to a file with --output). Commit " +

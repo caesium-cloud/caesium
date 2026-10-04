@@ -18,6 +18,7 @@ var (
 
 var cancelCmd = &cobra.Command{
 	Use:   "cancel",
+	Args:  cobra.NoArgs,
 	Short: "Cancel a running backfill",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if cancelJobID == "" {

@@ -17,6 +17,7 @@ var (
 
 var keyListCmd = &cobra.Command{
 	Use:   "list",
+	Args:  cobra.NoArgs,
 	Short: "List all API keys",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		server := strings.TrimSuffix(listServer, "/")

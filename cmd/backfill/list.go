@@ -17,6 +17,7 @@ var (
 
 var listCmd = &cobra.Command{
 	Use:   "list",
+	Args:  cobra.NoArgs,
 	Short: "List backfills for a job",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if listJobID == "" {

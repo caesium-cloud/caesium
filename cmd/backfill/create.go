@@ -24,6 +24,7 @@ var (
 
 var createCmd = &cobra.Command{
 	Use:   "create",
+	Args:  cobra.NoArgs,
 	Short: "Start a backfill for a job",
 	Long: `Start a backfill that queues runs for each cron fire time in [start, end).
 
