@@ -2251,14 +2251,14 @@ func TestTerminalTaskRunsSinceIncludesEveryTerminalStatusOnly(t *testing.T) {
 		require.True(t, IsTerminal(status))
 		id := uuid.New()
 		wantIDs = append(wantIDs, id)
-		require.NoError(t, f.db.Create(&models.TaskRun{ID: id, JobRunID: f.runID, TaskID: f.producer.ID, AtomID: f.producer.AtomID, Status: string(status), TerminalSequence: int64(i + 2)}).Error)
+		require.NoError(t, f.db.Create(&models.TaskRun{ID: id, JobRunID: f.runID, TaskID: f.producer.ID, AtomID: f.producer.AtomID, PartitionIndex: i + 1, Status: string(status), TerminalSequence: int64(i + 2)}).Error)
 	}
 	for i, status := range []TaskStatus{TaskStatusPending, TaskStatusRunning, TaskStatusSucceeded, TaskStatusFailed} {
 		seq := int64(100 + i)
 		if IsTerminal(status) {
 			seq = 1
 		}
-		require.NoError(t, f.db.Create(&models.TaskRun{ID: uuid.New(), JobRunID: f.runID, TaskID: f.producer.ID, AtomID: f.producer.AtomID, Status: string(status), TerminalSequence: seq}).Error)
+		require.NoError(t, f.db.Create(&models.TaskRun{ID: uuid.New(), JobRunID: f.runID, TaskID: f.producer.ID, AtomID: f.producer.AtomID, PartitionIndex: i + 6, Status: string(status), TerminalSequence: seq}).Error)
 	}
 	rows, err := f.store.TerminalTaskRunsSince(f.runID, 1)
 	require.NoError(t, err)
