@@ -455,15 +455,20 @@ func (sr *soakRunner) hostSample(t *testing.T, label string) {
 }
 
 func (sr *soakRunner) hostContainers(t *testing.T, label string) string {
+	evidence, _ := sr.hostContainersEvidence(t, label)
+	return evidence
+}
+
+func (sr *soakRunner) hostContainersEvidence(t *testing.T, label string) (string, bool) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 	ack, err := sr.hostRequest(ctx, nil, cluster.HostRequest{Action: soakActionContainers, Params: map[string]string{"label": label, "token": sr.token}})
 	if err != nil {
 		t.Errorf("container inventory %s: %v", label, err)
-		return ""
+		return "", false
 	}
 	t.Logf("container inventory %s: %s", label, truncate([]byte(ack.Evidence), 600))
-	return ack.Evidence
+	return ack.Evidence, true
 }
 
 // ---------------------------------------------------------------------------
@@ -2234,6 +2239,103 @@ func (sr *soakRunner) episodeReplacement(t *testing.T, ep SoakEpisode, rec *epis
 // drain: whole-schedule safety, then the host's post-drain samples.
 // ---------------------------------------------------------------------------
 
+type taskPodInventoryEntry struct {
+	Pod   string `json:"pod"`
+	Phase string `json:"phase"`
+	Owned bool   `json:"owned"`
+}
+
+type containerInventoryEvidence struct {
+	Counts   map[string]int          `json:"counts"`
+	Error    string                  `json:"error"`
+	TaskPods []taskPodInventoryEntry `json:"task_pods"`
+}
+
+type finalDrainObservation struct {
+	podInventoryObserved       bool
+	podInventoryReadable       bool
+	taskPods                   []corev1.Pod
+	containerInventoryObserved bool
+	containerInventoryReadable bool
+	containerInventory         containerInventoryEvidence
+}
+
+func parseContainerInventoryEvidence(raw string) (containerInventoryEvidence, error) {
+	var evidence containerInventoryEvidence
+	if err := json.Unmarshal([]byte(raw), &evidence); err != nil {
+		return evidence, fmt.Errorf("malformed container inventory: %w", err)
+	}
+	if evidence.Error != "" {
+		return evidence, fmt.Errorf("container inventory reports an error: %s", evidence.Error)
+	}
+	if evidence.Counts == nil || evidence.TaskPods == nil {
+		return evidence, fmt.Errorf("container inventory is missing counts or task_pods")
+	}
+	for _, key := range []string{"owned_task_containers", "task_running", "task_pods"} {
+		count, ok := evidence.Counts[key]
+		if !ok || count < 0 {
+			return evidence, fmt.Errorf("container inventory has invalid %s count", key)
+		}
+	}
+	return evidence, nil
+}
+
+func containerInventorySettled(evidence containerInventoryEvidence) bool {
+	if evidence.Counts["owned_task_containers"] != 0 || evidence.Counts["task_running"] != 0 {
+		return false
+	}
+	for _, pod := range evidence.TaskPods {
+		if pod.Owned {
+			return false
+		}
+	}
+	return true
+}
+
+func finalDrainEvidence(observation finalDrainObservation, token string) (failures, inconclusive []string) {
+	if !observation.podInventoryObserved || !observation.podInventoryReadable {
+		inconclusive = append(inconclusive, "final Kubernetes task-pod inventory is missing or unreadable")
+	}
+	var ownedPods []string
+	ownedPodNames := make(map[string]struct{})
+	for _, pod := range observation.taskPods {
+		if taskPodOwned(pod, token) {
+			ownedPods = append(ownedPods, pod.Name)
+			ownedPodNames[pod.Name] = struct{}{}
+		}
+	}
+	if len(ownedPods) > 0 {
+		failures = append(failures, fmt.Sprintf("%d owned task pods remain after drain: %v", len(ownedPods), ownedPods))
+	}
+
+	if !observation.containerInventoryObserved || !observation.containerInventoryReadable {
+		inconclusive = append(inconclusive, "final host container inventory is missing, malformed, or reports an error")
+	}
+	if !observation.containerInventoryObserved {
+		return failures, inconclusive
+	}
+	counts := observation.containerInventory.Counts
+	if counts["owned_task_containers"] > 0 {
+		failures = append(failures, fmt.Sprintf("%d owned task containers remain after drain", counts["owned_task_containers"]))
+	}
+	if counts["task_running"] > 0 {
+		failures = append(failures, fmt.Sprintf("%d task containers are still running after drain", counts["task_running"]))
+	}
+	var hostOwnedPods []string
+	for _, pod := range observation.containerInventory.TaskPods {
+		if pod.Owned {
+			if _, alreadyReported := ownedPodNames[pod.Pod]; pod.Pod != "" && alreadyReported {
+				continue
+			}
+			hostOwnedPods = append(hostOwnedPods, pod.Pod)
+		}
+	}
+	if len(hostOwnedPods) > 0 {
+		failures = append(failures, fmt.Sprintf("%d owned task pods remain in host inventory: %v", len(hostOwnedPods), hostOwnedPods))
+	}
+	return failures, inconclusive
+}
+
 func (sr *soakRunner) drain(t *testing.T) {
 	ctx := context.Background()
 	rec := &episodeRecord{Key: "drain", Family: "drain", SoakID: sr.soakID, Seed: sr.seed, StartedAt: time.Now().UTC(), Observations: map[string]any{}}
@@ -2338,41 +2440,86 @@ func (sr *soakRunner) drain(t *testing.T) {
 	// final host inventory is judged; whatever remains after it is a leak.
 	graceEnd := time.Now().Add(sr.w.Drain.ContainerGrace.Duration)
 	var podsLeft []string
+	var lastTaskPods []corev1.Pod
+	podInventoryObserved, podInventoryReadable := false, false
 	gctx, gcancel := context.WithDeadline(ctx, graceEnd)
 	_ = cluster.Poll(gctx, 3*time.Second, func() (bool, error) {
 		pods, err := cluster.ListTaskPods(gctx, sr.fe.kube, sr.fe.env.Namespace)
 		if err != nil {
+			podInventoryReadable = false
 			return false, nil
 		}
+		podInventoryObserved = true
+		podInventoryReadable = true
+		lastTaskPods = slices.Clone(pods)
 		podsLeft = podsLeft[:0]
+		ownedPods := 0
 		for _, p := range pods {
 			podsLeft = append(podsLeft, fmt.Sprintf("%s phase=%s node=%s owned=%t", p.Name, p.Status.Phase, p.Spec.NodeName, taskPodOwned(p, sr.token)))
+			if taskPodOwned(p, sr.token) {
+				ownedPods++
+			}
 		}
-		return len(pods) == 0, nil
+		return ownedPods == 0, nil
 	})
 	gcancel()
 	rec.Observations["task_pods_after_grace"] = podsLeft
 	rec.Observations["schedule_seconds"] = scheduleSeconds
 	rec.Observations["final_statuses"] = statuses
 	rec.Observations["refused_starts"] = refused
-	rec.Observations["failures"] = failures
 	rec.Observations["admitted_runs"] = len(ledger)
 	inventories := 0
+	var lastContainerInventory containerInventoryEvidence
+	containerInventoryObserved, containerInventoryReadable := false, false
+	var inventoryReadError string
 	for {
 		inventories++
-		evidence := sr.hostContainers(t, "post-drain")
-		var inv struct {
-			Counts map[string]int `json:"counts"`
-			Error  string         `json:"error"`
+		raw, transportReadable := sr.hostContainersEvidence(t, "post-drain")
+		var settled bool
+		if transportReadable {
+			inv, err := parseContainerInventoryEvidence(raw)
+			if err != nil {
+				containerInventoryReadable = false
+				inventoryReadError = err.Error()
+			} else {
+				lastContainerInventory = inv
+				containerInventoryObserved = true
+				containerInventoryReadable = true
+				inventoryReadError = ""
+				settled = containerInventorySettled(inv)
+			}
+		} else {
+			containerInventoryReadable = false
+			inventoryReadError = "host inventory request failed"
 		}
-		settled := json.Unmarshal([]byte(evidence), &inv) == nil && inv.Error == "" && inv.Counts != nil &&
-			inv.Counts["owned_task_containers"] == 0 && inv.Counts["task_running"] == 0 && inv.Counts["task_pods"] == 0
 		if settled || time.Now().Add(15*time.Second).After(graceEnd) {
 			break
 		}
 		time.Sleep(15 * time.Second)
 	}
 	rec.Observations["container_inventories"] = inventories
+	rec.Observations["task_pod_inventory_observed"] = podInventoryObserved
+	rec.Observations["task_pod_inventory_readable"] = podInventoryReadable
+	rec.Observations["container_inventory_observed"] = containerInventoryObserved
+	rec.Observations["container_inventory_readable"] = containerInventoryReadable
+	rec.Observations["container_inventory_read_error"] = inventoryReadError
+	if containerInventoryObserved {
+		rec.Observations["container_inventory_after_grace"] = map[string]any{
+			"counts":    lastContainerInventory.Counts,
+			"task_pods": lastContainerInventory.TaskPods,
+		}
+	}
+	drainFailures, drainInconclusive := finalDrainEvidence(finalDrainObservation{
+		podInventoryObserved:       podInventoryObserved,
+		podInventoryReadable:       podInventoryReadable,
+		taskPods:                   lastTaskPods,
+		containerInventoryObserved: containerInventoryObserved,
+		containerInventoryReadable: containerInventoryReadable,
+		containerInventory:         lastContainerInventory,
+	}, sr.token)
+	failures = append(failures, drainFailures...)
+	rec.Observations["failures"] = failures
+	rec.Observations["drain_inconclusive"] = drainInconclusive
 
 	time.Sleep(sr.w.Drain.Settle.Duration)
 	for i := 1; i <= sr.w.Drain.Samples; i++ {
@@ -2383,6 +2530,13 @@ func (sr *soakRunner) drain(t *testing.T) {
 	}
 	if len(failures) > 0 {
 		sr.failf(t, rec, "%d safety/progress failures across the schedule: %v", len(failures), failures)
+	}
+	if len(drainInconclusive) > 0 {
+		rec.Status = soakStatusBlocked
+		rec.Detail = strings.Join(drainInconclusive, "; ")
+		if !t.Failed() {
+			t.Errorf("inconclusive drain evidence: %s", rec.Detail)
+		}
 	}
 }
 

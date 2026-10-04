@@ -11,6 +11,8 @@ import (
 	"testing"
 
 	"github.com/caesium-cloud/caesium/test/robustness/cluster"
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 type startResponseRoundTripper struct {
@@ -111,5 +113,77 @@ func TestSoakStartUncertainOutcomeReplaysSameKeyAndStaysInconclusive(t *testing.
 				t.Fatalf("replay request bodies differ: %q", rt.bodies)
 			}
 		})
+	}
+}
+
+func TestFinalDrainEvidenceFiltersPodsAndFindsOwnedLeaks(t *testing.T) {
+	const token = "soak-owner"
+	ownedPod := corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "owned-pod"},
+		Spec:       corev1.PodSpec{Containers: []corev1.Container{{Env: []corev1.EnvVar{{Name: "CAESIUM_SOAK_OWNER", Value: token}}}}},
+	}
+	unownedPod := corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "unowned-pod"},
+		Spec:       corev1.PodSpec{Containers: []corev1.Container{{Env: []corev1.EnvVar{{Name: "CAESIUM_SOAK_OWNER", Value: "another-soak"}}}}},
+	}
+	baseInventory := containerInventoryEvidence{
+		Counts:   map[string]int{"owned_task_containers": 0, "task_running": 0, "task_pods": 1},
+		TaskPods: []taskPodInventoryEntry{{Pod: "unowned-pod", Owned: false}},
+	}
+	base := finalDrainObservation{
+		podInventoryObserved: true, podInventoryReadable: true,
+		containerInventoryObserved: true, containerInventoryReadable: true,
+		containerInventory: baseInventory,
+	}
+
+	if failures, inconclusive := finalDrainEvidence(base, token); len(failures) != 0 || len(inconclusive) != 0 {
+		t.Fatalf("unowned task pod blocked drain: failures=%v inconclusive=%v", failures, inconclusive)
+	}
+	base.taskPods = []corev1.Pod{unownedPod}
+	if failures, inconclusive := finalDrainEvidence(base, token); len(failures) != 0 || len(inconclusive) != 0 {
+		t.Fatalf("unowned Kubernetes pod blocked drain: failures=%v inconclusive=%v", failures, inconclusive)
+	}
+
+	base.taskPods = []corev1.Pod{ownedPod}
+	base.containerInventory.Counts["owned_task_containers"] = 2
+	base.containerInventory.Counts["task_running"] = 1
+	base.containerInventory.TaskPods = append(base.containerInventory.TaskPods, taskPodInventoryEntry{Pod: "owned-pod", Owned: true})
+	failures, inconclusive := finalDrainEvidence(base, token)
+	if len(failures) != 3 || len(inconclusive) != 0 {
+		t.Fatalf("owned leaks = failures %v, inconclusive %v; want pod, container and running failures", failures, inconclusive)
+	}
+}
+
+func TestFinalDrainEvidenceBlocksMissingMalformedAndEmbeddedErrorInventory(t *testing.T) {
+	valid := `{"counts":{"owned_task_containers":0,"task_running":0,"task_pods":0},"task_pods":[]}`
+	parsed, err := parseContainerInventoryEvidence(valid)
+	if err != nil || !containerInventorySettled(parsed) {
+		t.Fatalf("valid empty inventory = %+v, %v", parsed, err)
+	}
+	for _, raw := range []string{
+		"not JSON",
+		`{"counts":{},"task_pods":[]}`,
+		`{"counts":{"owned_task_containers":0,"task_running":0,"task_pods":0},"task_pods":[],"error":"node list failed"}`,
+	} {
+		if _, err := parseContainerInventoryEvidence(raw); err == nil {
+			t.Errorf("inventory %s was accepted", raw)
+		}
+	}
+
+	observation := finalDrainObservation{}
+	_, gaps := finalDrainEvidence(observation, "token")
+	if len(gaps) != 2 {
+		t.Fatalf("missing inventories gaps = %v, want both pod and host inventory gaps", gaps)
+	}
+	lastGood, err := parseContainerInventoryEvidence(`{"counts":{"owned_task_containers":1,"task_running":0,"task_pods":0},"task_pods":[]}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	observation.containerInventoryObserved = true
+	observation.containerInventoryReadable = false // A later malformed read must not erase the last successful leak evidence.
+	observation.containerInventory = lastGood
+	failures, gaps := finalDrainEvidence(observation, "token")
+	if len(failures) != 1 || len(gaps) != 2 {
+		t.Fatalf("last successful observation = failures %v, gaps %v; want retained leak plus missing pod/current host evidence", failures, gaps)
 	}
 }
