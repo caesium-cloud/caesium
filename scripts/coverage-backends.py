@@ -125,6 +125,52 @@ def contribution(context, reports, selected):
     return result
 
 
+def validate_oci_closure(archive, members, task_config_id, architecture):
+    names = {member.name: member for member in members}
+    if not ({'index.json', 'oci-layout'} & names.keys()):
+        return  # Legacy Docker-save manifest format, not an OCI layout.
+    require({'index.json', 'oci-layout'} <= names.keys(), 'incomplete OCI layout metadata')
+    def metadata(name):
+        member = names.get(name)
+        require(member is not None and member.isfile() and member.size <= 2 * 1024 * 1024, 'missing/oversized OCI metadata')
+        stream = archive.extractfile(member)
+        require(stream is not None, 'OCI metadata unavailable')
+        return json.loads(stream.read())
+    require(metadata('oci-layout').get('imageLayoutVersion') == '1.0.0', 'unsupported OCI layout')
+    root = metadata('index.json')
+    require(root.get('schemaVersion') == 2 and isinstance(root.get('manifests'), list) and root['manifests'], 'invalid OCI root index')
+    index_types = {'application/vnd.oci.image.index.v1+json', 'application/vnd.docker.distribution.manifest.list.v2+json'}
+    manifest_types = {'application/vnd.oci.image.manifest.v1+json', 'application/vnd.docker.distribution.manifest.v2+json'}
+    pending = [(descriptor, 0) for descriptor in root['manifests']]
+    seen, matched_task = {}, False
+    while pending:
+        descriptor, depth = pending.pop()
+        require(isinstance(descriptor, dict) and depth <= 32 and len(seen) < 10000, 'invalid/excessive OCI descriptor tree')
+        identity, size, media = descriptor.get('digest', ''), descriptor.get('size'), descriptor.get('mediaType', '')
+        require(IMAGE_RE.fullmatch(identity) and type(size) is int and size >= 0 and isinstance(media, str) and media, 'invalid OCI descriptor identity')
+        if identity in seen:
+            require(seen[identity] == (size, media), 'conflicting OCI descriptor identity')
+            continue
+        name = 'blobs/sha256/' + identity.removeprefix('sha256:')
+        member = names.get(name)
+        require(member is not None and member.isfile() and member.size == size, 'OCI descriptor closure incomplete')
+        stream = archive.extractfile(member)
+        require(stream is not None and 'sha256:' + hashlib.file_digest(stream, 'sha256').hexdigest() == identity, 'OCI descriptor content mismatch')
+        seen[identity] = (size, media)
+        if media in index_types:
+            index = metadata(name)
+            require(index.get('schemaVersion') == 2 and isinstance(index.get('manifests'), list), 'invalid OCI child index')
+            pending.extend((child, depth + 1) for child in index['manifests'])
+        elif media in manifest_types:
+            manifest = metadata(name)
+            require(manifest.get('schemaVersion') == 2 and isinstance(manifest.get('config'), dict) and isinstance(manifest.get('layers'), list), 'invalid OCI image manifest')
+            pending.extend((child, depth + 1) for child in [manifest['config'], *manifest['layers']])
+            platform = descriptor.get('platform', {})
+            if manifest['config'].get('digest') == task_config_id and (not platform or platform.get('os') == 'linux' and platform.get('architecture') == architecture):
+                matched_task = True
+    require(matched_task, 'OCI index does not bind the selected task config/platform')
+
+
 def archive_identity(path, expected_hash, image_id, image_ref, architecture):
     path = regular(path)
     require(digest(path) == expected_hash and HASH_RE.fullmatch(expected_hash or ''), 'task archive digest mismatch')
@@ -145,6 +191,7 @@ def archive_identity(path, expected_hash, image_id, image_ref, architecture):
         require('sha256:' + hashlib.sha256(config_bytes).hexdigest() == image_id, 'task archive config/image mismatch')
         config = json.loads(config_bytes)
         require(config.get('os') == 'linux' and config.get('architecture') == architecture, 'task archive must match requested Linux architecture')
+        validate_oci_closure(archive, members, image_id, architecture)
     return path
 
 

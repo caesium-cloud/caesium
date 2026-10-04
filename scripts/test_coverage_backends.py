@@ -101,6 +101,42 @@ class BackendGuards(unittest.TestCase):
         with self.assertRaises(b.Refused):
             b.validate_inputs(inputs, ['kubernetes'])
 
+    def test_oci_archive_requires_complete_digest_bound_descriptor_closure(self):
+        def archive(omit=None, corrupt=None, wrong_platform=False):
+            blobs = {}
+            def descriptor(value, media):
+                data = json.dumps(value).encode() if isinstance(value, dict) else value
+                identity = 'sha256:' + hashlib.sha256(data).hexdigest()
+                name = 'blobs/sha256/' + identity.removeprefix('sha256:')
+                blobs[name] = data
+                return {'mediaType': media, 'digest': identity, 'size': len(data)}
+            config = descriptor({'os': 'linux', 'architecture': 'arm64'}, 'application/vnd.oci.image.config.v1+json')
+            layer = descriptor(b'original task layer', 'application/vnd.oci.image.layer.v1.tar')
+            manifest = descriptor({'schemaVersion': 2, 'config': config, 'layers': [layer]}, 'application/vnd.oci.image.manifest.v1+json')
+            manifest['platform'] = {'os': 'linux', 'architecture': 'amd64' if wrong_platform else 'arm64'}
+            index = descriptor({'schemaVersion': 2, 'manifests': [manifest]}, 'application/vnd.oci.image.index.v1+json')
+            blobs['index.json'] = json.dumps({'schemaVersion': 2, 'manifests': [index]}).encode()
+            blobs['oci-layout'] = b'{"imageLayoutVersion":"1.0.0"}'
+            config_path = 'blobs/sha256/' + config['digest'].removeprefix('sha256:')
+            blobs['manifest.json'] = json.dumps([{'Config': config_path, 'RepoTags': ['alpine:3.23'], 'Layers': []}]).encode()
+            if omit == 'layer': blobs.pop('blobs/sha256/' + layer['digest'].removeprefix('sha256:'))
+            if omit == 'index': blobs.pop('blobs/sha256/' + index['digest'].removeprefix('sha256:'))
+            if corrupt == 'layer': blobs['blobs/sha256/' + layer['digest'].removeprefix('sha256:')] = b'corrupted task data'
+            if corrupt == 'same-size': blobs['blobs/sha256/' + layer['digest'].removeprefix('sha256:')] = b'x' * layer['size']
+            path = self.root / 'oci-task.tar'
+            with tarfile.open(path, 'w') as tar:
+                for name, data in blobs.items():
+                    entry = tarfile.TarInfo(name)
+                    entry.size = len(data)
+                    tar.addfile(entry, io.BytesIO(data))
+            return path, b.digest(path), config['digest']
+        path, archive_hash, config_id = archive()
+        b.archive_identity(path, archive_hash, config_id, 'alpine:3.23', 'arm64')
+        for args in ({'omit': 'layer'}, {'omit': 'index'}, {'corrupt': 'layer'}, {'corrupt': 'same-size'}, {'wrong_platform': True}):
+            path, archive_hash, config_id = archive(**args)
+            with self.assertRaises(b.Refused):
+                b.archive_identity(path, archive_hash, config_id, 'alpine:3.23', 'arm64')
+
     def test_missing_podman_prerequisite_refuses_before_allocation(self):
         inputs = self.archive()
         inputs.pop('podman_service_image_id')
