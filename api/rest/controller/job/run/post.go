@@ -10,6 +10,7 @@ import (
 
 	"github.com/caesium-cloud/caesium/api/rest/manualparams"
 	jsvc "github.com/caesium-cloud/caesium/api/rest/service/job"
+	runsvc "github.com/caesium-cloud/caesium/api/rest/service/run"
 	"github.com/caesium-cloud/caesium/internal/dbretry"
 	"github.com/caesium-cloud/caesium/internal/job"
 	"github.com/caesium-cloud/caesium/internal/models"
@@ -68,10 +69,10 @@ var (
 		return jsvc.Service(ctx).Get(id)
 	}
 	postStartRun = func(ctx context.Context, jobID uuid.UUID, opts ...runstorage.StartOption) (runstorage.StartResult, error) {
-		return postRunStore().StartWithResult(context.WithoutCancel(ctx), jobID, nil, opts...)
+		return runsvc.New(ctx).WithStore(postRunStore()).StartWithResult(jobID, nil, opts...)
 	}
 	postFindIdempotentStart = func(ctx context.Context, jobID uuid.UUID, opts ...runstorage.StartOption) (runstorage.StartResult, bool, error) {
-		return postRunStore().FindIdempotentStart(context.WithoutCancel(ctx), jobID, opts...)
+		return runsvc.New(ctx).WithStore(postRunStore()).FindIdempotentStart(jobID, opts...)
 	}
 	postGetRun = func(runID uuid.UUID) (*runstorage.JobRun, error) {
 		return postRunStore().Get(runID)
