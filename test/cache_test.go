@@ -494,8 +494,8 @@ steps:
 	// Start a run that takes a while.
 	runID := s.triggerRun(job.ID)
 
-	// Give it a moment to start.
-	time.Sleep(2 * time.Second)
+	// Wait until the real run reports its task as running before retrying.
+	s.awaitFirstTaskStatus(job.ID, runID, 30*time.Second, "running")
 
 	// Try to retry while it's still running.
 	resp, err := s.doJSONRequest(
