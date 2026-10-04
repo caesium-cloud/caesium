@@ -2,14 +2,16 @@ package faults
 
 import (
 	"context"
+	"errors"
 	"fmt"
-	"io"
 	"net"
 	"net/http"
 	"net/url"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/caesium-cloud/caesium/internal/bodylimit"
 )
 
 // Interposer is a CLIENT-side response fault, owned by the runner and sitting
@@ -216,12 +218,16 @@ func (i *Interposer) handle(w http.ResponseWriter, r *http.Request) {
 	target.Path = r.URL.Path
 	target.RawQuery = r.URL.RawQuery
 
-	body, err := io.ReadAll(io.LimitReader(r.Body, 8<<20))
+	body, err := bodylimit.Read(r.Body, 8<<20)
 	if err != nil {
 		op.UpstreamErr = "read request body: " + err.Error()
 		op.SettledAt = time.Now().UTC()
 		i.record(op)
-		http.Error(w, "interposer could not read the request body", http.StatusBadGateway)
+		status := http.StatusBadGateway
+		if errors.Is(err, bodylimit.ErrTooLarge) {
+			status = http.StatusRequestEntityTooLarge
+		}
+		http.Error(w, "interposer could not read the request body", status)
 		return
 	}
 
@@ -253,10 +259,18 @@ func (i *Interposer) handle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer func() { _ = resp.Body.Close() }()
-	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
+	respBody, readErr := bodylimit.Read(resp.Body, 8<<20)
 	op.UpstreamAt = time.Now().UTC()
 	op.UpstreamStatus = resp.StatusCode
 	op.UpstreamBody = string(respBody)
+	if readErr != nil {
+		op.UpstreamErr = "read upstream response: " + readErr.Error()
+		op.PossiblyCommitted = true
+		op.SettledAt = time.Now().UTC()
+		i.record(op)
+		http.Error(w, "interposer received incomplete upstream evidence", http.StatusBadGateway)
+		return
+	}
 
 	switch policy.Mode {
 	case ModeDropResponse:
