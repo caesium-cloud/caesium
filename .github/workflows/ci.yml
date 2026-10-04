@@ -1724,7 +1724,7 @@ jobs:
           docker pull --platform linux/amd64 "$podman_image"
           docker pull --platform linux/amd64 kindest/node:v1.36.1
           docker pull --platform linux/amd64 alpine:3.23
-          docker image save alpine:3.23 -o "$prereqs/task.tar"
+          docker image save --platform linux/amd64 alpine:3.23 -o "$prereqs/task.tar"
           python3 - "$prereqs" "$podman_image" <<'PY'
           import hashlib, json, pathlib, subprocess, sys, tarfile
           root = pathlib.Path(sys.argv[1]).resolve()
