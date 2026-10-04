@@ -1,6 +1,7 @@
 package atom
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -13,7 +14,7 @@ func TestGetMalformedUUIDReturnsBadRequestBeforeService(t *testing.T) {
 	e := echo.New()
 	e.GET("/v1/atoms/:id", Get)
 
-	req := httptest.NewRequest(http.MethodGet, "/v1/atoms/not-a-uuid", nil)
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/atoms/not-a-uuid", nil)
 	rec := httptest.NewRecorder()
 	e.ServeHTTP(rec, req)
 

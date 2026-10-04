@@ -681,7 +681,7 @@ func (tx *commitFailureTx) Commit() error {
 		tx.pool.beforeCommit()
 	}
 	if tx.pool.commits <= tx.pool.failCommits {
-		_ = tx.Tx.Rollback()
+		_ = tx.Rollback()
 		return errors.New("database is locked")
 	}
 	return tx.Tx.Commit()

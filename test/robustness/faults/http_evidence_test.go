@@ -3,6 +3,7 @@
 package faults
 
 import (
+	"context"
 	"errors"
 	"io"
 	"net/http"
@@ -47,7 +48,7 @@ func TestInterposerRejectsIncompleteRequestBeforeSubmission(t *testing.T) {
 			}
 			calls := 0
 			i.client = &http.Client{Transport: evidenceTransport(func(*http.Request) (*http.Response, error) { calls++; return nil, errors.New("must not submit") })}
-			req := httptest.NewRequest(http.MethodPost, "http://proxy/runs", nil)
+			req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "http://proxy/runs", nil)
 			req.Body = &evidenceBody{reader: strings.NewReader(tc.raw), fault: tc.fault}
 			rec := httptest.NewRecorder()
 			i.handle(rec, req)
@@ -79,7 +80,7 @@ func TestInterposerRetainsAcceptedButIncompleteResponseEvidence(t *testing.T) {
 				return &http.Response{StatusCode: http.StatusAccepted, Header: make(http.Header), Body: body}, nil
 			})}
 			rec := httptest.NewRecorder()
-			i.handle(rec, httptest.NewRequest(http.MethodPost, "http://proxy/runs", strings.NewReader(`{}`)))
+			i.handle(rec, httptest.NewRequestWithContext(context.Background(), http.MethodPost, "http://proxy/runs", strings.NewReader(`{}`)))
 			ops := i.Operations()
 			if len(ops) != 1 {
 				t.Fatalf("ops=%+v", ops)

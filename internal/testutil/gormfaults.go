@@ -29,7 +29,7 @@ func FailJobRunReads(tb testing.TB, db *gorm.DB, n int) {
 			return
 		}
 		remaining--
-		tx.AddError(errors.New("database is locked"))
+		_ = tx.AddError(errors.New("database is locked"))
 	}); err != nil {
 		tb.Fatalf("register query callback: %v", err)
 	}

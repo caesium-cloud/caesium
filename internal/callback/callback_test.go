@@ -253,6 +253,7 @@ func TestRetryPolicyPreservesBudgetAndCancellation(t *testing.T) {
 
 func TestCallbackRetryNormalizesNilContext(t *testing.T) {
 	calls := 0
+	//nolint:staticcheck // Characterize the documented nil-context normalization.
 	require.NoError(t, withAttemptContentionRetry(nil, func() error { calls++; return nil }))
 	require.Equal(t, 1, calls)
 }

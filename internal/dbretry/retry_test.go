@@ -90,6 +90,7 @@ func TestRetryCancellationOrdering(t *testing.T) {
 func TestRetryWaitErrorStopsAndNilWaitIsImmediate(t *testing.T) {
 	waitErr := errors.New("wait failed")
 	calls := 0
+	//nolint:staticcheck // Characterize the documented nil-context normalization.
 	err := Retry(nil, Policy{Backoffs: []time.Duration{1}, Retryable: func(error) bool { return true }, Wait: func(ctx context.Context, _ time.Duration) error {
 		if ctx == nil {
 			t.Fatal("nil context")
@@ -100,6 +101,7 @@ func TestRetryWaitErrorStopsAndNilWaitIsImmediate(t *testing.T) {
 		t.Fatalf("err=%v calls=%d", err, calls)
 	}
 	calls = 0
+	//nolint:staticcheck // Characterize the documented nil-context normalization.
 	err = Retry(nil, Policy{Backoffs: []time.Duration{1}, BeforeAttempt: true, Retryable: func(error) bool { return true }}, func() error {
 		calls++
 		if calls == 1 {

@@ -25,7 +25,7 @@ type PredecessorInputs struct {
 func (s *Store) PredecessorExecutionInputs(ctx context.Context, runID, taskID uuid.UUID) (PredecessorInputs, error) {
 	var result PredecessorInputs
 	var options []*sql.TxOptions
-	if s.db.Dialector.Name() == "postgres" {
+	if s.db.Name() == "postgres" {
 		// READ COMMITTED would let the graph/name and output queries observe
 		// different commits. SQLite/dqlite already keep one read view per txn.
 		options = []*sql.TxOptions{{Isolation: sql.LevelRepeatableRead, ReadOnly: true}}

@@ -2360,6 +2360,7 @@ func TestStoreBusyRetryPolicyPreservesBudgetClassificationAndJitter(t *testing.T
 				waits = append(waits, delay)
 				return nil
 			})
+			//nolint:staticcheck // Characterize the documented nil-context normalization.
 			err := dbretry.Retry(nil, policy, func() error { err := tc.results[attempts]; attempts++; return err })
 			require.ErrorIs(t, err, tc.want)
 			require.Equal(t, tc.attempts, attempts)
