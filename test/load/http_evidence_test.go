@@ -36,7 +36,7 @@ func (*incompleteEvidenceBody) Close() error { return nil }
 func evidenceClient(body string, status int, failure error, calls *int) *client {
 	return &client{base: "http://evidence.invalid", http: &http.Client{Transport: evidenceTransport(func(r *http.Request) (*http.Response, error) {
 		*calls++
-		var reader io.ReadCloser = io.NopCloser(strings.NewReader(body))
+		reader := io.NopCloser(strings.NewReader(body))
 		if failure != nil {
 			reader = &incompleteEvidenceBody{data: []byte(body), err: failure}
 		}

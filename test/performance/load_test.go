@@ -57,7 +57,6 @@ const catalogFile = "workloads.json"
 
 type catalog = workloadcatalog.Catalog
 type catalogEntry = workloadcatalog.Entry
-type requires = workloadcatalog.Requires
 
 func loadCatalog(t *testing.T) catalog {
 	t.Helper()

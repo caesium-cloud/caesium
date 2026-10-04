@@ -56,7 +56,7 @@ func TestSoakStartIncompleteBodyReconcilesOnlyWithSameKey(t *testing.T) {
 			sr.client = &http.Client{Transport: qualificationTransport(func(req *http.Request) (*http.Response, error) {
 				calls++
 				keys = append(keys, req.Header.Get("Idempotency-Key"))
-				var b io.ReadCloser = io.NopCloser(strings.NewReader(body))
+				b := io.NopCloser(strings.NewReader(body))
 				if calls == 1 {
 					b = io.NopCloser(strings.NewReader(tc.raw))
 					if tc.failure != nil {

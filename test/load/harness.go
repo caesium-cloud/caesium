@@ -4361,7 +4361,6 @@ func (r *report) markdown() string {
 // validated hermetically, without a server.
 type catalog = workloadcatalog.Catalog
 type catalogEntry = workloadcatalog.Entry
-type catalogRequires = workloadcatalog.Requires
 
 const catalogSchemaVersion = 1
 
