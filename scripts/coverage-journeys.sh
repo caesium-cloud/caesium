@@ -9,6 +9,7 @@
 # shutdown are merged into the collector's CLI/server profiles.
 
 COVERAGE_JOURNEY_ACTIVE_IDS=()
+COVERAGE_JOURNEY_PENDING_NAMES=()
 COVERAGE_JOURNEY_TEMP_DIRS=()
 COVERAGE_JOURNEY_SECRET_FILES=()
 COVERAGE_JOURNEY_CLI_DIRS=()
@@ -19,6 +20,7 @@ COVERAGE_BACKEND_PRODUCER_INPUTS_SHA256=""
 COVERAGE_BACKEND_MANIFEST_SHA256=""
 
 stage_coverage_backend_inputs() {
+  [[ "$CONTAINER_CLI" == docker ]] || { coverage_journey_fail "real cohort requires the pinned Docker daemon"; return 1; }
   local source="${CAESIUM_COVERAGE_BACKEND_INPUTS:-}"
   local staged="$ARTIFACTS/backend-producer-inputs.json"
   if [[ -z "$source" || "$source" != /* || ! -f "$source" || -L "$source" ]]; then
@@ -63,6 +65,15 @@ PY
     return 1
   }
   COVERAGE_BACKEND_PRODUCER_INPUTS="$staged"
+  local staged_socket
+  staged_socket="$(python3 "$ROOT/scripts/coverage-journeys.py" validate-inputs --inputs "$staged" --sha256 "$COVERAGE_BACKEND_PRODUCER_INPUTS_SHA256")" || return 1
+  if [[ -n "${CAESIUM_SOCK:-}" && "$CAESIUM_SOCK" != "$staged_socket" ]]; then
+    coverage_journey_fail "explicit socket differs from staged backend prerequisite"
+    return 1
+  fi
+  SOCK="$staged_socket"
+  export DOCKER_HOST="unix://$SOCK"
+  unset DOCKER_CONTEXT DOCKER_TLS_VERIFY DOCKER_CERT_PATH DOCKER_API_VERSION
 }
 
 coverage_journey_run_backends() {
@@ -158,32 +169,58 @@ coverage_journey_untrack_id() {
   COVERAGE_JOURNEY_ACTIVE_IDS=("${kept[@]}")
 }
 
+coverage_journey_resource() {
+  local action="$1" kind="$2" name="$3"
+  local image=""
+  [[ "$kind" != container || "$action" == absent ]] || image="$IMAGE_ID"
+  python3 "$ROOT/scripts/coverage-journeys.py" resource \
+    --action "$action" --kind "$kind" --name "$name" \
+    --owner "$CANDIDATE_SHA" --run-id "$ID" --image "$image"
+}
+
+coverage_journey_require_absent() {
+  coverage_journey_resource absent "$1" "$2" >/dev/null
+}
+
 coverage_journey_remove_owned() {
   local id="$1"
-  local owner run_id
-  owner="$("$CONTAINER_CLI" inspect -f '{{index .Config.Labels "caesium.coverage.owner"}}' "$id" 2>/dev/null || true)"
-  run_id="$("$CONTAINER_CLI" inspect -f '{{index .Config.Labels "caesium.coverage.run"}}' "$id" 2>/dev/null || true)"
-  if [[ "$owner" == "$CANDIDATE_SHA" && "$run_id" == "$ID" ]]; then
-    "$CONTAINER_CLI" rm -f "$id" >/dev/null 2>&1 || true
-  elif [[ -n "$owner" || -n "$run_id" ]]; then
-    log "refusing to remove container $id with unexpected coverage ownership labels"
-  fi
+  coverage_journey_resource remove container "$id" >/dev/null || return 1
   coverage_journey_untrack_id "$id"
 }
 
 cleanup_coverage_journeys() {
-  local id path
+  local id path rc=0
+  if ((${#COVERAGE_JOURNEY_PENDING_NAMES[@]})); then
+    for id in "${COVERAGE_JOURNEY_PENDING_NAMES[@]}"; do
+      coverage_journey_resource remove container "$id" >/dev/null || rc=1
+    done
+  fi
   if ((${#COVERAGE_JOURNEY_ACTIVE_IDS[@]})); then
-    for id in "${COVERAGE_JOURNEY_ACTIVE_IDS[@]}"; do coverage_journey_remove_owned "$id"; done
+    for id in "${COVERAGE_JOURNEY_ACTIVE_IDS[@]}"; do
+      coverage_journey_remove_owned "$id" || rc=1
+    done
   fi
   if ((${#COVERAGE_JOURNEY_SECRET_FILES[@]})); then
-    for path in "${COVERAGE_JOURNEY_SECRET_FILES[@]}"; do rm -f "$path"; done
+    for path in "${COVERAGE_JOURNEY_SECRET_FILES[@]}"; do rm -f "$path" || rc=1; done
+  fi
+  if ((${#COVERAGE_JOURNEY_TEMP_DIRS[@]})); then
+    for path in "${COVERAGE_JOURNEY_TEMP_DIRS[@]}"; do rm -rf "$path" || rc=1; done
+  fi
+  if [[ "$rc" -ne 0 ]]; then
+    : >"$ARTIFACTS/retained-owned-container-ids.txt"
+    if ((${#COVERAGE_JOURNEY_ACTIVE_IDS[@]})); then
+      printf '%s\n' "${COVERAGE_JOURNEY_ACTIVE_IDS[@]}" >"$ARTIFACTS/retained-owned-container-ids.txt"
+    fi
+    : >"$ARTIFACTS/retained-owned-container-names.txt"
+    if ((${#COVERAGE_JOURNEY_PENDING_NAMES[@]})); then
+      printf '%s\n' "${COVERAGE_JOURNEY_PENDING_NAMES[@]}" >"$ARTIFACTS/retained-owned-container-names.txt"
+    fi
+    coverage_journey_fail "owned cleanup incomplete; operator reconciliation required"
+    return 1
   fi
   COVERAGE_JOURNEY_SECRET_FILES=()
-  if ((${#COVERAGE_JOURNEY_TEMP_DIRS[@]})); then
-    for path in "${COVERAGE_JOURNEY_TEMP_DIRS[@]}"; do rm -rf "$path"; done
-  fi
   COVERAGE_JOURNEY_TEMP_DIRS=()
+  COVERAGE_JOURNEY_PENDING_NAMES=()
 }
 
 coverage_journey_log_redacted() {
@@ -205,7 +242,7 @@ PY
 coverage_journey_write_record() {
   local lane="$1" pattern="$2" min_pass="$3" test_rc="$4" passes="$5"
   local server_id="$6" stop_rc="$7" exit_code="$8" oom="$9"
-  local complete="${10}" missing="${11}" killed="${12}"
+  local complete="${10}" missing="${11}" killed="${12}" flush_rc="${13}"
   local lane_dir="$RAW/journeys/$lane"
   JOURNEY_RECORD_LANE="$lane" \
   JOURNEY_RECORD_PATTERN="$pattern" \
@@ -219,6 +256,7 @@ coverage_journey_write_record() {
   JOURNEY_RECORD_COMPLETE="$complete" \
   JOURNEY_RECORD_MISSING="$missing" \
   JOURNEY_RECORD_KILLED="$killed" \
+  JOURNEY_RECORD_FLUSH_RC="$flush_rc" \
   JOURNEY_RECORD_SHA="$CANDIDATE_SHA" \
   JOURNEY_RECORD_IMAGE_ID="$IMAGE_ID" \
   JOURNEY_RECORD_BUILD_CONTEXT="$BUILD_CONTEXT" \
@@ -259,6 +297,7 @@ record = {
         "container_id": os.environ["JOURNEY_RECORD_SERVER_ID"],
         "exit_code": int(os.environ["JOURNEY_RECORD_EXIT_CODE"]),
         "stop_rc": int(os.environ["JOURNEY_RECORD_STOP_RC"]),
+        "flush_rc": int(os.environ["JOURNEY_RECORD_FLUSH_RC"]),
         "flush": "sigusr2",
         "signal": "SIGTERM",
         "oom_killed": boolean("JOURNEY_RECORD_OOM"),
@@ -354,16 +393,13 @@ coverage_journey_run_lane() {
   local lane_dir="$RAW/journeys/$lane"
   local server_name="${ID}-journey-${lane}"
   local server_id="" ready=0 test_rc=125 passes=0
-  local stop_rc=0 exit_code=1 oom=true killed=false complete=false missing=true
+  local stop_rc=1 flush_rc=1 exit_code=1 oom=true killed=false complete=false missing=true
   local key="" auth_env="" runner_log="$ARTIFACTS/journeys/$lane.log"
   local agent_port="" CAESIUM_AGENT_API_EXTERNAL_URL=""
   local cli_raw="$lane_dir/cli" server_raw="$lane_dir/server"
   local -a server_args runner_args
 
-  if "$CONTAINER_CLI" inspect "$server_name" >/dev/null 2>&1; then
-    coverage_journey_fail "refusing pre-existing container name $server_name"
-    return 1
-  fi
+  coverage_journey_require_absent container "$server_name" || return 1
   if [[ -e "$lane_dir" || -L "$lane_dir" ]]; then
     coverage_journey_fail "refusing pre-existing lane artifact path $lane_dir"
     return 1
@@ -419,6 +455,7 @@ coverage_journey_run_lane() {
   server_args+=("$IMAGE_ID" start)
 
   log "starting real integration coverage lane '$lane' on $IMAGE_ID"
+  COVERAGE_JOURNEY_PENDING_NAMES+=("$server_name")
   server_id="$("$CONTAINER_CLI" "${server_args[@]}")" || {
     coverage_journey_fail "could not start server for lane '$lane'"
     return 1
@@ -515,19 +552,16 @@ coverage_journey_run_lane() {
   unset key
 
   log "flushing '$lane' server coverage via SIGUSR2 and stopping with SIGTERM"
-  "$CONTAINER_CLI" kill --signal=SIGUSR2 "$server_id" >/dev/null 2>&1 || true
-  sleep 1
-  "$CONTAINER_CLI" stop -t 60 "$server_id" >/dev/null || stop_rc=$?
-  local inspect_json
-  inspect_json="$("$CONTAINER_CLI" inspect "$server_id" 2>/dev/null || true)"
-  if [[ -n "$inspect_json" ]]; then
-    exit_code="$(printf '%s' "$inspect_json" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d[0]["State"].get("ExitCode", 1) if d else 1)' 2>/dev/null || echo 1)"
-    oom="$(printf '%s' "$inspect_json" | python3 -c 'import json,sys; d=json.load(sys.stdin); print("true" if d and d[0]["State"].get("OOMKilled") else "false")' 2>/dev/null || echo true)"
-  fi
+  local stopped
+  stopped="$(coverage_journey_resource stop container "$server_id")" || return 1
+  flush_rc="$(printf '%s' "$stopped" | python3 -c 'import json,sys; print(json.load(sys.stdin)["flush_rc"])')"
+  stop_rc="$(printf '%s' "$stopped" | python3 -c 'import json,sys; print(json.load(sys.stdin)["stop_rc"])')"
+  exit_code="$(printf '%s' "$stopped" | python3 -c 'import json,sys; print(json.load(sys.stdin)["State"].get("ExitCode", 1))')"
+  oom="$(printf '%s' "$stopped" | python3 -c 'import json,sys; print(str(json.load(sys.stdin)["State"].get("OOMKilled", True)).lower())')"
   if [[ "$oom" == "true" || "$exit_code" == "137" ]]; then
     killed=true
   fi
-  if [[ "$stop_rc" -eq 0 && "$killed" == false && ( "$exit_code" == "0" || "$exit_code" == "143" ) ]] \
+  if [[ "$flush_rc" -eq 0 && "$stop_rc" -eq 0 && "$killed" == false && "$exit_code" == "0" ]] \
       && gocoverdir_complete "$cli_raw" && gocoverdir_complete "$server_raw" \
       && [[ "$test_rc" -eq 0 && "$passes" -ge "$min_pass" ]]; then
     complete=true
@@ -535,8 +569,9 @@ coverage_journey_run_lane() {
   else
     missing=$(gocoverdir_complete "$cli_raw" && gocoverdir_complete "$server_raw" && echo false || echo true)
   fi
+  coverage_journey_remove_owned "$server_id" || complete=false
   coverage_journey_write_record "$lane" "$pattern" "$min_pass" "$test_rc" "$passes" \
-    "$server_id" "$stop_rc" "$exit_code" "$oom" "$complete" "$missing" "$killed" \
+    "$server_id" "$stop_rc" "$exit_code" "$oom" "$complete" "$missing" "$killed" "$flush_rc" \
     || { coverage_journey_fail "cannot write provenance for lane '$lane'"; return 1; }
 
   if [[ "$test_rc" -ne 0 || "$passes" -lt "$min_pass" ]]; then
@@ -548,14 +583,12 @@ coverage_journey_run_lane() {
       log "lane '$lane' server logs (API keys redacted):"
       "$CONTAINER_CLI" logs "$server_id" 2>&1 | coverage_journey_log_redacted >&2 || true
     fi
-    coverage_journey_remove_owned "$server_id"
     return 1
   fi
 
   COVERAGE_JOURNEY_CLI_DIRS+=("$cli_raw")
   COVERAGE_JOURNEY_SERVER_DIRS+=("$server_raw")
   COVERAGE_JOURNEY_NAMES+=("$lane")
-  coverage_journey_remove_owned "$server_id"
 }
 
 run_coverage_journeys() {
@@ -589,7 +622,7 @@ run_coverage_journeys() {
     coverage_journey_fail "could not extract candidate CLI from $IMAGE_ID"
     return 1
   fi
-  coverage_journey_remove_owned "$cli_ctr"
+  coverage_journey_remove_owned "$cli_ctr" || return 1
   chmod 0755 "$cli_dir/caesium"
   cli_digest="$(python3 - "$cli_dir/caesium" <<'PY'
 import hashlib
@@ -670,6 +703,7 @@ PY
       SSO_RECORD_INPUTS_SHA256="$COVERAGE_BACKEND_PRODUCER_INPUTS_SHA256" \
       SSO_RECORD_RAW_ROOT="$RAW" \
       python3 - "$sso_record" "$COVERAGE_BACKEND_PRODUCER_INPUTS" "$sso_cli_list" "$sso_server_list" <<'PY'
+import datetime
 import hashlib
 import json
 import os
@@ -698,7 +732,7 @@ if [item.get("generation") for item in generations] != [1, 2]:
 for item in generations:
     if item.get("image_id") != os.environ["SSO_RECORD_IMAGE_ID"]:
         raise SystemExit("SSO server generation used a different image")
-    if item.get("flush_rc") != 0 or item.get("stop_rc") != 0 or item.get("exit_code") not in (0, 143) or item.get("oom_killed") is not False:
+    if item.get("flush_rc") != 0 or item.get("stop_rc") != 0 or item.get("exit_code") != 0 or item.get("oom_killed") is not False or item.get("running") is not False or item.get("restart_count") != 0:
         raise SystemExit("SSO server generation did not flush and stop cleanly")
 if not generations[0].get("container_id") or generations[0].get("container_id") == generations[1].get("container_id"):
     raise SystemExit("SSO server process identity did not change across restart")
@@ -717,6 +751,8 @@ for field in ("job_id", "run_id", "task_id", "task_run_id"):
         raise SystemExit("SSO shutdown run/task identity is invalid")
 if not isinstance(shutdown.get("runtime_id"), str) or not re.fullmatch(r"[0-9a-f]{64}", shutdown["runtime_id"]):
     raise SystemExit("SSO shutdown runtime identity is invalid")
+if record.get("task_docker_image_id") != inputs.get("task_docker_image_id", inputs.get("task_image_id")):
+    raise SystemExit("SSO native task image differs from its Docker prerequisite")
 if shutdown.get("task_image_id") != record.get("task_image_id"):
     raise SystemExit("SSO shutdown task image differs from its pinned backend prerequisite")
 if (shutdown.get("initial_run_status"), shutdown.get("initial_task_status")) != ("running", "running"):
@@ -725,11 +761,34 @@ if shutdown.get("native_runtime_removed") is not True or shutdown.get("verified_
     raise SystemExit("SSO shutdown did not prove native cleanup and same-database restart")
 if (shutdown.get("final_run_status"), shutdown.get("final_task_status")) != ("failed", "failed"):
     raise SystemExit("SSO shutdown run/task did not persist as failed")
-if (shutdown.get("final_run_error"), shutdown.get("final_task_error")) != ("context canceled", "context canceled"):
+task_cancel = "task " + shutdown["task_id"] + " cancelled: context canceled"
+if (shutdown.get("final_run_error"), shutdown.get("final_task_error")) != ("context canceled", task_cancel):
     raise SystemExit("SSO shutdown run/task did not preserve its whole-run cancellation cause")
-if shutdown.get("final_task_run_id") != shutdown.get("task_run_id") or shutdown.get("final_task_run_status") != "failed" or shutdown.get("final_task_run_error") != "context canceled":
+if shutdown.get("final_task_run_id") != shutdown.get("task_run_id") or shutdown.get("final_task_run_status") != "failed" or shutdown.get("final_task_run_error") != task_cancel:
     raise SystemExit("SSO concrete TaskRun identity/status/cause did not persist")
+native = shutdown.get("native_before_signal")
+if not isinstance(native, dict) or native.get("running") is not True:
+    raise SystemExit("SSO shutdown lacks a native running witness")
+for field in ("run_id", "task_id", "runtime_id"):
+    if native.get(field) != shutdown.get(field):
+        raise SystemExit("SSO native running witness differs from the admitted run/task")
+if native.get("docker_image_id") != record.get("task_docker_image_id") or native.get("task_config_id") != record.get("task_image_id"):
+    raise SystemExit("SSO native running witness differs from the Docker task image")
+def timestamp(value):
+    if not isinstance(value, str):
+        raise SystemExit("SSO process timestamp is missing")
+    try:
+        result = datetime.datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise SystemExit("SSO process timestamp is invalid") from exc
+    if result.tzinfo is None or result.year <= 1:
+        raise SystemExit("SSO process timestamp is unqualified")
+    return result
+original_finish = timestamp(generations[0].get("finished_at"))
+timestamp(generations[1].get("finished_at"))
 for field in ("run_completed_at", "task_completed_at"):
+    if timestamp(shutdown.get(field)) > original_finish:
+        raise SystemExit("SSO terminal rows were repaired after the original server exited")
     if not isinstance(shutdown.get(field), str) or not shutdown[field]:
         raise SystemExit("SSO durable run/task lacks a terminal completion timestamp")
 if shutdown.get("native_runtime_absent_after_generation") != 2 or shutdown.get("native_runtime_absent_generations") != [1, 2]:
@@ -760,11 +819,13 @@ def validate_process(process, source, lane):
             raise SystemExit("SSO " + lane + " process used a different candidate")
     if process.get("kind") != "gocoverdir" or process.get("module") != "github.com/caesium-cloud/caesium" or process.get("complete") is not True or process.get("missing") is not False or process.get("killed") is not False:
         raise SystemExit("SSO " + lane + " process is incomplete")
+    if process.get("running") is not False or process.get("restart_count") != 0:
+        raise SystemExit("SSO " + lane + " process did not exit exactly once")
     if process.get("oom_killed") is not False:
         raise SystemExit("SSO " + lane + " process was OOM-killed")
     if source == "cli" and process.get("exit_code") != 0:
         raise SystemExit("SSO " + lane + " CLI process did not exit cleanly")
-    if source == "server" and process.get("exit_code") not in (0, 143):
+    if source == "server" and process.get("exit_code") != 0:
         raise SystemExit("SSO " + lane + " server did not exit after SIGTERM")
     if not isinstance(process.get("container_id"), str) or not re.fullmatch(r"[0-9a-f]{64}", process["container_id"]):
         raise SystemExit("SSO " + lane + " immutable container identity is invalid")
@@ -834,16 +895,6 @@ PY
   # join these exact candidate-image CLI/server merges.
   coverage_journey_run_backends || return 1
 
-  cli_raw="$RAW/cli-journeys-merged"
-  server_raw="$RAW/server-journeys-merged"
-  merge_gocoverdirs "$cli_raw" "$RAW/cli" "${COVERAGE_JOURNEY_CLI_DIRS[@]}" \
-    || { coverage_journey_fail "could not merge complete CLI journey profiles"; return 1; }
-  merge_gocoverdirs "$server_raw" "$RAW/server" "${COVERAGE_JOURNEY_SERVER_DIRS[@]}" \
-    || { coverage_journey_fail "could not merge complete server journey profiles"; return 1; }
-  rm -rf "$RAW/cli" "$RAW/server"
-  mv "$cli_raw" "$RAW/cli"
-  mv "$server_raw" "$RAW/server"
-
   JOURNEY_MANIFEST_SHA="$CANDIDATE_SHA" \
   JOURNEY_MANIFEST_IMAGE_ID="$IMAGE_ID" \
   JOURNEY_MANIFEST_BUILD_CONTEXT="$BUILD_CONTEXT" \
@@ -889,5 +940,14 @@ manifest = {
 }
 pathlib.Path(sys.argv[1]).write_text(json.dumps(manifest, indent=2) + "\n")
 PY
-  log "merged five exact-image real integration journeys into CLI/server coverage"
+  log "collected five exact-image real integration journeys; original process raws retained"
+}
+
+merge_coverage_journeys() {
+  local path
+  for path in "$RAW/cli" "$RAW/server" "${COVERAGE_JOURNEY_CLI_DIRS[@]}" "${COVERAGE_JOURNEY_SERVER_DIRS[@]}"; do
+    gocoverdir_complete "$path" || { coverage_journey_fail "required original raw profile missing: $path"; return 1; }
+  done
+  merge_gocoverdirs "$RAW/cohort-cli" "$RAW/cli" "${COVERAGE_JOURNEY_CLI_DIRS[@]}" || return 1
+  merge_gocoverdirs "$RAW/cohort-server" "$RAW/server" "${COVERAGE_JOURNEY_SERVER_DIRS[@]}" || return 1
 }
