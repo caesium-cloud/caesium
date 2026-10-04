@@ -247,6 +247,7 @@ coverage_journey_write_record() {
   local lane="$1" pattern="$2" min_pass="$3" test_rc="$4" passes="$5"
   local server_id="$6" stop_rc="$7" exit_code="$8" oom="$9"
   local complete="${10}" missing="${11}" killed="${12}" flush_rc="${13}"
+  local named_result="${14}"
   local lane_dir="$RAW/journeys/$lane"
   JOURNEY_RECORD_LANE="$lane" \
   JOURNEY_RECORD_PATTERN="$pattern" \
@@ -261,6 +262,7 @@ coverage_journey_write_record() {
   JOURNEY_RECORD_MISSING="$missing" \
   JOURNEY_RECORD_KILLED="$killed" \
   JOURNEY_RECORD_FLUSH_RC="$flush_rc" \
+  JOURNEY_RECORD_NAMED_RESULT="$named_result" \
   JOURNEY_RECORD_SHA="$CANDIDATE_SHA" \
   JOURNEY_RECORD_IMAGE_ID="$IMAGE_ID" \
   JOURNEY_RECORD_BUILD_CONTEXT="$BUILD_CONTEXT" \
@@ -275,6 +277,10 @@ import sys
 
 def boolean(name):
     return os.environ[name] == "true"
+
+named_result = json.loads(pathlib.Path(os.environ["JOURNEY_RECORD_NAMED_RESULT"]).read_text())
+if not isinstance(named_result, dict) or not isinstance(named_result.get("required"), list) or not isinstance(named_result.get("passed"), list):
+    raise SystemExit("named integration pass evidence is malformed")
 
 record = {
     "schema_version": 1,
@@ -296,6 +302,12 @@ record = {
         "passed_scenarios": int(os.environ["JOURNEY_RECORD_PASSES"]),
         "exit_code": int(os.environ["JOURNEY_RECORD_TEST_RC"]),
         "log": os.environ["JOURNEY_RECORD_TEST_LOG"],
+        "required_named_passes": named_result["required"],
+        "passed_named_passes": named_result["passed"],
+        "missing_named_passes": named_result.get("missing", []),
+        "skipped_named_passes": named_result.get("skipped", []),
+        "duplicate_named_passes": named_result.get("duplicate", []),
+        "named_passes_valid": named_result.get("valid") is True,
     },
     "server": {
         "container_id": os.environ["JOURNEY_RECORD_SERVER_ID"],
@@ -394,11 +406,14 @@ coverage_journey_server_env() {
 
 coverage_journey_run_lane() {
   local lane="$1" mode="$2" pattern="$3" min_pass="$4" cli_dir="$5"
+  shift 5
+  local -a required_named_passes=("$@")
   local lane_dir="$RAW/journeys/$lane"
   local server_name="${ID}-journey-${lane}"
   local server_id="" ready=0 test_rc=125 passes=0
   local stop_rc=1 flush_rc=1 exit_code=1 oom=true killed=false complete=false missing=true
   local key="" auth_env="" runner_log="$ARTIFACTS/journeys/$lane.log"
+  local named_result="$lane_dir/named-pass-results.json" named_rc=1 named_valid=false
   local agent_port="" CAESIUM_AGENT_API_EXTERNAL_URL=""
   local cli_raw="$lane_dir/cli" server_raw="$lane_dir/server"
   local -a server_args runner_args
@@ -412,6 +427,7 @@ coverage_journey_run_lane() {
     || { coverage_journey_fail "cannot create lane artifacts for '$lane'"; return 1; }
   chmod 0777 "$cli_raw" "$server_raw" \
     || { coverage_journey_fail "cannot prepare lane GOCOVERDIRs for '$lane'"; return 1; }
+  : >"$runner_log" || { coverage_journey_fail "cannot create test log for '$lane'"; return 1; }
 
   coverage_journey_server_env "$mode" || return 1
   if [[ "$mode" == "auth" ]]; then
@@ -549,6 +565,17 @@ coverage_journey_run_lane() {
     fi
   fi
 
+  local -a named_args=(--log "$runner_log")
+  local required_name
+  for required_name in "${required_named_passes[@]}"; do
+    named_args+=(--required-name "$required_name")
+  done
+  set +e
+  python3 "$ROOT/scripts/test_coverage_named_journeys.py" "${named_args[@]}" >"$named_result"
+  named_rc=$?
+  set -e
+  [[ "$named_rc" -eq 0 ]] && named_valid=true
+
   if [[ -n "$auth_env" ]]; then
     rm -f "$auth_env"
     COVERAGE_JOURNEY_SECRET_FILES=()
@@ -567,7 +594,7 @@ coverage_journey_run_lane() {
   fi
   if [[ "$flush_rc" -eq 0 && "$stop_rc" -eq 0 && "$killed" == false && "$exit_code" == "0" ]] \
       && gocoverdir_complete "$cli_raw" && gocoverdir_complete "$server_raw" \
-      && [[ "$test_rc" -eq 0 && "$passes" -ge "$min_pass" ]]; then
+      && [[ "$test_rc" -eq 0 && "$passes" -ge "$min_pass" && "$named_valid" == true ]]; then
     complete=true
     missing=false
   else
@@ -575,11 +602,11 @@ coverage_journey_run_lane() {
   fi
   coverage_journey_remove_owned "$server_id" || complete=false
   coverage_journey_write_record "$lane" "$pattern" "$min_pass" "$test_rc" "$passes" \
-    "$server_id" "$stop_rc" "$exit_code" "$oom" "$complete" "$missing" "$killed" "$flush_rc" \
+    "$server_id" "$stop_rc" "$exit_code" "$oom" "$complete" "$missing" "$killed" "$flush_rc" "$named_result" \
     || { coverage_journey_fail "cannot write provenance for lane '$lane'"; return 1; }
 
-  if [[ "$test_rc" -ne 0 || "$passes" -lt "$min_pass" ]]; then
-    log "lane '$lane' test command exit=$test_rc passes=$passes minimum=$min_pass"
+  if [[ "$test_rc" -ne 0 || "$passes" -lt "$min_pass" || "$named_valid" != true ]]; then
+    log "lane '$lane' test command exit=$test_rc passes=$passes minimum=$min_pass named_passes_valid=$named_valid"
   fi
   if [[ "$complete" != "true" ]]; then
     log "lane '$lane' did not produce complete verified test+CLI+server evidence"
@@ -647,21 +674,57 @@ PY
   local local_pattern auth_pattern distributed_pattern owner_pattern
   local_pattern='TestIntegrationTestSuite/(TestEventAndTriggerCLIWithWebhookReceiptLog|TestEventIngestRoutesEventTriggerJob|TestWebhookPathFiresHTTPAndEventTriggers|TestJobApplyThenExportInspectsDeployedPipeline|TestJobDiffCLIPrintsBreakingContractFindings|TestJobApplyReconcilesExistingDefinition|TestCacheHitSkipsExecution|TestCacheHitDAGOutputPropagation|TestCacheChainValuesBreaksUpstreamChurn|TestCacheManagementListAndInvalidate|TestCacheInvalidationForcesReexecution|TestFreshnessEvaluatorStateTransitions|TestFreshnessConsumedSnapshotTakenAtRunStart|TestFreshnessDerivedRunExecutesWithoutConcurrencyPolicy|TestFreshnessDerivedRunExecutesUnderConcurrencyPolicy|TestFreshnessDerivedRunHonoursJobPause|TestFreshnessDerivedRunCoalescesAJobsStaleOutputs|TestArrivalEventAdvancesSourceDatasetWatermark|TestLineageImpactReturnsDownstream|TestBackfillCLILifecycle|TestBackfillBasicHappyPath|TestBackfillListAndGet|TestBackfillReprocessNone|TestBackfillReprocessAll|TestBackfillValidationEndBeforeStart|TestNotificationChannelAndPolicyByID|TestReplayRESTEndpointIdempotencyAndSafety|TestReplayRESTEndpointConcurrentIdempotency|TestReplayRESTEndpointBaselineWithoutTaskRunsIs4xx|TestReplayMatrixCachePrunedFailsClosed|TestReplayMatrixBaselineScopedReplaySafeGate|TestRunReplayCLIJSONStdoutIdempotencyAndDiff|TestRunRetryCLIRoutesOverServer|TestReproduceCLIDryRunAndRunMode|TestReproduceDescriptorEndpointRoundTrip|TestDataAssertionsFeatureFlagIsReportedByLiveServer|TestDataAssertionsDatasetOperatorReads|TestRunListPaginationPagesRealRuns)'
   auth_pattern='TestIntegrationTestSuite/(TestAgentProfileCLIListJSONStdout|TestAgentProfileCRUD|TestAgentProfileCreateRejectsUnsupportedSecretProvider|TestJobdefLintVerifiesRemediationProfileReference|TestAuthKeyLifecycleCLI|TestAuthAuditCLI|TestAuthKeysREST|TestAuthJobApplyCLI|TestNotificationChannelAndPolicyMutationsAreAudited)'
+  local_pattern="${local_pattern%)}|TestCaesiumWhyExplainsHitAndMiss|TestRunDiffAttributesChangedField|TestRunDiffRESTEndpointCoversHTTPSurface|TestReproducibilityReceiptRoundTrip|TestContractGraphCLIJSONReportsInferredEdge|TestContractsGraphEndpointReportsInferredEdgeAndFeatureFlag|TestJobLintServerJSONReportsContractFinding|TestContractCheckFailsOnBreakingLocalChange|TestCheckImagesCLIGatesLocalDockerAvailability|TestAtomSpecPersistence|TestDatasetRESTAndCLIListSurfacesManualAdvance|TestIncidentRoutesGatedOffByDefault|TestDevOnceExecutesDAG|TestDevOnceRunTimeoutStopsAndRemovesContainer|TestDevOnceSIGINTStopsAndRemovesContainer|TestTestCommandValidatesDefinitions|TestTestCommandRunsHarnessScenarioWithObservabilityAssertions)"
+  auth_pattern="${auth_pattern%)}|TestIncidentCLIListJSONStdout|TestIncidentApprovalDecisionsCLI|TestIncidentApprovalWhyExplains|TestIncidentEscalationDeliversNotifiableEvent|TestIncidentOpenedEventObservable|TestIncidentApplyJobdefPatchCannotEditItsOwnPolicy|TestIncidentApprovalSecondPendingRequestStaysDecidable|TestIncidentPerClassNarrowingGatesTheMatchingClass|TestIncidentPerClassNarrowingIgnoresNonMatchingClass|TestScopedKeyWhoamiAllowed|TestScopedKeyAllowDenyMatrix|TestHoldDatasetCLIReleaseReopensTheGate)"
+
+  local -a local_named_passes=(
+    TestCaesiumWhyExplainsHitAndMiss
+    TestRunDiffAttributesChangedField
+    TestRunDiffRESTEndpointCoversHTTPSurface
+    TestReproducibilityReceiptRoundTrip
+    TestContractGraphCLIJSONReportsInferredEdge
+    TestContractsGraphEndpointReportsInferredEdgeAndFeatureFlag
+    TestJobLintServerJSONReportsContractFinding
+    TestContractCheckFailsOnBreakingLocalChange
+    TestCheckImagesCLIGatesLocalDockerAvailability
+    TestAtomSpecPersistence
+    TestDatasetRESTAndCLIListSurfacesManualAdvance
+    TestIncidentRoutesGatedOffByDefault
+    TestDevOnceExecutesDAG
+    TestDevOnceRunTimeoutStopsAndRemovesContainer
+    TestDevOnceSIGINTStopsAndRemovesContainer
+    TestTestCommandValidatesDefinitions
+    TestTestCommandRunsHarnessScenarioWithObservabilityAssertions
+  )
+  local -a auth_named_passes=(
+    TestIncidentCLIListJSONStdout
+    TestIncidentApprovalDecisionsCLI
+    TestIncidentApprovalWhyExplains
+    TestIncidentEscalationDeliversNotifiableEvent
+    TestIncidentOpenedEventObservable
+    TestIncidentApplyJobdefPatchCannotEditItsOwnPolicy
+    TestIncidentApprovalSecondPendingRequestStaysDecidable
+    TestIncidentPerClassNarrowingGatesTheMatchingClass
+    TestIncidentPerClassNarrowingIgnoresNonMatchingClass
+    TestScopedKeyWhoamiAllowed
+    TestScopedKeyAllowDenyMatrix
+    TestHoldDatasetCLIReleaseReopensTheGate
+  )
   distributed_pattern='TestIntegrationTestSuite/(TestRunConcurrencyStrategies|TestPriorityRunStartSurfacesAndCronDefault|TestFanOut|TestPlainFailure|TestSecretLogs|TestHaltPolicy|TestReplaceCancel|TestRetryAfterApplyExecutesRegisteredCommand|TestRetryValidatesAgainstTheRegisteredOutputSchema|TestDataAssertionsMetricsPersisted|TestResourceStats)'
   owner_pattern='TestIntegrationTestSuite/(TestFanOut|TestPlainFailure|TestSecretLogs|TestHaltPolicy|TestResourceStats)'
 
-  local local_min_pass=20
-  local auth_min_pass=8
+  local local_min_pass=37
+  local auth_min_pass=20
   local distributed_min_pass="${CAESIUM_DISTRIBUTED_INTEGRATION_MIN_PASS:-20}"
   local owner_min_pass="${CAESIUM_OWNER_MEMORY_INTEGRATION_MIN_PASS:-14}"
   local server_raw cli_raw
   for lane in local auth distributed owner-memory; do
     case "$lane" in
       local)
-        coverage_journey_run_lane "$lane" local "$local_pattern" "$local_min_pass" "$cli_dir" || return 1
+        coverage_journey_run_lane "$lane" local "$local_pattern" "$local_min_pass" "$cli_dir" "${local_named_passes[@]}" || return 1
         ;;
       auth)
-        coverage_journey_run_lane "$lane" auth "$auth_pattern" "$auth_min_pass" "$cli_dir" || return 1
+        coverage_journey_run_lane "$lane" auth "$auth_pattern" "$auth_min_pass" "$cli_dir" "${auth_named_passes[@]}" || return 1
         ;;
       distributed)
         coverage_journey_run_lane "$lane" distributed "$distributed_pattern" "$distributed_min_pass" "$cli_dir" || return 1
