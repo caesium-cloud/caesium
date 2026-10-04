@@ -453,3 +453,17 @@ func TestRunLocalWaitErrorStopsAtom(t *testing.T) {
 	require.True(t, engine.wasForceStopped(taskID.String()),
 		"a failed Wait means we stopped watching, not that the container stopped — it must be force-stopped, not abandoned")
 }
+
+func TestExecutorRegistrationInheritsCancellationDuringAdmission(t *testing.T) {
+	registry := newCancelRegistry()
+	runID := uuid.New()
+	outer, releaseOuter := registry.register(context.Background(), runID)
+	require.Equal(t, 1, registry.cancel(runID))
+	// job.Run's inner registration occurs after admission; it must inherit the
+	// already-cancelled kickoff context rather than reset its authority.
+	inner, releaseInner := registry.register(outer, runID)
+	require.ErrorIs(t, inner.Err(), context.Canceled)
+	releaseInner()
+	releaseOuter()
+	require.Zero(t, registry.tracked(runID))
+}

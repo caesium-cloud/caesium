@@ -13,6 +13,7 @@ import (
 	runsvc "github.com/caesium-cloud/caesium/api/rest/service/run"
 	"github.com/caesium-cloud/caesium/cmd/cliutil"
 	"github.com/caesium-cloud/caesium/internal/job"
+	"github.com/caesium-cloud/caesium/internal/models"
 	runstorage "github.com/caesium-cloud/caesium/internal/run"
 	"github.com/caesium-cloud/caesium/pkg/log"
 	"github.com/google/uuid"
@@ -97,21 +98,43 @@ var retryCmd = &cobra.Command{
 		}
 
 		store := runstorage.Default()
-		r, err := store.RetryFromFailure(runID)
+		_, err = startLocalWholeRunRetry(ctx, j, runID, store.RetryFromFailure, launchLocalWholeRunRetry)
 		if err != nil {
 			return fmt.Errorf("failed to retry run: %w", err)
 		}
 
-		go func() {
-			runCtx := runstorage.WithContext(context.Background(), r.ID)
-			if err := job.New(j, job.WithTriggerID(nil), job.WithParams(r.Params)).Run(runCtx); err != nil {
-				log.Error("job retry run failure", "id", j.ID, "run_id", r.ID, "error", err)
-			}
-		}()
-
 		cmd.Printf("Retrying run %s (job %s)\n", runID, jobID)
 		return nil
 	},
+}
+
+// Register before reopening the row: a cancellation during admission must reach
+// the context transferred to execution, even before its goroutine starts.
+func startLocalWholeRunRetry(parent context.Context, j *models.Job, runID uuid.UUID, admit func(uuid.UUID) (*runstorage.JobRun, error), launch func(context.Context, *models.Job, *runstorage.JobRun, func())) (*runstorage.JobRun, error) {
+	ctx, release := job.RegisterRunCancel(context.WithoutCancel(parent), runID)
+	transferred := false
+	defer func() {
+		if !transferred {
+			release()
+		}
+	}()
+	r, err := admit(runID)
+	if err != nil {
+		return nil, err
+	}
+	launch(ctx, j, r, release)
+	transferred = true
+	return r, nil
+}
+
+func launchLocalWholeRunRetry(ctx context.Context, j *models.Job, r *runstorage.JobRun, release func()) {
+	go func() {
+		defer release()
+		runCtx := runstorage.WithContext(ctx, r.ID)
+		if err := job.New(j, job.WithTriggerID(nil), job.WithParams(r.Params)).Run(runCtx); err != nil {
+			log.Error("job retry run failure", "id", j.ID, "run_id", r.ID, "error", err)
+		}
+	}()
 }
 
 func init() {

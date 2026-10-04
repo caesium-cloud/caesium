@@ -3,12 +3,18 @@ package run
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/caesium-cloud/caesium/internal/job"
+	"github.com/caesium-cloud/caesium/internal/models"
+	runstorage "github.com/caesium-cloud/caesium/internal/run"
+	"github.com/google/uuid"
 	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/require"
 )
@@ -449,4 +455,37 @@ func TestRetryWholeRunOverServerReadsAPIKeyFromEnv(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "Bearer env-key", sawAuth)
 	require.Contains(t, stdout.String(), "Retrying run run-1 (job job-1)")
+}
+
+func TestLocalWholeRetryRegistersDuringAdmissionAndBeforeDetachedLaunch(t *testing.T) {
+	runID := uuid.New()
+	launched := make(chan context.Context, 1)
+	gate := make(chan struct{})
+	done := make(chan bool, 1)
+	_, err := startLocalWholeRunRetry(context.Background(), &models.Job{}, runID,
+		func(id uuid.UUID) (*runstorage.JobRun, error) {
+			require.Equal(t, runID, id)
+			require.Equal(t, 1, job.CancelRunContexts(runID), "registration must precede reopen")
+			return &runstorage.JobRun{ID: id}, nil
+		},
+		func(ctx context.Context, _ *models.Job, _ *runstorage.JobRun, release func()) {
+			go func() { defer release(); launched <- ctx; <-gate; done <- ctx.Err() == nil }()
+		})
+	require.NoError(t, err)
+	ctx := <-launched
+	require.ErrorIs(t, ctx.Err(), context.Canceled)
+	close(gate)
+	require.False(t, <-done, "cancelled retry must not start an executor")
+	require.Eventually(t, func() bool { return job.CancelRunContexts(runID) == 0 }, time.Second, time.Millisecond)
+}
+func TestLocalWholeRetryAdmissionFailureReleasesRegistration(t *testing.T) {
+	runID := uuid.New()
+	fault := errors.New("admission failed")
+	_, err := startLocalWholeRunRetry(context.Background(), &models.Job{}, runID,
+		func(uuid.UUID) (*runstorage.JobRun, error) { return nil, fault },
+		func(context.Context, *models.Job, *runstorage.JobRun, func()) {
+			t.Fatal("must not launch refused retry")
+		})
+	require.ErrorIs(t, err, fault)
+	require.Zero(t, job.CancelRunContexts(runID))
 }
