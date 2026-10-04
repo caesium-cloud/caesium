@@ -2,6 +2,8 @@ package database
 
 import (
 	"context"
+	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -10,6 +12,58 @@ import (
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 )
+
+func TestReadOnlyGuardLexicalStates(t *testing.T) {
+	for _, tc := range []struct {
+		query string
+		want  error
+	}{
+		{"SELECT 1;", nil},
+		{"/* DELETE; */ -- UPDATE;\nSELECT 1", nil},
+		{"SELECT 'DELETE; ''UPDATE'", nil},
+		{"SELECT \"DELETE;\", `UPDATE;`", nil},
+		{"SELECT 1 -- DELETE;\n", nil},
+		{"SELECT 1 /* DELETE;\nUPDATE */", nil},
+		{"SELECT 'unterminated DELETE;", nil},
+		{"SELECT \"unterminated DELETE;", nil},
+		{"SELECT `unterminated DELETE;", nil},
+		{"SELECT 1 /* unterminated DELETE;", nil},
+		{"/* unterminated SELECT 1", ErrEmptyQuery},
+		{"-- SELECT 1", ErrEmptyQuery},
+		{"SELECT 1; -- comment", ErrMultipleStatements},
+		{"SELECT 1; /* comment */", ErrMultipleStatements},
+		{"SELECT 1;;", ErrMultipleStatements},
+		{"SELECT (1; 2)", ErrMultipleStatements},
+		{"SELECT 'safe'; DELETE FROM jobs", ErrMultipleStatements},
+		{"SELECT 1 /* safe */ DELETE", ErrUnsafeQuery},
+		{"'safe' SELECT 1", ErrUnsafeQuery},
+		{"SELECT 'backslash\\'; DELETE", ErrMultipleStatements},
+		{"SELECT INTO archive FROM jobs", ErrUnsafeQuery},
+	} {
+		t.Run(tc.query, func(t *testing.T) {
+			if got := validateReadOnlyQuery(tc.query); !errors.Is(got, tc.want) {
+				t.Fatalf("guard = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestSQLMaskPreservesBytePositions(t *testing.T) {
+	for _, tc := range []struct{ query, masked string }{
+		{"SELECT 'x;''y' AS x", "SELECT " + strings.Repeat(" ", 7) + " AS x"},
+		{"SELECT \"x;\", `y;`", "SELECT     ,     "},
+		{"-- x;\nSELECT 1", "     \nSELECT 1"},
+		{"/* x;\n*/SELECT 1", "        SELECT 1"},
+		{"SELECT 'é'", "SELECT " + strings.Repeat(" ", 4)},
+		{"SELECT 'x", "SELECT   "},
+	} {
+		t.Run(tc.query, func(t *testing.T) {
+			if got := sanitizeSQL(tc.query); got != tc.masked || len(got) != len(tc.query) {
+				t.Fatalf("mask = %q (%d bytes), want %q (%d bytes)", got, len(got), tc.masked, len(tc.query))
+			}
+		})
+	}
+}
 
 func TestSchemaIncludesTablesAndColumns(t *testing.T) {
 	svc := newTestService(t)
