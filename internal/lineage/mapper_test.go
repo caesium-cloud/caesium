@@ -826,3 +826,24 @@ func TestDatasetsOrderIsDeterministic(t *testing.T) {
 		}
 	}
 }
+
+func TestTaskLifecycleErrorFacetOnlyForFailedTask(t *testing.T) {
+	for _, tc := range []struct {
+		kind event.Type
+		want EventType
+	}{{event.TypeTaskStarted, EventTypeStart}, {event.TypeTaskSucceeded, EventTypeComplete}, {event.TypeTaskFailed, EventTypeFail}, {event.TypeTaskSkipped, EventTypeAbort}} {
+		for _, msg := range []string{"", "failure"} {
+			p := testTaskRunPayload()
+			p.Error = msg
+			evt := event.Event{Type: tc.kind, JobID: uuid.New(), RunID: p.JobRunID, Timestamp: time.Now(), Payload: mustMarshal(t, p)}
+			got, err := newMapper("test", nil).mapEvent(evt)
+			if err != nil || got.EventType != tc.want {
+				t.Fatalf("%s: %v %v", tc.kind, got, err)
+			}
+			_, has := got.Run.Facets["errorMessage"]
+			if has != (tc.kind == event.TypeTaskFailed && msg != "") {
+				t.Fatalf("%s error %q facet %t", tc.kind, msg, has)
+			}
+		}
+	}
+}

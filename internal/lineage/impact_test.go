@@ -494,3 +494,27 @@ func marshalFacet(v any) []byte {
 	}
 	return b
 }
+
+func (s *ImpactSuite) TestChunkedConsumerUnionAndGlobalOrdering() {
+	const ns = "chunk-test"
+	_, shared := s.createJobAndRun("shared-consumer", "")
+	_, newer := s.createJobAndRun("newer-consumer", "")
+	frontier := make([]datasetRef, 401)
+	for i := range frontier {
+		frontier[i] = datasetRef{namespace: ns, name: uuid.NewString()}
+	}
+	// One consumer belongs to both chunks; its output must occur once.
+	s.createDataset(shared, ns, frontier[0].name, "input", "shared")
+	s.createDataset(shared, ns, frontier[400].name, "input", "shared")
+	s.createDataset(shared, ns, "sink", "output", "shared")
+	s.createDataset(newer, ns, frontier[400].name, "input", "newer")
+	s.createDataset(newer, ns, "sink", "output", "newer")
+	now := time.Now().UTC()
+	s.Require().NoError(s.db.Model(&models.LineageDataset{}).Where("task_run_id = ? AND direction = ?", shared.ID, "output").Update("created_at", now.Add(-time.Hour)).Error)
+	s.Require().NoError(s.db.Model(&models.LineageDataset{}).Where("task_run_id = ? AND direction = ?", newer.ID, "output").Update("created_at", now).Error)
+	nodes, err := findConsumers(s.ctx, s.db, frontier)
+	s.Require().NoError(err)
+	s.Require().Len(nodes, 2)
+	s.Equal("newer-consumer", nodes[0].JobAlias)
+	s.Equal("shared-consumer", nodes[1].JobAlias)
+}
