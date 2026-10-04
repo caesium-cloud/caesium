@@ -119,7 +119,7 @@ func TestBackfillChildAdmissionFailureReleasesReservation(t *testing.T) {
 	const callback = "test:backfill_child_insert_failure"
 	require.NoError(t, rStore.DB().Callback().Create().Before("gorm:create").Register(callback, func(tx *gorm.DB) {
 		if tx.Statement.Schema != nil && tx.Statement.Schema.Name == "JobRun" {
-			tx.AddError(injected)
+			_ = tx.AddError(injected)
 		}
 	}))
 	t.Cleanup(func() { _ = rStore.DB().Callback().Create().Remove(callback) })
