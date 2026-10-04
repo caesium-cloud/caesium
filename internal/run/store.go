@@ -6226,7 +6226,7 @@ func collapseFanOutGroups(rows []*TaskRun) []*TaskRun {
 		insts := grouped[taskID]
 		head := *insts[0]
 		n := len(insts)
-		if n > 1 || head.PartitionValue != "" {
+		if models.IsFannedGroup(n, head.PartitionValue) {
 			head.PartitionCount = n
 		} else {
 			head.PartitionCount = 0
