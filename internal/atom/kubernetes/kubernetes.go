@@ -18,15 +18,6 @@ var (
 		v1.PodFailed:    atom.Stopped,
 		v1.PodUnknown:   atom.Invalid,
 	}
-	resultMap = map[int32]atom.Result{
-		0:   atom.Success,
-		1:   atom.Failure,
-		125: atom.StartupFailure,
-		126: atom.StartupFailure,
-		127: atom.StartupFailure,
-		137: atom.Killed,
-		143: atom.Terminated,
-	}
 )
 
 const kubeConfig = ".kube/config"
