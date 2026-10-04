@@ -3,6 +3,7 @@ package job
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -290,6 +291,16 @@ func runBackfill(ctx context.Context, b *models.Backfill, j *models.Job, schedul
 		}
 		r, err := rStore.StartForBackfill(j.ID, b.ID, params)
 		if err != nil {
+			// A failed readback can follow a committed insertion. Responsibility
+			// for that exact row stays reserved until conditional finalization.
+			if committedID, ok := runstore.CommittedRunID(err); ok {
+				cause := fmt.Errorf("backfill: committed child admission failed: %w", err)
+				// CompleteIfActive owns bounded retries for transient store contention.
+				if _, completeErr := rStore.CompleteIfActive(committedID, cause); completeErr != nil {
+					log.Error("backfill: committed child could not be finalized; leaving it for an operator",
+						"backfill_id", b.ID, "run_id", committedID, "error", completeErr)
+				}
+			}
 			releaseWork()
 			sem.Release(1)
 			if backfillDateOutcome(err) == backfillDateSkipped {

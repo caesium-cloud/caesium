@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -184,4 +185,89 @@ func TestDirectBackfillRetainsUserCancelDrain(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, 1, stored.CompletedRuns)
 	require.Zero(t, stored.FailedRuns)
+}
+
+func TestBackfillFinalizesExactCommittedAdmissionFailureBeforeReleasingOwnership(t *testing.T) {
+	b, j, bStore, rStore := backfillLifetimeFixture(t)
+	// Another active row must never be adopted or finalized by resemblance.
+	other := models.JobRun{ID: uuid.New(), JobID: j.ID, Status: string(runstore.StatusRunning)}
+	require.NoError(t, rStore.DB().Create(&other).Error)
+	injected := errors.New("post-insert child readback failed")
+	var committedID uuid.UUID
+	injectedRead := false
+	finalizing := make(chan struct{}, 1)
+	finish := make(chan struct{})
+	var once sync.Once
+	unblock := func() { once.Do(func() { close(finish) }) }
+	const createCallback = "test:observe_backfill_child_commit"
+	const queryCallback = "test:fail_backfill_child_readback"
+	const updateCallback = "test:block_backfill_child_finalization"
+	require.NoError(t, rStore.DB().Callback().Create().After("gorm:create").Register(createCallback, func(tx *gorm.DB) {
+		if row, ok := tx.Statement.Dest.(*models.JobRun); ok && row.BackfillID != nil && *row.BackfillID == b.ID {
+			committedID = row.ID
+		}
+	}))
+	require.NoError(t, rStore.DB().Callback().Query().Before("gorm:query").Register(queryCallback, func(tx *gorm.DB) {
+		if tx.Statement.Schema != nil && tx.Statement.Schema.Name == "JobRun" && committedID != uuid.Nil && !injectedRead {
+			injectedRead = true
+			_ = tx.AddError(injected)
+		}
+	}))
+	require.NoError(t, rStore.DB().Callback().Update().Before("gorm:update").Register(updateCallback, func(tx *gorm.DB) {
+		if tx.Statement.Schema != nil && tx.Statement.Schema.Name == "JobRun" {
+			var committed models.JobRun
+			require.NoError(t, tx.Session(&gorm.Session{NewDB: true}).First(&committed, "id = ?", committedID).Error)
+			require.Equal(t, string(runstore.StatusRunning), committed.Status, "fault followed a durable active insertion")
+			finalizing <- struct{}{}
+			<-finish
+		}
+	}))
+	owner := runlife.New(context.Background())
+	done := make(chan struct{})
+	t.Cleanup(func() {
+		owner.CloseAndCancel()
+		unblock()
+		<-done
+		_ = rStore.DB().Callback().Create().Remove(createCallback)
+		_ = rStore.DB().Callback().Query().Remove(queryCallback)
+		_ = rStore.DB().Callback().Update().Remove(updateCallback)
+	})
+	var calls atomic.Int32
+	schedule := mustParseCron(t, "0 * * * *")
+	go func() {
+		defer close(done)
+		runBackfill(runlife.WithSupervisor(t.Context(), owner), b, j, schedule, time.UTC, bStore, rStore,
+			func(context.Context, *models.Job, map[string]string) error { calls.Add(1); return nil })
+	}()
+	select {
+	case <-finalizing:
+	case <-time.After(5 * time.Second):
+		t.Fatal("committed failure did not reach conditional finalization")
+	}
+	owner.CloseAndCancel()
+	expired, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer cancel()
+	require.ErrorIs(t, owner.Wait(expired), context.DeadlineExceeded, "child remains reserved through terminal persistence")
+	unblock()
+	<-done
+	waitCtx, waitCancel := context.WithTimeout(context.Background(), time.Second)
+	defer waitCancel()
+	require.NoError(t, owner.Wait(waitCtx))
+	require.True(t, injectedRead)
+	require.NotEqual(t, uuid.Nil, committedID)
+	require.Zero(t, calls.Load())
+	var actual, untouched models.JobRun
+	require.NoError(t, rStore.DB().First(&actual, "id = ?", committedID).Error)
+	require.NoError(t, rStore.DB().First(&untouched, "id = ?", other.ID).Error)
+	require.Equal(t, string(runstore.StatusFailed), actual.Status)
+	require.Contains(t, actual.Error, injected.Error())
+	require.NotNil(t, actual.CompletedAt)
+	require.Equal(t, string(runstore.StatusRunning), untouched.Status)
+	require.Nil(t, untouched.CompletedAt)
+	var taskCount int64
+	require.NoError(t, rStore.DB().Model(&models.TaskRun{}).Where("job_run_id = ?", actual.ID).Count(&taskCount).Error)
+	require.Zero(t, taskCount)
+	stored, err := bStore.Get(b.ID)
+	require.NoError(t, err)
+	require.Equal(t, 1, stored.FailedRuns)
 }
