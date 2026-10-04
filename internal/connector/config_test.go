@@ -79,6 +79,22 @@ func TestParseAcceptsVersionedConnection(t *testing.T) {
 	}
 }
 
+func TestActorReservationAllowsNestedSchemaAndData(t *testing.T) {
+	for _, property := range []string{
+		"type: object\n                  properties:\n                    _caesium_actor:\n                      type: string",
+		"type: object\n                  const:\n                    _caesium_actor: nested",
+		"type: object\n                  enum:\n                    - _caesium_actor: nested",
+	} {
+		doc := strings.Replace(validConfig, "note:\n                  type: string", "note:\n                  "+property, 1)
+		if _, err := Parse([]byte(doc), nil); err != nil {
+			t.Fatalf("nested actor key in %q rejected: %v", property, err)
+		}
+	}
+	if _, err := Parse([]byte(validConfig+"_caesium_actor: user-value\n"), nil); err == nil {
+		t.Fatal("unknown top-level connector field accepted")
+	}
+}
+
 func TestParseRefusesClosedFailures(t *testing.T) {
 	cases := []struct {
 		name string
