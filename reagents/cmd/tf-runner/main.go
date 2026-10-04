@@ -690,7 +690,7 @@ func exportImportedOutputs(steps []string, environ []string, log io.Writer) ([]s
 // absent, and a producer whose normalized name merely EXTENDS this one as
 // present.
 func requireProducers(named map[string]string, present map[string]struct{}) error {
-	sentinel := normalizeStepName(publishedCountKey)
+	sentinel := tf.NormalizeEnvName(publishedCountKey)
 	var missing []string
 	for prefix, step := range named {
 		if _, ok := present[prefix+sentinel]; !ok {
@@ -728,7 +728,7 @@ func quotedList(names []string) string {
 
 // stepEnvPrefix is the environment prefix Caesium gives one step's outputs.
 func stepEnvPrefix(step string) string {
-	return "CAESIUM_OUTPUT_" + normalizeStepName(step) + "_"
+	return "CAESIUM_OUTPUT_" + tf.NormalizeEnvName(step) + "_"
 }
 
 // discoverStepPrefixes identifies, exactly, every step whose outputs are in this
@@ -748,7 +748,7 @@ func stepEnvPrefix(step string) string {
 // upstream APPLY steps by contract, so every real sibling is discoverable; the
 // per-variable log above is the backstop for anything else.
 func discoverStepPrefixes(present map[string]struct{}, named map[string]string) map[string]struct{} {
-	suffix := "_" + normalizeStepName(publishedCountKey)
+	suffix := "_" + tf.NormalizeEnvName(publishedCountKey)
 	prefixes := make(map[string]struct{}, len(present))
 	for key := range present {
 		if !strings.HasPrefix(key, "CAESIUM_OUTPUT_") {
@@ -782,11 +782,6 @@ func longestOwner(prefixes map[string]struct{}, key string) (string, bool) {
 // Caesium (the contract between them is the marker protocol, not a Go API), so
 // the rule is restated here; test/infra_deploy_test.go drives the real server,
 // which is what would catch a divergence.
-func normalizeStepName(name string) string {
-	name = strings.ReplaceAll(name, "-", "_")
-	name = strings.ReplaceAll(name, ".", "_")
-	return strings.ToUpper(name)
-}
 
 // ---------------------------------------------------------------------------
 // tf-apply
@@ -878,7 +873,7 @@ const publishedCountKey = "caesium_outputs_published"
 // variable.
 func isProtocolOutputSuffix(rest string) bool {
 	switch rest {
-	case normalizeStepName(publishedCountKey), normalizeStepName(tf.OutputNamesIndexRequiredKey):
+	case tf.NormalizeEnvName(publishedCountKey), tf.NormalizeEnvName(tf.OutputNamesIndexRequiredKey):
 		return true
 	default:
 		return false
@@ -905,7 +900,7 @@ func outputNamesIndexes(
 	prefixes := slices.Sorted(maps.Keys(named))
 	for _, prefix := range prefixes {
 		step := named[prefix]
-		publishedCountEnv := prefix + normalizeStepName(publishedCountKey)
+		publishedCountEnv := prefix + tf.NormalizeEnvName(publishedCountKey)
 		publishedCountValue := envValues[publishedCountEnv]
 		publishedCount, err := strconv.Atoi(publishedCountValue)
 		if err != nil || publishedCount < 0 {
@@ -914,7 +909,7 @@ func outputNamesIndexes(
 				step, publishedCountEnv, publishedCountValue)
 		}
 
-		requiredKey := prefix + normalizeStepName(tf.OutputNamesIndexRequiredKey)
+		requiredKey := prefix + tf.NormalizeEnvName(tf.OutputNamesIndexRequiredKey)
 		requiredValue, required := envValues[requiredKey]
 		if required && requiredValue != "1" {
 			return nil, fmt.Errorf(
@@ -1048,7 +1043,7 @@ func validateOutputNamesIndex(index map[string]string, suffixes map[string]struc
 			return fmt.Errorf("original output name %q is targeted by both %s and %s", original, prior, suffix)
 		}
 		originals[original] = suffix
-		if folded := normalizeStepName(original); folded != suffix {
+		if folded := tf.NormalizeEnvName(original); folded != suffix {
 			return fmt.Errorf("suffix %s maps to %q, which folds to %s", suffix, original, folded)
 		}
 		if _, exists := suffixes[suffix]; !exists {
@@ -1060,8 +1055,8 @@ func validateOutputNamesIndex(index map[string]string, suffixes map[string]struc
 	}
 
 	protocolNames := map[string]string{
-		normalizeStepName(publishedCountKey):              publishedCountKey,
-		normalizeStepName(tf.OutputNamesIndexRequiredKey): tf.OutputNamesIndexRequiredKey,
+		tf.NormalizeEnvName(publishedCountKey):              publishedCountKey,
+		tf.NormalizeEnvName(tf.OutputNamesIndexRequiredKey): tf.OutputNamesIndexRequiredKey,
 	}
 	for suffix, original := range protocolNames {
 		if got, exists := index[suffix]; exists && got != original {
@@ -1111,7 +1106,7 @@ type proposal struct {
 // Caesium exposes them: CAESIUM_OUTPUT_<PLAN>_PROPOSAL_SUMMARY and friends,
 // plus CAESIUM_OUTPUT_<PLAN>_<ARTIFACT>/_DIGEST for the reference.
 func readProposal(planStep string, getenv func(string) string) (proposal, error) {
-	prefix := "CAESIUM_OUTPUT_" + normalizeStepName(planStep) + "_"
+	prefix := "CAESIUM_OUTPUT_" + tf.NormalizeEnvName(planStep) + "_"
 
 	encoded := strings.TrimSpace(getenv(prefix + "PROPOSAL_SUMMARY"))
 	if encoded == "" {
@@ -1152,7 +1147,7 @@ func readProposal(planStep string, getenv func(string) string) (proposal, error)
 		return proposal{}, fmt.Errorf(
 			"step %q proposed changes but named no artifact; refusing to apply a plan that was never produced", planStep)
 	}
-	artifactPrefix := prefix + normalizeStepName(p.ArtifactKey)
+	artifactPrefix := prefix + tf.NormalizeEnvName(p.ArtifactKey)
 	p.ArtifactPath = strings.TrimSpace(getenv(artifactPrefix))
 	p.Digest = strings.TrimSpace(getenv(artifactPrefix + "_DIGEST"))
 	if p.ArtifactPath == "" || p.Digest == "" {

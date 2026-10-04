@@ -136,7 +136,7 @@ func outputNameSurvivesFold(name string) bool {
 // variable (pkg/task.NormalizeStepName). The reagents restate it rather than
 // import Caesium; test/infra_deploy_test.go drives the real server.
 func foldOutputKey(name string) string {
-	return strings.ToUpper(strings.NewReplacer("-", "_", ".", "_").Replace(name))
+	return NormalizeEnvName(name)
 }
 
 // CheckOutputNames refuses output names a consumer could not import exactly.

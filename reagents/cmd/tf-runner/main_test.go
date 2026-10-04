@@ -170,12 +170,12 @@ func branches(lines []string) []string {
 // authoritative index when any original name would not survive the fold.
 func applyOutputsEnviron(t *testing.T, step string, values map[string]string) []string {
 	t.Helper()
-	prefix := "CAESIUM_OUTPUT_" + normalizeStepName(step) + "_"
+	prefix := "CAESIUM_OUTPUT_" + tf.NormalizeEnvName(step) + "_"
 	environ := make([]string, 0, len(values)+1)
 	index := make(map[string]string, len(values))
 	needsIndex := false
 	for k, v := range values {
-		folded := normalizeStepName(k)
+		folded := tf.NormalizeEnvName(k)
 		environ = append(environ, prefix+folded+"="+v)
 		index[folded] = k
 		if strings.ToLower(folded) != k {
@@ -197,16 +197,16 @@ func applyOutputsEnviron(t *testing.T, step string, values map[string]string) []
 // with an output reference exposed as its path plus a companion _DIGEST.
 func plannedEnv(t *testing.T, step string, lines []string) {
 	t.Helper()
-	prefix := "CAESIUM_OUTPUT_" + normalizeStepName(step) + "_"
+	prefix := "CAESIUM_OUTPUT_" + tf.NormalizeEnvName(step) + "_"
 	for k, v := range outputs(t, lines) {
-		t.Setenv(prefix+normalizeStepName(k), v)
+		t.Setenv(prefix+tf.NormalizeEnvName(k), v)
 	}
 	if ref := outputRef(t, lines); ref != nil {
 		key, _ := ref["key"].(string)
 		path, _ := ref["path"].(string)
 		digest, _ := ref["digest"].(string)
-		t.Setenv(prefix+normalizeStepName(key), path)
-		t.Setenv(prefix+normalizeStepName(key)+"_DIGEST", digest)
+		t.Setenv(prefix+tf.NormalizeEnvName(key), path)
+		t.Setenv(prefix+tf.NormalizeEnvName(key)+"_DIGEST", digest)
 	}
 }
 
