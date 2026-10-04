@@ -82,7 +82,8 @@ func run(ctx context.Context, args []string) error {
 		if err := validateRepository(ctx, *repo, state); err != nil {
 			return err
 		}
-		listener, err := net.Listen("tcp", *listen)
+		listenConfig := net.ListenConfig{}
+		listener, err := listenConfig.Listen(ctx, "tcp", *listen)
 		if err != nil {
 			return errors.New("cannot bind private fixture listener")
 		}
@@ -282,7 +283,7 @@ func readRequest(r io.Reader, gitURL string) error {
 			return nil
 		}
 	}
-	return errors.New("Git request is outside the owned read-only source")
+	return errors.New("git request is outside the owned read-only source")
 }
 
 func uploadPack(ctx context.Context, conn net.Conn, repo, gitURL string) error {
