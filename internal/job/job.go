@@ -819,13 +819,7 @@ func buildLocalRunners(
 // buildParamEnv returns a map of environment variables derived from params.
 // It also injects CAESIUM_RUN_ID and CAESIUM_JOB_ALIAS.
 func buildParamEnv(runID uuid.UUID, jobAlias string, params map[string]string) map[string]string {
-	env := make(map[string]string, len(params)+2)
-	env["CAESIUM_RUN_ID"] = runID.String()
-	env["CAESIUM_JOB_ALIAS"] = jobAlias
-	for k, v := range params {
-		env["CAESIUM_PARAM_"+strings.ToUpper(k)] = v
-	}
-	return env
+	return jobdefruntime.BuildRunParamEnv(runID, jobAlias, params)
 }
 
 // taskHashInputArgs is the shared cache identity input for local execution.

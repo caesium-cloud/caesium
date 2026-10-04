@@ -863,13 +863,7 @@ func partitionEnv(taskRun *models.TaskRun, fanOut *jobdefschema.FanOut) map[stri
 }
 
 func buildRunParamEnv(runID uuid.UUID, jobAlias string, params map[string]string) map[string]string {
-	env := make(map[string]string, len(params)+2)
-	env["CAESIUM_RUN_ID"] = runID.String()
-	env["CAESIUM_JOB_ALIAS"] = jobAlias
-	for k, v := range params {
-		env["CAESIUM_PARAM_"+strings.ToUpper(k)] = v
-	}
-	return env
+	return jobdefruntime.BuildRunParamEnv(runID, jobAlias, params)
 }
 
 // executeTask runs one attempt and returns the partition list the container
