@@ -2,6 +2,7 @@ package tf
 
 import (
 	"context"
+	"github.com/caesium-cloud/caesium/reagents/internal/testutil"
 	"io"
 	"os"
 	"os/exec"
@@ -296,17 +297,11 @@ func plannedProbeInput(t *testing.T, runner *Runner, planPath string) string {
 
 func git(t *testing.T, dir string, args ...string) {
 	t.Helper()
-	full := append([]string{
-		"-c", "user.name=Pack Test",
-		"-c", "user.email=reagent@caesium.test",
-		"-c", "commit.gpgsign=false",
-		"-c", "safe.directory=" + dir,
-	}, args...)
-	cmd := exec.CommandContext(t.Context(), "git", full...)
-	cmd.Dir = dir
-	if out, err := cmd.CombinedOutput(); err != nil {
+	out, err := testutil.RunGit(t.Context(), dir, args...)
+	if err != nil {
 		t.Fatalf("git %v in %s: %v\n%s", args, dir, err, out)
 	}
+
 }
 
 func commit(t *testing.T, dir, msg string) {

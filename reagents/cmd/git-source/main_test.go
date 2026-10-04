@@ -6,13 +6,13 @@ import (
 	"encoding/json"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
 
 	"github.com/caesium-cloud/caesium/reagents/internal/protocol"
+	"github.com/caesium-cloud/caesium/reagents/internal/testutil"
 )
 
 // testRepo is a throwaway git repository on disk that the role clones over
@@ -54,15 +54,7 @@ func (r *testRepo) commit(msg string) string {
 
 func (r *testRepo) git(args ...string) string {
 	r.t.Helper()
-	full := append([]string{
-		"-c", "user.name=Pack Test",
-		"-c", "user.email=reagent@caesium.test",
-		"-c", "commit.gpgsign=false",
-		"-c", "safe.directory=" + r.dir,
-	}, args...)
-	cmd := exec.CommandContext(r.t.Context(), "git", full...)
-	cmd.Dir = r.dir
-	out, err := cmd.CombinedOutput()
+	out, err := testutil.RunGit(r.t.Context(), r.dir, args...)
 	if err != nil {
 		r.t.Fatalf("git %v: %v\n%s", args, err, out)
 	}

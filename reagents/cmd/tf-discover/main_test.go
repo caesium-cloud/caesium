@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/caesium-cloud/caesium/reagents/internal/protocol"
+	"github.com/caesium-cloud/caesium/reagents/internal/testutil"
 	"github.com/caesium-cloud/caesium/reagents/internal/tf"
 )
 
@@ -473,15 +474,7 @@ func remoteModuleStack(t *testing.T, root string) string {
 
 func gitInFixture(t *testing.T, dir string, args ...string) string {
 	t.Helper()
-	full := append([]string{
-		"-c", "user.name=Pack Test",
-		"-c", "user.email=reagent@caesium.test",
-		"-c", "commit.gpgsign=false",
-		"-c", "safe.directory=" + dir,
-	}, args...)
-	cmd := exec.CommandContext(t.Context(), "git", full...)
-	cmd.Dir = dir
-	out, err := cmd.CombinedOutput()
+	out, err := testutil.RunGit(t.Context(), dir, args...)
 	if err != nil {
 		t.Fatalf("git %v in %s: %v\n%s", args, dir, err, out)
 	}
