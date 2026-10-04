@@ -2,6 +2,7 @@ package env
 
 import (
 	"fmt"
+	"math"
 	"strconv"
 	"strings"
 )
@@ -54,6 +55,9 @@ func parseByteSize(value string) (int64, error) {
 		parsed, err := strconv.ParseInt(raw, 10, 64)
 		if err != nil {
 			return 0, fmt.Errorf("invalid byte size %q: %w", value, err)
+		}
+		if parsed < math.MinInt64/candidate.multiplier || parsed > math.MaxInt64/candidate.multiplier {
+			return 0, fmt.Errorf("invalid byte size %q: suffix multiplication overflows int64", value)
 		}
 		return parsed * candidate.multiplier, nil
 	}
