@@ -2,8 +2,6 @@ package auth
 
 import (
 	"errors"
-	"sort"
-	"strings"
 	"time"
 
 	"github.com/caesium-cloud/caesium/internal/models"
@@ -66,19 +64,5 @@ func normalizeAllowlist(in []string) []string {
 	if len(in) == 0 {
 		return nil
 	}
-	seen := make(map[string]struct{}, len(in))
-	out := make([]string, 0, len(in))
-	for _, a := range in {
-		a = strings.TrimSpace(a)
-		if a == "" {
-			continue
-		}
-		if _, ok := seen[a]; ok {
-			continue
-		}
-		seen[a] = struct{}{}
-		out = append(out, a)
-	}
-	sort.Strings(out)
-	return out
+	return normalizeJobAliases(in)
 }
