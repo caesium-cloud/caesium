@@ -39,11 +39,11 @@ import (
 	"net"
 	"net/http"
 	"net/url"
-	"path/filepath"
 	"strconv"
 	"sync/atomic"
 
 	"github.com/caesium-cloud/caesium/internal/bodylimit"
+	"github.com/caesium-cloud/caesium/test/internal/workloadcatalog"
 	"github.com/prometheus/common/expfmt"
 	"github.com/prometheus/common/model"
 	"os"
@@ -4359,75 +4359,13 @@ func (r *report) markdown() string {
 // Keeping the catalog inside the driver — rather than only inside the
 // integration test — means the same entries can be replayed by hand and can be
 // validated hermetically, without a server.
-type catalog struct {
-	SchemaVersion int            `json:"schema_version"`
-	Description   string         `json:"description"`
-	Workloads     []catalogEntry `json:"workloads"`
-}
+type catalog = workloadcatalog.Catalog
+type catalogEntry = workloadcatalog.Entry
+type catalogRequires = workloadcatalog.Requires
 
-type catalogEntry struct {
-	Name        string `json:"name"`
-	Tier        string `json:"tier"`
-	Description string `json:"description"`
-	// Requires declares what the server under test must provide. A workload
-	// whose prerequisites are absent is reported blocked/skipped with this
-	// reason — never silently passed.
-	Requires catalogRequires `json:"requires"`
-	// Driver maps load-driver flag names to values. Using the real flag names
-	// keeps the catalog honest: an unknown or malformed knob fails to parse
-	// instead of being ignored.
-	Driver map[string]any `json:"driver"`
-	// Expect is the invariant set the integration runner asserts on the
-	// driver's JSON result.
-	Expect map[string]any `json:"expect"`
-	// SustainedRationale records why this workload does or does not gate on
-	// the backlog verdict. Required: see TestWorkloadCatalogIsValid.
-	SustainedRationale string `json:"sustained_rationale"`
-}
-
-type catalogRequires struct {
-	Engine    string   `json:"engine"`
-	ServerEnv []string `json:"server_env"`
-	Reason    string   `json:"reason"`
-}
-
-// catalogSchemaVersion is the version this driver understands.
 const catalogSchemaVersion = 1
 
-func loadCatalog(path string) (*catalog, error) {
-	raw, err := os.ReadFile(filepath.Clean(path))
-	if err != nil {
-		return nil, fmt.Errorf("read workload catalog: %w", err)
-	}
-	var c catalog
-	if err := json.Unmarshal(raw, &c); err != nil {
-		return nil, fmt.Errorf("parse workload catalog %s: %w", path, err)
-	}
-	if c.SchemaVersion != catalogSchemaVersion {
-		return nil, fmt.Errorf("workload catalog %s has schema_version %d, this driver understands %d",
-			path, c.SchemaVersion, catalogSchemaVersion)
-	}
-	if len(c.Workloads) == 0 {
-		return nil, fmt.Errorf("workload catalog %s declares no workloads", path)
-	}
-	seen := map[string]bool{}
-	for _, entry := range c.Workloads {
-		if strings.TrimSpace(entry.Name) == "" {
-			return nil, fmt.Errorf("workload catalog %s has an entry without a name", path)
-		}
-		if seen[entry.Name] {
-			return nil, fmt.Errorf("workload catalog %s declares %q twice", path, entry.Name)
-		}
-		seen[entry.Name] = true
-		if len(entry.Driver) == 0 {
-			return nil, fmt.Errorf("workload %q declares no driver flags", entry.Name)
-		}
-		if len(entry.Expect) == 0 {
-			return nil, fmt.Errorf("workload %q declares no expectations, so running it could not fail", entry.Name)
-		}
-	}
-	return &c, nil
-}
+func loadCatalog(path string) (*catalog, error) { return workloadcatalog.Load(path) }
 
 // flagValue renders a catalog value as the string the flag package parses.
 func flagValue(v any) (string, error) {

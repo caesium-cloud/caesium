@@ -16,6 +16,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/caesium-cloud/caesium/test/internal/workloadcatalog"
 )
 
 const validMetrics = "# TYPE caesium_db_busy_retries_total counter\ncaesium_db_busy_retries_total 0\n# TYPE caesium_db_writes_total counter\ncaesium_db_writes_total{category=\"task_run_status\"} 5\n# TYPE caesium_db_statements_total counter\ncaesium_db_statements_total{category=\"task_run_status\"} 2\n"
@@ -229,7 +231,7 @@ func TestBooleanEnvironmentErrorsClearedByCatalogValues(t *testing.T) {
 			t.Setenv(tc.envName, "malformed")
 			catalogPath := filepath.Join(t.TempDir(), "catalog.json")
 			body, err := json.Marshal(catalog{SchemaVersion: catalogSchemaVersion, Workloads: []catalogEntry{{
-				Name: "selected", Driver: map[string]any{tc.flagName: tc.value}, Expect: map[string]any{"exit_code": float64(0)},
+				Name: "selected", Driver: map[string]any{tc.flagName: tc.value}, Expect: testExpectations(t, `{"exit_code":0}`),
 			}}})
 			if err != nil {
 				t.Fatal(err)
@@ -1823,7 +1825,7 @@ func TestWorkloadCatalogIsValid(t *testing.T) {
 			if entry.Tier != "smoke" && entry.Tier != "extended" {
 				t.Fatalf("unknown tier %q", entry.Tier)
 			}
-			if _, ok := entry.Expect["exit_code"]; !ok {
+			if entry.Expect.ExitCode == nil {
 				t.Fatal("entry declares no expected exit code")
 			}
 			if cfg.mode == modeOpen && cfg.totalArrivals() < 1 {
@@ -2846,5 +2848,50 @@ func TestUnresolvedTransportUncertainIsInconclusive(t *testing.T) {
 	}
 	if decoded.Outcome != "inconclusive" || decoded.Failure != "uncertain_admission_unresolved" {
 		t.Fatalf("json outcome=%s failure=%s", decoded.Outcome, decoded.Failure)
+	}
+}
+
+func testExpectations(t *testing.T, raw string) workloadcatalog.Expectations {
+	t.Helper()
+	var e workloadcatalog.Expectations
+	if err := json.Unmarshal([]byte(raw), &e); err != nil {
+		t.Fatal(err)
+	}
+	return e
+}
+
+func TestCatalogPreservesSelectedDriverOverrideAndUnselectedDynamicValues(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "catalog.json")
+	raw := `{"schema_version":1,"workloads":[{"name":"selected","driver":{"jobs":["malformed"],"unknown":{"nested":true}},"expect":{"exit_code":0}},{"name":"unselected","driver":{"unused":[false]},"expect":{"accounting_identity":false}}]}`
+	if err := os.WriteFile(path, []byte(raw), 0600); err != nil {
+		t.Fatal(err)
+	}
+	c, err := loadCatalog(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := defaultConfig()
+	flags := newFlagSet(&cfg, io.Discard)
+	if err := applyEntry(c.Workloads[0], flags, map[string]bool{"jobs": true, "unknown": true}); err != nil {
+		t.Fatalf("explicit overrides must skip validation: %v", err)
+	}
+	if err := applyEntry(c.Workloads[0], flags, nil); err == nil {
+		t.Fatal("selected malformed values accepted without override")
+	}
+	if c.Workloads[1].Expect.AccountingIdentity == nil || *c.Workloads[1].Expect.AccountingIdentity {
+		t.Fatal("explicit false lost")
+	}
+}
+
+func TestCatalogRejectsMalformedUnselectedTypedExpectations(t *testing.T) {
+	for _, expect := range []string{`{"unknown":1}`, `{"min_offered":"1"}`, `{"accounting_identity":0}`, `{"require_lifecycle_ok":[1]}`, `{"require_unavailable_reason":{"claim":1}}`} {
+		path := filepath.Join(t.TempDir(), "catalog.json")
+		raw := `{"schema_version":1,"workloads":[{"name":"selected","driver":{"jobs":1},"expect":{"exit_code":0}},{"name":"unselected","driver":{"jobs":1},"expect":` + expect + `}]}`
+		if err := os.WriteFile(path, []byte(raw), 0600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := loadCatalog(path); err == nil {
+			t.Fatalf("accepted unselected expectation %s", expect)
+		}
 	}
 }
