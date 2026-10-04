@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"github.com/caesium-cloud/caesium/cmd/cliutil"
+	"github.com/caesium-cloud/caesium/internal/clihttp"
 	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v3"
 )
@@ -197,29 +198,22 @@ func readProfileFile(path string) (*profileFile, error) {
 }
 
 func doRequest(cmd *cobra.Command, method, reqURL string, body io.Reader, wantStatus int, label string) ([]byte, error) {
-	req, err := http.NewRequestWithContext(cmd.Context(), method, reqURL, body)
-	if err != nil {
-		return nil, err
-	}
+	headers := make(http.Header)
 	if body != nil {
-		req.Header.Set("Content-Type", "application/json")
+		headers.Set("Content-Type", "application/json")
 	}
 	if k := cliutil.ResolveAPIKey(cmd, apiKeyFlag, agentProfileAPIKeyEnvVar, cliutil.APIKeyEnvVar); k != "" {
-		req.Header.Set("Authorization", "Bearer "+k)
+		headers.Set("Authorization", "Bearer "+k)
 	}
-
-	resp, err := httpClient.Do(req)
+	respBody, status, err := clihttp.Exchange(cmd.Context(), httpClient, method, reqURL, body, headers)
 	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = resp.Body.Close() }()
-
-	respBody, err := io.ReadAll(resp.Body)
-	if err != nil {
+		if status == 0 {
+			return nil, err
+		}
 		return nil, fmt.Errorf("reading %s response: %w", label, err)
 	}
-	if resp.StatusCode != wantStatus {
-		return nil, fmt.Errorf("%s failed (%d): %s", label, resp.StatusCode, strings.TrimSpace(string(respBody)))
+	if status != wantStatus {
+		return nil, fmt.Errorf("%s failed (%d): %s", label, status, strings.TrimSpace(string(respBody)))
 	}
 	return respBody, nil
 }
