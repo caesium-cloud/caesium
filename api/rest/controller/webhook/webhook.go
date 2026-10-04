@@ -20,6 +20,7 @@ import (
 	"github.com/caesium-cloud/caesium/internal/job"
 	"github.com/caesium-cloud/caesium/internal/metrics"
 	"github.com/caesium-cloud/caesium/internal/models"
+	"github.com/caesium-cloud/caesium/internal/runlife"
 	triggerevent "github.com/caesium-cloud/caesium/internal/trigger/event"
 	triggerhttp "github.com/caesium-cloud/caesium/internal/trigger/http"
 	"github.com/caesium-cloud/caesium/pkg/db"
@@ -135,6 +136,33 @@ func ReceiveWithServices(c *echo.Context, trigSvc TriggerLister, jobSvc JobListe
 		return echo.NewHTTPError(http.StatusUnauthorized, "invalid signature")
 	}
 
+	// Admit receipt persistence and every HTTP job before the event bridge can
+	// commit any durable work. Request cancellation does not end these contexts.
+	receiptCtx, releaseReceipt, err := runlife.FromContext(c.Request().Context()).Reserve(c.Request().Context())
+	if err != nil {
+		return echo.NewHTTPError(http.StatusServiceUnavailable, err.Error()).Wrap(err)
+	}
+	receiptTransferred := false
+	defer func() {
+		if !receiptTransferred {
+			releaseReceipt()
+		}
+	}()
+	var launches []func() int
+	var releases []func()
+	defer func() {
+		for _, release := range releases {
+			release()
+		}
+	}()
+	for _, acceptedTrigger := range accepted {
+		launch, release, err := reserveHTTPTriggerJobs(c.Request().Context(), acceptedTrigger, runner)
+		if err != nil {
+			return echo.NewHTTPError(http.StatusServiceUnavailable, err.Error()).Wrap(err)
+		}
+		launches = append(launches, launch)
+		releases = append(releases, release)
+	}
 	// A webhook may satisfy both an HTTP trigger and one or more event triggers.
 	// That is an explicit fan-out contract: the event bridge is persisted/routed
 	// before HTTP jobs are launched when possible, and both trigger families may
@@ -157,12 +185,14 @@ func ReceiveWithServices(c *echo.Context, trigSvc TriggerLister, jobSvc JobListe
 	}
 
 	httpRunsStarted := 0
-	for _, acceptedTrigger := range accepted {
-		httpRunsStarted += launchHTTPTriggerJobs(c.Request().Context(), acceptedTrigger, runner)
+	for _, launch := range launches {
+		httpRunsStarted += launch()
 	}
+	releases = nil
 
 	receipt := acceptedWebhookReceipt(path, ingested.Source, accepted, httpRunsStarted, result, err)
-	recordWebhookReceiptAsync(c.Request().Context(), path, receipt)
+	recordWebhookReceiptAsync(receiptCtx, path, receipt, releaseReceipt)
+	receiptTransferred = true
 
 	return c.JSON(http.StatusAccepted, webhookReceiptResponse(receipt))
 }
@@ -176,12 +206,17 @@ func FireHTTPTrigger(ctx context.Context, jobSvc JobLister, trig *models.Trigger
 	if err != nil {
 		return err
 	}
-	launchHTTPTriggerJobs(ctx, acceptedHTTPTrigger{
+	launch, release, err := reserveHTTPTriggerJobs(ctx, acceptedHTTPTrigger{
 		trigger:     trig,
 		httpTrigger: httpTrigger,
 		params:      params,
 		jobs:        jobs,
 	}, runner)
+	if err != nil {
+		return err
+	}
+	defer release()
+	launch()
 	return nil
 }
 
@@ -214,39 +249,54 @@ func listTriggerJobs(ctx context.Context, jobSvc JobLister, trig *models.Trigger
 	return jobs, nil
 }
 
-func launchHTTPTriggerJobs(ctx context.Context, accepted acceptedHTTPTrigger, runner Runner) int {
+func reserveHTTPTriggerJobs(ctx context.Context, accepted acceptedHTTPTrigger, runner Runner) (func() int, func(), error) {
 	if runner == nil {
 		runner = DefaultRunner
 	}
 	if accepted.httpTrigger == nil || accepted.trigger == nil {
-		log.Warn("skipping malformed accepted webhook trigger")
-		return 0
+		return func() int { return 0 }, func() {}, nil
 	}
-
-	log.Info("running jobs", "count", len(accepted.jobs), "trigger_id", accepted.trigger.ID)
-
-	started := 0
+	var launches []func()
+	var releases []func()
+	releaseAll := func() {
+		for _, release := range releases {
+			release()
+		}
+	}
 	for _, j := range accepted.jobs {
-		if j == nil {
-			log.Warn("skipping nil job", "trigger_id", accepted.trigger.ID)
+		if j == nil || j.Paused {
 			continue
 		}
-		if j.Paused {
-			log.Info("skipping paused job", "id", j.ID)
-			continue
+		workCtx, release, err := runlife.FromContext(ctx).Reserve(ctx)
+		if err != nil {
+			releaseAll()
+			return nil, nil, err
 		}
-
 		capturedJob := j
 		capturedParams := cloneStringMap(accepted.httpTrigger.MergeParams(accepted.params))
-		started++
-		go func() {
-			runCtx := context.WithoutCancel(ctx)
-			if err := runner(runCtx, capturedJob, capturedParams); err != nil {
-				log.Error("job run failure", "id", capturedJob.ID, "error", err)
-			}
-		}()
+		releases = append(releases, release)
+		launches = append(launches, func() {
+			go func() {
+				defer release()
+				if err := runner(workCtx, capturedJob, capturedParams); err != nil {
+					log.Error("job run failure", "id", capturedJob.ID, "error", err)
+				}
+			}()
+		})
 	}
-	return started
+	launched := false
+	cleanup := func() {
+		if !launched {
+			releaseAll()
+		}
+	}
+	return func() int {
+		launched = true
+		for _, launch := range launches {
+			launch()
+		}
+		return len(launches)
+	}, cleanup, nil
 }
 
 func DefaultRunner(ctx context.Context, j *models.Job, params map[string]string) error {
@@ -316,18 +366,19 @@ func acceptedWebhookReceipt(path, source string, accepted []acceptedHTTPTrigger,
 	return receipt
 }
 
-func recordWebhookReceiptAsync(ctx context.Context, path string, receipt *models.WebhookEvent) {
+func recordWebhookReceiptAsync(ctx context.Context, path string, receipt *models.WebhookEvent, release func()) {
 	if receipt == nil {
+		release()
 		return
 	}
-
 	captured := *receipt
 	// Capture the recorder synchronously before launching the goroutine: it's a
 	// package-level var that tests stub + restore, so reading it inside the
 	// goroutine races the test's Cleanup (the -race detector flags it).
 	recorder := recordWebhookReceipt
 	go func() {
-		recordCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), webhookReceiptRecordTimeout)
+		defer release()
+		recordCtx, cancel := context.WithTimeout(ctx, webhookReceiptRecordTimeout)
 		defer cancel()
 		if recordErr := recorder(recordCtx, &captured); recordErr != nil {
 			log.Warn("webhook receipt log failed", "path", path, "error", recordErr)

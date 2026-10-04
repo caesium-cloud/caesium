@@ -19,6 +19,7 @@ import (
 	"github.com/caesium-cloud/caesium/internal/metrics"
 	metrictestutil "github.com/caesium-cloud/caesium/internal/metrics/testutil"
 	"github.com/caesium-cloud/caesium/internal/models"
+	"github.com/caesium-cloud/caesium/internal/runlife"
 	triggerevent "github.com/caesium-cloud/caesium/internal/trigger/event"
 	triggerhttp "github.com/caesium-cloud/caesium/internal/trigger/http"
 	"github.com/caesium-cloud/caesium/pkg/env"
@@ -79,7 +80,7 @@ func TestReceiveWithServicesFiresWebhookTrigger(t *testing.T) {
 	triggerID := uuid.New()
 	jobID := uuid.New()
 
-	req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/v1/hooks/github/push", strings.NewReader(`{"ref":"refs/heads/main"}`))
+	req := httptest.NewRequestWithContext(webhookTestContext(t), http.MethodPost, "/v1/hooks/github/push", strings.NewReader(`{"ref":"refs/heads/main"}`))
 	req.Header.Set("Authorization", "Bearer top-secret")
 	rec := httptest.NewRecorder()
 
@@ -158,7 +159,7 @@ func TestReceiveWithServicesRecordsWebhookReceipt(t *testing.T) {
 
 	triggerID := uuid.New()
 	jobID := uuid.New()
-	req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/v1/hooks/github/push", strings.NewReader(`{"ref":"refs/heads/main"}`))
+	req := httptest.NewRequestWithContext(webhookTestContext(t), http.MethodPost, "/v1/hooks/github/push", strings.NewReader(`{"ref":"refs/heads/main"}`))
 	req.Header.Set("Authorization", "Bearer top-secret")
 	req.Header.Set("X-Caesium-Event-Source", "github")
 	rec := httptest.NewRecorder()
@@ -219,7 +220,7 @@ func TestReceiveWithServicesContinuesWhenWebhookBridgeFails(t *testing.T) {
 	runs := make(chan struct{}, 1)
 	before := metrictestutil.CounterValue(t, metrics.EventBridgeFailuresTotal, "webhook")
 
-	req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/v1/hooks/github/issues", strings.NewReader(`{"action":"opened"}`))
+	req := httptest.NewRequestWithContext(webhookTestContext(t), http.MethodPost, "/v1/hooks/github/issues", strings.NewReader(`{"action":"opened"}`))
 	req.Header.Set("Authorization", "Bearer top-secret")
 	rec := httptest.NewRecorder()
 
@@ -278,7 +279,7 @@ func TestReceiveWithServicesRoutesWebhookBeforeHTTPJobs(t *testing.T) {
 		return &triggerevent.RouteResult{EventID: uuid.New(), EventType: evt.Type, Source: evt.Source}, nil
 	})
 
-	req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/v1/hooks/github/issues", strings.NewReader(`{"action":"opened"}`))
+	req := httptest.NewRequestWithContext(webhookTestContext(t), http.MethodPost, "/v1/hooks/github/issues", strings.NewReader(`{"action":"opened"}`))
 	req.Header.Set("Authorization", "Bearer top-secret")
 	req.Header.Set("X-Caesium-Event-Source", "github")
 	rec := httptest.NewRecorder()
@@ -322,7 +323,7 @@ func TestReceiveWithServicesRoutesWebhookBeforeHTTPJobs(t *testing.T) {
 func TestReceiveWithServicesRejectsInvalidSignature(t *testing.T) {
 	require.NoError(t, env.Process())
 
-	req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/v1/hooks/github/push", strings.NewReader(`{"ref":"refs/heads/main"}`))
+	req := httptest.NewRequestWithContext(webhookTestContext(t), http.MethodPost, "/v1/hooks/github/push", strings.NewReader(`{"ref":"refs/heads/main"}`))
 	req.Header.Set("Authorization", "Bearer wrong-secret")
 	rec := httptest.NewRecorder()
 
@@ -363,7 +364,7 @@ func TestReceiveWithServicesRejectsOversizedBody(t *testing.T) {
 	t.Setenv("CAESIUM_WEBHOOK_MAX_BODY_SIZE", "8B")
 	require.NoError(t, env.Process())
 
-	req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/v1/hooks/github/push", strings.NewReader(`{"ref":"refs/heads/main"}`))
+	req := httptest.NewRequestWithContext(webhookTestContext(t), http.MethodPost, "/v1/hooks/github/push", strings.NewReader(`{"ref":"refs/heads/main"}`))
 	rec := httptest.NewRecorder()
 
 	e := echo.New()
@@ -393,7 +394,7 @@ func TestReceiveWithServicesRateLimitsByIP(t *testing.T) {
 	webhookRateLimiters = authmw.NewIPRateLimiters(15*time.Minute, webhookRateLimitConfig)
 
 	newContext := func() *echo.Context {
-		req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/v1/hooks/github/push", strings.NewReader(`{"ref":"refs/heads/main"}`))
+		req := httptest.NewRequestWithContext(webhookTestContext(t), http.MethodPost, "/v1/hooks/github/push", strings.NewReader(`{"ref":"refs/heads/main"}`))
 		req.Header.Set("Authorization", "Bearer top-secret")
 		req.RemoteAddr = "203.0.113.8:1234"
 		rec := httptest.NewRecorder()
@@ -437,7 +438,7 @@ func TestReceiveWithServicesRecordsMetricOnInvalidSignature(t *testing.T) {
 
 	before := metrictestutil.CounterValue(t, metrics.WebhookAuthFailuresTotal, "github/push", "invalid_signature")
 
-	req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/v1/hooks/github/push", strings.NewReader(`{"ref":"main"}`))
+	req := httptest.NewRequestWithContext(webhookTestContext(t), http.MethodPost, "/v1/hooks/github/push", strings.NewReader(`{"ref":"main"}`))
 	req.Header.Set("Authorization", "Bearer wrong-secret")
 	rec := httptest.NewRecorder()
 
@@ -483,7 +484,7 @@ func TestReceiveWithServicesRecordsMetricOnReplayedRequest(t *testing.T) {
 	_, _ = mac.Write([]byte(body))
 	sig := "sha256=" + hex.EncodeToString(mac.Sum(nil))
 
-	req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/v1/hooks/github/push", strings.NewReader(body))
+	req := httptest.NewRequestWithContext(webhookTestContext(t), http.MethodPost, "/v1/hooks/github/push", strings.NewReader(body))
 	req.Header.Set("X-Hub-Signature-256", sig)
 	req.Header.Set("X-Webhook-Timestamp", ts)
 	rec := httptest.NewRecorder()
@@ -528,7 +529,7 @@ func TestReceiveWithServicesNoMetricWhenOneTriggerAccepts(t *testing.T) {
 
 	before := metrictestutil.CounterValue(t, metrics.WebhookAuthFailuresTotal, "multi/path", "invalid_signature")
 
-	req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/v1/hooks/multi/path", strings.NewReader(`{"ref":"main"}`))
+	req := httptest.NewRequestWithContext(webhookTestContext(t), http.MethodPost, "/v1/hooks/multi/path", strings.NewReader(`{"ref":"main"}`))
 	req.Header.Set("Authorization", "Bearer correct-secret")
 	rec := httptest.NewRecorder()
 
@@ -569,4 +570,94 @@ func TestReceiveWithServicesNoMetricWhenOneTriggerAccepts(t *testing.T) {
 
 	after := metrictestutil.CounterValue(t, metrics.WebhookAuthFailuresTotal, "multi/path", "invalid_signature")
 	require.Equal(t, before, after, "should not record failure when at least one trigger accepts")
+}
+
+func webhookTestContext(t *testing.T) context.Context {
+	t.Helper()
+	owner := runlife.New(context.Background())
+	t.Cleanup(func() {
+		owner.CloseAndCancel()
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		require.NoError(t, owner.Wait(ctx))
+	})
+	return runlife.WithSupervisor(t.Context(), owner)
+}
+
+func TestWebhookJobsAndReceiptsKeepValuesAndJoin(t *testing.T) {
+	require.NoError(t, env.Process())
+	stubWebhookRouter(t, func(context.Context, *models.IngestedEvent) (*triggerevent.RouteResult, error) {
+		return &triggerevent.RouteResult{}, nil
+	})
+	type key struct{}
+	owner := runlife.New(context.Background())
+	request, cancelRequest := context.WithCancel(runlife.WithSupervisor(context.WithValue(context.Background(), key{}, "value"), owner))
+	defer cancelRequest()
+	jobStarted, receiptStarted := make(chan context.Context, 1), make(chan context.Context, 1)
+	finishJob, finishReceipt := make(chan struct{}), make(chan struct{})
+	stubWebhookReceiptRecorder(t, func(ctx context.Context, _ *models.WebhookEvent) error {
+		receiptStarted <- ctx
+		<-finishReceipt
+		return nil
+	})
+	req := httptest.NewRequestWithContext(request, http.MethodPost, "/v1/hooks/supervised", strings.NewReader(`{}`))
+	req.RemoteAddr = "203.0.113.219:4321"
+	req.Header.Set("Authorization", "Bearer secret")
+	e := echo.New()
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+	c.SetPathValues(echo.PathValues{{Name: "*", Value: "supervised"}})
+	err := ReceiveWithServices(c, stubTriggerLister{triggers: models.Triggers{&models.Trigger{ID: uuid.New(), Type: models.TriggerTypeHTTP, Configuration: `{"path":"supervised","secret":"secret","signatureScheme":"bearer"}`}}}, stubJobLister{jobs: models.Jobs{&models.Job{ID: uuid.New()}}}, nil, func(ctx context.Context, _ *models.Job, _ map[string]string) error {
+		jobStarted <- ctx
+		<-finishJob
+		return nil
+	})
+	require.NoError(t, err)
+	require.Equal(t, 202, rec.Code)
+	jobCtx, receiptCtx := <-jobStarted, <-receiptStarted
+	cancelRequest()
+	for _, ctx := range []context.Context{jobCtx, receiptCtx} {
+		require.NoError(t, ctx.Err())
+		require.Equal(t, "value", ctx.Value(key{}))
+	}
+	deadline, ok := receiptCtx.Deadline()
+	require.True(t, ok)
+	require.WithinDuration(t, time.Now().Add(webhookReceiptRecordTimeout), deadline, time.Second)
+	owner.CloseAndCancel()
+	for _, ctx := range []context.Context{jobCtx, receiptCtx} {
+		select {
+		case <-ctx.Done():
+		case <-time.After(time.Second):
+			t.Fatal("work not cancelled")
+		}
+	}
+	expired, expire := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer expire()
+	require.ErrorIs(t, owner.Wait(expired), context.DeadlineExceeded)
+	close(finishJob)
+	require.ErrorIs(t, owner.Wait(expired), context.DeadlineExceeded, "receipt write must remain joined separately")
+	close(finishReceipt)
+	require.NoError(t, owner.Wait(context.Background()))
+}
+
+func TestWebhookClosedOwnerRejectsBeforeEventBridge(t *testing.T) {
+	require.NoError(t, env.Process())
+	called := false
+	stubWebhookRouter(t, func(context.Context, *models.IngestedEvent) (*triggerevent.RouteResult, error) {
+		called = true
+		return nil, nil
+	})
+	owner := runlife.New(context.Background())
+	owner.CloseAndCancel()
+	req := httptest.NewRequestWithContext(runlife.WithSupervisor(context.Background(), owner), http.MethodPost, "/v1/hooks/closed", strings.NewReader(`{}`))
+	req.RemoteAddr = "203.0.113.220:4321"
+	req.Header.Set("Authorization", "Bearer secret")
+	e := echo.New()
+	c := e.NewContext(req, httptest.NewRecorder())
+	c.SetPathValues(echo.PathValues{{Name: "*", Value: "closed"}})
+	err := ReceiveWithServices(c, stubTriggerLister{triggers: models.Triggers{&models.Trigger{ID: uuid.New(), Type: models.TriggerTypeHTTP, Configuration: `{"path":"closed","secret":"secret","signatureScheme":"bearer"}`}}}, stubJobLister{}, nil, nil)
+	var he *echo.HTTPError
+	require.ErrorAs(t, err, &he)
+	require.Equal(t, 503, he.Code)
+	require.False(t, called)
 }
