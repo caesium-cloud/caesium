@@ -4,7 +4,6 @@ package robustness
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"net/http"
 	"strings"

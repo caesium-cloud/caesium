@@ -5,7 +5,6 @@ import (
 	"testing"
 
 	jobdeftestutil "github.com/caesium-cloud/caesium/internal/jobdef/testutil"
-	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/suite"
 	"gorm.io/gorm"
