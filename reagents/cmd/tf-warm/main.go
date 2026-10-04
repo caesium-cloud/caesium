@@ -663,7 +663,7 @@ func mirrorRound(ctx context.Context, cfg config, group []tf.LockedProvider, dir
 	// to stderr where it is still visible in the task log.
 	terraform.SetStdout(os.Stderr)
 	terraform.SetStderr(os.Stderr)
-	if err := terraform.SetEnv(tfexec.CleanEnv(envWith("TF_DATA_DIR", filepath.Join(dir, ".tfdata")))); err != nil {
+	if err := terraform.SetEnv(tfexec.CleanEnv(tf.EnvironmentWith("TF_DATA_DIR", filepath.Join(dir, ".tfdata")))); err != nil {
 		return fmt.Errorf("configure terraform environment: %w", err)
 	}
 
@@ -756,15 +756,3 @@ func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
 // envWith is this process's environment plus one override. Terraform's own
 // TF_DATA_DIR must point at scratch: the synthetic root module is temporary and
 // nothing may be written into the (read-only) source tree.
-func envWith(key, value string) map[string]string {
-	env := make(map[string]string, len(os.Environ())+1)
-	for _, kv := range os.Environ() {
-		k, v, ok := strings.Cut(kv, "=")
-		if !ok {
-			continue
-		}
-		env[k] = v
-	}
-	env[key] = value
-	return env
-}

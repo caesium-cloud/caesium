@@ -319,15 +319,7 @@ func isRootModule(dir string) (bool, error) {
 // stripped rather than rejected because a job manifest may legitimately set
 // TF_VAR_* on every step in the group, and discover has no use for them.
 func terraformEnv(dataDir string) map[string]string {
-	env := make(map[string]string, len(os.Environ())+1)
-	for _, kv := range os.Environ() {
-		key, value, ok := strings.Cut(kv, "=")
-		if !ok {
-			continue
-		}
-		env[key] = value
-	}
-	env["TF_DATA_DIR"] = dataDir
+	env := tf.EnvironmentWith("TF_DATA_DIR", dataDir)
 
 	// A git module source makes `terraform get` shell out to git, and git
 	// synthesizes a reflog identity by resolving the machine's own hostname
