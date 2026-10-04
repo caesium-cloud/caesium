@@ -6,7 +6,7 @@ import (
 	"github.com/google/uuid"
 )
 
-type BackfillStatus BackfillStatus
+type BackfillStatus string
 
 const (
 	BackfillStatusRunning   BackfillStatus = "running"
