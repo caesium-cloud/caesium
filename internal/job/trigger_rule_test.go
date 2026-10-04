@@ -96,6 +96,76 @@ func TestIsTolerantRule(t *testing.T) {
 
 // ─── integration tests ───────────────────────────────────────────────────────
 
+type triggerRuleRunScenario struct {
+	name              string
+	taskNames         []string
+	triggerRules      map[string]string
+	edges             [][2]string
+	failurePolicy     string
+	maxParallel       int
+	createErrByName   map[string]string
+	runDurationByName map[string]time.Duration
+	wantRunErr        bool
+	wantRunError      string
+	wantStatuses      map[string]run.TaskStatus
+}
+
+func runTriggerRuleScenario(t *testing.T, tc triggerRuleRunScenario) {
+	t.Helper()
+	db := jobdeftestutil.OpenTestDB(t)
+	t.Cleanup(func() { jobdeftestutil.CloseDB(db) })
+	store := run.NewStore(db)
+	engine := newFakeEngine()
+	jobID := uuid.New()
+	taskIDs := make(map[string]uuid.UUID, len(tc.taskNames))
+	atomIDs := make(map[string]uuid.UUID, len(tc.taskNames))
+	tasks := make(models.Tasks, 0, len(tc.taskNames))
+	atoms := make(map[uuid.UUID]*models.Atom, len(tc.taskNames))
+	for _, name := range tc.taskNames {
+		taskIDs[name] = uuid.New()
+		atomIDs[name] = uuid.New()
+		tasks = append(tasks, models.Task{
+			ID: taskIDs[name], JobID: jobID, AtomID: atomIDs[name], TriggerRule: tc.triggerRules[name],
+		})
+		atoms[atomIDs[name]] = fakeModelAtom(atomIDs[name])
+	}
+	edges := make(models.TaskEdges, 0, len(tc.edges))
+	for _, edge := range tc.edges {
+		edges = append(edges, models.TaskEdge{
+			ID: uuid.New(), JobID: jobID, FromTaskID: taskIDs[edge[0]], ToTaskID: taskIDs[edge[1]],
+		})
+	}
+	persistGraph(t, db, tasks, edges)
+	for name, message := range tc.createErrByName {
+		engine.createErrByName[taskIDs[name].String()] = errors.New(message)
+	}
+	for name, duration := range tc.runDurationByName {
+		engine.runDurationByName[taskIDs[name].String()] = duration
+	}
+	taskSvc := &fakeTaskService{tasks: tasks}
+	atomSvc := &fakeAtomService{atoms: atoms}
+	edgeSvc := &fakeTaskEdgeService{edges: edges}
+	opts := withTestDeps(store, env.Environment{
+		MaxParallelTasks:  tc.maxParallel,
+		TaskFailurePolicy: tc.failurePolicy,
+		ExecutionMode:     executionModeLocal,
+	}, taskSvc, atomSvc, edgeSvc, engine)
+
+	err := New(&models.Job{ID: jobID}, opts...).Run(context.Background())
+	if tc.wantRunErr {
+		require.Error(t, err)
+		if tc.wantRunError != "" {
+			require.Contains(t, err.Error(), tc.wantRunError)
+		}
+	} else {
+		require.NoError(t, err)
+	}
+	status := taskStatusByID(latestRunSnapshot(t, store, jobID))
+	for name, want := range tc.wantStatuses {
+		require.Equal(t, want, status[taskIDs[name]], "%s task status", name)
+	}
+}
+
 // TestAllDoneTaskRunsAfterUpstreamFailure verifies that a task with
 // triggerRule=all_done executes even when its predecessor fails, and that a
 // sibling task with no tolerant rule is skipped.
@@ -147,194 +217,67 @@ func TestAllDoneTaskRunsAfterUpstreamFailure(t *testing.T) {
 	require.Equal(t, run.TaskStatusSkipped, status[taskNormal], "all_success task should be skipped")
 }
 
-// TestAllFailedTaskRunsOnlyWhenAllFail verifies that a task with
-// triggerRule=all_failed only runs when all predecessors failed.
-func TestAllFailedTaskRunsOnlyWhenAllFail(t *testing.T) {
-	db := jobdeftestutil.OpenTestDB(t)
-	t.Cleanup(func() { jobdeftestutil.CloseDB(db) })
-
-	store := run.NewStore(db)
-	engine := newFakeEngine()
-
-	jobID := uuid.New()
-	taskUpstream := uuid.New()
-	taskOnFailure := uuid.New() // all_failed — should only run if upstream failed
-
-	taskSvc := &fakeTaskService{tasks: models.Tasks{
-		{ID: taskUpstream, JobID: jobID, AtomID: uuid.New(), TriggerRule: jobdefschema.TriggerRuleAllSuccess},
-		{ID: taskOnFailure, JobID: jobID, AtomID: uuid.New(), TriggerRule: jobdefschema.TriggerRuleAllFailed},
-	}}
-	atomSvc := &fakeAtomService{atoms: map[uuid.UUID]*models.Atom{
-		taskSvc.tasks[0].AtomID: fakeModelAtom(taskSvc.tasks[0].AtomID),
-		taskSvc.tasks[1].AtomID: fakeModelAtom(taskSvc.tasks[1].AtomID),
-	}}
-	edgeSvc := &fakeTaskEdgeService{edges: models.TaskEdges{
-		{ID: uuid.New(), JobID: jobID, FromTaskID: taskUpstream, ToTaskID: taskOnFailure},
-	}}
-	persistGraph(t, db, taskSvc.tasks, edgeSvc.edges)
-
-	engine.createErrByName[taskUpstream.String()] = errors.New("upstream failed")
-
-	opts := withTestDeps(store, env.Environment{
-		MaxParallelTasks:  1,
-		TaskFailurePolicy: taskFailurePolicyContinue,
-		ExecutionMode:     executionModeLocal,
-	}, taskSvc, atomSvc, edgeSvc, engine)
-
-	err := New(&models.Job{ID: jobID}, opts...).Run(context.Background())
-	require.Error(t, err)
-
-	snapshot := latestRunSnapshot(t, store, jobID)
-	status := taskStatusByID(snapshot)
-	require.Equal(t, run.TaskStatusFailed, status[taskUpstream])
-	require.Equal(t, run.TaskStatusSucceeded, status[taskOnFailure], "all_failed task should run when upstream failed")
+func TestAllFailedTriggerRule(t *testing.T) {
+	for _, tc := range []triggerRuleRunScenario{
+		{
+			name: "runs when upstream fails", taskNames: []string{"upstream", "on_failure"},
+			triggerRules: map[string]string{"upstream": jobdefschema.TriggerRuleAllSuccess, "on_failure": jobdefschema.TriggerRuleAllFailed},
+			edges:        [][2]string{{"upstream", "on_failure"}}, failurePolicy: taskFailurePolicyContinue, maxParallel: 1,
+			createErrByName: map[string]string{"upstream": "upstream failed"}, wantRunErr: true, wantRunError: "upstream failed",
+			wantStatuses: map[string]run.TaskStatus{"upstream": run.TaskStatusFailed, "on_failure": run.TaskStatusSucceeded},
+		},
+		{
+			name: "skips when upstream succeeds", taskNames: []string{"upstream", "on_failure"},
+			triggerRules: map[string]string{"upstream": jobdefschema.TriggerRuleAllSuccess, "on_failure": jobdefschema.TriggerRuleAllFailed},
+			edges:        [][2]string{{"upstream", "on_failure"}}, failurePolicy: taskFailurePolicyHalt, maxParallel: 1,
+			runDurationByName: map[string]time.Duration{"upstream": 10 * time.Millisecond},
+			wantStatuses:      map[string]run.TaskStatus{"upstream": run.TaskStatusSucceeded, "on_failure": run.TaskStatusSkipped},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) { runTriggerRuleScenario(t, tc) })
+	}
 }
 
-// TestAllFailedSkippedWhenUpstreamSucceeds verifies that a task with
-// triggerRule=all_failed is skipped when the upstream succeeded.
-func TestAllFailedSkippedWhenUpstreamSucceeds(t *testing.T) {
-	db := jobdeftestutil.OpenTestDB(t)
-	t.Cleanup(func() { jobdeftestutil.CloseDB(db) })
-
-	store := run.NewStore(db)
-	engine := newFakeEngine()
-
-	jobID := uuid.New()
-	taskUpstream := uuid.New()
-	taskOnFailure := uuid.New()
-
-	taskSvc := &fakeTaskService{tasks: models.Tasks{
-		{ID: taskUpstream, JobID: jobID, AtomID: uuid.New(), TriggerRule: jobdefschema.TriggerRuleAllSuccess},
-		{ID: taskOnFailure, JobID: jobID, AtomID: uuid.New(), TriggerRule: jobdefschema.TriggerRuleAllFailed},
-	}}
-	atomSvc := &fakeAtomService{atoms: map[uuid.UUID]*models.Atom{
-		taskSvc.tasks[0].AtomID: fakeModelAtom(taskSvc.tasks[0].AtomID),
-		taskSvc.tasks[1].AtomID: fakeModelAtom(taskSvc.tasks[1].AtomID),
-	}}
-	edgeSvc := &fakeTaskEdgeService{edges: models.TaskEdges{
-		{ID: uuid.New(), JobID: jobID, FromTaskID: taskUpstream, ToTaskID: taskOnFailure},
-	}}
-	persistGraph(t, db, taskSvc.tasks, edgeSvc.edges)
-
-	// upstream succeeds — all_failed task should be skipped
-	engine.runDurationByName[taskUpstream.String()] = 10 * time.Millisecond
-
-	opts := withTestDeps(store, env.Environment{
-		MaxParallelTasks:  1,
-		TaskFailurePolicy: taskFailurePolicyHalt,
-		ExecutionMode:     executionModeLocal,
-	}, taskSvc, atomSvc, edgeSvc, engine)
-
-	// The job should complete without error (all_failed task is simply skipped)
-	err := New(&models.Job{ID: jobID}, opts...).Run(context.Background())
-	require.NoError(t, err)
-
-	snapshot := latestRunSnapshot(t, store, jobID)
-	status := taskStatusByID(snapshot)
-	require.Equal(t, run.TaskStatusSucceeded, status[taskUpstream])
-	require.Equal(t, run.TaskStatusSkipped, status[taskOnFailure], "all_failed task should be skipped when upstream succeeded")
+func TestOneSuccessTriggerRule(t *testing.T) {
+	for _, tc := range []triggerRuleRunScenario{
+		{
+			name:      "runs when at least one predecessor succeeds",
+			taskNames: []string{"task_a", "task_b", "join"},
+			triggerRules: map[string]string{
+				"task_a": jobdefschema.TriggerRuleAllSuccess,
+				"task_b": jobdefschema.TriggerRuleAllSuccess,
+				"join":   jobdefschema.TriggerRuleOneSuccess,
+			},
+			edges:         [][2]string{{"task_a", "join"}, {"task_b", "join"}},
+			failurePolicy: taskFailurePolicyContinue, maxParallel: 2,
+			createErrByName:   map[string]string{"task_b": "b failed"},
+			runDurationByName: map[string]time.Duration{"task_a": 10 * time.Millisecond},
+			wantRunErr:        true, wantRunError: "b failed",
+			wantStatuses: map[string]run.TaskStatus{
+				"task_a": run.TaskStatusSucceeded, "task_b": run.TaskStatusFailed, "join": run.TaskStatusSucceeded,
+			},
+		},
+		{
+			name:      "skips when all predecessors fail",
+			taskNames: []string{"task_a", "task_b", "join"},
+			triggerRules: map[string]string{
+				"task_a": jobdefschema.TriggerRuleAllSuccess,
+				"task_b": jobdefschema.TriggerRuleAllSuccess,
+				"join":   jobdefschema.TriggerRuleOneSuccess,
+			},
+			edges:         [][2]string{{"task_a", "join"}, {"task_b", "join"}},
+			failurePolicy: taskFailurePolicyContinue, maxParallel: 2,
+			createErrByName: map[string]string{"task_a": "a failed", "task_b": "b failed"},
+			wantRunErr:      true,
+			wantStatuses: map[string]run.TaskStatus{
+				"task_a": run.TaskStatusFailed, "task_b": run.TaskStatusFailed, "join": run.TaskStatusSkipped,
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) { runTriggerRuleScenario(t, tc) })
+	}
 }
 
-// TestOneSuccessTaskRunsWhenAtLeastOneSucceeds verifies one_success behaviour.
-func TestOneSuccessTaskRunsWhenAtLeastOneSucceeds(t *testing.T) {
-	db := jobdeftestutil.OpenTestDB(t)
-	t.Cleanup(func() { jobdeftestutil.CloseDB(db) })
-
-	store := run.NewStore(db)
-	engine := newFakeEngine()
-
-	jobID := uuid.New()
-	taskA := uuid.New() // will succeed
-	taskB := uuid.New() // will fail
-	taskJoin := uuid.New()
-
-	taskSvc := &fakeTaskService{tasks: models.Tasks{
-		{ID: taskA, JobID: jobID, AtomID: uuid.New(), TriggerRule: jobdefschema.TriggerRuleAllSuccess},
-		{ID: taskB, JobID: jobID, AtomID: uuid.New(), TriggerRule: jobdefschema.TriggerRuleAllSuccess},
-		{ID: taskJoin, JobID: jobID, AtomID: uuid.New(), TriggerRule: jobdefschema.TriggerRuleOneSuccess},
-	}}
-	atomSvc := &fakeAtomService{atoms: map[uuid.UUID]*models.Atom{
-		taskSvc.tasks[0].AtomID: fakeModelAtom(taskSvc.tasks[0].AtomID),
-		taskSvc.tasks[1].AtomID: fakeModelAtom(taskSvc.tasks[1].AtomID),
-		taskSvc.tasks[2].AtomID: fakeModelAtom(taskSvc.tasks[2].AtomID),
-	}}
-	edgeSvc := &fakeTaskEdgeService{edges: models.TaskEdges{
-		{ID: uuid.New(), JobID: jobID, FromTaskID: taskA, ToTaskID: taskJoin},
-		{ID: uuid.New(), JobID: jobID, FromTaskID: taskB, ToTaskID: taskJoin},
-	}}
-	persistGraph(t, db, taskSvc.tasks, edgeSvc.edges)
-
-	// taskA succeeds, taskB fails
-	engine.runDurationByName[taskA.String()] = 10 * time.Millisecond
-	engine.createErrByName[taskB.String()] = errors.New("b failed")
-
-	opts := withTestDeps(store, env.Environment{
-		MaxParallelTasks:  2,
-		TaskFailurePolicy: taskFailurePolicyContinue,
-		ExecutionMode:     executionModeLocal,
-	}, taskSvc, atomSvc, edgeSvc, engine)
-
-	err := New(&models.Job{ID: jobID}, opts...).Run(context.Background())
-	require.Error(t, err) // b failed → runErr is set
-
-	snapshot := latestRunSnapshot(t, store, jobID)
-	status := taskStatusByID(snapshot)
-	require.Equal(t, run.TaskStatusSucceeded, status[taskA])
-	require.Equal(t, run.TaskStatusFailed, status[taskB])
-	require.Equal(t, run.TaskStatusSucceeded, status[taskJoin], "one_success join should run because taskA succeeded")
-}
-
-// TestOneSuccessSkippedWhenAllFail verifies one_success is skipped when no
-// predecessor succeeded.
-func TestOneSuccessSkippedWhenAllFail(t *testing.T) {
-	db := jobdeftestutil.OpenTestDB(t)
-	t.Cleanup(func() { jobdeftestutil.CloseDB(db) })
-
-	store := run.NewStore(db)
-	engine := newFakeEngine()
-
-	jobID := uuid.New()
-	taskA := uuid.New()
-	taskB := uuid.New()
-	taskJoin := uuid.New()
-
-	taskSvc := &fakeTaskService{tasks: models.Tasks{
-		{ID: taskA, JobID: jobID, AtomID: uuid.New(), TriggerRule: jobdefschema.TriggerRuleAllSuccess},
-		{ID: taskB, JobID: jobID, AtomID: uuid.New(), TriggerRule: jobdefschema.TriggerRuleAllSuccess},
-		{ID: taskJoin, JobID: jobID, AtomID: uuid.New(), TriggerRule: jobdefschema.TriggerRuleOneSuccess},
-	}}
-	atomSvc := &fakeAtomService{atoms: map[uuid.UUID]*models.Atom{
-		taskSvc.tasks[0].AtomID: fakeModelAtom(taskSvc.tasks[0].AtomID),
-		taskSvc.tasks[1].AtomID: fakeModelAtom(taskSvc.tasks[1].AtomID),
-		taskSvc.tasks[2].AtomID: fakeModelAtom(taskSvc.tasks[2].AtomID),
-	}}
-	edgeSvc := &fakeTaskEdgeService{edges: models.TaskEdges{
-		{ID: uuid.New(), JobID: jobID, FromTaskID: taskA, ToTaskID: taskJoin},
-		{ID: uuid.New(), JobID: jobID, FromTaskID: taskB, ToTaskID: taskJoin},
-	}}
-	persistGraph(t, db, taskSvc.tasks, edgeSvc.edges)
-
-	engine.createErrByName[taskA.String()] = errors.New("a failed")
-	engine.createErrByName[taskB.String()] = errors.New("b failed")
-
-	opts := withTestDeps(store, env.Environment{
-		MaxParallelTasks:  2,
-		TaskFailurePolicy: taskFailurePolicyContinue,
-		ExecutionMode:     executionModeLocal,
-	}, taskSvc, atomSvc, edgeSvc, engine)
-
-	err := New(&models.Job{ID: jobID}, opts...).Run(context.Background())
-	require.Error(t, err)
-
-	snapshot := latestRunSnapshot(t, store, jobID)
-	status := taskStatusByID(snapshot)
-	require.Equal(t, run.TaskStatusFailed, status[taskA])
-	require.Equal(t, run.TaskStatusFailed, status[taskB])
-	require.Equal(t, run.TaskStatusSkipped, status[taskJoin], "one_success join should be skipped when all predecessors failed")
-}
-
-// TestAlwaysTaskRunsRegardlessOfUpstreamStatus is an alias-rule integration
-// test verifying that "always" behaves like "all_done".
 func TestAlwaysTaskRunsRegardlessOfUpstreamStatus(t *testing.T) {
 	db := jobdeftestutil.OpenTestDB(t)
 	t.Cleanup(func() { jobdeftestutil.CloseDB(db) })
@@ -376,105 +319,41 @@ func TestAlwaysTaskRunsRegardlessOfUpstreamStatus(t *testing.T) {
 	require.Equal(t, run.TaskStatusSucceeded, status[taskNotify], "always task must run regardless of upstream failure")
 }
 
-// TestMixedRuleDAG exercises a realistic cleanup-on-failure DAG:
-//
-//	process → notify_always
-//	process → cleanup_on_fail (all_failed)
-//
-// Happy path: process succeeds → notify runs, cleanup is skipped.
-// Failure path: process fails → notify runs, cleanup runs.
-func TestMixedRuleDAGHappyPath(t *testing.T) {
-	db := jobdeftestutil.OpenTestDB(t)
-	t.Cleanup(func() { jobdeftestutil.CloseDB(db) })
-
-	store := run.NewStore(db)
-	engine := newFakeEngine()
-
-	jobID := uuid.New()
-	taskProcess := uuid.New()
-	taskNotify := uuid.New()
-	taskCleanup := uuid.New()
-
-	taskSvc := &fakeTaskService{tasks: models.Tasks{
-		{ID: taskProcess, JobID: jobID, AtomID: uuid.New(), TriggerRule: jobdefschema.TriggerRuleAllSuccess},
-		{ID: taskNotify, JobID: jobID, AtomID: uuid.New(), TriggerRule: jobdefschema.TriggerRuleAlways},
-		{ID: taskCleanup, JobID: jobID, AtomID: uuid.New(), TriggerRule: jobdefschema.TriggerRuleAllFailed},
-	}}
-	atomSvc := &fakeAtomService{atoms: map[uuid.UUID]*models.Atom{
-		taskSvc.tasks[0].AtomID: fakeModelAtom(taskSvc.tasks[0].AtomID),
-		taskSvc.tasks[1].AtomID: fakeModelAtom(taskSvc.tasks[1].AtomID),
-		taskSvc.tasks[2].AtomID: fakeModelAtom(taskSvc.tasks[2].AtomID),
-	}}
-	edgeSvc := &fakeTaskEdgeService{edges: models.TaskEdges{
-		{ID: uuid.New(), JobID: jobID, FromTaskID: taskProcess, ToTaskID: taskNotify},
-		{ID: uuid.New(), JobID: jobID, FromTaskID: taskProcess, ToTaskID: taskCleanup},
-	}}
-	persistGraph(t, db, taskSvc.tasks, edgeSvc.edges)
-
-	// process succeeds
-	engine.runDurationByName[taskProcess.String()] = 10 * time.Millisecond
-
-	opts := withTestDeps(store, env.Environment{
-		MaxParallelTasks:  1,
-		TaskFailurePolicy: taskFailurePolicyContinue,
-		ExecutionMode:     executionModeLocal,
-	}, taskSvc, atomSvc, edgeSvc, engine)
-
-	err := New(&models.Job{ID: jobID}, opts...).Run(context.Background())
-	require.NoError(t, err)
-
-	snapshot := latestRunSnapshot(t, store, jobID)
-	status := taskStatusByID(snapshot)
-	require.Equal(t, run.TaskStatusSucceeded, status[taskProcess], "process should succeed")
-	require.Equal(t, run.TaskStatusSucceeded, status[taskNotify], "always notify should run on success")
-	require.Equal(t, run.TaskStatusSkipped, status[taskCleanup], "all_failed cleanup should be skipped on success")
-}
-
-func TestMixedRuleDAGFailurePath(t *testing.T) {
-	db := jobdeftestutil.OpenTestDB(t)
-	t.Cleanup(func() { jobdeftestutil.CloseDB(db) })
-
-	store := run.NewStore(db)
-	engine := newFakeEngine()
-
-	jobID := uuid.New()
-	taskProcess := uuid.New()
-	taskNotify := uuid.New()
-	taskCleanup := uuid.New()
-
-	taskSvc := &fakeTaskService{tasks: models.Tasks{
-		{ID: taskProcess, JobID: jobID, AtomID: uuid.New(), TriggerRule: jobdefschema.TriggerRuleAllSuccess},
-		{ID: taskNotify, JobID: jobID, AtomID: uuid.New(), TriggerRule: jobdefschema.TriggerRuleAlways},
-		{ID: taskCleanup, JobID: jobID, AtomID: uuid.New(), TriggerRule: jobdefschema.TriggerRuleAllFailed},
-	}}
-	atomSvc := &fakeAtomService{atoms: map[uuid.UUID]*models.Atom{
-		taskSvc.tasks[0].AtomID: fakeModelAtom(taskSvc.tasks[0].AtomID),
-		taskSvc.tasks[1].AtomID: fakeModelAtom(taskSvc.tasks[1].AtomID),
-		taskSvc.tasks[2].AtomID: fakeModelAtom(taskSvc.tasks[2].AtomID),
-	}}
-	edgeSvc := &fakeTaskEdgeService{edges: models.TaskEdges{
-		{ID: uuid.New(), JobID: jobID, FromTaskID: taskProcess, ToTaskID: taskNotify},
-		{ID: uuid.New(), JobID: jobID, FromTaskID: taskProcess, ToTaskID: taskCleanup},
-	}}
-	persistGraph(t, db, taskSvc.tasks, edgeSvc.edges)
-
-	// process fails
-	engine.createErrByName[taskProcess.String()] = errors.New("process exploded")
-
-	opts := withTestDeps(store, env.Environment{
-		MaxParallelTasks:  1,
-		TaskFailurePolicy: taskFailurePolicyContinue,
-		ExecutionMode:     executionModeLocal,
-	}, taskSvc, atomSvc, edgeSvc, engine)
-
-	err := New(&models.Job{ID: jobID}, opts...).Run(context.Background())
-	require.Error(t, err)
-
-	snapshot := latestRunSnapshot(t, store, jobID)
-	status := taskStatusByID(snapshot)
-	require.Equal(t, run.TaskStatusFailed, status[taskProcess], "process should fail")
-	require.Equal(t, run.TaskStatusSucceeded, status[taskNotify], "always notify must still run on failure")
-	require.Equal(t, run.TaskStatusSucceeded, status[taskCleanup], "all_failed cleanup must run when process failed")
+// TestMixedRuleDAG exercises cleanup-on-failure propagation on both the happy
+// and failure paths of the same process → notify/cleanup graph.
+func TestMixedRuleDAG(t *testing.T) {
+	for _, tc := range []triggerRuleRunScenario{
+		{
+			name: "happy path", taskNames: []string{"process", "notify", "cleanup"},
+			triggerRules: map[string]string{
+				"process": jobdefschema.TriggerRuleAllSuccess,
+				"notify":  jobdefschema.TriggerRuleAlways,
+				"cleanup": jobdefschema.TriggerRuleAllFailed,
+			},
+			edges:         [][2]string{{"process", "notify"}, {"process", "cleanup"}},
+			failurePolicy: taskFailurePolicyContinue, maxParallel: 1,
+			runDurationByName: map[string]time.Duration{"process": 10 * time.Millisecond},
+			wantStatuses: map[string]run.TaskStatus{
+				"process": run.TaskStatusSucceeded, "notify": run.TaskStatusSucceeded, "cleanup": run.TaskStatusSkipped,
+			},
+		},
+		{
+			name: "failure path", taskNames: []string{"process", "notify", "cleanup"},
+			triggerRules: map[string]string{
+				"process": jobdefschema.TriggerRuleAllSuccess,
+				"notify":  jobdefschema.TriggerRuleAlways,
+				"cleanup": jobdefschema.TriggerRuleAllFailed,
+			},
+			edges:         [][2]string{{"process", "notify"}, {"process", "cleanup"}},
+			failurePolicy: taskFailurePolicyContinue, maxParallel: 1,
+			createErrByName: map[string]string{"process": "process exploded"}, wantRunErr: true, wantRunError: "process exploded",
+			wantStatuses: map[string]run.TaskStatus{
+				"process": run.TaskStatusFailed, "notify": run.TaskStatusSucceeded, "cleanup": run.TaskStatusSucceeded,
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) { runTriggerRuleScenario(t, tc) })
+	}
 }
 
 func TestSkippedTaskPropagatesToDescendants(t *testing.T) {
