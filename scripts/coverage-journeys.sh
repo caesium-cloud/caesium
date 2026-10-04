@@ -9,15 +9,29 @@
 # shutdown are merged into the collector's CLI/server profiles.
 
 COVERAGE_JOURNEY_ACTIVE_IDS=()
+COVERAGE_JOURNEY_BUILDER_IDS=()
 COVERAGE_JOURNEY_PENDING_NAMES=()
+COVERAGE_JOURNEY_BUILDER_PENDING_NAMES=()
 COVERAGE_JOURNEY_TEMP_DIRS=()
 COVERAGE_JOURNEY_SECRET_FILES=()
 COVERAGE_JOURNEY_CLI_DIRS=()
 COVERAGE_JOURNEY_SERVER_DIRS=()
+COVERAGE_JOURNEY_GIT_TEMP_DIRS=()
 COVERAGE_JOURNEY_NAMES=()
+COVERAGE_JOURNEY_NAMED_ARGS=()
 COVERAGE_BACKEND_PRODUCER_INPUTS=""
 COVERAGE_BACKEND_PRODUCER_INPUTS_SHA256=""
 COVERAGE_BACKEND_MANIFEST_SHA256=""
+COVERAGE_GIT_FIXTURE_ROOT=""
+COVERAGE_GIT_HELPER_DIR=""
+COVERAGE_GIT_SERVER_ID=""
+COVERAGE_GIT_SERVER_NAME=""
+COVERAGE_GIT_SERVER_ALIAS=""
+COVERAGE_GIT_SOURCE_ID=""
+COVERAGE_GIT_SOURCE_URL=""
+COVERAGE_GIT_SOURCES_JSON=""
+COVERAGE_GIT_TASK_IMAGE_REF=""
+COVERAGE_GIT_INITIAL_COMMIT=""
 
 stage_coverage_backend_inputs() {
   [[ "$CONTAINER_CLI" == docker ]] || { coverage_journey_fail "real cohort requires the pinned Docker daemon"; return 1; }
@@ -175,11 +189,68 @@ coverage_journey_untrack_id() {
 
 coverage_journey_resource() {
   local action="$1" kind="$2" name="$3"
-  local image=""
-  [[ "$kind" != container || "$action" == absent ]] || image="$IMAGE_ID"
+  local image="${4:-}"
+  local lane="${5:-}"
+  if [[ "$kind" == container && "$action" != absent && -z "$image" ]]; then
+    image="$IMAGE_ID"
+  fi
   python3 "$ROOT/scripts/coverage-journeys.py" resource \
     --action "$action" --kind "$kind" --name "$name" \
-    --owner "$CANDIDATE_SHA" --run-id "$ID" --image "$image"
+    --owner "$CANDIDATE_SHA" --run-id "$ID" --lane "$lane" --image "$image"
+}
+
+coverage_journey_track_builder_id() {
+  COVERAGE_JOURNEY_BUILDER_IDS+=("$1")
+}
+
+coverage_journey_untrack_builder_name() {
+  local want="$1"
+  local kept=()
+  local name
+  for name in "${COVERAGE_JOURNEY_BUILDER_PENDING_NAMES[@]}"; do
+    [[ "$name" == "$want" ]] || kept+=("$name")
+  done
+  if ((${#kept[@]})); then
+    COVERAGE_JOURNEY_BUILDER_PENDING_NAMES=("${kept[@]}")
+  else
+    COVERAGE_JOURNEY_BUILDER_PENDING_NAMES=()
+  fi
+}
+
+coverage_journey_untrack_builder_id() {
+  local want="$1"
+  local kept=()
+  local id
+  for id in "${COVERAGE_JOURNEY_BUILDER_IDS[@]}"; do
+    [[ "$id" == "$want" ]] || kept+=("$id")
+  done
+  if ((${#kept[@]})); then
+    COVERAGE_JOURNEY_BUILDER_IDS=("${kept[@]}")
+  else
+    COVERAGE_JOURNEY_BUILDER_IDS=()
+  fi
+}
+
+coverage_journey_stop_remove_owned_builder() {
+  local id="$1" before after stop_rc=0 proof_rc=0
+  before="$(coverage_journey_resource owned container "$id" "$BUILDER_RUN_IMAGE" git-source)" || return 1
+  if ! printf '%s' "$before" | python3 -c 'import json,sys; d=json.load(sys.stdin); raise SystemExit(0 if d.get("State",{}).get("Running") is True and d.get("RestartCount")==0 else 1)'; then
+    proof_rc=1
+  else
+    "$CONTAINER_CLI" stop -t 60 "$id" >/dev/null || stop_rc=$?
+    [[ "$stop_rc" -eq 0 ]] || proof_rc=1
+  fi
+  if after="$("$CONTAINER_CLI" inspect "$id" 2>/dev/null)"; then
+    if ! python3 -c 'import json,sys; owner,run_id,image,expected_id=sys.argv[1:]; items=json.load(sys.stdin); ok=isinstance(items,list) and len(items)==1; item=items[0] if ok else {}; labels=(item.get("Config") or {}).get("Labels") or {}; state=item.get("State") or {}; ok=ok and item.get("Id")==expected_id and labels.get("caesium.coverage.owner")==owner and labels.get("caesium.coverage.run")==run_id and labels.get("caesium.coverage.lane")=="git-source" and item.get("Image")==image and state.get("Running") is False and state.get("ExitCode")==0 and state.get("OOMKilled") is False and item.get("RestartCount")==0; raise SystemExit(0 if ok else 1)' \
+        "$CANDIDATE_SHA" "$ID" "$BUILDER_RUN_IMAGE" "$id" <<<"$after"; then
+      proof_rc=1
+    fi
+  else
+    proof_rc=1
+  fi
+  coverage_journey_resource remove container "$id" "$BUILDER_RUN_IMAGE" git-source >/dev/null || return 1
+  coverage_journey_untrack_builder_id "$id"
+  [[ "$proof_rc" -eq 0 ]]
 }
 
 coverage_journey_require_absent() {
@@ -204,27 +275,71 @@ cleanup_coverage_journeys() {
       coverage_journey_remove_owned "$id" || rc=1
     done
   fi
+  if ((${#COVERAGE_JOURNEY_BUILDER_PENDING_NAMES[@]})); then
+    for id in "${COVERAGE_JOURNEY_BUILDER_PENDING_NAMES[@]}"; do
+      local pending_id
+      pending_id="$("$CONTAINER_CLI" inspect -f '{{.Id}}' "$id" 2>/dev/null || true)"
+      if [[ "$pending_id" =~ ^[0-9a-f]{64}$ ]]; then
+        coverage_journey_track_builder_id "$pending_id"
+        if coverage_journey_stop_remove_owned_builder "$pending_id"; then
+          coverage_journey_untrack_builder_name "$id"
+        else
+          rc=1
+        fi
+      else
+        coverage_journey_resource remove container "$id" "$BUILDER_RUN_IMAGE" git-source >/dev/null \
+          && coverage_journey_untrack_builder_name "$id" || rc=1
+      fi
+    done
+  fi
+  if ((${#COVERAGE_JOURNEY_BUILDER_IDS[@]})); then
+    for id in "${COVERAGE_JOURNEY_BUILDER_IDS[@]}"; do
+      coverage_journey_stop_remove_owned_builder "$id" || rc=1
+    done
+  fi
   if ((${#COVERAGE_JOURNEY_SECRET_FILES[@]})); then
     for path in "${COVERAGE_JOURNEY_SECRET_FILES[@]}"; do rm -f "$path" || rc=1; done
   fi
   if ((${#COVERAGE_JOURNEY_TEMP_DIRS[@]})); then
     for path in "${COVERAGE_JOURNEY_TEMP_DIRS[@]}"; do rm -rf "$path" || rc=1; done
   fi
+  if [[ "$rc" -eq 0 ]] && ((${#COVERAGE_JOURNEY_BUILDER_IDS[@]} == 0)) \
+      && ((${#COVERAGE_JOURNEY_BUILDER_PENDING_NAMES[@]} == 0)); then
+    if ((${#COVERAGE_JOURNEY_GIT_TEMP_DIRS[@]})); then
+      for path in "${COVERAGE_JOURNEY_GIT_TEMP_DIRS[@]}"; do rm -rf "$path" || rc=1; done
+    fi
+  else
+    rc=1
+    : >"$ARTIFACTS/retained-owned-git-fixture-paths.txt"
+    if ((${#COVERAGE_JOURNEY_GIT_TEMP_DIRS[@]})); then
+      printf '%s\n' "${COVERAGE_JOURNEY_GIT_TEMP_DIRS[@]}" >"$ARTIFACTS/retained-owned-git-fixture-paths.txt"
+    fi
+  fi
   if [[ "$rc" -ne 0 ]]; then
     : >"$ARTIFACTS/retained-owned-container-ids.txt"
     if ((${#COVERAGE_JOURNEY_ACTIVE_IDS[@]})); then
       printf '%s\n' "${COVERAGE_JOURNEY_ACTIVE_IDS[@]}" >"$ARTIFACTS/retained-owned-container-ids.txt"
     fi
+    : >"$ARTIFACTS/retained-owned-builder-container-ids.txt"
+    if ((${#COVERAGE_JOURNEY_BUILDER_IDS[@]})); then
+      printf '%s\n' "${COVERAGE_JOURNEY_BUILDER_IDS[@]}" >"$ARTIFACTS/retained-owned-builder-container-ids.txt"
+    fi
     : >"$ARTIFACTS/retained-owned-container-names.txt"
     if ((${#COVERAGE_JOURNEY_PENDING_NAMES[@]})); then
       printf '%s\n' "${COVERAGE_JOURNEY_PENDING_NAMES[@]}" >"$ARTIFACTS/retained-owned-container-names.txt"
+    fi
+    : >"$ARTIFACTS/retained-owned-builder-container-names.txt"
+    if ((${#COVERAGE_JOURNEY_BUILDER_PENDING_NAMES[@]})); then
+      printf '%s\n' "${COVERAGE_JOURNEY_BUILDER_PENDING_NAMES[@]}" >"$ARTIFACTS/retained-owned-builder-container-names.txt"
     fi
     coverage_journey_fail "owned cleanup incomplete; operator reconciliation required"
     return 1
   fi
   COVERAGE_JOURNEY_SECRET_FILES=()
   COVERAGE_JOURNEY_TEMP_DIRS=()
+  COVERAGE_JOURNEY_GIT_TEMP_DIRS=()
   COVERAGE_JOURNEY_PENDING_NAMES=()
+  COVERAGE_JOURNEY_BUILDER_PENDING_NAMES=()
 }
 
 coverage_journey_log_redacted() {
@@ -248,6 +363,9 @@ coverage_journey_write_record() {
   local server_id="$6" stop_rc="$7" exit_code="$8" oom="$9"
   local complete="${10}" missing="${11}" killed="${12}" flush_rc="${13}"
   local named_result="${14}"
+  local fixture_receipt="${15:-}" fixture_validation="${16:-}"
+  local fixture_valid="${17:-true}"
+  local git_server_id="${18:-}" git_cleanup="${19:-true}" builder_image="${20:-}"
   local lane_dir="$RAW/journeys/$lane"
   JOURNEY_RECORD_LANE="$lane" \
   JOURNEY_RECORD_PATTERN="$pattern" \
@@ -263,6 +381,12 @@ coverage_journey_write_record() {
   JOURNEY_RECORD_KILLED="$killed" \
   JOURNEY_RECORD_FLUSH_RC="$flush_rc" \
   JOURNEY_RECORD_NAMED_RESULT="$named_result" \
+  JOURNEY_RECORD_FIXTURE_RECEIPT="$fixture_receipt" \
+  JOURNEY_RECORD_FIXTURE_VALIDATION="$fixture_validation" \
+  JOURNEY_RECORD_FIXTURE_VALID="$fixture_valid" \
+  JOURNEY_RECORD_GIT_SERVER_ID="$git_server_id" \
+  JOURNEY_RECORD_GIT_CLEANUP="$git_cleanup" \
+  JOURNEY_RECORD_BUILDER_IMAGE="$builder_image" \
   JOURNEY_RECORD_SHA="$CANDIDATE_SHA" \
   JOURNEY_RECORD_IMAGE_ID="$IMAGE_ID" \
   JOURNEY_RECORD_BUILD_CONTEXT="$BUILD_CONTEXT" \
@@ -271,6 +395,7 @@ coverage_journey_write_record() {
   JOURNEY_RECORD_TEST_LOG="$ARTIFACTS/journeys/$lane.log" \
   python3 - "$lane_dir/provenance.json" <<'PY'
 import json
+import hashlib
 import os
 import pathlib
 import sys
@@ -281,6 +406,31 @@ def boolean(name):
 named_result = json.loads(pathlib.Path(os.environ["JOURNEY_RECORD_NAMED_RESULT"]).read_text())
 if not isinstance(named_result, dict) or not isinstance(named_result.get("required"), list) or not isinstance(named_result.get("passed"), list):
     raise SystemExit("named integration pass evidence is malformed")
+fixture_evidence = None
+fixture_receipt = os.environ["JOURNEY_RECORD_FIXTURE_RECEIPT"]
+fixture_validation = os.environ["JOURNEY_RECORD_FIXTURE_VALIDATION"]
+if fixture_receipt:
+    receipt_path = pathlib.Path(fixture_receipt)
+    if receipt_path.is_symlink() or not receipt_path.is_file():
+        fixture_evidence = {"receipt_path": str(receipt_path), "available": False, "validated": False}
+    else:
+        fixture_evidence = {
+            "receipt_path": str(receipt_path),
+            "receipt_sha256": hashlib.sha256(receipt_path.read_bytes()).hexdigest(),
+            "available": True,
+            "validated": os.environ["JOURNEY_RECORD_FIXTURE_VALID"] == "true",
+        }
+    if fixture_evidence["validated"]:
+        validation_path = pathlib.Path(fixture_validation)
+        if validation_path.is_symlink() or not validation_path.is_file():
+            raise SystemExit("Git-sync semantic receipt validation evidence is unavailable")
+        validation = json.loads(validation_path.read_text())
+        if validation.get("valid") is not True:
+            raise SystemExit("Git-sync semantic receipt was not validated before provenance")
+        fixture_evidence.update({
+            "validation_path": str(validation_path),
+            "validation_sha256": hashlib.sha256(validation_path.read_bytes()).hexdigest(),
+        })
 
 record = {
     "schema_version": 1,
@@ -308,6 +458,7 @@ record = {
         "skipped_named_passes": named_result.get("skipped", []),
         "duplicate_named_passes": named_result.get("duplicate", []),
         "named_passes_valid": named_result.get("valid") is True,
+        "fixture_receipt_valid": (os.environ["JOURNEY_RECORD_FIXTURE_VALID"] == "true") if fixture_receipt else None,
     },
     "server": {
         "container_id": os.environ["JOURNEY_RECORD_SERVER_ID"],
@@ -320,6 +471,14 @@ record = {
     },
     "raw": {"cli": "cli", "server": "server"},
 }
+if fixture_evidence is not None:
+    record["fixture_evidence"] = fixture_evidence
+if os.environ["JOURNEY_RECORD_GIT_SERVER_ID"]:
+    record["git_source_server"] = {
+        "container_id": os.environ["JOURNEY_RECORD_GIT_SERVER_ID"],
+        "image_id": os.environ["JOURNEY_RECORD_BUILDER_IMAGE"],
+        "clean_stop_remove": os.environ["JOURNEY_RECORD_GIT_CLEANUP"] == "true",
+    }
 pathlib.Path(sys.argv[1]).write_text(json.dumps(record, indent=2) + "\n")
 PY
 }
@@ -373,6 +532,17 @@ coverage_journey_server_env() {
         CAESIUM_AGENT_APPROVAL_REDRIVE_INTERVAL=5s
       )
       ;;
+    git-sync)
+      [[ -n "$COVERAGE_GIT_SOURCES_JSON" ]] \
+        || { coverage_journey_fail "isolated Git source configuration is missing"; return 1; }
+      COVERAGE_JOURNEY_SERVER_ENV+=(
+        CAESIUM_AUTH_MODE=none
+        CAESIUM_JOBDEF_GIT_ENABLED=true
+        CAESIUM_JOBDEF_GIT_ONCE=false
+        CAESIUM_JOBDEF_GIT_INTERVAL=500ms
+        "CAESIUM_JOBDEF_GIT_SOURCES=$COVERAGE_GIT_SOURCES_JSON"
+      )
+      ;;
     distributed|owner-memory)
       COVERAGE_JOURNEY_SERVER_ENV+=(
         CAESIUM_AUTH_MODE=none
@@ -404,16 +574,222 @@ coverage_journey_server_env() {
   esac
 }
 
+coverage_journey_build_named_args() {
+  local runner_log="$1"
+  shift
+  COVERAGE_JOURNEY_NAMED_ARGS=(--log "$runner_log")
+  local required_name
+  for required_name; do
+    COVERAGE_JOURNEY_NAMED_ARGS+=(--required-name "$required_name")
+  done
+}
+
+coverage_journey_prepare_git_sync() {
+  local lane_dir="$1"
+  local helper_log="$ARTIFACTS/journeys/git-helper-build-$ID.log"
+  local init_log="$ARTIFACTS/journeys/git-fixture-init-$ID.log"
+  local git_log="$ARTIFACTS/journeys/git-source-server-$ID.log"
+  local probe_log="$ARTIFACTS/journeys/git-source-probe-$ID.log"
+  local state_path repo_path server_ready=0 probe_ready=0
+  local actual_image running output
+
+  [[ -n "$COVERAGE_BACKEND_PRODUCER_INPUTS" && -f "$COVERAGE_BACKEND_PRODUCER_INPUTS" \
+      && ! -L "$COVERAGE_BACKEND_PRODUCER_INPUTS" \
+      && "$COVERAGE_BACKEND_PRODUCER_INPUTS_SHA256" =~ ^[0-9a-f]{64}$ ]] \
+    || { coverage_journey_fail "Git-sync requires the already-validated immutable task image prerequisite"; return 1; }
+  COVERAGE_GIT_TASK_IMAGE_REF="$(python3 - "$COVERAGE_BACKEND_PRODUCER_INPUTS" "$COVERAGE_BACKEND_PRODUCER_INPUTS_SHA256" <<'PY'
+import hashlib
+import json
+import pathlib
+import re
+import sys
+
+path = pathlib.Path(sys.argv[1])
+raw = path.read_bytes()
+if hashlib.sha256(raw).hexdigest() != sys.argv[2]:
+    raise SystemExit("task image prerequisite digest changed")
+value = json.loads(raw)
+reference = value.get("task_image_ref")
+if not isinstance(reference, str) or not reference or re.search(r"[\x00-\x20]", reference):
+    raise SystemExit("task image reference is absent or malformed")
+print(reference)
+PY
+)" || { coverage_journey_fail "cannot read the pinned Git-sync task image reference"; return 1; }
+
+  COVERAGE_GIT_SERVER_ALIAS="coverage-git-$ID"
+  COVERAGE_GIT_SOURCE_ID="$COVERAGE_GIT_SERVER_ALIAS"
+  COVERAGE_GIT_SOURCE_URL="git://$COVERAGE_GIT_SERVER_ALIAS:9418/coverage.git"
+  COVERAGE_GIT_SERVER_NAME="${ID}-journey-git-source"
+  coverage_journey_require_absent container "$COVERAGE_GIT_SERVER_NAME" || return 1
+  COVERAGE_GIT_SOURCES_JSON="$(python3 - "$COVERAGE_GIT_SOURCE_URL" "$COVERAGE_GIT_SOURCE_ID" <<'PY'
+import json
+import sys
+url, source_id = sys.argv[1:]
+print(json.dumps([{
+    "url": url,
+    "ref": "main",
+    "path": "jobs",
+    "globs": ["**/*.job.yaml"],
+    "source_id": source_id,
+    "interval": "500ms",
+    "once": False,
+}], separators=(",", ":")))
+PY
+)" || { coverage_journey_fail "cannot encode the isolated Git source configuration"; return 1; }
+  COVERAGE_GIT_FIXTURE_ROOT="$(mktemp -d "$ARTIFACTS/journeys/git-source-fixture-$ID.XXXXXX")" \
+    || { coverage_journey_fail "cannot create a fresh Git source fixture directory"; return 1; }
+  COVERAGE_JOURNEY_GIT_TEMP_DIRS+=("$COVERAGE_GIT_FIXTURE_ROOT")
+  COVERAGE_GIT_HELPER_DIR="$(mktemp -d "$ARTIFACTS/journeys/git-source-helper-$ID.XXXXXX")" \
+    || { coverage_journey_fail "cannot create a fresh Git helper directory"; return 1; }
+  COVERAGE_JOURNEY_GIT_TEMP_DIRS+=("$COVERAGE_GIT_HELPER_DIR")
+  chmod 0777 "$COVERAGE_GIT_FIXTURE_ROOT" "$COVERAGE_GIT_HELPER_DIR" \
+    || { coverage_journey_fail "cannot prepare owned Git fixture mounts"; return 1; }
+  mkdir -p "$lane_dir/evidence" || { coverage_journey_fail "cannot create Git-sync evidence directory"; return 1; }
+  if [[ -e "$lane_dir/evidence/git-sync.json" || -L "$lane_dir/evidence/git-sync.json" ]]; then
+    coverage_journey_fail "refusing pre-existing Git-sync semantic receipt"
+    return 1
+  fi
+
+  log "building uninstrumented Git fixture helper in the pinned builder image"
+  set +e
+  "$CONTAINER_CLI" run --rm --pull=never --platform "$PLATFORM" --network none \
+    -v "$ROOT:/source:ro" -v "$COVERAGE_GIT_HELPER_DIR:/fixture-bin" -w /source \
+    -e GOTOOLCHAIN=local -e GOPROXY=off -e GOFLAGS=-buildvcs=false \
+    "$BUILDER_RUN_IMAGE" go build -tags=integration -o /fixture-bin/git-source ./test/fixtures/git-source \
+    >"$helper_log" 2>&1
+  local build_rc=$?
+  set -e
+  if [[ "$build_rc" -ne 0 ]]; then
+    log "Git fixture helper build failed; sanitized diagnostic follows"
+    coverage_journey_log_redacted <"$helper_log" >&2
+    return 1
+  fi
+  [[ -f "$COVERAGE_GIT_HELPER_DIR/git-source" && ! -L "$COVERAGE_GIT_HELPER_DIR/git-source" ]] \
+    || { coverage_journey_fail "builder did not produce the owned Git fixture helper"; return 1; }
+
+  log "creating the local Git source fixture with native Git in the pinned builder"
+  set +e
+  "$CONTAINER_CLI" run --rm --pull=never --platform "$PLATFORM" --network none \
+    -v "$COVERAGE_GIT_HELPER_DIR:/fixture-bin:ro" -v "$COVERAGE_GIT_FIXTURE_ROOT:/fixture:rw" \
+    --entrypoint /fixture-bin/git-source "$BUILDER_RUN_IMAGE" \
+    init --repo /fixture/coverage.git --alias "$COVERAGE_GIT_SERVER_ALIAS" \
+    --source-id "$COVERAGE_GIT_SOURCE_ID" --image "$COVERAGE_GIT_TASK_IMAGE_REF" \
+    --url "$COVERAGE_GIT_SOURCE_URL" >"$init_log" 2>&1
+  local init_rc=$?
+  set -e
+  if [[ "$init_rc" -ne 0 ]]; then
+    log "Git fixture initialization failed; sanitized diagnostic follows"
+    coverage_journey_log_redacted <"$init_log" >&2
+    return 1
+  fi
+  state_path="$COVERAGE_GIT_FIXTURE_ROOT/state.json"
+  repo_path="$COVERAGE_GIT_FIXTURE_ROOT/coverage.git"
+  if [[ -L "$COVERAGE_GIT_FIXTURE_ROOT" || ! -d "$COVERAGE_GIT_FIXTURE_ROOT" \
+      || -L "$state_path" || ! -f "$state_path" || -L "$repo_path" || ! -d "$repo_path" ]]; then
+    coverage_journey_fail "Git fixture state or repository is not a fresh regular owned path"
+    return 1
+  fi
+  COVERAGE_GIT_INITIAL_COMMIT="$(python3 - "$state_path" "$COVERAGE_GIT_SERVER_ALIAS" "$COVERAGE_GIT_SOURCE_ID" "$COVERAGE_GIT_SOURCE_URL" "$COVERAGE_GIT_TASK_IMAGE_REF" <<'PY'
+import json
+import pathlib
+import re
+import sys
+
+path = pathlib.Path(sys.argv[1])
+alias, source_id, url, image = sys.argv[2:]
+value = json.loads(path.read_text())
+expected = {
+    "schema_version": 1,
+    "alias": alias,
+    "source_id": source_id,
+    "url": url,
+    "ref": "main",
+    "path": "jobs/imported.job.yaml",
+    "image": image,
+}
+if any(value.get(key) != expected_value for key, expected_value in expected.items()):
+    raise SystemExit("Git fixture state differs from its requested source configuration")
+if set(value) != set(expected) | {"initial_commit", "git_version"} or type(value.get("schema_version")) is not int:
+    raise SystemExit("Git fixture state schema is unexpected")
+commit = value.get("initial_commit")
+if not isinstance(commit, str) or not re.fullmatch(r"[0-9a-f]{40}", commit):
+    raise SystemExit("Git fixture initial commit is not a full SHA-1")
+git_version = value.get("git_version")
+if not isinstance(git_version, str) or not git_version.startswith("git version "):
+    raise SystemExit("Git fixture does not record native Git provenance")
+print(commit)
+PY
+)" || { coverage_journey_fail "Git fixture initialization receipt is invalid"; return 1; }
+
+  coverage_journey_require_absent container "$COVERAGE_GIT_SERVER_NAME" || return 1
+  COVERAGE_JOURNEY_BUILDER_PENDING_NAMES+=("$COVERAGE_GIT_SERVER_NAME")
+  COVERAGE_GIT_SERVER_ID="$("$CONTAINER_CLI" run -d --pull=never --platform "$PLATFORM" \
+    --name "$COVERAGE_GIT_SERVER_NAME" \
+    --label "caesium.coverage.owner=$CANDIDATE_SHA" \
+    --label "caesium.coverage.run=$ID" \
+    --label caesium.coverage.lane=git-source \
+    --network "$NETWORK" --network-alias "$COVERAGE_GIT_SERVER_ALIAS" \
+    -v "$COVERAGE_GIT_HELPER_DIR:/fixture-bin:ro" \
+    -v "$COVERAGE_GIT_FIXTURE_ROOT:/fixture:ro" \
+    --entrypoint /fixture-bin/git-source "$BUILDER_RUN_IMAGE" \
+    serve --repo /fixture/coverage.git --url "$COVERAGE_GIT_SOURCE_URL" --listen 0.0.0.0:9418)" \
+    || { coverage_journey_fail "could not start the owned private Git fixture server"; return 1; }
+  [[ "$COVERAGE_GIT_SERVER_ID" =~ ^[0-9a-f]{64}$ ]] \
+    || { coverage_journey_fail "Git fixture server has no immutable container ID"; return 1; }
+  COVERAGE_JOURNEY_BUILDER_PENDING_NAMES=()
+  coverage_journey_track_builder_id "$COVERAGE_GIT_SERVER_ID"
+  actual_image="$("$CONTAINER_CLI" inspect -f '{{.Image}}' "$COVERAGE_GIT_SERVER_ID" 2>/dev/null || true)"
+  [[ "$actual_image" == "$BUILDER_RUN_IMAGE" ]] \
+    || { coverage_journey_fail "Git fixture server image differs from the pinned builder"; return 1; }
+
+  for _ in $(seq 1 60); do
+    running="$("$CONTAINER_CLI" inspect -f '{{.State.Running}}' "$COVERAGE_GIT_SERVER_ID" 2>/dev/null || true)"
+    [[ "$running" == true ]] || break
+    "$CONTAINER_CLI" logs "$COVERAGE_GIT_SERVER_ID" >"$git_log" 2>&1 || true
+    if grep -Fxq '{"phase":"git-fixture-ready"}' "$git_log"; then
+      server_ready=1
+      break
+    fi
+    sleep 0.5
+  done
+  [[ "$server_ready" -eq 1 ]] || {
+    log "Git fixture server did not prove bound readiness; sanitized logs follow"
+    if [[ -f "$git_log" ]]; then coverage_journey_log_redacted <"$git_log" >&2; fi
+    return 1
+  }
+
+  for _ in $(seq 1 60); do
+    set +e
+    output="$("$CONTAINER_CLI" run --rm --pull=never --platform "$PLATFORM" \
+      --network "$NETWORK" -v "$COVERAGE_GIT_HELPER_DIR:/fixture-bin:ro" \
+      --entrypoint git "$BUILDER_RUN_IMAGE" -c protocol.version=0 ls-remote \
+      "$COVERAGE_GIT_SOURCE_URL" refs/heads/main 2>"$probe_log")"
+    local probe_rc=$?
+    set -e
+    if [[ "$probe_rc" -eq 0 && "$output" == "$COVERAGE_GIT_INITIAL_COMMIT$(printf '\t')refs/heads/main" ]]; then
+      probe_ready=1
+      break
+    fi
+    sleep 0.5
+  done
+  [[ "$probe_ready" -eq 1 ]] || {
+    log "native Git protocol-v0 readiness probe did not return the exact initial commit"
+    coverage_journey_log_redacted <"$probe_log" >&2 || true
+    return 1
+  }
+}
+
 coverage_journey_run_lane() {
   local lane="$1" mode="$2" pattern="$3" min_pass="$4" cli_dir="$5"
   shift 5
-  local -a required_named_passes=("$@")
   local lane_dir="$RAW/journeys/$lane"
   local server_name="${ID}-journey-${lane}"
   local server_id="" ready=0 test_rc=125 passes=0
   local stop_rc=1 flush_rc=1 exit_code=1 oom=true killed=false complete=false missing=true
   local key="" auth_env="" runner_log="$ARTIFACTS/journeys/$lane.log"
   local named_result="$lane_dir/named-pass-results.json" named_rc=1 named_valid=false
+  local fixture_receipt="" fixture_valid=true git_cleanup_rc=0
+  local fixture_validation="$lane_dir/evidence/collector-validation.json" server_finished_at=""
   local agent_port="" CAESIUM_AGENT_API_EXTERNAL_URL=""
   local cli_raw="$lane_dir/cli" server_raw="$lane_dir/server"
   local -a server_args runner_args
@@ -428,6 +804,11 @@ coverage_journey_run_lane() {
   chmod 0777 "$cli_raw" "$server_raw" \
     || { coverage_journey_fail "cannot prepare lane GOCOVERDIRs for '$lane'"; return 1; }
   : >"$runner_log" || { coverage_journey_fail "cannot create test log for '$lane'"; return 1; }
+
+  if [[ "$mode" == "git-sync" ]]; then
+    coverage_journey_prepare_git_sync "$lane_dir" || return 1
+    fixture_receipt="$lane_dir/evidence/git-sync.json"
+  fi
 
   coverage_journey_server_env "$mode" || return 1
   if [[ "$mode" == "auth" ]]; then
@@ -553,6 +934,18 @@ coverage_journey_run_lane() {
         if [[ "$mode" == "owner-memory" ]]; then
           runner_args+=(-e CAESIUM_RUN_OWNER_IN_MEMORY=true)
         fi
+      elif [[ "$mode" == "git-sync" ]]; then
+        runner_args+=(
+          -v "$COVERAGE_GIT_FIXTURE_ROOT:/fixture:rw"
+          -v "$lane_dir/evidence:/coverage-evidence:rw"
+          -e CAESIUM_JOBDEF_GIT_SYNC_LANE=true
+          -e CAESIUM_JOBDEF_GIT_ENABLED=true
+          -e CAESIUM_JOBDEF_GIT_ONCE=false
+          -e CAESIUM_JOBDEF_GIT_INTERVAL=500ms
+          -e "CAESIUM_JOBDEF_GIT_SOURCES=$COVERAGE_GIT_SOURCES_JSON"
+          -e CAESIUM_JOBDEF_GIT_FIXTURE_ROOT=/fixture
+          -e CAESIUM_JOBDEF_GIT_RECEIPT=/coverage-evidence/git-sync.json
+        )
       fi
       runner_args+=("$BUILDER_RUN_IMAGE" sh scripts/integration-test.sh -test.run "$pattern")
       set +e
@@ -565,16 +958,17 @@ coverage_journey_run_lane() {
     fi
   fi
 
-  local -a named_args=(--log "$runner_log")
-  local required_name
-  for required_name in "${required_named_passes[@]}"; do
-    named_args+=(--required-name "$required_name")
-  done
+  coverage_journey_build_named_args "$runner_log" "$@"
   set +e
-  python3 "$ROOT/scripts/test_coverage_named_journeys.py" "${named_args[@]}" >"$named_result"
+  python3 "$ROOT/scripts/test_coverage_named_journeys.py" "${COVERAGE_JOURNEY_NAMED_ARGS[@]}" >"$named_result"
   named_rc=$?
   set -e
   [[ "$named_rc" -eq 0 ]] && named_valid=true
+  if [[ -n "$fixture_receipt" ]]; then
+    if [[ -L "$fixture_receipt" || ! -f "$fixture_receipt" || ! -s "$fixture_receipt" ]]; then
+      fixture_valid=false
+    fi
+  fi
 
   if [[ -n "$auth_env" ]]; then
     rm -f "$auth_env"
@@ -589,12 +983,31 @@ coverage_journey_run_lane() {
   stop_rc="$(printf '%s' "$stopped" | python3 -c 'import json,sys; print(json.load(sys.stdin)["stop_rc"])')"
   exit_code="$(printf '%s' "$stopped" | python3 -c 'import json,sys; print(json.load(sys.stdin)["State"].get("ExitCode", 1))')"
   oom="$(printf '%s' "$stopped" | python3 -c 'import json,sys; print(str(json.load(sys.stdin)["State"].get("OOMKilled", True)).lower())')"
+  server_finished_at="$(printf '%s' "$stopped" | python3 -c 'import json,sys; print(json.load(sys.stdin)["State"].get("FinishedAt", ""))')"
   if [[ "$oom" == "true" || "$exit_code" == "137" ]]; then
     killed=true
   fi
+  if [[ "$mode" == "git-sync" && -n "$COVERAGE_GIT_SERVER_ID" ]]; then
+    coverage_journey_stop_remove_owned_builder "$COVERAGE_GIT_SERVER_ID" || git_cleanup_rc=1
+  fi
+  if [[ -n "$fixture_receipt" ]]; then
+    set +e
+    python3 "$ROOT/scripts/test_coverage_named_journeys.py" validate-git-receipt \
+      --receipt "$fixture_receipt" \
+      --state "$COVERAGE_GIT_FIXTURE_ROOT/state.json" \
+      --server-finished-at "$server_finished_at" >"$fixture_validation" 2>"$ARTIFACTS/journeys/git-sync-receipt-validation-$ID.log"
+    local receipt_validation_rc=$?
+    set -e
+    if [[ "$receipt_validation_rc" -ne 0 ]]; then
+      fixture_valid=false
+      log "Git-sync semantic receipt failed validation; sanitized diagnostic follows"
+      coverage_journey_log_redacted <"$ARTIFACTS/journeys/git-sync-receipt-validation-$ID.log" >&2 || true
+    fi
+  fi
   if [[ "$flush_rc" -eq 0 && "$stop_rc" -eq 0 && "$killed" == false && "$exit_code" == "0" ]] \
       && gocoverdir_complete "$cli_raw" && gocoverdir_complete "$server_raw" \
-      && [[ "$test_rc" -eq 0 && "$passes" -ge "$min_pass" && "$named_valid" == true ]]; then
+      && [[ "$test_rc" -eq 0 && "$passes" -ge "$min_pass" && "$named_valid" == true \
+          && "$fixture_valid" == true && "$git_cleanup_rc" -eq 0 ]]; then
     complete=true
     missing=false
   else
@@ -603,6 +1016,8 @@ coverage_journey_run_lane() {
   coverage_journey_remove_owned "$server_id" || complete=false
   coverage_journey_write_record "$lane" "$pattern" "$min_pass" "$test_rc" "$passes" \
     "$server_id" "$stop_rc" "$exit_code" "$oom" "$complete" "$missing" "$killed" "$flush_rc" "$named_result" \
+    "$fixture_receipt" "$fixture_validation" "$fixture_valid" \
+    "$COVERAGE_GIT_SERVER_ID" "$([[ "$git_cleanup_rc" -eq 0 ]] && echo true || echo false)" "$BUILDER_RUN_IMAGE" \
     || { coverage_journey_fail "cannot write provenance for lane '$lane'"; return 1; }
 
   if [[ "$test_rc" -ne 0 || "$passes" -lt "$min_pass" || "$named_valid" != true ]]; then
@@ -734,6 +1149,11 @@ PY
         ;;
       esac
   done
+
+  coverage_journey_run_lane \
+    git-sync git-sync \
+    'TestIntegrationTestSuite/TestJobdefGitSyncLocalRepositoryUpdatesAndPrunes' \
+    1 "$cli_dir" TestJobdefGitSyncLocalRepositoryUpdatesAndPrunes || return 1
 
   local sso_log sso_rc
   sso_log="$(mktemp "$ARTIFACTS/journeys/sso-driver-$ID.XXXXXX.log")" \
@@ -976,7 +1396,7 @@ import pathlib
 import sys
 
 records = []
-for lane in ("local", "auth", "distributed", "owner-memory", "sso"):
+for lane in ("local", "auth", "distributed", "owner-memory", "git-sync", "sso"):
     record = json.loads((pathlib.Path(sys.argv[2]) / lane / "provenance.json").read_text())
     if record["complete"] is not True or record["candidate_sha"] != os.environ["JOURNEY_MANIFEST_SHA"]:
         raise SystemExit("incomplete or foreign lane record: " + lane)
@@ -994,7 +1414,7 @@ manifest = {
     "build_context": json.loads(os.environ["JOURNEY_MANIFEST_BUILD_CONTEXT"]),
     "image_provenance": os.environ["JOURNEY_MANIFEST_PROVENANCE"],
     "verified": os.environ["JOURNEY_MANIFEST_VERIFIED"] == "true",
-    "complete": len(records) == 5,
+    "complete": len(records) == 6,
     "lanes": records,
     "backend_contribution": {
         "path": os.environ["JOURNEY_MANIFEST_BACKEND_PATH"],
@@ -1007,7 +1427,7 @@ manifest = {
 }
 pathlib.Path(sys.argv[1]).write_text(json.dumps(manifest, indent=2) + "\n")
 PY
-  log "collected five exact-image real integration journeys; original process raws retained"
+  log "collected six exact-image real integration journeys; original process raws retained"
 }
 
 merge_coverage_journeys() {
