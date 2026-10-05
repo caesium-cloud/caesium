@@ -1720,7 +1720,7 @@ jobs:
           set -euo pipefail
           prereqs="$PWD/.tmp/coverage-backends"
           mkdir -p "$prereqs"
-          podman_image=quay.io/podman/stable@sha256:c70aa78a604fafa95076aae36bdc91d1173d2bff05e2749bf7d79c88c248acc0
+          podman_image=quay.io/podman/stable@sha256:c2c2b4fe8164af561d4804475c15f16c37ec1e40189e5330e7609f307d944dcd
           docker pull --platform linux/amd64 "$podman_image"
           docker pull --platform linux/amd64 kindest/node:v1.36.1
           docker pull --platform linux/amd64 alpine:3.23
