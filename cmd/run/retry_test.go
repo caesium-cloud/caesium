@@ -457,11 +457,9 @@ func TestRetryWholeRunOverServerReadsAPIKeyFromEnv(t *testing.T) {
 	require.Contains(t, stdout.String(), "Retrying run run-1 (job job-1)")
 }
 
-func TestLocalWholeRetryRegistersDuringAdmissionAndBeforeDetachedLaunch(t *testing.T) {
+func TestLocalWholeRetryRegistersDuringAdmissionAndBeforeExecution(t *testing.T) {
 	runID := uuid.New()
 	launched := make(chan context.Context, 1)
-	gate := make(chan struct{})
-	done := make(chan bool, 1)
 	_, err := startLocalWholeRunRetry(context.Background(), &models.Job{}, runID, &runstorage.JobRun{ID: runID},
 		func(id uuid.UUID) (*runstorage.JobRun, error) {
 			require.Equal(t, runID, id)
@@ -473,14 +471,13 @@ func TestLocalWholeRetryRegistersDuringAdmissionAndBeforeDetachedLaunch(t *testi
 			return false, nil
 		},
 		func(ctx context.Context, _ *models.Job, _ *runstorage.JobRun, release func()) {
-			go func() { defer release(); launched <- ctx; <-gate; done <- ctx.Err() == nil }()
+			defer release()
+			launched <- ctx
 		})
 	require.NoError(t, err)
 	ctx := <-launched
 	require.ErrorIs(t, ctx.Err(), context.Canceled)
-	close(gate)
-	require.False(t, <-done, "cancelled retry must not start an executor")
-	require.Eventually(t, func() bool { return job.CancelRunContexts(runID) == 0 }, time.Second, time.Millisecond)
+	require.Zero(t, job.CancelRunContexts(runID))
 }
 func TestLocalWholeRetryAdmissionFailureReleasesRegistration(t *testing.T) {
 	runID := uuid.New()

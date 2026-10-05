@@ -109,7 +109,7 @@ var retryCmd = &cobra.Command{
 }
 
 // Register before reopening the row: a cancellation during admission must reach
-// the context transferred to execution, even before its goroutine starts.
+// the context transferred to execution, before execution starts.
 func startLocalWholeRunRetry(parent context.Context, j *models.Job, runID uuid.UUID, runEntry *runstorage.JobRun, admit func(uuid.UUID) (*runstorage.JobRun, error), finalize func(uuid.UUID, error) (bool, error), launch func(context.Context, *models.Job, *runstorage.JobRun, func())) (*runstorage.JobRun, error) {
 	ctx, release := job.RegisterRunCancel(context.WithoutCancel(parent), runID)
 	transferred := false
@@ -136,14 +136,18 @@ func startLocalWholeRunRetry(parent context.Context, j *models.Job, runID uuid.U
 	return r, nil
 }
 
+// The local command owns this execution until RunE returns. A detached launch
+// would be lost when main exits, leaving the committed retry pending forever.
 func launchLocalWholeRunRetry(ctx context.Context, j *models.Job, r *runstorage.JobRun, release func()) {
-	go func() {
-		defer release()
-		runCtx := runstorage.WithContext(ctx, r.ID)
-		if err := job.New(j, job.WithTriggerID(nil), job.WithParams(r.Params)).Run(runCtx); err != nil {
-			log.Error("job retry run failure", "id", j.ID, "run_id", r.ID, "error", err)
-		}
-	}()
+	defer release()
+	runCtx := runstorage.WithContext(ctx, r.ID)
+	if err := localRetryExecution(runCtx, j, r.Params); err != nil {
+		log.Error("job retry run failure", "id", j.ID, "run_id", r.ID, "error", err)
+	}
+}
+
+var localRetryExecution = func(ctx context.Context, j *models.Job, params map[string]string) error {
+	return job.New(j, job.WithTriggerID(nil), job.WithParams(params)).Run(ctx)
 }
 
 func init() {

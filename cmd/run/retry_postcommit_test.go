@@ -9,13 +9,19 @@ import (
 	"os"
 	"os/exec"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	asvc "github.com/caesium-cloud/caesium/api/rest/service/atom"
+	tsvc "github.com/caesium-cloud/caesium/api/rest/service/task"
+	esvc "github.com/caesium-cloud/caesium/api/rest/service/taskedge"
+	"github.com/caesium-cloud/caesium/internal/atom"
 	"github.com/caesium-cloud/caesium/internal/job"
 	"github.com/caesium-cloud/caesium/internal/jobdef/testutil"
 	"github.com/caesium-cloud/caesium/internal/models"
 	runstorage "github.com/caesium-cloud/caesium/internal/run"
+	"github.com/caesium-cloud/caesium/pkg/env"
 	"github.com/caesium-cloud/caesium/pkg/log"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
@@ -330,4 +336,109 @@ func TestLocalWholeRetryProcessExitWaitsForCompensation(t *testing.T) {
 	var exitErr *exec.ExitError
 	require.ErrorAs(t, err, &exitErr)
 	require.Equal(t, 1, exitErr.ExitCode(), "original retry error still reaches Fatal")
+}
+
+type heldLocalRetryEngine struct {
+	atom.Engine // Create fails; no later engine operations are reached.
+	created     chan<- atom.EngineCreateRequest
+	finish      <-chan struct{}
+	returned    *atomic.Bool
+}
+
+func (e *heldLocalRetryEngine) Create(req *atom.EngineCreateRequest) (atom.Atom, error) {
+	e.created <- *req
+	<-e.finish
+	e.returned.Store(true)
+	return nil, errors.New("test local retry engine creation failed")
+}
+
+func TestLocalWholeRetrySuccessJoinsEngineAndTerminalPersistenceBeforeReturning(t *testing.T) {
+	store, j, entry, taskID := localRetryCompensationFixture(t)
+	db := store.DB()
+	oldExecute := localRetryExecution
+	t.Cleanup(func() { localRetryExecution = oldExecute })
+	created := make(chan atom.EngineCreateRequest, 1)
+	finishEngine, finishWrite := make(chan struct{}), make(chan struct{})
+	var engineOnce, writeOnce sync.Once
+	unblockEngine := func() { engineOnce.Do(func() { close(finishEngine) }) }
+	unblockWrite := func() { writeOnce.Do(func() { close(finishWrite) }) }
+	var engineReturned atomic.Bool
+	persisting := make(chan struct{}, 1)
+	const callback = "test:local_retry_hold_terminal_persistence"
+	require.NoError(t, db.Callback().Update().Before("gorm:update").Register(callback, func(tx *gorm.DB) {
+		if tx.Statement.Table == "job_runs" && engineReturned.Load() {
+			select {
+			case persisting <- struct{}{}:
+			default:
+			}
+			<-finishWrite
+		}
+	}))
+	localRetryExecution = func(ctx context.Context, jobModel *models.Job, params map[string]string) error {
+		return job.New(jobModel, job.WithTriggerID(nil), job.WithParams(params),
+			job.WithRunStoreFactory(func() *runstorage.Store { return store }),
+			job.WithEnvVariables(func() env.Environment { return env.Environment{ExecutionMode: "local", MaxParallelTasks: 1} }),
+			job.WithTaskServiceFactory(func(ctx context.Context) tsvc.Task { return tsvc.ServiceWithDB(ctx, db) }),
+			job.WithAtomServiceFactory(func(ctx context.Context) asvc.Atom { return asvc.ServiceWithDB(ctx, db) }),
+			job.WithTaskEdgeServiceFactory(func(ctx context.Context) esvc.TaskEdge { return esvc.ServiceWithDB(ctx, db) }),
+			job.WithDispatchRunCallbacks(func(context.Context, uuid.UUID, uuid.UUID, error) error { return nil }),
+			job.WithDockerEngineFactory(func(context.Context) atom.Engine {
+				return &heldLocalRetryEngine{created: created, finish: finishEngine, returned: &engineReturned}
+			}),
+		).Run(ctx)
+	}
+	done := make(chan error, 1)
+	exited := make(chan struct{})
+	t.Cleanup(func() {
+		unblockEngine()
+		unblockWrite()
+		<-exited
+		_ = db.Callback().Update().Remove(callback)
+	})
+	go func() {
+		defer close(exited)
+		_, err := startLocalWholeRunRetry(t.Context(), j, entry.ID, entry, store.RetryFromFailure, store.CompleteIfActive, launchLocalWholeRunRetry)
+		done <- err
+	}()
+	select {
+	case req := <-created:
+		require.Equal(t, "frozen:1", req.Image)
+		require.Equal(t, "durable", req.Spec.Env["CAESIUM_PARAM_INPUT"])
+		require.Equal(t, "0", req.Spec.Env["CAESIUM_PARAM_ZERO"])
+		require.Equal(t, entry.ID.String(), req.Spec.Env["CAESIUM_RUN_ID"])
+	case <-time.After(5 * time.Second):
+		t.Fatal("successful retry admission did not execute its engine")
+	}
+	select {
+	case <-done:
+		t.Fatal("local command returned while its engine was still running")
+	case <-time.After(50 * time.Millisecond):
+	}
+	unblockEngine()
+	select {
+	case <-persisting:
+	case <-time.After(5 * time.Second):
+		t.Fatal("local retry did not reach terminal persistence")
+	}
+	select {
+	case <-done:
+		t.Fatal("local command returned before durable terminal persistence")
+	case <-time.After(50 * time.Millisecond):
+	}
+	unblockWrite()
+	select {
+	case err := <-done:
+		require.NoError(t, err, "engine outcome remains represented by the durable run, not admission error")
+	case <-time.After(5 * time.Second):
+		t.Fatal("local retry did not join after persistence")
+	}
+	require.Zero(t, job.CancelRunContexts(entry.ID))
+	row, err := store.Get(entry.ID)
+	require.NoError(t, err)
+	require.Equal(t, runstorage.StatusFailed, row.Status)
+	require.NotNil(t, row.CompletedAt)
+	require.Equal(t, entry.Params, row.Params)
+	require.Len(t, row.Tasks, 1)
+	require.Equal(t, taskID, row.Tasks[0].TaskID)
+	require.Equal(t, runstorage.TaskStatusFailed, row.Tasks[0].Status)
 }
