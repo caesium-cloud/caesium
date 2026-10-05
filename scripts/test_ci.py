@@ -1830,6 +1830,96 @@ class SystemSuiteLaneWiringTests(unittest.TestCase):
         self.assertIn("needs CAESIUM_LIFECYCLE_EXPECTED_IMAGE_ID", body)
         self.assertIn('--expected-image-id "$expected"', body)
 
+    def _exercise_backend_task_export(self, fault=None):
+        """Execute the actual workflow prerequisite code against a hermetic daemon."""
+        import hashlib
+        import tarfile
+        from unittest.mock import patch
+
+        step = next(item for item in JOBS["coverage-ratchets"]["steps"]
+                    if item.get("name") == "Pin isolated backend prerequisites")
+        code = step["run"].split("<<'PY'\n", 1)[1].rsplit("\nPY", 1)[0]
+        config = json.dumps({"os": "linux", "architecture": "arm64" if fault == "config-platform" else "amd64"}).encode()
+        config_id = "sha256:" + hashlib.sha256(config).hexdigest()
+        child = json.dumps({"schemaVersion": 2, "config": {
+            "digest": config_id, "size": len(config)}, "layers": []}).encode()
+        child_id = "sha256:" + hashlib.sha256(child).hexdigest()
+        descriptor = {"digest": child_id, "platform": {"os": "linux", "architecture": "amd64"}}
+        index = json.dumps({"schemaVersion": 2, "manifests": [descriptor] * (2 if fault == "ambiguous" else 1)}).encode()
+        index_ref = "alpine@sha256:" + hashlib.sha256(index).hexdigest()
+        child_ref = "alpine@" + child_id
+        loaded_id = "sha256:" + "ab" * 32 if fault == "daemon" else child_id
+        calls = []
+        tagged = False
+        backend = runpy.run_path(str(ROOT / "scripts/coverage-backends.py"))
+
+        def output(args, text=False):
+            if args[:3] == ["docker", "image", "inspect"]:
+                ref = args[3]
+                identity = loaded_id if ref == child_ref or ref == "alpine:3.23" and tagged else index_ref.split("@")[1]
+                if fault == "retag" and ref == "alpine:3.23" and len(calls) == 3:
+                    identity = "sha256:" + "ef" * 32
+                value = [{"Id": identity, "Os": "linux", "Architecture": "arm64" if fault == "platform" else "amd64",
+                          "RepoDigests": [index_ref]}]
+                return json.dumps(value) if text else json.dumps(value).encode()
+            self.assertEqual(args[:4], ["docker", "buildx", "imagetools", "inspect"])
+            self.assertEqual(args[-1], "--raw")
+            raw = index if args[4] == index_ref else child
+            return raw + (b"corruption" if fault == "metadata" or fault == "child-metadata" and args[4] == child_ref else b"\n")
+
+        def call(args):
+            nonlocal tagged
+            calls.append(args)
+            if args[:2] == ["docker", "pull"]:
+                self.assertEqual(args, ["docker", "pull", "--platform", "linux/amd64", child_ref])
+            elif args[:2] == ["docker", "tag"]:
+                self.assertEqual(args, ["docker", "tag", child_ref, "alpine:3.23"])
+                tagged = True
+            else:
+                self.assertEqual(args[:5], ["docker", "image", "save", "alpine:3.23", "-o"])
+                saved = json.dumps({"os": "linux", "architecture": "arm64"}).encode() if fault == "config" else config
+                entries = {"config.json": saved, "manifest.json": json.dumps([
+                    {"Config": "config.json", "RepoTags": ["foreign:3.23" if fault == "tag" else "alpine:3.23"],
+                     "Layers": []}]).encode()}
+                if fault == "closure":
+                    entries["oci-layout"] = b'{"imageLayoutVersion":"1.0.0"}'
+                    entries["index.json"] = json.dumps({"manifests": [descriptor]}).encode()
+                with tarfile.open(args[-1], "w") as archive:
+                    for name, data in entries.items():
+                        member = tarfile.TarInfo(name)
+                        member.size = len(data)
+                        archive.addfile(member, io.BytesIO(data))
+            return 0
+
+        with tempfile.TemporaryDirectory() as directory:
+            with patch.object(sys, "argv", ["-", directory, "podman@sha256:" + "cd" * 32]), \
+                    patch.object(subprocess, "check_output", side_effect=output), \
+                    patch.object(subprocess, "check_call", side_effect=call), \
+                    patch.object(runpy, "run_path", return_value=backend):
+                exec(compile(code, "coverage-prerequisites", "exec"), {})
+            inputs = json.loads((Path(directory) / "backend-producer-inputs.json").read_text())
+            receipt = json.loads((Path(directory) / "task-export-receipt.json").read_text())
+            self.assertEqual(inputs["task_image_id"], config_id)
+            self.assertEqual(inputs["task_docker_image_id"], child_id)
+            self.assertEqual(receipt["index_ref"], index_ref)
+            self.assertEqual(receipt["manifest_id"], child_id)
+            self.assertEqual(receipt["config_id"], config_id)
+            self.assertEqual(receipt["archive_sha256"], inputs["task_archive_sha256"])
+            self.assertEqual(len(calls), 3)
+
+    def test_coverage_exports_verified_pulled_child_without_index_platform_selection(self):
+        self._exercise_backend_task_export()
+
+    def test_coverage_task_export_refuses_foreign_or_ambiguous_content(self):
+        controls = {"ambiguous": "unique exact", "metadata": "metadata digest",
+                    "daemon": "daemon task identity", "platform": "platform mismatch",
+                    "config": "exported daemon config", "tag": "unexpected task archive",
+                    "closure": "OCI", "child-metadata": "metadata digest",
+                    "config-platform": "exported task platform", "retag": "tag changed during export"}
+        for fault, reason in controls.items():
+            with self.subTest(fault=fault), self.assertRaisesRegex((AssertionError, RuntimeError), reason):
+                self._exercise_backend_task_export(fault)
+
     def test_coverage_diff_uses_the_events_own_base(self):
         steps = JOBS["coverage-ratchets"]["steps"]
         diff = next(step for step in steps if step.get("name") == "Changed Go paths of the tested change")

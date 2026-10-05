@@ -1732,29 +1732,71 @@ jobs:
           docker pull --platform linux/amd64 "$podman_image"
           docker pull --platform linux/amd64 kindest/node:v1.36.1
           docker pull --platform linux/amd64 alpine:3.23
-          docker image save --platform linux/amd64 alpine:3.23 -o "$prereqs/task.tar"
           python3 - "$prereqs" "$podman_image" <<'PY'
-          import hashlib, json, pathlib, subprocess, sys, tarfile
+          import hashlib, json, pathlib, re, runpy, subprocess, sys, tarfile
           root = pathlib.Path(sys.argv[1]).resolve()
           archive = root / 'task.tar'
-          def inspect(ref):
-              image = json.loads(subprocess.check_output(['docker', 'image', 'inspect', ref], text=True))[0]
+          def image(ref):
+              images = json.loads(subprocess.check_output(['docker', 'image', 'inspect', ref], text=True))
+              assert len(images) == 1, 'ambiguous backend prerequisite image'
+              image = images[0]
               assert image['Os'] == 'linux' and image['Architecture'] == 'amd64', 'backend prerequisite platform mismatch'
-              return image['Id']
+              return image
+          def inspect(ref):
+              return image(ref)['Id']
+          def metadata(ref, expected):
+              raw = subprocess.check_output(['docker', 'buildx', 'imagetools', 'inspect', ref, '--raw'])
+              # buildx may append one CLI newline to the immutable registry bytes.
+              if 'sha256:' + hashlib.sha256(raw).hexdigest() != expected and raw.endswith(b'\n'):
+                  raw = raw[:-1]
+              assert 'sha256:' + hashlib.sha256(raw).hexdigest() == expected, 'registry metadata digest mismatch'
+              return json.loads(raw)
+          pulled = image('alpine:3.23')
+          refs = set(pulled.get('RepoDigests') or [])
+          assert len(refs) == 1, 'ambiguous pulled task index'
+          index_ref = refs.pop()
+          assert re.fullmatch(r'(?:docker.io/library/)?alpine@sha256:[0-9a-f]{64}', index_ref), 'foreign pulled task index'
+          index = metadata(index_ref, index_ref.split('@')[1])
+          children = [entry for entry in index['manifests'] if entry.get('platform', {}).get('os') == 'linux'
+                      and entry['platform'].get('architecture') == 'amd64' and not entry['platform'].get('variant')]
+          assert len(children) == 1, 'unique exact linux/amd64 task manifest required'
+          child_id = children[0]['digest']
+          assert re.fullmatch(r'sha256:[0-9a-f]{64}', child_id), 'invalid task manifest digest'
+          child_ref = 'alpine@' + child_id
+          child = metadata(child_ref, child_id)
+          config_id = child['config']['digest']
+          assert re.fullmatch(r'sha256:[0-9a-f]{64}', config_id), 'invalid task config digest'
+          # Export the pulled leaf, avoiding Docker containerd's index/platform save bug.
+          # Modern Docker Id can be a manifest; the exported config is checked separately.
+          subprocess.check_call(['docker', 'pull', '--platform', 'linux/amd64', child_ref])
+          loaded = image(child_ref)
+          assert loaded['Id'] in (child_id, config_id), 'daemon task identity differs from the selected child'
+          subprocess.check_call(['docker', 'tag', child_ref, 'alpine:3.23'])
+          assert inspect('alpine:3.23') == loaded['Id'], 'task tag changed before export'
+          subprocess.check_call(['docker', 'image', 'save', 'alpine:3.23', '-o', str(archive)])
           with tarfile.open(archive) as image_archive:
               manifest = json.load(image_archive.extractfile('manifest.json'))
               assert len(manifest) == 1 and manifest[0]['RepoTags'] == ['alpine:3.23'], 'unexpected task archive'
               config = image_archive.extractfile(manifest[0]['Config']).read()
+              assert 'sha256:' + hashlib.sha256(config).hexdigest() == config_id, 'exported daemon config differs from selected child'
+              assert len(config) == child['config']['size'], 'exported config size mismatch'
               task_config = json.loads(config)
-              assert task_config['os'] == 'linux' and task_config['architecture'] == 'amd64'
+              assert task_config['os'] == 'linux' and task_config['architecture'] == 'amd64', 'exported task platform mismatch'
+          archive_hash = hashlib.sha256(archive.read_bytes()).hexdigest()
+          runpy.run_path('scripts/coverage-backends.py')['archive_identity'](archive, archive_hash, config_id, 'alpine:3.23', 'amd64')
+          assert inspect('alpine:3.23') == loaded['Id'], 'task tag changed during export'
+          (root / 'task-export-receipt.json').write_text(json.dumps({
+              'index_ref': index_ref, 'manifest_id': child_id, 'config_id': config_id,
+              'docker_image_id': loaded['Id'], 'platform': 'linux/amd64', 'archive_sha256': archive_hash,
+          }, indent=2) + '\n')
           inputs = {
               'schema_version': 1, 'platform': 'linux/amd64',
               'docker_socket': '/var/run/docker.sock',
               'task_archive': str(archive),
-              'task_archive_sha256': hashlib.sha256(archive.read_bytes()).hexdigest(),
+              'task_archive_sha256': archive_hash,
               'task_image_ref': 'alpine:3.23',
-              'task_image_id': 'sha256:' + hashlib.sha256(config).hexdigest(),
-              'task_docker_image_id': inspect('alpine:3.23'),
+              'task_image_id': config_id,
+              'task_docker_image_id': loaded['Id'],
               'kind_image_ref': 'kindest/node:v1.36.1',
               'kind_image_id': inspect('kindest/node:v1.36.1'),
               'podman_service_image_ref': sys.argv[2],
