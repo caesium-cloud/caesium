@@ -193,6 +193,89 @@ class NamedJourneyGuardTests(unittest.TestCase):
         self.assertEqual(completed.returncode, 0, completed.stderr)
         self.assertEqual(completed.stdout.splitlines(), ["--log", "/tmp/lane log"])
 
+    def _actual_lane_selection(self) -> dict[str, dict[str, object]]:
+        # Execute the actual shell declarations, so a name in a test-only list
+        # cannot conceal an omitted regex, required-name array or changed floor.
+        source = pathlib.Path(__file__).with_name("coverage-journeys.sh").read_text()
+        start = source.index("  local local_pattern auth_pattern distributed_pattern owner_pattern")
+        end = source.index("  local server_raw cli_raw", start)
+        body = source[start:end]
+        script = "set -eu; selectors() {\n" + body + "\n" + r'''
+printf 'local\t%s\t%s\n' "$local_pattern" "$local_min_pass"
+printf 'auth\t%s\t%s\n' "$auth_pattern" "$auth_min_pass"
+printf 'local-name\t%s\n' "${local_named_passes[@]}"
+printf 'auth-name\t%s\n' "${auth_named_passes[@]}"
+}; selectors
+'''
+        result = subprocess.run(["bash", "-c", script], capture_output=True, text=True, check=False)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        lanes = {"local": {"names": []}, "auth": {"names": []}}
+        for line in result.stdout.splitlines():
+            fields = line.split("\t")
+            if fields[0].endswith("-name"):
+                lanes[fields[0].removesuffix("-name")]["names"].append(fields[1])
+            else:
+                lanes[fields[0]].update(pattern=fields[1], minimum=int(fields[2]))
+        return lanes
+
+    def test_floor_gap_journeys_preserve_original_selection_and_floors(self) -> None:
+        lanes = self._actual_lane_selection()
+        self.assertEqual(lanes["local"]["minimum"], 39)
+        self.assertEqual(lanes["auth"]["minimum"], 21)
+        original_local = {
+            "TestCaesiumWhyExplainsHitAndMiss", "TestRunDiffAttributesChangedField",
+            "TestRunDiffRESTEndpointCoversHTTPSurface", "TestReproducibilityReceiptRoundTrip",
+            "TestContractGraphCLIJSONReportsInferredEdge", "TestContractsGraphEndpointReportsInferredEdgeAndFeatureFlag",
+            "TestJobLintServerJSONReportsContractFinding", "TestContractCheckFailsOnBreakingLocalChange",
+            "TestCheckImagesCLIGatesLocalDockerAvailability", "TestAtomSpecPersistence",
+            "TestDatasetRESTAndCLIListSurfacesManualAdvance", "TestIncidentRoutesGatedOffByDefault",
+            "TestDevOnceExecutesDAG", "TestDevOnceRunTimeoutStopsAndRemovesContainer",
+            "TestDevOnceSIGINTStopsAndRemovesContainer", "TestTestCommandValidatesDefinitions",
+            "TestTestCommandRunsHarnessScenarioWithObservabilityAssertions",
+            "TestFreshnessCronTickSkipsFreshOutput", "TestAutomaticRetryDelayConstantAndBackoff",
+        }
+        original_auth = {
+            "TestIncidentCLIListJSONStdout", "TestIncidentApprovalDecisionsCLI",
+            "TestIncidentApprovalWhyExplains", "TestIncidentEscalationDeliversNotifiableEvent",
+            "TestIncidentOpenedEventObservable", "TestIncidentApplyJobdefPatchCannotEditItsOwnPolicy",
+            "TestIncidentApprovalSecondPendingRequestStaysDecidable", "TestIncidentPerClassNarrowingGatesTheMatchingClass",
+            "TestIncidentPerClassNarrowingIgnoresNonMatchingClass", "TestScopedKeyWhoamiAllowed",
+            "TestScopedKeyAllowDenyMatrix", "TestHoldDatasetCLIReleaseReopensTheGate", "TestIncidentBundleFromRealFailure",
+        }
+        added = {
+            "local": {"TestCacheCLIListsInvalidatesAndPrunes", "TestNativeTaskSIGTERMResultClassification"},
+            "auth": {"TestPublicListingsOrderByAndRefuseInvalidTerms"},
+        }
+        for lane, original in (("local", original_local), ("auth", original_auth)):
+            self.assertEqual(set(lanes[lane]["names"]), original | added[lane])
+            self.assertEqual(len(lanes[lane]["names"]), len(original | added[lane]))
+            for name in lanes[lane]["names"]:
+                self.assertIsNotNone(re.fullmatch(lanes[lane]["pattern"], SUITE + "/" + name))
+            other_lane = "auth" if lane == "local" else "local"
+            for name in added[other_lane]:
+                self.assertIsNone(re.fullmatch(lanes[lane]["pattern"], SUITE + "/" + name))
+
+    def test_floor_gap_admission_refuses_skip_nested_duplicate_or_missing(self) -> None:
+        lanes = self._actual_lane_selection()
+        new = {"local": ["TestCacheCLIListsInvalidatesAndPrunes", "TestNativeTaskSIGTERMResultClassification"],
+               "auth": ["TestPublicListingsOrderByAndRefuseInvalidTerms"]}
+        for lane, names in new.items():
+            required = lanes[lane]["names"]
+            lines = {name: "    --- PASS: " + SUITE + "/" + name + " (0.01s)\n" for name in required}
+            complete = "".join(lines.values())
+            self.assertTrue(check_output(complete, required)["valid"])
+            for name in names:
+                refusals = {
+                    "missing": "", "skip": lines[name].replace("PASS", "SKIP"),
+                    "nested": lines[name].replace(name + " (", name + "/case ("),
+                    "lookalike": lines[name].replace(name + " (", name + "Extra ("),
+                    "duplicate": lines[name] + lines[name],
+                }
+                for control, replacement in refusals.items():
+                    with self.subTest(lane=lane, name=name, control=control):
+                        result = check_output(complete.replace(lines[name], replacement), required)
+                        self.assertFalse(result["valid"])
+
     def test_nested_pass_cannot_replace_missing_top_level_pass(self) -> None:
         result = check_output(
             "    --- PASS: TestIntegrationTestSuite/TestRequired/subtest (0.00s)\n",
