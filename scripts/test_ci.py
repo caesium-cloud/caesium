@@ -858,8 +858,40 @@ class EarlyEvidenceLaneTests(unittest.TestCase):
         self.assertTrue(any("kind-linux-amd64" in step.get("run", "") for step in steps))
         upload = steps[-1]
         self.assertEqual(upload["uses"], "actions/upload-artifact@v7")
-        self.assertEqual(upload["if"], "always()")
+        self.assertEqual(upload["if"], "always() && steps.redact_robustness_evidence.outcome == 'success'")
         self.assertEqual(upload["with"]["if-no-files-found"], "error")
+
+    def test_early_upload_requires_always_run_redaction_even_after_lane_failure(self):
+        steps = JOBS[self.LANE]["steps"]
+        redact = next(step for step in steps if step.get("id") == "redact_robustness_evidence")
+        self.assertEqual(redact["if"], "always()")
+        self.assertNotIn("continue-on-error", redact)
+        self.assertLess(steps.index(redact), len(steps) - 1)
+        self.assertIn("--artifacts .tmp/evidence/robustness", redact["run"])
+        self.assertNotIn("|| true", redact["run"])
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "scripts").mkdir()
+            shutil.copyfile(ROOT / "scripts/collect-evidence.py", root / "scripts/collect-evidence.py")
+            art = root / ".tmp/evidence/robustness"
+            result = subprocess.run(["bash", "-e", "-c", redact["run"]], cwd=root,
+                                    capture_output=True, text=True, timeout=10)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("No robustness artifact directory was produced", result.stdout)
+            art.parent.mkdir(parents=True)
+            art.write_text("not a directory; must refuse upload")
+            result = subprocess.run(["bash", "-e", "-c", redact["run"]], cwd=root,
+                                    capture_output=True, text=True, timeout=10)
+            self.assertNotEqual(result.returncode, 0)
+            art.unlink()
+            (art / "member-logs").mkdir(parents=True)
+            (art / "internal-token.txt").write_text("fixture-generated-token\n")
+            (art / "member-logs/crash.log").write_text("failed startup fixture-generated-token")
+            result = subprocess.run(["bash", "-e", "-c", redact["run"]], cwd=root,
+                                    capture_output=True, text=True, timeout=10)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual((art / "member-logs/crash.log").read_text(), "failed startup [REDACTED_INTERNAL_TOKEN]")
+            self.assertFalse((art / "internal-token.txt").exists())
 
     def test_registered_selectors_name_real_tests(self):
         by_id = {item["id"]: item for item in self.EARLY}

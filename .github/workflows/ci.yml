@@ -1480,13 +1480,21 @@ jobs:
         run: just tag=${{ env.IMAGE_TAG }}-amd64 robustness-test
       - name: Validate scenario evidence
         run: just tag=${{ env.IMAGE_TAG }}-amd64 check-evidence
-      - name: Upload scenario evidence
+      - name: Redact robustness evidence before upload
+        id: redact_robustness_evidence
         if: always()
+        run: |
+          if [[ -e .tmp/evidence/robustness || -L .tmp/evidence/robustness ]]; then
+            python3 scripts/collect-evidence.py redact --artifacts .tmp/evidence/robustness
+          else
+            echo "No robustness artifact directory was produced; no robustness logs to redact."
+          fi
+      - name: Upload scenario evidence
+        if: always() && steps.redact_robustness_evidence.outcome == 'success'
         uses: actions/upload-artifact@v7
         with:
           name: early-evidence
-          # The lane redacts its generated internal token and kubeconfigs
-          # before this step; see `just robustness-test`.
+          # A failed lane may upload diagnostics only after mandatory redaction.
           path: .tmp/evidence/
           if-no-files-found: error
           retention-days: 7
