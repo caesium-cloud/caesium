@@ -1246,7 +1246,7 @@ else:
     elif op == "logs":
         if scenario == "connector-silent": print("caesium start",flush=True)
         else:
-            print('{"msg":"connector config loaded"}',flush=True)
+            print('{"msg":"connector config loaded","fingerprint":"' + 'a'*64 + '"}',flush=True)
             try:
                 for i in range(4000): print("startup",i,flush=True)
             except BrokenPipeError: raise SystemExit(141)

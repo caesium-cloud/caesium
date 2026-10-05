@@ -171,7 +171,7 @@ class FaultChecks(unittest.TestCase):
         info["Config"]["Labels"][b.LABEL_LANE] = "base-connectors"
         info["State"].update(Running=fault != "stopped", Error="never-persist-native-error")
         calls, polls = [], []
-        logs = json.dumps({"msg": "connector config loaded", "level": "info", "ts": "2026-10-05T12:00:00Z",
+        logs = json.dumps({"msg": "connector config loaded", "fingerprint": "a" * 64, "level": "info", "ts": "2026-10-05T12:00:00Z",
                            "error": "csk_neverpersist", "token": "never-persist-token"}) + "\n" + json.dumps(
                {"msg": "Bearer never-persist-bearer", "jwt": "eyJheader.eyJpayload.signature",
                 "cookie": "never-persist-cookie", "assertion": "never-persist-assertion"})
@@ -348,7 +348,7 @@ print(json.dumps({'msg':'server started'}),file=sys.stderr)
     def test_connector_stderr_event_is_real_proof_only_for_successful_log_command(self):
         program = """import json,sys
 print('never-persist-stdout')
-print(json.dumps({'msg':'connector config loaded','error':'never-persist-error'}),file=sys.stderr)
+print(json.dumps({'msg':'connector config loaded','fingerprint':'a'*64,'error':'never-persist-error'}),file=sys.stderr)
 for _ in range(1100): print(json.dumps({'msg':'Bearer never-persist-secret'}),file=sys.stderr)
 """
         result = self.actual_connector_log_process(program)
@@ -365,6 +365,32 @@ for _ in range(1100): print(json.dumps({'msg':'Bearer never-persist-secret'}),fi
         self.assertEqual(failure['counts']['failed_log_streams_omitted'], 2)
         self.assertNotIn('connector config loaded', failed.stdout)
         self.assertNotIn('never-persist', failed.stdout)
+
+    def test_connector_real_successful_logs_without_valid_fingerprint_never_signal(self):
+        for channel in ('stdout', 'stderr'):
+            for fingerprint in ('missing', '', 'a' * 63, 'g' * 64, 123, ['a' * 64]):
+                with self.subTest(channel=channel, fingerprint=fingerprint):
+                    event = {'msg': 'connector config loaded'}
+                    if fingerprint != 'missing':
+                        event['fingerprint'] = fingerprint
+                    program = "import json,sys\nprint(" + repr(json.dumps(event)) + ",file=sys." + channel + ")"
+                    result = self.actual_connector_log_process(program)
+                    evidence = json.loads(result.stdout)
+                    self.assertEqual(result.returncode, 0)
+                    self.assertIsNone(evidence['loaded_event'])
+                    command, audit, calls = self.connector_fixture([(0, '{"status":"healthy"}')])
+                    def invalid_logs(*args, **kwargs):
+                        if args[1] == 'logs':
+                            return result
+                        return command(*args, **kwargs)
+                    with self.assertRaises(b.JourneyError):
+                        b.connector_shutdown(invalid_logs, CID, OWNER, 'owned', IMAGE, audit)
+                    record = json.loads((audit / 'connector-diagnostics.json').read_text())
+                    self.assertFalse(record['complete'] or record['fingerprint'])
+                    self.assertTrue(record['healthy'])
+                    self.assertEqual(record['refusal_category'], 'never_ready')
+                    self.assertEqual(record['polls'], 60)
+                    self.assertFalse(any(args[1] in ('kill', 'stop') for args in calls))
 
     def test_connector_stream_line_bound_cannot_promote_oversized_suffix_or_invalid_utf8(self):
         class BoundedStream(io.BytesIO):

@@ -288,7 +288,7 @@ def connector_log_records(streams) -> dict[str, Any]:
             if message == "connector config loaded":
                 if isinstance(value.get("fingerprint"), str) and DIGEST_RE.fullmatch(value["fingerprint"]):
                     record["fingerprint"] = value["fingerprint"]
-                loaded = record.copy()
+                    loaded = record.copy()
             records.append(record)
     counts["retained_records"] = len(records)
     return {"records": list(records), "loaded_event": loaded, "counts": counts}
