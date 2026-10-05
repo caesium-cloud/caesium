@@ -178,8 +178,13 @@ func collectReplaySSEWithin(t *testing.T, capture *replaySSECapture, window time
 		return result.events, result.err
 	case <-time.After(3 * time.Second):
 		capture.cancel()
-		_ = capture.body.Close()
-		t.Fatal("SSE observation did not cancel and join within its bound")
+		_ = capture.Close()
+		select {
+		case <-finished:
+		case <-time.After(2 * time.Second):
+			t.Fatal("SSE observation did not join after reader cleanup")
+		}
+		t.Fatal("SSE observation exceeded its bound; reader and collector joined during cleanup")
 		return nil, nil
 	}
 }
