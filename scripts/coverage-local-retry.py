@@ -43,6 +43,26 @@ def timestamp(raw):
     return calendar.timegm(date.utctimetuple()) * 1_000_000_000 + int((match[2] or '').ljust(9, '0'))
 
 
+def finished_log_matches(log, expected):
+    # Docker persisted logs may retain their native RFC3339Nano framing.
+    # Match a complete payload line, never a substring or suffix.
+    for line in log.splitlines():
+        if line == expected:
+            return True
+        prefix, separator, payload = line.partition(' ')
+        if not separator or payload != expected:
+            continue
+        try:
+            timestamp(prefix)
+            zone = re.search(r'([+-])(\d\d):(\d\d)$', prefix)
+            if zone and (int(zone[2]) > 23 or int(zone[3]) > 59):
+                continue
+        except (Refused, ValueError, TypeError, OverflowError):
+            continue
+        return True
+    return False
+
+
 def exact_uuid(value):
     require(isinstance(value, str) and UUID_RE.fullmatch(value) and str(uuid.UUID(value)) == value, 'public durable UUID missing')
     return value
@@ -79,8 +99,13 @@ def validate_receipt(record, context, inputs, output):
     absences = record.get('cleanup_absences', [])
     require(len(absences) == 7 and len({(a.get('kind'), a.get('name')) for a in absences}) == 7 and all(a.get('absent') is True for a in absences) and sorted(a.get('kind') for a in absences) == ['container'] * 5 + ['network', 'volume'], 'exact five processes/network/data-volume cleanup proof missing')
     require(all(a.get('name', '').startswith(record['owner'] + '-') and (a.get('kind') == 'volume' or re.fullmatch(r'[a-f0-9]{64}', a.get('identity', ''))) for a in absences), 'foreign cleanup receipt identity')
-    processes = record.get('processes', [])
-    require([p.get('role') for p in processes] == list(ROLES), 'exact five original process profiles required')
+    original_processes = record.get('processes', [])
+    roles = [p.get('role') for p in original_processes]
+    require(len(roles) == len(ROLES) and set(roles) == set(ROLES), 'exact five unique original process profiles required')
+    # Records are appended when each process finishes: apply/start precede
+    # server1's stop. Preserve that original journal; canonicalize only this
+    # validation view and the merge lists, never sidecars or process records.
+    processes = sorted(original_processes, key=lambda p: ROLES.index(p['role']))
     seen, dirs = set(), {'cli': [], 'server': []}
     for process in processes:
         source = 'server' if process['role'].startswith('server-') else 'cli'
@@ -281,7 +306,9 @@ class Driver(backend.Driver):
         return result
 
     def native(self, identity, job_id, run_id, task_id, task_run_id):
-        obj = self.inspect('container', identity)
+        return self.native_object(self.inspect('container', identity), identity, job_id, run_id, task_id, task_run_id)
+
+    def native_object(self, obj, identity, job_id, run_id, task_id, task_run_id):
         env = obj.get('Config', {}).get('Env', [])
         name = obj.get('Name', '').removeprefix('/')
         allowed = [task_id + '-' + run_id, task_id + '-' + run_id + '-' + task_run_id]
@@ -294,6 +321,19 @@ class Driver(backend.Driver):
         if backend.missing_object(result, 'container', identity):
             return True
         require(result.returncode == 0, 'native inventory error cannot prove absence')
+        return False
+
+    def native_removed(self, identity, job_id, run_id, task_id, task_run_id):
+        # Inspect once: engine removal between two reads is a legitimate state
+        # transition, not a daemon error. Validate the exact returned object
+        # whenever present; only literal typed absence can prove removal.
+        result = self.docker('container', 'inspect', identity, check=False, timeout=10)
+        if backend.missing_object(result, 'container', identity):
+            return True
+        require(result.returncode == 0, 'native inventory error cannot prove absence')
+        values = json.loads(result.stdout)
+        require(isinstance(values, list) and len(values) == 1 and isinstance(values[0], dict), 'native inventory shape refused')
+        self.native_object(values[0], identity, job_id, run_id, task_id, task_run_id)
         return False
 
     def retry(self, job_id, run_id, before):
@@ -317,10 +357,9 @@ class Driver(backend.Driver):
             return None
         witness = self.wait(running, 'actual native retry Running', 45)
         def removed():
-            if self.native_absent(witness['runtime_id']):
+            if self.native_removed(witness['runtime_id'], job_id, run_id, task_id, task_run_id):
                 witness['absent_at_ns'] = time.time_ns()
                 return True
-            self.native(witness['runtime_id'], job_id, run_id, task_id, task_run_id)
             return False
         self.wait(removed, 'native retry removal', 45)
         # Polling can observe removal after the CLI has exited. The original
@@ -337,6 +376,7 @@ class Driver(backend.Driver):
         self.report['native'] = witness
 
     def run(self):
+        self.phase = 'candidate_identity'
         candidate = self.image_check(self.image)
         require(candidate.get('Config', {}).get('Labels', {}).get('org.opencontainers.image.revision') == self.ownership_id, 'candidate revision escaped original cohort')
         self.verify_task_docker_receipt()
@@ -344,6 +384,7 @@ class Driver(backend.Driver):
         self.docker('network', 'create', *self.labels(), self.network)
         self.owned('network', self.network)
         self.database = self.volume('database')
+        self.phase = 'server1_ready'
         self.server(1)
         marker = self.owner + '-natural-drain'
         definition = {'apiVersion': 'v1', 'kind': 'Job', 'metadata': {'alias': marker, 'cache': {'enabled': False}},
@@ -357,6 +398,7 @@ class Driver(backend.Driver):
         definitions = self.output / 'definitions'
         definitions.mkdir()
         (definitions / 'job.job.yaml').write_text(json.dumps(definition, indent=2))
+        self.phase = 'public_apply'
         self.cli('apply', ['job', 'apply', '--path', '/definitions', '--server', 'http://' + self.server_name + ':8080'])
         jobs = [job for job in self.http('/v1/jobs') if job.get('alias') == marker]
         require(len(jobs) == 1, 'public apply job identity missing/ambiguous')
@@ -365,24 +407,32 @@ class Driver(backend.Driver):
         self.task_names = {exact_uuid(task['id']): task['name'] for task in names}
         require(len(self.task_names) == 2 and set(self.task_names.values()) == {'preserved', 'failed'}, 'exact applied task names/catalog IDs required')
         self.report.update(job_id=job_id, marker=marker)
+        self.phase = 'public_start'
         run_id = exact_uuid(self.cli('start', ['run', 'start', '--job-id', job_id, '--params', 'case=' + marker, '--server', 'http://' + self.server_name + ':8080']))
         self.report.update(job_id=job_id, run_id=run_id, marker=marker)
         def terminal():
             snapshot = self.snapshot(job_id, run_id)
             return snapshot if snapshot['status'] == 'failed' and snapshot.get('completed_at') else None
+        self.phase = 'initial_durable_failure'
         before = self.wait(terminal, 'initial public failed run', 45)
         failed_snapshot(before, job_id, run_id, marker)
         require(all(self.native_absent(row['runtime_id']) for row in before['rows'].values()), 'initial native runtime still present')
         self.report.update(job_id=job_id, run_id=run_id, marker=marker, before=before)
+        self.phase = 'server1_flush_stop'
         self.stop_server(1)
+        self.phase = 'natural_retry'
         self.retry(job_id, run_id, before)
+        self.phase = 'server2_ready'
         self.server(2)
+        self.phase = 'observer_durable_rows'
         after = self.snapshot(job_id, run_id)
         self.report['after'] = after
+        self.phase = 'observer_finished_log'
         log = self.read_log(job_id, run_id, after['rows']['failed']['task_id'])
         expected = 'FINISHED_' + marker + ':' + marker
-        require(expected in log.splitlines(), 'public retry finished log/params missing')
+        require(finished_log_matches(log, expected), 'public retry finished log/params missing')
         self.report['finished_log'] = expected
+        self.phase = 'server2_flush_stop'
         self.stop_server(2)
 
     def read_log(self, job_id, run_id, task_id):
@@ -439,6 +489,34 @@ class Driver(backend.Driver):
         return errors
 
 
+SAFE_PHASES = frozenset(('candidate_identity', 'server1_ready', 'public_apply', 'public_start',
+                        'initial_durable_failure', 'server1_flush_stop', 'natural_retry',
+                        'server2_ready', 'observer_durable_rows', 'observer_finished_log',
+                        'server2_flush_stop', 'final_original_profiles'))
+SAFE_GUARDS = frozenset(('public retry finished log/params missing',
+                         'exact five unique original process profiles required',
+                         'candidate original process did not exit cleanly',
+                         'actual original CLI/server argv differs from receipt',
+                         'original raw profile inventory changed/incomplete',
+                         'process sidecar changed', 'server flush/clean shutdown missing',
+                         'CLI did not exit naturally', 'shared database generations overlapped',
+                         'new attempt did not complete before natural CLI exit',
+                         'run completion not owned by CLI', 'native die did not precede CLI natural exit'))
+
+
+def failure_diagnostic(error, phase, processes):
+    # Error strings/body/native Config.Env are never retained. Only literal
+    # private guard messages on this allowlist can identify an exact predicate.
+    category = ('guard_refused' if isinstance(error, (Refused, common.JourneyError)) else
+                'bounded_timeout' if isinstance(error, (TimeoutError, backend.subprocess.TimeoutExpired)) else
+                'read_or_shape_failure')
+    message = error.args[0] if error.args and isinstance(error.args[0], str) else ''
+    return {'schema_version': 1, 'complete': False, 'category': category,
+            'phase': phase if phase in SAFE_PHASES else 'phase_unavailable',
+            'guard': message if message in SAFE_GUARDS else 'details_omitted',
+            'recorded_roles': [p['role'] for p in processes[:5] if p.get('role') in ROLES]}
+
+
 def load(args):
     context = backend.validate_context(backend.read_pinned(args.context, args.context_sha256))
     inputs = backend.validate_inputs(backend.read_pinned(args.inputs, args.inputs_sha256), [])
@@ -474,8 +552,10 @@ def main():
     try:
         driver.run()
         success = True
-    except BaseException:
+    except BaseException as error:
         driver.report['refusal_category'] = 'public_journey_or_process_refused'
+        driver.report['failure_diagnostic'] = failure_diagnostic(error, getattr(driver, 'phase', ''), driver.processes)
+        driver.save('failure-diagnostic.json', driver.report['failure_diagnostic'])
     finally:
         signal.alarm(0)
         for signum in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
@@ -488,8 +568,10 @@ def main():
     # Guard final publication with exact five original raws after cleanup.
     try:
         validate_receipt(driver.report, context, inputs, output)
-    except BaseException:
-        driver.report.update(complete=False, missing=True, refusal_category='original_profile_or_observation_refused')
+    except BaseException as error:
+        driver.report.update(complete=False, missing=True, refusal_category='original_profile_or_observation_refused',
+                             failure_diagnostic=failure_diagnostic(error, 'final_original_profiles', driver.processes))
+        driver.save('failure-diagnostic.json', driver.report['failure_diagnostic'])
         driver.save('provenance.json', driver.report)
         raise Refused('local retry final evidence refused')
     driver.save('provenance.json', driver.report)

@@ -89,6 +89,34 @@ class ReceiptControls(unittest.TestCase):
         self.record['native']['absent_at_ns'] = b.timestamp(date(21)) + 1
         self.validate()
 
+    def test_actual_record_finish_order_preserves_five_originals(self):
+        d = object.__new__(b.Driver)
+        d.output, d.image = self.output, IMAGE
+        d.binary_hash = self.record['binary_sha256']
+        d.report = self.record
+        d.processes = []
+        originals = {p['role']: p for p in self.record['processes']}
+        for role in ('apply', 'start', 'server-1', 'retry', 'server-2'):
+            original = originals[role]
+            obj = {'Id': original['container_id'], 'Image': IMAGE, 'RestartCount': 0,
+                   'Config': {'Cmd': original['command']},
+                   'State': {'ExitCode': 0, 'Running': False, 'OOMKilled': False,
+                             'StartedAt': original['started_at'], 'FinishedAt': original['finished_at']}}
+            d.owned = lambda *args, obj=obj: obj
+            d.record(role, obj['Id'], self.output / original['raw_dir'], original['command'],
+                     {'flush_rc': 0, 'stop_rc': 0} if role.startswith('server-') else None)
+        self.record['processes'] = d.processes
+        original_bytes = {(self.output / ('provenance-' + p['role'] + '.json')):
+                          (self.output / ('provenance-' + p['role'] + '.json')).read_bytes() for p in d.processes}
+        lists = self.validate()
+        self.assertEqual([p['role'] for p in self.record['processes']], ['apply', 'start', 'server-1', 'retry', 'server-2'])
+        self.assertEqual(len(lists['cli']), 3)
+        self.assertEqual(len(lists['server']), 2)
+        self.assertEqual(original_bytes, {path: path.read_bytes() for path in original_bytes})
+        self.record['processes'][-1] = self.record['processes'][0]
+        with self.assertRaises(b.Refused):
+            self.validate()
+
     def test_public_partition_omits_known_false_oom_but_refuses_unknown_or_true(self):
         # partitionRow uses omitempty on oom_killed, so an observed false
         # value is absent in real public JSON; oom_known must still be true.
@@ -198,6 +226,78 @@ class ResourceControls(unittest.TestCase):
         d.absences = {}
         d.inputs = {'task_docker_image_id': INDEX}
         return d
+
+    def test_failure_diagnostics_are_bounded_static_and_cannot_claim_completion(self):
+        records = [{'role': role} for role in b.ROLES]
+        positive = b.failure_diagnostic(b.Refused('public retry finished log/params missing'), 'observer_finished_log', records)
+        self.assertEqual(positive['guard'], 'public retry finished log/params missing')
+        self.assertEqual(positive['phase'], 'observer_finished_log')
+        self.assertFalse(positive['complete'])
+        for error in (RuntimeError('Config.Env secret-value csk_live_' + 'x' * 43), b.Refused('untrusted body ' + 'x' * 10000), KeyError('raw native Error')):
+            value = b.failure_diagnostic(error, 'untrusted ' + 'x' * 10000, records * 100)
+            serialized = json.dumps(value)
+            self.assertLess(len(serialized), 400)
+            self.assertNotIn('Config.Env', serialized)
+            self.assertNotIn('csk_live_', serialized)
+            self.assertNotIn('secret-value', serialized)
+            self.assertEqual(value['guard'], 'details_omitted')
+            self.assertEqual(value['phase'], 'phase_unavailable')
+            self.assertFalse(value['complete'])
+        timeout = b.failure_diagnostic(TimeoutError('raw socket error'), 'natural_retry', [])
+        self.assertEqual(timeout['category'], 'bounded_timeout')
+
+    def test_finished_log_exact_payload_with_native_timestamp_framing(self):
+        expected = 'FINISHED_owned-natural-drain:owned-natural-drain'
+        for log in (expected, expected + '\n', '2026-10-05T19:39:01.205028466Z ' + expected,
+                    'START_other\n2026-10-05T19:39:01Z ' + expected + '\n',
+                    '2026-10-05T19:39:01.2+01:30 ' + expected):
+            with self.subTest(log=log):
+                self.assertTrue(b.finished_log_matches(log, expected))
+        for log in ('other ' + expected, expected + ':suffix', 'prefix' + expected,
+                    '2026-10-05T19:39:01.205028466Z  ' + expected,
+                    '2026-13-05T19:39:01Z ' + expected,
+                    '2026-10-05T25:39:01Z ' + expected,
+                    '2026-10-05T19:39:01.1234567890Z ' + expected,
+                    '2026-10-05T19:39:01+01:99 ' + expected,
+                    '2026-10-05T19:39:01+24:00 ' + expected,
+                    '2026-10-05T19:39:01Z FINISHED_other:other',
+                    '2026-10-05T19:39:01Z ' + expected + ' extra'):
+            with self.subTest(log=log):
+                self.assertFalse(b.finished_log_matches(log, expected))
+
+    def test_removal_poll_validates_one_inspect_or_literal_absence(self):
+        d = self.driver()
+        identity = 'a' * 64
+        obj = {'Id': identity, 'Image': INDEX, 'Name': '/' + TASKS[1] + '-' + RUN + '-' + ROWS[1],
+               'Config': {'Env': ['COVERAGE_LOCAL_RETRY_OWNER=owned', 'CAESIUM_RUN_ID=' + RUN]},
+               'State': {'Running': False, 'OOMKilled': False}}
+        calls = []
+        # If removal occurs after these returned bytes, a second read fails.
+        # The poll must validate the captured object without another inspect.
+        def docker(*args, **kwargs):
+            calls.append((args, kwargs))
+            self.assertEqual(len(calls), 1)
+            return subprocess.CompletedProcess(args, 0, json.dumps([obj]), '')
+        d.docker = docker
+        d.inspect = lambda *args: self.fail('second inspect reintroduces removal race')
+        self.assertFalse(d.native_removed(identity, JOB, RUN, TASKS[1], ROWS[1]))
+        self.assertEqual(calls[0][0], ('container', 'inspect', identity))
+        self.assertFalse(calls[0][1]['check'])
+        for result in (subprocess.CompletedProcess([], 1, '[]', 'Error response from daemon: No such container: ' + identity),):
+            d.docker = lambda *args, **kwargs: result
+            self.assertTrue(d.native_removed(identity, JOB, RUN, TASKS[1], ROWS[1]))
+        for result in (subprocess.CompletedProcess([], 1, '', 'permission denied'),
+                       subprocess.CompletedProcess([], 1, '[]', 'Error response from daemon: No such container: foreign'),
+                       subprocess.CompletedProcess([], 0, '[]', ''),
+                       subprocess.CompletedProcess([], 0, '{}', ''),
+                       subprocess.CompletedProcess([], 0, '[not JSON', '')):
+            with self.subTest(result=result), self.assertRaises((b.Refused, ValueError)):
+                d.docker = lambda *args, **kwargs: result
+                d.native_removed(identity, JOB, RUN, TASKS[1], ROWS[1])
+        obj['Id'] = 'b' * 64
+        d.docker = lambda *args, **kwargs: subprocess.CompletedProcess(args, 0, json.dumps([obj]), '')
+        with self.assertRaises(b.Refused):
+            d.native_removed(identity, JOB, RUN, TASKS[1], ROWS[1])
 
     def test_native_guard_checks_exact_ids_owner_env_name_and_image(self):
         d = self.driver()
