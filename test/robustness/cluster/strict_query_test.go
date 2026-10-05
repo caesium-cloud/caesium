@@ -76,6 +76,35 @@ func TestQueryLeaseExactGenerationAndMalformedCells(t *testing.T) {
 	}
 }
 
+func TestQueryLeaseRejectsWrongIdentityAndShortRows(t *testing.T) {
+	const id = "e2a55b78-4f0e-4903-a9eb-36a3ff647959"
+	const otherID = "c22a9177-03aa-49e9-9988-984b3e590738"
+	for _, tc := range []struct {
+		name string
+		body string
+		want string
+	}{
+		{
+			name: "wrong returned run id",
+			body: fmt.Sprintf(`{"rows":[[%q,"node",1,"expiry"]]}`, otherID),
+			want: "lease run_id " + otherID + " != " + id,
+		},
+		{
+			name: "short lease row",
+			body: fmt.Sprintf(`{"rows":[[%q,"node",1]]}`, id),
+			want: "lease row has 3 columns, want 4",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := queryClient(tc.body, nil)
+			got, err := h.QueryLease(context.Background(), "http://query.test", id)
+			if err == nil || err.Error() != tc.want {
+				t.Fatalf("QueryLease = %+v, %v; want error %q", got, err, tc.want)
+			}
+		})
+	}
+}
+
 func TestQueryTaskRecipesRejectsMalformedCounters(t *testing.T) {
 	const id = "e2a55b78-4f0e-4903-a9eb-36a3ff647959"
 	for _, tc := range []struct {

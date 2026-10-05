@@ -5,6 +5,7 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"maps"
@@ -31,18 +32,26 @@ import (
 type stubTriggerLister struct {
 	triggers models.Triggers
 	err      error
+	calls    *int
 }
 
 func (s stubTriggerLister) ListByPath(string) (models.Triggers, error) {
+	if s.calls != nil {
+		(*s.calls)++
+	}
 	return s.triggers, s.err
 }
 
 type stubJobLister struct {
-	jobs models.Jobs
-	err  error
+	jobs  models.Jobs
+	err   error
+	calls *int
 }
 
 func (s stubJobLister) List(*jsvc.ListRequest) (models.Jobs, error) {
+	if s.calls != nil {
+		(*s.calls)++
+	}
 	return s.jobs, s.err
 }
 
@@ -365,23 +374,29 @@ func TestReceiveWithServicesRejectsOversizedBody(t *testing.T) {
 	require.NoError(t, env.Process())
 
 	req := httptest.NewRequestWithContext(webhookTestContext(t), http.MethodPost, "/v1/hooks/github/push", strings.NewReader(`{"ref":"refs/heads/main"}`))
+	req.RemoteAddr = "198.51.100.222:8123"
 	rec := httptest.NewRecorder()
 
+	triggerCalls, jobCalls, runnerCalls := 0, 0, 0
+	triggers := stubTriggerLister{calls: &triggerCalls}
+	jobs := stubJobLister{calls: &jobCalls}
 	e := echo.New()
-	c := e.NewContext(req, rec)
-	c.SetPathValues(echo.PathValues{{Name: "*", Value: "github/push"}})
-
-	err := ReceiveWithServices(
-		c,
-		stubTriggerLister{},
-		stubJobLister{},
-		nil,
-		func(context.Context, *models.Job, map[string]string) error { return nil },
-	)
-	require.Error(t, err)
-	httpErr, ok := err.(*echo.HTTPError)
-	require.True(t, ok)
-	require.Equal(t, http.StatusRequestEntityTooLarge, httpErr.Code)
+	e.POST("/v1/hooks/*", func(c *echo.Context) error {
+		return ReceiveWithServices(c, triggers, jobs, nil, func(context.Context, *models.Job, map[string]string) error {
+			runnerCalls++
+			return nil
+		})
+	})
+	e.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusRequestEntityTooLarge, rec.Code)
+	var response struct {
+		Message string `json:"message"`
+	}
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&response))
+	require.Equal(t, "request body too large", response.Message)
+	require.Zero(t, triggerCalls, "oversized body reached trigger service")
+	require.Zero(t, jobCalls, "oversized body reached job service")
+	require.Zero(t, runnerCalls, "oversized body started a job")
 }
 
 func TestReceiveWithServicesRateLimitsByIP(t *testing.T) {

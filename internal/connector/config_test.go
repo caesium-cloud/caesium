@@ -95,6 +95,18 @@ func TestActorReservationAllowsNestedSchemaAndData(t *testing.T) {
 	}
 }
 
+func TestActorReservationRejectsRootActionSchemaProperty(t *testing.T) {
+	doc := strings.Replace(
+		validConfig,
+		"              properties:\n                note:",
+		"              properties:\n                _caesium_actor:\n                  type: string\n                note:",
+		1,
+	)
+	if _, err := Parse([]byte(doc), nil); err == nil || !strings.Contains(err.Error(), ReservedActorField) {
+		t.Fatalf("root action schema property %q was not rejected: %v", ReservedActorField, err)
+	}
+}
+
 func TestParseRefusesClosedFailures(t *testing.T) {
 	cases := []struct {
 		name string
