@@ -30,16 +30,18 @@ func TestResponseErrorPreservesCLIErrorPrecedence(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got := ResponseError("backfill list", tc.status, tc.body, tc.readErr)
-			if tc.wantErr == nil {
+			if tc.want == "" {
 				require.NoError(t, got)
 				return
 			}
 			require.Error(t, got)
 			require.EqualError(t, got, tc.want)
-			if tc.unwrapped {
-				require.Same(t, tc.wantErr, got)
-			} else {
-				require.ErrorIs(t, got, tc.wantErr)
+			if tc.wantErr != nil {
+				if tc.unwrapped {
+					require.Same(t, tc.wantErr, got)
+				} else {
+					require.ErrorIs(t, got, tc.wantErr)
+				}
 			}
 		})
 	}
