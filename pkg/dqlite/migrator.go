@@ -762,6 +762,13 @@ func (m Migrator) recreateTableWithIndexes(value any, tablePtr *string,
 		}
 
 		return m.DB.Transaction(func(tx *gorm.DB) error {
+			// BeginTx is deferred: reserve the write before reading index metadata.
+			// A read-first snapshot can no longer be upgraded after a peer commits.
+			// Keep index capture inside this same transaction, before dropping the
+			// original table, so restoration still uses one atomic schema snapshot.
+			if err := tx.Exec(createSQL, sqlArgs...).Error; err != nil {
+				return err
+			}
 			var indexes []string
 			if preserveIndexes {
 				// Automatic indexes belong to constraints in CREATE TABLE. Only
@@ -769,9 +776,6 @@ func (m Migrator) recreateTableWithIndexes(value any, tablePtr *string,
 				if err := tx.Raw("SELECT sql FROM sqlite_master WHERE type = 'index' AND tbl_name = ? AND sql IS NOT NULL ORDER BY name", table).Scan(&indexes).Error; err != nil {
 					return err
 				}
-			}
-			if err := tx.Exec(createSQL, sqlArgs...).Error; err != nil {
-				return err
 			}
 
 			queries := []string{
