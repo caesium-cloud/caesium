@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"regexp"
 	"strings"
 	"time"
 
@@ -113,20 +114,23 @@ steps:
 	stdout, stderr, err = s.listingCacheCLI("invalidate", "--job-id", jobID, "--task", "step-a", "--server", s.caesiumURL)
 	s.Require().NoError(err, "%s", stderr)
 	s.Require().Empty(stdout)
-	s.Require().Equal(fmt.Sprintf("Cache invalidated for task %q in job %s\n", "step-a", jobID), stderr)
+	taskAck := fmt.Sprintf("Cache invalidated for task %q in job %s", "step-a", jobID)
+	s.requireCacheCLIStderrAck(stderr, func(line string) bool { return line == taskAck }, "task invalidation")
 	s.maintenanceJSON("/v1/jobs/"+jobID+"/cache", &httpListed)
 	s.Require().Equal([]listingCacheEntry{byTask["step-b"]}, httpListed.Entries)
 	stdout, stderr, err = s.listingCacheCLI("invalidate", "--job-id", jobID, "--server", s.caesiumURL)
 	s.Require().NoError(err, "%s", stderr)
 	s.Require().Empty(stdout)
-	s.Require().Equal("Cache invalidated for job "+jobID+"\n", stderr)
+	jobAck := "Cache invalidated for job " + jobID
+	s.requireCacheCLIStderrAck(stderr, func(line string) bool { return line == jobAck }, "job invalidation")
 	s.maintenanceJSON("/v1/jobs/"+jobID+"/cache", &httpListed)
 	s.Require().Empty(httpListed.Entries)
 
 	stdout, stderr, err = s.listingCacheCLI("prune", "--server", s.caesiumURL)
 	s.Require().NoError(err, "%s", stderr)
 	s.Require().Empty(stdout)
-	s.Require().Regexp(`^Pruned [0-9]+ expired cache entries\n$`, stderr)
+	pruneAck := regexp.MustCompile(`^Pruned [0-9]+ expired cache entries$`)
+	s.requireCacheCLIStderrAck(stderr, pruneAck.MatchString, "prune")
 	// Prune's count is global and the list route hides expired entries. This
 	// asserts the real command/response contract, not an invented exact delete.
 	s.maintenanceJSON("/v1/jobs/"+jobID+"/cache", &httpListed)
@@ -366,4 +370,22 @@ func (s *IntegrationTestSuite) listingCacheCLI(args ...string) (string, string, 
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
 	err := cmd.Run()
 	return stdout.String(), stderr.String(), err
+}
+
+func (s *IntegrationTestSuite) requireCacheCLIStderrAck(stderr string, isAck func(string) bool, action string) {
+	s.T().Helper()
+	ackCount := 0
+	for _, line := range strings.Split(stderr, "\n") {
+		if line == "" {
+			continue
+		}
+		if isAck(line) {
+			ackCount++
+			continue
+		}
+		var diagnostic map[string]any
+		s.Require().NoError(json.Unmarshal([]byte(line), &diagnostic), "non-acknowledgement stderr must be a structured diagnostic line: %q", line)
+		s.Require().NotEmpty(diagnostic, "non-acknowledgement stderr diagnostic must be a JSON object")
+	}
+	s.Require().Equal(1, ackCount, "stderr must contain exactly one full %s acknowledgement line", action)
 }
