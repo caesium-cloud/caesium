@@ -104,7 +104,10 @@ steps:
 		s.Require().Equal("succeeded", partition.Status)
 		s.Require().Equal("success", partition.Result)
 		s.Require().NotNil(partition.CompletedAt)
-		s.Require().Equal(partition.TaskRunID, entry.TaskRunID)
+		// Local execution stores the catalog task ID in cache TaskRunID; the
+		// partition listing exposes the concrete TaskRun row ID.
+		s.Require().Equal(taskIDs[entry.TaskName], entry.TaskRunID)
+		s.Require().NotEqual(entry.TaskRunID, partition.TaskRunID)
 		byTask[entry.TaskName] = entry
 	}
 	stdout, stderr, err = s.listingCacheCLI("invalidate", "--job-id", jobID, "--task", "step-a", "--server", s.caesiumURL)
