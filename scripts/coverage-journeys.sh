@@ -100,6 +100,41 @@ PY
   unset DOCKER_CONTEXT DOCKER_TLS_VERIFY DOCKER_CERT_PATH DOCKER_API_VERSION
 }
 
+coverage_journey_run_local_retry() {
+  local output="$RAW/journeys/local-retry" driver_log="$ARTIFACTS/journeys/local-retry-driver.log"
+  local rc=0 path
+  if [[ "$CONTAINER_CLI" != "docker" || -e "$output" || -L "$output" ]]; then
+    coverage_journey_fail "local retry requires Docker and fresh original raw paths"
+    return 1
+  fi
+  set +e
+  python3 "$ROOT/scripts/coverage-local-retry.py" \
+    --context "$PRODUCER_CONTEXT" --context-sha256 "$PRODUCER_CONTEXT_SHA256" \
+    --inputs "$COVERAGE_BACKEND_PRODUCER_INPUTS" --inputs-sha256 "$COVERAGE_BACKEND_PRODUCER_INPUTS_SHA256" \
+    --output "$output" --run >"$driver_log" 2>&1
+  rc=$?
+  set -e
+  if [[ "$rc" -ne 0 ]]; then
+    coverage_journey_log_redacted <"$driver_log" >&2 || true
+    coverage_journey_fail "public no-server retry/natural drain journey refused"
+    return 1
+  fi
+  if ! python3 "$ROOT/scripts/coverage-local-retry.py" \
+    --context "$PRODUCER_CONTEXT" --context-sha256 "$PRODUCER_CONTEXT_SHA256" \
+    --inputs "$COVERAGE_BACKEND_PRODUCER_INPUTS" --inputs-sha256 "$COVERAGE_BACKEND_PRODUCER_INPUTS_SHA256" \
+    --output "$output" --validate; then
+    coverage_journey_fail "local retry original process/raw/observation guards refused"
+    return 1
+  fi
+  while IFS= read -r path; do
+    [[ -n "$path" ]] && COVERAGE_JOURNEY_CLI_DIRS+=("$RAW/$path")
+  done <"$output/cli-dirs.txt"
+  while IFS= read -r path; do
+    [[ -n "$path" ]] && COVERAGE_JOURNEY_SERVER_DIRS+=("$RAW/$path")
+  done <"$output/server-dirs.txt"
+  COVERAGE_JOURNEY_NAMES+=("local-retry")
+}
+
 coverage_journey_run_backends() {
   local output="$RAW/journeys/backends"
   local driver_log="$ARTIFACTS/journeys/backend-driver.log"
@@ -1709,6 +1744,7 @@ PY
   # public-surface journeys, then provenance-checked before their raw profiles
   # join these exact candidate-image CLI/server merges.
   coverage_journey_run_backends || return 1
+  coverage_journey_run_local_retry || return 1
 
   JOURNEY_MANIFEST_SHA="$CANDIDATE_SHA" \
   JOURNEY_MANIFEST_IMAGE_ID="$IMAGE_ID" \
@@ -1724,7 +1760,7 @@ import pathlib
 import sys
 
 records = []
-for lane in ("local", "auth", "distributed", "owner-memory", "git-sync", "sso"):
+for lane in ("local", "auth", "distributed", "owner-memory", "git-sync", "sso", "local-retry"):
     record = json.loads((pathlib.Path(sys.argv[2]) / lane / "provenance.json").read_text())
     if record["complete"] is not True or record["candidate_sha"] != os.environ["JOURNEY_MANIFEST_SHA"]:
         raise SystemExit("incomplete or foreign lane record: " + lane)
@@ -1742,7 +1778,7 @@ manifest = {
     "build_context": json.loads(os.environ["JOURNEY_MANIFEST_BUILD_CONTEXT"]),
     "image_provenance": os.environ["JOURNEY_MANIFEST_PROVENANCE"],
     "verified": os.environ["JOURNEY_MANIFEST_VERIFIED"] == "true",
-    "complete": len(records) == 6,
+    "complete": len(records) == 7,
     "lanes": records,
     "backend_contribution": {
         "path": os.environ["JOURNEY_MANIFEST_BACKEND_PATH"],
@@ -1755,7 +1791,7 @@ manifest = {
 }
 pathlib.Path(sys.argv[1]).write_text(json.dumps(manifest, indent=2) + "\n")
 PY
-  log "collected six exact-image real integration journeys; original process raws retained"
+  log "collected seven exact-image real integration journeys; original process raws retained"
 }
 
 merge_coverage_journeys() {
