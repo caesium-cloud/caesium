@@ -3,11 +3,13 @@ package run
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 
 	jsvc "github.com/caesium-cloud/caesium/api/rest/service/job"
 	runsvc "github.com/caesium-cloud/caesium/api/rest/service/run"
@@ -15,6 +17,8 @@ import (
 	"github.com/caesium-cloud/caesium/internal/job"
 	"github.com/caesium-cloud/caesium/internal/models"
 	runstorage "github.com/caesium-cloud/caesium/internal/run"
+	"github.com/caesium-cloud/caesium/internal/runlife"
+	"github.com/caesium-cloud/caesium/pkg/env"
 	"github.com/caesium-cloud/caesium/pkg/log"
 	"github.com/google/uuid"
 	"github.com/spf13/cobra"
@@ -111,11 +115,27 @@ var retryCmd = &cobra.Command{
 // Register before reopening the row: a cancellation during admission must reach
 // the context transferred to execution, before execution starts.
 func startLocalWholeRunRetry(parent context.Context, j *models.Job, runID uuid.UUID, runEntry *runstorage.JobRun, admit func(uuid.UUID) (*runstorage.JobRun, error), finalize func(uuid.UUID, error) (bool, error), launch func(context.Context, *models.Job, *runstorage.JobRun, func())) (*runstorage.JobRun, error) {
-	ctx, release := job.RegisterRunCancel(context.WithoutCancel(parent), runID)
+	// A private owner joins this command's root and any replacement engines.
+	// An attached server owner gets one outer reservation, never a global drain.
+	owner, carrier, finishOwner, err := localRetryOwner(parent)
+	if err != nil {
+		return nil, err
+	}
+	workCtx, releaseWork, err := owner.Reserve(carrier)
+	if err != nil {
+		owner.CloseAndCancel()
+		finishOwner()
+		return nil, err
+	}
+	ctx, unregister := job.RegisterRunCancel(workCtx, runID)
+	release := func() { unregister(); releaseWork() }
 	transferred := false
 	defer func() {
 		if !transferred {
 			release()
+			owner.CloseAndCancel()
+			_ = owner.Wait(context.Background())
+			finishOwner()
 		}
 	}()
 	r, err := admit(runID)
@@ -133,17 +153,60 @@ func startLocalWholeRunRetry(parent context.Context, j *models.Job, runID uuid.U
 	}
 	launch(ctx, j, r, release)
 	transferred = true
+	if err := joinLocalRetryOwner(parent, owner, env.Variables().ShutdownGracePeriod); err != nil {
+		// Keep an attached owner's outer reservation until our work really joins,
+		// even when the command has to report an unresolved cleanup deadline.
+		go func() { _ = owner.Wait(context.Background()); finishOwner() }()
+		return r, fmt.Errorf("local retry %s could not join owned execution: %w", runID, err)
+	}
+	finishOwner()
 	return r, nil
+}
+
+func localRetryOwner(parent context.Context) (*runlife.Supervisor, context.Context, func(), error) {
+	outerCtx := parent
+	releaseOuter := func() {}
+	if attached := runlife.FromContext(parent); attached != nil {
+		var err error
+		outerCtx, releaseOuter, err = attached.Reserve(parent)
+		if err != nil {
+			return nil, nil, nil, err
+		}
+	}
+	lifetime, cancel := context.WithCancel(parent)
+	stop := context.AfterFunc(outerCtx, cancel)
+	owner := runlife.New(lifetime)
+	finish := func() { stop(); cancel(); releaseOuter() }
+	return owner, runlife.WithSupervisor(parent, owner), finish, nil
+}
+
+func joinLocalRetryOwner(ctx context.Context, owner *runlife.Supervisor, grace time.Duration) error {
+	drainErr := owner.Drain(ctx)
+	if drainErr == nil {
+		return nil
+	}
+	// No new total execution cap: only cancellation starts the configured grace.
+	// Backend outcome errors remain durable/log-only; an unjoined owner is a
+	// command error rather than a successful process boundary.
+	owner.CloseAndCancel()
+	cleanupCtx, cancel := context.WithTimeout(context.Background(), grace)
+	defer cancel()
+	if waitErr := owner.Wait(cleanupCtx); waitErr != nil {
+		return errors.Join(drainErr, waitErr)
+	}
+	return nil
 }
 
 // The local command owns this execution until RunE returns. A detached launch
 // would be lost when main exits, leaving the committed retry pending forever.
 func launchLocalWholeRunRetry(ctx context.Context, j *models.Job, r *runstorage.JobRun, release func()) {
-	defer release()
-	runCtx := runstorage.WithContext(ctx, r.ID)
-	if err := localRetryExecution(runCtx, j, r.Params); err != nil {
-		log.Error("job retry run failure", "id", j.ID, "run_id", r.ID, "error", err)
-	}
+	go func() {
+		defer release()
+		runCtx := runstorage.WithContext(ctx, r.ID)
+		if err := localRetryExecution(runCtx, j, r.Params); err != nil {
+			log.Error("job retry run failure", "id", j.ID, "run_id", r.ID, "error", err)
+		}
+	}()
 }
 
 var localRetryExecution = func(ctx context.Context, j *models.Job, params map[string]string) error {
