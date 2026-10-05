@@ -113,6 +113,9 @@ command_status=0
 sanitize_logs "$scratch/foreground" || fail log_sanitization_failed
 cat "$scratch/safe-logs"
 [ "$command_status" -eq 0 ] || fail healthy_run_failed "$command_status"
+grep -Fx 'cgroup memory limit 67108864' "$scratch/safe-logs" >/dev/null || fail healthy_limit_missing
+grep -Fx 'allocated 16 MiB' "$scratch/safe-logs" >/dev/null || fail healthy_allocation_missing
+grep -Fx 'completed' "$scratch/safe-logs" >/dev/null || fail healthy_completion_missing
 
 # A waiting process must not touch the large allocation before the harness has
 # set its limit. Its OOM is the kernel verdict, never a fixture-chosen exit 137.
@@ -140,6 +143,7 @@ done
 [ "$ready" = true ] || fail barrier_marker_missing
 read_state || fail barrier_inspect_failed "$inspect_status"
 [ "$running" = true ] || fail waiter_not_running
+[ "$memory" = 67108864 ] && [ "$swap" = 67108864 ] || fail barrier_memory_mismatch
 read_logs || fail barrier_logs_failed "$log_status"
 if [[ "$safe_logs" == *"allocated "* ]]; then fail allocated_before_release; fi
 phase="release"
@@ -153,7 +157,11 @@ for ((poll=0; poll<100; poll++)); do
     if [ "$running" = false ]; then
         [ "$state_status" = exited ] || fail wrong_terminal_status
         [ "$exit_code" = 137 ] || fail wrong_terminal_exit
-        if [ "$oom" = true ]; then terminal=true; break; fi
+        if [ "$oom" = true ]; then
+            [ "$memory" = 67108864 ] && [ "$swap" = 67108864 ] || fail terminal_memory_mismatch
+            terminal=true
+            break
+        fi
     fi
     sleep 0.1
 done

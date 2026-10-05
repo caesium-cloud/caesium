@@ -35,7 +35,13 @@ run)
     else
         [[ " $* " == *" --memory=64m --memory-swap=64m "* ]] || exit 12
         [[ "$*" == *" --memory-mib 16 --hold 2s" ]] || exit 12
-        printf 'cgroup memory limit 67108864\nallocated 16 MiB\ncompleted\n'
+        case "$SCENARIO" in
+            healthy_hollow) : ;;
+            healthy_wrong_limit) printf 'cgroup memory limit 134217728\nallocated 16 MiB\ncompleted\n' ;;
+            healthy_wrong_allocation) printf 'cgroup memory limit 67108864\nallocated 15 MiB\ncompleted\n' ;;
+            healthy_no_completion) printf 'cgroup memory limit 67108864\nallocated 16 MiB\n' ;;
+            *) printf 'cgroup memory limit 67108864\nallocated 16 MiB\ncompleted\n' ;;
+        esac
         if [ "$SCENARIO" = healthy_fail ]; then echo SECRET_NATIVE >&2; exit 5; fi
     fi
     ;;
@@ -56,7 +62,7 @@ logs)
 inspect)
     [[ "${!#}" = "$cid" ]] || exit 12
     if [ "$SCENARIO" = inspect_fail ]; then echo SECRET_NATIVE >&2; exit 9; fi
-    native_status=running; running=true; code=0; oom=false; memory=67108864
+    native_status=running; running=true; code=0; oom=false; memory=67108864; swap=67108864
     if [ -f "$FIXTURE/released" ]; then
         n=0; if [ -f "$FIXTURE/state_count" ]; then read -r n < "$FIXTURE/state_count"; fi
         n=$((n+1)); printf '%s\n' "$n" > "$FIXTURE/state_count"
@@ -68,6 +74,8 @@ inspect)
             wrong_status) native_status=dead ;;
             running_forever) native_status=running; running=true; code=0; oom=false ;;
             terminal_inspect_fail) echo SECRET_NATIVE >&2; exit 9 ;;
+            terminal_memory_mismatch) memory=134217728 ;;
+            terminal_swap_mismatch) swap=-1 ;;
         esac
     fi
     case "$SCENARIO" in
@@ -76,10 +84,12 @@ inspect)
         malformed_boolean) oom=maybe ;;
         malformed_exit) code=NaN ;;
         malformed_memory) memory=SECRET_MEMORY ;;
+        barrier_memory_mismatch) memory=0 ;;
+        barrier_swap_mismatch) swap=134217728 ;;
     esac
     # The real guard must request one coherent record, not scalar inspections.
     [ "$3" = '{{.Id}}|{{.Image}}|{{.State.Status}}|{{.State.Running}}|{{.State.ExitCode}}|{{.State.OOMKilled}}|{{.HostConfig.Memory}}|{{.HostConfig.MemorySwap}}' ] || exit 12
-    printf '%s|%s|%s|%s|%s|%s|%s|67108864\n' "$cid" "$image" "$native_status" "$running" "$code" "$oom" "$memory"
+    printf '%s|%s|%s|%s|%s|%s|%s|%s\n' "$cid" "$image" "$native_status" "$running" "$code" "$oom" "$memory" "$swap"
     ;;
 exec)
     [ "$*" = "exec $cid touch /tmp/release" ] || exit 12
@@ -155,6 +165,28 @@ class StressSmokeTests(unittest.TestCase):
     def test_terminal_status_must_be_exited(self):
         result, _, _ = self.assert_refused("wrong_status", "wrong_terminal_status")
         self.assertIn("status=dead running=false exit=137 oom=true", result.stderr)
+
+    def test_healthy_exit_zero_requires_actual_limit_allocation_and_completion(self):
+        for scenario, reason in [("healthy_hollow", "healthy_limit_missing"),
+                                 ("healthy_wrong_limit", "healthy_limit_missing"),
+                                 ("healthy_wrong_allocation", "healthy_allocation_missing"),
+                                 ("healthy_no_completion", "healthy_completion_missing")]:
+            with self.subTest(scenario=scenario):
+                _, journal, _ = self.assert_refused(scenario, reason)
+                self.assertEqual(len(journal), 1, "hollow healthy control admitted OOM workload")
+
+    def test_barrier_and_terminal_require_exact_memory_and_swap(self):
+        for phase in ["barrier", "terminal"]:
+            for resource in ["memory", "swap"]:
+                with self.subTest(phase=phase, resource=resource):
+                    result, journal, _ = self.assert_refused(phase + "_" + resource + "_mismatch",
+                                                              phase + "_memory_mismatch")
+                    self.assertIn("cid=" + CID, result.stderr)
+                    if phase == "barrier":
+                        self.assertNotIn("exec " + CID + " touch /tmp/release", journal)
+                    else:
+                        self.assertIn("exec " + CID + " touch /tmp/release", journal)
+                        self.assertIn("status=exited running=false exit=137 oom=true", result.stderr)
 
     def test_failed_or_malformed_native_inspection_is_not_evidence(self):
         for scenario, rc in [("inspect_fail", 9), ("terminal_inspect_fail", 9),
