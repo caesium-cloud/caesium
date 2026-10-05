@@ -56,16 +56,17 @@ logs)
 inspect)
     [[ "${!#}" = "$cid" ]] || exit 12
     if [ "$SCENARIO" = inspect_fail ]; then echo SECRET_NATIVE >&2; exit 9; fi
-    running=true; code=0; oom=false
+    native_status=running; running=true; code=0; oom=false; memory=67108864
     if [ -f "$FIXTURE/released" ]; then
         n=0; if [ -f "$FIXTURE/state_count" ]; then read -r n < "$FIXTURE/state_count"; fi
         n=$((n+1)); printf '%s\n' "$n" > "$FIXTURE/state_count"
-        running=false; code=137; oom=true
+        native_status=exited; running=false; code=137; oom=true
         case "$SCENARIO" in
             delayed_oom) if [ "$n" -lt 6 ]; then oom=false; fi ;;
             no_oom|logs_fail_cleanup_fail) oom=false ;;
             wrong_exit) code=2; oom=false ;;
-            running_forever) running=true; code=0; oom=false ;;
+            wrong_status) native_status=dead ;;
+            running_forever) native_status=running; running=true; code=0; oom=false ;;
             terminal_inspect_fail) echo SECRET_NATIVE >&2; exit 9 ;;
         esac
     fi
@@ -74,10 +75,11 @@ inspect)
         wrong_identity) cid=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc ;;
         malformed_boolean) oom=maybe ;;
         malformed_exit) code=NaN ;;
+        malformed_memory) memory=SECRET_MEMORY ;;
     esac
     # The real guard must request one coherent record, not scalar inspections.
-    [ "$3" = '{{.Id}}|{{.Image}}|{{.State.Running}}|{{.State.ExitCode}}|{{.State.OOMKilled}}' ] || exit 12
-    printf '%s|%s|%s|%s|%s\n' "$cid" "$image" "$running" "$code" "$oom"
+    [ "$3" = '{{.Id}}|{{.Image}}|{{.State.Status}}|{{.State.Running}}|{{.State.ExitCode}}|{{.State.OOMKilled}}|{{.HostConfig.Memory}}|{{.HostConfig.MemorySwap}}' ] || exit 12
+    printf '%s|%s|%s|%s|%s|%s|%s|67108864\n' "$cid" "$image" "$native_status" "$running" "$code" "$oom" "$memory"
     ;;
 exec)
     [ "$*" = "exec $cid touch /tmp/release" ] || exit 12
@@ -131,6 +133,8 @@ class StressSmokeTests(unittest.TestCase):
                 self.assertIn(PASS, result.stdout)
                 self.assertGreaterEqual(polls, minimum)
                 self.assertIn("running=false exit=137 oom=true", result.stderr)
+                self.assertIn("status=exited", result.stderr)
+                self.assertIn("memory=67108864 swap=67108864", result.stderr)
                 self.assertIn("cid=" + CID + " image=" + IMAGE, result.stderr)
                 self.assertEqual(sum(line == "rm -f " + CID for line in journal), 1)
                 self.assertIn("--memory-mib 1025 --hold 0s", journal[-2])
@@ -148,10 +152,14 @@ class StressSmokeTests(unittest.TestCase):
         self.assertIn("exit=2 oom=false", result.stderr)
         self.assertEqual(polls, 2)  # One qualifying attempt plus failure snapshot.
 
+    def test_terminal_status_must_be_exited(self):
+        result, _, _ = self.assert_refused("wrong_status", "wrong_terminal_status")
+        self.assertIn("status=dead running=false exit=137 oom=true", result.stderr)
+
     def test_failed_or_malformed_native_inspection_is_not_evidence(self):
         for scenario, rc in [("inspect_fail", 9), ("terminal_inspect_fail", 9),
                              ("malformed", 1), ("wrong_identity", 1),
-                             ("malformed_boolean", 1), ("malformed_exit", 1)]:
+                             ("malformed_boolean", 1), ("malformed_exit", 1), ("malformed_memory", 1)]:
             with self.subTest(scenario=scenario):
                 reason = "terminal_inspect_failed" if scenario == "terminal_inspect_fail" else "barrier_inspect_failed"
                 result, journal, _ = self.assert_refused(scenario, reason, rc)

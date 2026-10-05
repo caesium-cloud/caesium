@@ -36,27 +36,27 @@ read_logs() {
     safe_logs=$(cat "$scratch/safe-logs")
 }
 
-# Read the identity and terminal triple together; never combine separate
+# Read identity, status and terminal fields together; never combine separate
 # inspections into a state that the native runtime did not actually report.
 read_state() {
     inspect_status=0
-    "$runtime_cli" inspect -f '{{.Id}}|{{.Image}}|{{.State.Running}}|{{.State.ExitCode}}|{{.State.OOMKilled}}' \
+    "$runtime_cli" inspect -f '{{.Id}}|{{.Image}}|{{.State.Status}}|{{.State.Running}}|{{.State.ExitCode}}|{{.State.OOMKilled}}|{{.HostConfig.Memory}}|{{.HostConfig.MemorySwap}}' \
         "$ctr" >"$scratch/state" 2>/dev/null || inspect_status=$?
     [ "$inspect_status" -eq 0 ] || return "$inspect_status"
     native_state=$(cat "$scratch/state")
-    state_pattern="^${ctr}\\|(sha256:)?[0-9a-f]{64}\\|(true|false)\\|[0-9]{1,3}\\|(true|false)$"
+    state_pattern="^${ctr}\\|(sha256:)?[0-9a-f]{64}\\|(created|running|paused|restarting|removing|exited|dead)\\|(true|false)\\|[0-9]{1,3}\\|(true|false)\\|[0-9]{1,20}\\|-?[0-9]{1,20}$"
     if ! [[ "$native_state" =~ $state_pattern ]]; then
         inspect_status=1
         return 1
     fi
-    IFS='|' read -r state_id state_image running exit_code oom <<<"$native_state"
+    IFS='|' read -r state_id state_image state_status running exit_code oom memory swap <<<"$native_state"
 }
 
 snapshot() {
     [ -n "$ctr" ] || return 0
     if read_state; then
-        printf 'stress smoke: cid=%s image=%s running=%s exit=%s oom=%s\n' \
-            "$state_id" "$state_image" "$running" "$exit_code" "$oom" >&2
+        printf 'stress smoke: cid=%s image=%s status=%s running=%s exit=%s oom=%s memory=%s swap=%s\n' \
+            "$state_id" "$state_image" "$state_status" "$running" "$exit_code" "$oom" "$memory" "$swap" >&2
     else
         printf 'stress smoke: cid=%s inspect_unavailable rc=%s\n' "$ctr" "$inspect_status" >&2
     fi
@@ -151,6 +151,7 @@ terminal=false
 for ((poll=0; poll<100; poll++)); do
     read_state || fail terminal_inspect_failed "$inspect_status"
     if [ "$running" = false ]; then
+        [ "$state_status" = exited ] || fail wrong_terminal_status
         [ "$exit_code" = 137 ] || fail wrong_terminal_exit
         if [ "$oom" = true ]; then terminal=true; break; fi
     fi
