@@ -480,6 +480,10 @@ coverage_journey_resource() {
   esac
 }
 mkdir -p "$ARTIFACTS/journeys"
+if [[ "$FAKE_MODE" == complete ]]; then
+  COVERAGE_JOURNEY_GIT_TEMP_DIRS=()
+  coverage_journey_register_git_dir "$FAKE_FIXTURE" || exit 88
+fi
 log_path="$ARTIFACTS/journeys/preparation.log"
 if coverage_journey_with_prep_signal_cleanup \
   coverage_journey_run_builder_prep run-prep-lifecycle git-prep-test "$log_path" 1 \
@@ -516,9 +520,12 @@ class BuilderPreparationLifecycleTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="coverage-preparation-") as temporary:
             root = pathlib.Path(temporary)
             artifacts = root / "artifacts"
-            fixture = root / "fixture"
             artifacts.mkdir()
+            (artifacts / "journeys").mkdir()
+            fixture = artifacts / "journeys" / "git-source-fixture-run-prep-lifecycle.abc123"
             fixture.mkdir()
+            artifacts = artifacts.resolve()
+            fixture = fixture.resolve()
             shell_script = pathlib.Path(__file__).with_name("coverage-journeys.sh")
             completed = subprocess.run(
                 [

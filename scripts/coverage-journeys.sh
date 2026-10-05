@@ -17,6 +17,7 @@ COVERAGE_JOURNEY_PREP_ID_LANES=()
 COVERAGE_JOURNEY_PREP_PENDING_NAMES=()
 COVERAGE_JOURNEY_PREP_PENDING_LANES=()
 COVERAGE_JOURNEY_PREP_FAILED=false
+COVERAGE_JOURNEY_PREP_LAST_EXIT_CODE=125
 COVERAGE_JOURNEY_PREP_SIGNAL=""
 COVERAGE_JOURNEY_PREP_CLEANUP_ACTIVE=false
 COVERAGE_JOURNEY_PREP_SIGNAL_HANDLER_ACTIVE=false
@@ -27,6 +28,7 @@ COVERAGE_JOURNEY_SECRET_FILES=()
 COVERAGE_JOURNEY_CLI_DIRS=()
 COVERAGE_JOURNEY_SERVER_DIRS=()
 COVERAGE_JOURNEY_GIT_TEMP_DIRS=()
+COVERAGE_JOURNEY_GIT_DIR_IDENTITIES=()
 COVERAGE_JOURNEY_NAMES=()
 COVERAGE_JOURNEY_NAMED_ARGS=()
 COVERAGE_BACKEND_PRODUCER_INPUTS=""
@@ -384,6 +386,7 @@ coverage_journey_prep_wait_and_remove() {
     fi
     IFS=$'\t' read -r actual_id running status exit_code oom restarts finished_at <<<"$fields"
     if [[ "$running" == false ]]; then
+      COVERAGE_JOURNEY_PREP_LAST_EXIT_CODE="$exit_code"
       if [[ "$actual_id" != "$id" || "$status" != exited || "$exit_code" != 0 || "$oom" != false \
           || "$restarts" != 0 || -z "$finished_at" || "$finished_at" == 0001-01-01T00:00:00Z ]]; then
         coverage_journey_capture_prep_logs "$id" "$log_path" || true
@@ -416,6 +419,7 @@ coverage_journey_run_builder_prep() {
   shift 4
   local allocation_path="$ARTIFACTS/journeys/$name.container-id"
   local launch_error="$log_path.launch-error" launch_rc=0 reported_id snapshot actual_id
+  COVERAGE_JOURNEY_PREP_LAST_EXIT_CODE=125
   if ! coverage_journey_require_absent container "$name"; then
     coverage_journey_prep_mark_failed
     return 1
@@ -589,12 +593,159 @@ coverage_journey_remove_owned() {
   coverage_journey_untrack_id "$id"
 }
 
+# Capture only this run's freshly allocated roots, before any container writes.
+coverage_journey_git_dir_identity() {
+  python3 - "$1" "$ARTIFACTS/journeys" "$ID" "${2:-}" <<'PY_IDENTITY'
+import os
+import pathlib
+import re
+import stat
+import sys
+
+path, parent = map(pathlib.Path, sys.argv[1:3])
+run_id, expected = sys.argv[3:]
+if (not path.is_absolute() or path != path.resolve() or parent != parent.resolve()
+        or path.parent != parent or not re.fullmatch(
+            r"git-source-(fixture|helper)-" + re.escape(run_id) + r"\.[A-Za-z0-9]{6}", path.name)):
+    raise SystemExit("Git fixture root is not a canonical fresh owned path")
+info = path.lstat()
+identity = ":".join(map(str, (info.st_dev, info.st_ino, info.st_uid, info.st_gid)))
+if not stat.S_ISDIR(info.st_mode) or (expected and identity != expected.rsplit(":", 1)[0]):
+    raise SystemExit("Git fixture root identity changed")
+if not expected and (info.st_uid, info.st_gid) != (os.geteuid(), os.getegid()):
+    raise SystemExit("Git fixture root is not owned by the allocating host user")
+root = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+try:
+    if os.fstat(root) != info:
+        raise SystemExit("Git fixture root changed during registration")
+    marker = ".caesium-coverage-owned-root"
+    if not expected:
+        token = os.urandom(32).hex()
+        descriptor = os.open(marker, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o400, dir_fd=root)
+        try:
+            if os.write(descriptor, token.encode()) != 64:
+                raise SystemExit("Git fixture root marker could not be recorded")
+        finally:
+            os.close(descriptor)
+    else:
+        token = expected.rsplit(":", 1)[1]
+        descriptor = os.open(marker, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=root)
+        try:
+            entry = os.fstat(descriptor)
+            if (not re.fullmatch(r"[0-9a-f]{64}", token) or not stat.S_ISREG(entry.st_mode)
+                    or entry.st_size != 64 or entry.st_nlink != 1 or os.read(descriptor, 65) != token.encode()):
+                raise SystemExit("Git fixture root marker changed")
+        finally:
+            os.close(descriptor)
+finally:
+    os.close(root)
+print(identity + ":" + token)
+PY_IDENTITY
+}
+
+coverage_journey_register_git_dir() {
+  local path="$1" identity
+  COVERAGE_JOURNEY_GIT_TEMP_DIRS+=("$path")
+  identity="$(coverage_journey_git_dir_identity "$path")" || {
+    coverage_journey_prep_mark_failed
+    return 1
+  }
+  COVERAGE_JOURNEY_GIT_DIR_IDENTITIES+=("$identity")
+}
+
+coverage_journey_restore_git_dir() {
+  local path="$1" expected="$2" index="$3" identity uid gid token script
+  [[ "$COVERAGE_JOURNEY_PREP_FAILED" == false && -z "$COVERAGE_JOURNEY_PREP_SIGNAL" ]] \
+    && ((${#COVERAGE_JOURNEY_ACTIVE_IDS[@]} == 0)) \
+    && ((${#COVERAGE_JOURNEY_PENDING_NAMES[@]} == 0)) \
+    && ((${#COVERAGE_JOURNEY_BUILDER_IDS[@]} == 0)) \
+    && ((${#COVERAGE_JOURNEY_BUILDER_PENDING_NAMES[@]} == 0)) \
+    && ((${#COVERAGE_JOURNEY_PREP_IDS[@]} == 0)) \
+    && ((${#COVERAGE_JOURNEY_PREP_PENDING_NAMES[@]} == 0)) || return 1
+  identity="$(coverage_journey_git_dir_identity "$path" "$expected")" || return 1
+  IFS=: read -r _ _ uid gid token <<<"$identity"
+  # Node is already in builder-full. Descriptor-relative NOFOLLOW traversal
+  # validates the whole bounded tree before changing ownership or permissions.
+  script="$(cat <<'JS_RESTORE'
+const fs = require('fs');
+const c = fs.constants;
+let root;
+try {
+  if (![c.O_DIRECTORY, c.O_NOFOLLOW, c.O_NONBLOCK].every(Number.isInteger)) throw Error();
+  const args = process.argv.slice(1), ids = args.slice(0, 2).map(Number);
+  if (args.length !== 3 || !/^[0-9a-f]{64}$/.test(args[2])
+      || !ids.every(x => Number.isInteger(x) && x >= 0 && x <= 2147483647)) throw Error();
+  root = fs.openSync('/fixture', c.O_RDONLY | c.O_DIRECTORY | c.O_NOFOLLOW);
+  const marker = fs.openSync(`/proc/self/fd/${root}/.caesium-coverage-owned-root`, c.O_RDONLY | c.O_NOFOLLOW | c.O_NONBLOCK);
+  try {
+    const s = fs.fstatSync(marker, {bigint:true}), bytes = Buffer.alloc(65);
+    if (!s.isFile() || s.size !== 64n || s.nlink !== 1n
+        || fs.readSync(marker, bytes, 0, 65, 0) !== 64 || bytes.subarray(0, 64).toString('ascii') !== args[2]) throw Error();
+  } finally { fs.closeSync(marker); }
+  const entries = new Map();
+  const identity = s => [s.dev, s.ino, s.mode, s.nlink].map(String).join(':');
+  const rootDev = fs.fstatSync(root, {bigint:true}).dev;
+  function visit(fd, parts) {
+    const s = fs.fstatSync(fd, {bigint:true});
+    if (entries.size >= 10000 || parts.length > 32 || s.dev !== rootDev
+        || (!s.isDirectory() && (!s.isFile() || s.nlink !== 1n))) throw Error();
+    entries.set(JSON.stringify(parts), {parts, id:identity(s), mode:Number(s.mode & 0o777n), dir:s.isDirectory()});
+    if (s.isDirectory()) {
+      const dir = fs.opendirSync(`/proc/self/fd/${fd}`);
+      try {
+        let item;
+        while ((item = dir.readSync()) !== null) {
+          const child = fs.openSync(`/proc/self/fd/${fd}/${item.name}`, c.O_RDONLY | c.O_NOFOLLOW | c.O_NONBLOCK);
+          try { visit(child, [...parts, item.name]); } finally { fs.closeSync(child); }
+        }
+      } finally { dir.closeSync(); }
+    }
+  }
+  visit(root, []);
+  function reopen(parts) {
+    let fd = root;
+    try {
+      for (let i = 0; i < parts.length; i++) {
+        const next = fs.openSync(`/proc/self/fd/${fd}/${parts[i]}`, c.O_RDONLY | c.O_NOFOLLOW | c.O_NONBLOCK);
+        if (fd !== root) fs.closeSync(fd);
+        fd = next;
+        const expected = entries.get(JSON.stringify(parts.slice(0, i + 1)));
+        if (!expected || identity(fs.fstatSync(fd, {bigint:true})) !== expected.id) throw Error();
+      }
+      return fd;
+    } catch (e) { if (fd !== root) fs.closeSync(fd); throw e; }
+  }
+  for (const entry of [...entries.values()].reverse()) {
+    const fd = reopen(entry.parts);
+    try {
+      if (identity(fs.fstatSync(fd, {bigint:true})) !== entry.id) throw Error();
+      fs.fchownSync(fd, ids[0], ids[1]);
+      fs.fchmodSync(fd, entry.mode | (entry.dir ? 0o700 : 0o600));
+    } finally { if (fd !== root) fs.closeSync(fd); }
+  }
+  console.log(JSON.stringify({phase:'git-fixture-ownership-restored', entries:entries.size}));
+} catch (e) {
+  console.error('Git fixture ownership restoration refused');
+  process.exitCode = 1;
+} finally { if (root !== undefined) fs.closeSync(root); }
+JS_RESTORE
+)" || return 1
+  coverage_journey_with_prep_signal_cleanup coverage_journey_run_builder_prep \
+    "${ID}-journey-git-restore-$index" git-prep-restore \
+    "$ARTIFACTS/journeys/git-restore-$ID-$index.log" 30 \
+    --network none --read-only --user 0:0 \
+    -v "$path:/fixture:rw" --entrypoint node "$BUILDER_RUN_IMAGE" -e "$script" "$uid" "$gid" "$token" \
+    || return 1
+  coverage_journey_git_dir_identity "$path" "$expected" >/dev/null
+}
+
 cleanup_coverage_journeys() {
-  local id path rc=0 index
+  local id path rc=0 index pending_rc=0
   if ((${#COVERAGE_JOURNEY_PENDING_NAMES[@]})); then
     for id in "${COVERAGE_JOURNEY_PENDING_NAMES[@]}"; do
-      coverage_journey_resource remove container "$id" >/dev/null || rc=1
+      coverage_journey_resource remove container "$id" >/dev/null || pending_rc=1
     done
+    if [[ "$pending_rc" -eq 0 ]]; then COVERAGE_JOURNEY_PENDING_NAMES=(); else rc=1; fi
   fi
   if ((${#COVERAGE_JOURNEY_ACTIVE_IDS[@]})); then
     for id in "${COVERAGE_JOURNEY_ACTIVE_IDS[@]}"; do
@@ -631,15 +782,31 @@ cleanup_coverage_journeys() {
     for path in "${COVERAGE_JOURNEY_TEMP_DIRS[@]}"; do rm -rf "$path" || rc=1; done
   fi
   if [[ "$rc" -eq 0 && "$COVERAGE_JOURNEY_PREP_FAILED" == false ]] \
+      && ((${#COVERAGE_JOURNEY_ACTIVE_IDS[@]} == 0)) \
+      && ((${#COVERAGE_JOURNEY_PENDING_NAMES[@]} == 0)) \
       && ((${#COVERAGE_JOURNEY_BUILDER_IDS[@]} == 0)) \
       && ((${#COVERAGE_JOURNEY_BUILDER_PENDING_NAMES[@]} == 0)) \
       && ((${#COVERAGE_JOURNEY_PREP_IDS[@]} == 0)) \
       && ((${#COVERAGE_JOURNEY_PREP_PENDING_NAMES[@]} == 0)); then
     if ((${#COVERAGE_JOURNEY_GIT_TEMP_DIRS[@]})); then
-      for path in "${COVERAGE_JOURNEY_GIT_TEMP_DIRS[@]}"; do rm -rf "$path" || rc=1; done
+      if ((${#COVERAGE_JOURNEY_GIT_TEMP_DIRS[@]} != ${#COVERAGE_JOURNEY_GIT_DIR_IDENTITIES[@]})); then
+        rc=1
+      else
+        for ((index = 0; index < ${#COVERAGE_JOURNEY_GIT_TEMP_DIRS[@]}; index++)); do
+          path="${COVERAGE_JOURNEY_GIT_TEMP_DIRS[$index]}"
+          if coverage_journey_restore_git_dir "$path" "${COVERAGE_JOURNEY_GIT_DIR_IDENTITIES[$index]}" "$index"; then
+            rm -rf "$path" || rc=1
+          else
+            rc=1
+            break
+          fi
+        done
+      fi
     fi
   else
     rc=1
+  fi
+  if [[ "$rc" -ne 0 ]]; then
     : >"$ARTIFACTS/retained-owned-git-fixture-paths.txt"
     if ((${#COVERAGE_JOURNEY_GIT_TEMP_DIRS[@]})); then
       printf '%s\n' "${COVERAGE_JOURNEY_GIT_TEMP_DIRS[@]}" >"$ARTIFACTS/retained-owned-git-fixture-paths.txt"
@@ -695,6 +862,7 @@ cleanup_coverage_journeys() {
   COVERAGE_JOURNEY_SECRET_FILES=()
   COVERAGE_JOURNEY_TEMP_DIRS=()
   COVERAGE_JOURNEY_GIT_TEMP_DIRS=()
+  COVERAGE_JOURNEY_GIT_DIR_IDENTITIES=()
   COVERAGE_JOURNEY_PENDING_NAMES=()
   COVERAGE_JOURNEY_BUILDER_PENDING_NAMES=()
 }
@@ -995,10 +1163,10 @@ PY
 )" || { coverage_journey_fail "cannot encode the isolated Git source configuration"; return 1; }
   COVERAGE_GIT_FIXTURE_ROOT="$(mktemp -d "$ARTIFACTS/journeys/git-source-fixture-$ID.XXXXXX")" \
     || { coverage_journey_fail "cannot create a fresh Git source fixture directory"; return 1; }
-  COVERAGE_JOURNEY_GIT_TEMP_DIRS+=("$COVERAGE_GIT_FIXTURE_ROOT")
+  coverage_journey_register_git_dir "$COVERAGE_GIT_FIXTURE_ROOT" || return 1
   COVERAGE_GIT_HELPER_DIR="$(mktemp -d "$ARTIFACTS/journeys/git-source-helper-$ID.XXXXXX")" \
     || { coverage_journey_fail "cannot create a fresh Git helper directory"; return 1; }
-  COVERAGE_JOURNEY_GIT_TEMP_DIRS+=("$COVERAGE_GIT_HELPER_DIR")
+  coverage_journey_register_git_dir "$COVERAGE_GIT_HELPER_DIR" || return 1
   chmod 0777 "$COVERAGE_GIT_FIXTURE_ROOT" "$COVERAGE_GIT_HELPER_DIR" \
     || { coverage_journey_fail "cannot prepare owned Git fixture mounts"; return 1; }
   mkdir -p "$lane_dir/evidence" || { coverage_journey_fail "cannot create Git-sync evidence directory"; return 1; }
@@ -1301,11 +1469,28 @@ coverage_journey_run_lane() {
         )
       fi
       runner_args+=("$BUILDER_RUN_IMAGE" sh scripts/integration-test.sh -test.run "$pattern")
-      set +e
-      "$CONTAINER_CLI" "${runner_args[@]}" 2>&1 | coverage_journey_log_redacted | tee "$runner_log"
-      local -a pipeline_status=("${PIPESTATUS[@]}")
-      test_rc="${pipeline_status[0]:-125}"
-      set -e
+      if [[ "$mode" == "git-sync" ]]; then
+        # This runner mutates /fixture too: join and remove its exact owned ID
+        # before restoration, rather than rely on anonymous --rm acknowledgement.
+        local git_runner_log="$ARTIFACTS/journeys/git-runner-$ID.log"
+        if coverage_journey_with_prep_signal_cleanup coverage_journey_run_builder_prep \
+            "${ID}-journey-git-runner" git-prep-test "$git_runner_log" 1800 "${runner_args[@]:5}"; then
+          test_rc=0
+        else
+          test_rc="$COVERAGE_JOURNEY_PREP_LAST_EXIT_CODE"
+          # Clean join/removal failure cannot become a successful test result.
+          [[ "$test_rc" -ne 0 ]] || test_rc=125
+        fi
+        if [[ -f "$git_runner_log" ]]; then
+          coverage_journey_log_redacted <"$git_runner_log" | tee "$runner_log" || return 1
+        fi
+      else
+        set +e
+        "$CONTAINER_CLI" "${runner_args[@]}" 2>&1 | coverage_journey_log_redacted | tee "$runner_log"
+        local -a pipeline_status=("${PIPESTATUS[@]}")
+        test_rc="${pipeline_status[0]:-125}"
+        set -e
+      fi
       passes="$(grep -cE '^[[:space:]]*--- PASS: TestIntegrationTestSuite/' "$runner_log" 2>/dev/null || true)"
       passes="${passes:-0}"
     fi

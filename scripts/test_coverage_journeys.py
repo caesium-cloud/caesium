@@ -789,5 +789,196 @@ trap 'printf "%s\\n" "${COVERAGE_JOURNEY_PENDING_NAMES[*]}" >"$ARTIFACTS/names";
         self.assertEqual(c.network_id, CID)
         self.assertFalse(c.cleanup_complete)
 
+# Exercise the sourced cleanup and its embedded Node program without a daemon.
+# The bridge maps /fixture and /proc/self/fd onto private host fixtures; the
+# production NOFOLLOW/fstat/fchown/fchmod calls still execute unchanged.
+GIT_RESTORE_FAKE_RUNTIME = r"""#!/usr/bin/env python3
+import json, os, pathlib, subprocess, sys
+args = sys.argv[1:]
+base = pathlib.Path(os.environ['FAKE_ARTIFACTS'])
+state = base / 'native-state.json'
+events = base / 'events.jsonl'
+mode = os.environ['FAKE_MODE']
+cid = 'e' * 64
+image = 'sha256:' + 'b' * 64
+with events.open('a') as stream:
+    stream.write(json.dumps({'op':args[0], 'action':args[1] if args[0]=='resource' else None, 'name':args[args.index('--name')+1] if args[0]=='run' else None})+'\n')
+if args[0] == 'run':
+    lane = next(x.split('=',1)[1] for x in args if x.startswith('caesium.coverage.lane='))
+    if lane=='git-prep-test':
+        cid='f'*64
+        assert '--rm' not in args and '--pull=never' in args and image in args
+        assert args[-4:]==['sh','scripts/integration-test.sh','-test.run','exact-test-pattern']
+        assert args[args.index('--network')+1]=='container:owned-server'
+        value={'Id':cid,'Image':image,'RestartCount':0,
+          'State':{'Status':'exited','Running':False,'ExitCode':7 if mode=='runner-error' else 0,
+           'OOMKilled':False,'FinishedAt':'2026-10-05T22:00:00Z'},
+          'Name':args[args.index('--name')+1],'lane':lane,'log':'--- PASS: TestIntegrationTestSuite/TestJobdefGitSyncLocalRepositoryUpdatesAndPrunes\n'}
+        state.write_text(json.dumps(value)); print(cid); sys.exit(0)
+    required = ['--pull=never', '--name', '--read-only', '--user', '--network', '--entrypoint']
+    assert all(x in args for x in required) and '--rm' not in args
+    assert args[args.index('--network')+1]=='none' and args[args.index('--user')+1]=='0:0'
+    assert args[args.index('--entrypoint')+1]=='node' and image in args
+    for label in ['caesium.coverage.owner='+'a'*40, 'caesium.coverage.run=run-owned', 'caesium.coverage.lane=git-prep-restore']:
+        assert label in args
+    mount = args[args.index('-v')+1]
+    assert mount == os.environ['FAKE_FIXTURE']+':/fixture:rw'
+    program = args[args.index('-e')+1]
+    ids = args[args.index('-e')+2:]
+    assert ids[:2] == [str(os.getuid()), str(os.getgid())] and len(ids)==3 and len(ids[2])==64
+    bridge = r'''
+const bridgeFS = require('fs');
+const realOpen = bridgeFS.openSync, realClose = bridgeFS.closeSync, realDir = bridgeFS.opendirSync;
+const handles = new Map();
+function translate(p) {
+  if (p === '/fixture') return process.env.FAKE_FIXTURE;
+  const m = /^\/proc\/self\/fd\/(\d+)(.*)$/.exec(p);
+  if (!m) return p;
+  if (!handles.has(Number(m[1]))) throw Error('missing held parent');
+  return handles.get(Number(m[1])) + m[2];
+}
+bridgeFS.openSync = function(p, ...args) { const path = translate(p); const fd = realOpen(path, ...args); handles.set(fd,path); return fd; };
+bridgeFS.closeSync = function(fd) { handles.delete(fd); return realClose(fd); };
+bridgeFS.opendirSync = function(p, ...args) { return realDir(translate(p), ...args); };
+'''
+    env=os.environ.copy()
+    if mode=='mount-substituted': env['FAKE_FIXTURE']=os.environ['FAKE_FOREIGN']
+    result = subprocess.run(['node', '-e', bridge+'\n'+program, *ids], capture_output=True, text=True,env=env)
+    value = {'Id':cid,'Image':image,'RestartCount':0,
+      'State':{'Status':'exited','Running':False,'ExitCode':1 if mode=='restore-fail' else result.returncode,
+       'OOMKilled':False,'FinishedAt':'2026-10-05T22:00:00Z'},
+      'Name':args[args.index('--name')+1], 'lane':'git-prep-restore','log':result.stdout+result.stderr}
+    state.write_text(json.dumps(value))
+    if mode=='ack-fail': sys.exit(47)
+    print('short-id' if mode=='malformed-ack' else cid)
+elif args[0] == 'logs':
+    value=json.loads(state.read_text()); assert args[1]==value['Id']
+    print(value['log'],end='')
+elif args[0] == 'resource':
+    _,action,kind,reference,*extra=args
+    if action=='absent':
+        sys.exit(1 if state.exists() or mode=='pending-writer' else 0)
+    if mode in ('active-writer','pending-writer'):
+        sys.exit(1)
+    if not state.exists(): sys.exit(1)
+    value=json.loads(state.read_text())
+    cid=value['Id']
+    assert kind=='container' and reference in (cid,value['Name'])
+    assert extra==[image,value['lane']]
+    if action=='owned': print(json.dumps(value))
+    elif action=='remove':
+        if mode=='remove-fail': sys.exit(1)
+        state.unlink(); print(json.dumps({'absent':True,'Id':cid}))
+    else: sys.exit(9)
+else: sys.exit(9)
+"""
+
+GIT_RESTORE_SHELL = r'''set -eu
+source "$1/scripts/coverage-journeys.sh"
+ARTIFACTS="$2"; ID=run-owned; CONTAINER_CLI="$3"
+CANDIDATE_SHA=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+BUILDER_RUN_IMAGE=sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+IMAGE_ID="$BUILDER_RUN_IMAGE"; PLATFORM=linux/arm64
+COVERAGE_JOURNEY_PREP_POLL_INTERVAL=0
+log() { printf '%s\n' "$*" >&2; }
+coverage_journey_resource() { "$CONTAINER_CLI" resource "$@"; }
+coverage_journey_register_git_dir "$4" || exit 88
+case "$FAKE_MODE" in
+  active-writer) COVERAGE_JOURNEY_ACTIVE_IDS=(uncertain-writer) ;;
+  pending-writer) COVERAGE_JOURNEY_PREP_PENDING_NAMES=(uncertain-writer); COVERAGE_JOURNEY_PREP_PENDING_LANES=(git-prep-test) ;;
+  prep-failed) COVERAGE_JOURNEY_PREP_FAILED=true ;;
+  changed-root) mv "$4" "$4.old"; mkdir "$4" ;;
+  root-symlink) mv "$4" "$4.old"; ln -s "$FAKE_FOREIGN" "$4" ;;
+esac
+cleanup_coverage_journeys
+'''
+
+
+class GitFixtureOwnershipChecks(unittest.TestCase):
+    def exercise(self, mode, unsafe=None):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            artifacts = root / 'artifacts'; (artifacts / 'journeys').mkdir(parents=True)
+            fixture = artifacts / 'journeys/git-source-fixture-run-owned.abc123'; fixture.mkdir()
+            child = fixture / '.git'; child.mkdir(); (child / 'HEAD').write_text('fixture')
+            child.chmod(0o500); (child / 'HEAD').chmod(0o400)
+            foreign = root / 'foreign'; foreign.mkdir(); target = foreign / 'untouched'; target.write_text('foreign')
+            before = (target.stat().st_uid, target.stat().st_gid, target.stat().st_mode)
+            if unsafe=='symlink': (fixture / 'foreign-link').symlink_to(foreign, target_is_directory=True)
+            if unsafe=='hardlink': os.link(target, fixture / 'foreign-hardlink')
+            if unsafe=='fifo': os.mkfifo(fixture / 'foreign-fifo')
+            if unsafe=='depth':
+                deep = fixture
+                for _ in range(33): deep /= 'child'; deep.mkdir()
+            runtime = root / 'fake-runtime'; runtime.write_text(GIT_RESTORE_FAKE_RUNTIME); runtime.chmod(0o700)
+            env = os.environ.copy(); env.update(FAKE_ARTIFACTS=str(artifacts), FAKE_FIXTURE=str(fixture), FAKE_MODE=mode, FAKE_FOREIGN=str(foreign))
+            shell = GIT_RESTORE_SHELL
+            if mode.startswith('runner-'):
+                text = (ROOT / 'scripts/coverage-journeys.sh').read_text()
+                marker = text.index('# This runner mutates /fixture too:')
+                begin = text.rfind('      if [[ "$mode" == "git-sync" ]]; then',0,marker)
+                branch = text[begin:text.index('      passes=',marker)]
+                writer = '''run_writer() {
+local mode=git-sync test_rc=125
+local runner_log="$ARTIFACTS/journeys/test.log"
+local -a runner_args=(run --pull=never --rm --platform "$PLATFORM" --network container:owned-server "$BUILDER_RUN_IMAGE" sh scripts/integration-test.sh -test.run exact-test-pattern)
+''' + branch + '''
+if [[ "$FAKE_MODE" == runner-error ]]; then [[ "$test_rc" == 7 ]]; else [[ "$test_rc" == 0 ]]; fi
+}
+run_writer || exit 87
+'''
+                shell = shell.replace('cleanup_coverage_journeys\n',writer+'cleanup_coverage_journeys\n')
+            result = subprocess.run(['/bin/bash','-c',shell,'hermetic',str(ROOT),str(artifacts),str(runtime),str(fixture)], env=env, capture_output=True, timeout=20)
+            events = [json.loads(x) for x in (artifacts / 'events.jsonl').read_text().splitlines()] if (artifacts / 'events.jsonl').exists() else []
+            if mode in ('success','runner-success') and unsafe is None:
+                self.assertEqual(result.returncode,0,result.stderr)
+                self.assertFalse(fixture.exists())
+                expected=['resource','run','resource','resource','logs','resource']
+                self.assertEqual([x['op'] for x in events],expected * (2 if mode=='runner-success' else 1))
+                if mode=='runner-success':
+                    self.assertEqual(events[1]['name'],'run-owned-journey-git-runner')
+                    self.assertEqual(events[7]['name'],'run-owned-journey-git-restore-0')
+                self.assertFalse((artifacts / 'native-state.json').exists())
+                self.assertIn('ownership-restored',(artifacts / 'journeys/git-restore-run-owned-0.log').read_text())
+            else:
+                self.assertNotEqual(result.returncode,0,(mode,unsafe,result.stdout,result.stderr))
+                self.assertTrue(fixture.exists())
+                self.assertEqual((target.stat().st_uid,target.stat().st_gid,target.stat().st_mode),before)
+                self.assertTrue((artifacts / 'retained-owned-git-fixture-paths.txt').exists())
+                self.assertIn('operator reconciliation required',result.stderr.decode())
+                if mode in ('active-writer','pending-writer','prep-failed','changed-root','root-symlink'):
+                    self.assertFalse(any(x['op']=='run' for x in events))
+                if unsafe:
+                    self.assertEqual((child / 'HEAD').stat().st_mode & 0o777,0o400)
+                if mode=='remove-fail':
+                    self.assertTrue((artifacts / 'native-state.json').exists())
+                    self.assertIn('e'*64,(artifacts / 'retained-owned-preparation-container-ids.txt').read_text())
+            # Remove only harness-owned files after the refusal assertions.
+            child.chmod(0o700) if child.exists() else None
+
+    def test_real_embedded_restore_program_then_checked_removal(self):
+        self.exercise('success')
+
+    def test_uncertain_or_failed_writers_prevent_restoration(self):
+        for mode in ('active-writer','pending-writer','prep-failed'):
+            with self.subTest(mode=mode): self.exercise(mode)
+
+    def test_changed_root_and_root_symlink_refuse_before_allocation(self):
+        for mode in ('changed-root','root-symlink'):
+            with self.subTest(mode=mode): self.exercise(mode)
+
+    def test_unsafe_descendants_refuse_before_any_permission_change(self):
+        for unsafe in ('symlink','hardlink','fifo','depth'):
+            with self.subTest(unsafe=unsafe): self.exercise('success',unsafe)
+
+    def test_git_test_writer_is_joined_before_restore_and_error_stays_refused(self):
+        self.exercise('runner-success')
+        self.exercise('runner-error')
+
+    def test_restore_failure_and_lost_acknowledgement_never_clean_fixture(self):
+        for mode in ('restore-fail','ack-fail','malformed-ack','remove-fail','mount-substituted'):
+            with self.subTest(mode=mode): self.exercise(mode)
+
+
 if __name__ == "__main__":
     unittest.main()
