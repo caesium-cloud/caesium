@@ -8,6 +8,7 @@ import importlib.util
 import json
 from pathlib import Path
 import subprocess
+import sys
 import os
 import tempfile
 import unittest
@@ -183,7 +184,11 @@ class FaultChecks(unittest.TestCase):
                 if fault == "identity": info["Id"] = 'f' * 64
                 stdout = json.dumps([info])
             elif args[1] == "logs":
-                stdout = logs if fault != "no-fingerprint" else json.dumps({"msg": "not loaded: connector config loaded"})
+                raw = logs if fault != "no-fingerprint" else json.dumps({"msg": "not loaded: connector config loaded"})
+                rc = 17 if fault == "logs-failed" else 0
+                stdout = json.dumps(b.connector_log_records((("stdout", io.BytesIO(raw.encode())),)))
+                if rc:
+                    stdout = json.dumps({"records": [], "loaded_event": None, "counts": {"failed_log_streams_omitted": 2}})
             elif args[1] == "exec":
                 self.assertEqual(args, ("container", "exec", CID, "wget", "-q", "-T", "2", "-O", "-",
                                         "http://127.0.0.1:8080/health"))
@@ -234,7 +239,7 @@ class FaultChecks(unittest.TestCase):
                 self.assertFalse(record['complete'])
                 self.assertEqual(record['refusal_category'], 'never_ready')
                 self.assertEqual(record['polls'], 60)
-        for fault in ('stopped', 'no-fingerprint', 'foreign', 'image', 'identity'):
+        for fault in ('stopped', 'no-fingerprint', 'foreign', 'image', 'identity', 'logs-failed'):
             with self.subTest(fault=fault):
                 command, audit, calls = self.connector_fixture([(0, '{"status":"healthy"}')], fault)
                 with self.assertRaises(b.JourneyError):
@@ -242,7 +247,11 @@ class FaultChecks(unittest.TestCase):
                 self.assertFalse(any(args[1] in ('kill', 'stop') for args in calls))
                 record = json.loads((audit / 'connector-diagnostics.json').read_text())
                 self.assertFalse(record['complete'])
-                self.assertEqual(record['polls'], 60 if fault == 'no-fingerprint' else 1)
+                self.assertEqual(record['polls'], 60 if fault in ('no-fingerprint', 'logs-failed') else 1)
+                if fault == 'logs-failed':
+                    self.assertEqual(record['log_rc'], 17)
+                    self.assertEqual(record['log_counts']['failed_log_streams_omitted'], 2)
+                    self.assertFalse(record['fingerprint'])
 
     def test_connector_failed_stop_retains_refusal_without_native_secret_or_eligibility(self):
         for fault, category in (('flush', 'flush_failed'), ('stop', 'stop_failed'), ('exit', 'nonzero_exit')):
@@ -274,19 +283,109 @@ class FaultChecks(unittest.TestCase):
         self.assertNotIn('never-persist', raw)
         self.assertEqual(json.loads(raw)['exception_type'], 'UnexpectedError')
         self.assertFalse(any(args[1] in ('kill', 'stop') for args in calls))
-        logs = b.connector_log_records(json.dumps({'msg': ['csk_secret'], 'caller': 'csk_secret.go:1',
-            'error': 'Bearer private', 'Env': ['TOKEN=private']}) + '\nprivate raw line')
+        logs = b.connector_log_records((("stderr", io.BytesIO((json.dumps({'msg': ['csk_secret'], 'caller': 'csk_secret.go:1',
+            'error': 'Bearer private', 'Env': ['TOKEN=private']}) + '\nprivate raw line').encode())),))["records"]
         self.assertNotIn('private', json.dumps(logs))
         self.assertNotIn('csk_secret', json.dumps(logs))
         self.assertEqual(logs[-1]['msg'], '[unstructured log omitted]')
         def process(args, stdout, stderr, **kwargs):
             self.assertEqual(kwargs['timeout'], 10)
-            stdout.write(b'x' * (256 * 1024 + 1))
+            stdout.write(b'x' * (2 * 1024 * 1024 + 1))
             stderr.write(b'never-persist-stderr')
             return subprocess.CompletedProcess(args, 0)
         with patch.object(b.subprocess, 'run', side_effect=process):
             with self.assertRaises(b.JourneyError):
-                b.connector_command('container', 'logs', CID, timeout=10)
+                b.connector_command('container', 'exec', CID, timeout=10)
+
+    def test_connector_nonlog_cap_keeps_static_reason_and_numeric_bound(self):
+        command, audit, calls = self.connector_fixture([(0, '{"status":"healthy"}')])
+        def oversized(*args, **kwargs):
+            if args[1] == 'exec':
+                raise b.ConnectorOutputLimit(2 * 1024 * 1024, 2 * 1024 * 1024 + 1)
+            return command(*args, **kwargs)
+        with self.assertRaises(b.ConnectorOutputLimit):
+            b.connector_shutdown(oversized, CID, OWNER, 'owned', IMAGE, audit)
+        record = json.loads((audit / 'connector-diagnostics.json').read_text())
+        self.assertFalse(record['complete'])
+        self.assertEqual(record['refusal_category'], 'nonlog_output_cap')
+        self.assertEqual(record['output_limit'], 2 * 1024 * 1024)
+        self.assertEqual(record['observed_output_bytes_at_least'], 2 * 1024 * 1024 + 1)
+        self.assertFalse(any(args[1] in ('kill', 'stop') for args in calls))
+
+    def actual_connector_log_process(self, program):
+        run = subprocess.run
+        def child(argv, **kwargs):
+            self.assertEqual(argv, ['docker', 'container', 'logs', '--tail', 'all', CID])
+            self.assertEqual(kwargs['timeout'], 10)
+            self.assertFalse(kwargs['check'])
+            # Real child OS stdout/stderr and actual unlinked temp-file spools;
+            # no Docker process, application execution or live coverage claim.
+            return run([sys.executable, '-c', program], **kwargs)
+        with patch.object(b.subprocess, 'run', side_effect=child):
+            return b.connector_command('container', 'logs', '--tail', 'all', CID, check=False, timeout=10)
+
+    def test_connector_large_startup_keeps_loaded_proof_apart_from_last100(self):
+        result = self.actual_connector_log_process("""import json,sys
+print(json.dumps({'msg':'connector config loaded','fingerprint':'a'*64,'token':'never-persist-token'}))
+for _ in range(1400): print(json.dumps({'msg':'never-persist-startup'+'x'*250,'error':'csk_neverpersist'}))
+print(json.dumps({'msg':'server started'}),file=sys.stderr)
+""")
+        evidence = json.loads(result.stdout)
+        self.assertEqual(result.returncode, 0)
+        self.assertGreater(evidence['counts']['stdout_bytes'], 256 * 1024)
+        self.assertEqual(evidence['counts']['stdout_lines'], 1401)
+        self.assertEqual(evidence['counts']['stderr_lines'], 1)
+        self.assertEqual(len(evidence['records']), 100)
+        self.assertEqual(evidence['loaded_event']['msg'], 'connector config loaded')
+        self.assertEqual(evidence['loaded_event']['stream'], 'stdout')
+        self.assertEqual(evidence['loaded_event']['fingerprint'], 'a' * 64)
+        self.assertFalse(any(r['msg'] == 'connector config loaded' for r in evidence['records']))
+        self.assertLess(len(result.stdout.encode()), 40 * 1024)
+        self.assertEqual(result.stderr, '')
+        self.assertNotIn('never-persist', result.stdout)
+        self.assertNotIn('csk_neverpersist', result.stdout)
+
+    def test_connector_stderr_event_is_real_proof_only_for_successful_log_command(self):
+        program = """import json,sys
+print('never-persist-stdout')
+print(json.dumps({'msg':'connector config loaded','error':'never-persist-error'}),file=sys.stderr)
+for _ in range(1100): print(json.dumps({'msg':'Bearer never-persist-secret'}),file=sys.stderr)
+"""
+        result = self.actual_connector_log_process(program)
+        evidence = json.loads(result.stdout)
+        self.assertEqual(evidence['loaded_event']['stream'], 'stderr')
+        self.assertEqual(evidence['counts']['stderr_lines'], 1101)
+        self.assertEqual(len(evidence['records']), 100)
+        self.assertNotIn('never-persist', result.stdout)
+        failed = self.actual_connector_log_process(program + '\nsys.exit(17)')
+        self.assertEqual(failed.returncode, 17)
+        failure = json.loads(failed.stdout)
+        self.assertIsNone(failure['loaded_event'])
+        self.assertEqual(failure['records'], [])
+        self.assertEqual(failure['counts']['failed_log_streams_omitted'], 2)
+        self.assertNotIn('connector config loaded', failed.stdout)
+        self.assertNotIn('never-persist', failed.stdout)
+
+    def test_connector_stream_line_bound_cannot_promote_oversized_suffix_or_invalid_utf8(self):
+        class BoundedStream(io.BytesIO):
+            def read(self, *args):
+                raise AssertionError('whole-stream reads are forbidden')
+            def readline(self, size=-1):
+                self.assert_bound(size)
+                return super().readline(size)
+            def assert_bound(self, size):
+                if size != 64 * 1024 + 1:
+                    raise AssertionError('unbounded line read')
+        data = (b'x' * (2 * 1024 * 1024) + b'{"msg":"connector config loaded"}\n'
+                + b'\xff{"msg":"connector config loaded"}\n'
+                + b'{"msg":"server started"}\n')
+        evidence = b.connector_log_records((("stdout", BoundedStream(data)),))
+        self.assertIsNone(evidence['loaded_event'])
+        self.assertEqual(evidence['counts']['oversized_lines'], 1)
+        self.assertEqual(evidence['counts']['invalid_utf8_lines'], 1)
+        self.assertEqual(evidence['counts']['stdout_bytes'], len(data))
+        self.assertEqual(evidence['counts']['stdout_lines'], 3)
+        self.assertLess(len(json.dumps(evidence)), 1024)
 
     def test_missing_base_raws_never_merge_valid_journeys_and_originals_survive(self):
         raw = self.tmp / 'cohort'

@@ -1395,6 +1395,8 @@ run_coverage_journeys() {
         result = self.collect("connector-delayed-health")
         self.assertEqual(result.returncode, 0, output(result))
         diagnostics = json.loads((self.art / "audit/connector-diagnostics.json").read_text())
+        self.assertGreater(diagnostics["log_counts"]["stdout_lines"], 1000)
+        self.assertEqual(diagnostics["loaded_event"]["msg"], "connector config loaded")
         self.assertTrue(diagnostics["complete"])
         self.assertTrue(diagnostics["fingerprint"] and diagnostics["healthy"])
         self.assertEqual(diagnostics["polls"], 3)

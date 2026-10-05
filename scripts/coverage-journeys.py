@@ -11,6 +11,7 @@ memory and communicates the SAML replay-store restart barrier over stdin/stdout.
 from __future__ import annotations
 
 import argparse
+from collections import deque
 import datetime
 import hashlib
 import importlib.util
@@ -235,30 +236,68 @@ def safe_process_state(info: dict[str, Any]) -> dict[str, Any]:
             "RestartCount": info.get("RestartCount") if type(info.get("RestartCount")) is int else None, "State": safe}
 
 
-def connector_log_records(text: str) -> list[dict[str, str]]:
-    # Arbitrary error values and unstructured logs can contain credentials.
-    # Retain actual safe startup messages; mark other lines without their text.
+def connector_log_records(streams) -> dict[str, Any]:
+    """Filter successful log streams; iteration order is not cross-stream chronology."""
     safe_messages = {"connector config loaded", "caesium failure", "graceful shutdown failed",
                      "received shutdown signal", "server shutting down", "server started"}
-    records = []
-    for line in text.splitlines()[-100:]:
-        try:
-            value = json.loads(line)
-        except ValueError:
-            value = None
-        if not isinstance(value, dict):
-            records.append({"msg": "[unstructured log omitted]"})
-            continue
-        message = value.get("msg")
-        record = {"msg": message if isinstance(message, str) and message in safe_messages else "[message details omitted]"}
-        for key, pattern in (("level", r"debug|info|warn|error|fatal|panic"),
-                             ("ts", r"[0-9T:.+Z-]{1,40}"), ("caller", r"[a-zA-Z0-9_/-]+\.go:[0-9]+")):
-            if isinstance(value.get(key), str) and re.fullmatch(pattern, value[key]) and not KEY_RE.search(value[key]):
-                record[key] = value[key]
-        if "error" in value:
-            record["error"] = "[error details omitted]"
-        records.append(record)
-    return records
+    records = deque(maxlen=100)
+    loaded = None
+    counts = {"stdout_bytes": 0, "stderr_bytes": 0, "stdout_lines": 0, "stderr_lines": 0,
+              "oversized_lines": 0, "omitted_records": 0, "invalid_utf8_lines": 0}
+    for channel, stream in streams:
+        stream.seek(0)
+        while True:
+            raw = stream.readline(64 * 1024 + 1)
+            if not raw:
+                break
+            counts[channel + "_lines"] += 1
+            counts[channel + "_bytes"] += len(raw)
+            if len(raw) > 64 * 1024:
+                counts["oversized_lines"] += 1
+                # Drain this whole oversized line in bounded chunks. Never let
+                # a valid-looking suffix become an independent loaded event.
+                while not raw.endswith(b"\n"):
+                    raw = stream.readline(64 * 1024 + 1)
+                    counts[channel + "_bytes"] += len(raw)
+                    if not raw:
+                        break
+                continue
+            try:
+                value = json.loads(raw.decode("utf-8"))
+            except UnicodeDecodeError:
+                counts["invalid_utf8_lines"] += 1
+                value = None
+            except (ValueError, RecursionError):
+                value = None
+            if not isinstance(value, dict):
+                counts["omitted_records"] += 1
+                records.append({"stream": channel, "msg": "[unstructured log omitted]"})
+                continue
+            message = value.get("msg")
+            safe = isinstance(message, str) and message in safe_messages
+            if not safe:
+                counts["omitted_records"] += 1
+            record = {"stream": channel, "msg": message if safe else "[message details omitted]"}
+            for key, pattern in (("level", r"debug|info|warn|error|fatal|panic"),
+                                 ("ts", r"[0-9T:.+Z-]{1,40}"),
+                                 ("caller", r"[a-zA-Z0-9_/-]{1,140}\.go:[0-9]{1,10}")):
+                if isinstance(value.get(key), str) and re.fullmatch(pattern, value[key]) and not KEY_RE.search(value[key]):
+                    record[key] = value[key]
+            if "error" in value:
+                record["error"] = "[error details omitted]"
+            if message == "connector config loaded":
+                if isinstance(value.get("fingerprint"), str) and DIGEST_RE.fullmatch(value["fingerprint"]):
+                    record["fingerprint"] = value["fingerprint"]
+                loaded = record.copy()
+            records.append(record)
+    counts["retained_records"] = len(records)
+    return {"records": list(records), "loaded_event": loaded, "counts": counts}
+
+
+class ConnectorOutputLimit(JourneyError):
+    def __init__(self, limit: int, observed: int):
+        super().__init__("connector nonlog output exceeded evidence cap")
+        self.limit, self.observed = limit, observed
 
 
 def connector_shutdown(command, identity: str, owner: str, run_id: str, image: str,
@@ -280,15 +319,16 @@ def connector_shutdown(command, identity: str, owner: str, run_id: str, image: s
                 raise JourneyError("connector inventory differs from requested immutable identity")
             diagnostics["pre_stop"] = safe_process_state(info)
             diagnostics["refusal_category"] = "log_operation_failed"
-            logs = command("container", "logs", "--tail", "1000", identity, check=False, timeout=10)
+            logs = command("container", "logs", "--tail", "all", identity, check=False, timeout=10)
+            diagnostics["log_rc"] = logs.returncode
+            evidence = json.loads(logs.stdout)
+            diagnostics["log_counts"] = evidence["counts"]
             if logs.returncode == 0:
-                diagnostics["log_records"] = connector_log_records(logs.stdout)
-                for line in logs.stdout.splitlines():
-                    try:
-                        event = json.loads(line)
-                    except ValueError:
-                        continue
-                    diagnostics["fingerprint"] |= isinstance(event, dict) and event.get("msg") == "connector config loaded"
+                diagnostics["log_records"] = evidence["records"]
+                event = evidence["loaded_event"]
+                if event is not None:
+                    diagnostics["loaded_event"] = event
+                    diagnostics["fingerprint"] = True
             if info["State"].get("Running") is not True:
                 diagnostics["refusal_category"] = "stopped_before_readiness"
                 raise JourneyError("connector stopped before fingerprint and health readiness")
@@ -302,7 +342,7 @@ def connector_shutdown(command, identity: str, owner: str, run_id: str, image: s
                 body = None
             diagnostics["healthy"] = (health.returncode == 0 and isinstance(body, dict)
                                       and body.get("status") == "healthy")
-            if diagnostics["fingerprint"] and diagnostics["healthy"]:
+            if logs.returncode == 0 and diagnostics["fingerprint"] and diagnostics["healthy"]:
                 break
             time.sleep(1)
         else:
@@ -314,18 +354,23 @@ def connector_shutdown(command, identity: str, owner: str, run_id: str, image: s
         diagnostics["complete"] = True
         return {**safe_process_state(final), "flush_rc": final["flush_rc"], "stop_rc": final["stop_rc"]}
     except Exception as exc:
+        if isinstance(exc, ConnectorOutputLimit):
+            diagnostics.update(refusal_category="nonlog_output_cap", output_limit=exc.limit,
+                               observed_output_bytes_at_least=exc.observed)
         diagnostics["exception_type"] = type(exc).__name__ if type(exc).__name__ in (
-            "JourneyError", "TimeoutExpired", "OSError", "ValueError", "JSONDecodeError") else "UnexpectedError"
+            "JourneyError", "ConnectorOutputLimit", "TimeoutExpired", "OSError", "ValueError", "JSONDecodeError") else "UnexpectedError"
         raise
     finally:
         # A diagnostics write failure propagates; it never converts refusal to pass.
         if "pre_stop" in diagnostics:
             try:
                 guarded_resource(command, "container", identity, "owned", owner, run_id, "base-connectors", image)
-                logs = command("container", "logs", "--tail", "1000", identity, check=False, timeout=10)
+                logs = command("container", "logs", "--tail", "all", identity, check=False, timeout=10)
                 diagnostics["post_log_rc"] = logs.returncode
                 if logs.returncode == 0:
-                    diagnostics["post_log_records"] = connector_log_records(logs.stdout)
+                    evidence = json.loads(logs.stdout)
+                    diagnostics["post_log_records"] = evidence["records"]
+                    diagnostics["post_log_counts"] = evidence["counts"]
             except Exception:
                 diagnostics["post_log_category"] = "unavailable"
         with os.fdopen(os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "w") as stream:
@@ -333,18 +378,25 @@ def connector_shutdown(command, identity: str, owner: str, run_id: str, image: s
 
 
 def connector_command(*arguments, check=True, timeout=10):
-    # Spool bounded-time output privately, then refuse oversized evidence. Never
-    # print native stderr or persist inspect payloads containing credentials.
+    # Successful Docker logs may transport app records on either channel. Keep
+    # both private, and return only reduced structured evidence. Native errors
+    # from failed log commands never supply loaded/readiness proof.
     with tempfile.TemporaryFile() as output, tempfile.TemporaryFile() as errors:
         result = subprocess.run(["docker", *arguments], stdout=output, stderr=errors, timeout=timeout, check=False)
-        limit = 256 * 1024 if "logs" in arguments else 2 * 1024 * 1024
-        output.seek(0)
-        raw = output.read(limit + 1)
-        if len(raw) > limit:
-            raise JourneyError("connector command output exceeded evidence cap")
+        if arguments[:2] == ("container", "logs"):
+            evidence = (connector_log_records((("stdout", output), ("stderr", errors)))
+                        if result.returncode == 0 else {"records": [], "loaded_event": None,
+                            "counts": {"failed_log_streams_omitted": 2}})
+            raw = json.dumps(evidence)
+        else:
+            output.seek(0)
+            data = output.read(2 * 1024 * 1024 + 1)
+            if len(data) > 2 * 1024 * 1024:
+                raise ConnectorOutputLimit(2 * 1024 * 1024, len(data))
+            raw = data.decode("utf-8")
         if check and result.returncode:
             raise JourneyError("connector Docker command failed")
-        return subprocess.CompletedProcess(arguments, result.returncode, raw.decode("utf-8"), "")
+        return subprocess.CompletedProcess(arguments, result.returncode, raw, "")
 
 
 def validate_backend_contribution(args: argparse.Namespace) -> None:
