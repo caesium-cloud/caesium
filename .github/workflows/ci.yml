@@ -1651,7 +1651,6 @@ jobs:
     env:
       CANDIDATE_SHA: ${{ github.sha }}
       CAESIUM_SKIP_IMAGE_BUILD: "true"
-      CAESIUM_RESOURCE_STRESS_IMAGE: caesiumcloud/resource-stress:${{ env.IMAGE_TAG }}-amd64
     steps:
       - uses: actions/checkout@v6
       - uses: taiki-e/install-action@just
@@ -1850,6 +1849,8 @@ jobs:
           CAESIUM_SKIP_IMAGE_BUILD: "false"
         run: just tag=${{ env.IMAGE_TAG }}-amd64 stress-image-test
       - name: Coverage collection against the ratchets
+        env:
+          CAESIUM_RESOURCE_STRESS_IMAGE: caesiumcloud/resource-stress:${{ env.IMAGE_TAG }}-amd64
         run: just tag=${{ env.IMAGE_TAG }}-amd64 coverage-ratchets
       - name: Upload lane report
         if: always()

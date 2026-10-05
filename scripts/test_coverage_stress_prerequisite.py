@@ -23,7 +23,7 @@ class CoverageStressPrerequisiteTests(unittest.TestCase):
         self.assertEqual(job["needs"], ["changes", "builder"])
         self.assertEqual(job["runs-on"], "ubuntu-24.04")
         self.assertEqual(job["env"]["CAESIUM_SKIP_IMAGE_BUILD"], "true")
-        self.assertEqual(job["env"]["CAESIUM_RESOURCE_STRESS_IMAGE"], STRESS_IMAGE)
+        self.assertNotIn("CAESIUM_RESOURCE_STRESS_IMAGE", job["env"])
         steps = job["steps"]
         build = [i for i, step in enumerate(steps) if step.get("run") == STRESS_COMMAND]
         collect = [i for i, step in enumerate(steps) if step.get("run") == COLLECTION_COMMAND]
@@ -36,13 +36,13 @@ class CoverageStressPrerequisiteTests(unittest.TestCase):
         self.assertFalse(prerequisite.get("continue-on-error", False))
         collector = steps[collect[0]]
         self.assertEqual(collector.get("env", {}).get("CAESIUM_SKIP_IMAGE_BUILD", "true"), "true")
-        self.assertEqual(collector.get("env", {}).get("CAESIUM_RESOURCE_STRESS_IMAGE", STRESS_IMAGE), STRESS_IMAGE)
+        self.assertEqual(collector.get("env", {}).get("CAESIUM_RESOURCE_STRESS_IMAGE"), STRESS_IMAGE)
 
     def test_coverage_builds_smokes_and_selects_exact_fixture_before_collection(self):
         self.assertPrerequisite(self.job)
 
     def test_missing_or_bypassed_prerequisite_is_refused(self):
-        for fault in ("latest", "wrong-tag", "skip-build", "missing-build",
+        for fault in ("latest", "missing-selection", "job-env-selection", "wrong-tag", "skip-build", "missing-build",
                       "late-build", "optional-build", "ignored-failure",
                       "collector-override", "product-dependency"):
             with self.subTest(fault=fault):
@@ -51,7 +51,11 @@ class CoverageStressPrerequisiteTests(unittest.TestCase):
                 build = next(step for step in steps if step.get("run") == STRESS_COMMAND)
                 collect = next(step for step in steps if step.get("run") == COLLECTION_COMMAND)
                 if fault == "latest":
-                    job["env"]["CAESIUM_RESOURCE_STRESS_IMAGE"] = "caesiumcloud/resource-stress:latest"
+                    collect["env"]["CAESIUM_RESOURCE_STRESS_IMAGE"] = "caesiumcloud/resource-stress:latest"
+                elif fault == "missing-selection":
+                    del collect["env"]["CAESIUM_RESOURCE_STRESS_IMAGE"]
+                elif fault == "job-env-selection":
+                    job["env"]["CAESIUM_RESOURCE_STRESS_IMAGE"] = collect["env"].pop("CAESIUM_RESOURCE_STRESS_IMAGE")
                 elif fault == "wrong-tag":
                     build["run"] = STRESS_COMMAND.replace("-amd64", "-arm64")
                 elif fault == "skip-build":
