@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/caesium-cloud/caesium/api/internal/aggregatetime"
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/caesium-cloud/caesium/internal/run"
 	"github.com/caesium-cloud/caesium/pkg/db"
@@ -158,25 +159,6 @@ func parseAggregateTime(raw string) *time.Time {
 		return nil
 	}
 
-	layouts := []string{
-		time.RFC3339Nano,
-		"2006-01-02 15:04:05.999999999-07:00",
-		"2006-01-02 15:04:05.999999999",
-		"2006-01-02 15:04:05.999999",
-		"2006-01-02 15:04:05.999",
-		"2006-01-02 15:04:05",
-	}
-
-	for _, layout := range layouts {
-		if ts, err := time.Parse(layout, raw); err == nil {
-			tt := ts.UTC()
-			return &tt
-		}
-		if ts, err := time.ParseInLocation(layout, raw, time.UTC); err == nil {
-			tt := ts.UTC()
-			return &tt
-		}
-	}
-
-	return nil
+	parsed, _ := aggregatetime.Parse(raw)
+	return parsed
 }

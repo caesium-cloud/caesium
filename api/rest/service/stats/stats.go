@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/caesium-cloud/caesium/api/internal/aggregatetime"
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/caesium-cloud/caesium/pkg/db"
 	"gorm.io/gorm"
@@ -332,24 +333,8 @@ func parseAggregateTime(value sql.NullString) (*time.Time, error) {
 		return nil, nil
 	}
 
-	raw := strings.TrimSpace(value.String)
-	layouts := [...]string{
-		time.RFC3339Nano,
-		"2006-01-02 15:04:05.999999999-07:00",
-		"2006-01-02 15:04:05.999999999",
-		"2006-01-02 15:04:05.999999",
-		"2006-01-02 15:04:05.999",
-		"2006-01-02 15:04:05",
-	}
-	for _, layout := range layouts {
-		if parsed, err := time.Parse(layout, raw); err == nil {
-			utc := parsed.UTC()
-			return &utc, nil
-		}
-		if parsed, err := time.ParseInLocation(layout, raw, time.UTC); err == nil {
-			utc := parsed.UTC()
-			return &utc, nil
-		}
+	if parsed, ok := aggregatetime.Parse(strings.TrimSpace(value.String)); ok {
+		return parsed, nil
 	}
 	return nil, fmt.Errorf("invalid timestamp %q", value.String)
 }

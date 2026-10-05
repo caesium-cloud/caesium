@@ -135,3 +135,34 @@ func (s *WorkerStatusSuite) seedTaskRun(in taskRunSeed) {
 
 	s.Require().NoError(s.db.Create(taskRun).Error)
 }
+
+func TestParseAggregateTime(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		raw  string
+		want time.Time
+	}{
+		{"empty", "", time.Time{}},
+		{"blank", " \t\n", time.Time{}},
+		{"malformed", "not-a-timestamp", time.Time{}},
+		{"padded valid timestamp remains invalid", " 2025-01-02T03:04:05Z ", time.Time{}},
+		{"leading whitespace remains invalid", "\t2025-01-02 03:04:05", time.Time{}},
+		{"SQL UTC", "2025-01-02 03:04:05.123456789", time.Date(2025, 1, 2, 3, 4, 5, 123456789, time.UTC)},
+		{"SQL offset", "2025-01-02 03:04:05.123456-07:00", time.Date(2025, 1, 2, 10, 4, 5, 123456000, time.UTC)},
+		{"RFC3339 offset", "2025-01-02T03:04:05.123456789+02:00", time.Date(2025, 1, 2, 1, 4, 5, 123456789, time.UTC)},
+		{"SQL seconds", "2025-01-02 03:04:05", time.Date(2025, 1, 2, 3, 4, 5, 0, time.UTC)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := parseAggregateTime(tc.raw)
+			if tc.want.IsZero() {
+				if got != nil {
+					t.Fatalf("parseAggregateTime(%q) = %v; want nil", tc.raw, got)
+				}
+				return
+			}
+			if got == nil || !got.Equal(tc.want) || got.Location() != time.UTC {
+				t.Fatalf("parseAggregateTime(%q) = %v; want %v in UTC", tc.raw, got, tc.want)
+			}
+		})
+	}
+}

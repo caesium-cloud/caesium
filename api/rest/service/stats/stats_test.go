@@ -203,12 +203,13 @@ func (s *StatsSuite) TestSummaryReturnsMalformedLatestFailureTimestampError() {
 
 func TestParseAggregateTime(t *testing.T) {
 	for _, tc := range []struct {
-		name  string
-		value sql.NullString
-		want  time.Time
-		bad   bool
+		name    string
+		value   sql.NullString
+		want    time.Time
+		wantErr string
 	}{
 		{name: "null"},
+		{name: "null ignores string", value: sql.NullString{String: "not-a-timestamp"}},
 		{
 			name:  "sqlite dqlite naive UTC",
 			value: sql.NullString{String: "2025-01-02 03:04:05.123456789", Valid: true},
@@ -224,14 +225,21 @@ func TestParseAggregateTime(t *testing.T) {
 			value: sql.NullString{String: "2025-01-02T03:04:05.123456789+02:00", Valid: true},
 			want:  time.Date(2025, time.January, 2, 1, 4, 5, 123456789, time.UTC),
 		},
-		{name: "malformed", value: sql.NullString{String: "not-a-timestamp", Valid: true}, bad: true},
-		{name: "empty but non-null", value: sql.NullString{String: " ", Valid: true}, bad: true},
+		{
+			name:  "padded timestamp is trimmed",
+			value: sql.NullString{String: " \t2025-01-02T03:04:05Z\n ", Valid: true},
+			want:  time.Date(2025, time.January, 2, 3, 4, 5, 0, time.UTC),
+		},
+		{name: "malformed", value: sql.NullString{String: "not-a-timestamp", Valid: true}, wantErr: `invalid timestamp "not-a-timestamp"`},
+		{name: "empty but non-null", value: sql.NullString{Valid: true}, wantErr: `invalid timestamp ""`},
+		{name: "blank but non-null", value: sql.NullString{String: " ", Valid: true}, wantErr: `invalid timestamp " "`},
+		{name: "malformed preserves raw whitespace", value: sql.NullString{String: "  invalid  ", Valid: true}, wantErr: `invalid timestamp "  invalid  "`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got, err := parseAggregateTime(tc.value)
-			if tc.bad {
-				if err == nil || got != nil {
-					t.Fatalf("parseAggregateTime(%+v) = %v, %v; want error", tc.value, got, err)
+			if tc.wantErr != "" {
+				if err == nil || err.Error() != tc.wantErr || got != nil {
+					t.Fatalf("parseAggregateTime(%+v) = %v, %v; want nil, %q", tc.value, got, err, tc.wantErr)
 				}
 				return
 			}
