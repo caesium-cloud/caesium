@@ -264,9 +264,18 @@ func (s *IntegrationTestSuite) TestPublicListingsOrderByAndRefuseInvalidTerms() 
 				})
 				s.Require().Equal(name, created.Name)
 				if endpoint == "notifications/channels" {
-					s.Require().False(created.Enabled)
+					// The channel model's GORM default is enabled=true; set the
+					// owned row inactive through the public PATCH before testing
+					// listings. No notification policy references this fixture.
+					status, body = s.maintenanceHTTP(http.MethodPatch, "/v1/"+endpoint+"/"+id, []byte(`{"enabled":false}`))
+					s.Require().Equal(http.StatusOK, status)
+					var disabled listingObject
+					s.Require().NoError(json.Unmarshal(body, &disabled))
+					s.Require().Equal(id, disabled.ID)
+					s.Require().Equal(name, disabled.Name)
+					s.Require().False(disabled.Enabled)
 					s.Require().NotContains(string(body), "https://example.invalid/")
-					s.Require().Contains(fmt.Sprint(created.Config["url"]), "****")
+					s.Require().Contains(fmt.Sprint(disabled.Config["url"]), "****")
 				}
 				owned[id] = name
 			}
@@ -310,6 +319,10 @@ func (s *IntegrationTestSuite) TestPublicListingsOrderByAndRefuseInvalidTerms() 
 				s.maintenanceJSON("/v1/"+endpoint+"/"+id, &actual)
 				s.Require().Equal(id, actual.ID)
 				s.Require().Equal(name, actual.Name)
+				if endpoint == "notifications/channels" {
+					s.Require().False(actual.Enabled)
+					s.Require().Contains(fmt.Sprint(actual.Config["url"]), "****")
+				}
 			}
 		})
 	}
