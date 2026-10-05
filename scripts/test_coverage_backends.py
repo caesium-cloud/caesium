@@ -325,6 +325,7 @@ class BackendGuards(unittest.TestCase):
             lambda st: st['image'].update(id=INDEX),
             lambda st: st.update(config_image=dict(st['image'], repoTags=['foreign:tag'])),
             lambda st: st['image'].update(repoDigests=[]),
+            lambda st: st['image'].update(repoDigests=['not-a-digest']),
             lambda st: st.update(unavailable=True),
         ):
             with self.assertRaises(b.Refused):
@@ -359,6 +360,7 @@ class BackendGuards(unittest.TestCase):
             lambda st: st['native']['labels'].update({'io.kubernetes.pod.uid': 'foreign'}),
             lambda st: st['native']['labels'].update({'io.kubernetes.pod.namespace': 'foreign'}),
             lambda st: st['native']['labels'].update({'io.kubernetes.pod.name': 'foreign'}),
+            lambda st: st['native']['labels'].pop('io.kubernetes.container.name'),
             lambda st: st['pod']['status']['containerStatuses'][0].update(containerID='docker://' + 'd' * 64),
             lambda st: st['pod']['status']['containerStatuses'].append(copy.deepcopy(st['pod']['status']['containerStatuses'][0])),
         ]
