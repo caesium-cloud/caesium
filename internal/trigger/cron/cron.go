@@ -77,8 +77,13 @@ func (c *Cron) Listen(ctx context.Context) {
 // listen keeps clock, wait and fire private so recurrence can be exercised
 // without delays or job infrastructure. The real schedule still computes ticks.
 func (c *Cron) listen(ctx context.Context, now func() time.Time, wait func(context.Context, time.Time) error, fire func(context.Context, time.Time) error) {
+	var lastTick time.Time
 	for ctx.Err() == nil {
-		next := c.nextTickAt(now())
+		base := now()
+		if base.Before(lastTick) {
+			base = lastTick
+		}
+		next := c.nextTickAt(base)
 		if next.IsZero() {
 			log.Warn("trigger has no future occurrence, skipping", "id", c.id)
 			<-ctx.Done()
@@ -90,6 +95,10 @@ func (c *Cron) listen(ctx context.Context, now func() time.Time, wait func(conte
 		if ctx.Err() != nil {
 			return
 		}
+		// Calendar ticks have no monotonic component. Remember the attempted
+		// logical date even on failure, so a backward wall-clock step cannot
+		// schedule it again after the timer has already elapsed.
+		lastTick = next
 		if err := fire(ctx, next); err != nil {
 			log.Error("trigger fire failure", "id", c.id, "error", err)
 		}

@@ -195,6 +195,50 @@ func TestListenCancellationDuringWaitDoesNotFire(t *testing.T) {
 	require.ErrorIs(t, waitUntil(ctx, time.Now().Add(time.Hour)), context.Canceled)
 }
 
+func TestListenLogicalTicksSurviveClockDiscontinuities(t *testing.T) {
+	anchor := time.Date(2026, 10, 3, 12, 0, 0, 0, time.UTC)
+	for _, tc := range []struct {
+		name   string
+		clocks []time.Duration
+		ticks  []time.Duration
+	}{
+		{"backward after failed fire", []time.Duration{0, 30 * time.Second, -time.Minute}, []time.Duration{time.Minute, 2 * time.Minute, 3 * time.Minute}},
+		{"repeated wall clock", []time.Duration{0, 0, 0}, []time.Duration{time.Minute, 2 * time.Minute, 3 * time.Minute}},
+		{"forward jump skips missed ticks", []time.Duration{0, 5*time.Minute + 25*time.Second, 6 * time.Minute}, []time.Duration{time.Minute, 6 * time.Minute, 7 * time.Minute}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sched, err := robcron.NewParser(robcron.Minute | robcron.Hour | robcron.Dom | robcron.Month | robcron.Dow).Parse("* * * * *")
+			require.NoError(t, err)
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			var waits, fires []time.Time
+			clockCalls := 0
+			(&Cron{schedule: sched}).listen(ctx, func() time.Time {
+				require.Less(t, clockCalls, len(tc.clocks), "listener failed to progress")
+				clock := anchor.Add(tc.clocks[clockCalls])
+				clockCalls++
+				return clock
+			}, func(_ context.Context, tick time.Time) error {
+				waits = append(waits, tick)
+				return nil
+			}, func(_ context.Context, tick time.Time) error {
+				fires = append(fires, tick)
+				if len(fires) == len(tc.ticks) {
+					cancel()
+				}
+				return errors.New("attempted fire failed")
+			})
+			want := make([]time.Time, len(tc.ticks))
+			for i, offset := range tc.ticks {
+				want[i] = anchor.Add(offset)
+			}
+			require.Equal(t, want, fires)
+			require.Equal(t, want, waits)
+			require.Equal(t, len(tc.clocks), clockCalls)
+		})
+	}
+}
+
 type noFutureSchedule struct{ entered chan struct{} }
 
 func (s noFutureSchedule) Next(time.Time) time.Time { close(s.entered); return time.Time{} }
