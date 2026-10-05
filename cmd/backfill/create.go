@@ -4,12 +4,12 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"strings"
 	"time"
 
 	"github.com/caesium-cloud/caesium/cmd/cliutil"
+	"github.com/caesium-cloud/caesium/internal/clihttp"
 	"github.com/spf13/cobra"
 )
 
@@ -68,27 +68,11 @@ Reprocess policies:
 		server := strings.TrimSuffix(createServer, "/")
 		url := fmt.Sprintf("%s/v1/jobs/%s/backfill", server, createJobID)
 
-		req, err := http.NewRequestWithContext(cmd.Context(), http.MethodPost, url, bytes.NewReader(payload))
-		if err != nil {
+		headers := make(http.Header)
+		headers.Set("Content-Type", "application/json")
+		respBody, status, readErr := clihttp.Exchange(cmd.Context(), http.DefaultClient, http.MethodPost, url, bytes.NewReader(payload), headers)
+		if err := clihttp.ResponseError("backfill create", status, respBody, readErr); err != nil {
 			return err
-		}
-		req.Header.Set("Content-Type", "application/json")
-
-		resp, err := http.DefaultClient.Do(req)
-		if err != nil {
-			return err
-		}
-		defer func() { _ = resp.Body.Close() }()
-
-		respBody, readErr := io.ReadAll(resp.Body)
-		if resp.StatusCode >= http.StatusBadRequest {
-			if readErr != nil {
-				return fmt.Errorf("backfill create failed (%d): %s (reading response: %w)", resp.StatusCode, strings.TrimSpace(string(respBody)), readErr)
-			}
-			return fmt.Errorf("backfill create failed (%d): %s", resp.StatusCode, strings.TrimSpace(string(respBody)))
-		}
-		if readErr != nil {
-			return fmt.Errorf("reading backfill create response: %w", readErr)
 		}
 
 		// stdout is the created record and NOTHING else, so

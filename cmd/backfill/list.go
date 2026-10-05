@@ -2,11 +2,11 @@ package backfill
 
 import (
 	"fmt"
-	"io"
 	"net/http"
 	"strings"
 
 	"github.com/caesium-cloud/caesium/cmd/cliutil"
+	"github.com/caesium-cloud/caesium/internal/clihttp"
 	"github.com/spf13/cobra"
 )
 
@@ -27,26 +27,9 @@ var listCmd = &cobra.Command{
 		server := strings.TrimSuffix(listServer, "/")
 		url := fmt.Sprintf("%s/v1/jobs/%s/backfills", server, listJobID)
 
-		req, err := http.NewRequestWithContext(cmd.Context(), http.MethodGet, url, nil)
-		if err != nil {
+		body, status, readErr := clihttp.Exchange(cmd.Context(), http.DefaultClient, http.MethodGet, url, nil, make(http.Header))
+		if err := clihttp.ResponseError("backfill list", status, body, readErr); err != nil {
 			return err
-		}
-
-		resp, err := http.DefaultClient.Do(req)
-		if err != nil {
-			return err
-		}
-		defer func() { _ = resp.Body.Close() }()
-
-		body, readErr := io.ReadAll(resp.Body)
-		if resp.StatusCode >= http.StatusBadRequest {
-			if readErr != nil {
-				return fmt.Errorf("backfill list failed (%d): %s (reading response: %w)", resp.StatusCode, strings.TrimSpace(string(body)), readErr)
-			}
-			return fmt.Errorf("backfill list failed (%d): %s", resp.StatusCode, strings.TrimSpace(string(body)))
-		}
-		if readErr != nil {
-			return fmt.Errorf("reading backfill list response: %w", readErr)
 		}
 
 		// stdout is the listing and nothing else, so `backfill list | jq` works.

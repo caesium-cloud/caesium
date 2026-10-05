@@ -15,7 +15,6 @@ package why
 import (
 	"encoding/json"
 	"fmt"
-	"io"
 	"maps"
 	"net/http"
 	"net/url"
@@ -24,6 +23,7 @@ import (
 	"text/tabwriter"
 
 	"github.com/caesium-cloud/caesium/cmd/cliutil"
+	"github.com/caesium-cloud/caesium/internal/clihttp"
 	"github.com/spf13/cobra"
 )
 
@@ -181,29 +181,14 @@ var Cmd = &cobra.Command{
 		reqURL := fmt.Sprintf("%s/v1/jobs/%s/runs/%s/why?%s",
 			server, whyJobID, runID, query.Encode())
 
-		req, err := http.NewRequestWithContext(cmd.Context(), http.MethodGet, reqURL, nil)
-		if err != nil {
-			return err
-		}
+		headers := make(http.Header)
 		if apiKey := resolveAPIKey(cmd, whyAPIKey); apiKey != "" {
-			req.Header.Set("Authorization", "Bearer "+apiKey)
+			headers.Set("Authorization", "Bearer "+apiKey)
 		}
 
-		resp, err := http.DefaultClient.Do(req)
-		if err != nil {
+		body, status, readErr := clihttp.Exchange(cmd.Context(), http.DefaultClient, http.MethodGet, reqURL, nil, headers)
+		if err := clihttp.ResponseError("why", status, body, readErr); err != nil {
 			return err
-		}
-		defer func() { _ = resp.Body.Close() }()
-
-		body, readErr := io.ReadAll(resp.Body)
-		if resp.StatusCode >= http.StatusBadRequest {
-			if readErr != nil {
-				return fmt.Errorf("why failed (%d): %s (reading response: %w)", resp.StatusCode, strings.TrimSpace(string(body)), readErr)
-			}
-			return fmt.Errorf("why failed (%d): %s", resp.StatusCode, strings.TrimSpace(string(body)))
-		}
-		if readErr != nil {
-			return fmt.Errorf("reading why response: %w", readErr)
 		}
 
 		// NOTE: write machine-readable output via cmd.OutOrStdout(), NOT

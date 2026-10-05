@@ -7,11 +7,11 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"os"
 	"strings"
 
+	"github.com/caesium-cloud/caesium/internal/clihttp"
 	ireceipt "github.com/caesium-cloud/caesium/internal/receipt"
 	"github.com/google/uuid"
 	"github.com/spf13/cobra"
@@ -51,27 +51,11 @@ var Cmd = &cobra.Command{
 			return err
 		}
 
-		req, err := http.NewRequestWithContext(cmd.Context(), http.MethodPost, url, bytes.NewReader(payload))
-		if err != nil {
+		headers := make(http.Header)
+		headers.Set("Content-Type", "application/json")
+		body, status, readErr := clihttp.Exchange(cmd.Context(), http.DefaultClient, http.MethodPost, url, bytes.NewReader(payload), headers)
+		if err := clihttp.ResponseError("verify", status, body, readErr); err != nil {
 			return err
-		}
-		req.Header.Set("Content-Type", "application/json")
-
-		resp, err := http.DefaultClient.Do(req)
-		if err != nil {
-			return err
-		}
-		defer func() { _ = resp.Body.Close() }()
-
-		body, readErr := io.ReadAll(resp.Body)
-		if resp.StatusCode >= http.StatusBadRequest {
-			if readErr != nil {
-				return fmt.Errorf("verify failed (%d): %s (reading response: %w)", resp.StatusCode, strings.TrimSpace(string(body)), readErr)
-			}
-			return fmt.Errorf("verify failed (%d): %s", resp.StatusCode, strings.TrimSpace(string(body)))
-		}
-		if readErr != nil {
-			return fmt.Errorf("reading verify response: %w", readErr)
 		}
 
 		var result ireceipt.VerifyResult
