@@ -138,8 +138,19 @@ func newFreshnessRunLauncher(
 		workCtx, releaseWork, err := freshness.TakeRunReservation(ctx)
 		if errors.Is(err, freshness.ErrNoRunReservation) {
 			workCtx, releaseWork, err = runlife.FromContext(ctx).Reserve(ctx)
+			if err != nil {
+				// This direct caller already admitted the row but acquired no
+				// execution ownership. Settle that exact row without dispatch.
+				cause := fmt.Errorf("freshness: derived run submission refused: %w", err)
+				if _, completeErr := store.CompleteIfActive(r.ID, cause); completeErr != nil {
+					log.Error("freshness: refused derived run could not be finalized; leaving it for an operator",
+						"job_id", r.JobID, "run_id", r.ID, "error", completeErr)
+				}
+			}
 		}
 		if err != nil {
+			// A consumed evaluator token may be a duplicate invocation while
+			// the first launcher still owns execution. Never finalize its run.
 			log.Warn("freshness: derived run submission refused", "run_id", r.ID, "error", err)
 			return
 		}
