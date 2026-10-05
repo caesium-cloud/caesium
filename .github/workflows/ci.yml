@@ -247,7 +247,7 @@ jobs:
 
   ci-config:
     runs-on: ubuntu-24.04
-    timeout-minutes: 5
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v6
       - uses: taiki-e/install-action@just
@@ -1733,7 +1733,7 @@ jobs:
           docker pull --platform linux/amd64 kindest/node:v1.36.1
           docker pull --platform linux/amd64 alpine:3.23
           python3 - "$prereqs" "$podman_image" <<'PY'
-          import hashlib, json, pathlib, re, runpy, subprocess, sys, tarfile
+          import hashlib, json, pathlib, re, runpy, shutil, subprocess, sys, tarfile
           root = pathlib.Path(sys.argv[1]).resolve()
           archive = root / 'task.tar'
           proof = root / 'proof'
@@ -1770,29 +1770,54 @@ jobs:
           child = metadata(child_ref, child_id, 'task-amd64-manifest.json')
           config_id = child['config']['digest']
           assert re.fullmatch(r'sha256:[0-9a-f]{64}', config_id), 'invalid task config digest'
-          # Export the pulled leaf, avoiding Docker containerd's index/platform save bug.
-          # Modern Docker Id can be a manifest; the exported config is checked separately.
+          assert pulled['Id'] in (index_ref.split('@')[1], child_id, config_id), 'pulled task identity differs from verified index/child/config'
+          # Use the proven FROM-only BuildKit exporter rather than daemon save.
+          # No RUN, --load or tag mutation: retain the exact original config.
           subprocess.check_call(['docker', 'pull', '--platform', 'linux/amd64', child_ref])
           loaded = image(child_ref)
           assert loaded['Id'] in (child_id, config_id), 'daemon task identity differs from the selected child'
-          subprocess.check_call(['docker', 'tag', child_ref, 'alpine:3.23'])
-          assert inspect('alpine:3.23') == loaded['Id'], 'task tag changed before export'
-          subprocess.check_call(['docker', 'image', 'save', 'alpine:3.23', '-o', str(archive)])
+          assert inspect('alpine:3.23') == pulled['Id'], 'task tag changed before export'
+          source_ref = 'docker.io/library/' + child_ref
+          dockerfile = 'FROM ' + source_ref + '\n'
+          assert not archive.exists(), 'task export archive must be fresh'
+          subprocess.run(['docker', 'buildx', 'build', '--platform', 'linux/amd64', '--network', 'none',
+                          '--provenance=false', '--sbom=false', '--output', 'type=docker,dest=' + str(archive),
+                          '-t', 'alpine:3.23', '-'], input=dockerfile, text=True, check=True, timeout=180)
+          assert archive.stat().st_size <= 64 * 1024 * 1024, 'task export exceeds retained archive cap'
+          archive_hash = hashlib.sha256(archive.read_bytes()).hexdigest()
+          shutil.copyfile(archive, proof / 'task-export-original.tar')
           with tarfile.open(archive) as image_archive:
-              manifest = json.load(image_archive.extractfile('manifest.json'))
+              members = image_archive.getmembers()
+              assert len(members) <= 10000, 'task export member inventory exceeds cap'
+              inventory = json.dumps({'archive_sha256': archive_hash, 'members': [
+                  {'name': m.name, 'type': m.type.decode('ascii'), 'size': m.size, 'linkname': m.linkname}
+                  for m in members]}, indent=2) + '\n'
+              assert len(inventory.encode()) <= 2 * 1024 * 1024, 'task export member inventory exceeds cap'
+              (proof / 'task-export-members.json').write_text(inventory)
+              manifest_member = image_archive.getmember('manifest.json')
+              assert manifest_member.isfile() and manifest_member.size <= 2 * 1024 * 1024, 'invalid task export manifest'
+              raw_manifest = image_archive.extractfile(manifest_member).read()
+              (proof / 'task-export-manifest.json').write_bytes(raw_manifest)
+              manifest = json.loads(raw_manifest)
               assert len(manifest) == 1 and manifest[0]['RepoTags'] == ['alpine:3.23'], 'unexpected task archive'
-              config = image_archive.extractfile(manifest[0]['Config']).read()
+              config_member = next((m for m in members if m.name == manifest[0]['Config']), None)
+              assert config_member is not None and config_member.isfile(), 'exported task config member unavailable'
+              assert config_member.size == child['config']['size'], 'exported config size mismatch'
+              config = image_archive.extractfile(config_member).read()
               assert 'sha256:' + hashlib.sha256(config).hexdigest() == config_id, 'exported daemon config differs from selected child'
               assert len(config) == child['config']['size'], 'exported config size mismatch'
               task_config = json.loads(config)
               assert task_config['os'] == 'linux' and task_config['architecture'] == 'amd64', 'exported task platform mismatch'
-          archive_hash = hashlib.sha256(archive.read_bytes()).hexdigest()
           runpy.run_path('scripts/coverage-backends.py')['archive_identity'](archive, archive_hash, config_id, 'alpine:3.23', 'amd64')
-          assert inspect('alpine:3.23') == loaded['Id'], 'task tag changed during export'
+          assert inspect('alpine:3.23') == pulled['Id'], 'task tag changed during export'
           (proof / 'task-export-receipt.json').write_text(json.dumps({
               'index_ref': index_ref, 'manifest_id': child_id, 'config_id': config_id,
-              'docker_image_id': loaded['Id'], 'platform': 'linux/amd64', 'archive_sha256': archive_hash,
+              'docker_image_id': pulled['Id'], 'loaded_child_image_id': loaded['Id'],
+              'exporter': 'buildkit-docker', 'mode': 'from-only-no-load', 'source_ref': source_ref, 'dockerfile_sha256': hashlib.sha256(dockerfile.encode()).hexdigest(),
+              'platform': 'linux/amd64', 'archive_sha256': archive_hash,
               'index_metadata': 'task-index.json', 'manifest_metadata': 'task-amd64-manifest.json',
+              'archive_file': 'task-export-original.tar', 'archive_members': 'task-export-members.json',
+              'archive_manifest': 'task-export-manifest.json',
           }, indent=2) + '\n')
           inputs = {
               'schema_version': 1, 'platform': 'linux/amd64',
@@ -1801,7 +1826,7 @@ jobs:
               'task_archive_sha256': archive_hash,
               'task_image_ref': 'alpine:3.23',
               'task_image_id': config_id,
-              'task_docker_image_id': loaded['Id'],
+              'task_docker_image_id': pulled['Id'],
               'kind_image_ref': 'kindest/node:v1.36.1',
               'kind_image_id': inspect('kindest/node:v1.36.1'),
               'podman_service_image_ref': sys.argv[2],

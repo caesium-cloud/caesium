@@ -258,6 +258,9 @@ class WorkflowTests(unittest.TestCase):
         self.assertIn("bash scripts/test_helm_pod_replacement_membership.sh", commands)
 
     def test_ci_config_discovers_all_validator_tests(self):
+        # The complete hosted suite already took 294s before wrapper/action
+        # overhead; retain every test while providing a bounded ten-minute job.
+        self.assertEqual(JOBS["ci-config"]["timeout-minutes"], 10)
         commands = [line.strip() for step in JOBS["ci-config"]["steps"]
                     for line in step.get("run", "").splitlines()
                     if "unittest discover" in line]
@@ -1841,23 +1844,27 @@ class SystemSuiteLaneWiringTests(unittest.TestCase):
         code = step["run"].split("<<'PY'\n", 1)[1].rsplit("\nPY", 1)[0]
         config = json.dumps({"os": "linux", "architecture": "arm64" if fault == "config-platform" else "amd64"}).encode()
         config_id = "sha256:" + hashlib.sha256(config).hexdigest()
-        child = json.dumps({"schemaVersion": 2, "config": {
-            "digest": config_id, "size": len(config)}, "layers": []}).encode()
+        child = json.dumps({"schemaVersion": 2, "mediaType": "application/vnd.oci.image.manifest.v1+json", "config": {
+            "mediaType": "application/vnd.oci.image.config.v1+json", "digest": config_id,
+            "size": len(config) + (1 if fault == "config-size" else 0)}, "layers": []}).encode()
         child_id = "sha256:" + hashlib.sha256(child).hexdigest()
-        descriptor = {"digest": child_id, "platform": {"os": "linux", "architecture": "amd64"}}
+        descriptor = {"mediaType": "application/vnd.oci.image.manifest.v1+json", "size": len(child),
+                      "digest": child_id, "platform": {"os": "linux", "architecture": "amd64"}}
         index = json.dumps({"schemaVersion": 2, "manifests": [descriptor] * (2 if fault == "ambiguous" else 1)}).encode()
         index_ref = "alpine@sha256:" + hashlib.sha256(index).hexdigest()
         child_ref = "alpine@" + child_id
         loaded_id = "sha256:" + "ab" * 32 if fault == "daemon" else child_id
         calls = []
-        tagged = False
         backend = runpy.run_path(str(ROOT / "scripts/coverage-backends.py"))
 
         def output(args, text=False):
             if args[:3] == ["docker", "image", "inspect"]:
                 ref = args[3]
-                identity = loaded_id if ref == child_ref or ref == "alpine:3.23" and tagged else index_ref.split("@")[1]
-                if fault == "retag" and ref == "alpine:3.23" and len(calls) == 3:
+                identity = loaded_id if ref == child_ref else index_ref.split("@")[1]
+                if fault == "pulled-daemon" and ref == "alpine:3.23":
+                    identity = "sha256:" + "ef" * 32
+                if ref == "alpine:3.23" and (fault == "retag" and len(calls) == 2
+                                             or fault == "retag-before" and len(calls) == 1):
                     identity = "sha256:" + "ef" * 32
                 value = [{"Id": identity, "Os": "linux", "Architecture": "arm64" if fault == "platform" else "amd64",
                           "RepoDigests": [index_ref]}]
@@ -1868,33 +1875,57 @@ class SystemSuiteLaneWiringTests(unittest.TestCase):
             return raw + (b"corruption" if fault == "metadata" or fault == "child-metadata" and args[4] == child_ref else b"\n")
 
         def call(args):
-            nonlocal tagged
             calls.append(args)
-            if args[:2] == ["docker", "pull"]:
-                self.assertEqual(args, ["docker", "pull", "--platform", "linux/amd64", child_ref])
-            elif args[:2] == ["docker", "tag"]:
-                self.assertEqual(args, ["docker", "tag", child_ref, "alpine:3.23"])
-                tagged = True
-            else:
-                self.assertEqual(args[:5], ["docker", "image", "save", "alpine:3.23", "-o"])
-                saved = json.dumps({"os": "linux", "architecture": "arm64"}).encode() if fault == "config" else config
-                entries = {"config.json": saved, "manifest.json": json.dumps([
-                    {"Config": "config.json", "RepoTags": ["foreign:3.23" if fault == "tag" else "alpine:3.23"],
-                     "Layers": []}]).encode()}
-                if fault == "closure":
-                    entries["oci-layout"] = b'{"imageLayoutVersion":"1.0.0"}'
-                    entries["index.json"] = json.dumps({"manifests": [descriptor]}).encode()
-                with tarfile.open(args[-1], "w") as archive:
-                    for name, data in entries.items():
-                        member = tarfile.TarInfo(name)
+            self.assertEqual(args, ["docker", "pull", "--platform", "linux/amd64", child_ref])
+            return 0
+
+        def export(args, input, text, check, timeout):
+            calls.append(args)
+            self.assertEqual(args[:3], ["docker", "buildx", "build"])
+            self.assertEqual(args[3:11], ["--platform", "linux/amd64", "--network", "none",
+                                        "--provenance=false", "--sbom=false", "--output", args[10]])
+            self.assertEqual(args[11:], ["-t", "alpine:3.23", "-"])
+            self.assertTrue(args[10].startswith("type=docker,dest="))
+            self.assertEqual(input, "FROM docker.io/library/" + child_ref + "\n")
+            self.assertTrue(text and check)
+            self.assertEqual(timeout, 180)
+            self.assertNotIn("--load", args)
+            path = args[10].removeprefix("type=docker,dest=")
+            saved = json.dumps({"os": "linux", "architecture": "arm64"}).encode() if fault == "config" else config
+            config_path = "blobs/sha256/" + config_id.split(":")[1]
+            child_path = "blobs/sha256/" + child_id.split(":")[1]
+            archive_descriptor = dict(descriptor)
+            if fault == "media":
+                archive_descriptor["mediaType"] = "application/foreign.manifest"
+            entries = {config_path: saved, child_path: child,
+                       "oci-layout": b'{"imageLayoutVersion":"1.0.0"}',
+                       "index.json": json.dumps({"schemaVersion": 2, "manifests": [archive_descriptor]}).encode(),
+                       "manifest.json": json.dumps([{"Config": config_path,
+                            "RepoTags": ["foreign:3.23" if fault == "tag" else "alpine:3.23"], "Layers": []}]).encode()}
+            if fault == "closure":
+                del entries[child_path]
+            if fault == "missing-config":
+                del entries[config_path]
+            with tarfile.open(path, "w") as archive:
+                for name, data in entries.items():
+                    member = tarfile.TarInfo(name)
+                    if fault == "config-link" and name == config_path:
+                        member.type, member.linkname = tarfile.SYMTYPE, "/foreign"
+                        archive.addfile(member)
+                    else:
                         member.size = len(data)
                         archive.addfile(member, io.BytesIO(data))
-            return 0
+                if fault == "duplicate":
+                    member = tarfile.TarInfo(config_path)
+                    member.size = len(config)
+                    archive.addfile(member, io.BytesIO(config))
+            return subprocess.CompletedProcess(args, 0)
 
         with tempfile.TemporaryDirectory() as directory:
             with patch.object(sys, "argv", ["-", directory, "podman@sha256:" + "cd" * 32]), \
                     patch.object(subprocess, "check_output", side_effect=output), \
                     patch.object(subprocess, "check_call", side_effect=call), \
+                    patch.object(subprocess, "run", side_effect=export), \
                     patch.object(runpy, "run_path", return_value=backend):
                 try:
                     exec(compile(code, "coverage-prerequisites", "exec"), {})
@@ -1907,6 +1938,15 @@ class SystemSuiteLaneWiringTests(unittest.TestCase):
                         self.assertFalse((proof / "task-index.json").exists())
                     if fault == "child-metadata":
                         self.assertFalse((proof / "task-amd64-manifest.json").exists())
+                    if fault in {"missing-config", "media", "closure", "duplicate", "config-link", "config-size", "config", "tag", "retag"}:
+                        original = proof / "task-export-original.tar"
+                        self.assertEqual(original.read_bytes(), (Path(directory) / "task.tar").read_bytes())
+                        inventory = json.loads((proof / "task-export-members.json").read_text())
+                        self.assertEqual(inventory["archive_sha256"], hashlib.sha256(original.read_bytes()).hexdigest())
+                        manifest = json.loads((proof / "task-export-manifest.json").read_bytes())
+                        if fault == "missing-config":
+                            self.assertEqual(manifest[0]["Config"], "blobs/sha256/" + config_id.split(":")[1])
+                            self.assertNotIn(manifest[0]["Config"], {m["name"] for m in inventory["members"]})
                     raise
             inputs = json.loads((Path(directory) / "backend-producer-inputs.json").read_text())
             proof = Path(directory) / "proof"
@@ -1920,14 +1960,29 @@ class SystemSuiteLaneWiringTests(unittest.TestCase):
             saved_manifest = json.loads((proof / receipt["manifest_metadata"]).read_bytes())
             self.assertEqual(saved_manifest["config"]["digest"], receipt["config_id"])
             self.assertEqual({entry.name for entry in proof.iterdir()},
-                             {"task-index.json", "task-amd64-manifest.json", "task-export-receipt.json"})
+                             {"task-index.json", "task-amd64-manifest.json", "task-export-receipt.json",
+                              "task-export-original.tar", "task-export-members.json", "task-export-manifest.json"})
+            original = proof / "task-export-original.tar"
+            self.assertEqual(original.read_bytes(), Path(inputs["task_archive"]).read_bytes())
+            inventory = json.loads((proof / "task-export-members.json").read_text())
+            self.assertEqual(inventory["archive_sha256"], receipt["archive_sha256"])
+            self.assertIn("blobs/sha256/" + config_id.split(":")[1], {m["name"] for m in inventory["members"]})
+            self.assertEqual(receipt["exporter"], "buildkit-docker")
+            self.assertEqual(receipt["mode"], "from-only-no-load")
+            self.assertEqual(receipt["archive_file"], original.name)
+            self.assertEqual(receipt["archive_members"], "task-export-members.json")
+            self.assertEqual(receipt["archive_manifest"], "task-export-manifest.json")
+            self.assertEqual(receipt["source_ref"], "docker.io/library/" + child_ref)
+            self.assertEqual(receipt["dockerfile_sha256"], hashlib.sha256(("FROM " + receipt["source_ref"] + "\n").encode()).hexdigest())
+            self.assertEqual(receipt["loaded_child_image_id"], child_id)
             self.assertEqual(inputs["task_image_id"], config_id)
-            self.assertEqual(inputs["task_docker_image_id"], child_id)
+            self.assertEqual(inputs["task_docker_image_id"], index_ref.split("@")[1])
+            self.assertEqual(receipt["docker_image_id"], inputs["task_docker_image_id"])
             self.assertEqual(receipt["index_ref"], index_ref)
             self.assertEqual(receipt["manifest_id"], child_id)
             self.assertEqual(receipt["config_id"], config_id)
             self.assertEqual(receipt["archive_sha256"], inputs["task_archive_sha256"])
-            self.assertEqual(len(calls), 3)
+            self.assertEqual(len(calls), 2)
 
     def test_coverage_exports_verified_pulled_child_without_index_platform_selection(self):
         self._exercise_backend_task_export()
@@ -1937,7 +1992,11 @@ class SystemSuiteLaneWiringTests(unittest.TestCase):
                     "daemon": "daemon task identity", "platform": "platform mismatch",
                     "config": "exported daemon config", "tag": "unexpected task archive",
                     "closure": "OCI", "child-metadata": "metadata digest",
-                    "config-platform": "exported task platform", "retag": "tag changed during export"}
+                    "config-platform": "exported task platform", "retag": "tag changed during export",
+                    "retag-before": "tag changed before export", "missing-config": "config member unavailable",
+                    "config-size": "config size mismatch", "config-link": "config member unavailable",
+                    "duplicate": "duplicate image archive", "media": "OCI index does not bind",
+                    "pulled-daemon": "pulled task identity"}
         for fault, reason in controls.items():
             with self.subTest(fault=fault), self.assertRaisesRegex((AssertionError, RuntimeError), reason):
                 self._exercise_backend_task_export(fault)
