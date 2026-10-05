@@ -1896,9 +1896,31 @@ class SystemSuiteLaneWiringTests(unittest.TestCase):
                     patch.object(subprocess, "check_output", side_effect=output), \
                     patch.object(subprocess, "check_call", side_effect=call), \
                     patch.object(runpy, "run_path", return_value=backend):
-                exec(compile(code, "coverage-prerequisites", "exec"), {})
+                try:
+                    exec(compile(code, "coverage-prerequisites", "exec"), {})
+                except (AssertionError, RuntimeError):
+                    proof = Path(directory) / "proof"
+                    self.assertFalse((proof / "task-export-receipt.json").exists())
+                    self.assertFalse((Path(directory) / "backend-producer-inputs.json").exists())
+                    # A failed immutable digest check must never publish those bytes.
+                    if fault == "metadata":
+                        self.assertFalse((proof / "task-index.json").exists())
+                    if fault == "child-metadata":
+                        self.assertFalse((proof / "task-amd64-manifest.json").exists())
+                    raise
             inputs = json.loads((Path(directory) / "backend-producer-inputs.json").read_text())
-            receipt = json.loads((Path(directory) / "task-export-receipt.json").read_text())
+            proof = Path(directory) / "proof"
+            receipt = json.loads((proof / "task-export-receipt.json").read_text())
+            self.assertEqual((proof / receipt["index_metadata"]).read_bytes(), index)
+            self.assertEqual((proof / receipt["manifest_metadata"]).read_bytes(), child)
+            self.assertEqual("sha256:" + hashlib.sha256((proof / receipt["index_metadata"]).read_bytes()).hexdigest(),
+                             receipt["index_ref"].split("@")[1])
+            self.assertEqual("sha256:" + hashlib.sha256((proof / receipt["manifest_metadata"]).read_bytes()).hexdigest(),
+                             receipt["manifest_id"])
+            saved_manifest = json.loads((proof / receipt["manifest_metadata"]).read_bytes())
+            self.assertEqual(saved_manifest["config"]["digest"], receipt["config_id"])
+            self.assertEqual({entry.name for entry in proof.iterdir()},
+                             {"task-index.json", "task-amd64-manifest.json", "task-export-receipt.json"})
             self.assertEqual(inputs["task_image_id"], config_id)
             self.assertEqual(inputs["task_docker_image_id"], child_id)
             self.assertEqual(receipt["index_ref"], index_ref)
@@ -1919,6 +1941,19 @@ class SystemSuiteLaneWiringTests(unittest.TestCase):
         for fault, reason in controls.items():
             with self.subTest(fault=fault), self.assertRaisesRegex((AssertionError, RuntimeError), reason):
                 self._exercise_backend_task_export(fault)
+
+    def test_coverage_prerequisite_metadata_has_a_separate_failure_retained_artifact(self):
+        steps = JOBS["coverage-ratchets"]["steps"]
+        upload = next(step for step in steps if step.get("name") == "Upload backend prerequisite proof")
+        self.assertEqual(upload["uses"], "actions/upload-artifact@v7")
+        self.assertEqual(upload["if"], "always() && hashFiles('.tmp/coverage-backends/proof/*.json') != ''")
+        self.assertEqual(upload["with"]["name"], "coverage-backend-prerequisites")
+        self.assertEqual(upload["with"]["path"], ".tmp/coverage-backends/proof/")
+        self.assertEqual(upload["with"]["if-no-files-found"], "error")
+        original = next(step for step in steps if step.get("name") == "Upload lane artifacts")
+        self.assertEqual(original["with"]["path"], ".tmp/lane-evidence/coverage-ratchets/")
+        self.assertLess(steps.index(upload), next(i for i, step in enumerate(steps)
+                       if step.get("name") == "Coverage collection against the ratchets"))
 
     def test_coverage_diff_uses_the_events_own_base(self):
         steps = JOBS["coverage-ratchets"]["steps"]

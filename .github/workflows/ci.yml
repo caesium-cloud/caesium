@@ -1736,6 +1736,8 @@ jobs:
           import hashlib, json, pathlib, re, runpy, subprocess, sys, tarfile
           root = pathlib.Path(sys.argv[1]).resolve()
           archive = root / 'task.tar'
+          proof = root / 'proof'
+          proof.mkdir()
           def image(ref):
               images = json.loads(subprocess.check_output(['docker', 'image', 'inspect', ref], text=True))
               assert len(images) == 1, 'ambiguous backend prerequisite image'
@@ -1744,26 +1746,28 @@ jobs:
               return image
           def inspect(ref):
               return image(ref)['Id']
-          def metadata(ref, expected):
+          def metadata(ref, expected, name):
               raw = subprocess.check_output(['docker', 'buildx', 'imagetools', 'inspect', ref, '--raw'])
               # buildx may append one CLI newline to the immutable registry bytes.
               if 'sha256:' + hashlib.sha256(raw).hexdigest() != expected and raw.endswith(b'\n'):
                   raw = raw[:-1]
               assert 'sha256:' + hashlib.sha256(raw).hexdigest() == expected, 'registry metadata digest mismatch'
-              return json.loads(raw)
+              value = json.loads(raw)
+              (proof / name).write_bytes(raw)
+              return value
           pulled = image('alpine:3.23')
           refs = set(pulled.get('RepoDigests') or [])
           assert len(refs) == 1, 'ambiguous pulled task index'
           index_ref = refs.pop()
           assert re.fullmatch(r'(?:docker.io/library/)?alpine@sha256:[0-9a-f]{64}', index_ref), 'foreign pulled task index'
-          index = metadata(index_ref, index_ref.split('@')[1])
+          index = metadata(index_ref, index_ref.split('@')[1], 'task-index.json')
           children = [entry for entry in index['manifests'] if entry.get('platform', {}).get('os') == 'linux'
                       and entry['platform'].get('architecture') == 'amd64' and not entry['platform'].get('variant')]
           assert len(children) == 1, 'unique exact linux/amd64 task manifest required'
           child_id = children[0]['digest']
           assert re.fullmatch(r'sha256:[0-9a-f]{64}', child_id), 'invalid task manifest digest'
           child_ref = 'alpine@' + child_id
-          child = metadata(child_ref, child_id)
+          child = metadata(child_ref, child_id, 'task-amd64-manifest.json')
           config_id = child['config']['digest']
           assert re.fullmatch(r'sha256:[0-9a-f]{64}', config_id), 'invalid task config digest'
           # Export the pulled leaf, avoiding Docker containerd's index/platform save bug.
@@ -1785,9 +1789,10 @@ jobs:
           archive_hash = hashlib.sha256(archive.read_bytes()).hexdigest()
           runpy.run_path('scripts/coverage-backends.py')['archive_identity'](archive, archive_hash, config_id, 'alpine:3.23', 'amd64')
           assert inspect('alpine:3.23') == loaded['Id'], 'task tag changed during export'
-          (root / 'task-export-receipt.json').write_text(json.dumps({
+          (proof / 'task-export-receipt.json').write_text(json.dumps({
               'index_ref': index_ref, 'manifest_id': child_id, 'config_id': config_id,
               'docker_image_id': loaded['Id'], 'platform': 'linux/amd64', 'archive_sha256': archive_hash,
+              'index_metadata': 'task-index.json', 'manifest_metadata': 'task-amd64-manifest.json',
           }, indent=2) + '\n')
           inputs = {
               'schema_version': 1, 'platform': 'linux/amd64',
@@ -1806,6 +1811,14 @@ jobs:
           (root / 'backend-producer-inputs.json').write_text(json.dumps(inputs, indent=2) + '\n')
           PY
           echo "CAESIUM_COVERAGE_BACKEND_INPUTS=$prereqs/backend-producer-inputs.json" >>"$GITHUB_ENV"
+      - name: Upload backend prerequisite proof
+        if: always() && hashFiles('.tmp/coverage-backends/proof/*.json') != ''
+        uses: actions/upload-artifact@v7
+        with:
+          name: coverage-backend-prerequisites
+          path: .tmp/coverage-backends/proof/
+          if-no-files-found: error
+          retention-days: 7
       - name: Coverage collection against the ratchets
         run: just tag=${{ env.IMAGE_TAG }}-amd64 coverage-ratchets
       - name: Upload lane report
