@@ -239,9 +239,13 @@ func (s *IntegrationTestSuite) TestAutomaticRetryDelayConstantAndBackoff() {
 	for _, backoff := range []bool{false, true} {
 		s.Run(fmt.Sprintf("backoff-%t", backoff), func() {
 			alias := "maintenance-retry-" + uuid.NewString()
-			command := "echo " + alias + "-started; sleep 3; echo " + alias + "-finished; exit 17"
-			step := fmt.Sprintf("    retries: 2\n    retryDelay: 2s\n    retryBackoff: %t\n", backoff)
-			jobID := s.maintenanceApply(alias, maintenanceManifest(alias, "0 0 31 2 *", "  runTimeout: 60s\n", command, step))
+			// A local non-success engine result alone is terminal by design.
+			// Both executors validate captured output before that result decision;
+			// fail-mode schema errors take the supported automatic retry path.
+			// Keep exit 17 as independent native evidence on every real attempt.
+			command := "echo " + alias + "-started; sleep 3; echo '##caesium::output {\"rows\":\"not-a-number\"}'; echo " + alias + "-finished; exit 17"
+			step := fmt.Sprintf("    retries: 2\n    retryDelay: 2s\n    retryBackoff: %t\n    outputSchema:\n      type: object\n      properties:\n        rows: {type: integer}\n      required: [rows]\n", backoff)
+			jobID := s.maintenanceApply(alias, maintenanceManifest(alias, "0 0 31 2 *", "  runTimeout: 60s\n  schemaValidation: fail\n", command, step))
 			taskID := s.maintenanceTaskID(jobID)
 			ctx, cancel := context.WithTimeout(s.T().Context(), 90*time.Second)
 			defer cancel()
@@ -298,6 +302,7 @@ func (s *IntegrationTestSuite) TestAutomaticRetryDelayConstantAndBackoff() {
 					s.Require().Equal(concreteID, row.TaskRunID)
 					s.Require().Equal("failed", row.Status)
 					s.Require().Equal(3, row.Attempt)
+					s.Require().Equal(fmt.Sprintf("task %s output violates declared schema: 1 violation(s)", taskID), row.Error)
 					s.Require().NotNil(row.ExitCode)
 					s.Require().Equal(17, *row.ExitCode)
 					s.Require().NotNil(row.CompletedAt)
@@ -502,6 +507,7 @@ type maintenanceTask struct {
 	TaskRunID   string     `json:"task_run_id"`
 	RuntimeID   string     `json:"runtime_id"`
 	Status      string     `json:"status"`
+	Error       string     `json:"error"`
 	Attempt     int        `json:"attempt"`
 	ExitCode    *int       `json:"exit_code"`
 	CompletedAt *time.Time `json:"completed_at"`
