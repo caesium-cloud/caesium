@@ -63,7 +63,7 @@ def failed_snapshot(snapshot, job_id, run_id, marker):
         require(timestamp(row.get('started_at')) < timestamp(row.get('completed_at')), 'task completion does not follow start')
     require(rows['preserved']['output'] == {'marker': marker}, 'successful predecessor output missing')
     require(rows['failed'].get('error') and 'cancel' not in rows['failed']['error'].lower() and rows['failed'].get('exit_code') == 17, 'failed retry lost ordinary exit17 evidence')
-    require(rows['failed'].get('oom_known') is True and rows['failed'].get('oom_killed') is False, 'non-OOM native failure not observed')
+    require(rows['failed'].get('oom_known') is True and rows['failed'].get('oom_killed', False) is False, 'non-OOM native failure not observed')
     return rows
 
 

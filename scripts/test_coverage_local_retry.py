@@ -89,6 +89,27 @@ class ReceiptControls(unittest.TestCase):
         self.record['native']['absent_at_ns'] = b.timestamp(date(21)) + 1
         self.validate()
 
+    def test_public_partition_omits_known_false_oom_but_refuses_unknown_or_true(self):
+        # partitionRow uses omitempty on oom_killed, so an observed false
+        # value is absent in real public JSON; oom_known must still be true.
+        for snapshot in ('before', 'after'):
+            self.record[snapshot]['rows']['failed'].pop('oom_killed')
+        self.validate()
+        for value in (True, None, 'false'):
+            with self.subTest(oom_killed=value):
+                self.record['after']['rows']['failed']['oom_killed'] = value
+                with self.assertRaises(b.Refused):
+                    self.validate()
+        self.record['after']['rows']['failed'].pop('oom_killed')
+        for value in (False, None):
+            with self.subTest(oom_known=value):
+                self.record['after']['rows']['failed']['oom_known'] = value
+                with self.assertRaises(b.Refused):
+                    self.validate()
+        self.record['after']['rows']['failed'].pop('oom_known')
+        with self.assertRaises(b.Refused):
+            self.validate()
+
     def test_partial_failed_stale_or_foreign_process_cannot_merge(self):
         original = copy.deepcopy(self.record)
         changes = [
