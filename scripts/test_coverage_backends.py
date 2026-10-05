@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Hermetic guard/loopback HTTP tests; never invokes Docker or a real backend."""
 import base64
+import ast
 import copy
 from contextlib import contextmanager
 import http.client
@@ -596,6 +597,177 @@ class BackendHTTPGuards(unittest.TestCase):
         response = b'HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 100000\r\n\r\nDEADLINE_owned\n'
         with loopback_http([response]) as server:
             self.assertEqual(self.driver(server.base).live_deadline_log('job', 'run', task, 'owned'), 'DEADLINE_owned\n')
+
+
+class BackendFailureDiagnostics(unittest.TestCase):
+    def setUp(self):
+        BackendGuards.setUp(self)
+        self.root = self.root.resolve()
+    context = BackendGuards.context
+    archive = BackendGuards.archive
+
+    def native(self, driver):
+        return {'Id': 'a' * 64, 'Name': '/' + driver.owner + '-server', 'Image': IMAGE,
+                'Config': {'Labels': {b.LABEL_OWNER: SHA, b.LABEL_RUN: 'owned-coverage',
+                                     'caesium.coverage.backend-owner': driver.owner}, 'Env': ['PASSWORD=SECRET_NATIVE_ENV']},
+                'State': {'Running': True, 'OOMKilled': False, 'Dead': False, 'ExitCode': 0,
+                          'StartedAt': '2026-10-05T22:02:22.123456789Z', 'FinishedAt': '0001-01-01T00:00:00Z',
+                          'Error': 'SECRET_NATIVE_ERROR'}, 'RestartCount': 0,
+                'NetworkSettings': {'Ports': {'8080/tcp': [{'HostIp': '127.0.0.1', 'HostPort': '12345'}]}}}
+
+    def failed_main(self, mode='deadline', snapshot='owned', write_failure=False):
+        context, inputs = self.context('amd64'), self.archive('amd64')
+        context_path, input_path = self.root / 'context.json', self.root / 'input.json'
+        context_path.write_text(json.dumps(context)); input_path.write_text(json.dumps(inputs))
+        out = self.root / ('failed-' + mode + '-' + snapshot + str(write_failure))
+        argv = ['coverage-backends.py', '--run', '--backend', 'kubernetes', '--output', str(out),
+                '--context', str(context_path), '--context-sha256', b.digest(context_path),
+                '--inputs', str(input_path), '--inputs-sha256', b.digest(input_path)]
+        events, drivers = [], []
+        original = b.Driver
+        def factory(*args):
+            driver = original(*args); drivers.append(driver)
+            obj = self.native(driver)
+            driver.image_check = lambda image: {'Config': {'Labels': {'org.opencontainers.image.revision': SHA}}}
+            driver.register = lambda kind, name: driver.resources.append((kind, name))
+            def docker(*command, **options):
+                if command[:2] != ('container', 'inspect'):
+                    return subprocess.CompletedProcess(command, 0, '', '')
+                events.append('diagnostic-inspect')
+                self.assertEqual(command, ('container', 'inspect', 'a' * 64))
+                self.assertEqual(options, {'check': False, 'timeout': 10})
+                if snapshot == 'timeout':
+                    driver.uncertain_command = True
+                    raise subprocess.TimeoutExpired(['SECRET_COMMAND'], 10)
+                if snapshot == 'failed':
+                    return subprocess.CompletedProcess(command, 1, '', 'SECRET_NATIVE_STDERR')
+                value = copy.deepcopy(obj)
+                if snapshot == 'foreign': value['Config']['Labels'][b.LABEL_OWNER] = 'foreign'
+                if snapshot == 'wrong-image': value['Image'] = INDEX
+                if snapshot == 'wrong-id': value['Id'] = 'b' * 64
+                if snapshot == 'malformed-state': value['State']['Running'] = 'SECRET_STATE'
+                if snapshot == 'foreign-port': value['NetworkSettings']['Ports']['8080/tcp'][0]['HostIp'] = 'SECRET_FOREIGN_IP'
+                payload = '[' if snapshot == 'malformed' else json.dumps([value])
+                return subprocess.CompletedProcess(command, 0, payload, '')
+            driver.docker = docker
+            driver.prepare_kubernetes = lambda: None
+            def start():
+                driver.server_id = 'a' * 64
+                driver.base = 'http://owned.invalid'
+                if mode == 'native-exit': obj['State'].update(Running=False, ExitCode=1)
+                driver.owned = lambda kind, identity: obj
+                driver._wait_for_server()
+            driver.start_server = start
+            if mode == 'provisioning':
+                def refused(): raise ValueError('SECRET_EXCEPTION_BODY_URL_TOKEN')
+                driver.prepare_kubernetes = refused
+            save = driver.save
+            def guarded_save(name, value):
+                if name == 'failure-diagnostic.json':
+                    events.append('diagnostic-save')
+                    if write_failure: raise OSError('SECRET_WRITE_ERROR')
+                save(name, value)
+            driver.save = guarded_save
+            def cleanup():
+                events.append('cleanup')
+                self.assertIn('failure_diagnostic', driver.report)
+                self.assertEqual((driver.output / 'failure-diagnostic.json').exists(), not write_failure)
+                self.assertFalse(driver.report['complete']); self.assertTrue(driver.report['missing'])
+                self.assertFalse(getattr(driver, 'uncertain_command', False))
+                b.shutil.rmtree(driver.private)
+                driver.report['cleanup_errors'] = []
+                save('backend-result.json', driver.report)
+                return []
+            driver.cleanup = cleanup
+            return driver
+        expected = b.WaitExpired if mode == 'deadline' else b.ServerExited if mode == 'native-exit' else ValueError
+        with patch.object(b.sys, 'argv', argv), patch.object(b, 'Driver', side_effect=factory), \
+             patch.object(b.Path, 'is_socket', return_value=True), patch.object(b.signal, 'signal'), \
+             patch.object(b.urllib.request, 'urlopen', side_effect=b.urllib.error.URLError('SECRET_HTTP_URL_BODY')), \
+             patch.object(b.time, 'monotonic', side_effect=[0, 0, 91]), patch.object(b.time, 'sleep'):
+            with self.assertRaises(expected): b.main()
+        driver = drivers[0]
+        self.assertLess(events.index('diagnostic-save'), events.index('cleanup'))
+        result = json.loads((out / 'result.json').read_text())
+        self.assertFalse(result['complete']); self.assertFalse(result['selected_complete'])
+        self.assertEqual(result['contributors'][0]['processes'], [])
+        self.assertTrue(result['contributors'][0]['failed'])
+        self.assertNotIn('SECRET', json.dumps(result))
+        for f in out.rglob('*.json'): self.assertNotIn('SECRET', f.read_text())
+        return driver.report['failure_diagnostic']
+
+    def test_readiness_deadline_diagnostic_precedes_cleanup_and_retains_owned_state(self):
+        value = self.failed_main()
+        self.assertEqual(value['phase'], 'server-health')
+        self.assertEqual(value['exception_category'], 'deadline')
+        self.assertEqual(value['health']['attempts'], 1)
+        self.assertEqual(value['health']['outcome'], 'transport-error')
+        self.assertEqual(value['native']['outcome'], 'verified-owned')
+        self.assertTrue(value['native']['state']['Running'])
+        self.assertEqual(value['native']['port']['host_port'], 12345)
+
+    def test_native_exit_is_distinct_from_actual_wait_expiration(self):
+        value = self.failed_main(mode='native-exit')
+        self.assertEqual(value['exception_category'], 'native-exit')
+        self.assertEqual(value['health']['attempts'], 0)
+        self.assertFalse(value['native']['state']['Running'])
+        self.assertEqual(value['native']['state']['ExitCode'], 1)
+
+    def test_no_acknowledgement_records_no_invented_absence_or_exception_text(self):
+        value = self.failed_main(mode='provisioning')
+        self.assertEqual(value['phase'], 'provisioning')
+        self.assertEqual(value['exception_category'], 'encoding-error')
+        self.assertEqual(value['native'], {'outcome': 'not-acknowledged'})
+
+    def test_failed_foreign_malformed_snapshots_never_mask_original_deadline(self):
+        for snapshot in ('failed', 'foreign', 'wrong-image', 'wrong-id', 'malformed', 'malformed-state', 'foreign-port', 'timeout'):
+            with self.subTest(snapshot=snapshot):
+                value = self.failed_main(snapshot=snapshot)
+                self.assertEqual(value['exception_category'], 'deadline')
+                self.assertEqual(value['native']['outcome'], 'unavailable')
+                self.assertNotIn('state', value['native'])
+                if snapshot == 'timeout': self.assertEqual(value['native']['category'], 'command-deadline')
+
+    def test_diagnostic_write_failure_preserves_original_refusal_and_incomplete_result(self):
+        value = self.failed_main(write_failure=True)
+        self.assertEqual(value['exception_category'], 'deadline')
+        self.assertEqual(value['retention'], 'write-failed')
+
+    def test_health_complete_read_and_parse_categories_exclude_payload(self):
+        driver = object.__new__(b.Driver)
+        driver.base, driver.stage = 'http://owned.invalid', 'server-health'
+        driver.last_health = {'attempts': 0}
+        for payload, length, read, parse in ((b'{"ok":true}', '99', 'length-mismatch', 'not-attempted'),
+                                           (b'SECRET_BODY', '11', 'complete', 'invalid')):
+            response = unittest.mock.MagicMock()
+            response.__enter__.return_value = response
+            response.status = 200
+            response.headers.get_all.return_value = [length]
+            response.read.return_value = payload
+            with patch.object(b.urllib.request, 'urlopen', return_value=response):
+                with self.assertRaises(b.Refused): driver.http('/health')
+            self.assertEqual(driver.last_health['status'], 200)
+            self.assertEqual(driver.last_health['read'], read)
+            self.assertEqual(driver.last_health['parse'], parse)
+            self.assertNotIn('SECRET', json.dumps(driver.last_health))
+        response.read.return_value = b'{"value":"SECRET_BODY"}'
+        response.headers.get_all.return_value = []
+        with patch.object(b.urllib.request, 'urlopen', return_value=response):
+            self.assertEqual(driver.http('/health'), {'value': 'SECRET_BODY'})
+        self.assertEqual(driver.last_health['outcome'], 'complete')
+        self.assertEqual(driver.last_health['parse'], 'valid')
+        self.assertNotIn('SECRET', json.dumps(driver.last_health))
+
+    def test_entrypoint_unknown_failure_is_static_and_keeps_failure_exit(self):
+        tree = ast.parse(Path(b.__file__).read_text())
+        entrypoint = ast.Module(body=[tree.body[-1]], type_ignores=[])
+        def refused(): raise RuntimeError('SECRET_UNKNOWN_EXCEPTION')
+        namespace = dict(vars(b), __name__='__main__', main=refused)
+        with patch.object(b.sys, 'stderr', new=io.StringIO()) as stderr:
+            with self.assertRaises(SystemExit) as raised:
+                exec(compile(entrypoint, b.__file__, 'exec'), namespace)
+        self.assertEqual(raised.exception.code, 1)
+        self.assertEqual(stderr.getvalue(), 'backend qualification refused/incomplete; no coverage PASS claimed\n')
 
 
 if __name__ == '__main__':

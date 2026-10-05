@@ -37,6 +37,26 @@ class Refused(RuntimeError):
     pass
 
 
+class WaitExpired(Refused):
+    pass
+
+
+class ServerExited(Refused):
+    pass
+
+
+def failure_category(error):
+    # Exception text, native stderr and chained HTTP bodies are never evidence.
+    for kind, category in ((WaitExpired, 'deadline'), (ServerExited, 'native-exit'),
+                           (subprocess.TimeoutExpired, 'command-deadline'),
+                           (Refused, 'guard-refusal'), (OSError, 'io-error'),
+                           (ValueError, 'encoding-error'), (KeyboardInterrupt, 'interrupted'),
+                           (SystemExit, 'interrupted')):
+        if isinstance(error, kind):
+            return category
+    return 'unexpected-error'
+
+
 def require(condition, message):
     if not condition:
         raise Refused(message)
@@ -280,6 +300,8 @@ class Driver:
         self.task_ref = inputs['task_image_ref']
         self.network = self.owner + '-net'
         self.server_id = ''
+        self.stage = 'initialization'
+        self.last_health = {'attempts': 0, 'outcome': 'not-attempted', 'status': None, 'read': 'not-attempted', 'parse': 'not-attempted'}
         self.nodes = {}
         self.service_id = ''
         self.report = {'schema_version': 1, 'source': 'integration-journey', 'lane': 'backend-' + backend,
@@ -347,6 +369,84 @@ class Driver:
     def save(self, name, value):
         (self.output / name).write_text(json.dumps(value, indent=2) + '\n')
 
+    def failure_diagnostic(self, error):
+        stages = {'initialization', 'image-validation', 'network-allocation', 'provisioning',
+                  'server-allocation', 'server-inspection', 'server-binary', 'server-network',
+                  'server-binding', 'server-health', 'server-flush', 'process-validation', 'cleanup'}
+        stages.update('scenario-' + case + '-' + step for case in ('success', 'failure', 'deadline')
+                      for step in ('apply', 'start', 'observe', 'logs'))
+        phase = self.stage if isinstance(self.stage, str) and self.stage in stages else 'unknown-stage'
+        source = self.last_health if isinstance(self.last_health, dict) else {}
+        health = {}
+        for key, allowed in {'outcome': {'not-attempted', 'pending', 'status-check', 'transport-error', 'read-error', 'http-error', 'guard-refused', 'parse-error', 'complete'},
+                             'read': {'not-attempted', 'length-headers', 'reading-body', 'length-mismatch', 'received', 'oversized', 'complete'},
+                             'parse': {'not-attempted', 'invalid', 'valid'}}.items():
+            health[key] = source.get(key) if isinstance(source.get(key), str) and source.get(key) in allowed else 'unavailable'
+        attempts, status = source.get('attempts'), source.get('status')
+        health['attempts'] = attempts if type(attempts) is int and 0 <= attempts <= 1000000 else None
+        health['status'] = status if type(status) is int and 100 <= status <= 599 else None
+        value = {'schema_version': 1, 'phase': phase, 'exception_category': failure_category(error),
+                 'health': health, 'native': {'outcome': 'not-acknowledged'}}
+        snapshot_stage, inspect_status = 'identity', None
+        # The command timeout helper marks ambiguous mutation outcomes. This
+        # extra read must not add such a marker or alter the original cleanup.
+        had_uncertain = hasattr(self, 'uncertain_command')
+        uncertain = getattr(self, 'uncertain_command', False)
+        try:
+            identity = self.server_id
+            if identity:
+                require(HASH_RE.fullmatch(identity), 'invalid diagnostic identity')
+                snapshot_stage = 'inspect'
+                result = self.docker('container', 'inspect', identity, check=False, timeout=10)
+                inspect_status = result.returncode if type(result.returncode) is int and -255 <= result.returncode <= 255 else None
+                require(result.returncode == 0 and len(result.stdout) <= 1024 * 1024, 'diagnostic inspect unavailable')
+                snapshot_stage = 'decode'
+                items = json.loads(result.stdout)
+                require(isinstance(items, list) and len(items) == 1 and isinstance(items[0], dict), 'diagnostic inspect malformed')
+                obj = items[0]
+                labels = obj.get('Config', {}).get('Labels', {})
+                snapshot_stage = 'ownership'
+                require(obj.get('Id') == identity and obj.get('Name') == '/' + self.owner + '-server'
+                        and obj.get('Image') == self.image and IMAGE_RE.fullmatch(self.image)
+                        and labels.get(LABEL_OWNER) == self.ownership_id
+                        and labels.get(LABEL_RUN) == self.context['coverage_id']
+                        and labels.get('caesium.coverage.backend-owner') == self.owner, 'diagnostic ownership changed')
+                snapshot_stage = 'state'
+                state = obj.get('State', {})
+                require(all(type(state.get(k)) is bool for k in ('Running', 'OOMKilled', 'Dead'))
+                        and type(state.get('ExitCode')) is int and 0 <= state['ExitCode'] <= 255
+                        and type(obj.get('RestartCount')) is int and 0 <= obj['RestartCount'] <= 1000000, 'diagnostic state malformed')
+                reduced = {k: state[k] for k in ('Running', 'OOMKilled', 'Dead', 'ExitCode')}
+                for key in ('StartedAt', 'FinishedAt'):
+                    stamp = state.get(key)
+                    require(isinstance(stamp, str) and re.fullmatch(r'[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]{1,9})?Z', stamp), 'diagnostic timestamp malformed')
+                    reduced[key] = stamp
+                snapshot_stage = 'port'
+                ports = obj.get('NetworkSettings', {}).get('Ports', {}).get('8080/tcp')
+                port = {'outcome': 'unavailable'}
+                if ports:
+                    require(isinstance(ports, list) and len(ports) == 1 and ports[0].get('HostIp') == '127.0.0.1'
+                            and re.fullmatch(r'[0-9]{1,5}', ports[0].get('HostPort', ''))
+                            and 0 < int(ports[0]['HostPort']) <= 65535, 'diagnostic port malformed')
+                    port = {'outcome': 'verified-loopback', 'host_ip': '127.0.0.1', 'host_port': int(ports[0]['HostPort'])}
+                value['native'] = {'outcome': 'verified-owned', 'id': identity, 'image_id': self.image,
+                                   'state': reduced, 'restart_count': obj['RestartCount'], 'port': port}
+        except BaseException as snapshot_error:
+            value['native'] = {'outcome': 'unavailable', 'category': failure_category(snapshot_error),
+                               'stage': snapshot_stage, 'inspect_status': inspect_status}
+        finally:
+            if had_uncertain:
+                self.uncertain_command = uncertain
+            elif hasattr(self, 'uncertain_command'):
+                del self.uncertain_command
+        self.report['failure_diagnostic'] = value
+        try:
+            self.save('failure-diagnostic.json', value)
+            value['retention'] = 'written'
+        except BaseException:
+            value['retention'] = 'write-failed'
+        return value
+
     def wait(self, fn, label, timeout=90):
         end = time.monotonic() + timeout
         while time.monotonic() < end:
@@ -354,12 +454,17 @@ class Driver:
             if value:
                 return value
             time.sleep(.2)
-        raise Refused('deadline waiting for ' + label)
+        raise WaitExpired('deadline waiting for ' + label)
 
     def http(self, path, payload=None, text=False):
+        health = path == '/health' and getattr(self, 'stage', '') == 'server-health'
+        if health:
+            self.last_health.update(attempts=self.last_health['attempts'] + 1, outcome='pending', status=None, read='not-attempted', parse='not-attempted')
         req = urllib.request.Request(self.base + path, None if payload is None else json.dumps(payload).encode(), headers={'Content-Type': 'application/json'})
         try:
             with urllib.request.urlopen(req, timeout=12) as response:
+                if health:
+                    self.last_health.update(outcome='status-check', status=response.status if type(response.status) is int and 100 <= response.status <= 599 else None, read='length-headers')
                 require(response.status in (200, 202), 'public HTTP status mismatch')
                 maximum = 2 * 1024 * 1024
                 lengths = response.headers.get_all('Content-Length', [])
@@ -369,20 +474,39 @@ class Driver:
                     require(re.fullmatch(r'[0-9]+', declared.strip()) and len(declared.strip()) <= 10, 'invalid public response length')
                     declared = int(declared)
                     require(declared <= maximum, 'public response too large')
+                if health:
+                    self.last_health['read'] = 'reading-body'
                 body = response.read(maximum + 1)
+                if health:
+                    self.last_health['read'] = 'length-mismatch' if declared is not None and len(body) != declared else 'received'
                 require(declared is None or len(body) == declared, 'public response body incomplete')
         except (urllib.error.URLError, OSError, http.client.HTTPException) as exc:
+            if health:
+                self.last_health['outcome'] = 'transport-error' if self.last_health['status'] is None else 'read-error'
             if isinstance(exc, urllib.error.HTTPError):
+                if health:
+                    self.last_health.update(outcome='http-error', status=exc.code if type(exc.code) is int and 100 <= exc.code <= 599 else None)
                 try:
                     exc.close()
                 except (OSError, http.client.HTTPException) as close_error:
                     raise Refused('public HTTP error response close failed') from close_error
             raise Refused('public backend HTTP request failed') from exc
+        except Refused:
+            if health:
+                self.last_health['outcome'] = 'guard-refused'
+            raise
+        if health:
+            self.last_health['read'] = 'oversized' if len(body) > maximum else 'complete'
         require(len(body) <= maximum, 'public response too large')
         try:
-            return body.decode() if text else json.loads(body)
+            value = body.decode() if text else json.loads(body)
         except (UnicodeError, ValueError) as exc:
+            if health:
+                self.last_health.update(outcome='parse-error', parse='invalid')
             raise Refused('public response encoding invalid') from exc
+        if health:
+            self.last_health.update(outcome='complete', parse='valid')
+        return value
 
     def live_deadline_log(self, job_id, run_id, task, marker):
         # Cancellation removes the native object without a persisted raw log
@@ -585,6 +709,7 @@ class Driver:
                                                   'config_tls': True, 'config_credentials': 'private embedded certificate data; not retained'})
 
     def start_server(self):
+        self.stage = 'server-allocation'
         name = self.owner + '-server'
         self.register('container', name)
         raw = self.output / 'raw-server'
@@ -608,13 +733,17 @@ class Driver:
         for key, value in env.items():
             args += ['-e', key + '=' + value]
         self.server_id = self.docker(*args, self.image, 'start').stdout.strip()
+        self.stage = 'server-inspection'
         obj = self.owned('container', self.server_id)
         require(obj['Image'] == self.image, 'main image escaped producer cohort')
+        self.stage = 'server-binary'
         binary_hash = self.docker('exec', obj['Id'], 'sha256sum', '/bin/caesium').stdout.split()[0]
         require(HASH_RE.fullmatch(binary_hash) and ('binary_sha256' not in self.context or binary_hash == self.context['binary_sha256']), 'main binary differs from original producer')
         self.binary_hash = binary_hash
+        self.stage = 'server-network'
         if self.backend == 'kubernetes':
             self.docker('network', 'connect', 'kind', obj['Id'])
+        self.stage = 'server-binding'
         bindings = obj['NetworkSettings']['Ports'].get('8080/tcp', [])
         require(len(bindings) == 1 and bindings[0]['HostIp'] == '127.0.0.1', 'unexpected backend server port binding')
         self.base = 'http://127.0.0.1:' + bindings[0]['HostPort']
@@ -623,12 +752,18 @@ class Driver:
         self.server_raw = raw
 
     def _wait_for_server(self):
+        self.stage = 'server-health'
+        if not hasattr(self, 'last_health'):
+            self.last_health = {'attempts': 0, 'outcome': 'not-attempted', 'status': None, 'read': 'not-attempted', 'parse': 'not-attempted'}
+        def running():
+            if not self.owned('container', self.server_id)['State']['Running']:
+                raise ServerExited('backend server exited before health')
         def ready():
-            require(self.owned('container', self.server_id)['State']['Running'], 'backend server exited before health')
+            running()
             try:
                 return self.http('/health')
             except Refused:
-                require(self.owned('container', self.server_id)['State']['Running'], 'backend server exited before health')
+                running()
                 return None
         self.wait(ready, 'actual main readiness', 90)
 
@@ -777,6 +912,7 @@ class Driver:
                 'trigger': {'type': 'cron', 'configuration': {'expression': '0 0 31 2 *'}}, 'steps': steps}, marker
 
     def run_case(self, case):
+        self.stage = 'scenario-' + case + '-apply'
         definition, marker = self.manifest(case)
         definitions = self.output / 'definitions'
         definitions.mkdir(exist_ok=True)
@@ -788,8 +924,10 @@ class Driver:
         matches = [j for j in jobs if j.get('alias') == marker]
         require(len(matches) == 1, 'publicly applied backend job identity missing/ambiguous')
         job_id = matches[0]['id']
+        self.stage = 'scenario-' + case + '-start'
         run_id = self.cli('run', 'start', '--job-id', job_id)
         require(str(uuid.UUID(run_id)) == run_id, 'public CLI start did not return an exact run identity')
+        self.stage = 'scenario-' + case + '-observe'
         witnessed = {}
         live_logs = {}
         start = time.monotonic()
@@ -807,6 +945,7 @@ class Driver:
         verify_outcome(run, case, marker)
         require(all(task.get('engine') == self.backend and task.get('image') == self.task_ref for task in run['tasks']), 'durable backend/image identity mismatch')
         require(set(witnessed) == {t['runtime_id'] for t in run['tasks']}, 'each backend task must be observed natively Running before completion')
+        self.stage = 'scenario-' + case + '-logs'
         logs = dict(live_logs)
         for task in run['tasks']:
             if case != 'deadline':
@@ -838,10 +977,13 @@ class Driver:
         self.record_process('server', obj, self.server_raw, ['start'], stop.returncode, flush.returncode)
 
     def run(self):
+        self.stage = 'image-validation'
         candidate = self.image_check(self.image)
         require(candidate.get('Config', {}).get('Labels', {}).get('org.opencontainers.image.revision') == self.ownership_id, 'loaded coverage image revision differs from producer')
+        self.stage = 'network-allocation'
         self.register('network', self.network)
         self.docker('network', 'create', *self.labels(), self.network)
+        self.stage = 'provisioning'
         if self.backend == 'kubernetes':
             self.prepare_kubernetes()
         else:
@@ -849,7 +991,9 @@ class Driver:
         self.start_server()
         for case in ('success', 'failure', 'deadline'):
             self.run_case(case)
+        self.stage = 'server-flush'
         self.stop_server()
+        self.stage = 'process-validation'
         self.finalize_processes()
         self.report.update(complete=True, missing=False)
 
@@ -958,22 +1102,27 @@ def main():
             driver = Driver(context, inputs, backend, output / backend)
             try:
                 if args.smoke:
+                    driver.stage = 'provisioning'
                     driver.register('network', driver.network)
                     driver.docker('network', 'create', *driver.labels(), driver.network)
                     driver.prepare_kubernetes() if backend == 'kubernetes' else driver.prepare_podman()
                     driver.report.update(smoke_complete=True)
                 else:
                     driver.run()
-            except BaseException:
+            except BaseException as error:
                 driver.report.update(complete=False, missing=True, failed=True)
+                driver.failure_diagnostic(error)
                 raise
             finally:
                 for signum in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
                     signal.signal(signum, signal.SIG_IGN)
+                driver.stage = 'cleanup'
                 cleanup_errors = driver.cleanup()
                 for signum in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
                     signal.signal(signum, interrupted)
                 records.append(driver.report)
+            if cleanup_errors:
+                driver.failure_diagnostic(Refused('backend cleanup incomplete'))
             require(not cleanup_errors, 'backend cleanup incomplete')
     except BaseException:
         result = {'complete': False, 'selected_complete': False, 'candidate_sha': context.get('candidate_sha'), 'selected': selected, 'contributors': records}
@@ -989,6 +1138,6 @@ def main():
 if __name__ == '__main__':
     try:
         raise SystemExit(main())
-    except (Refused, OSError, ValueError, subprocess.SubprocessError):
+    except Exception:
         print('backend qualification refused/incomplete; no coverage PASS claimed', file=sys.stderr)
         raise SystemExit(1)
