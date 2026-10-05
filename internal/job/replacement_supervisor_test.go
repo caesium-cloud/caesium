@@ -20,14 +20,31 @@ type replacementObservedEngine struct {
 	*fakeEngine
 	ctx     context.Context
 	started chan<- context.Context
+	// Optional per-attempt evidence; ordinary terminal cleanup also uses Force.
+	stopped   chan<- replacementStopObservation
+	runtimeID string
+}
+
+type replacementStopObservation struct {
+	runtimeID string
+	force     bool
+	cause     error
 }
 
 func (e *replacementObservedEngine) Create(req *atom.EngineCreateRequest) (atom.Atom, error) {
 	a, err := e.fakeEngine.Create(req)
 	if err == nil && req.Spec.Env["CAESIUM_PARTITION"] == "retry" {
+		e.runtimeID = a.ID()
 		e.started <- e.ctx
 	}
 	return a, err
+}
+
+func (e *replacementObservedEngine) Stop(req *atom.EngineStopRequest) error {
+	if e.stopped != nil && req.ID == e.runtimeID {
+		e.stopped <- replacementStopObservation{runtimeID: req.ID, force: req.Force, cause: context.Cause(e.ctx)}
+	}
+	return e.fakeEngine.Stop(req)
 }
 
 func TestPartitionRetryReplacementInheritsServerOwnership(t *testing.T) {
@@ -203,6 +220,7 @@ func TestPartitionRetryReplacementNaturalDrainJoinsWithoutCancel(t *testing.T) {
 	f := newFanOutFixture(t, `["retry"]`, &schema.FanOut{From: "list", MaxPartitions: 16}, 0)
 	f.engine.createErrByPartition["retry"] = errors.New("first attempt failed")
 	started := make(chan context.Context, 1)
+	stopped := make(chan replacementStopObservation, 16)
 	owner := runlife.New(t.Context())
 	workCtx, releaseWork, err := owner.Reserve(runlife.WithSupervisor(t.Context(), owner))
 	require.NoError(t, err)
@@ -222,7 +240,7 @@ func TestPartitionRetryReplacementNaturalDrainJoinsWithoutCancel(t *testing.T) {
 	})
 	opts := withTestDeps(f.store, defaultFanOutVars(), f.taskSvc, f.atomSvc, f.edgeSvc, f.engine)
 	opts = append(opts, WithDockerEngineFactory(func(ctx context.Context) atom.Engine {
-		return &replacementObservedEngine{fakeEngine: f.engine, ctx: ctx, started: started}
+		return &replacementObservedEngine{fakeEngine: f.engine, ctx: ctx, started: started, stopped: stopped}
 	}))
 	runner := New(&models.Job{ID: f.jobID}, opts...).(*job)
 	var windows atomic.Int32
@@ -265,6 +283,18 @@ func TestPartitionRetryReplacementNaturalDrainJoinsWithoutCancel(t *testing.T) {
 	default:
 	}
 	require.NoError(t, replacementCtx.Err(), "ordinary parent return must not cancel the replacement")
+	// executeAtom removes even successful runtimes with Stop(Force: true).
+	// Inspect this replacement attempt's actual stop cause rather than a shared
+	// force map that also includes producer/earlier-attempt terminal cleanup.
+	var replacementStop replacementStopObservation
+	select {
+	case replacementStop = <-stopped:
+	case <-time.After(time.Second):
+		t.Fatal("replacement did not record its ordinary terminal runtime cleanup")
+	}
+	require.NotEmpty(t, replacementStop.runtimeID)
+	require.True(t, replacementStop.force, "ordinary terminal cleanup is forceful by design")
+	require.NoError(t, replacementStop.cause, "exact replacement cleanup must not be caused by owner cancellation")
 	unblock()
 	select {
 	case err := <-drained:
@@ -278,15 +308,16 @@ func TestPartitionRetryReplacementNaturalDrainJoinsWithoutCancel(t *testing.T) {
 	rows := f.instanceRows(t)
 	require.Len(t, rows, 1)
 	require.Equal(t, string(run.TaskStatusSucceeded), rows[0].Status)
+	require.Equal(t, rows[0].RuntimeID, replacementStop.runtimeID, "stop evidence must bind the exact replacement runtime")
 	require.False(t, rows[0].PartitionRetryPending)
 	require.NotNil(t, rows[0].CompletedAt)
 	f.engine.mu.Lock()
 	creates := f.engine.createCallsByPartition["retry"]
-	forced := false
-	for _, force := range f.engine.stopForceByID {
-		forced = forced || force
-	}
 	f.engine.mu.Unlock()
 	require.Equal(t, 2, creates)
-	require.False(t, forced, "a natural join must not force-stop a legitimate replacement")
+	select {
+	case unexpected := <-stopped:
+		t.Fatalf("replacement received an extra stop after its terminal cleanup: id=%s force=%t cause=%v", unexpected.runtimeID, unexpected.force, unexpected.cause)
+	default:
+	}
 }
