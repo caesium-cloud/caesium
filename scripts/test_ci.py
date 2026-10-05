@@ -2810,7 +2810,7 @@ class ResourceHarnessTests(unittest.TestCase):
         self.assertIn("1d97294c14c43d477e0a0826e9cd0f2a2af373ddfafe6f10252e8a3c43f32be6", commands)
         self.assertIn("sha256sum --check --strict", commands)
         self.assertIn('log_driver = "k8s-file"', commands)
-        self.assertIn("bash build/stress/smoke.sh podman caesiumcloud/resource-stress:${{ env.IMAGE_TAG }}-amd64", commands)
+        self.assertIn("bash -x build/stress/smoke.sh podman caesiumcloud/resource-stress:${{ env.IMAGE_TAG }}-amd64", commands)
 
     def test_missing_ci_fixture_fails_without_rebuilding(self):
         with tempfile.TemporaryDirectory() as tmp:

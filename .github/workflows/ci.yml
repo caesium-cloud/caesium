@@ -1845,7 +1845,7 @@ jobs:
           podman image inspect caesiumcloud/resource-stress:${{ env.IMAGE_TAG }}-amd64 >/dev/null
           podman pull alpine:3.23
       - name: Verify real OOM evidence through Podman
-        run: bash build/stress/smoke.sh podman caesiumcloud/resource-stress:${{ env.IMAGE_TAG }}-amd64
+        run: bash -x build/stress/smoke.sh podman caesiumcloud/resource-stress:${{ env.IMAGE_TAG }}-amd64
       - name: Start Caesium with Podman engine
         # This lane starts its OWN server rather than going through
         # `just integration-up`, so it silently drifts red whenever a feature
