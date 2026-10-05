@@ -541,6 +541,116 @@ func TestStandaloneStartShutdownJoinsOwnerAfterServeReturns(t *testing.T) {
 	require.Nil(t, remaining)
 }
 
+func TestPrivateOwnerSurvivesStartContextCancellationUntilShutdown(t *testing.T) {
+	prepareAPILifetimeTest(t)
+	ready := make(chan *http.Server, 1)
+	serveAPI = func(srv *http.Server, ln net.Listener) error { ready <- srv; return srv.Serve(ln) }
+	type startValueKey struct{}
+	root := context.WithValue(context.Background(), startValueKey{}, "preserved")
+	startCtx, cancelStart := context.WithCancel(root)
+	defer cancelStart()
+	serving := make(chan error, 1)
+	go func() { serving <- Start(startCtx, nil, nil, nil, nil, nil, nil, SSOProviders{}, nil) }()
+
+	srv := <-ready
+	requestBase := srv.BaseContext(nil)
+	owner := runlife.FromContext(requestBase)
+	shutting := make(chan error, 1)
+	shutdownStarted, shutdownJoined, servingJoined := false, false, false
+	var releaseWork func()
+	var shutdownCancel context.CancelFunc
+	startShutdown := func(ctx context.Context) {
+		if shutdownStarted {
+			return
+		}
+		shutdownStarted = true
+		go func() { shutting <- Shutdown(ctx) }()
+	}
+	t.Cleanup(func() {
+		cancelStart()
+		if releaseWork != nil {
+			releaseWork()
+		}
+		if shutdownCancel != nil {
+			shutdownCancel()
+		}
+		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), time.Second)
+		defer cleanupCancel()
+		if shutdownStarted && !shutdownJoined {
+			select {
+			case err := <-shutting:
+				shutdownJoined = true
+				if err != nil {
+					t.Errorf("cleanup API shutdown: %v", err)
+				}
+			case <-cleanupCtx.Done():
+				t.Error("cleanup API shutdown did not finish")
+			}
+		}
+		if err := Shutdown(cleanupCtx); err != nil {
+			t.Errorf("cleanup API owner join: %v", err)
+		}
+		if !servingJoined {
+			select {
+			case err := <-serving:
+				if err != nil {
+					t.Errorf("cleanup API Serve: %v", err)
+				}
+			case <-cleanupCtx.Done():
+				t.Error("cleanup API Serve did not finish")
+			}
+		}
+	})
+	require.NotNil(t, owner)
+	require.Equal(t, "preserved", requestBase.Value(startValueKey{}))
+	cancelStart()
+	require.NoError(t, requestBase.Err(), "HTTP request lifetime remains detached from Start cancellation")
+
+	workCtx, release, err := owner.Reserve(requestBase)
+	require.NoError(t, err, "private owner remains open until HTTP drain completes")
+	releaseWork = release
+	require.Equal(t, "preserved", workCtx.Value(startValueKey{}))
+
+	shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), time.Second)
+	shutdownCancel = cancelShutdown
+	startShutdown(shutdownCtx)
+	select {
+	case <-workCtx.Done():
+	case <-time.After(time.Second):
+		t.Fatal("Shutdown did not cancel admitted private-owner work")
+	}
+	select {
+	case err := <-shutting:
+		t.Fatalf("Shutdown returned before admitted work was released: %v", err)
+	default:
+	}
+	release()
+	releaseWork = nil
+	var shutdownErr error
+	select {
+	case shutdownErr = <-shutting:
+		shutdownJoined = true
+	case <-time.After(time.Second):
+		t.Fatal("Shutdown did not join admitted work after release")
+	}
+	cancelShutdown()
+	shutdownCancel = nil
+	require.NoError(t, shutdownErr)
+	var serveErr error
+	select {
+	case serveErr = <-serving:
+		servingJoined = true
+	case <-time.After(time.Second):
+		t.Fatal("API Serve did not return after Shutdown")
+	}
+	require.NoError(t, serveErr)
+
+	apiServer.Lock()
+	remaining := apiServer.owner
+	apiServer.Unlock()
+	require.Nil(t, remaining)
+}
+
 func TestSharedOwnerSurvivesAPIHTTPDrain(t *testing.T) {
 	prepareAPILifetimeTest(t)
 	owner := runlife.New(context.Background())

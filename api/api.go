@@ -81,7 +81,7 @@ func Start(ctx context.Context, bus event.Bus, authSvc *auth.Service, auditor *a
 	owner := runlife.FromContext(ctx)
 	privateOwner := owner == nil
 	if privateOwner {
-		owner = runlife.New(ctx)
+		owner = runlife.New(context.WithoutCancel(ctx))
 	}
 	// Request drain is independent of process cancellation. Reservations carry
 	// request values but are cancelled through the owner after HTTP drain.
