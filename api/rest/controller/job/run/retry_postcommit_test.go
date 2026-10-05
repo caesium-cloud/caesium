@@ -2,6 +2,7 @@ package run
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -132,8 +133,14 @@ func TestWholeRetryHTTPPostCommitFailureLaunchesOwnedEngineWithDurableParams(t *
 		).Run(ctx)
 	}
 	rec := retryHTTP(t, runlife.WithSupervisor(t.Context(), owner), f.j.ID, f.entry.ID)
-	require.Equal(t, http.StatusConflict, rec.Code)
-	require.Contains(t, rec.Body.String(), fault.Error(), "read failure remains a diagnostic response")
+	require.Equal(t, http.StatusAccepted, rec.Code)
+	var accepted runstorage.JobRun
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &accepted))
+	require.Equal(t, f.entry.ID, accepted.ID)
+	require.Equal(t, f.j.ID, accepted.JobID)
+	require.Equal(t, runstorage.StatusRunning, accepted.Status)
+	require.Equal(t, f.entry.Params, accepted.Params)
+	require.NotContains(t, rec.Body.String(), fault.Error(), "readback diagnostic stays in the server log")
 	require.Equal(t, 1, reads)
 	var req atom.EngineCreateRequest
 	select {
@@ -161,21 +168,34 @@ func TestWholeRetryHTTPPostCommitFailureLaunchesOwnedEngineWithDurableParams(t *
 }
 
 func TestWholeRetryHTTPUnrelatedCommittedIdentityDoesNotLaunch(t *testing.T) {
-	f := newRetryReadFixture(t)
-	f.install(t)
-	retryFromFailure = func(uuid.UUID) (*runstorage.JobRun, error) {
-		return nil, fmt.Errorf("wrapped: %w", &runstorage.RunCommittedError{RunID: uuid.New(), JobID: f.j.ID, Err: errors.New("unrelated committed run")})
+	for _, kind := range []string{"run", "job"} {
+		t.Run(kind, func(t *testing.T) {
+			f := newRetryReadFixture(t)
+			f.install(t)
+			retryFromFailure = func(uuid.UUID) (*runstorage.JobRun, error) {
+				committed := &runstorage.RunCommittedError{RunID: f.entry.ID, JobID: f.j.ID, Err: errors.New("unrelated committed identity")}
+				if kind == "run" {
+					committed.RunID = uuid.New()
+				} else {
+					committed.JobID = uuid.New()
+				}
+				return nil, fmt.Errorf("wrapped: %w", committed)
+			}
+			retryLaunch = func(context.Context, *models.Job, *runstorage.JobRun, func()) {
+				t.Fatal("unrelated committed identity launched")
+			}
+			ctx := supervisedRequestContext(t)
+			rec := retryHTTP(t, ctx, f.j.ID, f.entry.ID)
+			require.Equal(t, http.StatusConflict, rec.Code)
+			require.Zero(t, job.CancelRunContexts(f.entry.ID))
+			row, err := f.store.Get(f.entry.ID)
+			require.NoError(t, err)
+			require.Equal(t, runstorage.StatusFailed, row.Status)
+			owner := runlife.FromContext(ctx)
+			owner.CloseAndCancel()
+			require.NoError(t, owner.Wait(t.Context()))
+		})
 	}
-	retryLaunch = func(context.Context, *models.Job, *runstorage.JobRun, func()) {
-		t.Fatal("unrelated committed identity launched")
-	}
-	ctx := supervisedRequestContext(t)
-	rec := retryHTTP(t, ctx, f.j.ID, f.entry.ID)
-	require.Equal(t, http.StatusConflict, rec.Code)
-	require.Zero(t, job.CancelRunContexts(f.entry.ID))
-	owner := runlife.FromContext(ctx)
-	owner.CloseAndCancel()
-	require.NoError(t, owner.Wait(t.Context()))
 }
 
 func TestWholeRetryHTTPPreCommitFaultDoesNotLaunchOrReopen(t *testing.T) {
