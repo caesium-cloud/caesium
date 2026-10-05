@@ -283,7 +283,7 @@ func (s *IntegrationTestSuite) TestAutomaticRetryDelayConstantAndBackoff() {
 						}
 						s.Require().NoError(inspectErr)
 						s.Require().Equal(imageID, inspect.Image)
-						s.Require().Equal([]string{"sh", "-c", command}, inspect.Config.Cmd)
+						s.Require().Equal([]string{"sh", "-c", command}, []string(inspect.Config.Cmd))
 						if inspect.State.Running {
 							ids[row.Attempt] = inspect.ID
 							s.maintenanceLiveAttemptLogs(jobID, runID, taskID, concreteID, alias)
