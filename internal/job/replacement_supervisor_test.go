@@ -198,3 +198,95 @@ func TestDirectLocalChildReservationKeepsStandaloneDrainSemantics(t *testing.T) 
 	require.NoError(t, child.Err(), "direct local child retains independent lifetime without server owner")
 	require.Nil(t, runlife.FromContext(child))
 }
+
+func TestPartitionRetryReplacementNaturalDrainJoinsWithoutCancel(t *testing.T) {
+	f := newFanOutFixture(t, `["retry"]`, &schema.FanOut{From: "list", MaxPartitions: 16}, 0)
+	f.engine.createErrByPartition["retry"] = errors.New("first attempt failed")
+	started := make(chan context.Context, 1)
+	owner := runlife.New(t.Context())
+	workCtx, releaseWork, err := owner.Reserve(runlife.WithSupervisor(t.Context(), owner))
+	require.NoError(t, err)
+	finish := make(chan struct{})
+	var finished atomic.Bool
+	unblock := func() {
+		if finished.CompareAndSwap(false, true) {
+			close(finish)
+		}
+	}
+	t.Cleanup(func() {
+		unblock()
+		owner.CloseAndCancel()
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		require.NoError(t, owner.Wait(ctx))
+	})
+	opts := withTestDeps(f.store, defaultFanOutVars(), f.taskSvc, f.atomSvc, f.edgeSvc, f.engine)
+	opts = append(opts, WithDockerEngineFactory(func(ctx context.Context) atom.Engine {
+		return &replacementObservedEngine{fakeEngine: f.engine, ctx: ctx, started: started}
+	}))
+	runner := New(&models.Job{ID: f.jobID}, opts...).(*job)
+	var windows atomic.Int32
+	replacementCompleting := make(chan struct{})
+	runner.beforeComplete = func(runID uuid.UUID) {
+		if windows.Add(1) == 1 {
+			rows := f.instanceRowsFor(t, runID)
+			require.Len(t, rows, 1)
+			_, reopened, retryErr := f.store.RetryPartition(t.Context(), runID, rows[0].ID)
+			require.NoError(t, retryErr)
+			require.False(t, reopened)
+			f.engine.mu.Lock()
+			delete(f.engine.createErrByPartition, "retry")
+			f.engine.runDurationByPartition["retry"] = 20 * time.Millisecond
+			f.engine.mu.Unlock()
+			return
+		}
+		close(replacementCompleting)
+		<-finish
+	}
+	firstDone := make(chan error, 1)
+	go func() { defer releaseWork(); firstDone <- runner.Run(workCtx) }()
+	require.Error(t, <-firstDone, "the original engine reports its failed attempt after handing off")
+	var replacementCtx context.Context
+	select {
+	case replacementCtx = <-started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("replacement did not create its atom")
+	}
+	drained := make(chan error, 1)
+	go func() { drained <- owner.Drain(t.Context()) }()
+	select {
+	case <-replacementCompleting:
+	case <-time.After(5 * time.Second):
+		t.Fatal("replacement did not reach terminal persistence")
+	}
+	select {
+	case <-drained:
+		t.Fatal("natural drain passed replacement terminal persistence")
+	default:
+	}
+	require.NoError(t, replacementCtx.Err(), "ordinary parent return must not cancel the replacement")
+	unblock()
+	select {
+	case err := <-drained:
+		require.NoError(t, err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("natural drain did not join the replacement")
+	}
+	final := f.latestJobRun(t)
+	require.Equal(t, string(run.StatusSucceeded), final.Status)
+	require.NotNil(t, final.CompletedAt)
+	rows := f.instanceRows(t)
+	require.Len(t, rows, 1)
+	require.Equal(t, string(run.TaskStatusSucceeded), rows[0].Status)
+	require.False(t, rows[0].PartitionRetryPending)
+	require.NotNil(t, rows[0].CompletedAt)
+	f.engine.mu.Lock()
+	creates := f.engine.createCallsByPartition["retry"]
+	forced := false
+	for _, force := range f.engine.stopForceByID {
+		forced = forced || force
+	}
+	f.engine.mu.Unlock()
+	require.Equal(t, 2, creates)
+	require.False(t, forced, "a natural join must not force-stop a legitimate replacement")
+}

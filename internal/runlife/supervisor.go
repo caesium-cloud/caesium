@@ -20,11 +20,13 @@ type Supervisor struct {
 	closed   bool
 	work     sync.WaitGroup
 	done     chan struct{}
+	active   int
+	changed  chan struct{}
 }
 
 func New(parent context.Context) *Supervisor {
 	lifetime, cancel := context.WithCancel(parent)
-	return &Supervisor{lifetime: lifetime, cancel: cancel, done: make(chan struct{})}
+	return &Supervisor{lifetime: lifetime, cancel: cancel, done: make(chan struct{}), changed: make(chan struct{})}
 }
 
 func WithSupervisor(ctx context.Context, s *Supervisor) context.Context {
@@ -53,8 +55,20 @@ func (s *Supervisor) Reserve(requestCtx context.Context) (context.Context, func(
 	child, cancel := context.WithCancel(context.WithoutCancel(requestCtx))
 	stop := context.AfterFunc(s.lifetime, cancel)
 	s.work.Add(1)
+	s.active++
 	var once sync.Once
-	release := func() { once.Do(func() { stop(); cancel(); s.work.Done() }) }
+	release := func() {
+		once.Do(func() {
+			stop()
+			cancel()
+			s.mu.Lock()
+			defer s.mu.Unlock()
+			s.work.Done()
+			s.active--
+			close(s.changed)
+			s.changed = make(chan struct{})
+		})
+	}
 	return child, release, nil
 }
 
@@ -68,9 +82,44 @@ func (s *Supervisor) CloseAndCancel() {
 	if s.closed {
 		return
 	}
+	s.closeLocked()
+}
+
+func (s *Supervisor) closeLocked() {
 	s.closed = true
 	s.cancel()
 	go func() { s.work.Wait(); close(s.done) }()
+}
+
+// Drain allows admitted work to transfer ownership to children until all work
+// finishes naturally. Observing zero and closing admission share Reserve's lock,
+// so no zero-to-Add interval can let work escape the join. Cancellation returns
+// an error without claiming a join; callers must then cancel and bound Wait.
+func (s *Supervisor) Drain(ctx context.Context) error {
+	if s == nil {
+		return nil
+	}
+	for {
+		s.mu.Lock()
+		if s.closed {
+			s.mu.Unlock()
+			return s.Wait(ctx)
+		}
+		if s.active == 0 {
+			s.closeLocked()
+			s.mu.Unlock()
+			return s.Wait(ctx)
+		}
+		changed := s.changed
+		s.mu.Unlock()
+		select {
+		case <-changed:
+		case <-s.lifetime.Done():
+			return context.Cause(s.lifetime)
+		case <-ctx.Done():
+			return context.Cause(ctx)
+		}
+	}
 }
 
 // Wait joins admitted work after admission closes. An expired grace period does
