@@ -1228,6 +1228,17 @@ else:
         obj=lookup("containers", args[-1]); fmt=value("--format", value("-f"))
         with (root/"container-inspections.jsonl").open("a") as log: log.write(json.dumps(obj)+"\n")
         print(str(obj["State"]["Running"]).lower() if "Running" in fmt else obj["Image"] if ".Image" in fmt else json.dumps([obj]))
+    elif op == "exec":
+        obj=lookup("containers", args[2])
+        assert "wget" in args and args[-1] == "http://127.0.0.1:8080/health"
+        polls=root/"connector-health-polls"; count=int(polls.read_text()) if polls.exists() else 0; polls.write_text(str(count+1))
+        print(json.dumps({"status":"unavailable" if scenario=="connector-delayed-health" and count<2 else "healthy"}))
+    elif op == "kill":
+        obj=lookup("containers", args[-1])
+        if obj["Name"].endswith("-connectors"):
+            polls=root/"connector-health-polls"
+            if not polls.exists() or (scenario=="connector-delayed-health" and int(polls.read_text())<3):
+                raise SystemExit("connector signalled before readiness")
     elif op == "stop":
         obj=lookup("containers", args[-1]); killed=obj["Name"].endswith("-browser") and scenario=="killed"
         obj["State"].update(Running=False,ExitCode=137 if killed else 0,OOMKilled=killed)
@@ -1286,6 +1297,9 @@ run_coverage_journeys() {
     def collect(self, scenario):
         self.env["FAKE_SCENARIO"] = scenario
         (self.art / "backend-producer-inputs.json").unlink(missing_ok=True)
+        # Each fake collector invocation models a fresh diagnostic attempt;
+        # browser profiles stay intact for the existing stale/refusal controls.
+        (self.art / "audit/connector-diagnostics.json").unlink(missing_ok=True)
         return subprocess.run(["bash", str(self.collector), "collect"], capture_output=True, text=True,
                               env=self.env, cwd=str(ROOT), timeout=30)
 
@@ -1366,14 +1380,29 @@ run_coverage_journeys() {
     def test_connector_start_without_a_loaded_fingerprint_fails_the_journey(self):
         result = self.collect("connector-silent")
         self.assertNotEqual(result.returncode, 0, output(result))
-        self.assertIn("did not log a loaded fingerprint", output(result))
+        self.assertIn("connector loaded-fingerprint/health/clean-stop guard refused", output(result))
+        diagnostics = json.loads((self.art / "audit/connector-diagnostics.json").read_text())
+        self.assertFalse(diagnostics["complete"])
+        self.assertFalse(diagnostics["fingerprint"])
+        self.assertEqual(diagnostics["refusal_category"], "stopped_before_readiness")
         calls = [json.loads(line) for line in (self.art / "container-args.jsonl").read_text().splitlines()]
-        log_calls = [args for args in calls if args and args[0] == "logs"]
-        self.assertLessEqual(len(log_calls), 3, "a stopped connector must not be polled for the full minute")
-        self.assertTrue(
-            any(args and args[0] == "inspect" and "-f" in args for args in calls),
-            "a stopped connector is noticed via inspect -f",
-        )
+        self.assertLessEqual(len([args for args in calls if "logs" in args]), 3,
+                             "a stopped connector must not be polled for the full minute")
+        connector_id = hashlib.sha256(b"cov-test-connectors").hexdigest()
+        self.assertFalse(any("kill" in args and args[-1] == connector_id for args in calls))
+
+    def test_connector_fingerprint_waits_for_real_health_before_signalling(self):
+        result = self.collect("connector-delayed-health")
+        self.assertEqual(result.returncode, 0, output(result))
+        diagnostics = json.loads((self.art / "audit/connector-diagnostics.json").read_text())
+        self.assertTrue(diagnostics["complete"])
+        self.assertTrue(diagnostics["fingerprint"] and diagnostics["healthy"])
+        self.assertEqual(diagnostics["polls"], 3)
+        calls = [json.loads(line) for line in (self.art / "container-args.jsonl").read_text().splitlines()]
+        connector_id = hashlib.sha256(b"cov-test-connectors").hexdigest()
+        flush_at = next(i for i, args in enumerate(calls) if "kill" in args and args[-1] == connector_id)
+        self.assertEqual(len([args for args in calls[:flush_at] if "exec" in args and connector_id in args]), 3)
+        self.assertEqual(json.loads((self.art / "audit/connector-process.json").read_text())["flush_rc"], 0)
 
     def test_task_run_without_a_sampled_observation_fails_the_journey(self):
         result = self.collect("run-unsampled")
@@ -1575,8 +1604,8 @@ class DockerfileAndCollectorTests(unittest.TestCase):
         self.assertIn("system nodes remove", text)
         self.assertIn("CAESIUM_RESOURCE_STATS_ENABLED=true", text)
         self.assertIn("CAESIUM_CONNECTORS_ENABLED=true", text)
-        self.assertIn("connector config loaded", text)
-        self.assertIn('*"connector config loaded"*', text)
+        self.assertIn("connector config loaded", (ROOT / "scripts/coverage-journeys.py").read_text())
+        self.assertIn('coverage-journeys.py" connector', text)
         self.assertNotIn('logs "$CONNECTOR_NAME" 2>&1 | grep', text)
         self.assertIn("secret://k8s/temporal-creds/api-token", text)
         self.assertIn("secret://vault/kv/data/temporal?field=token", text)

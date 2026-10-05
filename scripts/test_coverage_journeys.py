@@ -162,6 +162,132 @@ class FaultChecks(unittest.TestCase):
         command, _ = self.command()
         self.assertEqual(b.guarded_resource(command, 'container', CID, 'stop', OWNER, 'owned', image=IMAGE)['flush_rc'], 0)
 
+    def connector_fixture(self, health, fault=None):
+        audit = self.tmp / ("audit-" + str(len(list(self.tmp.iterdir()))))
+        audit.mkdir()
+        info = self.info()
+        info["Config"].update(Env=["TOKEN=never-persist-env"])
+        info["Config"]["Labels"][b.LABEL_LANE] = "base-connectors"
+        info["State"].update(Running=fault != "stopped", Error="never-persist-native-error")
+        calls, polls = [], []
+        logs = json.dumps({"msg": "connector config loaded", "level": "info", "ts": "2026-10-05T12:00:00Z",
+                           "error": "csk_neverpersist", "token": "never-persist-token"}) + "\n" + json.dumps(
+               {"msg": "Bearer never-persist-bearer", "jwt": "eyJheader.eyJpayload.signature",
+                "cookie": "never-persist-cookie", "assertion": "never-persist-assertion"})
+        def command(*args, check=True, **kwargs):
+            calls.append(args)
+            rc, stdout = 0, ""
+            if args[1] == "inspect":
+                if fault == "foreign": info["Config"]["Labels"][b.LABEL_OWNER] = "foreign"
+                if fault == "image": info["Image"] = INDEX
+                if fault == "identity": info["Id"] = 'f' * 64
+                stdout = json.dumps([info])
+            elif args[1] == "logs":
+                stdout = logs if fault != "no-fingerprint" else json.dumps({"msg": "not loaded: connector config loaded"})
+            elif args[1] == "exec":
+                self.assertEqual(args, ("container", "exec", CID, "wget", "-q", "-T", "2", "-O", "-",
+                                        "http://127.0.0.1:8080/health"))
+                self.assertEqual(kwargs["timeout"], 5)
+                polls.append(args)
+                rc, stdout = health[min(len(polls) - 1, len(health) - 1)]
+            elif args[1] == "kill":
+                self.assertTrue(polls, "fingerprint alone must not cause a signal")
+                self.assertEqual(health[min(len(polls) - 1, len(health) - 1)], (0, '{"status":"healthy"}'))
+                rc = 1 if fault == "flush" else 0
+            elif args[1] == "stop":
+                info["State"].update(Running=False, ExitCode=17 if fault == "exit" else 0)
+                rc = 1 if fault == "stop" else 0
+            else:
+                self.fail("unexpected connector operation " + repr(args))
+            return subprocess.CompletedProcess(args, rc, stdout, "never-persist-native-stderr")
+        return command, audit, calls
+
+    def test_connector_waits_for_complete_exact_health_before_signal_and_retains_safe_states(self):
+        command, audit, calls = self.connector_fixture([(0, '{"status":"unavailable"}'), (0, '{"status":"healthy"}')])
+        result = b.connector_shutdown(command, CID, OWNER, "owned", IMAGE, audit)
+        self.assertEqual(result["flush_rc"], 0)
+        signals = [i for i, args in enumerate(calls) if args[1] == "kill"]
+        self.assertEqual(len(signals), 1)
+        self.assertEqual(len([args for args in calls[:signals[0]] if args[1] == "exec"]), 2)
+        raw = (audit / 'connector-diagnostics.json').read_text()
+        record = json.loads(raw)
+        self.assertTrue(record['complete'] and record['fingerprint'] and record['healthy'])
+        self.assertEqual(record['polls'], 2)
+        self.assertTrue(record['pre_stop']['State']['Running'])
+        self.assertFalse(record['post_stop']['State']['Running'])
+        self.assertEqual(record['refusal_category'], 'none')
+        self.assertEqual(record['post_log_rc'], 0)
+        for secret in ('never-persist', 'eyJheader', 'TOKEN=', 'Bearer', 'Config', 'Env', 'Error'):
+            self.assertNotIn(secret, raw)
+        self.assertIn('connector config loaded', raw)
+
+    def test_connector_never_ready_stopped_and_invalid_complete_json_do_not_signal(self):
+        for rc, body in ((0, '{"status":"unhealthy"}'), (0, '{"healthy":true}'),
+                         (0, '{"msg":"healthy"}'), (0, '{"status":"healthy"} trailing'),
+                         (0, '{"status":"healthy"'), (1, '{"status":"healthy"}')):
+            with self.subTest(rc=rc, body=body):
+                command, audit, calls = self.connector_fixture([(rc, body)])
+                with self.assertRaises(b.JourneyError):
+                    b.connector_shutdown(command, CID, OWNER, "owned", IMAGE, audit)
+                self.assertFalse(any(args[1] in ('kill', 'stop') for args in calls))
+                record = json.loads((audit / 'connector-diagnostics.json').read_text())
+                self.assertFalse(record['complete'])
+                self.assertEqual(record['refusal_category'], 'never_ready')
+                self.assertEqual(record['polls'], 60)
+        for fault in ('stopped', 'no-fingerprint', 'foreign', 'image', 'identity'):
+            with self.subTest(fault=fault):
+                command, audit, calls = self.connector_fixture([(0, '{"status":"healthy"}')], fault)
+                with self.assertRaises(b.JourneyError):
+                    b.connector_shutdown(command, CID, OWNER, "owned", IMAGE, audit)
+                self.assertFalse(any(args[1] in ('kill', 'stop') for args in calls))
+                record = json.loads((audit / 'connector-diagnostics.json').read_text())
+                self.assertFalse(record['complete'])
+                self.assertEqual(record['polls'], 60 if fault == 'no-fingerprint' else 1)
+
+    def test_connector_failed_stop_retains_refusal_without_native_secret_or_eligibility(self):
+        for fault, category in (('flush', 'flush_failed'), ('stop', 'stop_failed'), ('exit', 'nonzero_exit')):
+            with self.subTest(fault=fault):
+                command, audit, _ = self.connector_fixture([(0, '{"status":"healthy"}')], fault)
+                with self.assertRaises(b.JourneyError):
+                    b.connector_shutdown(command, CID, OWNER, "owned", IMAGE, audit)
+                raw = (audit / 'connector-diagnostics.json').read_text()
+                record = json.loads(raw)
+                self.assertFalse(record['complete'])
+                self.assertEqual(record['refusal_category'], category)
+                self.assertIn('post_stop', record)
+                self.assertNotIn('never-persist', raw)
+        command, audit, _ = self.connector_fixture([(0, '{"status":"healthy"}')])
+        (audit / 'connector-diagnostics.json').write_text('existing evidence')
+        with self.assertRaises(FileExistsError):
+            b.connector_shutdown(command, CID, OWNER, "owned", IMAGE, audit)
+        self.assertEqual((audit / 'connector-diagnostics.json').read_text(), 'existing evidence')
+
+    def test_connector_unknown_errors_logs_and_output_caps_do_not_leak_or_pass(self):
+        command, audit, calls = self.connector_fixture([(0, '{"status":"healthy"}')])
+        def interrupted(*args, **kwargs):
+            if args[1] == 'exec':
+                raise RuntimeError('never-persist-native-error csk_neverpersist')
+            return command(*args, **kwargs)
+        with self.assertRaises(RuntimeError):
+            b.connector_shutdown(interrupted, CID, OWNER, 'owned', IMAGE, audit)
+        raw = (audit / 'connector-diagnostics.json').read_text()
+        self.assertNotIn('never-persist', raw)
+        self.assertEqual(json.loads(raw)['exception_type'], 'UnexpectedError')
+        self.assertFalse(any(args[1] in ('kill', 'stop') for args in calls))
+        logs = b.connector_log_records(json.dumps({'msg': ['csk_secret'], 'caller': 'csk_secret.go:1',
+            'error': 'Bearer private', 'Env': ['TOKEN=private']}) + '\nprivate raw line')
+        self.assertNotIn('private', json.dumps(logs))
+        self.assertNotIn('csk_secret', json.dumps(logs))
+        self.assertEqual(logs[-1]['msg'], '[unstructured log omitted]')
+        def process(args, stdout, stderr, **kwargs):
+            self.assertEqual(kwargs['timeout'], 10)
+            stdout.write(b'x' * (256 * 1024 + 1))
+            stderr.write(b'never-persist-stderr')
+            return subprocess.CompletedProcess(args, 0)
+        with patch.object(b.subprocess, 'run', side_effect=process):
+            with self.assertRaises(b.JourneyError):
+                b.connector_command('container', 'logs', CID, timeout=10)
+
     def test_missing_base_raws_never_merge_valid_journeys_and_originals_survive(self):
         raw = self.tmp / 'cohort'
         raw.mkdir()

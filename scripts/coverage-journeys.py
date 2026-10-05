@@ -163,7 +163,7 @@ def backend_module():
     return module
 
 
-def guarded_resource(command, kind: str, name: str, action: str, owner: str, run_id: str, lane: str = "", image: str = "") -> dict[str, Any]:
+def guarded_resource(command, kind: str, name: str, action: str, owner: str, run_id: str, lane: str = "", image: str = "", diagnostics: dict[str, Any] | None = None) -> dict[str, Any]:
     result = command(kind, "inspect", name, check=False)
     if missing_object(result, kind, name):
         if action in ("absent", "remove"):
@@ -192,18 +192,159 @@ def guarded_resource(command, kind: str, name: str, action: str, owner: str, run
             raise JourneyError("owned resource removal is unproved")
         return {"absent": True, "Id": identity}
     if action == "stop":
+        if diagnostics is not None:
+            diagnostics["pre_stop"] = safe_process_state(info)
         flush = command("container", "kill", "--signal=SIGUSR2", identity, check=False)
+        if diagnostics is not None:
+            diagnostics["flush_rc"] = flush.returncode
         time.sleep(1)
         stop = command("container", "stop", "-t", "60", identity, check=False, timeout=75)
+        if diagnostics is not None:
+            diagnostics["stop_rc"] = stop.returncode
         final = guarded_resource(command, kind, identity, "owned", owner, run_id, lane, image)
         final.update(flush_rc=flush.returncode, stop_rc=stop.returncode)
         state = final["State"]
+        if diagnostics is not None:
+            diagnostics["post_stop"] = safe_process_state(final)
+            diagnostics["refusal_category"] = next((category for failed, category in (
+                (flush.returncode != 0, "flush_failed"), (stop.returncode != 0, "stop_failed"),
+                (state.get("ExitCode") != 0, "nonzero_exit"), (state.get("OOMKilled") is not False, "oom_state"),
+                (state.get("Running") is not False, "still_running"), (final.get("RestartCount") != 0, "restarted")) if failed), "none")
         if (flush.returncode != 0 or stop.returncode != 0 or state.get("ExitCode") != 0
                 or state.get("OOMKilled") is not False or state.get("Running") is not False
                 or final.get("RestartCount") != 0):
             raise JourneyError("owned process flush/clean shutdown unproved")
         return final
     return {"Id": identity, "Image": info.get("Image"), "State": info.get("State") or {}, "RestartCount": info.get("RestartCount")}
+
+
+def safe_process_state(info: dict[str, Any]) -> dict[str, Any]:
+    """Never persist Config/Env, native Error strings or unknown inspect fields."""
+    state = info.get("State") or {}
+    safe = {key: state[key] for key in ("Running", "Paused", "Restarting", "OOMKilled", "Dead")
+            if isinstance(state.get(key), bool)}
+    if type(state.get("ExitCode")) is int:
+        safe["ExitCode"] = state["ExitCode"]
+    for key in ("StartedAt", "FinishedAt"):
+        value = state.get(key)
+        if isinstance(value, str) and re.fullmatch(r"[0-9T:.+Z-]{1,40}", value):
+            safe[key] = value
+    if state.get("Status") in ("created", "running", "paused", "restarting", "removing", "exited", "dead"):
+        safe["Status"] = state["Status"]
+    return {"Id": info["Id"], "Image": info.get("Image"),
+            "RestartCount": info.get("RestartCount") if type(info.get("RestartCount")) is int else None, "State": safe}
+
+
+def connector_log_records(text: str) -> list[dict[str, str]]:
+    # Arbitrary error values and unstructured logs can contain credentials.
+    # Retain actual safe startup messages; mark other lines without their text.
+    safe_messages = {"connector config loaded", "caesium failure", "graceful shutdown failed",
+                     "received shutdown signal", "server shutting down", "server started"}
+    records = []
+    for line in text.splitlines()[-100:]:
+        try:
+            value = json.loads(line)
+        except ValueError:
+            value = None
+        if not isinstance(value, dict):
+            records.append({"msg": "[unstructured log omitted]"})
+            continue
+        message = value.get("msg")
+        record = {"msg": message if isinstance(message, str) and message in safe_messages else "[message details omitted]"}
+        for key, pattern in (("level", r"debug|info|warn|error|fatal|panic"),
+                             ("ts", r"[0-9T:.+Z-]{1,40}"), ("caller", r"[a-zA-Z0-9_/-]+\.go:[0-9]+")):
+            if isinstance(value.get(key), str) and re.fullmatch(pattern, value[key]) and not KEY_RE.search(value[key]):
+                record[key] = value[key]
+        if "error" in value:
+            record["error"] = "[error details omitted]"
+        records.append(record)
+    return records
+
+
+def connector_shutdown(command, identity: str, owner: str, run_id: str, image: str,
+                       audit: pathlib.Path) -> dict[str, Any]:
+    diagnostics: dict[str, Any] = {"schema_version": 1, "complete": False, "fingerprint": False,
+        "healthy": False, "polls": 0, "refusal_category": "readiness_pending", "log_records": []}
+    destination = audit / "connector-diagnostics.json"
+    try:
+        if destination.exists() or destination.is_symlink():
+            raise JourneyError("connector diagnostic path must be fresh")
+        if not re.fullmatch(r"[0-9a-f]{64}", identity):
+            diagnostics["refusal_category"] = "invalid_immutable_identity"
+            raise JourneyError("connector requires an immutable container identity")
+        for attempt in range(60):
+            diagnostics["polls"] = attempt + 1
+            diagnostics["refusal_category"] = "ownership_inventory_failed"
+            info = guarded_resource(command, "container", identity, "owned", owner, run_id, "base-connectors", image)
+            if info["Id"] != identity:
+                raise JourneyError("connector inventory differs from requested immutable identity")
+            diagnostics["pre_stop"] = safe_process_state(info)
+            diagnostics["refusal_category"] = "log_operation_failed"
+            logs = command("container", "logs", "--tail", "1000", identity, check=False, timeout=10)
+            if logs.returncode == 0:
+                diagnostics["log_records"] = connector_log_records(logs.stdout)
+                for line in logs.stdout.splitlines():
+                    try:
+                        event = json.loads(line)
+                    except ValueError:
+                        continue
+                    diagnostics["fingerprint"] |= isinstance(event, dict) and event.get("msg") == "connector config loaded"
+            if info["State"].get("Running") is not True:
+                diagnostics["refusal_category"] = "stopped_before_readiness"
+                raise JourneyError("connector stopped before fingerprint and health readiness")
+            diagnostics["refusal_category"] = "health_operation_failed"
+            health = command("container", "exec", identity, "wget", "-q", "-T", "2", "-O", "-",
+                             "http://127.0.0.1:8080/health", check=False, timeout=5)
+            diagnostics["health_rc"] = health.returncode
+            try:
+                body = json.loads(health.stdout)
+            except ValueError:
+                body = None
+            diagnostics["healthy"] = (health.returncode == 0 and isinstance(body, dict)
+                                      and body.get("status") == "healthy")
+            if diagnostics["fingerprint"] and diagnostics["healthy"]:
+                break
+            time.sleep(1)
+        else:
+            diagnostics["refusal_category"] = "never_ready"
+            raise JourneyError("connector did not reach loaded fingerprint and health readiness")
+        diagnostics["refusal_category"] = "stop_operation_failed"
+        final = guarded_resource(command, "container", identity, "stop", owner, run_id, "base-connectors", image,
+                                 diagnostics=diagnostics)
+        diagnostics["complete"] = True
+        return {**safe_process_state(final), "flush_rc": final["flush_rc"], "stop_rc": final["stop_rc"]}
+    except Exception as exc:
+        diagnostics["exception_type"] = type(exc).__name__ if type(exc).__name__ in (
+            "JourneyError", "TimeoutExpired", "OSError", "ValueError", "JSONDecodeError") else "UnexpectedError"
+        raise
+    finally:
+        # A diagnostics write failure propagates; it never converts refusal to pass.
+        if "pre_stop" in diagnostics:
+            try:
+                guarded_resource(command, "container", identity, "owned", owner, run_id, "base-connectors", image)
+                logs = command("container", "logs", "--tail", "1000", identity, check=False, timeout=10)
+                diagnostics["post_log_rc"] = logs.returncode
+                if logs.returncode == 0:
+                    diagnostics["post_log_records"] = connector_log_records(logs.stdout)
+            except Exception:
+                diagnostics["post_log_category"] = "unavailable"
+        with os.fdopen(os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "w") as stream:
+            stream.write(json.dumps(diagnostics, indent=2) + "\n")
+
+
+def connector_command(*arguments, check=True, timeout=10):
+    # Spool bounded-time output privately, then refuse oversized evidence. Never
+    # print native stderr or persist inspect payloads containing credentials.
+    with tempfile.TemporaryFile() as output, tempfile.TemporaryFile() as errors:
+        result = subprocess.run(["docker", *arguments], stdout=output, stderr=errors, timeout=timeout, check=False)
+        limit = 256 * 1024 if "logs" in arguments else 2 * 1024 * 1024
+        output.seek(0)
+        raw = output.read(limit + 1)
+        if len(raw) > limit:
+            raise JourneyError("connector command output exceeded evidence cap")
+        if check and result.returncode:
+            raise JourneyError("connector Docker command failed")
+        return subprocess.CompletedProcess(arguments, result.returncode, raw.decode("utf-8"), "")
 
 
 def validate_backend_contribution(args: argparse.Namespace) -> None:
@@ -1869,6 +2010,9 @@ def parse_args() -> argparse.Namespace:
         invalidate.add_argument("--" + name, required=True)
     raw = modes.add_parser("validate-raw")
     raw.add_argument("--directory", required=True)
+    connector = modes.add_parser("connector")
+    for name in ("name", "owner", "run-id", "image", "audit"):
+        connector.add_argument("--" + name, required=True)
     resource = modes.add_parser("resource")
     for name in ("kind", "name", "action", "owner", "run-id"):
         resource.add_argument("--" + name, required=True)
@@ -1878,7 +2022,7 @@ def parse_args() -> argparse.Namespace:
     inputs.add_argument("--inputs", required=True)
     inputs.add_argument("--sha256", required=True)
     args = parser.parse_args()
-    if args.mode in ("resource", "validate-raw", "validate-inputs", "invalidate"):
+    if args.mode in ("resource", "connector", "validate-raw", "validate-inputs", "invalidate"):
         return args
     if args.mode == "sso":
         if not re.fullmatch(r"[0-9a-f]{40}", args.candidate_sha):
@@ -1934,9 +2078,12 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
-    if args.mode in ("resource", "validate-raw", "validate-inputs", "invalidate"):
+    if args.mode in ("resource", "connector", "validate-raw", "validate-inputs", "invalidate"):
         try:
-            if args.mode == "invalidate":
+            if args.mode == "connector":
+                print(json.dumps(connector_shutdown(connector_command, args.name, args.owner, args.run_id,
+                                                    args.image, pathlib.Path(args.audit))))
+            elif args.mode == "invalidate":
                 invalidate_collection(pathlib.Path(args.profiles), pathlib.Path(args.raw), pathlib.Path(args.artifacts))
             elif args.mode == "validate-raw":
                 print(json.dumps(raw_files(pathlib.Path(args.directory)), sort_keys=True))

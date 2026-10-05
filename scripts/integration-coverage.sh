@@ -802,7 +802,8 @@ fi
 # fails closed. A second instrumented start loads one file, then stops. That
 # file resolves an env secret and shape-checks Kubernetes and Vault references.
 # It does not dial either provider. Counters share the server GOCOVERDIR.
-# A start that never logs the fingerprint fails the journey.
+# Loaded fingerprint and actual complete public /health readiness are required
+# before signalling; a failure retains only safe bounded diagnostics.
 load_connector_for_coverage() {
   cat > "$ARTIFACTS/connectors.yaml" <<'YAML'
 version: 1
@@ -875,23 +876,12 @@ YAML
   fi
   coverage_journey_track_id "$CONNECTOR_ID"
   coverage_journey_resource owned container "$CONNECTOR_ID" >/dev/null || return 1
-  connector_ready=0
-  for _ in $(seq 1 60); do
-    # Match a captured string. `docker logs | grep -q` under pipefail exits 141:
-    # grep closes the pipe on the first hit while caesium is still writing
-    # startup logs, so a present fingerprint line is reported missing.
-    connector_logs="$("$CONTAINER_CLI" logs "$CONNECTOR_NAME" 2>&1 || true)"
-    if [[ "$connector_logs" == *"connector config loaded"* ]]; then
-      connector_ready=1
-      break
-    fi
-    running="$("$CONTAINER_CLI" inspect -f '{{.State.Running}}' "$CONNECTOR_NAME" 2>/dev/null || true)"
-    if [[ "$running" == "false" ]]; then
-      break
-    fi
-    sleep 1
-  done
-  connector_stopped="$(coverage_journey_resource stop container "$CONNECTOR_ID")" || return 1
+  if ! connector_stopped="$(python3 "$ROOT/scripts/coverage-journeys.py" connector \
+    --name "$CONNECTOR_ID" --owner "$CANDIDATE_SHA" --run-id "$ID" \
+    --image "$IMAGE_ID" --audit "$AUDIT")"; then
+    log "connector loaded-fingerprint/health/clean-stop guard refused; see safe audit/connector-diagnostics.json when available"
+    return 1
+  fi
   if ! printf '%s' "$connector_stopped" | python3 -c 'import json,sys; d=json.load(sys.stdin); s=d["State"]; sys.exit(0 if d["flush_rc"]==0 and d["stop_rc"]==0 and s.get("ExitCode")==0 and s.get("OOMKilled") is False and s.get("Running") is False else 1)'; then
     return 1
   fi
@@ -899,11 +889,6 @@ YAML
   printf '%s\n' "$connector_stopped" >"$AUDIT/connector-process.json"
   coverage_journey_remove_owned "$CONNECTOR_ID" || return 1
   COVERAGE_JOURNEY_SERVER_DIRS+=("$RAW/connectors")
-  if [[ "$connector_ready" -ne 1 ]]; then
-    log "connector start did not log a loaded fingerprint; logs:"
-    "$CONTAINER_CLI" logs "$CONNECTOR_NAME" || true
-    return 1
-  fi
   return 0
 }
 
