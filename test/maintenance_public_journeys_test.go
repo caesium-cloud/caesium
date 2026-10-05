@@ -145,7 +145,10 @@ func (s *IntegrationTestSuite) TestFreshnessCronTickSkipsFreshOutput() {
 	command := fmt.Sprintf("echo '##caesium::output {\"wm\":\"%s\"}'", watermark)
 	registeredAfter := time.Now().UTC().Truncate(time.Minute)
 	jobID := s.maintenanceApply(alias, maintenanceManifest(alias, "* * * * *", metadata, command, step))
-	journeyDeadline := time.Now().Add(150 * time.Second)
+	// Trigger discovery polls once per minute. Registration just after that
+	// poll can need two minutes before the first real cron boundary, followed
+	// by another minute for the fresh-output skip.
+	journeyDeadline := time.Now().Add(225 * time.Second)
 	var taskID string
 	s.T().Cleanup(func() {
 		status, _ := s.maintenanceHTTPContext(context.WithoutCancel(s.T().Context()), http.MethodPut, "/v1/jobs/"+jobID+"/pause", nil)
@@ -170,7 +173,7 @@ func (s *IntegrationTestSuite) TestFreshnessCronTickSkipsFreshOutput() {
 	})
 	taskID = s.maintenanceTaskID(jobID)
 	var runID string
-	s.maintenancePoll(75*time.Second, func() bool {
+	s.maintenancePoll(135*time.Second, func() bool {
 		runs := s.maintenanceRuns(jobID)
 		if len(runs) == 0 {
 			return false
@@ -228,7 +231,7 @@ func (s *IntegrationTestSuite) TestFreshnessCronTickSkipsFreshOutput() {
 	s.Require().Equal("fresh", state.State.Status)
 	s.Require().Equal(watermark, state.State.Watermark)
 	s.Require().Equal(runID, state.State.LastRunID)
-	s.Require().True(time.Now().Before(journeyDeadline), "both real cron ticks must complete within 150s")
+	s.Require().True(time.Now().Before(journeyDeadline), "trigger discovery and both real cron ticks must complete within 225s")
 }
 
 func (s *IntegrationTestSuite) TestAutomaticRetryDelayConstantAndBackoff() {
