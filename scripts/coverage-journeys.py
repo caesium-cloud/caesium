@@ -23,6 +23,7 @@ import secrets
 import select
 import signal
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -745,14 +746,16 @@ class Collector:
             self.builder,
             "sh",
             "-c",
-            "go build -tags=integration -o /fixture/sso-idp ./test/fixtures/sso-idp",
+            "set -eu; go build -tags=integration -o /fixture/sso-idp ./test/fixtures/sso-idp; "
+            "chmod 0755 /fixture/sso-idp; test -x /fixture/sso-idp",
             timeout=900,
         )
-        if not self.binary_path.is_file():
-            raise JourneyError("builder did not produce the SSO fixture executable")
-        self.binary_path.chmod(0o755)
-        if self.binary_path.stat().st_size == 0:
-            raise JourneyError("SSO fixture executable is empty")
+        try:
+            binary = self.binary_path.lstat()
+        except OSError as exc:
+            raise JourneyError("builder did not produce the SSO fixture executable") from exc
+        if not stat.S_ISREG(binary.st_mode) or binary.st_size == 0 or not binary.st_mode & 0o111:
+            raise JourneyError("builder did not produce a nonempty regular executable SSO fixture")
 
     def write_secrets(self) -> None:
         client_secret = secrets.token_urlsafe(48)

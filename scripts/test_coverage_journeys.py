@@ -51,6 +51,57 @@ class FaultChecks(unittest.TestCase):
           'Config': {'Labels': {b.LABEL_OWNER: OWNER, b.LABEL_RUN: 'owned', b.LABEL_LANE: 'lane'}},
           'State': {'Running': False, 'ExitCode': 0, 'OOMKilled': False}}
 
+    def test_sso_fixture_mode_is_set_in_builder_and_host_refuses_unexecutable_output(self):
+        # The mocked builder deliberately does not produce an accepted helper;
+        # this control only proves that the host no longer chmods its output
+        # and that non-executable/symlink outputs remain ineligible.
+        for output_kind in ('non-executable', 'symlink'):
+            with self.subTest(output_kind=output_kind):
+                c = self.collector()
+                c.fixture_dir = self.tmp / ('fixture-' + output_kind)
+                c.binary_path = c.fixture_dir / 'sso-idp'
+                calls = []
+                original_chmod = Path.chmod
+                host_binary_chmods = []
+
+                def docker_run(*args, check=True, **kwargs):
+                    calls.append(args)
+                    if args[:2] == ('container', 'inspect'):
+                        name = args[2]
+                        return subprocess.CompletedProcess(
+                            args, 1, '', 'Error: No such container: ' + name)
+                    if args[0] == 'run':
+                        if output_kind == 'symlink':
+                            target = c.fixture_dir / 'target'
+                            target.write_bytes(b'not-a-compiled-fixture')
+                            original_chmod(target, 0o755)
+                            c.binary_path.symlink_to(target.name)
+                        else:
+                            c.binary_path.write_bytes(b'not-a-compiled-fixture')
+                        return subprocess.CompletedProcess(args, 0, '', '')
+                    self.fail('unexpected fixture builder operation ' + repr(args))
+
+                def deny_host_binary_chmod(path, mode, **kwargs):
+                    if path == c.binary_path:
+                        host_binary_chmods.append(mode)
+                        raise PermissionError('simulated builder-owned output')
+                    return original_chmod(path, mode, **kwargs)
+
+                c.docker_run = docker_run
+                with patch.object(Path, 'chmod', deny_host_binary_chmod):
+                    with self.assertRaises(b.JourneyError):
+                        c.build_fixture()
+
+                self.assertEqual(host_binary_chmods, [])
+                builder_args = next(args for args in calls if args[0] == 'run')
+                script = builder_args[builder_args.index('-c') + 1]
+                self.assertIn('go build -tags=integration -o /fixture/sso-idp ./test/fixtures/sso-idp', script)
+                self.assertIn('chmod 0755 /fixture/sso-idp; test -x /fixture/sso-idp', script)
+                self.assertEqual(builder_args[-4:-1], (IMAGE, 'sh', '-c'))
+                self.assertIn('--pull=never', builder_args)
+                self.assertIn('--platform', builder_args)
+                self.assertEqual(builder_args[builder_args.index('--platform') + 1], c.platform)
+
     def command(self, info=None, fault=None):
         state = {'removed': False, 'mutations': []}
         info = info or self.info()
