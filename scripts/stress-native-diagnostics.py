@@ -140,12 +140,13 @@ def capture(argv):
                 except subprocess.TimeoutExpired:
                     failure = "deadline"
         finally:
-            if failure or process.poll() is None:
-                # This child only observes native events, never a fixture.
-                try:
-                    os.killpg(process.pid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
+            # A successful leader can exit while a same-group descendant has
+            # closed its pipes and remains alive. Always terminate the owned
+            # observer group; these processes never execute the fixture.
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
             process.wait()
             process.stdout.close()
     return (None, failure) if failure else (bytes(body), None)

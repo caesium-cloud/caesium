@@ -100,6 +100,40 @@ class StressNativeDiagnosticsTests(unittest.TestCase):
             self.assertIsNotNone(children[-1].poll())
             self.assertTrue(children[-1].stdout.closed)
 
+    def test_successful_leader_cannot_leave_closed_pipe_descendant_alive(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            pid_file = Path(temporary) / "descendant"
+            code = ("import subprocess,sys,pathlib;"
+                    "child=subprocess.Popen([sys.executable,'-c','import time;time.sleep(5)'],"
+                    "stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL);"
+                    "pathlib.Path(" + repr(str(pid_file)) + ").write_text(str(child.pid));"
+                    "sys.stdout.buffer.write(" + repr(event()) + ")")
+            body, error = MODULE.capture([sys.executable, "-c", code])
+            self.assertIsNone(error)
+            self.assertEqual(body, event())
+            child = int(pid_file.read_text())
+            try:
+                deadline = time.monotonic() + 2
+                while time.monotonic() < deadline:
+                    try:
+                        os.kill(child, 0)
+                    except ProcessLookupError:
+                        break
+                    # An orphan may await the host's reaper after SIGKILL. It
+                    # must already be dead, never a surviving observer writer.
+                    status = subprocess.run(["ps", "-o", "stat=", "-p", str(child)],
+                                            capture_output=True, text=True, timeout=1, check=False)
+                    if status.stdout.strip().startswith("Z"):
+                        break
+                    time.sleep(.01)
+                else:
+                    self.fail("successful capture left its same-group descendant alive")
+            finally:
+                try:
+                    os.kill(child, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+
     def test_missing_runtime_or_unbound_snapshot_cannot_query_or_qualify(self):
         self.assertEqual(MODULE.capture(["/missing/stress-runtime"]), (None, "command-unavailable"))
         with tempfile.TemporaryDirectory() as temporary:
