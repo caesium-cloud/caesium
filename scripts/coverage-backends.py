@@ -969,7 +969,10 @@ class Driver:
         bindings = ports.get('8080/tcp', [])
         require(type(bindings) is list and len(bindings) == 1 and type(bindings[0]) is dict
                 and bindings[0].get('HostIp') == '127.0.0.1', 'unexpected backend server port binding')
-        self.base = 'http://127.0.0.1:' + bindings[0]['HostPort']
+        port = bindings[0].get('HostPort')
+        require(type(port) is str and re.fullmatch(r'[0-9]{1,5}', port)
+                and 1 <= int(port) <= 65535, 'invalid backend server host port')
+        self.base = 'http://127.0.0.1:' + port
         self.server_name = name
         self._wait_for_server()
         self.server_raw = raw

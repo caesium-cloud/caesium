@@ -530,13 +530,16 @@ class BackendServerBindingGuards(unittest.TestCase):
         return driver, calls, identity
 
     def test_kube_readiness_uses_fresh_owned_binding_after_attachment(self):
-        driver, calls, identity = self.driver()
-        driver.start_server()
-        self.assertEqual(driver.base, 'http://127.0.0.1:32771')
-        self.assertEqual(calls[-3:], [('network', 'connect', 'kind', identity),
-                                    ('container', 'inspect', identity),
-                                    ('readiness', 'http://127.0.0.1:32771')])
-        self.assertEqual(calls.count(('container', 'inspect', identity)), 2)
+        for port in ('32771', '1', '65535', '00001'):
+            with self.subTest(port=port):
+                driver, calls, identity = self.driver(
+                    lambda obj: obj['NetworkSettings']['Ports']['8080/tcp'][0].update(HostPort=port))
+                driver.start_server()
+                self.assertEqual(driver.base, 'http://127.0.0.1:' + port)
+                self.assertEqual(calls[-3:], [('network', 'connect', 'kind', identity),
+                                            ('container', 'inspect', identity),
+                                            ('readiness', 'http://127.0.0.1:' + port)])
+                self.assertEqual(calls.count(('container', 'inspect', identity)), 2)
 
     def test_foreign_or_changed_post_attachment_identity_never_reaches_readiness(self):
         changes = [lambda obj: obj['Config']['Labels'].update({b.LABEL_OWNER: 'foreign'}),
@@ -560,7 +563,11 @@ class BackendServerBindingGuards(unittest.TestCase):
                    lambda obj: obj['NetworkSettings']['Ports']['8080/tcp'][0].update(HostIp='0.0.0.0'),
                    lambda obj: obj['NetworkSettings'].update(Ports=None),
                    lambda obj: obj['NetworkSettings']['Ports'].update({'8080/tcp': None}),
-                   lambda obj: obj['NetworkSettings']['Ports'].clear()]
+                   lambda obj: obj['NetworkSettings']['Ports'].clear(),
+                   lambda obj: obj['NetworkSettings']['Ports']['8080/tcp'][0].pop('HostPort')]
+        for port in ('', 'abc', '0', '65536', '32771/other', '327710', '32771\n',
+                     ' 32771', '32771 ', '+32771', '\uff11\uff12\uff13', None, 32771, 32771.0, True, False):
+            changes.append(lambda obj, value=port: obj['NetworkSettings']['Ports']['8080/tcp'][0].update(HostPort=value))
         for change in changes:
             with self.subTest(change=changes.index(change)):
                 driver, calls, _ = self.driver(change)
