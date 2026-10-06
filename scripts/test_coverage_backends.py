@@ -482,6 +482,100 @@ class BackendGuards(unittest.TestCase):
             b.fresh_directory(link / 'new')
 
 
+class BackendServerBindingGuards(unittest.TestCase):
+    def driver(self, after=None, backend='kubernetes'):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        driver = object.__new__(b.Driver)
+        driver.output = Path(temporary.name)
+        driver.owner, driver.ownership_id = 'owned-backend', SHA
+        driver.context = {'coverage_id': 'owned-run', 'binary_sha256': 'a' * 64}
+        driver.image, driver.backend = IMAGE, backend
+        driver.network, driver.namespace = 'owned-network', 'owned-namespace'
+        driver.kube_dir, driver.socket_volume = driver.output / 'kube', 'owned-socket'
+        identity = 'c' * 64
+        before = {'Id': identity, 'Name': '/owned-backend-server', 'Image': IMAGE,
+                  'Config': {'Labels': {b.LABEL_OWNER: SHA, b.LABEL_RUN: 'owned-run',
+                                        'caesium.coverage.backend-owner': driver.owner}},
+                  'NetworkSettings': {'Ports': {'8080/tcp': [{'HostIp': '127.0.0.1', 'HostPort': '32770'}]}}}
+        current = copy.deepcopy(before)
+        current['NetworkSettings']['Ports']['8080/tcp'][0]['HostPort'] = '32771'
+        if after is not None:
+            after(current)
+        calls, connected = [], False
+
+        def docker(*args, **kwargs):
+            nonlocal connected
+            calls.append(args)
+            if args[0] == 'run':
+                stdout = identity
+            elif args == ('exec', identity, 'sha256sum', '/bin/caesium'):
+                stdout = 'a' * 64 + '  /bin/caesium\n'
+            elif args == ('network', 'connect', 'kind', identity):
+                self.assertEqual(backend, 'kubernetes')
+                connected, stdout = True, ''
+            elif args == ('container', 'inspect', identity):
+                stdout = json.dumps([current if connected else before])
+            else:
+                raise AssertionError('unexpected fake Docker command')
+            return subprocess.CompletedProcess(args, 0, stdout, '')
+
+        driver.docker = docker
+        driver.register = lambda *args: None
+        driver.volume = lambda suffix: 'owned-' + suffix
+
+        def readiness():
+            calls.append(('readiness', driver.base))
+        driver._wait_for_server = readiness
+        return driver, calls, identity
+
+    def test_kube_readiness_uses_fresh_owned_binding_after_attachment(self):
+        driver, calls, identity = self.driver()
+        driver.start_server()
+        self.assertEqual(driver.base, 'http://127.0.0.1:32771')
+        self.assertEqual(calls[-3:], [('network', 'connect', 'kind', identity),
+                                    ('container', 'inspect', identity),
+                                    ('readiness', 'http://127.0.0.1:32771')])
+        self.assertEqual(calls.count(('container', 'inspect', identity)), 2)
+
+    def test_foreign_or_changed_post_attachment_identity_never_reaches_readiness(self):
+        changes = [lambda obj: obj['Config']['Labels'].update({b.LABEL_OWNER: 'foreign'}),
+                   lambda obj: obj['Config']['Labels'].update({b.LABEL_RUN: 'foreign'}),
+                   lambda obj: obj['Config']['Labels'].update({'caesium.coverage.backend-owner': 'foreign'}),
+                   lambda obj: obj.update(Id='d' * 64),
+                   lambda obj: obj.update(Name='/foreign'),
+                   lambda obj: obj.update(Image=INDEX)]
+        for change in changes:
+            with self.subTest(change=changes.index(change)):
+                driver, calls, identity = self.driver(change)
+                with self.assertRaises(b.Refused):
+                    driver.start_server()
+                self.assertEqual(calls[-2:], [('network', 'connect', 'kind', identity),
+                                            ('container', 'inspect', identity)])
+                self.assertFalse(any(call[0] == 'readiness' for call in calls))
+
+    def test_invalid_post_attachment_binding_never_reaches_readiness(self):
+        changes = [lambda obj: obj['NetworkSettings']['Ports']['8080/tcp'].append(
+                       {'HostIp': '127.0.0.1', 'HostPort': '32772'}),
+                   lambda obj: obj['NetworkSettings']['Ports']['8080/tcp'][0].update(HostIp='0.0.0.0'),
+                   lambda obj: obj['NetworkSettings'].update(Ports=None),
+                   lambda obj: obj['NetworkSettings']['Ports'].update({'8080/tcp': None}),
+                   lambda obj: obj['NetworkSettings']['Ports'].clear()]
+        for change in changes:
+            with self.subTest(change=changes.index(change)):
+                driver, calls, _ = self.driver(change)
+                with self.assertRaises(b.Refused):
+                    driver.start_server()
+                self.assertFalse(any(call[0] == 'readiness' for call in calls))
+
+    def test_podman_retains_single_network_binding_selection(self):
+        driver, calls, identity = self.driver(backend='podman')
+        driver.start_server()
+        self.assertEqual(driver.base, 'http://127.0.0.1:32770')
+        self.assertEqual(calls.count(('container', 'inspect', identity)), 1)
+        self.assertFalse(any(call[:2] == ('network', 'connect') for call in calls))
+
+
 @contextmanager
 def loopback_http(responses):
     class Handler(socketserver.BaseRequestHandler):

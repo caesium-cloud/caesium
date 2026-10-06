@@ -960,9 +960,15 @@ class Driver:
         self.stage = 'server-network'
         if self.backend == 'kubernetes':
             self.docker('network', 'connect', 'kind', obj['Id'])
+            obj = self.owned('container', self.server_id)
+            require(obj.get('Id') == self.server_id and obj.get('Name') == '/' + name
+                    and obj.get('Image') == self.image, 'post-attach backend server identity changed')
         self.stage = 'server-binding'
-        bindings = obj['NetworkSettings']['Ports'].get('8080/tcp', [])
-        require(len(bindings) == 1 and bindings[0]['HostIp'] == '127.0.0.1', 'unexpected backend server port binding')
+        ports = obj['NetworkSettings'].get('Ports')
+        require(type(ports) is dict, 'backend server port bindings unavailable')
+        bindings = ports.get('8080/tcp', [])
+        require(type(bindings) is list and len(bindings) == 1 and type(bindings[0]) is dict
+                and bindings[0].get('HostIp') == '127.0.0.1', 'unexpected backend server port binding')
         self.base = 'http://127.0.0.1:' + bindings[0]['HostPort']
         self.server_name = name
         self._wait_for_server()
