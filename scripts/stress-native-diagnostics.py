@@ -109,12 +109,13 @@ def capture(argv):
                                    start_new_session=True)
     except OSError:
         return None, "command-unavailable"
-    body = bytearray()
-    failure = None
-    deadline = time.monotonic() + QUERY_SECONDS
-    with selectors.DefaultSelector() as selector:
-        selector.register(process.stdout, selectors.EVENT_READ)
-        try:
+    # Ownership begins at successful spawn, including selector setup failures.
+    try:
+        body = bytearray()
+        failure = None
+        deadline = time.monotonic() + QUERY_SECONDS
+        with selectors.DefaultSelector() as selector:
+            selector.register(process.stdout, selectors.EVENT_READ)
             while True:
                 if INTERRUPTED:
                     failure = "interrupted"
@@ -139,16 +140,16 @@ def capture(argv):
                         failure = "command-failed"
                 except subprocess.TimeoutExpired:
                     failure = "deadline"
-        finally:
-            # A successful leader can exit while a same-group descendant has
-            # closed its pipes and remains alive. Always terminate the owned
-            # observer group; these processes never execute the fixture.
-            try:
-                os.killpg(process.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-            process.wait()
-            process.stdout.close()
+    finally:
+        # A successful leader can exit while a same-group descendant has
+        # closed its pipes and remains alive. Always terminate the owned
+        # observer group; these processes never execute the fixture.
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        process.wait()
+        process.stdout.close()
     return (None, failure) if failure else (bytes(body), None)
 
 

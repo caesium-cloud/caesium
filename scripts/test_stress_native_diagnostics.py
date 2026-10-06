@@ -1,5 +1,6 @@
 """Adversarial bounded reduction and actual read-only subprocess controls."""
 import importlib.util
+import errno
 import json
 import os
 import signal
@@ -99,6 +100,34 @@ class StressNativeDiagnosticsTests(unittest.TestCase):
             self.assertEqual(error, reason)
             self.assertIsNotNone(children[-1].poll())
             self.assertTrue(children[-1].stdout.closed)
+
+    def test_actual_spawned_child_is_joined_when_selector_setup_fails(self):
+        original = subprocess.Popen
+        original_selector = MODULE.selectors.DefaultSelector
+        children = []
+        def spawn(*args, **kwargs):
+            child = original(*args, **kwargs)
+            children.append(child)
+            return child
+        def registration_failure():
+            selector = original_selector()
+            selector.register = mock.Mock(side_effect=OSError(errno.EMFILE, "SECRET_FD_ERROR"))
+            return selector
+        for fault in [OSError(errno.EMFILE, "SECRET_FD_ERROR"), registration_failure]:
+            with self.subTest(phase="construct" if isinstance(fault, OSError) else "register"):
+                try:
+                    with mock.patch.object(MODULE.subprocess, "Popen", spawn), \
+                         mock.patch.object(MODULE.selectors, "DefaultSelector", side_effect=fault):
+                        with self.assertRaises(OSError):
+                            MODULE.capture([sys.executable, "-c", "import time;time.sleep(5)"])
+                    self.assertIsNotNone(children[-1].poll(), "selector failure left the owned child alive")
+                    self.assertTrue(children[-1].stdout.closed, "selector failure leaked the owned read pipe")
+                finally:
+                    child = children[-1]
+                    if child.poll() is None:
+                        os.killpg(child.pid, signal.SIGKILL)
+                    child.wait()
+                    child.stdout.close()
 
     def test_successful_leader_cannot_leave_closed_pipe_descendant_alive(self):
         with tempfile.TemporaryDirectory() as temporary:
