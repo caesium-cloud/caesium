@@ -9,6 +9,27 @@ phase="healthy"
 reason="command_failed"
 cleanup_attempted=false
 scratch=$(mktemp -d)
+diagnostic_image=""
+diagnostic_since=""
+diagnostic_helper="${BASH_SOURCE[0]%/*}/../../scripts/stress-native-diagnostics.py"
+
+# Optional observations cannot change qualification or release timing. Cgroup
+# counters remain unavailable: a shared Linux daemon-host identity is unproved.
+native_diagnostics() {
+    if ! command -v python3 >/dev/null 2>&1 || [ ! -f "$diagnostic_helper" ]; then
+        echo 'stress smoke: native_diagnostics=unavailable observer_missing' >&2
+        return 0
+    fi
+    if python3 -I "$diagnostic_helper" --runtime "$runtime_cli" --cid "$ctr" \
+        --image "$diagnostic_image" --snapshot "$scratch/diagnostic-snapshot" \
+        --journal "$scratch/terminal-observations" --since "$diagnostic_since" \
+        >"$scratch/diagnostic-reduced" 2>/dev/null; then
+        cat "$scratch/diagnostic-reduced" >&2 || true
+    else
+        echo 'stress smoke: native_diagnostics=unavailable observer_failed' >&2
+    fi
+    return 0
+}
 
 fail() {
     reason="$1"
@@ -55,9 +76,11 @@ read_state() {
 snapshot() {
     [ -n "$ctr" ] || return 0
     if read_state; then
+        printf '%s\n' "$native_state" >"$scratch/diagnostic-snapshot" || true
         printf 'stress smoke: cid=%s image=%s status=%s running=%s exit=%s oom=%s memory=%s swap=%s\n' \
             "$state_id" "$state_image" "$state_status" "$running" "$exit_code" "$oom" "$memory" "$swap" >&2
     else
+        rm -f "$scratch/diagnostic-snapshot" || true
         printf 'stress smoke: cid=%s inspect_unavailable rc=%s\n' "$ctr" "$inspect_status" >&2
     fi
     if read_logs; then
@@ -67,6 +90,7 @@ snapshot() {
     else
         printf 'stress smoke: cid=%s logs_unavailable rc=%s\n' "$ctr" "$log_status" >&2
     fi
+    native_diagnostics
 }
 
 cleanup() {
@@ -120,6 +144,7 @@ grep -Fx 'completed' "$scratch/safe-logs" >/dev/null || fail healthy_completion_
 # A waiting process must not touch the large allocation before the harness has
 # set its limit. Its OOM is the kernel verdict, never a fixture-chosen exit 137.
 phase="allocate_waiter"
+diagnostic_since=$(date +%s 2>/dev/null) || diagnostic_since=""
 command_status=0
 ctr=$("$runtime_cli" run -d --memory=64m --memory-swap=64m "$stress_ref" \
     --memory-mib 128 --wait-file /tmp/release --wait-timeout 10s --hold 2s 2>/dev/null) || command_status=$?
@@ -142,6 +167,7 @@ for ((poll=0; poll<50; poll++)); do
 done
 [ "$ready" = true ] || fail barrier_marker_missing
 read_state || fail barrier_inspect_failed "$inspect_status"
+diagnostic_image="$state_image"
 [ "$running" = true ] || fail waiter_not_running
 [ "$memory" = 67108864 ] && [ "$swap" = 67108864 ] || fail barrier_memory_mismatch
 read_logs || fail barrier_logs_failed "$log_status"
@@ -154,6 +180,7 @@ phase="terminal"
 terminal=false
 for ((poll=0; poll<100; poll++)); do
     read_state || fail terminal_inspect_failed "$inspect_status"
+    printf '%s|%s\n' "$poll" "$native_state" >>"$scratch/terminal-observations" || true
     if [ "$running" = false ]; then
         [ "$state_status" = exited ] || fail wrong_terminal_status
         [ "$exit_code" = 137 ] || fail wrong_terminal_exit

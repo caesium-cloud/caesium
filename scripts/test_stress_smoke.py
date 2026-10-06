@@ -1,5 +1,7 @@
 """Exercise the actual smoke script with a hermetic native-runtime contract."""
 import os
+import json
+import shutil
 from pathlib import Path
 import subprocess
 import tempfile
@@ -70,6 +72,7 @@ inspect)
         case "$SCENARIO" in
             delayed_oom) if [ "$n" -lt 6 ]; then oom=false; fi ;;
             no_oom|logs_fail_cleanup_fail) oom=false ;;
+            late_oom_observation) if [ "$n" -le 100 ]; then oom=false; fi ;;
             wrong_exit) code=2; oom=false ;;
             wrong_status) native_status=dead ;;
             running_forever) native_status=running; running=true; code=0; oom=false ;;
@@ -102,13 +105,22 @@ rm)
         echo SECRET_NATIVE >&2; exit 6
     fi
     ;;
+events)
+    [[ " $* " == *" --filter container=$cid "* ]] || exit 12
+    [[ " $* " == *" --filter event=oom --filter event=die --filter event=kill "* ]] || exit 12
+    [ "${!#}" = '{{json .}}' ] || exit 12
+    if [ "$SCENARIO" = event_failure ]; then echo SECRET_NATIVE >&2; exit 9; fi
+    if [ "$SCENARIO" = event_malformed ]; then echo SECRET_EVENT; exit 0; fi
+    stamp="$3"
+    printf '{"Type":"container","Action":"oom","Actor":{"ID":"%s","Attributes":{"SECRET_ENV":"private"}},"timeNano":%s}\n' "$cid" "$((stamp*1000000000))"
+    ;;
 *) exit 12 ;;
 esac
 '''
 
 
 class StressSmokeTests(unittest.TestCase):
-    def run_case(self, scenario):
+    def run_case(self, scenario, observer=True):
         with tempfile.TemporaryDirectory() as temporary:
             fixture = Path(temporary)
             (fixture / "scratch").mkdir()
@@ -118,8 +130,11 @@ class StressSmokeTests(unittest.TestCase):
             sleep = fixture / "sleep"
             sleep.write_text("#!/usr/bin/env bash\nexit 0\n")
             sleep.chmod(0o700)
+            if not observer:
+                for command in ["bash", "mktemp", "awk", "cat", "grep", "rm", "date"]:
+                    (fixture / command).symlink_to(shutil.which(command))
             env = dict(os.environ, FIXTURE=str(fixture), SCENARIO=scenario,
-                       TMPDIR=str(fixture / "scratch"), PATH=str(fixture) + os.pathsep + os.environ["PATH"])
+                       TMPDIR=str(fixture / "scratch"), PATH=str(fixture) + (os.pathsep + os.environ["PATH"] if observer else ""))
             result = subprocess.run(["/bin/bash", str(ROOT / "build/stress/smoke.sh"), str(cli), "fixture:pinned"],
                                     env=env, capture_output=True, text=True, timeout=10, check=False)
             journal = (fixture / "journal").read_text().splitlines()
@@ -218,7 +233,7 @@ class StressSmokeTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("fixture_logs_begin", result.stderr)
         self.assertNotIn("oversize", result.stderr)
-        self.assertLess(len(result.stderr), 1024)
+        self.assertLess(len(result.stderr), 65536)
 
     def test_missing_marker_and_release_failure_keep_static_diagnostics(self):
         self.assert_refused("no_marker", "barrier_marker_missing")
@@ -235,9 +250,40 @@ class StressSmokeTests(unittest.TestCase):
         result, journal, _ = self.assert_refused("logs_fail_cleanup_fail", "terminal_oom_unconfirmed")
         self.assertIn("removal_failed rc=6", result.stderr)
         remove = journal.index("rm -f " + CID)
-        self.assertTrue(journal[remove - 2].startswith("inspect "))
-        self.assertTrue(journal[remove - 1].startswith("logs "))
+        self.assertTrue(journal[remove - 3].startswith("inspect "))
+        self.assertTrue(journal[remove - 2].startswith("logs "))
+        self.assertTrue(journal[remove - 1].startswith("events "))
         self.assertEqual(sum(line == "rm -f " + CID for line in journal), 1)
+
+    def test_optional_events_cannot_overrule_original_nonoom_failure(self):
+        for scenario in ["no_oom", "late_oom_observation"]:
+            with self.subTest(scenario=scenario):
+                result, _, _ = self.assert_refused(scenario, "terminal_oom_unconfirmed")
+                value = next(json.loads(line) for line in result.stderr.splitlines() if line.startswith('{"schema_version":'))
+                self.assertEqual(value["journal"]["polls"], 100)
+                self.assertEqual(len(value["journal"]["transitions"]), 1)
+                self.assertFalse(value["journal"]["transitions"][0]["state"]["oom"])
+                self.assertEqual(value["snapshot"]["oom"], scenario == "late_oom_observation")
+                self.assertEqual(value["events"]["records"][0]["action"], "oom")
+                self.assertEqual(value["qualification"], "unchanged")
+
+    def test_optional_capture_failure_does_not_change_healthy_qualification(self):
+        for scenario, reason in [("event_failure", "command-failed"), ("event_malformed", "invalid-or-unbound")]:
+            with self.subTest(scenario=scenario):
+                result, _, _ = self.run_case(scenario)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn(PASS, result.stdout)
+                value = next(json.loads(line) for line in result.stderr.splitlines() if line.startswith('{"schema_version":'))
+                self.assertEqual(value["events"], {"outcome": "unavailable", "reason": reason})
+
+    def test_missing_optional_python_preserves_original_success_and_refusal(self):
+        for scenario, status in [("immediate", 0), ("no_oom", 1)]:
+            with self.subTest(scenario=scenario):
+                result, journal, _ = self.run_case(scenario, observer=False)
+                self.assertEqual(result.returncode, status, result.stderr)
+                self.assertEqual(PASS in result.stdout, status == 0)
+                self.assertIn("native_diagnostics=unavailable observer_missing", result.stderr)
+                self.assertFalse(any(line.startswith("events ") for line in journal))
 
     def test_foreground_and_acknowledgement_failures_do_not_remove_unknown_id(self):
         for scenario, reason, rc in [("healthy_fail", "healthy_run_failed", 5),
