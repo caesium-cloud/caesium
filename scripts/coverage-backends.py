@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import errno
 import hashlib
 import http.client
 import json
@@ -17,6 +18,8 @@ import re
 import secrets
 import shutil
 import signal
+import socket
+import ssl
 import subprocess
 import sys
 import tarfile
@@ -55,6 +58,60 @@ def failure_category(error):
         if isinstance(error, kind):
             return category
     return 'unexpected-error'
+
+
+TRANSPORT_CATEGORIES = frozenset({'refused', 'timeout', 'reset', 'dns', 'tls', 'other', 'unavailable'})
+
+
+def transport_category(error):
+    # Exact stdlib types only: subclass attributes/strings are not evidence.
+    seen = set()
+    for _ in range(4):
+        if id(error) in seen:
+            return 'unavailable'
+        seen.add(id(error))
+        kind = type(error)
+        if kind is urllib.error.URLError:
+            values = object.__getattribute__(error, '__dict__')
+            if type(values) is not dict or len(values) > 16:
+                return 'unavailable'
+            error = next((value for key, value in values.items()
+                          if type(key) is str and key == 'reason'), None)
+            continue
+        if kind is TimeoutError:
+            return 'timeout'
+        if kind is ConnectionRefusedError:
+            return 'refused'
+        if any(kind is candidate for candidate in (ConnectionResetError, ConnectionAbortedError, BrokenPipeError)):
+            return 'reset'
+        if kind is socket.gaierror:
+            return 'dns'
+        if any(kind is candidate for candidate in (ssl.SSLError, ssl.SSLCertVerificationError, ssl.SSLEOFError,
+                                                  ssl.SSLZeroReturnError, ssl.SSLWantReadError, ssl.SSLWantWriteError)):
+            return 'tls'
+        if kind is OSError:
+            code = OSError.errno.__get__(error)
+            if type(code) is not int or not 0 <= code <= 2147483647:
+                return 'unavailable'
+            return {errno.ECONNREFUSED: 'refused', errno.ETIMEDOUT: 'timeout',
+                    errno.ECONNRESET: 'reset', errno.ECONNABORTED: 'reset', errno.EPIPE: 'reset'}.get(code, 'other')
+        if any(kind is candidate for candidate in (http.client.HTTPException, http.client.RemoteDisconnected,
+                                                  http.client.IncompleteRead, http.client.BadStatusLine,
+                                                  http.client.LineTooLong, http.client.UnknownProtocol,
+                                                  http.client.UnknownTransferEncoding, http.client.NotConnected,
+                                                  http.client.InvalidURL, http.client.CannotSendRequest,
+                                                  http.client.CannotSendHeader, http.client.ResponseNotReady)):
+            return 'other'
+        return 'unavailable'
+    return 'unavailable'
+
+
+def bounded_transport_counts(value):
+    if type(value) is not dict or len(value) > len(TRANSPORT_CATEGORIES):
+        return {}
+    return {key: count for key, count in value.items()
+            if type(key) is str and key in TRANSPORT_CATEGORIES
+            and type(count) is int and 0 <= count <= 1000000}
 
 
 def require(condition, message):
@@ -385,6 +442,9 @@ class Driver:
         attempts, status = source.get('attempts'), source.get('status')
         health['attempts'] = attempts if type(attempts) is int and 0 <= attempts <= 1000000 else None
         health['status'] = status if type(status) is int and 100 <= status <= 599 else None
+        category = source.get('transport_last')
+        health['transport_last'] = category if type(category) is str and category in TRANSPORT_CATEGORIES else 'unavailable'
+        health['transport_counts'] = bounded_transport_counts(source.get('transport_counts'))
         value = {'schema_version': 1, 'phase': phase, 'exception_category': failure_category(error),
                  'health': health, 'native': {'outcome': 'not-acknowledged'}}
         snapshot_stage, inspect_status = 'identity', None
@@ -483,6 +543,11 @@ class Driver:
         except (urllib.error.URLError, OSError, http.client.HTTPException) as exc:
             if health:
                 self.last_health['outcome'] = 'transport-error' if self.last_health['status'] is None else 'read-error'
+            if health and not isinstance(exc, urllib.error.HTTPError):
+                category = transport_category(exc)
+                counts = bounded_transport_counts(self.last_health.get('transport_counts'))
+                counts[category] = min(counts.get(category, 0) + 1, 1000000)
+                self.last_health.update(transport_last=category, transport_counts=counts)
             if isinstance(exc, urllib.error.HTTPError):
                 if health:
                     self.last_health.update(outcome='http-error', status=exc.code if type(exc.code) is int and 100 <= exc.code <= 599 else None)

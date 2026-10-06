@@ -770,5 +770,151 @@ class BackendFailureDiagnostics(unittest.TestCase):
         self.assertEqual(stderr.getvalue(), 'backend qualification refused/incomplete; no coverage PASS claimed\n')
 
 
+class BackendTransportDiagnostics(unittest.TestCase):
+    def driver(self):
+        driver = object.__new__(b.Driver)
+        driver.base, driver.stage = 'http://owned.invalid', 'server-health'
+        driver.last_health = {'attempts': 0}
+        driver.server_id, driver.report = '', {}
+        return driver
+
+    def refuse(self, driver, error):
+        with patch.object(b.urllib.request, 'urlopen', side_effect=error):
+            with self.assertRaises(b.Refused) as caught:
+                driver.http('/health')
+        self.assertIs(caught.exception.__cause__, error)
+        self.assertNotIn('SECRET', str(caught.exception))
+
+    def test_actual_http_transport_types_accumulate_only_safe_categories(self):
+        driver = self.driver()
+        cases = [(ConnectionRefusedError(b.errno.ECONNREFUSED, 'SECRET'), 'refused'),
+                 (TimeoutError('SECRET'), 'timeout'),
+                 (ConnectionResetError(b.errno.ECONNRESET, 'SECRET'), 'reset'),
+                 (b.socket.gaierror(b.socket.EAI_NONAME, 'SECRET'), 'dns'),
+                 (b.ssl.SSLCertVerificationError(1, 'SECRET'), 'tls'),
+                 (http.client.RemoteDisconnected('SECRET'), 'other'),
+                 (b.urllib.error.URLError('SECRET_URL'), 'unavailable')]
+        for error, category in cases:
+            with self.subTest(category=category):
+                self.refuse(driver, error)
+                self.assertEqual(driver.last_health['transport_last'], category)
+                self.assertEqual(driver.last_health['transport_counts'][category], 1)
+                self.assertEqual(driver.last_health['outcome'], 'transport-error')
+                self.assertIsNone(driver.last_health['status'])
+        with tempfile.TemporaryDirectory() as root:
+            driver.output = Path(root)
+            saved = driver.failure_diagnostic(b.WaitExpired('SECRET_DEADLINE'))
+            self.assertEqual(saved['health']['transport_counts'],
+                             {name: 1 for name in ['refused', 'timeout', 'reset', 'dns', 'tls', 'other', 'unavailable']})
+            self.assertEqual(saved['health']['attempts'], 7)
+            self.assertNotIn('SECRET', json.dumps(saved))
+            self.assertNotIn('SECRET', (Path(root) / 'failure-diagnostic.json').read_text())
+
+    def test_bounded_nested_reason_errno_and_malformed_reasons(self):
+        cause = OSError(b.errno.EINVAL, 'SECRET')
+        self.assertEqual(b.transport_category(cause), 'other')
+        for code, expected in [(b.errno.ECONNREFUSED, 'refused'), (b.errno.ETIMEDOUT, 'timeout'), (b.errno.EPIPE, 'reset')]:
+            error = OSError(code, 'SECRET')
+            for _ in range(3): error = b.urllib.error.URLError(error)
+            self.assertEqual(b.transport_category(error), expected)
+            self.assertEqual(b.transport_category(b.urllib.error.URLError(error)), 'unavailable')
+        cyclic = b.urllib.error.URLError(None); cyclic.reason = cyclic
+        malformed = OSError(1, 'SECRET'); malformed.errno = 'SECRET'
+        oversized = b.urllib.error.URLError(TimeoutError('SECRET'))
+        oversized.__dict__.update({str(i): 'SECRET' for i in range(17)})
+        for error in [cyclic, malformed, oversized, b.urllib.error.URLError('SECRET' * 200000), b.urllib.error.URLError(None)]:
+            self.assertEqual(b.transport_category(error), 'unavailable')
+
+    def test_untrusted_subclass_attributes_and_dictionary_keys_are_not_accessed(self):
+        class Hostile(b.urllib.error.URLError):
+            def __getattribute__(self, key):
+                if key in ('reason', '__dict__', 'args'): raise AssertionError('SECRET_ATTRIBUTE')
+                return super().__getattribute__(key)
+            def __str__(self): raise AssertionError('SECRET_STRING')
+        class Key:
+            def __hash__(self): return hash('reason')
+            def __eq__(self, other): raise AssertionError('SECRET_KEY')
+        class HostileMeta(type):
+            def __eq__(self, other): raise AssertionError('SECRET_CLASS_EQUALITY')
+        class HostileOS(OSError, metaclass=HostileMeta):
+            @property
+            def errno(self): raise AssertionError('SECRET_ERRNO')
+        driver = self.driver()
+        self.refuse(driver, HostileOS('SECRET'))
+        self.refuse(driver, Hostile('SECRET'))
+        self.assertEqual(driver.last_health['transport_last'], 'unavailable')
+        error = b.urllib.error.URLError(None); error.__dict__.clear(); error.__dict__[Key()] = TimeoutError('SECRET')
+        self.refuse(driver, error)
+        self.assertEqual(driver.last_health['transport_counts'], {'unavailable': 3})
+
+    def test_http_error_status_and_close_precedence_do_not_count_transport(self):
+        driver = self.driver()
+        self.refuse(driver, ConnectionRefusedError('SECRET'))
+        body = io.BytesIO(b'SECRET_BODY')
+        error = b.urllib.error.HTTPError('SECRET_URL', 503, 'SECRET', {}, body)
+        self.refuse(driver, error)
+        self.assertTrue(body.closed)
+        self.assertEqual(driver.last_health['status'], 503)
+        self.assertEqual(driver.last_health['outcome'], 'http-error')
+        self.assertEqual(driver.last_health['transport_counts'], {'refused': 1})
+        close_error = OSError('SECRET_CLOSE')
+        error = b.urllib.error.HTTPError('SECRET_URL', 404, 'SECRET', {}, None)
+        with patch.object(error, 'close', side_effect=close_error), patch.object(b.urllib.request, 'urlopen', side_effect=error):
+            with self.assertRaises(b.Refused) as caught: driver.http('/health')
+        self.assertIs(caught.exception.__cause__, close_error)
+        self.assertEqual(driver.last_health['status'], 404)
+        self.assertEqual(driver.last_health['transport_counts'], {'refused': 1})
+
+    def test_response_status_guard_precedes_body_error_and_read_error_preserves_status(self):
+        driver = self.driver()
+        response = unittest.mock.MagicMock()
+        response.__enter__.return_value = response
+        response.status = 500
+        response.read.side_effect = b.ssl.SSLError('SECRET')
+        with patch.object(b.urllib.request, 'urlopen', return_value=response):
+            with self.assertRaises(b.Refused): driver.http('/health')
+        response.read.assert_not_called()
+        self.assertEqual(driver.last_health['status'], 500)
+        self.assertNotIn('transport_counts', driver.last_health)
+        response.status = 200; response.headers.get_all.return_value = []
+        with patch.object(b.urllib.request, 'urlopen', return_value=response):
+            with self.assertRaises(b.Refused) as caught: driver.http('/health')
+        self.assertIs(caught.exception.__cause__, response.read.side_effect)
+        self.assertEqual(driver.last_health['status'], 200)
+        self.assertEqual(driver.last_health['outcome'], 'read-error')
+        self.assertEqual(driver.last_health['transport_last'], 'tls')
+
+    def test_success_and_malformed_summary_keep_only_bounded_enum_evidence(self):
+        driver = self.driver()
+        self.refuse(driver, TimeoutError('SECRET'))
+        response = unittest.mock.MagicMock()
+        response.__enter__.return_value = response
+        response.status = 200; response.headers.get_all.return_value = []
+        response.read.return_value = b'{"status":"healthy"}'
+        with patch.object(b.urllib.request, 'urlopen', return_value=response):
+            self.assertEqual(driver.http('/health'), {'status': 'healthy'})
+        self.assertEqual(driver.last_health['outcome'], 'complete')
+        self.assertEqual(driver.last_health['transport_counts'], {'timeout': 1})
+        self.assertEqual(driver.last_health['transport_last'], 'timeout')
+        driver.last_health.update(transport_last='SECRET', transport_counts={str(i): 'SECRET' for i in range(8)})
+        with tempfile.TemporaryDirectory() as root:
+            driver.output = Path(root)
+            value = driver.failure_diagnostic(b.WaitExpired('SECRET'))
+            self.assertEqual(value['health']['transport_last'], 'unavailable')
+            self.assertEqual(value['health']['transport_counts'], {})
+            self.assertNotIn('SECRET', json.dumps(value))
+
+    def test_counter_bounds_and_non_health_requests_do_not_change_health(self):
+        driver = self.driver()
+        driver.last_health['transport_counts'] = {'refused': 1000000, 'SECRET': 1, 'timeout': True, 'reset': -1, 'dns': 10**100}
+        self.refuse(driver, ConnectionRefusedError('SECRET'))
+        self.assertEqual(driver.last_health['transport_counts'], {'refused': 1000000})
+        prior = copy.deepcopy(driver.last_health)
+        with patch.object(b.urllib.request, 'urlopen', side_effect=TimeoutError('SECRET')):
+            with self.assertRaises(b.Refused): driver.http('/not-health')
+        self.assertEqual(driver.last_health, prior)
+        self.assertEqual(b.bounded_transport_counts({str(i): 1 for i in range(8)}), {})
+
+
 if __name__ == '__main__':
     unittest.main()
