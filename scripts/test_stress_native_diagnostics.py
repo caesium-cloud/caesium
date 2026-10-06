@@ -85,6 +85,19 @@ class StressNativeDiagnosticsTests(unittest.TestCase):
         self.assertIsNone(body)
         self.assertEqual(error, "command-failed")
 
+    def test_explicit_environment_merged_stderr_and_timeout_bound_preserve_defaults(self):
+        code = "import os,sys;sys.stdout.write(os.environ['EXACT_OBSERVER_ENV']);sys.stderr.write('stderr-proof')"
+        body, error = MODULE.capture([sys.executable, "-c", code],
+                                     env=dict(os.environ, EXACT_OBSERVER_ENV="stdout-proof"),
+                                     merge_stderr=True, timeout=1)
+        self.assertIsNone(error)
+        self.assertIn(b"stdout-proof", body)
+        self.assertIn(b"stderr-proof", body)
+        with mock.patch.object(MODULE.subprocess, "Popen") as spawn:
+            for bound in (False, 0, -1, 4, float('nan'), float('inf'), '1'):
+                self.assertEqual(MODULE.capture(['unused'], timeout=bound), (None, 'invalid-bound'))
+            spawn.assert_not_called()
+
     def test_actual_oversized_or_timed_out_child_is_joined(self):
         original = subprocess.Popen
         children = []

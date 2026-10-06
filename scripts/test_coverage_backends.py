@@ -9,6 +9,9 @@ import hashlib
 import importlib.util
 import io
 import json
+import os
+import signal
+import sys
 from pathlib import Path
 import subprocess
 import socketserver
@@ -615,7 +618,7 @@ class BackendFailureDiagnostics(unittest.TestCase):
                           'Error': 'SECRET_NATIVE_ERROR'}, 'RestartCount': 0,
                 'NetworkSettings': {'Ports': {'8080/tcp': [{'HostIp': '127.0.0.1', 'HostPort': '12345'}]}}}
 
-    def failed_main(self, mode='deadline', snapshot='owned', write_failure=False):
+    def failed_main(self, mode='deadline', snapshot='owned', write_failure=False, observe=False):
         context, inputs = self.context('amd64'), self.archive('amd64')
         context_path, input_path = self.root / 'context.json', self.root / 'input.json'
         context_path.write_text(json.dumps(context)); input_path.write_text(json.dumps(inputs))
@@ -680,11 +683,24 @@ class BackendFailureDiagnostics(unittest.TestCase):
                 return []
             driver.cleanup = cleanup
             return driver
+        def observer(command, env, **options):
+            events.append('observation-' + command[1])
+            if not observe:
+                return None, 'command-unavailable'
+            driver = drivers[0]
+            if command[1] == 'container':
+                expected = '|'.join([driver.server_id, driver.image, '/' + driver.owner + '-server',
+                                     SHA, 'owned-coverage', driver.owner])
+                return (expected + '\n').encode(), None
+            if command[1] == 'logs':
+                return b'2026-10-06T01:26:27Z {"msg":"migrating database","key":"SECRET"}\n', None
+            return b'{"status":"healthy","key":"SECRET"}', None
         expected = b.WaitExpired if mode == 'deadline' else b.ServerExited if mode == 'native-exit' else ValueError
         with patch.object(b.sys, 'argv', argv), patch.object(b, 'Driver', side_effect=factory), \
              patch.object(b.Path, 'is_socket', return_value=True), patch.object(b.signal, 'signal'), \
              patch.object(b.urllib.request, 'urlopen', side_effect=b.urllib.error.URLError('SECRET_HTTP_URL_BODY')), \
-             patch.object(b.time, 'monotonic', side_effect=[0, 0, 91]), patch.object(b.time, 'sleep'):
+             patch.object(b.time, 'monotonic', side_effect=[0, 0, 91] + [91] * 16), patch.object(b.time, 'sleep'), \
+             patch.object(b, 'observation_capture', side_effect=observer):
             with self.assertRaises(expected): b.main()
         driver = drivers[0]
         self.assertLess(events.index('diagnostic-save'), events.index('cleanup'))
@@ -705,6 +721,11 @@ class BackendFailureDiagnostics(unittest.TestCase):
         self.assertEqual(value['native']['outcome'], 'verified-owned')
         self.assertTrue(value['native']['state']['Running'])
         self.assertEqual(value['native']['port']['host_port'], 12345)
+
+    def test_healthy_postverdict_observation_cannot_upgrade_actual_failed_main(self):
+        value = self.failed_main(observe=True)
+        self.assertEqual(value['startup_observations']['internal_health']['outcome'], 'healthy')
+        self.assertEqual(value['exception_category'], 'deadline')
 
     def test_native_exit_is_distinct_from_actual_wait_expiration(self):
         value = self.failed_main(mode='native-exit')
@@ -914,6 +935,199 @@ class BackendTransportDiagnostics(unittest.TestCase):
             with self.assertRaises(b.Refused): driver.http('/not-health')
         self.assertEqual(driver.last_health, prior)
         self.assertEqual(b.bounded_transport_counts({str(i): 1 for i in range(8)}), {})
+
+
+class BackendStartupObservations(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        self.driver = b.Driver.__new__(b.Driver)
+        d = self.driver
+        d.server_id, d.image = 'a' * 64, IMAGE
+        d.owner, d.ownership_id = 'owned-backend', SHA
+        d.context = {'coverage_id': 'owned-run'}
+        d.env = dict(os.environ, PATH=str(self.root) + os.pathsep + os.environ['PATH'])
+        self.expected = '|'.join([d.server_id, IMAGE, '/owned-backend-server', SHA, 'owned-run', d.owner])
+        self.native = {'outcome': 'verified-owned', 'id': d.server_id, 'image_id': IMAGE}
+        self.calls = self.root / 'calls'
+
+    def fake_runtime(self, mode='healthy'):
+        d = self.driver
+        d.env.update(OBS_MODE=mode, OBS_EXPECT=self.expected, OBS_CALLS=str(self.calls))
+        runtime = self.root / 'docker'
+        runtime.write_text('#!' + sys.executable + "\n" + r"""
+import json,os,sys,time
+with open(os.environ['OBS_CALLS'],'a') as f:f.write(json.dumps(sys.argv[1:])+'\n')
+mode=os.environ['OBS_MODE']
+if sys.argv[1:3]==['container','inspect']:
+    if mode=='missing':sys.stderr.write('SECRET_NATIVE');sys.exit(1)
+    expected=os.environ['OBS_EXPECT']
+    if mode=='foreign' or (mode=='changed' and len(open(os.environ['OBS_CALLS']).readlines())>1):expected=expected.replace('owned-run','foreign-run')
+    print(expected)
+elif sys.argv[1]=='logs':
+    if mode=='timeout':time.sleep(4)
+    if mode=='oversized':print('x'*70000)
+    else:
+        print('2026-10-06T01:26:27.123456789Z '+json.dumps({'msg':'migrating database','password':'SECRET_ENV'}))
+        print('2026-10-06T01:26:28Z '+json.dumps({'msg':'api listener started','error':'SECRET_URL'}),file=sys.stderr)
+        print('2026-10-06T01:26:29Z '+json.dumps({'msg':'SECRET_UNKNOWN','token':'SECRET_TOKEN'}),file=sys.stderr)
+    if mode=='logs-failed':sys.exit(1)
+elif sys.argv[1]=='exec':
+    if mode=='probe-failed':sys.stderr.write('SECRET_NATIVE');sys.exit(8)
+    print('{"status":"healthy","checks":{"password":"SECRET_BODY"}}')
+else:sys.exit(99)
+""")
+        runtime.chmod(0o700)
+
+    def read_calls(self):
+        return [json.loads(line) for line in self.calls.read_text().splitlines()] if self.calls.exists() else []
+
+    def test_actual_stdout_stderr_milestones_and_complete_health_are_safe(self):
+        self.fake_runtime()
+        value = self.driver.startup_observations(self.native)
+        self.assertEqual(value['logs']['milestones'], ['api-listener-started', 'migrating-database'])
+        self.assertEqual(value['logs']['ignored'], 1)
+        self.assertEqual(value['logs']['ordering'], 'not-claimed')
+        self.assertFalse(value['logs']['absence_is_proof'])
+        self.assertEqual(value['internal_health']['outcome'], 'healthy')
+        self.assertEqual(value['qualification'], 'unchanged')
+        self.assertNotIn('SECRET', json.dumps(value))
+        calls = self.read_calls()
+        self.assertEqual([x[0] for x in calls], ['container','logs','container','exec'])
+        self.assertEqual(calls[1], ['logs','--timestamps','--tail','200',self.driver.server_id])
+        self.assertEqual(calls[3], ['exec',self.driver.server_id,'/bin/busybox','timeout','-s','KILL','2',
+                                    '/usr/bin/wget','--no-proxy','--max-redirect=0','--timeout=1','--tries=1','-q','-O','-',
+                                    'http://127.0.0.1:8080/health'])
+
+    def test_foreign_missing_and_changed_ownership_never_query_unowned_process(self):
+        for mode in ('foreign', 'missing', 'changed'):
+            with self.subTest(mode=mode):
+                self.calls.unlink(missing_ok=True)
+                self.fake_runtime(mode)
+                value = self.driver.startup_observations(self.native)
+                calls = self.read_calls()
+                self.assertEqual([c[0] for c in calls], ['container','logs','container'] if mode=='changed' else ['container','container'])
+                self.assertEqual(value['internal_health']['reason'], 'identity-not-proved')
+        self.calls.unlink()
+        self.driver.startup_observations(dict(self.native, image_id=INDEX))
+        self.driver.startup_observations({'outcome':'unavailable'})
+        self.assertFalse(self.calls.exists())
+
+    def test_capture_failure_timeout_and_oversize_never_qualify_or_retain_errors(self):
+        for mode, reason in [('logs-failed','command-failed'),('timeout','deadline'),('oversized','oversized')]:
+            with self.subTest(mode=mode):
+                self.fake_runtime(mode)
+                value = self.driver.startup_observations(self.native)
+                self.assertEqual(value['logs']['outcome'], 'unavailable')
+                self.assertEqual(value['logs']['reason'], reason)
+                self.assertNotIn('SECRET', json.dumps(value))
+        self.fake_runtime('probe-failed')
+        self.assertEqual(self.driver.startup_observations(self.native)['internal_health']['reason'], 'command-failed')
+
+    def test_projection_allows_only_literal_milestones_and_bounded_records(self):
+        stamp = b'2026-10-06T01:26:27Z '
+        body = b'\n'.join(stamp + json.dumps({'msg': message, 'url':'SECRET'}).encode() for message in b.STARTUP_MESSAGES)
+        value = b.startup_log_projection(body)
+        self.assertEqual(value['milestones'], sorted(b.STARTUP_MESSAGES.values()))
+        poisoned = [b'{"msg":"spinning up api SECRET"}', b'{"message":"spinning up api"}',
+                    b'{"msg":["spinning up api"]}', b'{"msg":"spinning up api","msg":"api listener started"}',
+                    b'{"msg":"SECRET"}', b'not-json']
+        body = b'\n'.join(stamp + line for line in poisoned) + b'\n' + stamp + b'x'*4097
+        value = b.startup_log_projection(body)
+        self.assertEqual(value['milestones'], [])
+        self.assertEqual(value['ignored'], 7)
+        self.assertTrue(value['truncated'])
+        self.assertNotIn('SECRET', json.dumps(value))
+        self.assertEqual(b.startup_log_projection(b'\n'.join([stamp+b'{}']*201))['outcome'], 'unavailable')
+
+    def test_health_projection_requires_complete_unique_json_and_known_status(self):
+        self.assertEqual(b.startup_health_projection(b'{"status":"healthy","url":"SECRET"}')['outcome'], 'healthy')
+        for status in ('degraded','unavailable','unknown'):
+            self.assertEqual(b.startup_health_projection(json.dumps({'status':status}).encode())['outcome'], 'unhealthy')
+        for body in (b'{"status":"healthy"} SECRET', b'{"status":"healthy"', b'{"status":"healthy","status":"unknown"}',
+                     b'{"status":true}', b'{"status":"not healthy"}', b'{"status":"healthy","secret":NaN}', b'null', b'\xff', b'x'*16385):
+            with self.subTest(body=body[:32]):
+                value = b.startup_health_projection(body)
+                self.assertEqual(value['outcome'], 'unavailable')
+                self.assertNotIn('SECRET', json.dumps(value))
+
+    def test_shared_total_budget_expires_without_more_queries(self):
+        with patch.object(b.time, 'monotonic', side_effect=[0, 7, 8]), patch.object(b, 'observation_capture') as capture:
+            value = self.driver.startup_observations(self.native)
+        capture.assert_not_called()
+        self.assertEqual(value['query_budget_seconds'], 6)
+
+    def test_optional_missing_observer_and_selector_failure_remain_unavailable(self):
+        with patch.object(b.importlib.util, 'spec_from_file_location', side_effect=OSError('SECRET_HELPER')):
+            self.assertEqual(b.observation_capture(['unused'], {}), (None,'observer-unavailable'))
+        # Shared capture owns a real spawned sleeper even on selector setup error.
+        import selectors
+        original = subprocess.Popen
+        children = []
+        def spawn(*args, **kwargs):
+            child = original(*args, **kwargs); children.append(child); return child
+        with patch.object(subprocess, 'Popen', side_effect=spawn), \
+             patch.object(selectors, 'DefaultSelector', side_effect=OSError('SECRET_SELECTOR')):
+            body, reason = b.observation_capture([sys.executable,'-c','import time;time.sleep(4)'], os.environ)
+        self.assertEqual((body,reason), (None,'observer-unavailable'))
+        self.assertIsNotNone(children[0].poll())
+        self.assertTrue(children[0].stdout.closed)
+
+    def test_actual_backend_raising_handler_cannot_leak_popen_transfer_child(self):
+        tree = ast.parse(Path(b.__file__).read_text())
+        main = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == 'main')
+        handler = next(node for node in main.body if isinstance(node, ast.FunctionDef) and node.name == 'interrupted')
+        namespace = {'Refused':b.Refused}
+        exec(compile(ast.Module(body=[handler],type_ignores=[]),b.__file__,'exec'),namespace)
+        backend_handler = namespace['interrupted']
+        original_spawn = subprocess.Popen
+        originals = {number:signal.getsignal(number) for number in (signal.SIGTERM,signal.SIGINT,signal.SIGHUP)}
+        children = []
+        try:
+            for number in originals: signal.signal(number,backend_handler)
+            for number in originals:
+                with self.subTest(signal=number):
+                    def spawn(*args, **kwargs):
+                        child = original_spawn(*args, **kwargs); children.append(child)
+                        # Real signal exactly after successful spawn, before the
+                        # caller receives its child reference/enters ownership.
+                        os.kill(os.getpid(),number)
+                        return child
+                    with patch.object(subprocess,'Popen',side_effect=spawn):
+                        body, reason = b.observation_capture([sys.executable,'-c','import time;time.sleep(4)'],os.environ)
+                    self.assertEqual((body,reason),(None,'interrupted'))
+                    self.assertIsNotNone(children[-1].poll())
+                    self.assertTrue(children[-1].stdout.closed)
+                    self.assertIs(signal.getsignal(number),backend_handler)
+        finally:
+            for number, handler in originals.items(): signal.signal(number,handler)
+            for child in children:
+                if child.poll() is None:child.kill();child.wait()
+
+    def test_observation_is_after_deadline_only_and_healthy_never_upgrades_failure(self):
+        d = self.driver
+        d.stage, d.last_health, d.report = 'server-health', {'attempts':380}, {'complete':False,'missing':True,'failed':True}
+        fixture = BackendFailureDiagnostics.native(None,d)
+        fixture['Config']['Labels'][b.LABEL_RUN] = 'owned-run'
+        d.docker = lambda *args, **kwargs: subprocess.CompletedProcess(args,0,json.dumps([fixture]),'')
+        events = []
+        d.save = lambda name, value: events.append('save')
+        d.startup_observations = lambda native: events.append('observe') or {'internal_health':{'outcome':'healthy'}}
+        for phase, error in [('server-binding',b.WaitExpired('SECRET')),('server-health',b.ServerExited('SECRET'))]:
+            d.stage = phase
+            d.failure_diagnostic(error)
+            self.assertNotIn('observe',events)
+        d.stage = 'server-health'
+        result = d.failure_diagnostic(b.WaitExpired('SECRET'))
+        events.append('cleanup')
+        self.assertLess(events.index('observe'), len(events)-1)
+        self.assertEqual(result['exception_category'], 'deadline')
+        self.assertEqual(result['startup_observations']['internal_health']['outcome'], 'healthy')
+        self.assertEqual(d.report['complete'], False)
+        self.assertEqual(d.report['failed'], True)
+        self.assertFalse(hasattr(d,'uncertain_command'))
+        self.assertNotIn('SECRET',json.dumps(d.report))
 
 
 if __name__ == '__main__':

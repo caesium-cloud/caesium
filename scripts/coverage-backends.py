@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import base64
 import errno
+import importlib.util
 import hashlib
 import http.client
 import json
@@ -61,6 +62,110 @@ def failure_category(error):
 
 
 TRANSPORT_CATEGORIES = frozenset({'refused', 'timeout', 'reset', 'dns', 'tls', 'other', 'unavailable'})
+
+
+# Post-verdict observations only. Four read-only commands share6s, at most3s each,
+# reuse the joined/byte-capped observer; they never decide profile eligibility.
+STARTUP_MESSAGES = {
+    'migrating database': 'migrating-database',
+    'establishing db connection': 'establishing-db-connection',
+    'database router initialized': 'database-router-initialized',
+    'execution configuration': 'execution-configuration',
+    'distributed worker disabled': 'distributed-worker-disabled',
+    'spinning up api': 'spinning-up-api',
+    'api listener started': 'api-listener-started',
+}
+
+
+def observation_capture(argv, env, *, logs=False, timeout=3):
+    # Load lazily: an absent optional observer must not break collection/import.
+    try:
+        spec = importlib.util.spec_from_file_location('backend_native_observer',
+                                                     Path(__file__).with_name('stress-native-diagnostics.py'))
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        # Backend handlers raise. Use a flag during child ownership transfer,
+        # exactly as stress main does, and restore every original handler only
+        # after the observer group/direct child have been terminated/joined.
+        handlers = {}
+        try:
+            def interrupted(_number, _frame):
+                module.INTERRUPTED = True
+            for number in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+                handlers[number] = signal.getsignal(number)
+                signal.signal(number, interrupted)
+            return module.capture(argv, env=env, merge_stderr=logs, timeout=timeout)
+        finally:
+            for number, handler in handlers.items():
+                signal.signal(number, handler)
+    except BaseException:
+        return None, 'observer-unavailable'
+
+
+def observation_unavailable(reason):
+    allowed = {'command-unavailable', 'command-failed', 'deadline', 'oversized',
+               'interrupted', 'observer-unavailable', 'identity-not-proved', 'invalid-body', 'invalid-bound'}
+    return {'outcome': 'unavailable', 'reason': reason if reason in allowed else 'observer-unavailable',
+            'truncated': reason == 'oversized'}
+
+
+def observation_json(text):
+    def unique(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError('duplicate')
+            result[key] = value
+        return result
+    def invalid_constant(_value):
+        raise ValueError('constant')
+    return json.loads(text, object_pairs_hook=unique, parse_constant=invalid_constant)
+
+
+def startup_log_projection(body):
+    # Docker --timestamps framing is checked, but merged stream ordering is
+    # deliberately not claimed. No original timestamp or arbitrary field leaks.
+    lines = body.splitlines()
+    value = {'outcome': 'complete', 'scope': 'tail-200', 'absence_is_proof': False,
+             'ordering': 'not-claimed', 'lines': len(lines), 'ignored': 0,
+             'truncated': False, 'milestones': []}
+    if len(body) > 65536 or len(lines) > 200:
+        return observation_unavailable('oversized')
+    seen = set()
+    for line in lines:
+        if len(line) > 4096:
+            value['ignored'] += 1
+            value['truncated'] = True
+            continue
+        try:
+            stamp, record = line.decode('utf-8').split(' ', 1)
+            # Fixed Docker UTC timestamp shape, not an arbitrary URL/string.
+            require(re.fullmatch(r'[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]{1,9})?Z', stamp), 'timestamp')
+            record = observation_json(record)
+            msg = record.get('msg') if type(record) is dict else None
+            milestone = STARTUP_MESSAGES.get(msg) if type(msg) is str else None
+            if milestone is None:
+                value['ignored'] += 1
+            else:
+                seen.add(milestone)
+        except (UnicodeError, ValueError, Refused, RecursionError):
+            value['ignored'] += 1
+    value['milestones'] = sorted(seen)
+    return value
+
+
+def startup_health_projection(body):
+    if len(body) > 16384:
+        return observation_unavailable('oversized')
+    try:
+        value = observation_json(body.decode('utf-8'))
+        status = value.get('status') if type(value) is dict else None
+        if type(status) is not str or status not in {'healthy', 'degraded', 'unavailable', 'unknown'}:
+            raise ValueError('status')
+        return {'outcome': 'healthy' if status == 'healthy' else 'unhealthy',
+                'read': 'complete', 'qualification': 'unchanged'}
+    except (UnicodeError, ValueError, RecursionError):
+        return observation_unavailable('invalid-body')
 
 
 def transport_category(error):
@@ -499,12 +604,59 @@ class Driver:
                 self.uncertain_command = uncertain
             elif hasattr(self, 'uncertain_command'):
                 del self.uncertain_command
+        if phase == 'server-health' and isinstance(error, WaitExpired):
+            try:
+                value['startup_observations'] = self.startup_observations(value['native'])
+            except BaseException:
+                value['startup_observations'] = observation_unavailable('observer-unavailable')
         self.report['failure_diagnostic'] = value
         try:
             self.save('failure-diagnostic.json', value)
             value['retention'] = 'written'
         except BaseException:
             value['retention'] = 'write-failed'
+        return value
+
+    def startup_observations(self, native):
+        value = {'query_budget_seconds': 6, 'qualification': 'unchanged',
+                 'logs': observation_unavailable('identity-not-proved'),
+                 'internal_health': observation_unavailable('identity-not-proved')}
+        if native.get('outcome') != 'verified-owned':
+            return value
+        identity = self.server_id
+        if not (type(identity) is str and HASH_RE.fullmatch(identity)
+                and type(self.image) is str and IMAGE_RE.fullmatch(self.image)
+                and native.get('id') == identity and native.get('image_id') == self.image):
+            return value
+        deadline = time.monotonic() + 6
+        def capture(argv, *, logs=False):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return None, 'deadline'
+            return observation_capture(argv, self.env, logs=logs, timeout=min(3, remaining))
+        expected = '|'.join([identity, self.image, '/' + self.owner + '-server',
+                             self.ownership_id, self.context['coverage_id'], self.owner])
+        format_ = '{{.Id}}|{{.Image}}|{{.Name}}|' + '|'.join(
+            '{{index .Config.Labels "' + key + '"}}'
+            for key in (LABEL_OWNER, LABEL_RUN, 'caesium.coverage.backend-owner'))
+        def bound():
+            body, failure = capture(['docker', 'container', 'inspect', '--format', format_, identity])
+            return failure is None and body == (expected + '\n').encode('utf-8')
+        # Revalidate before EACH query. Reads use the pinned Docker environment;
+        # they bypass command() so ambiguous reads never mutate cleanup policy.
+        for name, command, project in (
+            ('logs', ['docker', 'logs', '--timestamps', '--tail', '200', identity], startup_log_projection),
+            ('internal_health', ['docker', 'exec', identity, '/bin/busybox', 'timeout', '-s', 'KILL', '2',
+                                 '/usr/bin/wget', '--no-proxy', '--max-redirect=0',
+                                 '--timeout=1', '--tries=1', '-q', '-O', '-',
+                                 'http://127.0.0.1:8080/health'], startup_health_projection)):
+            try:
+                if not bound():
+                    continue
+                body, failure = capture(command, logs=name == 'logs')
+                value[name] = observation_unavailable(failure) if failure else project(body)
+            except BaseException:
+                value[name] = observation_unavailable('observer-unavailable')
         return value
 
     def wait(self, fn, label, timeout=90):

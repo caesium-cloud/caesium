@@ -3,6 +3,7 @@
 import argparse
 import datetime
 import json
+import math
 import os
 import re
 import selectors
@@ -102,18 +103,22 @@ def events(body, cid, window=None):
     return {"outcome": "complete", "records": records}
 
 
-def capture(argv):
-    """Cap stdout/time and join the read-only child; never retain its stderr."""
+def capture(argv, *, env=None, merge_stderr=False, timeout=None):
+    """Cap bytes/time and join the read-only group; defaults exclude stderr."""
+    if timeout is not None and (type(timeout) not in (int, float)
+                                or not math.isfinite(timeout) or not 0 < timeout <= 3):
+        return None, "invalid-bound"
     try:
-        process = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-                                   start_new_session=True)
+        process = subprocess.Popen(argv, stdout=subprocess.PIPE,
+                                   stderr=subprocess.STDOUT if merge_stderr else subprocess.DEVNULL,
+                                   env=env, start_new_session=True)
     except OSError:
         return None, "command-unavailable"
     # Ownership begins at successful spawn, including selector setup failures.
     try:
         body = bytearray()
         failure = None
-        deadline = time.monotonic() + QUERY_SECONDS
+        deadline = time.monotonic() + (QUERY_SECONDS if timeout is None else min(QUERY_SECONDS, max(0, timeout)))
         with selectors.DefaultSelector() as selector:
             selector.register(process.stdout, selectors.EVENT_READ)
             while True:
