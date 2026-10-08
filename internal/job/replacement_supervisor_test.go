@@ -19,10 +19,15 @@ import (
 type replacementObservedEngine struct {
 	*fakeEngine
 	ctx     context.Context
-	started chan<- context.Context
+	started chan<- replacementStartObservation
 	// Optional per-attempt evidence; ordinary terminal cleanup also uses Force.
 	stopped   chan<- replacementStopObservation
 	runtimeID string
+}
+
+type replacementStartObservation struct {
+	runtimeID string
+	ctx       context.Context
 }
 
 type replacementStopObservation struct {
@@ -35,7 +40,7 @@ func (e *replacementObservedEngine) Create(req *atom.EngineCreateRequest) (atom.
 	a, err := e.fakeEngine.Create(req)
 	if err == nil && req.Spec.Env["CAESIUM_PARTITION"] == "retry" {
 		e.runtimeID = a.ID()
-		e.started <- e.ctx
+		e.started <- replacementStartObservation{runtimeID: e.runtimeID, ctx: e.ctx}
 	}
 	return a, err
 }
@@ -50,7 +55,7 @@ func (e *replacementObservedEngine) Stop(req *atom.EngineStopRequest) error {
 func TestPartitionRetryReplacementInheritsServerOwnership(t *testing.T) {
 	f := newFanOutFixture(t, `["retry"]`, &schema.FanOut{From: "list", MaxPartitions: 16}, 0)
 	f.engine.createErrByPartition["retry"] = errors.New("first attempt failed")
-	started := make(chan context.Context, 1)
+	started := make(chan replacementStartObservation, 1)
 	stopped := make(chan replacementStopObservation, 1)
 	owner := runlife.New(context.Background())
 	carrier := runlife.WithSupervisor(t.Context(), owner)
@@ -96,12 +101,15 @@ func TestPartitionRetryReplacementInheritsServerOwnership(t *testing.T) {
 	firstDone := make(chan error, 1)
 	go func() { defer releaseWork(); firstDone <- runner.Run(workCtx) }()
 	require.Error(t, <-firstDone)
-	var replacementCtx context.Context
+	var replacementStart replacementStartObservation
 	select {
-	case replacementCtx = <-started:
+	case replacementStart = <-started:
 	case <-time.After(5 * time.Second):
 		t.Fatal("replacement did not create its atom")
 	}
+	require.NotEmpty(t, replacementStart.runtimeID)
+	replacementCtx := replacementStart.ctx
+	require.NotNil(t, replacementCtx)
 	require.NotNil(t, runlife.FromContext(replacementCtx))
 	owner.CloseAndCancel()
 	select {
@@ -125,7 +133,9 @@ func TestPartitionRetryReplacementInheritsServerOwnership(t *testing.T) {
 	require.Len(t, rows, 1)
 	select {
 	case observation := <-stopped:
-		require.Equal(t, rows[0].RuntimeID, observation.runtimeID)
+		// Cancellation can win the runtime-ID persistence write. Bind cleanup
+		// to the acknowledged Create identity instead of that cancellable row.
+		require.Equal(t, replacementStart.runtimeID, observation.runtimeID)
 		require.NotEmpty(t, observation.runtimeID)
 		require.True(t, observation.force)
 		require.ErrorIs(t, observation.cause, context.Canceled)
@@ -238,7 +248,7 @@ func TestDirectLocalChildReservationKeepsStandaloneDrainSemantics(t *testing.T) 
 func TestPartitionRetryReplacementNaturalDrainJoinsWithoutCancel(t *testing.T) {
 	f := newFanOutFixture(t, `["retry"]`, &schema.FanOut{From: "list", MaxPartitions: 16}, 0)
 	f.engine.createErrByPartition["retry"] = errors.New("first attempt failed")
-	started := make(chan context.Context, 1)
+	started := make(chan replacementStartObservation, 1)
 	stopped := make(chan replacementStopObservation, 16)
 	owner := runlife.New(t.Context())
 	workCtx, releaseWork, err := owner.Reserve(runlife.WithSupervisor(t.Context(), owner))
@@ -283,12 +293,15 @@ func TestPartitionRetryReplacementNaturalDrainJoinsWithoutCancel(t *testing.T) {
 	firstDone := make(chan error, 1)
 	go func() { defer releaseWork(); firstDone <- runner.Run(workCtx) }()
 	require.Error(t, <-firstDone, "the original engine reports its failed attempt after handing off")
-	var replacementCtx context.Context
+	var replacementStart replacementStartObservation
 	select {
-	case replacementCtx = <-started:
+	case replacementStart = <-started:
 	case <-time.After(5 * time.Second):
 		t.Fatal("replacement did not create its atom")
 	}
+	require.NotEmpty(t, replacementStart.runtimeID)
+	replacementCtx := replacementStart.ctx
+	require.NotNil(t, replacementCtx)
 	drained := make(chan error, 1)
 	go func() { drained <- owner.Drain(t.Context()) }()
 	select {
@@ -311,6 +324,7 @@ func TestPartitionRetryReplacementNaturalDrainJoinsWithoutCancel(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("replacement did not record its ordinary terminal runtime cleanup")
 	}
+	require.Equal(t, replacementStart.runtimeID, replacementStop.runtimeID, "stop evidence must bind the acknowledged replacement Create")
 	require.NotEmpty(t, replacementStop.runtimeID)
 	require.True(t, replacementStop.force, "ordinary terminal cleanup is forceful by design")
 	require.NoError(t, replacementStop.cause, "exact replacement cleanup must not be caused by owner cancellation")

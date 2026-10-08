@@ -141,6 +141,15 @@ grep -Fx 'cgroup memory limit 67108864' "$scratch/safe-logs" >/dev/null || fail 
 grep -Fx 'allocated 16 MiB' "$scratch/safe-logs" >/dev/null || fail healthy_allocation_missing
 grep -Fx 'completed' "$scratch/safe-logs" >/dev/null || fail healthy_completion_missing
 
+# Upload the release without an exec process/monitor in the constrained cgroup.
+# Build it before starting the waiter so preparation uses none of its wait budget.
+phase="prepare_release"
+command_status=0
+: >"$scratch/release" && chmod 0644 "$scratch/release" && \
+    tar -cf "$scratch/release.tar" -C "$scratch" release \
+    > /dev/null 2>&1 || command_status=$?
+[ "$command_status" -eq 0 ] || fail release_archive_prepare_failed "$command_status"
+
 # A waiting process must not touch the large allocation before the harness has
 # set its limit. Its OOM is the kernel verdict, never a fixture-chosen exit 137.
 phase="allocate_waiter"
@@ -174,8 +183,8 @@ read_logs || fail barrier_logs_failed "$log_status"
 if [[ "$safe_logs" == *"allocated "* ]]; then fail allocated_before_release; fi
 phase="release"
 command_status=0
-"$runtime_cli" exec "$ctr" touch /tmp/release > /dev/null 2>&1 || command_status=$?
-[ "$command_status" -eq 0 ] || fail release_exec_failed "$command_status"
+"$runtime_cli" cp - "$ctr:/tmp" <"$scratch/release.tar" > /dev/null 2>&1 || command_status=$?
+[ "$command_status" -eq 0 ] || fail release_archive_failed "$command_status"
 phase="terminal"
 terminal=false
 for ((poll=0; poll<100; poll++)); do

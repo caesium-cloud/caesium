@@ -1,7 +1,9 @@
 """Exercise the actual smoke script with a hermetic native-runtime contract."""
 import os
 import json
+import shlex
 import shutil
+import sys
 from pathlib import Path
 import subprocess
 import tempfile
@@ -22,6 +24,8 @@ run)
     if [[ " $* " == *" -d "* ]]; then
         [[ " $* " == *" --memory=64m --memory-swap=64m "* ]] || exit 12
         [[ "$*" == *" --memory-mib 128 --wait-file /tmp/release --wait-timeout 10s --hold 2s" ]] || exit 12
+        archives=("$TMPDIR"/*/release.tar)
+        [[ "${#archives[@]}" == 1 && -s "${archives[0]}" ]] || exit 12
         if [ "$SCENARIO" = allocate_fail ]; then echo SECRET_NATIVE >&2; exit 7; fi
         if [ "$SCENARIO" = allocate_fail_with_output ]; then echo "$cid"; echo SECRET_NATIVE >&2; exit 7; fi
         if [ "$SCENARIO" = invalid_ack ]; then echo unknown; else echo "$cid"; fi
@@ -94,9 +98,21 @@ inspect)
     [ "$3" = '{{.Id}}|{{.Image}}|{{.State.Status}}|{{.State.Running}}|{{.State.ExitCode}}|{{.State.OOMKilled}}|{{.HostConfig.Memory}}|{{.HostConfig.MemorySwap}}' ] || exit 12
     printf '%s|%s|%s|%s|%s|%s|%s|%s\n' "$cid" "$image" "$native_status" "$running" "$code" "$oom" "$memory" "$swap"
     ;;
-exec)
-    [ "$*" = "exec $cid touch /tmp/release" ] || exit 12
-    if [ "$SCENARIO" = exec_fail ]; then echo SECRET_NATIVE >&2; exit 8; fi
+cp)
+    [ "$*" = "cp - $cid:/tmp" ] || exit 12
+    "$TEST_PYTHON" -c '
+import io, sys, tarfile
+body = sys.stdin.buffer.read(65537)
+assert len(body) <= 65536
+with tarfile.open(fileobj=io.BytesIO(body), mode="r:") as archive:
+    members = archive.getmembers()
+    assert len(members) == 1
+    member = members[0]
+    assert member.name == "release" and member.isfile() and member.size == 0
+    assert member.mode == 0o644 and archive.extractfile(member).read() == b""
+' || exit 12
+    : > "$FIXTURE/archive_checked"
+    if [ "$SCENARIO" = cp_fail ]; then echo SECRET_NATIVE >&2; exit 8; fi
     : > "$FIXTURE/released"
     ;;
 rm)
@@ -130,14 +146,25 @@ class StressSmokeTests(unittest.TestCase):
             sleep = fixture / "sleep"
             sleep.write_text("#!/usr/bin/env bash\nexit 0\n")
             sleep.chmod(0o700)
+            mktemp = fixture / "mktemp"
+            mktemp.write_text("#!/bin/sh\nexec " + shlex.quote(shutil.which("mktemp")) +
+                              ' -d "$FIXTURE/scratch/owned.XXXXXX"\n')
+            mktemp.chmod(0o700)
+            if scenario == "archive_fail":
+                tar = fixture / "tar"
+                tar.write_text("#!/bin/sh\necho SECRET_ARCHIVE >&2\nexit 8\n")
+                tar.chmod(0o700)
             if not observer:
-                for command in ["bash", "mktemp", "awk", "cat", "grep", "rm", "date"]:
+                for command in ["bash", "awk", "cat", "grep", "rm", "date", "chmod", "tar"]:
                     (fixture / command).symlink_to(shutil.which(command))
             env = dict(os.environ, FIXTURE=str(fixture), SCENARIO=scenario,
+                       TEST_PYTHON=sys.executable,
                        TMPDIR=str(fixture / "scratch"), PATH=str(fixture) + (os.pathsep + os.environ["PATH"] if observer else ""))
             result = subprocess.run(["/bin/bash", str(ROOT / "build/stress/smoke.sh"), str(cli), "fixture:pinned"],
                                     env=env, capture_output=True, text=True, timeout=10, check=False)
             journal = (fixture / "journal").read_text().splitlines()
+            if any(line.startswith("cp ") for line in journal):
+                self.assertTrue((fixture / "archive_checked").exists(), "release archive was not validated")
             polls = int((fixture / "state_count").read_text()) if (fixture / "state_count").exists() else 0
             self.assertEqual(list((fixture / "scratch").iterdir()), [], "private raw diagnostic files survived")
         self.assertNotIn("SECRET_", result.stdout + result.stderr)
@@ -198,9 +225,9 @@ class StressSmokeTests(unittest.TestCase):
                                                               phase + "_memory_mismatch")
                     self.assertIn("cid=" + CID, result.stderr)
                     if phase == "barrier":
-                        self.assertNotIn("exec " + CID + " touch /tmp/release", journal)
+                        self.assertNotIn("cp - " + CID + ":/tmp", journal)
                     else:
-                        self.assertIn("exec " + CID + " touch /tmp/release", journal)
+                        self.assertIn("cp - " + CID + ":/tmp", journal)
                         self.assertIn("status=exited running=false exit=137 oom=true", result.stderr)
 
     def test_failed_or_malformed_native_inspection_is_not_evidence(self):
@@ -217,14 +244,14 @@ class StressSmokeTests(unittest.TestCase):
         for scenario in ["early_allocation", "late_allocation"]:
             with self.subTest(scenario=scenario):
                 result, journal, _ = self.assert_refused(scenario, "allocated_before_release")
-                self.assertNotIn("exec " + CID + " touch /tmp/release", journal)
+                self.assertNotIn("cp - " + CID + ":/tmp", journal)
                 self.assertIn("allocated 128 MiB", result.stderr)
 
     def test_log_producer_failure_with_valid_wait_marker_is_refused(self):
         for scenario in ["logs_fail", "logs_fail_after_ready"]:
             with self.subTest(scenario=scenario):
                 result, journal, _ = self.assert_refused(scenario, "barrier_logs_failed", 7)
-                self.assertNotIn("exec " + CID + " touch /tmp/release", journal)
+                self.assertNotIn("cp - " + CID + ":/tmp", journal)
                 self.assertIn("logs_unavailable rc=7", result.stderr)
                 self.assertNotIn("fixture_logs_begin", result.stderr)
 
@@ -237,8 +264,26 @@ class StressSmokeTests(unittest.TestCase):
 
     def test_missing_marker_and_release_failure_keep_static_diagnostics(self):
         self.assert_refused("no_marker", "barrier_marker_missing")
-        result, _, _ = self.assert_refused("exec_fail", "release_exec_failed", 8)
+        result, _, _ = self.assert_refused("cp_fail", "release_archive_failed", 8)
         self.assertIn("phase=release", result.stderr)
+
+    def test_archive_release_targets_only_owned_waiter_without_exec(self):
+        result, journal, _ = self.run_case("immediate")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        copy = journal.index("cp - " + CID + ":/tmp")
+        self.assertTrue(journal[copy - 1].startswith("logs "))
+        self.assertEqual(sum(line.startswith("cp ") for line in journal), 1)
+        self.assertFalse(any(line.startswith("exec ") for line in journal))
+        for scenario, reason in [("wrong_identity", "barrier_inspect_failed"),
+                                 ("invalid_ack", "waiter_identity_invalid")]:
+            with self.subTest(scenario=scenario):
+                _, refused, _ = self.assert_refused(scenario, reason)
+                self.assertFalse(any(line.startswith("cp ") for line in refused))
+
+    def test_archive_preparation_failure_never_starts_waiter(self):
+        result, journal, _ = self.assert_refused("archive_fail", "release_archive_prepare_failed", 8)
+        self.assertIn("phase=prepare_release", result.stderr)
+        self.assertEqual(len(journal), 1)
 
     def test_cleanup_failure_cannot_print_pass(self):
         result, journal, _ = self.assert_refused("cleanup_fail", "cleanup_failed", 6)
