@@ -63,11 +63,15 @@ read_state() {
     inspect_status=0
     "$runtime_cli" inspect -f '{{.Id}}|{{.Image}}|{{.State.Status}}|{{.State.Running}}|{{.State.ExitCode}}|{{.State.OOMKilled}}|{{.HostConfig.Memory}}|{{.HostConfig.MemorySwap}}' \
         "$ctr" >"$scratch/state" 2>/dev/null || inspect_status=$?
-    [ "$inspect_status" -eq 0 ] || return "$inspect_status"
+    if [ "$inspect_status" -ne 0 ]; then
+        printf 'stress smoke: cid=%s inspect_failure=command_failed rc=%s\n' "$ctr" "$inspect_status" >&2
+        return "$inspect_status"
+    fi
     native_state=$(cat "$scratch/state")
-    state_pattern="^${ctr}\\|(sha256:)?[0-9a-f]{64}\\|(created|running|paused|restarting|removing|exited|dead)\\|(true|false)\\|[0-9]{1,3}\\|(true|false)\\|[0-9]{1,20}\\|-?[0-9]{1,20}$"
+    state_pattern="^${ctr}\\|(sha256:)?[0-9a-f]{64}\\|(created|initialized|running|paused|restarting|removing|stopping|stopped|exited|dead)\\|(true|false)\\|[0-9]{1,3}\\|(true|false)\\|[0-9]{1,20}\\|-?[0-9]{1,20}$"
     if ! [[ "$native_state" =~ $state_pattern ]]; then
         inspect_status=1
+        printf 'stress smoke: cid=%s inspect_failure=invalid_or_unbound rc=1\n' "$ctr" >&2
         return 1
     fi
     IFS='|' read -r state_id state_image state_status running exit_code oom memory swap <<<"$native_state"
@@ -190,7 +194,9 @@ terminal=false
 for ((poll=0; poll<100; poll++)); do
     read_state || fail terminal_inspect_failed "$inspect_status"
     printf '%s|%s\n' "$poll" "$native_state" >>"$scratch/terminal-observations" || true
-    if [ "$running" = false ]; then
+    # Podman reports stopped before cleanup and stopping during shutdown.
+    # Neither qualifies: wait within the same budget for a strict exited record.
+    if [ "$running" = false ] && [ "$state_status" != stopped ] && [ "$state_status" != stopping ]; then
         [ "$state_status" = exited ] || fail wrong_terminal_status
         [ "$exit_code" = 137 ] || fail wrong_terminal_exit
         if [ "$oom" = true ]; then

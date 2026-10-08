@@ -29,7 +29,8 @@ def state(text, cid, image):
     if len(fields) != 8 or fields[:2] != [cid, image]:
         raise ValueError("identity")
     _, _, status, running, code, oom, memory, swap = fields
-    if status not in {"created", "running", "paused", "restarting", "removing", "exited", "dead"}:
+    if status not in {"created", "initialized", "running", "paused", "restarting", "removing",
+                      "stopping", "stopped", "exited", "dead"}:
         raise ValueError("state")
     if running not in {"true", "false"} or oom not in {"true", "false"}:
         raise ValueError("state")

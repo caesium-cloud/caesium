@@ -1233,18 +1233,37 @@ mode = os.environ['FAKE_MODE']
 cid = 'e' * 64
 image = 'sha256:' + 'b' * 64
 with events.open('a') as stream:
-    stream.write(json.dumps({'op':args[0], 'action':args[1] if args[0]=='resource' else None, 'name':args[args.index('--name')+1] if args[0]=='run' else None})+'\n')
+    stream.write(json.dumps({'op':args[0], 'action':args[1] if args[0]=='resource' else None,
+      'reference':args[3] if args[0]=='resource' else None,
+      'name':args[args.index('--name')+1] if args[0]=='run' and '--name' in args else None})+'\n')
 if args[0] == 'run':
-    lane = next(x.split('=',1)[1] for x in args if x.startswith('caesium.coverage.lane='))
+    labels = [args[i+1] for i,arg in enumerate(args[:-1]) if arg=='--label']
+    lane_labels = [x for x in labels if x.startswith('caesium.coverage.lane=')]
+    assert len(lane_labels)==1, labels
+    lane = lane_labels[0].split('=',1)[1]
     if lane=='git-prep-test':
         cid='f'*64
         assert '--rm' not in args and '--pull=never' in args and image in args
+        names = [args[i+1] for i,arg in enumerate(args[:-1]) if arg=='--name']
+        assert names==['run-owned-journey-git-runner'], names
+        assert labels==['caesium.coverage.owner='+'a'*40,
+          'caesium.coverage.run=run-owned', 'caesium.coverage.lane=git-prep-test'], labels
+        assert args[1]=='-d' and args.count('--label')==3 and args.count('--name')==1
         assert args[-4:]==['sh','scripts/integration-test.sh','-test.run','exact-test-pattern']
         assert args[args.index('--network')+1]=='container:owned-server'
+        assert args[args.index('-v')+1]=='/source-root:/source'
+        assert '/owned/cli:/coverage-cli:ro' in args
+        assert '/owned/docker.sock:/var/run/docker.sock' in args
+        assert '/owned/coverage:/coverage' in args
+        assert os.environ['FAKE_FIXTURE']+':/fixture:rw' in args
+        assert '/raw/journeys/git-sync/evidence:/coverage-evidence:rw' in args
+        assert 'CAESIUM_JOBDEF_GIT_SYNC_LANE=true' in args
         value={'Id':cid,'Image':image,'RestartCount':0,
           'State':{'Status':'exited','Running':False,'ExitCode':7 if mode=='runner-error' else 0,
            'OOMKilled':False,'FinishedAt':'2026-10-05T22:00:00Z'},
-          'Name':args[args.index('--name')+1],'lane':lane,'log':'--- PASS: TestIntegrationTestSuite/TestJobdefGitSyncLocalRepositoryUpdatesAndPrunes\n'}
+          'Name':names[0],'lane':lane,
+          'labels':{'caesium.coverage.owner':'a'*40,'caesium.coverage.run':'run-owned','caesium.coverage.lane':lane},
+          'log':'--- PASS: TestIntegrationTestSuite/TestJobdefGitSyncLocalRepositoryUpdatesAndPrunes\n'}
         state.write_text(json.dumps(value)); print(cid); sys.exit(0)
     required = ['--pull=never', '--name', '--read-only', '--user', '--network', '--entrypoint']
     assert all(x in args for x in required) and '--rm' not in args
@@ -1296,6 +1315,9 @@ elif args[0] == 'resource':
     cid=value['Id']
     assert kind=='container' and reference in (cid,value['Name'])
     assert extra==[image,value['lane']]
+    if value.get('labels'):
+        assert value['labels']=={'caesium.coverage.owner':'a'*40,
+          'caesium.coverage.run':'run-owned','caesium.coverage.lane':value['lane']}
     if action=='owned': print(json.dumps(value))
     elif action=='remove':
         if mode=='remove-fail': sys.exit(1)
@@ -1346,14 +1368,30 @@ class GitFixtureOwnershipChecks(unittest.TestCase):
             shell = GIT_RESTORE_SHELL
             if mode.startswith('runner-'):
                 text = (ROOT / 'scripts/coverage-journeys.sh').read_text()
-                marker = text.index('# This runner mutates /fixture too:')
-                begin = text.rfind('      if [[ "$mode" == "git-sync" ]]; then',0,marker)
-                branch = text[begin:text.index('      passes=',marker)]
+                marker = text.index('# Keep the runner payload separate from lifecycle identity.')
+                begin = text.index('      runner_payload_args=(',marker)
+                branch = text[begin:text.index('      passes=',begin)]
                 writer = '''run_writer() {
-local mode=git-sync test_rc=125
+local mode=git-sync lane=git-sync test_rc=125 pattern=exact-test-pattern
+local runner_name="${ID}-journey-runner-${lane}" server_id=owned-server
+local cli_dir=/owned/cli cli_raw=/owned/coverage SOCK=/owned/docker.sock
+local ROOT=/source-root lane_dir=/raw/journeys/git-sync
+local COVERAGE_GIT_FIXTURE_ROOT="$FAKE_FIXTURE"
+local COVERAGE_GIT_SOURCES_JSON='[{"url":"git://owned:9418/coverage.git"}]'
+local CAESIUM_EVENT_INGEST_API_KEY=integration-test-key
 local runner_log="$ARTIFACTS/journeys/test.log"
-local -a runner_args=(run --pull=never --rm --platform "$PLATFORM" --network container:owned-server "$BUILDER_RUN_IMAGE" sh scripts/integration-test.sh -test.run exact-test-pattern)
+local -a runner_args=() runner_payload_args=()
 ''' + branch + '''
+[[ "${runner_args[0]}" == run && " ${runner_args[*]} " == *" --rm "* ]] || exit 88
+[[ " ${runner_args[*]} " == *" --name ${ID}-journey-runner-git-sync "* ]] || exit 89
+[[ " ${runner_args[*]} " == *" caesium.coverage.lane=git-sync-runner "* ]] || exit 90
+[[ "${runner_args[*]}" != *git-prep-test* ]] || exit 91
+name_count=0; label_count=0
+for arg in "${runner_args[@]}"; do
+  [[ "$arg" == --name ]] && ((name_count+=1))
+  [[ "$arg" == --label ]] && ((label_count+=1))
+done
+[[ "$name_count" == 1 && "$label_count" == 3 ]] || exit 92
 if [[ "$FAKE_MODE" == runner-error ]]; then [[ "$test_rc" == 7 ]]; else [[ "$test_rc" == 0 ]]; fi
 }
 run_writer || exit 87
@@ -1369,6 +1407,11 @@ run_writer || exit 87
                 if mode=='runner-success':
                     self.assertEqual(events[1]['name'],'run-owned-journey-git-runner')
                     self.assertEqual(events[7]['name'],'run-owned-journey-git-restore-0')
+                    self.assertEqual(events[5]['reference'],'f'*64,
+                                     'test writer must be removed by the exact immutable ID')
+                    self.assertEqual(events[5]['action'],'remove')
+                    self.assertEqual(events[11]['reference'],'e'*64,
+                                     'fixture restore helper must also be removed by exact ID')
                 self.assertFalse((artifacts / 'native-state.json').exists())
                 self.assertIn('ownership-restored',(artifacts / 'journeys/git-restore-run-owned-0.log').read_text())
             else:
@@ -1405,6 +1448,171 @@ run_writer || exit 87
     def test_git_test_writer_is_joined_before_restore_and_error_stays_refused(self):
         self.exercise('runner-success')
         self.exercise('runner-error')
+
+    def test_shared_runner_payload_preserves_all_non_git_lane_arguments(self):
+        source = (ROOT / 'scripts/coverage-journeys.sh').read_text()
+        marker = source.index('# Keep the runner payload separate from lifecycle identity.')
+        begin = source.index('      runner_payload_args=(', marker)
+        runner_start = source.index('      runner_args=(', begin)
+        end = source.index('      if [[ "$mode" == "git-sync" ]]; then', runner_start)
+        production = source[begin:end]
+        wrapper = r'''set -euo pipefail
+run_mode() {
+local mode="$1" lane="$1" test_rc=0 pattern=exact-test-pattern
+local runner_name="${ID}-journey-runner-${lane}" server_id=owned-server
+local cli_dir=/owned/cli cli_raw=/owned/coverage SOCK=/owned/docker.sock
+local ROOT=/source-root lane_dir=/raw/journeys/${lane} auth_env=/owned/auth.env
+local CAESIUM_EVENT_INGEST_API_KEY=integration-test-key
+local -a runner_args=() runner_payload_args=()
+''' + production + r'''
+  [[ "${runner_args[0]}" == run && " ${runner_args[*]} " == *" --pull=never "* && " ${runner_args[*]} " == *" --rm "* ]]
+  [[ " ${runner_args[*]} " == *" --platform linux/arm64 "* && " ${runner_args[*]} " == *" --name owned-journey-runner-${mode} "* ]]
+  [[ " ${runner_args[*]} " == *" --label caesium.coverage.owner=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa "* ]]
+  [[ " ${runner_args[*]} " == *" --label caesium.coverage.run=owned "* ]]
+  [[ " ${runner_args[*]} " == *" --label caesium.coverage.lane=${mode}-runner "* ]]
+  [[ " ${runner_payload_args[*]} " == *" -v /source-root:/source "* ]]
+  [[ " ${runner_payload_args[*]} " == *" -v /owned/cli:/coverage-cli:ro "* ]]
+  [[ " ${runner_payload_args[*]} " == *" -v /owned/docker.sock:/var/run/docker.sock "* ]]
+  [[ " ${runner_payload_args[*]} " == *" -v /owned/coverage:/coverage "* ]]
+  [[ " ${runner_payload_args[*]} " == *" --network container:owned-server "* ]]
+  [[ " ${runner_payload_args[*]} " == *" -w /source "* ]]
+  [[ " ${runner_payload_args[*]} " == *" sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb sh scripts/integration-test.sh -test.run exact-test-pattern "* ]]
+  if [[ "$mode" == auth ]]; then
+    [[ " ${runner_payload_args[*]} " == *" --env-file /owned/auth.env "* ]]
+    [[ " ${runner_payload_args[*]} " == *" CAESIUM_AGENT_AUTH_LANE=true "* ]]
+    [[ " ${runner_payload_args[*]} " == *" CAESIUM_AUTH_MODE=api-key "* ]]
+  elif [[ "$mode" == distributed || "$mode" == owner-memory ]]; then
+    [[ " ${runner_payload_args[*]} " == *" CAESIUM_EXECUTION_MODE=distributed "* ]]
+    if [[ "$mode" == owner-memory ]]; then
+      [[ " ${runner_payload_args[*]} " == *" CAESIUM_RUN_OWNER_IN_MEMORY=true "* ]]
+    else
+      [[ " ${runner_payload_args[*]} " != *CAESIUM_RUN_OWNER_IN_MEMORY* ]]
+    fi
+  else
+    [[ " ${runner_payload_args[*]} " != *CAESIUM_EXECUTION_MODE* ]]
+    [[ " ${runner_payload_args[*]} " != *CAESIUM_AGENT_AUTH_LANE* ]]
+  fi
+}
+ID=owned CANDIDATE_SHA=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa PLATFORM=linux/arm64
+BUILDER_RUN_IMAGE=sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+CAESIUM_MAINTENANCE_JOURNEYS_REQUIRED=true
+for mode in local auth distributed owner-memory; do run_mode "$mode"; done
+'''
+        result=subprocess.run(['/bin/bash','-c',wrapper],capture_output=True,text=True,timeout=10)
+        self.assertEqual(result.returncode,0,result.stderr+result.stdout)
+
+    def test_git_sync_lane_uses_prep_owned_identity_and_removes_exact_id(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            artifacts = root / 'artifacts'; (artifacts / 'journeys').mkdir(parents=True)
+            raw = root / 'raw'; raw.mkdir()
+            fake_bin = root / 'bin'; fake_bin.mkdir()
+            prep_id = 'f' * 64
+            server_id = 'a' * 64
+            image = 'sha256:' + 'b' * 64
+            state = root / 'prep-state.json'
+            events = root / 'events.jsonl'
+            runtime = fake_bin / 'runtime'
+            runtime.write_text(r'''#!/usr/bin/env python3
+import json, os, pathlib, sys
+args=sys.argv[1:]
+events=pathlib.Path(os.environ['FAKE_EVENTS'])
+def record(value):
+    with events.open('a') as out: out.write(json.dumps(value)+'\n')
+if args[0]=='run' and '-d' in args:
+    name=args[args.index('--name')+1]
+    labels=[args[i+1] for i,x in enumerate(args[:-1]) if x=='--label']
+    record({'op':'run','name':name,'labels':labels,'args':args})
+    if 'git-prep-test' in labels[-1]:
+        assert args[1]=='-d' and '--rm' not in args, args
+        assert name=='owned-journey-git-runner', name
+        assert labels==['caesium.coverage.owner='+'a'*40,'caesium.coverage.run=owned','caesium.coverage.lane=git-prep-test'], labels
+        assert args.count('--name')==1 and args.count('--label')==3, args
+        assert '-v' in args and os.environ['FAKE_FIXTURE']+':/fixture:rw' in args
+        assert '-e' in args and 'CAESIUM_JOBDEF_GIT_SYNC_LANE=true' in args
+        state={'Id':'f'*64,'Image':os.environ['FAKE_IMAGE'],'RestartCount':0,
+          'Config':{'Labels':{'caesium.coverage.owner':'a'*40,'caesium.coverage.run':'owned','caesium.coverage.lane':'git-prep-test'}},
+          'State':{'Status':'exited','Running':False,'ExitCode':0,'OOMKilled':False,'FinishedAt':'2026-10-08T00:00:00Z'}}
+        pathlib.Path(os.environ['FAKE_STATE']).write_text(json.dumps(state))
+        print('f'*64)
+    else:
+        print('a'*64)
+elif args[0]=='run' and 'wget' in args:
+    print('healthy')
+elif args[0]=='inspect' and args[1]=='-f':
+    print(os.environ['FAKE_SERVER_IMAGE'])
+elif args[0]=='logs':
+    print('--- PASS: TestIntegrationTestSuite/TestJobdefGitSyncLocalRepositoryUpdatesAndPrunes')
+else:
+    raise SystemExit('unexpected fake runtime command: '+repr(args))
+''')
+            runtime.chmod(0o700)
+            real_python = sys.executable
+            fake_python = fake_bin / 'python3'
+            fake_python.write_text('#!/bin/sh\nif [ "$1" = "' + str(ROOT / 'scripts/test_coverage_named_journeys.py') + '" ]; then\n  if [ "${2:-}" = validate-git-receipt ]; then printf \'{"valid":true}\\n\'; fi\n  exit 0\nfi\nexec ' + real_python + ' "$@"\n')
+            fake_python.chmod(0o700)
+            harness = r'''set -euo pipefail
+trap 'rc=$?; printf "ERR rc=%s line=%s cmd=%s\\n" "$rc" "$LINENO" "$BASH_COMMAND" >&2' ERR
+source "$1/scripts/coverage-journeys.sh"
+ROOT="$1"; ARTIFACTS="$2"; RAW="$3"; CONTAINER_CLI="$4"
+ID=owned; CANDIDATE_SHA=$(printf 'a%.0s' {1..40})
+IMAGE_ID="sha256:$(printf 'c%.0s' {1..64})"; BUILDER_RUN_IMAGE="sha256:$(printf 'b%.0s' {1..64})"
+PLATFORM=linux/amd64; NETWORK=owned-network; SOCK=/owned/docker.sock; SOCK_GID=0
+BUILD_CONTEXT='{}'; IMAGE_PROVENANCE=built-by-this-run; IMAGE_VERIFIED=true
+COVERAGE_JOURNEY_PREP_POLL_INTERVAL=0
+COVERAGE_JOURNEY_SERVER_ENV=(CAESIUM_TEST_FAKE=true)
+log() { printf '%s\n' "$*" >&2; }
+coverage_journey_server_env() { COVERAGE_JOURNEY_SERVER_ENV=(CAESIUM_TEST_FAKE=true); }
+coverage_journey_prepare_git_sync() {
+  local lane_dir="$1"
+  COVERAGE_GIT_FIXTURE_ROOT="$FAKE_FIXTURE"
+  COVERAGE_GIT_SOURCES_JSON='[{"url":"git://owned:9418/coverage.git"}]'
+  mkdir -p "$lane_dir/evidence"
+  printf '{"fixture":"owned"}\n' >"$lane_dir/evidence/git-sync.json"
+}
+coverage_journey_resource() {
+  local action="$1" kind="$2" ref="$3" image="${4:-}" lane="${5:-}"
+  case "$action:$kind:$ref" in
+    absent:container:*) return 0 ;;
+    owned:container:owned-journey-git-runner|owned:container:$(printf 'f%.0s' {1..64})) cat "$FAKE_STATE" ;;
+    stop:container:$(printf 'a%.0s' {1..64}))
+      printf '{"flush_rc":0,"stop_rc":0,"State":{"ExitCode":0,"OOMKilled":false,"FinishedAt":"2026-10-08T00:00:01Z"}}\n' ;;
+    remove:container:*)
+      printf '{"op":"remove","reference":"%s","lane":"%s"}\n' "$ref" "$lane" >>"$FAKE_EVENTS"
+      [[ "$ref" == $(printf 'f%.0s' {1..64}) || "$ref" == $(printf 'a%.0s' {1..64}) ]] ;;
+    *) printf 'unexpected resource %s %s %s %s\n' "$action" "$kind" "$ref" "$lane" >&2; return 1 ;;
+  esac
+}
+gocoverdir_complete() { return 0; }
+coverage_journey_build_named_args() { COVERAGE_JOURNEY_NAMED_ARGS=(--log "$1"); }
+coverage_journey_write_record() {
+  [[ "$4" == 0 && "$5" -ge 1 && "${10}" == true && "${17}" == true && "${19}" == true ]]
+  printf '{"test_rc":%s,"passes":%s,"complete":%s}\n' "$4" "$5" "${10}" >"$RAW/journeys/git-sync/record.json"
+}
+coverage_journey_run_lane git-sync git-sync exact-test-pattern 1 /owned/cli
+[[ -s "$RAW/journeys/git-sync/record.json" ]]
+'''
+            env = os.environ.copy()
+            env.update(PATH=str(fake_bin) + os.pathsep + env.get('PATH',''),
+                       FAKE_STATE=str(state), FAKE_EVENTS=str(events), FAKE_FIXTURE=str(root/'fixture'),
+                       FAKE_IMAGE=image, FAKE_SERVER_IMAGE='sha256:'+'c'*64)
+            (root/'fixture').mkdir()
+            completed = subprocess.run(['/bin/bash','-c',harness,'git-sync-lane',str(ROOT),str(artifacts),str(raw),str(runtime)],
+                                       env=env,capture_output=True,text=True,timeout=20)
+            self.assertEqual(completed.returncode,0,completed.stderr+completed.stdout)
+            operations=[json.loads(line) for line in events.read_text().splitlines()]
+            prep=[item for item in operations if item.get('op')=='run' and item['name']=='owned-journey-git-runner']
+            self.assertEqual(len(prep),1)
+            self.assertEqual(prep[0]['labels'],[
+                'caesium.coverage.owner='+'a'*40,
+                'caesium.coverage.run=owned',
+                'caesium.coverage.lane=git-prep-test',
+            ])
+            self.assertNotIn('--rm',prep[0]['args'])
+            self.assertEqual([item for item in operations if item.get('op')=='remove'],[
+                {'op':'remove','reference':prep_id,'lane':'git-prep-test'},
+                {'op':'remove','reference':server_id,'lane':''},
+            ])
 
     def test_restore_failure_and_lost_acknowledgement_never_clean_fixture(self):
         for mode in ('restore-fail','ack-fail','malformed-ack','remove-fail','mount-substituted'):

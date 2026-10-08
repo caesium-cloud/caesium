@@ -66,6 +66,21 @@ class StressNativeDiagnosticsTests(unittest.TestCase):
         text = f"0|{STATE}\n1|{STATE.replace('|137|false|', '|137|true|')}"
         self.assertEqual(len(MODULE.journal(text, CID, IMAGE)["transitions"]), 2)
 
+    def test_podman_schema_transitions_are_observed_without_qualifying_oom(self):
+        statuses = ["initialized", "stopping", "stopped", "exited"]
+        text = "\n".join(f"{n}|{STATE.replace('|exited|', '|' + status + '|')}"
+                         for n, status in enumerate(statuses))
+        value = MODULE.journal(text, CID, IMAGE)
+        self.assertEqual(value["polls"], len(statuses))
+        self.assertEqual([row["state"]["status"] for row in value["transitions"]], statuses)
+        self.assertTrue(all(row["state"]["exit"] == 137 and not row["state"]["oom"]
+                            for row in value["transitions"]))
+        for record in [STATE.replace('|exited|', '|unknown|'), STATE.replace('|137|', '|-1|'),
+                       STATE.replace('|exited|', '|SECRET_STATUS|')]:
+            with self.subTest(record=record):
+                with self.assertRaises(ValueError):
+                    MODULE.journal("0|" + record, CID, IMAGE)
+
     def test_journal_identity_order_boolean_numeric_and_extra_rows_are_refused(self):
         for text in ["", f"1|{STATE}", f"0|{STATE}\n0|{STATE}",
                      f"0|{STATE.replace(CID, 'c' * 64)}", f"0|{STATE.replace(IMAGE, 'sha256:' + 'c' * 64)}",

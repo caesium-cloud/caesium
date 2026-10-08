@@ -243,8 +243,8 @@ func runGracefulTriggerShutdown(t *testing.T, kube *kubernetes.Clientset, api *c
 		t.Fatal(err)
 	}
 	retained, err := api.GetRun(ctx, observer, job.ID, admitted.ID)
-	if err != nil || retained.Status != "running" {
-		t.Fatalf("run must remain running after trigger-node SIGTERM: %+v error=%v", retained, err)
+	if err != nil {
+		t.Fatal(err)
 	}
 	rows, err := api.QueryTaskRecipes(ctx, observer, admitted.ID)
 	if err != nil {
@@ -255,6 +255,16 @@ func runGracefulTriggerShutdown(t *testing.T, kube *kubernetes.Clientset, api *c
 		if row.ID == remote.ID {
 			retainedRemote = row
 		}
+	}
+	if err := cluster.WriteRecords(ctx, kube, env.Namespace, "graceful_trigger_shutdown_retained", map[string]any{
+		"run_id": admitted.ID, "trigger_pod": before.Name, "pod_uid": before.UID,
+		"old_container": before.ContainerID, "new_container": after.ContainerID,
+		"sigterm": ack, "remote_before": remote, "retained": retained, "remote_after": rows,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if retained.Status != "running" {
+		t.Fatalf("run must remain running after trigger-node SIGTERM: %+v", retained)
 	}
 	if retainedRemote.Status != "running" || retainedRemote.ClaimedBy != remote.ClaimedBy || retainedRemote.ClaimAttempt != remote.ClaimAttempt {
 		t.Fatalf("healthy remote claim changed across trigger-node shutdown: before=%+v after=%+v", remote, retainedRemote)
@@ -274,27 +284,70 @@ func runGracefulTriggerShutdown(t *testing.T, kube *kubernetes.Clientset, api *c
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if final.ID != admitted.ID || len(final.Tasks) != 1 {
-		t.Fatalf("run identity/task set changed: %+v", final)
-	}
 	finalRecipes, err := api.QueryTaskRecipes(ctx, observer, admitted.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(finalRecipes) != 1 || finalRecipes[0].ID != remote.ID || finalRecipes[0].TaskID != remote.TaskID ||
-		finalRecipes[0].Attempt != remote.Attempt || finalRecipes[0].ClaimAttempt != remote.ClaimAttempt || finalRecipes[0].Status != "succeeded" {
-		t.Fatalf("remote task identity/attempt changed after release: before=%+v final=%+v", remote, finalRecipes)
-	}
 	starts, completions := sink.StartsFor(admitted.ID, cluster.BlockStep), sink.CompletionsFor(admitted.ID, cluster.BlockStep)
-	if len(starts) != 1 || len(completions) != 1 || starts[0].Nonce == "" || starts[0].Nonce != completions[0].Nonce {
-		t.Fatalf("remote task was re-executed or lacks matching completion evidence: starts=%+v completions=%+v", starts, completions)
+	// Persist the observed rows/effects before judging them, including any
+	// recovery fence that advances after the healthy remote claim checkpoint.
+	if err := cluster.WriteRecords(ctx, kube, env.Namespace, "graceful_trigger_shutdown", map[string]any{
+		"run_id": admitted.ID, "trigger_pod": before.Name, "pod_uid": before.UID,
+		"old_container": before.ContainerID, "new_container": after.ContainerID,
+		"sigterm": ack, "remote_before": remote, "remote_after": retainedRemote,
+		"remote_final": finalRecipes, "starts": starts, "completions": completions, "final": final,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateGracefulShutdownResult(admitted.ID, job.ID, remote, final, finalRecipes, starts, completions); err != nil {
+		t.Fatalf("shutdown recovery invariants: %v; before=%+v final=%+v starts=%+v completions=%+v", err, remote, finalRecipes, starts, completions)
 	}
 	if err := cluster.Poll(ctx, time.Second, func() (bool, error) {
 		return api.Health(ctx, triggerNode.HTTPBase()) == nil, nil
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if err := cluster.WriteRecords(ctx, kube, env.Namespace, "graceful_trigger_shutdown", map[string]any{"run_id": admitted.ID, "trigger_pod": before.Name, "pod_uid": before.UID, "old_container": before.ContainerID, "new_container": after.ContainerID, "remote_before": remote, "remote_after": retainedRemote, "remote_final": finalRecipes, "starts": starts, "completions": completions, "final": final}); err != nil {
-		t.Fatal(err)
+}
+
+// Owner recovery has at-least-once task execution: it resets in-flight rows and
+// reclaims them under a newer generation. Durable identities/retry attempts must
+// survive; multiple effects require positive evidence of that recovery fence.
+func validateGracefulShutdownResult(runID, jobID string, before cluster.TaskRecipe, final cluster.Run, recipes []cluster.TaskRecipe, starts, completions []recorder.Event) error {
+	if final.ID != runID || final.JobID != jobID || final.Status != "succeeded" || len(final.Tasks) != 1 || len(recipes) != 1 {
+		return fmt.Errorf("run identity, task set or final success changed")
 	}
+	task, recipe := final.Tasks[0], recipes[0]
+	if task.ID != before.ID || task.TaskID != before.TaskID || task.Attempt != before.Attempt || task.Status != "succeeded" ||
+		recipe.ID != before.ID || recipe.TaskID != before.TaskID || recipe.Attempt != before.Attempt || recipe.Status != "succeeded" ||
+		recipe.Image != before.Image || recipe.Command != before.Command {
+		return fmt.Errorf("durable task identity, retry attempt, recipe or final success changed")
+	}
+	if before.ClaimAttempt <= 0 || before.OwnerGeneration <= 0 || recipe.ClaimAttempt < before.ClaimAttempt || recipe.OwnerGeneration < before.OwnerGeneration {
+		return fmt.Errorf("claim attempt or owner generation missing/regressed")
+	}
+	if len(starts) == 0 || len(starts) != len(completions) {
+		return fmt.Errorf("missing or unpaired execution evidence")
+	}
+	if len(starts) > 1 && (recipe.ClaimAttempt == before.ClaimAttempt || recipe.OwnerGeneration == before.OwnerGeneration ||
+		len(starts)-1 > recipe.ClaimAttempt-before.ClaimAttempt) {
+		return fmt.Errorf("multiple executions lack advanced recovery fence")
+	}
+	byNonce := make(map[string]time.Time, len(starts))
+	for _, event := range starts {
+		if event.Kind != "start" || event.RunID != runID || event.Step != cluster.BlockStep || strings.TrimSpace(event.Nonce) == "" || event.At.IsZero() {
+			return fmt.Errorf("unbound start evidence")
+		}
+		if _, exists := byNonce[event.Nonce]; exists {
+			return fmt.Errorf("duplicate start nonce")
+		}
+		byNonce[event.Nonce] = event.At
+	}
+	for _, event := range completions {
+		started, exists := byNonce[event.Nonce]
+		if event.Kind != "complete" || event.RunID != runID || event.Step != cluster.BlockStep || !exists || event.At.Before(started) {
+			return fmt.Errorf("unbound, repeated or premature completion evidence")
+		}
+		delete(byNonce, event.Nonce)
+	}
+	return nil
 }

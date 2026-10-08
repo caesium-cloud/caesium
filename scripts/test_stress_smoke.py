@@ -74,6 +74,27 @@ inspect)
         n=$((n+1)); printf '%s\n' "$n" > "$FIXTURE/state_count"
         native_status=exited; running=false; code=137; oom=true
         case "$SCENARIO" in
+            podman_stopped_then_exited) if [ "$n" -eq 1 ]; then native_status=stopped; fi ;;
+            podman_stopping_then_stopped_then_exited)
+                if [ "$n" -eq 1 ]; then native_status=stopping; code=0; oom=false
+                elif [ "$n" -eq 2 ]; then native_status=stopped; fi ;;
+            podman_stopped_forever) native_status=stopped ;;
+            podman_stopping_forever) native_status=stopping; code=0; oom=false ;;
+            podman_stopped_no_oom)
+                if [ "$n" -eq 1 ]; then native_status=stopped; else oom=false; fi ;;
+            podman_stopped_wrong_exit)
+                if [ "$n" -eq 1 ]; then native_status=stopped; else code=2; oom=false; fi ;;
+            podman_stopped_then_inspect_fail|podman_stopped_then_inspect_fail_rc1|podman_stopped_then_malformed|podman_stopped_then_foreign_cid)
+                if [ "$n" -eq 1 ]; then native_status=stopped
+                elif [ "$n" -eq 2 ]; then
+                    case "$SCENARIO" in
+                        podman_stopped_then_inspect_fail) echo SECRET_NATIVE >&2; exit 9 ;;
+                        podman_stopped_then_inspect_fail_rc1) echo SECRET_NATIVE >&2; exit 1 ;;
+                        podman_stopped_then_malformed) code=SECRET_EXIT ;;
+                        podman_stopped_then_foreign_cid) cid=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc ;;
+                    esac
+                fi ;;
+            podman_initialized) native_status=initialized ;;
             delayed_oom) if [ "$n" -lt 6 ]; then oom=false; fi ;;
             no_oom|logs_fail_cleanup_fail) oom=false ;;
             late_oom_observation) if [ "$n" -le 100 ]; then oom=false; fi ;;
@@ -91,6 +112,7 @@ inspect)
         malformed_boolean) oom=maybe ;;
         malformed_exit) code=NaN ;;
         malformed_memory) memory=SECRET_MEMORY ;;
+        unknown_status) native_status=unknown ;;
         barrier_memory_mismatch) memory=0 ;;
         barrier_swap_mismatch) swap=134217728 ;;
     esac
@@ -199,6 +221,59 @@ class StressSmokeTests(unittest.TestCase):
                 self.assertGreaterEqual(polls, 100)
                 self.assertIn("phase=terminal", result.stderr)
 
+    def test_podman_cleanup_transitions_require_a_later_strict_exited_record(self):
+        for scenario, statuses in [
+                ("podman_stopped_then_exited", ["stopped", "exited"]),
+                ("podman_stopping_then_stopped_then_exited", ["stopping", "stopped", "exited"])]:
+            with self.subTest(scenario=scenario):
+                result, journal, polls = self.run_case(scenario)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn(PASS, result.stdout)
+                self.assertEqual(polls, len(statuses) + 1)  # Qualifying reads plus cleanup snapshot.
+                value = next(json.loads(line) for line in result.stderr.splitlines()
+                             if line.startswith('{"schema_version":'))
+                self.assertEqual(value["journal"]["outcome"], "complete")
+                self.assertEqual(value["journal"]["polls"], len(statuses))
+                self.assertEqual([row["state"]["status"] for row in value["journal"]["transitions"]], statuses)
+                terminal = value["journal"]["transitions"][-1]["state"]
+                self.assertEqual(terminal, {"status": "exited", "running": False, "exit": 137,
+                                            "oom": True, "memory": 67108864, "swap": 67108864})
+                self.assertEqual(value["qualification"], "unchanged")
+                self.assertEqual(sum(line == "cp - " + CID + ":/tmp" for line in journal), 1)
+                self.assertEqual(sum(line == "rm -f " + CID for line in journal), 1)
+
+    def test_podman_transitions_and_intermediate_oom_cannot_qualify_at_poll_bound(self):
+        for scenario in ["podman_stopped_forever", "podman_stopping_forever", "podman_stopped_no_oom"]:
+            with self.subTest(scenario=scenario):
+                result, _, polls = self.assert_refused(scenario, "terminal_oom_unconfirmed")
+                self.assertEqual(polls, 101)  # No early success, even stopped/137/OOMtrue.
+                value = next(json.loads(line) for line in result.stderr.splitlines()
+                             if line.startswith('{"schema_version":'))
+                self.assertEqual(value["journal"]["outcome"], "complete")
+                self.assertEqual(value["journal"]["polls"], 100)
+                self.assertEqual(value["qualification"], "unchanged")
+
+    def test_podman_progression_cannot_mask_a_later_native_or_record_failure(self):
+        for scenario, reason, status, diagnostic in [
+                ("podman_stopped_then_inspect_fail", "terminal_inspect_failed", 9, "command_failed"),
+                ("podman_stopped_then_inspect_fail_rc1", "terminal_inspect_failed", 1, "command_failed"),
+                ("podman_stopped_then_malformed", "terminal_inspect_failed", 1, "invalid_or_unbound"),
+                ("podman_stopped_then_foreign_cid", "terminal_inspect_failed", 1, "invalid_or_unbound"),
+                ("podman_stopped_wrong_exit", "wrong_terminal_exit", 1, None)]:
+            with self.subTest(scenario=scenario):
+                result, journal, polls = self.assert_refused(scenario, reason, status)
+                self.assertEqual(polls, 3)  # First transition, immediate refusal, diagnostic snapshot.
+                self.assertEqual(sum(line == "rm -f " + CID for line in journal), 1)
+                if diagnostic:
+                    self.assertIn("inspect_failure=" + diagnostic + " rc=" + str(status), result.stderr)
+                    # A later valid diagnostic snapshot cannot erase or qualify the failed read.
+                    self.assertIn("status=exited running=false exit=137 oom=true", result.stderr)
+
+    def test_podman_initialized_is_recognized_but_not_a_terminal_success(self):
+        result, _, polls = self.assert_refused("podman_initialized", "wrong_terminal_status")
+        self.assertEqual(polls, 2)
+        self.assertIn("status=initialized running=false exit=137 oom=true", result.stderr)
+
     def test_other_terminal_exit_refused_without_waiting_for_oom(self):
         result, _, polls = self.assert_refused("wrong_exit", "wrong_terminal_exit")
         self.assertIn("exit=2 oom=false", result.stderr)
@@ -233,11 +308,14 @@ class StressSmokeTests(unittest.TestCase):
     def test_failed_or_malformed_native_inspection_is_not_evidence(self):
         for scenario, rc in [("inspect_fail", 9), ("terminal_inspect_fail", 9),
                              ("malformed", 1), ("wrong_identity", 1),
-                             ("malformed_boolean", 1), ("malformed_exit", 1), ("malformed_memory", 1)]:
+                             ("malformed_boolean", 1), ("malformed_exit", 1), ("malformed_memory", 1),
+                             ("unknown_status", 1)]:
             with self.subTest(scenario=scenario):
                 reason = "terminal_inspect_failed" if scenario == "terminal_inspect_fail" else "barrier_inspect_failed"
                 result, journal, _ = self.assert_refused(scenario, reason, rc)
                 self.assertIn("inspect_unavailable", result.stderr)
+                diagnostic = "command_failed" if scenario in {"inspect_fail", "terminal_inspect_fail"} else "invalid_or_unbound"
+                self.assertIn("inspect_failure=" + diagnostic + " rc=" + str(rc), result.stderr)
                 self.assertEqual(sum(line == "rm -f " + CID for line in journal), 1)
 
     def test_no_allocation_before_release_including_second_log_read(self):

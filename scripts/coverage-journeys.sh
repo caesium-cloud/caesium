@@ -1402,7 +1402,7 @@ coverage_journey_run_lane() {
   local fixture_validation="$lane_dir/evidence/collector-validation.json" server_finished_at=""
   local agent_port="" CAESIUM_AGENT_API_EXTERNAL_URL=""
   local cli_raw="$lane_dir/cli" server_raw="$lane_dir/server"
-  local -a server_args runner_args
+  local -a server_args runner_args runner_payload_args
 
   coverage_journey_require_absent container "$server_name" || return 1
   if [[ -e "$lane_dir" || -L "$lane_dir" ]]; then
@@ -1513,12 +1513,10 @@ coverage_journey_run_lane() {
       fi
     fi
     if [[ "$test_rc" -ne 125 || "$lane" != "auth" || -n "$auth_env" ]]; then
-      runner_args=(
-        run --pull=never --rm --platform "$PLATFORM"
-        --name "$runner_name"
-        --label "caesium.coverage.owner=$CANDIDATE_SHA"
-        --label "caesium.coverage.run=$ID"
-        --label "caesium.coverage.lane=$lane-runner"
+      # Keep the runner payload separate from lifecycle identity. GitSync uses
+      # the detached prep helper below, which must supply its own unique name
+      # and owner/run/lane labels for checked join and cleanup.
+      runner_payload_args=(
         -v "$ROOT:/source"
         -v "$cli_dir:/coverage-cli:ro"
         -v "$SOCK:/var/run/docker.sock"
@@ -1537,7 +1535,7 @@ coverage_journey_run_lane() {
         -w /source
       )
       if [[ "$mode" == "auth" ]]; then
-        runner_args+=(
+        runner_payload_args+=(
           --env-file "$auth_env"
           -e CAESIUM_AGENT_AUTH_LANE=true
           -e CAESIUM_AUTH_MODE=api-key
@@ -1545,12 +1543,12 @@ coverage_journey_run_lane() {
           -e CAESIUM_AUTH_KEY_HASH_SECRET=agent-integration-auth-key-hash-secret-000001
         )
       elif [[ "$mode" == "distributed" || "$mode" == "owner-memory" ]]; then
-        runner_args+=(-e CAESIUM_EXECUTION_MODE=distributed)
+        runner_payload_args+=(-e CAESIUM_EXECUTION_MODE=distributed)
         if [[ "$mode" == "owner-memory" ]]; then
-          runner_args+=(-e CAESIUM_RUN_OWNER_IN_MEMORY=true)
+          runner_payload_args+=(-e CAESIUM_RUN_OWNER_IN_MEMORY=true)
         fi
       elif [[ "$mode" == "git-sync" ]]; then
-        runner_args+=(
+        runner_payload_args+=(
           -v "$COVERAGE_GIT_FIXTURE_ROOT:/fixture:rw"
           -v "$lane_dir/evidence:/coverage-evidence:rw"
           -e CAESIUM_JOBDEF_GIT_SYNC_LANE=true
@@ -1562,13 +1560,21 @@ coverage_journey_run_lane() {
           -e CAESIUM_JOBDEF_GIT_RECEIPT=/coverage-evidence/git-sync.json
         )
       fi
-      runner_args+=("$BUILDER_RUN_IMAGE" sh scripts/integration-test.sh -test.run "$pattern")
+      runner_payload_args+=("$BUILDER_RUN_IMAGE" sh scripts/integration-test.sh -test.run "$pattern")
+      runner_args=(
+        run --pull=never --rm --platform "$PLATFORM"
+        --name "$runner_name"
+        --label "caesium.coverage.owner=$CANDIDATE_SHA"
+        --label "caesium.coverage.run=$ID"
+        --label "caesium.coverage.lane=$lane-runner"
+        "${runner_payload_args[@]}"
+      )
       if [[ "$mode" == "git-sync" ]]; then
         # This runner mutates /fixture too: join and remove its exact owned ID
         # before restoration, rather than rely on anonymous --rm acknowledgement.
         local git_runner_log="$ARTIFACTS/journeys/git-runner-$ID.log"
         if coverage_journey_with_prep_signal_cleanup coverage_journey_run_builder_prep \
-            "${ID}-journey-git-runner" git-prep-test "$git_runner_log" 1800 "${runner_args[@]:5}"; then
+            "${ID}-journey-git-runner" git-prep-test "$git_runner_log" 1800 "${runner_payload_args[@]}"; then
           test_rc=0
         else
           test_rc="$COVERAGE_JOURNEY_PREP_LAST_EXIT_CODE"
