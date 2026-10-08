@@ -11,6 +11,7 @@ import (
 	"github.com/caesium-cloud/caesium/internal/metrics"
 	mtest "github.com/caesium-cloud/caesium/internal/metrics/testutil"
 	"github.com/caesium-cloud/caesium/internal/models"
+	fixturejson "github.com/caesium-cloud/caesium/internal/testutil"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 	"gorm.io/gorm"
@@ -421,18 +422,11 @@ func TestSnoozeRetryFireHandlerErrPropagates(t *testing.T) {
 	ops.retryErr = errors.New("boom")
 	runID := uuid.New()
 	timer := models.RemediationTimer{
-		Payload: mustJSON(t, snoozePayload{RunID: runID}),
+		Payload: fixturejson.MustJSONBytes(t, snoozePayload{RunID: runID}),
 	}
 	err := exec.fireSnoozeRetry(context.Background(), timer)
 	require.Error(t, err)
 	_ = store
-}
-
-func mustJSON(t *testing.T, v any) []byte {
-	t.Helper()
-	b, err := json.Marshal(v)
-	require.NoError(t, err)
-	return b
 }
 
 func pendingTimers(t *testing.T, db *gorm.DB, incidentID uuid.UUID) []models.RemediationTimer {
@@ -525,7 +519,7 @@ func TestSnoozeRetryRearmGivesUpAtCeiling(t *testing.T) {
 	timer := models.RemediationTimer{
 		IncidentID: inc.ID,
 		Namespace:  inc.Namespace,
-		Payload:    mustJSON(t, snoozePayload{RunID: runID, Rearm: maxSnoozeRearm}),
+		Payload:    fixturejson.MustJSONBytes(t, snoozePayload{RunID: runID, Rearm: maxSnoozeRearm}),
 	}
 	err := exec.fireSnoozeRetry(context.Background(), timer)
 	require.Error(t, err)
@@ -670,4 +664,21 @@ func TestPlaybookDocumentRoundTripsForTheBundle(t *testing.T) {
 
 	// The document a resolved playbook renders must decode back to the same policy.
 	require.Equal(t, pb, DecodePlaybook(pb.Document()))
+}
+
+func TestDeterministicRuleCannotExecuteApprovalTier(t *testing.T) {
+	_, store, ops, exec := newExecutorTest(t)
+	inc, _ := seedIncident(t, store)
+	rules := NewRules(DeterministicRule{Class: FailureClass(inc.Class), ActionType: ActionTypeSkipTask})
+	action, matched, err := exec.ApplyDeterministicRule(t.Context(), inc, rules)
+	require.True(t, matched)
+	require.ErrorContains(t, err, "requires approval")
+	require.NotNil(t, action)
+	require.Equal(t, models.AgentActionActorPolicy, action.Actor)
+	require.Equal(t, models.AgentActionStatusFailed, action.Status)
+	require.Empty(t, ops.skipTask)
+	var persisted models.AgentAction
+	require.NoError(t, store.DB().First(&persisted, "id = ?", action.ID).Error)
+	require.Equal(t, models.AgentActionStatusFailed, persisted.Status)
+	require.Contains(t, string(persisted.Result), "requires approval")
 }

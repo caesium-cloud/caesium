@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/caesium-cloud/caesium/internal/dbretry"
 	"github.com/caesium-cloud/caesium/internal/incident"
 	"github.com/caesium-cloud/caesium/internal/metrics"
 	"github.com/caesium-cloud/caesium/internal/models"
@@ -479,30 +480,20 @@ func attemptOrdinalLockSQL(dialect string) (string, error) {
 // withAttemptContentionRetry re-runs a whole attempt transaction on transient
 // dqlite/SQLite contention, on the shared repo-wide backoff schedule.
 func withAttemptContentionRetry(ctx context.Context, fn func() error) error {
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	var err error
-	for attempt := 0; ; attempt++ {
-		if ctxErr := ctx.Err(); ctxErr != nil {
-			return ctxErr
-		}
-		err = fn()
-		if err == nil || !dqlite.IsContentionError(err) {
-			return err
-		}
-		if attempt >= len(db.BusyRetryBackoffs) {
-			return err
-		}
-		metrics.DBBusyRetriesTotal.Inc()
-		timer := time.NewTimer(db.BusyRetryBackoffs[attempt])
-		select {
-		case <-ctx.Done():
-			timer.Stop()
-			return ctx.Err()
-		case <-timer.C:
-		}
-	}
+	return dbretry.Retry(ctx, dbretry.Policy{
+		Backoffs: db.BusyRetryBackoffs, Retryable: dqlite.IsContentionError, BeforeAttempt: true,
+		OnRetry: func(error) { metrics.DBBusyRetriesTotal.Inc() },
+		Wait: func(ctx context.Context, delay time.Duration) error {
+			timer := time.NewTimer(delay)
+			defer timer.Stop()
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-timer.C:
+				return nil
+			}
+		},
+	}, fn)
 }
 
 // sanitizeResponseBody prepares a callback target's response body for

@@ -2,12 +2,12 @@ package run
 
 import (
 	"context"
+	"sync"
 
 	"github.com/caesium-cloud/caesium/internal/event"
 	runstorage "github.com/caesium-cloud/caesium/internal/run"
 	"github.com/google/uuid"
 	"gorm.io/gorm"
-	"sync"
 )
 
 type Service interface {
@@ -24,8 +24,9 @@ type Service interface {
 }
 
 type runService struct {
-	ctx   context.Context
-	store *runstorage.Store
+	ctx     context.Context
+	storeMu sync.Mutex
+	store   *runstorage.Store
 }
 
 var (
@@ -42,31 +43,41 @@ func New(ctx context.Context) Service {
 			store: defaultService.store,
 		}
 	}
-	return &runService{
-		ctx:   ctx,
-		store: runstorage.Default(),
+	return &runService{ctx: ctx}
+}
+
+// runStore captures this service's binding before an operation. Deferring the
+// default lookup lets WithStore/WithDatabase bind a cold service without opening
+// an unrelated process-wide database. Concurrent operations resolve it once.
+func (r *runService) runStore() *runstorage.Store {
+	r.storeMu.Lock()
+	defer r.storeMu.Unlock()
+	if r.store == nil {
+		r.store = runstorage.Default()
 	}
+	return r.store
 }
 
 func (r *runService) SetBus(bus event.Bus) {
-	r.store.SetBus(bus)
+	store := r.runStore()
+	store.SetBus(bus)
 	defaultServiceMu.Lock()
 	defer defaultServiceMu.Unlock()
 	if defaultService == nil {
-		defaultService = &runService{store: r.store}
+		defaultService = &runService{store: store}
 	}
 }
 
 func (r *runService) Start(jobID uuid.UUID, triggerID *uuid.UUID, opts ...runstorage.StartOption) (*runstorage.JobRun, error) {
-	return r.store.Start(jobID, triggerID, opts...)
+	return r.runStore().Start(jobID, triggerID, opts...)
 }
 
 func (r *runService) StartWithResult(jobID uuid.UUID, triggerID *uuid.UUID, opts ...runstorage.StartOption) (runstorage.StartResult, error) {
-	return r.store.StartWithResult(r.detachedContext(), jobID, triggerID, opts...)
+	return r.runStore().StartWithResult(r.detachedContext(), jobID, triggerID, opts...)
 }
 
 func (r *runService) FindIdempotentStart(jobID uuid.UUID, opts ...runstorage.StartOption) (runstorage.StartResult, bool, error) {
-	return r.store.FindIdempotentStart(r.detachedContext(), jobID, opts...)
+	return r.runStore().FindIdempotentStart(r.detachedContext(), jobID, opts...)
 }
 
 // detachedContext keeps the request's values but not its cancellation, matching
@@ -80,19 +91,19 @@ func (r *runService) detachedContext() context.Context {
 }
 
 func (r *runService) Get(runID uuid.UUID) (*runstorage.JobRun, error) {
-	return r.store.Get(runID)
+	return r.runStore().Get(runID)
 }
 
 func (r *runService) GetTaskLogSnapshot(runID, taskID uuid.UUID) (*runstorage.TaskLogSnapshot, error) {
-	return r.store.GetTaskLogSnapshot(runID, taskID)
+	return r.runStore().GetTaskLogSnapshot(runID, taskID)
 }
 
 func (r *runService) List(jobID uuid.UUID, limit, offset int) ([]*runstorage.JobRun, int64, bool, error) {
-	return r.store.List(jobID, limit, offset)
+	return r.runStore().List(jobID, limit, offset)
 }
 
 func (r *runService) Latest(jobID uuid.UUID) (*runstorage.JobRun, error) {
-	return r.store.Latest(jobID)
+	return r.runStore().Latest(jobID)
 }
 
 // WithDatabase allows tests to override the database backing the store.
@@ -100,14 +111,15 @@ func (r *runService) WithDatabase(conn *gorm.DB) Service {
 	if conn == nil {
 		return r
 	}
-	r.store = runstorage.NewStore(conn)
-	return r
+	return r.WithStore(runstorage.NewStore(conn))
 }
 
 func (r *runService) WithStore(store *runstorage.Store) Service {
 	if store == nil {
 		return r
 	}
+	r.storeMu.Lock()
 	r.store = store
+	r.storeMu.Unlock()
 	return r
 }

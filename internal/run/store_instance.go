@@ -11,9 +11,7 @@ import (
 
 	"github.com/caesium-cloud/caesium/internal/event"
 	"github.com/caesium-cloud/caesium/internal/models"
-	"github.com/caesium-cloud/caesium/pkg/jobdef"
 	"github.com/caesium-cloud/caesium/pkg/log"
-	pkgtask "github.com/caesium-cloud/caesium/pkg/task"
 	"github.com/google/uuid"
 	"gorm.io/gorm"
 )
@@ -373,43 +371,9 @@ func ValidateTaskOutputSchemaInstance(
 	outputSchema []byte,
 	schemaValidation string,
 ) error {
-	if len(outputSchema) == 0 || schemaValidation == "" {
-		return nil
-	}
-	violations, err := pkgtask.ValidateOutputSchemaBytes(output, outputSchema)
-	if err != nil {
-		log.Warn("schema validation error", "task_id", taskID, "error", err)
-		return nil
-	}
-	if len(violations) == 0 {
-		return nil
-	}
-	// Same single read point as the unfanned form, consulted only once
-	// violations exist so the clean path costs nothing.
-	if SchemaGateOverridden(store, runID) {
-		logSchemaGateBypass(runID, taskID, len(violations))
-		return nil
-	}
-
-	log.Warn("task output schema violations", "task_id", taskID, "task_run_id", taskRunID, "violations", len(violations))
 	violationRef := taskRunID
 	if violationRef == uuid.Nil {
 		violationRef = taskID
 	}
-	if saveErr := store.SaveSchemaViolations(runID, violationRef, violations); saveErr != nil {
-		log.Warn("failed to persist schema violations", "task_id", taskID, "task_run_id", taskRunID, "error", saveErr)
-	}
-
-	if schemaValidation == jobdef.SchemaValidationFail {
-		// In fail mode the task fails and its task_failed event already carries
-		// the violations, so no separate event is emitted.
-		return fmt.Errorf("task %s output violates declared schema: %d violation(s)", taskID, len(violations))
-	}
-
-	// In warn mode the task does NOT fail, so the incident manager would never
-	// observe the violation. Emit a dedicated schema_violation_recorded event so
-	// the leader-gated incident subscriber can open a schema_violation incident.
-	publishSchemaViolationEvent(store, runID, taskID, len(violations))
-
-	return nil
+	return validateTaskOutputSchema(store, runID, taskID, violationRef, &taskRunID, output, outputSchema, schemaValidation)
 }

@@ -17,8 +17,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"maps"
 	"os"
-	"sort"
+	"slices"
 	"strings"
 	"unicode/utf8"
 )
@@ -172,11 +173,7 @@ func Run(name string, fn func(*Emitter) error) {
 // order would otherwise leak into a digest (spec §6.2 determinism requirement).
 func SortedKeys[V any](m map[string]V) []string {
 	keys := make([]string, 0, len(m))
-	for k := range m {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	return keys
+	return append(keys, slices.Sorted(maps.Keys(m))...)
 }
 
 func validScalar(what, s string) error {

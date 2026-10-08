@@ -39,10 +39,11 @@ import (
 	"net"
 	"net/http"
 	"net/url"
-	"path/filepath"
 	"strconv"
 	"sync/atomic"
 
+	"github.com/caesium-cloud/caesium/internal/bodylimit"
+	"github.com/caesium-cloud/caesium/test/internal/workloadcatalog"
 	"github.com/prometheus/common/expfmt"
 	"github.com/prometheus/common/model"
 	"os"
@@ -131,6 +132,9 @@ type config struct {
 	// whose whole point is a non-success terminal state (concurrency replace
 	// cancels the run it replaces) set it; everything else must not.
 	allowRunFailures bool
+	// envParseErrors retains malformed boolean environment values until a CLI
+	// flag or selected catalog entry explicitly overrides that setting.
+	envParseErrors map[string]error
 
 	// ---- E2: workload shape ---------------------------------------------
 	// concurrencyStrategy/maxRuns write metadata.concurrency on every applied
@@ -158,7 +162,10 @@ type config struct {
 }
 
 func defaultConfig() config {
-	return config{
+	requireSustained, requireSustainedErr := boolEnv("CAESIUM_LOAD_REQUIRE_SUSTAINED", false)
+	allowRunFailures, allowRunFailuresErr := boolEnv("CAESIUM_LOAD_ALLOW_RUN_FAILURES", false)
+	lifecycle, lifecycleErr := boolEnv("CAESIUM_LOAD_LIFECYCLE", true)
+	cfg := config{
 		serverURL:    envOrDefault("CAESIUM_LOAD_SERVER", "http://127.0.0.1:8080"),
 		jobCount:     envIntOrDefault("CAESIUM_LOAD_JOBS", 10),
 		fanOut:       envIntOrDefault("CAESIUM_LOAD_FAN_OUT", 4),
@@ -184,17 +191,32 @@ func defaultConfig() config {
 		drainTimeout:        envDurOrDefault("CAESIUM_LOAD_DRAIN_TIMEOUT", 5*time.Minute),
 		reconcileWorkers:    envIntOrDefault("CAESIUM_LOAD_RECONCILE_WORKERS", 8),
 		pollInterval:        envDurOrDefault("CAESIUM_LOAD_POLL_INTERVAL", time.Second),
-		requireSustained:    envBoolOrDefault("CAESIUM_LOAD_REQUIRE_SUSTAINED", false),
-		allowRunFailures:    envBoolOrDefault("CAESIUM_LOAD_ALLOW_RUN_FAILURES", false),
+		requireSustained:    requireSustained,
+		allowRunFailures:    allowRunFailures,
 		concurrencyStrategy: envOrDefault("CAESIUM_LOAD_CONCURRENCY_STRATEGY", ""),
 		maxRuns:             envNonNegIntOrDefault("CAESIUM_LOAD_MAX_RUNS", 0),
 		cacheMode:           envOrDefault("CAESIUM_LOAD_CACHE", cacheOff),
 		apiReadRate:         envNonNegFloatOrDefault("CAESIUM_LOAD_API_READ_RATE", 0),
 		subscribers:         envNonNegIntOrDefault("CAESIUM_LOAD_SUBSCRIBERS", 0),
-		lifecycle:           envBoolOrDefault("CAESIUM_LOAD_LIFECYCLE", true),
+		lifecycle:           lifecycle,
 		resourceContainer:   envOrDefault("CAESIUM_LOAD_RESOURCE_CONTAINER", ""),
 		dockerHost:          envOrDefault("CAESIUM_LOAD_DOCKER_HOST", envOrDefault("DOCKER_HOST", "unix:///var/run/docker.sock")),
 	}
+	cfg.envParseErrors = make(map[string]error)
+	for _, item := range []struct {
+		flagName string
+		envName  string
+		err      error
+	}{
+		{"require-sustained", "CAESIUM_LOAD_REQUIRE_SUSTAINED", requireSustainedErr},
+		{"allow-run-failures", "CAESIUM_LOAD_ALLOW_RUN_FAILURES", allowRunFailuresErr},
+		{"lifecycle", "CAESIUM_LOAD_LIFECYCLE", lifecycleErr},
+	} {
+		if item.err != nil {
+			cfg.envParseErrors[item.flagName] = fmt.Errorf("%s: %w", item.envName, item.err)
+		}
+	}
+	return cfg
 }
 
 // normalized fills the open-loop knobs on a configuration that predates them.
@@ -241,6 +263,15 @@ func (c config) totalArrivals() int {
 
 // validate runs before allocation, ticker creation, or any network side effect.
 func (c config) validate() error {
+	if len(c.envParseErrors) > 0 {
+		keys := make([]string, 0, len(c.envParseErrors))
+		for key := range c.envParseErrors {
+			keys = append(keys, key)
+		}
+		slices.Sort(keys)
+		key := keys[0]
+		return fmt.Errorf("invalid boolean setting -%s: %w", key, c.envParseErrors[key])
+	}
 	c = c.normalized()
 	u, err := url.Parse(c.serverURL)
 	if err != nil || u.Hostname() == "" || (u.Scheme != "http" && u.Scheme != "https") || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
@@ -530,7 +561,10 @@ func (c *client) listJobs(ctx context.Context) ([]struct{ ID, Alias string }, er
 	if resp.StatusCode >= 300 {
 		return nil, fmt.Errorf("list jobs: HTTP %d", resp.StatusCode)
 	}
-	raw, _ := io.ReadAll(resp.Body)
+	raw, readErr := readLoadBody(resp, 0, "list jobs")
+	if readErr != nil {
+		return nil, readErr
+	}
 	var entries []struct {
 		ID    string `json:"id"`
 		Alias string `json:"alias"`
@@ -554,7 +588,10 @@ func (c *client) getRunStatus(ctx context.Context, jobID, runID string) (string,
 	}
 	defer resp.Body.Close()
 
-	raw, _ := io.ReadAll(resp.Body)
+	raw, readErr := readLoadBody(resp, 0, "get run status")
+	if readErr != nil {
+		return "", readErr
+	}
 	if resp.StatusCode >= 300 {
 		return "", fmt.Errorf("get run %s: HTTP %d: %s", runID, resp.StatusCode, strings.TrimSpace(string(raw)))
 	}
@@ -611,7 +648,10 @@ func (c *client) getRun(ctx context.Context, jobID, runID string) (runSnapshot, 
 		return runSnapshot{}, err
 	}
 	defer resp.Body.Close()
-	raw, _ := io.ReadAll(resp.Body)
+	raw, readErr := readLoadBody(resp, 0, "get run")
+	if readErr != nil {
+		return runSnapshot{}, readErr
+	}
 	if resp.StatusCode >= 300 {
 		return runSnapshot{}, fmt.Errorf("get run %s: HTTP %d: %s", runID, resp.StatusCode, strings.TrimSpace(string(raw)))
 	}
@@ -634,10 +674,13 @@ func (c *client) listRuns(ctx context.Context, jobID string, maxPages int) ([]ru
 		if err != nil {
 			return all, err
 		}
-		raw, _ := io.ReadAll(resp.Body)
+		raw, readErr := readLoadBody(resp, 0, "list runs")
 		next := resp.Header.Get("X-Caesium-Next-Offset")
 		code := resp.StatusCode
 		resp.Body.Close()
+		if readErr != nil {
+			return all, readErr
+		}
 		if code >= 300 {
 			return all, fmt.Errorf("list runs for job %s: HTTP %d: %s", jobID, code, strings.TrimSpace(string(raw)))
 		}
@@ -665,7 +708,10 @@ func (c *client) queueDepth(ctx context.Context, jobID string) (int, error) {
 		return 0, err
 	}
 	defer resp.Body.Close()
-	raw, _ := io.ReadAll(resp.Body)
+	raw, readErr := readLoadBody(resp, 0, "list queue")
+	if readErr != nil {
+		return 0, readErr
+	}
 	if resp.StatusCode >= 300 {
 		return 0, fmt.Errorf("list queue for job %s: HTTP %d", jobID, resp.StatusCode)
 	}
@@ -1262,7 +1308,10 @@ func (d *dockerStatsClient) sample(ctx context.Context, container string) (conta
 		return containerStats{}, err
 	}
 	defer resp.Body.Close()
-	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	raw, readErr := readLoadBody(resp, 1<<20, "container stats")
+	if readErr != nil {
+		return containerStats{}, readErr
+	}
 	if resp.StatusCode != http.StatusOK {
 		return containerStats{}, fmt.Errorf("container stats %s: HTTP %d: %s", container, resp.StatusCode, strings.TrimSpace(string(raw)))
 	}
@@ -1941,22 +1990,45 @@ func (h *harness) triggerAndWait(ctx context.Context, alias, jobID string) runRe
 // path (/v1/hooks/*) is not used because its 202 response carries no body,
 // which would make per-run tracking impossible. POST /v1/jobs/:id/run returns
 // the JobRun object including the run ID.
+// uncertainStartError retains a possible committed identity without accepting
+// incomplete response bytes as an acknowledged admission.
+type uncertainStartError struct {
+	status int
+	runID  string
+	raw    []byte
+	cause  error
+}
+
+func (e *uncertainStartError) Error() string {
+	return fmt.Sprintf("run admission inconclusive, possibly committed (HTTP %d, possible run %q, body %q): %v", e.status, e.runID, e.raw, e.cause)
+}
+func (e *uncertainStartError) Unwrap() error { return e.cause }
+
 func (h *harness) startRun(ctx context.Context, jobID string) (string, error) {
 	resp, err := h.client.do(ctx, http.MethodPost, "/v1/jobs/"+jobID+"/run", nil)
 	if err != nil {
-		return "", err
+		return "", &uncertainStartError{cause: err}
 	}
 	defer resp.Body.Close()
+	raw, readErr := readLoadBody(resp, 0, "run job "+jobID)
+	if readErr != nil {
+		var partial struct {
+			ID string `json:"id"`
+		}
+		_ = json.Unmarshal(raw, &partial)
+		if !looksLikeUUID(partial.ID) {
+			partial.ID = ""
+		}
+		return partial.ID, &uncertainStartError{status: resp.StatusCode, runID: partial.ID, raw: raw, cause: readErr}
+	}
 	if resp.StatusCode >= 300 {
-		raw, _ := io.ReadAll(resp.Body)
 		return "", fmt.Errorf("run job %s: HTTP %d: %s", jobID, resp.StatusCode, strings.TrimSpace(string(raw)))
 	}
-	raw, _ := io.ReadAll(resp.Body)
 	var result struct {
 		ID string `json:"id"`
 	}
-	if jErr := json.Unmarshal(raw, &result); jErr != nil {
-		return "", fmt.Errorf("parse run response: %w", jErr)
+	if err := json.Unmarshal(raw, &result); err != nil {
+		return "", fmt.Errorf("parse run response: %w", err)
 	}
 	if result.ID == "" {
 		return "", fmt.Errorf("run job %s: response missing id", jobID)
@@ -2614,12 +2686,19 @@ func (h *harness) offer(ctx context.Context, job appliedJob, index int, schedule
 		return
 	}
 	defer resp.Body.Close()
-	raw, readErr := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	raw, readErr := bodylimit.Read(resp.Body, 1<<20)
 	code := resp.StatusCode
 	if readErr != nil {
 		// Headers arrived but the body did not. The run may well have been
 		// created, so this is DT-QUORUM-01 uncertainty — not a queue/skip.
-		record(outcomeUncertain, "response body truncated after HTTP "+strconv.Itoa(code)+": "+readErr.Error(), code, "")
+		var partial struct {
+			ID string `json:"id"`
+		}
+		_ = json.Unmarshal(raw, &partial)
+		if !looksLikeUUID(partial.ID) {
+			partial.ID = ""
+		}
+		record(outcomeUncertain, "response body incomplete after HTTP "+strconv.Itoa(code)+" (possible run "+partial.ID+"): "+readErr.Error(), code, "")
 		return
 	}
 	switch {
@@ -3585,6 +3664,9 @@ func buildReport(
 	// End-to-end latency percentiles.
 	slices.Sort(durations)
 	if len(durations) > 0 {
+		// Preserve the established end-to-end budget inputs. The separate API
+		// percentile reports use nearest-rank, but changing this legacy pair
+		// would silently shift the calibrated budget comparison.
 		r.endToEndP50 = durations[len(durations)/2]
 		r.endToEndP99 = durations[int(float64(len(durations))*0.99)]
 	}
@@ -4280,75 +4362,12 @@ func (r *report) markdown() string {
 // Keeping the catalog inside the driver — rather than only inside the
 // integration test — means the same entries can be replayed by hand and can be
 // validated hermetically, without a server.
-type catalog struct {
-	SchemaVersion int            `json:"schema_version"`
-	Description   string         `json:"description"`
-	Workloads     []catalogEntry `json:"workloads"`
-}
+type catalog = workloadcatalog.Catalog
+type catalogEntry = workloadcatalog.Entry
 
-type catalogEntry struct {
-	Name        string `json:"name"`
-	Tier        string `json:"tier"`
-	Description string `json:"description"`
-	// Requires declares what the server under test must provide. A workload
-	// whose prerequisites are absent is reported blocked/skipped with this
-	// reason — never silently passed.
-	Requires catalogRequires `json:"requires"`
-	// Driver maps load-driver flag names to values. Using the real flag names
-	// keeps the catalog honest: an unknown or malformed knob fails to parse
-	// instead of being ignored.
-	Driver map[string]any `json:"driver"`
-	// Expect is the invariant set the integration runner asserts on the
-	// driver's JSON result.
-	Expect map[string]any `json:"expect"`
-	// SustainedRationale records why this workload does or does not gate on
-	// the backlog verdict. Required: see TestWorkloadCatalogIsValid.
-	SustainedRationale string `json:"sustained_rationale"`
-}
-
-type catalogRequires struct {
-	Engine    string   `json:"engine"`
-	ServerEnv []string `json:"server_env"`
-	Reason    string   `json:"reason"`
-}
-
-// catalogSchemaVersion is the version this driver understands.
 const catalogSchemaVersion = 1
 
-func loadCatalog(path string) (*catalog, error) {
-	raw, err := os.ReadFile(filepath.Clean(path))
-	if err != nil {
-		return nil, fmt.Errorf("read workload catalog: %w", err)
-	}
-	var c catalog
-	if err := json.Unmarshal(raw, &c); err != nil {
-		return nil, fmt.Errorf("parse workload catalog %s: %w", path, err)
-	}
-	if c.SchemaVersion != catalogSchemaVersion {
-		return nil, fmt.Errorf("workload catalog %s has schema_version %d, this driver understands %d",
-			path, c.SchemaVersion, catalogSchemaVersion)
-	}
-	if len(c.Workloads) == 0 {
-		return nil, fmt.Errorf("workload catalog %s declares no workloads", path)
-	}
-	seen := map[string]bool{}
-	for _, entry := range c.Workloads {
-		if strings.TrimSpace(entry.Name) == "" {
-			return nil, fmt.Errorf("workload catalog %s has an entry without a name", path)
-		}
-		if seen[entry.Name] {
-			return nil, fmt.Errorf("workload catalog %s declares %q twice", path, entry.Name)
-		}
-		seen[entry.Name] = true
-		if len(entry.Driver) == 0 {
-			return nil, fmt.Errorf("workload %q declares no driver flags", entry.Name)
-		}
-		if len(entry.Expect) == 0 {
-			return nil, fmt.Errorf("workload %q declares no expectations, so running it could not fail", entry.Name)
-		}
-	}
-	return &c, nil
-}
+func loadCatalog(path string) (*catalog, error) { return workloadcatalog.Load(path) }
 
 // flagValue renders a catalog value as the string the flag package parses.
 func flagValue(v any) (string, error) {
@@ -4489,6 +4508,7 @@ func runMain(args []string, stdout, stderr io.Writer) int {
 			return 2
 		}
 	}
+	clearBoolEnvParseErrors(&cfg, flags)
 	rep, err := newHarness(cfg).run(context.Background())
 	human := stdout
 	if cfg.jsonFile == "-" {
@@ -4601,15 +4621,23 @@ func envNonNegFloatOrDefault(key string, def float64) float64 {
 
 // envBoolOrDefault rejects malformed values by returning the inverse of the
 // default, which every caller's validation or semantics treats as explicit.
-func envBoolOrDefault(key string, def bool) bool {
-	if v, ok := os.LookupEnv(key); ok {
-		b, err := strconv.ParseBool(v)
-		if err != nil {
-			return false
-		}
-		return b
+func boolEnv(key string, def bool) (bool, error) {
+	v, ok := os.LookupEnv(key)
+	if !ok {
+		return def, nil
 	}
-	return def
+	b, err := strconv.ParseBool(v)
+	if err != nil {
+		return def, err
+	}
+	return b, nil
+}
+
+func clearBoolEnvParseErrors(cfg *config, flags *flag.FlagSet) {
+	if len(cfg.envParseErrors) == 0 {
+		return
+	}
+	flags.Visit(func(f *flag.Flag) { delete(cfg.envParseErrors, f.Name) })
 }
 
 // percentile returns the p-th percentile of an already-sorted slice using the
@@ -4626,4 +4654,13 @@ func percentile(sorted []time.Duration, p float64) time.Duration {
 		idx = len(sorted) - 1
 	}
 	return sorted[idx]
+}
+
+// readLoadBody refuses partial evidence while retaining status and diagnostics.
+func readLoadBody(resp *http.Response, limit int64, operation string) ([]byte, error) {
+	raw, err := bodylimit.Read(resp.Body, limit)
+	if err != nil {
+		return raw, fmt.Errorf("%s: HTTP %d incomplete response (%s): %w", operation, resp.StatusCode, strings.TrimSpace(string(raw)), err)
+	}
+	return raw, nil
 }

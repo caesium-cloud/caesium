@@ -2,11 +2,11 @@ package diff
 
 import (
 	"context"
-	"encoding/json"
 	"testing"
 	"time"
 
 	"github.com/caesium-cloud/caesium/internal/models"
+	"github.com/caesium-cloud/caesium/internal/testutil"
 	schema "github.com/caesium-cloud/caesium/pkg/jobdef"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
@@ -247,7 +247,5 @@ func mustJSONString(t *testing.T, value any) string {
 
 func mustJSONBytes(t *testing.T, value any) []byte {
 	t.Helper()
-	data, err := json.Marshal(value)
-	require.NoError(t, err)
-	return data
+	return testutil.MustJSONBytes(t, value)
 }

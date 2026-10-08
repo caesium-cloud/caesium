@@ -6,12 +6,11 @@ package agentprofile
 import (
 	"encoding/json"
 	"errors"
-	"fmt"
 	"net/http"
 	"strconv"
-	"strings"
 	"time"
 
+	"github.com/caesium-cloud/caesium/api/internal/orderby"
 	svc "github.com/caesium-cloud/caesium/api/rest/service/agentprofile"
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/google/uuid"
@@ -197,7 +196,7 @@ func parseListRequest(c *echo.Context) (*svc.ListRequest, error) {
 	}
 
 	if orderBy := c.QueryParam("order_by"); orderBy != "" {
-		clauses, err := parseSafeOrderBy(orderBy)
+		clauses, err := orderby.Parse(orderBy, allowedOrderColumns)
 		if err != nil {
 			return nil, err
 		}
@@ -205,38 +204,4 @@ func parseListRequest(c *echo.Context) (*svc.ListRequest, error) {
 	}
 
 	return req, nil
-}
-
-// parseSafeOrderBy validates and sanitizes order_by terms against the
-// allowlist, mirroring api/rest/controller/notification's implementation.
-func parseSafeOrderBy(raw string) ([]string, error) {
-	parts := strings.Split(raw, ",")
-	result := make([]string, 0, len(parts))
-	for _, part := range parts {
-		part = strings.TrimSpace(part)
-		if part == "" {
-			continue
-		}
-		tokens := strings.Fields(part)
-		col := strings.ToLower(tokens[0])
-		if _, ok := allowedOrderColumns[col]; !ok {
-			return nil, fmt.Errorf("invalid order_by column: %q", tokens[0])
-		}
-		dir := "asc"
-		if len(tokens) > 1 {
-			switch strings.ToLower(tokens[1]) {
-			case "asc":
-				dir = "asc"
-			case "desc":
-				dir = "desc"
-			default:
-				return nil, fmt.Errorf("invalid order_by direction: %q", tokens[1])
-			}
-		}
-		if len(tokens) > 2 {
-			return nil, fmt.Errorf("invalid order_by term: %q", part)
-		}
-		result = append(result, col+" "+dir)
-	}
-	return result, nil
 }

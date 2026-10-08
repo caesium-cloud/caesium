@@ -4,9 +4,11 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/caesium-cloud/caesium/internal/jobdef/testutil"
 	"github.com/caesium-cloud/caesium/internal/models"
@@ -1006,4 +1008,40 @@ steps:
 	s.Require().NotNil(unsetStored.Autonomy)
 	s.Nil(unsetStored.Autonomy.Allow, "absent must decode as unconfigured, not as configured-empty")
 	s.Equal([]string{"pause_job"}, unsetStored.Autonomy.RequireApproval)
+}
+
+func TestRetryPolicyPreservesBudgetAndCancellation(t *testing.T) {
+	old := importerBusyRetryBackoffs
+	importerBusyRetryBackoffs = []time.Duration{0, 0}
+	t.Cleanup(func() { importerBusyRetryBackoffs = old })
+	busy := errors.New("database is locked")
+	calls := 0
+	require.ErrorIs(t, withImporterBusyRetry(context.Background(), func() error { calls++; return busy }), busy)
+	require.Equal(t, 3, calls)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	calls = 0
+	require.ErrorIs(t, withImporterBusyRetry(ctx, func() error { calls++; return nil }), context.Canceled)
+	require.Zero(t, calls)
+	importerBusyRetryBackoffs = []time.Duration{time.Hour}
+	ctx, cancel = context.WithCancel(context.Background())
+	defer cancel()
+	calls = 0
+	require.ErrorIs(t, withImporterBusyRetry(ctx, func() error { calls++; cancel(); return busy }), context.Canceled)
+	require.Equal(t, 1, calls)
+	calls = 0
+	other := errors.New("syntax error")
+	require.ErrorIs(t, withImporterBusyRetry(context.Background(), func() error { calls++; return other }), other)
+	require.Equal(t, 1, calls)
+}
+
+func TestImporterJitterSchedule(t *testing.T) {
+	require.Equal(t, []time.Duration{10 * time.Millisecond, 20 * time.Millisecond, 40 * time.Millisecond, 80 * time.Millisecond, 160 * time.Millisecond}, importerBusyRetryBackoffs)
+	for _, base := range importerBusyRetryBackoffs {
+		for range 100 {
+			got := jitterImporterBusyRetryBackoff(base)
+			require.GreaterOrEqual(t, got, base-base/5)
+			require.LessOrEqual(t, got, base)
+		}
+	}
 }

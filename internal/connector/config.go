@@ -961,9 +961,6 @@ func walkDocument(node *yaml.Node, fieldPath string) error {
 			if fieldPath != "" {
 				childPath = fieldPath + "." + key.Value
 			}
-			if key.Value == ReservedActorField {
-				return fmt.Errorf("%s: reserved field %q cannot be declared or overridden", childPath, ReservedActorField)
-			}
 			if err := walkDocument(node.Content[i+1], childPath); err != nil {
 				return err
 			}

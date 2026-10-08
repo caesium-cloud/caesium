@@ -195,7 +195,7 @@ func BuildBundle(ctx context.Context, db *gorm.DB, incidentID uuid.UUID, playboo
 			Where("job_run_id = ? AND task_id = ?", *inc.RunID, *inc.TaskID).
 			Order("partition_index ASC, created_at ASC, id ASC").
 			Find(&rows).Error; err == nil && len(rows) > 0 {
-			tr := bundleAttributionRow(rows)
+			tr := attributionTaskRun(rows)
 			// The resolved secret env of the run is not persisted (secrets are
 			// never stored), so exact secret-value removal is not available
 			// post-hoc; the high-entropy token heuristic still strips
@@ -212,7 +212,7 @@ func BuildBundle(ctx context.Context, db *gorm.DB, incidentID uuid.UUID, playboo
 			if tr.Error != "" {
 				b.Failure.Error = tr.Error
 			}
-			if isFannedGroup(rows) {
+			if models.IsFannedGroup(len(rows), rows[0].PartitionValue) {
 				b.Failure.PartitionCount = len(rows)
 				b.Failure.Partitions, b.Failure.PartitionsTruncated = failedPartitionEntries(rows)
 			}
@@ -242,27 +242,6 @@ func BuildBundle(ctx context.Context, db *gorm.DB, incidentID uuid.UUID, playboo
 	b.Notes = loadNoteHints(ctx, db, inc.ID)
 
 	return b, nil
-}
-
-// bundleAttributionRow picks the instance the bundle describes: the first FAILED
-// row in partition order, falling back to the first row when nothing failed (the
-// incident may be run-level, or the group may still be settling).
-func bundleAttributionRow(rows []models.TaskRun) *models.TaskRun {
-	for i := range rows {
-		if rows[i].Status == taskStatusFailed {
-			return &rows[i]
-		}
-	}
-	return &rows[0]
-}
-
-// isFannedGroup reports whether the rows describe a fan-out group. A
-// single-instance group still carries a partition value and is still fanned.
-func isFannedGroup(rows []models.TaskRun) bool {
-	if len(rows) > 1 {
-		return true
-	}
-	return len(rows) == 1 && rows[0].PartitionValue != ""
 }
 
 // failedPartitionEntries renders every failed instance of a fanned group, capped

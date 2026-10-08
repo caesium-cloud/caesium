@@ -27,6 +27,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"slices"
 	"sync"
 	"time"
 )
@@ -128,12 +129,7 @@ func (d *Directive) matches(path, eventType, runID string) bool {
 }
 
 func contains(list []string, want string) bool {
-	for _, v := range list {
-		if v == want {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(list, want)
 }
 
 func appendEntry(dir string, e entry) {

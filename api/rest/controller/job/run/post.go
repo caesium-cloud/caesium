@@ -3,15 +3,21 @@ package run
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/caesium-cloud/caesium/api/rest/manualparams"
 	jsvc "github.com/caesium-cloud/caesium/api/rest/service/job"
 	runsvc "github.com/caesium-cloud/caesium/api/rest/service/run"
+	"github.com/caesium-cloud/caesium/internal/dbretry"
 	"github.com/caesium-cloud/caesium/internal/job"
 	"github.com/caesium-cloud/caesium/internal/models"
 	runstorage "github.com/caesium-cloud/caesium/internal/run"
+	"github.com/caesium-cloud/caesium/internal/runlife"
+	"github.com/caesium-cloud/caesium/pkg/db"
+	"github.com/caesium-cloud/caesium/pkg/dqlite"
 	"github.com/caesium-cloud/caesium/pkg/log"
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v5"
@@ -58,14 +64,21 @@ type StartOutcomeResponse struct {
 // Seams the tests replace to drive Post against a test database without
 // launching containers.
 var (
-	postGetJob = func(ctx context.Context, id uuid.UUID) (*models.Job, error) {
+	postRunStore = runstorage.Default
+	postGetJob   = func(ctx context.Context, id uuid.UUID) (*models.Job, error) {
 		return jsvc.Service(ctx).Get(id)
 	}
 	postStartRun = func(ctx context.Context, jobID uuid.UUID, opts ...runstorage.StartOption) (runstorage.StartResult, error) {
-		return runsvc.New(ctx).StartWithResult(jobID, nil, opts...)
+		return runsvc.New(ctx).WithStore(postRunStore()).StartWithResult(jobID, nil, opts...)
 	}
 	postFindIdempotentStart = func(ctx context.Context, jobID uuid.UUID, opts ...runstorage.StartOption) (runstorage.StartResult, bool, error) {
-		return runsvc.New(ctx).FindIdempotentStart(jobID, opts...)
+		return runsvc.New(ctx).WithStore(postRunStore()).FindIdempotentStart(jobID, opts...)
+	}
+	postGetRun = func(runID uuid.UUID) (*runstorage.JobRun, error) {
+		return postRunStore().Get(runID)
+	}
+	postFinalizeCommittedRun = func(runID uuid.UUID, cause error) (bool, error) {
+		return postRunStore().CompleteIfActive(runID, cause)
 	}
 	postLaunchRun = launchRun
 )
@@ -106,6 +119,16 @@ func Post(c *echo.Context) error {
 		return echo.NewHTTPError(http.StatusInternalServerError, "internal server error").Wrap(err)
 	}
 
+	workCtx, release, err := runlife.FromContext(ctx).Reserve(ctx)
+	if err != nil {
+		return echo.NewHTTPError(http.StatusServiceUnavailable, err.Error()).Wrap(err)
+	}
+	transferred := false
+	defer func() {
+		if !transferred {
+			release()
+		}
+	}()
 	if j.Paused {
 		// A retry of a start admitted before the pause still gets its
 		// original answer; only a new start is refused.
@@ -123,10 +146,20 @@ func Post(c *echo.Context) error {
 
 	result, err := postStartRun(ctx, j.ID, startOpts...)
 	if err != nil {
+		// A readback failure can follow durable admission. Finalize only the
+		// exact committed row before releasing its server reservation. The
+		// store owns bounded contention retries; unresolved writes stay visible.
+		if committedID, ok := runstorage.CommittedRunID(err); ok && !manualRunServerShutdown(workCtx) {
+			if _, completeErr := postFinalizeCommittedRun(committedID, err); completeErr != nil {
+				log.Error("manual run: committed admission could not be finalized; leaving it for an operator",
+					"job_id", j.ID, "run_id", committedID, "error", completeErr)
+			}
+		}
 		return startError(err)
 	}
 	if result.Outcome == runstorage.StartOutcomeCreated && result.Run != nil && !result.Replayed {
-		postLaunchRun(j, result.Run)
+		postLaunchRun(workCtx, j, result.Run, release)
+		transferred = true
 	}
 	return writeStartResult(c, j.ID, result)
 }
@@ -166,16 +199,96 @@ func writeStartResult(c *echo.Context, jobID uuid.UUID, result runstorage.StartR
 	})
 }
 
-func launchRun(j *models.Job, r *runstorage.JobRun) {
+func launchRun(ctx context.Context, j *models.Job, r *runstorage.JobRun, releaseWork func()) {
+	cancelCtx, release := job.RegisterRunCancel(ctx, r.ID)
 	go func() {
+		defer releaseWork()
 		// Detached from the request context on purpose (the run outlives the
 		// HTTP call), but NOT uncancellable: RegisterRunCancel makes a later
 		// CancelRun / concurrency-replace reach this engine's containers.
-		cancelCtx, release := job.RegisterRunCancel(context.Background(), r.ID)
 		defer release()
 		runCtx := runstorage.WithContext(cancelCtx, r.ID)
-		if err := job.New(j, job.WithTriggerID(nil), job.WithParams(r.Params)).Run(runCtx); err != nil {
-			log.Error("job run failure", "id", j.ID, "run_id", r.ID, "error", err)
-		}
+		executeManualRun(runCtx, j, r)
 	}()
+}
+
+// The cancellation registry has no tombstones. Read durable state after
+// registration to cover cancellation committed before that registration existed.
+func executeManualRun(ctx context.Context, j *models.Job, r *runstorage.JobRun) {
+	if manualRunServerShutdown(ctx) {
+		return
+	}
+	ready, err := manualRunReady(ctx, r.ID)
+	// The lifetime cause can be visible before its cancellation callback reaches
+	// this reserved child. Preserve the admission even when the read failed or
+	// returned while that callback was still pending.
+	if cause := runlife.CancellationCause(ctx); cause != nil {
+		// Preserve the exact cause when cancellation arrives during the read.
+		err = cause
+	}
+	if errors.Is(err, runlife.ErrServerShutdown) {
+		return
+	}
+	if err != nil {
+		cause := fmt.Errorf("manual run could not dispatch safely: %w", err)
+		if _, completeErr := postFinalizeCommittedRun(r.ID, cause); completeErr != nil {
+			log.Error("manual run: pre-dispatch failure could not be finalized; leaving it for an operator",
+				"job_id", j.ID, "run_id", r.ID, "error", completeErr)
+		}
+		return
+	}
+	if !ready {
+		return // Preserve terminal status and its original cause.
+	}
+	if err := runExecution(ctx, j, r.Params); err != nil {
+		log.Error("job run failure", "id", j.ID, "run_id", r.ID, "error", err)
+	}
+}
+
+func manualRunServerShutdown(ctx context.Context) bool {
+	return errors.Is(runlife.CancellationCause(ctx), runlife.ErrServerShutdown)
+}
+
+func manualRunReady(ctx context.Context, runID uuid.UUID) (bool, error) {
+	ready := false
+	err := dbretry.Retry(ctx, dbretry.Policy{
+		BeforeAttempt: true,
+		Backoffs:      db.BusyRetryBackoffs,
+		Retryable:     dqlite.IsContentionError,
+		Wait: func(ctx context.Context, delay time.Duration) error {
+			timer := time.NewTimer(delay)
+			defer timer.Stop()
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-timer.C:
+				return nil
+			}
+		},
+	}, func() error {
+		current, err := postGetRun(runID)
+		if err != nil {
+			return err
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if current == nil {
+			return fmt.Errorf("run %s not found", runID)
+		}
+		switch current.Status {
+		case runstorage.StatusRunning:
+			ready = true
+		case runstorage.StatusCancelled, runstorage.StatusSucceeded, runstorage.StatusFailed, runstorage.StatusSkipped:
+			ready = false
+		default:
+			return fmt.Errorf("run %s has unknown dispatch status %q", runID, current.Status)
+		}
+		return nil
+	})
+	return ready, err
+}
+
+var runExecution = func(ctx context.Context, j *models.Job, params map[string]string) error {
+	return job.New(j, job.WithTriggerID(nil), job.WithParams(params)).Run(ctx)
 }

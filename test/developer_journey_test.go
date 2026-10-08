@@ -17,6 +17,52 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+type joinedCommand struct {
+	cmd    *exec.Cmd
+	done   chan error
+	waited bool
+}
+
+func startJoinedCommand(cmd *exec.Cmd) (*joinedCommand, error) {
+	if err := cmd.Start(); err != nil {
+		return nil, err
+	}
+	child := &joinedCommand{cmd: cmd, done: make(chan error, 1)}
+	go func() { child.done <- cmd.Wait() }()
+	return child, nil
+}
+
+func (c *joinedCommand) wait() error {
+	if c.waited {
+		panic("joined command result already consumed")
+	}
+	c.waited = true
+	return <-c.done
+}
+
+func (c *joinedCommand) waitFor(timeout time.Duration) (error, bool) {
+	if c.waited {
+		panic("joined command result already consumed")
+	}
+	select {
+	case err := <-c.done:
+		c.waited = true
+		return err, true
+	case <-time.After(timeout):
+		return nil, false
+	}
+}
+
+func (c *joinedCommand) killAndWait() {
+	if c.waited {
+		return
+	}
+	if c.cmd.Process != nil {
+		_ = c.cmd.Process.Kill()
+	}
+	_ = c.wait()
+}
+
 // ---------------------------------------------------------------------------
 // D1 (distributed-testing W3-gamma): extends the binary-driven developer
 // journey local_dev_test.go started with the paths that file's scenarios
@@ -282,7 +328,9 @@ steps:
 	cmd := exec.CommandContext(s.T().Context(), s.cliPath, "dev", "--once", "--run-timeout", "3s", "--path", dir)
 	cmd.Dir = s.projectRoot
 	cmd.Env = os.Environ()
-	s.Require().NoError(cmd.Start())
+	child, err := startJoinedCommand(cmd)
+	s.Require().NoError(err)
+	defer child.killAndWait()
 
 	var orphanIDs []string
 	s.Require().Eventually(func() bool {
@@ -290,7 +338,7 @@ steps:
 		return len(orphanIDs) > 0
 	}, 30*time.Second, 500*time.Millisecond, "dev --once never started a container carrying %q", marker)
 
-	waitErr := cmd.Wait()
+	waitErr := child.wait()
 	s.Require().Error(waitErr, "dev --once must exit nonzero when --run-timeout fires")
 
 	s.Require().Eventually(func() bool {
@@ -349,9 +397,9 @@ steps:
 	syncOut := &syncBuffer{}
 	cmd.Stdout = syncOut
 	cmd.Stderr = syncOut
-	s.Require().NoError(cmd.Start())
-	// Safety net in case an assertion below fails before the signal is sent.
-	defer func() { _ = cmd.Process.Kill() }()
+	child, err := startJoinedCommand(cmd)
+	s.Require().NoError(err)
+	defer child.killAndWait()
 
 	var orphanIDs []string
 	s.Require().Eventually(func() bool {
@@ -361,12 +409,9 @@ steps:
 
 	s.Require().NoError(cmd.Process.Signal(syscall.SIGINT))
 
-	done := make(chan error, 1)
-	go func() { done <- cmd.Wait() }()
-	select {
-	case waitErr := <-done:
+	if waitErr, finished := child.waitFor(30 * time.Second); finished {
 		s.Require().Error(waitErr, "dev --once must exit nonzero after SIGINT:\n%s", syncOut.String())
-	case <-time.After(30 * time.Second):
+	} else {
 		_ = cmd.Process.Kill()
 		s.Fail("dev --once did not exit after SIGINT", syncOut.String())
 	}
@@ -431,7 +476,9 @@ steps:
 	out := &syncBuffer{}
 	cmd.Stdout = out
 	cmd.Stderr = out
-	s.Require().NoError(cmd.Start())
+	child, err := startJoinedCommand(cmd)
+	s.Require().NoError(err)
+	defer child.killAndWait()
 	// Safety net: if an assertion below fails before the graceful shutdown
 	// runs, don't leave a watch process behind for the next test. A Kill on
 	// an already-exited process is a harmless no-op error.
@@ -451,12 +498,9 @@ steps:
 
 	s.Require().NoError(cmd.Process.Signal(syscall.SIGINT))
 
-	done := make(chan error, 1)
-	go func() { done <- cmd.Wait() }()
-	select {
-	case waitErr := <-done:
+	if waitErr, finished := child.waitFor(30 * time.Second); finished {
 		s.NoError(waitErr, "a graceful Ctrl-C should exit 0:\n%s", out.String())
-	case <-time.After(30 * time.Second):
+	} else {
 		_ = cmd.Process.Kill()
 		s.Fail("dev did not exit after SIGINT", out.String())
 	}
@@ -533,8 +577,9 @@ steps:
 	out := &syncBuffer{}
 	cmd.Stdout = out
 	cmd.Stderr = out
-	s.Require().NoError(cmd.Start())
-	defer func() { _ = cmd.Process.Kill() }()
+	child, err := startJoinedCommand(cmd)
+	s.Require().NoError(err)
+	defer child.killAndWait()
 
 	okCount := func(alias string) int {
 		return strings.Count(out.String(), "  OK    "+alias)
@@ -620,12 +665,9 @@ steps:
 
 	s.Require().NoError(cmd.Process.Signal(syscall.SIGINT))
 
-	done := make(chan error, 1)
-	go func() { done <- cmd.Wait() }()
-	select {
-	case waitErr := <-done:
+	if waitErr, finished := child.waitFor(30 * time.Second); finished {
 		s.NoError(waitErr, "a graceful Ctrl-C should exit 0:\n%s", out.String())
-	case <-time.After(30 * time.Second):
+	} else {
 		_ = cmd.Process.Kill()
 		s.Fail("dev did not exit after SIGINT", out.String())
 	}

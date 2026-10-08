@@ -2,7 +2,9 @@ package runtime
 
 import (
 	"fmt"
+	"maps"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 )
@@ -38,11 +40,7 @@ func InterpolateParamRefs(env map[string]string, params map[string]string) (map[
 		return env, nil
 	}
 
-	keys := make([]string, 0, len(env))
-	for k := range env {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
+	keys := slices.Sorted(maps.Keys(env))
 
 	out := make(map[string]string, len(env))
 	var missing []string
@@ -77,11 +75,7 @@ func paramLookup(params map[string]string) (map[string]string, error) {
 	if len(params) == 0 {
 		return nil, nil
 	}
-	keys := make([]string, 0, len(params))
-	for k := range params {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
+	keys := slices.Sorted(maps.Keys(params))
 
 	lookup := make(map[string]string, len(params))
 	folded := make(map[string][]string, len(params))

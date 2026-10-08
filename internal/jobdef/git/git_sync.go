@@ -16,6 +16,7 @@ import (
 	"github.com/bmatcuk/doublestar/v4"
 	"github.com/caesium-cloud/caesium/internal/jobdef"
 	"github.com/caesium-cloud/caesium/internal/jobdef/secret"
+	"github.com/caesium-cloud/caesium/internal/jobdef/yamlpath"
 	schema "github.com/caesium-cloud/caesium/pkg/jobdef"
 	"github.com/caesium-cloud/caesium/pkg/log"
 	"github.com/go-git/go-git/v5"
@@ -638,14 +639,9 @@ func referenceNameOrDefault(ref string) plumbing.ReferenceName {
 	return plumbing.NewBranchReferenceName(ref)
 }
 
-func isYAML(path string) bool {
-	ext := strings.ToLower(filepath.Ext(path))
-	return ext == ".yaml" || ext == ".yml"
-}
-
 func (s *Source) shouldInclude(fullPath, relative string) bool {
 	if len(s.Globs) == 0 {
-		return isYAML(fullPath)
+		return yamlpath.IsYAML(fullPath)
 	}
 	rel := filepath.ToSlash(relative)
 	for _, pattern := range s.Globs {

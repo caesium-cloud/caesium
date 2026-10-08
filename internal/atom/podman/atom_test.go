@@ -10,7 +10,8 @@ import (
 
 func (s *PodmanTestSuite) TestAtom() {
 	// valid states
-	for podmanState, atomState := range stateMap {
+	for _, podmanState := range []string{"created", "running", "paused", "restarting", "removing", "exited", "dead"} {
+		atomState := atom.ContainerState(podmanState)
 		c := &Atom{
 			metadata: newContainer(
 				testAtomID,
@@ -42,7 +43,8 @@ func (s *PodmanTestSuite) TestAtom() {
 	assert.Equal(s.T(), atom.Invalid, c.State())
 
 	// valid results
-	for podmanResult, atomResult := range resultMap {
+	for _, podmanResult := range []int{0, 1, 125, 126, 127, 137, 143} {
+		atomResult := atom.ResultForExitCode(podmanResult)
 		c := &Atom{
 			metadata: newContainer(
 				testAtomID,

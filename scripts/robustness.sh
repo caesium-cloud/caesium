@@ -111,9 +111,9 @@ TESTFAULT_MARKERS=(caesium-testfault-control CAESIUM_TESTFAULT_DIR bus-publish-p
 
 case "$RUN_PATTERN" in
   *TestOwnerCrash*)
-    REQUIRED_SUBTESTS=(TestOwnerCrash/owner_is_leader TestOwnerCrash/owner_is_not_leader)
+    REQUIRED_SUBTESTS=(TestOwnerCrash/owner_is_leader TestOwnerCrash/owner_is_not_leader TestOwnerCrash/cron_single_admission TestOwnerCrash/graceful_trigger_shutdown)
     REQUIRED_PARENTS=(TestOwnerCrash)
-    REQUIRED_RECORD_KEYS=(events owner_is_leader owner_is_not_leader)
+    REQUIRED_RECORD_KEYS=(events owner_is_leader owner_is_not_leader cron_single_admission graceful_trigger_shutdown)
     ;;
   *TestTargetedFaults*)
     REQUIRED_SUBTESTS=(
@@ -419,6 +419,99 @@ delete_owned_clusters() {
   done <"$OWNED_CLUSTERS"
 }
 
+# Capture each member explicitly: StatefulSet logs may choose a healthy survivor
+# and omit the member that is crash-looping. Never discover pods outside this
+# invocation's namespace or follow logs indefinitely during cleanup.
+capture_member_logs() (
+  export -f kc_ns
+  export KUBECONFIG_PATH NAMESPACE
+  python3 - "$ARTIFACTS" "$ROBUSTNESS_ID" "$CANDIDATE_SHA" "$OWNED_CLUSTERS" "$BASH" <<'PY_DIAGNOSTICS'
+import datetime
+import json
+import os
+from pathlib import Path
+import signal
+import subprocess
+import sys
+import time
+
+artifacts, owner, candidate, ledger, shell = sys.argv[1:]
+directory = Path(artifacts) / "member-logs"
+directory.mkdir(parents=True, exist_ok=True)
+manifest = {
+    "robustness_id": owner,
+    "candidate_sha": candidate,
+    "namespace": os.environ["NAMESPACE"],
+    "timeout_seconds": 10,
+    "tail_lines": 2000,
+    "captures": [],
+}
+manifest_path = directory / "capture-status.json"
+
+def save():
+    manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
+
+# The create ledger is populated only after absent-cluster checks. An early
+# refusal with a stale kubeconfig must not inspect somebody else's pods.
+if os.environ["NAMESPACE"] != owner or owner not in Path(ledger).read_text().splitlines():
+    manifest["scope_error"] = "namespace/owned-cluster ledger mismatch; no member calls attempted"
+    save()
+    raise SystemExit(1)
+
+for ordinal in range(3):
+    pod = f"caesium-{ordinal}"
+    for previous in (False, True):
+        mode = "previous" if previous else "current"
+        stdout_name = f"{pod}-{mode}.log"
+        stderr_name = f"{pod}-{mode}.stderr.log"
+        args = ["--request-timeout=10s", "logs", f"pod/{pod}", "-c", "caesium",
+                "--timestamps=true", "--tail=2000"]
+        if previous:
+            args.append("--previous=true")
+        record = {
+            "pod": pod, "container": "caesium", "mode": mode,
+            "arguments": args, "stdout": stdout_name, "stderr": stderr_name,
+            "started_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            "exit_code": None, "timed_out": False,
+        }
+        manifest["captures"].append(record)
+        save()  # retain an attempted call even if capture is interrupted
+        started = time.monotonic()
+        process = None
+        try:
+            with (directory / stdout_name).open("wb") as stdout, (directory / stderr_name).open("wb") as stderr:
+                # kc_ns retains the controller's exact explicit kubeconfig and
+                # namespace. The child gets its own process group so a hung
+                # kubectl can be killed and joined without touching the lane.
+                process = subprocess.Popen(
+                    [shell, "-c", 'kc_ns "$@"', "robustness-member-logs", *args],
+                    stdout=stdout, stderr=stderr, start_new_session=True,
+                )
+                try:
+                    record["exit_code"] = process.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    record["timed_out"] = True
+                    os.killpg(process.pid, signal.SIGKILL)
+                    record["exit_code"] = process.wait(timeout=1)
+        except Exception as exc:
+            # Details belong only in uploaded/scrubbed artifacts, not console
+            # output. Missing previous logs are likewise recorded, not PASS.
+            record["capture_error"] = f"{type(exc).__name__}: {exc}"
+        finally:
+            if process is not None and process.poll() is None:
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                    process.wait(timeout=1)
+                except Exception as exc:
+                    record["join_error"] = f"{type(exc).__name__}: {exc}"
+            if process is not None and record["exit_code"] is None:
+                record["exit_code"] = process.poll()
+            record["duration_seconds"] = round(time.monotonic() - started, 3)
+            record["finished_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
+            save()
+PY_DIAGNOSTICS
+)
+
 cleanup() {
   local status=$?
   set +e
@@ -426,6 +519,7 @@ cleanup() {
   resume_paused_task
   restart_faulted_node
   if [[ -f "$KUBECONFIG_PATH" ]]; then
+    capture_member_logs || log "cleanup: per-member log capture incomplete; see member-logs/capture-status.json"
     kc_ns logs pod/robustness-runner >"$ARTIFACTS/runner.log" 2>/dev/null || true
     kc_ns get cm robustness-records -o yaml >"$ARTIFACTS/robustness-records.yaml" 2>/dev/null || true
     kc get pods -A >"$ARTIFACTS/pods-all.txt" 2>/dev/null || true
@@ -1135,6 +1229,27 @@ PY
         return 0
       fi
       write_ack "$request_id" "$action" "ok" "cordoned $node"
+      ;;
+    terminate)
+      # Graceful signal only: keep kubelet and the pod sandbox alive. Verify
+      # the request still names this exact server container in our owned cluster.
+      if ! known_node "$node" || [[ ! "$cid" =~ ^[a-f0-9]{64}$ ]] || [[ -z "$pod" ]]; then
+        fail_request "$request_id" "$action" "terminate needs an owned node/pod and full container id"; return 0
+      fi
+      current="$(kc_ns get pod "$pod" -o json)" || { fail_request "$request_id" "$action" "cannot observe requested server pod"; return 0; }
+      observed_node="$(printf '%s' "$current" | jq -r '.spec.nodeName')"
+      observed_cid="$(printf '%s' "$current" | jq -r '.status.containerStatuses[] | select(.name == "caesium") | .containerID')"
+      observed_cid="${observed_cid#containerd://}"
+      if [[ "$observed_node" != "$node" || "$observed_cid" != "$cid" ]]; then
+        fail_request "$request_id" "$action" "server container identity changed before SIGTERM"; return 0
+      fi
+      signal_file="$ARTIFACTS/ctr-terminate-$cid.txt"
+      if ! docker exec "$node" ctr -n k8s.io tasks kill --signal SIGTERM "$cid" >"$signal_file" 2>&1; then
+        fail_request "$request_id" "$action" "SIGTERM delivery failed"; return 0
+      fi
+      # The runner independently observes exit 0 and the replacement container;
+      # this ack proves only delivery to the captured identity.
+      write_ack "$request_id" "$action" "ok" "SIGTERM delivered to $cid on $node"
       ;;
     kill)
       [[ -n "$node" && -n "$cid" ]] || { write_ack "$request_id" "$action" "failed" "" "missing node/container id"; LAST_REQUEST_ID="$request_id"; return 0; }

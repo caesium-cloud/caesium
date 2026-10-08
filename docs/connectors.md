@@ -125,7 +125,9 @@ Allocate a new id instead.
 Execution references are stateless. They are the connection id plus opaque
 coordinates chosen by the adapter, and they do not insert a catalog row.
 
-The reserved field `_caesium_actor` is a server-derived envelope. The root
+The reserved field `_caesium_actor` is a server-derived envelope. The reservation
+applies to the action schema root; nested schema properties and nested user data
+(including object-valued `const` and `enum`) may use that name. The root
 object schema sets `additionalProperties: false`. Nested objects do not have
 to. That root schema cannot declare the field, including through `required`,
 `patternProperties`, or `propertyNames`. A nested `patternProperties` entry,

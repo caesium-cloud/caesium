@@ -12,11 +12,22 @@ import (
 	"strings"
 	"time"
 
+	"github.com/caesium-cloud/caesium/test/robustness/internal/sqlcell"
 	"github.com/google/uuid"
 )
 
 // Query runs one read-only SQL statement through POST /v1/database/query.
 func (h *HTTP) Query(ctx context.Context, base, sql string, limit int) (QueryResponse, []byte, error) {
+	return h.query(ctx, base, sql, limit, queryDecoding{json.Unmarshal, "query", "decode query"})
+}
+
+type queryDecoding struct {
+	decode      func([]byte, any) error
+	statusLabel string
+	decodeLabel string
+}
+
+func (h *HTTP) query(ctx context.Context, base, sql string, limit int, decoding queryDecoding) (QueryResponse, []byte, error) {
 	if limit <= 0 {
 		limit = 200
 	}
@@ -28,11 +39,14 @@ func (h *HTTP) Query(ctx context.Context, base, sql string, limit int) (QueryRes
 		return QueryResponse{}, raw, err
 	}
 	if status != http.StatusOK {
-		return QueryResponse{}, raw, fmt.Errorf("query status %d: %s", status, truncate(raw, 1024))
+		return QueryResponse{}, raw, fmt.Errorf("%s status %d: %s", decoding.statusLabel, status, truncate(raw, 1024))
 	}
 	var resp QueryResponse
-	if err := json.Unmarshal(raw, &resp); err != nil {
-		return QueryResponse{}, raw, fmt.Errorf("decode query: %w", err)
+	if err := decoding.decode(raw, &resp); err != nil {
+		if decoding.decodeLabel != "" {
+			err = fmt.Errorf("%s: %w", decoding.decodeLabel, err)
+		}
+		return QueryResponse{}, raw, err
 	}
 	return resp, raw, nil
 }
@@ -50,7 +64,7 @@ func (h *HTTP) RetryRun(ctx context.Context, base, jobID, runID string) (status 
 	}
 	status, raw, err = h.Do(ctx, http.MethodPost, strings.TrimRight(base, "/")+"/v1/jobs/"+jid.String()+"/runs/"+rid.String()+"/retry", map[string]any{})
 	if err != nil {
-		return status, Run{}, raw, err
+		return status, Run{}, raw, uncertainExchange("run retry", status, err)
 	}
 	if status == http.StatusAccepted {
 		if err := json.Unmarshal(raw, &run); err != nil {
@@ -76,7 +90,11 @@ func (h *HTTP) RetryPartition(ctx context.Context, base, jobID, runID, taskID st
 	}
 	url := fmt.Sprintf("%s/v1/jobs/%s/runs/%s/tasks/%s/partitions/%d/retry",
 		strings.TrimRight(base, "/"), jid, rid, tid, index)
-	return h.Do(ctx, http.MethodPost, url, map[string]any{})
+	status, raw, err = h.Do(ctx, http.MethodPost, url, map[string]any{})
+	if err != nil {
+		err = uncertainExchange("partition retry", status, err)
+	}
+	return status, raw, err
 }
 
 // Metrics scrapes GET /metrics from one member.
@@ -97,7 +115,11 @@ func (h *HTTP) TriggerRunRaw(ctx context.Context, base, jobID string) (status in
 	if err != nil {
 		return 0, nil, fmt.Errorf("job id is not a uuid: %w", err)
 	}
-	return h.Do(ctx, http.MethodPost, strings.TrimRight(base, "/")+"/v1/jobs/"+id.String()+"/run", map[string]any{})
+	status, raw, err = h.Do(ctx, http.MethodPost, strings.TrimRight(base, "/")+"/v1/jobs/"+id.String()+"/run", map[string]any{})
+	if err != nil {
+		err = uncertainExchange("trigger", status, err)
+	}
+	return status, raw, err
 }
 
 // WithTimeout returns a shallow copy using a client with the given timeout.
@@ -130,7 +152,7 @@ func (h *HTTP) QueryTaskRecipes(ctx context.Context, base, runID string) ([]Task
 		return nil, fmt.Errorf("refusing to interpolate an unvalidated run id %q: %w", runID, err)
 	}
 	sql := fmt.Sprintf("SELECT id, task_id, status, image, command, claimed_by, attempt, claim_attempt, owner_generation, result, output FROM task_runs WHERE job_run_id = '%s' ORDER BY id", id.String())
-	resp, _, err := h.Query(ctx, base, sql, 200)
+	resp, _, err := h.query(ctx, base, sql, 200, queryDecoding{sqlcell.Decode, "query", "decode query"})
 	if err != nil {
 		return nil, err
 	}
@@ -159,6 +181,18 @@ func (h *HTTP) QueryTaskRecipes(ctx context.Context, base, runID string) ([]Task
 		if err != nil {
 			return nil, fmt.Errorf("task_runs.output for %s: %w", rowID, err)
 		}
+		attempt, err := queryInt(row[6])
+		if err != nil {
+			return nil, fmt.Errorf("task_runs.attempt for %s: %w", rowID, err)
+		}
+		claimAttempt, err := queryInt(row[7])
+		if err != nil {
+			return nil, fmt.Errorf("task_runs.claim_attempt for %s: %w", rowID, err)
+		}
+		generation, err := sqlcell.Int64(row[8])
+		if err != nil {
+			return nil, fmt.Errorf("task_runs.owner_generation for %s: %w", rowID, err)
+		}
 		out = append(out, TaskRecipe{
 			ID:              rowID,
 			TaskID:          taskID,
@@ -166,14 +200,25 @@ func (h *HTTP) QueryTaskRecipes(ctx context.Context, base, runID string) ([]Task
 			Image:           fmt.Sprint(row[3]),
 			Command:         fmt.Sprint(row[4]),
 			ClaimedBy:       fmt.Sprint(row[5]),
-			Attempt:         int(int64From(row[6])),
-			ClaimAttempt:    int(int64From(row[7])),
-			OwnerGeneration: int64From(row[8]),
+			Attempt:         attempt,
+			ClaimAttempt:    claimAttempt,
+			OwnerGeneration: generation,
 			ResultDigest:    resultDigest,
 			OutputDigest:    outputDigest,
 		})
 	}
 	return out, nil
+}
+
+func queryInt(value any) (int, error) {
+	n, err := sqlcell.Int64(value)
+	if err != nil {
+		return 0, err
+	}
+	if int64(int(n)) != n {
+		return 0, fmt.Errorf("integer %d overflows int", n)
+	}
+	return int(n), nil
 }
 
 // ResolveUnfannedTaskRecipe maps a public GET /runs/:id task projection to its

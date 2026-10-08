@@ -19,6 +19,7 @@ package faults
 import (
 	"fmt"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 )
@@ -242,12 +243,7 @@ func (p PartitionPlan) Validate() error {
 }
 
 func containsInt(list []int, want int) bool {
-	for _, v := range list {
-		if v == want {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(list, want)
 }
 
 // ActivationEvidence decides whether an asymmetric partition was really active.

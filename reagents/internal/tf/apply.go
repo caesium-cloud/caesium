@@ -2,6 +2,8 @@ package tf
 
 import (
 	"fmt"
+	"maps"
+	"slices"
 	"sort"
 	"strings"
 
@@ -31,11 +33,7 @@ import (
 // has to change.
 func PublishableOutputs(outputs map[string]tfexec.OutputMeta) (values map[string]string, withheld []string, err error) {
 	values = make(map[string]string, len(outputs))
-	names := make([]string, 0, len(outputs))
-	for name := range outputs {
-		names = append(names, name)
-	}
-	sort.Strings(names)
+	names := slices.Sorted(maps.Keys(outputs))
 
 	publishable := make([]string, 0, len(names))
 	for _, name := range names {
@@ -138,7 +136,7 @@ func outputNameSurvivesFold(name string) bool {
 // variable (pkg/task.NormalizeStepName). The reagents restate it rather than
 // import Caesium; test/infra_deploy_test.go drives the real server.
 func foldOutputKey(name string) string {
-	return strings.ToUpper(strings.NewReplacer("-", "_", ".", "_").Replace(name))
+	return NormalizeEnvName(name)
 }
 
 // CheckOutputNames refuses output names a consumer could not import exactly.

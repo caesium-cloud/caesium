@@ -2,12 +2,14 @@ package job
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -16,6 +18,7 @@ import (
 	internaljobdef "github.com/caesium-cloud/caesium/internal/jobdef"
 	lintpkg "github.com/caesium-cloud/caesium/internal/jobdef/lint"
 	"github.com/caesium-cloud/caesium/internal/jobdef/secret"
+	"github.com/caesium-cloud/caesium/internal/strutil"
 	"github.com/caesium-cloud/caesium/pkg/jobdef"
 	"github.com/spf13/cobra"
 )
@@ -531,14 +534,7 @@ func envBool(key string, fallback bool) bool {
 	return parsed
 }
 
-func firstNonEmpty(values ...string) string {
-	for _, v := range values {
-		if strings.TrimSpace(v) != "" {
-			return v
-		}
-	}
-	return ""
-}
+func firstNonEmpty(values ...string) string { return strutil.FirstNonBlank(values...) }
 
 // contractSummary returns a human-readable description of data contracts in a step list,
 // or "" if there are none.
@@ -576,14 +572,14 @@ func contractSummary(steps []jobdef.Step) string {
 		return ""
 	}
 
-	sort.Slice(contracts, func(i, j int) bool {
-		if contracts[i].producer != contracts[j].producer {
-			return contracts[i].producer < contracts[j].producer
+	slices.SortFunc(contracts, func(a, b contract) int {
+		if order := cmp.Compare(a.producer, b.producer); order != 0 {
+			return order
 		}
-		if contracts[i].consumer != contracts[j].consumer {
-			return contracts[i].consumer < contracts[j].consumer
+		if order := cmp.Compare(a.consumer, b.consumer); order != 0 {
+			return order
 		}
-		return strings.Join(contracts[i].keys, "\x00") < strings.Join(contracts[j].keys, "\x00")
+		return cmp.Compare(strings.Join(a.keys, "\x00"), strings.Join(b.keys, "\x00"))
 	})
 
 	parts := make([]string, 0, len(contracts))

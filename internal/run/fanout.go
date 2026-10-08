@@ -473,46 +473,22 @@ func (s *Store) expandFanOutSuccessors(
 
 		instances := make([]models.TaskRun, 0, n)
 		for i, p := range partitions {
-			attrs, err := encodePartitionMap(p.Attributes)
-			if err != nil {
-				return nil, err
-			}
-			deps, err := json.Marshal(p.DependsOn)
-			if err != nil {
-				return nil, err
-			}
 			indegree := 0
 			if graph != nil {
 				indegree = graph.Indegree[p.Key]
 			}
-			outstanding := template.OutstandingPredecessors + indegree
-			row := *template
-			if i == 0 {
-				row.ID = template.ID
-			} else {
-				row.ID = uuid.New()
-				row.CreatedAt = template.CreatedAt
+			id := template.ID
+			if i > 0 {
+				id = uuid.New()
 			}
-			row.PartitionValue = p.Key
-			row.PartitionIndex = i
-			row.PartitionCount = n
-			row.PartitionFingerprint = p.Fingerprint
-			row.PartitionAttributes = attrs
-			row.PartitionDependsOn = datatypes.JSON(deps)
-			row.OutstandingPredecessors = outstanding
-			row.Status = string(TaskStatusPending)
-			row.ClaimedBy = ""
-			row.RuntimeID = ""
-			row.StartedAt = nil
-			row.CompletedAt = nil
-			instances = append(instances, row)
-			group.Instances = append(group.Instances, ExpandedInstance{
-				TaskRunID:               row.ID,
-				TaskID:                  succID,
-				PartitionIndex:          i,
-				Partition:               p,
-				OutstandingPredecessors: outstanding,
-			})
+			inst := ExpandedInstance{TaskRunID: id, TaskID: succID, PartitionIndex: i,
+				Partition: p, OutstandingPredecessors: template.OutstandingPredecessors + indegree}
+			row, err := materializeFanOutTaskRun(template, inst, n)
+			if err != nil {
+				return nil, err
+			}
+			instances = append(instances, *row)
+			group.Instances = append(group.Instances, inst)
 		}
 
 		if persist {
@@ -530,6 +506,34 @@ func (s *Store) expandFanOutSuccessors(
 	}
 
 	return expansion, nil
+}
+
+// materializeFanOutTaskRun applies already-planned instance identity and
+// predecessor totals while retaining the template's immutable execution fields.
+func materializeFanOutTaskRun(template *models.TaskRun, inst ExpandedInstance, count int) (*models.TaskRun, error) {
+	attrs, err := encodePartitionMap(inst.Partition.Attributes)
+	if err != nil {
+		return nil, err
+	}
+	deps, err := json.Marshal(inst.Partition.DependsOn)
+	if err != nil {
+		return nil, err
+	}
+	row := *template
+	row.ID = inst.TaskRunID
+	row.PartitionValue = inst.Partition.Key
+	row.PartitionIndex = inst.PartitionIndex
+	row.PartitionCount = count
+	row.PartitionFingerprint = inst.Partition.Fingerprint
+	row.PartitionAttributes = attrs
+	row.PartitionDependsOn = datatypes.JSON(deps)
+	row.OutstandingPredecessors = inst.OutstandingPredecessors
+	row.Status = string(TaskStatusPending)
+	row.ClaimedBy = ""
+	row.RuntimeID = ""
+	row.StartedAt = nil
+	row.CompletedAt = nil
+	return &row, nil
 }
 
 // fanOutTemplateExpandable reports whether a successor's TaskRun is still the
@@ -573,30 +577,13 @@ func (s *Store) persistExpansionTx(tx *gorm.DB, runID uuid.UUID, expansion *FanO
 		}
 		rows := make([]models.TaskRun, 0, len(g.Instances))
 		for _, inst := range g.Instances {
-			attrs, err := encodePartitionMap(inst.Partition.Attributes)
+			row, err := materializeFanOutTaskRun(template, inst, len(g.Instances))
 			if err != nil {
 				return err
 			}
-			deps, err := json.Marshal(inst.Partition.DependsOn)
-			if err != nil {
-				return err
-			}
-			row := *template
-			row.ID = inst.TaskRunID
-			row.PartitionValue = inst.Partition.Key
-			row.PartitionIndex = inst.PartitionIndex
-			row.PartitionCount = len(g.Instances)
-			row.PartitionFingerprint = inst.Partition.Fingerprint
-			row.PartitionAttributes = attrs
-			row.PartitionDependsOn = datatypes.JSON(deps)
-			row.OutstandingPredecessors = inst.OutstandingPredecessors
-			row.Status = string(TaskStatusPending)
-			row.ClaimedBy = ""
-			row.RuntimeID = ""
-			row.StartedAt = nil
-			row.CompletedAt = nil
-			rows = append(rows, row)
+			rows = append(rows, *row)
 		}
+
 		if err := s.persistExpandedGroupTx(tx, template.ID, rows, counts); err != nil {
 			return err
 		}

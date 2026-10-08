@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -243,38 +244,77 @@ func (s *IntegrationTestSuite) fetchStatsSummary() statsSummary {
 }
 
 type replaySSECapture struct {
-	events chan event.Event
-	errs   chan error
-	cancel context.CancelFunc
-	resp   *http.Response
+	events    chan event.Event
+	done      chan struct{}
+	ctx       context.Context
+	cancel    context.CancelFunc
+	body      io.ReadCloser
+	readerErr error // published by closing done
+	closeOnce sync.Once
+	closeErr  error
+	check     func(error)
+}
+
+func newReplaySSECapture(ctx context.Context, cancel context.CancelFunc, body io.ReadCloser) *replaySSECapture {
+	c := &replaySSECapture{
+		events: make(chan event.Event, 128),
+		done:   make(chan struct{}),
+		ctx:    ctx,
+		cancel: cancel,
+		body:   body,
+	}
+	go func() {
+		defer close(c.done)
+		c.readerErr = readReplaySSE(ctx, body, c.events)
+	}()
+	return c
+}
+
+func (c *replaySSECapture) Close() error {
+	c.closeOnce.Do(func() {
+		c.cancel()
+		closeErr := c.body.Close() // unblocks a reader waiting for the next frame
+		<-c.done
+		c.closeErr = errors.Join(closeErr, c.readerErr)
+	})
+	return c.closeErr
 }
 
 func (s *IntegrationTestSuite) openSSE(path string) (*replaySSECapture, func()) {
 	s.T().Helper()
 	ctx, cancel := context.WithCancel(s.T().Context())
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, s.caesiumURL+path, nil)
+	if err != nil {
+		cancel()
+	}
 	s.Require().NoError(err)
 	req.Header.Set("Accept", "text/event-stream")
 	// Carry the suite's API key so this helper works on the auth-enabled lanes
 	// too; a no-op on lanes with auth off, where authAPIKey is empty.
 	s.authorize(req)
-	resp, err := http.DefaultClient.Do(req) //nolint:bodyclose // closed by the returned cleanup func (defer closeFn)
-	s.Require().NoError(err)
-	s.Require().Equal(http.StatusOK, resp.StatusCode)
-	c := &replaySSECapture{
-		events: make(chan event.Event, 128),
-		errs:   make(chan error, 1),
-		cancel: cancel,
-		resp:   resp,
+	resp, err := http.DefaultClient.Do(req) //nolint:bodyclose // owned and closed by replaySSECapture
+	if err != nil {
+		cancel()
 	}
-	go readReplaySSE(resp.Body, c.events, c.errs, ctx.Done())
-	return c, func() {
+	s.Require().NoError(err)
+	if resp.StatusCode != http.StatusOK {
 		cancel()
 		_ = resp.Body.Close()
 	}
+	s.Require().Equal(http.StatusOK, resp.StatusCode)
+	c := newReplaySSECapture(ctx, cancel, resp.Body)
+	c.check = func(err error) { s.Require().NoError(err, "SSE reader failed") }
+	return c, func() { c.check(c.Close()) }
 }
 
 func (c *replaySSECapture) Drain() []event.Event {
+	if c.check != nil {
+		select {
+		case <-c.done:
+			c.check(c.readerErr)
+		default:
+		}
+	}
 	var out []event.Event
 	for {
 		select {
@@ -286,36 +326,70 @@ func (c *replaySSECapture) Drain() []event.Event {
 	}
 }
 
+// CollectFor consumes while the observation window is open, so a backlog larger
+// than the channel cannot block behind a sleeping consumer. Every exit closes
+// the response and joins the reader; only our deliberate close ends a healthy
+// stream successfully.
+func (c *replaySSECapture) CollectFor(wait time.Duration) (events []event.Event, err error) {
+	defer func() { err = errors.Join(err, c.Close()) }()
+	timer := time.NewTimer(wait)
+	defer timer.Stop()
+	for {
+		select {
+		case evt := <-c.events:
+			events = append(events, evt)
+		case <-c.done:
+			if err := c.ctx.Err(); err != nil {
+				return events, err
+			}
+			return events, c.readerErr
+		case <-c.ctx.Done():
+			return events, c.ctx.Err()
+		case <-timer.C:
+			if err := c.ctx.Err(); err != nil {
+				return events, err
+			}
+			if err := c.Close(); err != nil {
+				return events, err
+			}
+			return append(events, c.Drain()...), nil
+		}
+	}
+}
+
 func (s *IntegrationTestSuite) readSSEBacklog(path string, wait time.Duration) []event.Event {
 	capture, closeFn := s.openSSE(path)
 	defer closeFn()
-	time.Sleep(wait)
-	return capture.Drain()
+	events, err := capture.CollectFor(wait)
+	s.Require().NoError(err, "SSE backlog observation failed")
+	return events
 }
 
-func readReplaySSE(body io.Reader, out chan<- event.Event, errs chan<- error, done <-chan struct{}) {
+func readReplaySSE(ctx context.Context, body io.Reader, out chan<- event.Event) error {
 	scanner := bufio.NewScanner(body)
 	var currentType event.Type
-	var currentData []byte
+	var currentData []string
 	for scanner.Scan() {
-		select {
-		case <-done:
-			return
-		default:
+		if ctx.Err() != nil {
+			return nil
 		}
 		line := scanner.Bytes()
 		if len(line) == 0 {
 			if len(currentData) > 0 {
 				var evt event.Event
-				if err := json.Unmarshal(currentData, &evt); err == nil {
-					if evt.Type == "" {
-						evt.Type = currentType
-					}
-					select {
-					case out <- evt:
-					case <-done:
-						return
-					}
+				if err := json.Unmarshal([]byte(strings.Join(currentData, "\n")), &evt); err != nil {
+					return fmt.Errorf("decode SSE event: %w", err)
+				}
+				if evt.Type == "" {
+					evt.Type = currentType
+				}
+				if evt.Type == "" {
+					return errors.New("SSE event has no type")
+				}
+				select {
+				case out <- evt:
+				case <-ctx.Done():
+					return nil
 				}
 			}
 			currentType = ""
@@ -335,15 +409,19 @@ func readReplaySSE(body io.Reader, out chan<- event.Event, errs chan<- error, do
 		case "event":
 			currentType = event.Type(value)
 		case "data":
-			currentData = append(currentData[:0], value...)
+			currentData = append(currentData, string(value))
 		}
+	}
+	if ctx.Err() != nil {
+		return nil
 	}
 	if err := scanner.Err(); err != nil {
-		select {
-		case errs <- err:
-		default:
-		}
+		return fmt.Errorf("read SSE stream: %w", err)
 	}
+	if len(currentData) > 0 {
+		return io.ErrUnexpectedEOF
+	}
+	return io.EOF // a live SSE stream ending before our window is not evidence of absence
 }
 
 func hasAnyEventForRun(events []event.Event, runID string) bool {

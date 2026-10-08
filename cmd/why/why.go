@@ -16,13 +16,15 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"net/url"
-	"os"
-	"sort"
+	"slices"
 	"strings"
 	"text/tabwriter"
 
+	"github.com/caesium-cloud/caesium/cmd/cliutil"
+	"github.com/caesium-cloud/caesium/internal/clihttp"
 	"github.com/spf13/cobra"
 )
 
@@ -180,23 +182,14 @@ var Cmd = &cobra.Command{
 		reqURL := fmt.Sprintf("%s/v1/jobs/%s/runs/%s/why?%s",
 			server, whyJobID, runID, query.Encode())
 
-		req, err := http.NewRequestWithContext(cmd.Context(), http.MethodGet, reqURL, nil)
-		if err != nil {
-			return err
-		}
+		headers := make(http.Header)
 		if apiKey := resolveAPIKey(cmd, whyAPIKey); apiKey != "" {
-			req.Header.Set("Authorization", "Bearer "+apiKey)
+			headers.Set("Authorization", "Bearer "+apiKey)
 		}
 
-		resp, err := http.DefaultClient.Do(req)
-		if err != nil {
+		body, status, readErr := clihttp.Exchange(cmd.Context(), http.DefaultClient, http.MethodGet, reqURL, nil, headers)
+		if err := clihttp.ResponseError("why", status, body, readErr); err != nil {
 			return err
-		}
-		defer func() { _ = resp.Body.Close() }()
-
-		body, _ := io.ReadAll(resp.Body)
-		if resp.StatusCode >= http.StatusBadRequest {
-			return fmt.Errorf("why failed (%d): %s", resp.StatusCode, strings.TrimSpace(string(body)))
 		}
 
 		// NOTE: write machine-readable output via cmd.OutOrStdout(), NOT
@@ -375,11 +368,7 @@ func renderGroup(out io.Writer, group *groupSummary) {
 	_, _ = fmt.Fprintf(out, "Fan-out group (%d partitions):\n", group.PartitionCount)
 
 	gw := tabwriter.NewWriter(out, 0, 4, 2, ' ', 0)
-	statuses := make([]string, 0, len(group.StatusCounts))
-	for status := range group.StatusCounts {
-		statuses = append(statuses, status)
-	}
-	sort.Strings(statuses)
+	statuses := slices.Sorted(maps.Keys(group.StatusCounts))
 	for _, status := range statuses {
 		_, _ = fmt.Fprintf(gw, "%s\t%d\n", strings.ToUpper(status), group.StatusCounts[status])
 	}
@@ -420,11 +409,7 @@ func dashIfEmpty(s string) string {
 }
 
 func resolveAPIKey(cmd *cobra.Command, flagValue string) string {
-	if strings.TrimSpace(flagValue) != "" {
-		cmd.PrintErrln(fmt.Sprintf("warning: --api-key is visible in process listings; prefer %s", apiKeyEnvVar))
-		return strings.TrimSpace(flagValue)
-	}
-	return strings.TrimSpace(os.Getenv(apiKeyEnvVar))
+	return cliutil.ResolveAPIKey(cmd, flagValue, cliutil.APIKeyEnvVar)
 }
 
 func init() {

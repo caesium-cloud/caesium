@@ -9,13 +9,16 @@ from __future__ import annotations
 
 import json
 import hashlib
+import io
 import os
 from pathlib import Path
 import runpy
+import shlex
 import shutil
 import subprocess
 import sys
 import tempfile
+import tarfile
 import unittest
 
 
@@ -1096,7 +1099,8 @@ class CollectorCollectTests(unittest.TestCase):
         CollectorMergeProvenanceTests.setUp(self)
         self.bin = self.art / "bin"
         self.bin.mkdir()
-        self.env.update(CAESIUM_COVERAGE_ID="cov-test", CAESIUM_COVERAGE_KEEP="1")
+        self.env.update(CAESIUM_COVERAGE_ID="cov-test", CAESIUM_COVERAGE_KEEP="0",
+                        CAESIUM_CONTAINER_CLI="docker", CAESIUM_PLATFORM="linux/amd64")
         self.env["PATH"] = str(self.bin) + os.pathsep + self.env["PATH"]
         self.env["FAKE_BROWSER_CHECKER"] = str(BROWSER_CHECKER)
         self.env["FAKE_BROWSER_JOURNEY"] = str(BROWSER_JOURNEY)
@@ -1126,108 +1130,190 @@ os.execv("/bin/bash",["bash"]+sys.argv[1:])
 ''')
         for path in (git, sleeper, bash):
             path.chmod(0o755)
+        # A PATH-private executable satisfies the literal Docker contract while
+        # all allocation/inspect/mutation responses remain local JSON fixtures.
         container = self.art / "fake-container"
-        with container.open("a") as stream:
-            stream.write('''else:
-    name=next((args[i+1] for i,v in enumerate(args) if v=="--name"),"")
-    names_path=root/"container-names.json"
-    names=json.loads(names_path.read_text()) if names_path.exists() else []
-    if args[:2]==["rm","-f"]:
-        names=[n for n in names if n not in args[2:]]
-    elif args and args[0]=="build": pass
-    elif args[:2]==["image","inspect"]:
-        if "--format" in args:
-            fmt=args[args.index("--format")+1]
-            if "revision" in fmt: print("a"*40)
-            elif ".Os" in fmt: print("linux")
-            elif ".Architecture" in fmt: print("amd64")
-            elif "builder" in args[-1]: print("sha256:"+("d" if "@" in args[-1] and os.environ.get("FAKE_SCENARIO")=="builder-mismatch" else "b")*64)
-            elif args[-1]=="caesiumcloud/caesium-coverage:latest" and (root/"retagged").exists(): print("sha256:"+"d"*64)
-            else: print("sha256:"+"c"*64)
-    elif args and args[0]=="create": print("audit-export")
-    elif args and args[0]=="port": print("127.0.0.1:12345")
-    elif args and args[0]=="logs":
-        if os.environ.get("FAKE_SCENARIO")=="connector-silent":
-            print("caesium start", flush=True)
-        else:
-            # The needle is followed by a long startup tail. `logs | grep -q`
-            # closes the pipe on the first hit; the writer then dies of SIGPIPE
-            # and pipefail reports a miss. A captured string still matches.
-            print('{"msg":"connector config loaded"}', flush=True)
-            try:
-                for i in range(4000):
-                    print("startup", i, flush=True)
-            except BrokenPipeError:
-                raise SystemExit(141)
-    elif args and args[0]=="inspect":
-        fmt=""
-        if "--format" in args:
-            fmt=args[args.index("--format")+1]
-        elif "-f" in args:
-            fmt=args[args.index("-f")+1]
-        if "Running" in fmt:
-            print("false" if os.environ.get("FAKE_SCENARIO")=="connector-silent" else "true")
-        else:
-            killed=args[-1].endswith("-browser") and os.environ.get("FAKE_SCENARIO")=="killed"
-            print(json.dumps([{"State":{"ExitCode":137 if killed else 0,"OOMKilled":killed}}]))
-    elif args and args[0]=="run":
-        if name and os.environ.get("FAKE_SCENARIO")=="retag":
-            (root/"retagged").write_text("other candidate now owns the tag")
+        (self.bin / "docker").symlink_to(container)
+        container.write_text(r'''#!/usr/bin/env python3
+import os, pathlib, shutil, sys, json, hashlib, re
+root = pathlib.Path(os.environ["FAKE_COV_ROOT"])
+args = sys.argv[1:]
+with (root / "container-args.jsonl").open("a") as log: log.write(json.dumps(args) + "\n")
+with (root / "container-calls").open("a") as log: log.write(" ".join(args) + "\n")
+state_path = root / "daemon-state.json"
+state = json.loads(state_path.read_text()) if state_path.exists() else {"containers": {}, "networks": {}}
+scenario = os.environ.get("FAKE_SCENARIO", "clean")
+mounts = {}
+for i, value in enumerate(args):
+    if value == "-v":
+        host, inside, *rest = args[i + 1].split(":")
+        mounts[inside] = pathlib.Path(host)
+def value(flag, default=""):
+    return args[args.index(flag)+1] if flag in args else default
+def save(): state_path.write_text(json.dumps(state))
+def lookup(kind, identity):
+    for obj in state[kind].values():
+        if obj["Id"] == identity or obj.get("Name", "").lstrip("/") == identity: return obj
+    label = "network" if kind == "networks" else "container"
+    message = ("Error response from daemon: network " + identity + " not found" if kind == "networks"
+               else "Error: No such container: " + identity)
+    print(message, file=sys.stderr); raise SystemExit(1)
+if "textfmt" in args:
+    out = next(v[3:] for v in args if v.startswith("-o="))
+    dest = mounts["/out"] / pathlib.Path(out).name
+    source = mounts["/in"].name.removeprefix("cohort-")
+    if source == "integration":
+        cli = (root/"fake-cli.out").read_text().splitlines(); server = (root/"fake-server.out").read_text().splitlines()
+        dest.write_text("\n".join(cli+server[1:])+"\n")
+    else: shutil.copyfile(root/("fake-"+source+".out"), dest)
+elif "merge" in args:
+    (mounts["/out"]/"covmeta.fake").write_text("meta")
+    (mounts["/out"]/"covcounters.fake").write_text("counters")
+else:
+    command = args[1:] if args and args[0] == "container" else args
+    op = command[0] if command else ""
+    labels = dict(args[i+1].split("=", 1) for i,v in enumerate(args) if v == "--label")
+    name = value("--name")
+    if args[:2] == ["image", "inspect"]:
+        reference = args[-1]
+        image_id = "sha256:"+("b" if "builder" in reference else "c")*64
+        if "builder" in reference and "@" in reference and scenario == "builder-mismatch": image_id="sha256:"+"d"*64
+        if reference == "caesiumcloud/caesium-coverage:latest" and (root/"retagged").exists(): image_id="sha256:"+"d"*64
+        fmt = value("--format")
+        if fmt: print("a"*40 if "revision" in fmt else "linux" if ".Os" in fmt else "amd64" if ".Architecture" in fmt else image_id)
+        else: print(json.dumps([{"Id":image_id,"Os":"linux","Architecture":"amd64","RepoTags":[reference]}]))
+    elif args and args[0] == "network":
+        operation = args[1]
+        if operation == "create":
+            nid=hashlib.sha256(args[-1].encode()).hexdigest()
+            state["networks"][nid]={"Id":nid,"Name":args[-1],"Labels":labels}; print(nid)
+        elif operation == "inspect": print(json.dumps([lookup("networks", args[-1])]))
+        elif operation == "rm": state["networks"].pop(lookup("networks", args[-1])["Id"])
+    elif op in ("create", "run"):
+        if name:
+            if any(o["Name"] == "/"+name for o in state["containers"].values()): raise SystemExit("container name already exists")
+            cid=hashlib.sha256(name.encode()).hexdigest()
+            image_id=next((arg for arg in args if re.fullmatch(r"sha256:[0-9a-f]{64}", arg)), "sha256:"+"c"*64)
+            state["containers"][cid]={"Id":cid,"Name":"/"+name,"Image":image_id,"RestartCount":0,
+                "Config":{"Labels":labels},"State":{"Running":op=="run","ExitCode":0,"OOMKilled":False,"FinishedAt":"2026-10-04T12:00:02Z"}}
+            if scenario == "retag": (root/"retagged").write_text("other candidate owns the tag")
+            if scenario == "connector-silent" and name.endswith("-connectors"): state["containers"][cid]["State"]["Running"]=False
+            print(cid)
         if mounts.get("/source"):
             if "-i" not in args: raise SystemExit("inventory stdin was not attached")
-            shutil.copyfile(root/"source-inventory.json",mounts["/audit"]/"source-inventory.json")
-        if name:
-            if name in names: raise SystemExit("container name already exists: "+name)
-            names.append(name)
+            shutil.copyfile(root/"source-inventory.json", mounts["/audit"]/"source-inventory.json")
         if "stat" in args: print("998")
         if "wget" in args:
-            url=args[-1]
-            unsampled=os.environ.get("FAKE_SCENARIO")=="run-unsampled"
-            task={"id":"t1","status":"succeeded","exit_code":0,"stats_source":"none" if unsampled else "sampled",
-                  "peak_memory_bytes":None if unsampled else 1048576}
-            if url.endswith("/v1/jobs"):
-                print(json.dumps([{"id":"other","alias":"other"},{"id":"11111111-1111-4111-8111-111111111111","alias":"coverage-write-read"}]))
+            url=args[-1]; unsampled=scenario=="run-unsampled"
+            task={"id":"t1","status":"succeeded","exit_code":0,"stats_source":"none" if unsampled else "sampled","peak_memory_bytes":None if unsampled else 1048576}
+            if url.endswith("/v1/jobs"): print(json.dumps([{"id":"other","alias":"other"},{"id":"11111111-1111-4111-8111-111111111111","alias":"coverage-write-read"}]))
             elif "/logs?task_id=" in url:
-                if os.environ.get("FAKE_SCENARIO") != "logs-empty": print("coverage-task-log")
+                if scenario != "logs-empty": print("coverage-task-log")
             elif "/runs/" in url:
-                polls=root/"run-polls"
-                count=int(polls.read_text()) if polls.exists() else 0
-                polls.write_text(str(count+1))
+                polls=root/"run-polls"; count=int(polls.read_text()) if polls.exists() else 0; polls.write_text(str(count+1))
                 print(json.dumps({"id":url.rsplit("/",1)[-1],"status":"running" if count==0 else "succeeded","tasks":[task]}))
-            else:
-                print("healthy")
-        if "start" in args and "--job-id" in args:
-            print("22222222-2222-4222-8222-222222222222")
+            else: print("healthy")
+        if "start" in args and "--job-id" in args: print("22222222-2222-4222-8222-222222222222")
         if "partitions" in args:
-            unsampled=os.environ.get("FAKE_SCENARIO")=="run-unsampled"
-            print(json.dumps({"partitions":[{"task_run_id":"t1","status":"succeeded","exit_code":0,
-                "stats_source":"none" if unsampled else "sampled","peak_memory_bytes":None if unsampled else 1048576}],"total":1}))
-        for inside in ("/coverage","/var/lib/caesium/coverage"):
+            unsampled=scenario=="run-unsampled"
+            print(json.dumps({"partitions":[{"task_run_id":"t1","status":"succeeded","exit_code":0,"stats_source":"none" if unsampled else "sampled","peak_memory_bytes":None if unsampled else 1048576}],"total":1}))
+        for inside in ("/coverage", "/var/lib/caesium/coverage"):
             if inside in mounts:
-                (mounts[inside]/"covmeta.fake").write_text("meta")
-                (mounts[inside]/"covcounters.fake").write_text("counters")
-        if "nodes" in args and "list" in args:
-            print(json.dumps([{"id":"42","address":"caesium:9001","role":"voter","leader":True,"reachability":"reachable"}]))
+                (mounts[inside]/"covmeta.fake").write_text("meta"); (mounts[inside]/"covcounters.fake").write_text("counters")
+        if "nodes" in args and "list" in args: print(json.dumps([{"id":"42","address":"caesium:9001","role":"voter","leader":True,"reachability":"reachable"}]))
         elif "nodes" in args and "remove" in args:
-            if os.environ.get("FAKE_SCENARIO")=="nodes-removed":
-                print(json.dumps({"status":"removed"}))
+            if scenario == "nodes-removed": print(json.dumps({"status":"removed"}))
             else:
-                print(json.dumps({"status":"refused","id":args[args.index("remove")+1],"reason":"not_a_member"}))
-                raise SystemExit(1)
-    names_path.write_text(json.dumps(names))
+                print(json.dumps({"status":"refused","id":args[args.index("remove")+1],"reason":"not_a_member"})); save(); raise SystemExit(1)
+    elif op == "inspect":
+        obj=lookup("containers", args[-1]); fmt=value("--format", value("-f"))
+        with (root/"container-inspections.jsonl").open("a") as log: log.write(json.dumps(obj)+"\n")
+        print(str(obj["State"]["Running"]).lower() if "Running" in fmt else obj["Image"] if ".Image" in fmt else json.dumps([obj]))
+    elif op == "exec":
+        obj=lookup("containers", args[2])
+        assert "wget" in args and args[-1] == "http://127.0.0.1:8080/health"
+        polls=root/"connector-health-polls"; count=int(polls.read_text()) if polls.exists() else 0; polls.write_text(str(count+1))
+        print(json.dumps({"status":"unavailable" if scenario=="connector-delayed-health" and count<2 else "healthy"}))
+    elif op == "kill":
+        obj=lookup("containers", args[-1])
+        if obj["Name"].endswith("-connectors"):
+            polls=root/"connector-health-polls"
+            if not polls.exists() or (scenario=="connector-delayed-health" and int(polls.read_text())<3):
+                raise SystemExit("connector signalled before readiness")
+    elif op == "stop":
+        obj=lookup("containers", args[-1]); killed=obj["Name"].endswith("-browser") and scenario=="killed"
+        obj["State"].update(Running=False,ExitCode=137 if killed else 0,OOMKilled=killed)
+    elif op == "rm": state["containers"].pop(lookup("containers", args[-1])["Id"])
+    elif op == "logs":
+        if scenario == "connector-silent": print("caesium start",flush=True)
+        else:
+            print('{"msg":"connector config loaded","fingerprint":"' + 'a'*64 + '"}',flush=True)
+            try:
+                for i in range(4000): print("startup",i,flush=True)
+            except BrokenPipeError: raise SystemExit(141)
+    elif op == "port": print("127.0.0.1:12345")
+save()
 ''')
-        # The stand-in only emulates CLI responses; it cannot launch a real engine.
-        code = container.read_text().replace("import os, pathlib, shutil, sys", "import os, pathlib, shutil, sys, json")
-        code = code.replace('args = sys.argv[1:]', 'args = sys.argv[1:]\nwith (root / "container-args.jsonl").open("a") as log: log.write(json.dumps(args) + "\\n")')
-        container.write_text(code)
-        (self.art / "container-names.json").write_text(json.dumps(["cov-test-browser"]))
+        container.chmod(0o755)
+        # The actual offline prerequisite validator reads a real legacy archive;
+        # these bytes are structural fixtures, never a loaded/runtime image.
+        config = json.dumps({"os": "linux", "architecture": "amd64"}).encode()
+        config_id = hashlib.sha256(config).hexdigest()
+        archive = self.art / "task.tar"
+        with tarfile.open(archive, "w") as tar:
+            for name, data in ((config_id+".json", config), ("manifest.json", json.dumps([
+                {"Config": config_id+".json", "RepoTags": ["alpine:3.23"], "Layers": []}]).encode())):
+                info = tarfile.TarInfo(name); info.size = len(data); tar.addfile(info, io.BytesIO(data))
+        inputs = self.art / "runtime-prereqs.json"
+        inputs.write_text(json.dumps({"schema_version": 1, "platform": "linux/amd64",
+            "docker_socket": "/var/run/docker.sock", "task_archive": str(archive),
+            "task_archive_sha256": hashlib.sha256(archive.read_bytes()).hexdigest(),
+            "task_image_id": "sha256:"+config_id, "task_image_ref": "alpine:3.23",
+            "task_image_supplier_ref": "docker.io/library/alpine:3.23@sha256:85fe1e81d6758c208f3e1eed4338a1997e19d4be002d4dd32d3100c9a8c010a0",
+            "kind_image_ref": "kindest/node:v1.36.1",
+            "kind_image_supplier_ref": "kindest/node:v1.36.1@sha256:3489c7674813ba5d8b1a9977baea8a6e553784dab7b84759d1014dbd78f7ebd5",
+            "kind_image_id": IMAGE_ID, "podman_service_image_id": IMAGE_ID,
+            "podman_privileged_approved": True}))
+        self.env["CAESIUM_COVERAGE_BACKEND_INPUTS"] = str(inputs)
+        # These legacy tests qualify the original base/browser lifecycle only.
+        # A private script copy substitutes only the additive journey producer;
+        # all prerequisite, ownership, flush, cleanup, merge/checker code is real.
+        self.collector = self.art / "collector-harness.sh"
+        source = COLLECTOR.read_text()
+        root_assignment = 'ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"'
+        assert source.count(root_assignment) == 1
+        source = source.replace(root_assignment, "ROOT=" + shlex.quote(str(ROOT)))
+        marker = 'source "$ROOT/scripts/coverage-journeys.sh"'
+        assert source.count(marker) == 1
+        source = source.replace(marker, marker + '''
+run_coverage_journeys() {
+  # Structural base-lifecycle test fixtures; never live journey proof.
+  [[ "${FAKE_SCENARIO:-}" != missing-additive ]] || return 1
+  mkdir -p "$RAW/harness-additive/cli" "$RAW/harness-additive/server"
+  cp "$RAW/cli/"cov* "$RAW/harness-additive/cli/"
+  cp "$RAW/server/"cov* "$RAW/harness-additive/server/"
+  COVERAGE_JOURNEY_CLI_DIRS+=("$RAW/harness-additive/cli")
+  COVERAGE_JOURNEY_SERVER_DIRS+=("$RAW/harness-additive/server")
+}
+''')
+        self.collector.write_text(source)
 
     def collect(self, scenario):
         self.env["FAKE_SCENARIO"] = scenario
-        return subprocess.run(["bash", str(COLLECTOR), "collect"], capture_output=True, text=True,
+        (self.art / "backend-producer-inputs.json").unlink(missing_ok=True)
+        # Each fake collector invocation models a fresh diagnostic attempt;
+        # browser profiles stay intact for the existing stale/refusal controls.
+        (self.art / "audit/connector-diagnostics.json").unlink(missing_ok=True)
+        return subprocess.run(["bash", str(self.collector), "collect"], capture_output=True, text=True,
                               env=self.env, cwd=str(ROOT), timeout=30)
 
-    def test_clean_collect_requires_browser_and_replaces_kept_browser(self):
+    def test_clean_collect_requires_browser_and_replaces_stale_browser_evidence(self):
+        stale_raw = self.art / "raw/browser"
+        stale_raw.mkdir()
+        (stale_raw / "covcounters.stale").write_text("old collection")
+        stale = json.loads((self.profiles / "browser.provenance.json").read_text())
+        stale["stale_fixture"] = True
+        (self.profiles / "browser.provenance.json").write_text(json.dumps(stale))
         result = self.collect("clean")
         self.assertEqual(result.returncode, 0, output(result))
         report = json.loads((self.art / "report.json").read_text())
@@ -1237,7 +1323,10 @@ os.execv("/bin/bash",["bash"]+sys.argv[1:])
         self.assertTrue(browser["complete"])
         self.assertEqual(browser["test_exit_code"], 0)
         self.assertEqual(browser["image_id"], IMAGE_ID)
-        self.assertIn("cov-test-browser", result.stdout.split("KEEP=1;")[-1])
+        self.assertNotIn("stale_fixture", browser)
+        self.assertFalse((stale_raw / "covcounters.stale").exists())
+        self.assertEqual(json.loads((self.art / "daemon-state.json").read_text()),
+                         {"containers": {}, "networks": {}}, "successful collection proves owned removal")
         calls = [json.loads(line) for line in (self.art / "container-args.jsonl").read_text().splitlines()]
         removals = [args for args in calls if "remove" in args and "nodes" in args]
         self.assertEqual(len(removals), 1)
@@ -1271,17 +1360,55 @@ os.execv("/bin/bash",["bash"]+sys.argv[1:])
         self.assertIn("22222222-2222-4222-8222-222222222222", partitions[0])
         self.assertIn("--json", partitions[0])
 
+    def test_preexisting_native_browser_is_refused_without_foreign_removal(self):
+        identity = "f" * 64
+        foreign = {"Id": identity, "Name": "/cov-test-browser", "Image": IMAGE_ID,
+                   "Config": {"Labels": {"caesium.coverage.owner": "another-run"}},
+                   "State": {"Running": True}}
+        inventory = {"containers": {identity: foreign}, "networks": {}}
+        (self.art / "daemon-state.json").write_text(json.dumps(inventory))
+        result = self.collect("clean")
+        self.assertNotEqual(result.returncode, 0, output(result))
+        self.assertEqual(json.loads((self.art / "daemon-state.json").read_text()), inventory)
+        calls = [json.loads(line) for line in (self.art / "container-args.jsonl").read_text().splitlines()]
+        self.assertFalse(any("rm" in args for args in calls))
+
+    def test_missing_additive_journey_cannot_reuse_complete_base_evidence(self):
+        result = self.collect("missing-additive")
+        self.assertNotEqual(result.returncode, 0, output(result))
+        self.assertIn("real journeys incomplete", output(result))
+        self.assertTrue((self.art / "audit/base-server-files.json").exists(),
+                        "the refusal must occur after the actual base lifecycle finalized")
+        self.assertNotEqual(json.loads((self.art / "report.json").read_text())["verdict"], "pass")
+
     def test_connector_start_without_a_loaded_fingerprint_fails_the_journey(self):
         result = self.collect("connector-silent")
         self.assertNotEqual(result.returncode, 0, output(result))
-        self.assertIn("did not log a loaded fingerprint", output(result))
+        self.assertIn("connector loaded-fingerprint/health/clean-stop guard refused", output(result))
+        diagnostics = json.loads((self.art / "audit/connector-diagnostics.json").read_text())
+        self.assertFalse(diagnostics["complete"])
+        self.assertFalse(diagnostics["fingerprint"])
+        self.assertEqual(diagnostics["refusal_category"], "stopped_before_readiness")
         calls = [json.loads(line) for line in (self.art / "container-args.jsonl").read_text().splitlines()]
-        log_calls = [args for args in calls if args and args[0] == "logs"]
-        self.assertLessEqual(len(log_calls), 3, "a stopped connector must not be polled for the full minute")
-        self.assertTrue(
-            any(args and args[0] == "inspect" and "-f" in args for args in calls),
-            "a stopped connector is noticed via inspect -f",
-        )
+        self.assertLessEqual(len([args for args in calls if "logs" in args]), 3,
+                             "a stopped connector must not be polled for the full minute")
+        connector_id = hashlib.sha256(b"cov-test-connectors").hexdigest()
+        self.assertFalse(any("kill" in args and args[-1] == connector_id for args in calls))
+
+    def test_connector_fingerprint_waits_for_real_health_before_signalling(self):
+        result = self.collect("connector-delayed-health")
+        self.assertEqual(result.returncode, 0, output(result))
+        diagnostics = json.loads((self.art / "audit/connector-diagnostics.json").read_text())
+        self.assertGreater(diagnostics["log_counts"]["stdout_lines"], 1000)
+        self.assertEqual(diagnostics["loaded_event"]["msg"], "connector config loaded")
+        self.assertTrue(diagnostics["complete"])
+        self.assertTrue(diagnostics["fingerprint"] and diagnostics["healthy"])
+        self.assertEqual(diagnostics["polls"], 3)
+        calls = [json.loads(line) for line in (self.art / "container-args.jsonl").read_text().splitlines()]
+        connector_id = hashlib.sha256(b"cov-test-connectors").hexdigest()
+        flush_at = next(i for i, args in enumerate(calls) if "kill" in args and args[-1] == connector_id)
+        self.assertEqual(len([args for args in calls[:flush_at] if "exec" in args and connector_id in args]), 3)
+        self.assertEqual(json.loads((self.art / "audit/connector-process.json").read_text())["flush_rc"], 0)
 
     def test_task_run_without_a_sampled_observation_fails_the_journey(self):
         result = self.collect("run-unsampled")
@@ -1353,9 +1480,18 @@ os.execv("/bin/bash",["bash"]+sys.argv[1:])
             with self.subTest(scenario=scenario):
                 result = self.collect(scenario)
                 self.assertNotEqual(result.returncode, 0, output(result))
-                browser = json.loads((self.profiles / "browser.provenance.json").read_text())
-                self.assertFalse(browser["complete"])
-                self.assertEqual(browser["killed"], scenario == "killed")
+                browser_path = self.profiles / "browser.provenance.json"
+                if scenario == "killed":
+                    self.assertFalse(browser_path.exists(), "guard refuses before eligible browser publication")
+                    observed = [json.loads(line) for line in
+                                (self.art / "container-inspections.jsonl").read_text().splitlines()]
+                    self.assertTrue(any(row["Name"] == "/cov-test-browser" and
+                                        row["State"]["ExitCode"] == 137 and row["State"]["OOMKilled"]
+                                        for row in observed), "failure reached the actual guarded exit/OOM check")
+                else:
+                    browser = json.loads(browser_path.read_text())
+                    self.assertFalse(browser["complete"])
+                    self.assertFalse(browser["killed"])
                 for mode in ("check", "merge"):
                     checked = subprocess.run(["bash", str(COLLECTOR), mode], capture_output=True, text=True,
                                              env=self.env, cwd=str(ROOT), timeout=30)
@@ -1435,7 +1571,6 @@ class DockerfileAndCollectorTests(unittest.TestCase):
         self.assertIn("go build -cover", text)
         self.assertIn("coverpkg", text)
         self.assertIn("GOCOVERDIR", text)
-        self.assertIn("SIGUSR2", text)
         self.assertIn("runtime/coverage", text)
         self.assertIn("reagents/go.mod", text)
         self.assertIn("reagents packages leaked", text)
@@ -1465,7 +1600,6 @@ class DockerfileAndCollectorTests(unittest.TestCase):
     def test_collector_script_invariants(self):
         text = COLLECTOR.read_text()
         self.assertIn("GOCOVERDIR", text)
-        self.assertIn("SIGUSR2", text)
         self.assertIn("docker stop", text)
         self.assertIn("job apply", text)
         self.assertIn("job export", text)
@@ -1474,8 +1608,8 @@ class DockerfileAndCollectorTests(unittest.TestCase):
         self.assertIn("system nodes remove", text)
         self.assertIn("CAESIUM_RESOURCE_STATS_ENABLED=true", text)
         self.assertIn("CAESIUM_CONNECTORS_ENABLED=true", text)
-        self.assertIn("connector config loaded", text)
-        self.assertIn('*"connector config loaded"*', text)
+        self.assertIn("connector config loaded", (ROOT / "scripts/coverage-journeys.py").read_text())
+        self.assertIn('coverage-journeys.py" connector', text)
         self.assertNotIn('logs "$CONNECTOR_NAME" 2>&1 | grep', text)
         self.assertIn("secret://k8s/temporal-creds/api-token", text)
         self.assertIn("secret://vault/kv/data/temporal?field=token", text)
@@ -1492,7 +1626,10 @@ class DockerfileAndCollectorTests(unittest.TestCase):
         self.assertNotIn(" --publish-all", text)
         self.assertIn("-p 127.0.0.1::8080", text)
         self.assertNotIn("-p 8080:8080", text)
-        self.assertIn("kill --signal=SIGUSR2", text)
+        helper = (ROOT / "scripts/coverage-journeys.py").read_text()
+        # Flush signaling and clean-exit acceptance are exercised against the
+        # real guarded-resource helper in test_coverage_journeys.py.
+        self.assertIn('coverage_journey_resource stop container "$SERVER_ID"', text)
         self.assertIn("CAESIUM_COVERAGE_BROWSER_DIR", text)
         self.assertIn("no host port", text)
         code = "\n".join(
@@ -1512,7 +1649,6 @@ class DockerfileAndCollectorTests(unittest.TestCase):
         self.assertIn('rm -rf "$RAW/cli"', text)
         self.assertIn("*.provenance.json", text)
         self.assertIn("stop_rc", text)
-        self.assertIn('exit_code" != "0" && "$exit_code" != "143"', text)
 
     def test_collector_bash_syntax(self):
         for script in (COLLECTOR, BROWSER_JOURNEY):

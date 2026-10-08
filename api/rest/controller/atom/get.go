@@ -9,7 +9,10 @@ import (
 )
 
 func Get(c *echo.Context) error {
-	id := uuid.MustParse(c.Param("id"))
+	id, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		return echo.NewHTTPError(http.StatusBadRequest, "bad request").Wrap(err)
+	}
 
 	a, err := atom.Service(c.Request().Context()).Get(id)
 

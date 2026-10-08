@@ -49,25 +49,9 @@ func (s *Subscriber) StartWithReady(ctx context.Context, ready chan<- struct{}) 
 		},
 	}
 
-	ch, err := s.bus.Subscribe(ctx, filter)
-	if err != nil {
-		return err
-	}
-	if ready != nil {
-		close(ready)
-	}
-
-	for {
-		select {
-		case <-ctx.Done():
-			return s.transport.Close()
-		case evt, ok := <-ch:
-			if !ok {
-				return s.transport.Close()
-			}
-			s.handleEvent(ctx, evt)
-		}
-	}
+	return event.RunSubscription(ctx, s.bus, filter, ready, func(evt event.Event) {
+		s.handleEvent(ctx, evt)
+	}, s.transport.Close)
 }
 
 func (s *Subscriber) handleEvent(ctx context.Context, evt event.Event) {

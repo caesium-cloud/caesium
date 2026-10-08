@@ -1,8 +1,9 @@
 package model
 
 import (
+	"cmp"
 	"fmt"
-	"sort"
+	"slices"
 	"strings"
 )
 
@@ -345,11 +346,10 @@ func findCycle[T comparable](nodes []T, succ func(T) []T) string {
 // step's position, then by partition index. Deterministic ordering is what lets
 // two implementations be compared element by element instead of as sets.
 func (d DAG) SortInstances(ids []InstanceID) {
-	sort.SliceStable(ids, func(i, j int) bool {
-		pi, pj := d.Position(ids[i].Task), d.Position(ids[j].Task)
-		if pi != pj {
-			return pi < pj
+	slices.SortStableFunc(ids, func(a, b InstanceID) int {
+		if pa, pb := d.Position(a.Task), d.Position(b.Task); pa != pb {
+			return cmp.Compare(pa, pb)
 		}
-		return ids[i].Partition < ids[j].Partition
+		return cmp.Compare(a.Partition, b.Partition)
 	})
 }

@@ -1,7 +1,6 @@
 package job
 
 import (
-	"strings"
 	"time"
 
 	"github.com/caesium-cloud/caesium/internal/models"
@@ -15,12 +14,7 @@ const (
 )
 
 func normalizeTaskFailurePolicy(value string) string {
-	switch strings.ToLower(strings.TrimSpace(value)) {
-	case taskFailurePolicyContinue:
-		return taskFailurePolicyContinue
-	default:
-		return taskFailurePolicyHalt
-	}
+	return run.NormalizeTaskFailurePolicy(value)
 }
 
 // computeRetryDelay returns the delay before the next retry attempt.
@@ -31,10 +25,7 @@ func computeRetryDelay(task *models.Task, attempt int) time.Duration {
 	if task == nil || task.RetryDelay <= 0 {
 		return 0
 	}
-	if task.RetryBackoff {
-		return task.RetryDelay * (1 << uint(attempt-1))
-	}
-	return task.RetryDelay
+	return run.ComputeRetryDelay(task.RetryDelay, task.RetryBackoff, attempt)
 }
 
 func collectDescendants(adjacency map[uuid.UUID][]uuid.UUID, start uuid.UUID) []uuid.UUID {

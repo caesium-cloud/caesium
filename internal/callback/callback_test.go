@@ -3,6 +3,7 @@ package callback
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"sync/atomic"
@@ -12,6 +13,7 @@ import (
 	"github.com/caesium-cloud/caesium/internal/jobdef/testutil"
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/caesium-cloud/caesium/internal/run"
+	"github.com/caesium-cloud/caesium/pkg/db"
 	"github.com/caesium-cloud/caesium/pkg/jsonutil"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
@@ -222,4 +224,36 @@ func TestRetryFailedCallbacks(t *testing.T) {
 	require.Equal(t, models.CallbackRunStatusSucceeded, callbackRuns[1].Status)
 	require.Empty(t, callbackRuns[1].Error)
 	require.NotNil(t, callbackRuns[1].CompletedAt)
+}
+
+func TestRetryPolicyPreservesBudgetAndCancellation(t *testing.T) {
+	old := db.BusyRetryBackoffs
+	db.BusyRetryBackoffs = []time.Duration{0, 0}
+	t.Cleanup(func() { db.BusyRetryBackoffs = old })
+	busy := errors.New("database is locked")
+	calls := 0
+	require.ErrorIs(t, withAttemptContentionRetry(context.Background(), func() error { calls++; return busy }), busy)
+	require.Equal(t, 3, calls)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	calls = 0
+	require.ErrorIs(t, withAttemptContentionRetry(ctx, func() error { calls++; return nil }), context.Canceled)
+	require.Zero(t, calls)
+	db.BusyRetryBackoffs = []time.Duration{time.Hour}
+	ctx, cancel = context.WithCancel(context.Background())
+	defer cancel()
+	calls = 0
+	require.ErrorIs(t, withAttemptContentionRetry(ctx, func() error { calls++; cancel(); return busy }), context.Canceled)
+	require.Equal(t, 1, calls)
+	calls = 0
+	other := errors.New("syntax error")
+	require.ErrorIs(t, withAttemptContentionRetry(context.Background(), func() error { calls++; return other }), other)
+	require.Equal(t, 1, calls)
+}
+
+func TestCallbackRetryNormalizesNilContext(t *testing.T) {
+	calls := 0
+	//nolint:staticcheck // Characterize the documented nil-context normalization.
+	require.NoError(t, withAttemptContentionRetry(nil, func() error { calls++; return nil }))
+	require.Equal(t, 1, calls)
 }

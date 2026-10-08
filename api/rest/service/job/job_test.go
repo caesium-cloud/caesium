@@ -5,27 +5,17 @@ import (
 	"testing"
 	"time"
 
+	jobdeftestutil "github.com/caesium-cloud/caesium/internal/jobdef/testutil"
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/caesium-cloud/caesium/pkg/jsonmap"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
-	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 )
 
-func openTestDB(t *testing.T) *gorm.DB {
-	t.Helper()
-	db, err := gorm.Open(sqlite.Open("file:"+uuid.NewString()+"?mode=memory&cache=shared"), &gorm.Config{})
-	require.NoError(t, err)
-	require.NoError(t, db.AutoMigrate(models.All...))
-	sqlDB, err := db.DB()
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = sqlDB.Close() })
-	return db
-}
-
 func TestCreatePersistsMetadata(t *testing.T) {
-	db := openTestDB(t)
+	db := jobdeftestutil.OpenTestDB(t)
+	t.Cleanup(func() { jobdeftestutil.CloseDB(db) })
 	svc := &jobService{ctx: context.Background(), db: db}
 
 	req := &CreateRequest{
@@ -51,7 +41,8 @@ func TestJSONMapFromStringMapHandlesNil(t *testing.T) {
 }
 
 func TestSetPausedPausesJob(t *testing.T) {
-	db := openTestDB(t)
+	db := jobdeftestutil.OpenTestDB(t)
+	t.Cleanup(func() { jobdeftestutil.CloseDB(db) })
 	svc := &jobService{ctx: context.Background(), db: db}
 
 	created, err := svc.Create(&CreateRequest{TriggerID: uuid.New(), Alias: "pause-test"})
@@ -68,7 +59,8 @@ func TestSetPausedPausesJob(t *testing.T) {
 }
 
 func TestSetPausedUnpausesJob(t *testing.T) {
-	db := openTestDB(t)
+	db := jobdeftestutil.OpenTestDB(t)
+	t.Cleanup(func() { jobdeftestutil.CloseDB(db) })
 	svc := &jobService{ctx: context.Background(), db: db}
 
 	created, err := svc.Create(&CreateRequest{TriggerID: uuid.New(), Alias: "unpause-test"})
@@ -87,7 +79,8 @@ func TestSetPausedUnpausesJob(t *testing.T) {
 }
 
 func TestSetPausedNotFoundReturnsError(t *testing.T) {
-	db := openTestDB(t)
+	db := jobdeftestutil.OpenTestDB(t)
+	t.Cleanup(func() { jobdeftestutil.CloseDB(db) })
 	svc := &jobService{ctx: context.Background(), db: db}
 
 	_, err := svc.SetPaused(uuid.New(), true)
@@ -100,7 +93,8 @@ func TestSetPausedNotFoundReturnsError(t *testing.T) {
 // see. A live claim is visible too but not stale, and an unclaimed row is
 // plainly pending.
 func TestQueueAnnotatesClaimStateInsteadOfHidingClaimedRows(t *testing.T) {
-	db := openTestDB(t)
+	db := jobdeftestutil.OpenTestDB(t)
+	t.Cleanup(func() { jobdeftestutil.CloseDB(db) })
 	svc := &jobService{ctx: context.Background(), db: db}
 
 	job, err := svc.Create(&CreateRequest{TriggerID: uuid.New(), Alias: "queue-claim-state"})
@@ -159,7 +153,8 @@ func TestQueueAnnotatesClaimStateInsteadOfHidingClaimedRows(t *testing.T) {
 }
 
 func TestQueueOfJobWithNoQueuedRunsIsEmpty(t *testing.T) {
-	db := openTestDB(t)
+	db := jobdeftestutil.OpenTestDB(t)
+	t.Cleanup(func() { jobdeftestutil.CloseDB(db) })
 	svc := &jobService{ctx: context.Background(), db: db}
 
 	job, err := svc.Create(&CreateRequest{TriggerID: uuid.New(), Alias: "queue-empty"})
@@ -171,7 +166,8 @@ func TestQueueOfJobWithNoQueuedRunsIsEmpty(t *testing.T) {
 }
 
 func TestListFiltersByAliases(t *testing.T) {
-	db := openTestDB(t)
+	db := jobdeftestutil.OpenTestDB(t)
+	t.Cleanup(func() { jobdeftestutil.CloseDB(db) })
 	svc := &jobService{ctx: context.Background(), db: db}
 
 	_, err := svc.Create(&CreateRequest{TriggerID: uuid.New(), Alias: "alpha"})
@@ -186,7 +182,8 @@ func TestListFiltersByAliases(t *testing.T) {
 }
 
 func TestDeleteSoftDeletesOwningTrigger(t *testing.T) {
-	db := openTestDB(t)
+	db := jobdeftestutil.OpenTestDB(t)
+	t.Cleanup(func() { jobdeftestutil.CloseDB(db) })
 	svc := &jobService{ctx: context.Background(), db: db}
 
 	trigger := &models.Trigger{
@@ -208,14 +205,16 @@ func TestDeleteSoftDeletesOwningTrigger(t *testing.T) {
 }
 
 func TestDeleteMissingJobIsIdempotent(t *testing.T) {
-	db := openTestDB(t)
+	db := jobdeftestutil.OpenTestDB(t)
+	t.Cleanup(func() { jobdeftestutil.CloseDB(db) })
 	svc := ServiceWithDatabase(context.Background(), db)
 
 	require.NoError(t, svc.Delete(uuid.New()))
 }
 
 func TestDeleteSharedTriggerKeepsUntilLastJob(t *testing.T) {
-	db := openTestDB(t)
+	db := jobdeftestutil.OpenTestDB(t)
+	t.Cleanup(func() { jobdeftestutil.CloseDB(db) })
 	svc := ServiceWithDatabase(context.Background(), db)
 
 	trigger := &models.Trigger{

@@ -29,6 +29,7 @@ var (
 // Cmd is the top-level dev command.
 var Cmd = &cobra.Command{
 	Use:   "dev",
+	Args:  cobra.NoArgs,
 	Short: "Watch YAML files and run DAGs locally on change",
 	Long:  "Parses job definitions, executes the DAG via the local container runtime, and re-runs on file changes.",
 	RunE:  runDev,

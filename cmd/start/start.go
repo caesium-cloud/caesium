@@ -41,6 +41,7 @@ import (
 	"github.com/caesium-cloud/caesium/internal/notification"
 	"github.com/caesium-cloud/caesium/internal/ratelimit"
 	"github.com/caesium-cloud/caesium/internal/run"
+	"github.com/caesium-cloud/caesium/internal/runlife"
 	"github.com/caesium-cloud/caesium/internal/runqueue"
 	triggerevent "github.com/caesium-cloud/caesium/internal/trigger/event"
 	triggerhttp "github.com/caesium-cloud/caesium/internal/trigger/http"
@@ -92,9 +93,8 @@ var derivedRunRetryBackoffs = []time.Duration{
 // startRun → admit seam cron, HTTP, event and manual runs use) but cannot
 // execute it itself: internal/job depends on internal/freshness, so the
 // executor is injected here. This mirrors the run-queue dequeuer's launch path
-// and the manual-run controller: register nothing extra, hand the run id to
-// internal/job through the run context, and let job.Run build and dispatch the
-// DAG (it registers the run-cancel entry itself).
+// and the manual-run controller: reserve owned work, register cancellation
+// before lookup, and hand the run id to job.Run to build and dispatch the DAG.
 func freshnessRunLauncher(store *run.Store) freshness.RunLauncher {
 	return newFreshnessRunLauncher(
 		store,
@@ -135,9 +135,34 @@ func newFreshnessRunLauncher(
 		// context and the DAG would start anyway. This is the same reason the
 		// other kickoff sites register: to close the gap between the run row
 		// existing and Run being entered (internal/job/job.go).
-		cancelCtx, releaseCancel := job.RegisterRunCancel(context.WithoutCancel(ctx), r.ID)
+		workCtx, releaseWork, err := freshness.TakeRunReservation(ctx)
+		if errors.Is(err, freshness.ErrNoRunReservation) {
+			owner := runlife.FromContext(ctx)
+			workCtx, releaseWork, err = owner.Reserve(ctx)
+			if err != nil {
+				if errors.Is(err, runlife.ErrClosed) && errors.Is(owner.Cause(), runlife.ErrServerShutdown) {
+					log.Info("freshness: shutdown refused execution ownership; leaving admitted run for takeover", "run_id", r.ID)
+					return
+				}
+				// This direct caller already admitted the row but acquired no
+				// execution ownership. Settle that exact row without dispatch.
+				cause := fmt.Errorf("freshness: derived run submission refused: %w", err)
+				if _, completeErr := store.CompleteIfActive(r.ID, cause); completeErr != nil {
+					log.Error("freshness: refused derived run could not be finalized; leaving it for an operator",
+						"job_id", r.JobID, "run_id", r.ID, "error", completeErr)
+				}
+			}
+		}
+		if err != nil {
+			// A consumed evaluator token may be a duplicate invocation while
+			// the first launcher still owns execution. Never finalize its run.
+			log.Warn("freshness: derived run submission refused", "run_id", r.ID, "error", err)
+			return
+		}
+		cancelCtx, releaseCancel := job.RegisterRunCancel(workCtx, r.ID)
 		runCtx := run.WithContext(cancelCtx, r.ID)
 		go func() {
+			defer releaseWork()
 			defer releaseCancel()
 			launchDerivedRun(runCtx, store, r, loadJob, execute)
 		}()
@@ -152,8 +177,14 @@ func launchDerivedRun(
 	loadJob func(context.Context, uuid.UUID) (*models.Job, error),
 	execute func(context.Context, *models.Job, *run.JobRun) error,
 ) {
+	if errors.Is(runlife.CancellationCause(ctx), runlife.ErrServerShutdown) {
+		return
+	}
 	j, err := loadDerivedRunJob(ctx, r.JobID, loadJob)
 	if err != nil {
+		if errors.Is(runlife.CancellationCause(ctx), runlife.ErrServerShutdown) {
+			return
+		}
 		// The run row and its `derived` audit are already committed. job.Run —
 		// whose aborted-resume finalizer would normally terminalize a run that
 		// never reached an engine — is never entered on this path, so a bare
@@ -171,6 +202,9 @@ func launchDerivedRun(
 		}
 		return
 	}
+	if errors.Is(runlife.CancellationCause(ctx), runlife.ErrServerShutdown) {
+		return
+	}
 	// Fence before the engine: the run may have been cancelled or replaced while
 	// the lookup ran. job.Run resolves a run id from the context without
 	// checking its status, and RegisterTasks has no parent-status guard, so
@@ -179,10 +213,20 @@ func launchDerivedRun(
 	// its side effects first.
 	switch verdict, reason := derivedRunFence(ctx, store, r); verdict {
 	case fenceStop:
+		if ctx.Err() != nil {
+			cause := fmt.Errorf("freshness: derived execution canceled before dispatch: %w", context.Cause(ctx))
+			if _, completeErr := store.CompleteIfActive(r.ID, cause); completeErr != nil {
+				log.Error("freshness: canceled derived run could not be finalized; leaving it for an operator",
+					"job_id", r.JobID, "run_id", r.ID, "error", completeErr)
+			}
+		}
 		log.Info("freshness: derived run is no longer launchable; not executing",
 			"job_id", r.JobID, "run_id", r.ID, "reason", reason)
 		return
 	case fenceUnresolved:
+		if errors.Is(runlife.CancellationCause(ctx), runlife.ErrServerShutdown) {
+			return
+		}
 		// Fail CLOSED. A cancellation that landed before this launcher
 		// registered is visible only in the row, so an unreadable status cannot
 		// be read as "still active" — that is precisely the case where
@@ -304,6 +348,7 @@ var (
 	// Cmd is the start command.
 	Cmd = &cobra.Command{
 		Use:        usage,
+		Args:       cobra.NoArgs,
 		Short:      short,
 		Long:       long,
 		Aliases:    []string{"s"},
@@ -329,9 +374,12 @@ func start(cmd *cobra.Command, args []string) error {
 	}
 
 	ctx, cancelFunc := context.WithCancel(context.Background())
+	supervisor := runlife.New(context.WithoutCancel(ctx))
+	ctx = runlife.WithSupervisor(ctx, supervisor)
 	var internalSrv *dispatch.InternalServer
 	shutdownCoordinator := newShutdownCoordinator(shutdownConfig{
 		cancel:      cancelFunc,
+		supervisor:  supervisor,
 		gracePeriod: vars.ShutdownGracePeriod,
 		internalShutdown: func(ctx context.Context) error {
 			if internalSrv == nil {

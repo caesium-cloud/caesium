@@ -3,6 +3,7 @@ package job
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -11,6 +12,7 @@ import (
 	"github.com/caesium-cloud/caesium/internal/metrics"
 	"github.com/caesium-cloud/caesium/internal/models"
 	runstore "github.com/caesium-cloud/caesium/internal/run"
+	"github.com/caesium-cloud/caesium/internal/runlife"
 	"github.com/caesium-cloud/caesium/pkg/log"
 	"github.com/google/uuid"
 	"github.com/robfig/cron"
@@ -74,8 +76,8 @@ func EnumerateLogicalDates(schedule cron.Schedule, start, end time.Time, loc *ti
 //	"none"   — skip dates that have any existing run
 //	"failed" — skip dates whose latest run succeeded
 //	"all"    — keep all dates
-func FilterDates(store *backfillstore.Store, jobID uuid.UUID, dates []time.Time, reprocess string) ([]time.Time, error) {
-	if reprocess == string(models.ReprocessAll) {
+func FilterDates(store *backfillstore.Store, jobID uuid.UUID, dates []time.Time, reprocess models.ReprocessPolicy) ([]time.Time, error) {
+	if reprocess == models.ReprocessAll {
 		return dates, nil
 	}
 
@@ -88,11 +90,11 @@ func FilterDates(store *backfillstore.Store, jobID uuid.UUID, dates []time.Time,
 		}
 
 		switch reprocess {
-		case string(models.ReprocessNone):
+		case models.ReprocessNone:
 			if status != "" {
 				continue
 			}
-		case string(models.ReprocessFailed):
+		case models.ReprocessFailed:
 			if status == "succeeded" {
 				continue
 			}
@@ -161,7 +163,8 @@ func waitForBackfillSlot(
 // with a semaphore controlling max concurrency.
 //
 // It honours ctx cancellation: when cancelled, no new runs are started but
-// any in-flight runs are allowed to finish.
+// any in-flight runs are allowed to finish. Server lifetime cancellation still
+// reaches those independently reserved child runs.
 func RunBackfill(
 	ctx context.Context,
 	b *models.Backfill,
@@ -169,9 +172,19 @@ func RunBackfill(
 	schedule cron.Schedule,
 	loc *time.Location,
 ) {
-	bStore := backfillstore.Default()
-	rStore := runstore.Default()
+	runBackfill(ctx, b, j, schedule, loc, backfillstore.Default(), runstore.Default(), func(ctx context.Context, j *models.Job, params map[string]string) error {
+		return New(j, WithTriggerID(nil), WithParams(params)).Run(ctx)
+	})
+}
 
+// runBackfill keeps driver/store ownership in one lexical scope. Execution is
+// injected privately so lifecycle tests exercise the real enumeration and joins.
+func runBackfill(ctx context.Context, b *models.Backfill, j *models.Job, schedule cron.Schedule, loc *time.Location,
+	bStore *backfillstore.Store, rStore *runstore.Store, execute func(context.Context, *models.Job, map[string]string) error) {
+
+	if serverShutdown(ctx) {
+		return
+	}
 	metrics.BackfillsActive.WithLabelValues(j.Alias).Inc()
 	defer metrics.BackfillsActive.WithLabelValues(j.Alias).Dec()
 
@@ -180,12 +193,18 @@ func RunBackfill(
 	filtered, err := FilterDates(bStore, b.JobID, dates, b.Reprocess)
 	if err != nil {
 		log.Error("backfill: failed to filter dates", "backfill_id", b.ID, "error", err)
+		if serverShutdown(ctx) {
+			return
+		}
 		if completeErr := bStore.Complete(b.ID, true); completeErr != nil {
 			log.Error("backfill: failed to mark failed", "backfill_id", b.ID, "error", completeErr)
 		}
 		return
 	}
 
+	if serverShutdown(ctx) {
+		return
+	}
 	if err := bStore.SetTotalRuns(b.ID, len(filtered)); err != nil {
 		log.Error("backfill: failed to set total_runs", "backfill_id", b.ID, "error", err)
 	}
@@ -273,9 +292,34 @@ func RunBackfill(
 		logicalDate := d.UTC().Format(time.RFC3339)
 		params := map[string]string{"logical_date": logicalDate}
 
-		r, err := rStore.StartForBackfill(j.ID, b.ID, params)
+		workCtx, releaseWork, err := reserveLocalChild(ctx)
 		if err != nil {
 			sem.Release(1)
+			cancelled = true
+			log.Info("backfill: child submission refused", "backfill_id", b.ID, "logical_date", logicalDate, "error", err)
+			break
+		}
+		r, err := rStore.StartForBackfill(j.ID, b.ID, params)
+		if err != nil {
+			// A failed readback can follow a committed insertion. Responsibility
+			// for that exact row stays reserved until conditional finalization.
+			if committedID, ok := runstore.CommittedRunID(err); ok {
+				cause := fmt.Errorf("backfill: committed child admission failed: %w", err)
+				if serverShutdown(workCtx) {
+					cause = runlife.ErrServerShutdown
+				}
+				// CompleteIfActive owns bounded retries for transient store contention.
+				if _, completeErr := rStore.CompleteIfActive(committedID, cause); completeErr != nil {
+					log.Error("backfill: committed child could not be finalized; leaving it for an operator",
+						"backfill_id", b.ID, "run_id", committedID, "error", completeErr)
+				}
+			}
+			releaseWork()
+			sem.Release(1)
+			if serverShutdown(ctx) {
+				cancelled = true
+				break
+			}
 			if backfillDateOutcome(err) == backfillDateSkipped {
 				log.Warn("backfill: date skipped by admission policy",
 					"backfill_id", b.ID, "logical_date", logicalDate,
@@ -289,6 +333,14 @@ func RunBackfill(
 			continue
 		}
 
+		if r == nil {
+			releaseWork()
+			sem.Release(1)
+			skipCount.Add(1)
+			metrics.BackfillRunsTotal.WithLabelValues(j.Alias, backfillDateSkipped).Inc()
+			continue
+		}
+		cancelCtx, releaseCancel := RegisterRunCancel(workCtx, r.ID)
 		metrics.BackfillRunsTotal.WithLabelValues(j.Alias, backfillDateStarted).Inc()
 
 		wg.Add(1)
@@ -296,13 +348,16 @@ func RunBackfill(
 		go func(id uuid.UUID, ld string) {
 			defer wg.Done()
 			defer sem.Release(1)
+			defer releaseWork()
+			defer releaseCancel()
 
 			// Each backfill run is independently cancellable: cancelling one of
 			// them must stop that run's container, not the whole backfill.
-			cancelCtx, release := RegisterRunCancel(context.Background(), id)
-			defer release()
 			runCtx := runstore.WithContext(cancelCtx, id)
-			runErr := New(j, WithTriggerID(nil), WithParams(params)).Run(runCtx)
+			runErr := execute(runCtx, j, params)
+			if runErr != nil && serverShutdown(runCtx) {
+				return // The durable child remains owned by recovery, not a failed date.
+			}
 			if runErr != nil {
 				log.Error("backfill: run failed", "backfill_id", b.ID, "logical_date", ld, "run_id", id, "error", runErr)
 				metrics.BackfillRunsTotal.WithLabelValues(j.Alias, backfillDateFailed).Inc()
@@ -321,6 +376,10 @@ func RunBackfill(
 	// finishes.
 	close(flushStop)
 	<-flusherDone
+
+	if serverShutdown(ctx) {
+		return // Keep driver status/progress available for restart or takeover.
+	}
 
 	if cancelled {
 		// Mark terminal cancellation only after the backfill has stopped

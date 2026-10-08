@@ -69,28 +69,13 @@ func (c *Capturer) Start(ctx context.Context) error {
 
 // StartWithReady is Start with a readiness signal for deterministic tests.
 func (c *Capturer) StartWithReady(ctx context.Context, ready chan<- struct{}) error {
-	ch, err := c.bus.Subscribe(ctx, event.Filter{Types: []event.Type{
+	return event.RunSubscription(ctx, c.bus, event.Filter{Types: []event.Type{
 		event.TypeRunCompleted,
-	}})
-	if err != nil {
-		return err
-	}
-	if ready != nil {
-		close(ready)
-	}
-	for {
-		select {
-		case <-ctx.Done():
-			return nil
-		case evt, ok := <-ch:
-			if !ok {
-				return nil
-			}
-			if evt.Type == event.TypeRunCompleted {
-				c.handleRunCompleted(ctx, evt)
-			}
+	}}, ready, func(evt event.Event) {
+		if evt.Type == event.TypeRunCompleted {
+			c.handleRunCompleted(ctx, evt)
 		}
-	}
+	}, nil)
 }
 
 // handleRunCompleted is the per-event capture. run_completed fires only for a
@@ -203,20 +188,7 @@ func (c *Capturer) handleRunCompleted(ctx context.Context, evt event.Event) {
 // watermark moved, so it can reactively re-derive downstream consumers off
 // post-advance state. Payload carries the {namespace, name} dataset identity.
 func (c *Capturer) publishDatasetAdvanced(namespace *string, name string, jobID, runID uuid.UUID) {
-	if c.bus == nil {
-		return
-	}
-	payload, _ := json.Marshal(map[string]any{
-		"namespace": nsValue(namespace),
-		"name":      name,
-	})
-	c.bus.Publish(event.Event{
-		Type:      event.TypeDatasetAdvanced,
-		JobID:     jobID,
-		RunID:     runID,
-		Timestamp: time.Now().UTC(),
-		Payload:   payload,
-	})
+	publishDatasetAdvanced(c.bus, namespace, name, jobID, runID)
 }
 
 // capturedRun is the job_runs projection the completion path needs: whether the
@@ -353,8 +325,8 @@ func (c *Capturer) stepOutputs(ctx context.Context, runID uuid.UUID) (map[string
 	return out, nil
 }
 
-// consumedSnapshot reads the current watermark of every consumed dataset in a
-// single query (no per-name N+1), keyed on the nil→"" namespace mapping.
+// consumedSnapshot reads the current watermark of every consumed dataset through
+// bounded batch queries (no per-name N+1), keyed on the nil→"" namespace mapping.
 //
 // It is a point-in-time read of whenever it is called: StartParamsEnricher calls
 // it to freeze the run's input view at creation, and consumedForRun calls it
@@ -366,32 +338,20 @@ func (c *Capturer) stepOutputs(ctx context.Context, runID uuid.UUID) (map[string
 // means the view is UNKNOWN. Returning nil for both is what let a transient read
 // failure be written down as an authoritative empty view.
 func consumedSnapshot(ctx context.Context, db *gorm.DB, namespace *string, names []string) (map[string]string, error) {
-	if len(names) == 0 {
-		return nil, nil
+	ids := make([]datasetIdentity, 0, len(names))
+	for _, name := range names {
+		ids = append(ids, datasetIdentity{namespace: nsValue(namespace), name: name})
 	}
-	// Dedupe before the IN query.
-	seen := make(map[string]struct{}, len(names))
-	uniq := make([]string, 0, len(names))
-	for _, n := range names {
-		if _, dup := seen[n]; dup {
-			continue
-		}
-		seen[n] = struct{}{}
-		uniq = append(uniq, n)
-	}
-
-	var rows []models.DatasetState
-	if err := db.WithContext(ctx).
-		Where("namespace = ? AND name IN ?", nsValue(namespace), uniq).
-		Find(&rows).Error; err != nil {
+	rows, err := NewStore(db).getMany(ctx, ids)
+	if err != nil {
 		return nil, err
 	}
 	if len(rows) == 0 {
 		return nil, nil
 	}
 	snapshot := make(map[string]string, len(rows))
-	for i := range rows {
-		snapshot[rows[i].Name] = rows[i].Watermark
+	for id, row := range rows {
+		snapshot[id.name] = row.Watermark
 	}
 	return snapshot, nil
 }

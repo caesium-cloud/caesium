@@ -8,6 +8,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/caesium-cloud/caesium/internal/models"
+	runstorage "github.com/caesium-cloud/caesium/internal/run"
+	"github.com/caesium-cloud/caesium/internal/runlife"
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v5"
 	"github.com/stretchr/testify/require"
@@ -49,5 +52,30 @@ func TestPostRunRejectsSchedulerParamsBeforeStartingRun(t *testing.T) {
 			require.Contains(t, err.Error(), key)
 			require.NotContains(t, err.Error(), "private-value")
 		})
+	}
+}
+
+func TestManualRunRefusesMissingOrClosedOwnerBeforeMutation(t *testing.T) {
+	oldJob, oldStart := postGetJob, postStartRun
+	t.Cleanup(func() { postGetJob, postStartRun = oldJob, oldStart })
+	jobID := uuid.New()
+	postGetJob = func(context.Context, uuid.UUID) (*models.Job, error) { return &models.Job{ID: jobID}, nil }
+	mutated := false
+	postStartRun = func(context.Context, uuid.UUID, ...runstorage.StartOption) (runstorage.StartResult, error) {
+		mutated = true
+		return runstorage.StartResult{}, nil
+	}
+	owner := runlife.New(context.Background())
+	owner.CloseAndCancel()
+	for _, ctx := range []context.Context{context.Background(), runlife.WithSupervisor(context.Background(), owner)} {
+		e := echo.New()
+		req := httptest.NewRequestWithContext(ctx, http.MethodPost, "/", strings.NewReader(""))
+		req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
+		c := e.NewContext(req, httptest.NewRecorder())
+		c.SetPathValues(echo.PathValues{{Name: "id", Value: jobID.String()}})
+		var he *echo.HTTPError
+		require.ErrorAs(t, Post(c), &he)
+		require.Equal(t, 503, he.Code)
+		require.False(t, mutated)
 	}
 }

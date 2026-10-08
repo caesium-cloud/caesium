@@ -247,7 +247,7 @@ jobs:
 
   ci-config:
     runs-on: ubuntu-24.04
-    timeout-minutes: 5
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v6
       - uses: taiki-e/install-action@just
@@ -577,6 +577,8 @@ jobs:
           name: reagent-toolchain-amd64
       - name: Unit tests
         run: just tag=${{ env.IMAGE_TAG }}-amd64 unit-test
+      - name: Hermetic integration-tagged unit tests
+        run: just tag=${{ env.IMAGE_TAG }}-amd64 tagged-unit-test
       - name: Reagents unit tests
         run: just tag=${{ env.IMAGE_TAG }}-amd64 reagents-test
 
@@ -593,6 +595,8 @@ jobs:
           name: builder-arm64
       - name: Unit tests (arm64)
         run: just tag=${{ env.IMAGE_TAG }}-arm64 unit-test
+      - name: Hermetic integration-tagged unit tests (arm64)
+        run: just tag=${{ env.IMAGE_TAG }}-arm64 tagged-unit-test
 
   ui-test:
     needs: [changes]
@@ -1480,13 +1484,21 @@ jobs:
         run: just tag=${{ env.IMAGE_TAG }}-amd64 robustness-test
       - name: Validate scenario evidence
         run: just tag=${{ env.IMAGE_TAG }}-amd64 check-evidence
-      - name: Upload scenario evidence
+      - name: Redact robustness evidence before upload
+        id: redact_robustness_evidence
         if: always()
+        run: |
+          if [[ -e .tmp/evidence/robustness || -L .tmp/evidence/robustness ]]; then
+            python3 scripts/collect-evidence.py redact --artifacts .tmp/evidence/robustness
+          else
+            echo "No robustness artifact directory was produced; no robustness logs to redact."
+          fi
+      - name: Upload scenario evidence
+        if: always() && steps.redact_robustness_evidence.outcome == 'success'
         uses: actions/upload-artifact@v7
         with:
           name: early-evidence
-          # The lane redacts its generated internal token and kubeconfigs
-          # before this step; see `just robustness-test`.
+          # A failed lane may upload diagnostics only after mandatory redaction.
           path: .tmp/evidence/
           if-no-files-found: error
           retention-days: 7
@@ -1704,7 +1716,346 @@ jobs:
           echo "diff base $base; $(wc -l <.tmp/coverage-diff/changed-paths.txt) changed Go path(s)"
           echo "CAESIUM_COVERAGE_DIFF_BASE=$base" >>"$GITHUB_ENV"
           echo "CAESIUM_COVERAGE_CHANGED_PATHS=$PWD/.tmp/coverage-diff/changed-paths.txt" >>"$GITHUB_ENV"
+      - name: Backend journey tools
+        run: |
+          set -euo pipefail
+          tools="$RUNNER_TEMP/coverage-tools"
+          mkdir -p "$tools"
+          curl -fsSL https://kind.sigs.k8s.io/dl/v0.33.0/kind-linux-amd64 -o "$tools/kind"
+          echo "aee6151561422756b764a4ae28e7f44cda5af5a9eead3cc9985112b1de8d8e0d  $tools/kind" | sha256sum -c -
+          curl -fsSL https://dl.k8s.io/release/v1.36.1/bin/linux/amd64/kubectl -o "$tools/kubectl"
+          echo "629d3f410e09bf49b64ae7079f7f0bda1191efed311f7d37fdbab0ad5b0ec2b7  $tools/kubectl" | sha256sum -c -
+          chmod +x "$tools/kind" "$tools/kubectl"
+          echo "$tools" >>"$GITHUB_PATH"
+      - name: Pin isolated backend prerequisites
+        run: |
+          set -euo pipefail
+          prereqs="$PWD/.tmp/coverage-backends"
+          mkdir -p "$prereqs"
+          python3 - "$prereqs" <<'PY'
+          import datetime, hashlib, json, pathlib, re, runpy, shutil, signal, subprocess, sys, tarfile, time
+          import urllib.error, urllib.parse, urllib.request
+          root = pathlib.Path(sys.argv[1]).resolve()
+          archive = root / 'task.tar'
+          proof = root / 'proof'
+          proof.mkdir()
+          kind_image_ref = 'kindest/node:v1.36.1'
+          kind_image_supplier_ref = 'kindest/node:v1.36.1@sha256:3489c7674813ba5d8b1a9977baea8a6e553784dab7b84759d1014dbd78f7ebd5'
+          task_image_ref = 'alpine:3.23'
+          task_image_supplier_ref = 'docker.io/library/alpine:3.23@sha256:85fe1e81d6758c208f3e1eed4338a1997e19d4be002d4dd32d3100c9a8c010a0'
+          def image(ref, observed=None):
+              images = json.loads(subprocess.check_output(['docker', 'image', 'inspect', ref], text=True))
+              if observed is not None:
+                  observed['docker_inspect_count'] = len(images)
+                  if len(images) == 1:
+                      observed.update(docker_image_id=images[0].get('Id'), docker_repo_digests=images[0].get('RepoDigests'),
+                                      docker_os=images[0].get('Os'), docker_architecture=images[0].get('Architecture'),
+                                      loaded_image_observed=isinstance(images[0].get('Id'), str) and bool(
+                                          re.fullmatch(r'sha256:[0-9a-f]{64}', images[0]['Id'])))
+                  podman_proof()
+              assert len(images) == 1, 'ambiguous backend prerequisite image'
+              image = images[0]
+              assert image['Os'] == 'linux' and image['Architecture'] == 'amd64', 'backend prerequisite platform mismatch'
+              return image
+          def inspect(ref):
+              return image(ref)['Id']
+          def metadata(ref, expected, name):
+              raw = subprocess.check_output(['docker', 'buildx', 'imagetools', 'inspect', ref, '--raw'])
+              # buildx may append one CLI newline to the immutable registry bytes.
+              if 'sha256:' + hashlib.sha256(raw).hexdigest() != expected and raw.endswith(b'\n'):
+                  raw = raw[:-1]
+              assert 'sha256:' + hashlib.sha256(raw).hexdigest() == expected, 'registry metadata digest mismatch'
+              value = json.loads(raw)
+              (proof / name).write_bytes(raw)
+              return value
+          # Discover this version once, then bind acquisition to immutable bytes.
+          podman_source = 'quay.io/podman/stable:v5.8.7'
+          podman_repository = 'quay.io/podman/stable'
+          cap = 256 * 1024
+          index_type = 'application/vnd.oci.image.index.v1+json'
+          manifest_type = 'application/vnd.oci.image.manifest.v1+json'
+          config_type = 'application/vnd.oci.image.config.v1+json'
+          podman_receipt = {
+              'schema_version': 1, 'discovery_ref': podman_source, 'declared_version_policy': '5.8.7',
+              'observed_at': datetime.datetime.now(datetime.timezone.utc).isoformat(),
+              'platform': 'linux/amd64', 'response_cap_bytes': cap, 'request_timeout_seconds': 10,
+              'response_deadline_seconds': 30, 'request_count': 0, 'outcome': 'resolving', 'phase': 'auth', 'loaded_image_observed': False,
+          }
+          def podman_proof():
+              (proof / 'podman-service-receipt.json').write_text(json.dumps(podman_receipt, indent=2) + '\n')
+          class NoRedirect(urllib.request.HTTPRedirectHandler):
+              def redirect_request(self, req, fp, code, msg, headers, newurl):
+                  return None
+          opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
+          def metadata_deadline(signum, frame):
+              raise TimeoutError('registry metadata wall deadline exceeded')
+          def fetch(url, token=None, config_redirect=False, deadline=None):
+              if deadline is None:
+                  # A socket timeout only limits inactivity: trickled headers or
+                  # buffered reads can otherwise block forever. Bound the whole
+                  # request, including a config redirect, with one POSIX wall timer.
+                  started = time.monotonic()
+                  previous_handler = signal.getsignal(signal.SIGALRM)
+                  previous_timer = signal.setitimer(signal.ITIMER_REAL, 0)
+                  try:
+                      signal.signal(signal.SIGALRM, metadata_deadline)
+                      seconds = min(30, previous_timer[0]) if previous_timer[0] else 30
+                      signal.setitimer(signal.ITIMER_REAL, seconds)
+                      return fetch(url, token, config_redirect, deadline=started + seconds)
+                  finally:
+                      signal.setitimer(signal.ITIMER_REAL, 0)
+                      signal.signal(signal.SIGALRM, previous_handler)
+                      if previous_timer[0]:
+                          remaining = max(0.000001, previous_timer[0] - (time.monotonic() - started))
+                          signal.setitimer(signal.ITIMER_REAL, remaining, previous_timer[1])
+              headers = {'Accept': ', '.join((index_type, manifest_type, config_type, 'application/json')),
+                         'Accept-Encoding': 'identity'}
+              if token:
+                  headers['Authorization'] = 'Bearer ' + token
+              podman_receipt['request_count'] += 1
+              try:
+                  response = opener.open(urllib.request.Request(url, headers=headers), timeout=10)
+              except urllib.error.HTTPError as error:
+                  response = error
+              with response:
+                  if config_redirect and response.code in (302, 307):
+                      location = response.headers.get('Location', '')
+                      assert len(location) <= 8192, 'config redirect exceeds cap'
+                      destination = urllib.parse.urlsplit(location)
+                      assert (destination.scheme == 'https' and destination.username is None
+                              and destination.password is None and destination.port in (None, 443)
+                              and re.fullmatch(r'cdn[0-9]{2}\.quay\.io', destination.hostname or '')), 'foreign config redirect'
+                      # Only the descriptor-bound config may redirect. Never forward its bearer.
+                      return fetch(location, deadline=deadline)
+                  assert response.code == 200, 'registry metadata unavailable'
+                  assert response.headers.get('Content-Encoding', 'identity') == 'identity', 'encoded registry metadata'
+                  length = response.headers.get('Content-Length')
+                  if length is not None:
+                      assert re.fullmatch(r'[0-9]+', length) and 0 < int(length) <= cap, 'metadata size exceeds cap'
+                  chunks, size = [], 0
+                  while True:
+                      assert time.monotonic() <= deadline, 'metadata response deadline exceeded'
+                      chunk = response.read(min(16384, cap + 1 - size))
+                      assert time.monotonic() <= deadline, 'metadata response deadline exceeded'
+                      if not chunk:
+                          break
+                      chunks.append(chunk)
+                      size += len(chunk)
+                      assert size <= cap, 'metadata body exceeds cap'
+                  raw = b''.join(chunks)
+                  assert length is None or len(raw) == int(length), 'incomplete metadata body'
+                  return raw, response.headers, urllib.parse.urlsplit(url).hostname == 'quay.io'
+          def digest(raw):
+              return 'sha256:' + hashlib.sha256(raw).hexdigest()
+          def descriptor(value, media):
+              assert isinstance(value, dict) and value.get('mediaType') == media, 'metadata descriptor media mismatch'
+              assert re.fullmatch(r'sha256:[0-9a-f]{64}', value.get('digest', '')), 'invalid metadata descriptor digest'
+              assert type(value.get('size')) is int and 0 < value['size'] <= cap, 'invalid metadata descriptor size'
+              return value['digest']
+          def document(raw, headers, name, media, expected=None, size=None, registry=True):
+              # Auth responses and redirect URLs are never retained. Raw image proofs
+              # must not contain the in-memory bearer or a registry redirect location.
+              assert token.encode() not in raw, 'credential in metadata body'
+              identity = digest(raw)
+              header_digest = headers.get('Docker-Content-Digest')
+              assert (not registry or header_digest is not None) and header_digest in (None, identity), 'registry digest header mismatch'
+              assert expected is None or identity == expected, 'metadata digest mismatch'
+              assert size is None or len(raw) == size, 'metadata descriptor size mismatch'
+              content_type = headers.get('Content-Type', '').split(';')[0].strip()
+              assert content_type in ((media, 'application/json', 'application/octet-stream') if media == config_type else (media,)), 'metadata response media mismatch'
+              value = json.loads(raw)
+              assert isinstance(value, dict), 'metadata object required'
+              if media != config_type:
+                  assert type(value.get('schemaVersion')) is int and value['schemaVersion'] == 2, 'metadata schema mismatch'
+                  assert value.get('mediaType') == media, 'metadata document media mismatch'
+              (proof / name).write_bytes(raw)
+              return value, identity
+          podman_proof()
+          try:
+              auth_url = 'https://quay.io/v2/auth?' + urllib.parse.urlencode({
+                  'service': 'quay.io', 'scope': 'repository:podman/stable:pull'})
+              auth_raw, _, _ = fetch(auth_url)
+              auth = json.loads(auth_raw)
+              token = auth.get('token') or auth.get('access_token')
+              assert isinstance(token, str) and token, 'registry bearer unavailable'
+              del auth, auth_raw
+              registry = 'https://quay.io/v2/podman/stable/'
+              podman_receipt['phase'] = 'discovery-index'
+              raw, headers, _ = fetch(registry + 'manifests/v5.8.7', token)
+              index, index_id = document(raw, headers, 'podman-discovery-index.json', index_type)
+              index_ref = podman_repository + '@' + index_id
+              podman_receipt.update(index_id=index_id, index_ref=index_ref)
+              podman_receipt['phase'] = 'immutable-index'
+              immutable, headers, _ = fetch(registry + 'manifests/' + index_id, token)
+              document(immutable, headers, 'podman-immutable-index.json', index_type, index_id, len(raw))
+              assert immutable == raw, 'immutable index differs from discovery'
+              manifests = index.get('manifests')
+              assert isinstance(manifests, list) and all(isinstance(entry, dict) and isinstance(entry.get('platform'), dict) for entry in manifests), 'invalid index manifest inventory'
+              children = [entry for entry in manifests if entry['platform'].get('os') == 'linux'
+                          and entry['platform'].get('architecture') == 'amd64' and entry['platform'].get('variant') in (None, '')]
+              assert len(children) == 1, 'unique exact linux/amd64 Podman manifest required'
+              child_descriptor = children[0]
+              child_id = descriptor(child_descriptor, manifest_type)
+              child_ref = podman_repository + '@' + child_id
+              podman_receipt.update(manifest_id=child_id, selected_manifest_ref=child_ref)
+              podman_receipt['phase'] = 'selected-manifest'
+              raw, headers, _ = fetch(registry + 'manifests/' + child_id, token)
+              child, _ = document(raw, headers, 'podman-amd64-manifest.json', manifest_type, child_id, child_descriptor['size'])
+              assert isinstance(child.get('layers'), list), 'manifest layers required'
+              config_descriptor = child.get('config')
+              config_id = descriptor(config_descriptor, config_type)
+              podman_receipt['config_id'] = config_id
+              podman_receipt['phase'] = 'selected-config'
+              raw, headers, from_registry = fetch(registry + 'blobs/' + config_id, token, config_redirect=True)
+              config, _ = document(raw, headers, 'podman-config.json', config_type, config_id,
+                                   config_descriptor['size'], registry=from_registry)
+              assert config.get('os') == 'linux' and config.get('architecture') == 'amd64' and config.get('variant') in (None, ''), 'Podman config platform mismatch'
+              version = (config.get('config', {}).get('Labels') or {}).get('org.opencontainers.image.version')
+              assert version == '5.8.7', 'Podman declared version mismatch'
+              podman_receipt.update(outcome='resolved', phase='immutable-pull', declared_version=version,
+                                    index_bytes=len(immutable),
+                                    manifest_bytes=child_descriptor['size'], config_bytes=config_descriptor['size'],
+                                    index_metadata='podman-discovery-index.json', immutable_index_metadata='podman-immutable-index.json',
+                                    manifest_metadata='podman-amd64-manifest.json', config_metadata='podman-config.json',
+                                    metadata_sha256={name: hashlib.sha256((proof / name).read_bytes()).hexdigest() for name in (
+                                        'podman-discovery-index.json', 'podman-immutable-index.json',
+                                        'podman-amd64-manifest.json', 'podman-config.json')})
+              podman_proof()  # Freeze the complete chain before any image pull.
+              subprocess.check_call(['docker', 'pull', '--platform', 'linux/amd64', child_ref], timeout=180)
+              podman_receipt['phase'] = 'loaded-image'
+              loaded_podman = image(child_ref, podman_receipt)
+              repo_digests = loaded_podman.get('RepoDigests') or []
+              assert len(repo_digests) == 1 and repo_digests[0] in (child_ref, index_ref), 'ambiguous or foreign Podman RepoDigest'
+              assert loaded_podman['Id'] in (index_id, child_id, config_id), 'loaded Podman identity differs from verified chain'
+              podman_receipt.update(outcome='acquired', phase='complete', docker_image_id=loaded_podman['Id'],
+                                    docker_repo_digests=repo_digests, docker_os=loaded_podman['Os'],
+                                    docker_architecture=loaded_podman['Architecture'])
+              podman_proof()
+          except Exception as error:
+              podman_receipt.update(outcome='refused', error_type=type(error).__name__)
+              podman_proof()
+              # Transport errors may contain tokens or signed URLs; retain only type/phase.
+              raise AssertionError('Podman prerequisite acquisition refused; see podman-service-receipt.json') from None
+          podman_receipt['prerequisite_phase'] = 'task-pulls'
+          try:
+              subprocess.check_call(['docker', 'pull', '--platform', 'linux/amd64', kind_image_supplier_ref])
+              subprocess.check_call(['docker', 'pull', '--platform', 'linux/amd64', task_image_supplier_ref])
+              podman_receipt['prerequisite_phase'] = 'task-metadata'
+              pulled = image(task_image_supplier_ref)
+              if task_image_ref not in (pulled.get('RepoTags') or []):
+                  subprocess.check_call(['docker', 'tag', task_image_supplier_ref, task_image_ref])
+              assert inspect(task_image_ref) == pulled['Id'], 'pinned task source does not own the preserved archive alias'
+              refs = set(pulled.get('RepoDigests') or [])
+              assert len(refs) == 1, 'ambiguous pulled task index'
+              index_ref = refs.pop()
+              validate_supplier_index_ref = runpy.run_path('scripts/coverage-backends.py')['validate_task_supplier_index_ref']
+              index_ref = validate_supplier_index_ref(index_ref, task_image_supplier_ref)
+              index = metadata(index_ref, index_ref.split('@')[1], 'task-index.json')
+              children = [entry for entry in index['manifests'] if entry.get('platform', {}).get('os') == 'linux'
+                          and entry['platform'].get('architecture') == 'amd64' and not entry['platform'].get('variant')]
+              assert len(children) == 1, 'unique exact linux/amd64 task manifest required'
+              child_id = children[0]['digest']
+              assert re.fullmatch(r'sha256:[0-9a-f]{64}', child_id), 'invalid task manifest digest'
+              child_ref = 'alpine@' + child_id
+              child = metadata(child_ref, child_id, 'task-amd64-manifest.json')
+              config_id = child['config']['digest']
+              assert re.fullmatch(r'sha256:[0-9a-f]{64}', config_id), 'invalid task config digest'
+              assert pulled['Id'] in (index_ref.split('@')[1], child_id, config_id), 'pulled task identity differs from verified index/child/config'
+              # Use the proven FROM-only BuildKit exporter rather than daemon save.
+              # No RUN, --load or tag mutation: retain the exact original config.
+              subprocess.check_call(['docker', 'pull', '--platform', 'linux/amd64', child_ref])
+              loaded = image(child_ref)
+              assert loaded['Id'] in (child_id, config_id), 'daemon task identity differs from the selected child'
+              assert inspect(task_image_ref) == pulled['Id'], 'task alias changed before export'
+              source_ref = 'docker.io/library/' + child_ref
+              dockerfile = 'FROM ' + source_ref + '\n'
+              assert not archive.exists(), 'task export archive must be fresh'
+              podman_receipt['prerequisite_phase'] = 'task-export'
+              subprocess.run(['docker', 'buildx', 'build', '--platform', 'linux/amd64', '--network', 'none',
+                              '--provenance=false', '--sbom=false', '--output', 'type=docker,dest=' + str(archive),
+                              '-t', task_image_ref, '-'], input=dockerfile, text=True, check=True, timeout=180)
+              assert archive.stat().st_size <= 64 * 1024 * 1024, 'task export exceeds retained archive cap'
+              archive_hash = hashlib.sha256(archive.read_bytes()).hexdigest()
+              shutil.copyfile(archive, proof / 'task-export-original.tar')
+              with tarfile.open(archive) as image_archive:
+                  members = image_archive.getmembers()
+                  assert len(members) <= 10000, 'task export member inventory exceeds cap'
+                  inventory = json.dumps({'archive_sha256': archive_hash, 'members': [
+                      {'name': m.name, 'type': m.type.decode('ascii'), 'size': m.size, 'linkname': m.linkname}
+                      for m in members]}, indent=2) + '\n'
+                  assert len(inventory.encode()) <= 2 * 1024 * 1024, 'task export member inventory exceeds cap'
+                  (proof / 'task-export-members.json').write_text(inventory)
+                  manifest_member = image_archive.getmember('manifest.json')
+                  assert manifest_member.isfile() and manifest_member.size <= 2 * 1024 * 1024, 'invalid task export manifest'
+                  raw_manifest = image_archive.extractfile(manifest_member).read()
+                  (proof / 'task-export-manifest.json').write_bytes(raw_manifest)
+                  manifest = json.loads(raw_manifest)
+                  assert len(manifest) == 1 and manifest[0]['RepoTags'] == [task_image_ref], 'unexpected task archive'
+                  config_member = next((m for m in members if m.name == manifest[0]['Config']), None)
+                  assert config_member is not None and config_member.isfile(), 'exported task config member unavailable'
+                  assert config_member.size == child['config']['size'], 'exported config size mismatch'
+                  config = image_archive.extractfile(config_member).read()
+                  assert 'sha256:' + hashlib.sha256(config).hexdigest() == config_id, 'exported daemon config differs from selected child'
+                  assert len(config) == child['config']['size'], 'exported config size mismatch'
+                  task_config = json.loads(config)
+                  assert task_config['os'] == 'linux' and task_config['architecture'] == 'amd64', 'exported task platform mismatch'
+              runpy.run_path('scripts/coverage-backends.py')['archive_identity'](archive, archive_hash, config_id, task_image_ref, 'amd64')
+              assert inspect(task_image_ref) == pulled['Id'], 'task alias changed during export'
+              (proof / 'task-export-receipt.json').write_text(json.dumps({
+                  'index_ref': index_ref, 'manifest_id': child_id, 'config_id': config_id,
+                  'docker_image_id': pulled['Id'], 'loaded_child_image_id': loaded['Id'],
+                  'supplier_ref': task_image_supplier_ref, 'preserved_tag_alias': task_image_ref,
+                  'exporter': 'buildkit-docker', 'mode': 'from-only-no-load', 'source_ref': source_ref, 'dockerfile_sha256': hashlib.sha256(dockerfile.encode()).hexdigest(),
+                  'platform': 'linux/amd64', 'archive_sha256': archive_hash,
+                  'index_metadata': 'task-index.json', 'manifest_metadata': 'task-amd64-manifest.json',
+                  'archive_file': 'task-export-original.tar', 'archive_members': 'task-export-members.json',
+                  'archive_manifest': 'task-export-manifest.json',
+              }, indent=2) + '\n')
+              podman_receipt['prerequisite_phase'] = 'input-write'
+              inputs = {
+                  'schema_version': 1, 'platform': 'linux/amd64',
+                  'docker_socket': '/var/run/docker.sock',
+                  'task_archive': str(archive),
+                  'task_archive_sha256': archive_hash,
+                  'task_image_ref': task_image_ref,
+                  'task_image_supplier_ref': task_image_supplier_ref,
+                  'task_image_id': config_id,
+                  'task_docker_image_id': pulled['Id'],
+                  'kind_image_ref': kind_image_ref,
+                  'kind_image_supplier_ref': kind_image_supplier_ref,
+                  'kind_image_id': inspect(kind_image_supplier_ref),
+                  'podman_service_image_ref': podman_receipt['selected_manifest_ref'],
+                  'podman_service_image_id': loaded_podman['Id'],
+                  'podman_service_provenance': json.loads((proof / 'podman-service-receipt.json').read_text()),
+                  'podman_service_proof_sha256': hashlib.sha256((proof / 'podman-service-receipt.json').read_bytes()).hexdigest(),
+                  'podman_privileged_approved': True,
+              }
+              input_path = root / 'backend-producer-inputs.json'
+              assert not input_path.exists(), 'backend producer inputs must be fresh'
+              pending = root / 'backend-producer-inputs.json.pending'
+              pending.write_text(json.dumps(inputs, indent=2) + '\n')
+              pending.replace(input_path)
+          except Exception as error:
+              podman_receipt.update(prerequisite_outcome='refused', prerequisite_error_type=type(error).__name__)
+              podman_proof()
+              raise
+          PY
+          echo "CAESIUM_COVERAGE_BACKEND_INPUTS=$prereqs/backend-producer-inputs.json" >>"$GITHUB_ENV"
+      - name: Upload backend prerequisite proof
+        if: always() && hashFiles('.tmp/coverage-backends/proof/*.json') != ''
+        uses: actions/upload-artifact@v7
+        with:
+          name: coverage-backend-prerequisites
+          path: .tmp/coverage-backends/proof/
+          if-no-files-found: error
+          retention-days: 7
+      - name: Build and verify coverage resource stress image
+        env:
+          CAESIUM_SKIP_IMAGE_BUILD: "false"
+        run: just tag=${{ env.IMAGE_TAG }}-amd64 stress-image-test
       - name: Coverage collection against the ratchets
+        env:
+          CAESIUM_RESOURCE_STRESS_IMAGE: caesiumcloud/resource-stress:${{ env.IMAGE_TAG }}-amd64
         run: just tag=${{ env.IMAGE_TAG }}-amd64 coverage-ratchets
       - name: Upload lane report
         if: always()

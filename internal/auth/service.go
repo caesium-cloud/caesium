@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/caesium-cloud/caesium/internal/dbretry"
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/caesium-cloud/caesium/pkg/log"
 	"github.com/google/uuid"
@@ -444,40 +445,32 @@ func (s *Service) tryRefreshBootstrapKey(newID uuid.UUID, prefix, hash string, n
 // "database is busy") are the only recognised retry triggers — other engines are not
 // currently supported for the bootstrap path.
 func (s *Service) withBootstrapRetry(fn func() (int64, error)) (int64, error) {
-	var lastErr error
-	for attempt := range bootstrapRetryAttempts {
-		rowsAffected, err := fn()
-		if err == nil {
-			return rowsAffected, nil
-		}
-		if !isBootstrapLockError(err) {
-			return 0, err
-		}
-		lastErr = err
-		if attempt < bootstrapRetryAttempts-1 {
-			s.sleep(bootstrapRetryDelay)
-		}
+	var rows int64
+	err := dbretry.Retry(context.Background(), s.lockRetryPolicy(), func() error {
+		var err error
+		rows, err = fn()
+		return err
+	})
+	if err != nil {
+		return 0, err
 	}
-	return 0, lastErr
+	return rows, nil
 }
 
-// withReadRetry retries read-only operations that fail due to transient DB lock errors.
+// withReadRetry retries read-only operations with the same narrow lock policy.
 func (s *Service) withReadRetry(fn func() error) error {
-	var lastErr error
-	for attempt := range bootstrapRetryAttempts {
-		err := fn()
-		if err == nil {
-			return nil
-		}
-		if !isBootstrapLockError(err) {
-			return err
-		}
-		lastErr = err
-		if attempt < bootstrapRetryAttempts-1 {
-			s.sleep(bootstrapRetryDelay)
-		}
+	return dbretry.Retry(context.Background(), s.lockRetryPolicy(), fn)
+}
+
+func (s *Service) lockRetryPolicy() dbretry.Policy {
+	backoffs := make([]time.Duration, bootstrapRetryAttempts-1)
+	for i := range backoffs {
+		backoffs[i] = bootstrapRetryDelay
 	}
-	return lastErr
+	return dbretry.Policy{
+		Backoffs: backoffs, Retryable: isBootstrapLockError,
+		Wait: func(_ context.Context, delay time.Duration) error { s.sleep(delay); return nil },
+	}
 }
 
 func isBootstrapLockError(err error) bool {

@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/caesium-cloud/caesium/api/internal/auditlog"
 	"github.com/caesium-cloud/caesium/internal/auth"
 	"github.com/caesium-cloud/caesium/internal/metrics"
 	"github.com/caesium-cloud/caesium/internal/models"
@@ -254,7 +255,7 @@ func classifySessionAuthError(err error) string {
 func recordCredentialFailure(c *echo.Context, d AuthDeps, ip, actor, reason string) bool {
 	metrics.AuthFailuresTotal.WithLabelValues(reason).Inc()
 	limited := d.Limiter.RecordFailure(ip)
-	logAuditFailure(d.Auditor.Log(auth.AuditEntry{
+	auditlog.LogFailure(d.Auditor.Log(auth.AuditEntry{
 		Actor:    actor,
 		Action:   auth.ActionAuthDenied,
 		SourceIP: ip,
@@ -309,7 +310,7 @@ func denyAccessWithMessage(
 		metadata["required_role"] = string(required)
 	}
 
-	logAuditFailure(auditor.Log(auth.AuditEntry{
+	auditlog.LogFailure(auditor.Log(auth.AuditEntry{
 		Actor:    actor,
 		Action:   auth.ActionAuthDenied,
 		SourceIP: c.RealIP(),
@@ -373,7 +374,7 @@ func logSuccessfulAction(
 		entry.ResourceID = c.Param("id")
 	}
 
-	logAuditFailure(auditor.Log(entry))
+	auditlog.LogFailure(auditor.Log(entry))
 }
 
 func auditActionForRoute(method, routePath string) string {
@@ -410,12 +411,6 @@ func auditActionForRoute(method, routePath string) string {
 		return auth.ActionClusterMemberRemove
 	default:
 		return ""
-	}
-}
-
-func logAuditFailure(err error) {
-	if err != nil {
-		log.Warn("failed to write audit log", "error", err)
 	}
 }
 

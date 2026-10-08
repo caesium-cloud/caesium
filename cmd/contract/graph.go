@@ -2,9 +2,10 @@ package contract
 
 import (
 	"fmt"
+	"maps"
 	"net/http"
 	"net/url"
-	"sort"
+	"slices"
 	"strings"
 	"text/tabwriter"
 
@@ -114,11 +115,7 @@ func formatLabels(labels map[string]string) string {
 	if len(labels) == 0 {
 		return "-"
 	}
-	keys := make([]string, 0, len(labels))
-	for key := range labels {
-		keys = append(keys, key)
-	}
-	sort.Strings(keys)
+	keys := slices.Sorted(maps.Keys(labels))
 	parts := make([]string, 0, len(keys))
 	for _, key := range keys {
 		parts = append(parts, key+"="+labels[key])

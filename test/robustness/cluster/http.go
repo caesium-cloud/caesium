@@ -6,13 +6,16 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"strings"
 	"time"
 
+	"github.com/caesium-cloud/caesium/internal/bodylimit"
 	"github.com/caesium-cloud/caesium/pkg/jobdef"
+	"github.com/caesium-cloud/caesium/test/robustness/internal/sqlcell"
 	"github.com/google/uuid"
 )
 
@@ -93,10 +96,10 @@ func (h *HTTP) Do(ctx context.Context, method, url string, body any) (status int
 	}
 	resp, err := h.Client.Do(req)
 	if err != nil {
-		return 0, nil, err
+		return 0, nil, &transportFailure{err}
 	}
 	defer func() { _ = resp.Body.Close() }()
-	raw, err = io.ReadAll(io.LimitReader(resp.Body, 4<<20))
+	raw, err = bodylimit.Read(resp.Body, 4<<20)
 	return resp.StatusCode, raw, err
 }
 
@@ -116,7 +119,7 @@ func (h *HTTP) Apply(ctx context.Context, base string, defs []jobdef.Definition)
 		"definitions": defs,
 	})
 	if err != nil {
-		return err
+		return uncertainExchange("apply", status, err)
 	}
 	if status != http.StatusOK {
 		return fmt.Errorf("apply status %d: %s", status, truncate(raw, 1024))
@@ -154,7 +157,7 @@ func (h *HTTP) TriggerRun(ctx context.Context, base, jobID string) (Run, []byte,
 	}
 	status, raw, err := h.Do(ctx, http.MethodPost, strings.TrimRight(base, "/")+"/v1/jobs/"+id.String()+"/run", map[string]any{})
 	if err != nil {
-		return Run{}, raw, err
+		return Run{}, raw, uncertainExchange("trigger", status, err)
 	}
 	if status != http.StatusAccepted {
 		return Run{}, raw, fmt.Errorf("trigger status %d: %s", status, truncate(raw, 1024))
@@ -174,6 +177,22 @@ func (h *HTTP) TriggerRun(ctx context.Context, base, jobID string) (Run, []byte,
 	}
 	return run, raw, nil
 }
+
+func uncertainExchange(operation string, status int, err error) error {
+	if status == 0 {
+		// Preflight failures cannot commit. A transport failure may happen
+		// after submission even when no response headers are available.
+		if _, ambiguous := errors.AsType[*transportFailure](err); !ambiguous {
+			return err
+		}
+	}
+	return fmt.Errorf("inconclusive: %s may have committed (response status %d): %w", operation, status, err)
+}
+
+type transportFailure struct{ cause error }
+
+func (e *transportFailure) Error() string { return e.cause.Error() }
+func (e *transportFailure) Unwrap() error { return e.cause }
 
 func (h *HTTP) ListJobTasks(ctx context.Context, base, jobID string) ([]CatalogTask, error) {
 	jid, err := uuid.Parse(jobID)
@@ -234,18 +253,8 @@ func (h *HTTP) QueryLease(ctx context.Context, base, runID string) (Lease, error
 		return Lease{}, fmt.Errorf("lease query refused unvalidated run id %q: %w", runID, err)
 	}
 	sql := fmt.Sprintf("SELECT run_id, owner_node, generation, lease_expires_at FROM run_leases WHERE run_id = '%s'", id.String())
-	status, raw, err := h.Do(ctx, http.MethodPost, strings.TrimRight(base, "/")+"/v1/database/query", map[string]any{
-		"sql":   sql,
-		"limit": 1,
-	})
+	resp, _, err := h.query(ctx, base, sql, 1, queryDecoding{sqlcell.Decode, "lease query", ""})
 	if err != nil {
-		return Lease{}, err
-	}
-	if status != http.StatusOK {
-		return Lease{}, fmt.Errorf("lease query status %d: %s", status, truncate(raw, 1024))
-	}
-	var resp QueryResponse
-	if err := json.Unmarshal(raw, &resp); err != nil {
 		return Lease{}, err
 	}
 	if len(resp.Rows) == 0 {
@@ -255,40 +264,20 @@ func (h *HTTP) QueryLease(ctx context.Context, base, runID string) (Lease, error
 	if len(row) < 4 {
 		return Lease{}, fmt.Errorf("lease row has %d columns, want 4", len(row))
 	}
+	generation, err := sqlcell.Int64(row[2])
+	if err != nil {
+		return Lease{}, fmt.Errorf("lease generation: %w", err)
+	}
 	lease := Lease{
 		RunID:          fmt.Sprint(row[0]),
 		OwnerNode:      fmt.Sprint(row[1]),
-		Generation:     int64From(row[2]),
+		Generation:     generation,
 		LeaseExpiresAt: fmt.Sprint(row[3]),
 	}
 	if lease.RunID != id.String() {
 		return Lease{}, fmt.Errorf("lease run_id %s != %s", lease.RunID, id)
 	}
 	return lease, nil
-}
-
-func int64From(v any) int64 {
-	switch t := v.(type) {
-	case int:
-		return int64(t)
-	case int32:
-		return int64(t)
-	case int64:
-		return t
-	case float64:
-		return int64(t)
-	case json.Number:
-		n, _ := t.Int64()
-		return n
-	case string:
-		var n int64
-		_, _ = fmt.Sscan(t, &n)
-		return n
-	default:
-		var n int64
-		_, _ = fmt.Sscan(fmt.Sprint(t), &n)
-		return n
-	}
 }
 
 func truncate(b []byte, n int) string {

@@ -2,11 +2,11 @@ package auth
 
 import (
 	"fmt"
-	"io"
 	"net/http"
 	"strings"
 
 	"github.com/caesium-cloud/caesium/cmd/cliutil"
+	"github.com/caesium-cloud/caesium/internal/clihttp"
 	"github.com/spf13/cobra"
 )
 
@@ -18,6 +18,7 @@ var (
 
 var keyRevokeCmd = &cobra.Command{
 	Use:     "revoke",
+	Args:    cobra.NoArgs,
 	Short:   "Revoke an API key",
 	Example: `  caesium auth key revoke --id <key-id>`,
 	RunE: func(cmd *cobra.Command, args []string) error {
@@ -25,23 +26,22 @@ var keyRevokeCmd = &cobra.Command{
 		apiKey := resolveAPIKey(cmd, revokeAPIKey)
 		url := fmt.Sprintf("%s/v1/auth/keys/%s/revoke", server, revokeID)
 
-		req, err := http.NewRequestWithContext(cmd.Context(), http.MethodPost, url, nil)
-		if err != nil {
-			return err
-		}
+		headers := make(http.Header)
 		if apiKey != "" {
-			req.Header.Set("Authorization", "Bearer "+apiKey)
+			headers.Set("Authorization", "Bearer "+apiKey)
 		}
-
-		resp, err := http.DefaultClient.Do(req)
-		if err != nil {
-			return err
+		body, status, readErr := clihttp.Exchange(cmd.Context(), http.DefaultClient, http.MethodPost, url, nil, headers)
+		if status == 0 && readErr != nil {
+			return readErr
 		}
-		defer func() { _ = resp.Body.Close() }()
-
-		body, _ := io.ReadAll(resp.Body)
-		if resp.StatusCode >= http.StatusBadRequest {
-			return fmt.Errorf("key revocation failed (%d): %s", resp.StatusCode, strings.TrimSpace(string(body)))
+		if status >= http.StatusBadRequest {
+			if readErr != nil {
+				return fmt.Errorf("key revocation failed (%d): %s (reading response: %w)", status, strings.TrimSpace(string(body)), readErr)
+			}
+			return fmt.Errorf("key revocation failed (%d): %s", status, strings.TrimSpace(string(body)))
+		}
+		if readErr != nil {
+			return fmt.Errorf("reading key revocation response: %w", readErr)
 		}
 
 		// Machine-readable result → stdout (cobra's Print* goes to stderr).

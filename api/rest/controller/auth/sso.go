@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"strings"
 
+	"github.com/caesium-cloud/caesium/api/internal/auditlog"
 	authmw "github.com/caesium-cloud/caesium/api/middleware"
 	iauth "github.com/caesium-cloud/caesium/internal/auth"
 	"github.com/caesium-cloud/caesium/internal/metrics"
@@ -286,7 +287,7 @@ func (s *SSOController) recordProviderLoginFailure(c *echo.Context, provider, ac
 	if outcome == iauth.OutcomeDenied {
 		action = iauth.ActionAuthLoginDenied
 	}
-	logAuditFailure(s.auditor.Log(iauth.AuditEntry{
+	auditlog.LogFailure(s.auditor.Log(iauth.AuditEntry{
 		Actor:    auditActor(actor),
 		Action:   action,
 		SourceIP: c.RealIP(),
@@ -324,7 +325,7 @@ func (s *SSOController) recordLogout(c *echo.Context, outcome string, sess *mode
 		entry.ResourceID = sess.ID.String()
 		entry.Metadata["provider"] = sess.AuthMethod
 	}
-	logAuditFailure(s.auditor.Log(entry))
+	auditlog.LogFailure(s.auditor.Log(entry))
 }
 
 func (s *SSOController) recordAPIKeyLogoutNoop(c *echo.Context, principal *iauth.Principal) {
@@ -346,14 +347,14 @@ func (s *SSOController) recordAPIKeyLogoutNoop(c *echo.Context, principal *iauth
 	if principal.KeyID != nil {
 		entry.ResourceID = principal.KeyID.String()
 	}
-	logAuditFailure(s.auditor.Log(entry))
+	auditlog.LogFailure(s.auditor.Log(entry))
 }
 
 func (s *SSOController) recordSessionRevoked(c *echo.Context, sess *models.Session, user *models.User) {
 	if s.auditor == nil || sess == nil {
 		return
 	}
-	logAuditFailure(s.auditor.Log(iauth.AuditEntry{
+	auditlog.LogFailure(s.auditor.Log(iauth.AuditEntry{
 		Actor:        logoutActor(c, user),
 		Action:       iauth.ActionAuthSessionRevoked,
 		ResourceType: "session",

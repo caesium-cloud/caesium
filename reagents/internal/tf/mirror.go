@@ -1,6 +1,7 @@
 package tf
 
 import (
+	"cmp"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
@@ -8,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 )
@@ -224,7 +226,7 @@ func ParseLockFile(data []byte) ([]LockedProvider, error) {
 	if len(providers) == 0 {
 		return nil, fmt.Errorf("lock file declares no providers")
 	}
-	sort.Slice(providers, func(i, j int) bool { return providers[i].Source < providers[j].Source })
+	slices.SortFunc(providers, func(a, b LockedProvider) int { return cmp.Compare(a.Source, b.Source) })
 	return providers, nil
 }
 
@@ -326,11 +328,11 @@ func MergeLocked(sets ...[]LockedProvider) []LockedProvider {
 		sort.Strings(p.Hashes)
 		out = append(out, p)
 	}
-	sort.Slice(out, func(i, j int) bool {
-		if out[i].Source != out[j].Source {
-			return out[i].Source < out[j].Source
+	slices.SortFunc(out, func(a, b LockedProvider) int {
+		if order := cmp.Compare(a.Source, b.Source); order != 0 {
+			return order
 		}
-		return out[i].Version < out[j].Version
+		return cmp.Compare(a.Version, b.Version)
 	})
 	return out
 }

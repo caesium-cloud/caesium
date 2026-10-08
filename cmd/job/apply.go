@@ -34,6 +34,7 @@ var (
 
 var applyCmd = &cobra.Command{
 	Use:   "apply",
+	Args:  cobra.NoArgs,
 	Short: "Apply job definitions via the REST API",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		defs, err := collectDefinitions(applyPaths)

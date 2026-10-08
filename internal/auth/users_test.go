@@ -2,6 +2,7 @@ package auth
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -73,4 +74,28 @@ func TestUserStoreUpsertHandlesConcurrentCreateConflict(t *testing.T) {
 	var count int64
 	require.NoError(t, db.Model(&models.User{}).Where("issuer = ? AND subject = ?", "oidc", "sub-race").Count(&count).Error)
 	require.Equal(t, int64(1), count)
+}
+
+func TestUserStoreUpsertDoesNotRetryUnrelatedDuplicateMessage(t *testing.T) {
+	db := testutil.OpenTestDB(t)
+	t.Cleanup(func() { testutil.CloseDB(db) })
+	us := NewUserStore(db.Session(&gorm.Session{SkipDefaultTransaction: true}))
+	injected := errors.New("duplicate request rejected before database insert")
+	const callbackName = "test:unrelated_duplicate_user_error"
+	require.NoError(t, db.Callback().Create().Before("gorm:create").Register(callbackName, func(tx *gorm.DB) {
+		if tx.Statement.Schema == nil || tx.Statement.Schema.Name != "User" {
+			return
+		}
+		tx.Exec("INSERT INTO users (id, issuer, subject, email, role, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+			uuid.New(), "oidc", "sub-unrelated", "original@example.com", string(models.RoleViewer), time.Now().UTC())
+		tx.AddError(injected)
+	}))
+	t.Cleanup(func() { _ = db.Callback().Create().Remove(callbackName) })
+	user, err := us.Upsert(t.Context(), &ExternalIdentity{Issuer: "oidc", Subject: "sub-unrelated", Email: "changed@example.com"}, models.RoleOperator)
+	require.ErrorIs(t, err, injected)
+	require.Nil(t, user)
+	var persisted models.User
+	require.NoError(t, db.Where("issuer = ? AND subject = ?", "oidc", "sub-unrelated").First(&persisted).Error)
+	require.Equal(t, "original@example.com", persisted.Email)
+	require.Equal(t, models.RoleViewer, persisted.Role)
 }

@@ -6,10 +6,10 @@ import (
 	"io"
 	"net/http"
 	"net/url"
-	"os"
 	"strings"
 	"text/tabwriter"
 
+	"github.com/caesium-cloud/caesium/cmd/cliutil"
 	"github.com/spf13/cobra"
 )
 
@@ -309,11 +309,7 @@ func dashRunDiffEmpty(s string) string {
 }
 
 func resolveRunDiffAPIKey(cmd *cobra.Command, flagValue string) string {
-	if strings.TrimSpace(flagValue) != "" {
-		_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "warning: --api-key is visible in process listings; prefer %s\n", runDiffAPIKeyEnvVar)
-		return strings.TrimSpace(flagValue)
-	}
-	return strings.TrimSpace(os.Getenv(runDiffAPIKeyEnvVar))
+	return cliutil.ResolveAPIKey(cmd, flagValue, cliutil.APIKeyEnvVar)
 }
 
 func init() {

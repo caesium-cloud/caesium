@@ -6,6 +6,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/caesium-cloud/caesium/test/internal/metricsutil"
 )
 
 // Outcome labels for a mutating request. Quorum-loss and lost-response
@@ -261,25 +263,7 @@ func earliestKind(events []TimedStep, step, kind string) (TimedStep, bool) {
 // PromCounter reads one labelled counter from Prometheus text. An absent
 // series is (0, false) so a missing metric cannot be treated as a rise.
 func PromCounter(text, name string, labels map[string]string) (float64, bool) {
-	for _, line := range strings.Split(text, "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" || strings.HasPrefix(line, "#") || !strings.HasPrefix(line, name) {
-			continue
-		}
-		series, value, ok := strings.Cut(line, " ")
-		if !ok {
-			continue
-		}
-		matched := true
-		for k, v := range labels {
-			if !strings.Contains(series, fmt.Sprintf("%s=%q", k, v)) {
-				matched = false
-				break
-			}
-		}
-		if !matched {
-			continue
-		}
+	for _, value := range metricsutil.MatchingCounterSamples(text, name, labels) {
 		parsed, err := strconv.ParseFloat(strings.TrimSpace(value), 64)
 		if err != nil {
 			continue

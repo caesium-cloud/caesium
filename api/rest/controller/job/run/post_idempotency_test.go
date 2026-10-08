@@ -52,7 +52,8 @@ func newPostFixture(t *testing.T) *postFixture {
 	postFindIdempotentStart = func(ctx context.Context, jobID uuid.UUID, opts ...runstorage.StartOption) (runstorage.StartResult, bool, error) {
 		return store.FindIdempotentStart(context.WithoutCancel(ctx), jobID, opts...)
 	}
-	postLaunchRun = func(_ *models.Job, r *runstorage.JobRun) {
+	postLaunchRun = func(_ context.Context, _ *models.Job, r *runstorage.JobRun, release func()) {
+		defer release()
 		f.mu.Lock()
 		defer f.mu.Unlock()
 		f.launched = append(f.launched, r.ID)
@@ -93,7 +94,7 @@ type postResponse struct {
 func (f *postFixture) post(t *testing.T, jobID uuid.UUID, key, body string) (postResponse, error) {
 	t.Helper()
 	e := echo.New()
-	req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/", strings.NewReader(body))
+	req := httptest.NewRequestWithContext(supervisedRequestContext(t), http.MethodPost, "/", strings.NewReader(body))
 	req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
 	if key != "" {
 		req.Header.Set(IdempotencyKeyHeader, key)

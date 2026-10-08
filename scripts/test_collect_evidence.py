@@ -8,11 +8,13 @@ stops producing evidence must fail closed, never silently pass.
 """
 
 import json
+import runpy
 from pathlib import Path
 import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -503,6 +505,122 @@ class RedactionTests(unittest.TestCase):
                 if path.is_file():
                     self.assertNotIn(TOKEN.encode(), path.read_bytes(), path)
             self.assertIn("[REDACTED_INTERNAL_TOKEN]", (art / "caesium-0.env").read_text())
+
+    def redaction_fixture(self, root):
+        art = root / "artifacts"
+        (art / "member-logs").mkdir(parents=True)
+        (art / "internal-token.txt").write_text(TOKEN + "\n")
+        (art / "kubeconfig").write_text("private fixture kubeconfig")
+        (art / "a.log").write_text("earlier " + TOKEN)
+        (art / "member-logs/b.log").write_text("nested " + TOKEN)
+        return art
+
+    def test_read_error_refuses_before_mutation_and_retains_credentials(self):
+        api = runpy.run_path(str(SCRIPT))
+        with tempfile.TemporaryDirectory() as tmp:
+            art = self.redaction_fixture(Path(tmp))
+            read_bytes = Path.read_bytes
+            def fail_read(path):
+                if path.name == "b.log":
+                    raise PermissionError(TOKEN)
+                return read_bytes(path)
+            with mock.patch.object(Path, "read_bytes", fail_read):
+                with self.assertRaises(api["EvidenceError"]) as caught:
+                    api["redact_artifacts"](art)
+            self.assertNotIn(TOKEN, str(caught.exception))
+            self.assertEqual((art / "internal-token.txt").read_text(), TOKEN + "\n")
+            self.assertTrue((art / "kubeconfig").is_file())
+            self.assertEqual((art / "a.log").read_text(), "earlier " + TOKEN)
+
+    def test_write_failure_retains_token_original_log_and_retry_scrubs_nested(self):
+        api = runpy.run_path(str(SCRIPT))
+        with tempfile.TemporaryDirectory() as tmp:
+            art = self.redaction_fixture(Path(tmp))
+            import os
+            replace = os.replace
+            def fail_second(source, destination):
+                if Path(destination).name == "b.log":
+                    raise OSError(TOKEN)
+                return replace(source, destination)
+            with mock.patch("os.replace", fail_second):
+                with self.assertRaises(api["EvidenceError"]) as caught:
+                    api["redact_artifacts"](art)
+            self.assertNotIn(TOKEN, str(caught.exception))
+            self.assertTrue((art / "internal-token.txt").is_file())
+            self.assertTrue((art / "kubeconfig").is_file())
+            self.assertNotIn(TOKEN, (art / "a.log").read_text())
+            self.assertEqual((art / "member-logs/b.log").read_text(), "nested " + TOKEN)
+            self.assertEqual(list(art.rglob(".redact-*")), [])
+            removed, scrubbed = api["redact_artifacts"](art)
+            self.assertEqual(removed, ["kubeconfig", "internal-token.txt"])
+            self.assertEqual(scrubbed, ["member-logs/b.log"])
+            self.assertNotIn(TOKEN, (art / "member-logs/b.log").read_text())
+            self.assertEqual(api["redact_artifacts"](art), ([], []))
+
+    def test_credential_unlink_failure_retains_token_until_successful_retry(self):
+        api = runpy.run_path(str(SCRIPT))
+        with tempfile.TemporaryDirectory() as tmp:
+            art = self.redaction_fixture(Path(tmp))
+            unlink = Path.unlink
+            def fail_kubeconfig(path, *args, **kwargs):
+                if path.name == "kubeconfig":
+                    raise PermissionError(TOKEN)
+                return unlink(path, *args, **kwargs)
+            with mock.patch.object(Path, "unlink", fail_kubeconfig):
+                with self.assertRaises(api["EvidenceError"]) as caught:
+                    api["redact_artifacts"](art)
+            self.assertNotIn(TOKEN, str(caught.exception))
+            self.assertTrue((art / "internal-token.txt").is_file())
+            api["redact_artifacts"](art)
+            self.assertFalse((art / "internal-token.txt").exists())
+            self.assertFalse((art / "kubeconfig").exists())
+
+    def test_root_inspection_error_is_typed_and_does_not_expose_secret(self):
+        api = runpy.run_path(str(SCRIPT))
+        with tempfile.TemporaryDirectory() as tmp:
+            art = self.redaction_fixture(Path(tmp))
+            with mock.patch.object(Path, "is_dir", side_effect=PermissionError(TOKEN)):
+                with self.assertRaises(api["EvidenceError"]) as caught:
+                    api["redact_artifacts"](art)
+            self.assertNotIn(TOKEN, str(caught.exception))
+            self.assertTrue((art / "internal-token.txt").is_file())
+
+    def test_directory_enumeration_error_is_not_silently_skipped(self):
+        api = runpy.run_path(str(SCRIPT))
+        with tempfile.TemporaryDirectory() as tmp:
+            art = self.redaction_fixture(Path(tmp))
+            def failed_walk(root, onerror):
+                onerror(PermissionError(TOKEN))
+            with mock.patch("os.walk", failed_walk):
+                with self.assertRaises(api["EvidenceError"]) as caught:
+                    api["redact_artifacts"](art)
+            self.assertNotIn(TOKEN, str(caught.exception))
+            self.assertTrue((art / "internal-token.txt").is_file())
+
+    def test_symlink_refusal_preserves_foreign_file_and_retry_source(self):
+        api = runpy.run_path(str(SCRIPT))
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            art = self.redaction_fixture(root)
+            foreign = root / "foreign.log"
+            foreign.write_text(TOKEN)
+            (art / "linked.log").symlink_to(foreign)
+            with self.assertRaises(api["EvidenceError"]):
+                api["redact_artifacts"](art)
+            self.assertEqual(foreign.read_text(), TOKEN)
+            self.assertTrue((art / "internal-token.txt").is_file())
+
+    def test_empty_token_and_secret_bearing_directory_errors_refuse_safely(self):
+        api = runpy.run_path(str(SCRIPT))
+        with tempfile.TemporaryDirectory() as tmp:
+            art = self.redaction_fixture(Path(tmp))
+            (art / "internal-token.txt").write_text("\n")
+            with self.assertRaises(api["EvidenceError"]):
+                api["redact_artifacts"](art)
+            self.assertTrue((art / "internal-token.txt").is_file())
+            result = run("redact", "--artifacts", str(Path(tmp) / TOKEN))
+            self.assertEqual(result.returncode, 1)
+            self.assertNotIn(TOKEN, result.stdout + result.stderr)
 
     def test_redacted_directory_still_yields_a_complete_fragment(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -79,6 +79,13 @@ func TestOwnerCrash(t *testing.T) {
 	}
 	t.Logf("connectivity probe %s observed", probeID)
 
+	t.Run("cron_single_admission", func(t *testing.T) {
+		runCronSingleAdmission(t, kube, httpAPI, env)
+	})
+	t.Run("graceful_trigger_shutdown", func(t *testing.T) {
+		runGracefulTriggerShutdown(t, kube, httpAPI, sink, env)
+	})
+
 	t.Run("owner_is_leader", func(t *testing.T) {
 		runOwnerCrash(t, kube, httpAPI, sink, env, true)
 	})

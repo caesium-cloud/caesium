@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
-	"strings"
 	"time"
 
 	jsvc "github.com/caesium-cloud/caesium/api/rest/service/job"
@@ -15,6 +14,7 @@ import (
 	"github.com/caesium-cloud/caesium/internal/job"
 	"github.com/caesium-cloud/caesium/internal/models"
 	runstorage "github.com/caesium-cloud/caesium/internal/run"
+	"github.com/caesium-cloud/caesium/internal/runlife"
 	"github.com/caesium-cloud/caesium/pkg/log"
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v5"
@@ -48,15 +48,6 @@ var (
 	// local-mode server actually executes the reset instance. Stubbed in handler
 	// tests; production wiring is kickoffPartitionRetryRun.
 	partitionKickoff = kickoffPartitionRetryRun
-)
-
-const (
-	// defaultPartitionPageSize is the page a client gets when it names no limit.
-	defaultPartitionPageSize = 100
-	// maxPartitionPageSize is the documented ceiling. A larger limit is a client
-	// bug worth reporting, not something to silently reduce: a caller that asked
-	// for 5000 and got 100 without being told believes it has the whole group.
-	maxPartitionPageSize = 1000
 )
 
 type partitionRow struct {
@@ -126,7 +117,7 @@ func ListPartitions(c *echo.Context) error {
 	statusFilter := c.QueryParam("status")
 	partitionFilter := c.QueryParam("partition")
 
-	limit, offset, err := partitionPageBounds(c.QueryParam("limit"), c.QueryParam("offset"))
+	limit, offset, err := pageBounds(c.QueryParam("limit"), c.QueryParam("offset"))
 	if err != nil {
 		return err
 	}
@@ -183,30 +174,6 @@ func ListPartitions(c *echo.Context) error {
 	})
 }
 
-// partitionPageBounds parses and validates the page window. An unparseable or
-// out-of-range limit is a 400 rather than a silent fallback: a client that asked
-// for 5000 rows and received 100 without being told has an incomplete view it
-// believes is complete.
-func partitionPageBounds(limitParam, offsetParam string) (limit, offset int, err error) {
-	limit = defaultPartitionPageSize
-	if raw := strings.TrimSpace(limitParam); raw != "" {
-		parsed, convErr := strconv.Atoi(raw)
-		if convErr != nil || parsed <= 0 || parsed > maxPartitionPageSize {
-			return 0, 0, echo.NewHTTPError(http.StatusBadRequest,
-				fmt.Sprintf("limit must be an integer between 1 and %d", maxPartitionPageSize))
-		}
-		limit = parsed
-	}
-	if raw := strings.TrimSpace(offsetParam); raw != "" {
-		parsed, convErr := strconv.Atoi(raw)
-		if convErr != nil || parsed < 0 {
-			return 0, 0, echo.NewHTTPError(http.StatusBadRequest, "offset must be a non-negative integer")
-		}
-		offset = parsed
-	}
-	return limit, offset, nil
-}
-
 // nextPartitionOffset returns the offset a client should request next, or nil
 // when this page is the last one. Nil (JSON null) rather than an offset past
 // the end so "am I done?" is a null check, not arithmetic the client can get
@@ -260,6 +227,16 @@ func RetryPartition(c *echo.Context) error {
 	// in-group indegree over non-terminal dependencies, re-open a finished run,
 	// and invalidate the owner checkpoints. Doing it here with a bare Updates()
 	// did none of that.
+	workCtx, release, err := runlife.FromContext(ctx).Reserve(ctx)
+	if err != nil {
+		return echo.NewHTTPError(http.StatusServiceUnavailable, err.Error()).Wrap(err)
+	}
+	transferred := false
+	defer func() {
+		if !transferred {
+			release()
+		}
+	}()
 	updated, reopened, err := partitionRetryInstance(ctx, runID, row.ID)
 	// Kickoff follows the transactional reopened flag, not the pre-tx
 	// runEntry.Status snapshot. A running local run can finish after
@@ -274,7 +251,8 @@ func RetryPartition(c *echo.Context) error {
 	// Run(); Store.Complete refusing a retry-reset pending partition covers
 	// the shutdown window.
 	if reopened {
-		partitionKickoff(j, runID, runEntry.Params)
+		partitionKickoff(workCtx, j, runID, runEntry.Params, release)
+		transferred = true
 	}
 	if err != nil {
 		return retryPartitionHTTPError(err)
@@ -300,17 +278,19 @@ func RetryPartition(c *echo.Context) error {
 // reset pending instance actually executes. In local mode that is the DAG loop
 // (rehydrating existing TaskRun rows, including the reset instance); in
 // distributed mode Run waits for workers, matching POST .../retry.
-func kickoffPartitionRetryRun(j *models.Job, runID uuid.UUID, params map[string]string) {
+func kickoffPartitionRetryRun(ctx context.Context, j *models.Job, runID uuid.UUID, params map[string]string, releaseWork func()) {
 	if j == nil {
+		releaseWork()
 		return
 	}
+	cancelCtx, release := job.RegisterRunCancel(ctx, runID)
 	go func() {
+		defer releaseWork()
 		// Registered like the manual-run kickoff: a cancel issued DURING a
 		// partition retry must reach the resumed engine's containers too.
-		cancelCtx, release := job.RegisterRunCancel(context.Background(), runID)
 		defer release()
 		runCtx := runstorage.WithContext(cancelCtx, runID)
-		if err := job.New(j, job.WithTriggerID(nil), job.WithParams(params)).Run(runCtx); err != nil {
+		if err := runExecution(runCtx, j, params); err != nil {
 			log.Error("partition retry run failure", "id", j.ID, "run_id", runID, "error", err)
 		}
 	}()
@@ -349,10 +329,10 @@ func projectPartitionRows(rows []models.TaskRun) []partitionRow {
 			StatsSource: r.StatsSource, OOMKnown: r.OOMKnown, OOMKilled: r.OOMKilled,
 		}
 		if r.StartedAt != nil {
-			pr.StartedAt = r.StartedAt.UTC().Format(time.RFC3339)
+			pr.StartedAt = r.StartedAt.UTC().Format(time.RFC3339Nano)
 		}
 		if r.CompletedAt != nil {
-			pr.CompletedAt = r.CompletedAt.UTC().Format(time.RFC3339)
+			pr.CompletedAt = r.CompletedAt.UTC().Format(time.RFC3339Nano)
 		}
 		if r.StartedAt != nil && r.CompletedAt != nil {
 			pr.Duration = r.CompletedAt.Sub(*r.StartedAt).Round(time.Millisecond).String()

@@ -1,17 +1,12 @@
 package job
 
 import (
-	"cmp"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
-	"maps"
 	"math/rand/v2"
 	"runtime"
 	"slices"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -27,14 +22,11 @@ import (
 	"github.com/caesium-cloud/caesium/internal/callback"
 	"github.com/caesium-cloud/caesium/internal/event"
 	"github.com/caesium-cloud/caesium/internal/imagecheck"
-	"github.com/caesium-cloud/caesium/internal/incident"
 	jobdefruntime "github.com/caesium-cloud/caesium/internal/jobdef/runtime"
 	"github.com/caesium-cloud/caesium/internal/jobdef/secret"
-	"github.com/caesium-cloud/caesium/internal/metrics"
 	"github.com/caesium-cloud/caesium/internal/models"
-	"github.com/caesium-cloud/caesium/internal/ratelimit"
 	"github.com/caesium-cloud/caesium/internal/run"
-	"github.com/caesium-cloud/caesium/internal/worker"
+	"github.com/caesium-cloud/caesium/internal/runlife"
 	"github.com/caesium-cloud/caesium/pkg/container"
 	"github.com/caesium-cloud/caesium/pkg/dqlite"
 	"github.com/caesium-cloud/caesium/pkg/env"
@@ -246,17 +238,20 @@ func (j *job) ownsUndispatchedRetry(taskRunID uuid.UUID) bool {
 // classify. Whatever is pending NOW — fresh or not — goes to a replacement
 // engine, because returning would leave it pending on a run with no engine.
 // Reports whether a replacement was started.
-func (j *job) handOffPendingPartitionRetries(store *run.Store, runID uuid.UUID, params map[string]string) bool {
+func (j *job) handOffPendingPartitionRetries(ctx context.Context, store *run.Store, runID uuid.UUID, params map[string]string) (bool, error) {
+	if serverShutdown(ctx) {
+		return false, runlife.ErrServerShutdown
+	}
 	pending, err := store.PendingPartitionRetries(runID)
 	if err != nil {
 		log.Error("run completion kept being refused and the pending partition retries could not be read",
 			"job_id", j.id, "run_id", runID, "error", err)
-		return false
+		return false, nil
 	}
 	if len(pending) == 0 {
 		log.Error("run completion kept being refused with no pending partition retry visible; leaving the run for an operator",
 			"job_id", j.id, "run_id", runID)
-		return false
+		return false, nil
 	}
 	ids := make([]uuid.UUID, 0, len(pending))
 	for i := range pending {
@@ -264,8 +259,13 @@ func (j *job) handOffPendingPartitionRetries(store *run.Store, runID uuid.UUID, 
 	}
 	log.Error("run completion kept being refused; handing every pending partition retry to a replacement engine",
 		"job_id", j.id, "run_id", runID, "instances", len(ids))
-	j.startReplacementRun(runID, params, ids)
-	return true
+	if err := j.startReplacementRun(ctx, runID, params, ids); err != nil {
+		if serverShutdown(ctx) {
+			return false, runlife.ErrServerShutdown
+		}
+		return false, j.abandonRejectedReplacement(store, runID, ids, err)
+	}
+	return true, nil
 }
 
 // recoverPendingPartitionRetries is the bounded end of the completion fence,
@@ -276,7 +276,10 @@ func (j *job) handOffPendingPartitionRetries(store *run.Store, runID uuid.UUID, 
 // differ — and fresh requests, which are handed to a replacement engine.
 // handedOff is true when a replacement now owns the run's finalization; the
 // returned error is the run error, possibly replaced by the abandon reason.
-func (j *job) recoverPendingPartitionRetries(store *run.Store, runID uuid.UUID, params map[string]string, runErr error) (handedOff bool, updated error, err error) {
+func (j *job) recoverPendingPartitionRetries(ctx context.Context, store *run.Store, runID uuid.UUID, params map[string]string, runErr error) (handedOff bool, updated error, err error) {
+	if serverShutdown(ctx) {
+		return false, runlife.ErrServerShutdown, nil
+	}
 	pending, err := store.PendingPartitionRetries(runID)
 	if err != nil {
 		return false, runErr, err
@@ -293,6 +296,9 @@ func (j *job) recoverPendingPartitionRetries(store *run.Store, runID uuid.UUID, 
 	// must not inherit rows this engine already failed to dispatch, or they
 	// would bounce between engines instead of resolving.
 	if len(mine) > 0 {
+		if serverShutdown(ctx) {
+			return false, runlife.ErrServerShutdown, nil
+		}
 		reason := "partition retry abandoned: the replacement engine could not dispatch the reset instance; retry the run"
 		abandoned, abandonErr := store.AbandonPartitionRetries(runID, mine, reason)
 		log.Error("partition retry could not be dispatched by the replacement engine; abandoning it",
@@ -310,7 +316,16 @@ func (j *job) recoverPendingPartitionRetries(store *run.Store, runID uuid.UUID, 
 	if len(fresh) > 0 {
 		log.Info("partition retry landed after the DAG finished; starting replacement engine",
 			"job_id", j.id, "run_id", runID, "instances", len(fresh))
-		j.startReplacementRun(runID, params, fresh)
+		if admissionErr := j.startReplacementRun(ctx, runID, params, fresh); admissionErr != nil {
+			if serverShutdown(ctx) {
+				return false, runlife.ErrServerShutdown, nil
+			}
+			failure := j.abandonRejectedReplacement(store, runID, fresh, admissionErr)
+			if errors.Is(failure, admissionErr) && !errors.Is(failure, errReplacementAbandonFailed) {
+				return false, errors.Join(runErr, failure), nil
+			}
+			return false, runErr, failure
+		}
 		return true, runErr, nil
 	}
 	return false, runErr, nil
@@ -545,17 +560,51 @@ func withPartitionRetryReplacement(taskRunIDs []uuid.UUID) JobOption {
 	}
 }
 
+// serverShutdown relinquishes the executor without changing durable claims.
+// A run deadline or user cancellation recorded first keeps its own authority.
+func serverShutdown(ctx context.Context) bool {
+	return errors.Is(runlife.CancellationCause(ctx), runlife.ErrServerShutdown)
+}
+
+// reserveLocalChild preserves direct local execution when no server owner is
+// carried. Server adapters always supply an owner; its closure is authoritative.
+func reserveLocalChild(ctx context.Context) (context.Context, func(), error) {
+	if owner := runlife.FromContext(ctx); owner != nil {
+		return owner.Reserve(ctx)
+	}
+	return context.WithoutCancel(ctx), func() {}, nil
+}
+
+var errReplacementAbandonFailed = errors.New("replacement refusal could not resolve retry markers")
+
+// abandonRejectedReplacement resolves only the retry set whose launch was refused.
+// The original completion owner keeps a nonnil cause and finalizes the run.
+func (j *job) abandonRejectedReplacement(store *run.Store, runID uuid.UUID, ids []uuid.UUID, admissionErr error) error {
+	reason := fmt.Sprintf("partition retry abandoned: replacement engine admission refused: %v; retry the run", admissionErr)
+	abandoned, err := store.AbandonPartitionRetries(runID, ids, reason)
+	log.Error("partition retry replacement admission refused", "job_id", j.id, "run_id", runID, "abandoned", abandoned, "error", admissionErr, "abandon_error", err)
+	if err != nil {
+		return errors.Join(admissionErr, errReplacementAbandonFailed, err)
+	}
+	return fmt.Errorf("%s: %w", reason, admissionErr)
+}
+
 // startReplacementRun kicks off a new in-process engine against an existing
 // run, matching HTTP partition-retry kickoff: job.New → Run with the run id
 // in context so the DAG rehydrates existing TaskRun rows (including a
 // partition that RetryPartition reset after this engine left runFannedGroup).
 // taskRunIDs are the retry-reset instances the replacement is responsible for.
-func (j *job) startReplacementRun(runID uuid.UUID, params map[string]string, taskRunIDs []uuid.UUID) {
+func (j *job) startReplacementRun(ctx context.Context, runID uuid.UUID, params map[string]string, taskRunIDs []uuid.UUID) error {
+	workCtx, releaseWork, err := reserveLocalChild(ctx)
+	if err != nil {
+		return err
+	}
+	cancelCtx, release := RegisterRunCancel(workCtx, runID)
 	go func() {
+		defer releaseWork()
 		// The replacement engine registers its own cancellable context against
 		// the SAME run id: the registry holds a set per run, so cancelling the
 		// run reaches this engine and the one that spawned it.
-		cancelCtx, release := RegisterRunCancel(context.Background(), runID)
 		defer release()
 		runCtx := run.WithContext(cancelCtx, runID)
 		replacement := New(&models.Job{
@@ -595,6 +644,7 @@ func (j *job) startReplacementRun(runID uuid.UUID, params map[string]string, tas
 			log.Error("partition retry replacement run failure", "id", j.id, "run_id", runID, "error", err)
 		}
 	}()
+	return nil
 }
 
 // finalizeAbortedResume finalizes a resumed run whose engine failed before its
@@ -604,7 +654,10 @@ func (j *job) startReplacementRun(runID uuid.UUID, params map[string]string, tas
 // replacement, the run is marked failed with the engine's error, and
 // callbacks fire as for any failed run. A run another path already finalized
 // is left alone.
-func (j *job) finalizeAbortedResume(store *run.Store, runID uuid.UUID, cause error) {
+func (j *job) finalizeAbortedResume(ctx context.Context, store *run.Store, runID uuid.UUID, cause error) {
+	if serverShutdown(ctx) {
+		return
+	}
 	snapshot, err := store.Get(runID)
 	if err != nil {
 		log.Error("resumed engine failed before executing and the run could not be read", "job_id", j.id, "run_id", runID, "cause", cause, "error", err)
@@ -621,47 +674,107 @@ func (j *job) finalizeAbortedResume(store *run.Store, runID uuid.UUID, cause err
 	// then refuses, and the classification is simply repeated, a bounded
 	// number of times, exactly as the normal completion path does.
 	var finalized bool
-	for attempt := 0; ; attempt++ {
-		if attempt >= 2 {
-			// Bounded like the normal completion path: the last word is a
-			// hand-off (itself retried), never a return that strands a retry.
-			for range 3 {
-				if j.handOffPendingPartitionRetries(store, runID, j.params) {
+	terminationWon := func() bool {
+		switch original := context.Cause(ctx); {
+		case run.IsRunDeadlineError(original):
+			cause = original
+		case serverShutdown(ctx):
+			cause = runlife.ErrServerShutdown
+		case ctx.Err() == context.Canceled:
+			cause = run.NewRunCancellationError(context.Cause(ctx))
+		default:
+			return false
+		}
+		return true
+	}
+	complete := func() (bool, error) {
+		terminationWon()
+		if errors.Is(cause, runlife.ErrServerShutdown) && !run.IsRunDeadlineError(cause) {
+			return false, nil
+		}
+		return store.CompleteIfActive(runID, cause)
+	}
+	if terminationWon() {
+		// This resume already owns an admitted run, but cancellation won
+		// before the normal finalizer was armed. Settle its unfinished rows
+		// atomically instead of handing work to a closed owner supervisor.
+		if j.beforeComplete != nil {
+			j.beforeComplete(runID)
+		}
+		finalized, err = complete()
+		if err != nil {
+			log.Error("cancelled aborted resume could not be finalized", "job_id", j.id, "run_id", runID, "error", err)
+			return
+		}
+	} else {
+		for attempt := 0; ; attempt++ {
+			if terminationWon() {
+				finalized, err = complete()
+				break
+			}
+			if attempt >= 2 {
+				// Bounded like the normal completion path: the last word is a
+				// hand-off (itself retried), never a return that strands a retry.
+				for range 3 {
+					if terminationWon() {
+						finalized, err = complete()
+						break
+					}
+					handedOff, handoffErr := j.handOffPendingPartitionRetries(ctx, store, runID, j.params)
+					if terminationWon() {
+						finalized, err = complete()
+						break
+					}
+					if handedOff {
+						return
+					}
+					if handoffErr != nil {
+						cause = errors.Join(cause, handoffErr)
+					}
+					finalized, err = complete()
+					if !errors.Is(err, run.ErrRunHasPendingWork) {
+						break
+					}
+				}
+				if err != nil {
+					log.Error("aborted resume could not be finalized or handed off; leaving the run for an operator",
+						"job_id", j.id, "run_id", runID, "error", err)
 					return
 				}
-				finalized, err = store.CompleteIfActive(runID, cause)
-				if !errors.Is(err, run.ErrRunHasPendingWork) {
-					break
-				}
+				break
+			}
+			var handedOff bool
+			var updated error
+			handedOff, updated, err = j.recoverPendingPartitionRetries(ctx, store, runID, j.params, cause)
+			if terminationWon() {
+				finalized, err = complete()
+				break
 			}
 			if err != nil {
-				log.Error("aborted resume could not be finalized or handed off; leaving the run for an operator",
-					"job_id", j.id, "run_id", runID, "error", err)
+				log.Error("retry-reset instances of an aborted resume could not be resolved; leaving the run for an operator", "job_id", j.id, "run_id", runID, "error", err)
+				return
+			}
+			if handedOff {
+				return
+			}
+			cause = updated
+			if j.beforeComplete != nil {
+				j.beforeComplete(runID)
+			}
+			finalized, err = complete()
+			if errors.Is(err, run.ErrRunHasPendingWork) {
+				continue
+			}
+			if err != nil {
+				log.Error("run completion persistence failure after aborted resume", "job_id", j.id, "run_id", runID, "error", err)
 				return
 			}
 			break
 		}
-		handedOff, updated, err := j.recoverPendingPartitionRetries(store, runID, j.params, cause)
-		if err != nil {
-			log.Error("retry-reset instances of an aborted resume could not be resolved; leaving the run for an operator", "job_id", j.id, "run_id", runID, "error", err)
-			return
-		}
-		if handedOff {
-			return
-		}
-		cause = updated
-		if j.beforeComplete != nil {
-			j.beforeComplete(runID)
-		}
-		finalized, err = store.CompleteIfActive(runID, cause)
-		if errors.Is(err, run.ErrRunHasPendingWork) {
-			continue
-		}
-		if err != nil {
-			log.Error("run completion persistence failure after aborted resume", "job_id", j.id, "run_id", runID, "error", err)
-			return
-		}
-		break
+	}
+	if err != nil {
+		log.Error("aborted resume completion persistence failure", "job_id", j.id, "run_id", runID, "error", err)
+		return
 	}
 	if !finalized {
 		// Another path finalized the run between the status read and this
@@ -819,74 +932,12 @@ func buildLocalRunners(
 // buildParamEnv returns a map of environment variables derived from params.
 // It also injects CAESIUM_RUN_ID and CAESIUM_JOB_ALIAS.
 func buildParamEnv(runID uuid.UUID, jobAlias string, params map[string]string) map[string]string {
-	env := make(map[string]string, len(params)+2)
-	env["CAESIUM_RUN_ID"] = runID.String()
-	env["CAESIUM_JOB_ALIAS"] = jobAlias
-	for k, v := range params {
-		env["CAESIUM_PARAM_"+strings.ToUpper(k)] = v
-	}
-	return env
+	return jobdefruntime.BuildRunParamEnv(runID, jobAlias, params)
 }
 
-// taskHashInputArgs is the per-execution input to buildTaskHashInput.
-//
-// Both the unfanned local path and every fan-out instance construct their cache
-// identity through that single function, so the two can never drift on which
-// fields are folded into the hash — a drift that would silently give fanned
-// steps a different cache identity from every other step. A fan-out instance
-// sets the three Partition* fields on top; everything else is identical by
-// construction.
-type taskHashInputArgs struct {
-	JobAlias                string
-	TaskName                string
-	Image                   string
-	UnresolvedImageIdentity string
-	ResolvedImageDigest     string
-	Command                 []string
-	Env                     map[string]string
-	WorkDir                 string
-	Mounts                  []container.Mount
-	ResolvedVolumeMounts    []container.VolumeMount
-	Kubernetes              *container.KubernetesSpec
-	PredecessorHashes       []string
-	PredecessorOutputs      map[string]map[string]string
-	RunParams               map[string]string
-	CacheVersion            int
-	// Chain is the resolved cache.chain mode. Under CacheChainValues the
-	// PredecessorHashes above are carried for provenance but excluded from the
-	// key; see cache.HashInput.Chain.
-	Chain string
-
-	Partition            string
-	PartitionFingerprint string
-	PartitionAttributes  map[string]string
-}
-
-// buildTaskHashInput is the single construction site for cache.HashInput in the
-// local executor. See taskHashInputArgs for why it exists.
-func buildTaskHashInput(a taskHashInputArgs) cache.HashInput {
-	return cache.HashInput{
-		JobAlias:                a.JobAlias,
-		TaskName:                a.TaskName,
-		Image:                   a.Image,
-		ResolvedImageDigest:     a.ResolvedImageDigest,
-		UnresolvedImageIdentity: a.UnresolvedImageIdentity,
-		Command:                 a.Command,
-		Env:                     a.Env,
-		WorkDir:                 a.WorkDir,
-		Mounts:                  a.Mounts,
-		ResolvedVolumeMounts:    a.ResolvedVolumeMounts,
-		Kubernetes:              a.Kubernetes,
-		PredecessorHashes:       a.PredecessorHashes,
-		PredecessorOutputs:      a.PredecessorOutputs,
-		RunParams:               a.RunParams,
-		Chain:                   a.Chain,
-		Partition:               a.Partition,
-		PartitionFingerprint:    a.PartitionFingerprint,
-		PartitionAttributes:     a.PartitionAttributes,
-		CacheVersion:            a.CacheVersion,
-	}
-}
+// taskHashInputArgs is the shared cache identity input for local execution.
+// Source-specific command and partition decoding stays at each call site.
+type taskHashInputArgs = cache.HashInput
 
 // applyCacheHit marks a task cached, replaying a cached fan-out producer's
 // partition list into the same transaction when there is one, so the consumer's
@@ -948,14 +999,17 @@ func (j *job) Run(ctx context.Context) (err error) {
 	// defer is armed (a secret resolver that cannot be built, a persistent
 	// store error) would leave the run running forever with nothing left to
 	// execute it. Finalize it here instead.
-	completionArmed := false
+	finalizationHandled := false
 	if resumeID, resuming := run.FromContext(ctx); resuming {
 		defer func() {
-			if completionArmed || err == nil {
+			if finalizationHandled || err == nil {
 				return
 			}
-			j.finalizeAbortedResume(store, resumeID, err)
+			j.finalizeAbortedResume(ctx, store, resumeID, err)
 		}()
+	}
+	if serverShutdown(ctx) {
+		return runlife.ErrServerShutdown
 	}
 	vars := j.envVariables()
 	secretResolver := j.secretResolver
@@ -975,14 +1029,6 @@ func (j *job) Run(ctx context.Context) (err error) {
 	// Lazily built, but fanned instances resolve their cache identity from
 	// concurrent goroutines, so the initialization must be once-only rather
 	// than a racy nil check.
-	var (
-		cacheStore     *cache.Store
-		cacheStoreOnce sync.Once
-	)
-	getCacheStore := func() *cache.Store {
-		cacheStoreOnce.Do(func() { cacheStore = cache.NewStore(store.DB()) })
-		return cacheStore
-	}
 
 	executionMode := normalizeExecutionMode(vars.ExecutionMode)
 	failurePolicy := normalizeTaskFailurePolicy(vars.TaskFailurePolicy)
@@ -1002,6 +1048,9 @@ func (j *job) Run(ctx context.Context) (err error) {
 	}
 
 	resolveRun := func() (*run.JobRun, error) {
+		if serverShutdown(ctx) {
+			return nil, runlife.ErrServerShutdown
+		}
 		startOpts := []run.StartOption{run.WithStartParams(j.params)}
 		startPriority := strings.TrimSpace(j.priorityOverride)
 		if startPriority == "" {
@@ -1036,6 +1085,9 @@ func (j *job) Run(ctx context.Context) (err error) {
 				return store.Get(running.ID)
 			}
 
+			if serverShutdown(ctx) {
+				return nil, runlife.ErrServerShutdown
+			}
 			if err := store.ResetInFlightTasks(running.ID); err != nil {
 				return nil, err
 			}
@@ -1054,6 +1106,14 @@ func (j *job) Run(ctx context.Context) (err error) {
 	}
 	if snapshot == nil {
 		return nil
+	}
+	if snapshot.Status == run.StatusCancelled {
+		// Durable cancellation can precede delivery of its asynchronous event.
+		// A caller's earlier status read and live registered context are not
+		// authority to resume this row. Its terminal write already owns the
+		// original cause and callbacks; do not register tasks or finalize again.
+		finalizationHandled = true
+		return fmt.Errorf("run %s cancelled (%s): %w", snapshot.ID, snapshot.Error, context.Canceled)
 	}
 
 	runID := snapshot.ID
@@ -1079,9 +1139,12 @@ func (j *job) Run(ctx context.Context) (err error) {
 	cancelCtx, releaseCancel := RegisterRunCancel(ctx, runID)
 	defer releaseCancel()
 	ctx = run.WithContext(cancelCtx, runID)
+	// Keep the registered owner context separate from the derived deadline
+	// context: its cleanup cancel runs before the completion defer below.
+	ownerCtx := ctx
 
 	var runErr error
-	completionArmed = true
+	finalizationHandled = true
 	defer func() {
 		// The run context is the authority for the whole-run deadline. It must
 		// win over an earlier ordinary task failure: with continue-on-failure a
@@ -1089,15 +1152,39 @@ func (j *job) Run(ctx context.Context) (err error) {
 		// the earlier error would leave that task and its pending siblings
 		// non-terminal. Per-task deadlines use child contexts and cannot enter
 		// this branch.
-		if cause := context.Cause(ctx); runTimeout > 0 && run.IsRunDeadlineError(cause) {
-			runErr = cause
-			err = cause
+		terminationWon := func() bool {
+			switch cause := context.Cause(ctx); {
+			case runTimeout > 0 && run.IsRunDeadlineError(cause):
+				runErr = cause
+				err = cause
+			case serverShutdown(ownerCtx):
+				runErr = runlife.ErrServerShutdown
+				err = runErr
+			case ownerCtx.Err() == context.Canceled:
+				// Sample the owner, never the cleanup-canceled deadline child.
+				runErr = run.NewRunCancellationError(context.Cause(ownerCtx))
+				err = runErr
+			default:
+				return false
+			}
+			return true
+		}
+		complete := func() error {
+			terminationWon()
+			if errors.Is(runErr, runlife.ErrServerShutdown) && !run.IsRunDeadlineError(runErr) {
+				return runlife.ErrServerShutdown
+			}
+			return store.Complete(runID, runErr)
 		}
 		if j.beforeComplete != nil {
 			j.beforeComplete(runID)
 		}
-		completeErr := store.Complete(runID, runErr)
+		completeErr := complete()
 		for attempt := 0; errors.Is(completeErr, run.ErrRunHasPendingWork); attempt++ {
+			if terminationWon() {
+				completeErr = complete()
+				break
+			}
 			// A per-partition retry landed after the DAG finished and before
 			// this status write. HTTP kickoff only fires when reopened=true;
 			// the run was still running so the handler will not start an
@@ -1114,10 +1201,22 @@ func (j *job) Run(ctx context.Context) (err error) {
 				// examined, so alternate hand-off and completion a few times
 				// before conceding the run to an operator.
 				for range 3 {
-					if j.handOffPendingPartitionRetries(store, runID, snapshot.Params) {
+					if terminationWon() {
+						completeErr = complete()
+						break
+					}
+					handedOff, handoffErr := j.handOffPendingPartitionRetries(ctx, store, runID, snapshot.Params)
+					if terminationWon() {
+						completeErr = complete()
+						break
+					}
+					if handedOff {
 						return
 					}
-					completeErr = store.Complete(runID, runErr)
+					if handoffErr != nil {
+						runErr = errors.Join(runErr, handoffErr)
+					}
+					completeErr = complete()
 					if !errors.Is(completeErr, run.ErrRunHasPendingWork) {
 						break
 					}
@@ -1129,7 +1228,11 @@ func (j *job) Run(ctx context.Context) (err error) {
 				}
 				break
 			}
-			handedOff, updatedErr, recoverErr := j.recoverPendingPartitionRetries(store, runID, snapshot.Params, runErr)
+			handedOff, updatedErr, recoverErr := j.recoverPendingPartitionRetries(ctx, store, runID, snapshot.Params, runErr)
+			if terminationWon() {
+				completeErr = complete()
+				break
+			}
 			if recoverErr != nil {
 				log.Error("run completion refused for a pending partition retry that could not be resolved; leaving the run for an operator",
 					"job_id", j.id, "run_id", runID, "error", recoverErr)
@@ -1139,7 +1242,10 @@ func (j *job) Run(ctx context.Context) (err error) {
 				return
 			}
 			runErr = updatedErr
-			completeErr = store.Complete(runID, runErr)
+			completeErr = complete()
+		}
+		if errors.Is(completeErr, runlife.ErrServerShutdown) {
+			return // The surviving owner keeps durable work and completion callbacks.
 		}
 		if completeErr != nil {
 			log.Error("run completion persistence failure", "run_id", runID, "error", completeErr)
@@ -1312,20 +1418,32 @@ func (j *job) Run(ctx context.Context) (err error) {
 		return err
 	}
 
-	queue := make([]uuid.UUID, 0, len(tasks))
-	inQueue := make(map[uuid.UUID]bool, len(tasks))
-	processed := make(map[uuid.UUID]bool, len(tasks))
-	taskOutcomes := make(map[uuid.UUID]run.TaskStatus, len(tasks))
-	taskOutputs := make(map[uuid.UUID]map[string]string, len(tasks))
-	taskHashes := make(map[uuid.UUID]string, len(tasks))
-	taskQuarantine := make(map[uuid.UUID]bool, len(tasks))
-	taskAttempts := make(map[uuid.UUID]int, len(tasks))
-	terminalTasks := 0
+	local := &localRun{
+		ctx: ctx, j: j, store: store, snapshot: snapshot, currentRun: currentRun,
+		tasks: tasks, atomsByTask: atomsByTask, tasksByID: tasksByID, runners: runners,
+		taskOrder: taskOrder, triggerRuleByTask: triggerRuleByTask,
+		adjacency: adjacency, predecessors: predecessors, indegree: indegree,
+		vars: vars, secretResolver: secretResolver, runID: runID,
+		runQuarantined: runQuarantined, maxParallel: maxParallel, continueOnFailure: continueOnFailure,
+		queue:          make([]uuid.UUID, 0, len(tasks)),
+		inQueue:        make(map[uuid.UUID]bool, len(tasks)),
+		processed:      make(map[uuid.UUID]bool, len(tasks)),
+		taskOutcomes:   make(map[uuid.UUID]run.TaskStatus, len(tasks)),
+		taskOutputs:    make(map[uuid.UUID]map[string]string, len(tasks)),
+		taskHashes:     make(map[uuid.UUID]string, len(tasks)),
+		taskQuarantine: make(map[uuid.UUID]bool, len(tasks)),
+		taskAttempts:   make(map[uuid.UUID]int, len(tasks)),
+	}
+	processed := local.processed
+	taskOutcomes := local.taskOutcomes
+	taskQuarantine := local.taskQuarantine
+	taskAttempts := local.taskAttempts
 	imageIdentityChecksRequired := false
 	for _, taskState := range currentRun.Tasks {
 		imageIdentityChecksRequired = imageIdentityChecksRequired || taskState.CacheEnabled && taskState.CachePinDigests || taskState.HasUnresolvedImageIdentity
 	}
 
+	local.imageIdentityChecksRequired = imageIdentityChecksRequired
 	for _, taskState := range currentRun.Tasks {
 		taskQuarantine[taskState.ID] = taskState.Quarantine || runQuarantined
 		taskAttempts[taskState.ID] = max(taskState.Attempt, 1)
@@ -1344,13 +1462,13 @@ func (j *job) Run(ctx context.Context) (err error) {
 			processed[taskState.ID] = true
 			taskOutcomes[taskState.ID] = run.TaskStatusSucceeded
 			if len(taskState.Output) > 0 {
-				taskOutputs[taskState.ID] = taskState.Output
+				local.setTaskOutput(taskState.ID, taskState.Output)
 			}
-			terminalTasks++
+			local.terminalTasks++
 		case run.TaskStatusSkipped:
 			processed[taskState.ID] = true
 			taskOutcomes[taskState.ID] = run.TaskStatusSkipped
-			terminalTasks++
+			local.terminalTasks++
 		case run.TaskStatusFailed:
 			// A failure this re-entry does not reset is a settled outcome, not
 			// a reason to abandon the run: whole-run retry never leaves one
@@ -1362,2331 +1480,16 @@ func (j *job) Run(ctx context.Context) (err error) {
 			// replacement engines that bailed the same way.
 			processed[taskState.ID] = true
 			taskOutcomes[taskState.ID] = run.TaskStatusFailed
-			terminalTasks++
+			local.terminalTasks++
 			if runErr == nil {
 				runErr = fmt.Errorf("task %s previously failed", taskState.ID)
 			}
 		}
 	}
 
-	push := func(id uuid.UUID) {
-		if processed[id] || inQueue[id] {
-			return
-		}
-		queue = append(queue, id)
-		inQueue[id] = true
-		slices.SortFunc(queue, func(a, b uuid.UUID) int {
-			return cmp.Compare(taskOrder[a], taskOrder[b])
-		})
-	}
-
-	propagateSkipped := func(start uuid.UUID) error {
-		queue := []uuid.UUID{start}
-		seen := map[uuid.UUID]struct{}{start: {}}
-
-		for len(queue) > 0 {
-			current := queue[0]
-			queue = queue[1:]
-
-			for _, successor := range adjacency[current] {
-				if processed[successor] {
-					continue
-				}
-				if _, ok := indegree[successor]; !ok {
-					continue
-				}
-				if indegree[successor] > 0 {
-					indegree[successor]--
-				}
-				if indegree[successor] != 0 {
-					continue
-				}
-
-				predStatuses := collectPredecessorStatuses(predecessors[successor], taskOutcomes)
-				if satisfiesTriggerRule(triggerRuleByTask[successor], predStatuses) {
-					push(successor)
-					continue
-				}
-
-				skipRuleReason := fmt.Sprintf("trigger rule %q not satisfied", triggerRuleByTask[successor])
-				if err := store.SkipTask(runID, successor, skipRuleReason); err != nil {
-					return err
-				}
-
-				taskOutcomes[successor] = run.TaskStatusSkipped
-				processed[successor] = true
-				terminalTasks++
-				delete(inQueue, successor)
-
-				if _, ok := seen[successor]; ok {
-					continue
-				}
-				seen[successor] = struct{}{}
-				queue = append(queue, successor)
-			}
-		}
-
-		return nil
-	}
-
-	// A resumed per-partition retry executes the reset instance and whatever
-	// its success releases — nothing else. Under the halt failure policy the
-	// original engine's first failure resolved every not-yet-dispatched
-	// intolerant step as skipped (haltUnstarted), so those cannot come back;
-	// but a tolerant root the halt left dispatchable, or a row registered
-	// before that sweep existed, can still sit pending with indegree 0, and
-	// seeding it here would resurrect work on the back of an unrelated retry.
-	// So when retry-reset instances exist, only the nodes that own one enter
-	// the initial queue; their successors are released through the ordinary
-	// in-loop path.
-	retryOwners := make(map[uuid.UUID]struct{})
-	if pendingRetries, err := store.PendingPartitionRetries(runID); err != nil {
-		log.Warn("failed to read pending partition retries for re-entry", "run_id", runID, "error", err)
-	} else {
-		for i := range pendingRetries {
-			retryOwners[pendingRetries[i].TaskID] = struct{}{}
-		}
-	}
-	for _, taskState := range currentRun.Tasks {
-		if processed[taskState.ID] {
-			continue
-		}
-		if len(retryOwners) > 0 {
-			if _, owns := retryOwners[taskState.ID]; !owns {
-				continue
-			}
-		}
-		if indegree[taskState.ID] == 0 {
-			push(taskState.ID)
-		}
-	}
-
-	if len(queue) == 0 && terminalTasks < len(tasks) {
-		runErr = fmt.Errorf("job %s has no runnable tasks (verify DAG configuration)", j.id)
-		return runErr
-	}
-
-	paramEnv := buildParamEnv(snapshot.ID, j.alias, snapshot.Params)
-
-	// executeAtom creates, monitors, and stops a container for one execution attempt.
-	// It returns the atom result string, any parsed task outputs, any branch
-	// selections (for branch-type tasks), a persisted log snapshot, and any error.
-	//
-	// instanceID identifies the TaskRun row this attempt belongs to. It is
-	// uuid.Nil for an unfanned step (whose single row is addressable by taskID)
-	// and the instance's TaskRun primary key for a fan-out partition, where N
-	// sibling rows share (runID, taskID) and every store write and container name
-	// must therefore be keyed on the instance, not the catalog task.
-	executeAtom := func(taskCtx context.Context, taskID, instanceID uuid.UUID, attempt int, attemptTimeout time.Duration, runner *atomRunner, extraEnv map[string]string) (string, map[string]string, []string, []pkgtask.Partition, run.MetricsCapture, *run.TaskLogSnapshot, error) {
-		attemptContextError := func() error {
-			cause := context.Cause(taskCtx)
-			switch {
-			case cause == nil:
-				return nil
-			case run.IsRunDeadlineError(cause):
-				return cause
-			case errors.Is(cause, context.DeadlineExceeded):
-				return fmt.Errorf("task %s timed out after %s", taskID, attemptTimeout)
-			case errors.Is(cause, context.Canceled):
-				return fmt.Errorf("task %s cancelled: %w", taskID, cause)
-			default:
-				return cause
-			}
-		}
-		// taskRef is what the run store resolves this execution to; see
-		// loadTaskRunByIDOrUnique for the primary-key-or-task-ID contract.
-		taskRef := taskID
-		atomName := fmt.Sprintf("%s-%s", taskID, runID)
-		if instanceID != uuid.Nil {
-			taskRef = instanceID
-			// Sibling partitions run against the same catalog task in the same
-			// run, so the container name must carry the instance identity or
-			// Docker rejects every sibling after the first with a name conflict.
-			atomName = fmt.Sprintf("%s-%s", atomName, instanceID)
-		}
-		if attempt > 1 {
-			atomName = fmt.Sprintf("%s-attempt%d", atomName, attempt)
-		}
-
-		image := imagecheck.PinReference(runner.image, runner.resolvedImageDigest)
-		log.Info("running atom", "job_id", j.id, "task_id", taskID, "instance_id", instanceID, "image", image, "cmd", runner.command, "attempt", attempt)
-
-		spec := runner.spec
-		taskQuarantined := taskQuarantine[taskID] || runQuarantined
-		if taskQuarantined {
-			return "", nil, nil, nil, run.MetricsCapture{}, nil, ErrLocalQuarantinedReplayUnsupported
-		}
-		interpolated, err := jobdefruntime.InterpolateParamRefs(spec.Env, snapshot.Params)
-		if err != nil {
-			return "", nil, nil, nil, run.MetricsCapture{}, nil, err
-		}
-		spec.Env = interpolated
-		rawSecretEnv := spec.Env
-		spec, secretIdentities, err := jobdefruntime.ResolveContainerSpecSecretsWithIdentities(taskCtx, secretResolver, spec)
-		if err != nil {
-			return "", nil, nil, nil, run.MetricsCapture{}, nil, err
-		}
-		secretValues := incident.SecretValuesFromEnv(rawSecretEnv, spec.Env)
-		secretBearing := len(secretIdentities) > 0
-		secretLogFence := run.SecretLogFence{Attempt: attempt, Generation: uuid.NewString()}
-		if len(secretIdentities) > 0 {
-			refs := make([]models.TaskExecutionSecretRef, 0, len(secretIdentities))
-			for _, resolved := range secretIdentities {
-				refs = append(refs, run.SecretIdentityDescriptorRef(resolved.EnvKey, resolved.Ref, resolved.Identity))
-			}
-			if err := store.UpdateTaskExecutionDescriptorSecretRefs(runID, taskRef, refs); err != nil {
-				log.Warn("failed to persist task execution descriptor secret identity", "task_id", taskID, "error", err)
-			}
-		}
-		if secretBearing {
-			if err := store.PrepareSecretTaskLog(runID, taskRef, secretLogFence); err != nil {
-				return "", nil, nil, nil, run.MetricsCapture{}, nil, fmt.Errorf("prepare scrubbed task log: %w", err)
-			}
-		}
-		if len(paramEnv) > 0 || len(extraEnv) > 0 {
-			merged := make(map[string]string, len(spec.Env)+len(paramEnv)+len(extraEnv))
-			maps.Copy(merged, spec.Env)
-			maps.Copy(merged, paramEnv)
-			maps.Copy(merged, extraEnv)
-			spec.Env = merged
-		}
-
-		if ctxErr := attemptContextError(); ctxErr != nil {
-			return "", nil, nil, nil, run.MetricsCapture{}, nil, ctxErr
-		}
-		engine, err := runner.newEngine(taskCtx)
-		if err != nil {
-			if ctxErr := attemptContextError(); ctxErr != nil {
-				return "", nil, nil, nil, run.MetricsCapture{}, nil, ctxErr
-			}
-			return "", nil, nil, nil, run.MetricsCapture{}, nil, fmt.Errorf("task %s: %w", taskID, err)
-		}
-		if ctxErr := attemptContextError(); ctxErr != nil {
-			return "", nil, nil, nil, run.MetricsCapture{}, nil, ctxErr
-		}
-		a, err := engine.Create(&atom.EngineCreateRequest{
-			Name:    atomName,
-			Image:   image,
-			Command: runner.command,
-			Spec:    spec,
-		})
-		if err != nil {
-			if ctxErr := attemptContextError(); ctxErr != nil {
-				return "", nil, nil, nil, run.MetricsCapture{}, nil, ctxErr
-			}
-			return "", nil, nil, nil, run.MetricsCapture{}, nil, err
-		}
-		if ctxErr := attemptContextError(); ctxErr != nil {
-			if stopErr := engine.Stop(&atom.EngineStopRequest{ID: a.ID(), Force: true}); stopErr != nil {
-				return "", nil, nil, nil, run.MetricsCapture{}, nil, fmt.Errorf("%w; failed to stop atom %s: %v", ctxErr, a.ID(), stopErr)
-			}
-			return "", nil, nil, nil, run.MetricsCapture{}, nil, ctxErr
-		}
-
-		if err := store.StartTask(runID, taskRef, a.ID()); err != nil {
-			return "", nil, nil, nil, run.MetricsCapture{}, nil, err
-		}
-
-		var resourceSampler *atom.ResourceSampler
-		if vars.ResourceStatsEnabled {
-			resourceSampler = atom.StartResourceSampler(taskCtx, engine, a.ID(), vars.ResourceStatsSampleInterval)
-			defer resourceSampler.Stop(nil)
-		}
-
-		persistResourceOutcome := func(final atom.Atom) {
-			if resourceSampler == nil {
-				return
-			}
-			outcome := run.TaskResourceOutcome{ResourceSummary: resourceSampler.Stop(final), RuntimeID: a.ID(), Attempt: attempt}
-			if final != nil {
-				outcome.ExitCode = final.ExitCode()
-			}
-			if resourceErr := store.SetTaskResourceOutcome(runID, taskRef, outcome); resourceErr != nil {
-				log.Warn("failed to persist task resource outcome", "task_id", taskID, "error", resourceErr)
-			}
-		}
-
-		var (
-			secretLogStream    io.ReadCloser
-			secretLogCollector *run.SecretLogCollector
-			secretLogResult    <-chan run.SecretLogCaptureResult
-		)
-		if secretBearing {
-			if stream, streamErr := engine.Logs(&atom.EngineLogsRequest{ID: a.ID()}); streamErr != nil {
-				log.Warn("failed to open scrubbed live task log; will retry after completion",
-					"task_id", taskID, "atom_id", a.ID(), "error", streamErr)
-			} else {
-				secretLogStream = stream
-				collector := run.NewSecretLogCollector(store, runID, taskRef, secretLogFence,
-					secretValues, pkgtask.MaxLogSnapshotBytes)
-				secretLogCollector = collector
-				secretLogResult = run.StartSecretTaskLogCapture(stream, collector,
-					vars.OutputRefMaxBytes.Int64(), env.Variables().FanOutMaxPartitions)
-			}
-		}
-
-		waitResult := make(chan struct {
-			atom atom.Atom
-			err  error
-		}, 1)
-		go func() {
-			next, waitErr := engine.Wait(&atom.EngineWaitRequest{ID: a.ID(), Context: taskCtx})
-			waitResult <- struct {
-				atom atom.Atom
-				err  error
-			}{atom: next, err: waitErr}
-		}()
-
-		// abandonAtom force-stops the container and classifies why we are walking
-		// away from it. It is shared by BOTH doors of the select below, and that
-		// sharing is the point.
-		//
-		// When taskCtx ends, engine.Wait ALSO returns — with ctx.Err() — so
-		// `taskCtx.Done()` and `waitResult` become ready at the same instant and
-		// Go picks between them uniformly at random. Stopping the atom on only
-		// the taskCtx.Done() door therefore abandoned roughly half of all
-		// cancelled containers, which is the very orphan this cancel path exists
-		// to kill. It reproduced as an arm64-only unit failure
-		// (TestRunLocalCancelStopsAtom) purely because the slower runner made
-		// the cancel land before Wait started polling more often; the race is
-		// arch-independent and real against Docker, whose Wait returns
-		// waitCtx.Err() the same way (internal/atom/docker/engine.go).
-		//
-		// Any OTHER wait error is stopped too, matching what the distributed
-		// worker already does (internal/worker/runtime_executor.go monitorTask):
-		// a failed Wait means we stopped watching, never that the container
-		// stopped.
-		//
-		// Force, like the timeout branch always did: a container the run has
-		// given up on must not outlive it by its own graceful stop timeout. A
-		// failed Stop is reported rather than swallowed — "cancelled" and
-		// "cancelled but the container is still out there" are different
-		// operational facts.
-		abandonAtom := func(waitErr error) (string, map[string]string, []string, []pkgtask.Partition, run.MetricsCapture, *run.TaskLogSnapshot, error) {
-			// Join sampling before Stop removes the runtime. A failed Wait has
-			// no terminal inspect evidence, but completed samples remain valid.
-			persistResourceOutcome(nil)
-			if secretLogCollector != nil {
-				secretLogCollector.Abort()
-			}
-			if secretLogStream != nil {
-				_ = secretLogStream.Close()
-			}
-			stopErr := engine.Stop(&atom.EngineStopRequest{
-				ID:    a.ID(),
-				Force: true,
-			})
-			cause := context.Cause(taskCtx)
-			switch {
-			case run.IsRunDeadlineError(cause):
-				if stopErr != nil {
-					return "", nil, nil, nil, run.MetricsCapture{}, nil, fmt.Errorf("%w; failed to stop atom %s: %v", cause, a.ID(), stopErr)
-				}
-				return "", nil, nil, nil, run.MetricsCapture{}, nil, cause
-			case errors.Is(cause, context.DeadlineExceeded):
-				if stopErr != nil {
-					return "", nil, nil, nil, run.MetricsCapture{}, nil, fmt.Errorf("task %s timed out after %s and failed to stop atom %s: %w", taskID, attemptTimeout, a.ID(), stopErr)
-				}
-				return "", nil, nil, nil, run.MetricsCapture{}, nil, fmt.Errorf("task %s timed out after %s", taskID, attemptTimeout)
-			case errors.Is(cause, context.Canceled):
-				if stopErr != nil {
-					return "", nil, nil, nil, run.MetricsCapture{}, nil, fmt.Errorf("task %s cancelled and failed to stop atom %s: %w", taskID, a.ID(), stopErr)
-				}
-				return "", nil, nil, nil, run.MetricsCapture{}, nil, fmt.Errorf("task %s cancelled: %w", taskID, cause)
-			}
-			// taskCtx is still live, so this is a genuine wait failure rather
-			// than a cancellation arriving by the other door. The stop is
-			// best-effort here: the wait error is the cause worth surfacing.
-			if stopErr != nil {
-				log.Warn("failed to stop atom after engine wait error", "job_id", j.id, "task_id", taskID, "atom_id", a.ID(), "error", stopErr)
-			}
-			if waitErr != nil {
-				return "", nil, nil, nil, run.MetricsCapture{}, nil, waitErr
-			}
-			return "", nil, nil, nil, run.MetricsCapture{}, nil, taskCtx.Err()
-		}
-
-		select {
-		case <-taskCtx.Done():
-			return abandonAtom(nil)
-		case result := <-waitResult:
-			if result.err != nil {
-				return abandonAtom(result.err)
-			}
-			a = result.atom
-			log.Info("atom finished", "job_id", j.id, "task_id", taskID, "atom_id", a.ID(), "result", a.Result())
-
-			persistResourceOutcome(a)
-
-			// Capture the raw exit code before Result() folds it into a coarse
-			// status and the incident classifier loses it. Best-effort.
-			if resourceSampler == nil {
-				if exitErr := store.SetTaskExitCode(runID, taskRef, a.ExitCode()); exitErr != nil {
-					log.Warn("failed to persist task exit code", "task_id", taskID, "error", exitErr)
-				}
-			}
-
-			// Parse both structured outputs and branch markers in a single
-			// pass over the log stream (no full buffering).
-			var taskOutput map[string]string
-			var branchNames []string
-			var logSnapshot *run.TaskLogSnapshot
-			var partitions []pkgtask.Partition
-			// metricsCapture carries the samples AND how completely they were
-			// read: a log this executor could not fetch or parse, and a metrics
-			// scan that overflowed its cap, both mean a declared metric's
-			// absence proves nothing (issue #437). The evaluator downgrades
-			// those verdicts to `unavailable` instead of failing the task for
-			// an infrastructure fault.
-			var metricsCapture run.MetricsCapture
-			var markers *pkgtask.Markers
-			var parseErr error
-			var logErr error
-			var secretLogDrainTimedOut bool
-			if secretLogResult != nil {
-				capture, timedOut := run.DrainSecretTaskLogCapture(secretLogResult, secretLogCollector, secretLogStream,
-					secretLogDrainTimeout, secretLogAbortTimeout)
-				markers, parseErr = capture.Markers, capture.Err
-				secretLogDrainTimedOut = timedOut
-				if capture.PersistErr != nil {
-					log.Warn("failed to persist scrubbed live task log", "task_id", taskID, "error", capture.PersistErr)
-				}
-			} else {
-				logStream, openErr := engine.Logs(&atom.EngineLogsRequest{ID: a.ID()})
-				logErr = openErr
-				if openErr == nil {
-					if secretBearing {
-						collector := run.NewSecretLogCollector(store, runID, taskRef, secretLogFence,
-							secretValues, pkgtask.MaxLogSnapshotBytes)
-						markers, parseErr = run.CaptureSecretTaskLogs(logStream, collector,
-							vars.OutputRefMaxBytes.Int64(), env.Variables().FanOutMaxPartitions)
-						if persistErr := collector.Err(); persistErr != nil {
-							log.Warn("failed to persist scrubbed task log", "task_id", taskID, "error", persistErr)
-						}
-					} else {
-						markers, parseErr = pkgtask.CaptureMarkersWithLimits(logStream, pkgtask.MaxLogSnapshotBytes, vars.OutputRefMaxBytes.Int64(), env.Variables().FanOutMaxPartitions)
-						if closeErr := logStream.Close(); closeErr != nil {
-							log.Warn("failed to close log stream", "task_id", taskID, "error", closeErr)
-						}
-					}
-				}
-			}
-			if logErr != nil {
-				metricsCapture.Unreadable = true
-				log.Warn("failed to read task logs; markers and dataset metrics are unavailable for this task",
-					"job_id", j.id, "task_id", taskID, "atom_id", a.ID(), "error", logErr)
-			} else {
-				switch {
-				case parseErr != nil:
-					if _, ok := errors.AsType[*pkgtask.PartitionError](parseErr); ok && !secretLogDrainTimedOut {
-						stopErr := engine.Stop(&atom.EngineStopRequest{ID: a.ID(), Force: true})
-						if stopErr != nil {
-							return "", nil, nil, nil, run.MetricsCapture{}, nil, fmt.Errorf("%v (also failed to stop atom: %w)", parseErr, stopErr)
-						}
-						return "", nil, nil, nil, run.MetricsCapture{}, nil, parseErr
-					}
-					metricsCapture.Unreadable = true
-					log.Warn("failed to parse task markers", "task_id", taskID, "error", parseErr)
-				case markers == nil:
-					metricsCapture.Unreadable = true
-				default:
-					taskOutput = markers.Output
-					branchNames = markers.Branches
-					partitions = markers.Partitions
-					metricsCapture.Samples = markers.Metrics
-					if markers.MetricsTruncated {
-						metricsCapture.Truncated = true
-						log.Warn("dataset metrics exceeded the marker cap; some samples were dropped",
-							"task_id", taskID, "cap_bytes", pkgtask.MaxMetricsBytes)
-					}
-					if markers.LogText != "" || markers.LogTruncated {
-						logSnapshot = &run.TaskLogSnapshot{
-							Text:      markers.LogText,
-							Truncated: markers.LogTruncated,
-						}
-					}
-				}
-			}
-
-			stopErr := engine.Stop(&atom.EngineStopRequest{
-				ID:    a.ID(),
-				Force: true,
-			})
-			if secretLogDrainTimedOut {
-				if stopErr != nil {
-					return "", nil, nil, nil, run.MetricsCapture{}, nil, fmt.Errorf("timed out draining scrubbed task log and failed to stop atom: %w", stopErr)
-				}
-				return "", nil, nil, nil, run.MetricsCapture{}, nil, fmt.Errorf("timed out draining scrubbed task log")
-			}
-			return string(a.Result()), taskOutput, branchNames, partitions, metricsCapture, logSnapshot, stopErr
-		}
-	}
-
-	fanOutGroups := make(map[uuid.UUID]run.ExpandedGroup)
-	// fanOutGroups is written from whichever worker goroutine completes a
-	// producer and read by whichever goroutine next runs a fanned step; the
-	// two are only DAG-ordered relative to EACH OTHER, so an unrelated task
-	// running concurrently makes the map a shared mutable. Every access after
-	// the run loop starts goes through registerExpansion/lookupFanOutGroup.
-	var fanOutGroupsMu sync.Mutex
-
-	// rehydrateFanOutGroups reconstructs already-expanded groups from the store.
-	//
-	// fanOutGroups is normally seeded by the producer's own completion, which
-	// returns the expansion payload. A RETRIED or resumed run does not re-execute
-	// the producer — RetryFromFailure keeps it terminal-successful — so that
-	// payload never arrives, and without this the local loop would treat a fanned
-	// step as one ordinary task and every store write keyed on the catalog task
-	// id would match N instance rows (ErrAmbiguousTaskRun), failing the retry.
-	// Instance rows are the durable record of the group; the payload is only an
-	// optimization that saves this read on the first run.
-	rehydrateFanOutGroups := func() {
-		var rows []models.TaskRun
-		if err := store.DB().
-			Where("job_run_id = ? AND partition_count > 0", runID).
-			Order("task_id ASC, partition_index ASC").
-			Find(&rows).Error; err != nil {
-			log.Warn("failed to rehydrate fan-out groups", "run_id", runID, "error", err)
-			return
-		}
-		byTask := make(map[uuid.UUID][]models.TaskRun, len(rows))
-		order := make([]uuid.UUID, 0, len(rows))
-		for _, row := range rows {
-			if _, seen := byTask[row.TaskID]; !seen {
-				order = append(order, row.TaskID)
-			}
-			byTask[row.TaskID] = append(byTask[row.TaskID], row)
-		}
-		for _, tid := range order {
-			if existing, ok := fanOutGroups[tid]; ok && len(existing.Instances) > 0 {
-				continue
-			}
-			instances := byTask[tid]
-			g := run.ExpandedGroup{TaskID: tid, Dependents: map[string][]string{}}
-			if t := tasksByID[tid]; t != nil {
-				g.TaskName = t.Name
-			}
-			for _, row := range instances {
-				var deps []string
-				if len(row.PartitionDependsOn) > 0 {
-					if err := json.Unmarshal(row.PartitionDependsOn, &deps); err != nil {
-						log.Warn("failed to decode partition dependsOn", "task_id", tid, "partition", row.PartitionValue, "error", err)
-					}
-				}
-				var attrs map[string]string
-				if len(row.PartitionAttributes) > 0 {
-					if err := json.Unmarshal(row.PartitionAttributes, &attrs); err != nil {
-						log.Warn("failed to decode partition attributes", "task_id", tid, "partition", row.PartitionValue, "error", err)
-					}
-				}
-				g.Instances = append(g.Instances, run.ExpandedInstance{
-					TaskRunID:               row.ID,
-					TaskID:                  tid,
-					PartitionIndex:          row.PartitionIndex,
-					Partition:               pkgtask.Partition{Key: row.PartitionValue, Fingerprint: row.PartitionFingerprint, DependsOn: deps, Attributes: attrs},
-					OutstandingPredecessors: row.OutstandingPredecessors,
-				})
-				for _, d := range deps {
-					g.Dependents[d] = append(g.Dependents[d], row.PartitionValue)
-				}
-			}
-			if len(g.Instances) > 0 {
-				fanOutGroups[tid] = g
-			}
-		}
-	}
-	rehydrateFanOutGroups()
-
-	// registerExpansion is the SINGLE place an expansion payload becomes an
-	// executable group. Two routes can expand a producer locally — a fresh
-	// completion (CompleteTaskWithPartitions) and a cache hit
-	// (CacheHitTaskWithPartitions) — and both funnel through here so they cannot
-	// drift on what "the group is now runnable" means.
-	registerExpansion := func(res *run.CompleteTaskResult) {
-		if res == nil || res.Expansion == nil {
-			return
-		}
-		fanOutGroupsMu.Lock()
-		defer fanOutGroupsMu.Unlock()
-		for _, g := range res.Expansion.Groups {
-			if len(g.Instances) > 0 {
-				fanOutGroups[g.TaskID] = g
-			}
-		}
-	}
-
-	// lookupFanOutGroup is the only read of fanOutGroups once the run loop is
-	// dispatching; rehydrateFanOutGroups above runs before any worker starts.
-	lookupFanOutGroup := func(taskID uuid.UUID) (run.ExpandedGroup, bool) {
-		fanOutGroupsMu.Lock()
-		defer fanOutGroupsMu.Unlock()
-		g, ok := fanOutGroups[taskID]
-		return g, ok
-	}
-
-	// liveTaskCount is the number of DAG *nodes* the run must resolve, which is
-	// the static task count: fan-out changes the TaskRun row count, never the
-	// node count. A fanned step stays one node in adjacency/indegree here and is
-	// collapsed back to one entry by convertRunModelWithDB, so both this guard
-	// and waitForRunCompletion count in the same unit. The instance rows behind a
-	// group are accounted for inside runFannedGroup, which does not return until
-	// every one of them is terminal.
-	liveTaskCount := len(tasks)
-
-	// resolveTaskCacheIdentity computes the cache config plus the partition-free
-	// hash-input args for a task. Shared by the unfanned path and every instance
-	// of a fanned group so both fold in exactly the same fields.
-	resolveTaskCacheIdentity := func(
-		taskID uuid.UUID,
-		taskModel *models.Task,
-		runner *atomRunner,
-		outputEnv map[string]string,
-		predOutputs map[string]map[string]string,
-	) (jobdefschema.CacheConfig, taskHashInputArgs, map[uuid.UUID]string, error) {
-		// The cache configuration the SCHEDULER resolved onto this run's rows,
-		// not a fresh resolution of the live step/job/env config. RegisterTasks
-		// calls ResolveCacheConfig once and freezes all seven fields; the
-		// distributed worker rebuilds them straight off the row. Re-resolving
-		// here made a retried run's cache identity lane-dependent: a `job apply`
-		// that bumped `cache.version`, switched `cache.chain`, or toggled
-		// `cache.enabled` changed the local key and the local publish decision
-		// while the worker kept replaying the registered one.
-		cacheCfg := runner.cacheCfg
-		predHashByID := make(map[uuid.UUID]string)
-
-		taskName := ""
-		if taskModel != nil {
-			taskName = taskModel.Name
-		}
-
-		// Volatile per-run env (CAESIUM_RUN_ID, the injected partition, …) is
-		// deliberately excluded: only the step's declared env (after
-		// ${CAESIUM_PARAM_*} substitution) and the resolved predecessor outputs
-		// are identity. Interpolation happens here, before Compute, so two runs
-		// with different params cannot cache-hit on a shared token.
-		interpolatedEnv, err := jobdefruntime.InterpolateParamRefs(runner.spec.Env, snapshot.Params)
-		if err != nil {
-			return cacheCfg, taskHashInputArgs{}, nil, err
-		}
-		mergedEnv := make(map[string]string, len(interpolatedEnv)+len(outputEnv))
-		maps.Copy(mergedEnv, interpolatedEnv)
-		maps.Copy(mergedEnv, outputEnv)
-
-		var predHashes []string
-		for _, predID := range predecessors[taskID] {
-			if h, ok := taskHashes[predID]; ok {
-				predHashes = append(predHashes, h)
-				predHashByID[predID] = h
-			}
-		}
-
-		// When digest pinning is on, fold the resolved content digest (not the
-		// mutable tag) into the key. If resolution fails, bypass reuse and
-		// publication and carry run-specific uncertainty into downstream hashes.
-		//
-		// The digest exists only to make a cache key miss on a moved tag, so it
-		// is resolved only when caching is actually on: with the cache disabled
-		// there is no key to protect and the registry round-trip would be pure
-		// cost on every task.
-		var resolvedImageDigest, unresolvedImageIdentity string
-		if cacheCfg.Enabled && cacheCfg.PinDigests {
-			// The engine the ROW froze, matching the distributed lane's
-			// imagecheck.Resolve(ctx, taskRun.Engine, taskRun.Image, ...) — the
-			// digest is folded into the cache key, so the two lanes must resolve
-			// it against the same engine or one unit of work hashes differently
-			// depending on which executor ran it.
-			engineKind := runner.engineKind
-			if engineKind == "" {
-				engineKind = models.AtomEngineDocker
-			}
-			if digest, derr := j.digestResolver().Resolve(ctx, engineKind, runner.image, cacheCfg.DigestTTL); derr == nil {
-				resolvedImageDigest = digest
-			} else {
-				unresolvedImageIdentity = uuid.NewString()
-				log.Warn("cache bypassed: requested image digest could not be resolved", "task", taskName, "image", runner.image, "error", derr)
-			}
-		}
-		if imageIdentityChecksRequired && cacheCfg.Chain != cache.ChainValues && unresolvedImageIdentity == "" {
-			if unknown, err := store.HasUnresolvedPredecessorImage(runID, taskID); unknown || err != nil {
-				unresolvedImageIdentity = uuid.NewString()
-				if err != nil {
-					log.Warn("cache bypassed: predecessor image identity query failed", "task", taskName, "reason", "identity_query_failed", "error", err)
-				} else {
-					log.Warn("cache bypassed: transitive predecessor image identity unavailable", "task", taskName, "reason", "unresolved_predecessor")
-				}
-			}
-		}
-		runner.resolvedImageDigest = resolvedImageDigest
-
-		return cacheCfg, taskHashInputArgs{
-			JobAlias:                j.alias,
-			TaskName:                taskName,
-			Image:                   runner.image,
-			ResolvedImageDigest:     resolvedImageDigest,
-			UnresolvedImageIdentity: unresolvedImageIdentity,
-			Command:                 runner.command,
-			Env:                     mergedEnv,
-			WorkDir:                 runner.spec.WorkDir,
-			Mounts:                  runner.spec.Mounts,
-			ResolvedVolumeMounts:    runner.spec.ResolvedVolumeMounts,
-			Kubernetes:              runner.spec.Kubernetes,
-			PredecessorHashes:       predHashes,
-			PredecessorOutputs:      predOutputs,
-			RunParams:               snapshot.Params,
-			CacheVersion:            cacheCfg.Version,
-			Chain:                   cacheCfg.Chain,
-		}, predHashByID, nil
-	}
-
-	var limiterOpts []ratelimit.Option
-	if j.rateLimitClock != nil {
-		limiterOpts = append(limiterOpts, ratelimit.WithClock(j.rateLimitClock))
-	}
-	rateLimiter := ratelimit.NewLimiter(store.DB(), limiterOpts...)
-
-	// acquireRateLimitFor consumes one rate-limit token for ONE UNIT OF WORK.
-	//
-	// taskID selects the RULE — declarations are per step, so every instance of a
-	// fanned step shares one. taskRef is the row a rejection parks, and it is a
-	// different thing: the catalog task id for an unfanned step, the instance's
-	// own TaskRun id for a fan-out instance. RateLimitTask refuses a catalog id
-	// that names N siblings (ErrAmbiguousTaskRun), so conflating the two both
-	// halted the run and, before that, let a whole group through on one token.
-	//
-	// One token per instance is what makes the local lane agree with the
-	// distributed ones: the claimer and the owner dispatcher each acquire per
-	// TaskRun row against the same catalog rule, so a `2 per minute` rule means
-	// two PARTITIONS a minute wherever the step runs. Acquiring once for the
-	// group meant a 1000-partition step consumed a single token locally and a
-	// thousand under a worker.
-	acquireRateLimitFor := func(taskID, taskRef uuid.UUID, partition string) (bool, time.Time, error) {
-		rule, ok, err := ratelimit.RuleForTask(ctx, store.DB(), runID, taskID)
-		if err != nil {
-			return false, time.Time{}, err
-		}
-		if !ok {
-			return true, time.Time{}, nil
-		}
-		acquired, err := rateLimiter.Acquire(ctx, rule.Resource, rule.Units, rule.Limit, rule.Window)
-		if err != nil {
-			return false, time.Time{}, err
-		}
-		if acquired {
-			return true, time.Time{}, nil
-		}
-
-		now := time.Now().UTC()
-		retryAfter := now.Add(ratelimit.RetryAfter(now, rule.Window))
-		if err := store.RateLimitTask(ctx, runID, taskRef, retryAfter); err != nil {
-			return false, time.Time{}, err
-		}
-		metrics.RunSkippedTotal.WithLabelValues(j.alias, "rate_limit").Inc()
-		logArgs := []any{"job_id", j.id, "run_id", runID, "task_id", taskID, "resource", rule.Resource, "retry_after", retryAfter}
-		if partition != "" {
-			logArgs = append(logArgs, "partition", partition)
-		}
-		log.Info("task delayed by rate limit", logArgs...)
-		return false, retryAfter, nil
-	}
-
-	// runFannedGroup executes one expanded fan-out group.
-	//
-	// Readiness is NOT tracked in memory here: it is read from each instance
-	// row's outstanding_predecessors column, the same scalar the distributed
-	// claimer gates on. The store seeds it at expansion (template value +
-	// in-group indegree) and decrements/skips it transitively inside
-	// completeTask/failTask, so both lanes share one ordering implementation and
-	// a failed dependency skips its dependents instead of hanging the run.
-	runFannedGroup := func(
-		taskID uuid.UUID,
-		runner *atomRunner,
-		taskModel *models.Task,
-		group run.ExpandedGroup,
-		outputEnv map[string]string,
-		predOutputs map[string]map[string]string,
-		predOutputsByID map[uuid.UUID]map[string]string,
-	) ([]uuid.UUID, error) {
-		if len(group.Instances) == 0 {
-			return nil, nil
-		}
-
-		fo, decodeErr := jobdefruntime.DecodeFanOutConfig(nil)
-		if taskModel != nil {
-			if decoded, err := jobdefruntime.DecodeFanOutConfig(taskModel.FanOutConfig); err == nil {
-				fo = decoded
-			} else {
-				decodeErr = err
-			}
-		}
-		if decodeErr != nil {
-			log.Warn("failed to decode fanOut config", "job_id", j.id, "task_id", taskID, "error", decodeErr)
-		}
-
-		envName := jobdefschema.DefaultFanOutEnv
-		// An omitted failurePolicy is fail_fast, NOT continue. The schema
-		// validator stamps that default onto the stored config
-		// (pkg/jobdef/definition.go validateSteps) and the run owner normalizes
-		// identically (run.normalizeFanOutFailurePolicy): only an explicit
-		// "continue" continues, and anything else — "" or a value this build
-		// does not recognize — fails the group fast. The three lanes must agree
-		// here or a job that omits the key runs every sibling locally and
-		// cancels them under the owner, which is the mode-dependent divergence
-		// the plan's route-completeness contract exists to prevent.
-		failurePolicy := jobdefschema.FanOutFailureFailFast
-		groupParallel := maxParallel
-		if fo != nil {
-			if fo.Env != "" {
-				envName = fo.Env
-			}
-			if fo.FailurePolicy == jobdefschema.FanOutFailureContinue {
-				failurePolicy = jobdefschema.FanOutFailureContinue
-			}
-			// maxParallel caps the group; the job-level pool still bounds the
-			// total, so the effective cap is the smaller of the two. Unset (0)
-			// means "bounded only by the job".
-			if fo.MaxParallel > 0 && fo.MaxParallel < groupParallel {
-				groupParallel = fo.MaxParallel
-			}
-		}
-		if groupParallel < 1 {
-			groupParallel = 1
-		}
-		failFast := failurePolicy == jobdefschema.FanOutFailureFailFast
-
-		// Static per-instance facts, keyed by TaskRun id. Statuses and readiness
-		// come from the store, never from this map.
-		type instanceMeta struct {
-			partition  pkgtask.Partition
-			maxAttempt int
-		}
-		// The attempt budget the ROW froze (task.Retries+1 at RegisterTasks),
-		// which is what the distributed worker runs on (taskRun.MaxAttempts).
-		// Reading taskModel.Retries here would give a retried run a different
-		// budget per lane after a `job apply` changed `retries:`.
-		maxAttempts := max(runner.maxAttempts, 1)
-		meta := make(map[uuid.UUID]instanceMeta, len(group.Instances))
-		for _, inst := range group.Instances {
-			meta[inst.TaskRunID] = instanceMeta{partition: inst.Partition, maxAttempt: maxAttempts}
-		}
-
-		cacheCfg, hashArgs, predHashByID, err := resolveTaskCacheIdentity(taskID, taskModel, runner, outputEnv, predOutputs)
-		if err != nil {
-			return nil, err
-		}
-		taskQuarantined := taskQuarantine[taskID] || runQuarantined
-		taskName := ""
-		if taskModel != nil {
-			taskName = taskModel.Name
-		}
-
-		type instanceResult struct {
-			taskRunID uuid.UUID
-			partition string
-			output    map[string]string
-			// skippedTasks are CATALOG task ids the store skipped downstream when
-			// this instance resolved the group. They are what the run loop wants
-			// back — never instance primary keys, which it would miscount as DAG
-			// nodes in terminalTasks.
-			skippedTasks []uuid.UUID
-			// identityHash is this instance's own cache identity, collected so the
-			// group can fold one aggregate hash for downstream steps.
-			identityHash string
-			// retry is set when the attempt failed but the instance has attempts
-			// left; the row has already been reset to pending.
-			retry bool
-			// abort stops dispatch if even the pre-execution failure cannot be
-			// persisted. Re-reading that pending row must never redrive it.
-			abort bool
-			err   error
-		}
-
-		var (
-			byPartition = make(map[string]map[string]string)
-			// skippedTaskIDs are catalog task ids to hand back to the run loop.
-			skippedTaskIDs []uuid.UUID
-			seenSkipped    = make(map[uuid.UUID]bool)
-			hashByInstance = make(map[uuid.UUID]string, len(group.Instances))
-			inFlight       int
-			sawFailure     bool
-			// rateLimitFailed records that acquiring a rate-limit token itself
-			// errored (a store/limiter fault, not a rejection). It is separate
-			// from sawFailure because a rejected acquisition is normal and a
-			// broken one must not leave the group parked for a whole window
-			// waiting on a decision nothing is going to make.
-			rateLimitFailed bool
-			firstErr        error
-			results         = make(chan instanceResult, len(group.Instances))
-			running         = make(map[uuid.UUID]bool, len(group.Instances))
-		)
-
-		// dispatch runs one attempt of one instance. It owns every terminal write
-		// for that instance.
-		dispatch := func(taskRunID uuid.UUID, m instanceMeta, attempt int) {
-			// A cancelled run must not start another partition attempt, for the
-			// same reason the unfanned loop refuses one: the retry budget exists
-			// for transient faults, and cancellation is not one. Checked here
-			// because this closure is re-entered for attempt N+1 after
-			// RetryTaskInstance, so a cancel that ended attempt N would
-			// otherwise be what launches the next container.
-			if err := ctx.Err(); err != nil {
-				results <- instanceResult{taskRunID: taskRunID, partition: m.partition.Key, err: err}
-				return
-			}
-			taskTimeout, timingErr := store.LocalTaskExecutionTimeout(ctx, runID, taskRunID)
-			if timingErr != nil {
-				results <- instanceResult{taskRunID: taskRunID, partition: m.partition.Key, err: timingErr}
-				return
-			}
-			if taskTimeout == 0 {
-				taskTimeout = runner.taskTimeout
-			}
-			failIdentity := func(cause error) {
-				persistErr := store.FailTaskInstance(runID, taskRunID, cause)
-				if persistErr != nil {
-					cause = errors.Join(cause, errUnresolvedIdentityTerminalWrite, fmt.Errorf("persist partition failure: %w", persistErr))
-				}
-				results <- instanceResult{taskRunID: taskRunID, partition: m.partition.Key, err: cause, abort: persistErr != nil}
-			}
-
-			partEnv := map[string]string{
-				envName: m.partition.Key,
-			}
-			if raw, err := m.partition.CanonicalJSON(); err == nil {
-				partEnv[jobdefschema.FanOutPartitionJSONEnv] = string(raw)
-			}
-			extra := make(map[string]string, len(outputEnv)+len(partEnv))
-			maps.Copy(extra, outputEnv)
-			maps.Copy(extra, partEnv)
-
-			// Per-partition identity: the shared args plus this instance's
-			// partition fields. The partition env above is deliberately NOT part
-			// of the hash — dependsOn rides inside CAESIUM_PARTITION_JSON and is
-			// a scheduling instruction, not a data input.
-			//
-			// The identity is computed and persisted whether or not caching is
-			// enabled: it is what makes a partition addressable to `caesium
-			// receipt get`, `caesium why --partition` and `run retry
-			// --partition`. Caching is only one consumer of it, and gates just
-			// the lookup and the publish below.
-			args := hashArgs
-			args.Partition = m.partition.Key
-			args.PartitionFingerprint = m.partition.Fingerprint
-			args.PartitionAttributes = m.partition.Attributes
-			hashInput := buildTaskHashInput(args)
-			inputHash := hashInput.Compute()
-			hashInputBlob, blobErr := hashInput.CanonicalJSON(inputHash)
-			if blobErr != nil {
-				if args.UnresolvedImageIdentity != "" {
-					failIdentity(fmt.Errorf("serialize unresolved image identity: %w", blobErr))
-					return
-				}
-				log.Warn("failed to serialize hash-input blob", "task", taskName, "partition", m.partition.Key, "error", blobErr)
-				hashInputBlob = nil
-			}
-			// SetTaskHashWithBlob resolves its second argument through
-			// loadTaskRunByIDOrUnique, so the instance's TaskRun id addresses
-			// exactly this row — the same primary-key-or-task-id contract
-			// StartTask/SetTaskExitCode already take.
-			if err := store.SetTaskHashWithBlob(runID, taskRunID, inputHash, args.ResolvedImageDigest, hashInputBlob); err != nil {
-				if args.UnresolvedImageIdentity != "" {
-					failIdentity(fmt.Errorf("persist unresolved image identity: %w", err))
-					return
-				}
-				log.Warn("failed to persist partition hash", "task", taskName, "partition", m.partition.Key, "error", err)
-			}
-			if err := store.UpdateTaskExecutionDescriptorInputs(runID, taskRunID, predOutputsByID, predHashByID, inputHash, args.ResolvedImageDigest, hashInputBlob); err != nil {
-				if args.UnresolvedImageIdentity != "" {
-					failIdentity(fmt.Errorf("persist unresolved image execution descriptor: %w", err))
-					return
-				}
-				log.Warn("failed to persist partition descriptor inputs", "task", taskName, "partition", m.partition.Key, "error", err)
-			}
-
-			// This cache-hit site — a FANNED INSTANCE resolving its OWN
-			// per-partition result — is deliberately NOT gated like the two
-			// producer-facing cache-hit sites in this file and in
-			// internal/worker/runtime_executor.go (see F7,
-			// run.Store.HasFanOutSuccessor): a fanned instance can never itself
-			// be a fan-out PRODUCER, because pkg/jobdef/definition.go's step
-			// validation rejects chained fan-out ("fanOut.from %q is itself a
-			// fanOut step") for every job accepted through
-			// internal/jobdef/importer.go, which is the only writer of
-			// Task.FanOutConfig. So entry.Partitions is never consulted here,
-			// and there is no downstream group this hit could silently collapse.
-			// If chained fan-out is ever allowed, this invariant breaks and this
-			// site needs the same gate.
-			if cacheCfg.Enabled && hashArgs.UnresolvedImageIdentity == "" {
-				if attempt == 1 {
-					if entry, found, err := getCacheStore().Get(inputHash); err != nil {
-						log.Warn("cache lookup failed", "task", taskName, "partition", m.partition.Key, "error", err)
-					} else if found {
-						if cause := context.Cause(ctx); run.IsRunDeadlineError(cause) {
-							results <- instanceResult{taskRunID: taskRunID, partition: m.partition.Key, err: cause}
-							return
-						}
-						if !taskQuarantined {
-							metrics.TaskCacheHitsTotal.WithLabelValues(j.alias, taskName).Inc()
-						}
-						cacheRes, cacheErr := store.CacheHitTask(runID, taskRunID, run.CacheHitSource{
-							RunID:     entry.RunID,
-							CreatedAt: entry.CreatedAt,
-							ExpiresAt: entry.ExpiresAt,
-						}, entry.Result, entry.Output, entry.BranchSelections)
-						if cacheErr != nil {
-							log.Error("failed to apply partition cache hit", "task", taskName, "partition", m.partition.Key, "error", cacheErr)
-							// Fall through to normal execution.
-						} else {
-							var hitErr error
-							if !run.IsSuccessfulTaskResult(entry.Result) {
-								hitErr = fmt.Errorf("partition %q failed with cached result %q", m.partition.Key, entry.Result)
-							}
-							var hitSkipped []uuid.UUID
-							if cacheRes != nil {
-								hitSkipped = cacheRes.SkippedTaskIDs
-							}
-							results <- instanceResult{taskRunID: taskRunID, partition: m.partition.Key, output: entry.Output, skippedTasks: hitSkipped, identityHash: inputHash, err: hitErr}
-							return
-						}
-					} else if !taskQuarantined {
-						metrics.TaskCacheMissesTotal.WithLabelValues(j.alias, taskName).Inc()
-					}
-				}
-			}
-
-			taskCtx := ctx
-			cancel := func() {}
-			if taskTimeout > 0 {
-				taskCtx, cancel = context.WithTimeout(ctx, taskTimeout)
-			}
-			result, output, branches, _, metricsCapture, logSnapshot, execErr := executeAtom(taskCtx, taskID, taskRunID, attempt, taskTimeout, runner, extra)
-			cancel()
-			if execErr == nil {
-				if cause := context.Cause(ctx); run.IsRunDeadlineError(cause) {
-					execErr = cause
-				}
-			}
-
-			if execErr == nil {
-				// Record violations on THIS INSTANCE's row. SaveSchemaViolations
-				// refuses a catalog task id that resolves to N siblings and only
-				// logs the refusal, so keying on the catalog task meant a fanned
-				// step recorded nothing: fail mode lost the evidence for the
-				// failure it was reporting, and warn mode opened an incident with
-				// no row.
-				//
-				// The schema and its enforcement mode come from the FROZEN row
-				// (runner), not from the live catalog task, matching
-				// runtimeExecutor.runSchemaValidation. taskID is the catalog id
-				// the row itself names, so no live-task lookup is needed and a
-				// vanished catalog task can no longer skip validation the run was
-				// registered to perform.
-				if err := run.ValidateTaskOutputSchemaInstance(store, runID, taskID, taskRunID, output, runner.outputSchema, runner.schemaValidation); err != nil {
-					execErr = err
-				}
-			}
-
-			if execErr == nil {
-				// Data-quality seam, beside schema validation and keyed on THIS
-				// instance's row: a fanned step records its samples per
-				// partition (see run.EvaluateDataAssertions).
-				if err := run.EvaluateDataAssertions(store, runID, taskID, taskRunID, metricsCapture); err != nil {
-					execErr = err
-				}
-			}
-
-			if execErr != nil {
-				_ = store.SaveCapturedTaskLogSnapshot(runID, taskRunID, logSnapshot)
-				if run.IsRunDeadlineError(execErr) {
-					// The run completion defer fails every unfinished row in one
-					// transaction. Retrying or failing this instance here would apply
-					// ordinary task policy first and turn siblings into skips.
-					results <- instanceResult{taskRunID: taskRunID, partition: m.partition.Key, err: execErr}
-					return
-				}
-				// Retries cover execution errors only, matching the unfanned
-				// local path: a container that ran and exited non-zero is a
-				// terminal result, not a transient fault.
-				if attempt < m.maxAttempt {
-					if !taskQuarantined {
-						metrics.TaskRetriesTotal.WithLabelValues(j.alias, taskID.String(), strconv.Itoa(attempt)).Inc()
-					}
-					if retryErr := store.RetryTaskInstance(runID, taskRunID, attempt+1); retryErr != nil {
-						log.Error("failed to persist partition retry state", "run_id", runID, "partition", m.partition.Key, "error", retryErr)
-					} else {
-						log.Info("retrying partition", "job_id", j.id, "task_id", taskID, "partition", m.partition.Key, "attempt", attempt, "next_attempt", attempt+1, "error", execErr)
-						results <- instanceResult{taskRunID: taskRunID, partition: m.partition.Key, retry: true, err: execErr}
-						return
-					}
-				}
-				// FailTask persists the real cause on this instance's row and
-				// runs the transitive in-group skip cascade. CompleteTaskInstance
-				// would stamp the canned "command exited with non-zero status".
-				if persistErr := store.FailTaskInstance(runID, taskRunID, execErr); persistErr != nil {
-					log.Error("failed to persist partition failure", "run_id", runID, "partition", m.partition.Key, "error", persistErr)
-				}
-				log.Error("partition execution failed", "job_id", j.id, "task_id", taskID, "partition", m.partition.Key, "error", execErr)
-				results <- instanceResult{taskRunID: taskRunID, partition: m.partition.Key, err: execErr}
-				return
-			}
-
-			completeRes, completeErr := store.CompleteTaskInstance(taskRunID, result, output, branches, nil)
-			if completeErr != nil {
-				results <- instanceResult{taskRunID: taskRunID, partition: m.partition.Key, err: completeErr}
-				return
-			}
-			_ = store.SaveCapturedTaskLogSnapshot(runID, taskRunID, logSnapshot)
-			var completeSkipped []uuid.UUID
-			if completeRes != nil {
-				completeSkipped = completeRes.SkippedTaskIDs
-			}
-
-			if !run.IsSuccessfulTaskResult(result) {
-				results <- instanceResult{
-					taskRunID:    taskRunID,
-					partition:    m.partition.Key,
-					skippedTasks: completeSkipped,
-					err:          fmt.Errorf("partition %q failed with result %q", m.partition.Key, result),
-				}
-				return
-			}
-
-			// Publish the successful result so a later run of the same partition
-			// set is a hit. Quarantined replays never publish.
-			if cacheCfg.Enabled && hashArgs.UnresolvedImageIdentity == "" && inputHash != "" {
-				if taskQuarantined {
-					log.Info("quarantined partition skipped cache publication", "task", taskName, "partition", m.partition.Key)
-				} else {
-					expiresAt := cache.EntryExpiry(time.Now(), cacheCfg.TTL, cacheCfg.TTLNever)
-					if putErr := getCacheStore().Put(&cache.Entry{
-						Hash:                inputHash,
-						JobID:               j.id,
-						TaskName:            taskName,
-						Result:              result,
-						Output:              output,
-						BranchSelections:    branches,
-						RunID:               runID,
-						TaskRunID:           taskRunID,
-						ResolvedImageDigest: hashArgs.ResolvedImageDigest,
-						HashInputBlob:       hashInputBlob,
-						CreatedAt:           time.Now(),
-						ExpiresAt:           expiresAt,
-					}); putErr != nil {
-						log.Warn("failed to store partition cache entry", "task", taskName, "partition", m.partition.Key, "error", putErr)
-					}
-				}
-			}
-
-			results <- instanceResult{taskRunID: taskRunID, partition: m.partition.Key, output: output, skippedTasks: completeSkipped, identityHash: inputHash}
-		}
-
-		// absorb folds one reported instance result into the group's bookkeeping.
-		// Shared by the loop and by the cancellation drain below so a cancelled
-		// group still collects the identities and outputs of instances that DID
-		// finish — the fan-in aggregate is rebuilt from them.
-		absorb := func(res instanceResult) {
-			if res.abort {
-				firstErr = errors.Join(firstErr, res.err)
-			}
-			inFlight--
-			delete(running, res.taskRunID)
-			for _, id := range res.skippedTasks {
-				if !seenSkipped[id] {
-					seenSkipped[id] = true
-					skippedTaskIDs = append(skippedTaskIDs, id)
-				}
-			}
-			if res.identityHash != "" {
-				hashByInstance[res.taskRunID] = res.identityHash
-			}
-		}
-
-		for {
-			rows, err := store.TaskRunInstances(ctx, runID, taskID)
-			if err != nil {
-				if ctx.Err() == nil {
-					return skippedTaskIDs, err
-				}
-				// The run was cancelled out from under the loop, and this read
-				// carries the run's context, so it fails before a single row has
-				// been examined. Returning here is what left a cancelled run's
-				// instances stranded even after the SWEEP was detached: the sweep
-				// was never reached. Drain what is still in flight — those
-				// containers' contexts are cancelled too, so they resolve
-				// promptly — and fall through to the sweep, which runs detached
-				// and is the only thing that will resolve what was never
-				// dispatched.
-				if cause := context.Cause(ctx); run.IsRunDeadlineError(cause) || firstErr == nil {
-					firstErr = cause
-				}
-				sawFailure = true
-				for inFlight > 0 {
-					absorb(<-results)
-				}
-				break
-			}
-
-			terminal := 0
-			var ready []*run.TaskRun
-			// rateLimitedUntil is the earliest moment a parked instance becomes
-			// dispatchable again. RateLimitTask persists the deadline on the row,
-			// so a parked instance is recognizable across loop passes without any
-			// in-memory bookkeeping — the same way readiness is read, not tracked.
-			var rateLimitedUntil time.Time
-			noteRateLimited := func(at time.Time) {
-				if at.IsZero() {
-					return
-				}
-				if rateLimitedUntil.IsZero() || at.Before(rateLimitedUntil) {
-					rateLimitedUntil = at
-				}
-			}
-			now := time.Now().UTC()
-			for _, row := range rows {
-				if row == nil {
-					continue
-				}
-				if run.IsTerminal(row.Status) {
-					terminal++
-					continue
-				}
-				if running[row.ID] {
-					continue
-				}
-				// Readiness is the store's scalar, seeded at expansion and
-				// decremented by each terminal sibling.
-				if row.Status == run.TaskStatusPending && row.OutstandingPredecessors == 0 {
-					if row.RateLimitRetryAfter != nil && row.RateLimitRetryAfter.After(now) {
-						noteRateLimited(*row.RateLimitRetryAfter)
-						continue
-					}
-					ready = append(ready, row)
-				}
-			}
-
-			if terminal == len(rows) && inFlight == 0 {
-				break
-			}
-
-			if !failFast || !sawFailure {
-				for _, row := range ready {
-					if inFlight >= groupParallel {
-						break
-					}
-					m, ok := meta[row.ID]
-					if !ok {
-						// An instance row the expansion payload did not describe
-						// cannot be executed safely; leave it to the store.
-						continue
-					}
-					// One token per INSTANCE, acquired before the container is
-					// launched and against the step's own rule. The token is not
-					// taken for the group at dispatch time, so a `2 per minute`
-					// rule admits two partitions a minute here exactly as it does
-					// under the claimer and the owner dispatcher.
-					acquired, retryAfter, rlErr := acquireRateLimitFor(taskID, row.ID, m.partition.Key)
-					if rlErr != nil {
-						if firstErr == nil {
-							firstErr = rlErr
-						}
-						sawFailure = true
-						rateLimitFailed = true
-						break
-					}
-					if !acquired {
-						noteRateLimited(retryAfter)
-						continue
-					}
-					j.noteInstanceDispatched(row.ID)
-					running[row.ID] = true
-					inFlight++
-					// Attempt is durable execution identity. On local re-entry the
-					// row may already be pending at attempt N after a retry reset;
-					// restarting at one would violate the secret-log fence and also
-					// incorrectly repeat first-attempt cache behavior.
-					go dispatch(row.ID, m, max(row.Attempt, 1))
-				}
-			}
-
-			if inFlight == 0 {
-				if !rateLimitedUntil.IsZero() && !rateLimitFailed && (!failFast || !sawFailure) {
-					// Every dispatchable instance is parked behind the rate-limit
-					// window. Waiting here is what keeps the group alive: breaking
-					// out would hand still-runnable partitions to the straggler
-					// sweep, which resolves them as "never dispatched" and fails a
-					// run whose only problem was that it was going too fast.
-					wait := time.Until(rateLimitedUntil)
-					if wait <= 0 {
-						continue
-					}
-					timer := time.NewTimer(wait)
-					select {
-					case <-ctx.Done():
-						timer.Stop()
-						if cause := context.Cause(ctx); run.IsRunDeadlineError(cause) || firstErr == nil {
-							firstErr = cause
-						}
-					case <-timer.C:
-						timer.Stop()
-						continue
-					}
-				}
-				// Nothing running and nothing dispatchable. Either fail_fast has
-				// tripped, or the remaining instances are blocked behind siblings
-				// the store has already resolved. Either way the straggler sweep
-				// after the loop resolves whatever is left.
-				break
-			}
-
-			res := <-results
-			absorb(res)
-
-			if res.retry {
-				// The row is pending again; the next loop pass re-reads it.
-				continue
-			}
-			if res.err != nil {
-				sawFailure = true
-				if run.IsRunDeadlineError(res.err) || firstErr == nil {
-					firstErr = res.err
-				}
-				if res.abort {
-					for inFlight > 0 {
-						absorb(<-results)
-					}
-					break
-				}
-				continue
-			}
-			if len(res.output) > 0 {
-				byPartition[res.partition] = res.output
-			}
-		}
-
-		// Run-timeout finalization owns every unfinished row in one transaction.
-		// The generic straggler sweep below records skips and unrecorded outcomes;
-		// doing that after the absolute deadline would hide which work the timeout
-		// actually interrupted and leave those rows outside the atomic failure.
-		if cause := context.Cause(ctx); run.IsRunDeadlineError(cause) {
-			return skippedTaskIDs, cause
-		}
-		if run.IsRunDeadlineError(firstErr) {
-			return skippedTaskIDs, firstErr
-		}
-
-		// The group node is about to be reported terminal to the run loop, so no
-		// instance row may be left non-terminal: an orphan pending row keeps the
-		// run's own accounting (and any downstream group-status read) waiting on
-		// something nothing will ever dispatch. Resolve stragglers explicitly and
-		// say so, rather than leaving the run to time out. In local mode there is
-		// no recovery owner to revisit the row later, so "leave it and let
-		// recovery sort it out" is not an available option here.
-		//
-		// DO NOT "harmonize" the store primitive this calls with the one the
-		// fail-fast cascade calls. SkipTaskInstance resolves any non-terminal row
-		// (internal/run/store_instance.go); markInstanceSkippedTx, used by
-		// failFastSkipSiblingsTx, is deliberately pending-only. They look like an
-		// inconsistency and are not one: the guard belongs to the caller's
-		// knowledge, not to the primitive. This sweep has drained every in-flight
-		// instance and therefore KNOWS the containers are over; the SQL cascade
-		// does not, because a distributed worker may still POST a completion, and
-		// resolving a live row there would invite that worker to contradict it.
-		// Same operation, opposite epistemic position, correctly different guards.
-		//
-		// The sweep runs on a DETACHED context, and that is the whole reason it
-		// still works when it is needed most. It used to read through the run's
-		// own ctx, so a cancelled run made the very first query return
-		// context.Canceled and the sweep returned before resolving anything —
-		// exactly the "stranded for good" outcome the paragraph above says is not
-		// an available option in local mode. Cancellation is not a reason to skip
-		// the cleanup; it is the most common reason to need it. The timeout keeps
-		// a detached context from becoming an unbounded one if the DB is wedged.
-		sweepCtx, cancelSweep := context.WithTimeout(context.WithoutCancel(ctx), fanOutSweepTimeout)
-		defer cancelSweep()
-
-		// Captured once, before the writes below, so every row in this sweep gets
-		// the same explanation. ctx here is the RUN's context, not sweepCtx.
-		runCancelled := ctx.Err() != nil
-
-		rows, err := store.TaskRunInstances(sweepCtx, runID, taskID)
-		if err != nil {
-			return skippedTaskIDs, errors.Join(firstErr, err)
-		}
-		var stranded []string
-		var unrecorded []string
-		cancelledUnresolved := 0
-		for _, row := range rows {
-			if row == nil || run.IsTerminal(row.Status) {
-				continue
-			}
-			// A row still RUNNING here is a different animal from a pending one.
-			// Both loop exits above are gated on inFlight == 0 and the only path
-			// past the bottom of the loop is `res := <-results`, so every
-			// instance this group dispatched has already reported: the container
-			// is provably over. Still-running therefore means the completion
-			// WRITE failed, not that the work was cancelled — and the container
-			// may well have SUCCEEDED. Blaming that row on the group's failure
-			// policy puts a confident, wrong explanation on the one instance
-			// whose outcome is genuinely unknown, and that string is what
-			// `caesium run partitions` and `caesium why --partition` display.
-			//
-			// It is still RESOLVED rather than left alone: local mode has no
-			// recovery owner to revisit it, so an unresolved row is stranded for
-			// good and hangs the accounting this sweep exists to protect. Say the
-			// true thing about it instead of leaving it.
-			wasRunning := row.Status == run.TaskStatusRunning
-			// A row still parked behind its rate-limit window is a third animal
-			// again: it was dispatchable, it was deliberately held back, and the
-			// run ended (cancelled, timed out) before the window rolled. Calling
-			// that "never dispatched (unresolved in-group dependency)" sends the
-			// reader hunting a dependsOn bug that does not exist.
-			rateLimited := !wasRunning && row.RateLimitRetryAfter != nil && row.RateLimitRetryAfter.After(time.Now().UTC())
-			// The status stays SKIPPED even for a cancelled run: these instances
-			// never ran, so `failed` — what the unfanned local path stamps on the
-			// task it was actually executing — would be a lie about work that
-			// never started, and would drag the failure accounting and the
-			// in-group cascade along with it. Only the REASON mirrors that path,
-			// so both lanes read the same way in `caesium run partitions`.
-			reason := "fan-out instance was never dispatched (unresolved in-group dependency)"
-			switch {
-			case wasRunning:
-				reason = "fan-out instance outcome unrecorded: completion write failed"
-			case failFast && sawFailure:
-				reason = "fan-out group failed fast"
-			case runCancelled && rateLimited:
-				reason = fmt.Sprintf("fan-out instance was parked by the step's rate limit when the run was cancelled: %v", ctx.Err())
-			case runCancelled:
-				reason = fmt.Sprintf("fan-out instance cancelled before dispatch: %v", ctx.Err())
-			case rateLimited:
-				reason = "fan-out instance still parked by the step's rate limit when the run ended"
-			}
-			// Note this resolves an INSTANCE row; its id is deliberately not
-			// added to skippedTaskIDs, which the run loop reads as catalog task
-			// ids and counts against the DAG's node total.
-			if skipErr := store.SkipTaskInstance(runID, row.ID, reason); skipErr != nil {
-				return skippedTaskIDs, errors.Join(firstErr, skipErr)
-			}
-			switch {
-			case wasRunning:
-				unrecorded = append(unrecorded, row.PartitionValue)
-			case runCancelled:
-				// Counted, not "stranded": the run was cancelled, and reporting
-				// these as unresolved partitions would bury the one fact that
-				// explains all of them under a list of symptoms.
-				cancelledUnresolved++
-			case !failFast || !sawFailure:
-				stranded = append(stranded, row.PartitionValue)
-			}
-		}
-		// Logged unconditionally, unlike the stranded case below: a lost outcome
-		// is worth surfacing whatever the failure policy, and gating it on
-		// !failFast is how it stayed invisible.
-		if len(unrecorded) > 0 {
-			log.Error("fan-out instances completed without a recorded outcome", "job_id", j.id, "task_id", taskID, "partitions", unrecorded)
-			if firstErr == nil {
-				firstErr = fmt.Errorf("fan-out step %s left %d partition(s) with an unrecorded outcome: %v", taskID, len(unrecorded), unrecorded)
-			}
-		}
-		if len(stranded) > 0 {
-			log.Error("fan-out instances were never dispatched", "job_id", j.id, "task_id", taskID, "partitions", stranded)
-			if firstErr == nil {
-				firstErr = fmt.Errorf("fan-out step %s left %d partition(s) unresolved: %v", taskID, len(stranded), stranded)
-			}
-		}
-		// Only when the cancellation actually left work unresolved. A group whose
-		// every instance had already finished when the run was cancelled did not
-		// fail, and manufacturing an error for it would turn a clean group into a
-		// failed one on the way out.
-		if cancelledUnresolved > 0 && firstErr == nil {
-			firstErr = fmt.Errorf("fan-out step %s left %d partition(s) unresolved when the run was cancelled: %w",
-				taskID, cancelledUnresolved, ctx.Err())
-		}
-
-		// Aggregate from the store so cache hits, skips and failures are all
-		// reflected, not just what this loop executed.
-		//
-		// The instance ROWS are the aggregate's source of truth, not the
-		// byPartition/hashByInstance maps above: those only ever describe the
-		// instances THIS invocation dispatched. After a manual partition retry
-		// (`caesium run retry --partition`) or a RetryFromFailure that preserved
-		// the succeeded siblings, that is a single instance — so the rebuilt
-		// fan-in aggregate reported PARTITION_COUNT=1 for an N-partition group
-		// and the group identity hash folded one instance instead of N, re-keying
-		// every downstream step purely because someone retried a partition.
-		// Hydrating from the rows makes a retried run's aggregate and group hash
-		// identical to a fresh run's.
-		// sweepCtx, not ctx: this rebuild is the other half of the cleanup above
-		// and is just as necessary on a cancelled run — a downstream step's
-		// predecessor hashes and fan-in aggregate must not silently vanish
-		// because the run's context died between the last instance and here.
-		identities, err := store.FanOutInstanceIdentities(sweepCtx, runID, taskID)
-		if err != nil {
-			return skippedTaskIDs, errors.Join(firstErr, err)
-		}
-		succeeded, failed := 0, 0
-		// groupHashes are the terminal-success instances' identities in
-		// partition-index order (FanOutInstanceIdentities orders by
-		// partition_index), the order run.GroupIdentityHash requires.
-		var groupHashes []string
-		for _, inst := range identities {
-			switch inst.Status {
-			case run.TaskStatusSucceeded, run.TaskStatusCached:
-				succeeded++
-				// The persisted (effective) identity is preferred over this
-				// invocation's computed one so the value folded here is
-				// byte-identical to what the SQL read path
-				// (store.PredecessorHashes) folds for the same group. The
-				// in-memory value is the fallback for the narrow case where
-				// persisting the hash failed.
-				h := inst.IdentityHash
-				if h == "" {
-					h = hashByInstance[inst.TaskRunID]
-				}
-				if h != "" {
-					groupHashes = append(groupHashes, h)
-				}
-				if _, seen := byPartition[inst.PartitionValue]; !seen && len(inst.Output) > 0 {
-					byPartition[inst.PartitionValue] = inst.Output
-				}
-			case run.TaskStatusFailed:
-				failed++
-			}
-		}
-		// An aggregate that does not fit MaxOutputBytes fails the GROUP rather
-		// than publishing a partial contract: silently collapsing to the three
-		// counters would drop every user key a downstream step reads.
-		aggregate, aggErr := pkgtask.AggregateFanInOutputs(taskName, byPartition, succeeded, failed)
-		if aggErr != nil {
-			log.Error("failed to aggregate fan-in outputs", "job_id", j.id, "task_id", taskID, "error", aggErr)
-			if firstErr == nil {
-				firstErr = aggErr
-			}
-		} else {
-			taskOutputs[taskID] = aggregate
-		}
-
-		// Publish ONE aggregate identity for the group so a downstream step folds
-		// the fanned predecessor into its own cache key as a single
-		// PredecessorHashes entry — the same value the SQL read path
-		// (store.PredecessorHashes) computes for the distributed lane. Without
-		// this the local lane contributed nothing for a fanned predecessor, so a
-		// downstream step's identity was blind to its input changing.
-		if h := run.GroupIdentityHash(groupHashes); h != "" {
-			taskHashes[taskID] = h
-		}
-
-		return skippedTaskIDs, firstErr
-	}
-
-	runTask := func(taskID uuid.UUID) ([]uuid.UUID, error) {
-		failIdentity := func(failure error) ([]uuid.UUID, error) {
-			if err := store.FailTask(runID, taskID, failure); err != nil {
-				return nil, errors.Join(failure, errUnresolvedIdentityTerminalWrite, fmt.Errorf("persist task identity failure: %w", err))
-			}
-			return nil, failure
-		}
-		runner := runners[taskID]
-		if runner == nil {
-			return nil, fmt.Errorf("missing runner for task %s", taskID)
-		}
-		// Build predecessor output env vars for this task.
-		predOutputs := make(map[string]map[string]string)
-		predOutputsByID := make(map[uuid.UUID]map[string]string)
-		for _, predID := range predecessors[taskID] {
-			if outputs, ok := taskOutputs[predID]; ok && len(outputs) > 0 {
-				predOutputsByID[predID] = outputs
-				stepName := ""
-				if t := tasksByID[predID]; t != nil {
-					stepName = t.Name
-				}
-				if stepName == "" {
-					stepName = predID.String()
-				}
-				predOutputs[stepName] = outputs
-			}
-		}
-		outputEnv, err := pkgtask.BuildOutputEnv(predOutputs)
-		if err != nil {
-			return nil, err
-		}
-
-		taskModel := tasksByID[taskID]
-		taskQuarantined := taskQuarantine[taskID] || runQuarantined
-
-		if group, ok := lookupFanOutGroup(taskID); ok && len(group.Instances) > 0 {
-			return runFannedGroup(taskID, runner, taskModel, group, outputEnv, predOutputs, predOutputsByID)
-		}
-		taskTimeout, timingErr := store.LocalTaskExecutionTimeout(ctx, runID, taskID)
-		if timingErr != nil {
-			return nil, timingErr
-		}
-		if taskTimeout == 0 {
-			taskTimeout = runner.taskTimeout
-		}
-
-		// Cache check — attempt to bypass container execution.
-		var inputHash string
-		// hashInputBlob is the canonical secret-redacted decomposition of the
-		// HashInput; declared here (like inputHash) so it survives into the
-		// success path where it is also written onto the cache Entry, letting a
-		// cache hit be explained as well as a re-run.
-		var hashInputBlob []byte
-
-		// The same resolver every fan-out instance uses, so the two paths cannot
-		// drift on which fields are folded into the cache key.
-		cacheCfg, hashArgs, predHashByID, err := resolveTaskCacheIdentity(taskID, taskModel, runner, outputEnv, predOutputs)
-		if err != nil {
-			return nil, err
-		}
-		// resolvedImageDigest is the content digest folded into inputHash when
-		// pinning is on; empty otherwise. Reused when the result is cached so
-		// the cache Entry records which image content the hash covers.
-		resolvedImageDigest := hashArgs.ResolvedImageDigest
-
-		if cacheCfg.Enabled || hashArgs.UnresolvedImageIdentity != "" {
-			cacheStore := getCacheStore()
-			taskName := ""
-			if taskModel != nil {
-				taskName = taskModel.Name
-			}
-
-			hashInput := buildTaskHashInput(hashArgs)
-			inputHash = hashInput.Compute()
-			// Serialize the decomposed input to a canonical, secret-redacted
-			// blob so `caesium why` can later diff this run field-by-field. A
-			// serialization failure is non-fatal: persist the hash without the
-			// blob (a missing blob degrades `why` to digest-only, never wrong).
-			blob, blobErr := hashInput.CanonicalJSON(inputHash)
-			if blobErr != nil {
-				if hashArgs.UnresolvedImageIdentity != "" {
-					return failIdentity(fmt.Errorf("serialize unresolved image identity: %w", blobErr))
-				}
-				log.Warn("failed to serialize hash-input blob", "task", taskName, "error", blobErr)
-				blob = nil
-			}
-			hashInputBlob = blob
-			if err := store.SetTaskHashWithBlob(runID, taskID, inputHash, resolvedImageDigest, hashInputBlob); err != nil {
-				if hashArgs.UnresolvedImageIdentity != "" {
-					return failIdentity(fmt.Errorf("persist unresolved image identity: %w", err))
-				}
-				log.Warn("failed to persist task hash", "task", taskName, "error", err)
-			}
-			if err := store.UpdateTaskExecutionDescriptorInputs(runID, taskID, predOutputsByID, predHashByID, inputHash, resolvedImageDigest, hashInputBlob); err != nil {
-				if hashArgs.UnresolvedImageIdentity != "" {
-					return failIdentity(fmt.Errorf("persist unresolved image execution descriptor: %w", err))
-				}
-				log.Warn("failed to persist task execution descriptor inputs", "task", taskName, "error", err)
-			}
-
-			var entry *cache.Entry
-			var found bool
-			var err error
-			if cacheCfg.Enabled && hashArgs.UnresolvedImageIdentity == "" {
-				entry, found, err = cacheStore.Get(inputHash)
-			}
-			// A cache entry with no recorded partition list (nil, not merely
-			// empty — see cache.Entry.Partitions) is ambiguous for a task with a
-			// downstream fan-out consumer: it might be a pre-fan-out entry (or
-			// one written before the parser learned to record an explicit `[]`)
-			// that never had the chance to record one. Treat that combination as
-			// a MISS, exactly like `found` were false, so the producer runs once
-			// more and backfills a real (possibly still-empty) list. Ordinary
-			// tasks are unaffected: HasAnyFanOutConsumerForRun/HasFanOutSuccessor
-			// are false for them, so a legitimately partition-less entry keeps
-			// hitting as before.
-			//
-			// BOTH lookup errors below fail CLOSED — treat the hit as a MISS, exactly
-			// as a cacheStore.Get error already does in this same block. An
-			// inconclusive answer from either query would otherwise let an
-			// unrecorded-partitions entry resolve "cached" on a run that DOES use
-			// fan-out: the group expands to nothing and the consumer is silently
-			// skipped via onEmpty — the exact collapse this gate exists to prevent.
-			// The cost of failing closed is one extra execution of this task on a
-			// rare transient read error; the cost of failing open is a silently
-			// empty group. (The per-run pre-filter is still what keeps ordinary
-			// hits cheap — it only changes what happens when that query ERRORS.)
-			if found && entry.Partitions == nil {
-				hasAnyFanOut, hafErr := store.HasAnyFanOutConsumerForRun(runID)
-				switch {
-				case hafErr != nil:
-					log.Warn("cache: failed to check whether this run uses fan-out; treating the hit as unusable (fail closed)",
-						"task", taskName, "hash", inputHash[:12], "error", hafErr)
-					found = false
-				case hasAnyFanOut:
-					hasConsumer, hcErr := store.HasFanOutSuccessor(runID, taskID)
-					switch {
-					case hcErr != nil:
-						log.Warn("cache: failed to check for a fan-out consumer; treating the hit as unusable (fail closed)",
-							"task", taskName, "hash", inputHash[:12], "error", hcErr)
-						found = false
-					case hasConsumer:
-						log.Info("cache: no partition list recorded on the cache entry; re-running producer to record one",
-							"task", taskName, "hash", inputHash[:12])
-						found = false
-					}
-				}
-			}
-			switch {
-			case err != nil:
-				log.Warn("cache lookup failed", "task", taskName, "error", err)
-			case found:
-				if cause := context.Cause(ctx); run.IsRunDeadlineError(cause) {
-					return nil, cause
-				}
-				if !taskQuarantined {
-					metrics.TaskCacheHitsTotal.WithLabelValues(j.alias, taskName).Inc()
-				}
-				log.Info("cache hit", "task", taskName, "hash", inputHash[:12])
-
-				// A fan-out producer's partition list is part of what its
-				// execution produced, so it rides the cache entry and must be
-				// replayed into the cache-hit transaction: without it the
-				// producer resolves, the consumer's group never expands, and the
-				// fanned step silently collapses to its unexpanded template row.
-				cacheResult, cacheErr := applyCacheHit(store, runID, taskID, run.CacheHitSource{
-					RunID:     entry.RunID,
-					CreatedAt: entry.CreatedAt,
-					ExpiresAt: entry.ExpiresAt,
-				}, entry.Result, entry.Output, entry.BranchSelections, entry.Partitions)
-				if cacheErr != nil {
-					log.Error("failed to apply cache hit", "task", taskName, "error", cacheErr)
-					// Fall through to normal execution.
-				} else {
-					registerExpansion(cacheResult)
-					if len(entry.Output) > 0 {
-						taskOutputs[taskID] = entry.Output
-					}
-					taskHashes[taskID] = inputHash
-					var skipped []uuid.UUID
-					if cacheResult != nil && len(cacheResult.SkippedTaskIDs) > 0 {
-						skipped = cacheResult.SkippedTaskIDs
-					}
-					if !run.IsSuccessfulTaskResult(entry.Result) {
-						return skipped, fmt.Errorf("task %s failed with cached result %q", taskID, entry.Result)
-					}
-					return skipped, nil
-				}
-			default:
-				if cacheCfg.Enabled && !taskQuarantined {
-					metrics.TaskCacheMissesTotal.WithLabelValues(j.alias, taskName).Inc()
-				}
-			}
-		}
-
-		// Frozen on the row, exactly as the distributed worker reads it — see
-		// the identical note in runFannedGroup.
-		maxAttempts := max(runner.maxAttempts, 1)
-
-		var lastErr error
-		for attempt := max(taskAttempts[taskID], 1); attempt <= maxAttempts; attempt++ {
-			// A cancelled run must not start another attempt. The retry budget
-			// is spent on transient failures, and a cancellation is not one:
-			// without this the cancel that ended attempt N was itself the
-			// trigger for attempt N+1 launching a fresh container on a run the
-			// operator had already stopped. The delay-based select below only
-			// covers retryDelay > 0, which is the default, so this is the check
-			// that holds for a step with no delay configured.
-			if err := ctx.Err(); err != nil {
-				return nil, err
-			}
-
-			taskCtx := ctx
-			cancel := func() {}
-			if taskTimeout > 0 {
-				taskCtx, cancel = context.WithTimeout(ctx, taskTimeout)
-			}
-
-			result, output, branchNames, partitions, metricsCapture, logSnapshot, execErr := executeAtom(taskCtx, taskID, uuid.Nil, attempt, taskTimeout, runner, outputEnv)
-			cancel()
-			if execErr == nil {
-				if cause := context.Cause(ctx); run.IsRunDeadlineError(cause) {
-					execErr = cause
-				}
-			}
-
-			if execErr == nil {
-				// Frozen row, not the live catalog - see the fanned twin above.
-				// This also removes the nil dereference the row-built runner
-				// exposed: taskModel is tasksByID[taskID], previously guaranteed
-				// non-nil only because the runner map was itself built from the
-				// live catalog. Keying on taskID keeps validation running for a
-				// row whose catalog task has vanished, which a nil-taskModel
-				// guard would instead silently skip.
-				if err := run.ValidateTaskOutputSchema(store, runID, taskID, output, runner.outputSchema, runner.schemaValidation); err != nil {
-					if snapshotErr := store.SaveCapturedTaskLogSnapshot(runID, taskID, logSnapshot); snapshotErr != nil {
-						log.Warn("failed to persist task log snapshot", "job_id", j.id, "task_id", taskID, "error", snapshotErr)
-					}
-					execErr = err
-				}
-			}
-
-			if execErr == nil {
-				// Data-quality seam, beside schema validation. The unfanned
-				// path has one row per (run, task), so the catalog task id
-				// resolves it unambiguously.
-				if err := run.EvaluateDataAssertions(store, runID, taskID, uuid.Nil, metricsCapture); err != nil {
-					if snapshotErr := store.SaveCapturedTaskLogSnapshot(runID, taskID, logSnapshot); snapshotErr != nil {
-						log.Warn("failed to persist task log snapshot", "job_id", j.id, "task_id", taskID, "error", snapshotErr)
-					}
-					execErr = err
-				}
-			}
-
-			if execErr == nil {
-				completeResult, completeErr := store.CompleteTaskWithPartitions(runID, taskID, result, output, branchNames, partitions)
-				if completeErr != nil {
-					return nil, completeErr
-				}
-				registerExpansion(completeResult)
-				if snapshotErr := store.SaveCapturedTaskLogSnapshot(runID, taskID, logSnapshot); snapshotErr != nil {
-					log.Warn("failed to persist task log snapshot", "job_id", j.id, "task_id", taskID, "error", snapshotErr)
-				}
-				if len(output) > 0 {
-					taskOutputs[taskID] = output
-				}
-
-				// Keep uncertain identity available to downstream tasks even though
-				// this execution cannot publish a cache entry or short-circuit.
-				if inputHash != "" {
-					taskHashes[taskID] = inputHash
-				}
-
-				// Store successful result in cache, reusing the hash computed earlier.
-				if cacheCfg.Enabled && hashArgs.UnresolvedImageIdentity == "" && inputHash != "" && run.IsSuccessfulTaskResult(result) {
-					cacheStore := getCacheStore()
-					taskName := ""
-					if taskModel != nil {
-						taskName = taskModel.Name
-					}
-
-					if taskQuarantined {
-						taskHashes[taskID] = inputHash
-						log.Info("quarantined task skipped cache publication", "task", taskName, "hash", inputHash[:12])
-					} else {
-						// Value-verified short-circuit (D2): this task re-executed
-						// because its OWN identity hash (inputHash) changed. If it
-						// produced output byte-identical to a prior successful run,
-						// present that prior run's identity to downstream consumers so
-						// a downstream whose only changed input was this step stays a
-						// cache hit instead of re-running. The substitution only
-						// happens when content equality is PROVEN (see
-						// cache.EquivalentPriorHash); on any uncertainty it returns
-						// inputHash unchanged (re-run downstream — always safe). The
-						// proof reads priors filtered to exclude inputHash, so the
-						// order relative to the Put below does not matter.
-						effectiveHash := inputHash
-						if priors, priorErr := cacheStore.PriorEntriesByTask(j.id, taskName, inputHash); priorErr != nil {
-							log.Warn("short-circuit: failed to load prior entries", "task", taskName, "error", priorErr)
-						} else {
-							effectiveHash = cache.EquivalentPriorHash(inputHash, output, priors)
-						}
-						// taskHashes drives the in-memory predHashes a downstream task
-						// folds into its own key; storing the effective (possibly
-						// prior) identity is what stops the cascade locally.
-						taskHashes[taskID] = effectiveHash
-						if effectiveHash != inputHash {
-							metrics.TaskCacheShortCircuitsTotal.WithLabelValues(j.alias, taskName).Inc()
-							log.Info("value-verified short-circuit", "task", taskName, "new_hash", inputHash[:12], "effective_hash", effectiveHash[:12])
-							if scErr := store.SetTaskEffectiveHash(runID, taskID, effectiveHash); scErr != nil {
-								log.Warn("short-circuit: failed to persist effective hash", "task", taskName, "error", scErr)
-							}
-						}
-
-						expiresAt := cache.EntryExpiry(time.Now(), cacheCfg.TTL, cacheCfg.TTLNever)
-						if putErr := cacheStore.Put(&cache.Entry{
-							Hash:             inputHash,
-							JobID:            j.id,
-							TaskName:         taskName,
-							Result:           result,
-							Output:           output,
-							BranchSelections: branchNames,
-							// A fan-out producer's emitted partition list is part
-							// of what its execution produced: without it a cache
-							// hit on the producer would resolve the step without
-							// ever expanding its consumer's group.
-							Partitions:          partitions,
-							RunID:               runID,
-							TaskRunID:           taskID,
-							ResolvedImageDigest: resolvedImageDigest,
-							HashInputBlob:       hashInputBlob,
-							CreatedAt:           time.Now(),
-							ExpiresAt:           expiresAt,
-						}); putErr != nil {
-							log.Warn("failed to store cache entry", "task", taskName, "error", putErr)
-						}
-					}
-				}
-
-				var skipped []uuid.UUID
-				if completeResult != nil && len(completeResult.SkippedTaskIDs) > 0 {
-					skipped = completeResult.SkippedTaskIDs
-				}
-				if !run.IsSuccessfulTaskResult(result) {
-					return skipped, fmt.Errorf("task %s failed with result %q", taskID, result)
-				}
-				return skipped, nil
-			}
-			if run.IsRunDeadlineError(execErr) {
-				// Preserve the typed cause for the run loop. CompleteIfActive in
-				// the run completion defer owns the atomic all-task transition.
-				return nil, execErr
-			}
-			lastErr = execErr
-
-			// No more attempts — mark as permanently failed.
-			if attempt >= maxAttempts {
-				break
-			}
-
-			// Compute retry delay.
-			delay := computeRetryDelay(taskModel, attempt)
-
-			log.Info("retrying task", "job_id", j.id, "task_id", taskID, "attempt", attempt, "next_attempt", attempt+1, "delay", delay, "error", lastErr)
-
-			if !taskQuarantined {
-				metrics.TaskRetriesTotal.WithLabelValues(j.alias, taskID.String(), strconv.Itoa(attempt)).Inc()
-			}
-
-			if err := store.RetryTask(runID, taskID, attempt+1); err != nil {
-				log.Error("failed to persist task retry state", "run_id", runID, "task_id", taskID, "error", err)
-			}
-
-			if delay > 0 {
-				select {
-				case <-ctx.Done():
-					return nil, ctx.Err()
-				case <-time.After(delay):
-				}
-			}
-		}
-
-		if persistErr := store.FailTask(runID, taskID, lastErr); persistErr != nil {
-			log.Error("failed to persist task failure", "run_id", runID, "task_id", taskID, "error", persistErr)
-		}
-		return nil, lastErr
-	}
-
-	taskPool := worker.NewPool(maxParallel)
-
-	results := make(chan taskResult)
-	active := 0
-	halt := false
-	deferred := make(map[uuid.UUID]time.Time)
-	// dispatched records every node handed to the pool. The halt sweep below
-	// must never resolve one of these: its row is still `pending` in SQL until
-	// executeAtom's StartTask, so the store cannot tell it from a node this loop
-	// has not reached, and skipping it would record a container that ran as
-	// skipped.
-	dispatched := make(map[uuid.UUID]bool)
-
-	moveDueDeferred := func() bool {
-		now := time.Now().UTC()
-		moved := false
-		for taskID, retryAfter := range deferred {
-			if retryAfter.After(now) {
-				continue
-			}
-			delete(deferred, taskID)
-			push(taskID)
-			moved = true
-		}
-		return moved
-	}
-
-	nextDeferredAt := func() (time.Time, bool) {
-		var next time.Time
-		for _, retryAfter := range deferred {
-			if next.IsZero() || retryAfter.Before(next) {
-				next = retryAfter
-			}
-		}
-		return next, !next.IsZero()
-	}
-
-	dispatch := func(taskID uuid.UUID) error {
-		// An EXPANDED fan-out step acquires its tokens per instance inside
-		// runFannedGroup, not once here for the whole group. Acquiring here would
-		// be wrong twice over: one token would admit all N partitions, and the
-		// rejection path would park the row by catalog task id — which names N
-		// rows, so RateLimitTask returns ErrAmbiguousTaskRun and this dispatch
-		// error halts the entire run.
-		if group, ok := lookupFanOutGroup(taskID); !ok || len(group.Instances) == 0 {
-			acquired, retryAfter, err := acquireRateLimitFor(taskID, taskID, "")
-			if err != nil {
-				return err
-			}
-			if !acquired {
-				deferred[taskID] = retryAfter
-				return nil
-			}
-		}
-
-		active++
-		if err := taskPool.Submit(ctx, func() {
-			skipped, err := runTask(taskID)
-			results <- taskResult{id: taskID, err: err, skippedByBranch: skipped}
-		}); err != nil {
-			active--
-			return err
-		}
-		dispatched[taskID] = true
-		return nil
-	}
-
-	// haltUnstarted is the local executor's half of the `halt` failure policy.
-	// The store resolves every not-yet-dispatched step whose trigger rule is not
-	// failure-tolerant as skipped (run.Store.HaltUnstartedTasks — the same
-	// primitive the distributed worker calls, so both lanes stamp the same rows
-	// with the same reason), and this brings the in-memory DAG into line: each
-	// skipped node is retired and its successors advanced through
-	// propagateSkipped, which is what releases an `all_done` cleanup that sits
-	// downstream of a halted branch. Nothing here touches `halt`: that flag is
-	// the hard stop for dispatch errors and cancellation, whereas a policy halt
-	// keeps the loop running for the tolerant successors it deliberately leaves
-	// dispatchable.
-	haltUnstarted := func(failedID uuid.UUID) error {
-		candidates := make([]uuid.UUID, 0, len(tasks))
-		for _, t := range tasks {
-			if !processed[t.ID] && !dispatched[t.ID] {
-				candidates = append(candidates, t.ID)
-			}
-		}
-		if len(candidates) == 0 {
-			return nil
-		}
-		skipped, err := store.HaltUnstartedTasks(runID, failedID, candidates)
-		if err != nil {
-			return err
-		}
-		for _, id := range skipped {
-			if processed[id] {
-				continue
-			}
-			taskOutcomes[id] = run.TaskStatusSkipped
-			processed[id] = true
-			terminalTasks++
-			delete(inQueue, id)
-			delete(deferred, id)
-			if err := propagateSkipped(id); err != nil {
-				return err
-			}
-		}
-		queue = slices.DeleteFunc(queue, func(id uuid.UUID) bool { return processed[id] })
-		return nil
-	}
-
-	for (!halt && (len(queue) > 0 || len(deferred) > 0)) || active > 0 {
-		if !halt && moveDueDeferred() {
-			continue
-		}
-
-		for !halt && active < maxParallel && len(queue) > 0 {
-			taskID := queue[0]
-			queue = queue[1:]
-			delete(inQueue, taskID)
-
-			if processed[taskID] {
-				continue
-			}
-
-			if err := dispatch(taskID); err != nil {
-				if runErr == nil {
-					runErr = err
-				}
-				halt = true
-				queue = queue[:0]
-				break
-			}
-		}
-
-		var result taskResult
-		gotResult := false
-		if halt && len(queue) == 0 && len(deferred) > 0 {
-			if active == 0 {
-				break
-			}
-			var ok bool
-			result, ok = waitForHaltedDispatchResult(results, haltedDispatchWaitInterval)
-			if !ok {
-				continue
-			}
-			active--
-			gotResult = true
-		} else if len(queue) == 0 && len(deferred) > 0 {
-			next, ok := nextDeferredAt()
-			if !ok {
-				continue
-			}
-			wait := time.Until(next)
-			if wait <= 0 {
-				continue
-			}
-			timer := time.NewTimer(wait)
-			if active == 0 {
-				select {
-				case <-ctx.Done():
-					timer.Stop()
-					runErr = context.Cause(ctx)
-					halt = true
-					continue
-				case <-timer.C:
-					continue
-				}
-			}
-			select {
-			case result = <-results:
-				if !timer.Stop() {
-					select {
-					case <-timer.C:
-					default:
-					}
-				}
-				active--
-				gotResult = true
-			case <-ctx.Done():
-				timer.Stop()
-				runErr = context.Cause(ctx)
-				halt = true
-				continue
-			case <-timer.C:
-				continue
-			}
-		}
-
-		if !gotResult {
-			if active == 0 {
-				break
-			}
-			result = <-results
-			active--
-		}
-
-		if processed[result.id] {
-			continue
-		}
-
-		processed[result.id] = true
-		terminalTasks++
-
-		if result.err != nil {
-			if errors.Is(result.err, errUnresolvedIdentityTerminalWrite) {
-				// A storage failure left the predecessor's identity uncertain.
-				// Drain admitted work but never dispatch downstream cache checks.
-				halt = true
-				queue = queue[:0]
-			}
-			taskOutcomes[result.id] = run.TaskStatusFailed
-			if run.IsRunDeadlineError(result.err) {
-				// A genuine run deadline is the final run classification even
-				// when another independent task failed earlier under continue.
-				runErr = result.err
-				// CompleteIfActive below owns the atomic run-timeout transition.
-				// Do not apply ordinary task-failure policy here: it would turn
-				// unfinished siblings into skips just before that transition.
-				halt = true
-				queue = queue[:0]
-				continue
-			}
-			if runErr == nil {
-				runErr = result.err
-			}
-			// Under BOTH failure policies the failed node's descendants resolve
-			// the same way: skip only the downstream tasks whose trigger rules
-			// require all predecessors to succeed. Tasks with all_done,
-			// all_failed, always or one_success rules are left to the normal
-			// indegree path so they can still run / evaluate their own rule.
-			// The policies differ only in what happens to everything ELSE, and
-			// that is haltUnstarted's job at the end of this branch.
-			skipReason := fmt.Sprintf("skipped due to failed dependency task %s", result.id)
-			skipDescendantsFiltered(
-				adjacency, predecessors, triggerRuleByTask,
-				result.id, processed, inQueue,
-				func(id uuid.UUID) {
-					if err := store.SkipTask(runID, id, skipReason); err != nil {
-						log.Error("failed to persist task skip", "run_id", runID, "task_id", id, "error", err)
-						if runErr == nil {
-							runErr = err
-						}
-						halt = true
-						queue = queue[:0]
-					}
-					taskOutcomes[id] = run.TaskStatusSkipped
-					processed[id] = true
-					terminalTasks++
-					delete(inQueue, id)
-					if !halt {
-						if propErr := propagateSkipped(id); propErr != nil {
-							log.Error("failed to propagate skipped task", "run_id", runID, "task_id", id, "error", propErr)
-							if runErr == nil {
-								runErr = propErr
-							}
-							halt = true
-							queue = queue[:0]
-						}
-					}
-				},
-			)
-
-			// Decrement indegree for successors that were NOT skipped (they
-			// have a failure-tolerant trigger rule). When their indegree
-			// reaches 0, evaluate the rule and push or skip accordingly.
-			if !halt {
-				for _, successor := range adjacency[result.id] {
-					if processed[successor] {
-						continue
-					}
-					if _, ok := indegree[successor]; !ok {
-						continue
-					}
-					if indegree[successor] > 0 {
-						indegree[successor]--
-					}
-					if indegree[successor] == 0 {
-						predStatuses := collectPredecessorStatuses(predecessors[successor], taskOutcomes)
-						if satisfiesTriggerRule(triggerRuleByTask[successor], predStatuses) {
-							push(successor)
-						} else {
-							skipRuleReason := fmt.Sprintf("trigger rule %q not satisfied", triggerRuleByTask[successor])
-							if err := store.SkipTask(runID, successor, skipRuleReason); err != nil {
-								log.Error("failed to persist trigger rule skip", "run_id", runID, "task_id", successor, "error", err)
-								if runErr == nil {
-									runErr = err
-								}
-								halt = true
-								queue = queue[:0]
-								break
-							}
-							taskOutcomes[successor] = run.TaskStatusSkipped
-							processed[successor] = true
-							terminalTasks++
-							delete(inQueue, successor)
-							if err := propagateSkipped(successor); err != nil {
-								log.Error("failed to propagate skipped task", "run_id", runID, "task_id", successor, "error", err)
-								if runErr == nil {
-									runErr = err
-								}
-								halt = true
-								queue = queue[:0]
-								break
-							}
-						}
-					}
-				}
-			}
-
-			// `halt`: stop admitting new work. Every step not yet dispatched
-			// whose rule is not failure-tolerant is resolved skipped, in the
-			// store and here; the tolerant ones stay dispatchable and the loop
-			// keeps running them (and whatever they release) to completion.
-			// Work already dispatched finishes on its own. The run still ends
-			// failed on runErr, whatever the cleanup steps then do.
-			if !continueOnFailure && !halt {
-				if err := haltUnstarted(result.id); err != nil {
-					log.Error("failed to halt unstarted tasks", "run_id", runID, "task_id", result.id, "error", err)
-					if runErr == nil {
-						runErr = err
-					}
-					halt = true
-					queue = queue[:0]
-				}
-			}
-			continue
-		}
-
-		taskOutcomes[result.id] = run.TaskStatusSucceeded
-
-		// Update local state for any tasks the run store skipped while
-		// resolving branch filtering or trigger-rule evaluation.
-		skippedSet := make(map[uuid.UUID]bool, len(result.skippedByBranch))
-		for _, skippedID := range result.skippedByBranch {
-			if processed[skippedID] {
-				skippedSet[skippedID] = true
-				continue
-			}
-
-			skippedSet[skippedID] = true
-			taskOutcomes[skippedID] = run.TaskStatusSkipped
-			processed[skippedID] = true
-			terminalTasks++
-			delete(inQueue, skippedID)
-
-			if err := propagateSkipped(skippedID); err != nil {
-				log.Error("failed to propagate skipped task", "run_id", runID, "task_id", skippedID, "error", err)
-				if runErr == nil {
-					runErr = err
-				}
-				halt = true
-				queue = queue[:0]
-				break
-			}
-		}
-
-		if !halt {
-			for _, successor := range adjacency[result.id] {
-				if _, ok := indegree[successor]; !ok {
-					continue
-				}
-
-				// Skip successors already handled by branch filtering in the store.
-				if skippedSet[successor] {
-					continue
-				}
-				// …and successors this loop already retired: a join the halt
-				// sweep (or a failed sibling predecessor) skipped while this
-				// predecessor was still running. Re-evaluating its rule here
-				// would count it terminal a second time.
-				if processed[successor] {
-					continue
-				}
-
-				if indegree[successor] > 0 {
-					indegree[successor]--
-				}
-				if indegree[successor] == 0 {
-					predStatuses := collectPredecessorStatuses(predecessors[successor], taskOutcomes)
-					if satisfiesTriggerRule(triggerRuleByTask[successor], predStatuses) {
-						push(successor)
-					} else {
-						skipRuleReason := fmt.Sprintf("trigger rule %q not satisfied", triggerRuleByTask[successor])
-						if err := store.SkipTask(runID, successor, skipRuleReason); err != nil {
-							log.Error("failed to persist trigger rule skip", "run_id", runID, "task_id", successor, "error", err)
-							if runErr == nil {
-								runErr = err
-							}
-							halt = true
-							queue = queue[:0]
-							break
-						}
-						taskOutcomes[successor] = run.TaskStatusSkipped
-						processed[successor] = true
-						terminalTasks++
-						delete(inQueue, successor)
-						if err := propagateSkipped(successor); err != nil {
-							log.Error("failed to propagate skipped task", "run_id", runID, "task_id", successor, "error", err)
-							if runErr == nil {
-								runErr = err
-							}
-							halt = true
-							queue = queue[:0]
-							break
-						}
-					}
-				}
-			}
-		}
-	}
-
-	if terminalTasks != liveTaskCount {
-		if runErr != nil {
-			return runErr
-		}
-		return fmt.Errorf("job %s reached terminal state for %d of %d tasks; remaining tasks may be waiting on unresolved dependencies", j.id, terminalTasks, liveTaskCount)
-	}
-
-	if runErr != nil {
-		return runErr
-	}
-
-	return nil
+	returnedErr, completionErr := local.execute(runErr)
+	runErr = completionErr
+	return returnedErr
 }
 
 func normalizeExecutionMode(value string) string {

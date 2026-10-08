@@ -8,10 +8,10 @@ import (
 	"io"
 	"net/http"
 	"net/url"
-	"os"
 	"strings"
 	"text/tabwriter"
 
+	"github.com/caesium-cloud/caesium/cmd/cliutil"
 	"github.com/google/uuid"
 	"github.com/spf13/cobra"
 )
@@ -106,19 +106,8 @@ var Cmd = &cobra.Command{
 			return err
 		}
 
-		stdout := cmd.OutOrStdout()
 		if blameJSON {
-			var out any
-			if err := json.Unmarshal(body, &out); err != nil {
-				return fmt.Errorf("blame response was not valid JSON: %w", err)
-			}
-			pretty, err := json.MarshalIndent(out, "", "  ")
-			if err != nil {
-				return fmt.Errorf("re-encoding blame JSON: %w", err)
-			}
-			_, _ = stdout.Write(pretty)
-			_, _ = fmt.Fprintln(stdout)
-			return nil
+			return cliutil.WritePrettyJSON(cmd, body, "blame response")
 		}
 
 		var res result
@@ -228,11 +217,7 @@ func dashIfEmpty(s string) string {
 }
 
 func resolveAPIKey(cmd *cobra.Command, explicit string) string {
-	if v := strings.TrimSpace(explicit); v != "" {
-		cmd.PrintErrln(fmt.Sprintf("warning: --api-key is visible in process listings; prefer %s", apiKeyEnvVar))
-		return v
-	}
-	return strings.TrimSpace(os.Getenv(apiKeyEnvVar))
+	return cliutil.ResolveAPIKey(cmd, explicit, cliutil.APIKeyEnvVar)
 }
 
 func init() {

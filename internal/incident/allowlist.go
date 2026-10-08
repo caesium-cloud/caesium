@@ -2,7 +2,8 @@ package incident
 
 import (
 	"context"
-	"sort"
+	"maps"
+	"slices"
 
 	"github.com/caesium-cloud/caesium/internal/lineage"
 	"github.com/caesium-cloud/caesium/internal/models"
@@ -104,9 +105,5 @@ func trustedOutputDatasets(ctx context.Context, db *gorm.DB, jobID uuid.UUID, fa
 
 func sortedKeys(m map[string]struct{}) []string {
 	out := make([]string, 0, len(m))
-	for k := range m {
-		out = append(out, k)
-	}
-	sort.Strings(out)
-	return out
+	return append(out, slices.Sorted(maps.Keys(m))...)
 }

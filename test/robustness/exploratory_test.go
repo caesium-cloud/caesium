@@ -40,6 +40,7 @@ package robustness
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -49,6 +50,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -57,10 +59,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/caesium-cloud/caesium/internal/bodylimit"
 	"github.com/caesium-cloud/caesium/pkg/jobdef"
 	"github.com/caesium-cloud/caesium/test/robustness/cluster"
 	"github.com/caesium-cloud/caesium/test/robustness/faults"
 	"github.com/caesium-cloud/caesium/test/robustness/history"
+	"github.com/caesium-cloud/caesium/test/robustness/internal/sqlcell"
 	"github.com/caesium-cloud/caesium/test/robustness/recorder"
 	"github.com/google/uuid"
 	corev1 "k8s.io/api/core/v1"
@@ -453,15 +457,20 @@ func (sr *soakRunner) hostSample(t *testing.T, label string) {
 }
 
 func (sr *soakRunner) hostContainers(t *testing.T, label string) string {
+	evidence, _ := sr.hostContainersEvidence(t, label)
+	return evidence
+}
+
+func (sr *soakRunner) hostContainersEvidence(t *testing.T, label string) (string, bool) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 	ack, err := sr.hostRequest(ctx, nil, cluster.HostRequest{Action: soakActionContainers, Params: map[string]string{"label": label, "token": sr.token}})
 	if err != nil {
 		t.Errorf("container inventory %s: %v", label, err)
-		return ""
+		return "", false
 	}
 	t.Logf("container inventory %s: %s", label, truncate([]byte(ack.Evidence), 600))
-	return ack.Evidence
+	return ack.Evidence, true
 }
 
 // ---------------------------------------------------------------------------
@@ -548,7 +557,7 @@ func (sr *soakRunner) queryMembership(ctx context.Context, topo []cluster.Member
 			_, isLive := live[n.Address]
 			view = append(view, soakMember{ID: n.ID, Address: n.Address, Role: strings.ToLower(n.Role.String()), Live: isLive})
 		}
-		sort.Slice(view, func(i, j int) bool { return view[i].ID < view[j].ID })
+		slices.SortFunc(view, func(a, b soakMember) int { return cmp.Compare(a.ID, b.ID) })
 		sig := jsonString(view)
 		if reference == "" {
 			reference = sig
@@ -742,8 +751,31 @@ func (sr *soakRunner) start(ctx context.Context, m cluster.Member, jobID, key st
 		return startOutcome{Err: err.Error()}
 	}
 	defer func() { _ = resp.Body.Close() }()
-	b, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	b, readErr := bodylimit.Read(resp.Body, 1<<20)
 	out := startOutcome{HTTPStatus: resp.StatusCode, Raw: truncate(b, 400), Replayed: resp.Header.Get("Idempotent-Replayed") == "true"}
+	if readErr != nil {
+		var partial struct {
+			Outcome string `json:"outcome"`
+			ID      string `json:"id"`
+			RunID   string `json:"run_id"`
+			QueueID string `json:"queue_id"`
+		}
+		if json.Unmarshal(b, &partial) == nil {
+			out.Outcome = partial.Outcome
+			id := partial.ID
+			if partial.Outcome == "skipped" {
+				id = partial.RunID
+			}
+			if _, err := uuid.Parse(id); err == nil {
+				out.RunID = id
+			}
+			if _, err := uuid.Parse(partial.QueueID); err == nil {
+				out.QueueID = partial.QueueID
+			}
+		}
+		out.Err = fmt.Sprintf("HTTP %d body incomplete, admission uncertain (possible run %q, queue %q): %v", resp.StatusCode, out.RunID, out.QueueID, readErr)
+		return out
+	}
 	if resp.StatusCode != http.StatusAccepted {
 		return out
 	}
@@ -758,25 +790,50 @@ func (sr *soakRunner) start(ctx context.Context, m cluster.Member, jobID, key st
 		return out
 	}
 	out.Outcome = parsed.Outcome
-	if parsed.Outcome == "created" {
+	switch parsed.Outcome {
+	case "created":
 		if _, err := uuid.Parse(parsed.ID); err != nil {
-			out.Err = "created outcome without a run id"
+			out.Err = "created outcome has an invalid run id"
 			return out
 		}
 		out.RunID = parsed.ID
+	case "queued", "dropped":
+		if parsed.QueueID != "" {
+			if _, err := uuid.Parse(parsed.QueueID); err != nil {
+				out.Err = parsed.Outcome + " outcome has an invalid queue id"
+				return out
+			}
+			out.QueueID = parsed.QueueID
+		}
+	case "skipped":
+		if parsed.RunID != "" {
+			if _, err := uuid.Parse(parsed.RunID); err != nil {
+				out.Err = "skipped outcome has an invalid run id"
+				return out
+			}
+			out.RunID = parsed.RunID
+		}
+	default:
+		out.Err = fmt.Sprintf("202 body has unsupported outcome %q", parsed.Outcome)
+		return out
 	}
-	out.QueueID = parsed.QueueID
 	return out
 }
 
 // startTracked admits a start and appends it to the ledger.
 func (sr *soakRunner) startTracked(ctx context.Context, m cluster.Member, jobID, key string, params map[string]string, priority, source string, steps []string, checked bool) *soakRun {
 	res := sr.start(ctx, m, jobID, key, params, priority)
+	// RunID and QueueID are acknowledged identities in the ledger. Possible
+	// identities from incomplete reads remain in Err until same-key replay.
+	runID, queueID := res.RunID, res.QueueID
+	if res.uncertain() {
+		runID, queueID = "", ""
+	}
 	entry := &soakRun{
 		Key: key, Source: source, JobID: jobID, Steps: steps, Member: m.Name,
 		Params: params, Priority: priority, AdmittedAt: time.Now().UTC(),
-		HTTPStatus: res.HTTPStatus, Outcome: res.Outcome, RunID: res.RunID,
-		QueueID: res.QueueID, Err: res.Err, Checked: checked,
+		HTTPStatus: res.HTTPStatus, Outcome: res.Outcome, RunID: runID,
+		QueueID: queueID, Err: res.Err, Checked: checked,
 	}
 	if res.uncertain() && entry.Err == "" {
 		entry.Err = fmt.Sprintf("HTTP %d: %s", res.HTTPStatus, res.Raw)
@@ -791,11 +848,15 @@ func (sr *soakRunner) startTracked(ctx context.Context, m cluster.Member, jobID,
 // certain. A replay of a key the server never recorded admits the run now,
 // which is still a definite outcome for that key.
 func (sr *soakRunner) reconcile(ctx context.Context, e *soakRun) error {
+	return sr.reconcileWithRetry(ctx, e, 6, 5*time.Second)
+}
+
+func (sr *soakRunner) reconcileWithRetry(ctx context.Context, e *soakRun, maxAttempts int, retryDelay time.Duration) error {
 	var last startOutcome
-	for attempt := 0; attempt < 6; attempt++ {
+	for attempt := 0; attempt < maxAttempts; attempt++ {
 		members := sr.liveMembers()
 		if len(members) == 0 {
-			time.Sleep(5 * time.Second)
+			time.Sleep(retryDelay)
 			continue
 		}
 		m := members[attempt%len(members)]
@@ -807,7 +868,7 @@ func (sr *soakRunner) reconcile(ctx context.Context, e *soakRun) error {
 			sr.mu.Unlock()
 			return nil
 		}
-		time.Sleep(5 * time.Second)
+		time.Sleep(retryDelay)
 	}
 	return fmt.Errorf("start %s stayed uncertain after replays: %+v", e.Key, last)
 }
@@ -1561,14 +1622,25 @@ func nilToEmpty(v []int) []int {
 // ---------------------------------------------------------------------------
 
 func (sr *soakRunner) scalar(ctx context.Context, m cluster.Member, sql string) (int64, error) {
-	resp, _, err := sr.fe.httpAPI.Query(ctx, m.HTTPBase(), sql, 1)
+	_, raw, err := sr.fe.httpAPI.Query(ctx, m.HTTPBase(), sql, 1)
 	if err != nil {
-		return 0, err
+		return 0, fmt.Errorf("scalar query %q: %w", sql, err)
+	}
+	var resp cluster.QueryResponse
+	if err := sqlcell.Decode(raw, &resp); err != nil {
+		return 0, fmt.Errorf("scalar query %q decode: %w", sql, err)
+	}
+	if resp.Truncated {
+		return 0, fmt.Errorf("scalar query %q returned truncated evidence", sql)
 	}
 	if len(resp.Rows) == 0 || len(resp.Rows[0]) == 0 {
 		return 0, fmt.Errorf("%q returned no row", sql)
 	}
-	return anyInt64(resp.Rows[0][0]), nil
+	n, err := sqlcell.Int64(resp.Rows[0][0])
+	if err != nil {
+		return 0, fmt.Errorf("scalar query %q cell: %w", sql, err)
+	}
+	return n, nil
 }
 
 func queryText(v any) string {
@@ -1591,18 +1663,78 @@ func (sr *soakRunner) checkpointSeqs(ctx context.Context, m cluster.Member, runI
 	if _, err := uuid.Parse(runID); err != nil {
 		return nil, err
 	}
-	resp, _, err := sr.fe.httpAPI.Query(ctx, m.HTTPBase(),
-		fmt.Sprintf("SELECT sequence_high FROM run_checkpoints WHERE run_id = '%s' ORDER BY sequence_high", runID), 100)
+	_, raw, err := sr.fe.httpAPI.Query(ctx, m.HTTPBase(), fmt.Sprintf("SELECT sequence_high FROM run_checkpoints WHERE run_id = '%s' ORDER BY sequence_high", runID), 100)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("checkpoint sequences for run %s: %w", runID, err)
+	}
+	var resp cluster.QueryResponse
+	if err := sqlcell.Decode(raw, &resp); err != nil {
+		return nil, fmt.Errorf("checkpoint sequences for run %s decode: %w", runID, err)
+	}
+	if resp.Truncated {
+		return nil, fmt.Errorf("checkpoint sequences for run %s returned truncated evidence", runID)
 	}
 	var out []int64
-	for _, row := range resp.Rows {
-		if len(row) > 0 {
-			out = append(out, anyInt64(row[0]))
+	for i, row := range resp.Rows {
+		if len(row) == 0 {
+			return nil, fmt.Errorf("checkpoint sequences for run %s row %d has no sequence cell", runID, i)
 		}
+		n, err := sqlcell.Int64(row[0])
+		if err != nil {
+			return nil, fmt.Errorf("checkpoint sequences for run %s row %d: %w", runID, i, err)
+		}
+		out = append(out, n)
 	}
 	return out, nil
+}
+
+type checkpointPoller struct {
+	cancel context.CancelFunc
+	done   chan struct{}
+	once   sync.Once
+}
+
+func startCheckpointPoller(parent context.Context, interval, queryTimeout time.Duration,
+	query func(context.Context) ([]int64, error), observe func([]int64, error),
+) *checkpointPoller {
+	ctx, cancel := context.WithCancel(parent)
+	poller := &checkpointPoller{cancel: cancel, done: make(chan struct{})}
+	go func() {
+		defer close(poller.done)
+		for {
+			if ctx.Err() != nil {
+				return
+			}
+			queryCtx, queryCancel := context.WithTimeout(ctx, queryTimeout)
+			seqs, err := query(queryCtx)
+			queryCancel()
+			if ctx.Err() != nil {
+				return
+			}
+			observe(seqs, err)
+
+			timer := time.NewTimer(interval)
+			select {
+			case <-ctx.Done():
+				if !timer.Stop() {
+					select {
+					case <-timer.C:
+					default:
+					}
+				}
+				return
+			case <-timer.C:
+			}
+		}
+	}()
+	return poller
+}
+
+func (p *checkpointPoller) stop() {
+	p.once.Do(func() {
+		p.cancel()
+		<-p.done
+	})
 }
 
 func (sr *soakRunner) episodeRetention(t *testing.T, ep SoakEpisode, rec *episodeRecord) {
@@ -1629,27 +1761,20 @@ func (sr *soakRunner) episodeRetention(t *testing.T, ep SoakEpisode, rec *episod
 		sr.failf(t, rec, "long run not admitted: %+v", *long)
 	}
 	var obs []CheckpointObservation
-	pollStop := make(chan struct{})
-	pollDone := make(chan struct{})
 	var pollErrs int
-	go func() {
-		defer close(pollDone)
-		for {
-			pctx, pcancel := context.WithTimeout(ctx, 10*time.Second)
-			seqs, err := sr.checkpointSeqs(pctx, sr.leader(), long.RunID)
-			pcancel()
+	poller := startCheckpointPoller(ctx, time.Second, 10*time.Second,
+		func(pctx context.Context) ([]int64, error) {
+			return sr.checkpointSeqs(pctx, sr.leader(), long.RunID)
+		},
+		func(seqs []int64, err error) {
 			if err != nil {
 				pollErrs++
 			} else {
 				obs = append(obs, CheckpointObservation{At: time.Now().UTC(), Sequences: seqs})
 			}
-			select {
-			case <-pollStop:
-				return
-			case <-time.After(time.Second):
-			}
-		}
-	}()
+		},
+	)
+	defer poller.stop()
 
 	// Sustained burst, from several members at once.
 	var mu sync.Mutex
@@ -1691,8 +1816,7 @@ func (sr *soakRunner) episodeRetention(t *testing.T, ep SoakEpisode, rec *episod
 		}
 	}
 	time.Sleep(3 * time.Second)
-	close(pollStop)
-	<-pollDone
+	poller.stop()
 	if len(obs) < 3 {
 		sr.blockf(t, rec, "only %d checkpoint polls succeeded (%d errors)", len(obs), pollErrs)
 	}
@@ -1783,7 +1907,7 @@ func (sr *soakRunner) episodeRetention(t *testing.T, ep SoakEpisode, rec *episod
 }
 
 func (e *soakRun) uncertainOrEmpty() bool {
-	return e.RunID == "" && (e.Err != "" || e.HTTPStatus == 0 || e.HTTPStatus >= 500)
+	return !e.Reconciled && (e.Err != "" || e.HTTPStatus == 0 || e.HTTPStatus >= 500)
 }
 
 // ---------------------------------------------------------------------------
@@ -2209,6 +2333,103 @@ func (sr *soakRunner) episodeReplacement(t *testing.T, ep SoakEpisode, rec *epis
 // drain: whole-schedule safety, then the host's post-drain samples.
 // ---------------------------------------------------------------------------
 
+type taskPodInventoryEntry struct {
+	Pod   string `json:"pod"`
+	Phase string `json:"phase"`
+	Owned bool   `json:"owned"`
+}
+
+type containerInventoryEvidence struct {
+	Counts   map[string]int          `json:"counts"`
+	Error    string                  `json:"error"`
+	TaskPods []taskPodInventoryEntry `json:"task_pods"`
+}
+
+type finalDrainObservation struct {
+	podInventoryObserved       bool
+	podInventoryReadable       bool
+	taskPods                   []corev1.Pod
+	containerInventoryObserved bool
+	containerInventoryReadable bool
+	containerInventory         containerInventoryEvidence
+}
+
+func parseContainerInventoryEvidence(raw string) (containerInventoryEvidence, error) {
+	var evidence containerInventoryEvidence
+	if err := json.Unmarshal([]byte(raw), &evidence); err != nil {
+		return evidence, fmt.Errorf("malformed container inventory: %w", err)
+	}
+	if evidence.Error != "" {
+		return evidence, fmt.Errorf("container inventory reports an error: %s", evidence.Error)
+	}
+	if evidence.Counts == nil || evidence.TaskPods == nil {
+		return evidence, fmt.Errorf("container inventory is missing counts or task_pods")
+	}
+	for _, key := range []string{"owned_task_containers", "task_running", "task_pods"} {
+		count, ok := evidence.Counts[key]
+		if !ok || count < 0 {
+			return evidence, fmt.Errorf("container inventory has invalid %s count", key)
+		}
+	}
+	return evidence, nil
+}
+
+func containerInventorySettled(evidence containerInventoryEvidence) bool {
+	if evidence.Counts["owned_task_containers"] != 0 || evidence.Counts["task_running"] != 0 {
+		return false
+	}
+	for _, pod := range evidence.TaskPods {
+		if pod.Owned {
+			return false
+		}
+	}
+	return true
+}
+
+func finalDrainEvidence(observation finalDrainObservation, token string) (failures, inconclusive []string) {
+	if !observation.podInventoryObserved || !observation.podInventoryReadable {
+		inconclusive = append(inconclusive, "final Kubernetes task-pod inventory is missing or unreadable")
+	}
+	var ownedPods []string
+	ownedPodNames := make(map[string]struct{})
+	for _, pod := range observation.taskPods {
+		if taskPodOwned(pod, token) {
+			ownedPods = append(ownedPods, pod.Name)
+			ownedPodNames[pod.Name] = struct{}{}
+		}
+	}
+	if len(ownedPods) > 0 {
+		failures = append(failures, fmt.Sprintf("%d owned task pods remain after drain: %v", len(ownedPods), ownedPods))
+	}
+
+	if !observation.containerInventoryObserved || !observation.containerInventoryReadable {
+		inconclusive = append(inconclusive, "final host container inventory is missing, malformed, or reports an error")
+	}
+	if !observation.containerInventoryObserved {
+		return failures, inconclusive
+	}
+	counts := observation.containerInventory.Counts
+	if counts["owned_task_containers"] > 0 {
+		failures = append(failures, fmt.Sprintf("%d owned task containers remain after drain", counts["owned_task_containers"]))
+	}
+	if counts["task_running"] > 0 {
+		failures = append(failures, fmt.Sprintf("%d task containers are still running after drain", counts["task_running"]))
+	}
+	var hostOwnedPods []string
+	for _, pod := range observation.containerInventory.TaskPods {
+		if pod.Owned {
+			if _, alreadyReported := ownedPodNames[pod.Pod]; pod.Pod != "" && alreadyReported {
+				continue
+			}
+			hostOwnedPods = append(hostOwnedPods, pod.Pod)
+		}
+	}
+	if len(hostOwnedPods) > 0 {
+		failures = append(failures, fmt.Sprintf("%d owned task pods remain in host inventory: %v", len(hostOwnedPods), hostOwnedPods))
+	}
+	return failures, inconclusive
+}
+
 func (sr *soakRunner) drain(t *testing.T) {
 	ctx := context.Background()
 	rec := &episodeRecord{Key: "drain", Family: "drain", SoakID: sr.soakID, Seed: sr.seed, StartedAt: time.Now().UTC(), Observations: map[string]any{}}
@@ -2251,7 +2472,7 @@ func (sr *soakRunner) drain(t *testing.T) {
 
 	var uncertain, refused []string
 	for _, e := range ledger {
-		if e.RunID == "" && (e.Err != "" || e.HTTPStatus == 0 || e.HTTPStatus >= 500) {
+		if e.uncertainOrEmpty() {
 			if err := sr.reconcile(ctx, e); err != nil {
 				uncertain = append(uncertain, err.Error())
 			}
@@ -2313,41 +2534,86 @@ func (sr *soakRunner) drain(t *testing.T) {
 	// final host inventory is judged; whatever remains after it is a leak.
 	graceEnd := time.Now().Add(sr.w.Drain.ContainerGrace.Duration)
 	var podsLeft []string
+	var lastTaskPods []corev1.Pod
+	podInventoryObserved, podInventoryReadable := false, false
 	gctx, gcancel := context.WithDeadline(ctx, graceEnd)
 	_ = cluster.Poll(gctx, 3*time.Second, func() (bool, error) {
 		pods, err := cluster.ListTaskPods(gctx, sr.fe.kube, sr.fe.env.Namespace)
 		if err != nil {
+			podInventoryReadable = false
 			return false, nil
 		}
+		podInventoryObserved = true
+		podInventoryReadable = true
+		lastTaskPods = slices.Clone(pods)
 		podsLeft = podsLeft[:0]
+		ownedPods := 0
 		for _, p := range pods {
 			podsLeft = append(podsLeft, fmt.Sprintf("%s phase=%s node=%s owned=%t", p.Name, p.Status.Phase, p.Spec.NodeName, taskPodOwned(p, sr.token)))
+			if taskPodOwned(p, sr.token) {
+				ownedPods++
+			}
 		}
-		return len(pods) == 0, nil
+		return ownedPods == 0, nil
 	})
 	gcancel()
 	rec.Observations["task_pods_after_grace"] = podsLeft
 	rec.Observations["schedule_seconds"] = scheduleSeconds
 	rec.Observations["final_statuses"] = statuses
 	rec.Observations["refused_starts"] = refused
-	rec.Observations["failures"] = failures
 	rec.Observations["admitted_runs"] = len(ledger)
 	inventories := 0
+	var lastContainerInventory containerInventoryEvidence
+	containerInventoryObserved, containerInventoryReadable := false, false
+	var inventoryReadError string
 	for {
 		inventories++
-		evidence := sr.hostContainers(t, "post-drain")
-		var inv struct {
-			Counts map[string]int `json:"counts"`
-			Error  string         `json:"error"`
+		raw, transportReadable := sr.hostContainersEvidence(t, "post-drain")
+		var settled bool
+		if transportReadable {
+			inv, err := parseContainerInventoryEvidence(raw)
+			if err != nil {
+				containerInventoryReadable = false
+				inventoryReadError = err.Error()
+			} else {
+				lastContainerInventory = inv
+				containerInventoryObserved = true
+				containerInventoryReadable = true
+				inventoryReadError = ""
+				settled = containerInventorySettled(inv)
+			}
+		} else {
+			containerInventoryReadable = false
+			inventoryReadError = "host inventory request failed"
 		}
-		settled := json.Unmarshal([]byte(evidence), &inv) == nil && inv.Error == "" && inv.Counts != nil &&
-			inv.Counts["owned_task_containers"] == 0 && inv.Counts["task_running"] == 0 && inv.Counts["task_pods"] == 0
 		if settled || time.Now().Add(15*time.Second).After(graceEnd) {
 			break
 		}
 		time.Sleep(15 * time.Second)
 	}
 	rec.Observations["container_inventories"] = inventories
+	rec.Observations["task_pod_inventory_observed"] = podInventoryObserved
+	rec.Observations["task_pod_inventory_readable"] = podInventoryReadable
+	rec.Observations["container_inventory_observed"] = containerInventoryObserved
+	rec.Observations["container_inventory_readable"] = containerInventoryReadable
+	rec.Observations["container_inventory_read_error"] = inventoryReadError
+	if containerInventoryObserved {
+		rec.Observations["container_inventory_after_grace"] = map[string]any{
+			"counts":    lastContainerInventory.Counts,
+			"task_pods": lastContainerInventory.TaskPods,
+		}
+	}
+	drainFailures, drainInconclusive := finalDrainEvidence(finalDrainObservation{
+		podInventoryObserved:       podInventoryObserved,
+		podInventoryReadable:       podInventoryReadable,
+		taskPods:                   lastTaskPods,
+		containerInventoryObserved: containerInventoryObserved,
+		containerInventoryReadable: containerInventoryReadable,
+		containerInventory:         lastContainerInventory,
+	}, sr.token)
+	failures = append(failures, drainFailures...)
+	rec.Observations["failures"] = failures
+	rec.Observations["drain_inconclusive"] = drainInconclusive
 
 	time.Sleep(sr.w.Drain.Settle.Duration)
 	for i := 1; i <= sr.w.Drain.Samples; i++ {
@@ -2358,6 +2624,13 @@ func (sr *soakRunner) drain(t *testing.T) {
 	}
 	if len(failures) > 0 {
 		sr.failf(t, rec, "%d safety/progress failures across the schedule: %v", len(failures), failures)
+	}
+	if len(drainInconclusive) > 0 {
+		rec.Status = soakStatusBlocked
+		rec.Detail = strings.Join(drainInconclusive, "; ")
+		if !t.Failed() {
+			t.Errorf("inconclusive drain evidence: %s", rec.Detail)
+		}
 	}
 }
 

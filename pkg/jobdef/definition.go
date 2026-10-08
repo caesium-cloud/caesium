@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/caesium-cloud/caesium/internal/enginekind"
 	"github.com/caesium-cloud/caesium/pkg/container"
 	"github.com/caesium-cloud/caesium/pkg/jobdef/yamlstrict"
 	"github.com/caesium-cloud/caesium/pkg/ptr"
@@ -1954,12 +1955,10 @@ func sourceKindCompatible(kind, engine string) bool {
 }
 
 func validateEngine(engine, field string) error {
-	switch engine {
-	case EngineDocker, EngineKubernetes, EnginePodman:
+	if enginekind.IsSupported(engine) {
 		return nil
-	default:
-		return fmt.Errorf("%s has unknown engine %q", field, engine)
 	}
+	return fmt.Errorf("%s has unknown engine %q", field, engine)
 }
 
 func isKnownAccessMode(value string) bool {
@@ -2430,9 +2429,7 @@ func computeStepAdjacency(steps []Step) (map[string]int, map[string]map[string]s
 		if strings.TrimSpace(step.Image) == "" {
 			return nil, nil, fmt.Errorf("steps[%d].image is required", i)
 		}
-		switch step.Engine {
-		case EngineDocker, EngineKubernetes, EnginePodman:
-		default:
+		if !enginekind.IsSupported(step.Engine) {
 			return nil, nil, fmt.Errorf("steps[%d].engine must be one of [%s,%s,%s]", i, EngineDocker, EngineKubernetes, EnginePodman)
 		}
 

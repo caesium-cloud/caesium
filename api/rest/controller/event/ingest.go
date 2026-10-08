@@ -13,6 +13,7 @@ import (
 
 	authmw "github.com/caesium-cloud/caesium/api/middleware"
 	eventsvc "github.com/caesium-cloud/caesium/api/rest/service/event"
+	"github.com/caesium-cloud/caesium/internal/bodylimit"
 	freshnesspkg "github.com/caesium-cloud/caesium/internal/freshness"
 	"github.com/caesium-cloud/caesium/internal/metrics"
 	"github.com/caesium-cloud/caesium/internal/models"
@@ -126,21 +127,12 @@ func eventIngestRateLimitConfig() (int, int) {
 	return vars.WebhookRateLimitPerMinute, vars.WebhookRateLimitBurst
 }
 
-var errIngestRequestTooLarge = errors.New("ingest request body too large")
+var errIngestRequestTooLarge = bodylimit.ErrTooLarge
 
 func readIngestBody(body io.Reader) ([]byte, error) {
-	maxBytes := env.Variables().WebhookMaxBodySize.Int64()
-	if maxBytes <= 0 {
-		return io.ReadAll(body)
-	}
-
-	limited := io.LimitReader(body, maxBytes+1)
-	data, err := io.ReadAll(limited)
+	data, err := bodylimit.Read(body, env.Variables().WebhookMaxBodySize.Int64())
 	if err != nil {
 		return nil, err
-	}
-	if int64(len(data)) > maxBytes {
-		return nil, errIngestRequestTooLarge
 	}
 	return data, nil
 }

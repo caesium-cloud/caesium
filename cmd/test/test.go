@@ -25,6 +25,7 @@ var (
 // Cmd is the top-level test command.
 var Cmd = &cobra.Command{
 	Use:   "test",
+	Args:  cobra.NoArgs,
 	Short: "Dry-run validation of job definitions",
 	Long:  "Validates YAML schemas, analyses the DAG topology, optionally gates on local Docker image availability, and can execute harness scenarios.",
 	RunE:  runTest,

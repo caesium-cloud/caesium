@@ -113,24 +113,9 @@ func (s *Subscriber) Start(ctx context.Context) error {
 // (used by tests to avoid a publish race).
 func (s *Subscriber) StartWithReady(ctx context.Context, ready chan<- struct{}) error {
 	types := append(append([]event.Type{}, classifierFailureTypes...), successTypes...)
-	ch, err := s.bus.Subscribe(ctx, event.Filter{Types: types})
-	if err != nil {
-		return err
-	}
-	if ready != nil {
-		close(ready)
-	}
-	for {
-		select {
-		case <-ctx.Done():
-			return nil
-		case evt, ok := <-ch:
-			if !ok {
-				return nil
-			}
-			s.handle(ctx, evt)
-		}
-	}
+	return event.RunSubscription(ctx, s.bus, event.Filter{Types: types}, ready, func(evt event.Event) {
+		s.handle(ctx, evt)
+	}, nil)
 }
 
 // isLeader reports whether this node should act on the event.

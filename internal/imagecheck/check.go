@@ -3,8 +3,8 @@ package imagecheck
 
 import (
 	"context"
-	"strings"
 
+	"github.com/containerd/errdefs"
 	"github.com/docker/docker/client"
 )
 
@@ -27,9 +27,16 @@ func Check(ctx context.Context, images []string) []Result {
 	}
 	defer func() { _ = cli.Close() }()
 
+	return checkImages(images, func(img string) error {
+		_, _, err := cli.ImageInspectWithRaw(ctx, img) //nolint:staticcheck // ImageInspect not yet available in our client version
+		return err
+	})
+}
+
+func checkImages(images []string, inspect func(string) error) []Result {
 	results := make([]Result, len(images))
 	for i, img := range images {
-		_, _, inspectErr := cli.ImageInspectWithRaw(ctx, img) //nolint:staticcheck // ImageInspect not yet available in our client version
+		inspectErr := inspect(img)
 		switch {
 		case inspectErr == nil:
 			results[i] = Result{Image: img, Available: true}
@@ -43,5 +50,5 @@ func Check(ctx context.Context, images []string) []Result {
 }
 
 func isNotFound(err error) bool {
-	return err != nil && strings.Contains(err.Error(), "No such image")
+	return errdefs.IsNotFound(err)
 }

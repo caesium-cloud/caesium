@@ -4,7 +4,6 @@ import (
 	"time"
 
 	"github.com/caesium-cloud/caesium/internal/atom"
-	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/caesium-cloud/caesium/pkg/env"
 	v1 "k8s.io/api/core/v1"
 )
@@ -14,10 +13,6 @@ import (
 type Atom struct {
 	atom.Atom
 	metadata *v1.Pod
-}
-
-func New(a *models.Atom) (atom.Atom, error) {
-	return nil, nil
 }
 
 // ID returns the ID of the Atom. This ID is
@@ -42,10 +37,7 @@ func (c *Atom) Result() atom.Result {
 		return atom.ResourceFailure
 	}
 	if term := terminatedState(c.metadata); term != nil {
-		if result, ok := resultMap[term.ExitCode]; ok {
-			return result
-		}
-		return atom.Unknown
+		return atom.ResultForExitCode(int(term.ExitCode))
 	}
 	switch c.metadata.Status.Phase {
 	case v1.PodSucceeded:

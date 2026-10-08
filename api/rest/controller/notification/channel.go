@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/caesium-cloud/caesium/api/internal/auditlog"
 	svc "github.com/caesium-cloud/caesium/api/rest/service/notification"
 	"github.com/caesium-cloud/caesium/internal/auth"
 	"github.com/caesium-cloud/caesium/internal/models"
@@ -60,7 +61,7 @@ func (ctrl *Controller) CreateChannel(c *echo.Context) error {
 		return serviceError(err)
 	}
 
-	logAuditFailure(ctrl.auditor.Log(auth.AuditEntry{
+	auditlog.LogFailure(ctrl.auditor.Log(auth.AuditEntry{
 		Actor:        auditActor(c),
 		Action:       auth.ActionNotificationChannelCreate,
 		ResourceType: "notification_channel",
@@ -96,7 +97,7 @@ func (ctrl *Controller) UpdateChannel(c *echo.Context) error {
 	// carries secrets (webhook URLs, tokens) that the read API itself
 	// redacts (see redactChannel) — the audit trail must not become the
 	// leak path for values the REST responses go out of their way to mask.
-	logAuditFailure(ctrl.auditor.Log(auth.AuditEntry{
+	auditlog.LogFailure(ctrl.auditor.Log(auth.AuditEntry{
 		Actor:        auditActor(c),
 		Action:       auth.ActionNotificationChannelUpdate,
 		ResourceType: "notification_channel",
@@ -123,7 +124,7 @@ func (ctrl *Controller) DeleteChannel(c *echo.Context) error {
 		return serviceError(err)
 	}
 
-	logAuditFailure(ctrl.auditor.Log(auth.AuditEntry{
+	auditlog.LogFailure(ctrl.auditor.Log(auth.AuditEntry{
 		Actor:        auditActor(c),
 		Action:       auth.ActionNotificationChannelDelete,
 		ResourceType: "notification_channel",

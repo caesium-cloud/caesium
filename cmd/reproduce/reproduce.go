@@ -8,11 +8,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"net/url"
 	"os"
 	osexec "os/exec"
-	"sort"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -22,6 +23,7 @@ import (
 	"github.com/caesium-cloud/caesium/internal/localrun"
 	"github.com/caesium-cloud/caesium/internal/outputdiff"
 	ireproduce "github.com/caesium-cloud/caesium/internal/reproduce"
+	"github.com/caesium-cloud/caesium/internal/strutil"
 	"github.com/caesium-cloud/caesium/pkg/container"
 	pkgjobdef "github.com/caesium-cloud/caesium/pkg/jobdef"
 	"github.com/docker/docker/api/types/image"
@@ -304,7 +306,13 @@ func fetchDescriptor(ctx context.Context, cmd *cobra.Command, server, jobID, run
 	body, readErr := io.ReadAll(resp.Body)
 	if resp.StatusCode >= http.StatusBadRequest {
 		if resp.StatusCode == http.StatusNotFound && strings.Contains(string(body), "descriptor unavailable") {
+			if readErr != nil {
+				return nil, fmt.Errorf("descriptor unavailable for run %s task %s (reading response: %w)", runID, task, readErr)
+			}
 			return nil, fmt.Errorf("descriptor unavailable for run %s task %s", runID, task)
+		}
+		if readErr != nil {
+			return nil, fmt.Errorf("fetch descriptor failed (%d): %s (reading response: %w)", resp.StatusCode, strings.TrimSpace(string(body)), readErr)
 		}
 		return nil, fmt.Errorf("fetch descriptor failed (%d): %s", resp.StatusCode, strings.TrimSpace(string(body)))
 	}
@@ -317,6 +325,9 @@ func fetchDescriptor(ctx context.Context, cmd *cobra.Command, server, jobID, run
 		return nil, fmt.Errorf("decode descriptor response: %w", err)
 	}
 	if len(out.Descriptor) == 0 {
+		if readErr != nil {
+			return nil, fmt.Errorf("descriptor unavailable for run %s task %s (reading response: %w)", runID, task, readErr)
+		}
 		return nil, fmt.Errorf("descriptor unavailable for run %s task %s", runID, task)
 	}
 	return &out, nil
@@ -629,11 +640,7 @@ func resultTaskLabel(env *ireproduce.Envelope) string {
 
 func sortedMapKeys(values map[string]string) []string {
 	keys := make([]string, 0, len(values))
-	for key := range values {
-		keys = append(keys, key)
-	}
-	sort.Strings(keys)
-	return keys
+	return append(keys, slices.Sorted(maps.Keys(values))...)
 }
 
 func validateModeFlags(shellMode, diffMode, dryRunMode, jsonMode bool) error {
@@ -680,8 +687,8 @@ func ExitCode(err error) (int, bool) {
 }
 
 func printExitError(w io.Writer, err error) error {
-	var exitErr *exitError
-	if errors.As(err, &exitErr) && exitErr.msg != "" {
+	exitErr, ok := errors.AsType[*exitError](err)
+	if ok && exitErr.msg != "" {
 		_, _ = fmt.Fprintln(w, exitErr.msg)
 	}
 	return err
@@ -712,10 +719,5 @@ func envBool(key string, fallback bool) bool {
 }
 
 func firstNonEmptyString(values ...string) string {
-	for _, value := range values {
-		if trimmed := strings.TrimSpace(value); trimmed != "" {
-			return trimmed
-		}
-	}
-	return ""
+	return strings.TrimSpace(strutil.FirstNonBlank(values...))
 }

@@ -9,10 +9,10 @@ import (
 func TestRecordEventMetric(t *testing.T) {
 	// Just verify it doesn't panic on all event types.
 	events := []event.Event{
-		{Type: event.TypeTaskFailed, Payload: mustJSON(map[string]string{"job_alias": "a"})},
-		{Type: event.TypeRunFailed, Payload: mustJSON(map[string]string{"job_alias": "b"})},
-		{Type: event.TypeRunTimedOut, Payload: mustJSON(map[string]string{"job_alias": "c"})},
-		{Type: event.TypeSLAMissed, Payload: mustJSON(map[string]string{"job_alias": "d"})},
+		{Type: event.TypeTaskFailed, Payload: mustJSON(t, map[string]string{"job_alias": "a"})},
+		{Type: event.TypeRunFailed, Payload: mustJSON(t, map[string]string{"job_alias": "b"})},
+		{Type: event.TypeRunTimedOut, Payload: mustJSON(t, map[string]string{"job_alias": "c"})},
+		{Type: event.TypeSLAMissed, Payload: mustJSON(t, map[string]string{"job_alias": "d"})},
 		{Type: event.TypeRunCompleted},
 		{Type: event.TypeTaskSucceeded},
 	}
@@ -27,9 +27,9 @@ func TestExtractJobAlias(t *testing.T) {
 		payload []byte
 		want    string
 	}{
-		{"with alias", mustJSON(map[string]string{"job_alias": "pipeline"}), "pipeline"},
+		{"with alias", mustJSON(t, map[string]string{"job_alias": "pipeline"}), "pipeline"},
 		{"empty payload", nil, ""},
-		{"no alias key", mustJSON(map[string]string{"foo": "bar"}), ""},
+		{"no alias key", mustJSON(t, map[string]string{"foo": "bar"}), ""},
 		{"invalid json", []byte("bad"), ""},
 	}
 	for _, tt := range tests {

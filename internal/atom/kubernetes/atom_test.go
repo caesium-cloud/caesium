@@ -1,6 +1,7 @@
 package kubernetes
 
 import (
+	"testing"
 	"time"
 
 	"github.com/caesium-cloud/caesium/internal/atom"
@@ -47,7 +48,8 @@ func (s *KubernetesTestSuite) TestAtom() {
 	assert.Equal(s.T(), atom.Invalid, c.State())
 
 	// valid results
-	for podResult, atomResult := range resultMap {
+	for _, podResult := range []int32{0, 1, 125, 126, 127, 137, 143} {
+		atomResult := atom.ResultForExitCode(int(podResult))
 		c := &Atom{
 			metadata: newPod(
 				testAtomID,
@@ -96,4 +98,15 @@ func (s *KubernetesTestSuite) TestAtom() {
 	}
 
 	assert.Equal(s.T(), atom.Unknown, c.Result())
+}
+
+func TestResultFallbackRequiresAbsentTerminatedState(t *testing.T) {
+	for phase, want := range map[v1.PodPhase]atom.Result{v1.PodSucceeded: atom.Success, v1.PodFailed: atom.Failure, v1.PodRunning: atom.Unknown} {
+		c := &Atom{metadata: &v1.Pod{Status: v1.PodStatus{Phase: phase}}}
+		assert.Equal(t, want, c.Result())
+		assert.Nil(t, c.ExitCode())
+		c.metadata.Status.ContainerStatuses = []v1.ContainerStatus{{State: v1.ContainerState{Terminated: &v1.ContainerStateTerminated{ExitCode: -1}}}}
+		assert.Equal(t, atom.Unknown, c.Result())
+		assert.Equal(t, -1, *c.ExitCode())
+	}
 }

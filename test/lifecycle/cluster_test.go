@@ -7,15 +7,18 @@ package lifecycle
 // raw-effect surfaces. A missing observation is blocked, never a pass.
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net"
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -126,7 +129,7 @@ func readClusterTaskProof(ctx context.Context, h *cluster.HTTP, base, runID, pub
 	sql := fmt.Sprintf("SELECT id, job_run_id, task_id, claimed_by, owner_generation, attempt, claim_attempt, runtime_id, status, output FROM task_runs WHERE job_run_id = '%s' AND task_id = '%s' LIMIT 2", rid, tid)
 	response, _, err := h.Query(ctx, base, sql, 2)
 	if err != nil {
-		return clusterTaskProof{}, fmt.Errorf("%w: %v", errTaskProofUnavailable, err)
+		return clusterTaskProof{}, fmt.Errorf("%w: %w", errTaskProofUnavailable, err)
 	}
 	return parseClusterTaskProof(response, rid.String(), tid.String())
 }
@@ -376,11 +379,7 @@ func verifyQueuedHeldAttempt(run apiRun, wantRunID, wantJobID, wantToken string,
 			starts[raw.Nonce] = true
 		}
 	}
-	nonces := make([]string, 0, len(starts))
-	for nonce := range starts {
-		nonces = append(nonces, nonce)
-	}
-	sort.Strings(nonces)
+	nonces := slices.Sorted(maps.Keys(starts))
 	if len(nonces) == 0 {
 		return nil, fmt.Errorf("queued run %s current durable runtime has no raw start nonce", run.ID)
 	}
@@ -485,33 +484,12 @@ func rawCompletionMatchesTask(runID string, proof clusterTaskProof, events []rec
 func clusterPair(t *testing.T) pairMatrix {
 	t.Helper()
 	p := loadMatrix(t)
-	var raw struct {
-		Pairs []struct {
-			ID      string `json:"id"`
-			Cluster struct {
-				Replicas                int `json:"replicas"`
-				DatabaseShards          int `json:"database_shards"`
-				DatabaseVoters          int `json:"database_voters"`
-				DatabaseStandbys        int `json:"database_standbys"`
-				ExpectedProtocolVersion int `json:"expected_protocol_version"`
-			} `json:"cluster"`
-		} `json:"pairs"`
-	}
-	data, err := os.ReadFile(filepath.Join(artifactsDir(t), "versions.json"))
-	require.NoError(t, err)
-	require.NoError(t, json.Unmarshal(data, &raw))
-	for _, item := range raw.Pairs {
-		if item.ID == p.ID {
-			require.Equal(t, 3, item.Cluster.Replicas)
-			require.Equal(t, 1, item.Cluster.DatabaseShards)
-			require.Equal(t, 3, item.Cluster.DatabaseVoters)
-			require.Zero(t, item.Cluster.DatabaseStandbys)
-			require.Equal(t, 2, item.Cluster.ExpectedProtocolVersion)
-			return p
-		}
-	}
-	blockf(t, "cluster-version-matrix", "pair %s lacks an F2 cluster matrix", p.ID)
-	return pairMatrix{}
+	require.Equal(t, 3, p.Cluster.Replicas)
+	require.Equal(t, 1, p.Cluster.DatabaseShards)
+	require.Equal(t, 3, p.Cluster.DatabaseVoters)
+	require.Zero(t, p.Cluster.DatabaseStandbys)
+	require.Equal(t, 2, p.Cluster.ExpectedProtocolVersion)
+	return p
 }
 
 func clusterKube(t *testing.T) (string, *cluster.HTTP, cluster.Topology) {
@@ -570,7 +548,7 @@ func memberEvidence(topo cluster.Topology, membership cluster.Membership) []clus
 			PVC: m.PVCName, Volume: m.VolumeName, Image: m.Image, ImageID: m.ImageID,
 			DqliteID: n.ID, Address: n.Address})
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	slices.SortFunc(out, func(a, b clusterMemberEvidence) int { return cmp.Compare(a.Name, b.Name) })
 	return out
 }
 
@@ -869,9 +847,7 @@ func TestLifecycleClusterSeed(t *testing.T) {
 		if err := verifySeedHeldAttempt(fx.DurableTasks[run.ID], rawBefore, run.Events); err != nil {
 			blockf(t, "retained-history-and-raw-effects", "seed held run %s lacks current durable attempt proof: %v", run.ID, err)
 		}
-		for nonce := range rawStartNonceSet(run.ID, rawBefore) {
-			fx.RawStartNonces[run.ID] = append(fx.RawStartNonces[run.ID], nonce)
-		}
+		fx.RawStartNonces[run.ID] = append(fx.RawStartNonces[run.ID], slices.Sorted(maps.Keys(rawStartNonceSet(run.ID, rawBefore)))...)
 		require.NotEmptyf(t, fx.RawStartNonces[run.ID], "seed run %s has no raw start nonce", run.ID)
 		sort.Strings(fx.RawStartNonces[run.ID])
 	}
@@ -1036,6 +1012,11 @@ func probeMixedProtocols(ctx context.Context, t *testing.T, h *cluster.HTTP, win
 	if err != nil {
 		return nil, fmt.Sprintf("cannot authenticate protocol probe: %v", err)
 	}
+	return probeMixedProtocolsWithClient(ctx, t, ic, window)
+}
+
+func probeMixedProtocolsWithClient(ctx context.Context, t *testing.T, ic *cluster.InternalClient, window map[string]mixedHeldMember) (map[string]mixedHeldMember, string) {
+	t.Helper()
 	probed := map[string]mixedHeldMember{}
 	for name, m := range window {
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, cluster.InternalBase(m.IP)+"/internal/capabilities", nil)
@@ -1047,8 +1028,11 @@ func probeMixedProtocols(ctx context.Context, t *testing.T, h *cluster.HTTP, win
 		if err != nil {
 			return nil, fmt.Sprintf("%s protocol probe: %v", name, err)
 		}
-		body, _ := io.ReadAll(resp.Body)
+		body, readErr := io.ReadAll(resp.Body)
 		resp.Body.Close()
+		if readErr != nil {
+			return nil, fmt.Sprintf("%s capabilities incomplete after status %d (%s): %v", name, resp.StatusCode, body, readErr)
+		}
 		if resp.StatusCode != http.StatusOK {
 			return nil, fmt.Sprintf("%s capabilities status %d: %s", name, resp.StatusCode, body)
 		}
@@ -1840,19 +1824,9 @@ func TestLifecycleClusterOrdinalZeroLoss(t *testing.T) {
 	var settleErr, rpcErr error
 	deadline := time.Now().Add(3 * time.Minute)
 	for {
-		var round []ordinalZeroView
-		rpcErr = nil
-		for _, m := range topo.Members {
-			ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
-			leader, members, err := cluster.QueryNode(ctx, m.DqliteAddr())
-			cancel()
-			if err != nil || leader == nil {
-				rpcErr = fmt.Errorf("%s: leader=%v err=%v", m.Name, leader, err)
-				break
-			}
-			round = append(round, newOrdinalZeroView(m.Name, m.DqliteAddr(), *leader, members))
-		}
-		if rpcErr == nil {
+		round, err := directViews(t, topo)
+		rpcErr = err
+		if rpcErr == nil && len(round) > 0 {
 			views = round
 			membership, settleErr = ordinalZeroSettled(views, info.ID, fresh.DqliteAddr(), liveAddrs, staleIDs)
 			if settleErr == nil {
@@ -2044,11 +2018,7 @@ func snapshotReadbackBases(expected, observed []corev1.Pod) map[string]string {
 // diagnostic evidence only: the caller still fails the snapshot phase.
 func readSnapshotDisputedWrite(ctx context.Context, h *cluster.HTTP, bases map[string]string,
 	jobID, expected string, timeout time.Duration) []snapshotDisputedReadback {
-	names := make([]string, 0, len(bases))
-	for name := range bases {
-		names = append(names, name)
-	}
-	sort.Strings(names)
+	names := slices.Sorted(maps.Keys(bases))
 	readbacks := make([]snapshotDisputedReadback, 0, len(names))
 	for _, name := range names {
 		base := bases[name]

@@ -10,7 +10,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 
 	"github.com/hashicorp/terraform-exec/tfexec"
 	tfjson "github.com/hashicorp/terraform-json"
@@ -53,37 +52,12 @@ func NewRunner(root, execPath string, log io.Writer) (*Runner, error) {
 		return nil, fmt.Errorf("root module %s is not a directory", abs)
 	}
 
-	terraform, err := tfexec.NewTerraform(abs, execPath)
+	terraform, serialized, err := NewTerraform(abs, execPath, log)
 	if err != nil {
 		return nil, fmt.Errorf("initialize terraform in %s: %w", abs, err)
 	}
-	// stdout belongs to the marker protocol alone. Terraform's own output is
-	// routed to the log stream, where it is still captured in the task log but
-	// can never be mistaken for a marker line.
-	//
-	// Both streams are pumped by terraform-exec on their OWN goroutines, and
-	// both land in the same writer here, so the writer is serialized. Without
-	// that, any caller passing something other than an *os.File — a buffer, a
-	// tee, a structured logger — races on every Terraform invocation.
-	serialized := &syncWriter{w: log}
-	terraform.SetStdout(serialized)
-	terraform.SetStderr(serialized)
 
 	return &Runner{tf: terraform, root: abs, log: serialized}, nil
-}
-
-// syncWriter serializes concurrent writes from terraform-exec's two output
-// pumps. A single *os.File would be safe on its own (one write syscall), but the
-// Runner's contract must not depend on which writer a caller happens to pass.
-type syncWriter struct {
-	mu sync.Mutex
-	w  io.Writer
-}
-
-func (s *syncWriter) Write(p []byte) (int, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.w.Write(p)
 }
 
 // Root is the absolute root module directory.

@@ -33,8 +33,8 @@ func NewRunDeadlineError(timeout time.Duration) error {
 }
 
 func IsRunDeadlineError(err error) bool {
-	var target *RunDeadlineError
-	return errors.As(err, &target)
+	_, ok := errors.AsType[*RunDeadlineError](err)
+	return ok
 }
 
 // TaskExecutionDeadline is the immutable timeout policy captured when the

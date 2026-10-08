@@ -52,7 +52,7 @@ steps:
 	s.runCLI("job", "apply", "--path", dir, "--server", s.caesiumURL)
 	job := s.requireJobByAlias(alias)
 
-	nameByID := s.taskNameMap(job.ID)
+	nameByID := s.taskNamesByID(job.ID)
 	s.waitForRateLimitWindowHeadroom(20 * time.Second)
 	runID := s.triggerRun(job.ID)
 
@@ -83,22 +83,6 @@ steps:
 	statuses := statusesByName(nameByID, run)
 	s.Equal("succeeded", statuses["limited-a"])
 	s.Equal("succeeded", statuses["limited-b"])
-}
-
-func (s *IntegrationTestSuite) taskNameMap(jobID string) map[string]string {
-	s.T().Helper()
-
-	var tasks []struct {
-		ID   string `json:"ID"`
-		Name string `json:"Name"`
-	}
-	s.getJSON(fmt.Sprintf("/v1/jobs/%s/tasks", jobID), &tasks)
-
-	nameByID := make(map[string]string, len(tasks))
-	for _, task := range tasks {
-		nameByID[task.ID] = task.Name
-	}
-	return nameByID
 }
 
 func statusesByName(nameByID map[string]string, run *runResponse) map[string]string {

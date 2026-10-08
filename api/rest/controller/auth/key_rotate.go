@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/caesium-cloud/caesium/api/internal/auditlog"
 	"github.com/caesium-cloud/caesium/api/middleware"
 	iauth "github.com/caesium-cloud/caesium/internal/auth"
 	"github.com/google/uuid"
@@ -51,7 +52,7 @@ func (ctrl *Controller) RotateKey(c *echo.Context) error {
 		return echo.NewHTTPError(http.StatusInternalServerError, "failed to rotate api key").Wrap(err)
 	}
 
-	logAuditFailure(ctrl.auditor.Log(iauth.AuditEntry{
+	auditlog.LogFailure(ctrl.auditor.Log(iauth.AuditEntry{
 		Actor:        actor,
 		Action:       iauth.ActionKeyRotate,
 		ResourceType: "api_key",

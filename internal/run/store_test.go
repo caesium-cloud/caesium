@@ -9,14 +9,17 @@ import (
 	"testing"
 	"time"
 
+	"github.com/caesium-cloud/caesium/internal/dbretry"
 	"github.com/caesium-cloud/caesium/internal/event"
 	"github.com/caesium-cloud/caesium/internal/jobdef/testutil"
 	"github.com/caesium-cloud/caesium/internal/lineage"
+	"github.com/caesium-cloud/caesium/internal/metrics"
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/caesium-cloud/caesium/pkg/container"
 	"github.com/caesium-cloud/caesium/pkg/jobdef"
 	"github.com/google/uuid"
 	"github.com/mattn/go-sqlite3"
+	dto "github.com/prometheus/client_model/go"
 	"github.com/stretchr/testify/require"
 	"gorm.io/datatypes"
 	"gorm.io/gorm"
@@ -2239,4 +2242,161 @@ func TestUnresolvedIdentityOverwriteClearsPriorDigestAndEffectiveHash(t *testing
 	require.Empty(t, desc.Runtime.ResolvedImageDigest)
 	require.Empty(t, desc.Cache.EffectiveHash)
 	require.Equal(t, "unknown", desc.Cache.ComputedHash)
+}
+
+func TestTerminalTaskRunsSinceIncludesEveryTerminalStatusOnly(t *testing.T) {
+	f := newFanOutFixture(t, nil)
+	var wantIDs []uuid.UUID
+	for i, status := range []TaskStatus{TaskStatusSucceeded, TaskStatusFailed, TaskStatusSkipped, TaskStatusCached, TaskStatusCancelled} {
+		require.True(t, IsTerminal(status))
+		id := uuid.New()
+		wantIDs = append(wantIDs, id)
+		require.NoError(t, f.db.Create(&models.TaskRun{ID: id, JobRunID: f.runID, TaskID: f.producer.ID, AtomID: f.producer.AtomID, PartitionIndex: i + 1, Status: string(status), TerminalSequence: int64(i + 2)}).Error)
+	}
+	for i, status := range []TaskStatus{TaskStatusPending, TaskStatusRunning, TaskStatusSucceeded, TaskStatusFailed} {
+		seq := int64(100 + i)
+		if IsTerminal(status) {
+			seq = 1
+		}
+		require.NoError(t, f.db.Create(&models.TaskRun{ID: uuid.New(), JobRunID: f.runID, TaskID: f.producer.ID, AtomID: f.producer.AtomID, PartitionIndex: i + 6, Status: string(status), TerminalSequence: seq}).Error)
+	}
+	rows, err := f.store.TerminalTaskRunsSince(f.runID, 1)
+	require.NoError(t, err)
+	ids := make([]uuid.UUID, 0, len(rows))
+	for _, row := range rows {
+		ids = append(ids, row.ID)
+	}
+	require.Equal(t, wantIDs, ids)
+	require.Equal(t, terminalStatusStrings(), terminalTaskStatuses())
+}
+
+func TestFailureMessageMappingsAndOwnerOverride(t *testing.T) {
+	for _, tc := range []struct{ result, want string }{
+		{"failure", "command exited with non-zero status"},
+		{"startup_failure", "atom failed to start (check image/command)"},
+		{"resource_failure", "atom exhausted resources (e.g. OOM)"},
+		{"killed", "atom was forcefully killed"},
+		{"terminated", "atom was gracefully terminated"},
+		{"provider-specific failure", "provider-specific failure"},
+	} {
+		require.Equal(t, tc.want, failureMessage(tc.result))
+	}
+	for _, explicit := range []string{"", "owner-specific failure"} {
+		t.Run(explicit, func(t *testing.T) {
+			f := newFanOutFixture(t, nil)
+			require.NoError(t, f.store.CompleteTaskOwner(f.runID, f.consumer.ID, TaskStatusFailed, "failure", explicit, "", nil, nil, 1, 1, nil, nil))
+			row := f.instances(t)[0]
+			want := explicit
+			if want == "" {
+				want = failureMessage("failure")
+			}
+			require.Equal(t, want, row.Error)
+		})
+	}
+}
+
+func TestCompletionFieldsOmitEmptyInputsAcrossUpdatePaths(t *testing.T) {
+	for _, path := range []string{"sql", "cache", "owner"} {
+		for _, shape := range []string{"nil", "empty", "values"} {
+			t.Run(path+"/"+shape, func(t *testing.T) {
+				f := newFanOutFixture(t, nil)
+				row := f.instances(t)[0]
+				oldOutput := datatypes.JSON(`{"old":"value"}`)
+				oldBranches := datatypes.JSON(`["old"]`)
+				require.NoError(t, f.db.Model(&row).Updates(map[string]any{"output": oldOutput, "branch_selections": oldBranches}).Error)
+				var output map[string]string
+				var branches []string
+				switch shape {
+				case "empty":
+					output = map[string]string{}
+					branches = []string{}
+				case "values":
+					output = map[string]string{"new": "value"}
+					branches = []string{"new"}
+				}
+				switch path {
+				case "sql":
+					require.NoError(t, f.store.CompleteTask(f.runID, f.consumer.ID, "success", output, branches))
+				case "cache":
+					_, err := f.store.CacheHitTask(f.runID, f.consumer.ID, CacheHitSource{RunID: uuid.New()}, "success", output, branches)
+					require.NoError(t, err)
+				case "owner":
+					require.NoError(t, f.store.CompleteTaskOwner(f.runID, f.consumer.ID, TaskStatusSucceeded, "success", "", "", output, branches, 1, 1, nil, nil))
+				}
+				row = f.instances(t)[0]
+				if shape == "values" {
+					require.JSONEq(t, `{"new":"value"}`, string(row.Output))
+					require.JSONEq(t, `["new"]`, string(row.BranchSelections))
+				} else {
+					require.Equal(t, oldOutput, row.Output)
+					require.Equal(t, oldBranches, row.BranchSelections)
+				}
+			})
+		}
+	}
+}
+
+func TestStoreBusyRetryPolicyPreservesBudgetClassificationAndJitter(t *testing.T) {
+	busy := sqlite3.Error{Code: sqlite3.ErrBusy}
+	other := errors.New("not contention")
+	for _, tc := range []struct {
+		name              string
+		results           []error
+		want              error
+		attempts, retries int
+	}{
+		{"success", []error{nil}, nil, 1, 0},
+		{"classified retry", []error{busy, nil}, nil, 2, 1},
+		{"non-contention", []error{other}, other, 1, 0},
+		{"exhaustion", []error{busy, busy, busy}, busy, 3, 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			attempts := 0
+			var waits []time.Duration
+			bases := []time.Duration{10 * time.Millisecond, 20 * time.Millisecond}
+			before := readStoreBusyRetryCounter(t)
+			policy := storeBusyRetryPolicy(bases, func(ctx context.Context, delay time.Duration) error {
+				require.NotNil(t, ctx)
+				waits = append(waits, delay)
+				return nil
+			})
+			//nolint:staticcheck // Characterize the documented nil-context normalization.
+			err := dbretry.Retry(nil, policy, func() error { err := tc.results[attempts]; attempts++; return err })
+			require.ErrorIs(t, err, tc.want)
+			require.Equal(t, tc.attempts, attempts)
+			require.Len(t, waits, tc.retries)
+			for i, delay := range waits {
+				require.GreaterOrEqual(t, delay, bases[i]-bases[i]/5)
+				require.LessOrEqual(t, delay, bases[i])
+			}
+			require.Equal(t, float64(tc.retries), readStoreBusyRetryCounter(t)-before)
+		})
+	}
+}
+
+func TestStoreBusyRetryContextCancellationOrder(t *testing.T) {
+	for _, beforeAttempt := range []bool{true, false} {
+		t.Run(map[bool]string{true: "before operation", false: "during wait"}[beforeAttempt], func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			calls := 0
+			if beforeAttempt {
+				cancel()
+			}
+			err := withStoreBusyRetryContext(ctx, func() error { calls++; cancel(); return sqlite3.Error{Code: sqlite3.ErrBusy} })
+			require.ErrorIs(t, err, context.Canceled)
+			if beforeAttempt {
+				require.Zero(t, calls)
+			} else {
+				require.Equal(t, 1, calls)
+			}
+		})
+	}
+}
+
+func readStoreBusyRetryCounter(t *testing.T) float64 {
+	t.Helper()
+	var value dto.Metric
+	require.NoError(t, metrics.DBBusyRetriesTotal.Write(&value))
+	return value.GetCounter().GetValue()
 }

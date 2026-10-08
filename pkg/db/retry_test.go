@@ -6,7 +6,9 @@ import (
 	"errors"
 	"sync/atomic"
 	"testing"
+	"time"
 
+	"github.com/caesium-cloud/caesium/pkg/dqlite"
 	"github.com/stretchr/testify/require"
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
@@ -297,4 +299,166 @@ func TestRWSplitCloseClosesBothPools(t *testing.T) {
 	require.Error(t, werr, "write pool should be closed")
 	_, rerr := readPool.db.ExecContext(context.Background(), "SELECT 1")
 	require.Error(t, rerr, "read pool should be closed")
+}
+
+func TestRetryBudgetsExhaustWithoutExtraAttempt(t *testing.T) {
+	old := BusyRetryBackoffs
+	BusyRetryBackoffs = []time.Duration{0, 0}
+	t.Cleanup(func() { BusyRetryBackoffs = old })
+	busy := errors.New("database is locked")
+	gdb, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	require.NoError(t, err)
+	sqlDB, err := gdb.DB()
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = sqlDB.Close() })
+	calls := 0
+	require.ErrorIs(t, transaction(context.Background(), gdb, func(tx *gorm.DB) error { calls++; return busy }), busy)
+	require.Equal(t, 3, calls)
+	pool := newCountingPool(t, 99, busy)
+	_, err = newRetryConnPool(pool).ExecContext(context.Background(), "SELECT 1")
+	require.ErrorIs(t, err, busy)
+	require.Equal(t, int32(3), pool.execAttempt.Load())
+}
+
+func TestTransactionRetriesRollbackAllAttemptWrites(t *testing.T) {
+	old := BusyRetryBackoffs
+	BusyRetryBackoffs = []time.Duration{0, 0}
+	t.Cleanup(func() { BusyRetryBackoffs = old })
+	gdb, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	require.NoError(t, err)
+	sqlDB, err := gdb.DB()
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = sqlDB.Close() })
+	require.NoError(t, gdb.Exec("CREATE TABLE retry_writes (attempt INTEGER)").Error)
+	calls := 0
+	require.NoError(t, transaction(context.Background(), gdb, func(tx *gorm.DB) error {
+		calls++
+		require.NoError(t, tx.Exec("INSERT INTO retry_writes VALUES (?)", calls).Error)
+		if calls < 3 {
+			return errors.New("database is locked")
+		}
+		return nil
+	}))
+	var attempts []int
+	require.NoError(t, gdb.Raw("SELECT attempt FROM retry_writes").Scan(&attempts).Error)
+	require.Equal(t, []int{3}, attempts)
+}
+
+func TestJitterRetryBackoffBounds(t *testing.T) {
+	for _, base := range []time.Duration{-1, 0, 4, 10 * time.Millisecond, time.Second} {
+		for range 100 {
+			got := jitterRetryBackoff(base)
+			if base <= 0 {
+				require.Zero(t, got)
+			} else {
+				require.GreaterOrEqual(t, got, base-base/5)
+				require.LessOrEqual(t, got, base)
+			}
+		}
+	}
+}
+
+// Pool cancellation retains both the backoff error and its last contention.
+func TestRetryPoolSurfacesWaitCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	busy := errors.New("database is locked")
+	p := newRetryConnPool(newCountingPool(t, 0, nil))
+	calls := 0
+	err := p.retry(ctx, func() error { calls++; cancel(); return busy })
+	require.ErrorIs(t, err, context.Canceled)
+	require.ErrorIs(t, err, busy)
+	require.True(t, dqlite.IsContentionError(err))
+	require.Equal(t, 1, calls)
+}
+
+func TestRetryPoolCancellationPreservesLastContention(t *testing.T) {
+	for _, stopped := range []error{context.Canceled, context.DeadlineExceeded} {
+		t.Run(stopped.Error(), func(t *testing.T) {
+			first := errors.New("checkpoint in progress: first")
+			last := errors.New("database is locked: last")
+			p := newRetryConnPool(newCountingPool(t, 0, nil))
+			waits := 0
+			p.wait = func(context.Context, time.Duration) error {
+				waits++
+				if waits == 2 {
+					return stopped
+				}
+				return nil
+			}
+			calls := 0
+			err := p.retry(t.Context(), func() error {
+				calls++
+				if calls == 1 {
+					return first
+				}
+				return last
+			})
+			require.ErrorIs(t, err, stopped)
+			require.ErrorIs(t, err, last)
+			require.NotErrorIs(t, err, first)
+			require.True(t, dqlite.IsContentionError(err))
+			require.Equal(t, 2, calls)
+			// The next operation must not inherit a previous operation's error.
+			require.ErrorIs(t, p.retry(t.Context(), func() error { return stopped }), stopped)
+			require.False(t, dqlite.IsContentionError(p.retry(t.Context(), func() error { return stopped })))
+			require.NoError(t, p.retry(t.Context(), func() error { return nil }))
+		})
+	}
+}
+
+func TestRWSplitReadOnlyTransactionDoesNotWaitForSerializedWriter(t *testing.T) {
+	writePool := newCountingPool(t, 0, nil)
+	writePool.db.SetMaxOpenConns(1)
+	readPool := newCountingPool(t, 0, nil)
+	split := newRWSplitConnPool(writePool, readPool)
+	writer, err := split.BeginTx(t.Context(), nil)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = writer.Rollback() })
+	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+	defer cancel()
+	reader, err := split.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	require.NoError(t, err, "read-only acquisition must succeed while the only writer is held")
+	t.Cleanup(func() { _ = reader.Rollback() })
+	var value int
+	require.NoError(t, reader.QueryRowContext(ctx, "SELECT 1").Scan(&value))
+	require.Equal(t, 1, value)
+	require.Equal(t, int32(1), writePool.beginAttempt.Load())
+	require.Equal(t, int32(1), readPool.beginAttempt.Load())
+	require.IsType(t, &sql.Tx{}, reader, "snapshot statements bypass per-statement retry")
+}
+
+func TestDatabaseRetryPathsUseInjectedWaitSchedule(t *testing.T) {
+	for _, wholeTransaction := range []bool{false, true} {
+		t.Run(map[bool]string{false: "pool", true: "transaction"}[wholeTransaction], func(t *testing.T) {
+			schedule := []time.Duration{17 * time.Millisecond, 31 * time.Millisecond}
+			var waits []time.Duration
+			wait := func(_ context.Context, d time.Duration) error { waits = append(waits, d); return nil }
+			calls := 0
+			operation := func() error {
+				calls++
+				if calls < 3 {
+					return errors.New("database is locked")
+				}
+				return nil
+			}
+			var err error
+			if wholeTransaction {
+				conn, openErr := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+				require.NoError(t, openErr)
+				sqlDB, dbErr := conn.DB()
+				require.NoError(t, dbErr)
+				t.Cleanup(func() { _ = sqlDB.Close() })
+				err = transactionWithPolicy(context.Background(), conn, busyRetryPolicy(schedule, wait), func(*gorm.DB) error { return operation() })
+			} else {
+				pool := newRetryConnPool(newCountingPool(t, 0, nil))
+				pool.backoffs = schedule
+				pool.wait = wait
+				err = pool.retry(context.Background(), operation)
+			}
+			require.NoError(t, err)
+			require.Equal(t, 3, calls)
+			require.Equal(t, schedule, waits)
+		})
+	}
 }

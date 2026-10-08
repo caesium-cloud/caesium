@@ -3,6 +3,8 @@ package lineage
 import (
 	"encoding/json"
 	"fmt"
+	"maps"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -229,88 +231,22 @@ func (m *mapper) mapRunFail(evt event.Event) (*RunEvent, error) {
 // --- Task-level mappings ---
 
 func (m *mapper) mapTaskStart(evt event.Event) (*RunEvent, error) {
-	var payload taskRunPayload
-	if err := json.Unmarshal(evt.Payload, &payload); err != nil {
-		return nil, fmt.Errorf("unmarshal task payload: %w", err)
-	}
-	m.enrichTaskPayload(&payload, evt.Timestamp)
-
-	jobAlias := m.resolveJobAlias(evt.JobID, "")
-	taskJobName := fmt.Sprintf("%s.task.%s", jobAlias, payload.TaskID)
-
-	runFacets := m.buildParentFacet(evt.RunID, jobAlias)
-	m.addExecutionFacet(runFacets, payload)
-
-	inputs, outputs := m.buildTaskDatasets(jobAlias, payload)
-	// Persist the bounded dataset graph on each task lifecycle event (start
-	// through terminal) so the impact query has edges to traverse — eagerly, so
-	// even an in-progress task's declared datasets are present. Without this the
-	// lineage_datasets table is never written and /lineage/impact always returns
-	// empty. The upsert keys on (task_run, namespace, name, direction), so
-	// re-emitted events are idempotent.
-	m.persistTaskDatasets(payload, inputs, outputs)
-
-	return &RunEvent{
-		EventTime: evt.Timestamp,
-		EventType: EventTypeStart,
-		Producer:  producerURI,
-		SchemaURL: schemaURL,
-		Run: Run{
-			RunID:  payload.ID,
-			Facets: runFacets,
-		},
-		Job: Job{
-			Namespace: m.namespace,
-			Name:      taskJobName,
-			Facets:    m.buildJobFacets(evt.JobID, "TASK"),
-		},
-		Inputs:  inputs,
-		Outputs: outputs,
-	}, nil
+	return m.mapTaskLifecycle(evt, EventTypeStart)
 }
 
 func (m *mapper) mapTaskComplete(evt event.Event) (*RunEvent, error) {
-	var payload taskRunPayload
-	if err := json.Unmarshal(evt.Payload, &payload); err != nil {
-		return nil, fmt.Errorf("unmarshal task payload: %w", err)
-	}
-	m.enrichTaskPayload(&payload, evt.Timestamp)
-
-	jobAlias := m.resolveJobAlias(evt.JobID, "")
-	taskJobName := fmt.Sprintf("%s.task.%s", jobAlias, payload.TaskID)
-
-	runFacets := m.buildParentFacet(evt.RunID, jobAlias)
-	m.addExecutionFacet(runFacets, payload)
-
-	inputs, outputs := m.buildTaskDatasets(jobAlias, payload)
-	// Persist the bounded dataset graph on each task lifecycle event (start
-	// through terminal) so the impact query has edges to traverse — eagerly, so
-	// even an in-progress task's declared datasets are present. Without this the
-	// lineage_datasets table is never written and /lineage/impact always returns
-	// empty. The upsert keys on (task_run, namespace, name, direction), so
-	// re-emitted events are idempotent.
-	m.persistTaskDatasets(payload, inputs, outputs)
-
-	return &RunEvent{
-		EventTime: evt.Timestamp,
-		EventType: EventTypeComplete,
-		Producer:  producerURI,
-		SchemaURL: schemaURL,
-		Run: Run{
-			RunID:  payload.ID,
-			Facets: runFacets,
-		},
-		Job: Job{
-			Namespace: m.namespace,
-			Name:      taskJobName,
-			Facets:    m.buildJobFacets(evt.JobID, "TASK"),
-		},
-		Inputs:  inputs,
-		Outputs: outputs,
-	}, nil
+	return m.mapTaskLifecycle(evt, EventTypeComplete)
 }
 
 func (m *mapper) mapTaskFail(evt event.Event) (*RunEvent, error) {
+	return m.mapTaskLifecycle(evt, EventTypeFail)
+}
+
+func (m *mapper) mapTaskAbort(evt event.Event) (*RunEvent, error) {
+	return m.mapTaskLifecycle(evt, EventTypeAbort)
+}
+
+func (m *mapper) mapTaskLifecycle(evt event.Event, eventType EventType) (*RunEvent, error) {
 	var payload taskRunPayload
 	if err := json.Unmarshal(evt.Payload, &payload); err != nil {
 		return nil, fmt.Errorf("unmarshal task payload: %w", err)
@@ -322,7 +258,7 @@ func (m *mapper) mapTaskFail(evt event.Event) (*RunEvent, error) {
 
 	runFacets := m.buildParentFacet(evt.RunID, jobAlias)
 	m.addExecutionFacet(runFacets, payload)
-	if payload.Error != "" {
+	if eventType == EventTypeFail && payload.Error != "" {
 		runFacets["errorMessage"] = ErrorMessageFacet{
 			BaseFacet:           newBaseFacet(errorFacetSchema),
 			Message:             payload.Error,
@@ -331,54 +267,12 @@ func (m *mapper) mapTaskFail(evt event.Event) (*RunEvent, error) {
 	}
 
 	inputs, outputs := m.buildTaskDatasets(jobAlias, payload)
-	// A failed task's declared inputs (and any partial outputs) are still
-	// recorded so lineage impact queries reflect failed runs too.
+	// Persist inputs and any partial outputs on every task lifecycle event.
 	m.persistTaskDatasets(payload, inputs, outputs)
 
 	return &RunEvent{
 		EventTime: evt.Timestamp,
-		EventType: EventTypeFail,
-		Producer:  producerURI,
-		SchemaURL: schemaURL,
-		Run: Run{
-			RunID:  payload.ID,
-			Facets: runFacets,
-		},
-		Job: Job{
-			Namespace: m.namespace,
-			Name:      taskJobName,
-			Facets:    m.buildJobFacets(evt.JobID, "TASK"),
-		},
-		Inputs:  inputs,
-		Outputs: outputs,
-	}, nil
-}
-
-func (m *mapper) mapTaskAbort(evt event.Event) (*RunEvent, error) {
-	var payload taskRunPayload
-	if err := json.Unmarshal(evt.Payload, &payload); err != nil {
-		return nil, fmt.Errorf("unmarshal task payload: %w", err)
-	}
-	m.enrichTaskPayload(&payload, evt.Timestamp)
-
-	jobAlias := m.resolveJobAlias(evt.JobID, "")
-	taskJobName := fmt.Sprintf("%s.task.%s", jobAlias, payload.TaskID)
-
-	runFacets := m.buildParentFacet(evt.RunID, jobAlias)
-	m.addExecutionFacet(runFacets, payload)
-
-	inputs, outputs := m.buildTaskDatasets(jobAlias, payload)
-	// Persist the bounded dataset graph on each task lifecycle event (start
-	// through terminal) so the impact query has edges to traverse — eagerly, so
-	// even an in-progress task's declared datasets are present. Without this the
-	// lineage_datasets table is never written and /lineage/impact always returns
-	// empty. The upsert keys on (task_run, namespace, name, direction), so
-	// re-emitted events are idempotent.
-	m.persistTaskDatasets(payload, inputs, outputs)
-
-	return &RunEvent{
-		EventTime: evt.Timestamp,
-		EventType: EventTypeAbort,
+		EventType: eventType,
 		Producer:  producerURI,
 		SchemaURL: schemaURL,
 		Run: Run{
@@ -724,11 +618,7 @@ func (m *mapper) buildTaskDatasets(jobAlias string, payload taskRunPayload) (inp
 	// Each predecessor in inputSchema becomes an input Dataset, referencing the
 	// predecessor step's logical output namespace within the same job.
 	// Sort predecessor names so the Inputs slice order is deterministic.
-	predNames := make([]string, 0, len(payload.InputSchema))
-	for predStepName := range payload.InputSchema {
-		predNames = append(predNames, predStepName)
-	}
-	sort.Strings(predNames)
+	predNames := slices.Sorted(maps.Keys(payload.InputSchema))
 	for _, predStepName := range predNames {
 		schema := payload.InputSchema[predStepName]
 		facets := map[string]any{

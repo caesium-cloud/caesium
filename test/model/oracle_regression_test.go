@@ -1,6 +1,7 @@
 package model_test
 
 import (
+	"slices"
 	"strings"
 	"testing"
 
@@ -191,12 +192,7 @@ func TestOracleRegressionWholeGroupFanIn(t *testing.T) {
 }
 
 func containsInstance(ids []model.InstanceID, want model.InstanceID) bool {
-	for _, id := range ids {
-		if id == want {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(ids, want)
 }
 
 func TestOracleRegressionDurableCompletionReplay(t *testing.T) {

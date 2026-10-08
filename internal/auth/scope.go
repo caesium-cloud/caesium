@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"slices"
-	"sort"
 	"strings"
 
 	"github.com/caesium-cloud/caesium/internal/models"
@@ -23,25 +22,12 @@ func DecodeScope(scopeJSON []byte) (*models.KeyScope, error) {
 		return nil, err
 	}
 
-	seen := make(map[string]struct{}, len(scope.Jobs))
-	jobs := make([]string, 0, len(scope.Jobs))
-	for _, alias := range scope.Jobs {
-		alias = strings.TrimSpace(alias)
-		if alias == "" {
-			continue
-		}
-		if _, ok := seen[alias]; ok {
-			continue
-		}
-		seen[alias] = struct{}{}
-		jobs = append(jobs, alias)
-	}
+	jobs := normalizeJobAliases(scope.Jobs)
 
 	if len(jobs) == 0 {
 		return nil, nil
 	}
 
-	sort.Strings(jobs)
 	scope.Jobs = jobs
 	return &scope, nil
 }
@@ -71,20 +57,7 @@ func DecodeAgentClaim(scopeJSON []byte) (*AgentClaimView, error) {
 	if scope.Agent == nil || scope.Agent.IncidentID == uuid.Nil {
 		return nil, nil
 	}
-	seen := make(map[string]struct{}, len(scope.Agent.Jobs))
-	jobs := make([]string, 0, len(scope.Agent.Jobs))
-	for _, alias := range scope.Agent.Jobs {
-		alias = strings.TrimSpace(alias)
-		if alias == "" {
-			continue
-		}
-		if _, ok := seen[alias]; ok {
-			continue
-		}
-		seen[alias] = struct{}{}
-		jobs = append(jobs, alias)
-	}
-	sort.Strings(jobs)
+	jobs := normalizeJobAliases(scope.Agent.Jobs)
 	return &AgentClaimView{IncidentID: scope.Agent.IncidentID, Jobs: jobs}, nil
 }
 
@@ -143,4 +116,13 @@ func (s *Service) JobAliasByBackfillID(ctx context.Context, id uuid.UUID) (strin
 		return "", err
 	}
 	return s.JobAliasByID(ctx, backfill.JobID)
+}
+
+// normalizeJobAliases retains an allocated empty result for scope decoding.
+func normalizeJobAliases(in []string) []string {
+	jobs := normalizeAllowlist(in)
+	if jobs == nil {
+		return []string{}
+	}
+	return jobs
 }

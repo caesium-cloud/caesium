@@ -30,10 +30,14 @@ func newJobCache(ttl time.Duration) *jobCache {
 }
 
 func (c *jobCache) Get(id uuid.UUID) (jobCacheEntry, bool) {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	entry, ok := c.entries[id]
-	if !ok || time.Since(entry.fetchedAt) > c.ttl {
+	if !ok {
+		return jobCacheEntry{}, false
+	}
+	if time.Since(entry.fetchedAt) > c.ttl {
+		delete(c.entries, id)
 		return jobCacheEntry{}, false
 	}
 	return entry, true
@@ -42,6 +46,12 @@ func (c *jobCache) Get(id uuid.UUID) (jobCacheEntry, bool) {
 func (c *jobCache) Set(id uuid.UUID, entry jobCacheEntry) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	entry.fetchedAt = time.Now()
+	now := time.Now()
+	for key, old := range c.entries {
+		if now.Sub(old.fetchedAt) > c.ttl {
+			delete(c.entries, key)
+		}
+	}
+	entry.fetchedAt = now
 	c.entries[id] = entry
 }

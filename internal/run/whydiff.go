@@ -415,7 +415,7 @@ func joinCommand(cmd []string) string {
 
 func diffEnv(before, after map[string]envBlobValue) []FieldChange {
 	var changes []FieldChange
-	for _, key := range unionKeysEnv(before, after) {
+	for _, key := range unionMapKeys(before, after) {
 		bv, bok := before[key]
 		av, aok := after[key]
 		bval, bred := bv.display()
@@ -434,7 +434,7 @@ func diffEnv(before, after map[string]envBlobValue) []FieldChange {
 
 func diffStringMap(prefix string, before, after map[string]string) []FieldChange {
 	var changes []FieldChange
-	for _, key := range unionKeysStr(before, after) {
+	for _, key := range unionMapKeys(before, after) {
 		bv, bok := before[key]
 		av, aok := after[key]
 		switch {
@@ -455,7 +455,7 @@ func diffStringMap(prefix string, before, after map[string]string) []FieldChange
 // verbatim.
 func diffPredecessorOutputs(before, after map[string]map[string]string) []FieldChange {
 	var changes []FieldChange
-	for _, step := range unionKeysOutputs(before, after) {
+	for _, step := range unionMapKeys(before, after) {
 		changes = append(changes, diffStringMap("predecessorOutputs."+step, before[step], after[step])...)
 	}
 	return changes
@@ -507,29 +507,7 @@ func canonicalizeRaw(raw json.RawMessage) []byte {
 	return out
 }
 
-func unionKeysEnv(a, b map[string]envBlobValue) []string {
-	seen := make(map[string]struct{}, len(a)+len(b))
-	for k := range a {
-		seen[k] = struct{}{}
-	}
-	for k := range b {
-		seen[k] = struct{}{}
-	}
-	return sortedSet(seen)
-}
-
-func unionKeysStr(a, b map[string]string) []string {
-	seen := make(map[string]struct{}, len(a)+len(b))
-	for k := range a {
-		seen[k] = struct{}{}
-	}
-	for k := range b {
-		seen[k] = struct{}{}
-	}
-	return sortedSet(seen)
-}
-
-func unionKeysOutputs(a, b map[string]map[string]string) []string {
+func unionMapKeys[V any](a, b map[string]V) []string {
 	seen := make(map[string]struct{}, len(a)+len(b))
 	for k := range a {
 		seen[k] = struct{}{}

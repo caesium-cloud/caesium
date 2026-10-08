@@ -252,3 +252,30 @@ func TestRunState_CloneIsolatesEveryMutation(t *testing.T) {
 	require.Equal(t, int64(1), clone.Sequence())
 	require.Equal(t, []uuid.UUID{c}, clone.ReadyTasks())
 }
+
+func TestOwnerManagerMalformedPersistedExpansionAbortsStagedCompletion(t *testing.T) {
+	db := testutil.OpenTestDB(t)
+	t.Cleanup(func() { testutil.CloseDB(db) })
+	store := NewStore(db)
+	fx := seedFanOutProducerRun(t, db, store)
+	mgr := NewOwnerManager(store, CheckpointConfig{Events: 1, Interval: time.Hour, KeepFulls: 3})
+	require.NoError(t, mgr.Adopt(fx.runID, 1))
+	mgr.MarkDispatched(fx.runID, fx.producer.ID, "node-1", 1, 0)
+	owned, ok := mgr.get(fx.runID)
+	require.True(t, ok)
+	before := owned.state.Clone()
+	partitions := []pkgtask.Partition{{Key: "a"}, {Key: "b"}}
+	exp, err := store.PlanFanOutExpansion(fx.runID, fx.producer.ID, partitions)
+	require.NoError(t, err)
+	require.NoError(t, store.CompleteTaskOwner(fx.runID, fx.producer.ID, TaskStatusSucceeded, "success", "", "node-1", nil, nil, 1, 1, nil, exp))
+	invalidID := exp.Groups[0].Instances[1].TaskRunID
+	require.NoError(t, db.Model(&models.TaskRun{}).Where("id = ?", invalidID).Update("partition_depends_on", datatypes.JSON(`["a",9]`)).Error)
+	var updates atomic.Int64
+	require.NoError(t, db.Callback().Update().Before("gorm:update").Register("test:adoption_no_commit", func(*gorm.DB) { updates.Add(1) }))
+	t.Cleanup(func() { _ = db.Callback().Update().Remove("test:adoption_no_commit") })
+	result, err := mgr.CompleteInstance(fx.runID, fx.producer.ID, uuid.Nil, TaskStatusSucceeded, "success", "", "node-1", nil, nil, partitions)
+	require.ErrorContains(t, err, invalidID.String())
+	require.True(t, result.Owned)
+	require.Equal(t, int64(0), updates.Load(), "malformed adoption must abort before durable completion")
+	require.Equal(t, before, owned.state.Clone(), "staged state must never replace the authoritative state")
+}

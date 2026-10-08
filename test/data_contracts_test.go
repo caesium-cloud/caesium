@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"os/exec"
 	"time"
 
 	"github.com/caesium-cloud/caesium/pkg/jobdef"
@@ -144,21 +143,11 @@ func (s *IntegrationTestSuite) TestDataContractsRejectIncompatibleConsumerSchema
 	dir := s.writeJobManifest(invalidDataContractsManifest(alias))
 	defer os.RemoveAll(dir)
 
-	output, err := s.runCLIExpectError("job", "apply", "--path", dir, "--server", s.caesiumURL)
+	output, err := s.runCLIRaw("job", "apply", "--path", dir, "--server", s.caesiumURL)
 	s.Require().Error(err)
 	s.Contains(output, `requires key "missing_key"`)
 
 	s.False(s.jobExists(alias))
-}
-
-func (s *IntegrationTestSuite) runCLIExpectError(args ...string) (string, error) {
-	s.T().Helper()
-
-	cmd := exec.CommandContext(s.T().Context(), s.cliPath, args...)
-	cmd.Dir = s.projectRoot
-	cmd.Env = os.Environ()
-	output, err := cmd.CombinedOutput()
-	return string(output), err
 }
 
 func (s *IntegrationTestSuite) requireTaskByName(tasks []map[string]any, name string) map[string]any {

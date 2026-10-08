@@ -3,11 +3,11 @@ package auth
 import (
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"strings"
 
 	"github.com/caesium-cloud/caesium/cmd/cliutil"
+	"github.com/caesium-cloud/caesium/internal/clihttp"
 	"github.com/spf13/cobra"
 )
 
@@ -22,6 +22,7 @@ var (
 
 var keyCreateCmd = &cobra.Command{
 	Use:   "create",
+	Args:  cobra.NoArgs,
 	Short: "Create a new API key",
 	Example: `  caesium auth key create --role operator --description "CI deploy key" --expires 90d
   caesium auth key create --role runner --description "ETL runner" --scope-jobs etl-daily,etl-hourly`,
@@ -47,24 +48,23 @@ var keyCreateCmd = &cobra.Command{
 			return err
 		}
 
-		req, err := http.NewRequestWithContext(cmd.Context(), http.MethodPost, server+"/v1/auth/keys", strings.NewReader(string(payload)))
-		if err != nil {
-			return err
-		}
-		req.Header.Set("Content-Type", "application/json")
+		headers := make(http.Header)
+		headers.Set("Content-Type", "application/json")
 		if apiKey != "" {
-			req.Header.Set("Authorization", "Bearer "+apiKey)
+			headers.Set("Authorization", "Bearer "+apiKey)
 		}
-
-		resp, err := http.DefaultClient.Do(req)
-		if err != nil {
-			return err
+		respBody, status, readErr := clihttp.Exchange(cmd.Context(), http.DefaultClient, http.MethodPost, server+"/v1/auth/keys", strings.NewReader(string(payload)), headers)
+		if status == 0 && readErr != nil {
+			return readErr
 		}
-		defer func() { _ = resp.Body.Close() }()
-
-		respBody, _ := io.ReadAll(resp.Body)
-		if resp.StatusCode >= http.StatusBadRequest {
-			return fmt.Errorf("key creation failed (%d): %s", resp.StatusCode, strings.TrimSpace(string(respBody)))
+		if status >= http.StatusBadRequest {
+			if readErr != nil {
+				return fmt.Errorf("key creation failed (%d): %s (reading response: %w)", status, strings.TrimSpace(string(respBody)), readErr)
+			}
+			return fmt.Errorf("key creation failed (%d): %s", status, strings.TrimSpace(string(respBody)))
+		}
+		if readErr != nil {
+			return fmt.Errorf("reading key creation response: %w", readErr)
 		}
 
 		// stdout is the created-key record and NOTHING else — the plaintext is

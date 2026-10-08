@@ -170,12 +170,12 @@ func branches(lines []string) []string {
 // authoritative index when any original name would not survive the fold.
 func applyOutputsEnviron(t *testing.T, step string, values map[string]string) []string {
 	t.Helper()
-	prefix := "CAESIUM_OUTPUT_" + normalizeStepName(step) + "_"
+	prefix := "CAESIUM_OUTPUT_" + tf.NormalizeEnvName(step) + "_"
 	environ := make([]string, 0, len(values)+1)
 	index := make(map[string]string, len(values))
 	needsIndex := false
 	for k, v := range values {
-		folded := normalizeStepName(k)
+		folded := tf.NormalizeEnvName(k)
 		environ = append(environ, prefix+folded+"="+v)
 		index[folded] = k
 		if strings.ToLower(folded) != k {
@@ -197,17 +197,29 @@ func applyOutputsEnviron(t *testing.T, step string, values map[string]string) []
 // with an output reference exposed as its path plus a companion _DIGEST.
 func plannedEnv(t *testing.T, step string, lines []string) {
 	t.Helper()
-	prefix := "CAESIUM_OUTPUT_" + normalizeStepName(step) + "_"
+	prefix := "CAESIUM_OUTPUT_" + tf.NormalizeEnvName(step) + "_"
 	for k, v := range outputs(t, lines) {
-		t.Setenv(prefix+normalizeStepName(k), v)
+		t.Setenv(prefix+tf.NormalizeEnvName(k), v)
 	}
 	if ref := outputRef(t, lines); ref != nil {
 		key, _ := ref["key"].(string)
 		path, _ := ref["path"].(string)
 		digest, _ := ref["digest"].(string)
-		t.Setenv(prefix+normalizeStepName(key), path)
-		t.Setenv(prefix+normalizeStepName(key)+"_DIGEST", digest)
+		t.Setenv(prefix+tf.NormalizeEnvName(key), path)
+		t.Setenv(prefix+tf.NormalizeEnvName(key)+"_DIGEST", digest)
 	}
+}
+
+// planForApply stages a proposal before callers apply or override its outputs.
+func planForApply(t *testing.T, cfg config, step, phase string) (config, []string) {
+	t.Helper()
+	lines, err := emit(t, runPlan, cfg)
+	if err != nil {
+		t.Fatalf("%s: %v", phase, err)
+	}
+	plannedEnv(t, step, lines)
+	cfg.PlanStep = step
+	return cfg, lines
 }
 
 // ---------------------------------------------------------------------------
@@ -315,12 +327,7 @@ func TestPlanDoesNotEchoThePlanJSONIntoTheLog(t *testing.T) {
 // instead.
 func TestApplyDoesNotEchoTerraformOutputJSONIntoTheLog(t *testing.T) {
 	cfg := newStack(t)
-	planLines, err := emit(t, runPlan, cfg)
-	if err != nil {
-		t.Fatalf("tf-plan: %v", err)
-	}
-	plannedEnv(t, "plan-offline", planLines)
-	cfg.PlanStep = "plan-offline"
+	cfg, _ = planForApply(t, cfg, "plan-offline", "tf-plan")
 
 	_, log, err := emitWithLog(t, runApply, cfg)
 	if err != nil {
@@ -333,12 +340,7 @@ func TestApplyDoesNotEchoTerraformOutputJSONIntoTheLog(t *testing.T) {
 
 func TestPlanOnAnAlreadyAppliedStackProposesNothing(t *testing.T) {
 	cfg := newStack(t)
-	planLines, err := emit(t, runPlan, cfg)
-	if err != nil {
-		t.Fatalf("first tf-plan: %v", err)
-	}
-	plannedEnv(t, "plan-offline", planLines)
-	cfg.PlanStep = "plan-offline"
+	cfg, _ = planForApply(t, cfg, "plan-offline", "first tf-plan")
 	if _, err := emit(t, runApply, cfg); err != nil {
 		t.Fatalf("tf-apply: %v", err)
 	}
@@ -373,22 +375,16 @@ func TestPlanBranchesToTheApplyStepOnlyWhenThereAreChanges(t *testing.T) {
 	cfg := newStack(t)
 	cfg.ApplyStep = "apply-offline"
 
-	lines, err := emit(t, runPlan, cfg)
-	if err != nil {
-		t.Fatalf("tf-plan: %v", err)
-	}
+	applyCfg, lines := planForApply(t, cfg, "plan-offline", "tf-plan")
 	if got := branches(lines); len(got) != 1 || got[0] != "apply-offline" {
 		t.Fatalf("branch markers = %v, want [apply-offline]", got)
 	}
 
-	plannedEnv(t, "plan-offline", lines)
-	applyCfg := cfg
-	applyCfg.PlanStep = "plan-offline"
 	if _, err := emit(t, runApply, applyCfg); err != nil {
 		t.Fatalf("tf-apply: %v", err)
 	}
 
-	lines, err = emit(t, runPlan, cfg)
+	lines, err := emit(t, runPlan, cfg)
 	if err != nil {
 		t.Fatalf("second tf-plan: %v", err)
 	}
@@ -454,12 +450,7 @@ func TestPlanFailuresEmitNoMarkers(t *testing.T) {
 
 func TestApplyAppliesTheProposedArtifactAndPublishesOutputs(t *testing.T) {
 	cfg := newStack(t)
-	planLines, err := emit(t, runPlan, cfg)
-	if err != nil {
-		t.Fatalf("tf-plan: %v", err)
-	}
-	plannedEnv(t, "plan-offline", planLines)
-	cfg.PlanStep = "plan-offline"
+	cfg, _ = planForApply(t, cfg, "plan-offline", "tf-plan")
 
 	lines, log, err := emitWithLog(t, runApply, cfg)
 	if err != nil {
@@ -497,21 +488,12 @@ func TestApplyAppliesTheProposedArtifactAndPublishesOutputs(t *testing.T) {
 // re-plan or fail every consumer.
 func TestApplyWithAnEmptyPlanSkipsTerraformButStillPublishesOutputs(t *testing.T) {
 	cfg := newStack(t)
-	planLines, err := emit(t, runPlan, cfg)
-	if err != nil {
-		t.Fatalf("tf-plan: %v", err)
-	}
-	plannedEnv(t, "plan-offline", planLines)
-	cfg.PlanStep = "plan-offline"
+	cfg, _ = planForApply(t, cfg, "plan-offline", "tf-plan")
 	if _, err := emit(t, runApply, cfg); err != nil {
 		t.Fatalf("first tf-apply: %v", err)
 	}
 
-	emptyLines, err := emit(t, runPlan, cfg)
-	if err != nil {
-		t.Fatalf("second tf-plan: %v", err)
-	}
-	plannedEnv(t, "plan-offline", emptyLines)
+	cfg, _ = planForApply(t, cfg, "plan-offline", "second tf-plan")
 
 	lines, log, err := emitWithLog(t, runApply, cfg)
 	if err != nil {
@@ -531,12 +513,7 @@ func TestApplyWithAnEmptyPlanSkipsTerraformButStillPublishesOutputs(t *testing.T
 // would make the propose/apply split decorative.
 func TestApplyRefusesAnArtifactThatDoesNotMatchTheProposal(t *testing.T) {
 	cfg := newStack(t)
-	planLines, err := emit(t, runPlan, cfg)
-	if err != nil {
-		t.Fatalf("tf-plan: %v", err)
-	}
-	plannedEnv(t, "plan-offline", planLines)
-	cfg.PlanStep = "plan-offline"
+	cfg, _ = planForApply(t, cfg, "plan-offline", "tf-plan")
 
 	planPath := filepath.Join(cfg.ArtifactDir, planFileName)
 	if err := os.WriteFile(planPath, []byte("tampered"), 0o600); err != nil {
@@ -562,12 +539,7 @@ func TestApplyRefusesAnArtifactThatDoesNotMatchTheProposal(t *testing.T) {
 // receipt is what turns that wedge into a republish.
 func TestApplyRecordsAReceiptAndRepublishesWithoutReApplying(t *testing.T) {
 	cfg := newStack(t)
-	planLines, err := emit(t, runPlan, cfg)
-	if err != nil {
-		t.Fatalf("tf-plan: %v", err)
-	}
-	plannedEnv(t, "plan-offline", planLines)
-	cfg.PlanStep = "plan-offline"
+	cfg, planLines := planForApply(t, cfg, "plan-offline", "tf-plan")
 
 	digest, _ := outputRef(t, planLines)["digest"].(string)
 	if !protocol.ValidDigest(digest) {
@@ -615,12 +587,7 @@ func TestApplyRecordsAReceiptAndRepublishesWithoutReApplying(t *testing.T) {
 // completed. The write therefore goes to a sibling temp file and is renamed in.
 func TestApplyReceiptIsWrittenAtomically(t *testing.T) {
 	cfg := newStack(t)
-	planLines, err := emit(t, runPlan, cfg)
-	if err != nil {
-		t.Fatalf("tf-plan: %v", err)
-	}
-	plannedEnv(t, "plan-offline", planLines)
-	cfg.PlanStep = "plan-offline"
+	cfg, planLines := planForApply(t, cfg, "plan-offline", "tf-plan")
 
 	digest, _ := outputRef(t, planLines)["digest"].(string)
 	receipt := applyReceiptPath(cfg.ArtifactDir, digest)
@@ -719,12 +686,7 @@ func TestWriteFileAtomicLeavesNoPartialBehind(t *testing.T) {
 // stack would suppress every apply after it.
 func TestApplyReceiptDoesNotMatchALaterProposal(t *testing.T) {
 	cfg := newStack(t)
-	firstPlan, err := emit(t, runPlan, cfg)
-	if err != nil {
-		t.Fatalf("tf-plan: %v", err)
-	}
-	plannedEnv(t, "plan-offline", firstPlan)
-	cfg.PlanStep = "plan-offline"
+	cfg, _ = planForApply(t, cfg, "plan-offline", "tf-plan")
 	if _, err := emit(t, runApply, cfg); err != nil {
 		t.Fatalf("tf-apply: %v", err)
 	}
@@ -733,11 +695,7 @@ func TestApplyReceiptDoesNotMatchALaterProposal(t *testing.T) {
 	// canary resource takes its input from var.greeting.
 	t.Setenv("TF_VAR_greeting", "hello again")
 
-	secondPlan, err := emit(t, runPlan, cfg)
-	if err != nil {
-		t.Fatalf("second tf-plan: %v", err)
-	}
-	plannedEnv(t, "plan-offline", secondPlan)
+	cfg, _ = planForApply(t, cfg, "plan-offline", "second tf-plan")
 
 	_, log, err := emitWithLog(t, runApply, cfg)
 	if err != nil {
@@ -935,13 +893,7 @@ func TestApplyRejectsAnIncompleteOrForeignProposal(t *testing.T) {
 
 func TestDriftOnACleanStackIsGreen(t *testing.T) {
 	cfg := newStack(t)
-	planLines, err := emit(t, runPlan, cfg)
-	if err != nil {
-		t.Fatalf("tf-plan: %v", err)
-	}
-	plannedEnv(t, "plan-offline", planLines)
-	applyCfg := cfg
-	applyCfg.PlanStep = "plan-offline"
+	applyCfg, _ := planForApply(t, cfg, "plan-offline", "tf-plan")
 	if _, err := emit(t, runApply, applyCfg); err != nil {
 		t.Fatalf("tf-apply: %v", err)
 	}
@@ -1315,10 +1267,7 @@ func TestSubcommandsCoverEveryDocumentedPhase(t *testing.T) {
 // apply that reads all zeros and does nothing — and the run is green.
 func TestApplyTrustsTerraformsChangeAnswerOverTheCounts(t *testing.T) {
 	cfg := newStack(t)
-	planLines, err := emit(t, runPlan, cfg)
-	if err != nil {
-		t.Fatalf("tf-plan: %v", err)
-	}
+	cfg, planLines := planForApply(t, cfg, "plan-offline", "tf-plan")
 	values := outputs(t, planLines)
 	summary, err := tf.DecodeSummary(values["proposal_summary"])
 	if err != nil {
@@ -1335,9 +1284,7 @@ func TestApplyTrustsTerraformsChangeAnswerOverTheCounts(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	plannedEnv(t, "plan-offline", planLines)
 	t.Setenv("CAESIUM_OUTPUT_PLAN_OFFLINE_PROPOSAL_SUMMARY", encoded)
-	cfg.PlanStep = "plan-offline"
 
 	_, log, err := emitWithLog(t, runApply, cfg)
 	if err != nil {
@@ -1392,12 +1339,7 @@ output "token" {
 		t.Fatal(err)
 	}
 
-	planLines, err := emit(t, runPlan, cfg)
-	if err != nil {
-		t.Fatalf("tf-plan: %v", err)
-	}
-	plannedEnv(t, "plan-offline", planLines)
-	cfg.PlanStep = "plan-offline"
+	cfg, _ = planForApply(t, cfg, "plan-offline", "tf-plan")
 
 	lines, err := emit(t, runApply, cfg)
 	if err != nil {
@@ -1449,12 +1391,7 @@ output "caesium_output_names" {
 		t.Fatal(err)
 	}
 
-	planLines, err := emit(t, runPlan, cfg)
-	if err != nil {
-		t.Fatalf("tf-plan: %v", err)
-	}
-	plannedEnv(t, "plan-offline", planLines)
-	cfg.PlanStep = "plan-offline"
+	cfg, _ = planForApply(t, cfg, "plan-offline", "tf-plan")
 
 	lines, err := emit(t, runApply, cfg)
 	if err != nil {
@@ -1534,12 +1471,7 @@ output "vpc_id" {
 		t.Fatal(err)
 	}
 
-	planLines, err := emit(t, runPlan, cfg)
-	if err != nil {
-		t.Fatalf("tf-plan: %v", err)
-	}
-	plannedEnv(t, "plan-offline", planLines)
-	cfg.PlanStep = "plan-offline"
+	cfg, _ = planForApply(t, cfg, "plan-offline", "tf-plan")
 
 	lines, log, err := emitWithLog(t, runApply, cfg)
 	if err == nil {
@@ -1561,12 +1493,7 @@ output "vpc_id" {
 
 func TestApplyReportsHowManyOutputsItPublished(t *testing.T) {
 	cfg := newStack(t)
-	planLines, err := emit(t, runPlan, cfg)
-	if err != nil {
-		t.Fatalf("tf-plan: %v", err)
-	}
-	plannedEnv(t, "plan-offline", planLines)
-	cfg.PlanStep = "plan-offline"
+	cfg, _ = planForApply(t, cfg, "plan-offline", "tf-plan")
 
 	lines, err := emit(t, runApply, cfg)
 	if err != nil {

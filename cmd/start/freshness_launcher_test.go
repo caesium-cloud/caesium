@@ -3,12 +3,17 @@ package start
 import (
 	"context"
 	"errors"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/caesium-cloud/caesium/internal/freshness"
 	"github.com/caesium-cloud/caesium/internal/job"
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/caesium-cloud/caesium/internal/run"
+	"github.com/caesium-cloud/caesium/internal/runlife"
+	"github.com/caesium-cloud/caesium/internal/testutil"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 	"gorm.io/driver/sqlite"
@@ -196,7 +201,7 @@ func TestFreshnessRunLauncherFencesCancellationDuringLookup(t *testing.T) {
 		},
 	)
 
-	launcher(context.Background(), derived)
+	launcher(derivedTestSupervisorContext(t), derived)
 
 	select {
 	case <-lookupEntered:
@@ -263,25 +268,9 @@ func TestLaunchDerivedRunSkipsTerminalRun(t *testing.T) {
 
 // failJobRunReads makes the first n reads of job_runs fail, simulating
 // transient database contention on the status fence.
-func failJobRunReads(t *testing.T, conn *gorm.DB, n int) {
+func failJobRunReads(t *testing.T, db *gorm.DB, n int) {
 	t.Helper()
-	const name = "test:fail_job_run_reads"
-	remaining := n
-	require.NoError(t, conn.Callback().Query().Before("gorm:query").Register(name, func(tx *gorm.DB) {
-		if remaining <= 0 {
-			return
-		}
-		table := tx.Statement.Table
-		if table == "" && tx.Statement.Schema != nil {
-			table = tx.Statement.Schema.Table
-		}
-		if table != "job_runs" {
-			return
-		}
-		remaining--
-		tx.AddError(errors.New("database is locked"))
-	}))
-	t.Cleanup(func() { _ = conn.Callback().Query().Remove(name) })
+	testutil.FailJobRunReads(t, db, n)
 }
 
 // TestLaunchDerivedRunFenceRetriesTransientStatusRead is the regression for a
@@ -396,4 +385,354 @@ func TestLaunchDerivedRunRetriesTransientLookupFailure(t *testing.T) {
 		t.Fatalf("run status = %q, want %q: a launched run is finalized by job.Run, not the launcher",
 			status, run.StatusRunning)
 	}
+}
+
+func derivedTestSupervisorContext(t *testing.T) context.Context {
+	t.Helper()
+	owner := runlife.New(context.Background())
+	t.Cleanup(func() {
+		owner.CloseAndCancel()
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		if err := owner.Wait(ctx); err != nil {
+			t.Errorf("derived work did not join: %v", err)
+		}
+	})
+	return runlife.WithSupervisor(t.Context(), owner)
+}
+
+func TestDerivedRunSubmissionRefusesMissingAndClosedOwner(t *testing.T) {
+	for _, kind := range []string{"missing", "closed"} {
+		t.Run(kind, func(t *testing.T) {
+			conn := openLauncherTestDB(t)
+			store := run.NewStore(conn)
+			derived, _ := seedRunningDerivedRun(t, conn)
+			other, _ := seedRunningDerivedRun(t, conn)
+			ctx := context.Background()
+			cause := runlife.ErrMissing
+			if kind == "closed" {
+				owner := runlife.New(context.Background())
+				owner.CloseAndCancel()
+				ctx = runlife.WithSupervisor(ctx, owner)
+				cause = runlife.ErrClosed
+			}
+			launcher := newFreshnessRunLauncher(store,
+				func(context.Context, uuid.UUID) (*models.Job, error) {
+					t.Fatal("refused submission entered lookup")
+					return nil, nil
+				},
+				func(context.Context, *models.Job, *run.JobRun) error {
+					t.Fatal("refused submission executed")
+					return nil
+				})
+			launcher(ctx, derived)
+			require.Zero(t, job.CancelRunContexts(derived.ID))
+			row, err := store.Get(derived.ID)
+			require.NoError(t, err)
+			require.Equal(t, run.StatusFailed, row.Status)
+			require.NotNil(t, row.CompletedAt)
+			require.Equal(t, "freshness: derived run submission refused: "+cause.Error(), row.Error)
+			untouched, err := store.Get(other.ID)
+			require.NoError(t, err)
+			require.Equal(t, run.StatusRunning, untouched.Status)
+			require.Nil(t, untouched.CompletedAt)
+			// A repeated refusal cannot replace an already-terminal cause.
+			launcher(ctx, derived)
+			again, err := store.Get(derived.ID)
+			require.NoError(t, err)
+			require.Equal(t, row.Error, again.Error)
+			require.Equal(t, row.CompletedAt, again.CompletedAt)
+		})
+	}
+}
+
+func TestDerivedRunRefusalFinalizationFailureRemainsUnresolvedWithoutExecution(t *testing.T) {
+	conn := openLauncherTestDB(t)
+	store := run.NewStore(conn)
+	derived, _ := seedRunningDerivedRun(t, conn)
+	const callback = "test:freshness_refused_completion_failure"
+	require.NoError(t, conn.Callback().Update().Before("gorm:update").Register(callback, func(tx *gorm.DB) {
+		if tx.Statement.Table == "job_runs" {
+			_ = tx.AddError(errors.New("finalization unavailable"))
+		}
+	}))
+	t.Cleanup(func() { _ = conn.Callback().Update().Remove(callback) })
+	launcher := newFreshnessRunLauncher(store,
+		func(context.Context, uuid.UUID) (*models.Job, error) {
+			t.Fatal("unowned run entered lookup")
+			return nil, nil
+		},
+		func(context.Context, *models.Job, *run.JobRun) error { t.Fatal("unowned run executed"); return nil })
+	launcher(t.Context(), derived)
+	row, err := store.Get(derived.ID)
+	require.NoError(t, err)
+	require.Equal(t, run.StatusRunning, row.Status, "a failed completion remains operator-visible, not falsely terminal")
+	require.Nil(t, row.CompletedAt)
+	require.Zero(t, job.CancelRunContexts(derived.ID))
+}
+
+func TestFreshnessConsumedReservationDuplicateDoesNotFinalizeOwnedExecution(t *testing.T) {
+	conn := openLauncherTestDB(t)
+	store := run.NewStore(conn)
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	old := now.Add(-2 * time.Hour)
+	trigger := models.Trigger{ID: uuid.New(), Alias: "duplicate-freshness-trigger", Type: models.TriggerTypeFreshness, Configuration: `{}`}
+	require.NoError(t, conn.Create(&trigger).Error)
+	j := models.Job{ID: uuid.New(), Alias: "duplicate-freshness-job", TriggerID: trigger.ID}
+	require.NoError(t, conn.Create(&j).Error)
+	decl := models.DatasetDeclaration{ID: uuid.New(), JobID: j.ID, JobAlias: j.Alias, StepName: "produce", Name: "duplicate-out",
+		Direction: models.DatasetDirectionProduces, Freshness: "1h", CreatedAt: old, UpdatedAt: old}
+	require.NoError(t, conn.Create(&decl).Error)
+	state := models.DatasetState{ID: uuid.New(), Name: decl.Name, Watermark: "100", AdvancedAt: &old,
+		Status: models.DatasetStatusUnknown, CreatedAt: old, UpdatedAt: old}
+	require.NoError(t, conn.Create(&state).Error)
+	owner := runlife.New(context.Background())
+	entered, completed := make(chan struct{}, 1), make(chan error, 1)
+	finish := make(chan struct{})
+	var once sync.Once
+	unblock := func() { once.Do(func() { close(finish) }) }
+	t.Cleanup(func() {
+		unblock()
+		owner.CloseAndCancel()
+		wait, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		require.NoError(t, owner.Wait(wait))
+	})
+	launcher := newFreshnessRunLauncher(store,
+		func(context.Context, uuid.UUID) (*models.Job, error) { return &j, nil },
+		func(_ context.Context, _ *models.Job, r *run.JobRun) error {
+			entered <- struct{}{}
+			<-finish
+			err := store.Complete(r.ID, nil)
+			completed <- err
+			return err
+		})
+	var admitted *run.JobRun
+	eval := freshness.NewEvaluator(freshness.Config{DB: conn, RunStore: store,
+		LaunchRun:             func(ctx context.Context, r *run.JobRun) { admitted = r; launcher(ctx, r); launcher(ctx, r) },
+		MaxDerivationsPerTick: 50, Now: func() time.Time { return now }})
+	require.NoError(t, eval.EvaluateOnce(runlife.WithSupervisor(t.Context(), owner)))
+	require.NotNil(t, admitted)
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("first owned execution was canceled by duplicate submission")
+	}
+	row, err := store.Get(admitted.ID)
+	require.NoError(t, err)
+	require.Equal(t, run.StatusRunning, row.Status)
+	require.Empty(t, row.Error)
+	require.Nil(t, row.CompletedAt)
+	unblock()
+	select {
+	case err := <-completed:
+		require.NoError(t, err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("owned execution did not finish")
+	}
+	owner.CloseAndCancel()
+	wait, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	require.NoError(t, owner.Wait(wait))
+	select {
+	case <-entered:
+		t.Fatal("consumed reservation launched execution twice")
+	default:
+	}
+	row, err = store.Get(admitted.ID)
+	require.NoError(t, err)
+	require.Equal(t, run.StatusSucceeded, row.Status)
+	require.Zero(t, job.CancelRunContexts(admitted.ID))
+}
+
+func TestLaunchDerivedRunFinalizesServerCancellationBeforeDispatch(t *testing.T) {
+	conn := openLauncherTestDB(t)
+	store := run.NewStore(conn)
+	derived, _ := seedRunningDerivedRun(t, conn)
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	executed := false
+	launchDerivedRun(ctx, store, derived,
+		func(_ context.Context, id uuid.UUID) (*models.Job, error) {
+			cancel()
+			return &models.Job{ID: id}, nil
+		}, func(context.Context, *models.Job, *run.JobRun) error { executed = true; return nil })
+	if executed {
+		t.Fatal("canceled run was dispatched")
+	}
+	row, err := store.Get(derived.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if row.Status != run.StatusFailed {
+		t.Fatalf("canceled admitted run status = %s", row.Status)
+	}
+	if !strings.Contains(row.Error, "canceled before dispatch") {
+		t.Fatalf("completion cause = %q", row.Error)
+	}
+}
+
+func TestFreshnessRunLauncherPreservesAdmissionRefusedDuringServerShutdown(t *testing.T) {
+	conn := openLauncherTestDB(t)
+	store := run.NewStore(conn)
+	derived, _ := seedRunningDerivedRun(t, conn)
+	parent, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	owner := runlife.New(context.Background())
+	owner.CloseAndCancelCause(runlife.ErrServerShutdown)
+	cancel() // The canceled request must not hide the supervisor's shutdown cause.
+	launcher := newFreshnessRunLauncher(store,
+		func(context.Context, uuid.UUID) (*models.Job, error) {
+			t.Fatal("shutdown entered lookup")
+			return nil, nil
+		},
+		func(context.Context, *models.Job, *run.JobRun) error {
+			t.Fatal("shutdown dispatched execution")
+			return nil
+		})
+	launcher(runlife.WithSupervisor(parent, owner), derived)
+	assertDerivedRunRetained(t, conn, store, derived.ID)
+	require.Zero(t, job.CancelRunContexts(derived.ID))
+}
+
+func TestLaunchDerivedRunPreservesShutdownBeforeDispatch(t *testing.T) {
+	for _, stage := range []string{"before_lookup", "lookup_error", "lookup_success", "fence_error"} {
+		t.Run(stage, func(t *testing.T) {
+			conn := openLauncherTestDB(t)
+			store := run.NewStore(conn)
+			derived, _ := seedRunningDerivedRun(t, conn)
+			owner := runlife.New(context.Background())
+			ctx, release, err := owner.Reserve(runlife.WithSupervisor(t.Context(), owner))
+			require.NoError(t, err)
+			defer release()
+			defer owner.CloseAndCancel()
+			if stage == "before_lookup" {
+				owner.CloseAndCancelCause(runlife.ErrServerShutdown)
+			}
+			const callback = "test:freshness_shutdown_fence"
+			if stage == "fence_error" {
+				require.NoError(t, conn.Callback().Query().Before("gorm:query").Register(callback, func(tx *gorm.DB) {
+					if tx.Statement.Table == "job_runs" {
+						owner.CloseAndCancelCause(runlife.ErrServerShutdown)
+						_ = tx.AddError(gorm.ErrRecordNotFound)
+					}
+				}))
+			}
+			launchDerivedRun(ctx, store, derived,
+				func(context.Context, uuid.UUID) (*models.Job, error) {
+					if stage == "before_lookup" {
+						t.Fatal("shutdown entered lookup")
+					}
+					if stage == "lookup_error" || stage == "lookup_success" {
+						owner.CloseAndCancelCause(runlife.ErrServerShutdown)
+					}
+					if stage == "lookup_error" {
+						return nil, context.Canceled
+					}
+					return &models.Job{ID: derived.JobID}, nil
+				},
+				func(context.Context, *models.Job, *run.JobRun) error {
+					t.Fatal("shutdown dispatched execution")
+					return nil
+				})
+			if stage == "fence_error" {
+				require.NoError(t, conn.Callback().Query().Remove(callback))
+			}
+			assertDerivedRunRetained(t, conn, store, derived.ID)
+		})
+	}
+}
+
+func assertDerivedRunRetained(t *testing.T, conn *gorm.DB, store *run.Store, id uuid.UUID) {
+	t.Helper()
+	row, err := store.Get(id)
+	require.NoError(t, err)
+	require.Equal(t, run.StatusRunning, row.Status)
+	require.Nil(t, row.CompletedAt)
+	require.Empty(t, row.Error)
+	var count int64
+	require.NoError(t, conn.Model(&models.TaskRun{}).Where("job_run_id = ?", id).Count(&count).Error)
+	require.Zero(t, count)
+}
+
+type closingFreshnessStarter struct {
+	*run.Store
+	owner *runlife.Supervisor
+}
+
+func (s closingFreshnessStarter) StartWithContext(ctx context.Context, jobID uuid.UUID, triggerID *uuid.UUID, opts ...run.StartOption) (*run.JobRun, error) {
+	r, err := s.Store.StartWithContext(ctx, jobID, triggerID, opts...)
+	if err == nil && r != nil {
+		s.owner.CloseAndCancel()
+	}
+	return r, err
+}
+
+// The evaluator and actual launcher must transfer the reservation: reserving a
+// second time after this committed start would be refused by the closed owner.
+func TestFreshnessAdmissionTransfersOwnershipToLauncherAcrossShutdown(t *testing.T) {
+	conn := openLauncherTestDB(t)
+	store := run.NewStore(conn)
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	old := now.Add(-2 * time.Hour)
+	trigger := models.Trigger{ID: uuid.New(), Alias: "owned-freshness-trigger", Type: models.TriggerTypeFreshness, Configuration: `{}`}
+	require.NoError(t, conn.Create(&trigger).Error)
+	j := models.Job{ID: uuid.New(), Alias: "owned-freshness-job", TriggerID: trigger.ID}
+	require.NoError(t, conn.Create(&j).Error)
+	decl := models.DatasetDeclaration{ID: uuid.New(), JobID: j.ID, JobAlias: j.Alias, StepName: "produce", Name: "owned-out",
+		Direction: models.DatasetDirectionProduces, Freshness: "1h", CreatedAt: old, UpdatedAt: old}
+	require.NoError(t, conn.Create(&decl).Error)
+	state := models.DatasetState{ID: uuid.New(), Name: decl.Name, Watermark: "100", AdvancedAt: &old,
+		Status: models.DatasetStatusUnknown, CreatedAt: old, UpdatedAt: old}
+	require.NoError(t, conn.Create(&state).Error)
+	owner := runlife.New(context.Background())
+	lookup := make(chan struct{}, 1)
+	finishLookup := make(chan struct{})
+	var once sync.Once
+	unblock := func() { once.Do(func() { close(finishLookup) }) }
+	t.Cleanup(func() {
+		owner.CloseAndCancel()
+		unblock()
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		require.NoError(t, owner.Wait(ctx))
+	})
+	executed := make(chan struct{}, 1)
+	launcher := newFreshnessRunLauncher(store,
+		func(ctx context.Context, _ uuid.UUID) (*models.Job, error) {
+			select {
+			case <-ctx.Done():
+			case <-time.After(time.Second):
+				return nil, errors.New("launch ignored server cancellation")
+			}
+			lookup <- struct{}{}
+			<-finishLookup
+			return &j, nil
+		}, func(context.Context, *models.Job, *run.JobRun) error { executed <- struct{}{}; return nil })
+	eval := freshness.NewEvaluator(freshness.Config{DB: conn, RunStore: closingFreshnessStarter{Store: store, owner: owner},
+		LaunchRun: launcher, MaxDerivationsPerTick: 50, Now: func() time.Time { return now }})
+	require.NoError(t, eval.EvaluateOnce(runlife.WithSupervisor(t.Context(), owner)))
+	select {
+	case <-lookup:
+	case <-time.After(5 * time.Second):
+		t.Fatal("committed admission was refused instead of transferring ownership")
+	}
+	expired, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer cancel()
+	require.ErrorIs(t, owner.Wait(expired), context.DeadlineExceeded)
+	unblock()
+	waitCtx, waitCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer waitCancel()
+	require.NoError(t, owner.Wait(waitCtx))
+	select {
+	case <-executed:
+		t.Fatal("shutdown run dispatched")
+	default:
+	}
+	var rows []models.JobRun
+	require.NoError(t, conn.Where("job_id = ?", j.ID).Find(&rows).Error)
+	require.Len(t, rows, 1)
+	require.Equal(t, string(run.StatusFailed), rows[0].Status)
+	require.Contains(t, rows[0].Error, "canceled before dispatch")
+	require.Zero(t, job.CancelRunContexts(rows[0].ID))
 }

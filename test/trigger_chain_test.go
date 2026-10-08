@@ -50,7 +50,7 @@ func (s *IntegrationTestSuite) TestTriggerChainCycleRejectedBeforePersistence() 
 	s.Require().Error(err)
 	s.Contains(stdout+stderr, "trigger chain cycle detected")
 
-	output, err := s.runCLIExpectError("job", "apply", "--path", dir, "--server", s.caesiumURL)
+	output, err := s.runCLIRaw("job", "apply", "--path", dir, "--server", s.caesiumURL)
 	s.Require().Error(err)
 	s.Contains(output, "trigger chain cycle detected")
 	s.False(s.jobExists(a))

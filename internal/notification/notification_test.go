@@ -7,6 +7,7 @@ import (
 
 	"github.com/caesium-cloud/caesium/internal/event"
 	"github.com/caesium-cloud/caesium/internal/models"
+	"github.com/caesium-cloud/caesium/internal/testutil"
 	"github.com/google/uuid"
 )
 
@@ -132,14 +133,14 @@ func TestPolicyFilterMatches(t *testing.T) {
 			name:    "job alias match",
 			filter:  &PolicyFilter{JobAlias: "etl"},
 			evtJob:  jobID,
-			payload: mustJSON(map[string]string{"job_alias": "etl"}),
+			payload: mustJSON(t, map[string]string{"job_alias": "etl"}),
 			want:    true,
 		},
 		{
 			name:    "job alias no match",
 			filter:  &PolicyFilter{JobAlias: "etl"},
 			evtJob:  jobID,
-			payload: mustJSON(map[string]string{"job_alias": "ingest"}),
+			payload: mustJSON(t, map[string]string{"job_alias": "ingest"}),
 			want:    false,
 		},
 		{
@@ -296,17 +297,17 @@ func TestParseSLA(t *testing.T) {
 		},
 		{
 			name:    "duration only",
-			input:   mustJSON(slaConfig{Duration: 30 * time.Minute}),
+			input:   mustJSON(t, slaConfig{Duration: 30 * time.Minute}),
 			wantDur: 30 * time.Minute,
 		},
 		{
 			name:       "completedBy only",
-			input:      mustJSON(slaConfig{CompletedBy: "09:00"}),
+			input:      mustJSON(t, slaConfig{CompletedBy: "09:00"}),
 			wantCompBy: "09:00",
 		},
 		{
 			name:       "both",
-			input:      mustJSON(slaConfig{Duration: 1 * time.Hour, CompletedBy: "14:30"}),
+			input:      mustJSON(t, slaConfig{Duration: 1 * time.Hour, CompletedBy: "14:30"}),
 			wantDur:    1 * time.Hour,
 			wantCompBy: "14:30",
 		},
@@ -451,10 +452,7 @@ func TestRunMetSLA_BoundaryConditions(t *testing.T) {
 	}
 }
 
-func mustJSON(v any) json.RawMessage {
-	data, err := json.Marshal(v)
-	if err != nil {
-		panic(err)
-	}
-	return data
+func mustJSON(t *testing.T, v any) json.RawMessage {
+	t.Helper()
+	return json.RawMessage(testutil.MustJSONBytes(t, v))
 }

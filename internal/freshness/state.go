@@ -4,10 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/caesium-cloud/caesium/internal/dbretry"
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/google/uuid"
 	"gorm.io/datatypes"
@@ -145,24 +147,19 @@ func (s *Store) Advance(ctx context.Context, in AdvanceInput) (AdvanceResult, er
 	in.RunOrder = order.UTC()
 
 	const maxAttempts = 5
-	var (
-		res AdvanceResult
-		err error
-	)
-	for range maxAttempts {
+	var res AdvanceResult
+	err := dbretry.Retry(ctx, dbretry.Policy{
+		Backoffs:  make([]time.Duration, maxAttempts-1),
+		Retryable: func(err error) bool { return errors.Is(err, errStateRaceRetry) || isBusyErr(err) },
+	}, func() error {
+		var err error
 		res, err = s.advanceTx(ctx, in)
-		if err == nil {
-			return res, nil
-		}
-		// Retry only the narrow race window (row created/removed between our
-		// read and our conditional write) and transient store-busy errors;
-		// everything else propagates immediately.
-		if errors.Is(err, errStateRaceRetry) || isBusyErr(err) {
-			continue
-		}
+		return err
+	})
+	if err != nil {
 		return AdvanceResult{}, err
 	}
-	return AdvanceResult{}, err
+	return res, nil
 }
 
 // advanceTx runs one attempt of the advance/verify contract in a single
@@ -467,6 +464,54 @@ func (s *Store) RecordConsumed(ctx context.Context, namespace *string, name stri
 	return s.db.WithContext(ctx).Model(&models.DatasetState{}).
 		Where("namespace = ? AND name = ?", nsValue(namespace), name).
 		Update("consumed_watermarks", datatypes.JSON(blob)).Error
+}
+
+type datasetIdentity struct {
+	namespace string
+	name      string
+}
+
+// getMany keeps namespace presence and observation timestamps while bounding
+// SQLite bind parameters. Missing rows are absent keys, never synthetic state.
+func (s *Store) getMany(ctx context.Context, ids []datasetIdentity) (map[datasetIdentity]models.DatasetState, error) {
+	const namesPerChunk = 400
+	seen := make(map[datasetIdentity]struct{}, len(ids))
+	namesByNamespace := make(map[string][]string)
+	for _, id := range ids {
+		id.namespace = nsValue(&id.namespace)
+		id.name = strings.TrimSpace(id.name)
+		if id.name == "" {
+			continue
+		}
+		if _, duplicate := seen[id]; duplicate {
+			continue
+		}
+		seen[id] = struct{}{}
+		namesByNamespace[id.namespace] = append(namesByNamespace[id.namespace], id.name)
+	}
+	namespaces := make([]string, 0, len(namesByNamespace))
+	for namespace := range namesByNamespace {
+		namespaces = append(namespaces, namespace)
+	}
+	sort.Strings(namespaces)
+	var result map[datasetIdentity]models.DatasetState
+	for _, namespace := range namespaces {
+		names := namesByNamespace[namespace]
+		for start := 0; start < len(names); start += namesPerChunk {
+			chunk := names[start:min(start+namesPerChunk, len(names))]
+			var rows []models.DatasetState
+			if err := s.db.WithContext(ctx).Where("namespace = ? AND name IN ?", namespace, chunk).Find(&rows).Error; err != nil {
+				return nil, err
+			}
+			for _, row := range rows {
+				if result == nil {
+					result = make(map[datasetIdentity]models.DatasetState)
+				}
+				result[datasetIdentity{namespace: row.Namespace, name: row.Name}] = row
+			}
+		}
+	}
+	return result, nil
 }
 
 // Get returns the state row for a dataset, or (zero, false, nil) when none

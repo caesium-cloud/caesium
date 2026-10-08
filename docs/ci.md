@@ -1844,25 +1844,47 @@ This revalidates B3 on merged code. The `early-evidence` selector still runs
 ### Coverage collection with provenance (distributed-testing W5/G2)
 
 `build/Dockerfile.coverage` is a separate image from the release image and
-from the performance images. The command is `scripts/integration-coverage.sh`
-(no justfile recipe). It refuses a dirty tree, stamps
-`org.opencontainers.image.revision`, and deletes previous covdata under the
-artifact directory before measuring. `CAESIUM_COVERAGE_SKIP_BUILD=1` reuses an
-image and records it as supplied/unverified.
+from the performance images. The collector is `scripts/integration-coverage.sh`
+(no standalone justfile recipe). It refuses a dirty tree, stamps
+`org.opencontainers.image.revision`, and clears only this collection's prior
+profiles before measuring. `CAESIUM_COVERAGE_SKIP_BUILD=1` records a supplied
+image as unverified and cannot qualify the normal gate.
+
+The full collect requires `CAESIUM_COVERAGE_BACKEND_INPUTS`: an absolute path to
+the verified schema-version-1 prerequisite JSON and its original proof files.
+The `Pin isolated backend prerequisites` workflow step produces this file,
+including the owned Docker socket, task archive/hash/config/platform identity,
+kind image, Podman index/AMD64 child/config receipt and native prerequisites.
+The collector validates/stages it before allocating resources. A local caller
+must prepare those same native prerequisites and exact identities; a missing
+file fails closed. A prior candidate's profiles or missing supplier receipts
+cannot be substituted. The former bare collector command is insufficient.
 
 ```sh
+: "${CAESIUM_COVERAGE_BACKEND_INPUTS:?absolute path to verified backend-inputs.json required}"
 CAESIUM_COVERAGE_ID="cov-$(uuidgen | tr '[:upper:]' '[:lower:]' | tr -d - | cut -c1-12)" \
 CAESIUM_COVERAGE_ARTIFACTS="$(mktemp -d)" \
   bash scripts/integration-coverage.sh
 ```
+
+Server and browser collection require a clean exit **exactly 0**. Exit 143,
+a signal death, or a missing exit observation is incomplete: it does not prove
+Go coverage buffers flushed. This intentionally tightens the former exit-143
+allowance. Backend/journey execution gate mode also requires `complete: true`;
+metadata-only discovery and a single backend are not complete qualification.
+`just tagged-unit-test` runs 38 hermetic named regressions from integration-tagged
+helper packages in the builder, without a Docker socket/cluster; both hosted
+unit architectures execute it in addition to the ordinary untagged suite.
+The shutdown result validator's three tests are included explicitly; compiling
+the robustness runner or selecting `TestOwnerCrash` does not execute them.
 
 `scripts/check-coverage.py` ignores `init()` coverage. A write-to-read pass
 needs the named apply/export functions and the server profile, not a merged
 profile that only imported those files. A missing provenance file is
 incomplete. A baseline is written only when the verdict is `pass`, and a
 baseline this script writes can be passed back with `--ratchet`. A killed
-server or a nonzero stop other than exit 143 is incomplete, not 0%. This is
-not a CI job. The collect that existed before review fix `7dcef7f0` is not
+server or any nonzero exit is incomplete, not 0%. The early historical collect
+below predated the current merge-blocking CI collector. The collect that existed before review fix `7dcef7f0` is not
 evidence for that commit. A fresh image labelled with reviewed head `7dcef7f0`
 later produced `verdict: pass`, complete CLI/server/integration profiles and
 covered the apply→export write/read path (7.6% integration coverage). No
@@ -2199,11 +2221,13 @@ Unpromoted lanes are listed on every `ci-ok` run.
 | `lifecycle-standalone` | `just lifecycle-standalone` (F4) | merge-blocking | 3:31–4:46 |
 | `generated-fuzz` | `just generated-fuzz` (C2, 10 s per target, warm Go cache) | merge-blocking | 3:16–4:03 warm, 12:09 cold |
 | `generated-oracles` | `just generated-oracles` (C3 mutation validator) | merge-blocking | 1:15–1:40 |
-| `coverage-ratchets` | `just coverage-ratchets` (G2) | merge-blocking | 4:58–5:42 |
+| `coverage-ratchets` | `just coverage-ratchets` (G2) | merge-blocking | 37:58 on source `261307c7`, run `37782134074`; older 4:58–5:42 estimate superseded |
 | `core-robustness-nightly` | `just core-robustness nightly-core` (B3, instrumented) | nightly | 14:12 |
 | `lifecycle-cluster` | `just lifecycle-cluster` (F2) | nightly | 27:26 |
 | `console-recovery` | `just console-recovery` (D3) | nightly | 16:47 |
 | `performance-gate` | `just performance-gate mode=advisory` (E4) | nightly, advisory | 52–72 min |
+
+The expanded collector's measured hosted job duration in [run 37782134074](https://github.com/caesium-cloud/caesium/actions/runs/37782134074) was **37m58s**, including **35m23s** in the collection step. That run's ARM64 unit job and `ci-ok` failed; this timing is not qualification of its head. The previous fifteen-minute merge-critical-path target is currently **unmet**. Review remediation runs isolated public journey lanes with bounded parallelism and joins every worker before merging profiles; fresh hosted timing is required before claiming the target is recovered. The 45-minute fail-closed job timeout remains an execution bound, not a performance claim. Native backends, browser journeys, coverage floors and provenance checks remain mandatory.
 
 The promoted set was chosen by measurement, per the W8 decision record: with
 all five candidates as parallel jobs the required-to-merge critical path

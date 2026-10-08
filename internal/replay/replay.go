@@ -17,6 +17,7 @@ import (
 	"github.com/caesium-cloud/caesium/internal/jobdef/secret"
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/caesium-cloud/caesium/internal/run"
+	"github.com/caesium-cloud/caesium/internal/strutil"
 	pkgtask "github.com/caesium-cloud/caesium/pkg/task"
 	"github.com/google/uuid"
 	"gorm.io/datatypes"
@@ -1624,14 +1625,7 @@ func fallbackTaskName(id uuid.UUID, name string) string {
 	return id.String()
 }
 
-func firstNonEmpty(values ...string) string {
-	for _, value := range values {
-		if strings.TrimSpace(value) != "" {
-			return value
-		}
-	}
-	return ""
-}
+func firstNonEmpty(values ...string) string { return strutil.FirstNonBlank(values...) }
 
 func shortHash(hash string) string {
 	if len(hash) <= 12 {

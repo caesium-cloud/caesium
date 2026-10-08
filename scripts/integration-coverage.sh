@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # G2 coverage collector: instrumented CLI/server binaries, labelled GOCOVERDIR
-# profiles, graceful shutdown + SIGUSR2 flush, merge, and check.
+# profiles, real local/auth/distributed/owner integration journeys, graceful
+# shutdown + SIGUSR2 flush, merge, and check.
 #
 # The script is the command (G6 owns any later justfile recipe). It never
 # starts caesium-server-test, publishes only an ephemeral loopback port for
-# its isolated Chromium journey, never runs just integration-up / ui-e2e /
-# performance, and never treats a killed
-# process or missing GOCOVERDIR as 0% success.
+# its isolated Chromium journey, never invokes just/builds or pulls images,
+# and never treats a killed process or missing GOCOVERDIR as 0% success.
 #
 #   CAESIUM_COVERAGE_ARTIFACTS=/tmp/cov \
 #   CANDIDATE_SHA=$(git rev-parse HEAD) \
@@ -134,10 +134,7 @@ write_provenance() {
 
 gocoverdir_complete() {
   local dir="$1"
-  local meta counters
-  meta=$(find "$dir" -maxdepth 1 -name 'covmeta.*' 2>/dev/null | wc -l | tr -d ' ')
-  counters=$(find "$dir" -maxdepth 1 -name 'covcounters.*' 2>/dev/null | wc -l | tr -d ' ')
-  [[ "$meta" -gt 0 && "$counters" -gt 0 ]]
+  python3 "$ROOT/scripts/coverage-journeys.py" validate-raw --directory "$dir" >/dev/null 2>&1
 }
 
 textfmt_dir() {
@@ -161,9 +158,8 @@ merge_gocoverdirs() {
   local inputs=()
   local arg
   for arg in "$@"; do
-    if gocoverdir_complete "$arg"; then
-      inputs+=("$arg")
-    fi
+    gocoverdir_complete "$arg" || return 1
+    inputs+=("$arg")
   done
   if [[ "${#inputs[@]}" -eq 0 ]]; then
     return 1
@@ -382,13 +378,21 @@ build_image() {
 
 extract_audit() {
   require_cmd "$CONTAINER_CLI"
-  local cid
-  cid="$("$CONTAINER_CLI" create --platform "$PLATFORM" --entrypoint true "$IMAGE_ID")"
+  local cid audit_name="${ID}-audit-extract"
+  coverage_journey_require_absent container "$audit_name" || die "audit extraction name is not provably free"
+  coverage_journey_track_pending_name "$audit_name" "$IMAGE_ID" || die "audit extraction ownership could not be retained"
+  cid="$("$CONTAINER_CLI" create --platform "$PLATFORM" --name "$audit_name" \
+    --label "caesium.coverage.owner=$CANDIDATE_SHA" \
+    --label "caesium.coverage.run=$ID" \
+    --label caesium.coverage.lane=audit-extract \
+    --entrypoint true "$IMAGE_ID")" || die "audit extraction allocation outcome is unproved"
+  coverage_journey_track_id "$cid"
+  coverage_journey_resource owned container "$cid" >/dev/null || die "audit extraction ownership is unproved"
   if ! "$CONTAINER_CLI" cp "$cid":/usr/share/caesium-coverage/. "$AUDIT/"; then
-    "$CONTAINER_CLI" rm -f "$cid" >/dev/null 2>&1 || true
+    coverage_journey_remove_owned "$cid" || die "audit extraction copy failed and removal is unproved"
     die "cannot extract the pinned coverage image audit"
   fi
-  "$CONTAINER_CLI" rm -f "$cid" >/dev/null 2>&1 || true
+  coverage_journey_remove_owned "$cid" || die "audit extraction cleanup is unproved"
 }
 
 write_fixture() {
@@ -400,13 +404,18 @@ metadata:
 trigger:
   type: cron
   configuration:
-    cron: "0 2 * * *"
+    cron: "0 0 31 2 *"
 steps:
   - name: sample
     image: alpine:3.23
     command: ["sh", "-c", "sleep 2; echo coverage-task-log"]
 YAML
 }
+
+# Adds selected real integration-test journeys to the exact same candidate
+# image's CLI/server GOCOVERDIR profiles. The helper is sourced so it can use
+# the collector's pinned image identity, cleanup trap, and merge function.
+source "$ROOT/scripts/coverage-journeys.sh"
 
 KEEP_RESOURCES=0
 if [[ "${CAESIUM_COVERAGE_KEEP:-}" == "1" ]]; then
@@ -415,17 +424,46 @@ fi
 
 # Invoked by the EXIT trap below.
 # shellcheck disable=SC2329
-cleanup() {
+NETWORK_ID=""
+NETWORK_PENDING=0
+COVERAGE_CLEANUP_DONE=0
+invalidate_collection() {
+  python3 "$ROOT/scripts/coverage-journeys.py" invalidate \
+    --profiles "$PROFILES" --raw "$RAW" --artifacts "$ARTIFACTS"
+}
+
+cleanup_resources() {
+  [[ "$COVERAGE_CLEANUP_DONE" -eq 0 ]] || return 0
   if [[ "$KEEP_RESOURCES" -eq 1 ]]; then
-    log "CAESIUM_COVERAGE_KEEP=1; leaving $SERVER_NAME / $BROWSER_SERVER_NAME / $NETWORK in place"
-    return
+    log "resources intentionally retained; qualification remains incomplete"
+    invalidate_collection || return 1
+    return 1
   fi
-  if command -v "$CONTAINER_CLI" >/dev/null 2>&1; then
-    "$CONTAINER_CLI" rm -f "$SERVER_NAME" >/dev/null 2>&1 || true
-    "$CONTAINER_CLI" rm -f "$CONNECTOR_NAME" >/dev/null 2>&1 || true
-    "$CONTAINER_CLI" rm -f "$BROWSER_SERVER_NAME" >/dev/null 2>&1 || true
-    "$CONTAINER_CLI" network rm "$NETWORK" >/dev/null 2>&1 || true
+  local rc=0
+  coverage_journey_cancel_parallel_workers || rc=1
+  coverage_journey_cleanup_parallel_resources || rc=1
+  cleanup_coverage_journeys || rc=1
+  if [[ "$NETWORK_PENDING" -eq 1 ]]; then
+    coverage_journey_resource remove network "${NETWORK_ID:-$NETWORK}" >/dev/null || rc=1
+    if [[ "$rc" -eq 0 ]]; then NETWORK_ID=""; NETWORK_PENDING=0; fi
   fi
+  if [[ "$rc" -ne 0 ]]; then
+    placeholder_report "$ARTIFACTS/report.json" "owned cleanup incomplete; operator reconciliation required"
+    invalidate_collection || return 1
+    return 1
+  fi
+  COVERAGE_CLEANUP_DONE=1
+}
+
+# The EXIT trap invokes this function indirectly.
+# shellcheck disable=SC2329
+cleanup() {
+  local original_rc=$?
+  trap - EXIT
+  if ! cleanup_resources; then
+    exit 1
+  fi
+  exit "$original_rc"
 }
 
 if [[ "$CMD" == "build" ]]; then
@@ -450,13 +488,19 @@ if [[ "$CMD" == "check" || "$CMD" == "merge" ]]; then
       placeholder_report "$ARTIFACTS/report.json" "merge input provenance failed validation"
       exit "$preflight_rc"
     fi
-    if ! gocoverdir_complete "$RAW/cli" || ! gocoverdir_complete "$RAW/server"; then
+    merge_cli_raw="$RAW/cli"
+    merge_server_raw="$RAW/server"
+    if [[ -f "$RAW/journeys/manifest.json" ]]; then
+      merge_cli_raw="$RAW/cohort-cli"
+      merge_server_raw="$RAW/cohort-server"
+    fi
+    if ! gocoverdir_complete "$merge_cli_raw" || ! gocoverdir_complete "$merge_server_raw"; then
       placeholder_report "$ARTIFACTS/report.json" "merge raw CLI/server profile is incomplete"
       exit 2
     fi
-    textfmt_dir "$RAW/cli" "$PROFILES/cli.out"
-    textfmt_dir "$RAW/server" "$PROFILES/server.out"
-    merge_gocoverdirs "$RAW/integration" "$RAW/cli" "$RAW/server"
+    textfmt_dir "$merge_cli_raw" "$PROFILES/cli.out"
+    textfmt_dir "$merge_server_raw" "$PROFILES/server.out"
+    merge_gocoverdirs "$RAW/integration" "$merge_cli_raw" "$merge_server_raw"
     textfmt_dir "$RAW/integration" "$PROFILES/integration.out"
     cp "$AUDIT/merge-provenance.json" "$PROFILES/integration.provenance.json"
   fi
@@ -469,9 +513,10 @@ require_cmd "$CONTAINER_CLI"
 if [[ -n "${CAESIUM_COVERAGE_BROWSER_DIR:-}" || -n "${CAESIUM_COVERAGE_BROWSER_PROFILE:-}" ]]; then
   die "collect runs its own Chromium journey; external browser profiles are accepted only by check/merge"
 fi
-rm -rf "$RAW/cli" "$RAW/server" "$RAW/browser" "$RAW/integration"
-mkdir -p "$RAW/cli" "$RAW/server" "$RAW/browser" "$RAW/integration" "$PROFILES" "$AUDIT"
+rm -rf "$RAW/cli" "$RAW/server" "$RAW/browser" "$RAW/integration" "$RAW/journeys"
+mkdir -p "$RAW/cli" "$RAW/server" "$RAW/browser" "$RAW/integration" "$RAW/journeys" "$PROFILES" "$AUDIT"
 rm -f "$PROFILES"/*.out "$PROFILES"/*.provenance.json
+stage_coverage_backend_inputs || die "real backend coverage prereq staging failed"
 
 if [[ "${CAESIUM_COVERAGE_SKIP_BUILD:-}" == "1" ]]; then
   "$CONTAINER_CLI" image inspect "$IMAGE" >/dev/null 2>&1 \
@@ -492,10 +537,13 @@ IMAGE_GOARCH="$("$CONTAINER_CLI" image inspect --format '{{.Architecture}}' "$IM
 [[ -n "$IMAGE_GOOS" && -n "$IMAGE_GOARCH" ]] || die "coverage image has no target build context"
 trap cleanup EXIT
 
-"$CONTAINER_CLI" rm -f "$SERVER_NAME" >/dev/null 2>&1 || true
-"$CONTAINER_CLI" rm -f "$BROWSER_SERVER_NAME" >/dev/null 2>&1 || true
-"$CONTAINER_CLI" network rm "$NETWORK" >/dev/null 2>&1 || true
-"$CONTAINER_CLI" network create "$NETWORK" >/dev/null
+for reserved_name in "$SERVER_NAME" "$CONNECTOR_NAME" "$BROWSER_SERVER_NAME"; do
+  coverage_journey_require_absent container "$reserved_name" || die "base container name is not provably free"
+done
+coverage_journey_require_absent network "$NETWORK" || die "base network name is not provably free"
+NETWORK_PENDING=1
+NETWORK_ID="$("$CONTAINER_CLI" network create --label "caesium.coverage.owner=$CANDIDATE_SHA" --label "caesium.coverage.run=$ID" "$NETWORK")"
+coverage_journey_resource owned network "$NETWORK_ID" >/dev/null || die "base network ownership is unproved"
 
 extract_audit
 # Eligibility is independent of observed counters. Map the image's audited
@@ -627,19 +675,85 @@ BUILD_CONTEXT="$(python3 -c 'import json,sys; print(json.dumps(json.load(open(sy
 
 # The journey runs one real task through the Docker engine, so the server
 # (still UID 10001) joins the engine socket's group instead of running as root.
-SOCK="${CAESIUM_SOCK:-/var/run/docker.sock}"
+# SOCK is pinned by immutable prerequisite staging before any allocation.
 SOCK_GID="$("$CONTAINER_CLI" run --rm --platform "$PLATFORM" --user 0:0 --entrypoint stat \
   -v "$SOCK:/var/run/docker.sock" "$IMAGE_ID" -c '%g' /var/run/docker.sock 2>/dev/null || true)"
 [[ "$SOCK_GID" =~ ^[0-9]+$ ]] || die "could not determine the group of $SOCK inside a container; refusing to guess"
+
+# Bind future backend lanes to the exact same candidate/build/source inventory.
+# The backend helper receives the file and its digest; it cannot promote an
+# image or profile from a different producer run by matching only the Git SHA.
+PRODUCER_CONTEXT="$ARTIFACTS/producer-context.json"
+PRODUCER_CONTEXT_SHA256="$(
+  PRODUCER_CANDIDATE_SHA="$CANDIDATE_SHA" \
+  PRODUCER_IMAGE_ID="$IMAGE_ID" \
+  PRODUCER_BUILD_CONTEXT="$BUILD_CONTEXT" \
+  PRODUCER_BUILDER_IMAGE_ID="$BUILDER_RUN_IMAGE" \
+  PRODUCER_PLATFORM="$PLATFORM" \
+  PRODUCER_IMAGE_PROVENANCE="$IMAGE_PROVENANCE" \
+  PRODUCER_IMAGE_VERIFIED="$IMAGE_VERIFIED" \
+  PRODUCER_CONTAINER_CLI="$CONTAINER_CLI" \
+  PRODUCER_COVERAGE_ID="$ID" \
+  PRODUCER_SOCKET_PATH="$SOCK" \
+  PRODUCER_SOCKET_GID="$SOCK_GID" \
+  python3 - "$PRODUCER_CONTEXT" "$ARTIFACTS" "$ROOT" "$AUDIT/source-inventory.json" <<'PY'
+import hashlib
+import json
+import os
+import pathlib
+import sys
+
+destination, artifacts, root, inventory_path = map(pathlib.Path, sys.argv[1:])
+inventory = json.loads(inventory_path.read_text())
+context = inventory.get("build_context")
+if inventory.get("complete") is not True or inventory.get("candidate_sha") != os.environ["PRODUCER_CANDIDATE_SHA"]:
+    raise SystemExit("source inventory is incomplete or belongs to another candidate")
+if inventory.get("image_id") != os.environ["PRODUCER_IMAGE_ID"] or context != json.loads(os.environ["PRODUCER_BUILD_CONTEXT"]):
+    raise SystemExit("source inventory differs from the pinned candidate image/build context")
+if os.environ["PRODUCER_IMAGE_PROVENANCE"] != "built-by-this-run" or os.environ["PRODUCER_IMAGE_VERIFIED"] != "true":
+    raise SystemExit("real backend coverage requires the verified image built by this collection")
+if not os.environ["PRODUCER_BUILDER_IMAGE_ID"].startswith("sha256:"):
+    raise SystemExit("builder image identity is not immutable")
+source_digest = hashlib.sha256(inventory_path.read_bytes()).hexdigest()
+record = {
+    "schema_version": 1,
+    "producer": "scripts/integration-coverage.sh",
+    "candidate_sha": os.environ["PRODUCER_CANDIDATE_SHA"],
+    "image_id": os.environ["PRODUCER_IMAGE_ID"],
+    "builder_image_id": os.environ["PRODUCER_BUILDER_IMAGE_ID"],
+    "platform": os.environ["PRODUCER_PLATFORM"],
+    "build_context": context,
+    "image_provenance": os.environ["PRODUCER_IMAGE_PROVENANCE"],
+    "verified": os.environ["PRODUCER_IMAGE_VERIFIED"] == "true",
+    "container_cli": os.environ["PRODUCER_CONTAINER_CLI"],
+    "coverage_id": os.environ["PRODUCER_COVERAGE_ID"],
+    "repository_root": str(root),
+    "artifact_dir": str(artifacts),
+    "socket_path": os.environ["PRODUCER_SOCKET_PATH"],
+    "socket_gid": int(os.environ["PRODUCER_SOCKET_GID"]),
+    "source_inventory": {
+        "path": str(pathlib.Path("audit") / "source-inventory.json"),
+        "sha256": source_digest,
+    },
+}
+destination.write_text(json.dumps(record, indent=2) + "\n")
+print(hashlib.sha256(destination.read_bytes()).hexdigest())
+PY
+)" || die "could not write verified coverage producer context"
+[[ "$PRODUCER_CONTEXT_SHA256" =~ ^[0-9a-f]{64}$ ]] || die "coverage producer context digest is invalid"
 
 # CAESIUM_RESOURCE_STATS_ENABLED defaults to false; the journey's task run is
 # the only thing that reaches the resource sampler and its projections, so the
 # feature is enabled here exactly as `just integration-up` enables it.
 log "starting coverage server $SERVER_NAME on network $NETWORK (no host port; engine socket group $SOCK_GID)"
-"$CONTAINER_CLI" run -d \
+coverage_journey_track_pending_name "$SERVER_NAME" "$IMAGE_ID" || die "coverage server ownership could not be retained"
+SERVER_ID="$("$CONTAINER_CLI" run -d \
   --name "$SERVER_NAME" \
+  --label "caesium.coverage.owner=$CANDIDATE_SHA" \
+  --label "caesium.coverage.run=$ID" \
+  --label caesium.coverage.lane=base-server \
   --platform "$PLATFORM" \
-  --network "$NETWORK" \
+  --network "$NETWORK_ID" \
   --network-alias caesium \
   --user 10001:10001 \
   --group-add "$SOCK_GID" \
@@ -652,12 +766,14 @@ log "starting coverage server $SERVER_NAME on network $NETWORK (no host port; en
   -e CAESIUM_RESOURCE_STATS_SAMPLE_INTERVAL=100ms \
   -v "$SOCK:/var/run/docker.sock" \
   -v "$RAW/server:/var/lib/caesium/coverage" \
-  "$IMAGE_ID" start >/dev/null
+  "$IMAGE_ID" start)"
+coverage_journey_track_id "$SERVER_ID"
+coverage_journey_resource owned container "$SERVER_ID" >/dev/null || die "base server ownership is unproved"
 
 # GET a server path from inside the journey network (the server has no host port).
 server_get() {
   "$CONTAINER_CLI" run --rm --platform "$PLATFORM" \
-    --network "$NETWORK" \
+    --network "$NETWORK_ID" \
     --user 0:0 \
     --entrypoint wget \
     "$IMAGE_ID" -q -O - "http://caesium:8080$1"
@@ -688,7 +804,8 @@ fi
 # fails closed. A second instrumented start loads one file, then stops. That
 # file resolves an env secret and shape-checks Kubernetes and Vault references.
 # It does not dial either provider. Counters share the server GOCOVERDIR.
-# A start that never logs the fingerprint fails the journey.
+# Loaded fingerprint and actual complete public /health readiness are required
+# before signalling; a failure retains only safe bounded diagnostics.
 load_connector_for_coverage() {
   cat > "$ARTIFACTS/connectors.yaml" <<'YAML'
 version: 1
@@ -730,11 +847,17 @@ connections:
 YAML
   chmod 0644 "$ARTIFACTS/connectors.yaml"
   log "loading a connector config on an instrumented start"
-  "$CONTAINER_CLI" rm -f "$CONNECTOR_NAME" >/dev/null 2>&1 || true
-  if ! "$CONTAINER_CLI" run -d \
+  coverage_journey_require_absent container "$CONNECTOR_NAME" || return 1
+  mkdir -p "$RAW/connectors"
+  chmod 0777 "$RAW/connectors"
+  coverage_journey_track_pending_name "$CONNECTOR_NAME" "$IMAGE_ID" || return 1
+  if ! CONNECTOR_ID="$("$CONTAINER_CLI" run -d \
     --name "$CONNECTOR_NAME" \
+    --label "caesium.coverage.owner=$CANDIDATE_SHA" \
+    --label "caesium.coverage.run=$ID" \
+    --label caesium.coverage.lane=base-connectors \
     --platform "$PLATFORM" \
-    --network "$NETWORK" \
+    --network "$NETWORK_ID" \
     --user 10001:10001 \
     --group-add "$SOCK_GID" \
     -e GOCOVERDIR=/var/lib/caesium/coverage \
@@ -748,35 +871,26 @@ YAML
     -e TEMPORAL_TOKEN=coverage-connector-token \
     -v "$SOCK:/var/run/docker.sock" \
     -v "$ARTIFACTS/connectors.yaml:/etc/caesium/connectors/connections.yaml:ro" \
-    -v "$RAW/server:/var/lib/caesium/coverage" \
-    "$IMAGE_ID" start >/dev/null; then
+    -v "$RAW/connectors:/var/lib/caesium/coverage" \
+    "$IMAGE_ID" start)"; then
     log "connector start could not be created"
     return 1
   fi
-  connector_ready=0
-  for _ in $(seq 1 60); do
-    # Match a captured string. `docker logs | grep -q` under pipefail exits 141:
-    # grep closes the pipe on the first hit while caesium is still writing
-    # startup logs, so a present fingerprint line is reported missing.
-    connector_logs="$("$CONTAINER_CLI" logs "$CONNECTOR_NAME" 2>&1 || true)"
-    if [[ "$connector_logs" == *"connector config loaded"* ]]; then
-      connector_ready=1
-      break
-    fi
-    running="$("$CONTAINER_CLI" inspect -f '{{.State.Running}}' "$CONNECTOR_NAME" 2>/dev/null || true)"
-    if [[ "$running" == "false" ]]; then
-      break
-    fi
-    sleep 1
-  done
-  "$CONTAINER_CLI" kill --signal=SIGUSR2 "$CONNECTOR_NAME" >/dev/null 2>&1 || true
-  sleep 1
-  "$CONTAINER_CLI" stop -t 60 "$CONNECTOR_NAME" >/dev/null 2>&1 || true
-  if [[ "$connector_ready" -ne 1 ]]; then
-    log "connector start did not log a loaded fingerprint; logs:"
-    "$CONTAINER_CLI" logs "$CONNECTOR_NAME" || true
+  coverage_journey_track_id "$CONNECTOR_ID"
+  coverage_journey_resource owned container "$CONNECTOR_ID" >/dev/null || return 1
+  if ! connector_stopped="$(python3 "$ROOT/scripts/coverage-journeys.py" connector \
+    --name "$CONNECTOR_ID" --owner "$CANDIDATE_SHA" --run-id "$ID" \
+    --image "$IMAGE_ID" --audit "$AUDIT")"; then
+    log "connector loaded-fingerprint/health/clean-stop guard refused; see safe audit/connector-diagnostics.json when available"
     return 1
   fi
+  if ! printf '%s' "$connector_stopped" | python3 -c 'import json,sys; d=json.load(sys.stdin); s=d["State"]; sys.exit(0 if d["flush_rc"]==0 and d["stop_rc"]==0 and s.get("ExitCode")==0 and s.get("OOMKilled") is False and s.get("Running") is False else 1)'; then
+    return 1
+  fi
+  gocoverdir_complete "$RAW/connectors" || return 1
+  printf '%s\n' "$connector_stopped" >"$AUDIT/connector-process.json"
+  coverage_journey_remove_owned "$CONNECTOR_ID" || return 1
+  COVERAGE_JOURNEY_SERVER_DIRS+=("$RAW/connectors")
   return 0
 }
 
@@ -784,7 +898,7 @@ log "running request-to-write-to-read: job apply then job export"
 cli_rc=0
 load_connector_for_coverage || cli_rc=1
 "$CONTAINER_CLI" run --rm --platform "$PLATFORM" \
-  --network "$NETWORK" \
+  --network "$NETWORK_ID" \
   --user 0:0 \
   --entrypoint /bin/caesium \
   -e GOCOVERDIR=/coverage \
@@ -794,7 +908,7 @@ load_connector_for_coverage || cli_rc=1
   || cli_rc=$?
 if [[ "$cli_rc" -eq 0 ]]; then
   "$CONTAINER_CLI" run --rm --platform "$PLATFORM" \
-    --network "$NETWORK" \
+    --network "$NETWORK_ID" \
     --user 0:0 \
     --entrypoint /bin/caesium \
     -e GOCOVERDIR=/coverage \
@@ -820,7 +934,7 @@ print(next(j["id"] for j in json.load(open(sys.argv[1])) if j.get("alias") == "c
 fi
 if [[ "$cli_rc" -eq 0 ]]; then
   run_id="$("$CONTAINER_CLI" run --rm --platform "$PLATFORM" \
-    --network "$NETWORK" \
+    --network "$NETWORK_ID" \
     --user 0:0 \
     --entrypoint /bin/caesium \
     -e GOCOVERDIR=/coverage \
@@ -850,7 +964,7 @@ sys.exit(0 if json.load(open(sys.argv[1])).get("status") not in ("pending", "run
 fi
 if [[ "$cli_rc" -eq 0 ]]; then
   "$CONTAINER_CLI" run --rm --platform "$PLATFORM" \
-    --network "$NETWORK" \
+    --network "$NETWORK_ID" \
     --user 0:0 \
     --entrypoint /bin/caesium \
     -e GOCOVERDIR=/coverage \
@@ -903,7 +1017,7 @@ fi
 if [[ "$cli_rc" -eq 0 ]]; then
   log "listing dqlite members, then requesting a refused non-member removal"
   "$CONTAINER_CLI" run --rm --platform "$PLATFORM" \
-    --network "$NETWORK" \
+    --network "$NETWORK_ID" \
     --user 0:0 \
     --entrypoint /bin/caesium \
     -e GOCOVERDIR=/coverage \
@@ -921,7 +1035,7 @@ fi
 if [[ "$cli_rc" -eq 0 ]]; then
   refusal_rc=0
   "$CONTAINER_CLI" run --rm --platform "$PLATFORM" \
-    --network "$NETWORK" \
+    --network "$NETWORK_ID" \
     --user 0:0 \
     --entrypoint /bin/caesium \
     -e GOCOVERDIR=/coverage \
@@ -957,17 +1071,16 @@ EOF
 # Explicit flush while the server is still running, then graceful SIGTERM.
 # docker kill without a signal is SIGKILL and is forbidden here.
 log "flushing server coverage via SIGUSR2, then docker stop (SIGTERM)"
-"$CONTAINER_CLI" kill --signal=SIGUSR2 "$SERVER_NAME" >/dev/null 2>&1 || true
-sleep 1
-stop_rc=0
-"$CONTAINER_CLI" stop -t 60 "$SERVER_NAME" >/dev/null || stop_rc=$?
-inspect_json="$("$CONTAINER_CLI" inspect "$SERVER_NAME" 2>/dev/null || true)"
-exit_code="$(printf '%s' "$inspect_json" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d[0]["State"].get("ExitCode", 1) if d else 1)' 2>/dev/null || echo 1)"
-oom="$(printf '%s' "$inspect_json" | python3 -c 'import json,sys; d=json.load(sys.stdin); print("true" if d and d[0]["State"].get("OOMKilled") else "false")' 2>/dev/null || echo false)"
+base_stopped="$(coverage_journey_resource stop container "$SERVER_ID")" || die "base server shutdown ownership/status unproved"
+flush_rc="$(printf '%s' "$base_stopped" | python3 -c 'import json,sys; print(json.load(sys.stdin)["flush_rc"])')"
+stop_rc="$(printf '%s' "$base_stopped" | python3 -c 'import json,sys; print(json.load(sys.stdin)["stop_rc"])')"
+exit_code="$(printf '%s' "$base_stopped" | python3 -c 'import json,sys; print(json.load(sys.stdin)["State"].get("ExitCode", 1))')"
+oom="$(printf '%s' "$base_stopped" | python3 -c 'import json,sys; print(str(json.load(sys.stdin)["State"].get("OOMKilled", True)).lower())')"
+printf '%s\n' "$base_stopped" >"$AUDIT/base-server-process.json"
 killed=false
 signal="SIGTERM"
 server_abnormal=false
-if [[ "$stop_rc" -ne 0 ]]; then
+if [[ "$flush_rc" -ne 0 || "$stop_rc" -ne 0 ]]; then
   server_abnormal=true
 fi
 if [[ "$oom" == "true" ]]; then
@@ -975,7 +1088,7 @@ if [[ "$oom" == "true" ]]; then
   server_abnormal=true
   signal="SIGKILL"
 fi
-if [[ "$exit_code" != "0" && "$exit_code" != "143" ]]; then
+if [[ "$exit_code" != "0" ]]; then
   server_abnormal=true
   if [[ "$exit_code" == "137" ]]; then
     killed=true
@@ -995,14 +1108,41 @@ elif gocoverdir_complete "$RAW/server"; then
   fi
 fi
 write_provenance "$PROFILES/server.provenance.json" <<EOF
-{"schema_version":1,"source":"server","kind":"gocoverdir","module":"github.com/caesium-cloud/caesium","candidate_sha":"$CANDIDATE_SHA","image_id":"$IMAGE_ID","build_context":$BUILD_CONTEXT,"image_provenance":"$IMAGE_PROVENANCE","verified":$IMAGE_VERIFIED,"complete":$server_complete,"missing":$server_missing,"killed":$killed,"exit_code":$exit_code,"stop_rc":$stop_rc,"signal":"$signal","oom_killed":$oom,"collection":"graceful-shutdown","flush":"sigusr2"}
+{"schema_version":1,"source":"server","kind":"gocoverdir","module":"github.com/caesium-cloud/caesium","candidate_sha":"$CANDIDATE_SHA","image_id":"$IMAGE_ID","build_context":$BUILD_CONTEXT,"image_provenance":"$IMAGE_PROVENANCE","verified":$IMAGE_VERIFIED,"complete":$server_complete,"missing":$server_missing,"killed":$killed,"exit_code":$exit_code,"flush_rc":$flush_rc,"stop_rc":$stop_rc,"signal":"$signal","oom_killed":$oom,"collection":"graceful-shutdown","flush":"sigusr2"}
 EOF
 
+if [[ "$cli_complete" != "true" || "$server_complete" != "true" ]]; then
+  die "base original CLI/server process coverage is incomplete"
+fi
+cp "$PROFILES/cli.provenance.json" "$AUDIT/base-cli.provenance.json"
+cp "$PROFILES/server.provenance.json" "$AUDIT/base-server.provenance.json"
+python3 "$ROOT/scripts/coverage-journeys.py" validate-raw --directory "$RAW/cli" >"$AUDIT/base-cli-files.json"
+python3 "$ROOT/scripts/coverage-journeys.py" validate-raw --directory "$RAW/server" >"$AUDIT/base-server-files.json"
+coverage_journey_remove_owned "$SERVER_ID" || die "base server cleanup unproved"
+run_coverage_journeys || die "real journeys incomplete"
+merge_coverage_journeys || die "required original cohort evidence incomplete"
+textfmt_dir "$RAW/cohort-cli" "$PROFILES/cli.out" || die "CLI cohort text profile failed"
+textfmt_dir "$RAW/cohort-server" "$PROFILES/server.out" || die "server cohort text profile failed"
+python3 - "$PROFILES" "$RAW" "$AUDIT" <<'COHORT_PROVENANCE'
+import json
+import pathlib
+import sys
+profiles, raw, audit = map(pathlib.Path, sys.argv[1:])
+for source in ("cli", "server"):
+    original = audit / ("base-" + source + ".provenance.json")
+    record = json.loads(original.read_text())
+    record.update(collection="verified-original-process-cohort", raw_dir=str(raw / ("cohort-" + source)),
+                  original_provenance=str(original), original_raw_dir=str(raw / source),
+                  original_files=str(audit / ("base-" + source + "-files.json")),
+                  journey_manifest=str(raw / "journeys" / "manifest.json"))
+    (profiles / (source + ".provenance.json")).write_text(json.dumps(record, indent=2) + "\n")
+COHORT_PROVENANCE
+
 if [[ "$cli_complete" == "true" && "$server_complete" == "true" ]]; then
-  if merge_gocoverdirs "$RAW/integration" "$RAW/cli" "$RAW/server"; then
+  if merge_gocoverdirs "$RAW/integration" "$RAW/cohort-cli" "$RAW/cohort-server"; then
     textfmt_dir "$RAW/integration" "$PROFILES/integration.out" || true
     write_provenance "$PROFILES/integration.provenance.json" <<EOF
-{"schema_version":1,"source":"integration","kind":"gocoverdir","module":"github.com/caesium-cloud/caesium","candidate_sha":"$CANDIDATE_SHA","image_id":"$IMAGE_ID","build_context":$BUILD_CONTEXT,"image_provenance":"$IMAGE_PROVENANCE","verified":$IMAGE_VERIFIED,"complete":true,"missing":false,"killed":false,"sources":["cli","server"],"collection":"covdata-merge"}
+{"schema_version":1,"source":"integration","kind":"gocoverdir","module":"github.com/caesium-cloud/caesium","candidate_sha":"$CANDIDATE_SHA","image_id":"$IMAGE_ID","build_context":$BUILD_CONTEXT,"image_provenance":"$IMAGE_PROVENANCE","verified":$IMAGE_VERIFIED,"complete":true,"missing":false,"killed":false,"sources":["cli","server"],"journey_manifest":"$RAW/journeys/manifest.json","collection":"covdata-merge"}
 EOF
   fi
 fi
@@ -1011,13 +1151,16 @@ fi
 # from the CLI/server write-to-read path. The live Console bundle is served by
 # the same instrumented image; Playwright drives Chromium over a loopback-only
 # ephemeral host port and must record all expected first-attempt passes.
-"$CONTAINER_CLI" rm -f "$SERVER_NAME" >/dev/null 2>&1 || true
 chmod 0777 "$RAW/browser"
 log "starting isolated browser coverage server $BROWSER_SERVER_NAME"
-"$CONTAINER_CLI" run -d \
+coverage_journey_track_pending_name "$BROWSER_SERVER_NAME" "$IMAGE_ID" || die "browser server ownership could not be retained"
+BROWSER_SERVER_ID="$("$CONTAINER_CLI" run -d \
   --name "$BROWSER_SERVER_NAME" \
+  --label "caesium.coverage.owner=$CANDIDATE_SHA" \
+  --label "caesium.coverage.run=$ID" \
+  --label caesium.coverage.lane=base-browser \
   --platform "$PLATFORM" \
-  --network "$NETWORK" \
+  --network "$NETWORK_ID" \
   -p 127.0.0.1::8080 \
   --user 10001:10001 \
   --group-add "$SOCK_GID" \
@@ -1035,12 +1178,14 @@ log "starting isolated browser coverage server $BROWSER_SERVER_NAME"
   -e CAESIUM_WORKER_POLL_INTERVAL=500ms \
   -v "$SOCK:/var/run/docker.sock" \
   -v "$RAW/browser:/var/lib/caesium/coverage" \
-  "$IMAGE_ID" start >/dev/null
+  "$IMAGE_ID" start)"
+coverage_journey_track_id "$BROWSER_SERVER_ID"
+coverage_journey_resource owned container "$BROWSER_SERVER_ID" >/dev/null || die "browser server ownership unproved"
 
 browser_healthy=0
 for _ in $(seq 1 60); do
   if "$CONTAINER_CLI" run --rm --platform "$PLATFORM" \
-      --network "$NETWORK" --user 0:0 --entrypoint wget \
+      --network "$NETWORK_ID" --user 0:0 --entrypoint wget \
       "$IMAGE_ID" -q -O - "http://$BROWSER_SERVER_NAME:8080/health" 2>/dev/null | grep -q healthy; then
     browser_healthy=1
     break
@@ -1062,20 +1207,18 @@ else
   "$CONTAINER_CLI" logs "$BROWSER_SERVER_NAME" >"$ARTIFACTS/browser-server.log" 2>&1 || true
 fi
 
-"$CONTAINER_CLI" kill --signal=SIGUSR2 "$BROWSER_SERVER_NAME" >/dev/null 2>&1 || true
-sleep 1
-browser_stop_rc=0
-"$CONTAINER_CLI" stop -t 60 "$BROWSER_SERVER_NAME" >/dev/null || browser_stop_rc=$?
-browser_inspect="$("$CONTAINER_CLI" inspect "$BROWSER_SERVER_NAME" 2>/dev/null || true)"
-browser_exit="$(printf '%s' "$browser_inspect" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d[0]["State"].get("ExitCode", 1) if d else 1)' 2>/dev/null || echo 1)"
-browser_oom="$(printf '%s' "$browser_inspect" | python3 -c 'import json,sys; d=json.load(sys.stdin); print("true" if d and d[0]["State"].get("OOMKilled") else "false")' 2>/dev/null || echo true)"
+browser_stopped="$(coverage_journey_resource stop container "$BROWSER_SERVER_ID")" || die "browser shutdown unproved"
+browser_flush_rc="$(printf '%s' "$browser_stopped" | python3 -c 'import json,sys; print(json.load(sys.stdin)["flush_rc"])')"
+browser_stop_rc="$(printf '%s' "$browser_stopped" | python3 -c 'import json,sys; print(json.load(sys.stdin)["stop_rc"])')"
+browser_exit="$(printf '%s' "$browser_stopped" | python3 -c 'import json,sys; print(json.load(sys.stdin)["State"].get("ExitCode", 1))')"
+browser_oom="$(printf '%s' "$browser_stopped" | python3 -c 'import json,sys; print(str(json.load(sys.stdin)["State"].get("OOMKilled", True)).lower())')"
 browser_complete=false
 browser_missing=true
 browser_killed=false
 if [[ "$browser_oom" == true || "$browser_exit" == 137 ]]; then
   browser_killed=true
 fi
-if [[ "$browser_rc" -eq 0 && "$browser_stop_rc" -eq 0 && "$browser_killed" == false && ( "$browser_exit" == 0 || "$browser_exit" == 143 ) ]] \
+if [[ "$browser_rc" -eq 0 && "$browser_flush_rc" -eq 0 && "$browser_stop_rc" -eq 0 && "$browser_killed" == false && "$browser_exit" == 0 ]] \
     && gocoverdir_complete "$RAW/browser"; then
   browser_missing=false
   if textfmt_dir "$RAW/browser" "$PROFILES/browser.out"; then
@@ -1085,9 +1228,11 @@ else
   browser_missing=$(gocoverdir_complete "$RAW/browser" && echo false || echo true)
 fi
 write_provenance "$PROFILES/browser.provenance.json" <<EOF
-{"schema_version":1,"source":"browser","kind":"gocoverdir","module":"github.com/caesium-cloud/caesium","candidate_sha":"$CANDIDATE_SHA","image_id":"$IMAGE_ID","build_context":$BUILD_CONTEXT,"image_provenance":"$IMAGE_PROVENANCE","verified":$IMAGE_VERIFIED,"complete":$browser_complete,"missing":$browser_missing,"killed":$browser_killed,"test_exit_code":$browser_rc,"test_results":"$ARTIFACTS/browser-playwright.json","exit_code":$browser_exit,"stop_rc":$browser_stop_rc,"oom_killed":$browser_oom,"collection":"chromium-live-console","flush":"sigusr2+sigterm"}
+{"schema_version":1,"source":"browser","kind":"gocoverdir","module":"github.com/caesium-cloud/caesium","candidate_sha":"$CANDIDATE_SHA","image_id":"$IMAGE_ID","build_context":$BUILD_CONTEXT,"image_provenance":"$IMAGE_PROVENANCE","verified":$IMAGE_VERIFIED,"complete":$browser_complete,"missing":$browser_missing,"killed":$browser_killed,"test_exit_code":$browser_rc,"test_results":"$ARTIFACTS/browser-playwright.json","exit_code":$browser_exit,"flush_rc":$browser_flush_rc,"stop_rc":$browser_stop_rc,"oom_killed":$browser_oom,"collection":"chromium-live-console","flush":"sigusr2+sigterm"}
 EOF
 
+cp "$PROFILES/browser.provenance.json" "$AUDIT/base-browser.provenance.json"
+cleanup_resources || die "owned resource/secret cleanup incomplete"
 log "checking labelled coverage"
 run_checker
 rc=$?

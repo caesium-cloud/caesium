@@ -378,37 +378,47 @@ func TestFanOutLocalWritesCacheEntryPerPartition(t *testing.T) {
 // three partition fields. A drifting field list silently changes cache identity
 // for fanned steps only.
 func TestFanOutHashInputMatchesUnfannedPath(t *testing.T) {
-	args := taskHashInputArgs{
-		JobAlias:            "alias",
-		TaskName:            "process",
-		Image:               "alpine:3.23",
-		ResolvedImageDigest: "sha256:abc",
-		Command:             []string{"sh", "-c", "echo hi"},
-		Env:                 map[string]string{"A": "1"},
-		WorkDir:             "/w",
-		PredecessorHashes:   []string{"h1"},
-		PredecessorOutputs:  map[string]map[string]string{"list": {"k": "v"}},
-		RunParams:           map[string]string{"p": "q"},
-		CacheVersion:        3,
-	}
-
-	unfanned := buildTaskHashInput(args)
-	fanned := buildTaskHashInput(args)
-
-	require.Equal(t, unfanned, fanned,
-		"an unpartitioned instance must hash identically to the unfanned path")
-	require.Equal(t, unfanned.Compute(), fanned.Compute())
-
-	// Adding the partition fields must be the ONLY difference.
-	args.Partition = "a"
-	args.PartitionFingerprint = "sha256:" + fmt.Sprintf("%064d", 1)
-	withPartition := buildTaskHashInput(args)
-	require.NotEqual(t, unfanned.Compute(), withPartition.Compute())
-
-	withPartition.Partition = ""
-	withPartition.PartitionFingerprint = ""
-	require.Equal(t, unfanned, withPartition,
-		"partition fields must be the only delta between the two paths")
+	f := newFanOutFixture(t, fmt.Sprintf(`[{"key":"a","fingerprint":%q,"source":"orders"}]`, localPartitionFingerprint("ab")), &schema.FanOut{From: "list", MaxPartitions: 16}, 0)
+	f.enableProducerCache(t)
+	f.enableStepCache(t)
+	f.engine.logsByName[f.producer.String()] += "##caesium::output {\"k\":\"v\"}\n"
+	opts := withTestDeps(f.store, defaultFanOutVars(), f.taskSvc, f.atomSvc, f.edgeSvc, f.engine)
+	opts = append(opts, WithParams(map[string]string{"p": "q"}))
+	model := &models.Job{ID: f.jobID, Alias: "hash-parity"}
+	require.NoError(t, New(model, opts...).Run(t.Context()))
+	fannedRows := f.instanceRows(t)
+	require.Len(t, fannedRows, 1)
+	var fanned cache.HashInputBlob
+	require.NoError(t, json.Unmarshal(fannedRows[0].HashInputBlob, &fanned))
+	require.Equal(t, fannedRows[0].Hash, fanned.Hash)
+	require.Equal(t, "a", fanned.Partition)
+	require.Equal(t, localPartitionFingerprint("ab"), fanned.PartitionFingerprint)
+	require.Equal(t, map[string]string{"source": "orders"}, fanned.PartitionAttributes)
+	// Drive the same catalog task through runTask instead of runFannedGroup.
+	// Keep every execution input and its predecessor's cached result unchanged.
+	before := f.runIDs(t)
+	f.taskSvc.tasks[1].FanOutConfig = nil
+	require.NoError(t, f.db.Model(&models.Task{}).Where("id = ?", f.fanned).Update("fan_out_config", nil).Error)
+	require.NoError(t, New(model, opts...).Run(t.Context()))
+	var unfannedRow models.TaskRun
+	require.NoError(t, f.db.Where("job_run_id = ? AND task_id = ?", f.newRunIDSince(t, before), f.fanned).First(&unfannedRow).Error)
+	require.Zero(t, unfannedRow.PartitionCount)
+	var unfanned cache.HashInputBlob
+	require.NoError(t, json.Unmarshal(unfannedRow.HashInputBlob, &unfanned))
+	require.Equal(t, unfannedRow.Hash, unfanned.Hash)
+	require.Empty(t, unfanned.Partition)
+	require.Empty(t, unfanned.PartitionFingerprint)
+	require.Empty(t, unfanned.PartitionAttributes)
+	require.NotEmpty(t, unfanned.Command)
+	require.NotEmpty(t, unfanned.PredecessorHashes)
+	require.Equal(t, map[string]map[string]string{"list": {"k": "v"}}, unfanned.PredecessorOutputs)
+	require.Equal(t, map[string]string{"p": "q"}, unfanned.RunParams)
+	require.NotEqual(t, fanned.Hash, unfanned.Hash)
+	fanned.Hash, unfanned.Hash = "", ""
+	fanned.Partition = ""
+	fanned.PartitionFingerprint = ""
+	fanned.PartitionAttributes = nil
+	require.Equal(t, unfanned, fanned, "actual production paths may differ only in partition identity")
 }
 
 func localPartitionFingerprint(hexByte string) string {

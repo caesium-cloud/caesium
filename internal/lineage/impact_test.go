@@ -7,11 +7,11 @@ import (
 	"time"
 
 	"github.com/caesium-cloud/caesium/internal/event"
+	jobdeftestutil "github.com/caesium-cloud/caesium/internal/jobdef/testutil"
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/suite"
 	"gorm.io/datatypes"
-	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 )
 
@@ -27,21 +27,12 @@ func TestImpactSuite(t *testing.T) {
 }
 
 func (s *ImpactSuite) SetupTest() {
-	dsn := "file:" + uuid.NewString() + "?mode=memory&cache=shared"
-	db, err := gorm.Open(sqlite.Open(dsn), &gorm.Config{})
-	s.Require().NoError(err)
-	s.Require().NoError(db.AutoMigrate(models.All...))
-	s.db = db
+	s.db = jobdeftestutil.OpenTestDB(s.T())
 	s.ctx = context.Background()
 }
 
 func (s *ImpactSuite) TearDownTest() {
-	if s.db != nil {
-		sqlDB, _ := s.db.DB()
-		if sqlDB != nil {
-			_ = sqlDB.Close()
-		}
-	}
+	jobdeftestutil.CloseDB(s.db)
 }
 
 // TestNoDownstream: querying a dataset with no consumers returns an empty list.
@@ -493,4 +484,49 @@ func marshalFacet(v any) []byte {
 		panic(err)
 	}
 	return b
+}
+
+func (s *ImpactSuite) TestChunkedConsumerUnionAndGlobalOrdering() {
+	const ns = "chunk-test"
+	_, shared := s.createJobAndRun("shared-consumer", "")
+	_, newer := s.createJobAndRun("newer-consumer", "")
+	frontier := make([]datasetRef, 401)
+	for i := range frontier {
+		frontier[i] = datasetRef{namespace: ns, name: uuid.NewString()}
+	}
+	// One consumer belongs to both chunks; its output must occur once.
+	s.createDataset(shared, ns, frontier[0].name, "input", "shared")
+	s.createDataset(shared, ns, frontier[400].name, "input", "shared")
+	s.createDataset(shared, ns, "sink", "output", "shared")
+	s.createDataset(newer, ns, frontier[400].name, "input", "newer")
+	s.createDataset(newer, ns, "sink", "output", "newer")
+	now := time.Now().UTC()
+	s.Require().NoError(s.db.Model(&models.LineageDataset{}).Where("task_run_id = ? AND direction = ?", shared.ID, "output").Update("created_at", now.Add(-time.Hour)).Error)
+	s.Require().NoError(s.db.Model(&models.LineageDataset{}).Where("task_run_id = ? AND direction = ?", newer.ID, "output").Update("created_at", now).Error)
+	nodes, err := findConsumers(s.ctx, s.db, frontier)
+	s.Require().NoError(err)
+	s.Require().Len(nodes, 2)
+	s.Equal("newer-consumer", nodes[0].JobAlias)
+	s.Equal("shared-consumer", nodes[1].JobAlias)
+}
+
+func (s *ImpactSuite) TestFailedTaskPersistsInputsAndPartialOutputs() {
+	job, _ := s.createJobAndRun("failed-lineage", "")
+	var jr models.JobRun
+	s.Require().NoError(s.db.Where("job_id = ?", job.ID).First(&jr).Error)
+	tr := s.createTaskWithRun(job.ID, jr.ID, "load", []byte(`{"extract":{"properties":{"rows":{"type":"string"}}}}`), nil)
+	mapped, err := newMapper("test", s.db).mapEvent(event.Event{
+		Type: event.TypeTaskFailed, JobID: job.ID, RunID: jr.ID, TaskID: tr.TaskID, Timestamp: time.Now().UTC(),
+		Payload: marshalFacet(taskRunPayload{ID: tr.ID, JobRunID: jr.ID, TaskID: tr.TaskID, Error: "failed after output", Output: map[string]string{"partial": "s3://bucket/partial.csv"}}),
+	})
+	s.Require().NoError(err)
+	s.Require().NotEmpty(mapped.Inputs)
+	s.Require().NotEmpty(mapped.Outputs)
+	for direction, datasets := range map[string][]Dataset{"input": mapped.Inputs, "output": mapped.Outputs} {
+		for _, ds := range datasets {
+			var count int64
+			s.Require().NoError(s.db.Model(&models.LineageDataset{}).Where("task_run_id = ? AND namespace = ? AND name = ? AND direction = ?", tr.ID, ds.Namespace, ds.Name, direction).Count(&count).Error)
+			s.Equal(int64(1), count, "%s %s must be persisted after failure", direction, ds.Name)
+		}
+	}
 }

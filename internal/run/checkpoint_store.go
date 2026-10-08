@@ -96,13 +96,7 @@ func (s *Store) TerminalTaskRunsSince(runID uuid.UUID, afterSeq int64) ([]models
 	var rows []models.TaskRun
 	err := s.db.
 		Where("job_run_id = ? AND terminal_sequence > ? AND status IN ?",
-			runID, afterSeq, []string{
-				string(TaskStatusSucceeded),
-				string(TaskStatusFailed),
-				string(TaskStatusSkipped),
-				string(TaskStatusCached),
-				string(TaskStatusCancelled),
-			}).
+			runID, afterSeq, terminalStatusStrings()).
 		Order("terminal_sequence ASC").
 		Find(&rows).Error
 	return rows, err

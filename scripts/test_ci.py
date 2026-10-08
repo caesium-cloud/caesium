@@ -258,6 +258,9 @@ class WorkflowTests(unittest.TestCase):
         self.assertIn("bash scripts/test_helm_pod_replacement_membership.sh", commands)
 
     def test_ci_config_discovers_all_validator_tests(self):
+        # The complete hosted suite already took 294s before wrapper/action
+        # overhead; retain every test while providing a bounded ten-minute job.
+        self.assertEqual(JOBS["ci-config"]["timeout-minutes"], 10)
         commands = [line.strip() for step in JOBS["ci-config"]["steps"]
                     for line in step.get("run", "").splitlines()
                     if "unittest discover" in line]
@@ -858,8 +861,40 @@ class EarlyEvidenceLaneTests(unittest.TestCase):
         self.assertTrue(any("kind-linux-amd64" in step.get("run", "") for step in steps))
         upload = steps[-1]
         self.assertEqual(upload["uses"], "actions/upload-artifact@v7")
-        self.assertEqual(upload["if"], "always()")
+        self.assertEqual(upload["if"], "always() && steps.redact_robustness_evidence.outcome == 'success'")
         self.assertEqual(upload["with"]["if-no-files-found"], "error")
+
+    def test_early_upload_requires_always_run_redaction_even_after_lane_failure(self):
+        steps = JOBS[self.LANE]["steps"]
+        redact = next(step for step in steps if step.get("id") == "redact_robustness_evidence")
+        self.assertEqual(redact["if"], "always()")
+        self.assertNotIn("continue-on-error", redact)
+        self.assertLess(steps.index(redact), len(steps) - 1)
+        self.assertIn("--artifacts .tmp/evidence/robustness", redact["run"])
+        self.assertNotIn("|| true", redact["run"])
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "scripts").mkdir()
+            shutil.copyfile(ROOT / "scripts/collect-evidence.py", root / "scripts/collect-evidence.py")
+            art = root / ".tmp/evidence/robustness"
+            result = subprocess.run(["bash", "-e", "-c", redact["run"]], cwd=root,
+                                    capture_output=True, text=True, timeout=10)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("No robustness artifact directory was produced", result.stdout)
+            art.parent.mkdir(parents=True)
+            art.write_text("not a directory; must refuse upload")
+            result = subprocess.run(["bash", "-e", "-c", redact["run"]], cwd=root,
+                                    capture_output=True, text=True, timeout=10)
+            self.assertNotEqual(result.returncode, 0)
+            art.unlink()
+            (art / "member-logs").mkdir(parents=True)
+            (art / "internal-token.txt").write_text("fixture-generated-token\n")
+            (art / "member-logs/crash.log").write_text("failed startup fixture-generated-token")
+            result = subprocess.run(["bash", "-e", "-c", redact["run"]], cwd=root,
+                                    capture_output=True, text=True, timeout=10)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual((art / "member-logs/crash.log").read_text(), "failed startup [REDACTED_INTERNAL_TOKEN]")
+            self.assertFalse((art / "internal-token.txt").exists())
 
     def test_registered_selectors_name_real_tests(self):
         by_id = {item["id"]: item for item in self.EARLY}
@@ -1797,6 +1832,633 @@ class SystemSuiteLaneWiringTests(unittest.TestCase):
         # An override without its producer's id is refused by the recipe.
         self.assertIn("needs CAESIUM_LIFECYCLE_EXPECTED_IMAGE_ID", body)
         self.assertIn('--expected-image-id "$expected"', body)
+
+    def _podman_metadata_fixture(self, fault=None):
+        """Quay transport seam for the actual embedded workflow resolver."""
+        import time
+        import urllib.error
+
+        index_type = "application/vnd.oci.image.index.v1+json"
+        manifest_type = "application/vnd.oci.image.manifest.v1+json"
+        config_type = "application/vnd.oci.image.config.v1+json"
+        repository = "quay.io/podman/stable"
+        secret = "bearer-secret-never-retained"
+        config = json.dumps({"os": "linux", "architecture": "arm64" if fault == "config-platform" else "amd64",
+                             "config": {"Labels": {"org.opencontainers.image.version":
+                                 "5.8.8" if fault == "version" else "5.8.7"}}}).encode()
+        config_id = "sha256:" + hashlib.sha256(config).hexdigest()
+        config_descriptor = {"mediaType": config_type, "digest": config_id, "size": len(config)}
+        if fault in {"config-digest", "config-media", "config-size"}:
+            config_descriptor[{"config-digest": "digest", "config-media": "mediaType", "config-size": "size"}[fault]] = {
+                "config-digest": "sha256:" + "aa" * 32, "config-media": manifest_type, "config-size": len(config) + 1}[fault]
+        child = json.dumps({"schemaVersion": 1 if fault == "child-schema" else 2,
+                            "mediaType": config_type if fault == "child-media" else manifest_type,
+                            "config": config_descriptor, "layers": []}).encode()
+        child_id = "sha256:" + hashlib.sha256(child).hexdigest()
+        descriptor = {"mediaType": manifest_type, "digest": child_id, "size": len(child),
+                      "platform": {"os": "linux", "architecture": "amd64"}}
+        changes = {"descriptor-digest": ("digest", "sha256:bad"),
+                   "descriptor-size": ("size", len(child) + 1),
+                   "descriptor-bool-size": ("size", True),
+                   "descriptor-media": ("mediaType", config_type)}
+        if fault in changes:
+            key, value = changes[fault]
+            descriptor[key] = value
+        if fault == "missing-platform":
+            del descriptor["platform"]
+        if fault == "foreign-platform":
+            descriptor["platform"]["architecture"] = "arm64"
+        if fault == "variant":
+            descriptor["platform"]["variant"] = "v1"
+        manifests = [] if fault == "missing-child" else [descriptor] * (2 if fault == "duplicate-child" else 1)
+        index = json.dumps({"schemaVersion": 1 if fault == "index-schema" else 2,
+                            "mediaType": manifest_type if fault == "index-media" else index_type,
+                            "manifests": manifests}).encode()
+        index_id = "sha256:" + hashlib.sha256(index).hexdigest()
+        log = []
+
+        class Response:
+            def __init__(self, body, media="application/json", header_digest=None, read_error=False, read_stall=False):
+                self.body, self.offset, self.read_error = body, 0, read_error
+                self.read_stall = read_stall
+                self.code = 200
+                self.headers = {"Content-Type": media, "Content-Length": str(len(body))}
+                if header_digest:
+                    self.headers["Docker-Content-Digest"] = header_digest
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                pass
+
+            def read(self, size):
+                if self.read_stall:
+                    if not hasattr(self, "buffered"):
+                        body = self.body
+
+                        class Trickle(io.RawIOBase):
+                            offset = 0
+
+                            def readable(self):
+                                return True
+
+                            def readinto(self, buffer):
+                                # Every receive is below the socket inactivity
+                                # timeout, while BufferedReader.read stays blocked.
+                                time.sleep(0.04)
+                                chunk = body[self.offset:self.offset + 64]
+                                buffer[:len(chunk)] = chunk
+                                self.offset += len(chunk)
+                                return len(chunk)
+
+                        self.buffered = io.BufferedReader(Trickle())
+                    return self.buffered.read(size)
+                if self.read_error and self.offset:
+                    raise OSError(secret + " https://cdn01.quay.io/config?signature=private")
+                chunk = self.body[self.offset:self.offset + size]
+                self.offset += len(chunk)
+                return chunk
+
+        class Opener:
+            def open(opener_self, request, timeout):
+                log.append(("http", request.full_url, dict(request.header_items())))
+                self.assertEqual(timeout, 10)
+                url = request.full_url
+                if "/v2/auth?" in url:
+                    if fault == "wall-auth-stall":
+                        time.sleep(0.4)
+                    self.assertNotIn("Authorization", dict(request.header_items()))
+                    return Response(json.dumps({"token": secret}).encode())
+                if url.startswith("https://cdn01.quay.io/"):
+                    if fault == "wall-redirect-stall":
+                        time.sleep(0.08)
+                    self.assertNotIn("Authorization", dict(request.header_items()))
+                    self.assertNotIn("Cookie", dict(request.header_items()))
+                    return Response(config, "application/octet-stream")
+                self.assertEqual(request.get_header("Authorization"), "Bearer " + secret)
+                if "/blobs/" in url:
+                    if fault in {"redirect", "foreign-redirect", "credential-redirect", "wall-redirect-stall"}:
+                        if fault == "wall-redirect-stall":
+                            time.sleep(0.08)
+                        location = {"foreign-redirect": "https://evil.example/config?signature=private",
+                                    "credential-redirect": "https://user:password@cdn01.quay.io/config?signature=private"}.get(
+                                        fault, "https://cdn01.quay.io/config?signature=private")
+                        raise urllib.error.HTTPError(url, 302, "signed " + location, {"Location": location}, io.BytesIO())
+                    return Response(config + (b"corruption" if fault == "config-body" else b""), config_type, config_id)
+                if url.endswith("manifests/v5.8.7"):
+                    if fault == "wall-open-stall":
+                        # opener.open includes SSL negotiation and header parsing.
+                        time.sleep(0.4)
+                    # A changing tag would return unrelated bytes if rediscovered.
+                    self.assertEqual(sum(entry[0] == "http" and entry[1].endswith("manifests/v5.8.7") for entry in log), 1)
+                    response = Response(index, index_type, "sha256:" + "ff" * 32 if fault == "header" else index_id,
+                                        read_error=fault == "partial-read-error", read_stall=fault == "wall-body-stall")
+                    if fault == "overflow":
+                        response.body = index + b" " * (256 * 1024)
+                        del response.headers["Content-Length"]
+                    if fault == "truncated":
+                        response.headers["Content-Length"] = str(len(index) + 1)
+                    if fault == "response-media":
+                        response.headers["Content-Type"] = manifest_type
+                    return response
+                if url.endswith("manifests/" + index_id):
+                    return Response(index + (b" " if fault == "immutable-change" else b""), index_type,
+                                    index_id)
+                self.assertTrue("/manifests/" in url)
+                return Response(child + (b"corruption" if fault == "child-body" else b""), manifest_type, child_id)
+
+        return {"opener": Opener(), "log": log, "index": index, "child": child, "config": config,
+                "index_id": index_id, "child_id": child_id, "config_id": config_id,
+                "child_ref": repository + "@" + child_id, "index_ref": repository + "@" + index_id,
+                "secret": secret}
+
+    def _exercise_podman_resolution(self, fault=None, loaded_kind="config", wall_budget=None):
+        import signal
+        import urllib.request
+        from unittest.mock import patch
+
+        step = next(item for item in JOBS["coverage-ratchets"]["steps"]
+                    if item.get("name") == "Pin isolated backend prerequisites")
+        code = step["run"].split("<<'PY'\n", 1)[1].rsplit("\nPY", 1)[0]
+        # Execute the exact resolver/acquisition portion; the adjacent harness
+        # executes this same code through task export and input publication.
+        code = code.split("podman_receipt['prerequisite_phase'] = 'task-pulls'", 1)[0]
+        fixture = self._podman_metadata_fixture(fault)
+        log = fixture["log"]
+        identity = fixture[loaded_kind + "_id"]
+        setitimer = signal.setitimer
+
+        def timer(which, seconds, interval=0):
+            log.append(("timer", seconds, interval))
+            return setitimer(which, wall_budget if wall_budget is not None and seconds == 30 else seconds, interval)
+
+        def call(args, timeout):
+            log.append(("pull", args))
+            self.assertEqual(timeout, 180)
+            self.assertEqual(args, ["docker", "pull", "--platform", "linux/amd64", fixture["child_ref"]])
+            if fault == "disappeared":
+                raise subprocess.CalledProcessError(1, args, stderr=fixture["secret"])
+
+        def output(args, text):
+            log.append(("inspect", args))
+            self.assertEqual(args, ["docker", "image", "inspect", fixture["child_ref"]])
+            if fault == "inspect-error":
+                raise OSError(fixture["secret"])
+            value = {"Id": "sha256:" + "cc" * 32 if fault == "foreign-id" else identity,
+                     "Os": "linux", "Architecture": "arm64" if fault == "loaded-platform" else "amd64",
+                     "RepoDigests": [fixture["index_ref"]]}
+            if fault == "missing-id":
+                del value["Id"]
+            if fault == "foreign-repodigest":
+                value["RepoDigests"] = ["foreign.example/image@" + fixture["child_id"]]
+            if fault == "ambiguous-repodigest":
+                value["RepoDigests"].append(fixture["child_ref"])
+            return json.dumps([value] * (2 if fault == "ambiguous-id" else 1))
+
+        with tempfile.TemporaryDirectory() as directory:
+            with patch.object(sys, "argv", ["-", directory]), \
+                    patch.object(urllib.request, "build_opener", return_value=fixture["opener"]), \
+                    patch.object(signal, "setitimer", side_effect=timer), \
+                    patch.object(subprocess, "check_call", side_effect=call), \
+                    patch.object(subprocess, "check_output", side_effect=output):
+                error = None
+                try:
+                    exec(compile(code, "coverage-prerequisites", "exec"), {})
+                except AssertionError as exc:
+                    error = exc
+            proof = Path(directory) / "proof"
+            receipt = json.loads((proof / "podman-service-receipt.json").read_text())
+            retained = b"".join(path.read_bytes() for path in proof.iterdir())
+            self.assertNotIn(fixture["secret"].encode(), retained)
+            self.assertNotIn(b"signature=private", retained)
+            self.assertNotIn(b"user:password", retained)
+            self.assertEqual(sum(entry[0] == "http" and entry[1].endswith("manifests/v5.8.7") for entry in log),
+                             0 if fault == "wall-auth-stall" else 1)
+            self.assertFalse((Path(directory) / "backend-producer-inputs.json").exists())
+            if fault not in {None, "redirect", "retarget"}:
+                self.assertIsNotNone(error, fault)
+                self.assertNotIn(fixture["secret"], str(error))
+                self.assertEqual(receipt["outcome"], "refused")
+            else:
+                self.assertIsNone(error)
+                self.assertEqual(receipt["outcome"], "acquired")
+                self.assertEqual(receipt["docker_image_id"], identity)
+                self.assertEqual(receipt["docker_repo_digests"], [fixture["index_ref"]])
+                self.assertEqual(receipt["discovery_ref"], "quay.io/podman/stable:v5.8.7")
+                self.assertEqual(receipt["index_id"], fixture["index_id"])
+                self.assertEqual(receipt["manifest_id"], fixture["child_id"])
+                self.assertEqual(receipt["config_id"], fixture["config_id"])
+                self.assertEqual(len({receipt[key] for key in ("index_id", "manifest_id", "config_id")}), 3)
+            if any(entry[0] == "pull" for entry in log):
+                for key, data in (("index_metadata", fixture["index"]), ("immutable_index_metadata", fixture["index"]),
+                                  ("manifest_metadata", fixture["child"]), ("config_metadata", fixture["config"])):
+                    self.assertEqual((proof / receipt[key]).read_bytes(), data)
+                    self.assertEqual(receipt["metadata_sha256"][receipt[key]], hashlib.sha256(data).hexdigest())
+                self.assertEqual(sum(entry[0] == "pull" for entry in log), 1)
+                self.assertLess(max(i for i, entry in enumerate(log) if entry[0] == "http"),
+                                next(i for i, entry in enumerate(log) if entry[0] == "pull"))
+            if fault == "missing-id":
+                self.assertFalse(receipt["loaded_image_observed"])
+                self.assertIsNone(receipt["docker_image_id"])
+            if fault == "disappeared":
+                self.assertFalse(receipt["loaded_image_observed"])
+                self.assertNotIn("docker_image_id", receipt)
+                self.assertEqual(receipt["phase"], "immutable-pull")
+            return receipt, log
+
+    def test_podman_metadata_wall_deadline_interrupts_open_and_buffered_read(self):
+        import signal
+        import time
+
+        for fault, phase in (("wall-auth-stall", "auth"), ("wall-open-stall", "discovery-index"),
+                             ("wall-body-stall", "discovery-index")):
+            with self.subTest(fault=fault):
+                before_handler = signal.getsignal(signal.SIGALRM)
+                before_timer = signal.getitimer(signal.ITIMER_REAL)
+                started = time.monotonic()
+                receipt, log = self._exercise_podman_resolution(fault, wall_budget=0.12)
+                self.assertLess(time.monotonic() - started, 0.35)
+                self.assertEqual(receipt["error_type"], "TimeoutError")
+                self.assertEqual(receipt["phase"], phase)
+                self.assertFalse(receipt["loaded_image_observed"])
+                self.assertFalse(any(entry[0] == "pull" for entry in log))
+                self.assertEqual(signal.getsignal(signal.SIGALRM), before_handler)
+                self.assertEqual(signal.getitimer(signal.ITIMER_REAL), before_timer)
+
+    def test_podman_metadata_redirect_shares_original_wall_deadline(self):
+        import time
+
+        started = time.monotonic()
+        receipt, log = self._exercise_podman_resolution("wall-redirect-stall", wall_budget=0.12)
+        self.assertLess(time.monotonic() - started, 0.35)
+        self.assertEqual(receipt["error_type"], "TimeoutError")
+        self.assertEqual(receipt["phase"], "selected-config")
+        self.assertEqual(receipt["request_count"], 6)
+        self.assertFalse(any(entry[0] == "pull" for entry in log))
+        # Auth/index/immutable index/manifest/config have five wall timers;
+        # the cross-origin config request must not allocate a sixth budget.
+        self.assertEqual(sum(entry[0] == "timer" and entry[1] == 30 for entry in log), 5)
+
+    def test_podman_metadata_wall_timer_restores_prior_handler_and_timer(self):
+        import signal
+        import time
+
+        def prior_handler(signum, frame):
+            self.fail("the prior long-lived timer must not expire")
+
+        saved_handler = signal.getsignal(signal.SIGALRM)
+        saved_timer = signal.setitimer(signal.ITIMER_REAL, 0)
+        try:
+            signal.signal(signal.SIGALRM, prior_handler)
+            signal.setitimer(signal.ITIMER_REAL, 60, 7)
+            for fault in (None, "wall-body-stall"):
+                with self.subTest(fault=fault):
+                    before, interval = signal.getitimer(signal.ITIMER_REAL)
+                    started = time.monotonic()
+                    self._exercise_podman_resolution(fault, wall_budget=0.12)
+                    after, restored_interval = signal.getitimer(signal.ITIMER_REAL)
+                    self.assertIs(signal.getsignal(signal.SIGALRM), prior_handler)
+                    self.assertEqual(restored_interval, interval)
+                    self.assertAlmostEqual(after, before - (time.monotonic() - started), delta=0.02)
+        finally:
+            signal.setitimer(signal.ITIMER_REAL, 0)
+            signal.signal(signal.SIGALRM, saved_handler)
+            signal.setitimer(signal.ITIMER_REAL, *saved_timer)
+
+    def test_podman_v587_resolution_chain_and_actual_id(self):
+        for kind in ("index", "child", "config"):
+            with self.subTest(loaded_kind=kind):
+                self._exercise_podman_resolution(loaded_kind=kind)
+
+    def test_podman_v587_resolution_refuses_partial_or_ambiguous_index(self):
+        controls = ("header", "partial-read-error", "overflow", "truncated", "response-media", "immutable-change",
+                    "index-schema", "index-media", "missing-platform", "missing-child", "duplicate-child",
+                    "foreign-platform", "variant", "descriptor-digest", "descriptor-size", "descriptor-bool-size",
+                    "descriptor-media", "child-schema", "child-media", "child-body", "config-digest",
+                    "config-media", "config-size", "config-body", "config-platform", "version",
+                    "foreign-id", "missing-id", "ambiguous-id", "foreign-repodigest", "ambiguous-repodigest", "loaded-platform")
+        for fault in controls:
+            with self.subTest(fault=fault):
+                self._exercise_podman_resolution(fault)
+
+    def test_podman_v587_digest_pull_refuses_retarget_and_disappearance(self):
+        self._exercise_podman_resolution("retarget")
+        self._exercise_podman_resolution("disappeared")
+        self._exercise_podman_resolution("inspect-error")
+
+    def test_podman_resolution_redacts_credentials_and_redirects(self):
+        receipt, log = self._exercise_podman_resolution("redirect")
+        self.assertEqual(receipt["request_count"], 6)
+        self.assertTrue(any(entry[0] == "http" and entry[1].startswith("https://cdn01.quay.io/") for entry in log))
+        for fault in ("foreign-redirect", "credential-redirect", "partial-read-error"):
+            with self.subTest(fault=fault):
+                self._exercise_podman_resolution(fault)
+
+    def _exercise_backend_task_export(self, fault=None, task_alias_loaded=False):
+        """Execute the actual workflow prerequisite code against a hermetic daemon."""
+        import hashlib
+        import tarfile
+        import types
+        import urllib.request
+        from unittest.mock import patch
+
+        step = next(item for item in JOBS["coverage-ratchets"]["steps"]
+                    if item.get("name") == "Pin isolated backend prerequisites")
+        code = step["run"].split("<<'PY'\n", 1)[1].rsplit("\nPY", 1)[0]
+        config = json.dumps({"os": "linux", "architecture": "arm64" if fault == "config-platform" else "amd64"}).encode()
+        config_id = "sha256:" + hashlib.sha256(config).hexdigest()
+        child = json.dumps({"schemaVersion": 2, "mediaType": "application/vnd.oci.image.manifest.v1+json", "config": {
+            "mediaType": "application/vnd.oci.image.config.v1+json", "digest": config_id,
+            "size": len(config) + (1 if fault == "config-size" else 0)}, "layers": []}).encode()
+        child_id = "sha256:" + hashlib.sha256(child).hexdigest()
+        descriptor = {"mediaType": "application/vnd.oci.image.manifest.v1+json", "size": len(child),
+                      "digest": child_id, "platform": {"os": "linux", "architecture": "amd64"}}
+        index = json.dumps({"schemaVersion": 2, "manifests": [descriptor] * (2 if fault == "ambiguous" else 1)}).encode()
+        index_ref = "docker.io/library/alpine@sha256:" + hashlib.sha256(index).hexdigest()
+        task_supplier_ref = "docker.io/library/alpine:3.23@" + index_ref.split("@")[1]
+        production_task_supplier_ref = "docker.io/library/alpine:3.23@sha256:85fe1e81d6758c208f3e1eed4338a1997e19d4be002d4dd32d3100c9a8c010a0"
+        kind_supplier_ref = "kindest/node:v1.36.1@sha256:3489c7674813ba5d8b1a9977baea8a6e553784dab7b84759d1014dbd78f7ebd5"
+        self.assertIn("kind_image_supplier_ref = " + repr(kind_supplier_ref), code)
+        self.assertEqual(code.count("task_image_supplier_ref = " + repr(production_task_supplier_ref)), 1)
+        # Registry bytes are synthetic in this hermetic daemon. Rebind only
+        # their external pin; execute the actual repository/digest validator.
+        code = code.replace(repr(production_task_supplier_ref), repr(task_supplier_ref))
+        child_ref = "alpine@" + child_id
+        loaded_id = "sha256:" + "ab" * 32 if fault == "daemon" else child_id
+        kind_id = "sha256:" + "cd" * 32
+        calls = []
+        task_pulls = []
+        alias_inspections = 0
+        tags = []
+        backend = runpy.run_path(str(ROOT / "scripts/coverage-backends.py"))
+        self.assertEqual(backend["PINNED_TASK_SUPPLIER_REF"], production_task_supplier_ref)
+        self.assertEqual(backend["PINNED_KIND_SUPPLIER_REF"], kind_supplier_ref)
+        validator = backend["validate_task_supplier_index_ref"]
+        backend["validate_task_supplier_index_ref"] = types.FunctionType(
+            validator.__code__, {**validator.__globals__, "PINNED_TASK_SUPPLIER_REF": task_supplier_ref},
+            validator.__name__, validator.__defaults__, validator.__closure__)
+        podman = self._podman_metadata_fixture()
+
+        def output(args, text=False):
+            nonlocal alias_inspections
+            podman["log"].append(("command-output", args))
+            if args[:3] == ["docker", "image", "inspect"]:
+                ref = args[3]
+                if ref == podman["child_ref"]:
+                    return json.dumps([{"Id": podman["config_id"], "Os": "linux", "Architecture": "amd64",
+                                        "RepoDigests": [podman["index_ref"]]}])
+                self.assertIn(ref, (task_supplier_ref, "alpine:3.23", child_ref, kind_supplier_ref))
+                identity = kind_id if ref == kind_supplier_ref else loaded_id if ref == child_ref else index_ref.split("@")[1]
+                if fault == "pulled-daemon" and ref in (task_supplier_ref, "alpine:3.23"):
+                    identity = "sha256:" + "ef" * 32
+                if ref == "alpine:3.23":
+                    alias_inspections += 1
+                    if (fault == "retag" and alias_inspections == 3
+                            or fault == "retag-before" and alias_inspections == 2
+                            or fault == "alias-ownership" and alias_inspections == 1):
+                        identity = "sha256:" + "ef" * 32
+                value = [{"Id": identity, "Os": "linux", "Architecture": "arm64" if fault == "platform" else "amd64",
+                          "RepoDigests": [index_ref],
+                          "RepoTags": ["alpine:3.23"] if task_alias_loaded or ref == "alpine:3.23" else []}]
+                if ref == task_supplier_ref:
+                    if fault == "repo-digest":
+                        value[0]["RepoDigests"] = ["alpine@sha256:" + "12" * 32]
+                    elif fault == "foreign-repo-digest":
+                        value[0]["RepoDigests"] = ["foreign.example/alpine@" + index_ref.split("@")[1]]
+                    elif fault == "ambiguous-repo-digest":
+                        value[0]["RepoDigests"].append("alpine@sha256:" + "12" * 32)
+                return json.dumps(value) if text else json.dumps(value).encode()
+            self.assertEqual(args[:4], ["docker", "buildx", "imagetools", "inspect"])
+            self.assertEqual(args[-1], "--raw")
+            self.assertIn(args[4], (index_ref, child_ref))
+            raw = index if args[4] == index_ref else child
+            return raw + (b"corruption" if fault == "metadata" or fault == "child-metadata" and args[4] == child_ref else b"\n")
+
+        def call(args, **kwargs):
+            podman["log"].append(("command-call", args))
+            if args == ["docker", "pull", "--platform", "linux/amd64", podman["child_ref"]]:
+                return 0
+            if args == ["docker", "tag", task_supplier_ref, "alpine:3.23"]:
+                self.assertFalse(task_alias_loaded)
+                tags.append(args)
+                return 0
+            if args == ["docker", "pull", "--platform", "linux/amd64", kind_supplier_ref]:
+                self.assertEqual(task_pulls, [])
+                task_pulls.append(args)
+                return 0
+            if args == ["docker", "pull", "--platform", "linux/amd64", task_supplier_ref]:
+                self.assertEqual(len(task_pulls), 1)
+                task_pulls.append(args)
+                return 0
+            calls.append(args)
+            self.assertEqual(args, ["docker", "pull", "--platform", "linux/amd64", child_ref])
+            return 0
+
+        def export(args, input, text, check, timeout):
+            podman["log"].append(("command-run", args))
+            calls.append(args)
+            if fault == "export-command":
+                raise RuntimeError("export failed")
+            self.assertEqual(args[:3], ["docker", "buildx", "build"])
+            self.assertEqual(args[3:11], ["--platform", "linux/amd64", "--network", "none",
+                                        "--provenance=false", "--sbom=false", "--output", args[10]])
+            self.assertEqual(args[11:], ["-t", "alpine:3.23", "-"])
+            self.assertTrue(args[10].startswith("type=docker,dest="))
+            self.assertEqual(input, "FROM docker.io/library/" + child_ref + "\n")
+            self.assertTrue(text and check)
+            self.assertEqual(timeout, 180)
+            self.assertNotIn("--load", args)
+            path = args[10].removeprefix("type=docker,dest=")
+            saved = json.dumps({"os": "linux", "architecture": "arm64"}).encode() if fault == "config" else config
+            config_path = "blobs/sha256/" + config_id.split(":")[1]
+            child_path = "blobs/sha256/" + child_id.split(":")[1]
+            archive_descriptor = dict(descriptor)
+            if fault == "media":
+                archive_descriptor["mediaType"] = "application/foreign.manifest"
+            entries = {config_path: saved, child_path: child,
+                       "oci-layout": b'{"imageLayoutVersion":"1.0.0"}',
+                       "index.json": json.dumps({"schemaVersion": 2, "manifests": [archive_descriptor]}).encode(),
+                       "manifest.json": json.dumps([{"Config": config_path,
+                            "RepoTags": ["foreign:3.23" if fault == "tag" else "alpine:3.23"], "Layers": []}]).encode()}
+            if fault == "closure":
+                del entries[child_path]
+            if fault == "missing-config":
+                del entries[config_path]
+            with tarfile.open(path, "w") as archive:
+                for name, data in entries.items():
+                    member = tarfile.TarInfo(name)
+                    if fault == "config-link" and name == config_path:
+                        member.type, member.linkname = tarfile.SYMTYPE, "/foreign"
+                        archive.addfile(member)
+                    else:
+                        member.size = len(data)
+                        archive.addfile(member, io.BytesIO(data))
+                if fault == "duplicate":
+                    member = tarfile.TarInfo(config_path)
+                    member.size = len(config)
+                    archive.addfile(member, io.BytesIO(config))
+            return subprocess.CompletedProcess(args, 0)
+
+        write_text = Path.write_text
+
+        def write(path, *args, **kwargs):
+            if fault == "input-write" and path.name == "backend-producer-inputs.json.pending":
+                raise OSError("input write failed")
+            return write_text(path, *args, **kwargs)
+
+        with tempfile.TemporaryDirectory() as directory:
+            with patch.object(sys, "argv", ["-", directory]), \
+                    patch.object(urllib.request, "build_opener", return_value=podman["opener"]), \
+                    patch.object(Path, "write_text", new=write), \
+                    patch.object(subprocess, "check_output", side_effect=output), \
+                    patch.object(subprocess, "check_call", side_effect=call), \
+                    patch.object(subprocess, "run", side_effect=export), \
+                    patch.object(runpy, "run_path", return_value=backend):
+                try:
+                    exec(compile(code, "coverage-prerequisites", "exec"), {})
+                except (AssertionError, RuntimeError, OSError):
+                    proof = Path(directory) / "proof"
+                    podman_receipt = json.loads((proof / "podman-service-receipt.json").read_text())
+                    self.assertEqual(podman_receipt["outcome"], "acquired")
+                    self.assertEqual(podman_receipt["docker_image_id"], podman["config_id"])
+                    self.assertEqual(podman_receipt["prerequisite_outcome"], "refused")
+                    for name, data in (("podman-discovery-index.json", podman["index"]),
+                                       ("podman-immutable-index.json", podman["index"]),
+                                       ("podman-amd64-manifest.json", podman["child"]), ("podman-config.json", podman["config"])):
+                        self.assertEqual((proof / name).read_bytes(), data)
+                    if fault != "input-write":
+                        self.assertFalse((proof / "task-export-receipt.json").exists())
+                    self.assertFalse((Path(directory) / "backend-producer-inputs.json").exists())
+                    if fault in {"repo-digest", "foreign-repo-digest", "ambiguous-repo-digest", "alias-ownership"}:
+                        self.assertEqual(podman_receipt["prerequisite_phase"], "task-metadata")
+                        self.assertFalse((proof / "task-index.json").exists())
+                        self.assertFalse((proof / "task-amd64-manifest.json").exists())
+                        self.assertEqual(calls, [], "supplier/alias refusal must precede child pull and export")
+                        self.assertFalse(any(entry[0] == "command-output" and entry[1][:3] == ["docker", "buildx", "imagetools"]
+                                             for entry in podman["log"]))
+                    # A failed immutable digest check must never publish those bytes.
+                    if fault == "metadata":
+                        self.assertFalse((proof / "task-index.json").exists())
+                    if fault == "child-metadata":
+                        self.assertFalse((proof / "task-amd64-manifest.json").exists())
+                    if fault in {"missing-config", "media", "closure", "duplicate", "config-link", "config-size", "config", "tag", "retag"}:
+                        original = proof / "task-export-original.tar"
+                        self.assertEqual(original.read_bytes(), (Path(directory) / "task.tar").read_bytes())
+                        inventory = json.loads((proof / "task-export-members.json").read_text())
+                        self.assertEqual(inventory["archive_sha256"], hashlib.sha256(original.read_bytes()).hexdigest())
+                        manifest = json.loads((proof / "task-export-manifest.json").read_bytes())
+                        if fault == "missing-config":
+                            self.assertEqual(manifest[0]["Config"], "blobs/sha256/" + config_id.split(":")[1])
+                            self.assertNotIn(manifest[0]["Config"], {m["name"] for m in inventory["members"]})
+                    raise
+            inputs = json.loads((Path(directory) / "backend-producer-inputs.json").read_text())
+            proof = Path(directory) / "proof"
+            receipt = json.loads((proof / "task-export-receipt.json").read_text())
+            self.assertEqual((proof / receipt["index_metadata"]).read_bytes(), index)
+            self.assertEqual((proof / receipt["manifest_metadata"]).read_bytes(), child)
+            self.assertEqual("sha256:" + hashlib.sha256((proof / receipt["index_metadata"]).read_bytes()).hexdigest(),
+                             receipt["index_ref"].split("@")[1])
+            self.assertEqual("sha256:" + hashlib.sha256((proof / receipt["manifest_metadata"]).read_bytes()).hexdigest(),
+                             receipt["manifest_id"])
+            saved_manifest = json.loads((proof / receipt["manifest_metadata"]).read_bytes())
+            self.assertEqual(saved_manifest["config"]["digest"], receipt["config_id"])
+            self.assertEqual({entry.name for entry in proof.iterdir()},
+                             {"task-index.json", "task-amd64-manifest.json", "task-export-receipt.json",
+                              "task-export-original.tar", "task-export-members.json", "task-export-manifest.json",
+                              "podman-service-receipt.json", "podman-discovery-index.json", "podman-immutable-index.json",
+                              "podman-amd64-manifest.json", "podman-config.json"})
+            original = proof / "task-export-original.tar"
+            self.assertEqual(original.read_bytes(), Path(inputs["task_archive"]).read_bytes())
+            inventory = json.loads((proof / "task-export-members.json").read_text())
+            self.assertEqual(inventory["archive_sha256"], receipt["archive_sha256"])
+            self.assertIn("blobs/sha256/" + config_id.split(":")[1], {m["name"] for m in inventory["members"]})
+            self.assertEqual(receipt["exporter"], "buildkit-docker")
+            self.assertEqual(receipt["mode"], "from-only-no-load")
+            self.assertEqual(receipt["archive_file"], original.name)
+            self.assertEqual(receipt["archive_members"], "task-export-members.json")
+            self.assertEqual(receipt["archive_manifest"], "task-export-manifest.json")
+            self.assertEqual(receipt["source_ref"], "docker.io/library/" + child_ref)
+            self.assertEqual(receipt["dockerfile_sha256"], hashlib.sha256(("FROM " + receipt["source_ref"] + "\n").encode()).hexdigest())
+            self.assertEqual(receipt["loaded_child_image_id"], child_id)
+            self.assertEqual(inputs["task_image_id"], config_id)
+            self.assertEqual(inputs["task_docker_image_id"], index_ref.split("@")[1])
+            self.assertEqual(receipt["docker_image_id"], inputs["task_docker_image_id"])
+            self.assertEqual(inputs["task_image_supplier_ref"], task_supplier_ref)
+            self.assertEqual(inputs["kind_image_supplier_ref"], kind_supplier_ref)
+            self.assertEqual(inputs["task_image_ref"], "alpine:3.23")
+            self.assertEqual(inputs["kind_image_ref"], "kindest/node:v1.36.1")
+            self.assertEqual(inputs["kind_image_id"], kind_id)
+            self.assertEqual(receipt["supplier_ref"], task_supplier_ref)
+            self.assertEqual(receipt["preserved_tag_alias"], "alpine:3.23")
+            self.assertEqual(receipt["index_ref"], index_ref)
+            self.assertEqual(receipt["manifest_id"], child_id)
+            self.assertEqual(receipt["config_id"], config_id)
+            self.assertEqual(receipt["archive_sha256"], inputs["task_archive_sha256"])
+            provenance = inputs["podman_service_provenance"]
+            self.assertEqual(provenance, json.loads((proof / "podman-service-receipt.json").read_text()))
+            self.assertEqual(inputs["podman_service_proof_sha256"],
+                             hashlib.sha256((proof / "podman-service-receipt.json").read_bytes()).hexdigest())
+            self.assertEqual(inputs["podman_service_image_ref"], podman["child_ref"])
+            self.assertEqual(inputs["podman_service_image_id"], podman["config_id"])
+            self.assertEqual(provenance["index_id"], podman["index_id"])
+            self.assertEqual(provenance["manifest_id"], podman["child_id"])
+            self.assertEqual(provenance["config_id"], podman["config_id"])
+            self.assertEqual(provenance["docker_image_id"], podman["config_id"])
+            self.assertEqual(provenance["docker_repo_digests"], [podman["index_ref"]])
+            self.assertEqual(sum(entry[0] == "http" and entry[1].endswith("manifests/v5.8.7")
+                                 for entry in podman["log"]), 1)
+            self.assertEqual(len(calls), 2)
+            self.assertEqual(task_pulls, [["docker", "pull", "--platform", "linux/amd64", ref]
+                                         for ref in (kind_supplier_ref, task_supplier_ref)])
+            self.assertEqual(tags, [] if task_alias_loaded else [["docker", "tag", task_supplier_ref, "alpine:3.23"]])
+            image_inspections = [entry[1][3] for entry in podman["log"]
+                                 if entry[0] == "command-output" and entry[1][:3] == ["docker", "image", "inspect"]]
+            self.assertEqual(image_inspections, [podman["child_ref"], task_supplier_ref, "alpine:3.23",
+                                                child_ref, "alpine:3.23", "alpine:3.23", kind_supplier_ref])
+
+    def test_podman_resolution_proof_survives_later_failure(self):
+        for fault in ("metadata", "export-command", "input-write"):
+            with self.subTest(fault=fault), self.assertRaises((AssertionError, RuntimeError, OSError)):
+                self._exercise_backend_task_export(fault)
+
+    def test_coverage_exports_verified_pulled_child_without_index_platform_selection(self):
+        for task_alias_loaded in (False, True):
+            with self.subTest(task_alias_loaded=task_alias_loaded):
+                self._exercise_backend_task_export(task_alias_loaded=task_alias_loaded)
+
+    def test_coverage_task_export_refuses_a_different_valid_supplier_repodigest(self):
+        with self.assertRaisesRegex(RuntimeError, "RepoDigest differs from the committed immutable"):
+            self._exercise_backend_task_export("repo-digest")
+
+    def test_coverage_task_export_refuses_foreign_or_ambiguous_content(self):
+        controls = {"ambiguous": "unique exact", "metadata": "metadata digest",
+                    "daemon": "daemon task identity", "platform": "platform mismatch",
+                    "config": "exported daemon config", "tag": "unexpected task archive",
+                    "closure": "OCI", "child-metadata": "metadata digest",
+                    "config-platform": "exported task platform", "retag": "alias changed during export",
+                    "retag-before": "alias changed before export", "missing-config": "config member unavailable",
+                    "config-size": "config size mismatch", "config-link": "config member unavailable",
+                    "duplicate": "duplicate image archive", "media": "OCI index does not bind",
+                    "pulled-daemon": "pulled task identity", "alias-ownership": "does not own the preserved archive alias",
+                    "foreign-repo-digest": "RepoDigest differs from the committed immutable",
+                    "ambiguous-repo-digest": "ambiguous pulled task index"}
+        for fault, reason in controls.items():
+            with self.subTest(fault=fault), self.assertRaisesRegex((AssertionError, RuntimeError), reason):
+                self._exercise_backend_task_export(fault)
+
+    def test_coverage_prerequisite_metadata_has_a_separate_failure_retained_artifact(self):
+        steps = JOBS["coverage-ratchets"]["steps"]
+        upload = next(step for step in steps if step.get("name") == "Upload backend prerequisite proof")
+        self.assertEqual(upload["uses"], "actions/upload-artifact@v7")
+        self.assertEqual(upload["if"], "always() && hashFiles('.tmp/coverage-backends/proof/*.json') != ''")
+        self.assertEqual(upload["with"]["name"], "coverage-backend-prerequisites")
+        self.assertEqual(upload["with"]["path"], ".tmp/coverage-backends/proof/")
+        self.assertEqual(upload["with"]["if-no-files-found"], "error")
+        original = next(step for step in steps if step.get("name") == "Upload lane artifacts")
+        self.assertEqual(original["with"]["path"], ".tmp/lane-evidence/coverage-ratchets/")
+        self.assertLess(steps.index(upload), next(i for i, step in enumerate(steps)
+                       if step.get("name") == "Coverage collection against the ratchets"))
 
     def test_coverage_diff_uses_the_events_own_base(self):
         steps = JOBS["coverage-ratchets"]["steps"]
@@ -2810,7 +3472,9 @@ class ResourceHarnessTests(unittest.TestCase):
         self.assertIn("1d97294c14c43d477e0a0826e9cd0f2a2af373ddfafe6f10252e8a3c43f32be6", commands)
         self.assertIn("sha256sum --check --strict", commands)
         self.assertIn('log_driver = "k8s-file"', commands)
-        self.assertIn("bash build/stress/smoke.sh podman caesiumcloud/resource-stress:${{ env.IMAGE_TAG }}-amd64", commands)
+        smoke = "build/stress/smoke.sh podman caesiumcloud/resource-stress:${{ env.IMAGE_TAG }}-amd64"
+        self.assertIn("bash " + smoke, commands)
+        self.assertNotIn("bash -x " + smoke, commands)
 
     def test_missing_ci_fixture_fails_without_rebuilding(self):
         with tempfile.TemporaryDirectory() as tmp:

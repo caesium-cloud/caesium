@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/caesium-cloud/caesium/internal/authmode"
 	"github.com/caesium-cloud/caesium/pkg/log"
 	"github.com/kelseyhightower/envconfig"
 )
@@ -25,8 +26,8 @@ func Process() error {
 		// credential mapping that value is exactly what an operator might have
 		// mistakenly set to a literal credential, so report the key and cause
 		// without the value.
-		var perr *envconfig.ParseError
-		if errors.As(err, &perr) && perr.KeyName == "CAESIUM_REGISTRY_AUTH" {
+		perr, ok := errors.AsType[*envconfig.ParseError](err)
+		if ok && perr.KeyName == "CAESIUM_REGISTRY_AUTH" {
 			return fmt.Errorf("failed to process environment variables: %s: %w", perr.KeyName, perr.Err)
 		}
 		return fmt.Errorf("failed to process environment variables: %w", err)
@@ -97,8 +98,7 @@ func validate() error {
 	}
 
 	if variables.AgentRemediationEnabled {
-		mode := strings.ToLower(strings.TrimSpace(variables.AuthMode))
-		if (mode == "" || mode == "none") && !variables.SSOEnabled() {
+		if !authmode.Active(variables.AuthMode, variables.SSOEnabled()) {
 			return fmt.Errorf("CAESIUM_AGENT_REMEDIATION_ENABLED requires an active authentication mode: set CAESIUM_AUTH_MODE=api-key or enable an SSO provider so the tier-3 approval routes are not reachable without authentication")
 		}
 	}

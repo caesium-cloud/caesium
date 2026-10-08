@@ -563,3 +563,16 @@ func TestMaxTimestampAgeDurationDefaults(t *testing.T) {
 	require.Equal(t, 10*time.Minute, Config{MaxTimestampAge: "10m"}.maxTimestampAgeDuration())
 	require.Equal(t, 30*time.Second, Config{MaxTimestampAge: "30s"}.maxTimestampAgeDuration())
 }
+
+func TestExtractParamsRetainsHTTPDecoderAndPathPolicy(t *testing.T) {
+	params := extractParams([]byte(`{"n":1.00,"items":[{"name":"ok"}]}`), map[string]string{"n": "$.n", "dot": "$.items.0.name", "bracket": "$.items[0].name"})
+	if params["n"] != "1" || params["dot"] != "ok" {
+		t.Fatal(params)
+	}
+	if _, ok := params["bracket"]; ok {
+		t.Fatal("HTTP accepted event bracket grammar")
+	}
+	if len(extractParams([]byte(`{"n":1} trailing`), map[string]string{"n": "$.n"})) != 0 {
+		t.Fatal("HTTP accepted trailing bytes")
+	}
+}

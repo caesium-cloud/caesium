@@ -5,10 +5,10 @@ import (
 	"testing"
 	"time"
 
+	jobdeftestutil "github.com/caesium-cloud/caesium/internal/jobdef/testutil"
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/suite"
-	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 )
 
@@ -26,20 +26,12 @@ func TestReceiptSuite(t *testing.T) {
 }
 
 func (s *ReceiptSuite) SetupTest() {
-	dsn := "file:" + uuid.NewString() + "?mode=memory&cache=shared"
-	db, err := gorm.Open(sqlite.Open(dsn), &gorm.Config{})
-	s.Require().NoError(err)
-	s.Require().NoError(db.AutoMigrate(models.All...))
-	s.db = db
+	s.db = jobdeftestutil.OpenTestDB(s.T())
 	s.ctx = context.Background()
 }
 
 func (s *ReceiptSuite) TearDownTest() {
-	if s.db != nil {
-		if sqlDB, _ := s.db.DB(); sqlDB != nil {
-			_ = sqlDB.Close()
-		}
-	}
+	jobdeftestutil.CloseDB(s.db)
 }
 
 // taskSpec describes a task to seed into a run.

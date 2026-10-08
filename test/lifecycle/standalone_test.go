@@ -29,6 +29,7 @@ package lifecycle
 import (
 	"bufio"
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -37,6 +38,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -212,10 +214,19 @@ type previousMatrix struct {
 	} `json:"schema"`
 }
 
+type clusterMatrix struct {
+	Replicas                int `json:"replicas"`
+	DatabaseShards          int `json:"database_shards"`
+	DatabaseVoters          int `json:"database_voters"`
+	DatabaseStandbys        int `json:"database_standbys"`
+	ExpectedProtocolVersion int `json:"expected_protocol_version"`
+}
+
 type pairMatrix struct {
 	ID         string           `json:"id"`
 	Previous   previousMatrix   `json:"previous"`
 	Standalone standaloneMatrix `json:"standalone"`
+	Cluster    clusterMatrix    `json:"cluster"`
 }
 
 type versionMatrix struct {
@@ -233,13 +244,33 @@ func loadMatrix(t *testing.T) pairMatrix {
 	var matrix versionMatrix
 	require.NoErrorf(t, json.Unmarshal(raw, &matrix), "versions.json is not valid JSON")
 	want := envOr("CAESIUM_LIFECYCLE_PAIR", "v0.1.0-to-candidate")
-	for _, pair := range matrix.Pairs {
-		if pair.ID == want {
-			return pair
-		}
+	if pair, ok := matrix.pair(want); ok {
+		return pair
 	}
 	blockf(t, "versions-matrix", "version matrix has no pair %q", want)
 	return pairMatrix{}
+}
+
+func (m versionMatrix) pair(id string) (pairMatrix, bool) {
+	for _, pair := range m.Pairs {
+		if pair.ID == id {
+			return pair, true
+		}
+	}
+	return pairMatrix{}, false
+}
+
+func TestVersionMatrixSelectsAndDecodesClusterPair(t *testing.T) {
+	const raw = `{"pairs":[{"id":"other","cluster":{"replicas":1}},{"id":"v0.1.0-to-candidate","cluster":{"replicas":3,"database_shards":1,"database_voters":3,"database_standbys":0,"expected_protocol_version":2}}]}`
+	var matrix versionMatrix
+	require.NoError(t, json.Unmarshal([]byte(raw), &matrix))
+
+	pair, ok := matrix.pair("v0.1.0-to-candidate")
+	require.True(t, ok)
+	require.Equal(t, clusterMatrix{
+		Replicas: 3, DatabaseShards: 1, DatabaseVoters: 3,
+		DatabaseStandbys: 0, ExpectedProtocolVersion: 2,
+	}, pair.Cluster)
 }
 
 // ---------------------------------------------------------------------------
@@ -562,7 +593,7 @@ func (c *client) schema(ctx context.Context) (schemaSnapshot, error) {
 		sort.Strings(entry.Columns)
 		snap.Tables = append(snap.Tables, entry)
 	}
-	sort.Slice(snap.Tables, func(i, j int) bool { return snap.Tables[i].Name < snap.Tables[j].Name })
+	slices.SortFunc(snap.Tables, func(a, b tableSchema) int { return cmp.Compare(a.Name, b.Name) })
 	return snap, nil
 }
 
@@ -637,7 +668,7 @@ func (r apiRun) fixture() runFixture {
 			CompletedAt: task.CompletedAt,
 		})
 	}
-	sort.Slice(out.Tasks, func(i, j int) bool { return out.Tasks[i].ID < out.Tasks[j].ID })
+	slices.SortFunc(out.Tasks, func(a, b taskRunFixture) int { return cmp.Compare(a.ID, b.ID) })
 	return out
 }
 
@@ -729,7 +760,11 @@ func (c *client) awaitRunStatus(ctx context.Context, jobID, runID string, want f
 // an explicit Last-Event-ID, and collects the persisted backlog. The stream is
 // long-lived by design, so the read ends on an idle window rather than EOF.
 func readEventBacklog(ctx context.Context, c *client, runID string, cursor uint64) ([]eventTuple, error) {
-	streamCtx, cancel := context.WithTimeout(ctx, eventHardLimit)
+	return readEventBacklogWithLimits(ctx, c, runID, cursor, eventIdleTimeout, eventHardLimit)
+}
+
+func readEventBacklogWithLimits(ctx context.Context, c *client, runID string, cursor uint64, idleTimeout, hardLimit time.Duration) ([]eventTuple, error) {
+	streamCtx, cancel := context.WithTimeout(ctx, hardLimit)
 	defer cancel()
 
 	req, err := http.NewRequestWithContext(streamCtx, http.MethodGet, c.base+"/v1/events?run_id="+runID, nil)
@@ -750,12 +785,17 @@ func readEventBacklog(ctx context.Context, c *client, runID string, cursor uint6
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
+		_ = resp.Body.Close()
 		return nil, fmt.Errorf("GET /v1/events?run_id=%s: status %d", runID, resp.StatusCode)
 	}
 
 	lines := make(chan string, 256)
 	readErr := make(chan error, 1)
+	readDone := make(chan struct{})
 	go func() {
+		defer close(readDone)
+		defer close(lines)
+		defer close(readErr)
 		scanner := bufio.NewScanner(resp.Body)
 		scanner.Buffer(make([]byte, 0, 64*1024), 4<<20)
 		for scanner.Scan() {
@@ -766,26 +806,35 @@ func readEventBacklog(ctx context.Context, c *client, runID string, cursor uint6
 			}
 		}
 		readErr <- scanner.Err()
-		close(lines)
+	}()
+	defer func() {
+		cancel()
+		_ = resp.Body.Close()
+		<-readDone
 	}()
 
 	var (
 		tuples  []eventTuple
 		curData string
-		idle    = time.NewTimer(eventIdleTimeout)
+		hasData bool
+		idle    = time.NewTimer(idleTimeout)
 	)
 	defer idle.Stop()
 	for {
 		select {
 		case <-streamCtx.Done():
-			return tuples, nil
-		case err := <-readErr:
-			if err != nil && !errors.Is(err, context.Canceled) {
-				return tuples, err
-			}
-			return tuples, nil
+			return tuples, streamCtx.Err()
 		case line, ok := <-lines:
 			if !ok {
+				if err := streamCtx.Err(); err != nil {
+					return tuples, err
+				}
+				if err := <-readErr; err != nil {
+					return tuples, err
+				}
+				if hasData {
+					return tuples, errors.New("incomplete SSE event frame at end of stream")
+				}
 				return tuples, nil
 			}
 			if !idle.Stop() {
@@ -794,23 +843,31 @@ func readEventBacklog(ctx context.Context, c *client, runID string, cursor uint6
 				default:
 				}
 			}
-			idle.Reset(eventIdleTimeout)
+			idle.Reset(idleTimeout)
 			switch {
 			case strings.HasPrefix(line, ":"):
 				// heartbeat comment
 			case strings.HasPrefix(line, "data: "):
 				curData = strings.TrimPrefix(line, "data: ")
+				hasData = true
 			case line == "":
-				if curData != "" {
+				if hasData {
 					tuple, err := parseEventTuple(curData)
 					if err != nil {
 						return tuples, err
 					}
 					tuples = append(tuples, tuple)
 					curData = ""
+					hasData = false
 				}
 			}
 		case <-idle.C:
+			if err := streamCtx.Err(); err != nil {
+				return tuples, err
+			}
+			if hasData {
+				return tuples, errors.New("incomplete SSE event frame after idle timeout")
+			}
 			return tuples, nil
 		}
 	}
@@ -870,11 +927,11 @@ func runCLI(t *testing.T, args ...string) cliResult {
 	cmd.Stderr = &stderr
 	err := cmd.Run()
 	res := cliResult{Stdout: stdout.String(), Stderr: stderr.String()}
-	var exitErr *exec.ExitError
+	exitErr, isExitErr := errors.AsType[*exec.ExitError](err)
 	switch {
 	case err == nil:
 		res.ExitCode = 0
-	case errors.As(err, &exitErr):
+	case isExitErr:
 		res.ExitCode = exitErr.ExitCode()
 	default:
 		t.Fatalf("caesium %s could not be executed: %v (stderr: %s)", strings.Join(args, " "), err, stderr.String())

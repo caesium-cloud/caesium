@@ -3,6 +3,10 @@ package freshness
 import (
 	"context"
 	"encoding/json"
+	"errors"
+
+	"github.com/stretchr/testify/require"
+	"gorm.io/gorm"
 	"strconv"
 	"sync"
 	"testing"
@@ -436,5 +440,55 @@ func TestRecordConsumed(t *testing.T) {
 	// Advancing must not have been clobbered by the consumed snapshot.
 	if got.Watermark != "5" {
 		t.Fatalf("watermark after RecordConsumed = %q, want 5", got.Watermark)
+	}
+}
+
+// State races and contention consume one shared budget, including a broad
+// busy/locked message that the other retry callers deliberately reject.
+func TestAdvanceSharesStateRaceAndContentionBudget(t *testing.T) {
+	for _, succeed := range []bool{false, true} {
+		t.Run(strconv.FormatBool(succeed), func(t *testing.T) {
+			conn := openRegistryDB(t)
+			sqlDB, err := conn.DB()
+			require.NoError(t, err)
+			t.Cleanup(func() { require.NoError(t, sqlDB.Close()) })
+			calls := 0
+			last := errors.New("resource busy elsewhere")
+			require.NoError(t, conn.Callback().Query().Before("gorm:query").Register("test:race-and-busy", func(tx *gorm.DB) {
+				if tx.Statement.Table != "dataset_states" {
+					return
+				}
+				calls++
+				if succeed && calls == 5 {
+					return
+				}
+				if calls%2 == 1 && calls < 5 {
+					tx.AddError(errStateRaceRetry)
+				} else {
+					tx.AddError(last)
+				}
+			}))
+			res, err := NewStore(conn).Advance(context.Background(), AdvanceInput{Name: "orders", Watermark: "1", RunID: uuid.New(), CompletedAt: t0})
+			require.Equal(t, 5, calls)
+			if succeed {
+				require.NoError(t, err)
+				require.Equal(t, OutcomeAdvanced, res.Outcome)
+			} else {
+				require.ErrorIs(t, err, last)
+				require.Equal(t, AdvanceResult{}, res)
+			}
+		})
+	}
+}
+
+func TestFreshnessBusyClassification(t *testing.T) {
+	for _, tc := range []struct {
+		err  error
+		want bool
+	}{
+		{nil, false}, {errors.New("LOCKED resource"), true}, {errors.New("worker busy"), true},
+		{errors.New("checkpoint in progress"), false}, {errors.New("cannot start a transaction within a transaction"), false},
+	} {
+		require.Equal(t, tc.want, isBusyErr(tc.err))
 	}
 }

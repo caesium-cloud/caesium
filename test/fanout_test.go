@@ -16,6 +16,29 @@ type partitionListResponse struct {
 	Partitions []partitionInstance `json:"partitions"`
 }
 
+func (s *IntegrationTestSuite) awaitRetriedPartitionTerminal(jobID, runID, taskRef, partition string,
+	timeout time.Duration, failureTitle, failureDetail string,
+) bool {
+	s.T().Helper()
+	deadline := time.Now().Add(timeout)
+	for {
+		current := partitionsByValue(s.expandedPartitions(s.listPartitions(jobID, runID, taskRef)))
+		row, ok := current[partition]
+		status := ""
+		if ok {
+			status = row.Status
+			if isTerminalPartitionStatus(status) {
+				return true
+			}
+		}
+		if time.Now().After(deadline) {
+			s.Failf(failureTitle, failureDetail, status)
+			return false
+		}
+		time.Sleep(fanOutPollInterval)
+	}
+}
+
 type partitionInstance struct {
 	Value       string   `json:"value"`
 	Index       int      `json:"index"`
@@ -530,28 +553,16 @@ steps:
 	// must drain rather than leave it non-terminal forever. WHICH terminal state
 	// is deliberately not asserted — this fixture's command still fails for
 	// `fail`, so failing a second time proves the re-execution just as well.
-	redispatchDeadline := time.Now().Add(60 * time.Second)
-	becameTerminal := false
-	for {
-		current := partitionsByValue(s.expandedPartitions(s.listPartitions(job.ID, run.ID, processID)))
-		if isTerminalPartitionStatus(current["fail"].Status) {
-			s.Equal(keepRow.Status, current["keep"].Status,
-				"re-running `fail` must not cascade to the succeeded sibling")
-			s.Equal(keepRow.TaskRunID, current["keep"].TaskRunID)
-			becameTerminal = true
-			break
-		}
-		if time.Now().After(redispatchDeadline) {
-			s.Failf("a reset instance never ran again",
-				"partition `fail` is still %q 60s after a 200 retry: the endpoint accepted a retry that "+
-					"nothing performed, so the reopened run is not being dispatched", current["fail"].Status)
-			break
-		}
-		time.Sleep(fanOutPollInterval)
-	}
-	if !becameTerminal {
+	if !s.awaitRetriedPartitionTerminal(job.ID, run.ID, processID, "fail", 60*time.Second,
+		"a reset instance never ran again",
+		"partition `fail` is still %q 60s after a 200 retry: the endpoint accepted a retry that "+
+			"nothing performed, so the reopened run is not being dispatched") {
 		return
 	}
+	current := partitionsByValue(s.expandedPartitions(s.listPartitions(job.ID, run.ID, processID)))
+	s.Equal(keepRow.Status, current["keep"].Status,
+		"re-running `fail` must not cascade to the succeeded sibling")
+	s.Equal(keepRow.TaskRunID, current["keep"].TaskRunID)
 
 	retried := s.awaitRun(job.ID, run.ID, runTimeout)
 	s.Contains([]string{"failed", "succeeded"}, retried.Status,
@@ -613,24 +624,17 @@ steps:
 	s.Require().NoError(readErr)
 	s.Require().Equal(http.StatusOK, resp.StatusCode, "retrying the failed root must be accepted: %s", body)
 
-	redispatchDeadline := time.Now().Add(60 * time.Second)
-	for {
-		current := partitionsByValue(s.expandedPartitions(s.listPartitions(job.ID, run.ID, processID)))
-		if isTerminalPartitionStatus(current["a"].Status) {
-			s.Equal("failed", current["a"].Status,
-				"the fixture's command still fails for `a`, so a re-execution must land on failed — not on the sweep's skipped")
-			s.Equal(before["a"].TaskRunID, current["a"].TaskRunID)
-			s.Equal("skipped", current["b"].Status, "a partition retry must not cascade to the resolved dependent")
-			s.Equal(before["b"].TaskRunID, current["b"].TaskRunID)
-			break
-		}
-		if time.Now().After(redispatchDeadline) {
-			s.Failf("a reset root never ran again",
-				"partition `a` is still %q 60s after a 200 retry: the reopened run is parked behind the skipped dependent's indegree", current["a"].Status)
-			return
-		}
-		time.Sleep(fanOutPollInterval)
+	if !s.awaitRetriedPartitionTerminal(job.ID, run.ID, processID, "a", 60*time.Second,
+		"a reset root never ran again",
+		"partition `a` is still %q 60s after a 200 retry: the reopened run is parked behind the skipped dependent's indegree") {
+		return
 	}
+	current := partitionsByValue(s.expandedPartitions(s.listPartitions(job.ID, run.ID, processID)))
+	s.Equal("failed", current["a"].Status,
+		"the fixture's command still fails for `a`, so a re-execution must land on failed — not on the sweep's skipped")
+	s.Equal(before["a"].TaskRunID, current["a"].TaskRunID)
+	s.Equal("skipped", current["b"].Status, "a partition retry must not cascade to the resolved dependent")
+	s.Equal(before["b"].TaskRunID, current["b"].TaskRunID)
 
 	retried := s.awaitRun(job.ID, run.ID, runTimeout)
 	s.Contains([]string{"failed", "succeeded"}, retried.Status,
@@ -2016,18 +2020,9 @@ fi`,
 	// Drain the resume so this test does not leave a reopened run executing
 	// into the next scenario. The command still fails for `e`, so terminal-
 	// failed is the expected re-execution.
-	redispatchDeadline := time.Now().Add(60 * time.Second)
-	for {
-		current := partitionStatusMap(s.expandedPartitions(s.listPartitions(job.ID, run.ID, "process")))
-		if isTerminalPartitionStatus(current["e"]) {
-			break
-		}
-		if time.Now().After(redispatchDeadline) {
-			s.Failf("a reset instance never ran again",
-				"partition `e` is still %q 60s after `run retry --partition`: nothing performed the resume",
-				current["e"])
-			break
-		}
-		time.Sleep(fanOutPollInterval)
+	if !s.awaitRetriedPartitionTerminal(job.ID, run.ID, "process", "e", 60*time.Second,
+		"a reset instance never ran again",
+		"partition `e` is still %q 60s after `run retry --partition`: nothing performed the resume") {
+		return
 	}
 }

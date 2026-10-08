@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"strings"
 	"testing"
@@ -892,6 +893,8 @@ type captureCreateEngine struct {
 	logsDelay  time.Duration
 	waitResult atom.Result
 	stopCalls  int
+	stopErr    error
+	stopReq    *atom.EngineStopRequest
 }
 
 func (e *captureCreateEngine) Get(*atom.EngineGetRequest) (atom.Atom, error) {
@@ -916,9 +919,10 @@ func (e *captureCreateEngine) Wait(*atom.EngineWaitRequest) (atom.Atom, error) {
 	return &fakeMonitorAtom{id: "runtime", result: result}, nil
 }
 
-func (e *captureCreateEngine) Stop(*atom.EngineStopRequest) error {
+func (e *captureCreateEngine) Stop(req *atom.EngineStopRequest) error {
 	e.stopCalls++
-	return nil
+	e.stopReq = req
+	return e.stopErr
 }
 
 func (e *captureCreateEngine) Logs(*atom.EngineLogsRequest) (io.ReadCloser, error) {
@@ -960,6 +964,35 @@ func TestWorkerImageIdentityChecksRequiredConservativeFreeze(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			row := &models.TaskRun{ExecutionDescriptor: datatypes.JSON(tc.raw), CacheEnabled: true, CachePinDigests: tc.ownPin, HashInputBlob: datatypes.JSON(tc.blob)}
 			require.Equal(t, tc.want, workerImageIdentityChecksRequired(row, nil))
+		})
+	}
+}
+
+func TestRuntimeExecutorPartitionErrorForcesOneStop(t *testing.T) {
+	for _, stopErr := range []error{nil, errors.New("stop failed")} {
+		t.Run(fmt.Sprint(stopErr), func(t *testing.T) {
+			f := seedProducerTaskRun(t, "partition-error-stop")
+			f.taskRun.SchemaValidation = jobdef.SchemaValidationFail
+			f.taskRun.OutputSchema = datatypes.JSON(`{"type":"object","required":["value"],"properties":{"value":{"type":"string"}}}`)
+			sink := &fakeSink{}
+			engine := &captureCreateEngine{logs: "##caesium::partitions not-json\n", stopErr: stopErr}
+			(&runtimeExecutor{store: f.store, localSink: sink, engineFactory: func(context.Context, models.AtomEngine) (atom.Engine, error) { return engine, nil }}).Execute(context.Background(), f.taskRun)
+			require.Equal(t, 1, engine.stopCalls)
+			require.True(t, engine.stopReq.Force)
+			require.Equal(t, "runtime", engine.stopReq.ID)
+			var partitionErr *pkgtask.PartitionError
+			require.ErrorAs(t, sink.lastErr, &partitionErr)
+			require.ErrorIs(t, sink.lastErr, partitionErr)
+			if stopErr != nil {
+				require.ErrorIs(t, sink.lastErr, stopErr)
+			}
+			require.Equal(t, 1, sink.failed)
+			require.Zero(t, sink.succeeded)
+			require.Zero(t, sink.cached)
+			var row models.TaskRun
+			require.NoError(t, f.db.First(&row, "id = ?", f.taskRun.ID).Error)
+			require.Empty(t, row.SchemaViolations)
+			require.Empty(t, row.Output)
 		})
 	}
 }

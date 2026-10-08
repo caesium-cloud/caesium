@@ -672,7 +672,10 @@ func (m *OwnerManager) CompleteInstance(runID, taskID, taskRunID uuid.UUID, stat
 				// reconstruction recovery performs on takeover.
 				log.Warn("owner manager: fan-out group already expanded durably; adopting persisted rows",
 					"run_id", runID, "task_id", taskID, "error", planErr)
-				m.adoptPersistedExpansion(staged, runID)
+				if err := m.adoptPersistedExpansion(staged, runID); err != nil {
+					or.mu.Unlock()
+					return CompleteResult{Owned: true}, err
+				}
 			default:
 				status = TaskStatusFailed
 				if errMsg == "" {
@@ -888,17 +891,17 @@ func (m *OwnerManager) ReclaimExpiredClaims(runID uuid.UUID) []uuid.UUID {
 // run's durable instance rows.  It is the "reload from rows" arm of the staged
 // completion path: when the planner reports the successor template is ambiguous,
 // the group is already materialized in the DB and the owner must adopt it rather
-// than fail the producer.  Best-effort — a read failure leaves the state as it
-// was, and the completion proceeds against the unexpanded catalog node.
-func (m *OwnerManager) adoptPersistedExpansion(state *RunState, runID uuid.UUID) {
+// than fail the producer. Row acquisition or malformed dependency lists abort
+// the staged completion; catalog scheduling metadata remains best-effort.
+func (m *OwnerManager) adoptPersistedExpansion(state *RunState, runID uuid.UUID) error {
 	if state == nil || m.store == nil || m.store.DB() == nil {
-		return
+		return nil
 	}
 	var rows []models.TaskRun
 	if err := m.store.DB().Where("job_run_id = ?", runID).Find(&rows).Error; err != nil {
 		log.Warn("owner manager: could not load rows to adopt persisted expansion",
 			"run_id", runID, "error", err)
-		return
+		return fmt.Errorf("adopt persisted fan-out rows: %w", err)
 	}
 	var catalog []models.Task
 	var jobRun models.JobRun
@@ -908,7 +911,7 @@ func (m *OwnerManager) adoptPersistedExpansion(state *RunState, runID uuid.UUID)
 				"run_id", runID, "error", err)
 		}
 	}
-	state.RehydrateInGroupEdges(rows, catalog)
+	return state.RehydrateInGroupEdges(rows, catalog)
 }
 
 // seedFanOutPolicies records each freshly-expanded group's fanOut.failurePolicy

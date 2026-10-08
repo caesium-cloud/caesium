@@ -30,12 +30,15 @@ var allowedImports = map[string]bool{
 // every way to reach the outside world, and an allowlist only has to be
 // correct about what is already needed.
 var allowedStdlib = map[string]bool{
+	"cmp":           true,
 	"fmt":           true,
 	"go/parser":     true,
 	"go/token":      true,
+	"maps":          true,
 	"os":            true,
 	"path/filepath": true,
 	"reflect":       true,
+	"slices":        true,
 	"sort":          true,
 	"strconv":       true,
 	"strings":       true,

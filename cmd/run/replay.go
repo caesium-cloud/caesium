@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/caesium-cloud/caesium/cmd/cliutil"
 	"github.com/google/uuid"
 	"github.com/spf13/cobra"
 )
@@ -92,12 +93,9 @@ func runReplay(cmd *cobra.Command, args []string) error {
 			return err
 		}
 		if replayJSON {
-			var out any
-			if err := json.Unmarshal(diff, &out); err != nil {
-				return fmt.Errorf("run diff response was not valid JSON: %w", err)
+			if err := cliutil.WritePrettyJSON(cmd, diff, "run diff response"); err != nil {
+				return err
 			}
-			pretty, _ := json.MarshalIndent(out, "", "  ")
-			_, _ = fmt.Fprintln(cmd.OutOrStdout(), string(pretty))
 			if replayFailed {
 				return fmt.Errorf("replay run %s failed", resp.RunID)
 			}

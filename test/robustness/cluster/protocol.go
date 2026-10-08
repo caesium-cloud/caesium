@@ -20,10 +20,11 @@ const (
 	AckConfigMap     = "robustness-host-ack"
 	RecordsConfigMap = "robustness-records"
 
-	ActionCordon  = "cordon"
-	ActionKill    = "kill"
-	ActionRestart = "restart"
-	ActionDone    = "done"
+	ActionCordon    = "cordon"
+	ActionKill      = "kill"
+	ActionTerminate = "terminate"
+	ActionRestart   = "restart"
+	ActionDone      = "done"
 
 	// B2 host-controller actions. Pause/resume freeze a real member process
 	// externally; partition/heal install and remove external network rules
@@ -59,40 +60,18 @@ type HostAck struct {
 	Error     string `json:"error,omitempty"`
 }
 
-func encodeData(v any) (map[string]string, error) {
-	raw, err := json.Marshal(v)
+func encodeData(req HostRequest) (map[string]string, error) {
+	raw, err := json.Marshal(req)
 	if err != nil {
 		return nil, err
 	}
 	return map[string]string{
 		"payload":     string(raw),
 		"payload_b64": base64.StdEncoding.EncodeToString(raw),
-		"request_id":  fieldString(v, "RequestID"),
-		"action":      fieldString(v, "Action"),
-		"status":      fieldString(v, "Status"),
+		"request_id":  req.RequestID,
+		"action":      req.Action,
+		"status":      "",
 	}, nil
-}
-
-func fieldString(v any, name string) string {
-	switch t := v.(type) {
-	case HostRequest:
-		switch name {
-		case "RequestID":
-			return t.RequestID
-		case "Action":
-			return t.Action
-		}
-	case HostAck:
-		switch name {
-		case "RequestID":
-			return t.RequestID
-		case "Action":
-			return t.Action
-		case "Status":
-			return t.Status
-		}
-	}
-	return ""
 }
 
 func putConfigMap(ctx context.Context, kube *kubernetes.Clientset, ns, name string, data map[string]string) error {

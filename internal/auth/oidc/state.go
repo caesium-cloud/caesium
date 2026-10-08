@@ -2,7 +2,6 @@ package oidc
 
 import (
 	"crypto/hmac"
-	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/base64"
@@ -10,9 +9,10 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"net/url"
 	"strings"
 	"time"
+
+	"github.com/caesium-cloud/caesium/internal/auth/ssostate"
 )
 
 var (
@@ -31,11 +31,11 @@ type loginState struct {
 }
 
 func (p *Provider) newLoginState(returnTo string) (loginState, error) {
-	state, err := randomURLSafe(32)
+	state, err := ssostate.RandomURLSafe(32)
 	if err != nil {
 		return loginState{}, err
 	}
-	nonce, err := randomURLSafe(32)
+	nonce, err := ssostate.RandomURLSafe(32)
 	if err != nil {
 		return loginState{}, err
 	}
@@ -132,55 +132,5 @@ func (p *Provider) signStatePayload(payload []byte) []byte {
 }
 
 func (p *Provider) validateReturnTo(returnTo string) (string, error) {
-	returnTo = strings.TrimSpace(returnTo)
-	if returnTo == "" {
-		return "/", nil
-	}
-	if strings.HasPrefix(returnTo, `\`) || strings.HasPrefix(returnTo, `//`) {
-		return "", ErrInvalidReturnTo
-	}
-
-	u, err := url.Parse(returnTo)
-	if err != nil {
-		return "", fmt.Errorf("%w: %v", ErrInvalidReturnTo, err)
-	}
-	if u.IsAbs() {
-		if !sameOrigin(u, p.publicOrigin) {
-			return "", ErrInvalidReturnTo
-		}
-		return requestURI(u), nil
-	}
-	if u.Host != "" || !strings.HasPrefix(u.Path, "/") {
-		return "", ErrInvalidReturnTo
-	}
-	return requestURI(u), nil
-}
-
-func sameOrigin(a, b *url.URL) bool {
-	if a == nil || b == nil {
-		return false
-	}
-	return strings.EqualFold(a.Scheme, b.Scheme) && strings.EqualFold(a.Host, b.Host)
-}
-
-func requestURI(u *url.URL) string {
-	out := u.EscapedPath()
-	if out == "" {
-		out = "/"
-	}
-	if u.RawQuery != "" {
-		out += "?" + u.RawQuery
-	}
-	if u.Fragment != "" {
-		out += "#" + u.EscapedFragment()
-	}
-	return out
-}
-
-func randomURLSafe(n int) (string, error) {
-	b := make([]byte, n)
-	if _, err := rand.Read(b); err != nil {
-		return "", fmt.Errorf("generate random value: %w", err)
-	}
-	return base64.RawURLEncoding.EncodeToString(b), nil
+	return ssostate.ValidateReturnTo(returnTo, p.publicOrigin, ErrInvalidReturnTo)
 }

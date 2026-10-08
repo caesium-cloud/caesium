@@ -2,7 +2,8 @@ package model
 
 import (
 	"fmt"
-	"sort"
+	"maps"
+	"slices"
 )
 
 // Lease is one run's ownership record: who holds it, until when, and under
@@ -92,11 +93,7 @@ func (t *LeaseTable) RenewOwned(owner string, nowMs, newExpiresAtMs int64) int {
 // row out of the expired set, so the second matches nothing. That is why the
 // model applies the whole sweep atomically rather than per row.
 func (t *LeaseTable) AcquireExpired(newOwner string, nowMs, ttlMs int64) []string {
-	ids := make([]string, 0, len(t.leases))
-	for runID := range t.leases {
-		ids = append(ids, runID)
-	}
-	sort.Strings(ids)
+	ids := slices.Sorted(maps.Keys(t.leases))
 
 	var taken []string
 	for _, runID := range ids {

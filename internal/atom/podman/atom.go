@@ -18,20 +18,14 @@ func (a *Atom) ID() string {
 }
 
 func (a *Atom) State() atom.State {
-	if state, ok := stateMap[a.metadata.State.Status]; ok {
-		return state
-	}
-	return atom.Invalid
+	return atom.ContainerState(a.metadata.State.Status)
 }
 
 func (a *Atom) Result() atom.Result {
 	if env.Variables().ResourceStatsEnabled && a.ResourceOutcome().OOMKilled {
 		return atom.ResourceFailure
 	}
-	if result, ok := resultMap[int(a.metadata.State.ExitCode)]; ok {
-		return result
-	}
-	return atom.Unknown
+	return atom.ResultForExitCode(int(a.metadata.State.ExitCode))
 }
 
 // ExitCode returns the raw Podman container exit code, preserved for the

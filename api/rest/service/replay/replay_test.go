@@ -2,7 +2,6 @@ package replay
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"sync"
 	"testing"
@@ -10,9 +9,12 @@ import (
 
 	iauth "github.com/caesium-cloud/caesium/internal/auth"
 	"github.com/caesium-cloud/caesium/internal/cache"
+	jobrunner "github.com/caesium-cloud/caesium/internal/job"
 	"github.com/caesium-cloud/caesium/internal/jobdef/testutil"
 	"github.com/caesium-cloud/caesium/internal/models"
 	runstorage "github.com/caesium-cloud/caesium/internal/run"
+	"github.com/caesium-cloud/caesium/internal/runlife"
+	fixturejson "github.com/caesium-cloud/caesium/internal/testutil"
 	"github.com/caesium-cloud/caesium/pkg/container"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
@@ -150,7 +152,7 @@ func TestReplayResumesPendingReservation(t *testing.T) {
 
 	dispatcher := &recordingDispatcher{}
 	result, err := (&Service{
-		ctx:        context.Background(),
+		ctx:        replayTestContext(t),
 		store:      store,
 		dispatcher: dispatcher,
 		executionMode: func() string {
@@ -178,7 +180,7 @@ func TestReplayConcurrentIdenticalRequestsReturnSingleReservation(t *testing.T) 
 	f.seedTask(t, true, "success")
 	key := "parallel-retry-key"
 	svc := (&Service{
-		ctx:        context.Background(),
+		ctx:        replayTestContext(t),
 		store:      f.store,
 		dispatcher: &recordingDispatcher{},
 	}).WithExecutionMode("local")
@@ -237,7 +239,7 @@ func TestReplayRetryResumesAfterDispatchFailure(t *testing.T) {
 
 	firstDispatcher := &recordingDispatcher{err: dispatchErr}
 	_, err := (&Service{
-		ctx:        context.Background(),
+		ctx:        replayTestContext(t),
 		store:      f.store,
 		dispatcher: firstDispatcher,
 	}).WithExecutionMode("distributed").Replay(req)
@@ -258,7 +260,7 @@ func TestReplayRetryResumesAfterDispatchFailure(t *testing.T) {
 
 	secondDispatcher := &completingDispatcher{store: f.store}
 	result, err := (&Service{
-		ctx:        context.Background(),
+		ctx:        replayTestContext(t),
 		store:      f.store,
 		dispatcher: secondDispatcher,
 	}).WithExecutionMode("distributed").Replay(req)
@@ -281,7 +283,7 @@ func TestReplayRefusesLocalModeWhenReplayWouldReexecute(t *testing.T) {
 	dispatcher := &recordingDispatcher{}
 
 	_, err := (&Service{
-		ctx:        context.Background(),
+		ctx:        replayTestContext(t),
 		store:      f.store,
 		dispatcher: dispatcher,
 	}).WithExecutionMode("local").Replay(Request{
@@ -338,7 +340,7 @@ func TestReplayExistingUnexpectedNonTerminalStatusIsCorrupt(t *testing.T) {
 
 	dispatcher := &recordingDispatcher{}
 	_, err = (&Service{
-		ctx:        context.Background(),
+		ctx:        replayTestContext(t),
 		store:      f.store,
 		dispatcher: dispatcher,
 	}).WithExecutionMode("distributed").Replay(Request{
@@ -398,7 +400,7 @@ func TestReplayUniqueViolationWithoutFingerprintMatchReturnsInsertError(t *testi
 	require.NoError(t, err)
 
 	_, err = (&Service{
-		ctx:        context.Background(),
+		ctx:        replayTestContext(t),
 		store:      f.store,
 		dispatcher: &recordingDispatcher{},
 	}).WithExecutionMode("local").Replay(Request{
@@ -617,14 +619,128 @@ func (d *completingDispatcher) DispatchReplay(ctx context.Context, runID uuid.UU
 
 func serviceJSON(t *testing.T, v any) datatypes.JSON {
 	t.Helper()
-	data, err := json.Marshal(v)
-	require.NoError(t, err)
-	return datatypes.JSON(data)
+	return datatypes.JSON(fixturejson.MustJSONBytes(t, v))
 }
 
 func serviceJSONString(t *testing.T, v any) string {
 	t.Helper()
-	data, err := json.Marshal(v)
+	return string(fixturejson.MustJSONBytes(t, v))
+}
+
+func replayTestContext(t *testing.T) context.Context {
+	t.Helper()
+	owner := runlife.New(context.Background())
+	t.Cleanup(func() {
+		owner.CloseAndCancel()
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		require.NoError(t, owner.Wait(ctx))
+	})
+	return runlife.WithSupervisor(t.Context(), owner)
+}
+
+func TestReplayRefusesOwnerBeforeMaterialization(t *testing.T) {
+	f := newServiceReplayFixture(t)
+	owner := runlife.New(context.Background())
+	owner.CloseAndCancel()
+	for _, ctx := range []context.Context{context.Background(), runlife.WithSupervisor(context.Background(), owner)} {
+		dispatcher := &recordingDispatcher{}
+		svc := &Service{ctx: ctx, store: f.store, dispatcher: dispatcher}
+		result, err := svc.Replay(Request{JobID: f.jobID, BaselineRunID: f.runID, IdempotencyKey: "key"})
+		require.Nil(t, result)
+		require.True(t, errors.Is(err, runlife.ErrMissing) || errors.Is(err, runlife.ErrClosed))
+		require.Empty(t, dispatcher.calls)
+	}
+	var count int64
+	require.NoError(t, f.db.Model(&models.JobRun{}).Where("replay_fingerprint IS NOT NULL").Count(&count).Error)
+	require.Zero(t, count, "an idempotency lookup is permitted, but new replay materialization is refused")
+}
+
+func TestReplayExistingWithoutPendingWorkDoesNotRequireAdmission(t *testing.T) {
+	f := newServiceReplayFixture(t)
+	f.seedTask(t, true, "success")
+	request := Request{JobID: f.jobID, BaselineRunID: f.runID, IdempotencyKey: "existing-without-work", Principal: f.principal}
+	dispatcher := &recordingDispatcher{}
+	first, err := (&Service{ctx: replayTestContext(t), store: f.store, dispatcher: dispatcher}).WithExecutionMode("distributed").Replay(request)
 	require.NoError(t, err)
-	return string(data)
+	dispatchCalls := len(dispatcher.calls)
+	// Materialized work has finished. A same-key read does not launch anything.
+	require.NoError(t, f.db.Model(&models.TaskRun{}).Where("job_run_id = ?", first.Run.ID).Update("status", string(runstorage.TaskStatusSucceeded)).Error)
+	for _, status := range []runstorage.Status{runstorage.StatusRunning, runstorage.StatusSucceeded} {
+		require.NoError(t, f.db.Model(&models.JobRun{}).Where("id = ?", first.Run.ID).Update("status", string(status)).Error)
+		owner := runlife.New(context.Background())
+		owner.CloseAndCancel()
+		for _, ctx := range []context.Context{context.Background(), runlife.WithSupervisor(context.Background(), owner)} {
+			result, err := (&Service{ctx: ctx, store: f.store, dispatcher: dispatcher}).WithExecutionMode("distributed").Replay(request)
+			require.NoError(t, err)
+			require.True(t, result.Existing)
+			require.Equal(t, first.Run.ID, result.Run.ID)
+		}
+	}
+	require.Len(t, dispatcher.calls, dispatchCalls, "same-key metadata reads must not redispatch")
+}
+
+func TestReplayExistingPendingWorkStillRequiresAdmission(t *testing.T) {
+	f := newServiceReplayFixture(t)
+	f.seedTask(t, true, "success")
+	request := Request{JobID: f.jobID, BaselineRunID: f.runID, IdempotencyKey: "existing-pending", Principal: f.principal, Set: map[string]string{"mode": "what-if"}}
+	dispatcher := &recordingDispatcher{err: errors.New("dispatch unavailable")}
+	_, err := (&Service{ctx: replayTestContext(t), store: f.store, dispatcher: dispatcher}).WithExecutionMode("distributed").Replay(request)
+	require.ErrorIs(t, err, dispatcher.err)
+	require.Len(t, dispatcher.calls, 1)
+	owner := runlife.New(context.Background())
+	owner.CloseAndCancel()
+	result, err := (&Service{ctx: runlife.WithSupervisor(t.Context(), owner), store: f.store, dispatcher: dispatcher}).WithExecutionMode("distributed").Replay(request)
+	require.Nil(t, result)
+	require.ErrorIs(t, err, runlife.ErrClosed)
+	require.Len(t, dispatcher.calls, 1, "closed admission must not redispatch the existing pending run")
+}
+func TestAsyncDispatcherFailureReleasesOwnerAndRunRegistration(t *testing.T) {
+	f := newServiceReplayFixture(t)
+	ctx := replayTestContext(t)
+	owner := runlife.FromContext(ctx)
+	runID := uuid.New()
+	err := NewAsyncDispatcher(f.store).DispatchReplay(ctx, runID)
+	require.ErrorIs(t, err, gorm.ErrRecordNotFound)
+	require.Zero(t, jobrunner.CancelRunContexts(runID))
+	owner.CloseAndCancel()
+	require.NoError(t, owner.Wait(context.Background()))
+}
+
+func TestReplayTransfersReservationThroughMaterializationToExecution(t *testing.T) {
+	f := newServiceReplayFixture(t)
+	f.seedTask(t, true, "success")
+	type key struct{}
+	owner := runlife.New(context.Background())
+	request, cancelRequest := context.WithCancel(runlife.WithSupervisor(context.WithValue(context.Background(), key{}, "value"), owner))
+	defer cancelRequest()
+	oldExecute := replayExecution
+	t.Cleanup(func() { replayExecution = oldExecute })
+	started := make(chan context.Context, 1)
+	finish := make(chan struct{})
+	replayExecution = func(ctx context.Context, j *models.Job, store *runstorage.Store) error {
+		started <- ctx
+		<-finish
+		return nil
+	}
+	svc := (&Service{ctx: request, store: f.store, dispatcher: NewAsyncDispatcher(f.store)}).WithExecutionMode("distributed")
+	result, err := svc.Replay(Request{JobID: f.jobID, BaselineRunID: f.runID, Set: map[string]string{"mode": "what-if"}, IdempotencyKey: "owned-replay", Principal: f.principal})
+	require.NoError(t, err)
+	require.True(t, result.Run.Quarantine)
+	running := <-started
+	cancelRequest()
+	require.NoError(t, running.Err())
+	require.Equal(t, "value", running.Value(key{}))
+	id, ok := runstorage.FromContext(running)
+	require.True(t, ok)
+	require.Equal(t, result.Run.ID, id)
+	require.Equal(t, 1, jobrunner.CancelRunContexts(id))
+	require.ErrorIs(t, running.Err(), context.Canceled)
+	owner.CloseAndCancel()
+	expired, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer cancel()
+	require.ErrorIs(t, owner.Wait(expired), context.DeadlineExceeded)
+	close(finish)
+	require.NoError(t, owner.Wait(context.Background()))
+	require.Zero(t, jobrunner.CancelRunContexts(id))
 }

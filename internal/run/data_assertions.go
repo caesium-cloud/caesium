@@ -152,8 +152,8 @@ func DataAssertionsEnabled() bool {
 // claim decides WHETHER this attempt may record anything at all. A stale claim
 // stops the evaluation outright — `unavailable` verdicts included, because a
 // verdict nothing may act on is a verdict nothing should count.
-func EvaluateDataAssertions(store *Store, runID, taskID, taskRunID uuid.UUID, capture MetricsCapture) error {
-	return EvaluateDataAssertionsClaimed(store, runID, taskID, taskRunID, nil, capture)
+func EvaluateDataAssertions(ctx context.Context, store *Store, runID, taskID, taskRunID uuid.UUID, capture MetricsCapture) error {
+	return EvaluateDataAssertionsClaimed(ctx, store, runID, taskID, taskRunID, nil, capture)
 }
 
 // EvaluateDataAssertionsClaimed is the same seam for a caller that HOLDS A
@@ -170,9 +170,19 @@ func EvaluateDataAssertions(store *Store, runID, taskID, taskRunID uuid.UUID, ca
 //
 // A nil claim is exactly EvaluateDataAssertions: the local executor
 // (internal/job, enforceClaim=false) holds no claim and cannot be superseded.
-func EvaluateDataAssertionsClaimed(store *Store, runID, taskID, taskRunID uuid.UUID, claim *TaskClaim, capture MetricsCapture) error {
+func EvaluateDataAssertionsClaimed(ctx context.Context, store *Store, runID, taskID, taskRunID uuid.UUID, claim *TaskClaim, capture MetricsCapture) (result error) {
 	if !DataAssertionsEnabled() {
 		return nil
+	}
+	// A canceled read or write cannot stand in for an evaluated assertion.
+	// Preserve its exact cause even on the shell's best-effort nil paths.
+	defer func() {
+		if result == nil && ctx.Err() != nil {
+			result = context.Cause(ctx)
+		}
+	}()
+	if cause := context.Cause(ctx); cause != nil {
+		return cause
 	}
 	if store == nil || store.db == nil {
 		return nil
@@ -183,7 +193,7 @@ func EvaluateDataAssertionsClaimed(store *Store, runID, taskID, taskRunID uuid.U
 	if ref == uuid.Nil {
 		ref = taskID
 	}
-	row, err := loadTaskRunByIDOrUnique(store.db, runID, ref)
+	row, err := loadTaskRunByIDOrUnique(store.db.WithContext(ctx), runID, ref)
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil
@@ -199,7 +209,6 @@ func EvaluateDataAssertionsClaimed(store *Store, runID, taskID, taskRunID uuid.U
 		return nil
 	}
 
-	ctx := context.Background()
 	declarations, err := producedDatasetDeclarations(ctx, store.db, row.TaskID)
 	if err != nil {
 		log.Warn("failed to load declared datasets for metric attribution", "task_id", row.TaskID, "error", err)
@@ -910,7 +919,7 @@ func dispatchDataAssertions(
 		return nil
 	}
 
-	written, err := store.saveDataViolationsClaimed(runID, row.ID, claim, recorded)
+	written, err := store.saveDataViolationsClaimed(ctx, runID, row.ID, claim, recorded)
 	if err != nil {
 		log.Warn("failed to persist data violations", "run_id", runID, "task_id", taskID, "error", err)
 	}

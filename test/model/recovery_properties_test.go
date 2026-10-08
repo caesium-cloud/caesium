@@ -2,6 +2,7 @@ package model_test
 
 import (
 	"reflect"
+	"slices"
 	"testing"
 
 	"github.com/caesium-cloud/caesium/test/model"
@@ -41,12 +42,7 @@ func drivePrefix(t *rapid.T, run *model.Run, steps int) []model.Snapshot {
 }
 
 func containsID(ids []model.InstanceID, want model.InstanceID) bool {
-	for _, id := range ids {
-		if id == want {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(ids, want)
 }
 
 func terminalStatuses(run *model.Run, dag model.DAG) map[model.InstanceID]model.TaskStatus {

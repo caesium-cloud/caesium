@@ -1,8 +1,9 @@
 package model
 
 import (
+	"cmp"
 	"fmt"
-	"sort"
+	"slices"
 )
 
 // Event is one persisted execution event.
@@ -154,7 +155,7 @@ func CheckDelivery(store *EventStore, sub *Subscriber, resumeCursor int64) error
 	}
 
 	all := store.Persisted()
-	sort.SliceStable(all, func(i, j int) bool { return all[i].Sequence < all[j].Sequence })
+	slices.SortStableFunc(all, func(a, b Event) int { return cmp.Compare(a.Sequence, b.Sequence) })
 	for i, e := range all {
 		if e.Sequence != int64(i+1) {
 			return fmt.Errorf("model: persisted sequence is not dense: position %d holds %d", i+1, e.Sequence)

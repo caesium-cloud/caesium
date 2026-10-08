@@ -22,6 +22,7 @@ var (
 
 var retryCallbacksCmd = &cobra.Command{
 	Use:   "retry-callbacks",
+	Args:  cobra.NoArgs,
 	Short: "Retry failed callbacks for a job run",
 	Long: "Retry failed callbacks for a completed job run. Only callbacks that previously failed will be re-run.\n\n" +
 		"Passing --server explicitly routes the request through the REST API " +

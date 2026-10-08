@@ -78,22 +78,352 @@ func (m Migrator) HasColumn(value any, name string) bool {
 
 func (m Migrator) AlterColumn(value any, name string) error {
 	return m.RunWithoutForeignKey(func() error {
-		return m.recreateTable(value, nil, func(rawDDL string, stmt *gorm.Statement) (sql string, sqlArgs []any, err error) {
-			if field := stmt.Schema.LookUpField(name); field != nil {
-				reg, err := regexp.Compile("(`|'|\"| )" + field.DBName + "(`|'|\"| ) .*?,")
-				if err != nil {
-					return "", nil, err
-				}
-
-				createSQL := reg.ReplaceAllString(rawDDL, fmt.Sprintf("`%v` ?,", field.DBName))
-
-				return createSQL, []any{m.FullDataTypeOf(field)}, nil
-
-			} else {
+		return m.recreateTablePreservingIndexes(value, nil, func(rawDDL string, stmt *gorm.Statement) (string, []any, error) {
+			field := stmt.Schema.LookUpField(name)
+			if field == nil {
 				return "", nil, fmt.Errorf("failed to alter field with name %v", name)
 			}
+			// FullDataTypeOf renders defaults using the dialector, rather than leaving
+			// bind arguments. No placeholder is needed in persisted table DDL.
+			dataType := m.FullDataTypeOf(field)
+			if len(dataType.Vars) != 0 {
+				return "", nil, fmt.Errorf("alter field %s: unexpected type arguments", name)
+			}
+			sql, err := alterColumnDDL(rawDDL, field.DBName, dataType.SQL)
+			return sql, nil, err
 		})
 	})
+}
+
+// ddlTokens retains byte offsets, including quoted values and parenthesized
+// expressions. Unlike a comma regexp, it cannot consume another column or
+// split a default/check expression. Unsupported or unbalanced input fails closed.
+type ddlToken struct {
+	text       string
+	start, end int
+}
+
+func ddlTokens(sql string) ([]ddlToken, error) {
+	var tokens []ddlToken
+	for i := 0; i < len(sql); {
+		if strings.ContainsRune(" \t\r\n", rune(sql[i])) {
+			i++
+			continue
+		}
+		start, depth, quote := i, 0, byte(0)
+		grouped := sql[i] == '(' || strings.ContainsRune("'\"`[", rune(sql[i]))
+		for ; i < len(sql); i++ {
+			c := sql[i]
+			if quote != 0 {
+				if c == quote {
+					if i+1 < len(sql) && sql[i+1] == quote {
+						i++
+						continue
+					}
+					quote = 0
+					if depth == 0 {
+						i++
+						break
+					}
+				}
+				continue
+			}
+			if depth == 0 && i > start && (strings.ContainsRune(" \t\r\n('\"`[", rune(c))) {
+				break
+			}
+			switch c {
+			case '\'', '"', '`':
+				quote = c
+			case '[':
+				quote = ']'
+			case '(':
+				depth++
+			case ')':
+				depth--
+				if depth < 0 {
+					return nil, fmt.Errorf("invalid DDL: unbalanced parentheses")
+				}
+				if grouped && depth == 0 {
+					i++
+					goto tokenDone
+				}
+			case ',', ';':
+				if depth == 0 {
+					return nil, fmt.Errorf("invalid DDL: unexpected separator")
+				}
+			}
+		}
+	tokenDone:
+		if quote != 0 || depth != 0 {
+			return nil, fmt.Errorf("invalid DDL: unfinished expression")
+		}
+		tokens = append(tokens, ddlToken{sql[start:i], start, i})
+	}
+	return tokens, nil
+}
+
+func ddlIdentifier(token string) string {
+	if len(token) >= 2 {
+		q := token[0]
+		if q == '`' || q == '"' || q == '\'' || q == '[' {
+			end := q
+			if q == '[' {
+				end = ']'
+			}
+			if token[len(token)-1] == end {
+				return strings.ReplaceAll(token[1:len(token)-1], string(end)+string(end), string(end))
+			}
+		}
+	}
+	return token
+}
+
+func splitAlterDDL(raw string) (fields []string, open, closeAt int, err error) {
+	// parseDDL validates the CREATE TABLE header. Split the original bytes as
+	// well: its normalized fields cannot retain escaped string literals verbatim.
+	if _, err := parseDDL(raw); err != nil {
+		return nil, 0, 0, err
+	}
+	open = strings.IndexByte(raw, '(')
+	if open < 0 {
+		return nil, 0, 0, fmt.Errorf("invalid DDL: missing table body")
+	}
+	header, err := ddlTokens(raw[:open])
+	if err != nil || len(header) != 3 || !strings.EqualFold(header[0].text, "CREATE") || !strings.EqualFold(header[1].text, "TABLE") {
+		return nil, 0, 0, fmt.Errorf("invalid DDL: table header")
+	}
+	depth, quote, start := 1, byte(0), open+1
+	closeAt = -1
+	for i := open + 1; i < len(raw); i++ {
+		c := raw[i]
+		if quote != 0 {
+			if c == quote {
+				if i+1 < len(raw) && raw[i+1] == quote {
+					i++
+					continue
+				}
+				quote = 0
+			}
+			continue
+		}
+		switch c {
+		case '\'', '"', '`':
+			quote = c
+		case '[':
+			quote = ']'
+		case '(':
+			depth++
+		case ')':
+			depth--
+			if depth == 0 {
+				fields = append(fields, raw[start:i])
+				closeAt = i
+			}
+		case ',':
+			if depth == 1 {
+				fields = append(fields, raw[start:i])
+				start = i + 1
+			}
+		}
+		if closeAt >= 0 {
+			break
+		}
+	}
+	if closeAt < 0 || quote != 0 {
+		return nil, 0, 0, fmt.Errorf("invalid DDL: unfinished table body")
+	}
+	tail := strings.TrimSpace(raw[closeAt+1:])
+	if tail != "" && !strings.EqualFold(tail, "WITHOUT ROWID") && !strings.EqualFold(tail, "STRICT") {
+		return nil, 0, 0, fmt.Errorf("invalid DDL: unsupported table suffix")
+	}
+	return fields, open, closeAt, nil
+}
+
+func alterColumnDDL(raw, name, dataType string) (string, error) {
+	fields, open, closeAt, err := splitAlterDDL(raw)
+	if err != nil {
+		return "", err
+	}
+	found := -1
+	for i, definition := range fields {
+		tokens, err := ddlTokens(definition)
+		if err != nil {
+			return "", fmt.Errorf("invalid DDL field: %w", err)
+		}
+		if len(tokens) == 0 {
+			return "", fmt.Errorf("invalid DDL: empty field")
+		}
+		if !strings.EqualFold(ddlIdentifier(tokens[0].text), name) {
+			continue
+		}
+		if found >= 0 {
+			return "", fmt.Errorf("ambiguous DDL field %s", name)
+		}
+		found = i
+		suffix, err := retainedColumnConstraints(definition, tokens)
+		if err != nil {
+			return "", fmt.Errorf("alter field %s: %w", name, err)
+		}
+		fields[i] = tokens[0].text + " " + dataType + suffix
+	}
+	if found < 0 {
+		return "", fmt.Errorf("missing DDL field %s", name)
+	}
+	return raw[:open+1] + strings.Join(fields, ",") + raw[closeAt:], nil
+}
+
+func retainedColumnConstraints(definition string, tokens []ddlToken) (string, error) {
+	suffix, _, err := columnConstraints(definition, tokens)
+	return suffix, err
+}
+
+// Generated-column identity comes from the parsed constraint, never a token
+// appearing as a DEFAULT value, collation, reference or constraint name.
+func columnConstraints(definition string, tokens []ddlToken) (string, bool, error) {
+	upper := func(i int) string {
+		if i >= len(tokens) {
+			return ""
+		}
+		return strings.ToUpper(tokens[i].text)
+	}
+	isConstraint := func(word string) bool {
+		switch word {
+		case "CONSTRAINT", "PRIMARY", "NOT", "NULL", "UNIQUE", "CHECK", "DEFAULT", "COLLATE", "REFERENCES", "GENERATED", "AS":
+			return true
+		}
+		return false
+	}
+	i := 1
+	for i < len(tokens) && !isConstraint(upper(i)) {
+		i++
+	}
+	if i == 1 {
+		return "", false, fmt.Errorf("missing column type")
+	}
+	var retained strings.Builder
+	generated := false
+	for i < len(tokens) {
+		start, keep := i, true
+		if upper(i) == "CONSTRAINT" {
+			i += 2
+			if i >= len(tokens) {
+				return "", false, fmt.Errorf("unfinished named constraint")
+			}
+		}
+		switch upper(i) {
+		case "NOT":
+			if upper(i+1) != "NULL" {
+				return "", false, fmt.Errorf("unsupported NOT constraint")
+			}
+			i += 2
+			keep = false
+		case "NULL":
+			i++
+			keep = false
+		case "DEFAULT":
+			i++
+			if i < len(tokens) && (upper(i) == "+" || upper(i) == "-") {
+				i++
+			}
+			i++
+			keep = false
+		case "PRIMARY":
+			if upper(i+1) != "KEY" {
+				return "", false, fmt.Errorf("unfinished primary key")
+			}
+			i += 2
+			if upper(i) == "ASC" || upper(i) == "DESC" {
+				i++
+			}
+		case "UNIQUE":
+			i++
+		case "CHECK":
+			i++
+			if i >= len(tokens) || !strings.HasPrefix(tokens[i].text, "(") {
+				return "", false, fmt.Errorf("unfinished CHECK")
+			}
+			i++
+		case "COLLATE":
+			i += 2
+		case "REFERENCES":
+			i += 2
+			if i < len(tokens) && strings.HasPrefix(tokens[i].text, "(") {
+				i++
+			}
+			for {
+				switch upper(i) {
+				case "ON":
+					if upper(i+1) != "DELETE" && upper(i+1) != "UPDATE" {
+						return "", false, fmt.Errorf("invalid reference action")
+					}
+					i += 2
+					switch upper(i) {
+					case "SET":
+						i += 2
+					case "NO":
+						if upper(i+1) != "ACTION" {
+							return "", false, fmt.Errorf("invalid reference action")
+						}
+						i += 2
+					case "CASCADE", "RESTRICT":
+						i++
+					default:
+						return "", false, fmt.Errorf("invalid reference action")
+					}
+				case "MATCH":
+					i += 2
+				case "NOT":
+					if upper(i+1) != "DEFERRABLE" {
+						goto referenceDone
+					}
+					i += 2
+				case "DEFERRABLE":
+					i++
+				case "INITIALLY":
+					i += 2
+				default:
+					goto referenceDone
+				}
+			}
+		referenceDone:
+			;
+		case "GENERATED", "AS":
+			if upper(i) == "GENERATED" {
+				i++
+				if upper(i) == "ALWAYS" {
+					i++
+				}
+			}
+			if upper(i) != "AS" {
+				return "", false, fmt.Errorf("invalid generated constraint")
+			}
+			i++
+			if i >= len(tokens) || !strings.HasPrefix(tokens[i].text, "(") {
+				return "", false, fmt.Errorf("invalid generated expression")
+			}
+			i++
+			if upper(i) == "STORED" || upper(i) == "VIRTUAL" {
+				i++
+			}
+			generated = true
+		default:
+			return "", false, fmt.Errorf("unsupported column constraint %s", upper(i))
+		}
+		if upper(i) == "ON" && upper(i+1) == "CONFLICT" {
+			i += 3
+		}
+		if upper(i) == "AUTOINCREMENT" {
+			i++
+		}
+		if i > len(tokens) {
+			return "", false, fmt.Errorf("unfinished column constraint")
+		}
+		if keep {
+			retained.WriteByte(' ')
+			retained.WriteString(definition[tokens[start].start:tokens[i-1].end])
+		}
+	}
+	return retained.String(), generated, nil
 }
 
 func (m Migrator) DropColumn(value any, name string) error {
@@ -352,6 +682,16 @@ func (m Migrator) getRawDDL(table string) (string, error) {
 
 func (m Migrator) recreateTable(value any, tablePtr *string,
 	getCreateSQL func(rawDDL string, stmt *gorm.Statement) (sql string, sqlArgs []any, err error)) error {
+	return m.recreateTableWithIndexes(value, tablePtr, getCreateSQL, false)
+}
+
+func (m Migrator) recreateTablePreservingIndexes(value any, tablePtr *string,
+	getCreateSQL func(string, *gorm.Statement) (string, []any, error)) error {
+	return m.recreateTableWithIndexes(value, tablePtr, getCreateSQL, true)
+}
+
+func (m Migrator) recreateTableWithIndexes(value any, tablePtr *string,
+	getCreateSQL func(string, *gorm.Statement) (string, []any, error), preserveIndexes bool) error {
 	return m.RunWithValue(value, func(stmt *gorm.Statement) error {
 		table := stmt.Table
 		if tablePtr != nil {
@@ -373,21 +713,69 @@ func (m Migrator) recreateTable(value any, tablePtr *string,
 			return nil
 		}
 
-		tableReg, err := regexp.Compile(" ('|`|\"| )" + table + "('|`|\"| ) ")
-		if err != nil {
-			return err
+		if preserveIndexes {
+			_, open, _, err := splitAlterDDL(createSQL)
+			if err != nil {
+				return err
+			}
+			header, err := ddlTokens(createSQL[:open])
+			if err != nil || len(header) != 3 || !strings.EqualFold(ddlIdentifier(header[2].text), table) {
+				return fmt.Errorf("invalid DDL: table name does not match %s", table)
+			}
+			createSQL = "CREATE TABLE " + stmt.Quote(newTableName) + " " + createSQL[open:]
+		} else {
+			tableReg, err := regexp.Compile(" ('|`|\"| )" + table + "('|`|\"| ) ")
+			if err != nil {
+				return err
+			}
+			createSQL = tableReg.ReplaceAllString(createSQL, fmt.Sprintf(" `%v` ", newTableName))
 		}
-		createSQL = tableReg.ReplaceAllString(createSQL, fmt.Sprintf(" `%v` ", newTableName))
 
 		createDDL, err := parseDDL(createSQL)
 		if err != nil {
 			return err
 		}
 		columns := createDDL.getColumns()
+		if preserveIndexes {
+			columns = nil
+			fields, _, _, err := splitAlterDDL(createSQL)
+			if err != nil {
+				return err
+			}
+			for _, definition := range fields {
+				tokens, err := ddlTokens(definition)
+				if err != nil || len(tokens) == 0 {
+					return fmt.Errorf("invalid copy column definition %q", definition)
+				}
+				switch strings.ToUpper(tokens[0].text) {
+				case "PRIMARY", "UNIQUE", "CHECK", "CONSTRAINT", "FOREIGN":
+					continue
+				}
+				_, generated, err := columnConstraints(definition, tokens)
+				if err != nil {
+					return fmt.Errorf("invalid copy column definition: %w", err)
+				}
+				if !generated {
+					columns = append(columns, stmt.Quote(ddlIdentifier(tokens[0].text)))
+				}
+			}
+		}
 
 		return m.DB.Transaction(func(tx *gorm.DB) error {
+			// BeginTx is deferred: reserve the write before reading index metadata.
+			// A read-first snapshot can no longer be upgraded after a peer commits.
+			// Keep index capture inside this same transaction, before dropping the
+			// original table, so restoration still uses one atomic schema snapshot.
 			if err := tx.Exec(createSQL, sqlArgs...).Error; err != nil {
 				return err
+			}
+			var indexes []string
+			if preserveIndexes {
+				// Automatic indexes belong to constraints in CREATE TABLE. Only
+				// explicitly created indexes have SQL that must be replayed.
+				if err := tx.Raw("SELECT sql FROM sqlite_master WHERE type = 'index' AND tbl_name = ? AND sql IS NOT NULL ORDER BY name", table).Scan(&indexes).Error; err != nil {
+					return err
+				}
 			}
 
 			queries := []string{
@@ -395,6 +783,7 @@ func (m Migrator) recreateTable(value any, tablePtr *string,
 				fmt.Sprintf("DROP TABLE `%v`", table),
 				fmt.Sprintf("ALTER TABLE `%v` RENAME TO `%v`", newTableName, table),
 			}
+			queries = append(queries, indexes...)
 			for _, query := range queries {
 				if err := tx.Exec(query).Error; err != nil {
 					return err

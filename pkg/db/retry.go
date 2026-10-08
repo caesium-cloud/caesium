@@ -3,10 +3,12 @@ package db
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"io"
 	"math/rand/v2"
 	"time"
 
+	"github.com/caesium-cloud/caesium/internal/dbretry"
 	"github.com/caesium-cloud/caesium/internal/metrics"
 	"github.com/caesium-cloud/caesium/pkg/dqlite"
 	"gorm.io/gorm"
@@ -43,23 +45,20 @@ func Transaction(ctx context.Context, fn func(tx *gorm.DB) error) error {
 }
 
 func transaction(ctx context.Context, conn *gorm.DB, fn func(tx *gorm.DB) error) error {
+	return transactionWithPolicy(ctx, conn, busyRetryPolicy(BusyRetryBackoffs, sleepRetry), fn)
+}
+
+func transactionWithPolicy(ctx context.Context, conn *gorm.DB, policy dbretry.Policy, fn func(tx *gorm.DB) error) error {
 	conn = conn.WithContext(ctx)
-	var err error
-	for attempt := 0; ; attempt++ {
-		err = conn.Transaction(fn)
-		if err == nil || !dqlite.IsContentionError(err) {
-			return err
-		}
-		if attempt >= len(BusyRetryBackoffs) {
-			return err
-		}
-		metrics.DBBusyRetriesTotal.Inc()
-		if sleepErr := sleepRetry(ctx, BusyRetryBackoffs[attempt]); sleepErr != nil {
-			// Context cancelled/timed out during backoff: surface that, not the
-			// contention error, so callers see context.Canceled/DeadlineExceeded
-			// rather than a misleading DB failure.
-			return sleepErr
-		}
+	return dbretry.Retry(ctx, policy, func() error { return conn.Transaction(fn) })
+}
+
+func busyRetryPolicy(backoffs []time.Duration, wait func(context.Context, time.Duration) error) dbretry.Policy {
+	return dbretry.Policy{
+		Backoffs:  backoffs,
+		Retryable: dqlite.IsContentionError,
+		Wait:      wait,
+		OnRetry:   func(error) { metrics.DBBusyRetriesTotal.Inc() },
 	}
 }
 
@@ -86,6 +85,7 @@ func transaction(ctx context.Context, conn *gorm.DB, fn func(tx *gorm.DB) error)
 type retryConnPool struct {
 	pool     gorm.ConnPool
 	backoffs []time.Duration
+	wait     func(context.Context, time.Duration) error
 }
 
 // Compile-time assertions that the decorator satisfies the interfaces GORM
@@ -97,28 +97,28 @@ var (
 )
 
 func newRetryConnPool(pool gorm.ConnPool) *retryConnPool {
-	return &retryConnPool{pool: pool, backoffs: BusyRetryBackoffs}
+	return &retryConnPool{pool: pool, backoffs: BusyRetryBackoffs, wait: sleepRetry}
 }
 
 // retry runs fn, retrying on transient contention with bounded backoff+jitter.
 // Non-contention errors (including sql.ErrNoRows / gorm.ErrRecordNotFound,
 // which are not contention) return immediately.
 func (p *retryConnPool) retry(ctx context.Context, fn func() error) error {
-	var err error
-	for attempt := 0; ; attempt++ {
-		err = fn()
-		if err == nil || !dqlite.IsContentionError(err) {
-			return err
+	var lastContention error
+	err := dbretry.Retry(ctx, busyRetryPolicy(p.backoffs, p.wait), func() error {
+		err := fn()
+		if dqlite.IsContentionError(err) {
+			lastContention = err
 		}
-		if attempt >= len(p.backoffs) {
-			return err
-		}
-
-		metrics.DBBusyRetriesTotal.Inc()
-		if sleepErr := sleepRetry(ctx, p.backoffs[attempt]); sleepErr != nil {
-			return err
-		}
+		return err
+	})
+	// A canceled backoff must remain classifiable both as cancellation and as
+	// the contention that exhausted this operation's progress. Otherwise callers
+	// lose their retryable/503 classification precisely when their budget ends.
+	if lastContention != nil && (errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)) {
+		return errors.Join(lastContention, err)
 	}
+	return err
 }
 
 func (p *retryConnPool) PrepareContext(ctx context.Context, query string) (*sql.Stmt, error) {
@@ -278,11 +278,11 @@ func (retryPlugin) Initialize(db *gorm.DB) error {
 // "database is locked" errors; one writer makes them wait instead.
 //
 // Autocommit reads (QueryContext/QueryRowContext) go to the read pool;
-// ExecContext, transactions (BeginTx), and prepared statements go to the write
-// pool. A transaction may write, so it must hold the single write connection;
-// reads issued inside that transaction run on its own connection, and other
-// goroutines' reads use the read pool — so no goroutine needs two connections
-// from one pool, avoiding the single-connection deadlock.
+// ReadOnly transactions also use the read pool. ExecContext, writable
+// transactions, and prepared statements use the write pool. Reads issued inside
+// a transaction run on its own connection, and other goroutines' reads use the
+// read pool — so no goroutine needs two connections from one pool, avoiding the
+// single-connection deadlock.
 type rwSplitConnPool struct {
 	write *retryConnPool
 	read  *retryConnPool
@@ -319,6 +319,11 @@ func (p *rwSplitConnPool) PrepareContext(ctx context.Context, query string) (*sq
 }
 
 func (p *rwSplitConnPool) BeginTx(ctx context.Context, opts *sql.TxOptions) (*sql.Tx, error) {
+	if opts != nil && opts.ReadOnly {
+		// Keep snapshot reads away from the single serialized writer. Returning
+		// the raw transaction still bypasses per-statement retry in either pool.
+		return p.read.BeginTx(ctx, opts)
+	}
 	return p.write.BeginTx(ctx, opts)
 }
 

@@ -15,41 +15,12 @@ const (
 )
 
 type BusDispatcher struct {
-	store    *Store
-	bus      Bus
-	interval time.Duration
-	batch    int
+	store *Store
+	bus   Bus
 }
 
-type BusDispatcherOption func(*BusDispatcher)
-
-func WithBusDispatcherInterval(interval time.Duration) BusDispatcherOption {
-	return func(d *BusDispatcher) {
-		if interval > 0 {
-			d.interval = interval
-		}
-	}
-}
-
-func WithBusDispatcherBatchSize(batch int) BusDispatcherOption {
-	return func(d *BusDispatcher) {
-		if batch > 0 {
-			d.batch = batch
-		}
-	}
-}
-
-func NewBusDispatcher(store *Store, bus Bus, opts ...BusDispatcherOption) *BusDispatcher {
-	d := &BusDispatcher{
-		store:    store,
-		bus:      bus,
-		interval: defaultBusDispatchPollInterval,
-		batch:    defaultBusDispatchBatchSize,
-	}
-	for _, opt := range opts {
-		opt(d)
-	}
-	return d
+func NewBusDispatcher(store *Store, bus Bus) *BusDispatcher {
+	return &BusDispatcher{store: store, bus: bus}
 }
 
 func (d *BusDispatcher) Start(ctx context.Context) error {
@@ -57,7 +28,7 @@ func (d *BusDispatcher) Start(ctx context.Context) error {
 		return nil
 	}
 
-	ticker := time.NewTicker(d.interval)
+	ticker := time.NewTicker(defaultBusDispatchPollInterval)
 	defer ticker.Stop()
 
 	for {
@@ -81,7 +52,7 @@ func (d *BusDispatcher) DispatchOnce(ctx context.Context) error {
 		return nil
 	}
 
-	events, err := d.store.ListPendingBusDispatch(ctx, d.batch)
+	events, err := d.store.ListPendingBusDispatch(ctx, defaultBusDispatchBatchSize)
 	if err != nil {
 		return err
 	}

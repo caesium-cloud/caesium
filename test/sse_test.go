@@ -102,19 +102,33 @@ func (s *IntegrationTestSuite) TestSSEStream() {
 	// Give the subscription a moment to establish
 	time.Sleep(1 * time.Second)
 
-	// 2. Create a job to trigger events
+	// 2. Observe an unrelated real run event before creating the target job.
+	unrelatedAlias := fmt.Sprintf("sse-unrelated-job-%d", time.Now().UnixNano())
+	unrelatedJob := s.createJob(unrelatedAlias, nil)
+	assert.NotNil(s.T(), unrelatedJob)
+	unrelatedRunID := uuid.MustParse(s.triggerRun(unrelatedJob.ID.String()))
+	unrelatedTimeout := time.After(20 * time.Second)
+	unrelatedObserved := false
+	for !unrelatedObserved {
+		select {
+		case evt := <-eventChan:
+			if evt.Type == event.TypeRunStarted && evt.RunID == unrelatedRunID {
+				unrelatedObserved = true
+			}
+		case err := <-errChan:
+			s.T().Fatalf("SSE stream error before target run: %v", err)
+		case <-unrelatedTimeout:
+			s.T().Fatalf("unrelated run_started event %s was not observed", unrelatedRunID)
+		}
+	}
+	assert.True(s.T(), unrelatedObserved, "the global SSE stream must deliver the unrelated run")
+
+	// 3. Create and trigger the target run.
 	alias := fmt.Sprintf("sse-test-job-%d", time.Now().UnixNano())
 	job := s.createJob(alias, nil)
 	assert.NotNil(s.T(), job)
 
-	// 3. Trigger a run
-	triggerURL := fmt.Sprintf("%v/v1/jobs/%s/run", s.caesiumURL, job.ID)
-	triggerResp, err := s.doJSONRequest(http.MethodPost, triggerURL, nil)
-	assert.Nil(s.T(), err)
-	if triggerResp != nil && triggerResp.Body != nil {
-		defer func() { _ = triggerResp.Body.Close() }()
-	}
-	assert.Equal(s.T(), http.StatusAccepted, triggerResp.StatusCode)
+	runID := uuid.MustParse(s.triggerRun(job.ID.String()))
 
 	// 4. Verify events
 	timeout := time.After(20 * time.Second)
@@ -139,15 +153,9 @@ func (s *IntegrationTestSuite) TestSSEStream() {
 				continue
 			}
 
-			match := false
-			switch evt.JobID {
-			case job.ID:
-				match = true
-			case uuid.Nil:
-				// Fallback for events where JobID might be missing but we can infer
-				if evt.Type == event.TypeRunStarted || evt.Type == event.TypeRunCompleted || evt.Type == event.TypeRunFailed {
-					match = true
-				}
+			match := evt.JobID == job.ID
+			if evt.Type != event.TypeJobCreated {
+				match = evt.RunID == runID
 			}
 
 			if match {

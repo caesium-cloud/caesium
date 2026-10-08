@@ -17,6 +17,7 @@ import (
 	runstore "github.com/caesium-cloud/caesium/internal/run"
 	"github.com/caesium-cloud/caesium/internal/trigger"
 	"github.com/caesium-cloud/caesium/pkg/db"
+	"github.com/caesium-cloud/caesium/pkg/dqlite"
 	"github.com/caesium-cloud/caesium/pkg/env"
 	"github.com/caesium-cloud/caesium/pkg/log"
 	"github.com/google/uuid"
@@ -47,30 +48,11 @@ func New(t *models.Trigger) (*Cron, error) {
 		return nil, err
 	}
 
-	expr, err := extractExpression(m)
+	sched, loc, err := parseScheduleConfig(m)
 	if err != nil {
 		return nil, err
 	}
-
-	loc, err := extractLocation(m)
-	if err != nil {
-		return nil, err
-	}
-
 	defaultParams, err := extractDefaultParams(m)
-	if err != nil {
-		return nil, err
-	}
-
-	parser := cron.NewParser(
-		cron.Minute |
-			cron.Hour |
-			cron.Dom |
-			cron.Month |
-			cron.Dow,
-	)
-
-	sched, err := parser.Parse(expr)
 	if err != nil {
 		return nil, err
 	}
@@ -90,20 +72,48 @@ func (c *Cron) Listen(ctx context.Context) {
 		"type", models.TriggerTypeCron,
 	)
 
-	next := c.nextTick()
-	if next.IsZero() {
-		log.Warn("trigger has no future occurrence, skipping", "id", c.id)
-		<-ctx.Done()
-		return
-	}
+	c.listen(ctx, time.Now, waitUntil, c.fireAt)
+}
 
-	select {
-	case <-time.After(time.Until(next)):
-		if err := c.fireAt(ctx, next); err != nil {
+// listen keeps clock, wait and fire private so recurrence can be exercised
+// without delays or job infrastructure. The real schedule still computes ticks.
+func (c *Cron) listen(ctx context.Context, now func() time.Time, wait func(context.Context, time.Time) error, fire func(context.Context, time.Time) error) {
+	var lastTick time.Time
+	for ctx.Err() == nil {
+		base := now()
+		if base.Before(lastTick) {
+			base = lastTick
+		}
+		next := c.nextTickAt(base)
+		if next.IsZero() {
+			log.Warn("trigger has no future occurrence, skipping", "id", c.id)
+			<-ctx.Done()
+			return
+		}
+		if err := wait(ctx, next); err != nil {
+			return
+		}
+		if ctx.Err() != nil {
+			return
+		}
+		// Calendar ticks have no monotonic component. Remember the attempted
+		// logical date even on failure, so a backward wall-clock step cannot
+		// schedule it again after the timer has already elapsed.
+		lastTick = next
+		if err := fire(ctx, next); err != nil {
 			log.Error("trigger fire failure", "id", c.id, "error", err)
 		}
+	}
+}
+
+func waitUntil(ctx context.Context, next time.Time) error {
+	timer := time.NewTimer(time.Until(next))
+	defer timer.Stop()
+	select {
 	case <-ctx.Done():
-		return
+		return ctx.Err()
+	case <-timer.C:
+		return nil
 	}
 }
 
@@ -112,6 +122,39 @@ func (c *Cron) Fire(ctx context.Context) error {
 }
 
 func (c *Cron) fireAt(ctx context.Context, logicalDate time.Time) error {
+	return c.fireAtWith(ctx, logicalDate,
+		cronLeaderCheck,
+		func(req *jsvc.ListRequest) (models.Jobs, error) { return jsvc.Service(ctx).List(req) },
+		func(j *models.Job, params map[string]string) error {
+			return job.New(j, job.WithParams(params)).Run(ctx)
+		},
+	)
+}
+
+func cronLeaderCheck(ctx context.Context) (bool, error) {
+	return cronLeaderForDatabase(ctx, env.Variables().DatabaseType, dqlite.IsLocalLeader)
+}
+
+func cronLeaderForDatabase(ctx context.Context, databaseType string, nativeLeader func(context.Context) (bool, error)) (bool, error) {
+	switch strings.ToLower(strings.TrimSpace(databaseType)) {
+	case "postgres":
+		// PostgreSQL has no dqlite app. Its standalone scheduling policy must
+		// not turn an absent native app into a refusal.
+		return true, nil
+	default:
+		// Match db.openConnection's native default, including an empty type.
+		return nativeLeader(ctx)
+	}
+}
+
+func (c *Cron) fireAtWith(ctx context.Context, logicalDate time.Time, leader func(context.Context) (bool, error), list func(*jsvc.ListRequest) (models.Jobs, error), runJob func(*models.Job, map[string]string) error) error {
+	localLeader, err := leader(ctx)
+	if err != nil {
+		return fmt.Errorf("cron leader check: %w", err)
+	}
+	if !localLeader {
+		return nil
+	}
 	log.Info(
 		"trigger firing",
 		"id", c.id,
@@ -120,7 +163,7 @@ func (c *Cron) fireAt(ctx context.Context, logicalDate time.Time) error {
 
 	req := &jsvc.ListRequest{TriggerID: c.id.String()}
 
-	jobs, err := jsvc.Service(ctx).List(req)
+	jobs, err := list(req)
 	if err != nil {
 		return err
 	}
@@ -151,8 +194,8 @@ func (c *Cron) fireAt(ctx context.Context, logicalDate time.Time) error {
 		metrics.TriggerFiresTotal.WithLabelValues(j.ID.String(), string(models.TriggerTypeCron)).Inc()
 		params := c.scheduledRunParams(logicalDate)
 		go func() {
-			if err = job.New(j, job.WithParams(params)).Run(ctx); err != nil {
-				log.Error("job run failure", "id", j.ID, "error", err)
+			if runErr := runJob(j, params); runErr != nil {
+				log.Error("job run failure", "id", j.ID, "error", runErr)
 			}
 		}()
 	}
@@ -245,27 +288,26 @@ func ParseSchedule(configuration string) (cron.Schedule, *time.Location, error) 
 		return nil, nil, fmt.Errorf("cron: invalid trigger configuration: %w", err)
 	}
 
-	expr, err := extractExpression(m)
-	if err != nil {
-		return nil, nil, err
-	}
-
-	loc, err := extractLocation(m)
+	sched, loc, err := parseScheduleConfig(m)
 	if err != nil {
 		return nil, nil, err
 	}
 	if loc == nil {
 		loc = time.UTC
 	}
+	return sched, loc, nil
+}
 
-	parser := cron.NewParser(
-		cron.Minute |
-			cron.Hour |
-			cron.Dom |
-			cron.Month |
-			cron.Dow,
-	)
-
+func parseScheduleConfig(cfg map[string]any) (cron.Schedule, *time.Location, error) {
+	expr, err := extractExpression(cfg)
+	if err != nil {
+		return nil, nil, err
+	}
+	loc, err := extractLocation(cfg)
+	if err != nil {
+		return nil, nil, err
+	}
+	parser := cron.NewParser(cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow)
 	sched, err := parser.Parse(expr)
 	if err != nil {
 		return nil, nil, err
@@ -342,8 +384,7 @@ func extractDefaultParams(cfg map[string]any) (map[string]string, error) {
 	}
 }
 
-func (c *Cron) nextTick() time.Time {
-	base := time.Now()
+func (c *Cron) nextTickAt(base time.Time) time.Time {
 	if c.location != nil {
 		base = base.In(c.location)
 	}

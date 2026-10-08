@@ -12,6 +12,7 @@ import (
 	jsvc "github.com/caesium-cloud/caesium/api/rest/service/job"
 	triggersvc "github.com/caesium-cloud/caesium/api/rest/service/trigger"
 	eventstore "github.com/caesium-cloud/caesium/internal/event"
+	"github.com/caesium-cloud/caesium/internal/eventmatch"
 	"github.com/caesium-cloud/caesium/internal/metrics"
 	"github.com/caesium-cloud/caesium/internal/models"
 	runstorage "github.com/caesium-cloud/caesium/internal/run"
@@ -421,10 +422,10 @@ func lifecycleTriggerDepth(data map[string]any) string {
 }
 
 func lifecycleTriggerDepthJSON(data []byte) string {
-	if depth, ok := extractField(data, TriggerDepthParam); ok {
+	if depth, ok := eventmatch.ExtractField(data, TriggerDepthParam); ok {
 		return depth
 	}
-	if depth, ok := extractField(data, "params."+TriggerDepthParam); ok {
+	if depth, ok := eventmatch.ExtractField(data, "params."+TriggerDepthParam); ok {
 		return depth
 	}
 	return ""

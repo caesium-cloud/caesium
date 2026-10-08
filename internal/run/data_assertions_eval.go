@@ -2,7 +2,9 @@ package run
 
 import (
 	"fmt"
+	"maps"
 	"math"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -220,11 +222,10 @@ func AssertionMetrics(assertions *jobdef.DatasetAssertions) []string {
 	for i := range assertions.Custom {
 		add(strings.TrimSpace(assertions.Custom[i].Metric))
 	}
-	metrics := make([]string, 0, len(seen))
-	for metric := range seen {
-		metrics = append(metrics, metric)
+	metrics := slices.Sorted(maps.Keys(seen))
+	if metrics == nil {
+		metrics = []string{}
 	}
-	sort.Strings(metrics)
 	return metrics
 }
 

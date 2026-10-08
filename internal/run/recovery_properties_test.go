@@ -2,6 +2,7 @@ package run
 
 import (
 	"fmt"
+	"slices"
 	"sort"
 	"testing"
 
@@ -143,12 +144,7 @@ func (tr *recoveryTrace) runningNow() []uuid.UUID {
 }
 
 func containsUUID(ids []uuid.UUID, want uuid.UUID) bool {
-	for _, id := range ids {
-		if id == want {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(ids, want)
 }
 
 // TestRecoveryReconstructsEveryCheckpoint is the core DT-RECOVER-01 property on

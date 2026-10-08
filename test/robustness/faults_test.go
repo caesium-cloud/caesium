@@ -7,13 +7,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"os"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/caesium-cloud/caesium/internal/bodylimit"
 	"github.com/caesium-cloud/caesium/pkg/jobdef"
 	"github.com/caesium-cloud/caesium/test/robustness/cluster"
 	"github.com/caesium-cloud/caesium/test/robustness/faults"
@@ -633,6 +633,41 @@ func runResponseLoss(t *testing.T, fe *faultEnv) {
 // through the same interposer and requires a usable response within bound. The
 // returned operation is the heal evidence: it is the interposer's own record of
 // forwarding a response it no longer withholds.
+type uncertainHealError struct {
+	status int
+	runID  string
+	body   string
+	cause  error
+}
+
+func (e *uncertainHealError) Error() string {
+	return fmt.Sprintf("inconclusive heal admission, possibly committed (HTTP %d, possible run %q, body %s): %v", e.status, e.runID, e.body, e.cause)
+}
+func (e *uncertainHealError) Unwrap() error { return e.cause }
+
+func readHealedRunResponse(resp *http.Response) (cluster.Run, error) {
+	body, readErr := bodylimit.Read(resp.Body, 1<<20)
+	if readErr != nil {
+		var partial cluster.Run
+		_ = json.Unmarshal(body, &partial)
+		if _, err := uuid.Parse(partial.ID); err != nil {
+			partial = cluster.Run{}
+		}
+		return partial, &uncertainHealError{status: resp.StatusCode, runID: partial.ID, body: truncate(body, 512), cause: readErr}
+	}
+	if resp.StatusCode != http.StatusAccepted {
+		return cluster.Run{}, fmt.Errorf("disarmed interposer returned status %d: %s", resp.StatusCode, truncate(body, 512))
+	}
+	var run cluster.Run
+	if err := json.Unmarshal(body, &run); err != nil {
+		return cluster.Run{}, fmt.Errorf("disarmed interposer returned an undecodable body: %w (%s)", err, truncate(body, 512))
+	}
+	if _, err := uuid.Parse(run.ID); err != nil {
+		return cluster.Run{}, fmt.Errorf("disarmed interposer returned no usable run id: %q", run.ID)
+	}
+	return run, nil
+}
+
 func probeInterposerHealed(ctx context.Context, fe *faultEnv, in *faults.Interposer, jobID string, bound time.Duration) (faults.Operation, cluster.Run, error) {
 	before := len(in.Operations())
 	reqCtx, cancel := context.WithTimeout(ctx, bound)
@@ -649,19 +684,26 @@ func probeInterposerHealed(ctx context.Context, fe *faultEnv, in *faults.Interpo
 	started := time.Now()
 	resp, err := client.Do(req)
 	if err != nil {
-		return faults.Operation{}, cluster.Run{}, fmt.Errorf("the disarmed interposer still lost the response after %s: %w", time.Since(started), err)
+		return faults.Operation{}, cluster.Run{}, &uncertainHealError{cause: fmt.Errorf("the disarmed interposer still lost the response after %s: %w", time.Since(started), err)}
 	}
 	defer func() { _ = resp.Body.Close() }()
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-	if resp.StatusCode != http.StatusAccepted {
-		return faults.Operation{}, cluster.Run{}, fmt.Errorf("disarmed interposer returned status %d: %s", resp.StatusCode, truncate(body, 512))
-	}
-	var healRun cluster.Run
-	if err := json.Unmarshal(body, &healRun); err != nil {
-		return faults.Operation{}, cluster.Run{}, fmt.Errorf("disarmed interposer returned an undecodable body: %w (%s)", err, truncate(body, 512))
-	}
-	if _, err := uuid.Parse(healRun.ID); err != nil {
-		return faults.Operation{}, cluster.Run{}, fmt.Errorf("disarmed interposer returned no usable run id: %q", healRun.ID)
+	healRun, readErr := readHealedRunResponse(resp)
+	if readErr != nil {
+		ops := in.Operations()
+		if len(ops) > before {
+			op := ops[len(ops)-1]
+			if op.PossiblyCommitted {
+				var partial cluster.Run
+				if json.Unmarshal([]byte(op.UpstreamBody), &partial) == nil {
+					if _, err := uuid.Parse(partial.ID); err == nil {
+						healRun = partial
+					}
+				}
+				readErr = &uncertainHealError{status: resp.StatusCode, runID: healRun.ID, body: truncate([]byte(op.UpstreamBody), 512), cause: readErr}
+			}
+			return op, healRun, readErr
+		}
+		return faults.Operation{}, healRun, readErr
 	}
 
 	ops := in.Operations()
@@ -673,7 +715,7 @@ func probeInterposerHealed(ctx context.Context, fe *faultEnv, in *faults.Interpo
 		return op, healRun, fmt.Errorf("the heal request was still faulted (applied=%s)", op.Applied)
 	}
 	if op.PossiblyCommitted {
-		return op, healRun, fmt.Errorf("the heal request was recorded as possibly committed: %+v", op)
+		return op, healRun, &uncertainHealError{status: op.UpstreamStatus, runID: healRun.ID, cause: fmt.Errorf("the heal request was recorded as possibly committed: %+v", op)}
 	}
 	if op.UpstreamStatus != http.StatusAccepted {
 		return op, healRun, fmt.Errorf("the heal request's upstream status was %d", op.UpstreamStatus)

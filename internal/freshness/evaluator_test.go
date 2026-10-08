@@ -12,6 +12,8 @@ import (
 	metrictest "github.com/caesium-cloud/caesium/internal/metrics/testutil"
 	"github.com/caesium-cloud/caesium/internal/models"
 	runstorage "github.com/caesium-cloud/caesium/internal/run"
+	"github.com/caesium-cloud/caesium/internal/runlife"
+	"github.com/caesium-cloud/caesium/internal/testutil"
 	"github.com/google/uuid"
 	"gorm.io/datatypes"
 	"gorm.io/gorm"
@@ -30,6 +32,7 @@ type fakeRunStarter struct {
 	// afterCommit runs inside StartWithContext once the run row exists, so a
 	// test can reproduce what happens concurrently with an admission: a
 	// cancelled tick context, or another node committing its own run.
+	beforeStart func(context.Context)
 	afterCommit func(runID, jobID uuid.UUID)
 	err         error
 	calls       int
@@ -37,8 +40,11 @@ type fakeRunStarter struct {
 	launched    []uuid.UUID
 }
 
-func (f *fakeRunStarter) StartWithContext(_ context.Context, jobID uuid.UUID, triggerID *uuid.UUID, opts ...runstorage.StartOption) (*runstorage.JobRun, error) {
+func (f *fakeRunStarter) StartWithContext(ctx context.Context, jobID uuid.UUID, triggerID *uuid.UUID, opts ...runstorage.StartOption) (*runstorage.JobRun, error) {
 	f.calls++
+	if f.beforeStart != nil {
+		f.beforeStart(ctx)
+	}
 	if f.err != nil && !f.commitThenFail {
 		return nil, f.err
 	}
@@ -508,25 +514,7 @@ func TestEvaluatorDoesNotAdoptAForeignRun(t *testing.T) {
 // the row back.
 func failJobRunReads(t *testing.T, db *gorm.DB, n int) {
 	t.Helper()
-	const name = "test:freshness_fail_job_run_reads"
-	remaining := n
-	if err := db.Callback().Query().Before("gorm:query").Register(name, func(tx *gorm.DB) {
-		if remaining <= 0 {
-			return
-		}
-		table := tx.Statement.Table
-		if table == "" && tx.Statement.Schema != nil {
-			table = tx.Statement.Schema.Table
-		}
-		if table != "job_runs" {
-			return
-		}
-		remaining--
-		tx.AddError(errors.New("database is locked"))
-	}); err != nil {
-		t.Fatalf("register query callback: %v", err)
-	}
-	t.Cleanup(func() { _ = db.Callback().Query().Remove(name) })
+	testutil.FailJobRunReads(t, db, n)
 }
 
 // TestEvaluatorHandsOffACommittedRunItCannotReadBack is the regression for
@@ -1343,5 +1331,116 @@ func requireEventType(t *testing.T, events <-chan event.Event, typ event.Type) {
 		}
 	case <-time.After(time.Second):
 		t.Fatalf("timed out waiting for event %q", typ)
+	}
+}
+
+func TestEvaluatorClosedOwnerCannotAdmitDerivedRun(t *testing.T) {
+	db := openRegistryDB(t)
+	now := t0.Add(3 * time.Hour)
+	jobID := seedFreshnessJob(t, db, "closed-owner")
+	seedDeclarations(t, db, produceDecl(jobID, "out", "1h", ""))
+	seedState(t, db, "out", "100", now.Add(-2*time.Hour), nil)
+	starter := &fakeRunStarter{t: t, db: db}
+	owner := runlife.New(context.Background())
+	owner.CloseAndCancel()
+	eval := NewEvaluator(Config{DB: db, RunStore: starter, LaunchRun: starter.launch,
+		MaxDerivationsPerTick: 50, Now: func() time.Time { return now }})
+	if err := eval.EvaluateOnce(runlife.WithSupervisor(t.Context(), owner)); !errors.Is(err, runlife.ErrClosed) {
+		t.Fatalf("evaluate with closed owner: %v", err)
+	}
+	if starter.calls != 0 || len(starter.runIDs) != 0 {
+		t.Fatal("closed owner reached durable admission")
+	}
+}
+
+func TestEvaluatorTransfersReservationAcrossPostCommitRecovery(t *testing.T) {
+	db := openRegistryDB(t)
+	now := t0.Add(3 * time.Hour)
+	jobID := seedFreshnessJob(t, db, "owned-post-commit")
+	seedDeclarations(t, db, produceDecl(jobID, "out", "1h", ""))
+	seedState(t, db, "out", "100", now.Add(-2*time.Hour), nil)
+	owner := runlife.New(context.Background())
+	tick, cancelTick := context.WithCancel(runlife.WithSupervisor(t.Context(), owner))
+	defer cancelTick()
+	starter := &fakeRunStarter{t: t, db: db, commitThenFail: true, err: context.Canceled,
+		beforeStart: func(admission context.Context) {
+			if admission.Done() != tick.Done() {
+				t.Fatal("admission detached tick/leadership cancellation")
+			}
+		},
+		afterCommit: func(uuid.UUID, uuid.UUID) { cancelTick(); owner.CloseAndCancel() },
+	}
+	var releaseWork func()
+	launched := false
+	eval := NewEvaluator(Config{DB: db, RunStore: starter,
+		LaunchRun: func(ctx context.Context, r *runstorage.JobRun) {
+			if r.ID != starter.runIDs[0] {
+				t.Fatal("recovery transferred wrong committed run")
+			}
+			work, release, err := TakeRunReservation(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			releaseWork = release
+			select {
+			case <-work.Done():
+			case <-time.After(time.Second):
+				t.Fatal("recovered launch ignored server shutdown")
+			}
+			launched = true
+		}, MaxDerivationsPerTick: 50, Now: func() time.Time { return now }})
+	if err := eval.EvaluateOnce(tick); err != nil {
+		t.Fatal(err)
+	}
+	if !launched {
+		t.Fatal("committed run was not handed off")
+	}
+	defer releaseWork()
+	expired, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer cancel()
+	if !errors.Is(owner.Wait(expired), context.DeadlineExceeded) {
+		t.Fatal("owner joined before launcher released recovered work")
+	}
+	releaseWork()
+	waitCtx, waitCancel := context.WithTimeout(context.Background(), time.Second)
+	defer waitCancel()
+	if err := owner.Wait(waitCtx); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestEvaluatorReleasesReservationForSynchronousInjectionAndDeclines(t *testing.T) {
+	for _, mode := range []string{"synchronous", "decline", "skip", "error"} {
+		t.Run(mode, func(t *testing.T) {
+			db := openRegistryDB(t)
+			now := t0.Add(3 * time.Hour)
+			jobID := seedFreshnessJob(t, db, "release-"+mode)
+			seedDeclarations(t, db, produceDecl(jobID, "out", "1h", ""))
+			seedState(t, db, "out", "100", now.Add(-2*time.Hour), nil)
+			starter := &fakeRunStarter{t: t, db: db, decline: mode == "decline"}
+			if mode == "error" {
+				starter.err = errors.New("admission failed")
+			}
+			if mode == "skip" {
+				starter.err = runstorage.ErrRunSkipped
+			}
+			owner := runlife.New(context.Background())
+			eval := NewEvaluator(Config{DB: db, RunStore: starter, LaunchRun: starter.launch,
+				MaxDerivationsPerTick: 50, Now: func() time.Time { return now }})
+			err := eval.EvaluateOnce(runlife.WithSupervisor(t.Context(), owner))
+			if mode == "error" {
+				if !errors.Is(err, starter.err) {
+					t.Fatalf("admission error: %v", err)
+				}
+			} else if err != nil {
+				t.Fatal(err)
+			}
+			owner.CloseAndCancel()
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			defer cancel()
+			if err := owner.Wait(ctx); err != nil {
+				t.Fatal("reservation leaked:", err)
+			}
+		})
 	}
 }

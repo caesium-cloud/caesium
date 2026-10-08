@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"maps"
 	"math/rand/v2"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -15,9 +16,12 @@ import (
 	"time"
 
 	"github.com/caesium-cloud/caesium/internal/cache"
+	"github.com/caesium-cloud/caesium/internal/dbretry"
 	"github.com/caesium-cloud/caesium/internal/event"
 	"github.com/caesium-cloud/caesium/internal/metrics"
 	"github.com/caesium-cloud/caesium/internal/models"
+	"github.com/caesium-cloud/caesium/internal/runlife"
+	"github.com/caesium-cloud/caesium/internal/strutil"
 	"github.com/caesium-cloud/caesium/pkg/container"
 	"github.com/caesium-cloud/caesium/pkg/db"
 	"github.com/caesium-cloud/caesium/pkg/dqlite"
@@ -574,12 +578,12 @@ var (
 	ErrJobPaused = errors.New("run: cannot retry while job is paused")
 )
 
-// RunCommittedError reports a start that FAILED after its run was already
-// committed and live: the row exists, run_started has been published and the
-// lease is taken, but the record could not be read back.
+// RunCommittedError reports a start or retry that failed to read its run back
+// after committing admission or reopening. The row is live and its events and
+// active accounting have been published; callers still own execution or cleanup.
 //
 // It carries the exact run id so a caller can drive or finalize the run it
-// actually created. That identity matters: searching for "a matching running
+// actually admitted or reopened. That identity matters: searching for "a matching running
 // run" instead would, during a leader change, let one node adopt and execute a
 // run another node created and is already executing.
 type RunCommittedError struct {
@@ -594,10 +598,9 @@ func (e *RunCommittedError) Error() string {
 
 func (e *RunCommittedError) Unwrap() error { return e.Err }
 
-// CommittedRunID reports the run a failed start already committed, if any.
+// CommittedRunID reports the run a failed start or retry already committed, if any.
 func CommittedRunID(err error) (uuid.UUID, bool) {
-	var committed *RunCommittedError
-	if errors.As(err, &committed) && committed.RunID != uuid.Nil {
+	if committed, ok := errors.AsType[*RunCommittedError](err); ok && committed.RunID != uuid.Nil {
 		return committed.RunID, true
 	}
 	return uuid.Nil, false
@@ -2319,11 +2322,7 @@ func descriptorSecretRefs(spec container.Spec) []models.TaskExecutionSecretRef {
 		return nil
 	}
 	refs := make([]models.TaskExecutionSecretRef, 0)
-	keys := make([]string, 0, len(spec.Env))
-	for key := range spec.Env {
-		keys = append(keys, key)
-	}
-	sort.Strings(keys)
+	keys := slices.Sorted(maps.Keys(spec.Env))
 	for _, key := range keys {
 		ref := strings.TrimSpace(spec.Env[key])
 		if !strings.HasPrefix(ref, "secret://") {
@@ -2342,14 +2341,7 @@ func descriptorSecretRefs(spec container.Spec) []models.TaskExecutionSecretRef {
 	return refs
 }
 
-func firstNonEmpty(values ...string) string {
-	for _, value := range values {
-		if strings.TrimSpace(value) != "" {
-			return value
-		}
-	}
-	return ""
-}
+func firstNonEmpty(values ...string) string { return strutil.FirstNonBlank(values...) }
 
 // StartTask marks a task run as running. taskRef is resolved by
 // loadTaskRunByIDOrUnique, so it may be either a TaskRun primary key (required
@@ -2947,20 +2939,11 @@ func (s *Store) cacheHitTask(runID, taskRef uuid.UUID, source CacheHitSource, re
 				return seqErr
 			}
 			updates["terminal_sequence"] = seq
-			if len(output) > 0 {
-				encoded, marshalErr := json.Marshal(output)
-				if marshalErr != nil {
-					return fmt.Errorf("marshalling task output: %w", marshalErr)
-				}
-				updates["output"] = encoded
+			fields, encodeErr := taskCompletionFieldUpdates(output, branchSelections)
+			if encodeErr != nil {
+				return encodeErr
 			}
-			if len(branchSelections) > 0 {
-				encoded, marshalErr := json.Marshal(branchSelections)
-				if marshalErr != nil {
-					return fmt.Errorf("marshalling branch selections: %w", marshalErr)
-				}
-				updates["branch_selections"] = encoded
-			}
+			maps.Copy(updates, fields)
 
 			resultUpdate := updateQuery.Updates(updates)
 			if resultUpdate.Error != nil {
@@ -3209,7 +3192,7 @@ func (s *Store) SaveSchemaViolations(runID, taskRef uuid.UUID, violations []pkgt
 // be addressed by its TaskRun ID, because assertions are evaluated PER
 // PARTITION and one bad partition must not make its N siblings look violating.
 func (s *Store) SaveDataViolations(runID, taskRef uuid.UUID, violations []DataViolation) error {
-	_, err := s.saveDataViolationsClaimed(runID, taskRef, nil, violations)
+	_, err := s.saveDataViolationsClaimed(context.Background(), runID, taskRef, nil, violations)
 	return err
 }
 
@@ -3222,7 +3205,7 @@ func (s *Store) SaveDataViolations(runID, taskRef uuid.UUID, violations []DataVi
 // read, so it is atomic with the write and needs no lock: a takeover that
 // commits first simply makes the statement match zero rows. A nil claim is the
 // local executor, which holds no claim and always writes.
-func (s *Store) saveDataViolationsClaimed(runID, taskRef uuid.UUID, claim *TaskClaim, violations []DataViolation) (bool, error) {
+func (s *Store) saveDataViolationsClaimed(ctx context.Context, runID, taskRef uuid.UUID, claim *TaskClaim, violations []DataViolation) (bool, error) {
 	if len(violations) == 0 {
 		return true, nil
 	}
@@ -3230,14 +3213,14 @@ func (s *Store) saveDataViolationsClaimed(runID, taskRef uuid.UUID, claim *TaskC
 	if err != nil {
 		return false, err
 	}
-	row, err := loadTaskRunByIDOrUnique(s.db, runID, taskRef)
+	row, err := loadTaskRunByIDOrUnique(s.db.WithContext(ctx), runID, taskRef)
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return false, nil
 		}
 		return false, err
 	}
-	q := s.db.Model(&models.TaskRun{}).Where("id = ?", row.ID)
+	q := s.db.WithContext(ctx).Model(&models.TaskRun{}).Where("id = ?", row.ID)
 	if claim != nil {
 		q = q.Where("claimed_by = ? AND claim_attempt = ?", claim.ClaimedBy, claim.ClaimAttempt)
 	}
@@ -3746,6 +3729,12 @@ type predecessorRef struct {
 // Replay: the descriptor's frozen predecessor refs, so a later apply cannot
 // change what a replay run considers its inputs.
 func (s *Store) resolvePredecessorsTx(tx *gorm.DB, runID, taskID uuid.UUID) ([]predecessorRef, error) {
+	return s.resolvePredecessorsWithPolicyTx(tx, runID, taskID, false)
+}
+
+// Strict name resolution is reserved for execution-input acquisition. Legacy
+// status and trigger readers retain their best-effort catalog policy.
+func (s *Store) resolvePredecessorsWithPolicyTx(tx *gorm.DB, runID, taskID uuid.UUID, strict bool) ([]predecessorRef, error) {
 	refs, replay, err := s.replayPredecessorRefsTx(tx, runID, taskID)
 	if err != nil {
 		return nil, err
@@ -3784,6 +3773,9 @@ func (s *Store) resolvePredecessorsTx(tx *gorm.DB, runID, taskID uuid.UUID) ([]p
 	namesByID := make(map[uuid.UUID]string, len(predTaskIDs))
 	var tasks []models.Task
 	if err := tx.Where("id IN ?", predTaskIDs).Find(&tasks).Error; err != nil {
+		if strict {
+			return nil, fmt.Errorf("resolve predecessor task names: %w", err)
+		}
 		log.Warn("failed to resolve predecessor task names", "run_id", runID, "task_id", taskID, "error", err)
 	} else {
 		for i := range tasks {
@@ -3794,6 +3786,9 @@ func (s *Store) resolvePredecessorsTx(tx *gorm.DB, runID, taskID uuid.UUID) ([]p
 	out := make([]predecessorRef, 0, len(edges))
 	for _, edge := range edges {
 		name, ok := namesByID[edge.FromTaskID]
+		if strict && !ok {
+			return nil, fmt.Errorf("predecessor task %s is missing from the live catalog", edge.FromTaskID)
+		}
 		out = append(out, predecessorRef{TaskID: edge.FromTaskID, Name: name, HasCatalogRow: ok})
 	}
 	return out, nil
@@ -4069,35 +4064,13 @@ func (s *Store) completeTask(runID, taskRef, instanceRef uuid.UUID, result, clai
 				"cache_expires_at":        nil,
 				"partition_retry_pending": false,
 			}
-			if len(output) > 0 {
-				encoded, marshalErr := json.Marshal(output)
-				if marshalErr != nil {
-					return fmt.Errorf("marshalling task output: %w", marshalErr)
-				}
-				updates["output"] = encoded
+			fields, encodeErr := taskCompletionFieldUpdates(output, branchSelections)
+			if encodeErr != nil {
+				return encodeErr
 			}
-			if len(branchSelections) > 0 {
-				encoded, marshalErr := json.Marshal(branchSelections)
-				if marshalErr != nil {
-					return fmt.Errorf("marshalling branch selections: %w", marshalErr)
-				}
-				updates["branch_selections"] = encoded
-			}
+			maps.Copy(updates, fields)
 			if status == TaskStatusFailed {
-				msg := result
-				switch Result(result) {
-				case "failure":
-					msg = "command exited with non-zero status"
-				case "startup_failure":
-					msg = "atom failed to start (check image/command)"
-				case "resource_failure":
-					msg = "atom exhausted resources (e.g. OOM)"
-				case "killed":
-					msg = "atom was forcefully killed"
-				case "terminated":
-					msg = "atom was gracefully terminated"
-				}
-				updates["error"] = msg
+				updates["error"] = failureMessage(result)
 			}
 
 			resultUpdate := updateQuery.Updates(updates)
@@ -4460,20 +4433,11 @@ func (s *Store) CompleteTaskOwner(
 				"cache_hit":               status == TaskStatusCached,
 				"partition_retry_pending": false,
 			}
-			if len(output) > 0 {
-				encoded, mErr := json.Marshal(output)
-				if mErr != nil {
-					return fmt.Errorf("marshalling task output: %w", mErr)
-				}
-				updates["output"] = encoded
+			fields, encodeErr := taskCompletionFieldUpdates(output, branchSelections)
+			if encodeErr != nil {
+				return encodeErr
 			}
-			if len(branchSelections) > 0 {
-				encoded, mErr := json.Marshal(branchSelections)
-				if mErr != nil {
-					return fmt.Errorf("marshalling branch selections: %w", mErr)
-				}
-				updates["branch_selections"] = encoded
-			}
+			maps.Copy(updates, fields)
 			if status == TaskStatusFailed {
 				if errMsg != "" {
 					updates["error"] = errMsg
@@ -4603,6 +4567,27 @@ func (s *Store) CompleteTaskOwner(
 		s.publishEvents(pendingEvents...)
 	}
 	return err
+}
+
+// taskCompletionFieldUpdates omits empty fields so a partial completion never
+// erases existing output or branch evidence.
+func taskCompletionFieldUpdates(output map[string]string, branchSelections []string) (map[string]any, error) {
+	fields := make(map[string]any, 2)
+	if len(output) > 0 {
+		encoded, err := json.Marshal(output)
+		if err != nil {
+			return nil, fmt.Errorf("marshalling task output: %w", err)
+		}
+		fields["output"] = encoded
+	}
+	if len(branchSelections) > 0 {
+		encoded, err := json.Marshal(branchSelections)
+		if err != nil {
+			return nil, fmt.Errorf("marshalling branch selections: %w", err)
+		}
+		fields["branch_selections"] = encoded
+	}
+	return fields, nil
 }
 
 // failureMessage maps a failure result string to a human-readable error, matching
@@ -5091,10 +5076,17 @@ func (s *Store) Complete(runID uuid.UUID, result error) error {
 // the distinction so a run another path finalized first is not notified
 // twice.
 func (s *Store) CompleteIfActive(runID uuid.UUID, result error) (bool, error) {
+	if errors.Is(result, runlife.ErrServerShutdown) && !IsRunDeadlineError(result) {
+		// Shutdown relinquishes process ownership, never durable run/task claims.
+		return false, nil
+	}
 	now := time.Now().UTC()
 	status := StatusSucceeded
 	errMsg := ""
-	runTimedOut := IsRunDeadlineError(result)
+	// An authoritative owner cancellation must settle its unfinished tasks too.
+	// Workers abandon canceled contexts without publishing a stale completion,
+	// and a terminal parent excludes those rows from lease recovery.
+	terminateUnfinished := IsRunDeadlineError(result) || IsRunCancellationError(result)
 	if result != nil {
 		status = StatusFailed
 		errMsg = result.Error()
@@ -5109,17 +5101,17 @@ func (s *Store) CompleteIfActive(runID uuid.UUID, result error) (bool, error) {
 	// the gauge bookkeeping below never depends on a separate best-effort read
 	// that could fail and leak the active-runs gauge.
 	var (
-		pendingEvents []event.Event
-		jobID         uuid.UUID
-		startedAt     time.Time
-		quarantine    bool
-		timedOutTasks []models.TaskRun
-		counts        dbWriteCounts
+		pendingEvents   []event.Event
+		jobID           uuid.UUID
+		startedAt       time.Time
+		quarantine      bool
+		terminatedTasks []models.TaskRun
+		counts          dbWriteCounts
 	)
 	err := withStoreBusyRetry(func() error {
 		counts.reset()
 		attemptEvents := make([]event.Event, 0, 2)
-		var attemptTimedOutTasks []models.TaskRun
+		var attemptTerminatedTasks []models.TaskRun
 		var (
 			attemptJobID      uuid.UUID
 			attemptStartedAt  time.Time
@@ -5161,7 +5153,7 @@ func (s *Store) CompleteIfActive(runID uuid.UUID, result error) (bool, error) {
 			// waits on a dependency the engine has not resolved is stranded by
 			// a terminal run just the same, and RetryPartition already refuses
 			// the retries no engine could ever release.
-			if !runTimedOut {
+			if !terminateUnfinished {
 				var pending int64
 				if err := tx.Model(&models.TaskRun{}).
 					Where("job_run_id = ? AND status = ? AND started_at IS NULL AND partition_retry_pending = ?",
@@ -5174,16 +5166,15 @@ func (s *Store) CompleteIfActive(runID uuid.UUID, result error) (bool, error) {
 				}
 			}
 
-			// A genuine metadata.runTimeout expiry resolves every unfinished task
-			// in the same transaction as the run. Clearing claims makes the
-			// worker's liveness sweep cancel old binaries, while new workers share
-			// this absolute deadline and stop the exact atom themselves. Terminal
-			// completion predicates below reject any result racing this write.
-			if runTimedOut {
-				var timeoutErr error
-				attemptTimedOutTasks, timeoutErr = s.failUnfinishedTasksForRunTimeoutTx(tx, runID, errMsg, now, &attemptEvents, &counts)
-				if timeoutErr != nil {
-					return timeoutErr
+			// A whole-run deadline or owner cancellation resolves every unfinished
+			// task in the same transaction as the run. Clearing claims fences
+			// workers and makes their liveness sweep stop remaining runtimes.
+			// Terminal completion predicates reject any result racing this write.
+			if terminateUnfinished {
+				var terminationErr error
+				attemptTerminatedTasks, terminationErr = s.failUnfinishedTasksForRunTerminationTx(tx, runID, errMsg, now, &attemptEvents, &counts)
+				if terminationErr != nil {
+					return terminationErr
 				}
 			}
 
@@ -5223,7 +5214,7 @@ func (s *Store) CompleteIfActive(runID uuid.UUID, result error) (bool, error) {
 				if err := s.eventStore.AppendTx(tx, &completionEvent); err != nil {
 					return err
 				}
-				if runTimedOut {
+				if terminateUnfinished {
 					counts.addEventInsert(1)
 				}
 				attemptEvents = append(attemptEvents, completionEvent)
@@ -5239,7 +5230,7 @@ func (s *Store) CompleteIfActive(runID uuid.UUID, result error) (bool, error) {
 				if err := s.eventStore.AppendTx(tx, &terminalEvent); err != nil {
 					return err
 				}
-				if runTimedOut {
+				if terminateUnfinished {
 					counts.addEventInsert(1)
 				}
 				attemptEvents = append(attemptEvents, terminalEvent)
@@ -5252,7 +5243,7 @@ func (s *Store) CompleteIfActive(runID uuid.UUID, result error) (bool, error) {
 			jobID = attemptJobID
 			startedAt = attemptStartedAt
 			quarantine = attemptQuarantine
-			timedOutTasks = attemptTimedOutTasks
+			terminatedTasks = attemptTerminatedTasks
 		}
 		return txErr
 	})
@@ -5271,7 +5262,7 @@ func (s *Store) CompleteIfActive(runID uuid.UUID, result error) (bool, error) {
 	jobIDStr := jobID.String()
 	counts.commit()
 	if !quarantine {
-		for _, task := range timedOutTasks {
+		for _, task := range terminatedTasks {
 			if task.Quarantine {
 				continue
 			}
@@ -5301,11 +5292,12 @@ func (s *Store) CompleteIfActive(runID uuid.UUID, result error) (bool, error) {
 	return true, nil
 }
 
-// failUnfinishedTasksForRunTimeoutTx runs after the caller has finalized and
-// locked the JobRun. Each concrete unfinished row receives its own replay
-// sequence and failure event, without invoking ordinary task failure cascades.
+// failUnfinishedTasksForRunTerminationTx runs after a whole-run deadline or
+// owner cancellation has finalized and locked the JobRun. Each concrete
+// unfinished row receives its own replay sequence and failure event, without
+// invoking ordinary task failure cascades.
 // Evidence and terminal rows are preserved; metrics are emitted after commit.
-func (s *Store) failUnfinishedTasksForRunTimeoutTx(tx *gorm.DB, runID uuid.UUID, errMsg string, now time.Time, events *[]event.Event, counts *dbWriteCounts) ([]models.TaskRun, error) {
+func (s *Store) failUnfinishedTasksForRunTerminationTx(tx *gorm.DB, runID uuid.UUID, errMsg string, now time.Time, events *[]event.Event, counts *dbWriteCounts) ([]models.TaskRun, error) {
 	var rows []models.TaskRun
 	if err := tx.Select("id", "task_id", "engine", "started_at", "quarantine").
 		Where("job_run_id = ? AND status NOT IN ?", runID, terminalTaskStatuses()).
@@ -6236,7 +6228,7 @@ func collapseFanOutGroups(rows []*TaskRun) []*TaskRun {
 		insts := grouped[taskID]
 		head := *insts[0]
 		n := len(insts)
-		if n > 1 || head.PartitionValue != "" {
+		if models.IsFannedGroup(n, head.PartitionValue) {
 			head.PartitionCount = n
 		} else {
 			head.PartitionCount = 0
@@ -6513,26 +6505,20 @@ func withStoreBusyRetry(fn func() error) error {
 }
 
 func withStoreBusyRetryContext(ctx context.Context, fn func() error) error {
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	var err error
-	for attempt := 0; ; attempt++ {
-		if ctxErr := ctx.Err(); ctxErr != nil {
-			return ctxErr
-		}
-		err = fn()
-		if err == nil || !isStoreContentionErr(err) {
-			return err
-		}
-		if attempt >= len(storeBusyRetryBackoffs) {
-			return err
-		}
+	return dbretry.Retry(ctx, storeBusyRetryPolicy(storeBusyRetryBackoffs, sleepStoreBusyRetry), fn)
+}
 
-		metrics.DBBusyRetriesTotal.Inc()
-		if sleepErr := sleepStoreBusyRetry(ctx, jitterStoreBusyRetryBackoff(storeBusyRetryBackoffs[attempt])); sleepErr != nil {
-			return sleepErr
-		}
+// Transaction scope and per-attempt resets remain in the callback. This policy
+// retains run-store cancellation, classification, jitter and retry metrics.
+func storeBusyRetryPolicy(backoffs []time.Duration, wait func(context.Context, time.Duration) error) dbretry.Policy {
+	return dbretry.Policy{
+		Backoffs:      backoffs,
+		Retryable:     isStoreContentionErr,
+		BeforeAttempt: true,
+		OnRetry:       func(error) { metrics.DBBusyRetriesTotal.Inc() },
+		Wait: func(ctx context.Context, base time.Duration) error {
+			return wait(ctx, jitterStoreBusyRetryBackoff(base))
+		},
 	}
 }
 
@@ -6648,6 +6634,10 @@ func groupTaskRunsByTaskID(rows []models.TaskRun) map[uuid.UUID][]models.TaskRun
 // silently truncated fan-in contract is the failure mode
 // FanInAggregateTooLargeError exists to prevent.
 func predecessorGroupOutput(producer string, rows []models.TaskRun) (map[string]string, bool, error) {
+	return predecessorGroupOutputWithPolicy(producer, rows, false)
+}
+
+func predecessorGroupOutputWithPolicy(producer string, rows []models.TaskRun, strict bool) (map[string]string, bool, error) {
 	switch {
 	case len(rows) == 0:
 		return nil, false, nil
@@ -6657,6 +6647,9 @@ func predecessorGroupOutput(producer string, rows []models.TaskRun) (map[string]
 		}
 		var output map[string]string
 		if err := json.Unmarshal(rows[0].Output, &output); err != nil {
+			if strict {
+				return nil, false, fmt.Errorf("decode predecessor %s output: %w", producer, err)
+			}
 			log.Warn("failed to unmarshal predecessor task output", "predecessor_task_id", rows[0].TaskID, "error", err)
 			return nil, false, nil
 		}
@@ -6676,6 +6669,9 @@ func predecessorGroupOutput(producer string, rows []models.TaskRun) (map[string]
 			}
 			var output map[string]string
 			if err := json.Unmarshal(row.Output, &output); err != nil {
+				if strict {
+					return nil, false, fmt.Errorf("decode predecessor %s partition %q output: %w", producer, row.PartitionValue, err)
+				}
 				log.Warn("failed to unmarshal fan-out instance output", "predecessor_task_id", row.TaskID, "partition", row.PartitionValue, "error", err)
 				continue
 			}
@@ -7656,5 +7652,11 @@ func (s *Store) retryFromFailure(runID uuid.UUID, admit bool) (*JobRun, error) {
 		metrics.JobsActive.WithLabelValues(jobID.String()).Inc()
 	}
 
-	return s.loadRun(runID)
+	loaded, err := s.loadRun(runID)
+	if err != nil {
+		// The reopen and task resets are committed. Preserve their exact identity
+		// so a read-back failure cannot be mistaken for an unaccepted retry.
+		return nil, &RunCommittedError{RunID: runID, JobID: jobID, Err: err}
+	}
+	return loaded, nil
 }
