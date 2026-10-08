@@ -1729,7 +1729,7 @@ jobs:
           prereqs="$PWD/.tmp/coverage-backends"
           mkdir -p "$prereqs"
           python3 - "$prereqs" <<'PY'
-          import datetime, hashlib, json, pathlib, re, runpy, shutil, subprocess, sys, tarfile, time
+          import datetime, hashlib, json, pathlib, re, runpy, shutil, signal, subprocess, sys, tarfile, time
           import urllib.error, urllib.parse, urllib.request
           root = pathlib.Path(sys.argv[1]).resolve()
           archive = root / 'task.tar'
@@ -1779,13 +1779,32 @@ jobs:
               def redirect_request(self, req, fp, code, msg, headers, newurl):
                   return None
           opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
-          def fetch(url, token=None, config_redirect=False):
+          def metadata_deadline(signum, frame):
+              raise TimeoutError('registry metadata wall deadline exceeded')
+          def fetch(url, token=None, config_redirect=False, deadline=None):
+              if deadline is None:
+                  # A socket timeout only limits inactivity: trickled headers or
+                  # buffered reads can otherwise block forever. Bound the whole
+                  # request, including a config redirect, with one POSIX wall timer.
+                  started = time.monotonic()
+                  previous_handler = signal.getsignal(signal.SIGALRM)
+                  previous_timer = signal.setitimer(signal.ITIMER_REAL, 0)
+                  try:
+                      signal.signal(signal.SIGALRM, metadata_deadline)
+                      seconds = min(30, previous_timer[0]) if previous_timer[0] else 30
+                      signal.setitimer(signal.ITIMER_REAL, seconds)
+                      return fetch(url, token, config_redirect, deadline=started + seconds)
+                  finally:
+                      signal.setitimer(signal.ITIMER_REAL, 0)
+                      signal.signal(signal.SIGALRM, previous_handler)
+                      if previous_timer[0]:
+                          remaining = max(0.000001, previous_timer[0] - (time.monotonic() - started))
+                          signal.setitimer(signal.ITIMER_REAL, remaining, previous_timer[1])
               headers = {'Accept': ', '.join((index_type, manifest_type, config_type, 'application/json')),
                          'Accept-Encoding': 'identity'}
               if token:
                   headers['Authorization'] = 'Bearer ' + token
               podman_receipt['request_count'] += 1
-              deadline = time.monotonic() + 30
               try:
                   response = opener.open(urllib.request.Request(url, headers=headers), timeout=10)
               except urllib.error.HTTPError as error:
@@ -1799,7 +1818,7 @@ jobs:
                               and destination.password is None and destination.port in (None, 443)
                               and re.fullmatch(r'cdn[0-9]{2}\.quay\.io', destination.hostname or '')), 'foreign config redirect'
                       # Only the descriptor-bound config may redirect. Never forward its bearer.
-                      return fetch(location)
+                      return fetch(location, deadline=deadline)
                   assert response.code == 200, 'registry metadata unavailable'
                   assert response.headers.get('Content-Encoding', 'identity') == 'identity', 'encoded registry metadata'
                   length = response.headers.get('Content-Length')

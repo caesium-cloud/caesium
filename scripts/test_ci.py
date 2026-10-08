@@ -1835,6 +1835,7 @@ class SystemSuiteLaneWiringTests(unittest.TestCase):
 
     def _podman_metadata_fixture(self, fault=None):
         """Quay transport seam for the actual embedded workflow resolver."""
+        import time
         import urllib.error
 
         index_type = "application/vnd.oci.image.index.v1+json"
@@ -1877,8 +1878,9 @@ class SystemSuiteLaneWiringTests(unittest.TestCase):
         log = []
 
         class Response:
-            def __init__(self, body, media="application/json", header_digest=None, read_error=False):
+            def __init__(self, body, media="application/json", header_digest=None, read_error=False, read_stall=False):
                 self.body, self.offset, self.read_error = body, 0, read_error
+                self.read_stall = read_stall
                 self.code = 200
                 self.headers = {"Content-Type": media, "Content-Length": str(len(body))}
                 if header_digest:
@@ -1891,6 +1893,27 @@ class SystemSuiteLaneWiringTests(unittest.TestCase):
                 pass
 
             def read(self, size):
+                if self.read_stall:
+                    if not hasattr(self, "buffered"):
+                        body = self.body
+
+                        class Trickle(io.RawIOBase):
+                            offset = 0
+
+                            def readable(self):
+                                return True
+
+                            def readinto(self, buffer):
+                                # Every receive is below the socket inactivity
+                                # timeout, while BufferedReader.read stays blocked.
+                                time.sleep(0.04)
+                                chunk = body[self.offset:self.offset + 64]
+                                buffer[:len(chunk)] = chunk
+                                self.offset += len(chunk)
+                                return len(chunk)
+
+                        self.buffered = io.BufferedReader(Trickle())
+                    return self.buffered.read(size)
                 if self.read_error and self.offset:
                     raise OSError(secret + " https://cdn01.quay.io/config?signature=private")
                 chunk = self.body[self.offset:self.offset + size]
@@ -1903,25 +1926,34 @@ class SystemSuiteLaneWiringTests(unittest.TestCase):
                 self.assertEqual(timeout, 10)
                 url = request.full_url
                 if "/v2/auth?" in url:
+                    if fault == "wall-auth-stall":
+                        time.sleep(0.4)
                     self.assertNotIn("Authorization", dict(request.header_items()))
                     return Response(json.dumps({"token": secret}).encode())
                 if url.startswith("https://cdn01.quay.io/"):
+                    if fault == "wall-redirect-stall":
+                        time.sleep(0.08)
                     self.assertNotIn("Authorization", dict(request.header_items()))
                     self.assertNotIn("Cookie", dict(request.header_items()))
                     return Response(config, "application/octet-stream")
                 self.assertEqual(request.get_header("Authorization"), "Bearer " + secret)
                 if "/blobs/" in url:
-                    if fault in {"redirect", "foreign-redirect", "credential-redirect"}:
+                    if fault in {"redirect", "foreign-redirect", "credential-redirect", "wall-redirect-stall"}:
+                        if fault == "wall-redirect-stall":
+                            time.sleep(0.08)
                         location = {"foreign-redirect": "https://evil.example/config?signature=private",
                                     "credential-redirect": "https://user:password@cdn01.quay.io/config?signature=private"}.get(
                                         fault, "https://cdn01.quay.io/config?signature=private")
                         raise urllib.error.HTTPError(url, 302, "signed " + location, {"Location": location}, io.BytesIO())
                     return Response(config + (b"corruption" if fault == "config-body" else b""), config_type, config_id)
                 if url.endswith("manifests/v5.8.7"):
+                    if fault == "wall-open-stall":
+                        # opener.open includes SSL negotiation and header parsing.
+                        time.sleep(0.4)
                     # A changing tag would return unrelated bytes if rediscovered.
-                    self.assertEqual(sum(entry[1].endswith("manifests/v5.8.7") for entry in log), 1)
+                    self.assertEqual(sum(entry[0] == "http" and entry[1].endswith("manifests/v5.8.7") for entry in log), 1)
                     response = Response(index, index_type, "sha256:" + "ff" * 32 if fault == "header" else index_id,
-                                        read_error=fault == "partial-read-error")
+                                        read_error=fault == "partial-read-error", read_stall=fault == "wall-body-stall")
                     if fault == "overflow":
                         response.body = index + b" " * (256 * 1024)
                         del response.headers["Content-Length"]
@@ -1941,7 +1973,8 @@ class SystemSuiteLaneWiringTests(unittest.TestCase):
                 "child_ref": repository + "@" + child_id, "index_ref": repository + "@" + index_id,
                 "secret": secret}
 
-    def _exercise_podman_resolution(self, fault=None, loaded_kind="config"):
+    def _exercise_podman_resolution(self, fault=None, loaded_kind="config", wall_budget=None):
+        import signal
         import urllib.request
         from unittest.mock import patch
 
@@ -1954,6 +1987,11 @@ class SystemSuiteLaneWiringTests(unittest.TestCase):
         fixture = self._podman_metadata_fixture(fault)
         log = fixture["log"]
         identity = fixture[loaded_kind + "_id"]
+        setitimer = signal.setitimer
+
+        def timer(which, seconds, interval=0):
+            log.append(("timer", seconds, interval))
+            return setitimer(which, wall_budget if wall_budget is not None and seconds == 30 else seconds, interval)
 
         def call(args, timeout):
             log.append(("pull", args))
@@ -1981,6 +2019,7 @@ class SystemSuiteLaneWiringTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             with patch.object(sys, "argv", ["-", directory]), \
                     patch.object(urllib.request, "build_opener", return_value=fixture["opener"]), \
+                    patch.object(signal, "setitimer", side_effect=timer), \
                     patch.object(subprocess, "check_call", side_effect=call), \
                     patch.object(subprocess, "check_output", side_effect=output):
                 error = None
@@ -1994,7 +2033,8 @@ class SystemSuiteLaneWiringTests(unittest.TestCase):
             self.assertNotIn(fixture["secret"].encode(), retained)
             self.assertNotIn(b"signature=private", retained)
             self.assertNotIn(b"user:password", retained)
-            self.assertEqual(sum(entry[0] == "http" and entry[1].endswith("manifests/v5.8.7") for entry in log), 1)
+            self.assertEqual(sum(entry[0] == "http" and entry[1].endswith("manifests/v5.8.7") for entry in log),
+                             0 if fault == "wall-auth-stall" else 1)
             self.assertFalse((Path(directory) / "backend-producer-inputs.json").exists())
             if fault not in {None, "redirect", "retarget"}:
                 self.assertIsNotNone(error, fault)
@@ -2026,6 +2066,65 @@ class SystemSuiteLaneWiringTests(unittest.TestCase):
                 self.assertNotIn("docker_image_id", receipt)
                 self.assertEqual(receipt["phase"], "immutable-pull")
             return receipt, log
+
+    def test_podman_metadata_wall_deadline_interrupts_open_and_buffered_read(self):
+        import signal
+        import time
+
+        for fault, phase in (("wall-auth-stall", "auth"), ("wall-open-stall", "discovery-index"),
+                             ("wall-body-stall", "discovery-index")):
+            with self.subTest(fault=fault):
+                before_handler = signal.getsignal(signal.SIGALRM)
+                before_timer = signal.getitimer(signal.ITIMER_REAL)
+                started = time.monotonic()
+                receipt, log = self._exercise_podman_resolution(fault, wall_budget=0.12)
+                self.assertLess(time.monotonic() - started, 0.35)
+                self.assertEqual(receipt["error_type"], "TimeoutError")
+                self.assertEqual(receipt["phase"], phase)
+                self.assertFalse(receipt["loaded_image_observed"])
+                self.assertFalse(any(entry[0] == "pull" for entry in log))
+                self.assertEqual(signal.getsignal(signal.SIGALRM), before_handler)
+                self.assertEqual(signal.getitimer(signal.ITIMER_REAL), before_timer)
+
+    def test_podman_metadata_redirect_shares_original_wall_deadline(self):
+        import time
+
+        started = time.monotonic()
+        receipt, log = self._exercise_podman_resolution("wall-redirect-stall", wall_budget=0.12)
+        self.assertLess(time.monotonic() - started, 0.35)
+        self.assertEqual(receipt["error_type"], "TimeoutError")
+        self.assertEqual(receipt["phase"], "selected-config")
+        self.assertEqual(receipt["request_count"], 6)
+        self.assertFalse(any(entry[0] == "pull" for entry in log))
+        # Auth/index/immutable index/manifest/config have five wall timers;
+        # the cross-origin config request must not allocate a sixth budget.
+        self.assertEqual(sum(entry[0] == "timer" and entry[1] == 30 for entry in log), 5)
+
+    def test_podman_metadata_wall_timer_restores_prior_handler_and_timer(self):
+        import signal
+        import time
+
+        def prior_handler(signum, frame):
+            self.fail("the prior long-lived timer must not expire")
+
+        saved_handler = signal.getsignal(signal.SIGALRM)
+        saved_timer = signal.setitimer(signal.ITIMER_REAL, 0)
+        try:
+            signal.signal(signal.SIGALRM, prior_handler)
+            signal.setitimer(signal.ITIMER_REAL, 60, 7)
+            for fault in (None, "wall-body-stall"):
+                with self.subTest(fault=fault):
+                    before, interval = signal.getitimer(signal.ITIMER_REAL)
+                    started = time.monotonic()
+                    self._exercise_podman_resolution(fault, wall_budget=0.12)
+                    after, restored_interval = signal.getitimer(signal.ITIMER_REAL)
+                    self.assertIs(signal.getsignal(signal.SIGALRM), prior_handler)
+                    self.assertEqual(restored_interval, interval)
+                    self.assertAlmostEqual(after, before - (time.monotonic() - started), delta=0.02)
+        finally:
+            signal.setitimer(signal.ITIMER_REAL, 0)
+            signal.signal(signal.SIGALRM, saved_handler)
+            signal.setitimer(signal.ITIMER_REAL, *saved_timer)
 
     def test_podman_v587_resolution_chain_and_actual_id(self):
         for kind in ("index", "child", "config"):
