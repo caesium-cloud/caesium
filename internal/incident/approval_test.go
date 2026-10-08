@@ -8,6 +8,7 @@ import (
 
 	"github.com/caesium-cloud/caesium/internal/event"
 	"github.com/caesium-cloud/caesium/internal/models"
+	fixturejson "github.com/caesium-cloud/caesium/internal/testutil"
 	"github.com/caesium-cloud/caesium/pkg/env"
 	schema "github.com/caesium-cloud/caesium/pkg/jobdef"
 	"github.com/google/uuid"
@@ -508,7 +509,7 @@ func TestApplyJobdefPatchRefusesEditingItsOwnPolicy(t *testing.T) {
 	var job models.Job
 	require.NoError(t, db.First(&job, "id = ?", jobID).Error)
 	require.NoError(t, db.Model(&models.Job{}).Where("id = ?", jobID).
-		Update("remediation", datatypes.JSON(mustJSON(t, triageOnlyBlock()))).Error)
+		Update("remediation", datatypes.JSON(fixturejson.MustJSONBytes(t, triageOnlyBlock()))).Error)
 
 	widened := &schema.MetadataRemediation{
 		Profile: "triage-only",
@@ -554,7 +555,7 @@ func TestApplyJobdefPatchRefusesRemovingItsOwnPolicy(t *testing.T) {
 	var job models.Job
 	require.NoError(t, db.First(&job, "id = ?", jobID).Error)
 	require.NoError(t, db.Model(&models.Job{}).Where("id = ?", jobID).
-		Update("remediation", datatypes.JSON(mustJSON(t, triageOnlyBlock()))).Error)
+		Update("remediation", datatypes.JSON(fixturejson.MustJSONBytes(t, triageOnlyBlock()))).Error)
 
 	action, err := exec.Execute(context.Background(), ActionRequest{
 		IncidentID: inc.ID,
@@ -582,7 +583,7 @@ func TestApplyJobdefPatchAllowsAnUnchangedPolicy(t *testing.T) {
 	var job models.Job
 	require.NoError(t, db.First(&job, "id = ?", jobID).Error)
 	require.NoError(t, db.Model(&models.Job{}).Where("id = ?", jobID).
-		Update("remediation", datatypes.JSON(mustJSON(t, triageOnlyBlock()))).Error)
+		Update("remediation", datatypes.JSON(fixturejson.MustJSONBytes(t, triageOnlyBlock()))).Error)
 
 	action, err := exec.Execute(context.Background(), ActionRequest{
 		IncidentID: inc.ID,

@@ -3,10 +3,10 @@ package cache
 import (
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"strings"
 
+	"github.com/caesium-cloud/caesium/internal/clihttp"
 	"github.com/spf13/cobra"
 )
 
@@ -14,25 +14,15 @@ var pruneServer string
 
 var pruneCmd = &cobra.Command{
 	Use:   "prune",
+	Args:  cobra.NoArgs,
 	Short: "Prune expired cache entries",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		server := strings.TrimSuffix(pruneServer, "/")
 		url := fmt.Sprintf("%s/v1/cache/prune", server)
 
-		req, err := http.NewRequestWithContext(cmd.Context(), http.MethodPost, url, nil)
-		if err != nil {
+		body, status, readErr := clihttp.Exchange(cmd.Context(), http.DefaultClient, http.MethodPost, url, nil, make(http.Header))
+		if err := clihttp.ResponseError("cache prune", status, body, readErr); err != nil {
 			return err
-		}
-
-		resp, err := http.DefaultClient.Do(req)
-		if err != nil {
-			return err
-		}
-		defer func() { _ = resp.Body.Close() }()
-
-		body, _ := io.ReadAll(resp.Body)
-		if resp.StatusCode >= http.StatusBadRequest {
-			return fmt.Errorf("cache prune failed (%d): %s", resp.StatusCode, strings.TrimSpace(string(body)))
 		}
 
 		var result struct {

@@ -3,11 +3,11 @@ package receipt
 import (
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"os"
 	"strings"
 
+	"github.com/caesium-cloud/caesium/internal/clihttp"
 	ireceipt "github.com/caesium-cloud/caesium/internal/receipt"
 	"github.com/spf13/cobra"
 )
@@ -21,6 +21,7 @@ var (
 
 var getCmd = &cobra.Command{
 	Use:   "get",
+	Args:  cobra.NoArgs,
 	Short: "Fetch the reproducibility receipt for a run",
 	Long: "Fetch the content-addressed reproducibility receipt for a run from " +
 		"the server and print it (or write it to a file with --output). Commit " +
@@ -34,20 +35,9 @@ var getCmd = &cobra.Command{
 		server := strings.TrimSuffix(getServer, "/")
 		url := fmt.Sprintf("%s/v1/jobs/%s/runs/%s/receipt", server, getJobID, getRunID)
 
-		req, err := http.NewRequestWithContext(cmd.Context(), http.MethodGet, url, nil)
-		if err != nil {
+		body, status, readErr := clihttp.Exchange(cmd.Context(), http.DefaultClient, http.MethodGet, url, nil, make(http.Header))
+		if err := clihttp.ResponseError("receipt get", status, body, readErr); err != nil {
 			return err
-		}
-
-		resp, err := http.DefaultClient.Do(req)
-		if err != nil {
-			return err
-		}
-		defer func() { _ = resp.Body.Close() }()
-
-		body, _ := io.ReadAll(resp.Body)
-		if resp.StatusCode >= http.StatusBadRequest {
-			return fmt.Errorf("receipt get failed (%d): %s", resp.StatusCode, strings.TrimSpace(string(body)))
 		}
 
 		// Pretty-print canonically so the committed file is stable and diffable.

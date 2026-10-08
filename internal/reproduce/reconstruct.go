@@ -16,6 +16,7 @@ import (
 
 	"github.com/caesium-cloud/caesium/internal/imagecheck"
 	jobdefruntime "github.com/caesium-cloud/caesium/internal/jobdef/runtime"
+	"github.com/caesium-cloud/caesium/internal/strutil"
 	"github.com/caesium-cloud/caesium/pkg/container"
 	pkgjobdef "github.com/caesium-cloud/caesium/pkg/jobdef"
 	pkgtask "github.com/caesium-cloud/caesium/pkg/task"
@@ -463,19 +464,18 @@ func BuildDefinition(desc *Descriptor, env *Envelope, timeout time.Duration) *pk
 	}
 }
 
-func predecessorOutputEnv(desc *Descriptor) (map[string]string, []Warning, error) {
+// predecessorOutputsByName indexes descriptor-owned maps without cloning them.
+// Callers that need independent ownership must clone the inner maps.
+func predecessorOutputsByName(desc *Descriptor) (map[string]map[string]string, []string) {
 	byName := make(map[string]map[string]string)
 	used := make(map[string]struct{})
-	warnings := make([]Warning, 0)
 	for _, pred := range desc.DAG.Predecessors {
-		outputs := desc.DAG.PredecessorOutputs[pred.TaskID]
-		if len(outputs) == 0 {
-			continue
+		if outputs := desc.DAG.PredecessorOutputs[pred.TaskID]; len(outputs) > 0 {
+			byName[firstNonEmpty(pred.TaskName, pred.TaskID)] = outputs
+			used[pred.TaskID] = struct{}{}
 		}
-		name := firstNonEmpty(pred.TaskName, pred.TaskID)
-		byName[name] = cloneMap(outputs)
-		used[pred.TaskID] = struct{}{}
 	}
+	var unmatchedIDs []string
 	for id, outputs := range desc.DAG.PredecessorOutputs {
 		if len(outputs) == 0 {
 			continue
@@ -483,7 +483,19 @@ func predecessorOutputEnv(desc *Descriptor) (map[string]string, []Warning, error
 		if _, ok := used[id]; ok {
 			continue
 		}
-		byName[id] = cloneMap(outputs)
+		byName[id] = outputs
+		unmatchedIDs = append(unmatchedIDs, id)
+	}
+	return byName, unmatchedIDs
+}
+
+func predecessorOutputEnv(desc *Descriptor) (map[string]string, []Warning, error) {
+	byName, unmatchedIDs := predecessorOutputsByName(desc)
+	for name, outputs := range byName {
+		byName[name] = cloneMap(outputs)
+	}
+	warnings := make([]Warning, 0)
+	for _, id := range unmatchedIDs {
 		warnings = append(warnings, Warning{
 			Code:    WarningOutputMissingName,
 			Message: fmt.Sprintf("predecessor output %s had no matching predecessor name; using UUID in CAESIUM_OUTPUT_* env", id),
@@ -684,23 +696,7 @@ func buildFidelitySummary(desc *Descriptor, env *Envelope, opts ReconstructOptio
 }
 
 func outputRefFidelityDetails(desc *Descriptor) []string {
-	byName := make(map[string]map[string]string)
-	used := make(map[string]struct{})
-	for _, pred := range desc.DAG.Predecessors {
-		if outputs := desc.DAG.PredecessorOutputs[pred.TaskID]; len(outputs) > 0 {
-			byName[firstNonEmpty(pred.TaskName, pred.TaskID)] = outputs
-			used[pred.TaskID] = struct{}{}
-		}
-	}
-	for id, outputs := range desc.DAG.PredecessorOutputs {
-		if len(outputs) == 0 {
-			continue
-		}
-		if _, ok := used[id]; ok {
-			continue
-		}
-		byName[id] = outputs
-	}
+	byName, _ := predecessorOutputsByName(desc)
 
 	var details []string
 	for stepName, outputs := range byName {
@@ -1032,11 +1028,7 @@ func resolvedSecretEnvKeys(resolved []SecretResolution) []string {
 
 func sortedKeys(values map[string]string) []string {
 	keys := make([]string, 0, len(values))
-	for key := range values {
-		keys = append(keys, key)
-	}
-	sort.Strings(keys)
-	return keys
+	return append(keys, slices.Sorted(maps.Keys(values))...)
 }
 
 func cloneMap[K comparable, V any](values map[K]V) map[K]V {
@@ -1090,11 +1082,4 @@ func sortWarnings(warnings []Warning) {
 	})
 }
 
-func firstNonEmpty(values ...string) string {
-	for _, value := range values {
-		if strings.TrimSpace(value) != "" {
-			return value
-		}
-	}
-	return ""
-}
+func firstNonEmpty(values ...string) string { return strutil.FirstNonBlank(values...) }

@@ -2,9 +2,10 @@ package http
 
 import (
 	"encoding/json"
-	"fmt"
 	"strconv"
 	"strings"
+
+	"github.com/caesium-cloud/caesium/internal/eventmatch"
 )
 
 func extractParams(body []byte, mapping map[string]string) map[string]string {
@@ -30,7 +31,7 @@ func extractParams(body []byte, mapping map[string]string) map[string]string {
 
 func resolveJSONPath(payload any, path string) (string, bool) {
 	if strings.TrimSpace(path) == "$" {
-		return stringifyJSONValue(payload)
+		return eventmatch.StringifyJSONValue(payload)
 	}
 
 	segments := parseJSONPath(path)
@@ -47,7 +48,7 @@ func resolveJSONPath(payload any, path string) (string, bool) {
 		current = next
 	}
 
-	return stringifyJSONValue(current)
+	return eventmatch.StringifyJSONValue(current)
 }
 
 func parseJSONPath(path string) []string {
@@ -92,34 +93,5 @@ func descendJSONPath(current any, segment string) (any, bool) {
 		return value[index], true
 	default:
 		return nil, false
-	}
-}
-
-func stringifyJSONValue(value any) (string, bool) {
-	switch v := value.(type) {
-	case nil:
-		return "", false
-	case string:
-		return v, true
-	case json.Number:
-		return v.String(), true
-	case bool:
-		return strconv.FormatBool(v), true
-	case float64:
-		return strconv.FormatFloat(v, 'f', -1, 64), true
-	case float32:
-		return strconv.FormatFloat(float64(v), 'f', -1, 32), true
-	case int:
-		return strconv.Itoa(v), true
-	case int64:
-		return strconv.FormatInt(v, 10), true
-	case uint64:
-		return strconv.FormatUint(v, 10), true
-	default:
-		data, err := json.Marshal(v)
-		if err != nil {
-			return fmt.Sprint(v), true
-		}
-		return string(data), true
 	}
 }

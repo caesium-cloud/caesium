@@ -3,6 +3,7 @@ package lineage
 import (
 	"context"
 	"encoding/json"
+	"slices"
 	"strings"
 	"time"
 
@@ -154,8 +155,8 @@ type datasetRef struct {
 // (direction='output') joined with job provenance.
 //
 // Using a subquery avoids loading intermediate task_run_id values into Go
-// memory and sidesteps the SQLite/dqlite 999-host-parameter limit that would
-// be hit by a large IN (?,?,…,?) list.
+// memory. Chunking the frontier also bounds each query's parameters and
+// expression width without assuming a backend-specific parameter limit.
 //
 // Results are ordered by (ld.created_at DESC, ld.id DESC) so that when the
 // same (namespace, name) output was produced by multiple task runs the most
@@ -166,29 +167,8 @@ func findConsumers(ctx context.Context, db *gorm.DB, frontier []datasetRef) ([]I
 		return nil, nil
 	}
 
-	// Build the frontier (namespace = ? AND name = ?) OR arms.
-	// The number of arms is bounded by the BFS frontier width, which is
-	// small in practice (one arm per distinct dataset at this depth level).
-	orArms := make([]string, len(frontier))
-	// subArgs holds the placeholder values for the subquery's WHERE clause.
-	subArgs := make([]any, 0, len(frontier)*2)
-	for i, f := range frontier {
-		orArms[i] = "(namespace = ? AND name = ?)"
-		subArgs = append(subArgs, f.namespace, f.name)
-	}
-
-	// The subquery selects task_run_ids that consumed any frontier dataset as
-	// an input.  The ? placeholders are filled by subArgs in the Scan call.
-	subquery := "SELECT task_run_id FROM lineage_datasets" +
-		" WHERE direction = 'input' AND (" + strings.Join(orArms, " OR ") + ")"
-
-	// The outer WHERE clause matches output rows whose task_run_id is in the
-	// subquery.  Args: 'output' for ld.direction, then subArgs for the
-	// embedded subquery placeholders.
-	outerWhere := "ld.direction = ? AND ld.task_run_id IN (" + subquery + ")"
-	queryArgs := append([]any{"output"}, subArgs...)
-
 	type outputRow struct {
+		ID               uuid.UUID
 		Namespace        string
 		Name             string
 		FacetSummary     []byte
@@ -199,23 +179,62 @@ func findConsumers(ctx context.Context, db *gorm.DB, frontier []datasetRef) ([]I
 		CreatedAt        time.Time
 	}
 	var outputRows []outputRow
+	seen := make(map[uuid.UUID]struct{})
+	for chunk := range slices.Chunk(frontier, 400) {
+		// Build the frontier (namespace = ? AND name = ?) OR arms.
+		// Each chunk bounds query parameters and expression width.
+		orArms := make([]string, len(chunk))
+		// subArgs holds the placeholder values for the subquery's WHERE clause.
+		subArgs := make([]any, 0, len(chunk)*2)
+		for i, f := range chunk {
+			orArms[i] = "(namespace = ? AND name = ?)"
+			subArgs = append(subArgs, f.namespace, f.name)
+		}
 
-	err := db.WithContext(ctx).
-		Table("lineage_datasets ld").
-		Select(
-			"ld.namespace, ld.name, ld.facet_summary, ld.created_at,"+
-				" j.id as job_id, j.alias as job_alias,"+
-				" j.provenance_commit, j.provenance_repo",
-		).
-		Joins("JOIN task_runs tr ON tr.id = ld.task_run_id").
-		Joins("JOIN job_runs jr ON jr.id = tr.job_run_id").
-		Joins("JOIN jobs j ON j.id = jr.job_id").
-		Where(outerWhere, queryArgs...).
-		Order("ld.created_at DESC, ld.id DESC").
-		Scan(&outputRows).Error
-	if err != nil {
-		return nil, err
+		// The subquery selects task_run_ids that consumed any frontier dataset as
+		// an input.  The ? placeholders are filled by subArgs in the Scan call.
+		subquery := "SELECT task_run_id FROM lineage_datasets" +
+			" WHERE direction = 'input' AND (" + strings.Join(orArms, " OR ") + ")"
+
+		// The outer WHERE clause matches output rows whose task_run_id is in the
+		// subquery.  Args: 'output' for ld.direction, then subArgs for the
+		// embedded subquery placeholders.
+		outerWhere := "ld.direction = ? AND ld.task_run_id IN (" + subquery + ")"
+		queryArgs := append([]any{"output"}, subArgs...)
+
+		var chunkRows []outputRow
+
+		err := db.WithContext(ctx).
+			Table("lineage_datasets ld").
+			Select(
+				"ld.id, ld.namespace, ld.name, ld.facet_summary, ld.created_at,"+
+					" j.id as job_id, j.alias as job_alias,"+
+					" j.provenance_commit, j.provenance_repo",
+			).
+			Joins("JOIN task_runs tr ON tr.id = ld.task_run_id").
+			Joins("JOIN job_runs jr ON jr.id = tr.job_run_id").
+			Joins("JOIN jobs j ON j.id = jr.job_id").
+			Where(outerWhere, queryArgs...).
+			Order("ld.created_at DESC, ld.id DESC").
+			Scan(&chunkRows).Error
+		if err != nil {
+			return nil, err
+		}
+
+		for _, row := range chunkRows {
+			if _, exists := seen[row.ID]; exists {
+				continue
+			}
+			seen[row.ID] = struct{}{}
+			outputRows = append(outputRows, row)
+		}
 	}
+	slices.SortFunc(outputRows, func(a, b outputRow) int {
+		if c := b.CreatedAt.Compare(a.CreatedAt); c != 0 {
+			return c
+		}
+		return strings.Compare(b.ID.String(), a.ID.String())
+	})
 
 	nodes := make([]ImpactNode, 0, len(outputRows))
 	for _, row := range outputRows {

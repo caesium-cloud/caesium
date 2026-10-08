@@ -1,11 +1,12 @@
 package contract
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
 	"os"
-	"sort"
+	"slices"
 	"strings"
 
 	internalcontract "github.com/caesium-cloud/caesium/internal/contract"
@@ -160,17 +161,17 @@ func FindingsFromGraph(graph internalcontract.Graph) []Finding {
 			})
 		}
 	}
-	sort.Slice(findings, func(i, j int) bool {
-		if findings[i].Verdict != findings[j].Verdict {
-			return findings[i].Verdict < findings[j].Verdict
+	slices.SortFunc(findings, func(a, b Finding) int {
+		if order := cmp.Compare(a.Verdict, b.Verdict); order != 0 {
+			return order
 		}
-		if findings[i].EdgeID != findings[j].EdgeID {
-			return findings[i].EdgeID < findings[j].EdgeID
+		if order := cmp.Compare(a.EdgeID, b.EdgeID); order != 0 {
+			return order
 		}
-		if findings[i].Path != findings[j].Path {
-			return findings[i].Path < findings[j].Path
+		if order := cmp.Compare(a.Path, b.Path); order != 0 {
+			return order
 		}
-		return findings[i].Detail < findings[j].Detail
+		return cmp.Compare(a.Detail, b.Detail)
 	})
 	return findings
 }

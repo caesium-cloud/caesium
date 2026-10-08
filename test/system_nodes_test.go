@@ -118,8 +118,8 @@ func (s *IntegrationTestSuite) requireCLIRefusal(id, reason string) memberRemova
 	s.T().Helper()
 
 	stdout, stderr, err := s.runCLISeparate("system", "nodes", "remove", id, "--json", "--server", s.caesiumURL)
-	var exitErr *exec.ExitError
-	s.Require().Truef(errors.As(err, &exitErr), "a refused removal must exit non-zero, got %v\nstdout: %s\nstderr: %s", err, stdout, stderr)
+	exitErr, ok := errors.AsType[*exec.ExitError](err)
+	s.Require().Truef(ok, "a refused removal must exit non-zero, got %v\nstdout: %s\nstderr: %s", err, stdout, stderr)
 	s.NotZero(exitErr.ExitCode())
 	var answer memberRemovalAnswer
 	s.Require().NoError(json.Unmarshal([]byte(stdout), &answer),

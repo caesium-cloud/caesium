@@ -3,11 +3,12 @@
 package robustness
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"sort"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -33,7 +34,7 @@ func runStaleGeneration(t *testing.T, fe *faultEnv) {
 	if len(eligible) == 0 {
 		t.Fatalf("inconclusive: no worker run owner outside dqlite leader %s", fe.leader.Name)
 	}
-	sort.Slice(eligible, func(i, j int) bool { return eligible[i].Name < eligible[j].Name })
+	slices.SortFunc(eligible, func(a, b cluster.Member) int { return cmp.Compare(a.Name, b.Name) })
 	owner := eligible[0]
 	alias := uniqueAlias("stale")
 	def := cluster.FixtureDefinition(alias, fe.env.TaskImage)

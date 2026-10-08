@@ -355,7 +355,7 @@ func selectWhyInstance(rows []models.TaskRun, taskName, partition string) (*mode
 	}
 
 	if partition == "" {
-		if isFannedGroup(rows) {
+		if models.IsFannedGroup(len(rows), rows[0].PartitionValue) {
 			return nil, nil
 		}
 		return &rows[0], nil
@@ -367,21 +367,11 @@ func selectWhyInstance(rows []models.TaskRun, taskName, partition string) (*mode
 		}
 	}
 
-	if !isFannedGroup(rows) {
+	if !models.IsFannedGroup(len(rows), rows[0].PartitionValue) {
 		return nil, fmt.Errorf("%w: task %q is not fanned, so it has no partition %q", ErrPartitionNotFound, taskName, partition)
 	}
 	return nil, fmt.Errorf("%w: task %q has no partition %q; available partitions: %s",
 		ErrPartitionNotFound, taskName, partition, strings.Join(partitionValuesCapped(rows), ", "))
-}
-
-// isFannedGroup reports whether the instance rows describe a fan-out group. A
-// single-partition group (N=1) is still fanned — it carries a partition value —
-// and must not be answered as if it were an ordinary task.
-func isFannedGroup(rows []models.TaskRun) bool {
-	if len(rows) > 1 {
-		return true
-	}
-	return len(rows) == 1 && rows[0].PartitionValue != ""
 }
 
 // partitionValuesCapped renders the group's partition values for an operator

@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/caesium-cloud/caesium/api"
+	"github.com/caesium-cloud/caesium/internal/runlife"
 	"github.com/caesium-cloud/caesium/pkg/db"
 	"github.com/caesium-cloud/caesium/pkg/log"
 	"golang.org/x/sync/errgroup"
@@ -15,6 +16,7 @@ import (
 const defaultShutdownGracePeriod = 30 * time.Second
 
 type shutdownConfig struct {
+	supervisor       *runlife.Supervisor
 	cancel           context.CancelFunc
 	gracePeriod      time.Duration
 	apiShutdown      func(context.Context) error
@@ -26,6 +28,7 @@ type shutdownCoordinator struct {
 	once sync.Once
 	wg   sync.WaitGroup
 
+	supervisor       *runlife.Supervisor
 	cancel           context.CancelFunc
 	gracePeriod      time.Duration
 	apiShutdown      func(context.Context) error
@@ -58,6 +61,7 @@ func newShutdownCoordinator(config shutdownConfig) *shutdownCoordinator {
 
 	return &shutdownCoordinator{
 		cancel:           config.cancel,
+		supervisor:       config.supervisor,
 		gracePeriod:      config.gracePeriod,
 		apiShutdown:      config.apiShutdown,
 		internalShutdown: config.internalShutdown,
@@ -126,11 +130,17 @@ func (s *shutdownCoordinator) shutdown() error {
 		shutdownErrs = append(shutdownErrs, err)
 	}
 
+	if s.supervisor != nil {
+		s.supervisor.CloseAndCancel()
+	}
 	if s.cancel != nil {
 		s.cancel()
 	}
 
-	if err := s.wait(graceCtx); err != nil {
+	var joins errgroup.Group
+	joins.Go(func() error { return s.wait(graceCtx) })
+	joins.Go(func() error { return s.supervisor.Wait(graceCtx) })
+	if err := joins.Wait(); err != nil {
 		log.Error("shutdown timed out waiting for background routines", "error", err)
 		shutdownErrs = append(shutdownErrs, err)
 	}

@@ -7,6 +7,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -775,11 +777,7 @@ func OutputNamesIndexEnv(stepName string) string {
 func EncodeOutputNamesIndex(outputs map[string]string) (string, error) {
 	index := make(map[string]string, len(outputs))
 	needed := false
-	keys := make([]string, 0, len(outputs))
-	for key := range outputs {
-		keys = append(keys, key)
-	}
-	sort.Strings(keys)
+	keys := slices.Sorted(maps.Keys(outputs))
 	for _, key := range keys {
 		folded := NormalizeStepName(key)
 		if prior, exists := index[folded]; exists {
@@ -848,11 +846,7 @@ func BuildOutputEnv(predecessorOutputs map[string]map[string]string) (map[string
 		return nil
 	}
 
-	stepNames := make([]string, 0, len(predecessorOutputs))
-	for stepName := range predecessorOutputs {
-		stepNames = append(stepNames, stepName)
-	}
-	sort.Strings(stepNames)
+	stepNames := slices.Sorted(maps.Keys(predecessorOutputs))
 	for _, stepName := range stepNames {
 		outputs := predecessorOutputs[stepName]
 		prefix := "CAESIUM_OUTPUT_" + NormalizeStepName(stepName) + "_"
@@ -861,11 +855,7 @@ func BuildOutputEnv(predecessorOutputs map[string]map[string]string) (map[string
 			return nil, fmt.Errorf("building output environment for step %q: %w", stepName, err)
 		}
 
-		keys := make([]string, 0, len(outputs))
-		for key := range outputs {
-			keys = append(keys, key)
-		}
-		sort.Strings(keys)
+		keys := slices.Sorted(maps.Keys(outputs))
 		for _, k := range keys {
 			v := outputs[k]
 			envKey := prefix + NormalizeStepName(k)
@@ -952,14 +942,12 @@ func AggregateFanInOutputs(producer string, byPartition map[string]map[string]st
 		}, nil
 	}
 	keys := map[string]struct{}{}
-	partKeys := make([]string, 0, len(byPartition))
-	for p, outs := range byPartition {
-		partKeys = append(partKeys, p)
-		for k := range outs {
+	partKeys := slices.Sorted(maps.Keys(byPartition))
+	for _, p := range partKeys {
+		for k := range byPartition[p] {
 			keys[k] = struct{}{}
 		}
 	}
-	sort.Strings(partKeys)
 	out := make(map[string]string, len(keys)+3)
 	for key := range keys {
 		obj := make(map[string]string, len(partKeys))

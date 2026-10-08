@@ -5,10 +5,10 @@ import (
 	"testing"
 	"time"
 
+	jobdeftestutil "github.com/caesium-cloud/caesium/internal/jobdef/testutil"
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/suite"
-	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 )
 
@@ -22,21 +22,11 @@ func TestWorkerStatusSuite(t *testing.T) {
 }
 
 func (s *WorkerStatusSuite) SetupTest() {
-	dsn := "file:" + uuid.NewString() + "?mode=memory&cache=shared"
-	db, err := gorm.Open(sqlite.Open(dsn), &gorm.Config{})
-	s.Require().NoError(err)
-	s.Require().NoError(db.AutoMigrate(models.All...))
-	s.db = db
+	s.db = jobdeftestutil.OpenTestDB(s.T())
 }
 
 func (s *WorkerStatusSuite) TearDownTest() {
-	if s.db == nil {
-		return
-	}
-	sqlDB, _ := s.db.DB()
-	if sqlDB != nil {
-		_ = sqlDB.Close()
-	}
+	jobdeftestutil.CloseDB(s.db)
 }
 
 func (s *WorkerStatusSuite) TestStatusWithNoClaimsReturnsEmpty() {
@@ -64,7 +54,7 @@ func (s *WorkerStatusSuite) TestStatusAggregatesClaimsAndExpirations() {
 		status:         "running",
 		claimAttempt:   3,
 		claimExpiresAt: new(now.Add(2 * time.Minute)),
-		updatedAt:      now.Add(-5 * time.Second),
+		updatedAt:      now.Add(-5 * time.Second).In(time.FixedZone("east", 5*60*60)),
 	})
 	s.seedTaskRun(taskRunSeed{
 		claimedBy:      "node-a",
@@ -102,6 +92,7 @@ func (s *WorkerStatusSuite) TestStatusAggregatesClaimsAndExpirations() {
 	s.Equal(int64(10), resp.TotalClaimAttempts)
 	s.Require().NotNil(resp.LastActivityAt)
 	s.WithinDuration(now.Add(-5*time.Second), *resp.LastActivityAt, time.Second)
+	s.Equal(time.UTC, resp.LastActivityAt.Location())
 
 	s.Equal(int64(2), resp.ClaimedByStatus["running"])
 	s.Equal(int64(1), resp.ClaimedByStatus["succeeded"])
@@ -143,4 +134,35 @@ func (s *WorkerStatusSuite) seedTaskRun(in taskRunSeed) {
 	}
 
 	s.Require().NoError(s.db.Create(taskRun).Error)
+}
+
+func TestParseAggregateTime(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		raw  string
+		want time.Time
+	}{
+		{"empty", "", time.Time{}},
+		{"blank", " \t\n", time.Time{}},
+		{"malformed", "not-a-timestamp", time.Time{}},
+		{"padded valid timestamp remains invalid", " 2025-01-02T03:04:05Z ", time.Time{}},
+		{"leading whitespace remains invalid", "\t2025-01-02 03:04:05", time.Time{}},
+		{"SQL UTC", "2025-01-02 03:04:05.123456789", time.Date(2025, 1, 2, 3, 4, 5, 123456789, time.UTC)},
+		{"SQL offset", "2025-01-02 03:04:05.123456-07:00", time.Date(2025, 1, 2, 10, 4, 5, 123456000, time.UTC)},
+		{"RFC3339 offset", "2025-01-02T03:04:05.123456789+02:00", time.Date(2025, 1, 2, 1, 4, 5, 123456789, time.UTC)},
+		{"SQL seconds", "2025-01-02 03:04:05", time.Date(2025, 1, 2, 3, 4, 5, 0, time.UTC)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := parseAggregateTime(tc.raw)
+			if tc.want.IsZero() {
+				if got != nil {
+					t.Fatalf("parseAggregateTime(%q) = %v; want nil", tc.raw, got)
+				}
+				return
+			}
+			if got == nil || !got.Equal(tc.want) || got.Location() != time.UTC {
+				t.Fatalf("parseAggregateTime(%q) = %v; want %v in UTC", tc.raw, got, tc.want)
+			}
+		})
+	}
 }

@@ -3,10 +3,10 @@ package cache
 import (
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"strings"
 
+	"github.com/caesium-cloud/caesium/internal/clihttp"
 	"github.com/spf13/cobra"
 )
 
@@ -17,6 +17,7 @@ var (
 
 var listCmd = &cobra.Command{
 	Use:   "list",
+	Args:  cobra.NoArgs,
 	Short: "List cache entries for a job",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if listJobID == "" {
@@ -26,20 +27,9 @@ var listCmd = &cobra.Command{
 		server := strings.TrimSuffix(listServer, "/")
 		url := fmt.Sprintf("%s/v1/jobs/%s/cache", server, listJobID)
 
-		req, err := http.NewRequestWithContext(cmd.Context(), http.MethodGet, url, nil)
-		if err != nil {
+		body, status, readErr := clihttp.Exchange(cmd.Context(), http.DefaultClient, http.MethodGet, url, nil, make(http.Header))
+		if err := clihttp.ResponseError("cache list", status, body, readErr); err != nil {
 			return err
-		}
-
-		resp, err := http.DefaultClient.Do(req)
-		if err != nil {
-			return err
-		}
-		defer func() { _ = resp.Body.Close() }()
-
-		body, _ := io.ReadAll(resp.Body)
-		if resp.StatusCode >= http.StatusBadRequest {
-			return fmt.Errorf("cache list failed (%d): %s", resp.StatusCode, strings.TrimSpace(string(body)))
 		}
 
 		// NOTE: write machine-readable output via cmd.OutOrStdout(), NOT

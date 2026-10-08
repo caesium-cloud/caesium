@@ -1,12 +1,14 @@
 package backfill
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"math/rand/v2"
 	"sync"
 	"time"
 
+	"github.com/caesium-cloud/caesium/internal/dbretry"
 	"github.com/caesium-cloud/caesium/internal/metrics"
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/caesium-cloud/caesium/pkg/db"
@@ -73,7 +75,7 @@ func (s *Store) RequestCancel(id uuid.UUID) error {
 	now := time.Now().UTC()
 	return s.withBusyRetry(func() error {
 		return s.db.Model(&models.Backfill{}).
-			Where("id = ? AND status = ?", id, string(models.BackfillStatusRunning)).
+			Where("id = ? AND status = ?", id, models.BackfillStatusRunning).
 			Updates(map[string]any{
 				"cancel_requested_at": now,
 			}).Error
@@ -86,9 +88,9 @@ func (s *Store) MarkCancelled(id uuid.UUID) error {
 	now := time.Now().UTC()
 	return s.withBusyRetry(func() error {
 		return s.db.Model(&models.Backfill{}).
-			Where("id = ? AND status = ?", id, string(models.BackfillStatusRunning)).
+			Where("id = ? AND status = ?", id, models.BackfillStatusRunning).
 			Updates(map[string]any{
-				"status":       string(models.BackfillStatusCancelled),
+				"status":       models.BackfillStatusCancelled,
 				"completed_at": now,
 			}).Error
 	})
@@ -102,7 +104,7 @@ func (s *Store) Complete(id uuid.UUID, failed bool) error {
 	}
 	return s.withBusyRetry(func() error {
 		return s.db.Model(&models.Backfill{}).
-			Where("id = ? AND status = ?", id, string(models.BackfillStatusRunning)).
+			Where("id = ? AND status = ?", id, models.BackfillStatusRunning).
 			Updates(map[string]any{
 				"status":       string(status),
 				"completed_at": now,
@@ -156,7 +158,7 @@ func (s *Store) IsRunning(id uuid.UUID) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	return b.Status == string(models.BackfillStatusRunning), nil
+	return b.Status == models.BackfillStatusRunning, nil
 }
 
 // IsCancelRequested returns true if a running backfill has a persisted cancel
@@ -170,7 +172,7 @@ func (s *Store) IsCancelRequested(id uuid.UUID) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	return b.Status == string(models.BackfillStatusRunning) && b.CancelRequestedAt != nil, nil
+	return b.Status == models.BackfillStatusRunning && b.CancelRequestedAt != nil, nil
 }
 
 // LatestRunForLogicalDate returns the status of the most recent run for a job
@@ -214,24 +216,16 @@ func (s *Store) LatestRunForLogicalDate(jobID uuid.UUID, logicalDate string) (st
 // dramatically improves per-retry success when one of the pooled connections
 // has been poisoned by a prior `checkpoint in progress` error.
 func (s *Store) withBusyRetry(fn func() error) error {
-	var err error
-	for attempt := 0; ; attempt++ {
-		err = fn()
-		if err == nil || !isContentionErr(err) {
-			return err
-		}
-		if attempt >= len(busyRetryBackoffs) {
-			return err
-		}
-
-		if isPoisonedConnErr(err) {
-			// Errors from this Exec are intentionally ignored — see comment above.
-			_ = s.db.Exec("ROLLBACK").Error
-		}
-
-		metrics.DBBusyRetriesTotal.Inc()
-		time.Sleep(jitterBackoff(busyRetryBackoffs[attempt]))
-	}
+	return dbretry.Retry(context.Background(), dbretry.Policy{
+		Backoffs: busyRetryBackoffs, Retryable: isContentionErr,
+		BeforeRetry: func(err error) {
+			if isPoisonedConnErr(err) {
+				_ = s.db.Exec("ROLLBACK").Error
+			}
+		},
+		OnRetry: func(error) { metrics.DBBusyRetriesTotal.Inc() },
+		Wait:    func(_ context.Context, base time.Duration) error { time.Sleep(jitterBackoff(base)); return nil },
+	}, fn)
 }
 
 // isPoisonedConnErr matches the narrow case where a pooled connection has

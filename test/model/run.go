@@ -1,8 +1,9 @@
 package model
 
 import (
+	"cmp"
 	"fmt"
-	"sort"
+	"slices"
 )
 
 // Skip reasons an owner decision records. They are operator-facing strings in
@@ -812,7 +813,7 @@ func (r *Run) TailSince(sequenceHigh int64) []TerminalRecord {
 			out = append(out, rec)
 		}
 	}
-	sort.SliceStable(out, func(i, j int) bool { return out[i].Sequence < out[j].Sequence })
+	slices.SortStableFunc(out, func(a, b TerminalRecord) int { return cmp.Compare(a.Sequence, b.Sequence) })
 	return out
 }
 

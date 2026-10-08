@@ -9,9 +9,10 @@ import (
 	"time"
 
 	"github.com/caesium-cloud/caesium/internal/jobdef/secret"
-	"github.com/caesium-cloud/caesium/internal/jobdef/testutil"
+	jobdeftestutil "github.com/caesium-cloud/caesium/internal/jobdef/testutil"
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/caesium-cloud/caesium/internal/run"
+	"github.com/caesium-cloud/caesium/internal/testutil"
 	"github.com/caesium-cloud/caesium/pkg/container"
 	"github.com/google/uuid"
 	vault "github.com/hashicorp/vault/api"
@@ -40,8 +41,8 @@ type replayFixture struct {
 
 func newReplayFixture(t *testing.T) replayFixture {
 	t.Helper()
-	db := testutil.OpenTestDB(t)
-	t.Cleanup(func() { testutil.CloseDB(db) })
+	db := jobdeftestutil.OpenTestDB(t)
+	t.Cleanup(func() { jobdeftestutil.CloseDB(db) })
 	now := time.Date(2026, 6, 25, 12, 0, 0, 0, time.UTC)
 	triggerID := uuid.New()
 	jobID := uuid.New()
@@ -816,16 +817,12 @@ func (f *replayVaultLogical) ReadWithDataWithContext(_ context.Context, path str
 
 func mustJSON(t *testing.T, v any) datatypes.JSON {
 	t.Helper()
-	data, err := json.Marshal(v)
-	require.NoError(t, err)
-	return datatypes.JSON(data)
+	return datatypes.JSON(testutil.MustJSONBytes(t, v))
 }
 
 func mustJSONString(t *testing.T, v any) string {
 	t.Helper()
-	data, err := json.Marshal(v)
-	require.NoError(t, err)
-	return string(data)
+	return string(testutil.MustJSONBytes(t, v))
 }
 
 func TestReplayUnresolvedPinnedBaselineReexecutesDespiteLegacyEntry(t *testing.T) {

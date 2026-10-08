@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/caesium-cloud/caesium/internal/jobdef/yamlpath"
 	schema "github.com/caesium-cloud/caesium/pkg/jobdef"
 	"gopkg.in/yaml.v3"
 )
@@ -150,10 +151,7 @@ func isJobManifestPath(path string) bool {
 }
 
 // IsYAML returns true if the file path has a .yaml or .yml extension.
-func IsYAML(path string) bool {
-	ext := strings.ToLower(filepath.Ext(path))
-	return ext == ".yaml" || ext == ".yml"
-}
+func IsYAML(path string) bool { return yamlpath.IsYAML(path) }
 
 // ResolveYAMLFiles returns all YAML file paths under the given paths.
 func ResolveYAMLFiles(paths []string) ([]string, error) {

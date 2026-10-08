@@ -308,11 +308,8 @@ func TestExecuteShellReturnsInteractiveExitCode(t *testing.T) {
 }
 
 func basicDescriptor(image string) *Descriptor {
-	desc := &Descriptor{}
-	desc.SchemaVersion = 1
-	desc.Baseline.TaskName = "transform"
+	desc := testDescriptor("transform", image)
 	desc.Baseline.JobAlias = "fixture"
-	desc.Runtime.Image = image
 	desc.Runtime.Command = []string{"sh", "-c", "echo ok"}
 	return desc
 }

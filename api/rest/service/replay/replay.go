@@ -10,7 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
-	"sort"
+	"slices"
 	"strings"
 
 	iauth "github.com/caesium-cloud/caesium/internal/auth"
@@ -18,6 +18,7 @@ import (
 	"github.com/caesium-cloud/caesium/internal/models"
 	replaycore "github.com/caesium-cloud/caesium/internal/replay"
 	runstorage "github.com/caesium-cloud/caesium/internal/run"
+	"github.com/caesium-cloud/caesium/internal/runlife"
 	"github.com/caesium-cloud/caesium/pkg/env"
 	"github.com/caesium-cloud/caesium/pkg/log"
 	"github.com/caesium-cloud/caesium/pkg/sqlerr"
@@ -108,8 +109,40 @@ func (s *Service) WithExecutionMode(mode string) *Service {
 	return &next
 }
 
+type replayReservationKey struct{}
+type replayReservation struct {
+	ctx         context.Context
+	release     func()
+	transferred bool
+}
+
 // Replay creates or resumes an idempotent quarantined replay.
 func (s *Service) Replay(req Request) (*Result, error) {
+	if s == nil || s.store == nil {
+		return nil, errors.New("replay: run store is required")
+	}
+	if s.dispatcher == nil {
+		return nil, replaycore.ErrDispatchRequired
+	}
+	if strings.TrimSpace(req.IdempotencyKey) == "" {
+		return nil, ErrMissingIdempotencyKey
+	}
+	ctx, release, err := runlife.FromContext(s.ctx).Reserve(s.ctx)
+	if err != nil {
+		return nil, err
+	}
+	reservation := &replayReservation{ctx: ctx, release: release}
+	defer func() {
+		if !reservation.transferred {
+			release()
+		}
+	}()
+	next := *s
+	next.ctx = context.WithValue(s.ctx, replayReservationKey{}, reservation)
+	return next.replay(req)
+}
+
+func (s *Service) replay(req Request) (*Result, error) {
 	if s == nil || s.store == nil {
 		return nil, errors.New("replay: run store is required")
 	}
@@ -299,11 +332,7 @@ func normalizeOverrides(overrides map[string]string) []overridePair {
 	if len(overrides) == 0 {
 		return []overridePair{}
 	}
-	keys := make([]string, 0, len(overrides))
-	for key := range overrides {
-		keys = append(keys, key)
-	}
-	sort.Strings(keys)
+	keys := slices.Sorted(maps.Keys(overrides))
 
 	normalized := make([]overridePair, 0, len(keys))
 	for _, key := range keys {
@@ -335,6 +364,27 @@ func (d *AsyncDispatcher) DispatchReplay(ctx context.Context, runID uuid.UUID) e
 		return errors.New("replay: run store is required")
 	}
 
+	reservation, _ := ctx.Value(replayReservationKey{}).(*replayReservation)
+	var workCtx context.Context
+	var releaseWork func()
+	if reservation != nil {
+		workCtx, releaseWork = reservation.ctx, reservation.release
+	} else {
+		var err error
+		workCtx, releaseWork, err = runlife.FromContext(ctx).Reserve(ctx)
+		if err != nil {
+			return err
+		}
+	}
+	cancelCtx, releaseCancel := jobrunner.RegisterRunCancel(workCtx, runID)
+	release := func() { releaseCancel(); releaseWork() }
+	transferred := false
+	defer func() {
+		if !transferred {
+			release()
+		}
+	}()
+
 	var runModel models.JobRun
 	if err := d.store.DB().WithContext(ctx).Select("id", "job_id").First(&runModel, "id = ?", runID).Error; err != nil {
 		return err
@@ -352,7 +402,12 @@ func (d *AsyncDispatcher) DispatchReplay(ctx context.Context, runID uuid.UUID) e
 		}
 	}
 
+	transferred = true
+	if reservation != nil {
+		reservation.transferred = true
+	}
 	go func() {
+		defer release()
 		defer func() {
 			if r := recover(); r != nil {
 				log.Error("replay dispatch panic", "job_id", runModel.JobID, "run_id", runID, "recover", r)
@@ -360,14 +415,8 @@ func (d *AsyncDispatcher) DispatchReplay(ctx context.Context, runID uuid.UUID) e
 		}()
 		// A quarantined replay is a detached run like any other: cancelling it
 		// must reach its containers.
-		cancelCtx, release := jobrunner.RegisterRunCancel(context.Background(), runID)
-		defer release()
 		runCtx := runstorage.WithContext(cancelCtx, runID)
-		err := jobrunner.New(
-			&jobModel,
-			jobrunner.WithTriggerID(nil),
-			jobrunner.WithRunStoreFactory(func() *runstorage.Store { return d.store }),
-		).Run(runCtx)
+		err := replayExecution(runCtx, &jobModel, d.store)
 		if err != nil {
 			log.Error("replay dispatch failure", "job_id", runModel.JobID, "run_id", runID, "error", err)
 		}
@@ -377,3 +426,7 @@ func (d *AsyncDispatcher) DispatchReplay(ctx context.Context, runID uuid.UUID) e
 }
 
 var _ replaycore.Dispatcher = (*AsyncDispatcher)(nil)
+
+var replayExecution = func(ctx context.Context, j *models.Job, store *runstorage.Store) error {
+	return jobrunner.New(j, jobrunner.WithTriggerID(nil), jobrunner.WithRunStoreFactory(func() *runstorage.Store { return store })).Run(ctx)
+}

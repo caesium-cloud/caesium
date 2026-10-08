@@ -3,12 +3,19 @@ package run
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/caesium-cloud/caesium/internal/job"
+	"github.com/caesium-cloud/caesium/internal/models"
+	runstorage "github.com/caesium-cloud/caesium/internal/run"
+	"github.com/caesium-cloud/caesium/internal/runlife"
+	"github.com/google/uuid"
 	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/require"
 )
@@ -449,4 +456,181 @@ func TestRetryWholeRunOverServerReadsAPIKeyFromEnv(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "Bearer env-key", sawAuth)
 	require.Contains(t, stdout.String(), "Retrying run run-1 (job job-1)")
+}
+
+func TestLocalWholeRetryRegistersDuringAdmissionAndBeforeExecution(t *testing.T) {
+	runID := uuid.New()
+	launched := make(chan context.Context, 1)
+	_, err := startLocalWholeRunRetry(context.Background(), &models.Job{}, runID, &runstorage.JobRun{ID: runID},
+		func(id uuid.UUID) (*runstorage.JobRun, error) {
+			require.Equal(t, runID, id)
+			require.Equal(t, 1, job.CancelRunContexts(runID), "registration must precede reopen")
+			return &runstorage.JobRun{ID: id}, nil
+		},
+		func(uuid.UUID, error) (bool, error) {
+			t.Fatal("successful admission must not compensate")
+			return false, nil
+		},
+		func(ctx context.Context, _ *models.Job, _ *runstorage.JobRun, release func()) {
+			defer release()
+			launched <- ctx
+		})
+	require.NoError(t, err)
+	ctx := <-launched
+	require.ErrorIs(t, ctx.Err(), context.Canceled)
+	require.Zero(t, job.CancelRunContexts(runID))
+}
+func TestLocalWholeRetryAdmissionFailureReleasesRegistration(t *testing.T) {
+	runID := uuid.New()
+	fault := errors.New("admission failed")
+	_, err := startLocalWholeRunRetry(context.Background(), &models.Job{}, runID, &runstorage.JobRun{ID: runID},
+		func(uuid.UUID) (*runstorage.JobRun, error) { return nil, fault },
+		func(uuid.UUID, error) (bool, error) {
+			t.Fatal("precommit failure must not compensate")
+			return false, nil
+		},
+		func(context.Context, *models.Job, *runstorage.JobRun, func()) {
+			t.Fatal("must not launch refused retry")
+		})
+	require.ErrorIs(t, err, fault)
+	require.Zero(t, job.CancelRunContexts(runID))
+}
+
+func TestLocalWholeRetryPrivateOwnerJoinsChildrenWithoutClosingAttachedOwner(t *testing.T) {
+	type requestKey struct{}
+	attached := runlife.New(t.Context())
+	parent := runlife.WithSupervisor(context.WithValue(t.Context(), requestKey{}, "value"), attached)
+	_, releaseOther, err := attached.Reserve(parent)
+	require.NoError(t, err)
+	childStarted := make(chan context.Context, 1)
+	finishChild := make(chan struct{})
+	finished := false
+	done := make(chan error, 1)
+	exited := make(chan struct{})
+	t.Cleanup(func() {
+		if !finished {
+			close(finishChild)
+		}
+		<-exited
+		releaseOther()
+		attached.CloseAndCancel()
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		require.NoError(t, attached.Wait(ctx))
+	})
+	runID := uuid.New()
+	go func() {
+		defer close(exited)
+		_, err := startLocalWholeRunRetry(parent, &models.Job{}, runID, &runstorage.JobRun{ID: runID},
+			func(id uuid.UUID) (*runstorage.JobRun, error) { return &runstorage.JobRun{ID: id}, nil },
+			func(uuid.UUID, error) (bool, error) { t.Error("successful admission compensated"); return false, nil },
+			func(ctx context.Context, _ *models.Job, _ *runstorage.JobRun, release func()) {
+				private := runlife.FromContext(ctx)
+				require.NotNil(t, private)
+				require.NotSame(t, attached, private)
+				require.Equal(t, "value", ctx.Value(requestKey{}))
+				child, releaseChild, reserveErr := private.Reserve(ctx)
+				require.NoError(t, reserveErr)
+				go func() { defer releaseChild(); childStarted <- child; <-finishChild }()
+				release()
+			})
+		done <- err
+	}()
+	var child context.Context
+	select {
+	case child = <-childStarted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("local retry did not transfer to a child")
+	}
+	require.NoError(t, child.Err())
+	select {
+	case <-done:
+		t.Fatal("local helper returned while its admitted child remained active")
+	case <-time.After(20 * time.Millisecond):
+	}
+	_, releaseProbe, err := attached.Reserve(parent)
+	require.NoError(t, err, "private drain must leave the attached server owner open")
+	releaseProbe()
+	close(finishChild)
+	finished = true
+	select {
+	case err := <-done:
+		require.NoError(t, err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("local helper did not join the child")
+	}
+	_, releaseProbe, err = attached.Reserve(parent)
+	require.NoError(t, err, "successful local command must not close the server owner")
+	releaseProbe()
+	require.Zero(t, job.CancelRunContexts(runID))
+}
+
+func TestLocalWholeRetryClosedAttachedOwnerRefusesBeforeAdmission(t *testing.T) {
+	owner := runlife.New(t.Context())
+	owner.CloseAndCancel()
+	_, err := startLocalWholeRunRetry(runlife.WithSupervisor(t.Context(), owner), &models.Job{}, uuid.New(), nil,
+		func(uuid.UUID) (*runstorage.JobRun, error) {
+			t.Fatal("closed owner mutated retry admission")
+			return nil, nil
+		},
+		func(uuid.UUID, error) (bool, error) { t.Fatal("no admission needs compensation"); return false, nil },
+		func(context.Context, *models.Job, *runstorage.JobRun, func()) {
+			t.Fatal("closed owner launched execution")
+		})
+	require.ErrorIs(t, err, runlife.ErrClosed)
+}
+
+func TestLocalRetryJoinCancellationUsesGraceAndReportsUnjoinedWork(t *testing.T) {
+	for _, releaseBeforeGrace := range []bool{true, false} {
+		t.Run(fmt.Sprint(releaseBeforeGrace), func(t *testing.T) {
+			parent, cancelParent := context.WithCancel(t.Context())
+			owner, carrier, finishOwner, err := localRetryOwner(parent)
+			require.NoError(t, err)
+			child, release, err := owner.Reserve(carrier)
+			require.NoError(t, err)
+			defer finishOwner()
+			defer release()
+			cancelParent()
+			select {
+			case <-child.Done():
+			case <-time.After(time.Second):
+				t.Fatal("caller cancellation did not reach private work")
+			}
+			if releaseBeforeGrace {
+				release()
+			}
+			err = joinLocalRetryOwner(parent, owner, 20*time.Millisecond)
+			if releaseBeforeGrace {
+				require.NoError(t, err, "joined backend cancellation preserves durable/log-only outcome policy")
+			} else {
+				require.ErrorIs(t, err, context.DeadlineExceeded, "unjoined work must become a command error")
+			}
+			release()
+			require.NoError(t, owner.Wait(t.Context()))
+		})
+	}
+}
+
+func TestLocalRetryAttachedCancellationKeepsOuterOwnershipUntilPrivateJoin(t *testing.T) {
+	attached := runlife.New(t.Context())
+	owner, carrier, finishOwner, err := localRetryOwner(runlife.WithSupervisor(context.Background(), attached))
+	require.NoError(t, err)
+	child, release, err := owner.Reserve(carrier)
+	require.NoError(t, err)
+	defer release()
+	defer finishOwner()
+	attached.CloseAndCancel()
+	select {
+	case <-child.Done():
+	case <-time.After(time.Second):
+		t.Fatal("attached server cancellation did not reach private execution")
+	}
+	require.ErrorIs(t, joinLocalRetryOwner(context.Background(), owner, 20*time.Millisecond), context.DeadlineExceeded)
+	expired, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer cancel()
+	require.ErrorIs(t, attached.Wait(expired), context.DeadlineExceeded, "outer token must outlive unresolved private execution")
+	release()
+	require.NoError(t, owner.Wait(t.Context()))
+	finishOwner()
+	require.NoError(t, attached.Wait(t.Context()))
 }

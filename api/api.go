@@ -20,6 +20,7 @@ import (
 	"github.com/caesium-cloud/caesium/internal/auth"
 	"github.com/caesium-cloud/caesium/internal/event"
 	"github.com/caesium-cloud/caesium/internal/metrics"
+	"github.com/caesium-cloud/caesium/internal/runlife"
 	"github.com/caesium-cloud/caesium/pkg/env"
 	"github.com/caesium-cloud/caesium/pkg/log"
 	"github.com/labstack/echo-contrib/v5/echoprometheus"
@@ -37,7 +38,9 @@ type SSOProviders struct {
 
 var apiServer struct {
 	sync.Mutex
-	srv *http.Server
+	srv          *http.Server
+	owner        *runlife.Supervisor
+	privateOwner bool
 }
 
 // Start launches Caesium's API.
@@ -75,7 +78,16 @@ func Start(ctx context.Context, bus event.Bus, authSvc *auth.Service, auditor *a
 	// Embedded web UI
 	RegisterUI(e)
 
+	owner := runlife.FromContext(ctx)
+	privateOwner := owner == nil
+	if privateOwner {
+		owner = runlife.New(context.WithoutCancel(ctx))
+	}
+	// Request drain is independent of process cancellation. Reservations carry
+	// request values but are cancelled through the owner after HTTP drain.
+	requestBase := runlife.WithSupervisor(context.WithoutCancel(ctx), owner)
 	srv := &http.Server{
+		BaseContext:       func(net.Listener) context.Context { return requestBase },
 		Addr:              fmt.Sprintf(":%v", vars.Port),
 		Handler:           e,
 		ReadHeaderTimeout: 10 * time.Second,
@@ -84,6 +96,8 @@ func Start(ctx context.Context, bus event.Bus, authSvc *auth.Service, auditor *a
 	}
 	apiServer.Lock()
 	apiServer.srv = srv
+	apiServer.owner = owner
+	apiServer.privateOwner = privateOwner
 	apiServer.Unlock()
 	defer func() {
 		apiServer.Lock()
@@ -96,11 +110,18 @@ func Start(ctx context.Context, bus event.Bus, authSvc *auth.Service, auditor *a
 	var lc net.ListenConfig
 	ln, err := lc.Listen(ctx, "tcp", srv.Addr)
 	if err != nil {
+		if privateOwner {
+			return errors.Join(err, closePrivateOwner(owner, vars.ShutdownGracePeriod))
+		}
 		return err
 	}
 
+	defer func() { _ = ln.Close() }()
 	log.Info("api listener started", "addr", ln.Addr().String())
-	if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
+	if err := serveAPI(srv, ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		if privateOwner {
+			return errors.Join(err, closePrivateOwner(owner, vars.ShutdownGracePeriod))
+		}
 		return err
 	}
 	return nil
@@ -311,12 +332,46 @@ func configureIPExtractor(e *echo.Echo, vars env.Environment) {
 	e.IPExtractor = echo.ExtractIPFromXFFHeader(options...)
 }
 
+var serveAPI = func(srv *http.Server, ln net.Listener) error { return srv.Serve(ln) }
+
+func clearPrivateOwner(owner *runlife.Supervisor) {
+	apiServer.Lock()
+	defer apiServer.Unlock()
+	if apiServer.owner == owner && apiServer.privateOwner {
+		apiServer.owner = nil
+		apiServer.privateOwner = false
+	}
+}
+
+func closePrivateOwner(owner *runlife.Supervisor, bound time.Duration) error {
+	if bound <= 0 {
+		bound = 30 * time.Second
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), bound)
+	defer cancel()
+	owner.CloseAndCancel()
+	err := owner.Wait(ctx)
+	if err == nil {
+		clearPrivateOwner(owner)
+	}
+	return err
+}
+
 func Shutdown(ctx context.Context) error {
 	apiServer.Lock()
-	srv := apiServer.srv
+	srv, owner, privateOwner := apiServer.srv, apiServer.owner, apiServer.privateOwner
 	apiServer.Unlock()
-	if srv == nil {
-		return nil
+	var drainErr error
+	if srv != nil {
+		drainErr = srv.Shutdown(ctx)
 	}
-	return srv.Shutdown(ctx)
+	if !privateOwner || owner == nil {
+		return drainErr
+	}
+	owner.CloseAndCancel()
+	joinErr := owner.Wait(ctx)
+	if joinErr == nil {
+		clearPrivateOwner(owner)
+	}
+	return errors.Join(drainErr, joinErr)
 }

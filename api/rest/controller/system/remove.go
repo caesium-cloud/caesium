@@ -80,8 +80,8 @@ func RemoveNode(c *echo.Context) error {
 
 	result, err := removeMember(c.Request().Context(), id)
 	if err != nil {
-		var refusal *dqlite.MemberRemovalRefusal
-		if errors.As(err, &refusal) {
+		refusal, ok := errors.AsType[*dqlite.MemberRemovalRefusal](err)
+		if ok {
 			return c.JSON(refusalStatus(refusal.Reason), refusalResponse(refusal))
 		}
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {

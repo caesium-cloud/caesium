@@ -528,36 +528,83 @@ REDACT_REMOVE = ("internal-token.txt", "kubeconfig", "kubeconfig-iso")
 
 
 def redact_artifacts(artifacts):
-    """Remove the run's generated credentials from an about-to-be-uploaded dir."""
+    """Scrub all readable artifacts before removing the retry's credential source."""
+    import os
+    import stat
+    import tempfile
+
     artifacts = Path(artifacts)
-    if not artifacts.is_dir():
-        raise EvidenceError(f"{artifacts} is not a directory")
-    secrets = []
-    token = artifacts / "internal-token.txt"
-    if token.is_file():
-        value = token.read_text().strip()
-        if value:
-            secrets.append(value)
-    removed = []
-    for name in REDACT_REMOVE:
-        path = artifacts / name
-        if path.is_file():
-            path.unlink()
-            removed.append(name)
-    scrubbed = []
-    for path in sorted(artifacts.rglob("*")):
-        if not path.is_file():
-            continue
-        try:
+    try:
+        if artifacts.is_symlink() or not artifacts.is_dir():
+            raise EvidenceError("artifact root is not a directory or is a symlink")
+    except OSError:
+        raise EvidenceError("cannot inspect artifact root for redaction") from None
+
+    def enumeration_failed(_error):
+        raise EvidenceError("cannot enumerate artifact directory for redaction")
+
+    try:
+        files = []
+        for directory, dirs, names in os.walk(artifacts, onerror=enumeration_failed):
+            dirs.sort()
+            for name in dirs:
+                if (Path(directory) / name).is_symlink():
+                    raise EvidenceError("artifact directory symlink refused during redaction")
+            for name in sorted(names):
+                path = Path(directory) / name
+                if not stat.S_ISREG(path.lstat().st_mode):
+                    raise EvidenceError("non-regular artifact file refused during redaction")
+                files.append(path)
+        token = artifacts / "internal-token.txt"
+        secret = token.read_bytes().strip() if token in files else b""
+        if token in files and not secret:
+            raise EvidenceError("generated internal token is empty")
+        credentials = {artifacts / name for name in REDACT_REMOVE}
+        # Complete every read before any write. A refused read cannot leave a
+        # partially scrubbed directory with its credential source missing.
+        pending = []
+        for path in files:
+            if path in credentials:
+                continue
             data = path.read_bytes()
-        except OSError:
-            continue
-        replaced = data
-        for secret in secrets:
-            replaced = replaced.replace(secret.encode(), b"[REDACTED_INTERNAL_TOKEN]")
-        if replaced != data:
-            path.write_bytes(replaced)
+            replaced = data.replace(secret, b"[REDACTED_INTERNAL_TOKEN]") if secret else data
+            if replaced != data:
+                pending.append((path, replaced))
+    except OSError:
+        raise EvidenceError("cannot read artifact files for redaction") from None
+
+    scrubbed = []
+    for path, replaced in pending:
+        temporary = None
+        try:
+            # A failed write must not truncate the original log or lose the
+            # token needed by a mandatory subsequent redaction attempt.
+            with tempfile.NamedTemporaryFile(dir=path.parent, prefix=".redact-", delete=False) as out:
+                temporary = Path(out.name)
+                out.write(replaced)
+            os.replace(temporary, path)
+            temporary = None
             scrubbed.append(str(path.relative_to(artifacts)))
+        except OSError:
+            raise EvidenceError("cannot write scrubbed artifact files") from None
+        finally:
+            if temporary is not None:
+                try:
+                    temporary.unlink()
+                except OSError:
+                    raise EvidenceError("cannot remove redaction temporary file") from None
+
+    removed = []
+    # Keep the generated token until both scrubbing and other credential-file
+    # removals succeed, so a partial failure remains recoverable on retry.
+    for name in (*REDACT_REMOVE[1:], REDACT_REMOVE[0]):
+        path = artifacts / name
+        if path in files:
+            try:
+                path.unlink()
+            except OSError:
+                raise EvidenceError("cannot remove generated credential files") from None
+            removed.append(name)
     return removed, scrubbed
 
 

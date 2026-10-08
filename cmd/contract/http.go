@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/caesium-cloud/caesium/cmd/cliutil"
+	"github.com/caesium-cloud/caesium/internal/clihttp"
 	"github.com/spf13/cobra"
 )
 
@@ -21,28 +22,21 @@ func serverBase() string {
 }
 
 func request(cmd *cobra.Command, apiKey, method, reqURL string, body io.Reader, label string) ([]byte, int, error) {
-	req, err := http.NewRequestWithContext(cmd.Context(), method, reqURL, body)
-	if err != nil {
-		return nil, 0, err
-	}
+	headers := make(http.Header)
 	if body != nil {
-		req.Header.Set("Content-Type", "application/json")
+		headers.Set("Content-Type", "application/json")
 	}
 	if apiKey != "" {
-		req.Header.Set("Authorization", "Bearer "+apiKey)
+		headers.Set("Authorization", "Bearer "+apiKey)
 	}
-
-	resp, err := httpClient.Do(req)
+	data, status, err := clihttp.Exchange(cmd.Context(), httpClient, method, reqURL, body, headers)
 	if err != nil {
-		return nil, 0, err
+		if status == 0 {
+			return nil, 0, err
+		}
+		return nil, status, fmt.Errorf("reading %s response: %w", label, err)
 	}
-	defer func() { _ = resp.Body.Close() }()
-
-	data, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, resp.StatusCode, fmt.Errorf("reading %s response: %w", label, err)
-	}
-	return data, resp.StatusCode, nil
+	return data, status, nil
 }
 
 func ensureContractEnforcementEnabled(cmd *cobra.Command, apiKey string) error {

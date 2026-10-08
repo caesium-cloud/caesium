@@ -360,17 +360,24 @@ func validateReadOnlyQuery(query string) error {
 	if strings.TrimSpace(query) == "" {
 		return ErrEmptyQuery
 	}
-	if hasMultipleStatements(query) {
-		return ErrMultipleStatements
+	normalized, semicolons := scanSQL(query)
+	for _, offset := range semicolons {
+		if strings.TrimSpace(query[offset+1:]) != "" {
+			return ErrMultipleStatements
+		}
 	}
-
 	trimmed := trimLeadingComments(query)
-	trimmed = strings.TrimSuffix(strings.TrimSpace(trimmed), ";")
+	// The legacy prefix helper returns a raw suffix with trailing whitespace
+	// removed. Locate that suffix without resetting the scanner's lexical state.
+	start := strings.LastIndex(query, trimmed)
+	trimmed = strings.TrimSuffix(trimmed, ";")
 	if trimmed == "" {
 		return ErrEmptyQuery
 	}
-
-	normalized := sanitizeSQL(trimmed)
+	// trimLeadingComments returns an already trimmed raw suffix. Only remove
+	// the same terminal semicolon from its position-preserving mask; trimming
+	// masked spaces would accidentally accept a quoted prefix before SELECT.
+	normalized = normalized[start : start+len(trimmed)]
 	upper := strings.ToUpper(normalized)
 	switch {
 	case strings.HasPrefix(upper, "SELECT "),
@@ -390,78 +397,6 @@ func validateReadOnlyQuery(query string) error {
 	}
 
 	return nil
-}
-
-func hasMultipleStatements(query string) bool {
-	inSingleQuote := false
-	inDoubleQuote := false
-	inBacktick := false
-	inLineComment := false
-	inBlockComment := false
-
-	for i := 0; i < len(query); i++ {
-		if inLineComment {
-			if query[i] == '\n' {
-				inLineComment = false
-			}
-			continue
-		}
-		if inBlockComment {
-			if i+1 < len(query) && query[i] == '*' && query[i+1] == '/' {
-				inBlockComment = false
-				i++
-			}
-			continue
-		}
-		if inSingleQuote {
-			if query[i] == '\'' {
-				if i+1 < len(query) && query[i+1] == '\'' {
-					i++
-					continue
-				}
-				inSingleQuote = false
-			}
-			continue
-		}
-		if inDoubleQuote {
-			if query[i] == '"' {
-				inDoubleQuote = false
-			}
-			continue
-		}
-		if inBacktick {
-			if query[i] == '`' {
-				inBacktick = false
-			}
-			continue
-		}
-
-		if i+1 < len(query) && query[i] == '-' && query[i+1] == '-' {
-			inLineComment = true
-			i++
-			continue
-		}
-		if i+1 < len(query) && query[i] == '/' && query[i+1] == '*' {
-			inBlockComment = true
-			i++
-			continue
-		}
-
-		switch query[i] {
-		case '\'':
-			inSingleQuote = true
-		case '"':
-			inDoubleQuote = true
-		case '`':
-			inBacktick = true
-		case ';':
-			if strings.TrimSpace(query[i+1:]) != "" {
-				return true
-			}
-		}
-	}
-
-	return false
 }
 
 func trimLeadingComments(query string) string {
@@ -537,7 +472,8 @@ func quoteSQLiteIdentifier(identifier string) string {
 	return "`" + strings.ReplaceAll(identifier, "`", "``") + "`"
 }
 
-func sanitizeSQL(query string) string {
+func scanSQL(query string) (string, []int) {
+	var semicolons []int
 	var builder strings.Builder
 	builder.Grow(len(query))
 
@@ -616,10 +552,13 @@ func sanitizeSQL(query string) string {
 		case '`':
 			inBacktick = true
 			builder.WriteByte(' ')
+		case ';':
+			semicolons = append(semicolons, i)
+			builder.WriteByte(ch)
 		default:
 			builder.WriteByte(ch)
 		}
 	}
 
-	return builder.String()
+	return builder.String(), semicolons
 }

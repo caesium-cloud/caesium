@@ -152,15 +152,15 @@ func TestFilterDatesRespectsReprocessPolicies(t *testing.T) {
 
 	dates := []time.Time{date1, date2, date3}
 
-	all, err := FilterDates(store, jobID, dates, string(models.ReprocessAll))
+	all, err := FilterDates(store, jobID, dates, models.ReprocessAll)
 	require.NoError(t, err)
 	require.Equal(t, dates, all)
 
-	none, err := FilterDates(store, jobID, dates, string(models.ReprocessNone))
+	none, err := FilterDates(store, jobID, dates, models.ReprocessNone)
 	require.NoError(t, err)
 	require.Equal(t, []time.Time{date3}, none)
 
-	failed, err := FilterDates(store, jobID, dates, string(models.ReprocessFailed))
+	failed, err := FilterDates(store, jobID, dates, models.ReprocessFailed)
 	require.NoError(t, err)
 	require.Equal(t, []time.Time{date2, date3}, failed)
 }

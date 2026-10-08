@@ -18,24 +18,7 @@ func (s *IntegrationTestSuite) TestHTTPTriggerInterpolatesParamRefsInStepEnv() {
 	alias := fmt.Sprintf("integration-param-env-%d", time.Now().UnixNano())
 	hook := fmt.Sprintf("param-env-%d", time.Now().UnixNano())
 	wantRef := "deadbeefcafebabe"
-	manifest := fmt.Sprintf(`
-apiVersion: v1
-kind: Job
-metadata:
-  alias: %s
-trigger:
-  type: http
-  configuration:
-    path: "/hooks/%s"
-    paramMapping:
-      SHA: "$.sha"
-steps:
-  - name: echo-ref
-    image: alpine:3.23
-    command: ["sh", "-c", "echo GIT_REF=$GIT_REF"]
-    env:
-      GIT_REF: "${CAESIUM_PARAM_SHA}"
-`, alias, hook)
+	manifest := paramEnvManifest(alias, hook)
 
 	dir := s.writeJobManifest(manifest)
 	defer os.RemoveAll(dir)
@@ -78,24 +61,7 @@ steps:
 func (s *IntegrationTestSuite) TestHTTPTriggerMissingParamRefFailsClosed() {
 	alias := fmt.Sprintf("integration-param-env-missing-%d", time.Now().UnixNano())
 	hook := fmt.Sprintf("param-env-missing-%d", time.Now().UnixNano())
-	manifest := fmt.Sprintf(`
-apiVersion: v1
-kind: Job
-metadata:
-  alias: %s
-trigger:
-  type: http
-  configuration:
-    path: "/hooks/%s"
-    paramMapping:
-      SHA: "$.sha"
-steps:
-  - name: echo-ref
-    image: alpine:3.23
-    command: ["sh", "-c", "echo GIT_REF=$GIT_REF"]
-    env:
-      GIT_REF: "${CAESIUM_PARAM_SHA}"
-`, alias, hook)
+	manifest := paramEnvManifest(alias, hook)
 
 	dir := s.writeJobManifest(manifest)
 	defer os.RemoveAll(dir)
@@ -133,6 +99,27 @@ steps:
 			taskErrorsContain(finished, "${CAESIUM_PARAM_SHA}"),
 		"failure must name the unresolved token, got run error %q tasks %#v", finished.Error, finished.Tasks,
 	)
+}
+
+func paramEnvManifest(alias, hook string) string {
+	return fmt.Sprintf(`
+apiVersion: v1
+kind: Job
+metadata:
+  alias: %s
+trigger:
+  type: http
+  configuration:
+    path: "/hooks/%s"
+    paramMapping:
+      SHA: "$.sha"
+steps:
+  - name: echo-ref
+    image: alpine:3.23
+    command: ["sh", "-c", "echo GIT_REF=$GIT_REF"]
+    env:
+      GIT_REF: "${CAESIUM_PARAM_SHA}"
+`, alias, hook)
 }
 
 func taskErrorsContain(run *runResponse, needle string) bool {

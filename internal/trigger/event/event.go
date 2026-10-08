@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	jsvc "github.com/caesium-cloud/caesium/api/rest/service/job"
+	"github.com/caesium-cloud/caesium/internal/eventmatch"
 	"github.com/caesium-cloud/caesium/internal/job"
 	"github.com/caesium-cloud/caesium/internal/metrics"
 	"github.com/caesium-cloud/caesium/internal/models"
@@ -352,113 +353,13 @@ func extractParams(data []byte, mapping map[string]string) map[string]string {
 
 	params := make(map[string]string, len(mapping))
 	for name, jsonPath := range mapping {
-		value, ok := resolveJSONPath(payload, jsonPath)
+		value, ok := eventmatch.ResolveJSONPath(payload, jsonPath)
 		if !ok {
 			continue
 		}
 		params[name] = value
 	}
 	return params
-}
-
-func resolveJSONPath(payload any, jsonPath string) (string, bool) {
-	if strings.TrimSpace(jsonPath) == "$" {
-		return stringifyJSONValue(payload)
-	}
-
-	segments := parseJSONPath(jsonPath)
-	if len(segments) == 0 {
-		return "", false
-	}
-
-	current := payload
-	for _, segment := range segments {
-		next, ok := descendJSONPath(current, segment)
-		if !ok {
-			return "", false
-		}
-		current = next
-	}
-
-	return stringifyJSONValue(current)
-}
-
-func parseJSONPath(jsonPath string) []string {
-	jsonPath = strings.TrimSpace(jsonPath)
-	if jsonPath == "" {
-		return nil
-	}
-	switch {
-	case strings.HasPrefix(jsonPath, "$."):
-		jsonPath = jsonPath[2:]
-	case jsonPath == "$":
-		return []string{}
-	case strings.HasPrefix(jsonPath, "$"):
-		jsonPath = strings.TrimPrefix(jsonPath, "$")
-		jsonPath = strings.TrimPrefix(jsonPath, ".")
-	}
-	if jsonPath == "" {
-		return nil
-	}
-
-	raw := strings.Split(jsonPath, ".")
-	segments := make([]string, 0, len(raw))
-	for _, segment := range raw {
-		segment = strings.TrimSpace(segment)
-		if segment == "" {
-			return nil
-		}
-		parsed, ok := parseJSONPathSegment(segment)
-		if !ok {
-			return nil
-		}
-		segments = append(segments, parsed...)
-	}
-	return segments
-}
-
-func parseJSONPathSegment(segment string) ([]string, bool) {
-	if segment == "" {
-		return nil, false
-	}
-	parts := make([]string, 0, 2)
-	for len(segment) > 0 {
-		open := strings.IndexByte(segment, '[')
-		if open < 0 {
-			parts = append(parts, segment)
-			break
-		}
-		if open > 0 {
-			parts = append(parts, segment[:open])
-		}
-		close := strings.IndexByte(segment[open:], ']')
-		if close <= 1 {
-			return nil, false
-		}
-		index := segment[open+1 : open+close]
-		if _, err := strconv.Atoi(index); err != nil {
-			return nil, false
-		}
-		parts = append(parts, index)
-		segment = segment[open+close+1:]
-	}
-	return parts, len(parts) > 0
-}
-
-func descendJSONPath(current any, segment string) (any, bool) {
-	switch value := current.(type) {
-	case map[string]any:
-		next, ok := value[segment]
-		return next, ok
-	case []any:
-		index, err := strconv.Atoi(segment)
-		if err != nil || index < 0 || index >= len(value) {
-			return nil, false
-		}
-		return value[index], true
-	default:
-		return nil, false
-	}
 }
 
 func cloneParams[K comparable, V any](params map[K]V) map[K]V {

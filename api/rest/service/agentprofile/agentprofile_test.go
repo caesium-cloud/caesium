@@ -5,10 +5,10 @@ import (
 	"encoding/json"
 	"testing"
 
+	jobdeftestutil "github.com/caesium-cloud/caesium/internal/jobdef/testutil"
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/suite"
-	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 )
 
@@ -22,20 +22,11 @@ func TestAgentProfileSuite(t *testing.T) {
 }
 
 func (s *AgentProfileSuite) SetupTest() {
-	dsn := "file:" + uuid.NewString() + "?mode=memory&cache=shared"
-	db, err := gorm.Open(sqlite.Open(dsn), &gorm.Config{})
-	s.Require().NoError(err)
-	s.Require().NoError(db.AutoMigrate(models.All...))
-	s.db = db
+	s.db = jobdeftestutil.OpenTestDB(s.T())
 }
 
 func (s *AgentProfileSuite) TearDownTest() {
-	if s.db != nil {
-		sqlDB, _ := s.db.DB()
-		if sqlDB != nil {
-			_ = sqlDB.Close()
-		}
-	}
+	jobdeftestutil.CloseDB(s.db)
 }
 
 func (s *AgentProfileSuite) svc() *service {
@@ -106,6 +97,31 @@ func (s *AgentProfileSuite) TestCreateRejectsUnknownEngine() {
 	_, err := svc.Create(&CreateRequest{Name: "bad-engine", Image: "img", Engine: "lxc"})
 	s.Require().Error(err)
 	s.ErrorIs(err, ErrInvalidProfile)
+}
+
+func (s *AgentProfileSuite) TestValidateEngineKeepsExactMembershipAndDefault() {
+	for _, engine := range []models.AtomEngine{
+		models.AtomEngineDocker,
+		models.AtomEnginePodman,
+		models.AtomEngineKubernetes,
+	} {
+		got, err := validateEngine(engine)
+		s.Require().NoError(err)
+		s.Equal(engine, got)
+	}
+
+	for _, blank := range []models.AtomEngine{"", " ", "\t"} {
+		got, err := validateEngine(blank)
+		s.Require().NoError(err)
+		s.Equal(models.AtomEngineDocker, got)
+	}
+
+	for _, engine := range []models.AtomEngine{"Docker", " docker", "docker ", "lxc"} {
+		got, err := validateEngine(engine)
+		s.Empty(got)
+		s.Require().ErrorIs(err, ErrInvalidProfile)
+		s.Equal(`invalid agent profile: unsupported engine "`+string(engine)+`"`, err.Error())
+	}
 }
 
 func (s *AgentProfileSuite) TestCreateRejectsMalformedSecretRef() {

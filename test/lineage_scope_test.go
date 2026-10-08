@@ -3,10 +3,8 @@
 package test
 
 import (
-	"context"
 	"encoding/json"
 	"io"
-	"net"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -16,6 +14,7 @@ import (
 	lineagectrl "github.com/caesium-cloud/caesium/api/rest/controller/lineage"
 	iauth "github.com/caesium-cloud/caesium/internal/auth"
 	"github.com/caesium-cloud/caesium/internal/models"
+	"github.com/caesium-cloud/caesium/internal/testutil"
 	"github.com/caesium-cloud/caesium/pkg/db"
 	"github.com/caesium-cloud/caesium/pkg/env"
 	"github.com/labstack/echo/v5"
@@ -98,10 +97,5 @@ func getWithBearer(t *testing.T, target, token string) (int, string) {
 
 func freeLoopbackAddress(t *testing.T) string {
 	t.Helper()
-
-	var lc net.ListenConfig
-	ln, err := lc.Listen(context.Background(), "tcp", "127.0.0.1:0")
-	require.NoError(t, err)
-	defer ln.Close()
-	return ln.Addr().String()
+	return testutil.FreeLoopbackAddress(t)
 }

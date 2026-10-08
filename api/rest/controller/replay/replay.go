@@ -14,6 +14,7 @@ import (
 	replaysvc "github.com/caesium-cloud/caesium/api/rest/service/replay"
 	runsvc "github.com/caesium-cloud/caesium/api/rest/service/run"
 	replaycore "github.com/caesium-cloud/caesium/internal/replay"
+	"github.com/caesium-cloud/caesium/internal/runlife"
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v5"
 	"gorm.io/gorm"
@@ -154,6 +155,8 @@ func validatePostRequest(req PostRequest) error {
 
 func replayError(err error) error {
 	switch {
+	case errors.Is(err, runlife.ErrClosed), errors.Is(err, runlife.ErrMissing):
+		return echo.NewHTTPError(http.StatusServiceUnavailable, err.Error()).Wrap(err)
 	case errors.Is(err, replaysvc.ErrMissingIdempotencyKey):
 		return echo.NewHTTPError(http.StatusBadRequest, "Idempotency-Key header is required")
 	case errors.Is(err, replaysvc.ErrReplayRequiresDistributedMode):

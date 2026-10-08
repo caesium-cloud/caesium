@@ -1,14 +1,17 @@
 package run
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
 	"github.com/caesium-cloud/caesium/internal/models"
 	runstorage "github.com/caesium-cloud/caesium/internal/run"
+	"github.com/caesium-cloud/caesium/internal/runlife"
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v5"
 	"github.com/stretchr/testify/assert"
@@ -127,4 +130,26 @@ func TestRetryPartitionHTTPErrorMapsUnknownToInternal(t *testing.T) {
 
 func TestRetryPartitionHTTPErrorNilIsNil(t *testing.T) {
 	assert.NoError(t, retryPartitionHTTPError(nil))
+}
+
+func TestPartitionRetryRefusesOwnerBeforeMutation(t *testing.T) {
+	f := newPartitionsFixture(t, 1)
+	f.failPartition(t, 0)
+	f.finishRun(t, string(runstorage.StatusFailed))
+	called := false
+	partitionRetryInstance = func(context.Context, uuid.UUID, uuid.UUID) (*runstorage.TaskRun, bool, error) {
+		called = true
+		return nil, false, nil
+	}
+	owner := runlife.New(context.Background())
+	owner.CloseAndCancel()
+	for _, ctx := range []context.Context{context.Background(), runlife.WithSupervisor(context.Background(), owner)} {
+		e := echo.New()
+		c := e.NewContext(httptest.NewRequestWithContext(ctx, http.MethodPost, "/retry", nil), httptest.NewRecorder())
+		c.SetPathValues(echo.PathValues{{Name: "id", Value: f.jobID.String()}, {Name: "run_id", Value: f.runID.String()}, {Name: "task_id", Value: f.taskID.String()}, {Name: "index", Value: "0"}})
+		var he *echo.HTTPError
+		require.ErrorAs(t, RetryPartition(c), &he)
+		require.Equal(t, 503, he.Code)
+		require.False(t, called)
+	}
 }

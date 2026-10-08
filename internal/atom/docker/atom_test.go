@@ -10,7 +10,8 @@ import (
 
 func (s *DockerTestSuite) TestAtom() {
 	// valid states
-	for dockerState, atomState := range stateMap {
+	for _, dockerState := range []string{"created", "running", "paused", "restarting", "removing", "exited", "dead"} {
+		atomState := atom.ContainerState(dockerState)
 		c := &Atom{
 			metadata: newContainer(
 				testAtomID,
@@ -42,7 +43,8 @@ func (s *DockerTestSuite) TestAtom() {
 	assert.Equal(s.T(), atom.Invalid, c.State())
 
 	// valid results
-	for dockerResult, atomResult := range resultMap {
+	for _, dockerResult := range []int{0, 1, 125, 126, 127, 137, 143} {
+		atomResult := atom.ResultForExitCode(dockerResult)
 		c := &Atom{
 			metadata: newContainer(
 				testAtomID,

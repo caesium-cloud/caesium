@@ -119,15 +119,7 @@ func (s *IntegrationTestSuite) runInfraPipeline(f *infraFixture, opts infraPipel
 func (s *IntegrationTestSuite) taskOutputsByName(jobID string, run *runResponse) map[string]map[string]string {
 	s.T().Helper()
 
-	var tasks []struct {
-		ID   string `json:"ID"`
-		Name string `json:"Name"`
-	}
-	s.getJSON(fmt.Sprintf("/v1/jobs/%s/tasks", jobID), &tasks)
-	nameByID := make(map[string]string, len(tasks))
-	for _, t := range tasks {
-		nameByID[t.ID] = t.Name
-	}
+	nameByID := s.taskNamesByID(jobID)
 
 	out := make(map[string]map[string]string, len(run.Tasks))
 	for _, t := range run.Tasks {

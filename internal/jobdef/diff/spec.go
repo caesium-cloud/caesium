@@ -14,6 +14,7 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/caesium-cloud/caesium/internal/jobdef/yamlpath"
 	"github.com/caesium-cloud/caesium/internal/models"
 	schema "github.com/caesium-cloud/caesium/pkg/jobdef"
 	"github.com/google/uuid"
@@ -323,13 +324,13 @@ func collectPath(path string, fn func(*schema.Definition) error) error {
 			if d.IsDir() {
 				return nil
 			}
-			if !isYAML(p) {
+			if !yamlpath.IsYAML(p) {
 				return nil
 			}
 			return decodeDefinitions(p, fn)
 		})
 	}
-	if !isYAML(path) {
+	if !yamlpath.IsYAML(path) {
 		return fmt.Errorf("%s is not a YAML file", path)
 	}
 	return decodeDefinitions(path, fn)
@@ -360,11 +361,6 @@ func decodeDefinitions(path string, fn func(*schema.Definition) error) error {
 		}
 	}
 	return nil
-}
-
-func isYAML(path string) bool {
-	ext := strings.ToLower(filepath.Ext(path))
-	return ext == ".yaml" || ext == ".yml"
 }
 
 func cloneMap[K comparable, V any](in map[K]V) map[K]V {

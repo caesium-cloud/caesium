@@ -408,8 +408,8 @@ func transientPullErr(err error) bool {
 	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, os.ErrDeadlineExceeded) {
 		return true
 	}
-	var netErr net.Error
-	if errors.As(err, &netErr) && netErr.Timeout() {
+	netErr, ok := errors.AsType[net.Error](err)
+	if ok && netErr.Timeout() {
 		return true
 	}
 	msg := strings.ToLower(err.Error())

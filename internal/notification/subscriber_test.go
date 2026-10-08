@@ -21,7 +21,7 @@ func TestSubscriberDropsQuarantinedEventsBeforeMetrics(t *testing.T) {
 	sub := &Subscriber{db: db}
 	sub.handleEvent(context.Background(), event.Event{
 		Type:       event.TypeTaskFailed,
-		Payload:    mustJSON(map[string]string{"job_alias": "pipeline"}),
+		Payload:    mustJSON(t, map[string]string{"job_alias": "pipeline"}),
 		Quarantine: true,
 	})
 
@@ -29,7 +29,7 @@ func TestSubscriberDropsQuarantinedEventsBeforeMetrics(t *testing.T) {
 
 	sub.handleEvent(context.Background(), event.Event{
 		Type:    event.TypeTaskFailed,
-		Payload: mustJSON(map[string]string{"job_alias": "pipeline"}),
+		Payload: mustJSON(t, map[string]string{"job_alias": "pipeline"}),
 	})
 
 	require.Equal(t, 1.0, metrictestutil.CounterValue(t, TaskFailuresTotal, "pipeline"))

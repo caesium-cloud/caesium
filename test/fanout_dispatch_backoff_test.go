@@ -8,8 +8,9 @@ import (
 	"net/http"
 	"os"
 	"strconv"
-	"strings"
 	"time"
+
+	"github.com/caesium-cloud/caesium/test/internal/metricsutil"
 )
 
 // scrapeCounter reads one Prometheus counter off GET /metrics, matching the
@@ -26,27 +27,9 @@ func (s *IntegrationTestSuite) scrapeCounter(name string, labels map[string]stri
 	s.Require().NoError(err)
 	s.Require().Equal(http.StatusOK, resp.StatusCode, string(body))
 
-	for _, line := range strings.Split(string(body), "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" || strings.HasPrefix(line, "#") || !strings.HasPrefix(line, name) {
-			continue
-		}
-		series, value, ok := strings.Cut(line, " ")
-		if !ok {
-			continue
-		}
-		matched := true
-		for k, v := range labels {
-			if !strings.Contains(series, fmt.Sprintf("%s=%q", k, v)) {
-				matched = false
-				break
-			}
-		}
-		if !matched {
-			continue
-		}
+	for _, value := range metricsutil.MatchingCounterSamples(string(body), name, labels) {
 		parsed, parseErr := strconv.ParseFloat(value, 64)
-		s.Require().NoError(parseErr, "parse metric sample %q", line)
+		s.Require().NoError(parseErr, "parse metric sample %q", value)
 		return parsed
 	}
 	return 0

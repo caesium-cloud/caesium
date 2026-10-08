@@ -2,10 +2,10 @@ package contract
 
 import (
 	"context"
-	"encoding/json"
 	"testing"
 	"time"
 
+	fixturejson "github.com/caesium-cloud/caesium/internal/testutil"
 	schema "github.com/caesium-cloud/caesium/pkg/jobdef"
 	"github.com/caesium-cloud/caesium/pkg/jobdef/schemacompat"
 	"github.com/google/uuid"
@@ -866,7 +866,5 @@ func insertDatasetDeclarationWithSchema(t *testing.T, db *gorm.DB, jobID uuid.UU
 
 func mustJSON(t *testing.T, value any) string {
 	t.Helper()
-	data, err := json.Marshal(value)
-	require.NoError(t, err)
-	return string(data)
+	return string(fixturejson.MustJSONBytes(t, value))
 }

@@ -47,12 +47,12 @@ import (
 const roleName = "tf-discover"
 
 func main() {
-	protocol.Run(roleName, func(e *protocol.Emitter) error {
+	protocol.RunWithSignalContext(roleName, func(ctx context.Context, e *protocol.Emitter) error {
 		cfg, err := loadConfig(os.Getenv)
 		if err != nil {
 			return err
 		}
-		return discover(context.Background(), cfg, e)
+		return discover(ctx, cfg, e)
 	})
 }
 
@@ -153,15 +153,13 @@ func discoverMulti(ctx context.Context, cfg config, e *protocol.Emitter) error {
 
 // fingerprintStack resolves one root module's module graph and digests it.
 func fingerprintStack(ctx context.Context, cfg config, dir string) ([]fingerprint.Input, string, error) {
-	terraform, err := tfexec.NewTerraform(dir, cfg.ExecPath)
+	terraform, _, err := tf.NewTerraform(dir, cfg.ExecPath, os.Stderr)
 	if err != nil {
 		return nil, "", fmt.Errorf("initialize terraform in %s: %w", dir, err)
 	}
 	// Terraform's own stdout goes to STDERR. stdout belongs to the marker
 	// protocol alone: a `Downloading …` line landing between the markers would
 	// be harmless, but a line that happens to contain a marker prefix would not.
-	terraform.SetStdout(os.Stderr)
-	terraform.SetStderr(os.Stderr)
 
 	// Relocate Terraform's data directory out of the source tree. Discover
 	// mounts the source read-only (design §5.5) and, in multi-root mode, walks
@@ -319,15 +317,7 @@ func isRootModule(dir string) (bool, error) {
 // stripped rather than rejected because a job manifest may legitimately set
 // TF_VAR_* on every step in the group, and discover has no use for them.
 func terraformEnv(dataDir string) map[string]string {
-	env := make(map[string]string, len(os.Environ())+1)
-	for _, kv := range os.Environ() {
-		key, value, ok := strings.Cut(kv, "=")
-		if !ok {
-			continue
-		}
-		env[key] = value
-	}
-	env["TF_DATA_DIR"] = dataDir
+	env := tf.EnvironmentWith("TF_DATA_DIR", dataDir)
 
 	// A git module source makes `terraform get` shell out to git, and git
 	// synthesizes a reflog identity by resolving the machine's own hostname

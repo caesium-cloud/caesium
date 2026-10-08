@@ -27,10 +27,7 @@ func (c *Atom) ID() string {
 // State returns the state of the Atom. This function
 // maps Docker container states to Caesium Atom states.
 func (c *Atom) State() atom.State {
-	if state, ok := stateMap[c.metadata.State.Status]; ok {
-		return state
-	}
-	return atom.Invalid
+	return atom.ContainerState(c.metadata.State.Status)
 }
 
 // Result returns the result of the Atom. This function
@@ -39,10 +36,7 @@ func (c *Atom) Result() atom.Result {
 	if env.Variables().ResourceStatsEnabled && c.ResourceOutcome().OOMKilled {
 		return atom.ResourceFailure
 	}
-	if result, ok := resultMap[c.metadata.State.ExitCode]; ok {
-		return result
-	}
-	return atom.Unknown
+	return atom.ResultForExitCode(c.metadata.State.ExitCode)
 }
 
 // ExitCode returns the raw Docker container exit code, preserved for the

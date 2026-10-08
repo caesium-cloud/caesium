@@ -3,7 +3,6 @@ package notification
 import (
 	"github.com/caesium-cloud/caesium/api/middleware"
 	"github.com/caesium-cloud/caesium/internal/auth"
-	"github.com/caesium-cloud/caesium/pkg/log"
 	"github.com/labstack/echo/v5"
 )
 
@@ -18,14 +17,6 @@ type Controller struct {
 // New constructs a notification controller with explicit dependencies.
 func New(auditor *auth.AuditLogger) *Controller {
 	return &Controller{auditor: auditor}
-}
-
-// logAuditFailure logs (but does not fail the request on) an error writing an
-// audit entry, matching api/rest/controller/auth.logAuditFailure.
-func logAuditFailure(err error) {
-	if err != nil {
-		log.Warn("failed to write audit log", "error", err)
-	}
 }
 
 // auditActor extracts the caller's key prefix from the echo context for the

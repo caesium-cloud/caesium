@@ -6,10 +6,11 @@ import (
 	"fmt"
 	"maps"
 	"math/rand/v2"
-	"sort"
+	"slices"
 	"strings"
 	"time"
 
+	"github.com/caesium-cloud/caesium/internal/dbretry"
 	"github.com/caesium-cloud/caesium/internal/event"
 	"github.com/caesium-cloud/caesium/internal/metrics"
 	"github.com/caesium-cloud/caesium/internal/models"
@@ -394,11 +395,7 @@ func (c *Claimer) nodeSelectorPredicateSQL(dialect, tableAlias string) (string, 
 		return "NOT EXISTS (SELECT 1 FROM " + iteratorSQL + " WHERE " + valueExpr + " <> '')", nil, nil
 	}
 
-	keys := make([]string, 0, len(c.nodeLabels))
-	for key := range c.nodeLabels {
-		keys = append(keys, key)
-	}
-	sort.Strings(keys)
+	keys := slices.Sorted(maps.Keys(c.nodeLabels))
 
 	args := make([]any, 0, len(keys)*3)
 	inPlaceholders := make([]string, 0, len(keys))
@@ -584,24 +581,15 @@ func (c *Claimer) observeBusyRetry(error) {
 }
 
 func withBusyRetry(ctx context.Context, backoffs []time.Duration, fn func() error, onRetry func(error)) error {
-	var err error
-	for attempt := 0; ; attempt++ {
-		err = fn()
-		if err == nil || !isClaimContentionErr(err) {
-			return err
-		}
-		if attempt >= len(backoffs) {
-			return err
-		}
-
-		metrics.DBBusyRetriesTotal.Inc()
-		if onRetry != nil {
-			onRetry(err)
-		}
-		if sleepErr := sleepBusyRetry(ctx, backoffs[attempt]); sleepErr != nil {
-			return sleepErr
-		}
-	}
+	return dbretry.Retry(ctx, dbretry.Policy{
+		Backoffs: backoffs, Retryable: isClaimContentionErr, Wait: sleepBusyRetry,
+		OnRetry: func(err error) {
+			metrics.DBBusyRetriesTotal.Inc()
+			if onRetry != nil {
+				onRetry(err)
+			}
+		},
+	}, fn)
 }
 
 func sleepBusyRetry(ctx context.Context, base time.Duration) error {

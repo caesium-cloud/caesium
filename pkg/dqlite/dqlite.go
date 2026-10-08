@@ -75,13 +75,14 @@ func (dialector Dialector) Initialize(db *gorm.DB) (err error) {
 	}
 	databaseName := databaseNameFromDSN(dialector.DSN)
 
-	supportsSQLPragmas := true
+	applyConnectionPragmas := true
 	if dialector.Conn != nil {
 		db.ConnPool = dialector.Conn
 	} else {
-		// go-dqlite rejects SQL PRAGMA statements with SQLITE_AUTH; configure
-		// the busy timeout through its native node option instead.
-		supportsSQLPragmas = false
+		// Native dqlite denies selected PRAGMA setters, including busy_timeout
+		// and synchronous. Configure busy timeout through the native node option.
+		// foreign_keys is supported and enabled by the native VFS on every handle.
+		applyConnectionPragmas = false
 		logFunc := func(l client.LogLevel, format string, a ...any) {
 			// log info by default
 			fn := log.Info
@@ -113,7 +114,7 @@ func (dialector Dialector) Initialize(db *gorm.DB) (err error) {
 		db.ConnPool = conn
 	}
 
-	if supportsSQLPragmas {
+	if applyConnectionPragmas {
 		if err := setConnectionPragmas(context.Background(), db.ConnPool); err != nil {
 			return err
 		}

@@ -3,7 +3,9 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -14,9 +16,11 @@ import (
 	iauth "github.com/caesium-cloud/caesium/internal/auth"
 	"github.com/caesium-cloud/caesium/internal/jobdef/testutil"
 	"github.com/caesium-cloud/caesium/internal/models"
+	"github.com/caesium-cloud/caesium/internal/runlife"
 	"github.com/caesium-cloud/caesium/pkg/env"
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v5"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/require"
 )
 
@@ -487,4 +491,206 @@ func (noopCredentialAuthenticator) Name() string {
 
 func (noopCredentialAuthenticator) Authenticate(context.Context, string, string) (*iauth.ExternalIdentity, error) {
 	return nil, nil
+}
+
+func prepareAPILifetimeTest(t *testing.T) {
+	t.Helper()
+	oldRegisterer, oldGatherer := prometheus.DefaultRegisterer, prometheus.DefaultGatherer
+	registry := prometheus.NewRegistry()
+	prometheus.DefaultRegisterer, prometheus.DefaultGatherer = registry, registry
+	t.Cleanup(func() { prometheus.DefaultRegisterer, prometheus.DefaultGatherer = oldRegisterer, oldGatherer })
+	t.Cleanup(func() { require.NoError(t, env.Process()) })
+	t.Setenv("CAESIUM_PORT", "0")
+	t.Setenv("CAESIUM_AUTH_MODE", "none")
+	t.Setenv("CAESIUM_SHUTDOWN_GRACE_PERIOD", "20ms")
+	require.NoError(t, env.Process())
+	oldServe := serveAPI
+	t.Cleanup(func() { serveAPI = oldServe })
+}
+
+func TestStandaloneStartShutdownJoinsOwnerAfterServeReturns(t *testing.T) {
+	prepareAPILifetimeTest(t)
+	ready := make(chan *http.Server, 1)
+	serveAPI = func(srv *http.Server, ln net.Listener) error { ready <- srv; return srv.Serve(ln) }
+	serving := make(chan error, 1)
+	go func() { serving <- Start(context.Background(), nil, nil, nil, nil, nil, nil, SSOProviders{}, nil) }()
+	srv := <-ready
+	requestBase := srv.BaseContext(nil)
+	owner := runlife.FromContext(requestBase)
+	require.NotNil(t, owner)
+	child, release, err := owner.Reserve(requestBase)
+	require.NoError(t, err)
+	shutting := make(chan error, 1)
+	go func() { shutting <- Shutdown(context.Background()) }()
+	select {
+	case <-child.Done():
+	case <-time.After(time.Second):
+		t.Fatal("owned work not cancelled")
+	}
+	require.NoError(t, <-serving)
+	select {
+	case err := <-shutting:
+		t.Fatalf("shutdown skipped owned work: %v", err)
+	default:
+	}
+	release()
+	require.NoError(t, <-shutting)
+	apiServer.Lock()
+	remaining := apiServer.owner
+	apiServer.Unlock()
+	require.Nil(t, remaining)
+}
+
+func TestPrivateOwnerSurvivesStartContextCancellationUntilShutdown(t *testing.T) {
+	prepareAPILifetimeTest(t)
+	ready := make(chan *http.Server, 1)
+	serveAPI = func(srv *http.Server, ln net.Listener) error { ready <- srv; return srv.Serve(ln) }
+	type startValueKey struct{}
+	root := context.WithValue(context.Background(), startValueKey{}, "preserved")
+	startCtx, cancelStart := context.WithCancel(root)
+	defer cancelStart()
+	serving := make(chan error, 1)
+	go func() { serving <- Start(startCtx, nil, nil, nil, nil, nil, nil, SSOProviders{}, nil) }()
+
+	srv := <-ready
+	requestBase := srv.BaseContext(nil)
+	owner := runlife.FromContext(requestBase)
+	shutting := make(chan error, 1)
+	shutdownStarted, shutdownJoined, servingJoined := false, false, false
+	var releaseWork func()
+	var shutdownCancel context.CancelFunc
+	startShutdown := func(ctx context.Context) {
+		if shutdownStarted {
+			return
+		}
+		shutdownStarted = true
+		go func() { shutting <- Shutdown(ctx) }()
+	}
+	t.Cleanup(func() {
+		cancelStart()
+		if releaseWork != nil {
+			releaseWork()
+		}
+		if shutdownCancel != nil {
+			shutdownCancel()
+		}
+		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), time.Second)
+		defer cleanupCancel()
+		if shutdownStarted && !shutdownJoined {
+			select {
+			case err := <-shutting:
+				shutdownJoined = true
+				if err != nil {
+					t.Errorf("cleanup API shutdown: %v", err)
+				}
+			case <-cleanupCtx.Done():
+				t.Error("cleanup API shutdown did not finish")
+			}
+		}
+		if err := Shutdown(cleanupCtx); err != nil {
+			t.Errorf("cleanup API owner join: %v", err)
+		}
+		if !servingJoined {
+			select {
+			case err := <-serving:
+				if err != nil {
+					t.Errorf("cleanup API Serve: %v", err)
+				}
+			case <-cleanupCtx.Done():
+				t.Error("cleanup API Serve did not finish")
+			}
+		}
+	})
+	require.NotNil(t, owner)
+	require.Equal(t, "preserved", requestBase.Value(startValueKey{}))
+	cancelStart()
+	require.NoError(t, requestBase.Err(), "HTTP request lifetime remains detached from Start cancellation")
+
+	workCtx, release, err := owner.Reserve(requestBase)
+	require.NoError(t, err, "private owner remains open until HTTP drain completes")
+	releaseWork = release
+	require.Equal(t, "preserved", workCtx.Value(startValueKey{}))
+
+	shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), time.Second)
+	shutdownCancel = cancelShutdown
+	startShutdown(shutdownCtx)
+	select {
+	case <-workCtx.Done():
+	case <-time.After(time.Second):
+		t.Fatal("Shutdown did not cancel admitted private-owner work")
+	}
+	select {
+	case err := <-shutting:
+		t.Fatalf("Shutdown returned before admitted work was released: %v", err)
+	default:
+	}
+	release()
+	releaseWork = nil
+	var shutdownErr error
+	select {
+	case shutdownErr = <-shutting:
+		shutdownJoined = true
+	case <-time.After(time.Second):
+		t.Fatal("Shutdown did not join admitted work after release")
+	}
+	cancelShutdown()
+	shutdownCancel = nil
+	require.NoError(t, shutdownErr)
+	var serveErr error
+	select {
+	case serveErr = <-serving:
+		servingJoined = true
+	case <-time.After(time.Second):
+		t.Fatal("API Serve did not return after Shutdown")
+	}
+	require.NoError(t, serveErr)
+
+	apiServer.Lock()
+	remaining := apiServer.owner
+	apiServer.Unlock()
+	require.Nil(t, remaining)
+}
+
+func TestSharedOwnerSurvivesAPIHTTPDrain(t *testing.T) {
+	prepareAPILifetimeTest(t)
+	owner := runlife.New(context.Background())
+	defer owner.CloseAndCancel()
+	ready := make(chan *http.Server, 1)
+	serveAPI = func(srv *http.Server, ln net.Listener) error { ready <- srv; return srv.Serve(ln) }
+	root, cancel := context.WithCancel(context.Background())
+	ctx := runlife.WithSupervisor(root, owner)
+	serving := make(chan error, 1)
+	go func() { serving <- Start(ctx, nil, nil, nil, nil, nil, nil, SSOProviders{}, nil) }()
+	srv := <-ready
+	cancel()
+	require.NoError(t, srv.BaseContext(nil).Err(), "HTTP request drain is independent of process cancellation")
+	require.NoError(t, Shutdown(context.Background()))
+	require.NoError(t, <-serving)
+	_, release, err := owner.Reserve(srv.BaseContext(nil))
+	require.NoError(t, err, "shared owner closes only in coordinator")
+	release()
+}
+
+func TestUnexpectedServeExitRetainsOwnerAfterJoinTimeout(t *testing.T) {
+	prepareAPILifetimeTest(t)
+	fault := errors.New("serve failed")
+	var owner *runlife.Supervisor
+	var release func()
+	serveAPI = func(srv *http.Server, _ net.Listener) error {
+		owner = runlife.FromContext(srv.BaseContext(nil))
+		_, release, _ = owner.Reserve(srv.BaseContext(nil))
+		return fault
+	}
+	err := Start(context.Background(), nil, nil, nil, nil, nil, nil, SSOProviders{}, nil)
+	require.ErrorIs(t, err, fault)
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+	apiServer.Lock()
+	retained, srv := apiServer.owner, apiServer.srv
+	apiServer.Unlock()
+	require.Same(t, owner, retained)
+	require.Nil(t, srv)
+	_, _, err = owner.Reserve(context.Background())
+	require.ErrorIs(t, err, runlife.ErrClosed)
+	release()
+	require.NoError(t, Shutdown(context.Background()))
 }

@@ -4,10 +4,9 @@ import (
 	"context"
 	"testing"
 
-	"github.com/caesium-cloud/caesium/internal/models"
+	jobdeftestutil "github.com/caesium-cloud/caesium/internal/jobdef/testutil"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/suite"
-	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 )
 
@@ -26,19 +25,11 @@ func TestNotificationServiceSuite(t *testing.T) {
 }
 
 func (s *NotificationServiceSuite) SetupTest() {
-	dsn := "file:" + uuid.NewString() + "?mode=memory&cache=shared"
-	db, err := gorm.Open(sqlite.Open(dsn), &gorm.Config{})
-	s.Require().NoError(err)
-	s.Require().NoError(db.AutoMigrate(models.All...))
-	s.db = db
+	s.db = jobdeftestutil.OpenTestDB(s.T())
 }
 
 func (s *NotificationServiceSuite) TearDownTest() {
-	if s.db != nil {
-		if sqlDB, err := s.db.DB(); err == nil {
-			_ = sqlDB.Close()
-		}
-	}
+	jobdeftestutil.CloseDB(s.db)
 }
 
 func (s *NotificationServiceSuite) svc() *service {

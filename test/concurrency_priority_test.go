@@ -8,7 +8,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
-	"sort"
+	"slices"
 	"strings"
 	"time"
 
@@ -297,8 +297,8 @@ func priorityDrainOrder(runs map[string]*runResponse) []string {
 			startedAt: *run.Tasks[0].StartedAt,
 		})
 	}
-	sort.Slice(observedRuns, func(i, j int) bool {
-		return observedRuns[i].startedAt.Before(observedRuns[j].startedAt)
+	slices.SortFunc(observedRuns, func(a, b observed) int {
+		return a.startedAt.Compare(b.startedAt)
 	})
 	out := make([]string, 0, len(observedRuns))
 	for _, run := range observedRuns {

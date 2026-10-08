@@ -2,11 +2,11 @@ package auth
 
 import (
 	"fmt"
-	"io"
 	"net/http"
 	"strings"
 
 	"github.com/caesium-cloud/caesium/cmd/cliutil"
+	"github.com/caesium-cloud/caesium/internal/clihttp"
 	"github.com/spf13/cobra"
 )
 
@@ -17,28 +17,28 @@ var (
 
 var keyListCmd = &cobra.Command{
 	Use:   "list",
+	Args:  cobra.NoArgs,
 	Short: "List all API keys",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		server := strings.TrimSuffix(listServer, "/")
 		apiKey := resolveAPIKey(cmd, listAPIKey)
 
-		req, err := http.NewRequestWithContext(cmd.Context(), http.MethodGet, server+"/v1/auth/keys", nil)
-		if err != nil {
-			return err
-		}
+		headers := make(http.Header)
 		if apiKey != "" {
-			req.Header.Set("Authorization", "Bearer "+apiKey)
+			headers.Set("Authorization", "Bearer "+apiKey)
 		}
-
-		resp, err := http.DefaultClient.Do(req)
-		if err != nil {
-			return err
+		body, status, readErr := clihttp.Exchange(cmd.Context(), http.DefaultClient, http.MethodGet, server+"/v1/auth/keys", nil, headers)
+		if status == 0 && readErr != nil {
+			return readErr
 		}
-		defer func() { _ = resp.Body.Close() }()
-
-		body, _ := io.ReadAll(resp.Body)
-		if resp.StatusCode >= http.StatusBadRequest {
-			return fmt.Errorf("key list failed (%d): %s", resp.StatusCode, strings.TrimSpace(string(body)))
+		if status >= http.StatusBadRequest {
+			if readErr != nil {
+				return fmt.Errorf("key list failed (%d): %s (reading response: %w)", status, strings.TrimSpace(string(body)), readErr)
+			}
+			return fmt.Errorf("key list failed (%d): %s", status, strings.TrimSpace(string(body)))
+		}
+		if readErr != nil {
+			return fmt.Errorf("reading key list response: %w", readErr)
 		}
 
 		// Machine-readable listing → stdout, nothing else on it. cobra's Print*

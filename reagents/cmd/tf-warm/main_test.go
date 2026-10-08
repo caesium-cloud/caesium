@@ -74,9 +74,12 @@ $1 == "version" { gsub(/"/, "", $3); print source, $3 }
   for platform in $platforms; do
     echo mirrored > "$dir/terraform-provider-${provider_type}_${version}_${platform}.zip"
   done
-  # A real mirror writes one package at a time. Pausing between providers is
-  # what makes a concurrent warm able to observe — or destroy — a partial tree.
-  [ -n "${CAESIUM_FAKE_MIRROR_DELAY:-}" ] && sleep "$CAESIUM_FAKE_MIRROR_DELAY"
+  # Optional handshake stops each invocation after its first partial package.
+  if [ -n "${CAESIUM_FAKE_MIRROR_BARRIER:-}" ]; then
+    printf '%s\n' "$target" > "$CAESIUM_FAKE_MIRROR_BARRIER/ready.$(basename "$target")"
+    while [ ! -f "$CAESIUM_FAKE_MIRROR_BARRIER/release" ]; do sleep 0.01; done
+  fi
+
 done
 cp providers.tf "$target/providers.tf.seen" 2>/dev/null || true
 exit ` + strconv.Itoa(exitCode) + `
@@ -449,23 +452,61 @@ func stagingDirs(t *testing.T, cache string) []string {
 func TestConcurrentWarmsOfOneKeyBothPromoteACompleteMirror(t *testing.T) {
 	src, cache := newWarmFixture(t)
 	execPath, record := fakeTerraform(t, 0)
-	t.Setenv("CAESIUM_FAKE_MIRROR_DELAY", "0.4")
+	barrier := t.TempDir()
+	t.Setenv("CAESIUM_FAKE_MIRROR_BARRIER", barrier)
 	cfg := warmConfig(t, src, cache, execPath)
-
-	// The second warm is staggered into the MIDDLE of the first one's mirror, so
-	// it clears staging after the first package has been written and before the
-	// second. Starting them simultaneously does not reproduce the bug: both
-	// would clear an empty directory before either had written anything.
+	ctx, cancel := context.WithCancel(context.Background())
 	var wg sync.WaitGroup
 	errs := make([]error, 2)
-	for i := range errs {
-		wg.Go(func() {
-			if i > 0 {
-				time.Sleep(200 * time.Millisecond)
+	release := func() { _ = os.WriteFile(filepath.Join(barrier, "release"), nil, 0o600) }
+	// Every assertion failure first unblocks both fake invocations and joins
+	// every warm that was started before its fixture directories are removed.
+	t.Cleanup(func() {
+		release()
+		cancel()
+		joined := make(chan struct{})
+		go func() { wg.Wait(); close(joined) }()
+		select {
+		case <-joined:
+		case <-time.After(5 * time.Second):
+			t.Error("warm invocations did not join during cleanup")
+		}
+	})
+	start := func(i int) { wg.Go(func() { errs[i] = warm(ctx, cfg, io.Discard) }) }
+	waitReady := func(count int) {
+		deadline := time.NewTimer(5 * time.Second)
+		defer deadline.Stop()
+		ticker := time.NewTicker(5 * time.Millisecond)
+		defer ticker.Stop()
+		for {
+			entries, err := os.ReadDir(barrier)
+			if err != nil {
+				t.Fatal(err)
 			}
-			errs[i] = warm(context.Background(), cfg, io.Discard)
-		})
+			ready := 0
+			for _, entry := range entries {
+				if strings.HasPrefix(entry.Name(), "ready.") {
+					ready++
+				}
+			}
+			if ready >= count {
+				return
+			}
+			select {
+			case <-deadline.C:
+				t.Fatalf("only %d of %d warm invocations reached their partial-mirror barrier", ready, count)
+			case <-ticker.C:
+			}
+		}
 	}
+	start(0)
+	waitReady(1)
+	start(1)
+	waitReady(2) // Both distinct staging operations overlap before either release.
+	if got := len(invocations(t, record)); got != 2 {
+		t.Fatalf("mirror invocations before release = %d, want 2", got)
+	}
+	release()
 	wg.Wait()
 	for i, err := range errs {
 		if err != nil {

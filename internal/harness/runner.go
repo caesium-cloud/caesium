@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"maps"
 	"math"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -683,11 +684,7 @@ func formatMetricLabels(labels map[string]string) string {
 
 func sortedMapKeys(values map[string]string) []string {
 	keys := make([]string, 0, len(values))
-	for key := range values {
-		keys = append(keys, key)
-	}
-	sort.Strings(keys)
-	return keys
+	return append(keys, slices.Sorted(maps.Keys(values))...)
 }
 
 func cloneLabels[K comparable, V any](labels map[K]V) map[K]V {

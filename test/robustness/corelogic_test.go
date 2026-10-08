@@ -277,3 +277,16 @@ func TestLoadCoreFixtureYAML(t *testing.T) {
 type errString string
 
 func (e errString) Error() string { return string(e) }
+
+func TestPromCounterSkipsMalformedAndTrimsLaterMatchingSample(t *testing.T) {
+	value, ok := PromCounter("m{a=\"x\"} bad\nm{a=\"x\"}   2\nm{a=\"x\"} 3\n", "m", map[string]string{"a": "x"})
+	if !ok || value != 2 {
+		t.Fatalf("%v %t", value, ok)
+	}
+	if _, ok := PromCounter("m bad\n", "m", nil); ok {
+		t.Fatal("malformed sample accepted")
+	}
+	if value, ok := PromCounter("other 1\n", "m", nil); ok || value != 0 {
+		t.Fatalf("absence: %v %t", value, ok)
+	}
+}

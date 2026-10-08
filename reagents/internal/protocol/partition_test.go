@@ -148,4 +148,7 @@ func TestSortedKeys(t *testing.T) {
 	if strings.Join(got, ",") != "a,b,c" {
 		t.Fatalf("SortedKeys = %v", got)
 	}
+	if empty := SortedKeys(map[string]int{}); empty == nil || len(empty) != 0 {
+		t.Fatalf("SortedKeys(empty) = %#v, want allocated empty slice", empty)
+	}
 }

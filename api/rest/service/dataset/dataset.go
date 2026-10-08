@@ -3,9 +3,10 @@
 package dataset
 
 import (
+	"cmp"
 	"context"
 	"errors"
-	"sort"
+	"slices"
 	"strings"
 	"time"
 
@@ -475,15 +476,13 @@ func paginateStates(rows []models.DatasetState, limit, offset int) []models.Data
 }
 
 func sortStates(rows []models.DatasetState) {
-	sort.SliceStable(rows, func(i, j int) bool {
-		left := rows[i].UpdatedAt
-		right := rows[j].UpdatedAt
-		if left.Equal(right) {
-			if rows[i].Namespace == rows[j].Namespace {
-				return rows[i].Name < rows[j].Name
-			}
-			return rows[i].Namespace < rows[j].Namespace
+	slices.SortStableFunc(rows, func(a, b models.DatasetState) int {
+		if order := b.UpdatedAt.Compare(a.UpdatedAt); order != 0 {
+			return order
 		}
-		return left.After(right)
+		if order := cmp.Compare(a.Namespace, b.Namespace); order != 0 {
+			return order
+		}
+		return cmp.Compare(a.Name, b.Name)
 	})
 }

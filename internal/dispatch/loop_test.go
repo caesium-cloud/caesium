@@ -14,6 +14,7 @@ import (
 
 	"github.com/caesium-cloud/caesium/internal/jobdef/testutil"
 	"github.com/caesium-cloud/caesium/internal/metrics"
+	metrictestutil "github.com/caesium-cloud/caesium/internal/metrics/testutil"
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/caesium-cloud/caesium/internal/run"
 	"github.com/google/uuid"
@@ -72,11 +73,7 @@ func counterValue(t *testing.T, c prometheus.Counter) float64 {
 // given label values.
 func counterVecValue(t *testing.T, cv *prometheus.CounterVec, lvs ...string) float64 {
 	t.Helper()
-	c, err := cv.GetMetricWithLabelValues(lvs...)
-	if err != nil {
-		t.Fatalf("GetMetricWithLabelValues(%v): %v", lvs, err)
-	}
-	return counterValue(t, c)
+	return metrictestutil.CounterValue(t, cv, lvs...)
 }
 
 // serverPort parses the port from an httptest.Server's listener address string
@@ -614,4 +611,110 @@ func TestDispatchLoop_BenchesUnreachablePeer(t *testing.T) {
 
 	require.Equal(t, float64(1), netDelta, "dead peer is hit once, then benched for the rest of the run")
 	require.GreaterOrEqual(t, rejDelta, float64(2), "reachable peer keeps receiving dispatches after the dead one is benched")
+}
+
+func TestDispatchCandidatesBoundConcurrencyAndWait(t *testing.T) {
+	gate := make(chan struct{})
+	var once sync.Once
+	release := func() { once.Do(func() { close(gate) }) }
+	defer release()
+	entered := make(chan DispatchRequest, 32)
+	var active, maxActive atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req DispatchRequest
+		if json.NewDecoder(r.Body).Decode(&req) != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		n := active.Add(1)
+		for old := maxActive.Load(); n > old; old = maxActive.Load() {
+			if maxActive.CompareAndSwap(old, n) {
+				break
+			}
+		}
+		entered <- req
+		<-gate
+		active.Add(-1)
+		w.WriteHeader(http.StatusAccepted)
+	}))
+	defer server.Close()
+	loop := NewDispatchLoop(DispatchLoopConfig{Deadline: time.Minute})
+	runID := uuid.New()
+	candidates := make([]dispatchCandidate, 32)
+	for i := range candidates {
+		candidates[i] = dispatchCandidate{taskID: uuid.New(), taskRunID: uuid.New(), executionRef: uuid.New(), attempt: i + 1}
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	done := make(chan struct{})
+	go func() {
+		loop.dispatchCandidates(ctx, runID, 7, candidates, []peer{{nodeID: "peer", baseURL: server.URL}})
+		close(done)
+	}()
+	for range 16 {
+		select {
+		case req := <-entered:
+			require.Equal(t, runID, req.RunID)
+			require.Equal(t, int64(7), req.OwnerGeneration)
+			require.NotEqual(t, req.TaskID, req.TaskRunID)
+		case <-ctx.Done():
+			t.Fatal(ctx.Err())
+		}
+	}
+	select {
+	case <-done:
+		t.Fatal("returned before in-flight posts finished")
+	default:
+	}
+	release()
+	select {
+	case <-done:
+	case <-ctx.Done():
+		t.Fatal(ctx.Err())
+	}
+	require.LessOrEqual(t, maxActive.Load(), int32(16))
+	require.Len(t, entered, 16)
+	canceled, stop := context.WithCancel(t.Context())
+	stop()
+	before := loop.counter.Load()
+	loop.dispatchCandidates(canceled, runID, 7, candidates, []peer{{nodeID: "peer", baseURL: server.URL}})
+	require.Equal(t, before, loop.counter.Load(), "canceled dispatch must not start candidates")
+}
+
+func TestDispatchCandidatesKeepQuarantineMetricPolicy(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusAccepted) }))
+	defer server.Close()
+	loop := NewDispatchLoop(DispatchLoopConfig{Deadline: time.Minute})
+	before := counterValue(t, metrics.DispatchSentTotal)
+	loop.dispatchCandidates(t.Context(), uuid.New(), 1, []dispatchCandidate{{taskID: uuid.New(), quarantine: true}, {taskID: uuid.New()}}, []peer{{nodeID: "peer", baseURL: server.URL}})
+	require.Equal(t, before+1, counterValue(t, metrics.DispatchSentTotal))
+}
+
+type candidateRejectLimiter struct{}
+
+func (candidateRejectLimiter) Acquire(context.Context, string, int, int, time.Duration) (bool, error) {
+	return false, nil
+}
+
+type candidateParkStore struct{ parked uuid.UUID }
+
+func (*candidateParkStore) PendingTasksForDispatch(context.Context, uuid.UUID, int) ([]models.TaskRun, error) {
+	return nil, nil
+}
+func (s *candidateParkStore) RateLimitTask(_ context.Context, _, ref uuid.UUID, _ time.Time) error {
+	s.parked = ref
+	return nil
+}
+
+func TestDispatchCandidatesRateLimitUsesIndependentExecutionReference(t *testing.T) {
+	db := testutil.OpenTestDB(t)
+	t.Cleanup(func() { testutil.CloseDB(db) })
+	store := run.NewStore(db)
+	runID, taskID, rows := seedFannedRun(t, db, store)
+	parked := &candidateParkStore{}
+	loop := NewDispatchLoop(DispatchLoopConfig{Store: parked, RateLimitDB: db, RateLimiter: candidateRejectLimiter{}})
+	ref := uuid.New()
+	// The request's instance id and the rate-limit parking identity are independent.
+	loop.dispatchCandidates(t.Context(), runID, 1, []dispatchCandidate{{taskID: taskID, taskRunID: rows[0], executionRef: ref}}, []peer{{nodeID: "unused", baseURL: "http://127.0.0.1:1"}})
+	require.Equal(t, ref, parked.parked)
 }

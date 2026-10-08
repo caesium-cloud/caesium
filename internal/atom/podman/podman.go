@@ -15,27 +15,6 @@ import (
 	"github.com/containers/podman/v5/pkg/specgen"
 )
 
-var (
-	stateMap = map[string]atom.State{
-		"created":    atom.Created,
-		"running":    atom.Running,
-		"paused":     atom.Invalid, // a container should never be paused
-		"restarting": atom.Invalid, // a container should never be restarting
-		"removing":   atom.Stopping,
-		"exited":     atom.Stopped,
-		"dead":       atom.Stopped,
-	}
-	resultMap = map[int]atom.Result{
-		0:   atom.Success,
-		1:   atom.Failure,
-		125: atom.StartupFailure,
-		126: atom.StartupFailure,
-		127: atom.StartupFailure,
-		137: atom.Killed,
-		143: atom.Terminated,
-	}
-)
-
 type podmanBackend interface {
 	ContainerStats(context.Context, string) (atom.ResourceStats, error)
 	ContainerInspect(string) (*define.InspectContainerData, error)

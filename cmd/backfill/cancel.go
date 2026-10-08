@@ -2,11 +2,11 @@ package backfill
 
 import (
 	"fmt"
-	"io"
 	"net/http"
 	"strings"
 
 	"github.com/caesium-cloud/caesium/cmd/cliutil"
+	"github.com/caesium-cloud/caesium/internal/clihttp"
 	"github.com/spf13/cobra"
 )
 
@@ -18,6 +18,7 @@ var (
 
 var cancelCmd = &cobra.Command{
 	Use:   "cancel",
+	Args:  cobra.NoArgs,
 	Short: "Cancel a running backfill",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if cancelJobID == "" {
@@ -30,20 +31,9 @@ var cancelCmd = &cobra.Command{
 		server := strings.TrimSuffix(cancelServer, "/")
 		url := fmt.Sprintf("%s/v1/jobs/%s/backfills/%s/cancel", server, cancelJobID, cancelBackfillID)
 
-		req, err := http.NewRequestWithContext(cmd.Context(), http.MethodPut, url, nil)
-		if err != nil {
+		body, status, readErr := clihttp.Exchange(cmd.Context(), http.DefaultClient, http.MethodPut, url, nil, make(http.Header))
+		if err := clihttp.ResponseError("backfill cancel", status, body, readErr); err != nil {
 			return err
-		}
-
-		resp, err := http.DefaultClient.Do(req)
-		if err != nil {
-			return err
-		}
-		defer func() { _ = resp.Body.Close() }()
-
-		body, _ := io.ReadAll(resp.Body)
-		if resp.StatusCode >= http.StatusBadRequest {
-			return fmt.Errorf("backfill cancel failed (%d): %s", resp.StatusCode, strings.TrimSpace(string(body)))
 		}
 
 		// The endpoint answers with the updated backfill record

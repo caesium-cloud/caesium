@@ -15,12 +15,12 @@ import (
 )
 
 const (
-	// defaultRunListPageSize / maxRunListPageSize mirror the ListPartitions
-	// convention (see partitionPageBounds in partitions.go): a documented
+	// defaultPageSize / maxPageSize are shared by run and partition lists:
+	// a documented
 	// default and ceiling instead of an unbounded query or a limit that gets
 	// silently clamped.
-	defaultRunListPageSize = 100
-	maxRunListPageSize     = 1000
+	defaultPageSize = 100
+	maxPageSize     = 1000
 
 	// runListHeaderTotalCount / runListHeaderNextOffset carry the pagination
 	// contract on RESPONSE HEADERS rather than in the JSON body. The body
@@ -50,7 +50,7 @@ func List(c *echo.Context) error {
 		return echo.NewHTTPError(http.StatusInternalServerError, "internal server error").Wrap(err)
 	}
 
-	limit, offset, err := runListPageBounds(c.QueryParam("limit"), c.QueryParam("offset"))
+	limit, offset, err := pageBounds(c.QueryParam("limit"), c.QueryParam("offset"))
 	if err != nil {
 		return err
 	}
@@ -73,19 +73,18 @@ func List(c *echo.Context) error {
 	return c.JSON(http.StatusOK, runs)
 }
 
-// runListPageBounds parses and validates the page window the same way
-// partitionPageBounds does: an unparseable or out-of-range limit is a 400
+// pageBounds parses and validates the page window for run and partition lists:
+// an unparseable or out-of-range limit is a 400
 // rather than a silent fallback — a client that asked for 5000 runs and got
 // 100 without being told has an incomplete view it believes is complete.
-// Absent params default to defaultRunListPageSize, matching how the other
-// list endpoints in this package behave when no limit is given.
-func runListPageBounds(limitParam, offsetParam string) (limit, offset int, err error) {
-	limit = defaultRunListPageSize
+// Absent params default to defaultPageSize.
+func pageBounds(limitParam, offsetParam string) (limit, offset int, err error) {
+	limit = defaultPageSize
 	if raw := strings.TrimSpace(limitParam); raw != "" {
 		parsed, convErr := strconv.Atoi(raw)
-		if convErr != nil || parsed <= 0 || parsed > maxRunListPageSize {
+		if convErr != nil || parsed <= 0 || parsed > maxPageSize {
 			return 0, 0, echo.NewHTTPError(http.StatusBadRequest,
-				fmt.Sprintf("limit must be an integer between 1 and %d", maxRunListPageSize))
+				fmt.Sprintf("limit must be an integer between 1 and %d", maxPageSize))
 		}
 		limit = parsed
 	}

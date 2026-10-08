@@ -419,6 +419,99 @@ delete_owned_clusters() {
   done <"$OWNED_CLUSTERS"
 }
 
+# Capture each member explicitly: StatefulSet logs may choose a healthy survivor
+# and omit the member that is crash-looping. Never discover pods outside this
+# invocation's namespace or follow logs indefinitely during cleanup.
+capture_member_logs() (
+  export -f kc_ns
+  export KUBECONFIG_PATH NAMESPACE
+  python3 - "$ARTIFACTS" "$ROBUSTNESS_ID" "$CANDIDATE_SHA" "$OWNED_CLUSTERS" "$BASH" <<'PY_DIAGNOSTICS'
+import datetime
+import json
+import os
+from pathlib import Path
+import signal
+import subprocess
+import sys
+import time
+
+artifacts, owner, candidate, ledger, shell = sys.argv[1:]
+directory = Path(artifacts) / "member-logs"
+directory.mkdir(parents=True, exist_ok=True)
+manifest = {
+    "robustness_id": owner,
+    "candidate_sha": candidate,
+    "namespace": os.environ["NAMESPACE"],
+    "timeout_seconds": 10,
+    "tail_lines": 2000,
+    "captures": [],
+}
+manifest_path = directory / "capture-status.json"
+
+def save():
+    manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
+
+# The create ledger is populated only after absent-cluster checks. An early
+# refusal with a stale kubeconfig must not inspect somebody else's pods.
+if os.environ["NAMESPACE"] != owner or owner not in Path(ledger).read_text().splitlines():
+    manifest["scope_error"] = "namespace/owned-cluster ledger mismatch; no member calls attempted"
+    save()
+    raise SystemExit(1)
+
+for ordinal in range(3):
+    pod = f"caesium-{ordinal}"
+    for previous in (False, True):
+        mode = "previous" if previous else "current"
+        stdout_name = f"{pod}-{mode}.log"
+        stderr_name = f"{pod}-{mode}.stderr.log"
+        args = ["--request-timeout=10s", "logs", f"pod/{pod}", "-c", "caesium",
+                "--timestamps=true", "--tail=2000"]
+        if previous:
+            args.append("--previous=true")
+        record = {
+            "pod": pod, "container": "caesium", "mode": mode,
+            "arguments": args, "stdout": stdout_name, "stderr": stderr_name,
+            "started_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            "exit_code": None, "timed_out": False,
+        }
+        manifest["captures"].append(record)
+        save()  # retain an attempted call even if capture is interrupted
+        started = time.monotonic()
+        process = None
+        try:
+            with (directory / stdout_name).open("wb") as stdout, (directory / stderr_name).open("wb") as stderr:
+                # kc_ns retains the controller's exact explicit kubeconfig and
+                # namespace. The child gets its own process group so a hung
+                # kubectl can be killed and joined without touching the lane.
+                process = subprocess.Popen(
+                    [shell, "-c", 'kc_ns "$@"', "robustness-member-logs", *args],
+                    stdout=stdout, stderr=stderr, start_new_session=True,
+                )
+                try:
+                    record["exit_code"] = process.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    record["timed_out"] = True
+                    os.killpg(process.pid, signal.SIGKILL)
+                    record["exit_code"] = process.wait(timeout=1)
+        except Exception as exc:
+            # Details belong only in uploaded/scrubbed artifacts, not console
+            # output. Missing previous logs are likewise recorded, not PASS.
+            record["capture_error"] = f"{type(exc).__name__}: {exc}"
+        finally:
+            if process is not None and process.poll() is None:
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                    process.wait(timeout=1)
+                except Exception as exc:
+                    record["join_error"] = f"{type(exc).__name__}: {exc}"
+            if process is not None and record["exit_code"] is None:
+                record["exit_code"] = process.poll()
+            record["duration_seconds"] = round(time.monotonic() - started, 3)
+            record["finished_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
+            save()
+PY_DIAGNOSTICS
+)
+
 cleanup() {
   local status=$?
   set +e
@@ -426,6 +519,7 @@ cleanup() {
   resume_paused_task
   restart_faulted_node
   if [[ -f "$KUBECONFIG_PATH" ]]; then
+    capture_member_logs || log "cleanup: per-member log capture incomplete; see member-logs/capture-status.json"
     kc_ns logs pod/robustness-runner >"$ARTIFACTS/runner.log" 2>/dev/null || true
     kc_ns get cm robustness-records -o yaml >"$ARTIFACTS/robustness-records.yaml" 2>/dev/null || true
     kc get pods -A >"$ARTIFACTS/pods-all.txt" 2>/dev/null || true

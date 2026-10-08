@@ -1,6 +1,10 @@
 package backfill
 
 import (
+	"context"
+	"database/sql"
+	sqldriver "database/sql/driver"
+	"encoding/json"
 	"errors"
 	"testing"
 	"time"
@@ -11,6 +15,28 @@ import (
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 )
+
+func TestBackfillEnumStorageAndJSONRemainText(t *testing.T) {
+	_, db, id := newBackfillTestStore(t)
+	var stored models.Backfill
+	require.NoError(t, db.First(&stored, "id = ?", id).Error)
+	require.Equal(t, models.BackfillStatusRunning, stored.Status)
+	require.Equal(t, models.ReprocessNone, stored.Reprocess)
+	var row struct{ Status, Reprocess string }
+	require.NoError(t, db.Model(&models.Backfill{}).Select("status, reprocess").Where("id = ?", id).Scan(&row).Error)
+	require.Equal(t, "running", row.Status)
+	require.Equal(t, "none", row.Reprocess)
+	raw, err := json.Marshal(stored)
+	require.NoError(t, err)
+	var wire map[string]any
+	require.NoError(t, json.Unmarshal(raw, &wire))
+	require.Equal(t, "running", wire["status"])
+	require.Equal(t, "none", wire["reprocess"])
+	var decoded models.Backfill
+	require.NoError(t, json.Unmarshal(raw, &decoded))
+	require.Equal(t, stored.Status, decoded.Status)
+	require.Equal(t, stored.Reprocess, decoded.Reprocess)
+}
 
 func TestIsContentionErrRecognisesPoisonedConnection(t *testing.T) {
 	// `cannot start a transaction within a transaction` is the connection-state
@@ -142,7 +168,7 @@ func TestRequestCancelMarksIntentWithoutTerminalTransition(t *testing.T) {
 
 	var backfill models.Backfill
 	require.NoError(t, db.First(&backfill, "id = ?", backfillID).Error)
-	require.Equal(t, string(models.BackfillStatusRunning), backfill.Status)
+	require.Equal(t, models.BackfillStatusRunning, backfill.Status)
 	require.NotNil(t, backfill.CancelRequestedAt)
 
 	cancelRequested, err := store.IsCancelRequested(backfillID)
@@ -158,7 +184,7 @@ func TestMarkCancelledTransitionsRunningBackfill(t *testing.T) {
 
 	var backfill models.Backfill
 	require.NoError(t, db.First(&backfill, "id = ?", backfillID).Error)
-	require.Equal(t, string(models.BackfillStatusCancelled), backfill.Status)
+	require.Equal(t, models.BackfillStatusCancelled, backfill.Status)
 	require.NotNil(t, backfill.CancelRequestedAt)
 	require.NotNil(t, backfill.CompletedAt)
 
@@ -176,7 +202,7 @@ func TestCompleteDoesNotOverwriteCancelledBackfill(t *testing.T) {
 
 	var backfill models.Backfill
 	require.NoError(t, db.First(&backfill, "id = ?", backfillID).Error)
-	require.Equal(t, string(models.BackfillStatusCancelled), backfill.Status)
+	require.Equal(t, models.BackfillStatusCancelled, backfill.Status)
 	require.NotNil(t, backfill.CompletedAt)
 }
 
@@ -233,14 +259,75 @@ func newBackfillTestStore(t *testing.T) (*Store, *gorm.DB, uuid.UUID) {
 	require.NoError(t, db.Create(&models.Backfill{
 		ID:            backfillID,
 		JobID:         jobID,
-		Status:        string(models.BackfillStatusRunning),
+		Status:        models.BackfillStatusRunning,
 		Start:         time.Now().UTC().Add(-time.Hour),
 		End:           time.Now().UTC(),
 		MaxConcurrent: 1,
-		Reprocess:     string(models.ReprocessNone),
+		Reprocess:     models.ReprocessNone,
 		CreatedAt:     time.Now().UTC(),
 		UpdatedAt:     time.Now().UTC(),
 	}).Error)
 
 	return NewStore(db), db, backfillID
+}
+
+type rollbackRecordingPool struct {
+	gorm.ConnPool
+	order       *[]string
+	rollbackErr error
+}
+
+func (p rollbackRecordingPool) ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error) {
+	if query == "ROLLBACK" {
+		*p.order = append(*p.order, "rollback")
+		return sqldriver.RowsAffected(0), p.rollbackErr
+	}
+	return p.ConnPool.ExecContext(ctx, query, args...)
+}
+
+func (p rollbackRecordingPool) GetDBConn() (*sql.DB, error) {
+	if sqlDB, ok := p.ConnPool.(*sql.DB); ok {
+		return sqlDB, nil
+	}
+	if connector, ok := p.ConnPool.(gorm.GetDBConnector); ok {
+		return connector.GetDBConn()
+	}
+	return nil, gorm.ErrInvalidDB
+}
+
+func TestBackfillRetryRollbackOrderAndBudget(t *testing.T) {
+	old := busyRetryBackoffs
+	busyRetryBackoffs = []time.Duration{0, 0}
+	t.Cleanup(func() { busyRetryBackoffs = old })
+	for _, rollbackErr := range []error{nil, errors.New("rollback failed")} {
+		store, _, _ := newBackfillTestStore(t)
+		var order []string
+		pool := rollbackRecordingPool{store.db.Statement.ConnPool, &order, rollbackErr}
+		store.db.Statement.ConnPool = pool
+		calls := 0
+		poisoned := errors.New("cannot start a transaction within a transaction")
+		err := store.withBusyRetry(func() error { calls++; order = append(order, "attempt"); return poisoned })
+		require.ErrorIs(t, err, poisoned)
+		require.Equal(t, 3, calls)
+		require.Equal(t, []string{"attempt", "rollback", "attempt", "rollback", "attempt"}, order)
+	}
+}
+
+func TestBackfillRetryDoesNotCheckStoreContext(t *testing.T) {
+	old := busyRetryBackoffs
+	busyRetryBackoffs = []time.Duration{0}
+	t.Cleanup(func() { busyRetryBackoffs = old })
+	store, _, _ := newBackfillTestStore(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	store.db = store.db.WithContext(ctx)
+	calls := 0
+	require.NoError(t, store.withBusyRetry(func() error {
+		calls++
+		if calls == 1 {
+			return errors.New("database is locked")
+		}
+		return nil
+	}))
+	require.Equal(t, 2, calls)
 }

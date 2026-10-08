@@ -43,10 +43,12 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -60,12 +62,12 @@ import (
 const roleName = "tf-warm"
 
 func main() {
-	protocol.Run(roleName, func(*protocol.Emitter) error {
+	protocol.RunWithSignalContext(roleName, func(ctx context.Context, _ *protocol.Emitter) error {
 		cfg, err := loadConfig(os.Getenv)
 		if err != nil {
 			return err
 		}
-		return warm(context.Background(), cfg, os.Stderr)
+		return warm(ctx, cfg, os.Stderr)
 	})
 }
 
@@ -389,11 +391,7 @@ func mirrorDirectoryReady(path string, providers []tf.LockedProvider, platforms 
 			wanted[filepath.Join(providerDir, name)] = struct{}{}
 		}
 	}
-	paths := make([]string, 0, len(wanted))
-	for rel := range wanted {
-		paths = append(paths, rel)
-	}
-	sort.Strings(paths)
+	paths := slices.Sorted(maps.Keys(wanted))
 	for _, rel := range paths {
 		present, err := regularMirrorFile(path, rel)
 		if err != nil {
@@ -445,13 +443,18 @@ func regularMirrorFile(root, rel string) (bool, error) {
 // the repair crash-safe: a killed repair leaves either the old directory, a
 // complete new directory, or a quarantine the next always-run warm can ignore
 // while promoting its own complete staging tree.
-func promoteMirror(
+func promoteMirror(staging, mirrorDir, cacheDir, key string, providers []tf.LockedProvider, platforms []string, logOut io.Writer) error {
+	return promoteMirrorWithRename(staging, mirrorDir, cacheDir, key, providers, platforms, logOut, os.Rename)
+}
+
+func promoteMirrorWithRename(
 	staging, mirrorDir, cacheDir, key string,
 	providers []tf.LockedProvider,
 	platforms []string,
 	logOut io.Writer,
+	rename func(string, string) error,
 ) error {
-	if err := os.Rename(staging, mirrorDir); err == nil {
+	if err := rename(staging, mirrorDir); err == nil {
 		complete, checkErr := mirrorDirectoryReady(mirrorDir, providers, platforms)
 		if checkErr != nil {
 			return checkErr
@@ -481,11 +484,11 @@ func promoteMirror(
 			return fmt.Errorf("prepare quarantine %s: %w", quarantine, removeErr)
 		}
 
-		if quarantineErr := os.Rename(mirrorDir, quarantine); quarantineErr != nil {
+		if quarantineErr := rename(mirrorDir, quarantine); quarantineErr != nil {
 			// Another repair may have moved the incomplete directory. Compete at
 			// the atomic promotion seam instead; exactly one complete staging tree
 			// wins and every loser can adopt it.
-			if promoteErr := os.Rename(staging, mirrorDir); promoteErr == nil {
+			if promoteErr := rename(staging, mirrorDir); promoteErr == nil {
 				complete, checkErr = mirrorDirectoryReady(mirrorDir, providers, platforms)
 				if checkErr != nil {
 					return checkErr
@@ -507,7 +510,7 @@ func promoteMirror(
 			return fmt.Errorf("quarantine incomplete mirror %s: %w", mirrorDir, quarantineErr)
 		}
 
-		if promoteErr := os.Rename(staging, mirrorDir); promoteErr != nil {
+		if promoteErr := rename(staging, mirrorDir); promoteErr != nil {
 			complete, checkErr = mirrorDirectoryReady(mirrorDir, providers, platforms)
 			if checkErr == nil && complete {
 				_ = os.RemoveAll(quarantine)
@@ -516,8 +519,8 @@ func promoteMirror(
 			}
 			// Best-effort rollback only when nobody else installed a winner.
 			if _, statErr := os.Lstat(mirrorDir); errors.Is(statErr, fs.ErrNotExist) {
-				if restoreErr := os.Rename(quarantine, mirrorDir); restoreErr != nil {
-					return fmt.Errorf("promote repaired mirror %s: %v (also could not restore quarantine %s: %w)",
+				if restoreErr := rename(quarantine, mirrorDir); restoreErr != nil {
+					return fmt.Errorf("promote repaired mirror %s: %w (also could not restore quarantine %s: %w)",
 						mirrorDir, promoteErr, quarantine, restoreErr)
 				}
 			}
@@ -657,15 +660,14 @@ func mirrorRound(ctx context.Context, cfg config, group []tf.LockedProvider, dir
 		return fmt.Errorf("write synthetic lock file: %w", err)
 	}
 
-	terraform, err := tfexec.NewTerraform(dir, cfg.ExecPath)
+	terraform, _, err := tf.NewTerraform(dir, cfg.ExecPath, os.Stderr)
 	if err != nil {
 		return fmt.Errorf("initialize terraform: %w", err)
 	}
 	// stdout belongs to the marker protocol alone; Terraform's own chatter goes
 	// to stderr where it is still visible in the task log.
-	terraform.SetStdout(os.Stderr)
-	terraform.SetStderr(os.Stderr)
-	if err := terraform.SetEnv(tfexec.CleanEnv(envWith("TF_DATA_DIR", filepath.Join(dir, ".tfdata")))); err != nil {
+	// TF_DATA_DIR points at scratch; the source tree remains read-only.
+	if err := terraform.SetEnv(tfexec.CleanEnv(tf.EnvironmentWith("TF_DATA_DIR", filepath.Join(dir, ".tfdata")))); err != nil {
 		return fmt.Errorf("configure terraform environment: %w", err)
 	}
 
@@ -753,20 +755,4 @@ func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
 		return fmt.Errorf("rename %s to %s: %w", name, path, err)
 	}
 	return nil
-}
-
-// envWith is this process's environment plus one override. Terraform's own
-// TF_DATA_DIR must point at scratch: the synthetic root module is temporary and
-// nothing may be written into the (read-only) source tree.
-func envWith(key, value string) map[string]string {
-	env := make(map[string]string, len(os.Environ())+1)
-	for _, kv := range os.Environ() {
-		k, v, ok := strings.Cut(kv, "=")
-		if !ok {
-			continue
-		}
-		env[k] = v
-	}
-	env[key] = value
-	return env
 }

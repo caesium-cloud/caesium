@@ -7,11 +7,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"maps"
 	"net"
 	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -391,11 +393,7 @@ func (s *IntegrationTestSuite) writeRunnerMounts(b *strings.Builder) {
 
 func sortedKeys(m map[string]string) []string {
 	keys := make([]string, 0, len(m))
-	for k := range m {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	return keys
+	return append(keys, slices.Sorted(maps.Keys(m))...)
 }
 
 // threeStackDeploy is the §5.5 shape: network exports a vpc_id that app-web

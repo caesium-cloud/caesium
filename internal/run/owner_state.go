@@ -1076,9 +1076,25 @@ func (rs *RunState) partitionKey(id uuid.UUID) string {
 // without this a takeover silently drops it for the rest of the run) and the
 // step names the group-duration metric is labelled with.  It may be nil, in
 // which case only the edges and partition keys are rebuilt.
-func (rs *RunState) RehydrateInGroupEdges(rows []models.TaskRun, catalog []models.Task) {
+func (rs *RunState) RehydrateInGroupEdges(rows []models.TaskRun, catalog []models.Task) error {
 	if rs == nil || len(rows) == 0 {
-		return
+		return nil
+	}
+	// Validate every dependency list that reconstruction consumes before touching
+	// any state, including scheduling metadata. A failed adoption is atomic.
+	dependencies := make(map[uuid.UUID][]string, len(rows))
+	for i := range rows {
+		row := &rows[i]
+		if row.PartitionCount == 0 && row.PartitionValue == "" {
+			continue
+		}
+		var deps []string
+		if len(row.PartitionDependsOn) > 0 {
+			if err := json.Unmarshal(row.PartitionDependsOn, &deps); err != nil {
+				return fmt.Errorf("run: decode partition dependencies for task run %s: %w", row.ID, err)
+			}
+		}
+		dependencies[row.ID] = deps
 	}
 	if rs.catalogOf == nil {
 		rs.catalogOf = make(map[uuid.UUID]uuid.UUID)
@@ -1154,10 +1170,7 @@ func (rs *RunState) RehydrateInGroupEdges(rows []models.TaskRun, catalog []model
 			expanded := make([]ExpandedInstance, 0, len(insts))
 			base := rs.indegree[catalogID]
 			for _, row := range insts {
-				var deps []string
-				if len(row.PartitionDependsOn) > 0 {
-					_ = json.Unmarshal(row.PartitionDependsOn, &deps)
-				}
+				deps := dependencies[row.ID]
 				indegree := max(len(deps), 0)
 				expanded = append(expanded, ExpandedInstance{
 					TaskRunID:               row.ID,
@@ -1173,10 +1186,7 @@ func (rs *RunState) RehydrateInGroupEdges(rows []models.TaskRun, catalog []model
 				keyToID[row.PartitionValue] = row.ID
 			}
 			for _, row := range insts {
-				var deps []string
-				if len(row.PartitionDependsOn) > 0 {
-					_ = json.Unmarshal(row.PartitionDependsOn, &deps)
-				}
+				deps := dependencies[row.ID]
 				for _, d := range deps {
 					if from := keyToID[d]; from != uuid.Nil {
 						rs.inGroupAdj[from] = append(rs.inGroupAdj[from], row.ID)
@@ -1196,10 +1206,7 @@ func (rs *RunState) RehydrateInGroupEdges(rows []models.TaskRun, catalog []model
 		}
 		rs.instancesOf[catalogID] = ids
 		for _, row := range insts {
-			var deps []string
-			if len(row.PartitionDependsOn) > 0 {
-				_ = json.Unmarshal(row.PartitionDependsOn, &deps)
-			}
+			deps := dependencies[row.ID]
 			for _, d := range deps {
 				from := keyToID[d]
 				if from != uuid.Nil {
@@ -1208,6 +1215,7 @@ func (rs *RunState) RehydrateInGroupEdges(rows []models.TaskRun, catalog []model
 			}
 		}
 	}
+	return nil
 }
 
 const runStateSnapshotVersion = 1

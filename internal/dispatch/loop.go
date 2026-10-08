@@ -431,56 +431,11 @@ func (l *DispatchLoop) dispatchRun(ctx context.Context, runID uuid.UUID, generat
 		return
 	}
 
-	// Bound the per-tick concurrent dispatches so we don't fan out 64 goroutines
-	// for every owned run. 16 is a soft cap that keeps slow workers from
-	// stalling the loop while not requiring a full worker-pool abstraction.
-	const maxConcurrent = 16
-	concurrency := min(len(tasks), maxConcurrent)
-	sem := make(chan struct{}, concurrency)
-	var wg sync.WaitGroup
-
-	for i := range tasks {
-		if ctx.Err() != nil {
-			break
-		}
-		task := &tasks[i]
-
-		// Pick a peer via round-robin (atomic counter is per-loop, so per-task
-		// dispatch rotation is monotonic across runs and ticks).
-		idx := l.counter.Add(1) - 1
-		p := peers[idx%uint64(len(peers))]
-
-		req := DispatchRequest{
-			RunID:  runID,
-			TaskID: task.TaskID,
-			// PendingTasksForDispatch returns rows, and a fanned step has N rows
-			// sharing one task_id; naming the row is what stops the worker from
-			// having to disambiguate siblings.
-			TaskRunID:       task.ID,
-			OwnerGeneration: generation,
-			Attempt:         task.Attempt,
-			// nodeID matches the recipient's CAESIUM_NODE_ADDRESS so the
-			// handler's `req.WorkerNode == h.nodeID` check passes.
-			WorkerNode: p.nodeID,
-			// OwnerBaseURL is this node's (the owner's) own API base URL; the
-			// receiving worker POSTs its completion back here so the owner stays
-			// the single writer for its run's hot rows.
-			OwnerBaseURL: l.ownerBaseURL,
-			Deadline:     time.Now().UTC().Add(l.cfg.Deadline),
-		}
-
-		wg.Add(1)
-		sem <- struct{}{}
-		go func(p peer, req DispatchRequest) {
-			defer wg.Done()
-			defer func() { <-sem }()
-			if ok := l.acquireRateLimit(ctx, runID, req.TaskID, req.TaskRunID); !ok {
-				return
-			}
-			l.postOne(ctx, runID, p, req, task.Quarantine)
-		}(p, req)
+	candidates := make([]dispatchCandidate, 0, len(tasks))
+	for _, task := range tasks {
+		candidates = append(candidates, dispatchCandidate{taskID: task.TaskID, taskRunID: task.ID, executionRef: task.ID, attempt: task.Attempt, quarantine: task.Quarantine})
 	}
-	wg.Wait()
+	l.dispatchCandidates(ctx, runID, generation, candidates, peers)
 }
 
 // dispatchRunInMemory dispatches a run's ready tasks from the owner's in-memory
@@ -539,41 +494,41 @@ func (l *DispatchLoop) dispatchRunInMemory(ctx context.Context, runID uuid.UUID,
 		ready = ready[:l.cfg.BatchSize]
 	}
 
-	const maxConcurrent = 16
-	concurrency := min(len(ready), maxConcurrent)
-	sem := make(chan struct{}, concurrency)
-	var wg sync.WaitGroup
-
+	candidates := make([]dispatchCandidate, 0, len(ready))
 	for _, dt := range ready {
+		candidates = append(candidates, dispatchCandidate{taskID: dt.TaskID, taskRunID: dt.TaskRunID, executionRef: dt.ExecutionRef(), attempt: dt.Attempt})
+	}
+	l.dispatchCandidates(ctx, runID, generation, candidates, peers)
+}
+
+// dispatchCandidate keeps the worker row identity separate from rate-limit bookkeeping.
+type dispatchCandidate struct {
+	taskID, taskRunID, executionRef uuid.UUID
+	attempt                         int
+	quarantine                      bool
+}
+
+func (l *DispatchLoop) dispatchCandidates(ctx context.Context, runID uuid.UUID, generation int64, candidates []dispatchCandidate, peers []peer) {
+	const maxConcurrent = 16
+	sem := make(chan struct{}, min(len(candidates), maxConcurrent))
+	var wg sync.WaitGroup
+	for _, candidate := range candidates {
 		if ctx.Err() != nil {
 			break
 		}
 		idx := l.counter.Add(1) - 1
 		p := peers[idx%uint64(len(peers))]
-		// Carry both identities: the catalog task id (what every catalog lookup,
-		// including the rate-limit rule, is keyed by) and the instance TaskRun id
-		// (what the worker executes and fences its completion against).
-		req := DispatchRequest{
-			RunID:           runID,
-			TaskID:          dt.TaskID,
-			TaskRunID:       dt.TaskRunID,
-			OwnerGeneration: generation,
-			Attempt:         dt.Attempt,
-			WorkerNode:      p.nodeID,
-			OwnerBaseURL:    l.ownerBaseURL,
-			Deadline:        time.Now().UTC().Add(l.cfg.Deadline),
-		}
-		execRef := dt.ExecutionRef()
+		req := DispatchRequest{RunID: runID, TaskID: candidate.taskID, TaskRunID: candidate.taskRunID, OwnerGeneration: generation, Attempt: candidate.attempt, WorkerNode: p.nodeID, OwnerBaseURL: l.ownerBaseURL, Deadline: time.Now().UTC().Add(l.cfg.Deadline)}
 		wg.Add(1)
 		sem <- struct{}{}
-		go func(p peer, req DispatchRequest, execRef uuid.UUID) {
+		go func(p peer, req DispatchRequest, candidate dispatchCandidate) {
 			defer wg.Done()
 			defer func() { <-sem }()
-			if ok := l.acquireRateLimit(ctx, runID, req.TaskID, execRef); !ok {
+			if !l.acquireRateLimit(ctx, runID, req.TaskID, candidate.executionRef) {
 				return
 			}
-			l.postOne(ctx, runID, p, req, false)
-		}(p, req, execRef)
+			l.postOne(ctx, runID, p, req, candidate.quarantine)
+		}(p, req, candidate)
 	}
 	wg.Wait()
 }

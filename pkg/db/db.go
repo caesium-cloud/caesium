@@ -110,7 +110,7 @@ func openRouterFromEnv() (*Router, error) {
 	return router, nil
 }
 
-func openConnection(databaseName string, enforceForeignKeys bool) (*gorm.DB, error) {
+func openConnection(databaseName string, createForeignKeyConstraints bool) (*gorm.DB, error) {
 	vars := env.Variables()
 	dbType := strings.ToLower(strings.TrimSpace(vars.DatabaseType))
 
@@ -127,7 +127,8 @@ func openConnection(databaseName string, enforceForeignKeys bool) (*gorm.DB, err
 		// Explicit db.Transaction(fn) closures are unaffected by this flag.
 		SkipDefaultTransaction: true,
 	}
-	if !enforceForeignKeys {
+	// Shards omit cross-database FK DDL; native connections still enforce FKs.
+	if !createForeignKeyConstraints {
 		cfg.DisableForeignKeyConstraintWhenMigrating = true
 	}
 
@@ -181,10 +182,6 @@ func openConnection(databaseName string, enforceForeignKeys bool) (*gorm.DB, err
 		}
 	}
 
-	if isInternalDqlite(dbType) && enforceForeignKeys {
-		// Enable foreign key enforcement for SQLite-based catalog databases.
-		conn.Exec("PRAGMA foreign_keys = ON")
-	}
 	return conn, nil
 }
 

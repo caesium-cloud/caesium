@@ -332,11 +332,9 @@ func (s *MetricsSuite) TestContractBreaksBlockedTotalIncrements() {
 }
 
 func (s *MetricsSuite) gaugeValue(vec *prometheus.GaugeVec, labels ...string) float64 {
-	var m dto.Metric
 	gauge, err := vec.GetMetricWithLabelValues(labels...)
 	s.Require().NoError(err)
-	s.Require().NoError(gauge.(prometheus.Metric).Write(&m))
-	return m.GetGauge().GetValue()
+	return metrictestutil.GaugeValue(s.T(), gauge)
 }
 
 func (s *MetricsSuite) TestResourceFamiliesRegisteredAndObserved() {

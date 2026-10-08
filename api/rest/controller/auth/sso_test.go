@@ -380,98 +380,80 @@ func TestRedirectCallbacksSetSecureSessionCookieBehindTrustedHTTPSProxy(t *testi
 	}
 }
 
-func TestOIDCCallbackCompletesSSOAndSetsSessionCookie(t *testing.T) {
-	db := testutil.OpenTestDB(t)
-	t.Cleanup(func() { testutil.CloseDB(db) })
-
-	sessions := iauth.NewSessionStore(db)
-	mapper, err := iauth.NewRoleMapper("eng=operator", "")
-	require.NoError(t, err)
-	sso := iauth.NewSSOService(iauth.NewUserStore(db), sessions, mapper)
-	provider := &fakeRedirectAuthenticator{
-		name:     "oidc",
-		returnTo: "/runs?status=mine#latest",
-		identity: &iauth.ExternalIdentity{
-			Issuer:      "oidc",
-			Subject:     "sub-1",
-			Email:       "viewer@example.com",
-			DisplayName: "Viewer One",
-			Groups:      []string{"eng"},
+func TestRedirectCallbackCompletesSSOAndSetsSessionCookie(t *testing.T) {
+	tests := []struct {
+		name      string
+		provider  string
+		method    string
+		target    string
+		returnTo  string
+		identity  *iauth.ExternalIdentity
+		userAgent string
+		callback  func(*SSOController, *echo.Context) error
+	}{
+		{
+			name: "oidc", provider: "oidc", method: http.MethodGet,
+			target: "/auth/sso/oidc/callback?code=abc&state=xyz", returnTo: "/runs?status=mine#latest",
+			identity: &iauth.ExternalIdentity{
+				Issuer: "oidc", Subject: "sub-1", Email: "viewer@example.com", DisplayName: "Viewer One", Groups: []string{"eng"},
+			},
+			userAgent: "sso-test-agent",
+			callback:  func(ctrl *SSOController, c *echo.Context) error { return ctrl.OIDCCallback(c) },
+		},
+		{
+			name: "saml", provider: "saml", method: http.MethodPost,
+			target: "/auth/sso/saml/acs", returnTo: "/runs?status=mine",
+			identity: &iauth.ExternalIdentity{
+				Issuer: "saml", Subject: "nameid-1", Email: "viewer@example.com", DisplayName: "Viewer One", Groups: []string{"eng"},
+			},
+			userAgent: "saml-test-agent",
+			callback:  func(ctrl *SSOController, c *echo.Context) error { return ctrl.SAMLACS(c) },
 		},
 	}
-	ctrl := NewSSO(sessions, sso, "caesium_session")
-	ctrl.SetOIDCProvider(provider)
-	c, rec := newAuthContext(t, http.MethodGet, "/auth/sso/oidc/callback?code=abc&state=xyz", "")
-	c.Request().Header.Set("User-Agent", "sso-test-agent")
 
-	err = ctrl.OIDCCallback(c)
-	require.NoError(t, err)
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			db := testutil.OpenTestDB(t)
+			t.Cleanup(func() { testutil.CloseDB(db) })
 
-	require.True(t, provider.completeCalled)
-	require.Equal(t, http.StatusFound, rec.Code)
-	require.Equal(t, "/runs?status=mine#latest", rec.Header().Get("Location"))
+			sessions := iauth.NewSessionStore(db)
+			mapper, err := iauth.NewRoleMapper("eng=operator", "")
+			require.NoError(t, err)
+			sso := iauth.NewSSOService(iauth.NewUserStore(db), sessions, mapper)
+			provider := &fakeRedirectAuthenticator{
+				name: tc.provider, returnTo: tc.returnTo, identity: tc.identity,
+			}
+			ctrl := NewSSO(sessions, sso, "caesium_session")
+			if tc.provider == "oidc" {
+				ctrl.SetOIDCProvider(provider)
+			} else {
+				ctrl.SetSAMLProvider(provider)
+			}
+			c, rec := newAuthContext(t, tc.method, tc.target, "")
+			c.Request().Header.Set("User-Agent", tc.userAgent)
 
-	sessionCookie := requireResponseCookie(t, rec.Result().Cookies(), "caesium_session")
-	require.NotEmpty(t, sessionCookie.Value)
-	require.True(t, sessionCookie.HttpOnly)
-	require.False(t, sessionCookie.Secure)
-	require.Equal(t, http.SameSiteLaxMode, sessionCookie.SameSite)
-	require.False(t, sessionCookie.Expires.IsZero())
+			require.NoError(t, tc.callback(ctrl, c))
 
-	sess, user, err := sessions.Validate(t.Context(), sessionCookie.Value)
-	require.NoError(t, err)
-	require.Equal(t, "oidc", sess.AuthMethod)
-	require.Equal(t, "198.51.100.8", sess.SourceIP)
-	require.Equal(t, "sso-test-agent", sess.UserAgent)
-	require.Equal(t, "viewer@example.com", user.Email)
-	require.Equal(t, models.RoleOperator, user.Role)
-}
+			require.True(t, provider.completeCalled)
+			require.Equal(t, http.StatusFound, rec.Code)
+			require.Equal(t, tc.returnTo, rec.Header().Get("Location"))
 
-func TestSAMLACSCompletesSSOAndSetsSessionCookie(t *testing.T) {
-	db := testutil.OpenTestDB(t)
-	t.Cleanup(func() { testutil.CloseDB(db) })
+			sessionCookie := requireResponseCookie(t, rec.Result().Cookies(), "caesium_session")
+			require.NotEmpty(t, sessionCookie.Value)
+			require.True(t, sessionCookie.HttpOnly)
+			require.False(t, sessionCookie.Secure)
+			require.Equal(t, http.SameSiteLaxMode, sessionCookie.SameSite)
+			require.False(t, sessionCookie.Expires.IsZero())
 
-	sessions := iauth.NewSessionStore(db)
-	mapper, err := iauth.NewRoleMapper("eng=operator", "")
-	require.NoError(t, err)
-	sso := iauth.NewSSOService(iauth.NewUserStore(db), sessions, mapper)
-	provider := &fakeRedirectAuthenticator{
-		name:     "saml",
-		returnTo: "/runs?status=mine",
-		identity: &iauth.ExternalIdentity{
-			Issuer:      "saml",
-			Subject:     "nameid-1",
-			Email:       "viewer@example.com",
-			DisplayName: "Viewer One",
-			Groups:      []string{"eng"},
-		},
+			sess, user, err := sessions.Validate(t.Context(), sessionCookie.Value)
+			require.NoError(t, err)
+			require.Equal(t, tc.provider, sess.AuthMethod)
+			require.Equal(t, "198.51.100.8", sess.SourceIP)
+			require.Equal(t, tc.userAgent, sess.UserAgent)
+			require.Equal(t, "viewer@example.com", user.Email)
+			require.Equal(t, models.RoleOperator, user.Role)
+		})
 	}
-	ctrl := NewSSO(sessions, sso, "caesium_session")
-	ctrl.SetSAMLProvider(provider)
-	c, rec := newAuthContext(t, http.MethodPost, "/auth/sso/saml/acs", "")
-	c.Request().Header.Set("User-Agent", "saml-test-agent")
-
-	err = ctrl.SAMLACS(c)
-	require.NoError(t, err)
-
-	require.True(t, provider.completeCalled)
-	require.Equal(t, http.StatusFound, rec.Code)
-	require.Equal(t, "/runs?status=mine", rec.Header().Get("Location"))
-
-	sessionCookie := requireResponseCookie(t, rec.Result().Cookies(), "caesium_session")
-	require.NotEmpty(t, sessionCookie.Value)
-	require.True(t, sessionCookie.HttpOnly)
-	require.False(t, sessionCookie.Secure)
-	require.Equal(t, http.SameSiteLaxMode, sessionCookie.SameSite)
-	require.False(t, sessionCookie.Expires.IsZero())
-
-	sess, user, err := sessions.Validate(t.Context(), sessionCookie.Value)
-	require.NoError(t, err)
-	require.Equal(t, "saml", sess.AuthMethod)
-	require.Equal(t, "198.51.100.8", sess.SourceIP)
-	require.Equal(t, "saml-test-agent", sess.UserAgent)
-	require.Equal(t, "viewer@example.com", user.Email)
-	require.Equal(t, models.RoleOperator, user.Role)
 }
 
 func TestLDAPLoginCompletesSSOAndSetsSessionCookie(t *testing.T) {

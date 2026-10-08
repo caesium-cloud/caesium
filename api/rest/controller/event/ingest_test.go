@@ -73,3 +73,25 @@ func TestIngestRejectsMissingAPIKey(t *testing.T) {
 	require.True(t, ok)
 	require.Equal(t, http.StatusUnauthorized, httpErr.Code)
 }
+
+func TestIngestRejectsOversizedBodyBeforeRouting(t *testing.T) {
+	t.Cleanup(func() { require.NoError(t, env.Process()) })
+	t.Setenv("CAESIUM_EVENT_INGEST_API_KEY", "test-key")
+	t.Setenv("CAESIUM_WEBHOOK_MAX_BODY_SIZE", "8B")
+	require.NoError(t, env.Process())
+	original := routeEvent
+	routeEvent = func(context.Context, *models.IngestedEvent) (*triggerevent.RouteResult, error) {
+		t.Fatal("oversized event reached routing")
+		return nil, nil
+	}
+	t.Cleanup(func() { routeEvent = original })
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/v1/events", strings.NewReader(`{"type":"event","data":{}}`))
+	req.Header.Set("X-Caesium-API-Key", "test-key")
+	req.RemoteAddr = "127.0.0.88:12345"
+	rec := httptest.NewRecorder()
+	e := echo.New()
+	e.POST("/v1/events", New(nil).Ingest)
+	e.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusRequestEntityTooLarge, rec.Code)
+	require.Contains(t, rec.Body.String(), "request body too large")
+}

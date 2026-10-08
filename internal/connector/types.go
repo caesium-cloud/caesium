@@ -9,7 +9,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"sort"
+	"maps"
+	"slices"
 	"strings"
 	"time"
 )
@@ -256,11 +257,7 @@ func NewExecutionReference(connectionID string, coordinates map[string]string) (
 // OpaqueID is a stable digest of the connection id and coordinates. Computing
 // it does not insert a catalog row.
 func (r ExecutionReference) OpaqueID() string {
-	keys := make([]string, 0, len(r.Coordinates))
-	for key := range r.Coordinates {
-		keys = append(keys, key)
-	}
-	sort.Strings(keys)
+	keys := slices.Sorted(maps.Keys(r.Coordinates))
 	digest := sha256.New()
 	// %q keeps connection ids and coordinates unambiguous. {"a=b":"c"} and
 	// {"a":"b=c"} must not share an id, and embedded newlines must not add pairs.

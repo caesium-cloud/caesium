@@ -32,6 +32,7 @@ type pushRequest struct {
 
 var pushCmd = &cobra.Command{
 	Use:   "push --type <type> [--source <source>] --data '{}'",
+	Args:  cobra.NoArgs,
 	Short: "Push an event into the event-trigger router",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		eventType := strings.TrimSpace(pushType)

@@ -3,13 +3,14 @@
 package robustness
 
 import (
+	"cmp"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
-	"sort"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -57,10 +58,6 @@ func applyCoreFixture(t *testing.T, fe *faultEnv, member cluster.Member, name, a
 
 func uniqueAlias(kind string) string {
 	return fmt.Sprintf("core-%s-%s", kind, strings.ReplaceAll(uuid.NewString(), "-", "")[:8])
-}
-
-func fingerprintRun(t *testing.T, ctx context.Context, fe *faultEnv, base, jobID, runID string) StateFingerprint {
-	return fingerprintRunWithDurable(t, ctx, fe, base, jobID, runID, false)
 }
 
 // fingerprintDurableRun requires the lease and every task recipe to be readable.
@@ -128,7 +125,7 @@ func fingerprintRunWithDurable(t *testing.T, ctx context.Context, fe *faultEnv, 
 		}
 		fp.Tasks = append(fp.Tasks, tf)
 	}
-	sort.Slice(fp.Tasks, func(i, j int) bool { return fp.Tasks[i].ID < fp.Tasks[j].ID })
+	slices.SortFunc(fp.Tasks, func(a, b TaskFingerprint) int { return cmp.Compare(a.ID, b.ID) })
 	for _, ev := range fe.sink.Events() {
 		if ev.RunID == runID && strings.TrimSpace(ev.Nonce) != "" {
 			fp.EffectNonces = append(fp.EffectNonces, ev.Nonce)

@@ -24,7 +24,10 @@
 package history
 
 import (
+	"cmp"
 	"fmt"
+	"maps"
+	"slices"
 	"sort"
 )
 
@@ -578,10 +581,7 @@ func CorrelateEffects(runID string, effects []Effect, delivered []Delivered, per
 		rep.PerStep[name] = *s
 	}
 
-	for id := range unmapped {
-		rep.UnmappedTaskIDs = append(rep.UnmappedTaskIDs, id)
-	}
-	sort.Strings(rep.UnmappedTaskIDs)
+	rep.UnmappedTaskIDs = append(rep.UnmappedTaskIDs, slices.Sorted(maps.Keys(unmapped))...)
 	sort.Strings(rep.Notes)
 
 	if rep.RawStarts == 0 {
@@ -603,11 +603,7 @@ func CorrelateEffects(runID string, effects []Effect, delivered []Delivered, per
 // Defects returns only the illegal findings of an effect correlation.
 func (r EffectReport) Defects() []string {
 	var out []string
-	names := make([]string, 0, len(r.PerStep))
-	for name := range r.PerStep {
-		names = append(names, name)
-	}
-	sort.Strings(names)
+	names := slices.Sorted(maps.Keys(r.PerStep))
 	for _, name := range names {
 		s := r.PerStep[name]
 		if s.PhantomCompletions > 0 {
@@ -623,5 +619,5 @@ func (r EffectReport) Defects() []string {
 func (r EffectReport) Conclusive() bool { return len(r.Inconclusive) == 0 }
 
 func sortU64(v []uint64) {
-	sort.Slice(v, func(i, j int) bool { return v[i] < v[j] })
+	slices.SortFunc(v, cmp.Compare[uint64])
 }

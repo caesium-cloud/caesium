@@ -8,12 +8,6 @@
 //
 //	internal/jobdef -> internal/freshness -> internal/trigger/event ->
 //	internal/job -> internal/jobdef/runtime -> internal/jobdef/git -> internal/jobdef
-//
-// NOTE: internal/trigger/event still keeps its own private copies of these
-// helpers (matcher.go + the resolveJSONPath family in event.go). This package
-// mirrors them verbatim to avoid the cycle; a follow-up can collapse
-// trigger/event onto this leaf (safe — importing a leaf creates no cycle).
-// Keep the two in sync until then.
 package eventmatch
 
 import (
@@ -40,14 +34,14 @@ func (p EventPattern) Matches(evt *models.IngestedEvent) bool {
 	if evt == nil {
 		return false
 	}
-	if !matchesEventType(p.Type, evt.Type) {
+	if !MatchesEventType(p.Type, evt.Type) {
 		return false
 	}
 	if strings.TrimSpace(p.Source) != "" && strings.TrimSpace(p.Source) != strings.TrimSpace(evt.Source) {
 		return false
 	}
 	for field, expected := range p.Filter {
-		actual, ok := extractField(evt.Data, field)
+		actual, ok := ExtractField(evt.Data, field)
 		if !ok || actual != expected {
 			return false
 		}
@@ -55,7 +49,7 @@ func (p EventPattern) Matches(evt *models.IngestedEvent) bool {
 	return true
 }
 
-func matchesEventType(pattern, eventType string) bool {
+func MatchesEventType(pattern, eventType string) bool {
 	pattern = strings.TrimSpace(pattern)
 	eventType = strings.TrimSpace(eventType)
 	if pattern == "" || eventType == "" {
@@ -68,7 +62,8 @@ func matchesEventType(pattern, eventType string) bool {
 	return err == nil && matched
 }
 
-func extractField(data []byte, fieldPath string) (string, bool) {
+// ExtractField reads a dotted object path using the event decoder policy.
+func ExtractField(data []byte, fieldPath string) (string, bool) {
 	fieldPath = strings.TrimSpace(fieldPath)
 	if fieldPath == "" {
 		return "", false
@@ -98,10 +93,10 @@ func extractField(data []byte, fieldPath string) (string, bool) {
 		current = next
 	}
 
-	return stringifyJSONValue(current)
+	return StringifyJSONValue(current)
 }
 
-func stringifyJSONValue(value any) (string, bool) {
+func StringifyJSONValue(value any) (string, bool) {
 	switch v := value.(type) {
 	case nil:
 		return "", false
@@ -141,12 +136,12 @@ func ResolveJSONPathBytes(data []byte, jsonPath string) (string, bool) {
 	if err := decoder.Decode(&payload); err != nil {
 		return "", false
 	}
-	return resolveJSONPath(payload, jsonPath)
+	return ResolveJSONPath(payload, jsonPath)
 }
 
-func resolveJSONPath(payload any, jsonPath string) (string, bool) {
+func ResolveJSONPath(payload any, jsonPath string) (string, bool) {
 	if strings.TrimSpace(jsonPath) == "$" {
-		return stringifyJSONValue(payload)
+		return StringifyJSONValue(payload)
 	}
 
 	segments := parseJSONPath(jsonPath)
@@ -163,7 +158,7 @@ func resolveJSONPath(payload any, jsonPath string) (string, bool) {
 		current = next
 	}
 
-	return stringifyJSONValue(current)
+	return StringifyJSONValue(current)
 }
 
 func parseJSONPath(jsonPath string) []string {
