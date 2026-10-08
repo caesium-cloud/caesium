@@ -1,6 +1,6 @@
 # Go maintainability implementation
 
-Status: **implemented; per-run Podman resolution ready; fresh hosted qualification pending**. [Aggregate draft PR #620](https://github.com/caesium-cloud/caesium/pull/620) contains all 253 planned source items, with zero final acceptances pending required current qualification. Published `49b4780c` automatic run [37410181530](https://github.com/caesium-cloud/caesium/actions/runs/37410181530), tested through merge `9692907d`, finished with 39 successful, two failed and three skipped jobs. All normal jobs passed, including actual pod replacement/rejoin. Coverage failed before collection because Quay could not supply the pinned Podman AMD64 manifest; `ci-ok` failed through that dependency. A bounded metadata diagnosis confirmed that the exact old index and child return 404. The replacement declares the same version but all ten image layers differ, so it requires fresh qualification. Earlier startup failures and historical profiles retain their source identities.
+Status: **253 work items accepted at qualified source `4de34ffa`; aggregate draft PR open**. [PR #620](https://github.com/caesium-cloud/caesium/pull/620) contains the 107 verified candidates. Automatic run [37713798770](https://github.com/caesium-cloud/caesium/actions/runs/37713798770), attempt 1, passed all 41 executed jobs and `ci-ok`, with three expected conditional skips. The actual tested merge `4139021f` has base `0b4cc4c4` and source `4de34ffa` as parents and an identical source tree. Independent artifact review and coordinator adjudication accepted the fresh coverage/backend cohort with the evidence limits below. Acceptance combines each item's original semantic/test evidence, unchanged current blob bindings and the shared qualification; a green coverage report alone does not accept an item. This documentation closeout changes no code or qualification policy. The final published PR head must also pass its automatic required checks; no merge is part of this endpoint.
 
 Base / verified audit target: `0b4cc4c4677f9cb28924366043ccb79cc4543e54` (#618 included). Both Go modules declare Go 1.27.1. The audit raised 142 findings, merged them into 107 independently verified candidates, and produced 253 work items. All confirmed items remain in scope, including low-value cleanup; item-sized PR suggestions are now local commit batches for one final PR.
 
@@ -12,7 +12,7 @@ Base / verified audit target: `0b4cc4c4677f9cb28924366043ccb79cc4543e54` (#618 i
 - CI Podman acquisition: the user approved one-time discovery of fixed version `v5.8.7` per run, followed by complete index/AMD64/config validation and an immutable digest pull. Record the exact supplier content for each run; do not fall back or reuse qualification profiles from another image. This accepts supplier rebuilds within the fixed version between runs. Platform, ownership, volumes, native checks, scenarios, coverage floors and budgets remain required.
 - No exported identifier/signature changes outside internal packages are authorized by this plan.
 
-The resolver source at `21fdadb5` passed 11 focused methods comprising 69 actual recipe executions, including malformed metadata, conflicting image identities, failure-proof retention and wall deadlines around blocked headers, buffered body reads and redirects; actionlint and the scoped diff check passed. The deadline tests reject the original recipe. One timer covers a complete request and its config redirect, with the previous signal handler and timer restored afterward. The final source receives independent review and complete portable-tooling validation before publication. These controls do not qualify a runnable AMD64 service or produce coverage; the new hosted full collector remains required.
+The resolver source at `21fdadb5`, integrated through `4de34ffa`, passed 11 focused methods comprising 69 recipe executions. Independent review exercised 76 controls without skips, including real timer delivery, blocked headers, buffered/chunked reads, redirects and restoration of earlier timers. The original recipe fails the new deadline controls. Complete portable tooling passed locally: 798 tests, no skips; hosted tooling passed 797 with one optional cached-Alpine Docker probe skipped. Actionlint and scoped diff checks passed. The fresh hosted acquisition pulled the captured AMD64 child `sha256:4364cd21…` under validated index `sha256:f94b291e…` and config `sha256:987a1ac7…`; the actual Docker ID/sole RepoDigest are the child identity, separately recorded from config. All seven Podman process receipts bind the complete producer JSON byte hash; Kubernetes and Podman success, failure and deadline cases retain native running and task-absence observations. Metadata acquisition and local controls alone would not qualify those runtime cases.
 
 ## Acceptance
 
@@ -24,263 +24,263 @@ The resolver source at `21fdadb5` passed 11 focused methods comprising 69 actual
 
 ## Progress
 
-Current item states: implemented=253.
+Current item states: accepted=253; pending=0. Each row keeps its original source evidence; shared acceptance is the source-bound `4de34ffa` cohort described below.
 
 | Item | Candidates | Work | State | Evidence |
 | --- | --- | --- | --- | --- |
-| W01 | C061, C058 | Pin CLI HTTP policies and separate output streams | implemented | f9396f3c..4169b1ff; complete-scope acceptance pending |
-| W02 | C105 | Characterize local execution state and completion handoff | implemented | 5b2b7db6..58883905; complete-scope acceptance pending |
-| W249 | C032 | Pin predecessor projections and execution ownership | implemented | 7255aa8f..5b50c51d; PG snapshot77aaf098; complete-scope acceptance pending |
-| W250 | C003 | Prove native foreign keys on both pools and new connections | implemented | bb70101f..63d3dbae; complete-scope acceptance pending |
-| W03 | C002 | Pin caller-specific retry policies | implemented | bb70101f..63d3dbae; complete-scope acceptance pending |
-| W04 | C002 | Pin database retry policy before extraction | implemented | bb70101f..63d3dbae; complete-scope acceptance pending |
-| W05 | C054 | Characterize the read-only SQL guard | implemented | c04b6577/298dd8ee/3a14063e/bf18324a/3a4070dd/f5423c3f/03530cc2/a542984e; aggregate/real-surface acceptance pending |
-| W06 | C097 | Use current standard-library idioms in api/rest/controller/jobdef | implemented | f6415b2a/f73a5901; complete-scope acceptance pending |
-| W07 | C096 | Use current standard-library idioms in api/rest/controller/replay | implemented | f6415b2a/f73a5901; complete-scope acceptance pending |
-| W08 | C096 | Use current standard-library idioms in api/rest/controller/system | implemented | f6415b2a/f73a5901; complete-scope acceptance pending |
-| W09 | C097 | Use current standard-library idioms in api/rest/service/contract | implemented | f6415b2a/f73a5901; complete-scope acceptance pending |
-| W10 | C097 | Use current standard-library idioms in api/rest/service/dataset | implemented | f6415b2a/f73a5901; complete-scope acceptance pending |
-| W11 | C005 | Use current standard-library idioms in api/rest/service/replay | implemented | f6415b2a/f73a5901; complete-scope acceptance pending |
-| W12 | C097 | Use current standard-library idioms in api/rest/service/system | implemented | f6415b2a/f73a5901; complete-scope acceptance pending |
-| W13 | C005 | Use current standard-library idioms in cmd/contract | implemented | f6415b2a/f73a5901; complete-scope acceptance pending |
-| W14 | C096 | Use current standard-library idioms in cmd/dataset | implemented | f6415b2a/f73a5901; complete-scope acceptance pending |
-| W15 | C005, C097 | Use current standard-library idioms in cmd/job | implemented | f6415b2a/f73a5901; complete-scope acceptance pending |
-| W16 | C005, C096 | Use current standard-library idioms in cmd/reproduce | implemented | f6415b2a/f73a5901; complete-scope acceptance pending |
-| W17 | C005 | Use current standard-library idioms in cmd/why | implemented | f6415b2a/f73a5901; complete-scope acceptance pending |
-| W18 | C096 | Use current standard-library idioms in internal/atom/kubernetes | implemented | f6415b2a/f73a5901; complete-scope acceptance pending |
-| W19 | C005 | Use current standard-library idioms in internal/cache | implemented | f6415b2a/f73a5901; complete-scope acceptance pending |
-| W20 | C005 | Use current standard-library idioms in internal/connector | implemented | f6415b2a/f73a5901; complete-scope acceptance pending |
-| W21 | C005 | Use current standard-library idioms in internal/contract | implemented | f6415b2a/f73a5901; complete-scope acceptance pending |
-| W22 | C005 | Use current standard-library idioms in internal/freshness | implemented | f6415b2a/f73a5901; complete-scope acceptance pending |
-| W23 | C005 | Use current standard-library idioms in internal/harness | implemented | f6415b2a/f73a5901; complete-scope acceptance pending |
-| W24 | C005 | Use current standard-library idioms in internal/incident | implemented | f6415b2a/f73a5901; complete-scope acceptance pending |
-| W25 | C005, C096 | Use current standard-library idioms in internal/jobdef | implemented | f6415b2a/f73a5901; complete-scope acceptance pending |
-| W26 | C005 | Use current standard-library idioms in internal/jobdef/runtime | implemented | f6415b2a/f73a5901; complete-scope acceptance pending |
-| W27 | C005 | Use current standard-library idioms in internal/lineage | implemented | f6415b2a/f73a5901; complete-scope acceptance pending |
-| W28 | C005 | Use current standard-library idioms in internal/reproduce | implemented | f6415b2a/f73a5901; complete-scope acceptance pending |
-| W29 | C005, C096 | Use current standard-library idioms in internal/run | implemented | b4518a47..8ce50178; fixturef8cf3ac0; complete-scope acceptance pending |
-| W30 | C005 | Use current standard-library idioms in internal/testfault | implemented | f6415b2a/f73a5901; complete-scope acceptance pending |
-| W31 | C005 | Use current standard-library idioms in internal/worker | implemented | f6415b2a/f73a5901; complete-scope acceptance pending |
-| W32 | C096 | Use current standard-library idioms in pkg/dqlite | implemented | f6415b2a/f73a5901; complete-scope acceptance pending |
-| W33 | C096 | Use current standard-library idioms in pkg/env | implemented | f6415b2a/f73a5901; complete-scope acceptance pending |
-| W34 | C005 | Use current standard-library idioms in pkg/jobdef/schemacompat | implemented | f6415b2a/f73a5901; complete-scope acceptance pending |
-| W35 | C005 | Use current standard-library idioms in pkg/task | implemented | f6415b2a/f73a5901; complete-scope acceptance pending |
-| W36 | C097 | Use current standard-library idioms in reagents/cmd/tf-discover | implemented | f6415b2a/f73a5901; complete-scope acceptance pending |
-| W37 | C005 | Use current standard-library idioms in reagents/cmd/tf-runner | implemented | f6415b2a/f73a5901; complete-scope acceptance pending |
-| W38 | C005 | Use current standard-library idioms in reagents/cmd/tf-warm | implemented | f6415b2a/f73a5901; complete-scope acceptance pending |
-| W39 | C097 | Use current standard-library idioms in reagents/internal/fingerprint | implemented | f6415b2a/f73a5901; complete-scope acceptance pending |
-| W40 | C005, C097 | Use current standard-library idioms in reagents/internal/protocol | implemented | f6415b2a/f73a5901; complete-scope acceptance pending |
-| W41 | C005, C097 | Use current standard-library idioms in reagents/internal/tf | implemented | f6415b2a/f73a5901; complete-scope acceptance pending |
-| W42 | C005, C096, C097 | Use current standard-library idioms in test | implemented | f6415b2a/f73a5901; complete-scope acceptance pending |
-| W43 | C005, C096, C097 | Use current standard-library idioms in test/lifecycle | implemented | f6415b2a/f73a5901; complete-scope acceptance pending |
-| W44 | C005, C097 | Use current standard-library idioms in test/model | implemented | f6415b2a/f73a5901; complete-scope acceptance pending |
-| W45 | C096 | Use current standard-library idioms in test/performance | implemented | f6415b2a/f73a5901; complete-scope acceptance pending |
-| W46 | C097 | Use current standard-library idioms in test/robustness | implemented | f6415b2a/f73a5901; complete-scope acceptance pending |
-| W47 | C005 | Use current standard-library idioms in test/robustness/faults | implemented | f6415b2a/f73a5901; complete-scope acceptance pending |
-| W48 | C005, C097 | Use current standard-library idioms in test/robustness/history | implemented | f6415b2a/f73a5901; complete-scope acceptance pending |
-| W251 | C003 | Remove redundant FK setup and clarify native PRAGMA policy | implemented | bb70101f..63d3dbae; complete-scope acceptance pending |
-| W49 | C001 | Reject byte-size suffix multiplication overflow | implemented | f6415b2a/f73a5901; complete-scope acceptance pending |
-| W50 | C044 | Reject malformed partition edges during recovery | implemented | b4518a47..8ce50178; fixturef8cf3ac0; complete-scope acceptance pending |
-| W51 | C077 | Reject incomplete SSE event backlogs | implemented | Luna test hygiene integrated through 1dc686e6; host subset passed; native/integration acceptance pending |
-| W52 | C079 | Reject malformed boolean environment values before load qualification | implemented | Luna test hygiene integrated through 1dc686e6; host subset passed; native/integration acceptance pending |
-| W53 | C083 | Require durable snapshots before claiming rejected requests are state-inert | implemented | c04b6577/298dd8ee/3a14063e/bf18324a/3a4070dd/f5423c3f/03530cc2/a542984e; aggregate/real-surface acceptance pending |
-| W54 | C086 | Treat malformed accepted start outcomes as uncertain | implemented | Luna test hygiene integrated through 1dc686e6; host subset passed; native/integration acceptance pending |
-| W55 | C098 | Stop the distributed atom before returning partition marker errors | implemented | 7255aa8f..5b50c51d; PG snapshot77aaf098; complete-scope acceptance pending |
-| W56 | C099 | Register local whole-run retries before starting execution | implemented | 219bead1..12fc7e0e; metrics ec3a40c8; fixture cca78cea; aggregate/real-surface acceptance pending |
-| W57 | C014, C015, C016 | Keep cron recurrence alive and errors local | implemented | bb70101f..63d3dbae; complete-scope acceptance pending |
-| W252 | C032 | Read and project predecessor inputs from one strict snapshot | implemented | 7255aa8f..5b50c51d; PG snapshot77aaf098; complete-scope acceptance pending |
-| W253 | C032 | Fail before launch and reuse predecessor inputs across retries | implemented | 7255aa8f..5b50c51d; PG snapshot77aaf098; complete-scope acceptance pending |
-| W58 | C008 | Chunk wide lineage frontiers before building SQL predicates | implemented | 26 items integrated through d7f1426c; domain-events-receipt.md, native/real surface acceptance pending |
-| W59 | C009 | Share the repeated task lifecycle event mapping | implemented | 26 items integrated through d7f1426c; domain-events-receipt.md, native/real surface acceptance pending |
-| W60 | C010 | Reclaim expired job-cache entries | implemented | 26 items integrated through d7f1426c; domain-events-receipt.md, native/real surface acceptance pending |
-| W61 | C012 | Batch consumed-dataset state reads | implemented | 97751615..b66a4c66; complete-scope acceptance pending |
-| W62 | C018 | Classify Docker image absence with the typed error | implemented | 29 items integrated through 25bafffe/6c254bac/b32aed16; auth-runtime-helpers-receipt.md, native/real surface acceptance pending |
-| W63 | C019 | Share predecessor-output name reconstruction | implemented | 29 items integrated through 25bafffe/6c254bac/b32aed16; auth-runtime-helpers-receipt.md, native/real surface acceptance pending |
-| W64 | C024 | Normalize job aliases in one auth helper | implemented | 29 items integrated through 25bafffe/6c254bac/b32aed16; auth-runtime-helpers-receipt.md, native/real surface acceptance pending; C024 accepted direction amendment852376→c93: reuse exact existing normalizeAllowlist, nil-to-empty scope adapter; no new agent launch behavior; independent ACCEPT + native auth/middleware race/taggedvet/lint0 PASS. |
-| W65 | C026 | Share the SQL and in-memory dispatch batching loop | implemented | 26 items integrated through d7f1426c; domain-events-receipt.md, native/real surface acceptance pending |
-| W66 | C028 | Keep deterministic policy rules from dispatching approval-tier actions | implemented | 26 items integrated through d7f1426c; domain-events-receipt.md, native/real surface acceptance pending |
-| W67 | C033 | Use cache.HashInput directly for local hash inputs | implemented | b4518a47..8ce50178; fixturef8cf3ac0; complete-scope acceptance pending |
-| W68 | C040 | Share fan-out TaskRun materialization between SQL and owner paths | implemented | b4518a47..8ce50178; fixturef8cf3ac0; complete-scope acceptance pending |
-| W69 | C043 | Share schema-violation policy across catalog and instance validation | implemented | b4518a47..8ce50178; fixturef8cf3ac0; complete-scope acceptance pending |
-| W70 | C045 | Use one SQL set for terminal task statuses | implemented | b4518a47..8ce50178; fixturef8cf3ac0; complete-scope acceptance pending |
-| W71 | C046 | Propagate execution context through data-assertion evaluation | implemented | b4518a47..8ce50178; fixturef8cf3ac0; complete-scope acceptance pending |
-| W72 | C049 | Share run and partition page-bound parsing | implemented | 2ab9b7cd/b6e456f9; stats correctiona52a7be0; complete-scope acceptance pending |
-| W73 | C053 | Propagate statistics query failures | implemented | 2ab9b7cd/b6e456f9; stats correctiona52a7be0; complete-scope acceptance pending; 2783514e nativecontroller: threefreshchild racePASS, realGet/Summary querycancel=>wrapped500/exactredactedJSON/positivebeforeafter; package lint0; rootreceipt run/stats-controller-root-adjudication.json |
-| W74 | C054 | Share the SQL quote and comment scanner | implemented | c04b6577/298dd8ee/3a14063e/bf18324a/3a4070dd/f5423c3f/03530cc2/a542984e; aggregate/real-surface acceptance pending |
-| W75 | C063 | Centralize tf-runner's plan-to-apply test wiring | implemented | 592c0a14..9eb5734c; host focused race; real Terraform check underway; aggregate/real-surface acceptance pending |
-| W76 | C073 | Reap developer-journey CLI children on early failures | implemented | Luna test hygiene integrated through 1dc686e6; host subset passed; native/integration acceptance pending |
-| W77 | C080 | Reject unknown names in mixed performance workload selections | implemented | Luna test hygiene integrated through 1dc686e6; host subset passed; native/integration acceptance pending |
-| W78 | C082 | Use one percentile convention for end-to-end latency fields | implemented | Luna test hygiene integrated through 1dc686e6; host subset passed; native/integration acceptance pending |
-| W79 | C084 | Fail soak drain when owned task resources remain after grace | implemented | Luna test hygiene integrated through 1dc686e6; host subset passed; native/integration acceptance pending |
-| W80 | C085 | Join the retention checkpoint poller on every exit | implemented | Luna test hygiene integrated through 1dc686e6; host subset passed; native/integration acceptance pending |
-| W81 | C089 | Restrict the reserved actor check to the root action schema | implemented | c04b6577/298dd8ee/3a14063e/bf18324a/3a4070dd/f5423c3f/03530cc2/a542984e; aggregate/real-surface acceptance pending |
-| W82 | C095 | Scan worker aggregates into a typed result | implemented | 2ab9b7cd/b6e456f9; stats correctiona52a7be0; complete-scope acceptance pending |
-| W83 | C103 | Correlate SSE expectations with the triggered run | implemented | Luna test hygiene integrated through 1dc686e6; host subset passed; native/integration acceptance pending |
-| W84 | C104 | Replace the fixed stagger in the concurrent warm test | implemented | 592c0a14..9eb5734c; host focused race; real Terraform check underway; aggregate/real-surface acceptance pending |
-| W85 | C038, C039 | Share completion field encoding and failure messages | implemented | b4518a47..8ce50178; fixturef8cf3ac0; complete-scope acceptance pending |
-| W86 | C068, C075 | Wait on retry state instead of sleeps | implemented | Luna test hygiene integrated through 1dc686e6; host subset passed; native/integration acceptance pending |
-| W87 | C048 | Reject malformed atom UUIDs before service calls | implemented | 2ab9b7cd/b6e456f9; stats correctiona52a7be0; complete-scope acceptance pending |
-| W88 | C048 | Reject malformed trigger UUIDs before service calls | implemented | 2ab9b7cd/b6e456f9; stats correctiona52a7be0; complete-scope acceptance pending |
-| W89 | C006 | Share the duplicated cache-hash test setup | implemented | Luna test hygiene integrated through 1dc686e6; host subset passed; native/integration acceptance pending |
-| W90 | C013 | Share dataset_advanced event construction | implemented | 97751615..b66a4c66; complete-scope acceptance pending |
-| W91 | C020 | Centralize repeated reproduction descriptor test defaults | implemented | 29 items integrated through 25bafffe/6c254bac/b32aed16; auth-runtime-helpers-receipt.md, native/real surface acceptance pending |
-| W92 | C022 | Remove the no-op Kubernetes Atom constructor | implemented | 29 items integrated through 25bafffe/6c254bac/b32aed16; auth-runtime-helpers-receipt.md, native/real surface acceptance pending |
-| W93 | C030 | Share the failed-first task-run attribution selector | implemented | 26 items integrated through d7f1426c; domain-events-receipt.md, native/real surface acceptance pending |
-| W94 | C037 | Trigger-rule success and failure scenarios duplicate their DAG setup | implemented | Luna test hygiene integrated through 1dc686e6; host subset passed; native/integration acceptance pending |
-| W95 | C047 | Table-drive OIDC and SAML callback persistence coverage | implemented | Luna test hygiene integrated through 1dc686e6; host subset passed; native/integration acceptance pending |
-| W96 | C067 | Use the shared raw CLI runner for expected errors | implemented | Luna test hygiene integrated through 1dc686e6; host subset passed; native/integration acceptance pending |
-| W97 | C071 | Share the task-ID-to-name index across integration helpers | implemented | a63fc5fe task name fixtures; real-surface acceptance pending |
-| W98 | C088 | Give the host-request encoder a concrete request type | implemented | 610b7cea typed host request encoder; real-surface acceptance pending |
-| W99 | C106 | Remove the unused bus dispatcher tuning options | implemented | 219bead1..12fc7e0e; metrics ec3a40c8; fixture cca78cea; aggregate/real-surface acceptance pending |
-| W100 | C069, C070, C074 | Consolidate typed integration manifest fixtures | implemented | 97506bfe integration manifest fixtures; real-surface acceptance pending |
-| W101 | C076, C078 | Share lifecycle matrix and membership reads | implemented | 36447dc5 matrix/directViews; final acceptance pending |
-| W102 | C057, C058, C060 | Consolidate helpers and error handling in cmd/auth | implemented | f9396f3c..4169b1ff; complete-scope acceptance pending |
-| W103 | C057, C058 | Consolidate helpers and error handling in cmd/backfill | implemented | f9396f3c..4169b1ff; complete-scope acceptance pending |
-| W104 | C057, C058 | Consolidate helpers and error handling in cmd/cache | implemented | f9396f3c..4169b1ff; complete-scope acceptance pending |
-| W105 | C057, C058 | Consolidate helpers and error handling in cmd/receipt | implemented | f9396f3c..4169b1ff; complete-scope acceptance pending |
-| W106 | C058 | Consolidate helpers and error handling in cmd/reproduce | implemented | f9396f3c..4169b1ff; complete-scope acceptance pending |
-| W107 | C058 | Consolidate helpers and error handling in cmd/verify | implemented | f9396f3c..4169b1ff; complete-scope acceptance pending |
-| W108 | C058, C060 | Consolidate helpers and error handling in cmd/why | implemented | f9396f3c..4169b1ff; complete-scope acceptance pending |
-| W109 | C087 | Introduce strict internal SQL evidence decoding | implemented | 8948da9a/16586b50/1cb2cee7/7283391e/f7215821/008feae2; complete-scope acceptance pending |
-| W110 | C087 | Migrate cluster strict query to the C087 helper | implemented | 8948da9a/16586b50/1cb2cee7/7283391e/f7215821/008feae2; complete-scope acceptance pending |
-| W111 | C087 | Migrate robustness persisted evidence to the C087 helper | implemented | 8948da9a/16586b50/1cb2cee7/7283391e/f7215821/008feae2; complete-scope acceptance pending |
-| W112 | C087 | Migrate robustness scalar and checkpoint evidence to the C087 helper | implemented | 824c82b8 exact same-request scalar/checkpoint cells; final acceptance pending |
-| W113 | C057 | Consolidate helpers and error handling in cmd/agentprofile | implemented | f9396f3c..4169b1ff; complete-scope acceptance pending |
-| W114 | C057 | Consolidate helpers and error handling in cmd/contract | implemented | f9396f3c..4169b1ff; complete-scope acceptance pending |
-| W115 | C102 | Consolidate helpers and error handling in cmd/dataset | implemented | f9396f3c..4169b1ff; complete-scope acceptance pending |
-| W116 | C057 | Consolidate helpers and error handling in cmd/dev | implemented | f9396f3c..4169b1ff; complete-scope acceptance pending |
-| W117 | C057 | Consolidate helpers and error handling in cmd/event | implemented | f9396f3c..4169b1ff; complete-scope acceptance pending |
-| W118 | C057 | Consolidate helpers and error handling in cmd/job | implemented | f9396f3c..4169b1ff; complete-scope acceptance pending |
-| W119 | C057, C060, C062 | Consolidate helpers and error handling in cmd/run | implemented | f9396f3c..4169b1ff; complete-scope acceptance pending |
-| W120 | C057, C102 | Consolidate helpers and error handling in cmd/start | implemented | 219bead1..12fc7e0e; metrics ec3a40c8; fixture cca78cea; aggregate/real-surface acceptance pending |
-| W121 | C057 | Consolidate helpers and error handling in cmd/test | implemented | f9396f3c..4169b1ff; complete-scope acceptance pending |
-| W122 | C102 | Consolidate helpers and error handling in reagents/cmd/tf-warm | implemented | 592c0a14..9eb5734c; host focused race; real Terraform check underway; aggregate/real-surface acceptance pending |
-| W123 | C102 | Consolidate helpers and error handling in test/lifecycle | implemented | e944b197 dual-cause lifecycle error wrapping; final acceptance pending; C081 exactb42 selected25tests/race3/tagvet/lint PASS; original6612 read-seam controls attributed; new consumer outcomes separately proved; final hosted acceptance pending. |
-| W124 | C002 | Introduce caller-configured database retry mechanics | implemented | bb70101f..63d3dbae; complete-scope acceptance pending |
-| W125 | C002 | Migrate auth to the C002 helper | implemented | 97751615..b66a4c66; complete-scope acceptance pending |
-| W126 | C002 | Migrate backfill to the C002 helper | implemented | 97751615..b66a4c66; complete-scope acceptance pending |
-| W127 | C002 | Migrate callback to the C002 helper | implemented | 97751615..b66a4c66; complete-scope acceptance pending |
-| W128 | C002 | Migrate freshness to the C002 helper | implemented | 97751615..b66a4c66; complete-scope acceptance pending |
-| W129 | C002 | Migrate jobdef importer to the C002 helper | implemented | 97751615..b66a4c66; complete-scope acceptance pending |
-| W130 | C002 | Migrate run store to the C002 helper | implemented | b4518a47..8ce50178; fixturef8cf3ac0; complete-scope acceptance pending |
-| W131 | C002 | Migrate worker to the C002 helper | implemented | 97751615..b66a4c66; complete-scope acceptance pending |
-| W132 | C017 | Consolidate event matching and scalar formatting | implemented | 26 items integrated through d7f1426c; domain-events-receipt.md, native/real surface acceptance pending |
-| W133 | C017 | Migrate HTTP trigger to the C017 helper | implemented | 26 items integrated through d7f1426c; domain-events-receipt.md, native/real surface acceptance pending |
-| W134 | C017 | Migrate contract matcher to the C017 helper | implemented | 26 items integrated through d7f1426c; domain-events-receipt.md, native/real surface acceptance pending |
-| W135 | C017 | Migrate jobdef matcher to the C017 helper | implemented | 26 items integrated through d7f1426c; domain-events-receipt.md, native/real surface acceptance pending |
-| W136 | C021 | Share container state and exit-code mappings | implemented | 29 items integrated through 25bafffe/6c254bac/b32aed16; auth-runtime-helpers-receipt.md, native/real surface acceptance pending |
-| W137 | C021 | Migrate Kubernetes to the C021 helper | implemented | 29 items integrated through 25bafffe/6c254bac/b32aed16; auth-runtime-helpers-receipt.md, native/real surface acceptance pending |
-| W138 | C021 | Migrate Podman to the C021 helper | implemented | 29 items integrated through 25bafffe/6c254bac/b32aed16; auth-runtime-helpers-receipt.md, native/real surface acceptance pending |
-| W139 | C023 | Use the SQL uniqueness classifier in user insertion | implemented | 29 items integrated through 25bafffe/6c254bac/b32aed16; auth-runtime-helpers-receipt.md, native/real surface acceptance pending |
-| W140 | C023 | Migrate SAML assertions to the C023 helper | implemented | 29 items integrated through 25bafffe/6c254bac/b32aed16; auth-runtime-helpers-receipt.md, native/real surface acceptance pending |
-| W141 | C025 | Share SSO return-target and random-state primitives | implemented | 29 items integrated through 25bafffe/6c254bac/b32aed16; auth-runtime-helpers-receipt.md, native/real surface acceptance pending |
-| W142 | C025 | Migrate SAML state to the C025 helper | implemented | 29 items integrated through 25bafffe/6c254bac/b32aed16; auth-runtime-helpers-receipt.md, native/real surface acceptance pending |
-| W143 | C029 | Share the active-authentication predicate | implemented | 29 items integrated through 25bafffe/6c254bac/b32aed16; auth-runtime-helpers-receipt.md, native/real surface acceptance pending |
-| W144 | C029 | Migrate incident auth gate to the C029 helper | implemented | 29 items integrated through 25bafffe/6c254bac/b32aed16; auth-runtime-helpers-receipt.md, native/real surface acceptance pending |
-| W145 | C031 | Share event subscription lifecycle | implemented | 26 items integrated through d7f1426c; domain-events-receipt.md, native/real surface acceptance pending |
-| W146 | C031 | Migrate incident subscriber to the C031 helper | implemented | 26 items integrated through d7f1426c; domain-events-receipt.md, native/real surface acceptance pending |
-| W147 | C031 | Migrate lineage subscriber to the C031 helper | implemented | 26 items integrated through d7f1426c; domain-events-receipt.md, native/real surface acceptance pending |
-| W148 | C031 | Migrate notification subscriber to the C031 helper | implemented | 26 items integrated through d7f1426c; domain-events-receipt.md, native/real surface acceptance pending |
-| W149 | C035 | Share execution retry-delay calculation | implemented | 5b2b7db6..58883905; complete-scope acceptance pending |
-| W150 | C035 | Migrate worker retry delay to the C035 helper | implemented | 5b2b7db6..58883905; complete-scope acceptance pending |
-| W151 | C042 | Share fan-out group detection | implemented | 26 items integrated through d7f1426c; domain-events-receipt.md, native/real surface acceptance pending |
-| W152 | C042 | Migrate run fan-out groups to the C042 helper | implemented | 26 items integrated through d7f1426c; domain-events-receipt.md, native/real surface acceptance pending |
-| W153 | C050 | Introduce the bounded body reader | implemented | 8948da9a/16586b50/1cb2cee7/7283391e/f7215821/008feae2; complete-scope acceptance pending |
-| W154 | C081 | Require complete HTTP evidence in test/lifecycle | implemented | 09614dcc complete mixed-protocol probe; final-qualification-receipt.md; live gates pending; C081 exactb42 selected25tests/race3/tagvet/lint PASS; original6612 read-seam controls attributed; new consumer outcomes separately proved; final hosted acceptance pending. |
-| W155 | C081 | Require complete HTTP evidence in test/load | implemented | d8f47a02 complete load HTTP evidence; real-surface acceptance pending; C081 exactb42 selected25tests/race3/tagvet/lint PASS; original6612 read-seam controls attributed; new consumer outcomes separately proved; final hosted acceptance pending. |
-| W156 | C081 | Require complete HTTP evidence in test/performance | implemented | 18828553 complete env probe; final acceptance pending; C081 exactb42 selected25tests/race3/tagvet/lint PASS; original6612 read-seam controls attributed; new consumer outcomes separately proved; final hosted acceptance pending. |
-| W157 | C081 | Require complete HTTP evidence in test/robustness/cluster | implemented | 8948da9a/16586b50/1cb2cee7/7283391e/f7215821/008feae2; complete-scope acceptance pending; C081 exactb42 selected25tests/race3/tagvet/lint PASS; original6612 read-seam controls attributed; new consumer outcomes separately proved; final hosted acceptance pending. |
-| W158 | C081 | Require complete HTTP evidence in test/robustness/faults | implemented | c04b6577/298dd8ee/3a14063e/bf18324a/3a4070dd/f5423c3f/03530cc2/a542984e; aggregate/real-surface acceptance pending; C081 exactb42 selected25tests/race3/tagvet/lint PASS; original6612 read-seam controls attributed; new consumer outcomes separately proved; final hosted acceptance pending. |
-| W159 | C081 | Require complete HTTP evidence in test/robustness | implemented | 5dec0494 incomplete mutation proof; ledger follow-up in progress; final acceptance pending; C081 exactb42 selected25tests/race3/tagvet/lint PASS; original6612 read-seam controls attributed; new consumer outcomes separately proved; final hosted acceptance pending. |
-| W160 | C050 | Migrate webhook body limit to the C050 helper | implemented | 8948da9a/16586b50/1cb2cee7/7283391e/f7215821/008feae2; complete-scope acceptance pending |
-| W161 | C051 | Share allowlisted order parsing | implemented | 2ab9b7cd/b6e456f9; stats correctiona52a7be0; complete-scope acceptance pending |
-| W162 | C051 | Migrate notification ordering to the C051 helper | implemented | 2ab9b7cd/b6e456f9; stats correctiona52a7be0; complete-scope acceptance pending |
-| W163 | C055 | Share exact engine membership | implemented | 2ab9b7cd/b6e456f9; stats correctiona52a7be0; complete-scope acceptance pending |
-| W164 | C055 | Migrate agentprofile engines to the C055 helper | implemented | 2ab9b7cd/b6e456f9; stats correctiona52a7be0; complete-scope acceptance pending |
-| W165 | C061 | Share CLI HTTP transport | implemented | f9396f3c..4169b1ff; complete-scope acceptance pending |
-| W166 | C061 | Migrate auth HTTP to the C061 helper | implemented | f9396f3c..4169b1ff; complete-scope acceptance pending |
-| W167 | C061 | Migrate contract HTTP to the C061 helper | implemented | f9396f3c..4169b1ff; complete-scope acceptance pending |
-| W168 | C061 | Migrate dataset HTTP to the C061 helper | implemented | f9396f3c..4169b1ff; complete-scope acceptance pending |
-| W169 | C061 | Migrate incident HTTP to the C061 helper | implemented | f9396f3c..4169b1ff; complete-scope acceptance pending |
-| W170 | C065 | Share Terraform child-output routing | implemented | 592c0a14..9eb5734c; host focused race; real Terraform check underway; aggregate/real-surface acceptance pending |
-| W171 | C065 | Migrate tf-discover output to the C065 helper | implemented | 592c0a14..9eb5734c; host focused race; real Terraform check underway; aggregate/real-surface acceptance pending |
-| W172 | C065 | Migrate tf-warm output to the C065 helper | implemented | 592c0a14..9eb5734c; host focused race; real Terraform check underway; aggregate/real-surface acceptance pending |
-| W173 | C090 | Share trigger-pattern configuration parsing | implemented | 26 items integrated through d7f1426c; domain-events-receipt.md, native/real surface acceptance pending |
-| W174 | C090 | Migrate contract pattern parser to the C090 helper | implemented | 26 items integrated through d7f1426c; domain-events-receipt.md, native/real surface acceptance pending |
-| W175 | C091 | Expose the existing internal contract alias query | implemented | 26 items integrated through d7f1426c; domain-events-receipt.md, native/real surface acceptance pending |
-| W176 | C091 | Migrate jobdef alias reads to the C091 helper | implemented | 26 items integrated through d7f1426c; domain-events-receipt.md, native/real surface acceptance pending |
-| W177 | C092 | Share Reagents environment-name normalization | implemented | 592c0a14..9eb5734c; host focused race; real Terraform check underway; aggregate/real-surface acceptance pending |
-| W178 | C092 | Migrate tf-runner names to the C092 helper | implemented | 592c0a14..9eb5734c; host focused race; real Terraform check underway; aggregate/real-surface acceptance pending |
-| W179 | C094 | Share Prometheus sample selection | implemented | 26 items integrated through d7f1426c; domain-events-receipt.md, native/real surface acceptance pending |
-| W180 | C094 | Migrate robustness metrics to the C094 helper | implemented | 26 items integrated through d7f1426c; domain-events-receipt.md, native/real surface acceptance pending |
-| W181 | C060, C062 | Consolidate helpers and error handling in cmd/blame | implemented | f9396f3c..4169b1ff; complete-scope acceptance pending |
-| W182 | C007 | Introduce a dependency-free YAML path leaf | implemented | 29 items integrated through 25bafffe/6c254bac/b32aed16; auth-runtime-helpers-receipt.md, native/real surface acceptance pending |
-| W183 | C007 | Migrate jobdef Git to the C007 helper | implemented | 29 items integrated through 25bafffe/6c254bac/b32aed16; auth-runtime-helpers-receipt.md, native/real surface acceptance pending |
-| W184 | C007 | Migrate jobdef diff to the C007 helper | implemented | 29 items integrated through 25bafffe/6c254bac/b32aed16; auth-runtime-helpers-receipt.md, native/real surface acceptance pending |
-| W185 | C011 | Reuse OpenTestDB in the first lineage suite | implemented | 9f4ceb51/59b6a1e8, db-fixture-receipt.md; hostlineage/receipt passed, native service gates pending |
-| W186 | C011 | Migrate agentprofile tests to the C011 helper | implemented | 9f4ceb51/59b6a1e8, db-fixture-receipt.md; hostlineage/receipt passed, native service gates pending |
-| W187 | C011 | Migrate atom tests to the C011 helper | implemented | 9f4ceb51/59b6a1e8, db-fixture-receipt.md; hostlineage/receipt passed, native service gates pending |
-| W188 | C011 | Migrate job tests to the C011 helper | implemented | 9f4ceb51/59b6a1e8, db-fixture-receipt.md; hostlineage/receipt passed, native service gates pending |
-| W189 | C011 | Migrate notification tests to the C011 helper | implemented | 9f4ceb51/59b6a1e8, db-fixture-receipt.md; hostlineage/receipt passed, native service gates pending |
-| W190 | C011 | Migrate receipt tests to the C011 helper | implemented | 9f4ceb51/59b6a1e8, db-fixture-receipt.md; hostlineage/receipt passed, native service gates pending |
-| W191 | C011 | Migrate stats tests to the C011 helper | implemented | 9f4ceb51/59b6a1e8, db-fixture-receipt.md; hostlineage/receipt passed, native service gates pending |
-| W192 | C011 | Migrate task tests to the C011 helper | implemented | 9f4ceb51/59b6a1e8, db-fixture-receipt.md; hostlineage/receipt passed, native service gates pending |
-| W193 | C011 | Migrate taskedge tests to the C011 helper | implemented | 9f4ceb51/59b6a1e8, db-fixture-receipt.md; hostlineage/receipt passed, native service gates pending |
-| W194 | C011 | Migrate trigger tests to the C011 helper | implemented | 9f4ceb51/59b6a1e8, db-fixture-receipt.md; hostlineage/receipt passed, native service gates pending |
-| W195 | C011 | Migrate worker tests to the C011 helper | implemented | 9f4ceb51/59b6a1e8, db-fixture-receipt.md; hostlineage/receipt passed, native service gates pending |
-| W196 | C027 | Reuse metric value helpers in dispatch tests | implemented | 26 items integrated through d7f1426c; domain-events-receipt.md, native/real surface acceptance pending |
-| W197 | C027 | Migrate metrics tests to the C027 helper | implemented | 26 items integrated through d7f1426c; domain-events-receipt.md, native/real surface acceptance pending |
-| W198 | C027 | Migrate run metrics tests to the C027 helper | implemented | 26 items integrated through d7f1426c; domain-events-receipt.md, native/real surface acceptance pending |
-| W199 | C034 | Share run-parameter environment construction | implemented | 5b2b7db6..58883905; complete-scope acceptance pending |
-| W200 | C034 | Migrate worker params to the C034 helper | implemented | 5b2b7db6..58883905; complete-scope acceptance pending |
-| W201 | C036 | Share task-failure policy normalization | implemented | 5b2b7db6..58883905; complete-scope acceptance pending |
-| W202 | C036 | Migrate worker failure policy to the C036 helper | implemented | 5b2b7db6..58883905; complete-scope acceptance pending |
-| W203 | C052 | Share API audit-failure logging | implemented | 29 items integrated through 25bafffe/6c254bac/b32aed16; auth-runtime-helpers-receipt.md, native/real surface acceptance pending |
-| W204 | C052 | Migrate auth audit warnings to the C052 helper | implemented | 29 items integrated through 25bafffe/6c254bac/b32aed16; auth-runtime-helpers-receipt.md, native/real surface acceptance pending |
-| W205 | C052 | Migrate notification audit warnings to the C052 helper | implemented | 29 items integrated through 25bafffe/6c254bac/b32aed16; auth-runtime-helpers-receipt.md, native/real surface acceptance pending |
-| W206 | C056 | Share test JSON fixture encoding | implemented | 219bead1..12fc7e0e; metrics ec3a40c8; fixture cca78cea; aggregate/real-surface acceptance pending |
-| W207 | C056 | Migrate API replay JSON fixtures to the C056 helper | implemented | 219bead1..12fc7e0e; metrics ec3a40c8; fixture cca78cea; aggregate/real-surface acceptance pending |
-| W208 | C056 | Migrate incident JSON fixtures to the C056 helper | implemented | 26 items integrated through d7f1426c; domain-events-receipt.md, native/real surface acceptance pending |
-| W209 | C056 | Migrate jobdef diff JSON fixtures to the C056 helper | implemented | 29 items integrated through 25bafffe/6c254bac/b32aed16; auth-runtime-helpers-receipt.md, native/real surface acceptance pending |
-| W210 | C056 | Migrate notification JSON fixtures to the C056 helper | implemented | 29 items integrated through 25bafffe/6c254bac/b32aed16; auth-runtime-helpers-receipt.md, native/real surface acceptance pending |
-| W211 | C056 | Migrate replay JSON fixtures to the C056 helper | implemented | 29 items integrated through 25bafffe/6c254bac/b32aed16; auth-runtime-helpers-receipt.md, native/real surface acceptance pending |
-| W212 | C059 | Share first-nonblank string selection | implemented | 29 items integrated through 25bafffe/6c254bac/b32aed16; auth-runtime-helpers-receipt.md, native/real surface acceptance pending |
-| W213 | C059 | Migrate job lint to the C059 helper | implemented | 29 items integrated through 25bafffe/6c254bac/b32aed16; auth-runtime-helpers-receipt.md, native/real surface acceptance pending |
-| W214 | C059 | Migrate reproduce to the C059 helper | implemented | 29 items integrated through 25bafffe/6c254bac/b32aed16; auth-runtime-helpers-receipt.md, native/real surface acceptance pending |
-| W215 | C059 | Migrate reproduce CLI to the C059 helper | implemented | 29 items integrated through 25bafffe/6c254bac/b32aed16; auth-runtime-helpers-receipt.md, native/real surface acceptance pending |
-| W216 | C059 | Migrate run strings to the C059 helper | implemented | 475dbf1a integrated; native regression pending |
-| W217 | C064 | Share Terraform environment copying | implemented | 592c0a14..9eb5734c; host focused race; real Terraform check underway; aggregate/real-surface acceptance pending |
-| W218 | C064 | Migrate tf-warm environment to the C064 helper | implemented | 592c0a14..9eb5734c; host focused race; real Terraform check underway; aggregate/real-surface acceptance pending |
-| W219 | C066 | Share deterministic Git fixture commands | implemented | 592c0a14..9eb5734c; host focused race; real Terraform check underway; aggregate/real-surface acceptance pending |
-| W220 | C066 | Migrate tf Git fixtures to the C066 helper | implemented | 592c0a14..9eb5734c; host focused race; real Terraform check underway; aggregate/real-surface acceptance pending |
-| W221 | C066 | Migrate tf-discover Git fixtures to the C066 helper | implemented | 592c0a14..9eb5734c; host focused race; real Terraform check underway; aggregate/real-surface acceptance pending |
-| W222 | C072 | Share the loopback-address fixture | implemented | 29 items integrated through 25bafffe/6c254bac/b32aed16; auth-runtime-helpers-receipt.md, native/real surface acceptance pending |
-| W223 | C072 | Migrate Linux nodelay fixture to the C072 helper | implemented | 29 items integrated through 25bafffe/6c254bac/b32aed16; auth-runtime-helpers-receipt.md, native/real surface acceptance pending |
-| W224 | C107 | Share the scoped GORM fault fixture | implemented | 5b2b7db6..58883905; complete-scope acceptance pending |
-| W225 | C107 | Migrate freshness failure fixtures to the C107 helper | implemented | 5b2b7db6..58883905; complete-scope acceptance pending |
-| W226 | C041 | Replace typed union-key copies with one generic helper | implemented | 5b2b7db6..58883905; complete-scope acceptance pending |
-| W227 | C105 | Extract local queue and trigger bookkeeping | implemented | 7029e41a..93ba93ce; compile/race underway; complete-scope acceptance pending |
-| W228 | C105 | Move local cache identity and rate-limit methods | implemented | 7029e41a..93ba93ce; compile/race underway; complete-scope acceptance pending |
-| W229 | C105 | Move the atom execution closure | implemented | 7029e41a..93ba93ce; compile/race underway; complete-scope acceptance pending |
-| W230 | C105 | Move fan-out execution and its shared state | implemented | 7029e41a..93ba93ce; compile/race underway; complete-scope acceptance pending |
-| W231 | C105 | Move task dispatch onto localRun | implemented | 7029e41a..93ba93ce; compile/race underway; complete-scope acceptance pending |
-| W232 | C105 | Finish local scheduler execution handoff | implemented | 7029e41a..93ba93ce; compile/race underway; complete-scope acceptance pending |
-| W233 | C100 | Introduce the server work supervisor | implemented | 219bead1..12fc7e0e; metrics ec3a40c8; fixture cca78cea; aggregate/real-surface acceptance pending; native df7c69c1 + fresh all8 C100realshutdown PASS (lanes-df7c69c1-shutdown/summary.json); finalhostedCIpending |
-| W234 | C100 | Wire the supervisor into API and startup shutdown | implemented | 219bead1..12fc7e0e; metrics ec3a40c8; fixture cca78cea; aggregate/real-surface acceptance pending; native df7c69c1 + fresh all8 C100realshutdown PASS (lanes-df7c69c1-shutdown/summary.json); finalhostedCIpending |
-| W235 | C100 | Migrate backfill launches to the C100 helper | implemented | 219bead1..12fc7e0e; metrics ec3a40c8; fixture cca78cea; aggregate/real-surface acceptance pending; native df7c69c1 + fresh all8 C100realshutdown PASS (lanes-df7c69c1-shutdown/summary.json); finalhostedCIpending |
-| W236 | C100 | Migrate manual launches to the C100 helper | implemented | 219bead1..12fc7e0e; metrics ec3a40c8; fixture cca78cea; aggregate/real-surface acceptance pending; native df7c69c1 + fresh all8 C100realshutdown PASS (lanes-df7c69c1-shutdown/summary.json); finalhostedCIpending |
-| W237 | C100 | Migrate partition retry launches to the C100 helper | implemented | 219bead1..12fc7e0e; metrics ec3a40c8; fixture cca78cea; aggregate/real-surface acceptance pending; native df7c69c1 + fresh all8 C100realshutdown PASS (lanes-df7c69c1-shutdown/summary.json); finalhostedCIpending |
-| W238 | C100 | Migrate replay launches to the C100 helper | implemented | 219bead1..12fc7e0e; metrics ec3a40c8; fixture cca78cea; aggregate/real-surface acceptance pending; native df7c69c1 + fresh all8 C100realshutdown PASS (lanes-df7c69c1-shutdown/summary.json); finalhostedCIpending |
-| W239 | C100 | Migrate webhook launches and receipts to the C100 helper | implemented | 219bead1..12fc7e0e; metrics ec3a40c8; fixture cca78cea; aggregate/real-surface acceptance pending; native df7c69c1 + fresh all8 C100realshutdown PASS (lanes-df7c69c1-shutdown/summary.json); finalhostedCIpending |
-| W240 | C100 | Migrate whole-run retry launches to the C100 helper | implemented | 219bead1..12fc7e0e; metrics ec3a40c8; fixture cca78cea; aggregate/real-surface acceptance pending; native df7c69c1 + fresh all8 C100realshutdown PASS (lanes-df7c69c1-shutdown/summary.json); finalhostedCIpending |
-| W241 | C101 | Add the signal-context protocol entry point | implemented | 592c0a14..9eb5734c; host focused race; real Terraform check underway; aggregate/real-surface acceptance pending |
-| W242 | C101 | Migrate tf-discover signals to the C101 helper | implemented | 592c0a14..9eb5734c; host focused race; real Terraform check underway; aggregate/real-surface acceptance pending |
-| W243 | C101 | Migrate tf-runner signals to the C101 helper | implemented | 592c0a14..9eb5734c; host focused race; real Terraform check underway; aggregate/real-surface acceptance pending |
-| W244 | C101 | Migrate tf-warm signals to the C101 helper | implemented | 592c0a14..9eb5734c; host focused race; real Terraform check underway; aggregate/real-surface acceptance pending |
-| W245 | C004 | Use the declared backfill enum types in the model | implemented | c04b6577/298dd8ee/3a14063e/bf18324a/3a4070dd/f5423c3f/03530cc2/a542984e; aggregate/real-surface acceptance pending |
-| W246 | C093 | Introduce the shared workload catalogue schema | implemented | c04b6577/298dd8ee/3a14063e/bf18324a/3a4070dd/f5423c3f/03530cc2/a542984e; aggregate/real-surface acceptance pending |
-| W247 | C093 | Migrate load catalogue to the C093 helper | implemented | f84bceff shared typed catalog, driver override tests; real-surface acceptance pending |
-| W248 | C093 | Migrate performance catalogue to the C093 helper | implemented | 2fcdbacd typed20 expectation presence; final acceptance pending |
+| W01 | C061, C058 | Pin CLI HTTP policies and separate output streams | accepted | f9396f3c..4169b1ff; qualified at4de34ffa  |
+| W02 | C105 | Characterize local execution state and completion handoff | accepted | 5b2b7db6..58883905; qualified at4de34ffa  |
+| W249 | C032 | Pin predecessor projections and execution ownership | accepted | 7255aa8f..5b50c51d; PG snapshot77aaf098; qualified at4de34ffa  |
+| W250 | C003 | Prove native foreign keys on both pools and new connections | accepted | bb70101f..63d3dbae; qualified at4de34ffa  |
+| W03 | C002 | Pin caller-specific retry policies | accepted | bb70101f..63d3dbae; qualified at4de34ffa  |
+| W04 | C002 | Pin database retry policy before extraction | accepted | bb70101f..63d3dbae; qualified at4de34ffa  |
+| W05 | C054 | Characterize the read-only SQL guard | accepted | c04b6577/298dd8ee/3a14063e/bf18324a/3a4070dd/f5423c3f/03530cc2/a542984e; qualified at4de34ffa  |
+| W06 | C097 | Use current standard-library idioms in api/rest/controller/jobdef | accepted | f6415b2a/f73a5901; qualified at4de34ffa  |
+| W07 | C096 | Use current standard-library idioms in api/rest/controller/replay | accepted | f6415b2a/f73a5901; qualified at4de34ffa  |
+| W08 | C096 | Use current standard-library idioms in api/rest/controller/system | accepted | f6415b2a/f73a5901; qualified at4de34ffa  |
+| W09 | C097 | Use current standard-library idioms in api/rest/service/contract | accepted | f6415b2a/f73a5901; qualified at4de34ffa  |
+| W10 | C097 | Use current standard-library idioms in api/rest/service/dataset | accepted | f6415b2a/f73a5901; qualified at4de34ffa  |
+| W11 | C005 | Use current standard-library idioms in api/rest/service/replay | accepted | f6415b2a/f73a5901; qualified at4de34ffa  |
+| W12 | C097 | Use current standard-library idioms in api/rest/service/system | accepted | f6415b2a/f73a5901; qualified at4de34ffa  |
+| W13 | C005 | Use current standard-library idioms in cmd/contract | accepted | f6415b2a/f73a5901; qualified at4de34ffa  |
+| W14 | C096 | Use current standard-library idioms in cmd/dataset | accepted | f6415b2a/f73a5901; qualified at4de34ffa  |
+| W15 | C005, C097 | Use current standard-library idioms in cmd/job | accepted | f6415b2a/f73a5901; qualified at4de34ffa  |
+| W16 | C005, C096 | Use current standard-library idioms in cmd/reproduce | accepted | f6415b2a/f73a5901; qualified at4de34ffa  |
+| W17 | C005 | Use current standard-library idioms in cmd/why | accepted | f6415b2a/f73a5901; qualified at4de34ffa  |
+| W18 | C096 | Use current standard-library idioms in internal/atom/kubernetes | accepted | f6415b2a/f73a5901; qualified at4de34ffa  |
+| W19 | C005 | Use current standard-library idioms in internal/cache | accepted | f6415b2a/f73a5901; qualified at4de34ffa  |
+| W20 | C005 | Use current standard-library idioms in internal/connector | accepted | f6415b2a/f73a5901; qualified at4de34ffa  |
+| W21 | C005 | Use current standard-library idioms in internal/contract | accepted | f6415b2a/f73a5901; qualified at4de34ffa  |
+| W22 | C005 | Use current standard-library idioms in internal/freshness | accepted | f6415b2a/f73a5901; qualified at4de34ffa  |
+| W23 | C005 | Use current standard-library idioms in internal/harness | accepted | f6415b2a/f73a5901; qualified at4de34ffa  |
+| W24 | C005 | Use current standard-library idioms in internal/incident | accepted | f6415b2a/f73a5901; qualified at4de34ffa  |
+| W25 | C005, C096 | Use current standard-library idioms in internal/jobdef | accepted | f6415b2a/f73a5901; qualified at4de34ffa  |
+| W26 | C005 | Use current standard-library idioms in internal/jobdef/runtime | accepted | f6415b2a/f73a5901; qualified at4de34ffa  |
+| W27 | C005 | Use current standard-library idioms in internal/lineage | accepted | f6415b2a/f73a5901; qualified at4de34ffa  |
+| W28 | C005 | Use current standard-library idioms in internal/reproduce | accepted | f6415b2a/f73a5901; qualified at4de34ffa  |
+| W29 | C005, C096 | Use current standard-library idioms in internal/run | accepted | b4518a47..8ce50178; fixturef8cf3ac0; qualified at4de34ffa  |
+| W30 | C005 | Use current standard-library idioms in internal/testfault | accepted | f6415b2a/f73a5901; qualified at4de34ffa  |
+| W31 | C005 | Use current standard-library idioms in internal/worker | accepted | f6415b2a/f73a5901; qualified at4de34ffa  |
+| W32 | C096 | Use current standard-library idioms in pkg/dqlite | accepted | f6415b2a/f73a5901; qualified at4de34ffa  |
+| W33 | C096 | Use current standard-library idioms in pkg/env | accepted | f6415b2a/f73a5901; qualified at4de34ffa  |
+| W34 | C005 | Use current standard-library idioms in pkg/jobdef/schemacompat | accepted | f6415b2a/f73a5901; qualified at4de34ffa  |
+| W35 | C005 | Use current standard-library idioms in pkg/task | accepted | f6415b2a/f73a5901; qualified at4de34ffa  |
+| W36 | C097 | Use current standard-library idioms in reagents/cmd/tf-discover | accepted | f6415b2a/f73a5901; qualified at4de34ffa  |
+| W37 | C005 | Use current standard-library idioms in reagents/cmd/tf-runner | accepted | f6415b2a/f73a5901; qualified at4de34ffa  |
+| W38 | C005 | Use current standard-library idioms in reagents/cmd/tf-warm | accepted | f6415b2a/f73a5901; qualified at4de34ffa  |
+| W39 | C097 | Use current standard-library idioms in reagents/internal/fingerprint | accepted | f6415b2a/f73a5901; qualified at4de34ffa  |
+| W40 | C005, C097 | Use current standard-library idioms in reagents/internal/protocol | accepted | f6415b2a/f73a5901; qualified at4de34ffa  |
+| W41 | C005, C097 | Use current standard-library idioms in reagents/internal/tf | accepted | f6415b2a/f73a5901; qualified at4de34ffa  |
+| W42 | C005, C096, C097 | Use current standard-library idioms in test | accepted | f6415b2a/f73a5901; qualified at4de34ffa  |
+| W43 | C005, C096, C097 | Use current standard-library idioms in test/lifecycle | accepted | f6415b2a/f73a5901; qualified at4de34ffa  |
+| W44 | C005, C097 | Use current standard-library idioms in test/model | accepted | f6415b2a/f73a5901; qualified at4de34ffa  |
+| W45 | C096 | Use current standard-library idioms in test/performance | accepted | f6415b2a/f73a5901; qualified at4de34ffa  |
+| W46 | C097 | Use current standard-library idioms in test/robustness | accepted | f6415b2a/f73a5901; qualified at4de34ffa  |
+| W47 | C005 | Use current standard-library idioms in test/robustness/faults | accepted | f6415b2a/f73a5901; qualified at4de34ffa  |
+| W48 | C005, C097 | Use current standard-library idioms in test/robustness/history | accepted | f6415b2a/f73a5901; qualified at4de34ffa  |
+| W251 | C003 | Remove redundant FK setup and clarify native PRAGMA policy | accepted | bb70101f..63d3dbae; qualified at4de34ffa  |
+| W49 | C001 | Reject byte-size suffix multiplication overflow | accepted | f6415b2a/f73a5901; qualified at4de34ffa  |
+| W50 | C044 | Reject malformed partition edges during recovery | accepted | b4518a47..8ce50178; fixturef8cf3ac0; qualified at4de34ffa  |
+| W51 | C077 | Reject incomplete SSE event backlogs | accepted | Luna test hygiene integrated through 1dc686e6; host subset passed; qualified at4de34ffa  |
+| W52 | C079 | Reject malformed boolean environment values before load qualification | accepted | Luna test hygiene integrated through 1dc686e6; host subset passed; qualified at4de34ffa  |
+| W53 | C083 | Require durable snapshots before claiming rejected requests are state-inert | accepted | c04b6577/298dd8ee/3a14063e/bf18324a/3a4070dd/f5423c3f/03530cc2/a542984e; qualified at4de34ffa  |
+| W54 | C086 | Treat malformed accepted start outcomes as uncertain | accepted | Luna test hygiene integrated through 1dc686e6; host subset passed; qualified at4de34ffa  |
+| W55 | C098 | Stop the distributed atom before returning partition marker errors | accepted | 7255aa8f..5b50c51d; PG snapshot77aaf098; qualified at4de34ffa  |
+| W56 | C099 | Register local whole-run retries before starting execution | accepted | 219bead1..12fc7e0e; metrics ec3a40c8; fixture cca78cea; qualified at4de34ffa  |
+| W57 | C014, C015, C016 | Keep cron recurrence alive and errors local | accepted | bb70101f..63d3dbae; qualified at4de34ffa  |
+| W252 | C032 | Read and project predecessor inputs from one strict snapshot | accepted | 7255aa8f..5b50c51d; PG snapshot77aaf098; qualified at4de34ffa  |
+| W253 | C032 | Fail before launch and reuse predecessor inputs across retries | accepted | 7255aa8f..5b50c51d; PG snapshot77aaf098; qualified at4de34ffa  |
+| W58 | C008 | Chunk wide lineage frontiers before building SQL predicates | accepted | 26 items integrated through d7f1426c; domain-events-receipt.md; qualified at4de34ffa  |
+| W59 | C009 | Share the repeated task lifecycle event mapping | accepted | 26 items integrated through d7f1426c; domain-events-receipt.md; qualified at4de34ffa  |
+| W60 | C010 | Reclaim expired job-cache entries | accepted | 26 items integrated through d7f1426c; domain-events-receipt.md; qualified at4de34ffa  |
+| W61 | C012 | Batch consumed-dataset state reads | accepted | 97751615..b66a4c66; qualified at4de34ffa  |
+| W62 | C018 | Classify Docker image absence with the typed error | accepted | 29 items integrated through 25bafffe/6c254bac/b32aed16; auth-runtime-helpers-receipt.md; qualified at4de34ffa  |
+| W63 | C019 | Share predecessor-output name reconstruction | accepted | 29 items integrated through 25bafffe/6c254bac/b32aed16; auth-runtime-helpers-receipt.md; qualified at4de34ffa  |
+| W64 | C024 | Normalize job aliases in one auth helper | accepted | 29 items integrated through 25bafffe/6c254bac/b32aed16; auth-runtime-helpers-receipt.md; C024 accepted direction amendment852376→c93: reuse exact existing normalizeAllowlist, nil-to-empty scope adapter; no new agent launch behavior; independent ACCEPT + native auth/middleware race/taggedvet/lint0 PASS.; qualified at4de34ffa  |
+| W65 | C026 | Share the SQL and in-memory dispatch batching loop | accepted | 26 items integrated through d7f1426c; domain-events-receipt.md; qualified at4de34ffa  |
+| W66 | C028 | Keep deterministic policy rules from dispatching approval-tier actions | accepted | 26 items integrated through d7f1426c; domain-events-receipt.md; qualified at4de34ffa  |
+| W67 | C033 | Use cache.HashInput directly for local hash inputs | accepted | b4518a47..8ce50178; fixturef8cf3ac0; qualified at4de34ffa  |
+| W68 | C040 | Share fan-out TaskRun materialization between SQL and owner paths | accepted | b4518a47..8ce50178; fixturef8cf3ac0; qualified at4de34ffa  |
+| W69 | C043 | Share schema-violation policy across catalog and instance validation | accepted | b4518a47..8ce50178; fixturef8cf3ac0; qualified at4de34ffa  |
+| W70 | C045 | Use one SQL set for terminal task statuses | accepted | b4518a47..8ce50178; fixturef8cf3ac0; qualified at4de34ffa  |
+| W71 | C046 | Propagate execution context through data-assertion evaluation | accepted | b4518a47..8ce50178; fixturef8cf3ac0; qualified at4de34ffa  |
+| W72 | C049 | Share run and partition page-bound parsing | accepted | 2ab9b7cd/b6e456f9; stats correctiona52a7be0; qualified at4de34ffa  |
+| W73 | C053 | Propagate statistics query failures | accepted | 2ab9b7cd/b6e456f9; stats correctiona52a7be0; 2783514e nativecontroller: threefreshchild racePASS, realGet/Summary querycancel=>wrapped500/exactredactedJSON/positivebeforeafter; package lint0; rootreceipt run/stats-controller-root-adjudication.json; qualified at4de34ffa  |
+| W74 | C054 | Share the SQL quote and comment scanner | accepted | c04b6577/298dd8ee/3a14063e/bf18324a/3a4070dd/f5423c3f/03530cc2/a542984e; qualified at4de34ffa  |
+| W75 | C063 | Centralize tf-runner's plan-to-apply test wiring | accepted | 592c0a14..9eb5734c; host focused race; retained source-equivalent Terraform qualification PASS; qualified at4de34ffa  |
+| W76 | C073 | Reap developer-journey CLI children on early failures | accepted | Luna test hygiene integrated through 1dc686e6; host subset passed; qualified at4de34ffa  |
+| W77 | C080 | Reject unknown names in mixed performance workload selections | accepted | Luna test hygiene integrated through 1dc686e6; host subset passed; qualified at4de34ffa  |
+| W78 | C082 | Use one percentile convention for end-to-end latency fields | accepted | Luna test hygiene integrated through 1dc686e6; host subset passed; qualified at4de34ffa  |
+| W79 | C084 | Fail soak drain when owned task resources remain after grace | accepted | Luna test hygiene integrated through 1dc686e6; host subset passed; qualified at4de34ffa  |
+| W80 | C085 | Join the retention checkpoint poller on every exit | accepted | Luna test hygiene integrated through 1dc686e6; host subset passed; qualified at4de34ffa  |
+| W81 | C089 | Restrict the reserved actor check to the root action schema | accepted | c04b6577/298dd8ee/3a14063e/bf18324a/3a4070dd/f5423c3f/03530cc2/a542984e; qualified at4de34ffa  |
+| W82 | C095 | Scan worker aggregates into a typed result | accepted | 2ab9b7cd/b6e456f9; stats correctiona52a7be0; qualified at4de34ffa  |
+| W83 | C103 | Correlate SSE expectations with the triggered run | accepted | Luna test hygiene integrated through 1dc686e6; host subset passed; qualified at4de34ffa  |
+| W84 | C104 | Replace the fixed stagger in the concurrent warm test | accepted | 592c0a14..9eb5734c; host focused race; retained source-equivalent Terraform qualification PASS; qualified at4de34ffa  |
+| W85 | C038, C039 | Share completion field encoding and failure messages | accepted | b4518a47..8ce50178; fixturef8cf3ac0; qualified at4de34ffa  |
+| W86 | C068, C075 | Wait on retry state instead of sleeps | accepted | Luna test hygiene integrated through 1dc686e6; host subset passed; qualified at4de34ffa  |
+| W87 | C048 | Reject malformed atom UUIDs before service calls | accepted | 2ab9b7cd/b6e456f9; stats correctiona52a7be0; qualified at4de34ffa  |
+| W88 | C048 | Reject malformed trigger UUIDs before service calls | accepted | 2ab9b7cd/b6e456f9; stats correctiona52a7be0; qualified at4de34ffa  |
+| W89 | C006 | Share the duplicated cache-hash test setup | accepted | Luna test hygiene integrated through 1dc686e6; host subset passed; qualified at4de34ffa  |
+| W90 | C013 | Share dataset_advanced event construction | accepted | 97751615..b66a4c66; qualified at4de34ffa  |
+| W91 | C020 | Centralize repeated reproduction descriptor test defaults | accepted | 29 items integrated through 25bafffe/6c254bac/b32aed16; auth-runtime-helpers-receipt.md; qualified at4de34ffa  |
+| W92 | C022 | Remove the no-op Kubernetes Atom constructor | accepted | 29 items integrated through 25bafffe/6c254bac/b32aed16; auth-runtime-helpers-receipt.md; qualified at4de34ffa  |
+| W93 | C030 | Share the failed-first task-run attribution selector | accepted | 26 items integrated through d7f1426c; domain-events-receipt.md; qualified at4de34ffa  |
+| W94 | C037 | Trigger-rule success and failure scenarios duplicate their DAG setup | accepted | Luna test hygiene integrated through 1dc686e6; host subset passed; qualified at4de34ffa  |
+| W95 | C047 | Table-drive OIDC and SAML callback persistence coverage | accepted | Luna test hygiene integrated through 1dc686e6; host subset passed; qualified at4de34ffa  |
+| W96 | C067 | Use the shared raw CLI runner for expected errors | accepted | Luna test hygiene integrated through 1dc686e6; host subset passed; qualified at4de34ffa  |
+| W97 | C071 | Share the task-ID-to-name index across integration helpers | accepted | a63fc5fe task name fixtures; qualified at4de34ffa  |
+| W98 | C088 | Give the host-request encoder a concrete request type | accepted | 610b7cea typed host request encoder; qualified at4de34ffa  |
+| W99 | C106 | Remove the unused bus dispatcher tuning options | accepted | 219bead1..12fc7e0e; metrics ec3a40c8; fixture cca78cea; qualified at4de34ffa  |
+| W100 | C069, C070, C074 | Consolidate typed integration manifest fixtures | accepted | 97506bfe integration manifest fixtures; qualified at4de34ffa  |
+| W101 | C076, C078 | Share lifecycle matrix and membership reads | accepted | 36447dc5 matrix/directViews; qualified at4de34ffa  |
+| W102 | C057, C058, C060 | Consolidate helpers and error handling in cmd/auth | accepted | f9396f3c..4169b1ff; qualified at4de34ffa  |
+| W103 | C057, C058 | Consolidate helpers and error handling in cmd/backfill | accepted | f9396f3c..4169b1ff; qualified at4de34ffa  |
+| W104 | C057, C058 | Consolidate helpers and error handling in cmd/cache | accepted | f9396f3c..4169b1ff; qualified at4de34ffa  |
+| W105 | C057, C058 | Consolidate helpers and error handling in cmd/receipt | accepted | f9396f3c..4169b1ff; qualified at4de34ffa  |
+| W106 | C058 | Consolidate helpers and error handling in cmd/reproduce | accepted | f9396f3c..4169b1ff; qualified at4de34ffa  |
+| W107 | C058 | Consolidate helpers and error handling in cmd/verify | accepted | f9396f3c..4169b1ff; qualified at4de34ffa  |
+| W108 | C058, C060 | Consolidate helpers and error handling in cmd/why | accepted | f9396f3c..4169b1ff; qualified at4de34ffa  |
+| W109 | C087 | Introduce strict internal SQL evidence decoding | accepted | 8948da9a/16586b50/1cb2cee7/7283391e/f7215821/008feae2; qualified at4de34ffa  |
+| W110 | C087 | Migrate cluster strict query to the C087 helper | accepted | 8948da9a/16586b50/1cb2cee7/7283391e/f7215821/008feae2; qualified at4de34ffa  |
+| W111 | C087 | Migrate robustness persisted evidence to the C087 helper | accepted | 8948da9a/16586b50/1cb2cee7/7283391e/f7215821/008feae2; qualified at4de34ffa  |
+| W112 | C087 | Migrate robustness scalar and checkpoint evidence to the C087 helper | accepted | 824c82b8 exact same-request scalar/checkpoint cells; qualified at4de34ffa  |
+| W113 | C057 | Consolidate helpers and error handling in cmd/agentprofile | accepted | f9396f3c..4169b1ff; qualified at4de34ffa  |
+| W114 | C057 | Consolidate helpers and error handling in cmd/contract | accepted | f9396f3c..4169b1ff; qualified at4de34ffa  |
+| W115 | C102 | Consolidate helpers and error handling in cmd/dataset | accepted | f9396f3c..4169b1ff; qualified at4de34ffa  |
+| W116 | C057 | Consolidate helpers and error handling in cmd/dev | accepted | f9396f3c..4169b1ff; qualified at4de34ffa  |
+| W117 | C057 | Consolidate helpers and error handling in cmd/event | accepted | f9396f3c..4169b1ff; qualified at4de34ffa  |
+| W118 | C057 | Consolidate helpers and error handling in cmd/job | accepted | f9396f3c..4169b1ff; qualified at4de34ffa  |
+| W119 | C057, C060, C062 | Consolidate helpers and error handling in cmd/run | accepted | f9396f3c..4169b1ff; qualified at4de34ffa  |
+| W120 | C057, C102 | Consolidate helpers and error handling in cmd/start | accepted | 219bead1..12fc7e0e; metrics ec3a40c8; fixture cca78cea; qualified at4de34ffa  |
+| W121 | C057 | Consolidate helpers and error handling in cmd/test | accepted | f9396f3c..4169b1ff; qualified at4de34ffa  |
+| W122 | C102 | Consolidate helpers and error handling in reagents/cmd/tf-warm | accepted | 592c0a14..9eb5734c; host focused race; retained source-equivalent Terraform qualification PASS; qualified at4de34ffa  |
+| W123 | C102 | Consolidate helpers and error handling in test/lifecycle | accepted | e944b197 dual-cause lifecycle error wrapping; C081 exactb42 selected25tests/race3/tagvet/lint PASS; original6612 read-seam controls attributed; new consumer outcomes separately proved; qualified at4de34ffa  |
+| W124 | C002 | Introduce caller-configured database retry mechanics | accepted | bb70101f..63d3dbae; qualified at4de34ffa  |
+| W125 | C002 | Migrate auth to the C002 helper | accepted | 97751615..b66a4c66; qualified at4de34ffa  |
+| W126 | C002 | Migrate backfill to the C002 helper | accepted | 97751615..b66a4c66; qualified at4de34ffa  |
+| W127 | C002 | Migrate callback to the C002 helper | accepted | 97751615..b66a4c66; qualified at4de34ffa  |
+| W128 | C002 | Migrate freshness to the C002 helper | accepted | 97751615..b66a4c66; qualified at4de34ffa  |
+| W129 | C002 | Migrate jobdef importer to the C002 helper | accepted | 97751615..b66a4c66; qualified at4de34ffa  |
+| W130 | C002 | Migrate run store to the C002 helper | accepted | b4518a47..8ce50178; fixturef8cf3ac0; qualified at4de34ffa  |
+| W131 | C002 | Migrate worker to the C002 helper | accepted | 97751615..b66a4c66; qualified at4de34ffa  |
+| W132 | C017 | Consolidate event matching and scalar formatting | accepted | 26 items integrated through d7f1426c; domain-events-receipt.md; qualified at4de34ffa  |
+| W133 | C017 | Migrate HTTP trigger to the C017 helper | accepted | 26 items integrated through d7f1426c; domain-events-receipt.md; qualified at4de34ffa  |
+| W134 | C017 | Migrate contract matcher to the C017 helper | accepted | 26 items integrated through d7f1426c; domain-events-receipt.md; qualified at4de34ffa  |
+| W135 | C017 | Migrate jobdef matcher to the C017 helper | accepted | 26 items integrated through d7f1426c; domain-events-receipt.md; qualified at4de34ffa  |
+| W136 | C021 | Share container state and exit-code mappings | accepted | 29 items integrated through 25bafffe/6c254bac/b32aed16; auth-runtime-helpers-receipt.md; qualified at4de34ffa  |
+| W137 | C021 | Migrate Kubernetes to the C021 helper | accepted | 29 items integrated through 25bafffe/6c254bac/b32aed16; auth-runtime-helpers-receipt.md; qualified at4de34ffa  |
+| W138 | C021 | Migrate Podman to the C021 helper | accepted | 29 items integrated through 25bafffe/6c254bac/b32aed16; auth-runtime-helpers-receipt.md; qualified at4de34ffa  |
+| W139 | C023 | Use the SQL uniqueness classifier in user insertion | accepted | 29 items integrated through 25bafffe/6c254bac/b32aed16; auth-runtime-helpers-receipt.md; qualified at4de34ffa  |
+| W140 | C023 | Migrate SAML assertions to the C023 helper | accepted | 29 items integrated through 25bafffe/6c254bac/b32aed16; auth-runtime-helpers-receipt.md; qualified at4de34ffa  |
+| W141 | C025 | Share SSO return-target and random-state primitives | accepted | 29 items integrated through 25bafffe/6c254bac/b32aed16; auth-runtime-helpers-receipt.md; qualified at4de34ffa  |
+| W142 | C025 | Migrate SAML state to the C025 helper | accepted | 29 items integrated through 25bafffe/6c254bac/b32aed16; auth-runtime-helpers-receipt.md; qualified at4de34ffa  |
+| W143 | C029 | Share the active-authentication predicate | accepted | 29 items integrated through 25bafffe/6c254bac/b32aed16; auth-runtime-helpers-receipt.md; qualified at4de34ffa  |
+| W144 | C029 | Migrate incident auth gate to the C029 helper | accepted | 29 items integrated through 25bafffe/6c254bac/b32aed16; auth-runtime-helpers-receipt.md; qualified at4de34ffa  |
+| W145 | C031 | Share event subscription lifecycle | accepted | 26 items integrated through d7f1426c; domain-events-receipt.md; qualified at4de34ffa  |
+| W146 | C031 | Migrate incident subscriber to the C031 helper | accepted | 26 items integrated through d7f1426c; domain-events-receipt.md; qualified at4de34ffa  |
+| W147 | C031 | Migrate lineage subscriber to the C031 helper | accepted | 26 items integrated through d7f1426c; domain-events-receipt.md; qualified at4de34ffa  |
+| W148 | C031 | Migrate notification subscriber to the C031 helper | accepted | 26 items integrated through d7f1426c; domain-events-receipt.md; qualified at4de34ffa  |
+| W149 | C035 | Share execution retry-delay calculation | accepted | 5b2b7db6..58883905; qualified at4de34ffa  |
+| W150 | C035 | Migrate worker retry delay to the C035 helper | accepted | 5b2b7db6..58883905; qualified at4de34ffa  |
+| W151 | C042 | Share fan-out group detection | accepted | 26 items integrated through d7f1426c; domain-events-receipt.md; qualified at4de34ffa  |
+| W152 | C042 | Migrate run fan-out groups to the C042 helper | accepted | 26 items integrated through d7f1426c; domain-events-receipt.md; qualified at4de34ffa  |
+| W153 | C050 | Introduce the bounded body reader | accepted | 8948da9a/16586b50/1cb2cee7/7283391e/f7215821/008feae2; qualified at4de34ffa  |
+| W154 | C081 | Require complete HTTP evidence in test/lifecycle | accepted | 09614dcc complete mixed-protocol probe; final-qualification-receipt.md; C081 exactb42 selected25tests/race3/tagvet/lint PASS; original6612 read-seam controls attributed; new consumer outcomes separately proved; qualified at4de34ffa  |
+| W155 | C081 | Require complete HTTP evidence in test/load | accepted | d8f47a02 complete load HTTP evidence; C081 exactb42 selected25tests/race3/tagvet/lint PASS; original6612 read-seam controls attributed; new consumer outcomes separately proved; qualified at4de34ffa  |
+| W156 | C081 | Require complete HTTP evidence in test/performance | accepted | 18828553 complete env probe; C081 exactb42 selected25tests/race3/tagvet/lint PASS; original6612 read-seam controls attributed; new consumer outcomes separately proved; qualified at4de34ffa  |
+| W157 | C081 | Require complete HTTP evidence in test/robustness/cluster | accepted | 8948da9a/16586b50/1cb2cee7/7283391e/f7215821/008feae2; C081 exactb42 selected25tests/race3/tagvet/lint PASS; original6612 read-seam controls attributed; new consumer outcomes separately proved; qualified at4de34ffa  |
+| W158 | C081 | Require complete HTTP evidence in test/robustness/faults | accepted | c04b6577/298dd8ee/3a14063e/bf18324a/3a4070dd/f5423c3f/03530cc2/a542984e; C081 exactb42 selected25tests/race3/tagvet/lint PASS; original6612 read-seam controls attributed; new consumer outcomes separately proved; qualified at4de34ffa  |
+| W159 | C081 | Require complete HTTP evidence in test/robustness | accepted | 5dec0494 original mutation-attribution limit; superseded by b42e1c6b contract review; C081 exactb42 selected25tests/race3/tagvet/lint PASS; original6612 read-seam controls attributed; new consumer outcomes separately proved; qualified at4de34ffa  |
+| W160 | C050 | Migrate webhook body limit to the C050 helper | accepted | 8948da9a/16586b50/1cb2cee7/7283391e/f7215821/008feae2; qualified at4de34ffa  |
+| W161 | C051 | Share allowlisted order parsing | accepted | 2ab9b7cd/b6e456f9; stats correctiona52a7be0; qualified at4de34ffa  |
+| W162 | C051 | Migrate notification ordering to the C051 helper | accepted | 2ab9b7cd/b6e456f9; stats correctiona52a7be0; qualified at4de34ffa  |
+| W163 | C055 | Share exact engine membership | accepted | 2ab9b7cd/b6e456f9; stats correctiona52a7be0; qualified at4de34ffa  |
+| W164 | C055 | Migrate agentprofile engines to the C055 helper | accepted | 2ab9b7cd/b6e456f9; stats correctiona52a7be0; qualified at4de34ffa  |
+| W165 | C061 | Share CLI HTTP transport | accepted | f9396f3c..4169b1ff; qualified at4de34ffa  |
+| W166 | C061 | Migrate auth HTTP to the C061 helper | accepted | f9396f3c..4169b1ff; qualified at4de34ffa  |
+| W167 | C061 | Migrate contract HTTP to the C061 helper | accepted | f9396f3c..4169b1ff; qualified at4de34ffa  |
+| W168 | C061 | Migrate dataset HTTP to the C061 helper | accepted | f9396f3c..4169b1ff; qualified at4de34ffa  |
+| W169 | C061 | Migrate incident HTTP to the C061 helper | accepted | f9396f3c..4169b1ff; qualified at4de34ffa  |
+| W170 | C065 | Share Terraform child-output routing | accepted | 592c0a14..9eb5734c; host focused race; retained source-equivalent Terraform qualification PASS; qualified at4de34ffa  |
+| W171 | C065 | Migrate tf-discover output to the C065 helper | accepted | 592c0a14..9eb5734c; host focused race; retained source-equivalent Terraform qualification PASS; qualified at4de34ffa  |
+| W172 | C065 | Migrate tf-warm output to the C065 helper | accepted | 592c0a14..9eb5734c; host focused race; retained source-equivalent Terraform qualification PASS; qualified at4de34ffa  |
+| W173 | C090 | Share trigger-pattern configuration parsing | accepted | 26 items integrated through d7f1426c; domain-events-receipt.md; qualified at4de34ffa  |
+| W174 | C090 | Migrate contract pattern parser to the C090 helper | accepted | 26 items integrated through d7f1426c; domain-events-receipt.md; qualified at4de34ffa  |
+| W175 | C091 | Expose the existing internal contract alias query | accepted | 26 items integrated through d7f1426c; domain-events-receipt.md; qualified at4de34ffa  |
+| W176 | C091 | Migrate jobdef alias reads to the C091 helper | accepted | 26 items integrated through d7f1426c; domain-events-receipt.md; qualified at4de34ffa  |
+| W177 | C092 | Share Reagents environment-name normalization | accepted | 592c0a14..9eb5734c; host focused race; retained source-equivalent Terraform qualification PASS; qualified at4de34ffa  |
+| W178 | C092 | Migrate tf-runner names to the C092 helper | accepted | 592c0a14..9eb5734c; host focused race; retained source-equivalent Terraform qualification PASS; qualified at4de34ffa  |
+| W179 | C094 | Share Prometheus sample selection | accepted | 26 items integrated through d7f1426c; domain-events-receipt.md; qualified at4de34ffa  |
+| W180 | C094 | Migrate robustness metrics to the C094 helper | accepted | 26 items integrated through d7f1426c; domain-events-receipt.md; qualified at4de34ffa  |
+| W181 | C060, C062 | Consolidate helpers and error handling in cmd/blame | accepted | f9396f3c..4169b1ff; qualified at4de34ffa  |
+| W182 | C007 | Introduce a dependency-free YAML path leaf | accepted | 29 items integrated through 25bafffe/6c254bac/b32aed16; auth-runtime-helpers-receipt.md; qualified at4de34ffa  |
+| W183 | C007 | Migrate jobdef Git to the C007 helper | accepted | 29 items integrated through 25bafffe/6c254bac/b32aed16; auth-runtime-helpers-receipt.md; qualified at4de34ffa  |
+| W184 | C007 | Migrate jobdef diff to the C007 helper | accepted | 29 items integrated through 25bafffe/6c254bac/b32aed16; auth-runtime-helpers-receipt.md; qualified at4de34ffa  |
+| W185 | C011 | Reuse OpenTestDB in the first lineage suite | accepted | 9f4ceb51/59b6a1e8, db-fixture-receipt.md; hostlineage/receipt passed; qualified at4de34ffa  |
+| W186 | C011 | Migrate agentprofile tests to the C011 helper | accepted | 9f4ceb51/59b6a1e8, db-fixture-receipt.md; hostlineage/receipt passed; qualified at4de34ffa  |
+| W187 | C011 | Migrate atom tests to the C011 helper | accepted | 9f4ceb51/59b6a1e8, db-fixture-receipt.md; hostlineage/receipt passed; qualified at4de34ffa  |
+| W188 | C011 | Migrate job tests to the C011 helper | accepted | 9f4ceb51/59b6a1e8, db-fixture-receipt.md; hostlineage/receipt passed; qualified at4de34ffa  |
+| W189 | C011 | Migrate notification tests to the C011 helper | accepted | 9f4ceb51/59b6a1e8, db-fixture-receipt.md; hostlineage/receipt passed; qualified at4de34ffa  |
+| W190 | C011 | Migrate receipt tests to the C011 helper | accepted | 9f4ceb51/59b6a1e8, db-fixture-receipt.md; hostlineage/receipt passed; qualified at4de34ffa  |
+| W191 | C011 | Migrate stats tests to the C011 helper | accepted | 9f4ceb51/59b6a1e8, db-fixture-receipt.md; hostlineage/receipt passed; qualified at4de34ffa  |
+| W192 | C011 | Migrate task tests to the C011 helper | accepted | 9f4ceb51/59b6a1e8, db-fixture-receipt.md; hostlineage/receipt passed; qualified at4de34ffa  |
+| W193 | C011 | Migrate taskedge tests to the C011 helper | accepted | 9f4ceb51/59b6a1e8, db-fixture-receipt.md; hostlineage/receipt passed; qualified at4de34ffa  |
+| W194 | C011 | Migrate trigger tests to the C011 helper | accepted | 9f4ceb51/59b6a1e8, db-fixture-receipt.md; hostlineage/receipt passed; qualified at4de34ffa  |
+| W195 | C011 | Migrate worker tests to the C011 helper | accepted | 9f4ceb51/59b6a1e8, db-fixture-receipt.md; hostlineage/receipt passed; qualified at4de34ffa  |
+| W196 | C027 | Reuse metric value helpers in dispatch tests | accepted | 26 items integrated through d7f1426c; domain-events-receipt.md; qualified at4de34ffa  |
+| W197 | C027 | Migrate metrics tests to the C027 helper | accepted | 26 items integrated through d7f1426c; domain-events-receipt.md; qualified at4de34ffa  |
+| W198 | C027 | Migrate run metrics tests to the C027 helper | accepted | 26 items integrated through d7f1426c; domain-events-receipt.md; qualified at4de34ffa  |
+| W199 | C034 | Share run-parameter environment construction | accepted | 5b2b7db6..58883905; qualified at4de34ffa  |
+| W200 | C034 | Migrate worker params to the C034 helper | accepted | 5b2b7db6..58883905; qualified at4de34ffa  |
+| W201 | C036 | Share task-failure policy normalization | accepted | 5b2b7db6..58883905; qualified at4de34ffa  |
+| W202 | C036 | Migrate worker failure policy to the C036 helper | accepted | 5b2b7db6..58883905; qualified at4de34ffa  |
+| W203 | C052 | Share API audit-failure logging | accepted | 29 items integrated through 25bafffe/6c254bac/b32aed16; auth-runtime-helpers-receipt.md; qualified at4de34ffa  |
+| W204 | C052 | Migrate auth audit warnings to the C052 helper | accepted | 29 items integrated through 25bafffe/6c254bac/b32aed16; auth-runtime-helpers-receipt.md; qualified at4de34ffa  |
+| W205 | C052 | Migrate notification audit warnings to the C052 helper | accepted | 29 items integrated through 25bafffe/6c254bac/b32aed16; auth-runtime-helpers-receipt.md; qualified at4de34ffa  |
+| W206 | C056 | Share test JSON fixture encoding | accepted | 219bead1..12fc7e0e; metrics ec3a40c8; fixture cca78cea; qualified at4de34ffa  |
+| W207 | C056 | Migrate API replay JSON fixtures to the C056 helper | accepted | 219bead1..12fc7e0e; metrics ec3a40c8; fixture cca78cea; qualified at4de34ffa  |
+| W208 | C056 | Migrate incident JSON fixtures to the C056 helper | accepted | 26 items integrated through d7f1426c; domain-events-receipt.md; qualified at4de34ffa  |
+| W209 | C056 | Migrate jobdef diff JSON fixtures to the C056 helper | accepted | 29 items integrated through 25bafffe/6c254bac/b32aed16; auth-runtime-helpers-receipt.md; qualified at4de34ffa  |
+| W210 | C056 | Migrate notification JSON fixtures to the C056 helper | accepted | 29 items integrated through 25bafffe/6c254bac/b32aed16; auth-runtime-helpers-receipt.md; qualified at4de34ffa  |
+| W211 | C056 | Migrate replay JSON fixtures to the C056 helper | accepted | 29 items integrated through 25bafffe/6c254bac/b32aed16; auth-runtime-helpers-receipt.md; qualified at4de34ffa  |
+| W212 | C059 | Share first-nonblank string selection | accepted | 29 items integrated through 25bafffe/6c254bac/b32aed16; auth-runtime-helpers-receipt.md; qualified at4de34ffa  |
+| W213 | C059 | Migrate job lint to the C059 helper | accepted | 29 items integrated through 25bafffe/6c254bac/b32aed16; auth-runtime-helpers-receipt.md; qualified at4de34ffa  |
+| W214 | C059 | Migrate reproduce to the C059 helper | accepted | 29 items integrated through 25bafffe/6c254bac/b32aed16; auth-runtime-helpers-receipt.md; qualified at4de34ffa  |
+| W215 | C059 | Migrate reproduce CLI to the C059 helper | accepted | 29 items integrated through 25bafffe/6c254bac/b32aed16; auth-runtime-helpers-receipt.md; qualified at4de34ffa  |
+| W216 | C059 | Migrate run strings to the C059 helper | accepted | 475dbf1a integrated; qualified at4de34ffa  |
+| W217 | C064 | Share Terraform environment copying | accepted | 592c0a14..9eb5734c; host focused race; retained source-equivalent Terraform qualification PASS; qualified at4de34ffa  |
+| W218 | C064 | Migrate tf-warm environment to the C064 helper | accepted | 592c0a14..9eb5734c; host focused race; retained source-equivalent Terraform qualification PASS; qualified at4de34ffa  |
+| W219 | C066 | Share deterministic Git fixture commands | accepted | 592c0a14..9eb5734c; host focused race; retained source-equivalent Terraform qualification PASS; qualified at4de34ffa  |
+| W220 | C066 | Migrate tf Git fixtures to the C066 helper | accepted | 592c0a14..9eb5734c; host focused race; retained source-equivalent Terraform qualification PASS; qualified at4de34ffa  |
+| W221 | C066 | Migrate tf-discover Git fixtures to the C066 helper | accepted | 592c0a14..9eb5734c; host focused race; retained source-equivalent Terraform qualification PASS; qualified at4de34ffa  |
+| W222 | C072 | Share the loopback-address fixture | accepted | 29 items integrated through 25bafffe/6c254bac/b32aed16; auth-runtime-helpers-receipt.md; qualified at4de34ffa  |
+| W223 | C072 | Migrate Linux nodelay fixture to the C072 helper | accepted | 29 items integrated through 25bafffe/6c254bac/b32aed16; auth-runtime-helpers-receipt.md; qualified at4de34ffa  |
+| W224 | C107 | Share the scoped GORM fault fixture | accepted | 5b2b7db6..58883905; qualified at4de34ffa  |
+| W225 | C107 | Migrate freshness failure fixtures to the C107 helper | accepted | 5b2b7db6..58883905; qualified at4de34ffa  |
+| W226 | C041 | Replace typed union-key copies with one generic helper | accepted | 5b2b7db6..58883905; qualified at4de34ffa  |
+| W227 | C105 | Extract local queue and trigger bookkeeping | accepted | 7029e41a..93ba93ce; current root compile/race PASS; qualified at4de34ffa  |
+| W228 | C105 | Move local cache identity and rate-limit methods | accepted | 7029e41a..93ba93ce; current root compile/race PASS; qualified at4de34ffa  |
+| W229 | C105 | Move the atom execution closure | accepted | 7029e41a..93ba93ce; current root compile/race PASS; qualified at4de34ffa  |
+| W230 | C105 | Move fan-out execution and its shared state | accepted | 7029e41a..93ba93ce; current root compile/race PASS; qualified at4de34ffa  |
+| W231 | C105 | Move task dispatch onto localRun | accepted | 7029e41a..93ba93ce; current root compile/race PASS; qualified at4de34ffa  |
+| W232 | C105 | Finish local scheduler execution handoff | accepted | 7029e41a..93ba93ce; current root compile/race PASS; qualified at4de34ffa  |
+| W233 | C100 | Introduce the server work supervisor | accepted | 219bead1..12fc7e0e; metrics ec3a40c8; fixture cca78cea; native df7c69c1 + fresh all8 C100realshutdown PASS (lanes-df7c69c1-shutdown/summary.json); qualified at4de34ffa  |
+| W234 | C100 | Wire the supervisor into API and startup shutdown | accepted | 219bead1..12fc7e0e; metrics ec3a40c8; fixture cca78cea; native df7c69c1 + fresh all8 C100realshutdown PASS (lanes-df7c69c1-shutdown/summary.json); qualified at4de34ffa  |
+| W235 | C100 | Migrate backfill launches to the C100 helper | accepted | 219bead1..12fc7e0e; metrics ec3a40c8; fixture cca78cea; native df7c69c1 + fresh all8 C100realshutdown PASS (lanes-df7c69c1-shutdown/summary.json); qualified at4de34ffa  |
+| W236 | C100 | Migrate manual launches to the C100 helper | accepted | 219bead1..12fc7e0e; metrics ec3a40c8; fixture cca78cea; native df7c69c1 + fresh all8 C100realshutdown PASS (lanes-df7c69c1-shutdown/summary.json); qualified at4de34ffa  |
+| W237 | C100 | Migrate partition retry launches to the C100 helper | accepted | 219bead1..12fc7e0e; metrics ec3a40c8; fixture cca78cea; native df7c69c1 + fresh all8 C100realshutdown PASS (lanes-df7c69c1-shutdown/summary.json); qualified at4de34ffa  |
+| W238 | C100 | Migrate replay launches to the C100 helper | accepted | 219bead1..12fc7e0e; metrics ec3a40c8; fixture cca78cea; native df7c69c1 + fresh all8 C100realshutdown PASS (lanes-df7c69c1-shutdown/summary.json); qualified at4de34ffa  |
+| W239 | C100 | Migrate webhook launches and receipts to the C100 helper | accepted | 219bead1..12fc7e0e; metrics ec3a40c8; fixture cca78cea; native df7c69c1 + fresh all8 C100realshutdown PASS (lanes-df7c69c1-shutdown/summary.json); qualified at4de34ffa  |
+| W240 | C100 | Migrate whole-run retry launches to the C100 helper | accepted | 219bead1..12fc7e0e; metrics ec3a40c8; fixture cca78cea; native df7c69c1 + fresh all8 C100realshutdown PASS (lanes-df7c69c1-shutdown/summary.json); qualified at4de34ffa  |
+| W241 | C101 | Add the signal-context protocol entry point | accepted | 592c0a14..9eb5734c; host focused race; retained source-equivalent Terraform qualification PASS; qualified at4de34ffa  |
+| W242 | C101 | Migrate tf-discover signals to the C101 helper | accepted | 592c0a14..9eb5734c; host focused race; retained source-equivalent Terraform qualification PASS; qualified at4de34ffa  |
+| W243 | C101 | Migrate tf-runner signals to the C101 helper | accepted | 592c0a14..9eb5734c; host focused race; retained source-equivalent Terraform qualification PASS; qualified at4de34ffa  |
+| W244 | C101 | Migrate tf-warm signals to the C101 helper | accepted | 592c0a14..9eb5734c; host focused race; retained source-equivalent Terraform qualification PASS; qualified at4de34ffa  |
+| W245 | C004 | Use the declared backfill enum types in the model | accepted | c04b6577/298dd8ee/3a14063e/bf18324a/3a4070dd/f5423c3f/03530cc2/a542984e; qualified at4de34ffa  |
+| W246 | C093 | Introduce the shared workload catalogue schema | accepted | c04b6577/298dd8ee/3a14063e/bf18324a/3a4070dd/f5423c3f/03530cc2/a542984e; qualified at4de34ffa  |
+| W247 | C093 | Migrate load catalogue to the C093 helper | accepted | f84bceff shared typed catalog, driver override tests; qualified at4de34ffa  |
+| W248 | C093 | Migrate performance catalogue to the C093 helper | accepted | 2fcdbacd typed20 expectation presence; qualified at4de34ffa  |
 
 ## Verification status
 
@@ -292,7 +292,7 @@ Verification evidence (each result keeps its recorded source identity):
 - C003 native FK characterization covers all three dqlite databases, both pools and replacement connections. C032 PostgreSQL repeatable-read snapshot proof includes a failing READ COMMITTED negative control. Input acquisition failure, snapshot reuse and caller retry policies have focused native race evidence.
 - SQL scanning has 50,000-input differential race evidence. API Start/Shutdown owner barriers, private CLI natural drain/replacement handoff, freshness compensation and matching committed REST retry cases passed focused races, tagged vet and lint at recorded source commits. Current production blobs preserve those identities; no atomic context-versus-commit guarantee is claimed.
 - Public API declaration screen passed: 234 Git-inventoried files, 107 packages, 866 declarations per side and 11 controls. Only planned Cobra NoArgs initializer differences remain; no exported identifier/signature changes. This syntax screen is not an ABI/runtime compatibility proof.
-- Reagents is checked separately: native races and lint/vet, both architecture unit/race jobs, and actual Terraform 1.15.9 infrastructure scenarios have retained source-equivalent evidence. The 14 supporting Reagents blobs and module/infra inputs match their qualified source. Unit/Reagents coverage profiles were not collected.
+- Reagents is checked separately: the fresh hosted AMD64 module unit/race job passed seven packages, with one package containing no tests, and module lint passed. Root module unit/race checks passed on AMD64 and ARM64. Earlier native Reagents race/vet/lint and actual Terraform 1.15.9 infrastructure checks retain source-equivalent evidence; an ARM64 Reagents image build is not an ARM64 module unit/race test. The 14 supporting Reagents blobs and module/infra inputs match their qualified source. Unit/Reagents coverage profiles were not collected.
 - All 724 CI-tooling controls passed locally at `6612e775`. The local-retry correction has independent/root native five-process proof; the SSO permission correction has independent/root Linux UID refusal and positive execution proof. Fresh `6612e775` whole coverage subsequently passed both corrected helpers.
 - Hosted `6612e775` run 37366120047 failed twice. Attempt 1: two successful, two failed, two canceled and 26 skipped jobs. Attempt 2: zero successful, two failed, four canceled and 26 skipped jobs. Authenticated annotations show hosted runner acquisition refusal with runner ID zero; merge guards reject the canceled changes job. Required product/runtime/coverage jobs did not execute. No third manual retry was performed.
 - Final C081 test-only follow-up at `b42e1c6b` passed independent Luna/root contract review and native `-tags=integration -race -count=3`: 25 selected tests, 75 top-level and 96 subtest passes, no skips; six package commands, tagged vet and lint exited zero. The owned builder exited zero without OOM/restarts, then was removed by exact ID with literal absence checks. Existing seam/overflow/offer/performance controls were already present; added tests exercise consumer recovery, unavailable observations and complete-page retention. Four test files changed (+310/-18); production, measurement, build and workflow inputs match `6612e775`.
@@ -313,21 +313,26 @@ Verification evidence (each result keeps its recorded source identity):
 
 - The bounded failure-only startup observer at `6fb00b95` changes four diagnostic/test scripts. After an unchanged readiness deadline and verified container ownership, four read-only commands share six seconds: ownership is rechecked before a capped log-tail projection and a fixed no-redirect internal health probe. Only seven known startup milestone enums and a healthy/unhealthy/unavailable health outcome are retained; arbitrary fields, raw logs, response bodies and errors are discarded. Neither result can qualify a failed report. Independent Luna/source and root review passed, with all 786 tooling tests passing in 240.591 seconds. Real pinned-image fixtures passed healthy-with-secret-fields, refusal, invalid JSON/status, wrong ownership, missing object and actual redirect controls; source remains unchanged through the fixture corrections. Root checked all 22 recorded container IDs and 21 network IDs absent, all 23 explicitly retained private paths absent, and foreign IDs preserved; the owned lane keeper joined and released. Earlier fixture failures remain retained, with their original limits. This is observer compatibility proof, not a production startup fix or a fresh whole coverage cohort.
 
-- Current automatic `45b7f2bf` hosted run [37403866015](https://github.com/caesium-cloud/caesium/actions/runs/37403866015), attempt1, finished39 successful/two failed/three expected PR-event skips. All39 normal jobs passed, including both architectures and actual replacement/rejoin. Coverage failed at the first Kubernetes server-health deadline:380 typed connection refusals, no HTTP status/body, exact-owned Running=true/OOMKilled=false/restart0 with loopback mapping. After the original failure, the capped tail200 projected API-listener-started, distributed-worker-disabled and spinning-up-api, and an internal probe returned complete valid JSON projected as unhealthy. Precise status/components, original logs/timing and ordering were discarded; underlying cause remains unknown. Cases/processes are empty and collection incomplete. All41 non-skipped original job logs,44 checks and four ZIPs/504 members were retained; no partial/profile promotion or manual retry occurred. The missing lane report and ci-ok are downstream failures.
+- Prior automatic `45b7f2bf` hosted run [37403866015](https://github.com/caesium-cloud/caesium/actions/runs/37403866015), attempt1, finished39 successful/two failed/three expected PR-event skips. All39 normal jobs passed, including both architectures and actual replacement/rejoin. Coverage failed at the first Kubernetes server-health deadline:380 typed connection refusals, no HTTP status/body, exact-owned Running=true/OOMKilled=false/restart0 with loopback mapping. After the original failure, the capped tail200 projected API-listener-started, distributed-worker-disabled and spinning-up-api, and an internal probe returned complete valid JSON projected as unhealthy. Precise status/components, original logs/timing and ordering were discarded; underlying cause remains unknown. Cases/processes are empty and collection incomplete. All41 non-skipped original job logs,44 checks and four ZIPs/504 members were retained; no partial/profile promotion or manual retry occurred. The missing lane report and ci-ok are downstream failures.
 
 - Binding guard correction at `e375e589` changes only the backend helper and its tests (+113/-3 combined versus45b7). Kubernetes now rechecks exact owned container ID/name/image/labels after network attachment and selects its fresh loopback port. Missing, ambiguous, nonloopback or invalid HostPort values refuse before readiness; ports are exact ASCII decimal1..5digits in1..65535 and legitimate text is preserved. Podman retains its single-network path. New controls fail old45b7 and5d1b; independent source review accepted the final correction, and all790 tooling tests passed in239.998s with no skips. All515 original work-item Gitblob bindings and8 alternate-path nulls remain unchanged. Original request/readiness budgets, topology, health predicates, scenario selection, cleanup and floors are preserved.
 - The separate pinned-image native two-network diagnostic completed without reproducing the host failure on local Docker29.8.1/linuxARM64: old and fresh port64793 remained equal, both host reads returned HTTP200 and privately matched the healthy fixture body. The exact owned container and both networks were removed; root independently checked all3IDs and names absent,23foreigncontainers/5networks preserved, and the keeper joined/released. This supports a bounded nonreproduction, not a current producer/profile or historical CI cause. A pre-allocation source-check cap failure and earlier unexecuted probe reviews remain retained.
 
+- Fresh automatic `4de34ffa` run [37713798770](https://github.com/caesium-cloud/caesium/actions/runs/37713798770) passed 41 jobs with three expected PR-event skips and `ci-ok`. All original logs/checks and selected artifact ZIPs were retained; independent review rehashed the 795-file reader inventory. The full coverage ZIP contains 551 regular members (620 extracted filesystem paths including directories), not 620 ZIP members. No manual rerun occurred.
+- Fresh integration coverage is 52.6%; integration plus three real browser cases is 53.5% (28,512 / 53,331 statements, 161 packages). All 77 committed package floors remain unchanged and passed; the newly emitted 148-package measured baseline is diagnostic output, not a changed policy. All 177 eligible changed production statement files were observed, with zero uncovered across 483 changed Go paths; the separate Reagents module is audited outside the root ratchet.
+- Fresh named local/auth/distributed/owner-memory/Git journeys, all 32 SSO checks across restart, five no-server local-retry processes, and 14 distinct Kubernetes/Podman coverage processes passed with original profiles. The distributed lane's owner-memory-only saturation case deliberately skipped there and passed in the same fresh owner-memory lane. Three native cases per backend retained actual running task identity and later task absence; producer input hashes bind the complete captured supplier chain. The original process profile bytes and source inventories were rehashed; uploaded receipts consistently record the executable SHA, but executable bytes themselves were not retained.
+- Fresh normal lanes passed AMD64 and ARM64 root unit/race suites, root lint, Docker/Podman/Kubernetes integrations, separate AMD64 Reagents unit/race and module lint checks, Terraform, auth/SSE, UI and lifecycle, early owner-crash recovery and actual three-pod replacement/rejoin. Standalone lifecycle's raw supplied-image warning remains in the originals; the authenticated current image producer ID equals the expected/actual consumer and qualification-fragment IDs, closing identity through the workflow's separate binding. Twenty lifecycle cases passed. No separate remote-daemon reinspection beyond retained native observations is claimed.
+
 Current qualification limits:
 
-- Current published `45b7f2bf` run 37403866015 failed (39 successful / two failed / three skipped). Collection stopped at Kubernetes backend readiness after380 connection refusals; no backend case, Podman backend, final floors or fresh whole profile qualified. Exact-owned Running=true/OOMKilled=false/restarts=0 and a later complete unhealthy internal health response are observations, not a diagnosis. Three allowlisted startup milestones include API listener started; log-tail absence and ordering are not proof. All253 items remain implemented with zero final acceptances. Prior `0ff88773` remains a separate failed cohort; no profile promotion occurred.
-- Historical failures remain retained. The `348338f0` stress/backend causes were unlocalized and Git permission failure was definite. The `296c4e8a` Kubernetes health deadline and initial Helm join cause remain unknown; `add22dbc` actual replacement/owner recovery success does not explain or qualify those failed cohorts. Current stress kernel/daemon attribution remains unknown despite correct strict refusal. Diagnostic controls cannot backfill absent old evidence.
+- Acceptance is bounded to the 107 audited candidates and their 253 items at source `4de34ffa`. It does not establish every changed branch, exhaustive protocol behavior or universal runtime correctness. The final documentation-only head has identical Go, module, build, workflow, helper and policy inputs; its new automatic CI must qualify that run's actual supplier content independently.
+- Historical failures remain retained. The `348338f0` stress/backend causes were unlocalized and Git permission failure was definite. The `296c4e8a` Kubernetes health deadline and initial Helm join cause remain unknown; `add22dbc` actual replacement/owner recovery success does not explain or qualify those failed cohorts. The historical `add22dbc` stress kernel/daemon attribution remains unknown despite correct strict refusal; the fresh run passed its strict prerequisite. Diagnostic controls cannot backfill absent old evidence.
 - Issue #598 orphan reaping remains separate by user decision: enforcing soak passed five fault families but failed final drain after a killed worker retained a completed task pod. No fresh base reproduction or passing full enforcing soak is claimed.
 - Nightly-performance registration remains separate by user decision: measurements passed, but the original wrapper failed with no registered scenarios. Fifteen open-workload SLOs were not evaluated. Results show bounded noninferiority, not equivalence or a speedup; sample SIGKILL teardown does not prove graceful coverage flushing.
-- DT-CANCEL-01/DT-EVENT-01 labels, the excluded nonmandatory saturated-pool skip and public agent-mint wiring remain unqualified. Skips do not count as named passes. Selected coverage demonstrates at least one statement in each eligible changed production file, not every changed branch.
-- The previous startup/recovery scope question is unanswered; no production recovery or Helm change has been added. Latest actual replacement at `0ff88773` passed. Bounded observer/typed transport diagnostics stay within existing qualification-helper scope, preserve original predicates and request/poll budgets, and do not claim zero overhead: terminal journal writes are small, the stress event query adds at most three seconds after its verdict, and optional backend startup queries share six seconds after the failed readiness verdict.
+- DT-CANCEL-01/DT-EVENT-01 diagnostic labels and public agent-mint wiring remain unqualified. The saturation case has a passing fresh owner-memory counterpart; its distributed skip is not counted as a pass. Selected coverage demonstrates at least one statement in each eligible changed production file, not every changed branch. Unit/Reagents coverage contributions remain unmeasured. Backend driver cleanup reports no errors, but no independent service/volume post-removal reinspection or separately retained smoke/import receipt is claimed; local-retry retains seven resource absence observations.
+- Production startup/recovery and Helm changes remain outside this maintenance scope. The approved per-run Podman metadata policy is implemented and freshly qualified; no decision remains pending for it. Bounded observer/transport diagnostics preserve original predicates and budgets. Their overhead remains explicit: small terminal journal writes, at most three seconds of post-verdict stress event queries and six shared seconds of optional post-failure startup queries.
 
-All 253 source items retain explicit attribution and remain implemented, with zero final acceptances while required current hosted qualification is incomplete. Current published source `45b7f2bf` has a retained terminal failure; its bounded startup observation follow-up at `6fb00b95` passed locally and produced the new hosted observations. Independent evidence review accepted the original failure; the narrow post-attachment binding guard correction is locally verified and ready for fresh automatic hosted qualification. Prior failed qualifications, partial profiles and original runtime/performance cohorts keep their actual source identities. No startup/recovery implementation, qualification-policy relaxation or manual CI rerun was made. The requested endpoint is this single aggregate draft PR; no merge has been performed.
+All 253 items have an explicit accepted current-code disposition in the local item ledger, backed by item-specific original evidence, 515 unchanged blob records and eight original alternate-path null dispositions, focused semantic/native controls and the fresh `4de34ffa` shared gates. Earlier failed qualifications and the `6612e775` performance cohort keep their original identities; neither partial profiles nor performance samples are promoted into this fresh cohort. This documentation closeout keeps the qualifying code source explicit and leaves final-head CI verification to the published checks and endpoint receipt. No production recovery/Helm change, relaxed qualification policy or manual CI rerun was added. The endpoint is one aggregate draft PR; no merge has been performed.
 
 Required baseline commands: `just lint`, `just unit-test`, `just reagents-lint`, `just reagents-test`, `just integration-test`, plus affected auth, distributed/owner-memory, Podman, lifecycle and infrastructure lanes named by the work items and current CI workflow. Commands run from the aggregate worktree and use repository containers.
 
