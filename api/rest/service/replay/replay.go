@@ -118,28 +118,28 @@ type replayReservation struct {
 
 // Replay creates or resumes an idempotent quarantined replay.
 func (s *Service) Replay(req Request) (*Result, error) {
-	if s == nil || s.store == nil {
-		return nil, errors.New("replay: run store is required")
-	}
-	if s.dispatcher == nil {
-		return nil, replaycore.ErrDispatchRequired
-	}
-	if strings.TrimSpace(req.IdempotencyKey) == "" {
-		return nil, ErrMissingIdempotencyKey
+	return s.replay(req)
+}
+
+func (s *Service) reserveWork() (*Service, func(), error) {
+	if s.ctx != nil {
+		if reservation, _ := s.ctx.Value(replayReservationKey{}).(*replayReservation); reservation != nil {
+			return s, func() {}, nil
+		}
 	}
 	ctx, release, err := runlife.FromContext(s.ctx).Reserve(s.ctx)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	reservation := &replayReservation{ctx: ctx, release: release}
-	defer func() {
+	cleanup := func() {
 		if !reservation.transferred {
 			release()
 		}
-	}()
+	}
 	next := *s
 	next.ctx = context.WithValue(s.ctx, replayReservationKey{}, reservation)
-	return next.replay(req)
+	return &next, cleanup, nil
 }
 
 func (s *Service) replay(req Request) (*Result, error) {
@@ -166,6 +166,13 @@ func (s *Service) replay(req Request) (*Result, error) {
 	} else if !errors.Is(err, gorm.ErrRecordNotFound) {
 		return nil, err
 	}
+	// An already materialized replay can be an idempotent metadata read even
+	// while admission is closed. Reserve only when new durable work is needed.
+	s, release, err := s.reserveWork()
+	if err != nil {
+		return nil, err
+	}
+	defer release()
 
 	constructor := replaycore.New(s.store, s.dispatcher)
 	prepared, err := constructor.Prepare(s.ctx, replaycore.Request{
@@ -263,6 +270,13 @@ func (s *Service) resumePending(runID, expectedJobID uuid.UUID) error {
 	if !s.isDistributedExecutionMode() {
 		return ErrReplayRequiresDistributedMode
 	}
+	// Pending work is not a metadata-only retry: preserve supervised admission
+	// when an existing reservation must be dispatched again.
+	s, release, err := s.reserveWork()
+	if err != nil {
+		return err
+	}
+	defer release()
 	return s.dispatcher.DispatchReplay(s.ctx, runID)
 }
 

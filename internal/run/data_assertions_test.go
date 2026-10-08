@@ -176,7 +176,7 @@ func TestDataAssertionsCanceledContextStopsInitialAcquisition(t *testing.T) {
 	require.NoError(t, db.First(&row, "id = ?", rowID).Error)
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	require.NoError(t, EvaluateDataAssertions(ctx, store, row.JobRunID, taskID, rowID, CapturedMetrics([]pkgtask.DatasetMetricSample{{Dataset: "orders", Metric: "rowCount", Value: 12}})))
+	require.ErrorIs(t, EvaluateDataAssertions(ctx, store, row.JobRunID, taskID, rowID, CapturedMetrics([]pkgtask.DatasetMetricSample{{Dataset: "orders", Metric: "rowCount", Value: 12}})), context.Canceled)
 	require.Empty(t, metricRows(t, db))
 	require.Empty(t, dataViolationsOf(t, db, rowID))
 	written, err := store.saveDataViolationsClaimed(ctx, row.JobRunID, rowID, nil, []DataViolation{{Dataset: "orders", Assertion: AssertionMin}})
@@ -241,4 +241,31 @@ func TestDataAssertionsCancellationDuringHoldFailsClosed(t *testing.T) {
 	require.Empty(t, activeHolds(t, db, "orders"))
 	require.Empty(t, dataViolationsOf(t, db, rowID), "best-effort violation persistence can be lost after cancellation")
 	require.Len(t, metricRows(t, db), 1, "the sample committed before cancellation remains")
+}
+
+func TestDataAssertionsCancellationDuringDeclarationReadIsNotSuccess(t *testing.T) {
+	setDataAssertions(t, true)
+	db := testutil.OpenTestDB(t)
+	t.Cleanup(func() { testutil.CloseDB(db) })
+	store := NewStore(db)
+	jobID, taskID, rowID, name := seedTaskRun(t, db, string(TaskStatusRunning), false)
+	declareProduces(t, db, jobID, name, "orders")
+	var row models.TaskRun
+	require.NoError(t, db.First(&row, "id = ?", rowID).Error)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	called := false
+	const callback = "test:cancel_assertion_declarations"
+	require.NoError(t, db.Callback().Query().Before("gorm:query").Register(callback, func(tx *gorm.DB) {
+		if tx.Statement.Table == "dataset_declarations" {
+			called = true
+			cancel()
+		}
+	}))
+	defer func() { require.NoError(t, db.Callback().Query().Remove(callback)) }()
+	require.ErrorIs(t, EvaluateDataAssertions(ctx, store, row.JobRunID, taskID, rowID,
+		CapturedMetrics([]pkgtask.DatasetMetricSample{{Dataset: "orders", Metric: "rowCount", Value: 12}})), context.Canceled)
+	require.True(t, called, "must cancel after task-row acquisition, inside the assertion read")
+	require.Empty(t, metricRows(t, db))
+	require.Empty(t, dataViolationsOf(t, db, rowID))
 }

@@ -336,7 +336,7 @@ func TestFireAtConcurrentFailuresStayWithTheirJob(t *testing.T) {
 	}()
 	c := &Cron{id: uuid.New()}
 	date := time.Date(2026, 10, 3, 12, 0, 0, 0, time.UTC)
-	err := c.fireAtWith(context.Background(), date, func(req *jsvc.ListRequest) (models.Jobs, error) {
+	err := c.fireAtWith(context.Background(), date, func(context.Context) (bool, error) { return true, nil }, func(req *jsvc.ListRequest) (models.Jobs, error) {
 		require.Equal(t, c.id.String(), req.TriggerID)
 		return jobs, nil
 	}, func(j *models.Job, params map[string]string) error {
@@ -369,5 +369,53 @@ func TestFireAtConcurrentFailuresStayWithTheirJob(t *testing.T) {
 		id, err := uuid.Parse(fields["id"].(string))
 		require.NoError(t, err)
 		require.Equal(t, failures[id].Error(), fields["error"])
+	}
+}
+
+func TestCronLeadershipIsCheckedForEachFireBeforeLookupAndCatchup(t *testing.T) {
+	c := &Cron{id: uuid.New(), catchup: true}
+	lookupCalls := 0
+	leaderChecks := 0
+	leaderErr := errors.New("leader unavailable")
+	leader := func(context.Context) (bool, error) {
+		leaderChecks++
+		return false, map[int]error{2: leaderErr}[leaderChecks]
+	}
+	list := func(*jsvc.ListRequest) (models.Jobs, error) { lookupCalls++; return nil, nil }
+	run := func(*models.Job, map[string]string) error { t.Error("non-leader launched a job"); return nil }
+	require.NoError(t, c.fireAtWith(t.Context(), time.Now(), leader, list, run))
+	require.ErrorIs(t, c.fireAtWith(t.Context(), time.Now(), leader, list, run), leaderErr)
+	require.Zero(t, lookupCalls, "neither normal nor catchup jobs are loaded on a follower/refusal")
+	catchupAvailable := false
+	c.catchupOnce.Do(func() { catchupAvailable = true })
+	require.True(t, catchupAvailable, "a follower must not consume catchup admission")
+	c.catchup = false
+	require.NoError(t, c.fireAtWith(t.Context(), time.Now(), func(context.Context) (bool, error) {
+		leaderChecks++
+		return true, nil
+	}, list, run))
+	require.Equal(t, 3, leaderChecks)
+	require.Equal(t, 1, lookupCalls, "a later leader is allowed to fire")
+}
+
+func TestCronLeadershipPolicyUsesNativeLeaderOnlyForInternalDatabase(t *testing.T) {
+	for _, databaseType := range []string{"", "internal", " DQLITE ", "postgres", "unknown"} {
+		t.Run(databaseType, func(t *testing.T) {
+			calls := 0
+			errNative := errors.New("no native app")
+			leader, err := cronLeaderForDatabase(t.Context(), databaseType, func(context.Context) (bool, error) {
+				calls++
+				return false, errNative
+			})
+			if databaseType == "postgres" {
+				require.NoError(t, err)
+				require.True(t, leader)
+				require.Zero(t, calls)
+			} else {
+				require.ErrorIs(t, err, errNative)
+				require.False(t, leader)
+				require.Equal(t, 1, calls)
+			}
+		})
 	}
 }

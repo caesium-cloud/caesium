@@ -10,6 +10,7 @@ import (
 	"github.com/caesium-cloud/caesium/internal/cache"
 	"github.com/caesium-cloud/caesium/internal/metrics"
 	"github.com/caesium-cloud/caesium/internal/run"
+	"github.com/caesium-cloud/caesium/internal/runlife"
 	"github.com/caesium-cloud/caesium/pkg/log"
 	pkgtask "github.com/caesium-cloud/caesium/pkg/task"
 	"github.com/google/uuid"
@@ -17,6 +18,9 @@ import (
 
 func (l *localRun) runTask(taskID uuid.UUID) ([]uuid.UUID, error) {
 	ctx := l.ctx
+	if cause := runlife.CancellationCause(ctx); cause != nil {
+		return nil, cause
+	}
 	j := l.j
 	store := l.store
 	tasksByID := l.tasksByID
@@ -24,11 +28,12 @@ func (l *localRun) runTask(taskID uuid.UUID) ([]uuid.UUID, error) {
 	predecessors := l.predecessors
 	runID := l.runID
 	runQuarantined := l.runQuarantined
-	taskOutputs := l.taskOutputs
-	taskHashes := l.taskHashes
 	taskQuarantine := l.taskQuarantine
 	taskAttempts := l.taskAttempts
 	failIdentity := func(failure error) ([]uuid.UUID, error) {
+		if serverShutdown(ctx) {
+			return nil, runlife.ErrServerShutdown
+		}
 		if err := store.FailTask(runID, taskID, failure); err != nil {
 			return nil, errors.Join(failure, errUnresolvedIdentityTerminalWrite, fmt.Errorf("persist task identity failure: %w", err))
 		}
@@ -42,7 +47,7 @@ func (l *localRun) runTask(taskID uuid.UUID) ([]uuid.UUID, error) {
 	predOutputs := make(map[string]map[string]string)
 	predOutputsByID := make(map[uuid.UUID]map[string]string)
 	for _, predID := range predecessors[taskID] {
-		if outputs, ok := taskOutputs[predID]; ok && len(outputs) > 0 {
+		if outputs, ok := l.taskOutput(predID); ok && len(outputs) > 0 {
 			predOutputsByID[predID] = outputs
 			stepName := ""
 			if t := tasksByID[predID]; t != nil {
@@ -179,7 +184,7 @@ func (l *localRun) runTask(taskID uuid.UUID) ([]uuid.UUID, error) {
 		case err != nil:
 			log.Warn("cache lookup failed", "task", taskName, "error", err)
 		case found:
-			if cause := context.Cause(ctx); run.IsRunDeadlineError(cause) {
+			if cause := runlife.CancellationCause(ctx); cause != nil {
 				return nil, cause
 			}
 			if !taskQuarantined {
@@ -203,9 +208,9 @@ func (l *localRun) runTask(taskID uuid.UUID) ([]uuid.UUID, error) {
 			} else {
 				l.registerExpansion(cacheResult)
 				if len(entry.Output) > 0 {
-					taskOutputs[taskID] = entry.Output
+					l.setTaskOutput(taskID, entry.Output)
 				}
-				taskHashes[taskID] = inputHash
+				l.setTaskHash(taskID, inputHash)
 				var skipped []uuid.UUID
 				if cacheResult != nil && len(cacheResult.SkippedTaskIDs) > 0 {
 					skipped = cacheResult.SkippedTaskIDs
@@ -247,10 +252,11 @@ func (l *localRun) runTask(taskID uuid.UUID) ([]uuid.UUID, error) {
 
 		result, output, branchNames, partitions, metricsCapture, logSnapshot, execErr := l.executeAtom(taskCtx, taskID, uuid.Nil, attempt, taskTimeout, runner, outputEnv)
 		cancel()
-		if execErr == nil {
-			if cause := context.Cause(ctx); run.IsRunDeadlineError(cause) {
-				execErr = cause
-			}
+		if cause := runlife.CancellationCause(ctx); cause != nil {
+			execErr = cause
+		}
+		if serverShutdown(ctx) {
+			return nil, runlife.ErrServerShutdown
 		}
 
 		if execErr == nil {
@@ -281,6 +287,10 @@ func (l *localRun) runTask(taskID uuid.UUID) ([]uuid.UUID, error) {
 			}
 		}
 
+		if serverShutdown(ctx) {
+			return nil, runlife.ErrServerShutdown
+		}
+
 		if execErr == nil {
 			completeResult, completeErr := store.CompleteTaskWithPartitions(runID, taskID, result, output, branchNames, partitions)
 			if completeErr != nil {
@@ -291,13 +301,13 @@ func (l *localRun) runTask(taskID uuid.UUID) ([]uuid.UUID, error) {
 				log.Warn("failed to persist task log snapshot", "job_id", j.id, "task_id", taskID, "error", snapshotErr)
 			}
 			if len(output) > 0 {
-				taskOutputs[taskID] = output
+				l.setTaskOutput(taskID, output)
 			}
 
 			// Keep uncertain identity available to downstream tasks even though
 			// this execution cannot publish a cache entry or short-circuit.
 			if inputHash != "" {
-				taskHashes[taskID] = inputHash
+				l.setTaskHash(taskID, inputHash)
 			}
 
 			// Store successful result in cache, reusing the hash computed earlier.
@@ -309,7 +319,7 @@ func (l *localRun) runTask(taskID uuid.UUID) ([]uuid.UUID, error) {
 				}
 
 				if taskQuarantined {
-					taskHashes[taskID] = inputHash
+					l.setTaskHash(taskID, inputHash)
 					log.Info("quarantined task skipped cache publication", "task", taskName, "hash", inputHash[:12])
 				} else {
 					// Value-verified short-circuit (D2): this task re-executed
@@ -332,7 +342,7 @@ func (l *localRun) runTask(taskID uuid.UUID) ([]uuid.UUID, error) {
 					// taskHashes drives the in-memory predHashes a downstream task
 					// folds into its own key; storing the effective (possibly
 					// prior) identity is what stops the cascade locally.
-					taskHashes[taskID] = effectiveHash
+					l.setTaskHash(taskID, effectiveHash)
 					if effectiveHash != inputHash {
 						metrics.TaskCacheShortCircuitsTotal.WithLabelValues(j.alias, taskName).Inc()
 						log.Info("value-verified short-circuit", "task", taskName, "new_hash", inputHash[:12], "effective_hash", effectiveHash[:12])
@@ -396,6 +406,9 @@ func (l *localRun) runTask(taskID uuid.UUID) ([]uuid.UUID, error) {
 			metrics.TaskRetriesTotal.WithLabelValues(j.alias, taskID.String(), strconv.Itoa(attempt)).Inc()
 		}
 
+		if serverShutdown(ctx) {
+			return nil, runlife.ErrServerShutdown
+		}
 		if err := store.RetryTask(runID, taskID, attempt+1); err != nil {
 			log.Error("failed to persist task retry state", "run_id", runID, "task_id", taskID, "error", err)
 		}
@@ -409,6 +422,9 @@ func (l *localRun) runTask(taskID uuid.UUID) ([]uuid.UUID, error) {
 		}
 	}
 
+	if serverShutdown(ctx) {
+		return nil, runlife.ErrServerShutdown
+	}
 	if persistErr := store.FailTask(runID, taskID, lastErr); persistErr != nil {
 		log.Error("failed to persist task failure", "run_id", runID, "task_id", taskID, "error", persistErr)
 	}
@@ -417,6 +433,9 @@ func (l *localRun) runTask(taskID uuid.UUID) ([]uuid.UUID, error) {
 
 func (l *localRun) dispatchTask(taskID uuid.UUID) error {
 	ctx := l.ctx
+	if cause := runlife.CancellationCause(ctx); cause != nil {
+		return cause
+	}
 	deferred := l.deferred
 	dispatched := l.dispatched
 	// An EXPANDED fan-out step acquires its tokens per instance inside

@@ -10,6 +10,7 @@ import (
 	jobdeftestutil "github.com/caesium-cloud/caesium/internal/jobdef/testutil"
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/caesium-cloud/caesium/internal/run"
+	"github.com/caesium-cloud/caesium/internal/runlife"
 	"github.com/caesium-cloud/caesium/pkg/env"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
@@ -135,4 +136,83 @@ func TestBackendCancelledErrorDoesNotMarkLiveOwnerCancelled(t *testing.T) {
 	require.ErrorIs(t, returned, context.Canceled)
 	require.False(t, run.IsRunCancellationError(returned))
 	require.NoError(t, ownerCtx.Err())
+}
+
+func TestDistributedServerShutdownLeavesRunForTakeover(t *testing.T) {
+	db := jobdeftestutil.OpenTestDB(t)
+	t.Cleanup(func() { jobdeftestutil.CloseDB(db) })
+	store := run.NewStore(db)
+	bus := &cancellationWaitBus{Bus: event.New(), ready: make(chan uuid.UUID, 2)}
+	store.SetBus(bus)
+	jobID, taskID, atomID := uuid.New(), uuid.New(), uuid.New()
+	model := &models.Job{ID: jobID, Alias: "distributed-owner-shutdown", RunTimeout: time.Hour}
+	require.NoError(t, db.Create(model).Error)
+	tasks := &fakeTaskService{tasks: models.Tasks{{ID: taskID, JobID: jobID, AtomID: atomID}}}
+	persistGraph(t, db, tasks.tasks, nil)
+	atoms := &fakeAtomService{atoms: map[uuid.UUID]*models.Atom{atomID: fakeModelAtom(atomID)}}
+	engine := newFakeEngine()
+	opts := withTestDeps(store, env.Environment{ExecutionMode: executionModeDistributed, WorkerPollInterval: time.Hour}, tasks, atoms, &fakeTaskEdgeService{}, engine)
+	owner := runlife.New(t.Context())
+	ctx, release, err := owner.Reserve(runlife.WithSupervisor(t.Context(), owner))
+	require.NoError(t, err)
+	runner := New(model, opts...).(*job)
+	callbacks := 0
+	runner.dispatchRunCallbacks = func(context.Context, uuid.UUID, uuid.UUID, error) error { callbacks++; return nil }
+	done := make(chan error, 1)
+	go func() { defer release(); done <- runner.Run(ctx) }()
+	t.Cleanup(func() {
+		owner.CloseAndCancelCause(runlife.ErrServerShutdown)
+		wait, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		require.NoError(t, owner.Wait(wait))
+	})
+	var runID uuid.UUID
+	select {
+	case runID = <-bus.ready:
+	case <-time.After(5 * time.Second):
+		t.Fatal("owner did not reach distributed waiter")
+	}
+	var row models.TaskRun
+	require.NoError(t, db.Where("job_run_id = ? AND task_id = ?", runID, taskID).First(&row).Error)
+	lease := time.Now().UTC().Add(time.Minute)
+	require.NoError(t, db.Model(&row).Updates(map[string]any{"status": string(run.TaskStatusRunning), "claimed_by": "worker-b", "claim_expires_at": lease, "runtime_id": "remote-runtime"}).Error)
+	var beforeRun models.JobRun
+	var beforeTask models.TaskRun
+	require.NoError(t, db.First(&beforeRun, "id = ?", runID).Error)
+	require.NoError(t, db.First(&beforeTask, "id = ?", row.ID).Error)
+	owner.CloseAndCancelCause(runlife.ErrServerShutdown)
+	select {
+	case err := <-done:
+		require.ErrorIs(t, err, runlife.ErrServerShutdown)
+	case <-time.After(5 * time.Second):
+		t.Fatal("shutdown owner did not return")
+	}
+	require.Zero(t, callbacks, "shutdown may not emit completion callbacks")
+	var afterRun models.JobRun
+	var afterTask models.TaskRun
+	require.NoError(t, db.First(&afterRun, "id = ?", runID).Error)
+	require.NoError(t, db.First(&afterTask, "id = ?", row.ID).Error)
+	require.Equal(t, beforeRun, afterRun)
+	require.Equal(t, beforeTask, afterTask)
+	require.Empty(t, engine.createRequestsForTask(taskID))
+	require.NoError(t, store.CompleteTaskClaimed(runID, row.ID, "success", "worker-b", nil, nil))
+	// Completion happened before the replacement subscribed. Its bounded poll
+	// must observe the durable terminal task rather than await a lost event.
+	recoveryCtx, cancelRecovery := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancelRecovery()
+	recoveryOpts := append(opts, WithEnvVariables(func() env.Environment {
+		return env.Environment{ExecutionMode: executionModeDistributed, WorkerPollInterval: 5 * time.Millisecond}
+	}))
+	require.NoError(t, New(model, recoveryOpts...).Run(run.WithContext(recoveryCtx, runID)), "a fresh owner completes the same durable run")
+	snapshot, err := store.Get(runID)
+	require.NoError(t, err)
+	require.Equal(t, run.StatusSucceeded, snapshot.Status)
+	// The public Store.Get view collapses ID to catalog TaskID. Durable
+	// TaskRun identity must be checked against the original primary key.
+	var completed []models.TaskRun
+	require.NoError(t, db.Where("job_run_id = ? AND task_id = ?", runID, taskID).Find(&completed).Error)
+	require.Len(t, completed, 1, "takeover must not create a replacement task row")
+	require.Equal(t, row.ID, completed[0].ID)
+	require.Equal(t, string(run.TaskStatusSucceeded), completed[0].Status)
+	require.Equal(t, "remote-runtime", completed[0].RuntimeID)
 }

@@ -17,6 +17,7 @@ import (
 	runstore "github.com/caesium-cloud/caesium/internal/run"
 	"github.com/caesium-cloud/caesium/internal/trigger"
 	"github.com/caesium-cloud/caesium/pkg/db"
+	"github.com/caesium-cloud/caesium/pkg/dqlite"
 	"github.com/caesium-cloud/caesium/pkg/env"
 	"github.com/caesium-cloud/caesium/pkg/log"
 	"github.com/google/uuid"
@@ -122,6 +123,7 @@ func (c *Cron) Fire(ctx context.Context) error {
 
 func (c *Cron) fireAt(ctx context.Context, logicalDate time.Time) error {
 	return c.fireAtWith(ctx, logicalDate,
+		cronLeaderCheck,
 		func(req *jsvc.ListRequest) (models.Jobs, error) { return jsvc.Service(ctx).List(req) },
 		func(j *models.Job, params map[string]string) error {
 			return job.New(j, job.WithParams(params)).Run(ctx)
@@ -129,7 +131,30 @@ func (c *Cron) fireAt(ctx context.Context, logicalDate time.Time) error {
 	)
 }
 
-func (c *Cron) fireAtWith(ctx context.Context, logicalDate time.Time, list func(*jsvc.ListRequest) (models.Jobs, error), runJob func(*models.Job, map[string]string) error) error {
+func cronLeaderCheck(ctx context.Context) (bool, error) {
+	return cronLeaderForDatabase(ctx, env.Variables().DatabaseType, dqlite.IsLocalLeader)
+}
+
+func cronLeaderForDatabase(ctx context.Context, databaseType string, nativeLeader func(context.Context) (bool, error)) (bool, error) {
+	switch strings.ToLower(strings.TrimSpace(databaseType)) {
+	case "postgres":
+		// PostgreSQL has no dqlite app. Its standalone scheduling policy must
+		// not turn an absent native app into a refusal.
+		return true, nil
+	default:
+		// Match db.openConnection's native default, including an empty type.
+		return nativeLeader(ctx)
+	}
+}
+
+func (c *Cron) fireAtWith(ctx context.Context, logicalDate time.Time, leader func(context.Context) (bool, error), list func(*jsvc.ListRequest) (models.Jobs, error), runJob func(*models.Job, map[string]string) error) error {
+	localLeader, err := leader(ctx)
+	if err != nil {
+		return fmt.Errorf("cron leader check: %w", err)
+	}
+	if !localLeader {
+		return nil
+	}
 	log.Info(
 		"trigger firing",
 		"id", c.id,

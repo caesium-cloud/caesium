@@ -51,6 +51,7 @@ func TestPartitionRetryReplacementInheritsServerOwnership(t *testing.T) {
 	f := newFanOutFixture(t, `["retry"]`, &schema.FanOut{From: "list", MaxPartitions: 16}, 0)
 	f.engine.createErrByPartition["retry"] = errors.New("first attempt failed")
 	started := make(chan context.Context, 1)
+	stopped := make(chan replacementStopObservation, 1)
 	owner := runlife.New(context.Background())
 	carrier := runlife.WithSupervisor(t.Context(), owner)
 	workCtx, releaseWork, err := owner.Reserve(carrier)
@@ -71,7 +72,7 @@ func TestPartitionRetryReplacementInheritsServerOwnership(t *testing.T) {
 	})
 	opts := withTestDeps(f.store, defaultFanOutVars(), f.taskSvc, f.atomSvc, f.edgeSvc, f.engine)
 	opts = append(opts, WithDockerEngineFactory(func(ctx context.Context) atom.Engine {
-		return &replacementObservedEngine{fakeEngine: f.engine, ctx: ctx, started: started}
+		return &replacementObservedEngine{fakeEngine: f.engine, ctx: ctx, started: started, stopped: stopped}
 	}))
 	runner := New(&models.Job{ID: f.jobID}, opts...).(*job)
 	var windows atomic.Int32
@@ -120,15 +121,17 @@ func TestPartitionRetryReplacementInheritsServerOwnership(t *testing.T) {
 	waitCtx, waitCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer waitCancel()
 	require.NoError(t, owner.Wait(waitCtx))
-	f.engine.mu.Lock()
-	forced := false
-	for _, force := range f.engine.stopForceByID {
-		forced = forced || force
-	}
-	f.engine.mu.Unlock()
-	require.True(t, forced, "server cancellation stopped replacement atom")
 	rows := f.instanceRows(t)
 	require.Len(t, rows, 1)
+	select {
+	case observation := <-stopped:
+		require.Equal(t, rows[0].RuntimeID, observation.runtimeID)
+		require.NotEmpty(t, observation.runtimeID)
+		require.True(t, observation.force)
+		require.ErrorIs(t, observation.cause, context.Canceled)
+	case <-time.After(time.Second):
+		t.Fatal("replacement atom did not stop under its cancelled context")
+	}
 	require.False(t, rows[0].PartitionRetryPending)
 	require.Equal(t, string(run.StatusFailed), f.latestJobRun(t).Status)
 }
@@ -155,6 +158,22 @@ func TestClosedOwnerReplacementResolvesRetryAndCompletesFailed(t *testing.T) {
 		case <-workCtx.Done():
 		case <-time.After(5 * time.Second):
 			t.Fatal("server cancellation did not reach reserved work before completion")
+		}
+		// The owner context is a descendant registered after Reserve. Wait for
+		// that exact context too; observing the ancestor alone races AfterFunc.
+		defaultCancelRegistry.mu.Lock()
+		var registered []context.Context
+		for _, entry := range defaultCancelRegistry.runs[runID] {
+			registered = append(registered, entry.ctx)
+		}
+		defaultCancelRegistry.mu.Unlock()
+		require.NotEmpty(t, registered)
+		for _, ctx := range registered {
+			select {
+			case <-ctx.Done():
+			case <-time.After(5 * time.Second):
+				t.Fatal("registered owner did not observe cancellation before completion")
+			}
 		}
 	}
 	returned := runner.Run(workCtx)

@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/caesium-cloud/caesium/pkg/dqlite"
 	"github.com/stretchr/testify/require"
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
@@ -357,7 +358,7 @@ func TestJitterRetryBackoffBounds(t *testing.T) {
 	}
 }
 
-// Pool cancellation surfaces the wait error, matching whole-transaction retry.
+// Pool cancellation retains both the backoff error and its last contention.
 func TestRetryPoolSurfacesWaitCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -366,7 +367,65 @@ func TestRetryPoolSurfacesWaitCancellation(t *testing.T) {
 	calls := 0
 	err := p.retry(ctx, func() error { calls++; cancel(); return busy })
 	require.ErrorIs(t, err, context.Canceled)
+	require.ErrorIs(t, err, busy)
+	require.True(t, dqlite.IsContentionError(err))
 	require.Equal(t, 1, calls)
+}
+
+func TestRetryPoolCancellationPreservesLastContention(t *testing.T) {
+	for _, stopped := range []error{context.Canceled, context.DeadlineExceeded} {
+		t.Run(stopped.Error(), func(t *testing.T) {
+			first := errors.New("checkpoint in progress: first")
+			last := errors.New("database is locked: last")
+			p := newRetryConnPool(newCountingPool(t, 0, nil))
+			waits := 0
+			p.wait = func(context.Context, time.Duration) error {
+				waits++
+				if waits == 2 {
+					return stopped
+				}
+				return nil
+			}
+			calls := 0
+			err := p.retry(t.Context(), func() error {
+				calls++
+				if calls == 1 {
+					return first
+				}
+				return last
+			})
+			require.ErrorIs(t, err, stopped)
+			require.ErrorIs(t, err, last)
+			require.NotErrorIs(t, err, first)
+			require.True(t, dqlite.IsContentionError(err))
+			require.Equal(t, 2, calls)
+			// The next operation must not inherit a previous operation's error.
+			require.ErrorIs(t, p.retry(t.Context(), func() error { return stopped }), stopped)
+			require.False(t, dqlite.IsContentionError(p.retry(t.Context(), func() error { return stopped })))
+			require.NoError(t, p.retry(t.Context(), func() error { return nil }))
+		})
+	}
+}
+
+func TestRWSplitReadOnlyTransactionDoesNotWaitForSerializedWriter(t *testing.T) {
+	writePool := newCountingPool(t, 0, nil)
+	writePool.db.SetMaxOpenConns(1)
+	readPool := newCountingPool(t, 0, nil)
+	split := newRWSplitConnPool(writePool, readPool)
+	writer, err := split.BeginTx(t.Context(), nil)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = writer.Rollback() })
+	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+	defer cancel()
+	reader, err := split.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	require.NoError(t, err, "read-only acquisition must succeed while the only writer is held")
+	t.Cleanup(func() { _ = reader.Rollback() })
+	var value int
+	require.NoError(t, reader.QueryRowContext(ctx, "SELECT 1").Scan(&value))
+	require.Equal(t, 1, value)
+	require.Equal(t, int32(1), writePool.beginAttempt.Load())
+	require.Equal(t, int32(1), readPool.beginAttempt.Load())
+	require.IsType(t, &sql.Tx{}, reader, "snapshot statements bypass per-statement retry")
 }
 
 func TestDatabaseRetryPathsUseInjectedWaitSchedule(t *testing.T) {

@@ -572,6 +572,89 @@ func TestLaunchDerivedRunFinalizesServerCancellationBeforeDispatch(t *testing.T)
 	}
 }
 
+func TestFreshnessRunLauncherPreservesAdmissionRefusedDuringServerShutdown(t *testing.T) {
+	conn := openLauncherTestDB(t)
+	store := run.NewStore(conn)
+	derived, _ := seedRunningDerivedRun(t, conn)
+	parent, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	owner := runlife.New(context.Background())
+	owner.CloseAndCancelCause(runlife.ErrServerShutdown)
+	cancel() // The canceled request must not hide the supervisor's shutdown cause.
+	launcher := newFreshnessRunLauncher(store,
+		func(context.Context, uuid.UUID) (*models.Job, error) {
+			t.Fatal("shutdown entered lookup")
+			return nil, nil
+		},
+		func(context.Context, *models.Job, *run.JobRun) error {
+			t.Fatal("shutdown dispatched execution")
+			return nil
+		})
+	launcher(runlife.WithSupervisor(parent, owner), derived)
+	assertDerivedRunRetained(t, conn, store, derived.ID)
+	require.Zero(t, job.CancelRunContexts(derived.ID))
+}
+
+func TestLaunchDerivedRunPreservesShutdownBeforeDispatch(t *testing.T) {
+	for _, stage := range []string{"before_lookup", "lookup_error", "lookup_success", "fence_error"} {
+		t.Run(stage, func(t *testing.T) {
+			conn := openLauncherTestDB(t)
+			store := run.NewStore(conn)
+			derived, _ := seedRunningDerivedRun(t, conn)
+			owner := runlife.New(context.Background())
+			ctx, release, err := owner.Reserve(runlife.WithSupervisor(t.Context(), owner))
+			require.NoError(t, err)
+			defer release()
+			defer owner.CloseAndCancel()
+			if stage == "before_lookup" {
+				owner.CloseAndCancelCause(runlife.ErrServerShutdown)
+			}
+			const callback = "test:freshness_shutdown_fence"
+			if stage == "fence_error" {
+				require.NoError(t, conn.Callback().Query().Before("gorm:query").Register(callback, func(tx *gorm.DB) {
+					if tx.Statement.Table == "job_runs" {
+						owner.CloseAndCancelCause(runlife.ErrServerShutdown)
+						_ = tx.AddError(gorm.ErrRecordNotFound)
+					}
+				}))
+			}
+			launchDerivedRun(ctx, store, derived,
+				func(context.Context, uuid.UUID) (*models.Job, error) {
+					if stage == "before_lookup" {
+						t.Fatal("shutdown entered lookup")
+					}
+					if stage == "lookup_error" || stage == "lookup_success" {
+						owner.CloseAndCancelCause(runlife.ErrServerShutdown)
+					}
+					if stage == "lookup_error" {
+						return nil, context.Canceled
+					}
+					return &models.Job{ID: derived.JobID}, nil
+				},
+				func(context.Context, *models.Job, *run.JobRun) error {
+					t.Fatal("shutdown dispatched execution")
+					return nil
+				})
+			if stage == "fence_error" {
+				require.NoError(t, conn.Callback().Query().Remove(callback))
+			}
+			assertDerivedRunRetained(t, conn, store, derived.ID)
+		})
+	}
+}
+
+func assertDerivedRunRetained(t *testing.T, conn *gorm.DB, store *run.Store, id uuid.UUID) {
+	t.Helper()
+	row, err := store.Get(id)
+	require.NoError(t, err)
+	require.Equal(t, run.StatusRunning, row.Status)
+	require.Nil(t, row.CompletedAt)
+	require.Empty(t, row.Error)
+	var count int64
+	require.NoError(t, conn.Model(&models.TaskRun{}).Where("job_run_id = ?", id).Count(&count).Error)
+	require.Zero(t, count)
+}
+
 type closingFreshnessStarter struct {
 	*run.Store
 	owner *runlife.Supervisor

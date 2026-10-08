@@ -2302,19 +2302,19 @@ func TestEndToEndLatencyUsesTheDriverClock(t *testing.T) {
 	}
 }
 
-func TestBuildReportUsesNearestRankLatencyPercentiles(t *testing.T) {
+func TestBuildReportPreservesLegacyEndToEndPercentileFormula(t *testing.T) {
 	t0 := time.Date(2026, time.January, 2, 3, 4, 5, 0, time.UTC)
-	t.Run("even p50 chooses lower rank", func(t *testing.T) {
+	t.Run("even p50 uses upper middle", func(t *testing.T) {
 		results := []runResult{
 			{runID: "one", startedAt: t0, finishedAt: t0.Add(time.Second), status: "succeeded"},
 			{runID: "two", startedAt: t0, finishedAt: t0.Add(2 * time.Second), status: "succeeded"},
 		}
 		r := buildReport(fixtureConfig("http://127.0.0.1:1"), results, metricSample{}, metricSample{}, nil, 0)
-		if r.endToEndP50 != time.Second {
-			t.Fatalf("p50=%s, want lower nearest-rank observation %s", r.endToEndP50, time.Second)
+		if r.endToEndP50 != 2*time.Second {
+			t.Fatalf("p50=%s, want legacy upper-middle observation %s", r.endToEndP50, 2*time.Second)
 		}
 	})
-	t.Run("integral p99 rank boundary", func(t *testing.T) {
+	t.Run("p99 at 100 samples remains maximum", func(t *testing.T) {
 		results := make([]runResult, 100)
 		for i := range results {
 			results[i] = runResult{
@@ -2323,8 +2323,8 @@ func TestBuildReportUsesNearestRankLatencyPercentiles(t *testing.T) {
 			}
 		}
 		r := buildReport(fixtureConfig("http://127.0.0.1:1"), results, metricSample{}, metricSample{}, nil, 0)
-		if r.endToEndP99 != 99*time.Second {
-			t.Fatalf("p99=%s, want nearest-rank observation %s", r.endToEndP99, 99*time.Second)
+		if r.endToEndP99 != 100*time.Second {
+			t.Fatalf("p99=%s, want legacy maximum observation %s", r.endToEndP99, 100*time.Second)
 		}
 	})
 }

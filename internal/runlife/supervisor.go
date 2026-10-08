@@ -10,13 +10,16 @@ import (
 var ErrClosed = errors.New("run supervisor is closed")
 var ErrMissing = errors.New("run supervisor is missing from context")
 
+// ErrServerShutdown releases in-process execution without terminating durable work.
+var ErrServerShutdown = errors.New("server shutting down; execution left for takeover")
+
 type supervisorKey struct{}
 
 // Supervisor separates admission from cancellation and joining owned work.
 type Supervisor struct {
 	mu       sync.Mutex
 	lifetime context.Context
-	cancel   context.CancelFunc
+	cancel   context.CancelCauseFunc
 	closed   bool
 	work     sync.WaitGroup
 	done     chan struct{}
@@ -25,7 +28,7 @@ type Supervisor struct {
 }
 
 func New(parent context.Context) *Supervisor {
-	lifetime, cancel := context.WithCancel(parent)
+	lifetime, cancel := context.WithCancelCause(parent)
 	return &Supervisor{lifetime: lifetime, cancel: cancel, done: make(chan struct{}), changed: make(chan struct{})}
 }
 
@@ -40,6 +43,26 @@ func FromContext(ctx context.Context) *Supervisor {
 	return s
 }
 
+// Cause identifies lifetime cancellation even when no child was admitted.
+func (s *Supervisor) Cause() error {
+	if s == nil {
+		return nil
+	}
+	return context.Cause(s.lifetime)
+}
+
+// CancellationCause also observes lifetime cancellation before Reserve's
+// AfterFunc reaches the child. A cause already recorded by the child wins.
+func CancellationCause(ctx context.Context) error {
+	if cause := context.Cause(ctx); cause != nil {
+		return cause
+	}
+	if s := FromContext(ctx); s != nil {
+		return context.Cause(s.lifetime)
+	}
+	return nil
+}
+
 // Reserve preserves request values but not its cancellation or deadline. The
 // returned context ends with the server lifetime or release, and release is
 // idempotent. Admission and Add share the shutdown lock.
@@ -52,15 +75,15 @@ func (s *Supervisor) Reserve(requestCtx context.Context) (context.Context, func(
 	if s.closed || s.lifetime.Err() != nil {
 		return nil, nil, ErrClosed
 	}
-	child, cancel := context.WithCancel(context.WithoutCancel(requestCtx))
-	stop := context.AfterFunc(s.lifetime, cancel)
+	child, cancel := context.WithCancelCause(context.WithoutCancel(requestCtx))
+	stop := context.AfterFunc(s.lifetime, func() { cancel(context.Cause(s.lifetime)) })
 	s.work.Add(1)
 	s.active++
 	var once sync.Once
 	release := func() {
 		once.Do(func() {
 			stop()
-			cancel()
+			cancel(nil)
 			s.mu.Lock()
 			defer s.mu.Unlock()
 			s.work.Done()
@@ -74,6 +97,11 @@ func (s *Supervisor) Reserve(requestCtx context.Context) (context.Context, func(
 
 // CloseAndCancel refuses new submissions and cancels all admitted contexts.
 func (s *Supervisor) CloseAndCancel() {
+	s.CloseAndCancelCause(context.Canceled)
+}
+
+// CloseAndCancelCause closes admission and preserves why execution was stopped.
+func (s *Supervisor) CloseAndCancelCause(cause error) {
 	if s == nil {
 		return
 	}
@@ -82,12 +110,12 @@ func (s *Supervisor) CloseAndCancel() {
 	if s.closed {
 		return
 	}
-	s.closeLocked()
+	s.closeLocked(cause)
 }
 
-func (s *Supervisor) closeLocked() {
+func (s *Supervisor) closeLocked(cause error) {
 	s.closed = true
-	s.cancel()
+	s.cancel(cause)
 	go func() { s.work.Wait(); close(s.done) }()
 }
 
@@ -106,7 +134,7 @@ func (s *Supervisor) Drain(ctx context.Context) error {
 			return s.Wait(ctx)
 		}
 		if s.active == 0 {
-			s.closeLocked()
+			s.closeLocked(nil)
 			s.mu.Unlock()
 			return s.Wait(ctx)
 		}

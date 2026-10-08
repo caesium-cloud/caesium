@@ -27,6 +27,9 @@ import (
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v5"
 	"github.com/stretchr/testify/require"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
+	"go.uber.org/zap/zaptest/observer"
 )
 
 type stubTriggerLister struct {
@@ -675,4 +678,46 @@ func TestWebhookClosedOwnerRejectsBeforeEventBridge(t *testing.T) {
 	require.ErrorAs(t, err, &he)
 	require.Equal(t, 503, he.Code)
 	require.False(t, called)
+}
+
+func TestWebhookAdmissionFailureHasFixedPublicResponseAndLogsMissingWiring(t *testing.T) {
+	require.NoError(t, env.Process())
+	core, logs := observer.New(zapcore.ErrorLevel)
+	restore := zap.ReplaceGlobals(zap.New(core))
+	defer restore()
+	bridgeCalls := 0
+	stubWebhookRouter(t, func(context.Context, *models.IngestedEvent) (*triggerevent.RouteResult, error) {
+		bridgeCalls++
+		return nil, nil
+	})
+	owner := runlife.New(context.Background())
+	owner.CloseAndCancel()
+	for _, missing := range []bool{false, true} {
+		t.Run(fmt.Sprintf("missing=%v", missing), func(t *testing.T) {
+			ctx := context.Background()
+			if !missing {
+				ctx = runlife.WithSupervisor(ctx, owner)
+			}
+			e := echo.New()
+			e.POST("/v1/hooks/*", func(c *echo.Context) error {
+				return ReceiveWithServices(c, stubTriggerLister{triggers: models.Triggers{{
+					ID: uuid.New(), Type: models.TriggerTypeHTTP,
+					Configuration: `{"path":"admission","secret":"secret","signatureScheme":"bearer"}`,
+				}}}, stubJobLister{}, nil, nil)
+			})
+			req := httptest.NewRequestWithContext(ctx, http.MethodPost, "/v1/hooks/admission", strings.NewReader(`{}`))
+			req.RemoteAddr = "203.0.113.221:4321"
+			req.Header.Set("Authorization", "Bearer secret")
+			rec := httptest.NewRecorder()
+			e.ServeHTTP(rec, req)
+			require.Equal(t, http.StatusServiceUnavailable, rec.Code)
+			var body map[string]any
+			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+			require.Equal(t, "service unavailable", body["message"])
+			require.NotContains(t, rec.Body.String(), runlife.ErrMissing.Error())
+			require.NotContains(t, rec.Body.String(), runlife.ErrClosed.Error())
+		})
+	}
+	require.Zero(t, bridgeCalls, "refused admission must not persist or route events")
+	require.Equal(t, 1, logs.FilterMessage("webhook run supervisor wiring is missing").Len())
 }

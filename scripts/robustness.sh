@@ -111,9 +111,9 @@ TESTFAULT_MARKERS=(caesium-testfault-control CAESIUM_TESTFAULT_DIR bus-publish-p
 
 case "$RUN_PATTERN" in
   *TestOwnerCrash*)
-    REQUIRED_SUBTESTS=(TestOwnerCrash/owner_is_leader TestOwnerCrash/owner_is_not_leader)
+    REQUIRED_SUBTESTS=(TestOwnerCrash/owner_is_leader TestOwnerCrash/owner_is_not_leader TestOwnerCrash/cron_single_admission TestOwnerCrash/graceful_trigger_shutdown)
     REQUIRED_PARENTS=(TestOwnerCrash)
-    REQUIRED_RECORD_KEYS=(events owner_is_leader owner_is_not_leader)
+    REQUIRED_RECORD_KEYS=(events owner_is_leader owner_is_not_leader cron_single_admission graceful_trigger_shutdown)
     ;;
   *TestTargetedFaults*)
     REQUIRED_SUBTESTS=(
@@ -1229,6 +1229,27 @@ PY
         return 0
       fi
       write_ack "$request_id" "$action" "ok" "cordoned $node"
+      ;;
+    terminate)
+      # Graceful signal only: keep kubelet and the pod sandbox alive. Verify
+      # the request still names this exact server container in our owned cluster.
+      if ! known_node "$node" || [[ ! "$cid" =~ ^[a-f0-9]{64}$ ]] || [[ -z "$pod" ]]; then
+        fail_request "$request_id" "$action" "terminate needs an owned node/pod and full container id"; return 0
+      fi
+      current="$(kc_ns get pod "$pod" -o json)" || { fail_request "$request_id" "$action" "cannot observe requested server pod"; return 0; }
+      observed_node="$(printf '%s' "$current" | jq -r '.spec.nodeName')"
+      observed_cid="$(printf '%s' "$current" | jq -r '.status.containerStatuses[] | select(.name == "caesium") | .containerID')"
+      observed_cid="${observed_cid#containerd://}"
+      if [[ "$observed_node" != "$node" || "$observed_cid" != "$cid" ]]; then
+        fail_request "$request_id" "$action" "server container identity changed before SIGTERM"; return 0
+      fi
+      signal_file="$ARTIFACTS/ctr-terminate-$cid.txt"
+      if ! docker exec "$node" ctr -n k8s.io tasks kill --signal SIGTERM "$cid" >"$signal_file" 2>&1; then
+        fail_request "$request_id" "$action" "SIGTERM delivery failed"; return 0
+      fi
+      # The runner independently observes exit 0 and the replacement container;
+      # this ack proves only delivery to the captured identity.
+      write_ack "$request_id" "$action" "ok" "SIGTERM delivered to $cid on $node"
       ;;
     kill)
       [[ -n "$node" && -n "$cid" ]] || { write_ack "$request_id" "$action" "failed" "" "missing node/container id"; LAST_REQUEST_ID="$request_id"; return 0; }

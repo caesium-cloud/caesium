@@ -149,7 +149,7 @@ func Post(c *echo.Context) error {
 		// A readback failure can follow durable admission. Finalize only the
 		// exact committed row before releasing its server reservation. The
 		// store owns bounded contention retries; unresolved writes stay visible.
-		if committedID, ok := runstorage.CommittedRunID(err); ok {
+		if committedID, ok := runstorage.CommittedRunID(err); ok && !manualRunServerShutdown(workCtx) {
 			if _, completeErr := postFinalizeCommittedRun(committedID, err); completeErr != nil {
 				log.Error("manual run: committed admission could not be finalized; leaving it for an operator",
 					"job_id", j.ID, "run_id", committedID, "error", completeErr)
@@ -215,10 +215,19 @@ func launchRun(ctx context.Context, j *models.Job, r *runstorage.JobRun, release
 // The cancellation registry has no tombstones. Read durable state after
 // registration to cover cancellation committed before that registration existed.
 func executeManualRun(ctx context.Context, j *models.Job, r *runstorage.JobRun) {
+	if manualRunServerShutdown(ctx) {
+		return
+	}
 	ready, err := manualRunReady(ctx, r.ID)
-	if err == nil && ready {
-		// Cancellation may arrive during the read or immediately after it.
-		err = ctx.Err()
+	// The lifetime cause can be visible before its cancellation callback reaches
+	// this reserved child. Preserve the admission even when the read failed or
+	// returned while that callback was still pending.
+	if cause := runlife.CancellationCause(ctx); cause != nil {
+		// Preserve the exact cause when cancellation arrives during the read.
+		err = cause
+	}
+	if errors.Is(err, runlife.ErrServerShutdown) {
+		return
 	}
 	if err != nil {
 		cause := fmt.Errorf("manual run could not dispatch safely: %w", err)
@@ -234,6 +243,10 @@ func executeManualRun(ctx context.Context, j *models.Job, r *runstorage.JobRun) 
 	if err := runExecution(ctx, j, r.Params); err != nil {
 		log.Error("job run failure", "id", j.ID, "run_id", r.ID, "error", err)
 	}
+}
+
+func manualRunServerShutdown(ctx context.Context) bool {
+	return errors.Is(runlife.CancellationCause(ctx), runlife.ErrServerShutdown)
 }
 
 func manualRunReady(ctx context.Context, runID uuid.UUID) (bool, error) {

@@ -3,6 +3,7 @@ package db
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"io"
 	"math/rand/v2"
 	"time"
@@ -103,7 +104,21 @@ func newRetryConnPool(pool gorm.ConnPool) *retryConnPool {
 // Non-contention errors (including sql.ErrNoRows / gorm.ErrRecordNotFound,
 // which are not contention) return immediately.
 func (p *retryConnPool) retry(ctx context.Context, fn func() error) error {
-	return dbretry.Retry(ctx, busyRetryPolicy(p.backoffs, p.wait), fn)
+	var lastContention error
+	err := dbretry.Retry(ctx, busyRetryPolicy(p.backoffs, p.wait), func() error {
+		err := fn()
+		if dqlite.IsContentionError(err) {
+			lastContention = err
+		}
+		return err
+	})
+	// A canceled backoff must remain classifiable both as cancellation and as
+	// the contention that exhausted this operation's progress. Otherwise callers
+	// lose their retryable/503 classification precisely when their budget ends.
+	if lastContention != nil && (errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)) {
+		return errors.Join(lastContention, err)
+	}
+	return err
 }
 
 func (p *retryConnPool) PrepareContext(ctx context.Context, query string) (*sql.Stmt, error) {
@@ -263,11 +278,11 @@ func (retryPlugin) Initialize(db *gorm.DB) error {
 // "database is locked" errors; one writer makes them wait instead.
 //
 // Autocommit reads (QueryContext/QueryRowContext) go to the read pool;
-// ExecContext, transactions (BeginTx), and prepared statements go to the write
-// pool. A transaction may write, so it must hold the single write connection;
-// reads issued inside that transaction run on its own connection, and other
-// goroutines' reads use the read pool — so no goroutine needs two connections
-// from one pool, avoiding the single-connection deadlock.
+// ReadOnly transactions also use the read pool. ExecContext, writable
+// transactions, and prepared statements use the write pool. Reads issued inside
+// a transaction run on its own connection, and other goroutines' reads use the
+// read pool — so no goroutine needs two connections from one pool, avoiding the
+// single-connection deadlock.
 type rwSplitConnPool struct {
 	write *retryConnPool
 	read  *retryConnPool
@@ -304,6 +319,11 @@ func (p *rwSplitConnPool) PrepareContext(ctx context.Context, query string) (*sq
 }
 
 func (p *rwSplitConnPool) BeginTx(ctx context.Context, opts *sql.TxOptions) (*sql.Tx, error) {
+	if opts != nil && opts.ReadOnly {
+		// Keep snapshot reads away from the single serialized writer. Returning
+		// the raw transaction still bypasses per-statement retry in either pool.
+		return p.read.BeginTx(ctx, opts)
+	}
 	return p.write.BeginTx(ctx, opts)
 }
 

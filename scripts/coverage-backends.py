@@ -26,6 +26,7 @@ import sys
 import tarfile
 import tempfile
 import time
+import traceback
 import urllib.error
 import urllib.request
 import uuid
@@ -33,6 +34,8 @@ import uuid
 MODULE = 'github.com/caesium-cloud/caesium'
 IMAGE_RE = re.compile(r'sha256:[0-9a-f]{64}')
 HASH_RE = re.compile(r'[0-9a-f]{64}')
+PINNED_TASK_SUPPLIER_REF = 'docker.io/library/alpine:3.23@sha256:85fe1e81d6758c208f3e1eed4338a1997e19d4be002d4dd32d3100c9a8c010a0'
+PINNED_KIND_SUPPLIER_REF = 'kindest/node:v1.36.1@sha256:3489c7674813ba5d8b1a9977baea8a6e553784dab7b84759d1014dbd78f7ebd5'
 LABEL_OWNER = 'caesium.coverage.owner'
 LABEL_RUN = 'caesium.coverage.run'
 
@@ -59,6 +62,16 @@ def failure_category(error):
         if isinstance(error, kind):
             return category
     return 'unexpected-error'
+
+
+def safe_exception_metadata(error):
+    """Return traceback locations without exception text, source, or locals."""
+    frames = traceback.extract_tb(error.__traceback__)[-12:]
+    return {
+        'exception_type': type(error).__module__ + '.' + type(error).__qualname__,
+        'traceback': [{'file': Path(frame.filename).name, 'function': frame.name, 'line': frame.lineno}
+                      for frame in frames],
+    }
 
 
 TRANSPORT_CATEGORIES = frozenset({'refused', 'timeout', 'reset', 'dns', 'tls', 'other', 'unavailable'})
@@ -285,10 +298,24 @@ def normalized_image_ref(reference):
     return reference
 
 
+def validate_task_supplier_index_ref(repo_digest, supplier_ref):
+    require(supplier_ref == PINNED_TASK_SUPPLIER_REF,
+            'task supplier must use the committed immutable Alpine index identity')
+    expected_repository, expected_digest = supplier_ref.split('@', 1)
+    expected_repository = expected_repository.rsplit(':', 1)[0]
+    repository, separator, digest_ref = repo_digest.rpartition('@') if isinstance(repo_digest, str) else ('', '', '')
+    require(separator and normalized_image_ref(repository) == normalized_image_ref(expected_repository)
+            and digest_ref == expected_digest,
+            'pulled task image RepoDigest differs from the committed immutable Alpine index identity')
+    return normalized_image_ref(repository) + '@' + digest_ref
+
+
 def backend_receipts(inputs, backend):
     receipt = {key: inputs[key] for key in ('platform', 'task_archive_sha256', 'task_image_id', 'task_image_ref')}
     if inputs.get('task_docker_image_id'):
         receipt['task_docker_image_id'] = inputs['task_docker_image_id']
+    for key in ('task_image_supplier_ref', 'kind_image_supplier_ref'):
+        receipt[key] = inputs[key]
     receipt['kind_image_id' if backend == 'kubernetes' else 'podman_service_image_id'] = inputs['kind_image_id' if backend == 'kubernetes' else 'podman_service_image_id']
     return receipt
 
@@ -1282,6 +1309,14 @@ def validate_inputs(inputs, selected):
     require(inputs.get('platform') in ('linux/amd64', 'linux/arm64'), 'explicit supported input platform required')
     if 'task_docker_image_id' in inputs:
         require(IMAGE_RE.fullmatch(inputs['task_docker_image_id']), 'invalid separate task Docker index identity')
+    require(inputs.get('task_image_ref') == 'alpine:3.23',
+            'task image must retain the serialized Alpine archive alias')
+    require(inputs.get('kind_image_ref') == 'kindest/node:v1.36.1',
+            'kind image must retain the serialized node archive alias')
+    require(inputs.get('task_image_supplier_ref') == PINNED_TASK_SUPPLIER_REF,
+            'task supplier must use the committed immutable Alpine index identity')
+    require(inputs.get('kind_image_supplier_ref') == PINNED_KIND_SUPPLIER_REF,
+            'kind supplier must use the committed immutable node index identity')
     require(Path(inputs.get('docker_socket', '')).is_absolute(), 'explicit absolute Docker Unix socket required')
     inputs['task_archive'] = str(archive_identity(inputs.get('task_archive', ''), inputs.get('task_archive_sha256', ''), inputs.get('task_image_id', ''), inputs.get('task_image_ref', ''), inputs['platform'].split('/')[1]))
     if 'kubernetes' in selected:
@@ -1300,9 +1335,13 @@ def main():
     parser.add_argument('--output', required=True)
     parser.add_argument('--backend', choices=('kubernetes', 'podman', 'both'), default='both')
     parser.add_argument('--run', action='store_true')
+    parser.add_argument('--gate', action='store_true', help='require a complete two-backend coverage contribution')
     parser.add_argument('--smoke', action='store_true', help='with --run: native backend prerequisite only, no candidate or coverage contribution')
     args = parser.parse_args()
     selected = ['kubernetes', 'podman'] if args.backend == 'both' else [args.backend]
+    if args.gate:
+        require(args.run and not args.smoke and args.backend == 'both',
+                '--gate requires --run --backend both and forbids --smoke')
     inputs = validate_inputs(read_pinned(args.inputs, args.inputs_sha256), selected)
     inputs['_inputs_sha256'] = args.inputs_sha256
     if args.smoke:
@@ -1315,7 +1354,10 @@ def main():
         context['_context_sha256'] = args.context_sha256
         context['_inputs_sha256'] = args.inputs_sha256
     if not args.run:
-        print(json.dumps({'mode': 'offline plan; no Docker/network/resources', 'selected': selected, 'candidate_sha': context.get('candidate_sha'), 'image_id': context.get('image_id'), 'smoke': args.smoke, 'platform': inputs['platform'], 'requires': 'parent serial runtime; loaded images/native smoke/private kind TLS'}, indent=2))
+        print(json.dumps({'mode': 'discovery-only; no Docker/network/resources', 'coverage_contribution': False,
+                          'complete': False, 'selected': selected, 'candidate_sha': context.get('candidate_sha'),
+                          'image_id': context.get('image_id'), 'smoke': args.smoke, 'platform': inputs['platform'],
+                          'requires': 'parent serial runtime; loaded images/native smoke/private kind TLS'}, indent=2))
         return 0
     output = fresh_directory(args.output)
     def interrupted(signum, frame):
@@ -1351,19 +1393,32 @@ def main():
                 driver.failure_diagnostic(Refused('backend cleanup incomplete'))
             require(not cleanup_errors, 'backend cleanup incomplete')
     except BaseException:
-        result = {'complete': False, 'selected_complete': False, 'candidate_sha': context.get('candidate_sha'), 'selected': selected, 'contributors': records}
+        result = {'complete': False, 'selected_complete': False, 'gate_mode': args.gate,
+                  'candidate_sha': context.get('candidate_sha'), 'selected': selected, 'contributors': records}
         (output / 'result.json').write_text(json.dumps(result, indent=2) + '\n')
-        (output / ('smoke-result.json' if args.smoke else 'contribution.json')).write_text(json.dumps({'kind': 'native-backend-prerequisite-smoke', 'complete': len(records) == len(selected) and all(r.get('smoke_complete') and not r.get('failed') and not r.get('cleanup_errors') for r in records), 'coverage_contribution': False, 'platform': inputs['platform'], 'receipts': records} if args.smoke else contribution(context, records, selected), indent=2) + '\n')
+        contribution_doc = {'kind': 'native-backend-prerequisite-smoke', 'complete': len(records) == len(selected) and all(r.get('smoke_complete') and not r.get('failed') and not r.get('cleanup_errors') for r in records), 'coverage_contribution': False, 'platform': inputs['platform'], 'receipts': records} if args.smoke else contribution(context, records, selected)
+        (output / ('smoke-result.json' if args.smoke else 'contribution.json')).write_text(json.dumps(contribution_doc, indent=2) + '\n')
         raise
-    result = {'complete': selected == ['kubernetes', 'podman'], 'selected_complete': True, 'coverage_contribution': not args.smoke, 'candidate_sha': context.get('candidate_sha'), 'selected': selected, 'contributors': records}
+    result = {'complete': selected == ['kubernetes', 'podman'], 'selected_complete': True,
+              'gate_mode': args.gate, 'coverage_contribution': not args.smoke,
+              'candidate_sha': context.get('candidate_sha'), 'selected': selected, 'contributors': records}
     (output / 'result.json').write_text(json.dumps(result, indent=2) + '\n')
-    (output / ('smoke-result.json' if args.smoke else 'contribution.json')).write_text(json.dumps({'kind': 'native-backend-prerequisite-smoke', 'complete': len(records) == len(selected) and all(r.get('smoke_complete') and not r.get('failed') and not r.get('cleanup_errors') for r in records), 'coverage_contribution': False, 'platform': inputs['platform'], 'receipts': records} if args.smoke else contribution(context, records, selected), indent=2) + '\n')
+    contribution_doc = {'kind': 'native-backend-prerequisite-smoke', 'complete': len(records) == len(selected) and all(r.get('smoke_complete') and not r.get('failed') and not r.get('cleanup_errors') for r in records), 'coverage_contribution': False, 'platform': inputs['platform'], 'receipts': records} if args.smoke else contribution(context, records, selected)
+    (output / ('smoke-result.json' if args.smoke else 'contribution.json')).write_text(json.dumps(contribution_doc, indent=2) + '\n')
+    if args.gate and not (result['complete'] is True and result['selected_complete'] is True
+                          and result['coverage_contribution'] is True and contribution_doc.get('complete') is True):
+        print('backend coverage gate incomplete; no coverage PASS claimed', file=sys.stderr)
+        return 1
     return 0
 
 
 if __name__ == '__main__':
     try:
         raise SystemExit(main())
-    except Exception:
-        print('backend qualification refused/incomplete; no coverage PASS claimed', file=sys.stderr)
+    except Refused as error:
+        print('backend qualification refused: ' + type(error).__name__ + '; no coverage PASS claimed', file=sys.stderr)
+        raise SystemExit(1)
+    except Exception as error:
+        diagnostic = {'error': 'unexpected-backend-exception', **safe_exception_metadata(error)}
+        print(json.dumps(diagnostic, sort_keys=True), file=sys.stderr)
         raise SystemExit(1)

@@ -14,6 +14,7 @@ import (
 	"github.com/caesium-cloud/caesium/internal/metrics"
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/caesium-cloud/caesium/internal/run"
+	"github.com/caesium-cloud/caesium/internal/runlife"
 	jobdefschema "github.com/caesium-cloud/caesium/pkg/jobdef"
 	"github.com/caesium-cloud/caesium/pkg/log"
 	pkgtask "github.com/caesium-cloud/caesium/pkg/task"
@@ -144,8 +145,6 @@ func (l *localRun) runFannedGroup(
 	runID := l.runID
 	runQuarantined := l.runQuarantined
 	maxParallel := l.maxParallel
-	taskOutputs := l.taskOutputs
-	taskHashes := l.taskHashes
 	taskQuarantine := l.taskQuarantine
 	if len(group.Instances) == 0 {
 		return nil, nil
@@ -269,8 +268,8 @@ func (l *localRun) runFannedGroup(
 		// because this closure is re-entered for attempt N+1 after
 		// RetryTaskInstance, so a cancel that ended attempt N would
 		// otherwise be what launches the next container.
-		if err := ctx.Err(); err != nil {
-			results <- instanceResult{taskRunID: taskRunID, partition: m.partition.Key, err: err}
+		if cause := runlife.CancellationCause(ctx); cause != nil {
+			results <- instanceResult{taskRunID: taskRunID, partition: m.partition.Key, err: cause}
 			return
 		}
 		taskTimeout, timingErr := store.LocalTaskExecutionTimeout(ctx, runID, taskRunID)
@@ -282,6 +281,10 @@ func (l *localRun) runFannedGroup(
 			taskTimeout = runner.taskTimeout
 		}
 		failIdentity := func(cause error) {
+			if serverShutdown(ctx) {
+				results <- instanceResult{taskRunID: taskRunID, partition: m.partition.Key, err: runlife.ErrServerShutdown}
+				return
+			}
 			persistErr := store.FailTaskInstance(runID, taskRunID, cause)
 			if persistErr != nil {
 				cause = errors.Join(cause, errUnresolvedIdentityTerminalWrite, fmt.Errorf("persist partition failure: %w", persistErr))
@@ -361,7 +364,7 @@ func (l *localRun) runFannedGroup(
 				if entry, found, err := l.getCacheStore().Get(inputHash); err != nil {
 					log.Warn("cache lookup failed", "task", taskName, "partition", m.partition.Key, "error", err)
 				} else if found {
-					if cause := context.Cause(ctx); run.IsRunDeadlineError(cause) {
+					if cause := runlife.CancellationCause(ctx); cause != nil {
 						results <- instanceResult{taskRunID: taskRunID, partition: m.partition.Key, err: cause}
 						return
 					}
@@ -401,10 +404,8 @@ func (l *localRun) runFannedGroup(
 		}
 		result, output, branches, _, metricsCapture, logSnapshot, execErr := l.executeAtom(taskCtx, taskID, taskRunID, attempt, taskTimeout, runner, extra)
 		cancel()
-		if execErr == nil {
-			if cause := context.Cause(ctx); run.IsRunDeadlineError(cause) {
-				execErr = cause
-			}
+		if cause := runlife.CancellationCause(ctx); cause != nil {
+			execErr = cause
 		}
 
 		if execErr == nil {
@@ -433,6 +434,11 @@ func (l *localRun) runFannedGroup(
 			if err := run.EvaluateDataAssertions(ctx, store, runID, taskID, taskRunID, metricsCapture); err != nil {
 				execErr = err
 			}
+		}
+
+		if serverShutdown(ctx) {
+			results <- instanceResult{taskRunID: taskRunID, partition: m.partition.Key, err: runlife.ErrServerShutdown}
+			return
 		}
 
 		if execErr != nil {
@@ -542,6 +548,12 @@ func (l *localRun) runFannedGroup(
 	}
 
 	for {
+		if serverShutdown(ctx) {
+			for inFlight > 0 {
+				absorb(<-results)
+			}
+			return skippedTaskIDs, runlife.ErrServerShutdown
+		}
 		rows, err := store.TaskRunInstances(ctx, runID, taskID)
 		if err != nil {
 			if ctx.Err() == nil {
@@ -741,6 +753,9 @@ func (l *localRun) runFannedGroup(
 	// an available option in local mode. Cancellation is not a reason to skip
 	// the cleanup; it is the most common reason to need it. The timeout keeps
 	// a detached context from becoming an unbounded one if the DB is wedged.
+	if serverShutdown(ctx) {
+		return skippedTaskIDs, runlife.ErrServerShutdown
+	}
 	sweepCtx, cancelSweep := context.WithTimeout(context.WithoutCancel(ctx), fanOutSweepTimeout)
 	defer cancelSweep()
 
@@ -902,7 +917,7 @@ func (l *localRun) runFannedGroup(
 			firstErr = aggErr
 		}
 	} else {
-		taskOutputs[taskID] = aggregate
+		l.setTaskOutput(taskID, aggregate)
 	}
 
 	// Publish ONE aggregate identity for the group so a downstream step folds
@@ -912,7 +927,7 @@ func (l *localRun) runFannedGroup(
 	// this the local lane contributed nothing for a fanned predecessor, so a
 	// downstream step's identity was blind to its input changing.
 	if h := run.GroupIdentityHash(groupHashes); h != "" {
-		taskHashes[taskID] = h
+		l.setTaskHash(taskID, h)
 	}
 
 	return skippedTaskIDs, firstErr

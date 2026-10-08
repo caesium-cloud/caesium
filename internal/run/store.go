@@ -20,6 +20,7 @@ import (
 	"github.com/caesium-cloud/caesium/internal/event"
 	"github.com/caesium-cloud/caesium/internal/metrics"
 	"github.com/caesium-cloud/caesium/internal/models"
+	"github.com/caesium-cloud/caesium/internal/runlife"
 	"github.com/caesium-cloud/caesium/internal/strutil"
 	"github.com/caesium-cloud/caesium/pkg/container"
 	"github.com/caesium-cloud/caesium/pkg/db"
@@ -5075,6 +5076,10 @@ func (s *Store) Complete(runID uuid.UUID, result error) error {
 // the distinction so a run another path finalized first is not notified
 // twice.
 func (s *Store) CompleteIfActive(runID uuid.UUID, result error) (bool, error) {
+	if errors.Is(result, runlife.ErrServerShutdown) && !IsRunDeadlineError(result) {
+		// Shutdown relinquishes process ownership, never durable run/task claims.
+		return false, nil
+	}
 	now := time.Now().UTC()
 	status := StatusSucceeded
 	errMsg := ""

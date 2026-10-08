@@ -507,14 +507,20 @@ SAFE_GUARDS = frozenset(('public retry finished log/params missing',
 def failure_diagnostic(error, phase, processes):
     # Error strings/body/native Config.Env are never retained. Only literal
     # private guard messages on this allowlist can identify an exact predicate.
-    category = ('guard_refused' if isinstance(error, (Refused, common.JourneyError)) else
-                'bounded_timeout' if isinstance(error, (TimeoutError, backend.subprocess.TimeoutExpired)) else
-                'read_or_shape_failure')
+    if isinstance(error, (Refused, common.JourneyError)):
+        category = 'guard_refused'
+    elif isinstance(error, (TimeoutError, backend.subprocess.TimeoutExpired)):
+        category = 'bounded_timeout'
+    else:
+        category = 'unexpected_exception'
     message = error.args[0] if error.args and isinstance(error.args[0], str) else ''
-    return {'schema_version': 1, 'complete': False, 'category': category,
-            'phase': phase if phase in SAFE_PHASES else 'phase_unavailable',
-            'guard': message if message in SAFE_GUARDS else 'details_omitted',
-            'recorded_roles': [p['role'] for p in processes[:5] if p.get('role') in ROLES]}
+    result = {'schema_version': 1, 'complete': False, 'category': category,
+              'phase': phase if phase in SAFE_PHASES else 'phase_unavailable',
+              'guard': message if message in SAFE_GUARDS else 'details_omitted',
+              'recorded_roles': [p['role'] for p in processes[:5] if p.get('role') in ROLES]}
+    if category == 'unexpected_exception':
+        result.update(common.safe_exception_metadata(error))
+    return result
 
 
 def load(args):
@@ -581,6 +587,12 @@ def main():
 if __name__ == '__main__':
     try:
         sys.exit(main())
-    except Exception:
-        print('Local retry guard refused (raw diagnostics withheld)', file=sys.stderr)
+    except Refused:
+        print('Local retry guard refused: Refused (raw diagnostics withheld)', file=sys.stderr)
+        sys.exit(1)
+    except common.JourneyError:
+        print('Local retry guard refused: JourneyError (raw diagnostics withheld)', file=sys.stderr)
+        sys.exit(1)
+    except Exception as error:
+        print(common.unexpected_exception_record('unexpected-local-retry-exception', error), file=sys.stderr)
         sys.exit(1)

@@ -68,7 +68,10 @@ func TestLocalRunOrdinaryErrorCompletionPrecedesCallback(t *testing.T) {
 	require.Equal(t, run.TaskStatusFailed, taskRunByID(latestRunSnapshot(t, store, j.id), tasks[0].ID).Status)
 }
 
-func TestLocalRunUnresolvedDependenciesKeepCompletionErrorSeparate(t *testing.T) {
+// TODO: known pre-existing bug: unresolved pending work is currently persisted
+// as succeeded and emits success callbacks. This characterization documents the
+// defect for a separate fix; it is not an intended execution contract.
+func TestLocalRunKnownIssueUnresolvedDependenciesCompleteAsSucceeded(t *testing.T) {
 	// A runnable root completes while a disconnected cycle stays unresolved.
 	j, store, engine, tasks := characterizationJob(t, 3, [][2]int{{1, 2}, {2, 1}})
 	callbacks := 0

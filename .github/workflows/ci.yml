@@ -577,6 +577,8 @@ jobs:
           name: reagent-toolchain-amd64
       - name: Unit tests
         run: just tag=${{ env.IMAGE_TAG }}-amd64 unit-test
+      - name: Hermetic integration-tagged unit tests
+        run: just tag=${{ env.IMAGE_TAG }}-amd64 tagged-unit-test
       - name: Reagents unit tests
         run: just tag=${{ env.IMAGE_TAG }}-amd64 reagents-test
 
@@ -593,6 +595,8 @@ jobs:
           name: builder-arm64
       - name: Unit tests (arm64)
         run: just tag=${{ env.IMAGE_TAG }}-arm64 unit-test
+      - name: Hermetic integration-tagged unit tests (arm64)
+        run: just tag=${{ env.IMAGE_TAG }}-arm64 tagged-unit-test
 
   ui-test:
     needs: [changes]
@@ -1735,6 +1739,10 @@ jobs:
           archive = root / 'task.tar'
           proof = root / 'proof'
           proof.mkdir()
+          kind_image_ref = 'kindest/node:v1.36.1'
+          kind_image_supplier_ref = 'kindest/node:v1.36.1@sha256:3489c7674813ba5d8b1a9977baea8a6e553784dab7b84759d1014dbd78f7ebd5'
+          task_image_ref = 'alpine:3.23'
+          task_image_supplier_ref = 'docker.io/library/alpine:3.23@sha256:85fe1e81d6758c208f3e1eed4338a1997e19d4be002d4dd32d3100c9a8c010a0'
           def image(ref, observed=None):
               images = json.loads(subprocess.check_output(['docker', 'image', 'inspect', ref], text=True))
               if observed is not None:
@@ -1930,14 +1938,18 @@ jobs:
               raise AssertionError('Podman prerequisite acquisition refused; see podman-service-receipt.json') from None
           podman_receipt['prerequisite_phase'] = 'task-pulls'
           try:
-              subprocess.check_call(['docker', 'pull', '--platform', 'linux/amd64', 'kindest/node:v1.36.1'])
-              subprocess.check_call(['docker', 'pull', '--platform', 'linux/amd64', 'alpine:3.23'])
+              subprocess.check_call(['docker', 'pull', '--platform', 'linux/amd64', kind_image_supplier_ref])
+              subprocess.check_call(['docker', 'pull', '--platform', 'linux/amd64', task_image_supplier_ref])
               podman_receipt['prerequisite_phase'] = 'task-metadata'
-              pulled = image('alpine:3.23')
+              pulled = image(task_image_supplier_ref)
+              if task_image_ref not in (pulled.get('RepoTags') or []):
+                  subprocess.check_call(['docker', 'tag', task_image_supplier_ref, task_image_ref])
+              assert inspect(task_image_ref) == pulled['Id'], 'pinned task source does not own the preserved archive alias'
               refs = set(pulled.get('RepoDigests') or [])
               assert len(refs) == 1, 'ambiguous pulled task index'
               index_ref = refs.pop()
-              assert re.fullmatch(r'(?:docker.io/library/)?alpine@sha256:[0-9a-f]{64}', index_ref), 'foreign pulled task index'
+              validate_supplier_index_ref = runpy.run_path('scripts/coverage-backends.py')['validate_task_supplier_index_ref']
+              index_ref = validate_supplier_index_ref(index_ref, task_image_supplier_ref)
               index = metadata(index_ref, index_ref.split('@')[1], 'task-index.json')
               children = [entry for entry in index['manifests'] if entry.get('platform', {}).get('os') == 'linux'
                           and entry['platform'].get('architecture') == 'amd64' and not entry['platform'].get('variant')]
@@ -1954,14 +1966,14 @@ jobs:
               subprocess.check_call(['docker', 'pull', '--platform', 'linux/amd64', child_ref])
               loaded = image(child_ref)
               assert loaded['Id'] in (child_id, config_id), 'daemon task identity differs from the selected child'
-              assert inspect('alpine:3.23') == pulled['Id'], 'task tag changed before export'
+              assert inspect(task_image_ref) == pulled['Id'], 'task alias changed before export'
               source_ref = 'docker.io/library/' + child_ref
               dockerfile = 'FROM ' + source_ref + '\n'
               assert not archive.exists(), 'task export archive must be fresh'
               podman_receipt['prerequisite_phase'] = 'task-export'
               subprocess.run(['docker', 'buildx', 'build', '--platform', 'linux/amd64', '--network', 'none',
                               '--provenance=false', '--sbom=false', '--output', 'type=docker,dest=' + str(archive),
-                              '-t', 'alpine:3.23', '-'], input=dockerfile, text=True, check=True, timeout=180)
+                              '-t', task_image_ref, '-'], input=dockerfile, text=True, check=True, timeout=180)
               assert archive.stat().st_size <= 64 * 1024 * 1024, 'task export exceeds retained archive cap'
               archive_hash = hashlib.sha256(archive.read_bytes()).hexdigest()
               shutil.copyfile(archive, proof / 'task-export-original.tar')
@@ -1978,7 +1990,7 @@ jobs:
                   raw_manifest = image_archive.extractfile(manifest_member).read()
                   (proof / 'task-export-manifest.json').write_bytes(raw_manifest)
                   manifest = json.loads(raw_manifest)
-                  assert len(manifest) == 1 and manifest[0]['RepoTags'] == ['alpine:3.23'], 'unexpected task archive'
+                  assert len(manifest) == 1 and manifest[0]['RepoTags'] == [task_image_ref], 'unexpected task archive'
                   config_member = next((m for m in members if m.name == manifest[0]['Config']), None)
                   assert config_member is not None and config_member.isfile(), 'exported task config member unavailable'
                   assert config_member.size == child['config']['size'], 'exported config size mismatch'
@@ -1987,11 +1999,12 @@ jobs:
                   assert len(config) == child['config']['size'], 'exported config size mismatch'
                   task_config = json.loads(config)
                   assert task_config['os'] == 'linux' and task_config['architecture'] == 'amd64', 'exported task platform mismatch'
-              runpy.run_path('scripts/coverage-backends.py')['archive_identity'](archive, archive_hash, config_id, 'alpine:3.23', 'amd64')
-              assert inspect('alpine:3.23') == pulled['Id'], 'task tag changed during export'
+              runpy.run_path('scripts/coverage-backends.py')['archive_identity'](archive, archive_hash, config_id, task_image_ref, 'amd64')
+              assert inspect(task_image_ref) == pulled['Id'], 'task alias changed during export'
               (proof / 'task-export-receipt.json').write_text(json.dumps({
                   'index_ref': index_ref, 'manifest_id': child_id, 'config_id': config_id,
                   'docker_image_id': pulled['Id'], 'loaded_child_image_id': loaded['Id'],
+                  'supplier_ref': task_image_supplier_ref, 'preserved_tag_alias': task_image_ref,
                   'exporter': 'buildkit-docker', 'mode': 'from-only-no-load', 'source_ref': source_ref, 'dockerfile_sha256': hashlib.sha256(dockerfile.encode()).hexdigest(),
                   'platform': 'linux/amd64', 'archive_sha256': archive_hash,
                   'index_metadata': 'task-index.json', 'manifest_metadata': 'task-amd64-manifest.json',
@@ -2004,11 +2017,13 @@ jobs:
                   'docker_socket': '/var/run/docker.sock',
                   'task_archive': str(archive),
                   'task_archive_sha256': archive_hash,
-                  'task_image_ref': 'alpine:3.23',
+                  'task_image_ref': task_image_ref,
+                  'task_image_supplier_ref': task_image_supplier_ref,
                   'task_image_id': config_id,
                   'task_docker_image_id': pulled['Id'],
-                  'kind_image_ref': 'kindest/node:v1.36.1',
-                  'kind_image_id': inspect('kindest/node:v1.36.1'),
+                  'kind_image_ref': kind_image_ref,
+                  'kind_image_supplier_ref': kind_image_supplier_ref,
+                  'kind_image_id': inspect(kind_image_supplier_ref),
                   'podman_service_image_ref': podman_receipt['selected_manifest_ref'],
                   'podman_service_image_id': loaded_podman['Id'],
                   'podman_service_provenance': json.loads((proof / 'podman-service-receipt.json').read_text()),
@@ -2129,7 +2144,7 @@ jobs:
           podman image inspect caesiumcloud/resource-stress:${{ env.IMAGE_TAG }}-amd64 >/dev/null
           podman pull alpine:3.23
       - name: Verify real OOM evidence through Podman
-        run: bash -x build/stress/smoke.sh podman caesiumcloud/resource-stress:${{ env.IMAGE_TAG }}-amd64
+        run: bash build/stress/smoke.sh podman caesiumcloud/resource-stress:${{ env.IMAGE_TAG }}-amd64
       - name: Start Caesium with Podman engine
         # This lane starts its OWN server rather than going through
         # `just integration-up`, so it silently drifts red whenever a feature

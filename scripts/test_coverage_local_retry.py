@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """Portable guard controls, never runtime or eligible coverage evidence."""
 import copy
+import ast
 import importlib.util
+import io
 import json
 import os
 from pathlib import Path
@@ -196,8 +198,9 @@ class ReceiptControls(unittest.TestCase):
 
     def test_seventh_manifest_lane_is_mandatory(self):
         source = (ROOT / 'scripts/coverage-journeys.sh').read_text()
-        marker = 'python3 - "$RAW/journeys/manifest.json" "$RAW/journeys" <<\'PY\'\n'
-        script = source.split(marker)[1].split('\nPY')[0]
+        marker = next(line for line in source.splitlines()
+                      if line.startswith('  python3 - "$destination" "$journeys_dir" <<'))
+        script = source.split(marker + '\n', 1)[1].split('\nPY', 1)[0]
         env = dict(os.environ, JOURNEY_MANIFEST_SHA='d' * 40, JOURNEY_MANIFEST_IMAGE_ID=IMAGE, JOURNEY_MANIFEST_BUILD_CONTEXT='{}',
                    JOURNEY_MANIFEST_PROVENANCE='built-by-this-run', JOURNEY_MANIFEST_VERIFIED='true', JOURNEY_MANIFEST_BACKEND_SHA256='f' * 64, JOURNEY_MANIFEST_BACKEND_PATH='bound.json')
         for lane in ('local', 'auth', 'distributed', 'owner-memory', 'git-sync', 'sso', 'local-retry'):
@@ -245,6 +248,69 @@ class ResourceControls(unittest.TestCase):
             self.assertFalse(value['complete'])
         timeout = b.failure_diagnostic(TimeoutError('raw socket error'), 'natural_retry', [])
         self.assertEqual(timeout['category'], 'bounded_timeout')
+
+    def test_entrypoint_keeps_unexpected_traceback_metadata_but_withholds_messages(self):
+        tree = ast.parse(Path(b.__file__).read_text())
+        entrypoint = ast.Module(body=[tree.body[-1]], type_ignores=[])
+
+        def fail_unexpectedly():
+            raise RuntimeError('SECRET_NATIVE_TOKEN')
+
+        namespace = dict(vars(b), __name__='__main__', main=fail_unexpectedly)
+        with patch.object(b.sys, 'stderr', new=io.StringIO()) as stderr:
+            with self.assertRaises(SystemExit) as raised:
+                exec(compile(entrypoint, b.__file__, 'exec'), namespace)
+        self.assertEqual(raised.exception.code, 1)
+        diagnostic = json.loads(stderr.getvalue())
+        self.assertEqual(diagnostic['error'], 'unexpected-local-retry-exception')
+        self.assertEqual(diagnostic['exception_type'], 'builtins.RuntimeError')
+        self.assertEqual(diagnostic['traceback'][-1]['function'], 'fail_unexpectedly')
+        self.assertNotIn('SECRET', stderr.getvalue())
+
+        def refuse_deliberately():
+            raise b.Refused('SECRET_REFUSAL')
+
+        namespace['main'] = refuse_deliberately
+        with patch.object(b.sys, 'stderr', new=io.StringIO()) as stderr:
+            with self.assertRaises(SystemExit) as raised:
+                exec(compile(entrypoint, b.__file__, 'exec'), namespace)
+        self.assertEqual(raised.exception.code, 1)
+        self.assertEqual(stderr.getvalue(),
+                         'Local retry guard refused: Refused (raw diagnostics withheld)\n')
+
+    def test_driver_run_unexpected_exception_is_recorded_by_actual_main_path(self):
+        saved = {}
+
+        class FakeDriver:
+            def __init__(self, context, inputs, output):
+                self.phase = 'observer_finished_log'
+                self.processes = []
+                self.report = {}
+
+            def run(self):
+                raise KeyError('SECRET_NATIVE_BODY')
+
+            def cleanup(self):
+                return []
+
+            def save(self, name, value):
+                saved[name] = copy.deepcopy(value)
+
+        with tempfile.TemporaryDirectory() as output_dir:
+            argv = ['coverage-local-retry', '--context', 'ctx', '--context-sha256', 'a' * 64,
+                    '--inputs', 'inputs', '--inputs-sha256', 'b' * 64, '--output', output_dir, '--run']
+            with patch.object(b.sys, 'argv', argv), \
+                 patch.object(b, 'load', return_value=({}, {})), \
+                 patch.object(b, 'Driver', FakeDriver), \
+                 patch.object(b.signal, 'alarm'), patch.object(b.signal, 'signal'), \
+                 patch.object(b.sys, 'stderr', new=io.StringIO()) as stderr:
+                self.assertEqual(b.main(), 1)
+        diagnostic = saved['failure-diagnostic.json']
+        self.assertEqual(diagnostic['category'], 'unexpected_exception')
+        self.assertEqual(diagnostic['exception_type'], 'builtins.KeyError')
+        self.assertEqual(diagnostic['traceback'][-1]['function'], 'run')
+        self.assertNotIn('SECRET_NATIVE_BODY', json.dumps(diagnostic) + stderr.getvalue())
+        self.assertIn('Local retry journey refused', stderr.getvalue())
 
     def test_finished_log_exact_payload_with_native_timestamp_framing(self):
         expected = 'FINISHED_owned-natural-drain:owned-natural-drain'

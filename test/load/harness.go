@@ -3664,8 +3664,11 @@ func buildReport(
 	// End-to-end latency percentiles.
 	slices.Sort(durations)
 	if len(durations) > 0 {
-		r.endToEndP50 = percentile(durations, 50)
-		r.endToEndP99 = percentile(durations, 99)
+		// Preserve the established end-to-end budget inputs. The separate API
+		// percentile reports use nearest-rank, but changing this legacy pair
+		// would silently shift the calibrated budget comparison.
+		r.endToEndP50 = durations[len(durations)/2]
+		r.endToEndP99 = durations[int(float64(len(durations))*0.99)]
 	}
 
 	// Delta row counts.

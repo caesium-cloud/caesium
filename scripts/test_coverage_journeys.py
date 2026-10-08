@@ -10,12 +10,14 @@ from pathlib import Path
 import subprocess
 import sys
 import os
+import re
 import tempfile
 import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
+JOURNEY_SHELL = ROOT / 'scripts/coverage-journeys.sh'
 spec = importlib.util.spec_from_file_location('collector', ROOT / 'scripts/coverage-journeys.py')
 b = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(b)
@@ -37,6 +39,230 @@ class FaultChecks(unittest.TestCase):
         (path / 'covmeta.actual').write_bytes(b'actual metadata')
         (path / 'covcounters.actual').write_bytes(b'actual counter bytes')
         return path
+
+    def test_manifest_writer_failure_propagates_under_or_list_caller(self):
+        fake_bin = self.tmp / 'bin'
+        fake_bin.mkdir()
+        fake_python = fake_bin / 'python3'
+        fake_python.write_text('#!/bin/sh\nexit 37\n')
+        fake_python.chmod(0o755)
+        script = r'''set +e
+source "$1"
+coverage_journey_fail() { return 1; }
+coverage_journey_write_manifest_required "$2/manifest.json" "$2" || exit 23
+exit 91
+'''
+        env = os.environ.copy()
+        env['PATH'] = str(fake_bin) + os.pathsep + env.get('PATH', '')
+        result = subprocess.run(['bash', '-c', script, 'manifest-failure', str(JOURNEY_SHELL), str(self.tmp)],
+                                capture_output=True, text=True, env=env, timeout=10)
+        self.assertEqual(result.returncode, 23, result.stderr)
+
+    def test_backend_consumer_requires_actual_complete_gate_receipt(self):
+        valid = {
+            'complete': True, 'selected_complete': True,
+            'gate_mode': True, 'coverage_contribution': True,
+        }
+        self.assertTrue(b.complete_backend_gate(valid))
+        for key in valid:
+            with self.subTest(key=key):
+                self.assertFalse(b.complete_backend_gate(dict(valid, **{key: False})))
+        self.assertFalse(b.complete_backend_gate(None))
+        self.assertFalse(b.complete_backend_gate([]))
+
+    def test_sso_entrypoint_separates_refusal_from_sanitized_unexpected_traceback(self):
+        argv = [
+            'coverage-journeys.py', 'sso', '--root', str(ROOT),
+            '--artifacts', str(self.tmp / 'artifacts'), '--raw', str(self.tmp / 'raw'),
+            '--coverage-image', IMAGE, '--builder-image', IMAGE, '--platform', 'linux/amd64',
+            '--candidate-sha', OWNER, '--run-id', 'owned', '--build-context', '{}',
+            '--image-provenance', 'built-by-this-run', '--docker-socket', '/owned/socket',
+            '--socket-gid', '0', '--backend-inputs', '/owned/inputs',
+            '--backend-inputs-sha256', 'c' * 64, '--verified', 'true',
+        ]
+
+        class FakeCollector:
+            failure = None
+            def __init__(self, args):
+                self.args = args
+            def execute(self):
+                raise self.failure
+            def cleanup(self):
+                pass
+
+        with patch.object(b.sys, 'argv', argv), patch.object(b, 'Collector', FakeCollector), \
+             patch.object(b.signal, 'signal'):
+            FakeCollector.failure = b.JourneyError('SECRET_REFUSAL')
+            with patch.object(b.sys, 'stderr', new=io.StringIO()) as refusal_stderr:
+                self.assertEqual(b.main(), 1)
+            self.assertEqual(refusal_stderr.getvalue(),
+                             'SSO live coverage journey refused: JourneyError; raw diagnostics withheld\n')
+
+            FakeCollector.failure = RuntimeError('SECRET_UNEXPECTED')
+            with patch.object(b.sys, 'stderr', new=io.StringIO()) as unexpected_stderr:
+                self.assertEqual(b.main(), 1)
+            diagnostic = json.loads(unexpected_stderr.getvalue())
+            self.assertEqual(diagnostic['error'], 'unexpected-sso-journey-exception')
+            self.assertEqual(diagnostic['exception_type'], 'builtins.RuntimeError')
+            self.assertEqual(diagnostic['traceback'][-1]['function'], 'execute')
+            self.assertNotIn('SECRET', unexpected_stderr.getvalue())
+
+    def test_configurable_lane_minimums_cannot_weaken_hard_floors(self):
+        script = r'''set -e
+source "$1"
+unset CAESIUM_DISTRIBUTED_INTEGRATION_MIN_PASS CAESIUM_OWNER_MEMORY_INTEGRATION_MIN_PASS
+[[ "$(coverage_journey_minimum_passes CAESIUM_DISTRIBUTED_INTEGRATION_MIN_PASS 20)" == 20 ]]
+[[ "$(CAESIUM_DISTRIBUTED_INTEGRATION_MIN_PASS=1 coverage_journey_minimum_passes CAESIUM_DISTRIBUTED_INTEGRATION_MIN_PASS 20)" == 20 ]]
+[[ "$(CAESIUM_DISTRIBUTED_INTEGRATION_MIN_PASS=00027 coverage_journey_minimum_passes CAESIUM_DISTRIBUTED_INTEGRATION_MIN_PASS 20)" == 27 ]]
+[[ "$(CAESIUM_OWNER_MEMORY_INTEGRATION_MIN_PASS=2 coverage_journey_minimum_passes CAESIUM_OWNER_MEMORY_INTEGRATION_MIN_PASS 14)" == 14 ]]
+if CAESIUM_OWNER_MEMORY_INTEGRATION_MIN_PASS=2x coverage_journey_minimum_passes CAESIUM_OWNER_MEMORY_INTEGRATION_MIN_PASS 14; then exit 71; fi
+if CAESIUM_OWNER_MEMORY_INTEGRATION_MIN_PASS=9999999999 coverage_journey_minimum_passes CAESIUM_OWNER_MEMORY_INTEGRATION_MIN_PASS 14; then exit 72; fi
+'''
+        result = subprocess.run(['bash', '-c', script, 'minimum-floors', str(JOURNEY_SHELL)],
+                                capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_parallel_lanes_overlap_join_fail_closed_and_preserve_parent_cleanup_ids(self):
+        script = r'''set -euo pipefail
+source "$1"
+RAW="$2/raw"
+ARTIFACTS="$2/artifacts"
+AUDIT="$2/audit"
+EVENTS="$2/events"
+DONE="$2/done"
+CLEANUP_CALLS="$2/cleanup-calls"
+ID=run
+CANDIDATE_SHA=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+IMAGE_ID=sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+mkdir -p "$RAW/journeys" "$ARTIFACTS/journeys" "$AUDIT" "$DONE"
+coverage_journey_log_redacted() { cat; }
+coverage_journey_fail() { return 1; }
+cleanup_coverage_journeys() { return 0; }
+coverage_journey_resource() { printf '%s\n' "$*" >>"$CLEANUP_CALLS"; }
+parallel_lane() {
+  local lane="$1" peer="$2" result="$3" identity
+  case "$lane" in
+    local) identity=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa ;;
+    auth) identity=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb ;;
+    distributed) identity=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc ;;
+    owner-memory) identity=dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd ;;
+  esac
+  coverage_journey_track_pending_name "test-$lane"
+  coverage_journey_track_id "$identity"
+  printf '%s\n' "$lane" >>"$EVENTS"
+  for _ in $(seq 1 200); do
+    grep -Fxq "$peer" "$EVENTS" && break
+    sleep 0.01
+  done
+  if ! grep -Fxq "$peer" "$EVENTS"; then touch "$DONE/$lane"; return 41; fi
+  mkdir -p "$RAW/journeys/$lane/cli" "$RAW/journeys/$lane/server"
+  python3 - "$RAW/journeys/$lane/provenance.json" "$lane" "$CANDIDATE_SHA" "$IMAGE_ID" <<'PY'
+import json, pathlib, sys
+path, lane, candidate, image = sys.argv[1:]
+pathlib.Path(path).write_text(json.dumps({
+  'source':'integration-journey', 'lane':lane, 'complete':True,
+  'candidate_sha':candidate, 'image_id':image,
+  'raw':{'cli':'cli', 'server':'server'}}))
+PY
+  touch "$DONE/$lane"
+  [[ "$result" == pass ]]
+}
+lane_local=(parallel_lane local auth pass)
+lane_auth=(parallel_lane auth local pass)
+coverage_journey_run_parallel_pair local-auth local ${#lane_local[@]} "${lane_local[@]}" auth ${#lane_auth[@]} "${lane_auth[@]}"
+lane_distributed=(parallel_lane distributed owner-memory fail)
+lane_owner=(parallel_lane owner-memory distributed pass)
+if coverage_journey_run_parallel_pair distributed-owner distributed ${#lane_distributed[@]} "${lane_distributed[@]}" owner-memory ${#lane_owner[@]} "${lane_owner[@]}"; then
+  exit 81
+else
+  failure_rc=$?
+fi
+coverage_journey_cleanup_parallel_resources
+printf 'FAIL_RC=%s\nNAMES=%s\nCLEANUP_CALLS=%s\n' \
+  "$failure_rc" "${COVERAGE_JOURNEY_NAMES[*]}" "$(wc -l <"$CLEANUP_CALLS" | awk '{print $1}')"
+'''
+        result = subprocess.run(
+            ['bash', '-c', script, 'parallel-lanes', str(JOURNEY_SHELL), str(self.tmp)],
+            capture_output=True, text=True, timeout=20,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        self.assertIn('FAIL_RC=1', result.stdout)
+        self.assertIn('NAMES=local auth', result.stdout)
+        self.assertIn('CLEANUP_CALLS=8', result.stdout)
+        self.assertEqual({path.name for path in (self.tmp / 'done').iterdir()},
+                         {'local', 'auth', 'distributed', 'owner-memory'})
+        self.assertEqual((self.tmp / 'audit/parallel-lane-container-ids.txt').read_text().count('\n'), 4)
+        self.assertEqual((self.tmp / 'audit/parallel-lane-container-names.txt').read_text().count('\n'), 4)
+
+    def test_parallel_cancel_retries_delayed_runner_creation_before_join_and_cleans_worker_secret(self):
+        fake_bin = self.tmp / 'bin'
+        fake_bin.mkdir()
+        fake_cli = fake_bin / 'fake_runner'
+        fake_cli.write_text('#!/bin/sh\nprintf started >"$FAKE_RUNNER_LAUNCH_FILE"\nsleep 0.25\nprintf "%s\\n" "$$" >"$FAKE_RUNNER_PID_FILE"\nexec sleep 30\n')
+        fake_cli.chmod(0o755)
+        script = r'''set -euo pipefail
+trap 'echo "parallel cancel shell failed at line $LINENO (rc=$?)" >&2' ERR
+source "$1"
+ID="$(printf 'a%.0s' {1..40})"
+CANDIDATE_SHA=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+IMAGE_ID=sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+BUILDER_RUN_IMAGE=sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+full_runner_name="$ID-journey-runner-owner-memory"
+AUDIT="$2/audit"
+ARTIFACTS="$2/artifacts"
+SECRET="$2/worker-secret"
+CALLS="$2/removal-calls"
+mkdir -p "$AUDIT" "$ARTIFACTS"
+coverage_journey_enable_parallel_resource_tracking
+coverage_journey_resource() {
+  local action="$1" kind="$2" name="$3" image="$4"
+  printf '%s\t%s\t%s\t%s\n' "$action" "$kind" "$name" "$image" >>"$CALLS"
+  [[ "$action $kind $name" == "remove container $ID-journey-runner-owner-memory" ]] || return 0
+  local pid
+  [[ -s "$FAKE_RUNNER_PID_FILE" ]] || return 0
+  pid="$(cat "$FAKE_RUNNER_PID_FILE")"
+  kill -TERM "$pid" 2>/dev/null || true
+}
+blocked_lane() {
+  local runner_name="$ID-journey-runner-owner-memory"
+  coverage_journey_track_pending_name "$runner_name" "$BUILDER_RUN_IMAGE"
+  COVERAGE_JOURNEY_SECRET_FILES+=("$SECRET")
+  printf secret >"$SECRET"
+  fake_runner run --name "$runner_name"
+}
+coverage_journey_run_parallel_worker blocked_lane >"$2/worker.log" 2>&1 &
+worker=$!
+COVERAGE_JOURNEY_WORKER_PIDS+=("$worker")
+for _ in $(seq 1 200); do
+  [[ -s "$FAKE_RUNNER_LAUNCH_FILE" ]] && break
+  sleep 0.01
+done
+[[ -s "$FAKE_RUNNER_LAUNCH_FILE" ]]
+if coverage_journey_cancel_parallel_workers; then exit 71; else cancel_rc=$?; fi
+[[ "$cancel_rc" -eq 1 ]]
+[[ ! -e "$SECRET" ]]
+[[ "${#COVERAGE_JOURNEY_WORKER_PIDS[@]}" -eq 0 ]]
+grep -F "$full_runner_name" "$CALLS" >/dev/null
+grep -F "$BUILDER_RUN_IMAGE" "$CALLS" >/dev/null
+attempts="$(awk -F '\t' -v name="$full_runner_name" '$1 == "remove" && $2 == "container" && $3 == name { n++ } END { print n + 0 }' "$CALLS")"
+printf 'runner_name_length=%s\nremoval_attempts=%s\n' "${#full_runner_name}" "$attempts"
+'''
+        env = os.environ.copy()
+        env['PATH'] = str(fake_bin) + os.pathsep + env.get('PATH', '')
+        env['FAKE_RUNNER_PID_FILE'] = str(self.tmp / 'fake-runner.pid')
+        env['FAKE_RUNNER_LAUNCH_FILE'] = str(self.tmp / 'fake-runner-launching')
+        import time
+        started = time.monotonic()
+        result = subprocess.run(
+            ['bash', '-c', script, 'parallel-cancel', str(JOURNEY_SHELL), str(self.tmp)],
+            capture_output=True, text=True, env=env, timeout=5,
+        )
+        elapsed = time.monotonic() - started
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout + (self.tmp / 'worker.log').read_text() + (self.tmp / 'removal-calls').read_text())
+        self.assertLess(elapsed, 2.0, f'foreground runner cancellation took {elapsed:.3f}s')
+        self.assertIn('runner_name_length=68', result.stdout)
+        attempts = int(re.search(r'removal_attempts=(\d+)', result.stdout).group(1))
+        self.assertGreaterEqual(attempts, 2, result.stdout)
 
     def collector(self):
         args = SimpleNamespace(root=str(ROOT), artifacts=str(self.tmp), raw=str(self.tmp / 'raw'),
@@ -209,10 +435,15 @@ class FaultChecks(unittest.TestCase):
             info = self.info()
             if key == 'RestartCount': info[key] = value
             else: info['State'][key] = value
-            command, _ = self.command(info)
+            command, state = self.command(info)
             with self.assertRaises(b.JourneyError): b.guarded_resource(command, 'container', CID, 'stop', OWNER, 'owned', image=IMAGE)
+            self.assertEqual(state['mutations'], [
+                ('container', 'kill', '--signal=SIGUSR2', CID),
+                ('container', 'stop', '-t', '60', CID),
+            ])
         command, _ = self.command()
-        self.assertEqual(b.guarded_resource(command, 'container', CID, 'stop', OWNER, 'owned', image=IMAGE)['flush_rc'], 0)
+        result = b.guarded_resource(command, 'container', CID, 'stop', OWNER, 'owned', image=IMAGE)
+        self.assertEqual(result['flush_rc'], 0)
 
     def connector_fixture(self, health, fault=None):
         audit = self.tmp / ("audit-" + str(len(list(self.tmp.iterdir()))))
@@ -524,16 +755,35 @@ if cleanup_coverage_journeys; then exit 9; fi
     def test_native_running_and_exact_local_cause(self):
         c = self.collector(); c.task_image_id, c.task_docker_image_id, c.task_image_ref = CONFIG, INDEX, 'alpine:3.23'
         c.shutdown_job = {'runtime_id': CID, 'run_id': RUN, 'task_id': TASK}
+        c.shutdown_control_dir = self.tmp / 'native-shutdown-control'
+        c.shutdown_control_dir.mkdir()
+        c.shutdown_control_mount_source_sha256 = hashlib.sha256(str(c.shutdown_control_dir.resolve()).encode()).hexdigest()
         info = {'Id': CID, 'Image': INDEX, 'Name': '/' + TASK + '-' + RUN, 'RestartCount': 0,
-          'Config': {'Image': 'alpine:3.23', 'Cmd': ['sh', '-c', 'sleep 300; echo caesium-shutdown-owned']},
+          'Config': {'Image': 'alpine:3.23', 'Cmd': ['sh', '-c', c.shutdown_command()]},
+          'Mounts': [{'Type': 'bind', 'Source': str(c.shutdown_control_dir.resolve()),
+                      'Destination': '/caesium-shutdown-control', 'Mode': '', 'RW': False}],
           'State': {'Running': True, 'Restarting': False, 'OOMKilled': False}}
         c.inspect_container = lambda *args: info
-        self.assertEqual(c.local_task_cancel_cause(), 'task ' + TASK + ' cancelled: context canceled')
-        self.assertTrue(c.native_running()['running'])
+        native = c.native_running()
+        self.assertTrue(native['running'])
+        self.assertEqual(native['control_mount_source_sha256'], c.shutdown_control_mount_source_sha256)
+        self.assertTrue(native['control_mount_read_only'])
         for field, value in (('Running', False), ('OOMKilled', True), ('Restarting', True)):
             info['State'][field] = value
             with self.assertRaises(b.JourneyError): c.native_running()
             info['State'][field] = {'Running': True, 'OOMKilled': False, 'Restarting': False}[field]
+        expected_mount = copy.deepcopy(info['Mounts'][0])
+        for mutation in (
+            lambda mount: mount.update(RW=True, Mode='rw'),
+            lambda mount: mount.update(Source=str(self.tmp / 'foreign-control')),
+            lambda mount: mount.update(Destination='/wrong-target'),
+            lambda mount: mount.update(Type='volume'),
+            lambda mount: mount.pop('RW'),
+        ):
+            info['Mounts'][0] = copy.deepcopy(expected_mount)
+            mutation(info['Mounts'][0])
+            with self.assertRaises(b.JourneyError): c.native_running()
+        info['Mounts'][0] = expected_mount
 
     def test_cleanup_secret_failure_prevents_publication(self):
         c = self.collector()
@@ -556,25 +806,182 @@ if cleanup_coverage_journeys; then exit 9; fi
             self.assertEqual(b.main(), 1)
         self.assertNotIn('published', events)
 
-    def test_completed_rows_must_predate_original_server_finish(self):
-        for late in (False, True):
-            c = self.collector()
-            c.task_image_id, c.task_docker_image_id, c.task_image_ref = CONFIG, INDEX, 'alpine:3.23'
-            c.shutdown_job = {'job_id': RUN, 'run_id': RUN, 'task_id': TASK, 'task_run_id': TASK, 'runtime_id': CID}
-            c.native_runtime_absent_generations = [1]
-            c.verify_runtime_absent = lambda generation: None
-            c.server_generations = [{'finished_at': '2026-10-04T12:00:02Z'}]
-            completed = '2026-10-04T12:00:03Z' if late else '2026-10-04T12:00:01Z'
-            cause = c.local_task_cancel_cause()
-            parent = {'id': RUN, 'status': 'failed', 'error': 'context canceled', 'completed_at': completed,
-                      'tasks': [{'task_id': TASK, 'status': 'failed', 'error': cause}]}
-            instances = {'total': 1, 'partitions': [{'task_run_id': TASK, 'runtime_id': CID, 'status': 'failed', 'error': cause, 'completed_at': completed}]}
-            c.api_json = lambda _, path: instances if '/partitions' in path else parent
-            if late:
-                with self.assertRaises(b.JourneyError): c.verify_shutdown_job_failed('owned-server')
-            else:
-                c.verify_shutdown_job_failed('owned-server')
-                self.assertEqual(c.shutdown_job['final_task_run_error'], cause)
+    def test_same_durable_rows_are_retained_then_explicitly_resumed_to_success(self):
+        c = self.collector()
+        c.task_image_id, c.task_docker_image_id, c.task_image_ref = CONFIG, INDEX, 'alpine:3.23'
+        c.shutdown_control_dir = self.tmp / 'shutdown-control'
+        c.shutdown_control_dir.mkdir()
+        c.shutdown_release_path = c.shutdown_control_dir / 'release'
+        c.shutdown_control_mount_source_sha256 = hashlib.sha256(str(c.shutdown_control_dir.resolve()).encode()).hexdigest()
+        c.shutdown_job = {'job_id': RUN, 'run_id': RUN, 'task_id': TASK, 'task_run_id': TASK, 'runtime_id': CID,
+                          'attempt_before_signal': 1,
+                          'resumption_mode': 'explicit-public-http-trigger-existing-run',
+                          'resumption_path': '/hooks/coverage-shutdown-owned',
+                          'control_mount_source_sha256': c.shutdown_control_mount_source_sha256}
+        c.run_id = 'owned'
+        c.native_runtime_absent_generations = [1]
+        removed = []
+        c.verify_runtime_absent = lambda generation, runtime_id=None: removed.append((generation, runtime_id))
+        c.server_generations = [{'finished_at': '2026-10-04T12:00:02Z'}]
+        new_runtime = 'f' * 64
+        retained_run = {'id': RUN, 'status': 'running', 'tasks': [{'task_id': TASK, 'status': 'running', 'runtime_id': CID}]}
+        retained_row = {'task_run_id': TASK, 'runtime_id': CID, 'status': 'running', 'attempt': 1}
+        delayed_dispatch_run = copy.deepcopy(retained_run)
+        delayed_dispatch_row = copy.deepcopy(retained_row)
+        split_snapshot_run = copy.deepcopy(retained_run)
+        running_run = {'id': RUN, 'status': 'running', 'tasks': [{'task_id': TASK, 'status': 'running', 'runtime_id': new_runtime}]}
+        running_row = {'task_run_id': TASK, 'runtime_id': new_runtime, 'status': 'running', 'attempt': 1,
+                       'started_at': '2026-10-07T12:00:03Z'}
+        final_run = {'id': RUN, 'status': 'succeeded', 'completed_at': '2030-01-01T00:00:05Z',
+                     'tasks': [{'task_id': TASK, 'status': 'succeeded', 'runtime_id': new_runtime,
+                                'output': {'shutdown': 'resumed-owned'}}]}
+        final_row = {'task_run_id': TASK, 'runtime_id': new_runtime, 'status': 'succeeded',
+                     'attempt': 1, 'started_at': '2026-10-07T12:00:03Z', 'completed_at': '2030-01-01T00:00:05Z'}
+        records = [retained_run, delayed_dispatch_run, split_snapshot_run, running_run, final_run]
+        partitions = [retained_row, delayed_dispatch_row, running_row, running_row, final_row]
+        def api_json(_, path):
+            if '/partitions' in path:
+                return {'total': 1, 'partitions': [partitions.pop(0)]}
+            return records.pop(0)
+        c.api_json = api_json
+        order = []
+        def native_running(runtime_id=None):
+            self.assertTrue(c.shutdown_release_marker_absent(), 'release must remain held during native runtime proof')
+            self.assertEqual(runtime_id, new_runtime)
+            order.append('native-running')
+            return {'runtime_id': new_runtime, 'run_id': RUN, 'task_id': TASK,
+                    'docker_image_id': INDEX, 'task_config_id': CONFIG,
+                    'command_sha256': hashlib.sha256(c.shutdown_command().encode()).hexdigest(),
+                    'control_mount_source_sha256': c.shutdown_control_mount_source_sha256,
+                    'control_mount_destination': '/caesium-shutdown-control', 'control_mount_read_only': True,
+                    'running': True}
+        c.native_running = native_running
+        c.fire_shutdown_webhook = lambda _: {'status': 202, 'path': c.shutdown_job['resumption_path'],
+                                              'http_triggers_accepted': 1, 'http_runs_started': 1,
+                                              'receipt_id': '12345678-1234-4234-8234-123456789abc'}
+        original_fire = c.fire_shutdown_webhook
+        def fire(_):
+            order.append('webhook-accepted')
+            return original_fire(_)
+        c.fire_shutdown_webhook = fire
+        original_release = c.release_shutdown_task
+        def release():
+            self.assertEqual(order[-1], 'native-running')
+            order.append('release')
+            return original_release()
+        c.release_shutdown_task = release
+        c.verify_shutdown_job_explicitly_resumed('owned-server')
+        self.assertEqual(order, ['webhook-accepted', 'native-running', 'release'])
+        self.assertIs(c.shutdown_job['generation2_automatic_takeover'], False)
+        self.assertEqual(c.shutdown_job['retained_task_run_id'], TASK)
+        self.assertEqual(c.shutdown_job['retained_attempt'], 1)
+        self.assertEqual(c.shutdown_job['retained_runtime_id'], CID)
+        self.assertEqual(c.shutdown_job['final_task_run_id'], TASK)
+        self.assertEqual(c.shutdown_job['final_attempt'], 1)
+        self.assertEqual(c.shutdown_job['final_runtime_id'], new_runtime)
+        self.assertEqual(removed, [(2, new_runtime)])
+        self.assertEqual(c.shutdown_job['resumption_output'], {'shutdown': 'resumed-owned'})
+        self.assertTrue(c.shutdown_job['release_marker_after_running_observation'])
+        self.assertTrue(c.shutdown_job['resumption_runtime_absent_after_completion'])
+
+    def test_release_marker_is_one_shot_and_uses_expected_bytes(self):
+        c = self.collector()
+        c.task_image_id, c.task_docker_image_id, c.task_image_ref = CONFIG, INDEX, 'alpine:3.23'
+        c.run_id = 'owned'
+        c.shutdown_control_dir = self.tmp / 'shutdown-control'
+        c.shutdown_control_dir.mkdir()
+        c.shutdown_release_path = c.shutdown_control_dir / 'release'
+        c.shutdown_control_mount_source_sha256 = hashlib.sha256(str(c.shutdown_control_dir.resolve()).encode()).hexdigest()
+        c.shutdown_job = {'runtime_id': CID, 'run_id': RUN, 'task_id': TASK, 'task_run_id': TASK,
+                          'attempt_before_signal': 1,
+                          'control_mount_source_sha256': c.shutdown_control_mount_source_sha256}
+        with self.assertRaises(b.JourneyError):
+            c.release_shutdown_task()
+        c.server_generations = [{'finished_at': '2026-10-04T12:00:02Z'}]
+        observed_at = b.datetime.datetime.now(b.datetime.timezone.utc).isoformat().replace('+00:00', 'Z')
+        c.shutdown_job['resumption_webhook'] = {'status': 202}
+        c.shutdown_job['resumption_runtime_running'] = {
+            'runtime_id': 'f' * 64, 'task_run_id': TASK, 'attempt': 1,
+            'task_started_at': '2026-10-07T12:00:03Z', 'observed_at': observed_at,
+            'release_marker_absent': True, 'running': True,
+            'native': {'runtime_id': 'f' * 64, 'run_id': RUN, 'task_id': TASK,
+                       'docker_image_id': INDEX, 'task_config_id': CONFIG,
+                       'command_sha256': hashlib.sha256(c.shutdown_command().encode()).hexdigest(),
+                       'control_mount_source_sha256': c.shutdown_control_mount_source_sha256,
+                       'control_mount_destination': '/caesium-shutdown-control', 'control_mount_read_only': True,
+                       'running': True},
+        }
+        self.assertTrue(c.shutdown_release_marker_absent())
+        marker = c.release_shutdown_task()
+        self.assertFalse(c.shutdown_release_marker_absent())
+        self.assertEqual(c.shutdown_release_path.read_bytes(), b'release-v1\n')
+        self.assertEqual(marker['sha256'], hashlib.sha256(b'release-v1\n').hexdigest())
+        with self.assertRaises(b.JourneyError):
+            c.release_shutdown_task()
+
+    def test_resumption_refuses_changed_ids_same_runtime_failed_or_pre_shutdown_completion(self):
+        for fault in ('run-id', 'task-id', 'task-run-id', 'same-runtime', 'failed', 'early', 'retained-attempt', 'final-attempt', 'missing-attempt', 'wrong-output', 'runtime-changed-after-observation', 'split-runtime-change'):
+            with self.subTest(fault=fault):
+                c = self.collector()
+                c.task_image_id, c.task_docker_image_id, c.task_image_ref = CONFIG, INDEX, 'alpine:3.23'
+                c.shutdown_control_dir = self.tmp / ('shutdown-control-' + fault)
+                c.shutdown_control_dir.mkdir()
+                c.shutdown_release_path = c.shutdown_control_dir / 'release'
+                c.shutdown_control_mount_source_sha256 = hashlib.sha256(str(c.shutdown_control_dir.resolve()).encode()).hexdigest()
+                c.shutdown_job = {'job_id': RUN, 'run_id': RUN, 'task_id': TASK, 'task_run_id': TASK, 'runtime_id': CID,
+                                  'attempt_before_signal': 1,
+                                  'resumption_mode': 'explicit-public-http-trigger-existing-run',
+                                  'resumption_path': '/hooks/coverage-shutdown-owned',
+                                  'control_mount_source_sha256': c.shutdown_control_mount_source_sha256}
+                c.run_id = 'owned'
+                c.native_runtime_absent_generations = [1]
+                c.verify_runtime_absent = lambda generation, runtime_id=None: None
+                c.server_generations = [{'finished_at': '2026-10-04T12:00:02Z'}]
+                new_runtime = CID if fault == 'same-runtime' else 'f' * 64
+                retained_run = {'id': RUN, 'status': 'running', 'tasks': [{'task_id': TASK, 'status': 'running', 'runtime_id': CID}]}
+                retained_row = {'task_run_id': TASK, 'runtime_id': CID, 'status': 'running',
+                                'attempt': 2 if fault == 'retained-attempt' else 1}
+                delayed_dispatch_run = copy.deepcopy(retained_run)
+                delayed_dispatch_row = copy.deepcopy(retained_row)
+                observed_runtime = new_runtime
+                final_runtime = 'e' * 64 if fault == 'runtime-changed-after-observation' else new_runtime
+                running_run = {'id': RUN, 'status': 'running', 'tasks': [{'task_id': TASK, 'status': 'running', 'runtime_id': observed_runtime}]}
+                running_row = {'task_run_id': TASK, 'runtime_id': observed_runtime, 'status': 'running',
+                               'attempt': 1, 'started_at': '2026-10-07T12:00:03Z'}
+                split_snapshot_run = copy.deepcopy(retained_run)
+                split_snapshot_row = copy.deepcopy(running_row)
+                if fault == 'split-runtime-change':
+                    split_snapshot_row['runtime_id'] = '0' * 64
+                run_id = '99999999-9999-4999-8999-999999999999' if fault == 'run-id' else RUN
+                task_id = '88888888-8888-4888-8888-888888888888' if fault == 'task-id' else TASK
+                task_run_id = '77777777-7777-4777-8777-777777777777' if fault == 'task-run-id' else TASK
+                completion = '2026-10-04T12:00:01Z' if fault == 'early' else '2030-01-01T00:00:05Z'
+                status = 'failed' if fault == 'failed' else 'succeeded'
+                final_run = {'id': run_id, 'status': status, 'completed_at': completion,
+                             'tasks': [{'task_id': task_id, 'status': status, 'runtime_id': final_runtime,
+                                        'output': {} if fault == 'wrong-output' else {'shutdown': 'resumed-owned'}}]}
+                final_row = {'task_run_id': task_run_id, 'runtime_id': final_runtime, 'status': status,
+                             'attempt': (2 if fault == 'final-attempt' else 1),
+                             'started_at': '2026-10-07T12:00:03Z', 'completed_at': completion}
+                if fault == 'missing-attempt':
+                    final_row.pop('attempt')
+                records, partitions = [retained_run, delayed_dispatch_run, split_snapshot_run, running_run, final_run], [retained_row, delayed_dispatch_row, split_snapshot_row, running_row, final_row]
+                def api_json(_, path):
+                    if '/partitions' in path:
+                        return {'total': 1, 'partitions': [partitions.pop(0)]}
+                    return records.pop(0)
+                c.api_json = api_json
+                c.native_running = lambda runtime_id=None: {'runtime_id': runtime_id, 'run_id': RUN,
+                    'task_id': TASK, 'docker_image_id': INDEX, 'task_config_id': CONFIG,
+                    'command_sha256': hashlib.sha256(c.shutdown_command().encode()).hexdigest(),
+                    'control_mount_source_sha256': c.shutdown_control_mount_source_sha256,
+                    'control_mount_destination': '/caesium-shutdown-control', 'control_mount_read_only': True,
+                    'running': True}
+                c.fire_shutdown_webhook = lambda _: {'status': 202, 'path': c.shutdown_job['resumption_path'],
+                                                      'http_triggers_accepted': 1, 'http_runs_started': 1,
+                                                      'receipt_id': '12345678-1234-4234-8234-123456789abc'}
+                with self.assertRaises(b.JourneyError):
+                    c.verify_shutdown_job_explicitly_resumed('owned-server')
 
     def test_public_read_never_promotes_partial_valid_json_or_cap_plus_one(self):
         class Stream:
@@ -652,16 +1059,57 @@ if cleanup_coverage_journeys; then exit 9; fi
                 process.update(generation=len(processes) - 1, flush="sigusr2", signal="SIGTERM", stop_rc=0, flush_rc=0,
                     database_mount_sha256="same-db", server_environment_sha256="same-env", finished_at="2026-10-04T12:00:02Z")
             processes.append(process)
+        recovered_runtime = "f" * 64
+        collector_run_id = "cov-distinct"
+        command_collector = self.collector()
+        command_collector.run_id = collector_run_id
+        hold_command = command_collector.shutdown_command()
+        hold_digest = hashlib.sha256(hold_command.encode()).hexdigest()
+        control_mount_digest = hashlib.sha256(b'/owned/sso/shutdown-control').hexdigest()
         shutdown = {"job_id": RUN, "run_id": RUN, "task_id": TASK, "task_run_id": TASK, "runtime_id": CID,
             "task_image_id": CONFIG, "initial_run_status": "running", "initial_task_status": "running",
-            "native_runtime_removed": True, "verified_after_generation": 2, "final_run_status": "failed", "final_task_status": "failed",
-            "final_run_error": "context canceled", "final_task_error": "task " + TASK + " cancelled: context canceled",
-            "final_task_run_id": TASK, "final_task_run_status": "failed", "final_task_run_error": "task " + TASK + " cancelled: context canceled",
-            "run_completed_at": "2026-10-04T12:00:01Z", "task_completed_at": "2026-10-04T12:00:01Z",
-            "native_runtime_absent_after_generation": 2, "native_runtime_absent_generations": [1, 2], "replay_restart_elapsed_seconds": 1,
+            "control_mount_source_sha256": control_mount_digest,
+            "hold_strategy": "read-only-host-release-marker", "hold_command_sha256": hold_digest,
+            "release_marker_absent_before_signal": True, "release_marker_absent_before_webhook": True,
+            "attempt_before_signal": 1, "retained_attempt": 1, "final_attempt": 1,
+            "native_runtime_removed": True, "verified_after_generation": 2,
+            "native_runtime_absent_ids_by_generation": {"1": CID, "2": recovered_runtime},
+            "resumption_runtime_absent_after_completion": True,
+            "resumption_mode": "explicit-public-http-trigger-existing-run", "resumption_path": "/hooks/coverage-shutdown-" + collector_run_id,
+            "retained_after_generation": 2, "retained_run_status": "running", "retained_task_status": "running",
+            "generation2_automatic_takeover": False,
+            "retained_task_run_id": TASK, "retained_runtime_id": CID,
+            "resumption_webhook": {"status": 202, "path": "/hooks/coverage-shutdown-" + collector_run_id,
+                "http_triggers_accepted": 1, "http_runs_started": 1, "receipt_id": "12345678-1234-4234-8234-123456789abc"},
+            "resumption_runtime_running": {"runtime_id": recovered_runtime, "task_run_id": TASK, "attempt": 1,
+                "task_started_at": "2026-10-04T12:00:03Z", "observed_at": "2026-10-04T12:00:03.500000Z",
+                "release_marker_absent": True, "running": True,
+                "native": {"runtime_id": recovered_runtime, "run_id": RUN, "task_id": TASK,
+                    "docker_image_id": INDEX, "task_config_id": CONFIG, "command_sha256": hold_digest,
+                    "control_mount_source_sha256": control_mount_digest,
+                    "control_mount_destination": "/caesium-shutdown-control", "control_mount_read_only": True,
+                    "running": True}},
+            "release_marker_after_running_observation": True,
+            "resumption_output": {"shutdown": "resumed-" + collector_run_id},
+            "release_marker": {"strategy": "read-only-host-release-marker", "written": True,
+                "sha256": hashlib.sha256(b"release-v1\n").hexdigest(), "written_at": "2026-10-04T12:00:04Z"},
+            "final_run_status": "succeeded", "final_task_status": "succeeded", "final_task_run_id": TASK,
+            "final_task_run_status": "succeeded", "final_runtime_id": recovered_runtime,
+            "run_completed_at": "2026-10-04T12:00:05Z", "task_started_at": "2026-10-04T12:00:03Z",
+            "task_completed_at": "2026-10-04T12:00:05Z",
+            "native_runtime_absent_after_generation": 2, "native_runtime_absent_generations": [1, 2],
+            "native_runtime_cleanup_absences": [{"runtime_id": CID, "absent": True},
+                {"runtime_id": recovered_runtime, "absent": True}],
+            "replay_restart_elapsed_seconds": 1,
             "native_before_signal": {"running": True, "run_id": RUN, "task_id": TASK, "runtime_id": CID,
-                "docker_image_id": INDEX, "task_config_id": CONFIG}}
+                "docker_image_id": INDEX, "task_config_id": CONFIG, "command_sha256": hold_digest,
+                "control_mount_source_sha256": control_mount_digest,
+                "control_mount_destination": "/caesium-shutdown-control", "control_mount_read_only": True},
+            "native_initial_running": {"running": True, "command_sha256": hold_digest,
+                "control_mount_source_sha256": control_mount_digest,
+                "control_mount_destination": "/caesium-shutdown-control", "control_mount_read_only": True}}
         original = {"complete": True, "missing": False, "killed": False, "candidate_sha": OWNER, "image_id": IMAGE,
+            "collector_run_id": collector_run_id,
             "task_image_id": CONFIG, "task_docker_image_id": INDEX, "task_image_ref": "alpine:3.23",
             "server_generations": processes[2:], "cli_processes": processes[:2], "shutdown_cancellation": shutdown}
         inputs = self.tmp / "inputs.json"
@@ -672,22 +1120,29 @@ if cleanup_coverage_journeys; then exit 9; fi
         code = source[start:source.index('\nPY\n  then', start)]
         record = self.tmp / "record.json"
         env = {**os.environ, "SSO_RECORD_RAW_ROOT": str(raw.resolve()), "SSO_RECORD_SHA": OWNER,
-               "SSO_RECORD_IMAGE_ID": IMAGE, "SSO_RECORD_INPUTS_SHA256": digest}
-        for fault in (None, "plain", "native", "timestamp", "exit", "cause", "flush", "wrong-uuid", "substring"):
+               "SSO_RECORD_IMAGE_ID": IMAGE, "SSO_RECORD_RUN_ID": collector_run_id, "SSO_RECORD_INPUTS_SHA256": digest}
+        for fault in (None, "native", "timestamp", "exit", "flush", "wrong-uuid", "resumption", "same-runtime", "cleanup", "attempt", "auto-takeover", "durable-path", "early-release", "not-running-observed", "marker-before-running", "wrong-output", "wrong-absence-identity", "writable-mount"):
             value = copy.deepcopy(original)
-            if fault == "plain":
-                value["shutdown_cancellation"].update(final_task_error="context canceled", final_task_run_error="context canceled")
             if fault == "wrong-uuid":
-                wrong = "task " + RUN + " cancelled: context canceled"
-                value["shutdown_cancellation"].update(final_task_error=wrong, final_task_run_error=wrong)
-            if fault == "substring":
-                wrong = "prefix context canceled suffix"
-                value["shutdown_cancellation"].update(final_task_error=wrong, final_task_run_error=wrong)
+                value["shutdown_cancellation"]["final_task_run_id"] = RUN
             if fault == "native": value["shutdown_cancellation"]["native_before_signal"]["running"] = False
-            if fault == "timestamp": value["shutdown_cancellation"]["task_completed_at"] = "2026-10-04T12:00:03Z"
+            if fault == "timestamp": value["shutdown_cancellation"]["task_started_at"] = "2026-10-04T12:00:01Z"
             if fault == "exit": value["server_generations"][0]["exit_code"] = 143
-            if fault == "cause": value["shutdown_cancellation"]["final_task_error"] = "context canceled"
             if fault == "flush": value["server_generations"][0]["flush_rc"] = 1
+            if fault == "resumption": value["shutdown_cancellation"]["resumption_webhook"]["http_runs_started"] = 0
+            if fault == "same-runtime": value["shutdown_cancellation"]["final_runtime_id"] = CID
+            if fault == "cleanup": value["shutdown_cancellation"]["native_runtime_cleanup_absences"][1]["absent"] = False
+            if fault == "attempt": value["shutdown_cancellation"]["final_attempt"] = 2
+            if fault == "auto-takeover": value["shutdown_cancellation"]["generation2_automatic_takeover"] = True
+            if fault == "durable-path":
+                value["shutdown_cancellation"]["resumption_path"] = "/hooks/coverage-shutdown-" + RUN
+                value["shutdown_cancellation"]["resumption_webhook"]["path"] = "/hooks/coverage-shutdown-" + RUN
+            if fault == "early-release": value["shutdown_cancellation"]["release_marker"]["written_at"] = "2026-10-04T12:00:06Z"
+            if fault == "not-running-observed": value["shutdown_cancellation"]["resumption_runtime_running"]["native"]["running"] = False
+            if fault == "marker-before-running": value["shutdown_cancellation"]["release_marker"]["written_at"] = "2026-10-04T12:00:03Z"
+            if fault == "wrong-output": value["shutdown_cancellation"]["resumption_output"] = {"shutdown": "wrong-run"}
+            if fault == "wrong-absence-identity": value["shutdown_cancellation"]["native_runtime_absent_ids_by_generation"]["2"] = CID
+            if fault == "writable-mount": value["shutdown_cancellation"]["resumption_runtime_running"]["native"]["control_mount_read_only"] = False
             for process in value["cli_processes"] + value["server_generations"]:
                 (raw / process["provenance_path"]).write_text(json.dumps(process))
             record.write_text(json.dumps(value))
@@ -695,36 +1150,12 @@ if cleanup_coverage_journeys; then exit 9; fi
             for path in (cli_list, server_list): path.unlink(missing_ok=True)
             result = subprocess.run(["python3", "-c", code, str(record), str(inputs), str(cli_list), str(server_list)],
                 env=env, capture_output=True)
-            if fault in (None, "plain"):
+            if fault is None:
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertEqual(cli_list.read_text().splitlines(), ["shutdown-apply", "shutdown-start"])
             else:
                 self.assertNotEqual(result.returncode, 0, fault)
                 self.assertFalse(cli_list.exists(), fault)
-
-    def test_live_shutdown_exact_cause_forms_must_agree_on_both_rows(self):
-        formatted = "task " + TASK + " cancelled: context canceled"
-        for collapsed, concrete, accepted in (
-            (formatted, formatted, True), ("context canceled", "context canceled", True),
-            (formatted, "context canceled", False), ("context canceled", formatted, False),
-            ("task " + RUN + " cancelled: context canceled", "task " + RUN + " cancelled: context canceled", False),
-            ("prefix context canceled suffix", "prefix context canceled suffix", False),
-        ):
-            c = self.collector()
-            c.shutdown_job = {"job_id": RUN, "run_id": RUN, "task_id": TASK, "task_run_id": TASK, "runtime_id": CID}
-            c.native_runtime_absent_generations = [1]
-            c.verify_runtime_absent = lambda generation: None
-            c.server_generations = [{"finished_at": "2026-10-04T12:00:02Z"}]
-            parent = {"id": RUN, "status": "failed", "error": "context canceled", "completed_at": "2026-10-04T12:00:01Z",
-                "tasks": [{"task_id": TASK, "status": "failed", "error": collapsed}]}
-            instances = {"total": 1, "partitions": [{"task_run_id": TASK, "runtime_id": CID, "status": "failed",
-                "error": concrete, "completed_at": "2026-10-04T12:00:01Z"}]}
-            c.api_json = lambda _, path: instances if "/partitions" in path else parent
-            if accepted:
-                c.verify_shutdown_job_failed("server")
-                self.assertEqual(c.shutdown_job["final_task_error"], concrete)
-            else:
-                with self.assertRaises(b.JourneyError): c.verify_shutdown_job_failed("server")
 
     def test_shell_untrack_last_id_and_keep_another_under_nounset(self):
         shell = '''set -eu

@@ -2155,10 +2155,11 @@ class SystemSuiteLaneWiringTests(unittest.TestCase):
             with self.subTest(fault=fault):
                 self._exercise_podman_resolution(fault)
 
-    def _exercise_backend_task_export(self, fault=None):
+    def _exercise_backend_task_export(self, fault=None, task_alias_loaded=False):
         """Execute the actual workflow prerequisite code against a hermetic daemon."""
         import hashlib
         import tarfile
+        import types
         import urllib.request
         from unittest.mock import patch
 
@@ -2174,38 +2175,81 @@ class SystemSuiteLaneWiringTests(unittest.TestCase):
         descriptor = {"mediaType": "application/vnd.oci.image.manifest.v1+json", "size": len(child),
                       "digest": child_id, "platform": {"os": "linux", "architecture": "amd64"}}
         index = json.dumps({"schemaVersion": 2, "manifests": [descriptor] * (2 if fault == "ambiguous" else 1)}).encode()
-        index_ref = "alpine@sha256:" + hashlib.sha256(index).hexdigest()
+        index_ref = "docker.io/library/alpine@sha256:" + hashlib.sha256(index).hexdigest()
+        task_supplier_ref = "docker.io/library/alpine:3.23@" + index_ref.split("@")[1]
+        production_task_supplier_ref = "docker.io/library/alpine:3.23@sha256:85fe1e81d6758c208f3e1eed4338a1997e19d4be002d4dd32d3100c9a8c010a0"
+        kind_supplier_ref = "kindest/node:v1.36.1@sha256:3489c7674813ba5d8b1a9977baea8a6e553784dab7b84759d1014dbd78f7ebd5"
+        self.assertIn("kind_image_supplier_ref = " + repr(kind_supplier_ref), code)
+        self.assertEqual(code.count("task_image_supplier_ref = " + repr(production_task_supplier_ref)), 1)
+        # Registry bytes are synthetic in this hermetic daemon. Rebind only
+        # their external pin; execute the actual repository/digest validator.
+        code = code.replace(repr(production_task_supplier_ref), repr(task_supplier_ref))
         child_ref = "alpine@" + child_id
         loaded_id = "sha256:" + "ab" * 32 if fault == "daemon" else child_id
+        kind_id = "sha256:" + "cd" * 32
         calls = []
+        task_pulls = []
+        alias_inspections = 0
+        tags = []
         backend = runpy.run_path(str(ROOT / "scripts/coverage-backends.py"))
+        self.assertEqual(backend["PINNED_TASK_SUPPLIER_REF"], production_task_supplier_ref)
+        self.assertEqual(backend["PINNED_KIND_SUPPLIER_REF"], kind_supplier_ref)
+        validator = backend["validate_task_supplier_index_ref"]
+        backend["validate_task_supplier_index_ref"] = types.FunctionType(
+            validator.__code__, {**validator.__globals__, "PINNED_TASK_SUPPLIER_REF": task_supplier_ref},
+            validator.__name__, validator.__defaults__, validator.__closure__)
         podman = self._podman_metadata_fixture()
 
         def output(args, text=False):
+            nonlocal alias_inspections
             podman["log"].append(("command-output", args))
             if args[:3] == ["docker", "image", "inspect"]:
                 ref = args[3]
                 if ref == podman["child_ref"]:
                     return json.dumps([{"Id": podman["config_id"], "Os": "linux", "Architecture": "amd64",
                                         "RepoDigests": [podman["index_ref"]]}])
-                identity = loaded_id if ref == child_ref else index_ref.split("@")[1]
-                if fault == "pulled-daemon" and ref == "alpine:3.23":
+                self.assertIn(ref, (task_supplier_ref, "alpine:3.23", child_ref, kind_supplier_ref))
+                identity = kind_id if ref == kind_supplier_ref else loaded_id if ref == child_ref else index_ref.split("@")[1]
+                if fault == "pulled-daemon" and ref in (task_supplier_ref, "alpine:3.23"):
                     identity = "sha256:" + "ef" * 32
-                if ref == "alpine:3.23" and (fault == "retag" and len(calls) == 2
-                                             or fault == "retag-before" and len(calls) == 1):
-                    identity = "sha256:" + "ef" * 32
+                if ref == "alpine:3.23":
+                    alias_inspections += 1
+                    if (fault == "retag" and alias_inspections == 3
+                            or fault == "retag-before" and alias_inspections == 2
+                            or fault == "alias-ownership" and alias_inspections == 1):
+                        identity = "sha256:" + "ef" * 32
                 value = [{"Id": identity, "Os": "linux", "Architecture": "arm64" if fault == "platform" else "amd64",
-                          "RepoDigests": [index_ref]}]
+                          "RepoDigests": [index_ref],
+                          "RepoTags": ["alpine:3.23"] if task_alias_loaded or ref == "alpine:3.23" else []}]
+                if ref == task_supplier_ref:
+                    if fault == "repo-digest":
+                        value[0]["RepoDigests"] = ["alpine@sha256:" + "12" * 32]
+                    elif fault == "foreign-repo-digest":
+                        value[0]["RepoDigests"] = ["foreign.example/alpine@" + index_ref.split("@")[1]]
+                    elif fault == "ambiguous-repo-digest":
+                        value[0]["RepoDigests"].append("alpine@sha256:" + "12" * 32)
                 return json.dumps(value) if text else json.dumps(value).encode()
             self.assertEqual(args[:4], ["docker", "buildx", "imagetools", "inspect"])
             self.assertEqual(args[-1], "--raw")
+            self.assertIn(args[4], (index_ref, child_ref))
             raw = index if args[4] == index_ref else child
             return raw + (b"corruption" if fault == "metadata" or fault == "child-metadata" and args[4] == child_ref else b"\n")
 
         def call(args, **kwargs):
             podman["log"].append(("command-call", args))
-            if args[3:] in (["linux/amd64", podman["child_ref"]], ["linux/amd64", "kindest/node:v1.36.1"],
-                            ["linux/amd64", "alpine:3.23"]):
+            if args == ["docker", "pull", "--platform", "linux/amd64", podman["child_ref"]]:
+                return 0
+            if args == ["docker", "tag", task_supplier_ref, "alpine:3.23"]:
+                self.assertFalse(task_alias_loaded)
+                tags.append(args)
+                return 0
+            if args == ["docker", "pull", "--platform", "linux/amd64", kind_supplier_ref]:
+                self.assertEqual(task_pulls, [])
+                task_pulls.append(args)
+                return 0
+            if args == ["docker", "pull", "--platform", "linux/amd64", task_supplier_ref]:
+                self.assertEqual(len(task_pulls), 1)
+                task_pulls.append(args)
                 return 0
             calls.append(args)
             self.assertEqual(args, ["docker", "pull", "--platform", "linux/amd64", child_ref])
@@ -2286,6 +2330,13 @@ class SystemSuiteLaneWiringTests(unittest.TestCase):
                     if fault != "input-write":
                         self.assertFalse((proof / "task-export-receipt.json").exists())
                     self.assertFalse((Path(directory) / "backend-producer-inputs.json").exists())
+                    if fault in {"repo-digest", "foreign-repo-digest", "ambiguous-repo-digest", "alias-ownership"}:
+                        self.assertEqual(podman_receipt["prerequisite_phase"], "task-metadata")
+                        self.assertFalse((proof / "task-index.json").exists())
+                        self.assertFalse((proof / "task-amd64-manifest.json").exists())
+                        self.assertEqual(calls, [], "supplier/alias refusal must precede child pull and export")
+                        self.assertFalse(any(entry[0] == "command-output" and entry[1][:3] == ["docker", "buildx", "imagetools"]
+                                             for entry in podman["log"]))
                     # A failed immutable digest check must never publish those bytes.
                     if fault == "metadata":
                         self.assertFalse((proof / "task-index.json").exists())
@@ -2333,6 +2384,13 @@ class SystemSuiteLaneWiringTests(unittest.TestCase):
             self.assertEqual(inputs["task_image_id"], config_id)
             self.assertEqual(inputs["task_docker_image_id"], index_ref.split("@")[1])
             self.assertEqual(receipt["docker_image_id"], inputs["task_docker_image_id"])
+            self.assertEqual(inputs["task_image_supplier_ref"], task_supplier_ref)
+            self.assertEqual(inputs["kind_image_supplier_ref"], kind_supplier_ref)
+            self.assertEqual(inputs["task_image_ref"], "alpine:3.23")
+            self.assertEqual(inputs["kind_image_ref"], "kindest/node:v1.36.1")
+            self.assertEqual(inputs["kind_image_id"], kind_id)
+            self.assertEqual(receipt["supplier_ref"], task_supplier_ref)
+            self.assertEqual(receipt["preserved_tag_alias"], "alpine:3.23")
             self.assertEqual(receipt["index_ref"], index_ref)
             self.assertEqual(receipt["manifest_id"], child_id)
             self.assertEqual(receipt["config_id"], config_id)
@@ -2351,6 +2409,13 @@ class SystemSuiteLaneWiringTests(unittest.TestCase):
             self.assertEqual(sum(entry[0] == "http" and entry[1].endswith("manifests/v5.8.7")
                                  for entry in podman["log"]), 1)
             self.assertEqual(len(calls), 2)
+            self.assertEqual(task_pulls, [["docker", "pull", "--platform", "linux/amd64", ref]
+                                         for ref in (kind_supplier_ref, task_supplier_ref)])
+            self.assertEqual(tags, [] if task_alias_loaded else [["docker", "tag", task_supplier_ref, "alpine:3.23"]])
+            image_inspections = [entry[1][3] for entry in podman["log"]
+                                 if entry[0] == "command-output" and entry[1][:3] == ["docker", "image", "inspect"]]
+            self.assertEqual(image_inspections, [podman["child_ref"], task_supplier_ref, "alpine:3.23",
+                                                child_ref, "alpine:3.23", "alpine:3.23", kind_supplier_ref])
 
     def test_podman_resolution_proof_survives_later_failure(self):
         for fault in ("metadata", "export-command", "input-write"):
@@ -2358,18 +2423,26 @@ class SystemSuiteLaneWiringTests(unittest.TestCase):
                 self._exercise_backend_task_export(fault)
 
     def test_coverage_exports_verified_pulled_child_without_index_platform_selection(self):
-        self._exercise_backend_task_export()
+        for task_alias_loaded in (False, True):
+            with self.subTest(task_alias_loaded=task_alias_loaded):
+                self._exercise_backend_task_export(task_alias_loaded=task_alias_loaded)
+
+    def test_coverage_task_export_refuses_a_different_valid_supplier_repodigest(self):
+        with self.assertRaisesRegex(RuntimeError, "RepoDigest differs from the committed immutable"):
+            self._exercise_backend_task_export("repo-digest")
 
     def test_coverage_task_export_refuses_foreign_or_ambiguous_content(self):
         controls = {"ambiguous": "unique exact", "metadata": "metadata digest",
                     "daemon": "daemon task identity", "platform": "platform mismatch",
                     "config": "exported daemon config", "tag": "unexpected task archive",
                     "closure": "OCI", "child-metadata": "metadata digest",
-                    "config-platform": "exported task platform", "retag": "tag changed during export",
-                    "retag-before": "tag changed before export", "missing-config": "config member unavailable",
+                    "config-platform": "exported task platform", "retag": "alias changed during export",
+                    "retag-before": "alias changed before export", "missing-config": "config member unavailable",
                     "config-size": "config size mismatch", "config-link": "config member unavailable",
                     "duplicate": "duplicate image archive", "media": "OCI index does not bind",
-                    "pulled-daemon": "pulled task identity"}
+                    "pulled-daemon": "pulled task identity", "alias-ownership": "does not own the preserved archive alias",
+                    "foreign-repo-digest": "RepoDigest differs from the committed immutable",
+                    "ambiguous-repo-digest": "ambiguous pulled task index"}
         for fault, reason in controls.items():
             with self.subTest(fault=fault), self.assertRaisesRegex((AssertionError, RuntimeError), reason):
                 self._exercise_backend_task_export(fault)
@@ -3399,7 +3472,9 @@ class ResourceHarnessTests(unittest.TestCase):
         self.assertIn("1d97294c14c43d477e0a0826e9cd0f2a2af373ddfafe6f10252e8a3c43f32be6", commands)
         self.assertIn("sha256sum --check --strict", commands)
         self.assertIn('log_driver = "k8s-file"', commands)
-        self.assertIn("bash -x build/stress/smoke.sh podman caesiumcloud/resource-stress:${{ env.IMAGE_TAG }}-amd64", commands)
+        smoke = "build/stress/smoke.sh podman caesiumcloud/resource-stress:${{ env.IMAGE_TAG }}-amd64"
+        self.assertIn("bash " + smoke, commands)
+        self.assertNotIn("bash -x " + smoke, commands)
 
     def test_missing_ci_fixture_fails_without_rebuilding(self):
         with tempfile.TemporaryDirectory() as tmp:

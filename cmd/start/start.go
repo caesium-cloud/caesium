@@ -137,8 +137,13 @@ func newFreshnessRunLauncher(
 		// existing and Run being entered (internal/job/job.go).
 		workCtx, releaseWork, err := freshness.TakeRunReservation(ctx)
 		if errors.Is(err, freshness.ErrNoRunReservation) {
-			workCtx, releaseWork, err = runlife.FromContext(ctx).Reserve(ctx)
+			owner := runlife.FromContext(ctx)
+			workCtx, releaseWork, err = owner.Reserve(ctx)
 			if err != nil {
+				if errors.Is(err, runlife.ErrClosed) && errors.Is(owner.Cause(), runlife.ErrServerShutdown) {
+					log.Info("freshness: shutdown refused execution ownership; leaving admitted run for takeover", "run_id", r.ID)
+					return
+				}
 				// This direct caller already admitted the row but acquired no
 				// execution ownership. Settle that exact row without dispatch.
 				cause := fmt.Errorf("freshness: derived run submission refused: %w", err)
@@ -172,8 +177,14 @@ func launchDerivedRun(
 	loadJob func(context.Context, uuid.UUID) (*models.Job, error),
 	execute func(context.Context, *models.Job, *run.JobRun) error,
 ) {
+	if errors.Is(runlife.CancellationCause(ctx), runlife.ErrServerShutdown) {
+		return
+	}
 	j, err := loadDerivedRunJob(ctx, r.JobID, loadJob)
 	if err != nil {
+		if errors.Is(runlife.CancellationCause(ctx), runlife.ErrServerShutdown) {
+			return
+		}
 		// The run row and its `derived` audit are already committed. job.Run —
 		// whose aborted-resume finalizer would normally terminalize a run that
 		// never reached an engine — is never entered on this path, so a bare
@@ -189,6 +200,9 @@ func launchDerivedRun(
 			log.Error("freshness: derived run could not be finalized after a failed job lookup; leaving it for an operator",
 				"job_id", r.JobID, "run_id", r.ID, "error", completeErr)
 		}
+		return
+	}
+	if errors.Is(runlife.CancellationCause(ctx), runlife.ErrServerShutdown) {
 		return
 	}
 	// Fence before the engine: the run may have been cancelled or replaced while
@@ -210,6 +224,9 @@ func launchDerivedRun(
 			"job_id", r.JobID, "run_id", r.ID, "reason", reason)
 		return
 	case fenceUnresolved:
+		if errors.Is(runlife.CancellationCause(ctx), runlife.ErrServerShutdown) {
+			return
+		}
 		// Fail CLOSED. A cancellation that landed before this launcher
 		// registered is visible only in the row, so an unreadable status cannot
 		// be read as "still active" — that is precisely the case where

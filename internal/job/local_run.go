@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"slices"
 	"sync"
 	"time"
@@ -14,6 +15,7 @@ import (
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/caesium-cloud/caesium/internal/ratelimit"
 	"github.com/caesium-cloud/caesium/internal/run"
+	"github.com/caesium-cloud/caesium/internal/runlife"
 	"github.com/caesium-cloud/caesium/internal/worker"
 	"github.com/caesium-cloud/caesium/pkg/env"
 	"github.com/caesium-cloud/caesium/pkg/log"
@@ -21,8 +23,8 @@ import (
 )
 
 // localRun owns local execution state after durable registration. Its map
-// references are shared with admitted workers; fan-out group access retains
-// the mutex used by the original execution closures.
+// references are shared with admitted workers. Output/hash and fan-out group
+// publication are synchronized; scheduler-only maps stay on the run loop.
 type localRun struct {
 	ctx                         context.Context
 	j                           *job
@@ -49,6 +51,7 @@ type localRun struct {
 	taskOutcomes                map[uuid.UUID]run.TaskStatus
 	taskOutputs                 map[uuid.UUID]map[string]string
 	taskHashes                  map[uuid.UUID]string
+	taskIdentityMu              sync.RWMutex
 	taskQuarantine              map[uuid.UUID]bool
 	taskAttempts                map[uuid.UUID]int
 	terminalTasks               int
@@ -62,6 +65,32 @@ type localRun struct {
 	taskPool                    *worker.Pool
 	results                     chan taskResult
 	active                      int
+}
+
+func (l *localRun) taskOutput(id uuid.UUID) (map[string]string, bool) {
+	l.taskIdentityMu.RLock()
+	defer l.taskIdentityMu.RUnlock()
+	output, ok := l.taskOutputs[id]
+	return maps.Clone(output), ok
+}
+
+func (l *localRun) setTaskOutput(id uuid.UUID, output map[string]string) {
+	l.taskIdentityMu.Lock()
+	defer l.taskIdentityMu.Unlock()
+	l.taskOutputs[id] = maps.Clone(output)
+}
+
+func (l *localRun) taskHash(id uuid.UUID) (string, bool) {
+	l.taskIdentityMu.RLock()
+	defer l.taskIdentityMu.RUnlock()
+	hash, ok := l.taskHashes[id]
+	return hash, ok
+}
+
+func (l *localRun) setTaskHash(id uuid.UUID, hash string) {
+	l.taskIdentityMu.Lock()
+	defer l.taskIdentityMu.Unlock()
+	l.taskHashes[id] = hash
 }
 
 func (l *localRun) push(id uuid.UUID) {
@@ -213,7 +242,8 @@ func (l *localRun) haltUnstarted(failedID uuid.UUID) error {
 }
 
 // execute retains the scheduler's separate return and completion errors.
-// A final unresolved-dependencies return must not become the completion cause.
+// TODO: the pre-existing unresolved-dependencies path returns an error but
+// completes with nil. Preserve it for this refactor, not as an intended contract.
 func (l *localRun) execute(initialCompletionErr error) (returnErr error, completionErr error) {
 	runErr := initialCompletionErr
 	ctx := l.ctx
@@ -398,6 +428,13 @@ func (l *localRun) execute(initialCompletionErr error) (returnErr error, complet
 
 		if processed[result.id] {
 			continue
+		}
+
+		if serverShutdown(ctx) {
+			runErr = runlife.ErrServerShutdown
+			halt = true
+			l.queue = l.queue[:0]
+			continue // Drain admitted work without failing/skipping durable siblings.
 		}
 
 		processed[result.id] = true

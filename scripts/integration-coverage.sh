@@ -380,7 +380,7 @@ extract_audit() {
   require_cmd "$CONTAINER_CLI"
   local cid audit_name="${ID}-audit-extract"
   coverage_journey_require_absent container "$audit_name" || die "audit extraction name is not provably free"
-  COVERAGE_JOURNEY_PENDING_NAMES+=("$audit_name")
+  coverage_journey_track_pending_name "$audit_name" "$IMAGE_ID" || die "audit extraction ownership could not be retained"
   cid="$("$CONTAINER_CLI" create --platform "$PLATFORM" --name "$audit_name" \
     --label "caesium.coverage.owner=$CANDIDATE_SHA" \
     --label "caesium.coverage.run=$ID" \
@@ -440,6 +440,8 @@ cleanup_resources() {
     return 1
   fi
   local rc=0
+  coverage_journey_cancel_parallel_workers || rc=1
+  coverage_journey_cleanup_parallel_resources || rc=1
   cleanup_coverage_journeys || rc=1
   if [[ "$NETWORK_PENDING" -eq 1 ]]; then
     coverage_journey_resource remove network "${NETWORK_ID:-$NETWORK}" >/dev/null || rc=1
@@ -744,7 +746,7 @@ PY
 # the only thing that reaches the resource sampler and its projections, so the
 # feature is enabled here exactly as `just integration-up` enables it.
 log "starting coverage server $SERVER_NAME on network $NETWORK (no host port; engine socket group $SOCK_GID)"
-COVERAGE_JOURNEY_PENDING_NAMES+=("$SERVER_NAME")
+coverage_journey_track_pending_name "$SERVER_NAME" "$IMAGE_ID" || die "coverage server ownership could not be retained"
 SERVER_ID="$("$CONTAINER_CLI" run -d \
   --name "$SERVER_NAME" \
   --label "caesium.coverage.owner=$CANDIDATE_SHA" \
@@ -848,7 +850,7 @@ YAML
   coverage_journey_require_absent container "$CONNECTOR_NAME" || return 1
   mkdir -p "$RAW/connectors"
   chmod 0777 "$RAW/connectors"
-  COVERAGE_JOURNEY_PENDING_NAMES+=("$CONNECTOR_NAME")
+  coverage_journey_track_pending_name "$CONNECTOR_NAME" "$IMAGE_ID" || return 1
   if ! CONNECTOR_ID="$("$CONTAINER_CLI" run -d \
     --name "$CONNECTOR_NAME" \
     --label "caesium.coverage.owner=$CANDIDATE_SHA" \
@@ -1151,7 +1153,7 @@ fi
 # ephemeral host port and must record all expected first-attempt passes.
 chmod 0777 "$RAW/browser"
 log "starting isolated browser coverage server $BROWSER_SERVER_NAME"
-COVERAGE_JOURNEY_PENDING_NAMES+=("$BROWSER_SERVER_NAME")
+coverage_journey_track_pending_name "$BROWSER_SERVER_NAME" "$IMAGE_ID" || die "browser server ownership could not be retained"
 BROWSER_SERVER_ID="$("$CONTAINER_CLI" run -d \
   --name "$BROWSER_SERVER_NAME" \
   --label "caesium.coverage.owner=$CANDIDATE_SHA" \

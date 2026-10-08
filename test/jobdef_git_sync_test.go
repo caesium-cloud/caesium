@@ -58,7 +58,7 @@ type gitSyncRun struct {
 // and all Caesium effects are observed via public HTTP and the candidate CLI.
 func (s *IntegrationTestSuite) TestJobdefGitSyncLocalRepositoryUpdatesAndPrunes() {
 	if !envBool("CAESIUM_JOBDEF_GIT_SYNC_LANE") {
-		s.T().Skip("requires the isolated configured GitSync collector lane")
+		s.maintenanceMissingPrerequisite("the isolated configured GitSync collector lane")
 	}
 	s.Require().Equal("docker", s.engineType)
 	root := os.Getenv("CAESIUM_JOBDEF_GIT_FIXTURE_ROOT")

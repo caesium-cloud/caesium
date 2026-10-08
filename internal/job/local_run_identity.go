@@ -36,7 +36,6 @@ func (l *localRun) resolveTaskCacheIdentity(
 	predecessors := l.predecessors
 	runID := l.runID
 	imageIdentityChecksRequired := l.imageIdentityChecksRequired
-	taskHashes := l.taskHashes
 	// The cache configuration the SCHEDULER resolved onto this run's rows,
 	// not a fresh resolution of the live step/job/env config. RegisterTasks
 	// calls ResolveCacheConfig once and freezes all seven fields; the
@@ -68,7 +67,7 @@ func (l *localRun) resolveTaskCacheIdentity(
 
 	var predHashes []string
 	for _, predID := range predecessors[taskID] {
-		if h, ok := taskHashes[predID]; ok {
+		if h, ok := l.taskHash(predID); ok {
 			predHashes = append(predHashes, h)
 			predHashByID[predID] = h
 		}

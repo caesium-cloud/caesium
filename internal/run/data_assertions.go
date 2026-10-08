@@ -170,9 +170,19 @@ func EvaluateDataAssertions(ctx context.Context, store *Store, runID, taskID, ta
 //
 // A nil claim is exactly EvaluateDataAssertions: the local executor
 // (internal/job, enforceClaim=false) holds no claim and cannot be superseded.
-func EvaluateDataAssertionsClaimed(ctx context.Context, store *Store, runID, taskID, taskRunID uuid.UUID, claim *TaskClaim, capture MetricsCapture) error {
+func EvaluateDataAssertionsClaimed(ctx context.Context, store *Store, runID, taskID, taskRunID uuid.UUID, claim *TaskClaim, capture MetricsCapture) (result error) {
 	if !DataAssertionsEnabled() {
 		return nil
+	}
+	// A canceled read or write cannot stand in for an evaluated assertion.
+	// Preserve its exact cause even on the shell's best-effort nil paths.
+	defer func() {
+		if result == nil && ctx.Err() != nil {
+			result = context.Cause(ctx)
+		}
+	}()
+	if cause := context.Cause(ctx); cause != nil {
+		return cause
 	}
 	if store == nil || store.db == nil {
 		return nil

@@ -1135,7 +1135,7 @@ os.execv("/bin/bash",["bash"]+sys.argv[1:])
         container = self.art / "fake-container"
         (self.bin / "docker").symlink_to(container)
         container.write_text(r'''#!/usr/bin/env python3
-import os, pathlib, shutil, sys, json, hashlib
+import os, pathlib, shutil, sys, json, hashlib, re
 root = pathlib.Path(os.environ["FAKE_COV_ROOT"])
 args = sys.argv[1:]
 with (root / "container-args.jsonl").open("a") as log: log.write(json.dumps(args) + "\n")
@@ -1193,7 +1193,8 @@ else:
         if name:
             if any(o["Name"] == "/"+name for o in state["containers"].values()): raise SystemExit("container name already exists")
             cid=hashlib.sha256(name.encode()).hexdigest()
-            state["containers"][cid]={"Id":cid,"Name":"/"+name,"Image":"sha256:"+"c"*64,"RestartCount":0,
+            image_id=next((arg for arg in args if re.fullmatch(r"sha256:[0-9a-f]{64}", arg)), "sha256:"+"c"*64)
+            state["containers"][cid]={"Id":cid,"Name":"/"+name,"Image":image_id,"RestartCount":0,
                 "Config":{"Labels":labels},"State":{"Running":op=="run","ExitCode":0,"OOMKilled":False,"FinishedAt":"2026-10-04T12:00:02Z"}}
             if scenario == "retag": (root/"retagged").write_text("other candidate owns the tag")
             if scenario == "connector-silent" and name.endswith("-connectors"): state["containers"][cid]["State"]["Running"]=False
@@ -1268,6 +1269,9 @@ save()
             "docker_socket": "/var/run/docker.sock", "task_archive": str(archive),
             "task_archive_sha256": hashlib.sha256(archive.read_bytes()).hexdigest(),
             "task_image_id": "sha256:"+config_id, "task_image_ref": "alpine:3.23",
+            "task_image_supplier_ref": "docker.io/library/alpine:3.23@sha256:85fe1e81d6758c208f3e1eed4338a1997e19d4be002d4dd32d3100c9a8c010a0",
+            "kind_image_ref": "kindest/node:v1.36.1",
+            "kind_image_supplier_ref": "kindest/node:v1.36.1@sha256:3489c7674813ba5d8b1a9977baea8a6e553784dab7b84759d1014dbd78f7ebd5",
             "kind_image_id": IMAGE_ID, "podman_service_image_id": IMAGE_ID,
             "podman_privileged_approved": True}))
         self.env["CAESIUM_COVERAGE_BACKEND_INPUTS"] = str(inputs)
@@ -1567,7 +1571,6 @@ class DockerfileAndCollectorTests(unittest.TestCase):
         self.assertIn("go build -cover", text)
         self.assertIn("coverpkg", text)
         self.assertIn("GOCOVERDIR", text)
-        self.assertIn("SIGUSR2", text)
         self.assertIn("runtime/coverage", text)
         self.assertIn("reagents/go.mod", text)
         self.assertIn("reagents packages leaked", text)
@@ -1597,7 +1600,6 @@ class DockerfileAndCollectorTests(unittest.TestCase):
     def test_collector_script_invariants(self):
         text = COLLECTOR.read_text()
         self.assertIn("GOCOVERDIR", text)
-        self.assertIn("SIGUSR2", text)
         self.assertIn("docker stop", text)
         self.assertIn("job apply", text)
         self.assertIn("job export", text)
@@ -1625,7 +1627,8 @@ class DockerfileAndCollectorTests(unittest.TestCase):
         self.assertIn("-p 127.0.0.1::8080", text)
         self.assertNotIn("-p 8080:8080", text)
         helper = (ROOT / "scripts/coverage-journeys.py").read_text()
-        self.assertIn('"kill", "--signal=SIGUSR2"', helper)
+        # Flush signaling and clean-exit acceptance are exercised against the
+        # real guarded-resource helper in test_coverage_journeys.py.
         self.assertIn('coverage_journey_resource stop container "$SERVER_ID"', text)
         self.assertIn("CAESIUM_COVERAGE_BROWSER_DIR", text)
         self.assertIn("no host port", text)
@@ -1646,8 +1649,6 @@ class DockerfileAndCollectorTests(unittest.TestCase):
         self.assertIn('rm -rf "$RAW/cli"', text)
         self.assertIn("*.provenance.json", text)
         self.assertIn("stop_rc", text)
-        self.assertIn('if [[ "$exit_code" != "0" ]]', text)
-        self.assertIn('state.get("ExitCode") != 0', helper)
 
     def test_collector_bash_syntax(self):
         for script in (COLLECTOR, BROWSER_JOURNEY):

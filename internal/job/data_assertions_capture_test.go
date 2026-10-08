@@ -6,8 +6,11 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync/atomic"
 	"testing"
 
+	"github.com/caesium-cloud/caesium/internal/atom"
+	"github.com/caesium-cloud/caesium/internal/cache"
 	jobdeftestutil "github.com/caesium-cloud/caesium/internal/jobdef/testutil"
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/caesium-cloud/caesium/internal/run"
@@ -17,6 +20,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"gorm.io/datatypes"
 	"gorm.io/gorm"
 )
 
@@ -34,12 +38,13 @@ import (
 // captureFixture is one job with one step that declares a produced dataset
 // under a min-bound contract, wired to the local executor.
 type captureFixture struct {
-	db     *gorm.DB
-	store  *run.Store
-	engine *fakeEngine
-	jobID  uuid.UUID
-	taskID uuid.UUID
-	opts   []JobOption
+	db      *gorm.DB
+	store   *run.Store
+	engine  *fakeEngine
+	jobID   uuid.UUID
+	taskID  uuid.UUID
+	opts    []JobOption
+	taskSvc *fakeTaskService
 }
 
 func newCaptureFixture(t *testing.T, onViolation string) *captureFixture {
@@ -64,6 +69,7 @@ func newCaptureFixture(t *testing.T, onViolation string) *captureFixture {
 	taskSvc := &fakeTaskService{tasks: models.Tasks{
 		{ID: f.taskID, JobID: f.jobID, AtomID: atomID, Name: "load"},
 	}}
+	f.taskSvc = taskSvc
 	atomSvc := &fakeAtomService{atoms: map[uuid.UUID]*models.Atom{atomID: fakeModelAtom(atomID)}}
 	persistGraph(t, db, taskSvc.tasks, nil)
 
@@ -187,4 +193,54 @@ func TestLocalExecutorSilentStepStillFailsMissing(t *testing.T) {
 
 	snapshot := latestRunSnapshot(t, f.store, f.jobID)
 	assert.Equal(t, run.TaskStatusFailed, taskStatusByID(snapshot)[f.taskID])
+}
+
+type assertionCompletionEngine struct {
+	*fakeEngine
+	stopped *atomic.Bool
+}
+
+func (e *assertionCompletionEngine) Stop(req *atom.EngineStopRequest) error {
+	err := e.fakeEngine.Stop(req)
+	e.stopped.Store(true)
+	return err
+}
+
+func TestLocalAssertionReadCancellationCannotSucceedOrPublishCache(t *testing.T) {
+	f := newCaptureFixture(t, "fail")
+	f.taskSvc.tasks[0].CacheConfig = datatypes.JSON("true")
+	require.NoError(t, f.db.Model(&models.Task{}).Where("id = ?", f.taskID).Update("cache_config", datatypes.JSON("true")).Error)
+	f.engine.logsByName[f.taskID.String()] = "##caesium::metrics {\"dataset\":\"warehouse/orders\",\"rowCount\":5000}\n"
+	var stopped atomic.Bool
+	f.opts = append(f.opts, WithDockerEngineFactory(func(context.Context) atom.Engine {
+		return &assertionCompletionEngine{fakeEngine: f.engine, stopped: &stopped}
+	}))
+	ctx, cancel := context.WithCancelCause(t.Context())
+	defer cancel(nil)
+	cause := errors.New("cancelled during assertion declaration read")
+	var cancelled atomic.Bool
+	const callback = "test:cancel_local_assertion_read"
+	require.NoError(t, f.db.Callback().Query().Before("gorm:query").Register(callback, func(tx *gorm.DB) {
+		if tx.Statement.Table == "dataset_declarations" && stopped.Load() && cancelled.CompareAndSwap(false, true) {
+			cancel(cause)
+		}
+	}))
+	defer func() { require.NoError(t, f.db.Callback().Query().Remove(callback)) }()
+	returned := New(&models.Job{ID: f.jobID}, f.opts...).Run(ctx)
+	require.True(t, stopped.Load(), "container actually succeeded before evaluator cancellation")
+	require.True(t, cancelled.Load(), "cancel must occur inside the evaluator, after successful execution")
+	require.ErrorIs(t, returned, cause)
+	snapshot := latestRunSnapshot(t, f.store, f.jobID)
+	row := taskRunByID(snapshot, f.taskID)
+	require.NotNil(t, row)
+	require.Equal(t, run.StatusFailed, snapshot.Status)
+	require.Equal(t, run.TaskStatusFailed, row.Status)
+	var persisted models.TaskRun
+	// Store.Get collapses its task view to catalog IDs; query the actual row
+	// within this exact run rather than using that view ID as a primary key.
+	require.NoError(t, f.db.Where("job_run_id = ? AND task_id = ?", snapshot.ID, f.taskID).First(&persisted).Error)
+	require.NotEmpty(t, persisted.Hash)
+	_, found, err := cache.NewStore(f.db).Get(persisted.Hash)
+	require.NoError(t, err)
+	require.False(t, found, "an unevaluated assertion cannot publish a successful cache result")
 }

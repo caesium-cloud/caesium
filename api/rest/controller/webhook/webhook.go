@@ -140,7 +140,7 @@ func ReceiveWithServices(c *echo.Context, trigSvc TriggerLister, jobSvc JobListe
 	// commit any durable work. Request cancellation does not end these contexts.
 	receiptCtx, releaseReceipt, err := runlife.FromContext(c.Request().Context()).Reserve(c.Request().Context())
 	if err != nil {
-		return echo.NewHTTPError(http.StatusServiceUnavailable, err.Error()).Wrap(err)
+		return webhookAdmissionError(path, err)
 	}
 	receiptTransferred := false
 	defer func() {
@@ -158,7 +158,7 @@ func ReceiveWithServices(c *echo.Context, trigSvc TriggerLister, jobSvc JobListe
 	for _, acceptedTrigger := range accepted {
 		launch, release, err := reserveHTTPTriggerJobs(c.Request().Context(), acceptedTrigger, runner)
 		if err != nil {
-			return echo.NewHTTPError(http.StatusServiceUnavailable, err.Error()).Wrap(err)
+			return webhookAdmissionError(path, err)
 		}
 		launches = append(launches, launch)
 		releases = append(releases, release)
@@ -195,6 +195,13 @@ func ReceiveWithServices(c *echo.Context, trigSvc TriggerLister, jobSvc JobListe
 	receiptTransferred = true
 
 	return c.JSON(http.StatusAccepted, webhookReceiptResponse(receipt))
+}
+
+func webhookAdmissionError(path string, err error) error {
+	if errors.Is(err, runlife.ErrMissing) {
+		log.Error("webhook run supervisor wiring is missing", "path", path, "error", err)
+	}
+	return echo.NewHTTPError(http.StatusServiceUnavailable, "service unavailable").Wrap(err)
 }
 
 func FireHTTPTrigger(ctx context.Context, jobSvc JobLister, trig *models.Trigger, params map[string]string, runner Runner) error {

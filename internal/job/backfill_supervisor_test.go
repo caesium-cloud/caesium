@@ -293,3 +293,72 @@ func TestBackfillFinalizesExactCommittedAdmissionFailureBeforeReleasingOwnership
 	require.NoError(t, err)
 	require.Equal(t, 1, stored.FailedRuns)
 }
+
+func TestBackfillServerShutdownPreservesDriverAndDurableChild(t *testing.T) {
+	b, j, bStore, rStore := backfillLifetimeFixture(t)
+	owner := runlife.New(t.Context())
+	ctx, release, err := owner.Reserve(runlife.WithSupervisor(t.Context(), owner))
+	require.NoError(t, err)
+	started := make(chan context.Context, 1)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		defer release()
+		runBackfill(ctx, b, j, mustParseCron(t, "0 * * * *"), time.UTC, bStore, rStore,
+			func(ctx context.Context, _ *models.Job, _ map[string]string) error {
+				started <- ctx
+				<-ctx.Done()
+				return context.Cause(ctx)
+			})
+	}()
+	t.Cleanup(func() {
+		owner.CloseAndCancelCause(runlife.ErrServerShutdown)
+		wait, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		require.NoError(t, owner.Wait(wait))
+	})
+	var child context.Context
+	select {
+	case child = <-started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("child did not start")
+	}
+	childID, ok := runstore.FromContext(child)
+	require.True(t, ok)
+	var before models.JobRun
+	require.NoError(t, rStore.DB().First(&before, "id = ?", childID).Error)
+	owner.CloseAndCancelCause(runlife.ErrServerShutdown)
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("backfill did not join shutdown child")
+	}
+	require.ErrorIs(t, context.Cause(child), runlife.ErrServerShutdown)
+	stored, err := bStore.Get(b.ID)
+	require.NoError(t, err)
+	require.Equal(t, models.BackfillStatusRunning, stored.Status)
+	require.Zero(t, stored.FailedRuns)
+	require.Zero(t, stored.CompletedRuns)
+	var after models.JobRun
+	require.NoError(t, rStore.DB().First(&after, "id = ?", childID).Error)
+	require.Equal(t, before, after)
+	require.Zero(t, CancelRunContexts(childID), "joined shutdown child released its process registration")
+}
+
+func TestShutdownOwnerBackfillLeavesDriverAvailableWithoutAdmission(t *testing.T) {
+	b, j, bStore, rStore := backfillLifetimeFixture(t)
+	owner := runlife.New(t.Context())
+	owner.CloseAndCancelCause(runlife.ErrServerShutdown)
+	runBackfill(runlife.WithSupervisor(t.Context(), owner), b, j, mustParseCron(t, "0 * * * *"), time.UTC, bStore, rStore,
+		func(context.Context, *models.Job, map[string]string) error {
+			t.Fatal("closed owner admitted a child")
+			return nil
+		})
+	stored, err := bStore.Get(b.ID)
+	require.NoError(t, err)
+	require.Equal(t, models.BackfillStatusRunning, stored.Status)
+	require.Zero(t, stored.FailedRuns)
+	var count int64
+	require.NoError(t, rStore.DB().Model(&models.JobRun{}).Where("backfill_id = ?", b.ID).Count(&count).Error)
+	require.Zero(t, count)
+}

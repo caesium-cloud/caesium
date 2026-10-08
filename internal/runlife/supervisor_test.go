@@ -163,3 +163,35 @@ func TestCanceledNaturalDrainDoesNotClaimJoin(t *testing.T) {
 	release()
 	require.NoError(t, s.Wait(t.Context()))
 }
+
+func TestShutdownCauseReachesReservationAndRejectsAdmission(t *testing.T) {
+	owner := New(t.Context())
+	child, release, err := owner.Reserve(WithSupervisor(t.Context(), owner))
+	require.NoError(t, err)
+	owner.CloseAndCancelCause(ErrServerShutdown)
+	require.ErrorIs(t, CancellationCause(WithSupervisor(t.Context(), owner)), ErrServerShutdown,
+		"closed lifetime is authoritative before asynchronous child propagation")
+	select {
+	case <-child.Done():
+	case <-time.After(time.Second):
+		t.Fatal("shutdown did not reach reserved child")
+	}
+	require.ErrorIs(t, context.Cause(child), ErrServerShutdown)
+	_, _, err = owner.Reserve(t.Context())
+	require.ErrorIs(t, err, ErrClosed)
+	release()
+	require.ErrorIs(t, context.Cause(child), ErrServerShutdown, "release must preserve the first cause")
+	require.NoError(t, owner.Wait(t.Context()))
+}
+
+func TestShutdownDoesNotOverrideRecordedUserCancellationOrDeadline(t *testing.T) {
+	for _, cause := range []error{context.Canceled, context.DeadlineExceeded} {
+		t.Run(cause.Error(), func(t *testing.T) {
+			owner := New(t.Context())
+			ctx, cancel := context.WithCancelCause(WithSupervisor(t.Context(), owner))
+			cancel(cause)
+			owner.CloseAndCancelCause(ErrServerShutdown)
+			require.ErrorIs(t, CancellationCause(ctx), cause)
+		})
+	}
+}

@@ -21,6 +21,9 @@ func ResponseError(operation string, status int, body []byte, readErr error) err
 		return fmt.Errorf("%s failed (%d): %s", operation, status, strings.TrimSpace(string(body)))
 	}
 	if readErr != nil {
+		if status >= http.StatusOK && status < http.StatusMultipleChoices {
+			return fmt.Errorf("%s accepted (%d), but response body incomplete; the operation may already have taken effect, verify before retrying: %w", operation, status, readErr)
+		}
 		return fmt.Errorf("reading %s response: %w", operation, readErr)
 	}
 	return nil

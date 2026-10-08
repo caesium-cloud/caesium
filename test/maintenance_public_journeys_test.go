@@ -133,7 +133,7 @@ func (s *IntegrationTestSuite) TestFreshnessCronTickSkipsFreshOutput() {
 	var features freshnessFeatures
 	s.maintenanceJSON("/v1/system/features", &features)
 	if !features.FreshnessEnabled {
-		s.T().Skipf("%s requires CAESIUM_FRESHNESS_ENABLED=true on the server", s.T().Name())
+		s.maintenanceMissingPrerequisite("CAESIUM_FRESHNESS_ENABLED=true on the server")
 	}
 	s.Require().True(features.FreshnessEnabled)
 	cli, _ := s.maintenanceDockerPrerequisite()
@@ -260,6 +260,8 @@ func (s *IntegrationTestSuite) TestAutomaticRetryDelayConstantAndBackoff() {
 			concreteID := ""
 			s.T().Cleanup(func() { s.maintenanceRunCleanup(cli, jobID, runID, taskID, alias, ids) })
 			var terminal maintenanceRun
+			poll := time.NewTicker(100 * time.Millisecond)
+			defer poll.Stop()
 			for {
 				select {
 				case message, open := <-messages:
@@ -274,7 +276,7 @@ func (s *IntegrationTestSuite) TestAutomaticRetryDelayConstantAndBackoff() {
 					s.Require().FailNow("native event stream ended before retry proof")
 				case <-ctx.Done():
 					s.Require().NoError(ctx.Err(), "automatic retries did not finish within their bound")
-				case <-time.After(100 * time.Millisecond):
+				case <-poll.C:
 					row := s.maintenancePartition(jobID, runID, taskID)
 					if row.TaskRunID == "" {
 						continue
@@ -350,7 +352,7 @@ func (s *IntegrationTestSuite) TestAutomaticRetryDelayConstantAndBackoff() {
 func (s *IntegrationTestSuite) maintenanceDockerPrerequisite() (*client.Client, string) {
 	s.T().Helper()
 	if s.engineType != "" && s.engineType != "docker" {
-		s.T().Skipf("%s requires preloaded Docker tasks/native observation; engine=%s", s.T().Name(), s.engineType)
+		s.maintenanceMissingPrerequisite("preloaded Docker tasks/native observation; engine=" + s.engineType)
 	}
 	cli := s.dockerClient()
 	s.T().Cleanup(func() { s.NoError(cli.Close()) })
@@ -358,10 +360,18 @@ func (s *IntegrationTestSuite) maintenanceDockerPrerequisite() (*client.Client, 
 	defer cancel()
 	image, err := cli.ImageInspect(ctx, "alpine:3.23")
 	if errdefs.IsNotFound(err) {
-		s.T().Skipf("%s requires preloaded alpine:3.23; no implicit pull", s.T().Name())
+		s.maintenanceMissingPrerequisite("preloaded alpine:3.23; no implicit pull")
 	}
 	s.Require().NoError(err, "unexpected Docker prerequisite observation failure")
 	return cli, image.ID
+}
+
+func (s *IntegrationTestSuite) maintenanceMissingPrerequisite(reason string) {
+	s.T().Helper()
+	if envBool("CAESIUM_MAINTENANCE_JOURNEYS_REQUIRED") {
+		s.Require().FailNow("required maintenance journey prerequisite missing", reason)
+	}
+	s.T().Skipf("%s requires %s", s.T().Name(), reason)
 }
 
 // All HTTP observations require a complete bounded body, including read/close

@@ -239,6 +239,9 @@ func (j *job) ownsUndispatchedRetry(taskRunID uuid.UUID) bool {
 // engine, because returning would leave it pending on a run with no engine.
 // Reports whether a replacement was started.
 func (j *job) handOffPendingPartitionRetries(ctx context.Context, store *run.Store, runID uuid.UUID, params map[string]string) (bool, error) {
+	if serverShutdown(ctx) {
+		return false, runlife.ErrServerShutdown
+	}
 	pending, err := store.PendingPartitionRetries(runID)
 	if err != nil {
 		log.Error("run completion kept being refused and the pending partition retries could not be read",
@@ -257,6 +260,9 @@ func (j *job) handOffPendingPartitionRetries(ctx context.Context, store *run.Sto
 	log.Error("run completion kept being refused; handing every pending partition retry to a replacement engine",
 		"job_id", j.id, "run_id", runID, "instances", len(ids))
 	if err := j.startReplacementRun(ctx, runID, params, ids); err != nil {
+		if serverShutdown(ctx) {
+			return false, runlife.ErrServerShutdown
+		}
 		return false, j.abandonRejectedReplacement(store, runID, ids, err)
 	}
 	return true, nil
@@ -271,6 +277,9 @@ func (j *job) handOffPendingPartitionRetries(ctx context.Context, store *run.Sto
 // handedOff is true when a replacement now owns the run's finalization; the
 // returned error is the run error, possibly replaced by the abandon reason.
 func (j *job) recoverPendingPartitionRetries(ctx context.Context, store *run.Store, runID uuid.UUID, params map[string]string, runErr error) (handedOff bool, updated error, err error) {
+	if serverShutdown(ctx) {
+		return false, runlife.ErrServerShutdown, nil
+	}
 	pending, err := store.PendingPartitionRetries(runID)
 	if err != nil {
 		return false, runErr, err
@@ -287,6 +296,9 @@ func (j *job) recoverPendingPartitionRetries(ctx context.Context, store *run.Sto
 	// must not inherit rows this engine already failed to dispatch, or they
 	// would bounce between engines instead of resolving.
 	if len(mine) > 0 {
+		if serverShutdown(ctx) {
+			return false, runlife.ErrServerShutdown, nil
+		}
 		reason := "partition retry abandoned: the replacement engine could not dispatch the reset instance; retry the run"
 		abandoned, abandonErr := store.AbandonPartitionRetries(runID, mine, reason)
 		log.Error("partition retry could not be dispatched by the replacement engine; abandoning it",
@@ -305,6 +317,9 @@ func (j *job) recoverPendingPartitionRetries(ctx context.Context, store *run.Sto
 		log.Info("partition retry landed after the DAG finished; starting replacement engine",
 			"job_id", j.id, "run_id", runID, "instances", len(fresh))
 		if admissionErr := j.startReplacementRun(ctx, runID, params, fresh); admissionErr != nil {
+			if serverShutdown(ctx) {
+				return false, runlife.ErrServerShutdown, nil
+			}
 			failure := j.abandonRejectedReplacement(store, runID, fresh, admissionErr)
 			if errors.Is(failure, admissionErr) && !errors.Is(failure, errReplacementAbandonFailed) {
 				return false, errors.Join(runErr, failure), nil
@@ -545,6 +560,12 @@ func withPartitionRetryReplacement(taskRunIDs []uuid.UUID) JobOption {
 	}
 }
 
+// serverShutdown relinquishes the executor without changing durable claims.
+// A run deadline or user cancellation recorded first keeps its own authority.
+func serverShutdown(ctx context.Context) bool {
+	return errors.Is(runlife.CancellationCause(ctx), runlife.ErrServerShutdown)
+}
+
 // reserveLocalChild preserves direct local execution when no server owner is
 // carried. Server adapters always supply an owner; its closure is authoritative.
 func reserveLocalChild(ctx context.Context) (context.Context, func(), error) {
@@ -634,6 +655,9 @@ func (j *job) startReplacementRun(ctx context.Context, runID uuid.UUID, params m
 // callbacks fire as for any failed run. A run another path already finalized
 // is left alone.
 func (j *job) finalizeAbortedResume(ctx context.Context, store *run.Store, runID uuid.UUID, cause error) {
+	if serverShutdown(ctx) {
+		return
+	}
 	snapshot, err := store.Get(runID)
 	if err != nil {
 		log.Error("resumed engine failed before executing and the run could not be read", "job_id", j.id, "run_id", runID, "cause", cause, "error", err)
@@ -651,17 +675,23 @@ func (j *job) finalizeAbortedResume(ctx context.Context, store *run.Store, runID
 	// number of times, exactly as the normal completion path does.
 	var finalized bool
 	terminationWon := func() bool {
-		if original := context.Cause(ctx); run.IsRunDeadlineError(original) {
+		switch original := context.Cause(ctx); {
+		case run.IsRunDeadlineError(original):
 			cause = original
-		} else if ctx.Err() == context.Canceled {
+		case serverShutdown(ctx):
+			cause = runlife.ErrServerShutdown
+		case ctx.Err() == context.Canceled:
 			cause = run.NewRunCancellationError(context.Cause(ctx))
-		} else {
+		default:
 			return false
 		}
 		return true
 	}
 	complete := func() (bool, error) {
 		terminationWon()
+		if errors.Is(cause, runlife.ErrServerShutdown) && !run.IsRunDeadlineError(cause) {
+			return false, nil
+		}
 		return store.CompleteIfActive(runID, cause)
 	}
 	if terminationWon() {
@@ -978,6 +1008,9 @@ func (j *job) Run(ctx context.Context) (err error) {
 			j.finalizeAbortedResume(ctx, store, resumeID, err)
 		}()
 	}
+	if serverShutdown(ctx) {
+		return runlife.ErrServerShutdown
+	}
 	vars := j.envVariables()
 	secretResolver := j.secretResolver
 	if secretResolver == nil {
@@ -1015,6 +1048,9 @@ func (j *job) Run(ctx context.Context) (err error) {
 	}
 
 	resolveRun := func() (*run.JobRun, error) {
+		if serverShutdown(ctx) {
+			return nil, runlife.ErrServerShutdown
+		}
 		startOpts := []run.StartOption{run.WithStartParams(j.params)}
 		startPriority := strings.TrimSpace(j.priorityOverride)
 		if startPriority == "" {
@@ -1049,6 +1085,9 @@ func (j *job) Run(ctx context.Context) (err error) {
 				return store.Get(running.ID)
 			}
 
+			if serverShutdown(ctx) {
+				return nil, runlife.ErrServerShutdown
+			}
 			if err := store.ResetInFlightTasks(running.ID); err != nil {
 				return nil, err
 			}
@@ -1114,20 +1153,27 @@ func (j *job) Run(ctx context.Context) (err error) {
 		// non-terminal. Per-task deadlines use child contexts and cannot enter
 		// this branch.
 		terminationWon := func() bool {
-			if cause := context.Cause(ctx); runTimeout > 0 && run.IsRunDeadlineError(cause) {
+			switch cause := context.Cause(ctx); {
+			case runTimeout > 0 && run.IsRunDeadlineError(cause):
 				runErr = cause
 				err = cause
-			} else if ownerCtx.Err() == context.Canceled {
+			case serverShutdown(ownerCtx):
+				runErr = runlife.ErrServerShutdown
+				err = runErr
+			case ownerCtx.Err() == context.Canceled:
 				// Sample the owner, never the cleanup-canceled deadline child.
 				runErr = run.NewRunCancellationError(context.Cause(ownerCtx))
 				err = runErr
-			} else {
+			default:
 				return false
 			}
 			return true
 		}
 		complete := func() error {
 			terminationWon()
+			if errors.Is(runErr, runlife.ErrServerShutdown) && !run.IsRunDeadlineError(runErr) {
+				return runlife.ErrServerShutdown
+			}
 			return store.Complete(runID, runErr)
 		}
 		if j.beforeComplete != nil {
@@ -1197,6 +1243,9 @@ func (j *job) Run(ctx context.Context) (err error) {
 			}
 			runErr = updatedErr
 			completeErr = complete()
+		}
+		if errors.Is(completeErr, runlife.ErrServerShutdown) {
+			return // The surviving owner keeps durable work and completion callbacks.
 		}
 		if completeErr != nil {
 			log.Error("run completion persistence failure", "run_id", runID, "error", completeErr)
@@ -1387,7 +1436,6 @@ func (j *job) Run(ctx context.Context) (err error) {
 	}
 	processed := local.processed
 	taskOutcomes := local.taskOutcomes
-	taskOutputs := local.taskOutputs
 	taskQuarantine := local.taskQuarantine
 	taskAttempts := local.taskAttempts
 	imageIdentityChecksRequired := false
@@ -1414,7 +1462,7 @@ func (j *job) Run(ctx context.Context) (err error) {
 			processed[taskState.ID] = true
 			taskOutcomes[taskState.ID] = run.TaskStatusSucceeded
 			if len(taskState.Output) > 0 {
-				taskOutputs[taskState.ID] = taskState.Output
+				local.setTaskOutput(taskState.ID, taskState.Output)
 			}
 			local.terminalTasks++
 		case run.TaskStatusSkipped:

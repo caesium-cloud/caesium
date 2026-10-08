@@ -24,11 +24,11 @@ type PredecessorInputs struct {
 // return no partial inputs. Legacy status/trigger readers remain best-effort.
 func (s *Store) PredecessorExecutionInputs(ctx context.Context, runID, taskID uuid.UUID) (PredecessorInputs, error) {
 	var result PredecessorInputs
-	var options []*sql.TxOptions
+	options := []*sql.TxOptions{{ReadOnly: true}}
 	if s.db.Name() == "postgres" {
 		// READ COMMITTED would let the graph/name and output queries observe
 		// different commits. SQLite/dqlite already keep one read view per txn.
-		options = []*sql.TxOptions{{Isolation: sql.LevelRepeatableRead, ReadOnly: true}}
+		options[0].Isolation = sql.LevelRepeatableRead
 	}
 	err := withStoreBusyRetryContext(ctx, func() error {
 		// A failed commit can leave a complete but uncommitted projection.

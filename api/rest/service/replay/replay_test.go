@@ -640,17 +640,60 @@ func replayTestContext(t *testing.T) context.Context {
 }
 
 func TestReplayRefusesOwnerBeforeMaterialization(t *testing.T) {
+	f := newServiceReplayFixture(t)
 	owner := runlife.New(context.Background())
 	owner.CloseAndCancel()
 	for _, ctx := range []context.Context{context.Background(), runlife.WithSupervisor(context.Background(), owner)} {
 		dispatcher := &recordingDispatcher{}
-		// A nonnil store with no DB panics if admission reaches database work.
-		svc := &Service{ctx: ctx, store: &runstorage.Store{}, dispatcher: dispatcher}
-		result, err := svc.Replay(Request{JobID: uuid.New(), BaselineRunID: uuid.New(), IdempotencyKey: "key"})
+		svc := &Service{ctx: ctx, store: f.store, dispatcher: dispatcher}
+		result, err := svc.Replay(Request{JobID: f.jobID, BaselineRunID: f.runID, IdempotencyKey: "key"})
 		require.Nil(t, result)
 		require.True(t, errors.Is(err, runlife.ErrMissing) || errors.Is(err, runlife.ErrClosed))
 		require.Empty(t, dispatcher.calls)
 	}
+	var count int64
+	require.NoError(t, f.db.Model(&models.JobRun{}).Where("replay_fingerprint IS NOT NULL").Count(&count).Error)
+	require.Zero(t, count, "an idempotency lookup is permitted, but new replay materialization is refused")
+}
+
+func TestReplayExistingWithoutPendingWorkDoesNotRequireAdmission(t *testing.T) {
+	f := newServiceReplayFixture(t)
+	f.seedTask(t, true, "success")
+	request := Request{JobID: f.jobID, BaselineRunID: f.runID, IdempotencyKey: "existing-without-work", Principal: f.principal}
+	dispatcher := &recordingDispatcher{}
+	first, err := (&Service{ctx: replayTestContext(t), store: f.store, dispatcher: dispatcher}).WithExecutionMode("distributed").Replay(request)
+	require.NoError(t, err)
+	dispatchCalls := len(dispatcher.calls)
+	// Materialized work has finished. A same-key read does not launch anything.
+	require.NoError(t, f.db.Model(&models.TaskRun{}).Where("job_run_id = ?", first.Run.ID).Update("status", string(runstorage.TaskStatusSucceeded)).Error)
+	for _, status := range []runstorage.Status{runstorage.StatusRunning, runstorage.StatusSucceeded} {
+		require.NoError(t, f.db.Model(&models.JobRun{}).Where("id = ?", first.Run.ID).Update("status", string(status)).Error)
+		owner := runlife.New(context.Background())
+		owner.CloseAndCancel()
+		for _, ctx := range []context.Context{context.Background(), runlife.WithSupervisor(context.Background(), owner)} {
+			result, err := (&Service{ctx: ctx, store: f.store, dispatcher: dispatcher}).WithExecutionMode("distributed").Replay(request)
+			require.NoError(t, err)
+			require.True(t, result.Existing)
+			require.Equal(t, first.Run.ID, result.Run.ID)
+		}
+	}
+	require.Len(t, dispatcher.calls, dispatchCalls, "same-key metadata reads must not redispatch")
+}
+
+func TestReplayExistingPendingWorkStillRequiresAdmission(t *testing.T) {
+	f := newServiceReplayFixture(t)
+	f.seedTask(t, true, "success")
+	request := Request{JobID: f.jobID, BaselineRunID: f.runID, IdempotencyKey: "existing-pending", Principal: f.principal, Set: map[string]string{"mode": "what-if"}}
+	dispatcher := &recordingDispatcher{err: errors.New("dispatch unavailable")}
+	_, err := (&Service{ctx: replayTestContext(t), store: f.store, dispatcher: dispatcher}).WithExecutionMode("distributed").Replay(request)
+	require.ErrorIs(t, err, dispatcher.err)
+	require.Len(t, dispatcher.calls, 1)
+	owner := runlife.New(context.Background())
+	owner.CloseAndCancel()
+	result, err := (&Service{ctx: runlife.WithSupervisor(t.Context(), owner), store: f.store, dispatcher: dispatcher}).WithExecutionMode("distributed").Replay(request)
+	require.Nil(t, result)
+	require.ErrorIs(t, err, runlife.ErrClosed)
+	require.Len(t, dispatcher.calls, 1, "closed admission must not redispatch the existing pending run")
 }
 func TestAsyncDispatcherFailureReleasesOwnerAndRunRegistration(t *testing.T) {
 	f := newServiceReplayFixture(t)

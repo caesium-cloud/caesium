@@ -58,7 +58,11 @@ class BackendGuards(unittest.TestCase):
             if extra:
                 tar.addfile(extra)
         return {'schema_version': 1, 'platform': 'linux/' + arch, 'docker_socket': '/owned/docker.sock', 'task_archive': str(path), 'task_archive_sha256': b.digest(path),
-                'task_image_id': image_id, 'task_docker_image_id': INDEX, 'task_image_ref': 'alpine:3.23', 'kind_image_id': IMAGE, 'podman_service_image_id': BUILDER,
+                'task_image_id': image_id, 'task_docker_image_id': INDEX, 'task_image_ref': 'alpine:3.23',
+                'task_image_supplier_ref': b.PINNED_TASK_SUPPLIER_REF,
+                'kind_image_ref': 'kindest/node:v1.36.1',
+                'kind_image_supplier_ref': b.PINNED_KIND_SUPPLIER_REF,
+                'kind_image_id': IMAGE, 'podman_service_image_id': BUILDER,
                 'podman_privileged_approved': True, '_inputs_sha256': '6' * 64}
 
     def raw(self, name='raw'):
@@ -103,11 +107,40 @@ class BackendGuards(unittest.TestCase):
         inputs = self.archive(tags=['alpine:3.23', 'foreign:latest'])
         with self.assertRaises(b.Refused):
             b.validate_inputs(inputs, ['kubernetes'])
+
+    def test_task_and_kind_supplier_refs_are_required_immutable_committed_pins(self):
+        for field, wrong in (
+            ('task_image_supplier_ref', 'docker.io/library/alpine:3.23'),
+            ('kind_image_supplier_ref', 'kindest/node:v1.36.1'),
+            ('task_image_ref', 'alpine:latest'),
+            ('kind_image_ref', 'kindest/node:latest'),
+        ):
+            with self.subTest(field=field):
+                inputs = self.archive()
+                inputs[field] = wrong
+                with self.assertRaises(b.Refused):
+                    b.validate_inputs(inputs, ['kubernetes', 'podman'])
+        for field in ('task_image_supplier_ref', 'kind_image_supplier_ref'):
+            with self.subTest(missing=field):
+                inputs = self.archive()
+                inputs.pop(field)
+                with self.assertRaises(b.Refused):
+                    b.validate_inputs(inputs, ['kubernetes', 'podman'])
         link = tarfile.TarInfo('unowned')
         link.type, link.linkname = tarfile.SYMTYPE, '/foreign'
         inputs = self.archive(extra=link)
         with self.assertRaises(b.Refused):
             b.validate_inputs(inputs, ['kubernetes'])
+
+    def test_pulled_task_repo_digest_must_equal_committed_alpine_supplier_index(self):
+        digest = b.PINNED_TASK_SUPPLIER_REF.split('@', 1)[1]
+        accepted = 'docker.io/library/alpine@' + digest
+        self.assertEqual(
+            b.validate_task_supplier_index_ref(accepted, b.PINNED_TASK_SUPPLIER_REF), accepted)
+        contradictory = 'docker.io/library/alpine@sha256:' + ('a' * 64)
+        for repo_digest in (contradictory, 'example.invalid/alpine@' + digest):
+            with self.subTest(repo_digest=repo_digest), self.assertRaises(b.Refused):
+                b.validate_task_supplier_index_ref(repo_digest, b.PINNED_TASK_SUPPLIER_REF)
 
     def test_oci_archive_requires_complete_digest_bound_descriptor_closure(self):
         def archive(omit=None, corrupt=None, wrong_platform=False):
@@ -413,6 +446,10 @@ class BackendGuards(unittest.TestCase):
             self.assertEqual(record['builder_image_id'], BUILDER)
             self.assertEqual(record['source_inventory_sha256'], driver.context['source_inventory']['sha256'])
             self.assertEqual(record['backend_receipts']['task_docker_image_id'], INDEX)
+            self.assertEqual(record['backend_receipts']['task_image_supplier_ref'],
+                             b.PINNED_TASK_SUPPLIER_REF)
+            self.assertEqual(record['backend_receipts']['kind_image_supplier_ref'],
+                             b.PINNED_KIND_SUPPLIER_REF)
             self.assertEqual(record['test_suite']['passed_scenarios'], 3)
             if record['source'] == 'cli':
                 self.assertEqual(record['flush'], 'process-exit')
@@ -460,7 +497,25 @@ class BackendGuards(unittest.TestCase):
             plan = json.loads(stdout.getvalue())
         self.assertIsNone(plan['candidate_sha'])
         self.assertTrue(plan['smoke'])
+        self.assertEqual(plan['mode'], 'discovery-only; no Docker/network/resources')
+        self.assertFalse(plan['coverage_contribution'])
+        self.assertFalse(plan['complete'])
         self.assertFalse(output.exists())
+
+    def test_gate_mode_requires_both_real_backends_and_run_before_reading_inputs(self):
+        for options in (
+            ['--gate'],
+            ['--gate', '--run', '--backend', 'podman'],
+            ['--gate', '--run', '--backend', 'both', '--smoke'],
+        ):
+            with self.subTest(options=options):
+                argv = ['coverage-backends.py', '--inputs', '/missing/inputs.json',
+                        '--inputs-sha256', '0' * 64, '--output', '/missing/output', *options]
+                with patch.object(b.sys, 'argv', argv), patch.object(
+                    b, 'read_pinned', side_effect=AssertionError('inputs read before gate-policy refusal')
+                ):
+                    with self.assertRaises(b.Refused):
+                        b.main()
 
     def test_normalized_containerd_reference_retains_exact_tag(self):
         self.assertEqual(b.normalized_image_ref('alpine:3.23'), 'docker.io/library/alpine:3.23')
@@ -880,7 +935,7 @@ class BackendFailureDiagnostics(unittest.TestCase):
         self.assertEqual(driver.last_health['parse'], 'valid')
         self.assertNotIn('SECRET', json.dumps(driver.last_health))
 
-    def test_entrypoint_unknown_failure_is_static_and_keeps_failure_exit(self):
+    def test_entrypoint_separates_refusal_from_sanitized_unexpected_traceback(self):
         tree = ast.parse(Path(b.__file__).read_text())
         entrypoint = ast.Module(body=[tree.body[-1]], type_ignores=[])
         def refused(): raise RuntimeError('SECRET_UNKNOWN_EXCEPTION')
@@ -889,7 +944,20 @@ class BackendFailureDiagnostics(unittest.TestCase):
             with self.assertRaises(SystemExit) as raised:
                 exec(compile(entrypoint, b.__file__, 'exec'), namespace)
         self.assertEqual(raised.exception.code, 1)
-        self.assertEqual(stderr.getvalue(), 'backend qualification refused/incomplete; no coverage PASS claimed\n')
+        diagnostic = json.loads(stderr.getvalue())
+        self.assertEqual(diagnostic['error'], 'unexpected-backend-exception')
+        self.assertEqual(diagnostic['exception_type'], 'builtins.RuntimeError')
+        self.assertEqual(diagnostic['traceback'][-1]['function'], 'refused')
+        self.assertNotIn('SECRET', stderr.getvalue())
+
+        def deliberate_refusal(): raise b.Refused('SECRET_REFUSAL')
+        namespace['main'] = deliberate_refusal
+        with patch.object(b.sys, 'stderr', new=io.StringIO()) as refusal_stderr:
+            with self.assertRaises(SystemExit) as refused_exit:
+                exec(compile(entrypoint, b.__file__, 'exec'), namespace)
+        self.assertEqual(refused_exit.exception.code, 1)
+        self.assertEqual(refusal_stderr.getvalue(),
+                         'backend qualification refused: Refused; no coverage PASS claimed\n')
 
 
 class BackendTransportDiagnostics(unittest.TestCase):

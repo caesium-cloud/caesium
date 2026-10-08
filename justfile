@@ -393,6 +393,15 @@ unit-test: builder-full
         {{ local_builder_ref }}:{{ tag }}-full \
         sh -c 'mkdir -p ui/dist && touch ui/dist/index.html && go test -race -coverprofile=coverage.txt -covermode=atomic -v ./...'
 
+# Hermetic helper regressions whose implementations share the integration tag.
+# Require every named test to pass; no cluster or Docker socket is supplied.
+tagged-unit-test: builder-full
+    {{ container_cli }} run --rm --platform {{ platform }} \
+        -v {{ repo_dir }}:{{ bld_dir }}:ro \
+        -w {{ bld_dir }} \
+        {{ local_builder_ref }}:{{ tag }}-full \
+        python3 scripts/integration-hermetic-tests.py
+
 run: build
     {{ container_cli }} run --platform {{ platform }} \
         -d --name caesium-server \

@@ -194,20 +194,71 @@ class NamedJourneyGuardTests(unittest.TestCase):
         self.assertEqual(completed.stdout.splitlines(), ["--log", "/tmp/lane log"])
 
     def _actual_lane_selection(self) -> dict[str, dict[str, object]]:
-        # Execute the actual shell declarations, so a name in a test-only list
-        # cannot conceal an omitted regex, required-name array or changed floor.
-        source = pathlib.Path(__file__).with_name("coverage-journeys.sh").read_text()
-        start = source.index("  local local_pattern auth_pattern distributed_pattern owner_pattern")
-        end = source.index("  local server_raw cli_raw", start)
-        body = source[start:end]
-        script = "set -eu; selectors() {\n" + body + "\n" + r'''
-printf 'local\t%s\t%s\n' "$local_pattern" "$local_min_pass"
-printf 'auth\t%s\t%s\n' "$auth_pattern" "$auth_min_pass"
-printf 'local-name\t%s\n' "${local_named_passes[@]}"
-printf 'auth-name\t%s\n' "${auth_named_passes[@]}"
-}; selectors
+        # Capture the actual dispatch arguments; declaration placement and lane
+        # order do not affect the selector/floor/required-name contract.
+        shell_script = pathlib.Path(__file__).with_name("coverage-journeys.sh")
+        script = r'''set -eu
+source "$1"
+ARTIFACTS="$2"
+RAW="$ARTIFACTS/raw"
+ID=selection-fixture
+CONTAINER_CLI=docker
+PLATFORM=linux/amd64
+IMAGE_ID=sha256:fixture-image
+IMAGE_PROVENANCE=built-by-this-run
+IMAGE_VERIFIED=true
+CANDIDATE_SHA=fixture-candidate
+COVERAGE_SELECTION_CAPTURED=0
+unset CAESIUM_DISTRIBUTED_INTEGRATION_MIN_PASS CAESIUM_OWNER_MEMORY_INTEGRATION_MIN_PASS
+docker() {
+  case "$1" in
+    create) printf '%064d\n' 1 ;;
+    cp) [[ "$#" -eq 3 ]] && printf 'fixture CLI\n' > "$3" ;;
+    *) printf 'unexpected container command: %s\n' "$1" >&2; return 1 ;;
+  esac
+}
+coverage_journey_track_id() { [[ "$1" == "$cli_ctr" ]]; }
+coverage_journey_remove_owned() { [[ "$1" == "$cli_ctr" ]]; }
+coverage_journey_run_lane() { printf 'unexpected native lane dispatch\n' >&2; return 1; }
+python3() {
+  [[ "$#" -eq 2 && "$1" == - && "$2" == "$cli_dir/caesium" ]] || {
+    printf 'unexpected journey driver\n' >&2; return 1
+  }
+  command python3 "$@"
+}
+coverage_journey_run_parallel_pair() {
+  shift # Pair identity does not choose the tests or floors.
+  local lane argc name
+  while (($#)); do
+    [[ "$#" -ge 2 ]] || return 1
+    lane="$1" argc="$2"
+    shift 2
+    [[ "$argc" =~ ^[0-9]+$ ]] && ((argc >= 6 && argc <= $#)) || return 1
+    local -a command=("${@:1:argc}")
+    [[ "${command[0]}" == coverage_journey_run_lane && "${command[1]}" == "$lane" ]] || return 1
+    case "$lane" in
+      local|auth)
+        printf '%s\t%s\t%s\n' "$lane" "${command[3]}" "${command[4]}"
+        for name in "${command[@]:6}"; do printf '%s-name\t%s\n' "$lane" "$name"; done
+        COVERAGE_SELECTION_CAPTURED=$((COVERAGE_SELECTION_CAPTURED + 1))
+        ;;
+    esac
+    shift "$argc"
+  done
+  # Stop before any native lane or later SSO/Git driver executes.
+  ((COVERAGE_SELECTION_CAPTURED < 2))
+}
+if run_coverage_journeys; then
+  printf 'collector did not stop at captured dispatch\n' >&2
+  exit 1
+fi
+[[ "$COVERAGE_SELECTION_CAPTURED" -eq 2 ]]
 '''
-        result = subprocess.run(["bash", "-c", script], capture_output=True, text=True, check=False)
+        with tempfile.TemporaryDirectory(prefix="coverage-lane-selection-") as directory:
+            result = subprocess.run(
+                ["bash", "-c", script, "coverage-selection-test", str(shell_script), directory],
+                capture_output=True, text=True, check=False,
+            )
         self.assertEqual(result.returncode, 0, result.stderr)
         lanes = {"local": {"names": []}, "auth": {"names": []}}
         for line in result.stdout.splitlines():

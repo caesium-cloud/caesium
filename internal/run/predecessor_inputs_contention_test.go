@@ -22,16 +22,33 @@ type predecessorContentionPool struct {
 	begins        int
 	commits       int
 	rollbacks     int
+	options       []*sql.TxOptions
 	afterRollback func()
 }
 
 func (p *predecessorContentionPool) BeginTx(ctx context.Context, opts *sql.TxOptions) (gorm.ConnPool, error) {
+	if opts != nil {
+		copied := *opts
+		p.options = append(p.options, &copied)
+	} else {
+		p.options = append(p.options, nil)
+	}
 	tx, err := p.DB.BeginTx(ctx, opts)
 	if err != nil {
 		return nil, err
 	}
 	p.begins++
 	return &predecessorContentionTx{Tx: tx, pool: p}, nil
+}
+
+func TestPredecessorExecutionInputsRequestsReadOnlySnapshot(t *testing.T) {
+	f := newFanOutFixture(t, nil)
+	store, pool := predecessorContentionStore(t, f, nil, 0)
+	_, err := store.PredecessorExecutionInputs(t.Context(), f.runID, f.consumer.ID)
+	require.NoError(t, err)
+	require.Len(t, pool.options, 1)
+	require.Equal(t, &sql.TxOptions{ReadOnly: true}, pool.options[0], "dqlite/SQLite snapshot must route through the read pool")
+	require.Zero(t, pool.Stats().InUse)
 }
 
 type predecessorContentionTx struct {

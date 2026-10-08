@@ -795,6 +795,7 @@ func readEventBacklogWithLimits(ctx context.Context, c *client, runID string, cu
 	go func() {
 		defer close(readDone)
 		defer close(lines)
+		defer close(readErr)
 		scanner := bufio.NewScanner(resp.Body)
 		scanner.Buffer(make([]byte, 0, 64*1024), 4<<20)
 		for scanner.Scan() {
@@ -825,6 +826,9 @@ func readEventBacklogWithLimits(ctx context.Context, c *client, runID string, cu
 			return tuples, streamCtx.Err()
 		case line, ok := <-lines:
 			if !ok {
+				if err := streamCtx.Err(); err != nil {
+					return tuples, err
+				}
 				if err := <-readErr; err != nil {
 					return tuples, err
 				}

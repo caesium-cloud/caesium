@@ -11,6 +11,7 @@
 COVERAGE_JOURNEY_ACTIVE_IDS=()
 COVERAGE_JOURNEY_BUILDER_IDS=()
 COVERAGE_JOURNEY_PENDING_NAMES=()
+COVERAGE_JOURNEY_PENDING_IMAGES=()
 COVERAGE_JOURNEY_BUILDER_PENDING_NAMES=()
 COVERAGE_JOURNEY_PREP_IDS=()
 COVERAGE_JOURNEY_PREP_ID_LANES=()
@@ -31,6 +32,9 @@ COVERAGE_JOURNEY_GIT_TEMP_DIRS=()
 COVERAGE_JOURNEY_GIT_DIR_IDENTITIES=()
 COVERAGE_JOURNEY_NAMES=()
 COVERAGE_JOURNEY_NAMED_ARGS=()
+COVERAGE_JOURNEY_WORKER_PIDS=()
+COVERAGE_JOURNEY_PARALLEL_ID_LEDGER="${COVERAGE_JOURNEY_PARALLEL_ID_LEDGER:-}"
+COVERAGE_JOURNEY_PARALLEL_NAME_LEDGER="${COVERAGE_JOURNEY_PARALLEL_NAME_LEDGER:-}"
 COVERAGE_BACKEND_PRODUCER_INPUTS=""
 COVERAGE_BACKEND_PRODUCER_INPUTS_SHA256=""
 COVERAGE_BACKEND_MANIFEST_SHA256=""
@@ -162,6 +166,7 @@ coverage_journey_run_backends() {
     --inputs-sha256 "$COVERAGE_BACKEND_PRODUCER_INPUTS_SHA256" \
     --output "$output" \
     --backend both \
+    --gate \
     --run >"$driver_log" 2>&1
   rc=$?
   set -e
@@ -214,7 +219,22 @@ coverage_journey_fail() {
 }
 
 coverage_journey_track_id() {
-  COVERAGE_JOURNEY_ACTIVE_IDS+=("$1")
+  local id="$1" image="${2:-${IMAGE_ID:-}}"
+  COVERAGE_JOURNEY_ACTIVE_IDS+=("$id")
+  if [[ -n "$COVERAGE_JOURNEY_PARALLEL_ID_LEDGER" ]]; then
+    [[ "$id" =~ ^[0-9a-f]{64}$ && "$image" =~ ^sha256:[0-9a-f]{64}$ ]] || return 1
+    printf '%s\t%s\n' "$id" "$image" >>"$COVERAGE_JOURNEY_PARALLEL_ID_LEDGER" || return 1
+  fi
+}
+
+coverage_journey_track_pending_name() {
+  local name="$1" image="${2:-${IMAGE_ID:-}}"
+  COVERAGE_JOURNEY_PENDING_NAMES+=("$name")
+  COVERAGE_JOURNEY_PENDING_IMAGES+=("$image")
+  if [[ -n "$COVERAGE_JOURNEY_PARALLEL_NAME_LEDGER" ]]; then
+    [[ "$name" =~ ^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,254}$ && "$image" =~ ^sha256:[0-9a-f]{64}$ ]] || return 1
+    printf '%s\t%s\n' "$name" "$image" >>"$COVERAGE_JOURNEY_PARALLEL_NAME_LEDGER" || return 1
+  fi
 }
 
 coverage_journey_untrack_id() {
@@ -740,12 +760,23 @@ JS_RESTORE
 }
 
 cleanup_coverage_journeys() {
-  local id path rc=0 index pending_rc=0
+  local id path rc=0 index pending_rc=0 pending_image
   if ((${#COVERAGE_JOURNEY_PENDING_NAMES[@]})); then
-    for id in "${COVERAGE_JOURNEY_PENDING_NAMES[@]}"; do
-      coverage_journey_resource remove container "$id" >/dev/null || pending_rc=1
-    done
-    if [[ "$pending_rc" -eq 0 ]]; then COVERAGE_JOURNEY_PENDING_NAMES=(); else rc=1; fi
+    if ((${#COVERAGE_JOURNEY_PENDING_NAMES[@]} != ${#COVERAGE_JOURNEY_PENDING_IMAGES[@]})); then
+      pending_rc=1
+    else
+      for ((index = 0; index < ${#COVERAGE_JOURNEY_PENDING_NAMES[@]}; index++)); do
+        id="${COVERAGE_JOURNEY_PENDING_NAMES[$index]}"
+        pending_image="${COVERAGE_JOURNEY_PENDING_IMAGES[$index]}"
+        coverage_journey_resource remove container "$id" "$pending_image" >/dev/null || pending_rc=1
+      done
+    fi
+    if [[ "$pending_rc" -eq 0 ]]; then
+      COVERAGE_JOURNEY_PENDING_NAMES=()
+      COVERAGE_JOURNEY_PENDING_IMAGES=()
+    else
+      rc=1
+    fi
   fi
   if ((${#COVERAGE_JOURNEY_ACTIVE_IDS[@]})); then
     for id in "${COVERAGE_JOURNEY_ACTIVE_IDS[@]}"; do
@@ -864,6 +895,7 @@ cleanup_coverage_journeys() {
   COVERAGE_JOURNEY_GIT_TEMP_DIRS=()
   COVERAGE_JOURNEY_GIT_DIR_IDENTITIES=()
   COVERAGE_JOURNEY_PENDING_NAMES=()
+  COVERAGE_JOURNEY_PENDING_IMAGES=()
   COVERAGE_JOURNEY_BUILDER_PENDING_NAMES=()
 }
 
@@ -1006,6 +1038,62 @@ if os.environ["JOURNEY_RECORD_GIT_SERVER_ID"]:
     }
 pathlib.Path(sys.argv[1]).write_text(json.dumps(record, indent=2) + "\n")
 PY
+}
+
+coverage_journey_write_manifest() {
+  local destination="$1" journeys_dir="$2"
+  JOURNEY_MANIFEST_SHA="$CANDIDATE_SHA" \
+  JOURNEY_MANIFEST_IMAGE_ID="$IMAGE_ID" \
+  JOURNEY_MANIFEST_BUILD_CONTEXT="$BUILD_CONTEXT" \
+  JOURNEY_MANIFEST_PROVENANCE="$IMAGE_PROVENANCE" \
+  JOURNEY_MANIFEST_VERIFIED="$IMAGE_VERIFIED" \
+  JOURNEY_MANIFEST_BACKEND_SHA256="$COVERAGE_BACKEND_MANIFEST_SHA256" \
+  JOURNEY_MANIFEST_BACKEND_PATH="$ARTIFACTS/backend-inputs.json" \
+  python3 - "$destination" "$journeys_dir" <<'PY'
+import json
+import os
+import pathlib
+import sys
+
+records = []
+for lane in ("local", "auth", "distributed", "owner-memory", "git-sync", "sso", "local-retry"):
+    record = json.loads((pathlib.Path(sys.argv[2]) / lane / "provenance.json").read_text())
+    if record["complete"] is not True or record["candidate_sha"] != os.environ["JOURNEY_MANIFEST_SHA"]:
+        raise SystemExit("incomplete or foreign lane record: " + lane)
+    if record["image_id"] != os.environ["JOURNEY_MANIFEST_IMAGE_ID"]:
+        raise SystemExit("lane image differs from pinned candidate: " + lane)
+    records.append(record)
+backend_digest = os.environ["JOURNEY_MANIFEST_BACKEND_SHA256"]
+if len(backend_digest) != 64 or any(ch not in "0123456789abcdef" for ch in backend_digest):
+    raise SystemExit("validated backend contribution digest is missing")
+manifest = {
+    "schema_version": 1,
+    "kind": "real-integration-coverage-journeys",
+    "candidate_sha": os.environ["JOURNEY_MANIFEST_SHA"],
+    "image_id": os.environ["JOURNEY_MANIFEST_IMAGE_ID"],
+    "build_context": json.loads(os.environ["JOURNEY_MANIFEST_BUILD_CONTEXT"]),
+    "image_provenance": os.environ["JOURNEY_MANIFEST_PROVENANCE"],
+    "verified": os.environ["JOURNEY_MANIFEST_VERIFIED"] == "true",
+    "complete": len(records) == 7,
+    "lanes": records,
+    "backend_contribution": {
+        "path": os.environ["JOURNEY_MANIFEST_BACKEND_PATH"],
+        "sha256": backend_digest,
+        "complete": True,
+        "backends": ["kubernetes", "podman"],
+        "process_profiles": 14,
+    },
+    "merged_into": ["cli", "server"],
+}
+pathlib.Path(sys.argv[1]).write_text(json.dumps(manifest, indent=2) + "\n")
+PY
+}
+
+coverage_journey_write_manifest_required() {
+  coverage_journey_write_manifest "$@" || {
+    coverage_journey_fail "cannot write complete real-journey manifest"
+    return 1
+  }
 }
 
 coverage_journey_server_env() {
@@ -1305,6 +1393,7 @@ coverage_journey_run_lane() {
   shift 5
   local lane_dir="$RAW/journeys/$lane"
   local server_name="${ID}-journey-${lane}"
+  local runner_name="${ID}-journey-runner-${lane}"
   local server_id="" ready=0 test_rc=125 passes=0
   local stop_rc=1 flush_rc=1 exit_code=1 oom=true killed=false complete=false missing=true
   local key="" auth_env="" runner_log="$ARTIFACTS/journeys/$lane.log"
@@ -1377,13 +1466,13 @@ coverage_journey_run_lane() {
   server_args+=("$IMAGE_ID" start)
 
   log "starting real integration coverage lane '$lane' on $IMAGE_ID"
-  COVERAGE_JOURNEY_PENDING_NAMES+=("$server_name")
+  coverage_journey_track_pending_name "$server_name" || return 1
   server_id="$("$CONTAINER_CLI" "${server_args[@]}")" || {
     coverage_journey_fail "could not start server for lane '$lane'"
     return 1
   }
   [[ -n "$server_id" ]] || { coverage_journey_fail "lane '$lane' server has no container id"; return 1; }
-  coverage_journey_track_id "$server_id"
+  coverage_journey_track_id "$server_id" || { coverage_journey_fail "cannot retain lane '$lane' server ownership"; return 1; }
   local actual_image
   actual_image="$("$CONTAINER_CLI" inspect -f '{{.Image}}' "$server_id" 2>/dev/null || true)"
   if [[ "$actual_image" != "$IMAGE_ID" ]]; then
@@ -1426,6 +1515,10 @@ coverage_journey_run_lane() {
     if [[ "$test_rc" -ne 125 || "$lane" != "auth" || -n "$auth_env" ]]; then
       runner_args=(
         run --pull=never --rm --platform "$PLATFORM"
+        --name "$runner_name"
+        --label "caesium.coverage.owner=$CANDIDATE_SHA"
+        --label "caesium.coverage.run=$ID"
+        --label "caesium.coverage.lane=$lane-runner"
         -v "$ROOT:/source"
         -v "$cli_dir:/coverage-cli:ro"
         -v "$SOCK:/var/run/docker.sock"
@@ -1436,6 +1529,7 @@ coverage_journey_run_lane() {
         -e GOFLAGS=-buildvcs=false
         -e CAESIUM_CLI_PATH=/coverage-cli/caesium
         -e CAESIUM_RESOURCE_STRESS_IMAGE="${CAESIUM_RESOURCE_STRESS_IMAGE:-caesiumcloud/resource-stress:latest}"
+        -e CAESIUM_MAINTENANCE_JOURNEYS_REQUIRED=true
         -e CAESIUM_MANUAL_TRIGGER_API_KEY=integration-test-key
         -e CAESIUM_EVENT_INGEST_API_KEY="${CAESIUM_EVENT_INGEST_API_KEY:-integration-test-key}"
         -e DOCKER_HOST=unix:///var/run/docker.sock
@@ -1486,6 +1580,11 @@ coverage_journey_run_lane() {
         fi
       else
         set +e
+        coverage_journey_require_absent container "$runner_name" || return 1
+        coverage_journey_track_pending_name "$runner_name" "$BUILDER_RUN_IMAGE" || {
+          coverage_journey_fail "cannot retain lane '$lane' runner ownership"
+          return 1
+        }
         "$CONTAINER_CLI" "${runner_args[@]}" 2>&1 | coverage_journey_log_redacted | tee "$runner_log"
         local -a pipeline_status=("${PIPESTATUS[@]}")
         test_rc="${pipeline_status[0]:-125}"
@@ -1601,7 +1700,7 @@ run_coverage_journeys() {
       coverage_journey_fail "could not create candidate CLI extraction container"
       return 1
     }
-  coverage_journey_track_id "$cli_ctr"
+  coverage_journey_track_id "$cli_ctr" || { coverage_journey_fail "cannot retain candidate CLI extraction ownership"; return 1; }
   if ! "$CONTAINER_CLI" cp "$cli_ctr:/bin/caesium" "$cli_dir/caesium"; then
     coverage_journey_fail "could not extract candidate CLI from $IMAGE_ID"
     return 1
@@ -1678,25 +1777,24 @@ PY
 
   local local_min_pass=39
   local auth_min_pass=21
-  local distributed_min_pass="${CAESIUM_DISTRIBUTED_INTEGRATION_MIN_PASS:-20}"
-  local owner_min_pass="${CAESIUM_OWNER_MEMORY_INTEGRATION_MIN_PASS:-14}"
-  local server_raw cli_raw
-  for lane in local auth distributed owner-memory; do
-    case "$lane" in
-      local)
-        coverage_journey_run_lane "$lane" local "$local_pattern" "$local_min_pass" "$cli_dir" "${local_named_passes[@]}" || return 1
-        ;;
-      auth)
-        coverage_journey_run_lane "$lane" auth "$auth_pattern" "$auth_min_pass" "$cli_dir" "${auth_named_passes[@]}" || return 1
-        ;;
-      distributed)
-        coverage_journey_run_lane "$lane" distributed "$distributed_pattern" "$distributed_min_pass" "$cli_dir" "${distributed_named_passes[@]}" || return 1
-        ;;
-      owner-memory)
-        coverage_journey_run_lane "$lane" owner-memory "$owner_pattern" "$owner_min_pass" "$cli_dir" || return 1
-        ;;
-      esac
-  done
+  local distributed_min_pass owner_min_pass
+  distributed_min_pass="$(coverage_journey_minimum_passes CAESIUM_DISTRIBUTED_INTEGRATION_MIN_PASS 20)" || {
+    coverage_journey_fail "CAESIUM_DISTRIBUTED_INTEGRATION_MIN_PASS must be a non-negative decimal integer with at most nine digits"
+    return 1
+  }
+  owner_min_pass="$(coverage_journey_minimum_passes CAESIUM_OWNER_MEMORY_INTEGRATION_MIN_PASS 14)" || {
+    coverage_journey_fail "CAESIUM_OWNER_MEMORY_INTEGRATION_MIN_PASS must be a non-negative decimal integer with at most nine digits"
+    return 1
+  }
+  local -a local_lane_command=(coverage_journey_run_lane local local "$local_pattern" "$local_min_pass" "$cli_dir" "${local_named_passes[@]}")
+  local -a auth_lane_command=(coverage_journey_run_lane auth auth "$auth_pattern" "$auth_min_pass" "$cli_dir" "${auth_named_passes[@]}")
+  local -a distributed_lane_command=(coverage_journey_run_lane distributed distributed "$distributed_pattern" "$distributed_min_pass" "$cli_dir" "${distributed_named_passes[@]}")
+  local -a owner_lane_command=(coverage_journey_run_lane owner-memory owner-memory "$owner_pattern" "$owner_min_pass" "$cli_dir")
+  # Each pair has unique container labels/names, raw directories, test logs and
+  # server databases. Bound concurrency at two to shorten the critical path
+  # without flooding the hosted runner or merging incomplete lane evidence.
+  coverage_journey_run_parallel_pair local-auth local "${#local_lane_command[@]}" "${local_lane_command[@]}" auth "${#auth_lane_command[@]}" "${auth_lane_command[@]}" || return 1
+  coverage_journey_run_parallel_pair distributed-owner distributed "${#distributed_lane_command[@]}" "${distributed_lane_command[@]}" owner-memory "${#owner_lane_command[@]}" "${owner_lane_command[@]}" || return 1
 
   coverage_journey_run_lane \
     git-sync git-sync \
@@ -1734,7 +1832,7 @@ PY
   local sso_record="$RAW/journeys/sso/provenance.json"
   local sso_cli_list="$RAW/journeys/sso/cli-dirs.txt"
   local sso_server_list="$RAW/journeys/sso/server-dirs.txt"
-  if ! SSO_RECORD_SHA="$CANDIDATE_SHA" SSO_RECORD_IMAGE_ID="$IMAGE_ID" \
+  if ! SSO_RECORD_SHA="$CANDIDATE_SHA" SSO_RECORD_IMAGE_ID="$IMAGE_ID" SSO_RECORD_RUN_ID="$ID" \
       SSO_RECORD_INPUTS_SHA256="$COVERAGE_BACKEND_PRODUCER_INPUTS_SHA256" \
       SSO_RECORD_RAW_ROOT="$RAW" \
       python3 - "$sso_record" "$COVERAGE_BACKEND_PRODUCER_INPUTS" "$sso_cli_list" "$sso_server_list" <<'PY'
@@ -1759,6 +1857,11 @@ if record.get("candidate_sha") != os.environ["SSO_RECORD_SHA"]:
     raise SystemExit("SSO record belongs to a different candidate")
 if record.get("image_id") != os.environ["SSO_RECORD_IMAGE_ID"]:
     raise SystemExit("SSO record differs from the pinned candidate image")
+collector_run_id = record.get("collector_run_id")
+if (collector_run_id != os.environ["SSO_RECORD_RUN_ID"]
+        or not isinstance(collector_run_id, str)
+        or not re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,38}[a-z0-9])?", collector_run_id)):
+    raise SystemExit("SSO record is not bound to this collector run identity")
 generations = record.get("server_generations")
 if not isinstance(generations, list) or len(generations) != 2:
     raise SystemExit("SSO record does not contain both server generations")
@@ -1792,17 +1895,95 @@ if shutdown.get("task_image_id") != record.get("task_image_id"):
     raise SystemExit("SSO shutdown task image differs from its pinned backend prerequisite")
 if (shutdown.get("initial_run_status"), shutdown.get("initial_task_status")) != ("running", "running"):
     raise SystemExit("SSO shutdown did not observe its exact run/task running before termination")
+expected_hold_command = ("while [ ! -e /caesium-shutdown-control/release ]; do sleep 0.1; done; "
+                        "echo '##caesium::output {\"shutdown\":\"resumed-" + collector_run_id + "\"}'")
+expected_hold_digest = hashlib.sha256(expected_hold_command.encode()).hexdigest()
+if (shutdown.get("hold_strategy") != "read-only-host-release-marker"
+        or shutdown.get("hold_command_sha256") != expected_hold_digest
+        or shutdown.get("release_marker_absent_before_signal") is not True
+        or shutdown.get("release_marker_absent_before_webhook") is not True):
+    raise SystemExit("SSO shutdown did not hold the exact task behind an unreleased host marker")
 if shutdown.get("native_runtime_removed") is not True or shutdown.get("verified_after_generation") != 2:
     raise SystemExit("SSO shutdown did not prove native cleanup and same-database restart")
-if (shutdown.get("final_run_status"), shutdown.get("final_task_status")) != ("failed", "failed"):
-    raise SystemExit("SSO shutdown run/task did not persist as failed")
-task_cancel = "task " + shutdown["task_id"] + " cancelled: context canceled"
-if shutdown.get("final_run_error") != "context canceled" or shutdown.get("final_task_error") not in ("context canceled", task_cancel):
-    raise SystemExit("SSO shutdown run/task did not preserve its whole-run cancellation cause")
-if shutdown.get("final_task_run_id") != shutdown.get("task_run_id") or shutdown.get("final_task_run_status") != "failed" or shutdown.get("final_task_run_error") != shutdown.get("final_task_error"):
-    raise SystemExit("SSO concrete TaskRun identity/status/cause did not persist")
+expected_resumption_path = "/hooks/coverage-shutdown-" + collector_run_id
+if (shutdown.get("resumption_mode") != "explicit-public-http-trigger-existing-run"
+        or shutdown.get("resumption_path") != expected_resumption_path
+        or shutdown.get("retained_after_generation") != 2
+        or shutdown.get("generation2_automatic_takeover") is not False
+        or (shutdown.get("retained_run_status"), shutdown.get("retained_task_status")) != ("running", "running")
+        or shutdown.get("retained_task_run_id") != shutdown.get("task_run_id")
+        or shutdown.get("retained_runtime_id") != shutdown.get("runtime_id")):
+    raise SystemExit("SSO generation 2 did not retain the original durable run/task before explicit resumption")
+attempt_before_signal = shutdown.get("attempt_before_signal")
+retained_attempt = shutdown.get("retained_attempt")
+final_attempt = shutdown.get("final_attempt")
+if (not isinstance(attempt_before_signal, int) or isinstance(attempt_before_signal, bool) or attempt_before_signal < 1
+        or not isinstance(retained_attempt, int) or isinstance(retained_attempt, bool)
+        or not isinstance(final_attempt, int) or isinstance(final_attempt, bool)
+        or retained_attempt != attempt_before_signal or final_attempt != attempt_before_signal):
+    raise SystemExit("SSO explicit local resumption changed or omitted the original TaskRun attempt")
+webhook = shutdown.get("resumption_webhook")
+if (not isinstance(webhook, dict) or webhook.get("status") != 202
+        or webhook.get("path") != expected_resumption_path or webhook.get("http_triggers_accepted") != 1
+        or webhook.get("http_runs_started") != 1
+        or not isinstance(webhook.get("receipt_id"), str)
+        or not re.fullmatch(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", webhook["receipt_id"])):
+    raise SystemExit("SSO explicit public webhook resumption receipt is incomplete")
+running = shutdown.get("resumption_runtime_running")
+if (not isinstance(running, dict) or running.get("runtime_id") == shutdown.get("runtime_id")
+        or running.get("runtime_id") != shutdown.get("final_runtime_id")
+        or not isinstance(running.get("runtime_id"), str)
+        or not re.fullmatch(r"[0-9a-f]{64}", running["runtime_id"])
+        or running.get("task_run_id") != shutdown.get("task_run_id")
+        or running.get("attempt") != shutdown.get("attempt_before_signal")
+        or running.get("release_marker_absent") is not True or running.get("running") is not True):
+    raise SystemExit("SSO release marker lacks a distinct running replacement bound to the original TaskRun")
+running_native = running.get("native")
+if (not isinstance(running_native, dict) or running_native.get("runtime_id") != running.get("runtime_id")
+        or running_native.get("run_id") != shutdown.get("run_id")
+        or running_native.get("task_id") != shutdown.get("task_id")
+        or running_native.get("docker_image_id") != record.get("task_docker_image_id")
+        or running_native.get("task_config_id") != record.get("task_image_id")
+        or running_native.get("command_sha256") != expected_hold_digest
+        or not isinstance(shutdown.get("control_mount_source_sha256"), str)
+        or not re.fullmatch(r"[0-9a-f]{64}", shutdown["control_mount_source_sha256"])
+        or running_native.get("control_mount_source_sha256") != shutdown.get("control_mount_source_sha256")
+        or running_native.get("control_mount_destination") != "/caesium-shutdown-control"
+        or running_native.get("control_mount_read_only") is not True
+        or running_native.get("running") is not True):
+    raise SystemExit("SSO replacement TaskRun lacks an exact native-running witness")
+if shutdown.get("release_marker_after_running_observation") is not True:
+    raise SystemExit("SSO release marker preceded the positively observed Gen2 runtime")
+expected_output = {"shutdown": "resumed-" + collector_run_id}
+if shutdown.get("resumption_output") != expected_output:
+    raise SystemExit("SSO resumed TaskRun did not persist the expected structured output")
+release = shutdown.get("release_marker")
+if (not isinstance(release, dict)
+        or release.get("strategy") != "read-only-host-release-marker"
+        or release.get("written") is not True
+        or release.get("sha256") != hashlib.sha256(b"release-v1\n").hexdigest()):
+    raise SystemExit("SSO explicit resumption lacks the controlled task-release marker")
+if (shutdown.get("resumption_mode") != "explicit-public-http-trigger-existing-run"
+        or (shutdown.get("final_run_status"), shutdown.get("final_task_status"), shutdown.get("final_task_run_status")) != ("succeeded", "succeeded", "succeeded")
+        or shutdown.get("final_task_run_id") != shutdown.get("task_run_id")):
+    raise SystemExit("SSO explicit resumption did not complete the exact original run/task/TaskRun IDs")
+if (not isinstance(shutdown.get("final_runtime_id"), str)
+        or not re.fullmatch(r"[0-9a-f]{64}", shutdown["final_runtime_id"])
+        or shutdown["final_runtime_id"] == shutdown["runtime_id"]):
+    raise SystemExit("SSO explicit resumption did not bind a new native runtime identity")
 native = shutdown.get("native_before_signal")
-if not isinstance(native, dict) or native.get("running") is not True:
+native_initial = shutdown.get("native_initial_running")
+if (not isinstance(native, dict) or not isinstance(native_initial, dict) or native.get("running") is not True
+        or native.get("command_sha256") != expected_hold_digest
+        or native_initial.get("command_sha256") != expected_hold_digest
+        or not isinstance(shutdown.get("control_mount_source_sha256"), str)
+        or not re.fullmatch(r"[0-9a-f]{64}", shutdown["control_mount_source_sha256"])
+        or native.get("control_mount_source_sha256") != shutdown.get("control_mount_source_sha256")
+        or native_initial.get("control_mount_source_sha256") != shutdown.get("control_mount_source_sha256")
+        or native.get("control_mount_destination") != "/caesium-shutdown-control"
+        or native_initial.get("control_mount_destination") != "/caesium-shutdown-control"
+        or native.get("control_mount_read_only") is not True
+        or native_initial.get("control_mount_read_only") is not True):
     raise SystemExit("SSO shutdown lacks a native running witness")
 for field in ("run_id", "task_id", "runtime_id"):
     if native.get(field) != shutdown.get(field):
@@ -1821,13 +2002,28 @@ def timestamp(value):
     return result
 original_finish = timestamp(generations[0].get("finished_at"))
 timestamp(generations[1].get("finished_at"))
-for field in ("run_completed_at", "task_completed_at"):
-    if timestamp(shutdown.get(field)) > original_finish:
-        raise SystemExit("SSO terminal rows were repaired after the original server exited")
-    if not isinstance(shutdown.get(field), str) or not shutdown[field]:
-        raise SystemExit("SSO durable run/task lacks a terminal completion timestamp")
+task_started = timestamp(shutdown.get("task_started_at"))
+run_completed = timestamp(shutdown.get("run_completed_at"))
+task_completed = timestamp(shutdown.get("task_completed_at"))
+release_written = timestamp(release.get("written_at"))
+running_observed = timestamp(running.get("observed_at"))
+running_started = timestamp(running.get("task_started_at"))
+if (task_started <= original_finish or running_started <= original_finish
+        or running_started > running_observed or release_written <= running_observed
+        or task_started < running_started or run_completed <= max(original_finish, release_written)
+        or task_completed <= max(task_started, release_written)):
+    raise SystemExit("SSO original TaskRun did not resume and complete after generation-1 shutdown")
 if shutdown.get("native_runtime_absent_after_generation") != 2 or shutdown.get("native_runtime_absent_generations") != [1, 2]:
     raise SystemExit("SSO native runtime absence was not verified after both server generations")
+if shutdown.get("native_runtime_absent_ids_by_generation") != {"1": shutdown.get("runtime_id"), "2": running.get("runtime_id")}:
+    raise SystemExit("SSO generation 1 and 2 runtime absences do not bind their exact native identities")
+if shutdown.get("resumption_runtime_absent_after_completion") is not True:
+    raise SystemExit("SSO replacement native runtime was not verified absent after TaskRun completion")
+cleanup_absences = shutdown.get("native_runtime_cleanup_absences")
+if (not isinstance(cleanup_absences, list) or len(cleanup_absences) != 2
+        or [item.get("runtime_id") for item in cleanup_absences] != [shutdown.get("runtime_id"), shutdown.get("final_runtime_id")]
+        or not all(item.get("absent") is True for item in cleanup_absences)):
+    raise SystemExit("SSO original and resumed native runtimes lack exact cleanup absence proof")
 elapsed = shutdown.get("replay_restart_elapsed_seconds")
 if not isinstance(elapsed, (int, float)) or isinstance(elapsed, bool) or not (0 <= elapsed < 55):
     raise SystemExit("SSO shutdown/restart exceeded the existing replay-age budget")
@@ -1931,52 +2127,217 @@ PY
   coverage_journey_run_backends || return 1
   coverage_journey_run_local_retry || return 1
 
-  JOURNEY_MANIFEST_SHA="$CANDIDATE_SHA" \
-  JOURNEY_MANIFEST_IMAGE_ID="$IMAGE_ID" \
-  JOURNEY_MANIFEST_BUILD_CONTEXT="$BUILD_CONTEXT" \
-  JOURNEY_MANIFEST_PROVENANCE="$IMAGE_PROVENANCE" \
-  JOURNEY_MANIFEST_VERIFIED="$IMAGE_VERIFIED" \
-  JOURNEY_MANIFEST_BACKEND_SHA256="$COVERAGE_BACKEND_MANIFEST_SHA256" \
-  JOURNEY_MANIFEST_BACKEND_PATH="$ARTIFACTS/backend-inputs.json" \
-  python3 - "$RAW/journeys/manifest.json" "$RAW/journeys" <<'PY'
+  coverage_journey_write_manifest_required "$RAW/journeys/manifest.json" "$RAW/journeys" || return 1
+  log "collected seven exact-image real integration journeys; original process raws retained"
+}
+
+coverage_journey_minimum_passes() {
+  local variable="$1" hard_minimum="$2" value="${!1:-$2}"
+  [[ "$hard_minimum" =~ ^[0-9]+$ && "$value" =~ ^[0-9]+$ && ${#value} -le 9 ]] || return 1
+  value=$((10#$value))
+  hard_minimum=$((10#$hard_minimum))
+  ((value < hard_minimum)) && value="$hard_minimum"
+  printf '%s\n' "$value"
+}
+
+coverage_journey_enable_parallel_resource_tracking() {
+  local ledger
+  mkdir -p "$AUDIT" || return 1
+  if [[ -n "$COVERAGE_JOURNEY_PARALLEL_ID_LEDGER" || -n "$COVERAGE_JOURNEY_PARALLEL_NAME_LEDGER" ]]; then
+    [[ -n "$COVERAGE_JOURNEY_PARALLEL_ID_LEDGER" && -n "$COVERAGE_JOURNEY_PARALLEL_NAME_LEDGER" \
+        && -f "$COVERAGE_JOURNEY_PARALLEL_ID_LEDGER" && ! -L "$COVERAGE_JOURNEY_PARALLEL_ID_LEDGER" \
+        && -f "$COVERAGE_JOURNEY_PARALLEL_NAME_LEDGER" && ! -L "$COVERAGE_JOURNEY_PARALLEL_NAME_LEDGER" ]] || {
+      coverage_journey_fail "parallel resource ledgers are incomplete or unsafe"
+      return 1
+    }
+    return 0
+  fi
+  if [[ -z "$COVERAGE_JOURNEY_PARALLEL_ID_LEDGER" && -z "$COVERAGE_JOURNEY_PARALLEL_NAME_LEDGER" ]]; then
+    COVERAGE_JOURNEY_PARALLEL_ID_LEDGER="$AUDIT/parallel-lane-container-ids.txt"
+    COVERAGE_JOURNEY_PARALLEL_NAME_LEDGER="$AUDIT/parallel-lane-container-names.txt"
+    export COVERAGE_JOURNEY_PARALLEL_ID_LEDGER COVERAGE_JOURNEY_PARALLEL_NAME_LEDGER
+  fi
+  for ledger in "$COVERAGE_JOURNEY_PARALLEL_ID_LEDGER" "$COVERAGE_JOURNEY_PARALLEL_NAME_LEDGER"; do
+    [[ "$ledger" == /* && ! -e "$ledger" && ! -L "$ledger" ]] || {
+      coverage_journey_fail "refusing pre-existing or unsafe parallel resource ledger"
+      return 1
+    }
+    (umask 077; set -o noclobber; : >"$ledger") || {
+      coverage_journey_fail "cannot create fresh parallel resource ledger"
+      return 1
+    }
+  done
+}
+
+coverage_journey_run_parallel_worker() {
+  local -a command=("$@")
+  # This function itself runs as a background subshell. Each worker owns only
+  # its lane's resources and temp files; parent-owned CLI extraction survives.
+  COVERAGE_JOURNEY_ACTIVE_IDS=()
+  COVERAGE_JOURNEY_PENDING_NAMES=()
+  COVERAGE_JOURNEY_PENDING_IMAGES=()
+  COVERAGE_JOURNEY_BUILDER_IDS=()
+  COVERAGE_JOURNEY_BUILDER_PENDING_NAMES=()
+  COVERAGE_JOURNEY_PREP_IDS=()
+  COVERAGE_JOURNEY_PREP_ID_LANES=()
+  COVERAGE_JOURNEY_PREP_PENDING_NAMES=()
+  COVERAGE_JOURNEY_PREP_PENDING_LANES=()
+  COVERAGE_JOURNEY_TEMP_DIRS=()
+  COVERAGE_JOURNEY_SECRET_FILES=()
+  COVERAGE_JOURNEY_GIT_TEMP_DIRS=()
+  COVERAGE_JOURNEY_GIT_DIR_IDENTITIES=()
+  COVERAGE_JOURNEY_WORKER_PIDS=()
+  set +e
+  trap 'coverage_journey_parallel_worker_signal INT' INT
+  trap 'coverage_journey_parallel_worker_signal TERM' TERM
+  trap 'coverage_journey_parallel_worker_signal HUP' HUP
+  # Keep the lane in this resource-owning shell. A trapped signal is deferred
+  # while the foreground runner is active; the parent first removes the exact
+  # registered runner and server containers, which releases that foreground
+  # client before the worker trap performs local secret/temp cleanup.
+  "${command[@]}"
+  local rc=$?
+  cleanup_coverage_journeys || rc=1
+  return "$rc"
+}
+
+coverage_journey_parallel_worker_signal() {
+  local signal="$1" rc=1
+  trap - INT TERM HUP
+  cleanup_coverage_journeys || rc=1
+  case "$signal" in INT) exit 130 ;; TERM) exit 143 ;; HUP) exit 129 ;; esac
+  exit "$rc"
+}
+
+coverage_journey_attach_parallel_lane() {
+  local lane="$1" path="$RAW/journeys/$1/provenance.json"
+  if ! python3 - "$path" "$lane" "$CANDIDATE_SHA" "$IMAGE_ID" <<'PY'
 import json
-import os
 import pathlib
 import sys
 
-records = []
-for lane in ("local", "auth", "distributed", "owner-memory", "git-sync", "sso", "local-retry"):
-    record = json.loads((pathlib.Path(sys.argv[2]) / lane / "provenance.json").read_text())
-    if record["complete"] is not True or record["candidate_sha"] != os.environ["JOURNEY_MANIFEST_SHA"]:
-        raise SystemExit("incomplete or foreign lane record: " + lane)
-    if record["image_id"] != os.environ["JOURNEY_MANIFEST_IMAGE_ID"]:
-        raise SystemExit("lane image differs from pinned candidate: " + lane)
-    records.append(record)
-backend_digest = os.environ["JOURNEY_MANIFEST_BACKEND_SHA256"]
-if len(backend_digest) != 64 or any(ch not in "0123456789abcdef" for ch in backend_digest):
-    raise SystemExit("validated backend contribution digest is missing")
-manifest = {
-    "schema_version": 1,
-    "kind": "real-integration-coverage-journeys",
-    "candidate_sha": os.environ["JOURNEY_MANIFEST_SHA"],
-    "image_id": os.environ["JOURNEY_MANIFEST_IMAGE_ID"],
-    "build_context": json.loads(os.environ["JOURNEY_MANIFEST_BUILD_CONTEXT"]),
-    "image_provenance": os.environ["JOURNEY_MANIFEST_PROVENANCE"],
-    "verified": os.environ["JOURNEY_MANIFEST_VERIFIED"] == "true",
-    "complete": len(records) == 7,
-    "lanes": records,
-    "backend_contribution": {
-        "path": os.environ["JOURNEY_MANIFEST_BACKEND_PATH"],
-        "sha256": backend_digest,
-        "complete": True,
-        "backends": ["kubernetes", "podman"],
-        "process_profiles": 14,
-    },
-    "merged_into": ["cli", "server"],
-}
-pathlib.Path(sys.argv[1]).write_text(json.dumps(manifest, indent=2) + "\n")
+path, lane, candidate, image = sys.argv[1:]
+value = json.loads(pathlib.Path(path).read_text())
+if (value.get("source") != "integration-journey" or value.get("lane") != lane
+        or value.get("complete") is not True or value.get("candidate_sha") != candidate
+        or value.get("image_id") != image or value.get("raw") != {"cli": "cli", "server": "server"}):
+    raise SystemExit("parallel journey lane receipt is incomplete or foreign")
 PY
-  log "collected seven exact-image real integration journeys; original process raws retained"
+  then
+    coverage_journey_fail "parallel lane '$lane' receipt is incomplete or foreign"
+    return 1
+  fi
+  for path in "$RAW/journeys/$lane/cli" "$RAW/journeys/$lane/server"; do
+    [[ -d "$path" && ! -L "$path" ]] || { coverage_journey_fail "parallel lane '$lane' raw profile is unavailable"; return 1; }
+  done
+  COVERAGE_JOURNEY_CLI_DIRS+=("$RAW/journeys/$lane/cli")
+  COVERAGE_JOURNEY_SERVER_DIRS+=("$RAW/journeys/$lane/server")
+  COVERAGE_JOURNEY_NAMES+=("$lane")
+}
+
+coverage_journey_run_parallel_pair() {
+  local pair="$1"
+  shift
+  local first_lane="$1" first_count="$2" second_lane second_count index
+  shift 2
+  local -a first_command=() second_command=()
+  for ((index = 0; index < first_count; index++)); do
+    first_command+=("$1")
+    shift
+  done
+  second_lane="$1"
+  second_count="$2"
+  shift 2
+  for ((index = 0; index < second_count; index++)); do
+    second_command+=("$1")
+    shift
+  done
+  local first_log="$ARTIFACTS/journeys/parallel-$pair-first-$ID.log"
+  local second_log="$ARTIFACTS/journeys/parallel-$pair-second-$ID.log"
+  local first_pid second_pid first_rc=0 second_rc=0
+  coverage_journey_enable_parallel_resource_tracking || return 1
+  [[ ! -e "$first_log" && ! -L "$first_log" && ! -e "$second_log" && ! -L "$second_log" ]] || {
+    coverage_journey_fail "refusing pre-existing parallel lane logs"
+    return 1
+  }
+  coverage_journey_run_parallel_worker "${first_command[@]}" >"$first_log" 2>&1 &
+  first_pid=$!
+  COVERAGE_JOURNEY_WORKER_PIDS+=("$first_pid")
+  coverage_journey_run_parallel_worker "${second_command[@]}" >"$second_log" 2>&1 &
+  second_pid=$!
+  COVERAGE_JOURNEY_WORKER_PIDS+=("$second_pid")
+  wait "$first_pid" || first_rc=$?
+  wait "$second_pid" || second_rc=$?
+  COVERAGE_JOURNEY_WORKER_PIDS=()
+  coverage_journey_log_redacted <"$first_log"
+  coverage_journey_log_redacted <"$second_log"
+  if [[ "$first_rc" -ne 0 || "$second_rc" -ne 0 ]]; then
+    coverage_journey_fail "parallel journey pair '$pair' failed (first=$first_rc second=$second_rc)"
+    return 1
+  fi
+  coverage_journey_attach_parallel_lane "$first_lane" || return 1
+  coverage_journey_attach_parallel_lane "$second_lane" || return 1
+}
+
+coverage_journey_cancel_parallel_workers() {
+  local pid rc=0 live
+  if (("${#COVERAGE_JOURNEY_WORKER_PIDS[@]}")); then
+    for pid in "${COVERAGE_JOURNEY_WORKER_PIDS[@]}"; do
+      kill -TERM "$pid" 2>/dev/null || true
+    done
+    # Keep removing exact registered resources while a worker is live. A
+    # foreground `docker run` can still be creating the named container when
+    # the first removal sees it as absent; retrying closes that window before
+    # the join, instead of leaving the runner blocked behind a late create.
+    while :; do
+      live=0
+      for pid in "${COVERAGE_JOURNEY_WORKER_PIDS[@]}"; do
+        if coverage_journey_parallel_worker_live "$pid"; then live=1; fi
+      done
+      [[ "$live" -eq 1 ]] || break
+      coverage_journey_cleanup_parallel_resources || rc=1
+      sleep 0.1
+    done
+    for pid in "${COVERAGE_JOURNEY_WORKER_PIDS[@]}"; do
+      wait "$pid" 2>/dev/null || rc=1
+    done
+    # Close the create/remove race: a worker can be signaled just as the
+    # daemon is making its pre-registered name inspectable. The first pass
+    # releases a foreground client; this post-join pass proves no late object
+    # from that worker survived.
+    coverage_journey_cleanup_parallel_resources || rc=1
+  fi
+  COVERAGE_JOURNEY_WORKER_PIDS=()
+  return "$rc"
+}
+
+coverage_journey_parallel_worker_live() {
+  local state
+  state="$(ps -p "$1" -o stat= 2>/dev/null)" || return 1
+  [[ -n "$state" && "${state:0:1}" != Z ]]
+}
+
+coverage_journey_cleanup_parallel_resources() {
+  local ledger value image extra rc=0
+  for ledger in "$COVERAGE_JOURNEY_PARALLEL_ID_LEDGER" "$COVERAGE_JOURNEY_PARALLEL_NAME_LEDGER"; do
+    [[ -n "$ledger" ]] || continue
+    if [[ -L "$ledger" || ! -f "$ledger" ]]; then
+      coverage_journey_fail "parallel resource ledger is unavailable or unsafe"
+      rc=1
+      continue
+    fi
+    while IFS=$'\t' read -r value image extra; do
+      [[ -n "$value" ]] || continue
+      [[ -z "$extra" && "$image" =~ ^sha256:[0-9a-f]{64}$ ]] || { rc=1; continue; }
+      if [[ "$ledger" == "$COVERAGE_JOURNEY_PARALLEL_ID_LEDGER" ]]; then
+        [[ "$value" =~ ^[0-9a-f]{64}$ ]] || { rc=1; continue; }
+      else
+        [[ "$value" =~ ^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,254}$ ]] || { rc=1; continue; }
+      fi
+      coverage_journey_resource remove container "$value" "$image" >/dev/null || rc=1
+    done <"$ledger"
+  done
+  return "$rc"
 }
 
 merge_coverage_journeys() {

@@ -20,10 +20,11 @@ const (
 	AckConfigMap     = "robustness-host-ack"
 	RecordsConfigMap = "robustness-records"
 
-	ActionCordon  = "cordon"
-	ActionKill    = "kill"
-	ActionRestart = "restart"
-	ActionDone    = "done"
+	ActionCordon    = "cordon"
+	ActionKill      = "kill"
+	ActionTerminate = "terminate"
+	ActionRestart   = "restart"
+	ActionDone      = "done"
 
 	// B2 host-controller actions. Pause/resume freeze a real member process
 	// externally; partition/heal install and remove external network rules

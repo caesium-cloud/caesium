@@ -131,7 +131,7 @@ func (s *shutdownCoordinator) shutdown() error {
 	}
 
 	if s.supervisor != nil {
-		s.supervisor.CloseAndCancel()
+		s.supervisor.CloseAndCancelCause(runlife.ErrServerShutdown)
 	}
 	if s.cancel != nil {
 		s.cancel()

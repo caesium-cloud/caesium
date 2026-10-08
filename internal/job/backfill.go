@@ -12,6 +12,7 @@ import (
 	"github.com/caesium-cloud/caesium/internal/metrics"
 	"github.com/caesium-cloud/caesium/internal/models"
 	runstore "github.com/caesium-cloud/caesium/internal/run"
+	"github.com/caesium-cloud/caesium/internal/runlife"
 	"github.com/caesium-cloud/caesium/pkg/log"
 	"github.com/google/uuid"
 	"github.com/robfig/cron"
@@ -181,6 +182,9 @@ func RunBackfill(
 func runBackfill(ctx context.Context, b *models.Backfill, j *models.Job, schedule cron.Schedule, loc *time.Location,
 	bStore *backfillstore.Store, rStore *runstore.Store, execute func(context.Context, *models.Job, map[string]string) error) {
 
+	if serverShutdown(ctx) {
+		return
+	}
 	metrics.BackfillsActive.WithLabelValues(j.Alias).Inc()
 	defer metrics.BackfillsActive.WithLabelValues(j.Alias).Dec()
 
@@ -189,12 +193,18 @@ func runBackfill(ctx context.Context, b *models.Backfill, j *models.Job, schedul
 	filtered, err := FilterDates(bStore, b.JobID, dates, b.Reprocess)
 	if err != nil {
 		log.Error("backfill: failed to filter dates", "backfill_id", b.ID, "error", err)
+		if serverShutdown(ctx) {
+			return
+		}
 		if completeErr := bStore.Complete(b.ID, true); completeErr != nil {
 			log.Error("backfill: failed to mark failed", "backfill_id", b.ID, "error", completeErr)
 		}
 		return
 	}
 
+	if serverShutdown(ctx) {
+		return
+	}
 	if err := bStore.SetTotalRuns(b.ID, len(filtered)); err != nil {
 		log.Error("backfill: failed to set total_runs", "backfill_id", b.ID, "error", err)
 	}
@@ -295,6 +305,9 @@ func runBackfill(ctx context.Context, b *models.Backfill, j *models.Job, schedul
 			// for that exact row stays reserved until conditional finalization.
 			if committedID, ok := runstore.CommittedRunID(err); ok {
 				cause := fmt.Errorf("backfill: committed child admission failed: %w", err)
+				if serverShutdown(workCtx) {
+					cause = runlife.ErrServerShutdown
+				}
 				// CompleteIfActive owns bounded retries for transient store contention.
 				if _, completeErr := rStore.CompleteIfActive(committedID, cause); completeErr != nil {
 					log.Error("backfill: committed child could not be finalized; leaving it for an operator",
@@ -303,6 +316,10 @@ func runBackfill(ctx context.Context, b *models.Backfill, j *models.Job, schedul
 			}
 			releaseWork()
 			sem.Release(1)
+			if serverShutdown(ctx) {
+				cancelled = true
+				break
+			}
 			if backfillDateOutcome(err) == backfillDateSkipped {
 				log.Warn("backfill: date skipped by admission policy",
 					"backfill_id", b.ID, "logical_date", logicalDate,
@@ -338,6 +355,9 @@ func runBackfill(ctx context.Context, b *models.Backfill, j *models.Job, schedul
 			// them must stop that run's container, not the whole backfill.
 			runCtx := runstore.WithContext(cancelCtx, id)
 			runErr := execute(runCtx, j, params)
+			if runErr != nil && serverShutdown(runCtx) {
+				return // The durable child remains owned by recovery, not a failed date.
+			}
 			if runErr != nil {
 				log.Error("backfill: run failed", "backfill_id", b.ID, "logical_date", ld, "run_id", id, "error", runErr)
 				metrics.BackfillRunsTotal.WithLabelValues(j.Alias, backfillDateFailed).Inc()
@@ -356,6 +376,10 @@ func runBackfill(ctx context.Context, b *models.Backfill, j *models.Job, schedul
 	// finishes.
 	close(flushStop)
 	<-flusherDone
+
+	if serverShutdown(ctx) {
+		return // Keep driver status/progress available for restart or takeover.
+	}
 
 	if cancelled {
 		// Mark terminal cancellation only after the backfill has stopped
