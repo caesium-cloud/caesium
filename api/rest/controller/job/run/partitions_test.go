@@ -68,10 +68,62 @@ func TestProjectPartitionRowsCarriesInstanceIdentity(t *testing.T) {
 	// Absolute timestamps, not only the derived duration: an operator diagnosing
 	// a skewed group needs to see WHEN each instance ran, and a client that only
 	// gets "30s" cannot place two partitions on a timeline or tell a slow
-	// instance from a late-dispatched one. RFC3339 so the CLI's --json and the
-	// UI parse the same string.
-	assert.Equal(t, start.Format(time.RFC3339), out[0].StartedAt)
-	assert.Equal(t, end.Format(time.RFC3339), out[0].CompletedAt)
+	// instance from a late-dispatched one. RFC3339 with optional fractional
+	// seconds lets clients retain precise event ordering when they need it.
+	assert.Equal(t, start.Format(time.RFC3339Nano), out[0].StartedAt)
+	assert.Equal(t, end.Format(time.RFC3339Nano), out[0].CompletedAt)
+}
+
+func TestProjectPartitionRowsPreservesSubsecondChronology(t *testing.T) {
+	locations := []struct {
+		name string
+		loc  *time.Location
+	}{
+		{name: "utc", loc: time.UTC},
+		{name: "non_utc", loc: time.FixedZone("east", 5*60*60+30*60)},
+	}
+
+	for _, tc := range locations {
+		t.Run(tc.name, func(t *testing.T) {
+			start := time.Date(2026, 10, 8, 12, 0, 0, 100_000_000, tc.loc)
+			release := time.Date(2026, 10, 8, 12, 0, 0, 500_000_000, tc.loc)
+			complete := time.Date(2026, 10, 8, 12, 0, 0, 800_000_000, tc.loc)
+			assert.True(t, start.Before(release))
+			assert.True(t, release.Before(complete))
+
+			rows := projectPartitionRows([]models.TaskRun{{
+				ID:          uuid.New(),
+				Status:      "succeeded",
+				StartedAt:   &start,
+				CompletedAt: &complete,
+			}})
+			require.Len(t, rows, 1)
+
+			encoded, err := json.Marshal(rows[0])
+			require.NoError(t, err)
+			var roundTrip partitionRow
+			require.NoError(t, json.Unmarshal(encoded, &roundTrip))
+			assert.Equal(t, start.UTC().Format(time.RFC3339Nano), roundTrip.StartedAt)
+			assert.Equal(t, complete.UTC().Format(time.RFC3339Nano), roundTrip.CompletedAt)
+
+			started, err := time.Parse(time.RFC3339Nano, roundTrip.StartedAt)
+			require.NoError(t, err)
+			completed, err := time.Parse(time.RFC3339Nano, roundTrip.CompletedAt)
+			require.NoError(t, err)
+			assert.True(t, started.Equal(start))
+			assert.True(t, started.Before(release))
+			assert.True(t, completed.Equal(complete))
+			assert.True(t, release.Before(completed))
+
+			// Existing RFC3339 parsers accept the optional fractional seconds too.
+			legacyStarted, err := time.Parse(time.RFC3339, roundTrip.StartedAt)
+			require.NoError(t, err)
+			legacyCompleted, err := time.Parse(time.RFC3339, roundTrip.CompletedAt)
+			require.NoError(t, err)
+			assert.True(t, legacyStarted.Equal(start))
+			assert.True(t, legacyCompleted.Equal(complete))
+		})
+	}
 }
 
 func TestProjectPartitionRowsOmitsDurationWhenNotFinished(t *testing.T) {
@@ -79,7 +131,7 @@ func TestProjectPartitionRowsOmitsDurationWhenNotFinished(t *testing.T) {
 	out := projectPartitionRows([]models.TaskRun{{ID: uuid.New(), StartedAt: &start}})
 	require.Len(t, out, 1)
 	assert.Empty(t, out[0].Duration)
-	assert.Equal(t, start.Format(time.RFC3339), out[0].StartedAt,
+	assert.Equal(t, start.Format(time.RFC3339Nano), out[0].StartedAt,
 		"a running instance still has a start time; only the duration is unknown")
 	assert.Empty(t, out[0].CompletedAt)
 }

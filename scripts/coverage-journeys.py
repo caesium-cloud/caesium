@@ -1743,7 +1743,7 @@ class Collector:
         if self.shutdown_job.get("resumption_path") != expected_path:
             raise JourneyError("shutdown resumption path differs from the owned HTTP trigger")
         request = Request(
-            self.host_api_base(server_id) + expected_path,
+            self.host_api_base(server_id) + "/v1" + expected_path,
             data=b"{}",
             headers={"Content-Type": "application/json", "Accept": "application/json"},
             method="POST",
@@ -2549,6 +2549,7 @@ def main() -> int:
     except (JourneyError, OSError, ValueError, Interrupted) as exc:
         print(f"SSO live coverage journey refused: {type(exc).__name__}; raw diagnostics withheld",
               file=sys.stderr)
+        print(unexpected_exception_record("sso-journey-refused", exc), file=sys.stderr)
         return 1
     except Exception as exc:
         print(unexpected_exception_record("unexpected-sso-journey-exception", exc), file=sys.stderr)

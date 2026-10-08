@@ -329,10 +329,10 @@ func projectPartitionRows(rows []models.TaskRun) []partitionRow {
 			StatsSource: r.StatsSource, OOMKnown: r.OOMKnown, OOMKilled: r.OOMKilled,
 		}
 		if r.StartedAt != nil {
-			pr.StartedAt = r.StartedAt.UTC().Format(time.RFC3339)
+			pr.StartedAt = r.StartedAt.UTC().Format(time.RFC3339Nano)
 		}
 		if r.CompletedAt != nil {
-			pr.CompletedAt = r.CompletedAt.UTC().Format(time.RFC3339)
+			pr.CompletedAt = r.CompletedAt.UTC().Format(time.RFC3339Nano)
 		}
 		if r.StartedAt != nil && r.CompletedAt != nil {
 			pr.Duration = r.CompletedAt.Sub(*r.StartedAt).Round(time.Millisecond).String()

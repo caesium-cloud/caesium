@@ -95,8 +95,15 @@ exit 91
             FakeCollector.failure = b.JourneyError('SECRET_REFUSAL')
             with patch.object(b.sys, 'stderr', new=io.StringIO()) as refusal_stderr:
                 self.assertEqual(b.main(), 1)
-            self.assertEqual(refusal_stderr.getvalue(),
-                             'SSO live coverage journey refused: JourneyError; raw diagnostics withheld\n')
+            refusal_lines = refusal_stderr.getvalue().splitlines()
+            self.assertEqual(len(refusal_lines), 2)
+            self.assertEqual(refusal_lines[0],
+                             'SSO live coverage journey refused: JourneyError; raw diagnostics withheld')
+            refusal = json.loads(refusal_lines[1])
+            self.assertEqual(refusal['error'], 'sso-journey-refused')
+            self.assertTrue(refusal['exception_type'].endswith('.JourneyError'))
+            self.assertEqual(refusal['traceback'][-1]['function'], 'execute')
+            self.assertNotIn('SECRET', refusal_stderr.getvalue())
 
             FakeCollector.failure = RuntimeError('SECRET_UNEXPECTED')
             with patch.object(b.sys, 'stderr', new=io.StringIO()) as unexpected_stderr:
@@ -806,6 +813,42 @@ if cleanup_coverage_journeys; then exit 9; fi
             self.assertEqual(b.main(), 1)
         self.assertNotIn('published', events)
 
+    def test_resumption_posts_to_versioned_public_webhook_and_requires_receipt(self):
+        c = self.collector()
+        c.run_id = 'owned'
+        c.shutdown_job = {'resumption_path': '/hooks/coverage-shutdown-owned'}
+        c.host_api_base = lambda _: 'http://127.0.0.1:8080'
+        receipt = {'path': 'coverage-shutdown-owned', 'http_triggers_accepted': 1,
+                   'http_runs_started': 1, 'receipt_id': RUN}
+
+        class Response(io.BytesIO):
+            def __init__(self, status, payload):
+                body = json.dumps(payload).encode()
+                super().__init__(body)
+                self.status = status
+                self.headers = {'Content-Length': str(len(body))}
+
+        requests = []
+        def open_request(request, timeout):
+            requests.append(request)
+            self.assertEqual(request.full_url, 'http://127.0.0.1:8080/v1/hooks/coverage-shutdown-owned')
+            self.assertEqual(request.get_method(), 'POST')
+            self.assertEqual(json.loads(request.data), {})
+            self.assertEqual(timeout, 10)
+            return Response(202, receipt)
+
+        with patch.object(b, 'urlopen', side_effect=open_request):
+            self.assertEqual(c.fire_shutdown_webhook('owned-server')['receipt_id'], RUN)
+        self.assertEqual(len(requests), 1)
+        for status, payload in ((200, receipt), (202, dict(receipt, path='foreign')),
+                                (202, dict(receipt, http_runs_started=0)),
+                                (202, dict(receipt, http_triggers_accepted=0)),
+                                (202, dict(receipt, receipt_id='invalid'))):
+            with self.subTest(status=status, payload=payload), \
+                 patch.object(b, 'urlopen', return_value=Response(status, payload)):
+                with self.assertRaises(b.JourneyError):
+                    c.fire_shutdown_webhook('owned-server')
+
     def test_same_durable_rows_are_retained_then_explicitly_resumed_to_success(self):
         c = self.collector()
         c.task_image_id, c.task_docker_image_id, c.task_image_ref = CONFIG, INDEX, 'alpine:3.23'
@@ -822,7 +865,7 @@ if cleanup_coverage_journeys; then exit 9; fi
         c.native_runtime_absent_generations = [1]
         removed = []
         c.verify_runtime_absent = lambda generation, runtime_id=None: removed.append((generation, runtime_id))
-        c.server_generations = [{'finished_at': '2026-10-04T12:00:02Z'}]
+        c.server_generations = [{'finished_at': '2026-10-08T12:00:02.600Z'}]
         new_runtime = 'f' * 64
         retained_run = {'id': RUN, 'status': 'running', 'tasks': [{'task_id': TASK, 'status': 'running', 'runtime_id': CID}]}
         retained_row = {'task_run_id': TASK, 'runtime_id': CID, 'status': 'running', 'attempt': 1}
@@ -831,12 +874,12 @@ if cleanup_coverage_journeys; then exit 9; fi
         split_snapshot_run = copy.deepcopy(retained_run)
         running_run = {'id': RUN, 'status': 'running', 'tasks': [{'task_id': TASK, 'status': 'running', 'runtime_id': new_runtime}]}
         running_row = {'task_run_id': TASK, 'runtime_id': new_runtime, 'status': 'running', 'attempt': 1,
-                       'started_at': '2026-10-07T12:00:03Z'}
-        final_run = {'id': RUN, 'status': 'succeeded', 'completed_at': '2030-01-01T00:00:05Z',
+                       'started_at': '2026-10-08T12:00:02.800Z'}
+        final_run = {'id': RUN, 'status': 'succeeded', 'completed_at': '2026-10-08T12:00:03.900Z',
                      'tasks': [{'task_id': TASK, 'status': 'succeeded', 'runtime_id': new_runtime,
                                 'output': {'shutdown': 'resumed-owned'}}]}
         final_row = {'task_run_id': TASK, 'runtime_id': new_runtime, 'status': 'succeeded',
-                     'attempt': 1, 'started_at': '2026-10-07T12:00:03Z', 'completed_at': '2030-01-01T00:00:05Z'}
+                     'attempt': 1, 'started_at': '2026-10-08T12:00:02.800Z', 'completed_at': '2026-10-08T12:00:03.800Z'}
         records = [retained_run, delayed_dispatch_run, split_snapshot_run, running_run, final_run]
         partitions = [retained_row, delayed_dispatch_row, running_row, running_row, final_row]
         def api_json(_, path):
@@ -870,7 +913,14 @@ if cleanup_coverage_journeys; then exit 9; fi
             order.append('release')
             return original_release()
         c.release_shutdown_task = release
-        c.verify_shutdown_job_explicitly_resumed('owned-server')
+        original_datetime = b.datetime.datetime
+        observations = iter(('2026-10-08T12:00:03.100Z', '2026-10-08T12:00:03.200Z'))
+        class Clock(original_datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return cls.fromisoformat(next(observations).replace('Z', '+00:00'))
+        with patch.object(b.datetime, 'datetime', Clock):
+            c.verify_shutdown_job_explicitly_resumed('owned-server')
         self.assertEqual(order, ['webhook-accepted', 'native-running', 'release'])
         self.assertIs(c.shutdown_job['generation2_automatic_takeover'], False)
         self.assertEqual(c.shutdown_job['retained_task_run_id'], TASK)
