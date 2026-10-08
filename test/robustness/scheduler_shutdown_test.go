@@ -310,14 +310,17 @@ func runGracefulTriggerShutdown(t *testing.T, kube *kubernetes.Clientset, api *c
 }
 
 // Owner recovery has at-least-once task execution: it resets in-flight rows and
-// reclaims them under a newer generation. Durable identities/retry attempts must
-// survive; multiple effects require positive evidence of that recovery fence.
+// advances the claim attempt on re-dispatch. A same-owner restart can retain its
+// generation. Durable identities/retry attempts must survive, and each extra
+// execution requires an observed extra claim without a generation regression.
 func validateGracefulShutdownResult(runID, jobID string, before cluster.TaskRecipe, final cluster.Run, recipes []cluster.TaskRecipe, starts, completions []recorder.Event) error {
 	if final.ID != runID || final.JobID != jobID || final.Status != "succeeded" || len(final.Tasks) != 1 || len(recipes) != 1 {
 		return fmt.Errorf("run identity, task set or final success changed")
 	}
 	task, recipe := final.Tasks[0], recipes[0]
-	if task.ID != before.ID || task.TaskID != before.TaskID || task.Attempt != before.Attempt || task.Status != "succeeded" ||
+	// Compact run tasks expose the catalog ID in both id and task_id; the
+	// partition recipe below carries the distinct durable TaskRun ID.
+	if task.ID != before.TaskID || task.TaskID != before.TaskID || task.Attempt != before.Attempt || task.Status != "succeeded" ||
 		recipe.ID != before.ID || recipe.TaskID != before.TaskID || recipe.Attempt != before.Attempt || recipe.Status != "succeeded" ||
 		recipe.Image != before.Image || recipe.Command != before.Command {
 		return fmt.Errorf("durable task identity, retry attempt, recipe or final success changed")
@@ -328,7 +331,7 @@ func validateGracefulShutdownResult(runID, jobID string, before cluster.TaskReci
 	if len(starts) == 0 || len(starts) != len(completions) {
 		return fmt.Errorf("missing or unpaired execution evidence")
 	}
-	if len(starts) > 1 && (recipe.ClaimAttempt == before.ClaimAttempt || recipe.OwnerGeneration == before.OwnerGeneration ||
+	if len(starts) > 1 && (recipe.ClaimAttempt == before.ClaimAttempt ||
 		len(starts)-1 > recipe.ClaimAttempt-before.ClaimAttempt) {
 		return fmt.Errorf("multiple executions lack advanced recovery fence")
 	}

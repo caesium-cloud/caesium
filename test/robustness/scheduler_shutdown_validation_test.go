@@ -3,6 +3,7 @@
 package robustness
 
 import (
+	"encoding/json"
 	"testing"
 	"time"
 
@@ -20,7 +21,7 @@ type shutdownResultFixture struct {
 func newShutdownResultFixture(executions int) shutdownResultFixture {
 	f := shutdownResultFixture{
 		before: cluster.TaskRecipe{ID: "task-run", TaskID: "task", Status: "running", Image: "image", Command: "command", Attempt: 1, ClaimAttempt: 1, OwnerGeneration: 1},
-		final:  cluster.Run{ID: "run", JobID: "job", Status: "succeeded", Tasks: []cluster.Task{{ID: "task-run", TaskID: "task", Status: "succeeded", Attempt: 1}}},
+		final:  cluster.Run{ID: "run", JobID: "job", Status: "succeeded", Tasks: []cluster.Task{{ID: "task", TaskID: "task", Status: "succeeded", Attempt: 1}}},
 	}
 	f.recipes = []cluster.TaskRecipe{f.before}
 	f.recipes[0].Status = "succeeded"
@@ -41,12 +42,38 @@ func (f shutdownResultFixture) validate() error {
 }
 
 func TestGracefulShutdownResultAcceptsSingleExecutionAndFencedRecovery(t *testing.T) {
-	for _, executions := range []int{1, 2, 3} {
-		f := newShutdownResultFixture(executions)
-		if err := f.validate(); err != nil {
-			t.Fatalf("%d paired executions: %v", executions, err)
-		}
+	for _, test := range []struct {
+		name       string
+		executions int
+		generation int64
+	}{
+		{"single", 1, 1},
+		{"same owner reclaim", 2, 1},
+		{"same owner repeated reclaims", 3, 1},
+		{"takeover", 2, 2},
+		{"repeated takeovers", 3, 3},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			f := newShutdownResultFixture(test.executions)
+			f.recipes[0].OwnerGeneration = test.generation
+			if err := f.validate(); err != nil {
+				t.Fatal(err)
+			}
+		})
 	}
+	t.Run("compact catalog identity differs from durable row", func(t *testing.T) {
+		f := newShutdownResultFixture(2)
+		f.recipes[0].OwnerGeneration = 1
+		// This is the native compact API shape: both public identifiers name
+		// the catalog task, while the recipe ID remains the durable task-run.
+		const response = `{"id":"run","job_id":"job","status":"succeeded","tasks":[{"id":"task","task_id":"task","status":"succeeded","attempt":1}]}`
+		if err := json.Unmarshal([]byte(response), &f.final); err != nil {
+			t.Fatal(err)
+		}
+		if err := f.validate(); err != nil {
+			t.Fatal(err)
+		}
+	})
 	// Advancing ownership does not itself require a duplicate effect.
 	f := newShutdownResultFixture(1)
 	f.recipes[0].ClaimAttempt, f.recipes[0].OwnerGeneration = 2, 2
@@ -65,7 +92,8 @@ func TestGracefulShutdownResultRefusesIdentityStatusAndFenceDrift(t *testing.T) 
 		{"failed run", func(f *shutdownResultFixture) { f.final.Status = "failed" }},
 		{"extra public task", func(f *shutdownResultFixture) { f.final.Tasks = append(f.final.Tasks, f.final.Tasks[0]) }},
 		{"extra recipe", func(f *shutdownResultFixture) { f.recipes = append(f.recipes, f.recipes[0]) }},
-		{"public task run", func(f *shutdownResultFixture) { f.final.Tasks[0].ID = "foreign" }},
+		{"public catalog id", func(f *shutdownResultFixture) { f.final.Tasks[0].ID = "foreign" }},
+		{"public id replaced with durable row", func(f *shutdownResultFixture) { f.final.Tasks[0].ID = f.before.ID }},
 		{"public task", func(f *shutdownResultFixture) { f.final.Tasks[0].TaskID = "foreign" }},
 		{"public retry", func(f *shutdownResultFixture) { f.final.Tasks[0].Attempt++ }},
 		{"public task failed", func(f *shutdownResultFixture) { f.final.Tasks[0].Status = "failed" }},
@@ -81,7 +109,6 @@ func TestGracefulShutdownResultRefusesIdentityStatusAndFenceDrift(t *testing.T) 
 		{"generation regressed", func(f *shutdownResultFixture) { f.recipes[0].OwnerGeneration = 0 }},
 		{"unfenced duplicate", func(f *shutdownResultFixture) { f.recipes[0].ClaimAttempt, f.recipes[0].OwnerGeneration = 1, 1 }},
 		{"generation only", func(f *shutdownResultFixture) { f.recipes[0].ClaimAttempt = 1 }},
-		{"claim only", func(f *shutdownResultFixture) { f.recipes[0].OwnerGeneration = 1 }},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			f := newShutdownResultFixture(2)
