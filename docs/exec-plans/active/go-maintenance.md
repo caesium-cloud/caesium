@@ -36,6 +36,8 @@ Hosted source `c9d9e27b` / merge `91f5217e` in [run 37802496983](https://github.
 
 Local verification of these CI corrections passed **820 portable tooling tests with no skips and stable source**, three integration-tagged shutdown validator race tests, tagged vet and scoped lint. Three fresh strict ARM64 Docker OOM smokes passed; a separate real Docker prep-marker control verified ownership, log capture and exact-ID removal. Those controls do not claim hosted Podman, full three-node, Git-sync semantic or coverage qualification; the pushed head must pass its own native lanes.
 
+A subsequent wiring review found that those three new validator tests were absent from the explicit integration-tagged hermetic selector. The selector now requires all **38** named tests on both unit architectures, retaining every original requirement. All 38 passed through the actual selector in the local containerized ARM64 builder, and the portable selector/missing-PASS controls passed. Fresh hosted execution on both architectures remains required. The native early-evidence scenario and all three full Podman integration shards remain required; compiling a tagged runner alone does not execute the validator tests.
+
 ## Acceptance
 
 - Every confirmed candidate and every work item below must have an explicit current-code disposition and acceptance evidence. Source edits alone do not complete an item.

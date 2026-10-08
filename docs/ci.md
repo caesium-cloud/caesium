@@ -1872,9 +1872,11 @@ a signal death, or a missing exit observation is incomplete: it does not prove
 Go coverage buffers flushed. This intentionally tightens the former exit-143
 allowance. Backend/journey execution gate mode also requires `complete: true`;
 metadata-only discovery and a single backend are not complete qualification.
-`just tagged-unit-test` runs 35 hermetic named regressions from integration-tagged
+`just tagged-unit-test` runs 38 hermetic named regressions from integration-tagged
 helper packages in the builder, without a Docker socket/cluster; both hosted
 unit architectures execute it in addition to the ordinary untagged suite.
+The shutdown result validator's three tests are included explicitly; compiling
+the robustness runner or selecting `TestOwnerCrash` does not execute them.
 
 `scripts/check-coverage.py` ignores `init()` coverage. A write-to-read pass
 needs the named apply/export functions and the server profile, not a merged
