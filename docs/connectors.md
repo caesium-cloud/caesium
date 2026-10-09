@@ -246,3 +246,77 @@ See [kubernetes-deployment.md](kubernetes-deployment.md) for the Helm chart and
 [temporal.md](temporal.md) for the current REST-only way to call Caesium from
 Temporal. The plan that tracks the unshipped work is
 `exec-plans/active/execution-connectors.md`.
+
+## Temporal observation
+
+`internal/connector/temporal` compiles `go.temporal.io/sdk` v1.49.0. It is
+observation only. Health, a filtered visibility list, direct describe, and
+bounded history are implemented. Queries, Updates, receipts, correlation, and
+HTTP routes are not. With `CAESIUM_CONNECTORS_ENABLED` left at its default
+false, the process dials no Temporal server, starts no worker, and needs no
+Temporal credentials.
+
+Health calls `GetSystemInfo` on the workflow service. In this SDK release,
+`CheckHealth` is a gRPC health RPC rather than a wrapper over `GetSystemInfo`,
+so the adapter does not use it. A health failure is an availability error. It
+is not a workflow display status, and a missing worker is not a workflow
+failure. Local adapter tests do not certify Temporal Cloud.
+
+List passes the visibility query through and does not add an order. The page
+size comes from the caller and is clamped to 100 (`connector.MaxPageEntries`).
+The next page token is the server token, unchanged. Each entry's opaque
+coordinates are `workflow_id` and `run_id`. The configured namespace is
+returned separately as scope. It is not a Temporal column on the core
+reference.
+
+Describe reads one execution and stamps the caller's clock as the observation
+time on the returned value. That time is not stored. When `ParentExecution`
+is set, the relation type is `parent`. A child workflow is not a parent and
+is not delegation.
+
+History is one bounded page. `WaitNewEvent` stays false, so the call does not
+follow the workflow. Workflow inputs, results, and activity payloads are not
+copied. An encoded raw-history blob is not decoded; that response is an
+availability error. Activity attempts come from `ActivityTaskStarted` and
+carry the activity id, activity type, attempt, and history event id. An
+attempt is not a workflow failure. `ChildWorkflowExecutionStarted` is relation
+type `child`, with the child workflow id and run id.
+`WorkflowExecutionContinuedAsNew` is relation type `continuation` to the new
+run id. Relation type `delegation` is not emitted.
+
+`WorkflowTaskFailed` and `WorkflowTaskTimedOut` are a separate problem list
+of event id and cause. They do not change a running describe into `failed`.
+
+Native status is the protobuf enum name, not the SDK's shortened `String()`
+(`Running`). v1.49.0's generated `String()` returns that short name, so the
+adapter uses the generated name map instead. Display status is:
+
+| Native status | Display | Terminal | Workflow failure |
+| --- | --- | --- | --- |
+| `WORKFLOW_EXECUTION_STATUS_RUNNING` | `running` | no | no |
+| `WORKFLOW_EXECUTION_STATUS_COMPLETED` | `completed` | yes | no |
+| `WORKFLOW_EXECUTION_STATUS_FAILED` | `failed` | yes | yes |
+| `WORKFLOW_EXECUTION_STATUS_CANCELED` | `canceled` | yes | no |
+| `WORKFLOW_EXECUTION_STATUS_TERMINATED` | `terminated` | yes | no |
+| `WORKFLOW_EXECUTION_STATUS_CONTINUED_AS_NEW` | `continued` | yes | no |
+| `WORKFLOW_EXECUTION_STATUS_TIMED_OUT` | `timed_out` | yes | no |
+| unspecified, `PAUSED`, or unrecognized | `unknown` | no | no |
+
+`CONTINUED_AS_NEW` closes this run. It is not a failure.
+
+Transport is derived from the connection file. The endpoint is `host:port`
+and the namespace is the connection scope. An API key, when set, uses
+`client.NewAPIKeyStaticCredentials`. It is not logged and is stripped from
+errors. Certificate paths are classified by base name: `ca.crt` or `ca.pem`
+are root CAs; `tls.crt` or `client.crt` together with `tls.key` or
+`client.key` are the mTLS client certificate. One of the certificate or key
+without the other, or any other base name, is an error. Plaintext is only
+for `localhost`, `127.0.0.1`, or `::1` when no certificate path is set. The
+TLS config is then nil, and `TLSDisabled` is set so an API key does not make
+the SDK turn TLS on at dial time. Any other host uses TLS. Empty certificate
+paths mean the system roots, which is how a remote frontend or Temporal Cloud
+API-key connection works without a new YAML field. Loopback with certificate
+paths uses TLS. File-read errors are redacted when they would contain the API
+key or a PEM body. The configured RPC deadline defaults to
+`connector.MaxRPCDeadline` and a larger value is rejected. A caller's shorter
+deadline is kept.
