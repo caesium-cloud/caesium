@@ -78,23 +78,25 @@ Item checkboxes remain unchecked until merged acceptance evidence exists.
 
 ### Wave 1 — Foundations (2026-10-09)
 
-- **W1-α / A1 — policy package:** implementation dispatched on
-  `codex/identity-and-access-w1-alpha`; publication, independent review, and
-  containerized lint/unit/integration verification pending.
+- **W1-α / A1 — policy package:** draft [PR #624](https://github.com/caesium-cloud/caesium/pull/624),
+  head `28586d80be0940132818b857f4de67cb46f109d4`. Independent review passed after
+  two edge-case fixes. Containerized `just lint` and race-enabled `just unit-test`
+  passed (policy coverage 99.5%); fresh-image integration and hosted CI pending.
 - **W1-β / B1 — namespace persistence and cache identity:** implementation dispatched
   on `codex/identity-and-access-w1-beta`; public apply/export/run/move/cache scenarios,
   generated schema reference, example lint, and baseline gates pending.
 - **A2 and D3:** not dispatched. A2 requires A1 to land; D3 requires B1 to land.
   The suggested W1 includes these follow-ups, but the review-PR endpoint leaves
   them pending until their prerequisite PRs merge. H-1, H-2, and N-1 require A4.
-- **Plan sync:** maintained in a separate W1 progress PR; no merge or approval
+- **Plan sync:** maintained in [PR #622](https://github.com/caesium-cloud/caesium/pull/622);
+  documentation guardrails passed. No merge or approval
   bypass is authorized. Remaining streams retain their original dependencies.
 
 ### Stream Status
 
 | Stream | Scope | Priority | Status |
 |--------|-------|----------|--------|
-| A | Policy file, grants, principal, route classes, namespace-aware middleware, keys with namespaces, SSO-admin key management | **P0** | W1 A1 in progress; A2 waits for A1 |
+| A | Policy file, grants, principal, route classes, namespace-aware middleware, keys with namespaces, SSO-admin key management | **P0** | W1 A1 draft #624; A2 waits for A1 |
 | B | `metadata.namespace` on jobs: schema, columns, importer, lint, apply/prune/move, git-sync allowlist, collection filtering, aggregate collapse | **P0** | W1 B1 in progress |
 | C | Runtime isolation: per-namespace Kubernetes namespace + service account, scoped secret resolution, Helm RBAC | P1 | Not started |
 | D | Run quota + round-robin fairness (#395 v1 slice); namespaced notification channels, policies, agent profiles | P1 | Not started |
@@ -296,10 +298,15 @@ middleware relies on.
       `internal/models/backfill.go`, `internal/models/incident.go`,
       `internal/jobdef/importer.go`, `internal/run/store.go`,
       `api/rest/controller/job/post.go`, `api/rest/service/job/job.go`,
-      `internal/replay/replay.go`, `internal/backfill/` (creator),
-      `internal/incident/store.go` (namespace + `DedupeKey`), `internal/cache/hash.go`,
-      `internal/cache/hash_test.go`, `internal/job/job.go` (`buildTaskHashInput`),
-      `internal/worker/runtime_executor.go` (hash input), new `test/cache_namespace_move_test.go`,
+      `internal/replay/replay.go` (run insert and replay hash input),
+      `api/rest/controller/backfill/backfill.go` (creator), `internal/backfill/`,
+      `internal/incident/{incident,store,subscriber}.go` (persisted namespace, dedupe,
+      and remediation), `internal/cache/hash.go`, `internal/cache/hash_test.go`,
+      `internal/job/local_run_identity.go` (local hash input),
+      `internal/worker/runtime_executor.go` (worker hash input),
+      `internal/run/whydiff.go` (persisted hash decoding),
+      `pkg/db/{db,migrations,migrations_test}.go` (legacy namespace normalization),
+      `justfile` (distributed scenario selection), new `test/cache_namespace_move_test.go`,
       `internal/jobdef/exporter.go`, `docs/examples/`,
       `docs/caesium-job-llm-reference.md`, `docs/job-definitions.md`.
 - [ ] B2. Server-side namespace semantics: `POST /v1/jobdefs/lint` and apply reject an
