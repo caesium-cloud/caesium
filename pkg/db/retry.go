@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"math/rand/v2"
+	"strings"
 	"time"
 
 	"github.com/caesium-cloud/caesium/internal/dbretry"
@@ -261,11 +262,22 @@ func (retryPlugin) Initialize(db *gorm.DB) error {
 	if db.ConnPool == nil {
 		return nil
 	}
-	if _, already := db.ConnPool.(*retryConnPool); already {
-		return nil
+	pool := db.ConnPool
+	if _, already := pool.(*retryConnPool); !already {
+		pool = newRetryConnPool(pool)
 	}
-	db.ConnPool = newRetryConnPool(db.ConnPool)
+	installConnPool(db, pool)
 	return nil
+}
+
+// installConnPool updates both GORM's configured pool and the active statement
+// pool. GORM clones Statement.ConnPool for queries and transactions after Open;
+// changing Config.ConnPool alone leaves real SQL using the previous pool.
+func installConnPool(db *gorm.DB, pool gorm.ConnPool) {
+	db.ConnPool = pool
+	if db.Statement != nil {
+		db.Statement.ConnPool = pool
+	}
 }
 
 // rwSplitConnPool routes reads and writes to separate underlying pools, each
@@ -277,12 +289,15 @@ func (retryPlugin) Initialize(db *gorm.DB) error {
 // multi-connection pool turns transient write collisions into immediate
 // "database is locked" errors; one writer makes them wait instead.
 //
-// Autocommit reads (QueryContext/QueryRowContext) go to the read pool;
+// Plain autocommit SELECTs go to the read pool; QueryContext and QueryRowContext
+// also carry mutations (including INSERT ... RETURNING), which use the writer.
 // ReadOnly transactions also use the read pool. ExecContext, writable
-// transactions, and prepared statements use the write pool. Reads issued inside
-// a transaction run on its own connection, and other goroutines' reads use the
-// read pool — so no goroutine needs two connections from one pool, avoiding the
-// single-connection deadlock.
+// transactions, and prepared statements use the write pool. Reads issued on a
+// transaction handle use its own connection; plain SELECTs on the outer handle
+// use the read pool. Writer-routed reads on the outer handle inside a writable
+// transaction can deadlock waiting for that transaction's single connection.
+// An open cursor from a writer-routed query also blocks subsequent writes until
+// it is drained or closed.
 type rwSplitConnPool struct {
 	write *retryConnPool
 	read  *retryConnPool
@@ -307,11 +322,27 @@ func (p *rwSplitConnPool) ExecContext(ctx context.Context, query string, args ..
 }
 
 func (p *rwSplitConnPool) QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error) {
-	return p.read.QueryContext(ctx, query, args...)
+	return p.queryPool(query).QueryContext(ctx, query, args...)
 }
 
 func (p *rwSplitConnPool) QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row {
-	return p.read.QueryRowContext(ctx, query, args...)
+	return p.queryPool(query).QueryRowContext(ctx, query, args...)
+}
+
+func (p *rwSplitConnPool) queryPool(query string) *retryConnPool {
+	// Only an unambiguous single SELECT is eligible for the read pool. WITH
+	// can introduce a mutation, PRAGMA can change settings, and multi-statement
+	// strings can append a write after a SELECT. Unrecognised/comment-prefixed
+	// SQL is conservatively sent to the serialized writer. This intentionally
+	// avoids a partial SQL parser whose mistakes could admit concurrent writes.
+	query = strings.TrimSpace(query)
+	if len(query) > len("SELECT") && strings.EqualFold(query[:len("SELECT")], "SELECT") && !strings.ContainsRune(query, ';') {
+		switch query[len("SELECT")] {
+		case ' ', '\t', '\n', '\r', '\f', '\v', '(':
+			return p.read
+		}
+	}
+	return p.write
 }
 
 func (p *rwSplitConnPool) PrepareContext(ctx context.Context, query string) (*sql.Stmt, error) {
