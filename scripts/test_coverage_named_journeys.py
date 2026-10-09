@@ -294,8 +294,9 @@ fi
             "TestScopedKeyAllowDenyMatrix", "TestHoldDatasetCLIReleaseReopensTheGate", "TestIncidentBundleFromRealFailure",
         }
         added = {
-            "local": {"TestCacheCLIListsInvalidatesAndPrunes", "TestNativeTaskSIGTERMResultClassification"},
-            "auth": {"TestPublicListingsOrderByAndRefuseInvalidTerms"},
+            "local": {"TestCacheCLIListsInvalidatesAndPrunes", "TestNativeTaskSIGTERMResultClassification",
+                      "TestJobSchemaNamespaceDocumentation"},
+            "auth": {"TestPublicListingsOrderByAndRefuseInvalidTerms", "TestIncidentNamespaceLifecycle"},
         }
         for lane, original in (("local", original_local), ("auth", original_auth)):
             self.assertEqual(set(lanes[lane]["names"]), original | added[lane])
@@ -308,8 +309,9 @@ fi
 
     def test_floor_gap_admission_refuses_skip_nested_duplicate_or_missing(self) -> None:
         lanes = self._actual_lane_selection()
-        new = {"local": ["TestCacheCLIListsInvalidatesAndPrunes", "TestNativeTaskSIGTERMResultClassification"],
-               "auth": ["TestPublicListingsOrderByAndRefuseInvalidTerms"]}
+        new = {"local": ["TestCacheCLIListsInvalidatesAndPrunes", "TestNativeTaskSIGTERMResultClassification",
+                         "TestJobSchemaNamespaceDocumentation"],
+               "auth": ["TestPublicListingsOrderByAndRefuseInvalidTerms", "TestIncidentNamespaceLifecycle"]}
         for lane, names in new.items():
             required = lanes[lane]["names"]
             lines = {name: "    --- PASS: " + SUITE + "/" + name + " (0.01s)\n" for name in required}

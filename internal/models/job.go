@@ -1,7 +1,6 @@
 package models
 
 import (
-	"fmt"
 	"time"
 
 	"github.com/google/uuid"
@@ -55,10 +54,6 @@ type Job struct {
 	UpdatedAt   time.Time      `gorm:"not null" json:"updated_at"`
 
 	LatestRun *JobRun `gorm:"-" json:"latest_run,omitempty"`
-}
-
-func (j *Job) String() string {
-	return fmt.Sprintf("ID:%s\tAlias:%s\t", j.ID, j.Alias)
 }
 
 type Jobs []*Job

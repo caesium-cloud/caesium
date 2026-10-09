@@ -1735,6 +1735,9 @@ PY
   local_pattern="${local_pattern%)}|TestCaesiumWhyExplainsHitAndMiss|TestRunDiffAttributesChangedField|TestRunDiffRESTEndpointCoversHTTPSurface|TestReproducibilityReceiptRoundTrip|TestContractGraphCLIJSONReportsInferredEdge|TestContractsGraphEndpointReportsInferredEdgeAndFeatureFlag|TestJobLintServerJSONReportsContractFinding|TestContractCheckFailsOnBreakingLocalChange|TestCheckImagesCLIGatesLocalDockerAvailability|TestAtomSpecPersistence|TestDatasetRESTAndCLIListSurfacesManualAdvance|TestIncidentRoutesGatedOffByDefault|TestDevOnceExecutesDAG|TestDevOnceRunTimeoutStopsAndRemovesContainer|TestDevOnceSIGINTStopsAndRemovesContainer|TestTestCommandValidatesDefinitions|TestTestCommandRunsHarnessScenarioWithObservabilityAssertions|TestFreshnessCronTickSkipsFreshOutput|TestAutomaticRetryDelayConstantAndBackoff|TestCacheCLIListsInvalidatesAndPrunes|TestNativeTaskSIGTERMResultClassification)"
   auth_pattern="${auth_pattern%)}|TestIncidentCLIListJSONStdout|TestIncidentApprovalDecisionsCLI|TestIncidentApprovalWhyExplains|TestIncidentEscalationDeliversNotifiableEvent|TestIncidentOpenedEventObservable|TestIncidentApplyJobdefPatchCannotEditItsOwnPolicy|TestIncidentApprovalSecondPendingRequestStaysDecidable|TestIncidentPerClassNarrowingGatesTheMatchingClass|TestIncidentPerClassNarrowingIgnoresNonMatchingClass|TestScopedKeyWhoamiAllowed|TestScopedKeyAllowDenyMatrix|TestHoldDatasetCLIReleaseReopensTheGate|TestIncidentBundleFromRealFailure|TestPublicListingsOrderByAndRefuseInvalidTerms)"
 
+  local_pattern="${local_pattern%)}|TestJobSchemaNamespaceDocumentation)"
+  auth_pattern="${auth_pattern%)}|TestIncidentNamespaceLifecycle)"
+
   local -a local_named_passes=(
     TestCaesiumWhyExplainsHitAndMiss
     TestRunDiffAttributesChangedField
@@ -1757,6 +1760,7 @@ PY
     TestAutomaticRetryDelayConstantAndBackoff
     TestCacheCLIListsInvalidatesAndPrunes
     TestNativeTaskSIGTERMResultClassification
+    TestJobSchemaNamespaceDocumentation
   )
   local -a auth_named_passes=(
     TestIncidentCLIListJSONStdout
@@ -1773,6 +1777,7 @@ PY
     TestHoldDatasetCLIReleaseReopensTheGate
     TestIncidentBundleFromRealFailure
     TestPublicListingsOrderByAndRefuseInvalidTerms
+    TestIncidentNamespaceLifecycle
   )
   local -a distributed_named_passes=(
     TestNodeWorkersRoute
