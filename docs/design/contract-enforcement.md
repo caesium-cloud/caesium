@@ -6,9 +6,9 @@
 > graph/check surfaces, the Console graph, JobDefs diff badges, intentional-break
 > acknowledgements, deprecation notifications, and dataset schema declarations.
 > The static complement to
-> [`design-agent-in-the-loop.md`](design-agent-in-the-loop.md) scenario 2
+> [`agent-in-the-loop.md`](agent-in-the-loop.md) scenario 2
 > (schema drift) and the apply-time counterpart of
-> [`design-data-circuit-breaker.md`](design-data-circuit-breaker.md).
+> [`data-circuit-breaker.md`](data-circuit-breaker.md).
 > Companion roadmap item: §2.1 PR Preview Runs (the PR surface this plugs
 > into).
 
@@ -21,7 +21,7 @@ run** by `pkg/task/schema.go`. But data also flows *between jobs*:
 
 - **Trigger chaining.** Job B declares an `event` trigger matching
   `run_completed` filtered on `job_alias: vendor-x-daily`
-  ([`design-event-triggers.md`](design-event-triggers.md) WS3). The payload
+  ([`event-triggers.md`](event-triggers.md) WS3). The payload
   is the full marshaled `JobRun` — including `Tasks[].Output`
   (`internal/run/store.go`) — and B's `paramMapping` JSONPath expressions
   pull values from it into run params, which become env vars for B's steps.
@@ -78,7 +78,7 @@ event-trigger chain vendor-x-daily → reporting-daily)."*
 
 | Edge source | How derived | Default action on break |
 |---|---|---|
-| Declared `produces`/`consumes` | new YAML block (shared with [`design-freshness-scheduling.md`](design-freshness-scheduling.md)) | **fail** |
+| Declared `produces`/`consumes` | new YAML block (shared with [`freshness-scheduling.md`](freshness-scheduling.md)) | **fail** |
 | Trigger chain + `paramMapping` paths into `$.tasks[*].output.*` | static analysis of persisted triggers (same merge logic as `ValidateTriggerChains`, `internal/jobdef/trigger_cycle.go`) | **fail** when the extracted key is provably removed/retyped; warn otherwise |
 | Lineage evidence only (`lineage_datasets` rows, no declaration) | runtime observation | **warn** (evidence, not a promise) |
 
@@ -99,7 +99,7 @@ declarations are the only path to *fail*-grade enforcement for dataset edges.
 ## YAML: declared produces/consumes
 
 The step-level `datasets` block is **the same block** introduced by
-[`design-freshness-scheduling.md`](design-freshness-scheduling.md) —
+[`freshness-scheduling.md`](freshness-scheduling.md) —
 freshness reads `freshness`/`watermark`; this design adds
 `schema`/`schemaFrom` to `produces` entries and lets a `consumes` entry
 carry the consumer's required schema. Dataset `name` maps to the OpenLineage
@@ -341,19 +341,19 @@ merge.
 
 ## Interplay
 
-- **[`design-freshness-scheduling.md`](design-freshness-scheduling.md)** —
+- **[`freshness-scheduling.md`](freshness-scheduling.md)** —
   the step-level `datasets` block is *shared substrate*: freshness uses it
   for time (recent enough?), this design for shape (right shape?). One
   declaration, two enforcers.
-- **[`design-data-circuit-breaker.md`](design-data-circuit-breaker.md)** —
+- **[`data-circuit-breaker.md`](data-circuit-breaker.md)** —
   enforces at runtime what this enforces at apply: the breaker trips on
   observed bad data crossing an edge; this design keeps the *declared*
   version of the same break from deploying. Same edge model.
-- **[`design-agent-in-the-loop.md`](design-agent-in-the-loop.md)** —
+- **[`agent-in-the-loop.md`](agent-in-the-loop.md)** —
   scenario 2's agent-proposed schema patches flow through `jobdefs/diff` +
   `apply`, so they are contract-checked before a human sees the approval
   card; a patch that would break a downstream team is auto-rejected.
-- **[`design-backtesting.md`](design-backtesting.md)** — backtests replay
+- **[`backtesting.md`](backtesting.md)** — backtests replay
   historical definitions; the graph endpoint gives them the edge set to
   validate a proposed schema against historical consumer versions.
 

@@ -1,6 +1,6 @@
 # Design: Airflow Functional Parity
 
-> Status: Phase 1 + most of Phase 2 shipped — 9 of 15 workstreams implemented (WS1–4, 6, 8, 10, 12, 15) and SLA tracking (WS11) partially shipped. The shipped operator-facing subset is documented in [airflow-parity.md](airflow-parity.md); this file now tracks the five remaining workstreams (sensors, dynamic mapping, task pools, priority weights, templating).
+> Status: Phase 1 + most of Phase 2 shipped — 9 of 15 workstreams implemented (WS1–4, 6, 8, 10, 12, 15) and SLA tracking (WS11) partially shipped. The shipped operator-facing subset is summarised under [What shipped](#what-shipped); this file tracks the five remaining workstreams (sensors, dynamic mapping, task pools, priority weights, templating).
 
 ## Overview
 
@@ -8,19 +8,25 @@ This plan closes the feature gaps between Caesium and Apache Airflow while prese
 
 ## What shipped
 
-Operator-facing behaviour for the shipped subset lives in [airflow-parity.md](airflow-parity.md), [backfill.md](backfill.md), and [sso-authentication.md](sso-authentication.md). Condensed record (the "why" is preserved; full implementation now lives in code):
+Operator-facing behaviour for the shipped subset lives in [job-definitions.md](../job-definitions.md), [backfill.md](../backfill.md), and [sso-authentication.md](../sso-authentication.md). Condensed record (the "why" is preserved; full implementation now lives in code):
 
 | WS | Feature | Why it mattered | Lands in |
 |----|---------|-----------------|----------|
 | 1 | Task retries — `retries`/`retryDelay`/`retryBackoff`, attempt tracking, exponential backoff | transient failures (OOM, network blip, pull timeout) shouldn't need manual intervention | `internal/job/failure_policy.go` (`computeRetryDelay`) |
 | 2 | Trigger rules — `all_success`/`all_done`/`all_failed`/`one_success`/`always` | unlocks error-handling DAG patterns (cleanup-on-failure, always-run notify, conditional joins) | `internal/job/failure_policy.go` (`satisfiesTriggerRule`) |
 | 3 | Run parameters — `defaultParams`, `POST /v1/jobs/{id}/run` params, `CAESIUM_PARAM_*` env | parameterized runs without a job per variation | `internal/job/job.go` (`buildParamEnv`) |
-| 4 | Backfill & catchup — date-range replay, `reprocess` none/failed/all, concurrency cap | historical reprocessing for data pipelines | `internal/job/backfill.go`, [backfill.md](backfill.md) |
+| 4 | Backfill & catchup — date-range replay, `reprocess` none/failed/all, concurrency cap | historical reprocessing for data pipelines | `internal/job/backfill.go`, [../backfill.md](../backfill.md) |
 | 6 | Branching — `type: branch`, `##caesium::branch` marker, `BranchSelections` persisted | runtime-conditional DAGs | `internal/job/branch.go`, `pkg/task/output.go` |
 | 8 | Task outputs / XCom — `##caesium::output` → `CAESIUM_OUTPUT_<STEP>_<KEY>` env (64KB, last-write-wins) | inter-task data passing with no external system | `pkg/task/output.go` (`ParseOutput`) |
 | 10 | Pause / unpause — `Paused`, `PUT /v1/jobs/{id}/pause`\|`/unpause`, 409 on manual run | suspend a schedule without deleting it | `api/rest/controller/job/pause.go` |
 | 12 | Run timeout — `runTimeout` wraps the run in `context.WithTimeout` | cap runaway pipelines | `internal/job/job.go` |
-| 15 | Auth & API keys — keyed-hash API-key middleware + roles, and native **SSO** (OIDC/SAML/LDAP) built on top | secure the API | `internal/auth/`, [sso-authentication.md](sso-authentication.md) |
+| 15 | Auth & API keys — keyed-hash API-key middleware + roles, and native **SSO** (OIDC/SAML/LDAP) built on top | secure the API | `internal/auth/`, [../sso-authentication.md](../sso-authentication.md) |
+
+Operator notes for the shipped subset:
+
+- Paused jobs remain listed in the embedded web UI and REST API, but trigger execution skips starting new runs until the job is unpaused.
+- Trigger defaults and manually supplied run parameters are persisted onto the resulting run record for inspection.
+- `one_success` joins are evaluated after all predecessor outcomes are known, so a failed sibling no longer causes an early skip when another predecessor succeeded.
 
 > WS8 shipped differently from the original design: instead of a file-based `/caesium/output/` scheme it uses the stdout-marker protocol above. Non-string JSON values coerce to strings; malformed JSON is skipped.
 
@@ -120,13 +126,13 @@ Files: `internal/models/pool.go` (new), `internal/models/models.go`, `internal/p
 
 ## Workstream 11: SLA Tracking (P2) — partially shipped
 
-Breach detection shipped (see [Known gaps](#known-gaps-in-shipped-features)): `internal/notification/watcher.go` scans running runs and `completedBy` deadlines and emits `SLAMissed` without killing the task; `SLAConfig` exists in `pkg/jobdef`. The remaining work — predictive **at-risk** alerting (EWMA over historical durations) and stage-based escalation chains — is now scoped by `exec-plans/active/window-scheduling.md` B1 (predictive ETA; the standalone SLA design was removed 2026-09-06 as superseded — freshness SLOs cover the declarative half). Do not duplicate that scope here.
+Breach detection shipped (see [Known gaps](#known-gaps-in-shipped-features)): `internal/notification/watcher.go` scans running runs and `completedBy` deadlines and emits `SLAMissed` without killing the task; `SLAConfig` exists in `pkg/jobdef`. The remaining work — predictive **at-risk** alerting (EWMA over historical durations) and stage-based escalation chains — is now scoped by `../exec-plans/active/window-scheduling.md` B1 (predictive ETA; the standalone SLA design was removed 2026-09-06 as superseded — freshness SLOs cover the declarative half). Do not duplicate that scope here.
 
 ## Workstream 13: Priority Weights (P2)
 
 **Why**: When resources are constrained, high-priority tasks should run before low-priority ones.
 
-Not shipped — the distributed claimer is pure FIFO today (`internal/worker/claimer.go`, `ORDER BY tr.created_at ASC`; no `Priority` column on `Task`/`TaskRun`/`jobdef`). The full design (priority-ordered distributed claiming, plus concurrency strategies and rate limiting) now lives in **[design-concurrency-priority.md](design-concurrency-priority.md)**; the mechanical change is a `Priority` column threaded Job→TaskRun plus a `ORDER BY tr.priority DESC, tr.created_at ASC` claim query.
+Not shipped — the distributed claimer is pure FIFO today (`internal/worker/claimer.go`, `ORDER BY tr.created_at ASC`; no `Priority` column on `Task`/`TaskRun`/`jobdef`). The full design (priority-ordered distributed claiming, plus concurrency strategies and rate limiting) now lives in **[concurrency-priority.md](concurrency-priority.md)**; the mechanical change is a `Priority` column threaded Job→TaskRun plus a `ORDER BY tr.priority DESC, tr.created_at ASC` claim query.
 
 ## Workstream 14: Templating (P2)
 
@@ -153,4 +159,4 @@ Workstream 2 (Trigger Rules, shipped) ← Workstream 7 (Dynamic Mapping) uses ru
 Workstream 9 (Task Pools)             ← Workstream 13 (Priority) uses pools for ordering
 ```
 
-Recommended order for the remaining work: WS5 (Sensors) and WS9 (Task Pools) first (highest operator value, P1), then WS7/WS13/WS14 (P2). WS11's remaining half (predictive ETA) now lives in `exec-plans/active/window-scheduling.md` B1 (its standalone design was removed 2026-09-06) and WS13 is tracked in [design-concurrency-priority.md](design-concurrency-priority.md) respectively.
+Recommended order for the remaining work: WS5 (Sensors) and WS9 (Task Pools) first (highest operator value, P1), then WS7/WS13/WS14 (P2). WS11's remaining half (predictive ETA) now lives in `../exec-plans/active/window-scheduling.md` B1 (its standalone design was removed 2026-09-06) and WS13 is tracked in [concurrency-priority.md](concurrency-priority.md) respectively.

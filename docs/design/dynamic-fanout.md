@@ -1,6 +1,6 @@
 # Design: Dynamic Fan-Out (Data-Proportional Parallelism)
 
-> Status: Shipped — runtime-materialized parallel task instances via `fanOut` and `##caesium::partitions`. Implementation: [`exec-plans/completed/dynamic-fanout.md`](exec-plans/completed/dynamic-fanout.md). Grounded against the executor, run store, claimer, and cache identity code as of 2026-07, amended 2026-08-25 with [`## Structured Partitions`](#structured-partitions-key--fingerprint--dependson) (re-grounded on that date) and 2026-08-29 with [`## Group Output Contracts`](#group-output-contracts-groupoutputschema) (design only — not implemented; issue #357).
+> Status: Shipped — runtime-materialized parallel task instances via `fanOut` and `##caesium::partitions`. Implementation: [`../exec-plans/completed/dynamic-fanout.md`](../exec-plans/completed/dynamic-fanout.md). Grounded against the executor, run store, claimer, and cache identity code as of 2026-07, amended 2026-08-25 with [`## Structured Partitions`](#structured-partitions-key--fingerprint--dependson) (re-grounded on that date) and 2026-08-29 with [`## Group Output Contracts`](#group-output-contracts-groupoutputschema) (design only — not implemented; issue #357).
 
 ## Problem
 
@@ -247,7 +247,7 @@ the same tx that today walks successor edges via `successorEdgesForRunTx`
    template as instance 0 (`partition_value` set, `partition_count = N`) and
    inserts instances 1…N-1 as copies — same task_id, image, command, priority,
    cache/schema snapshot columns, `Quarantine` copied (the distributed-parity
-   rule from [`design-quarantined-replay.md`](design-quarantined-replay.md)) —
+   rule from [`quarantined-replay.md`](quarantined-replay.md)) —
    each inheriting the template's *current* `outstanding_predecessors`.
 3. The normal successor decrement runs (`batchDecrementPredecessorsTx`'s
    `task_id IN ?` predicate already matches every sibling row).
@@ -309,7 +309,7 @@ as the discriminating field. Two deliberate contracts:
   all instances re-run. Per-partition skip across producer re-runs needs an
   explicit "this instance consumes only its partition value" contract —
   deferred, same posture as the per-step param-dependency deferral in
-  [`design-quarantined-replay.md`](design-quarantined-replay.md).
+  [`quarantined-replay.md`](quarantined-replay.md).
 
 A partition's optional `fingerprint` adds two more hashed fields
 (`PartitionFingerprint`, `PartitionAttributes`) and is what finally makes that
@@ -363,7 +363,7 @@ partition set.
 - `TaskExecutionDescriptor` is already per-`TaskRun`
   (`internal/models/run.go:154`); each instance gets its own descriptor with
   the partition in `Runtime`, and the producer row records the emitted list.
-  Receipts ([`design-reproduce.md`](design-reproduce.md)) gain a `--partition`
+  Receipts ([`reproduce.md`](reproduce.md)) gain a `--partition`
   selector; surfaces that assumed one `TaskRun` per `Task` (receipt get,
   `why --task`) must disambiguate or default to the group summary.
 - `caesium why` names `partition` as a discriminating field via the blob.
@@ -406,13 +406,13 @@ partition set.
 > numbers are stale.
 
 The forcing consumer is
-[`superpowers/specs/2026-08-25-dag-native-infrastructure-deployment-design.md`](superpowers/specs/2026-08-25-dag-native-infrastructure-deployment-design.md)
+[`2026-08-25-dag-native-infrastructure-deployment-design.md`](2026-08-25-dag-native-infrastructure-deployment-design.md)
 §5.4, which builds per-unit infrastructure delivery on this feature and cannot
 express its pattern on bare-string partitions. That spec is one consumer; the
 capability is data-engineering-first and is specified here, not there. The
 converse also holds: the chain break (`cache.chain: values`, spec §4) that makes
 a per-unit fingerprint *effective* is specified there and implemented by Stream
-A of `exec-plans/completed/infra-deploy.md`, not here.
+A of `../exec-plans/completed/infra-deploy.md`, not here.
 
 ### Why a bare string is not enough
 
@@ -594,8 +594,8 @@ Two mechanisms close the gap, and neither is this amendment's to invent:
   fingerprint, the emitted list is no longer byte-identical, and the substitution
   is (correctly) refused. It is conservative by construction and stays that way.
 - **`cache.chain: values`** — the step-level knob added, and shipped (Stream A
-  of `exec-plans/completed/infra-deploy.md`), by
-  [`2026-08-25-dag-native-infrastructure-deployment-design.md`](superpowers/specs/2026-08-25-dag-native-infrastructure-deployment-design.md)
+  of `../exec-plans/completed/infra-deploy.md`), by
+  [`2026-08-25-dag-native-infrastructure-deployment-design.md`](2026-08-25-dag-native-infrastructure-deployment-design.md)
   §4, which excludes `PredecessorHashes` from a step's key while still hashing
   `PredecessorOutputs`. That is the chain break, and it is orthogonal to this
   amendment.
@@ -1063,7 +1063,7 @@ by partition *value*, never by index.
 - **No new YAML field.** `fanOut:` is untouched — `from`, `env`, `maxPartitions`,
   `maxParallel`, `onEmpty`, `failurePolicy`. Structure is a property of what the
   producer emits, not of what the consumer declares, so `pkg/jobdef` and the
-  generated [`job-schema-reference.md`](job-schema-reference.md) gain nothing
+  generated [`job-schema-reference.md`](../job-schema-reference.md) gain nothing
   from this amendment beyond what the base design already required.
 - **No new env var / operator dial.** `CAESIUM_FANOUT_MAX_PARTITIONS` remains the
   only one.
@@ -1290,7 +1290,7 @@ Derivation reads only top-level `properties` and `required`. A step whose
 `outputSchema` expresses itself through `$ref`, `allOf`/`anyOf`/`oneOf`, or
 `patternProperties` has no derivable key set, and `derived` is then a **lint
 error naming the construct** — the same honest "cannot prove it, so say so"
-verdict [`design-contract-enforcement.md`](design-contract-enforcement.md) uses
+verdict [`contract-enforcement.md`](contract-enforcement.md) uses
 for schema constructs outside its subset. Silently deriving an empty schema
 would be a contract that passes everything.
 
@@ -1627,7 +1627,7 @@ of bounded references is what that mechanism is for.
   *tightened* a contract — punishing exactly the change worth making. A contract
   describes what the work produced; it is not an input to the work.
 - **The generated reference is generated.** `groupOutputSchema` reaches
-  [`job-schema-reference.md`](job-schema-reference.md) by editing
+  [`job-schema-reference.md`](../job-schema-reference.md) by editing
   `internal/jobdef/report/report.go:169-170`, never the doc itself; a guardrail
   test compares the two.
 
@@ -1988,7 +1988,7 @@ behavior-neutral substrate work that stands on its own.
   partition data; data rides BYO volumes/object stores via `output-ref`.
 - **No nested fan-out** (v1) and no fan-out of `branch` steps.
 - **No cluster autoscaling** — node elasticity for large N belongs to K8s/Kueue
-  ([`sovereignty.md`](sovereignty.md) posture).
+  ([`sovereignty.md`](../sovereignty.md) posture).
 - **No partition-aware backfill coupling** (v1): backfill remains fan-out across
   runs; M runs × N partitions is deliberate operator arithmetic under both caps.
 
@@ -1997,18 +1997,18 @@ behavior-neutral substrate work that stands on its own.
 1. **Partial success.** Is a `minSuccessRatio` (≤k% partition failures still
    "succeeded-with-warnings") worth the trigger-rule ambiguity? A breaker keyed
    on partition-failure ratio is a natural trip signal for
-   [`design-data-circuit-breaker.md`](design-data-circuit-breaker.md).
+   [`data-circuit-breaker.md`](data-circuit-breaker.md).
 2. **Window-derived partitions.** Should `fanOut` optionally derive partitions
    from the scheduling window instead of a marker, aligning with
-   [`design-window-scheduling.md`](design-window-scheduling.md) /
-   [`design-backtesting.md`](design-backtesting.md) (backtests are fan-out
+   [`window-scheduling.md`](window-scheduling.md) /
+   [`backtesting.md`](backtesting.md) (backtests are fan-out
    across historical windows)? Marker-first keeps v1 honest.
 3. **Per-partition resource profiles.** Should instances inherit right-sized
-   requests from [`design-resource-right-sizing.md`](design-resource-right-sizing.md)
+   requests from [`resource-right-sizing.md`](resource-right-sizing.md)
    keyed per partition (skewed file sizes), or per step only?
 4. ~~**Contract granularity.** Does `outputSchema` apply per instance (current
    plan) or additionally to the aggregate, and how does
-   [`design-contract-enforcement.md`](design-contract-enforcement.md) count
+   [`contract-enforcement.md`](contract-enforcement.md) count
    per-partition violations?~~ **Resolved (#357)** — see [`## Group Output
    Contracts`](#group-output-contracts-groupoutputschema). `outputSchema` stays
    strictly per instance; the fold gets its own `groupOutputSchema` with its own
@@ -2017,10 +2017,10 @@ behavior-neutral substrate work that stands on its own.
    violations stay on their own instance rows. Three questions the section could
    not close are listed at its end.
 5. **Agent remediation.** Should the
-   [`design-agent-in-the-loop.md`](design-agent-in-the-loop.md) action catalog
+   [`agent-in-the-loop.md`](agent-in-the-loop.md) action catalog
    gain `retry_partition` as a Tier-1 action (cheap, bounded, obviously safe)?
 6. **Freshness interplay.** When
-   [`design-freshness-scheduling.md`](design-freshness-scheduling.md) drives
+   [`freshness-scheduling.md`](freshness-scheduling.md) drives
    re-runs, does per-partition staleness justify pulling the deferred
    value-verified per-partition skip forward?
 7. **Ordering visibility.** Should the in-group `dependsOn` graph be renderable

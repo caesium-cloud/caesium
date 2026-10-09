@@ -42,7 +42,7 @@ assembly + one runtime mode, not new persistence:
   see Stream C).
 
 **Strategic frame.** This is the *Retain* layer of
-[`differentiation-strategy.md`](../../differentiation-strategy.md) — the
+[`differentiation-strategy.md`](../../design/differentiation-strategy.md) — the
 differentiating axis the strategy protects, not the "why-not-Airflow" roadmap.
 It deliberately stays honestly scoped: `run diff` does **cache-bust attribution**
 (which step/output changed and why a task re-ran), and hands full row/column
@@ -70,7 +70,7 @@ For drafting new plans in this same shape, see
 
 ## Project Posture
 
-From [`differentiation-strategy.md`](../../differentiation-strategy.md): the
+From [`differentiation-strategy.md`](../../design/differentiation-strategy.md): the
 data-plane memory is the **second act** — *"the killer differentiator within
 sovereignty … what makes Caesium more than 'Argo with a nicer binary,' once a
 user is already inside."* These three verbs are retention hooks no other
@@ -128,13 +128,13 @@ Authority is **split by topic**, deliberately (adversarial review round 15):
 
 - For the **substrate** and **honest-scope** rules (what the cache/hash/lineage/
   `DagSnapshot` can support, what each verb may and may not claim),
-  [`docs/design-data-plane-memory.md`](../../design-data-plane-memory.md) is the
+  [`docs/design/data-plane-memory.md`](../../design/data-plane-memory.md) is the
   design-of-record and **wins** on disagreement — it carries the "What each
   feature needs" table these verbs must honor.
 - For the **new verbs' behavior and — above all — the replay safety invariants**
   (non-bypassable quarantine, the `replaySafe` gate, atomic idempotency, and
   side-effect/observability suppression across *every* producer), **this plan and
-  the B1 replay memo (`docs/design-quarantined-replay.md`) are authoritative and
+  the B1 replay memo (`docs/design/quarantined-replay.md`) are authoritative and
   override the design doc.** These invariants are **non-negotiable**: they are
   *not* in the older design table, so the "design doc wins" rule must **not** be
   used to resolve ambiguity back to a weaker record — doing so is exactly how a
@@ -328,7 +328,7 @@ before an admin-merge. All gemini + greptile review threads were addressed
   on a corrupt per-task blob; corrupt-blob + trigger-delta tests; `tasks` emits
   `[]` not `null`.
 - **W1-β — B1 (quarantined-replay design memo)** — PR #233, merged `6204034`.
-  New `docs/design-quarantined-replay.md` (the Stream B hard barrier) + README
+  New `docs/design/quarantined-replay.md` (the Stream B hard barrier) + README
   index + a guardrail durably enforcing its Status banner. Two Opus review rounds
   resolved 4 blockers (live-bus/SSE marker carrier, cron-watermark corruption,
   run-health-metric mis-mapping, unsound Vault identity gate) + a greptile P1
@@ -615,7 +615,7 @@ attribution only — hand value-level row/column diffs to dbt/Datafold.
       `HashInput` diffs through an in-scope path. Flip the design doc's `run diff`
       feature-table row from honest-scope-until-then to shipped.
       Files: `test/data_plane_e2e_test.go` (add `TestRunDiffAttributesChangedField`
-      + `TestRunDiffRejectsCrossScopeRunIDs`), `docs/design-data-plane-memory.md`.
+      + `TestRunDiffRejectsCrossScopeRunIDs`), `docs/design/data-plane-memory.md`.
       Depends on: A3.
       Note: W3-alpha added `TestRunDiffAttributesChangedField` against the live CLI
       and flipped the design-table row to shipped. The scoped-key cross-scope CLI
@@ -758,12 +758,12 @@ write, lineage emit, or callback.
         run authoritative; non-quarantined re-execution is `caesium run retry`, a
         separate existing command.
       Carry a `> Status:` banner.
-      Files: new `docs/design-quarantined-replay.md`, `docs/README.md` (index the
+      Files: new `docs/design/quarantined-replay.md`, `docs/README.md` (index the
       new top-level doc — `internal/guardrails`'s
       `TestDocsREADMEIndexesEveryTopLevelDoc` requires every `docs/*.md` to be
       linked from the README; the `> Status:` banner satisfies
       `TestPlanningAndHistoricalDocsCarryStatusBanner`).
-      Note (W1-beta): Added `docs/design-quarantined-replay.md` with the
+      Note (W1-beta): Added `docs/design/quarantined-replay.md` with the
       fail-closed replay safety model, producer/metric/envelope audits grounded in
       source grep, plus the required top-level README index entry.
 - [x] B2. Add quarantine to the run model **and propagate it to both executors**.
@@ -1261,7 +1261,7 @@ write, lineage emit, or callback.
       with a unit test asserting the column default is `false`, not NULL. Flip the
       design doc's `Quarantined what-if replay` feature-table row to shipped.
       Files: new `test/replay_test.go` (`//go:build integration`; reuses the
-      existing suite helpers), `docs/design-data-plane-memory.md`.
+      existing suite helpers), `docs/design/data-plane-memory.md`.
       Depends on: B5.
       W8-alpha note (2026-06-26): added the B6 acceptance matrix without faking
       local-mode distributed behavior. Inventory:
@@ -1597,10 +1597,10 @@ behavior must be deliberate, not an accident of the fall-through.
       `docs/roadmap.md` §3.4 (Live DAG Debugging — already flagged "partially
       shipped via data-plane-memory"; extend it to mark the causal half shipped),
       add this plan to the `docs/README.md` active-records index, and note the
-      Retain-layer progress in `docs/differentiation-strategy.md`. Concentrating
+      Retain-layer progress in `docs/design/differentiation-strategy.md`. Concentrating
       all roadmap/README/strategy edits here keeps Streams A/B/C from colliding on
       those shared docs.
-      Files: `docs/roadmap.md`, `docs/README.md`, `docs/differentiation-strategy.md`.
+      Files: `docs/roadmap.md`, `docs/README.md`, `docs/design/differentiation-strategy.md`.
       Depends on: A4 + B6 + C4 (runs last, once all three verbs have shipped).
 
 ## Sequencing & Dependencies
@@ -1662,7 +1662,7 @@ behavior must be deliberate, not an accident of the fall-through.
   files**, each with its own `init()` calling `AddCommand` on the existing
   `run.Cmd`; parallel-safe (no shared-line edit). `cmd/execute.go`'s `cmds` slice
   is touched **only** by C3 (top-level `blame.Cmd`) — no contention.
-- `docs/design-data-plane-memory.md` — A4 and B6 each flip a different
+- `docs/design/data-plane-memory.md` — A4 and B6 each flip a different
   feature-table row; different lines, mechanically rebaseable if co-scheduled.
 - `internal/run/store.go` — B2 and B3 both touch it but are sequential within
   Stream B, so no cross-stream conflict.
@@ -1749,7 +1749,7 @@ The plan is done when **all** of these hold:
    The design doc's `run diff` feature-table row reads shipped.
 2. **Stream B — quarantined replay** is a runtime feature that is **fail-closed
    and distributed-safe**: the replay design memo
-   (`docs/design-quarantined-replay.md`) has landed, `caesium run replay --set …
+   (`docs/design/quarantined-replay.md`) has landed, `caesium run replay --set …
    --diff` re-runs the baseline in an isolated run (a no-override replay cache-hits
    all unchanged tasks; any `--set` param override re-runs the full DAG, since
    `RunParams` folds wholesale into every task hash — selective per-task re-run is
@@ -1812,7 +1812,7 @@ The plan is done when **all** of these hold:
    cannot leak to a scoped principal.
 5. **Plan-level cross-links (N-1)** reflect the shipped trio: `docs/roadmap.md`
    §3.4 records the causal reimagining as shipped, `docs/README.md` indexes this
-   plan, and `docs/differentiation-strategy.md` notes the Retain-layer progress.
+   plan, and `docs/design/differentiation-strategy.md` notes the Retain-layer progress.
 6. **Cross-cutting**: `docs/roadmap.md` and the
    [data-plane-memory](../completed/data-plane-memory.md) sibling plan reflect
    every shipped stream; this plan's per-stream `## Progress` entries match merged
@@ -1840,18 +1840,18 @@ The plan is done when **all** of these hold:
 
 ## Cross-References
 
-- [`docs/design-data-plane-memory.md`](../../design-data-plane-memory.md) — the
+- [`docs/design/data-plane-memory.md`](../../design/data-plane-memory.md) — the
   design-of-record and source of truth; carries the "What each feature needs"
   substrate table and the honest-scope rules these verbs honor.
 - [`../completed/data-plane-memory.md`](../completed/data-plane-memory.md) — the
   substrate plan (streams A–D) this builds on; its `#### Deferred to a follow-on
   feature plan` note named these three verbs.
-- [`docs/differentiation-strategy.md`](../../differentiation-strategy.md) — why
+- [`docs/design/differentiation-strategy.md`](../../design/differentiation-strategy.md) — why
   the data-plane memory is the Retain layer (second act), and the do-not-overclaim
   guardrails.
 - [`docs/roadmap.md`](../../roadmap.md) — §3.4 Live DAG Debugging, reimagined here
   as *causal* (run diff / blame) rather than a visual state-viewer.
-- [`docs/design-quarantined-replay.md`](../../design-quarantined-replay.md) — the
+- [`docs/design/quarantined-replay.md`](../../design/quarantined-replay.md) — the
   replay quarantine-semantics design memo authored by item B1 (created when B1
   lands).
 - `internal/run/whydiff.go` — the field-by-field `HashInput`-blob differ Stream A

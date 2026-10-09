@@ -1,8 +1,197 @@
-# Operator console handoff and motion audit
+# Operator console facelift (October 2026)
+
+> Status: Historical record. Evidence and dispositions for the Standard operator
+> console facelift shipped in PR #617 and its motion follow-up in PR #619.
+> Current console behavior is the code under `ui/`; this file preserves the
+> design decisions, the data-availability limits, and the qualification runs.
+
+## Facelift (PR #617)
+
+Implements the Standard concept from `Caesium Operator Console Facelift.zip`, starting with its handoff README, design specification, route guide, and functional invariants.
+
+The console uses self-hosted Sometype Mono, warm text on cool instrument surfaces, flat lists, word tabs, and status glyphs. The shell has a 44 px header, 208 px sidebar, and 44 px search footer. Clicking anywhere in the footer, Cmd/Ctrl-K, or `:` opens navigation search in a bounded dialog on desktop and mobile. Search finds pages and resources by name or ID; it does not execute shell commands. Escape, Close, or clicking outside dismisses search and restores focus to its button. Mobile also keeps its navigation drawer.
+
+The shared UTC clock drives recent fleet history and trigger countdowns. Historical strips and terminal timelines stop subscribing to ticks. Each CSS instrument aligns its own animation to UTC when inserted and resynchronizes after a hidden tab returns. Reduced motion freezes live indicators and replaces the oscillator with a flat line. Identifiers retain their original case and use one copy-chip component with eight visible characters, the full title and clipboard payload, and a one-second confirmation. Plain HTTP deployments use native copy when the Clipboard API is unavailable; if both paths are denied, the chip exposes the full selectable value.
+
+Run pages show alias and start time before the diagnostic ID. Task nodes are 260 × 112 px with status-specific electrons. Timeline rows have a 48 px minimum to accommodate task annotations, graph spacing is updated, and contract and lineage nodes are 260 × 80 px. Lineage metadata remains in the node tooltip; its links, freshness and hold overlays remain functional. Job YAML uses the same CodeMirror theme as the authoring editor.
+
+Re-run uses Alt-R; unmodified `r` does not launch work. Global `g` navigation chords consume their second key before route shortcuts run. UTC time formatting accepts malformed or absent timestamps and displays a fallback. Both YAML surfaces follow the resolved light/dark theme, including selections and tooltips.
+
+The fleet strip defaults to the last 15 minutes, with URL-persisted 1-hour and 24-hour choices and a separate, labeled ordinal fallback for older or undated history. One shared clock marker and aligned grid frame recent history; mark height shows duration up to 10 seconds. Live events update both status and the strip immediately, with coalesced reads to reconcile bounded history. `GET /v1/jobs` includes `last_runs[].started_at`, which the existing SQL projection already collected. The integration history test checks this field against a real run.
+
+### Data availability
+
+The facelift does not invent fields missing from the current server:
+
+- Build SHA, raft index/term, last-contact timestamps and leader CPU/memory are unavailable; the console says so. Existing membership, liveness probes, worker counts and latency remain visible. Standalone or stale health does not draw fabricated healthy voters.
+- Receipt metadata says pending, available or unavailable based on the receipt query. The receipt API supplies a digest and verification results, not a signature, so the console does not label it signed.
+- Atom used-by counts, per-task historical cache hit ratios and manifest digests are not returned by these APIs. Existing creation time, cache inventory/policy/run statistics and reconstructed YAML remain available.
+- Blame has snapshot/commit identities and causation evidence, without a complete timestamped commit history or first-bad-run designation. That evidence remains visible without invented times.
+
+Dark `--text-3` lightness is 50%, slightly above the handoff's 48%, because the supplied value measured 4.41:1 on the obsidian surface. No accessibility allowlist was expanded.
+
+### Validation
+
+UI checks:
+
+```sh
+cd ui
+npm run lint
+npm test
+npm run build:ci
+npx playwright test --project=network-recovery --retries=0
+```
+
+The `light` project runs accessibility, visual, mobile-console, performance and facelift checks. `network-recovery` depends on both default and light, so the ordinary CI entry point includes both themes. Visual baselines are generated and compared on Linux with the Playwright version installed by `package-lock.json`. Regenerate only intentionally:
+
+```sh
+npx playwright test visual.spec.ts --project=default --project=light --update-snapshots
+```
+
+Run the browser suite against the containerized production release, with the environment used by `just ui-e2e`. The API-key lane additionally runs `--project=auth` using the `just ui-e2e-auth` bootstrap and feature configuration. Live external LDAP/OIDC providers and the separate Kubernetes crash-recovery lane are outside this rendering change's local qualification.
+
+Go validation uses the repository builder image (`go test -race ./...` inside the container) and the real `TestJobsListIncludesLastRuns` integration scenario. Never build the Go application on the host.
+
+#### Initial facelift qualification, 2026-10-01
+
+- ESLint and all 414 UI tests passed across 57 test files.
+- The containerized production image built successfully. Its embedded UI passed 83 browser scenarios: 62 default, 16 light and five network-recovery checks. All six regenerated Linux visual baselines were compared without snapshot updates. Accessibility, mobile-console and performance gates passed in both themes.
+- API-key authentication passed eight dark and eight light scenarios, including viewer/runner login, scoped access, replay permissions, incidents and hold release. Every browser lane used zero retries and reported zero skipped, flaky or failed tests.
+- Containerized `go test -race ./...`, `go vet ./...` and the real run-history integration scenario passed.
+- The production asset check passed with unchanged budgets: largest JS chunk 1,228.26 KiB raw / 358.42 KiB gzip; all 15 route assets, including fonts, 2,590.04 KiB raw / 782.41 KiB gzip.
+- A live uncached task confirmed that the running electron travels around the node perimeter; dark/light jobs and system views and a live run were rendered for inspection.
+
+Browser JSON reports are retained in the ignored `.tmp/facelift-e2e-results.json`, `.tmp/facelift-auth-results.json` and `.tmp/facelift-auth-light-results.json`. Render previews and the electron probe are in `.tmp/facelift-previews/`.
+
+#### Exploratory QA follow-up
+
+- F1: Graph height uses unscrolled layout coordinates and changes only with loading/layout measurement or window resize. Ordinary main-panel scrolling can reach and open the receipt without growing the graph.
+- F2/F8: Structured logs use the theme foreground; both task error banners use the failed glyph and danger color. The terminal keeps its readable dark instrument surface in either theme.
+- F3/F4: JobDefs constrains its grid/editor widths, wraps its header and contains long lines in CodeMirror's own scroller. Its tabs use the shared underline style. JSON step parsing accepts the same scalar/list `next` and `dependsOn` forms as YAML; invalid forms name the step and field. The three reported repository examples are covered through live lint, diff, apply and persisted graph checks.
+- F5: All seven webhook controls have stable IDs and associated labels. Browser coverage drives label-based entry and keyboard submission.
+- F6/F7: The footer and palette describe navigation search and its supported destinations. Datasets uses exact active matching so Holds is the sole active destination on `/datasets/holds`.
+- Dialogs have accessible descriptions, and a completed live-log source badge describes where the logs were collected. The documentation index includes this page.
+
+`ui/e2e/facelift-qa.spec.ts` runs six regression journeys in each theme. It uses real runs and REST endpoints, checks computed log contrast for both renderers, and drives scrolling, editing, focus and keyboard submission through the browser. `test/jobdef_scalar_edges_test.go` independently qualifies the JSON REST edge forms and named invalid-field diagnostics.
+
+
+Follow-up validation uses `caesiumcloud/caesium:facelift-qa-fixes-20261001`, built with `just tag=facelift-qa-fixes-20261001 build-release`. ESLint, 414 UI tests, the production asset budget, containerized Go race tests and vet passed. All six Linux screenshot baselines matched without updates. The two new REST integration scenarios passed, including all three documented examples and both invalid-field diagnostics.
+
+A subsequent clean-server run passed all 12 QA journeys with zero retries, skips, flaky or failed tests. The broader zero-retry browser attempt reported 80 passes, 10 failures and five unrun dependency-blocked recovery tests. All 12 QA regression journeys passed within that attempt. Failures included unexpected live-event stream closures, incomplete run/lineage rendering and a mobile empty-table overflow assertion; server logs also recorded database deadline errors. These results do not qualify the complete suite, and their relationship to the changes is unresolved. No error allowlist, timeout or assertion was weakened. The original 83-test qualification above predates these QA corrections.
+
+Follow-up reports and failure traces are retained under ignored `.tmp/facelift-qa-fixes-*` artifacts. The original exploratory QA server and its evidence remain untouched.
+
+#### PR review follow-up
+
+- Keep empty-fleet authoring navigation inside the router so API-key sessions survive. Omit the unsupported job-origin subtitle rather than labeling every pipeline manual.
+- Preserve identifier case in buttons, badges and job headings. Mute zero DAG counters and use the failed glyph in replay errors as well as the already-corrected task and log banners.
+- Align late-mounted CSS animations through their actual Web Animations start times. Clamp future run starts to the current strip edge, move marks with transforms, and unsubscribe archived strips and terminal timelines from clock updates. Unstarted terminal tasks use recorded lifecycle times and terminal captions instead of live ghosts.
+- Include fonts in the performance harness asset directory. Remove duplicate run/time labels in the latest overlay and compare picker. Select light/dark CodeMirror themes from the resolved console theme.
+- Unposted add-on 1: Add safe `formatUTCTime` at all five reported sites, plus the older millisecond log timestamp and UTC clock. Unit tests cover invalid input; browser coverage injects malformed timestamps into all affected route views.
+- Unposted add-on 2: Delete the unused sparkline and its tests; the design handoff replaces it with the run strip.
+- Unposted add-on 3: Honor `EmptyState.icon`, remove the obsolete `UTCClock.hideDot` prop and its vacuous test, and assert custom empty-state artwork is rendered.
+- Unposted add-on 4: Choose metadata chips with explicit `idChip` props across receipt, task and diff cells. A shared renderer keeps empty and `None` values as plain text, independent of display-label spelling.
+
+`ui/e2e/facelift-review.spec.ts` adds six journeys in each theme. Payload, clipboard-capability and animation probes are labeled synthetic; their supporting runs use real REST execution. API-key coverage separately checks authoring navigation without a document reload and performs lint against the real authenticated endpoint.
+
+Review validation uses `caesiumcloud/caesium:pr617-review-20261001`, built with `just tag=pr617-review-20261001 build-release` from an isolated copy of tracked sources and the new review files. ESLint, all 429 UI tests across 59 files, asset budgets, containerized documentation guardrails, Go vet and golangci-lint passed. The performance harness and comparator's 133 Python tests passed. All 28 focused browser journeys passed with one worker and zero retries, skips or flaky tests. The previous push's CI lint simplification and ambiguous wide-DAG node selector are corrected without changing their behavioral assertions.
+
+The expanded four-worker pass finished with 41 passes and six light-theme failures. Both mobile journeys, the real 18-node wide DAG, both adversarial contrast probes and all six existing Linux screenshot baselines passed without updates. Failures affected light-theme run/navigation/copy journeys, a task-panel accessibility journey, JobDefs and a clock check; observed diagnostics included absent route content and incomplete event streams. The successful one-worker focused run does not qualify the full concurrent suite. A separate 107-test attempt against the preceding review image was stopped after the drawer shortcut regression was discovered, then the image was rebuilt with its correction. No assertion, error allowlist or timeout was weakened.
+
+The production budget reports largest JS 1,231.33 KiB raw / 359.36 KiB gzip and total route assets 2,591.93 KiB raw / 783.21 KiB gzip, including fonts. The final release manifest is `sha256:ec21c634ff0b9d210897b50afdfa5ee5fb0536bd009e3b1fd0bce3a5f34e4db8`. Build-source hashes are retained in `.tmp/pr617-review-build-manifest.json`; product sources match the files qualified by the final release.
+
+The final image also passed all 18 API-key journeys: nine dark and nine light, including the empty-fleet authoring action and its authenticated lint request. Both lanes used zero retries and reported no skips or flaky tests. Final focused, expanded and authentication reports are retained under `.tmp/pr617-review-*`.
+
+The shared Docker filesystem exhausted its free space during a separate Go check; the successful rerun stored compiler temporary files and caches in the workspace. A subsequent visual/scale attempt reported four passes and three failures caused by missing run-page content and browser socket errors. Those failures are retained under `.tmp/pr617-review-*`; they are not counted as passes. Owned browser dependencies were moved into the workspace to reduce Docker disk use. No foreign images, volumes or containers were pruned.
+
+#### Visual polish follow-up
+
+See [Operator console polish](#polish-pass-pr-617) for the thirteen visual findings, behavior changes, before/after screenshots, and the current qualification boundary. Earlier test results above remain evidence for their recorded revisions.
+
+See [Handoff and motion audit](#handoff-and-motion-audit-pr-619) for the comparison with the original bundle, restored timeline instruments, live-state correction, representative screenshots, and a real-run motion recording.
+
+## Polish pass (PR #617)
+
+This pass keeps the console's mono typography, warm ink, cyan/gold status language, flat navigation, existing permissions, and prior QA/review fixes. It improves how the existing data is arranged and explained.
+
+The findings were reproduced on `4d5b91f3dbaac22f111346c2af04557118d1147c` using `caesiumcloud/caesium:pr617-review-20261001` at localhost:8083 before source edits. The navigation probe recorded Jobs and then Triggers both at `scrollTop=500`.
+
+### Finding to fix
+
+| Finding | Change |
+| --- | --- |
+| 1. Sidebar alignment | Fixed indicator, label, count, and shortcut columns. Missing shortcuts and counts retain their slots; counts are right aligned. |
+| 2. Historical history | An ordinal “Older” group and consistently anchored age caption replace archived marks in time coordinates. Only recent events use the 15-minute plot. |
+| 3. Jobs hierarchy | Names receive more width, history receives less, header/rows share one grid, and empty history says “No runs yet.” Remove repeated cyan now-dots. Phone rows reflow with visible actions. |
+| 4. Run header | Separate title, time/status/identity, metadata, task counts, and grouped navigation/execution actions. Keep one All runs link. Replay configures a baseline replay; Re-run starts a new run with the same parameters. |
+| 5. Execution timeline | Choose ticks from the actual duration, including milliseconds. Keep endpoints inside the plot, place durations with task labels, and reveal full skip/error reasons through expandable details. Actual bar widths remain proportional; zero-duration events are explicitly described as markers. |
+| 6. Mobile details | Wrap graph metadata and job navigation; retain the latest-run link. Initially frame the first task at readable zoom on narrow canvases; Fit view still shows the whole graph. A scroll hint and sticky task labels preserve timeline context. |
+| 7. Section scrolling | Register the main scroller with router restoration. New destinations start at the top; Back restores the history entry. Preserve router history state when updating filters or task selection, and preserve scroll for job dialogs. |
+| 8. Page consistency | Shared PageHeader and FilterChip establish title/count/description/action hierarchy and consistent filters. Remove Contracts' extra breadcrumb, eyebrow, and duplicated filter heading. |
+| 9. Empty states | Datasets/Holds show a single relevant empty state with an existing next step. Selection guidance appears when records can be selected. Hide empty pagination and distinguish no inventory from no filter matches. |
+| 10. Atoms | Combine atom/image identity, decode serialized arguments with explicit quoting, retain exact raw command disclosure, and make expansion keyboard accessible. Rename the abbreviated “Full ID” to “Atom ID”; copying still uses the full value. |
+| 11. Stats | Failing-atom bars show task, job identity, and failure count without hover. Separate current/24h KPIs from the range-controlled analysis and label UTC/run-count units. |
+| 12. Details/dialogs | Remove duplicate Server default text, use a trigger ID chip, and distinguish Delete/Invalidate actions with the danger treatment. Keep the existing confirmation behavior. |
+| 13. Status wording | Distinguish succeeded, skipped, blocked, cached, and cancelled counts. “Completed” is the terminal aggregate, including failed/skipped tasks; its explanation and the separate status counts remain available. |
+
+### Representative before / after
+
+These are unedited browser screenshots with real API data, not mockups. The gallery covers desktop and phone layouts in both themes. The gallery pairs use the same seeded backend inventory: the original 4d5b91f3 frontend and the final production frontend. Wall-clock timestamps and elapsed ages can differ between captures. The original pre-edit matrix is also retained locally.
+
+| Surface | Before | After |
+| --- | --- | --- |
+| Jobs and sidebar · dark · 1440×900 | [Before](https://github.com/caesium-cloud/caesium/blob/0a4f41185cacf86712197ce8d6188531982a56fd/docs/ui-polish-617/jobs-dark-1440-before.png) | [After](https://github.com/caesium-cloud/caesium/blob/0a4f41185cacf86712197ce8d6188531982a56fd/docs/ui-polish-617/jobs-dark-1440-after.png) |
+| Run header and timeline · light · 1280×800 | [Before](https://github.com/caesium-cloud/caesium/blob/0a4f41185cacf86712197ce8d6188531982a56fd/docs/ui-polish-617/run-light-1280-before.png) | [After](https://github.com/caesium-cloud/caesium/blob/0a4f41185cacf86712197ce8d6188531982a56fd/docs/ui-polish-617/run-light-1280-after.png) |
+| Job graph/navigation · dark · 390×844 | [Before](https://github.com/caesium-cloud/caesium/blob/0a4f41185cacf86712197ce8d6188531982a56fd/docs/ui-polish-617/job-dark-390-before.png) | [After](https://github.com/caesium-cloud/caesium/blob/0a4f41185cacf86712197ce8d6188531982a56fd/docs/ui-polish-617/job-dark-390-after.png) |
+| Empty datasets · light · 1280×800 | [Before](https://github.com/caesium-cloud/caesium/blob/0a4f41185cacf86712197ce8d6188531982a56fd/docs/ui-polish-617/datasets-light-1280-before.png) | [After](https://github.com/caesium-cloud/caesium/blob/0a4f41185cacf86712197ce8d6188531982a56fd/docs/ui-polish-617/datasets-light-1280-after.png) |
+| Atoms · dark · 1440×900 | [Before](https://github.com/caesium-cloud/caesium/blob/0a4f41185cacf86712197ce8d6188531982a56fd/docs/ui-polish-617/atoms-dark-1440-before.png) | [After](https://github.com/caesium-cloud/caesium/blob/0a4f41185cacf86712197ce8d6188531982a56fd/docs/ui-polish-617/atoms-dark-1440-after.png) |
+| Stats · light · 1440×900 | [Before](https://github.com/caesium-cloud/caesium/blob/0a4f41185cacf86712197ce8d6188531982a56fd/docs/ui-polish-617/stats-light-1440-before.png) | [After](https://github.com/caesium-cloud/caesium/blob/0a4f41185cacf86712197ce8d6188531982a56fd/docs/ui-polish-617/stats-light-1440-after.png) |
+| JobDefs · light · 390×844 | [Before](https://github.com/caesium-cloud/caesium/blob/0a4f41185cacf86712197ce8d6188531982a56fd/docs/ui-polish-617/jobdefs-light-390-before.png) | [After](https://github.com/caesium-cloud/caesium/blob/0a4f41185cacf86712197ce8d6188531982a56fd/docs/ui-polish-617/jobdefs-light-390-after.png) |
+
+### Qualification
+
+The UI production bundle is built and tested inside `mcr.microsoft.com/playwright:v1.59.1-noble`, matching the lockfile's Playwright version. It is served through a local preview proxy against the unchanged `pr617-review-20261001` release backend. This is production-frontend / real-backend qualification, not a newly compiled Go release image. No Go source changed in this follow-up.
+
+| Check | Result |
+| --- | --- |
+| Containerized ESLint | Passed |
+| Containerized Vitest | 433 tests / 60 files passed (`npm test -- --maxWorkers=2`) |
+| Production build and unchanged asset budgets | Passed; largest JS 1,233.51 KiB raw / 361.50 KiB gzip; all assets including fonts 2,594.97 KiB raw / 786.36 KiB gzip |
+| Broad browser pass, one worker, zero retries | 58 passed / 2 failed. All ten new polish checks, both mobile journeys, ten accessibility checks, twelve original QA checks, and six unchanged Linux screenshot baselines passed. |
+| Documentation guardrail | Containerized `go test ./internal/guardrails/... -count=1` passed |
+| Read-only browser measurements | Both themes: aligned count/shortcut edges, section reset and Back restoration, preserved dialog scroll, sticky timeline labels, full trigger-ID copying, empty/filter clearing, and text token contrast passed |
+
+The two broad-pass failures were existing light-theme review journeys: the identifier/shortcut test could not find the run heading after navigation, and the malformed-timestamp test could not find Run History after navigation. The latter trace includes an incomplete `route.fetch` at teardown. They are retained as failures in `regression-results.json`; this pass does not claim to fix intermittent route-loading stalls. An unchanged, isolated recheck of those two journeys passed in both themes (4/4, zero retries). That recheck does not erase the broader failures.
+
+Earlier polish attempts caught stale test expectations and a real mobile framing race between React Flow's initial fit and the resize handler. The framing race was fixed by giving the measured-viewport handler sole ownership of automatic fitting. Direct live screenshots then exposed a non-shrinking counter wrapper; the final browser pass covers that correction with a real running job. An unrestricted unit-test run hit a process-spawn timeout while enumerating Playwright projects; the final two-worker run passed without changing timeouts or assertions.
+
+Rendered pages are captured at 1440×900, 1280×800, and 390×844 in both themes. The full local evidence, including scripts, original reproduction, screenshots, browser traces, and JSON reports, is retained under `.tmp/pr617-polish/`. Representative screenshots are committed above. A separate real 45-second log-streaming run with a long alias was captured while running on Jobs, Job detail, and Run detail at every viewport/theme combination (18 screenshots); the API then reported successful completion. Missing run values and historical-only rows were inspected, as were filtered-empty pages and Cache/Configuration dialogs. No API responses were invented for these visual captures; malformed timestamps remain an explicitly synthetic regression scenario.
+
+Measured `text-3` contrast on page/panel backgrounds is 7.02–7.57:1 in dark mode and 5.87–6.99:1 in light mode. The checks also measured `text-2`, cyan, and danger against those three backgrounds; the minimum was 4.93:1. Disabled controls retain reduced opacity and dashed borders. These measurements do not establish whole-application accessibility compliance.
+
+Populated Datasets/Holds/Contracts layouts and feature-gated incident screens still require a dedicated visual qualification pass. The local visual matrix covers their empty states. Multi-node/degraded operation, external SSO providers, and the full concurrent browser suite are outside this polish pass.
+
+### Search follow-up
+
+The terminal-like footer obscured its navigation-search action: only the narrow left prompt opened it, while desktop results stretched across the content area. The entire 44 px footer is now a labeled search button with a search icon and platform shortcut. Cmd/Ctrl-K and `:` remain supported. Both desktop and phone use the same bounded dialog, with a reserved close-button area, quieter selected rows, consistent metadata, short IDs to distinguish duplicate names, and visible keyboard hints. Search accepts full IDs as well as names. Escape, Close, and outside click restore focus to the footer; resizing retains the query and input focus.
+
+These captures compare the production frontend at `eca55d81` with the search follow-up against the same real backend. The broader qualification limits above still apply.
+
+| Surface | Before | After |
+| --- | --- | --- |
+| Search button · dark · 1440×900 | [Before](https://github.com/caesium-cloud/caesium/blob/0a4f41185cacf86712197ce8d6188531982a56fd/docs/ui-polish-617/search-closed-dark-1440-before.png) | [After](https://github.com/caesium-cloud/caesium/blob/0a4f41185cacf86712197ce8d6188531982a56fd/docs/ui-polish-617/search-closed-dark-1440-after.png) |
+| Search dialog · dark · 1440×900 | [Before](https://github.com/caesium-cloud/caesium/blob/0a4f41185cacf86712197ce8d6188531982a56fd/docs/ui-polish-617/search-open-dark-1440-before.png) | [After](https://github.com/caesium-cloud/caesium/blob/0a4f41185cacf86712197ce8d6188531982a56fd/docs/ui-polish-617/search-open-dark-1440-after.png) |
+| Search dialog · light · 390×844 | [Before](https://github.com/caesium-cloud/caesium/blob/0a4f41185cacf86712197ce8d6188531982a56fd/docs/ui-polish-617/search-open-light-390-before.png) | [After](https://github.com/caesium-cloud/caesium/blob/0a4f41185cacf86712197ce8d6188531982a56fd/docs/ui-polish-617/search-open-light-390-after.png) |
+
+The search follow-up passed containerized ESLint, all 433 unit tests, the production build and unchanged bundle budgets, and the documentation guardrail. Twelve focused browser checks passed with one worker and zero retries across both themes, covering full-bar clicks, both keyboard shortcuts, focus containment/restoration, dismissal, viewport changes, full-ID navigation, the existing mobile journey, copying, and reduced motion. Direct screenshots were inspected at all three target sizes in both themes, including long results and no matches; six scoped axe scans of the open search dialog reported zero WCAG 2.0/2.1 A/AA violations. These scoped scans do not establish whole-application compliance. Local receipts are under `.tmp/pr617-search/`.
+
+A second regression selection passed 8/8 with zero retries: navigation-search destination/active-route checks in both themes and all six unchanged Linux visual baselines. Total focused browser coverage for this follow-up is 20/20 passing; it does not supersede the broader failures recorded above.
+
+## Handoff and motion audit (PR #619)
 
 This follow-up restores the Standard bundle's time instruments and visible motion while keeping the QA, review, responsive-layout, status-language, and search corrections in PR #617.
 
-## Comparison basis
+### Comparison basis
 
 The audit read the supplied `Caesium Operator Console Facelift.zip` handoff README, design specification, route guide, and functional invariants, and rendered the chosen Standard references in both themes. Retired concepts were excluded. Source before this follow-up was `705ad583d9d2fb6cde8ba545ddff35c14a0ca683`.
 
@@ -10,7 +199,7 @@ Three local surfaces were distinguished: port 8080 still serves the original `fa
 
 The bundle's sample fleet has frequent recent runs and a multi-voter cluster. The local fleet includes many historical-only jobs and a standalone server. Those differences were preserved rather than replaced with invented activity or membership.
 
-## Findings and dispositions
+### Findings and dispositions
 
 | Area | Audit result and action |
 | --- | --- |
@@ -22,7 +211,7 @@ The bundle's sample fleet has frequent recent runs and a multi-voter cluster. Th
 | Oscillators | Strengthened the header sine to the reference stroke weight. The login sine previously collapsed into a tiny central viewBox; it now repeats across the full viewport at a stable wavelength. Reduced motion paints a flat line. |
 | Motion contract | Retained the existing UTC phase system, 1-second clock beat, 2-second gold/glow beat, 6-second task electron, and 22/30/38-second atom orbits. New live bars join the same clock. No route entrance animation was added. Reduced motion disables the new glow and duration transitions as well as existing instruments. |
 
-## Handoff coverage and deliberate differences
+### Handoff coverage and deliberate differences
 
 | Handoff surface | Current disposition |
 | --- | --- |
@@ -37,7 +226,7 @@ The bundle's sample fleet has frequent recent runs and a multi-voter cluster. Th
 | Incidents and approvals | Existing feature-gated activity timeline, status words, and approval permissions remain; no new live qualification is claimed here. |
 | Login, 404, search | Atom and oscillator fidelity improved. The clearer full-width Search button and bounded accessible dialog intentionally replace the bundle's terminal-like expanding footer. Existing API-key/SSO forms, 404 action, focus restoration, and shortcuts remain. |
 
-## Rendered evidence
+### Rendered evidence
 
 Screenshots and recordings remain available in the immutable PR review snapshot linked below. Binary review evidence is removed from the final source tree so a squash merge does not add it to `master`.
 
@@ -55,7 +244,7 @@ Reference renders contain the bundle's sample data. Application screenshots are 
 
 [Watch the real-run motion recording](https://github.com/caesium-cloud/caesium/blob/0a4f41185cacf86712197ce8d6188531982a56fd/docs/ui-motion-617/live-instruments.webm): a REST-triggered uncached three-step job updates the fleet strip, then shows the execution cursor, running bar, and task electron. The API subsequently reported this recorded run as succeeded. [Live fleet still](https://github.com/caesium-cloud/caesium/blob/0a4f41185cacf86712197ce8d6188531982a56fd/docs/ui-motion-617/live-fleet-after.png).
 
-## Qualification and limits
+### Qualification and limits
 
 The final production frontend was built inside the existing Playwright Linux image and served against the unchanged release backend. No Go application source, permission model, or API response schema changed. The raw capture matrix and receipts are under `.tmp/pr617-motion/`; representative artifacts are linked above from the immutable PR review snapshot.
 
@@ -67,15 +256,15 @@ The final production frontend was built inside the existing Playwright Linux ima
 
 The first four-test motion pass caught the live-history timing defect in light mode (three passed, one failed); the trace exposed a burst of list reads during event replay. After the correction, both real-run journeys and both layout journeys passed. Two login assertions then incorrectly treated a zero-height stroked SVG path as a visible layout box; they were corrected to assert the painted stroke and reduced-motion display state. Failed attempts remain in the local receipts. An attempted pull of a new Node image exhausted Docker's shared disk; validation used the already-installed image without pruning foreign resources.
 
-Populated Datasets/Holds/Contracts, feature-gated incident screens, multi-node/degraded cluster operation, external SSO providers, and the full concurrent browser suite remain outside this pass. Existing broad-suite failures documented in [the polish report](operator-console-polish.md) are not erased by focused validation here.
+Populated Datasets/Holds/Contracts, feature-gated incident screens, multi-node/degraded cluster operation, external SSO providers, and the full concurrent browser suite remain outside this pass. Existing broad-suite failures documented in [the polish report](#polish-pass-pr-617) are not erased by focused validation here.
 
-## Fleet column spacing follow-up
+### Fleet column spacing follow-up
 
 Give the timeline more of the flexible desktop width. At 1440 px, the name column changes from 436 to 238 px and history from 264 to 462 px; at 1280 px, names change from 336 to 220 px and history from 204 to 320 px. Header/row alignment, full-name tooltips, fixed status/time/action columns, and the phone layout are preserved. [Before](https://github.com/caesium-cloud/caesium/blob/0a4f41185cacf86712197ce8d6188531982a56fd/docs/ui-motion-617/spacing-dark-1440-before.png) · [After](https://github.com/caesium-cloud/caesium/blob/0a4f41185cacf86712197ce8d6188531982a56fd/docs/ui-motion-617/spacing-dark-1440-after.png).
 
 Direct captures cover both themes at 1440×900, 1280×800, and 390×844, including long names. Containerized lint, production build/budget checks, and four existing browser alignment/responsive checks passed with zero retries. No new unit tests were added for this CSS-only adjustment. Local measurements and captures are retained in `.tmp/pr617-spacing/`.
 
-## Quorum placement and local Kubernetes follow-up
+### Quorum placement and local Kubernetes follow-up
 
 The quorum count now sits below the large System atom, with tabular numerals, a stronger foreground, and the label “reachable / total voters.” Orbit paths no longer cross the count. Membership, liveness, leader marking, and reduced-motion behavior are unchanged.
 
@@ -103,7 +292,7 @@ The node inventory has a remaining presentation issue: configured DNS seeds are 
 
 Docker's shared disk was full. With explicit user approval, unused build cache was cleared; containers, images, volumes, and existing clusters were preserved. Free space remains low (about 630 MiB at the final runtime check), so this is a small demonstration cluster, not a stress-test environment. The new cluster is intentionally left running.
 
-## Shared shortcut keycaps
+### Shared shortcut keycaps
 
 Run actions, the search footer, and search-dialog guidance now use the shared `Kbd` primitive. Command/dropdown shortcut primitives delegate to it too. Every hint uses the same 20 px height, 11 px mono type, border, background, and foreground. Sidebar shortcuts appear only in a tooltip on mouse hover or keyboard focus, keeping the resting navigation to labels and right-aligned counts. Tooltips show sequences such as `g › j`, expose “Keyboard shortcut: G, then J” to assistive technology, and dismiss with Escape. Modifier combinations retain `⌘ K` / `Ctrl K` and `Alt R`. The phone drawer reserves room above the first navigation row for its close button.
 
@@ -119,7 +308,7 @@ The local Kubernetes release uses `caesiumcloud/caesium:pr617-shortcut-tooltips-
 
 The local rollout encountered two operational issues: one replica retained obsolete peer addresses in its discovery cache, and disk exhaustion interrupted an init container. The discovery cache was backed up and refreshed from observed live membership, then the replica restarted; raft/database data were retained. Removing only this cluster's superseded image tags and import aliases recovered space, and the interrupted pod was recreated. These are runtime recovery notes, not backend fixes or failover qualification. Final checks confirm healthy database access and 3/3 reachable voters on each replica, and all 11 served entry assets match the production build. Foreign runtimes and the default kubectl context were preserved.
 
-## Follow-up: fluid execution and terminal snapshots
+### Follow-up: fluid execution and terminal snapshots
 
 Reproduced against `0b775140` on the three-replica Kubernetes release at port 8084. The reported `k8s-live-demo` run `657ca32f-aeaa-482f-9d88-f3bc96667809` is persisted as **failed**, with `database is locked`; its stream task remains recorded as running and its final task as pending. The old UI animated the stream forever and extended its duration using the current clock. No database records were rewritten.
 
@@ -138,7 +327,7 @@ This is a UI correction, not a fix for the recorded backend database-lock failur
 
 Local delivery: image `caesiumcloud/caesium:pr617-dag-motion-20261002` is embedded and served on port 8084 by all three replicas. Each replica passes database health and reports 3/3 reachable voters; all 14 entry assets match the production build. A final run of the same `k8s-live-demo` job (`a9a48115-face-4a5b-8ef3-a8f62d95025e`) succeeds on the deployed image and visibly stops without reload. Containerized documentation guardrails also pass. The rollout used the existing builder/OCI packaging procedure with host-mounted build caches and removed only superseded images belonging to this local release.
 
-## Follow-up: connect jobs to their executions
+### Follow-up: connect jobs to their executions
 
 The path from Jobs to a timeline previously relied on a small `Latest overlay` timestamp link, and an execution's main navigation offered no explicit route to the job overview. This pass keeps the graph-first job overview and existing execution routes while making their relationship visible.
 
@@ -157,7 +346,7 @@ No scheduler, API, permission, run-state, or animation logic changes in this pas
 
 Local delivery: image `caesiumcloud/caesium:pr617-run-navigation-20261002` is served on port 8084 by three healthy replicas with 3/3 reachable voters. All 14 entry assets match the production build. A final real execution of `k8s-live-demo` (`d90f8e48-b992-46b9-8d96-b7bcae2ce6f2`) verifies View live run, exact execution identity, the run picker, natural completion, and return to the job overview with its succeeded outcome. Containerized documentation guardrails pass. The existing Kubernetes release remains running for inspection.
 
-## Follow-up: history alignment and consistent counts
+### Follow-up: history alignment and consistent counts
 
 Reproduced on `a5de859f` at port 8084: relative ages shifted the run-history status and duration columns, Datasets had no count beside Holds' zero, and the tallest archived run marks began only 3px below their row boundary.
 
@@ -175,7 +364,7 @@ Validation: containerized ESLint, all 444 unit tests, production build/bundle bu
 
 Local delivery: image `caesiumcloud/caesium:pr617-history-polish-20261002` is running on port 8084 across three healthy replicas. Fresh membership observations confirm 3/3 reachable voters, and all 14 served entry assets match the build. A final browser check follows the deployed archive link into the history modal and opens its exact real execution and timeline. Only this release's superseded images were retired; foreign resources were preserved.
 
-## Second review pass
+### Second review pass
 
 This pass addresses the 16 follow-up threads without changing the backend, permissions, animation phases, or duration geometry.
 
@@ -208,13 +397,13 @@ Validation for this review pass:
 - The subsequent CI run exposed missing database-console enablement in the browser test server: both copy scenarios stopped at the disabled schema control. Enable the console only in that server setup so the existing tests exercise the real SQL endpoint. Both themes passed a focused rerun against the current UI and the enabled QA server; application defaults remain unchanged.
 - Local captures, test/build receipts, and an archive of the removed review media are under `.tmp/pr617-review2/`. CI collects new browser screenshots in its diagnostics artifact; no new binary evidence is added to the source tree.
 
-## Now-reference alignment
+### Now-reference alignment
 
 The Jobs clock dot was centered 3 px left of the time-grid boundary. Replace it with a 1 px line below “now” at the same coordinate as the row guides, and give the time reference a synchronized, low-opacity two-second pulse. Reduced motion keeps the line static; archived history stays in its separate ordered lane.
 
 Before/after captures were reviewed at 1440, 1280, and 390 px in both themes. Browser checks measured zero horizontal offset, confirmed the pulse changes opacity without shifting the line, checked reduced motion, and found no main-panel overflow. Lint and the containerized production build/bundle budgets passed. Captures and geometry receipts are retained in `.tmp/pr617-now-line/`; no binary evidence is added to the source tree.
 
-## Final review pass
+### Final review pass
 
 | Finding | Correction |
 | --- | --- |
@@ -238,7 +427,7 @@ Validation includes 470 unit tests, containerized lint/production build and bund
 
 Cross-node SSE fan-out itself remains a backend concern: a one-minute REST reconciliation interval discovers missed events while preserving the existing event bus and permissions. Populated incident lifecycles remain outside this focused visual qualification.
 
-### CI follow-up
+#### CI follow-up
 
 The full browser suite exposed two runtime issues beyond the focused review pass. SSE event and server-log responses inherited the HTTP server's 30-second write deadline; renew that deadline for each stream chunk, including heartbeats, while retaining the ordinary HTTP limit and a bounded timeout for stalled stream writes. Both real REST streams now have an integration scenario requiring four heartbeats over 45 seconds, plus a real HTTP unit regression through Echo's response wrapper.
 
@@ -246,7 +435,7 @@ A latest-run projection that disagreed with paged history could make each comple
 
 Presentation fixtures now use one fixed browser clock and consistent latest/history snapshots. Sustained-event coverage retains one request handler throughout its gated read; slow-response request bounds use elapsed time rather than assuming workstation timing. The mid-burst update, final update, single in-flight request, concurrent-run identity, and console-error assertions remain enforced. CI follow-up artifacts are retained in `.tmp/pr617-ci-recovery/` and `.tmp/pr617-ci-green/`.
 
-### Streaming follow-up review
+#### Streaming follow-up review
 
 | Finding | Correction |
 | --- | --- |

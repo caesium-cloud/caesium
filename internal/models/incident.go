@@ -8,7 +8,7 @@ import (
 )
 
 // IncidentStatus enumerates the states of the incident status machine
-// (design-agent-in-the-loop.md, Phase 0). The lifecycle is:
+// (docs/design/agent-in-the-loop.md, Phase 0). The lifecycle is:
 //
 //	open → triaging → (awaiting_approval ↔ triaging) → remediated | escalated → closed
 //

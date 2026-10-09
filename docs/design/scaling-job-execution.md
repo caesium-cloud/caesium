@@ -1,12 +1,12 @@
 # Design: Scaling Job Execution Beyond the Sharded Dqlite Ceiling
 
-> Status: Phase 0 (load harness), Phase 1 write-volume reduction, and Phase 2 run-owner coordination are **shipped** behind `CAESIUM_RUN_OWNER_ENABLED` (default off), with B3 in-memory advancement further gated by `CAESIUM_RUN_OWNER_IN_MEMORY` (default off). Remaining: in-process catalog cache (1.3), delta/incremental checkpoints, the `run_commands` mutation path, and the default-on rollout. Layers on [design-database-locking-fix.md](design-database-locking-fix.md) Phase 4; measurements in [load-testing-history.md](load-testing-history.md). The Phase 2 sections below are the **design of record for the shipped run-owner system**, with remaining items flagged inline.
+> Status: Phase 0 (load harness), Phase 1 write-volume reduction, and Phase 2 run-owner coordination are **shipped** behind `CAESIUM_RUN_OWNER_ENABLED` (default off), with B3 in-memory advancement further gated by `CAESIUM_RUN_OWNER_IN_MEMORY` (default off). Remaining: in-process catalog cache (1.3), delta/incremental checkpoints, the `run_commands` mutation path, and the default-on rollout. Layers on [database-locking-fix.md](database-locking-fix.md) Phase 4; measurements in [../archive/load-testing-history.md](../archive/load-testing-history.md). The Phase 2 sections below are the **design of record for the shipped run-owner system**, with remaining items flagged inline.
 
 ## What shipped
 
 | Phase | What | Status / gate |
 |---|---|---|
-| 0 | Load harness + `caesium_db_writes_total{category}` counters (`internal/metrics`) | ✅ shipped; baselines in [load-testing-history.md](load-testing-history.md) |
+| 0 | Load harness + `caesium_db_writes_total{category}` counters (`internal/metrics`) | ✅ shipped; baselines in [../archive/load-testing-history.md](../archive/load-testing-history.md) |
 | 1.1 | Event coalescing — batched `execution_events` insert per transaction | ✅ shipped |
 | 1.2 | Per-node lease-renewal batching | ✅ shipped |
 | 1.4 | Predecessor-counter `UPDATE` batching | ✅ shipped |
@@ -16,7 +16,7 @@
 | 2B (B3) | In-memory DAG advancement (`run.RunState`), `run_checkpoints`, checkpoint/replay, owner-failover | ✅ shipped behind `CAESIUM_RUN_OWNER_IN_MEMORY` (default off) |
 | — | Delta/incremental checkpoints (v1 writes full snapshots only; `RUN_CHECKPOINT_FULL_EVERY` is advisory) | ⬜ remaining |
 | — | `run_commands` mutation path (cancel/retry/signal via the owner) | ⬜ remaining |
-| — | mTLS on the internal endpoints | ✅ auto-provisioned — see [archive/design-internal-mtls-auto-provisioning.md](archive/design-internal-mtls-auto-provisioning.md) |
+| — | mTLS on the internal endpoints | ✅ auto-provisioned — see [../archive/design-internal-mtls-auto-provisioning.md](../archive/design-internal-mtls-auto-provisioning.md) |
 
 Code: `internal/dispatch/` (dispatch/complete RPCs, loop, mTLS), `internal/run/owner_state.go`, `internal/run/checkpoint_store.go`, `internal/run/recovery.go`, `internal/models/run_lease.go`, `internal/models/run_checkpoint.go`. Env vars in `pkg/env/env.go`: `RUN_OWNER_ENABLED`, `RUN_OWNER_IN_MEMORY`, `RUN_LEASE_TTL`, `RUN_CHECKPOINT_EVENTS`/`_INTERVAL`/`_FULL_EVERY`.
 
@@ -39,7 +39,7 @@ Non-goals: multi-cluster federation, alternative durable stores (PostgreSQL stay
 
 ## Phase 0 — load harness (shipped)
 
-The `caesium_db_writes_total{category}` counters (categories: `task_run_insert`, `task_run_status`, `event_insert`, `lease_renewal`, `checkpoint`, `command`, `callback`) and the parameterized DAG load harness shipped and produced the baseline series. The full Phase 0 → 2B measurement narrative — including the finding that `task_run_status` (44.4%) narrowly led `event_insert` (41.7%) as the dominant write category, which motivated Phase 1.4 — now lives in [load-testing-history.md](load-testing-history.md).
+The `caesium_db_writes_total{category}` counters (categories: `task_run_insert`, `task_run_status`, `event_insert`, `lease_renewal`, `checkpoint`, `command`, `callback`) and the parameterized DAG load harness shipped and produced the baseline series. The full Phase 0 → 2B measurement narrative — including the finding that `task_run_status` (44.4%) narrowly led `event_insert` (41.7%) as the dominant write category, which motivated Phase 1.4 — now lives in [../archive/load-testing-history.md](../archive/load-testing-history.md).
 
 ## Phase 1 — write-volume reduction (Family A)
 
@@ -131,7 +131,7 @@ Unit (`internal/run/`): owner state machine; checkpoint + terminal-row replay ac
 - Phase 0 + Phase 1.1/1.2/1.4: default-on (shipped).
 - Phase 1.3 catalog cache: ship behind `CAESIUM_CATALOG_CACHE_ENABLED` (default off) for one release, then default-on (remaining).
 - Phase 2: shipped behind `CAESIUM_RUN_OWNER_ENABLED` (default off); B3 in-memory further behind `CAESIUM_RUN_OWNER_IN_MEMORY` (default off). Default-on only after a multi-month soak in a Caesium-operated reference cluster with the recovery path exercised under partition + crash injection. When disabled, the path is bypassed entirely.
-- mTLS on `/internal/dispatch`+`/internal/complete` is auto-provisioned (see [archive/design-internal-mtls-auto-provisioning.md](archive/design-internal-mtls-auto-provisioning.md)); credentials are distinct from `CAESIUM_INTERNAL_WAKEUP_TOKEN`.
+- mTLS on `/internal/dispatch`+`/internal/complete` is auto-provisioned (see [../archive/design-internal-mtls-auto-provisioning.md](../archive/design-internal-mtls-auto-provisioning.md)); credentials are distinct from `CAESIUM_INTERNAL_WAKEUP_TOKEN`.
 
 ## Operational risks
 
@@ -153,9 +153,9 @@ Unit (`internal/run/`): owner state machine; checkpoint + terminal-row replay ac
 
 ## References
 
-- [design-database-locking-fix.md](design-database-locking-fix.md) — the locking-fix plan whose Phase 4 this layers on.
-- [design-parallel-job-execution.md](archive/design-parallel-job-execution.md) — the (archived) original distributed-mode execution model.
-- [parallel-execution-operations.md](parallel-execution-operations.md) — operator-facing config and rollout.
-- [database-sharding.md](database-sharding.md) — table placement and routing contract (PR #157).
-- [load-testing-history.md](load-testing-history.md) — Phase 0 → 2B measurement record.
+- [database-locking-fix.md](database-locking-fix.md) — the locking-fix plan whose Phase 4 this layers on.
+- [design-parallel-job-execution.md](../archive/design-parallel-job-execution.md) — the (archived) original distributed-mode execution model.
+- [../distributed-execution.md](../distributed-execution.md) — operator-facing config and rollout.
+- [../distributed-execution.md](../distributed-execution.md#database-sharding) — table placement and routing contract (PR #157).
+- [../archive/load-testing-history.md](../archive/load-testing-history.md) — Phase 0 → 2B measurement record.
 - Temporal "history shards" — the single-owner-per-workflow pattern this adapts to Caesium's run-grain.

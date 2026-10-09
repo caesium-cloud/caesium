@@ -43,7 +43,7 @@ For drafting new plans in this same shape, see
 
 ## Source-Of-Truth Note
 
-This plan implements [`docs/design-dynamic-fanout.md`](../../design-dynamic-fanout.md).
+This plan implements [`docs/design/dynamic-fanout.md`](../../design/dynamic-fanout.md).
 **The design doc is authoritative for INTENT and SCOPE and wins on any
 disagreement** — what fan-out must do (the marker protocol, the expansion
 transaction, per-partition cache identity, the fan-in aggregation contract, the
@@ -62,7 +62,7 @@ scalar attributes enter `cache.HashInput` (the sibling list, and a partition's
 silently drops data).
 
 The design was **amended 2026-08-25** with
-[`## Structured Partitions`](../../design-dynamic-fanout.md#structured-partitions-key--fingerprint--dependson):
+[`## Structured Partitions`](../../design/dynamic-fanout.md#structured-partitions-key--fingerprint--dependson):
 a `##caesium::partitions` element may be a JSON object
 (`{key, fingerprint, dependsOn, …scalar attributes}`) as well as a bare string.
 That amendment is authoritative the same way the rest of the design is, and adds
@@ -84,7 +84,7 @@ three advancement implementations.** A seed with no inverse is a stall; an inver
 present on only some routes is a *mode-dependent* stall, which is strictly worse
 because it passes CI in the default configuration and fails in production under a
 flag nobody varied. The matrix to fill in per item is in the design's
-[`## Route completeness`](../../design-dynamic-fanout.md#route-completeness-state-this-once-check-every-item-against-it)
+[`## Route completeness`](../../design/dynamic-fanout.md#route-completeness-state-this-once-check-every-item-against-it)
 section. **Read that section's closing subsection before relying on the matrix**:
 a fourth review round found a defect it does not catch, because its axes are
 operation × completion route and the defect lived on a *traversal site* (the owner
@@ -151,14 +151,14 @@ merged tree: `just lint`, `just unit-test`, `just integration-test`,
 `just integration-test-distributed`, `just integration-test-owner-memory`.
 
 The plan was published from
-[`docs/design-dynamic-fanout.md`](../../design-dynamic-fanout.md) (then Status:
+[`docs/design/dynamic-fanout.md`](../../design/dynamic-fanout.md) (then Status:
 Brainstorm/Design) with every item grounded against the executor, run store,
 claimer, and cache-identity code as of 2026-07. That banner is now flipped to
 Shipped, and the `docs/roadmap.md` Phase 4 row with it.
 
 **Amendment, 2026-08-25 — structured partitions.** Because no stream had started,
 the design's structured-partition amendment
-([`## Structured Partitions`](../../design-dynamic-fanout.md#structured-partitions-key--fingerprint--dependson))
+([`## Structured Partitions`](../../design/dynamic-fanout.md#structured-partitions-key--fingerprint--dependson))
 was absorbed into the existing streams rather than bolted on as a follow-up wave:
 items A3, C1, C2, D1, E1, E2, E3, F2, H-1, and N-1 were **amended in place**, and
 items A4, C4, D3, and E4 are **new**.
@@ -178,7 +178,7 @@ about (failover, checkpointing, incident attribution), and **must land before an
 expansion or ordering work** — so it is now **Stream G**, a gating prerequisite,
 rather than scattered bullets inside the streams that consume it. A2 is
 correspondingly narrowed and now depends on G. See
-[`## The task-ID identity assumption`](../../design-dynamic-fanout.md#the-task-id-identity-assumption).
+[`## The task-ID identity assumption`](../../design/dynamic-fanout.md#the-task-id-identity-assumption).
 
 **Every `file:line` in this document is now stale by construction.** All of them
 predate the Wave 1 implementation, which added ~1,400 net lines to
@@ -395,7 +395,7 @@ historical note.
    `_FAILED` keys — and no item in this plan owns it. Do not paper over it by
    validating the aggregate against the per-instance schema; that would reject
    every correct fold.
-   _Deferred: design question (group-level schema vocabulary) for `docs/design-dynamic-fanout.md`; tracked as #357._
+   _Deferred: design question (group-level schema vocabulary) for `docs/design/dynamic-fanout.md`; tracked as #357._
 
 15. **Rolling-upgrade capability gate — delete it once the fleet is on protocol
    2.** Fanned dispatch is routed only to peers advertising
@@ -983,7 +983,7 @@ env, folds the partition into the cache hash, and resolves the group. Owns
       from invalidating all N (`internal/cache/shortcircuit.go:56` cannot help — one
       changed fingerprint makes the emitted list non-identical and the substitution
       is correctly refused). The chain break is `cache.chain: values`, owned by
-      `docs/superpowers/specs/2026-08-25-dag-native-infrastructure-deployment-design.md`
+      `docs/design/2026-08-25-dag-native-infrastructure-deployment-design.md`
       §4. Do not invent a second mechanism for it in this item.
       _Shipped 2026-08-26: `Partition`, `PartitionFingerprint`, and
       `PartitionAttributes` on `cache.HashInput` and mirrored verbatim into
@@ -1196,7 +1196,7 @@ which makes the substrate able to represent two siblings at all.
       runs to its own terminal state, the group resolves `failed` on that
       transition, and the fan-in is skipped by its trigger rule: later, never
       wrong. This refines the design's "cancelling pending siblings"
-      (`docs/design-dynamic-fanout.md:324`, `:691`, `:1111`). SQL:
+      (`docs/design/dynamic-fanout.md:324`, `:691`, `:1111`). SQL:
       `markInstanceSkippedTx`, whose `markInstanceSkippedFromTx` makes the
       `{pending}` source set an explicit argument at every call site rather than an
       inherited default. Owner: the `st.Status != TaskStatusPending` guard in
@@ -1516,7 +1516,7 @@ the Stream E endpoints.
 ## Navigational / Organizational Improvements
 
 - [x] N-1. Reflect fan-out in the docs, last, after A–F ship. Flip the
-      [`docs/design-dynamic-fanout.md`](../../design-dynamic-fanout.md) `> Status:`
+      [`docs/design/dynamic-fanout.md`](../../design/dynamic-fanout.md) `> Status:`
       banner from "Brainstorm/Design" to shipped (pointing at this plan); update the
       "Dynamic fan-out" row in the `docs/roadmap.md` Phase 4 design-wave table
       (`docs/roadmap.md:222`) to Shipped with a plan link; document the `fanOut`
@@ -1533,7 +1533,7 @@ the Stream E endpoints.
       image refs only — the image-pin guardrail rejects unpinned base-image names)
       and index it in `docs/job-definitions.md`
       (`TestJobDefinitionsDocReferencesEveryExampleManifest`); and update the
-      existing `design-dynamic-fanout.md` bullet in `docs/README.md`
+      existing `design/dynamic-fanout.md` bullet in `docs/README.md`
       (`docs/README.md:46`) in-place from "(proposed)" to shipped — keep it in
       backtick/inline-code form (do not add a clickable subdirectory link; the
       `TestDocsREADMEIndexesEveryTopLevelDoc` guardrail rejects them).
@@ -1544,7 +1544,7 @@ the Stream E endpoints.
       element forms, and `CAESIUM_PARTITION_JSON`;
       `docs/job-schema-reference.md` was **regenerated** from `report.go`; and the
       `docs/README.md` bullet was updated in place in backtick form._
-      Files: `docs/design-dynamic-fanout.md`, `docs/roadmap.md`,
+      Files: `docs/design/dynamic-fanout.md`, `docs/roadmap.md`,
       `docs/job-schema-reference.md`, `docs/job-definitions.md`,
       `docs/caesium-job-llm-reference.md`, `docs/examples/`, `docs/README.md`.
       Depends on: A–F (runs last, after the runtime ships).
@@ -1559,7 +1559,7 @@ skip across producer re-runs** — v1's conservative identity re-runs all instan
 when the producer's own inputs change. The structured-partition amendment makes
 this *expressible* (C2 puts each unit's fingerprint in its key) but does **not**
 enable it: the enabling half is the chain break, `cache.chain: values`, owned by
-[`2026-08-25-dag-native-infrastructure-deployment-design.md`](../../superpowers/specs/2026-08-25-dag-native-infrastructure-deployment-design.md)
+[`2026-08-25-dag-native-infrastructure-deployment-design.md`](../../design/2026-08-25-dag-native-infrastructure-deployment-design.md)
 §4 and implemented by Stream A of [`infra-deploy.md`](infra-deploy.md) (which
 edits the same `hash.go` / `job.go` / `runtime_executor.go` / `definition.go`
 files as Streams A–C here — land one before the other, see that plan's
@@ -1892,13 +1892,13 @@ The plan is done when **all** of these hold:
    the distributed lane runnable in **both** `CAESIUM_RUN_OWNER_IN_MEMORY` modes,
    and the string-form / object-form / rejection fixtures available, so the A–D
    scenarios drive the live binary in CI.
-8. **N-1 — docs reflect reality:** the `design-dynamic-fanout.md` banner flipped,
+8. **N-1 — docs reflect reality:** the `design/dynamic-fanout.md` banner flipped,
    the `docs/roadmap.md` Phase 4 fan-out row marked Shipped, the `fanOut` block +
    both marker element forms + `CAESIUM_PARTITION_JSON` documented in the schema
    references (`docs/job-schema-reference.md` **regenerated**, never hand-edited)
    with a working `docs/examples/` manifest, and the `docs/README.md` bullet updated
    in place in backtick form.
-9. **Cross-cutting:** `docs/roadmap.md`, `docs/design-dynamic-fanout.md`, and this
+9. **Cross-cutting:** `docs/roadmap.md`, `docs/design/dynamic-fanout.md`, and this
    plan's per-stream `## Progress` entries reflect every shipped stream and match the
    merged PRs. (Phase 5 replay re-expansion and value-verified per-partition skip
    remain explicitly deferred — not gates here. Per-partition skip in particular is
@@ -1923,14 +1923,14 @@ The plan is done when **all** of these hold:
 
 ## Cross-References
 
-- [`docs/design-dynamic-fanout.md`](../../design-dynamic-fanout.md) — the design of
+- [`docs/design/dynamic-fanout.md`](../../design/dynamic-fanout.md) — the design of
   record and source of truth for intent, scope, and the Non-Goals that bind this
   plan; its
-  [`## Structured Partitions`](../../design-dynamic-fanout.md#structured-partitions-key--fingerprint--dependson)
+  [`## Structured Partitions`](../../design/dynamic-fanout.md#structured-partitions-key--fingerprint--dependson)
   section (amendment, 2026-08-25) is authoritative for the object element form,
   the fingerprint's place in the identity hash, and the in-group ordering
   semantics.
-- [`docs/superpowers/specs/2026-08-25-dag-native-infrastructure-deployment-design.md`](../../superpowers/specs/2026-08-25-dag-native-infrastructure-deployment-design.md)
+- [`docs/design/2026-08-25-dag-native-infrastructure-deployment-design.md`](../../design/2026-08-25-dag-native-infrastructure-deployment-design.md)
   — the consumer that forced the structured-partition amendment (§5.4), and the
   owner of the orthogonal `cache.chain: values` chain break (§4) that per-unit
   cache skip depends on. This plan implements the partition side of that contract
@@ -1942,7 +1942,7 @@ The plan is done when **all** of these hold:
 - [`docs/job-schema-reference.md`](../../job-schema-reference.md),
   `docs/job-definitions.md`, `docs/caesium-job-llm-reference.md` — the schema docs
   N-1 extends with the `fanOut` block and partition markers.
-- [`docs/design-quarantined-replay.md`](../../design-quarantined-replay.md) — the
+- [`docs/design/quarantined-replay.md`](../../design/quarantined-replay.md) — the
   fail-closed posture E3 follows for fanned baselines and the deferred
   per-partition skip.
 - `internal/run/owner_state.go`, `internal/run/owner_manager.go`,

@@ -1,5 +1,5 @@
 // Package agentprofile is the REST surface for the AgentProfile resource
-// (docs/design-agent-in-the-loop.md, agent-in-the-loop-remediation Stream
+// (docs/design/agent-in-the-loop.md, agent-in-the-loop-remediation Stream
 // E2). It mirrors api/rest/controller/notification's channel CRUD.
 package agentprofile
 

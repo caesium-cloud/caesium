@@ -7,14 +7,14 @@
 > UI, skip-when-fresh, and `trigger: {type: freshness}` all ship, feature-gated
 > behind `CAESIUM_FRESHNESS_ENABLED`. The strategic flagship of this design
 > wave: cron becomes the fallback, not the model. Exec plan:
-> [`freshness-scheduling.md`](exec-plans/completed/freshness-scheduling.md); the
+> [`freshness-scheduling.md`](../exec-plans/completed/freshness-scheduling.md); the
 > `datasets` surface is documented in
-> [`job-schema-reference.md`](job-schema-reference.md#datasets--freshness).
-> Companion designs: [`design-window-scheduling.md`](design-window-scheduling.md),
-> [`design-data-circuit-breaker.md`](design-data-circuit-breaker.md),
-> [`design-contract-enforcement.md`](design-contract-enforcement.md),
-> [`design-agent-in-the-loop.md`](design-agent-in-the-loop.md),
-> [`design-dynamic-fanout.md`](design-dynamic-fanout.md).
+> [`job-schema-reference.md`](../job-schema-reference.md#datasets--freshness).
+> Companion designs: [`window-scheduling.md`](window-scheduling.md),
+> [`data-circuit-breaker.md`](data-circuit-breaker.md),
+> [`contract-enforcement.md`](contract-enforcement.md),
+> [`agent-in-the-loop.md`](agent-in-the-loop.md),
+> [`dynamic-fanout.md`](dynamic-fanout.md).
 
 ## Problem
 
@@ -24,7 +24,7 @@ why 3 a.m. pages exist:
 - The vendor file usually lands by 03:00, so the extract runs at 03:15. The
   day it lands at 04:30, the extract **fails** and the on-call is paged; the
   "fix" is to wait and press retry. The delayed-file incident class in
-  [`design-agent-in-the-loop.md`](design-agent-in-the-loop.md) exists
+  [`agent-in-the-loop.md`](agent-in-the-loop.md) exists
   largely because time-based scheduling turns "not yet" into "error".
 - To be safe, the guess is padded: run hourly "just in case", re-run DAGs
   whose inputs never changed. Compute is burned proving nothing happened.
@@ -102,7 +102,7 @@ identity).
   job boundaries; the declared registry feeds this same shape.
 - **Arrival signaling exists.** `POST /v1/events`, `caesium event push`,
   webhook bridging, and the event router's `_trigger_depth` chain guard
-  ([`design-event-triggers.md`](design-event-triggers.md)) are shipped.
+  ([`event-triggers.md`](event-triggers.md)) are shipped.
 - **"Nothing changed" is already detectable.** `HashInput`
   (`internal/cache/hash.go:266-287`) folds image digest, command, env,
   predecessor hashes, **predecessor outputs**, and run params into cache
@@ -376,15 +376,15 @@ New feature dir `ui/src/features/datasets/`:
   whose triage bundle already contains the answer (which upstream, how
   late, lateness history); the delayed-file scenario mostly never reaches
   the incident manager because no task fails.
-- **Window scheduling** ([`design-window-scheduling.md`](design-window-scheduling.md)):
+- **Window scheduling** ([`window-scheduling.md`](window-scheduling.md)):
   freshness says IF, windows say WHEN — a derived run outside its window
   parks until it opens; staleness accrued while parked is the window's.
 - **Circuit breaker / contracts**: quarantined datasets
-  ([`design-data-circuit-breaker.md`](design-data-circuit-breaker.md)) are
+  ([`data-circuit-breaker.md`](data-circuit-breaker.md)) are
   never fresh; contract violations
-  ([`design-contract-enforcement.md`](design-contract-enforcement.md)) can
+  ([`contract-enforcement.md`](contract-enforcement.md)) can
   block the advance so downstream never freshens off bad data.
-- **Dynamic fan-out** ([`design-dynamic-fanout.md`](design-dynamic-fanout.md)):
+- **Dynamic fan-out** ([`dynamic-fanout.md`](dynamic-fanout.md)):
   per-partition watermarks are the natural extension, out of v1 scope.
 
 ## Testing

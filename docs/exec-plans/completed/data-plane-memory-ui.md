@@ -527,7 +527,7 @@ The plan is done when **all** of these hold:
   blame / replay) whose endpoints this UI drives.
 - `docs/exec-plans/completed/data-plane-memory.md` — the substrate verbs (why /
   receipt / verify / lineage) whose endpoints this UI drives.
-- `docs/design-quarantined-replay.md` — the replay safety model the replay UI must
+- `docs/design/quarantined-replay.md` — the replay safety model the replay UI must
   honor (quarantine, the replay-safe gate, distributed-only execution).
 - `ui/src/lib/api.ts`, `ui/src/features/jobs/RunDetailPage.tsx`,
   `ui/src/features/jobs/TaskDetailPanel.tsx`, `ui/src/features/jobs/JobDAG.tsx` — the

@@ -165,7 +165,7 @@ func parkAwaitingApprovalTx(tx *gorm.DB, incidentID uuid.UUID, now time.Time) (m
 }
 
 // endSessionForApproval ends the proposing agent session while the approval is
-// pending: design-agent-in-the-loop.md's "the agent session ends (no idle
+// pending: docs/design/agent-in-the-loop.md's "the agent session ends (no idle
 // container burning tokens); a fresh session resumes on decision if follow-up
 // work is needed". Best-effort — the approval is already durable, and a session
 // row that outlives its container is a cosmetic defect, not a correctness one.

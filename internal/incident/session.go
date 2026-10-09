@@ -385,7 +385,7 @@ const stopContainerTimeout = 30 * time.Second
 
 // EndSession terminates a still-active agent session and revokes its scoped
 // credential. It is the "no idle container burning tokens while a human decides"
-// half of the tier-3 approval flow (design-agent-in-the-loop.md, Approval
+// half of the tier-3 approval flow (docs/design/agent-in-the-loop.md, Approval
 // gates): once a proposal parks the incident in awaiting_approval, the session
 // that made it has nothing left to do.
 //

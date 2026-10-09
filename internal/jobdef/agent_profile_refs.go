@@ -14,7 +14,7 @@ import (
 // metadata.remediation block references exists: the AgentProfile named by
 // remediation.profile and the NotificationChannel named by
 // remediation.escalation.channel. This is the server-side half of the lint
-// split docs/design-agent-in-the-loop.md documents: pkg/jobdef's offline
+// split docs/design/agent-in-the-loop.md documents: pkg/jobdef's offline
 // validation (which runs with conn == nil, e.g. `caesium job lint`) can only
 // check the references are well-formed and emits a scope note, because these
 // are server-side state. This function closes that gap and is invoked both

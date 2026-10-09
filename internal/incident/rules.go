@@ -7,7 +7,7 @@ import (
 	"github.com/caesium-cloud/caesium/internal/models"
 )
 
-// Deterministic Phase-0 rule names (design-agent-in-the-loop.md, "Playbook
+// Deterministic Phase-0 rule names (docs/design/agent-in-the-loop.md, "Playbook
 // match"): if a failure class maps to a deterministic rule, the incident manager
 // executes it directly and records it as an AgentAction with actor=policy — same
 // audit trail, no container launch.

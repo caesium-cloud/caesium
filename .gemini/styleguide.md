@@ -107,4 +107,5 @@ caesium job apply --path jobs/          # Deploy to running server
 - Lint: `just lint` (go fmt + go vet + golangci-lint)
 - Job definition Go types: `pkg/jobdef/definition.go`
 - Example manifests: `docs/examples/*.job.yaml`
-- CI: `.circleci/` (CircleCI), not GitHub Actions
+- CI: GitHub Actions (`.github/workflows/ci.yml`; runbook in `docs/ci.md`)
+- Repository conventions and the documentation layout: `AGENTS.md`
