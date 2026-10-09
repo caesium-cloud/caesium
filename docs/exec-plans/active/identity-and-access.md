@@ -79,7 +79,7 @@ Item checkboxes remain unchecked until merged acceptance evidence exists.
 
 ### Wave 1 — Foundations (2026-10-09)
 
-- **W1-α / A1 — policy package:** ready for review [PR #624](https://github.com/caesium-cloud/caesium/pull/624),
+- **W1-α / A1 — policy package:** draft [PR #624](https://github.com/caesium-cloud/caesium/pull/624),
   head `28586d80be0940132818b857f4de67cb46f109d4`. Independent review passed after
   two edge-case fixes. Containerized `just lint` and race-enabled `just unit-test`
   passed (policy coverage 99.5%). Fresh-image local integration failed first at
@@ -90,6 +90,9 @@ Item checkboxes remain unchecked until merged acceptance evidence exists.
   confirm existing base DB pool defects, but do not establish the original
   failure's cause. Exact-head local integration revalidation passed in 886.772s
   (269 passed, 41 lane-specific skips). The initial failed run remains recorded.
+  A fresh current-head review posted 13 threads, including three P1 candidates;
+  email comparison, path traversal and Vault field matching are being corrected.
+  A1 returned to draft while the new findings are adjudicated and revalidated.
 - **W1-β / B1 — namespace persistence and cache identity:** draft
   [PR #625](https://github.com/caesium-cloud/caesium/pull/625), head
   `41e0cb0d0019bdb512e5d52168a615a952dabf1c`. Focused changed-package regressions,
@@ -116,7 +119,9 @@ Item checkboxes remain unchecked until merged acceptance evidence exists.
   race suite and independent review at `839e8e0c01f947eb679df9dfd5c155c8b7158602`;
   draft [PR #626](https://github.com/caesium-cloud/caesium/pull/626) is published and
   hosted CI including `ci-ok`, both architecture unit suites and lint passed;
-  local package race tests passed. Full local unsharded integration remains pending.
+  local package race tests passed. Full local integration is running. A fresh
+  current-head review posted four threads; the missing fresh-installer regression
+  and related test/documentation corrections are being prepared.
   It does not change A1/B1 dependencies or establish the integration failure's
   causal chain.
 - **A2 and D3:** not dispatched. A2 requires A1 to land; D3 requires B1 to land.
@@ -130,7 +135,7 @@ Item checkboxes remain unchecked until merged acceptance evidence exists.
 
 | Stream | Scope | Priority | Status |
 |--------|-------|----------|--------|
-| A | Policy file, grants, principal, route classes, namespace-aware middleware, keys with namespaces, SSO-admin key management | **P0** | W1 A1 ready #624; A2 waits for A1 merge |
+| A | Policy file, grants, principal, route classes, namespace-aware middleware, keys with namespaces, SSO-admin key management | **P0** | W1 A1 draft #624; A2 waits for A1 merge |
 | B | `metadata.namespace` on jobs: schema, columns, importer, lint, apply/prune/move, git-sync allowlist, collection filtering, aggregate collapse | **P0** | W1 B1 draft #625 |
 | C | Runtime isolation: per-namespace Kubernetes namespace + service account, scoped secret resolution, Helm RBAC | P1 | Not started |
 | D | Run quota + round-robin fairness (#395 v1 slice); namespaced notification channels, policies, agent profiles | P1 | Not started |
@@ -943,7 +948,8 @@ Regenerate the table from the edges if items move.
 - `internal/incident/allowlist.go` + `session.go`: A8 here **and** the arc plans
   (`data-circuit-breaker` F). Additive; rebase, different waves preferred.
   `internal/incident/store.go`: B1 (`DedupeKey`) only in this plan.
-- `internal/worker/worker.go`: C2 only. `scripts/ci-ok.py`, `scripts/test_ci.py`: G1 only.
+- `internal/worker/worker.go`: C2 only. `scripts/ci-ok.py`: G1 only.
+  `scripts/test_ci.py`: B1's distributed-selector guard, then G1's Keycloak lane.
 - `pkg/jobdef/definition.go`: B1 only.
 - `internal/cache/hash.go`: B1 (namespace in the key + test) → C1 (hash the resolved
   Kubernetes target). Sequential.
