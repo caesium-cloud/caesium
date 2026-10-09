@@ -6,16 +6,16 @@ tracepoint:oom:mark_victim
 }
 tracepoint:cgroup:cgroup_notify_populated
 {
-    printf("T %llu populated=%d id=%llu by=%s path=%s\n", nsecs, ARGval, ARGid, comm, str(ARGpath));
+    printf("T %llu populated=%d id=%llu by=%s path=%s\n", nsecs, ARGval, ARGid, comm, STR(ARGpath));
 }
 tracepoint:cgroup:cgroup_rmdir
 {
-    printf("T %llu rmdir id=%llu by=%s pid=%d path=%s\n", nsecs, ARGid, comm, pid, str(ARGpath));
+    printf("T %llu rmdir id=%llu by=%s pid=%d path=%s\n", nsecs, ARGid, comm, pid, STR(ARGpath));
 }
 tracepoint:syscalls:sys_enter_openat
 /comm == "containerd-shim" || comm == "conmon"/
 {
-    printf("T %llu openat by=%s tid=%d file=%s\n", nsecs, comm, tid, str(ARGfilename));
+    printf("T %llu openat by=%s tid=%d file=%s\n", nsecs, comm, tid, STR(ARGfilename));
 }
 tracepoint:syscalls:sys_exit_openat
 /comm == "containerd-shim" || comm == "conmon"/
