@@ -84,7 +84,8 @@ Item checkboxes remain unchecked until merged acceptance evidence exists.
   passed after email-confusable, traversal, Vault delimiter and strict YAML fixes.
   Current-head hosted lint and both full race unit suites passed, including all
   security regressions (policy coverage 99.6%); the tested merge has the same tree.
-  Final hosted coverage/runtime checks are being collected. A2/C4 follow-up
+  Current-head hosted CI is fully green, including runtime lanes, coverage and
+  `ci-ok`; final receipts are being archived. A2/C4 follow-up
   obligations are recorded below; existing review threads await human review.
   At preceding `28586d80`, local lint/race unit tests and hosted CI passed. The
   first local integration failed at queue reclaim with later DB lock/transaction
@@ -100,15 +101,18 @@ Item checkboxes remain unchecked until merged acceptance evidence exists.
   All coverage floors remain unchanged. Current-head hosted lint and both full
   unit suites passed; 20 live backend/auth scenario proofs passed, including
   namespace move/diff/replay on all five runtime lanes. Fresh full local integration
-  is running; hosted coverage remains pending. At preceding `41e0cb0d`, full local lint/race unit/integration
+  passed (877.002s; 273 passed, 42 lane-specific skips); hosted CI, coverage and
+  `ci-ok` passed with no uncovered changed paths. At preceding `41e0cb0d`, full local lint/race unit/integration
   passed (801.740s; 272 passed, 41 lane-specific skips), schema/examples passed,
   and hosted logs proved 15 namespace scenario/engine combinations without skips.
   That head's coverage failed on three changed files; the new journeys and removal
   of an unused model formatter address those gaps. Native-dqlite populated upgrade
-  remains pending after two corrected harness failures before population; owned
-  resources were cleaned. Strict constraints and coordinated upgrade guidance
+  remains pending: the latest old-node startup exposed a harness parser confusing
+  a logged API-key prefix with the printed bootstrap key. This failed before
+  population; owned resources were cleaned and the parser is being corrected.
+  Strict constraints and coordinated upgrade guidance
   travel together in this PR.
-- **Separately authorized DB repair:** draft [PR #626](https://github.com/caesium-cloud/caesium/pull/626),
+- **Separately authorized DB repair:** ready for review [PR #626](https://github.com/caesium-cloud/caesium/pull/626),
   head `a8e92a34f9975dc9f847722c6184f8847f709da1`. Independent review passed after
   adding a fresh-installer regression, removing unnecessary reinstallation logic,
   and hardening routing tests/fixtures/documentation. Actual SQL detects a deliberate
