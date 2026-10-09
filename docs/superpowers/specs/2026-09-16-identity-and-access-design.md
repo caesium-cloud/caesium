@@ -249,7 +249,8 @@ Validation rules (all enforced by `internal/auth/policy` and by
   and `**` across segments (`path.Match` semantics extended with `**`). Literal
   `.` and `..` path segments are rejected in rules and targets. Vault rules select
   the secret path and allow every field at that path: the canonical target's
-  nonempty `#field` suffix is ignored for matching. `#field` patterns are unsupported.
+  nonempty `#field` suffix is ignored for matching. `#` is reserved as the delimiter;
+  targets with multiple delimiters are denied. `#field` patterns are unsupported.
 - Lint warnings (non-fatal): a namespace other than `default` without `secrets`
   rules; a binding whose group never matched any known user (server-side only).
 
@@ -598,6 +599,11 @@ prune at all.
   either `#password` or `#username`, and `vault/secret/data/marketing/**` includes
   `vault/secret/data/marketing#key`. Vault rules containing `#` are rejected;
   field-specific authorization is outside this version's policy contract.
+  The canonicalizer must reject `#` in the decoded effective path or field before
+  constructing the target, including URL-encoded `%23` inputs. `#` is reserved as
+  the single delimiter; the matcher denies targets containing multiple delimiters.
+  A field may otherwise contain slashes or dots because rules grant the entire
+  selected secret object.
 - `internal/jobdef/secret.ScopedResolver{inner Resolver, namespace string, rules}`
   implements `Resolver`; a denied reference returns
   `ErrSecretDenied{Namespace, Ref}` (redacted to `provider/<first segment>/…` in

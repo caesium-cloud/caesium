@@ -266,6 +266,9 @@ func (v *yamlValidator) validate(node *yaml.Node, typ reflect.Type, path string)
 	}
 	switch typ.Kind() {
 	case reflect.Struct, reflect.Map:
+		if typ.Kind() == reflect.Map && typ.Key().Kind() != reflect.String {
+			return fmt.Errorf("%s (line %d): unsupported policy map key type %s", path, node.Line, typ.Key())
+		}
 		if node.Kind != yaml.MappingNode {
 			return errType("a mapping")
 		}

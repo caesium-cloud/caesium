@@ -14,7 +14,8 @@ var providerName = regexp.MustCompile(`^[a-z][a-z0-9_-]*$`)
 // or more segments. In other segments, repeated stars, escapes and character
 // classes retain path.Match semantics within that segment. Neither patterns nor
 // targets are cleaned. Vault rules select paths, covering all fields; a target's
-// nonempty #field suffix is ignored. Field patterns are unsupported.
+// nonempty #field suffix is ignored. # is reserved as that delimiter, and targets
+// with multiple delimiters fail closed. Field patterns are unsupported.
 func ValidateGlob(pattern string) error {
 	provider, rest, ok := strings.Cut(pattern, "/")
 	if !ok || !providerName.MatchString(provider) || rest == "" {
@@ -52,6 +53,9 @@ func MatchGlob(pattern, target string) (bool, error) {
 		return false, nil
 	}
 	if provider == "vault" {
+		if strings.Count(rest, "#") > 1 {
+			return false, nil
+		}
 		var field string
 		var hasField bool
 		rest, field, hasField = strings.Cut(rest, "#")
