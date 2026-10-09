@@ -3455,10 +3455,16 @@ class ResourceHarnessTests(unittest.TestCase):
             for setting in ("RESOURCE_STATS_ENABLED=true", "RESOURCE_STATS_SAMPLE_INTERVAL=100ms", "RIGHT_SIZING_ENABLED=true"):
                 self.assertIn(f"-e CAESIUM_{setting}", commands)
         exact = "caesiumcloud/resource-stress:${{ env.IMAGE_TAG }}-amd64"
-        for job, transfer in (("podman-integration-test", f"docker save {exact} | podman load"), ("helm-integration-test", f"kind load docker-image {exact}")):
+        for job, transfer in (("podman-integration-test", f"docker save {exact} | podman load"), ("helm-integration-test", f"kind_load {exact}")):
             commands = "\n".join(step.get("run", "") for step in JOBS[job]["steps"])
             self.assertIn(transfer, commands)
             self.assertIn(f"-e CAESIUM_RESOURCE_STRESS_IMAGE={exact}", commands)
+        # A pulled multi-platform tag in the containerd image store cannot go
+        # through `kind load docker-image`; kind_load ships a platform archive.
+        helm_commands = "\n".join(step.get("run", "") for step in JOBS["helm-integration-test"]["steps"])
+        self.assertIn("docker image save --platform linux/amd64", helm_commands)
+        self.assertIn("kind load image-archive", helm_commands)
+        self.assertNotIn("kind load docker-image alpine", helm_commands)
         values = yaml.safe_load((ROOT / "helm/caesium/ci/test-values-k8s.yaml").read_text())
         helm_env = {item["name"]: item["value"] for item in values["config"]["extraEnv"]}
         self.assertEqual(helm_env["CAESIUM_RESOURCE_STATS_ENABLED"], "true")

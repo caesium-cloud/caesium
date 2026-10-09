@@ -1213,9 +1213,20 @@ jobs:
         run: helm test caesium --timeout 90s
       - name: Pre-load job images into kind
         run: |
+          set -euo pipefail
+          # Docker 29's containerd image store (the ubuntu-26.04 default) keeps
+          # a pulled tag's whole multi-platform index but only this platform's
+          # blobs, so `kind load docker-image` fails in the node's
+          # `ctr import --all-platforms` ("content digest ... not found").
+          # Load a single-platform archive instead, as lifecycle-tests.sh does.
+          kind_load() {
+            docker image save --platform linux/amd64 --output "$RUNNER_TEMP/kind-image.tar" "$1"
+            kind load image-archive "$RUNNER_TEMP/kind-image.tar"
+            rm -f "$RUNNER_TEMP/kind-image.tar"
+          }
           docker pull alpine:3.23
-          kind load docker-image alpine:3.23
-          kind load docker-image caesiumcloud/resource-stress:${{ env.IMAGE_TAG }}-amd64
+          kind_load alpine:3.23
+          kind_load caesiumcloud/resource-stress:${{ env.IMAGE_TAG }}-amd64
       - name: Start port-forward to Caesium
         run: |
           kubectl port-forward service/caesium 8080:8080 >/tmp/port-forward.log 2>&1 &
