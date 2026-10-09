@@ -3447,7 +3447,26 @@ class ResourceHarnessTests(unittest.TestCase):
                     self.assertIn("-e CAESIUM_RESOURCE_STRESS_IMAGE=caesiumcloud/resource-stress:harness-evidence", commands)
                     self.assertIn("build/Dockerfile.stress", commands)
                 if recipe in ("integration-test-distributed", "integration-test-owner-memory", "integration-test-agent", "integration-test-infra"):
-                    self.assertIn("|TestResourceStats)", commands)
+                    selectors = re.findall(r'-test\.run\s+\\?"(.*?)\\?"', commands)
+                    self.assertEqual(len(selectors), 1, commands)
+                    suite_filter, scenario_filter = selectors[0].split("/", 1)
+                    # Go matches each slash-separated -test.run expression
+                    # independently, allowing scenario prefixes in the filter.
+                    self.assertRegex("TestIntegrationTestSuite", suite_filter)
+                    selected_scenarios = (
+                        "TestResourceStatsCapturesAttempt",
+                        "TestResourceStatsPersistsObservedNonOOMExit137",
+                        "TestResourceStatsFanOutKeepsInstanceObservations",
+                    )
+                    if recipe == "integration-test-distributed":
+                        selected_scenarios += (
+                            "TestCacheNamespaceMove",
+                            "TestNamespaceLegacyPostAndBackfill",
+                            "TestNamespaceLegacyPostDefaultsAndRejectsInvalid",
+                        )
+                    for scenario in selected_scenarios:
+                        self.assertRegex(scenario, scenario_filter)
+                    self.assertNotRegex("TestHealth", scenario_filter)
 
     def test_inline_servers_and_foreign_image_stores_receive_same_fixture(self):
         for job in ("ui-e2e", "ui-e2e-auth", "podman-integration-test"):

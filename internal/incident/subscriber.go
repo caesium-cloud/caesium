@@ -154,8 +154,9 @@ const taskStatusFailed = "failed"
 
 // failureContext carries the resolved facts a failure event contributes.
 type failureContext struct {
-	jobID    uuid.UUID
-	taskName string
+	namespace string
+	jobID     uuid.UUID
+	taskName  string
 	// taskRun is the instance the incident is classified from. For a fanned
 	// step it is the first FAILED instance, never an arbitrary sibling.
 	taskRun *models.TaskRun
@@ -173,12 +174,13 @@ func (s *Subscriber) resolveContext(ctx context.Context, evt event.Event) failur
 	if evt.RunID != uuid.Nil {
 		var jr models.JobRun
 		if err := s.db.WithContext(ctx).
-			Select("id", "job_id", "backfill_id").
+			Select("id", "job_id", "backfill_id", "namespace").
 			First(&jr, "id = ?", evt.RunID).Error; err == nil {
 			if fc.jobID == uuid.Nil {
 				fc.jobID = jr.JobID
 			}
 			fc.backfillID = jr.BackfillID
+			fc.namespace = models.NamespaceOrDefault(jr.Namespace)
 		}
 	}
 
@@ -201,6 +203,12 @@ func (s *Subscriber) resolveContext(ctx context.Context, evt event.Event) failur
 		var task models.Task
 		if err := s.db.WithContext(ctx).Select("name").First(&task, "id = ?", evt.TaskID).Error; err == nil {
 			fc.taskName = task.Name
+		}
+	}
+	if fc.namespace == "" && evt.RunID == uuid.Nil {
+		var job models.Job
+		if err := s.db.WithContext(ctx).Select("namespace").First(&job, "id = ?", fc.jobID).Error; err == nil {
+			fc.namespace = models.NamespaceOrDefault(job.Namespace)
 		}
 	}
 	return fc
@@ -321,6 +329,7 @@ func (s *Subscriber) handleFailure(ctx context.Context, evt event.Event) {
 	}
 
 	params := OpenParams{
+		Namespace:              fc.namespace,
 		JobID:                  fc.jobID,
 		RunID:                  runID,
 		TaskID:                 taskID,
@@ -440,7 +449,8 @@ func (s *Subscriber) handleSuccess(ctx context.Context, evt event.Event) {
 		return
 	}
 
-	incidents, err := s.store.OpenForJobTask(ctx, jobID, taskName)
+	fc := s.resolveContext(ctx, evt)
+	incidents, err := s.store.OpenForJobTask(ctx, jobID, taskName, fc.namespace)
 	if err != nil {
 		log.Warn("incident: failed to load open incidents for success", "job_id", jobID, "error", err)
 		return

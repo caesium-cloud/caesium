@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -13,6 +14,8 @@ import (
 
 // schemaResourceURL is the pseudo-URL used for in-memory schema resources.
 const schemaResourceURL = "https://caesium.internal/schema.json"
+
+var namespacePattern = regexp.MustCompile(`^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$`)
 
 // validateSchemas checks outputSchema/inputSchema fields on all steps.
 // It is called after the DAG structure has been validated (no cycles, no unknown refs).
@@ -333,4 +336,13 @@ func ParseDeltaFromBaseline(raw string) (float64, error) {
 		return 0, fmt.Errorf("%q must be a positive percentage", raw)
 	}
 	return value / 100, nil
+}
+
+// ValidateNamespace checks tenancy namespace syntax only. Namespace declarations
+// and access grants are server policy concerns, not offline manifest validation.
+func ValidateNamespace(namespace string) error {
+	if namespace != "" && !namespacePattern.MatchString(namespace) {
+		return fmt.Errorf("metadata.namespace %q must be a DNS label (1-63 lowercase letters, digits or hyphens, beginning and ending with a letter or digit)", namespace)
+	}
+	return nil
 }

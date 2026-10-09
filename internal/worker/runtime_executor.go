@@ -233,7 +233,7 @@ func (e *runtimeExecutor) Execute(ctx context.Context, taskRun *models.TaskRun) 
 			return
 		}
 	}
-	runParams, err := e.loadRunParams(taskRun.JobRunID)
+	runParams, runNamespace, err := e.loadRunInputs(taskRun.JobRunID)
 	if err != nil {
 		log.Error("failed to load run params for worker task", "task_id", taskRun.TaskID, "run_id", taskRun.JobRunID, "error", err)
 		if persistErr := sink.Failed(ctx, taskRun, err); persistErr != nil && !errors.Is(persistErr, run.ErrTaskClaimMismatch) {
@@ -366,6 +366,7 @@ func (e *runtimeExecutor) Execute(ctx context.Context, taskRun *models.TaskRun) 
 
 		hashInput := cache.HashInput{
 			JobAlias:                cacheJobAlias,
+			Namespace:               runNamespace,
 			TaskName:                taskName,
 			Image:                   taskRun.Image,
 			ResolvedImageDigest:     resolvedImageDigest,
@@ -784,19 +785,19 @@ func (e *runtimeExecutor) loadAtomSpec(atomID uuid.UUID) (container.Spec, error)
 	return spec, nil
 }
 
-func (e *runtimeExecutor) loadRunParams(runID uuid.UUID) (map[string]string, error) {
+func (e *runtimeExecutor) loadRunInputs(runID uuid.UUID) (map[string]string, string, error) {
 	var jobRun models.JobRun
-	if err := e.store.DB().Select("params").First(&jobRun, "id = ?", runID).Error; err != nil {
-		return nil, err
+	if err := e.store.DB().Select("params", "namespace").First(&jobRun, "id = ?", runID).Error; err != nil {
+		return nil, "", err
 	}
 	if len(jobRun.Params) == 0 {
-		return nil, nil
+		return nil, models.NamespaceOrDefault(jobRun.Namespace), nil
 	}
 	var params map[string]string
 	if err := json.Unmarshal(jobRun.Params, &params); err != nil {
-		return nil, fmt.Errorf("decode run params: %w", err)
+		return nil, "", fmt.Errorf("decode run params: %w", err)
 	}
-	return params, nil
+	return params, models.NamespaceOrDefault(jobRun.Namespace), nil
 }
 
 // decodePartitionAttributes decodes the scalar attributes persisted on a fan-out

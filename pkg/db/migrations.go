@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/caesium-cloud/caesium/pkg/log"
 	"gorm.io/gorm"
 )
@@ -113,4 +114,87 @@ func taskRunIndexDefinition(conn *gorm.DB) (string, bool, error) {
 func indexIsUniqueOverPartitionIndex(definition string) bool {
 	lowered := strings.ToLower(definition)
 	return strings.Contains(lowered, "unique") && strings.Contains(lowered, "partition_index")
+}
+
+// MigrateNamespaceDefaults repairs legacy NULL/empty ownership before
+// AutoMigrate tightens the columns. It never derives historical ownership from
+// the mutable job: old rows belong to default; explicit namespaces are retained.
+// Run this on catalog, hot shards and cold storage because JobRun is sharded.
+func MigrateNamespaceDefaults(conn *gorm.DB) error {
+	if conn == nil {
+		return nil
+	}
+	return conn.Transaction(func(tx *gorm.DB) error {
+		for _, model := range []any{&models.Job{}, &models.JobRun{}, &models.Backfill{}, &models.Incident{}} {
+			if !tx.Migrator().HasTable(model) || !tx.Migrator().HasColumn(model, "Namespace") {
+				continue
+			}
+			if err := tx.Unscoped().Model(model).Where("namespace IS NULL OR namespace = ''").UpdateColumn("namespace", models.DefaultNamespace).Error; err != nil {
+				return fmt.Errorf("db: normalize namespace on %T: %w", model, err)
+			}
+		}
+		if !tx.Migrator().HasTable(&models.Incident{}) {
+			return nil
+		}
+		var incidents []models.Incident
+		if err := tx.Select("id", "job_id", "task_name", "class", "namespace", "dedupe_key", "active_dedupe_key").Find(&incidents).Error; err != nil {
+			return err
+		}
+		// A partially migrated or otherwise invalid catalog can hold both the
+		// legacy and namespaced active keys for one incident identity. Do not
+		// merge or suppress either history: stop the upgrade with their IDs.
+		activeOwners := make(map[string]string, len(incidents))
+		for _, inc := range incidents {
+			if inc.ActiveDedupeKey == nil {
+				continue
+			}
+			key := *inc.ActiveDedupeKey
+			legacy := fmt.Sprintf("%s|%s|%s", inc.JobID, inc.TaskName, inc.Class)
+			if inc.DedupeKey == legacy && key == legacy {
+				key = fmt.Sprintf("%s|%s", models.NamespaceOrDefault(inc.Namespace), legacy)
+			}
+			if owner, exists := activeOwners[key]; exists {
+				return fmt.Errorf("db: namespace migration active dedupe key collision %q between incidents %s and %s; resolve the conflicting incident records before retrying", key, owner, inc.ID)
+			}
+			activeOwners[key] = inc.ID.String()
+		}
+		for _, inc := range incidents {
+			legacy := fmt.Sprintf("%s|%s|%s", inc.JobID, inc.TaskName, inc.Class)
+			if inc.DedupeKey != legacy {
+				continue
+			}
+			key := fmt.Sprintf("%s|%s", models.NamespaceOrDefault(inc.Namespace), legacy)
+			updates := map[string]any{"dedupe_key": key}
+			if inc.ActiveDedupeKey != nil && *inc.ActiveDedupeKey == legacy {
+				updates["active_dedupe_key"] = key
+			}
+			if err := tx.Model(&models.Incident{}).Where("id = ?", inc.ID).Updates(updates).Error; err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
+// ensureNamespaceConstraint covers dialects whose AutoMigrate skips tightening
+// a nullable column when its other metadata already matches the new model.
+func ensureNamespaceConstraint(conn *gorm.DB, model any) error {
+	switch model.(type) {
+	case *models.Job, *models.JobRun, *models.Backfill, *models.Incident:
+	default:
+		return nil
+	}
+	columns, err := conn.Migrator().ColumnTypes(model)
+	if err != nil {
+		return err
+	}
+	for _, column := range columns {
+		if column.Name() != "namespace" {
+			continue
+		}
+		if nullable, known := column.Nullable(); known && nullable {
+			return conn.Migrator().AlterColumn(model, "Namespace")
+		}
+	}
+	return nil
 }

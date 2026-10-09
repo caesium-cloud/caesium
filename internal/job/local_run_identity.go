@@ -113,6 +113,7 @@ func (l *localRun) resolveTaskCacheIdentity(
 
 	return cacheCfg, taskHashInputArgs{
 		JobAlias:                j.alias,
+		Namespace:               snapshot.Namespace,
 		TaskName:                taskName,
 		Image:                   runner.image,
 		ResolvedImageDigest:     resolvedImageDigest,

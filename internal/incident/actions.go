@@ -286,7 +286,7 @@ func (e *Executor) dispatch(ctx context.Context, actionType string, inc *models.
 			return nil, errors.New("incident: snooze_retry requires a positive delay_seconds")
 		}
 		fireAt := time.Now().UTC().Add(params.delay())
-		timer, err := e.store.ScheduleTimer(ctx, inc.ID, TimerKindSnoozeRetry, fireAt, encodeJSON(snoozePayload{RunID: runID}), &action.ID, inc.Namespace)
+		timer, err := e.store.ScheduleTimer(ctx, inc.ID, TimerKindSnoozeRetry, fireAt, encodeJSON(snoozePayload{RunID: runID}), &action.ID, &inc.Namespace)
 		if err != nil {
 			return nil, err
 		}

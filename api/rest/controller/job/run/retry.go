@@ -68,7 +68,7 @@ func Retry(c *echo.Context) error {
 		if committed, ok := errors.AsType[*runstorage.RunCommittedError](err); ok && committed.RunID == runID && committed.JobID == jobID && runEntry.ID == runID {
 			// Retry preserves durable params. The preloaded row supplies only
 			// launch identity/params; execution reloads the committed task resets.
-			fallback := &runstorage.JobRun{ID: runID, JobID: jobID, Status: runstorage.StatusRunning, Params: runEntry.Params, Quarantine: runEntry.Quarantine}
+			fallback := &runstorage.JobRun{ID: runID, JobID: jobID, Namespace: runEntry.Namespace, Status: runstorage.StatusRunning, Params: runEntry.Params, Quarantine: runEntry.Quarantine}
 			retryLaunch(cancelCtx, j, fallback, release)
 			transferred = true
 			log.Warn("job retry committed but readback failed; executing the admitted retry",

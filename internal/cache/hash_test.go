@@ -1389,3 +1389,30 @@ func TestUnresolvedImageIdentityIsExecutionSpecificAndPersisted(t *testing.T) {
 		require.Equal(t, in.UnresolvedImageIdentity, blob.UnresolvedImageIdentity)
 	}
 }
+
+func TestHashInputNamespaceIsOwnershipIdentity(t *testing.T) {
+	legacy := baseInput()
+	legacy.Namespace = ""
+	implicit := legacy
+	implicit.Namespace = "default"
+	require.Equal(t, legacy.Compute(), implicit.Compute(), "default retains pre-namespace cache identities")
+	before := legacy
+	before.Namespace = "marketing"
+	after := before
+	after.Namespace = "finance"
+	require.NotEqual(t, legacy.Compute(), before.Compute())
+	require.NotEqual(t, before.Compute(), after.Compute())
+	data, err := after.CanonicalJSON(after.Compute())
+	require.NoError(t, err)
+	require.Equal(t, "finance", unmarshalBlob(t, data).Namespace)
+	// Oversized decompositions must retain the ownership that produced the key.
+	after.Env = map[string]string{}
+	for i := range 2000 {
+		after.Env["key-"+strconv.Itoa(i)] = "value"
+	}
+	data, err = after.CanonicalJSON(after.Compute())
+	require.NoError(t, err)
+	blob := unmarshalBlob(t, data)
+	require.NotNil(t, blob.Oversized)
+	require.Equal(t, "finance", blob.Namespace)
+}

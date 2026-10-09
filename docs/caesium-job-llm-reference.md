@@ -378,6 +378,16 @@ trigger:
 
 ---
 
+## Job Namespaces
+
+`metadata.namespace` is the job's tenancy namespace. It defaults to `default`
+and must be a DNS label: 1-63 lowercase letters, digits or hyphens, beginning
+and ending with a letter or digit. Job aliases remain globally unique. Apply
+updates the job's namespace; new runs, backfills and incidents carry that
+ownership, while historical rows retain their original namespace. Namespace
+changes invalidate cached step outputs. Export writes the namespace back into
+the manifest. Offline lint checks its syntax.
+
 ## DAG Wiring Rules
 
 1. **Implicit sequential**: When NO step declares `next` or `dependsOn`, steps link in order automatically.

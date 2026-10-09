@@ -80,5 +80,5 @@ func (s *Service) AllowedJobs(id uuid.UUID) ([]string, error) {
 
 // Note appends a free-text finding to the incident timeline.
 func (s *Service) Note(inc *models.Incident, text string) (*models.AgentAction, error) {
-	return iincident.RecordNote(s.ctx, s.db, inc.ID, nil, inc.Namespace, text)
+	return iincident.RecordNote(s.ctx, s.db, inc.ID, nil, &inc.Namespace, text)
 }
