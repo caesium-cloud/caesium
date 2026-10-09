@@ -19,8 +19,9 @@ quota); enforcement at the existing middleware chokepoint plus one shared collec
 filter; bounded-staleness **IdP group refresh**; **user administration**; namespaced
 notification channels, policies and agent profiles; a **Keycloak** CI lane that drives
 real logins; a namespace switcher and Access page in the Console; and `caesium login`
-for an SSO-backed, user-attributed CLI credential. Everything is additive and
-default-preserving: with no policy file the server behaves exactly as today.
+for an SSO-backed, user-attributed CLI credential. With no policy file the server
+keeps the existing single-namespace behavior. The pre-alpha schema change requires
+all nodes to stop and upgrade together; mixed-version rolling upgrades are unsupported.
 
 This plan follows the `exec-plan-wave` skill's structural convention:
 `## Progress` is a wave-by-wave dashboard, `## Streams` is the work
@@ -83,12 +84,18 @@ Item checkboxes remain unchecked until merged acceptance evidence exists.
   two edge-case fixes. Containerized `just lint` and race-enabled `just unit-test`
   passed (policy coverage 99.5%). Fresh-image local integration failed first at
   `TestRunConcurrencyStrategies/queue_reclaims_stale_claim`, followed by database
-  lock/transaction errors in later writes; attribution and hosted CI are pending.
+  lock/transaction errors in later writes. Hosted application checks passed;
+  coverage-ratchets remains pending. Actual-SQL probes confirm existing base-revision
+  DB pool wiring defects; the unchanged-base integration comparison is running.
 - **W1-β / B1 — namespace persistence and cache identity:** committed candidate
   `138b72bdb94c679adbe309f079d569c49b062375` on `codex/identity-and-access-w1-beta`.
   Focused changed-package regressions, generated schema guardrail, and integration
-  compilation passed. Independent review, live apply/export/run/move/cache scenarios,
-  example lint, and full baseline gates pending.
+  compilation, full lint and race-enabled unit suite passed. Root interrupted the
+  old candidate's integration run to fix independent review findings: exported
+  manifest engine duplication outside Docker and unclear incident-key collision
+  errors. The strict incident namespace constraint is retained under the user-approved
+  coordinated upgrade contract. Updated candidate, live scenarios, example lint,
+  independent re-review and hosted CI remain pending.
 - **A2 and D3:** not dispatched. A2 requires A1 to land; D3 requires B1 to land.
   The suggested W1 includes these follow-ups, but the review-PR endpoint leaves
   them pending until their prerequisite PRs merge. H-1, H-2, and N-1 require A4.
@@ -280,6 +287,10 @@ middleware relies on.
       default `default`), `Job.Namespace` / `JobRun.Namespace` / `Backfill.Namespace`
       (text, not null, default `'default'`, indexed) and `Incident.Namespace`
       tightened from nullable to the same shape; the importer writes it on apply and
+      upgrades normalize existing NULL/empty namespace rows first. All nodes must
+      stop and upgrade together; mixed-version incident writers are unsupported.
+      Migration key collisions fail atomically with a diagnostic identifying both
+      incident rows rather than discarding or silently closing history. The
       the run/backfill/incident creators copy it from the job; JSON tags so every API
       object carries `namespace`; `caesium job export` round-trips it (the exporter writes it back into the manifest); the report generator
       documents it so `docs/job-schema-reference.md` regenerates; one example manifest

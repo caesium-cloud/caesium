@@ -827,7 +827,12 @@ deletes the local entry. Administrative revocation stays separate.
   `agent_profiles.namespace` tightened to not null default, `api_keys.namespaces`
   (JSON, NULL ⇒ `["*"]`), `api_keys.user_id`, `sessions.refresh_handle`,
   `sessions.groups_refreshed_at`, `audit_logs.namespace`. All additive; GORM
-  AutoMigrate; no data backfill. Rolling upgrade: old nodes ignore the columns.
+  AutoMigrate. Normalize existing NULL/empty namespace values to `default` before
+  tightening constraints. This pre-alpha change requires a coordinated upgrade:
+  stop every node before applying the new binary and restart only upgraded nodes.
+  Mixed-version rolling upgrades are unsupported; old incident writers explicitly
+  insert NULL and cannot satisfy the new constraint. No transitional nullable
+  schema or legacy-writer compatibility path is retained.
 - Behaviour with no policy file: identical to today (one namespace, env mapping,
   allow-all secrets, single Kubernetes namespace, no quotas).
 - API: `job`, `run`, `incident`, channel, policy, profile JSON gain `namespace`.
