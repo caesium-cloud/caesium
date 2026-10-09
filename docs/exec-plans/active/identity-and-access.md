@@ -100,7 +100,8 @@ Item checkboxes remain unchecked until merged acceptance evidence exists.
   retry/split installers bypass GORM's active pool and returning mutations can
   reach the reader once the split is enabled. A local repair passed the package
   race suite and independent review at `839e8e0c01f947eb679df9dfd5c155c8b7158602`;
-  standalone review publication and full runtime gates are underway. It does not
+  draft [PR #626](https://github.com/caesium-cloud/caesium/pull/626) is published and
+  full runtime gates are pending. It does not
   change A1/B1 dependencies or establish the integration failure's causal chain.
 - **A2 and D3:** not dispatched. A2 requires A1 to land; D3 requires B1 to land.
   The suggested W1 includes these follow-ups, but the review-PR endpoint leaves
