@@ -90,9 +90,8 @@ These back the investigation verbs described in
 
 | Endpoint | Purpose |
 | --- | --- |
-| `GET /datasets`, `GET /datasets/:ns/:name`, `GET /datasets/:ns/:name/derivations`, `GET /datasets/:ns/:name/metrics` | Dataset freshness, derivation history, and recorded metrics. Gated by `CAESIUM_FRESHNESS_ENABLED`. |
-| `POST /datasets/:ns/:name/advance` | Advance a dataset's watermark. |
-| `GET /datasets/holds`, `POST /datasets/holds/:id/release` | Dataset holds raised by the data circuit breaker. |
+| `GET /datasets`, `GET /datasets/:ns/:name`, `GET /datasets/:ns/:name/derivations`, `POST /datasets/:ns/:name/advance` | Dataset freshness state, derivation history, and watermark advance. Always registered; the freshness evaluator that populates them runs when `CAESIUM_FRESHNESS_ENABLED=true`. |
+| `GET /datasets/:ns/:name/metrics`, `GET /datasets/holds`, `POST /datasets/holds/:id/release` | Recorded `##caesium::metrics` samples and the holds raised by the data circuit breaker. Registered only when `CAESIUM_DATA_ASSERTIONS_ENABLED=true`; otherwise these paths return 404. |
 | `GET /incidents`, `GET /incidents/:id` | Incidents opened by the remediation runtime. Gated by `CAESIUM_AGENT_REMEDIATION_ENABLED`. |
 | `POST /incidents/:id/approvals/:approval_id/approve`, `…/reject` | Decide a tier-3 approval. |
 | `GET /agent/incidents/:id/bundle`, `GET /agent/incidents/:id/context/*`, `POST /agent/incidents/:id/actions`, `POST /agent/incidents/:id/notes`, `POST /agent/incidents/:id/mcp` | The scoped surface the agent runtime uses. See [design/agent-in-the-loop.md](design/agent-in-the-loop.md). |
