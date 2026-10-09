@@ -1,6 +1,6 @@
 # Identity and Access — Namespaces, Grants, Policy-as-Code, Corporate SSO
 
-Last updated: 2026-09-16
+Last updated: 2026-10-09
 
 Caesium's authentication is shipped and native (OIDC, SAML, LDAP; `docs/sso-authentication.md`),
 but authorization is a single global role ladder keyed per HTTP route, SSO users cannot be
@@ -19,8 +19,9 @@ quota); enforcement at the existing middleware chokepoint plus one shared collec
 filter; bounded-staleness **IdP group refresh**; **user administration**; namespaced
 notification channels, policies and agent profiles; a **Keycloak** CI lane that drives
 real logins; a namespace switcher and Access page in the Console; and `caesium login`
-for an SSO-backed, user-attributed CLI credential. Everything is additive and
-default-preserving: with no policy file the server behaves exactly as today.
+for an SSO-backed, user-attributed CLI credential. With no policy file the server
+keeps the existing single-namespace behavior. The pre-alpha schema change requires
+all nodes to stop and upgrade together; mixed-version rolling upgrades are unsupported.
 
 This plan follows the `exec-plan-wave` skill's structural convention:
 `## Progress` is a wave-by-wave dashboard, `## Streams` is the work
@@ -37,9 +38,9 @@ plan. Any agent can:
    `## Progress`.
 
 For wave orchestration of the streams below, see
-[`.claude/skills/exec-plan-wave/`](../../../.claude/skills/exec-plan-wave/).
+[`.codex/skills/exec-plan-wave/`](../../../.codex/skills/exec-plan-wave/).
 For drafting new plans in this same shape, see
-[`.claude/skills/draft-exec-plan/`](../../../.claude/skills/draft-exec-plan/).
+[`.codex/skills/draft-exec-plan/`](../../../.codex/skills/draft-exec-plan/).
 
 ## Strategic Decisions
 
@@ -70,19 +71,72 @@ fairness was parked by `docs/exec-plans/active/window-scheduling.md` (its §"Glo
 vs. per-job load ceiling"); Stream D of this plan owns the v1 slice (issue #395) and
 window-scheduling's parked note points here.
 
-## Progress (as of 2026-09-16)
+## Progress (as of 2026-10-09)
 
-No implementation waves have shipped yet. The plan was published with the
-brainstorm alignment of 2026-09-16 (spec §4); the first wave is the next eligible
-run of the `exec-plan-wave` skill against this doc. Wave-1 leaf items are listed under
-`## Sequencing & Dependencies`.
+No implementation waves have shipped yet. W1 is in progress against master
+`150bbaa472bdd35af518d000b52436e824959be5`; its authorized endpoint is review PRs.
+Item checkboxes remain unchecked until merged acceptance evidence exists.
+
+### Wave 1 — Foundations (2026-10-09)
+
+- **W1-α / A1 — policy package:** draft [PR #624](https://github.com/caesium-cloud/caesium/pull/624),
+  head `4417f69ddc1be034674d304ed2fee03ba44b2ed3`. Independent security review
+  passed after email-confusable, traversal, Vault delimiter and strict YAML fixes.
+  Current-head hosted lint and both full race unit suites passed, including all
+  security regressions (policy coverage 99.6%); the tested merge has the same tree.
+  Current-head hosted CI is fully green, including runtime lanes, coverage and
+  `ci-ok`; final receipts are being archived. A2/C4 follow-up
+  obligations are recorded below; existing review threads await human review.
+  At preceding `28586d80`, local lint/race unit tests and hosted CI passed. The
+  first local integration failed at queue reclaim with later DB lock/transaction
+  errors; unchanged base and exact-head revalidation passed (269 passed, 41
+  lane-specific skips; recheck 886.772s). Original failed evidence is preserved;
+  the confirmed base pool defects do not establish its causal chain.
+- **W1-β / B1 — namespace persistence and cache identity:** draft
+  [PR #625](https://github.com/caesium-cloud/caesium/pull/625), head
+  `e5380a79a5a05ff307cbf5ede9d855daffc67c5d`. Independent review passed after
+  correcting namespace-only CLI/REST/approval diffs and explaining unsafe replay
+  refusal. Real schema CLI, namespace incident recovery, and enhanced cache/diff/
+  replay journeys are required by coverage; ten selection guard tests passed.
+  All coverage floors remain unchanged. Current-head hosted lint and both full
+  unit suites passed; 20 live backend/auth scenario proofs passed, including
+  namespace move/diff/replay on all five runtime lanes. Fresh full local integration
+  passed (877.002s; 273 passed, 42 lane-specific skips); hosted CI, coverage and
+  `ci-ok` passed with no uncovered changed paths. At preceding `41e0cb0d`, full local lint/race unit/integration
+  passed (801.740s; 272 passed, 41 lane-specific skips), schema/examples passed,
+  and hosted logs proved 15 namespace scenario/engine combinations without skips.
+  That head's coverage failed on three changed files; the new journeys and removal
+  of an unused model formatter address those gaps. Native-dqlite populated upgrade
+  remains pending: the latest old-node startup exposed a harness parser confusing
+  a logged API-key prefix with the printed bootstrap key. This failed before
+  population; owned resources were cleaned and the parser is being corrected.
+  Strict constraints and coordinated upgrade guidance
+  travel together in this PR.
+- **Separately authorized DB repair:** ready for review [PR #626](https://github.com/caesium-cloud/caesium/pull/626),
+  head `a8e92a34f9975dc9f847722c6184f8847f709da1`. Independent review passed after
+  adding a fresh-installer regression, removing unnecessary reinstallation logic,
+  and hardening routing tests/fixtures/documentation. Actual SQL detects a deliberate
+  Config-only wiring mutation; restored package race tests and vet passed. Full
+  local lint, full race unit and fresh-image integration passed (817.924s;
+  269 passed, 41 lane-specific skips). Current-head hosted CI is fully green,
+  including both unit architectures, coverage and `ci-ok` (41 checks passed,
+  three expected skips); the tested merge has the same tree. The preceding
+  `839e8e0c` passed all hosted checks and full
+  local integration (822.055s; 269 passed, 41 lane-specific skips). This repair does
+  not change identity dependencies or prove the original failure's causal chain.
+- **A2 and D3:** not dispatched. A2 requires A1 to land; D3 requires B1 to land.
+  The suggested W1 includes these follow-ups, but the review-PR endpoint leaves
+  them pending until their prerequisite PRs merge. H-1, H-2, and N-1 require A4.
+- **Plan sync:** maintained in [PR #622](https://github.com/caesium-cloud/caesium/pull/622);
+  documentation guardrails passed. No merge or approval
+  bypass is authorized. Remaining streams retain their original dependencies.
 
 ### Stream Status
 
 | Stream | Scope | Priority | Status |
 |--------|-------|----------|--------|
-| A | Policy file, grants, principal, route classes, namespace-aware middleware, keys with namespaces, SSO-admin key management | **P0** | Not started |
-| B | `metadata.namespace` on jobs: schema, columns, importer, lint, apply/prune/move, git-sync allowlist, collection filtering, aggregate collapse | **P0** | Not started |
+| A | Policy file, grants, principal, route classes, namespace-aware middleware, keys with namespaces, SSO-admin key management | **P0** | W1 A1 draft #624; A2 waits for A1 merge |
+| B | `metadata.namespace` on jobs: schema, columns, importer, lint, apply/prune/move, git-sync allowlist, collection filtering, aggregate collapse | **P0** | W1 B1 draft #625 |
 | C | Runtime isolation: per-namespace Kubernetes namespace + service account, scoped secret resolution, Helm RBAC | P1 | Not started |
 | D | Run quota + round-robin fairness (#395 v1 slice); namespaced notification channels, policies, agent profiles | P1 | Not started |
 | E | Identity lifecycle: IdP group refresh, user/session administration, user-bound keys, `caesium login` | P1 | Not started |
@@ -108,8 +162,10 @@ translated into cluster-wide bindings and behaviour is unchanged.
       `namespaces`), YAML parse, validation per spec §6.2 (DNS-label namespaces, `*`
       rejected as a key, declared-namespace check on bindings, role validity,
       non-empty subjects), `Resolve(groups, email) Grants` (highest role per namespace,
-      `"*"` group wildcard, case-insensitive email), the `provider/path` glob matcher
-      with `*` and `**`, and lint warnings (non-`default` namespace without secret
+      `"*"` group wildcard, ASCII-case-insensitive email with non-ASCII bytes exact),
+      the `provider/path` glob matcher with `*` and `**`, rejecting dot traversal;
+      Vault path rules cover every field of the selected secret. Lint warnings
+      cover non-`default` namespaces without secret
       rules). Pure package, table-driven unit tests, no wiring.
       Files: new `internal/auth/policy/policy.go`, new `internal/auth/policy/resolve.go`,
       new `internal/auth/policy/glob.go`, new `internal/auth/policy/policy_test.go`.
@@ -120,6 +176,11 @@ translated into cluster-wide bindings and behaviour is unchanged.
       `CAESIUM_AUTH_DEFAULT_ROLE` into cluster-wide bindings when no policy file is set
       (`rolemap.go` becomes that translation); update the two readers of
       `Principal.Role` (middleware metrics/audit label, whoami) to the cluster role.
+      Policy groups remain byte-exact; the no-policy env adapter trims incoming
+      groups to preserve `RoleMapper.Resolve` behavior. Only trusted/verified
+      provider email may reach email bindings; unverified email passes as empty,
+      with the trust state preserved for per-request resolution. Tests must reject
+      an unverified OIDC email claiming an email-only admin binding.
       `User.Role` stays as "cluster role at last login" for the users list only.
       Own the login tail: `SSOService.Complete` (`internal/auth/provider.go`) calls
       `RoleMapper.Resolve(groups)` before provisioning; rewrite it to
@@ -260,8 +321,12 @@ middleware relies on.
       `Metadata.Namespace` in the definition (syntax validation in `Validate()`,
       default `default`), `Job.Namespace` / `JobRun.Namespace` / `Backfill.Namespace`
       (text, not null, default `'default'`, indexed) and `Incident.Namespace`
-      tightened from nullable to the same shape; the importer writes it on apply and
-      the run/backfill/incident creators copy it from the job; JSON tags so every API
+      tightened from nullable to the same shape; the importer writes it on apply.
+      Upgrades normalize existing NULL/empty namespace rows first. All nodes must
+      stop and upgrade together; mixed-version incident writers are unsupported.
+      Migration key collisions fail atomically with a diagnostic identifying both
+      incident rows rather than discarding or silently closing history.
+      The run/backfill/incident creators copy it from the job; JSON tags so every API
       object carries `namespace`; `caesium job export` round-trips it (the exporter writes it back into the manifest); the report generator
       documents it so `docs/job-schema-reference.md` regenerates; one example manifest
       declares a namespace. **Every** job and run constructor stamps it: the legacy
@@ -277,23 +342,37 @@ middleware relies on.
       miss). Incident deduplication (`incident.DedupeKey`) gains the run's persisted
       namespace so a post-move failure opens a new incident in the new namespace.
       Offline `caesium job lint` validates syntax only.
+      Namespace-only moves also appear in the shared CLI/REST/approval metadata
+      diff, including omission moving a namespaced job to `default`. Unsafe
+      historical replay across a move fails closed with old/new namespace context.
       Files: `pkg/jobdef/definition.go`, `pkg/jobdef/definition_test.go`,
       `pkg/jobdef/schema.go`, `internal/jobdef/report/report.go`,
       `docs/job-schema-reference.md`, `internal/models/job.go`, `internal/models/run.go`,
       `internal/models/backfill.go`, `internal/models/incident.go`,
       `internal/jobdef/importer.go`, `internal/run/store.go`,
       `api/rest/controller/job/post.go`, `api/rest/service/job/job.go`,
-      `internal/replay/replay.go`, `internal/backfill/` (creator),
-      `internal/incident/store.go` (namespace + `DedupeKey`), `internal/cache/hash.go`,
-      `internal/cache/hash_test.go`, `internal/job/job.go` (`buildTaskHashInput`),
-      `internal/worker/runtime_executor.go` (hash input), new `test/cache_namespace_move_test.go`,
+      `internal/replay/replay.go` (run insert and replay hash input),
+      `api/rest/controller/backfill/backfill.go` (creator), `internal/backfill/`,
+      `internal/incident/{incident,store,subscriber}.go` (persisted namespace, dedupe,
+      and remediation), `internal/cache/hash.go`, `internal/cache/hash_test.go`,
+      `internal/job/local_run_identity.go` (local hash input),
+      `internal/worker/runtime_executor.go` (worker hash input),
+      `internal/run/whydiff.go` (persisted hash decoding),
+      `pkg/db/{db,migrations,migrations_test}.go` (legacy namespace normalization),
+      `justfile`, `scripts/test_ci.py` (distributed scenario selection and guard),
+      new `test/cache_namespace_move_test.go`,
+      new `test/namespace_schema_doc_test.go`,
+      new `test/namespace_incident_lifecycle_test.go`,
+      `internal/jobdef/diff/` (namespace projection),
+      `scripts/coverage-journeys.sh`, `scripts/test_coverage_named_journeys.py`
+      (required real schema, incident and cache/diff/replay journeys),
       `internal/jobdef/exporter.go`, `docs/examples/`,
       `docs/caesium-job-llm-reference.md`, `docs/job-definitions.md`.
 - [ ] B2. Server-side namespace semantics: `POST /v1/jobdefs/lint` and apply reject an
       undeclared namespace (from the A4 policy holder) naming it; a namespace move keeps
       history (runs, receipts, incidents) on the original namespace and rewrites only
-      `jobs.namespace`; the apply preview lists namespaces touched; `caesium job diff`
-      shows a namespace change as a metadata diff. **Diff and lint baselines are
+      `jobs.namespace`; the apply preview lists namespaces touched. B1 supplies the
+      metadata namespace diff; B2 supplies its authorization semantics. **Diff and lint baselines are
       filtered**: `POST /v1/jobdefs/diff` compares against every persisted job
       (`jobdiff.LoadDatabaseSpecs`) and reports absent jobs as `removed`, so the
       baseline, the `removed` list and cross-job contract findings are restricted to
@@ -458,7 +537,14 @@ resolver refuses references outside the namespace's allow-list at lint and at ru
       — the env resolver honours `?name=` over the path (`env.go`) and Vault reads
       `?field=` (`vault.go`) — via a new `CanonicalTarget(ref)` on the `Resolver`
       interface (`env/<effective name>`, `vault/<mount>/<path>#<field>`,
-      `k8s/<namespace>/<secret>`), never by path alone. Returns `ErrSecretDenied` (redacted to `provider/<first segment>/…`). Wired
+      `k8s/<namespace>/<secret>`), derived from the provider's effective target,
+      including query overrides. Vault allow rules select the canonical secret
+      path and grant every field of that object; `#` is a reserved delimiter, so
+      decoded effective paths or fields containing it must be rejected before
+      matching. C4 expands relative `k8s/<secret>` rules against the mapped
+      Kubernetes namespace and pins `k8s/**` to that namespace in tests. Provider
+      aliases are canonicalized and unknown rule providers produce a lint error.
+      Returns `ErrSecretDenied` (redacted to `provider/<first segment>/…`). Wired
       at the executor and worker `ResolveContainerSpecSecretsWithIdentities` call
       sites, the HTTP trigger's per-job secret, and server-side `lint.CheckSecrets`;
       the executor runs the allow-check (parse + canonicalise + match, no resolution)
@@ -884,7 +970,8 @@ Regenerate the table from the edges if items move.
 - `internal/incident/allowlist.go` + `session.go`: A8 here **and** the arc plans
   (`data-circuit-breaker` F). Additive; rebase, different waves preferred.
   `internal/incident/store.go`: B1 (`DedupeKey`) only in this plan.
-- `internal/worker/worker.go`: C2 only. `scripts/ci-ok.py`, `scripts/test_ci.py`: G1 only.
+- `internal/worker/worker.go`: C2 only. `scripts/ci-ok.py`: G1 only.
+  `scripts/test_ci.py`: B1's distributed-selector guard, then G1's Keycloak lane.
 - `pkg/jobdef/definition.go`: B1 only.
 - `internal/cache/hash.go`: B1 (namespace in the key + test) → C1 (hash the resolved
   Kubernetes target). Sequential.
