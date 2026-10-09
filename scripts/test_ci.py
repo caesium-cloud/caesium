@@ -3498,5 +3498,32 @@ class ResourceHarnessTests(unittest.TestCase):
             self.assertEqual(command_log.read_text().splitlines(), ["image inspect caesiumcloud/resource-stress:harness-evidence"])
 
 
+class KindHostLimitsTests(unittest.TestCase):
+    """ubuntu-26.04 boots with the kernel's inotify defaults (128 instances),
+    not the 1280/655360 the ubuntu-24.04 image applied. Multi-node kind
+    clusters then fail kubeadm join, so every kind job raises them first."""
+
+    KIND_USE = re.compile(r"kind(-linux-|\.sigs\.k8s\.io| create| load)")
+
+    def test_every_kind_job_raises_inotify_limits_before_kind(self):
+        checked = []
+        for workflow, jobs in (("ci.yml", JOBS), ("qualification-lanes.yml", LANE_JOBS)):
+            for name, job in jobs.items():
+                steps = job.get("steps", [])
+                first_kind = next((i for i, step in enumerate(steps)
+                                   if self.KIND_USE.search(step.get("run", ""))), None)
+                if first_kind is None:
+                    continue
+                checked.append(f"{workflow}:{name}")
+                raise_at = next((i for i, step in enumerate(steps)
+                                 if "fs.inotify.max_user_instances=1280" in step.get("run", "")
+                                 and "fs.inotify.max_user_watches=655360" in step.get("run", "")), None)
+                with self.subTest(job=f"{workflow}:{name}"):
+                    self.assertIsNotNone(raise_at, "kind job never raises the inotify limits")
+                    self.assertLess(raise_at, first_kind, "inotify limits raised after kind is installed")
+        self.assertIn("ci.yml:helm-integration-test", checked)
+        self.assertIn("qualification-lanes.yml:console-recovery", checked)
+
+
 if __name__ == "__main__":
     unittest.main()

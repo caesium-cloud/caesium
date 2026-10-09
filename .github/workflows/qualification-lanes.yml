@@ -102,6 +102,11 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: taiki-e/install-action@just
+      # kind's documented "too many open files" fix. The ubuntu-24.04 image
+      # applied these values at boot; ubuntu-26.04 runs the kernel defaults
+      # (128 instances), which starve multi-node clusters' kubelets.
+      - name: Raise inotify limits for kind
+        run: sudo sysctl -w fs.inotify.max_user_watches=655360 fs.inotify.max_user_instances=1280
       - name: Install kind
         run: |
           curl -Lo ./kind https://kind.sigs.k8s.io/dl/latest/kind-linux-amd64
@@ -178,6 +183,11 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: taiki-e/install-action@just
+      # kind's documented "too many open files" fix. The ubuntu-24.04 image
+      # applied these values at boot; ubuntu-26.04 runs the kernel defaults
+      # (128 instances), which starve multi-node clusters' kubelets.
+      - name: Raise inotify limits for kind
+        run: sudo sysctl -w fs.inotify.max_user_watches=655360 fs.inotify.max_user_instances=1280
       - name: Install kind
         run: |
           curl -Lo ./kind https://kind.sigs.k8s.io/dl/latest/kind-linux-amd64
@@ -226,6 +236,11 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: taiki-e/install-action@just
+      # kind's documented "too many open files" fix. The ubuntu-24.04 image
+      # applied these values at boot; ubuntu-26.04 runs the kernel defaults
+      # (128 instances), which starve multi-node clusters' kubelets.
+      - name: Raise inotify limits for kind
+        run: sudo sysctl -w fs.inotify.max_user_watches=655360 fs.inotify.max_user_instances=1280
       - name: Install kind
         run: |
           curl -Lo ./kind https://kind.sigs.k8s.io/dl/latest/kind-linux-amd64
@@ -403,6 +418,11 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: taiki-e/install-action@just
+      # kind's documented "too many open files" fix. The ubuntu-24.04 image
+      # applied these values at boot; ubuntu-26.04 runs the kernel defaults
+      # (128 instances), which starve multi-node clusters' kubelets.
+      - name: Raise inotify limits for kind
+        run: sudo sysctl -w fs.inotify.max_user_watches=655360 fs.inotify.max_user_instances=1280
       - name: Install kind
         run: |
           curl -Lo ./kind https://kind.sigs.k8s.io/dl/latest/kind-linux-amd64
@@ -416,10 +436,6 @@ jobs:
       - uses: azure/setup-helm@v5
         with:
           version: v3.22.0
-      # Four kind nodes on one runner: raise the inotify limits kubelet and
-      # containerd exhaust at the hosted defaults.
-      - name: Raise inotify limits for a four-node kind cluster
-        run: sudo sysctl -w fs.inotify.max_user_watches=524288 fs.inotify.max_user_instances=512
       - name: Seeded single-host soak (advisory)
         env:
           CAESIUM_SOAK_SEED: ${{ inputs.soak-seed }}

@@ -1178,6 +1178,11 @@ jobs:
       - uses: ./.github/actions/load-docker-images
         with:
           name: integration-runner-amd64
+      # kind's documented "too many open files" fix. The ubuntu-24.04 image
+      # applied these values at boot; ubuntu-26.04 runs the kernel defaults
+      # (128 instances), which starve multi-node clusters' kubelets.
+      - name: Raise inotify limits for kind
+        run: sudo sysctl -w fs.inotify.max_user_watches=655360 fs.inotify.max_user_instances=1280
       - name: Install kind
         run: |
           curl -Lo ./kind https://kind.sigs.k8s.io/dl/latest/kind-linux-amd64
@@ -1413,6 +1418,11 @@ jobs:
       - uses: ./.github/actions/load-docker-images
         with:
           name: product-amd64
+      # kind's documented "too many open files" fix. The ubuntu-24.04 image
+      # applied these values at boot; ubuntu-26.04 runs the kernel defaults
+      # (128 instances), which starve multi-node clusters' kubelets.
+      - name: Raise inotify limits for kind
+        run: sudo sysctl -w fs.inotify.max_user_watches=655360 fs.inotify.max_user_instances=1280
       - name: Install kind
         run: |
           curl -Lo ./kind https://kind.sigs.k8s.io/dl/latest/kind-linux-amd64
@@ -1470,6 +1480,11 @@ jobs:
       CAESIUM_SKIP_IMAGE_BUILD: "true"
     steps:
       - uses: actions/checkout@v7
+      # kind's documented "too many open files" fix. The ubuntu-24.04 image
+      # applied these values at boot; ubuntu-26.04 runs the kernel defaults
+      # (128 instances), which starve multi-node clusters' kubelets.
+      - name: Raise inotify limits for kind
+        run: sudo sysctl -w fs.inotify.max_user_watches=655360 fs.inotify.max_user_instances=1280
       - name: Install kind
         run: |
           curl -Lo ./kind https://kind.sigs.k8s.io/dl/latest/kind-linux-amd64
@@ -1727,6 +1742,11 @@ jobs:
           echo "diff base $base; $(wc -l <.tmp/coverage-diff/changed-paths.txt) changed Go path(s)"
           echo "CAESIUM_COVERAGE_DIFF_BASE=$base" >>"$GITHUB_ENV"
           echo "CAESIUM_COVERAGE_CHANGED_PATHS=$PWD/.tmp/coverage-diff/changed-paths.txt" >>"$GITHUB_ENV"
+      # kind's documented "too many open files" fix. The ubuntu-24.04 image
+      # applied these values at boot; ubuntu-26.04 runs the kernel defaults
+      # (128 instances), which starve multi-node clusters' kubelets.
+      - name: Raise inotify limits for kind
+        run: sudo sysctl -w fs.inotify.max_user_watches=655360 fs.inotify.max_user_instances=1280
       - name: Backend journey tools
         run: |
           set -euo pipefail

@@ -400,6 +400,16 @@ Path-filter outputs (`changes.go` / `.ui` / `.helm` / `.reagents` / `.ci` /
 `.images`) decide which of the jobs above run on a pull request. `master`
 and `v*` tags force every output to `true`.
 
+Two ubuntu-26.04 host differences matter to every kind lane:
+- **inotify limits.** The image boots with the kernel's inotify defaults
+  (128 instances), not the 1280 instances / 655360 watches the 24.04 image
+  applied, so each job that runs kind sets those values with `sysctl -w`
+  before installing kind. `KindHostLimitsTests` in `scripts/test_ci.py`
+  enforces this.
+- **Image store.** Docker 29 there uses the containerd image store, so images
+  enter kind as platform-scoped archives (`docker image save --platform` +
+  `kind load image-archive`), never through `kind load docker-image`.
+
 Docker (amd64 and arm64), Podman, and Helm each retain the complete
 integration test package. Each engine uses three isolated servers/runners.
 `test/shard_test.go` discovers the same Test* methods as testify and assigns
