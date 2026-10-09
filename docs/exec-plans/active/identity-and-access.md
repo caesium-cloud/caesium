@@ -87,15 +87,21 @@ Item checkboxes remain unchecked until merged acceptance evidence exists.
   lock/transaction errors in later writes. Hosted application checks passed;
   coverage-ratchets remains pending. Actual-SQL probes confirm existing base-revision
   DB pool wiring defects; the unchanged-base integration comparison is running.
-- **W1-β / B1 — namespace persistence and cache identity:** committed candidate
-  `138b72bdb94c679adbe309f079d569c49b062375` on `codex/identity-and-access-w1-beta`.
-  Focused changed-package regressions, generated schema guardrail, and integration
-  compilation, full lint and race-enabled unit suite passed. Root interrupted the
-  old candidate's integration run to fix independent review findings: exported
-  manifest engine duplication outside Docker and unclear incident-key collision
-  errors. The strict incident namespace constraint is retained under the user-approved
-  coordinated upgrade contract. Updated candidate, live scenarios, example lint,
-  independent re-review and hosted CI remain pending.
+- **W1-β / B1 — namespace persistence and cache identity:** draft
+  [PR #625](https://github.com/caesium-cloud/caesium/pull/625), head
+  `708637a67a10bdefb2856ec2f71b1d44730643dc`. Focused changed-package regressions,
+  generated schema guardrail and integration compilation passed. Independent
+  review passed after exported-manifest and migration collision fixes. Strict
+  incident constraints and the coordinated upgrade guidance travel together in
+  this PR. Final-candidate full gates, populated-dqlite upgrade, live scenarios,
+  example lint and hosted CI remain pending. The preceding candidate's full lint
+  and unit suite passed; its integration run was interrupted for review fixes.
+- **Separately authorized DB repair:** actual-SQL probes confirmed base-revision
+  retry/split installers bypass GORM's active pool and returning mutations can
+  reach the reader once the split is enabled. A local repair passed the package
+  race suite and independent review at `839e8e0c01f947eb679df9dfd5c155c8b7158602`;
+  standalone review publication and full runtime gates are underway. It does not
+  change A1/B1 dependencies or establish the integration failure's causal chain.
 - **A2 and D3:** not dispatched. A2 requires A1 to land; D3 requires B1 to land.
   The suggested W1 includes these follow-ups, but the review-PR endpoint leaves
   them pending until their prerequisite PRs merge. H-1, H-2, and N-1 require A4.
@@ -108,7 +114,7 @@ Item checkboxes remain unchecked until merged acceptance evidence exists.
 | Stream | Scope | Priority | Status |
 |--------|-------|----------|--------|
 | A | Policy file, grants, principal, route classes, namespace-aware middleware, keys with namespaces, SSO-admin key management | **P0** | W1 A1 draft #624; A2 waits for A1 |
-| B | `metadata.namespace` on jobs: schema, columns, importer, lint, apply/prune/move, git-sync allowlist, collection filtering, aggregate collapse | **P0** | W1 B1 in progress |
+| B | `metadata.namespace` on jobs: schema, columns, importer, lint, apply/prune/move, git-sync allowlist, collection filtering, aggregate collapse | **P0** | W1 B1 draft #625 |
 | C | Runtime isolation: per-namespace Kubernetes namespace + service account, scoped secret resolution, Helm RBAC | P1 | Not started |
 | D | Run quota + round-robin fairness (#395 v1 slice); namespaced notification channels, policies, agent profiles | P1 | Not started |
 | E | Identity lifecycle: IdP group refresh, user/session administration, user-bound keys, `caesium login` | P1 | Not started |
