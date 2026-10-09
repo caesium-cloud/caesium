@@ -103,10 +103,12 @@ Item checkboxes remain unchecked until merged acceptance evidence exists.
   integration passed (801.740s; 272 passed, 41 lane-specific skips). Hosted logs
   explicitly prove the three new scenarios across Docker amd64/arm64, Podman,
   Kubernetes and distributed execution (15 combinations, zero skips). Populated
-  native-dqlite upgrade is running after an inspection-only harness failure was
-  corrected; that attempt created no server or network. Hosted coverage-ratchets
-  and `ci-ok` failed in run `37936353731`; the underlying coverage report is under
-  investigation. B1 remains draft until these gates are resolved.
+  native-dqlite upgrade remains pending after two harness failures before catalog
+  population (image inspection and old-server voter configuration); both were
+  corrected and owned resources cleaned. Hosted coverage-ratchets and `ci-ok`
+  failed in run `37936353731`: three eligible changed files have zero observed
+  counters. Real schema-CLI and incident-lifecycle coverage is being added while
+  preserving the coverage floor. B1 remains draft until these gates are resolved.
   The preceding candidate's integration run was interrupted for review fixes.
 - **Separately authorized DB repair:** actual-SQL probes confirmed base-revision
   retry/split installers bypass GORM's active pool and returning mutations can
