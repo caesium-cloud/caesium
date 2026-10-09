@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"sort"
 	"strings"
 	"time"
 
@@ -64,9 +65,13 @@ var (
 	// ErrDiscoverySuperseded rejects discovery that is not strictly newer than
 	// the latest direct snapshot.
 	ErrDiscoverySuperseded = errors.New("connector: discovery cannot overwrite newer direct state")
-	// ErrIdempotencyMismatch rejects the same idempotency key with a different
-	// request fingerprint.
-	ErrIdempotencyMismatch = errors.New("connector: idempotency key reused with a different request fingerprint")
+	// ErrIdempotencyMismatch rejects the same idempotency key when the
+	// execution, action, binding version, external update id, or request
+	// fingerprint differs from the stored receipt.
+	ErrIdempotencyMismatch = errors.New("connector: idempotency key reused with a different request")
+	// ErrSnapshotConflict means a concurrent writer won the identity
+	// compare-and-swap. RecordSnapshot retries it, then returns this error.
+	ErrSnapshotConflict = errors.New("connector: snapshot compare-and-swap conflict")
 	// ErrEpochMismatch means the stored fingerprint was not the expected previous value.
 	ErrEpochMismatch = errors.New("connector: configuration epoch mismatch")
 	// ErrEmptyEpoch rejects an empty next fingerprint.
@@ -152,13 +157,27 @@ func NewStore(db *gorm.DB, clock ...func() time.Time) *Store {
 	return &Store{db: db, clock: fn}
 }
 
+// WriteBounds is one connection's configured write budget. A zero field uses
+// the matching hard ceiling. A value outside 1..ceiling is rejected. C1 passes
+// the connection limits. Callers that omit the argument stay on the ceilings.
+type WriteBounds struct {
+	MaxMetadataBytes         int
+	MaxUnreferencedSnapshots int
+}
+
 // RecordSnapshot inserts an identity for a direct read and appends a snapshot
 // when evidence advances. Discovery never inserts an identity and writes
-// nothing for an unknown one. Unchanged evidence does not write and does not
-// refresh the stored observation time. List and history pages are not accepted
-// here; there is no method that inserts from a page of search results.
-func (s *Store) RecordSnapshot(ctx context.Context, obs Observation) (SnapshotResult, error) {
-	prepared, terminal, digest, err := prepareObservation(obs)
+// nothing for an unknown one. Unchanged evidence does not write a snapshot and
+// does not refresh the stored observation time. A higher generation with the
+// same evidence advances the generation watermark only. List and history pages
+// are not accepted here; there is no method that inserts from a page of search
+// results. bounds, when set, supplies the connection's metadata and snapshot caps.
+func (s *Store) RecordSnapshot(ctx context.Context, obs Observation, bounds ...WriteBounds) (SnapshotResult, error) {
+	limit, err := resolveWriteBounds(bounds...)
+	if err != nil {
+		return SnapshotResult{}, err
+	}
+	prepared, terminal, digest, err := prepareObservation(obs, limit.MaxMetadataBytes)
 	if err != nil {
 		return SnapshotResult{}, err
 	}
@@ -170,7 +189,7 @@ func (s *Store) RecordSnapshot(ctx context.Context, obs Observation) (SnapshotRe
 		if prepared.SourceKind == SourceDiscovery {
 			return SnapshotResult{}, ErrNotFound
 		}
-		return s.advanceSnapshot(ctx, prepared, digest, terminal)
+		return s.advanceSnapshot(ctx, prepared, digest, terminal, limit.MaxUnreferencedSnapshots)
 	}
 	if err != nil {
 		return SnapshotResult{}, err
@@ -178,18 +197,22 @@ func (s *Store) RecordSnapshot(ctx context.Context, obs Observation) (SnapshotRe
 	if decision, stop := decideSnapshot(ident, prepared, digest, terminal); stop {
 		return decision.result, decision.err
 	}
-	return s.advanceSnapshot(ctx, prepared, digest, terminal)
+	return s.advanceSnapshot(ctx, prepared, digest, terminal, limit.MaxUnreferencedSnapshots)
 }
 
 // RecordRelation stores typed evidence between two identities that already
 // exist. It does not create identities. The same from, to, type, and evidence
 // digest returns the original row. A different digest inserts another row.
 // Both identities are marked referenced.
-func (s *Store) RecordRelation(ctx context.Context, from, to ExecutionReference, relationType string, evidence []byte) (models.ExternalExecutionRelation, error) {
+func (s *Store) RecordRelation(ctx context.Context, from, to ExecutionReference, relationType string, evidence []byte, bounds ...WriteBounds) (models.ExternalExecutionRelation, error) {
+	limit, err := resolveWriteBounds(bounds...)
+	if err != nil {
+		return models.ExternalExecutionRelation{}, err
+	}
 	if !validRelationType(relationType) {
 		return models.ExternalExecutionRelation{}, ErrInvalidRelation
 	}
-	if err := boundJSON(evidence); err != nil {
+	if err := boundJSON(evidence, limit.MaxMetadataBytes); err != nil {
 		return models.ExternalExecutionRelation{}, err
 	}
 	fromRef, err := NewExecutionReference(from.ConnectionID, from.Coordinates)
@@ -273,12 +296,18 @@ func (s *Store) MarkReferenced(ctx context.Context, opaqueID string) error {
 }
 
 // AdmitOperation inserts one receipt for a connection and idempotency key.
-// The identity must already exist. The same key and fingerprint returns the
-// original row. A different fingerprint writes nothing. A second key for the
-// same open connection, execution, and action returns the existing id with
-// Conflict set and writes nothing. A new row marks the identity referenced.
-func (s *Store) AdmitOperation(ctx context.Context, req OperationRequest) (OperationDecision, error) {
-	ref, err := validateOperationRequest(req)
+// The identity must already exist. The same key and the same execution,
+// action, binding version, external update id, and fingerprint returns the
+// original row. Any of those fields differing writes nothing. A second key
+// for the same open connection, execution, and action returns the existing
+// id with Conflict set and writes nothing. A new row marks the identity
+// referenced. bounds, when set, caps the actor JSON.
+func (s *Store) AdmitOperation(ctx context.Context, req OperationRequest, bounds ...WriteBounds) (OperationDecision, error) {
+	limit, err := resolveWriteBounds(bounds...)
+	if err != nil {
+		return OperationDecision{}, err
+	}
+	ref, err := validateOperationRequest(req, limit.MaxMetadataBytes)
 	if err != nil {
 		return OperationDecision{}, err
 	}
@@ -303,15 +332,12 @@ func (s *Store) AdmitOperation(ctx context.Context, req OperationRequest) (Opera
 
 	var created bool
 	err = s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		if err := identityExists(tx, opaque); err != nil {
-			return err
-		}
 		var owner models.ExternalExecution
-		if err := tx.Select("connection_id").Where("opaque_id = ?", opaque).First(&owner).Error; err != nil {
+		if err := tx.Where("opaque_id = ?", opaque).First(&owner).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return ErrNotFound
+			}
 			return err
-		}
-		if owner.ConnectionID != req.ConnectionID {
-			return ErrInvalidOperation
 		}
 		res := tx.Clauses(clause.OnConflict{
 			Columns:   []clause.Column{{Name: "connection_id"}, {Name: "idempotency_key"}},
@@ -325,7 +351,7 @@ func (s *Store) AdmitOperation(ctx context.Context, req OperationRequest) (Opera
 			if err := tx.Where("connection_id = ? AND idempotency_key = ?", req.ConnectionID, req.IdempotencyKey).First(&stored).Error; err != nil {
 				return err
 			}
-			if stored.RequestFingerprint != req.RequestFingerprint {
+			if !admissionMatches(stored, req, opaque) {
 				return ErrIdempotencyMismatch
 			}
 			op = stored
@@ -343,7 +369,7 @@ func (s *Store) AdmitOperation(ctx context.Context, req OperationRequest) (Opera
 				Where("connection_id = ? AND idempotency_key = ?", req.ConnectionID, req.IdempotencyKey).
 				First(&stored).Error
 			if loadErr == nil {
-				if stored.RequestFingerprint != req.RequestFingerprint {
+				if !admissionMatches(stored, req, opaque) {
 					return OperationDecision{}, ErrIdempotencyMismatch
 				}
 				return OperationDecision{Operation: stored, Created: false, Conflict: false}, nil
@@ -433,6 +459,17 @@ func (s *Store) ActivateEpoch(ctx context.Context, previousFingerprint, nextFing
 	return nil
 }
 
+// ReadCatalogEpoch returns the stored fingerprint. A missing row is an empty
+// fingerprint and a nil error. Startup calls this after migration when the
+// connector gate is on. It does not compare the fingerprint; that is C1.
+func ReadCatalogEpoch(ctx context.Context, db *gorm.DB) (string, error) {
+	fingerprint, err := NewStore(db).ActiveEpoch(ctx)
+	if errors.Is(err, ErrNotFound) {
+		return "", nil
+	}
+	return fingerprint, err
+}
+
 // ActiveEpoch returns the stored configuration fingerprint.
 func (s *Store) ActiveEpoch(ctx context.Context) (string, error) {
 	var row models.ConnectorConfiguration
@@ -446,9 +483,10 @@ func (s *Store) ActiveEpoch(ctx context.Context) (string, error) {
 	return row.Fingerprint, nil
 }
 
-// EnforceRetention deletes unreferenced snapshots for connectionID older than
-// maxAge, then evicts the oldest unreferenced snapshots until that count is
-// below maxCount. Identities, relations, operations, the epoch row, and
+// EnforceRetention deletes unreferenced historical snapshots for connectionID
+// older than maxAge, then evicts the oldest of those until at most maxCount
+// remain. An identity's latest snapshot is kept even when it is old and
+// unreferenced. Identities, relations, operations, the epoch row, and
 // snapshots of a referenced identity are kept. Limits above the hard ceilings
 // or non-positive limits are rejected.
 func (s *Store) EnforceRetention(ctx context.Context, connectionID string, maxAge time.Duration, maxCount int) error {
@@ -460,16 +498,17 @@ func (s *Store) EnforceRetention(ctx context.Context, connectionID string, maxAg
 		if err := deleteUnreferencedOlderThan(tx, connectionID, cutoff); err != nil {
 			return err
 		}
-		return evictUnreferencedBelow(tx, connectionID, maxCount)
+		return evictHistoricalAbove(tx, connectionID, maxCount)
 	})
 }
 
 type snapshotDecision struct {
-	result SnapshotResult
-	err    error
+	result    SnapshotResult
+	err       error
+	watermark bool
 }
 
-func prepareObservation(obs Observation) (Observation, bool, string, error) {
+func prepareObservation(obs Observation, maxMetadata int) (Observation, bool, string, error) {
 	ref, err := NewExecutionReference(obs.Execution.ConnectionID, obs.Execution.Coordinates)
 	if err != nil {
 		return Observation{}, false, "", err
@@ -479,7 +518,7 @@ func prepareObservation(obs Observation) (Observation, bool, string, error) {
 	if !ok || !validAvailability(obs.Availability) || !validCompleteness(obs.Completeness) || !validSourceKind(obs.SourceKind) {
 		return Observation{}, false, "", ErrInvalidObservation
 	}
-	if err := boundJSON(obs.Metadata); err != nil {
+	if err := boundJSON(obs.Metadata, maxMetadata); err != nil {
 		return Observation{}, false, "", err
 	}
 	obs.ObservedAt = obs.ObservedAt.UTC()
@@ -490,27 +529,48 @@ func decideSnapshot(ident models.ExternalExecution, obs Observation, digest stri
 	if ident.LatestGeneration == nil {
 		return snapshotDecision{}, false
 	}
+	latest := *ident.LatestGeneration
 	if ident.LatestEvidenceDigest == digest {
+		if obs.Generation > latest {
+			return snapshotDecision{watermark: true}, false
+		}
 		observed := time.Time{}
 		if ident.LatestObservedAt != nil {
 			observed = ident.LatestObservedAt.UTC()
 		}
 		return snapshotDecision{result: SnapshotResult{Wrote: false, ObservedAt: observed}}, true
 	}
-	latest := *ident.LatestGeneration
+	if obs.Generation <= latest {
+		if obs.SourceKind == SourceDiscovery && ident.LatestSourceKind == SourceDirect {
+			return snapshotDecision{err: ErrDiscoverySuperseded}, true
+		}
+		return snapshotDecision{err: ErrStaleGeneration}, true
+	}
 	if !terminal && ident.LatestTerminal {
 		return snapshotDecision{err: ErrTerminalRegression}, true
-	}
-	if obs.SourceKind == SourceDiscovery && ident.LatestSourceKind == SourceDirect && obs.Generation <= latest {
-		return snapshotDecision{err: ErrDiscoverySuperseded}, true
-	}
-	if obs.Generation < latest || obs.Generation == latest {
-		return snapshotDecision{err: ErrStaleGeneration}, true
 	}
 	return snapshotDecision{}, false
 }
 
-func (s *Store) advanceSnapshot(ctx context.Context, obs Observation, digest string, terminal bool) (SnapshotResult, error) {
+func (s *Store) advanceSnapshot(ctx context.Context, obs Observation, digest string, terminal bool, maxHistorical int) (SnapshotResult, error) {
+	var lastErr error
+	for range 8 {
+		result, err := s.advanceSnapshotOnce(ctx, obs, digest, terminal, maxHistorical)
+		if err == nil {
+			return result, nil
+		}
+		if !errors.Is(err, ErrSnapshotConflict) {
+			return SnapshotResult{}, err
+		}
+		lastErr = err
+	}
+	if lastErr == nil {
+		lastErr = ErrSnapshotConflict
+	}
+	return SnapshotResult{}, lastErr
+}
+
+func (s *Store) advanceSnapshotOnce(ctx context.Context, obs Observation, digest string, terminal bool, maxHistorical int) (SnapshotResult, error) {
 	opaque := obs.Execution.OpaqueID()
 	var result SnapshotResult
 	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
@@ -519,62 +579,84 @@ func (s *Store) advanceSnapshot(ctx context.Context, obs Observation, digest str
 				return err
 			}
 		}
-		for range 8 {
-			var ident models.ExternalExecution
-			if err := tx.Where("opaque_id = ?", opaque).First(&ident).Error; err != nil {
-				if errors.Is(err, gorm.ErrRecordNotFound) {
-					return ErrNotFound
-				}
-				return err
+		var ident models.ExternalExecution
+		if err := tx.Where("opaque_id = ?", opaque).First(&ident).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return ErrNotFound
 			}
-			if decision, stop := decideSnapshot(ident, obs, digest, terminal); stop {
-				result = decision.result
-				return decision.err
-			}
+			return err
+		}
+		decision, stop := decideSnapshot(ident, obs, digest, terminal)
+		if decision.err != nil {
+			return decision.err
+		}
+		if decision.watermark {
 			res := tx.Model(&models.ExternalExecution{}).
 				Where("opaque_id = ? AND cas_version = ?", opaque, ident.CASVersion).
 				Updates(map[string]any{
-					"cas_version":            ident.CASVersion + 1,
-					"latest_generation":      obs.Generation,
-					"latest_evidence_digest": digest,
-					"latest_terminal":        terminal,
-					"latest_source_kind":     obs.SourceKind,
-					"latest_observed_at":     obs.ObservedAt,
-					"updated_at":             time.Now().UTC(),
+					"cas_version":       ident.CASVersion + 1,
+					"latest_generation": obs.Generation,
+					"updated_at":        time.Now().UTC(),
 				})
 			if res.Error != nil {
 				return res.Error
 			}
 			if res.RowsAffected != 1 {
-				continue
+				return ErrSnapshotConflict
 			}
-			if err := evictUnreferencedBelow(tx, obs.Execution.ConnectionID, MaxUnreferencedSnapshots); err != nil {
-				return err
+			observed := time.Time{}
+			if ident.LatestObservedAt != nil {
+				observed = ident.LatestObservedAt.UTC()
 			}
-			snap := models.ExternalExecutionSnapshot{
-				ID:             uuid.New(),
-				OpaqueID:       opaque,
-				ConnectionID:   obs.Execution.ConnectionID,
-				Generation:     obs.Generation,
-				SourceEventID:  obs.SourceEventID,
-				NativeStatus:   obs.NativeStatus,
-				DisplayStatus:  obs.DisplayStatus,
-				Availability:   obs.Availability,
-				Completeness:   obs.Completeness,
-				Metadata:       jsonValue(obs.Metadata),
-				SourceKind:     obs.SourceKind,
-				Terminal:       terminal,
-				EvidenceDigest: digest,
-				ObservedAt:     obs.ObservedAt,
-				CreatedAt:      time.Now().UTC(),
-			}
-			if err := tx.Create(&snap).Error; err != nil {
-				return err
-			}
-			result = SnapshotResult{Wrote: true, ObservedAt: obs.ObservedAt}
+			result = SnapshotResult{Wrote: false, ObservedAt: observed}
 			return nil
 		}
-		return errors.New("connector: snapshot advance lost the compare-and-swap")
+		if stop {
+			result = decision.result
+			return nil
+		}
+		res := tx.Model(&models.ExternalExecution{}).
+			Where("opaque_id = ? AND cas_version = ?", opaque, ident.CASVersion).
+			Updates(map[string]any{
+				"cas_version":            ident.CASVersion + 1,
+				"latest_generation":      obs.Generation,
+				"latest_evidence_digest": digest,
+				"latest_terminal":        terminal,
+				"latest_source_kind":     obs.SourceKind,
+				"latest_observed_at":     obs.ObservedAt,
+				"updated_at":             time.Now().UTC(),
+			})
+		if res.Error != nil {
+			return res.Error
+		}
+		if res.RowsAffected != 1 {
+			return ErrSnapshotConflict
+		}
+		if err := evictHistoricalAbove(tx, obs.Execution.ConnectionID, maxHistorical); err != nil {
+			return err
+		}
+		snap := models.ExternalExecutionSnapshot{
+			ID:             uuid.New(),
+			OpaqueID:       opaque,
+			ConnectionID:   obs.Execution.ConnectionID,
+			Generation:     obs.Generation,
+			SourceEventID:  obs.SourceEventID,
+			NativeStatus:   obs.NativeStatus,
+			DisplayStatus:  obs.DisplayStatus,
+			Availability:   obs.Availability,
+			Completeness:   obs.Completeness,
+			Metadata:       jsonValue(obs.Metadata),
+			SourceKind:     obs.SourceKind,
+			Terminal:       terminal,
+			EvidenceDigest: digest,
+			ObservedAt:     obs.ObservedAt,
+			CreatedAt:      time.Now().UTC(),
+		}
+		if err := tx.Create(&snap).Error; err != nil {
+			return err
+		}
+		result = SnapshotResult{Wrote: true, ObservedAt: obs.ObservedAt}
+		return nil
 	})
 	if err != nil {
 		return SnapshotResult{}, err
@@ -599,6 +681,38 @@ func ensureIdentity(tx *gorm.DB, ref ExecutionReference) error {
 		Columns:   []clause.Column{{Name: "opaque_id"}},
 		DoNothing: true,
 	}).Create(&row).Error
+}
+
+func admissionMatches(stored models.ConnectorOperation, req OperationRequest, opaque string) bool {
+	return stored.RequestFingerprint == req.RequestFingerprint &&
+		stored.OpaqueID == opaque &&
+		stored.ActionName == req.Action &&
+		stored.BindingVersion == req.BindingVersion &&
+		stored.ExternalUpdateID == req.ExternalUpdateID
+}
+
+func resolveWriteBounds(bounds ...WriteBounds) (WriteBounds, error) {
+	out := WriteBounds{
+		MaxMetadataBytes:         MaxPageMetadataBytes,
+		MaxUnreferencedSnapshots: MaxUnreferencedSnapshots,
+	}
+	if len(bounds) == 0 || bounds[0] == (WriteBounds{}) {
+		return out, nil
+	}
+	in := bounds[0]
+	if in.MaxMetadataBytes != 0 {
+		if in.MaxMetadataBytes < 1 || in.MaxMetadataBytes > MaxPageMetadataBytes {
+			return WriteBounds{}, ErrRetentionLimit
+		}
+		out.MaxMetadataBytes = in.MaxMetadataBytes
+	}
+	if in.MaxUnreferencedSnapshots != 0 {
+		if in.MaxUnreferencedSnapshots < 1 || in.MaxUnreferencedSnapshots > MaxUnreferencedSnapshots {
+			return WriteBounds{}, ErrRetentionLimit
+		}
+		out.MaxUnreferencedSnapshots = in.MaxUnreferencedSnapshots
+	}
+	return out, nil
 }
 
 func identityExists(tx *gorm.DB, opaqueID string) error {
@@ -677,7 +791,7 @@ func (s *Store) operationByOpenKey(ctx context.Context, openKey string) (models.
 	return row, true, nil
 }
 
-func validateOperationRequest(req OperationRequest) (ExecutionReference, error) {
+func validateOperationRequest(req OperationRequest, maxMetadata int) (ExecutionReference, error) {
 	if strings.TrimSpace(req.ConnectionID) == "" ||
 		strings.TrimSpace(req.IdempotencyKey) == "" ||
 		strings.TrimSpace(req.Action) == "" ||
@@ -686,7 +800,7 @@ func validateOperationRequest(req OperationRequest) (ExecutionReference, error) 
 		strings.TrimSpace(req.ExternalUpdateID) == "" {
 		return ExecutionReference{}, ErrInvalidOperation
 	}
-	if err := boundJSON(req.Actor); err != nil {
+	if err := boundJSON(req.Actor, maxMetadata); err != nil {
 		return ExecutionReference{}, err
 	}
 	ref, err := NewExecutionReference(req.Execution.ConnectionID, req.Execution.Coordinates)
@@ -720,105 +834,75 @@ func operationTransitionAllowed(from, to string) bool {
 	}
 }
 
-func evictUnreferencedBelow(tx *gorm.DB, connectionID string, maxCount int) error {
-	for {
-		count, err := countUnreferenced(tx, connectionID)
-		if err != nil {
-			return err
-		}
-		if count < int64(maxCount) {
-			return nil
-		}
-		id, ok, err := oldestUnreferenced(tx, connectionID)
-		if err != nil {
-			return err
-		}
-		if !ok {
-			return errors.New("connector: unreferenced snapshot count did not match a row")
-		}
-		res := tx.Exec(`DELETE FROM external_execution_snapshots WHERE id = ?`, id)
-		if res.Error != nil {
-			return res.Error
-		}
-		if res.RowsAffected != 1 {
-			return errors.New("connector: retention eviction made no progress")
-		}
+func evictHistoricalAbove(tx *gorm.DB, connectionID string, keep int) error {
+	rows, err := historicalSnapshots(tx, connectionID)
+	if err != nil {
+		return err
 	}
+	if len(rows) <= keep {
+		return nil
+	}
+	sortHistorical(rows)
+	drop := rows[:len(rows)-keep]
+	ids := make([]string, len(drop))
+	for i, row := range drop {
+		ids[i] = row.ID
+	}
+	return deleteSnapshotIDs(tx, ids)
 }
 
 func deleteUnreferencedOlderThan(tx *gorm.DB, connectionID string, cutoff time.Time) error {
 	// Compare instants in Go. SQLite stores the driver's timestamp text, and a
-	// SQL inequality on that text is not the retention rule.
-	type aged struct {
-		ID         string    `gorm:"column:id"`
-		ObservedAt time.Time `gorm:"column:observed_at"`
-	}
-	var rows []aged
-	err := tx.Raw(`
-		SELECT s.id AS id, s.observed_at AS observed_at
-		FROM external_execution_snapshots AS s
-		INNER JOIN external_executions AS e ON e.opaque_id = s.opaque_id
-		WHERE s.connection_id = ? AND e.referenced = ?
-	`, connectionID, false).Scan(&rows).Error
+	// SQL inequality on that text is not the retention rule. The latest
+	// snapshot of each identity is not eligible.
+	rows, err := historicalSnapshots(tx, connectionID)
 	if err != nil {
 		return err
 	}
+	var ids []string
 	for _, row := range rows {
-		if !row.ObservedAt.Before(cutoff) {
-			continue
-		}
-		if err := tx.Exec(`DELETE FROM external_execution_snapshots WHERE id = ?`, row.ID).Error; err != nil {
-			return err
+		if row.ObservedAt.Before(cutoff) {
+			ids = append(ids, row.ID)
 		}
 	}
-	return nil
+	return deleteSnapshotIDs(tx, ids)
 }
 
-func countUnreferenced(tx *gorm.DB, connectionID string) (int64, error) {
-	var row struct {
-		N int64 `gorm:"column:n"`
-	}
-	err := tx.Raw(`
-		SELECT COUNT(*) AS n
-		FROM external_execution_snapshots AS s
-		INNER JOIN external_executions AS e ON e.opaque_id = s.opaque_id
-		WHERE s.connection_id = ? AND e.referenced = ?
-	`, connectionID, false).Scan(&row).Error
-	return row.N, err
+type agedSnapshot struct {
+	ID         string    `gorm:"column:id"`
+	ObservedAt time.Time `gorm:"column:observed_at"`
 }
 
-func oldestUnreferenced(tx *gorm.DB, connectionID string) (string, bool, error) {
-	type aged struct {
-		ID         string    `gorm:"column:id"`
-		ObservedAt time.Time `gorm:"column:observed_at"`
-	}
-	var rows []aged
+func historicalSnapshots(tx *gorm.DB, connectionID string) ([]agedSnapshot, error) {
+	var rows []agedSnapshot
 	err := tx.Raw(`
 		SELECT s.id AS id, s.observed_at AS observed_at
 		FROM external_execution_snapshots AS s
 		INNER JOIN external_executions AS e ON e.opaque_id = s.opaque_id
 		WHERE s.connection_id = ? AND e.referenced = ?
+		  AND NOT (e.latest_generation IS NOT NULL AND s.generation = e.latest_generation)
 	`, connectionID, false).Scan(&rows).Error
-	if err != nil {
-		return "", false, err
-	}
-	if len(rows) == 0 {
-		return "", false, nil
-	}
-	oldest := rows[0]
-	for _, row := range rows[1:] {
-		if row.ObservedAt.Before(oldest.ObservedAt) || (row.ObservedAt.Equal(oldest.ObservedAt) && row.ID < oldest.ID) {
-			oldest = row
-		}
-	}
-	if oldest.ID == "" {
-		return "", false, nil
-	}
-	return oldest.ID, true, nil
+	return rows, err
 }
 
-func boundJSON(payload []byte) error {
-	if len(payload) > MaxPageMetadataBytes {
+func sortHistorical(rows []agedSnapshot) {
+	sort.Slice(rows, func(i, j int) bool {
+		if rows[i].ObservedAt.Equal(rows[j].ObservedAt) {
+			return rows[i].ID < rows[j].ID
+		}
+		return rows[i].ObservedAt.Before(rows[j].ObservedAt)
+	})
+}
+
+func deleteSnapshotIDs(tx *gorm.DB, ids []string) error {
+	if len(ids) == 0 {
+		return nil
+	}
+	return tx.Exec(`DELETE FROM external_execution_snapshots WHERE id IN ?`, ids).Error
+}
+
+func boundJSON(payload []byte, maxBytes int) error {
+	if len(payload) > maxBytes {
 		return ErrPayloadTooLarge
 	}
 	if len(payload) > 0 && !json.Valid(payload) {
@@ -846,7 +930,6 @@ func evidenceDigest(obs Observation, terminal bool) string {
 		[]byte(obs.Availability),
 		[]byte(obs.Completeness),
 		obs.Metadata,
-		[]byte(obs.SourceKind),
 		[]byte(terminalBit),
 	)
 }

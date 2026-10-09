@@ -3,7 +3,8 @@
 > Status: In progress. This guide records the provider-neutral contract and
 > configuration file frozen for review. The catalog store now persists
 > identities, direct snapshots, relations, the configuration epoch, and
-> operation receipts. Startup still does not enforce the epoch, and there are
+> operation receipts. Startup reads the epoch after migration and does not
+> compare it, and there are
 > still no connector HTTP routes or Console pages. Caesium does not yet dial a
 > provider. Job-definition YAML is unchanged.
 
@@ -264,19 +265,26 @@ adapter coordinates. Provider coordinates stay in an opaque JSON blob. The
 catalog has no workflow id, run id, or namespace column.
 
 A direct observation ensures that identity and appends a snapshot only when
-the source evidence changes. An unchanged poll does not write a snapshot and
-does not refresh the stored observation time. List and history pages write
-nothing. Discovery does not insert an identity and does not snapshot an
-execution that has not already been read directly. A write is conditional on
-the observation generation: a stale or conflicting generation writes nothing,
-and a non-terminal observation cannot regress a terminal snapshot. Discovery
-cannot overwrite newer direct state. A successful advance inserts a new
-snapshot row and leaves the previous row in place.
+the source evidence changes. Evidence is the source event id, native status,
+display status, availability, completeness, metadata, and the terminal bit.
+The source kind is stored on the row and is not part of that digest, so a
+direct re-read of state already recorded by discovery is an unchanged poll.
+An unchanged poll does not write a snapshot and does not refresh the stored
+observation time. A higher generation with that same evidence advances only
+the generation watermark. List and history pages write nothing. Discovery
+does not insert an identity and does not snapshot an execution that has not
+already been read directly. A write is conditional on the observation
+generation: a stale or conflicting generation writes nothing. Generation is
+checked before terminal regression, so a late older read is stale rather than
+a regression. A newer non-terminal observation cannot regress a terminal
+snapshot. Discovery cannot overwrite newer direct state. A successful advance
+inserts a new snapshot row and leaves the previous row in place.
 
 Action admission stores one receipt per connection and idempotency key. The
-same key with a different request fingerprint is refused. The receipt stores
-the request fingerprint and a bounded actor record, not secret bytes. At most
-one operation for a connection, execution, and action stays open. `submitted`,
+same key with a different execution, action, binding version, external update
+id, or request fingerprint is refused. The receipt stores the request
+fingerprint and a bounded actor record, not secret bytes. At most one
+operation for a connection, execution, and action stays open. `submitted`,
 `accepted`, and `unknown` hold that guard; `unknown` is not completion.
 `completed` and `rejected` are terminal, clear the guard, and are not reopened.
 A later admission is a new row.
@@ -284,14 +292,19 @@ A later admission is a new row.
 The active configuration fingerprint is one catalog row. Activation is a
 compare-and-swap on the previous fingerprint. Concurrent callers that start
 from the same previous value have one winner, and the loser leaves the stored
-fingerprint unchanged. Startup does not enforce this epoch yet.
+fingerprint unchanged. When the connector gate is on, startup reads this
+row after migration. A missing row is left empty. A query error stops the
+process. Startup does not compare the fingerprint to the loaded config.
 
-Unreferenced snapshots are deleted past the configured age and capped per
-connection by evicting the oldest eligible rows before the next insert. The
-hard ceilings are 24 hours and 1,000 snapshots. A referenced identity — one
-with relation evidence or an operation — keeps its snapshots. Identities,
-relations, receipts, and the epoch row are not pruned. The catalog is not a
-full history mirror.
+Unreferenced historical snapshots are deleted past the configured age and
+then capped at that count. An identity's latest snapshot stays, including
+when it is the only row and it is older than the age. The hard ceilings are
+24 hours and 1,000 historical snapshots. `RecordSnapshot`, `AdmitOperation`,
+and `RecordRelation` take an optional write budget; zero fields use those
+ceilings, and C1 passes the connection's configured limits. A referenced
+identity — one with relation evidence or an operation — keeps its snapshots.
+Identities, relations, receipts, and the epoch row are not pruned. The
+catalog is not a full history mirror.
 
 Public read proof is still plan item C1. This store has no connector HTTP
 routes and no Console pages.

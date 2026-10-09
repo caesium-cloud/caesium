@@ -67,6 +67,8 @@ func TestRecordSnapshotRejectsConcurrentTerminalRegression(t *testing.T) {
 	require.NoError(t, err)
 	_, err = store.RecordSnapshot(ctx, directObservation(ref, 32, DisplayRunning, "event-back", terminalAt.Add(3*time.Hour)))
 	require.ErrorIs(t, err, ErrTerminalRegression)
+	_, err = store.RecordSnapshot(ctx, directObservation(ref, 1, DisplayRunning, "event-late", terminalAt.Add(4*time.Hour)))
+	require.ErrorIs(t, err, ErrStaleGeneration)
 	require.Equal(t, int64(4), countModel(t, db, &models.ExternalExecutionSnapshot{}))
 }
 
@@ -166,6 +168,14 @@ func TestAdmitOperationCollapsesIdempotencyKey(t *testing.T) {
 	changed := req
 	changed.RequestFingerprint = "fingerprint-b"
 	_, err = store.AdmitOperation(ctx, changed)
+	require.ErrorIs(t, err, ErrIdempotencyMismatch)
+	otherAction := req
+	otherAction.Action = "signal"
+	_, err = store.AdmitOperation(ctx, otherAction)
+	require.ErrorIs(t, err, ErrIdempotencyMismatch)
+	otherExec := operationRequest(mustExecutionRef(t, "primary", "exec-other"), "key-1", "fingerprint-a")
+	requireDirect(t, store, otherExec.Execution)
+	_, err = store.AdmitOperation(ctx, otherExec)
 	require.ErrorIs(t, err, ErrIdempotencyMismatch)
 	require.Equal(t, int64(1), countModel(t, db, &models.ConnectorOperation{}))
 	var stored models.ConnectorOperation
@@ -426,7 +436,29 @@ func TestUnchangedSnapshotDoesNotWrite(t *testing.T) {
 	require.NoError(t, db.First(&ident).Error)
 	require.NotNil(t, ident.LatestObservedAt)
 	require.WithinDuration(t, firstAt, *ident.LatestObservedAt, time.Second)
+	require.NotNil(t, ident.LatestGeneration)
+	require.Equal(t, int64(99), *ident.LatestGeneration)
 	require.False(t, ident.Referenced)
+
+	late := obs
+	late.Generation = 8
+	late.SourceEventID = "event-8"
+	_, err = store.RecordSnapshot(ctx, late)
+	require.ErrorIs(t, err, ErrStaleGeneration)
+	require.Equal(t, int64(1), countModel(t, db, &models.ExternalExecutionSnapshot{}))
+}
+
+func TestReadCatalogEpochTreatsMissingRowAsEmpty(t *testing.T) {
+	db := openStoreDB(t)
+	ctx := context.Background()
+	fingerprint, err := ReadCatalogEpoch(ctx, db)
+	require.NoError(t, err)
+	require.Empty(t, fingerprint)
+
+	require.NoError(t, NewStore(db).ActivateEpoch(ctx, "", "epoch-1"))
+	fingerprint, err = ReadCatalogEpoch(ctx, db)
+	require.NoError(t, err)
+	require.Equal(t, "epoch-1", fingerprint)
 }
 
 func TestRetentionKeepsReferencedSnapshotsAndCapsTheRest(t *testing.T) {
@@ -466,9 +498,9 @@ func TestRetentionKeepsReferencedSnapshotsAndCapsTheRest(t *testing.T) {
 
 	require.NoError(t, store.EnforceRetention(ctx, "primary", 24*time.Hour, 2))
 
-	require.False(t, snapshotExists(t, db, oldUnref.OpaqueID()))
+	require.True(t, snapshotExists(t, db, oldUnref.OpaqueID()))
 	require.True(t, snapshotExists(t, db, oldRef.OpaqueID()))
-	require.False(t, snapshotExists(t, db, young1.OpaqueID()))
+	require.True(t, snapshotExists(t, db, young1.OpaqueID()))
 	require.True(t, snapshotExists(t, db, young2.OpaqueID()))
 	require.True(t, snapshotExists(t, db, young3.OpaqueID()))
 	require.True(t, snapshotExists(t, db, other.OpaqueID()))
@@ -483,23 +515,35 @@ func TestRetentionKeepsReferencedSnapshotsAndCapsTheRest(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "retain-epoch", epoch)
 
-	// Cap inside RecordSnapshot uses the hard ceiling: one past the ceiling
-	// evicts the oldest unreferenced snapshot and keeps the referenced one.
+	// A later non-latest snapshot ages out. The identity's latest row stays.
+	aged := mustExecutionRef(t, "aged", "two-gens")
+	require.NoError(t, recordGen(store, aged, 1, now.Add(-48*time.Hour)))
+	require.NoError(t, recordGen(store, aged, 2, now.Add(-time.Hour)))
+	require.NoError(t, store.EnforceRetention(ctx, "aged", 24*time.Hour, 2))
+	require.Equal(t, int64(1), snapshotCount(t, db, aged.OpaqueID()))
+	var kept models.ExternalExecutionSnapshot
+	require.NoError(t, db.Where("opaque_id = ?", aged.OpaqueID()).First(&kept).Error)
+	require.Equal(t, int64(2), kept.Generation)
+
+	// The cap keeps exactly maxCount historical snapshots, plus the latest.
+	hist := mustExecutionRef(t, "capped", "hist")
+	bounds := WriteBounds{MaxUnreferencedSnapshots: 2}
 	base := now.Add(-30 * time.Minute)
-	first := mustExecutionRef(t, "capped", "snap-0")
-	require.NoError(t, recordAt(store, first, base))
-	for i := 1; i < MaxUnreferencedSnapshots; i++ {
-		ref := mustExecutionRef(t, "capped", fmt.Sprintf("snap-%d", i))
-		require.NoError(t, recordAt(store, ref, base.Add(time.Duration(i)*time.Second)))
+	for gen := int64(1); gen <= 4; gen++ {
+		_, err := store.RecordSnapshot(ctx, directObservation(hist, gen, DisplayRunning, fmt.Sprintf("g-%d", gen), base.Add(time.Duration(gen)*time.Second)), bounds)
+		require.NoError(t, err)
 	}
-	require.Equal(t, int64(MaxUnreferencedSnapshots), unreferencedSnapshots(t, db, "capped"))
-	extra := mustExecutionRef(t, "capped", "snap-extra")
-	require.NoError(t, recordAt(store, extra, base.Add(time.Duration(MaxUnreferencedSnapshots+1)*time.Second)))
-	require.Equal(t, int64(MaxUnreferencedSnapshots), unreferencedSnapshots(t, db, "capped"))
-	require.False(t, snapshotExists(t, db, first.OpaqueID()))
-	require.True(t, snapshotExists(t, db, extra.OpaqueID()))
-	require.True(t, catalogIdentityPresent(t, db, first.OpaqueID()))
+	require.Equal(t, int64(3), snapshotCount(t, db, hist.OpaqueID()))
+	var gens []int64
+	require.NoError(t, db.Model(&models.ExternalExecutionSnapshot{}).Where("opaque_id = ?", hist.OpaqueID()).Order("generation").Pluck("generation", &gens).Error)
+	require.Equal(t, []int64{2, 3, 4}, gens)
+	require.True(t, catalogIdentityPresent(t, db, hist.OpaqueID()))
 	require.True(t, snapshotExists(t, db, oldRef.OpaqueID()))
+
+	_, err = store.RecordSnapshot(ctx, directObservation(mustExecutionRef(t, "bounded", "meta"), 1, DisplayRunning, "meta", now, bytes.Repeat([]byte("m"), 64)), WriteBounds{MaxMetadataBytes: 32})
+	require.ErrorIs(t, err, ErrPayloadTooLarge)
+	_, err = store.RecordSnapshot(ctx, directObservation(mustExecutionRef(t, "bounded", "over"), 1, DisplayRunning, "over", now), WriteBounds{MaxUnreferencedSnapshots: MaxUnreferencedSnapshots + 1})
+	require.ErrorIs(t, err, ErrRetentionLimit)
 }
 
 func TestDiscoveryDoesNotInsertIdentityAndStaleGenerationWritesNothing(t *testing.T) {
@@ -532,6 +576,11 @@ func TestDiscoveryDoesNotInsertIdentityAndStaleGenerationWritesNothing(t *testin
 	wrote, err := store.RecordSnapshot(ctx, observation(ref, 6, DisplayRunning, SourceDiscovery, "disc-6", at.Add(5*time.Minute)))
 	require.NoError(t, err)
 	require.True(t, wrote.Wrote)
+	require.Equal(t, int64(2), countModel(t, db, &models.ExternalExecutionSnapshot{}))
+
+	same, err := store.RecordSnapshot(ctx, directObservation(ref, 6, DisplayRunning, "disc-6", at.Add(6*time.Minute)))
+	require.NoError(t, err)
+	require.False(t, same.Wrote)
 	require.Equal(t, int64(2), countModel(t, db, &models.ExternalExecutionSnapshot{}))
 	require.Equal(t, int64(1), countModel(t, db, &models.ExternalExecution{}))
 
@@ -755,8 +804,19 @@ func requireDirect(t *testing.T, store *Store, ref ExecutionReference) {
 }
 
 func recordAt(store *Store, ref ExecutionReference, at time.Time) error {
-	_, err := store.RecordSnapshot(context.Background(), directObservation(ref, 1, DisplayRunning, "retained", at))
+	return recordGen(store, ref, 1, at)
+}
+
+func recordGen(store *Store, ref ExecutionReference, generation int64, at time.Time) error {
+	_, err := store.RecordSnapshot(context.Background(), directObservation(ref, generation, DisplayRunning, fmt.Sprintf("retained-%d", generation), at))
 	return err
+}
+
+func snapshotCount(t *testing.T, db *gorm.DB, opaqueID string) int64 {
+	t.Helper()
+	var n int64
+	require.NoError(t, db.Model(&models.ExternalExecutionSnapshot{}).Where("opaque_id = ?", opaqueID).Count(&n).Error)
+	return n
 }
 
 func countModel(t *testing.T, db *gorm.DB, model any) int64 {
@@ -778,21 +838,6 @@ func catalogIdentityPresent(t *testing.T, db *gorm.DB, opaqueID string) bool {
 	var n int64
 	require.NoError(t, db.Model(&models.ExternalExecution{}).Where("opaque_id = ?", opaqueID).Count(&n).Error)
 	return n == 1
-}
-
-func unreferencedSnapshots(t *testing.T, db *gorm.DB, connectionID string) int64 {
-	t.Helper()
-	var row struct {
-		N int64 `gorm:"column:n"`
-	}
-	err := db.Raw(`
-		SELECT COUNT(*) AS n
-		FROM external_execution_snapshots AS s
-		INNER JOIN external_executions AS e ON e.opaque_id = s.opaque_id
-		WHERE s.connection_id = ? AND e.referenced = ?
-	`, connectionID, false).Scan(&row).Error
-	require.NoError(t, err)
-	return row.N
 }
 
 func assertNoRunColumns(t *testing.T, db *gorm.DB, table string) {

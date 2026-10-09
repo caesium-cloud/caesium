@@ -9,7 +9,8 @@ const ConnectorConfigurationID = "active"
 
 // ConnectorConfiguration is the active connector configuration epoch.
 // One catalog row. Not a hot execution table, and not registered in
-// hotPathModels()/hotTables. Startup does not enforce the epoch; that is C1.
+// hotPathModels()/hotTables. Startup reads the row when the gate is on and
+// does not compare fingerprints. Comparison is C1.
 type ConnectorConfiguration struct {
 	ID          string    `gorm:"type:text;primaryKey" json:"id"`
 	Fingerprint string    `gorm:"type:text;not null" json:"fingerprint"`
