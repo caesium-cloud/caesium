@@ -10,8 +10,10 @@ import (
 var providerName = regexp.MustCompile(`^[a-z][a-z0-9_-]*$`)
 
 // ValidateGlob checks a provider/path rule. Providers are exact names. Each path
-// segment follows path.Match syntax; a whole "**" segment matches zero or more
-// segments. Neither patterns nor targets are cleaned or otherwise normalised.
+// segment follows path.Match syntax; a whole unescaped "**" segment matches zero
+// or more segments. In other segments, repeated stars, escapes and character
+// classes retain path.Match semantics within that segment. Neither patterns nor
+// targets are cleaned or otherwise normalised.
 func ValidateGlob(pattern string) error {
 	provider, rest, ok := strings.Cut(pattern, "/")
 	if !ok || !providerName.MatchString(provider) || rest == "" {
@@ -23,9 +25,6 @@ func ValidateGlob(pattern string) error {
 		}
 		if segment == "**" {
 			continue
-		}
-		if strings.Contains(segment, "**") {
-			return fmt.Errorf("invalid secret glob %q: ** must be a whole path segment", pattern)
 		}
 		if _, err := path.Match(segment, ""); err != nil {
 			return fmt.Errorf("invalid secret glob %q: %w", pattern, err)

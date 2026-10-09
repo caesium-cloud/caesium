@@ -44,6 +44,19 @@ func TestMatchGlob(t *testing.T) {
 		{`env/TOKEN_\*`, "env/TOKEN_*", true},
 		{`env/TOKEN_\*`, "env/TOKEN_x", false},
 		{"env/TOKEN_[*]", "env/TOKEN_*", true},
+		{`vault/secret/data/star\**`, "vault/secret/data/star*token", true},
+		{`vault/secret/data/star\**`, "vault/secret/data/startoken", false},
+		{`vault/secret/data/star\**`, "vault/secret/data/star*token/other", false},
+		{"vault/secret/data/[**]", "vault/secret/data/*", true},
+		{"vault/secret/data/[**]", "vault/secret/data/token", false},
+		{`vault/\**/token`, "vault/*suffix/token", true},
+		{`vault/\**/token`, "vault/token", false},
+		{`vault/\**/token`, "vault/*suffix/other/token", false},
+		{"env/foo**", "env/foobar", true},
+		{"env/foo**", "env/foobar/other", false},
+		{"env/**foo", "env/prefixfoo", true},
+		{"env/***", "env/token", true},
+		{"env/***", "env/nested/token", false},
 		{"env/token", "env/token", true},
 		{"env/token", "env/TOKEN", false},
 		{"env/*", "ENV/token", false},
@@ -58,6 +71,7 @@ func TestMatchGlob(t *testing.T) {
 	} {
 		t.Run(tc.pattern+" matches "+tc.target, func(t *testing.T) {
 			t.Parallel()
+			require.NoError(t, policy.ValidateGlob(tc.pattern))
 			matched, err := policy.MatchGlob(tc.pattern, tc.target)
 			require.NoError(t, err)
 			require.Equal(t, tc.want, matched)
@@ -70,7 +84,6 @@ func TestInvalidGlobs(t *testing.T) {
 	for _, pattern := range []string{
 		"", "env", "env/", "/token", "*/token", "Env/token", "secret://env/token",
 		"env//token", "env/token/", "env/[", "env/[]", "env/[z-a", `env/token\`,
-		"env/foo**", "env/**foo", "env/***", "env/first/**last",
 	} {
 		t.Run(pattern, func(t *testing.T) {
 			t.Parallel()
