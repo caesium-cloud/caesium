@@ -191,6 +191,10 @@ func openConnection(databaseName string, createForeignKeyConstraints bool) (*gor
 // the same dqlite database serves concurrent reads. Contention retry wraps each
 // underlying pool.
 func installDqliteReadWriteSplit(conn *gorm.DB, databaseName string, readMaxOpen, readMaxIdle int) error {
+	if pool, already := conn.ConnPool.(*rwSplitConnPool); already {
+		installConnPool(conn, pool)
+		return nil
+	}
 	writeDB, err := conn.DB()
 	if err != nil {
 		return err
@@ -204,7 +208,7 @@ func installDqliteReadWriteSplit(conn *gorm.DB, databaseName string, readMaxOpen
 	}
 	configureConnectionPool(readDB, readMaxOpen, readMaxIdle)
 
-	conn.ConnPool = newRWSplitConnPool(writeDB, readDB)
+	installConnPool(conn, newRWSplitConnPool(writeDB, readDB))
 	return nil
 }
 
