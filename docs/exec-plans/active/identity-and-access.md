@@ -80,50 +80,39 @@ Item checkboxes remain unchecked until merged acceptance evidence exists.
 ### Wave 1 — Foundations (2026-10-09)
 
 - **W1-α / A1 — policy package:** draft [PR #624](https://github.com/caesium-cloud/caesium/pull/624),
-  head `28586d80be0940132818b857f4de67cb46f109d4`. Independent review passed after
-  two edge-case fixes. Containerized `just lint` and race-enabled `just unit-test`
-  passed (policy coverage 99.5%). Fresh-image local integration failed first at
-  `TestRunConcurrencyStrategies/queue_reclaims_stale_claim`, followed by database
-  lock/transaction errors in later writes. Current-head hosted CI, including
-  coverage-ratchets and `ci-ok`, passed. The unchanged base passed the same full
-  local command (269 scenarios passed, 41 lane-specific skips). Actual-SQL probes
-  confirm existing base DB pool defects, but do not establish the original
-  failure's cause. Exact-head local integration revalidation passed in 886.772s
-  (269 passed, 41 lane-specific skips). The initial failed run remains recorded.
-  A fresh current-head review posted 13 threads, including three P1 candidates;
-  email comparison, path traversal and Vault field matching are being corrected.
-  A1 returned to draft while the new findings are adjudicated and revalidated.
+  head `4417f69ddc1be034674d304ed2fee03ba44b2ed3`. Independent security review
+  passed after email-confusable, traversal, Vault delimiter and strict YAML fixes.
+  Current-head container tests and hosted CI are being refreshed. A2/C4 follow-up
+  obligations are recorded below; existing review threads await human review.
+  At preceding `28586d80`, local lint/race unit tests and hosted CI passed. The
+  first local integration failed at queue reclaim with later DB lock/transaction
+  errors; unchanged base and exact-head revalidation passed (269 passed, 41
+  lane-specific skips; recheck 886.772s). Original failed evidence is preserved;
+  the confirmed base pool defects do not establish its causal chain.
 - **W1-β / B1 — namespace persistence and cache identity:** draft
   [PR #625](https://github.com/caesium-cloud/caesium/pull/625), head
-  `41e0cb0d0019bdb512e5d52168a615a952dabf1c`. Focused changed-package regressions,
-  generated schema guardrail and integration compilation passed. Independent
-  review passed after exported-manifest and migration collision fixes. Strict
-  incident constraints and the coordinated upgrade guidance travel together in
-  this PR. Container-built CLI lint passed all 30 example manifests; generated
-  schema guardrail passed. CI's brittle resource-filter ordering assertion was
-  replaced with actual scenario matching and five focused guard tests passed.
-  Final-candidate `just lint`, race-enabled `just unit-test` and full fresh-image
-  integration passed (801.740s; 272 passed, 41 lane-specific skips). Hosted logs
-  explicitly prove the three new scenarios across Docker amd64/arm64, Podman,
-  Kubernetes and distributed execution (15 combinations, zero skips). Populated
-  native-dqlite upgrade remains pending after two harness failures before catalog
-  population (image inspection and old-server voter configuration); both were
-  corrected and owned resources cleaned. Hosted coverage-ratchets and `ci-ok`
-  failed in run `37936353731`: three eligible changed files have zero observed
-  counters. Real schema-CLI and incident-lifecycle coverage is being added while
-  preserving the coverage floor. B1 remains draft until these gates are resolved.
-  The preceding candidate's integration run was interrupted for review fixes.
-- **Separately authorized DB repair:** actual-SQL probes confirmed base-revision
-  retry/split installers bypass GORM's active pool and returning mutations can
-  reach the reader once the split is enabled. A local repair passed the package
-  race suite and independent review at `839e8e0c01f947eb679df9dfd5c155c8b7158602`;
-  draft [PR #626](https://github.com/caesium-cloud/caesium/pull/626) is published and
-  hosted CI including `ci-ok`, both architecture unit suites and lint passed;
-  local package race tests passed. Full local integration is running. A fresh
-  current-head review posted four threads; the missing fresh-installer regression
-  and related test/documentation corrections are being prepared.
-  It does not change A1/B1 dependencies or establish the integration failure's
-  causal chain.
+  `e5380a79a5a05ff307cbf5ede9d855daffc67c5d`. Independent review passed after
+  correcting namespace-only CLI/REST/approval diffs and explaining unsafe replay
+  refusal. Real schema CLI, namespace incident recovery, and enhanced cache/diff/
+  replay journeys are required by coverage; ten selection guard tests passed.
+  All coverage floors remain unchanged. Current-head runtime gates and CI are
+  being refreshed. At preceding `41e0cb0d`, full local lint/race unit/integration
+  passed (801.740s; 272 passed, 41 lane-specific skips), schema/examples passed,
+  and hosted logs proved 15 namespace scenario/engine combinations without skips.
+  That head's coverage failed on three changed files; the new journeys and removal
+  of an unused model formatter address those gaps. Native-dqlite populated upgrade
+  remains pending after two corrected harness failures before population; owned
+  resources were cleaned. Strict constraints and coordinated upgrade guidance
+  travel together in this PR.
+- **Separately authorized DB repair:** draft [PR #626](https://github.com/caesium-cloud/caesium/pull/626),
+  head `a8e92a34f9975dc9f847722c6184f8847f709da1`. Independent review passed after
+  adding a fresh-installer regression, removing unnecessary reinstallation logic,
+  and hardening routing tests/fixtures/documentation. Actual SQL detects a deliberate
+  Config-only wiring mutation; restored package race tests and vet passed. Full
+  local lint and race unit tests passed; fresh-image integration and current-head
+  hosted CI are running. The preceding `839e8e0c` passed all hosted checks and full
+  local integration (822.055s; 269 passed, 41 lane-specific skips). This repair does
+  not change identity dependencies or prove the original failure's causal chain.
 - **A2 and D3:** not dispatched. A2 requires A1 to land; D3 requires B1 to land.
   The suggested W1 includes these follow-ups, but the review-PR endpoint leaves
   them pending until their prerequisite PRs merge. H-1, H-2, and N-1 require A4.
@@ -162,8 +151,10 @@ translated into cluster-wide bindings and behaviour is unchanged.
       `namespaces`), YAML parse, validation per spec §6.2 (DNS-label namespaces, `*`
       rejected as a key, declared-namespace check on bindings, role validity,
       non-empty subjects), `Resolve(groups, email) Grants` (highest role per namespace,
-      `"*"` group wildcard, case-insensitive email), the `provider/path` glob matcher
-      with `*` and `**`, and lint warnings (non-`default` namespace without secret
+      `"*"` group wildcard, ASCII-case-insensitive email with non-ASCII bytes exact),
+      the `provider/path` glob matcher with `*` and `**`, rejecting dot traversal;
+      Vault path rules cover every field of the selected secret. Lint warnings
+      cover non-`default` namespaces without secret
       rules). Pure package, table-driven unit tests, no wiring.
       Files: new `internal/auth/policy/policy.go`, new `internal/auth/policy/resolve.go`,
       new `internal/auth/policy/glob.go`, new `internal/auth/policy/policy_test.go`.
@@ -174,6 +165,11 @@ translated into cluster-wide bindings and behaviour is unchanged.
       `CAESIUM_AUTH_DEFAULT_ROLE` into cluster-wide bindings when no policy file is set
       (`rolemap.go` becomes that translation); update the two readers of
       `Principal.Role` (middleware metrics/audit label, whoami) to the cluster role.
+      Policy groups remain byte-exact; the no-policy env adapter trims incoming
+      groups to preserve `RoleMapper.Resolve` behavior. Only trusted/verified
+      provider email may reach email bindings; unverified email passes as empty,
+      with the trust state preserved for per-request resolution. Tests must reject
+      an unverified OIDC email claiming an email-only admin binding.
       `User.Role` stays as "cluster role at last login" for the users list only.
       Own the login tail: `SSOService.Complete` (`internal/auth/provider.go`) calls
       `RoleMapper.Resolve(groups)` before provisioning; rewrite it to
@@ -335,6 +331,9 @@ middleware relies on.
       miss). Incident deduplication (`incident.DedupeKey`) gains the run's persisted
       namespace so a post-move failure opens a new incident in the new namespace.
       Offline `caesium job lint` validates syntax only.
+      Namespace-only moves also appear in the shared CLI/REST/approval metadata
+      diff, including omission moving a namespaced job to `default`. Unsafe
+      historical replay across a move fails closed with old/new namespace context.
       Files: `pkg/jobdef/definition.go`, `pkg/jobdef/definition_test.go`,
       `pkg/jobdef/schema.go`, `internal/jobdef/report/report.go`,
       `docs/job-schema-reference.md`, `internal/models/job.go`, `internal/models/run.go`,
@@ -351,13 +350,18 @@ middleware relies on.
       `pkg/db/{db,migrations,migrations_test}.go` (legacy namespace normalization),
       `justfile`, `scripts/test_ci.py` (distributed scenario selection and guard),
       new `test/cache_namespace_move_test.go`,
+      new `test/namespace_schema_doc_test.go`,
+      new `test/namespace_incident_lifecycle_test.go`,
+      `internal/jobdef/diff/` (namespace projection),
+      `scripts/coverage-journeys.sh`, `scripts/test_coverage_named_journeys.py`
+      (required real schema, incident and cache/diff/replay journeys),
       `internal/jobdef/exporter.go`, `docs/examples/`,
       `docs/caesium-job-llm-reference.md`, `docs/job-definitions.md`.
 - [ ] B2. Server-side namespace semantics: `POST /v1/jobdefs/lint` and apply reject an
       undeclared namespace (from the A4 policy holder) naming it; a namespace move keeps
       history (runs, receipts, incidents) on the original namespace and rewrites only
-      `jobs.namespace`; the apply preview lists namespaces touched; `caesium job diff`
-      shows a namespace change as a metadata diff. **Diff and lint baselines are
+      `jobs.namespace`; the apply preview lists namespaces touched. B1 supplies the
+      metadata namespace diff; B2 supplies its authorization semantics. **Diff and lint baselines are
       filtered**: `POST /v1/jobdefs/diff` compares against every persisted job
       (`jobdiff.LoadDatabaseSpecs`) and reports absent jobs as `removed`, so the
       baseline, the `removed` list and cross-job contract findings are restricted to
@@ -522,7 +526,14 @@ resolver refuses references outside the namespace's allow-list at lint and at ru
       — the env resolver honours `?name=` over the path (`env.go`) and Vault reads
       `?field=` (`vault.go`) — via a new `CanonicalTarget(ref)` on the `Resolver`
       interface (`env/<effective name>`, `vault/<mount>/<path>#<field>`,
-      `k8s/<namespace>/<secret>`), never by path alone. Returns `ErrSecretDenied` (redacted to `provider/<first segment>/…`). Wired
+      `k8s/<namespace>/<secret>`), derived from the provider's effective target,
+      including query overrides. Vault allow rules select the canonical secret
+      path and grant every field of that object; `#` is a reserved delimiter, so
+      decoded effective paths or fields containing it must be rejected before
+      matching. C4 expands relative `k8s/<secret>` rules against the mapped
+      Kubernetes namespace and pins `k8s/**` to that namespace in tests. Provider
+      aliases are canonicalized and unknown rule providers produce a lint error.
+      Returns `ErrSecretDenied` (redacted to `provider/<first segment>/…`). Wired
       at the executor and worker `ResolveContainerSpecSecretsWithIdentities` call
       sites, the HTTP trigger's per-job secret, and server-side `lint.CheckSecrets`;
       the executor runs the allow-check (parse + canonicalise + match, no resolution)
