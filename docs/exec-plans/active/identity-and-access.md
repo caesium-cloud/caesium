@@ -79,7 +79,7 @@ Item checkboxes remain unchecked until merged acceptance evidence exists.
 
 ### Wave 1 — Foundations (2026-10-09)
 
-- **W1-α / A1 — policy package:** draft [PR #624](https://github.com/caesium-cloud/caesium/pull/624),
+- **W1-α / A1 — policy package:** ready for review [PR #624](https://github.com/caesium-cloud/caesium/pull/624),
   head `28586d80be0940132818b857f4de67cb46f109d4`. Independent review passed after
   two edge-case fixes. Containerized `just lint` and race-enabled `just unit-test`
   passed (policy coverage 99.5%). Fresh-image local integration failed first at
@@ -88,7 +88,8 @@ Item checkboxes remain unchecked until merged acceptance evidence exists.
   coverage-ratchets and `ci-ok`, passed. The unchanged base passed the same full
   local command (269 scenarios passed, 41 lane-specific skips). Actual-SQL probes
   confirm existing base DB pool defects, but do not establish the original
-  failure's cause. Exact-head local integration revalidation is running.
+  failure's cause. Exact-head local integration revalidation passed in 886.772s
+  (269 passed, 41 lane-specific skips). The initial failed run remains recorded.
 - **W1-β / B1 — namespace persistence and cache identity:** draft
   [PR #625](https://github.com/caesium-cloud/caesium/pull/625), head
   `41e0cb0d0019bdb512e5d52168a615a952dabf1c`. Focused changed-package regressions,
@@ -98,8 +99,8 @@ Item checkboxes remain unchecked until merged acceptance evidence exists.
   this PR. Container-built CLI lint passed all 30 example manifests; generated
   schema guardrail passed. CI's brittle resource-filter ordering assertion was
   replaced with actual scenario matching and five focused guard tests passed.
-  Final-candidate full gates, populated-dqlite upgrade, live scenarios and hosted
-  CI remain pending. The preceding candidate's full lint
+  Final-candidate full gates are running; populated-dqlite upgrade, live scenarios
+  and hosted CI remain pending. The preceding candidate's full lint
   and unit suite passed; its integration run was interrupted for review fixes.
 - **Separately authorized DB repair:** actual-SQL probes confirmed base-revision
   retry/split installers bypass GORM's active pool and returning mutations can
@@ -119,7 +120,7 @@ Item checkboxes remain unchecked until merged acceptance evidence exists.
 
 | Stream | Scope | Priority | Status |
 |--------|-------|----------|--------|
-| A | Policy file, grants, principal, route classes, namespace-aware middleware, keys with namespaces, SSO-admin key management | **P0** | W1 A1 draft #624; A2 waits for A1 |
+| A | Policy file, grants, principal, route classes, namespace-aware middleware, keys with namespaces, SSO-admin key management | **P0** | W1 A1 ready #624; A2 waits for A1 merge |
 | B | `metadata.namespace` on jobs: schema, columns, importer, lint, apply/prune/move, git-sync allowlist, collection filtering, aggregate collapse | **P0** | W1 B1 draft #625 |
 | C | Runtime isolation: per-namespace Kubernetes namespace + service account, scoped secret resolution, Helm RBAC | P1 | Not started |
 | D | Run quota + round-robin fairness (#395 v1 slice); namespaced notification channels, policies, agent profiles | P1 | Not started |
