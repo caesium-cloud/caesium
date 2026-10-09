@@ -140,6 +140,24 @@ func MigrateNamespaceDefaults(conn *gorm.DB) error {
 		if err := tx.Select("id", "job_id", "task_name", "class", "namespace", "dedupe_key", "active_dedupe_key").Find(&incidents).Error; err != nil {
 			return err
 		}
+		// A partially migrated or otherwise invalid catalog can hold both the
+		// legacy and namespaced active keys for one incident identity. Do not
+		// merge or suppress either history: stop the upgrade with their IDs.
+		activeOwners := make(map[string]string, len(incidents))
+		for _, inc := range incidents {
+			if inc.ActiveDedupeKey == nil {
+				continue
+			}
+			key := *inc.ActiveDedupeKey
+			legacy := fmt.Sprintf("%s|%s|%s", inc.JobID, inc.TaskName, inc.Class)
+			if inc.DedupeKey == legacy && key == legacy {
+				key = fmt.Sprintf("%s|%s", models.NamespaceOrDefault(inc.Namespace), legacy)
+			}
+			if owner, exists := activeOwners[key]; exists {
+				return fmt.Errorf("db: namespace migration active dedupe key collision %q between incidents %s and %s; resolve the conflicting incident records before retrying", key, owner, inc.ID)
+			}
+			activeOwners[key] = inc.ID.String()
+		}
 		for _, inc := range incidents {
 			legacy := fmt.Sprintf("%s|%s|%s", inc.JobID, inc.TaskName, inc.Class)
 			if inc.DedupeKey != legacy {

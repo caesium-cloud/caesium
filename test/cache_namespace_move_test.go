@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -60,8 +61,8 @@ steps:
 	definition, err := schema.Parse([]byte(exported))
 	s.Require().NoError(err)
 	s.Equal("marketing", definition.Metadata.Namespace)
-	exportedDir := s.writeJobManifest(exported)
-	defer os.RemoveAll(exportedDir)
+	exportedDir := s.T().TempDir()
+	s.Require().NoError(os.WriteFile(filepath.Join(exportedDir, alias+".job.yaml"), []byte(exported), 0o644))
 	s.runCLI("job", "apply", "--path", exportedDir, "--server", s.caesiumURL)
 	again, stderr, err := s.runCLISeparate("job", "export", alias, "--server", s.caesiumURL)
 	s.Require().NoError(err, "re-export failed: %s", stderr)

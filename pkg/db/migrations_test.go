@@ -219,3 +219,31 @@ func TestNamespaceMigrationNormalizesOnlyUnsetOwnershipAcrossTables(t *testing.T
 func TestNamespaceMigrationFreshDatabaseIsNoOp(t *testing.T) {
 	require.NoError(t, MigrateNamespaceDefaults(openMigrationTestDB(t)))
 }
+
+func TestNamespaceMigrationFailsClosedOnActiveDedupeCollision(t *testing.T) {
+	conn := openMigrationTestDB(t)
+	require.NoError(t, conn.AutoMigrate(&legacyNamespaceIncident{}))
+	now := time.Now().UTC().Truncate(time.Second)
+	jobID := uuid.New()
+	legacyKey := fmt.Sprintf("%s|extract|unknown", jobID)
+	namespacedKey := "default|" + legacyKey
+	defaultNamespace := "default"
+	rows := []legacyNamespaceIncident{
+		{ID: uuid.New(), JobID: jobID, TaskName: "extract", Class: "unknown", Status: models.IncidentStatusOpen, DedupeKey: legacyKey, ActiveDedupeKey: &legacyKey, OpenedAt: now, CreatedAt: now, UpdatedAt: now},
+		{ID: uuid.New(), Namespace: &defaultNamespace, JobID: jobID, TaskName: "extract", Class: "unknown", Status: models.IncidentStatusOpen, DedupeKey: namespacedKey, ActiveDedupeKey: &namespacedKey, OpenedAt: now, CreatedAt: now, UpdatedAt: now},
+	}
+	require.NoError(t, conn.Create(&rows).Error)
+	var before []legacyNamespaceIncident
+	require.NoError(t, conn.Order("id").Find(&before).Error)
+	for range 2 {
+		err := MigrateNamespaceDefaults(conn)
+		require.ErrorContains(t, err, "namespace migration active dedupe key collision")
+		require.ErrorContains(t, err, namespacedKey)
+		for _, row := range rows {
+			require.ErrorContains(t, err, row.ID.String())
+		}
+		var after []legacyNamespaceIncident
+		require.NoError(t, conn.Order("id").Find(&after).Error)
+		require.Equal(t, before, after, "failed migration must roll back namespace repair and retain both active histories")
+	}
+}
