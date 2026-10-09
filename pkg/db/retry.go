@@ -292,10 +292,12 @@ func installConnPool(db *gorm.DB, pool gorm.ConnPool) {
 // Plain autocommit SELECTs go to the read pool; QueryContext and QueryRowContext
 // also carry mutations (including INSERT ... RETURNING), which use the writer.
 // ReadOnly transactions also use the read pool. ExecContext, writable
-// transactions, and prepared statements use the write pool. Reads issued inside
-// a transaction run on its own connection, and other goroutines' reads use the
-// read pool — so no goroutine needs two connections from one pool, avoiding the
-// single-connection deadlock.
+// transactions, and prepared statements use the write pool. Reads issued on a
+// transaction handle use its own connection; plain SELECTs on the outer handle
+// use the read pool. Writer-routed reads on the outer handle inside a writable
+// transaction can deadlock waiting for that transaction's single connection.
+// An open cursor from a writer-routed query also blocks subsequent writes until
+// it is drained or closed.
 type rwSplitConnPool struct {
 	write *retryConnPool
 	read  *retryConnPool
