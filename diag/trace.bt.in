@@ -1,0 +1,25 @@
+// DIAG ONLY (never merged). ARG is replaced with "args->" or "args." to suit
+// the runner's bpftrace. Paths of container cgroups carry the container ID.
+tracepoint:oom:mark_victim
+{
+    printf("T %llu victim pid=%d comm=%s\n", nsecs, ARGpid, str(ARGcomm));
+}
+tracepoint:cgroup:cgroup_notify_populated
+{
+    printf("T %llu populated=%d path=%s by=%s\n", nsecs, ARGval, str(ARGpath), comm);
+}
+tracepoint:cgroup:cgroup_rmdir
+{
+    printf("T %llu rmdir path=%s by=%s pid=%d\n", nsecs, str(ARGpath), comm, pid);
+}
+tracepoint:syscalls:sys_enter_openat
+/comm == "containerd-shim" || comm == "conmon"/
+{
+    @file[tid] = str(ARGfilename);
+}
+tracepoint:syscalls:sys_exit_openat
+/@file[tid] != ""/
+{
+    printf("T %llu open by=%s tid=%d ret=%d file=%s\n", nsecs, comm, tid, ARGret, @file[tid]);
+    delete(@file[tid]);
+}
