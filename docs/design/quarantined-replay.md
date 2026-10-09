@@ -3,9 +3,9 @@
 > Status: Shipped — implemented by data-plane-memory-ii Stream B (#233, #235, #240–#244); remains the authoritative safety-invariant spec for replay/backtest (originally the data-plane-memory-ii B1 design gate; the closed-loop arc's Plan 3 backtesting builds on these invariants).
 
 This memo is the B1 design gate for
-[`data-plane-memory-ii`](exec-plans/completed/data-plane-memory-ii.md). It fixes the
+[`data-plane-memory-ii`](../exec-plans/completed/data-plane-memory-ii.md). It fixes the
 replay safety model before B2-B6 add runtime code. It complements
-[`design-data-plane-memory.md`](design-data-plane-memory.md): that older design is
+[`data-plane-memory.md`](data-plane-memory.md): that older design is
 authoritative for the shipped substrate and honest-scope rules, while this memo
 and the active plan are authoritative for replay quarantine, idempotency,
 side-effect suppression, observability isolation, and the `replaySafe` gate.

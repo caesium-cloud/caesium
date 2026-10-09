@@ -55,7 +55,7 @@ For drafting new plans in this same shape, see
   - "When this plan and `docs/roadmap.md` disagree, the roadmap wins."
   - "When this plan and `pkg/jobdef/definition.go` disagree, the schema
     wins."  (job-definition / YAML-contract plans)
-  - "When this plan and `docs/superpowers/specs/<spec>.md` disagree, the
+  - "When this plan and `docs/design/<date>-<topic>-design.md` disagree, the
     spec wins."
   - "When this plan and `<sibling-plan>.md` disagree, the sibling wins."
   - Plus: any per-stream cross-link rule (e.g. "Stream X is owned by
@@ -230,8 +230,8 @@ The plan is done when **all** of these hold:
   entries:
   - docs/roadmap.md
   - sibling exec plans (docs/exec-plans/active/*.md)
-  - design docs the plan promotes / consumes (docs/design-*.md)
-  - superpowers specs (docs/superpowers/specs/*.md)
+  - design records the plan promotes / consumes (docs/design/*.md)
+  - dated specs (docs/design/<date>-<topic>-design.md)
   - the job-definition schema (pkg/jobdef/definition.go) for YAML-contract plans
   - runbooks / operator docs the plan adds or extends
 -->

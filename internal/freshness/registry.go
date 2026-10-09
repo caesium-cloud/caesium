@@ -95,7 +95,7 @@ func BuildDeclarations(def *schema.Definition, jobID uuid.UUID, jobAlias string)
 				watermarkKey = strings.TrimSpace(p.Watermark.Key)
 			}
 			// The data-circuit-breaker spec rides the SAME registry row as the
-			// freshness SLO (design-data-circuit-breaker.md: one registry, no
+			// freshness SLO (docs/design/data-circuit-breaker.md: one registry, no
 			// private copy), so it is rebuilt from the manifest on every apply
 			// exactly like the schema and SLO columns.
 			assertionsJSON, err := marshalAssertions(p.Assertions)

@@ -1,5 +1,5 @@
 # Terraform infrastructure deployment via the unit-pipeline pattern
-# (docs/superpowers/specs/2026-08-25-dag-native-infrastructure-deployment-design.md).
+# (docs/design/2026-08-25-dag-native-infrastructure-deployment-design.md).
 # Three stacks (network, account, app-web) deployed in dependency order, with
 # unchanged stacks skipped and the provider set warmed once.
 #

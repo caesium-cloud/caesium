@@ -1,6 +1,6 @@
 # Design: Parallel Job Execution
 
-> Status: Implemented with some historical branch references retained below. For day-to-day operations, prefer [parallel-execution-operations.md](parallel-execution-operations.md).
+> Status: Implemented with some historical branch references retained below. For day-to-day operations, prefer [parallel-execution-operations.md](../distributed-execution.md).
 
 ## Status
 
@@ -76,7 +76,7 @@ Implemented on branch `codex/phase3-4-3-5-polish`:
   - DAG nodes render worker attribution metadata when a task is claimed by a node.
   - Task detail panels show `Claimed By` for the selected task.
 - Phase 3.5 configuration and operations documentation:
-  - Added a dedicated distributed parallel execution operations guide (`docs/parallel-execution-operations.md`).
+  - Added a dedicated distributed parallel execution operations guide (`docs/distributed-execution.md`).
   - Updated embedded UI docs to clarify that DAG nodes surface worker-node attribution.
 
 Not yet complete:

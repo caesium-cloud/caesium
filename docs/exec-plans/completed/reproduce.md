@@ -56,7 +56,7 @@ For drafting new plans in this same shape, see
 
 ## Source-Of-Truth Note
 
-When this plan and [`docs/design-reproduce.md`](../../design-reproduce.md)
+When this plan and [`docs/design/reproduce.md`](../../design/reproduce.md)
 disagree, **the design doc wins** — it is authoritative for the feature's intent,
 scope, the faithful-vs-best-effort fidelity contract (the table under "What
 Reproduces Faithfully vs Best-Effort"), the exit-code semantics, the
@@ -197,7 +197,7 @@ verify/publish/merge:
 
 Docs-only closing stream:
 
-- **W5-ν (N-1)** — the docs now match reality: `docs/design-reproduce.md`
+- **W5-ν (N-1)** — the docs now match reality: `docs/design/reproduce.md`
   banner flipped to Shipped/active (PRs #334–#340), the roadmap Phase 4 row
   carries the `**Shipped.**` idiom, the `docs/README.md` design bullet flipped
   (exec-plan ref kept in backtick form per the README guardrail), and a new
@@ -205,8 +205,8 @@ Docs-only closing stream:
   table (mirrored from `cmd/reproduce/reproduce.go`), exit codes 0/1/2/3, the
   per-dimension fidelity contract, secrets behavior, and `--image` OVERRIDDEN
   semantics — indexed in the README. Cross-links landed in both consuming
-  siblings: `design-agent-in-the-loop.md` gains the escalation repro
-  one-liner, `design-backtesting.md` notes the shared `internal/outputdiff`
+  siblings: `design/agent-in-the-loop.md` gains the escalation repro
+  one-liner, `design/backtesting.md` notes the shared `internal/outputdiff`
   comparator shipped in C1. Review: gemini caught a genuinely missing warning
   code (`predecessor_output_missing_name`) in the new doc — added. PR #341.
 
@@ -456,7 +456,7 @@ on the shared command file — see conflicts).
 
 ## Navigational / Organizational Improvements
 
-- [x] N-1. Flip the [`docs/design-reproduce.md`](../../design-reproduce.md)
+- [x] N-1. Flip the [`docs/design/reproduce.md`](../../design/reproduce.md)
       `> Status:` banner from "Brainstorm/Design" to shipped/active and point it at
       this plan; update the `docs/roadmap.md` Phase 4 "Data-Plane Differentiators"
       table `caesium reproduce` row (line ~228) to add the plan link
@@ -465,13 +465,13 @@ on the shared command file — see conflicts).
       plan and flip its status; add a `caesium reproduce` CLI reference (flags, exit
       codes, the faithful-vs-best-effort fidelity contract) to the CLI/operator
       docs; and cross-link the two consuming siblings —
-      [`design-agent-in-the-loop.md`](../../design-agent-in-the-loop.md) (the
-      escalation repro one-liner) and [`design-backtesting.md`](../../design-backtesting.md)
+      [`design/agent-in-the-loop.md`](../../design/agent-in-the-loop.md) (the
+      escalation repro one-liner) and [`design/backtesting.md`](../../design/backtesting.md)
       (the shared `internal/outputdiff` compare primitive from C1). Keep the
       `docs/README.md` reference in backtick/inline-code form
       (`TestDocsREADMEIndexesEveryTopLevelDoc` rejects clickable subdirectory links).
       Runs last, after A–D ship, so the docs reflect reality.
-      Files: `docs/design-reproduce.md`, `docs/roadmap.md`, `docs/README.md`,
+      Files: `docs/design/reproduce.md`, `docs/roadmap.md`, `docs/README.md`,
       CLI/operator reference docs.
       Depends on: A–D (runs last).
       Note: W5-nu flipped the design/roadmap/README shipped status, added
@@ -600,13 +600,13 @@ The plan is done when **all** of these hold:
    reproduce scenarios drive the real CLI against the harness Docker daemon with
    stdout captured separately from stderr, so the A/B scenarios run against the live
    binary in CI, not an internal call.
-6. **N-1 — docs reflect reality:** the `docs/design-reproduce.md` `> Status:` banner
+6. **N-1 — docs reflect reality:** the `docs/design/reproduce.md` `> Status:` banner
    is flipped and points at this plan, the `docs/roadmap.md` Phase 4 `caesium
    reproduce` row links the plan, the `docs/README.md` design-index bullet is
    repointed (backtick form), the CLI reference documents the flags/exit-codes/
    fidelity contract, and the agent-in-the-loop and backtesting siblings are
    cross-linked.
-7. **Cross-cutting:** `docs/roadmap.md`, `docs/design-reproduce.md`, and this plan's
+7. **Cross-cutting:** `docs/roadmap.md`, `docs/design/reproduce.md`, and this plan's
    per-stream `## Progress` entries reflect every shipped stream and match the merged
    PRs. The three deferred design Open Questions (#1 pruned-descriptor messaging, #4
    `--shell-image` fallback, #5 explain integration) remain explicitly recorded as
@@ -631,19 +631,19 @@ The plan is done when **all** of these hold:
 
 ## Cross-References
 
-- [`docs/design-reproduce.md`](../../design-reproduce.md) — the design of record.
+- [`docs/design/reproduce.md`](../../design/reproduce.md) — the design of record.
   Source of truth for intent, scope, the fidelity contract, exit codes, and the
   security posture.
 - [`docs/roadmap.md`](../../roadmap.md) Phase 4 "Data-Plane Differentiators" — the
   `caesium reproduce` entry this plan promotes from design to shipped.
-- [`docs/design-quarantined-replay.md`](../../design-quarantined-replay.md) — the
+- [`docs/design/quarantined-replay.md`](../../design/quarantined-replay.md) — the
   server-side ancestor; reproduce reuses its descriptor decode/validation and
   env/hash reconstruction (`internal/replay/replay.go`) and inherits the
   never-store-secret-values invariant, but discards the quarantine machinery.
-- [`design-backtesting.md`](../../design-backtesting.md) /
+- [`design/backtesting.md`](../../design/backtesting.md) /
   [`backtesting.md`](../active/backtesting.md) — the N-run sibling that consumes the shared
   `internal/outputdiff` compare primitive built in C1.
-- [`design-agent-in-the-loop.md`](../../design-agent-in-the-loop.md) /
+- [`design/agent-in-the-loop.md`](../../design/agent-in-the-loop.md) /
   [`agent-in-the-loop-remediation.md`](agent-in-the-loop-remediation.md) — every
   diagnosed page appends a `caesium reproduce … --diff` one-liner.
 - `internal/models/run.go` (`TaskExecutionDescriptor`), `internal/run/store.go`

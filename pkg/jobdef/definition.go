@@ -354,7 +354,7 @@ const (
 	DatasetSchemaFromOutput = "output"
 )
 
-// Data-assertion dispatch and release constants (design-data-circuit-breaker.md).
+// Data-assertion dispatch and release constants (docs/design/data-circuit-breaker.md).
 // They are the canonical values persisted on the DatasetDeclaration registry and
 // read by the post-task assertion evaluator.
 const (
@@ -461,7 +461,7 @@ type ProducedDataset struct {
 	Watermark *Watermark `yaml:"watermark,omitempty" json:"watermark,omitempty"`
 	// Assertions is the declared data-quality contract the post-task evaluator
 	// checks the step's emitted ##caesium::metrics against
-	// (design-data-circuit-breaker.md). Like the SLO fields it is post-task
+	// (docs/design/data-circuit-breaker.md). Like the SLO fields it is post-task
 	// evaluation metadata and never enters the cache identity hash.
 	Assertions *DatasetAssertions `yaml:"assertions,omitempty" json:"assertions,omitempty"`
 	// OnViolation dispatches an assertion violation: warn | fail | hold.
@@ -663,7 +663,7 @@ var remediationClasses = map[string]struct{}{
 
 // Remediation action names accepted by metadata.remediation.autonomy.allow,
 // .perClass[].allow, and .requireApproval. These name the typed action
-// catalog docs/design-agent-in-the-loop.md defines for Stream B's executor
+// catalog docs/design/agent-in-the-loop.md defines for Stream B's executor
 // (tier 1/2 autonomous actions, tier-3 approval-gated producers, plus the
 // terminal `escalate`); pkg/jobdef validates job-declared policy names
 // against this list without depending on Stream B's executor package.
@@ -890,7 +890,7 @@ type RemediationEscalation struct {
 }
 
 // MetadataRemediation is the job-level opt-in to autonomous incident
-// remediation (docs/design-agent-in-the-loop.md "Declarative policy"). It is
+// remediation (docs/design/agent-in-the-loop.md "Declarative policy"). It is
 // policy metadata enforced server-side by the incident manager and executor
 // (Streams A-D); it never participates in step-execution cache identity.
 type MetadataRemediation struct {

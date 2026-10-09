@@ -24,7 +24,7 @@ The following table compares Caesium against the open-core data orchestrators en
 | **Single binary / zero external deps** | **Yes** (Go binary + embedded dqlite) | No (Postgres required) | No (JVM + Postgres + Redis) | No (Postgres + Redis) | No (Postgres + broker + executor) |
 | **Air-gapped / offline operation** | **Yes** (no outbound network required at runtime) | No (control plane phones home) | No (JVM telemetry; external DB) | No (cloud-first architecture) | Possible, but multi-process complexity |
 | **Self-hosted with no vendor account** | **Yes** | OSS tier (limited features) | OSS tier (limited features) | Limited (some features require account) | Yes |
-| **Data-plane memory (explain/reproduce/skip)** | Free (shipped; `caesium why`, reproducibility receipts, value-verified skip — see [`design-data-plane-memory.md`](design-data-plane-memory.md)) | Paid (Dagster+ Insights) | Not available | Not available | Not available |
+| **Data-plane memory (explain/reproduce/skip)** | Free (shipped; `caesium why`, reproducibility receipts, value-verified skip — see [`design/data-plane-memory.md`](design/data-plane-memory.md)) | Paid (Dagster+ Insights) | Not available | Not available | Not available |
 
 ### What this means in practice
 
@@ -74,7 +74,7 @@ curl -fsSL https://github.com/caesium-cloud/caesium/releases/latest/download/cae
 On the air-gapped host, no configuration is required for a single-node deployment:
 
 ```bash
-caesium server
+caesium start
 ```
 
 Caesium creates its embedded dqlite database at `/var/lib/caesium/dqlite` (override with `CAESIUM_DATABASE_PATH`) and starts listening on port 8080. No Postgres, no Redis, no Kafka, no network egress.
@@ -112,7 +112,7 @@ Images must be reachable from the host. In an air-gapped environment, either:
 - Use images already present on the host / in a local registry, or
 - Pre-load images into Docker/Podman before starting (see [Air-Gapped Kubernetes Notes](kubernetes-deployment.md#air-gapped-deployment-notes) for the Kubernetes path).
 
-For image digest pinning in air-gapped environments, see [`cache.pinDigests`](design-data-plane-memory.md) — this ensures the cache key is computed from a content-addressed digest rather than a mutable tag, which matters for regulated environments where reproducibility is auditable.
+For image digest pinning in air-gapped environments, see [`cache.pinDigests`](design/data-plane-memory.md) — this ensures the cache key is computed from a content-addressed digest rather than a mutable tag, which matters for regulated environments where reproducibility is auditable.
 
 ### Step 4: Validate and deploy the job
 
@@ -135,7 +135,7 @@ For a resilient 3-node cluster — still with no external dependencies — copy 
 # On each node, set this node's own address and the full peer list
 export CAESIUM_NODE_ADDRESS="node1:9001"        # this node's dqlite listen address
 export CAESIUM_DATABASE_NODES="node1:9001,node2:9001,node3:9001"
-caesium server
+caesium start
 ```
 
 All three nodes use embedded dqlite with RAFT consensus. No external coordinator required.
@@ -171,7 +171,7 @@ ssh user@airgapped-host "systemctl restart caesium"
 
 ## Related Documents
 
-- [`differentiation-strategy.md`](differentiation-strategy.md) — the full positioning thesis: why sovereignty sells by constraint, not comparison, and the kill-conditions that test the thesis.
+- [`design/differentiation-strategy.md`](design/differentiation-strategy.md) — the full positioning thesis: why sovereignty sells by constraint, not comparison, and the kill-conditions that test the thesis.
 - [`kubernetes-deployment.md`](kubernetes-deployment.md) — Helm-based Kubernetes deployment, including air-gapped cluster notes.
-- [`design-data-plane-memory.md`](design-data-plane-memory.md) — the data-plane memory substrate: `caesium why`, reproducibility receipts, and value-verified skip — the "second act" differentiator within sovereignty.
+- [`design/data-plane-memory.md`](design/data-plane-memory.md) — the data-plane memory substrate: `caesium why`, reproducibility receipts, and value-verified skip — the "second act" differentiator within sovereignty.
 - [`sso-authentication.md`](sso-authentication.md) — native OIDC, SAML, and LDAP SSO configuration.

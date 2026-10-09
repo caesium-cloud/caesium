@@ -6,8 +6,8 @@ This document consolidates early design notes that informed Caesium's direction.
 
 For current behavior, use:
 
-- [job-definitions.md](job-definitions.md)
-- [job-schema-reference.md](job-schema-reference.md)
+- [job-definitions.md](../job-definitions.md)
+- [job-schema-reference.md](../job-schema-reference.md)
 - [job-definition-plan.md](job-definition-plan.md)
 
 ## Core Design Intent

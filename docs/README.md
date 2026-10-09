@@ -1,96 +1,85 @@
-# Caesium Documentation
+# Caesium documentation
 
-This directory separates how to use Caesium today from the design records
-that explain why it's built the way it is. Completed, shipped, superseded,
-and historical records have been moved out of the active set into
-[`archive/`](archive/README.md).
+New here? Start with [getting-started.md](getting-started.md). The rest is
+grouped by what you are trying to do. Guides describe how Caesium behaves
+today. Design records and execution plans explain why it is built the way it
+is and what is still in flight; they are not operator documentation.
 
-## Use Caesium
+## Author pipelines
 
-Operator documentation, tours, and references for running Caesium and
-authoring pipelines against a real server.
+| Guide | What it covers |
+| --- | --- |
+| [getting-started.md](getting-started.md) | Install the CLI, run a server, write and run a job, ask `why`, get a receipt. |
+| [job-definitions.md](job-definitions.md) | The authoring reference: DAG wiring, branching, dynamic fan-out, scheduling controls, caching, contracts, freshness, volumes, secrets, Git sync, lint / diff / apply. |
+| [job-schema-reference.md](job-schema-reference.md) | Field-by-field schema generated from `pkg/jobdef` by `caesium job schema --doc`. Do not edit by hand. |
+| [caesium-job-llm-reference.md](caesium-job-llm-reference.md) | Compact authoring reference for coding assistants, plus the executable harness scenario format. |
+| [backfill.md](backfill.md) | Backfills over cron intervals through the API, CLI, and console. |
+| [reproduce.md](reproduce.md) | `caesium reproduce`: rebuild one historical task on your own Docker daemon. |
+| [temporal.md](temporal.md) | Driving Caesium jobs from Temporal workflows over the REST API. |
+| [infrastructure-deployment.md](infrastructure-deployment.md) | Terraform stacks (or any unit-pipeline tool) as dependency-ordered DAGs using the reagent images. |
+| [examples/](examples/) | Example manifests loaded by `just hydrate` and exercised by the conformance tests. [examples-k8s/](examples-k8s/) holds the `engine: kubernetes` variants. |
 
-### Get Started
+## Run and operate a server
 
-- [getting-started.md](getting-started.md): Install the CLI, run the server, write and validate a job, apply it, trigger a run, and interrogate it with `why` and a reproducibility receipt.
+| Guide | What it covers |
+| --- | --- |
+| [rest-api.md](rest-api.md) | REST endpoints, auth endpoints, the SSE event stream, and the gated operator consoles. |
+| [sso-authentication.md](sso-authentication.md) | API keys, roles, and native OIDC / SAML / LDAP sign-in. |
+| [distributed-execution.md](distributed-execution.md) | Execution modes, every worker and dqlite environment variable, run-owner mode, Raft log retention, database sharding, troubleshooting. |
+| [kubernetes-deployment.md](kubernetes-deployment.md) | The Helm chart, three-node Raft clusters, Kueue delegation, backup and member replacement, air-gapped notes. |
+| [sovereignty.md](sovereignty.md) | The air-gapped quickstart and the free-versus-paywalled comparison with other orchestrators. |
+| [open-lineage.md](open-lineage.md) | OpenLineage event emission, facets, and transports. |
+| [connectors.md](connectors.md) | Execution connectors. In progress, not shipped: records the frozen configuration contract. |
+| [upgrade-notes.md](upgrade-notes.md) | Behavior changes to read before upgrading. |
+| [ci.md](ci.md) | The CI runbook: required-to-merge checks, the job matrix, per-lane server env parity, and the release procedure. |
 
-### Operator Reference
+## Direction
 
-- [upgrade-notes.md](upgrade-notes.md): Upgrade compatibility notes, including dataset identities written under escaped names.
-- [job-definitions.md](job-definitions.md): Authoring, linting, diffing, schema tooling, Git sync, and operational controls for job manifests.
-- [operator-console-polish.md](operator-console-polish.md): PR #617 visual polish, finding dispositions, screenshots, and qualification scope.
-- [operator-console-motion-audit.md](operator-console-motion-audit.md): Handoff comparison, timeline and motion restoration, screenshots, and validation limits.
-- [operator-console-facelift.md](operator-console-facelift.md): Console design, data availability, accessibility and local validation evidence.
-- [caesium-job-llm-reference.md](caesium-job-llm-reference.md): LLM authoring guide plus executable harness scenario format, including metrics and OpenLineage assertions.
-- [job-schema-reference.md](job-schema-reference.md): Generated schema reference from `pkg/jobdef`.
-- [backfill.md](backfill.md): Backfill behavior across API, CLI, and UI.
-- [parallel-execution-operations.md](parallel-execution-operations.md): Distributed execution configuration, rollout, and troubleshooting.
-- [ci.md](ci.md): CI runbook — required-to-merge vs. required-to-publish status checks, the job matrix, per-lane server env, and the release procedure for `v*` tags.
-- [sso-authentication.md](sso-authentication.md): Native OIDC, SAML, and LDAP SSO configuration.
-- [database-sharding.md](database-sharding.md): Phase 4 database shard layout, routing contract, and constraints.
-- [open_lineage.md](open_lineage.md): OpenLineage configuration, transports, and observability.
-- [reproduce.md](reproduce.md): Operator reference for `caesium reproduce` flags, exit codes, fidelity, image overrides, and local secret resolution.
-- [kubernetes-deployment.md](kubernetes-deployment.md): Deploying Caesium to Kubernetes with Helm.
-- [airflow-parity.md](airflow-parity.md): Implemented Airflow-style authoring and operator semantics.
-- [temporal.md](temporal.md): Driving Caesium from Temporal: an idempotent activity that starts a run and waits on it, event-routed starts, and handing off from a pipeline to a workflow.
-- [connectors.md](connectors.md): In progress, not shipped behavior. Provider-neutral connector configuration, the frozen v1 contract, fingerprint equality, `CAESIUM_CONNECTORS_CONFIG_PREVIOUS_FINGERPRINT` rollout, and mounting one file on every Helm replica with existing `config.extraEnv`, `extraVolumes`, and `extraVolumeMounts`.
-- [infrastructure-deployment.md](infrastructure-deployment.md): Dependency-ordered Terraform (and other unit-pipeline binding) deployment via `cache.chain: values` and the `caesiumcloud/{git-source,tf-discover,tf-warm,tf-runner}` reagent images.
-- [examples/](examples/): Example job manifests used by docs and conformance tests.
+- [roadmap.md](roadmap.md) is the design principles and the prioritised plan. When a plan and the roadmap disagree on priority, the roadmap wins.
+- [design/](design/) holds one design record per feature. Each starts with a `> Status:` banner saying whether it is proposed, active, or shipped, and links the plan that implements it.
+- [exec-plans/active/](exec-plans/active/) holds the plans being executed wave by wave with the `exec-plan-wave` skill; finished plans move to [exec-plans/completed/](exec-plans/completed/).
+- [archive/](archive/README.md) keeps shipped or superseded records that are no longer the source of truth, with a pointer to their live successor.
 
-### Load Testing
+### Design records
 
-- [load-testing-history.md](load-testing-history.md): Consolidated Phase 0 → Phase 2B distributed-execution load-test history (replaces the former per-run `load-baseline-*` series).
+| Record | Status |
+| --- | --- |
+| [differentiation-strategy.md](design/differentiation-strategy.md) | Positioning. Sovereignty-led, data-plane memory as the second act. |
+| [incremental-execution.md](design/incremental-execution.md) | Shipped. Content-addressed task cache and restart-from-failure. |
+| [event-triggers.md](design/event-triggers.md) | Shipped. Webhook triggers, event routing, trigger chaining. |
+| [concurrency-priority.md](design/concurrency-priority.md) | Shipped. Run concurrency strategies, priorities, rate limits. |
+| [airflow-parity.md](design/airflow-parity.md) | Mostly shipped. Tracks the remaining Airflow-style workstreams. |
+| [database-locking-fix.md](design/database-locking-fix.md) | Shipped through Phase 3. Phase 4 sharded write path in progress. |
+| [scaling-job-execution.md](design/scaling-job-execution.md) | Partially shipped. Run-owner coordination behind `CAESIUM_RUN_OWNER_ENABLED`. |
+| [data-plane-memory.md](design/data-plane-memory.md) | Shipped. The substrate behind `why`, receipts, lineage, and value-verified skip. |
+| [quarantined-replay.md](design/quarantined-replay.md) | Shipped. The fail-closed safety model for `run replay` and backtesting. |
+| [reproduce.md](design/reproduce.md) | Shipped. `caesium reproduce`. |
+| [dynamic-fanout.md](design/dynamic-fanout.md) | Shipped. Runtime partitions become parallel task instances. |
+| [freshness-scheduling.md](design/freshness-scheduling.md) | Shipped. Datasets, freshness SLOs, schedule on arrival. |
+| [contract-enforcement.md](design/contract-enforcement.md) | Shipped. Cross-job schema contracts checked at lint / diff / apply. |
+| [agent-in-the-loop.md](design/agent-in-the-loop.md) | Shipped runtime. Incident triage and approval-gated remediation. |
+| [data-circuit-breaker.md](design/data-circuit-breaker.md) | Active, Plan 1 of the closed-loop arc. Statistical assertions and dataset holds. |
+| [resource-right-sizing.md](design/resource-right-sizing.md) | Active, Plan 2. Learned requests and OOM retry escalation. |
+| [backtesting.md](design/backtesting.md) | Active, Plan 3. Replay a change over recorded production runs before merge. |
+| [window-scheduling.md](design/window-scheduling.md) | Active, Plan 4 (optional). Deadline windows instead of cron guesses. |
+| [2026-05-29-volumes-and-workload-identity-design.md](design/2026-05-29-volumes-and-workload-identity-design.md) | Shipped spec. Named volumes and Kubernetes workload identity. |
+| [2026-08-25-dag-native-infrastructure-deployment-design.md](design/2026-08-25-dag-native-infrastructure-deployment-design.md) | Shipped spec. The unit-pipeline pattern behind infrastructure-deployment.md. |
+| [2026-09-16-identity-and-access-design.md](design/2026-09-16-identity-and-access-design.md) | Active spec. Namespaces, grants, policy-as-code, corporate SSO. |
 
-## Design records
+### Active execution plans
 
-Positioning, in-flight designs, and the exec plans that implement them —
-where Caesium is going and why, not how to run it today.
+| Plan | Scope |
+| --- | --- |
+| [closed-loop-arc.md](exec-plans/active/closed-loop-arc.md) | Umbrella for Plans 0 to 4. Owns cross-plan ordering and shared conventions; not itself a wave target. |
+| [data-circuit-breaker.md](exec-plans/active/data-circuit-breaker.md) | Plan 1, the data loop: `##caesium::metrics`, assertions, holds, incidents. |
+| [resource-right-sizing.md](exec-plans/active/resource-right-sizing.md) | Plan 2, the compute loop: stats substrate, recommendations, OOM escalation. |
+| [backtesting.md](exec-plans/active/backtesting.md) | Plan 3, the proof loop: backtest proposals against recorded runs. |
+| [window-scheduling.md](exec-plans/active/window-scheduling.md) | Plan 4, the time loop. Optional tail of the arc. |
+| [distributed-testing.md](exec-plans/active/distributed-testing.md) | Cross-cutting: make a green `ci-ok` mean the distributed guarantees hold. 30 of 31 items done; F3 open on product findings. |
+| [identity-and-access.md](exec-plans/active/identity-and-access.md) | Namespaces, grants, policy file, Keycloak lane, `caesium login`. |
+| [execution-connectors.md](exec-plans/active/execution-connectors.md) | Temporal monitoring and declared operator actions. Planning only. |
 
-### Strategy & Roadmap
-
-- [differentiation-strategy.md](differentiation-strategy.md): Positioning thesis — the sovereignty-led funnel, why Caesium wins by constraint not comparison, and the kill-conditions that test it.
-- [sovereignty.md](sovereignty.md): Sovereignty proof-points — free vs. paywalled feature comparison (HA, RBAC, SSO, audit, lineage vs. Dagster+/Kestra Enterprise/Prefect Cloud) and a zero-dependency / air-gapped quickstart.
-- [roadmap.md](roadmap.md): Strategic vision, design principles, and the prioritized feature plan; Phase 5 is sequenced by the closed-loop arc listed under Active Exec Plans.
-
-### Active Design Records
-
-Forward-looking or partially-shipped designs with open work. Each carries a `> Status:` banner near the top; CI enforces banners on the planning/historical records it tracks.
-
-- [design-airflow-parity.md](design-airflow-parity.md): Airflow-parity workstreams — current shipped subset in `airflow-parity.md`; this tracks the remaining workstreams.
-- [design-event-triggers.md](design-event-triggers.md): HTTP webhook triggers, event-based routing, and trigger chaining (WS1–WS3 shipped; reconciliation tracked in `exec-plans/completed/event-trigger-routing.md`).
-- [design-concurrency-priority.md](design-concurrency-priority.md): Concurrency strategies, rate limiting, and priority-based scheduling (shipped; completed plan in `exec-plans/completed/concurrency-priority-queues.md`).
-- [design-database-locking-fix.md](design-database-locking-fix.md): dqlite contention remediation (Phases 0–3 shipped) and the scale-out path.
-- [design-scaling-job-execution.md](design-scaling-job-execution.md): Cluster-wide task-start throughput frontier on sharded dqlite.
-- [design-incremental-execution.md](design-incremental-execution.md): Smart incremental execution and task caching (Phase 1 shipped; follow-on phases planned).
-- [design-data-plane-memory.md](design-data-plane-memory.md): The second-act substrate (digest pinning, decomposed-hash persistence, DAG versioning, lineage datasets, large-object passing) that makes the data-plane queryable — explain/reproduce/skip. Substrate shipped (streams A–D, #213–#222); the causal query verbs (`run diff`, quarantined `replay`, `blame`) shipped via the completed follow-on plan `exec-plans/completed/data-plane-memory-ii.md`, and those verbs (plus `why`, receipt/`verify`, and the cross-job lineage-impact graph) are now surfaced in the web UI via `exec-plans/completed/data-plane-memory-ui.md`.
-- [design-quarantined-replay.md](design-quarantined-replay.md): Authoritative fail-closed safety model for quarantined replay in the data-plane-memory-ii plan.
-- [design-agent-in-the-loop.md](design-agent-in-the-loop.md): Agent-in-the-loop ETL remediation — autonomous failure triage and bounded remediation via a container-native agent over the data-plane-memory primitives (runtime shipped; the `metadata.remediation` jobdef block plus the incident manager, tiered executor, agent runtime, approval gates, and Console incident panels land — exec plan `exec-plans/completed/agent-in-the-loop-remediation.md`).
-- [design-reproduce.md](design-reproduce.md): `caesium reproduce` — re-execute a single historical production task locally under Docker from its recorded execution descriptor (exact image digest, env, params, predecessor outputs), with secrets resolved locally or not at all (shipped via `exec-plans/completed/reproduce.md`).
-- [design-freshness-scheduling.md](design-freshness-scheduling.md): Freshness-driven scheduling — declare freshness SLOs on datasets and derive execution from lineage and data arrival instead of cron guesses (shipped, streams A–G; the `datasets` jobdef surface, freshness evaluator, arrival signals, `GET /v1/datasets*`, Console freshness UI, skip-when-fresh, and `trigger: {type: freshness}` land — exec plan `exec-plans/completed/freshness-scheduling.md`).
-- [design-backtesting.md](design-backtesting.md): Pipeline backtesting — replay a code change over recorded production runs in quarantine and report output deltas before merge (active — Plan 3 of the closed-loop arc; exec plan `exec-plans/active/backtesting.md`).
-- [design-contract-enforcement.md](design-contract-enforcement.md): Cross-job contract enforcement — schema-compatibility checks across producer/consumer jobs at lint/diff/apply time, with named consumers, Console graph/diff surfaces, and an intentional-break path (shipped; completed plan `exec-plans/completed/contract-enforcement.md`).
-- [design-data-circuit-breaker.md](design-data-circuit-breaker.md): Data circuit breaker — statistical assertions on step outputs with dataset holds that stop bad data from propagating downstream (active — Plan 1 of the closed-loop arc; exec plan `exec-plans/active/data-circuit-breaker.md`).
-- [design-resource-right-sizing.md](design-resource-right-sizing.md): Learned resource right-sizing — per-step memory/CPU recommendations from run history plus OOM retry escalation (active — Plan 2 of the closed-loop arc; exec plan `exec-plans/active/resource-right-sizing.md`).
-- [design-dynamic-fanout.md](design-dynamic-fanout.md): Dynamic fan-out — runtime partition markers materialize data-proportional parallel task instances with per-partition caching (shipped; exec plan `exec-plans/completed/dynamic-fanout.md`).
-- [design-window-scheduling.md](design-window-scheduling.md): Deadline-window scheduling — run within a declared window, choosing the start via load/cost/carbon signals with a deadline-safe latest start (active — Plan 4 of the closed-loop arc; exec plan `exec-plans/active/window-scheduling.md`).
-
-### Active Exec Plans
-
-Live execution plans with unchecked work, orchestrated wave-by-wave via the `exec-plan-wave` skill. Feature exec plans with a design record are linked above. The closed-loop feature plans run in the order below: the arc is their umbrella (not itself a wave target) and owns their cross-plan ordering, while each child plan and design owns implementation details. Cross-cutting plans are listed separately and coordinate shared files with those feature owners.
-
-- `exec-plans/active/distributed-testing.md`: **Distributed Testing and Performance Confidence.** Cross-cutting test plan outside the closed-loop feature sequence. W1–W5 delivered contracts, an owner-crash `early-evidence` lane, SQL-work budget, reference models, CLI/browser journeys, targeted faults, an open-loop driver, fuzzing, single-node upgrade qualification, candidate identity, `TestCore`, coverage collection and a performance comparator. W6 merged a checker-strength validator, B3 acceptance repair, persistent-cluster lifecycle runner and common performance benchmark harness. W7 accepted D3 and E3. D3's console owner-crash journey passed a live kind proof (#581). E3's comparator was stripped of harness noise and recorded a conclusive A/B (#584). W7 also shipped bounded dqlite Raft retention (`CAESIUM_DATABASE_SNAPSHOT_*`, #585), after which F2's snapshot catch-up passed twice under the 1Gi cap. W8 fixed ordinal-0 rejoin (#591, closes #582), recorded the isolated rollback outcome (#590) and calibrated performance budgets with a fixed baseline on the recorded local runner (#589); the merged-tree cluster qualification passed, so E4 and F2 are accepted. The W8 closure interview resolved Q1/Q2/Q5/Q6. 24 of 31 items are checked; G6, single-host F3, hosted G4 and four follow-up items (H1–H4) remain for W9. `ci-ok` fails closed on the owner-crash evidence and, since 2026-09-28, is one of master's required status checks; a merge queue (ruleset 24123341) is active, so `merge_group` runs live. Calibrated budgets exist for the recorded local runner only (Q2 open). Operating guidance is in [ci.md](ci.md). W9 promoted the standalone lifecycle, fuzz, mutation-validator and coverage-ratchet lanes into `ci-ok` (#593), added stale-member removal (#595), fixed the dqlite TCP_NODELAY read stall (#594, closes #588), pinned the mixed-version window and attributed the leader memory residual (#596), shipped the single-host soak harness whose first runs surfaced six product findings (#597; #598–#603), and refreshed the coverage floors (#607), and scheduled the nightly qualification set with a publish gate on same-SHA release evidence (#610); 30 of 31 items are checked; F3 remains open on product findings #598–#603.
-
-- `exec-plans/active/closed-loop-arc.md`: **Umbrella — the arc.** Thesis (three loops — data, compute, time — over the shared data-plane memory, with backtesting as the proof), the plan sequence, cross-plan synergies, shared conventions 1–8, file-conflict rules, arc acceptance criteria, and the parked/filed/deleted decisions.
-- `exec-plans/completed/trust-the-substrate.md`: **Plan 0 — trust the substrate.** Fix the six ledger bugs, close the tier-3 approval loop, widen the auth-enabled integration lane, make CI gate merges, cut `v0.1.0` with a downloadable CLI, name the shipped verbs in the README, delete dead scaffolding, file the unfiled follow-ups.
-- `exec-plans/active/data-circuit-breaker.md`: **Plan 1 — the data loop.** Data circuit breaker plus its previously-deferred Phase 3: `data_quality_hold` incidents, `release_hold` action, held ⇒ not-fresh, `why` provenance (design record `design-data-circuit-breaker.md`).
-- `exec-plans/active/resource-right-sizing.md`: **Plan 2 — the compute loop.** Resource right-sizing with the apply path recast as an incident action, k8s paths exercised in the kind lane, fan-out partition stats, `why` provenance for escalations (design record `design-resource-right-sizing.md`).
-- `exec-plans/active/backtesting.md`: **Plan 3 — the proof loop.** Backtesting after a design refresh (`internal/outputdiff` reuse; reconcile with the fan-out-aware replay core), plus proposal verification in the approval flow and assertion-threshold backtests (design record `design-backtesting.md`).
-- `exec-plans/active/identity-and-access.md`: **Identity and access — namespaces, grants, policy-as-code, corporate SSO.** Outside the closed-loop arc. A flat `metadata.namespace` on jobs, `role @ namespace` grants for SSO users and API keys from one reloadable policy file, namespace-aware middleware plus collection filtering, per-namespace Kubernetes target / secret allow-list / run quota, IdP group refresh, user administration, a Keycloak CI lane, Console switcher + Access page, and `caesium login` (drafted 2026-09-16; spec `superpowers/specs/2026-09-16-identity-and-access-design.md`, superseding the archived SSO spec).
-- `exec-plans/active/execution-connectors.md`: **Execution connectors — Temporal monitoring and operator actions.** Proposed, outside the closed-loop arc. A generic execution connector with Temporal as its first implementation, external workflow inspection, verified links to Caesium runs/data evidence, and one declared approval Update in the Console. Planning only; no connector behavior has shipped.
-- `exec-plans/active/window-scheduling.md`: **Plan 4 — the time loop (optional tail).** Window scheduling re-cut to P0 over the shared stats substrate; cost/carbon signals parked; not an arc gate (design record `design-window-scheduling.md`).
-
-Recently completed: `exec-plans/completed/infra-deploy.md` — DAG-native infrastructure deployment — `cache.chain: values` + `ttl: never` (the one core change), the `caesiumcloud/{git-source,tf-discover,tf-warm,tf-runner}` reagent images implementing the generic unit-pipeline pattern with Terraform as the first binding, a multi-writer volume lint warning, reference manifests + mandatory drift job, and a Console proposal panel (drafted 2026-08-26; spec `superpowers/specs/2026-08-25-dag-native-infrastructure-deployment-design.md`).
-
-### Archive
-
-Completed, shipped, or historical records that are no longer the active source of truth live under [`archive/`](archive/README.md): shipped design docs (ARM64 build support, Helm/Kubernetes deployment, internal mTLS auto-provisioning, parallel job execution), completed plans (job-definition reconciliation, UI implementation), the original feature brainstorm, and early architecture history.
+Completed plans live in [exec-plans/completed/](exec-plans/completed/); the most recent are
+[trust-the-substrate.md](exec-plans/completed/trust-the-substrate.md) (Plan 0, cut `v0.1.0`),
+[infra-deploy.md](exec-plans/completed/infra-deploy.md), and
+[go-maintenance.md](exec-plans/completed/go-maintenance.md).

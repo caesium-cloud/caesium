@@ -96,7 +96,7 @@ For drafting new plans in this same shape, see
 **The arc wins on why-in-scope and cross-plan ordering.**
 [`closed-loop-arc.md`](closed-loop-arc.md) is the program-level source of truth
 for this plan. Its
-[**shared conventions 1–8**](closed-loop-arc.md#shared-conventions-do-not-restate-these-in-child-plans-link-here)
+[**shared conventions 1–8**](closed-loop-arc.md#shared-conventions-do-not-restate-these-in-child-plans--link-here)
 are inherited verbatim and are **not restated here** — read them there. This
 plan's binding of each, and nothing more:
 
@@ -122,7 +122,7 @@ plan's binding of each, and nothing more:
 - **Conventions 7–8** → N-1, and the wave hygiene in `## Sequencing`.
 
 This plan implements
-[`docs/design-resource-right-sizing.md`](../../design-resource-right-sizing.md).
+[`docs/design/resource-right-sizing.md`](../../design/resource-right-sizing.md).
 **The design doc is authoritative for INTENT and SCOPE** — the phasing, the
 YAML contract (`resources:` / `rightSizing:` shapes), the cache-identity
 exclusion decision, the recommendation formula, the provenance-routing rule,
@@ -682,7 +682,7 @@ change); `suggest = quantize_up(p99(peak_mem) × (1 + headroom))` clamped to
       template step** (group by `(job, task name)` and fold every
       `partition_index`), not per partition — one `resources:` block is declared
       on the template step and fan-out children **inherit** it (design
-      Non-Goals: "the horizontal analog is `design-dynamic-fanout.md`'s
+      Non-Goals: "the horizontal analog is `design/dynamic-fanout.md`'s
       territory, whose fan-out children inherit the template step's
       `resources`"). Expose per-partition peaks as detail for the D2 read and
       the F2 UI, but recommend one number per step. Unit-test that a
@@ -737,7 +737,7 @@ read-time recomputation proves too slow on large fleets. Not a gate here.
 ### Stream E — Phase 4: `propose_resources`, through the one approval pipeline
 
 **Recast 2026-09-05 per
-[arc convention 4](closed-loop-arc.md#shared-conventions-do-not-restate-these-in-child-plans-link-here)**
+[arc convention 4](closed-loop-arc.md#shared-conventions-do-not-restate-these-in-child-plans--link-here)**
 (read the convention there; the code-grounded decision that follows is this
 plan's, and stays). The durable half of the compute loop is an
 **incident action**, not a new REST router: an `oom` incident (the class A2
@@ -760,7 +760,7 @@ contract of `apply_jobdef_patch`: `internal/incident/actions.go` catalogues it a
 `TierApproval`, Plan 0 C7 implements exactly the provenance branch (direct apply
 for non-git jobs, degrade-to-`escalate` with the rendered diff for git-synced
 ones), Plan 1 F3 replaces that degradation with the PR route, and
-`docs/design-agent-in-the-loop.md` already states the router is "provenance-
+`docs/design/agent-in-the-loop.md` already states the router is "provenance-
 routed, enforced server-side" and refused when auth mode is `none`. A second
 router would be a second implementation of the same five rules, a second audit
 spine, and a second thing to keep refused under `AUTH_MODE=none` — the exact
@@ -876,7 +876,7 @@ client-side (E1(c)).
       tier-3 `apply_jobdef_patch` **cannot** be auto-approved by any playbook
       setting that exists today. If true unattended apply is wanted, that is a
       change to tier semantics in the shipped runtime and must be raised as an
-      amendment to `docs/design-agent-in-the-loop.md` first — **not** smuggled in
+      amendment to `docs/design/agent-in-the-loop.md` first — **not** smuggled in
       here. **Note also that the playbook allowlist is not the gate on the
       deterministic path** (verified fact 12: `ExecutePolicy` dispatches with
       `Playbook{}` and never calls `decide`) — E1(b)'s env-gated rule assembly
@@ -983,7 +983,7 @@ Surfaces the backend through the jobs feature, gated on the `RightSizing`
 ## Harness Strengthening
 
 - [ ] H-1. Make **every self-server lane** exercise the real resource path
-      ([arc convention 2](closed-loop-arc.md#shared-conventions-do-not-restate-these-in-child-plans-link-here)
+      ([arc convention 2](closed-loop-arc.md#shared-conventions-do-not-restate-these-in-child-plans--link-here)
       — rationale there, not repeated here). Add a small `build/` stress image
       (`build/Dockerfile.stress`, published as a `caesiumcloud/…` tag alongside
       the existing `build/Dockerfile`, `Dockerfile.build`, `Dockerfile.reagents`,
@@ -1087,7 +1087,7 @@ the lane the note calls hypothetical already exists in `ci.yml`.
 ## Navigational / Organizational Improvements
 
 - [ ] N-1. Reconcile the docs after A–F ship, per arc convention 7. Flip the
-      [`docs/design-resource-right-sizing.md`](../../design-resource-right-sizing.md)
+      [`docs/design/resource-right-sizing.md`](../../design/resource-right-sizing.md)
       `> Status:` banner from "Brainstorm/Design → active — Plan 2 of the
       closed-loop arc" to "implemented by this plan" (and mark shipped phases),
       and amend the **three** design paragraphs this plan deliberately deviates
@@ -1131,7 +1131,7 @@ the lane the note calls hypothetical already exists in `ci.yml`.
       this plan's row in the [`closed-loop-arc.md`](closed-loop-arc.md) **arc
       dashboard** and repoint its links when the plan moves to
       `docs/exec-plans/completed/`, in the same PR. Runs last.
-      Files: `docs/design-resource-right-sizing.md`, `docs/roadmap.md`,
+      Files: `docs/design/resource-right-sizing.md`, `docs/roadmap.md`,
       `internal/jobdef/report/` (the schema-reference generator) +
       `docs/job-schema-reference.md` (regenerated), `docs/job-definitions.md`,
       `docs/caesium-job-llm-reference.md`, `docs/examples/`, `docs/README.md`,
@@ -1435,7 +1435,7 @@ The plan is done when **all** of these hold:
     working `docs/examples/` manifests with canonically pinned images, this plan
     indexed in `docs/README.md` (backtick form), `docs/tour-compute-loop.md`
     written, and the **arc dashboard row ticked** in the same PR.
-11. **Cross-cutting:** `docs/roadmap.md`, `docs/design-resource-right-sizing.md`,
+11. **Cross-cutting:** `docs/roadmap.md`, `docs/design/resource-right-sizing.md`,
     the arc dashboard, and this plan's per-stream `## Progress` entries reflect
     every shipped stream and match the merged PRs. (The
     `resource_recommendations` cache table remains explicitly deferred — not a
@@ -1499,13 +1499,13 @@ The plan is done when **all** of these hold:
   `HistorySource` (Plan 2 D1) — no new reader"), so nothing needs flagging —
   just keep D1's interface shape stable, since B1's documented fallback
   reproduces it.
-- [`docs/design-resource-right-sizing.md`](../../design-resource-right-sizing.md)
+- [`docs/design/resource-right-sizing.md`](../../design/resource-right-sizing.md)
   — the design of record. Source of truth for intent, scope, phasing, and the
   YAML/cache/recommendation contracts. Deviated from in exactly three places —
   Stream E's surface and the kind lane (arc conventions 4 and 2) plus C1's
   dynamic `MaxAttempts` grant (a correctness correction) — each flagged inline
   and amended by N-1.
-- [`docs/design-agent-in-the-loop.md`](../../design-agent-in-the-loop.md) — the
+- [`docs/design/agent-in-the-loop.md`](../../design/agent-in-the-loop.md) — the
   provenance-routed `apply_jobdef_patch` router and the `oom`
   incident-composition seam Stream E routes through, plus the tier semantics
   (`Playbook.decide`) that bound E2's `mode: auto`.
@@ -1524,8 +1524,8 @@ The plan is done when **all** of these hold:
   representation this plan's per-partition stats ride on: **one `TaskRun` row per
   instance**, unique on `(job_run_id, task_id, partition_index)`, children
   inheriting the template step's spec.
-- `docs/design-window-scheduling.md`, `docs/design-backtesting.md`,
-  `docs/design-freshness-scheduling.md`, `docs/design-dynamic-fanout.md` —
+- `docs/design/window-scheduling.md`, `docs/design/backtesting.md`,
+  `docs/design/freshness-scheduling.md`, `docs/design/dynamic-fanout.md` —
   sibling designs referenced by the Non-Goals (fan-out children inherit
   `resources`; quarantine/backtesting runs are excluded from the window).
 - `docs/job-schema-reference.md` (**generated** — update

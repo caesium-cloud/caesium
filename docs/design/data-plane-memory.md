@@ -1,6 +1,6 @@
 # Design: Data-Plane Memory (the second-act substrate)
 
-> Status: Shipped (2026-06-20) — all five components (10 items across streams A–D) merged to master; execution record archived at [`exec-plans/completed/data-plane-memory.md`](exec-plans/completed/data-plane-memory.md). This is the **retention / differentiation layer**, not the lead positioning — see [`differentiation-strategy.md`](differentiation-strategy.md). It turns Caesium's already-shipped content-addressed cache, event store, and OpenLineage pipeline into a *queryable memory of what data flowed and why each task ran*: opt-in image digest pinning, a persisted decomposed `HashInput`, `caesium why` (field-level causal explainer), a git-committable reproducibility receipt + `caesium verify`, append-only DAG-topology history, populated OpenLineage datasets + cross-job impact query, large-object reference passing, and a value-verified short-circuit. Sequenced **after** sovereignty positioning and built in a **correctness-first order** (digest pinning gates REPRODUCE/SKIP).
+> Status: Shipped (2026-06-20) — all five components (10 items across streams A–D) merged to master; execution record archived at [`../exec-plans/completed/data-plane-memory.md`](../exec-plans/completed/data-plane-memory.md). This is the **retention / differentiation layer**, not the lead positioning — see [`differentiation-strategy.md`](differentiation-strategy.md). It turns Caesium's already-shipped content-addressed cache, event store, and OpenLineage pipeline into a *queryable memory of what data flowed and why each task ran*: opt-in image digest pinning, a persisted decomposed `HashInput`, `caesium why` (field-level causal explainer), a git-committable reproducibility receipt + `caesium verify`, append-only DAG-topology history, populated OpenLineage datasets + cross-job impact query, large-object reference passing, and a value-verified short-circuit. Sequenced **after** sovereignty positioning and built in a **correctness-first order** (digest pinning gates REPRODUCE/SKIP).
 
 ## Thesis (scoped)
 
@@ -28,7 +28,7 @@ Caesium uniquely computes a transitive content hash that folds in the **typed da
 
 ## Components, in correctness-first build order
 
-> Verified current state is cited with file:line. The house migration pattern is GORM `AutoMigrate(models.All...)` (`internal/models/models.go`); new columns are added as struct fields with GORM tags and created at startup — additive, nullable, backward-compatible. The house pattern for getting per-task context to distributed workers is scheduler-propagated fields on `TaskRun` (e.g. `PredecessorCacheHashes`/`PredecessorCacheOutputs`, per [`design-incremental-execution.md`](design-incremental-execution.md)); any new per-task field must follow that pattern so local and distributed modes behave identically.
+> Verified current state is cited with file:line. The house migration pattern is GORM `AutoMigrate(models.All...)` (`internal/models/models.go`); new columns are added as struct fields with GORM tags and created at startup — additive, nullable, backward-compatible. The house pattern for getting per-task context to distributed workers is scheduler-propagated fields on `TaskRun` (e.g. `PredecessorCacheHashes`/`PredecessorCacheOutputs`, per [`incremental-execution.md`](incremental-execution.md)); any new per-task field must follow that pattern so local and distributed modes behave identically.
 
 ### Component 1 — Image digest resolution (FIRST: correctness gate)
 
@@ -114,8 +114,8 @@ Each ships behind the existing opt-in cache/lineage config and is independently 
 ## Related documents
 
 - [`differentiation-strategy.md`](differentiation-strategy.md) — why this is the second act, not the headline.
-- [`design-incremental-execution.md`](design-incremental-execution.md) — the shipped content-addressed cache and its distributed propagation pattern.
-- [`open_lineage.md`](open_lineage.md) — the shipped OpenLineage emission pipeline this populates.
-- [`roadmap.md`](roadmap.md) — `caesium why` / run-diff overlap with the "live DAG debugging" item (3.4), reimagined here as *causal* rather than a visual state-viewer.
-- [`exec-plans/completed/data-plane-memory.md`](exec-plans/completed/data-plane-memory.md) — the shipped substrate build plan (streams A–D, #213–#222).
-- [`exec-plans/completed/data-plane-memory-ii.md`](exec-plans/completed/data-plane-memory-ii.md) — the follow-on plan building the causal query verbs (`run diff`, quarantined `replay`, `blame`) on top of this substrate; honors the "What each feature needs" table above.
+- [`incremental-execution.md`](incremental-execution.md) — the shipped content-addressed cache and its distributed propagation pattern.
+- [`../open-lineage.md`](../open-lineage.md) — the shipped OpenLineage emission pipeline this populates.
+- [`roadmap.md`](../roadmap.md) — `caesium why` / run-diff overlap with the "live DAG debugging" item (3.4), reimagined here as *causal* rather than a visual state-viewer.
+- [`../exec-plans/completed/data-plane-memory.md`](../exec-plans/completed/data-plane-memory.md) — the shipped substrate build plan (streams A–D, #213–#222).
+- [`../exec-plans/completed/data-plane-memory-ii.md`](../exec-plans/completed/data-plane-memory-ii.md) — the follow-on plan building the causal query verbs (`run diff`, quarantined `replay`, `blame`) on top of this substrate; honors the "What each feature needs" table above.

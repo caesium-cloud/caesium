@@ -2,13 +2,13 @@
 
 > Status: Brainstorm/Design — proposal for runtime data-quality assertions and
 > dataset-level circuit breaking ("holds"). No implementation yet. Companions:
-> [`design-contract-enforcement.md`](design-contract-enforcement.md) (static
-> half of the contract story), [`design-freshness-scheduling.md`](design-freshness-scheduling.md)
-> (shared declared-dataset registry), [`design-agent-in-the-loop.md`](design-agent-in-the-loop.md)
+> [`contract-enforcement.md`](contract-enforcement.md) (static
+> half of the contract story), [`freshness-scheduling.md`](freshness-scheduling.md)
+> (shared declared-dataset registry), [`agent-in-the-loop.md`](agent-in-the-loop.md)
 > (holds become an incident class and a gated action).
 > → **active — Plan 1 of the closed-loop arc** (see
-> [`exec-plans/active/data-circuit-breaker.md`](exec-plans/active/data-circuit-breaker.md);
-> umbrella [`exec-plans/active/closed-loop-arc.md`](exec-plans/active/closed-loop-arc.md)).
+> [`../exec-plans/active/data-circuit-breaker.md`](../exec-plans/active/data-circuit-breaker.md);
+> umbrella [`../exec-plans/active/closed-loop-arc.md`](../exec-plans/active/closed-loop-arc.md)).
 
 ## Problem
 
@@ -35,13 +35,13 @@ is a circuit breaker on the dataset: when what a step *produced* looks
 statistically wrong, mark the **dataset** held, let downstream jobs skip
 instead of consuming poison, alert **once at the source**, and release on
 human ack or the next clean run — a native primitive for scenario 3 of
-`design-agent-in-the-loop.md` (bad values) and the runtime complement of the
-PR-time checks in `design-contract-enforcement.md`.
+`agent-in-the-loop.md` (bad values) and the runtime complement of the
+PR-time checks in `contract-enforcement.md`.
 
 ## Terminology: "hold", deliberately not "quarantine"
 
 Caesium already has a quarantine concept and it means something else:
-[`design-quarantined-replay.md`](design-quarantined-replay.md) defines **run
+[`quarantined-replay.md`](quarantined-replay.md) defines **run
 quarantine** — a replay `JobRun`/`TaskRun` marked non-authoritative — and
 that marker is load-bearing in persisted columns (`JobRun.Quarantine`,
 `TaskRun.Quarantine`, `ExecutionEvent.Quarantine`), the live-bus field
@@ -100,7 +100,7 @@ actual data is a job for an auditing *step*, not for Caesium.
 
 Assertions attach to a **declared produced dataset** on the step. The
 `produces:` block is the declared-dataset registry — explicitly the *same*
-YAML and model substrate as [`design-freshness-scheduling.md`](design-freshness-scheduling.md),
+YAML and model substrate as [`freshness-scheduling.md`](freshness-scheduling.md),
 one registry keyed `(namespace, name)` read there for watermarks and here for
 holds; neither design ships a private copy.
 
@@ -332,7 +332,7 @@ claim fence on `run.EvaluateDataAssertionsClaimed`).
   *Amended 2026-09-07 (Plan 1 N-2):* a fifth env knob,
   `CAESIUM_GIT_WRITE_CREDENTIALS`, backs the Git-PR provenance route of
   `apply_jobdef_patch` (see
-  [`design-agent-in-the-loop.md`](design-agent-in-the-loop.md)). Shape it
+  [`agent-in-the-loop.md`](agent-in-the-loop.md)). Shape it
   after the shipped `CAESIUM_JOBDEF_GIT_SOURCES` precedent
   (`pkg/env/jobdef.go` `GitSources`/`GitSourceConfig`/`GitBasicAuth`, a
   JSON-decoded `envconfig.Decoder`): a JSON array keyed by repo URL or
@@ -346,9 +346,9 @@ claim fence on `run.EvaluateDataAssertionsClaimed`).
   rendered diff rather than half-succeeding, and — like every tier-3 action —
   it is refused outright under `CAESIUM_AUTH_MODE=none`. This knob is a
   recorded deviation from this section's original four-knob enumeration; see
-  [`exec-plans/active/data-circuit-breaker.md`](exec-plans/active/data-circuit-breaker.md)
+  [`../exec-plans/active/data-circuit-breaker.md`](../exec-plans/active/data-circuit-breaker.md)
   § Source-Of-Truth Note for the authorization
-  ([`closed-loop-arc.md`](exec-plans/active/closed-loop-arc.md) § Synergies
+  ([`closed-loop-arc.md`](../exec-plans/active/closed-loop-arc.md) § Synergies
   assigns the Git-PR route to this plan's Stream F) and item **N-2** for this
   amendment.
 
@@ -381,19 +381,19 @@ via `runCLIStdout`, never the stream-merging capture.
 
 ## Interplay
 
-- **[`design-freshness-scheduling.md`](design-freshness-scheduling.md)** —
+- **[`freshness-scheduling.md`](freshness-scheduling.md)** —
   same `Dataset` registry; a held dataset is **not fresh** regardless of
   watermark, so a poisoned-but-recent partition never satisfies a freshness
   trigger or advances downstream scheduling.
-- **[`design-contract-enforcement.md`](design-contract-enforcement.md)** —
+- **[`contract-enforcement.md`](contract-enforcement.md)** —
   static/PR-time enforcement there; this is the runtime breaker for what
   static analysis cannot see, the *values*. One contract story, two gates.
-- **[`design-agent-in-the-loop.md`](design-agent-in-the-loop.md)** —
+- **[`agent-in-the-loop.md`](agent-in-the-loop.md)** —
   `dataset_held` becomes an incident class (`data_quality_hold`) whose triage
   bundle carries the violation, baseline, and impact graph; `release_hold`
   joins the action catalog at tier 2 (tier 3 with tolerance windows);
   `suppress_downstream_alerts` becomes largely unnecessary for this class.
-- **[`design-backtesting.md`](design-backtesting.md)** — assertions evaluate
+- **[`backtesting.md`](backtesting.md)** — assertions evaluate
   in backtests too, over metrics historical runs emitted: free regression
   signal ("this change would have tripped the breaker on 3 of the last 30
   days"), with holds never opened from backtest runs.

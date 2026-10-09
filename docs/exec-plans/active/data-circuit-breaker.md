@@ -29,7 +29,7 @@ feed with a perfectly valid schema, a join key that goes 40% null, a watermark
 stalled on yesterday's data. Bad *data* propagates one hop further with every
 downstream trigger, and failing every consumer buries the root cause under N pages.
 
-This plan ships [`docs/design-data-circuit-breaker.md`](../../design-data-circuit-breaker.md):
+This plan ships [`docs/design/data-circuit-breaker.md`](../../design/data-circuit-breaker.md):
 a circuit breaker on the **dataset**, not the run. A new `##caesium::metrics`
 stdout marker (beside `##caesium::output` in `pkg/task/output.go` `parseMarkers`)
 lets a step self-report what it observed; a post-task **assertion evaluator** (a
@@ -71,7 +71,7 @@ For drafting new plans in this same shape, see
 
 ## Source-Of-Truth Note
 
-When this plan and [`docs/design-data-circuit-breaker.md`](../../design-data-circuit-breaker.md)
+When this plan and [`docs/design/data-circuit-breaker.md`](../../design/data-circuit-breaker.md)
 disagree, **the design doc wins on INTENT and SCOPE** — what the marker, the
 evaluator, the hold model, the admission gate, and the release semantics must do.
 No item may add a NEW marker, model, event type, config knob, endpoint, or CLI
@@ -79,7 +79,7 @@ verb beyond what the design enumerates without first amending the design doc and
 this Source-Of-Truth Note.
 
 **Recorded deviation — `CAESIUM_GIT_WRITE_CREDENTIALS` (F3).**
-[`docs/design-data-circuit-breaker.md`](../../design-data-circuit-breaker.md)
+[`docs/design/data-circuit-breaker.md`](../../design/data-circuit-breaker.md)
 § "Events, notifications, REST, env" enumerates exactly four env knobs —
 `CAESIUM_DATA_ASSERTIONS_ENABLED`, `CAESIUM_BASELINE_WINDOW`,
 `CAESIUM_BASELINE_MIN_SAMPLES`, `CAESIUM_DATASET_METRIC_RETENTION` (verified
@@ -151,7 +151,7 @@ decided.
 > above).* **Shared `DatasetDeclaration` registry — coordinate with
 > `freshness-scheduling.md`.** The design is explicit that the declared-dataset
 > registry (`produces:` keyed `(namespace, name)`) is the **same YAML and model
-> substrate** as [`design-freshness-scheduling.md`](../../design-freshness-scheduling.md);
+> substrate** as [`design/freshness-scheduling.md`](../../design/freshness-scheduling.md);
 > "whichever design lands first creates it, the other extends it." To keep the two
 > plans from colliding on the base table, the canonical names are freshness's: the
 > model is **`DatasetDeclaration`** in `internal/models/dataset_declaration.go`
@@ -348,10 +348,10 @@ re-verified by W3's gate.
 ### Wave 1 — Observability substrate (2026-09-07/08)
 
 - **γ / N-2** — [#432](https://github.com/caesium-cloud/caesium/pull/432)
-  `ccb15e4`. `docs/design-data-circuit-breaker.md` § "Events, notifications,
+  `ccb15e4`. `docs/design/data-circuit-breaker.md` § "Events, notifications,
   REST, env" gains `CAESIUM_GIT_WRITE_CREDENTIALS` (JSON shape after
   `CAESIUM_JOBDEF_GIT_SOURCES`; a separate write grant; degrade-to-`escalate`;
-  refused under `AUTH_MODE=none`) and `docs/design-agent-in-the-loop.md`
+  refused under `AUTH_MODE=none`) and `docs/design/agent-in-the-loop.md`
   documents both `apply_jobdef_patch` routes (the shipped direct route,
   `ErrPatchAltersRemediation`; the Git-PR route F3 builds). F3 may now land.
 - **β / H-1** — [#433](https://github.com/caesium-cloud/caesium/pull/433)
@@ -648,7 +648,7 @@ reviewed.
       collapses N verdicts into one hold with an occurrence count — the exact
       collapse a group aggregate would need a new seam to achieve. Accepted
       limitation: a group-AGGREGATE assertion is not expressible in v1. Recorded
-      in `docs/design-data-circuit-breaker.md` § Open questions as item 5.
+      in `docs/design/data-circuit-breaker.md` § Open questions as item 5.
       **Adversarial-review fix (P1, same PR):** in the distributed worker the
       seam sits BELOW the attempt-outcome decision and runs only on a succeeding
       attempt. A retry reuses the same row (`RetryTaskClaimedInstance` keys on
@@ -1206,11 +1206,11 @@ evaluator (adds the `hold` disposition) and gates run admission in the store.
 > `park` run disposition with release-drain (the dequeuer is concurrency-driven
 > today and needs its own leader-gated draining wiring); the agent-in-the-loop
 > `data_quality_hold` incident class + `release_hold` action
-> ([`design-agent-in-the-loop.md`](../../design-agent-in-the-loop.md)); freshness
+> ([`design/agent-in-the-loop.md`](../../design/agent-in-the-loop.md)); freshness
 > integration (a held dataset is not fresh —
-> [`design-freshness-scheduling.md`](../../design-freshness-scheduling.md)); and
+> [`design/freshness-scheduling.md`](../../design/freshness-scheduling.md)); and
 > backtest evaluation of assertions over historical metrics
-> ([`design-backtesting.md`](../../design-backtesting.md)). Draft these against the
+> ([`design/backtesting.md`](../../design/backtesting.md)). Draft these against the
 > Stream C/D endpoints once this plan completes.
 
 **Disposition as of 2026-09-05:**
@@ -1660,7 +1660,7 @@ precedent for it is warn-mode schema validation, which publishes
 - [ ] N-1. Flip the `docs/roadmap.md` Phase-4 Data-Plane Differentiators entry for
       "Data circuit breaker" to Shipped (and update the Execution-Priority /
       Completed-Features rows as appropriate); update the
-      [`design-data-circuit-breaker.md`](../../design-data-circuit-breaker.md)
+      [`design/data-circuit-breaker.md`](../../design/data-circuit-breaker.md)
       `> Status:` banner (Brainstorm/Design → shipped, per-phase). Document the
       `##caesium::metrics` marker and the `produces`/`assertions`/`consumes`/
       `onViolation`/`onUpstreamHold` fields in `docs/job-schema-reference.md`,
@@ -1689,7 +1689,7 @@ precedent for it is warn-mode schema validation, which publishes
       (d) Any example manifest must use a **canonically pinned image**
       (`alpine:3.23`, `busybox:1.36.1`, or a `caesiumcloud/...` image) — a guardrail
       test scans `.md` files under `docs/` for unpinned base-image refs (the canonical pins are `alpine:3.23` and `busybox:1.36.1`).
-      Files: `docs/roadmap.md`, `docs/design-data-circuit-breaker.md`,
+      Files: `docs/roadmap.md`, `docs/design/data-circuit-breaker.md`,
       `internal/jobdef/report/` (generator) + the regenerated
       `docs/job-schema-reference.md`, `docs/job-definitions.md`,
       `docs/caesium-job-llm-reference.md`, `docs/examples/`, new
@@ -1709,7 +1709,7 @@ precedent for it is warn-mode schema validation, which publishes
       Git-PR provenance route, before F3 lands.** The Source-Of-Truth Note forbids
       adding a config knob the design does not enumerate without amending the
       design first, and
-      [`docs/design-data-circuit-breaker.md`](../../design-data-circuit-breaker.md)
+      [`docs/design/data-circuit-breaker.md`](../../design/data-circuit-breaker.md)
       § "Events, notifications, REST, env" today enumerates exactly
       `CAESIUM_DATA_ASSERTIONS_ENABLED`, `CAESIUM_BASELINE_WINDOW`,
       `CAESIUM_BASELINE_MIN_SAMPLES`, `CAESIUM_DATASET_METRIC_RETENTION` (verified
@@ -1718,19 +1718,19 @@ precedent for it is warn-mode schema validation, which publishes
       credentials are a **separate grant** from read-only sync credentials, and
       state the degrade-to-`escalate` behavior when no entry matches. Mirror the
       same amendment into
-      [`docs/design-agent-in-the-loop.md`](../../design-agent-in-the-loop.md)
+      [`docs/design/agent-in-the-loop.md`](../../design/agent-in-the-loop.md)
       where the `apply_jobdef_patch` action and its provenance routes are
       described, so the Git-PR route stops being an undocumented half of B4. This
       is the pattern [`backtesting.md`](backtesting.md) uses for its own divergence
       ("this divergence is only legal once the design says so: **N-2 amends
-      `docs/design-backtesting.md` first**"). Docs-only, no code.
-      Files: `docs/design-data-circuit-breaker.md`,
-      `docs/design-agent-in-the-loop.md`.
+      `docs/design/backtesting.md` first**"). Docs-only, no code.
+      Files: `docs/design/data-circuit-breaker.md`,
+      `docs/design/agent-in-the-loop.md`.
       Depends on: (none — may land any time before F3).
-      **Done:** amended `docs/design-data-circuit-breaker.md` § "Events,
+      **Done:** amended `docs/design/data-circuit-breaker.md` § "Events,
       notifications, REST, env" (fifth env knob `CAESIUM_GIT_WRITE_CREDENTIALS`,
       JSON shape modelled on `CAESIUM_JOBDEF_GIT_SOURCES`, separate-grant and
-      degrade-to-`escalate` semantics) and `docs/design-agent-in-the-loop.md`
+      degrade-to-`escalate` semantics) and `docs/design/agent-in-the-loop.md`
       where `apply_jobdef_patch`'s provenance routing is described (documented
       both the shipped direct route — trust-the-substrate C7,
       `ErrPatchAltersRemediation` — and the unshipped Git-PR route — Plan 1 F3,
@@ -2027,8 +2027,8 @@ The plan is done when **all** of these hold:
    canonically pinned image, **`docs/tour-data-loop.md`** published, this plan
    indexed in `docs/README.md` (backtick form), and the
    [`closed-loop-arc.md`](closed-loop-arc.md) dashboard row for plan 1 ticked.
-   **N-2** has amended `docs/design-data-circuit-breaker.md` (and
-   `docs/design-agent-in-the-loop.md`) with `CAESIUM_GIT_WRITE_CREDENTIALS` and the
+   **N-2** has amended `docs/design/data-circuit-breaker.md` (and
+   `docs/design/agent-in-the-loop.md`) with `CAESIUM_GIT_WRITE_CREDENTIALS` and the
    Git-PR provenance route **before F3 merged**, so no shipped config knob is
    absent from the design of record.
 9. **Cross-cutting (arc acceptance criterion 7):** **every automated decision this
@@ -2036,7 +2036,7 @@ The plan is done when **all** of these hold:
    scenario — the hold, the downstream skip, the release (clean-run and acked), and
    the approved agent action each leave a persisted event with enough provenance
    that the task-scoped explainer names it. `docs/roadmap.md`,
-   `docs/design-data-circuit-breaker.md`, and this plan's per-stream `## Progress`
+   `docs/design/data-circuit-breaker.md`, and this plan's per-stream `## Progress`
    entries reflect every shipped stream and match the merged PRs; the shared
    `DatasetDeclaration` registry stays a single table (no duplicate registry, no
    second `Dataset` model); and no second jobdef-apply path or second approval
@@ -2100,9 +2100,9 @@ The plan is done when **all** of these hold:
   endpoint **does not exist**. Nothing to re-point. (Stale in the other direction:
   that plan still says this plan's "Stream F is not yet drafted" in two places — a
   sibling change to raise, not fixable here.)
-- [`docs/design-data-circuit-breaker.md`](../../design-data-circuit-breaker.md) —
+- [`docs/design/data-circuit-breaker.md`](../../design/data-circuit-breaker.md) —
   the design of record. Source of truth for intent and scope.
-- [`docs/design-agent-in-the-loop.md`](../../design-agent-in-the-loop.md) and
+- [`docs/design/agent-in-the-loop.md`](../../design/agent-in-the-loop.md) and
   [`agent-in-the-loop-remediation.md`](../completed/agent-in-the-loop-remediation.md) —
   the shipped incident runtime Stream F extends: incident classes, the typed action
   catalog + tiers, the approval gate, and the MCP tool surface. `dataset_held`
@@ -2151,7 +2151,7 @@ question, not a fact). Each must be answered *in the PR that first touches it*.
    one-active-hold-per-dataset upsert collapses N verdicts into one hold with an
    occurrence count, so the "N possible holds" objection does not arise and no
    group-completion seam is needed. A group-AGGREGATE assertion is out of scope
-   for v1. Recorded in `docs/design-data-circuit-breaker.md` § Open questions as
+   for v1. Recorded in `docs/design/data-circuit-breaker.md` § Open questions as
    item 5.
 2. **`release_hold` tier (F2).** The design says "tier 2, tier 3 with tolerance
    windows", but `actionCatalog` is a static `map[string]int` consulted by

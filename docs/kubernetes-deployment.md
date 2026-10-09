@@ -452,7 +452,7 @@ Once installed, the Caesium server pod does not make outbound network calls. It 
 
 ### Image digest pinning for regulated environments
 
-In air-gapped or regulated deployments where reproducibility must be auditable, enable digest pinning so cache keys are computed from content-addressed `sha256:` digests rather than mutable tags. This is tracked in the data-plane memory substrate — see [`cache.pinDigests` in `design-data-plane-memory.md`](design-data-plane-memory.md) for details and current build status. Do not duplicate that configuration here; cross-link instead.
+In air-gapped or regulated deployments where reproducibility must be auditable, enable digest pinning so cache keys are computed from content-addressed `sha256:` digests rather than mutable tags. This is tracked in the data-plane memory substrate — see [`cache.pinDigests` in `design/data-plane-memory.md`](design/data-plane-memory.md) for details and current build status. Do not duplicate that configuration here; cross-link instead.
 
 ### Further reading
 

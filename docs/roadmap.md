@@ -30,7 +30,7 @@ These features address the most common reasons a team would choose an alternativ
 
 **Delivered state**: HTTP triggers are now a first-class webhook ingestion layer. External systems (CI/CD, GitHub, Slack, S3 notifications, custom apps) can POST to a dedicated webhook endpoint, and Caesium routes the payload to the correct job with parameter extraction and signature validation.
 
-**Design doc**: [`design-event-triggers.md`](design-event-triggers.md)
+**Design doc**: [`design/event-triggers.md`](design/event-triggers.md)
 
 ### 1.2 Event-Driven Trigger Routing
 
@@ -38,7 +38,7 @@ These features address the most common reasons a team would choose an alternativ
 
 **Delivered state**: Jobs can declare event-based triggers that fire when matching events arrive from external ingestion, webhook traffic, or internal lifecycle events. Event patterns support type globs, source filters, and JSON payload filters, so one endpoint or event stream can route many event shapes to the right jobs. Chained jobs flow through the same router, with lint/apply cycle checks and the `_trigger_depth` runtime guard preventing runaway loops.
 
-**Design doc**: [`design-event-triggers.md`](design-event-triggers.md)
+**Design doc**: [`design/event-triggers.md`](design/event-triggers.md)
 
 **Plan**: [Event-Driven Trigger Routing](exec-plans/completed/event-trigger-routing.md)
 
@@ -48,7 +48,7 @@ These features address the most common reasons a team would choose an alternativ
 
 **Target state**: Teams can configure concurrency strategies per job (queue, replace-oldest, skip-if-running) and rate limits per resource (e.g., "max 100 API calls/minute across all tasks using this endpoint"). In distributed mode, fairness policies ensure shared clusters serve multiple teams equitably.
 
-**Design doc**: [`design-concurrency-priority.md`](design-concurrency-priority.md)
+**Design doc**: [`design/concurrency-priority.md`](design/concurrency-priority.md)
 
 **Plan**: [Concurrency Strategies & Priority Queues](exec-plans/completed/concurrency-priority-queues.md) (Streams A/C/D)
 
@@ -58,7 +58,7 @@ These features address the most common reasons a team would choose an alternativ
 
 **Target state**: Jobs and individual runs can declare priority levels. The distributed task claimer respects priority ordering so critical pipelines run first when the cluster is saturated.
 
-**Design doc**: [`design-concurrency-priority.md`](design-concurrency-priority.md)
+**Design doc**: [`design/concurrency-priority.md`](design/concurrency-priority.md)
 
 **Plan**: [Concurrency Strategies & Priority Queues](exec-plans/completed/concurrency-priority-queues.md) (Stream B)
 
@@ -146,7 +146,7 @@ These features open Caesium to new use cases and larger organizations.
 
 ### 3.1 Multi-Tenancy & Namespace Isolation
 
-**Status**: Planned — active exec plan [`exec-plans/active/identity-and-access.md`](exec-plans/active/identity-and-access.md); design of record [`superpowers/specs/2026-09-16-identity-and-access-design.md`](superpowers/specs/2026-09-16-identity-and-access-design.md) (drafted 2026-09-16).
+**Status**: Planned — active exec plan [`exec-plans/active/identity-and-access.md`](exec-plans/active/identity-and-access.md); design of record [`design/2026-09-16-identity-and-access-design.md`](design/2026-09-16-identity-and-access-design.md) (drafted 2026-09-16).
 
 **Current state**: Single-tenant. All jobs, runs, and resources share a flat namespace; authorization is a global four-role ladder keyed per route; SSO users cannot be scoped; SSO admins cannot manage API keys; users have no lifecycle; no SSO path has end-to-end coverage.
 
@@ -195,7 +195,7 @@ steps:
 
 ### 3.4 Live DAG Debugging & Run Diff
 
-**Status**: Partially shipped via the [data-plane-memory](design-data-plane-memory.md) substrate. `caesium why <run> --task <t>` reimagines the causal half of this item — a field-level, machine-checkable explanation of why a task ran/skipped/re-ran (the discriminating `HashInput` field + trigger causation), reconstructed from the persisted decomposed hash + event store rather than a UI state-viewer. A git-committable reproducibility receipt + `caesium verify` and append-only DAG-topology history also land here. The remaining causal verbs have now **shipped** ([Exec Plan: Data-Plane Memory II](exec-plans/completed/data-plane-memory-ii.md)): `caesium run diff` (causal cache-bust attribution across two runs), `caesium blame` (commit/snapshot topology attribution over `dag_snapshot`), and the quarantined what-if `caesium run replay --set … --diff` (a descriptor-reconstructed, replay-safe-gated, side-effect-free run via the distributed worker). These causal verbs have now **shipped in the web UI** — run diff (causal cache-bust attribution), the quarantined what-if replay, the per-task `why` explainer, blame, the reproducibility receipt + `verify`, and the cross-job lineage-impact graph are all first-class affordances on the run/task surfaces, each gated by a Playwright e2e (incl. an auth-enabled lane) that drives the real UI against a live backend — see the completed [Data-Plane Memory UI](exec-plans/completed/data-plane-memory-ui.md) plan. What remains of the original §3.4 vision is the literal interactive timeline scrubber (state-at-each-point step-through); the causal verbs above deliver its diagnostic substance.
+**Status**: Partially shipped via the [data-plane-memory](design/data-plane-memory.md) substrate. `caesium why <run> --task <t>` reimagines the causal half of this item — a field-level, machine-checkable explanation of why a task ran/skipped/re-ran (the discriminating `HashInput` field + trigger causation), reconstructed from the persisted decomposed hash + event store rather than a UI state-viewer. A git-committable reproducibility receipt + `caesium verify` and append-only DAG-topology history also land here. The remaining causal verbs have now **shipped** ([Exec Plan: Data-Plane Memory II](exec-plans/completed/data-plane-memory-ii.md)): `caesium run diff` (causal cache-bust attribution across two runs), `caesium blame` (commit/snapshot topology attribution over `dag_snapshot`), and the quarantined what-if `caesium run replay --set … --diff` (a descriptor-reconstructed, replay-safe-gated, side-effect-free run via the distributed worker). These causal verbs have now **shipped in the web UI** — run diff (causal cache-bust attribution), the quarantined what-if replay, the per-task `why` explainer, blame, the reproducibility receipt + `verify`, and the cross-job lineage-impact graph are all first-class affordances on the run/task surfaces, each gated by a Playwright e2e (incl. an auth-enabled lane) that drives the real UI against a live backend — see the completed [Data-Plane Memory UI](exec-plans/completed/data-plane-memory-ui.md) plan. What remains of the original §3.4 vision is the literal interactive timeline scrubber (state-at-each-point step-through); the causal verbs above deliver its diagnostic substance.
 
 **Current state**: Debugging failed runs requires manual log inspection. No way to compare two runs side-by-side.
 
@@ -213,7 +213,7 @@ steps:
 
 **Delivered state**: Failures open an incident that a container-native LLM agent triages using Caesium's causal primitives (`why`, run diff, receipts, lineage impact, quarantined replay as a what-if sandbox) and remediates within a declarative, tiered, server-enforced action policy — retrying late-file extracts on a schedule, proposing human-approved schema patches for vendor drift, pausing lineage-adjacent jobs on credential failures — escalating to humans with the diagnosis already done.
 
-**Design doc**: [`design-agent-in-the-loop.md`](design-agent-in-the-loop.md)
+**Design doc**: [`design/agent-in-the-loop.md`](design/agent-in-the-loop.md)
 
 **Plan**: [`agent-in-the-loop-remediation.md`](exec-plans/completed/agent-in-the-loop-remediation.md) — decomposed into 8 streams, phased 0→3 (Phase 0 = diagnosed pages, no LLM); all runtime streams merged. The `metadata.remediation` surface is documented in [`job-schema-reference.md`](job-schema-reference.md#remediation).
 
@@ -227,15 +227,15 @@ Each design has an execution plan under `docs/exec-plans/{active,completed}/` de
 
 | Design | One-liner | Doc | Plan |
 |--------|-----------|-----|------|
-| Resource right-sizing | Learn per-step memory/CPU from run history; propose right-sized requests (GitOps PR) and retry OOM at escalated memory | [`design-resource-right-sizing.md`](design-resource-right-sizing.md) | [`resource-right-sizing.md`](exec-plans/active/resource-right-sizing.md) |
-| Dynamic fan-out | **Shipped.** A step emits a partition list; Caesium materializes N parallel task instances with per-partition cache identity | [`design-dynamic-fanout.md`](design-dynamic-fanout.md) | [`dynamic-fanout.md`](exec-plans/completed/dynamic-fanout.md) |
-| Deadline-window scheduling | Declare a window + deadline instead of a cron minute; scheduler picks the start from load/cost/carbon signals with a deadline-safe latest start (P0 re-cut: predictor + deadline-safe force-start; load/cost/carbon signals parked — see Phase 5) | [`design-window-scheduling.md`](design-window-scheduling.md) | [`window-scheduling.md`](exec-plans/active/window-scheduling.md) |
-| Freshness-driven scheduling | **Shipped.** Declare freshness SLOs on datasets; execution derives from lineage + data arrival instead of cron guesses — the `datasets` jobdef surface, freshness evaluator, arrival signals, `GET /v1/datasets*`, Console freshness UI, P1 skip-when-fresh, and P2 `trigger: {type: freshness}` all land | [`design-freshness-scheduling.md`](design-freshness-scheduling.md) | [`freshness-scheduling.md`](exec-plans/completed/freshness-scheduling.md) |
-| Pipeline backtesting | Replay a code change over recorded production runs in quarantine; report output deltas in the PR before merge | [`design-backtesting.md`](design-backtesting.md) | [`backtesting.md`](exec-plans/active/backtesting.md) |
-| Contract enforcement | **Shipped.** Cross-job schema-compatibility checks at lint/diff/apply with named consumers, REST/CLI/Console graph surfaces, JobDefs diff badges, and an intentional-break acknowledgement path | [`design-contract-enforcement.md`](design-contract-enforcement.md) | `exec-plans/completed/contract-enforcement.md` |
-| Data circuit breaker | Statistical assertions on step outputs; violations hold the dataset so downstream jobs skip poison instead of consuming it | [`design-data-circuit-breaker.md`](design-data-circuit-breaker.md) | [`data-circuit-breaker.md`](exec-plans/active/data-circuit-breaker.md) |
-| `caesium reproduce` | **Shipped.** Descriptor endpoint plus `caesium reproduce` local single-task execution with `--dry-run`, run mode, `--diff` exit 3, `--shell`, `--image` fix-testing, `--resolve-secrets`, and explicit fidelity summary | [`design-reproduce.md`](design-reproduce.md) | [`reproduce.md`](exec-plans/completed/reproduce.md) |
-| DAG-native infrastructure deployment | **Shipped.** Dependency-ordered Terraform (first binding) stacks as ordinary DAGs — the `cache.chain: values` key plus the `caesiumcloud/{git-source,tf-discover,tf-warm,tf-runner}` reagent images, change-gated by a container-computed fingerprint, shared read-only provider mirror, mandatory drift job, reference manifests, and a Console proposal panel | [`superpowers/specs/2026-08-25-dag-native-infrastructure-deployment-design.md`](superpowers/specs/2026-08-25-dag-native-infrastructure-deployment-design.md) | [`infra-deploy.md`](exec-plans/completed/infra-deploy.md) |
+| Resource right-sizing | Learn per-step memory/CPU from run history; propose right-sized requests (GitOps PR) and retry OOM at escalated memory | [`design/resource-right-sizing.md`](design/resource-right-sizing.md) | [`resource-right-sizing.md`](exec-plans/active/resource-right-sizing.md) |
+| Dynamic fan-out | **Shipped.** A step emits a partition list; Caesium materializes N parallel task instances with per-partition cache identity | [`design/dynamic-fanout.md`](design/dynamic-fanout.md) | [`dynamic-fanout.md`](exec-plans/completed/dynamic-fanout.md) |
+| Deadline-window scheduling | Declare a window + deadline instead of a cron minute; scheduler picks the start from load/cost/carbon signals with a deadline-safe latest start (P0 re-cut: predictor + deadline-safe force-start; load/cost/carbon signals parked — see Phase 5) | [`design/window-scheduling.md`](design/window-scheduling.md) | [`window-scheduling.md`](exec-plans/active/window-scheduling.md) |
+| Freshness-driven scheduling | **Shipped.** Declare freshness SLOs on datasets; execution derives from lineage + data arrival instead of cron guesses — the `datasets` jobdef surface, freshness evaluator, arrival signals, `GET /v1/datasets*`, Console freshness UI, P1 skip-when-fresh, and P2 `trigger: {type: freshness}` all land | [`design/freshness-scheduling.md`](design/freshness-scheduling.md) | [`freshness-scheduling.md`](exec-plans/completed/freshness-scheduling.md) |
+| Pipeline backtesting | Replay a code change over recorded production runs in quarantine; report output deltas in the PR before merge | [`design/backtesting.md`](design/backtesting.md) | [`backtesting.md`](exec-plans/active/backtesting.md) |
+| Contract enforcement | **Shipped.** Cross-job schema-compatibility checks at lint/diff/apply with named consumers, REST/CLI/Console graph surfaces, JobDefs diff badges, and an intentional-break acknowledgement path | [`design/contract-enforcement.md`](design/contract-enforcement.md) | `exec-plans/completed/contract-enforcement.md` |
+| Data circuit breaker | Statistical assertions on step outputs; violations hold the dataset so downstream jobs skip poison instead of consuming it | [`design/data-circuit-breaker.md`](design/data-circuit-breaker.md) | [`data-circuit-breaker.md`](exec-plans/active/data-circuit-breaker.md) |
+| `caesium reproduce` | **Shipped.** Descriptor endpoint plus `caesium reproduce` local single-task execution with `--dry-run`, run mode, `--diff` exit 3, `--shell`, `--image` fix-testing, `--resolve-secrets`, and explicit fidelity summary | [`design/reproduce.md`](design/reproduce.md) | [`reproduce.md`](exec-plans/completed/reproduce.md) |
+| DAG-native infrastructure deployment | **Shipped.** Dependency-ordered Terraform (first binding) stacks as ordinary DAGs — the `cache.chain: values` key plus the `caesiumcloud/{git-source,tf-discover,tf-warm,tf-runner}` reagent images, change-gated by a container-computed fingerprint, shared read-only provider mirror, mandatory drift job, reference manifests, and a Console proposal panel | [`design/2026-08-25-dag-native-infrastructure-deployment-design.md`](design/2026-08-25-dag-native-infrastructure-deployment-design.md) | [`infra-deploy.md`](exec-plans/completed/infra-deploy.md) |
 
 ---
 
@@ -292,36 +292,36 @@ Features that were previously on the roadmap and are now shipped:
 
 | Feature | Design Doc | Status |
 |---------|-----------|--------|
-| Smart incremental execution & task caching | [`design-incremental-execution.md`](design-incremental-execution.md) | Shipped (Phase 1) |
+| Smart incremental execution & task caching | [`design/incremental-execution.md`](design/incremental-execution.md) | Shipped (Phase 1) |
 | Data contracts / schema validation | [`brainstorm-differentiators.md`](archive/brainstorm-differentiators.md) §2 | Shipped |
 | Local dev experience (`caesium dev`, `caesium test`) | [`brainstorm-differentiators.md`](archive/brainstorm-differentiators.md) §4 | Shipped |
 | Backfill with reprocess modes | [`backfill.md`](backfill.md) | Shipped |
-| OpenLineage integration | [`open_lineage.md`](open_lineage.md) | Shipped |
+| OpenLineage integration | [`open-lineage.md`](open-lineage.md) | Shipped |
 | Git-based job synchronization | — | Shipped |
 | Harness testing framework | — | Shipped |
-| Full-featured HTTP triggers & webhook ingestion | [`design-event-triggers.md`](design-event-triggers.md) WS1 | Shipped |
-| Task retries with exponential backoff | [`airflow-parity.md`](airflow-parity.md) | Shipped |
-| Trigger rules (all_success, all_done, etc.) | [`airflow-parity.md`](airflow-parity.md) | Shipped |
+| Full-featured HTTP triggers & webhook ingestion | [`design/event-triggers.md`](design/event-triggers.md) WS1 | Shipped |
+| Task retries with exponential backoff | [`design/airflow-parity.md#what-shipped`](design/airflow-parity.md#what-shipped) | Shipped |
+| Trigger rules (all_success, all_done, etc.) | [`design/airflow-parity.md#what-shipped`](design/airflow-parity.md#what-shipped) | Shipped |
 | Embedded web UI with DAG visualization | [`ui_implementation_plan.md`](archive/ui_implementation_plan.md) | Shipped |
 | Native SSO authentication | [`sso-authentication.md`](sso-authentication.md) | Shipped (OIDC, SAML, LDAP) |
-| Freshness-driven scheduling | [`design-freshness-scheduling.md`](design-freshness-scheduling.md) | Shipped ([plan](exec-plans/completed/freshness-scheduling.md); streams A–G) |
-| Cross-job contract enforcement | [`design-contract-enforcement.md`](design-contract-enforcement.md) | Shipped (`exec-plans/completed/contract-enforcement.md`; contract graph/check, apply enforcement, Console graph and diff badges) |
-| Agent-in-the-loop ETL remediation | [`design-agent-in-the-loop.md`](design-agent-in-the-loop.md) | Shipped ([plan](exec-plans/completed/agent-in-the-loop-remediation.md); runtime streams) |
+| Freshness-driven scheduling | [`design/freshness-scheduling.md`](design/freshness-scheduling.md) | Shipped ([plan](exec-plans/completed/freshness-scheduling.md); streams A–G) |
+| Cross-job contract enforcement | [`design/contract-enforcement.md`](design/contract-enforcement.md) | Shipped (`exec-plans/completed/contract-enforcement.md`; contract graph/check, apply enforcement, Console graph and diff badges) |
+| Agent-in-the-loop ETL remediation | [`design/agent-in-the-loop.md`](design/agent-in-the-loop.md) | Shipped ([plan](exec-plans/completed/agent-in-the-loop-remediation.md); runtime streams) |
 
 ---
 
 ## Related Documents
 
-- [Exec Plan: Distributed Testing and Performance Confidence](exec-plans/active/distributed-testing.md) — W1–W6 implementation merged. W7 accepted D3, whose console owner-crash journey passed live on kind (#581), and E3, whose harness noise was removed and whose comparison came out conclusive (#584). W7 also bounded dqlite's retained Raft log (#585); F2's snapshot catch-up then passed twice under 1Gi. W8 fixed ordinal-0 rejoin (#591, closes #582), recorded the isolated rollback outcome (#590) and calibrated performance budgets with a fixed baseline on the recorded local runner (#589); the merged-tree cluster qualification passed, so E4 and F2 are accepted. The W8 closure interview resolved Q1/Q2/Q5/Q6 (hosted runners only, ≤15-minute PR budget, approved budgets rule, `ci-ok` required with an active merge queue). 24 of 31 items are checked; G6, single-host F3, hosted G4 and four follow-up items (H1–H4) remain for W9. Operating guidance: [ci.md](ci.md). W9 promoted the standalone lifecycle, fuzz, mutation-validator and coverage-ratchet lanes into `ci-ok` (#593), added stale-member removal (#595), fixed the dqlite TCP_NODELAY read stall (#594, closes #588), pinned the mixed-version window and attributed the leader memory residual (#596), shipped the single-host soak harness whose first runs surfaced six product findings (#597; #598–#603), and refreshed the coverage floors (#607), and scheduled the nightly qualification set with a publish gate on same-SHA release evidence (#610); 30 of 31 items are checked; F3 remains open on product findings #598–#603.
-- [Differentiation Strategy: Where Caesium Wins](differentiation-strategy.md) — positioning thesis; re-ranks this roadmap behind a sovereignty-led funnel (re-scored 2026-09-05)
+- [Exec Plan: Distributed Testing and Performance Confidence](exec-plans/active/distributed-testing.md) — cross-cutting test plan; `ci-ok` is a required check on `master` with an active merge queue since 2026-09-28. 30 of 31 items are checked; F3 remains open on product findings #598–#603. The plan's `## Progress` section is the live status; operating guidance is in [ci.md](ci.md).
+- [Differentiation Strategy: Where Caesium Wins](design/differentiation-strategy.md) — positioning thesis; re-ranks this roadmap behind a sovereignty-led funnel (re-scored 2026-09-05)
 - [Closed-Loop Orchestration — The Arc](exec-plans/active/closed-loop-arc.md) — the Phase 5 umbrella: program-level source of truth sequencing Plans 0–4 and the closing "tell it" wave
 - [Exec Plan: Trust the Substrate](exec-plans/completed/trust-the-substrate.md) — Plan 0 of the arc: known-bug fixes, widened auth-enabled integration lane, CI gating, `v0.1.0` with a downloadable CLI, dead-scaffolding removal, unfiled follow-ups filed
 - [Exec Plan: Sovereignty Execution](exec-plans/completed/sovereignty-execution.md) — operationalizes the positioning pivot (README repositioning + Kueue delegation); shipped
-- [Design: Data-Plane Memory](design-data-plane-memory.md) — the second-act substrate enabling explain/reproduce/skip
+- [Design: Data-Plane Memory](design/data-plane-memory.md) — the second-act substrate enabling explain/reproduce/skip
 - [Exec Plan: Data-Plane Memory](exec-plans/completed/data-plane-memory.md) — the substrate build plan (streams A–D); shipped (#213–#222)
 - [Exec Plan: Data-Plane Memory II](exec-plans/completed/data-plane-memory-ii.md) — the completed follow-on: causal `run diff`, quarantined `replay`, and `blame` (all shipped)
 - [Brainstorm: Killer Features Beyond Airflow Parity](archive/brainstorm-differentiators.md) — original idea backlog
-- [Design: Smart Incremental Execution](design-incremental-execution.md) — shipped cache system
-- [Design: Event-Driven Triggers](design-event-triggers.md) — P0 trigger overhaul
-- [Design: Concurrency & Priority](design-concurrency-priority.md) — P1 scheduling controls
-- [Design: Agent-in-the-Loop ETL Remediation](design-agent-in-the-loop.md) — P3 autonomous failure triage & remediation
+- [Design: Smart Incremental Execution](design/incremental-execution.md) — shipped cache system
+- [Design: Event-Driven Triggers](design/event-triggers.md) — P0 trigger overhaul
+- [Design: Concurrency & Priority](design/concurrency-priority.md) — P1 scheduling controls
+- [Design: Agent-in-the-Loop ETL Remediation](design/agent-in-the-loop.md) — P3 autonomous failure triage & remediation

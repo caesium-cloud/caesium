@@ -321,43 +321,68 @@ func TestArchitectureBoundaries(t *testing.T) {
 	}
 }
 
-func TestDocsREADMEIndexesEveryTopLevelDoc(t *testing.T) {
-	root := repoRoot(t)
+// docsIndexDirs are the documentation directories whose Markdown files must
+// each be linked from docs/README.md: the operator guides, the design records,
+// and the execution plans still in flight. Historical records under
+// docs/archive/ are indexed by docs/archive/README.md instead.
+var docsIndexDirs = []string{"docs", "docs/design", "docs/exec-plans/active"}
 
-	entries, err := filepath.Glob(filepath.Join(root, "docs", "*.md"))
-	if err != nil {
-		t.Fatalf("glob docs: %v", err)
-	}
+func TestDocsREADMEIndexesEveryDoc(t *testing.T) {
+	assertIndexLinksEveryDoc(t, repoRoot(t), "docs/README.md", docsIndexDirs)
+}
 
-	expected := make(map[string]struct{}, len(entries))
-	for _, entry := range entries {
-		base := filepath.Base(entry)
-		if base == "README.md" {
-			continue
+func TestArchiveREADMEIndexesEveryArchivedDoc(t *testing.T) {
+	assertIndexLinksEveryDoc(t, repoRoot(t), "docs/archive/README.md", []string{"docs/archive"})
+}
+
+// assertIndexLinksEveryDoc fails when a Markdown file under dirs is not the
+// target of a `[text](path.md)` link in indexRel, or when a link in indexRel
+// points at a file that does not exist. Link paths are resolved relative to
+// the index file's directory, so subdirectory links such as
+// `design/foo.md` and parent links such as `../roadmap.md` both count.
+func assertIndexLinksEveryDoc(t *testing.T, root, indexRel string, dirs []string) {
+	t.Helper()
+
+	indexDir := filepath.Join(root, filepath.Dir(filepath.FromSlash(indexRel)))
+	expected := make(map[string]struct{})
+	for _, dir := range dirs {
+		entries, err := filepath.Glob(filepath.Join(root, filepath.FromSlash(dir), "*.md"))
+		if err != nil {
+			t.Fatalf("glob %s: %v", dir, err)
 		}
-		expected[base] = struct{}{}
+		for _, entry := range entries {
+			if entry == filepath.Join(indexDir, "README.md") {
+				continue
+			}
+			rel, err := filepath.Rel(indexDir, entry)
+			if err != nil {
+				t.Fatalf("rel %s: %v", entry, err)
+			}
+			expected[filepath.ToSlash(rel)] = struct{}{}
+		}
 	}
 
-	readmePath := filepath.Join(root, "docs", "README.md")
-	readmeBytes, err := os.ReadFile(readmePath)
+	indexBytes, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(indexRel)))
 	if err != nil {
-		t.Fatalf("read docs README: %v", err)
+		t.Fatalf("read %s: %v", indexRel, err)
 	}
 
-	re := regexp.MustCompile(`\(([^)]+\.md)\)`)
+	re := regexp.MustCompile(`\]\(([^)#\s]+\.md)(?:#[^)]*)?\)`)
 	actual := make(map[string]struct{})
-	for _, match := range re.FindAllStringSubmatch(string(readmeBytes), -1) {
-		base := filepath.Base(match[1])
-		if base == "README.md" {
+	var broken []string
+	for _, match := range re.FindAllStringSubmatch(string(indexBytes), -1) {
+		link := filepath.ToSlash(filepath.Clean(filepath.FromSlash(match[1])))
+		if _, err := os.Stat(filepath.Join(indexDir, filepath.FromSlash(link))); err != nil {
+			broken = append(broken, match[1])
 			continue
 		}
-		actual[base] = struct{}{}
+		actual[link] = struct{}{}
 	}
 
 	missing := setDifference(expected, actual)
-	extra := setDifference(actual, expected)
-	if len(missing) > 0 || len(extra) > 0 {
-		t.Fatalf("docs/README.md index drifted; missing=%v extra=%v", missing, extra)
+	sort.Strings(broken)
+	if len(missing) > 0 || len(broken) > 0 {
+		t.Fatalf("%s index drifted; unindexed=%v broken=%v", indexRel, missing, broken)
 	}
 }
 
@@ -365,24 +390,24 @@ func TestPlanningAndHistoricalDocsCarryStatusBanner(t *testing.T) {
 	root := repoRoot(t)
 
 	files := []string{
-		"docs/design-agent-in-the-loop.md",
-		"docs/design-airflow-parity.md",
-		"docs/design-backtesting.md",
-		"docs/design-concurrency-priority.md",
-		"docs/design-contract-enforcement.md",
-		"docs/design-data-circuit-breaker.md",
-		"docs/design-data-plane-memory.md",
-		"docs/design-database-locking-fix.md",
-		"docs/design-dynamic-fanout.md",
-		"docs/design-event-triggers.md",
-		"docs/design-freshness-scheduling.md",
-		"docs/design-incremental-execution.md",
-		"docs/design-quarantined-replay.md",
-		"docs/design-reproduce.md",
-		"docs/design-resource-right-sizing.md",
-		"docs/design-scaling-job-execution.md",
-		"docs/design-window-scheduling.md",
-		"docs/differentiation-strategy.md",
+		"docs/design/agent-in-the-loop.md",
+		"docs/design/airflow-parity.md",
+		"docs/design/backtesting.md",
+		"docs/design/concurrency-priority.md",
+		"docs/design/contract-enforcement.md",
+		"docs/design/data-circuit-breaker.md",
+		"docs/design/data-plane-memory.md",
+		"docs/design/database-locking-fix.md",
+		"docs/design/dynamic-fanout.md",
+		"docs/design/event-triggers.md",
+		"docs/design/freshness-scheduling.md",
+		"docs/design/incremental-execution.md",
+		"docs/design/quarantined-replay.md",
+		"docs/design/reproduce.md",
+		"docs/design/resource-right-sizing.md",
+		"docs/design/scaling-job-execution.md",
+		"docs/design/window-scheduling.md",
+		"docs/design/differentiation-strategy.md",
 	}
 
 	for _, rel := range files {

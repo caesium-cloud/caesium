@@ -1,359 +1,197 @@
 <p align="center">
-  <img src="brand/caesium-icon.svg" width="120" alt="Caesium logo" />
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="brand/caesium-logo-dark.svg">
+    <source media="(prefers-color-scheme: light)" srcset="brand/caesium-logo-light.svg">
+    <img src="brand/caesium-logo-dark.svg" width="380" alt="Caesium">
+  </picture>
 </p>
 
-<h1 align="center">caesium</h1>
-
 <p align="center">
-  <strong>The zero-dependency, self-hosted DAG scheduler — one Go binary, no Postgres, no Redis, no broker. Runs where Airflow, Dagster, and Flyte can't.</strong>
+  <strong>A self-hosted DAG scheduler for data pipelines.<br>One Go binary. An embedded Raft database. Any container image.</strong>
 </p>
 
 <p align="center">
   <a href="https://github.com/caesium-cloud/caesium/actions/workflows/ci.yml"><img src="https://github.com/caesium-cloud/caesium/actions/workflows/ci.yml/badge.svg?branch=master" alt="CI"></a>
-  <a href="https://pkg.go.dev/github.com/caesium-cloud/caesium"><img src="https://pkg.go.dev/badge/github.com/caesium-cloud/caesium.svg" alt="Go Reference"></a>
-  <a href="https://goreportcard.com/report/github.com/caesium-cloud/caesium"><img src="https://goreportcard.com/badge/github.com/caesium-cloud/caesium" alt="Go Report Card"></a>
   <a href="https://github.com/caesium-cloud/caesium/releases"><img src="https://img.shields.io/github/release/caesium-cloud/caesium.svg" alt="Release"></a>
-  <a href="https://hub.docker.com/r/caesiumcloud/caesium/"><img src="https://img.shields.io/docker/pulls/caesiumcloud/caesium?style=plastic" alt="Docker Pulls"></a>
+  <a href="https://hub.docker.com/r/caesiumcloud/caesium/"><img src="https://img.shields.io/docker/pulls/caesiumcloud/caesium" alt="Docker Pulls"></a>
+  <a href="https://goreportcard.com/report/github.com/caesium-cloud/caesium"><img src="https://goreportcard.com/badge/github.com/caesium-cloud/caesium" alt="Go Report Card"></a>
+  <a href="https://pkg.go.dev/github.com/caesium-cloud/caesium"><img src="https://pkg.go.dev/badge/github.com/caesium-cloud/caesium.svg" alt="Go Reference"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-blue.svg" alt="License"></a>
 </p>
 
-Caesium runs your data pipelines as declarative YAML DAGs on Docker, Podman, or Kubernetes — and ships as a **single self-contained binary with an embedded database**. No PostgreSQL, no Redis, no message broker, no control plane to babysit. `scp` one binary to a laptop, an edge node, an air-gapped cluster, or a regulated on-prem environment, and it just runs. Everything the managed orchestrators paywall — HA, RBAC, SSO, audit logging, Kubernetes execution — is free and self-hosted, forever.
+<p align="center">
+  <a href="#quick-start">Quick start</a> ·
+  <a href="docs/getting-started.md">Getting started</a> ·
+  <a href="docs/README.md">Documentation</a> ·
+  <a href="docs/roadmap.md">Roadmap</a> ·
+  <a href="CONTRIBUTING.md">Contributing</a>
+</p>
 
-You still operate it through a REST API, Prometheus metrics, and an embedded React UI.
+---
 
-## Why Caesium
+Caesium runs pipelines you write as YAML DAGs. Every step is a container image. Caesium schedules it on Docker, Podman, or Kubernetes, skips work whose inputs have not changed, checks the data that flows between steps, and keeps a record of every run so you can ask it what happened and why.
 
-Most orchestrators force a trade-off Caesium refuses:
+It ships as a single static binary with an embedded, Raft-replicated SQLite database ([dqlite](https://dqlite.io)). There is no PostgreSQL to run, no Redis, no message broker, and no vendor control plane. High availability, RBAC, SSO, audit logging, lineage, and Kubernetes execution are all in the Apache-2.0 build.
 
-- **vs. Airflow / Dagster / Flyte** — they're data-aware, but they make you stand up and operate Postgres, Redis, Kafka, or a Kubernetes control plane, and they paywall the parts that matter (HA, RBAC, SSO, lineage). Caesium is one binary on embedded distributed SQLite (dqlite/Raft): HA out of the box, nothing external to run, none of it gated behind a paid tier.
-- **vs. raw Kubernetes + Kueue + Argo** — they schedule containers but understand nothing about your data. Caesium adds content-addressed caching, typed data contracts between steps, lineage, backfills, and a local-to-prod dev loop on top of *any* container image — no SDK, no language lock-in.
-
-If you've searched for a *lightweight Airflow alternative with no database*, a *self-hosted orchestrator that doesn't need Postgres*, or an *air-gapped pipeline scheduler*, that's the gap Caesium fills. See [`docs/differentiation-strategy.md`](docs/differentiation-strategy.md) for the full positioning.
-
-## Beyond scheduling — what you can ask Caesium
-
-Caesium remembers every run, so you can interrogate it after the fact instead of re-reading logs:
-
-- **`caesium why <run-id> --task <task> --job-id <job-id>`** — the per-task causal explainer: why a task ran, was skipped, or failed. See [docs/design-data-plane-memory.md](docs/design-data-plane-memory.md).
-- **`caesium blame <job-id-or-alias>`** — which change (jobdef, image, input) broke a run. See [docs/design-data-plane-memory.md](docs/design-data-plane-memory.md).
-- **`caesium run diff <left-run> <right-run> --job-id <job-id>`** — compare two runs of the same job and see exactly what differed. See [docs/design-data-plane-memory.md](docs/design-data-plane-memory.md).
-- **`caesium run replay <run-id> --job-id <job-id>`** — a quarantined, side-effect-free re-execution of a completed run for what-if analysis. See [docs/design-quarantined-replay.md](docs/design-quarantined-replay.md).
-- **`caesium reproduce <run-id> --job-id <job-id> --task <task>`** — rebuild one historical task locally on your own Docker daemon from its recorded execution descriptor. See [docs/reproduce.md](docs/reproduce.md).
-- **`caesium receipt get`** / **`caesium verify <receipt-file>`** — fetch and verify a signed, tamper-evident execution receipt for a task. See [docs/design-data-plane-memory.md](docs/design-data-plane-memory.md).
-- **`caesium contract check|graph`** — validate and visualize cross-job schema contracts before they break downstream consumers. See [docs/design-contract-enforcement.md](docs/design-contract-enforcement.md).
-- **`caesium dataset status|list|advance`** — track dataset freshness and drive freshness-gated scheduling. See [docs/design-freshness-scheduling.md](docs/design-freshness-scheduling.md).
-- **`caesium backfill`** — replay a range of missed or historical schedule intervals. See [docs/backfill.md](docs/backfill.md).
-- **`caesium incident`** plus the agent runtime and its MCP tools — automated triage and tiered, approval-gated remediation of failed runs. See [docs/design-agent-in-the-loop.md](docs/design-agent-in-the-loop.md).
-- **Infra-deploy reagents** — model Terraform (or dbt, or any unit-pipeline tool) stacks as ordinary dependency-ordered Caesium DAGs, with unchanged stacks skipped and a shared provider cache warmed once. See [docs/infrastructure-deployment.md](docs/infrastructure-deployment.md).
-
-## Local Developer Experience
-
-Caesium is designed so job authors can validate, visualize, and execute pipelines locally before pushing them to a server.
-
-### Validate definitions
-
-```bash
-caesium test --path jobs/ --verbose
-```
-
-Use `--check-images` to strictly verify images used by Docker steps. Podman- and Kubernetes-only steps report runtime-readiness caveats without probing Docker.
-
-### Run executable harness scenarios
-
-```bash
-caesium test --scenario ./harness
-```
-
-Harness scenario files use the `Harness` kind and let you assert run status, task status, output fragments, schema-violation counts, cache hits, log content, Prometheus metric values, and emitted OpenLineage events against a real local execution.
-
-### Visualize a DAG
-
-```bash
-caesium job preview --path jobs/fanout-join.job.yaml
-```
-
-### Run locally
-
-```bash
-caesium dev --once --path jobs/nightly-etl.job.yaml
-```
-
-`caesium dev` without `--once` watches YAML files and re-runs the DAG on save. The local runner uses an in-memory SQLite database and the same execution engine as the server path.
-
-## Quick Start
-
-### 0. Install the CLI
-
-**Linux** — download the static binary from the [`v0.1.0` release](https://github.com/caesium-cloud/caesium/releases/tag/v0.1.0) (no shared-library dependencies, so it runs on a bare host):
-
-```bash
-curl -LO https://github.com/caesium-cloud/caesium/releases/download/v0.1.0/caesium-linux-amd64   # or caesium-linux-arm64
-curl -LO https://github.com/caesium-cloud/caesium/releases/download/v0.1.0/SHA256SUMS
-sha256sum --ignore-missing -c SHA256SUMS
-chmod +x caesium-linux-amd64
-sudo mv caesium-linux-amd64 /usr/local/bin/caesium
-```
-
-Linux only — there is no macOS or Windows binary; the toolchain builds `GOOS=linux` against CGO dqlite.
-
-**macOS, or anywhere Docker is available** — clone the repo and run the CLI inside the release image instead:
-
-```bash
-git clone https://github.com/caesium-cloud/caesium.git
-cd caesium
-just tag=v0.1.0 cli   # writes ./.tmp/caesium-cli/caesium, a wrapper that runs the CLI inside caesiumcloud/caesium:v0.1.0
-./.tmp/caesium-cli/caesium job lint --path jobs/
-```
-
-On macOS, address a server running on the Mac as `http://host.docker.internal:8080` rather than `localhost`. `just run` (see [Server Workflow](#server-workflow)) remains the from-source path for running the server itself.
-
-The wrapper is what makes `caesium dev --once`, harness scenarios, `--check-images`, and `caesium reproduce` work on macOS: at **invocation** time it mounts the host container runtime socket into the CLI container and sets `DOCKER_HOST=unix:///var/run/docker.sock`. Lookup order:
-
-1. `DOCKER_HOST` when it is a `unix://` path
-2. `CAESIUM_SOCK` if set
-3. Docker Desktop's `$HOME/.docker/run/docker.sock` (or `$HOME/.docker/desktop/docker.sock`) if that socket exists
-4. `/var/run/docker.sock`, or the Podman socket when `CAESIUM_PODMAN=true`
-
-If a command needs the runtime and the socket is missing, the wrapper exits with an error (start Docker Desktop, or set `DOCKER_HOST` / `CAESIUM_SOCK`) instead of starting a container that cannot talk to Docker. `job lint`, `job preview`, and `--help` do not require the socket.
-
-If `KUBECONFIG` is set, that file is used; otherwise `CAESIUM_KUBERNETES_CONFIG/.kube/config` or `$HOME/.kube/config`. The wrapper flattens file-referenced certs/keys (`certificate-authority: ca.crt`, client cert/key) into `*-data` fields, then mounts the result at `/caesium-kube/.kube/config` with `CAESIUM_KUBERNETES_CONFIG=/caesium-kube` (what the Kubernetes engine actually reads). This shares the selected host credentials with the CLI container.
-
-**Host `kubectl` is required when a kubeconfig is selected**; the wrapper uses its offline `config view --raw --flatten` parser, including normal YAML comments and quoting. Without a kubeconfig, host `kubectl` is not needed.
-
-Each invocation mounts its own mode-600 file in a mode-700 temporary directory. The wrapper forwards termination signals and removes that directory after the container exits, including failed commands.
-
-**Access boundary:** a wrapper invocation that mounts the runtime socket can create containers on the host Docker/Podman daemon, and a mounted kubeconfig is your cluster credentials. Host socket ownership is not the Docker Desktop VM's: the wrapper probes whether the CLI container can write the mounted socket as your uid and falls back to root when that probe fails (typical Docker Desktop `0:0`/`0660` socket). On Linux it still adds the socket group or runs as root when the host socket is not user-writable. Files written into `$PWD` may then be root-owned.
-
-### 1. Write a job definition
+## A pipeline in thirty lines
 
 ```yaml
 apiVersion: v1
 kind: Job
 metadata:
   alias: nightly-etl
+  schemaValidation: fail            # a step that emits the wrong shape fails, not its consumers
 trigger:
   type: cron
   configuration:
     cron: "0 2 * * *"
-    timezone: "UTC"
+    timezone: UTC
 steps:
   - name: extract
-    image: alpine:3.23
-    command: ["sh", "-c", "echo extracting"]
+    image: ghcr.io/acme/extract:1.4.2
+    command: ["python", "extract.py"]        # prints: ##caesium::output {"row_count": 48213}
+    outputSchema:
+      type: object
+      required: [row_count]
+      properties:
+        row_count: { type: integer }
   - name: transform
-    image: alpine:3.23
-    command: ["sh", "-c", "echo transforming"]
+    image: ghcr.io/acme/transform:1.4.2
+    command: ["sh", "-c", "python transform.py --rows $CAESIUM_OUTPUT_EXTRACT_ROW_COUNT"]
+    cache: true                              # skipped on the next run if its inputs are identical
   - name: load
-    image: alpine:3.23
-    command: ["sh", "-c", "echo loading"]
+    image: ghcr.io/acme/load:1.4.2
+    command: ["python", "load.py"]
+    retries: 3
+    retryDelay: 30s
+    retryBackoff: true
 ```
-
-### 2. Validate and preview it
 
 ```bash
-caesium test --path jobs/ --verbose
-caesium test --path jobs/ --check-images # strict local-Docker image gate
-caesium test --scenario ./harness
-caesium job preview --path jobs/nightly-etl.job.yaml
-caesium job lint --path jobs/
+caesium job lint --path nightly-etl.job.yaml       # schema and DAG checks, no server needed
+caesium dev --once --path nightly-etl.job.yaml     # run it on your local Docker daemon
+caesium job apply --path nightly-etl.job.yaml --server http://localhost:8080
 ```
 
-`caesium test --check-images` is a strict local Docker daemon gate: each
-referenced image must already be present, and a daemon error also fails the
-command. It never pulls from a registry. Its result reports local Docker cache
-presence only; it does not establish registry pullability, Podman runtime
-availability, or whether a target Kubernetes cluster/node can run the image.
+No SDK, no decorators, no Python environment on the scheduler. If it runs in a container, it is a Caesium step.
 
-### 3. Run it locally
+## Why Caesium
+
+**Nothing to operate but Caesium.** The scheduler, its database, its API, and its console are one process. Three nodes form a Raft cluster with no external coordinator. You can `scp` the binary to an air-gapped host, an edge box, or a regulated on-prem network and it runs. Upgrades are a binary swap.
+
+**It remembers what ran.** Every task records the exact image digest, arguments, environment, parameters, and the typed outputs of its predecessors. That record is what makes content-addressed caching safe, and it is what you query when something breaks: `caesium why`, `caesium blame`, `caesium run diff`, `caesium reproduce`, and tamper-evident receipts you can commit next to the pipeline.
+
+**Data-aware, not just DAG-aware.** Steps declare output and input schemas. Cross-job contracts are checked at lint, diff, and apply time, before a producer breaks its consumers. Datasets carry freshness SLOs, so a job can run when data arrives instead of at a time you guessed. Runs can emit OpenLineage events to any compatible consumer.
+
+**Free means free.** HA, RBAC, native OIDC / SAML / LDAP sign-in, an audit log, Kubernetes execution, lineage, and the console are in the open-source build, not behind an enterprise tier or a hosted service. See [docs/sovereignty.md](docs/sovereignty.md) for the comparison with Airflow, Dagster, Prefect, and Kestra.
+
+## What's in the box
+
+| | |
+| --- | --- |
+| **Pipelines** | YAML jobs with `lint`, `preview`, `diff`, and `apply`. Fan-out and fan-in, branching, dynamic fan-out from runtime partitions, retries with backoff, trigger rules, per-task and per-run timeouts, named volumes, `secret://` references. Git sync keeps a server in step with a repository. |
+| **Triggers** | Cron. HTTP webhooks with HMAC, bearer, or basic auth and JSONPath parameter extraction. Events with content filters and job-to-job chaining. Freshness, to run when a dataset is stale. Backfills over a date range. Manual and API starts with idempotency keys. |
+| **Execution** | Docker, Podman, and Kubernetes engines (with optional Kueue delegation). Run concurrency strategies (queue, replace, skip, fail), priorities, and shared rate limits. Content-addressed task cache with restart-from-failure. Distributed workers over a dqlite Raft cluster. `linux/amd64` and `linux/arm64`. |
+| **Data** | Typed step outputs via a stdout marker, per-step schemas, cross-job contract enforcement, dataset freshness and watermarks, OpenLineage emission, lineage impact queries. |
+| **Investigation** | `why`, `blame`, `run diff`, quarantined `run replay`, local `reproduce`, tamper-evident receipts with `verify`. Agent-assisted incident triage with approval-gated remediation, off by default. |
+| **Operations** | Embedded console with live run updates, DAG and timeline views, log streaming, and backfill controls. REST API with an SSE event stream. Prometheus metrics. API keys with roles, native SSO, audit log. Helm chart. Terraform stacks as dependency-ordered DAGs via the reagent images. |
+
+## Ask it what happened
+
+Caesium keeps the execution record, so the questions you would otherwise answer by rereading logs have commands.
+
+| Command | Answers |
+| --- | --- |
+| `caesium why <run-id> --task <task> --job-id <job-id>` | Why did this task run, get skipped, or fail? Field-level causes, not a status. |
+| `caesium blame <job-id-or-alias>` | Which change broke the job: the manifest, an image, or an input? |
+| `caesium run diff <left-run> <right-run> --job-id <job-id>` | What differed between two runs of the same job, and why? |
+| `caesium run replay <run-id> --job-id <job-id> --set k=v` | Re-execute a completed run with overrides, in quarantine, with Caesium-side side effects suppressed. |
+| `caesium reproduce <run-id> --job-id <job-id> --task <task>` | Rebuild one historical task on your own Docker daemon from its recorded descriptor. Add `--shell` to poke at it. |
+| `caesium receipt get` / `caesium verify <receipt-file>` | A tamper-evident receipt for a task you can commit to git and check later. |
+| `caesium contract check --path jobs/` | Will this manifest change break a downstream consumer's input schema? |
+| `caesium dataset status <name>` | Is this dataset fresh, stale, or held? |
+| `caesium backfill create --job-id <job-id> --start … --end …` | Replay a cron job over a range of logical dates. |
+
+The walkthrough in [docs/getting-started.md](docs/getting-started.md) ends with `why` and a receipt against a real run.
+
+## Quick start
+
+**1. Install the CLI.** Linux gets a static binary; everything else runs the CLI inside the release image.
 
 ```bash
-caesium dev --once --path jobs/nightly-etl.job.yaml
+# Linux (amd64 or arm64)
+curl -LO https://github.com/caesium-cloud/caesium/releases/download/v0.1.0/caesium-linux-amd64
+curl -LO https://github.com/caesium-cloud/caesium/releases/download/v0.1.0/SHA256SUMS
+sha256sum --ignore-missing -c SHA256SUMS
+chmod +x caesium-linux-amd64 && sudo mv caesium-linux-amd64 /usr/local/bin/caesium
 ```
-
-### 4. Start the server and apply definitions
 
 ```bash
-# Start the server
-just run
-
-# Apply definitions
-caesium job apply --path jobs/ --server http://localhost:8080
+# macOS, or anywhere with Docker: a wrapper that runs the CLI in caesiumcloud/caesium:v0.1.0
+git clone https://github.com/caesium-cloud/caesium.git && cd caesium
+just tag=v0.1.0 cli        # writes ./.tmp/caesium-cli/caesium
 ```
 
-## Features
-
-- Declarative YAML job definitions with validation, diffing, schema reporting, and Git sync.
-- DAG execution with fan-out, fan-in, retry controls, trigger rules, and run parameters.
-- Docker, Podman, and Kubernetes task runtimes.
-- Cron and HTTP triggers.
-- Distributed execution backed by dqlite, including mixed `amd64` and `arm64` clusters.
-- Embedded operator UI with live run updates, DAG inspection, backfill controls, and log streaming.
-- Smart incremental execution: cache task results and skip re-execution when inputs are unchanged.
-- OpenLineage event emission.
-- Prometheus metrics plus optional in-browser operator tools for server logs and database inspection.
-
-## Server Workflow
-
-### Prerequisites
-
-- [Docker](https://docs.docker.com/get-docker/) or Podman
-- [just](https://github.com/casey/just)
-
-### Run the server
+**2. Run a server.** It needs the host container socket to launch task containers and a volume so the embedded database survives restarts.
 
 ```bash
-just run
+docker run -d --name caesium-server -p 8080:8080 \
+  -v /var/run/docker.sock:/var/run/docker.sock -e DOCKER_HOST=unix:///var/run/docker.sock \
+  -v caesium-data:/var/lib/caesium --user 0:0 \
+  caesiumcloud/caesium:v0.1.0 start
+curl http://localhost:8080/health
 ```
 
-The API and embedded UI are served from `http://localhost:8080`.
+The console is at [http://localhost:8080](http://localhost:8080). From a clone, `just run` builds and starts the same thing from source.
 
-### Using Podman
-
-Set the following environment variables to use Podman instead of Docker:
+**3. Write a job, run it locally, apply it.** Save the YAML above as `nightly-etl.job.yaml`, or start from [docs/examples/minimal.job.yaml](docs/examples/minimal.job.yaml).
 
 ```bash
-export CAESIUM_PODMAN=true
-just run
+caesium dev --once --path nightly-etl.job.yaml
+caesium job apply --path nightly-etl.job.yaml --server http://localhost:8080
 ```
 
-When `CAESIUM_PODMAN=true`, Caesium defaults to the rootless Podman socket at
-`$XDG_RUNTIME_DIR/podman/podman.sock` (or `/run/user/$UID/podman/podman.sock`
-when `XDG_RUNTIME_DIR` is unset) and uses the `podman` CLI. Override either if
-your setup differs:
+[docs/getting-started.md](docs/getting-started.md) continues from here: trigger a run, ask `why`, fetch a receipt, and covers the macOS wrapper, Podman, and Kubernetes credentials in detail.
 
-```bash
-export CAESIUM_SOCK=/custom/path/podman.sock
-export CAESIUM_CONTAINER_CLI=podman
-just run
-```
+## Deploy
 
-| Variable | Default | Description |
-|---|---|---|
-| `CAESIUM_PODMAN` | `false` | Prefix image references with `localhost/` for Podman's local image store |
-| `CAESIUM_CONTAINER_CLI` | `docker` or `podman` when `CAESIUM_PODMAN=true` | Container CLI used by `just` recipes |
-| `CAESIUM_SOCK` | `/var/run/docker.sock` or `$XDG_RUNTIME_DIR/podman/podman.sock` when `CAESIUM_PODMAN=true` | Host-side container socket to mount into the container |
-| `CAESIUM_PORT` | `8080` | Host port to expose the server on |
+| Target | How |
+| --- | --- |
+| Single host | The `docker run` above, or the binary under systemd. See [docs/sovereignty.md](docs/sovereignty.md) for the air-gapped path. |
+| Kubernetes | `helm install caesium ./helm/caesium`, and `--set replicaCount=3` for a Raft cluster. Backup, member replacement, Kueue delegation, and air-gapped image loading are in [docs/kubernetes-deployment.md](docs/kubernetes-deployment.md). |
+| Multi-node, no Kubernetes | Point each binary at its peers with `CAESIUM_NODE_ADDRESS` and `CAESIUM_DATABASE_NODES`. Every execution and dqlite knob is in [docs/distributed-execution.md](docs/distributed-execution.md). |
 
-### Load example jobs
-
-```bash
-just hydrate
-```
-
-### Trigger a run manually
-
-```bash
-curl -X POST http://localhost:8080/v1/jobs/<job-id>/run
-```
-
-### Backfill a cron job
-
-```bash
-caesium backfill create \
-  --job-id <job-id> \
-  --start 2026-03-01T00:00:00Z \
-  --end 2026-03-03T00:00:00Z \
-  --server http://localhost:8080
-```
-
-## Job Definitions
-
-Jobs use the `apiVersion` / `kind` / `metadata` / `trigger` / `steps` schema. For full authoring guidance see [docs/job-definitions.md](docs/job-definitions.md) and the generated reference in [docs/job-schema-reference.md](docs/job-schema-reference.md).
-
-Useful CLI commands:
-
-```bash
-caesium job lint --path ./jobs
-caesium job diff --path ./jobs --server http://localhost:8080
-caesium job apply --path ./jobs --server http://localhost:8080
-caesium job schema --doc
-caesium run retry-callbacks --job-id <job-id> --run-id <run-id>
-```
-
-## Building and Testing
-
-Runtime images are published as multi-arch Docker manifests. `docker pull caesiumcloud/caesium:<tag>` resolves to the native architecture automatically.
-
-| Command | Description |
-|---|---|
-| `just build` | Build a release image for the host platform |
-| `CAESIUM_PLATFORM=linux/arm64 just build` | Cross-build for a specific architecture |
-| `just build-cross linux/arm64` | Cross-build a single platform with buildx |
-| `just build-multiarch tag=<tag>` | Build and push a multi-arch manifest |
-| `just unit-test` | Run Go unit tests with race detector and coverage |
-| `just ui-test` | Run UI unit tests and bundle budget checks |
-| `just ui-e2e` | Run Playwright against the embedded UI and a real Caesium server |
-| `just integration-test` | Run integration tests |
-| `just helm-lint` | Validate the Helm chart |
-
-Supported runtime image targets:
-
-- `linux/amd64`
-- `linux/arm64`
-
-## Operator Tools
-
-The embedded UI exposes a few optional power-user surfaces:
-
-- Server log console: enabled by `CAESIUM_LOG_CONSOLE_ENABLED=true` and backed by `GET /v1/logs/stream`, `GET /v1/logs/level`, and `PUT /v1/logs/level`.
-- Database console: enabled by `CAESIUM_DATABASE_CONSOLE_ENABLED=true` and backed by `GET /v1/database/schema` and `POST /v1/database/query`.
-- Worker inspection: `GET /v1/nodes/:address/workers`.
-- Fleet-level stats: `GET /v1/stats`.
-
-## API Reference
-
-The server exposes REST on port `8080`. When API-key auth is enabled, authentication in this release applies to the REST API, `/metrics`, and embedded UI only, and webhook delivery continues to use per-trigger webhook signature configuration rather than bearer tokens. The UI determines whether login is required through the explicit `GET /auth/status` endpoint rather than probing protected resources. Native OIDC, SAML, and LDAP SSO can be enabled alongside API keys; see [docs/sso-authentication.md](docs/sso-authentication.md).
-
-| Endpoint | Purpose |
-|---|---|
-| `GET /health` | Health check |
-| `GET /auth/status` | Report available API-key and SSO auth methods for the UI |
-| `GET /auth/whoami` | Return the current authenticated API-key or session principal |
-| `POST /auth/logout` | Revoke the current browser session |
-| `GET /metrics` | Prometheus metrics (viewer auth required when `CAESIUM_AUTH_MODE=api-key`) |
-| `GET /v1/jobs` | List jobs |
-| `GET /v1/jobs/:id` | Get one job |
-| `GET /v1/jobs/:id/tasks` | List persisted task definitions for a job |
-| `GET /v1/jobs/:id/dag` | Retrieve DAG nodes and edges |
-| `POST /v1/jobs/:id/run` | Trigger a new run; the `202` body's `outcome` is `created`, `queued`, or `skipped`, and an `Idempotency-Key` header makes retries safe (see [docs/job-definitions.md](docs/job-definitions.md#starting-runs-from-other-systems-outcomes-and-idempotency)) |
-| `PUT /v1/jobs/:id/pause` | Pause a job |
-| `PUT /v1/jobs/:id/unpause` | Unpause a job |
-| `GET /v1/jobs/:id/runs` | List runs for a job |
-| `GET /v1/jobs/:id/runs/:run_id` | Get one run |
-| `GET /v1/jobs/:id/runs/:run_id/logs?task_id=<task-id>` | Stream or retrieve task logs |
-| `POST /v1/jobs/:id/runs/:run_id/callbacks/retry` | Retry failed callbacks |
-| `POST /v1/jobs/:id/backfill` | Start a backfill |
-| `GET /v1/jobs/:id/backfills` | List backfills |
-| `PUT /v1/jobs/:id/backfills/:backfill_id/cancel` | Cancel a backfill |
-| `POST /v1/jobdefs/apply` | Apply one or more job definitions |
-| `GET /v1/triggers` | List triggers |
-| `GET /v1/atoms` | List atoms |
-| `GET /v1/events` | Subscribe to lifecycle events over SSE |
-| `GET /v1/stats` | Get aggregated job/run statistics |
-| `GET /v1/nodes/:address/workers` | Inspect worker state for one node |
-
-The log and database console endpoints are intentionally gated by environment variables because they are operator-facing debugging features rather than default public APIs.
-
-For the auth management CLI, prefer supplying credentials through `CAESIUM_API_KEY`; the `--api-key` flag remains available but is visible in process listings.
-
-When `CAESIUM_AUTH_MODE=api-key`, you must also set `CAESIUM_AUTH_KEY_HASH_SECRET` to a long random server-side secret. New and rotated API keys are stored as HMAC-SHA256 hashes derived from that secret. Existing legacy SHA-256 key hashes continue to validate after upgrade so you can roll the change out safely, but you should rotate those keys so the database no longer contains legacy unkeyed hashes.
+Authentication, SSO, and the REST API are covered in [docs/sso-authentication.md](docs/sso-authentication.md) and [docs/rest-api.md](docs/rest-api.md).
 
 ## Documentation
 
-| Guide | Description |
-|---|---|
-| [docs/README.md](docs/README.md) | Documentation index |
-| [docs/job-definitions.md](docs/job-definitions.md) | Authoring, linting, diffing, and applying manifests |
-| [docs/job-schema-reference.md](docs/job-schema-reference.md) | Generated schema reference |
-| [docs/backfill.md](docs/backfill.md) | Backfill API, CLI, and UI behavior |
-| [docs/parallel-execution-operations.md](docs/parallel-execution-operations.md) | Distributed execution configuration and troubleshooting |
-| [docs/open_lineage.md](docs/open_lineage.md) | OpenLineage transport and configuration |
-| [docs/kubernetes-deployment.md](docs/kubernetes-deployment.md) | Helm-based Kubernetes deployment |
-| [docs/load-testing-history.md](docs/load-testing-history.md) | Distributed-execution scaling load-test history (Phase 0 → 2B) |
+| | |
+| --- | --- |
+| [docs/README.md](docs/README.md) | The index. Start here. |
+| [docs/getting-started.md](docs/getting-started.md) | Install, run, write a job, ask `why`, get a receipt. |
+| [docs/job-definitions.md](docs/job-definitions.md) | The authoring reference, with the generated [schema reference](docs/job-schema-reference.md) beside it. |
+| [docs/caesium-job-llm-reference.md](docs/caesium-job-llm-reference.md) | A compact reference for coding assistants that write Caesium YAML. |
+| [docs/distributed-execution.md](docs/distributed-execution.md) | Clusters, workers, dqlite, troubleshooting. |
+| [docs/design/](docs/README.md#design-records) | One design record per feature, each with a status banner. |
+| [docs/roadmap.md](docs/roadmap.md) | Design principles and what is next. |
 
-## Contributing
+## Status
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for setup, development workflow, and PR guidance.
+Caesium is pre-1.0. The latest release is [v0.1.0](https://github.com/caesium-cloud/caesium/releases/tag/v0.1.0), with Linux binaries and a multi-arch image. The job schema is versioned (`apiVersion: v1`) and [docs/upgrade-notes.md](docs/upgrade-notes.md) lists behavior changes between releases. Current work is the closed-loop arc (data circuit breaker, resource right-sizing, backtesting), namespaces and policy-as-code for corporate SSO, and execution connectors; the plans are indexed in [docs/README.md](docs/README.md#active-execution-plans).
+
+Caesium is open source and not a managed service. There is no cloud tier; every feature is designed for self-hosting.
+
+## Building from source
+
+```bash
+just build              # release image for the host platform (containerized; no host Go toolchain needed)
+just run                # start it
+just unit-test          # Go unit tests with the race detector
+just integration-test   # drives the CLI and REST API against a real server
+```
+
+[CONTRIBUTING.md](CONTRIBUTING.md) has the full workflow, the UI and Helm checks, and a walkthrough for adding triggers, runtimes, endpoints, and console pages. Questions go to [GitHub Discussions](https://github.com/caesium-cloud/caesium/discussions).
 
 ## License
 
-See [LICENSE](LICENSE) for details.
+[Apache 2.0](LICENSE).

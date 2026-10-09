@@ -104,3 +104,5 @@ caesium job apply --path jobs/      # Deploy
 - Lint: `just lint`
 - Job definition types: `pkg/jobdef/definition.go`
 - Examples: `docs/examples/*.job.yaml`
+- CI: GitHub Actions (`.github/workflows/ci.yml`; runbook in `docs/ci.md`)
+- Repository conventions and the documentation layout: `AGENTS.md`

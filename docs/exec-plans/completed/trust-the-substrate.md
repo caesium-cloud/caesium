@@ -413,7 +413,7 @@ orders this stream first.
       Expansion only ever happens inside the producer's completion transaction,
       so such a template can never materialize: `advanceCrossStepSuccessorsTx`
       now skips it with `fan-out producer %q did not produce a partition list`,
-      the resolution `docs/design-dynamic-fanout.md` already prescribes for a
+      the resolution `docs/design/dynamic-fanout.md` already prescribes for a
       group that cannot exist (`onEmpty: skip`). Pinned by
       `TestFailedFanOutProducerSkipsUnexpandedConsumerTemplate`, which also
       asserts `PendingTasksForDispatch` is left empty. Excluding templates in
@@ -514,7 +514,7 @@ orders this stream first.
       and `-distributed` lanes); `continue` is still untested end-to-end for
       the H-2 reason above. Semantics are written down in
       `docs/job-definitions.md` (trigger rules) and
-      `docs/parallel-execution-operations.md`.
+      `docs/distributed-execution.md`.
 - [x] A3. Make run cancellation reach the local executor's container. Add a
       process-wide run-cancel registry in `internal/job` (new
       `internal/job/cancel_registry.go`: `Register(runID) (ctx, release)`,
@@ -1268,7 +1268,7 @@ guard.
       plan's B4 text specifies for the no-credentials case. The Git-PR route
       (`CAESIUM_GIT_WRITE_CREDENTIALS`, `internal/incident/provenance.go`)
       is **Plan 1 Stream F's**, not this item's — say so in the code comment
-      and in `docs/design-agent-in-the-loop.md`'s banner. Arc convention 4
+      and in `docs/design/agent-in-the-loop.md`'s banner. Arc convention 4
       requires that this single apply router be **refused under
       `CAESIUM_AUTH_MODE=none`**: `apply_jobdef_patch` returns a typed refusal
       (not a panic, not a silent no-op) when `vars.AuthMode == "none"`
@@ -1296,7 +1296,7 @@ guard.
       adapter methods), `internal/incident/executor_test.go`,
       `api/rest/service/incident/*_test.go`, `cmd/start/start.go`,
       `internal/models/run.go` (only if `override_schema_gate` needs a
-      column), `docs/design-agent-in-the-loop.md` (banner caveat).
+      column), `docs/design/agent-in-the-loop.md` (banner caveat).
       Depends on: C4.
       Note: W1-ε added `Executor.ExecuteApproved(ctx, actionID)`
       (`internal/incident/approval.go`), invoked by `Service.Approve` AFTER the
@@ -1949,17 +1949,17 @@ binary to download (Ledger L14).
 - [x] N-1. `README.md` — the sole README editor in W2. (a) Add a section
       **"Beyond scheduling — what you can ask Caesium"** between `## Why
       Caesium` and `## Local Developer Experience`, one line + doc link each
-      for: `caesium why` (per-task causal explainer — `docs/design-data-plane-memory.md`),
-      `caesium blame` (which change broke the run — `docs/design-data-plane-memory.md`),
+      for: `caesium why` (per-task causal explainer — `docs/design/data-plane-memory.md`),
+      `caesium blame` (which change broke the run — `docs/design/data-plane-memory.md`),
       `caesium run diff` (two runs, what differed — same), `caesium run
-      replay` (quarantined re-execution — `docs/design-quarantined-replay.md`),
+      replay` (quarantined re-execution — `docs/design/quarantined-replay.md`),
       `caesium reproduce` (rebuild one task locally — `docs/reproduce.md`),
       `caesium receipt get` / `caesium verify` (signed execution receipts —
-      `docs/design-data-plane-memory.md`), `caesium contract check|graph`
-      (cross-job schema contracts — `docs/design-contract-enforcement.md`),
-      `caesium dataset status|list|advance` (freshness — `docs/design-freshness-scheduling.md`),
+      `docs/design/data-plane-memory.md`), `caesium contract check|graph`
+      (cross-job schema contracts — `docs/design/contract-enforcement.md`),
+      `caesium dataset status|list|advance` (freshness — `docs/design/freshness-scheduling.md`),
       `caesium backfill` (`docs/backfill.md`), `caesium incident` + the agent
-      runtime and its MCP tools (`docs/design-agent-in-the-loop.md`), the
+      runtime and its MCP tools (`docs/design/agent-in-the-loop.md`), the
       infra-deploy reagents (`docs/infrastructure-deployment.md`). (b) Add a
       real step 0 to Quick Start: download `caesium-linux-<arch>` from the
       `v0.1.0` release (URL pattern, `chmod +x`, `SHA256SUMS`), or `just
@@ -2371,11 +2371,11 @@ The plan is done when **all** of these hold:
   Stream B known limitation — L7.
 - [`../completed/agent-in-the-loop-remediation.md`](agent-in-the-loop-remediation.md)
   D1 — the approval flow whose creation half is missing (L9).
-- [`../../design-agent-in-the-loop.md`](../../design-agent-in-the-loop.md),
-  [`../../design-data-plane-memory.md`](../../design-data-plane-memory.md),
-  [`../../design-freshness-scheduling.md`](../../design-freshness-scheduling.md)
+- [`../../design/agent-in-the-loop.md`](../../design/agent-in-the-loop.md),
+  [`../../design/data-plane-memory.md`](../../design/data-plane-memory.md),
+  [`../../design/freshness-scheduling.md`](../../design/freshness-scheduling.md)
   — the designs the fixed surfaces belong to.
-- [`../../parallel-execution-operations.md`](../../parallel-execution-operations.md)
+- [`../../distributed-execution.md`](../../distributed-execution.md)
   — lane/env reference D2's `docs/ci.md` links to rather than duplicates.
 - [`../../kubernetes-deployment.md`](../../kubernetes-deployment.md) — E3's
   chart-versioning rule lands there.

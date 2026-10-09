@@ -13,7 +13,7 @@ lifecycle events (`run_completed`, `run_failed`, …) and persists them for SSE,
 but nothing routes them to triggers.
 
 This plan ships the two remaining work streams from
-[`design-event-triggers.md`](../../design-event-triggers.md): **WS2** — a reactive
+[`design/event-triggers.md`](../../design/event-triggers.md): **WS2** — a reactive
 `event` trigger type with a content matcher, a singleton router, a
 `POST /v1/events` ingestion API, and durable event observability; and **WS3** —
 trigger chaining as a special case of WS2 where the event source is the internal
@@ -48,7 +48,7 @@ For wave orchestration of the streams below, see
 
 ## Source-Of-Truth Note
 
-This plan implements WS2 + WS3 of [`design-event-triggers.md`](../../design-event-triggers.md).
+This plan implements WS2 + WS3 of [`design/event-triggers.md`](../../design/event-triggers.md).
 **The design doc is authoritative for INTENT and SCOPE** (what WS2/WS3 must do).
 **But where this plan records an explicit correction or amendment below — each
 verified against the real code — the PLAN's corrected contract wins**, and the
@@ -68,7 +68,7 @@ validation, not a structural schema change** — if an item finds it needs a str
 change, stop and reconcile against the design before proceeding.
 
 **Amendments to the design (surfaced by adversarial review of this plan, folded
-back into `design-event-triggers.md` by N-1):** (1) `POST /v1/events` gets a
+back into `design/event-triggers.md` by N-1):** (1) `POST /v1/events` gets a
 dedicated `CAESIUM_EVENT_INGEST_API_KEY` — the design said "reuse webhook auth,"
 but webhook auth is per-path signature validation with no analogue for a path-less
 endpoint; (2) a durable `event_trigger_matches` table backs `GET /v1/triggers/:id/events`
@@ -81,7 +81,7 @@ concrete `FireWithParams` and the router holds concrete `*EventTrigger` (the des
 interface snippet is wrong about the current code); (5) `Router.Route` returns a
 structured `RouteResult` through one persist-and-fire boundary (so `event_trigger_matches`
 is written atomically), not a fire-and-return-`[]uuid.UUID`. These five are the
-contracts W1/W2 follow; N-1 folds all of them into `design-event-triggers.md`.
+contracts W1/W2 follow; N-1 folds all of them into `design/event-triggers.md`.
 
 ## Progress (as of 2026-06-27)
 
@@ -103,7 +103,7 @@ foundation, every endpoint + CLI verb gated by a live-server integration test.
   hygiene clean; fixes for a hollow persistence test (DB read-back), the hot-path
   receipt write, a `-race` bug, an `http_runs_started`-before-launch count, and an
   arch-boundary (cobra under `cmd/`). Integration gate green (231s).
-- **Stream β (N-1):** roadmap §1.2 flipped to Shipped; the `design-event-triggers.md`
+- **Stream β (N-1):** roadmap §1.2 flipped to Shipped; the `design/event-triggers.md`
   banner + the **five code-verified amendments** reconciled into the doc body; the
   `event` trigger schema documented across the references; event + chaining examples
   (pinned images); README indexed — PR #261, merged `cf1b17e`. Review caught the
@@ -422,7 +422,7 @@ plan against the Stream B endpoints.
 ## Navigational / Organizational Improvements
 
 - [x] N-1. Flip `docs/roadmap.md` §1.2 from "WS2/WS3 proposed" to **Shipped**;
-      update the [`design-event-triggers.md`](../../design-event-triggers.md)
+      update the [`design/event-triggers.md`](../../design/event-triggers.md)
       `> Status:` banner (WS2/WS3 shipped) **and reconcile all FIVE design
       amendments into the doc body** (the `CAESIUM_EVENT_INGEST_API_KEY` auth knob,
       the `event_trigger_matches` table, the webhook→event bridge, the corrected
@@ -434,14 +434,14 @@ plan against the Stream B endpoints.
       `event`-trigger and a chaining example under `docs/examples/`; in
       `docs/README.md`, **UPDATE the existing backtick reference** (the plan PR
       already added `exec-plans/active/event-trigger-routing.md` to the
-      `design-event-triggers.md` bullet) — repoint it `active/` → `completed/` when
+      `design/event-triggers.md` bullet) — repoint it `active/` → `completed/` when
       this plan archives. Do NOT add a second/duplicate entry, and keep it
       backtick/inline-code form (the `TestDocsREADMEIndexesEveryTopLevelDoc`
       guardrail rejects clickable subdirectory links — PR #245 hit exactly this).
       W3-β: Reconciled roadmap/design/schema/LLM docs, added pinned event and
       chaining examples, and kept the README plan reference in backtick form.
       Runs last.
-      Files: `docs/roadmap.md`, `docs/design-event-triggers.md`,
+      Files: `docs/roadmap.md`, `docs/design/event-triggers.md`,
       `docs/job-schema-reference.md`, `docs/job-definitions.md`,
       `docs/caesium-job-llm-reference.md`, `docs/examples/`, `docs/README.md`.
       Depends on: A–D (runs last, after the runtime ships).
@@ -563,7 +563,7 @@ The plan is done when **all** of these hold:
    design-doc `> Status:` banner updated, the `event` trigger fields documented in
    the schema references with working `docs/examples/` manifests, and this plan
    indexed in `docs/README.md`.
-7. **Cross-cutting:** `docs/roadmap.md`, `docs/design-event-triggers.md`, and this
+7. **Cross-cutting:** `docs/roadmap.md`, `docs/design/event-triggers.md`, and this
    plan's per-stream `## Progress` entries reflect every shipped stream and match
    the merged PRs. (The Event-trigger UI remains explicitly deferred to a follow-on
    plan — not a gate here.)
@@ -587,7 +587,7 @@ The plan is done when **all** of these hold:
 
 ## Cross-References
 
-- [`docs/design-event-triggers.md`](../../design-event-triggers.md) — the design
+- [`docs/design/event-triggers.md`](../../design/event-triggers.md) — the design
   of record (WS1 shipped; WS2/WS3 are this plan). Source of truth.
 - [`docs/roadmap.md`](../../roadmap.md) §1.2 Event-Driven Trigger Routing — the P0
   strategic entry this plan closes.

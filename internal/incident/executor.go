@@ -16,7 +16,7 @@ import (
 	"gorm.io/datatypes"
 )
 
-// Action tiers (design-agent-in-the-loop.md, "Action catalog: typed,
+// Action tiers (docs/design/agent-in-the-loop.md, "Action catalog: typed,
 // server-enforced, tiered"). Tier semantics: tier 0/1 default autonomous, tier 2
 // autonomous only if explicitly allowed by the playbook, tier 3 always produces
 // an ApprovalRequest and is never auto-executed in v1 regardless of config.

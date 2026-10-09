@@ -3,7 +3,7 @@
 Last updated: 2026-06-20
 
 This plan implements the five-component substrate specified in
-[`docs/design-data-plane-memory.md`](../../design-data-plane-memory.md): the
+[`docs/design/data-plane-memory.md`](../../design/data-plane-memory.md): the
 work that turns Caesium's already-shipped content-addressed cache, event store,
 and OpenLineage pipeline into a *queryable memory of what data flowed and why
 each task ran*. Shipping it unlocks the EXPLAIN (`caesium why`), REPRODUCE
@@ -40,7 +40,7 @@ For drafting new plans in this same shape, see
 ## Project Posture
 
 This substrate is the **demoted "second act" / retention layer** from
-[`docs/differentiation-strategy.md`](../../differentiation-strategy.md) — it is
+[`docs/design/differentiation-strategy.md`](../../design/differentiation-strategy.md) — it is
 *not* the lead. Operational-sovereignty positioning leads; do **not** market
 these features until the substrate ships. Build implications, enforced by the
 Depends-on edges below:
@@ -56,11 +56,11 @@ Depends-on edges below:
 
 ## Source-Of-Truth Note
 
-When this plan and [`docs/design-data-plane-memory.md`](../../design-data-plane-memory.md)
+When this plan and [`docs/design/data-plane-memory.md`](../../design/data-plane-memory.md)
 disagree, the **design doc wins** — it carries the verified current-state code
 citations and the correctness-first ordering. Strategic framing (lead axis,
 do-not-market constraints) defers to
-[`docs/differentiation-strategy.md`](../../differentiation-strategy.md). Any
+[`docs/design/differentiation-strategy.md`](../../design/differentiation-strategy.md). Any
 change to the job-definition YAML contract (e.g. the `cache.pinDigests` field in
 A1) additionally defers to `pkg/jobdef/definition.go`.
 
@@ -232,7 +232,7 @@ from a tamper-prone opaque digest into a tamper-evident, explainable record.
       typed inputs + pinned digests.
       Files: new `internal/receipt/`, new `cmd/verify/` (+ `cmd/execute.go`),
       `api/rest/controller/receipt/` + service + `api/rest/bind/bind.go`,
-      `docs/design-data-plane-memory.md` (mark REPRODUCE shipped).
+      `docs/design/data-plane-memory.md` (mark REPRODUCE shipped).
       Depends on: A1 + A2.
       Done (W3-β): `internal/receipt` builds a finalized `Receipt` (sorted per-task
       identity hashes + resolved image digests + manifest content hash from the
@@ -259,7 +259,7 @@ its own design pass). Draft a follow-on once A–D land; do not fabricate items
 below the design level here.
 
 **Follow-on drafted (2026-06-20):** now scoped as
-[`../active/data-plane-memory-ii.md`](../active/data-plane-memory-ii.md)
+[`../active/data-plane-memory-ii.md`](data-plane-memory-ii.md)
 ("Data-Plane Memory II — The Causal Query Layer"), Streams A (`run diff`),
 B (quarantined `replay`), C (`blame`). A–D have shipped (#213–#222).
 
@@ -296,7 +296,7 @@ pipeline ships but emits empty datasets). Independent of Stream A.
       http transport.
       Files: `internal/lineage/mapper.go` (all 7 mappers — replace `[]Dataset{}`),
       `internal/lineage/facets.go`, new `internal/models/lineage_dataset.go` + `internal/models/models.go` (additive),
-      `docs/open_lineage.md`. — Landed in data-plane-memory W1-γ PR.
+      `docs/open-lineage.md`. — Landed in data-plane-memory W1-γ PR.
 - [x] C2. Add a cross-job impact query ("what breaks if this table changes") over
       the dataset graph, bound to the producing step + git commit/author.
       Files: `api/rest/controller/` + `api/rest/service/` + `api/rest/bind/bind.go`,
@@ -441,7 +441,7 @@ The plan is done when **all** of these hold:
 4. **Stream D — large-object + value-verified skip**: a step emitting a >64 KB
    payload via the reference protocol succeeds, and a byte-identical re-run
    short-circuits with downstream staying green (harness scenario green).
-5. **Cross-cutting**: `docs/roadmap.md` and `docs/design-data-plane-memory.md`
+5. **Cross-cutting**: `docs/roadmap.md` and `docs/design/data-plane-memory.md`
    reflect every shipped stream (banner flipped to active, plan linked); this
    plan's per-stream `## Progress` entries match merged PRs; `just integration-test`
    is green for every stream that adds a runtime path.
@@ -465,14 +465,14 @@ The plan is done when **all** of these hold:
 
 ## Cross-References
 
-- [`docs/design-data-plane-memory.md`](../../design-data-plane-memory.md) — the
+- [`docs/design/data-plane-memory.md`](../../design/data-plane-memory.md) — the
   substrate spec and source of truth (verified current-state code citations).
-- [`docs/differentiation-strategy.md`](../../differentiation-strategy.md) — why
+- [`docs/design/differentiation-strategy.md`](../../design/differentiation-strategy.md) — why
   this is the second act, not the lead; the do-not-market constraints.
-- [`docs/design-incremental-execution.md`](../../design-incremental-execution.md)
+- [`docs/design/incremental-execution.md`](../../design/incremental-execution.md)
   — the shipped content-addressed cache and its distributed-propagation pattern
   (`PredecessorCacheHashes`/`PredecessorCacheOutputs`) that A2 follows.
-- [`docs/open_lineage.md`](../../open_lineage.md) — the shipped OpenLineage
+- [`docs/open-lineage.md`](../../open-lineage.md) — the shipped OpenLineage
   emission pipeline that Stream C populates.
 - [`docs/roadmap.md`](../../roadmap.md) — `caesium why` / run-diff overlap with
   the "live DAG debugging" item (3.4), reimagined here as *causal*.

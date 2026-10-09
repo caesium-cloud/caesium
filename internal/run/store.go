@@ -574,7 +574,7 @@ var (
 	ErrMaxConcurrentRunsReached = errors.New("run: max concurrent runs reached")
 	// ErrJobPaused is returned by RetryFromFailureAdmitted when an agent-initiated
 	// retry is refused because the job is paused. A human pause outranks an agent
-	// retry (design-agent-in-the-loop.md, retry safety valves).
+	// retry (docs/design/agent-in-the-loop.md, retry safety valves).
 	ErrJobPaused = errors.New("run: cannot retry while job is paused")
 )
 
@@ -6937,7 +6937,7 @@ func (s *Store) RetryFromFailure(runID uuid.UUID) (*JobRun, error) {
 // RetryFromFailureAdmitted is the admit-aware retry entry point used by the
 // incident action executor's retry actions (retry_from_failure, snooze_retry,
 // retry_callbacks re-run). It adds the two safety valves the plain
-// RetryFromFailure store call lacks (design-agent-in-the-loop.md):
+// RetryFromFailure store call lacks (docs/design/agent-in-the-loop.md):
 //
 //  1. It refuses while the job is Paused (returns ErrJobPaused) — a human pause
 //     outranks an agent retry.

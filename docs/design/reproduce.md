@@ -1,10 +1,10 @@
 # Design: `caesium reproduce` — Re-Execute a Historical Production Task Locally
 
 > Status: Shipped/active — implemented via
-> [`exec-plans/completed/reproduce.md`](exec-plans/completed/reproduce.md) (PRs
-> #334-#341). Siblings: [`design-quarantined-replay.md`](design-quarantined-replay.md)
-> (server-side what-if), [`design-backtesting.md`](design-backtesting.md)
-> (N-run server-side sibling), [`design-agent-in-the-loop.md`](design-agent-in-the-loop.md)
+> [`../exec-plans/completed/reproduce.md`](../exec-plans/completed/reproduce.md) (PRs
+> #334-#341). Siblings: [`quarantined-replay.md`](quarantined-replay.md)
+> (server-side what-if), [`backtesting.md`](backtesting.md)
+> (N-run server-side sibling), [`agent-in-the-loop.md`](agent-in-the-loop.md)
 > (consumes the repro one-liner in escalations).
 
 ## Problem
@@ -42,7 +42,7 @@ an SSH session.
   behavioral interface. No SDK, no agent in the image — any historical task of
   any language reproduces the same way.
 - **Data-plane memory payoff.** The descriptor/receipt substrate was built to
-  answer EXPLAIN/REPRODUCE/SKIP ([`design-data-plane-memory.md`](design-data-plane-memory.md)).
+  answer EXPLAIN/REPRODUCE/SKIP ([`data-plane-memory.md`](data-plane-memory.md)).
   The receipt is the *attestation* half of REPRODUCE; this verb is the
   *execution* half.
 - **Local-first dev story.** `caesium dev` runs tomorrow's pipeline locally
@@ -218,7 +218,7 @@ silence.
 | Host bind mounts / volumes | **Not reproduced** — recorded sources are prod paths. Warn + `--mount old=new` remap. PVC / claimTemplate / k8s volumeSource mounts cannot exist under local Docker: warned and skipped. | |
 | Engine & workload identity | **Best-effort** — podman/k8s tasks run under local Docker; `ServiceAccountName`, pod annotations, node selector, Kueue queue have no local equivalent (listed in the fidelity summary, not applied). | |
 | CPU architecture | **Best-effort** — a prod arm64 digest on an amd64 laptop runs under qemu emulation if configured (`--platform`), with real behavioral/perf differences. Warned when the manifest platform mismatches. | |
-| Resource limits | **Not recorded** in descriptor v1. When [`design-resource-right-sizing.md`](design-resource-right-sizing.md) lands recorded limits, reproduce applies them — reproducing an OOM locally becomes one command. | |
+| Resource limits | **Not recorded** in descriptor v1. When [`resource-right-sizing.md`](resource-right-sizing.md) lands recorded limits, reproduce applies them — reproducing an OOM locally becomes one command. | |
 | Wall clock / time | **Not reproduced** — the task runs *now*. `date`, TTLs, "yesterday's partition" logic all see today. | |
 | External system state | **Not reproduced — say it loudly:** reproduce replays the task's *env and inputs*, not the world. The database the task queried has moved on; the API it called returns today's answer. For tasks that read external systems, reproduction is best-effort by construction. | |
 | Side effects | **Not suppressed** — the task really executes. Blast radius = whatever the operator's laptop and locally resolved credentials can reach. Hence secrets-unresolved by default. | |
@@ -248,19 +248,19 @@ silence.
   descriptor decode/validation (`decodeBaselineTask` invariants) and env/hash
   reconstruction, and inherits its never-store-secret-values invariant, but
   discards its quarantine machinery because nothing runs inside Caesium.
-- **[`design-backtesting.md`](design-backtesting.md)** — the N-run server-side
+- **[`backtesting.md`](backtesting.md)** — the N-run server-side
   sibling: same descriptor substrate, fanned across history, executed in
   quarantine. Reproduce's `--diff` output-compare (recorded vs reproduced
   `##caesium::output` maps) is the same comparison primitive backtesting needs
   per run; build it once as a shared package.
-- **[`design-agent-in-the-loop.md`](design-agent-in-the-loop.md)** — every
+- **[`agent-in-the-loop.md`](agent-in-the-loop.md)** — every
   diagnosed page gets a repro command. The escalation the agent writes
   ("transform failed, discriminating input: `CAESIUM_OUTPUT_EXTRACT_ROW_COUNT`
   changed") appends
   `caesium reproduce <run> --job-id <id> --task transform --diff` — the human
   starts their shift with a one-liner that puts the failure in a container on
   their laptop.
-- **[`design-resource-right-sizing.md`](design-resource-right-sizing.md)** —
+- **[`resource-right-sizing.md`](resource-right-sizing.md)** —
   once recorded limits enter the descriptor, `reproduce` applies them by
   default, making "repro the OOM locally, then re-run with `--set-env` /
   a limit override to find the ceiling" a tight loop.

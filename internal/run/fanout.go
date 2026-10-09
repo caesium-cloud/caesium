@@ -751,7 +751,7 @@ func (s *Store) advanceCrossStepSuccessorsTx(
 			// fan_out_config, and the row should never be left pending here in
 			// the first place.)
 			//
-			// Skipping is what design-dynamic-fanout.md already prescribes for
+			// Skipping is what docs/design/dynamic-fanout.md already prescribes for
 			// a group that cannot materialize — the same resolution `onEmpty:
 			// skip` uses — and it keeps the group's own status truthful:
 			// `skipped` for a group that never existed, which downstream
@@ -1257,7 +1257,7 @@ func cancellableBeforeStartPredicate() (string, []any) {
 // (and the integration lane) match on it.
 //
 // NOT-YET-STARTED, not merely pending, is the contract. The design says
-// fail_fast "cancels pending siblings" (docs/design-dynamic-fanout.md:324,
+// fail_fast "cancels pending siblings" (docs/design/dynamic-fanout.md:324,
 // :691, :1111), but `status = pending` is not that set: both claim paths flip a
 // row to `running` BEFORE any container exists — ClaimNext's single-statement
 // UPDATE, and ClaimTaskForDispatch — and the worker pool may hold the claimed

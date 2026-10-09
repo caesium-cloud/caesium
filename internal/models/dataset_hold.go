@@ -29,7 +29,7 @@ const (
 
 // DatasetHold is the circuit breaker's state: one row per time a declared
 // dataset broke its data contract under `onViolation: hold`
-// (docs/design-data-circuit-breaker.md "The hold model").
+// (docs/design/data-circuit-breaker.md "The hold model").
 //
 // The producing task SUCCEEDS — the work is done, and failing it would only
 // invite a retry of the same data — and the DATASET is held instead. While a

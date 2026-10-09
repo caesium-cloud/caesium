@@ -106,17 +106,17 @@ These are baked into the skill (do not deviate):
   `just helm-lint` + `just helm-template` (+ the kind-based k8s integration
   run) for `helm/**` or Kubernetes-engine / distributed-Raft changes;
   `just integration-test-podman` for the podman engine adapter.
-- **Merge gate (read carefully — differs from a CI-required-checks repo)**:
-  `master` branch protection has **NO required status checks**
-  (`required_status_checks.contexts: []`). CI is advisory at the GitHub
-  level. The enforced gate is **`require_code_owner_reviews: true`** with
-  CODEOWNERS `@rocketbitz @RohanDalton` (`.github/CODEOWNERS`) and
-  `enforce_admins: false`. So a green CI run does NOT mechanically permit a
-  merge — a CODEOWNER approval does. Because `enforce_admins: false`, a repo
-  admin can `gh pr merge` without the review; a non-admin cannot. The
-  orchestrator attempts the merge and, if GitHub blocks it on "review
-  required", surfaces it to the user (the CODEOWNER) to approve or
-  admin-merge. See `PLAYBOOK.md` Phase 6d + Phase 7b.
+- **Merge gate**: since 2026-09-28 `ci-ok` is a **required status check**
+  on `master` and ruleset 24123341 ("master merge queue") is active, so a
+  PR normally enters the merge queue and lands only when `ci-ok` is green on
+  the queued candidate. A CODEOWNER approval (`require_code_owner_reviews:
+  true`, `.github/CODEOWNERS`) is still required, and `enforce_admins:
+  false` means a repo admin can bypass both with `gh pr merge --admin`; do
+  not use the bypass unless the user has authorised it. The orchestrator
+  attempts the merge and, if GitHub blocks it on "review required", surfaces
+  it to the user to approve or admin-merge. Re-check protection at runtime
+  (`gh api repos/caesium-cloud/caesium/branches/master/protection`); see
+  `PLAYBOOK.md` Phase 6d + Phase 7b and `docs/ci.md` §1.
 - **Stream-section protocol**: each stream agent edits ONLY (a) the
   checkbox(es) for its own items in the relevant streams/sections of the
   plan doc, and (b) the per-item note attached to those items. The
@@ -124,6 +124,7 @@ These are baked into the skill (do not deviate):
   contribute their bullet via reporting back, not via plan-doc edits to
   that section.
 - **Source of truth**: `docs/roadmap.md` for strategic priority/status;
+  `docs/design/<topic>.md` for a feature's design of record;
   `pkg/jobdef/definition.go` for the job-definition (YAML) contract. When
   the plan doc and the source of truth disagree, the source of truth wins.
 
@@ -143,7 +144,7 @@ These are baked into the skill (do not deviate):
 - **A review comment requires substantive design judgment** (not mechanical fix): the review sub-agent should reply explaining the trade-off and tag the orchestrator's report; the orchestrator surfaces this to the user as part of the final wave summary, but does NOT block the merge.
 - **CI shows a real (non-flake) regression**: stop the merge sequence for that PR; report the failing test(s) and root cause; ask the user whether to fix forward, revert, or merge with override.
 - **Integration gate fails for real (Phase 6.5)**: same disposition as a real CI regression — stop the merge for that PR, report root cause from the captured log + server container logs, ask the user.
-- **Merge gate requires a CODEOWNER approval you can't supply** (you are not a repo admin, and the PR is unapproved): stop and ask the user to approve or admin-merge. This is the one expected human-in-the-loop stop in caesium (CI is advisory; CODEOWNER review is the real gate).
+- **Merge gate requires a CODEOWNER approval you can't supply** (you are not a repo admin, and the PR is unapproved): stop and ask the user to approve or admin-merge. This is the one expected human-in-the-loop stop in caesium (`ci-ok` must be green and a CODEOWNER must approve).
 - **Merge conflict resolution requires content choices not derivable from the two sides**: stop, report the conflict regions and the choices needed.
 - **The plan doc's structure deviates from the standard "## Streams" / "## Progress" / "## Acceptance Criteria" pattern**: stop and ask the user to confirm the structural interpretation before proceeding.
 

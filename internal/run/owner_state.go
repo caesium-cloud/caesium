@@ -293,7 +293,7 @@ func (rs *RunState) ApplyCompletion(taskID uuid.UUID, status TaskStatus, branchS
 		// exclusive.
 		//
 		// Every sibling that has not STARTED, matching the design ("at first
-		// failure, cancelling pending siblings" — docs/design-dynamic-fanout.md:324,
+		// failure, cancelling pending siblings" — docs/design/dynamic-fanout.md:324,
 		// :691, :1111) and the SQL lane's failFastSkipSiblingsTx.
 		//
 		// "Pending" is the design's word for it, but pending is not the whole set

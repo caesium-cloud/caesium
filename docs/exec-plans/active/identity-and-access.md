@@ -10,7 +10,7 @@ that wants Active Directory, LDAP, SAML or Keycloak identity to flow through int
 per-team permissions.
 
 This plan ships the design in
-`docs/superpowers/specs/2026-09-16-identity-and-access-design.md`: a flat **namespace**
+`docs/design/2026-09-16-identity-and-access-design.md`: a flat **namespace**
 declared on the job manifest and carried by every job-owned resource; **grants**
 (`role @ namespace`, `*` for cluster-wide) resolved per request from one **policy-as-code
 file** that binds IdP groups or user emails to roles and declares each namespace's
@@ -63,7 +63,7 @@ Recorded in the spec's §4 decision table; the ones that shape the streams:
 
 ## Source-Of-Truth Note
 
-When this plan and `docs/superpowers/specs/2026-09-16-identity-and-access-design.md`
+When this plan and `docs/design/2026-09-16-identity-and-access-design.md`
 disagree, the spec wins. When the spec and `pkg/jobdef/definition.go` disagree about
 the manifest contract, the schema wins once Stream B1 has landed. Per-namespace run
 fairness was parked by `docs/exec-plans/active/window-scheduling.md` (its §"Global
@@ -997,7 +997,7 @@ The plan is done when **all** of these hold:
 
 ## Cross-References
 
-- `docs/superpowers/specs/2026-09-16-identity-and-access-design.md` — the design of
+- `docs/design/2026-09-16-identity-and-access-design.md` — the design of
   record (source of truth for this plan).
 - `docs/archive/design-sso-authentication.md` — the shipped SSO design this spec
   supersedes; its provider, session and CSRF decisions carry forward.
