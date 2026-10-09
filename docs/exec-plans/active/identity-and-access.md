@@ -99,15 +99,20 @@ Item checkboxes remain unchecked until merged acceptance evidence exists.
   this PR. Container-built CLI lint passed all 30 example manifests; generated
   schema guardrail passed. CI's brittle resource-filter ordering assertion was
   replaced with actual scenario matching and five focused guard tests passed.
-  Final-candidate full gates are running; populated-dqlite upgrade, live scenarios
-  and hosted CI remain pending. The preceding candidate's full lint
-  and unit suite passed; its integration run was interrupted for review fixes.
+  Final-candidate `just lint`, race-enabled `just unit-test` and full fresh-image
+  integration passed (801.740s; 272 passed, 41 lane-specific skips). Hosted logs
+  explicitly prove the three new scenarios across Docker amd64/arm64, Podman,
+  Kubernetes and distributed execution (15 combinations, zero skips). Populated
+  native-dqlite upgrade is running; hosted coverage and final gate remain pending.
+  The preceding candidate's integration run was interrupted for review fixes.
 - **Separately authorized DB repair:** actual-SQL probes confirmed base-revision
   retry/split installers bypass GORM's active pool and returning mutations can
   reach the reader once the split is enabled. A local repair passed the package
   race suite and independent review at `839e8e0c01f947eb679df9dfd5c155c8b7158602`;
   draft [PR #626](https://github.com/caesium-cloud/caesium/pull/626) is published and
-  full runtime gates are pending. It does not
+  hosted CI including `ci-ok`, both architecture unit suites and lint passed;
+  local package race tests passed. Full local unsharded integration remains pending.
+  It does not
   change A1/B1 dependencies or establish the integration failure's causal chain.
 - **A2 and D3:** not dispatched. A2 requires A1 to land; D3 requires B1 to land.
   The suggested W1 includes these follow-ups, but the review-PR endpoint leaves
