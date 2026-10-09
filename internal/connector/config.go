@@ -1109,27 +1109,51 @@ func (r *redactor) wrap(err error) error {
 	if err == nil || r == nil {
 		return err
 	}
+	return RedactError(err, r.secrets, r.public)
+}
+
+// RedactError replaces secret substrings in err's message with "[redacted]".
+// Secrets are applied longest-first. Values shorter than minRedactedSecretLen,
+// or contained in any public string, are skipped. An unchanged message returns
+// err. Otherwise Error is the redacted text and Unwrap returns err.
+func RedactError(err error, secrets, public []string) error {
+	if err == nil {
+		return nil
+	}
 	message := err.Error()
-	for _, value := range r.secrets {
-		if len(value) < minRedactedSecretLen || r.publicContains(value) {
+	ordered := append([]string(nil), secrets...)
+	sort.Slice(ordered, func(i, j int) bool {
+		return len(ordered[i]) > len(ordered[j])
+	})
+	for _, secret := range ordered {
+		if len(secret) < minRedactedSecretLen || publicContains(public, secret) {
 			continue
 		}
-		message = strings.ReplaceAll(message, value, "[redacted]")
+		message = strings.ReplaceAll(message, secret, "[redacted]")
 	}
 	if message == err.Error() {
 		return err
 	}
-	return errors.New(message)
+	return &redactedError{text: message, err: err}
 }
 
-func (r *redactor) publicContains(value string) bool {
-	for _, public := range r.public {
-		if strings.Contains(public, value) {
+func publicContains(public []string, value string) bool {
+	for _, item := range public {
+		if strings.Contains(item, value) {
 			return true
 		}
 	}
 	return false
 }
+
+type redactedError struct {
+	text string
+	err  error
+}
+
+func (e *redactedError) Error() string { return e.text }
+
+func (e *redactedError) Unwrap() error { return e.err }
 
 func sanitizeYAMLError(err error) error {
 	if err == nil {

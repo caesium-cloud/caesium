@@ -2,7 +2,9 @@ package connector
 
 import (
 	"bytes"
+	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -270,6 +272,49 @@ func TestParseAcceptsEnvAndMountedCredentials(t *testing.T) {
 	vaultPath := strings.Replace(validConfig, "secret://env/TEMPORAL_TOKEN?name=TEMPORAL_TOKEN", "secret://vault/kv/data/temporal/token", 1)
 	if _, err := Parse([]byte(vaultPath), nil); err != nil {
 		t.Fatalf("vault path reference: %v", err)
+	}
+}
+
+func TestRedactError(t *testing.T) {
+	if err := RedactError(nil, []string{"long-secret-value"}, nil); err != nil {
+		t.Fatal(err)
+	}
+	plain := errors.New("ordinary failure")
+	if got := RedactError(plain, []string{"long-secret-value"}, nil); got != plain {
+		t.Fatal("unchanged error was replaced")
+	}
+	short := errors.New("token e in readsPerMinute")
+	if got := RedactError(short, []string{"e"}, nil); got != short || !strings.Contains(got.Error(), "readsPerMinute") {
+		t.Fatalf("short secret changed the error: %v", got)
+	}
+	leaked := errors.New("dial long-secret-value failed")
+	got := RedactError(leaked, []string{"long-secret-value"}, nil)
+	if strings.Contains(got.Error(), "long-secret-value") || !strings.Contains(got.Error(), "[redacted]") {
+		t.Fatalf("error = %s", got)
+	}
+	if !errors.Is(got, leaked) {
+		t.Fatal("redacted error does not unwrap to the original")
+	}
+	nested := fmt.Errorf("call long-secret-value: %w", context.DeadlineExceeded)
+	got = RedactError(nested, []string{"long-secret-value"}, nil)
+	if !errors.Is(got, context.DeadlineExceeded) || strings.Contains(got.Error(), "long-secret-value") {
+		t.Fatalf("deadline = %v", got)
+	}
+	canceled := fmt.Errorf("call long-secret-value: %w", context.Canceled)
+	got = RedactError(canceled, []string{"long-secret-value"}, nil)
+	if !errors.Is(got, context.Canceled) {
+		t.Fatalf("canceled = %v", got)
+	}
+	kept := errors.New("see long-secret-value in the message")
+	got = RedactError(kept, []string{"long-secret-value"}, []string{"prefix long-secret-value suffix"})
+	if got != kept || !strings.Contains(got.Error(), "long-secret-value") {
+		t.Fatalf("public container was redacted: %v", got)
+	}
+	longer := "long-secret-value-and-more"
+	msg := errors.New("body " + longer + " end")
+	got = RedactError(msg, []string{"long-secret-value", longer}, nil)
+	if got.Error() != "body [redacted] end" {
+		t.Fatalf("longest-first = %s", got)
 	}
 }
 
