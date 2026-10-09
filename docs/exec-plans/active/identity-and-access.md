@@ -1,6 +1,6 @@
 # Identity and Access — Namespaces, Grants, Policy-as-Code, Corporate SSO
 
-Last updated: 2026-09-16
+Last updated: 2026-10-09
 
 Caesium's authentication is shipped and native (OIDC, SAML, LDAP; `docs/sso-authentication.md`),
 but authorization is a single global role ladder keyed per HTTP route, SSO users cannot be
@@ -37,9 +37,9 @@ plan. Any agent can:
    `## Progress`.
 
 For wave orchestration of the streams below, see
-[`.claude/skills/exec-plan-wave/`](../../../.claude/skills/exec-plan-wave/).
+[`.codex/skills/exec-plan-wave/`](../../../.codex/skills/exec-plan-wave/).
 For drafting new plans in this same shape, see
-[`.claude/skills/draft-exec-plan/`](../../../.claude/skills/draft-exec-plan/).
+[`.codex/skills/draft-exec-plan/`](../../../.codex/skills/draft-exec-plan/).
 
 ## Strategic Decisions
 
@@ -70,19 +70,32 @@ fairness was parked by `docs/exec-plans/active/window-scheduling.md` (its §"Glo
 vs. per-job load ceiling"); Stream D of this plan owns the v1 slice (issue #395) and
 window-scheduling's parked note points here.
 
-## Progress (as of 2026-09-16)
+## Progress (as of 2026-10-09)
 
-No implementation waves have shipped yet. The plan was published with the
-brainstorm alignment of 2026-09-16 (spec §4); the first wave is the next eligible
-run of the `exec-plan-wave` skill against this doc. Wave-1 leaf items are listed under
-`## Sequencing & Dependencies`.
+No implementation waves have shipped yet. W1 is in progress against master
+`150bbaa472bdd35af518d000b52436e824959be5`; its authorized endpoint is review PRs.
+Item checkboxes remain unchecked until merged acceptance evidence exists.
+
+### Wave 1 — Foundations (2026-10-09)
+
+- **W1-α / A1 — policy package:** implementation dispatched on
+  `codex/identity-and-access-w1-alpha`; publication, independent review, and
+  containerized lint/unit/integration verification pending.
+- **W1-β / B1 — namespace persistence and cache identity:** implementation dispatched
+  on `codex/identity-and-access-w1-beta`; public apply/export/run/move/cache scenarios,
+  generated schema reference, example lint, and baseline gates pending.
+- **A2 and D3:** not dispatched. A2 requires A1 to land; D3 requires B1 to land.
+  The suggested W1 includes these follow-ups, but the review-PR endpoint leaves
+  them pending until their prerequisite PRs merge. H-1, H-2, and N-1 require A4.
+- **Plan sync:** maintained in a separate W1 progress PR; no merge or approval
+  bypass is authorized. Remaining streams retain their original dependencies.
 
 ### Stream Status
 
 | Stream | Scope | Priority | Status |
 |--------|-------|----------|--------|
-| A | Policy file, grants, principal, route classes, namespace-aware middleware, keys with namespaces, SSO-admin key management | **P0** | Not started |
-| B | `metadata.namespace` on jobs: schema, columns, importer, lint, apply/prune/move, git-sync allowlist, collection filtering, aggregate collapse | **P0** | Not started |
+| A | Policy file, grants, principal, route classes, namespace-aware middleware, keys with namespaces, SSO-admin key management | **P0** | W1 A1 in progress; A2 waits for A1 |
+| B | `metadata.namespace` on jobs: schema, columns, importer, lint, apply/prune/move, git-sync allowlist, collection filtering, aggregate collapse | **P0** | W1 B1 in progress |
 | C | Runtime isolation: per-namespace Kubernetes namespace + service account, scoped secret resolution, Helm RBAC | P1 | Not started |
 | D | Run quota + round-robin fairness (#395 v1 slice); namespaced notification channels, policies, agent profiles | P1 | Not started |
 | E | Identity lifecycle: IdP group refresh, user/session administration, user-bound keys, `caesium login` | P1 | Not started |
