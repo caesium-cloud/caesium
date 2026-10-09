@@ -220,6 +220,8 @@ See `docs/examples/dynamic-fanout.job.yaml` for a runnable three-step example â€
 - `apiVersion`/`kind` are fixed (`v1`, `Job`).
 - `metadata.alias` must be unique per Caesium installation.
 - `metadata.namespace` owns the job and defaults to `default`. Use a DNS label (1-63 lowercase letters, digits or hyphens, with a letter or digit at each end). Offline lint validates syntax. Applying a new namespace preserves the job ID and historical run, backfill and incident ownership; future runs use the new namespace and cached outputs from the previous owner are invalidated. `caesium job export` round-trips the namespace.
+
+  When upgrading an existing installation to namespace-aware persistence, stop every node first and restart only upgraded nodes. Mixed-version rolling upgrades are unsupported in this pre-alpha release. Migration assigns `default` to existing NULL/empty ownership before tightening constraints. If incident active keys collide, migration stops without changing either history and identifies both rows for reconciliation.
 - `engine` defaults to `docker` if omitted.
 - `trigger.defaultParams` seeds run parameters for cron-triggered executions and is persisted onto the resulting run. Caesium also injects a scheduler-owned `logical_date` parameter for cron fires so each scheduled slot has a stable identity.
 - Manual runs reject scheduler-owned parameter keys (`_`-prefixed keys and `logical_date`) with HTTP 400. Console Re-run preserves business inputs and removes these keys so trigger depth, freshness provenance, and scheduled-slot identity belong to the new execution. Use backfill to execute a scheduled logical slot.
