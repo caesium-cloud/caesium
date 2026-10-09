@@ -370,35 +370,45 @@ publish ← tag only, needs the full matrix and ci-ok
 
 | Job id | runs-on | needs | timeout (min) | justfile recipe(s) / inline | Server started |
 | --- | --- | --- | --- | --- | --- |
-| `changes` | ubuntu-24.04 | — | 5 | path filter (`dorny/paths-filter`) | none |
-| `builder` | ubuntu-24.04 | `changes` | 30 | `docker/build-push-action` `builder-full` (GHA cache) | none |
-| `builder-arm64` | ubuntu-24.04-arm | `changes` | 30 | arm64 twin of the above | none |
-| `images` | ubuntu-24.04 | `builder` | 30 | `build/ci.docker-bake.hcl` `product`, `build-triage-agent`, `stress-image-test`, CLI smoke | none |
-| `images-arm64` | ubuntu-24.04-arm | `builder-arm64` | 30 | arm64 twin of `images` (parallel) | none |
-| `reagents` | ubuntu-24.04 | `changes` | 20 | `build/ci.docker-bake.hcl` `reagents` (parallel with `images`) | none |
-| `reagents-arm64` | ubuntu-24.04-arm | `changes` | 20 | `reagent-roles` bake group (no unused arm64 lint/test toolchain) | none |
-| `lint` | ubuntu-24.04 | `builder`, `reagents` | 30 | `lint`, `reagents-lint` (toolchain loaded, not rebuilt) | none |
-| `helm-lint` | ubuntu-24.04 | — | 10 | inline `helm lint`/`helm template` (mirrors justfile `helm-lint`/`helm-template`) | none |
-| `unit-test` | ubuntu-24.04 | `builder`, `reagents` | 30 | `unit-test`, `reagents-test` | none |
-| `unit-test-arm64` | ubuntu-24.04-arm | `builder-arm64` | 30 | `unit-test` only — no `reagents-test` on arm64 | none |
-| `ui-test` | ubuntu-24.04 | `changes` | 30 | Node 22 + cached npm downloads; one `npm ci`, lint + test + `build:ci` | none |
-| `integration` | ubuntu-24.04 | `images` | 45 | matrix: three Docker full-suite shards + agent-auth (`run-integration` composite) | `integration-up` / `integration-up-agent` |
-| `integration-extra` | ubuntu-24.04 | `images`, `reagents` | 45–60 | matrix: distributed / owner-memory / infra (not required-to-merge) | matching `integration-up-*` |
-| `integration-arm64` | ubuntu-24.04-arm | `images-arm64`, `reagents-arm64` | 45–60 | matrix: three Docker full-suite shards + infra (parallel with amd64) | matching `integration-up*` |
-| `ui-e2e` | ubuntu-24.04 | `[ui-test, images]` | 45 | host-installed Playwright process joined only to the server network namespace, reusing the `product-amd64` artifact | inline `docker run --name caesium-server` |
-| `ui-e2e-auth` | ubuntu-24.04 | `[ui-test, images]` | 45 | inline `docker run` | inline `docker run --name caesium-server-auth` |
-| `helm-integration-test` | ubuntu-24.04 | `[images, helm-lint]` | 60 | kind + `helm install` + `helm test` + full suite in three shards | kind pod via the Helm chart |
-| `helm-pod-replacement-test` | ubuntu-24.04 | `[changes, images, helm-lint]` | 45 | `scripts/helm-pod-replacement.sh` — kind + `helm install` at three replicas with retained PVCs, then replaces every pod and proves it rejoins (issue #493) | three kind pods via the Helm chart |
-| `podman-integration-test` | ubuntu-24.04 | `images` | 45 | inline `docker run` + full suite in three shards | inline `docker run --name caesium-server-podman` |
-| `early-evidence` | ubuntu-24.04 | `changes`, `images`, `helm-lint` | 60 | `integration-test-sql-budget`, `robustness-test`, `check-evidence` (kind + Helm, three persistent replicas) | `integration-up`, then three kind pods via the Helm chart |
-| `ci-config` | ubuntu-24.04 | — | 5 | actionlint + wildcard `scripts/test_*.py` discovery | none |
-| `build-and-integration-test` / `build-and-integration-test-agent-auth` | ubuntu-24.04 | `changes`, `images`, `integration` | 5 | legacy required-context adapters | none |
-| `ci-ok` | ubuntu-24.04 | see §1 | 5 | `scripts/ci-ok.py` | none |
-| `publish` | ubuntu-24.04 | see §3 | 30 | none — direct `docker push`/`docker manifest`, and release asset upload (§6) | none |
+| `changes` | ubuntu-26.04 | — | 5 | path filter (`dorny/paths-filter`) | none |
+| `builder` | ubuntu-26.04 | `changes` | 30 | `docker/build-push-action` `builder-full` (GHA cache) | none |
+| `builder-arm64` | ubuntu-26.04-arm | `changes` | 30 | arm64 twin of the above | none |
+| `images` | ubuntu-26.04 | `builder` | 30 | `build/ci.docker-bake.hcl` `product`, `build-triage-agent`, `stress-image-test`, CLI smoke | none |
+| `images-arm64` | ubuntu-26.04-arm | `builder-arm64` | 30 | arm64 twin of `images` (parallel) | none |
+| `reagents` | ubuntu-26.04 | `changes` | 20 | `build/ci.docker-bake.hcl` `reagents` (parallel with `images`) | none |
+| `reagents-arm64` | ubuntu-26.04-arm | `changes` | 20 | `reagent-roles` bake group (no unused arm64 lint/test toolchain) | none |
+| `lint` | ubuntu-26.04 | `builder`, `reagents` | 30 | `lint`, `reagents-lint` (toolchain loaded, not rebuilt) | none |
+| `helm-lint` | ubuntu-26.04 | — | 10 | inline `helm lint`/`helm template` (mirrors justfile `helm-lint`/`helm-template`) | none |
+| `unit-test` | ubuntu-26.04 | `builder`, `reagents` | 30 | `unit-test`, `reagents-test` | none |
+| `unit-test-arm64` | ubuntu-26.04-arm | `builder-arm64` | 30 | `unit-test` only — no `reagents-test` on arm64 | none |
+| `ui-test` | ubuntu-26.04 | `changes` | 30 | Node 24 + cached npm downloads; one `npm ci`, lint + test + `build:ci` | none |
+| `integration` | ubuntu-26.04 | `images` | 45 | matrix: three Docker full-suite shards + agent-auth (`run-integration` composite) | `integration-up` / `integration-up-agent` |
+| `integration-extra` | ubuntu-26.04 | `images`, `reagents` | 45–60 | matrix: distributed / owner-memory / infra (not required-to-merge) | matching `integration-up-*` |
+| `integration-arm64` | ubuntu-26.04-arm | `images-arm64`, `reagents-arm64` | 45–60 | matrix: three Docker full-suite shards + infra (parallel with amd64) | matching `integration-up*` |
+| `ui-e2e` | ubuntu-26.04 | `[ui-test, images]` | 45 | host-installed Playwright process joined only to the server network namespace, reusing the `product-amd64` artifact | inline `docker run --name caesium-server` |
+| `ui-e2e-auth` | ubuntu-26.04 | `[ui-test, images]` | 45 | inline `docker run` | inline `docker run --name caesium-server-auth` |
+| `helm-integration-test` | ubuntu-26.04 | `[images, helm-lint]` | 60 | kind + `helm install` + `helm test` + full suite in three shards | kind pod via the Helm chart |
+| `helm-pod-replacement-test` | ubuntu-26.04 | `[changes, images, helm-lint]` | 45 | `scripts/helm-pod-replacement.sh` — kind + `helm install` at three replicas with retained PVCs, then replaces every pod and proves it rejoins (issue #493) | three kind pods via the Helm chart |
+| `podman-integration-test` | ubuntu-26.04 | `images` | 45 | inline `docker run` + full suite in three shards | inline `docker run --name caesium-server-podman` |
+| `early-evidence` | ubuntu-26.04 | `changes`, `images`, `helm-lint` | 60 | `integration-test-sql-budget`, `robustness-test`, `check-evidence` (kind + Helm, three persistent replicas) | `integration-up`, then three kind pods via the Helm chart |
+| `ci-config` | ubuntu-26.04 | — | 5 | actionlint + wildcard `scripts/test_*.py` discovery | none |
+| `build-and-integration-test` / `build-and-integration-test-agent-auth` | ubuntu-26.04 | `changes`, `images`, `integration` | 5 | legacy required-context adapters | none |
+| `ci-ok` | ubuntu-26.04 | see §1 | 5 | `scripts/ci-ok.py` | none |
+| `publish` | ubuntu-26.04 | see §3 | 30 | none — direct `docker push`/`docker manifest`, and release asset upload (§6) | none |
 
 Path-filter outputs (`changes.go` / `.ui` / `.helm` / `.reagents` / `.ci` /
 `.images`) decide which of the jobs above run on a pull request. `master`
 and `v*` tags force every output to `true`.
+
+Two ubuntu-26.04 host differences matter to every kind lane:
+- **inotify limits.** The image boots with the kernel's inotify defaults
+  (128 instances), not the 1280 instances / 655360 watches the 24.04 image
+  applied, so each job that runs kind sets those values with `sysctl -w`
+  before installing kind. `KindHostLimitsTests` in `scripts/test_ci.py`
+  enforces this.
+- **Image store.** Docker 29 there uses the containerd image store, so images
+  enter kind as platform-scoped archives (`docker image save --platform` +
+  `kind load image-archive`), never through `kind load docker-image`.
 
 Docker (amd64 and arm64), Podman, and Helm each retain the complete
 integration test package. Each engine uses three isolated servers/runners.
@@ -510,7 +520,7 @@ its own Go toolchain, so it never needs the Caesium builder artifact.
 Runtime roles and the reagent toolchain are uploaded separately. Infra and
 publish download only the roles; lint and unit tests download only the
 toolchain. Arm64 builds only the runtime roles because no arm64 lane
-consumes the reagent lint/test toolchain. UI validation runs directly on Node 22
+consumes the reagent lint/test toolchain. UI validation runs directly on Node 24
 without waiting for a Go builder. Sharding adds runner setup, but integration
 compilation is shared; compare both elapsed and total job minutes when tuning it.
 
@@ -533,7 +543,7 @@ cannot disrupt neighboring tests. Both projects appear in the same report.
 `just ui-e2e` uses the same project selection. A failure in either phase fails
 the job; a failed default dependency prevents the recovery phase from starting.
 
-The CI default lane keeps the existing Node 22, `npm ci`, and
+The CI default lane keeps the existing Node 24, `npm ci`, and
 `npx playwright install --with-deps chromium` setup so it uses the same host
 browser binary, font packages, cache, and Linux screenshot baseline as the
 normal runner. It gets the running Caesium container PID and uses `sudo nsenter
@@ -842,7 +852,7 @@ above, which picks up every `scripts/test_*.py` module.
 
 `early-evidence` is the first CI lane that executes a real multi-node fault, and
 since W3/G5 it is a dependency of the fail-closed `ci-ok` aggregate. It runs on
-`ubuntu-24.04` when the `go`, `helm` or `ci` path filters select it — exactly
+`ubuntu-26.04` when the `go`, `helm` or `ci` path filters select it — exactly
 the condition `scripts/ci-ok.py` records in `SELECTORS["early-evidence"]`, so a
 lane that disappears cannot read as an allowed skip.
 
@@ -1229,7 +1239,7 @@ the existing aggregate describe the commit it actually tested, and it wired
 `ci-ok` remains absent from required contexts (G5's Q6 finding). No PATCH in
 §1 was executed.
 
-**What the workflow now does.** Every `actions/checkout@v6` step omits `ref:`,
+**What the workflow now does.** Every `actions/checkout@v7` step omits `ref:`,
 so each evidence-producing job tests the commit GitHub hands it — on
 `pull_request` that is the prospective merge commit (`refs/pull/N/merge`). The
 `ci-ok` job passes this run's `github.event_name`, the base/head SHAs from
@@ -2534,8 +2544,8 @@ allowlist entry explaining why that lane is exempt.
      must bump `appVersion` to the tag, and `version` per semver, in the
      merge PR);
    - verifies the two `.smoke-ok` markers (one per architecture — the CLI
-     binary ran natively on its own runner, `ubuntu-24.04` for amd64,
-     `ubuntu-24.04-arm` for arm64) and their `sha256sum`s before attaching
+     binary ran natively on its own runner, `ubuntu-26.04` for amd64,
+     `ubuntu-26.04-arm` for arm64) and their `sha256sum`s before attaching
      any release asset;
    - writes `SHA256SUMS` over the release binaries;
    - pushes the multi-arch `caesiumcloud/caesium:<tag>` manifest (amd64 +
