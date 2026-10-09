@@ -84,17 +84,22 @@ Item checkboxes remain unchecked until merged acceptance evidence exists.
   two edge-case fixes. Containerized `just lint` and race-enabled `just unit-test`
   passed (policy coverage 99.5%). Fresh-image local integration failed first at
   `TestRunConcurrencyStrategies/queue_reclaims_stale_claim`, followed by database
-  lock/transaction errors in later writes. Hosted application checks passed;
-  coverage-ratchets remains pending. Actual-SQL probes confirm existing base-revision
-  DB pool wiring defects; the unchanged-base integration comparison is running.
+  lock/transaction errors in later writes. Current-head hosted CI, including
+  coverage-ratchets and `ci-ok`, passed. The unchanged base passed the same full
+  local command (269 scenarios passed, 41 lane-specific skips). Actual-SQL probes
+  confirm existing base DB pool defects, but do not establish the original
+  failure's cause. Exact-head local integration revalidation is running.
 - **W1-β / B1 — namespace persistence and cache identity:** draft
   [PR #625](https://github.com/caesium-cloud/caesium/pull/625), head
-  `708637a67a10bdefb2856ec2f71b1d44730643dc`. Focused changed-package regressions,
+  `41e0cb0d0019bdb512e5d52168a615a952dabf1c`. Focused changed-package regressions,
   generated schema guardrail and integration compilation passed. Independent
   review passed after exported-manifest and migration collision fixes. Strict
   incident constraints and the coordinated upgrade guidance travel together in
-  this PR. Final-candidate full gates, populated-dqlite upgrade, live scenarios,
-  example lint and hosted CI remain pending. The preceding candidate's full lint
+  this PR. Container-built CLI lint passed all 30 example manifests; generated
+  schema guardrail passed. CI's brittle resource-filter ordering assertion was
+  replaced with actual scenario matching and five focused guard tests passed.
+  Final-candidate full gates, populated-dqlite upgrade, live scenarios and hosted
+  CI remain pending. The preceding candidate's full lint
   and unit suite passed; its integration run was interrupted for review fixes.
 - **Separately authorized DB repair:** actual-SQL probes confirmed base-revision
   retry/split installers bypass GORM's active pool and returning mutations can
@@ -328,7 +333,8 @@ middleware relies on.
       `internal/worker/runtime_executor.go` (worker hash input),
       `internal/run/whydiff.go` (persisted hash decoding),
       `pkg/db/{db,migrations,migrations_test}.go` (legacy namespace normalization),
-      `justfile` (distributed scenario selection), new `test/cache_namespace_move_test.go`,
+      `justfile`, `scripts/test_ci.py` (distributed scenario selection and guard),
+      new `test/cache_namespace_move_test.go`,
       `internal/jobdef/exporter.go`, `docs/examples/`,
       `docs/caesium-job-llm-reference.md`, `docs/job-definitions.md`.
 - [ ] B2. Server-side namespace semantics: `POST /v1/jobdefs/lint` and apply reject an
