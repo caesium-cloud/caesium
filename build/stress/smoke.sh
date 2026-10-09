@@ -156,16 +156,17 @@ command_status=0
 [ "$command_status" -eq 0 ] || fail release_archive_prepare_failed "$command_status"
 
 # A waiting process must not touch the large allocation before the harness has
-# set its limit. Its OOM is the kernel verdict, never a fixture-chosen exit 137.
+# set its limit. Its OOM is the runtime's record of the kernel's kill
+# (OOMKilled), never an exit code: the 137 below only mirrors the workload
+# child's SIGKILL through the init that outlives it.
 #
-# --linger allocates in a child of the container's init and keeps that init
-# alive 2s after the child dies. A runtime learns of an OOM kill only by
-# reading the cgroup's memory.events, whose change notification the kernel
-# defers up to ~10ms after an earlier one. When the victim is the container's
-# only process the cgroup empties at once, and the host may remove it before
-# that read: the runtime then records exit 137 without OOMKilled (see the
-# stress fixture section of docs/ci.md). A surviving init keeps the cgroup and
-# its kill record readable, so only the kernel's verdict decides this phase.
+# --linger allocates in a child of the container's init, which outlives the
+# child by 2s. A runtime learns of an OOM kill only by reading the cgroup's
+# memory.events, whose change notification the kernel defers ~10ms after an
+# earlier one. A single-process container's cgroup empties as its victim dies,
+# and systemd can remove it before that read; the runtime then records exit
+# 137 without OOMKilled (see the stress fixture section of docs/ci.md). The
+# surviving init keeps the cgroup, and so the kernel's kill count, readable.
 phase="allocate_waiter"
 diagnostic_since=$(date +%s 2>/dev/null) || diagnostic_since=""
 command_status=0

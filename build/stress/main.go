@@ -6,6 +6,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -35,13 +36,21 @@ func run() int {
 		return 2
 	}
 	if *linger > 0 {
+		exe, err := os.Executable()
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "resolve workload executable:", err)
+			return 1
+		}
 		var args []string
 		flag.Visit(func(f *flag.Flag) {
 			if f.Name != "linger" {
 				args = append(args, "--"+f.Name+"="+f.Value.String())
 			}
 		})
-		return supervise(args, *linger)
+		workload := exec.Command(exe, args...)
+		workload.Stdout, workload.Stderr = os.Stdout, os.Stderr
+		workload.Env = append(os.Environ(), supervisedEnv+"=1")
+		return supervise(workload, *linger, os.Stdout)
 	}
 	if os.Getenv(supervisedEnv) == "1" {
 		// Make the workload, never its supervisor, the OOM killer's victim.
@@ -84,60 +93,54 @@ func run() int {
 	return 0
 }
 
-// supervise runs the workload as a child and keeps this process alive for
-// linger after the child ends. Container runtimes learn of a kernel OOM kill
-// by reading the container cgroup's memory.events, and the kernel defers that
-// file's change notification by up to 10ms after an earlier one. When the
-// victim is the container's only process, its cgroup empties at once and the
-// host (systemd, for a scope) may remove it before the runtime reads the kill:
-// containerd then publishes no TaskOOM, and Docker reports exit 137 with
-// OOMKilled=false. A surviving supervisor keeps the cgroup populated, so the
-// runtime observes the kernel's kill before the container can exit.
+// supervise runs the workload and keeps this process alive for linger after
+// the workload ends. Container runtimes learn of a kernel OOM kill only by
+// reading the container cgroup's memory.events, and the kernel defers that
+// file's change notification by ~10ms after an earlier one. When the victim
+// is the container's only process, its cgroup empties as it dies, and systemd
+// can remove it before the runtime reads the kill: containerd then publishes
+// no TaskOOM, and Docker reports exit 137 with OOMKilled=false. A surviving
+// supervisor keeps the cgroup populated until the runtime has read the kill.
 //
-// The exit status mirrors the child's like a shell's: 128+signal when it was
-// killed. That status is never OOM evidence; only the runtime's OOMKilled is.
-func supervise(args []string, linger time.Duration) int {
-	exe, err := os.Executable()
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "resolve workload executable:", err)
-		return 1
-	}
+// The exit status mirrors the workload's like a shell's: 128+signal when it
+// was killed. That status is never OOM evidence; only the runtime's
+// OOMKilled is. The record written to out says which of the two happened.
+func supervise(workload *exec.Cmd, linger time.Duration, out io.Writer) int {
 	signals := make(chan os.Signal, 1)
 	signal.Notify(signals, os.Interrupt, syscall.SIGTERM)
 	defer signal.Stop(signals)
-	cmd := exec.Command(exe, args...)
-	cmd.Stdout, cmd.Stderr = os.Stdout, os.Stderr
-	cmd.Env = append(os.Environ(), supervisedEnv+"=1")
-	if err := cmd.Start(); err != nil {
+	if err := workload.Start(); err != nil {
 		fmt.Fprintln(os.Stderr, "start workload:", err)
 		return 1
 	}
-	done := make(chan struct{})
-	go func() {
-		_ = cmd.Wait() // ProcessState carries the status; Wait's error repeats it.
-		close(done)
-	}()
+	done := make(chan error, 1)
+	go func() { done <- workload.Wait() }()
 	stopping := false
+	var waitErr error
 	for waiting := true; waiting; {
 		select {
 		case sig := <-signals:
 			stopping = true
-			_ = cmd.Process.Signal(sig) // Stop requests belong to the workload.
-		case <-done:
+			_ = workload.Process.Signal(sig) // Stop requests belong to the workload.
+		case waitErr = <-done:
 			waiting = false
 		}
 	}
-	status, ok := cmd.ProcessState.Sys().(syscall.WaitStatus)
+	var status syscall.WaitStatus
+	ok := workload.ProcessState != nil
+	if ok {
+		status, ok = workload.ProcessState.Sys().(syscall.WaitStatus)
+	}
 	if !ok {
-		fmt.Fprintln(os.Stderr, "workload status unavailable")
+		fmt.Fprintln(os.Stderr, "workload status unavailable:", waitErr)
 		return 1
 	}
 	code := status.ExitStatus()
 	if status.Signaled() {
 		code = 128 + int(status.Signal())
-		fmt.Printf("workload terminated by signal %d\n", int(status.Signal()))
+		fmt.Fprintf(out, "workload terminated by signal %d\n", int(status.Signal()))
 	} else {
-		fmt.Printf("workload exited with status %d\n", code)
+		fmt.Fprintf(out, "workload exited with status %d\n", code)
 	}
 	if stopping {
 		return code // A requested stop never waits out the linger.
