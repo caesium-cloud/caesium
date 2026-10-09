@@ -1,0 +1,108 @@
+name: diag-oom-smoke-soak
+
+# DIAG ONLY -- never merged. Runs the real build/stress/smoke.sh (this branch's
+# fixed version) and master's unfixed smoke + fixture, interleaved, many times
+# per hosted runner and runtime, and tallies every terminal outcome.
+on:
+  push:
+    branches: [diag/oom-smoke-soak]
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  soak:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, ubuntu-24.04-arm, ubuntu-26.04, ubuntu-26.04-arm]
+        runtime: [docker, podman]
+        shard: [1, 2, 3]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - name: Versions
+        run: |
+          set -x
+          uname -a
+          docker version --format 'docker {{.Server.Version}}'
+          docker info --format 'cgroup={{.CgroupDriver}} v={{.CgroupVersion}}'
+          containerd --version || true
+          runc --version | head -1 || true
+          podman version --format '{{.Client.Version}}' || true
+          systemctl --version | head -1
+      - name: Build fixed and unfixed fixtures
+        run: |
+          set -euxo pipefail
+          docker build -q -f build/Dockerfile.stress -t caesiumdiag/stress:fixed .
+          base=$(git merge-base HEAD origin/master)
+          git show "$base:build/stress/smoke.sh" > build/stress/smoke-unfixed.sh
+          ctx=$(mktemp -d); mkdir -p "$ctx/build/stress"
+          git show "$base:build/stress/main.go" > "$ctx/build/stress/main.go"
+          git show "$base:build/Dockerfile.stress" > "$ctx/Dockerfile.stress"
+          docker build -q -f "$ctx/Dockerfile.stress" -t caesiumdiag/stress:unfixed "$ctx"
+          echo "unfixed = smoke.sh and fixture at $base"
+      - name: Prepare podman
+        if: matrix.runtime == 'podman'
+        run: |
+          set -euxo pipefail
+          arch=$(dpkg --print-architecture)
+          case "$arch" in
+            amd64) sum=1d97294c14c43d477e0a0826e9cd0f2a2af373ddfafe6f10252e8a3c43f32be6 ;;
+            arm64) sum=c2fa62b3555eb0a729d853df23c5784d970f46050f2fb5f9931ded1bf455d216 ;;
+          esac
+          if ! command -v podman >/dev/null; then sudo apt-get update -q && sudo apt-get install -y -q podman; fi
+          curl --fail --location --retry 3 "https://github.com/containers/conmon/releases/download/v2.2.1/conmon.$arch" -o "$RUNNER_TEMP/conmon"
+          echo "$sum  $RUNNER_TEMP/conmon" | sha256sum --check --strict
+          sudo install -m 0755 "$RUNNER_TEMP/conmon" /usr/bin/conmon
+          mkdir -p "$HOME/.config/containers"
+          printf '%s\n' '[containers]' 'log_driver = "k8s-file"' > "$HOME/.config/containers/containers.conf"
+          podman info --format '{{.Host.CgroupManager}} {{.Host.CgroupsVersion}} {{.Host.OCIRuntime.Name}} {{.Host.Conmon.Version}}'
+          docker save caesiumdiag/stress:fixed | podman load
+          docker save caesiumdiag/stress:unfixed | podman load
+          podman image inspect docker.io/caesiumdiag/stress:fixed docker.io/caesiumdiag/stress:unfixed >/dev/null
+      - name: Soak
+        timeout-minutes: 48
+        run: |
+          rt=${{ matrix.runtime }}
+          prefix=""; [ "$rt" = podman ] && prefix=docker.io/
+          out="$RUNNER_TEMP/out"; mkdir -p "$out"
+          end=$((SECONDS + 44 * 60))
+          i=0
+          while (( SECONDS < end )); do
+            if (( i % 2 == 0 )); then order=(fixed unfixed); else order=(unfixed fixed); fi
+            for v in "${order[@]}"; do
+              script=build/stress/smoke.sh; [ "$v" = unfixed ] && script=build/stress/smoke-unfixed.sh
+              if bash "$script" "$rt" "${prefix}caesiumdiag/stress:$v" >"$out/stdout" 2>"$out/stderr"; then
+                echo "SMOKE $i $v pass" | tee -a "$out/results"
+              else
+                reason=$(grep -o 'reason=[a-z_]*' "$out/stderr" | head -1)
+                echo "SMOKE $i $v fail ${reason:-reason=unknown}" | tee -a "$out/results"
+                { echo "=== $i $v"; cat "$out/stderr"; } >>"$out/failures.log"
+              fi
+            done
+            i=$((i + 1))
+          done
+      - name: Summarize
+        if: always()
+        run: |
+          out="$RUNNER_TEMP/out"
+          echo "## ${{ matrix.runner }} / ${{ matrix.runtime }} / shard ${{ matrix.shard }}" | tee -a "$GITHUB_STEP_SUMMARY"
+          awk '/^SMOKE/ {k=$3" "$4" "$5; c[k]++} END {for (k in c) print c[k], k}' "$out/results" | sort -k2 | tee -a "$GITHUB_STEP_SUMMARY"
+          if [ -s "$out/failures.log" ]; then head -c 100000 "$out/failures.log"; fi
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: soak-${{ matrix.runner }}-${{ matrix.runtime }}-${{ matrix.shard }}
+          path: |
+            ${{ runner.temp }}/out/results
+            ${{ runner.temp }}/out/failures.log
+          if-no-files-found: warn
+          retention-days: 7
