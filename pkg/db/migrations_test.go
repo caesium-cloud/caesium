@@ -2,6 +2,7 @@ package db
 
 import (
 	"testing"
+	"time"
 
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/google/uuid"
@@ -126,4 +127,97 @@ func assertPartitionUniquenessEnforced(t *testing.T, conn *gorm.DB) {
 	err := conn.Create(newRow(1)).Error
 	require.Error(t, err, "a duplicate (job_run_id, task_id, partition_index) must be rejected by the unique index")
 	assert.Contains(t, err.Error(), "UNIQUE")
+}
+
+// connectorCatalogTables are the execution-connector catalog. They are not hot
+// execution tables.
+var connectorCatalogTables = []any{
+	&models.ExternalExecution{},
+	&models.ExternalExecutionSnapshot{},
+	&models.ExternalExecutionRelation{},
+	&models.ConnectorOperation{},
+	&models.ConnectorConfiguration{},
+}
+
+func TestConnectorCatalogRoutesToCatalogOnly(t *testing.T) {
+	catalog := openMigrationTestDB(t)
+	hot1 := openMigrationTestDB(t)
+	hot2 := openMigrationTestDB(t)
+	cold := openMigrationTestDB(t)
+	router, err := NewRouter(catalog, []*gorm.DB{hot1, hot2}, cold)
+	require.NoError(t, err)
+	require.Greater(t, router.ShardCount(), 1)
+
+	// Same split as Migrate: every model on the catalog, hot-path models on
+	// each hot shard and on cold.
+	require.NoError(t, migrateModels(router.Catalog(), models.All...))
+	for _, shard := range router.HotShards() {
+		require.NoError(t, migrateModels(shard, hotPathModels()...))
+	}
+	require.NoError(t, migrateModels(router.Cold(), hotPathModels()...))
+
+	hotNames := map[string]struct{}{}
+	for _, model := range hotPathModels() {
+		hotNames[modelTable(t, catalog, model)] = struct{}{}
+	}
+	for _, model := range connectorCatalogTables {
+		table := modelTable(t, catalog, model)
+		require.Truef(t, catalog.Migrator().HasTable(table), "catalog missing %s", table)
+		require.Falsef(t, hot1.Migrator().HasTable(table), "hot shard has %s", table)
+		require.Falsef(t, hot2.Migrator().HasTable(table), "hot shard has %s", table)
+		require.Falsef(t, cold.Migrator().HasTable(table), "cold database has %s", table)
+
+		conn, role, shard, err := router.RouteTable(table, uuid.Nil)
+		require.NoError(t, err)
+		require.Equal(t, DatabaseRoleCatalog, role)
+		require.Equal(t, -1, shard)
+		require.Same(t, catalog, conn)
+
+		_, onHotModel := hotNames[table]
+		require.Falsef(t, onHotModel, "hotPathModels includes %s", table)
+		_, onHotRoute := hotTables[table]
+		require.Falsef(t, onHotRoute, "hotTables includes %s", table)
+	}
+}
+
+func TestConnectorCatalogUpgradeKeepsJobs(t *testing.T) {
+	catalog := openMigrationTestDB(t)
+	require.NoError(t, catalog.AutoMigrate(&models.Trigger{}, &models.Job{}))
+	now := time.Now().UTC()
+	triggerID := uuid.New()
+	jobID := uuid.New()
+	require.NoError(t, catalog.Create(&models.Trigger{
+		ID:        triggerID,
+		Alias:     "upgrade-trigger",
+		Type:      models.TriggerTypeCron,
+		CreatedAt: now,
+		UpdatedAt: now,
+	}).Error)
+	require.NoError(t, catalog.Create(&models.Job{
+		ID:        jobID,
+		Alias:     "upgrade-job",
+		TriggerID: triggerID,
+		CreatedAt: now,
+		UpdatedAt: now,
+	}).Error)
+
+	require.NoError(t, migrateModels(catalog, models.All...))
+	for _, model := range connectorCatalogTables {
+		table := modelTable(t, catalog, model)
+		require.Truef(t, catalog.Migrator().HasTable(table), "upgraded catalog missing %s", table)
+	}
+	var jobs int64
+	require.NoError(t, catalog.Model(&models.Job{}).Where("id = ?", jobID).Count(&jobs).Error)
+	require.Equal(t, int64(1), jobs)
+	var got models.Job
+	require.NoError(t, catalog.First(&got, "id = ?", jobID).Error)
+	require.Equal(t, "upgrade-job", got.Alias)
+	require.True(t, catalog.Migrator().HasTable("jobs"))
+}
+
+func modelTable(t *testing.T, db *gorm.DB, model any) string {
+	t.Helper()
+	stmt := &gorm.Statement{DB: db}
+	require.NoError(t, stmt.Parse(model))
+	return stmt.Schema.Table
 }
