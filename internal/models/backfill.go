@@ -24,6 +24,7 @@ const (
 )
 
 type Backfill struct {
+	Namespace         string          `gorm:"type:text;not null;default:'default';index" json:"namespace"`
 	ID                uuid.UUID       `gorm:"type:uuid;primaryKey" json:"id"`
 	JobID             uuid.UUID       `gorm:"type:uuid;index;not null" json:"job_id"`
 	Job               Job             `gorm:"constraint:OnDelete:CASCADE" json:"-"`

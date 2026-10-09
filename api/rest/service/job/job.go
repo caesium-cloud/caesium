@@ -14,6 +14,7 @@ import (
 	runstorage "github.com/caesium-cloud/caesium/internal/run"
 	"github.com/caesium-cloud/caesium/pkg/db"
 	"github.com/caesium-cloud/caesium/pkg/env"
+	"github.com/caesium-cloud/caesium/pkg/jobdef"
 	"github.com/caesium-cloud/caesium/pkg/jsonmap"
 	"github.com/caesium-cloud/caesium/pkg/log"
 	"github.com/google/uuid"
@@ -102,6 +103,7 @@ type ListRequest struct {
 }
 
 type RunListSummary struct {
+	Namespace     string     `json:"namespace"`
 	ID            uuid.UUID  `json:"-"`
 	JobID         uuid.UUID  `json:"-"`
 	Status        string     `json:"status"`
@@ -116,6 +118,7 @@ type RunListSummary struct {
 
 func (r RunListSummary) JobRun() *runstorage.JobRun {
 	return &runstorage.JobRun{
+		Namespace:     models.NamespaceOrDefault(r.Namespace),
 		ID:            r.ID,
 		JobID:         r.JobID,
 		Status:        runstorage.Status(r.Status),
@@ -174,6 +177,7 @@ func (j *jobService) ListRecentRuns(jobIDs []uuid.UUID, limit int) (map[uuid.UUI
 	}
 
 	type recentRunRow struct {
+		Namespace     string     `gorm:"column:namespace"`
 		ID            uuid.UUID  `gorm:"column:id"`
 		JobID         uuid.UUID  `gorm:"column:job_id"`
 		Status        string     `gorm:"column:status"`
@@ -190,6 +194,7 @@ func (j *jobService) ListRecentRuns(jobIDs []uuid.UUID, limit int) (map[uuid.UUI
 		Select(`
 			job_runs.id,
 			job_runs.job_id,
+			job_runs.namespace,
 			job_runs.status,
 			job_runs.started_at,
 			job_runs.completed_at,
@@ -207,6 +212,7 @@ func (j *jobService) ListRecentRuns(jobIDs []uuid.UUID, limit int) (map[uuid.UUI
 		Select(`
 			ranked.id,
 			ranked.job_id,
+			ranked.namespace,
 			ranked.status,
 			ranked.started_at,
 			ranked.completed_at,
@@ -217,7 +223,7 @@ func (j *jobService) ListRecentRuns(jobIDs []uuid.UUID, limit int) (map[uuid.UUI
 		`).
 		Joins("LEFT JOIN task_runs ON task_runs.job_run_id = ranked.id").
 		Where("ranked.rn <= ?", limit).
-		Group("ranked.id, ranked.job_id, ranked.status, ranked.started_at, ranked.completed_at, ranked.error").
+		Group("ranked.id, ranked.namespace, ranked.job_id, ranked.status, ranked.started_at, ranked.completed_at, ranked.error").
 		Order("ranked.job_id ASC, ranked.started_at ASC, ranked.id ASC").
 		Scan(&rows).Error
 	if err != nil {
@@ -234,6 +240,7 @@ func (j *jobService) ListRecentRuns(jobIDs []uuid.UUID, limit int) (map[uuid.UUI
 			duration = &seconds
 		}
 		out[row.JobID] = append(out[row.JobID], RunListSummary{
+			Namespace:     models.NamespaceOrDefault(row.Namespace),
 			ID:            row.ID,
 			JobID:         row.JobID,
 			Status:        row.Status,
@@ -329,6 +336,7 @@ func (j *jobService) attachLatestRun(job *models.Job) {
 		job.LatestRun = &models.JobRun{
 			ID:            latest.ID,
 			JobID:         latest.JobID,
+			Namespace:     latest.Namespace,
 			Status:        string(latest.Status),
 			StartedAt:     latest.StartedAt,
 			CompletedAt:   latest.CompletedAt,
@@ -418,6 +426,7 @@ func decodeQueueParams(raw []byte) (map[string]string, error) {
 }
 
 type CreateRequest struct {
+	Namespace   string            `json:"namespace,omitempty"`
 	TriggerID   uuid.UUID         `json:"trigger_id"`
 	Alias       string            `json:"alias"`
 	Labels      map[string]string `json:"labels,omitempty"`
@@ -425,6 +434,9 @@ type CreateRequest struct {
 }
 
 func (j *jobService) Create(req *CreateRequest) (*models.Job, error) {
+	if err := jobdef.ValidateNamespace(req.Namespace); err != nil {
+		return nil, err
+	}
 	var (
 		id = uuid.New()
 		q  = j.db.WithContext(j.ctx)
@@ -434,6 +446,7 @@ func (j *jobService) Create(req *CreateRequest) (*models.Job, error) {
 		ID:          id,
 		TriggerID:   req.TriggerID,
 		Alias:       req.Alias,
+		Namespace:   models.NamespaceOrDefault(req.Namespace),
 		Labels:      jsonmap.FromStringMap(req.Labels),
 		Annotations: jsonmap.FromStringMap(req.Annotations),
 	}

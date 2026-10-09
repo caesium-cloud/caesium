@@ -96,6 +96,7 @@ type Result struct {
 
 // PreparedReplay is a validated replay plan that has not yet been materialized.
 type PreparedReplay struct {
+	namespace   string
 	baseline    models.JobRun
 	params      map[string]string
 	overrides   map[string]string
@@ -253,13 +254,22 @@ func (c *Constructor) Prepare(ctx context.Context, req Request) (*PreparedReplay
 		replayParams[k] = v
 	}
 
-	plans, err := c.planTasks(ctx, groups, replayParams, paramsChanged)
+	var currentJob models.Job
+	if err := c.store.DB().WithContext(ctx).Select("namespace").First(&currentJob, "id = ?", baseline.JobID).Error; err != nil {
+		return nil, err
+	}
+	namespace := models.NamespaceOrDefault(currentJob.Namespace)
+	// Effective hashes can alias an equal-output prior from another namespace.
+	// Ownership changes therefore force execution independently of hash equality.
+	namespaceChanged := namespace != models.NamespaceOrDefault(baseline.Namespace)
+	plans, err := c.planTasks(ctx, groups, replayParams, paramsChanged || namespaceChanged, namespace)
 	if err != nil {
 		return nil, err
 	}
 
 	return &PreparedReplay{
 		baseline:    baseline,
+		namespace:   namespace,
 		params:      replayParams,
 		overrides:   maps.Clone(req.Set),
 		fingerprint: req.ReplayFingerprint,
@@ -279,7 +289,7 @@ func (c *Constructor) Materialize(ctx context.Context, prepared *PreparedReplay)
 		return nil, errors.New("replay: prepared replay is required")
 	}
 
-	runID, err := c.materialize(ctx, prepared.baseline, prepared.params, prepared.overrides, prepared.fingerprint, prepared.plans)
+	runID, err := c.materialize(ctx, prepared.baseline, prepared.params, prepared.overrides, prepared.fingerprint, prepared.plans, prepared.namespace)
 	if err != nil {
 		return nil, err
 	}
@@ -671,7 +681,7 @@ func sortBaselineReady(groups []*baselineGroup) {
 	})
 }
 
-func (c *Constructor) planTasks(ctx context.Context, groups []*baselineGroup, params map[string]string, forceReexecute bool) ([]plannedTask, error) {
+func (c *Constructor) planTasks(ctx context.Context, groups []*baselineGroup, params map[string]string, forceReexecute bool, namespace string) ([]plannedTask, error) {
 	// One entry per catalog task, listing every plan for it in partition-index
 	// order. A fanned predecessor is resolved from the whole slice, never from
 	// one sibling: the DAG wires the GROUP, so it presents one aggregate output
@@ -732,7 +742,7 @@ func (c *Constructor) planTasks(ctx context.Context, groups []*baselineGroup, pa
 		for _, i := range group.order {
 			task := group.tasks[i]
 			pending := pendingPredecessors + pendingSiblings[task.partition.Key]
-			replayHash, hashErr := computeDescriptorInstanceHash(task.descriptor, params, predOutputsByName, predHashes, task.partition)
+			replayHash, hashErr := computeDescriptorInstanceHash(task.descriptor, params, predOutputsByName, predHashes, task.partition, namespace)
 			if hashErr != nil {
 				return nil, fmt.Errorf("replay: interpolate env for step %q: %w", firstNonEmpty(task.taskName, group.taskName), hashErr)
 			}
@@ -887,7 +897,12 @@ func computeDescriptorInstanceHash(
 	predOutputs map[string]map[string]string,
 	predHashes []string,
 	partition pkgtask.Partition,
+	namespaces ...string,
 ) (string, error) {
+	namespace := desc.Baseline.Namespace
+	if len(namespaces) > 0 {
+		namespace = namespaces[0]
+	}
 	spec := desc.ContainerSpec
 	env := maps.Clone(spec.Env)
 	if desc.Runtime.ParamEnvInterpolation {
@@ -915,6 +930,7 @@ func computeDescriptorInstanceHash(
 	}
 	return cache.HashInput{
 		JobAlias:             desc.Baseline.JobAlias,
+		Namespace:            namespace,
 		TaskName:             desc.Baseline.TaskName,
 		Image:                desc.Runtime.Image,
 		ResolvedImageDigest:  desc.Runtime.ResolvedImageDigest,
@@ -1176,7 +1192,7 @@ func ReplaySecretIdentityFromDescriptor(ref models.TaskExecutionSecretRef) secre
 	}
 }
 
-func (c *Constructor) materialize(ctx context.Context, baseline models.JobRun, params, overrides map[string]string, fingerprint string, plans []plannedTask) (uuid.UUID, error) {
+func (c *Constructor) materialize(ctx context.Context, baseline models.JobRun, params, overrides map[string]string, fingerprint string, plans []plannedTask, namespace string) (uuid.UUID, error) {
 	now := c.now()
 	replayID := uuid.New()
 	var fingerprintPtr *string
@@ -1232,6 +1248,13 @@ func (c *Constructor) materialize(ctx context.Context, baseline models.JobRun, p
 
 	var pendingEvents []event.Event
 	err = c.store.DB().WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var job models.Job
+		if err := tx.Select("namespace").First(&job, "id = ?", baseline.JobID).Error; err != nil {
+			return err
+		}
+		if models.NamespaceOrDefault(job.Namespace) != namespace {
+			return fmt.Errorf("replay: job namespace changed while preparing replay; prepare again")
+		}
 		status := string(run.StatusRunning)
 		var completedAt *time.Time
 		if allCached {
@@ -1241,6 +1264,7 @@ func (c *Constructor) materialize(ctx context.Context, baseline models.JobRun, p
 		model := models.JobRun{
 			ID:                replayID,
 			JobID:             baseline.JobID,
+			Namespace:         namespace,
 			Status:            status,
 			Params:            datatypes.JSON(encodedParams),
 			Priority:          priority,

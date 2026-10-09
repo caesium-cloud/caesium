@@ -21,6 +21,8 @@ func TestLocalParallelRootsPublishCompletePredecessorIdentity(t *testing.T) {
 	}
 	j, store, engine, tasks := characterizationJob(t, roots+1, edges)
 	j.envVariables = func() env.Environment { return env.Environment{ExecutionMode: executionModeLocal, MaxParallelTasks: 8} }
+	require.NoError(t, store.DB().Create(&models.Job{ID: j.id, Namespace: "marketing"}).Error)
+	require.Equal(t, "default", j.namespace, "preloaded job model deliberately predates persisted ownership")
 	for i, task := range tasks {
 		task.Name = fmt.Sprintf("step-%02d", i)
 		task.CacheConfig = datatypes.JSON("true")
@@ -33,6 +35,8 @@ func TestLocalParallelRootsPublishCompletePredecessorIdentity(t *testing.T) {
 	require.NoError(t, store.DB().Where("job_run_id = ? AND task_id = ?", snapshot.ID, tasks[roots].ID).First(&consumer).Error)
 	var blob cache.HashInputBlob
 	require.NoError(t, json.Unmarshal(consumer.HashInputBlob, &blob))
+	require.Equal(t, "marketing", snapshot.Namespace)
+	require.Equal(t, "marketing", blob.Namespace, "local execution hashes the persisted run rather than the preloaded job model")
 	expectedHashes := make([]string, roots)
 	expectedOutputs := make(map[string]map[string]string, roots)
 	for i, task := range tasks[:roots] {

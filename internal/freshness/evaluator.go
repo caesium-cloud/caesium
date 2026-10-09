@@ -714,7 +714,11 @@ func (e *Evaluator) derive(ctx context.Context, decl models.DatasetDeclaration, 
 			return err
 		}
 		recoverCtx := context.WithoutCancel(ctx)
-		adopted := e.recoverCommittedRun(recoverCtx, committedID, decl.JobID, params)
+		namespace := models.DefaultNamespace
+		if committed, ok := errors.AsType[*runstorage.RunCommittedError](err); ok {
+			namespace = models.NamespaceOrDefault(committed.Namespace)
+		}
+		adopted := e.recoverCommittedRun(recoverCtx, committedID, decl.JobID, params, namespace)
 		if adopted == nil {
 			return err
 		}
@@ -760,7 +764,7 @@ var committedRunReadBackoffs = []time.Duration{
 // reaches the launcher: the launcher loads the job, fences on the run's status
 // and, when neither can be resolved, finalizes the run conditionally. Either
 // way the run ends up executed or terminal, never stranded.
-func (e *Evaluator) recoverCommittedRun(ctx context.Context, runID, jobID uuid.UUID, params map[string]string) *runstorage.JobRun {
+func (e *Evaluator) recoverCommittedRun(ctx context.Context, runID, jobID uuid.UUID, params map[string]string, namespace string) *runstorage.JobRun {
 	var lastErr error
 retry:
 	for attempt := 0; attempt <= len(committedRunReadBackoffs); attempt++ {
@@ -781,10 +785,11 @@ retry:
 	log.Error("freshness: a committed run could not be read back; handing its identity to the launcher so it is executed or finalized",
 		"job_id", jobID, "run_id", runID, "error", lastErr)
 	return &runstorage.JobRun{
-		ID:     runID,
-		JobID:  jobID,
-		Status: runstorage.StatusRunning,
-		Params: params,
+		Namespace: namespace,
+		ID:        runID,
+		JobID:     jobID,
+		Status:    runstorage.StatusRunning,
+		Params:    params,
 	}
 }
 
@@ -807,6 +812,7 @@ func (e *Evaluator) runByID(ctx context.Context, runID, jobID uuid.UUID) (*runst
 		return nil, nil
 	}
 	return &runstorage.JobRun{
+		Namespace:  models.NamespaceOrDefault(row.Namespace),
 		ID:         row.ID,
 		JobID:      row.JobID,
 		Status:     runstorage.Status(row.Status),

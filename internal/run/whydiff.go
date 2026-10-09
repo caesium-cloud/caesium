@@ -7,6 +7,7 @@ import (
 	"sort"
 
 	"github.com/caesium-cloud/caesium/internal/cache"
+	"github.com/caesium-cloud/caesium/internal/models"
 )
 
 // whydiff.go implements the read-side, field-by-field diff that powers
@@ -100,6 +101,7 @@ type hashInputBlob struct {
 	BlobVersion int    `json:"blobVersion"`
 	Hash        string `json:"hash"`
 
+	Namespace               string                       `json:"namespace,omitempty"`
 	JobAlias                string                       `json:"jobAlias,omitempty"`
 	TaskName                string                       `json:"taskName,omitempty"`
 	Image                   string                       `json:"image,omitempty"`
@@ -343,6 +345,7 @@ func diffBlobs(before, after *hashInputBlob) []FieldChange {
 		}
 	}
 
+	addScalar("namespace", models.NamespaceOrDefault(before.Namespace), models.NamespaceOrDefault(after.Namespace))
 	addScalar("image", before.Image, after.Image)
 	addScalar("resolvedImageDigest", before.ResolvedImageDigest, after.ResolvedImageDigest)
 	addScalar("command", joinCommand(before.Command), joinCommand(after.Command))

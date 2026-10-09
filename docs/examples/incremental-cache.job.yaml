@@ -6,6 +6,7 @@ $schema: https://yourorg.io/schemas/job.v1.json
 apiVersion: v1
 kind: Job
 metadata:
+  namespace: default
   alias: incremental-cache-demo
   labels:
     team: data-eng

@@ -444,6 +444,7 @@ func (i *Importer) upsertJobAndTriggerTx(tx *gorm.DB, existing *models.Job, def 
 		jobModel := &models.Job{
 			ID:               uuid.New(),
 			Alias:            def.Metadata.Alias,
+			Namespace:        def.Metadata.Namespace,
 			TriggerID:        triggerModel.ID,
 			Labels:           jsonmap.FromStringMap(def.Metadata.Labels),
 			Annotations:      jsonmap.FromStringMap(def.Metadata.Annotations),
@@ -468,6 +469,7 @@ func (i *Importer) upsertJobAndTriggerTx(tx *gorm.DB, existing *models.Job, def 
 	}
 
 	existing.Alias = def.Metadata.Alias
+	existing.Namespace = def.Metadata.Namespace
 	existing.TriggerID = triggerModel.ID
 	existing.Labels = jsonmap.FromStringMap(def.Metadata.Labels)
 	existing.Annotations = jsonmap.FromStringMap(def.Metadata.Annotations)
@@ -487,6 +489,7 @@ func (i *Importer) upsertJobAndTriggerTx(tx *gorm.DB, existing *models.Job, def 
 
 	updates := map[string]any{
 		"alias":              existing.Alias,
+		"namespace":          existing.Namespace,
 		"trigger_id":         existing.TriggerID,
 		"labels":             existing.Labels,
 		"annotations":        existing.Annotations,

@@ -17,6 +17,7 @@ import (
 // --------------------------------------------------------------------------
 
 type backfillResponse struct {
+	Namespace     string     `json:"namespace"`
 	ID            string     `json:"id"`
 	JobID         string     `json:"job_id"`
 	Status        string     `json:"status"`
@@ -31,6 +32,7 @@ type backfillResponse struct {
 }
 
 type backfillRunSummary struct {
+	Namespace  string            `json:"namespace"`
 	ID         string            `json:"id"`
 	JobID      string            `json:"job_id"`
 	BackfillID string            `json:"backfill_id,omitempty"`

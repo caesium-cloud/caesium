@@ -63,6 +63,7 @@ func (s *ImporterTestSuite) TestApplyCreatesRecords() {
 	job, err := s.importer.Apply(ctx, def)
 	s.Require().NoError(err)
 	s.Equal("csv-to-parquet", job.Alias)
+	s.Equal("default", job.Namespace)
 	s.Equal("data", job.Labels["team"])
 	s.Equal("etl", job.Annotations["owner"])
 
@@ -1044,4 +1045,24 @@ func TestImporterJitterSchedule(t *testing.T) {
 			require.LessOrEqual(t, got, base)
 		}
 	}
+}
+
+func (s *ImporterTestSuite) TestNamespaceApplyMovesJobInPlace() {
+	def, err := schema.Parse([]byte(testutil.SampleJob))
+	s.Require().NoError(err)
+	def.Metadata.Namespace = "marketing"
+	first, err := s.importer.Apply(context.Background(), def)
+	s.Require().NoError(err)
+	s.Equal("marketing", first.Namespace)
+	def.Metadata.Namespace = "finance"
+	moved, err := s.importer.Apply(context.Background(), def)
+	s.Require().NoError(err)
+	s.Equal(first.ID, moved.ID)
+	s.Equal("finance", moved.Namespace)
+	var persisted models.Job
+	s.Require().NoError(s.db.First(&persisted, "id = ?", first.ID).Error)
+	s.Equal("finance", persisted.Namespace)
+	exported, err := NewExporter(s.db).Export(context.Background(), first.ID)
+	s.Require().NoError(err)
+	s.Equal("finance", exported.Metadata.Namespace)
 }

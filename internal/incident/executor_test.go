@@ -518,7 +518,7 @@ func TestSnoozeRetryRearmGivesUpAtCeiling(t *testing.T) {
 
 	timer := models.RemediationTimer{
 		IncidentID: inc.ID,
-		Namespace:  inc.Namespace,
+		Namespace:  &inc.Namespace,
 		Payload:    fixturejson.MustJSONBytes(t, snoozePayload{RunID: runID, Rearm: maxSnoozeRearm}),
 	}
 	err := exec.fireSnoozeRetry(context.Background(), timer)

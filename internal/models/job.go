@@ -10,6 +10,7 @@ import (
 )
 
 type Job struct {
+	Namespace          string            `gorm:"type:text;not null;default:'default';index" json:"namespace"`
 	ID                 uuid.UUID         `gorm:"type:uuid;primaryKey" json:"id"`
 	Alias              string            `gorm:"uniqueIndex" json:"alias"`
 	TriggerID          uuid.UUID         `gorm:"type:uuid;index;not null" json:"trigger_id"`

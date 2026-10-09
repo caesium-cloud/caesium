@@ -103,6 +103,7 @@ func Post(c *echo.Context) error {
 	b := &models.Backfill{
 		ID:            uuid.New(),
 		JobID:         jobID,
+		Namespace:     models.NamespaceOrDefault(j.Namespace),
 		Status:        models.BackfillStatusRunning,
 		Start:         req.Start.UTC(),
 		End:           req.End.UTC(),
