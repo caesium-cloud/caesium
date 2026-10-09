@@ -5,7 +5,7 @@ gate a merge into `master`, which checks gate a `v*` tag publish, the job
 matrix and its per-lane server env, and the release procedure. For the
 general execution-mode / worker / dqlite env reference (what each
 `CAESIUM_*` variable does), see
-[parallel-execution-operations.md](parallel-execution-operations.md) — this
+[distributed-execution.md](distributed-execution.md) — this
 doc does not repeat that material, only the CI-specific wiring.
 
 Shipped W1 load reporting and browser evidence; the W2 owner-crash robustness
@@ -520,7 +520,7 @@ Pure Markdown documentation changes still avoid image builds.
 
 Per-lane `-run` filters, `-timeout` values, and PASS-floor variables
 (`*_integration_min_pass`) are execution-mode wiring, not CI wiring — see
-[parallel-execution-operations.md](parallel-execution-operations.md) and the
+[distributed-execution.md](distributed-execution.md) and the
 justfile recipes named above for the current values; they change more often
 than this doc should need to.
 
@@ -1683,7 +1683,7 @@ sets `CAESIUM_DATABASE_SNAPSHOT_THRESHOLD` / `CAESIUM_DATABASE_SNAPSHOT_TRAILING
 bounds retention at 3,072 entries (about 421 MB at 137 KB), and snapshot
 frequency is unchanged. The trade-off is that a follower more than 2,048
 entries behind the leader's last snapshot catches up by a full snapshot
-install. See [execution operations](parallel-execution-operations.md). The 1Gi
+install. See [execution operations](distributed-execution.md). The 1Gi
 lifecycle limit was not changed.
 
 Two cluster qualifications with the fix, each on a candidate image built by
@@ -2336,7 +2336,7 @@ is native memory in anonymous mappings of 64 MiB or more held while one voter
 is stopped, starting at the first log truncation past that voter's index,
 levelling off about 450 MiB above the retained log and released (−348 to −354
 MiB) when the voter rejoins. It is recorded as a limit in
-`docs/parallel-execution-operations.md`; #583 stays open for the residual in
+`docs/distributed-execution.md`; #583 stays open for the residual in
 its original run, which began before any truncation and did not recur in five
 soaks. Three consecutive qualifications on `dd407e2f` passed
 (`lifecycle-w9d-f1-c0a1` 1,405 s, `f2r-c1d4` 1,404 s, `f3r-e3f5` 1,400 s),

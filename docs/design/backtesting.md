@@ -1,6 +1,6 @@
 # Design: Pipeline Backtesting — Regression-Test a Change Against Recorded Production History
 
-> Status: Brainstorm/Design — proposal for a pre-merge verb that replays a candidate change over the last N production runs' recorded inputs and reports output deltas per run. Composes shipped primitives (quarantined replay, execution descriptors, receipts, causal run diff); requires one significant piece of new machinery (controlled descriptor overrides) with its own safety analysis. → **active — Plan 3 of the closed-loop arc** (see [`exec-plans/active/backtesting.md`](exec-plans/active/backtesting.md); umbrella [`exec-plans/active/closed-loop-arc.md`](exec-plans/active/closed-loop-arc.md)).
+> Status: Brainstorm/Design — proposal for a pre-merge verb that replays a candidate change over the last N production runs' recorded inputs and reports output deltas per run. Composes shipped primitives (quarantined replay, execution descriptors, receipts, causal run diff); requires one significant piece of new machinery (controlled descriptor overrides) with its own safety analysis. → **active — Plan 3 of the closed-loop arc** (see [`../exec-plans/active/backtesting.md`](../exec-plans/active/backtesting.md); umbrella [`../exec-plans/active/closed-loop-arc.md`](../exec-plans/active/closed-loop-arc.md)).
 
 ## Problem
 
@@ -400,7 +400,7 @@ integration test driving its real surface.
 
 - **Not CI for data quality.** Backtest compares candidate vs baseline over
   *recorded history*; judging whether tonight's fresh data is sane is
-  [`design-data-circuit-breaker.md`](design-data-circuit-breaker.md)'s problem.
+  [`data-circuit-breaker.md`](data-circuit-breaker.md)'s problem.
 - **Not a staging environment.** No environment redirection, synthetic data, or
   alternate namespaces (explicitly cut from replay v1; still cut here).
 - **Not row/column dataset diffing.** Deltas are over typed step outputs and
@@ -427,19 +427,19 @@ integration test driving its real surface.
 
 ## Related Documents
 
-- [`design-quarantined-replay.md`](design-quarantined-replay.md) — the inherited
+- [`quarantined-replay.md`](quarantined-replay.md) — the inherited
   safety model; authoritative for every invariant reused here.
-- [`design-data-plane-memory.md`](design-data-plane-memory.md) — the substrate
+- [`data-plane-memory.md`](data-plane-memory.md) — the substrate
   that recorded everything backtest replays.
-- [`design-reproduce.md`](design-reproduce.md) — same descriptor substrate,
+- [`reproduce.md`](reproduce.md) — same descriptor substrate,
   single-task local reproduction; backtest is the N-run server-side counterpart.
   The recorded-vs-reproduced output compare primitive has already shipped as
   `internal/outputdiff` in reproduce C1 (#339), so backtesting should reuse that
   package instead of adding a second comparator.
-- [`design-contract-enforcement.md`](design-contract-enforcement.md) — the
+- [`contract-enforcement.md`](contract-enforcement.md) — the
   *static* half of pre-merge safety; backtest is the *dynamic* half.
-- [`design-data-circuit-breaker.md`](design-data-circuit-breaker.md) — runtime
+- [`data-circuit-breaker.md`](data-circuit-breaker.md) — runtime
   data-quality gating on fresh data; complementary, explicitly not this design.
-- [`design-agent-in-the-loop.md`](design-agent-in-the-loop.md) — the agent can
+- [`agent-in-the-loop.md`](agent-in-the-loop.md) — the agent can
   attach a backtest report as evidence when proposing a jobdef patch.
-- [`roadmap.md`](roadmap.md) §2.1 — the PR-preview-runs Action this ships inside.
+- [`roadmap.md`](../roadmap.md) §2.1 — the PR-preview-runs Action this ships inside.

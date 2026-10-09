@@ -4,11 +4,11 @@
 > from run history, proposing/applying right-sized requests, and escalating
 > memory on OOM retries instead of failing identically. No implementation
 > yet. Depends on and delivers the stats substrate planned in roadmap §2.5;
-> composes with [`design-agent-in-the-loop.md`](design-agent-in-the-loop.md)
+> composes with [`agent-in-the-loop.md`](agent-in-the-loop.md)
 > and reuses its provenance-routed GitOps-patch machinery.
 > → **active — Plan 2 of the closed-loop arc** (see
-> [`exec-plans/active/resource-right-sizing.md`](exec-plans/active/resource-right-sizing.md);
-> umbrella [`exec-plans/active/closed-loop-arc.md`](exec-plans/active/closed-loop-arc.md)).
+> [`../exec-plans/active/resource-right-sizing.md`](../exec-plans/active/resource-right-sizing.md);
+> umbrella [`../exec-plans/active/closed-loop-arc.md`](../exec-plans/active/closed-loop-arc.md)).
 
 ## Problem
 
@@ -35,7 +35,7 @@ computation (no resharding, no live resize, no autoscaling; see Non-Goals).
 
 ## Fit with Design Principles
 
-Against the six principles from [`roadmap.md`](roadmap.md):
+Against the six principles from [`roadmap.md`](../roadmap.md):
 
 1. **"Container-native execution."** Limits apply through each engine's
    native knobs; stats come from what each runtime already exposes. No agent
@@ -252,7 +252,7 @@ average); OOM-killed attempts are censored observations (peak ≥ limit)
 forcing the suggestion to at least `applied × onOOM.factor` — and a
 success-after-escalation is the strongest signal of all. Deliberately
 percentile-plus-headroom, not a model — boring, explainable, auditable.
-Quarantined replays and [`design-backtesting.md`](design-backtesting.md)
+Quarantined replays and [`backtesting.md`](backtesting.md)
 runs are excluded (`quarantine IS NOT TRUE`, the established filter), as
 are backfill storms unless opted in — backfill inputs differ from steady
 state systematically.
@@ -392,7 +392,7 @@ get Playwright e2e against the live backend, per precedent.
   where K8s supports it; escalation happens *between attempts*, never
   inside one.
 - **No Beam/Dataflow-style resharding** of a running computation — the
-  horizontal analog is [`design-dynamic-fanout.md`](design-dynamic-fanout.md)'s
+  horizontal analog is [`dynamic-fanout.md`](dynamic-fanout.md)'s
   territory, whose fan-out children inherit the template step's `resources`.
 - **No cost/dollar modeling** — §2.5's cost layer multiplies the columns
   this design persists; substrate shared, scope not. **No per-run manual
@@ -410,14 +410,14 @@ get Playwright e2e against the live backend, per precedent.
    the recommendation surface.
 3. **Window reset triggers.** Image-digest changes reset the window; should
    a params-distribution shift too?
-   [`design-window-scheduling.md`](design-window-scheduling.md) /
-   [`design-freshness-scheduling.md`](design-freshness-scheduling.md)
+   [`window-scheduling.md`](window-scheduling.md) /
+   [`freshness-scheduling.md`](freshness-scheduling.md)
    cohorts could partition it per data-window size.
 4. **Opt-in identity folding.** `rightSizing.hashResources: true` for steps
    whose outputs depend on limits (self-sizing JVMs), at the cost of cache
    busts on every change? Leaning: no in v1 — document `cache: false`.
 5. **PR ergonomics.** One rolling Renovate-style PR per repo vs. discrete
    PRs per job? Interacts with how
-   [`design-contract-enforcement.md`](design-contract-enforcement.md) and
+   [`contract-enforcement.md`](contract-enforcement.md) and
    the agent doc route proposals — a shared channel may deserve its own
    mini-design.

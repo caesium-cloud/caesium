@@ -17,9 +17,9 @@
 > `escalate` with the rendered diff, and the **Git-PR route
 > (`CAESIUM_GIT_WRITE_CREDENTIALS`, `internal/incident/provenance.go`) is
 > data-circuit-breaker.md Stream F's**, not shipped here. Exec plan:
-> [`agent-in-the-loop-remediation.md`](exec-plans/completed/agent-in-the-loop-remediation.md);
+> [`agent-in-the-loop-remediation.md`](../exec-plans/completed/agent-in-the-loop-remediation.md);
 > the `metadata.remediation` surface is documented in
-> [`job-schema-reference.md`](job-schema-reference.md#remediation). Companion
+> [`job-schema-reference.md`](../job-schema-reference.md#remediation). Companion
 > roadmap items: §2.3 SLA Management (escalation), §3.2 Approval Gates &
 > Human-in-the-Loop.
 
@@ -62,7 +62,7 @@ quarantined replay (a side-effect-free sandbox to *test* a hypothesis fix
 before touching production). Most orchestrators would have to build that first.
 We just have to hand it to an agent.
 
-Human escalations can now include the shipped [`caesium reproduce`](reproduce.md) one-liner, for example `caesium reproduce <run> --job-id <id> --task <task> --diff`, so the on-call can replay the failed task locally from the recorded descriptor; design record: [`design-reproduce.md`](design-reproduce.md).
+Human escalations can now include the shipped [`caesium reproduce`](../reproduce.md) one-liner, for example `caesium reproduce <run> --job-id <id> --task <task> --diff`, so the on-call can replay the failed task locally from the recorded descriptor; design record: [`reproduce.md`](reproduce.md).
 
 ## Fit with Design Principles
 
@@ -250,7 +250,7 @@ Pipeline per event:
      is defined but never produced today — every engine maps exit 137 to
      `Killed` and none reads the runtime OOM flags — so `oom` classification
      depends on the detection substrate
-     [`design-resource-right-sizing.md`](design-resource-right-sizing.md)
+     [`resource-right-sizing.md`](resource-right-sizing.md)
      builds in its Phase 0.
    - `TaskRun.SchemaViolations` → `schema_violation`
    - `run_timed_out`/`sla_missed` → `sla_risk`
@@ -390,7 +390,7 @@ autonomous only if explicitly allowed, tier 3 always produces an
 `quarantine_replay` deserves emphasis — and honest limits. It is the agent's
 **experiment harness**: the quarantine invariants (no production cache
 writes, no authoritative lineage, no callbacks, no stats pollution; see
-[`design-quarantined-replay.md`](design-quarantined-replay.md)) suppress
+[`quarantined-replay.md`](quarantined-replay.md)) suppress
 every *Caesium-internal* side effect. But quarantine does **not** sandbox the
 container — a replayed task really executes its command against whatever
 external systems it touches. That is exactly why replay is hard-gated on the
@@ -424,7 +424,7 @@ direct `jobdefs/diff` + `apply` path. The agent cannot choose the route; the
 executor derives it from provenance.
 
 *Amended 2026-09-07 (Plan 1 N-2):* naming the two routes precisely, since
-[`data-circuit-breaker.md`](exec-plans/active/data-circuit-breaker.md) Stream
+[`data-circuit-breaker.md`](../exec-plans/active/data-circuit-breaker.md) Stream
 F builds the second one as new work.
 
 - **The direct route ships today** (trust-the-substrate C7,
@@ -435,14 +435,14 @@ F builds the second one as new work.
   change the job's own `metadata.remediation` block; an agent may not edit
   the policy that governs it.
 - **The Git-PR route is not yet shipped** —
-  [`data-circuit-breaker.md`](exec-plans/active/data-circuit-breaker.md)
+  [`data-circuit-breaker.md`](../exec-plans/active/data-circuit-breaker.md)
   Stream F item **F3**. For a job with non-empty `ProvenanceRepo`, a new
   `internal/incident/provenance.go` router branches from `ProvenanceRef`,
   writes the rendered manifest at `ProvenancePath`, and opens a pull request
   (GitHub first; the forge interface admits others) whose body carries the
   incident id, the violated assertion, the observed/bound/baseline triple,
   and the rendered diff. Credentials come from `CAESIUM_GIT_WRITE_CREDENTIALS`
-  (see [`design-data-circuit-breaker.md`](design-data-circuit-breaker.md)
+  (see [`data-circuit-breaker.md`](data-circuit-breaker.md)
   § "Events, notifications, REST, env") — a grant separate from read-only
   sync credentials. Until F3 lands, and whenever no credential entry matches
   the job's repo once it has, a git-synced job's approved patch **degrades to
@@ -495,7 +495,7 @@ max tool calls), and default playbook. Shipped default profiles: a
 can adopt incrementally.
 
 Linting is honest about its two modes (the same split
-[`design-contract-enforcement.md`](design-contract-enforcement.md) adopts):
+[`contract-enforcement.md`](contract-enforcement.md) adopts):
 offline `caesium job lint` validates everything knowable from the local
 YAML — action names, class names, and that `paramOverrides` keys exist in
 `defaultParams` — but cannot verify `profile:` references, because lint is

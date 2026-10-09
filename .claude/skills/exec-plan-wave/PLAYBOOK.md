@@ -420,18 +420,18 @@ A failure is **real** otherwise — the PR's changes plausibly cause it. Don't b
 | PR-specific timing flake | `gh run rerun <run-id> --failed`. If it fails twice, escalate as real |
 | Real regression | Stop the merge for this PR. Report root cause. Ask user how to proceed |
 
-### Step 6d: Merge-gate check (caesium has NO required status checks)
+### Step 6d: Merge-gate check (`ci-ok` required + merge queue)
 
-Unlike a CI-gated repo, caesium's `master` protection requires **zero** status checks — confirm with:
+Since 2026-09-28 (`docs/ci.md` §1) `master` requires the `ci-ok` status check and ruleset 24123341 ("master merge queue") is active. Confirm at runtime:
 
 ```sh
 gh api "repos/caesium-cloud/caesium/branches/master/protection/required_status_checks" --jq '.contexts'
-# expected: []
+# expected: ["ci-ok"]
 ```
 
-So a red CI run does NOT mechanically block merge, and a green one does NOT permit it. The enforced gate is **a CODEOWNER approval** (`require_code_owner_reviews: true`, CODEOWNERS `@rocketbitz @RohanDalton`, `enforce_admins: false`). Practical consequences:
-- A failing CI check is advisory — but you should still NOT merge a PR with a **real** regression (Phase 6b "real"). Treat real CI failures and real integration-gate failures (Phase 6.5) as merge-blocking by policy, even though GitHub won't enforce it.
-- The merge itself is gated on a CODEOWNER review. If you are running as a repo admin, `gh pr merge` succeeds without the review (`enforce_admins: false`). If not, GitHub blocks the merge — surface it to the user to approve/merge (Phase 7b). Re-check protection at runtime; it can change.
+Practical consequences:
+- A red `ci-ok` blocks the merge mechanically. A real regression (Phase 6b "real") must be fixed; a diagnosed flake is rerun, never bypassed. Real integration-gate failures (Phase 6.5) are merge-blocking by policy even though GitHub does not run that gate.
+- The merge also needs a CODEOWNER review (`require_code_owner_reviews: true`, CODEOWNERS `@rocketbitz @RohanDalton`). `enforce_admins: false` lets a repo admin bypass both the queue and the review with `gh pr merge --admin`; do not use it unless the user has authorised it for this wave. Otherwise `gh pr merge` enqueues the PR and GitHub merges it when the queued candidate's `ci-ok` passes. Surface a "review required" block to the user (Phase 7b). Re-check protection at runtime; it can change.
 
 ### Step 6e: CI darkness as a wave anomaly
 
@@ -540,8 +540,9 @@ Highest-priority (most-disruptive shared-file edit) first:
 gh pr merge <pr> --squash --delete-branch
 ```
 
-**Merge gate (caesium-specific):** because `require_code_owner_reviews: true` and `enforce_admins: false`:
-- If you're running as a repo admin, the squash-merge succeeds without an explicit review.
+**Merge gate (caesium-specific):** `ci-ok` is required and the merge queue is active (Phase 6d), and `require_code_owner_reviews: true` with `enforce_admins: false`:
+- A plain `gh pr merge --squash` enqueues the PR; it lands once the queued candidate's `ci-ok` is green and a CODEOWNER has approved. Poll `gh pr view --json state,mergedAt` rather than assuming the merge happened.
+- If you're running as a repo admin and the user has authorised the bypass, `--admin` merges immediately without the queue or the review.
 - If GitHub returns `Pull request review required` / `not authorized to merge`, the PR needs a CODEOWNER (`@rocketbitz` / `@RohanDalton`) approval. **Stop for this PR and surface it to the user** to approve or admin-merge — list it under "Followups for the user". Don't try to bypass with `--admin` unless the user has told you that's allowed. (Note: GitHub forbids approving your own PR, so if all wave PRs are authored under the user's account, a second reviewer or an admin-merge is genuinely required.)
 
 Treat `failed to delete local branch ... used by worktree at ...` as **success** (the PR merged; only local cleanup failed). Do NOT panic or force-remove the worktree.
@@ -709,7 +710,7 @@ Read the plan doc end-to-end again. Look for:
 
 ### Step 8c: Commit + push the dashboard sync
 
-The Progress dashboard sync is a doc-only orchestrator update. `master` protection has `required_pull_request_reviews` set, and the repo's history is 100% PR-merges (no direct-to-master commits), so a plain `git push origin master` will be **rejected** unless you're a repo admin (admins bypass via `enforce_admins: false`). Default to a small docs-only PR; use a direct push only as an admin fast-path. Use this commit message format either way:
+The Progress dashboard sync is a doc-only orchestrator update. `master` requires a PR with `ci-ok` and a CODEOWNER review, and the repo's history is 100% PR-merges, so a plain `git push origin master` will be **rejected** unless you're a repo admin bypassing protection. Always use a small docs-only PR. Use this commit message format:
 
 ```
 docs(<plan-slug>): sync plan with merged wave-<N> state
@@ -728,7 +729,8 @@ Then publish it:
 # Default (non-admin): a tiny docs-only PR, then surface for CODEOWNER approval per Phase 7b.
 git checkout -b sync-<plan-slug>-w<N> && git add <plan-doc> docs/roadmap.md && git commit -m "..." && git push -u origin sync-<plan-slug>-w<N>
 gh pr create --title "docs(<plan-slug>): sync plan with merged wave-<N> state" --body "Dashboard sync for wave <N>."
-# Admin fast-path only: `git push origin master` directly (allowed because enforce_admins: false).
+# Docs-only PRs skip unit-test in CI, so run the guardrails package (containerized) before pushing:
+# the docs index and status-banner guardrails only run there.
 ```
 
 Re-check protection at runtime (`gh api repos/caesium-cloud/caesium/branches/master/protection`); it can change.

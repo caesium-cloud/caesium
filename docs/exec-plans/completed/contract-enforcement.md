@@ -18,7 +18,7 @@ compatible with what *consumers* extract or require. The failure mode is the 3 a
 page: team A trims `customer_id` from `vendor-x-daily`; `reporting-daily` (team B)
 fails its `inputSchema` gate — or silently loads nulls — at 3 a.m. the next morning.
 
-This plan ships [`docs/design-contract-enforcement.md`](../../design-contract-enforcement.md):
+This plan ships [`docs/design/contract-enforcement.md`](../../design/contract-enforcement.md):
 a control-plane graph derivation over data the server already holds (persisted
 jobdefs, triggers, lineage rows), a pragmatic-subset JSON-Schema **compatibility
 checker** (breaking / compatible / unknown, never a silent pass), apply-time
@@ -54,7 +54,7 @@ For drafting new plans in this same shape, see
 
 ## Source-Of-Truth Note
 
-When this plan and [`docs/design-contract-enforcement.md`](../../design-contract-enforcement.md)
+When this plan and [`docs/design/contract-enforcement.md`](../../design/contract-enforcement.md)
 disagree, **the design doc wins on INTENT and SCOPE** (what the graph derivation,
 the compatibility subset, the enforcement points, and the escape hatch must do). No
 item may add a NEW edge class, verdict grade, config knob, endpoint, or CLI verb
@@ -504,7 +504,7 @@ precedent: backend REST/CLI first, UI consumes it). New feature dir gated by the
 
 ## Navigational / Organizational Improvements
 
-- [x] N-1. Flip the [`docs/design-contract-enforcement.md`](../../design-contract-enforcement.md)
+- [x] N-1. Flip the [`docs/design/contract-enforcement.md`](../../design/contract-enforcement.md)
       `> Status:` banner from "Brainstorm/Design" to shipped (naming this plan);
       update `docs/roadmap.md` §2.1 (PR Preview Runs) to note the contract section of
       the PR flow ships, and the Phase-4 design table row (`docs/roadmap.md:226`);
@@ -515,7 +515,7 @@ precedent: backend REST/CLI first, UI consumes it). New feature dir gated by the
       `docs/README.md` in backtick/inline-code form (the
       `TestDocsREADMEIndexesEveryTopLevelDoc` guardrail rejects clickable
       subdirectory links). Runs last, after the runtime ships.
-      Files: `docs/design-contract-enforcement.md`, `docs/roadmap.md`,
+      Files: `docs/design/contract-enforcement.md`, `docs/roadmap.md`,
       `docs/job-schema-reference.md`, `docs/job-definitions.md`,
       `docs/caesium-job-llm-reference.md`, `docs/examples/`, `docs/README.md`.
       Depends on: A–F (runs last).
@@ -671,12 +671,12 @@ The plan is done when **all** of these hold:
    e2e against a live backend.
 7. **H-1 — the integration server** runs with `CAESIUM_CONTRACT_ENFORCEMENT` set so
    the Stream C/D scenarios exercise the live gated path in CI, not an internal call.
-8. **N-1 — docs reflect reality:** the `design-contract-enforcement.md` `> Status:`
+8. **N-1 — docs reflect reality:** the `design/contract-enforcement.md` `> Status:`
    banner flipped, `docs/roadmap.md` §2.1 + the Phase-4 table updated, the `datasets`
    schema fields and `CAESIUM_CONTRACT_*` env vars documented in the schema
    references with a working `docs/examples/` manifest, and this plan indexed in
    `docs/README.md`.
-9. **Cross-cutting:** `docs/roadmap.md`, `docs/design-contract-enforcement.md`, the
+9. **Cross-cutting:** `docs/roadmap.md`, `docs/design/contract-enforcement.md`, the
    freshness-scheduling plan (on the shared `datasets` block), and this plan's
    per-stream `## Progress` entries reflect every shipped stream and match the merged
    PRs.
@@ -700,7 +700,7 @@ The plan is done when **all** of these hold:
 
 ## Cross-References
 
-- [`docs/design-contract-enforcement.md`](../../design-contract-enforcement.md) — the
+- [`docs/design/contract-enforcement.md`](../../design/contract-enforcement.md) — the
   design of record. Source of truth for intent and scope.
 - [`docs/roadmap.md`](../../roadmap.md) §2.1 PR Preview Runs & Visual DAG Diff — the
   PR surface this feature plugs its contract section into; and the Phase-4 design
@@ -708,12 +708,12 @@ The plan is done when **all** of these hold:
 - [`freshness-scheduling.md`](freshness-scheduling.md) — sibling active plan that
   **owns the base step-level `datasets` block**; Stream E here extends it with schema
   fields. Coordinate on `pkg/jobdef/definition.go`.
-- [`docs/design-event-triggers.md`](../../design-event-triggers.md) and the shipped
+- [`docs/design/event-triggers.md`](../../design/event-triggers.md) and the shipped
   [`event-trigger-routing.md`](event-trigger-routing.md) — the WS3
   trigger-chaining substrate (`internal/jobdef/trigger_cycle.go`,
   `paramMapping`) the inferred edge class analyzes.
-- [`docs/design-data-circuit-breaker.md`](../../design-data-circuit-breaker.md) and
-  [`docs/design-agent-in-the-loop.md`](../../design-agent-in-the-loop.md) — the
+- [`docs/design/data-circuit-breaker.md`](../../design/data-circuit-breaker.md) and
+  [`docs/design/agent-in-the-loop.md`](../../design/agent-in-the-loop.md) — the
   runtime and remediation complements to this apply-time enforcer (same edge model).
 - [`pkg/jobdef/definition.go`](../../../pkg/jobdef/definition.go) — the job-definition
   schema Stream E extends; `internal/jobdef/trigger_cycle.go`,

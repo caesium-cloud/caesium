@@ -7,7 +7,7 @@ across all later phases.
 The reference for "what good looks like" in caesium is the wave/workstream
 structure of `.claude/plans/golden-kindling-cherny.md` (parallel workstreams
 with new/modified-files tables) blended with the header/exit-criteria
-scaffolding of `docs/superpowers/plans/archive/2026-05-27-sso-foundation.md`
+scaffolding of `docs/archive/2026-05-27-sso-foundation-plan.md`
 (note its `## Phase N exit criteria` headers). Skim one of each before
 starting phase 1 — the structural pattern is more easily absorbed than
 described.
@@ -30,8 +30,8 @@ without inventing.
      `## Streams` headers — you'll either depend on them or
      handoff-to-them.
    - `grep -ri <key-noun> docs/` to find existing design docs
-     (`docs/design-*.md`), superpowers specs
-     (`docs/superpowers/specs/`), and the roadmap section
+     (`docs/design/*.md`), dated specs
+     (`docs/design/<date>-<topic>-design.md`), and the roadmap section
      (`docs/roadmap.md`) that contain the technical contract.
    - `git show --stat 53cdb57` — the volumes/workload-identity feature
      (PR #207) is the canonical "what a full feature touches" reference
@@ -40,9 +40,9 @@ without inventing.
    candidates:
    - `docs/roadmap.md` (the strategic priority list; per-section
      `**Status**:` + `**Design doc**:` lines)
-   - A design doc under `docs/design-<topic>.md` (each carries a
+   - A design record under `docs/design/<topic>.md` (each carries a
      `> Status:` banner)
-   - A superpowers spec under `docs/superpowers/specs/<date>-<topic>-design.md`
+   - A dated spec under `docs/design/<date>-<topic>-design.md`
    - `pkg/jobdef/definition.go` (the job-definition schema) for any plan
      that changes the YAML contract
    When in doubt, ask the user. The Source-Of-Truth Note in the final
@@ -52,7 +52,7 @@ without inventing.
    plans should not collide with active work. Check recent commits
    (`git log --oneline -30`) and the two live initiatives (SSO under
    `docs/sso-authentication.md`; Volumes & workload-identity under
-   `docs/superpowers/specs/2026-05-29-volumes-and-workload-identity-design.md`).
+   `docs/design/2026-05-29-volumes-and-workload-identity-design.md`).
 
 **Output of phase 1**: a one-paragraph summary of the initiative, the
 source-of-truth file, and the names of every sibling plan or design doc
@@ -70,14 +70,14 @@ yet. Each candidate should be:
 
 - **Concrete**: nameable as a single PR or design memo.
 - **Anchored**: at least one file path (or "new design doc:
-  `docs/design-<x>.md`") that the work touches.
+  `docs/design/<x>.md`") that the work touches.
 - **Self-contained**: a reader who only sees this item should know what
   to build.
 
 Sources for candidate items:
 
 - The user's problem statement (split compound asks into atoms).
-- Existing design docs / superpowers specs (extract the "Open question"
+- Existing design records / specs (extract the "Open question"
   / "Remaining work" / "Non-goals → later" lists; each often becomes a
   stream item).
 - Code grep for `// TODO` near the named files.
@@ -119,8 +119,8 @@ Sources for candidate items:
     `internal/cache/hash.go` (cache key MUST include new fields), and the
     docs (`docs/caesium-job-llm-reference.md`, `docs/job-definitions.md`,
     `docs/job-schema-reference.md`) + `docs/examples/*.job.yaml`.
-  - **Design doc** — `docs/design-<topic>.md` with a `> Status:` banner,
-    or a superpowers spec for a larger design-of-record.
+  - **Design record** — `docs/design/<topic>.md` with a `> Status:` banner,
+    or a dated spec (`docs/design/<date>-<topic>-design.md`) for a larger design-of-record.
   - **Tests** — unit (`*_test.go` beside code, run by `just unit-test`)
     + integration scenario (`test/<feature>_test.go` behind
     `//go:build integration`, run by `just integration-test`).
@@ -381,7 +381,7 @@ Update at least:
   table.
 - Any sibling plan whose stream now hands off to or owns from the new
   plan: edit the relevant stream description to cross-link.
-- Any design doc / superpowers spec the plan promotes: update its
+- Any design record / spec the plan promotes: update its
   `> Status:` banner (e.g. "Status: Proposed → active — Stream X in
   `<new-plan>.md`").
 - [`docs/README.md`](../../../docs/README.md): add a bullet under the
@@ -420,7 +420,7 @@ run the first wave.
   acceptance criteria.
 - **The user gives an initiative that's exploratory.** Produce a
   design-only plan with one stream that ends in a design memo
-  (`docs/design-<topic>.md` or a superpowers spec). Don't fabricate
+  (`docs/design/<topic>.md` or a dated spec). Don't fabricate
   concrete items below the design level.
 - **A candidate item is "ship feature X end-to-end".** That's a stream,
   not an item. Decompose it.

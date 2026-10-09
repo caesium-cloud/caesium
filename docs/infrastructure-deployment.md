@@ -3,7 +3,7 @@
 > Status: Shipped — dependency-ordered deployment of infrastructure stacks as
 > ordinary Caesium DAGs, with unchanged stacks skipped and a shared provider
 > cache warmed once. Design:
-> `superpowers/specs/2026-08-25-dag-native-infrastructure-deployment-design.md`.
+> `design/2026-08-25-dag-native-infrastructure-deployment-design.md`.
 > Implementation: `exec-plans/completed/infra-deploy.md`.
 
 This is a pattern, not a Terraform feature. Caesium's Go never learns what HCL
@@ -971,7 +971,7 @@ short-circuits a cascade when a re-executed step is *proven* to publish
 byte-identical output (`EquivalentPriorHash`). Neither mechanism subsumes the
 other: the short-circuit acts *after* execution and only on proof, so it does
 nothing for a step that publishes nothing at all (`warm-cache`'s own contract
-— see [`design-incremental-execution.md`](design-incremental-execution.md#chain-mode-cachechain))
+— see [`design/incremental-execution.md`](design/incremental-execution.md#chain-mode-cachechain))
 or for a consumer that only cares about part of what its predecessor
 publishes; `chain: values` decides *before* execution and covers exactly
 those two cases, at zero cost when the upstream would have re-run anyway.
@@ -1033,11 +1033,11 @@ Ordered by damage:
   `cache.chain`/`cache.ttl` schema and volumes reference.
 - [`caesium-job-llm-reference.md`](caesium-job-llm-reference.md#cache-chain-breaking-a-noisy-upstream) —
   LLM-oriented authoring reference, including the cache-chain YAML shape.
-- [`design-incremental-execution.md`](design-incremental-execution.md#chain-mode-cachechain) —
+- [`design/incremental-execution.md`](design/incremental-execution.md#chain-mode-cachechain) —
   cache-chain implementation notes and its relationship to the value-verified
   short-circuit.
 - [`exec-plans/completed/dynamic-fanout.md`](exec-plans/completed/dynamic-fanout.md) —
   the fan-out mechanism itself, which shipped; the plan → apply handoff this
   pattern would need on top of it has [not](#the-fan-out-form-not-yet-supported).
-- `superpowers/specs/2026-08-25-dag-native-infrastructure-deployment-design.md` —
+- `design/2026-08-25-dag-native-infrastructure-deployment-design.md` —
   the full design this guide implements.

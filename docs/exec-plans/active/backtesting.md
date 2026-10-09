@@ -82,17 +82,17 @@ This plan inherits the arc's **shared conventions 1–8** by link — feature ga
 (5), symbol citations (6), docs/N-items (7), wave hygiene (8) — and does not
 restate them; an item that contradicts one says so explicitly.
 
-This plan implements [`docs/design-backtesting.md`](../../design-backtesting.md).
+This plan implements [`docs/design/backtesting.md`](../../design/backtesting.md).
 **The design doc is authoritative for INTENT and SCOPE and wins on any
 disagreement** with this plan — if an item here contradicts the design, the
 design's contract holds and the item is corrected, not the design. No item may
 add a new verb, endpoint, config knob, or job-schema field beyond what the design
 enumerates without first amending the design. The design in turn defers its
 reused **safety invariants** to
-[`docs/design-quarantined-replay.md`](../../design-quarantined-replay.md)
+[`docs/design/quarantined-replay.md`](../../design/quarantined-replay.md)
 (authoritative for every quarantine/`replaySafe`/suppression invariant this plan
 inherits verbatim) and the descriptor substrate to
-[`docs/design-data-plane-memory.md`](../../design-data-plane-memory.md). The
+[`docs/design/data-plane-memory.md`](../../design/data-plane-memory.md). The
 job-definition contract for the new `metadata.backtest` block lives in
 [`pkg/jobdef/definition.go`](../../../pkg/jobdef/definition.go) — if an item finds
 it needs a struct change beyond the design's `ignoreOutputs` / `backtestMode`
@@ -110,14 +110,14 @@ partition lists"), which C1 must reconcile with. Stream F's items (six after the
 2026-09-05 adversarial review split F1 and the old F4 into single-purpose items)
 are the
 arc's synergy (arc table row "Backtesting had no consumer for its report except a
-human reading a PR"); the design doc's `design-agent-in-the-loop.md` cross-link
+human reading a PR"); the design doc's `design/agent-in-the-loop.md` cross-link
 ("the agent can attach a backtest report as evidence when proposing a jobdef
 patch") is their intent statement.
 
 ## Progress (as of 2026-09-05)
 
 No implementation waves have shipped yet. The plan was published on 2026-07-03
-from the [`design-backtesting.md`](../../design-backtesting.md) brainstorm/design
+from the [`design/backtesting.md`](../../design/backtesting.md) brainstorm/design
 proposal and **re-cut on 2026-09-05** as Plan 3 of the closed-loop arc (design
 refresh, symbol citations, Stream F, explainability item, lane-aware harness).
 The first wave is the next eligible run of the `exec-plan-wave` skill against
@@ -140,7 +140,7 @@ Stream F**, not merely on Plan 1 (corrected 2026-09-05).
 | F | Proposal verification & assertion backtests (arc synergy) — `backtest_patch` incident action (F1); `apply_jobdef_patch` proposals carry a backtest verdict on the approval card / `incident get` / MCP (F2); assertion-threshold backtest over `DatasetMetric` history, no re-execution (F3); resource-override backtest (F4, stretch); `why` provenance (F5) + timeline chain (F6) | P1 (F4 optional) | Not started — F1/F2 blocked on **Plan 0 C4/C7** (the approval pipeline) + Plan 1 F; F3 blocked on Plan 1 substrate |
 | H-1 | Integration harness — `CAESIUM_BACKTEST_ENABLED` + override capability on the distributed lane, the agent/auth lane and every other self-server lane (**deliberately NOT the default `integration-up` lane**, which hosts the gated-off 404 scenario); approval-card scenarios on the auth lane | — | Not started |
 | N-1 | Docs — roadmap flip, design banner, `metadata.backtest` + `backtest` verb schema docs (generator), example manifest, README repoint, `docs/tour-proof-loop.md`, arc dashboard row | — | Not started |
-| N-2 | **Design amendment (runs FIRST, before D1/F1–F4)** — land the surface this plan adds beyond the 2026-07 design (`backtest create` subcommand, `mode: assertions`, `backtest assertions`, the `backtest_patch` remediation action, `--resources`) into `docs/design-backtesting.md` so the Source-Of-Truth rule holds | — | Not started |
+| N-2 | **Design amendment (runs FIRST, before D1/F1–F4)** — land the surface this plan adds beyond the 2026-07 design (`backtest create` subcommand, `mode: assertions`, `backtest assertions`, the `backtest_patch` remediation action, `--resources`) into `docs/design/backtesting.md` so the Source-Of-Truth rule holds | — | Not started |
 | (CI Action) | §2.1 Action fourth step `lint→diff→backtest→comment` + dry-run-then-label cost guard | — | **Deferred** — external `caesium-action` repo |
 
 ## Streams
@@ -611,7 +611,7 @@ stderr, captured separately in the integration test (`runCLIStdout`).
       `--json` embeds the `Diff` struct. Reserve the `assertions` subcommand name
       for F3 (do not use it for anything else).
       **Deliberate divergence from the design (2026-09-05).**
-      `docs/design-backtesting.md` `## CLI` specifies create as flags on the *root*
+      `docs/design/backtesting.md` `## CLI` specifies create as flags on the *root*
       command (`caesium backtest --job <alias|id> --against last-30-runs …`) plus a
       `backtest report <id> --job <id>` subcommand. This plan instead ships create
       as an explicit **`caesium backtest create`** subcommand, matching the arc's
@@ -619,7 +619,7 @@ stderr, captured separately in the integration test (`runCLIStdout`).
       --image …`) and leaving the root command free to host `report` and F3's
       `assertions` without a flags-vs-subcommand ambiguity. Per the Source-Of-Truth
       Note this divergence is only legal once the design says so: **N-2 amends
-      `docs/design-backtesting.md` first** and D1 depends on it.
+      `docs/design/backtesting.md` first** and D1 depends on it.
       Files: new `cmd/backtest/`, `cmd/execute.go`.
       Depends on: B1 + B2 + N-2.
 - [ ] D2. Add the override flags to the CLI: `--image step=ref`,
@@ -1029,7 +1029,7 @@ it.
       [`docs/roadmap.md`](../../roadmap.md) Phase-4 exploration-table "Pipeline
       backtesting" row, the Phase 5 sequence-table row 3 ("The proof loop"), and
       the §2.1 Action note to reflect the shipped
-      state; update the [`design-backtesting.md`](../../design-backtesting.md)
+      state; update the [`design/backtesting.md`](../../design/backtesting.md)
       `> Status:` banner from Brainstorm/Design to shipped-per-stream (N-2 has
       already amended that doc's `## CLI` / `### REST` / action surface). Document the
       `metadata.backtest` fields (`ignoreOutputs`, `backtestMode`) and the
@@ -1037,8 +1037,8 @@ it.
       `docs/job-definitions.md`, and `docs/caesium-job-llm-reference.md`; add a
       backtest example (`metadata.backtest` block, pinned images) under
       `docs/examples/`. In `docs/README.md`, refresh **both** existing entries to
-      the shipped state: the top-level `design-backtesting.md` bullet — which is a
-      **markdown link** (`- [design-backtesting.md](design-backtesting.md): …`)
+      the shipped state: the top-level `design/backtesting.md` bullet — which is a
+      **markdown link** (`- [design/backtesting.md](../../design/backtesting.md): …`)
       and is legal because its basename *is* a top-level `docs/*.md`, so keep it
       as a link — and the **backticked** `exec-plans/active/backtesting.md` bullet
       under "Active Exec Plans", which must stay in backtick/inline-code form
@@ -1066,7 +1066,7 @@ it.
       plan to `docs/exec-plans/completed/`, and repoint the arc's links. If this
       is Plan 3's final wave, draft `tell-it.md` per the arc's "Closing wave"
       section (or confirm it is already drafted).
-      Files: `docs/roadmap.md`, `docs/design-backtesting.md`,
+      Files: `docs/roadmap.md`, `docs/design/backtesting.md`,
       `internal/jobdef/report/report.go` (+ regenerated
       `docs/job-schema-reference.md`), `docs/job-definitions.md`,
       `docs/caesium-job-llm-reference.md`, `docs/examples/`, `docs/README.md`,
@@ -1077,7 +1077,7 @@ it.
       D1 / F1 / F3 / F4 ship**. The Source-Of-Truth Note above forbids adding "a new
       verb, endpoint, config knob, or job-schema field beyond what the design
       enumerates without first amending the design", and this cut adds five such
-      things that `docs/design-backtesting.md` does not enumerate:
+      things that `docs/design/backtesting.md` does not enumerate:
       (a) **`caesium backtest create`** as a subcommand — the design's `## CLI`
       section specifies create as flags on the root command
       (`caesium backtest --job <alias|id> --against last-30-runs …`) plus
@@ -1098,7 +1098,7 @@ it.
       "Backtesting had no consumer for its report except a human reading a PR"
       (owned by Plan 3, new Stream F) as the authority for the scope expansion.
       No code, no roadmap flip — N-1 still owns the status banner.
-      Files: `docs/design-backtesting.md`.
+      Files: `docs/design/backtesting.md`.
       Depends on: nothing (first-wave eligible).
 
 ## Sequencing & Dependencies
@@ -1390,8 +1390,8 @@ The plan is done when **all** of these hold:
    `docs/tour-proof-loop.md` written, this plan indexed in `docs/README.md`, and
    the arc dashboard row ticked. **N-2 — the design amendment** landed *before*
    D1/F1/F3/F4, so no shipped verb, endpoint, config knob, action name or schema
-   field exceeds what `docs/design-backtesting.md` enumerates.
-9. **Cross-cutting:** `docs/roadmap.md`, `docs/design-backtesting.md`,
+   field exceeds what `docs/design/backtesting.md` enumerates.
+9. **Cross-cutting:** `docs/roadmap.md`, `docs/design/backtesting.md`,
    `closed-loop-arc.md`'s dashboard, and this plan's per-stream `## Progress`
    entries reflect every shipped stream and match the merged PRs. (The CI Action
    fourth step remains explicitly deferred to the external `caesium-action`
@@ -1427,21 +1427,21 @@ The plan is done when **all** of these hold:
 - [`closed-loop-arc.md`](closed-loop-arc.md) — the umbrella arc; this is Plan 3.
   Shared conventions 1–8, the synergy table row this plan's Stream F owns, the
   cross-plan file-conflict table, and the arc acceptance criterion 4.
-- [`docs/design-backtesting.md`](../../design-backtesting.md) — the design of
+- [`docs/design/backtesting.md`](../../design/backtesting.md) — the design of
   record. Source of truth for intent and scope.
-- [`docs/design-quarantined-replay.md`](../../design-quarantined-replay.md) — the
+- [`docs/design/quarantined-replay.md`](../../design/quarantined-replay.md) — the
   inherited safety model; authoritative for every quarantine/`replaySafe`/
   suppression invariant reused here.
-- [`docs/design-data-plane-memory.md`](../../design-data-plane-memory.md) — the
+- [`docs/design/data-plane-memory.md`](../../design/data-plane-memory.md) — the
   descriptor/output substrate backtest replays and compares against.
-- [`docs/design-reproduce.md`](../../design-reproduce.md) and
+- [`docs/design/reproduce.md`](../../design/reproduce.md) and
   [`reproduce.md`](../completed/reproduce.md) (Stream C, C1 — #339) — the
   single-task local counterpart on the same descriptor substrate and the shared
   `internal/outputdiff` comparator this plan reuses.
 - [`dynamic-fanout.md`](../completed/dynamic-fanout.md) and PR #374 ("Replay
   fanned baselines from recorded partition lists") — the fan-out-aware replay
   core Stream C reconciles with.
-- [`docs/design-agent-in-the-loop.md`](../../design-agent-in-the-loop.md) and
+- [`docs/design/agent-in-the-loop.md`](../../design/agent-in-the-loop.md) and
   [`agent-in-the-loop-remediation.md`](../completed/agent-in-the-loop-remediation.md)
   — the incident runtime, action catalog, approval flow, and `apply_jobdef_patch`
   provenance router Stream F attaches to (see the verified-gap note in Stream F).

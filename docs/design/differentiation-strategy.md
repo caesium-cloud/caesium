@@ -1,6 +1,6 @@
 # Differentiation Strategy: Where Caesium Wins
 
-> Status: Proposed positioning (2026-06-19). This document reframes how Caesium is positioned and prioritized. It is the output of a structured competitive analysis + a six-angle adversarial red-team of the resulting thesis. It does not change shipped behavior; it changes what we lead with, what we build next, and why. Supersedes the implicit "better Airflow" framing of the feature roadmap. The companion build spec is [`design-data-plane-memory.md`](design-data-plane-memory.md); re-scored 2026-09-05 — see Status update below.
+> Status: Proposed positioning (2026-06-19). This document reframes how Caesium is positioned and prioritized. It is the output of a structured competitive analysis + a six-angle adversarial red-team of the resulting thesis. It does not change shipped behavior; it changes what we lead with, what we build next, and why. Supersedes the implicit "better Airflow" framing of the feature roadmap. The companion build spec is [`data-plane-memory.md`](data-plane-memory.md); re-scored 2026-09-05 — see Status update below.
 
 ## The problem this document solves
 
@@ -54,7 +54,7 @@ The pivot is **invert the ranking**, not discard the data work. All three differ
 |---|---|---|---|
 | **Hook** — reason to clone | DX over raw k8s | *"Why not hand-roll Argo/Kueue?"* | Strong, but a taste argument; needs marketing to win |
 | **Close** — reason to adopt | **Operational sovereignty** | *"Why not Airflow/Dagster/Flyte?"* | **100% built, un-copyable, sells by constraint** |
-| **Retain** — reason to stay | Content-addressed data-plane memory | *"Why not the other zero-dep schedulers (Argo/Kueue/Cronicle)?"* | Second act; substrate + the causal query layer (`caesium run diff` / `blame` / quarantined `replay --set … --diff`) **shipped** (see spec + the completed [data-plane-memory](exec-plans/completed/data-plane-memory.md) / [data-plane-memory-ii](exec-plans/completed/data-plane-memory-ii.md) plans) |
+| **Retain** — reason to stay | Content-addressed data-plane memory | *"Why not the other zero-dep schedulers (Argo/Kueue/Cronicle)?"* | Second act; substrate + the causal query layer (`caesium run diff` / `blame` / quarantined `replay --set … --diff`) **shipped** (see spec + the completed [data-plane-memory](../exec-plans/completed/data-plane-memory.md) / [data-plane-memory-ii](../exec-plans/completed/data-plane-memory-ii.md) plans) |
 
 **Lead with sovereignty. Hook with DX. Retain with data-plane memory** — explicitly demoted from north-star to *"the killer differentiator within sovereignty"*: it is what makes Caesium more than "Argo with a nicer binary," once a user is already inside.
 
@@ -72,7 +72,7 @@ good at what Caesium deliberately does not do (roadmap principle 5): long-lived
 business processes, durable waits for signals and human approval, compensation,
 and millions of small per-entity workflows. Caesium already borrows its
 durability core; the run-owner design adapts Temporal's history-shard pattern
-at container grain ([`design-scaling-job-execution.md`](design-scaling-job-execution.md)).
+at container grain ([`scaling-job-execution.md`](scaling-job-execution.md)).
 
 Where they do collide is teams that already run Temporal and write their ETL as
 activities because it is the platform they have. Two things follow:
@@ -89,7 +89,7 @@ activities because it is the platform they have. Two things follow:
   Caesium to be a safe callee for an at-least-once client, which it now is:
   `POST /v1/jobs/:id/run` accepts an `Idempotency-Key` and reports queued and
   skipped starts instead of an empty `202`. The operator recipe is
-  [`temporal.md`](temporal.md). It is documentation and REST contract only;
+  [`temporal.md`](../temporal.md). It is documentation and REST contract only;
   Caesium takes no dependency on Temporal.
 
 **Proposed scope amendment (2026-10-01; implementation has not shipped).**
@@ -102,7 +102,7 @@ provider must justify further generalization. This authorizes neither a provider
 catalog nor a dynamic plugin system. B1 must update this section and the Temporal
 guide in the same PR that adds the compiled SDK dependency. Even then, the
 default-disabled runtime requires no Temporal service, worker or credentials.
-The active plan is `exec-plans/active/execution-connectors.md`.
+The active plan is `../exec-plans/active/execution-connectors.md`.
 
 ## Positioning statement
 
@@ -114,7 +114,7 @@ Use the words a frustrated engineer actually types into a search bar: *"lightwei
 
 - **No code required first.** The highest-leverage move is a positioning rewrite (README/landing) to lead with sovereignty. The asset is already built.
 - **Delegate scheduling to Kueue; never bin-pack.** Emit the `kueue.x-k8s.io/queue-name` label so a Caesium DAG inherits quota/fair-share for free. A shallow Caesium "priority field" reads as a toy.
-- **The data-plane memory is the second act**, built in a correctness-first order (see [`design-data-plane-memory.md`](design-data-plane-memory.md)): digest-pin images → persist decomposed hash inputs → version DAG topology → populate lineage datasets → raise the 64 KB cap.
+- **The data-plane memory is the second act**, built in a correctness-first order (see [`data-plane-memory.md`](data-plane-memory.md)): digest-pin images → persist decomposed hash inputs → version DAG topology → populate lineage datasets → raise the 64 KB cap.
 - **Scope `caesium why` honestly** until the substrate lands: what the event store answers *today* is cache hit/miss, predecessor-hash change, and param change — not field-level data causality.
 
 ## Do NOT build (protect the wedge)
@@ -137,7 +137,7 @@ Use the words a frustrated engineer actually types into a search bar: *"lightwei
 ## Interim status update (2026-09-05; final re-score in the arc's Tell-it wave)
 
 Re-scored two and a half months after the pivot, as part of drafting the
-closed-loop arc ([`exec-plans/active/closed-loop-arc.md`](exec-plans/active/closed-loop-arc.md)).
+closed-loop arc ([`../exec-plans/active/closed-loop-arc.md`](../exec-plans/active/closed-loop-arc.md)).
 
 **What changed in the market.**
 
@@ -195,9 +195,9 @@ This thesis was not authored top-down. It came from: (1) a structured competitiv
 
 ## Related documents
 
-- [`exec-plans/completed/sovereignty-execution.md`](exec-plans/completed/sovereignty-execution.md) — the execution plan operationalizing this positioning (README repositioning + Kueue delegation); shipped.
-- [`exec-plans/active/closed-loop-arc.md`](exec-plans/active/closed-loop-arc.md) — the closed-loop arc: the third act this positioning now extends (see the 2026-09-05 status update above).
-- [`design-data-plane-memory.md`](design-data-plane-memory.md) — the second-act substrate build, in correctness-first order.
-- [`roadmap.md`](roadmap.md) — feature roadmap (re-ranked; Phase 5 = the closed-loop arc).
-- [`design-incremental-execution.md`](design-incremental-execution.md) — the shipped content-addressed cache this builds on.
-- [`archive/brainstorm-differentiators.md`](archive/brainstorm-differentiators.md) — the original (pre-pivot) idea backlog.
+- [`../exec-plans/completed/sovereignty-execution.md`](../exec-plans/completed/sovereignty-execution.md) — the execution plan operationalizing this positioning (README repositioning + Kueue delegation); shipped.
+- [`../exec-plans/active/closed-loop-arc.md`](../exec-plans/active/closed-loop-arc.md) — the closed-loop arc: the third act this positioning now extends (see the 2026-09-05 status update above).
+- [`data-plane-memory.md`](data-plane-memory.md) — the second-act substrate build, in correctness-first order.
+- [`roadmap.md`](../roadmap.md) — feature roadmap (re-ranked; Phase 5 = the closed-loop arc).
+- [`incremental-execution.md`](incremental-execution.md) — the shipped content-addressed cache this builds on.
+- [`../archive/brainstorm-differentiators.md`](../archive/brainstorm-differentiators.md) — the original (pre-pivot) idea backlog.

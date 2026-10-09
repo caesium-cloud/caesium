@@ -8,7 +8,7 @@ vendor file turns "not yet" into a failed run, padded cadences burn compute
 re-running DAGs whose inputs never changed, and the SLO consumers actually
 care about ("how stale may this table be?") lives in a runbook if anywhere.
 This plan ships the design of record in
-[`design-freshness-scheduling.md`](../../design-freshness-scheduling.md): jobs
+[`design/freshness-scheduling.md`](../../design/freshness-scheduling.md): jobs
 **declare** the datasets their steps produce and consume plus a freshness SLO
 on each output, and Caesium derives execution from that graph — run when
 upstream data has arrived and my output is stale against its SLO, don't run
@@ -23,7 +23,7 @@ shipped cache identity for "nothing changed"). It reuses four shipped
 substrates verified in the repo: observed lineage datasets
 (`internal/models/lineage_dataset.go`, behind `CAESIUM_OPEN_LINEAGE_ENABLED`),
 downstream traversal (`internal/lineage/impact.go:82` `QueryImpact`), event
-ingestion + `_trigger_depth` chaining (`design-event-triggers.md`, shipped),
+ingestion + `_trigger_depth` chaining (`design/event-triggers.md`, shipped),
 and cache identity (`internal/cache/hash.go:266` `HashInput`, the value-verified
 short-circuit `internal/cache/shortcircuit.go`). It follows the design's
 three-phase rollout — **P0** declarations + observability (no scheduling
@@ -63,7 +63,7 @@ For drafting new plans in this same shape, see
 
 ## Source-Of-Truth Note
 
-**When this plan and [`design-freshness-scheduling.md`](../../design-freshness-scheduling.md)
+**When this plan and [`design/freshness-scheduling.md`](../../design/freshness-scheduling.md)
 disagree, the design doc wins** — it is authoritative for INTENT and SCOPE
 (what freshness declarations, the state machine, the evaluator, and the
 three-phase rollout must do). Every file:line anchor in this plan was verified
@@ -85,7 +85,7 @@ hard boundaries — an item that crosses one stops and reconciles first.
 ## Progress (as of 2026-07-05)
 
 The plan was published from the
-[`design-freshness-scheduling.md`](../../design-freshness-scheduling.md) design
+[`design/freshness-scheduling.md`](../../design/freshness-scheduling.md) design
 of record (the strategic flagship of the Phase 4 data-plane design wave). The
 design's P0 slice (declarations + observability, no scheduling change) maps to
 Streams A–F + H-1 + N-1; P1 (skip-when-fresh) and P2 (full derivation) are the
@@ -544,7 +544,7 @@ the trigger/executor loop, distinct files from the evaluator.
 
 Per-partition watermarks (one watermark per *partition* rather than per
 dataset) are the natural extension via
-[`design-dynamic-fanout.md`](../../design-dynamic-fanout.md) and are **out of
+[`design/dynamic-fanout.md`](../../design/dynamic-fanout.md) and are **out of
 v1 scope** (design Non-goal: "one watermark per dataset in v1"). Not part of
 this plan's acceptance criteria; the models carry a nullable `namespace` column
 from day one so the later extension does not require a migration rewrite.
@@ -567,7 +567,7 @@ from day one so the later extension does not require a migration rewrite.
 - [x] N-1. Flip the roadmap Phase 4 "Freshness-driven scheduling" row to
       reference the shipped work (link this plan; mark P0/P1/P2 status as they
       land); update the
-      [`design-freshness-scheduling.md`](../../design-freshness-scheduling.md)
+      [`design/freshness-scheduling.md`](../../design/freshness-scheduling.md)
       `> Status:` banner from "Brainstorm/Design — no implementation yet" to the
       shipped phases; document the `datasets` jobdef surface
       (`produces`/`consumes`/`freshness`/`maxStaleness`/`watermark`,
@@ -575,17 +575,17 @@ from day one so the later extension does not require a migration rewrite.
       in `docs/job-schema-reference.md`, `docs/job-definitions.md`, and
       `docs/caesium-job-llm-reference.md`; add a freshness/arrival example and a
       fan-in cascade example under `docs/examples/` (pinned images); and in
-      `docs/README.md` **UPDATE the existing `design-freshness-scheduling.md`
+      `docs/README.md` **UPDATE the existing `design/freshness-scheduling.md`
       bullet** (line ~41) from "(proposed)" to reference this plan — keep it in
       backtick/inline-code form (the `TestDocsREADMEIndexesEveryTopLevelDoc`
       guardrail rejects clickable subdirectory links), do NOT add a duplicate
       entry.
-      Files: `docs/roadmap.md`, `docs/design-freshness-scheduling.md`,
+      Files: `docs/roadmap.md`, `docs/design/freshness-scheduling.md`,
       `docs/job-schema-reference.md`, `docs/job-definitions.md`,
       `docs/caesium-job-llm-reference.md`, `docs/examples/`, `docs/README.md`.
       Depends on: A–G (runs last, after the runtime ships).
       Note: N-1 (docs stream) flipped the roadmap Phase 4 row + §3.5 and the
-      `design-freshness-scheduling.md` / `design-agent-in-the-loop.md` `> Status:`
+      `design/freshness-scheduling.md` / `design/agent-in-the-loop.md` `> Status:`
       banners to Shipped, documented the `datasets` surface (incl. `trigger:
       {type: freshness}`) by editing `internal/jobdef/report/report.go` and
       regenerating `docs/job-schema-reference.md` plus the hand-written
@@ -770,10 +770,10 @@ The plan is done when **all** of these hold:
    plan, the design-doc `> Status:` banner is updated per shipped phase, the
    `datasets` surface is documented across the schema references with working
    `docs/examples/` manifests, and this plan is indexed in `docs/README.md`.
-10. **Cross-cutting:** `docs/roadmap.md`, `docs/design-freshness-scheduling.md`,
+10. **Cross-cutting:** `docs/roadmap.md`, `docs/design/freshness-scheduling.md`,
     and this plan's per-stream `## Progress` entries reflect every shipped stream
     and match the merged PRs. (Partition-level freshness remains explicitly
-    deferred to `design-dynamic-fanout.md` — not a gate here.)
+    deferred to `design/dynamic-fanout.md` — not a gate here.)
 
 ## How To Pick Up Work
 
@@ -796,16 +796,16 @@ The plan is done when **all** of these hold:
 
 ## Cross-References
 
-- [`docs/design-freshness-scheduling.md`](../../design-freshness-scheduling.md) —
+- [`docs/design/freshness-scheduling.md`](../../design/freshness-scheduling.md) —
   the design of record. Source of truth for intent and scope.
 - [`docs/roadmap.md`](../../roadmap.md) Phase 4 (Data-Plane Differentiators) —
   the design-wave entry this plan promotes from proposed to shipped; freshness is
   the strategic flagship.
-- [`docs/design-event-triggers.md`](../../design-event-triggers.md) +
+- [`docs/design/event-triggers.md`](../../design/event-triggers.md) +
   [`exec-plans/completed/event-trigger-routing.md`](event-trigger-routing.md)
   — the shipped event ingestion, router, and `_trigger_depth` chain guard that
   arrival signals (Stream D) and derived-run cascades (Stream C) ride.
-- [`docs/design-data-plane-memory.md`](../../design-data-plane-memory.md) +
+- [`docs/design/data-plane-memory.md`](../../design/data-plane-memory.md) +
   [Data-Plane Memory UI](data-plane-memory-ui.md) — the observed
   `lineage_datasets` graph, `QueryImpact` traversal, and cache identity this plan
   builds on; the CLI/REST-first-then-UI precedent Stream F follows.
@@ -816,12 +816,12 @@ The plan is done when **all** of these hold:
   `docs/job-definitions.md`, `docs/caesium-job-llm-reference.md` — the schema docs
   N-1 extends with the `datasets` surface and the freshness trigger.
 - Companion Phase 4 designs this plan interlocks with:
-  [`design-window-scheduling.md`](../../design-window-scheduling.md) (IF vs WHEN),
-  [`design-data-circuit-breaker.md`](../../design-data-circuit-breaker.md)
+  [`design/window-scheduling.md`](../../design/window-scheduling.md) (IF vs WHEN),
+  [`design/data-circuit-breaker.md`](../../design/data-circuit-breaker.md)
   (quarantined datasets never fresh),
-  [`design-contract-enforcement.md`](../../design-contract-enforcement.md)
+  [`design/contract-enforcement.md`](../../design/contract-enforcement.md)
   (contract violations block the advance),
-  [`design-agent-in-the-loop.md`](../../design-agent-in-the-loop.md)
+  [`design/agent-in-the-loop.md`](../../design/agent-in-the-loop.md)
   (`freshness_violated` incident class),
-  [`design-dynamic-fanout.md`](../../design-dynamic-fanout.md) (deferred
+  [`design/dynamic-fanout.md`](../../design/dynamic-fanout.md) (deferred
   partition-level freshness).

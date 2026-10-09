@@ -219,7 +219,7 @@ stress-image-test: build-stress
     bash build/stress/smoke.sh {{ container_cli }} {{ local_stress_ref }}:{{ tag }}
 
 # ---------------------------------------------------------------------------
-# The unit-pipeline reagents (docs/superpowers/specs/…-infrastructure-deployment…).
+# The unit-pipeline reagents (docs/design/2026-08-25-dag-native-infrastructure-deployment-design.md).
 # `reagents/` is a separate Go module, so it is invisible to the root `./...`
 # and needs its own lint/test targets — these are wired into CI's lint and
 # unit-test jobs alongside the root ones.

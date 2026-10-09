@@ -49,7 +49,7 @@ For wave orchestration of the streams below, see
 
 ## Source-Of-Truth Note
 
-This plan implements [`design-concurrency-priority.md`](../../design-concurrency-priority.md).
+This plan implements [`design/concurrency-priority.md`](../../design/concurrency-priority.md).
 **The design doc is authoritative for INTENT and SCOPE** (the four strategies, the
 priority tiers, the rate-limit model). Strategic priority/status lives in
 [`docs/roadmap.md`](../../roadmap.md) §1.3 + §1.4 (the roadmap wins on
@@ -156,7 +156,7 @@ concession this plan makes.
 
 ## Progress (as of 2026-06-30)
 
-The plan was published from the `design-concurrency-priority.md` design, a six-subsystem
+The plan was published from the `design/concurrency-priority.md` design, a six-subsystem
 survey of the live backend, and **two adversarial-review rounds** — which caught **eleven
 blockers** (the metadata-never-persisted gap on both create and update paths, the TOCTOU
 admission race, the cron-overrun bypass, the REST-path choke-point error, the per-node
@@ -245,7 +245,7 @@ path), folded into the **nine** as-built corrections in the Source-Of-Truth Note
   pending before draining) now **runs and passes** in that lane — closing Acceptance
   Criterion #2's distributed e2e. The cron-priority flake was de-flaked (deterministic
   trigger). PR #269, merged `581a69d`.
-- **N-1 (docs):** roadmap §1.3 + §1.4 flipped to **Shipped**; the `design-concurrency-priority.md`
+- **N-1 (docs):** roadmap §1.3 + §1.4 flipped to **Shipped**; the `design/concurrency-priority.md`
   banner flipped to Shipped with the nine as-built corrections summarized; README updated.
 
 **Plan complete.** All streams (A–E, H-1, N-1) shipped; the roadmap's §1.3 + §1.4 (both
@@ -579,14 +579,14 @@ Makes the queue and rate-limit state legible to operators.
 
 - [x] N-1. Flip the roadmap + reconcile the design doc banner. `docs/roadmap.md` §1.3 +
       §1.4 → Shipped (with the delivered surface); flip the `> Status:` banner on
-      `docs/design-concurrency-priority.md` (Proposed → Shipped — **mandatory**, or
+      `docs/design/concurrency-priority.md` (Proposed → Shipped — **mandatory**, or
       `TestPlanningAndHistoricalDocsCarryStatusBanner` fails) and fold in the nine
       Source-Of-Truth corrections (task-vs-run semaphore, the catalog-persistence
       requirement, `run.Store` method placement, the `run.Store.Start` choke point, the
       atomic-admission requirement, the cache-hash exclusion, JobRun→TaskRun propagation +
       claim index, the catalog-table shapes + raw-SQL upsert, the cancellation primitive).
-      The README already indexes `design-concurrency-priority.md` (no add needed).
-      Files: `docs/roadmap.md`, `docs/design-concurrency-priority.md`.
+      The README already indexes `design/concurrency-priority.md` (no add needed).
+      Files: `docs/roadmap.md`, `docs/design/concurrency-priority.md`.
       Depends on: every runtime stream merged (runs last).
 
 ## Sequencing & Dependencies
@@ -675,7 +675,7 @@ The plan is done when **all** of these hold:
    queued runs (clean stdout, scoped-key behavior asserted) and the job-detail UI shows the
    run queue + rate-limit state, each gated by a green integration/e2e test.
 6. **H-1** wires `CAESIUM_RUN_QUEUE_*` + `CAESIUM_RATE_LIMIT_*` into `just integration-up`.
-7. `docs/roadmap.md` §1.3 + §1.4 read **Shipped**, `design-concurrency-priority.md`'s
+7. `docs/roadmap.md` §1.3 + §1.4 read **Shipped**, `design/concurrency-priority.md`'s
    banner is flipped + reconciled to the as-built contract, and this plan's per-stream
    `## Progress` entries match the merged PRs.
 
@@ -700,7 +700,7 @@ The plan is done when **all** of these hold:
 
 - [`docs/roadmap.md`](../../roadmap.md) — §1.3 (Concurrency Strategies & Rate Limiting),
   §1.4 (Priority Queues); the priority/status source of truth.
-- [`docs/design-concurrency-priority.md`](../../design-concurrency-priority.md) — the
+- [`docs/design/concurrency-priority.md`](../../design/concurrency-priority.md) — the
   design of record; reconciled to the as-built contract by N-1.
 - [`pkg/jobdef/definition.go`](../../../pkg/jobdef/definition.go) — the job-definition
   schema; the field-shape source of truth.

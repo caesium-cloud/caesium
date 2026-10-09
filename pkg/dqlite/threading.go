@@ -23,7 +23,7 @@ import (
 // SQLite prints when the default VFS lookup finds nothing.
 //
 // That is the `internal/trigger/event` unit-test flake tracked in
-// docs/exec-plans/active/trust-the-substrate.md (Ledger L12): the two router
+// docs/exec-plans/completed/trust-the-substrate.md (Ledger L12): the two router
 // tests are the package's first `t.Parallel()` openers, so they are the ones
 // that collide. Reproduced locally at roughly 1 in 40 FRESH test processes
 // (`-race`, 300 runs); `-count=N` inside one process never shows it, because

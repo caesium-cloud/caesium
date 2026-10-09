@@ -21,7 +21,7 @@ export interface NavCounts {
  * yet — until it does, we fall back to the existing list endpoints and
  * count their length client-side.
  *
- * API gap (tracked in `docs/ui-refresh-execution-plan.md` §"API gap summary"):
+ * API gap (see `docs/archive/ui_implementation_plan.md`):
  *   - `GET /v1/jobs?count_only=true`
  *   - `GET /v1/jobs/summary` (status counts, used by 1.1)
  */

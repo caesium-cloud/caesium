@@ -60,7 +60,7 @@ production history, and every automated decision leaves a provenance event that
   the incident action catalog, the replay core, `run_queue`, the Console's
   lineage/run views.
 - **It is the part competitors can't lift in a sprint.** Since
-  [`differentiation-strategy.md`](../../differentiation-strategy.md) was
+  [`differentiation-strategy.md`](../../design/differentiation-strategy.md) was
   written, Prefect acquired Dagster Labs (2026-07-13), Airflow 3 shipped
   assets + event-driven scheduling, and every orchestrator grew an MCP server —
   so freshness scheduling and "has an MCP" are now table stakes. What remains
@@ -295,7 +295,7 @@ The arc is done when **all** of these hold (Plan 4 excepted — see 5):
    across a server restart. **Not running Plan 4 does not block the arc.**
 6. **Tell it closed:** `README.md` leads with the loop (one recorded
    walkthrough: OOM → incident → PR → backtested → merged),
-   `docs/differentiation-strategy.md` is re-scored against its own
+   `docs/design/differentiation-strategy.md` is re-scored against its own
    kill-conditions, `docs/roadmap.md` Phase 5 is marked shipped, and `v0.2.0`
    is released.
 7. **Cross-cutting:** every automated decision introduced by the arc is
@@ -314,7 +314,7 @@ Enumerated here so nothing is lost; drafted into `tell-it.md` (canonical
   holds`, `job resources`); one recorded terminal walkthrough (asciinema or
   GIF) of a loop closing. (`docs/getting-started.md` and the `docs/README.md`
   Use/Design split ship in Plan 0 N-2; the tours ship with each loop.)
-- `docs/differentiation-strategy.md`: the 2026-09-05 section is an *interim*
+- `docs/design/differentiation-strategy.md`: the 2026-09-05 section is an *interim*
   status update; the final re-score of every kill-condition — with the
   `v0.1.0`/`v0.2.0` inbound evidence that condition 1 needs — lands here.
 - `docs/roadmap.md`: Phase 5 marked shipped; the Phase-4 table's four rows
@@ -366,19 +366,19 @@ Explicit decisions so they don't rot as prose inside archived plans:
 
 ## Cross-references
 
-- [`docs/differentiation-strategy.md`](../../differentiation-strategy.md) — the
+- [`docs/design/differentiation-strategy.md`](../../design/differentiation-strategy.md) — the
   positioning this arc extends (see its 2026-09 status update).
 - [`docs/roadmap.md`](../../roadmap.md) Phase 5 — the roadmap entry for this arc.
 - [`trust-the-substrate.md`](../completed/trust-the-substrate.md) — Plan 0.
 - [`data-circuit-breaker.md`](data-circuit-breaker.md) — Plan 1; design of
-  record [`docs/design-data-circuit-breaker.md`](../../design-data-circuit-breaker.md).
+  record [`docs/design/data-circuit-breaker.md`](../../design/data-circuit-breaker.md).
 - [`resource-right-sizing.md`](resource-right-sizing.md) — Plan 2; design of
-  record [`docs/design-resource-right-sizing.md`](../../design-resource-right-sizing.md).
+  record [`docs/design/resource-right-sizing.md`](../../design/resource-right-sizing.md).
 - [`backtesting.md`](backtesting.md) — Plan 3; design of record
-  [`docs/design-backtesting.md`](../../design-backtesting.md).
+  [`docs/design/backtesting.md`](../../design/backtesting.md).
 - [`window-scheduling.md`](window-scheduling.md) — Plan 4 (optional); design of
-  record [`docs/design-window-scheduling.md`](../../design-window-scheduling.md).
-- [`docs/design-agent-in-the-loop.md`](../../design-agent-in-the-loop.md) and
+  record [`docs/design/window-scheduling.md`](../../design/window-scheduling.md).
+- [`docs/design/agent-in-the-loop.md`](../../design/agent-in-the-loop.md) and
   [`agent-in-the-loop-remediation.md`](../completed/agent-in-the-loop-remediation.md)
   — the shipped incident runtime every loop's durable action routes through.
 - [`freshness-scheduling.md`](../completed/freshness-scheduling.md),

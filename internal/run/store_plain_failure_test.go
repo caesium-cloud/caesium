@@ -306,7 +306,7 @@ func TestFanOutInstanceFailureStillGatesOnGroupTerminal(t *testing.T) {
 //
 // The rule is tolerant here (all_done) precisely so the trigger rule cannot be
 // what saves it: a group that can never materialize must resolve `skipped`,
-// which is what design-dynamic-fanout.md prescribes for the same situation
+// which is what docs/design/dynamic-fanout.md prescribes for the same situation
 // under `onEmpty: skip`.
 func TestFailedFanOutProducerSkipsUnexpandedConsumerTemplate(t *testing.T) {
 	db := testutil.OpenTestDB(t)

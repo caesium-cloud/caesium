@@ -2,7 +2,7 @@
 // the declarative image/engine/limits, secret:// model-credential
 // references, session budgets, and default playbook a job's
 // metadata.remediation.profile field references
-// (docs/design-agent-in-the-loop.md "Declarative policy", Stream E2). It
+// (docs/design/agent-in-the-loop.md "Declarative policy", Stream E2). It
 // mirrors the api/rest/service/notification channel CRUD shape.
 package agentprofile
 

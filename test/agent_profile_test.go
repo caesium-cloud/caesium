@@ -129,7 +129,7 @@ func (s *IntegrationTestSuite) TestAgentProfileCreateRejectsUnsupportedSecretPro
 
 // TestJobdefLintVerifiesRemediationProfileReference exercises the
 // server-side half of the metadata.remediation lint split
-// (docs/design-agent-in-the-loop.md): POST /v1/jobdefs/lint has a database
+// (docs/design/agent-in-the-loop.md): POST /v1/jobdefs/lint has a database
 // connection, so — unlike offline `caesium job lint` — it can and must
 // verify that metadata.remediation.profile names a real AgentProfile.
 func (s *IntegrationTestSuite) TestJobdefLintVerifiesRemediationProfileReference() {

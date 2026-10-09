@@ -49,7 +49,7 @@ type JobRun struct {
 	ReplayFingerprint *string        `gorm:"type:text;uniqueIndex:idx_job_runs_replay_fingerprint" json:"replay_fingerprint,omitempty"`
 	ReplayOverrides   datatypes.JSON `gorm:"type:json" json:"replay_overrides,omitempty"`
 	// SchemaGateOverride records an APPROVED tier-3 `override_schema_gate` action
-	// for this ONE run (design-agent-in-the-loop.md action catalog). While set,
+	// for this ONE run (docs/design/agent-in-the-loop.md action catalog). While set,
 	// ValidateTaskOutputSchema / ValidateTaskOutputSchemaInstance skip output
 	// schema enforcement for the run's tasks and say so in the log.
 	//

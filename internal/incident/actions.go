@@ -19,7 +19,7 @@ import (
 	"gorm.io/gorm"
 )
 
-// Typed action catalog (design-agent-in-the-loop.md). The agent never gets
+// Typed action catalog (docs/design/agent-in-the-loop.md). The agent never gets
 // shell, SQL, or generic HTTP; it selects one of these typed actions and the
 // executor validates + dispatches it server-side onto machinery that already
 // exists.
@@ -466,7 +466,7 @@ func (e *Executor) dispatch(ctx context.Context, actionType string, inc *models.
 			"task_id":   taskID.String(),
 			"task_name": taskName,
 			"reason":    reason,
-			// design-agent-in-the-loop.md Open Question 3, recorded on the row
+			// docs/design/agent-in-the-loop.md Open Question 3, recorded on the row
 			// rather than left as folklore: a skip changes what downstream sees.
 			"caveat": "skipping a task changes downstream trigger-rule evaluation (all_success vs all_done) and the cache identity of consumers that hashed its output",
 		}, nil
