@@ -73,7 +73,7 @@ caesium dev --once --path nightly-etl.job.yaml     # run it on your local Docker
 caesium job apply --path nightly-etl.job.yaml --server http://localhost:8080
 ```
 
-No SDK, no decorators, no Python environment on the scheduler. If it runs in a container, it is a Caesium step.
+No SDK, no decorators, no Python environment on the scheduler. If it runs in a container, it is a Caesium step. The Acme images above stand in for your own; the [quick start](#quick-start) runs a public-image example.
 
 ## Why Caesium
 
@@ -144,14 +144,22 @@ curl http://localhost:8080/health
 
 The console is at [http://localhost:8080](http://localhost:8080). From a clone, `just run` builds and starts the same thing from source.
 
-**3. Write a job, run it locally, apply it.** Save the YAML above as `nightly-etl.job.yaml`, or start from [docs/examples/minimal.job.yaml](docs/examples/minimal.job.yaml).
+**3. Run a job locally, then apply it.** Start with [docs/examples/minimal.job.yaml](docs/examples/minimal.job.yaml), three sequential steps on the public `alpine:3.23` image. The Acme pipeline above needs images you build yourself.
 
 ```bash
-caesium dev --once --path nightly-etl.job.yaml
-caesium job apply --path nightly-etl.job.yaml --server http://localhost:8080
+curl -LO https://raw.githubusercontent.com/caesium-cloud/caesium/master/docs/examples/minimal.job.yaml
+caesium dev --once --path minimal.job.yaml
+caesium job apply --path minimal.job.yaml --server http://localhost:8080
 ```
 
-[docs/getting-started.md](docs/getting-started.md) continues from here: trigger a run, ask `why`, fetch a receipt, and covers the macOS wrapper, Podman, and Kubernetes credentials in detail.
+On macOS the CLI runs inside a container, so call the generated wrapper and address the server through Docker Desktop's host alias:
+
+```bash
+./.tmp/caesium-cli/caesium dev --once --path docs/examples/minimal.job.yaml
+./.tmp/caesium-cli/caesium job apply --path docs/examples/minimal.job.yaml --server http://host.docker.internal:8080
+```
+
+[docs/getting-started.md](docs/getting-started.md) continues from here: trigger a run, ask `why`, fetch a receipt, and covers the wrapper's socket and kubeconfig handling, Podman, and Kubernetes credentials in detail.
 
 ## Deploy
 
