@@ -81,10 +81,14 @@ Item checkboxes remain unchecked until merged acceptance evidence exists.
 - **W1-α / A1 — policy package:** draft [PR #624](https://github.com/caesium-cloud/caesium/pull/624),
   head `28586d80be0940132818b857f4de67cb46f109d4`. Independent review passed after
   two edge-case fixes. Containerized `just lint` and race-enabled `just unit-test`
-  passed (policy coverage 99.5%); fresh-image integration and hosted CI pending.
-- **W1-β / B1 — namespace persistence and cache identity:** implementation dispatched
-  on `codex/identity-and-access-w1-beta`; public apply/export/run/move/cache scenarios,
-  generated schema reference, example lint, and baseline gates pending.
+  passed (policy coverage 99.5%). Fresh-image local integration failed first at
+  `TestRunConcurrencyStrategies/queue_reclaims_stale_claim`, followed by database
+  lock/transaction errors in later writes; attribution and hosted CI are pending.
+- **W1-β / B1 — namespace persistence and cache identity:** committed candidate
+  `138b72bdb94c679adbe309f079d569c49b062375` on `codex/identity-and-access-w1-beta`.
+  Focused changed-package regressions, generated schema guardrail, and integration
+  compilation passed. Independent review, live apply/export/run/move/cache scenarios,
+  example lint, and full baseline gates pending.
 - **A2 and D3:** not dispatched. A2 requires A1 to land; D3 requires B1 to land.
   The suggested W1 includes these follow-ups, but the review-PR endpoint leaves
   them pending until their prerequisite PRs merge. H-1, H-2, and N-1 require A4.
