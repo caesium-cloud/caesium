@@ -26,6 +26,7 @@ import (
 // JobSpec captures the fields that participate in diffing.
 type JobSpec struct {
 	Alias       string            `json:"alias"`
+	Namespace   string            `json:"namespace"`
 	Labels      map[string]string `json:"labels"`
 	Annotations map[string]string `json:"annotations"`
 	// Remediation participates in diffing because it is ENFORCED policy, not
@@ -113,6 +114,7 @@ func producedDatasetSpecs(datasets *schema.StepDatasets) []ProducedDatasetSpec {
 func FromDefinition(def *schema.Definition) JobSpec {
 	return JobSpec{
 		Alias:          def.Metadata.Alias,
+		Namespace:      models.NamespaceOrDefault(def.Metadata.Namespace),
 		Labels:         cloneMap(def.Metadata.Labels),
 		Annotations:    cloneMap(def.Metadata.Annotations),
 		Remediation:    def.Metadata.Remediation,
@@ -169,6 +171,7 @@ func LoadDatabaseSpecs(ctx context.Context, db *gorm.DB) (map[string]JobSpec, er
 func buildJobSpec(ctx context.Context, db *gorm.DB, job *models.Job) (JobSpec, error) {
 	spec := JobSpec{
 		Alias:          job.Alias,
+		Namespace:      models.NamespaceOrDefault(job.Namespace),
 		Labels:         jsonMapToStringMap(job.Labels),
 		Annotations:    jsonMapToStringMap(job.Annotations),
 		OnUpstreamHold: job.OnUpstreamHold,

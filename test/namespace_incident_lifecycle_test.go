@@ -69,6 +69,8 @@ func (s *IntegrationTestSuite) TestIncidentNamespaceLifecycle() {
 	finance := s.awaitNamespaceLifecycleIncident(jobID, "finance")
 	s.Require().NotEqual(marketing.ID, finance.ID, "dedupe must include namespace")
 	s.Require().Equal(financeFailure.ID, finance.RunID)
+	s.Require().Contains([]string{"open", "triaging", "awaiting_approval"}, finance.Status)
+	s.Require().Nil(finance.ClosedAt)
 	financeSuccess := runInNamespace("finance", 0)
 	s.Require().NotEqual(financeFailure.ID, financeSuccess.ID)
 	s.awaitIncidentStatus(finance.ID, "closed", 60*time.Second)

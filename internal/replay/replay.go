@@ -264,6 +264,9 @@ func (c *Constructor) Prepare(ctx context.Context, req Request) (*PreparedReplay
 	namespaceChanged := namespace != models.NamespaceOrDefault(baseline.Namespace)
 	plans, err := c.planTasks(ctx, groups, replayParams, paramsChanged || namespaceChanged, namespace)
 	if err != nil {
+		if namespaceChanged && errors.Is(err, ErrReplayUnsafe) {
+			return nil, fmt.Errorf("replay: job namespace changed from %q to %q and requires re-execution: %w", models.NamespaceOrDefault(baseline.Namespace), namespace, err)
+		}
 		return nil, err
 	}
 

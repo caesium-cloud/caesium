@@ -295,7 +295,7 @@ fi
         }
         added = {
             "local": {"TestCacheCLIListsInvalidatesAndPrunes", "TestNativeTaskSIGTERMResultClassification",
-                      "TestJobSchemaNamespaceDocumentation"},
+                      "TestJobSchemaNamespaceDocumentation", "TestCacheNamespaceMove"},
             "auth": {"TestPublicListingsOrderByAndRefuseInvalidTerms", "TestIncidentNamespaceLifecycle"},
         }
         for lane, original in (("local", original_local), ("auth", original_auth)):
@@ -310,7 +310,7 @@ fi
     def test_floor_gap_admission_refuses_skip_nested_duplicate_or_missing(self) -> None:
         lanes = self._actual_lane_selection()
         new = {"local": ["TestCacheCLIListsInvalidatesAndPrunes", "TestNativeTaskSIGTERMResultClassification",
-                         "TestJobSchemaNamespaceDocumentation"],
+                         "TestJobSchemaNamespaceDocumentation", "TestCacheNamespaceMove"],
                "auth": ["TestPublicListingsOrderByAndRefuseInvalidTerms", "TestIncidentNamespaceLifecycle"]}
         for lane, names in new.items():
             required = lanes[lane]["names"]
