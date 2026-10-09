@@ -1,0 +1,76 @@
+name: diag-ubuntu26-oom
+
+# Throwaway diagnostic for PR #627: why the stress smoke's OOMKilled verdict
+# disappears in coverage-ratchets on ubuntu-26.04. Never merged.
+on:
+  push:
+    branches: [diag/ubuntu26-oom]
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  oom:
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: [stock, restart-only, snapshotter-restart, docker-ce-latest]
+    runs-on: ubuntu-26.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: taiki-e/install-action@just
+      - name: Before
+        run: |
+          set -x
+          uname -a
+          docker version
+          docker info --format '{{json .DriverStatus}} cgroup={{.CgroupDriver}} v={{.CgroupVersion}} runtimes={{json .Runtimes}} default={{.DefaultRuntime}}'
+          containerd --version || true
+          runc --version || true
+          sudo cat /etc/docker/daemon.json || true
+          systemctl cat docker | grep -E 'ExecStart|containerd' || true
+          dpkg -l | grep -E 'docker|containerd|runc|moby' || true
+      - name: Variant
+        run: |
+          set -euxo pipefail
+          case "${{ matrix.variant }}" in
+            stock) ;;
+            restart-only)
+              sudo systemctl restart docker ;;
+            snapshotter-restart)
+              conf=/etc/docker/daemon.json
+              if [ -s "$conf" ]; then current="$(sudo cat "$conf")"; else current='{}'; fi
+              printf '%s' "$current" | jq '.features["containerd-snapshotter"] = true' | sudo tee "$conf" >/dev/null
+              sudo systemctl restart docker ;;
+            docker-ce-latest)
+              sudo install -m 0755 -d /etc/apt/keyrings
+              sudo curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
+              sudo chmod a+r /etc/apt/keyrings/docker.asc
+              echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo "$VERSION_CODENAME") stable" \
+                | sudo tee /etc/apt/sources.list.d/docker.list >/dev/null
+              sudo apt-get update -q
+              sudo apt-get install -y -q docker-ce docker-ce-cli containerd.io docker-buildx-plugin
+              conf=/etc/docker/daemon.json
+              if [ -s "$conf" ]; then current="$(sudo cat "$conf")"; else current='{}'; fi
+              printf '%s' "$current" | jq '.features["containerd-snapshotter"] = true' | sudo tee "$conf" >/dev/null
+              sudo systemctl restart docker ;;
+          esac
+          docker version --format 'client {{.Client.Version}} server {{.Server.Version}}'
+          docker info --format '{{json .DriverStatus}} cgroup={{.CgroupDriver}}'
+          containerd --version || true
+      - name: Stress smoke
+        id: smoke
+        continue-on-error: true
+        run: just tag=diag-${{ matrix.variant }} stress-image-test
+      - name: After
+        if: always()
+        run: |
+          set -x
+          sudo dmesg -T | grep -iE 'oom|memory cgroup|Killed process' | tail -20 || true
+          sudo journalctl -u docker -u containerd --since '-10min' --no-pager | grep -iE 'oom|TaskOOM|exit' | tail -30 || true
+          echo "smoke outcome: ${{ steps.smoke.outcome }}"
