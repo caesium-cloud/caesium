@@ -234,14 +234,16 @@ func (s *Store) RecordRelation(ctx context.Context, from, to ExecutionReference,
 		if res.Error != nil {
 			return res.Error
 		}
-		// RowsAffected == 0 means the evidence was already stored. Return that
-		// original row either way so a duplicate does not report a new id.
+		// Look up with a zero primary key. First on the inserted struct would
+		// add its new id, and ON CONFLICT DO NOTHING leaves that id unstored.
+		var stored models.ExternalExecutionRelation
 		if err := tx.Where(
 			"from_opaque_id = ? AND to_opaque_id = ? AND relation_type = ? AND evidence_digest = ?",
 			fromID, toID, relationType, digest,
-		).First(&row).Error; err != nil {
+		).Take(&stored).Error; err != nil {
 			return err
 		}
+		row = stored
 		if err := markReferencedTx(tx, fromID); err != nil {
 			return err
 		}

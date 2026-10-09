@@ -216,12 +216,14 @@ func TestAdmitOperationConflictsOnOpenTarget(t *testing.T) {
 	var got []result
 	created := 0
 	var winner uuid.UUID
+	winnerKey := ""
 	for item := range out {
 		require.NoError(t, item.err)
 		got = append(got, item)
 		if item.decision.Created {
 			created++
 			require.False(t, item.decision.Conflict)
+			winnerKey = item.decision.Operation.IdempotencyKey
 		}
 		if winner == uuid.Nil {
 			winner = item.decision.Operation.ID
@@ -231,6 +233,7 @@ func TestAdmitOperationConflictsOnOpenTarget(t *testing.T) {
 	require.Len(t, got, n)
 	require.Equal(t, 1, created)
 	require.NotEqual(t, uuid.Nil, winner)
+	require.NotEmpty(t, winnerKey)
 	for _, item := range got {
 		if item.decision.Operation.IdempotencyKey != item.key {
 			require.True(t, item.decision.Conflict)
@@ -239,7 +242,11 @@ func TestAdmitOperationConflictsOnOpenTarget(t *testing.T) {
 	}
 	require.Equal(t, int64(1), countModel(t, db, &models.ConnectorOperation{}))
 
-	again, err := store.AdmitOperation(ctx, secondReq)
+	loser := firstReq
+	if winnerKey == firstReq.IdempotencyKey {
+		loser = secondReq
+	}
+	again, err := store.AdmitOperation(ctx, loser)
 	require.NoError(t, err)
 	require.False(t, again.Created)
 	require.True(t, again.Conflict)
@@ -491,7 +498,7 @@ func TestRetentionKeepsReferencedSnapshotsAndCapsTheRest(t *testing.T) {
 	require.Equal(t, int64(MaxUnreferencedSnapshots), unreferencedSnapshots(t, db, "capped"))
 	require.False(t, snapshotExists(t, db, first.OpaqueID()))
 	require.True(t, snapshotExists(t, db, extra.OpaqueID()))
-	require.True(t, identityExists(t, db, first.OpaqueID()))
+	require.True(t, catalogIdentityPresent(t, db, first.OpaqueID()))
 	require.True(t, snapshotExists(t, db, oldRef.OpaqueID()))
 }
 
@@ -766,7 +773,7 @@ func snapshotExists(t *testing.T, db *gorm.DB, opaqueID string) bool {
 	return n > 0
 }
 
-func identityExists(t *testing.T, db *gorm.DB, opaqueID string) bool {
+func catalogIdentityPresent(t *testing.T, db *gorm.DB, opaqueID string) bool {
 	t.Helper()
 	var n int64
 	require.NoError(t, db.Model(&models.ExternalExecution{}).Where("opaque_id = ?", opaqueID).Count(&n).Error)
