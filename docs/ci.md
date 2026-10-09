@@ -381,7 +381,7 @@ publish ← tag only, needs the full matrix and ci-ok
 | `helm-lint` | ubuntu-26.04 | — | 10 | inline `helm lint`/`helm template` (mirrors justfile `helm-lint`/`helm-template`) | none |
 | `unit-test` | ubuntu-26.04 | `builder`, `reagents` | 30 | `unit-test`, `reagents-test` | none |
 | `unit-test-arm64` | ubuntu-26.04-arm | `builder-arm64` | 30 | `unit-test` only — no `reagents-test` on arm64 | none |
-| `ui-test` | ubuntu-26.04 | `changes` | 30 | Node 22 + cached npm downloads; one `npm ci`, lint + test + `build:ci` | none |
+| `ui-test` | ubuntu-26.04 | `changes` | 30 | Node 24 + cached npm downloads; one `npm ci`, lint + test + `build:ci` | none |
 | `integration` | ubuntu-26.04 | `images` | 45 | matrix: three Docker full-suite shards + agent-auth (`run-integration` composite) | `integration-up` / `integration-up-agent` |
 | `integration-extra` | ubuntu-26.04 | `images`, `reagents` | 45–60 | matrix: distributed / owner-memory / infra (not required-to-merge) | matching `integration-up-*` |
 | `integration-arm64` | ubuntu-26.04-arm | `images-arm64`, `reagents-arm64` | 45–60 | matrix: three Docker full-suite shards + infra (parallel with amd64) | matching `integration-up*` |
@@ -510,7 +510,7 @@ its own Go toolchain, so it never needs the Caesium builder artifact.
 Runtime roles and the reagent toolchain are uploaded separately. Infra and
 publish download only the roles; lint and unit tests download only the
 toolchain. Arm64 builds only the runtime roles because no arm64 lane
-consumes the reagent lint/test toolchain. UI validation runs directly on Node 22
+consumes the reagent lint/test toolchain. UI validation runs directly on Node 24
 without waiting for a Go builder. Sharding adds runner setup, but integration
 compilation is shared; compare both elapsed and total job minutes when tuning it.
 
@@ -533,7 +533,7 @@ cannot disrupt neighboring tests. Both projects appear in the same report.
 `just ui-e2e` uses the same project selection. A failure in either phase fails
 the job; a failed default dependency prevents the recovery phase from starting.
 
-The CI default lane keeps the existing Node 22, `npm ci`, and
+The CI default lane keeps the existing Node 24, `npm ci`, and
 `npx playwright install --with-deps chromium` setup so it uses the same host
 browser binary, font packages, cache, and Linux screenshot baseline as the
 normal runner. It gets the running Caesium container PID and uses `sudo nsenter

@@ -1,0 +1,8 @@
+# actionlint v1.7.12 (the latest release, pinned in ci.yml's ci-config job)
+# predates GitHub's 2026-09-17 GA of the Ubuntu 26.04 hosted image, so its
+# runner-label rule rejects these labels. Declare them here until an actionlint
+# release lists them in rule_runner_label.go, then delete this file.
+self-hosted-runner:
+  labels:
+    - ubuntu-26.04
+    - ubuntu-26.04-arm

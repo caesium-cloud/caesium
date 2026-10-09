@@ -261,13 +261,13 @@ jobs:
           echo /tmp/actionlint-bin >> "$GITHUB_PATH"
       - uses: actions/setup-python@v7
         with:
-          python-version: '3.12'
+          python-version: '3.14'
       - name: Install kubectl for wrapper contract tests
         run: |
           mkdir -p "$RUNNER_TEMP/wrapper-kubectl"
           cd "$RUNNER_TEMP/wrapper-kubectl"
-          curl -fsSLO --retry 3 https://dl.k8s.io/release/v1.37.0/bin/linux/amd64/kubectl
-          curl -fsSLO --retry 3 https://dl.k8s.io/release/v1.37.0/bin/linux/amd64/kubectl.sha256
+          curl -fsSLO --retry 3 https://dl.k8s.io/release/v1.37.1/bin/linux/amd64/kubectl
+          curl -fsSLO --retry 3 https://dl.k8s.io/release/v1.37.1/bin/linux/amd64/kubectl.sha256
           echo "$(cat kubectl.sha256)  kubectl" | sha256sum -c -
           chmod +x kubectl
           echo "$RUNNER_TEMP/wrapper-kubectl" >> "$GITHUB_PATH"
@@ -553,7 +553,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: azure/setup-helm@v5
         with:
-          version: v3.17.0
+          version: v3.22.0
       - name: Helm lint
         run: helm lint ./helm/caesium
       - name: Helm template
@@ -607,7 +607,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
         with:
-          node-version: '22'
+          node-version: '24'
           cache: npm
           cache-dependency-path: ui/package-lock.json
       - name: UI lint, unit tests, and production build
@@ -744,7 +744,7 @@ jobs:
           name: product-amd64
       - uses: actions/setup-node@v7
         with:
-          node-version: '22'
+          node-version: '24'
           cache: npm
           cache-dependency-path: ui/package-lock.json
       - name: Install UI dependencies and browsers
@@ -1002,7 +1002,7 @@ jobs:
           name: product-amd64
       - uses: actions/setup-node@v7
         with:
-          node-version: '22'
+          node-version: '24'
           cache: npm
           cache-dependency-path: ui/package-lock.json
       - name: Install UI dependencies and browsers
@@ -1190,7 +1190,7 @@ jobs:
           sudo mv ./kubectl /usr/local/bin/kubectl
       - uses: azure/setup-helm@v5
         with:
-          version: v3.17.0
+          version: v3.22.0
       - name: Create kind cluster
         run: kind create cluster --wait 120s
       - name: Load Caesium image into kind
@@ -1414,7 +1414,7 @@ jobs:
           sudo mv ./kubectl /usr/local/bin/kubectl
       - uses: azure/setup-helm@v5
         with:
-          version: v3.17.0
+          version: v3.22.0
       - name: Pre-pull the task image
         run: docker pull alpine:3.23
       - name: Replace every replica on retained volumes
@@ -1471,7 +1471,7 @@ jobs:
           sudo mv ./kubectl /usr/local/bin/kubectl
       - uses: azure/setup-helm@v5
         with:
-          version: v3.17.0
+          version: v3.22.0
       # Loads the precompiled runner, product and robustness images (no
       # compiler image) and runs the focused SQL-work-budget scenario.
       - name: SQL-work budget scenario (existing integration suite)
@@ -1660,7 +1660,7 @@ jobs:
       - uses: taiki-e/install-action@just
       - uses: actions/setup-node@v7
         with:
-          node-version: '22'
+          node-version: '24'
           cache: npm
           cache-dependency-path: ui/package-lock.json
       - name: Install Chromium for the browser journey

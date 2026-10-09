@@ -114,7 +114,7 @@ jobs:
           sudo mv ./kubectl /usr/local/bin/kubectl
       - uses: azure/setup-helm@v5
         with:
-          version: v3.17.0
+          version: v3.22.0
       # Cluster mode verifies single-platform OCI image archives with
       # `docker image inspect --platform` (Docker >= 28.1; the hosted image
       # ships 28.0.4) and reads each archive's platform descriptor, which only
@@ -190,7 +190,7 @@ jobs:
           sudo mv ./kubectl /usr/local/bin/kubectl
       - uses: azure/setup-helm@v5
         with:
-          version: v3.17.0
+          version: v3.22.0
       - name: Build the release, runner and instrumented images
         run: just tag=${{ github.sha }} robustness-instrumented
       - name: Fenced core suite with the instrumented server
@@ -238,10 +238,10 @@ jobs:
           sudo mv ./kubectl /usr/local/bin/kubectl
       - uses: azure/setup-helm@v5
         with:
-          version: v3.17.0
+          version: v3.22.0
       - uses: actions/setup-node@v7
         with:
-          node-version: '22'
+          node-version: '24'
           cache: npm
           cache-dependency-path: ui/package-lock.json
       - name: Install Chromium for the console journey
@@ -297,7 +297,7 @@ jobs:
       - uses: taiki-e/install-action@just
       - uses: actions/setup-node@v7
         with:
-          node-version: '22'
+          node-version: '24'
           cache: npm
           cache-dependency-path: ui/package-lock.json
       - name: Install Chromium for the browser series
@@ -415,7 +415,7 @@ jobs:
           sudo mv ./kubectl /usr/local/bin/kubectl
       - uses: azure/setup-helm@v5
         with:
-          version: v3.17.0
+          version: v3.22.0
       # Four kind nodes on one runner: raise the inotify limits kubelet and
       # containerd exhaust at the hosted defaults.
       - name: Raise inotify limits for a four-node kind cluster

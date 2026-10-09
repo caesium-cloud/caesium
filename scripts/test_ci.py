@@ -386,7 +386,7 @@ class WorkflowTests(unittest.TestCase):
                             if step.get("id") == "dependencies")
         browser = next(step for step in JOBS["ui-e2e"]["steps"]
                        if step.get("id") == "playwright")
-        self.assertEqual(setup_node["with"]["node-version"], "22")
+        self.assertEqual(setup_node["with"]["node-version"], "24")
         self.assertEqual(setup_node["with"]["cache"], "npm")
         self.assertEqual(setup_node["with"]["cache-dependency-path"], "ui/package-lock.json")
         self.assertEqual(dependencies["working-directory"], "ui")
