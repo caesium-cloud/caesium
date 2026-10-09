@@ -103,7 +103,10 @@ Item checkboxes remain unchecked until merged acceptance evidence exists.
   integration passed (801.740s; 272 passed, 41 lane-specific skips). Hosted logs
   explicitly prove the three new scenarios across Docker amd64/arm64, Podman,
   Kubernetes and distributed execution (15 combinations, zero skips). Populated
-  native-dqlite upgrade is running; hosted coverage and final gate remain pending.
+  native-dqlite upgrade is running after an inspection-only harness failure was
+  corrected; that attempt created no server or network. Hosted coverage-ratchets
+  and `ci-ok` failed in run `37936353731`; the underlying coverage report is under
+  investigation. B1 remains draft until these gates are resolved.
   The preceding candidate's integration run was interrupted for review fixes.
 - **Separately authorized DB repair:** actual-SQL probes confirmed base-revision
   retry/split installers bypass GORM's active pool and returning mutations can
@@ -112,8 +115,8 @@ Item checkboxes remain unchecked until merged acceptance evidence exists.
   draft [PR #626](https://github.com/caesium-cloud/caesium/pull/626) is published and
   hosted CI including `ci-ok`, both architecture unit suites and lint passed;
   local package race tests passed. Full local unsharded integration remains pending.
-  It does not
-  change A1/B1 dependencies or establish the integration failure's causal chain.
+  It does not change A1/B1 dependencies or establish the integration failure's
+  causal chain.
 - **A2 and D3:** not dispatched. A2 requires A1 to land; D3 requires B1 to land.
   The suggested W1 includes these follow-ups, but the review-PR endpoint leaves
   them pending until their prerequisite PRs merge. H-1, H-2, and N-1 require A4.
