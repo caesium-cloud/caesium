@@ -826,8 +826,8 @@ deletes the local entry. Administrative revocation stays separate.
   `notification_policies.namespace` (all `NOT NULL DEFAULT 'default'`),
   `agent_profiles.namespace` tightened to not null default, `api_keys.namespaces`
   (JSON, NULL ⇒ `["*"]`), `api_keys.user_id`, `sessions.refresh_handle`,
-  `sessions.groups_refreshed_at`, `audit_logs.namespace`. All additive; GORM
-  AutoMigrate. Normalize existing NULL/empty namespace values to `default` before
+  `sessions.groups_refreshed_at`, `audit_logs.namespace`. Use GORM AutoMigrate.
+  Normalize existing NULL/empty namespace values to `default` before
   tightening constraints. This pre-alpha change requires a coordinated upgrade:
   stop every node before applying the new binary and restart only upgraded nodes.
   Mixed-version rolling upgrades are unsupported; old incident writers explicitly

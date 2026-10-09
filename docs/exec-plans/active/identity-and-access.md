@@ -286,12 +286,12 @@ middleware relies on.
       `Metadata.Namespace` in the definition (syntax validation in `Validate()`,
       default `default`), `Job.Namespace` / `JobRun.Namespace` / `Backfill.Namespace`
       (text, not null, default `'default'`, indexed) and `Incident.Namespace`
-      tightened from nullable to the same shape; the importer writes it on apply and
-      upgrades normalize existing NULL/empty namespace rows first. All nodes must
+      tightened from nullable to the same shape; the importer writes it on apply.
+      Upgrades normalize existing NULL/empty namespace rows first. All nodes must
       stop and upgrade together; mixed-version incident writers are unsupported.
       Migration key collisions fail atomically with a diagnostic identifying both
-      incident rows rather than discarding or silently closing history. The
-      the run/backfill/incident creators copy it from the job; JSON tags so every API
+      incident rows rather than discarding or silently closing history.
+      The run/backfill/incident creators copy it from the job; JSON tags so every API
       object carries `namespace`; `caesium job export` round-trips it (the exporter writes it back into the manifest); the report generator
       documents it so `docs/job-schema-reference.md` regenerates; one example manifest
       declares a namespace. **Every** job and run constructor stamps it: the legacy
