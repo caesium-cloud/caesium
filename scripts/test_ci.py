@@ -381,7 +381,7 @@ class WorkflowTests(unittest.TestCase):
 
     def test_default_browser_lane_selects_network_recovery_with_dependencies(self):
         setup_node = next(step for step in JOBS["ui-e2e"]["steps"]
-                          if step.get("uses") == "actions/setup-node@v6")
+                          if step.get("uses") == "actions/setup-node@v7")
         dependencies = next(step for step in JOBS["ui-e2e"]["steps"]
                             if step.get("id") == "dependencies")
         browser = next(step for step in JOBS["ui-e2e"]["steps"]
@@ -1520,14 +1520,14 @@ class MergeGroupWorkflowWiringTests(unittest.TestCase):
                     continue
                 allowed = (
                     (job_name == "changes"
-                     and (step.get("uses") == "actions/checkout@v6" or step.get("id") == "filter"))
+                     and (step.get("uses") == "actions/checkout@v7" or step.get("id") == "filter"))
                     or (job_name == "ci-ok" and step.get("id") in ("base-freshness", "candidate-parents"))
                 )
                 self.assertTrue(allowed, f"{job_name}: unaudited event_name if: {condition!r}")
 
     def test_changes_job_filters_on_both_pull_request_and_merge_group(self):
         steps = JOBS["changes"]["steps"]
-        checkout = next(step for step in steps if step.get("uses") == "actions/checkout@v6")
+        checkout = next(step for step in steps if step.get("uses") == "actions/checkout@v7")
         filter_step = next(step for step in steps if step.get("id") == "filter")
         both = "github.event_name == 'pull_request' || github.event_name == 'merge_group'"
         self.assertEqual(checkout["if"], both)
@@ -1557,7 +1557,7 @@ class MergeGroupWorkflowWiringTests(unittest.TestCase):
 
     def test_fetch_depth_ternary_uses_truthy_string_operands_not_falsy_zero(self):
         checkout = next(step for step in JOBS["changes"]["steps"]
-                        if step.get("uses") == "actions/checkout@v6")
+                        if step.get("uses") == "actions/checkout@v7")
         expr = checkout["with"]["fetch-depth"]
         self.assertIn("'0'", expr)
         self.assertIn("'1'", expr)
@@ -1587,7 +1587,7 @@ class MergeGroupWorkflowWiringTests(unittest.TestCase):
 
     def test_no_checkout_overrides_ref_anywhere_in_the_workflow(self):
         """Every job that produces evidence or a required context must test
-        exactly the commit `actions/checkout@v6` gives it by default -- on
+        exactly the commit `actions/checkout@v7` gives it by default -- on
         pull_request that is GitHub's prospective merge commit
         (refs/pull/N/merge). An explicit `ref:` could silently swap in the PR
         head (or anything else) instead."""
@@ -2811,8 +2811,8 @@ class NightlyLaneTests(unittest.TestCase):
         self.assertEqual(NIGHTLY_WORKFLOW[True]["workflow_dispatch"]["inputs"]["fuzz-seconds"]["default"], "5m")
         # The PR lane's Go cache is restored, never overwritten by the campaign.
         cache = [step for step in job["steps"] if "actions/cache" in step.get("uses", "")]
-        self.assertEqual([step["uses"] for step in cache], ["actions/cache/restore@v4"])
-        pr_cache = next(step for step in JOBS["generated-fuzz"]["steps"] if step.get("uses") == "actions/cache@v4")
+        self.assertEqual([step["uses"] for step in cache], ["actions/cache/restore@v6"])
+        pr_cache = next(step for step in JOBS["generated-fuzz"]["steps"] if step.get("uses") == "actions/cache@v6")
         self.assertEqual(cache[0]["with"]["key"], pr_cache["with"]["key"])
         # The explored corpus is retained.
         artifacts = next(step for step in job["steps"]

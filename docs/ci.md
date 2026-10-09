@@ -1229,7 +1229,7 @@ the existing aggregate describe the commit it actually tested, and it wired
 `ci-ok` remains absent from required contexts (G5's Q6 finding). No PATCH in
 §1 was executed.
 
-**What the workflow now does.** Every `actions/checkout@v6` step omits `ref:`,
+**What the workflow now does.** Every `actions/checkout@v7` step omits `ref:`,
 so each evidence-producing job tests the commit GitHub hands it — on
 `pull_request` that is the prospective merge commit (`refs/pull/N/merge`). The
 `ci-ok` job passes this run's `github.event_name`, the base/head SHAs from

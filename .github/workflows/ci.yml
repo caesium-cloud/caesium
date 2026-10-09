@@ -99,7 +99,7 @@ jobs:
       ci: ${{ steps.set.outputs.ci }}
       images: ${{ steps.set.outputs.images }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
         with:
           # merge_group has no PR to diff through the GitHub API, so the
@@ -117,7 +117,7 @@ jobs:
           # makes this actually branch. scripts/test_ci.py pins this with a
           # semantic check, not just a text match.
           fetch-depth: ${{ github.event_name == 'merge_group' && '0' || '1' }}
-      - uses: dorny/paths-filter@v3
+      - uses: dorny/paths-filter@v4
         id: filter
         if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
         with:
@@ -249,7 +249,7 @@ jobs:
     runs-on: ubuntu-26.04
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: taiki-e/install-action@just
       - name: Install actionlint
         run: |
@@ -259,7 +259,7 @@ jobs:
           mkdir -p /tmp/actionlint-bin
           tar -xzf /tmp/actionlint.tar.gz -C /tmp/actionlint-bin actionlint
           echo /tmp/actionlint-bin >> "$GITHUB_PATH"
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@v7
         with:
           python-version: '3.12'
       - name: Install kubectl for wrapper contract tests
@@ -287,9 +287,9 @@ jobs:
     runs-on: ubuntu-26.04
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v6
-      - uses: docker/setup-buildx-action@v3
-      - uses: docker/build-push-action@v6
+      - uses: actions/checkout@v7
+      - uses: docker/setup-buildx-action@v4
+      - uses: docker/build-push-action@v7
         with:
           context: .
           file: build/Dockerfile.build
@@ -320,9 +320,9 @@ jobs:
     runs-on: ubuntu-26.04-arm
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v6
-      - uses: docker/setup-buildx-action@v3
-      - uses: docker/build-push-action@v6
+      - uses: actions/checkout@v7
+      - uses: docker/setup-buildx-action@v4
+      - uses: docker/build-push-action@v7
         with:
           context: .
           file: build/Dockerfile.build
@@ -353,7 +353,7 @@ jobs:
     runs-on: ubuntu-26.04
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: taiki-e/install-action@just
       - uses: ./.github/actions/bake-images
         with:
@@ -431,7 +431,7 @@ jobs:
     runs-on: ubuntu-26.04-arm
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: ./.github/actions/bake-images
         with:
           arch: arm64
@@ -482,7 +482,7 @@ jobs:
     runs-on: ubuntu-26.04
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: ./.github/actions/bake-images
         with:
           arch: amd64
@@ -510,7 +510,7 @@ jobs:
     runs-on: ubuntu-26.04-arm
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: ./.github/actions/bake-images
         with:
           arch: arm64
@@ -533,7 +533,7 @@ jobs:
     env:
       CAESIUM_SKIP_IMAGE_BUILD: "true"
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: taiki-e/install-action@just
       - uses: ./.github/actions/load-docker-images
         with:
@@ -550,7 +550,7 @@ jobs:
     runs-on: ubuntu-26.04
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: azure/setup-helm@v5
         with:
           version: v3.17.0
@@ -567,7 +567,7 @@ jobs:
     env:
       CAESIUM_SKIP_IMAGE_BUILD: "true"
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: taiki-e/install-action@just
       - uses: ./.github/actions/load-docker-images
         with:
@@ -588,7 +588,7 @@ jobs:
     runs-on: ubuntu-26.04-arm
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: taiki-e/install-action@just
       - uses: ./.github/actions/load-docker-images
         with:
@@ -604,8 +604,8 @@ jobs:
     runs-on: ubuntu-26.04
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-node@v6
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with:
           node-version: '22'
           cache: npm
@@ -651,7 +651,7 @@ jobs:
             load-reagents: "false"
             timeout: 45
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: ./.github/actions/run-integration
         with:
           arch: amd64
@@ -685,7 +685,7 @@ jobs:
             load-reagents: "true"
             timeout: 60
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: ./.github/actions/run-integration
         with:
           arch: amd64
@@ -723,7 +723,7 @@ jobs:
             load-reagents: "true"
             timeout: 60
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: ./.github/actions/run-integration
         with:
           arch: arm64
@@ -738,11 +738,11 @@ jobs:
     runs-on: ubuntu-26.04
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: ./.github/actions/load-docker-images
         with:
           name: product-amd64
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@v7
         with:
           node-version: '22'
           cache: npm
@@ -996,11 +996,11 @@ jobs:
     runs-on: ubuntu-26.04
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: ./.github/actions/load-docker-images
         with:
           name: product-amd64
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@v7
         with:
           node-version: '22'
           cache: npm
@@ -1171,7 +1171,7 @@ jobs:
     runs-on: ubuntu-26.04
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: ./.github/actions/load-docker-images
         with:
           name: product-amd64
@@ -1398,7 +1398,7 @@ jobs:
     runs-on: ubuntu-26.04
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: ./.github/actions/load-docker-images
         with:
           name: product-amd64
@@ -1458,7 +1458,7 @@ jobs:
       CANDIDATE_SHA: ${{ github.sha }}
       CAESIUM_SKIP_IMAGE_BUILD: "true"
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - name: Install kind
         run: |
           curl -Lo ./kind https://kind.sigs.k8s.io/dl/latest/kind-linux-amd64
@@ -1525,7 +1525,7 @@ jobs:
       CANDIDATE_SHA: ${{ github.sha }}
       CAESIUM_SKIP_IMAGE_BUILD: "true"
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: taiki-e/install-action@just
       - uses: ./.github/actions/load-docker-images
         with:
@@ -1575,7 +1575,7 @@ jobs:
     env:
       CANDIDATE_SHA: ${{ github.sha }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: taiki-e/install-action@just
       - uses: ./.github/actions/load-docker-images
         with:
@@ -1584,7 +1584,7 @@ jobs:
       # lane compiling (race and fuzz-instrumented builds). Content-addressed,
       # so it can only miss; keyed on the dependency set and the fuzz script.
       - name: Restore the Go fuzz build cache
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: .tmp/fuzz-gocache
           key: fuzz-gocache-v1-amd64-${{ hashFiles('go.sum', 'build/Dockerfile.build', 'scripts/fuzz-tests.sh') }}
@@ -1619,7 +1619,7 @@ jobs:
     env:
       CANDIDATE_SHA: ${{ github.sha }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: taiki-e/install-action@just
       - uses: ./.github/actions/load-docker-images
         with:
@@ -1656,9 +1656,9 @@ jobs:
       CANDIDATE_SHA: ${{ github.sha }}
       CAESIUM_SKIP_IMAGE_BUILD: "true"
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: taiki-e/install-action@just
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@v7
         with:
           node-version: '22'
           cache: npm
@@ -2111,7 +2111,7 @@ jobs:
     runs-on: ubuntu-26.04
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: ./.github/actions/load-docker-images
         with:
           name: product-amd64
@@ -2218,7 +2218,7 @@ jobs:
     runs-on: ubuntu-26.04
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - name: Verify required integration matrix
         env:
           NEEDS_JSON: ${{ toJSON(needs) }}
@@ -2230,7 +2230,7 @@ jobs:
     runs-on: ubuntu-26.04
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - name: Verify required integration matrix
         env:
           NEEDS_JSON: ${{ toJSON(needs) }}
@@ -2287,7 +2287,7 @@ jobs:
     runs-on: ubuntu-26.04
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       # Only downloadable when the lane actually ran. A lane that ran but left
       # no report still fails the gate: ci-ok.py requires the file.
       - name: Download early-evidence report
@@ -2402,7 +2402,7 @@ jobs:
     runs-on: ubuntu-26.04
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       # Every report this run uploaded, one directory per artifact. A lane that
       # never ran leaves no directory, which the gate refuses as absent
       # evidence; so a failed download is the gate's to judge, not this step's.
@@ -2483,7 +2483,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - name: Verify chart appVersion matches the pushed tag
         if: ${{ !inputs.publish-dry-run }}
         run: |

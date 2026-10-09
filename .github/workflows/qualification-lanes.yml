@@ -85,7 +85,7 @@ jobs:
     runs-on: ubuntu-26.04
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - name: Validate the lane selection
         env:
           LANES: ${{ inputs.lanes }}
@@ -100,7 +100,7 @@ jobs:
     env:
       CANDIDATE_SHA: ${{ github.sha }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: taiki-e/install-action@just
       - name: Install kind
         run: |
@@ -176,7 +176,7 @@ jobs:
     env:
       CANDIDATE_SHA: ${{ github.sha }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: taiki-e/install-action@just
       - name: Install kind
         run: |
@@ -224,7 +224,7 @@ jobs:
     env:
       CANDIDATE_SHA: ${{ github.sha }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: taiki-e/install-action@just
       - name: Install kind
         run: |
@@ -239,7 +239,7 @@ jobs:
       - uses: azure/setup-helm@v5
         with:
           version: v3.17.0
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@v7
         with:
           node-version: '22'
           cache: npm
@@ -290,12 +290,12 @@ jobs:
       CAESIUM_PERF_HOST_ID: github-hosted|ubuntu-26.04|x86_64
       CAESIUM_PERF_BASE_SHA: ${{ inputs.performance-base }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           # performance.sh checks out the base SHA in a temporary worktree.
           fetch-depth: 0
       - uses: taiki-e/install-action@just
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@v7
         with:
           node-version: '22'
           cache: npm
@@ -357,10 +357,10 @@ jobs:
     env:
       CANDIDATE_SHA: ${{ github.sha }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: taiki-e/install-action@just
       - name: Restore the Go fuzz build cache
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v6
         with:
           path: .tmp/fuzz-gocache
           key: fuzz-gocache-v1-amd64-${{ hashFiles('go.sum', 'build/Dockerfile.build', 'scripts/fuzz-tests.sh') }}
@@ -401,7 +401,7 @@ jobs:
     env:
       CANDIDATE_SHA: ${{ github.sha }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: taiki-e/install-action@just
       - name: Install kind
         run: |
