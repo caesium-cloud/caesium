@@ -23,14 +23,14 @@ case "$1" in
 run)
     if [[ " $* " == *" -d "* ]]; then
         [[ " $* " == *" --memory=64m --memory-swap=64m "* ]] || exit 12
-        [[ "$*" == *" --memory-mib 128 --wait-file /tmp/release --wait-timeout 10s --hold 2s" ]] || exit 12
+        [[ "$*" == *" --memory-mib 128 --wait-file /tmp/release --wait-timeout 10s --hold 2s --linger 2s" ]] || exit 12
         archives=("$TMPDIR"/*/release.tar)
         [[ "${#archives[@]}" == 1 && -s "${archives[0]}" ]] || exit 12
         if [ "$SCENARIO" = allocate_fail ]; then echo SECRET_NATIVE >&2; exit 7; fi
         if [ "$SCENARIO" = allocate_fail_with_output ]; then echo "$cid"; echo SECRET_NATIVE >&2; exit 7; fi
         if [ "$SCENARIO" = invalid_ack ]; then echo unknown; else echo "$cid"; fi
     elif [[ " $* " == *" --memory-mib 1025 "* ]]; then
-        echo 'invalid arguments: memory must be 1..1024 MiB, hold 0..5m, wait-timeout >0..5m, with no positional arguments'
+        echo 'invalid arguments: memory must be 1..1024 MiB, hold 0..5m, wait-timeout >0..5m, linger 0..1m, with no positional arguments'
         [ "$SCENARIO" != bound_accepted ] || exit 0
         exit 2
     elif [[ " $* " == *" --wait-file /tmp/never-released "* ]]; then
@@ -60,6 +60,16 @@ logs)
         echo SECRET_NATIVE >&2; exit 7
     fi
     if [ "$SCENARIO" = early_allocation ] || { [ "$SCENARIO" = late_allocation ] && [ "$n" -ge 1 ]; }; then echo 'allocated 128 MiB'; fi
+    if [ -f "$FIXTURE/released" ]; then
+        case "$SCENARIO" in
+            supervisor_record_missing) : ;;
+            supervisor_record_clean_exit) echo 'workload exited with status 0' ;;
+            supervisor_record_sigterm) echo 'workload terminated by signal 15' ;;
+            supervisor_record_spoofed) echo 'workload terminated by signal 9 SECRET_TAIL' ;;
+            terminal_logs_fail) echo SECRET_NATIVE >&2; exit 7 ;;
+            *) echo 'workload terminated by signal 9' ;;
+        esac
+    fi
     if [ "$SCENARIO" = unknown_logs ]; then
         echo 'SECRET_APPLICATION token=private' >&2
         printf '%300s\n' oversize
@@ -210,9 +220,26 @@ class StressSmokeTests(unittest.TestCase):
                 self.assertIn("status=exited", result.stderr)
                 self.assertIn("memory=67108864 swap=67108864", result.stderr)
                 self.assertIn("cid=" + CID + " image=" + IMAGE, result.stderr)
+                self.assertIn("\nworkload terminated by signal 9\n", result.stderr)
                 self.assertEqual(sum(line == "rm -f " + CID for line in journal), 1)
                 self.assertIn("--memory-mib 1025 --hold 0s", journal[-2])
                 self.assertIn("--wait-timeout 100ms", journal[-1])
+
+    def test_supervisor_record_must_show_the_workload_child_was_killed(self):
+        # The runtime's OOM triple is necessary but the lingering init's record
+        # must also show the kernel killed its workload child, not the init.
+        for scenario in ["supervisor_record_missing", "supervisor_record_clean_exit",
+                         "supervisor_record_sigterm", "supervisor_record_spoofed"]:
+            with self.subTest(scenario=scenario):
+                result, journal, _ = self.assert_refused(scenario, "terminal_supervisor_record_missing")
+                self.assertIn("phase=terminal", result.stderr)
+                self.assertIn("status=exited running=false exit=137 oom=true", result.stderr)
+                self.assertEqual(sum(line == "cp - " + CID + ":/tmp" for line in journal), 1)
+                self.assertEqual(sum(line == "rm -f " + CID for line in journal), 1)
+                self.assertNotIn("--memory-mib 1025 --hold 0s", "\n".join(journal))
+        result, journal, _ = self.assert_refused("terminal_logs_fail", "terminal_logs_failed", 7)
+        self.assertIn("logs_unavailable rc=7", result.stderr)
+        self.assertEqual(sum(line == "rm -f " + CID for line in journal), 1)
 
     def test_terminal_nonoom_or_running_cannot_qualify_at_poll_bound(self):
         for scenario in ["no_oom", "running_forever"]:

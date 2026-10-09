@@ -43,8 +43,9 @@ sanitize_logs() {
         $0 == "waiting for /tmp/never-released" || $0 == "completed" ||
         $0 ~ /^cgroup memory limit ([0-9]+|max|unavailable)$/ ||
         $0 ~ /^allocated [0-9]+ MiB$/ ||
+        $0 ~ /^workload (terminated by signal|exited with status) [0-9]+$/ ||
         $0 == "wait for release file: context deadline exceeded" ||
-        $0 == "invalid arguments: memory must be 1..1024 MiB, hold 0..5m, wait-timeout >0..5m, with no positional arguments") {
+        $0 == "invalid arguments: memory must be 1..1024 MiB, hold 0..5m, wait-timeout >0..5m, linger 0..1m, with no positional arguments") {
             if (kept++ < 20) print
         }' "$1" >"$scratch/safe-logs"
 }
@@ -156,11 +157,20 @@ command_status=0
 
 # A waiting process must not touch the large allocation before the harness has
 # set its limit. Its OOM is the kernel verdict, never a fixture-chosen exit 137.
+#
+# --linger allocates in a child of the container's init and keeps that init
+# alive 2s after the child dies. A runtime learns of an OOM kill only by
+# reading the cgroup's memory.events, whose change notification the kernel
+# defers up to ~10ms after an earlier one. When the victim is the container's
+# only process the cgroup empties at once, and the host may remove it before
+# that read: the runtime then records exit 137 without OOMKilled (see the
+# stress fixture section of docs/ci.md). A surviving init keeps the cgroup and
+# its kill record readable, so only the kernel's verdict decides this phase.
 phase="allocate_waiter"
 diagnostic_since=$(date +%s 2>/dev/null) || diagnostic_since=""
 command_status=0
 ctr=$("$runtime_cli" run -d --memory=64m --memory-swap=64m "$stress_ref" \
-    --memory-mib 128 --wait-file /tmp/release --wait-timeout 10s --hold 2s 2>/dev/null) || command_status=$?
+    --memory-mib 128 --wait-file /tmp/release --wait-timeout 10s --hold 2s --linger 2s 2>/dev/null) || command_status=$?
 if [ "$command_status" -ne 0 ]; then
     ctr=""
     echo 'stress smoke: reconciliation_required=true unconfirmed_waiter' >&2
@@ -208,6 +218,10 @@ for ((poll=0; poll<100; poll++)); do
     sleep 0.1
 done
 [ "$terminal" = true ] || fail terminal_oom_unconfirmed
+# The init's record corroborates that the kernel killed the workload child,
+# not the init, and that the init outlived it. Only OOMKilled qualifies.
+read_logs || fail terminal_logs_failed "$log_status"
+grep -Fx 'workload terminated by signal 9' "$scratch/safe-logs" >/dev/null || fail terminal_supervisor_record_missing
 phase="cleanup"
 cleanup || fail cleanup_failed "$cleanup_status"
 

@@ -463,9 +463,40 @@ allocating (`--wait-timeout`, default 60s, maximum 5m). Alpine supplies `touch`
 so a runtime test can observe the waiting container, set a test-only memory
 limit, then release it. Integration scenarios copy the release file through the
 runtime archive API, avoiding an extra process in the measured cgroup.
+`--linger` (up to 1m) runs that workload as a child, raised to
+`oom_score_adj` 1000, and keeps the container's init alive for the given time
+after the child ends, then exits with the child's status (128+signal when
+killed) after printing `workload terminated by signal N` or
+`workload exited with status N`. Without it the fixture is one process, which is
+how integration scenarios run it.
 `just stress-image-test` proves a 16 MiB successful
 allocation, the release barrier, a real kernel OOM at 128 MiB under a 64 MiB
 limit, and rejected/expired bounds.
+
+The OOM phase runs the waiter with `--linger 2s` and qualifies only on the
+runtime's own `exited`, exit 137 and `OOMKilled=true` record, plus the init's
+`workload terminated by signal 9` line as corroboration. The lingering init is
+what makes that record reliable. A runtime learns of a kernel OOM kill only by
+reading the container cgroup's `memory.events`. The kernel
+[defers that file's change notification](https://github.com/torvalds/linux/blob/v6.17/kernel/cgroup/cgroup.c#L4589-L4606)
+by up to ~10ms after an earlier one, and the over-limit (`max`) events that
+precede every OOM kill have just fired one. When the victim is a container's
+only process, the cgroup empties at once. Under the systemd cgroup driver,
+systemd then stops the container's scope and removes its cgroup, and the
+pending notification
+[is dropped with it](https://github.com/torvalds/linux/blob/v6.17/kernel/cgroup/cgroup.c#L1718-L1736).
+containerd's last read of `memory.events`
+([`internal/oom`](https://github.com/containerd/containerd/blob/v2.3.6/internal/oom/watcher.go#L126-L134))
+then finds no cgroup and gives up silently, so no `TaskOOM` is published and
+Docker reports exit 137 with `OOMKilled=false` and no `oom` event. conmon's
+exit-time read has the same race. Upstream tracks it as
+[containerd#12260](https://github.com/containerd/containerd/issues/12260),
+[containerd#8893](https://github.com/containerd/containerd/issues/8893) and
+[conmon#426](https://github.com/containers/conmon/issues/426). Before the
+fixture lingered, the smoke failed this way intermittently with
+`reason=terminal_oom_unconfirmed`. A populated cgroup keeps the kill record
+readable until the runtime has read it, so the verdict is still the kernel's
+and is no longer lost to the race.
 
 The Podman lane retains Ubuntu's Podman API but installs the checksum-pinned
 upstream conmon 2.2.1 monitor with the `k8s-file` log driver (the upstream
