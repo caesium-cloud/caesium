@@ -1,0 +1,27 @@
+name: diag-ubuntu26-sysctl
+
+# Throwaway diagnostic for PR #627: are the runner image's inotify sysctls
+# (appended to /etc/sysctl.conf at image build) applied on ubuntu-26.04?
+on:
+  push:
+    branches: [diag/ubuntu26-oom]
+
+permissions:
+  contents: read
+
+jobs:
+  sysctl:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, ubuntu-26.04, ubuntu-26.04-arm]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 5
+    steps:
+      - run: |
+          set -x
+          sysctl fs.inotify.max_user_watches fs.inotify.max_user_instances vm.max_map_count vm.mmap_rnd_bits
+          grep -nE 'inotify|max_map_count|mmap_rnd' /etc/sysctl.conf || echo "no entries in /etc/sysctl.conf"
+          ls -la /etc/sysctl.conf /etc/sysctl.d/ || true
+          dpkg -l procps | tail -1 || true
+          systemctl cat systemd-sysctl.service | grep -E 'ExecStart' || true
