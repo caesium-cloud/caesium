@@ -82,7 +82,7 @@ jobs:
   # Fails closed on a lane name nothing would run, instead of a silently empty
   # (and therefore green) qualification.
   select:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v6
@@ -95,7 +95,7 @@ jobs:
   lifecycle-cluster:
     needs: [select]
     if: contains(format(',{0},', inputs.lanes), ',cluster-lifecycle,') || contains(format(',{0},', inputs.lanes), ',all,')
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 120
     env:
       CANDIDATE_SHA: ${{ github.sha }}
@@ -171,7 +171,7 @@ jobs:
   core-robustness-nightly:
     needs: [select]
     if: contains(format(',{0},', inputs.lanes), ',core-robustness,') || contains(format(',{0},', inputs.lanes), ',all,')
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 120
     env:
       CANDIDATE_SHA: ${{ github.sha }}
@@ -219,7 +219,7 @@ jobs:
   console-recovery:
     needs: [select]
     if: contains(format(',{0},', inputs.lanes), ',console-recovery,') || contains(format(',{0},', inputs.lanes), ',all,')
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 90
     env:
       CANDIDATE_SHA: ${{ github.sha }}
@@ -282,12 +282,12 @@ jobs:
       fail-fast: false
       matrix:
         run: ${{ fromJSON(inputs.performance-runs || '[1]') }}
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 180
     env:
       CANDIDATE_SHA: ${{ github.sha }}
       # A stable fleet identity: the hosted runner's hostname changes per job.
-      CAESIUM_PERF_HOST_ID: github-hosted|ubuntu-24.04|x86_64
+      CAESIUM_PERF_HOST_ID: github-hosted|ubuntu-26.04|x86_64
       CAESIUM_PERF_BASE_SHA: ${{ inputs.performance-base }}
     steps:
       - uses: actions/checkout@v6
@@ -352,7 +352,7 @@ jobs:
   fuzz-campaign:
     needs: [select]
     if: contains(format(',{0},', inputs.lanes), ',fuzz-campaign,') || contains(format(',{0},', inputs.lanes), ',all,')
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 150
     env:
       CANDIDATE_SHA: ${{ github.sha }}
@@ -396,7 +396,7 @@ jobs:
   soak:
     needs: [select]
     if: contains(format(',{0},', inputs.lanes), ',soak,') || contains(format(',{0},', inputs.lanes), ',all,')
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 150
     env:
       CANDIDATE_SHA: ${{ github.sha }}
@@ -460,7 +460,7 @@ jobs:
       - performance-gate
       - fuzz-campaign
       - soak
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 5
     outputs:
       needs: ${{ steps.collect.outputs.needs }}

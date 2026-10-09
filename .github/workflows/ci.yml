@@ -89,7 +89,7 @@ jobs:
     permissions:
       contents: read
       pull-requests: read
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 5
     outputs:
       go: ${{ steps.set.outputs.go }}
@@ -246,7 +246,7 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
   ci-config:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v6
@@ -284,7 +284,7 @@ jobs:
       actions: read # Cache lookup; cache uploads use the Actions runtime token.
     needs: [changes]
     if: needs.changes.outputs.images == 'true'
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v6
@@ -317,7 +317,7 @@ jobs:
       actions: read # Cache lookup; cache uploads use the Actions runtime token.
     needs: [changes]
     if: needs.changes.outputs.images == 'true'
-    runs-on: ubuntu-24.04-arm
+    runs-on: ubuntu-26.04-arm
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v6
@@ -350,7 +350,7 @@ jobs:
       actions: read # BuildKit cache lookup; uploads use the runtime token.
     needs: [changes, builder]
     if: needs.changes.outputs.images == 'true'
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v6
@@ -428,7 +428,7 @@ jobs:
       actions: read
     needs: [changes, builder-arm64]
     if: needs.changes.outputs.images == 'true'
-    runs-on: ubuntu-24.04-arm
+    runs-on: ubuntu-26.04-arm
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v6
@@ -479,7 +479,7 @@ jobs:
       actions: read
     needs: [changes]
     if: needs.changes.outputs.go == 'true' || needs.changes.outputs.reagents == 'true' || needs.changes.outputs.ci == 'true'
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v6
@@ -507,7 +507,7 @@ jobs:
       actions: read
     needs: [changes]
     if: needs.changes.outputs.go == 'true' || needs.changes.outputs.reagents == 'true' || needs.changes.outputs.ci == 'true'
-    runs-on: ubuntu-24.04-arm
+    runs-on: ubuntu-26.04-arm
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v6
@@ -528,7 +528,7 @@ jobs:
   lint:
     needs: [changes, builder, reagents]
     if: needs.changes.outputs.go == 'true' || needs.changes.outputs.reagents == 'true' || needs.changes.outputs.ci == 'true'
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 30
     env:
       CAESIUM_SKIP_IMAGE_BUILD: "true"
@@ -547,7 +547,7 @@ jobs:
         run: just tag=${{ env.IMAGE_TAG }}-amd64 reagents-lint
 
   helm-lint:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v6
@@ -562,7 +562,7 @@ jobs:
   unit-test:
     needs: [changes, builder, reagents]
     if: needs.changes.outputs.go == 'true' || needs.changes.outputs.reagents == 'true' || needs.changes.outputs.ci == 'true'
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 30
     env:
       CAESIUM_SKIP_IMAGE_BUILD: "true"
@@ -585,7 +585,7 @@ jobs:
   unit-test-arm64:
     needs: [changes, builder-arm64]
     if: needs.changes.outputs.go == 'true' || needs.changes.outputs.ci == 'true'
-    runs-on: ubuntu-24.04-arm
+    runs-on: ubuntu-26.04-arm
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v6
@@ -601,7 +601,7 @@ jobs:
   ui-test:
     needs: [changes]
     if: needs.changes.outputs.ui == 'true' || needs.changes.outputs.go == 'true' || needs.changes.outputs.ci == 'true'
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v6
@@ -620,7 +620,7 @@ jobs:
     name: integration (${{ matrix.id == 'docker' && format('docker, {0}/3', matrix.shard) || matrix.id }})
     needs: [changes, images]
     if: needs.changes.outputs.go == 'true' || needs.changes.outputs.ci == 'true'
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: ${{ matrix.timeout }}
     strategy:
       fail-fast: false
@@ -666,7 +666,7 @@ jobs:
     name: integration-extra (${{ matrix.id }})
     needs: [changes, images, reagents]
     if: needs.changes.outputs.go == 'true' || needs.changes.outputs.reagents == 'true' || needs.changes.outputs.ci == 'true'
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: ${{ matrix.timeout }}
     strategy:
       fail-fast: false
@@ -696,7 +696,7 @@ jobs:
     name: integration-arm64 (${{ matrix.id == 'docker' && format('docker, {0}/3', matrix.shard) || matrix.id }})
     needs: [changes, images-arm64, reagents-arm64]
     if: needs.changes.outputs.go == 'true' || needs.changes.outputs.reagents == 'true' || needs.changes.outputs.ci == 'true'
-    runs-on: ubuntu-24.04-arm
+    runs-on: ubuntu-26.04-arm
     timeout-minutes: ${{ matrix.timeout }}
     strategy:
       fail-fast: false
@@ -735,7 +735,7 @@ jobs:
   ui-e2e:
     needs: [changes, ui-test, images]
     if: needs.changes.outputs.ui == 'true' || needs.changes.outputs.go == 'true' || needs.changes.outputs.ci == 'true'
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v6
@@ -993,7 +993,7 @@ jobs:
   ui-e2e-auth:
     needs: [changes, ui-test, images]
     if: needs.changes.outputs.ui == 'true' || needs.changes.outputs.go == 'true' || needs.changes.outputs.ci == 'true'
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v6
@@ -1168,7 +1168,7 @@ jobs:
       fail-fast: false
       matrix:
         shard: [1, 2, 3]
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v6
@@ -1395,7 +1395,7 @@ jobs:
   helm-pod-replacement-test:
     needs: [changes, images, helm-lint]
     if: needs.changes.outputs.helm == 'true' || needs.changes.outputs.go == 'true' || needs.changes.outputs.ci == 'true'
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v6
@@ -1450,7 +1450,7 @@ jobs:
   early-evidence:
     needs: [changes, images, helm-lint]
     if: needs.changes.outputs.go == 'true' || needs.changes.outputs.helm == 'true' || needs.changes.outputs.ci == 'true'
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 60
     env:
       # check-test-evidence.py requires a real commit SHA; the `-amd64` image
@@ -1519,7 +1519,7 @@ jobs:
   lifecycle-standalone:
     needs: [changes, builder, images]
     if: needs.changes.outputs.go == 'true' || needs.changes.outputs.ci == 'true'
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 30
     env:
       CANDIDATE_SHA: ${{ github.sha }}
@@ -1570,7 +1570,7 @@ jobs:
   generated-fuzz:
     needs: [changes, builder]
     if: needs.changes.outputs.go == 'true' || needs.changes.outputs.ci == 'true'
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 30
     env:
       CANDIDATE_SHA: ${{ github.sha }}
@@ -1614,7 +1614,7 @@ jobs:
   generated-oracles:
     needs: [changes, builder]
     if: needs.changes.outputs.go == 'true' || needs.changes.outputs.ci == 'true'
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 30
     env:
       CANDIDATE_SHA: ${{ github.sha }}
@@ -1650,7 +1650,7 @@ jobs:
   coverage-ratchets:
     needs: [changes, builder]
     if: needs.changes.outputs.go == 'true' || needs.changes.outputs.ui == 'true' || needs.changes.outputs.ci == 'true'
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 45
     env:
       CANDIDATE_SHA: ${{ github.sha }}
@@ -2108,7 +2108,7 @@ jobs:
       fail-fast: false
       matrix:
         shard: [1, 2, 3]
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v6
@@ -2215,7 +2215,7 @@ jobs:
   build-and-integration-test:
     if: always()
     needs: [changes, images, integration]
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v6
@@ -2227,7 +2227,7 @@ jobs:
   build-and-integration-test-agent-auth:
     if: always()
     needs: [changes, images, integration]
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v6
@@ -2284,7 +2284,7 @@ jobs:
       - generated-fuzz
       - generated-oracles
       - coverage-ratchets
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v6
@@ -2399,7 +2399,7 @@ jobs:
   release-qualification:
     if: always() && (startsWith(github.ref, 'refs/tags/v') || inputs.publish-dry-run)
     needs: [changes, ci-ok, images, images-arm64, qualification]
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v6
@@ -2474,7 +2474,7 @@ jobs:
       - helm-integration-test
       - helm-pod-replacement-test
       - podman-integration-test
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     # A dry run evaluates to '' (no environment, so no deployment record and
     # none of its secrets). The operand order matters: `cond && '' || x` would
     # always yield x, because '' is falsy.
@@ -2604,7 +2604,7 @@ jobs:
           wrapper to \`./.tmp/caesium-cli/caesium\`.
 
           Each binary was smoke-tested **natively on its own architecture's
-          runner** (\`ubuntu-24.04\` / \`ubuntu-24.04-arm\`, no emulation) inside
+          runner** (\`ubuntu-26.04\` / \`ubuntu-26.04-arm\`, no emulation) inside
           a plain \`ubuntu:24.04\` container carrying none of the caesium
           runtime libraries: \`caesium --help\` and \`caesium job lint\` both
           succeed there.

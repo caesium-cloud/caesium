@@ -2787,7 +2787,7 @@ class NightlyLaneTests(unittest.TestCase):
 
     def test_performance_runs_on_a_stable_fleet_identity(self):
         job = LANE_JOBS["performance-gate"]
-        self.assertEqual(job["env"]["CAESIUM_PERF_HOST_ID"], "github-hosted|ubuntu-24.04|x86_64")
+        self.assertEqual(job["env"]["CAESIUM_PERF_HOST_ID"], "github-hosted|ubuntu-26.04|x86_64")
         self.assertEqual(job["strategy"]["matrix"]["run"], "${{ fromJSON(inputs.performance-runs || '[1]') }}")
         body = recipe_body("performance-gate")
         for setting in ("CAESIUM_PERF_WORKLOADS=\"${CAESIUM_PERF_WORKLOADS:-closed-baseline}\"",

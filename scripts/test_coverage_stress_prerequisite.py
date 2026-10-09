@@ -21,7 +21,7 @@ class CoverageStressPrerequisiteTests(unittest.TestCase):
 
     def assertPrerequisite(self, job):
         self.assertEqual(job["needs"], ["changes", "builder"])
-        self.assertEqual(job["runs-on"], "ubuntu-24.04")
+        self.assertEqual(job["runs-on"], "ubuntu-26.04")
         self.assertEqual(job["env"]["CAESIUM_SKIP_IMAGE_BUILD"], "true")
         self.assertNotIn("CAESIUM_RESOURCE_STRESS_IMAGE", job["env"])
         steps = job["steps"]
