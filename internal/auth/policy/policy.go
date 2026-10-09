@@ -23,7 +23,10 @@ const (
 	ClusterNamespace = "*"
 )
 
-var namespaceLabel = regexp.MustCompile(`^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$`)
+var (
+	namespaceLabel = regexp.MustCompile(`^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$`)
+	dnsSubdomain   = regexp.MustCompile(`^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$`)
+)
 
 // AccessPolicy declares namespaces and the identity bindings that grant access.
 type AccessPolicy struct {
@@ -204,15 +207,9 @@ func namespaceNames(namespaces map[string]Namespace) []string {
 }
 
 func validDNSSubdomain(name string) bool {
-	if len(name) > 253 {
-		return false
-	}
-	for label := range strings.SplitSeq(name, ".") {
-		if !namespaceLabel.MatchString(label) {
-			return false
-		}
-	}
-	return true
+	// Kubernetes service accounts use DNS1123 subdomain validation: the whole
+	// name is limited to 253 characters, without a per-label 63-character cap.
+	return len(name) <= 253 && dnsSubdomain.MatchString(name)
 }
 
 // yaml.v3 normally coerces numeric and boolean scalars into strings and treats
