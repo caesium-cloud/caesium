@@ -82,7 +82,9 @@ Item checkboxes remain unchecked until merged acceptance evidence exists.
 - **W1-α / A1 — policy package:** draft [PR #624](https://github.com/caesium-cloud/caesium/pull/624),
   head `4417f69ddc1be034674d304ed2fee03ba44b2ed3`. Independent security review
   passed after email-confusable, traversal, Vault delimiter and strict YAML fixes.
-  Current-head container tests and hosted CI are being refreshed. A2/C4 follow-up
+  Current-head hosted lint and both full race unit suites passed, including all
+  security regressions (policy coverage 99.6%); the tested merge has the same tree.
+  Final hosted coverage/runtime checks are being collected. A2/C4 follow-up
   obligations are recorded below; existing review threads await human review.
   At preceding `28586d80`, local lint/race unit tests and hosted CI passed. The
   first local integration failed at queue reclaim with later DB lock/transaction
@@ -95,8 +97,10 @@ Item checkboxes remain unchecked until merged acceptance evidence exists.
   correcting namespace-only CLI/REST/approval diffs and explaining unsafe replay
   refusal. Real schema CLI, namespace incident recovery, and enhanced cache/diff/
   replay journeys are required by coverage; ten selection guard tests passed.
-  All coverage floors remain unchanged. Current-head runtime gates and CI are
-  being refreshed. At preceding `41e0cb0d`, full local lint/race unit/integration
+  All coverage floors remain unchanged. Current-head hosted lint and both full
+  unit suites passed; 20 live backend/auth scenario proofs passed, including
+  namespace move/diff/replay on all five runtime lanes. Fresh full local integration
+  is running; hosted coverage remains pending. At preceding `41e0cb0d`, full local lint/race unit/integration
   passed (801.740s; 272 passed, 41 lane-specific skips), schema/examples passed,
   and hosted logs proved 15 namespace scenario/engine combinations without skips.
   That head's coverage failed on three changed files; the new journeys and removal
@@ -109,8 +113,11 @@ Item checkboxes remain unchecked until merged acceptance evidence exists.
   adding a fresh-installer regression, removing unnecessary reinstallation logic,
   and hardening routing tests/fixtures/documentation. Actual SQL detects a deliberate
   Config-only wiring mutation; restored package race tests and vet passed. Full
-  local lint and race unit tests passed; fresh-image integration and current-head
-  hosted CI are running. The preceding `839e8e0c` passed all hosted checks and full
+  local lint, full race unit and fresh-image integration passed (817.924s;
+  269 passed, 41 lane-specific skips). Current-head hosted CI is fully green,
+  including both unit architectures, coverage and `ci-ok` (41 checks passed,
+  three expected skips); the tested merge has the same tree. The preceding
+  `839e8e0c` passed all hosted checks and full
   local integration (822.055s; 269 passed, 41 lane-specific skips). This repair does
   not change identity dependencies or prove the original failure's causal chain.
 - **A2 and D3:** not dispatched. A2 requires A1 to land; D3 requires B1 to land.
