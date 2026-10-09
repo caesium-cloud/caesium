@@ -1,8 +1,7 @@
 name: diag-oom-race
 
-# DIAG ONLY -- never merged. Measures how often a container runtime misses a
-# real kernel OOM kill of a single-process container, versus the fixture's
-# --linger supervisor shape, with bpftrace timelines of the cgroup removal.
+# DIAG ONLY -- never merged. Probe: check the bpftrace program loads on each
+# runner and records a container OOM timeline.
 on:
   push:
     branches: [diag/oom-cgroup-race]
@@ -15,90 +14,32 @@ defaults:
     shell: bash
 
 jobs:
-  trials:
+  probe:
     strategy:
       fail-fast: false
       matrix:
         runner: [ubuntu-24.04, ubuntu-24.04-arm, ubuntu-26.04, ubuntu-26.04-arm]
-        runtime: [docker, podman]
-        shard: [1, 2]
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 55
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v6
-      - name: Versions
-        run: |
-          set -x
-          uname -a
-          docker version
-          docker info --format 'cgroup={{.CgroupDriver}} v={{.CgroupVersion}} driver={{.Driver}}'
-          containerd --version || true
-          runc --version || true
-          podman version || true
-          systemctl --version | head -1
       - name: Build fixture
-        run: |
-          docker build -q -f build/Dockerfile.stress -t caesiumdiag/stress:diag .
-      - name: Prepare podman
-        if: matrix.runtime == 'podman'
-        run: |
-          set -euxo pipefail
-          arch=$(dpkg --print-architecture)
-          case "$arch" in
-            amd64) sum=1d97294c14c43d477e0a0826e9cd0f2a2af373ddfafe6f10252e8a3c43f32be6 ;;
-            arm64) sum=c2fa62b3555eb0a729d853df23c5784d970f46050f2fb5f9931ded1bf455d216 ;;
-          esac
-          if ! command -v podman >/dev/null; then sudo apt-get update -q && sudo apt-get install -y -q podman; fi
-          curl --fail --location --retry 3 "https://github.com/containers/conmon/releases/download/v2.2.1/conmon.$arch" -o "$RUNNER_TEMP/conmon"
-          echo "$sum  $RUNNER_TEMP/conmon" | sha256sum --check --strict
-          sudo install -m 0755 "$RUNNER_TEMP/conmon" /usr/bin/conmon
-          conmon --version
-          mkdir -p "$HOME/.config/containers"
-          printf '%s\n' '[containers]' 'log_driver = "k8s-file"' > "$HOME/.config/containers/containers.conf"
-          podman info --format '{{.Host.CgroupManager}} {{.Host.CgroupsVersion}} {{.Host.OCIRuntime.Name}} {{.Host.Conmon.Version}}'
-          docker save caesiumdiag/stress:diag | podman load
-          podman image inspect docker.io/caesiumdiag/stress:diag >/dev/null
+        run: docker build -q -f build/Dockerfile.stress -t caesiumdiag/stress:diag .
       - name: Start tracer
         run: |
           sudo apt-get update -q >/dev/null
           sudo apt-get install -y -q bpftrace >/dev/null
           mkdir -p "$RUNNER_TEMP/out"
-          bash diag/trace-start.sh "$RUNNER_TEMP/out"
+          bash diag/trace-start.sh "$RUNNER_TEMP/out" verbose
       - name: Trials
-        timeout-minutes: 42
-        run: |
-          image=caesiumdiag/stress:diag
-          [ "${{ matrix.runtime }}" = podman ] && image=docker.io/caesiumdiag/stress:diag
-          end=$((SECONDS + 38 * 60))
-          bash diag/loop.sh ${{ matrix.runtime }} "$image" 400 "$RUNNER_TEMP/out" &
-          pid=$!
-          while kill -0 "$pid" 2>/dev/null; do
-            if (( SECONDS > end )); then pkill -P "$pid" || true; kill "$pid" || true; break; fi
-            sleep 5
-          done
-          wait "$pid" || true
+        run: bash diag/loop.sh docker caesiumdiag/stress:diag 3 "$RUNNER_TEMP/out"
       - name: Summarize
         if: always()
         run: |
           sudo pkill -INT -x bpftrace || true
           sleep 2
           sudo chown -R "$(id -u)" "$RUNNER_TEMP/out" || true
-          python3 diag/summarize.py "$RUNNER_TEMP/out" "${{ matrix.runner }}/${{ matrix.runtime }}/${{ matrix.shard }}"
-          for dir in "$RUNNER_TEMP"/out/fail-*; do
-            [ -d "$dir" ] || continue
-            echo "::group::$(basename "$dir")"
-            for f in "$dir"/*; do echo "--- $(basename "$f")"; head -c 6000 "$f"; echo; done
-            echo "::endgroup::"
-          done
-          head -c 200000 "$RUNNER_TEMP/out/timelines.txt" || true
-      - uses: actions/upload-artifact@v7
-        if: always()
-        with:
-          name: oom-${{ matrix.runner }}-${{ matrix.runtime }}-${{ matrix.shard }}
-          path: |
-            ${{ runner.temp }}/out/results
-            ${{ runner.temp }}/out/summary.json
-            ${{ runner.temp }}/out/timelines.txt
-            ${{ runner.temp }}/out/fail-*/
-            ${{ runner.temp }}/out/trace.err
-          retention-days: 7
+          tail -c 3000 "$RUNNER_TEMP/out/trace.err" || true
+          grep -c . "$RUNNER_TEMP/out/trace.log" || true
+          python3 diag/summarize.py "$RUNNER_TEMP/out" "${{ matrix.runner }}/probe"
+          head -c 30000 "$RUNNER_TEMP/out/timelines.txt" || true

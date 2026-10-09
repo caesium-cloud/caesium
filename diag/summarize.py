@@ -18,16 +18,31 @@ summary = {"label": label, "trials": collections.Counter(r[2] for r in results),
 trace = out / "trace.log"
 timeline = collections.defaultdict(list)
 victims = []
+pending = {}
 if trace.exists():
     for line in trace.read_text(errors="replace").splitlines():
         if not line.startswith("T "):
             continue
         parts = line.split(" ", 3)
-        stamp, kind, rest = int(parts[1]), parts[2], parts[3] if len(parts) > 3 else ""
+        try:
+            stamp = int(parts[1])
+        except ValueError:
+            continue
+        kind, rest = parts[2], parts[3] if len(parts) > 3 else ""
         if kind == "victim":
             victims.append((stamp, rest))
             continue
-        match = re.search(r"(?:docker-|libpod-)([0-9a-f]{64})\.scope", line)
+        tid = re.search(r"tid=(\d+)", rest)
+        if kind == "openat" and tid:
+            pending[tid.group(1)] = (stamp, rest)
+            continue
+        if kind == "openret" and tid:
+            started = pending.pop(tid.group(1), None)
+            if started is None:
+                continue
+            ret = re.search(r"ret=(-?\d+)", rest).group(1)
+            stamp, kind, rest = started[0], "open", started[1].replace(" file=", f" ret={ret} file=")
+        match = re.search(r"(?:docker-|libpod-)([0-9a-f]{64})\.scope", rest)
         if match:
             timeline[match.group(1)].append((stamp, kind, rest))
 

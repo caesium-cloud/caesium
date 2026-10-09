@@ -2,24 +2,23 @@
 // the runner's bpftrace. Paths of container cgroups carry the container ID.
 tracepoint:oom:mark_victim
 {
-    printf("T %llu victim pid=%d comm=%s\n", nsecs, ARGpid, str(ARGcomm));
+    printf("T %llu victim pid=%d\n", nsecs, ARGpid);
 }
 tracepoint:cgroup:cgroup_notify_populated
 {
-    printf("T %llu populated=%d path=%s by=%s\n", nsecs, ARGval, str(ARGpath), comm);
+    printf("T %llu populated=%d id=%llu by=%s path=%s\n", nsecs, ARGval, ARGid, comm, str(ARGpath));
 }
 tracepoint:cgroup:cgroup_rmdir
 {
-    printf("T %llu rmdir path=%s by=%s pid=%d\n", nsecs, str(ARGpath), comm, pid);
+    printf("T %llu rmdir id=%llu by=%s pid=%d path=%s\n", nsecs, ARGid, comm, pid, str(ARGpath));
 }
 tracepoint:syscalls:sys_enter_openat
 /comm == "containerd-shim" || comm == "conmon"/
 {
-    @file[tid] = str(ARGfilename);
+    printf("T %llu openat by=%s tid=%d file=%s\n", nsecs, comm, tid, str(ARGfilename));
 }
 tracepoint:syscalls:sys_exit_openat
-/@file[tid] != ""/
+/comm == "containerd-shim" || comm == "conmon"/
 {
-    printf("T %llu open by=%s tid=%d ret=%d file=%s\n", nsecs, comm, tid, ARGret, @file[tid]);
-    delete(@file[tid]);
+    printf("T %llu openret by=%s tid=%d ret=%d\n", nsecs, comm, tid, ARGret);
 }
