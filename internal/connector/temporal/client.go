@@ -13,9 +13,9 @@ import (
 	"net"
 	"os"
 	"path"
-	"sort"
 	"strings"
 
+	"github.com/caesium-cloud/caesium/internal/connector"
 	"go.temporal.io/sdk/client"
 )
 
@@ -34,10 +34,11 @@ type DialConfig struct {
 }
 
 // ClientOptions builds SDK dial options without dialing.
-// Plaintext (a nil TLS config, with TLSDisabled) is used only for localhost,
-// 127.0.0.1, or ::1 when no certificate path is set. TLSDisabled keeps the
-// SDK from turning an API key into TLS at dial time. Any other host uses TLS.
-// Empty certificate paths then mean the system roots, not plaintext.
+// Plaintext stays loopback-only: a nil TLS config, with TLSDisabled, is used
+// only for localhost, 127.0.0.1, or ::1 when no certificate path is set.
+// TLSDisabled keeps the SDK from turning an API key into TLS at dial time.
+// Any other host uses TLS. Empty certificate paths then mean the system
+// roots, not plaintext.
 func ClientOptions(cfg DialConfig) (client.Options, error) {
 	secrets := []string{cfg.APIKey}
 	opts, err := buildClientOptions(cfg, &secrets)
@@ -138,7 +139,7 @@ func tlsConfigFor(paths []string, secrets *[]string) (*tls.Config, error) {
 				return nil, err
 			}
 			if !pool.AppendCertsFromPEM(data) {
-				return nil, fmt.Errorf("certificate %s contained no PEM certificates: %s", path.Base(certPath), data)
+				return nil, fmt.Errorf("certificate %s contained no PEM certificates", path.Base(certPath))
 			}
 		}
 		cfg.RootCAs = pool
@@ -154,7 +155,7 @@ func tlsConfigFor(paths []string, secrets *[]string) (*tls.Config, error) {
 		}
 		pair, err := tls.X509KeyPair(certPEM, keyPEM)
 		if err != nil {
-			return nil, fmt.Errorf("client certificate: %w: %s%s", err, certPEM, keyPEM)
+			return nil, fmt.Errorf("client certificate %s: %w", path.Base(certs[0]), err)
 		}
 		cfg.Certificates = []tls.Certificate{pair}
 	}
@@ -173,30 +174,7 @@ func readSecretFile(certPath string, secrets *[]string) ([]byte, error) {
 }
 
 func redactError(err error, secrets []string) error {
-	if err == nil {
-		return nil
-	}
-	message := err.Error()
-	ordered := append([]string(nil), secrets...)
-	sort.Slice(ordered, func(i, j int) bool {
-		return len(ordered[i]) > len(ordered[j])
-	})
-	for _, secret := range ordered {
-		if len(secret) < minRedactedSecretLen {
-			continue
-		}
-		message = strings.ReplaceAll(message, secret, "[redacted]")
-	}
-	if message == err.Error() {
-		return err
-	}
-	if errors.Is(err, context.DeadlineExceeded) {
-		return fmt.Errorf("%s: %w", message, context.DeadlineExceeded)
-	}
-	if errors.Is(err, context.Canceled) {
-		return fmt.Errorf("%s: %w", message, context.Canceled)
-	}
-	return errors.New(message)
+	return connector.RedactError(err, secrets, nil)
 }
 
 type discardLog struct{}

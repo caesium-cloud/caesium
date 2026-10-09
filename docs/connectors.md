@@ -256,33 +256,44 @@ HTTP routes are not. With `CAESIUM_CONNECTORS_ENABLED` left at its default
 false, the process dials no Temporal server, starts no worker, and needs no
 Temporal credentials.
 
-Health calls `GetSystemInfo` on the workflow service. In this SDK release,
-`CheckHealth` is a gRPC health RPC rather than a wrapper over `GetSystemInfo`,
-so the adapter does not use it. A health failure is an availability error. It
-is not a workflow display status, and a missing worker is not a workflow
-failure. Local adapter tests do not certify Temporal Cloud.
+Health calls `GetSystemInfo` and `DescribeNamespace` for the configured
+namespace. In this SDK release, `CheckHealth` is a gRPC health RPC rather than
+a wrapper over `GetSystemInfo`, so the adapter does not use it. A health
+failure, including an unknown namespace, is an availability error. It is not a
+workflow display status, and a missing worker is not a workflow failure.
+Local adapter tests do not certify Temporal Cloud.
 
 List passes the visibility query through and does not add an order. The page
-size comes from the caller and is clamped to 100 (`connector.MaxPageEntries`).
+size comes from the caller and is clamped to the observer's maximum. That
+maximum defaults to 100 (`connector.MaxPageEntries`) and a larger value is
+rejected.
 The next page token is the server token, unchanged. Each entry's opaque
 coordinates are `workflow_id` and `run_id`. The configured namespace is
 returned separately as scope. It is not a Temporal column on the core
 reference.
 
 Describe reads one execution and stamps the caller's clock as the observation
-time on the returned value. That time is not stored. When `ParentExecution`
-is set, the relation type is `parent`. A child workflow is not a parent and
-is not delegation.
+time on the returned value. That time is not stored. List and describe set
+relation type `parent` from `ParentExecution` when it is present. A child
+workflow is not a parent and is not delegation.
 
 History is one bounded page. `WaitNewEvent` stays false, so the call does not
 follow the workflow. Workflow inputs, results, and activity payloads are not
 copied. An encoded raw-history blob is not decoded; that response is an
-availability error. Activity attempts come from `ActivityTaskStarted` and
-carry the activity id, activity type, attempt, and history event id. An
-attempt is not a workflow failure. `ChildWorkflowExecutionStarted` is relation
-type `child`, with the child workflow id and run id.
-`WorkflowExecutionContinuedAsNew` is relation type `continuation` to the new
-run id. Relation type `delegation` is not emitted.
+availability error. A history response does not echo a run id. When the caller
+omits one, the page describes the execution once and uses that run id.
+`OriginalExecutionRunId` is kept across reset while the current run id changes,
+and `ContinuedExecutionRunId` is the previous run, so neither labels this page.
+Activity attempts
+come from `ActivityTaskStarted` and carry the scheduled event id, attempt, and
+history event id. Activity id and type are filled only when `ActivityTaskScheduled`
+is on the same page. An attempt is not a workflow failure.
+`WorkflowExecutionStarted` records relation type `parent` from
+`ParentWorkflowExecution` and relation type `continuation` from
+`ContinuedExecutionRunId` on the same workflow id.
+`ChildWorkflowExecutionStarted` is relation type `child`, with the child
+workflow id and run id. `WorkflowExecutionContinuedAsNew` is relation type
+`continuation` to the new run id. Relation type `delegation` is not emitted.
 
 `WorkflowTaskFailed` and `WorkflowTaskTimedOut` are a separate problem list
 of event id and cause. They do not change a running describe into `failed`.

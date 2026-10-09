@@ -164,6 +164,31 @@ func TestClientOptionsRedactsKeyAndPEM(t *testing.T) {
 		t.Fatal("expected PEM rejection")
 	}
 	mustNotLeak(t, err.Error(), apiKeySentinel, pemSentinel, body)
+	if !strings.Contains(err.Error(), "ca.pem") || strings.Contains(err.Error(), "BEGIN CERTIFICATE") {
+		t.Fatalf("certificate error = %s", err)
+	}
+
+	keyDir := t.TempDir()
+	clientCert := filepath.Join(keyDir, "tls.crt")
+	clientKey := filepath.Join(keyDir, "tls.key")
+	writeCert(t, clientCert, "", false)
+	keyBody := "-----BEGIN PRIVATE KEY-----\n" + apiKeySentinel + "-" + pemSentinel + "\n-----END PRIVATE KEY-----\n"
+	if err := os.WriteFile(clientKey, []byte(keyBody), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err = ClientOptions(DialConfig{
+		Endpoint:         "example.temporal.io:7233",
+		Namespace:        "payments",
+		APIKey:           apiKeySentinel,
+		CertificatePaths: []string{clientCert, clientKey},
+	})
+	if err == nil {
+		t.Fatal("expected key rejection")
+	}
+	mustNotLeak(t, err.Error(), apiKeySentinel, pemSentinel, keyBody)
+	if !strings.Contains(err.Error(), "tls.crt") {
+		t.Fatalf("key-pair error = %s", err)
+	}
 }
 
 func TestListPagesAreDisjoint(t *testing.T) {
@@ -340,7 +365,7 @@ func TestDescribeParentDeadlineAndContinued(t *testing.T) {
 	}
 	mustNotLeak(t, err.Error(), apiKeySentinel)
 
-	_, err = NewObserver(fake, "payments", apiKeySentinel, connector.MaxRPCDeadline+time.Nanosecond)
+	_, err = NewObserver(fake, "payments", apiKeySentinel, connector.MaxRPCDeadline+time.Nanosecond, 0)
 	if err == nil {
 		t.Fatal("expected deadline ceiling rejection")
 	}
@@ -441,6 +466,7 @@ func TestHistoryMetadataOmitsPayloads(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	describes := len(fake.describes)
 	page, err := obs.History(context.Background(), "order", "run-1", nil, 1000)
 	if err != nil {
 		t.Fatal(err)
@@ -451,6 +477,9 @@ func TestHistoryMetadataOmitsPayloads(t *testing.T) {
 	if fake.histories[0].GetMaximumPageSize() != connector.MaxPageEntries {
 		t.Fatalf("history page size = %d", fake.histories[0].GetMaximumPageSize())
 	}
+	if len(fake.describes) != describes {
+		t.Fatal("history described a caller-supplied run id")
+	}
 	if fake.histories[0].GetWaitNewEvent() {
 		t.Fatal("history followed new events")
 	}
@@ -458,7 +487,7 @@ func TestHistoryMetadataOmitsPayloads(t *testing.T) {
 		t.Fatalf("activities = %#v", page.Activities)
 	}
 	activity := page.Activities[0]
-	if activity.EventID != 11 || activity.ActivityID != "act-1" || activity.ActivityType != "Charge" || activity.Attempt != 2 {
+	if activity.EventID != 11 || activity.ScheduledEventID != 10 || activity.ActivityID != "act-1" || activity.ActivityType != "Charge" || activity.Attempt != 2 {
 		t.Fatalf("activity = %#v", activity)
 	}
 	if len(page.Problems) != 2 || page.Problems[0].EventID != 12 || page.Problems[1].EventID != 13 {
@@ -546,6 +575,9 @@ func TestHealthIsAvailability(t *testing.T) {
 	if err := obs.Health(context.Background()); err != nil {
 		t.Fatal(err)
 	}
+	if fake.systemInfos != 1 || len(fake.namespaces) != 1 || fake.namespaces[0] != "payments" {
+		t.Fatalf("health calls = system %d namespaces %#v", fake.systemInfos, fake.namespaces)
+	}
 	fake.healthOK = false
 	fake.healthErr = fmt.Errorf("system info %s: backend unavailable", apiKeySentinel)
 	err := obs.Health(context.Background())
@@ -559,6 +591,313 @@ func TestHealthIsAvailability(t *testing.T) {
 	if !strings.Contains(err.Error(), "unavailable") {
 		t.Fatalf("health error = %s", err.Error())
 	}
+	if fake.systemInfos != 2 || len(fake.namespaces) != 1 {
+		t.Fatal("namespace was checked after GetSystemInfo failed")
+	}
+
+	fake.healthOK = true
+	fake.healthErr = nil
+	fake.namespaceErr = fmt.Errorf("namespace %s is not found", apiKeySentinel)
+	err = obs.Health(context.Background())
+	if err == nil {
+		t.Fatal("expected namespace health error")
+	}
+	mustNotLeak(t, err.Error(), apiKeySentinel)
+	if strings.Contains(err.Error(), "WORKFLOW_EXECUTION_STATUS_FAILED") || strings.Contains(err.Error(), "display_status") {
+		t.Fatalf("namespace health mapped to a workflow failure: %s", err.Error())
+	}
+	if !strings.Contains(err.Error(), "unavailable") {
+		t.Fatalf("namespace health error = %s", err.Error())
+	}
+	if fake.systemInfos != 3 || len(fake.namespaces) != 2 || fake.namespaces[1] != "payments" {
+		t.Fatalf("namespace check = system %d %#v", fake.systemInfos, fake.namespaces)
+	}
+}
+
+func TestObservedAtOmitsZeroTime(t *testing.T) {
+	zeroExec, err := json.Marshal(Execution{WorkflowID: "wf", RunID: "run"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(zeroExec), "observed_at") {
+		t.Fatalf("zero execution time was encoded: %s", zeroExec)
+	}
+	zeroPage, err := json.Marshal(HistoryPage{WorkflowID: "wf"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(zeroPage), "observed_at") {
+		t.Fatalf("zero history time was encoded: %s", zeroPage)
+	}
+	stamp := time.Date(2026, 10, 9, 12, 0, 0, 0, time.UTC)
+	presentExec, err := json.Marshal(Execution{ObservedAt: stamp})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(presentExec), `"observed_at"`) {
+		t.Fatalf("execution time missing: %s", presentExec)
+	}
+	presentPage, err := json.Marshal(HistoryPage{ObservedAt: stamp})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(presentPage), `"observed_at"`) {
+		t.Fatalf("history time missing: %s", presentPage)
+	}
+}
+
+func TestPageSizeClampsToObserverMaximum(t *testing.T) {
+	fake := &fakeService{
+		pages: map[string]*workflowservice.ListWorkflowExecutionsResponse{
+			"": {Executions: []*workflowpb.WorkflowExecutionInfo{
+				executionInfo("alpha", "run-a", enumspb.WORKFLOW_EXECUTION_STATUS_RUNNING),
+			}},
+		},
+		history: &workflowservice.GetWorkflowExecutionHistoryResponse{History: &historypb.History{}},
+	}
+	obs, err := NewObserver(fake, "payments", apiKeySentinel, 0, 4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := obs.List(context.Background(), "WorkflowType = 'order'", nil, 50); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := obs.List(context.Background(), "WorkflowType = 'order'", nil, 0); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := obs.List(context.Background(), "WorkflowType = 'order'", nil, 2); err != nil {
+		t.Fatal(err)
+	}
+	if fake.lists[0].GetPageSize() != 4 || fake.lists[1].GetPageSize() != 4 || fake.lists[2].GetPageSize() != 2 {
+		t.Fatalf("list sizes = %d %d %d", fake.lists[0].GetPageSize(), fake.lists[1].GetPageSize(), fake.lists[2].GetPageSize())
+	}
+	if _, err := obs.History(context.Background(), "alpha", "run-a", nil, 80); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := obs.History(context.Background(), "alpha", "run-a", nil, 1); err != nil {
+		t.Fatal(err)
+	}
+	if fake.histories[0].GetMaximumPageSize() != 4 || fake.histories[1].GetMaximumPageSize() != 1 {
+		t.Fatalf("history sizes = %d %d", fake.histories[0].GetMaximumPageSize(), fake.histories[1].GetMaximumPageSize())
+	}
+	if len(fake.describes) != 0 {
+		t.Fatal("history described a caller-supplied run id")
+	}
+	if _, err := NewObserver(fake, "payments", apiKeySentinel, 0, connector.MaxPageEntries+1); err == nil {
+		t.Fatal("expected page ceiling rejection")
+	} else {
+		mustNotLeak(t, err.Error(), apiKeySentinel)
+	}
+	if _, err := NewObserver(fake, "payments", apiKeySentinel, 0, -1); err == nil {
+		t.Fatal("expected negative page rejection")
+	} else {
+		mustNotLeak(t, err.Error(), apiKeySentinel)
+	}
+}
+
+func TestActivityIdentityStaysOnThePage(t *testing.T) {
+	startedOnly := &workflowservice.GetWorkflowExecutionHistoryResponse{
+		History: &historypb.History{Events: []*historypb.HistoryEvent{{
+			EventId:   21,
+			EventType: enumspb.EVENT_TYPE_ACTIVITY_TASK_STARTED,
+			Attributes: &historypb.HistoryEvent_ActivityTaskStartedEventAttributes{
+				ActivityTaskStartedEventAttributes: &historypb.ActivityTaskStartedEventAttributes{
+					ScheduledEventId: 5,
+					Attempt:          1,
+				},
+			},
+		}}},
+	}
+	fake := &fakeService{history: startedOnly}
+	obs := observerFor(t, fake, "", 0)
+	page, err := obs.History(context.Background(), "order", "run-1", []byte("page-2"), 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(page.Activities) != 1 {
+		t.Fatalf("activities = %#v", page.Activities)
+	}
+	activity := page.Activities[0]
+	if activity.ScheduledEventID != 5 || activity.ActivityID != "" || activity.ActivityType != "" || activity.Attempt != 1 {
+		t.Fatalf("activity = %#v", activity)
+	}
+
+	fake.history = &workflowservice.GetWorkflowExecutionHistoryResponse{
+		History: &historypb.History{Events: []*historypb.HistoryEvent{
+			{
+				EventId:   5,
+				EventType: enumspb.EVENT_TYPE_ACTIVITY_TASK_SCHEDULED,
+				Attributes: &historypb.HistoryEvent_ActivityTaskScheduledEventAttributes{
+					ActivityTaskScheduledEventAttributes: &historypb.ActivityTaskScheduledEventAttributes{
+						ActivityId:   "act-from-other-page",
+						ActivityType: &commonpb.ActivityType{Name: "Remembered"},
+					},
+				},
+			},
+		}},
+	}
+	if _, err := obs.History(context.Background(), "order", "run-1", nil, 10); err != nil {
+		t.Fatal(err)
+	}
+	fake.history = startedOnly
+	again, err := obs.History(context.Background(), "order", "run-1", []byte("page-2"), 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if again.Activities[0].ActivityID != "" || again.Activities[0].ActivityType != "" || again.Activities[0].ScheduledEventID != 5 {
+		t.Fatalf("identity leaked across pages: %#v", again.Activities[0])
+	}
+}
+
+func TestParentMatchesListAndHistory(t *testing.T) {
+	info := executionInfo("order", "run-2", enumspb.WORKFLOW_EXECUTION_STATUS_RUNNING)
+	info.ParentExecution = &commonpb.WorkflowExecution{WorkflowId: "parent-wf", RunId: "parent-run"}
+	fake := &fakeService{
+		pages: map[string]*workflowservice.ListWorkflowExecutionsResponse{
+			"": {Executions: []*workflowpb.WorkflowExecutionInfo{info}},
+		},
+		describe: &workflowservice.DescribeWorkflowExecutionResponse{WorkflowExecutionInfo: info},
+		history: &workflowservice.GetWorkflowExecutionHistoryResponse{
+			History: &historypb.History{Events: []*historypb.HistoryEvent{
+				{
+					EventId:   1,
+					EventType: enumspb.EVENT_TYPE_WORKFLOW_EXECUTION_STARTED,
+					Attributes: &historypb.HistoryEvent_WorkflowExecutionStartedEventAttributes{
+						WorkflowExecutionStartedEventAttributes: &historypb.WorkflowExecutionStartedEventAttributes{
+							ParentWorkflowExecution: &commonpb.WorkflowExecution{WorkflowId: "parent-wf", RunId: "parent-run"},
+							ContinuedExecutionRunId: "run-1",
+							OriginalExecutionRunId:  "run-2",
+							FirstExecutionRunId:     "run-0",
+						},
+					},
+				},
+				{
+					EventId:   2,
+					EventType: enumspb.EVENT_TYPE_CHILD_WORKFLOW_EXECUTION_STARTED,
+					Attributes: &historypb.HistoryEvent_ChildWorkflowExecutionStartedEventAttributes{
+						ChildWorkflowExecutionStartedEventAttributes: &historypb.ChildWorkflowExecutionStartedEventAttributes{
+							WorkflowExecution: &commonpb.WorkflowExecution{WorkflowId: "child-wf", RunId: "child-run"},
+						},
+					},
+				},
+			}},
+		},
+	}
+	obs := observerFor(t, fake, "", 0)
+	page, err := obs.History(context.Background(), "order", "", nil, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(fake.describes) != 1 || fake.describes[0].workflowID != "order" || fake.describes[0].runID != "" {
+		t.Fatalf("history describe = %#v", fake.describes)
+	}
+	if page.RunID != "run-2" {
+		t.Fatalf("run id = %s", page.RunID)
+	}
+	listed, err := obs.List(context.Background(), "", nil, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	described, err := obs.Describe(context.Background(), "order", "run-2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	parent := relationByType(page.Relations, RelationParent)
+	if parent == nil || listed.Executions[0].Parent == nil || described.Parent == nil {
+		t.Fatalf("parents list=%#v describe=%#v history=%#v", listed.Executions[0].Parent, described.Parent, parent)
+	}
+	if parent.Type != RelationParent || parent.WorkflowID != "parent-wf" || parent.RunID != "parent-run" || parent.EventID != 1 {
+		t.Fatalf("history parent = %#v", parent)
+	}
+	if listed.Executions[0].Parent.Type != parent.Type || listed.Executions[0].Parent.WorkflowID != parent.WorkflowID || listed.Executions[0].Parent.RunID != parent.RunID {
+		t.Fatalf("list parent = %#v history = %#v", listed.Executions[0].Parent, parent)
+	}
+	if described.Parent.Type != parent.Type || described.Parent.WorkflowID != parent.WorkflowID || described.Parent.RunID != parent.RunID {
+		t.Fatalf("describe parent = %#v", described.Parent)
+	}
+	continued := relationByType(page.Relations, RelationContinuation)
+	if continued == nil || continued.WorkflowID != "order" || continued.RunID != "run-1" || continued.EventID != 1 {
+		t.Fatalf("continuation = %#v", continued)
+	}
+	child := relationByType(page.Relations, RelationChild)
+	if child == nil || child.WorkflowID != "child-wf" || child.RunID != "child-run" {
+		t.Fatalf("child = %#v", child)
+	}
+	for _, rel := range page.Relations {
+		if rel.Type == "delegation" || rel.RunID == "run-0" || rel.WorkflowID == "root-wf" {
+			t.Fatalf("unexpected relation %#v", rel)
+		}
+	}
+}
+
+func TestHistoryRunIDFallsBackToDescribe(t *testing.T) {
+	fake := &fakeService{
+		describe: &workflowservice.DescribeWorkflowExecutionResponse{
+			WorkflowExecutionInfo: executionInfo("order", "run-current", enumspb.WORKFLOW_EXECUTION_STATUS_RUNNING),
+		},
+		history: &workflowservice.GetWorkflowExecutionHistoryResponse{
+			History: &historypb.History{Events: []*historypb.HistoryEvent{{
+				EventId:   1,
+				EventType: enumspb.EVENT_TYPE_WORKFLOW_EXECUTION_STARTED,
+				Attributes: &historypb.HistoryEvent_WorkflowExecutionStartedEventAttributes{
+					WorkflowExecutionStartedEventAttributes: &historypb.WorkflowExecutionStartedEventAttributes{
+						ContinuedExecutionRunId: "run-previous",
+						FirstExecutionRunId:     "run-first",
+					},
+				},
+			}}},
+		},
+	}
+	obs := observerFor(t, fake, "", 0)
+	page, err := obs.History(context.Background(), "order", "", nil, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if page.RunID != "run-current" {
+		t.Fatalf("run id = %s", page.RunID)
+	}
+	if len(fake.describes) != 1 || fake.describes[0].workflowID != "order" || fake.describes[0].runID != "" {
+		t.Fatalf("describe calls = %#v", fake.describes)
+	}
+	continued := relationByType(page.Relations, RelationContinuation)
+	if continued == nil || continued.RunID != "run-previous" || continued.WorkflowID != "order" {
+		t.Fatalf("continuation = %#v", continued)
+	}
+
+	fake.describes = nil
+	named, err := obs.History(context.Background(), "order", "run-explicit", nil, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if named.RunID != "run-explicit" || len(fake.describes) != 0 {
+		t.Fatalf("named run = %s describes = %#v", named.RunID, fake.describes)
+	}
+
+	fake.history = &workflowservice.GetWorkflowExecutionHistoryResponse{
+		History: &historypb.History{Events: []*historypb.HistoryEvent{{
+			EventId:   40,
+			EventType: enumspb.EVENT_TYPE_ACTIVITY_TASK_STARTED,
+			Attributes: &historypb.HistoryEvent_ActivityTaskStartedEventAttributes{
+				ActivityTaskStartedEventAttributes: &historypb.ActivityTaskStartedEventAttributes{ScheduledEventId: 9},
+			},
+		}}},
+	}
+	later, err := obs.History(context.Background(), "order", "", []byte("page-2"), 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if later.RunID != "run-current" || len(fake.describes) != 1 {
+		t.Fatalf("later run = %s describes = %#v", later.RunID, fake.describes)
+	}
+}
+
+func relationByType(relations []Relation, kind string) *Relation {
+	for i := range relations {
+		if relations[i].Type == kind {
+			return &relations[i]
+		}
+	}
+	return nil
 }
 
 type listCall struct {
@@ -582,16 +921,25 @@ func (c historyCall) GetMaximumPageSize() int32 { return c.pageSize }
 func (c historyCall) GetWaitNewEvent() bool     { return c.wait }
 
 type fakeService struct {
-	pages     map[string]*workflowservice.ListWorkflowExecutionsResponse
-	lists     []listCall
-	listErr   error
-	describe  *workflowservice.DescribeWorkflowExecutionResponse
-	history   *workflowservice.GetWorkflowExecutionHistoryResponse
-	histories []historyCall
-	healthOK  bool
-	healthErr error
-	block     bool
-	apiKey    string
+	pages        map[string]*workflowservice.ListWorkflowExecutionsResponse
+	lists        []listCall
+	listErr      error
+	describe     *workflowservice.DescribeWorkflowExecutionResponse
+	describes    []describeCall
+	history      *workflowservice.GetWorkflowExecutionHistoryResponse
+	histories    []historyCall
+	healthOK     bool
+	healthErr    error
+	namespaceErr error
+	namespaces   []string
+	systemInfos  int
+	block        bool
+	apiKey       string
+}
+
+type describeCall struct {
+	workflowID string
+	runID      string
 }
 
 func (f *fakeService) ListWorkflowExecutions(ctx context.Context, in *workflowservice.ListWorkflowExecutionsRequest, _ ...grpc.CallOption) (*workflowservice.ListWorkflowExecutionsResponse, error) {
@@ -613,10 +961,16 @@ func (f *fakeService) ListWorkflowExecutions(ctx context.Context, in *workflowse
 	return page, nil
 }
 
-func (f *fakeService) DescribeWorkflowExecution(ctx context.Context, _ *workflowservice.DescribeWorkflowExecutionRequest, _ ...grpc.CallOption) (*workflowservice.DescribeWorkflowExecutionResponse, error) {
+func (f *fakeService) DescribeWorkflowExecution(ctx context.Context, in *workflowservice.DescribeWorkflowExecutionRequest, _ ...grpc.CallOption) (*workflowservice.DescribeWorkflowExecutionResponse, error) {
 	if err := f.wait(ctx); err != nil {
 		return nil, err
 	}
+	call := describeCall{}
+	if in != nil && in.GetExecution() != nil {
+		call.workflowID = in.GetExecution().GetWorkflowId()
+		call.runID = in.GetExecution().GetRunId()
+	}
+	f.describes = append(f.describes, call)
 	return f.describe, nil
 }
 
@@ -632,6 +986,7 @@ func (f *fakeService) GetSystemInfo(ctx context.Context, _ *workflowservice.GetS
 	if err := f.wait(ctx); err != nil {
 		return nil, err
 	}
+	f.systemInfos++
 	if f.healthErr != nil {
 		return nil, f.healthErr
 	}
@@ -639,6 +994,19 @@ func (f *fakeService) GetSystemInfo(ctx context.Context, _ *workflowservice.GetS
 		return nil, errors.New("health not configured")
 	}
 	return &workflowservice.GetSystemInfoResponse{}, nil
+}
+
+func (f *fakeService) DescribeNamespace(ctx context.Context, in *workflowservice.DescribeNamespaceRequest, _ ...grpc.CallOption) (*workflowservice.DescribeNamespaceResponse, error) {
+	if err := f.wait(ctx); err != nil {
+		return nil, err
+	}
+	if in != nil {
+		f.namespaces = append(f.namespaces, in.GetNamespace())
+	}
+	if f.namespaceErr != nil {
+		return nil, f.namespaceErr
+	}
+	return &workflowservice.DescribeNamespaceResponse{}, nil
 }
 
 func (f *fakeService) wait(ctx context.Context) error {
@@ -651,7 +1019,7 @@ func (f *fakeService) wait(ctx context.Context) error {
 
 func observerFor(t *testing.T, service Service, apiKey string, deadline time.Duration) *Observer {
 	t.Helper()
-	obs, err := NewObserver(service, "payments", apiKey, deadline)
+	obs, err := NewObserver(service, "payments", apiKey, deadline, 0)
 	if err != nil {
 		t.Fatal(err)
 	}

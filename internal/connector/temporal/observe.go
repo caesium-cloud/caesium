@@ -28,12 +28,13 @@ const (
 // Service is the workflow-service surface observation needs. The real SDK
 // client's WorkflowService implements it. Tests pass a fake.
 // SDK CheckHealth in v1.49.0 is a gRPC health RPC, not GetSystemInfo, so
-// health calls GetSystemInfo directly.
+// health calls GetSystemInfo and DescribeNamespace directly.
 type Service interface {
 	ListWorkflowExecutions(ctx context.Context, in *workflowservice.ListWorkflowExecutionsRequest, opts ...grpc.CallOption) (*workflowservice.ListWorkflowExecutionsResponse, error)
 	DescribeWorkflowExecution(ctx context.Context, in *workflowservice.DescribeWorkflowExecutionRequest, opts ...grpc.CallOption) (*workflowservice.DescribeWorkflowExecutionResponse, error)
 	GetWorkflowExecutionHistory(ctx context.Context, in *workflowservice.GetWorkflowExecutionHistoryRequest, opts ...grpc.CallOption) (*workflowservice.GetWorkflowExecutionHistoryResponse, error)
 	GetSystemInfo(ctx context.Context, in *workflowservice.GetSystemInfoRequest, opts ...grpc.CallOption) (*workflowservice.GetSystemInfoResponse, error)
+	DescribeNamespace(ctx context.Context, in *workflowservice.DescribeNamespaceRequest, opts ...grpc.CallOption) (*workflowservice.DescribeNamespaceResponse, error)
 }
 
 var _ Service = workflowservice.WorkflowServiceClient(nil)
@@ -41,17 +42,20 @@ var _ Service = workflowservice.WorkflowServiceClient(nil)
 // Observer reads one Temporal namespace. It does not store executions.
 // apiKey is kept only so errors can be redacted. It is never logged.
 type Observer struct {
-	service  Service
-	scope    string
-	apiKey   string
-	deadline time.Duration
-	now      func() time.Time
+	service        Service
+	scope          string
+	apiKey         string
+	deadline       time.Duration
+	maxPageEntries int
+	now            func() time.Time
 }
 
-// NewObserver checks the deadline ceiling and returns an observer.
+// NewObserver checks the deadline ceiling and the page-size ceiling.
 // A non-positive deadline uses connector.MaxRPCDeadline.
 // A deadline above that ceiling is rejected.
-func NewObserver(service Service, namespace, apiKey string, deadline time.Duration) (*Observer, error) {
+// maxPageEntries of zero uses connector.MaxPageEntries.
+// Any other value outside 1..connector.MaxPageEntries is rejected.
+func NewObserver(service Service, namespace, apiKey string, deadline time.Duration, maxPageEntries int) (*Observer, error) {
 	if service == nil {
 		return nil, errors.New("temporal service is required")
 	}
@@ -67,21 +71,27 @@ func NewObserver(service Service, namespace, apiKey string, deadline time.Durati
 	if deadline > connector.MaxRPCDeadline {
 		return nil, redactError(fmt.Errorf("temporal rpc deadline must be at most %s", connector.MaxRPCDeadline), []string{apiKey})
 	}
+	if maxPageEntries == 0 {
+		maxPageEntries = connector.MaxPageEntries
+	} else if maxPageEntries < 1 || maxPageEntries > connector.MaxPageEntries {
+		return nil, redactError(fmt.Errorf("temporal page size must be between 1 and %d", connector.MaxPageEntries), []string{apiKey})
+	}
 	return &Observer{
-		service:  service,
-		scope:    namespace,
-		apiKey:   apiKey,
-		deadline: deadline,
-		now:      time.Now,
+		service:        service,
+		scope:          namespace,
+		apiKey:         apiKey,
+		deadline:       deadline,
+		maxPageEntries: maxPageEntries,
+		now:            time.Now,
 	}, nil
 }
 
 // NewObserverFromClient uses the real SDK workflow service.
-func NewObserverFromClient(c client.Client, namespace, apiKey string, deadline time.Duration) (*Observer, error) {
+func NewObserverFromClient(c client.Client, namespace, apiKey string, deadline time.Duration, maxPageEntries int) (*Observer, error) {
 	if c == nil {
 		return nil, errors.New("temporal client is required")
 	}
-	return NewObserver(c.WorkflowService(), namespace, apiKey, deadline)
+	return NewObserver(c.WorkflowService(), namespace, apiKey, deadline, maxPageEntries)
 }
 
 // Execution is one workflow run. Scope is the configured namespace, not a
@@ -97,7 +107,7 @@ type Execution struct {
 	DisplayStatus string            `json:"display_status"`
 	Terminal      bool              `json:"terminal"`
 	Failure       bool              `json:"failure"`
-	ObservedAt    time.Time         `json:"observed_at,omitempty"`
+	ObservedAt    time.Time         `json:"observed_at,omitzero"`
 	Parent        *Relation         `json:"parent,omitempty"`
 }
 
@@ -123,13 +133,16 @@ type EventMeta struct {
 	Type string `json:"event_type"`
 }
 
-// ActivityRecord is one activity attempt. Attempt comes from
-// ActivityTaskStarted. An attempt is not a workflow failure.
+// ActivityRecord is one activity attempt. Attempt and ScheduledEventID come
+// from ActivityTaskStarted. ActivityID and ActivityType are set only when
+// ActivityTaskScheduled for that scheduled event is on the same page.
+// An attempt is not a workflow failure.
 type ActivityRecord struct {
-	EventID      int64  `json:"event_id"`
-	ActivityID   string `json:"activity_id"`
-	ActivityType string `json:"activity_type"`
-	Attempt      int32  `json:"attempt"`
+	EventID          int64  `json:"event_id"`
+	ScheduledEventID int64  `json:"scheduled_event_id"`
+	ActivityID       string `json:"activity_id"`
+	ActivityType     string `json:"activity_type"`
+	Attempt          int32  `json:"attempt"`
 }
 
 // WorkflowTaskProblem is a workflow-task failure or timeout.
@@ -146,7 +159,7 @@ type HistoryPage struct {
 	WorkflowID    string                `json:"workflow_id"`
 	RunID         string                `json:"run_id"`
 	Scope         string                `json:"scope"`
-	ObservedAt    time.Time             `json:"observed_at,omitempty"`
+	ObservedAt    time.Time             `json:"observed_at,omitzero"`
 	Events        []EventMeta           `json:"events,omitempty"`
 	Activities    []ActivityRecord      `json:"activities,omitempty"`
 	Relations     []Relation            `json:"relations,omitempty"`
@@ -155,14 +168,14 @@ type HistoryPage struct {
 }
 
 // List returns one visibility page. query is passed through unchanged.
-// pageSize is clamped to connector.MaxPageEntries. Zero or negative sizes
-// use that ceiling, so a page is never unbounded.
+// pageSize is clamped to the observer's maximum. Zero or negative sizes
+// use that maximum, so a page is never unbounded.
 func (o *Observer) List(ctx context.Context, query string, pageToken []byte, pageSize int) (Page, error) {
 	ctx, cancel := o.callContext(ctx)
 	defer cancel()
 	resp, err := o.service.ListWorkflowExecutions(ctx, &workflowservice.ListWorkflowExecutionsRequest{
 		Namespace:     o.scope,
-		PageSize:      clampPageSize(pageSize),
+		PageSize:      o.clampPageSize(pageSize),
 		NextPageToken: pageToken,
 		Query:         query,
 	})
@@ -183,8 +196,8 @@ func (o *Observer) List(ctx context.Context, query string, pageToken []byte, pag
 }
 
 // Describe reads one execution. ObservedAt is the caller's clock on the
-// returned value and is not stored. When ParentExecution is set, the
-// relation type is parent.
+// returned value and is not stored. ParentExecution, when set, is relation
+// type parent.
 func (o *Observer) Describe(ctx context.Context, workflowID, runID string) (Execution, error) {
 	if strings.TrimSpace(workflowID) == "" {
 		return Execution{}, o.redact(errors.New("temporal describe: workflow id is required"))
@@ -211,13 +224,6 @@ func (o *Observer) Describe(ctx context.Context, workflowID, runID string) (Exec
 		execution.RunID = runID
 		execution.Coordinates["run_id"] = runID
 	}
-	if parent := resp.GetWorkflowExecutionInfo().GetParentExecution(); parent != nil {
-		execution.Parent = &Relation{
-			Type:       RelationParent,
-			WorkflowID: parent.GetWorkflowId(),
-			RunID:      parent.GetRunId(),
-		}
-	}
 	return execution, nil
 }
 
@@ -236,7 +242,7 @@ func (o *Observer) History(ctx context.Context, workflowID, runID string, pageTo
 			WorkflowId: workflowID,
 			RunId:      runID,
 		},
-		MaximumPageSize:        clampPageSize(pageSize),
+		MaximumPageSize:        o.clampPageSize(pageSize),
 		NextPageToken:          pageToken,
 		WaitNewEvent:           false,
 		HistoryEventFilterType: enumspb.HISTORY_EVENT_FILTER_TYPE_ALL_EVENT,
@@ -263,17 +269,32 @@ func (o *Observer) History(ctx context.Context, workflowID, runID string, pageTo
 		events = resp.GetHistory().GetEvents()
 	}
 	page.Events, page.Activities, page.Relations, page.Problems = projectHistory(workflowID, events)
+	if page.RunID == "" {
+		// The history response does not echo a run id. WorkflowExecutionStarted's
+		// OriginalExecutionRunId is preserved across reset while the current
+		// execution run id changes, and ContinuedExecutionRunId is the previous
+		// run. Describe resolves the current run the same way an empty run id
+		// does on the history RPC.
+		resolved, err := o.describedRunID(ctx, workflowID)
+		if err != nil {
+			return HistoryPage{}, err
+		}
+		page.RunID = resolved
+	}
 	return page, nil
 }
 
-// Health returns nil when GetSystemInfo succeeds. A failure is availability
-// only. It is not a workflow display status, and a missing worker is not a
-// workflow failure.
+// Health returns nil when GetSystemInfo and DescribeNamespace both succeed.
+// A failure is availability only. It is not a workflow display status, and a
+// missing worker is not a workflow failure. A wrong namespace is the same
+// kind of availability error.
 func (o *Observer) Health(ctx context.Context) error {
 	ctx, cancel := o.callContext(ctx)
 	defer cancel()
-	_, err := o.service.GetSystemInfo(ctx, &workflowservice.GetSystemInfoRequest{})
-	if err != nil {
+	if _, err := o.service.GetSystemInfo(ctx, &workflowservice.GetSystemInfoRequest{}); err != nil {
+		return o.redact(fmt.Errorf("temporal unavailable: %w", err))
+	}
+	if _, err := o.service.DescribeNamespace(ctx, &workflowservice.DescribeNamespaceRequest{Namespace: o.scope}); err != nil {
 		return o.redact(fmt.Errorf("temporal unavailable: %w", err))
 	}
 	return nil
@@ -287,7 +308,7 @@ func (o *Observer) executionFromInfo(info *workflowpb.WorkflowExecutionInfo) Exe
 		workflowID = execution.GetWorkflowId()
 		runID = execution.GetRunId()
 	}
-	return Execution{
+	out := Execution{
 		WorkflowID:    workflowID,
 		RunID:         runID,
 		Scope:         o.scope,
@@ -297,6 +318,14 @@ func (o *Observer) executionFromInfo(info *workflowpb.WorkflowExecutionInfo) Exe
 		Terminal:      terminal,
 		Failure:       failure,
 	}
+	if parent := info.GetParentExecution(); parent != nil {
+		out.Parent = &Relation{
+			Type:       RelationParent,
+			WorkflowID: parent.GetWorkflowId(),
+			RunID:      parent.GetRunId(),
+		}
+	}
+	return out
 }
 
 func (o *Observer) callContext(ctx context.Context) (context.Context, context.CancelFunc) {
@@ -317,10 +346,11 @@ func (o *Observer) clock() time.Time {
 }
 
 func (o *Observer) redact(err error) error {
-	if o == nil {
-		return redactError(err, nil)
+	var secrets []string
+	if o != nil {
+		secrets = []string{o.apiKey}
 	}
-	return redactError(err, []string{o.apiKey})
+	return connector.RedactError(err, secrets, nil)
 }
 
 func cloneToken(token []byte) []byte {
@@ -332,11 +362,35 @@ func cloneToken(token []byte) []byte {
 	return out
 }
 
-func clampPageSize(pageSize int) int32 {
-	if pageSize < 1 || pageSize > connector.MaxPageEntries {
-		return connector.MaxPageEntries
+func (o *Observer) clampPageSize(pageSize int) int32 {
+	limit := connector.MaxPageEntries
+	if o != nil && o.maxPageEntries >= 1 && o.maxPageEntries < limit {
+		limit = o.maxPageEntries
+	}
+	if pageSize < 1 || pageSize > limit {
+		return int32(limit)
 	}
 	return int32(pageSize)
+}
+
+// describedRunID asks for the current run when history did not identify one.
+// The caller must not use this when a run id was passed or already resolved.
+func (o *Observer) describedRunID(ctx context.Context, workflowID string) (string, error) {
+	resp, err := o.service.DescribeWorkflowExecution(ctx, &workflowservice.DescribeWorkflowExecutionRequest{
+		Namespace: o.scope,
+		Execution: &commonpb.WorkflowExecution{WorkflowId: workflowID},
+	})
+	if err != nil {
+		return "", o.redact(fmt.Errorf("temporal history: %w", err))
+	}
+	var runID string
+	if resp != nil && resp.GetWorkflowExecutionInfo() != nil && resp.GetWorkflowExecutionInfo().GetExecution() != nil {
+		runID = resp.GetWorkflowExecutionInfo().GetExecution().GetRunId()
+	}
+	if runID == "" {
+		return "", o.redact(errors.New("temporal history: missing run id"))
+	}
+	return runID, nil
 }
 
 func statusView(status enumspb.WorkflowExecutionStatus) (native, display string, terminal, failure bool) {
@@ -374,6 +428,7 @@ type scheduledActivity struct {
 }
 
 func projectHistory(workflowID string, events []*historypb.HistoryEvent) ([]EventMeta, []ActivityRecord, []Relation, []WorkflowTaskProblem) {
+	// This page only. The Observer does not keep activity identity across RPCs.
 	scheduled := make(map[int64]scheduledActivity, len(events))
 	for _, event := range events {
 		attrs := event.GetActivityTaskScheduledEventAttributes()
@@ -398,11 +453,30 @@ func projectHistory(workflowID string, events []*historypb.HistoryEvent) ([]Even
 		if attrs := event.GetActivityTaskStartedEventAttributes(); attrs != nil {
 			ref := scheduled[attrs.GetScheduledEventId()]
 			activities = append(activities, ActivityRecord{
-				EventID:      event.GetEventId(),
-				ActivityID:   ref.id,
-				ActivityType: ref.name,
-				Attempt:      attrs.GetAttempt(),
+				EventID:          event.GetEventId(),
+				ScheduledEventID: attrs.GetScheduledEventId(),
+				ActivityID:       ref.id,
+				ActivityType:     ref.name,
+				Attempt:          attrs.GetAttempt(),
 			})
+		}
+		if attrs := event.GetWorkflowExecutionStartedEventAttributes(); attrs != nil {
+			if parent := attrs.GetParentWorkflowExecution(); parent != nil {
+				relations = append(relations, Relation{
+					Type:       RelationParent,
+					WorkflowID: parent.GetWorkflowId(),
+					RunID:      parent.GetRunId(),
+					EventID:    event.GetEventId(),
+				})
+			}
+			if continued := attrs.GetContinuedExecutionRunId(); continued != "" {
+				relations = append(relations, Relation{
+					Type:       RelationContinuation,
+					WorkflowID: workflowID,
+					RunID:      continued,
+					EventID:    event.GetEventId(),
+				})
+			}
 		}
 		if attrs := event.GetChildWorkflowExecutionStartedEventAttributes(); attrs != nil {
 			childID := ""
