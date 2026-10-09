@@ -238,12 +238,18 @@ Validation rules (all enforced by `internal/auth/policy` and by
   declared to attach settings.
 - `bindings[].role` ∈ the four roles; `namespaces` non-empty, each either `*` or a
   declared namespace; `subjects` has at least one of `groups`, `users`.
-- `groups` entries are exact strings (LDAP DNs with `=` and `,` are fine because
-  YAML quotes them; the old "split on the last `=`" hack goes away). `"*"` matches
-  every authenticated user. `users` entries are compared case-insensitively to
-  `User.Email`.
+- `groups` entries are exact strings, including whitespace and case (LDAP DNs with
+  `=` and `,` are fine because YAML quotes them; the old "split on the last `=`"
+  hack goes away). `"*"` matches
+  every authenticated user. `users` entries are compared to `User.Email` by folding
+  only ASCII `A`–`Z` to lowercase; non-ASCII bytes remain exact and neither side is
+  trimmed. Unicode case-fold equivalents such as `ſ`/`s` and `K`/`k` are distinct
+  identities.
 - `secrets.allow` globs: `provider/path` with `*` matching within a path segment
-  and `**` across segments (`path.Match` semantics extended with `**`).
+  and `**` across segments (`path.Match` semantics extended with `**`). Literal
+  `.` and `..` path segments are rejected in rules and targets. Vault rules select
+  the secret path and allow every field at that path: the canonical target's
+  nonempty `#field` suffix is ignored for matching. `#field` patterns are unsupported.
 - Lint warnings (non-fatal): a namespace other than `default` without `secrets`
   rules; a binding whose group never matched any known user (server-side only).
 
@@ -266,7 +272,8 @@ Validation rules (all enforced by `internal/auth/policy` and by
 - No policy file ⇒ `CAESIUM_AUTH_ROLE_MAPPING` and `CAESIUM_AUTH_DEFAULT_ROLE` are
   translated at startup into cluster-wide bindings (`group=role` ⇒
   `{groups:[group], role, namespaces:["*"]}`) and a single `default` namespace.
-  Behaviour is byte-for-byte today's.
+  Behaviour is byte-for-byte today's. The env-mapping adapter preserves
+  `RoleMapper`'s trimming of incoming groups; policy-file group matching remains exact.
 - Policy file **and** `CAESIUM_AUTH_ROLE_MAPPING` both set ⇒ fatal startup error
   naming both. The env mapping is documented as deprecated.
 
@@ -575,13 +582,22 @@ prune at all.
   `k8s/<secret>` means "in this namespace's mapped Kubernetes namespace"; any
   effective namespace not named by a rule is denied, whatever the reference's
   surface form. **Every provider canonicalises with its own effective-target
-  parser**, never by path alone: the env resolver gives `?name=` precedence over
-  the path (`env.go`), and the Vault resolver reads `?field=` and path semantics
+  parser**, never the reference's surface path alone: the env resolver gives
+  `?name=` precedence over the path (`env.go`), and the Vault resolver reads
+  `?field=` and path semantics
   (`vault.go`), so each `Resolver` exports `CanonicalTarget(ref) (string, error)`
   and the scoped resolver matches rules against that string
   (`env/<effective name>`, `vault/<mount>/<path>#<field>`,
   `k8s/<namespace>/<secret>`). A reference whose canonical target differs from its
   surface path is matched on the target only.
+- **Vault field semantics.** The provider must still derive the effective read
+  path and field with its own parser, including path-form fields and `?field=`
+  overrides. Policy globs match the path portion of the resulting canonical
+  `vault/<mount>/<path>#<field>` target, granting all fields in an allowed secret
+  object. For example, `vault/secret/data/marketing/token` allows that path with
+  either `#password` or `#username`, and `vault/secret/data/marketing/**` includes
+  `vault/secret/data/marketing#key`. Vault rules containing `#` are rejected;
+  field-specific authorization is outside this version's policy contract.
 - `internal/jobdef/secret.ScopedResolver{inner Resolver, namespace string, rules}`
   implements `Resolver`; a denied reference returns
   `ErrSecretDenied{Namespace, Ref}` (redacted to `provider/<first segment>/…` in

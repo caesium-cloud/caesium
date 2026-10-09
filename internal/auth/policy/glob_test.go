@@ -22,7 +22,13 @@ func TestMatchGlob(t *testing.T) {
 		{"vault/secret/data/marketing/*", "vault/secret/data/marketing/token", true},
 		{"vault/secret/data/marketing/*", "vault/secret/data/marketing/sub/token", false},
 		{"vault/secret/data/marketing/**", "vault/secret/data/marketing", true},
+		{"vault/secret/data/marketing/**", "vault/secret/data/marketing#key", true},
 		{"vault/secret/data/marketing/**", "vault/secret/data/marketing/sub/token#field", true},
+		{"vault/secret/data/marketing/token", "vault/secret/data/marketing/token#password", true},
+		{"vault/secret/data/marketing/token", "vault/secret/data/marketing/token#username", true},
+		{"vault/secret/data/marketing/token", "vault/secret/data/finance/token#password", false},
+		{"vault/secret/data/marketing/token", "vault/secret/data/marketing/token#", false},
+		{"vault/**", "vault/#field", false},
 		{"vault/**/token", "vault/token", true},
 		{"vault/**/token", "vault/secret/data/marketing/token", true},
 		{"vault/**/token", "vault/secret/data/marketing/token/other", false},
@@ -60,7 +66,13 @@ func TestMatchGlob(t *testing.T) {
 		{"env/token", "env/token", true},
 		{"env/token", "env/TOKEN", false},
 		{"env/*", "ENV/token", false},
-		{"vault/**", "vault/secret/../finance/token", true},
+		{"vault/**", "vault/secret/../finance/token", false},
+		{"vault/secret/data/marketing/**", "vault/secret/data/marketing/../finance/token#password", false},
+		{"vault/secret/data/marketing/**", "vault/secret/data/marketing/./token#password", false},
+		{"vault/**", "vault/secret/..#field", false},
+		{"vault/**", "vault/secret/.#field", false},
+		{"env/*", "env/..", false},
+		{"env/*", "env/.", false},
 		{"vault/marketing/*", "vault/marketing/../finance/token", false},
 		{"vault/marketing/token", "vault/marketing/./token", false},
 		{"vault/**", "vault/secret//token", false},
@@ -84,6 +96,7 @@ func TestInvalidGlobs(t *testing.T) {
 	for _, pattern := range []string{
 		"", "env", "env/", "/token", "*/token", "Env/token", "secret://env/token",
 		"env//token", "env/token/", "env/[", "env/[]", "env/[z-a", `env/token\`,
+		"vault/secret/../token", "vault/secret/./token", "vault/secret/token#field", "vault/secret/token#*",
 	} {
 		t.Run(pattern, func(t *testing.T) {
 			t.Parallel()

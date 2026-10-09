@@ -69,7 +69,7 @@ type Binding struct {
 }
 
 // Subjects matches exact IdP groups (or "*" for all authenticated users) and
-// case-insensitive user emails. Other group strings are never patterns.
+// ASCII case-insensitive user emails. Other group strings are never patterns.
 type Subjects struct {
 	Groups []string `yaml:"groups,omitempty" json:"groups,omitempty"`
 	Users  []string `yaml:"users,omitempty" json:"users,omitempty"`
@@ -93,13 +93,12 @@ func Parse(data []byte) (*AccessPolicy, error) {
 	if len(document.Content) != 1 || document.Content[0].Kind != yaml.MappingNode {
 		return nil, errors.New("access policy must be a YAML mapping")
 	}
-	if err := validateYAML(document.Content[0], reflect.TypeFor[AccessPolicy](), "policy", make(map[*yaml.Node]bool)); err != nil {
+	walker := yamlValidator{active: make(map[*yaml.Node]bool), validated: make(map[yamlValidationKey]bool)}
+	if err := walker.validate(document.Content[0], reflect.TypeFor[AccessPolicy](), "policy"); err != nil {
 		return nil, err
 	}
-	dec = yaml.NewDecoder(bytes.NewReader(data))
-	dec.KnownFields(true)
 	var p AccessPolicy
-	if err := dec.Decode(&p); err != nil {
+	if err := document.Content[0].Decode(&p); err != nil {
 		return nil, fmt.Errorf("parse access policy: %w", err)
 	}
 	if err := p.Validate(); err != nil {
@@ -110,6 +109,16 @@ func Parse(data []byte) (*AccessPolicy, error) {
 	}
 	if _, exists := p.Namespaces[DefaultNamespace]; !exists {
 		p.Namespaces[DefaultNamespace] = Namespace{}
+	}
+	for _, namespace := range p.Namespaces {
+		if namespace.Secrets != nil && namespace.Secrets.Allow == nil {
+			namespace.Secrets.Allow = []string{}
+		}
+	}
+	for i := range p.Bindings {
+		for j, email := range p.Bindings[i].Subjects.Users {
+			p.Bindings[i].Subjects.Users[j] = foldASCII(email)
+		}
 	}
 	return &p, nil
 }
@@ -128,24 +137,27 @@ func (p *AccessPolicy) Validate() error {
 	}
 	for _, name := range namespaceNames(p.Namespaces) {
 		if !namespaceLabel.MatchString(name) {
-			return fmt.Errorf("namespaces.%s: namespace must be a DNS label; %q is reserved for cluster grants", name, ClusterNamespace)
+			if name == ClusterNamespace {
+				return fmt.Errorf("namespaces[%q]: namespace must be a DNS label; %q is reserved for cluster grants", name, ClusterNamespace)
+			}
+			return fmt.Errorf("namespaces[%q]: namespace must be a DNS label", name)
 		}
 		ns := p.Namespaces[name]
 		if ns.Kubernetes != nil {
 			if target := ns.Kubernetes.Namespace; target != "" && !namespaceLabel.MatchString(target) {
-				return fmt.Errorf("namespaces.%s.kubernetes.namespace: must be a DNS label", name)
+				return fmt.Errorf("namespaces[%q].kubernetes.namespace: must be a DNS label", name)
 			}
 			if account := ns.Kubernetes.ServiceAccountName; account != "" && !validDNSSubdomain(account) {
-				return fmt.Errorf("namespaces.%s.kubernetes.serviceAccountName: must be a DNS subdomain", name)
+				return fmt.Errorf("namespaces[%q].kubernetes.serviceAccountName: must be a DNS subdomain", name)
 			}
 		}
 		if ns.Quotas != nil && ns.Quotas.MaxConcurrentRuns < 0 {
-			return fmt.Errorf("namespaces.%s.quotas.maxConcurrentRuns: must not be negative", name)
+			return fmt.Errorf("namespaces[%q].quotas.maxConcurrentRuns: must not be negative", name)
 		}
 		if ns.Secrets != nil {
 			for i, glob := range ns.Secrets.Allow {
 				if err := ValidateGlob(glob); err != nil {
-					return fmt.Errorf("namespaces.%s.secrets.allow[%d]: %w", name, i, err)
+					return fmt.Errorf("namespaces[%q].secrets.allow[%d]: %w", name, i, err)
 				}
 			}
 		}
@@ -212,20 +224,42 @@ func validDNSSubdomain(name string) bool {
 	return len(name) <= 253 && dnsSubdomain.MatchString(name)
 }
 
+type yamlValidationKey struct {
+	node *yaml.Node
+	typ  reflect.Type
+}
+
+type yamlValidator struct {
+	active    map[*yaml.Node]bool
+	validated map[yamlValidationKey]bool
+}
+
 // yaml.v3 normally coerces numeric and boolean scalars into strings and treats
 // null settings as omitted. Reject those ambiguities before typed decoding,
 // especially null secret rules, which must never become an allow-all default.
-func validateYAML(node *yaml.Node, typ reflect.Type, path string, active map[*yaml.Node]bool) error {
-	if active[node] {
-		return fmt.Errorf("%s: cyclic YAML alias", path)
+func (v *yamlValidator) validate(node *yaml.Node, typ reflect.Type, path string) (err error) {
+	if node == nil {
+		return fmt.Errorf("%s: missing YAML node", path)
 	}
-	active[node] = true
-	defer delete(active, node)
-	if node.Kind == yaml.AliasNode {
-		return validateYAML(node.Alias, typ, path, active)
+	if v.active[node] {
+		return fmt.Errorf("%s: cyclic YAML alias", path)
 	}
 	for typ.Kind() == reflect.Pointer {
 		typ = typ.Elem()
+	}
+	key := yamlValidationKey{node: node, typ: typ}
+	if v.validated[key] {
+		return nil
+	}
+	v.active[node] = true
+	defer func() {
+		delete(v.active, node)
+		if err == nil {
+			v.validated[key] = true
+		}
+	}()
+	if node.Kind == yaml.AliasNode {
+		return v.validate(node.Alias, typ, path)
 	}
 	errType := func(want string) error {
 		return fmt.Errorf("%s (line %d): expected %s", path, node.Line, want)
@@ -261,7 +295,11 @@ func validateYAML(node *yaml.Node, typ reflect.Type, path string, active map[*ya
 					return fmt.Errorf("%s (line %d): unknown field %q", path, key.Line, key.Value)
 				}
 			}
-			if err := validateYAML(value, childType, path+"."+key.Value, active); err != nil {
+			childPath := path + "." + key.Value
+			if typ.Kind() == reflect.Map {
+				childPath = fmt.Sprintf("%s[%q]", path, key.Value)
+			}
+			if err := v.validate(value, childType, childPath); err != nil {
 				return err
 			}
 		}
@@ -270,7 +308,7 @@ func validateYAML(node *yaml.Node, typ reflect.Type, path string, active map[*ya
 			return errType("a sequence")
 		}
 		for i, child := range node.Content {
-			if err := validateYAML(child, typ.Elem(), fmt.Sprintf("%s[%d]", path, i), active); err != nil {
+			if err := v.validate(child, typ.Elem(), fmt.Sprintf("%s[%d]", path, i)); err != nil {
 				return err
 			}
 		}
@@ -282,6 +320,8 @@ func validateYAML(node *yaml.Node, typ reflect.Type, path string, active map[*ya
 		if node.Kind != yaml.ScalarNode || node.Tag != "!!int" {
 			return errType("an integer")
 		}
+	default:
+		return fmt.Errorf("%s (line %d): unsupported policy field type %s", path, node.Line, typ)
 	}
 	return nil
 }

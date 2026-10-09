@@ -82,3 +82,39 @@ func TestResolveWildcardAndOrder(t *testing.T) {
 	var missing *policy.AccessPolicy
 	require.Equal(t, policy.Grants{}, missing.Resolve([]string{"eng"}, "alice@example.com"))
 }
+
+func TestResolveEmailDoesNotFoldUnicodeIdentities(t *testing.T) {
+	t.Parallel()
+	p, err := policy.Parse([]byte(header + `bindings:
+  - subjects: {users: [SAM@EXAMPLE.COM, KIM@EXAMPLE.COM]}
+    role: admin
+    namespaces: ["*"]
+`))
+	require.NoError(t, err)
+	require.Equal(t, []string{"sam@example.com", "kim@example.com"}, p.Bindings[0].Subjects.Users)
+	for _, email := range []string{"sam@example.com", "Sam@Example.Com", "kim@EXAMPLE.COM"} {
+		require.Equal(t, policy.Grants{"*": models.RoleAdmin}, p.Resolve(nil, email))
+	}
+	for _, email := range []string{"ſam@example.com", "Kim@example.com", "ſAM@EXAMPLE.COM", "KIM@EXAMPLE.COM"} {
+		require.Empty(t, p.Resolve(nil, email), "a Unicode case-fold equivalent must not acquire another email's grant")
+	}
+	// Programmatically constructed policies obey the same comparison contract.
+	p.Bindings[0].Subjects.Users = []string{"ſam@example.com", "é@EXAMPLE.COM"}
+	require.Equal(t, policy.Grants{"*": models.RoleAdmin}, p.Resolve(nil, "ſam@EXAMPLE.COM"))
+	require.Equal(t, policy.Grants{"*": models.RoleAdmin}, p.Resolve(nil, "é@example.com"))
+	require.Empty(t, p.Resolve(nil, "sam@example.com"))
+	require.Empty(t, p.Resolve(nil, "É@example.com"))
+}
+
+func TestResolveGroupsRemainByteExact(t *testing.T) {
+	t.Parallel()
+	p, err := policy.Parse([]byte(header + `bindings:
+  - subjects: {groups: [" team "]}
+    role: runner
+    namespaces: [default]
+`))
+	require.NoError(t, err)
+	require.Empty(t, p.Resolve([]string{"team"}, ""))
+	require.Empty(t, p.Resolve([]string{" TEAM "}, ""))
+	require.Equal(t, policy.Grants{"default": models.RoleRunner}, p.Resolve([]string{" team "}, ""))
+}

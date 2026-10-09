@@ -165,8 +165,10 @@ func TestWarningsAndSecretRulePresence(t *testing.T) {
 	require.NoError(t, err)
 	require.Nil(t, p.Namespaces["finance"].Secrets)
 	require.NotNil(t, p.Namespaces["restricted"].Secrets)
+	require.NotNil(t, p.Namespaces["restricted"].Secrets.Allow)
 	require.Empty(t, p.Namespaces["restricted"].Secrets.Allow)
 	require.NotNil(t, p.Namespaces["denied"].Secrets)
+	require.Equal(t, []string{}, p.Namespaces["denied"].Secrets.Allow)
 	require.Equal(t, []string{
 		`namespace "finance" has no secret rules; all secrets are allowed`,
 		`namespace "marketing" has no secret rules; all secrets are allowed`,
@@ -188,4 +190,38 @@ func TestValidateDoesNotMutatePolicy(t *testing.T) {
 	var missing *policy.AccessPolicy
 	require.ErrorContains(t, missing.Validate(), "required")
 	require.Empty(t, missing.Warnings())
+}
+
+func TestNamespaceValidationQuotesInvalidNames(t *testing.T) {
+	t.Parallel()
+	for _, name := range []string{"my_team", "team\nproduction", "team\x1b[31m"} {
+		p := &policy.AccessPolicy{APIVersion: policy.APIVersionV1, Kind: policy.KindAccessPolicy,
+			Namespaces: map[string]policy.Namespace{name: {}}}
+		err := p.Validate()
+		require.ErrorContains(t, err, "DNS label")
+		require.NotContains(t, err.Error(), "reserved")
+		require.NotContains(t, err.Error(), "\n")
+		require.NotContains(t, err.Error(), "\x1b")
+	}
+}
+
+func TestAliasValidationIsSpecificToItsFieldType(t *testing.T) {
+	t.Parallel()
+	_, err := policy.Parse([]byte(header + `namespaces: {default: &settings {quotas: {maxConcurrentRuns: 1}}}
+bindings: [{subjects: *settings, role: viewer, namespaces: [default]}]
+`))
+	require.ErrorContains(t, err, `unknown field "quotas"`)
+}
+
+func TestParseRejectsExcessiveAliasExpansion(t *testing.T) {
+	t.Parallel()
+	// Each aliased binding shares the same large aliased group list. The strict
+	// walker validates each typed node once; typed decode still rejects expansion.
+	const count = 1000
+	input := header + "bindings:\n  - &binding\n    subjects: {groups: [&group eng, " +
+		strings.Repeat("*group, ", count) + "]}\n    role: viewer\n    namespaces: [default]\n" +
+		strings.Repeat("  - *binding\n", count)
+	p, err := policy.Parse([]byte(input))
+	require.ErrorContains(t, err, "excessive aliasing")
+	require.Nil(t, p)
 }

@@ -13,15 +13,22 @@ var providerName = regexp.MustCompile(`^[a-z][a-z0-9_-]*$`)
 // segment follows path.Match syntax; a whole unescaped "**" segment matches zero
 // or more segments. In other segments, repeated stars, escapes and character
 // classes retain path.Match semantics within that segment. Neither patterns nor
-// targets are cleaned or otherwise normalised.
+// targets are cleaned. Vault rules select paths, covering all fields; a target's
+// nonempty #field suffix is ignored. Field patterns are unsupported.
 func ValidateGlob(pattern string) error {
 	provider, rest, ok := strings.Cut(pattern, "/")
 	if !ok || !providerName.MatchString(provider) || rest == "" {
 		return fmt.Errorf("invalid secret glob %q: expected provider/path", pattern)
 	}
+	if provider == "vault" && strings.Contains(rest, "#") {
+		return fmt.Errorf("invalid secret glob %q: Vault rules select paths without #field", pattern)
+	}
 	for segment := range strings.SplitSeq(rest, "/") {
 		if segment == "" {
 			return fmt.Errorf("invalid secret glob %q: empty path segment", pattern)
+		}
+		if segment == "." || segment == ".." {
+			return fmt.Errorf("invalid secret glob %q: dot path segments are unsupported", pattern)
 		}
 		if segment == "**" {
 			continue
@@ -44,9 +51,17 @@ func MatchGlob(pattern, target string) (bool, error) {
 	if !ok || !providerName.MatchString(provider) || rest == "" {
 		return false, nil
 	}
+	if provider == "vault" {
+		var field string
+		var hasField bool
+		rest, field, hasField = strings.Cut(rest, "#")
+		if hasField && field == "" {
+			return false, nil
+		}
+	}
 	parts := strings.Split(rest, "/")
 	for _, part := range parts {
-		if part == "" {
+		if part == "" || part == "." || part == ".." {
 			return false, nil
 		}
 	}
@@ -68,8 +83,11 @@ func MatchGlob(pattern, target string) (bool, error) {
 			}
 		} else {
 			for j := 1; j <= len(parts); j++ {
+				if !previous[j-1] {
+					continue
+				}
 				matched, _ := path.Match(segment, parts[j-1]) // syntax checked above
-				current[j] = previous[j-1] && matched
+				current[j] = matched
 			}
 		}
 		previous = current
