@@ -1,6 +1,6 @@
 # Identity and Access — Namespaces, Grants, Policy-as-Code, Corporate SSO
 
-Last updated: 2026-10-09
+Last updated: 2026-10-12
 
 Caesium's authentication is shipped and native (OIDC, SAML, LDAP; `docs/sso-authentication.md`),
 but authorization is a single global role ladder keyed per HTTP route, SSO users cannot be
@@ -71,7 +71,7 @@ fairness was parked by `docs/exec-plans/active/window-scheduling.md` (its §"Glo
 vs. per-job load ceiling"); Stream D of this plan owns the v1 slice (issue #395) and
 window-scheduling's parked note points here.
 
-## Progress (as of 2026-10-09)
+## Progress (as of 2026-10-12)
 
 No implementation waves have shipped yet. W1 is in progress against master
 `150bbaa472bdd35af518d000b52436e824959be5`; its authorized endpoint is review PRs.
@@ -79,13 +79,15 @@ Item checkboxes remain unchecked until merged acceptance evidence exists.
 
 ### Wave 1 — Foundations (2026-10-09)
 
-- **W1-α / A1 — policy package:** draft [PR #624](https://github.com/caesium-cloud/caesium/pull/624),
+- **W1-α / A1 — policy package:** ready for review [PR #624](https://github.com/caesium-cloud/caesium/pull/624),
   head `4417f69ddc1be034674d304ed2fee03ba44b2ed3`. Independent security review
   passed after email-confusable, traversal, Vault delimiter and strict YAML fixes.
   Current-head hosted lint and both full race unit suites passed, including all
   security regressions (policy coverage 99.6%); the tested merge has the same tree.
   Current-head hosted CI is fully green, including runtime lanes, coverage and
-  `ci-ok`; final receipts are being archived. A2/C4 follow-up
+  `ci-ok`; the primary coverage receipt reports no issues or uncovered changed
+  paths. Full integration across all three AMD64 CI shards passed (267 passed,
+  43 lane-specific skips). A2/C4 follow-up
   obligations are recorded below; existing review threads await human review.
   At preceding `28586d80`, local lint/race unit tests and hosted CI passed. The
   first local integration failed at queue reclaim with later DB lock/transaction
@@ -102,7 +104,9 @@ Item checkboxes remain unchecked until merged acceptance evidence exists.
   unit suites passed; 20 live backend/auth scenario proofs passed, including
   namespace move/diff/replay on all five runtime lanes. Fresh full local integration
   passed (877.002s; 273 passed, 42 lane-specific skips); hosted CI, coverage and
-  `ci-ok` passed with no uncovered changed paths. At preceding `41e0cb0d`, full local lint/race unit/integration
+  `ci-ok` passed with no uncovered changed paths. Current-head schema guardrails
+  and the pinned container CLI validated all 30 example definitions.
+  At preceding `41e0cb0d`, full local lint/race unit/integration
   passed (801.740s; 272 passed, 41 lane-specific skips), schema/examples passed,
   and hosted logs proved 15 namespace scenario/engine combinations without skips.
   That head's coverage failed on three changed files; the new journeys and removal
@@ -135,7 +139,7 @@ Item checkboxes remain unchecked until merged acceptance evidence exists.
 
 | Stream | Scope | Priority | Status |
 |--------|-------|----------|--------|
-| A | Policy file, grants, principal, route classes, namespace-aware middleware, keys with namespaces, SSO-admin key management | **P0** | W1 A1 draft #624; A2 waits for A1 merge |
+| A | Policy file, grants, principal, route classes, namespace-aware middleware, keys with namespaces, SSO-admin key management | **P0** | W1 A1 review #624; A2 waits for A1 merge |
 | B | `metadata.namespace` on jobs: schema, columns, importer, lint, apply/prune/move, git-sync allowlist, collection filtering, aggregate collapse | **P0** | W1 B1 draft #625 |
 | C | Runtime isolation: per-namespace Kubernetes namespace + service account, scoped secret resolution, Helm RBAC | P1 | Not started |
 | D | Run quota + round-robin fairness (#395 v1 slice); namespaced notification channels, policies, agent profiles | P1 | Not started |
