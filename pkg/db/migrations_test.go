@@ -1,7 +1,9 @@
 package db
 
 import (
+	"fmt"
 	"testing"
+	"time"
 
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/google/uuid"
@@ -126,4 +128,122 @@ func assertPartitionUniquenessEnforced(t *testing.T, conn *gorm.DB) {
 	err := conn.Create(newRow(1)).Error
 	require.Error(t, err, "a duplicate (job_run_id, task_id, partition_index) must be rejected by the unique index")
 	assert.Contains(t, err.Error(), "UNIQUE")
+}
+
+// This is the persisted incident layout from before namespaces became required.
+type legacyNamespaceIncident struct {
+	ID              uuid.UUID `gorm:"type:uuid;primaryKey"`
+	Namespace       *string   `gorm:"type:text;index"`
+	JobID           uuid.UUID `gorm:"type:uuid;not null"`
+	TaskName        string
+	Class           string                `gorm:"not null"`
+	Status          models.IncidentStatus `gorm:"not null"`
+	DedupeKey       string                `gorm:"not null"`
+	ActiveDedupeKey *string               `gorm:"uniqueIndex:idx_incidents_active_dedupe"`
+	OpenedAt        time.Time             `gorm:"not null"`
+	CreatedAt       time.Time             `gorm:"not null"`
+	UpdatedAt       time.Time             `gorm:"not null"`
+}
+
+func (legacyNamespaceIncident) TableName() string { return "incidents" }
+
+func TestNamespaceMigrationRepairsLegacyNullsAndPreservesHistory(t *testing.T) {
+	conn := openMigrationTestDB(t)
+	require.NoError(t, conn.AutoMigrate(&legacyNamespaceIncident{}))
+	now := time.Now().UTC().Truncate(time.Second)
+	empty, marketing := "", "marketing"
+	namespaces := []*string{nil, &empty, &marketing}
+	ids := make([]uuid.UUID, len(namespaces))
+	for i, namespace := range namespaces {
+		jobID := uuid.New()
+		key := fmt.Sprintf("%s|extract|unknown", jobID)
+		ids[i] = uuid.New()
+		row := legacyNamespaceIncident{ID: ids[i], Namespace: namespace, JobID: jobID, TaskName: "extract", Class: "unknown", Status: models.IncidentStatusOpen, DedupeKey: key, ActiveDedupeKey: &key, OpenedAt: now, CreatedAt: now, UpdatedAt: now}
+		if i == 1 {
+			row.Status = models.IncidentStatusClosed
+			row.ActiveDedupeKey = nil
+		}
+		require.NoError(t, conn.Create(&row).Error)
+	}
+	for range 2 {
+		require.NoError(t, MigrateNamespaceDefaults(conn))
+		require.NoError(t, migrateModels(conn, &models.Incident{}))
+	}
+	for i, id := range ids {
+		var row models.Incident
+		require.NoError(t, conn.First(&row, "id = ?", id).Error)
+		want := "default"
+		if i == 2 {
+			want = "marketing"
+		}
+		require.Equal(t, want, row.Namespace)
+		require.Equal(t, fmt.Sprintf("%s|%s|extract|unknown", want, row.JobID), row.DedupeKey)
+		if i == 1 {
+			require.Nil(t, row.ActiveDedupeKey)
+		} else {
+			require.Equal(t, row.DedupeKey, *row.ActiveDedupeKey)
+		}
+		require.True(t, now.Equal(row.OpenedAt), "history's original timestamp must not move")
+	}
+	require.True(t, conn.Migrator().HasIndex(&models.Incident{}, "idx_incidents_namespace"))
+	require.Error(t, conn.Exec("UPDATE incidents SET namespace = NULL WHERE id = ?", ids[0]).Error, "NULL must be rejected after the upgrade")
+	columns, err := conn.Migrator().ColumnTypes(&models.Incident{})
+	require.NoError(t, err)
+	for _, column := range columns {
+		if column.Name() == "namespace" {
+			nullable, ok := column.Nullable()
+			require.True(t, ok)
+			require.False(t, nullable)
+			value, ok := column.DefaultValue()
+			require.True(t, ok)
+			require.Equal(t, "default", value)
+		}
+	}
+}
+
+func TestNamespaceMigrationNormalizesOnlyUnsetOwnershipAcrossTables(t *testing.T) {
+	conn := openMigrationTestDB(t)
+	for _, table := range []string{"jobs", "job_runs", "backfills"} {
+		require.NoError(t, conn.Exec("CREATE TABLE "+table+" (id TEXT PRIMARY KEY, namespace TEXT)").Error)
+		require.NoError(t, conn.Exec("INSERT INTO "+table+" (id, namespace) VALUES ('null', NULL), ('empty', ''), ('owned', 'finance')").Error)
+	}
+	require.NoError(t, MigrateNamespaceDefaults(conn))
+	for _, table := range []string{"jobs", "job_runs", "backfills"} {
+		var namespaces []string
+		require.NoError(t, conn.Table(table).Order("id").Pluck("namespace", &namespaces).Error)
+		require.Equal(t, []string{"default", "default", "finance"}, namespaces)
+	}
+	require.NoError(t, MigrateNamespaceDefaults(conn))
+}
+
+func TestNamespaceMigrationFreshDatabaseIsNoOp(t *testing.T) {
+	require.NoError(t, MigrateNamespaceDefaults(openMigrationTestDB(t)))
+}
+
+func TestNamespaceMigrationFailsClosedOnActiveDedupeCollision(t *testing.T) {
+	conn := openMigrationTestDB(t)
+	require.NoError(t, conn.AutoMigrate(&legacyNamespaceIncident{}))
+	now := time.Now().UTC().Truncate(time.Second)
+	jobID := uuid.New()
+	legacyKey := fmt.Sprintf("%s|extract|unknown", jobID)
+	namespacedKey := "default|" + legacyKey
+	defaultNamespace := "default"
+	rows := []legacyNamespaceIncident{
+		{ID: uuid.New(), JobID: jobID, TaskName: "extract", Class: "unknown", Status: models.IncidentStatusOpen, DedupeKey: legacyKey, ActiveDedupeKey: &legacyKey, OpenedAt: now, CreatedAt: now, UpdatedAt: now},
+		{ID: uuid.New(), Namespace: &defaultNamespace, JobID: jobID, TaskName: "extract", Class: "unknown", Status: models.IncidentStatusOpen, DedupeKey: namespacedKey, ActiveDedupeKey: &namespacedKey, OpenedAt: now, CreatedAt: now, UpdatedAt: now},
+	}
+	require.NoError(t, conn.Create(&rows).Error)
+	var before []legacyNamespaceIncident
+	require.NoError(t, conn.Order("id").Find(&before).Error)
+	for range 2 {
+		err := MigrateNamespaceDefaults(conn)
+		require.ErrorContains(t, err, "namespace migration active dedupe key collision")
+		require.ErrorContains(t, err, namespacedKey)
+		for _, row := range rows {
+			require.ErrorContains(t, err, row.ID.String())
+		}
+		var after []legacyNamespaceIncident
+		require.NoError(t, conn.Order("id").Find(&after).Error)
+		require.Equal(t, before, after, "failed migration must roll back namespace repair and retain both active histories")
+	}
 }

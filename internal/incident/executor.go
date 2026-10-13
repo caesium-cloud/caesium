@@ -424,7 +424,7 @@ func (e *Executor) newAction(inc *models.Incident, req ActionRequest, tier int, 
 	now := time.Now().UTC()
 	return &models.AgentAction{
 		ID:         uuid.New(),
-		Namespace:  inc.Namespace,
+		Namespace:  &inc.Namespace,
 		IncidentID: inc.ID,
 		SessionID:  req.SessionID,
 		Type:       req.Type,

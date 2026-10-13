@@ -96,14 +96,14 @@ func TestOpenForJobTaskMatchesTaskNameExactly(t *testing.T) {
 
 	// A per-task success (task_succeeded → task name) must match ONLY that task's
 	// incident.
-	perTask, err := store.OpenForJobTask(ctx, jobID, "extract")
+	perTask, err := store.OpenForJobTask(ctx, jobID, "extract", "default")
 	require.NoError(t, err)
 	require.Len(t, perTask, 1)
 	require.Equal(t, "extract", perTask[0].TaskName)
 
 	// A run-level success (run_completed → empty task name) must match ONLY the
 	// run-level incident, never wildcard-close the per-task one.
-	runLevel, err := store.OpenForJobTask(ctx, jobID, "")
+	runLevel, err := store.OpenForJobTask(ctx, jobID, "", "default")
 	require.NoError(t, err)
 	require.Len(t, runLevel, 1)
 	require.Equal(t, "", runLevel[0].TaskName)

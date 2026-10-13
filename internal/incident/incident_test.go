@@ -9,15 +9,18 @@ import (
 
 func TestDedupeKeyStable(t *testing.T) {
 	id := uuid.New()
-	a := DedupeKey(id, "extract", ClassDataUnavailable)
-	b := DedupeKey(id, "extract", ClassDataUnavailable)
+	a := DedupeKey("default", id, "extract", ClassDataUnavailable)
+	b := DedupeKey("default", id, "extract", ClassDataUnavailable)
 	if a != b {
 		t.Fatalf("dedupe key not stable: %q != %q", a, b)
 	}
-	if a == DedupeKey(id, "extract", ClassAuthFailure) {
+	if a == DedupeKey("default", id, "extract", ClassAuthFailure) {
 		t.Fatalf("dedupe key must differ by class")
 	}
-	if a == DedupeKey(uuid.New(), "extract", ClassDataUnavailable) {
+	if a == DedupeKey("marketing", id, "extract", ClassDataUnavailable) {
+		t.Fatalf("dedupe key must differ by namespace")
+	}
+	if a == DedupeKey("default", uuid.New(), "extract", ClassDataUnavailable) {
 		t.Fatalf("dedupe key must differ by job")
 	}
 }

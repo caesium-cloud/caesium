@@ -237,6 +237,19 @@ func configureConnectionPool(sqlDB *sql.DB, maxOpen, maxIdle int) {
 
 func Migrate() (err error) {
 	router := DefaultRouter()
+	if err = MigrateNamespaceDefaults(router.Catalog()); err != nil {
+		return err
+	}
+	if router.ShardCount() > 1 {
+		for _, shard := range router.HotShards() {
+			if err = MigrateNamespaceDefaults(shard); err != nil {
+				return err
+			}
+		}
+		if err = MigrateNamespaceDefaults(router.Cold()); err != nil {
+			return err
+		}
+	}
 	// Explicit index migrations run BEFORE AutoMigrate: AutoMigrate skips any
 	// index whose NAME already exists, so a re-shaped index (same name, now
 	// UNIQUE and covering a new column) has to be dropped first or the old one
@@ -293,6 +306,9 @@ func Migrate() (err error) {
 func migrateModels(conn *gorm.DB, models ...any) error {
 	for _, model := range models {
 		if err := conn.AutoMigrate(model); err != nil {
+			return err
+		}
+		if err := ensureNamespaceConstraint(conn, model); err != nil {
 			return err
 		}
 	}

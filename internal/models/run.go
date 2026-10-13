@@ -21,6 +21,7 @@ const (
 )
 
 type JobRun struct {
+	Namespace    string     `gorm:"type:text;not null;default:'default';index" json:"namespace"`
 	ID           uuid.UUID  `gorm:"type:uuid;primaryKey" json:"id"`
 	JobID        uuid.UUID  `gorm:"type:uuid;index;not null" json:"job_id"`
 	Job          Job        `gorm:"constraint:OnDelete:CASCADE" json:"-"`
@@ -341,6 +342,7 @@ type TaskExecutionFanOutGroup struct {
 }
 
 type TaskExecutionBaseline struct {
+	Namespace           string    `json:"namespace,omitempty"`
 	JobID               uuid.UUID `json:"jobId"`
 	JobAlias            string    `json:"jobAlias"`
 	TaskID              uuid.UUID `json:"taskId"`

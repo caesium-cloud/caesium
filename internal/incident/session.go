@@ -194,7 +194,7 @@ func (s *Supervisor) reserveWithCaps(ctx context.Context, inc *models.Incident, 
 	now := time.Now().UTC()
 	session := &models.AgentSession{
 		ID:         uuid.New(),
-		Namespace:  inc.Namespace,
+		Namespace:  &inc.Namespace,
 		IncidentID: inc.ID,
 		ProfileID:  &profile.ID,
 		Engine:     engineType,
@@ -259,7 +259,7 @@ func (s *Supervisor) reserve(ctx context.Context, inc *models.Incident, profile 
 	now := time.Now().UTC()
 	session := &models.AgentSession{
 		ID:         uuid.New(),
-		Namespace:  inc.Namespace,
+		Namespace:  &inc.Namespace,
 		IncidentID: inc.ID,
 		ProfileID:  &profile.ID,
 		Engine:     engineType,

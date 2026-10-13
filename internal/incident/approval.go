@@ -79,7 +79,7 @@ func (e *Executor) requestApproval(ctx context.Context, inc *models.Incident, ac
 	expires := now.Add(approvalExpiry)
 	approval := &models.ApprovalRequest{
 		ID:         uuid.New(),
-		Namespace:  inc.Namespace,
+		Namespace:  &inc.Namespace,
 		IncidentID: inc.ID,
 		ActionID:   action.ID,
 		Decision:   models.ApprovalDecisionPending,

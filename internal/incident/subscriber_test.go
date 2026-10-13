@@ -470,3 +470,30 @@ func TestSubscriberIncidentOpenedSurvivesEventInsertFailureThenRedelivery(t *tes
 		t.Fatal("timed out waiting for incident_opened on the redelivered attempt")
 	}
 }
+
+func TestSubscriberKeepsMovedJobIncidentsWithRunNamespace(t *testing.T) {
+	db := testutil.OpenTestDB(t)
+	t.Cleanup(func() { testutil.CloseDB(db) })
+	jobID, oldRunID, taskID := seedFailedTask(t, db, "unknown failure")
+	require.NoError(t, db.Model(&models.JobRun{}).Where("id = ?", oldRunID).Update("namespace", "marketing").Error)
+	// Current ownership already moved before the old failure event is handled.
+	require.NoError(t, db.Create(&models.Job{ID: jobID, Alias: "moved-incident", Namespace: "finance"}).Error)
+	subscriber := NewSubscriber(nil, db, nil, 0)
+	subscriber.handleFailure(t.Context(), event.Event{Type: event.TypeTaskFailed, JobID: jobID, RunID: oldRunID, TaskID: taskID})
+	newRunID := uuid.New()
+	now := time.Now().UTC()
+	require.NoError(t, db.Create(&models.JobRun{ID: newRunID, JobID: jobID, Namespace: "finance", Status: "failed", StartedAt: now, CreatedAt: now, UpdatedAt: now}).Error)
+	require.NoError(t, db.Create(&models.TaskRun{ID: uuid.New(), JobRunID: newRunID, TaskID: taskID, AtomID: uuid.New(), Engine: models.AtomEngineDocker, Image: "alpine:3.23", Command: "sh", Status: "failed", Result: "failure"}).Error)
+	subscriber.handleFailure(t.Context(), event.Event{Type: event.TypeTaskFailed, JobID: jobID, RunID: newRunID, TaskID: taskID})
+	var incidents []models.Incident
+	require.NoError(t, db.Where("job_id = ?", jobID).Order("namespace").Find(&incidents).Error)
+	require.Len(t, incidents, 2)
+	require.Equal(t, "finance", incidents[0].Namespace)
+	require.Equal(t, "marketing", incidents[1].Namespace)
+	require.NotEqual(t, incidents[0].DedupeKey, incidents[1].DedupeKey)
+	require.NoError(t, db.Model(&models.TaskRun{}).Where("job_run_id = ?", newRunID).Updates(map[string]any{"status": "succeeded", "result": "success"}).Error)
+	subscriber.handleSuccess(t.Context(), event.Event{Type: event.TypeTaskSucceeded, JobID: jobID, RunID: newRunID, TaskID: taskID})
+	require.NoError(t, db.Where("job_id = ?", jobID).Order("namespace").Find(&incidents).Error)
+	require.Equal(t, models.IncidentStatusClosed, incidents[0].Status)
+	require.Equal(t, models.IncidentStatusOpen, incidents[1].Status, "success under the new owner cannot close the old owner's incident")
+}

@@ -12,6 +12,7 @@ import (
 	"github.com/caesium-cloud/caesium/internal/event"
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/caesium-cloud/caesium/pkg/db"
+	"github.com/caesium-cloud/caesium/pkg/jobdef"
 	"github.com/caesium-cloud/caesium/pkg/log"
 	"github.com/labstack/echo/v5"
 	"gorm.io/gorm"
@@ -21,6 +22,14 @@ func Post(c *echo.Context) error {
 	req := &PostRequest{}
 	if err := c.Bind(req); err != nil {
 		return err
+	}
+
+	namespace := ""
+	if req.Metadata != nil {
+		namespace = req.Metadata.Namespace
+	}
+	if err := jobdef.ValidateNamespace(namespace); err != nil {
+		return echo.NewHTTPError(http.StatusBadRequest, err.Error()).Wrap(err)
 	}
 
 	if req.Trigger == nil {
@@ -52,6 +61,7 @@ func Post(c *echo.Context) error {
 		j, err := job.Service(ctx).WithDatabase(tx).Create(&job.CreateRequest{
 			TriggerID:   trig.ID,
 			Alias:       req.Alias,
+			Namespace:   namespace,
 			Labels:      metadataLabels(req.Metadata),
 			Annotations: metadataAnnotations(req.Metadata),
 		})
@@ -158,6 +168,7 @@ type edgeSpec struct {
 }
 
 type MetadataRequest struct {
+	Namespace   string            `json:"namespace,omitempty"`
 	Labels      map[string]string `json:"labels,omitempty"`
 	Annotations map[string]string `json:"annotations,omitempty"`
 }

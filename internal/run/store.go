@@ -258,6 +258,7 @@ type TaskRun struct {
 }
 
 type JobRun struct {
+	Namespace    string            `json:"namespace"`
 	ID           uuid.UUID         `json:"id"`
 	JobID        uuid.UUID         `json:"job_id"`
 	JobAlias     string            `json:"job_alias,omitempty"`
@@ -587,9 +588,10 @@ var (
 // run" instead would, during a leader change, let one node adopt and execute a
 // run another node created and is already executing.
 type RunCommittedError struct {
-	RunID uuid.UUID
-	JobID uuid.UUID
-	Err   error
+	Namespace string
+	RunID     uuid.UUID
+	JobID     uuid.UUID
+	Err       error
 }
 
 func (e *RunCommittedError) Error() string {
@@ -1155,6 +1157,7 @@ func (s *Store) replayPredecessorRefsTx(tx *gorm.DB, runID, taskID uuid.UUID) ([
 func newStartRunModel(req startRunRequest) (*models.JobRun, error) {
 	now := time.Now().UTC()
 	model := &models.JobRun{
+		Namespace:        models.DefaultNamespace,
 		ID:               uuid.New(),
 		JobID:            req.jobID,
 		Status:           string(StatusRunning),
@@ -1186,6 +1189,7 @@ func (s *Store) appendRunStartedEventTx(tx *gorm.DB, model *models.JobRun) (*eve
 	payload, err := json.Marshal(&JobRun{
 		ID:        model.ID,
 		JobID:     model.JobID,
+		Namespace: model.Namespace,
 		Status:    Status(model.Status),
 		Priority:  model.Priority,
 		StartedAt: model.StartedAt,
@@ -1264,6 +1268,14 @@ func (s *Store) admit(tx *gorm.DB, model *models.JobRun, req startRunRequest) (a
 	if model == nil {
 		return admissionResult{}, errors.New("run: admission requires a run model")
 	}
+
+	// Freeze ownership in the admission transaction before any path inserts
+	// the run, including terminal-skipped runs and queued promotions.
+	var owner models.Job
+	if err := tx.Select("namespace").First(&owner, "id = ?", model.JobID).Error; err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+		return admissionResult{}, err
+	}
+	model.Namespace = models.NamespaceOrDefault(owner.Namespace)
 
 	// The data circuit breaker's downstream gate runs FIRST, before any
 	// concurrency policy: a run that must not exist should not consume a slot,
@@ -1641,7 +1653,7 @@ func (s *Store) startRun(req startRunRequest) (*JobRun, error) {
 		// identity so the caller can drive or finalize THAT run — never a
 		// look-alike found by searching, which on another node would mean
 		// executing someone else's run twice.
-		return nil, &RunCommittedError{RunID: model.ID, JobID: model.JobID, Err: err}
+		return nil, &RunCommittedError{RunID: model.ID, JobID: model.JobID, Namespace: model.Namespace, Err: err}
 	}
 	return loaded, nil
 }
@@ -1794,7 +1806,7 @@ func (s *Store) RegisterTasks(runID uuid.UUID, inputs []RegisterTaskInput) error
 	}
 
 	var jobRun models.JobRun
-	if err := s.db.Select("id", "job_id", "params", "trigger_id", "trigger_type", "trigger_alias", "priority", "quarantine").First(&jobRun, "id = ?", runID).Error; err != nil {
+	if err := s.db.Select("id", "job_id", "namespace", "params", "trigger_id", "trigger_type", "trigger_alias", "priority", "quarantine").First(&jobRun, "id = ?", runID).Error; err != nil {
 		return fmt.Errorf("run: job run %s not found: %w", runID, err)
 	}
 	if !jobRun.Quarantine {
@@ -2163,6 +2175,7 @@ func (s *Store) initialTaskExecutionDescriptorTx(
 		CapturedAt:    time.Now().UTC(),
 		Baseline: models.TaskExecutionBaseline{
 			JobID:         jobRun.JobID,
+			Namespace:     models.NamespaceOrDefault(jobRun.Namespace),
 			JobAlias:      jobAlias,
 			TaskID:        task.ID,
 			TaskName:      task.Name,
@@ -6035,6 +6048,7 @@ func (s *Store) convertRunModelWithDB(conn *gorm.DB, model *models.JobRun) (*Job
 	}
 
 	runValue := &JobRun{
+		Namespace:  models.NamespaceOrDefault(model.Namespace),
 		ID:         model.ID,
 		JobID:      model.JobID,
 		BackfillID: model.BackfillID,
@@ -7514,6 +7528,7 @@ func (s *Store) AbandonPendingPartitionRetries(runID uuid.UUID, reason string) (
 func (s *Store) retryFromFailure(runID uuid.UUID, admit bool) (*JobRun, error) {
 	pendingEvents := make([]event.Event, 0, 2)
 	var jobID uuid.UUID
+	var namespace string
 	var quarantine bool
 	var counts dbWriteCounts
 
@@ -7527,6 +7542,7 @@ func (s *Store) retryFromFailure(runID uuid.UUID, admit bool) (*JobRun, error) {
 			return fmt.Errorf("can only retry runs in terminal state, current: %s", jobRun.Status)
 		}
 		jobID = jobRun.JobID
+		namespace = models.NamespaceOrDefault(jobRun.Namespace)
 		quarantine = jobRun.Quarantine
 
 		// Safety valve 1 (agent retries only): a human pause outranks an agent
@@ -7656,7 +7672,7 @@ func (s *Store) retryFromFailure(runID uuid.UUID, admit bool) (*JobRun, error) {
 	if err != nil {
 		// The reopen and task resets are committed. Preserve their exact identity
 		// so a read-back failure cannot be mistaken for an unaccepted retry.
-		return nil, &RunCommittedError{RunID: runID, JobID: jobID, Err: err}
+		return nil, &RunCommittedError{RunID: runID, JobID: jobID, Namespace: namespace, Err: err}
 	}
 	return loaded, nil
 }

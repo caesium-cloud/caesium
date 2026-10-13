@@ -34,7 +34,7 @@ func (s *Store) DB() *gorm.DB { return s.db }
 
 // OpenParams describes a failure the subscriber wants to record as an incident.
 type OpenParams struct {
-	Namespace  *string
+	Namespace  string
 	JobID      uuid.UUID
 	RunID      *uuid.UUID
 	TaskID     *uuid.UUID
@@ -85,7 +85,23 @@ const (
 // open twins. A recently-closed same-key incident within Cooldown suppresses a
 // fresh open.
 func (s *Store) OpenOrAppend(ctx context.Context, p OpenParams) (*models.Incident, OpenOutcome, error) {
-	key := DedupeKey(p.JobID, p.TaskName, p.Class)
+	if p.RunID != nil {
+		var run models.JobRun
+		if err := s.db.WithContext(ctx).Select("namespace").First(&run, "id = ?", *p.RunID).Error; err == nil {
+			p.Namespace = run.Namespace
+		} else if !errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, "", err
+		}
+	} else {
+		var job models.Job
+		if err := s.db.WithContext(ctx).Select("namespace").First(&job, "id = ?", p.JobID).Error; err == nil {
+			p.Namespace = job.Namespace
+		} else if !errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, "", err
+		}
+	}
+	p.Namespace = models.NamespaceOrDefault(p.Namespace)
+	key := DedupeKey(p.Namespace, p.JobID, p.TaskName, p.Class)
 	now := time.Now().UTC()
 
 	// Cooldown: skip if a same-key incident closed within the window.
@@ -292,7 +308,7 @@ func (s *Store) Remediate(ctx context.Context, id uuid.UUID, summary string) (*m
 
 // OpenForJobTask returns the open (non-terminal) incidents for a job whose task
 // name matches. Used by the terminal-verification success path.
-func (s *Store) OpenForJobTask(ctx context.Context, jobID uuid.UUID, taskName string) ([]models.Incident, error) {
+func (s *Store) OpenForJobTask(ctx context.Context, jobID uuid.UUID, taskName, namespace string) ([]models.Incident, error) {
 	var incidents []models.Incident
 	// Match task_name EXACTLY, including the empty string: a run-level success
 	// event (run_completed, no TaskID) carries taskName == "" and must remediate
@@ -301,7 +317,7 @@ func (s *Store) OpenForJobTask(ctx context.Context, jobID uuid.UUID, taskName st
 	// name and remediates that task's incidents. This mirrors the (job, task,
 	// class) dedupe correlation key.
 	q := s.db.WithContext(ctx).
-		Where("job_id = ? AND task_name = ? AND active_dedupe_key IS NOT NULL", jobID, taskName)
+		Where("job_id = ? AND task_name = ? AND namespace = ? AND active_dedupe_key IS NOT NULL", jobID, taskName, models.NamespaceOrDefault(namespace))
 	if err := q.Find(&incidents).Error; err != nil {
 		return nil, err
 	}

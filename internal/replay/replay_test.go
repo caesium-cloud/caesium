@@ -889,3 +889,42 @@ func TestReplayRefreshesFrozenImageIdentityGate(t *testing.T) {
 		})
 	}
 }
+
+func TestReplayMovedJobUsesCurrentNamespaceAndReexecutes(t *testing.T) {
+	for _, effectiveAlias := range []bool{false, true} {
+		name := "distinct_hash"
+		if effectiveAlias {
+			name = "matching_effective_hash"
+		}
+		t.Run(name, func(t *testing.T) {
+			f := newReplayFixture(t)
+			taskID := f.seedTask(t, seedTaskConfig{name: "safe", replaySafe: true, result: "success", output: map[string]string{"val": "42"}})
+			if effectiveAlias {
+				var row models.TaskRun
+				require.NoError(t, f.db.First(&row, "job_run_id = ? AND task_id = ?", f.runID, taskID).Error)
+				var descriptor models.TaskExecutionDescriptor
+				require.NoError(t, json.Unmarshal(row.ExecutionDescriptor, &descriptor))
+				// Simulate equal-output short-circuit provenance: a marketing/default run
+				// can have an effective identity originating in finance. That alias is
+				// not permission to reuse its output across the ownership boundary.
+				candidate := descriptor
+				candidate.Baseline.Namespace = "finance"
+				effective, err := computeDescriptorHash(candidate, map[string]string{"mode": "baseline"}, nil, nil)
+				require.NoError(t, err)
+				require.NoError(t, f.db.Model(&row).Update("effective_hash", effective).Error)
+			}
+			require.NoError(t, f.db.Model(&models.Job{}).Where("id = ?", f.jobID).Update("namespace", "finance").Error)
+			dispatch := &recordingDispatcher{}
+			result, err := New(f.store, dispatch).Replay(context.Background(), Request{BaselineRunID: f.runID})
+			require.NoError(t, err)
+			require.Equal(t, "finance", result.Run.Namespace)
+			require.True(t, result.Run.Quarantine)
+			require.Len(t, dispatch.calls, 1, "a move must not reuse the baseline owner's output")
+			require.Len(t, result.Run.Tasks, 1)
+			require.False(t, result.Run.Tasks[0].CacheHit)
+			var baseline models.JobRun
+			require.NoError(t, f.db.First(&baseline, "id = ?", f.runID).Error)
+			require.Equal(t, "default", baseline.Namespace)
+		})
+	}
+}

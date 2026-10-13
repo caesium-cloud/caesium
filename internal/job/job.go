@@ -152,6 +152,7 @@ type job struct {
 	maxParallelTasks       int
 	taskTimeout            time.Duration
 	runTimeout             time.Duration
+	namespace              string
 	alias                  string
 	priority               string
 	priorityOverride       string
@@ -341,6 +342,7 @@ func New(m *models.Job, opts ...JobOption) Job {
 		maxParallelTasks:       m.MaxParallelTasks,
 		taskTimeout:            m.TaskTimeout,
 		runTimeout:             m.RunTimeout,
+		namespace:              models.NamespaceOrDefault(m.Namespace),
 		alias:                  m.Alias,
 		priority:               m.Priority,
 		concurrency:            unmarshalConcurrency(m.Concurrency),
@@ -610,6 +612,7 @@ func (j *job) startReplacementRun(ctx context.Context, runID uuid.UUID, params m
 		replacement := New(&models.Job{
 			ID:               j.id,
 			Alias:            j.alias,
+			Namespace:        j.namespace,
 			MaxParallelTasks: j.maxParallelTasks,
 			TaskTimeout:      j.taskTimeout,
 			RunTimeout:       j.runTimeout,

@@ -87,7 +87,7 @@ func (s *Service) ProposeAction(inc *models.Incident, req ActionRequest) (*Actio
 	}
 	action := &models.AgentAction{
 		ID:         uuid.New(),
-		Namespace:  inc.Namespace,
+		Namespace:  &inc.Namespace,
 		IncidentID: inc.ID,
 		Type:       req.Type,
 		Params:     params,

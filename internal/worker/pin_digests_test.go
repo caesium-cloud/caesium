@@ -49,7 +49,7 @@ func TestRuntimeExecutorCreatesDigestPinnedImage(t *testing.T) {
 			now := time.Now().UTC()
 			trigger := &models.Trigger{ID: uuid.New(), Alias: "trigger", Type: models.TriggerTypeCron, CreatedAt: now, UpdatedAt: now}
 			require.NoError(t, db.Create(trigger).Error)
-			job := &models.Job{ID: uuid.New(), Alias: "worker-pin-digest", TriggerID: trigger.ID, CreatedAt: now, UpdatedAt: now}
+			job := &models.Job{ID: uuid.New(), Alias: "worker-pin-digest", Namespace: "finance", TriggerID: trigger.ID, CreatedAt: now, UpdatedAt: now}
 			require.NoError(t, db.Create(job).Error)
 
 			specBytes, err := json.Marshal(map[string]any{})
@@ -69,6 +69,7 @@ func TestRuntimeExecutorCreatesDigestPinnedImage(t *testing.T) {
 			jobRun := &models.JobRun{
 				ID:          uuid.New(),
 				JobID:       job.ID,
+				Namespace:   "marketing",
 				TriggerID:   trigger.ID,
 				TriggerType: string(trigger.Type),
 				Status:      string(run.StatusRunning),
@@ -115,6 +116,9 @@ func TestRuntimeExecutorCreatesDigestPinnedImage(t *testing.T) {
 
 			var persisted models.TaskRun
 			require.NoError(t, db.First(&persisted, "id = ?", taskRun.ID).Error)
+			var blob cache.HashInputBlob
+			require.NoError(t, json.Unmarshal(persisted.HashInputBlob, &blob))
+			require.Equal(t, "marketing", blob.Namespace, "worker hashes frozen run ownership, not the moved job")
 			require.Equal(t, movedTagDigest, persisted.ResolvedImageDigest,
 				"the digest folded into the cache key must be the one that ran")
 		})

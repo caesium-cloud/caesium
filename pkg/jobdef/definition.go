@@ -20,8 +20,9 @@ import (
 )
 
 const (
-	APIVersionV1 = "v1"
-	KindJob      = "Job"
+	APIVersionV1     = "v1"
+	KindJob          = "Job"
+	DefaultNamespace = "default"
 
 	TriggerCron      = "cron"
 	TriggerHTTP      = "http"
@@ -139,6 +140,8 @@ func (s *SLAConfig) UnmarshalJSON(data []byte) error {
 
 // Metadata contains descriptive data for the job.
 type Metadata struct {
+	// Namespace owns this job and its future runs. Empty defaults to default.
+	Namespace        string            `yaml:"namespace,omitempty" json:"namespace,omitempty"`
 	Alias            string            `yaml:"alias" json:"alias"`
 	Labels           map[string]string `yaml:"labels,omitempty" json:"labels,omitempty"`
 	Annotations      map[string]string `yaml:"annotations,omitempty" json:"annotations,omitempty"`
@@ -1143,6 +1146,13 @@ func (d *Definition) Validate() error {
 	}
 	if strings.TrimSpace(d.Metadata.Alias) == "" {
 		return fmt.Errorf("metadata.alias is required")
+	}
+
+	if err := ValidateNamespace(d.Metadata.Namespace); err != nil {
+		return err
+	}
+	if d.Metadata.Namespace == "" {
+		d.Metadata.Namespace = DefaultNamespace
 	}
 
 	switch d.Metadata.SchemaValidation {

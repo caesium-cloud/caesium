@@ -8,10 +8,10 @@ import (
 )
 
 // DedupeKey is the stable correlation key for an incident:
-// (job_id, task_name, failure_class). Failures sharing a key fold into one
+// (namespace, job_id, task_name, failure_class). Failures sharing a key fold into one
 // incident rather than opening twins.
-func DedupeKey(jobID uuid.UUID, taskName string, class FailureClass) string {
-	return fmt.Sprintf("%s|%s|%s", jobID.String(), taskName, class)
+func DedupeKey(namespace string, jobID uuid.UUID, taskName string, class FailureClass) string {
+	return fmt.Sprintf("%s|%s|%s|%s", models.NamespaceOrDefault(namespace), jobID.String(), taskName, class)
 }
 
 // allowedTransitions encodes the incident status machine:

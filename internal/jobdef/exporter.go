@@ -264,6 +264,7 @@ func buildMetadata(records *JobRecords) (schema.Metadata, error) {
 
 	metadata := schema.Metadata{
 		Alias:            jobModel.Alias,
+		Namespace:        models.NamespaceOrDefault(jobModel.Namespace),
 		Labels:           nonEmptyStringMap(jsonmap.ToStringMap(jobModel.Labels)),
 		Annotations:      nonEmptyStringMap(jsonmap.ToStringMap(jobModel.Annotations)),
 		MaxParallelTasks: jobModel.MaxParallelTasks,

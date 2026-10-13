@@ -22,6 +22,7 @@ This document is generated from the job definition Go structs (`pkg/jobdef`). It
 | Field | Type | Required | Notes |
 |-------|------|----------|-------|
 | `alias` | string | required | Unique identifier used across APIs and web UI. |
+| `namespace` | string | optional | Tenancy namespace. Defaults to `default`; DNS label (1-63 lowercase letters, digits or hyphens). New runs inherit it; moving a job preserves history and invalidates cached outputs. |
 | `labels` | map[string]string | optional | Attach metadata for filtering. |
 | `annotations` | map[string]string | optional | Free-form metadata surfaced to clients. |
 | `maxParallelTasks` | integer | optional | Caps concurrent runnable steps for a single job run. |
@@ -272,4 +273,3 @@ An omitted list and an explicitly empty one are DIFFERENT policies, at both leve
 ## Secret References
 
 Use `secret://` URIs for sensitive values. Supported providers: `env`, `k8s`, `vault`. See `docs/job-definitions.md` for details.
-

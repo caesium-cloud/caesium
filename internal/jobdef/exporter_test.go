@@ -31,6 +31,7 @@ apiVersion: v1
 kind: Job
 metadata:
   alias: export-round-trip
+  namespace: marketing
   labels:
     team: data
     tier: gold
@@ -283,6 +284,7 @@ func (s *ExporterTestSuite) TestExportedManifestMatchesTheAppliedOne() {
 
 	md := exported.Metadata
 	s.Equal("export-round-trip", md.Alias)
+	s.Equal("marketing", md.Namespace)
 	s.Equal(map[string]string{"team": "data", "tier": "gold"}, md.Labels)
 	s.Equal(map[string]string{"owner": "platform-oncall"}, md.Annotations)
 	s.Equal(3, md.MaxParallelTasks)

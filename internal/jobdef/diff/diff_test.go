@@ -180,6 +180,7 @@ func insertDiffDefinition(t *testing.T, db *gorm.DB, def schema.Definition) {
 	require.NoError(t, db.Create(&models.Job{
 		ID:          jobID,
 		Alias:       def.Metadata.Alias,
+		Namespace:   models.NamespaceOrDefault(def.Metadata.Namespace),
 		TriggerID:   triggerID,
 		Labels:      stringMapToJSONMap(def.Metadata.Labels),
 		Annotations: stringMapToJSONMap(def.Metadata.Annotations),

@@ -41,9 +41,8 @@ func (s IncidentStatus) IsTerminal() bool {
 // NOT a hot per-run table — so they are not listed in hotPathModels().
 type Incident struct {
 	ID uuid.UUID `gorm:"type:uuid;primaryKey" json:"id"`
-	// Namespace is nullable from day one (design Open Question 4). Empty/NULL
-	// means the default namespace; a value scopes the incident to a tenant.
-	Namespace *string `gorm:"type:text;index" json:"namespace,omitempty"`
+	// Namespace records the failing run's ownership and never changes on a job move.
+	Namespace string `gorm:"type:text;not null;default:'default';index" json:"namespace"`
 
 	JobID    uuid.UUID  `gorm:"type:uuid;index;not null" json:"job_id"`
 	RunID    *uuid.UUID `gorm:"type:uuid;index" json:"run_id,omitempty"`
@@ -55,7 +54,7 @@ type Incident struct {
 	// Status is the current position in the incident status machine.
 	Status IncidentStatus `gorm:"type:text;index;not null" json:"status"`
 
-	// DedupeKey is the stable correlation key (job_id, task_name, failure_class).
+	// DedupeKey is the stable correlation key (namespace, job_id, task_name, failure_class).
 	// It is recorded on every incident (open or closed) for history and querying.
 	DedupeKey string `gorm:"type:text;index;not null" json:"dedupe_key"`
 	// ActiveDedupeKey enforces "at most one non-terminal incident per dedupe key":

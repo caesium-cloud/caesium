@@ -93,6 +93,7 @@ type HashInputBlob struct {
 	// trusting the decomposition.
 	Hash string `json:"hash"`
 
+	Namespace               string                       `json:"namespace,omitempty"`
 	JobAlias                string                       `json:"jobAlias,omitempty"`
 	TaskName                string                       `json:"taskName,omitempty"`
 	Image                   string                       `json:"image,omitempty"`
@@ -206,6 +207,7 @@ func (h HashInput) CanonicalJSON(precomputed string) ([]byte, error) {
 	blob := HashInputBlob{
 		BlobVersion:             HashInputBlobVersion,
 		Hash:                    precomputed,
+		Namespace:               h.nonDefaultNamespace(),
 		JobAlias:                h.JobAlias,
 		TaskName:                h.TaskName,
 		Image:                   h.Image,
@@ -239,6 +241,7 @@ func (h HashInput) CanonicalJSON(precomputed string) ([]byte, error) {
 	oversized := HashInputBlob{
 		BlobVersion:             HashInputBlobVersion,
 		Hash:                    blob.Hash,
+		Namespace:               h.nonDefaultNamespace(),
 		JobAlias:                h.JobAlias,
 		TaskName:                h.TaskName,
 		Image:                   h.Image,
@@ -319,9 +322,12 @@ func sortedVolumeMounts(mounts []container.VolumeMount) []container.VolumeMount 
 // Control-plane flags such as replaySafe are deliberately absent: they gate
 // orchestration decisions but are not execution inputs and must not bust cache.
 type HashInput struct {
-	JobAlias string
-	TaskName string
-	Image    string
+	// Namespace is the persisted run ownership. The implicit default keeps
+	// pre-namespace cache identities valid; every other namespace re-keys them.
+	Namespace string
+	JobAlias  string
+	TaskName  string
+	Image     string
 	// ResolvedImageDigest is the content digest (sha256:...) the Image tag
 	// resolved to when digest pinning is enabled. It is empty when pinning is
 	// off, in which case the hash is byte-identical to the pre-pinning era and
@@ -383,9 +389,19 @@ func (h HashInput) blobChain() string {
 }
 
 // Compute returns the SHA-256 hex digest of the canonicalized input.
+func (h HashInput) nonDefaultNamespace() string {
+	if h.Namespace == "default" {
+		return ""
+	}
+	return h.Namespace
+}
+
 func (h HashInput) Compute() string {
 	digest := sha256.New()
 	// Write each field in deterministic order
+	if namespace := h.nonDefaultNamespace(); namespace != "" {
+		w(digest, "namespace:%s\n", canonicalJSON(namespace))
+	}
 	w(digest, "job_alias:%s\n", h.JobAlias)
 	w(digest, "task_name:%s\n", h.TaskName)
 	w(digest, "image:%s\n", h.Image)

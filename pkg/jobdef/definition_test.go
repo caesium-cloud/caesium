@@ -1399,3 +1399,23 @@ steps:
 	require.NoError(t, json.Unmarshal(encoded, &decoded))
 	require.Equal(t, "list", decoded.From)
 }
+
+func TestMetadataNamespaceValidation(t *testing.T) {
+	for _, namespace := range []string{"", "default", "marketing", "team-7", "0", strings.Repeat("a", 63)} {
+		t.Run("valid_"+namespace, func(t *testing.T) {
+			def := &Definition{APIVersion: "v1", Kind: "Job", Metadata: Metadata{Alias: "ns", Namespace: namespace}, Trigger: Trigger{Type: "http", Configuration: map[string]any{"path": "/ns"}}, Steps: []Step{{Name: "step", Type: StepTypeTask, Image: "alpine:3.23", Engine: EngineDocker}}}
+			require.NoError(t, def.Validate())
+			if namespace == "" {
+				require.Equal(t, DefaultNamespace, def.Metadata.Namespace)
+			} else {
+				require.Equal(t, namespace, def.Metadata.Namespace)
+			}
+		})
+	}
+	for _, namespace := range []string{"*", "Marketing", "team_a", "a.b", "-a", "a-", " a", "a ", strings.Repeat("a", 64)} {
+		t.Run("invalid_"+namespace, func(t *testing.T) {
+			def := &Definition{APIVersion: "v1", Kind: "Job", Metadata: Metadata{Alias: "ns", Namespace: namespace}}
+			require.ErrorContains(t, def.Validate(), "metadata.namespace")
+		})
+	}
+}
