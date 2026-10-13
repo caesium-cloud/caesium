@@ -89,20 +89,21 @@ activities because it is the platform they have. Two things follow:
   Caesium to be a safe callee for an at-least-once client, which it now is:
   `POST /v1/jobs/:id/run` accepts an `Idempotency-Key` and reports queued and
   skipped starts instead of an empty `202`. The operator recipe is
-  [`temporal.md`](temporal.md). It is documentation and REST contract only;
-  Caesium takes no dependency on Temporal.
+  [`temporal.md`](temporal.md). The optional connector adapter compiles
+  `go.temporal.io/sdk` v1.49.0. With `CAESIUM_CONNECTORS_ENABLED` left at its
+  default false, the process dials no Temporal server, starts no worker, and
+  needs no Temporal credentials.
 
-**Proposed scope amendment (2026-10-01; implementation has not shipped).**
+**Proposed scope amendment (2026-10-01; the initiative is not complete).**
 The execution-connectors plan adds one optional Temporal monitoring/action
 adapter that joins external workflow state to Caesium run and data evidence.
 Build only the small shared execution identity, observation, capability,
 relationship and operation contracts needed by that adapter now. A test-only
 adapter checks that these contracts do not embed Temporal fields; a second real
 provider must justify further generalization. This authorizes neither a provider
-catalog nor a dynamic plugin system. B1 must update this section and the Temporal
-guide in the same PR that adds the compiled SDK dependency. Even then, the
-default-disabled runtime requires no Temporal service, worker or credentials.
-The active plan is `exec-plans/active/execution-connectors.md`.
+catalog nor a dynamic plugin system. B1 adds the compiled SDK in this change.
+A default-disabled runtime still requires no Temporal service, worker, or
+credentials. The active plan is `exec-plans/active/execution-connectors.md`.
 
 ## Positioning statement
 

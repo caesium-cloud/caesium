@@ -3,13 +3,17 @@
 > Status: Operator guide. Uses the shipped `POST /v1/jobs/:id/run` idempotency
 > contract ([job-definitions.md](job-definitions.md#starting-runs-from-other-systems-outcomes-and-idempotency))
 > and event triggers ([design-event-triggers.md](design-event-triggers.md)).
-> Caesium does not depend on Temporal. Nothing here is a plugin; it is how the
-> two fit together over Caesium's REST API.
+> The optional connector adapter compiles `go.temporal.io/sdk` v1.49.0.
+> With `CAESIUM_CONNECTORS_ENABLED` left at its default false, the process dials
+> no Temporal server, starts no worker, and needs no Temporal credentials.
+> The patterns below are not a plugin; they are how the two fit together over
+> Caesium's REST API. The adapter is described in [connectors.md](connectors.md).
 
-Native workflow monitoring and declared operator actions are proposed in the
-[execution-connectors plan](exec-plans/active/execution-connectors.md), with
-Temporal as the first implementation of a generic execution connector. That
-plan is not shipped; the patterns below describe the current REST integration.
+The optional adapter observes Temporal workflows. It does not add HTTP
+monitoring, Console pages, or Query/Update support. Declared operator actions
+remain proposed in the
+[execution-connectors plan](exec-plans/active/execution-connectors.md).
+That plan is not complete. The patterns below are the unchanged REST recipe.
 
 [Temporal](https://temporal.io) and Caesium sit at different layers, and they
 work best together, not as substitutes:
