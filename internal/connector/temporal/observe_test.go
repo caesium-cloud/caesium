@@ -365,7 +365,7 @@ func TestDescribeParentDeadlineAndContinued(t *testing.T) {
 	}
 	mustNotLeak(t, err.Error(), apiKeySentinel)
 
-	_, err = NewObserver(fake, "payments", apiKeySentinel, connector.MaxRPCDeadline+time.Nanosecond, 0)
+	_, err = NewObserver(fake, "payments", apiKeySentinel, connector.MaxRPCDeadline+time.Nanosecond, 0, 0)
 	if err == nil {
 		t.Fatal("expected deadline ceiling rejection")
 	}
@@ -471,9 +471,6 @@ func TestHistoryMetadataOmitsPayloads(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if described.DisplayStatus != "running" || described.Failure {
-		t.Fatalf("workflow-task problems changed describe: %#v", described)
-	}
 	if fake.histories[0].GetMaximumPageSize() != connector.MaxPageEntries {
 		t.Fatalf("history page size = %d", fake.histories[0].GetMaximumPageSize())
 	}
@@ -525,12 +522,14 @@ func TestHistoryMetadataOmitsPayloads(t *testing.T) {
 		t.Fatal(err)
 	}
 	mustNotLeak(t, string(encoded), payloadSentinel)
-	describedEncoded, err := json.Marshal(described)
-	if err != nil {
-		t.Fatal(err)
+	if !strings.Contains(string(encoded), `"problems"`) {
+		t.Fatalf("history page dropped workflow-task problems: %s", encoded)
 	}
-	if strings.Contains(string(describedEncoded), `"display_status":"failed"`) {
-		t.Fatalf("describe became failed: %s", describedEncoded)
+	if strings.Contains(string(encoded), `"display_status"`) || strings.Contains(string(encoded), `"failure"`) {
+		t.Fatalf("history page carries workflow status: %s", encoded)
+	}
+	if described.DisplayStatus != "running" {
+		t.Fatalf("describe status = %s", described.DisplayStatus)
 	}
 }
 
@@ -655,7 +654,7 @@ func TestPageSizeClampsToObserverMaximum(t *testing.T) {
 		},
 		history: &workflowservice.GetWorkflowExecutionHistoryResponse{History: &historypb.History{}},
 	}
-	obs, err := NewObserver(fake, "payments", apiKeySentinel, 0, 4)
+	obs, err := NewObserver(fake, "payments", apiKeySentinel, 0, 4, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -683,13 +682,23 @@ func TestPageSizeClampsToObserverMaximum(t *testing.T) {
 	if len(fake.describes) != 0 {
 		t.Fatal("history described a caller-supplied run id")
 	}
-	if _, err := NewObserver(fake, "payments", apiKeySentinel, 0, connector.MaxPageEntries+1); err == nil {
+	if _, err := NewObserver(fake, "payments", apiKeySentinel, 0, connector.MaxPageEntries+1, 0); err == nil {
 		t.Fatal("expected page ceiling rejection")
 	} else {
 		mustNotLeak(t, err.Error(), apiKeySentinel)
 	}
-	if _, err := NewObserver(fake, "payments", apiKeySentinel, 0, -1); err == nil {
+	if _, err := NewObserver(fake, "payments", apiKeySentinel, 0, -1, 0); err == nil {
 		t.Fatal("expected negative page rejection")
+	} else {
+		mustNotLeak(t, err.Error(), apiKeySentinel)
+	}
+	if _, err := NewObserver(fake, "payments", apiKeySentinel, 0, 0, connector.MaxPageMetadataBytes+1); err == nil {
+		t.Fatal("expected metadata ceiling rejection")
+	} else {
+		mustNotLeak(t, err.Error(), apiKeySentinel)
+	}
+	if _, err := NewObserver(fake, "payments", apiKeySentinel, 0, 0, -1); err == nil {
+		t.Fatal("expected negative metadata rejection")
 	} else {
 		mustNotLeak(t, err.Error(), apiKeySentinel)
 	}
@@ -747,6 +756,291 @@ func TestActivityIdentityStaysOnThePage(t *testing.T) {
 	if again.Activities[0].ActivityID != "" || again.Activities[0].ActivityType != "" || again.Activities[0].ScheduledEventID != 5 {
 		t.Fatalf("identity leaked across pages: %#v", again.Activities[0])
 	}
+}
+
+func TestDescribeProjectsPendingActivitiesWithoutFailure(t *testing.T) {
+	const failurePayload = "pending-failure-payload-do-not-copy"
+	fake := &fakeService{
+		describe: &workflowservice.DescribeWorkflowExecutionResponse{
+			WorkflowExecutionInfo: executionInfo("order", "run-1", enumspb.WORKFLOW_EXECUTION_STATUS_RUNNING),
+			PendingActivities: []*workflowpb.PendingActivityInfo{
+				nil,
+				{
+					ActivityId:      "act-pending",
+					ActivityType:    &commonpb.ActivityType{Name: "Charge"},
+					State:           enumspb.PENDING_ACTIVITY_STATE_STARTED,
+					Attempt:         3,
+					MaximumAttempts: 5,
+					LastFailure:     &failurepb.Failure{Message: failurePayload},
+					HeartbeatDetails: &commonpb.Payloads{Payloads: []*commonpb.Payload{{
+						Data: []byte(failurePayload),
+					}}},
+				},
+			},
+		},
+	}
+	obs := observerFor(t, fake, apiKeySentinel, 0)
+	observed := time.Date(2026, 10, 13, 12, 0, 0, 0, time.UTC)
+	obs.now = func() time.Time { return observed }
+	got, err := obs.Describe(context.Background(), "order", "run-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Incomplete || len(got.Pending) != 1 {
+		t.Fatalf("pending = %#v incomplete=%v", got.Pending, got.Incomplete)
+	}
+	pending := got.Pending[0]
+	if pending.ActivityID != "act-pending" || pending.ActivityType != "Charge" || pending.Attempt != 3 || pending.MaximumAttempts != 5 || pending.State != "PENDING_ACTIVITY_STATE_STARTED" {
+		t.Fatalf("pending = %#v", pending)
+	}
+	encoded, err := json.Marshal(got)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustNotLeak(t, string(encoded), failurePayload)
+
+	got.Incomplete = true
+	marked, err := json.Marshal(got)
+	if err != nil {
+		t.Fatal(err)
+	}
+	many := make([]*workflowpb.PendingActivityInfo, 20)
+	for i := range many {
+		many[i] = fake.describe.PendingActivities[1]
+	}
+	fake.describe.PendingActivities = many
+	capped, err := NewObserver(fake, "payments", apiKeySentinel, 0, 0, len(marked))
+	if err != nil {
+		t.Fatal(err)
+	}
+	capped.now = obs.now
+	partial, err := capped.Describe(context.Background(), "order", "run-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	partialRaw, err := json.Marshal(partial)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(partialRaw) > len(marked) || !partial.Incomplete || len(partial.Pending) < 1 || len(partial.Pending) >= len(many) {
+		t.Fatalf("partial pending = %d incomplete=%v bytes=%d budget=%d", len(partial.Pending), partial.Incomplete, len(partialRaw), len(marked))
+	}
+	mustNotLeak(t, string(partialRaw), failurePayload)
+}
+
+func TestClosingEventsContinueWhenTheNewRunIsSet(t *testing.T) {
+	events := []*historypb.HistoryEvent{
+		closingEvent(20, enumspb.EVENT_TYPE_WORKFLOW_EXECUTION_FAILED, "retry-run"),
+		closingEvent(21, enumspb.EVENT_TYPE_WORKFLOW_EXECUTION_TIMED_OUT, "timeout-run"),
+		closingEvent(22, enumspb.EVENT_TYPE_WORKFLOW_EXECUTION_COMPLETED, "cron-run"),
+		closingEvent(23, enumspb.EVENT_TYPE_WORKFLOW_EXECUTION_COMPLETED, ""),
+		closingEvent(24, enumspb.EVENT_TYPE_WORKFLOW_EXECUTION_CONTINUED_AS_NEW, ""),
+	}
+	fake := &fakeService{
+		history: &workflowservice.GetWorkflowExecutionHistoryResponse{
+			History: &historypb.History{Events: events},
+		},
+	}
+	obs := observerFor(t, fake, "", 0)
+	page, err := obs.History(context.Background(), "order", "run-1", nil, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(page.Relations) != 3 {
+		t.Fatalf("relations = %#v", page.Relations)
+	}
+	want := []string{"retry-run", "timeout-run", "cron-run"}
+	for i, runID := range want {
+		rel := page.Relations[i]
+		if rel.Type != RelationContinuation || rel.WorkflowID != "order" || rel.RunID != runID || rel.EventID != int64(20+i) {
+			t.Fatalf("relation %d = %#v", i, rel)
+		}
+	}
+}
+
+func TestMetadataBudgetDropsTheTailAndTheServerToken(t *testing.T) {
+	longID := strings.Repeat("w", 1000)
+	longRun := strings.Repeat("r", 1000)
+	infos := make([]*workflowpb.WorkflowExecutionInfo, connector.MaxPageEntries)
+	for i := range infos {
+		infos[i] = executionInfo(fmt.Sprintf("%s-%03d", longID, i), longRun, enumspb.WORKFLOW_EXECUTION_STATUS_RUNNING)
+	}
+	token := []byte("next-visibility-page")
+	fake := &fakeService{
+		pages: map[string]*workflowservice.ListWorkflowExecutionsResponse{
+			"": {Executions: infos, NextPageToken: token},
+		},
+	}
+	obs := observerFor(t, fake, "", 0)
+	page, err := obs.List(context.Background(), "WorkflowType = 'order'", nil, connector.MaxPageEntries)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := json.Marshal(page)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(raw) > connector.MaxPageMetadataBytes {
+		t.Fatalf("list page is %d bytes", len(raw))
+	}
+	if !page.Incomplete || page.NextPageToken != nil {
+		t.Fatalf("incomplete=%v token=%q", page.Incomplete, page.NextPageToken)
+	}
+	if len(page.Executions) < 1 || len(page.Executions) >= len(infos) {
+		t.Fatalf("kept %d of %d", len(page.Executions), len(infos))
+	}
+	if page.Executions[0].WorkflowID != infos[0].GetExecution().GetWorkflowId() {
+		t.Fatalf("prefix changed: %s", page.Executions[0].WorkflowID)
+	}
+
+	one := executionInfo("alpha", "run-a", enumspb.WORKFLOW_EXECUTION_STATUS_RUNNING)
+	two := executionInfo("beta", "run-b", enumspb.WORKFLOW_EXECUTION_STATUS_COMPLETED)
+	sampleObs := observerFor(t, &fakeService{
+		pages: map[string]*workflowservice.ListWorkflowExecutionsResponse{
+			"": {Executions: []*workflowpb.WorkflowExecutionInfo{one}},
+		},
+	}, "", 0)
+	onePage, err := sampleObs.List(context.Background(), "", nil, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	onePage.Incomplete = true
+	oneRaw, err := json.Marshal(onePage)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tight := &fakeService{
+		pages: map[string]*workflowservice.ListWorkflowExecutionsResponse{
+			"": {Executions: []*workflowpb.WorkflowExecutionInfo{one, two}, NextPageToken: token},
+		},
+	}
+	tightObs, err := NewObserver(tight, "payments", "", 0, 0, len(oneRaw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	tightPage, err := tightObs.List(context.Background(), "", nil, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tightPage.Executions) != 1 || tightPage.Executions[0].WorkflowID != "alpha" || !tightPage.Incomplete || tightPage.NextPageToken != nil {
+		t.Fatalf("tight page = %#v", tightPage)
+	}
+
+	emptyPage, err := json.Marshal(Page{Executions: []Execution{}, Incomplete: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	huge := &fakeService{
+		pages: map[string]*workflowservice.ListWorkflowExecutionsResponse{
+			"": {Executions: []*workflowpb.WorkflowExecutionInfo{one}},
+		},
+	}
+	hugeObs, err := NewObserver(huge, "payments", apiKeySentinel, 0, 0, len(emptyPage))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = hugeObs.List(context.Background(), "", nil, 1)
+	if err == nil || !strings.Contains(err.Error(), "execution exceeds metadata budget") {
+		t.Fatalf("oversized execution error = %v", err)
+	}
+	mustNotLeak(t, err.Error(), apiKeySentinel)
+
+	scheduled := &historypb.HistoryEvent{
+		EventId:   10,
+		EventType: enumspb.EVENT_TYPE_ACTIVITY_TASK_SCHEDULED,
+		Attributes: &historypb.HistoryEvent_ActivityTaskScheduledEventAttributes{
+			ActivityTaskScheduledEventAttributes: &historypb.ActivityTaskScheduledEventAttributes{
+				ActivityId:   "act-1",
+				ActivityType: &commonpb.ActivityType{Name: "Charge"},
+			},
+		},
+	}
+	started := &historypb.HistoryEvent{
+		EventId:   11,
+		EventType: enumspb.EVENT_TYPE_ACTIVITY_TASK_STARTED,
+		Attributes: &historypb.HistoryEvent_ActivityTaskStartedEventAttributes{
+			ActivityTaskStartedEventAttributes: &historypb.ActivityTaskStartedEventAttributes{
+				ScheduledEventId: 10,
+				Attempt:          1,
+			},
+		},
+	}
+	child := &historypb.HistoryEvent{
+		EventId:   14,
+		EventType: enumspb.EVENT_TYPE_CHILD_WORKFLOW_EXECUTION_STARTED,
+		Attributes: &historypb.HistoryEvent_ChildWorkflowExecutionStartedEventAttributes{
+			ChildWorkflowExecutionStartedEventAttributes: &historypb.ChildWorkflowExecutionStartedEventAttributes{
+				WorkflowExecution: &commonpb.WorkflowExecution{WorkflowId: "child-wf", RunId: "child-run"},
+			},
+		},
+	}
+	historyFake := &fakeService{history: &workflowservice.GetWorkflowExecutionHistoryResponse{
+		History:       &historypb.History{Events: []*historypb.HistoryEvent{scheduled}},
+		NextPageToken: []byte("hist-next"),
+	}}
+	historyObs := observerFor(t, historyFake, "", 0)
+	historyObs.now = func() time.Time { return time.Unix(1, 0).UTC() }
+	firstEvent, err := historyObs.History(context.Background(), "order", "run-1", nil, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstEvent.NextPageToken = nil
+	firstEvent.Incomplete = true
+	firstRaw, err := json.Marshal(firstEvent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	historyFake.history = &workflowservice.GetWorkflowExecutionHistoryResponse{
+		History:       &historypb.History{Events: []*historypb.HistoryEvent{scheduled, started, child}},
+		NextPageToken: []byte("hist-next"),
+	}
+	capped, err := NewObserver(historyFake, "payments", "", 0, 0, len(firstRaw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	capped.now = historyObs.now
+	historyPage, err := capped.History(context.Background(), "order", "run-1", nil, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	historyRaw, err := json.Marshal(historyPage)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(historyRaw) > len(firstRaw) {
+		t.Fatalf("history page is %d bytes, budget %d", len(historyRaw), len(firstRaw))
+	}
+	if !historyPage.Incomplete || historyPage.NextPageToken != nil {
+		t.Fatalf("history incomplete=%v token=%q", historyPage.Incomplete, historyPage.NextPageToken)
+	}
+	if len(historyPage.Events) != 1 || historyPage.Events[0].ID != 10 || len(historyPage.Activities) != 0 || len(historyPage.Relations) != 0 {
+		t.Fatalf("history prefix = %#v", historyPage)
+	}
+}
+
+func closingEvent(id int64, kind enumspb.EventType, newRunID string) *historypb.HistoryEvent {
+	event := &historypb.HistoryEvent{EventId: id, EventType: kind}
+	switch kind {
+	case enumspb.EVENT_TYPE_WORKFLOW_EXECUTION_FAILED:
+		event.Attributes = &historypb.HistoryEvent_WorkflowExecutionFailedEventAttributes{
+			WorkflowExecutionFailedEventAttributes: &historypb.WorkflowExecutionFailedEventAttributes{NewExecutionRunId: newRunID},
+		}
+	case enumspb.EVENT_TYPE_WORKFLOW_EXECUTION_TIMED_OUT:
+		event.Attributes = &historypb.HistoryEvent_WorkflowExecutionTimedOutEventAttributes{
+			WorkflowExecutionTimedOutEventAttributes: &historypb.WorkflowExecutionTimedOutEventAttributes{NewExecutionRunId: newRunID},
+		}
+	case enumspb.EVENT_TYPE_WORKFLOW_EXECUTION_COMPLETED:
+		event.Attributes = &historypb.HistoryEvent_WorkflowExecutionCompletedEventAttributes{
+			WorkflowExecutionCompletedEventAttributes: &historypb.WorkflowExecutionCompletedEventAttributes{NewExecutionRunId: newRunID},
+		}
+	case enumspb.EVENT_TYPE_WORKFLOW_EXECUTION_CONTINUED_AS_NEW:
+		event.Attributes = &historypb.HistoryEvent_WorkflowExecutionContinuedAsNewEventAttributes{
+			WorkflowExecutionContinuedAsNewEventAttributes: &historypb.WorkflowExecutionContinuedAsNewEventAttributes{NewExecutionRunId: newRunID},
+		}
+	default:
+		panic(kind.String())
+	}
+	return event
 }
 
 func TestParentMatchesListAndHistory(t *testing.T) {
@@ -1019,7 +1313,7 @@ func (f *fakeService) wait(ctx context.Context) error {
 
 func observerFor(t *testing.T, service Service, apiKey string, deadline time.Duration) *Observer {
 	t.Helper()
-	obs, err := NewObserver(service, "payments", apiKey, deadline, 0)
+	obs, err := NewObserver(service, "payments", apiKey, deadline, 0, 0)
 	if err != nil {
 		t.Fatal(err)
 	}

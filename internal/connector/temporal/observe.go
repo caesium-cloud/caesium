@@ -2,6 +2,7 @@ package temporal
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strconv"
@@ -42,20 +43,23 @@ var _ Service = workflowservice.WorkflowServiceClient(nil)
 // Observer reads one Temporal namespace. It does not store executions.
 // apiKey is kept only so errors can be redacted. It is never logged.
 type Observer struct {
-	service        Service
-	scope          string
-	apiKey         string
-	deadline       time.Duration
-	maxPageEntries int
-	now            func() time.Time
+	service          Service
+	scope            string
+	apiKey           string
+	deadline         time.Duration
+	maxPageEntries   int
+	maxMetadataBytes int
+	now              func() time.Time
 }
 
-// NewObserver checks the deadline ceiling and the page-size ceiling.
-// A non-positive deadline uses connector.MaxRPCDeadline.
+// NewObserver checks the deadline ceiling, the page-size ceiling, and the
+// exposed-metadata ceiling. A non-positive deadline uses connector.MaxRPCDeadline.
 // A deadline above that ceiling is rejected.
 // maxPageEntries of zero uses connector.MaxPageEntries.
 // Any other value outside 1..connector.MaxPageEntries is rejected.
-func NewObserver(service Service, namespace, apiKey string, deadline time.Duration, maxPageEntries int) (*Observer, error) {
+// maxMetadataBytes of zero uses connector.MaxPageMetadataBytes.
+// Any other value outside 1..connector.MaxPageMetadataBytes is rejected.
+func NewObserver(service Service, namespace, apiKey string, deadline time.Duration, maxPageEntries, maxMetadataBytes int) (*Observer, error) {
 	if service == nil {
 		return nil, errors.New("temporal service is required")
 	}
@@ -76,22 +80,28 @@ func NewObserver(service Service, namespace, apiKey string, deadline time.Durati
 	} else if maxPageEntries < 1 || maxPageEntries > connector.MaxPageEntries {
 		return nil, redactError(fmt.Errorf("temporal page size must be between 1 and %d", connector.MaxPageEntries), []string{apiKey})
 	}
+	if maxMetadataBytes == 0 {
+		maxMetadataBytes = connector.MaxPageMetadataBytes
+	} else if maxMetadataBytes < 1 || maxMetadataBytes > connector.MaxPageMetadataBytes {
+		return nil, redactError(fmt.Errorf("temporal page metadata must be between 1 and %d bytes", connector.MaxPageMetadataBytes), []string{apiKey})
+	}
 	return &Observer{
-		service:        service,
-		scope:          namespace,
-		apiKey:         apiKey,
-		deadline:       deadline,
-		maxPageEntries: maxPageEntries,
-		now:            time.Now,
+		service:          service,
+		scope:            namespace,
+		apiKey:           apiKey,
+		deadline:         deadline,
+		maxPageEntries:   maxPageEntries,
+		maxMetadataBytes: maxMetadataBytes,
+		now:              time.Now,
 	}, nil
 }
 
 // NewObserverFromClient uses the real SDK workflow service.
-func NewObserverFromClient(c client.Client, namespace, apiKey string, deadline time.Duration, maxPageEntries int) (*Observer, error) {
+func NewObserverFromClient(c client.Client, namespace, apiKey string, deadline time.Duration, maxPageEntries, maxMetadataBytes int) (*Observer, error) {
 	if c == nil {
 		return nil, errors.New("temporal client is required")
 	}
-	return NewObserver(c.WorkflowService(), namespace, apiKey, deadline, maxPageEntries)
+	return NewObserver(c.WorkflowService(), namespace, apiKey, deadline, maxPageEntries, maxMetadataBytes)
 }
 
 // Execution is one workflow run. Scope is the configured namespace, not a
@@ -109,13 +119,33 @@ type Execution struct {
 	Failure       bool              `json:"failure"`
 	ObservedAt    time.Time         `json:"observed_at,omitzero"`
 	Parent        *Relation         `json:"parent,omitempty"`
+	// Pending is the in-flight activity list from Describe. History does not
+	// fill it. LastFailure and heartbeat payloads are not copied.
+	Pending []PendingActivity `json:"pending_activities,omitempty"`
+	// Incomplete is true when Pending was shortened so the JSON stays within
+	// the metadata budget. Describe is not paged; the prefix is what fit.
+	Incomplete bool `json:"incomplete,omitempty"`
 }
 
-// Page is one visibility page. NextPageToken is the server token, unchanged.
-// The server order is preserved; this package does not invent one.
+// PendingActivity is one in-flight activity. State is the protobuf enum name.
+type PendingActivity struct {
+	ActivityID      string `json:"activity_id"`
+	ActivityType    string `json:"activity_type"`
+	Attempt         int32  `json:"attempt"`
+	MaximumAttempts int32  `json:"maximum_attempts,omitempty"`
+	State           string `json:"state"`
+}
+
+// Page is one visibility page. The server order is preserved; this package
+// does not invent one. NextPageToken is the server token when every execution
+// from that response fit in the metadata budget. Incomplete means a tail or
+// that token was omitted. The caller repeats the same request token with a
+// smaller page size. The omitted server token is not returned, because that
+// token skips the dropped executions.
 type Page struct {
 	Executions    []Execution `json:"executions"`
 	NextPageToken []byte      `json:"next_page_token,omitempty"`
+	Incomplete    bool        `json:"incomplete,omitempty"`
 }
 
 // Relation is parent, child, or continuation. Type is never "delegation".
@@ -136,6 +166,9 @@ type EventMeta struct {
 // ActivityRecord is one activity attempt. Attempt and ScheduledEventID come
 // from ActivityTaskStarted. ActivityID and ActivityType are set only when
 // ActivityTaskScheduled for that scheduled event is on the same page.
+// The observer does not remember scheduled events across RPCs. A closed
+// attempt split across pages keeps ScheduledEventID and leaves id and type
+// empty. In-flight attempts are PendingActivity values on Describe.
 // An attempt is not a workflow failure.
 type ActivityRecord struct {
 	EventID          int64  `json:"event_id"`
@@ -153,8 +186,11 @@ type WorkflowTaskProblem struct {
 }
 
 // HistoryPage is one bounded history page. Payloads are not copied.
-// A non-empty NextPageToken means the page is incomplete, not that the
-// workflow failed.
+// A non-empty NextPageToken means the server has more history. It does not
+// mean the workflow failed. Incomplete means this response kept an event
+// prefix, or dropped the server token, so the JSON stays within the metadata
+// budget. Activities, relations, and problems match that prefix. The caller
+// repeats the same request token with a smaller page size.
 type HistoryPage struct {
 	WorkflowID    string                `json:"workflow_id"`
 	RunID         string                `json:"run_id"`
@@ -165,6 +201,7 @@ type HistoryPage struct {
 	Relations     []Relation            `json:"relations,omitempty"`
 	Problems      []WorkflowTaskProblem `json:"problems,omitempty"`
 	NextPageToken []byte                `json:"next_page_token,omitempty"`
+	Incomplete    bool                  `json:"incomplete,omitempty"`
 }
 
 // List returns one visibility page. query is passed through unchanged.
@@ -185,19 +222,17 @@ func (o *Observer) List(ctx context.Context, query string, pageToken []byte, pag
 	if resp == nil {
 		return Page{}, o.redact(errors.New("temporal list: empty response"))
 	}
-	page := Page{NextPageToken: cloneToken(resp.GetNextPageToken())}
+	var executions []Execution
 	for _, info := range resp.GetExecutions() {
-		page.Executions = append(page.Executions, o.executionFromInfo(info))
+		executions = append(executions, o.executionFromInfo(info))
 	}
-	if page.Executions == nil {
-		page.Executions = []Execution{}
-	}
-	return page, nil
+	return o.boundList(executions, resp.GetNextPageToken())
 }
 
 // Describe reads one execution. ObservedAt is the caller's clock on the
 // returned value and is not stored. ParentExecution, when set, is relation
-// type parent.
+// type parent. Pending activities are id, type, attempt, maximum attempts,
+// and state. Failure payloads are not copied.
 func (o *Observer) Describe(ctx context.Context, workflowID, runID string) (Execution, error) {
 	if strings.TrimSpace(workflowID) == "" {
 		return Execution{}, o.redact(errors.New("temporal describe: workflow id is required"))
@@ -224,7 +259,8 @@ func (o *Observer) Describe(ctx context.Context, workflowID, runID string) (Exec
 		execution.RunID = runID
 		execution.Coordinates["run_id"] = runID
 	}
-	return execution, nil
+	execution.Pending = pendingActivities(resp.GetPendingActivities())
+	return o.boundDescribe(execution)
 }
 
 // History returns one metadata page. Workflow inputs, results, and activity
@@ -258,30 +294,29 @@ func (o *Observer) History(ctx context.Context, workflowID, runID string, pageTo
 		return HistoryPage{}, o.redact(errors.New("temporal history: encoded history is not decoded"))
 	}
 	page := HistoryPage{
-		WorkflowID:    workflowID,
-		RunID:         runID,
-		Scope:         o.scope,
-		ObservedAt:    o.clock(),
-		NextPageToken: cloneToken(resp.GetNextPageToken()),
+		WorkflowID: workflowID,
+		RunID:      runID,
+		Scope:      o.scope,
+		ObservedAt: o.clock(),
 	}
-	events := []*historypb.HistoryEvent{}
-	if resp.GetHistory() != nil {
-		events = resp.GetHistory().GetEvents()
-	}
-	page.Events, page.Activities, page.Relations, page.Problems = projectHistory(workflowID, events)
 	if page.RunID == "" {
 		// The history response does not echo a run id. WorkflowExecutionStarted's
 		// OriginalExecutionRunId is preserved across reset while the current
 		// execution run id changes, and ContinuedExecutionRunId is the previous
 		// run. Describe resolves the current run the same way an empty run id
-		// does on the history RPC.
+		// does on the history RPC. Resolve it before the metadata budget is
+		// measured so the returned JSON cannot grow past that budget.
 		resolved, err := o.describedRunID(ctx, workflowID)
 		if err != nil {
 			return HistoryPage{}, err
 		}
 		page.RunID = resolved
 	}
-	return page, nil
+	events := []*historypb.HistoryEvent{}
+	if resp.GetHistory() != nil {
+		events = resp.GetHistory().GetEvents()
+	}
+	return o.boundHistory(page, workflowID, events, resp.GetNextPageToken())
 }
 
 // Health returns nil when GetSystemInfo and DescribeNamespace both succeed.
@@ -469,14 +504,7 @@ func projectHistory(workflowID string, events []*historypb.HistoryEvent) ([]Even
 					EventID:    event.GetEventId(),
 				})
 			}
-			if continued := attrs.GetContinuedExecutionRunId(); continued != "" {
-				relations = append(relations, Relation{
-					Type:       RelationContinuation,
-					WorkflowID: workflowID,
-					RunID:      continued,
-					EventID:    event.GetEventId(),
-				})
-			}
+			relations = appendContinuation(relations, workflowID, attrs.GetContinuedExecutionRunId(), event.GetEventId())
 		}
 		if attrs := event.GetChildWorkflowExecutionStartedEventAttributes(); attrs != nil {
 			childID := ""
@@ -493,12 +521,16 @@ func projectHistory(workflowID string, events []*historypb.HistoryEvent) ([]Even
 			})
 		}
 		if attrs := event.GetWorkflowExecutionContinuedAsNewEventAttributes(); attrs != nil {
-			relations = append(relations, Relation{
-				Type:       RelationContinuation,
-				WorkflowID: workflowID,
-				RunID:      attrs.GetNewExecutionRunId(),
-				EventID:    event.GetEventId(),
-			})
+			relations = appendContinuation(relations, workflowID, attrs.GetNewExecutionRunId(), event.GetEventId())
+		}
+		if attrs := event.GetWorkflowExecutionFailedEventAttributes(); attrs != nil {
+			relations = appendContinuation(relations, workflowID, attrs.GetNewExecutionRunId(), event.GetEventId())
+		}
+		if attrs := event.GetWorkflowExecutionTimedOutEventAttributes(); attrs != nil {
+			relations = appendContinuation(relations, workflowID, attrs.GetNewExecutionRunId(), event.GetEventId())
+		}
+		if attrs := event.GetWorkflowExecutionCompletedEventAttributes(); attrs != nil {
+			relations = appendContinuation(relations, workflowID, attrs.GetNewExecutionRunId(), event.GetEventId())
 		}
 		if attrs := event.GetWorkflowTaskFailedEventAttributes(); attrs != nil {
 			problems = append(problems, WorkflowTaskProblem{
@@ -514,4 +546,210 @@ func projectHistory(workflowID string, events []*historypb.HistoryEvent) ([]Even
 		}
 	}
 	return metas, activities, relations, problems
+}
+
+// appendContinuation records a new or previous run on the same workflow.
+// An empty run id is not a relation. Cron and retry set NewExecutionRunId on
+// the closing event; continued-as-new does the same. There is no sub-kind.
+func appendContinuation(relations []Relation, workflowID, runID string, eventID int64) []Relation {
+	if runID == "" {
+		return relations
+	}
+	return append(relations, Relation{
+		Type:       RelationContinuation,
+		WorkflowID: workflowID,
+		RunID:      runID,
+		EventID:    eventID,
+	})
+}
+
+func pendingActivities(infos []*workflowpb.PendingActivityInfo) []PendingActivity {
+	if len(infos) == 0 {
+		return nil
+	}
+	out := make([]PendingActivity, 0, len(infos))
+	for _, info := range infos {
+		if info == nil {
+			continue
+		}
+		name := ""
+		if activityType := info.GetActivityType(); activityType != nil {
+			name = activityType.GetName()
+		}
+		out = append(out, PendingActivity{
+			ActivityID:      info.GetActivityId(),
+			ActivityType:    name,
+			Attempt:         info.GetAttempt(),
+			MaximumAttempts: info.GetMaximumAttempts(),
+			State:           enumLabel(enumspb.PendingActivityState_name, int32(info.GetState())),
+		})
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func (o *Observer) metadataBudget() int {
+	if o == nil || o.maxMetadataBytes < 1 || o.maxMetadataBytes > connector.MaxPageMetadataBytes {
+		return connector.MaxPageMetadataBytes
+	}
+	return o.maxMetadataBytes
+}
+
+func (o *Observer) withinBudget(v any) (bool, error) {
+	raw, err := json.Marshal(v)
+	if err != nil {
+		return false, err
+	}
+	return len(raw) <= o.metadataBudget(), nil
+}
+
+// longestPrefix returns the largest count in 0..n for which fit is true.
+// A result below zero means even the empty prefix does not fit.
+func longestPrefix(n int, fit func(count int) (bool, error)) (int, error) {
+	best := -1
+	lo, hi := 0, n
+	for lo <= hi {
+		mid := (lo + hi) / 2
+		ok, err := fit(mid)
+		if err != nil {
+			return 0, err
+		}
+		if ok {
+			best = mid
+			lo = mid + 1
+		} else {
+			hi = mid - 1
+		}
+	}
+	return best, nil
+}
+
+func (o *Observer) boundList(executions []Execution, token []byte) (Page, error) {
+	if executions == nil {
+		executions = []Execution{}
+	}
+	full := Page{Executions: executions, NextPageToken: cloneToken(token)}
+	ok, err := o.withinBudget(full)
+	if err != nil {
+		return Page{}, o.redact(err)
+	}
+	if ok {
+		return full, nil
+	}
+	best, err := longestPrefix(len(executions), func(count int) (bool, error) {
+		trial := Page{Executions: executions[:count], Incomplete: true}
+		if count == 0 {
+			trial.Executions = []Execution{}
+		}
+		return o.withinBudget(trial)
+	})
+	if err != nil {
+		return Page{}, o.redact(err)
+	}
+	if best < 1 {
+		if len(executions) == 0 {
+			return Page{}, o.redact(errors.New("temporal list: page token exceeds metadata budget"))
+		}
+		if best < 0 {
+			return Page{}, o.redact(errors.New("temporal list: page exceeds metadata budget"))
+		}
+		return Page{}, o.redact(errors.New("temporal list: execution exceeds metadata budget"))
+	}
+	return Page{Executions: executions[:best], Incomplete: true}, nil
+}
+
+func (o *Observer) boundDescribe(execution Execution) (Execution, error) {
+	ok, err := o.withinBudget(execution)
+	if err != nil {
+		return Execution{}, o.redact(err)
+	}
+	if ok {
+		return execution, nil
+	}
+	pending := execution.Pending
+	execution.Pending = nil
+	execution.Incomplete = false
+	baseOK, err := o.withinBudget(execution)
+	if err != nil {
+		return Execution{}, o.redact(err)
+	}
+	if !baseOK || len(pending) == 0 {
+		return Execution{}, o.redact(errors.New("temporal describe: execution exceeds metadata budget"))
+	}
+	execution.Incomplete = true
+	markedOK, err := o.withinBudget(execution)
+	if err != nil {
+		return Execution{}, o.redact(err)
+	}
+	if !markedOK {
+		return Execution{}, o.redact(errors.New("temporal describe: execution exceeds metadata budget"))
+	}
+	best, err := longestPrefix(len(pending), func(count int) (bool, error) {
+		trial := execution
+		trial.Incomplete = true
+		if count == 0 {
+			trial.Pending = nil
+		} else {
+			trial.Pending = pending[:count]
+		}
+		return o.withinBudget(trial)
+	})
+	if err != nil {
+		return Execution{}, o.redact(err)
+	}
+	if best < 1 {
+		execution.Pending = nil
+		return execution, nil
+	}
+	execution.Pending = pending[:best]
+	execution.Incomplete = true
+	return execution, nil
+}
+
+func (o *Observer) boundHistory(base HistoryPage, workflowID string, events []*historypb.HistoryEvent, token []byte) (HistoryPage, error) {
+	full := o.historyPrefix(base, workflowID, events, len(events))
+	full.NextPageToken = cloneToken(token)
+	full.Incomplete = false
+	ok, err := o.withinBudget(full)
+	if err != nil {
+		return HistoryPage{}, o.redact(err)
+	}
+	if ok {
+		return full, nil
+	}
+	best, err := longestPrefix(len(events), func(count int) (bool, error) {
+		trial := o.historyPrefix(base, workflowID, events, count)
+		trial.Incomplete = true
+		return o.withinBudget(trial)
+	})
+	if err != nil {
+		return HistoryPage{}, o.redact(err)
+	}
+	if best < 1 {
+		if len(events) == 0 {
+			return HistoryPage{}, o.redact(errors.New("temporal history: page token exceeds metadata budget"))
+		}
+		if best < 0 {
+			return HistoryPage{}, o.redact(errors.New("temporal history: page exceeds metadata budget"))
+		}
+		return HistoryPage{}, o.redact(errors.New("temporal history: event exceeds metadata budget"))
+	}
+	page := o.historyPrefix(base, workflowID, events, best)
+	page.Incomplete = true
+	return page, nil
+}
+
+func (o *Observer) historyPrefix(base HistoryPage, workflowID string, events []*historypb.HistoryEvent, count int) HistoryPage {
+	if count < 0 {
+		count = 0
+	}
+	if count > len(events) {
+		count = len(events)
+	}
+	page := base
+	page.NextPageToken = nil
+	page.Events, page.Activities, page.Relations, page.Problems = projectHistory(workflowID, events[:count])
+	return page
 }

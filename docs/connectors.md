@@ -267,7 +267,14 @@ List passes the visibility query through and does not add an order. The page
 size comes from the caller and is clamped to the observer's maximum. That
 maximum defaults to 100 (`connector.MaxPageEntries`) and a larger value is
 rejected.
-The next page token is the server token, unchanged. Each entry's opaque
+The next page token is the server token when every execution in that response
+fits in the exposed-metadata budget. The budget defaults to 64 KiB
+(`connector.MaxPageMetadataBytes`); a larger value is rejected. Exposed JSON
+is what counts, so coordinates count as well as the execution fields. When
+the page does not fit, the adapter keeps a prefix, sets `incomplete`, and
+omits the server token. That token is not returned, because it would skip the
+dropped executions. The caller repeats the same request token with a smaller
+page size. A single execution over the budget is an error. Each entry's opaque
 coordinates are `workflow_id` and `run_id`. The configured namespace is
 returned separately as scope. It is not a Temporal column on the core
 reference.
@@ -275,7 +282,11 @@ reference.
 Describe reads one execution and stamps the caller's clock as the observation
 time on the returned value. That time is not stored. List and describe set
 relation type `parent` from `ParentExecution` when it is present. A child
-workflow is not a parent and is not delegation.
+workflow is not a parent and is not delegation. Describe also projects
+`PendingActivities` as id, type, attempt, maximum attempts, and the protobuf
+state name. `LastFailure` and heartbeat payloads are not copied. The same
+metadata budget applies. `incomplete` on a describe means the pending list was
+shortened to a prefix. Describe is not paged.
 
 History is one bounded page. `WaitNewEvent` stays false, so the call does not
 follow the workflow. Workflow inputs, results, and activity payloads are not
@@ -284,16 +295,28 @@ availability error. A history response does not echo a run id. When the caller
 omits one, the page describes the execution once and uses that run id.
 `OriginalExecutionRunId` is kept across reset while the current run id changes,
 and `ContinuedExecutionRunId` is the previous run, so neither labels this page.
+The run id is resolved before the metadata budget is measured. A history page
+that does not fit keeps an event prefix and sets `incomplete`, with no server
+token. Activities, relations, and problems on that page come only from the
+kept events. The caller repeats the same request token with a smaller page
+size. One event over the budget is an error.
 Activity attempts
 come from `ActivityTaskStarted` and carry the scheduled event id, attempt, and
 history event id. Activity id and type are filled only when `ActivityTaskScheduled`
-is on the same page. An attempt is not a workflow failure.
+is on the same page. The observer does not remember scheduled events across
+RPCs. A closed attempt split across pages keeps `ScheduledEventID` and leaves
+id and type empty. In-flight attempts are the describe pending list, not a
+reconstruction across history pages. An attempt is not a workflow failure.
 `WorkflowExecutionStarted` records relation type `parent` from
 `ParentWorkflowExecution` and relation type `continuation` from
 `ContinuedExecutionRunId` on the same workflow id.
 `ChildWorkflowExecutionStarted` is relation type `child`, with the child
-workflow id and run id. `WorkflowExecutionContinuedAsNew` is relation type
-`continuation` to the new run id. Relation type `delegation` is not emitted.
+workflow id and run id. A non-empty `NewExecutionRunId` on
+`WorkflowExecutionContinuedAsNew`, `WorkflowExecutionFailed`,
+`WorkflowExecutionTimedOut`, or `WorkflowExecutionCompleted` is relation type
+`continuation` to that new run id on the same workflow id. Retry and cron use
+the closing event; there is no separate relation kind. An empty new run id is
+not a continuation. Relation type `delegation` is not emitted.
 
 `WorkflowTaskFailed` and `WorkflowTaskTimedOut` are a separate problem list
 of event id and cause. They do not change a running describe into `failed`.
@@ -324,7 +347,8 @@ are root CAs; `tls.crt` or `client.crt` together with `tls.key` or
 without the other, or any other base name, is an error. Plaintext is only
 for `localhost`, `127.0.0.1`, or `::1` when no certificate path is set. The
 TLS config is then nil, and `TLSDisabled` is set so an API key does not make
-the SDK turn TLS on at dial time. Any other host uses TLS. Empty certificate
+the SDK turn TLS on at dial time. Any other host uses TLS, including an
+in-cluster frontend. There is no plaintext opt-in. Empty certificate
 paths mean the system roots, which is how a remote frontend or Temporal Cloud
 API-key connection works without a new YAML field. Loopback with certificate
 paths uses TLS. File-read errors are redacted when they would contain the API
