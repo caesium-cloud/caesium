@@ -82,10 +82,10 @@ jobs:
   # Fails closed on a lane name nothing would run, instead of a silently empty
   # (and therefore green) qualification.
   select:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - name: Validate the lane selection
         env:
           LANES: ${{ inputs.lanes }}
@@ -95,13 +95,18 @@ jobs:
   lifecycle-cluster:
     needs: [select]
     if: contains(format(',{0},', inputs.lanes), ',cluster-lifecycle,') || contains(format(',{0},', inputs.lanes), ',all,')
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 120
     env:
       CANDIDATE_SHA: ${{ github.sha }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: taiki-e/install-action@just
+      # kind's documented "too many open files" fix. The ubuntu-24.04 image
+      # applied these values at boot; ubuntu-26.04 runs the kernel defaults
+      # (128 instances), which starve multi-node clusters' kubelets.
+      - name: Raise inotify limits for kind
+        run: sudo sysctl -w fs.inotify.max_user_watches=655360 fs.inotify.max_user_instances=1280
       - name: Install kind
         run: |
           curl -Lo ./kind https://kind.sigs.k8s.io/dl/latest/kind-linux-amd64
@@ -114,7 +119,7 @@ jobs:
           sudo mv ./kubectl /usr/local/bin/kubectl
       - uses: azure/setup-helm@v5
         with:
-          version: v3.17.0
+          version: v3.22.0
       # Cluster mode verifies single-platform OCI image archives with
       # `docker image inspect --platform` (Docker >= 28.1; the hosted image
       # ships 28.0.4) and reads each archive's platform descriptor, which only
@@ -171,13 +176,18 @@ jobs:
   core-robustness-nightly:
     needs: [select]
     if: contains(format(',{0},', inputs.lanes), ',core-robustness,') || contains(format(',{0},', inputs.lanes), ',all,')
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 120
     env:
       CANDIDATE_SHA: ${{ github.sha }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: taiki-e/install-action@just
+      # kind's documented "too many open files" fix. The ubuntu-24.04 image
+      # applied these values at boot; ubuntu-26.04 runs the kernel defaults
+      # (128 instances), which starve multi-node clusters' kubelets.
+      - name: Raise inotify limits for kind
+        run: sudo sysctl -w fs.inotify.max_user_watches=655360 fs.inotify.max_user_instances=1280
       - name: Install kind
         run: |
           curl -Lo ./kind https://kind.sigs.k8s.io/dl/latest/kind-linux-amd64
@@ -190,7 +200,7 @@ jobs:
           sudo mv ./kubectl /usr/local/bin/kubectl
       - uses: azure/setup-helm@v5
         with:
-          version: v3.17.0
+          version: v3.22.0
       - name: Build the release, runner and instrumented images
         run: just tag=${{ github.sha }} robustness-instrumented
       - name: Fenced core suite with the instrumented server
@@ -219,13 +229,18 @@ jobs:
   console-recovery:
     needs: [select]
     if: contains(format(',{0},', inputs.lanes), ',console-recovery,') || contains(format(',{0},', inputs.lanes), ',all,')
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 90
     env:
       CANDIDATE_SHA: ${{ github.sha }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: taiki-e/install-action@just
+      # kind's documented "too many open files" fix. The ubuntu-24.04 image
+      # applied these values at boot; ubuntu-26.04 runs the kernel defaults
+      # (128 instances), which starve multi-node clusters' kubelets.
+      - name: Raise inotify limits for kind
+        run: sudo sysctl -w fs.inotify.max_user_watches=655360 fs.inotify.max_user_instances=1280
       - name: Install kind
         run: |
           curl -Lo ./kind https://kind.sigs.k8s.io/dl/latest/kind-linux-amd64
@@ -238,10 +253,10 @@ jobs:
           sudo mv ./kubectl /usr/local/bin/kubectl
       - uses: azure/setup-helm@v5
         with:
-          version: v3.17.0
-      - uses: actions/setup-node@v6
+          version: v3.22.0
+      - uses: actions/setup-node@v7
         with:
-          node-version: '22'
+          node-version: '24'
           cache: npm
           cache-dependency-path: ui/package-lock.json
       - name: Install Chromium for the console journey
@@ -282,22 +297,22 @@ jobs:
       fail-fast: false
       matrix:
         run: ${{ fromJSON(inputs.performance-runs || '[1]') }}
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 180
     env:
       CANDIDATE_SHA: ${{ github.sha }}
       # A stable fleet identity: the hosted runner's hostname changes per job.
-      CAESIUM_PERF_HOST_ID: github-hosted|ubuntu-24.04|x86_64
+      CAESIUM_PERF_HOST_ID: github-hosted|ubuntu-26.04|x86_64
       CAESIUM_PERF_BASE_SHA: ${{ inputs.performance-base }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           # performance.sh checks out the base SHA in a temporary worktree.
           fetch-depth: 0
       - uses: taiki-e/install-action@just
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@v7
         with:
-          node-version: '22'
+          node-version: '24'
           cache: npm
           cache-dependency-path: ui/package-lock.json
       - name: Install Chromium for the browser series
@@ -352,15 +367,15 @@ jobs:
   fuzz-campaign:
     needs: [select]
     if: contains(format(',{0},', inputs.lanes), ',fuzz-campaign,') || contains(format(',{0},', inputs.lanes), ',all,')
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 150
     env:
       CANDIDATE_SHA: ${{ github.sha }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: taiki-e/install-action@just
       - name: Restore the Go fuzz build cache
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v6
         with:
           path: .tmp/fuzz-gocache
           key: fuzz-gocache-v1-amd64-${{ hashFiles('go.sum', 'build/Dockerfile.build', 'scripts/fuzz-tests.sh') }}
@@ -396,13 +411,18 @@ jobs:
   soak:
     needs: [select]
     if: contains(format(',{0},', inputs.lanes), ',soak,') || contains(format(',{0},', inputs.lanes), ',all,')
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 150
     env:
       CANDIDATE_SHA: ${{ github.sha }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: taiki-e/install-action@just
+      # kind's documented "too many open files" fix. The ubuntu-24.04 image
+      # applied these values at boot; ubuntu-26.04 runs the kernel defaults
+      # (128 instances), which starve multi-node clusters' kubelets.
+      - name: Raise inotify limits for kind
+        run: sudo sysctl -w fs.inotify.max_user_watches=655360 fs.inotify.max_user_instances=1280
       - name: Install kind
         run: |
           curl -Lo ./kind https://kind.sigs.k8s.io/dl/latest/kind-linux-amd64
@@ -415,11 +435,7 @@ jobs:
           sudo mv ./kubectl /usr/local/bin/kubectl
       - uses: azure/setup-helm@v5
         with:
-          version: v3.17.0
-      # Four kind nodes on one runner: raise the inotify limits kubelet and
-      # containerd exhaust at the hosted defaults.
-      - name: Raise inotify limits for a four-node kind cluster
-        run: sudo sysctl -w fs.inotify.max_user_watches=524288 fs.inotify.max_user_instances=512
+          version: v3.22.0
       - name: Seeded single-host soak (advisory)
         env:
           CAESIUM_SOAK_SEED: ${{ inputs.soak-seed }}
@@ -460,7 +476,7 @@ jobs:
       - performance-gate
       - fuzz-campaign
       - soak
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 5
     outputs:
       needs: ${{ steps.collect.outputs.needs }}

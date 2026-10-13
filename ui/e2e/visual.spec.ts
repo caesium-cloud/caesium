@@ -14,11 +14,11 @@ failOnUnexpectedPageErrors();
  *
  * CRITICAL: these snapshots are generated and compared per-platform (Playwright's
  * default `toHaveScreenshot` naming appends the OS, e.g. `-linux.png` /
- * `-darwin.png`). CI runs on ubuntu-24.04 ("noble") and only ever compares
+ * `-darwin.png`). CI runs on ubuntu-26.04 ("resolute") and only ever compares
  * against `-linux.png` baselines. Any baseline committed here MUST be
  * generated inside a Linux container running the exact `@playwright/test`
  * version pinned in package-lock.json (e.g.
- * `mcr.microsoft.com/playwright:v<version>-noble`) — a baseline generated on
+ * `mcr.microsoft.com/playwright:v<version>-resolute`) — a baseline generated on
  * a developer's macOS/Windows machine names a DIFFERENT file and would never
  * be consulted by CI, silently leaving the linux baseline missing (which
  * fails the very first CI run, not passes it).
@@ -41,7 +41,7 @@ failOnUnexpectedPageErrors();
  * failing on a missing baseline — a developer's local `just ui-e2e` (which
  * runs the browser on whatever OS invoked `just`, not in a container) is
  * expected to report these as "skipped" off Linux. The real comparison runs
- * in CI's required `ui-e2e`/`ui-e2e-auth` checks (ubuntu-24.04). Committing a
+ * in CI's required `ui-e2e`/`ui-e2e-auth` checks (ubuntu-26.04). Committing a
  * `-darwin.png`/`-win32.png` baseline instead of skipping would not fix
  * this: CI never reads those files, so it would still start from "no linux
  * baseline" on first merge.

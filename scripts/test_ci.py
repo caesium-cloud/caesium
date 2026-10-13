@@ -381,12 +381,12 @@ class WorkflowTests(unittest.TestCase):
 
     def test_default_browser_lane_selects_network_recovery_with_dependencies(self):
         setup_node = next(step for step in JOBS["ui-e2e"]["steps"]
-                          if step.get("uses") == "actions/setup-node@v6")
+                          if step.get("uses") == "actions/setup-node@v7")
         dependencies = next(step for step in JOBS["ui-e2e"]["steps"]
                             if step.get("id") == "dependencies")
         browser = next(step for step in JOBS["ui-e2e"]["steps"]
                        if step.get("id") == "playwright")
-        self.assertEqual(setup_node["with"]["node-version"], "22")
+        self.assertEqual(setup_node["with"]["node-version"], "24")
         self.assertEqual(setup_node["with"]["cache"], "npm")
         self.assertEqual(setup_node["with"]["cache-dependency-path"], "ui/package-lock.json")
         self.assertEqual(dependencies["working-directory"], "ui")
@@ -1520,14 +1520,14 @@ class MergeGroupWorkflowWiringTests(unittest.TestCase):
                     continue
                 allowed = (
                     (job_name == "changes"
-                     and (step.get("uses") == "actions/checkout@v6" or step.get("id") == "filter"))
+                     and (step.get("uses") == "actions/checkout@v7" or step.get("id") == "filter"))
                     or (job_name == "ci-ok" and step.get("id") in ("base-freshness", "candidate-parents"))
                 )
                 self.assertTrue(allowed, f"{job_name}: unaudited event_name if: {condition!r}")
 
     def test_changes_job_filters_on_both_pull_request_and_merge_group(self):
         steps = JOBS["changes"]["steps"]
-        checkout = next(step for step in steps if step.get("uses") == "actions/checkout@v6")
+        checkout = next(step for step in steps if step.get("uses") == "actions/checkout@v7")
         filter_step = next(step for step in steps if step.get("id") == "filter")
         both = "github.event_name == 'pull_request' || github.event_name == 'merge_group'"
         self.assertEqual(checkout["if"], both)
@@ -1557,7 +1557,7 @@ class MergeGroupWorkflowWiringTests(unittest.TestCase):
 
     def test_fetch_depth_ternary_uses_truthy_string_operands_not_falsy_zero(self):
         checkout = next(step for step in JOBS["changes"]["steps"]
-                        if step.get("uses") == "actions/checkout@v6")
+                        if step.get("uses") == "actions/checkout@v7")
         expr = checkout["with"]["fetch-depth"]
         self.assertIn("'0'", expr)
         self.assertIn("'1'", expr)
@@ -1587,7 +1587,7 @@ class MergeGroupWorkflowWiringTests(unittest.TestCase):
 
     def test_no_checkout_overrides_ref_anywhere_in_the_workflow(self):
         """Every job that produces evidence or a required context must test
-        exactly the commit `actions/checkout@v6` gives it by default -- on
+        exactly the commit `actions/checkout@v7` gives it by default -- on
         pull_request that is GitHub's prospective merge commit
         (refs/pull/N/merge). An explicit `ref:` could silently swap in the PR
         head (or anything else) instead."""
@@ -2787,7 +2787,7 @@ class NightlyLaneTests(unittest.TestCase):
 
     def test_performance_runs_on_a_stable_fleet_identity(self):
         job = LANE_JOBS["performance-gate"]
-        self.assertEqual(job["env"]["CAESIUM_PERF_HOST_ID"], "github-hosted|ubuntu-24.04|x86_64")
+        self.assertEqual(job["env"]["CAESIUM_PERF_HOST_ID"], "github-hosted|ubuntu-26.04|x86_64")
         self.assertEqual(job["strategy"]["matrix"]["run"], "${{ fromJSON(inputs.performance-runs || '[1]') }}")
         body = recipe_body("performance-gate")
         for setting in ("CAESIUM_PERF_WORKLOADS=\"${CAESIUM_PERF_WORKLOADS:-closed-baseline}\"",
@@ -2811,8 +2811,8 @@ class NightlyLaneTests(unittest.TestCase):
         self.assertEqual(NIGHTLY_WORKFLOW[True]["workflow_dispatch"]["inputs"]["fuzz-seconds"]["default"], "5m")
         # The PR lane's Go cache is restored, never overwritten by the campaign.
         cache = [step for step in job["steps"] if "actions/cache" in step.get("uses", "")]
-        self.assertEqual([step["uses"] for step in cache], ["actions/cache/restore@v4"])
-        pr_cache = next(step for step in JOBS["generated-fuzz"]["steps"] if step.get("uses") == "actions/cache@v4")
+        self.assertEqual([step["uses"] for step in cache], ["actions/cache/restore@v6"])
+        pr_cache = next(step for step in JOBS["generated-fuzz"]["steps"] if step.get("uses") == "actions/cache@v6")
         self.assertEqual(cache[0]["with"]["key"], pr_cache["with"]["key"])
         # The explored corpus is retained.
         artifacts = next(step for step in job["steps"]
@@ -3455,10 +3455,16 @@ class ResourceHarnessTests(unittest.TestCase):
             for setting in ("RESOURCE_STATS_ENABLED=true", "RESOURCE_STATS_SAMPLE_INTERVAL=100ms", "RIGHT_SIZING_ENABLED=true"):
                 self.assertIn(f"-e CAESIUM_{setting}", commands)
         exact = "caesiumcloud/resource-stress:${{ env.IMAGE_TAG }}-amd64"
-        for job, transfer in (("podman-integration-test", f"docker save {exact} | podman load"), ("helm-integration-test", f"kind load docker-image {exact}")):
+        for job, transfer in (("podman-integration-test", f"docker save {exact} | podman load"), ("helm-integration-test", f"kind_load {exact}")):
             commands = "\n".join(step.get("run", "") for step in JOBS[job]["steps"])
             self.assertIn(transfer, commands)
             self.assertIn(f"-e CAESIUM_RESOURCE_STRESS_IMAGE={exact}", commands)
+        # A pulled multi-platform tag in the containerd image store cannot go
+        # through `kind load docker-image`; kind_load ships a platform archive.
+        helm_commands = "\n".join(step.get("run", "") for step in JOBS["helm-integration-test"]["steps"])
+        self.assertIn("docker image save --platform linux/amd64", helm_commands)
+        self.assertIn("kind load image-archive", helm_commands)
+        self.assertNotIn("kind load docker-image alpine", helm_commands)
         values = yaml.safe_load((ROOT / "helm/caesium/ci/test-values-k8s.yaml").read_text())
         helm_env = {item["name"]: item["value"] for item in values["config"]["extraEnv"]}
         self.assertEqual(helm_env["CAESIUM_RESOURCE_STATS_ENABLED"], "true")
@@ -3490,6 +3496,33 @@ class ResourceHarnessTests(unittest.TestCase):
             )
             self.assertNotEqual(result.returncode, 0)
             self.assertEqual(command_log.read_text().splitlines(), ["image inspect caesiumcloud/resource-stress:harness-evidence"])
+
+
+class KindHostLimitsTests(unittest.TestCase):
+    """ubuntu-26.04 boots with the kernel's inotify defaults (128 instances),
+    not the 1280/655360 the ubuntu-24.04 image applied. Multi-node kind
+    clusters then fail kubeadm join, so every kind job raises them first."""
+
+    KIND_USE = re.compile(r"kind(-linux-|\.sigs\.k8s\.io| create| load)")
+
+    def test_every_kind_job_raises_inotify_limits_before_kind(self):
+        checked = []
+        for workflow, jobs in (("ci.yml", JOBS), ("qualification-lanes.yml", LANE_JOBS)):
+            for name, job in jobs.items():
+                steps = job.get("steps", [])
+                first_kind = next((i for i, step in enumerate(steps)
+                                   if self.KIND_USE.search(step.get("run", ""))), None)
+                if first_kind is None:
+                    continue
+                checked.append(f"{workflow}:{name}")
+                raise_at = next((i for i, step in enumerate(steps)
+                                 if "fs.inotify.max_user_instances=1280" in step.get("run", "")
+                                 and "fs.inotify.max_user_watches=655360" in step.get("run", "")), None)
+                with self.subTest(job=f"{workflow}:{name}"):
+                    self.assertIsNotNone(raise_at, "kind job never raises the inotify limits")
+                    self.assertLess(raise_at, first_kind, "inotify limits raised after kind is installed")
+        self.assertIn("ci.yml:helm-integration-test", checked)
+        self.assertIn("qualification-lanes.yml:console-recovery", checked)
 
 
 if __name__ == "__main__":

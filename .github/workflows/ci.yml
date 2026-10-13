@@ -89,7 +89,7 @@ jobs:
     permissions:
       contents: read
       pull-requests: read
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 5
     outputs:
       go: ${{ steps.set.outputs.go }}
@@ -99,7 +99,7 @@ jobs:
       ci: ${{ steps.set.outputs.ci }}
       images: ${{ steps.set.outputs.images }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
         with:
           # merge_group has no PR to diff through the GitHub API, so the
@@ -117,7 +117,7 @@ jobs:
           # makes this actually branch. scripts/test_ci.py pins this with a
           # semantic check, not just a text match.
           fetch-depth: ${{ github.event_name == 'merge_group' && '0' || '1' }}
-      - uses: dorny/paths-filter@v3
+      - uses: dorny/paths-filter@v4
         id: filter
         if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
         with:
@@ -246,10 +246,10 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
   ci-config:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: taiki-e/install-action@just
       - name: Install actionlint
         run: |
@@ -259,15 +259,15 @@ jobs:
           mkdir -p /tmp/actionlint-bin
           tar -xzf /tmp/actionlint.tar.gz -C /tmp/actionlint-bin actionlint
           echo /tmp/actionlint-bin >> "$GITHUB_PATH"
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@v7
         with:
-          python-version: '3.12'
+          python-version: '3.14'
       - name: Install kubectl for wrapper contract tests
         run: |
           mkdir -p "$RUNNER_TEMP/wrapper-kubectl"
           cd "$RUNNER_TEMP/wrapper-kubectl"
-          curl -fsSLO --retry 3 https://dl.k8s.io/release/v1.37.0/bin/linux/amd64/kubectl
-          curl -fsSLO --retry 3 https://dl.k8s.io/release/v1.37.0/bin/linux/amd64/kubectl.sha256
+          curl -fsSLO --retry 3 https://dl.k8s.io/release/v1.37.1/bin/linux/amd64/kubectl
+          curl -fsSLO --retry 3 https://dl.k8s.io/release/v1.37.1/bin/linux/amd64/kubectl.sha256
           echo "$(cat kubectl.sha256)  kubectl" | sha256sum -c -
           chmod +x kubectl
           echo "$RUNNER_TEMP/wrapper-kubectl" >> "$GITHUB_PATH"
@@ -284,12 +284,12 @@ jobs:
       actions: read # Cache lookup; cache uploads use the Actions runtime token.
     needs: [changes]
     if: needs.changes.outputs.images == 'true'
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v6
-      - uses: docker/setup-buildx-action@v3
-      - uses: docker/build-push-action@v6
+      - uses: actions/checkout@v7
+      - uses: docker/setup-buildx-action@v4
+      - uses: docker/build-push-action@v7
         with:
           context: .
           file: build/Dockerfile.build
@@ -317,12 +317,12 @@ jobs:
       actions: read # Cache lookup; cache uploads use the Actions runtime token.
     needs: [changes]
     if: needs.changes.outputs.images == 'true'
-    runs-on: ubuntu-24.04-arm
+    runs-on: ubuntu-26.04-arm
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v6
-      - uses: docker/setup-buildx-action@v3
-      - uses: docker/build-push-action@v6
+      - uses: actions/checkout@v7
+      - uses: docker/setup-buildx-action@v4
+      - uses: docker/build-push-action@v7
         with:
           context: .
           file: build/Dockerfile.build
@@ -350,10 +350,10 @@ jobs:
       actions: read # BuildKit cache lookup; uploads use the runtime token.
     needs: [changes, builder]
     if: needs.changes.outputs.images == 'true'
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: taiki-e/install-action@just
       - uses: ./.github/actions/bake-images
         with:
@@ -428,10 +428,10 @@ jobs:
       actions: read
     needs: [changes, builder-arm64]
     if: needs.changes.outputs.images == 'true'
-    runs-on: ubuntu-24.04-arm
+    runs-on: ubuntu-26.04-arm
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: ./.github/actions/bake-images
         with:
           arch: arm64
@@ -479,10 +479,10 @@ jobs:
       actions: read
     needs: [changes]
     if: needs.changes.outputs.go == 'true' || needs.changes.outputs.reagents == 'true' || needs.changes.outputs.ci == 'true'
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: ./.github/actions/bake-images
         with:
           arch: amd64
@@ -507,10 +507,10 @@ jobs:
       actions: read
     needs: [changes]
     if: needs.changes.outputs.go == 'true' || needs.changes.outputs.reagents == 'true' || needs.changes.outputs.ci == 'true'
-    runs-on: ubuntu-24.04-arm
+    runs-on: ubuntu-26.04-arm
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: ./.github/actions/bake-images
         with:
           arch: arm64
@@ -528,12 +528,12 @@ jobs:
   lint:
     needs: [changes, builder, reagents]
     if: needs.changes.outputs.go == 'true' || needs.changes.outputs.reagents == 'true' || needs.changes.outputs.ci == 'true'
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 30
     env:
       CAESIUM_SKIP_IMAGE_BUILD: "true"
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: taiki-e/install-action@just
       - uses: ./.github/actions/load-docker-images
         with:
@@ -547,13 +547,13 @@ jobs:
         run: just tag=${{ env.IMAGE_TAG }}-amd64 reagents-lint
 
   helm-lint:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: azure/setup-helm@v5
         with:
-          version: v3.17.0
+          version: v3.22.0
       - name: Helm lint
         run: helm lint ./helm/caesium
       - name: Helm template
@@ -562,12 +562,12 @@ jobs:
   unit-test:
     needs: [changes, builder, reagents]
     if: needs.changes.outputs.go == 'true' || needs.changes.outputs.reagents == 'true' || needs.changes.outputs.ci == 'true'
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 30
     env:
       CAESIUM_SKIP_IMAGE_BUILD: "true"
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: taiki-e/install-action@just
       - uses: ./.github/actions/load-docker-images
         with:
@@ -585,10 +585,10 @@ jobs:
   unit-test-arm64:
     needs: [changes, builder-arm64]
     if: needs.changes.outputs.go == 'true' || needs.changes.outputs.ci == 'true'
-    runs-on: ubuntu-24.04-arm
+    runs-on: ubuntu-26.04-arm
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: taiki-e/install-action@just
       - uses: ./.github/actions/load-docker-images
         with:
@@ -601,13 +601,13 @@ jobs:
   ui-test:
     needs: [changes]
     if: needs.changes.outputs.ui == 'true' || needs.changes.outputs.go == 'true' || needs.changes.outputs.ci == 'true'
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-node@v6
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with:
-          node-version: '22'
+          node-version: '24'
           cache: npm
           cache-dependency-path: ui/package-lock.json
       - name: UI lint, unit tests, and production build
@@ -620,7 +620,7 @@ jobs:
     name: integration (${{ matrix.id == 'docker' && format('docker, {0}/3', matrix.shard) || matrix.id }})
     needs: [changes, images]
     if: needs.changes.outputs.go == 'true' || needs.changes.outputs.ci == 'true'
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: ${{ matrix.timeout }}
     strategy:
       fail-fast: false
@@ -651,7 +651,7 @@ jobs:
             load-reagents: "false"
             timeout: 45
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: ./.github/actions/run-integration
         with:
           arch: amd64
@@ -666,7 +666,7 @@ jobs:
     name: integration-extra (${{ matrix.id }})
     needs: [changes, images, reagents]
     if: needs.changes.outputs.go == 'true' || needs.changes.outputs.reagents == 'true' || needs.changes.outputs.ci == 'true'
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: ${{ matrix.timeout }}
     strategy:
       fail-fast: false
@@ -685,7 +685,7 @@ jobs:
             load-reagents: "true"
             timeout: 60
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: ./.github/actions/run-integration
         with:
           arch: amd64
@@ -696,7 +696,7 @@ jobs:
     name: integration-arm64 (${{ matrix.id == 'docker' && format('docker, {0}/3', matrix.shard) || matrix.id }})
     needs: [changes, images-arm64, reagents-arm64]
     if: needs.changes.outputs.go == 'true' || needs.changes.outputs.reagents == 'true' || needs.changes.outputs.ci == 'true'
-    runs-on: ubuntu-24.04-arm
+    runs-on: ubuntu-26.04-arm
     timeout-minutes: ${{ matrix.timeout }}
     strategy:
       fail-fast: false
@@ -723,7 +723,7 @@ jobs:
             load-reagents: "true"
             timeout: 60
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: ./.github/actions/run-integration
         with:
           arch: arm64
@@ -735,16 +735,16 @@ jobs:
   ui-e2e:
     needs: [changes, ui-test, images]
     if: needs.changes.outputs.ui == 'true' || needs.changes.outputs.go == 'true' || needs.changes.outputs.ci == 'true'
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: ./.github/actions/load-docker-images
         with:
           name: product-amd64
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@v7
         with:
-          node-version: '22'
+          node-version: '24'
           cache: npm
           cache-dependency-path: ui/package-lock.json
       - name: Install UI dependencies and browsers
@@ -993,16 +993,16 @@ jobs:
   ui-e2e-auth:
     needs: [changes, ui-test, images]
     if: needs.changes.outputs.ui == 'true' || needs.changes.outputs.go == 'true' || needs.changes.outputs.ci == 'true'
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: ./.github/actions/load-docker-images
         with:
           name: product-amd64
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@v7
         with:
-          node-version: '22'
+          node-version: '24'
           cache: npm
           cache-dependency-path: ui/package-lock.json
       - name: Install UI dependencies and browsers
@@ -1168,16 +1168,21 @@ jobs:
       fail-fast: false
       matrix:
         shard: [1, 2, 3]
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: ./.github/actions/load-docker-images
         with:
           name: product-amd64
       - uses: ./.github/actions/load-docker-images
         with:
           name: integration-runner-amd64
+      # kind's documented "too many open files" fix. The ubuntu-24.04 image
+      # applied these values at boot; ubuntu-26.04 runs the kernel defaults
+      # (128 instances), which starve multi-node clusters' kubelets.
+      - name: Raise inotify limits for kind
+        run: sudo sysctl -w fs.inotify.max_user_watches=655360 fs.inotify.max_user_instances=1280
       - name: Install kind
         run: |
           curl -Lo ./kind https://kind.sigs.k8s.io/dl/latest/kind-linux-amd64
@@ -1190,7 +1195,7 @@ jobs:
           sudo mv ./kubectl /usr/local/bin/kubectl
       - uses: azure/setup-helm@v5
         with:
-          version: v3.17.0
+          version: v3.22.0
       - name: Create kind cluster
         run: kind create cluster --wait 120s
       - name: Load Caesium image into kind
@@ -1213,9 +1218,20 @@ jobs:
         run: helm test caesium --timeout 90s
       - name: Pre-load job images into kind
         run: |
+          set -euo pipefail
+          # Docker 29's containerd image store (the ubuntu-26.04 default) keeps
+          # a pulled tag's whole multi-platform index but only this platform's
+          # blobs, so `kind load docker-image` fails in the node's
+          # `ctr import --all-platforms` ("content digest ... not found").
+          # Load a single-platform archive instead, as lifecycle-tests.sh does.
+          kind_load() {
+            docker image save --platform linux/amd64 --output "$RUNNER_TEMP/kind-image.tar" "$1"
+            kind load image-archive "$RUNNER_TEMP/kind-image.tar"
+            rm -f "$RUNNER_TEMP/kind-image.tar"
+          }
           docker pull alpine:3.23
-          kind load docker-image alpine:3.23
-          kind load docker-image caesiumcloud/resource-stress:${{ env.IMAGE_TAG }}-amd64
+          kind_load alpine:3.23
+          kind_load caesiumcloud/resource-stress:${{ env.IMAGE_TAG }}-amd64
       - name: Start port-forward to Caesium
         run: |
           kubectl port-forward service/caesium 8080:8080 >/tmp/port-forward.log 2>&1 &
@@ -1395,13 +1411,18 @@ jobs:
   helm-pod-replacement-test:
     needs: [changes, images, helm-lint]
     if: needs.changes.outputs.helm == 'true' || needs.changes.outputs.go == 'true' || needs.changes.outputs.ci == 'true'
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: ./.github/actions/load-docker-images
         with:
           name: product-amd64
+      # kind's documented "too many open files" fix. The ubuntu-24.04 image
+      # applied these values at boot; ubuntu-26.04 runs the kernel defaults
+      # (128 instances), which starve multi-node clusters' kubelets.
+      - name: Raise inotify limits for kind
+        run: sudo sysctl -w fs.inotify.max_user_watches=655360 fs.inotify.max_user_instances=1280
       - name: Install kind
         run: |
           curl -Lo ./kind https://kind.sigs.k8s.io/dl/latest/kind-linux-amd64
@@ -1414,7 +1435,7 @@ jobs:
           sudo mv ./kubectl /usr/local/bin/kubectl
       - uses: azure/setup-helm@v5
         with:
-          version: v3.17.0
+          version: v3.22.0
       - name: Pre-pull the task image
         run: docker pull alpine:3.23
       - name: Replace every replica on retained volumes
@@ -1450,7 +1471,7 @@ jobs:
   early-evidence:
     needs: [changes, images, helm-lint]
     if: needs.changes.outputs.go == 'true' || needs.changes.outputs.helm == 'true' || needs.changes.outputs.ci == 'true'
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 60
     env:
       # check-test-evidence.py requires a real commit SHA; the `-amd64` image
@@ -1458,7 +1479,12 @@ jobs:
       CANDIDATE_SHA: ${{ github.sha }}
       CAESIUM_SKIP_IMAGE_BUILD: "true"
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
+      # kind's documented "too many open files" fix. The ubuntu-24.04 image
+      # applied these values at boot; ubuntu-26.04 runs the kernel defaults
+      # (128 instances), which starve multi-node clusters' kubelets.
+      - name: Raise inotify limits for kind
+        run: sudo sysctl -w fs.inotify.max_user_watches=655360 fs.inotify.max_user_instances=1280
       - name: Install kind
         run: |
           curl -Lo ./kind https://kind.sigs.k8s.io/dl/latest/kind-linux-amd64
@@ -1471,7 +1497,7 @@ jobs:
           sudo mv ./kubectl /usr/local/bin/kubectl
       - uses: azure/setup-helm@v5
         with:
-          version: v3.17.0
+          version: v3.22.0
       # Loads the precompiled runner, product and robustness images (no
       # compiler image) and runs the focused SQL-work-budget scenario.
       - name: SQL-work budget scenario (existing integration suite)
@@ -1519,13 +1545,13 @@ jobs:
   lifecycle-standalone:
     needs: [changes, builder, images]
     if: needs.changes.outputs.go == 'true' || needs.changes.outputs.ci == 'true'
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 30
     env:
       CANDIDATE_SHA: ${{ github.sha }}
       CAESIUM_SKIP_IMAGE_BUILD: "true"
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: taiki-e/install-action@just
       - uses: ./.github/actions/load-docker-images
         with:
@@ -1570,12 +1596,12 @@ jobs:
   generated-fuzz:
     needs: [changes, builder]
     if: needs.changes.outputs.go == 'true' || needs.changes.outputs.ci == 'true'
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 30
     env:
       CANDIDATE_SHA: ${{ github.sha }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: taiki-e/install-action@just
       - uses: ./.github/actions/load-docker-images
         with:
@@ -1584,7 +1610,7 @@ jobs:
       # lane compiling (race and fuzz-instrumented builds). Content-addressed,
       # so it can only miss; keyed on the dependency set and the fuzz script.
       - name: Restore the Go fuzz build cache
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: .tmp/fuzz-gocache
           key: fuzz-gocache-v1-amd64-${{ hashFiles('go.sum', 'build/Dockerfile.build', 'scripts/fuzz-tests.sh') }}
@@ -1614,12 +1640,12 @@ jobs:
   generated-oracles:
     needs: [changes, builder]
     if: needs.changes.outputs.go == 'true' || needs.changes.outputs.ci == 'true'
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 30
     env:
       CANDIDATE_SHA: ${{ github.sha }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: taiki-e/install-action@just
       - uses: ./.github/actions/load-docker-images
         with:
@@ -1650,17 +1676,17 @@ jobs:
   coverage-ratchets:
     needs: [changes, builder]
     if: needs.changes.outputs.go == 'true' || needs.changes.outputs.ui == 'true' || needs.changes.outputs.ci == 'true'
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 45
     env:
       CANDIDATE_SHA: ${{ github.sha }}
       CAESIUM_SKIP_IMAGE_BUILD: "true"
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: taiki-e/install-action@just
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@v7
         with:
-          node-version: '22'
+          node-version: '24'
           cache: npm
           cache-dependency-path: ui/package-lock.json
       - name: Install Chromium for the browser journey
@@ -1716,6 +1742,11 @@ jobs:
           echo "diff base $base; $(wc -l <.tmp/coverage-diff/changed-paths.txt) changed Go path(s)"
           echo "CAESIUM_COVERAGE_DIFF_BASE=$base" >>"$GITHUB_ENV"
           echo "CAESIUM_COVERAGE_CHANGED_PATHS=$PWD/.tmp/coverage-diff/changed-paths.txt" >>"$GITHUB_ENV"
+      # kind's documented "too many open files" fix. The ubuntu-24.04 image
+      # applied these values at boot; ubuntu-26.04 runs the kernel defaults
+      # (128 instances), which starve multi-node clusters' kubelets.
+      - name: Raise inotify limits for kind
+        run: sudo sysctl -w fs.inotify.max_user_watches=655360 fs.inotify.max_user_instances=1280
       - name: Backend journey tools
         run: |
           set -euo pipefail
@@ -2108,10 +2139,10 @@ jobs:
       fail-fast: false
       matrix:
         shard: [1, 2, 3]
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: ./.github/actions/load-docker-images
         with:
           name: product-amd64
@@ -2215,10 +2246,10 @@ jobs:
   build-and-integration-test:
     if: always()
     needs: [changes, images, integration]
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - name: Verify required integration matrix
         env:
           NEEDS_JSON: ${{ toJSON(needs) }}
@@ -2227,10 +2258,10 @@ jobs:
   build-and-integration-test-agent-auth:
     if: always()
     needs: [changes, images, integration]
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - name: Verify required integration matrix
         env:
           NEEDS_JSON: ${{ toJSON(needs) }}
@@ -2284,10 +2315,10 @@ jobs:
       - generated-fuzz
       - generated-oracles
       - coverage-ratchets
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       # Only downloadable when the lane actually ran. A lane that ran but left
       # no report still fails the gate: ci-ok.py requires the file.
       - name: Download early-evidence report
@@ -2399,10 +2430,10 @@ jobs:
   release-qualification:
     if: always() && (startsWith(github.ref, 'refs/tags/v') || inputs.publish-dry-run)
     needs: [changes, ci-ok, images, images-arm64, qualification]
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       # Every report this run uploaded, one directory per artifact. A lane that
       # never ran leaves no directory, which the gate refuses as absent
       # evidence; so a failed download is the gate's to judge, not this step's.
@@ -2474,7 +2505,7 @@ jobs:
       - helm-integration-test
       - helm-pod-replacement-test
       - podman-integration-test
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     # A dry run evaluates to '' (no environment, so no deployment record and
     # none of its secrets). The operand order matters: `cond && '' || x` would
     # always yield x, because '' is falsy.
@@ -2483,7 +2514,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - name: Verify chart appVersion matches the pushed tag
         if: ${{ !inputs.publish-dry-run }}
         run: |
@@ -2604,7 +2635,7 @@ jobs:
           wrapper to \`./.tmp/caesium-cli/caesium\`.
 
           Each binary was smoke-tested **natively on its own architecture's
-          runner** (\`ubuntu-24.04\` / \`ubuntu-24.04-arm\`, no emulation) inside
+          runner** (\`ubuntu-26.04\` / \`ubuntu-26.04-arm\`, no emulation) inside
           a plain \`ubuntu:24.04\` container carrying none of the caesium
           runtime libraries: \`caesium --help\` and \`caesium job lint\` both
           succeed there.

@@ -146,9 +146,22 @@ kind create cluster \
   --kubeconfig "$KUBECONFIG_PATH" \
   --wait 180s
 
+# Docker 29's containerd image store keeps a pulled tag's whole multi-platform
+# index but only this platform's blobs, so `kind load docker-image` fails in
+# the node's `ctr import --all-platforms` ("content digest ... not found").
+# Load a single-platform archive instead, as scripts/lifecycle-tests.sh does.
+kind_load() {
+  local image="$1" archive platform
+  platform="$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "$image")"
+  archive="$(mktemp "${TMPDIR:-/tmp}/kind-image.XXXXXX")"
+  docker image save --platform "$platform" --output "$archive" "$image"
+  kind load image-archive --name "$REPLACEMENT_ID" "$archive"
+  rm -f "$archive"
+}
+
 log "loading images into the cluster"
-kind load docker-image --name "$REPLACEMENT_ID" "${CHART_REPO}:${CHART_TAG}"
-kind load docker-image --name "$REPLACEMENT_ID" "$TASK_IMAGE"
+kind_load "${CHART_REPO}:${CHART_TAG}"
+kind_load "$TASK_IMAGE"
 
 kc create namespace "$NAMESPACE"
 

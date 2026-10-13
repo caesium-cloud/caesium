@@ -382,7 +382,7 @@ Cross-check by spot-fetching one or two comments after they finish.
 
 **Goal**: classify each failing CI check as flake-or-real, recover flakes by rerun, escalate real failures.
 
-caesium CI is `.github/workflows/ci.yml` — 13 container-based jobs mapping to `just` targets, matrixed amd64 (`ubuntu-24.04`) + arm64 (`ubuntu-24.04-arm`). It triggers on push to **all** branches (`branches: ['**']`) and on PR to `master`, so a `worktree-agent-*` branch fires the full workflow on push, and a PR adds a second near-identical run — **dedupe by `event`** when reading status. The `builder`/`builder-arm64` jobs are the roots (they build + upload the builder image); if a builder job fails, everything downstream is skipped — **root-cause builder first**.
+caesium CI is `.github/workflows/ci.yml` — 13 container-based jobs mapping to `just` targets, matrixed amd64 (`ubuntu-26.04`) + arm64 (`ubuntu-26.04-arm`). It triggers on push to **all** branches (`branches: ['**']`) and on PR to `master`, so a `worktree-agent-*` branch fires the full workflow on push, and a PR adds a second near-identical run — **dedupe by `event`** when reading status. The `builder`/`builder-arm64` jobs are the roots (they build + upload the builder image); if a builder job fails, everything downstream is skipped — **root-cause builder first**.
 
 ### Step 6a: Enumerate failures
 
