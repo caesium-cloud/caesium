@@ -1,6 +1,6 @@
 # Identity and Access — Namespaces, Grants, Policy-as-Code, Corporate SSO
 
-Last updated: 2026-10-12
+Last updated: 2026-10-13
 
 Caesium's authentication is shipped and native (OIDC, SAML, LDAP; `docs/sso-authentication.md`),
 but authorization is a single global role ladder keyed per HTTP route, SSO users cannot be
@@ -71,11 +71,12 @@ fairness was parked by `docs/exec-plans/active/window-scheduling.md` (its §"Glo
 vs. per-job load ceiling"); Stream D of this plan owns the v1 slice (issue #395) and
 window-scheduling's parked note points here.
 
-## Progress (as of 2026-10-12)
+## Progress (as of 2026-10-13)
 
-No implementation waves have shipped yet. W1 is in progress against master
-`150bbaa472bdd35af518d000b52436e824959be5`; its authorized endpoint is review PRs.
-Item checkboxes remain unchecked until merged acceptance evidence exists.
+No implementation waves have shipped yet. W1's available foundation items are
+verified at the authorized review-PR endpoint against master
+`150bbaa472bdd35af518d000b52436e824959be5`. Item checkboxes remain unchecked
+until merged acceptance evidence exists.
 
 ### Wave 1 — Foundations (2026-10-09)
 
@@ -94,7 +95,7 @@ Item checkboxes remain unchecked until merged acceptance evidence exists.
   errors; unchanged base and exact-head revalidation passed (269 passed, 41
   lane-specific skips; recheck 886.772s). Original failed evidence is preserved;
   the confirmed base pool defects do not establish its causal chain.
-- **W1-β / B1 — namespace persistence and cache identity:** draft
+- **W1-β / B1 — namespace persistence and cache identity:** ready for review
   [PR #625](https://github.com/caesium-cloud/caesium/pull/625), head
   `e5380a79a5a05ff307cbf5ede9d855daffc67c5d`. Independent review passed after
   correcting namespace-only CLI/REST/approval diffs and explaining unsafe replay
@@ -110,12 +111,13 @@ Item checkboxes remain unchecked until merged acceptance evidence exists.
   passed (801.740s; 272 passed, 41 lane-specific skips), schema/examples passed,
   and hosted logs proved 15 namespace scenario/engine combinations without skips.
   That head's coverage failed on three changed files; the new journeys and removal
-  of an unused model formatter address those gaps. Native-dqlite populated upgrade
-  remains pending: the latest old-node startup exposed a harness parser confusing
-  a logged API-key prefix with the printed bootstrap key. This failed before
-  population; owned resources were cleaned and the parser is being corrected.
-  Strict constraints and coordinated upgrade guidance
-  travel together in this PR.
+  of an unused model formatter address those gaps. A populated native-dqlite
+  upgrade from the base image passed through the public API: strict constraints,
+  default ownership, historical identities/event times, incident rekey/dedup,
+  namespace moves and restart idempotence. The fixture used one native node and
+  one DB shard; populated hot/cold-shard and PostgreSQL upgrades are unqualified.
+  Owned containers/network were cleaned; cold backup and evidence are retained.
+  Strict constraints and coordinated upgrade guidance travel together in this PR.
 - **Separately authorized DB repair:** ready for review [PR #626](https://github.com/caesium-cloud/caesium/pull/626),
   head `a8e92a34f9975dc9f847722c6184f8847f709da1`. Independent review passed after
   adding a fresh-installer regression, removing unnecessary reinstallation logic,
@@ -131,16 +133,17 @@ Item checkboxes remain unchecked until merged acceptance evidence exists.
 - **A2 and D3:** not dispatched. A2 requires A1 to land; D3 requires B1 to land.
   The suggested W1 includes these follow-ups, but the review-PR endpoint leaves
   them pending until their prerequisite PRs merge. H-1, H-2, and N-1 require A4.
-- **Plan sync:** maintained in [PR #622](https://github.com/caesium-cloud/caesium/pull/622);
-  documentation guardrails passed. No merge or approval
-  bypass is authorized. Remaining streams retain their original dependencies.
+- **Plan sync:** ready for review [PR #622](https://github.com/caesium-cloud/caesium/pull/622);
+  documentation guardrails and local links passed. No merges were performed;
+  required human reviews and all unmerged worktrees are retained. Remaining
+  streams retain their original dependencies.
 
 ### Stream Status
 
 | Stream | Scope | Priority | Status |
 |--------|-------|----------|--------|
 | A | Policy file, grants, principal, route classes, namespace-aware middleware, keys with namespaces, SSO-admin key management | **P0** | W1 A1 review #624; A2 waits for A1 merge |
-| B | `metadata.namespace` on jobs: schema, columns, importer, lint, apply/prune/move, git-sync allowlist, collection filtering, aggregate collapse | **P0** | W1 B1 draft #625 |
+| B | `metadata.namespace` on jobs: schema, columns, importer, lint, apply/prune/move, git-sync allowlist, collection filtering, aggregate collapse | **P0** | W1 B1 review #625 |
 | C | Runtime isolation: per-namespace Kubernetes namespace + service account, scoped secret resolution, Helm RBAC | P1 | Not started |
 | D | Run quota + round-robin fairness (#395 v1 slice); namespaced notification channels, policies, agent profiles | P1 | Not started |
 | E | Identity lifecycle: IdP group refresh, user/session administration, user-bound keys, `caesium login` | P1 | Not started |
