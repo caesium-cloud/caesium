@@ -144,6 +144,8 @@ class ConnectorFixtureOrchestrationTests(unittest.TestCase):
         self.assertNotIn('host-private', json.dumps(calls))
         for call in containers[1:]:
             self.assertEqual(call[call.index('--user')+1], f'{os.getuid()}:{os.getgid()}')
+            self.assertIn('USER=caesium-fixture', call)
+            self.assertIn('HOME=/tmp', call)
         self.assertCountEqual(self.removed(), ['1'*64, '2'*64, '3'*64])
         self.assertIn('staged probe', (self.artifacts/'source-diff.patch').read_text())
         manifest = json.loads((self.artifacts/'source-checksums.json').read_text())

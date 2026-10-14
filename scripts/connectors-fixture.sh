@@ -169,7 +169,8 @@ done
 [ -n "$admin_key" ] || { echo "tracked auth server bootstrap key did not appear" >&2; exit 1; }
 [ ! -e "$fixture_cid" ] || { echo "fixture CID file already exists" >&2; exit 1; }
 "$cli" create --platform "$platform" --name "$fixture_name" --cidfile "$fixture_cid" \
-    --network="container:$server_id" --user "$host_user" -v "$artifacts:/artifacts" \
+    --network="container:$server_id" --user "$host_user" \
+    -e USER=caesium-fixture -e HOME=/tmp -v "$artifacts:/artifacts" \
     -e CAESIUM_CONNECTORS_CANDIDATE_SHA="$candidate" \
     -e CAESIUM_MANUAL_TRIGGER_API_KEY=integration-test-key "$image" >"$artifacts/fixture-create.log"
 fixture_id=$(created_id "$fixture_cid")
@@ -191,7 +192,7 @@ fi
 [ ! -e "$runner_cid" ] || { echo "runner CID file already exists" >&2; exit 1; }
 "$cli" create --platform "$platform" --name "$runner_name" --cidfile "$runner_cid" \
     --network="container:$server_id" --user "$host_user" \
-    -v "$root:/bld/caesium" -v "$artifacts:/artifacts" \
+    -e USER=caesium-fixture -e HOME=/tmp -v "$root:/bld/caesium" -v "$artifacts:/artifacts" \
     -e CAESIUM_CLI_PATH=/artifacts/cli/caesium -e CAESIUM_CONNECTORS_FIXTURE=true \
     -e CAESIUM_CONNECTORS_ARTIFACTS=/artifacts -e CAESIUM_CONNECTORS_CANDIDATE_SHA="$candidate" \
     -e CAESIUM_API_KEY="$admin_key" -e CAESIUM_AUTH_ADMIN_KEY="$admin_key" \
