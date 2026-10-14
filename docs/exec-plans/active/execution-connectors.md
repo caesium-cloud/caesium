@@ -1,6 +1,6 @@
 # Execution Connectors — Temporal Monitoring and Operator Actions
 
-Last updated: 2026-10-01
+Last updated: 2026-10-14
 
 Caesium should let an operator follow a data process across Temporal workflows
 and Caesium jobs, understand the data consequence, and perform a declared
@@ -218,22 +218,52 @@ write. Limits are validated configuration with conservative hard ceilings fixed
 by A1 before dependent work. C1/F3 measure unchanged-poll write count, catalog
 cardinality and closed-workflow Query dispatch count through the live surface.
 
-## Progress (as of 2026-10-01)
+## Progress (as of 2026-10-14)
 
-No implementation waves have shipped. This is planning only; none of the
-proposed behavior has runtime acceptance evidence. Drafting base:
-`a0e862171b898a64b64828b1a5376226e85b106a`.
+W1 and W2 have merged. B2, C, D, E, F, and N are not started. Drafting base:
+`a0e862171b898a64b64828b1a5376226e85b106a`. An open PR or a fixture-only pass
+is not completion. The SHAs below are the squash merges read from GitHub.
 
 The orchestrator owns this dashboard: PR URLs, exact tested heads/merge SHAs,
 executed scenarios, evidence and blockers. Workers update assigned items/notes.
-An open PR or fixture-only pass is not completion. Resume unfinished waves.
+Resume unfinished waves. Do not archive this plan while later items remain.
+
+### W1 — Contract (merged 2026-10-03)
+
+- **W1-α / A1:** [PR #618](https://github.com/caesium-cloud/caesium/pull/618)
+  merged `0b4cc4c4677f9cb28924366043ccb79cc4543e54` at 2026-10-03T14:58:08Z.
+  Head `2a5e78185e20b0c5291686c1c6d6318577867d76`. `ci-ok` succeeded on that head.
+  The provider-neutral contract, config fingerprint, and disabled-by-default
+  gate are on master. C1 still supplies the live gate proof.
+
+### W2 — Catalog and Temporal observation (merged 2026-10-13)
+
+- **W2-β / B1:** [PR #629](https://github.com/caesium-cloud/caesium/pull/629)
+  merged `d5ae265aad51ecb2cd18f12cd70911b505eb8ed6` at 2026-10-13T23:05:36Z.
+  Head `03aa3e635d961975035037e1f91ec75e74d54b9d`. `ci-ok`, coverage, and both
+  image jobs succeeded. Plaintext stays loopback-only, including for an
+  in-cluster frontend. Describe projects pending activities without failure
+  payloads. List and history keep a JSON prefix inside the 64 KiB metadata
+  ceiling and omit the server token when a tail is dropped. A non-empty new
+  run id on failed, timed out, completed, or continued-as-new is a
+  continuation. F1 has not run this adapter against real Temporal.
+- **W2-α / A2:** [PR #628](https://github.com/caesium-cloud/caesium/pull/628)
+  merged `331ccce7a1897f19ea0c6c7d2ca24b427d87df79` at 2026-10-14T00:09:41Z.
+  Head `7f39fe437d98a9f6dd013e0aa3fbc143da6a0578`. `ci-ok`, coverage, unit
+  tests, lint, and `images-arm64` succeeded. The catalog store is on master.
+  `docs/connectors.md` keeps storage and retention, then Temporal observation.
+  Startup reads the epoch after migration and does not compare it. HTTP proof
+  remains C1. An earlier arm64 stress smoke on a pre-rewrite SHA reported
+  `terminal_oom_unconfirmed` (exit 137, `oom=false`); the merged head's
+  `images-arm64` check succeeded.
+- **Next ready:** B2 and F1. D1 still needs F1. C1 still needs D1 and F1.
 
 ### Stream Status
 
 | Stream | Scope | Priority | Status |
 | --- | --- | --- | --- |
-| A | Generic contract, configuration and catalog (2 items) | P0 | Not started |
-| B | Temporal inspection and declared messages (2 items) | P0 | Not started |
+| A | Generic contract, configuration and catalog (2 items) | P0 | Shipped (A1, A2) |
+| B | Temporal inspection and declared messages (2 items) | P0 | B1 shipped; B2 not started |
 | C | Authenticated REST and composition (2 items) | P0 | Not started |
 | D | Verified correlation and action durability (2 items) | P0 | Not started |
 | E | Console monitoring, data links and approval (3 items) | P0 | Not started |
@@ -244,7 +274,7 @@ An open PR or fixture-only pass is not completion. Resume unfinished waves.
 
 ### Stream A — Generic contract, configuration and catalog
 
-- [ ] A1. Implement provider-neutral contracts/registry and strict versioned
+- [x] A1. Implement provider-neutral contracts/registry and strict versioned
   connection/binding configuration: schemas, secret references, gate validation,
   resource limits, canonical config fingerprint, immutable connection identity,
   stateless execution references, reserved actor envelope and the frozen v1
@@ -263,7 +293,7 @@ An open PR or fixture-only pass is not completion. Resume unfinished waves.
   secret bytes do not. Disabled configuration preserves defaults. The guide/index
   ship together and pass the docs-index guardrail. C1 supplies actual gate proof.
 
-- [ ] A2. Persist external identities, bounded direct snapshots, typed relation
+- [x] A2. Persist external identities, bounded direct snapshots, typed relation
   evidence, active configuration epoch and action receipt/dedupe records in the
   catalog. Unique indexes and conditional writes enforce observation-generation,
   one-open-operation and receipt invariants. Coalesce unchanged evidence and
@@ -284,7 +314,7 @@ An open PR or fixture-only pass is not completion. Resume unfinished waves.
 
 ### Stream B — Temporal adapter
 
-- [ ] B1. Implement health, filtered paginated discovery, direct descriptions
+- [x] B1. Implement health, filtered paginated discovery, direct descriptions
   and bounded history. Preserve native identity/status, reported activity attempts,
   parent/child/continuation evidence and workflow-task problems separately from
   workflow failure. Configure TLS/API-key/mTLS; plaintext is explicitly local.
@@ -567,9 +597,9 @@ compiled integration-runner approach; fixture code stays in the root module.
 **16 included items in seven streams.** Dependencies are explicit above;
 unchecked sibling work is not a hidden prerequisite.
 
-- First ready item: **A1**; no Temporal account/server required.
-- After A1: **A2 and B1** can proceed independently.
-- After B1: **B2 and F1**; F1 supplies the pinned external fixture.
+- **A1, A2, and B1** are merged. See Progress for the merge SHAs.
+- Next ready items: **B2 and F1**. F1 supplies the pinned external fixture.
+  B2 needs no Temporal Cloud account; F1 needs the pinned dev server.
 - **D1** needs A2/B1/F1; **D2** needs A2/B2/F1. Core files are disjoint.
 - **C1** joins A2/B1/D1/F1; **C2** follows C1/B2/D2.
 - **E1** can run on merged C1 while C2 develops; **E2 -> E3** serializes
