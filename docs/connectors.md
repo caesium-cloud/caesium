@@ -417,3 +417,72 @@ paths uses TLS. File-read errors are redacted when they would contain the API
 key or a PEM body. The configured RPC deadline defaults to
 `connector.MaxRPCDeadline` and a larger value is rejected. A caller's shorter
 deadline is kept.
+
+## Real Temporal development fixture
+
+`just connectors-fixture-check` builds the fixture and integration runner from
+this checkout, starts the tracked authenticated `integration-up-agent` server, and drives
+real Temporal and Caesium APIs. The recipe requires Docker, the repository
+builder, and an unused tracked `caesium-server-agent-test` container name. It refuses
+to replace an existing server. The controller must serialize this recipe with
+other Docker/browser lanes. No application rows are seeded.
+
+The fixture pins Go SDK **1.49.0**, Temporal CLI **1.9.1**, and its bundled
+Temporal Server **1.32.0**. Linux amd64 and arm64 CLI archives are verified
+against the checksums from the
+[official release](https://github.com/temporalio/cli/releases/tag/v1.9.1), and the
+runtime pins the Alpine 3.23 multi-platform image digest. The test checks the
+actual server version returned by `GetSystemInfo`; artifacts also retain the
+CLI version, image identities, candidate SHA and dirty source status. A dirty
+development run is useful iteration evidence, not final candidate qualification.
+This local matrix does not qualify Temporal Cloud or other server versions.
+
+```sh
+just tag=connector-local connectors-fixture-check
+```
+
+For a controller-owned existing tracked server, pass its exact name without
+transferring cleanup ownership:
+
+```sh
+CAESIUM_CONNECTORS_EXISTING_SERVER=true \
+CAESIUM_CONNECTORS_SERVER_CONTAINER=caesium-server-agent-test \
+just tag=connector-local connectors-fixture-check
+```
+
+The script creates a unique Temporal/worker container in the server's network
+namespace and removes only resources it successfully created. Evidence remains
+under `.tmp/connectors-fixture/`, or the absolute directory supplied in
+`CAESIUM_CONNECTORS_ARTIFACTS`. The fixture runs an on-disk development server,
+a real SDK worker, an mTLS gRPC proxy, and a separate append-only effect/start
+journal. The fixture control API is test infrastructure at port 7240, never a
+Caesium product endpoint. The trusted service-producer boundary for actor
+context is unchanged: another authorized Temporal writer is outside the claim.
+
+The selected test fails if the fixture or worker is absent. It verifies:
+
+- External-only inspection and a publication workflow using the actual
+  `POST /v1/jobs/:id/run` API. Activity retries send the same
+  `<RunID>/<ActivityID>` key and return the frozen `v1` correlation envelope.
+- Explicit status Query, remote validator rejection, recorded actor context,
+  server-derived operator principal from real key creation and `/auth/whoami`,
+  one independent approval effect across distinct Update IDs/operators, and a
+  second actual Caesium job admission.
+- Worker stop/restart, child Run ID, continuation without retargeting an old
+  action, connector-path interruption/recovery, and activity results with an
+  unsupported encoding that retain metadata without revealing their payload.
+- Real accepted and rejected Update replies dropped after the server responds.
+  On the pinned server, a completed accepted Update looks up as
+  `COMPLETED/OK`; a validator rejection before acceptance looks up as
+  `NOT_FOUND`. Lookups after eligibility changes do not send another Update.
+  A deliberate explicit submission of the same ID demonstrates confirmation.
+- Actual mTLS option handling: the configured CA/client pair succeeds, and a
+  missing client certificate fails against the same endpoint.
+
+`test/connectors/testdata/connections.yaml` declares the `publication` workflow
+binding and bounded Query schema. Mount the artifact directory at `/artifacts`
+for its certificate paths. Its two job aliases are examples; substitute the
+actual lane job aliases before later correlation-route qualification. F1's
+self-check uses real SDK calls because connector REST routes land in C1/C2.
+The authenticated HTTP/browser CI lane and receipt/restart qualification remain
+later plan items, and the existing default integration lane stays off by default.

@@ -1970,3 +1970,10 @@ clean-worktrees:
     else
         echo "removed $removable worktree(s), kept $kept."
     fi
+
+# Real Temporal 1.32.0 / CLI 1.9.1 / SDK 1.49.0 fixture self-qualification.
+# This uses tracked integration-up-agent; F2 adds connector HTTP/browser routes.
+connectors-fixture-check: integration-runner
+    CAESIUM_CONTAINER_CLI={{ container_cli }} CAESIUM_PLATFORM={{ platform }} \
+        CAESIUM_CONNECTORS_TAG={{ tag }} CAESIUM_CONNECTORS_BUILDER_IMAGE={{ local_builder_ref }}:{{ tag }}-full \
+        sh scripts/connectors-fixture.sh check

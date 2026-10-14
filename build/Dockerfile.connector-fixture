@@ -1,0 +1,25 @@
+# CLI checksums: https://github.com/temporalio/cli/releases/tag/v1.9.1
+# That release embeds Temporal Server v1.32.0 (its tagged go.mod).
+ARG BUILDER_IMAGE=caesiumcloud/caesium-builder:latest-full
+FROM ${BUILDER_IMAGE} AS compile
+WORKDIR /bld/caesium
+COPY . .
+RUN --mount=type=cache,target=/root/.cache/go-build \
+    CGO_ENABLED=0 go build -tags=integration -o /out/connectors-fixture ./test/connectors/fixture
+
+FROM alpine:3.23@sha256:85fe1e81d6758c208f3e1eed4338a1997e19d4be002d4dd32d3100c9a8c010a0 AS fixture
+ARG TARGETARCH
+RUN apk add --no-cache ca-certificates curl tar && \
+    case "$TARGETARCH" in \
+      amd64) checksum=09a0326a51db84d02735e53542b9ebd8c4758daf47482a9ab0abce15844e60d5 ;; \
+      arm64) checksum=6c57c352d52fc3df34412376fd9ba6f74b7e3ace8e426e6cba8600156d36a145 ;; \
+      *) echo "unsupported fixture architecture" >&2; exit 1 ;; \
+    esac && \
+    curl -fsSL "https://github.com/temporalio/cli/releases/download/v1.9.1/temporal_cli_1.9.1_linux_${TARGETARCH}.tar.gz" -o /tmp/temporal.tar.gz && \
+    echo "$checksum  /tmp/temporal.tar.gz" | sha256sum -c - && \
+    tar -xzf /tmp/temporal.tar.gz -C /usr/local/bin temporal && \
+    rm /tmp/temporal.tar.gz
+COPY --from=compile /out/connectors-fixture /usr/local/bin/connectors-fixture
+COPY scripts/connectors-fixture.sh /usr/local/bin/connectors-fixture.sh
+EXPOSE 7233 7234 7240
+ENTRYPOINT ["sh", "/usr/local/bin/connectors-fixture.sh", "serve"]
