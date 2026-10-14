@@ -9,7 +9,10 @@ import json
 import subprocess
 import sys
 
-TESTS = {'./test/robustness': ['TestSoakStartIncompleteBodyReconcilesOnlyWithSameKey',
+TESTS = {'./test/connectors/fixture': ['TestFixtureConfigMatchesPublicationState',
+                                    'TestFixtureVersionsRejectUnqualifiedObservations',
+                                    'TestFixtureJournalRecordsEveryEffectExecution'],
+ './test/robustness': ['TestSoakStartIncompleteBodyReconcilesOnlyWithSameKey',
                        'TestNoKeyHealReadErrorPreservesPossibleIdentityAndStatus',
                        'TestHealThroughInterposerIncompleteResponseNeverBlindRetries',
                        'TestSoakQueueDepthRejectsIncompleteEvidence',

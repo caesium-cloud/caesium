@@ -24,11 +24,12 @@ SHUTDOWN_RESULT_TESTS = {
 class HermeticIntegrationSelectorTests(unittest.TestCase):
     def test_all_original_requirements_and_shutdown_validators_are_selected(self):
         expected = [name for names in runner.TESTS.values() for name in names]
-        self.assertEqual(len(expected), 38)
-        self.assertEqual(len(set(expected)), 38)
+        self.assertEqual(len(expected), 41)
+        self.assertEqual(len(set(expected)), 41)
         self.assertEqual(
             {package: len(names) for package, names in runner.TESTS.items()},
             {
+                "./test/connectors/fixture": 3,
                 "./test/robustness": 10,
                 "./test/lifecycle": 8,
                 "./test/robustness/cluster": 15,
@@ -78,8 +79,19 @@ class HermeticIntegrationSelectorTests(unittest.TestCase):
         with patch.object(runner.subprocess, "run", side_effect=fake_go_test), \
                 redirect_stdout(io.StringIO()), redirect_stderr(stderr):
             self.assertEqual(runner.main(), 1)
-        self.assertEqual(len(commands), 1)
+        self.assertEqual(len(commands), 2)
         self.assertIn(missing, stderr.getvalue())
+
+    def test_fixture_missing_or_skipped_named_pass_fails_closed(self):
+        for missing in runner.TESTS["./test/connectors/fixture"]:
+            with self.subTest(missing=missing):
+                events = [json.dumps({"Action": "skip" if name == missing else "pass", "Test": name})
+                          for name in runner.TESTS["./test/connectors/fixture"]]
+                result = subprocess.CompletedProcess([], 0, "\n".join(events) + "\n", "")
+                with patch.object(runner.subprocess, "run", return_value=result), \
+                        redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                    self.assertEqual(runner.main(), 1)
+
 
 
 if __name__ == "__main__":

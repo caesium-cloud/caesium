@@ -105,9 +105,8 @@ func (a *activities) RunJob(ctx context.Context, in runJobInput) (any, error) {
 func (a *activities) Effect(ctx context.Context, actor connector.ActorEnvelope) error {
 	info := activity.GetInfo(ctx)
 	a.journal.add(map[string]any{"kind": "effect_attempt", "run_id": info.WorkflowExecution.RunID, "activity_id": info.ActivityID, "attempt": info.Attempt})
-	// The independent journal is durable across worker restarts. Activity retry
-	// cannot count another external effect under the same workflow run.
-	a.journal.effect(info.WorkflowExecution.RunID, actor)
+	// Preserve every execution independently from the workflow's approval guard.
+	a.journal.effect(info.WorkflowExecution.RunID, info.ActivityID, info.Attempt, actor)
 	return nil
 }
 func (a *activities) request(ctx context.Context, method, path, key string, body, out any) error {

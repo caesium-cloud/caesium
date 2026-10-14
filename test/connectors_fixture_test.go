@@ -312,7 +312,7 @@ func (s *IntegrationTestSuite) TestConnectorsFixture() {
 	s.Require().Equal(1, state.ApprovalEffects)
 	s.Require().Equal(&actor, state.Actor)
 	s.Require().Len(s.fetchRuns(jobs[1]), 1, "new update ID must not start the second job again")
-	s.Require().Equal(1, fixtureCount(s.fixtureEvidence(), "approval_effect", "run_id", publication.RunID), "independent sink counts one business effect")
+	s.Require().Equal(1, fixtureCount(s.fixtureEvidence(), "approval_effect", "run_id", publication.RunID), "raw external effect executions must remain one across distinct Updates and restart")
 	s.Require().Equal(1, fixtureEffectActivities(s.fixtureEvidence(), publication.RunID), "one distinct effect activity across new IDs and worker replay")
 	for _, event := range s.fixtureHistory(c, publication) {
 		if accepted := event.GetWorkflowExecutionUpdateAcceptedEventAttributes(); accepted != nil && accepted.GetAcceptedRequest().GetMeta().GetUpdateId() == acceptedID {
@@ -326,8 +326,9 @@ func (s *IntegrationTestSuite) TestConnectorsFixture() {
 	}
 	s.Require().True(actorFound, "authenticated producer context must survive in real accepted Update history")
 
-	// Before acceptance a rejected Update is absent from history. Changed
-	// eligibility and lookups must not silently submit the same unknown operation.
+	// Record raw provider lookup behavior after a validator rejection and changed
+	// eligibility. Adapter reconciliation/no-resend is qualified by B2, not by
+	// this helper, which deliberately issues only PollWorkflowExecutionUpdate.
 	rejected := s.fixtureStart("lost-rejected", "publication", jobs[0], jobs[1], false, false, false, false)
 	s.fixtureAwait(c, rejected, "awaiting_approval")
 	rejectedID := "lost-rejected"
@@ -337,7 +338,6 @@ func (s *IntegrationTestSuite) TestConnectorsFixture() {
 	s.Require().Equal(codes.DeadlineExceeded, serviceerror.ToStatus(err).Code())
 	_, err = s.fixtureLookup(c, rejected, rejectedID)
 	s.Require().Equal(codes.NotFound, serviceerror.ToStatus(err).Code(), "pinned server rejected-before-acceptance lookup is NotFound")
-	callsBefore := fixtureCount(s.fixtureEvidence(), "update_rpc", "update_id", rejectedID)
 	s.fixtureSignal(rejected, "fixture_eligibility", true)
 	for i := 0; i < 2; i++ {
 		_, err = s.fixtureLookup(c, rejected, rejectedID)
@@ -347,7 +347,6 @@ func (s *IntegrationTestSuite) TestConnectorsFixture() {
 	s.Require().True(state.Eligible)
 	s.Require().False(state.Approved)
 	s.Require().Equal(0, fixtureCount(s.fixtureEvidence(), "approval_effect", "run_id", rejected.RunID))
-	s.Require().Equal(callsBefore, fixtureCount(s.fixtureEvidence(), "update_rpc", "update_id", rejectedID), "lookup never resubmits after eligibility changes")
 	for _, event := range s.fixtureHistory(c, rejected) {
 		if accepted := event.GetWorkflowExecutionUpdateAcceptedEventAttributes(); accepted != nil {
 			s.Require().NotEqual(rejectedID, accepted.GetAcceptedRequest().GetMeta().GetUpdateId())
@@ -449,7 +448,7 @@ func (s *IntegrationTestSuite) TestConnectorsFixture() {
 	s.Require().True(acceptedDrop, "accepted reply-loss fault must actually activate")
 	s.Require().True(rejectedDrop, "rejected reply-loss fault must actually activate")
 	s.Require().True(interruption)
-	data, err := json.MarshalIndent(map[string]any{"candidate_sha": candidate, "sdk": "1.49.0", "cli": "1.9.1", "server": system.GetServerVersion(), "accepted_lookup": "COMPLETED/OK", "rejected_lookup": "NOT_FOUND", "publication": publication, "continuation_run_id": continuation, "events": events}, "", "  ")
+	data, err := json.MarshalIndent(map[string]any{"candidate_sha": candidate, "sdk": ready["sdk"], "cli": ready["cli"], "server": system.GetServerVersion(), "accepted_lookup": "COMPLETED/OK", "rejected_lookup": "NOT_FOUND", "publication": publication, "continuation_run_id": continuation, "events": events}, "", "  ")
 	s.Require().NoError(err)
 	s.Require().NoError(os.WriteFile(filepath.Join(artifacts, "fixture-evidence.json"), data, 0644))
 }

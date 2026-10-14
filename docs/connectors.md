@@ -421,28 +421,34 @@ deadline is kept.
 ## Real Temporal development fixture
 
 `just connectors-fixture-check` builds the fixture and integration runner from
-this checkout, starts the tracked authenticated `integration-up-agent` server, and drives
-real Temporal and Caesium APIs. The recipe requires Docker, the repository
-builder, and an unused tracked `caesium-server-agent-test` container name. It refuses
-to replace an existing server. The controller must serialize this recipe with
-other Docker/browser lanes. No application rows are seeded.
+this checkout and drives real Temporal and authenticated Caesium APIs. It builds
+the tracked `integration-up-agent` prerequisites first, then uses that recipe's
+shared environment in create-only mode. Container creation reserves the name
+atomically; it never removes a same-named server. The immediate source-matched
+prerequisite images are reused for that create-only call. The controller must
+serialize this recipe with other Docker/browser lanes. No application rows are
+seeded. Docker, Python 3, the repository builder and an unused tracked
+`caesium-server-agent-test` name are required.
 
 The fixture pins Go SDK **1.49.0**, Temporal CLI **1.9.1**, and its bundled
 Temporal Server **1.32.0**. Linux amd64 and arm64 CLI archives are verified
 against the checksums from the
 [official release](https://github.com/temporalio/cli/releases/tag/v1.9.1), and the
-runtime pins the Alpine 3.23 multi-platform image digest. The test checks the
-actual server version returned by `GetSystemInfo`; artifacts also retain the
-CLI version, image identities, candidate SHA and dirty source status. A dirty
-development run is useful iteration evidence, not final candidate qualification.
-This local matrix does not qualify Temporal Cloud or other server versions.
+runtime pins the Alpine 3.23 multi-platform image digest. At startup, the worker
+observes its SDK build identity, invokes `temporal --version`, and reads the
+server version through `GetSystemInfo`. A mismatch prevents readiness. Health
+and the startup journal report those checked observations, including when only
+the B2 adapter scenario is selected. This local matrix does not qualify Temporal
+Cloud or other server versions.
 
 ```sh
 just tag=connector-local connectors-fixture-check
 ```
 
 For a controller-owned existing tracked server, pass its exact name without
-transferring cleanup ownership:
+transferring cleanup ownership. Only this mode uses an exported
+`CAESIUM_AUTH_ADMIN_KEY` or `CAESIUM_API_KEY`; an owned server always supplies its
+own fresh bootstrap credential.
 
 ```sh
 CAESIUM_CONNECTORS_EXISTING_SERVER=true \
@@ -450,14 +456,28 @@ CAESIUM_CONNECTORS_SERVER_CONTAINER=caesium-server-agent-test \
 just tag=connector-local connectors-fixture-check
 ```
 
-The script creates a unique Temporal/worker container in the server's network
-namespace and removes only resources it successfully created. Evidence remains
-under `.tmp/connectors-fixture/`, or the absolute directory supplied in
-`CAESIUM_CONNECTORS_ARTIFACTS`. The fixture runs an on-disk development server,
-a real SDK worker, an mTLS gRPC proxy, and a separate append-only effect/start
-journal. The fixture control API is test infrastructure at port 7240, never a
-Caesium product endpoint. The trusted service-producer boundary for actor
-context is unchanged: another authorized Temporal writer is outside the claim.
+The script records immutable container IDs as creation succeeds and cleans only
+those IDs on ordinary exit, HUP, INT or TERM, including under dash. A borrowed
+server name is resolved once and never grants cleanup ownership. The fixture and
+runner use the host UID/GID, so Linux hosts can read and remove their evidence;
+private TLS keys retain restrictive permissions. The fixture runs an on-disk
+development server, a real SDK worker, an mTLS gRPC proxy, and a separate
+append-only start/effect journal. Every effect execution is recorded with its
+Activity ID and attempt; the evidence sink does not suppress duplicates.
+
+Evidence remains under `.tmp/connectors-fixture/`, or the absolute directory in
+`CAESIUM_CONNECTORS_ARTIFACTS`. A supplied directory must be empty. Artifacts
+include the candidate SHA, working-tree status, the diff against HEAD (including
+staged changes), hashes for all tracked and untracked source paths, observed
+versions, fixture/runner image identities, and the actual server container and
+image in both ownership modes. Server metadata and retained logs redact
+credentials. A dirty development run is iteration evidence, not final candidate
+qualification. The `serve` entrypoint expects the controller-created artifact
+directory; it is not a standalone host launcher.
+
+The fixture control API is test infrastructure at port 7240, never a Caesium
+product endpoint. The trusted service-producer boundary for actor context is
+unchanged: another authorized Temporal writer is outside the claim.
 
 The selected test fails if the fixture or worker is absent. It verifies:
 
@@ -466,23 +486,36 @@ The selected test fails if the fixture or worker is absent. It verifies:
   `<RunID>/<ActivityID>` key and return the frozen `v1` correlation envelope.
 - Explicit status Query, remote validator rejection, recorded actor context,
   server-derived operator principal from real key creation and `/auth/whoami`,
-  one independent approval effect across distinct Update IDs/operators, and a
-  second actual Caesium job admission.
+  one raw external effect execution across distinct Update IDs/operators and
+  worker restart, and a second actual Caesium job admission.
 - Worker stop/restart, child Run ID, continuation without retargeting an old
   action, connector-path interruption/recovery, and activity results with an
   unsupported encoding that retain metadata without revealing their payload.
 - Real accepted and rejected Update replies dropped after the server responds.
   On the pinned server, a completed accepted Update looks up as
   `COMPLETED/OK`; a validator rejection before acceptance looks up as
-  `NOT_FOUND`. Lookups after eligibility changes do not send another Update.
-  A deliberate explicit submission of the same ID demonstrates confirmation.
+  `NOT_FOUND`, including after eligibility changes. F1 records this raw Poll
+  behavior. B2's separate adapter scenario qualifies receipt lookup without
+  resubmission. A deliberate explicit submission of the same ID demonstrates
+  the remote behavior needed for confirmation.
 - Actual mTLS option handling: the configured CA/client pair succeeds, and a
   missing client certificate fails against the same endpoint.
 
 `test/connectors/testdata/connections.yaml` declares the `publication` workflow
-binding and bounded Query schema. Mount the artifact directory at `/artifacts`
-for its certificate paths. Its two job aliases are examples; substitute the
-actual lane job aliases before later correlation-route qualification. F1's
-self-check uses real SDK calls because connector REST routes land in C1/C2.
-The authenticated HTTP/browser CI lane and receipt/restart qualification remain
-later plan items, and the existing default integration lane stays off by default.
+binding and bounded Query schema. It requires merged B2 Query schema support.
+`just tagged-unit-test` requires the hermetic fixture config/state-schema,
+observed-version and raw-effect journal regressions to pass by name; it fails on
+an unsupported config, a missing test or a skip. The publication state is
+serialized and validated against the committed schema, without a live server.
+The orchestration probes run without Docker:
+
+```sh
+python3 -m unittest scripts/test_connectors_fixture.py scripts/test_integration_hermetic_tests.py
+```
+
+Mount the artifact directory at `/artifacts` for the configuration's certificate
+paths. Its two job aliases are examples; substitute actual lane job aliases
+before later correlation-route qualification. F1's self-check uses real SDK
+calls because connector REST routes land in C1/C2. The authenticated HTTP/browser
+CI lane and receipt/restart qualification remain later plan items, and the
+existing default integration lane stays off by default.

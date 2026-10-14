@@ -19,8 +19,10 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"regexp"
 	"runtime/debug"
 	"strings"
 	"sync"
@@ -45,14 +47,13 @@ import (
 )
 
 type journal struct {
-	mu      sync.Mutex
-	path    string
-	events  []map[string]any
-	effects map[string]bool
+	mu     sync.Mutex
+	path   string
+	events []map[string]any
 }
 
 func newJournal(path string) (*journal, error) {
-	j := &journal{path: path, effects: map[string]bool{}}
+	j := &journal{path: path}
 	raw, err := os.ReadFile(path)
 	if err == nil {
 		for _, line := range strings.Split(strings.TrimSpace(string(raw)), "\n") {
@@ -61,11 +62,7 @@ func newJournal(path string) (*journal, error) {
 				return nil, err
 			}
 			j.events = append(j.events, event)
-			if event["kind"] == "approval_effect" {
-				if key, ok := event["run_id"].(string); ok {
-					j.effects[key] = true
-				}
-			}
+
 		}
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return nil, err
@@ -79,7 +76,7 @@ func (j *journal) append(event map[string]any) {
 	if err != nil {
 		log.Fatal(err)
 	}
-	f, err := os.OpenFile(j.path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600)
+	f, err := os.OpenFile(j.path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -95,14 +92,11 @@ func (j *journal) append(event map[string]any) {
 	}
 	j.events = append(j.events, event)
 }
-func (j *journal) effect(runID string, actor connector.ActorEnvelope) {
-	j.mu.Lock()
-	defer j.mu.Unlock()
-	if j.effects[runID] {
-		return
-	}
-	j.append(map[string]any{"kind": "approval_effect", "run_id": runID, "actor": actor})
-	j.effects[runID] = true
+
+// effect records every external execution. The evidence sink never suppresses
+// duplicates; its raw count must expose a second activity or a retry.
+func (j *journal) effect(runID, activityID string, attempt int32, actor connector.ActorEnvelope) {
+	j.add(map[string]any{"kind": "approval_effect", "run_id": runID, "activity_id": activityID, "attempt": attempt, "actor": actor})
 }
 func (j *journal) snapshot() []map[string]any {
 	j.mu.Lock()
@@ -110,6 +104,26 @@ func (j *journal) snapshot() []map[string]any {
 	out := make([]map[string]any, len(j.events))
 	copy(out, j.events)
 	return out
+}
+
+type versionMatrix struct {
+	SDK    string `json:"sdk"`
+	CLI    string `json:"cli"`
+	Server string `json:"server"`
+}
+
+var cliVersionPattern = regexp.MustCompile(`^temporal version ([0-9]+\.[0-9]+\.[0-9]+) \(Server ([0-9]+\.[0-9]+\.[0-9]+),`)
+
+func validateVersions(sdk, cliOutput, server string) (versionMatrix, error) {
+	matched := cliVersionPattern.FindStringSubmatch(strings.TrimSpace(cliOutput))
+	if len(matched) != 3 {
+		return versionMatrix{}, errors.New("temporal CLI version output is unrecognized")
+	}
+	observed := versionMatrix{SDK: strings.TrimPrefix(sdk, "v"), CLI: matched[1], Server: server}
+	if observed.SDK != "1.49.0" || observed.CLI != "1.9.1" || observed.Server != "1.32.0" || matched[2] != observed.Server {
+		return versionMatrix{}, errors.New("observed Temporal versions do not match qualified fixture matrix")
+	}
+	return observed, nil
 }
 
 type fixture struct {
@@ -120,6 +134,7 @@ type fixture struct {
 	j                  *journal
 	faultID, faultMode string
 	outage             bool
+	versions           versionMatrix
 }
 
 func (f *fixture) startWorker() error {
@@ -277,7 +292,7 @@ func (f *fixture) routes() http.Handler {
 			http.Error(w, "real worker query failed", http.StatusServiceUnavailable)
 			return
 		}
-		writeJSON(w, map[string]any{"ready": true, "sdk": "1.49.0", "cli": "1.9.1", "server": "1.32.0"})
+		writeJSON(w, map[string]any{"ready": true, "sdk": f.versions.SDK, "cli": f.versions.CLI, "server": f.versions.Server})
 	})
 	mux.HandleFunc("POST /configure", func(w http.ResponseWriter, r *http.Request) {
 		var in struct {
@@ -479,9 +494,7 @@ func main() {
 			sdkVersion = dependency.Version
 		}
 	}
-	if sdkVersion != "v1.49.0" {
-		log.Fatalf("unqualified fixture SDK version %q", sdkVersion)
-	}
+
 	artifacts := os.Getenv("CAESIUM_CONNECTORS_ARTIFACTS")
 	if artifacts == "" {
 		artifacts = "/artifacts"
@@ -511,11 +524,33 @@ func main() {
 		time.Sleep(time.Second)
 	}
 	defer c.Close()
+	versionCtx, versionCancel := context.WithTimeout(ctx, 5*time.Second)
+	system, err := c.WorkflowService().GetSystemInfo(versionCtx, &workflowservice.GetSystemInfoRequest{})
+	versionCancel()
+	if err != nil {
+		log.Fatal("Temporal server version could not be observed")
+	}
+	cliCtx, cliCancel := context.WithTimeout(ctx, 5*time.Second)
+	cliOutput, err := exec.CommandContext(cliCtx, "temporal", "--version").Output()
+	cliCancel()
+	if err != nil {
+		log.Fatal("Temporal CLI version could not be observed")
+	}
+	versions, err := validateVersions(sdkVersion, string(cliOutput), system.GetServerVersion())
+	if err != nil {
+		log.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(artifacts, "temporal-version.txt"), cliOutput, 0644); err != nil {
+		log.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(artifacts, "server-version.txt"), []byte(versions.Server+"\n"), 0644); err != nil {
+		log.Fatal(err)
+	}
 	server := os.Getenv("CAESIUM_CONNECTORS_CAESIUM_URL")
 	if server == "" {
 		server = "http://127.0.0.1:8080"
 	}
-	f := &fixture{c: c, j: j, a: &activities{server: server, key: os.Getenv("CAESIUM_CONNECTORS_RUNNER_KEY"), http: &http.Client{Timeout: 10 * time.Second}, journal: j}}
+	f := &fixture{c: c, j: j, versions: versions, a: &activities{server: server, http: &http.Client{Timeout: 10 * time.Second}, journal: j}}
 	if err := f.startWorker(); err != nil {
 		log.Fatal(err)
 	}
@@ -545,7 +580,7 @@ func main() {
 			log.Fatal(err)
 		}
 	}()
-	j.add(map[string]any{"kind": "fixture_started", "sdk": "1.49.0", "cli": "1.9.1", "server": "1.32.0", "candidate": os.Getenv("CAESIUM_CONNECTORS_CANDIDATE_SHA")})
+	j.add(map[string]any{"kind": "fixture_started", "sdk": versions.SDK, "cli": versions.CLI, "server": versions.Server, "candidate": os.Getenv("CAESIUM_CONNECTORS_CANDIDATE_SHA")})
 	<-ctx.Done()
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer shutdownCancel()
