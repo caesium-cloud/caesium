@@ -294,7 +294,7 @@ Resume unfinished waves. Do not archive this plan while later items remain.
   default-disabled integration passed in 867.5 seconds; normal agent auth passed
   45 scenarios in 35.2 seconds. Final containerized plan guardrails passed.
   Hosted B2 [run 38569107187](https://github.com/caesium-cloud/caesium/actions/runs/38569107187)
-  has no observed failing job and still awaits coverage. F1
+  completed successfully, including current-head `ci-ok`. F1
   [run 38569974495](https://github.com/caesium-cloud/caesium/actions/runs/38569974495)
   failed both unit architectures at the explicit B2 schema prerequisite. It also
   failed [UI focus restoration](https://github.com/caesium-cloud/caesium/actions/runs/38569974495/job/115875857245)
