@@ -70,10 +70,12 @@ reads/history supply detail; bindings supply explicit business semantics.
 1. **Three objects.** Connector implementations register behind a neutral
    interface. Connections have stable IDs, provider type, endpoint, credential
    references and external scope. Optional versioned workflow bindings declare
-   display names, one status Query, named actions with JSON input/result schemas
+   display names, one status Query with a closed JSON result schema, named actions with JSON input/result schemas
    and a Caesium activity correlation contract. A1 freezes the activity-type/job
    allowlist and envelope schema before F1 consumes them. Unbound workflows remain
-   inspectable with no business action buttons. Configured workflow-type scope
+   inspectable with no business action buttons. A binding's name is its exact
+   workflow type selector. An omitted status Query result schema leaves that
+   Query unavailable; existing configuration remains parseable. Configured workflow-type scope
    applies to direct reads/action targets as well as lists.
 2. **Gate/configuration.** `CAESIUM_CONNECTORS_ENABLED=false` by default;
    `CAESIUM_CONNECTORS_CONFIG_FILE` selects separate versioned YAML, not a job
@@ -220,7 +222,8 @@ cardinality and closed-workflow Query dispatch count through the live surface.
 
 ## Progress (as of 2026-10-14)
 
-W1 and W2 have merged. B2, C, D, E, F, and N are not started. Drafting base:
+W1 and W2 have merged. W3 is implementing B2 and F1. C, D, E, F2–F4, and N
+are not started. Drafting base:
 `a0e862171b898a64b64828b1a5376226e85b106a`. An open PR or a fixture-only pass
 is not completion. The SHAs below are the squash merges read from GitHub.
 
@@ -258,16 +261,27 @@ Resume unfinished waves. Do not archive this plan while later items remain.
   `images-arm64` check succeeded.
 - **Next ready:** B2 and F1. D1 still needs F1. C1 still needs D1 and F1.
 
+### W3 — Declared messages and real fixture (in progress)
+
+- **W3-α / B2:** Implementing in `codex/execution-connectors-w3-alpha` from
+  `0905995c1a7602c5da8d8f5b7937d474ad43d09e`. PR and candidate evidence pending.
+  Queries require a declared closed result schema; the binding name selects the
+  exact observed workflow type. No HTTP action surface is included in this wave.
+- **W3-β / F1:** Implementing in `codex/execution-connectors-w3-beta` from the
+  same base. PR, fixture pins, fault proof, and runtime evidence pending.
+- B2 and F1 remain unchecked until their merged acceptance evidence is recorded.
+  D1/D2/C1/C2 have not been dispatched.
+
 ### Stream Status
 
 | Stream | Scope | Priority | Status |
 | --- | --- | --- | --- |
 | A | Generic contract, configuration and catalog (2 items) | P0 | Shipped (A1, A2) |
-| B | Temporal inspection and declared messages (2 items) | P0 | B1 shipped; B2 not started |
+| B | Temporal inspection and declared messages (2 items) | P0 | B1 shipped; B2 in progress (W3-α) |
 | C | Authenticated REST and composition (2 items) | P0 | Not started |
 | D | Verified correlation and action durability (2 items) | P0 | Not started |
 | E | Console monitoring, data links and approval (3 items) | P0 | Not started |
-| F | Real fixture, CI, qualification and promotion (4 items) | P0 | Not started |
+| F | Real fixture, CI, qualification and promotion (4 items) | P0 | F1 in progress (W3-β); F2–F4 not started |
 | N | Operator guidance and reconciliation (1 item) | P0 | Not started |
 
 ## Streams
@@ -335,6 +349,9 @@ Resume unfinished waves. Do not archive this plan while later items remain.
   rejection and ambiguous RPC outcomes, including not-found after lost rejection.
   Files: new `internal/connector/temporal/messages.go`,
   new `internal/connector/temporal/messages_test.go`,
+  `internal/connector/config.go`, `internal/connector/config_test.go`,
+  `internal/connector/fingerprint.go`, `test/fixtures/connectors/connections.yaml`
+  (optional status Query result schema and its fingerprint),
   `docs/connectors.md` (message semantics sections).
   Depends on: B1.
   Verify: refuse undeclared handlers/custom conversion. F1 proves real Query,
