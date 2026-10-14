@@ -26,6 +26,13 @@ connections:
         version: "1"
         displayName: Publication
         statusQuery: publication_status
+        statusQueryResultSchema:
+          type: object
+          additionalProperties: false
+          required: [stage]
+          properties:
+            stage:
+              type: string
         activityAllowlist:
           - activityType: caesium.start
             jobs: [publish, notify]
