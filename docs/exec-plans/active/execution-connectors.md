@@ -262,29 +262,38 @@ Resume unfinished waves. Do not archive this plan while later items remain.
   `images-arm64` check succeeded.
 - **Next ready:** B2 and F1. D1 still needs F1. C1 still needs D1 and F1.
 
-### W3 — Declared messages and real fixture (draft PRs; verification in progress)
+### W3 — Declared messages and real fixture (local gates passed; PRs open)
 
-- **W3-α / B2:** [Draft PR #632](https://github.com/caesium-cloud/caesium/pull/632),
+- **W3-α / B2:** [PR #632](https://github.com/caesium-cloud/caesium/pull/632),
   head `d3a58f24c16597d6b66746665cbd360b028690ed`, from
   `0905995c1a7602c5da8d8f5b7937d474ad43d09e`.
   Queries require a declared closed result schema; the binding name selects the
   exact observed workflow type. No HTTP action surface is included in this wave.
-- **W3-β / F1:** [Draft PR #633](https://github.com/caesium-cloud/caesium/pull/633),
+- **W3-β / F1:** [PR #633](https://github.com/caesium-cloud/caesium/pull/633),
   head `64be892b6a81f156698f891d0e09ae5a151d4969`, from the same base.
   SDK 1.49.0, CLI 1.9.1, Server 1.32.0, and the Alpine 3.23 image digest are
   pinned. A development fixture run passed in 6.33 seconds: real authenticated
   actors, mTLS, retry admissions, distinct effect activity identity, worker
-  restart, continuation, and accepted/rejected reply-loss faults. Strengthened
-  final assertions still require the current-candidate rerun.
+  restart, continuation, and accepted/rejected reply-loss faults. The final
+  clean-candidate rerun also passed the strengthened assertions below.
 - **Current validation:** Combined candidate
   `77b1fee95294a08698e3262f65a13edb98a4e83f` contains both feature snapshots,
   with B2 then F1 guide sections. Containerized connector race tests, full
   `just lint` (zero issues), and full race-enabled `just unit-test` passed.
-  Default-disabled `just integration-test` is running, followed by the selected
-  real fixture and message scenarios. This combined local evidence does not
+  Fresh-image default-disabled `just integration-test` passed in 819.8 seconds.
+  Fresh-image `just connectors-fixture-check` then ran both authenticated real
+  scenarios with no skips: `TestConnectorsFixture` passed in 6.31 seconds and
+  `TestConnectorsMessages` in 0.30 seconds (6.62 seconds total). Source status
+  was clean, and both preserved reports name this candidate. The tests observed
+  real mTLS, exact activity-derived admission keys, server-derived actors in
+  state/history, one distinct effect activity, activated accepted/rejected
+  reply losses, and exactly one initial Update send per B2 operation. Accepted
+  lookup returned `OK/COMPLETED`; rejected-before-acceptance lookup remained
+  `NotFound` after eligibility changed, without sending another Update.
+  Containerized final plan guardrails passed. This combined local evidence does not
   qualify Cloud or other versions. Both independent source reviews have no
-  remaining substantive findings; final provider evidence and GitHub checks
-  remain pending. One CODEOWNER approval and current merge-queue checks are
+  remaining substantive findings. Both feature PRs are ready for review;
+  current GitHub checks are still running. One CODEOWNER approval and current merge-queue checks are
   required by the live repository rules.
 - B2 and F1 remain unchecked until their merged acceptance evidence is recorded.
   Merge B2 before F1's schema-bearing configuration. D1/D2/C1/C2 have not been
@@ -296,11 +305,11 @@ Resume unfinished waves. Do not archive this plan while later items remain.
 | Stream | Scope | Priority | Status |
 | --- | --- | --- | --- |
 | A | Generic contract, configuration and catalog (2 items) | P0 | Shipped (A1, A2) |
-| B | Temporal inspection and declared messages (2 items) | P0 | B1 shipped; B2 draft PR #632 |
+| B | Temporal inspection and declared messages (2 items) | P0 | B1 shipped; B2 open PR #632 |
 | C | Authenticated REST and composition (2 items) | P0 | Not started |
 | D | Verified correlation and action durability (2 items) | P0 | Not started |
 | E | Console monitoring, data links and approval (3 items) | P0 | Not started |
-| F | Real fixture, CI, qualification and promotion (4 items) | P0 | F1 draft PR #633; F2–F4 not started |
+| F | Real fixture, CI, qualification and promotion (4 items) | P0 | F1 open PR #633; F2–F4 not started |
 | N | Operator guidance and reconciliation (1 item) | P0 | Not started |
 
 ## Streams
