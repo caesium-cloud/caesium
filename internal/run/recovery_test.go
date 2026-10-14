@@ -1,6 +1,7 @@
 package run
 
 import (
+	"math"
 	"testing"
 
 	"github.com/caesium-cloud/caesium/internal/models"
@@ -152,6 +153,60 @@ func TestRecover_SequenceGapReported(t *testing.T) {
 	}
 	if len(res.SequenceGaps) != 1 || res.SequenceGaps[0] != 2 {
 		t.Fatalf("expected gap at sequence 2, got %v", res.SequenceGaps)
+	}
+}
+
+// TestRecover_CorruptSequenceJumpIsBounded is the nightly fuzz campaign's
+// FuzzRecoverRunStateTerminalRows crash: a terminal_sequence billions past the
+// previous one made the gap check append every missing value until the process
+// died with "fatal error: out of memory".
+func TestRecover_CorruptSequenceJumpIsBounded(t *testing.T) {
+	b := newTopoBuilder()
+	a, bb, c := b.task(""), b.task(""), b.task("")
+	b.edge(a, bb)
+	b.edge(bb, c)
+	topo := b.build()
+
+	rows := []models.TaskRun{
+		row(a, TaskStatusSucceeded, 1),
+		row(bb, TaskStatusSucceeded, 4_000_000_000),
+		row(c, TaskStatusSucceeded, math.MaxInt64),
+	}
+	_, res, err := RecoverRunState(topo, nil, rows)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.SequenceGaps) != maxReportedSequenceGaps {
+		t.Fatalf("expected %d reported gaps, got %d", maxReportedSequenceGaps, len(res.SequenceGaps))
+	}
+	if first, last := res.SequenceGaps[0], res.SequenceGaps[len(res.SequenceGaps)-1]; first != 2 || last != maxReportedSequenceGaps+1 {
+		t.Fatalf("expected gaps 2..%d, got %d..%d", maxReportedSequenceGaps+1, first, last)
+	}
+	if res.MaxSequence != math.MaxInt64 || !res.Complete {
+		t.Fatalf("every row must still apply: max=%d complete=%v", res.MaxSequence, res.Complete)
+	}
+}
+
+// TestRecover_MaximalCheckpointSequenceDoesNotWrap covers the other way to
+// reach the same walk: a checkpoint at math.MaxInt64 overflowed the cursor to
+// math.MinInt64, so the first tail row reported negative "gaps".
+func TestRecover_MaximalCheckpointSequenceDoesNotWrap(t *testing.T) {
+	b := newTopoBuilder()
+	a, bb := b.task(""), b.task("")
+	b.edge(a, bb)
+	topo := b.build()
+
+	blob, err := NewRunState(topo, 0).Snapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkpoint := &models.RunCheckpoint{SequenceHigh: math.MaxInt64, StateBlob: blob}
+	_, res, err := RecoverRunState(topo, checkpoint, []models.TaskRun{row(a, TaskStatusSucceeded, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.SequenceGaps) != 0 {
+		t.Fatalf("nothing can follow math.MaxInt64, got %d gaps starting at %d", len(res.SequenceGaps), res.SequenceGaps[0])
 	}
 }
 
