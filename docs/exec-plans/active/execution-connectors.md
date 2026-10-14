@@ -223,7 +223,7 @@ cardinality and closed-workflow Query dispatch count through the live surface.
 
 ## Progress (as of 2026-10-14)
 
-W1 and W2 have merged. W3 has verified open PRs for B2 and F1. C, D, E, F2–F4, and N
+W1 and W2 have merged. W3 has open review-fix PRs for B2 and F1. C, D, E, F2–F4, and N
 are not started. Drafting base:
 `a0e862171b898a64b64828b1a5376226e85b106a`. An open PR or a fixture-only pass
 is not completion. The SHAs below are the squash merges read from GitHub.
@@ -262,49 +262,43 @@ Resume unfinished waves. Do not archive this plan while later items remain.
   `images-arm64` check succeeded.
 - **Next ready:** B2 and F1. D1 still needs F1. C1 still needs D1 and F1.
 
-### W3 — Declared messages and real fixture (verified; blocked on CODEOWNER approval)
+### W3 — Review fixes (live verification in progress; unmerged)
 
 - **W3-α / B2:** [PR #632](https://github.com/caesium-cloud/caesium/pull/632),
-  head `d3a58f24c16597d6b66746665cbd360b028690ed`, from
+  head `190353f32c00aae17e4cecede993afa827cc32fd`, from
   `0905995c1a7602c5da8d8f5b7937d474ad43d09e`.
-  Queries require a declared closed result schema; the binding name selects the
-  exact observed workflow type. No HTTP action surface is included in this wave.
+  Preflight refusals are distinguishable from uncertain dispatch; completed
+  failure outcomes retain unknown origin and never imply validator rejection
+  or no effect. Queries require a closed result schema and the exact workflow type.
 - **W3-β / F1:** [PR #633](https://github.com/caesium-cloud/caesium/pull/633),
-  head `64be892b6a81f156698f891d0e09ae5a151d4969`, from the same base.
-  SDK 1.49.0, CLI 1.9.1, Server 1.32.0, and the Alpine 3.23 image digest are
-  pinned. A development fixture run passed in 6.33 seconds: real authenticated
-  actors, mTLS, retry admissions, distinct effect activity identity, worker
-  restart, continuation, and accepted/rejected reply-loss faults. The final
-  clean-candidate rerun also passed the strengthened assertions below.
-- **Current validation:** Combined candidate
-  `77b1fee95294a08698e3262f65a13edb98a4e83f` contains both feature snapshots,
-  with B2 then F1 guide sections. Containerized connector race tests, full
-  `just lint` (zero issues), and full race-enabled `just unit-test` passed.
-  Fresh-image default-disabled `just integration-test` passed in 819.8 seconds.
-  Fresh-image `just connectors-fixture-check` then ran both authenticated real
-  scenarios with no skips: `TestConnectorsFixture` passed in 6.31 seconds and
-  `TestConnectorsMessages` in 0.30 seconds (6.62 seconds total). Source status
-  was clean, and both preserved reports name this candidate. The tests observed
-  real mTLS, exact activity-derived admission keys, server-derived actors in
-  state/history, one distinct effect activity, activated accepted/rejected
-  reply losses, and exactly one initial Update send per B2 operation. Accepted
-  lookup returned `OK/COMPLETED`; rejected-before-acceptance lookup remained
-  `NotFound` after eligibility changed, without sending another Update.
-  Containerized final plan guardrails passed. This combined local evidence does not
-  qualify Cloud or other versions. Both independent source reviews have no
-  remaining substantive findings. Both feature PRs are ready for review and
-  current-head `ci-ok` passed: B2 in
-  [run 38498119835](https://github.com/caesium-cloud/caesium/actions/runs/38498119835)
-  and F1 in
-  [run 38498119886](https://github.com/caesium-cloud/caesium/actions/runs/38498119886).
-  Coverage and the selected hosted matrices succeeded on each head. The base
-  remains `0905995c1a7602c5da8d8f5b7937d474ad43d09e`.
-  Final GitHub review threads are empty, but both PRs remain `REVIEW_REQUIRED`
-  and `BLOCKED`: one CODEOWNER approval is required by the live rules. No
-  approval, admin bypass, repository-settings change, or merge was performed.
-- B2 and F1 remain unchecked until their merged acceptance evidence is recorded.
-  Merge B2 before F1's schema-bearing configuration. D1/D2/C1/C2 have not been
-  dispatched. Worktrees and local evidence are retained for resumption. Plan synchronization is open in
+  head `8e9a82fc6e6f21e3ab28607bd4f7373e634f950b`, from the same base.
+  Cleanup uses atomic creation and immutable IDs, including dash signal exits.
+  Evidence records raw effect executions, observed versions, host-owned files,
+  full source and server identities, and refuses stale artifact directories.
+- **Review:** Three B2 and eight F1 threads were refreshed at their original
+  heads and fixed. Independent reviews of the revised source have no remaining
+  substantive findings. Replies/resolutions wait for the current live gates.
+- **Current candidate:** Clean combined commit
+  `3553f37f15c5cb1922a9d7e8f847da29b63a13c8` contains the exact B2/F1 source
+  snapshots with both guide sections. Its Go/recipe source is unchanged from
+  `7e9490a994da69bd51a43e1577a9b88d85d666ce`, which passed full containerized
+  lint (zero issues), race-enabled `just unit-test`, all 41 named
+  `just tagged-unit-test` regressions, and all 832 CI helper tests. The final
+  numeric-UID USER/HOME environment correction passed ten dash/selector probes
+  again. Fresh-image fixture qualification passed on this clean candidate:
+  `TestConnectorsFixture` 6.33 seconds and `TestConnectorsMessages` 0.30 seconds,
+  both PASS/no skips (6.64 seconds total). Reports bind to this candidate and
+  observe Server 1.32.0, recent pollers, the ambiguous failure state, raw effects,
+  and activated reply loss. Artifacts have host UID ownership. Default-disabled
+  integration and normal agent-lane reruns are in progress; hosted checks must
+  also match the new heads.
+- **Dependency/merge blocker:** The intact fixture config/schema regression
+  fails on F1's pre-B2 base with unsupported `statusQueryResultSchema`; it passes
+  on the combined candidate. Merge B2 first, then integrate the new master into
+  F1 and reverify. The live rules require CODEOWNER approval. Both PRs remain
+  open, and B2/F1 remain unchecked. No approval, settings change or merge occurred.
+  D1/D2/C1/C2 are not dispatched. Local evidence does not qualify Cloud or other
+  versions. Plan synchronization remains open in
   [PR #631](https://github.com/caesium-cloud/caesium/pull/631).
 
 ### Stream Status
@@ -484,6 +478,11 @@ auth chokepoints. Every endpoint includes a live HTTP integration scenario.
   explicit operator decision. Different fresh keys/actors cannot bypass the open
   guard; terminal/new-ID attempts cause no second logical approval effect. C2
   provides the public-surface proof and records actual pinned-server behavior.
+  Map B2's provider evidence explicitly: a preflight refusal proves this call
+  never dispatched, while a lookup preflight refusal says nothing about an
+  earlier send. A completed submission or lookup failure can have unknown
+  acceptance and effects. Neither becomes a
+  validator-rejected/no-effect receipt without evidence of validator origin.
 
 ### Stream E — Console operator experience
 
@@ -561,16 +560,22 @@ compiled integration-runner approach; fixture code stays in the root module.
   Independently record effects/starts.
   Files: new `test/connectors/fixture/main.go`,
   new `test/connectors/fixture/workflows.go`,
-  new `test/connectors/fixture/activity.go`, new `test/connectors_fixture_test.go`,
+  new `test/connectors/fixture/activity.go`, new `test/connectors/fixture/fixture_test.go`,
+  new `test/connectors_fixture_test.go`, new `scripts/test_connectors_fixture.py`,
   new `test/connectors/testdata/connections.yaml`,
   new `build/Dockerfile.connector-fixture`, new `scripts/connectors-fixture.sh`,
+  `scripts/integration-hermetic-tests.py`, `scripts/test_integration_hermetic_tests.py`,
   `justfile` (fixture-check recipe), `docs/connectors.md` (fixture instructions).
-  Depends on: B1.
+  Depends on: B1, B2 (the fixture configuration declares its Query result schema).
   Verify: container-built fixture drives actual Temporal/Caesium APIs without
   seeded application rows. Pin server/CLI artifact/image digests and record the
   SDK/server matrix; local certificates verify TLS option handling. Prove fault
   activation, including dropped accepted/rejected replies and exact subsequent
   lookup statuses for the pinned server. Missing worker/fixture is failure.
+  Hermetic tagged-unit checks parse the committed connection file through the
+  production parser and validate marshalled publication state against its
+  declared Query schema. Require named PASS records; unsupported schema or
+  state/config drift fails. B2 must land before F1 can pass on the merge base.
   The fixture consumes A1's schema and does not wait for D1 to define it.
   C1/C2 complete adapter qualification.
 
@@ -596,6 +601,9 @@ compiled integration-runner approach; fixture code stays in the root module.
   Verify: proposed `just integration-test-connectors` executes all manifest-named
   live scenarios and E1's dedicated Playwright project. Run
   `scripts/check-test-evidence.py --manifest test/contracts/scenarios.json --report <report> --require connectors --strict`.
+  Include `TestConnectorsMessages` in the connector lane and require an explicit
+  PASS with no skip, alongside `TestConnectorsFixture`; before F2 this real
+  Temporal adapter scenario runs only through the manual fixture-check recipe.
   Gate-off/queue-off misconfiguration, zero count, fixture failure, failed first
   browser attempt, missing artifacts or wrong candidate SHA fail the lane, which
   remains explicitly advisory to `ci-ok` until F4. Env-parity guardrail includes
@@ -652,7 +660,7 @@ compiled integration-runner approach; fixture code stays in the root module.
 unchecked sibling work is not a hidden prerequisite.
 
 - **A1, A2, and B1** are merged. See Progress for the merge SHAs.
-- Next ready items: **B2 and F1**. F1 supplies the pinned external fixture.
+- In-flight items: **B2 and F1**. Merge B2 before F1's schema-bearing fixture.
   B2 needs no Temporal Cloud account; F1 needs the pinned dev server.
 - **D1** needs A2/B1/F1; **D2** needs A2/B2/F1. Core files are disjoint.
 - **C1** joins A2/B1/D1/F1; **C2** follows C1/B2/D2.
