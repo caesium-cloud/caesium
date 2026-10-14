@@ -323,7 +323,7 @@ type Environment struct {
 	// to trusting the event alone.
 	CancelReconcileInterval time.Duration `envconfig:"CANCEL_RECONCILE_INTERVAL" default:"15s"`
 
-	// Data circuit breaker (design-data-circuit-breaker.md).
+	// Data circuit breaker (docs/design/data-circuit-breaker.md).
 	// DataAssertionsEnabled is the ONE master gate for the whole feature: off
 	// means no evaluator, no metrics persistence, no routes, and the jobdef
 	// `assertions`/`onViolation`/`release`/`onUpstreamHold` fields are refused at

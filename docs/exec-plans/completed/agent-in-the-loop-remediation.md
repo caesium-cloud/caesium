@@ -55,7 +55,7 @@ For drafting new plans in this same shape, see
 
 ## Source-Of-Truth Note
 
-This plan implements [`docs/design-agent-in-the-loop.md`](../../design-agent-in-the-loop.md).
+This plan implements [`docs/design/agent-in-the-loop.md`](../../design/agent-in-the-loop.md).
 **The design doc is authoritative for INTENT and SCOPE** — when this plan and the
 design disagree on what a stream must do (the incident lifecycle, the tiered
 action catalog and its tier semantics, the security posture, the phasing
@@ -73,10 +73,10 @@ lint/apply** — it does **not** participate in step-execution cache identity, s
 Two companion designs are load-bearing dependencies the design itself calls out,
 and this plan honors them: the quarantine invariants that make `quarantine_replay`
 a safe experiment harness are owned by
-[`design-quarantined-replay.md`](../../design-quarantined-replay.md) (the
+[`design/quarantined-replay.md`](../../design/quarantined-replay.md) (the
 `replaySafe` gate defaults to `false` and the playbook cannot widen it), and full
 `oom` classification depends on the OOM-detection substrate
-[`design-resource-right-sizing.md`](../../design-resource-right-sizing.md) builds
+[`design/resource-right-sizing.md`](../../design/resource-right-sizing.md) builds
 in its Phase 0 (`atom.ResourceFailure` is defined at
 `internal/atom/*` but **never produced** today — every engine maps exit 137 to
 `Killed`). This plan captures the raw `TaskRun.ExitCode` (design Phase 0) so the
@@ -98,7 +98,7 @@ resource-right-sizing lands its detection, and that limit is recorded, not hidde
 > approve → execute, direct route) and `data-circuit-breaker.md` F3 (Git-PR
 > route) in the closed-loop arc.
 
-The plan was published from the `design-agent-in-the-loop.md` design of record.
+The plan was published from the `design/agent-in-the-loop.md` design of record.
 The design is explicitly phased (0→3); Wave 1 landed Stream A, the entire Phase-0
 incident core + substrate, which unblocks every other stream.
 
@@ -205,7 +205,7 @@ closed the integration-coverage gap noted above.
 
 **N-1** (docs) shipped in [#299](https://github.com/caesium-cloud/caesium/pull/299)
 (merge `ebb54b6`) — a combined docs pass across both data-plane plans: roadmap §3.5
-flip, the `design-agent-in-the-loop.md` status banner, the `metadata.remediation`
+flip, the `design/agent-in-the-loop.md` status banner, the `metadata.remediation`
 schema surface via the `internal/jobdef/report` generator, a pinned-image
 remediation example, and the README bullet. **Plan complete — all streams (A–G, U)
 + H-1 + N-1 shipped.** Ready to archive to `docs/exec-plans/completed/`.
@@ -266,7 +266,7 @@ store. Largest blast radius (models + engines + `cmd/start/start.go` + `env.go` 
       `internal/run/schema_validation.go` when mode is `warn` (in `fail` mode the
       task failure already carries the violations). Note the honest limit: full
       `oom` classification still needs the OOM-flag detection
-      `design-resource-right-sizing.md` builds — this item ships the `ExitCode`
+      `design/resource-right-sizing.md` builds — this item ships the `ExitCode`
       substrate, not the OOM flag.
       Files: `internal/models/run.go`, `internal/atom/docker/engine.go`,
       `internal/atom/kubernetes/engine.go`, `internal/atom/podman/engine.go`,
@@ -677,7 +677,7 @@ primary evidence — nothing is prose-only.
 ## Navigational / Organizational Improvements
 
 - [x] N-1. Flip `docs/roadmap.md` §3.5 to reflect shipped phases; update the
-      [`design-agent-in-the-loop.md`](../../design-agent-in-the-loop.md)
+      [`design/agent-in-the-loop.md`](../../design/agent-in-the-loop.md)
       `> Status:` banner from "Brainstorm/Design — no implementation yet" to the
       shipped phase(s), and reconcile any design amendments this plan surfaced back
       into the doc body; document the `metadata.remediation` block
@@ -687,12 +687,12 @@ primary evidence — nothing is prose-only.
       in `docs/README.md` **in backtick/inline-code form** (the
       `TestDocsREADMEIndexesEveryTopLevelDoc` guardrail rejects clickable
       subdirectory links). Runs last.
-      Files: `docs/roadmap.md`, `docs/design-agent-in-the-loop.md`,
+      Files: `docs/roadmap.md`, `docs/design/agent-in-the-loop.md`,
       `docs/job-schema-reference.md`, `docs/job-definitions.md`,
       `docs/caesium-job-llm-reference.md`, `docs/examples/`, `docs/README.md`.
       Depends on: A–U + F + G (runs last, after the runtime ships).
       Note: shipped in the combined freshness+agent N-1 docs PR. Flipped §3.5 to
-      Shipped (runtime) and the `design-agent-in-the-loop.md` `> Status:` banner
+      Shipped (runtime) and the `design/agent-in-the-loop.md` `> Status:` banner
       to the shipped runtime; documented the `metadata.remediation` block
       (profile/classes/maxAttempts/autonomy/escalation, action + class
       vocabularies) via `internal/jobdef/report/report.go` → regenerated
@@ -869,7 +869,7 @@ The plan is done when **all** of these hold:
     phase(s), the design-doc `> Status:` banner flipped, the `metadata.remediation`
     block documented across the schema references with a working `docs/examples/`
     manifest, and this plan indexed in `docs/README.md` (backtick form).
-11. **Cross-cutting:** `docs/roadmap.md`, `docs/design-agent-in-the-loop.md`, and
+11. **Cross-cutting:** `docs/roadmap.md`, `docs/design/agent-in-the-loop.md`, and
     this plan's per-stream `## Progress` entries reflect every shipped stream and
     match the merged PRs.
 
@@ -892,18 +892,18 @@ The plan is done when **all** of these hold:
 
 ## Cross-References
 
-- [`docs/design-agent-in-the-loop.md`](../../design-agent-in-the-loop.md) — the
+- [`docs/design/agent-in-the-loop.md`](../../design/agent-in-the-loop.md) — the
   design of record. Source of truth for intent and scope.
 - [`docs/roadmap.md`](../../roadmap.md) §3.5 Agent-in-the-Loop ETL Remediation —
   the P3 strategic entry this plan closes; §3.2 Approval Gates & Human-in-the-Loop
   (the `ApprovalRequest` primitive this plan builds and §3.2 reuses); §2.3 SLA
   Management (the `extend_sla_once` / `sla_risk` interplay).
-- [`docs/design-quarantined-replay.md`](../../design-quarantined-replay.md) — the
+- [`docs/design/quarantined-replay.md`](../../design/quarantined-replay.md) — the
   quarantine invariants that make `quarantine_replay` a safe experiment harness
   (`replaySafe` gate).
-- [`docs/design-resource-right-sizing.md`](../../design-resource-right-sizing.md) —
+- [`docs/design/resource-right-sizing.md`](../../design/resource-right-sizing.md) —
   the OOM-detection substrate the full `oom` classification depends on.
-- [`docs/design-contract-enforcement.md`](../../design-contract-enforcement.md) —
+- [`docs/design/contract-enforcement.md`](../../design/contract-enforcement.md) —
   the offline/server-side lint split this plan's E1/E2 adopt.
 - [`docs/job-schema-reference.md`](../../job-schema-reference.md),
   `docs/job-definitions.md`, `docs/caesium-job-llm-reference.md` — the schema docs

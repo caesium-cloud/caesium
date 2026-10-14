@@ -1,6 +1,6 @@
 # Design: Native SSO Authentication (OIDC, SAML, LDAP)
 
-> Status: Shipped design record (PRs #192–#203), **superseded on 2026-09-16** by [`../superpowers/specs/2026-09-16-identity-and-access-design.md`](../superpowers/specs/2026-09-16-identity-and-access-design.md), which keeps every provider, session and CSRF decision here and adds namespaces, grants, policy-as-code, group refresh, user administration, Keycloak and CLI login. Live operator guide: [sso-authentication.md](../sso-authentication.md) (renamed to `identity-and-access.md` by the identity-and-access plan).
+> Status: Shipped design record (PRs #192–#203), **superseded on 2026-09-16** by [`../design/2026-09-16-identity-and-access-design.md`](../design/2026-09-16-identity-and-access-design.md), which keeps every provider, session and CSRF decision here and adds namespaces, grants, policy-as-code, group refresh, user administration, Keycloak and CLI login. Live operator guide: [sso-authentication.md](../sso-authentication.md) (renamed to `identity-and-access.md` by the identity-and-access plan).
 
 **Status:** Shipped (merged PRs #192–#203); superseded as a design of record
 **Date:** 2026-05-27

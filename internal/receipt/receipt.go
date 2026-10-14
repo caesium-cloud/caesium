@@ -10,7 +10,7 @@
 //	    git commit )
 //
 // It is the REPRODUCE half of the data-plane-memory substrate (see
-// docs/design-data-plane-memory.md): a small, deterministic, commit-into-git
+// docs/design/data-plane-memory.md): a small, deterministic, commit-into-git
 // artifact that attests *what ran*. `caesium verify` re-derives the receipt
 // from the run's persisted state and flags DRIFT — e.g. a `:latest` tag that
 // moved to new content (digest mismatch) or a changed manifest. It does NOT

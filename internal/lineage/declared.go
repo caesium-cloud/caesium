@@ -18,7 +18,7 @@ import (
 //
 // It exists because the declared registry and the observed lineage graph are
 // two different sources of truth for "what datasets exist"
-// (design-data-circuit-breaker.md § "Dataset identity"): a hold hangs off the
+// (docs/design/data-circuit-breaker.md § "Dataset identity"): a hold hangs off the
 // DECLARED name, so a typo there is a hold nobody can ever open and an impact
 // cone that resolves to nothing. Comparing the two catches the typo at lint
 // time instead of at 3am.

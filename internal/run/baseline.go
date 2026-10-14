@@ -17,7 +17,7 @@ const DefaultBaselineWindow = 20
 
 // BaselineStats summarises the recent clean history of one (dataset, metric).
 // It is computed on read — there is no materialized baseline table, because the
-// window is a handful of small rows per metric (design-data-circuit-breaker.md
+// window is a handful of small rows per metric (docs/design/data-circuit-breaker.md
 // "Data model").
 type BaselineStats struct {
 	Namespace string    `json:"namespace"`

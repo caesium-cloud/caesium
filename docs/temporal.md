@@ -2,7 +2,7 @@
 
 > Status: Operator guide. Uses the shipped `POST /v1/jobs/:id/run` idempotency
 > contract ([job-definitions.md](job-definitions.md#starting-runs-from-other-systems-outcomes-and-idempotency))
-> and event triggers ([design-event-triggers.md](design-event-triggers.md)).
+> and event triggers ([design/event-triggers.md](design/event-triggers.md)).
 > The optional connector adapter compiles `go.temporal.io/sdk` v1.49.0.
 > With `CAESIUM_CONNECTORS_ENABLED` left at its default false, the process dials
 > no Temporal server, starts no worker, and needs no Temporal credentials.
@@ -362,5 +362,5 @@ business process:
   The notification payload carries `job_id`, `job_alias` and `run_id`, but not
   the run's params, so the bridge keys on `run_id`. For automated triage and
   approval-gated remediation, Caesium's own incident runtime
-  ([design-agent-in-the-loop.md](design-agent-in-the-loop.md)) may already cover
+  ([design/agent-in-the-loop.md](design/agent-in-the-loop.md)) may already cover
   it. Pick one owner per concern.

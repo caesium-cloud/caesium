@@ -1,6 +1,6 @@
 # Design: DAG-Native Infrastructure Deployment (Terraform first)
 
-**Status:** Shipped — implemented via [`docs/exec-plans/completed/infra-deploy.md`](../../exec-plans/completed/infra-deploy.md) (streams A–E, H, N; see that plan's `## Progress` for the per-stream detail). User guide: [`docs/infrastructure-deployment.md`](../../infrastructure-deployment.md).
+**Status:** Shipped — implemented via [`docs/exec-plans/completed/infra-deploy.md`](../exec-plans/completed/infra-deploy.md) (streams A–E, H, N; see that plan's `## Progress` for the per-stream detail). User guide: [`docs/infrastructure-deployment.md`](../infrastructure-deployment.md).
 **Date:** 2026-08-25
 **Author:** Christopher Ryan
 **Topic:** Dependency-ordered deployment of infrastructure stacks as Caesium DAGs — with a
@@ -262,7 +262,7 @@ natively, and dbt models have inter-model dependencies exactly as stacks do.
 ### 5.4 Fan-out is what makes this scale — and needs one enhancement
 
 Written out by hand, each unit is a four-step group; forty stacks is an unreadable manifest, and
-three hundred dbt models is impossible. [Dynamic fan-out](../../design-dynamic-fanout.md)
+three hundred dbt models is impossible. [Dynamic fan-out](dynamic-fanout.md)
 (designed, **no streams started** as of 2026-07) is the right vehicle: a producer emits
 `##caesium::partitions`, the consumer declares `fanOut:`, and one `Task` expands to N `TaskRun`
 rows each carrying `CAESIUM_PARTITION`. That turns any number of units into **five steps**.
@@ -308,7 +308,7 @@ what their fingerprints say. Three separate mechanisms compose here:
 
 All three are required, which is why the reference manifest in §5.5 carries `chain: values` on
 both fanned steps. Without the chain break the behaviour is conservative but still correct —
-over-running, never a stale hit. **This enhancement belongs in `design-dynamic-fanout.md`, not here** —
+over-running, never a stale hit. **This enhancement belongs in `dynamic-fanout.md`, not here** —
 it is data-engineering-first (per-file checksums and dependency-ordered dbt models want it as
 much as stacks do) and this spec is one consumer. Until it lands, the fallback is the
 hand-written per-unit group in §5.5, which works today and is merely verbose.
@@ -754,7 +754,7 @@ pipeline with a shared upstream step.
 3. Does the Console plan panel belong on the task detail view or as a run-level summary
    aggregating every stack's counts? The latter is more useful and more work.
 4. Should the structured-partition enhancement (§5.4) be raised as a PR against
-   `design-dynamic-fanout.md` before or after this spec is implemented? Before is tidier, but it
+   `dynamic-fanout.md` before or after this spec is implemented? Before is tidier, but it
    couples two unshipped designs; after risks fan-out shipping with string-only partitions and
    needing a follow-up.
 5. How do `fanOut` and `type: branch` interact? The fan-out form of this spec avoids the
@@ -774,7 +774,7 @@ pipeline with a shared upstream step.
 - **Step-group templates** (roadmap §2.2) — what makes "a stack is a template" literally true and
   removes the per-stack copy-paste.
 - **Node affinity / co-location** — unblocks RWO storage for the cache volume.
-- **Dynamic fan-out** (`design-dynamic-fanout.md`, designed, unstarted) — the vehicle that turns
+- **Dynamic fan-out** (`dynamic-fanout.md`, designed, unstarted) — the vehicle that turns
   N units into five steps (§5.4). This spec's hand-written form works without it; the pattern does
   not scale past a handful of units until it lands.
 - **Structured partition objects** — the `{key, fingerprint, dependsOn}` enhancement in §5.4,

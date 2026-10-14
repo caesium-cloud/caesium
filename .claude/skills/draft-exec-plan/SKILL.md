@@ -31,8 +31,8 @@ files, and shared-file conflict rules below are caesium-specific.
   is genuinely ambiguous; otherwise infer from the description and
   surrounding repo state.
 - **Reference docs** (optional but high-leverage): existing design docs
-  (`docs/design-*.md`), superpowers specs
-  (`docs/superpowers/specs/<date>-<topic>-design.md`), the roadmap
+  (`docs/design/*.md`), dated specs
+  (`docs/design/<date>-<topic>-design.md`), the roadmap
   (`docs/roadmap.md`), related plans, source files. Pull these up early —
   they shape the streams.
 - **Target file path** (optional). Default: `docs/exec-plans/active/<slug>.md`
@@ -91,7 +91,7 @@ Bake these into the plan you produce (do not deviate):
   - "When this plan and `docs/roadmap.md` disagree, the roadmap wins."
   - "When this plan and `pkg/jobdef/definition.go` disagree, the schema
     wins." (job-definition / YAML-contract plans)
-  - "When this plan and `docs/superpowers/specs/<spec>.md` disagree, the
+  - "When this plan and `docs/design/<date>-<topic>-design.md` disagree, the
     spec wins."
   - "When this plan and `<sibling-plan>.md` disagree, the sibling wins."
 - **Verify chain**: every plan ends with the canonical block:
@@ -134,7 +134,7 @@ Bake these into the plan you produce (do not deviate):
   cross-links several).
 - **The problem area has no existing source-of-truth file** to anchor
   the Source-Of-Truth Note: ask the user where the contract lives
-  (often: `docs/roadmap.md`, a design doc under `docs/`, a superpowers
+  (often: `docs/roadmap.md`, a design record under `docs/design/`, a dated
   spec, or `pkg/jobdef/definition.go`).
 - **A proposed stream has no obvious file ownership boundary** with
   another (e.g. two streams both rewrite `cmd/start/start.go` or
@@ -142,8 +142,8 @@ Bake these into the plan you produce (do not deviate):
   stream or sequence sequentially.
 - **The acceptance criteria can't be made concrete** because the
   initiative is exploratory: produce a "design-only" plan with one
-  stream that ends in a design memo (`docs/design-<topic>.md` or a
-  superpowers spec), and ask the user to confirm before saving.
+  stream that ends in a design memo (`docs/design/<topic>.md` or a
+  dated spec), and ask the user to confirm before saving.
 
 Otherwise, run end-to-end without checking in.
 
@@ -157,7 +157,7 @@ user:
 - **Stream count + count of unchecked items**: e.g. "6 streams,
   34 unchecked items, 1 deferred".
 - **Cross-links updated**: which sibling docs (`docs/roadmap.md`,
-  related plans, design docs, superpowers specs) you edited to point at
+  related plans, design records, specs) you edited to point at
   the new plan.
 - **First-wave eligibility hint**: which items are leaf items
   (no unmet `Depends on:` edges) so the user can immediately invoke

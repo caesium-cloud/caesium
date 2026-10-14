@@ -52,7 +52,8 @@ caesium/
 ├── build/                # Dockerfiles for builder and runtime images
 ├── helm/                 # Kubernetes Helm chart
 ├── test/                 # Integration tests (build tag: integration)
-└── docs/                 # User-facing guides and schema reference
+├── reagents/             # Images for infrastructure deployment (git-source, tf-*)
+└── docs/                 # Guides, design records, execution plans (index: docs/README.md)
 ```
 
 Key files:
@@ -61,6 +62,7 @@ Key files:
 - `justfile` — all build, test, and dev commands
 - `.golangci.yml` — Go linter configuration
 - `.github/workflows/ci.yml` — CI/CD pipeline (GitHub Actions; see `docs/ci.md`)
+- `AGENTS.md` — the repository conventions in one page, read by humans and coding agents alike; `CLAUDE.md` links to it
 
 ---
 
@@ -105,14 +107,14 @@ just hydrate
 
 ## Development Workflow
 
-Always branch from `develop`:
+Branch from `master`:
 
 ```bash
 git fetch upstream
-git checkout -b feat/my-feature upstream/develop
+git checkout -b feat/my-feature upstream/master
 ```
 
-Use `develop` as the base for all PRs. `master` is the stable release branch and is only updated via merge from `develop` at release time.
+`master` is the only long-lived branch. Every PR squash-merges onto it through the merge queue once `ci-ok` is green and a code owner has approved. Releases are `v*` tags cut from `master` (see `docs/ci.md`).
 
 ### Useful commands
 
@@ -196,7 +198,7 @@ All lint checks must pass before a PR can merge. The CI pipeline runs them autom
 
 1. **Open an issue first** for non-trivial changes. Describe the problem and your proposed approach. This avoids wasted effort if the direction needs adjustment.
 
-2. **Branch from `develop`** (see [Development Workflow](#development-workflow)).
+2. **Branch from `master`** (see [Development Workflow](#development-workflow)).
 
 3. **Write tests** for your changes. PRs without tests for new behavior will be asked to add them.
 
@@ -206,7 +208,7 @@ All lint checks must pass before a PR can merge. The CI pipeline runs them autom
    just lint && just ui-lint && just unit-test && just ui-test
    ```
 
-5. **Open a PR against `develop`**, not `master`. Include:
+5. **Open a PR against `master`.** Include:
    - A clear description of what the change does and why
    - A link to the related issue (if applicable)
    - Evidence of testing (test output, screenshots for UI changes)
@@ -225,7 +227,7 @@ Here is a walkthrough for common contribution types.
 2. Implement the new type (e.g., `internal/trigger/webhook/`).
 3. Register the trigger in the executor (`internal/executor/executor.go`).
 4. Add the trigger type to the job definition schema (`pkg/jobdef/`).
-5. Update the schema reference in `docs/job-schema-reference.md`.
+5. Regenerate the schema reference: edit `internal/jobdef/report/report.go` and run `caesium job schema --doc > docs/job-schema-reference.md` (a test fails if the file is stale).
 6. Add unit tests alongside the implementation and an integration test under `test/`.
 
 ### Adding a new container runtime (atom)
@@ -248,6 +250,12 @@ Here is a walkthrough for common contribution types.
 2. Register any new routes in `ui/src/router.tsx`.
 3. Use TanStack Query for data fetching and Radix UI primitives for accessible components.
 4. Run `just ui-lint` and `just ui-test` before pushing.
+
+---
+
+## Documentation
+
+`docs/README.md` indexes everything. Guides at the top of `docs/` describe current behavior; `docs/design/` holds one design record per feature; `docs/exec-plans/` holds the execution plans; `docs/archive/` holds shipped or superseded records. A guardrail test fails when a new doc is not indexed, so add new guides to `docs/README.md` in the same PR. `docs/job-schema-reference.md` is generated and must not be edited by hand. The full rules are in `AGENTS.md`.
 
 ---
 

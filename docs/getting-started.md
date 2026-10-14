@@ -1,9 +1,8 @@
 # Getting Started
 
 This is the fastest path from "nothing installed" to "a job ran on a real
-Caesium server and I can explain why." Every command below is copy-pasteable
-and matches the [README Quick Start](../README.md#quick-start) exactly — if
-you've already done a step from there, skip ahead.
+Caesium server and I can explain why." Every command below is copy-pasteable.
+If you have already done a step from the README quick start, skip ahead.
 
 ## 0. Install the CLI
 
@@ -92,6 +91,21 @@ Either way, confirm it's up:
 curl http://localhost:8080/health
 ```
 
+### Using Podman instead of Docker
+
+Set `CAESIUM_PODMAN=true` before `just run`. Caesium then defaults to the
+rootless Podman socket at `$XDG_RUNTIME_DIR/podman/podman.sock` (or
+`/run/user/$UID/podman/podman.sock` when `XDG_RUNTIME_DIR` is unset), uses the
+`podman` CLI, and prefixes image references with `localhost/` for Podman's
+local image store. Override the socket or CLI if your setup differs:
+
+| Variable | Default | Description |
+|---|---|---|
+| `CAESIUM_PODMAN` | `false` | Use Podman conventions (socket, CLI, `localhost/` image prefix). |
+| `CAESIUM_CONTAINER_CLI` | `docker`, or `podman` when `CAESIUM_PODMAN=true` | Container CLI used by the `just` recipes. |
+| `CAESIUM_SOCK` | `/var/run/docker.sock`, or the Podman socket when `CAESIUM_PODMAN=true` | Host-side container socket to mount into the container. |
+| `CAESIUM_PORT` | `8080` | Host port to expose the server on. |
+
 ## 2. Write your first job
 
 Save this as `nightly-etl.job.yaml` — it's [`docs/examples/minimal.job.yaml`](examples/minimal.job.yaml) in the repo, three sequential steps on the pinned `alpine:3.23` image:
@@ -172,14 +186,15 @@ Commit the receipt into git next to the pipeline and `caesium verify
 
 ## Where next
 
-- The rest of the causal-query surface (`blame`, `run diff`, `run replay`,
+- The rest of the run-query surface (`blame`, `run diff`, `run replay`,
   `reproduce`, `contract check|graph`, `dataset status|list|advance`,
-  `backfill`, `incident`) is listed in the README's
-  ["Beyond scheduling"](../README.md#beyond-scheduling--what-you-can-ask-caesium)
-  section, each linked to its design record.
-- [job-definitions.md](job-definitions.md) — full job-authoring reference:
-  linting, diffing, schema tooling, Git sync.
-- [ci.md](ci.md) — the CI runbook and the release procedure this walkthrough's
-  `v0.1.0` references follow.
-- [README.md](../README.md) — server workflow (Podman, backfills, operator
-  tools, API reference) beyond this first-run tour.
+  `backfill`, `incident`) is summarised in the README's
+  ["Ask it what happened"](../README.md#ask-it-what-happened) section, each
+  linked to its guide or design record.
+- [job-definitions.md](job-definitions.md) — the full authoring reference:
+  DAG wiring, caching, contracts, freshness, volumes, secrets, Git sync.
+- [rest-api.md](rest-api.md) — every endpoint the CLI and console use.
+- [backfill.md](backfill.md) — replaying a cron job over a date range.
+- [kubernetes-deployment.md](kubernetes-deployment.md) — the Helm chart and a
+  three-node Raft cluster.
+- [README.md](README.md) — the full documentation index.

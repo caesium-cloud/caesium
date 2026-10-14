@@ -12,7 +12,7 @@ import (
 // unchanged topology reuses the existing row (dedup by ContentHash).
 //
 // This is the persistence layer for Component 3 (Version DAG topology) from
-// docs/design-data-plane-memory.md. The live graph in task_edges still drives
+// docs/design/data-plane-memory.md. The live graph in task_edges still drives
 // execution; dag_snapshots preserves history so "the pipeline as of commit X"
 // is reconstructable from dqlite without a git checkout.
 type DagSnapshot struct {

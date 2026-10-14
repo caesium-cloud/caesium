@@ -1,6 +1,6 @@
 # Job Definition Ingestion Roadmap & Checklist
 
-> Status: Largely implemented. Phase 1 reconciliation and prune work is complete, including provenance-aware updates, source-scoped pruning, restoration of retired definitions, and history-preserving soft deletes. Use [job-definitions.md](job-definitions.md) and [job-schema-reference.md](job-schema-reference.md) for current behavior; treat unchecked items here as remaining roadmap notes.
+> Status: Largely implemented. Phase 1 reconciliation and prune work is complete, including provenance-aware updates, source-scoped pruning, restoration of retired definitions, and history-preserving soft deletes. Use [job-definitions.md](../job-definitions.md) and [job-schema-reference.md](../job-schema-reference.md) for current behavior; treat unchecked items here as remaining roadmap notes.
 
 ## Recent Progress
 - Reconcile-in-place imports now preserve job identity and run history on re-apply.

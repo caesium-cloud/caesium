@@ -40,7 +40,7 @@ This plan records the proposed contract from the connector discussion of
 additive and carry real-surface tests. Unmerged sibling work is not a prerequisite.
 
 This PR includes the narrow proposed amendment in
-[differentiation-strategy.md](../../differentiation-strategy.md): join external
+[differentiation-strategy.md](../../design/differentiation-strategy.md): join external
 process state to Caesium data evidence without reopening the parked provider
 catalog. The optional compiled adapter adds a Go dependency; with the feature
 off, Caesium requires no Temporal server, worker or credentials. The current
@@ -292,7 +292,7 @@ An open PR or fixture-only pass is not completion. Resume unfinished waves.
   new `internal/connector/temporal/observe.go`,
   new `internal/connector/temporal/observe_test.go`, `go.mod`, `go.sum`,
   `docs/connectors.md` (Temporal/authentication sections), `docs/temporal.md`,
-  `docs/differentiation-strategy.md` (update dependency claims with SDK addition).
+  `docs/design/differentiation-strategy.md` (update dependency claims with SDK addition).
   Depends on: A1.
   Verify: adapter tests cover pagination, deadlines, redaction and status mapping;
   F1 runs this adapter against real Temporal. Start from SDK v1.49.0 (#560's
@@ -555,7 +555,7 @@ compiled integration-runner approach; fixture code stays in the root module.
   Update roadmap/navigation only from merged evidence. Preserve at-least-once
   and cancellation limitations, deferred scope and the later second-provider check.
   Files: `docs/connectors.md`, `docs/temporal.md`, `docs/README.md`,
-  `docs/roadmap.md`, `docs/differentiation-strategy.md`,
+  `docs/roadmap.md`, `docs/design/differentiation-strategy.md`,
   `docs/exec-plans/active/execution-connectors.md`.
   Depends on: F4.
   Verify: documented local tour reproduces actual API/Console inspection and
@@ -727,7 +727,7 @@ Use `$draft-exec-plan` to revise the plan without starting implementation.
 
 - [Current Temporal recipe](../../temporal.md) and
   [run-start contract](../../job-definitions.md).
-- [Strategy](../../differentiation-strategy.md) and [roadmap](../../roadmap.md).
+- [Strategy](../../design/differentiation-strategy.md) and [roadmap](../../roadmap.md).
 - [Identity/access](identity-and-access.md), [arc](closed-loop-arc.md) and
   [distributed testing](distributed-testing.md).
 - [Console operator loop](../completed/console-operator-loop-ux.md),

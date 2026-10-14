@@ -5,7 +5,7 @@
 Last updated: 2026-06-20
 
 This plan operationalizes the positioning pivot recorded in
-[`docs/differentiation-strategy.md`](../../differentiation-strategy.md): **lead
+[`docs/design/differentiation-strategy.md`](../../design/differentiation-strategy.md): **lead
 with operational sovereignty.** It covers the two execution items that doc names
 *beyond* the data-plane-memory substrate — (A) repositioning the project's
 public surface to lead with sovereignty, and (B) delegating scheduling to Kueue
@@ -37,7 +37,7 @@ For wave orchestration of the streams below, see
 
 ## Project Posture
 
-From [`docs/differentiation-strategy.md`](../../differentiation-strategy.md):
+From [`docs/design/differentiation-strategy.md`](../../design/differentiation-strategy.md):
 **sovereignty leads** (it sells by *constraint* — "you literally cannot run
 Dagster here" — not by *comparison*, which a marketing-less project can't win),
 **DX-over-k8s hooks**, and **data-plane memory is the second act** (separate
@@ -52,7 +52,7 @@ plan). Enforced here:
 
 ## Source-Of-Truth Note
 
-When this plan and [`docs/differentiation-strategy.md`](../../differentiation-strategy.md)
+When this plan and [`docs/design/differentiation-strategy.md`](../../design/differentiation-strategy.md)
 disagree, the **strategy doc wins**. The Kueue passthrough's YAML contract (B1)
 additionally defers to `pkg/jobdef/definition.go`. The data-plane memory work is
 owned by the sibling plan [`data-plane-memory.md`](data-plane-memory.md); where
@@ -76,7 +76,7 @@ the two plans touch the same files, the sibling's Stream A owns
   (`scp` one binary story, no Postgres). Index entry added to `docs/README.md`
   (guardrail green). Air-gapped k8s notes subsection added to
   `docs/kubernetes-deployment.md` with cross-link to `cache.pinDigests` in
-  `design-data-plane-memory.md` (not duplicated). Review: greptile found real
+  `design/data-plane-memory.md` (not duplicated). Review: greptile found real
   doc-accuracy bugs (invalid trigger YAML, non-existent `imagePullPolicy` field,
   wrong env vars `CAESIUM_NODE_ID`/data-dir) — all fixed and verified against source.
 - **Stream B**: B1 landed (PR #224) — steps declare `kueue: {queueName: "..."}` on the
@@ -197,13 +197,13 @@ The plan is done when **all** of these hold:
    helm path green), the field is excluded from the cache identity hash (unit
    test asserts an identical hash with and without it), and the job-schema docs +
    a `docs/examples-k8s/` sample are updated.
-3. **Cross-cutting**: `docs/differentiation-strategy.md` and `docs/roadmap.md`
+3. **Cross-cutting**: `docs/design/differentiation-strategy.md` and `docs/roadmap.md`
    reflect the shipped items; this plan's per-stream `## Progress` entries match
    merged PRs.
 
 ## How To Pick Up Work
 
-1. Read this file end-to-end, plus `docs/differentiation-strategy.md` for the
+1. Read this file end-to-end, plus `docs/design/differentiation-strategy.md` for the
    positioning rationale.
 2. Pick an unchecked item under `## Streams` whose `Depends on:` /
    cross-plan-coordination constraints are satisfied. Leaf items: A2, B1
@@ -218,7 +218,7 @@ The plan is done when **all** of these hold:
 
 ## Cross-References
 
-- [`docs/differentiation-strategy.md`](../../differentiation-strategy.md) — the
+- [`docs/design/differentiation-strategy.md`](../../design/differentiation-strategy.md) — the
   positioning thesis and source of truth for this plan.
 - [`data-plane-memory.md`](data-plane-memory.md) — the sibling plan for the
   "second act" substrate; owns `internal/cache/hash.go` /

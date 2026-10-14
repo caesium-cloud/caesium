@@ -21,7 +21,7 @@ is nailed to a minute chosen with no view of cluster load, spot price, or grid
 carbon. Caesium already *detects* a blown deadline (`metadata.sla.completedBy`,
 `internal/notification/watcher.go` `scanCompletedBySLA`) but nothing uses the
 deadline to decide when to *start*. This plan ships the P0 of the design of
-record in [`design-window-scheduling.md`](../../design-window-scheduling.md): a
+record in [`design/window-scheduling.md`](../../design/window-scheduling.md): a
 job declares an execution **window** plus a completion **deadline** (`window
 00:00 → 05:00, finish by 06:00`), and Caesium picks the start moment from
 predicted duration (p95 from history) and priority — with a hard rule that
@@ -83,7 +83,7 @@ reads `TaskRun`/`JobRun` timestamps and Plan 2 A1's stats columns; no second
 stats table), **6** symbol citations, **7** docs/N-1 shape including the loop
 tour, **8** wave hygiene.
 
-[`docs/design-window-scheduling.md`](../../design-window-scheduling.md) is
+[`docs/design/window-scheduling.md`](../../design/window-scheduling.md) is
 **authoritative for INTENT and SCOPE within P0** — when this plan and the
 design doc disagree on how a P0 stream is built, the design doc wins, and the
 plan is reconciled to match. Where the design describes P1/P2 machinery (load
@@ -139,7 +139,7 @@ reason; the window scheduler must not inherit that shape).
 
 **Explicit design amendment (arc § Shared conventions: "a child plan's item
 that contradicts one of these must say so explicitly and why").**
-[`design-window-scheduling.md`](../../design-window-scheduling.md) still states
+[`design/window-scheduling.md`](../../design/window-scheduling.md) still states
 **"Release = `store.AdmitRun(...)` with the parked row's params, priority, and
 logical date"**. That is wrong for jobs without a `concurrency:` block, per
 fact (3). This plan overrides it: **release = `job.New(...).Run(ctx)`**, and
@@ -173,7 +173,7 @@ around — none of them is visible from the design doc's `AdmitRun` framing:
 ## Progress (as of 2026-09-05)
 
 No implementation waves have shipped yet. The plan was published 2026-07-03
-from the `design-window-scheduling.md` design of record and **re-cut
+from the `design/window-scheduling.md` design of record and **re-cut
 2026-09-05 as Plan 4 (optional tail) of the closed-loop arc**: P0 scope only,
 predictor rebased onto the shared stats substrate, feature gate extended to
 jobdef validation, a `why`-provenance item added (B4), D2/E2 parked, all
@@ -720,7 +720,7 @@ Full text preserved; checkbox kept; **excluded from Acceptance Criteria**.
       arc table row 4 ("The time loop (optional tail)") to shipped and the
       Phase 4 "Deadline-window scheduling" table row from a bare design link
       to the completed plan link; update the
-      [`design-window-scheduling.md`](../../design-window-scheduling.md)
+      [`design/window-scheduling.md`](../../design/window-scheduling.md)
       `> Status:` banner from brainstorm/design to "active — this plan" (on the
       first runtime merge) and then to shipped-P0 with P1/P2 parked (the
       `TestPlanningAndHistoricalDocsCarryStatusBanner` guardrail in
@@ -754,7 +754,7 @@ Full text preserved; checkbox kept; **excluded from Acceptance Criteria**.
       [`closed-loop-arc.md`](closed-loop-arc.md) (waves shipped, last PR) in
       the same PR, then move this plan to `docs/exec-plans/completed/` and
       repoint the arc's links. Runs last, after the runtime ships.
-      Files: `docs/roadmap.md`, `docs/design-window-scheduling.md` (status
+      Files: `docs/roadmap.md`, `docs/design/window-scheduling.md` (status
       banner **and** the release-mechanism text/flow label),
       `internal/jobdef/report/report.go` (+ regenerated
       `docs/job-schema-reference.md`), `docs/job-definitions.md`,
@@ -981,12 +981,12 @@ The plan is done when **all** of these hold:
    B/C scenarios drive the live binary in CI on every lane, not an internal
    call, and the restart scenario runs on the default lane.
 8. **N-1 — docs reflect reality:** the `docs/roadmap.md` rows point at this
-   plan, the `design-window-scheduling.md` `> Status:` banner is flipped, the
+   plan, the `design/window-scheduling.md` `> Status:` banner is flipped, the
    `window` trigger fields are documented across the schema references (via
    the generator) with a working `docs/examples/` manifest,
    `docs/tour-time-loop.md` exists and is indexed, this plan is indexed in
    `docs/README.md`, and the arc dashboard row for Plan 4 is ticked.
-9. **Cross-cutting:** `docs/roadmap.md`, `docs/design-window-scheduling.md`,
+9. **Cross-cutting:** `docs/roadmap.md`, `docs/design/window-scheduling.md`,
    `closed-loop-arc.md`'s dashboard, and this plan's per-stream `## Progress`
    entries reflect every shipped stream and match the merged PRs.
 
@@ -1037,7 +1037,7 @@ The plan is done when **all** of these hold:
   half). Its predictive-ETA engine folds into this plan's B1 predictor
   (`ETA(runID)`); its EWMA model, escalation chains, `internal/sla/` package,
   `caesium sla` verbs and REST surface are **not** imported.
-- [`docs/design-window-scheduling.md`](../../design-window-scheduling.md) — the
+- [`docs/design/window-scheduling.md`](../../design/window-scheduling.md) — the
   design of record and source of truth for how P0 streams are built.
 - [`docs/roadmap.md`](../../roadmap.md) Phase 5 (closed-loop arc table, row 4)
   and Phase 4 Data-Plane Differentiators (Deadline-window scheduling row) —
@@ -1048,8 +1048,8 @@ The plan is done when **all** of these hold:
   deadline*, this plan decides *when inside the window to start*) over the same
   run-history + `run_queue` substrate. Its `CAESIUM_FRESHNESS_ENABLED` gating of
   `trigger.type: freshness` in `validateTrigger` is the pattern A2 mirrors.
-- [`docs/design-resource-right-sizing.md`](../../design-resource-right-sizing.md),
-  [`docs/design-dynamic-fanout.md`](../../design-dynamic-fanout.md) — companion
+- [`docs/design/resource-right-sizing.md`](../../design/resource-right-sizing.md),
+  [`docs/design/dynamic-fanout.md`](../../design/dynamic-fanout.md) — companion
   designs: right-sizing shares the run-history substrate and the signal-source
   interface; dynamic fan-out is the spatial slice to this temporal one.
 - [`pkg/jobdef/definition.go`](../../../pkg/jobdef/definition.go) — the

@@ -3,7 +3,7 @@
 Last updated: 2026-08-28 · **Status: COMPLETE** — every stream (A–E, H, N) shipped across Waves 1–3 on PR #351 (one squashed commit, `35c939c`); see the `## Progress` dashboard. Archived here from `active/`. The out-of-plan gaps found while shipping are tracked as GitHub issues #361–#368 (see `### Follow-ups outside this plan`).
 
 This plan ships the design in
-[`docs/superpowers/specs/2026-08-25-dag-native-infrastructure-deployment-design.md`](../../superpowers/specs/2026-08-25-dag-native-infrastructure-deployment-design.md):
+[`docs/design/2026-08-25-dag-native-infrastructure-deployment-design.md`](../../design/2026-08-25-dag-native-infrastructure-deployment-design.md):
 dependency-ordered deployment of infrastructure stacks as ordinary Caesium DAGs,
 with unchanged stacks skipped and a provider set warmed once. Almost everything
 composes shipped primitives (content-addressed cache, `##caesium::output-ref`,
@@ -87,7 +87,7 @@ Settled by the spec (§3, §7, §12) and binding on every item:
 ## Source-Of-Truth Note
 
 When this plan and
-`docs/superpowers/specs/2026-08-25-dag-native-infrastructure-deployment-design.md`
+`docs/design/2026-08-25-dag-native-infrastructure-deployment-design.md`
 disagree, the spec wins — for intent, scope, the role contracts (§5.2), the
 `cache.chain` semantics (§4.3), the Terraform binding's behaviour (§6), the
 security requirements (§6.4 sensitive handling), the failure modes (§8), and
@@ -97,7 +97,7 @@ spec is amended to address them, the amended spec wins. Where the spec touches
 the YAML contract, `pkg/jobdef/definition.go` is authoritative for the
 *current* shape and Stream A changes it. Dynamic fan-out and structured
 partition objects are owned by `docs/exec-plans/completed/dynamic-fanout.md` and
-`docs/design-dynamic-fanout.md`; tracking for them continues there.
+`docs/design/dynamic-fanout.md`; tracking for them continues there.
 
 ## Progress (as of 2026-08-28)
 
@@ -118,7 +118,7 @@ and the `pack-*`/`build-pack` just targets) was renamed post-ship to **reagents*
 (`reagents/`, `build/Dockerfile.reagents`, `reagents-lint`/`reagents-test`/
 `build-reagents`) — a pure concept rename with no behavioural change. This doc's
 prose and paths below reflect the final, renamed state; the spec
-(`docs/superpowers/specs/2026-08-25-…design.md`) still uses "pack" as its
+(`docs/design/2026-08-25-dag-native-infrastructure-deployment-design.md`) still uses "pack" as its
 historical design term.
 
 ### Wave 1 (2026-08-27) — A, B + H-1, D1, E1 in parallel
@@ -394,16 +394,16 @@ load-bearing "edit one stack, re-apply one stack" test).
       semantics table (spec §4.3) and the sharp edge (§4.4) in
       `docs/job-definitions.md` (Enabling Cache / Cache Behavior),
       `docs/caesium-job-llm-reference.md`, and add a `chain` section to the
-      cache design of record `docs/design-incremental-execution.md`. Run
+      cache design of record `docs/design/incremental-execution.md`. Run
       `caesium job lint --path docs/examples/`.
       Files: `internal/jobdef/report/report.go`, `docs/job-schema-reference.md`
       (generated), `docs/job-definitions.md`,
-      `docs/caesium-job-llm-reference.md`, `docs/design-incremental-execution.md`.
+      `docs/caesium-job-llm-reference.md`, `docs/design/incremental-execution.md`.
       Depends on: A1, A4.
       Done (W1-α): a new "Cache Chain" section in `report.go` (semantics table +
       sharp edge) and `docs/job-schema-reference.md` regenerated from it; prose
       + example in `job-definitions.md` and the LLM reference; rationale and
-      lane-threading in `design-incremental-execution.md`.
+      lane-threading in `design/incremental-execution.md`.
       `caesium job lint --path docs/examples/` validates 28 definitions.
 
 ### Stream B — Pack scaffold, `git-source`, `tf-discover`, hermetic fixture
@@ -1104,15 +1104,15 @@ renders the summary and shows the reference.
       with a link to this plan; update the Phase 4 roadmap row added at draft
       time to **Shipped**; confirm the `cache.chain` cross-links in
       `docs/exec-plans/completed/dynamic-fanout.md` and
-      `docs/design-dynamic-fanout.md` still describe the shipped behaviour; sync
+      `docs/design/dynamic-fanout.md` still describe the shipped behaviour; sync
       this plan's `## Progress` with merged PRs and move it to
       `docs/exec-plans/completed/`.
-      Files: `docs/superpowers/specs/2026-08-25-dag-native-infrastructure-deployment-design.md`,
+      Files: `docs/design/2026-08-25-dag-native-infrastructure-deployment-design.md`,
       `docs/roadmap.md`, `docs/exec-plans/completed/dynamic-fanout.md`,
-      `docs/design-dynamic-fanout.md`, this file.
+      `docs/design/dynamic-fanout.md`, this file.
       > Shipped (W3-α), scoped per this stream's workspace rules: banner
       > flipped, roadmap row flipped, cache.chain cross-links confirmed
-      > accurate (one tense fix in `design-dynamic-fanout.md`: "the knob
+      > accurate (one tense fix in `design/dynamic-fanout.md`: "the knob
       > proposed in §4" → "added, and shipped (Stream A), by §4" — no
       > "deferred to" phrasing was found anywhere referencing `cache.chain`).
       > **`## Progress` sync and the move to `exec-plans/completed/` are
@@ -1255,7 +1255,7 @@ The plan is done when **all** of these hold:
    `docs/README.md`; the spec's status banner reads Shipped; the Phase 4 roadmap
    row reads Shipped.
 8. `docs/roadmap.md`, `docs/exec-plans/completed/dynamic-fanout.md`,
-   `docs/design-dynamic-fanout.md`, and `docs/design-incremental-execution.md`
+   `docs/design/dynamic-fanout.md`, and `docs/design/incremental-execution.md`
    reflect every shipped stream; this plan's per-stream Progress entries match
    merged PRs.
 
@@ -1311,15 +1311,15 @@ Decisions this plan makes that the user may want to confirm before wave 1:
 
 ## Cross-References
 
-- `docs/superpowers/specs/2026-08-25-dag-native-infrastructure-deployment-design.md`
+- `docs/design/2026-08-25-dag-native-infrastructure-deployment-design.md`
   — the source of truth for this plan.
 - `docs/roadmap.md` — Phase 4 design-wave table row added at draft time.
-- `docs/exec-plans/completed/dynamic-fanout.md` and `docs/design-dynamic-fanout.md`
+- `docs/exec-plans/completed/dynamic-fanout.md` and `docs/design/dynamic-fanout.md`
   — own dynamic fan-out and structured partition objects; defer the chain
   break to Stream A here.
-- `docs/design-incremental-execution.md` — the cache design of record; A7 adds
+- `docs/design/incremental-execution.md` — the cache design of record; A7 adds
   `chain`.
-- `docs/superpowers/specs/2026-05-29-volumes-and-workload-identity-design.md`
+- `docs/design/2026-05-29-volumes-and-workload-identity-design.md`
   — the volumes / `secret://` / workload-identity substrate this pattern rides
   on.
 - `pkg/jobdef/definition.go` — the YAML contract Stream A changes.

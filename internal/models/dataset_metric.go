@@ -7,7 +7,7 @@ import (
 )
 
 // DatasetMetric is one metric sample a step self-reported for a declared
-// dataset via the ##caesium::metrics marker (design-data-circuit-breaker.md
+// dataset via the ##caesium::metrics marker (docs/design/data-circuit-breaker.md
 // "Data model"). It is the observation history the assertion evaluator asserts
 // against and the rolling baseline is computed from — there is no materialized
 // baseline table, because the window is at most CAESIUM_BASELINE_WINDOW small

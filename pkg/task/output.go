@@ -44,7 +44,7 @@ const (
 	branchMarker = "##caesium::branch "
 
 	// metricsMarker is the stdout line prefix a step uses to self-report the
-	// dataset metrics an assertion evaluates (design-data-circuit-breaker.md).
+	// dataset metrics an assertion evaluates (docs/design/data-circuit-breaker.md).
 	// Payload is a flat JSON object; the reserved "dataset" key selects the
 	// declared dataset the remaining keys describe:
 	//

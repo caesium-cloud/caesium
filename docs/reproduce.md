@@ -1,6 +1,6 @@
 # `caesium reproduce`
 
-`caesium reproduce` re-executes one historical task on the operator's local Docker daemon from the recorded task execution descriptor. The server only serves the descriptor; no `JobRun` or `TaskRun` is created, no events are emitted, and no server-side execution happens. The design record is [`design-reproduce.md`](design-reproduce.md).
+`caesium reproduce` re-executes one historical task on the operator's local Docker daemon from the recorded task execution descriptor. The server only serves the descriptor; no `JobRun` or `TaskRun` is created, no events are emitted, and no server-side execution happens. The design record is [`design/reproduce.md`](design/reproduce.md).
 
 ## Quickstart
 
