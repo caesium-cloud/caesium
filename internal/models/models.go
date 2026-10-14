@@ -79,4 +79,17 @@ var All = []any{
 	&AgentAction{},
 	&ApprovalRequest{},
 	&RemediationTimer{},
+	// Execution-connector catalog (execution connectors A2): identities, direct
+	// snapshots, relation evidence, action receipts, and the configuration
+	// epoch. Low-volume catalog metadata — not hot per-run tables — so they
+	// are deliberately absent from hotPathModels()/hotTables, like DatasetHold
+	// and DatasetMetric. No foreign keys to job_runs or task_runs. Execution
+	// primary keys are opaque digests, not workflow ids. external_executions
+	// precedes snapshots and relations so a later reader sees the identity
+	// table first; none of these rows are created from a list page.
+	&ExternalExecution{},
+	&ExternalExecutionSnapshot{},
+	&ExternalExecutionRelation{},
+	&ConnectorOperation{},
+	&ConnectorConfiguration{},
 }

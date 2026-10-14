@@ -438,6 +438,11 @@ func start(cmd *cobra.Command, args []string) error {
 	if err := db.Migrate(); err != nil {
 		log.Fatal("database migration failure", "error", err)
 	}
+	if vars.ConnectorsEnabled {
+		if err := confirmCatalogEpoch(ctx); err != nil {
+			log.Fatal("connector catalog unreadable", "error", err)
+		}
+	}
 	event.StartIngestRetentionPruner(ctx, event.NewIngestStore(db.Connection()), vars.EventRetention)
 	event.StartWebhookEventRetentionPruner(ctx, event.NewWebhookEventStore(db.Connection()), vars.WebhookEventRetention)
 	if vars.DataAssertionsEnabled {
