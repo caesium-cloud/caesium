@@ -10,10 +10,11 @@ for an external execution system. Temporal is the first implementation.
 Temporal-only workflows are included; moving their ETL into Caesium is not a
 prerequisite for monitoring them.
 
-Today, [PR #560](https://github.com/caesium-cloud/caesium/pull/560) supplies
+At drafting, [PR #560](https://github.com/caesium-cloud/caesium/pull/560) supplied
 idempotent Caesium starts, explicit created/queued/skipped/dropped outcomes and
-an operator recipe. There is no native Temporal client, external execution
-model, monitoring connector or workflow action surface. The Console's existing
+an operator recipe. W1/W2 have since added the connector contract, catalog, and
+Temporal observation adapter; HTTP monitoring and operator action surfaces
+remain pending. The Console's existing
 run, dataset, freshness, lineage, receipt and incident views are the data
 evidence this integration should join to external process state.
 
@@ -261,27 +262,45 @@ Resume unfinished waves. Do not archive this plan while later items remain.
   `images-arm64` check succeeded.
 - **Next ready:** B2 and F1. D1 still needs F1. C1 still needs D1 and F1.
 
-### W3 — Declared messages and real fixture (in progress)
+### W3 — Declared messages and real fixture (draft PRs; verification in progress)
 
-- **W3-α / B2:** Implementing in `codex/execution-connectors-w3-alpha` from
-  `0905995c1a7602c5da8d8f5b7937d474ad43d09e`. PR and candidate evidence pending.
+- **W3-α / B2:** [Draft PR #632](https://github.com/caesium-cloud/caesium/pull/632),
+  head `d3a58f24c16597d6b66746665cbd360b028690ed`, from
+  `0905995c1a7602c5da8d8f5b7937d474ad43d09e`.
   Queries require a declared closed result schema; the binding name selects the
   exact observed workflow type. No HTTP action surface is included in this wave.
-- **W3-β / F1:** Implementing in `codex/execution-connectors-w3-beta` from the
-  same base. PR, fixture pins, fault proof, and runtime evidence pending.
+- **W3-β / F1:** [Draft PR #633](https://github.com/caesium-cloud/caesium/pull/633),
+  head `64be892b6a81f156698f891d0e09ae5a151d4969`, from the same base.
+  SDK 1.49.0, CLI 1.9.1, Server 1.32.0, and the Alpine 3.23 image digest are
+  pinned. A development fixture run passed in 6.33 seconds: real authenticated
+  actors, mTLS, retry admissions, distinct effect activity identity, worker
+  restart, continuation, and accepted/rejected reply-loss faults. Strengthened
+  final assertions still require the current-candidate rerun.
+- **Current validation:** Combined candidate
+  `77b1fee95294a08698e3262f65a13edb98a4e83f` contains both feature snapshots,
+  with B2 then F1 guide sections. Containerized connector race tests, full
+  `just lint` (zero issues), and full race-enabled `just unit-test` passed.
+  Default-disabled `just integration-test` is running, followed by the selected
+  real fixture and message scenarios. This combined local evidence does not
+  qualify Cloud or other versions. Both independent source reviews have no
+  remaining substantive findings; final provider evidence and GitHub checks
+  remain pending. One CODEOWNER approval and current merge-queue checks are
+  required by the live repository rules.
 - B2 and F1 remain unchecked until their merged acceptance evidence is recorded.
-  D1/D2/C1/C2 have not been dispatched.
+  Merge B2 before F1's schema-bearing configuration. D1/D2/C1/C2 have not been
+  dispatched. Plan synchronization is open in
+  [PR #631](https://github.com/caesium-cloud/caesium/pull/631).
 
 ### Stream Status
 
 | Stream | Scope | Priority | Status |
 | --- | --- | --- | --- |
 | A | Generic contract, configuration and catalog (2 items) | P0 | Shipped (A1, A2) |
-| B | Temporal inspection and declared messages (2 items) | P0 | B1 shipped; B2 in progress (W3-α) |
+| B | Temporal inspection and declared messages (2 items) | P0 | B1 shipped; B2 draft PR #632 |
 | C | Authenticated REST and composition (2 items) | P0 | Not started |
 | D | Verified correlation and action durability (2 items) | P0 | Not started |
 | E | Console monitoring, data links and approval (3 items) | P0 | Not started |
-| F | Real fixture, CI, qualification and promotion (4 items) | P0 | F1 in progress (W3-β); F2–F4 not started |
+| F | Real fixture, CI, qualification and promotion (4 items) | P0 | F1 draft PR #633; F2–F4 not started |
 | N | Operator guidance and reconciliation (1 item) | P0 | Not started |
 
 ## Streams
@@ -349,10 +368,12 @@ Resume unfinished waves. Do not archive this plan while later items remain.
   rejection and ambiguous RPC outcomes, including not-found after lost rejection.
   Files: new `internal/connector/temporal/messages.go`,
   new `internal/connector/temporal/messages_test.go`,
+  new `test/connectors_messages_test.go` (real fixture adapter scenario),
   `internal/connector/config.go`, `internal/connector/config_test.go`,
   `internal/connector/fingerprint.go`, `test/fixtures/connectors/connections.yaml`
   (optional status Query result schema and its fingerprint),
-  `docs/connectors.md` (message semantics sections).
+  `docs/connectors.md` (message semantics sections), `docs/temporal.md`
+  (implemented adapter versus pending operator surface).
   Depends on: B1.
   Verify: refuse undeclared handlers/custom conversion. F1 proves real Query,
   accepted/completed Update, workflow-visible principal, spoof refusal, validator
