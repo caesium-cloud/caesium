@@ -487,20 +487,40 @@ the envelope; other authorized Temporal writers are outside that assertion.
 
 Submission waits for acceptance. It makes one Update RPC and returns the
 actual lifecycle stage: `submitted` for admitted, `accepted` for accepted,
-`completed` for a validated successful outcome, and `rejected` for a returned
-failure outcome. A remote failure outcome is distinct from an RPC error; the
-adapter does not claim that an arbitrary handler failure came from the
-validator. Failure messages and details are omitted. A completed response with
-an invalid result stays `unknown`, so it cannot authorize another effect.
+and `completed` for a validated successful outcome. A completed failure returned
+by submission stays `unknown` with `failure_kind: failure_origin_unknown`:
+the wire response does not distinguish validator rejection from an accepted
+handler that failed, possibly after effects. `rejected` requires independent
+proof of validator rejection and is not inferred by this adapter. Failure
+messages and details are omitted. A completed response with an invalid result
+also stays `unknown`, so it cannot authorize another effect.
+
+Local validation, binding/identity mismatch, cancellation before dispatch, or
+a failed preflight describe return `not_dispatched`. The Update RPC has not
+been issued. Identity mismatches retain a descriptive error and have no RPC
+code. `preflight_rpc_code` records only the actual code of a failed describe;
+`rpc_code` records only a failed Update or Poll RPC. A canceled context detected
+before any RPC has neither code. This avoids presenting a provably unsent
+action as an uncertain send.
 
 `LookupAction` makes one nonblocking `PollWorkflowExecutionUpdate` RPC for the
 same pinned run and Update ID. It does not take input or an actor, call an Update
 handler, or follow a newer run. RPC failures preserve the exact gRPC status code
-and leave the operation `unknown`. `NotFound` remains `unknown`, including after
+and leave the operation `unknown`. A completed failure returned by lookup also
+stays `unknown` with `failure_kind: failure_origin_unknown`. A Poll can retain
+an in-flight Update while its validator rejects it, so the failure outcome
+alone does not prove acceptance. It also does not prove validator origin or
+absence of effects. `NotFound` remains `unknown`, including after
 a lost validator-rejection reply: a rejected-before-acceptance Update can be
 absent from history. Absence proves neither rejection nor lack of effect and
 does not authorize resubmission. Explicit original-principal confirmation and
 durable guard handling remain D2/C2.
+
+These are adapter evidence states, not durable receipt states. D2 must explicitly
+map them into receipt and open-guard policy without treating an ambiguous or
+returned failure as a no-effect rejection. On lookup, `not_dispatched`
+means that call issued no Poll; it says nothing about the original Update and
+cannot release an existing receipt's guard or authorize resubmission.
 
 Only a single `json/plain` result payload is decoded. Custom or encrypted
 payloads remain unavailable. Input, stamped envelope, and exposed result each

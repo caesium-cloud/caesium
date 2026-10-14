@@ -213,6 +213,13 @@ func (s *IntegrationTestSuite) TestConnectorsMessages() {
 	cancel()
 	s.Require().NoError(err)
 	s.T().Cleanup(c.Close)
+	versionCtx, versionCancel := context.WithTimeout(s.T().Context(), 3*time.Second)
+	system, err := c.WorkflowService().GetSystemInfo(versionCtx, &workflowservice.GetSystemInfoRequest{})
+	versionCancel()
+	s.Require().NoError(err, "observed server version requires an actual Temporal RPC")
+	observedServerVersion := system.GetServerVersion()
+	s.Require().Equal("1.32.0", observedServerVersion, "message evidence must identify the pinned running server")
+	s.Require().Equal(observedServerVersion, readiness["server"], "fixture readiness and provider observation must agree")
 	m, err := ctemporal.NewMessengerFromClient(c, connection.ID, connection.Scope, connection.Bindings, "", 3*time.Second, connection.Limits.MaxPageMetadataBytes)
 	s.Require().NoError(err)
 	operator := s.createAPIKeyCLI("--role", "operator", "--description", "connector messages fixture operator")
@@ -223,27 +230,44 @@ func (s *IntegrationTestSuite) TestConnectorsMessages() {
 	ref := s.messageFixtureStart(c, "approved", "publication", true)
 	target := messageFixtureTarget(connection, ref)
 	s.messageFixtureAwait(m, target, func(state messageFixtureState) bool { return state.Stage == "awaiting_approval" })
+	workerEvidence, err := m.CheckWorker(s.T().Context(), target)
+	s.Require().NoError(err, "recent-poller evidence must use the real Temporal task queue RPC")
+	s.Require().Equal("recent_pollers", workerEvidence.Availability)
 	input := map[string]any{"note": "real actor approval"}
 	beforeRefusals := messageFixtureCount(s.messageFixtureEvents(), "update_rpc", "", "")
 	for _, rejectedInput := range []map[string]any{{"note": 42}, {connector.ReservedActorField: actor}} {
-		_, err := m.SubmitAction(s.T().Context(), target, "approve_publication", updateID, rejectedInput, actor)
+		refused, err := m.SubmitAction(s.T().Context(), target, "approve_publication", updateID, rejectedInput, actor)
 		s.Require().Error(err)
+		s.Require().Equal(ctemporal.UpdateNotDispatched, refused.State)
+		s.Require().Empty(refused.RPCCode)
+		s.Require().Empty(refused.PreflightRPCCode)
 	}
 	for _, mutate := range []func(*ctemporal.MessageTarget){
 		func(target *ctemporal.MessageTarget) { target.RunID = "" },
-		func(target *ctemporal.MessageTarget) { target.RunID = "another-run" },
+		func(target *ctemporal.MessageTarget) { target.RunID = "00000000-0000-4000-8000-000000000001" },
 		func(target *ctemporal.MessageTarget) { target.BindingVersion = "changed" },
 	} {
 		bad := target
 		mutate(&bad)
-		_, err := m.SubmitAction(s.T().Context(), bad, "approve_publication", updateID, input, actor)
+		refused, err := m.SubmitAction(s.T().Context(), bad, "approve_publication", updateID, input, actor)
 		s.Require().Error(err)
+		s.Require().Equal(ctemporal.UpdateNotDispatched, refused.State)
+		s.Require().Empty(refused.RPCCode)
+		if bad.RunID == "00000000-0000-4000-8000-000000000001" {
+			s.Require().Equal("NotFound", refused.PreflightRPCCode)
+		} else {
+			s.Require().Empty(refused.PreflightRPCCode)
+		}
 	}
 	_, err = m.SubmitAction(s.T().Context(), target, "undeclared_update", updateID, input, actor)
 	s.Require().Error(err)
 	external := s.messageFixtureStart(c, "type-refusal", "external_only", true)
-	_, err = m.SubmitAction(s.T().Context(), messageFixtureTarget(connection, external), "approve_publication", updateID, input, actor)
+	typeRefusal, err := m.SubmitAction(s.T().Context(), messageFixtureTarget(connection, external), "approve_publication", updateID, input, actor)
 	s.Require().Error(err, "actual workflow type mismatch must be refused")
+	s.Require().Equal(ctemporal.UpdateNotDispatched, typeRefusal.State)
+	s.Require().Empty(typeRefusal.RPCCode)
+	s.Require().Empty(typeRefusal.PreflightRPCCode)
+	s.Require().Contains(err.Error(), "does not match the pinned binding")
 	s.Require().Equal(beforeRefusals, messageFixtureCount(s.messageFixtureEvents(), "update_rpc", "", ""), "schema/spoof/handler/target refusals must happen before an Update RPC")
 
 	// The special test-only Query returns a real unsupported encoding. The
@@ -315,19 +339,22 @@ func (s *IntegrationTestSuite) TestConnectorsMessages() {
 	s.Require().Equal(1, messageFixtureCount(s.messageFixtureEvents(), "approval_effect", "", lostAccepted.RunID))
 	s.messageFixtureControl(http.MethodPost, "/fault", map[string]any{}, nil)
 
-	// Direct validator failure is known rejection. A dropped rejection is
-	// unknown; NotFound after eligibility changes must never resend it.
+	// The fixture's validator fails, but the production adapter cannot infer
+	// validator versus handler origin from a completed submission failure.
+	// A dropped rejection and later NotFound must never cause a resend.
 	rejected := s.messageFixtureStart(c, "rejected", "publication", false)
 	rejectedTarget := messageFixtureTarget(connection, rejected)
 	s.messageFixtureAwait(m, rejectedTarget, func(state messageFixtureState) bool { return state.Stage == "awaiting_approval" })
 	rejectedActor := s.messageFixtureActor(operator, operationPrefix+"-rejected")
 	rejectedID, err := ctemporal.StableUpdateID(rejectedActor.OperationID)
 	s.Require().NoError(err)
-	knownRejection, err := m.SubmitAction(s.T().Context(), rejectedTarget, "approve_publication", rejectedID, input, rejectedActor)
+	submissionFailure, err := m.SubmitAction(s.T().Context(), rejectedTarget, "approve_publication", rejectedID, input, rejectedActor)
 	s.Require().NoError(err)
-	s.Require().Equal(ctemporal.UpdateRejected, knownRejection.State)
-	s.Require().Equal("remote_update_failure", knownRejection.FailureKind)
-	s.Require().Equal(1, messageFixtureCount(s.messageFixtureEvents(), "update_rpc", rejectedID, ""), "known rejection must come from one explicit Update RPC")
+	s.Require().Equal(ctemporal.UpdateUnknown, submissionFailure.State)
+	s.Require().Equal("failure_origin_unknown", submissionFailure.FailureKind)
+	s.Require().Empty(submissionFailure.RPCCode)
+	s.Require().Empty(submissionFailure.PreflightRPCCode)
+	s.Require().Equal(1, messageFixtureCount(s.messageFixtureEvents(), "update_rpc", rejectedID, ""), "submission failure must come from one explicit Update RPC")
 	lostRejectedActor := s.messageFixtureActor(operator, operationPrefix+"-lost-rejected")
 	lostRejectedID, err := ctemporal.StableUpdateID(lostRejectedActor.OperationID)
 	s.Require().NoError(err)
@@ -375,8 +402,8 @@ func (s *IntegrationTestSuite) TestConnectorsMessages() {
 	}
 	s.Require().True(provedAcceptedLoss, "fault must drop a real accepted response")
 	s.Require().True(provedRejectedLoss, "fault must drop a real validator rejection response")
-	s.Require().True(provedRejection, "known rejection must have provider outcome evidence")
-	evidence, err := json.MarshalIndent(map[string]any{"candidate_sha": candidate, "sdk": "1.49.0", "server": "1.32.0", "events": events}, "", "  ")
+	s.Require().True(provedRejection, "fixture validator failure must have provider outcome evidence")
+	evidence, err := json.MarshalIndent(map[string]any{"candidate_sha": candidate, "sdk": readiness["sdk"], "server": observedServerVersion, "worker_observation": workerEvidence, "submission_failure": submissionFailure, "events": events}, "", "  ")
 	s.Require().NoError(err)
 	s.Require().NotContains(string(evidence), operator.Plaintext)
 	s.Require().NoError(os.WriteFile(filepath.Join(artifacts, "messages-provider-evidence.json"), append(evidence, '\n'), 0600))

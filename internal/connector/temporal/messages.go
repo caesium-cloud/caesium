@@ -53,23 +53,31 @@ type MessageTarget struct {
 }
 
 const (
-	UpdateSubmitted = "submitted"
-	UpdateAccepted  = "accepted"
-	UpdateCompleted = "completed"
-	UpdateRejected  = "rejected"
-	UpdateUnknown   = "unknown"
+	UpdateNotDispatched = "not_dispatched"
+	UpdateSubmitted     = "submitted"
+	UpdateAccepted      = "accepted"
+	UpdateCompleted     = "completed"
+	// UpdateRejected requires independent proof of validator rejection. A
+	// completed failure response alone does not establish that proof.
+	UpdateRejected = "rejected"
+	UpdateUnknown  = "unknown"
 )
 
-// UpdateResult is provider evidence, not a durable receipt. RPCCode is the
-// exact gRPC code of a failed RPC. FailureKind is bounded metadata; arbitrary
-// remote failure messages/details and payloads are never exposed. A failed
-// outcome establishes remote rejection, while an RPC error never does.
+// UpdateResult is provider evidence, not a durable receipt. not_dispatched
+// means this call issued no Update/Poll RPC, including local validation errors.
+// PreflightRPCCode is the exact code of a failed Describe RPC; RPCCode is the
+// exact code of a failed Update/Poll RPC. Identity refusals have neither code.
+// FailureKind omits remote messages/details. A submission failure does not
+// prove validator rejection or absence of effects. A lookup failure outcome
+// can also race a validator rejection; neither call proves acceptance or effects. Receipt policy and
+// mapping these provider states into durable state remain D2's responsibility.
 type UpdateResult struct {
-	State       string          `json:"state"`
-	NativeStage string          `json:"native_stage,omitempty"`
-	RPCCode     string          `json:"rpc_code,omitempty"`
-	Result      json.RawMessage `json:"result,omitempty"`
-	FailureKind string          `json:"failure_kind,omitempty"`
+	State            string          `json:"state"`
+	NativeStage      string          `json:"native_stage,omitempty"`
+	PreflightRPCCode string          `json:"preflight_rpc_code,omitempty"`
+	RPCCode          string          `json:"rpc_code,omitempty"`
+	Result           json.RawMessage `json:"result,omitempty"`
+	FailureKind      string          `json:"failure_kind,omitempty"`
 }
 
 // WorkerObservation reports recent task-queue poller evidence. No recent
@@ -222,54 +230,58 @@ func (m *Messenger) QueryStatus(ctx context.Context, target MessageTarget) (json
 
 // SubmitAction validates user JSON, stamps the authenticated server actor and
 // sends one Update pinned to the specified run. It waits for acceptance, not
-// completion. An outcome already returned by the server may prove completion
-// or rejection. There is no automatic retry even when a reply is lost.
+// completion. A successful outcome may prove completion; a failed outcome
+// does not distinguish validator rejection from an accepted handler failure.
+// There is no automatic retry even when a reply is lost.
 func (m *Messenger) SubmitAction(ctx context.Context, target MessageTarget, actionName, updateID string, input map[string]any, actor connector.ActorEnvelope) (UpdateResult, error) {
 	action, err := m.action(target, actionName, updateID)
 	if err != nil {
-		return UpdateResult{}, err
+		return notDispatched(err)
 	}
 	if err := actor.Validate(); err != nil {
-		return UpdateResult{}, err
+		return notDispatched(err)
 	}
 	if actor.Role != "operator" && actor.Role != "admin" {
-		return UpdateResult{}, errors.New("temporal action requires an operator or admin actor")
+		return notDispatched(errors.New("temporal action requires an operator or admin actor"))
 	}
 	if actor.BindingVersion != target.BindingVersion {
-		return UpdateResult{}, errors.New("actor binding version does not match the pinned target")
+		return notDispatched(errors.New("actor binding version does not match the pinned target"))
 	}
 	expected, _ := StableUpdateID(actor.OperationID)
 	if updateID != expected {
-		return UpdateResult{}, errors.New("update id does not match the persisted actor operation")
+		return notDispatched(errors.New("update id does not match the persisted actor operation"))
 	}
 	if _, spoof := input[connector.ReservedActorField]; spoof {
-		return UpdateResult{}, errors.New("caller cannot supply the reserved actor field")
+		return notDispatched(errors.New("caller cannot supply the reserved actor field"))
 	}
 	if input == nil {
 		input = map[string]any{}
 	}
 	encoded, err := json.Marshal(input)
 	if err != nil || len(encoded) > m.maxPayloadBytes {
-		return UpdateResult{}, errors.New("action input is invalid JSON or exceeds the payload budget")
+		return notDispatched(errors.New("action input is invalid JSON or exceeds the payload budget"))
 	}
 	validated, err := validateMessageJSON(encoded, action.input)
 	if err != nil {
-		return UpdateResult{}, err
+		return notDispatched(err)
 	}
 	// Separate caller input from the immutable reserved context. This envelope
 	// is the only argument sent to the remote Update handler.
 	envelope, err := connector.ApplyActor(map[string]any{"input": validated}, actor)
 	if err != nil {
-		return UpdateResult{}, err
+		return notDispatched(err)
 	}
 	encoded, err = json.Marshal(envelope)
 	if err != nil || len(encoded) > m.maxPayloadBytes {
-		return UpdateResult{}, errors.New("stamped action input exceeds the payload budget")
+		return notDispatched(errors.New("stamped action input exceeds the payload budget"))
 	}
 	ctx, cancel := m.rpcContext(ctx)
 	defer cancel()
 	if _, err := m.inspectTarget(ctx, target); err != nil {
-		return unknownRPC(err)
+		return notDispatched(err)
+	}
+	if err := ctx.Err(); err != nil {
+		return notDispatched(err)
 	}
 	response, err := m.service.UpdateWorkflowExecution(ctx, &workflowservice.UpdateWorkflowExecutionRequest{
 		Namespace: m.namespace, WorkflowExecution: workflowExecution(target),
@@ -292,15 +304,20 @@ func (m *Messenger) SubmitAction(ctx context.Context, target MessageTarget, acti
 // no input or actor argument and cannot resend. In particular NotFound after
 // an uncertain rejection is unknown: rejected-before-acceptance Updates need
 // not be in history. Absence never authorizes resubmission or releases a guard.
+// not_dispatched means this lookup issued no Poll; it says nothing about any
+// earlier Update. A failure outcome alone does not prove acceptance or effects.
 func (m *Messenger) LookupAction(ctx context.Context, target MessageTarget, actionName, updateID string) (UpdateResult, error) {
 	action, err := m.action(target, actionName, updateID)
 	if err != nil {
-		return UpdateResult{}, err
+		return notDispatched(err)
 	}
 	ctx, cancel := m.rpcContext(ctx)
 	defer cancel()
 	if _, err := m.inspectTarget(ctx, target); err != nil {
-		return unknownRPC(err)
+		return notDispatched(err)
+	}
+	if err := ctx.Err(); err != nil {
+		return notDispatched(err)
 	}
 	response, err := m.service.PollWorkflowExecutionUpdate(ctx, &workflowservice.PollWorkflowExecutionUpdateRequest{
 		Namespace: m.namespace, Identity: "caesium-connector",
@@ -379,6 +396,9 @@ func (m *Messenger) action(target MessageTarget, name, updateID string) (message
 }
 
 func (m *Messenger) inspectTarget(ctx context.Context, target MessageTarget) (*workflowservice.DescribeWorkflowExecutionResponse, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	response, err := m.service.DescribeWorkflowExecution(ctx, &workflowservice.DescribeWorkflowExecutionRequest{
 		Namespace: m.namespace, Execution: workflowExecution(target),
 	})
@@ -410,7 +430,10 @@ func (m *Messenger) updateResult(stage enumspb.UpdateWorkflowExecutionLifecycleS
 			if value.Failure == nil {
 				return result, errors.New("temporal returned an empty failure outcome")
 			}
-			result.State, result.FailureKind = UpdateRejected, "remote_update_failure"
+			// Validator rejection and accepted handler failure share the wire
+			// outcome. Even a nonblocking Poll can race in-flight rejection;
+			// neither response alone proves acceptance or absence of effects.
+			result.FailureKind = "failure_origin_unknown"
 			return result, nil
 		case *updatepb.Outcome_Success:
 			decoded, err := m.decodeResult(value.Success, schema)
@@ -556,6 +579,14 @@ func (m *Messenger) redactString(value string) string {
 
 func unknownRPC(err error) (UpdateResult, error) {
 	return UpdateResult{State: UpdateUnknown, RPCCode: rpcCode(err).String()}, messageRPCError(err)
+}
+
+func notDispatched(err error) (UpdateResult, error) {
+	result := UpdateResult{State: UpdateNotDispatched}
+	if rpcStatus, ok := status.FromError(err); ok {
+		result.PreflightRPCCode = rpcStatus.Code().String()
+	}
+	return result, err
 }
 
 type messageSchemaLoader struct{}

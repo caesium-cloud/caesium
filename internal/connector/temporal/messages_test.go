@@ -109,6 +109,13 @@ func completedMessageOutcome(raw string) *updatepb.Outcome {
 	return &updatepb.Outcome{Value: &updatepb.Outcome_Success{Success: jsonPayloads([]byte(raw))}}
 }
 
+func requireLocalNotDispatched(t *testing.T, result UpdateResult, err error) {
+	t.Helper()
+	if err == nil || result.State != UpdateNotDispatched || result.RPCCode != "" || result.PreflightRPCCode != "" {
+		t.Fatalf("local refusal was not distinguishable from dispatch/describe failure: %+v %v", result, err)
+	}
+}
+
 func TestDeclaredStatusQueryPinsTargetAndValidatesSchema(t *testing.T) {
 	service := &fakeMessageService{query: func(ctx context.Context, request *workflowservice.QueryWorkflowRequest) (*workflowservice.QueryWorkflowResponse, error) {
 		if request.Namespace != "namespace" || request.Execution.RunId != "original-run" || request.Execution.WorkflowId != "publication-workflow" || request.Query.QueryType != "publication_status" || request.Query.QueryArgs != nil {
@@ -141,12 +148,10 @@ func TestMessageTargetsAndUndeclaredHandlersRefuseBeforeDispatch(t *testing.T) {
 		if _, err := m.QueryStatus(t.Context(), target); err == nil {
 			t.Fatal("invalid Query target accepted")
 		}
-		if _, err := m.SubmitAction(t.Context(), target, "approve_publication", mustUpdateID(t), nil, messageActor()); err == nil {
-			t.Fatal("invalid action target accepted")
-		}
-		if _, err := m.LookupAction(t.Context(), target, "approve_publication", mustUpdateID(t)); err == nil {
-			t.Fatal("invalid lookup target accepted")
-		}
+		result, err := m.SubmitAction(t.Context(), target, "approve_publication", mustUpdateID(t), nil, messageActor())
+		requireLocalNotDispatched(t, result, err)
+		result, err = m.LookupAction(t.Context(), target, "approve_publication", mustUpdateID(t))
+		requireLocalNotDispatched(t, result, err)
 		if service.reads+service.queries+service.sends+service.polls != 0 {
 			t.Fatal("invalid target reached Temporal")
 		}
@@ -154,11 +159,16 @@ func TestMessageTargetsAndUndeclaredHandlersRefuseBeforeDispatch(t *testing.T) {
 	service := &fakeMessageService{}
 	m := mustMessenger(t, service)
 	for _, name := range []string{"arbitrary_signal", "terminate", "retry"} {
-		if _, err := m.SubmitAction(t.Context(), pinnedMessageTarget(), name, mustUpdateID(t), nil, messageActor()); err == nil {
-			t.Fatalf("undeclared handler %q accepted", name)
-		}
+		result, err := m.SubmitAction(t.Context(), pinnedMessageTarget(), name, mustUpdateID(t), nil, messageActor())
+		requireLocalNotDispatched(t, result, err)
+		result, err = m.LookupAction(t.Context(), pinnedMessageTarget(), name, mustUpdateID(t))
+		requireLocalNotDispatched(t, result, err)
 	}
-	if _, err := m.LookupAction(t.Context(), pinnedMessageTarget(), "approve_publication", ""); err == nil || service.reads != 0 {
+	result, err := m.LookupAction(t.Context(), pinnedMessageTarget(), "approve_publication", "")
+	requireLocalNotDispatched(t, result, err)
+	result, err = m.SubmitAction(t.Context(), pinnedMessageTarget(), "approve_publication", "", nil, messageActor())
+	requireLocalNotDispatched(t, result, err)
+	if service.reads != 0 {
 		t.Fatal("blank stable Update id reached provider")
 	}
 }
@@ -184,12 +194,13 @@ func TestActualWorkflowTypeAndRunMustMatchBinding(t *testing.T) {
 			if _, err := m.QueryStatus(t.Context(), pinnedMessageTarget()); err == nil {
 				t.Fatal("mismatched Query execution accepted")
 			}
-			if _, err := m.SubmitAction(t.Context(), pinnedMessageTarget(), "approve_publication", mustUpdateID(t), nil, messageActor()); err == nil {
-				t.Fatal("mismatched Update execution accepted")
+			result, err := m.SubmitAction(t.Context(), pinnedMessageTarget(), "approve_publication", mustUpdateID(t), nil, messageActor())
+			requireLocalNotDispatched(t, result, err)
+			if !strings.Contains(err.Error(), "does not match the pinned binding") {
+				t.Fatalf("identity refusal lost its descriptive error: %v", err)
 			}
-			if _, err := m.LookupAction(t.Context(), pinnedMessageTarget(), "approve_publication", mustUpdateID(t)); err == nil {
-				t.Fatal("mismatched lookup execution accepted")
-			}
+			result, err = m.LookupAction(t.Context(), pinnedMessageTarget(), "approve_publication", mustUpdateID(t))
+			requireLocalNotDispatched(t, result, err)
 			if service.queries+service.sends+service.polls != 0 {
 				t.Fatal("mismatched execution dispatched a message")
 			}
@@ -226,8 +237,10 @@ func TestActionInputActorSpoofAndIDMismatchRefuseBeforeRPC(t *testing.T) {
 		{"note": make(chan int)},
 	} {
 		service := &fakeMessageService{}
-		if _, err := mustMessenger(t, service).SubmitAction(t.Context(), pinnedMessageTarget(), "approve_publication", mustUpdateID(t), input, messageActor()); err == nil || service.reads != 0 {
-			t.Fatalf("invalid/spoofed input dispatched: %v", err)
+		result, err := mustMessenger(t, service).SubmitAction(t.Context(), pinnedMessageTarget(), "approve_publication", mustUpdateID(t), input, messageActor())
+		requireLocalNotDispatched(t, result, err)
+		if service.reads != 0 {
+			t.Fatal("invalid/spoofed input dispatched")
 		}
 	}
 	for _, mutation := range []func(*connector.ActorEnvelope){
@@ -239,8 +252,96 @@ func TestActionInputActorSpoofAndIDMismatchRefuseBeforeRPC(t *testing.T) {
 		service := &fakeMessageService{}
 		actor := messageActor()
 		mutation(&actor)
-		if _, err := mustMessenger(t, service).SubmitAction(t.Context(), pinnedMessageTarget(), "approve_publication", mustUpdateID(t), nil, actor); err == nil || service.reads != 0 {
+		result, err := mustMessenger(t, service).SubmitAction(t.Context(), pinnedMessageTarget(), "approve_publication", mustUpdateID(t), nil, actor)
+		requireLocalNotDispatched(t, result, err)
+		if service.reads != 0 {
 			t.Fatal("invalid actor/operation dispatched")
+		}
+	}
+}
+
+func TestDescribeRPCFailureIsNotAnAmbiguousDispatch(t *testing.T) {
+	for _, rpcErr := range []error{
+		serviceerror.NewUnavailable("secret-describe-message"),
+		serviceerror.NewNotFound("secret-describe-message"),
+		context.DeadlineExceeded,
+		context.Canceled,
+		status.Error(codes.Unknown, "secret-describe-message"),
+	} {
+		service := &fakeMessageService{describe: func(context.Context, *workflowservice.DescribeWorkflowExecutionRequest) (*workflowservice.DescribeWorkflowExecutionResponse, error) {
+			return nil, rpcErr
+		}}
+		m := mustMessenger(t, service)
+		for _, invoke := range []func() (UpdateResult, error){
+			func() (UpdateResult, error) {
+				return m.SubmitAction(t.Context(), pinnedMessageTarget(), "approve_publication", mustUpdateID(t), nil, messageActor())
+			},
+			func() (UpdateResult, error) {
+				return m.LookupAction(t.Context(), pinnedMessageTarget(), "approve_publication", mustUpdateID(t))
+			},
+		} {
+			result, err := invoke()
+			if err == nil || result.State != UpdateNotDispatched || result.PreflightRPCCode != rpcCode(rpcErr).String() || result.RPCCode != "" || strings.Contains(err.Error(), "secret") {
+				t.Fatalf("describe fault looked like an uncertain Update/Poll dispatch: %+v %v", result, err)
+			}
+		}
+		if service.reads != 2 || service.sends+service.polls != 0 {
+			t.Fatalf("failed preflight dispatched: describe=%d Update=%d Poll=%d", service.reads, service.sends, service.polls)
+		}
+	}
+}
+
+func TestCanceledBeforeDispatchHasNoFabricatedRPCCode(t *testing.T) {
+	for _, duringDescribe := range []bool{false, true} {
+		for _, lookup := range []bool{false, true} {
+			ctx, cancel := context.WithCancel(t.Context())
+			service := &fakeMessageService{}
+			if duringDescribe {
+				service.describe = func(_ context.Context, request *workflowservice.DescribeWorkflowExecutionRequest) (*workflowservice.DescribeWorkflowExecutionResponse, error) {
+					cancel()
+					return &workflowservice.DescribeWorkflowExecutionResponse{WorkflowExecutionInfo: &workflowpb.WorkflowExecutionInfo{Execution: request.Execution, Type: &commonpb.WorkflowType{Name: "publication"}}}, nil
+				}
+			} else {
+				cancel()
+			}
+			m := mustMessenger(t, service)
+			var result UpdateResult
+			var err error
+			if lookup {
+				result, err = m.LookupAction(ctx, pinnedMessageTarget(), "approve_publication", mustUpdateID(t))
+			} else {
+				result, err = m.SubmitAction(ctx, pinnedMessageTarget(), "approve_publication", mustUpdateID(t), nil, messageActor())
+			}
+			cancel()
+			requireLocalNotDispatched(t, result, err)
+			if !errors.Is(err, context.Canceled) || service.sends+service.polls != 0 {
+				t.Fatalf("canceled call attempted dispatch or lost cancellation: %+v %v", result, err)
+			}
+			wantReads := 0
+			if duringDescribe {
+				wantReads = 1
+			}
+			if service.reads != wantReads {
+				t.Fatalf("canceled preflight read count=%d want=%d", service.reads, wantReads)
+			}
+		}
+	}
+}
+
+func TestSubmissionFailureCannotProveValidatorRejection(t *testing.T) {
+	// Both validator rejection and an accepted handler failure share this
+	// completed failure shape. Remote failure text cannot prove its origin.
+	for _, message := range []string{"publication is not eligible", "handler failed after effects", "Workflow Update failed because the Workflow completed before the Update completed"} {
+		service := &fakeMessageService{submit: func(_ context.Context, request *workflowservice.UpdateWorkflowExecutionRequest) (*workflowservice.UpdateWorkflowExecutionResponse, error) {
+			return &workflowservice.UpdateWorkflowExecutionResponse{UpdateRef: updateRef(request), Stage: enumspb.UPDATE_WORKFLOW_EXECUTION_LIFECYCLE_STAGE_COMPLETED, Outcome: &updatepb.Outcome{Value: &updatepb.Outcome_Failure{Failure: &failurepb.Failure{Message: message}}}}, nil
+		}}
+		result, err := mustMessenger(t, service).SubmitAction(t.Context(), pinnedMessageTarget(), "approve_publication", mustUpdateID(t), nil, messageActor())
+		if err != nil || result.State != UpdateUnknown || result.FailureKind != "failure_origin_unknown" || result.RPCCode != "" || result.PreflightRPCCode != "" || service.sends != 1 {
+			t.Fatalf("ambiguous failure was classified as no-effect rejection: %+v %v", result, err)
+		}
+		encoded, _ := json.Marshal(result)
+		if strings.Contains(string(encoded), message) {
+			t.Fatalf("remote failure details leaked: %s", encoded)
 		}
 	}
 }
@@ -266,12 +367,12 @@ func TestLostRPCRepliesAndNotFoundStayUnknownWithoutResubmit(t *testing.T) {
 		}
 		m := mustMessenger(t, service)
 		submitted, err := m.SubmitAction(t.Context(), pinnedMessageTarget(), "approve_publication", mustUpdateID(t), nil, messageActor())
-		if err == nil || submitted.State != UpdateUnknown || submitted.RPCCode != rpcCode(rpcErr).String() || strings.Contains(err.Error(), "token-secret") {
+		if err == nil || submitted.State != UpdateUnknown || submitted.RPCCode != rpcCode(rpcErr).String() || submitted.PreflightRPCCode != "" || strings.Contains(err.Error(), "token-secret") {
 			t.Fatalf("ambiguous submission became terminal or leaked text: %+v %v", submitted, err)
 		}
 		for range 3 {
 			lookedUp, err := m.LookupAction(t.Context(), pinnedMessageTarget(), "approve_publication", mustUpdateID(t))
-			if err == nil || lookedUp.State != UpdateUnknown || lookedUp.RPCCode != rpcCode(rpcErr).String() {
+			if err == nil || lookedUp.State != UpdateUnknown || lookedUp.RPCCode != rpcCode(rpcErr).String() || lookedUp.PreflightRPCCode != "" {
 				t.Fatalf("RPC lookup error became known rejection: %+v %v", lookedUp, err)
 			}
 		}
@@ -281,7 +382,7 @@ func TestLostRPCRepliesAndNotFoundStayUnknownWithoutResubmit(t *testing.T) {
 	}
 }
 
-func TestUpdateOutcomeDistinguishesCompletedRejectionAndAcceptance(t *testing.T) {
+func TestLookupOutcomeDistinguishesReturnedFailureAndAcceptance(t *testing.T) {
 	for _, scenario := range []struct {
 		name    string
 		stage   enumspb.UpdateWorkflowExecutionLifecycleStage
@@ -290,7 +391,8 @@ func TestUpdateOutcomeDistinguishesCompletedRejectionAndAcceptance(t *testing.T)
 		wantErr bool
 	}{
 		{"completed", enumspb.UPDATE_WORKFLOW_EXECUTION_LIFECYCLE_STAGE_COMPLETED, completedMessageOutcome(`{"approved":true}`), UpdateCompleted, false},
-		{"remote rejection", enumspb.UPDATE_WORKFLOW_EXECUTION_LIFECYCLE_STAGE_COMPLETED, &updatepb.Outcome{Value: &updatepb.Outcome_Failure{Failure: &failurepb.Failure{Message: "secret-validator-message"}}}, UpdateRejected, false},
+		{"handler failure", enumspb.UPDATE_WORKFLOW_EXECUTION_LIFECYCLE_STAGE_COMPLETED, &updatepb.Outcome{Value: &updatepb.Outcome_Failure{Failure: &failurepb.Failure{Message: "secret-handler-message"}}}, UpdateUnknown, false},
+		{"in-flight validator rejection", enumspb.UPDATE_WORKFLOW_EXECUTION_LIFECYCLE_STAGE_COMPLETED, &updatepb.Outcome{Value: &updatepb.Outcome_Failure{Failure: &failurepb.Failure{Message: "secret-validator-message"}}}, UpdateUnknown, false},
 		{"admitted", enumspb.UPDATE_WORKFLOW_EXECUTION_LIFECYCLE_STAGE_ADMITTED, nil, UpdateSubmitted, false},
 		{"accepted", enumspb.UPDATE_WORKFLOW_EXECUTION_LIFECYCLE_STAGE_ACCEPTED, nil, UpdateAccepted, false},
 		{"unspecified", enumspb.UPDATE_WORKFLOW_EXECUTION_LIFECYCLE_STAGE_UNSPECIFIED, nil, UpdateUnknown, false},
@@ -306,6 +408,9 @@ func TestUpdateOutcomeDistinguishesCompletedRejectionAndAcceptance(t *testing.T)
 			result, err := mustMessenger(t, service).LookupAction(t.Context(), pinnedMessageTarget(), "approve_publication", mustUpdateID(t))
 			if (err != nil) != scenario.wantErr || result.State != scenario.state || service.sends != 0 {
 				t.Fatalf("outcome=%+v err=%v", result, err)
+			}
+			if scenario.outcome.GetFailure() != nil && result.FailureKind != "failure_origin_unknown" {
+				t.Fatalf("lookup failure claimed an unproven origin: %+v", result)
 			}
 			encoded, _ := json.Marshal(result)
 			if strings.Contains(string(encoded), "secret") || strings.Contains(string(encoded), "private") {
@@ -369,10 +474,14 @@ func TestMessengerFreezesBindingsAndRespectsBudgetAndShortDeadline(t *testing.T)
 	if result, err := m.QueryStatus(ctx, pinnedMessageTarget()); err == nil || len(result) != 0 {
 		t.Fatal("over-budget Query result exposed")
 	}
-	if _, err := m.SubmitAction(t.Context(), pinnedMessageTarget(), "approve_publication", mustUpdateID(t), map[string]any{"note": strings.Repeat("a", 129)}, messageActor()); err == nil || service.sends != 0 {
+	result, err := m.SubmitAction(t.Context(), pinnedMessageTarget(), "approve_publication", mustUpdateID(t), map[string]any{"note": strings.Repeat("a", 129)}, messageActor())
+	requireLocalNotDispatched(t, result, err)
+	if service.sends != 0 {
 		t.Fatal("over-budget input dispatched")
 	}
-	if _, err := m.SubmitAction(t.Context(), pinnedMessageTarget(), "approve_publication", mustUpdateID(t), nil, messageActor()); err == nil || service.sends != 0 {
+	result, err = m.SubmitAction(t.Context(), pinnedMessageTarget(), "approve_publication", mustUpdateID(t), nil, messageActor())
+	requireLocalNotDispatched(t, result, err)
+	if service.sends != 0 {
 		t.Fatal("actor envelope budget was not included")
 	}
 	for _, bad := range []struct {
@@ -388,13 +497,29 @@ func TestMessengerFreezesBindingsAndRespectsBudgetAndShortDeadline(t *testing.T)
 }
 
 func TestResponseUpdateReferenceCannotRetarget(t *testing.T) {
-	service := &fakeMessageService{poll: func(_ context.Context, request *workflowservice.PollWorkflowExecutionUpdateRequest) (*workflowservice.PollWorkflowExecutionUpdateResponse, error) {
-		ref := &updatepb.UpdateRef{WorkflowExecution: &commonpb.WorkflowExecution{WorkflowId: "publication-workflow", RunId: "continued-run"}, UpdateId: request.UpdateRef.UpdateId}
-		return &workflowservice.PollWorkflowExecutionUpdateResponse{UpdateRef: ref, Stage: enumspb.UPDATE_WORKFLOW_EXECUTION_LIFECYCLE_STAGE_COMPLETED, Outcome: completedMessageOutcome(`{"approved":true}`)}, nil
-	}}
-	result, err := mustMessenger(t, service).LookupAction(t.Context(), pinnedMessageTarget(), "approve_publication", mustUpdateID(t))
-	if err == nil || result.State != UpdateUnknown || len(result.Result) != 0 || service.sends != 0 {
-		t.Fatalf("continued run retargeted lookup: %+v %v", result, err)
+	for _, mismatch := range []string{"run", "workflow", "update", "missing reference", "missing response"} {
+		t.Run(mismatch, func(t *testing.T) {
+			service := &fakeMessageService{poll: func(_ context.Context, request *workflowservice.PollWorkflowExecutionUpdateRequest) (*workflowservice.PollWorkflowExecutionUpdateResponse, error) {
+				ref := &updatepb.UpdateRef{WorkflowExecution: &commonpb.WorkflowExecution{WorkflowId: "publication-workflow", RunId: "original-run"}, UpdateId: request.UpdateRef.UpdateId}
+				switch mismatch {
+				case "run":
+					ref.WorkflowExecution.RunId = "continued-run"
+				case "workflow":
+					ref.WorkflowExecution.WorkflowId = "other-workflow"
+				case "update":
+					ref.UpdateId = "other-update"
+				case "missing reference":
+					ref = nil
+				case "missing response":
+					return nil, nil
+				}
+				return &workflowservice.PollWorkflowExecutionUpdateResponse{UpdateRef: ref, Stage: enumspb.UPDATE_WORKFLOW_EXECUTION_LIFECYCLE_STAGE_COMPLETED, Outcome: completedMessageOutcome(`{"approved":true}`)}, nil
+			}}
+			result, err := mustMessenger(t, service).LookupAction(t.Context(), pinnedMessageTarget(), "approve_publication", mustUpdateID(t))
+			if err == nil || result.State != UpdateUnknown || result.PreflightRPCCode != "" || result.RPCCode != "" || len(result.Result) != 0 || service.sends != 0 || service.polls != 1 {
+				t.Fatalf("mismatched dispatched lookup looked like a refusal, RPC failure, or retargeted result: %+v %v", result, err)
+			}
+		})
 	}
 }
 
