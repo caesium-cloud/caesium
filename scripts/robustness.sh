@@ -896,8 +896,13 @@ PY
   done
 fi
 
+# The chart's OrderedReady StatefulSet starts the members one at a time, after
+# ordinal 0 probes its peers for peerDiscovery.probeSeconds. A healthy install
+# takes ~166s on the hosted runners, so a 240s budget left one slow member no
+# slack (the 2026-10-14 nightly core-robustness failure on #613). 480s matches
+# scripts/helm-pod-replacement.sh, which installs the same topology.
 log "helm install caesium into namespace $NAMESPACE"
-helm install caesium "$ROOT/helm/caesium" \
+if ! helm install caesium "$ROOT/helm/caesium" \
   --kubeconfig "$KUBECONFIG_PATH" \
   --namespace "$NAMESPACE" \
   --create-namespace \
@@ -906,7 +911,13 @@ helm install caesium "$ROOT/helm/caesium" \
   --set config.extraEnv[0].name=CAESIUM_INTERNAL_WAKEUP_TOKEN \
   --set-string config.extraEnv[0].value="$TOKEN" \
   "${HELM_EXTRA[@]+"${HELM_EXTRA[@]}"}" \
-  --wait --timeout 240s
+  --wait --timeout 480s; then
+  # cleanup saves the full describe and member logs as artifacts; the job log
+  # gets which member stalled and why.
+  kc_ns get pods -o wide || true
+  kc_ns get events --sort-by=.lastTimestamp 2>/dev/null | tail -n 40 || true
+  die "helm install did not reach three Ready members within 480s"
+fi
 
 log "verifying three bound PVCs, distinct members, and candidate image IDs"
 EXPECTED_IDENTITIES="$(paste -sd, "$ARTIFACTS/candidate-identities.txt")"

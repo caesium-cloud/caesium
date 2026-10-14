@@ -229,7 +229,7 @@ runner and task images using `kind load docker-image --name "$ROBUSTNESS_ID"`.
 Install with `helm install caesium ./helm/caesium --kubeconfig
 "$ARTIFACTS/kubeconfig" --namespace "$ROBUSTNESS_ID" --create-namespace --values
 helm/caesium/ci/test-values-robustness.yaml --set image.tag="$CANDIDATE_SHA"
---wait --timeout 240s`. Verify three bound PVCs, three distinct pod UIDs/IPs and
+--wait --timeout 480s`. Verify three bound PVCs, three distinct pod UIDs/IPs and
 worker nodes, and running image IDs matching the loaded candidate per platform.
 A healthy `/health` or three Ready pods is insufficient membership proof.
 
