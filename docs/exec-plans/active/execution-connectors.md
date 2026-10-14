@@ -262,7 +262,7 @@ Resume unfinished waves. Do not archive this plan while later items remain.
   `images-arm64` check succeeded.
 - **Next ready:** B2 and F1. D1 still needs F1. C1 still needs D1 and F1.
 
-### W3 — Review fixes (live verification in progress; unmerged)
+### W3 — Review fixes verified locally (unmerged; approval and CI blockers)
 
 - **W3-α / B2:** [PR #632](https://github.com/caesium-cloud/caesium/pull/632),
   head `190353f32c00aae17e4cecede993afa827cc32fd`, from
@@ -275,9 +275,10 @@ Resume unfinished waves. Do not archive this plan while later items remain.
   Cleanup uses atomic creation and immutable IDs, including dash signal exits.
   Evidence records raw effect executions, observed versions, host-owned files,
   full source and server identities, and refuses stale artifact directories.
-- **Review:** Three B2 and eight F1 threads were refreshed at their original
-  heads and fixed. Independent reviews of the revised source have no remaining
-  substantive findings. Replies/resolutions wait for the current live gates.
+- **Review:** All three B2 and eight F1 threads received evidence-based replies and were
+  resolved on the current feature heads. A fresh GitHub read verified all eleven
+  replies and zero unresolved threads. Independent source reviews have no
+  remaining substantive findings.
 - **Current candidate:** Clean combined commit
   `3553f37f15c5cb1922a9d7e8f847da29b63a13c8` contains the exact B2/F1 source
   snapshots with both guide sections. Its Go/recipe source is unchanged from
@@ -289,9 +290,17 @@ Resume unfinished waves. Do not archive this plan while later items remain.
   `TestConnectorsFixture` 6.33 seconds and `TestConnectorsMessages` 0.30 seconds,
   both PASS/no skips (6.64 seconds total). Reports bind to this candidate and
   observe Server 1.32.0, recent pollers, the ambiguous failure state, raw effects,
-  and activated reply loss. Artifacts have host UID ownership. Default-disabled
-  integration and normal agent-lane reruns are in progress; hosted checks must
-  also match the new heads.
+  and activated reply loss. Artifacts have host UID ownership. Fresh-image
+  default-disabled integration passed in 867.5 seconds; normal agent auth passed
+  45 scenarios in 35.2 seconds. Final containerized plan guardrails passed.
+  Hosted B2 [run 38569107187](https://github.com/caesium-cloud/caesium/actions/runs/38569107187)
+  has no observed failing job and still awaits coverage. F1
+  [run 38569974495](https://github.com/caesium-cloud/caesium/actions/runs/38569974495)
+  failed both unit architectures at the explicit B2 schema prerequisite. It also
+  failed [UI focus restoration](https://github.com/caesium-cloud/caesium/actions/runs/38569974495/job/115875857245)
+  at `ui/e2e/accessibility.spec.ts:308`: the automated retry passed, but the strict
+  lane remains failed. UI source is unchanged by this stream; the failure is
+  retained as an additional merge blocker.
 - **Dependency/merge blocker:** The intact fixture config/schema regression
   fails on F1's pre-B2 base with unsupported `statusQueryResultSchema`; it passes
   on the combined candidate. Merge B2 first, then integrate the new master into
@@ -388,8 +397,11 @@ Resume unfinished waves. Do not archive this plan while later items remain.
   Verify: refuse undeclared handlers/custom conversion. F1 proves real Query,
   accepted/completed Update, workflow-visible principal, spoof refusal, validator
   rejection and same-ID lookup. Record actual RPC statuses for the pinned server;
-  rejected-but-unaccepted absence is never proof of rejection/no effect. No
-  action implicitly targets the latest run or replays during lookup. C2 supplies
+  rejected-but-unaccepted absence is never proof of rejection/no effect. A
+  completed failure outcome alone does not prove validator origin or acceptance;
+  retain unknown origin until independent evidence resolves it. Preflight refusals
+  must distinguish this call's absence of dispatch from an uncertain send.
+  No action implicitly targets the latest run or replays during lookup. C2 supplies
   the HTTP proof.
 
 ### Stream C — Authenticated API and composition
