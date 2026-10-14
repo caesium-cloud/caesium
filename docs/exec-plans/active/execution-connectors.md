@@ -223,7 +223,7 @@ cardinality and closed-workflow Query dispatch count through the live surface.
 
 ## Progress (as of 2026-10-14)
 
-W1 and W2 have merged. W3 is implementing B2 and F1. C, D, E, F2–F4, and N
+W1 and W2 have merged. W3 has verified open PRs for B2 and F1. C, D, E, F2–F4, and N
 are not started. Drafting base:
 `a0e862171b898a64b64828b1a5376226e85b106a`. An open PR or a fixture-only pass
 is not completion. The SHAs below are the squash merges read from GitHub.
@@ -262,7 +262,7 @@ Resume unfinished waves. Do not archive this plan while later items remain.
   `images-arm64` check succeeded.
 - **Next ready:** B2 and F1. D1 still needs F1. C1 still needs D1 and F1.
 
-### W3 — Declared messages and real fixture (local gates passed; PRs open)
+### W3 — Declared messages and real fixture (verified; blocked on CODEOWNER approval)
 
 - **W3-α / B2:** [PR #632](https://github.com/caesium-cloud/caesium/pull/632),
   head `d3a58f24c16597d6b66746665cbd360b028690ed`, from
@@ -292,12 +292,19 @@ Resume unfinished waves. Do not archive this plan while later items remain.
   `NotFound` after eligibility changed, without sending another Update.
   Containerized final plan guardrails passed. This combined local evidence does not
   qualify Cloud or other versions. Both independent source reviews have no
-  remaining substantive findings. Both feature PRs are ready for review;
-  current GitHub checks are still running. One CODEOWNER approval and current merge-queue checks are
-  required by the live repository rules.
+  remaining substantive findings. Both feature PRs are ready for review and
+  current-head `ci-ok` passed: B2 in
+  [run 38498119835](https://github.com/caesium-cloud/caesium/actions/runs/38498119835)
+  and F1 in
+  [run 38498119886](https://github.com/caesium-cloud/caesium/actions/runs/38498119886).
+  Coverage and the selected hosted matrices succeeded on each head. The base
+  remains `0905995c1a7602c5da8d8f5b7937d474ad43d09e`.
+  Final GitHub review threads are empty, but both PRs remain `REVIEW_REQUIRED`
+  and `BLOCKED`: one CODEOWNER approval is required by the live rules. No
+  approval, admin bypass, repository-settings change, or merge was performed.
 - B2 and F1 remain unchecked until their merged acceptance evidence is recorded.
   Merge B2 before F1's schema-bearing configuration. D1/D2/C1/C2 have not been
-  dispatched. Plan synchronization is open in
+  dispatched. Worktrees and local evidence are retained for resumption. Plan synchronization is open in
   [PR #631](https://github.com/caesium-cloud/caesium/pull/631).
 
 ### Stream Status
