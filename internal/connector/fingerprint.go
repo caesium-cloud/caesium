@@ -55,12 +55,13 @@ type canonicalLimits struct {
 }
 
 type canonicalBinding struct {
-	Name              string              `json:"name"`
-	Version           string              `json:"version"`
-	DisplayName       string              `json:"displayName"`
-	StatusQuery       string              `json:"statusQuery"`
-	ActivityAllowlist []canonicalActivity `json:"activityAllowlist"`
-	Actions           []canonicalAction   `json:"actions"`
+	Name                    string              `json:"name"`
+	Version                 string              `json:"version"`
+	DisplayName             string              `json:"displayName"`
+	StatusQuery             string              `json:"statusQuery"`
+	StatusQueryResultSchema json.RawMessage     `json:"statusQueryResultSchema,omitempty"`
+	ActivityAllowlist       []canonicalActivity `json:"activityAllowlist"`
+	Actions                 []canonicalAction   `json:"actions"`
 }
 
 type canonicalActivity struct {
@@ -164,11 +165,12 @@ func canonicalBindingFrom(binding Binding) (canonicalBinding, error) {
 		canonicalActivities = []canonicalActivity{}
 	}
 	return canonicalBinding{
-		Name:              binding.Name,
-		Version:           binding.Version,
-		DisplayName:       binding.DisplayName,
-		StatusQuery:       binding.StatusQuery,
-		ActivityAllowlist: canonicalActivities,
-		Actions:           canonicalActions,
+		Name:                    binding.Name,
+		Version:                 binding.Version,
+		DisplayName:             binding.DisplayName,
+		StatusQuery:             binding.StatusQuery,
+		StatusQueryResultSchema: binding.StatusQueryResultSchema,
+		ActivityAllowlist:       canonicalActivities,
+		Actions:                 canonicalActions,
 	}, nil
 }
