@@ -32,6 +32,12 @@ If no group mapping matches, an empty `CAESIUM_AUTH_DEFAULT_ROLE` denies login.
 Set it to `viewer`, `runner`, `operator`, or `admin` only when unmapped SSO
 users should receive that fallback role.
 
+Caesium stores each user's groups at login and resolves the role again on every
+request from those stored groups. A mapping changed across a restart therefore
+applies to existing sessions without a new login; a user's group changes still
+take effect at their next login. A cookie session presented to a server that
+has no SSO provider enabled resolves no role and is refused.
+
 The browser session cookie is HTTP-only and `SameSite=Lax`. Unsafe requests from
 cookie sessions must include the CSRF token surfaced by `GET /auth/whoami`.
 `CAESIUM_AUTH_SESSION_COOKIE_NAME` changes the cookie name; use it when multiple
@@ -240,7 +246,9 @@ SSO login and logout lifecycle events are written to the audit log with actions
 `auth.login`, `auth.login_denied`, `auth.logout`, and
 `auth.session_revoked`. New SSO users also emit `user.provisioned` once when the
 shared login tail creates the local user record. Audit metadata includes the
-provider and denial reason where applicable.
+provider and denial reason where applicable. A login whose groups match no
+mapping (and with no default role) is denied with reason `no_binding`; a
+disabled user is denied with reason `user_disabled`.
 
 Prometheus exposes SSO counters and timing:
 

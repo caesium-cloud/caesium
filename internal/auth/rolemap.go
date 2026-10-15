@@ -2,24 +2,32 @@ package auth
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 
+	"github.com/caesium-cloud/caesium/internal/auth/policy"
 	"github.com/caesium-cloud/caesium/internal/models"
 )
 
-// RoleMapper resolves IdP groups to Caesium roles. Highest matched role wins.
-// The wildcard entry "*" matches every login; defaultRole is only a fallback
+// RoleMapper is the env-mapping policy source, used when no policy file is
+// set. It translates CAESIUM_AUTH_ROLE_MAPPING and CAESIUM_AUTH_DEFAULT_ROLE
+// into cluster-wide bindings, so the highest matched role wins at "*". The
+// wildcard entry "*" matches every login; the default role is only a fallback
 // when no explicit or wildcard mapping applies.
+//
+// The env mapping is deprecated in favour of the access policy file. This
+// adapter alone trims incoming groups, as the env mapping always has; policy
+// file groups are matched byte-exact.
 type RoleMapper struct {
-	byGroup     map[string]models.Role
-	wildcard    *models.Role
-	defaultRole *models.Role
+	static *policy.Static
 }
 
 // NewRoleMapper parses a semicolon-separated group=role mapping and optional
 // default role. Entries split on the last '=' so LDAP DNs can be used as keys.
+// A repeated group or wildcard keeps its last entry.
 func NewRoleMapper(mapping, defaultRole string) (*RoleMapper, error) {
-	m := &RoleMapper{byGroup: map[string]models.Role{}}
+	byGroup := map[string]models.Role{}
+	var wildcard *models.Role
 	for entry := range strings.SplitSeq(mapping, ";") {
 		entry = strings.TrimSpace(entry)
 		if entry == "" {
@@ -36,45 +44,65 @@ func NewRoleMapper(mapping, defaultRole string) (*RoleMapper, error) {
 		}
 		if group == "*" {
 			r := role
-			m.wildcard = &r
+			wildcard = &r
 			continue
 		}
-		m.byGroup[group] = role
+		byGroup[group] = role
 	}
 
+	var fallback models.Role
 	if dr := strings.TrimSpace(defaultRole); dr != "" {
 		if !models.ValidRole(dr) {
 			return nil, fmt.Errorf("invalid default role %q", dr)
 		}
-		r := models.Role(dr)
-		m.defaultRole = &r
+		fallback = models.Role(dr)
 	}
-	return m, nil
+
+	// One binding per distinct group, after the last-entry-wins dedupe above:
+	// a binding per raw entry would let "g=admin;g=viewer" resolve to admin.
+	groups := make([]string, 0, len(byGroup))
+	for group := range byGroup {
+		groups = append(groups, group)
+	}
+	slices.Sort(groups)
+	bindings := make([]policy.Binding, 0, len(groups)+1)
+	for _, group := range groups {
+		bindings = append(bindings, clusterBinding(group, byGroup[group]))
+	}
+	if wildcard != nil {
+		bindings = append(bindings, clusterBinding("*", *wildcard))
+	}
+	translated := &policy.AccessPolicy{
+		APIVersion: policy.APIVersionV1,
+		Kind:       policy.KindAccessPolicy,
+		Namespaces: map[string]policy.Namespace{policy.DefaultNamespace: {}},
+		Bindings:   bindings,
+	}
+	if err := translated.Validate(); err != nil {
+		return nil, fmt.Errorf("translate role mapping: %w", err)
+	}
+	return &RoleMapper{static: &policy.Static{Policy: translated, DefaultRole: fallback}}, nil
 }
 
-// Resolve returns the effective role for groups and whether login is allowed.
-func (m *RoleMapper) Resolve(groups []string) (models.Role, bool) {
-	var best models.Role
-	matched := false
-	for _, g := range groups {
-		role, ok := m.byGroup[strings.TrimSpace(g)]
-		if !ok {
-			continue
-		}
-		if !matched || models.RoleLevel(role) > models.RoleLevel(best) {
-			best = role
-			matched = true
-		}
+func clusterBinding(group string, role models.Role) policy.Binding {
+	return policy.Binding{
+		Subjects:   policy.Subjects{Groups: []string{group}},
+		Role:       role,
+		Namespaces: []string{policy.ClusterNamespace},
 	}
-	if m.wildcard != nil && (!matched || models.RoleLevel(*m.wildcard) > models.RoleLevel(best)) {
-		best = *m.wildcard
-		matched = true
+}
+
+// Resolve returns the grants for groups: the highest mapped role at "*", the
+// default role when nothing matched, or empty grants (login denied). Incoming
+// groups are trimmed. The env mapping has no user bindings, so email never
+// grants anything.
+func (m *RoleMapper) Resolve(groups []string, _ string) policy.Grants {
+	if m == nil || m.static == nil {
+		return policy.Grants{}
 	}
-	if matched {
-		return best, true
+	trimmed := make([]string, 0, len(groups))
+	for _, group := range groups {
+		trimmed = append(trimmed, strings.TrimSpace(group))
 	}
-	if m.defaultRole != nil {
-		return *m.defaultRole, true
-	}
-	return "", false
+	return m.static.Resolve(trimmed, "")
 }

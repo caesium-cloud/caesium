@@ -76,9 +76,9 @@ func TestProviderAuthenticateOpenLDAPFixture(t *testing.T) {
 		"",
 	)
 	require.NoError(t, err)
-	role, ok := mapper.Resolve(identity.Groups)
-	require.True(t, ok)
-	require.Equal(t, models.RoleOperator, role)
+	grants := mapper.Resolve(identity.Groups, "")
+	require.NotEmpty(t, grants)
+	require.Equal(t, models.RoleOperator, grants.ClusterRole())
 }
 
 func dockerClientOrSkip(t *testing.T) *client.Client {

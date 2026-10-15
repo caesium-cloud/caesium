@@ -16,9 +16,14 @@ type User struct {
 	DisplayName string         `gorm:"type:text" json:"display_name,omitempty"`
 	Groups      datatypes.JSON `gorm:"type:json" json:"groups,omitempty"`
 	Role        Role           `gorm:"type:text;not null" json:"role"`
-	CreatedAt   time.Time      `gorm:"not null" json:"created_at"`
-	LastLoginAt *time.Time     `json:"last_login_at,omitempty"`
-	DisabledAt  *time.Time     `json:"disabled_at,omitempty"`
+	// EmailVerified records whether the provider verified Email at the last
+	// login. It is identity trust state, not a grant: only a verified email may
+	// match policy users: bindings. The column is nullable with no default, so
+	// rows from before it existed read NULL, which scans as false (untrusted).
+	EmailVerified bool       `json:"email_verified"`
+	CreatedAt     time.Time  `gorm:"not null" json:"created_at"`
+	LastLoginAt   *time.Time `json:"last_login_at,omitempty"`
+	DisabledAt    *time.Time `json:"disabled_at,omitempty"`
 }
 
 // IsDisabled reports whether the user account has been disabled.

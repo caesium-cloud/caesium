@@ -6,12 +6,14 @@ import (
 	"testing"
 	"time"
 
+	"github.com/caesium-cloud/caesium/internal/auth/policy"
 	"github.com/caesium-cloud/caesium/internal/jobdef/testutil"
 	"github.com/caesium-cloud/caesium/internal/metrics"
 	metrictestutil "github.com/caesium-cloud/caesium/internal/metrics/testutil"
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
+	"gorm.io/gorm"
 )
 
 func TestSSOServiceComplete(t *testing.T) {
@@ -193,7 +195,7 @@ func TestSSOServiceCompleteAuditsAndRecordsMetrics(t *testing.T) {
 
 	var metadata map[string]any
 	require.NoError(t, json.Unmarshal(deniedEntries[0].Metadata, &metadata))
-	require.Equal(t, "no_role_mapping", metadata["reason"])
+	require.Equal(t, "no_binding", metadata["reason"])
 	require.Equal(t, "oidc", metadata["provider"])
 }
 
@@ -249,4 +251,166 @@ func TestSSOServiceCompleteAuditsUserProvisionedOnce(t *testing.T) {
 	loginEntries, err = auditor.Query(&AuditQueryRequest{Action: ActionAuthLogin, Limit: 10})
 	require.NoError(t, err)
 	require.Len(t, loginEntries, 2)
+}
+
+func TestSSOServiceCompletePolicyGroupBindingLogsIn(t *testing.T) {
+	db := testutil.OpenTestDB(t)
+	defer testutil.CloseDB(db)
+	p, err := policy.Parse([]byte(`apiVersion: v1
+kind: AccessPolicy
+bindings:
+  - subjects: {groups: ["CN=Ops,DC=example"]}
+    role: operator
+    namespaces: ["*"]
+`))
+	require.NoError(t, err)
+	sso := NewSSOService(NewUserStore(db), NewSessionStore(db), &policy.Static{Policy: p})
+
+	// Policy-file groups are byte-exact: the env adapter's trimming does not apply.
+	_, _, err = sso.Complete(context.Background(), &ExternalIdentity{
+		Issuer: "oidc", Subject: "padded", Groups: []string{" CN=Ops,DC=example "},
+	}, "oidc", "", "")
+	require.ErrorIs(t, err, ErrLoginDenied)
+
+	cookie, _, err := sso.Complete(context.Background(), &ExternalIdentity{
+		Issuer: "oidc", Subject: "exact", Email: "ops@example.com", Groups: []string{"CN=Ops,DC=example"},
+	}, "oidc", "", "")
+	require.NoError(t, err)
+	require.NotEmpty(t, cookie)
+
+	var user models.User
+	require.NoError(t, db.First(&user, "subject = ?", "exact").Error)
+	require.Equal(t, models.RoleOperator, user.Role)
+}
+
+func TestSSOServiceCompleteEmailOnlyBindingRequiresVerifiedEmail(t *testing.T) {
+	db := testutil.OpenTestDB(t)
+	defer testutil.CloseDB(db)
+	auditor := NewAuditLogger(db)
+	sso := NewSSOService(NewUserStore(db), NewSessionStore(db), emailOnlyAdminSource(t), WithSSOAuditLogger(auditor))
+
+	ext := &ExternalIdentity{Issuer: "oidc", Subject: "admin-sub", Email: "admin@example.com", EmailVerified: false}
+	cookie, sess, err := sso.Complete(context.Background(), ext, "oidc", "203.0.113.30", "agent")
+	require.ErrorIs(t, err, ErrLoginDenied)
+	require.Empty(t, cookie)
+	require.Nil(t, sess)
+	requireUserAndSessionCounts(t, db, 0, 0)
+
+	denied, err := auditor.Query(&AuditQueryRequest{Action: ActionAuthLoginDenied, Limit: 10})
+	require.NoError(t, err)
+	require.Len(t, denied, 1)
+	var metadata map[string]any
+	require.NoError(t, json.Unmarshal(denied[0].Metadata, &metadata))
+	require.Equal(t, "no_binding", metadata["reason"])
+
+	ext.EmailVerified = true
+	cookie, _, err = sso.Complete(context.Background(), ext, "oidc", "203.0.113.30", "agent")
+	require.NoError(t, err)
+	require.NotEmpty(t, cookie)
+
+	var user models.User
+	require.NoError(t, db.First(&user, "subject = ?", "admin-sub").Error)
+	require.Equal(t, models.RoleAdmin, user.Role)
+	require.True(t, user.EmailVerified)
+}
+
+func TestSSOServiceCompleteNoBindingDenied(t *testing.T) {
+	db := testutil.OpenTestDB(t)
+	defer testutil.CloseDB(db)
+	sso := NewSSOService(NewUserStore(db), NewSessionStore(db), emailOnlyAdminSource(t))
+
+	deniedBefore := metrictestutil.CounterValue(t, metrics.SSOLoginsTotal, "ldap", OutcomeDenied)
+	_, _, err := sso.Complete(context.Background(), &ExternalIdentity{
+		Issuer: "ldap", Subject: "carol", Email: "carol@example.com", EmailVerified: true, Groups: []string{"admins"},
+	}, "ldap", "", "")
+	require.ErrorIs(t, err, ErrLoginDenied)
+	require.Equal(t, deniedBefore+1, metrictestutil.CounterValue(t, metrics.SSOLoginsTotal, "ldap", OutcomeDenied))
+	requireUserAndSessionCounts(t, db, 0, 0)
+}
+
+func TestSSOServiceCompleteConfinedOnlyStoresEmptyClusterRole(t *testing.T) {
+	db := testutil.OpenTestDB(t)
+	defer testutil.CloseDB(db)
+	p, err := policy.Parse([]byte(`apiVersion: v1
+kind: AccessPolicy
+namespaces: {marketing: {}}
+bindings:
+  - subjects: {groups: [marketing-eng]}
+    role: operator
+    namespaces: [marketing]
+`))
+	require.NoError(t, err)
+	sso := NewSSOService(NewUserStore(db), NewSessionStore(db), &policy.Static{Policy: p})
+
+	_, _, err = sso.Complete(context.Background(), &ExternalIdentity{
+		Issuer: "oidc", Subject: "marketer", Groups: []string{"marketing-eng"},
+	}, "oidc", "", "")
+	require.NoError(t, err)
+
+	var user models.User
+	require.NoError(t, db.First(&user, "subject = ?", "marketer").Error)
+	require.Equal(t, models.Role(""), user.Role)
+	requireUserAndSessionCounts(t, db, 1, 1)
+}
+
+func TestSSOServiceCompleteNilSourceDenies(t *testing.T) {
+	db := testutil.OpenTestDB(t)
+	defer testutil.CloseDB(db)
+	var typedNil *RoleMapper
+	for _, src := range []policy.Source{nil, typedNil} {
+		sso := NewSSOService(NewUserStore(db), NewSessionStore(db), src)
+		_, _, err := sso.Complete(context.Background(), &ExternalIdentity{
+			Issuer: "oidc", Subject: "anyone", Email: "a@b.com", EmailVerified: true, Groups: []string{"eng"},
+		}, "oidc", "", "")
+		require.ErrorIs(t, err, ErrLoginDenied)
+	}
+	requireUserAndSessionCounts(t, db, 0, 0)
+}
+
+func TestSSOServiceCompleteDowngradesEmailTrust(t *testing.T) {
+	db := testutil.OpenTestDB(t)
+	defer testutil.CloseDB(db)
+	p, err := policy.Parse([]byte(`apiVersion: v1
+kind: AccessPolicy
+bindings:
+  - subjects: {groups: [viewers]}
+    role: viewer
+    namespaces: ["*"]
+  - subjects: {users: [admin@example.com]}
+    role: admin
+    namespaces: ["*"]
+`))
+	require.NoError(t, err)
+	src := &policy.Static{Policy: p}
+	sso := NewSSOService(NewUserStore(db), NewSessionStore(db), src)
+
+	ext := &ExternalIdentity{
+		Issuer: "oidc", Subject: "trust-sub", Email: "admin@example.com", EmailVerified: true, Groups: []string{"viewers"},
+	}
+	_, _, err = sso.Complete(context.Background(), ext, "oidc", "", "")
+	require.NoError(t, err)
+	var user models.User
+	require.NoError(t, db.First(&user, "subject = ?", "trust-sub").Error)
+	require.True(t, user.EmailVerified)
+	require.Equal(t, models.RoleAdmin, user.Role)
+	require.Equal(t, models.RoleAdmin, PrincipalFromUser(&user, src).ClusterRole())
+
+	ext.EmailVerified = false
+	_, _, err = sso.Complete(context.Background(), ext, "oidc", "", "")
+	require.NoError(t, err)
+	user = models.User{}
+	require.NoError(t, db.First(&user, "subject = ?", "trust-sub").Error)
+	require.False(t, user.EmailVerified, "an unverified login must downgrade the stored trust")
+	require.Equal(t, models.RoleViewer, user.Role)
+	require.Equal(t, models.RoleViewer, PrincipalFromUser(&user, src).ClusterRole(),
+		"the session principal must lose the email-only grant")
+}
+
+func requireUserAndSessionCounts(t *testing.T, db *gorm.DB, users, sessions int64) {
+	t.Helper()
+	var count int64
+	require.NoError(t, db.Model(&models.User{}).Count(&count).Error)
+	require.Equal(t, users, count, "users")
+	require.NoError(t, db.Model(&models.Session{}).Count(&count).Error)
+	require.Equal(t, sessions, count, "sessions")
 }

@@ -121,9 +121,9 @@ func TestAuthenticateGroupDNsCanResolveRoleMappings(t *testing.T) {
 
 	mapper, err := authpkg.NewRoleMapper(groupDN+"=operator", "")
 	require.NoError(t, err)
-	role, ok := mapper.Resolve(identity.Groups)
-	require.True(t, ok)
-	require.Equal(t, models.RoleOperator, role)
+	grants := mapper.Resolve(identity.Groups, "")
+	require.NotEmpty(t, grants)
+	require.Equal(t, models.RoleOperator, grants.ClusterRole())
 	require.Equal(t, `(memberUid=pat)`, fake.searches[1].Filter)
 	require.Equal(t, []string{"dn"}, fake.searches[1].Attributes)
 }

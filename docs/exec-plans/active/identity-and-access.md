@@ -176,7 +176,7 @@ translated into cluster-wide bindings and behaviour is unchanged.
       rules). Pure package, table-driven unit tests, no wiring.
       Files: new `internal/auth/policy/policy.go`, new `internal/auth/policy/resolve.go`,
       new `internal/auth/policy/glob.go`, new `internal/auth/policy/policy_test.go`.
-- [ ] A2. Replace `Principal.Role` with `Grants` (`RoleIn`, `ClusterRole`,
+- [x] A2. Replace `Principal.Role` with `Grants` (`RoleIn`, `ClusterRole`,
       `AllowedNamespaces`); `PrincipalFromUser(user, policy)` resolves grants from the
       stored groups + email on every request; `PrincipalFromKey` maps the key's
       `Namespaces` (NULL ⇒ `["*"]`) to grants; translate `CAESIUM_AUTH_ROLE_MAPPING` +
@@ -185,7 +185,8 @@ translated into cluster-wide bindings and behaviour is unchanged.
       `Principal.Role` (middleware metrics/audit label, whoami) to the cluster role.
       Policy groups remain byte-exact; the no-policy env adapter trims incoming
       groups to preserve `RoleMapper.Resolve` behavior. Only trusted/verified
-      provider email may reach email bindings; unverified email passes as empty,
+      provider email may reach email bindings (v1: OIDC `email_verified=true`
+      only; SAML and LDAP email is untrusted); unverified email passes as empty,
       with the trust state preserved for per-request resolution. Tests must reject
       an unverified OIDC email claiming an email-only admin binding.
       `User.Role` stays as "cluster role at last login" for the users list only.

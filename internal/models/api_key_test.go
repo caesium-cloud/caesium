@@ -4,7 +4,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
+	"gorm.io/datatypes"
 )
 
 func TestIsRevokedFalseByDefault(t *testing.T) {
@@ -49,4 +51,26 @@ func TestValidRole(t *testing.T) {
 	require.True(t, ValidRole("viewer"))
 	require.False(t, ValidRole("superuser"))
 	require.False(t, ValidRole(""))
+}
+
+// A key minted without namespaces persists SQL NULL and reads back empty,
+// which PrincipalFromKey treats as cluster-wide. Nothing normalizes it.
+func TestAPIKeyNamespacesNullRoundTrip(t *testing.T) {
+	db := openEmptyModelTestDB(t)
+	require.NoError(t, db.AutoMigrate(&APIKey{}))
+
+	key := &APIKey{ID: uuid.New(), KeyPrefix: "csk_live_ns", KeyHash: "hash", Role: RoleViewer, CreatedAt: time.Now().UTC()}
+	require.NoError(t, db.Create(key).Error)
+
+	var nulls int64
+	require.NoError(t, db.Raw("SELECT COUNT(*) FROM api_keys WHERE namespaces IS NULL").Scan(&nulls).Error)
+	require.Equal(t, int64(1), nulls)
+
+	var got APIKey
+	require.NoError(t, db.First(&got, "id = ?", key.ID).Error)
+	require.Empty(t, got.Namespaces)
+
+	require.NoError(t, db.Model(&APIKey{}).Where("id = ?", key.ID).Update("namespaces", datatypes.JSON(`["marketing"]`)).Error)
+	require.NoError(t, db.First(&got, "id = ?", key.ID).Error)
+	require.JSONEq(t, `["marketing"]`, string(got.Namespaces))
 }

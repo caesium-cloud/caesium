@@ -13,6 +13,7 @@ import (
 
 	authmw "github.com/caesium-cloud/caesium/api/middleware"
 	iauth "github.com/caesium-cloud/caesium/internal/auth"
+	"github.com/caesium-cloud/caesium/internal/auth/policy"
 	"github.com/caesium-cloud/caesium/internal/jobdef/testutil"
 	"github.com/caesium-cloud/caesium/internal/metrics"
 	metrictestutil "github.com/caesium-cloud/caesium/internal/metrics/testutil"
@@ -41,7 +42,7 @@ func TestWhoamiReturnsPrincipalAndCSRF(t *testing.T) {
 	c.Set(authmw.ContextKeyPrincipal, &iauth.Principal{
 		Kind:    iauth.PrincipalUser,
 		Subject: "viewer@example.com",
-		Role:    models.RoleViewer,
+		Grants:  policy.Grants{"*": models.RoleViewer},
 	})
 	c.Set(authmw.ContextKeyCSRFToken, "csrf-token")
 
@@ -69,7 +70,7 @@ func TestWhoamiNamesTheScopeOfAScopedKey(t *testing.T) {
 	c.Set(authmw.ContextKeyPrincipal, &iauth.Principal{
 		Kind:    iauth.PrincipalAPIKey,
 		Subject: "csk_live_abcd",
-		Role:    models.RoleViewer,
+		Grants:  policy.Grants{"*": models.RoleViewer},
 		Scope:   []byte(`{"jobs":["beta","alpha"]}`),
 	})
 
@@ -85,6 +86,25 @@ func TestWhoamiNamesTheScopeOfAScopedKey(t *testing.T) {
 	require.True(t, ok, "scoped key whoami must carry a scope object, got %v", body["scope"])
 	// ScopeJobs normalises (trim/dedupe/sort), so the order is deterministic.
 	require.Equal(t, []any{"alpha", "beta"}, scope["jobs"])
+}
+
+// TestWhoamiRoleIsClusterRole pins the interim whoami shape: role is the
+// cluster role, so a principal confined to namespaces reports "" until whoami
+// gains grants and namespaces.
+func TestWhoamiRoleIsClusterRole(t *testing.T) {
+	ctrl := NewSSO(nil, nil, "caesium_session")
+	c, rec := newAuthContext(t, http.MethodGet, "/auth/whoami", "")
+	c.Set(authmw.ContextKeyPrincipal, &iauth.Principal{
+		Kind:    iauth.PrincipalAPIKey,
+		Subject: "csk_live_conf",
+		Grants:  policy.Grants{"marketing": models.RoleAdmin},
+	})
+
+	require.NoError(t, ctrl.Whoami(c))
+	var body map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+	require.Contains(t, body, "role")
+	require.Equal(t, "", body["role"])
 }
 
 func TestNewSSORetainsCompletionService(t *testing.T) {

@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/caesium-cloud/caesium/internal/auth/policy"
 	"github.com/caesium-cloud/caesium/internal/dbretry"
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/caesium-cloud/caesium/pkg/log"
@@ -43,6 +44,7 @@ type Service struct {
 	validationFailureMinLatency time.Duration
 	sleep                       func(time.Duration)
 	now                         func() time.Time
+	policySource                policy.Source
 
 	// lastUsedMu protects the async last_used_at update buffer.
 	lastUsedMu sync.Mutex
@@ -57,6 +59,21 @@ func WithKeyHashSecret(secret string) ServiceOption {
 	return func(s *Service) {
 		s.keyHashSecret = secret
 	}
+}
+
+// WithPolicySource configures the grant source for session principals.
+func WithPolicySource(src policy.Source) ServiceOption {
+	return func(s *Service) {
+		s.policySource = src
+	}
+}
+
+// PolicySource returns the configured grant source, or nil when there is none.
+func (s *Service) PolicySource() policy.Source {
+	if s == nil {
+		return nil
+	}
+	return s.policySource
 }
 
 // WithValidationFailureMinLatency configures the minimum latency for auth failures.

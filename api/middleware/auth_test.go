@@ -16,6 +16,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v5"
 	"github.com/stretchr/testify/require"
+	"gorm.io/datatypes"
 	"gorm.io/gorm"
 )
 
@@ -214,14 +215,14 @@ func TestMiddlewareStoresAuthInContext(t *testing.T) {
 	require.NotNil(t, capturedPrincipal)
 	require.Equal(t, auth.PrincipalAPIKey, capturedPrincipal.Kind)
 	require.Equal(t, capturedKey.KeyPrefix, capturedPrincipal.Subject)
-	require.Equal(t, models.RoleAdmin, capturedPrincipal.Role)
+	require.Equal(t, models.RoleAdmin, capturedPrincipal.ClusterRole())
 }
 
 func TestAuthAcceptsSessionCookie(t *testing.T) {
 	db := testutil.OpenTestDB(t)
 	t.Cleanup(func() { testutil.CloseDB(db) })
 
-	svc := auth.NewService(db)
+	svc := auth.NewService(db, auth.WithPolicySource(mustRoleMapper(t, "viewers=viewer;operators=operator")))
 	auditor := auth.NewAuditLogger(db)
 	limiter := auth.NewRateLimiter(10, time.Minute)
 	sessions := auth.NewSessionStore(db)
@@ -231,6 +232,7 @@ func TestAuthAcceptsSessionCookie(t *testing.T) {
 		Issuer:    "oidc",
 		Subject:   "sub-1",
 		Email:     "viewer@example.com",
+		Groups:    datatypes.JSON(`["viewers"]`),
 		Role:      models.RoleViewer,
 		CreatedAt: time.Now().UTC(),
 	}
@@ -270,7 +272,7 @@ func TestAuthAcceptsSessionCookie(t *testing.T) {
 	require.NotNil(t, capturedPrincipal)
 	require.Equal(t, auth.PrincipalUser, capturedPrincipal.Kind)
 	require.Equal(t, "viewer@example.com", capturedPrincipal.Subject)
-	require.Equal(t, models.RoleViewer, capturedPrincipal.Role)
+	require.Equal(t, models.RoleViewer, capturedPrincipal.ClusterRole())
 	require.Nil(t, authmw.GetAuthKey(c))
 }
 
@@ -278,7 +280,7 @@ func TestAuthAcceptsSessionCookieWithCSRFOnUnsafeMethod(t *testing.T) {
 	db := testutil.OpenTestDB(t)
 	t.Cleanup(func() { testutil.CloseDB(db) })
 
-	svc := auth.NewService(db)
+	svc := auth.NewService(db, auth.WithPolicySource(mustRoleMapper(t, "viewers=viewer;operators=operator")))
 	auditor := auth.NewAuditLogger(db)
 	limiter := auth.NewRateLimiter(10, time.Minute)
 	sessions := auth.NewSessionStore(db)
@@ -288,6 +290,7 @@ func TestAuthAcceptsSessionCookieWithCSRFOnUnsafeMethod(t *testing.T) {
 		Issuer:    "oidc",
 		Subject:   "sub-1",
 		Email:     "operator@example.com",
+		Groups:    datatypes.JSON(`["operators"]`),
 		Role:      models.RoleOperator,
 		CreatedAt: time.Now().UTC(),
 	}

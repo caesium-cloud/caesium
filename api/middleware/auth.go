@@ -115,7 +115,7 @@ func Auth(d AuthDeps) echo.MiddlewareFunc {
 						}
 						return err
 					}
-					principal = auth.PrincipalFromUser(user)
+					principal = auth.PrincipalFromUser(user, d.Service.PolicySource())
 					c.Set(ContextKeyCSRFToken, sess.CSRFToken)
 				}
 			}
@@ -129,18 +129,18 @@ func Auth(d AuthDeps) echo.MiddlewareFunc {
 			routePath := normalisePath(c)
 			required, ok := auth.RequiredRole(c.Request().Method, routePath)
 			if !ok {
-				return denyAccess(c, d.Auditor, principal.Subject, principal.Role, routePath, "unknown_route", "")
+				return denyAccess(c, d.Auditor, principal.Subject, principal.ClusterRole(), routePath, "unknown_route", "")
 			}
 
-			if !auth.HasRole(principal.Role, required) {
-				return denyAccess(c, d.Auditor, principal.Subject, principal.Role, routePath, "insufficient_role", required)
+			if !auth.HasRole(principal.ClusterRole(), required) {
+				return denyAccess(c, d.Auditor, principal.Subject, principal.ClusterRole(), routePath, "insufficient_role", required)
 			}
 
 			// Store authenticated identity in context for downstream handlers.
 			scopeContext, err := authorizeScope(c, d.Service, principal.Scope, routePath)
 			if err != nil {
 				if he, ok := err.(*echo.HTTPError); ok && he.Code == http.StatusForbidden {
-					return denyAccessWithMessage(c, d.Auditor, principal.Subject, principal.Role, routePath, "insufficient_scope", required, forbiddenMessage(he))
+					return denyAccessWithMessage(c, d.Auditor, principal.Subject, principal.ClusterRole(), routePath, "insufficient_scope", required, forbiddenMessage(he))
 				}
 				return err
 			}
@@ -155,7 +155,7 @@ func Auth(d AuthDeps) echo.MiddlewareFunc {
 				return err
 			}
 
-			metrics.AuthRequestsTotal.WithLabelValues("success", string(principal.Role), c.Request().Method, routePath).Inc()
+			metrics.AuthRequestsTotal.WithLabelValues("success", string(principal.ClusterRole()), c.Request().Method, routePath).Inc()
 			logSuccessfulAction(d.Auditor, c, principal, routePath, scopeContext)
 			return nil
 		}
