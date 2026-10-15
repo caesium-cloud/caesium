@@ -90,6 +90,23 @@ func (s *Source) allowedPlans(ctx context.Context, importer *jobdef.Importer, pl
 	return allowed, nil
 }
 
+// skippedBatchError makes a batch validation failure actionable when manifests
+// were skipped for their namespace: their stored rows stay live and take part
+// in the validation, so a conflict with them (say a trigger cycle through a job
+// moved out of the allowlist) fails the sync. Without skips the error is
+// returned unchanged.
+func skippedBatchError(report *SyncReport, err error) error {
+	if len(report.Violations) == 0 {
+		return err
+	}
+	aliases := make([]string, 0, len(report.Violations))
+	for _, violation := range report.Violations {
+		aliases = append(aliases, violation.Alias)
+	}
+	return fmt.Errorf("git sync %s commit %s: batch invalid while namespace-skipped manifests %q keep their stored jobs: %w (fix the repository or move the job back into the allowlist)",
+		report.SourceID, report.Commit, aliases, err)
+}
+
 func (s *Source) reportViolation(report *SyncReport, path, alias, namespace, storedNamespace, reason string) {
 	if reason != jobdef.NamespaceReasonStored {
 		storedNamespace = ""

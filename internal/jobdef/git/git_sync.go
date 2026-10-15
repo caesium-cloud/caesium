@@ -321,7 +321,7 @@ func (s *Source) applyCheckout(ctx context.Context, importer *jobdef.Importer, d
 	}
 
 	if err := importer.ValidateBatch(ctx, planDefinitions(plans)); err != nil {
-		return err
+		return skippedBatchError(report, err)
 	}
 
 	for idx, plan := range plans {
@@ -346,10 +346,12 @@ func (s *Source) applyCheckout(ctx context.Context, importer *jobdef.Importer, d
 			// a silent cycle, and the same checkout keeps failing until an
 			// operator fixes one side (a new commit, or a REST apply with git
 			// sync disabled). It needs a concurrent move of a source-owned
-			// job to race the watcher between the pre-filter and this apply.
+			// job to race the watcher between the pre-filter and this apply;
+			// the same conflict without the race fails in skippedBatchError.
 			s.reportViolation(report, plan.path, nsErr.Alias, nsErr.RequestedNamespace, nsErr.StoredNamespace, nsErr.Reason)
 			if err := importer.ValidateBatch(ctx, planDefinitions(plans[idx+1:])); err != nil {
-				return err
+				return fmt.Errorf("git sync %s commit %s: namespace refusal of %q left the remaining batch invalid: %w (fix the repository or move the job back into the allowlist)",
+					report.SourceID, commit, nsErr.Alias, err)
 			}
 			continue
 		}

@@ -752,6 +752,76 @@ func (s *GitSyncSuite) TestSyncAllowlistInTransactionRefusalRevalidatesRest() {
 	s.Equal("error", audits[1].Outcome)
 }
 
+// A later manifest refused in its transaction after an earlier one committed:
+// the earlier apply stays (per-manifest transactions), and the revalidation
+// turns the resulting stored cycle into a loud, actionable sync error.
+func (s *GitSyncSuite) TestSyncAllowlistLaterInTransactionRefusalFailsLoudly() {
+	repoDir, db, importer := s.allowlistSetup(map[string]string{
+		"jobs/a.yaml": allowlistChainManifest("ns-a", ""),
+		"jobs/b.yaml": allowlistChainManifest("ns-b", "ns-a"),
+	})
+	source := narrowedSource(repoDir)
+	s.Require().NoError(source.Sync(context.Background(), importer))
+	bBefore := s.allowlistJob(db, "ns-b")
+
+	// Valid as a batch: a now listens for b, and b becomes cron.
+	s.commit(repoDir, map[string]string{
+		"jobs/a.yaml": allowlistChainManifest("ns-a", "ns-b"),
+		"jobs/b.yaml": allowlistChainManifest("ns-b", ""),
+	})
+	head := s.headCommit(repoDir)
+	applyHookForTest = func(alias string) {
+		if alias == "ns-b" { // b moves out after a has committed
+			s.Require().NoError(db.Model(&models.Job{}).Where("alias = ?", alias).Update("namespace", "marketing").Error)
+		}
+	}
+	s.T().Cleanup(func() { applyHookForTest = nil })
+
+	report, err := source.SyncWithReport(context.Background(), importer)
+	s.Require().ErrorIs(err, jobdef.ErrTriggerChainCycle)
+	s.Contains(err.Error(), `namespace refusal of "ns-b" left the remaining batch invalid`)
+	s.Contains(err.Error(), "move the job back into the allowlist")
+	s.Equal(1, report.Applied)
+	s.Equal(head, s.allowlistJob(db, "ns-a").ProvenanceCommit, "the earlier manifest stays applied")
+	bAfter := s.allowlistJob(db, "ns-b")
+	s.Equal(bBefore.ProvenanceCommit, bAfter.ProvenanceCommit, "the refused manifest is not applied")
+	s.Equal("marketing", bAfter.Namespace)
+
+	audits := s.allowlistAudits(db)
+	s.Require().Len(audits, 2)
+	s.Equal("error", audits[1].Outcome)
+	s.Equal(1, audits[1].Meta.Applied)
+	s.Require().Len(audits[1].Meta.Violations, 1)
+	s.Equal(jobdef.NamespaceReasonStored, audits[1].Meta.Violations[0].Reason)
+}
+
+// The same conflict without a race: b was moved out of the allowlist before
+// the commit, so the pre-filter skips it and a's proposal is validated against
+// b's live row. The sync fails instead of applying a into a cycle.
+func (s *GitSyncSuite) TestSyncAllowlistSkippedStoredRowConflictFailsLoudly() {
+	repoDir, db, importer := s.allowlistSetup(map[string]string{
+		"jobs/a.yaml": allowlistChainManifest("ns-a", ""),
+		"jobs/b.yaml": allowlistChainManifest("ns-b", "ns-a"),
+	})
+	source := narrowedSource(repoDir)
+	s.Require().NoError(source.Sync(context.Background(), importer))
+	aBefore := s.allowlistJob(db, "ns-a")
+	s.Require().NoError(db.Model(&models.Job{}).Where("alias = ?", "ns-b").Update("namespace", "marketing").Error)
+
+	s.commit(repoDir, map[string]string{"jobs/a.yaml": allowlistChainManifest("ns-a", "ns-b")})
+	report, err := source.SyncWithReport(context.Background(), importer)
+	s.Require().ErrorIs(err, jobdef.ErrTriggerChainCycle)
+	s.Contains(err.Error(), `namespace-skipped manifests ["ns-b"] keep their stored jobs`)
+	s.Equal(0, report.Applied)
+	s.Equal(aBefore.ProvenanceCommit, s.allowlistJob(db, "ns-a").ProvenanceCommit, "a must not apply into a cycle")
+
+	audits := s.allowlistAudits(db)
+	s.Require().Len(audits, 2)
+	s.Equal("error", audits[1].Outcome)
+	s.Require().Len(audits[1].Meta.Violations, 1)
+	s.Equal("ns-b", audits[1].Meta.Violations[0].Alias)
+}
+
 func (s *GitSyncSuite) TestSyncAllowlistDuplicateAliasStaysFatal() {
 	repoDir, db, importer := s.allowlistSetup(map[string]string{
 		"jobs/a.yaml": allowlistManifest("ns-dup", "marketing"),
