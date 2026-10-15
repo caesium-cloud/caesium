@@ -359,9 +359,11 @@ Resume unfinished waves. Do not archive this plan while later items remain.
   review is clear. Containerized focused race/static fixture/dependency checks,
   lint (zero issues), full race/coverage unit and required tagged checks passed
   on these committed contents. Five new regression groups drive the adapter
-  through actual StartWithResult admissions and typed persistence. Current-head
-  real Temporal/default integration and hosted CI are pending; prior provider
-  artifacts at `9cff2744` do not qualify this changed implementation. The earlier
+  through actual StartWithResult admissions and typed persistence. Fresh clean
+  current-head real Temporal qualification passed Fixture, Messages and
+  Correlation without skips (16.04 seconds); source/image provenance and observed
+  Server 1.32.0, SDK 1.49.0 and CLI 1.9.1 are verified. Default integration and
+  hosted CI remain pending. The earlier
   browser-only repair remains unchanged. Threads stay open until verified
   publication; one CODEOWNER approval remains required before merge.
 - **W4-β / D2:** Draft [PR #637](https://github.com/caesium-cloud/caesium/pull/637),
@@ -398,8 +400,9 @@ Resume unfinished waves. Do not archive this plan while later items remain.
   attempt. D2 has four open findings: transient preflight refusal becomes
   terminal, failed lookup erases prior acceptance, an evidence envelope can
   prevent a legal maximum result from completing, and a same-key retry can hide
-  a failed evidence write. Fixes and independent review are in progress in the
-  existing worktrees; no finding is resolved before verified publication.
+  a failed evidence write. Fixes are published and independently reviewed.
+  Both local baselines passed; fresh provider/integration and hosted checks are
+  running. No finding is resolved before verified publication.
 - **Merge/plan status:** All three PRs remain open and require one CODEOWNER
   approval and the protected squash merge queue.
   Plan validation includes an earlier full containerized race/coverage unit pass
