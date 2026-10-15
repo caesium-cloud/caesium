@@ -945,8 +945,12 @@ integration-test-infra: integration-runner
     {{ container_cli }} rm -f {{ infra_it_container }} >/dev/null 2>&1 || true
 
 integration-up-agent: build-stress build-test build-triage-agent
-    {{ container_cli }} rm -f {{ agent_it_container }} >/dev/null 2>&1 || true
-    {{ container_cli }} run -d --platform {{ platform }} \
+    @if [ -z "${CAESIUM_CONNECTORS_SERVER_CIDFILE:-}" ]; then {{ container_cli }} rm -f {{ agent_it_container }} >/dev/null 2>&1 || true; fi
+    @if [ -n "${CAESIUM_CONNECTORS_SERVER_CIDFILE:-}" ]; then \
+        [ ! -e "$CAESIUM_CONNECTORS_SERVER_CIDFILE" ] || { echo "server CID file already exists" >&2; exit 1; }; \
+        set -- create --cidfile "$CAESIUM_CONNECTORS_SERVER_CIDFILE"; \
+    else set -- run -d; fi; \
+    {{ container_cli }} "$@" --platform {{ platform }} \
         --name {{ agent_it_container }} \
         --privileged \
         -p {{ port }}:8080 \
@@ -1970,3 +1974,10 @@ clean-worktrees:
     else
         echo "removed $removable worktree(s), kept $kept."
     fi
+
+# Real Temporal 1.32.0 / CLI 1.9.1 / SDK 1.49.0 fixture self-qualification.
+# This uses tracked integration-up-agent; F2 adds connector HTTP/browser routes.
+connectors-fixture-check: integration-runner
+    CAESIUM_CONTAINER_CLI={{ container_cli }} CAESIUM_PLATFORM={{ platform }} \
+        CAESIUM_CONNECTORS_TAG={{ tag }} CAESIUM_CONNECTORS_BUILDER_IMAGE={{ local_builder_ref }}:{{ tag }}-full \
+        sh scripts/connectors-fixture.sh check

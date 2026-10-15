@@ -1,0 +1,79 @@
+# Mount the fixture artifacts at /artifacts. The TLS proxy and Caesium share
+# the lane's network namespace. Replace the two example aliases with lane job aliases
+# when exercising D1's trusted admission lookup. F1 drives actual starts itself.
+version: 1
+connections:
+  - id: fixture
+    provider: temporal
+    endpoint: 127.0.0.1:7234
+    scope: default
+    enabled: true
+    credentials:
+      certificatePaths:
+        - /artifacts/tls/ca.crt
+        - /artifacts/tls/tls.crt
+        - /artifacts/tls/tls.key
+    bindings:
+      - name: publication
+        version: "1"
+        displayName: Fixture publication
+        statusQuery: publication_status
+        statusQueryResultSchema:
+          type: object
+          additionalProperties: false
+          required: [stage, eligible, approved, approval_effects]
+          properties:
+            stage: {type: string}
+            eligible: {type: boolean}
+            approved: {type: boolean}
+            approval_effects: {type: integer, minimum: 0, maximum: 1}
+            child_run_id: {type: string}
+            actor:
+              type: object
+              additionalProperties: false
+              required: [principal_kind, stable_id, subject, role, operation_id, binding_version]
+              properties:
+                principal_kind: {type: string, enum: [user, api_key]}
+                stable_id: {type: string}
+                subject: {type: string}
+                role: {type: string}
+                operation_id: {type: string}
+                binding_version: {type: string}
+            first:
+              type: object
+              additionalProperties: false
+              required: [version, job_id, idempotency_key, outcome]
+              properties:
+                version: {type: string, const: v1}
+                job_id: {type: string}
+                idempotency_key: {type: string}
+                outcome: {type: string}
+                queue_id: {type: string}
+                run_id: {type: string}
+            second:
+              type: object
+              additionalProperties: false
+              required: [version, job_id, idempotency_key, outcome]
+              properties:
+                version: {type: string, const: v1}
+                job_id: {type: string}
+                idempotency_key: {type: string}
+                outcome: {type: string}
+                queue_id: {type: string}
+                run_id: {type: string}
+        activityAllowlist:
+          - activityType: caesium.start
+            jobs: [connector-fixture-publish, connector-fixture-notify]
+        actions:
+          - name: approve_publication
+            inputSchema:
+              type: object
+              additionalProperties: false
+              properties:
+                note: {type: string}
+            resultSchema:
+              type: object
+              additionalProperties: false
+              required: [approved]
+              properties:
+                approved: {type: boolean}
