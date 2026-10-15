@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/url"
 	"strings"
 	"testing"
@@ -15,6 +16,7 @@ import (
 	"github.com/caesium-cloud/caesium/pkg/container"
 	schema "github.com/caesium-cloud/caesium/pkg/jobdef"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/mattn/go-sqlite3"
 	"github.com/stretchr/testify/require"
 	"github.com/stretchr/testify/suite"
@@ -1084,13 +1086,47 @@ func TestImporterLocksGuardedJobRowsOnPostgres(t *testing.T) {
 	require.NoError(t, err)
 	var jobs []models.Job
 	require.NoError(t, pruneScopeTx(db, &PruneOptions{SourceID: "git-a"}).Find(&jobs).Error)
+	require.NoError(t, lockBatchJobsTx(db, []string{"b", "a"}))
 
-	require.Len(t, statements, 2)
+	require.Len(t, statements, 3)
 	for _, statement := range statements {
 		require.True(t, strings.HasSuffix(statement, " FOR UPDATE"), statement)
 	}
 	require.Contains(t, statements[0], "alias = $1")
+	// The two multi-row locks share one byte order, so a git batch and a
+	// concurrent prune cannot deadlock.
 	require.Contains(t, statements[1], "provenance_source_id = $1")
+	require.True(t, strings.HasSuffix(statements[1], `ORDER BY alias COLLATE "C" FOR UPDATE`), statements[1])
+	require.Contains(t, statements[2], "alias IN ($1,$2)")
+	require.True(t, strings.HasSuffix(statements[2], `ORDER BY alias COLLATE "C" FOR UPDATE`), statements[2])
+}
+
+func TestImporterContentionClassifierRetriesPostgresConflicts(t *testing.T) {
+	for code, want := range map[string]bool{"40P01": true, "40001": true, "23505": false, "57014": false} {
+		err := fmt.Errorf("apply: %w", &pgconn.PgError{Code: code})
+		require.Equal(t, want, isImporterContentionErr(err), code)
+	}
+	require.True(t, isImporterContentionErr(sqlite3.Error{Code: sqlite3.ErrBusy}))
+	require.False(t, isImporterContentionErr(errors.New("job alias already exists")))
+}
+
+func (s *ImporterTestSuite) TestApplyBatchLocksJobsInAliasOrderFirst() {
+	var statements []string
+	s.Require().NoError(s.db.Callback().Query().After("gorm:query").Register("allowlist:capture", func(tx *gorm.DB) {
+		if tx.Statement.Table == "jobs" {
+			statements = append(statements, tx.Statement.SQL.String())
+		}
+	}))
+	_, err := s.importer.ApplyBatchWithOptions(context.Background(), []BatchPlan{
+		{Def: s.allowlistDef("batch-c", ""), Opts: &ApplyOptions{}},
+		{Def: s.allowlistDef("batch-a", ""), Opts: &ApplyOptions{}},
+	})
+	s.Require().NoError(err)
+	s.Require().NotEmpty(statements)
+	// SQLite drops the FOR UPDATE clause; the order it would lock in remains.
+	s.Contains(statements[0], "alias IN (")
+	s.True(strings.HasSuffix(strings.TrimSpace(statements[0]), "ORDER BY alias"), statements[0])
+	testutil.AssertCount(s.T(), s.db, &models.Job{}, 2)
 }
 
 func (s *ImporterTestSuite) allowlistDef(alias, namespace string) *schema.Definition {

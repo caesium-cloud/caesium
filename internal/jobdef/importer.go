@@ -301,10 +301,18 @@ func (i *Importer) ApplyBatchWithOptions(ctx context.Context, plans []BatchPlan)
 		}
 	}
 
+	aliases := make([]string, 0, len(plans))
+	for _, plan := range plans {
+		aliases = append(aliases, plan.Def.Metadata.Alias)
+	}
+
 	var result BatchResult
 	err := withImporterBusyRetry(ctx, func() error {
 		attempt := BatchResult{}
 		err := i.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+			if err := lockBatchJobsTx(tx, aliases); err != nil {
+				return err
+			}
 			for idx, plan := range plans {
 				if _, err := i.applyTx(ctx, tx, plan.Def, plan.Opts); err != nil {
 					nsErr, ok := errors.AsType[*NamespaceAllowlistError](err)
@@ -485,6 +493,15 @@ func jitterImporterBusyRetryBackoff(base time.Duration) time.Duration {
 }
 
 func isImporterContentionErr(err error) bool {
+	// PostgreSQL aborts one side of a row-lock deadlock (40P01) or a
+	// serialization conflict (40001); re-running the whole transaction is the
+	// documented remedy. pgconn.PgError exposes the code as SQLState.
+	if pgErr, ok := errors.AsType[interface {
+		error
+		SQLState() string
+	}](err); ok && (pgErr.SQLState() == "40P01" || pgErr.SQLState() == "40001") {
+		return true
+	}
 	// Delegate to the single shared classifier so the matched error strings
 	// live in exactly one place (pkg/dqlite).
 	return dqlite.IsContentionError(err)
@@ -500,9 +517,33 @@ func lockJobRows(tx *gorm.DB) *gorm.DB {
 	return tx.Clauses(clause.Locking{Strength: "UPDATE"})
 }
 
-// pruneScopeTx selects the active jobs PruneMissing may retire, locked.
+// jobAliasLockOrder orders multi-row job locks: PruneMissing and
+// ApplyBatchWithOptions take theirs in this one order, so they cannot deadlock
+// each other on PostgreSQL. COLLATE "C" pins byte order there regardless of the
+// database collation; SQLite's default BINARY collation is already byte order.
+func jobAliasLockOrder(tx *gorm.DB) string {
+	if tx.Name() == "postgres" {
+		return `alias COLLATE "C"`
+	}
+	return "alias"
+}
+
+// lockBatchJobsTx locks every existing row (retired ones included) of a batch's
+// aliases up front, in jobAliasLockOrder, before the batch applies them in its
+// own order.
+func lockBatchJobsTx(tx *gorm.DB, aliases []string) error {
+	if len(aliases) == 0 {
+		return nil
+	}
+	var ids []uuid.UUID
+	return lockJobRows(tx).Unscoped().Model(&models.Job{}).Where("alias IN ?", aliases).
+		Order(jobAliasLockOrder(tx)).Pluck("id", &ids).Error
+}
+
+// pruneScopeTx selects the active jobs PruneMissing may retire, locked in
+// jobAliasLockOrder.
 func pruneScopeTx(tx *gorm.DB, opts *PruneOptions) *gorm.DB {
-	query := lockJobRows(tx).Model(&models.Job{})
+	query := lockJobRows(tx).Model(&models.Job{}).Order(jobAliasLockOrder(tx))
 	if opts != nil && strings.TrimSpace(opts.SourceID) != "" {
 		query = query.Where("provenance_source_id = ?", strings.TrimSpace(opts.SourceID))
 	}
