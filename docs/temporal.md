@@ -280,6 +280,50 @@ func MonthEndClose(ctx workflow.Context, month string) error {
 }
 ```
 
+### Optional verified activity correlation
+
+The adapter can join a binding-recognized activity to an existing Caesium
+admission. Declare its exact activity type and a bounded allowlist of **local job
+aliases** in the connector binding. At most 100 aliases are searched for one
+activity. The adapter obtains the enclosing Workflow ID, pinned Run ID,
+activity ID and activity type from Temporal Describe/history evidence, derives
+`<RunID>/<ActivityID>`, and reads every allowed job's admission for that key.
+Exactly one consistent admission is required. This read does not reconstruct
+params or priority, replay a start, or promote a queue entry.
+
+A worker may optionally replace the example's string heartbeats and result
+with the frozen v1 JSON correlation hint:
+
+```json
+{"version":"v1","job_id":"3f0c5a3c-7320-4cda-8cf8-a052bc648e59","idempotency_key":"<RunID>/<ActivityID>","outcome":"queued","queue_id":"df7e73c1-4673-446a-b719-d3d63eeab089"}
+```
+
+`job_id` is the job UUID, not its alias. Required fields are `version`, `job_id`,
+`idempotency_key` and `outcome`; `queue_id` and `run_id` are optional UUIDs.
+Report the actual accepted start outcome (`created`, `queued`, `skipped`, or
+`dropped`), independent of the run's running/succeeded/failed status. In the
+recipe, build the hint from `in.JobID`, `key`, `start.Outcome`, `start.QueueID`
+and `start.ID`. Heartbeat it while waiting and return it on completion. A
+promoted queued start keeps its original queue ID in the durable admission,
+although the subsequent HTTP response may omit that optional value.
+
+Every reported hint value must agree with the trusted key and current local
+admission. A stale `queued` hint after promotion is unverified until refreshed;
+it cannot regress or erase an already verified association. Missing, ambiguous,
+unrelated or inconsistent admissions remain unverified. The hint never chooses
+a job from the allowlist. Plain metadata and custom/encrypted payloads work
+without a decoded hint: the same trusted activity identity finds the admission.
+Only the frozen envelope is retained; arbitrary activity payloads are not copied.
+Incomplete history pages without a scheduled activity's identity cannot supply
+a verified link.
+
+The typed catalog link keeps one admission identity across retries, queue
+promotion and restarts, with source event ID/type and verification time.
+Repeated unchanged reads do not write evidence. This verifies the declared
+protocol identity, not the HTTP caller or arbitrary data provenance. It creates
+no local work, synthetic runs or dataset evidence. The public bidirectional
+monitoring surface remains pending in the execution-connectors plan.
+
 Operational notes:
 
 - `POST /v1/jobs/:id/run` takes the job **ID**. Resolve an alias once with

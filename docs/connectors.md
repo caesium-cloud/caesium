@@ -5,7 +5,8 @@
 > direct snapshots, relations, the configuration epoch, and operation receipts.
 > Startup reads the epoch after migration and does not compare it. Temporal
 > observation is implemented and dials only when the connector gate is on.
-> The adapter also implements binding-declared JSON Queries and Updates.
+> The adapter also implements binding-declared JSON Queries and Updates, and
+> trusted activity correlation can verify existing Caesium admissions.
 > There are still no connector HTTP routes or Console pages. Job-definition
 > YAML is unchanged.
 
@@ -271,7 +272,8 @@ Temporal. The plan that tracks the unshipped work is
 Connector identities, direct snapshots, relation evidence, the configuration
 epoch, and operation receipts are catalog metadata. The tables are
 `external_executions`, `external_execution_snapshots`,
-`external_execution_relations`, `connector_operations`, and
+`external_execution_relations`, `external_execution_correlations`,
+`connector_operations`, and
 `connector_configurations`. They are registered with `models.All` and are not
 hot-path tables: they are absent from hot-shard routing and from the hot
 execution migrator. Nothing in this store creates a Caesium job run or task run.
@@ -329,8 +331,8 @@ routes and no Console pages.
 
 `internal/connector/temporal` compiles `go.temporal.io/sdk` v1.49.0.
 Health, a filtered visibility list, direct describe, and bounded history are
-implemented. Declared Queries and Updates are implemented separately; durable
-receipts, correlation, and HTTP routes remain later plan items. With
+implemented. Declared Queries, Updates and activity correlation are implemented
+separately; durable receipts and HTTP routes remain later plan items. With
 `CAESIUM_CONNECTORS_ENABLED` left at its default
 false, the process dials no Temporal server, starts no worker, and needs no
 Temporal credentials.
@@ -434,6 +436,36 @@ paths uses TLS. File-read errors are redacted when they would contain the API
 key or a PEM body. The configured RPC deadline defaults to
 `connector.MaxRPCDeadline` and a larger value is rejected. A caller's shorter
 deadline is kept.
+
+## Activity correlation
+
+A trusted adapter read derives the admission key from the enclosing Temporal
+Run ID and Activity ID. The read-only lookup searches every local job alias
+in the binding's activity allowlist. Exactly one consistent admission can
+become a verified `delegation` link; a hint never narrows that search or
+supplies the source identity. Optional frozen `v1` heartbeat/result hints
+must match every reported value. Unrelated pending activities cannot hide a
+recognized activity's heartbeat or consume its evidence budget. A completion
+without a decoded hint preserves a reported pending hint; conflicting hints
+refuse the mixed read. Current Describe attempt and history evidence must agree:
+an older start cannot lower the attempt or advance its source event. A page
+containing an older start without the current start withholds that activity as
+incomplete; schedule-only evidence remains usable. Custom
+payloads can use the metadata-only path without decoding inputs or reconstructing
+the start request hash.
+
+`external_execution_correlations` stores the external/activity/admission
+identity, local job/queue/run references and bounded source evidence. Queue
+promotion updates the same link and keeps its admission and queue identity.
+Unchanged evidence writes nothing; old evidence and mismatched hints preserve
+newer verified state. No lookup starts or retries local work. These records
+verify the declared admission protocol, not arbitrary data provenance.
+
+See [the activity envelope recipe](temporal.md#optional-verified-activity-correlation)
+for the frozen payload. The real fixture qualifies provider identity, queued
+promotion, retry and actual public job starts. Component tests separately
+exercise typed persistence and database reopen. Public bidirectional links
+and running-server integration remain C1.
 
 ## Temporal messages
 

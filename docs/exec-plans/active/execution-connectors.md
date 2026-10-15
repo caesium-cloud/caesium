@@ -247,7 +247,7 @@ cardinality and closed-workflow Query dispatch count through the live surface.
 
 ## Progress (as of 2026-10-15)
 
-W1, W2 and W3 have merged. W4 implements D1 and D2; neither is merged.
+W1, W2 and W3 have merged. W4 D1 has merged; D2 remains in PR #637.
 C, E, F2–F4 and N remain later work. An open PR or a component-only pass
 is not completion. The SHAs below are the squash merges read from GitHub.
 
@@ -347,75 +347,84 @@ Resume unfinished waves. Do not archive this plan while later items remain.
 
 ### W4 — Correlation and action durability (in progress)
 
-- **Base:** `b796b5672eab30134876f403f257af9e7a1f76da`; W3 implementation
-  and plan synchronization are merged.
-- **W4-α / D1:** Draft [PR #636](https://github.com/caesium-cloud/caesium/pull/636),
-  head `5c2ee804ac110017b4f5129d2084dcc57aa0a926`, implements trusted
+- **Base:** W4 started from `b796b5672eab30134876f403f257af9e7a1f76da`.
+  Current `master` includes D1 at `2615c8745466c5f949f2aa43cc7947d349cb9c47`.
+- **W4-α / D1:** [PR #636](https://github.com/caesium-cloud/caesium/pull/636)
+  merged `2615c8745466c5f949f2aa43cc7947d349cb9c47` at 2026-10-15T22:17:40Z.
+  Tested head `5c2ee804ac110017b4f5129d2084dcc57aa0a926` implements trusted
   activity/admission correlation and durable local links. The two posted review
   findings are fixed: unrelated pending activities cannot discard recognized
   heartbeat/attempt evidence, and older history starts cannot lower Describe's
   current attempt or advance its source event. Mixed/conflicting hints refuse
   verification instead of silently losing reported values. Independent source
   review is clear. Containerized focused race/static fixture/dependency checks,
-  lint (zero issues), full race/coverage unit and required tagged checks passed
-  on these committed contents. Five new regression groups drive the adapter
-  through actual StartWithResult admissions and typed persistence. Fresh clean
-  current-head real Temporal qualification passed Fixture, Messages and
-  Correlation without skips (16.04 seconds); source/image provenance and observed
-  Server 1.32.0, SDK 1.49.0 and CLI 1.9.1 are verified. Full default integration
-  passed in 876.192 seconds. Current-head [CI run 38807694976](https://github.com/caesium-cloud/caesium/actions/runs/38807694976)
-  is running. The earlier
-  browser-only repair remains unchanged. Both posted findings have verified
-  replies and resolved threads at this head; one CODEOWNER approval remains
-  required before merge.
-- **W4-β / D2:** Draft [PR #637](https://github.com/caesium-cloud/caesium/pull/637),
-  head `f5ab6072905a6b356cc7f33a87af6d8c410cef13`, implements immutable action
+  lint (zero issues), full race/coverage unit and required tagged checks passed.
+  Five new regression groups drive the adapter through actual StartWithResult
+  admissions and typed persistence. Fresh clean real Temporal qualification
+  passed Fixture, Messages and Correlation without skips (16.04 seconds), with
+  verified source/image provenance and observed Server 1.32.0, SDK 1.49.0 and
+  CLI 1.9.1. Full default integration passed in 876.192 seconds. Exact-head
+  [CI run 38807694976](https://github.com/caesium-cloud/caesium/actions/runs/38807694976)
+  succeeded, including coverage, browser lanes and `ci-ok`. Both posted findings
+  have verified replies and resolved threads. D1 component acceptance is merged;
+  C1/C2 still own the public HTTP composition.
+- **W4-β / D2:** [PR #637](https://github.com/caesium-cloud/caesium/pull/637),
+  head `997b9ba849cab33fc0e8de640f7c043e8d0dae4c`, implements immutable action
   receipts, guarded dispatch, lookup-only recovery and explicit original-principal
-  resubmission. Four posted findings are fixed: durable initial no-send proof
-  and transactional claims permit safe transient retries; weaker/error lookup
-  retains acceptance bytes; validated completion survives result omission at the
-  evidence ceiling; and nonterminal replay repairs failed evidence writes by
-  lookup without another send. Independent review is clear. Containerized lint
-  (zero issues), focused race/static fixture/dependency checks, full race/coverage
-  unit and required tagged checks passed on these committed contents. All ten
-  new regression groups passed, including real Messenger/Temporal-bridge calls,
-  concurrent retry claims, injected database errors and an exact legal result
-  ceiling. Fresh clean current-head real Temporal qualification passed all three
-  named Fixture, Messages and Operations scenarios without skips (7.05 seconds),
-  with verified source/image provenance and observed Server 1.32.0, SDK 1.49.0 and
-  CLI 1.9.1. Component evidence records five Update sends and three logical
-  effects across lost replies, admission crash and explicit confirmation.
-  Default/agent integration and [CI run 38808433945](https://github.com/caesium-cloud/caesium/actions/runs/38808433945)
-  remain pending. All four posted findings have verified replies and resolved
-  threads at this head; one CODEOWNER approval remains required before merge.
-- **Composition:** The earlier uncommitted combined candidate is preserved.
-  The orchestrator now owns the shared Docker lane for review-fix verification.
-  A fresh local-only candidate will integrate both published fixes, retain both
-  guide sections, and run combined unit plus all four named real fixture
-  scenarios after standalone qualification. That combined proof is still
-  pending; it is not a feature PR or a GitHub merge. After the first sibling
-  merges, integrate actual updated `master` into the second and refresh affected
-  verification before its merge.
+  resubmission. It merges actual D1 `master`, preserving both implementations;
+  only two guide status paragraphs conflicted and were reconciled semantically.
+  Four posted findings are fixed: durable initial no-send proof and transactional
+  claims permit safe transient retries; weaker/error lookup retains acceptance
+  bytes; validated completion survives result omission at the evidence ceiling;
+  and nonterminal replay repairs failed evidence writes by lookup without another
+  send. Independent review is clear. Standalone head
+  `f5ab6072905a6b356cc7f33a87af6d8c410cef13` passed containerized lint (zero
+  issues), focused race/static fixture/dependency checks, full race/coverage unit,
+  required tagged checks, default integration (821.974 seconds), normal agent
+  integration (35.095 seconds), and
+  [CI run 38808433945](https://github.com/caesium-cloud/caesium/actions/runs/38808433945),
+  including `ci-ok`. All ten new regression groups passed, including actual
+  Messenger/Temporal-bridge calls, concurrent retry claims, injected database
+  errors and an exact legal result ceiling. That clean head's real Temporal
+  qualification passed Fixture, Messages and Operations without skips (7.05
+  seconds), with verified source/image provenance and observed Server 1.32.0,
+  SDK 1.49.0 and CLI 1.9.1. Component evidence records five Update sends and
+  three logical effects across lost replies, admission crash and explicit
+  confirmation. The merged candidate's complete tree matches the combined unit
+  candidate below. New-head [CI run 38816506079](https://github.com/caesium-cloud/caesium/actions/runs/38816506079)
+  is running; prior standalone CI is not current-head qualification. All four
+  posted findings have verified replies and resolved threads. D2 stays unchecked
+  pending verified merge, current checks and required review.
+- **Composition:** Before the actual D1 merge, a local combined candidate passed
+  the full containerized root-module race/coverage unit suite: 152 packages,
+  zero failures or race warnings. Its tree
+  `0ac9102f5a038e14d5736c679bf9d4732235a7a3` exactly matches all 1,992 tracked
+  entries in current D2 commit `997b9ba8`; an independent comparison also verifies
+  all 27 frozen manifest hashes. D1's squash merge has the same complete tree as
+  its tested head. This binds the existing combined unit result to the resolved
+  candidate without repeating an identical suite. Fresh combined qualification
+  with all four named real fixture scenarios remains pending; the shared Docker
+  lane is currently occupied by another verification run.
 - **Verification boundary:** Real Temporal component scenarios supplement
   containerized baseline checks. Running-server connector HTTP, bidirectional
   public links and process-restart proof remain C1/C2; those routes do not yet
-  exist. No D1/D2 checkbox advances before verified merged acceptance.
-- **Review follow-up:** All six posted findings are fixed in the published
-  candidates, independently reviewed and covered by passing race/unit/tagged and
-  real-provider checks. Six thread-specific replies cite the fixing heads and
-  completed evidence, explicitly labeling broader pending checks. Fresh paginated
-  GitHub reads verify D1's two threads and D2's four threads resolved, with no
-  remaining open findings. Full D2 default/agent integration, combined
-  qualification, final plan guardrails and hosted CI are still in progress.
-- **Merge/plan status:** All three PRs remain open and require one CODEOWNER
-  approval and the protected squash merge queue.
-  Plan validation includes an earlier full containerized race/coverage unit pass
-  with documentation guardrails; subsequent progress edits pass item/dependency,
-  local-link, template-token and whitespace checks. A final targeted container
-  guardrail refresh is scheduled after standalone and combined runtime gates in
-  the owned lane.
+  exist. D1 is checked on merged component acceptance; D2 remains unchecked.
+- **Review follow-up:** All six posted findings are fixed, independently
+  reviewed, covered by passing regressions, replied to in their own threads and
+  resolved. Fresh paginated GitHub reads verify D1's two threads and D2's four
+  threads resolved, with no remaining open findings. Standalone default/agent
+  integration and combined unit qualification have passed; combined real-provider
+  qualification, final plan guardrails and new-head D2 CI remain pending.
+- **Merge/plan status:** D1 is merged. D2 and the dashboard
+  [PR #635](https://github.com/caesium-cloud/caesium/pull/635) remain open;
+  protected checks/review and the squash merge queue still apply. Plan validation
+  includes an earlier full containerized race/coverage unit pass with documentation
+  guardrails. Subsequent progress edits pass item/dependency, local-link,
+  template-token and whitespace checks. A final targeted container guardrail
+  refresh awaits the shared lane. W4 is not shipped while D2 and plan sync remain
+  open.
 - **Remaining:** C, E, F2–F4 and N are outside this wave. No later wave is
-  dispatched while W4 prerequisites remain open.
+  dispatched while W4 remains open.
 
 ### Stream Status
 
@@ -424,7 +433,7 @@ Resume unfinished waves. Do not archive this plan while later items remain.
 | A | Generic contract, configuration and catalog (2 items) | P0 | Shipped (A1, A2) |
 | B | Temporal inspection and declared messages (2 items) | P0 | Shipped (B1, B2) |
 | C | Authenticated REST and composition (2 items) | P0 | Not started |
-| D | Verified correlation and action durability (2 items) | P0 | W4 review fixes in progress |
+| D | Verified correlation and action durability (2 items) | P0 | D1 shipped; D2 awaiting checks/review |
 | E | Console monitoring, data links and approval (3 items) | P0 | Not started |
 | F | Real fixture, CI, qualification and promotion (4 items) | P0 | F1 shipped; F2–F4 not started |
 | N | Operator guidance and reconciliation (1 item) | P0 | Not started |
@@ -564,7 +573,7 @@ auth chokepoints. Every endpoint includes a live HTTP integration scenario.
 
 ### Stream D — Correlation and action durability
 
-- [ ] D1. Derive `<RunID>/<ActivityID>` from trusted Temporal identity and use a
+- [x] D1. Derive `<RunID>/<ActivityID>` from trusted Temporal identity and use a
   read-only admission lookup over A1's activity/job allowlist. Validate optional
   A1-defined heartbeat/result hints against that identity and #560's records;
   persist typed links with source evidence. Follow queued promotion without
@@ -810,7 +819,7 @@ compiled integration-runner approach; fixture code stays in the root module.
 **16 included items in seven streams.** Dependencies are explicit above;
 unchecked sibling work is not a hidden prerequisite.
 
-- **A1, A2, B1, B2 and F1** are merged. See Progress for the merge SHAs.
+- **A1, A2, B1, B2, F1 and D1** are merged. See Progress for the merge SHAs.
   B2 landed before F1's schema-bearing fixture; the pinned development server
   supplied real provider qualification without a Temporal Cloud account.
 - **D1** needs A2/B1/F1; **D2** needs A2/B2/F1. Core files are disjoint.

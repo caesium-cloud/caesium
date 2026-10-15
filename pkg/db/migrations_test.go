@@ -136,6 +136,7 @@ var connectorCatalogTables = []any{
 	&models.ExternalExecution{},
 	&models.ExternalExecutionSnapshot{},
 	&models.ExternalExecutionRelation{},
+	&models.ExternalExecutionCorrelation{},
 	&models.ConnectorOperation{},
 	&models.ConnectorConfiguration{},
 }

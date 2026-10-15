@@ -11,9 +11,9 @@ import (
 	"slices"
 	"strings"
 	"time"
-	"unicode"
 
 	"github.com/caesium-cloud/caesium/internal/models"
+	"github.com/caesium-cloud/caesium/internal/runadmission"
 	"github.com/google/uuid"
 	"gorm.io/gorm"
 )
@@ -33,12 +33,12 @@ import (
 // records nothing, so a retry with the same key re-attempts admission.
 
 // MaxIdempotencyKeyLength bounds a run-start idempotency key.
-const MaxIdempotencyKeyLength = 255
+const MaxIdempotencyKeyLength = runadmission.MaxIdempotencyKeyLength
 
 var (
 	// ErrInvalidIdempotencyKey rejects a key that is too long or carries
 	// control characters.
-	ErrInvalidIdempotencyKey = errors.New("run: invalid idempotency key")
+	ErrInvalidIdempotencyKey = runadmission.ErrInvalidIdempotencyKey
 	// ErrIdempotencyKeyReused is returned when a key already recorded for this
 	// job is presented with different params or priority.
 	ErrIdempotencyKeyReused = errors.New("run: idempotency key was already used for a different request")
@@ -48,21 +48,21 @@ var (
 )
 
 // StartOutcome is how an accepted run start was admitted.
-type StartOutcome string
+type StartOutcome = runadmission.StartOutcome
 
 const (
 	// StartOutcomeCreated: a run was created and is executing.
-	StartOutcomeCreated StartOutcome = "created"
+	StartOutcomeCreated = runadmission.StartOutcomeCreated
 	// StartOutcomeQueued: the concurrency policy parked the start in
 	// run_queue; the dequeuer creates the run when a slot frees.
-	StartOutcomeQueued StartOutcome = "queued"
+	StartOutcomeQueued = runadmission.StartOutcomeQueued
 	// StartOutcomeSkipped: nothing will execute — the concurrency policy
 	// dropped the start, or a consumed dataset is held.
-	StartOutcomeSkipped StartOutcome = "skipped"
+	StartOutcomeSkipped = runadmission.StartOutcomeSkipped
 	// StartOutcomeDropped: a queued start whose queue entry was removed
 	// (cancelled by an operator or evicted by queue overflow) before it was
 	// promoted. Only a replay of an idempotent start can observe it.
-	StartOutcomeDropped StartOutcome = "dropped"
+	StartOutcomeDropped = runadmission.StartOutcomeDropped
 )
 
 // Skip reasons reported on a skipped StartResult.
@@ -91,16 +91,7 @@ type StartResult struct {
 // ValidateIdempotencyKey trims key and reports whether it is usable. An empty
 // key is valid and means "not idempotent".
 func ValidateIdempotencyKey(key string) (string, error) {
-	key = strings.TrimSpace(key)
-	if len(key) > MaxIdempotencyKeyLength {
-		return "", fmt.Errorf("%w: longer than %d bytes", ErrInvalidIdempotencyKey, MaxIdempotencyKeyLength)
-	}
-	for _, r := range key {
-		if unicode.IsControl(r) {
-			return "", fmt.Errorf("%w: contains a control character", ErrInvalidIdempotencyKey)
-		}
-	}
-	return key, nil
+	return runadmission.ValidateIdempotencyKey(key)
 }
 
 // WithStartIdempotencyKey makes the start idempotent under key, scoped to the
@@ -340,4 +331,117 @@ func (s *Store) replayIdempotentStart(conn *gorm.DB, existing *models.RunStartId
 		*result = out
 	}
 	return run, err
+}
+
+// StartAdmission is a read-only projection of the accepted start protocol. It
+// deliberately excludes request hashes, params, and task/run payloads.
+type StartAdmission = runadmission.StartAdmission
+
+// LookupStartAdmission reads job/key without reconstructing the HTTP request or
+// replaying admission. It never starts work or writes a dropped outcome. Queue
+// promotion retains the original admission and QueueID.
+func (s *Store) LookupStartAdmission(ctx context.Context, jobID uuid.UUID, key string) (StartAdmission, bool, error) {
+	normalized, err := ValidateIdempotencyKey(key)
+	if err != nil {
+		return StartAdmission{}, false, err
+	}
+	if jobID == uuid.Nil || normalized == "" || normalized != key {
+		return StartAdmission{}, false, ErrInvalidIdempotencyKey
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	conn := s.db.WithContext(ctx)
+	row, err := findStartIdempotency(conn, jobID, key)
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return StartAdmission{}, false, nil
+	}
+	if err != nil {
+		return StartAdmission{}, false, err
+	}
+	// A promoted admission retains QueueID after the queue row is deleted.
+	// If the queue still exists, it must belong to the same job for every
+	// outcome, including the promotion/deletion window.
+	var queue []models.RunQueue
+	if row.QueueID != nil {
+		if err := conn.Select("id", "job_id").Where("id = ?", *row.QueueID).Limit(1).Find(&queue).Error; err != nil {
+			return StartAdmission{}, false, err
+		}
+		if len(queue) > 0 && queue[0].JobID != jobID {
+			return StartAdmission{}, false, ErrIdempotencyRecordCorrupt
+		}
+	}
+	// The promotion transaction updates the admission before removing its queue
+	// row. Re-read after an absent queue so a concurrent promotion is not dropped.
+	if row.Outcome == string(StartOutcomeQueued) && row.RunID == nil && row.QueueID != nil && len(queue) == 0 {
+		row, err = findStartIdempotency(conn, jobID, key)
+		if err != nil {
+			return StartAdmission{}, false, err
+		}
+		if row.Outcome == string(StartOutcomeQueued) {
+			row.Outcome = string(StartOutcomeDropped)
+		}
+	}
+	out := StartAdmission{ID: row.ID, JobID: row.JobID, IdempotencyKey: row.IdempotencyKey, Outcome: StartOutcome(row.Outcome), Reason: row.Reason, QueueID: row.QueueID, RunID: row.RunID}
+	if out.ID == uuid.Nil || out.JobID != jobID || out.IdempotencyKey != key || out.QueueID != nil && *out.QueueID == uuid.Nil || out.RunID != nil && *out.RunID == uuid.Nil {
+		return StartAdmission{}, false, ErrIdempotencyRecordCorrupt
+	}
+	switch out.Outcome {
+	case StartOutcomeCreated:
+		if out.RunID == nil {
+			return StartAdmission{}, false, ErrIdempotencyRecordCorrupt
+		}
+	case StartOutcomeQueued, StartOutcomeDropped:
+		if out.QueueID == nil || out.RunID != nil {
+			return StartAdmission{}, false, ErrIdempotencyRecordCorrupt
+		}
+	case StartOutcomeSkipped:
+	default:
+		return StartAdmission{}, false, ErrIdempotencyRecordCorrupt
+	}
+	if out.RunID != nil {
+		var runs []models.JobRun
+		if err := conn.Select("id", "job_id").Where("id = ?", *out.RunID).Limit(1).Find(&runs).Error; err != nil {
+			return StartAdmission{}, false, err
+		}
+		if len(runs) != 1 || runs[0].JobID != jobID {
+			return StartAdmission{}, false, ErrIdempotencyRecordCorrupt
+		}
+	}
+	return out, true, nil
+}
+
+// LookupStartAdmissions resolves a bounded set of local job aliases and reads
+// every matching job/key admission. It never uses a reported hint to narrow the
+// search: two valid admissions remain ambiguous to a correlation caller.
+func (s *Store) LookupStartAdmissions(ctx context.Context, aliases []string, key string) ([]StartAdmission, error) {
+	const maxAliases = 100
+	if len(aliases) == 0 || len(aliases) > maxAliases {
+		return nil, errors.New("run: admission alias lookup exceeds its bound")
+	}
+	unique := make(map[string]bool, len(aliases))
+	for _, alias := range aliases {
+		if strings.TrimSpace(alias) == "" || strings.TrimSpace(alias) != alias {
+			return nil, errors.New("run: invalid admission job alias")
+		}
+		unique[alias] = true
+	}
+	var jobs []models.Job
+	if err := s.db.WithContext(ctx).Select("id").Where("alias IN ?", slices.Collect(maps.Keys(unique))).Limit(maxAliases + 1).Find(&jobs).Error; err != nil {
+		return nil, err
+	}
+	if len(jobs) > maxAliases {
+		return nil, errors.New("run: admission alias lookup exceeds its bound")
+	}
+	var admissions []StartAdmission
+	for _, job := range jobs {
+		admission, found, err := s.LookupStartAdmission(ctx, job.ID, key)
+		if err != nil {
+			return nil, err
+		}
+		if found {
+			admissions = append(admissions, admission)
+		}
+	}
+	return admissions, nil
 }
