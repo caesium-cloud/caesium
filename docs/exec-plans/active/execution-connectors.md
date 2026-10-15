@@ -371,7 +371,8 @@ Resume unfinished waves. Do not archive this plan while later items remain.
   Default integration passed in 823.085 seconds; normal agent auth passed 45
   executed scenarios in 35.200 seconds (one expected gate-off incident skip).
   Current-head hosted [CI run 38786078638](https://github.com/caesium-cloud/caesium/actions/runs/38786078638)
-  has only coverage collection pending; all other selected jobs passed.
+  awaits coverage collection and the final `ci-ok` aggregate; completed build,
+  unit, browser and integration jobs passed.
 - **Composition:** A local-only combined candidate resolves two guide status
   hunks by retaining both implemented components. Source/scripts merge cleanly;
   combined unit and all four named real fixture scenarios are queued behind a
