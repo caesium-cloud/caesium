@@ -57,17 +57,21 @@ func (s *Store) Operations(ctx context.Context, execution connector.ExecutionRef
 
 // recordOperationEvidence never overwrites a newer lookup, dispatch attempt or
 // terminal result. A stale response returns the current receipt for recovery.
-func (s *Store) recordOperationEvidence(ctx context.Context, before models.ConnectorOperation, state string, evidence []byte) (models.ConnectorOperation, error) {
+func (s *Store) recordOperationEvidence(ctx context.Context, before models.ConnectorOperation, state string, evidence []byte, unsent ...bool) (models.ConnectorOperation, error) {
 	if operationTerminal(before.State) {
 		return before, nil
 	}
-	updates := map[string]any{"state": state, "provider_evidence": jsonValue(evidence), "revision": before.Revision + 1, "updated_at": time.Now().UTC()}
+	if before.State == connector.OperationAccepted && state != connector.OperationAccepted && state != connector.OperationCompleted {
+		return s.Operation(ctx, before.ID)
+	}
+	retryable := len(unsent) > 0 && unsent[0] && before.Attempt == 1 && state == connector.OperationSubmitted
+	updates := map[string]any{"state": state, "provider_evidence": jsonValue(evidence), "retryable_unsent": retryable, "revision": before.Revision + 1, "updated_at": time.Now().UTC()}
 	if operationTerminal(state) {
 		updates["open_key"] = gorm.Expr("NULL")
 	}
 	res := s.db.WithContext(ctx).Model(&models.ConnectorOperation{}).Where("id = ? AND revision = ? AND attempt = ? AND state = ?", before.ID, before.Revision, before.Attempt, before.State).Updates(updates)
 	if res.Error != nil {
-		return models.ConnectorOperation{}, res.Error
+		return before, res.Error
 	}
 	op, err := s.Operation(ctx, before.ID)
 	if err != nil {
@@ -77,6 +81,55 @@ func (s *Store) recordOperationEvidence(ctx context.Context, before models.Conne
 		return op, ErrOperationChanged
 	}
 	return op, nil
+}
+
+// claimDispatch durably consumes exactly one send authorization. Defaults and
+// crash/evidence-loss rows have no retry authorization; only a new admission's
+// winner or a persisted initial preflight no-send proof can claim one.
+func (s *Store) claimDispatch(ctx context.Context, before models.ConnectorOperation, epoch string, initial bool) (models.ConnectorOperation, error) {
+	var out models.ConnectorOperation
+	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		active, err := connector.NewStore(tx).ActiveEpoch(ctx)
+		if errors.Is(err, connector.ErrNotFound) {
+			return connector.ErrEpochMismatch
+		}
+		if err != nil {
+			return err
+		}
+		if epoch == "" || active != epoch {
+			return connector.ErrEpochMismatch
+		}
+		if before.State != connector.OperationSubmitted || before.Attempt != 1 {
+			return ErrOperationChanged
+		}
+		query := tx.Model(&models.ConnectorOperation{}).Where("id = ? AND revision = ? AND attempt = ? AND state = ?", before.ID, before.Revision, before.Attempt, before.State)
+		if initial {
+			if before.Revision != 1 || len(before.ProviderEvidence) != 0 || before.RetryableUnsent {
+				return ErrOperationChanged
+			}
+			query = query.Where("retryable_unsent = ? AND provider_evidence IS NULL", false)
+		} else {
+			if !before.RetryableUnsent {
+				return ErrOperationChanged
+			}
+			query = query.Where("retryable_unsent = ?", true)
+		}
+		res := query.Updates(map[string]any{"retryable_unsent": false, "revision": before.Revision + 1, "updated_at": time.Now().UTC()})
+		if res.Error != nil {
+			return res.Error
+		}
+		if res.RowsAffected != 1 {
+			return ErrOperationChanged
+		}
+		return tx.Where("id = ?", before.ID).First(&out).Error
+	})
+	if errors.Is(err, ErrOperationChanged) {
+		out, _ = s.Operation(ctx, before.ID)
+	}
+	if err != nil && out.ID == uuid.Nil {
+		out = before
+	}
+	return out, err
 }
 
 type resendDecision struct {
@@ -120,7 +173,7 @@ func (s *Store) confirmOperationResend(ctx context.Context, before models.Connec
 		if err := boundJSON(raw, maxBytes); err != nil {
 			return err
 		}
-		res := tx.Model(&models.ConnectorOperation{}).Where("id = ? AND state = ? AND revision = ? AND attempt = ?", before.ID, connector.OperationUnknown, before.Revision, before.Attempt).Updates(map[string]any{"state": connector.OperationSubmitted, "revision": before.Revision + 1, "attempt": before.Attempt + 1, "resend_audit": jsonValue(raw), "updated_at": time.Now().UTC()})
+		res := tx.Model(&models.ConnectorOperation{}).Where("id = ? AND state = ? AND revision = ? AND attempt = ?", before.ID, connector.OperationUnknown, before.Revision, before.Attempt).Updates(map[string]any{"state": connector.OperationSubmitted, "retryable_unsent": false, "revision": before.Revision + 1, "attempt": before.Attempt + 1, "resend_audit": jsonValue(raw), "updated_at": time.Now().UTC()})
 		if res.Error != nil {
 			return res.Error
 		}
@@ -129,6 +182,9 @@ func (s *Store) confirmOperationResend(ctx context.Context, before models.Connec
 		}
 		return tx.Where("id = ?", before.ID).First(&out).Error
 	})
+	if err != nil && out.ID == uuid.Nil {
+		out = before
+	}
 	return out, err
 }
 

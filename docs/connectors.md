@@ -298,12 +298,14 @@ snapshot. Discovery cannot overwrite newer direct state. A successful advance
 inserts a new snapshot row and leaves the previous row in place.
 
 Action admission stores one receipt per connection and idempotency key. The
-same key with a different execution, action, binding version, external update
-id, or request fingerprint is refused. The receipt stores the request
-fingerprint and a bounded actor record, not secret bytes. At most one
+same key with a different execution, action, binding version or logical request
+fingerprint is refused. Durable retries retain the winning receipt's original
+UUID and external Update ID; a losing candidate's freshly generated IDs cannot
+replace them or prevent attachment. The receipt stores the request fingerprint
+and a bounded actor record, not secret bytes. At most one
 operation for a connection, execution, and action stays open. `submitted`,
 `accepted`, and `unknown` hold that guard; `unknown` is not completion.
-`completed`, `rejected`, and a fresh `not_dispatched` preflight refusal are
+`completed`, `rejected`, and a definitive initial `not_dispatched` preflight refusal are
 terminal, clear the guard, and are not reopened.
 A later admission is a new row.
 
@@ -574,17 +576,26 @@ and admission epoch. Changed input, target, binding or principal under that key
 is refused. A separate unique open-operation guard returns the
 existing receipt for another key/operator targeting the same execution/action.
 Terminal completion and independently proved validator rejection release that
-guard. A fresh preflight refusal has a separate terminal `not_dispatched` receipt:
-this call provably sent no Update and it is never described as business rejection.
-Replays of all terminal receipts never send again.
+guard. A definitive initial preflight refusal (`NotFound`, `InvalidArgument`,
+`FailedPrecondition`, `PermissionDenied`) has a separate terminal `not_dispatched`
+receipt; it is never described as business rejection. Transient or unclassified
+initial no-send evidence keeps the receipt submitted and its guard open. A later
+same-key explicit submission can retry only after a transactional current-epoch
+revision claim consumes durable proof that the initial attempt never sent an
+Update. That proof defaults false; a crash or failed evidence write cannot grant
+it. Generic nonterminal same-key replay performs lookup only; an initial
+admission whose dispatch is still unclaimed reports an explicit pending error
+rather than claiming success. Replays of terminal receipts never send again.
 
 A receipt starts `submitted` before dispatch. A process crash at that boundary is
 uncertain. `Reconcile` looks up only the persisted run and Update ID, with no input
 or actor available to the lookup adapter. Background and restart code must use
 this method and must never call Submit or ConfirmResend implicitly. Lookup
 preflight refusal, `NotFound`, failed outcomes and timeouts remain `unknown` and
-keep the guard open. `rejected` requires independent validator-origin proof;
-Temporal's failure outcome alone supplies no such proof.
+keep the guard open. Once acceptance is recorded, weaker or failed lookup
+observations retain both the accepted state and its original evidence and cannot
+make it eligible for resend. `rejected` requires independent validator-origin
+proof; Temporal's failure outcome alone supplies no such proof.
 
 Every request and provider call still requires the service's loaded configuration
 to match the active epoch. A compatible new service may recover an older receipt
@@ -609,7 +620,9 @@ Provider observations use receipt revision/attempt compare-and-swap. A delayed
 lookup or older send cannot overwrite terminal state, a newer attempt's evidence,
 or its guard. Provider results are validated against the frozen result schema and
 withheld when credential/PEM bytes remain; arbitrary remote errors and failure
-messages are never persisted.
+messages are never persisted. The complete serialized evidence envelope fits the
+metadata ceiling. A validated completion remains terminal and clears the guard
+when its result must be omitted to fit that envelope.
 
 `TestConnectorsOperations` uses real authenticated key creation and `/auth/whoami`,
 a real mTLS Temporal worker/server and direct observations ingested through the

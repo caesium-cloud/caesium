@@ -41,7 +41,10 @@ type ConnectorOperation struct {
 	Revision           uint64         `gorm:"not null;default:0" json:"revision"`
 	Attempt            uint64         `gorm:"not null;default:0" json:"attempt"`
 	ProviderEvidence   datatypes.JSON `gorm:"type:json" json:"provider_evidence,omitempty"`
-	ResendAudit        datatypes.JSON `gorm:"type:json" json:"resend_audit,omitempty"`
+	// RetryableUnsent is granted only by persisted initial preflight no-send
+	// proof, and consumed transactionally before another provider submission.
+	RetryableUnsent bool           `gorm:"not null;default:false" json:"-"`
+	ResendAudit     datatypes.JSON `gorm:"type:json" json:"resend_audit,omitempty"`
 	// OpenKey guards one open operation per connection, execution, and action.
 	// NULL when State is completed, rejected or not_dispatched.
 	OpenKey   *string   `gorm:"type:text;uniqueIndex:idx_connector_operations_open_key" json:"-"`

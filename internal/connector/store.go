@@ -812,9 +812,10 @@ func (s *Store) transitionOperation(ctx context.Context, operationID uuid.UUID, 
 			return ErrInvalidTransition
 		}
 		updates := map[string]any{
-			"state":      next,
-			"revision":   gorm.Expr("revision + 1"),
-			"updated_at": time.Now().UTC(),
+			"state":            next,
+			"retryable_unsent": false,
+			"revision":         gorm.Expr("revision + 1"),
+			"updated_at":       time.Now().UTC(),
 		}
 		if operationTerminal(next) {
 			updates["open_key"] = gorm.Expr("NULL")

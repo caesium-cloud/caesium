@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -97,7 +98,7 @@ func TestOperationsConcurrentAdmissionAndOpenGuard(t *testing.T) {
 	require.Equal(t, 1, created)
 	for e := range errs {
 		if e != nil {
-			require.ErrorIs(t, e, ErrOperationProvider)
+			require.True(t, errors.Is(e, ErrOperationProvider) || errors.Is(e, ErrOperationPending) || errors.Is(e, ErrOperationChanged), "unexpected concurrent result: %v", e)
 		}
 	}
 	require.Len(t, p.sends, 1)
@@ -156,7 +157,8 @@ func TestOperationsAdmissionCrashReopenLookupOnly(t *testing.T) {
 		require.ErrorIs(t, e, ErrOperationProvider)
 	}
 	replay, e := s.Submit(t.Context(), r)
-	require.NoError(t, e)
+	require.ErrorIs(t, e, ErrOperationProvider)
+	op = replay.Operation
 	require.False(t, replay.Created)
 	require.Empty(t, p.sends)
 	_, e = s.ConfirmResend(t.Context(), op.ID, op.Revision, r.Principal, false)
@@ -184,7 +186,7 @@ func TestOperationsAdmissionCrashReopenLookupOnly(t *testing.T) {
 	require.ErrorIs(t, e, ErrOperationConfirmation)
 	_, e = s.Reconcile(t.Context(), op.ID)
 	require.NoError(t, e)
-	require.Len(t, p.lookups, 3)
+	require.Len(t, p.lookups, 4)
 }
 func TestOperationsEvidenceMappingPreservesUncertainty(t *testing.T) {
 	cases := []struct {
@@ -511,14 +513,14 @@ func TestOperationsSameEpochReorderedConfigurationSurvivesFileReopen(t *testing.
 	s, e = NewService(store, p, reordered, sameEpoch)
 	require.NoError(t, e)
 	replay, e := s.Submit(t.Context(), r)
-	require.NoError(t, e)
+	require.ErrorIs(t, e, ErrOperationProvider)
 	require.False(t, replay.Created)
 	require.Equal(t, d.Operation.ID, replay.Operation.ID)
 	require.Len(t, p.sends, 1)
 	op, e := s.Reconcile(t.Context(), d.Operation.ID)
 	require.ErrorIs(t, e, ErrOperationProvider)
 	require.Equal(t, connector.OperationUnknown, op.State)
-	require.Len(t, p.lookups, 1)
+	require.Len(t, p.lookups, 2)
 	require.Len(t, p.sends, 1)
 	p.submit = func(OperationDispatch) (OperationEvidence, error) {
 		return OperationEvidence{State: connector.OperationCompleted, Result: json.RawMessage(`{"approved":true}`)}, nil
@@ -657,7 +659,7 @@ func TestOperationsCompatibleConfigurationEpochAdvanceRecoversPinnedReceipt(t *t
 	current, e := NewService(store, provider, connection, secondEpoch)
 	require.NoError(t, e)
 	replay, e := current.Submit(t.Context(), request)
-	require.NoError(t, e)
+	require.ErrorIs(t, e, ErrOperationProvider)
 	require.False(t, replay.Created)
 	require.Equal(t, original.ID, replay.Operation.ID)
 	require.Equal(t, original.Actor, replay.Operation.Actor)
@@ -677,7 +679,7 @@ func TestOperationsCompatibleConfigurationEpochAdvanceRecoversPinnedReceipt(t *t
 	require.ErrorIs(t, e, ErrOperationProvider)
 	require.Equal(t, connector.OperationUnknown, recovered.State)
 	require.NotNil(t, recovered.OpenKey)
-	require.Len(t, provider.lookups, 1)
+	require.Len(t, provider.lookups, 2)
 	require.Len(t, provider.sends, 1)
 	// A stale process cannot use this compatibility rule to bypass active fencing.
 	stale, e := NewService(store, provider, connection, firstEpoch)
@@ -699,7 +701,7 @@ func TestOperationsCompatibleConfigurationEpochAdvanceRecoversPinnedReceipt(t *t
 	require.Equal(t, recovered.Revision, untouched.Revision)
 	require.Equal(t, recovered.Attempt, untouched.Attempt)
 	require.Empty(t, untouched.ResendAudit)
-	require.Len(t, provider.lookups, 1)
+	require.Len(t, provider.lookups, 2)
 	require.Len(t, provider.sends, 1)
 	// The current original principal confirms the observed revision; only that
 	// same immutable run/input/actor/ID is sent, and audit records the new epoch.
@@ -823,4 +825,220 @@ func TestOperationsConnectionIdentitySnapshotIsBoundedAndSecretScreened(t *testi
 	_, e = NewService(store, provider, disabled, "epoch")
 	require.ErrorIs(t, e, connector.ErrInvalidOperation)
 	require.Empty(t, provider.sends)
+}
+
+func TestOperationsTransientNoSendProofIsClaimedOnceBeforeRetry(t *testing.T) {
+	store := NewStore(openStoreDB(t))
+	require.NoError(t, store.catalog.ActivateEpoch(t.Context(), "", "epoch"))
+	provider := &operationTestProvider{}
+	service := operationTestService(t, store, provider)
+	request := operationTestRequest(t, store)
+	provider.submit = func(OperationDispatch) (OperationEvidence, error) {
+		return OperationEvidence{State: connector.OperationNotDispatched, PreflightRPCCode: "Unavailable"}, errors.New("preflight transport failed")
+	}
+	first, e := service.Submit(t.Context(), request)
+	require.ErrorIs(t, e, ErrOperationProvider)
+	require.Equal(t, connector.OperationSubmitted, first.Operation.State)
+	require.NotNil(t, first.Operation.OpenKey)
+	require.True(t, first.Operation.RetryableUnsent)
+	require.Equal(t, uint64(1), first.Operation.Attempt)
+	// Background reconciliation never consumes or sends a proven-unsent retry.
+	_, e = service.Reconcile(t.Context(), first.Operation.ID)
+	require.ErrorIs(t, e, ErrOperationPending)
+	require.Empty(t, provider.lookups)
+	require.Len(t, provider.sends, 1)
+	entered, release := make(chan struct{}), make(chan struct{})
+	provider.submit = func(OperationDispatch) (OperationEvidence, error) {
+		close(entered)
+		<-release
+		return OperationEvidence{State: connector.OperationUnknown, RPCCode: "DeadlineExceeded"}, errors.New("reply lost")
+	}
+	result := make(chan error, 1)
+	go func() { _, e := service.Submit(context.Background(), request); result <- e }()
+	<-entered
+	claimed, e := store.Operation(t.Context(), first.Operation.ID)
+	require.NoError(t, e)
+	require.False(t, claimed.RetryableUnsent)
+	require.Greater(t, claimed.Revision, first.Operation.Revision)
+	// A competing duplicate may only look up this claimed send, never dispatch.
+	_, e = service.Submit(t.Context(), request)
+	require.ErrorIs(t, e, ErrOperationProvider)
+	require.Len(t, provider.sends, 2)
+	require.Len(t, provider.lookups, 1)
+	close(release)
+	e = <-result
+	require.True(t, errors.Is(e, ErrOperationProvider) || errors.Is(e, ErrOperationChanged))
+	_, e = service.Submit(t.Context(), request)
+	require.ErrorIs(t, e, ErrOperationProvider)
+	require.Len(t, provider.sends, 2)
+	require.Len(t, provider.lookups, 2)
+	require.Equal(t, provider.sends[0], provider.sends[1])
+}
+
+func TestOperationsAdmissionOnlyReplayIsPendingAndClaimedCrashIsLookupOnly(t *testing.T) {
+	store := NewStore(openStoreDB(t))
+	require.NoError(t, store.catalog.ActivateEpoch(t.Context(), "", "epoch"))
+	provider := &operationTestProvider{}
+	service := operationTestService(t, store, provider)
+	request := operationTestRequest(t, store)
+	admitted, e := service.Admit(t.Context(), request)
+	require.NoError(t, e)
+	require.False(t, admitted.Operation.RetryableUnsent)
+	_, e = service.Submit(t.Context(), request)
+	require.ErrorIs(t, e, ErrOperationPending)
+	require.Empty(t, provider.sends)
+	require.Empty(t, provider.lookups)
+	claimed, e := store.claimDispatch(t.Context(), admitted.Operation, "epoch", true)
+	require.NoError(t, e)
+	require.Greater(t, claimed.Revision, admitted.Operation.Revision)
+	require.False(t, claimed.RetryableUnsent)
+	// A restart cannot distinguish crash-before-RPC from crash-after-RPC here.
+	restarted := operationTestService(t, store, provider)
+	_, e = restarted.Submit(t.Context(), request)
+	require.ErrorIs(t, e, ErrOperationProvider)
+	require.Empty(t, provider.sends)
+	require.Len(t, provider.lookups, 1)
+}
+
+func TestOperationsEvidenceWriteFailureAfterSendReplaysLookupOnly(t *testing.T) {
+	db := openStoreDB(t)
+	store := NewStore(db)
+	require.NoError(t, store.catalog.ActivateEpoch(t.Context(), "", "epoch"))
+	provider := &operationTestProvider{}
+	service := operationTestService(t, store, provider)
+	request := operationTestRequest(t, store)
+	injected := errors.New("evidence write unavailable")
+	failEvidence := true
+	require.NoError(t, db.Callback().Update().Before("gorm:update").Register("operations:test_evidence_failure", func(tx *gorm.DB) {
+		values, ok := tx.Statement.Dest.(map[string]any)
+		if ok && failEvidence && values["provider_evidence"] != nil {
+			_ = tx.AddError(injected)
+		}
+	}))
+	t.Cleanup(func() { _ = db.Callback().Update().Remove("operations:test_evidence_failure") })
+	provider.submit = func(OperationDispatch) (OperationEvidence, error) {
+		return OperationEvidence{State: connector.OperationCompleted, Result: json.RawMessage(`{"approved":true}`)}, nil
+	}
+	first, e := service.Submit(t.Context(), request)
+	require.ErrorIs(t, e, injected)
+	require.Len(t, provider.sends, 1)
+	failEvidence = false
+	var row models.ConnectorOperation
+	require.NoError(t, db.Where("idempotency_key = ?", request.IdempotencyKey).First(&row).Error)
+	require.Equal(t, connector.OperationSubmitted, row.State)
+	require.Empty(t, row.ProviderEvidence)
+	require.False(t, row.RetryableUnsent)
+	require.Greater(t, row.Revision, uint64(1))
+	provider.lookup = func(d OperationDispatch) (OperationEvidence, error) {
+		require.Nil(t, d.Input)
+		require.Empty(t, d.Actor.OperationID)
+		return OperationEvidence{State: connector.OperationCompleted, Result: json.RawMessage(`{"approved":true}`)}, nil
+	}
+	repaired, e := service.Submit(t.Context(), request)
+	require.NoError(t, e)
+	require.False(t, repaired.Created)
+	require.Equal(t, row.ID, repaired.Operation.ID)
+	require.Equal(t, connector.OperationCompleted, repaired.Operation.State)
+	require.Nil(t, repaired.Operation.OpenKey)
+	require.Len(t, provider.sends, 1)
+	require.Len(t, provider.lookups, 1)
+	require.NotEqual(t, uuid.Nil, first.Operation.ID, "failed persistence should retain a reviewable receipt id")
+}
+
+func TestOperationsAcceptedProofSurvivesEveryWeakerLookup(t *testing.T) {
+	store := NewStore(openStoreDB(t))
+	require.NoError(t, store.catalog.ActivateEpoch(t.Context(), "", "epoch"))
+	provider := &operationTestProvider{}
+	service := operationTestService(t, store, provider)
+	request := operationTestRequest(t, store)
+	provider.submit = func(OperationDispatch) (OperationEvidence, error) {
+		return OperationEvidence{State: connector.OperationAccepted, NativeStage: "accepted"}, nil
+	}
+	first, e := service.Submit(t.Context(), request)
+	require.NoError(t, e)
+	accepted := first.Operation
+	cases := []struct {
+		evidence OperationEvidence
+		err      error
+	}{
+		{OperationEvidence{State: connector.OperationUnknown, RPCCode: "NotFound"}, errors.New("missing")},
+		{OperationEvidence{State: connector.OperationUnknown, RPCCode: "DeadlineExceeded"}, errors.New("timeout")},
+		{OperationEvidence{State: connector.OperationUnknown, RPCCode: "Unavailable"}, errors.New("unavailable")},
+		{OperationEvidence{State: connector.OperationSubmitted}, nil},
+		{OperationEvidence{State: connector.OperationUnknown, FailureKind: "failure_origin_unknown"}, nil},
+		{OperationEvidence{State: connector.OperationCompleted, Result: json.RawMessage(`{"invalid":true}`)}, nil},
+		{OperationEvidence{State: connector.OperationCompleted, Result: json.RawMessage(`{"approved":true,"padding":"` + strings.Repeat("x", connector.MaxPageMetadataBytes) + `"}`)}, nil},
+	}
+	for _, tc := range cases {
+		provider.lookup = func(OperationDispatch) (OperationEvidence, error) { return tc.evidence, tc.err }
+		current, e := service.Reconcile(t.Context(), accepted.ID)
+		if tc.err != nil {
+			require.ErrorIs(t, e, ErrOperationProvider)
+		} else {
+			require.NoError(t, e)
+		}
+		require.Equal(t, connector.OperationAccepted, current.State)
+		require.Equal(t, accepted.ProviderEvidence, current.ProviderEvidence)
+		require.Equal(t, accepted.Revision, current.Revision)
+		require.NotNil(t, current.OpenKey)
+		_, e = service.ConfirmResend(t.Context(), current.ID, current.Revision, request.Principal, true)
+		require.ErrorIs(t, e, ErrOperationConfirmation)
+	}
+	require.Len(t, provider.sends, 1)
+}
+
+func TestOperationsResendPreflightCannotProveEarlierSendAbsent(t *testing.T) {
+	for _, code := range []string{"Unavailable", "NotFound", ""} {
+		t.Run(code, func(t *testing.T) {
+			store := NewStore(openStoreDB(t))
+			require.NoError(t, store.catalog.ActivateEpoch(t.Context(), "", "epoch"))
+			provider := &operationTestProvider{}
+			service := operationTestService(t, store, provider)
+			request := operationTestRequest(t, store)
+			first, e := service.Submit(t.Context(), request)
+			require.ErrorIs(t, e, ErrOperationProvider)
+			provider.submit = func(OperationDispatch) (OperationEvidence, error) {
+				return OperationEvidence{State: connector.OperationNotDispatched, PreflightRPCCode: code}, errors.New("no send on this attempt")
+			}
+			second, e := service.ConfirmResend(t.Context(), first.Operation.ID, first.Operation.Revision, request.Principal, true)
+			require.ErrorIs(t, e, ErrOperationProvider)
+			require.Equal(t, connector.OperationUnknown, second.State)
+			require.NotNil(t, second.OpenKey)
+			require.False(t, second.RetryableUnsent)
+			_, e = service.Submit(t.Context(), request)
+			require.ErrorIs(t, e, ErrOperationProvider)
+			require.Len(t, provider.sends, 2)
+			require.Len(t, provider.lookups, 1)
+		})
+	}
+}
+
+func TestOperationsLostNoSendEvidenceCannotGrantRetry(t *testing.T) {
+	db := openStoreDB(t)
+	store := NewStore(db)
+	require.NoError(t, store.catalog.ActivateEpoch(t.Context(), "", "epoch"))
+	provider := &operationTestProvider{}
+	service := operationTestService(t, store, provider)
+	request := operationTestRequest(t, store)
+	injected := errors.New("no-send proof write lost")
+	fail := true
+	require.NoError(t, db.Callback().Update().Before("gorm:update").Register("operations:test_unsent_failure", func(tx *gorm.DB) {
+		values, ok := tx.Statement.Dest.(map[string]any)
+		if ok && fail && values["provider_evidence"] != nil {
+			_ = tx.AddError(injected)
+		}
+	}))
+	t.Cleanup(func() { _ = db.Callback().Update().Remove("operations:test_unsent_failure") })
+	provider.submit = func(OperationDispatch) (OperationEvidence, error) {
+		return OperationEvidence{State: connector.OperationNotDispatched, PreflightRPCCode: "Unavailable"}, errors.New("preflight unavailable")
+	}
+	first, e := service.Submit(t.Context(), request)
+	require.ErrorIs(t, e, injected)
+	require.NotEqual(t, uuid.Nil, first.Operation.ID)
+	require.False(t, first.Operation.RetryableUnsent)
+	fail = false
+	_, e = service.Submit(t.Context(), request)
+	require.ErrorIs(t, e, ErrOperationProvider)
+	require.Len(t, provider.sends, 1)
+	require.Len(t, provider.lookups, 1)
 }

@@ -236,7 +236,8 @@ func (s *IntegrationTestSuite) TestConnectorsOperations() {
 		s.Require().Contains(string(unknown.ProviderEvidence), "NotFound")
 	}
 	replay, err = service.Submit(s.T().Context(), rejected)
-	s.Require().NoError(err)
+	s.Require().ErrorIs(err, coperations.ErrOperationProvider)
+	unknown = replay.Operation
 	s.Require().False(replay.Created)
 	bypass := rejected
 	bypass.IdempotencyKey = "second-operator"

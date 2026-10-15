@@ -21,6 +21,7 @@ var (
 	ErrOperationForbidden    = errors.New("connector: action requires the original unscoped operator or admin principal")
 	ErrOperationConfirmation = errors.New("connector: explicit confirmation of an unknown operation is required")
 	ErrOperationProvider     = errors.New("connector: operation provider unavailable; consult receipt evidence")
+	ErrOperationPending      = errors.New("connector: operation remains pending; consult receipt evidence")
 	ErrSensitiveOperation    = errors.New("connector: action content contains sensitive material")
 	operationPEM             = regexp.MustCompile(`(?s)-----BEGIN [A-Z0-9 ]+-----.*?-----END [A-Z0-9 ]+-----`)
 )
@@ -53,6 +54,7 @@ type OperationEvidence struct {
 	Result           json.RawMessage `json:"result,omitempty"`
 	FailureKind      string          `json:"failure_kind,omitempty"`
 	RejectionProof   string          `json:"rejection_proof,omitempty"`
+	ResultOmitted    bool            `json:"result_omitted,omitempty"`
 }
 
 // OperationProvider must make at most one send per SubmitOperation call.
@@ -272,11 +274,31 @@ func (s *Service) Admit(ctx context.Context, request OperationSubmission) (conne
 	return s.store.catalog.AdmitOperation(ctx, connector.OperationRequest{ID: id, ConnectionID: s.connection.ID, IdempotencyKey: request.IdempotencyKey, Execution: request.Target.Execution, Action: request.Action, RequestFingerprint: requestFingerprint(logical), Actor: actorJSON, BindingVersion: binding.Version, ExternalUpdateID: externalID, Input: input, Target: target, BindingSnapshot: snapshot, ConnectionIdentity: identityJSON, ConfigurationEpoch: s.epoch}, connector.WriteBounds{MaxMetadataBytes: s.maxBytes})
 }
 
-// Submit dispatches only the winner of a fresh admission. Replays/conflicts
-// return the original receipt and never send or implicitly reconcile it.
+// Submit claims a fresh admission or persisted initial no-send proof before
+// dispatch. Other same-key nonterminal replays only reconcile; an admission
+// without a claimed send returns pending. A conflicting key never does work.
 func (s *Service) Submit(ctx context.Context, request OperationSubmission) (connector.OperationDecision, error) {
 	decision, err := s.Admit(ctx, request)
-	if err != nil || !decision.Created {
+	if err != nil || decision.Conflict || operationTerminal(decision.Operation.State) {
+		return decision, err
+	}
+	if !decision.Created && !decision.Operation.RetryableUnsent {
+		// A fresh winner may still be taking its first claim. Do not let a
+		// duplicate lookup invalidate that claim, and never infer no-send here.
+		if decision.Operation.Revision == 1 && len(decision.Operation.ProviderEvidence) == 0 {
+			return decision, ErrOperationPending
+		}
+		decision.Operation, err = s.Reconcile(ctx, decision.Operation.ID)
+		if err == nil && (decision.Operation.State == connector.OperationUnknown || decision.Operation.State == connector.OperationSubmitted) {
+			err = ErrOperationPending
+		}
+		return decision, err
+	}
+	if _, err = s.dispatch(decision.Operation); err != nil {
+		return decision, err
+	}
+	decision.Operation, err = s.store.claimDispatch(ctx, decision.Operation, s.epoch, decision.Created)
+	if err != nil {
 		return decision, err
 	}
 	decision.Operation, err = s.call(ctx, decision.Operation, true)
@@ -291,6 +313,9 @@ func (s *Service) Reconcile(ctx context.Context, id uuid.UUID) (models.Connector
 	op, err := s.store.Operation(ctx, id)
 	if err != nil || operationTerminal(op.State) {
 		return op, err
+	}
+	if op.RetryableUnsent {
+		return op, ErrOperationPending
 	}
 	return s.call(ctx, op, false)
 }
@@ -400,6 +425,8 @@ func (s *Service) call(ctx context.Context, op models.ConnectorOperation, send b
 		evidence, err = s.provider.LookupOperation(ctx, dispatch)
 	}
 	state := connector.OperationUnknown
+	retryableUnsent := false
+	evidence.ResultOmitted = false
 	switch evidence.State {
 	case connector.OperationSubmitted, connector.OperationAccepted:
 		state = evidence.State
@@ -408,7 +435,7 @@ func (s *Service) call(ctx context.Context, op models.ConnectorOperation, send b
 		}
 	case connector.OperationCompleted:
 		_, action, actionErr := s.action(dispatch.Target, op.ActionName)
-		if actionErr == nil && s.nonsecret(evidence.Result) == nil {
+		if actionErr == nil && len(evidence.Result) <= s.maxBytes && s.nonsecret(evidence.Result) == nil {
 			var result map[string]any
 			if decodeOperationObject(evidence.Result, &result) == nil && connector.ValidateActionPayload(action.ResultSchema, result) == nil {
 				state = connector.OperationCompleted
@@ -419,32 +446,87 @@ func (s *Service) call(ctx context.Context, op models.ConnectorOperation, send b
 			state = connector.OperationRejected
 		}
 	case connector.OperationNotDispatched:
-		// Only a fresh attempt can prove there was no earlier send.
+		// Only initial-attempt proof can establish that there was no earlier
+		// Update. A transient preflight is retryable, not a business refusal.
 		if send && op.Attempt == 1 {
-			state = connector.OperationNotDispatched
+			if definitivePreflight(evidence.PreflightRPCCode) {
+				state = connector.OperationNotDispatched
+			} else {
+				state, retryableUnsent = connector.OperationSubmitted, true
+			}
 		}
 	}
 	if state != connector.OperationCompleted {
 		evidence.Result = nil
 	}
-	if err != nil && state != connector.OperationNotDispatched {
+	if err != nil && state != connector.OperationNotDispatched && !retryableUnsent {
 		state = connector.OperationUnknown
 		evidence.Result = nil
 	}
-	evidence = s.safeEvidence(evidence)
-	raw, marshalErr := json.Marshal(evidence)
-	if marshalErr != nil || len(raw) > s.maxBytes {
-		raw = []byte(`{"state":"unknown","failure_kind":"evidence_unavailable"}`)
-		state = connector.OperationUnknown
+	// Acceptance is durable positive proof. An unavailable, malformed or weaker
+	// lookup cannot erase its bytes or authorize an explicit resend.
+	if op.State == connector.OperationAccepted && (err != nil || (state != connector.OperationCompleted && evidence.State != connector.OperationAccepted)) {
+		current, readErr := s.store.Operation(ctx, op.ID)
+		if readErr != nil {
+			return current, readErr
+		}
+		if err != nil {
+			return current, ErrOperationProvider
+		}
+		return current, nil
 	}
-	stored, storeErr := s.store.recordOperationEvidence(ctx, op, state, raw)
+	evidence = s.safeEvidence(evidence)
+	raw, marshalErr := s.fitEvidence(evidence)
+	if marshalErr != nil {
+		return op, marshalErr
+	}
+	stored, storeErr := s.store.recordOperationEvidence(ctx, op, state, raw, retryableUnsent)
 	if storeErr != nil {
 		return stored, storeErr
 	}
 	if err != nil {
 		return stored, ErrOperationProvider
 	}
+	if retryableUnsent {
+		return stored, ErrOperationPending
+	}
 	return stored, nil
+}
+
+func definitivePreflight(code string) bool {
+	switch code {
+	case "NotFound", "InvalidArgument", "FailedPrecondition", "PermissionDenied":
+		return true
+	}
+	return false
+}
+
+// A legal validated result may occupy the entire provider payload budget.
+// Drop only its exposed body when envelope overhead does not fit; completion
+// and its guard release were proved independently of storage presentation.
+func (s *Service) fitEvidence(e OperationEvidence) ([]byte, error) {
+	raw, err := json.Marshal(e)
+	if err != nil {
+		return nil, err
+	}
+	if len(raw) > s.maxBytes && len(e.Result) > 0 {
+		e.Result, e.ResultOmitted = nil, true
+		raw, err = json.Marshal(e)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if len(raw) > s.maxBytes {
+		e = OperationEvidence{State: e.State, PreflightRPCCode: e.PreflightRPCCode, RejectionProof: e.RejectionProof, ResultOmitted: e.ResultOmitted}
+		raw, err = json.Marshal(e)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if err := boundJSON(raw, s.maxBytes); err != nil {
+		return nil, err
+	}
+	return raw, nil
 }
 
 // Preserve arbitrary JSON integers and decimals exactly across persisted retry
