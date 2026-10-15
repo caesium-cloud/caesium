@@ -134,12 +134,18 @@ reads/history supply detail; bindings supply explicit business semantics.
    preflight refusal has the separate terminal state `not_dispatched`, proving
    only that this initial attempt issued no Update; it is not business rejection.
    Lookup or resend preflight refusal retains prior uncertainty and its open
-   guard. Timeout is not rejection/completion. Background/restart reconciliation only looks up the
-   same Update handle/ID; it never resubmits. A rejected-before-acceptance Update
+   guard. Timeout is not rejection/completion. Background/restart reconciliation
+   only looks up the same Update handle/ID; it never resubmits. A rejected-before-acceptance Update
    is absent from history, so lookup `NotFound` leaves an uncertain operation
    unknown, not rejected or safe to retry. Only a fresh explicit confirmation of
-   the displayed receipt revision by the original principal may resubmit the immutable receipt/Update ID to its
-   pinned run; audit that decision and recheck authorization/configuration.
+   the displayed receipt revision by the original principal may resubmit the
+   immutable receipt/Update ID to its pinned run; audit that decision and recheck
+   authorization/configuration. Preserve the admission epoch as provenance.
+   A current matching node can recover across unrelated global epoch changes
+   only while the server-derived connection identity and canonical binding stay
+   unchanged. Removed/repointed connections and changed bindings refuse before
+   RPC. A resend transaction fences and audits the confirming service's current
+   epoch while retaining the receipt's original actor, target and Update ID.
    Known rejection is terminal and duplicate requests never resend it. Restart
    never retargets a newer run. The remote validator remains authoritative for
    eligibility, and the workflow handler enforces one logical approval effect
@@ -338,14 +344,16 @@ Resume unfinished waves. Do not archive this plan while later items remain.
   Messages and Correlation scenarios without skips (15.72 seconds), including
   queued promotion, retry, worker restart and opaque evidence. Source/image
   provenance identifies this clean head and Server 1.32.0, SDK 1.49.0 and CLI
-  1.9.1. Default integration is running; current-head hosted CI remains pending.
+  1.9.1. Default integration is running. Current-head hosted `ui-e2e` failed
+  and is under investigation; coverage and one Helm lane remain pending.
 - **W4-β / D2:** Implementing immutable action receipts, guarded dispatch,
   lookup-only recovery and explicit original-principal resubmission. The
   pre-refinement candidate passed lint, full race/coverage unit and tagged
   checks. Review found that an unrelated global configuration epoch change
-  could strand an uncertain receipt. A compatibility fix preserves the origin
-  epoch and immutable destination while fencing the current node; regression,
-  final candidate checks and PR publication remain pending.
+  could strand an uncertain receipt. The compatibility fix and regression source
+  passed independent review: it preserves the origin epoch and immutable
+  destination while fencing the current node. Final candidate execution checks
+  and PR publication remain pending behind the serialized Docker lane.
 - **Verification boundary:** Real Temporal component scenarios supplement
   containerized baseline checks. Running-server connector HTTP, bidirectional
   public links and process-restart proof remain C1/C2; those routes do not yet
@@ -556,6 +564,11 @@ auth chokepoints. Every endpoint includes a live HTTP integration scenario.
   earlier send. A completed submission or lookup failure can have unknown
   acceptance and effects. Neither becomes a
   validator-rejected/no-effect receipt without evidence of validator origin.
+  Reopen under an actual different fingerprint with only an unrelated connection
+  added: identical retries attach to the old receipt, lookup sends nothing, and
+  explicit same-principal confirmation uses its immutable Update ID. Stale nodes
+  and incompatible destinations/bindings refuse without RPC or attempt/audit
+  changes; origin provenance and the confirming current epoch remain distinct.
 
 ### Stream E — Console operator experience
 
