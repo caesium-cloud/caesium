@@ -365,32 +365,29 @@ Resume unfinished waves. Do not archive this plan while later items remain.
   browser-only repair remains unchanged. Threads stay open until verified
   publication; one CODEOWNER approval remains required before merge.
 - **W4-β / D2:** Draft [PR #637](https://github.com/caesium-cloud/caesium/pull/637),
-  head `bbb663094f730477d82197ec6629f76a6e86b7ca`, implements immutable action
+  head `f5ab6072905a6b356cc7f33a87af6d8c410cef13`, implements immutable action
   receipts, guarded dispatch, lookup-only recovery and explicit original-principal
-  resubmission. Independent source review is clear. Final containerized lint,
-  full race/coverage unit tests, all required tagged checks and focused static/
-  race/dependency checks passed on these committed contents. The reviewed epoch
-  refinement preserves origin provenance and immutable destination while fencing
-  the current node; actual cross-epoch reopen/compatibility regressions pass.
-  Real provider qualification passed all three named Fixture, Messages and
-  Operations scenarios without skips (6.92 seconds) on this clean head. Raw
-  component evidence records five sends, lookup-only recovery and three logical
-  effects across lost replies, admission crash and explicit confirmation.
-  Default integration passed in 823.085 seconds; normal agent auth passed 45
-  executed scenarios in 35.200 seconds (one expected gate-off incident skip).
-  Current-head hosted [CI run 38786078638](https://github.com/caesium-cloud/caesium/actions/runs/38786078638)
-  passed coverage ratchets and all nine required checks, including `ci-ok`. The
-  Linux browser lane passed 160 scenarios without skips or flaky retries. The
-  PR is draft while the posted review findings below are fixed and the new
-  candidate is verified; one CODEOWNER approval remains required before merge.
-- **Composition:** A local-only combined candidate resolves two guide status
-  hunks by retaining both implemented components. Source/scripts merge cleanly;
-  combined unit and all four named real fixture scenarios have not run: a live
-  unrelated verification owns the shared Docker lane. The standalone feature
-  checks above are complete. This is additional composition work, not a
-  feature PR or merge. After the first
-  sibling merges, integrate updated `master` into the second, retain that guide
-  wording and refresh current-candidate verification before its merge.
+  resubmission. Four posted findings are fixed: durable initial no-send proof
+  and transactional claims permit safe transient retries; weaker/error lookup
+  retains acceptance bytes; validated completion survives result omission at the
+  evidence ceiling; and nonterminal replay repairs failed evidence writes by
+  lookup without another send. Independent review is clear. Containerized lint
+  (zero issues), focused race/static fixture/dependency checks, full race/coverage
+  unit and required tagged checks passed on these committed contents. All ten
+  new regression groups passed, including real Messenger/Temporal-bridge calls,
+  concurrent retry claims, injected database errors and an exact legal result
+  ceiling. Current-head real provider/default/agent integration and hosted CI are
+  pending; previous `bbb66309` artifacts do not qualify this changed state
+  machine. Threads stay open until verified publication; one CODEOWNER approval
+  remains required before merge.
+- **Composition:** The earlier uncommitted combined candidate is preserved.
+  The orchestrator now owns the shared Docker lane for review-fix verification.
+  A fresh local-only candidate will integrate both published fixes, retain both
+  guide sections, and run combined unit plus all four named real fixture
+  scenarios after standalone qualification. That combined proof is still
+  pending; it is not a feature PR or a GitHub merge. After the first sibling
+  merges, integrate actual updated `master` into the second and refresh affected
+  verification before its merge.
 - **Verification boundary:** Real Temporal component scenarios supplement
   containerized baseline checks. Running-server connector HTTP, bidirectional
   public links and process-restart proof remain C1/C2; those routes do not yet
@@ -408,7 +405,8 @@ Resume unfinished waves. Do not archive this plan while later items remain.
   Plan validation includes an earlier full containerized race/coverage unit pass
   with documentation guardrails; subsequent progress edits pass item/dependency,
   local-link, template-token and whitespace checks. A final targeted container
-  guardrail refresh has not run while the shared Docker lane is occupied.
+  guardrail refresh is scheduled after standalone and combined runtime gates in
+  the owned lane.
 - **Remaining:** C, E, F2–F4 and N are outside this wave. No later wave is
   dispatched while W4 prerequisites remain open.
 
