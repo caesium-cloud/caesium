@@ -223,8 +223,8 @@ cardinality and closed-workflow Query dispatch count through the live surface.
 
 ## Progress (as of 2026-10-14)
 
-W1 and W2 have merged. W3 has open review-fix PRs for B2 and F1. C, D, E, F2–F4, and N
-are not started. Drafting base:
+W1, W2 and W3 B2 have merged. W3 F1 remains open in PR #633 with CI fixes
+under verification. C, D, E, F2–F4 and N are not started. Drafting base:
 `a0e862171b898a64b64828b1a5376226e85b106a`. An open PR or a fixture-only pass
 is not completion. The SHAs below are the squash merges read from GitHub.
 
@@ -260,62 +260,57 @@ Resume unfinished waves. Do not archive this plan while later items remain.
   remains C1. An earlier arm64 stress smoke on a pre-rewrite SHA reported
   `terminal_oom_unconfirmed` (exit 137, `oom=false`); the merged head's
   `images-arm64` check succeeded.
-- **Next ready:** B2 and F1. D1 still needs F1. C1 still needs D1 and F1.
+- **Next ready:** Finish F1. D1 still needs F1. C1 still needs D1 and F1.
 
-### W3 — Review fixes verified locally (unmerged; approval and CI blockers)
+### W3 — B2 merged; F1 CI fixes under verification
 
-- **W3-α / B2:** [PR #632](https://github.com/caesium-cloud/caesium/pull/632),
-  head `190353f32c00aae17e4cecede993afa827cc32fd`, from
-  `0905995c1a7602c5da8d8f5b7937d474ad43d09e`.
-  Preflight refusals are distinguishable from uncertain dispatch; completed
-  failure outcomes retain unknown origin and never imply validator rejection
-  or no effect. Queries require a closed result schema and the exact workflow type.
+- **W3-α / B2:** [PR #632](https://github.com/caesium-cloud/caesium/pull/632)
+  merged `adab46d0981fc6f30da6fb220963d2454354ff23` at 2026-10-15T01:21:33Z.
+  Head `190353f32c00aae17e4cecede993afa827cc32fd` passed hosted
+  [run 38569107187](https://github.com/caesium-cloud/caesium/actions/runs/38569107187),
+  including `ci-ok`. Preflight refusals remain distinct from uncertain dispatch;
+  completed failures retain unknown origin and never imply validator rejection
+  or no effect. Queries require a closed schema and exact workflow type.
 - **W3-β / F1:** [PR #633](https://github.com/caesium-cloud/caesium/pull/633),
-  head `8e9a82fc6e6f21e3ab28607bd4f7373e634f950b`, from the same base.
-  Cleanup uses atomic creation and immutable IDs, including dash signal exits.
-  Evidence records raw effect executions, observed versions, host-owned files,
-  full source and server identities, and refuses stale artifact directories.
-- **Review:** All three B2 and eight F1 threads received evidence-based replies and were
-  resolved on the current feature heads. A fresh GitHub read verified all eleven
-  replies and zero unresolved threads. Independent source reviews have no
-  remaining substantive findings.
-- **Current candidate:** Clean combined commit
-  `3553f37f15c5cb1922a9d7e8f847da29b63a13c8` contains the exact B2/F1 source
-  snapshots with both guide sections. Its Go/recipe source is unchanged from
-  `7e9490a994da69bd51a43e1577a9b88d85d666ce`, which passed full containerized
-  lint (zero issues), race-enabled `just unit-test`, all 41 named
-  `just tagged-unit-test` regressions, and all 832 CI helper tests. The final
-  numeric-UID USER/HOME environment correction passed ten dash/selector probes
-  again. Fresh-image fixture qualification passed on this clean candidate:
-  `TestConnectorsFixture` 6.33 seconds and `TestConnectorsMessages` 0.30 seconds,
-  both PASS/no skips (6.64 seconds total). Reports bind to this candidate and
-  observe Server 1.32.0, recent pollers, the ambiguous failure state, raw effects,
-  and activated reply loss. Artifacts have host UID ownership. Fresh-image
-  default-disabled integration passed in 867.5 seconds; normal agent auth passed
-  45 scenarios in 35.2 seconds. Final containerized plan guardrails passed.
-  Hosted B2 [run 38569107187](https://github.com/caesium-cloud/caesium/actions/runs/38569107187)
-  completed successfully, including current-head `ci-ok`. F1
-  [run 38569974495](https://github.com/caesium-cloud/caesium/actions/runs/38569974495)
-  failed both unit architectures at the explicit B2 schema prerequisite. It also
-  failed [UI focus restoration](https://github.com/caesium-cloud/caesium/actions/runs/38569974495/job/115875857245)
-  at `ui/e2e/accessibility.spec.ts:308`: the automated retry passed, but the strict
-  lane remains failed. UI source is unchanged by this stream; the failure is
-  retained as an additional merge blocker.
-- **Dependency/merge blocker:** The intact fixture config/schema regression
-  fails on F1's pre-B2 base with unsupported `statusQueryResultSchema`; it passes
-  on the combined candidate. Merge B2 first, then integrate the new master into
-  F1 and reverify. The live rules require CODEOWNER approval. Both PRs remain
-  open, and B2/F1 remain unchecked. No approval, settings change or merge occurred.
-  D1/D2/C1/C2 are not dispatched. Local evidence does not qualify Cloud or other
-  versions. Plan synchronization remains open in
-  [PR #631](https://github.com/caesium-cloud/caesium/pull/631).
+  candidate `434ca81278a832401432671bed3f6ff52c77cfd1`, integrates merged B2
+  and retains both guide sections. The intact fixture configuration now passes
+  the hermetic schema gate that failed on both architectures in
+  [run 38569974495](https://github.com/caesium-cloud/caesium/actions/runs/38569974495).
+  The additional UI failure came from controlled DAG nodes dropping measured
+  dimensions during selection updates. They now retain measurements, preserving
+  focus when the task panel closes. A new browser regression records transient
+  node hiding and repeated keyboard open/close cycles. It fails on the original
+  production UI and passes on the fix; the original accessibility scenario and
+  regression passed all 20 checks across both themes and five repetitions,
+  without retries, against a fresh production server.
+- **Current local gates:** Full containerized lint, race/coverage unit tests and
+  all named tagged hermetic regressions passed. UI lint, all 474 UI unit tests,
+  and the production build/bundle budget passed. Ten fixture orchestration and
+  selector probes passed. Fresh-image fixture qualification on the clean commit
+  passed Fixture (6.29 seconds) and Messages (0.25 seconds), with no skips (6.55
+  seconds total). Both provider reports bind to `434ca812`, source status is
+  empty, and the observed server is 1.32.0. All owned containers were removed.
+  Current-head hosted [run 38666620120](https://github.com/caesium-cloud/caesium/actions/runs/38666620120)
+  is running. The PR is mergeable; current CI and required CODEOWNER review
+  remain pending.
+- **Earlier provider/regression evidence:** The B2/F1 Go and fixture inputs
+  match clean combined candidate `3553f37f15c5cb1922a9d7e8f847da29b63a13c8`.
+  Its real fixture passed Fixture and Messages without skips (6.64 seconds),
+  with observed Server 1.32.0, raw effects and activated reply loss. Default
+  integration passed in 867.5 seconds and normal agent auth passed 45 scenarios
+  in 35.2 seconds. Eleven review replies/resolutions were verified at feature
+  heads `190353f3`/`8e9a82fc`; this predates the current F1 CI-fix head.
+- **Remaining:** F1 stays unchecked until its normal merge after current CI and
+  required CODEOWNER review. D1/D2/C1/C2 and later items are not dispatched.
+  Local arm64 evidence does not qualify Cloud or other versions. Plan sync
+  remains open in [PR #631](https://github.com/caesium-cloud/caesium/pull/631).
 
 ### Stream Status
 
 | Stream | Scope | Priority | Status |
 | --- | --- | --- | --- |
 | A | Generic contract, configuration and catalog (2 items) | P0 | Shipped (A1, A2) |
-| B | Temporal inspection and declared messages (2 items) | P0 | B1 shipped; B2 open PR #632 |
+| B | Temporal inspection and declared messages (2 items) | P0 | Shipped (B1, B2) |
 | C | Authenticated REST and composition (2 items) | P0 | Not started |
 | D | Verified correlation and action durability (2 items) | P0 | Not started |
 | E | Console monitoring, data links and approval (3 items) | P0 | Not started |
@@ -381,7 +376,7 @@ Resume unfinished waves. Do not archive this plan while later items remain.
   example version), record justified changes, and regenerate sums with the
   containerized toolchain. Local tests do not certify a Temporal Cloud account.
 
-- [ ] B2. Implement only binding-declared status Queries/Update actions, JSON
+- [x] B2. Implement only binding-declared status Queries/Update actions, JSON
   input/result validation, server-derived actor envelope, pinned targets, stable
   Update IDs and lookup-only reconciliation. Separate missing workers, validator
   rejection and ambiguous RPC outcomes, including not-found after lost rejection.

@@ -1,7 +1,7 @@
-// Package temporal is the optional Temporal observation adapter.
+// Package temporal is the optional Temporal observation and message adapter.
 // It compiles go.temporal.io/sdk v1.49.0. With connectors left disabled, nothing
-// in this package is dialed. Queries, Updates, receipts, and HTTP routes are
-// later items and are not implemented here.
+// in this package is dialed. Binding-declared Queries and Updates are supported;
+// durable receipts and HTTP routes are supplied by later plan items.
 package temporal
 
 import (

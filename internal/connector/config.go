@@ -101,12 +101,13 @@ func DefaultLimits() Limits {
 // to local-job allowlist, and named actions. It does not declare the actor
 // envelope or the correlation field list.
 type Binding struct {
-	Name              string
-	Version           string
-	DisplayName       string
-	StatusQuery       string
-	ActivityAllowlist []ActivityJob
-	Actions           []Action
+	Name                    string
+	Version                 string
+	DisplayName             string
+	StatusQuery             string
+	StatusQueryResultSchema json.RawMessage
+	ActivityAllowlist       []ActivityJob
+	Actions                 []Action
 }
 
 // ActivityJob maps one external activity type to local job aliases.
@@ -156,12 +157,13 @@ type fileLimits struct {
 }
 
 type fileBinding struct {
-	Name              string         `yaml:"name"`
-	Version           string         `yaml:"version"`
-	DisplayName       string         `yaml:"displayName"`
-	StatusQuery       string         `yaml:"statusQuery"`
-	ActivityAllowlist []fileActivity `yaml:"activityAllowlist"`
-	Actions           []fileAction   `yaml:"actions"`
+	Name                    string         `yaml:"name"`
+	Version                 string         `yaml:"version"`
+	DisplayName             string         `yaml:"displayName"`
+	StatusQuery             string         `yaml:"statusQuery"`
+	StatusQueryResultSchema yaml.Node      `yaml:"statusQueryResultSchema"`
+	ActivityAllowlist       []fileActivity `yaml:"activityAllowlist"`
+	Actions                 []fileAction   `yaml:"actions"`
 }
 
 type fileActivity struct {
@@ -555,13 +557,21 @@ func compileBinding(where string, raw fileBinding, seenActivity map[string]struc
 	if err != nil {
 		return Binding{}, err
 	}
+	var queryResult json.RawMessage
+	if raw.StatusQueryResultSchema.Kind != 0 {
+		queryResult, err = compileSchema(where+".statusQueryResultSchema", &raw.StatusQueryResultSchema)
+		if err != nil {
+			return Binding{}, err
+		}
+	}
 	return Binding{
-		Name:              raw.Name,
-		Version:           raw.Version,
-		DisplayName:       raw.DisplayName,
-		StatusQuery:       raw.StatusQuery,
-		ActivityAllowlist: allowlist,
-		Actions:           actions,
+		Name:                    raw.Name,
+		Version:                 raw.Version,
+		DisplayName:             raw.DisplayName,
+		StatusQuery:             raw.StatusQuery,
+		StatusQueryResultSchema: queryResult,
+		ActivityAllowlist:       allowlist,
+		Actions:                 actions,
 	}, nil
 }
 
@@ -994,7 +1004,8 @@ func validateScalar(node *yaml.Node, fieldPath string) error {
 
 func inSchema(fieldPath string) bool {
 	return strings.Contains(fieldPath, ".inputSchema") || strings.Contains(fieldPath, ".resultSchema") ||
-		fieldPath == "inputSchema" || fieldPath == "resultSchema"
+		strings.Contains(fieldPath, ".statusQueryResultSchema") ||
+		fieldPath == "inputSchema" || fieldPath == "resultSchema" || fieldPath == "statusQueryResultSchema"
 }
 
 func isConfigInteger(fieldPath string) bool {
