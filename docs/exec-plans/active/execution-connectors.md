@@ -130,12 +130,15 @@ reads/history supply detail; bindings supply explicit business semantics.
    A transactional guard permits only one open operation per connection/workflow/
    run/action across different keys and operators; conflicts return the existing
    receipt ID. List execution operations so refresh/new tabs recover server state.
-   Distinguish submitted, accepted, completed, rejected and unknown. Timeout is
-   not rejection/completion. Background/restart reconciliation only looks up the
+   Distinguish submitted, accepted, completed, rejected and unknown. A fresh
+   preflight refusal has the separate terminal state `not_dispatched`, proving
+   only that this initial attempt issued no Update; it is not business rejection.
+   Lookup or resend preflight refusal retains prior uncertainty and its open
+   guard. Timeout is not rejection/completion. Background/restart reconciliation only looks up the
    same Update handle/ID; it never resubmits. A rejected-before-acceptance Update
    is absent from history, so lookup `NotFound` leaves an uncertain operation
-   unknown, not rejected or safe to retry. Only a fresh explicit confirmation by
-   the original principal may resubmit the immutable receipt/Update ID to its
+   unknown, not rejected or safe to retry. Only a fresh explicit confirmation of
+   the displayed receipt revision by the original principal may resubmit the immutable receipt/Update ID to its
    pinned run; audit that decision and recheck authorization/configuration.
    Known rejection is terminal and duplicate requests never resend it. Restart
    never retargets a newer run. The remote validator remains authoritative for
@@ -325,8 +328,12 @@ Resume unfinished waves. Do not archive this plan while later items remain.
 
 - **Base:** `b796b5672eab30134876f403f257af9e7a1f76da`; W3 implementation
   and plan synchronization are merged.
-- **W4-α / D1:** Implementing trusted activity/admission correlation, read-only
-  admission lookup and durable local links. PR and candidate checks pending.
+- **W4-α / D1:** Draft [PR #636](https://github.com/caesium-cloud/caesium/pull/636),
+  head `1d4e7a318e50359264b27c3221a0d34cfe718258`, implements trusted
+  activity/admission correlation and durable local links. Containerized lint,
+  full race/coverage unit tests and all required tagged hermetic checks passed
+  on the committed contents. Independent source review has no open findings.
+  Default integration, real Temporal qualification and hosted CI remain pending.
 - **W4-β / D2:** Implementing immutable action receipts, guarded dispatch,
   lookup-only recovery and explicit original-principal resubmission. PR and
   candidate checks pending.
@@ -490,8 +497,16 @@ auth chokepoints. Every endpoint includes a live HTTP integration scenario.
   persist typed links with source evidence. Follow queued promotion without
   starting work. Extend the Temporal recipe using the already-frozen envelope.
   Files: new `internal/connector/correlation.go`,
-  new `internal/connector/correlation_test.go`, `internal/run/start_idempotency.go`,
-  `internal/run/start_idempotency_test.go`, `docs/temporal.md` (activity envelope).
+  new `internal/connector/correlation_store.go`,
+  new `internal/connector/correlation_test.go`,
+  new `internal/connector/temporal/correlation.go` and its tests,
+  new `internal/models/external_execution_correlation.go`,
+  `internal/models/models.go`, `pkg/db/migrations_test.go`,
+  `internal/run/start_idempotency.go`, `internal/run/start_idempotency_test.go`,
+  new `test/connectors_correlation_test.go`,
+  `scripts/connectors-fixture.sh`, `scripts/test_connectors_fixture.py`
+  (strict named component selection), `docs/connectors.md` (storage boundary),
+  `docs/temporal.md` (activity envelope).
   Depends on: A2, B1, F1.
   Verify: the real fixture reports queued/running/finished admission. C1 proves
   bidirectional public links. Wrong/missing/ambiguous admission, another job's
@@ -508,6 +523,12 @@ auth chokepoints. Every endpoint includes a live HTTP integration scenario.
   Files: new `internal/connector/operations.go`,
   new `internal/connector/operation_store.go`,
   new `internal/connector/operations_test.go`,
+  `internal/connector/store.go` (operation admission/state seam),
+  `internal/models/connector_operation.go` (immutable dispatch/evidence fields),
+  new `internal/connector/temporal/operations.go` and its tests,
+  new `test/connectors_operations_test.go`,
+  `scripts/connectors-fixture.sh`, `scripts/test_connectors_fixture.py`
+  (strict named component selection),
   `docs/connectors.md` (receipt/recovery sections).
   Depends on: A2, B2, F1.
   Verify: real fixture plus store concurrency tests cover lost accepted reply,
@@ -641,9 +662,10 @@ compiled integration-runner approach; fixture code stays in the root module.
   Verify: proposed `just integration-test-connectors` executes all manifest-named
   live scenarios and E1's dedicated Playwright project. Run
   `scripts/check-test-evidence.py --manifest test/contracts/scenarios.json --report <report> --require connectors --strict`.
-  Include `TestConnectorsMessages` in the connector lane and require an explicit
-  PASS with no skip, alongside `TestConnectorsFixture`; before F2 this real
-  Temporal adapter scenario runs only through the manual fixture-check recipe.
+  Include `TestConnectorsMessages`, `TestConnectorsCorrelation` and
+  `TestConnectorsOperations` in the connector lane and require each explicit
+  PASS with no skip, alongside `TestConnectorsFixture`; before F2 these real
+  Temporal component scenarios run through the manual fixture-check recipe.
   Gate-off/queue-off misconfiguration, zero count, fixture failure, failed first
   browser attempt, missing artifacts or wrong candidate SHA fail the lane, which
   remains explicitly advisory to `ci-ok` until F4. Env-parity guardrail includes
@@ -721,7 +743,7 @@ unchecked sibling work is not a hidden prerequisite.
 | #560 lookup seam | D1 only; preserve admission behavior/regressions |
 | UI client/navigation | E1 then E3; detail page E1 -> E2 -> E3 |
 | Fixture/CI recipes/guardrail | F1 then F2 for `justfile`; F2 owns tracked recipe/guardrail and advisory CI wiring; F4 owns later promotion in the same CI files |
-| Fixture orchestration | F1 creates `scripts/connectors-fixture.sh`; C1 adds config-skew support, then F2 wires lane execution |
+| Fixture orchestration | F1 creates `scripts/connectors-fixture.sh`; W4 integration owner selects strict D1/D2 component scenarios; C1 adds config-skew support, then F2 wires lane execution |
 | Playwright selection/helper | E1 owns configuration/helper when the first specs land; E2/E3 add specs in its isolated project; F2 selects that existing project |
 | Connector guide | One integration writer; section integration order A1 -> A2 -> B1 -> B2 -> F1 -> D2 -> C1 -> C2 -> E1 -> E2 -> E3 -> F2 -> F4 -> N1 |
 | Other docs/Progress | A1 indexes its new guide; B1 corrects Temporal/strategy dependency claims, D1 extends the frozen envelope recipe, then N1 reconciles. F2 -> F4 own CI lane text/records. Orchestrator owns Progress; F3/F4 contribute evidence |
