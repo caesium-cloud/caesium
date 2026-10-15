@@ -129,11 +129,18 @@ func (s *IntegrationTestSuite) TestRunConcurrencyStrategies() {
 func (s *IntegrationTestSuite) TestRunConcurrencyAtomicAdmissionTOCTOU() {
 	job := s.applyConcurrencyJob("fail", `sleep 6`)
 
+	// Isolate these simultaneous admissions from connections pooled by earlier tests.
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	defer transport.CloseIdleConnections()
+	client := *http.DefaultClient
+	client.Transport = transport
+
 	var wg sync.WaitGroup
 	start := make(chan struct{})
 	type result struct {
 		status int
 		runID  string
+		err    error
 	}
 	results := make(chan result, 2)
 	for i := 0; i < 2; i++ {
@@ -141,8 +148,8 @@ func (s *IntegrationTestSuite) TestRunConcurrencyAtomicAdmissionTOCTOU() {
 		go func() {
 			defer wg.Done()
 			<-start
-			status, runID := s.postConcurrencyRun(job.ID)
-			results <- result{status: status, runID: runID}
+			status, runID, err := s.requestConcurrencyRun(job.ID, &client)
+			results <- result{status: status, runID: runID, err: err}
 		}()
 	}
 	close(start)
@@ -152,6 +159,7 @@ func (s *IntegrationTestSuite) TestRunConcurrencyAtomicAdmissionTOCTOU() {
 	admitted := 0
 	conflicts := 0
 	for got := range results {
+		s.Require().NoError(got.err)
 		switch got.status {
 		case http.StatusAccepted:
 			if got.runID != "" {
@@ -175,20 +183,36 @@ func (s *IntegrationTestSuite) applyConcurrencyJob(strategy, command string) *jo
 
 func (s *IntegrationTestSuite) postConcurrencyRun(jobID string) (int, string) {
 	s.T().Helper()
-	resp, err := s.doJSONRequest(http.MethodPost, fmt.Sprintf("%s/v1/jobs/%s/run", s.caesiumURL, jobID), nil)
+	status, runID, err := s.requestConcurrencyRun(jobID, http.DefaultClient)
 	s.Require().NoError(err)
+	return status, runID
+}
+
+func (s *IntegrationTestSuite) requestConcurrencyRun(jobID string, client *http.Client) (int, string, error) {
+	req, err := http.NewRequestWithContext(s.T().Context(), http.MethodPost, fmt.Sprintf("%s/v1/jobs/%s/run", s.caesiumURL, jobID), nil)
+	if err != nil {
+		return 0, "", err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	s.authorize(req)
+	resp, err := client.Do(req)
+	if err != nil {
+		return 0, "", err
+	}
 	defer resp.Body.Close()
 
 	body, err := io.ReadAll(resp.Body)
-	s.Require().NoError(err)
+	if err != nil {
+		return resp.StatusCode, "", err
+	}
 	if len(body) == 0 {
-		return resp.StatusCode, ""
+		return resp.StatusCode, "", nil
 	}
 	var run runResponse
 	if err := json.Unmarshal(body, &run); err != nil {
-		return resp.StatusCode, ""
+		return resp.StatusCode, "", nil
 	}
-	return resp.StatusCode, run.ID
+	return resp.StatusCode, run.ID, nil
 }
 
 func (s *IntegrationTestSuite) staleClaimQueuedRun(jobID string) {
