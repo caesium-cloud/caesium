@@ -334,29 +334,29 @@ Resume unfinished waves. Do not archive this plan while later items remain.
 
 - **Base:** `b796b5672eab30134876f403f257af9e7a1f76da`; W3 implementation
   and plan synchronization are merged.
-- **W4-α / D1:** Draft [PR #636](https://github.com/caesium-cloud/caesium/pull/636),
+- **W4-α / D1:** Ready [PR #636](https://github.com/caesium-cloud/caesium/pull/636),
   head `43e89c438f48e1d794743351e0558139ae6039d6`, implements trusted
-  activity/admission correlation and durable local links. Containerized lint,
-  full race/coverage unit tests and all required tagged hermetic checks passed
-  on the committed contents. Independent source review has no open findings.
-  The static fixture build and dependency checks pass with the isolated service
-  package. Fresh real Temporal qualification passed all three named Fixture,
-  Messages and Correlation scenarios without skips (15.72 seconds), including
-  queued promotion, retry, worker restart and opaque evidence. Source/image
-  provenance identifies this clean head and Server 1.32.0, SDK 1.49.0 and CLI
-  1.9.1. Default integration passed (868.869 seconds). These gates ran on
-  `9cff2744`; all sixteen feature files are byte-identical at the current head.
-  A required hosted browser test exposed a navigation timing race before
-  unmount. Its reviewed test-only repair now holds the response and proves
-  exact-request cancellation through real SPA navigation; product UI, strict
-  flaky-test policy and limits are unchanged. The local repair also exposed a Playwright route-cleanup deadlock; the
-  handler now completes its route action after natural cancellation. The
-  corrected UI lint, 474 unit tests, build/budgets and strict Playwright pass
-  (154 passed, six expected macOS visual skips, zero flaky). The repaired test
-  passes once in both themes. Linux visuals remain hosted proof. Current-head
+  activity/admission correlation and durable local links. Independent source
+  review has no open findings. Containerized lint, full race/coverage unit,
+  required tagged hermetic, static fixture and dependency checks passed at
+  `9cff274473ff970356e9842e1642930a1441724a`. Fresh real Temporal qualification
+  passed all three named Fixture, Messages and Correlation scenarios without
+  skips (15.72 seconds), including queued promotion, retry, worker restart and
+  opaque evidence. Source/image artifacts identify that clean candidate and
+  Server 1.32.0, SDK 1.49.0 and CLI 1.9.1. Default integration passed there
+  (868.869 seconds). All sixteen feature files are byte-identical at the current
+  head; the only follow-up repairs the required browser cancellation test.
+  The reviewed test now holds its response and proves exact-request abort
+  through real SPA navigation, with bounded route cleanup. Current-head UI lint,
+  474 unit tests, build/budgets and strict local Playwright pass (154 passed,
+  six expected macOS visual skips, zero flaky). The current-head Linux browser
+  lane passed all 160 scenarios, including both themes, without skips or flaky
+  retries. Current-head
   [CI run 38786960361](https://github.com/caesium-cloud/caesium/actions/runs/38786960361)
-  is running. The superseded run's coverage collection did not complete.
-- **W4-β / D2:** Draft [PR #637](https://github.com/caesium-cloud/caesium/pull/637),
+  passed coverage ratchets and all nine required checks, including `ci-ok`. The
+  PR is ready; fresh review state has no reviews or unresolved threads and
+  requires one CODEOWNER approval before merge.
+- **W4-β / D2:** Ready [PR #637](https://github.com/caesium-cloud/caesium/pull/637),
   head `bbb663094f730477d82197ec6629f76a6e86b7ca`, implements immutable action
   receipts, guarded dispatch, lookup-only recovery and explicit original-principal
   resubmission. Independent source review is clear. Final containerized lint,
@@ -371,13 +371,15 @@ Resume unfinished waves. Do not archive this plan while later items remain.
   Default integration passed in 823.085 seconds; normal agent auth passed 45
   executed scenarios in 35.200 seconds (one expected gate-off incident skip).
   Current-head hosted [CI run 38786078638](https://github.com/caesium-cloud/caesium/actions/runs/38786078638)
-  awaits coverage collection and the final `ci-ok` aggregate; completed build,
-  unit, browser and integration jobs passed.
+  passed coverage ratchets and all nine required checks, including `ci-ok`. The
+  Linux browser lane passed 160 scenarios without skips or flaky retries. The
+  PR is ready; fresh review state has no reviews or unresolved threads and
+  requires one CODEOWNER approval before merge.
 - **Composition:** A local-only combined candidate resolves two guide status
   hunks by retaining both implemented components. Source/scripts merge cleanly;
-  combined unit and all four named real fixture scenarios are queued behind a
-  live unrelated Docker verification lane. Neither has run; the standalone
-  feature checks above are complete. This is additional composition work, not a
+  combined unit and all four named real fixture scenarios have not run: a live
+  unrelated verification owns the shared Docker lane. The standalone feature
+  checks above are complete. This is additional composition work, not a
   feature PR or merge. After the first
   sibling merges, integrate updated `master` into the second, retain that guide
   wording and refresh current-candidate verification before its merge.
@@ -385,6 +387,12 @@ Resume unfinished waves. Do not archive this plan while later items remain.
   containerized baseline checks. Running-server connector HTTP, bidirectional
   public links and process-restart proof remain C1/C2; those routes do not yet
   exist. No D1/D2 checkbox advances before verified merged acceptance.
+- **Merge/plan status:** All three PRs remain open and require one CODEOWNER
+  approval and the protected squash merge queue. No review threads are open.
+  Plan validation includes an earlier full containerized race/coverage unit pass
+  with documentation guardrails; subsequent progress edits pass item/dependency,
+  local-link, template-token and whitespace checks. A final targeted container
+  guardrail refresh has not run while the shared Docker lane is occupied.
 - **Remaining:** C, E, F2–F4 and N are outside this wave. No later wave is
   dispatched while W4 prerequisites remain open.
 
@@ -395,7 +403,7 @@ Resume unfinished waves. Do not archive this plan while later items remain.
 | A | Generic contract, configuration and catalog (2 items) | P0 | Shipped (A1, A2) |
 | B | Temporal inspection and declared messages (2 items) | P0 | Shipped (B1, B2) |
 | C | Authenticated REST and composition (2 items) | P0 | Not started |
-| D | Verified correlation and action durability (2 items) | P0 | W4 implementing D1/D2 |
+| D | Verified correlation and action durability (2 items) | P0 | W4 review PRs; approval required |
 | E | Console monitoring, data links and approval (3 items) | P0 | Not started |
 | F | Real fixture, CI, qualification and promotion (4 items) | P0 | F1 shipped; F2–F4 not started |
 | N | Operator guidance and reconciliation (1 item) | P0 | Not started |
