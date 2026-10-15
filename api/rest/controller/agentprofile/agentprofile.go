@@ -107,6 +107,7 @@ func Delete(c *echo.Context) error {
 // internal/models.AgentProfile documents this invariant).
 type profileView struct {
 	ID         uuid.UUID         `json:"id"`
+	Namespace  string            `json:"namespace"`
 	Name       string            `json:"name"`
 	Image      string            `json:"image"`
 	Engine     models.AtomEngine `json:"engine"`
@@ -121,6 +122,7 @@ type profileView struct {
 func toView(p models.AgentProfile) profileView {
 	view := profileView{
 		ID:        p.ID,
+		Namespace: models.NamespaceOrDefault(p.Namespace),
 		Name:      p.Name,
 		Image:     p.Image,
 		Engine:    p.Engine,
@@ -154,6 +156,11 @@ func toView(p models.AgentProfile) profileView {
 	return view
 }
 
+// namespaceImmutableMessage is the fixed 400 message for an update that tries
+// to move a profile to another namespace (the same text the notification
+// controllers use). It names no stored data.
+const namespaceImmutableMessage = "namespace is create-only; delete and recreate the object to move it"
+
 func serviceError(err error) error {
 	switch {
 	case err == nil:
@@ -162,6 +169,8 @@ func serviceError(err error) error {
 		return echo.ErrNotFound
 	case errors.Is(err, svc.ErrProfileNameConflict):
 		return echo.NewHTTPError(http.StatusConflict, "conflict").Wrap(err)
+	case errors.Is(err, models.ErrNamespaceImmutable):
+		return echo.NewHTTPError(http.StatusBadRequest, namespaceImmutableMessage).Wrap(err)
 	case errors.Is(err, svc.ErrInvalidProfile):
 		return echo.NewHTTPError(http.StatusBadRequest, "bad request").Wrap(err)
 	default:

@@ -99,7 +99,9 @@ var applyCmd = &cobra.Command{
 	Args:  cobra.NoArgs,
 	Short: "Create or update an agent profile",
 	Long: "Create an AgentProfile from a YAML or JSON document. " +
-		"Use --id to update an existing profile by ID; updates are sent with PATCH.",
+		"Use --id to update an existing profile by ID; updates are sent with PATCH. " +
+		"The optional namespace (default \"default\"; \"*\" is cluster-shared) is create-only: " +
+		"an update may echo it but not change it.",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		profile, err := readProfileFile(applyPath)
 		if err != nil {
@@ -137,6 +139,7 @@ var applyCmd = &cobra.Command{
 
 type profileFile struct {
 	ID         string            `json:"id,omitempty" yaml:"id,omitempty"`
+	Namespace  *string           `json:"namespace,omitempty" yaml:"namespace,omitempty"`
 	Name       *string           `json:"name,omitempty" yaml:"name,omitempty"`
 	Image      *string           `json:"image,omitempty" yaml:"image,omitempty"`
 	Engine     *string           `json:"engine,omitempty" yaml:"engine,omitempty"`
@@ -147,6 +150,7 @@ type profileFile struct {
 }
 
 type profileRequest struct {
+	Namespace  *string           `json:"namespace,omitempty"`
 	Name       *string           `json:"name,omitempty"`
 	Image      *string           `json:"image,omitempty"`
 	Engine     *string           `json:"engine,omitempty"`
@@ -158,6 +162,7 @@ type profileRequest struct {
 
 func (p profileFile) toRequest() profileRequest {
 	return profileRequest{
+		Namespace:  p.Namespace,
 		Name:       p.Name,
 		Image:      p.Image,
 		Engine:     p.Engine,

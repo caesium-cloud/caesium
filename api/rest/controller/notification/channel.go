@@ -69,8 +69,9 @@ func (ctrl *Controller) CreateChannel(c *echo.Context) error {
 		SourceIP:     c.RealIP(),
 		Outcome:      auth.OutcomeSuccess,
 		Metadata: map[string]any{
-			"name": ch.Name,
-			"type": string(ch.Type),
+			"namespace": models.NamespaceOrDefault(ch.Namespace),
+			"name":      ch.Name,
+			"type":      string(ch.Type),
 		},
 	}))
 
@@ -140,6 +141,7 @@ func (ctrl *Controller) DeleteChannel(c *echo.Context) error {
 // sensitive config fields redacted.
 type channelView struct {
 	ID        uuid.UUID          `json:"id"`
+	Namespace string             `json:"namespace"`
 	Name      string             `json:"name"`
 	Type      models.ChannelType `json:"type"`
 	Config    map[string]any     `json:"config"`
@@ -175,6 +177,7 @@ func redactChannel(ch models.NotificationChannel) channelView {
 
 	return channelView{
 		ID:        ch.ID,
+		Namespace: models.NamespaceOrDefault(ch.Namespace),
 		Name:      ch.Name,
 		Type:      ch.Type,
 		Config:    cfg,

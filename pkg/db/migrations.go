@@ -119,13 +119,29 @@ func indexIsUniqueOverPartitionIndex(definition string) bool {
 // MigrateNamespaceDefaults repairs legacy NULL/empty ownership before
 // AutoMigrate tightens the columns. It never derives historical ownership from
 // the mutable job: old rows belong to default; explicit namespaces are retained.
-// Run this on catalog, hot shards and cold storage because JobRun is sharded.
+// The one exception is the built-in triage-only AgentProfile, which moves to the
+// cluster-shared namespace "*" so every job namespace can keep referencing the
+// advertised default (design §10.4). Shared objects (notification channels and
+// policies, agent profiles) are catalog-only; on a handle without the table or
+// column (hot shards, cold, channels and policies before the upgrade) each
+// model is skipped. Run this on catalog, hot shards and cold storage because
+// JobRun is sharded.
 func MigrateNamespaceDefaults(conn *gorm.DB) error {
 	if conn == nil {
 		return nil
 	}
 	return conn.Transaction(func(tx *gorm.DB) error {
-		for _, model := range []any{&models.Job{}, &models.JobRun{}, &models.Backfill{}, &models.Incident{}} {
+		if tx.Migrator().HasTable(&models.AgentProfile{}) && tx.Migrator().HasColumn(&models.AgentProfile{}, "Namespace") {
+			if err := tx.Unscoped().Model(&models.AgentProfile{}).
+				Where("name = ? AND (namespace IS NULL OR namespace = '')", models.DefaultTriageOnlyProfileName).
+				UpdateColumn("namespace", models.ClusterNamespace).Error; err != nil {
+				return fmt.Errorf("db: move built-in %s profile to the shared namespace: %w", models.DefaultTriageOnlyProfileName, err)
+			}
+		}
+		for _, model := range []any{
+			&models.Job{}, &models.JobRun{}, &models.Backfill{}, &models.Incident{},
+			&models.NotificationChannel{}, &models.NotificationPolicy{}, &models.AgentProfile{},
+		} {
 			if !tx.Migrator().HasTable(model) || !tx.Migrator().HasColumn(model, "Namespace") {
 				continue
 			}
@@ -180,7 +196,8 @@ func MigrateNamespaceDefaults(conn *gorm.DB) error {
 // a nullable column when its other metadata already matches the new model.
 func ensureNamespaceConstraint(conn *gorm.DB, model any) error {
 	switch model.(type) {
-	case *models.Job, *models.JobRun, *models.Backfill, *models.Incident:
+	case *models.Job, *models.JobRun, *models.Backfill, *models.Incident,
+		*models.NotificationChannel, *models.NotificationPolicy, *models.AgentProfile:
 	default:
 		return nil
 	}

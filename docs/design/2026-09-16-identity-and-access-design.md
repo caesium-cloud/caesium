@@ -665,6 +665,10 @@ prune at all.
   at the same boundary.
 - Lint: a job may reference channels/policies/profiles in its own namespace or
   shared ones; anything else is an error naming the object and namespace.
+- The built-in `triage-only` AgentProfile is seeded into `*`, and the upgrade
+  moves a legacy NULL/empty `triage-only` row to `*` rather than `default`, so
+  every namespace can reference the advertised default. Lint treats it as
+  resolvable only while no row exists.
 - Notification policies match runs in their own namespace only (a shared policy
   matches everywhere).
 
@@ -849,7 +853,7 @@ deletes the local entry. Administrative revocation stays separate.
   `agent_profiles.namespace` tightened to not null default, `api_keys.namespaces`
   (JSON, NULL ⇒ `["*"]`), `api_keys.user_id`, `sessions.refresh_handle`,
   `sessions.groups_refreshed_at`, `audit_logs.namespace`. Use GORM AutoMigrate.
-  Normalize existing NULL/empty namespace values to `default` before
+  Normalize existing NULL/empty namespace values to `default` (except the built-in `triage-only` profile, which becomes `*`; §10.4) before
   tightening constraints. This pre-alpha change requires a coordinated upgrade:
   stop every node before applying the new binary and restart only upgraded nodes.
   Mixed-version rolling upgrades are unsupported; old incident writers explicitly

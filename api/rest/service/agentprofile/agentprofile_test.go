@@ -152,7 +152,86 @@ func (s *AgentProfileSuite) TestSeedDefaultsIsIdempotent() {
 
 	var profiles []models.AgentProfile
 	s.Require().NoError(s.db.Where("name = ?", DefaultTriageOnlyProfileName).Find(&profiles).Error)
-	s.Len(profiles, 1)
+	s.Require().Len(profiles, 1)
+	s.Equal(models.ClusterNamespace, profiles[0].Namespace, "the built-in default is cluster-shared")
+}
+
+func (s *AgentProfileSuite) TestCreateNamespaceDefaultsSharedAndRejectsInvalid() {
+	svc := s.svc()
+
+	omitted, err := svc.Create(&CreateRequest{Name: "ns-omitted", Image: "img"})
+	s.Require().NoError(err)
+	s.Equal(models.DefaultNamespace, omitted.Namespace, "omitted namespace means default, never shared")
+
+	blank, err := svc.Create(&CreateRequest{Name: "ns-blank", Image: "img", Namespace: "   "})
+	s.Require().NoError(err)
+	s.Equal(models.DefaultNamespace, blank.Namespace)
+
+	explicit, err := svc.Create(&CreateRequest{Name: "ns-marketing", Image: "img", Namespace: " marketing "})
+	s.Require().NoError(err)
+	s.Equal("marketing", explicit.Namespace)
+
+	shared, err := svc.Create(&CreateRequest{Name: "ns-shared", Image: "img", Namespace: "*"})
+	s.Require().NoError(err)
+	s.Equal(models.ClusterNamespace, shared.Namespace)
+
+	fetched, err := svc.Get(explicit.ID)
+	s.Require().NoError(err)
+	s.Equal("marketing", fetched.Namespace)
+
+	for _, bad := range []string{"Bad_NS", "**", "ns/x"} {
+		_, err := svc.Create(&CreateRequest{Name: "ns-bad", Image: "img", Namespace: bad})
+		s.Require().Error(err, bad)
+		s.ErrorIs(err, ErrInvalidProfile)
+		s.NotErrorIs(err, models.ErrNamespaceImmutable)
+	}
+	var count int64
+	s.Require().NoError(s.db.Model(&models.AgentProfile{}).Where("name = ?", "ns-bad").Count(&count).Error)
+	s.Zero(count)
+}
+
+func (s *AgentProfileSuite) TestUpdateRejectsNamespaceChangeWithoutWriting() {
+	svc := s.svc()
+	created, err := svc.Create(&CreateRequest{Name: "ns-move", Image: "img:v1", Namespace: "marketing"})
+	s.Require().NoError(err)
+
+	finance, image := "finance", "img:v2"
+	_, err = svc.Update(created.ID, &UpdateRequest{Namespace: &finance, Image: &image})
+	s.Require().Error(err)
+	s.ErrorIs(err, models.ErrNamespaceImmutable)
+	s.ErrorIs(err, ErrInvalidProfile)
+
+	shared := "*"
+	_, err = svc.Update(created.ID, &UpdateRequest{Namespace: &shared, Image: &image})
+	s.Require().ErrorIs(err, models.ErrNamespaceImmutable, "moving to the shared namespace is a move too")
+
+	fetched, err := svc.Get(created.ID)
+	s.Require().NoError(err)
+	s.Equal("marketing", fetched.Namespace)
+	s.Equal("img:v1", fetched.Image, "a rejected update must write nothing")
+}
+
+func (s *AgentProfileSuite) TestUpdateAcceptsEchoedOrEmptyNamespace() {
+	svc := s.svc()
+	created, err := svc.Create(&CreateRequest{Name: "ns-echo", Image: "img:v1", Namespace: "marketing"})
+	s.Require().NoError(err)
+
+	echo, image := "marketing", "img:v2"
+	updated, err := svc.Update(created.ID, &UpdateRequest{Namespace: &echo, Image: &image})
+	s.Require().NoError(err)
+	s.Equal("img:v2", updated.Image)
+	s.Equal("marketing", updated.Namespace)
+
+	blank, image3 := "", "img:v3"
+	updated, err = svc.Update(created.ID, &UpdateRequest{Namespace: &blank, Image: &image3})
+	s.Require().NoError(err)
+	s.Equal("img:v3", updated.Image)
+	s.Equal("marketing", updated.Namespace, "blank namespace on update means no change")
+
+	image4 := "img:v4"
+	updated, err = svc.Update(created.ID, &UpdateRequest{Image: &image4})
+	s.Require().NoError(err)
+	s.Equal("marketing", updated.Namespace)
 }
 
 func (s *AgentProfileSuite) TestDefaultTriageOnlyProfileNameMatchesModel() {

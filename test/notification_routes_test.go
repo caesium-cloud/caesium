@@ -21,15 +21,17 @@ import (
 // have shipped green.
 
 type notificationChannelView struct {
-	ID      string         `json:"id"`
-	Name    string         `json:"name"`
-	Type    string         `json:"type"`
-	Config  map[string]any `json:"config"`
-	Enabled bool           `json:"enabled"`
+	ID        string         `json:"id"`
+	Namespace string         `json:"namespace"`
+	Name      string         `json:"name"`
+	Type      string         `json:"type"`
+	Config    map[string]any `json:"config"`
+	Enabled   bool           `json:"enabled"`
 }
 
 type notificationPolicyView struct {
 	ID         string          `json:"id"`
+	Namespace  string          `json:"namespace"`
 	Name       string          `json:"name"`
 	ChannelID  string          `json:"channel_id"`
 	EventTypes json.RawMessage `json:"event_types"`
@@ -161,6 +163,125 @@ func (s *IntegrationTestSuite) TestNotificationChannelAndPolicyByID() {
 	// A malformed id is a 400, not a 500.
 	status, body = s.notificationRequest(http.MethodGet, "/v1/notifications/channels/not-a-uuid", "")
 	s.Equal(http.StatusBadRequest, status, body)
+}
+
+// TestNotificationNamespaceCreateOnly drives the tenancy namespace on the real
+// notification channel and policy surface (identity-and-access D3): create
+// accepts it (blank = default, "*" = cluster-shared), reads return it, an
+// update may echo but never change it, and a policy may reference only a
+// channel in its own namespace or "*".
+func (s *IntegrationTestSuite) TestNotificationNamespaceCreateOnly() {
+	stamp := time.Now().UnixNano()
+	var channelIDs, policyIDs []string
+	defer func() {
+		// Policies first: they reference the channels.
+		for _, id := range policyIDs {
+			s.sharedNSDelete("/v1/notifications/policies/" + id)
+		}
+		for _, id := range channelIDs {
+			s.sharedNSDelete("/v1/notifications/channels/" + id)
+		}
+	}()
+
+	createChannel := func(suffix, namespace string) notificationChannelView {
+		s.T().Helper()
+		payload := fmt.Sprintf(`{"name":"integration-ns-chan-%s-%d","type":"webhook","config":{"url":"https://example.invalid/hooks/ns"}}`, suffix, stamp)
+		if namespace != "" {
+			payload = fmt.Sprintf(`{"namespace":%q,"name":"integration-ns-chan-%s-%d","type":"webhook","config":{"url":"https://example.invalid/hooks/ns"}}`, namespace, suffix, stamp)
+		}
+		status, body := s.notificationRequest(http.MethodPost, "/v1/notifications/channels", payload)
+		s.Require().Equal(http.StatusCreated, status, body)
+		var ch notificationChannelView
+		s.Require().NoError(json.Unmarshal([]byte(body), &ch), body)
+		s.Require().NotEmpty(ch.ID)
+		channelIDs = append(channelIDs, ch.ID)
+		// POST ignores enabled:false; disable explicitly so nothing can deliver
+		// on the shared server.
+		status, body = s.notificationRequest(http.MethodPatch, "/v1/notifications/channels/"+ch.ID, `{"enabled":false}`)
+		s.Require().Equal(http.StatusOK, status, body)
+		return ch
+	}
+	policyPayload := func(name, namespace, channelID string) string {
+		return fmt.Sprintf(`{"namespace":%q,"name":%q,"channel_id":%q,"event_types":["run_failed"],"filters":{"job_ids":[%q]}}`,
+			namespace, name, channelID, uuid.NewString())
+	}
+
+	// --- channels ---------------------------------------------------------
+	marketing := createChannel("mkt", "marketing")
+	s.Equal("marketing", marketing.Namespace)
+	var fetched notificationChannelView
+	s.getJSON("/v1/notifications/channels/"+marketing.ID, &fetched)
+	s.Equal("marketing", fetched.Namespace)
+	var listed []notificationChannelView
+	s.getJSON("/v1/notifications/channels?limit=1000", &listed)
+	found := false
+	for _, ch := range listed {
+		if ch.ID == marketing.ID {
+			found = true
+			s.Equal("marketing", ch.Namespace)
+		}
+	}
+	s.True(found, "expected %s in the channel list", marketing.ID)
+
+	s.Equal("default", createChannel("default", "").Namespace, "an omitted namespace means default, never shared")
+	shared := createChannel("shared", "*")
+	s.Equal("*", shared.Namespace)
+	finance := createChannel("fin", "finance")
+
+	status, body := s.notificationRequest(http.MethodPost, "/v1/notifications/channels",
+		fmt.Sprintf(`{"namespace":"Bad_NS","name":"integration-ns-chan-bad-%d","type":"webhook","config":{}}`, stamp))
+	s.Require().Equal(http.StatusBadRequest, status, body)
+
+	renamed := fmt.Sprintf("integration-ns-chan-mkt-renamed-%d", stamp)
+	status, body = s.notificationRequest(http.MethodPatch, "/v1/notifications/channels/"+marketing.ID,
+		fmt.Sprintf(`{"namespace":"finance","name":%q}`, renamed))
+	s.Require().Equal(http.StatusBadRequest, status, body)
+	s.Contains(body, "create-only")
+	s.getJSON("/v1/notifications/channels/"+marketing.ID, &fetched)
+	s.Equal("marketing", fetched.Namespace)
+	s.NotEqual(renamed, fetched.Name, "a rejected patch must write nothing")
+
+	status, body = s.notificationRequest(http.MethodPatch, "/v1/notifications/channels/"+marketing.ID,
+		fmt.Sprintf(`{"namespace":"marketing","name":%q}`, renamed))
+	s.Require().Equal(http.StatusOK, status, body)
+	s.Require().NoError(json.Unmarshal([]byte(body), &fetched), body)
+	s.Equal(renamed, fetched.Name)
+	s.Equal("marketing", fetched.Namespace)
+
+	// --- policies -----------------------------------------------------------
+	status, body = s.notificationRequest(http.MethodPost, "/v1/notifications/policies",
+		policyPayload(fmt.Sprintf("integration-ns-pol-shared-%d", stamp), "marketing", shared.ID))
+	s.Require().Equal(http.StatusCreated, status, "a marketing policy may use a shared channel: %s", body)
+	var policy notificationPolicyView
+	s.Require().NoError(json.Unmarshal([]byte(body), &policy), body)
+	policyIDs = append(policyIDs, policy.ID)
+	s.Equal("marketing", policy.Namespace)
+	var fetchedPolicy notificationPolicyView
+	s.getJSON("/v1/notifications/policies/"+policy.ID, &fetchedPolicy)
+	s.Equal("marketing", fetchedPolicy.Namespace)
+
+	status, body = s.notificationRequest(http.MethodPost, "/v1/notifications/policies",
+		policyPayload(fmt.Sprintf("integration-ns-pol-cross-%d", stamp), "marketing", finance.ID))
+	s.Require().Equal(http.StatusBadRequest, status, "a marketing policy may not use a finance channel: %s", body)
+
+	status, body = s.notificationRequest(http.MethodPatch, "/v1/notifications/policies/"+policy.ID,
+		fmt.Sprintf(`{"channel_id":%q}`, finance.ID))
+	s.Require().Equal(http.StatusBadRequest, status, "a channel_id patch to a foreign channel is refused: %s", body)
+
+	status, body = s.notificationRequest(http.MethodPatch, "/v1/notifications/policies/"+policy.ID,
+		`{"namespace":"finance","enabled":false}`)
+	s.Require().Equal(http.StatusBadRequest, status, body)
+	s.Contains(body, "create-only")
+	s.getJSON("/v1/notifications/policies/"+policy.ID, &fetchedPolicy)
+	s.Equal("marketing", fetchedPolicy.Namespace)
+	s.Equal(shared.ID, fetchedPolicy.ChannelID)
+
+	status, body = s.notificationRequest(http.MethodPatch, "/v1/notifications/policies/"+policy.ID,
+		`{"namespace":"marketing","enabled":false}`)
+	s.Require().Equal(http.StatusOK, status, body)
+	s.Require().NoError(json.Unmarshal([]byte(body), &fetchedPolicy), body)
+	s.False(fetchedPolicy.Enabled)
+	s.Equal("marketing", fetchedPolicy.Namespace)
 }
 
 // TestNotificationChannelAndPolicyMutationsAreAudited drives the same

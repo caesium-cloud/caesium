@@ -11,10 +11,11 @@ import (
 // DefaultTriageOnlyProfileName is the shipped zero-risk default AgentProfile:
 // tier 0 (deterministic rules only) plus escalate, so teams can adopt
 // agent-in-the-loop remediation incrementally without granting any autonomous
-// action. It is a built-in name: a job's metadata.remediation.profile may
-// reference it and server-side lint/apply treats it as always resolvable even
-// before the row is seeded, so a fresh server never rejects the advertised
-// default. See docs/design/agent-in-the-loop.md.
+// action. It is a built-in name: it is seeded into, and migrated to, the
+// cluster-shared namespace "*", so every job namespace may reference it;
+// server-side lint/apply treats it as resolvable while no row exists, and once
+// a row exists it is checked like any other profile (job's namespace or "*").
+// See docs/design/agent-in-the-loop.md.
 const DefaultTriageOnlyProfileName = "triage-only"
 
 // AgentProfile is the server-side resource declaring how a remediation agent
@@ -23,8 +24,9 @@ const DefaultTriageOnlyProfileName = "triage-only"
 // referenced by a job's metadata.remediation block. Low-volume catalog row.
 type AgentProfile struct {
 	ID uuid.UUID `gorm:"type:uuid;primaryKey" json:"id"`
-	// Namespace is nullable from day one (design Open Question 4).
-	Namespace *string `gorm:"type:text;index" json:"namespace,omitempty"`
+	// Namespace is the tenancy namespace; "*" (ClusterNamespace) marks a
+	// cluster-shared profile. It is create-only.
+	Namespace string `gorm:"type:text;not null;default:'default';index" json:"namespace"`
 
 	Name   string     `gorm:"uniqueIndex;not null" json:"name"`
 	Image  string     `gorm:"type:text;not null" json:"image"`

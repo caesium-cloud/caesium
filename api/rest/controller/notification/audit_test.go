@@ -114,20 +114,24 @@ func TestCreateChannelAudits(t *testing.T) {
 	require.NoError(t, err)
 	withFakeService(t, &fakeNotificationService{
 		channel: &models.NotificationChannel{
-			ID:      chID,
-			Name:    "pager-primary",
-			Type:    models.ChannelType("webhook"),
-			Config:  datatypes.JSON(cfg),
-			Enabled: true,
+			ID:        chID,
+			Namespace: "marketing",
+			Name:      "pager-primary",
+			Type:      models.ChannelType("webhook"),
+			Config:    datatypes.JSON(cfg),
+			Enabled:   true,
 		},
 	})
 
 	c, rec := newNotificationContext(t, http.MethodPost, "/v1/notifications/channels",
-		`{"name":"pager-primary","type":"webhook","config":{"url":"https://hooks.example.com/super-secret-path"}}`,
+		`{"namespace":"marketing","name":"pager-primary","type":"webhook","config":{"url":"https://hooks.example.com/super-secret-path"}}`,
 		"", &models.APIKey{KeyPrefix: "csk_live_admin"})
 
 	require.NoError(t, ctrl.CreateChannel(c))
 	require.Equal(t, http.StatusCreated, rec.Code)
+	var body map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+	require.Equal(t, "marketing", body["namespace"])
 
 	entries, err := auditor.Query(&iauth.AuditQueryRequest{Action: iauth.ActionNotificationChannelCreate})
 	require.NoError(t, err)
@@ -142,6 +146,7 @@ func TestCreateChannelAudits(t *testing.T) {
 
 	var meta map[string]any
 	require.NoError(t, json.Unmarshal(entry.Metadata, &meta))
+	require.Equal(t, "marketing", meta["namespace"])
 	require.Equal(t, "pager-primary", meta["name"])
 	require.Equal(t, "webhook", meta["type"])
 	// The channel config (which may hold secrets — webhook URLs, tokens) must
@@ -246,6 +251,7 @@ func TestCreatePolicyAudits(t *testing.T) {
 	withFakeService(t, &fakeNotificationService{
 		policy: &models.NotificationPolicy{
 			ID:         polID,
+			Namespace:  models.ClusterNamespace,
 			Name:       "page-oncall",
 			ChannelID:  chanID,
 			EventTypes: datatypes.JSON(eventTypesJSON),
@@ -254,11 +260,14 @@ func TestCreatePolicyAudits(t *testing.T) {
 	})
 
 	c, rec := newNotificationContext(t, http.MethodPost, "/v1/notifications/policies",
-		`{"name":"page-oncall","channel_id":"`+chanID.String()+`","event_types":["run_failed"]}`,
+		`{"namespace":"*","name":"page-oncall","channel_id":"`+chanID.String()+`","event_types":["run_failed"]}`,
 		"", &models.APIKey{KeyPrefix: "csk_live_admin"})
 
 	require.NoError(t, ctrl.CreatePolicy(c))
 	require.Equal(t, http.StatusCreated, rec.Code)
+	var body map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+	require.Equal(t, models.ClusterNamespace, body["namespace"], "the policy model's JSON tag is the wire shape")
 
 	entries, err := auditor.Query(&iauth.AuditQueryRequest{Action: iauth.ActionNotificationPolicyCreate})
 	require.NoError(t, err)
@@ -268,6 +277,7 @@ func TestCreatePolicyAudits(t *testing.T) {
 
 	var meta map[string]any
 	require.NoError(t, json.Unmarshal(entries[0].Metadata, &meta))
+	require.Equal(t, models.ClusterNamespace, meta["namespace"])
 	require.Equal(t, "page-oncall", meta["name"])
 	require.Equal(t, chanID.String(), meta["channel_id"])
 }

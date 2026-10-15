@@ -340,3 +340,122 @@ func TestNamespaceMigrationFailsClosedOnActiveDedupeCollision(t *testing.T) {
 		require.Equal(t, before, after, "failed migration must roll back namespace repair and retain both active histories")
 	}
 }
+
+// The persisted agent_profiles layout from before shared objects carried a
+// required tenancy namespace (the column existed, nullable and never written).
+type legacyNamespaceAgentProfile struct {
+	ID        uuid.UUID      `gorm:"type:uuid;primaryKey"`
+	Namespace *string        `gorm:"type:text;index"`
+	Name      string         `gorm:"uniqueIndex;not null"`
+	Image     string         `gorm:"type:text;not null"`
+	Engine    string         `gorm:"type:text;not null;default:'docker'"`
+	DeletedAt gorm.DeletedAt `gorm:"index"`
+	CreatedAt time.Time      `gorm:"not null"`
+	UpdatedAt time.Time      `gorm:"not null"`
+}
+
+func (legacyNamespaceAgentProfile) TableName() string { return "agent_profiles" }
+
+// createLegacySharedNotificationTables creates the pre-upgrade notification
+// tables, which have no namespace column at all.
+func createLegacySharedNotificationTables(t *testing.T, conn *gorm.DB) {
+	t.Helper()
+	for _, ddl := range []string{
+		"CREATE TABLE notification_channels (id uuid PRIMARY KEY, name text NOT NULL, type text NOT NULL, config json NOT NULL, enabled numeric NOT NULL DEFAULT true, deleted_at datetime, created_at datetime NOT NULL, updated_at datetime NOT NULL)",
+		"CREATE UNIQUE INDEX idx_notification_channels_name ON notification_channels(name)",
+		"CREATE INDEX idx_notification_channels_type ON notification_channels(type)",
+		"CREATE INDEX idx_notification_channels_deleted_at ON notification_channels(deleted_at)",
+		"CREATE TABLE notification_policies (id uuid PRIMARY KEY, name text NOT NULL, channel_id uuid NOT NULL, event_types json NOT NULL, filters json, enabled numeric NOT NULL DEFAULT true, deleted_at datetime, created_at datetime NOT NULL, updated_at datetime NOT NULL, CONSTRAINT fk_notification_policies_channel FOREIGN KEY (channel_id) REFERENCES notification_channels(id) ON DELETE CASCADE)",
+		"CREATE UNIQUE INDEX idx_notification_policies_name ON notification_policies(name)",
+		"CREATE INDEX idx_notification_policies_channel_id ON notification_policies(channel_id)",
+		"CREATE INDEX idx_notification_policies_deleted_at ON notification_policies(deleted_at)",
+	} {
+		require.NoError(t, conn.Exec(ddl).Error)
+	}
+}
+
+func TestNamespaceMigrationTightensSharedObjects(t *testing.T) {
+	conn := openMigrationTestDB(t)
+	require.NoError(t, conn.AutoMigrate(&legacyNamespaceAgentProfile{}))
+	createLegacySharedNotificationTables(t, conn)
+
+	now := time.Now().UTC().Truncate(time.Second)
+	empty, finance := "", "finance"
+	profiles := []legacyNamespaceAgentProfile{
+		{ID: uuid.New(), Name: "legacy-null", Image: "img:1", Engine: "docker", CreatedAt: now, UpdatedAt: now},
+		{ID: uuid.New(), Name: "legacy-empty", Namespace: &empty, Image: "img:1", Engine: "docker", CreatedAt: now, UpdatedAt: now},
+		{ID: uuid.New(), Name: "legacy-finance", Namespace: &finance, Image: "img:1", Engine: "docker", CreatedAt: now, UpdatedAt: now},
+		{ID: uuid.New(), Name: models.DefaultTriageOnlyProfileName, Image: "img:1", Engine: "docker", CreatedAt: now, UpdatedAt: now},
+		{ID: uuid.New(), Name: "legacy-deleted", Image: "img:1", Engine: "docker", DeletedAt: gorm.DeletedAt{Time: now, Valid: true}, CreatedAt: now, UpdatedAt: now},
+	}
+	require.NoError(t, conn.Create(&profiles).Error)
+	channelID, policyID := uuid.New(), uuid.New()
+	require.NoError(t, conn.Exec("INSERT INTO notification_channels (id, name, type, config, enabled, created_at, updated_at) VALUES (?, 'legacy-channel', 'webhook', '{}', true, ?, ?)", channelID, now, now).Error)
+	require.NoError(t, conn.Exec(`INSERT INTO notification_policies (id, name, channel_id, event_types, enabled, created_at, updated_at) VALUES (?, 'legacy-policy', ?, '["run_failed"]', true, ?, ?)`, policyID, channelID, now, now).Error)
+
+	for range 2 {
+		require.NoError(t, MigrateNamespaceDefaults(conn))
+		require.NoError(t, migrateModels(conn, &models.NotificationChannel{}, &models.NotificationPolicy{}, &models.AgentProfile{}))
+	}
+
+	want := map[string]string{
+		"legacy-null":    models.DefaultNamespace,
+		"legacy-empty":   models.DefaultNamespace,
+		"legacy-finance": "finance",
+		// The built-in default moves to the cluster-shared namespace so every
+		// job namespace keeps resolving it (design §10.4).
+		models.DefaultTriageOnlyProfileName: models.ClusterNamespace,
+		"legacy-deleted":                    models.DefaultNamespace,
+	}
+	var stored []models.AgentProfile
+	require.NoError(t, conn.Unscoped().Find(&stored).Error)
+	require.Len(t, stored, len(want))
+	for _, profile := range stored {
+		require.Equal(t, want[profile.Name], profile.Namespace, "profile %s", profile.Name)
+	}
+	var channel models.NotificationChannel
+	require.NoError(t, conn.First(&channel, "id = ?", channelID).Error)
+	require.Equal(t, models.DefaultNamespace, channel.Namespace)
+	var policy models.NotificationPolicy
+	require.NoError(t, conn.First(&policy, "id = ?", policyID).Error)
+	require.Equal(t, models.DefaultNamespace, policy.Namespace)
+	require.Equal(t, channelID, policy.ChannelID)
+
+	for _, model := range []any{&models.NotificationChannel{}, &models.NotificationPolicy{}, &models.AgentProfile{}} {
+		table := modelTable(t, conn, model)
+		require.True(t, conn.Migrator().HasIndex(model, "idx_"+table+"_namespace"), table)
+		require.Error(t, conn.Exec("UPDATE "+table+" SET namespace = NULL").Error, "%s must reject NULL after the upgrade", table)
+		columns, err := conn.Migrator().ColumnTypes(model)
+		require.NoError(t, err)
+		var seen bool
+		for _, column := range columns {
+			if column.Name() != "namespace" {
+				continue
+			}
+			seen = true
+			nullable, ok := column.Nullable()
+			require.True(t, ok)
+			require.False(t, nullable, table)
+			value, ok := column.DefaultValue()
+			require.True(t, ok)
+			require.Equal(t, models.DefaultNamespace, value, table)
+		}
+		require.True(t, seen, "%s.namespace", table)
+	}
+	require.Error(t, conn.Exec("INSERT INTO notification_channels (id, namespace, name, type, config, enabled, created_at, updated_at) VALUES (?, 'finance', 'legacy-channel', 'webhook', '{}', true, ?, ?)", uuid.New(), now, now).Error, "names stay globally unique")
+	require.Error(t, conn.Exec("INSERT INTO agent_profiles (id, namespace, name, image, engine, created_at, updated_at) VALUES (?, 'finance', 'legacy-null', 'img', 'docker', ?, ?)", uuid.New(), now, now).Error, "names stay globally unique")
+}
+
+// An explicitly owned triage-only row is retained: only unset ownership is
+// moved to the shared namespace.
+func TestNamespaceMigrationKeepsExplicitTriageOnlyNamespace(t *testing.T) {
+	conn := openMigrationTestDB(t)
+	require.NoError(t, conn.AutoMigrate(&legacyNamespaceAgentProfile{}))
+	finance := "finance"
+	now := time.Now().UTC()
+	require.NoError(t, conn.Create(&legacyNamespaceAgentProfile{ID: uuid.New(), Name: models.DefaultTriageOnlyProfileName, Namespace: &finance, Image: "img", Engine: "docker", CreatedAt: now, UpdatedAt: now}).Error)
+	require.NoError(t, MigrateNamespaceDefaults(conn))
+	var namespaces []string
+	require.NoError(t, conn.Table("agent_profiles").Where("name = ?", models.DefaultTriageOnlyProfileName).Pluck("namespace", &namespaces).Error)
+	require.Equal(t, []string{"finance"}, namespaces)
+}

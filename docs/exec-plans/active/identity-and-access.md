@@ -619,7 +619,7 @@ cluster-shared instances.
       Files: `api/rest/controller/job/queue/`, `api/rest/service/job/`,
       `cmd/job/queue.go`, `test/job_queue_cli_test.go`.
       Depends on: D1.
-- [ ] D3. Namespace column on shared objects: `NotificationChannel.Namespace`,
+- [x] D3. Namespace column on shared objects: `NotificationChannel.Namespace`,
       `NotificationPolicy.Namespace` (text, not null, default `'default'`),
       `AgentProfile.Namespace` tightened to the same shape; `*` is the cluster-shared
       sentinel; JSON tags; create bodies accept `namespace`, **update bodies may not
@@ -631,6 +631,7 @@ cluster-shared instances.
       `api/rest/controller/notification/`, `api/rest/controller/agentprofile/`,
       `internal/jobdef/lint/`, `internal/jobdef/agent_profile_refs.go`.
       Depends on: B1.
+      (Lint rule lives in `internal/jobdef/agent_profile_refs.go`, not `internal/jobdef/lint/`; the built-in `triage-only` profile is cluster-shared `*`.)
 - [ ] D4. Shared-object semantics through the surface: lists are collections
       (`*` objects always included); writes to `*` objects require operator at `*`;
       notification policies match runs in their own namespace only, shared policies
