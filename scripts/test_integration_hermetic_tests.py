@@ -79,8 +79,37 @@ class HermeticIntegrationSelectorTests(unittest.TestCase):
         with patch.object(runner.subprocess, "run", side_effect=fake_go_test), \
                 redirect_stdout(io.StringIO()), redirect_stderr(stderr):
             self.assertEqual(runner.main(), 1)
-        self.assertEqual(len(commands), 2)
+        self.assertEqual(len(commands), len(runner.TESTS))
         self.assertIn(missing, stderr.getvalue())
+
+    def test_fixture_failure_does_not_hide_later_failures_or_passes(self):
+        for failure in ("missing", "exit", "malformed"):
+            with self.subTest(failure=failure):
+                commands = []
+
+                def fake_go_test(command, **kwargs):
+                    package = command[-1]
+                    commands.append(package)
+                    names = runner.TESTS[package]
+                    if package == "./test/connectors/fixture" and failure == "missing":
+                        names = names[1:]
+                    if package == "./test/robustness":
+                        names = names[1:]
+                    output = "\n".join(json.dumps({"Action": "pass", "Test": name}) for name in names)
+                    bad = package == "./test/connectors/fixture"
+                    if bad and failure == "malformed":
+                        output += "\nnot JSON\n[]"
+                    return subprocess.CompletedProcess(command, int(bad and failure == "exit"), output, "")
+
+                stderr = io.StringIO()
+                stdout = io.StringIO()
+                with patch.object(runner.subprocess, "run", side_effect=fake_go_test), \
+                        redirect_stdout(stdout), redirect_stderr(stderr):
+                    self.assertEqual(runner.main(), 1)
+                self.assertEqual(commands, list(runner.TESTS))
+                self.assertIn("./test/connectors/fixture:", stderr.getvalue())
+                self.assertIn("./test/robustness:", stderr.getvalue())
+                self.assertIn("./test/performance: 5 required hermetic regressions passed", stdout.getvalue())
 
     def test_fixture_missing_or_skipped_named_pass_fails_closed(self):
         for missing in runner.TESTS["./test/connectors/fixture"]:

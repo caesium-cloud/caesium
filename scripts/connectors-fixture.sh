@@ -46,6 +46,37 @@ if path.is_symlink() or (path.exists() and (not path.is_dir() or any(path.iterdi
     raise SystemExit("refusing nonempty or invalid artifact directory")
 path.mkdir(parents=True, exist_ok=True)
 PY
+# The tracked server needs rootful Linux Docker with its default user namespace.
+# Refuse unsupported mappings before builds or creation rather than producing
+# subordinate-UID files (or failing later on the host-owned evidence mount).
+if [ "${CAESIUM_PODMAN:-false}" = true ] || ! engine_server_json=$("$cli" version --format '{{json .Server}}') ||
+    ! printf '%s\n' "$engine_server_json" | python3 -c '
+import json, sys
+try:
+    server = json.load(sys.stdin)
+    supported = (server.get("Os") == "linux" and server.get("Platform", {}).get("Name", "").startswith("Docker")
+                 and any(c.get("Name") == "Engine" for c in server.get("Components", [])))
+except (ValueError, TypeError, AttributeError):
+    supported = False
+raise SystemExit(0 if supported else 1)
+'; then
+    echo "connector fixture check requires rootful Linux Docker; Podman and unknown engines are unsupported" >&2
+    exit 1
+fi
+if ! engine_security_json=$("$cli" info --format '{{json .SecurityOptions}}') ||
+    ! printf '%s\n' "$engine_security_json" | python3 -c '
+import json, sys
+try:
+    options = json.load(sys.stdin)
+    supported = (isinstance(options, list) and all(isinstance(v, str) for v in options)
+                 and not any(v.split(",", 1)[0] in ("name=rootless", "name=userns") for v in options))
+except (ValueError, TypeError):
+    supported = False
+raise SystemExit(0 if supported else 1)
+'; then
+    echo "connector fixture check requires rootful Docker without user-namespace remapping" >&2
+    exit 1
+fi
 mkdir "$artifacts/cli"
 server_cid=$artifacts/server-container-id
 fixture_cid=$artifacts/fixture-container-id
@@ -93,20 +124,13 @@ created_id() {
     printf '%s\n' "$cid"
 }
 record_server() {
-    if ! "$cli" container inspect "$1" | python3 -c '
-import json, sys
-records = json.load(sys.stdin)
-for record in records:
-    config = record.setdefault("Config", {})
-    config["Env"] = [entry.split("=", 1)[0] + "=[REDACTED]" if any(word in entry.split("=", 1)[0] for word in ("KEY", "TOKEN", "SECRET", "PASSWORD")) else entry for entry in config.get("Env", [])]
-json.dump(records, sys.stdout, indent=2)
-' >"$artifacts/server.inspect.tmp"; then
+    if ! python3 "$root/scripts/connectors-fixture-metadata.py" container "$cli" "$1" >"$artifacts/server.inspect.tmp"; then
         rm -f "$artifacts/server.inspect.tmp"
         return 1
     fi
     mv "$artifacts/server.inspect.tmp" "$artifacts/server.json"
     server_image=$("$cli" container inspect --format '{{.Image}}' "$1") || return 1
-    "$cli" image inspect "$server_image" >"$artifacts/server-image.tmp" || return 1
+    python3 "$root/scripts/connectors-fixture-metadata.py" image "$cli" "$server_image" >"$artifacts/server-image.tmp" || return 1
     mv "$artifacts/server-image.tmp" "$artifacts/server-image.json"
 }
 cleanup() {
@@ -122,7 +146,7 @@ cleanup() {
         "$cli" logs "$cleanup_id" >"$artifacts/container.log" 2>&1 || true
         "$cli" rm -f "$cleanup_id" >/dev/null 2>&1 || true
     fi
-    "$cli" image inspect "$image" "$runner" >"$artifacts/images.json" 2>/dev/null || true
+    python3 "$root/scripts/connectors-fixture-metadata.py" image "$cli" "$image" "$runner" >"$artifacts/images.json" 2>/dev/null || true
     cleanup_server_id=$server_id
     if [ -z "$cleanup_server_id" ]; then cleanup_server_id=$(created_id "$server_cid") || cleanup_server_id=; fi
     if [ -n "$cleanup_server_id" ]; then

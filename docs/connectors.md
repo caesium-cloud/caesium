@@ -554,8 +554,9 @@ shared environment in create-only mode. Container creation reserves the name
 atomically; it never removes a same-named server. The immediate source-matched
 prerequisite images are reused for that create-only call. The controller must
 serialize this recipe with other Docker/browser lanes. No application rows are
-seeded. Docker, Python 3, the repository builder and an unused tracked
-`caesium-server-agent-test` name are required.
+seeded. Rootful Linux Docker without user-namespace remapping, Python 3, the
+repository builder and an unused tracked `caesium-server-agent-test` name are
+required.
 
 The fixture pins Go SDK **1.49.0**, Temporal CLI **1.9.1**, and its bundled
 Temporal Server **1.32.0**. Linux amd64 and arm64 CLI archives are verified
@@ -587,6 +588,8 @@ The script records immutable container IDs as creation succeeds and cleans only
 those IDs on ordinary exit, HUP, INT or TERM, including under dash. A borrowed
 server name is resolved once and never grants cleanup ownership. The fixture and
 runner use the host UID/GID, so Linux hosts can read and remove their evidence;
+`check` refuses rootless Docker, Podman and unknown engines before builds or
+container creation. Docker Desktop with its rootful Linux engine is supported;
 private TLS keys retain restrictive permissions. The fixture runs an on-disk
 development server, a real SDK worker, an mTLS gRPC proxy, and a separate
 append-only start/effect journal. Every effect execution is recorded with its
@@ -597,9 +600,12 @@ Evidence remains under `.tmp/connectors-fixture/`, or the absolute directory in
 include the candidate SHA, working-tree status, the diff against HEAD (including
 staged changes), hashes for all tracked and untracked source paths, observed
 versions, fixture/runner image identities, and the actual server container and
-image in both ownership modes. Server metadata and retained logs redact
-credentials. A dirty development run is iteration evidence, not final candidate
-qualification. The `serve` entrypoint expects the controller-created artifact
+image in both ownership modes. Container and image inspection records use an
+allowlist of identity, state, platform and network fields. Environment names
+are retained without values; commands, arguments, labels, health logs and error
+text are omitted. Retained server logs mask bootstrap API keys; these test logs
+are not a general-purpose sanitizer for arbitrary borrowed-server output. A
+dirty development run is iteration evidence, not final candidate qualification. The `serve` entrypoint expects the controller-created artifact
 directory; it is not a standalone host launcher.
 
 The fixture control API is test infrastructure at port 7240, never a Caesium

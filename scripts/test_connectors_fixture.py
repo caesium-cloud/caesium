@@ -21,14 +21,22 @@ state=Path(os.environ['MOCK_STATE'])
 with (state/'calls.jsonl').open('a') as out: out.write(json.dumps(args)+'\n')
 def option(name): return args[args.index(name)+1]
 def role(cid): return {'1'*64:'server','2'*64:'fixture','3'*64:'runner','f'*64:'foreign'}.get(cid,'unknown')
-if args[:2]==['container','inspect'] or args[0]=='inspect':
+if args[0]=='version':
+ print(json.dumps({'Platform':{'Name':os.environ.get('MOCK_ENGINE','Docker Engine - Community')},'Os':'linux','Components':[{'Name':'Engine'}]}))
+ if os.environ.get('MOCK_VERSION_FAIL'): sys.exit(1)
+elif args[0]=='info':
+ print(os.environ.get('MOCK_SECURITY_OPTIONS','["name=seccomp,profile=builtin"]'))
+ if os.environ.get('MOCK_INFO_FAIL'): sys.exit(1)
+elif args[:2]==['container','inspect'] or args[0]=='inspect':
  target=args[-1]
  cid=target if len(target)==64 else ('f'*64 if (state/'names'/target).exists() else '')
  if not cid: sys.exit(1)
  if '--format' in args:
   print({'{{.Id}}':cid,'{{.Image}}':'sha256:'+'a'*64,'{{.State.Running}}':'true'}[option('--format')])
- else: print(json.dumps([{'Id':cid,'Image':'sha256:'+'a'*64,'Config':{'Env':['CAESIUM_AUTH_MODE=api-key','SAMPLE_SECRET=private']}}]))
-elif args[:2]==['image','inspect']: print(json.dumps([{'Id':args[-1]}]))
+ else: print(json.dumps([{'Id':cid,'Image':'sha256:'+'a'*64,'Config':{'Env':['CAESIUM_AUTH_MODE=api-key','SAMPLE_SECRET=private','ARBITRARY=unusual-credential','CAESIUM_REGISTRY_AUTH=secret://env/ARBITRARY','CAESIUM_DATABASE_DSN=postgres://u:password@db','CAESIUM_IT_REGISTRY_CREDS=ci-user:ci-pass'],'Cmd':['--auth=argv-credential']},'Args':['argv-credential'],'State':{'Running':True,'Error':'state-credential','Health':{'Log':[{'Output':'health-credential'}]}}}]))
+elif args[:2]==['image','inspect']:
+ print(json.dumps([{'Id':args[-1],'Config':{'Env':['LABELLESS=image-credential'],'Cmd':['argv-credential'],'Labels':{'x':'label-credential'}}}]))
+ if os.environ.get('MOCK_IMAGE_INSPECT_FAIL'): sys.exit(1)
 elif args[0]=='create':
  name=option('--name'); reservation=state/'names'/name
  try:
@@ -80,6 +88,7 @@ class ConnectorFixtureOrchestrationTests(unittest.TestCase):
         self.root = Path(self.temp.name)
         (self.root/'scripts').mkdir()
         shutil.copy(ROOT/'scripts/connectors-fixture.sh', self.root/'scripts/connectors-fixture.sh')
+        shutil.copy(ROOT/'scripts/connectors-fixture-metadata.py', self.root/'scripts/connectors-fixture-metadata.py')
         shutil.copy(ROOT/'justfile', self.root/'justfile')
         self.state = self.root/'mock'
         (self.state/'names').mkdir(parents=True)
@@ -153,8 +162,53 @@ class ConnectorFixtureOrchestrationTests(unittest.TestCase):
         self.assertEqual(entry['sha256'], hashlib.sha256(untracked.read_bytes()).hexdigest())
         server = json.loads((self.artifacts/'server.json').read_text())[0]
         self.assertEqual(server['Id'], '1'*64)
-        self.assertIn('SAMPLE_SECRET=[REDACTED]', server['Config']['Env'])
+        self.assertIn('SAMPLE_SECRET', server['Config']['EnvNames'])
+        self.assertNotIn('Env', server['Config'])
         self.assertTrue((self.artifacts/'server-image.json').exists())
+
+    def test_unsupported_engine_modes_refused_before_build_or_creation(self):
+        for extra in ({'CAESIUM_PODMAN': 'true'}, {'MOCK_ENGINE': 'Podman Engine'},
+                      {'MOCK_ENGINE': 'unknown'}, {'MOCK_SECURITY_OPTIONS': '["name=rootless"]'},
+                      {'MOCK_SECURITY_OPTIONS': '["name=userns"]'}, {'MOCK_SECURITY_OPTIONS': 'null'},
+                      {'MOCK_VERSION_FAIL': 'true'}, {'MOCK_INFO_FAIL': 'true'}):
+            with self.subTest(mode=extra):
+                for child in (self.artifacts, self.state):
+                    if child.exists(): shutil.rmtree(child)
+                (self.state/'names').mkdir(parents=True)
+                code, _, error = self.finish(self.launch(**extra))
+                self.assertNotEqual(code, 0)
+                self.assertIn('requires rootful', error)
+                self.assertTrue(all(call[0] in ('version', 'info') for call in self.calls()))
+
+    def test_owned_and_borrowed_inspection_never_retain_config_values_or_free_text(self):
+        for borrowed in (False, True):
+            with self.subTest(borrowed=borrowed):
+                for child in (self.artifacts, self.state):
+                    if child.exists(): shutil.rmtree(child)
+                (self.state/'names').mkdir(parents=True)
+                (self.state/'names'/'borrowed-server').touch()
+                extra = {'CAESIUM_CONNECTORS_EXISTING_SERVER': 'true',
+                         'CAESIUM_CONNECTORS_SERVER_CONTAINER': 'borrowed-server'} if borrowed else {}
+                code, _, error = self.finish(self.launch(**extra))
+                self.assertEqual(code, 0, error)
+                for name in ('server.json', 'server-image.json', 'images.json'):
+                    raw = (self.artifacts/name).read_text()
+                    for secret in ('unusual-credential', 'secret://env/', 'postgres://', 'ci-user:ci-pass',
+                                   'argv-credential', 'image-credential', 'label-credential',
+                                   'state-credential', 'health-credential'):
+                        self.assertNotIn(secret, raw, name)
+                    self.assertTrue(json.loads(raw)[0]['Id'])
+                server = json.loads((self.artifacts/'server.json').read_text())[0]
+                self.assertTrue(server['State']['Running'])
+                self.assertIn('CAESIUM_IT_REGISTRY_CREDS', server['Config']['EnvNames'])
+                if borrowed:
+                    self.assertNotIn('f'*64, self.removed())
+
+    def test_failed_inspection_cannot_publish_plausible_image_evidence(self):
+        code, _, _ = self.finish(self.launch(MOCK_IMAGE_INSPECT_FAIL='true'))
+        self.assertNotEqual(code, 0)
+        self.assertEqual(self.removed(), ['1'*64])
+        self.assertFalse((self.artifacts/'server-image.json').exists())
 
     def test_foreign_name_created_during_build_is_never_removed(self):
         code, _, _ = self.finish(self.launch(MOCK_RACE_NAME='true'))
