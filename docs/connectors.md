@@ -5,7 +5,8 @@
 > direct snapshots, relations, the configuration epoch, and operation receipts.
 > Startup reads the epoch after migration and does not compare it. Temporal
 > observation is implemented and dials only when the connector gate is on.
-> The adapter also implements binding-declared JSON Queries and Updates.
+> The adapter also implements binding-declared JSON Queries and Updates, with
+> durable receipt admission and lookup-only component recovery.
 > There are still no connector HTTP routes or Console pages. Job-definition
 > YAML is unchanged.
 
@@ -302,7 +303,8 @@ id, or request fingerprint is refused. The receipt stores the request
 fingerprint and a bounded actor record, not secret bytes. At most one
 operation for a connection, execution, and action stays open. `submitted`,
 `accepted`, and `unknown` hold that guard; `unknown` is not completion.
-`completed` and `rejected` are terminal, clear the guard, and are not reopened.
+`completed`, `rejected`, and a fresh `not_dispatched` preflight refusal are
+terminal, clear the guard, and are not reopened.
 A later admission is a new row.
 
 The active configuration fingerprint is one catalog row. Activation is a
@@ -329,8 +331,8 @@ routes and no Console pages.
 
 `internal/connector/temporal` compiles `go.temporal.io/sdk` v1.49.0.
 Health, a filtered visibility list, direct describe, and bounded history are
-implemented. Declared Queries and Updates are implemented separately; durable
-receipts, correlation, and HTTP routes remain later plan items. With
+implemented. Declared Queries, Updates and durable receipt components are implemented
+separately; correlation and HTTP routes remain later plan items. With
 `CAESIUM_CONNECTORS_ENABLED` left at its default
 false, the process dials no Temporal server, starts no worker, and needs no
 Temporal credentials.
@@ -440,7 +442,7 @@ deadline is kept.
 The Temporal adapter supports one explicitly invoked status Query and
 binding-declared Update actions. It does not register connector HTTP routes,
 persist a receipt, automatically query closed workflows, or resend an Update.
-Those service surfaces remain plan items C and D.
+The durable operation component below composes it; public service surfaces remain C2.
 
 In v1, `binding.name` is the exact Temporal workflow type. Every message requires
 a nonempty observed Workflow ID and Run ID, connection id, binding name and
@@ -513,11 +515,11 @@ alone does not prove acceptance. It also does not prove validator origin or
 absence of effects. `NotFound` remains `unknown`, including after
 a lost validator-rejection reply: a rejected-before-acceptance Update can be
 absent from history. Absence proves neither rejection nor lack of effect and
-does not authorize resubmission. Explicit original-principal confirmation and
-durable guard handling remain D2/C2.
+does not authorize resubmission. The durable component below implements explicit original-principal confirmation
+and guard handling; their public HTTP surface remains C2.
 
-These are adapter evidence states, not durable receipt states. D2 must explicitly
-map them into receipt and open-guard policy without treating an ambiguous or
+These are adapter evidence states, not durable receipt states. The operation
+component maps them into receipt and open-guard policy without treating an ambiguous or
 returned failure as a no-effect rejection. On lookup, `not_dispatched`
 means that call issued no Poll; it says nothing about the original Update and
 cannot release an existing receipt's guard or authorize resubmission.
@@ -544,6 +546,80 @@ does not prove that a worker cannot arrive. Query, submission and receipt lookup
 do not invoke this diagnostic or infer a workflow failure from it. Server-side
 rate, concurrency, authentication and configuration-epoch policy remain with
 the composing service.
+
+## Durable action receipts and recovery
+
+`internal/connector/operations` composes the catalog and a neutral
+`OperationProvider`. The Temporal bridge delegates one send or one lookup to the
+bounded message adapter. No connector action or receipt HTTP routes are added by
+this component; those public service surfaces remain C2.
+
+Before any action send, admission stores a generated receipt UUID, deterministic
+external Update ID, the exact observed execution coordinates, binding name and
+version, the complete binding/action schema snapshot, authenticated actor,
+validated immutable input, server-derived connection identity, request
+fingerprint and admission configuration epoch. The identity pins the connection
+ID, provider, endpoint and scope; callers cannot supply a replacement destination.
+The input is private retry material. It is never silently redacted or changed:
+known credential bytes and PEM material cause admission to fail instead. The
+combined dispatch snapshot fits the configured metadata ceiling. JSON-escaped
+credential strings and keys are checked after decoding, as well as raw bytes.
+
+One transactional unique index joins identical connection/idempotency-key
+requests to the original receipt. The logical fingerprint includes the principal
+and pinned connection identity; it excludes the newly proposed receipt UUID and
+global configuration epoch. Concurrent losers and compatible retries after an
+unrelated configuration change attach to the winner's immutable actor, Update ID
+and admission epoch. Changed input, target, binding or principal under that key
+is refused. A separate unique open-operation guard returns the
+existing receipt for another key/operator targeting the same execution/action.
+Terminal completion and independently proved validator rejection release that
+guard. A fresh preflight refusal has a separate terminal `not_dispatched` receipt:
+this call provably sent no Update and it is never described as business rejection.
+Replays of all terminal receipts never send again.
+
+A receipt starts `submitted` before dispatch. A process crash at that boundary is
+uncertain. `Reconcile` looks up only the persisted run and Update ID, with no input
+or actor available to the lookup adapter. Background and restart code must use
+this method and must never call Submit or ConfirmResend implicitly. Lookup
+preflight refusal, `NotFound`, failed outcomes and timeouts remain `unknown` and
+keep the guard open. `rejected` requires independent validator-origin proof;
+Temporal's failure outcome alone supplies no such proof.
+
+Every request and provider call still requires the service's loaded configuration
+to match the active epoch. A compatible new service may recover an older receipt
+only while the pinned connection identity and canonical binding remain unchanged.
+Removing or repointing the connection, or changing that binding, refuses recovery
+before an RPC. Adding an unrelated connection does not strand pending receipts.
+The original epoch remains receipt provenance, separate from current-node fencing.
+
+An unknown receipt can be sent again only through `ConfirmResend` with explicit
+confirmation, the receipt revision actually confirmed, and a fresh authenticated
+principal with the original kind/stable ID and current unscoped operator/admin
+role. The service rechecks active configuration and frozen binding and atomically
+claims that revision against its current epoch while appending a bounded decision
+audit containing that epoch. Delayed copies of
+the same confirmation cannot send again after a newer attempt becomes unknown.
+The original input, actor, target and Update ID remain unchanged, including after
+role/subject changes. At most sixteen decision records are retained; additional
+confirmations are refused rather than deleting audit history. A resend preflight
+refusal remains unknown because it says nothing about an earlier send.
+
+Provider observations use receipt revision/attempt compare-and-swap. A delayed
+lookup or older send cannot overwrite terminal state, a newer attempt's evidence,
+or its guard. Provider results are validated against the frozen result schema and
+withheld when credential/PEM bytes remain; arbitrary remote errors and failure
+messages are never persisted.
+
+`TestConnectorsOperations` uses real authenticated key creation and `/auth/whoami`,
+a real mTLS Temporal worker/server and direct observations ingested through the
+catalog store. It closes/reopens a separate on-disk component catalog and
+reconstructs the adapter and operation service. Raw sends and raw effect counts
+prove lost accepted-reply recovery, crash after admission, lost validator reply
+followed by eligibility without automatic approval, original-principal
+confirmation and one logical effect across terminal/new Update IDs. Its artifact
+is `operations-component-evidence.json`. This is component recovery evidence;
+live Caesium process restart/catalog and public route qualification remain C1/C2.
 
 ## Real Temporal development fixture
 
@@ -645,6 +721,10 @@ The orchestration probes run without Docker:
 ```sh
 python3 -m unittest scripts/test_connectors_fixture.py scripts/test_integration_hermetic_tests.py
 ```
+
+The fixture runner also selects and requires a named PASS for each committed
+correlation or durable-operation component scenario. A missing or skipped
+selected scenario fails qualification.
 
 Mount the artifact directory at `/artifacts` for the configuration's certificate
 paths. Its two job aliases are examples; substitute actual lane job aliases

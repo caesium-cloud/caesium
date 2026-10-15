@@ -207,12 +207,18 @@ for _attempt in $(seq 1 120); do
 done
 [ "$ready" = true ] || { echo "fixture/server/real worker failed readiness" >&2; exit 1; }
 "$cli" cp "$server_id:/bin/caesium" "$artifacts/cli/caesium"
-selection=TestIntegrationTestSuite/TestConnectorsFixture
-if [ -f test/connectors_messages_test.go ]; then
-    selection='TestIntegrationTestSuite/(TestConnectorsFixture|TestConnectorsMessages)'
-else
-    echo "B2 adapter qualification not included: message scenario source is absent"
-fi
+scenarios=TestConnectorsFixture
+for component in messages correlation operations; do
+    if [ -f "test/connectors_${component}_test.go" ]; then
+        case "$component" in
+            messages) scenario=TestConnectorsMessages ;;
+            correlation) scenario=TestConnectorsCorrelation ;;
+            operations) scenario=TestConnectorsOperations ;;
+        esac
+        scenarios="$scenarios $scenario"
+    fi
+done
+selection="TestIntegrationTestSuite/($(printf '%s' "$scenarios" | tr ' ' '|'))"
 [ ! -e "$runner_cid" ] || { echo "runner CID file already exists" >&2; exit 1; }
 "$cli" create --platform "$platform" --name "$runner_name" --cidfile "$runner_cid" \
     --network="container:$server_id" --user "$host_user" \
@@ -231,13 +237,12 @@ runner_cli_pid=
 if [ "$runner_rc" -ne 0 ]; then cat "$artifacts/test.log"; exit "$runner_rc"; fi
 cat "$artifacts/test.log"
 # A selected fixture scenario cannot pass via a skip or a zero-match command.
-if ! grep -q -- '--- PASS: TestIntegrationTestSuite/TestConnectorsFixture ' "$artifacts/test.log"; then
-    echo "fixture scenario did not pass" >&2; exit 1
-fi
-if [ -f test/connectors_messages_test.go ] && ! grep -q -- '--- PASS: TestIntegrationTestSuite/TestConnectorsMessages ' "$artifacts/test.log"; then
-    echo "selected B2 adapter scenario did not pass" >&2; exit 1
-fi
-if grep -qE -- '--- SKIP: .*TestConnectors(Fixture|Messages)' "$artifacts/test.log"; then
-    echo "selected fixture scenario skipped" >&2; exit 1
-fi
+for scenario in $scenarios; do
+    if ! grep -q -- "--- PASS: TestIntegrationTestSuite/$scenario " "$artifacts/test.log"; then
+        echo "selected $scenario scenario did not pass" >&2; exit 1
+    fi
+    if grep -qE -- "--- (SKIP|FAIL): TestIntegrationTestSuite/$scenario([ /]|$)" "$artifacts/test.log"; then
+        echo "selected $scenario scenario skipped or failed" >&2; exit 1
+    fi
+done
 printf 'Connector fixture evidence: %s\n' "$artifacts"

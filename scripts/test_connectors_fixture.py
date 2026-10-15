@@ -55,7 +55,10 @@ elif args[0]=='start':
   (state/'runner-attached').touch()
   if os.environ.get('MOCK_BLOCK_RUNNER'):
    while not (state/'release').exists(): time.sleep(.02)
-  print('    --- PASS: TestIntegrationTestSuite/TestConnectorsFixture (0.01s)')
+  for name in os.environ.get('MOCK_SCENARIOS','Fixture').split(','):
+   if name: print('    --- PASS: TestIntegrationTestSuite/TestConnectors'+name+' (0.01s)')
+  if os.environ.get('MOCK_SKIPPED_SCENARIO'):
+   print('    --- SKIP: TestIntegrationTestSuite/TestConnectors'+os.environ['MOCK_SKIPPED_SCENARIO']+'/nested (0.01s)')
  else: print(cid)
 elif args[0]=='logs': print('bootstrap csk_live_fixture_bootstrap')
 elif args[0]=='exec': print('{"ready":true}')
@@ -179,6 +182,31 @@ class ConnectorFixtureOrchestrationTests(unittest.TestCase):
                 self.assertNotEqual(code, 0)
                 self.assertIn('requires rootful', error)
                 self.assertTrue(all(call[0] in ('version', 'info') for call in self.calls()))
+
+    def test_all_present_component_scenarios_are_selected_and_required(self):
+        (self.root/'test').mkdir()
+        for component in ('messages', 'correlation', 'operations'):
+            (self.root/'test'/f'connectors_{component}_test.go').touch()
+        code, _, error = self.finish(self.launch(MOCK_SCENARIOS='Fixture,Messages,Correlation,Operations'))
+        self.assertEqual(code, 0, error)
+        runner = next(call for call in self.calls() if call[0] == 'create' and
+                      'caesium-connectors-runner-' in call[call.index('--name')+1])
+        self.assertEqual(runner[-1], 'TestIntegrationTestSuite/(TestConnectorsFixture|TestConnectorsMessages|TestConnectorsCorrelation|TestConnectorsOperations)')
+
+    def test_missing_or_skipped_component_cannot_satisfy_qualification(self):
+        (self.root/'test').mkdir()
+        (self.root/'test'/'connectors_operations_test.go').touch()
+        for extra in ({'MOCK_SCENARIOS': 'Fixture'},
+                      {'MOCK_SCENARIOS': 'Fixture,Operations', 'MOCK_SKIPPED_SCENARIO': 'Operations'},
+                      {'MOCK_SCENARIOS': ''}):
+            with self.subTest(results=extra):
+                for child in (self.artifacts, self.state):
+                    if child.exists(): shutil.rmtree(child)
+                (self.state/'names').mkdir(parents=True)
+                code, _, error = self.finish(self.launch(**extra))
+                self.assertNotEqual(code, 0)
+                self.assertIn('scenario', error)
+                self.assertCountEqual(self.removed(), ['1'*64, '2'*64, '3'*64])
 
     def test_owned_and_borrowed_inspection_never_retain_config_values_or_free_text(self):
         for borrowed in (False, True):

@@ -884,6 +884,13 @@ func compiledSchema(raw json.RawMessage) (*jsonschema.Schema, error) {
 	return compiler.Compile(resource)
 }
 
+// ValidateActionPayload validates a caller object against a declared action
+// schema without stamping actor context. Optional connector services share this
+// exact validation path with AcceptActionInput.
+func ValidateActionPayload(schema json.RawMessage, input map[string]any) error {
+	return validateCallerPayload(schema, input)
+}
+
 func validateCallerPayload(schema json.RawMessage, input map[string]any) error {
 	if len(schema) == 0 {
 		return errors.New("action schema is required")
