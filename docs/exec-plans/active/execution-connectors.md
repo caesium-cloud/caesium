@@ -130,11 +130,19 @@ reads/history supply detail; bindings supply explicit business semantics.
    A transactional guard permits only one open operation per connection/workflow/
    run/action across different keys and operators; conflicts return the existing
    receipt ID. List execution operations so refresh/new tabs recover server state.
-   Distinguish submitted, accepted, completed, rejected and unknown. A fresh
-   preflight refusal has the separate terminal state `not_dispatched`, proving
-   only that this initial attempt issued no Update; it is not business rejection.
-   Lookup or resend preflight refusal retains prior uncertainty and its open
-   guard. Timeout is not rejection/completion. Background/restart reconciliation
+   Distinguish submitted, accepted, completed, rejected and unknown. Definitive
+   initial preflight refusals (`NotFound`, `InvalidArgument`, `FailedPrecondition`,
+   `PermissionDenied`) have the separate terminal state `not_dispatched`; this
+   is not business rejection. Transient or unclassified initial no-send evidence
+   keeps the receipt submitted and its guard open. A same-key explicit submission
+   may retry only after a current-epoch transactional revision claim consumes
+   durable proof that this initial attempt issued no Update. The proof defaults
+   false; admission, a crash or a failed evidence write cannot manufacture it.
+   Other nonterminal same-key replays reconcile by lookup only. Acceptance and
+   its evidence survive weaker/error lookup results. Validated completion clears
+   the guard even when its result must be omitted to fit the complete metadata
+   envelope. Lookup or resend preflight refusal retains prior uncertainty and its
+   open guard. Timeout is not rejection/completion. Background/restart reconciliation
    only looks up the same Update handle/ID; it never resubmits. A rejected-before-acceptance Update
    is absent from history, so lookup `NotFound` leaves an uncertain operation
    unknown, not rejected or safe to retry. Only a fresh explicit confirmation of
@@ -177,7 +185,12 @@ reads/history supply detail; bindings supply explicit business semantics.
    Missing/ambiguous records and mismatched hints stay unverified. Another
    workflow's otherwise valid admission cannot be borrowed. Queue promotion
    resolves to the admitted run; activity retries reuse that admission. Persist
-   source evidence and verification time only when evidence changes. This verifies
+   source evidence and verification time only when evidence changes. Unrelated
+   pending activities cannot consume the recognized-activity evidence budget or
+   hide a present hint. Source event and attempt advance together; an older start
+   cannot lower Describe's current pending attempt. Inconsistent split-page
+   evidence stays incomplete/unverified rather than losing a reported hint.
+   This verifies
    the declared protocol identity, not the identity of #560's HTTP caller or
    arbitrary data provenance. Follow verified local runs to existing data APIs;
    dataset associations are declarations, never proof of freshness,
@@ -614,6 +627,11 @@ auth chokepoints. Every endpoint includes a live HTTP integration scenario.
   explicit same-principal confirmation uses its immutable Update ID. Stale nodes
   and incompatible destinations/bindings refuse without RPC or attempt/audit
   changes; origin provenance and the confirming current epoch remain distinct.
+  Definitive initial preflight refusal is terminal; transient no-send evidence
+  supports only a transactionally claimed same-key retry. Concurrent retries,
+  restart and failed evidence writes cannot bypass that proof. Weak/error polls
+  preserve accepted state/evidence, legal maximum results complete with bounded
+  stored evidence, and nonterminal replay repairs outcomes by lookup only.
 
 ### Stream E — Console operator experience
 
