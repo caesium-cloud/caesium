@@ -460,3 +460,96 @@ func TestStartWithResultRefusalRechecksKey(t *testing.T) {
 	_, err = store.StartWithResult(context.Background(), job.ID, nil, WithStartIdempotencyKey("other"))
 	require.ErrorIs(t, err, ErrMaxConcurrentRunsReached)
 }
+
+func TestLookupStartAdmissionReadsWithoutRequestHashOrWrites(t *testing.T) {
+	db, store := openIdempotencyStore(t)
+	job := createConcurrencyJob(t, db, "admission-read", jobdef.ConcurrencyStrategyFail, 5)
+	first, err := store.StartWithResult(t.Context(), job.ID, nil, WithStartParams(map[string]string{"unknown-to-reader": "value"}), WithStartPriority("high"), WithStartIdempotencyKey("wf/activity"))
+	require.NoError(t, err)
+	var before models.RunStartIdempotency
+	require.NoError(t, db.Where("job_id = ?", job.ID).Take(&before).Error)
+	for range 3 {
+		admission, found, err := store.LookupStartAdmission(t.Context(), job.ID, "wf/activity")
+		require.NoError(t, err)
+		require.True(t, found)
+		require.Equal(t, before.ID, admission.ID)
+		require.Equal(t, first.RunID, admission.RunID)
+	}
+	var after models.RunStartIdempotency
+	require.NoError(t, db.Where("id = ?", before.ID).Take(&after).Error)
+	require.Equal(t, before, after)
+	_, found, err := store.LookupStartAdmission(t.Context(), job.ID, "missing")
+	require.NoError(t, err)
+	require.False(t, found)
+	require.Equal(t, int64(1), countJobRuns(t, db, job.ID))
+}
+
+func TestLookupStartAdmissionFollowsPromotionAndDroppedQueue(t *testing.T) {
+	db, store := openIdempotencyStore(t)
+	job := createConcurrencyJob(t, db, "admission-queue", jobdef.ConcurrencyStrategyQueue, 1)
+	holder, err := store.StartWithResult(t.Context(), job.ID, nil)
+	require.NoError(t, err)
+	queued, err := store.StartWithResult(t.Context(), job.ID, nil, WithStartIdempotencyKey("wf/queued"))
+	require.NoError(t, err)
+	before, found, err := store.LookupStartAdmission(t.Context(), job.ID, "wf/queued")
+	require.NoError(t, err)
+	require.True(t, found)
+	require.Equal(t, StartOutcomeQueued, before.Outcome)
+	finishRun(t, db, holder.Run.ID)
+	promoted := promoteQueued(t, store, job.ID)
+	after, found, err := NewStore(db).LookupStartAdmission(t.Context(), job.ID, "wf/queued")
+	require.NoError(t, err)
+	require.True(t, found)
+	require.Equal(t, before.ID, after.ID)
+	require.Equal(t, queued.QueueID, after.QueueID)
+	require.Equal(t, promoted.ID, *after.RunID)
+	require.Equal(t, StartOutcomeCreated, after.Outcome)
+	dropped, err := store.StartWithResult(t.Context(), job.ID, nil, WithStartIdempotencyKey("wf/drop"))
+	require.NoError(t, err)
+	require.NoError(t, db.Delete(&models.RunQueue{}, "id = ?", *dropped.QueueID).Error)
+	result, found, err := store.LookupStartAdmission(t.Context(), job.ID, "wf/drop")
+	require.NoError(t, err)
+	require.True(t, found)
+	require.Equal(t, StartOutcomeDropped, result.Outcome)
+	var persisted models.RunStartIdempotency
+	require.NoError(t, db.Where("id = ?", result.ID).Take(&persisted).Error)
+	require.Equal(t, string(StartOutcomeQueued), persisted.Outcome, "read must not write inferred drop")
+}
+
+func TestLookupStartAdmissionRefusesCorruptRunOrQueueOwnership(t *testing.T) {
+	for _, kind := range []string{"run", "queue", "promoted_queue", "missing_run", "unknown_outcome"} {
+		t.Run(kind, func(t *testing.T) {
+			db, store := openIdempotencyStore(t)
+			job := createConcurrencyJob(t, db, "admission-corrupt", jobdef.ConcurrencyStrategyQueue, 1)
+			other := createConcurrencyJob(t, db, "admission-corrupt-other", jobdef.ConcurrencyStrategyFail, 5)
+			first, err := store.StartWithResult(t.Context(), job.ID, nil, WithStartIdempotencyKey("wf/first"))
+			require.NoError(t, err)
+			key := "wf/first"
+			switch kind {
+			case "run":
+				require.NoError(t, db.Model(&models.JobRun{}).Where("id = ?", *first.RunID).Update("job_id", other.ID).Error)
+			case "missing_run":
+				require.NoError(t, db.Delete(&models.JobRun{}, "id = ?", *first.RunID).Error)
+			case "unknown_outcome":
+				require.NoError(t, db.Model(&models.RunStartIdempotency{}).Where("job_id = ?", job.ID).Update("outcome", "invented").Error)
+			case "queue", "promoted_queue":
+				queued, err := store.StartWithResult(t.Context(), job.ID, nil, WithStartIdempotencyKey("wf/queue"))
+				require.NoError(t, err)
+				key = "wf/queue"
+				if kind == "promoted_queue" {
+					finishRun(t, db, *first.RunID)
+					pending, err := store.DequeueNextRun(t.Context(), job.ID, "correlation-promotion")
+					require.NoError(t, err)
+					require.NotNil(t, pending)
+					promoted, err := store.StartQueuedRun(t.Context(), pending)
+					require.NoError(t, err)
+					require.NotNil(t, promoted)
+					// Inspect before the dequeuer deletes the retained queue row.
+				}
+				require.NoError(t, db.Model(&models.RunQueue{}).Where("id = ?", *queued.QueueID).Update("job_id", other.ID).Error)
+			}
+			_, _, err = store.LookupStartAdmission(t.Context(), job.ID, key)
+			require.ErrorIs(t, err, ErrIdempotencyRecordCorrupt)
+		})
+	}
+}
