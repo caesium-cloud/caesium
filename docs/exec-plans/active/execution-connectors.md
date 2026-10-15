@@ -10,11 +10,12 @@ for an external execution system. Temporal is the first implementation.
 Temporal-only workflows are included; moving their ETL into Caesium is not a
 prerequisite for monitoring them.
 
-Today, [PR #560](https://github.com/caesium-cloud/caesium/pull/560) supplies
+At drafting, [PR #560](https://github.com/caesium-cloud/caesium/pull/560) supplied
 idempotent Caesium starts, explicit created/queued/skipped/dropped outcomes and
-an operator recipe. There is no native Temporal client, external execution
-model, monitoring connector or workflow action surface. The Console's existing
-run, dataset, freshness, lineage, receipt and incident views are the data
+an operator recipe. W1–W3 have since added the connector contract, catalog,
+Temporal adapter and real development fixture; HTTP monitoring and operator
+action surfaces remain pending. The Console's existing run, dataset, freshness,
+lineage, receipt and incident views are the data
 evidence this integration should join to external process state.
 
 The first release includes one optional Temporal connector, file-configured
@@ -70,10 +71,12 @@ reads/history supply detail; bindings supply explicit business semantics.
 1. **Three objects.** Connector implementations register behind a neutral
    interface. Connections have stable IDs, provider type, endpoint, credential
    references and external scope. Optional versioned workflow bindings declare
-   display names, one status Query, named actions with JSON input/result schemas
+   display names, one status Query with a closed JSON result schema, named actions with JSON input/result schemas
    and a Caesium activity correlation contract. A1 freezes the activity-type/job
    allowlist and envelope schema before F1 consumes them. Unbound workflows remain
-   inspectable with no business action buttons. Configured workflow-type scope
+   inspectable with no business action buttons. A binding's name is its exact
+   workflow type selector. An omitted status Query result schema leaves that
+   Query unavailable; existing configuration remains parseable. Configured workflow-type scope
    applies to direct reads/action targets as well as lists.
 2. **Gate/configuration.** `CAESIUM_CONNECTORS_ENABLED=false` by default;
    `CAESIUM_CONNECTORS_CONFIG_FILE` selects separate versioned YAML, not a job
@@ -218,9 +221,11 @@ write. Limits are validated configuration with conservative hard ceilings fixed
 by A1 before dependent work. C1/F3 measure unchanged-poll write count, catalog
 cardinality and closed-workflow Query dispatch count through the live surface.
 
-## Progress (as of 2026-10-14)
+## Progress (as of 2026-10-15)
 
-W1 and W2 have merged. B2, C, D, E, F, and N are not started. Drafting base:
+W1, W2 and both W3 feature PRs have merged. B2 and F1 passed their final-head
+checks; the W3 plan sync remains open in PR #631 pending required CODEOWNER
+review. C, D, E, F2–F4 and N are not started. Drafting base:
 `a0e862171b898a64b64828b1a5376226e85b106a`. An open PR or a fixture-only pass
 is not completion. The SHAs below are the squash merges read from GitHub.
 
@@ -246,7 +251,7 @@ Resume unfinished waves. Do not archive this plan while later items remain.
   payloads. List and history keep a JSON prefix inside the 64 KiB metadata
   ceiling and omit the server token when a tail is dropped. A non-empty new
   run id on failed, timed out, completed, or continued-as-new is a
-  continuation. F1 has not run this adapter against real Temporal.
+  continuation. W3 F1 subsequently qualified this adapter against real Temporal.
 - **W2-α / A2:** [PR #628](https://github.com/caesium-cloud/caesium/pull/628)
   merged `331ccce7a1897f19ea0c6c7d2ca24b427d87df79` at 2026-10-14T00:09:41Z.
   Head `7f39fe437d98a9f6dd013e0aa3fbc143da6a0578`. `ci-ok`, coverage, unit
@@ -256,18 +261,76 @@ Resume unfinished waves. Do not archive this plan while later items remain.
   remains C1. An earlier arm64 stress smoke on a pre-rewrite SHA reported
   `terminal_oom_unconfirmed` (exit 137, `oom=false`); the merged head's
   `images-arm64` check succeeded.
-- **Next ready:** B2 and F1. D1 still needs F1. C1 still needs D1 and F1.
+
+### W3 — B2 and F1 merged (2026-10-15)
+
+- **W3-α / B2:** [PR #632](https://github.com/caesium-cloud/caesium/pull/632)
+  merged `adab46d0981fc6f30da6fb220963d2454354ff23` at 2026-10-15T01:21:33Z.
+  Head `190353f32c00aae17e4cecede993afa827cc32fd` passed hosted
+  [run 38569107187](https://github.com/caesium-cloud/caesium/actions/runs/38569107187),
+  including `ci-ok`. Preflight refusals remain distinct from uncertain dispatch;
+  completed failures retain unknown origin and never imply validator rejection
+  or no effect. Queries require a closed schema and exact workflow type.
+- **W3-β / F1:** [PR #633](https://github.com/caesium-cloud/caesium/pull/633)
+  merged `8aac3383e6f2cfcba9825a537a9f71d2a80a9ea9` at 2026-10-15T15:47:38Z.
+  Head `3f3751e8dcd28e0e1812492f48e35b9b81b13eb4` integrates merged B2
+  and retains both guide sections. The intact fixture configuration now passes
+  the hermetic schema gate that failed on both architectures in
+  [run 38569974495](https://github.com/caesium-cloud/caesium/actions/runs/38569974495).
+  The additional UI failure came from controlled DAG nodes dropping measured
+  dimensions during selection updates. They now retain measurements, preserving
+  focus when the task panel closes. A new browser regression records transient
+  node hiding and repeated keyboard open/close cycles. It fails on the original
+  production UI and passes on the fix; the original accessibility scenario and
+  regression passed all 20 checks across both themes and five repetitions,
+  without retries, against a fresh production server.
+- **Round-2 follow-ups:** `42abbdca` aggregates failures across all five
+  hermetic packages while retaining every required named PASS; Reagents runs
+  before that step. Fixture checks now refuse unsupported rootless, remapped,
+  Podman and unknown engines before builds or creation. All container/image
+  inspection artifacts use an identity/state allowlist and environment names
+  without values. Commands, labels, health logs and error text are omitted.
+  `3f3751e8` keeps the mock probes independent of an exported host Podman setting.
+  Three evidence-based replies were posted and resolved, then all eleven F1
+  threads were re-fetched and verified resolved with no new open threads.
+- **Current local gates:** Containerized lint, full race/coverage unit tests and
+  all 41 named tagged hermetic regressions passed. Fourteen orchestration/selector
+  probes passed with ordinary settings and with host `CAESIUM_PODMAN=true`.
+  All 166 CI guard tests, shellcheck, dash syntax and actionlint passed. Fresh
+  fixture qualification on clean `3f3751e8` passed Fixture (6.49 seconds) and
+  Messages (0.31 seconds), no skips (6.81 seconds total). Both provider reports
+  bind to this head, source status is empty, the observed server is 1.32.0,
+  and all three real inspection artifacts satisfy the new allowlist. Owned
+  containers and lane locks were cleaned after qualification.
+  Current-head [CI run 38744014617](https://github.com/caesium-cloud/caesium/actions/runs/38744014617)
+  succeeded on that head, including lint, both unit architectures, coverage,
+  browser/authenticated browser suites, all selected integration lanes and
+  `ci-ok`. Release qualification and publishing were unselected on the PR.
+- **Earlier provider/regression evidence:** Before the later fixture
+  orchestration and metadata hardening, clean combined candidate
+  `3553f37f15c5cb1922a9d7e8f847da29b63a13c8` passed its real Fixture and
+  Messages scenarios without skips (6.64 seconds),
+  with observed Server 1.32.0, raw effects and activated reply loss. Default
+  integration passed in 867.5 seconds and normal agent auth passed 45 scenarios
+  in 35.2 seconds. Eleven review replies/resolutions were verified at feature
+  heads `190353f3`/`8e9a82fc`; the current F1 follow-up dispositions are above.
+- **Next ready:** D1 and D2 have merged prerequisites and disjoint core files.
+  Neither is dispatched; C1 still needs D1, and C2 still needs C1 and D2.
+- **Remaining:** C, D, E, F2–F4 and N are not dispatched. Local arm64 evidence
+  does not qualify Cloud or other versions. Plan sync remains open in
+  [PR #631](https://github.com/caesium-cloud/caesium/pull/631) pending required
+  CODEOWNER review; W3 closeout awaits that merge.
 
 ### Stream Status
 
 | Stream | Scope | Priority | Status |
 | --- | --- | --- | --- |
 | A | Generic contract, configuration and catalog (2 items) | P0 | Shipped (A1, A2) |
-| B | Temporal inspection and declared messages (2 items) | P0 | B1 shipped; B2 not started |
+| B | Temporal inspection and declared messages (2 items) | P0 | Shipped (B1, B2) |
 | C | Authenticated REST and composition (2 items) | P0 | Not started |
 | D | Verified correlation and action durability (2 items) | P0 | Not started |
 | E | Console monitoring, data links and approval (3 items) | P0 | Not started |
-| F | Real fixture, CI, qualification and promotion (4 items) | P0 | Not started |
+| F | Real fixture, CI, qualification and promotion (4 items) | P0 | F1 shipped; F2–F4 not started |
 | N | Operator guidance and reconciliation (1 item) | P0 | Not started |
 
 ## Streams
@@ -329,19 +392,27 @@ Resume unfinished waves. Do not archive this plan while later items remain.
   example version), record justified changes, and regenerate sums with the
   containerized toolchain. Local tests do not certify a Temporal Cloud account.
 
-- [ ] B2. Implement only binding-declared status Queries/Update actions, JSON
+- [x] B2. Implement only binding-declared status Queries/Update actions, JSON
   input/result validation, server-derived actor envelope, pinned targets, stable
   Update IDs and lookup-only reconciliation. Separate missing workers, validator
   rejection and ambiguous RPC outcomes, including not-found after lost rejection.
   Files: new `internal/connector/temporal/messages.go`,
   new `internal/connector/temporal/messages_test.go`,
-  `docs/connectors.md` (message semantics sections).
+  new `test/connectors_messages_test.go` (real fixture adapter scenario),
+  `internal/connector/config.go`, `internal/connector/config_test.go`,
+  `internal/connector/fingerprint.go`, `test/fixtures/connectors/connections.yaml`
+  (optional status Query result schema and its fingerprint),
+  `docs/connectors.md` (message semantics sections), `docs/temporal.md`
+  (implemented adapter versus pending operator surface).
   Depends on: B1.
   Verify: refuse undeclared handlers/custom conversion. F1 proves real Query,
   accepted/completed Update, workflow-visible principal, spoof refusal, validator
   rejection and same-ID lookup. Record actual RPC statuses for the pinned server;
-  rejected-but-unaccepted absence is never proof of rejection/no effect. No
-  action implicitly targets the latest run or replays during lookup. C2 supplies
+  rejected-but-unaccepted absence is never proof of rejection/no effect. A
+  completed failure outcome alone does not prove validator origin or acceptance;
+  retain unknown origin until independent evidence resolves it. Preflight refusals
+  must distinguish this call's absence of dispatch from an uncertain send.
+  No action implicitly targets the latest run or replays during lookup. C2 supplies
   the HTTP proof.
 
 ### Stream C — Authenticated API and composition
@@ -430,6 +501,11 @@ auth chokepoints. Every endpoint includes a live HTTP integration scenario.
   explicit operator decision. Different fresh keys/actors cannot bypass the open
   guard; terminal/new-ID attempts cause no second logical approval effect. C2
   provides the public-surface proof and records actual pinned-server behavior.
+  Map B2's provider evidence explicitly: a preflight refusal proves this call
+  never dispatched, while a lookup preflight refusal says nothing about an
+  earlier send. A completed submission or lookup failure can have unknown
+  acceptance and effects. Neither becomes a
+  validator-rejected/no-effect receipt without evidence of validator origin.
 
 ### Stream E — Console operator experience
 
@@ -496,7 +572,7 @@ joined to existing Caesium pages. No cross-provider global pagination in v1.
 One owner serializes the local Docker/browser lane. Reuse the builder and
 compiled integration-runner approach; fixture code stays in the root module.
 
-- [ ] F1. Build a pinned isolated Temporal development fixture with real SDK
+- [x] F1. Build a pinned isolated Temporal development fixture with real SDK
   worker: external-only workflow, and publication workflow that invokes a Caesium
   job through #560, reports A1's frozen correlation envelope, awaits approval
   and invokes a second job. Include Query, validator rejection, worker restart,
@@ -507,16 +583,23 @@ compiled integration-runner approach; fixture code stays in the root module.
   Independently record effects/starts.
   Files: new `test/connectors/fixture/main.go`,
   new `test/connectors/fixture/workflows.go`,
-  new `test/connectors/fixture/activity.go`, new `test/connectors_fixture_test.go`,
+  new `test/connectors/fixture/activity.go`, new `test/connectors/fixture/fixture_test.go`,
+  new `test/connectors_fixture_test.go`, new `scripts/test_connectors_fixture.py`,
   new `test/connectors/testdata/connections.yaml`,
   new `build/Dockerfile.connector-fixture`, new `scripts/connectors-fixture.sh`,
+  new `scripts/connectors-fixture-metadata.py`,
+  `scripts/integration-hermetic-tests.py`, `scripts/test_integration_hermetic_tests.py`,
   `justfile` (fixture-check recipe), `docs/connectors.md` (fixture instructions).
-  Depends on: B1.
+  Depends on: B1, B2 (the fixture configuration declares its Query result schema).
   Verify: container-built fixture drives actual Temporal/Caesium APIs without
   seeded application rows. Pin server/CLI artifact/image digests and record the
   SDK/server matrix; local certificates verify TLS option handling. Prove fault
   activation, including dropped accepted/rejected replies and exact subsequent
   lookup statuses for the pinned server. Missing worker/fixture is failure.
+  Hermetic tagged-unit checks parse the committed connection file through the
+  production parser and validate marshalled publication state against its
+  declared Query schema. Require named PASS records; unsupported schema or
+  state/config drift fails. B2 must land before F1 can pass on the merge base.
   The fixture consumes A1's schema and does not wait for D1 to define it.
   C1/C2 complete adapter qualification.
 
@@ -542,6 +625,9 @@ compiled integration-runner approach; fixture code stays in the root module.
   Verify: proposed `just integration-test-connectors` executes all manifest-named
   live scenarios and E1's dedicated Playwright project. Run
   `scripts/check-test-evidence.py --manifest test/contracts/scenarios.json --report <report> --require connectors --strict`.
+  Include `TestConnectorsMessages` in the connector lane and require an explicit
+  PASS with no skip, alongside `TestConnectorsFixture`; before F2 this real
+  Temporal adapter scenario runs only through the manual fixture-check recipe.
   Gate-off/queue-off misconfiguration, zero count, fixture failure, failed first
   browser attempt, missing artifacts or wrong candidate SHA fail the lane, which
   remains explicitly advisory to `ci-ok` until F4. Env-parity guardrail includes
@@ -597,9 +683,9 @@ compiled integration-runner approach; fixture code stays in the root module.
 **16 included items in seven streams.** Dependencies are explicit above;
 unchecked sibling work is not a hidden prerequisite.
 
-- **A1, A2, and B1** are merged. See Progress for the merge SHAs.
-- Next ready items: **B2 and F1**. F1 supplies the pinned external fixture.
-  B2 needs no Temporal Cloud account; F1 needs the pinned dev server.
+- **A1, A2, B1, B2 and F1** are merged. See Progress for the merge SHAs.
+  B2 landed before F1's schema-bearing fixture; the pinned development server
+  supplied real provider qualification without a Temporal Cloud account.
 - **D1** needs A2/B1/F1; **D2** needs A2/B2/F1. Core files are disjoint.
 - **C1** joins A2/B1/D1/F1; **C2** follows C1/B2/D2.
 - **E1** can run on merged C1 while C2 develops; **E2 -> E3** serializes
