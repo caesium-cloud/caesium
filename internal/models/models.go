@@ -90,6 +90,7 @@ var All = []any{
 	&ExternalExecution{},
 	&ExternalExecutionSnapshot{},
 	&ExternalExecutionRelation{},
+	&ExternalExecutionCorrelation{},
 	&ConnectorOperation{},
 	&ConnectorConfiguration{},
 }

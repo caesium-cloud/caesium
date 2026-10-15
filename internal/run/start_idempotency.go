@@ -341,3 +341,124 @@ func (s *Store) replayIdempotentStart(conn *gorm.DB, existing *models.RunStartId
 	}
 	return run, err
 }
+
+// StartAdmission is a read-only projection of the accepted start protocol. It
+// deliberately excludes request hashes, params, and task/run payloads.
+type StartAdmission struct {
+	ID             uuid.UUID
+	JobID          uuid.UUID
+	IdempotencyKey string
+	Outcome        StartOutcome
+	Reason         string
+	QueueID        *uuid.UUID
+	RunID          *uuid.UUID
+}
+
+// LookupStartAdmission reads job/key without reconstructing the HTTP request or
+// replaying admission. It never starts work or writes a dropped outcome. Queue
+// promotion retains the original admission and QueueID.
+func (s *Store) LookupStartAdmission(ctx context.Context, jobID uuid.UUID, key string) (StartAdmission, bool, error) {
+	normalized, err := ValidateIdempotencyKey(key)
+	if err != nil {
+		return StartAdmission{}, false, err
+	}
+	if jobID == uuid.Nil || normalized == "" || normalized != key {
+		return StartAdmission{}, false, ErrInvalidIdempotencyKey
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	conn := s.db.WithContext(ctx)
+	row, err := findStartIdempotency(conn, jobID, key)
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return StartAdmission{}, false, nil
+	}
+	if err != nil {
+		return StartAdmission{}, false, err
+	}
+	// A promoted admission retains QueueID after the queue row is deleted.
+	// If the queue still exists, it must belong to the same job for every
+	// outcome, including the promotion/deletion window.
+	var queue []models.RunQueue
+	if row.QueueID != nil {
+		if err := conn.Select("id", "job_id").Where("id = ?", *row.QueueID).Limit(1).Find(&queue).Error; err != nil {
+			return StartAdmission{}, false, err
+		}
+		if len(queue) > 0 && queue[0].JobID != jobID {
+			return StartAdmission{}, false, ErrIdempotencyRecordCorrupt
+		}
+	}
+	// The promotion transaction updates the admission before removing its queue
+	// row. Re-read after an absent queue so a concurrent promotion is not dropped.
+	if row.Outcome == string(StartOutcomeQueued) && row.RunID == nil && row.QueueID != nil && len(queue) == 0 {
+		row, err = findStartIdempotency(conn, jobID, key)
+		if err != nil {
+			return StartAdmission{}, false, err
+		}
+		if row.Outcome == string(StartOutcomeQueued) {
+			row.Outcome = string(StartOutcomeDropped)
+		}
+	}
+	out := StartAdmission{ID: row.ID, JobID: row.JobID, IdempotencyKey: row.IdempotencyKey, Outcome: StartOutcome(row.Outcome), Reason: row.Reason, QueueID: row.QueueID, RunID: row.RunID}
+	if out.ID == uuid.Nil || out.JobID != jobID || out.IdempotencyKey != key || out.QueueID != nil && *out.QueueID == uuid.Nil || out.RunID != nil && *out.RunID == uuid.Nil {
+		return StartAdmission{}, false, ErrIdempotencyRecordCorrupt
+	}
+	switch out.Outcome {
+	case StartOutcomeCreated:
+		if out.RunID == nil {
+			return StartAdmission{}, false, ErrIdempotencyRecordCorrupt
+		}
+	case StartOutcomeQueued, StartOutcomeDropped:
+		if out.QueueID == nil || out.RunID != nil {
+			return StartAdmission{}, false, ErrIdempotencyRecordCorrupt
+		}
+	case StartOutcomeSkipped:
+	default:
+		return StartAdmission{}, false, ErrIdempotencyRecordCorrupt
+	}
+	if out.RunID != nil {
+		var runs []models.JobRun
+		if err := conn.Select("id", "job_id").Where("id = ?", *out.RunID).Limit(1).Find(&runs).Error; err != nil {
+			return StartAdmission{}, false, err
+		}
+		if len(runs) != 1 || runs[0].JobID != jobID {
+			return StartAdmission{}, false, ErrIdempotencyRecordCorrupt
+		}
+	}
+	return out, true, nil
+}
+
+// LookupStartAdmissions resolves a bounded set of local job aliases and reads
+// every matching job/key admission. It never uses a reported hint to narrow the
+// search: two valid admissions remain ambiguous to a correlation caller.
+func (s *Store) LookupStartAdmissions(ctx context.Context, aliases []string, key string) ([]StartAdmission, error) {
+	const maxAliases = 100
+	if len(aliases) == 0 || len(aliases) > maxAliases {
+		return nil, errors.New("run: admission alias lookup exceeds its bound")
+	}
+	unique := make(map[string]bool, len(aliases))
+	for _, alias := range aliases {
+		if strings.TrimSpace(alias) == "" || strings.TrimSpace(alias) != alias {
+			return nil, errors.New("run: invalid admission job alias")
+		}
+		unique[alias] = true
+	}
+	var jobs []models.Job
+	if err := s.db.WithContext(ctx).Select("id").Where("alias IN ?", slices.Collect(maps.Keys(unique))).Limit(maxAliases + 1).Find(&jobs).Error; err != nil {
+		return nil, err
+	}
+	if len(jobs) > maxAliases {
+		return nil, errors.New("run: admission alias lookup exceeds its bound")
+	}
+	var admissions []StartAdmission
+	for _, job := range jobs {
+		admission, found, err := s.LookupStartAdmission(ctx, job.ID, key)
+		if err != nil {
+			return nil, err
+		}
+		if found {
+			admissions = append(admissions, admission)
+		}
+	}
+	return admissions, nil
+}
