@@ -1,6 +1,6 @@
 # Execution Connectors — Temporal Monitoring and Operator Actions
 
-Last updated: 2026-10-14
+Last updated: 2026-10-15
 
 Caesium should let an operator follow a data process across Temporal workflows
 and Caesium jobs, understand the data consequence, and perform a declared
@@ -223,10 +223,8 @@ cardinality and closed-workflow Query dispatch count through the live surface.
 
 ## Progress (as of 2026-10-15)
 
-W1, W2 and both W3 feature PRs have merged. B2 and F1 passed their final-head
-checks; the W3 plan sync remains open in PR #631 pending required CODEOWNER
-review. C, D, E, F2–F4 and N are not started. Drafting base:
-`a0e862171b898a64b64828b1a5376226e85b106a`. An open PR or a fixture-only pass
+W1, W2 and W3 have merged. W4 implements D1 and D2; neither is merged.
+C, E, F2–F4 and N remain later work. An open PR or a component-only pass
 is not completion. The SHAs below are the squash merges read from GitHub.
 
 The orchestrator owns this dashboard: PR URLs, exact tested heads/merge SHAs,
@@ -315,11 +313,29 @@ Resume unfinished waves. Do not archive this plan while later items remain.
   in 35.2 seconds. Eleven review replies/resolutions were verified at feature
   heads `190353f3`/`8e9a82fc`; the current F1 follow-up dispositions are above.
 - **Next ready:** D1 and D2 have merged prerequisites and disjoint core files.
-  Neither is dispatched; C1 still needs D1, and C2 still needs C1 and D2.
-- **Remaining:** C, D, E, F2–F4 and N are not dispatched. Local arm64 evidence
-  does not qualify Cloud or other versions. Plan sync remains open in
-  [PR #631](https://github.com/caesium-cloud/caesium/pull/631) pending required
-  CODEOWNER review; W3 closeout awaits that merge.
+  Both are dispatched in W4 below; C1 still needs D1, and C2 still needs C1 and D2.
+- **Closeout:** [PR #631](https://github.com/caesium-cloud/caesium/pull/631)
+  merged `b796b5672eab30134876f403f257af9e7a1f76da` at 2026-10-15T17:07:08Z.
+  Head `0503b5b81437889cae14571bdd8ebf8e9c0c5daa` passed current-head
+  [CI run 38764838541](https://github.com/caesium-cloud/caesium/actions/runs/38764838541),
+  including `ci-ok`. W3 is shipped. Local arm64 evidence does not qualify
+  Cloud or other versions.
+
+### W4 — Correlation and action durability (in progress)
+
+- **Base:** `b796b5672eab30134876f403f257af9e7a1f76da`; W3 implementation
+  and plan synchronization are merged.
+- **W4-α / D1:** Implementing trusted activity/admission correlation, read-only
+  admission lookup and durable local links. PR and candidate checks pending.
+- **W4-β / D2:** Implementing immutable action receipts, guarded dispatch,
+  lookup-only recovery and explicit original-principal resubmission. PR and
+  candidate checks pending.
+- **Verification boundary:** Real Temporal component scenarios supplement
+  containerized baseline checks. Running-server connector HTTP, bidirectional
+  public links and process-restart proof remain C1/C2; those routes do not yet
+  exist. No D1/D2 checkbox advances before verified merged acceptance.
+- **Remaining:** C, E, F2–F4 and N are outside this wave. No later wave is
+  dispatched while W4 prerequisites remain open.
 
 ### Stream Status
 
@@ -328,7 +344,7 @@ Resume unfinished waves. Do not archive this plan while later items remain.
 | A | Generic contract, configuration and catalog (2 items) | P0 | Shipped (A1, A2) |
 | B | Temporal inspection and declared messages (2 items) | P0 | Shipped (B1, B2) |
 | C | Authenticated REST and composition (2 items) | P0 | Not started |
-| D | Verified correlation and action durability (2 items) | P0 | Not started |
+| D | Verified correlation and action durability (2 items) | P0 | W4 implementing D1/D2 |
 | E | Console monitoring, data links and approval (3 items) | P0 | Not started |
 | F | Real fixture, CI, qualification and promotion (4 items) | P0 | F1 shipped; F2–F4 not started |
 | N | Operator guidance and reconciliation (1 item) | P0 | Not started |
