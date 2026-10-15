@@ -81,6 +81,55 @@ func TestParseAcceptsVersionedConnection(t *testing.T) {
 	}
 }
 
+func TestStatusQueryResultSchemaIsOptionalAndFingerprintBound(t *testing.T) {
+	old := mustParse(t, validConfig, nil)
+	if len(old.Connections[0].Bindings[0].StatusQueryResultSchema) != 0 {
+		t.Fatal("legacy binding unexpectedly declares a Query result schema")
+	}
+	oldFingerprint, err := Fingerprint(old)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Canonical SHA-256 of the pre-B2 validConfig. Omitting the new optional
+	// field must not require every existing connection to change its epoch.
+	const legacyFingerprint = "d2e2872e2f4dd7e90b7e111345af803504d76fe68abd5ddc25c71b6bfc8e3b64"
+	if oldFingerprint != legacyFingerprint {
+		t.Fatalf("legacy fingerprint changed: got %s", oldFingerprint)
+	}
+	withSchema := strings.Replace(validConfig, "        statusQuery: publication_status", `        statusQuery: publication_status
+        statusQueryResultSchema:
+          type: object
+          additionalProperties: false
+          required: [stage]
+          properties:
+            stage:
+              type: string`, 1)
+	current := mustParse(t, withSchema, nil)
+	if len(current.Connections[0].Bindings[0].StatusQueryResultSchema) == 0 {
+		t.Fatal("Query result schema was not retained")
+	}
+	currentFingerprint, err := Fingerprint(current)
+	if err != nil || currentFingerprint == oldFingerprint {
+		t.Fatalf("new Query schema did not change fingerprint: %s, %v", currentFingerprint, err)
+	}
+	changed := mustParse(t, strings.Replace(withSchema, "required: [stage]", "required: []", 1), nil)
+	changedFingerprint, err := Fingerprint(changed)
+	if err != nil || changedFingerprint == currentFingerprint {
+		t.Fatalf("Query schema mutation did not change fingerprint: %s, %v", changedFingerprint, err)
+	}
+	for _, mutation := range []string{
+		strings.Replace(withSchema, "          additionalProperties: false", "          additionalProperties: true", 1),
+		strings.Replace(withSchema, "          type: object", "          type: string", 1),
+		strings.Replace(withSchema, "              type: string", "              type: invalid", 1),
+		strings.Replace(withSchema, "            stage:", "            _caesium_actor:", 1),
+		strings.Replace(withSchema, "              type: string", "              $ref: https://example.invalid/schema.json", 1),
+	} {
+		if _, err := Parse([]byte(mutation), nil); err == nil {
+			t.Fatalf("invalid Query result schema accepted: %s", mutation)
+		}
+	}
+}
+
 func TestActorReservationAllowsNestedSchemaAndData(t *testing.T) {
 	for _, property := range []string{
 		"type: object\n                  properties:\n                    _caesium_actor:\n                      type: string",

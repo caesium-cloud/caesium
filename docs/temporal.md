@@ -9,9 +9,9 @@
 > The patterns below are not a plugin; they are how the two fit together over
 > Caesium's REST API. The adapter is described in [connectors.md](connectors.md).
 
-The optional adapter observes Temporal workflows. It does not add HTTP
-monitoring, Console pages, or Query/Update support. Declared operator actions
-remain proposed in the
+The optional adapter observes Temporal workflows and implements binding-declared
+JSON Queries and Updates. It does not add HTTP monitoring or Console pages.
+Durable action admission and the operator action surface remain proposed in the
 [execution-connectors plan](exec-plans/active/execution-connectors.md).
 That plan is not complete. The patterns below are the unchanged REST recipe.
 

@@ -5,6 +5,7 @@
 > direct snapshots, relations, the configuration epoch, and operation receipts.
 > Startup reads the epoch after migration and does not compare it. Temporal
 > observation is implemented and dials only when the connector gate is on.
+> The adapter also implements binding-declared JSON Queries and Updates.
 > There are still no connector HTTP routes or Console pages. Job-definition
 > YAML is unchanged.
 
@@ -69,6 +70,13 @@ connections:
         version: "1"
         displayName: Publication
         statusQuery: publication_status
+        statusQueryResultSchema:
+          type: object
+          additionalProperties: false
+          required: [stage]
+          properties:
+            stage:
+              type: string
         activityAllowlist:
           - activityType: caesium.start
             jobs: [publish, notify]
@@ -169,6 +177,14 @@ A binding's `activityAllowlist` maps an external activity type to local job
 aliases. That allowlist is the only set of jobs a later admission lookup may
 search. Bindings may also name one status query and zero or more actions.
 Each action has a JSON object input schema and a JSON object result schema.
+
+A binding's `name` is the exact Temporal workflow type it permits. Before a
+Query or Update, the adapter describes the pinned workflow/run and checks that
+type and the binding version. A status Query exposes only a JSON object that
+validates against `statusQueryResultSchema`, whose root must set
+`additionalProperties: false`. The field is optional for existing files;
+omitting it makes the Query unavailable. Supplying or changing it changes the
+configuration fingerprint.
 
 Adapter capabilities are optional and advertised only when a server wires them:
 discovery, inspection, history, relationships, status query, action submission,
@@ -311,10 +327,11 @@ routes and no Console pages.
 
 ## Temporal observation
 
-`internal/connector/temporal` compiles `go.temporal.io/sdk` v1.49.0. It is
-observation only. Health, a filtered visibility list, direct describe, and
-bounded history are implemented. Queries, Updates, receipts, correlation, and
-HTTP routes are not. With `CAESIUM_CONNECTORS_ENABLED` left at its default
+`internal/connector/temporal` compiles `go.temporal.io/sdk` v1.49.0.
+Health, a filtered visibility list, direct describe, and bounded history are
+implemented. Declared Queries and Updates are implemented separately; durable
+receipts, correlation, and HTTP routes remain later plan items. With
+`CAESIUM_CONNECTORS_ENABLED` left at its default
 false, the process dials no Temporal server, starts no worker, and needs no
 Temporal credentials.
 
@@ -417,6 +434,116 @@ paths uses TLS. File-read errors are redacted when they would contain the API
 key or a PEM body. The configured RPC deadline defaults to
 `connector.MaxRPCDeadline` and a larger value is rejected. A caller's shorter
 deadline is kept.
+
+## Temporal messages
+
+The Temporal adapter supports one explicitly invoked status Query and
+binding-declared Update actions. It does not register connector HTTP routes,
+persist a receipt, automatically query closed workflows, or resend an Update.
+Those service surfaces remain plan items C and D.
+
+In v1, `binding.name` is the exact Temporal workflow type. Every message requires
+a nonempty observed Workflow ID and Run ID, connection id, binding name and
+binding version. Before the message RPC, a direct describe must return those
+same execution coordinates and workflow type. An unbound workflow, a different
+type, a changed binding version, or a missing Run ID is refused. Continue-as-new
+cannot turn an old action into an action on the latest run.
+
+`statusQueryResultSchema` is optional in the configuration file so existing
+files remain valid. Query invocation requires that schema. It is a closed JSON
+object schema with the same local-reference and actor-reservation restrictions
+as action schemas. Adding or changing it changes the configuration fingerprint;
+omitting it preserves the existing fingerprint. `QueryStatus` sends no arguments
+and invokes only `statusQuery`, then validates the result before exposing it.
+There is no raw-payload fallback for a binding without this schema.
+
+`SubmitAction` validates the caller object against `inputSchema` before adding
+the server actor. A root `_caesium_actor` in caller input is refused before RPC.
+The remote Update receives one default JSON argument:
+
+```json
+{
+  "input": {"note": "Publication reviewed"},
+  "_caesium_actor": {
+    "principal_kind": "api_key",
+    "stable_id": "authenticated-key-id",
+    "subject": "authenticated-key-subject",
+    "role": "operator",
+    "operation_id": "persisted-operation-id",
+    "binding_version": "1"
+  }
+}
+```
+
+The actor comes from the authenticated Caesium principal, with `operator` or
+`admin` role. API keys stay identified as keys. The adapter checks the actor's
+binding version and stable Update ID against its operation id; the composing
+service must enforce authorization and persist the immutable receipt, actor,
+input and target before dispatch. `StableUpdateID` derives one deterministic
+SHA-256-based external id from that persisted operation id. Dispatch never
+generates a new Update ID. The remote validator remains authoritative for
+business eligibility and trusts the authenticated connector service to supply
+the envelope; other authorized Temporal writers are outside that assertion.
+
+Submission waits for acceptance. It makes one Update RPC and returns the
+actual lifecycle stage: `submitted` for admitted, `accepted` for accepted,
+and `completed` for a validated successful outcome. A completed failure returned
+by submission stays `unknown` with `failure_kind: failure_origin_unknown`:
+the wire response does not distinguish validator rejection from an accepted
+handler that failed, possibly after effects. `rejected` requires independent
+proof of validator rejection and is not inferred by this adapter. Failure
+messages and details are omitted. A completed response with an invalid result
+also stays `unknown`, so it cannot authorize another effect.
+
+Local validation, binding/identity mismatch, cancellation before dispatch, or
+a failed preflight describe return `not_dispatched`. The Update RPC has not
+been issued. Identity mismatches retain a descriptive error and have no RPC
+code. `preflight_rpc_code` records only the actual code of a failed describe;
+`rpc_code` records only a failed Update or Poll RPC. A canceled context detected
+before any RPC has neither code. This avoids presenting a provably unsent
+action as an uncertain send.
+
+`LookupAction` makes one nonblocking `PollWorkflowExecutionUpdate` RPC for the
+same pinned run and Update ID. It does not take input or an actor, call an Update
+handler, or follow a newer run. RPC failures preserve the exact gRPC status code
+and leave the operation `unknown`. A completed failure returned by lookup also
+stays `unknown` with `failure_kind: failure_origin_unknown`. A Poll can retain
+an in-flight Update while its validator rejects it, so the failure outcome
+alone does not prove acceptance. It also does not prove validator origin or
+absence of effects. `NotFound` remains `unknown`, including after
+a lost validator-rejection reply: a rejected-before-acceptance Update can be
+absent from history. Absence proves neither rejection nor lack of effect and
+does not authorize resubmission. Explicit original-principal confirmation and
+durable guard handling remain D2/C2.
+
+These are adapter evidence states, not durable receipt states. D2 must explicitly
+map them into receipt and open-guard policy without treating an ambiguous or
+returned failure as a no-effect rejection. On lookup, `not_dispatched`
+means that call issued no Poll; it says nothing about the original Update and
+cannot release an existing receipt's guard or authorize resubmission.
+
+Only a single `json/plain` result payload is decoded. Custom or encrypted
+payloads remain unavailable. Input, stamped envelope, and exposed result each
+fit the configured payload ceiling, at most 64 KiB. Result objects are checked
+against their declared schema; known API-key bytes and PEM bodies are redacted,
+then the redacted object is validated again. Arbitrary history/input/failure
+payloads are not exposed. One bounded context covers describe and message RPCs,
+and a shorter caller deadline is preserved. A timeout is not completion or
+rejection.
+
+Sensitive object keys cause the entire result to be withheld. Known API-key
+bytes are scrubbed even for short credentials; a result is withheld if those
+bytes remain in its encoded JSON, including numeric or boolean values. PEM
+blocks are scrubbed before credential replacement so overlapping text cannot
+break their delimiters and expose their contents.
+
+`CheckWorker` is an explicit diagnostic. It reports `recent_pollers`,
+`no_recent_pollers`, or `unknown` from the workflow task queue's observed poller
+evidence. Recent polling does not prove present worker liveness, and its absence
+does not prove that a worker cannot arrive. Query, submission and receipt lookup
+do not invoke this diagnostic or infer a workflow failure from it. Server-side
+rate, concurrency, authentication and configuration-epoch policy remain with
+the composing service.
 
 ## Real Temporal development fixture
 
