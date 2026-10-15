@@ -61,22 +61,15 @@ func (o *Observer) CorrelationActivities(ctx context.Context, connectionID, work
 		out.Incomplete = true
 		out.NextPageToken = nil
 	}
-	pending := map[string]*commonpb.Payloads{}
-	attempts := map[string]int32{}
-	for i, p := range desc.GetPendingActivities() {
-		if i >= o.maxPageEntries {
-			break
-		}
-		pending[p.GetActivityId()] = p.GetHeartbeatDetails()
-		attempts[p.GetActivityId()] = p.GetAttempt()
-	}
 	records := map[int64]correlation.ActivityEvidence{}
+	schedules := map[string]int64{}
 	var order []int64
 	allowed := map[string]bool{}
 	for _, a := range binding.ActivityAllowlist {
 		allowed[a.ActivityType] = true
 	}
-	// Use only the bounded provider page. There is no namespace history cache.
+	// Retain only the recognized IDs on this bounded history page. Describe's
+	// provider order and unrelated pending work must not discard their hints.
 	for _, event := range events {
 		attrs := event.GetActivityTaskScheduledEventAttributes()
 		if attrs == nil || !allowed[attrs.GetActivityType().GetName()] {
@@ -86,26 +79,52 @@ func (o *Observer) CorrelationActivities(ctx context.Context, connectionID, work
 		if id == "" || kind == "" || event.GetEventId() <= 0 || event.GetEventType() != enumspb.EVENT_TYPE_ACTIVITY_TASK_SCHEDULED {
 			continue
 		}
-		hint, err := correlationHint(pending[id])
+		if _, duplicate := schedules[id]; duplicate {
+			return CorrelationPage{}, correlation.ErrUnverifiedCorrelation
+		}
+		records[event.GetEventId()] = correlation.ActivityEvidence{Execution: ref, WorkflowType: binding.Name, ActivityID: id, ActivityType: kind, IdempotencyKey: runID + "/" + id, SourceEventID: event.GetEventId(), SourceEventType: enumLabel(enumspb.EventType_name, int32(event.GetEventType())), ScheduledEventID: event.GetEventId(), Attempt: 1}
+		schedules[id] = event.GetEventId()
+		order = append(order, event.GetEventId())
+	}
+	pendingSeen := map[string]bool{}
+	for _, pending := range desc.GetPendingActivities() {
+		scheduledID, matched := schedules[pending.GetActivityId()]
+		if !matched {
+			continue
+		}
+		rec := records[scheduledID]
+		if pendingSeen[rec.ActivityID] || pending.GetActivityType().GetName() != rec.ActivityType || pending.GetAttempt() < 1 {
+			return CorrelationPage{}, correlation.ErrUnverifiedCorrelation
+		}
+		hint, err := correlationHint(pending.GetHeartbeatDetails())
 		if err != nil {
 			return CorrelationPage{}, err
 		}
-		attempt := attempts[id]
-		if attempt < 1 {
-			attempt = 1
-		}
-		records[event.GetEventId()] = correlation.ActivityEvidence{Execution: ref, WorkflowType: binding.Name, ActivityID: id, ActivityType: kind, IdempotencyKey: runID + "/" + id, SourceEventID: event.GetEventId(), SourceEventType: enumLabel(enumspb.EventType_name, int32(event.GetEventType())), ScheduledEventID: event.GetEventId(), Attempt: attempt, Hint: hint}
-		order = append(order, event.GetEventId())
+		rec.Hint = hint
+		rec.Attempt = pending.GetAttempt()
+		records[scheduledID] = rec
+		pendingSeen[rec.ActivityID] = true
 	}
+	// An older historical start cannot replace Describe's current attempt or
+	// advance the source event independently of that attempt. Withhold it until
+	// this page also supplies the matching current start.
+	missingCurrentStart := map[int64]bool{}
+
 	for _, event := range events {
 		if started := event.GetActivityTaskStartedEventAttributes(); started != nil {
 			rec, ok := records[started.GetScheduledEventId()]
 			if !ok {
+				out.Incomplete = true
 				continue
 			}
 			if event.GetEventType() != enumspb.EVENT_TYPE_ACTIVITY_TASK_STARTED || event.GetEventId() <= rec.SourceEventID || started.GetAttempt() < 1 {
 				return CorrelationPage{}, correlation.ErrUnverifiedCorrelation
 			}
+			if started.GetAttempt() < rec.Attempt {
+				missingCurrentStart[started.GetScheduledEventId()] = true
+				continue
+			}
+			delete(missingCurrentStart, started.GetScheduledEventId())
 			rec.SourceEventID = event.GetEventId()
 			rec.SourceEventType = enumLabel(enumspb.EventType_name, int32(event.GetEventType()))
 			rec.Attempt = started.GetAttempt()
@@ -114,6 +133,10 @@ func (o *Observer) CorrelationActivities(ctx context.Context, connectionID, work
 		if completed := event.GetActivityTaskCompletedEventAttributes(); completed != nil {
 			rec, ok := records[completed.GetScheduledEventId()]
 			if !ok {
+				out.Incomplete = true
+				continue
+			}
+			if missingCurrentStart[completed.GetScheduledEventId()] {
 				continue
 			}
 			if event.GetEventType() != enumspb.EVENT_TYPE_ACTIVITY_TASK_COMPLETED || event.GetEventId() <= rec.SourceEventID {
@@ -123,13 +146,25 @@ func (o *Observer) CorrelationActivities(ctx context.Context, connectionID, work
 			if err != nil {
 				return CorrelationPage{}, err
 			}
+			// A missing/custom result must not erase a reported heartbeat.
+			// Conflicting decoded reports make this mixed read unverified; a
+			// fresh Describe/history read can resolve their relative progress.
+			if hint != nil {
+				if rec.Hint != nil && *rec.Hint != *hint {
+					return CorrelationPage{}, correlation.ErrUnverifiedCorrelation
+				}
+				rec.Hint = hint
+			}
 			rec.SourceEventID = event.GetEventId()
 			rec.SourceEventType = enumLabel(enumspb.EventType_name, int32(event.GetEventType()))
-			rec.Hint = hint
 			records[completed.GetScheduledEventId()] = rec
 		}
 	}
 	for _, id := range order {
+		if missingCurrentStart[id] {
+			out.Incomplete = true
+			continue
+		}
 		if len(out.Activities) >= int(o.clampPageSize(pageSize)) {
 			out.Incomplete = true
 			out.NextPageToken = nil

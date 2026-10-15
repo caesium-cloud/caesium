@@ -444,8 +444,15 @@ Run ID and Activity ID. The read-only lookup searches every local job alias
 in the binding's activity allowlist. Exactly one consistent admission can
 become a verified `delegation` link; a hint never narrows that search or
 supplies the source identity. Optional frozen `v1` heartbeat/result hints
-must match every reported value. Custom payloads can use the metadata-only
-path without decoding inputs or reconstructing the start request hash.
+must match every reported value. Unrelated pending activities cannot hide a
+recognized activity's heartbeat or consume its evidence budget. A completion
+without a decoded hint preserves a reported pending hint; conflicting hints
+refuse the mixed read. Current Describe attempt and history evidence must agree:
+an older start cannot lower the attempt or advance its source event. A page
+containing an older start without the current start withholds that activity as
+incomplete; schedule-only evidence remains usable. Custom
+payloads can use the metadata-only path without decoding inputs or reconstructing
+the start request hash.
 
 `external_execution_correlations` stores the external/activity/admission
 identity, local job/queue/run references and bounded source evidence. Queue
