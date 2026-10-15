@@ -223,8 +223,8 @@ cardinality and closed-workflow Query dispatch count through the live surface.
 
 ## Progress (as of 2026-10-14)
 
-W1, W2 and W3 B2 have merged. W3 F1 remains open in PR #633 with verified CI fixes
-and required CODEOWNER review pending. C, D, E, F2–F4 and N are not started. Drafting base:
+W1, W2 and W3 B2 have merged. W3 F1 remains open in PR #633 with review follow-ups verified locally,
+current CI running and required CODEOWNER review pending. C, D, E, F2–F4 and N are not started. Drafting base:
 `a0e862171b898a64b64828b1a5376226e85b106a`. An open PR or a fixture-only pass
 is not completion. The SHAs below are the squash merges read from GitHub.
 
@@ -262,7 +262,7 @@ Resume unfinished waves. Do not archive this plan while later items remain.
   `images-arm64` check succeeded.
 - **Next ready:** Finish F1. D1 still needs F1. C1 still needs D1 and F1.
 
-### W3 — B2 merged; F1 CI fixes verified (review pending)
+### W3 — B2 merged; F1 review follow-ups verified locally
 
 - **W3-α / B2:** [PR #632](https://github.com/caesium-cloud/caesium/pull/632)
   merged `adab46d0981fc6f30da6fb220963d2454354ff23` at 2026-10-15T01:21:33Z.
@@ -272,7 +272,7 @@ Resume unfinished waves. Do not archive this plan while later items remain.
   completed failures retain unknown origin and never imply validator rejection
   or no effect. Queries require a closed schema and exact workflow type.
 - **W3-β / F1:** [PR #633](https://github.com/caesium-cloud/caesium/pull/633),
-  candidate `434ca81278a832401432671bed3f6ff52c77cfd1`, integrates merged B2
+  candidate `3f3751e8dcd28e0e1812492f48e35b9b81b13eb4`, integrates merged B2
   and retains both guide sections. The intact fixture configuration now passes
   the hermetic schema gate that failed on both architectures in
   [run 38569974495](https://github.com/caesium-cloud/caesium/actions/runs/38569974495).
@@ -283,24 +283,36 @@ Resume unfinished waves. Do not archive this plan while later items remain.
   production UI and passes on the fix; the original accessibility scenario and
   regression passed all 20 checks across both themes and five repetitions,
   without retries, against a fresh production server.
-- **Current local gates:** Full containerized lint, race/coverage unit tests and
-  all named tagged hermetic regressions passed. UI lint, all 474 UI unit tests,
-  and the production build/bundle budget passed. Ten fixture orchestration and
-  selector probes passed. Fresh-image fixture qualification on the clean commit
-  passed Fixture (6.29 seconds) and Messages (0.25 seconds), with no skips (6.55
-  seconds total). Both provider reports bind to `434ca812`, source status is
-  empty, and the observed server is 1.32.0. All owned containers were removed.
-  Current-head hosted [run 38666620120](https://github.com/caesium-cloud/caesium/actions/runs/38666620120)
-  completed successfully, including both unit architectures, all 160 Linux
-  browser cases, coverage ratchets and `ci-ok`. The PR is mergeable; required
-  CODEOWNER review remains pending.
+- **Round-2 follow-ups:** `42abbdca` aggregates failures across all five
+  hermetic packages while retaining every required named PASS; Reagents runs
+  before that step. Fixture checks now refuse unsupported rootless, remapped,
+  Podman and unknown engines before builds or creation. All container/image
+  inspection artifacts use an identity/state allowlist and environment names
+  without values. Commands, labels, health logs and error text are omitted.
+  `3f3751e8` keeps the mock probes independent of an exported host Podman setting.
+  Three evidence-based replies were posted and resolved, then all eleven F1
+  threads were re-fetched and verified resolved with no new open threads.
+- **Current local gates:** Containerized lint, full race/coverage unit tests and
+  all 41 named tagged hermetic regressions passed. Fourteen orchestration/selector
+  probes passed with ordinary settings and with host `CAESIUM_PODMAN=true`.
+  All 166 CI guard tests, shellcheck, dash syntax and actionlint passed. Fresh
+  fixture qualification on clean `3f3751e8` passed Fixture (6.49 seconds) and
+  Messages (0.31 seconds), no skips (6.81 seconds total). Both provider reports
+  bind to this head, source status is empty, the observed server is 1.32.0,
+  and all three real inspection artifacts satisfy the new allowlist. Owned
+  containers and lane locks were cleaned after qualification.
+  Current-head [CI run 38744014617](https://github.com/caesium-cloud/caesium/actions/runs/38744014617)
+  is pending; required CODEOWNER review also remains pending. Prior-head
+  [run 38666620120](https://github.com/caesium-cloud/caesium/actions/runs/38666620120)
+  passed both unit architectures, all 160 Linux browser cases, coverage and
+  `ci-ok` at `434ca812`; the UI implementation is unchanged by these follow-ups.
 - **Earlier provider/regression evidence:** The B2/F1 Go and fixture inputs
   match clean combined candidate `3553f37f15c5cb1922a9d7e8f847da29b63a13c8`.
   Its real fixture passed Fixture and Messages without skips (6.64 seconds),
   with observed Server 1.32.0, raw effects and activated reply loss. Default
   integration passed in 867.5 seconds and normal agent auth passed 45 scenarios
   in 35.2 seconds. Eleven review replies/resolutions were verified at feature
-  heads `190353f3`/`8e9a82fc`; this predates the current F1 CI-fix head.
+  heads `190353f3`/`8e9a82fc`; the current F1 follow-up dispositions are above.
 - **Remaining:** F1 stays unchecked until its normal merge after current CI and
   required CODEOWNER review. D1/D2/C1/C2 and later items are not dispatched.
   Local arm64 evidence does not qualify Cloud or other versions. Plan sync
