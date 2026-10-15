@@ -223,8 +223,8 @@ cardinality and closed-workflow Query dispatch count through the live surface.
 
 ## Progress (as of 2026-10-14)
 
-W1, W2 and W3 B2 have merged. W3 F1 remains open in PR #633 with CI fixes
-under verification. C, D, E, F2–F4 and N are not started. Drafting base:
+W1, W2 and W3 B2 have merged. W3 F1 remains open in PR #633 with verified CI fixes
+and required CODEOWNER review pending. C, D, E, F2–F4 and N are not started. Drafting base:
 `a0e862171b898a64b64828b1a5376226e85b106a`. An open PR or a fixture-only pass
 is not completion. The SHAs below are the squash merges read from GitHub.
 
@@ -262,7 +262,7 @@ Resume unfinished waves. Do not archive this plan while later items remain.
   `images-arm64` check succeeded.
 - **Next ready:** Finish F1. D1 still needs F1. C1 still needs D1 and F1.
 
-### W3 — B2 merged; F1 CI fixes under verification
+### W3 — B2 merged; F1 CI fixes verified (review pending)
 
 - **W3-α / B2:** [PR #632](https://github.com/caesium-cloud/caesium/pull/632)
   merged `adab46d0981fc6f30da6fb220963d2454354ff23` at 2026-10-15T01:21:33Z.
@@ -291,8 +291,9 @@ Resume unfinished waves. Do not archive this plan while later items remain.
   seconds total). Both provider reports bind to `434ca812`, source status is
   empty, and the observed server is 1.32.0. All owned containers were removed.
   Current-head hosted [run 38666620120](https://github.com/caesium-cloud/caesium/actions/runs/38666620120)
-  is running. The PR is mergeable; current CI and required CODEOWNER review
-  remain pending.
+  completed successfully, including both unit architectures, all 160 Linux
+  browser cases, coverage ratchets and `ci-ok`. The PR is mergeable; required
+  CODEOWNER review remains pending.
 - **Earlier provider/regression evidence:** The B2/F1 Go and fixture inputs
   match clean combined candidate `3553f37f15c5cb1922a9d7e8f847da29b63a13c8`.
   Its real fixture passed Fixture and Messages without skips (6.64 seconds),
