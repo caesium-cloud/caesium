@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/caesium-cloud/caesium/internal/connector"
+	"github.com/caesium-cloud/caesium/internal/connector/correlation"
 	"github.com/stretchr/testify/require"
 	commonpb "go.temporal.io/api/common/v1"
 	enumspb "go.temporal.io/api/enums/v1"
@@ -63,7 +64,7 @@ func TestCorrelationActivitiesRejectsUnpinnedOrMismatchedSource(t *testing.T) {
 			observer, err := NewObserver(fake, "default", "", 0, 0, 0)
 			require.NoError(t, err)
 			_, err = observer.CorrelationActivities(t.Context(), "primary", "workflow", runID, correlationBindingFixture(), nil, 100)
-			require.ErrorIs(t, err, connector.ErrUnverifiedCorrelation)
+			require.ErrorIs(t, err, correlation.ErrUnverifiedCorrelation)
 			require.Empty(t, fake.histories)
 		})
 	}
@@ -122,7 +123,7 @@ func TestCorrelationActivitiesExtractsOnlyFrozenHintAndBoundsEvidence(t *testing
 func TestCorrelationHintRefusesMalformedOrAmbiguousJSON(t *testing.T) {
 	for _, raw := range []string{`{"version":"v1"}`, `{"version":"v1","job_id":"j","idempotency_key":"k","outcome":"created","run_id":null}`, `{"version":"v1","job_id":"wrong","job_id":"j","idempotency_key":"k","outcome":"created"}`, `{"version":"v1","job_id":"j","idempotency_key":"k","outcome":"created","secret":"x"}`, `{"version":"v1","job_id":"j","idempotency_key":"k","outcome":"created"} {}`} {
 		_, err := correlationHint(&commonpb.Payloads{Payloads: []*commonpb.Payload{{Metadata: map[string][]byte{"encoding": []byte("json/plain")}, Data: []byte(raw)}}})
-		require.ErrorIs(t, err, connector.ErrUnverifiedCorrelation)
+		require.ErrorIs(t, err, correlation.ErrUnverifiedCorrelation)
 	}
 }
 

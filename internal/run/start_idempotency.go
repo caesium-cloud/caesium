@@ -11,9 +11,9 @@ import (
 	"slices"
 	"strings"
 	"time"
-	"unicode"
 
 	"github.com/caesium-cloud/caesium/internal/models"
+	"github.com/caesium-cloud/caesium/internal/runadmission"
 	"github.com/google/uuid"
 	"gorm.io/gorm"
 )
@@ -33,12 +33,12 @@ import (
 // records nothing, so a retry with the same key re-attempts admission.
 
 // MaxIdempotencyKeyLength bounds a run-start idempotency key.
-const MaxIdempotencyKeyLength = 255
+const MaxIdempotencyKeyLength = runadmission.MaxIdempotencyKeyLength
 
 var (
 	// ErrInvalidIdempotencyKey rejects a key that is too long or carries
 	// control characters.
-	ErrInvalidIdempotencyKey = errors.New("run: invalid idempotency key")
+	ErrInvalidIdempotencyKey = runadmission.ErrInvalidIdempotencyKey
 	// ErrIdempotencyKeyReused is returned when a key already recorded for this
 	// job is presented with different params or priority.
 	ErrIdempotencyKeyReused = errors.New("run: idempotency key was already used for a different request")
@@ -48,21 +48,21 @@ var (
 )
 
 // StartOutcome is how an accepted run start was admitted.
-type StartOutcome string
+type StartOutcome = runadmission.StartOutcome
 
 const (
 	// StartOutcomeCreated: a run was created and is executing.
-	StartOutcomeCreated StartOutcome = "created"
+	StartOutcomeCreated = runadmission.StartOutcomeCreated
 	// StartOutcomeQueued: the concurrency policy parked the start in
 	// run_queue; the dequeuer creates the run when a slot frees.
-	StartOutcomeQueued StartOutcome = "queued"
+	StartOutcomeQueued = runadmission.StartOutcomeQueued
 	// StartOutcomeSkipped: nothing will execute — the concurrency policy
 	// dropped the start, or a consumed dataset is held.
-	StartOutcomeSkipped StartOutcome = "skipped"
+	StartOutcomeSkipped = runadmission.StartOutcomeSkipped
 	// StartOutcomeDropped: a queued start whose queue entry was removed
 	// (cancelled by an operator or evicted by queue overflow) before it was
 	// promoted. Only a replay of an idempotent start can observe it.
-	StartOutcomeDropped StartOutcome = "dropped"
+	StartOutcomeDropped = runadmission.StartOutcomeDropped
 )
 
 // Skip reasons reported on a skipped StartResult.
@@ -91,16 +91,7 @@ type StartResult struct {
 // ValidateIdempotencyKey trims key and reports whether it is usable. An empty
 // key is valid and means "not idempotent".
 func ValidateIdempotencyKey(key string) (string, error) {
-	key = strings.TrimSpace(key)
-	if len(key) > MaxIdempotencyKeyLength {
-		return "", fmt.Errorf("%w: longer than %d bytes", ErrInvalidIdempotencyKey, MaxIdempotencyKeyLength)
-	}
-	for _, r := range key {
-		if unicode.IsControl(r) {
-			return "", fmt.Errorf("%w: contains a control character", ErrInvalidIdempotencyKey)
-		}
-	}
-	return key, nil
+	return runadmission.ValidateIdempotencyKey(key)
 }
 
 // WithStartIdempotencyKey makes the start idempotent under key, scoped to the
@@ -344,15 +335,7 @@ func (s *Store) replayIdempotentStart(conn *gorm.DB, existing *models.RunStartId
 
 // StartAdmission is a read-only projection of the accepted start protocol. It
 // deliberately excludes request hashes, params, and task/run payloads.
-type StartAdmission struct {
-	ID             uuid.UUID
-	JobID          uuid.UUID
-	IdempotencyKey string
-	Outcome        StartOutcome
-	Reason         string
-	QueueID        *uuid.UUID
-	RunID          *uuid.UUID
-}
+type StartAdmission = runadmission.StartAdmission
 
 // LookupStartAdmission reads job/key without reconstructing the HTTP request or
 // replaying admission. It never starts work or writes a dropped outcome. Queue

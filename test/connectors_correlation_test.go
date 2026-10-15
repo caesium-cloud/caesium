@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/caesium-cloud/caesium/internal/connector"
+	"github.com/caesium-cloud/caesium/internal/connector/correlation"
 	ctemporal "github.com/caesium-cloud/caesium/internal/connector/temporal"
 	"go.temporal.io/api/workflowservice/v1"
 )
@@ -157,7 +158,7 @@ func (s *IntegrationTestSuite) TestConnectorsCorrelation() {
 	wrongBinding := binding
 	wrongBinding.Name = "unrelated"
 	_, err = observer.CorrelationActivities(s.T().Context(), "fixture", ref.WorkflowID, ref.RunID, wrongBinding, nil, 100)
-	s.Require().ErrorIs(err, connector.ErrUnverifiedCorrelation)
+	s.Require().ErrorIs(err, correlation.ErrUnverifiedCorrelation)
 	unrelated := binding
 	unrelated.ActivityAllowlist = []connector.ActivityJob{{ActivityType: "unrelated", Jobs: []string{alias}}}
 	unrelatedPage, err := observer.CorrelationActivities(s.T().Context(), "fixture", ref.WorkflowID, ref.RunID, unrelated, nil, 100)

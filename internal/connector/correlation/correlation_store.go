@@ -1,20 +1,32 @@
-package connector
+package correlation
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"time"
 
+	"github.com/caesium-cloud/caesium/internal/connector"
 	"github.com/caesium-cloud/caesium/internal/models"
-	"github.com/caesium-cloud/caesium/internal/run"
+	"github.com/caesium-cloud/caesium/internal/runadmission"
 	"github.com/google/uuid"
+	"gorm.io/datatypes"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 )
 
-func (s *Store) recordCorrelation(ctx context.Context, version string, source ActivityEvidence, admission run.StartAdmission, at time.Time, bounds ...WriteBounds) (models.ExternalExecutionCorrelation, error) {
-	limits, err := resolveWriteBounds(bounds...)
+// Store owns the catalog connection injected by the composition root. It stores
+// D1's verified local-admission relations; shipped external snapshots and other
+// catalog methods remain on connector.Store.
+type Store struct{ db *gorm.DB }
+
+func NewStore(db *gorm.DB) *Store { return &Store{db: db} }
+
+func (s *Store) recordCorrelation(ctx context.Context, version string, source ActivityEvidence, admission runadmission.StartAdmission, at time.Time, bounds ...connector.WriteBounds) (models.ExternalExecutionCorrelation, error) {
+	limit, err := evidenceLimit(bounds...)
 	if err != nil {
 		return models.ExternalExecutionCorrelation{}, err
 	}
@@ -22,14 +34,14 @@ func (s *Store) recordCorrelation(ctx context.Context, version string, source Ac
 	if err != nil {
 		return models.ExternalExecutionCorrelation{}, err
 	}
-	if err := boundJSON(evidence, limits.MaxMetadataBytes); err != nil {
+	if err := boundJSON(evidence, limit); err != nil {
 		return models.ExternalExecutionCorrelation{}, err
 	}
 	row := models.ExternalExecutionCorrelation{ID: uuid.New(), OpaqueID: source.Execution.OpaqueID(), ConnectionID: source.Execution.ConnectionID,
-		ActivityID: source.ActivityID, ActivityType: source.ActivityType, RelationType: RelationDelegation, BindingVersion: version,
+		ActivityID: source.ActivityID, ActivityType: source.ActivityType, RelationType: connector.RelationDelegation, BindingVersion: version,
 		AdmissionID: admission.ID, JobID: admission.JobID, IdempotencyKey: admission.IdempotencyKey, Outcome: string(admission.Outcome),
 		QueueID: admission.QueueID, RunID: admission.RunID, SourceEventID: source.SourceEventID,
-		Evidence: jsonValue(evidence), EvidenceDigest: digestBytes(evidence), VerifiedAt: at, CreatedAt: at, UpdatedAt: at}
+		Evidence: datatypes.JSON(evidence), EvidenceDigest: digestBytes(evidence), VerifiedAt: at, CreatedAt: at, UpdatedAt: at}
 	err = s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		if err := identityExists(tx, row.OpaqueID); err != nil {
 			return err
@@ -54,7 +66,7 @@ func (s *Store) recordCorrelation(ctx context.Context, version string, source Ac
 			return ErrUnverifiedCorrelation
 		}
 		if stored.SourceEventID > row.SourceEventID {
-			return ErrStaleGeneration
+			return connector.ErrStaleGeneration
 		}
 		var previous ActivityEvidence
 		if json.Unmarshal(stored.Evidence, &previous) != nil {
@@ -63,10 +75,10 @@ func (s *Store) recordCorrelation(ctx context.Context, version string, source Ac
 		// Describe and history can complete out of order. A delayed read must
 		// not erase a newer reported retry attempt, even at the same event ID.
 		if source.Attempt < previous.Attempt {
-			return ErrStaleGeneration
+			return connector.ErrStaleGeneration
 		}
 
-		if stored.Outcome != row.Outcome && stored.Outcome != string(run.StartOutcomeQueued) {
+		if stored.Outcome != row.Outcome && stored.Outcome != string(runadmission.StartOutcomeQueued) {
 			return ErrUnverifiedCorrelation
 		}
 		unchanged := stored.EvidenceDigest == row.EvidenceDigest && stored.Outcome == row.Outcome && sameUUID(stored.RunID, row.RunID) && sameUUID(stored.QueueID, row.QueueID) && stored.BindingVersion == row.BindingVersion
@@ -78,7 +90,7 @@ func (s *Store) recordCorrelation(ctx context.Context, version string, source Ac
 				return result.Error
 			}
 			if result.RowsAffected != 1 {
-				return ErrSnapshotConflict
+				return connector.ErrSnapshotConflict
 			}
 			row.ID = stored.ID
 			row.CreatedAt = stored.CreatedAt
@@ -101,15 +113,15 @@ func sameUUID(a, b *uuid.UUID) bool {
 
 // Correlations returns only verified typed local links for one inspected
 // execution. It is bounded and creates no identity or snapshot.
-func (s *Store) Correlations(ctx context.Context, ref ExecutionReference) ([]models.ExternalExecutionCorrelation, error) {
-	validated, err := NewExecutionReference(ref.ConnectionID, ref.Coordinates)
+func (s *Store) Correlations(ctx context.Context, ref connector.ExecutionReference) ([]models.ExternalExecutionCorrelation, error) {
+	validated, err := connector.NewExecutionReference(ref.ConnectionID, ref.Coordinates)
 	if err != nil {
 		return nil, err
 	}
 	var rows []models.ExternalExecutionCorrelation
-	err = s.db.WithContext(ctx).Where("opaque_id = ?", validated.OpaqueID()).Order("activity_id").Limit(MaxPageEntries + 1).Find(&rows).Error
-	if err == nil && len(rows) > MaxPageEntries {
-		return nil, ErrPayloadTooLarge
+	err = s.db.WithContext(ctx).Where("opaque_id = ?", validated.OpaqueID()).Order("activity_id").Limit(connector.MaxPageEntries + 1).Find(&rows).Error
+	if err == nil && len(rows) > connector.MaxPageEntries {
+		return nil, connector.ErrPayloadTooLarge
 	}
 	return rows, err
 }
@@ -122,9 +134,55 @@ func (s *Store) RunCorrelations(ctx context.Context, jobID, runID uuid.UUID) ([]
 		return nil, errors.New("connector: job and run ids are required")
 	}
 	var rows []models.ExternalExecutionCorrelation
-	err := s.db.WithContext(ctx).Where("job_id = ? AND run_id = ?", jobID, runID).Order("opaque_id, activity_id").Limit(MaxPageEntries + 1).Find(&rows).Error
-	if err == nil && len(rows) > MaxPageEntries {
-		return nil, ErrPayloadTooLarge
+	err := s.db.WithContext(ctx).Where("job_id = ? AND run_id = ?", jobID, runID).Order("opaque_id, activity_id").Limit(connector.MaxPageEntries + 1).Find(&rows).Error
+	if err == nil && len(rows) > connector.MaxPageEntries {
+		return nil, connector.ErrPayloadTooLarge
 	}
 	return rows, err
+}
+
+// These small repository helpers keep D1 independent of core Store internals.
+func evidenceLimit(bounds ...connector.WriteBounds) (int, error) {
+	limit := connector.MaxPageMetadataBytes
+	if len(bounds) == 0 {
+		return limit, nil
+	}
+	in := bounds[0]
+	if in.MaxMetadataBytes != 0 {
+		if in.MaxMetadataBytes < 1 || in.MaxMetadataBytes > connector.MaxPageMetadataBytes {
+			return 0, connector.ErrRetentionLimit
+		}
+		limit = in.MaxMetadataBytes
+	}
+	if in.MaxUnreferencedSnapshots < 0 || in.MaxUnreferencedSnapshots > connector.MaxUnreferencedSnapshots {
+		return 0, connector.ErrRetentionLimit
+	}
+	return limit, nil
+}
+func boundJSON(raw []byte, limit int) error {
+	if len(raw) > limit {
+		return connector.ErrPayloadTooLarge
+	}
+	if len(raw) > 0 && !json.Valid(raw) {
+		return connector.ErrInvalidPayload
+	}
+	return nil
+}
+func digestBytes(raw []byte) string {
+	hash := sha256.New()
+	var prefix [8]byte
+	binary.BigEndian.PutUint64(prefix[:], uint64(len(raw)))
+	_, _ = hash.Write(prefix[:])
+	_, _ = hash.Write(raw)
+	return hex.EncodeToString(hash.Sum(nil))
+}
+func identityExists(tx *gorm.DB, opaque string) error {
+	var count int64
+	if err := tx.Model(&models.ExternalExecution{}).Where("opaque_id = ?", opaque).Count(&count).Error; err != nil {
+		return err
+	}
+	if count == 0 {
+		return connector.ErrNotFound
+	}
+	return nil
 }

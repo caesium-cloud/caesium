@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/caesium-cloud/caesium/internal/connector"
+	"github.com/caesium-cloud/caesium/internal/connector/correlation"
 	commonpb "go.temporal.io/api/common/v1"
 	enumspb "go.temporal.io/api/enums/v1"
 	"go.temporal.io/api/workflowservice/v1"
@@ -19,9 +20,9 @@ import (
 // decoded arbitrary payload. Missing scheduled events on split pages leave the
 // activity unavailable; callers must not infer its identity from a result hint.
 type CorrelationPage struct {
-	Activities    []connector.ActivityEvidence `json:"activities"`
-	NextPageToken []byte                       `json:"next_page_token,omitempty"`
-	Incomplete    bool                         `json:"incomplete,omitempty"`
+	Activities    []correlation.ActivityEvidence `json:"activities"`
+	NextPageToken []byte                         `json:"next_page_token,omitempty"`
+	Incomplete    bool                           `json:"incomplete,omitempty"`
 }
 
 // CorrelationActivities pins both workflow and run before reading evidence.
@@ -30,7 +31,7 @@ type CorrelationPage struct {
 // payload encodings remain metadata-only and derive the same admission key.
 func (o *Observer) CorrelationActivities(ctx context.Context, connectionID, workflowID, runID string, binding connector.Binding, pageToken []byte, pageSize int) (CorrelationPage, error) {
 	if strings.TrimSpace(workflowID) == "" || strings.TrimSpace(runID) == "" || binding.Name == "" || binding.Version == "" {
-		return CorrelationPage{}, connector.ErrUnverifiedCorrelation
+		return CorrelationPage{}, correlation.ErrUnverifiedCorrelation
 	}
 	ctx, cancel := o.callContext(ctx)
 	defer cancel()
@@ -40,7 +41,7 @@ func (o *Observer) CorrelationActivities(ctx context.Context, connectionID, work
 	}
 	info := desc.GetWorkflowExecutionInfo()
 	if info.GetExecution().GetWorkflowId() != workflowID || info.GetExecution().GetRunId() != runID || info.GetType().GetName() != binding.Name {
-		return CorrelationPage{}, connector.ErrUnverifiedCorrelation
+		return CorrelationPage{}, correlation.ErrUnverifiedCorrelation
 	}
 	ref, err := connector.NewExecutionReference(connectionID, map[string]string{"workflow_id": workflowID, "run_id": runID})
 	if err != nil {
@@ -69,7 +70,7 @@ func (o *Observer) CorrelationActivities(ctx context.Context, connectionID, work
 		pending[p.GetActivityId()] = p.GetHeartbeatDetails()
 		attempts[p.GetActivityId()] = p.GetAttempt()
 	}
-	records := map[int64]connector.ActivityEvidence{}
+	records := map[int64]correlation.ActivityEvidence{}
 	var order []int64
 	allowed := map[string]bool{}
 	for _, a := range binding.ActivityAllowlist {
@@ -93,7 +94,7 @@ func (o *Observer) CorrelationActivities(ctx context.Context, connectionID, work
 		if attempt < 1 {
 			attempt = 1
 		}
-		records[event.GetEventId()] = connector.ActivityEvidence{Execution: ref, WorkflowType: binding.Name, ActivityID: id, ActivityType: kind, IdempotencyKey: runID + "/" + id, SourceEventID: event.GetEventId(), SourceEventType: enumLabel(enumspb.EventType_name, int32(event.GetEventType())), ScheduledEventID: event.GetEventId(), Attempt: attempt, Hint: hint}
+		records[event.GetEventId()] = correlation.ActivityEvidence{Execution: ref, WorkflowType: binding.Name, ActivityID: id, ActivityType: kind, IdempotencyKey: runID + "/" + id, SourceEventID: event.GetEventId(), SourceEventType: enumLabel(enumspb.EventType_name, int32(event.GetEventType())), ScheduledEventID: event.GetEventId(), Attempt: attempt, Hint: hint}
 		order = append(order, event.GetEventId())
 	}
 	for _, event := range events {
@@ -103,7 +104,7 @@ func (o *Observer) CorrelationActivities(ctx context.Context, connectionID, work
 				continue
 			}
 			if event.GetEventType() != enumspb.EVENT_TYPE_ACTIVITY_TASK_STARTED || event.GetEventId() <= rec.SourceEventID || started.GetAttempt() < 1 {
-				return CorrelationPage{}, connector.ErrUnverifiedCorrelation
+				return CorrelationPage{}, correlation.ErrUnverifiedCorrelation
 			}
 			rec.SourceEventID = event.GetEventId()
 			rec.SourceEventType = enumLabel(enumspb.EventType_name, int32(event.GetEventType()))
@@ -116,7 +117,7 @@ func (o *Observer) CorrelationActivities(ctx context.Context, connectionID, work
 				continue
 			}
 			if event.GetEventType() != enumspb.EVENT_TYPE_ACTIVITY_TASK_COMPLETED || event.GetEventId() <= rec.SourceEventID {
-				return CorrelationPage{}, connector.ErrUnverifiedCorrelation
+				return CorrelationPage{}, correlation.ErrUnverifiedCorrelation
 			}
 			hint, err := correlationHint(completed.GetResult())
 			if err != nil {
@@ -181,7 +182,7 @@ func correlationHint(payloads *commonpb.Payloads) (*connector.CorrelationEnvelop
 		}
 		var fields map[string]json.RawMessage
 		if json.Unmarshal(data, &fields) != nil {
-			return nil, connector.ErrUnverifiedCorrelation
+			return nil, correlation.ErrUnverifiedCorrelation
 		}
 		// Ordinary declared business results are not correlation hints.
 		recognized := false
@@ -194,38 +195,38 @@ func correlationHint(payloads *commonpb.Payloads) (*connector.CorrelationEnvelop
 			continue
 		}
 		if hint != nil || len(payloads.GetPayloads()) != 1 {
-			return nil, connector.ErrUnverifiedCorrelation
+			return nil, correlation.ErrUnverifiedCorrelation
 		}
 		// The frozen envelope is a closed object of strings. Reject duplicate
 		// keys and null optional values instead of silently discarding reports.
 		fieldsDecoder := json.NewDecoder(bytes.NewReader(data))
 		if _, err := fieldsDecoder.Token(); err != nil {
-			return nil, connector.ErrUnverifiedCorrelation
+			return nil, correlation.ErrUnverifiedCorrelation
 		}
 		seen := map[string]bool{}
 		for fieldsDecoder.More() {
 			token, err := fieldsDecoder.Token()
 			if err != nil {
-				return nil, connector.ErrUnverifiedCorrelation
+				return nil, correlation.ErrUnverifiedCorrelation
 			}
 			field, ok := token.(string)
 			if !ok || seen[field] {
-				return nil, connector.ErrUnverifiedCorrelation
+				return nil, correlation.ErrUnverifiedCorrelation
 			}
 			seen[field] = true
 			var value json.RawMessage
 			if fieldsDecoder.Decode(&value) != nil || len(value) == 0 || value[0] != '"' {
-				return nil, connector.ErrUnverifiedCorrelation
+				return nil, correlation.ErrUnverifiedCorrelation
 			}
 		}
 		value := connector.CorrelationEnvelope{}
 		decoder := json.NewDecoder(bytes.NewReader(data))
 		decoder.DisallowUnknownFields()
 		if err := decoder.Decode(&value); err != nil {
-			return nil, fmt.Errorf("%w: malformed activity hint", connector.ErrUnverifiedCorrelation)
+			return nil, fmt.Errorf("%w: malformed activity hint", correlation.ErrUnverifiedCorrelation)
 		}
 		if decoder.Decode(new(any)) != io.EOF || value.Validate() != nil {
-			return nil, connector.ErrUnverifiedCorrelation
+			return nil, correlation.ErrUnverifiedCorrelation
 		}
 		hint = &value
 	}

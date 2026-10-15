@@ -1,4 +1,4 @@
-package connector
+package correlation
 
 import (
 	"context"
@@ -6,13 +6,16 @@ import (
 	"path/filepath"
 	"sync"
 	"testing"
+	"time"
 
+	"github.com/caesium-cloud/caesium/internal/connector"
 	"github.com/caesium-cloud/caesium/internal/jobdef/testutil"
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/caesium-cloud/caesium/internal/run"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 	"gorm.io/datatypes"
+	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 )
 
@@ -30,13 +33,14 @@ func correlationJob(t *testing.T, db *gorm.DB, alias string, queue bool) models.
 }
 func correlationSource(t *testing.T, catalog *Store) ActivityEvidence {
 	t.Helper()
-	ref, err := NewExecutionReference("primary", map[string]string{"process": "p-1", "attempt": "r-1"})
+	ref, err := connector.NewExecutionReference("primary", map[string]string{"process": "p-1", "attempt": "r-1"})
 	require.NoError(t, err)
-	requireDirect(t, catalog, ref)
+	_, err = connector.NewStore(catalog.db).RecordSnapshot(t.Context(), connector.Observation{Execution: ref, Generation: 1, SourceEventID: "initial", NativeStatus: "running", DisplayStatus: connector.DisplayRunning, Availability: connector.AvailabilityAvailable, Completeness: connector.CompletenessComplete, SourceKind: connector.SourceDirect, ObservedAt: time.Now().UTC()})
+	require.NoError(t, err)
 	return ActivityEvidence{Execution: ref, WorkflowType: "publication", ActivityID: "a-1", ActivityType: "caesium.start", IdempotencyKey: "r-1/a-1", SourceEventID: 5, SourceEventType: "ACTIVITY_STARTED", ScheduledEventID: 4, Attempt: 1}
 }
-func correlationBinding(aliases ...string) Binding {
-	return Binding{Name: "publication", Version: "1", ActivityAllowlist: []ActivityJob{{ActivityType: "caesium.start", Jobs: aliases}}}
+func correlationBinding(aliases ...string) connector.Binding {
+	return connector.Binding{Name: "publication", Version: "1", ActivityAllowlist: []connector.ActivityJob{{ActivityType: "caesium.start", Jobs: aliases}}}
 }
 
 func TestCorrelationVerifiesRealAdmissionAndCoalescesConcurrentRetries(t *testing.T) {
@@ -49,7 +53,7 @@ func TestCorrelationVerifiesRealAdmissionAndCoalescesConcurrentRetries(t *testin
 	started, err := runs.StartWithResult(t.Context(), job.ID, nil, run.WithStartParams(map[string]string{"not-reconstructed": "secret"}), run.WithStartIdempotencyKey(source.IdempotencyKey))
 	require.NoError(t, err)
 	verifier := NewCorrelator(runs, catalog)
-	source.Hint = &CorrelationEnvelope{Version: "v1", JobID: job.ID.String(), IdempotencyKey: source.IdempotencyKey, Outcome: "created", RunID: started.RunID.String()}
+	source.Hint = &connector.CorrelationEnvelope{Version: "v1", JobID: job.ID.String(), IdempotencyKey: source.IdempotencyKey, Outcome: "created", RunID: started.RunID.String()}
 	const readers = 8
 	results := make(chan models.ExternalExecutionCorrelation, readers)
 	errs := make(chan error, readers)
@@ -104,7 +108,7 @@ func TestCorrelationPreservesQueueIdentityAcrossPromotionAndReopen(t *testing.T)
 	queued, err := runs.StartWithResult(t.Context(), job.ID, nil, run.WithStartIdempotencyKey(source.IdempotencyKey))
 	require.NoError(t, err)
 	require.Equal(t, run.StartOutcomeQueued, queued.Outcome)
-	source.Hint = &CorrelationEnvelope{Version: "v1", JobID: job.ID.String(), IdempotencyKey: source.IdempotencyKey, Outcome: "queued", QueueID: queued.QueueID.String()}
+	source.Hint = &connector.CorrelationEnvelope{Version: "v1", JobID: job.ID.String(), IdempotencyKey: source.IdempotencyKey, Outcome: "queued", QueueID: queued.QueueID.String()}
 	before, err := NewCorrelator(runs, catalog).Verify(t.Context(), correlationBinding(job.Alias), source)
 	require.NoError(t, err)
 	require.NoError(t, db.Model(&models.JobRun{}).Where("id = ?", *holder.RunID).Update("status", "succeeded").Error)
@@ -161,7 +165,7 @@ func TestCorrelationRefusesUntrustedHintsAndAmbiguousAdmissions(t *testing.T) {
 				started, err = runs.StartWithResult(t.Context(), job.ID, nil, run.WithStartIdempotencyKey(key))
 				require.NoError(t, err)
 			}
-			source.Hint = &CorrelationEnvelope{Version: "v1", JobID: job.ID.String(), IdempotencyKey: source.IdempotencyKey, Outcome: "created"}
+			source.Hint = &connector.CorrelationEnvelope{Version: "v1", JobID: job.ID.String(), IdempotencyKey: source.IdempotencyKey, Outcome: "created"}
 			if started.RunID != nil {
 				source.Hint.RunID = started.RunID.String()
 			}
@@ -218,7 +222,7 @@ func TestCorrelationOldEvidenceCannotRegressOrRepointLink(t *testing.T) {
 	require.NoError(t, err)
 	source.SourceEventID--
 	_, err = verifier.Verify(t.Context(), correlationBinding(job.Alias), source)
-	require.ErrorIs(t, err, ErrStaleGeneration)
+	require.ErrorIs(t, err, connector.ErrStaleGeneration)
 	source.SourceEventID += 2
 	source.Attempt = 2
 	next, err := verifier.Verify(t.Context(), correlationBinding(job.Alias), source)
@@ -227,7 +231,7 @@ func TestCorrelationOldEvidenceCannotRegressOrRepointLink(t *testing.T) {
 	require.True(t, !next.VerifiedAt.Before(first.VerifiedAt))
 	source.Attempt = 1
 	_, err = verifier.Verify(t.Context(), correlationBinding(job.Alias), source)
-	require.ErrorIs(t, err, ErrStaleGeneration)
+	require.ErrorIs(t, err, connector.ErrStaleGeneration)
 	links, err := catalog.Correlations(t.Context(), source.Execution)
 	require.NoError(t, err)
 	require.Len(t, links, 1)
@@ -247,7 +251,32 @@ func TestCorrelationHonorsConfiguredEvidenceBudget(t *testing.T) {
 	source := correlationSource(t, catalog)
 	_, err := runs.StartWithResult(t.Context(), job.ID, nil, run.WithStartIdempotencyKey(source.IdempotencyKey))
 	require.NoError(t, err)
-	_, err = NewCorrelator(runs, catalog).Verify(t.Context(), correlationBinding(job.Alias), source, WriteBounds{MaxMetadataBytes: 100})
-	require.ErrorIs(t, err, ErrPayloadTooLarge)
+	_, err = NewCorrelator(runs, catalog).Verify(t.Context(), correlationBinding(job.Alias), source, connector.WriteBounds{MaxMetadataBytes: 100})
+	require.ErrorIs(t, err, connector.ErrPayloadTooLarge)
 	require.Zero(t, countModel(t, db, &models.ExternalExecutionCorrelation{}))
+}
+
+func countModel(t *testing.T, db *gorm.DB, model any) int64 {
+	t.Helper()
+	var count int64
+	require.NoError(t, db.Model(model).Count(&count).Error)
+	return count
+}
+func openSQLiteFile(t *testing.T, path string) *gorm.DB {
+	t.Helper()
+	db, err := gorm.Open(sqlite.Open("file:"+path+"?_journal_mode=WAL&_busy_timeout=5000&_txlock=immediate"), &gorm.Config{})
+	require.NoError(t, err)
+	sqlDB, err := db.DB()
+	require.NoError(t, err)
+	sqlDB.SetMaxOpenConns(8)
+	sqlDB.SetMaxIdleConns(8)
+	t.Cleanup(func() { _ = sqlDB.Close() })
+	return db
+}
+func closeSQLite(t *testing.T, db *gorm.DB) {
+	t.Helper()
+	require.NoError(t, db.Exec("PRAGMA wal_checkpoint(TRUNCATE)").Error)
+	sqlDB, err := db.DB()
+	require.NoError(t, err)
+	require.NoError(t, sqlDB.Close())
 }
