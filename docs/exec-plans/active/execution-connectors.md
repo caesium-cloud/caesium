@@ -335,7 +335,7 @@ Resume unfinished waves. Do not archive this plan while later items remain.
 - **Base:** `b796b5672eab30134876f403f257af9e7a1f76da`; W3 implementation
   and plan synchronization are merged.
 - **W4-α / D1:** Draft [PR #636](https://github.com/caesium-cloud/caesium/pull/636),
-  head `9cff274473ff970356e9842e1642930a1441724a`, implements trusted
+  head `4997efb535479dd0e09ae025620cc4578434eb21`, implements trusted
   activity/admission correlation and durable local links. Containerized lint,
   full race/coverage unit tests and all required tagged hermetic checks passed
   on the committed contents. Independent source review has no open findings.
@@ -344,16 +344,24 @@ Resume unfinished waves. Do not archive this plan while later items remain.
   Messages and Correlation scenarios without skips (15.72 seconds), including
   queued promotion, retry, worker restart and opaque evidence. Source/image
   provenance identifies this clean head and Server 1.32.0, SDK 1.49.0 and CLI
-  1.9.1. Default integration is running. Current-head hosted `ui-e2e` failed
-  and is under investigation; coverage and one Helm lane remain pending.
-- **W4-β / D2:** Implementing immutable action receipts, guarded dispatch,
-  lookup-only recovery and explicit original-principal resubmission. The
-  pre-refinement candidate passed lint, full race/coverage unit and tagged
-  checks. Review found that an unrelated global configuration epoch change
-  could strand an uncertain receipt. The compatibility fix and regression source
-  passed independent review: it preserves the origin epoch and immutable
-  destination while fencing the current node. Final candidate execution checks
-  and PR publication remain pending behind the serialized Docker lane.
+  1.9.1. Default integration passed (868.869 seconds). These gates ran on
+  `9cff2744`; all sixteen feature files are byte-identical at the current head.
+  A required hosted browser test exposed a navigation timing race before
+  unmount. Its reviewed test-only repair now holds the response and proves
+  exact-request cancellation through real SPA navigation; product UI, strict
+  flaky-test policy and limits are unchanged. Local UI checks and current-head
+  [CI run 38785888503](https://github.com/caesium-cloud/caesium/actions/runs/38785888503)
+  are running. The superseded run's coverage collection did not complete.
+- **W4-β / D2:** Draft [PR #637](https://github.com/caesium-cloud/caesium/pull/637),
+  head `bbb663094f730477d82197ec6629f76a6e86b7ca`, implements immutable action
+  receipts, guarded dispatch, lookup-only recovery and explicit original-principal
+  resubmission. Independent source review is clear. Final containerized lint,
+  full race/coverage unit tests, all required tagged checks and focused static/
+  race/dependency checks passed on these committed contents. The reviewed epoch
+  refinement preserves origin provenance and immutable destination while fencing
+  the current node; actual cross-epoch reopen/compatibility regressions pass.
+  Real provider, default integration and normal agent-auth regression remain
+  pending behind the serialized Docker lane, along with current-head hosted CI.
 - **Verification boundary:** Real Temporal component scenarios supplement
   containerized baseline checks. Running-server connector HTTP, bidirectional
   public links and process-restart proof remain C1/C2; those routes do not yet
@@ -525,7 +533,9 @@ auth chokepoints. Every endpoint includes a live HTTP integration scenario.
   new `test/connectors_correlation_test.go`,
   `scripts/connectors-fixture.sh`, `scripts/test_connectors_fixture.py`
   (strict named component selection), `docs/connectors.md` (storage boundary),
-  `docs/temporal.md` (activity envelope).
+  `docs/temporal.md` (activity envelope),
+  `ui/e2e/facelift-review2.spec.ts` (required-CI cancellation test repair only;
+  no product UI changes).
   Depends on: A2, B1, F1.
   Verify: the real fixture reports queued/running/finished admission. C1 proves
   bidirectional public links. Wrong/missing/ambiguous admission, another job's
