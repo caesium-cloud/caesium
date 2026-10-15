@@ -368,12 +368,16 @@ Resume unfinished waves. Do not archive this plan while later items remain.
   Operations scenarios without skips (6.92 seconds) on this clean head. Raw
   component evidence records five sends, lookup-only recovery and three logical
   effects across lost replies, admission crash and explicit confirmation.
-  Default integration is running; normal agent-auth regression follows, along
-  with current-head hosted [CI run 38786078638](https://github.com/caesium-cloud/caesium/actions/runs/38786078638).
+  Default integration passed in 823.085 seconds; normal agent auth passed 45
+  executed scenarios in 35.200 seconds (one expected gate-off incident skip).
+  Current-head hosted [CI run 38786078638](https://github.com/caesium-cloud/caesium/actions/runs/38786078638)
+  has only coverage collection pending; all other selected jobs passed.
 - **Composition:** A local-only combined candidate resolves two guide status
   hunks by retaining both implemented components. Source/scripts merge cleanly;
-  combined unit and all four named real fixture scenarios are queued. This is
-  additional composition evidence, not a feature PR or merge. After the first
+  combined unit and all four named real fixture scenarios are queued behind a
+  live unrelated Docker verification lane. Neither has run; the standalone
+  feature checks above are complete. This is additional composition work, not a
+  feature PR or merge. After the first
   sibling merges, integrate updated `master` into the second, retain that guide
   wording and refresh current-candidate verification before its merge.
 - **Verification boundary:** Real Temporal component scenarios supplement
