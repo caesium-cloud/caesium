@@ -113,7 +113,7 @@ class ConnectorFixtureOrchestrationTests(unittest.TestCase):
     def env(self, **extra):
         env = dict(os.environ)
         env.update(PATH=str(self.bin)+os.pathsep+os.environ['PATH'], MOCK_STATE=str(self.state),
-                   CAESIUM_CONTAINER_CLI=str(self.bin/'engine'), CAESIUM_PLATFORM='linux/amd64',
+                   CAESIUM_PODMAN='false', CAESIUM_CONTAINER_CLI=str(self.bin/'engine'), CAESIUM_PLATFORM='linux/amd64',
                    CAESIUM_CONNECTORS_TAG='probe', CAESIUM_CONNECTORS_ARTIFACTS=str(self.artifacts),
                    CAESIUM_CONNECTORS_EXISTING_SERVER='false',
                    CAESIUM_API_KEY='host-private-key', CAESIUM_AUTH_ADMIN_KEY='host-private-admin')
