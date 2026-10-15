@@ -21,6 +21,7 @@ import (
 	"github.com/caesium-cloud/caesium/internal/jobdef/secret"
 	"github.com/caesium-cloud/caesium/internal/jobdef/testutil"
 	"github.com/caesium-cloud/caesium/internal/models"
+	schema "github.com/caesium-cloud/caesium/pkg/jobdef"
 	"github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing/object"
 	httpauth "github.com/go-git/go-git/v5/plumbing/transport/http"
@@ -681,31 +682,6 @@ func (s *GitSyncSuite) TestSyncAllowlistStoredViolatorSkipsValidation() {
 	s.Equal(s.headCommit(repoDir), s.allowlistJob(db, "ns-default").ProvenanceCommit)
 }
 
-func (s *GitSyncSuite) TestSyncAllowlistInTransactionRefusalIsSkip() {
-	repoDir, db, importer := s.allowlistSetup(map[string]string{
-		"jobs/default.yaml": allowlistManifest("ns-default", ""),
-	})
-	source := narrowedSource(repoDir)
-	s.Require().NoError(source.Sync(context.Background(), importer))
-	before := s.allowlistJob(db, "ns-default")
-
-	s.commit(repoDir, map[string]string{"jobs/default.yaml": strings.Replace(allowlistManifest("ns-default", ""), "echo list", "echo changed", 1)})
-	// A concurrent move lands after the stored-namespace pre-filter.
-	applyHookForTest = func(alias string) {
-		s.Require().NoError(db.Model(&models.Job{}).Where("alias = ?", alias).Update("namespace", "marketing").Error)
-	}
-	s.T().Cleanup(func() { applyHookForTest = nil })
-
-	report, err := source.SyncWithReport(context.Background(), importer)
-	s.Require().NoError(err)
-	s.Equal(0, report.Applied)
-	s.Equal([]ManifestViolation{{Path: "jobs/default.yaml", Alias: "ns-default", Namespace: "default",
-		StoredNamespace: "marketing", Reason: jobdef.NamespaceReasonStored}}, report.Violations)
-	after := s.allowlistJob(db, "ns-default")
-	s.Equal("marketing", after.Namespace)
-	s.Equal(before.ProvenanceCommit, after.ProvenanceCommit)
-}
-
 // allowlistChainManifest is a cron job, or with upstream an event job that
 // runs when upstream's run completes.
 func allowlistChainManifest(alias, upstream string) string {
@@ -717,82 +693,171 @@ func allowlistChainManifest(alias, upstream string) string {
 		"steps:\n  - name: run\n    image: busybox:1.36.1\n    command: [\"sh\", \"-c\", \"echo ok\"]\n"
 }
 
-func (s *GitSyncSuite) TestSyncAllowlistInTransactionRefusalRevalidatesRest() {
+// allowlistMoveBeforeBatch moves alias out of the allowlist after the
+// stored-namespace pre-filter, just before the batch transaction, as a
+// concurrent REST apply would.
+func (s *GitSyncSuite) allowlistMoveBeforeBatch(db *gorm.DB, alias string) {
+	applyHookForTest = func() {
+		s.Require().NoError(db.Model(&models.Job{}).Where("alias = ?", alias).Update("namespace", "marketing").Error)
+	}
+	s.T().Cleanup(func() { applyHookForTest = nil })
+}
+
+func (s *GitSyncSuite) TestSyncAllowlistInTransactionRefusalIsSkip() {
+	repoDir, db, importer := s.allowlistSetup(map[string]string{
+		"jobs/default.yaml": allowlistManifest("ns-default", ""),
+	})
+	source := narrowedSource(repoDir)
+	s.Require().NoError(source.Sync(context.Background(), importer))
+	before := s.allowlistJob(db, "ns-default")
+
+	s.commit(repoDir, map[string]string{"jobs/default.yaml": strings.Replace(allowlistManifest("ns-default", ""), "echo list", "echo changed", 1)})
+	s.allowlistMoveBeforeBatch(db, "ns-default")
+
+	report, err := source.SyncWithReport(context.Background(), importer)
+	s.Require().NoError(err)
+	s.Equal(0, report.Applied)
+	s.Equal([]ManifestViolation{{Path: "jobs/default.yaml", Alias: "ns-default", Namespace: "default",
+		StoredNamespace: "marketing", Reason: jobdef.NamespaceReasonStored}}, report.Violations)
+	after := s.allowlistJob(db, "ns-default")
+	s.Equal("marketing", after.Namespace)
+	s.Equal(before.ProvenanceCommit, after.ProvenanceCommit)
+}
+
+// An in-transaction refusal that leaves a valid graph: the rest of the commit
+// applies and the refusal is reported.
+func (s *GitSyncSuite) TestSyncAllowlistInTransactionRefusalKeepsValidBatch() {
+	repoDir, db, importer := s.allowlistSetup(map[string]string{
+		"jobs/x.yaml": allowlistChainManifest("ns-x", ""),
+		"jobs/y.yaml": allowlistChainManifest("ns-y", ""),
+	})
+	source := narrowedSource(repoDir)
+	s.Require().NoError(source.Sync(context.Background(), importer))
+	yBefore := s.allowlistJob(db, "ns-y")
+
+	s.commit(repoDir, map[string]string{
+		"jobs/x.yaml": allowlistChainManifest("ns-x", "ns-y"),
+		"jobs/y.yaml": strings.Replace(allowlistChainManifest("ns-y", ""), "echo ok", "echo changed", 1),
+	})
+	s.allowlistMoveBeforeBatch(db, "ns-y")
+
+	report, err := source.SyncWithReport(context.Background(), importer)
+	s.Require().NoError(err)
+	s.Equal(1, report.Applied)
+	s.Equal([]ManifestViolation{{Path: "jobs/y.yaml", Alias: "ns-y", Namespace: "default",
+		StoredNamespace: "marketing", Reason: jobdef.NamespaceReasonStored}}, report.Violations)
+	s.Equal(s.headCommit(repoDir), s.allowlistJob(db, "ns-x").ProvenanceCommit)
+	yAfter := s.allowlistJob(db, "ns-y")
+	s.Equal(yBefore.ProvenanceCommit, yAfter.ProvenanceCommit)
+	s.Equal("marketing", yAfter.Namespace)
+
+	audits := s.allowlistAudits(db)
+	s.Require().Len(audits, 2)
+	s.Equal("denied", audits[1].Outcome)
+}
+
+// requireBatchRolledBack asserts the stored jobs still hold their earlier
+// definitions: nothing from the refused batch persisted.
+func (s *GitSyncSuite) requireBatchRolledBack(db *gorm.DB, before map[string]models.Job) {
+	for alias, job := range before {
+		after := s.allowlistJob(db, alias)
+		s.Equal(job.ProvenanceCommit, after.ProvenanceCommit, "%s must keep its stored definition", alias)
+		s.Equal(job.TriggerID, after.TriggerID, alias)
+	}
+}
+
+// A refusal of the first manifest whose live row makes the rest of the batch a
+// cycle: nothing from the commit is applied.
+func (s *GitSyncSuite) TestSyncAllowlistFirstManifestRefusalRollsBackInvalidBatch() {
 	repoDir, db, importer := s.allowlistSetup(map[string]string{
 		"jobs/a.yaml": allowlistChainManifest("ns-a", "ns-b"),
 		"jobs/b.yaml": allowlistChainManifest("ns-b", ""),
 	})
 	source := narrowedSource(repoDir)
 	s.Require().NoError(source.Sync(context.Background(), importer))
-	bBefore := s.allowlistJob(db, "ns-b")
+	before := map[string]models.Job{"ns-a": s.allowlistJob(db, "ns-a"), "ns-b": s.allowlistJob(db, "ns-b")}
 
-	// The commit reverses the chain: valid as a batch, but a cycle against
-	// a's stored row once a is refused.
+	// The commit reverses the chain: valid as a batch, a cycle against a's
+	// live row once a is refused.
 	s.commit(repoDir, map[string]string{
 		"jobs/a.yaml": allowlistChainManifest("ns-a", ""),
 		"jobs/b.yaml": allowlistChainManifest("ns-b", "ns-a"),
 	})
-	applyHookForTest = func(alias string) {
-		if alias == "ns-a" {
-			s.Require().NoError(db.Model(&models.Job{}).Where("alias = ?", alias).Update("namespace", "marketing").Error)
-		}
-	}
-	s.T().Cleanup(func() { applyHookForTest = nil })
+	s.allowlistMoveBeforeBatch(db, "ns-a")
 
 	report, err := source.SyncWithReport(context.Background(), importer)
 	s.Require().ErrorIs(err, jobdef.ErrTriggerChainCycle)
+	s.Require().ErrorIs(err, jobdef.ErrBatchInvalid)
 	s.Equal(0, report.Applied)
 	s.Require().Len(report.Violations, 1)
 	s.Equal("ns-a", report.Violations[0].Alias)
-	bAfter := s.allowlistJob(db, "ns-b")
-	s.Equal(bBefore.ProvenanceCommit, bAfter.ProvenanceCommit, "b must not apply against a's live row")
+	s.requireBatchRolledBack(db, before)
 
 	audits := s.allowlistAudits(db)
 	s.Require().Len(audits, 2)
 	s.Equal("error", audits[1].Outcome)
 }
 
-// A later manifest refused in its transaction after an earlier one committed:
-// the earlier apply stays (per-manifest transactions), and the revalidation
-// turns the resulting stored cycle into a loud, actionable sync error.
-func (s *GitSyncSuite) TestSyncAllowlistLaterInTransactionRefusalFailsLoudly() {
+// A later manifest refused after an earlier one was written in the same
+// batch: the batch rolls back, so the stored graph stays as it was (valid)
+// and the earlier manifest is not committed either.
+func (s *GitSyncSuite) TestSyncAllowlistLaterManifestRefusalRollsBackInvalidBatch() {
 	repoDir, db, importer := s.allowlistSetup(map[string]string{
 		"jobs/a.yaml": allowlistChainManifest("ns-a", ""),
 		"jobs/b.yaml": allowlistChainManifest("ns-b", "ns-a"),
 	})
 	source := narrowedSource(repoDir)
 	s.Require().NoError(source.Sync(context.Background(), importer))
-	bBefore := s.allowlistJob(db, "ns-b")
+	before := map[string]models.Job{"ns-a": s.allowlistJob(db, "ns-a"), "ns-b": s.allowlistJob(db, "ns-b")}
 
 	// Valid as a batch: a now listens for b, and b becomes cron.
 	s.commit(repoDir, map[string]string{
 		"jobs/a.yaml": allowlistChainManifest("ns-a", "ns-b"),
 		"jobs/b.yaml": allowlistChainManifest("ns-b", ""),
 	})
-	head := s.headCommit(repoDir)
-	applyHookForTest = func(alias string) {
-		if alias == "ns-b" { // b moves out after a has committed
-			s.Require().NoError(db.Model(&models.Job{}).Where("alias = ?", alias).Update("namespace", "marketing").Error)
-		}
-	}
-	s.T().Cleanup(func() { applyHookForTest = nil })
+	s.allowlistMoveBeforeBatch(db, "ns-b")
 
 	report, err := source.SyncWithReport(context.Background(), importer)
 	s.Require().ErrorIs(err, jobdef.ErrTriggerChainCycle)
-	s.Contains(err.Error(), `namespace refusal of "ns-b" left the remaining batch invalid`)
+	s.Contains(err.Error(), `namespace refusal of ["ns-b"] leaves the batch invalid, so nothing from this commit was applied`)
 	s.Contains(err.Error(), "move the job back into the allowlist")
-	s.Equal(1, report.Applied)
-	s.Equal(head, s.allowlistJob(db, "ns-a").ProvenanceCommit, "the earlier manifest stays applied")
-	bAfter := s.allowlistJob(db, "ns-b")
-	s.Equal(bBefore.ProvenanceCommit, bAfter.ProvenanceCommit, "the refused manifest is not applied")
-	s.Equal("marketing", bAfter.Namespace)
+	s.Equal(0, report.Applied)
+	s.requireBatchRolledBack(db, before)
+	s.Equal("marketing", s.allowlistJob(db, "ns-b").Namespace)
+	// The stored graph is still valid: a cron, b listening for a.
+	s.Require().NoError(jobdef.ValidateTriggerChains(context.Background(), db, nil))
 
 	audits := s.allowlistAudits(db)
 	s.Require().Len(audits, 2)
 	s.Equal("error", audits[1].Outcome)
-	s.Equal(1, audits[1].Meta.Applied)
+	s.Equal(0, audits[1].Meta.Applied)
 	s.Require().Len(audits[1].Meta.Violations, 1)
 	s.Equal(jobdef.NamespaceReasonStored, audits[1].Meta.Violations[0].Reason)
+}
+
+// A non-namespace error later in the batch rolls back the earlier manifests
+// of a restricted source too: all allowed manifests or none.
+func (s *GitSyncSuite) TestSyncAllowlistBatchRollsBackOnApplyError() {
+	repoDir, db, importer := s.allowlistSetup(map[string]string{
+		"jobs/a.yaml": allowlistChainManifest("ns-a", ""),
+		"jobs/b.yaml": allowlistChainManifest("ns-b", ""),
+	})
+	foreign, err := schema.Parse([]byte(allowlistChainManifest("ns-b", "")))
+	s.Require().NoError(err)
+	_, err = importer.ApplyWithOptions(context.Background(), foreign, &jobdef.ApplyOptions{Provenance: &jobdef.Provenance{SourceID: "git-other"}})
+	s.Require().NoError(err)
+
+	source := narrowedSource(repoDir)
+	report, err := source.SyncWithReport(context.Background(), importer)
+	s.Require().ErrorIs(err, jobdef.ErrProvenanceConflict)
+	s.Equal(0, report.Applied)
+	var count int64
+	s.Require().NoError(db.Unscoped().Model(&models.Job{}).Where("alias = ?", "ns-a").Count(&count).Error)
+	s.Zero(count, "a must roll back with the batch")
+
+	audits := s.allowlistAudits(db)
+	s.Require().Len(audits, 1)
+	s.Equal("error", audits[0].Outcome)
 }
 
 // The same conflict without a race: b was moved out of the allowlist before

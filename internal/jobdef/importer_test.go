@@ -1093,6 +1093,54 @@ func TestImporterLocksGuardedJobRowsOnPostgres(t *testing.T) {
 	require.Contains(t, statements[1], "provenance_source_id = $1")
 }
 
+func (s *ImporterTestSuite) allowlistDef(alias, namespace string) *schema.Definition {
+	def, err := schema.Parse([]byte(strings.Replace(testutil.SampleJob, "csv-to-parquet", alias, 1)))
+	s.Require().NoError(err)
+	def.Metadata.Namespace = namespace
+	return def
+}
+
+func (s *ImporterTestSuite) TestApplyBatchRetriesWithoutDuplicatingRefusals() {
+	busy := true
+	s.Require().NoError(s.db.Callback().Query().After("gorm:query").Register("allowlist:busy-once", func(tx *gorm.DB) {
+		if busy && strings.Contains(tx.Statement.SQL.String(), "JOIN triggers") {
+			busy = false
+			_ = tx.AddError(sqlite3.Error{Code: sqlite3.ErrBusy})
+		}
+	}))
+	opts := &ApplyOptions{NamespaceAllowlist: []string{"default"}}
+	result, err := s.importer.ApplyBatchWithOptions(context.Background(), []BatchPlan{
+		{Def: s.allowlistDef("batch-a", ""), Opts: opts},
+		{Def: s.allowlistDef("batch-b", "marketing"), Opts: opts},
+	})
+	s.Require().NoError(err)
+	s.False(busy, "the first attempt must hit contention and retry")
+	s.Equal(1, result.Applied)
+	s.Require().Len(result.Refused, 1)
+	s.Equal(1, result.Refused[0].Index)
+	s.Equal(NamespaceReasonRequested, result.Refused[0].Err.Reason)
+	testutil.AssertCount(s.T(), s.db, &models.Job{}, 1)
+}
+
+func (s *ImporterTestSuite) TestApplyBatchRollsBackInvalidGraph() {
+	chain := func(alias, upstream string) *schema.Definition {
+		def, err := schema.Parse([]byte("apiVersion: v1\nkind: Job\nmetadata:\n  alias: " + alias +
+			"\ntrigger:\n  type: event\n  configuration:\n    events:\n      - type: run_completed\n        source: caesium\n        filter:\n          job_alias: " + upstream +
+			"\nsteps:\n  - name: run\n    image: busybox:1.36.1\n    command: [\"sh\", \"-c\", \"echo ok\"]\n"))
+		s.Require().NoError(err)
+		return def
+	}
+	result, err := s.importer.ApplyBatchWithOptions(context.Background(), []BatchPlan{
+		{Def: s.allowlistDef("batch-plain", ""), Opts: &ApplyOptions{}},
+		{Def: chain("batch-a", "batch-b"), Opts: &ApplyOptions{}},
+		{Def: chain("batch-b", "batch-a"), Opts: &ApplyOptions{}},
+	})
+	s.Require().ErrorIs(err, ErrBatchInvalid)
+	s.Require().ErrorIs(err, ErrTriggerChainCycle)
+	s.Equal(0, result.Applied)
+	testutil.AssertCount(s.T(), s.db, &models.Job{}, 0)
+}
+
 // allowlistApply applies SampleJob under alias in namespace, owned by source.
 func (s *ImporterTestSuite) allowlistApply(alias, namespace, source, commit string, opts ApplyOptions) (*models.Job, error) {
 	def, err := schema.Parse([]byte(strings.Replace(testutil.SampleJob, "csv-to-parquet", alias, 1)))

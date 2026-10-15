@@ -324,38 +324,17 @@ func (s *Source) applyCheckout(ctx context.Context, importer *jobdef.Importer, d
 		return skippedBatchError(report, err)
 	}
 
-	for idx, plan := range plans {
-		if applyHookForTest != nil {
-			applyHookForTest(plan.def.Metadata.Alias)
+	if s.Namespaces != nil {
+		if err := s.applyAtomically(ctx, importer, plans, report); err != nil {
+			return err
 		}
-		if _, err := importer.ApplyWithOptions(ctx, plan.def, plan.opts); err != nil {
-			nsErr, ok := errors.AsType[*jobdef.NamespaceAllowlistError](err)
-			if !ok {
+	} else {
+		for _, plan := range plans {
+			if _, err := importer.ApplyWithOptions(ctx, plan.def, plan.opts); err != nil {
 				return err
 			}
-			// The in-transaction guard is the authority: a row that moved
-			// after the pre-filter is still a per-manifest skip. The rest of
-			// the batch was validated against the refused proposal, so
-			// revalidate it against the stored row that stays live.
-			//
-			// Known residual: each manifest commits in its own transaction
-			// (as before B3), so manifests applied before this refusal stay
-			// applied. If they relied on the refused proposal (say a trigger
-			// chain it would have broken), the stored graph is now invalid;
-			// this validation then fails the sync loudly instead of leaving
-			// a silent cycle, and the same checkout keeps failing until an
-			// operator fixes one side (a new commit, or a REST apply with git
-			// sync disabled). It needs a concurrent move of a source-owned
-			// job to race the watcher between the pre-filter and this apply;
-			// the same conflict without the race fails in skippedBatchError.
-			s.reportViolation(report, plan.path, nsErr.Alias, nsErr.RequestedNamespace, nsErr.StoredNamespace, nsErr.Reason)
-			if err := importer.ValidateBatch(ctx, planDefinitions(plans[idx+1:])); err != nil {
-				return fmt.Errorf("git sync %s commit %s: namespace refusal of %q left the remaining batch invalid: %w (fix the repository or move the job back into the allowlist)",
-					report.SourceID, commit, nsErr.Alias, err)
-			}
-			continue
+			report.Applied++
 		}
-		report.Applied++
 	}
 
 	if strings.TrimSpace(s.SourceID) != "" {

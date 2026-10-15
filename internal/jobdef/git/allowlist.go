@@ -2,6 +2,7 @@ package git
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/url"
 	"slices"
@@ -35,10 +36,46 @@ type SyncReport struct {
 	PruneSkipped []jobdef.PruneSkip
 }
 
-// applyHookForTest, when set, runs before each apply so a package test can
-// change a row between the stored-namespace pre-filter and the apply
-// transaction. Always nil in production.
-var applyHookForTest func(alias string)
+// applyHookForTest, when set, runs just before a restricted source's batch
+// transaction so a package test can move a row after the stored-namespace
+// pre-filter. Always nil in production.
+var applyHookForTest func()
+
+// applyAtomically applies a restricted source's allowed manifests in one
+// transaction: all of them or none. A manifest the in-transaction guard
+// refuses (its row moved after the pre-filter) is skipped and reported, and
+// the batch commits only if the stored graph it leaves is still valid. The
+// trade-off: the database writer is held for the whole batch, once per new
+// commit and only for allowlisted sources; unrestricted sources keep the
+// per-manifest transactions.
+func (s *Source) applyAtomically(ctx context.Context, importer *jobdef.Importer, plans []applyFilePlan, report *SyncReport) error {
+	if len(plans) == 0 {
+		return nil
+	}
+	if applyHookForTest != nil {
+		applyHookForTest()
+	}
+	batch := make([]jobdef.BatchPlan, 0, len(plans))
+	for _, plan := range plans {
+		batch = append(batch, jobdef.BatchPlan{Def: plan.def, Opts: plan.opts})
+	}
+	result, err := importer.ApplyBatchWithOptions(ctx, batch)
+	refused := make([]string, 0, len(result.Refused))
+	for _, refusal := range result.Refused {
+		nsErr := refusal.Err
+		s.reportViolation(report, plans[refusal.Index].path, nsErr.Alias, nsErr.RequestedNamespace, nsErr.StoredNamespace, nsErr.Reason)
+		refused = append(refused, nsErr.Alias)
+	}
+	if err != nil {
+		if len(refused) > 0 && errors.Is(err, jobdef.ErrBatchInvalid) {
+			return fmt.Errorf("git sync %s commit %s: namespace refusal of %q leaves the batch invalid, so nothing from this commit was applied: %w (fix the repository or move the job back into the allowlist)",
+				report.SourceID, report.Commit, refused, err)
+		}
+		return err
+	}
+	report.Applied = result.Applied
+	return nil
+}
 
 // rejectDuplicateAliases runs over every collected manifest, before any
 // namespace filtering, so a refused copy cannot hide a duplicate. It is fatal,

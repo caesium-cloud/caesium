@@ -203,51 +203,9 @@ func (i *Importer) ApplyWithOptions(ctx context.Context, def *schema.Definition,
 	err := withImporterBusyRetry(ctx, func() error {
 		var attemptResult *models.Job
 		err := i.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-			existing, err := i.findJobByAliasTx(tx, def.Metadata.Alias)
-			if err != nil {
-				return err
-			}
-			if err := i.guardJobMutationTx(tx, existing, def, opts); err != nil {
-				return err
-			}
-
-			jobModel, triggerModel, err := i.upsertJobAndTriggerTx(tx, existing, def, opts)
-			if err != nil {
-				return err
-			}
-			if triggerModel != nil {
-				jobModel.TriggerID = triggerModel.ID
-			}
-
-			taskByName, _, retiredAtomIDs, err := i.reconcileTasksTx(tx, jobModel, def, opts)
-			if err != nil {
-				return err
-			}
-			successors, err := schema.DeriveStepSuccessors(def.Steps)
-			if err != nil {
-				return err
-			}
-			if err := i.reconcileEdgesTx(tx, jobModel, def.Steps, successors, taskByName, opts); err != nil {
-				return err
-			}
-			if err := i.writeSnapshotTx(tx, jobModel, def.Steps, successors, taskByName, opts); err != nil {
-				return err
-			}
-			if err := i.reconcileCallbacksTx(tx, jobModel.ID, def.Callbacks); err != nil {
-				return err
-			}
-			if err := i.reconcileDatasetDeclarationsTx(tx, jobModel, def); err != nil {
-				return err
-			}
-			if err := i.enforceContractsWithOptionsTx(ctx, tx, def, opts); err != nil {
-				return err
-			}
-			if err := i.softDeleteAtomsTx(tx, retiredAtomIDs); err != nil {
-				return err
-			}
-
+			jobModel, err := i.applyTx(ctx, tx, def, opts)
 			attemptResult = jobModel
-			return nil
+			return err
 		})
 		if err != nil {
 			return err
@@ -261,6 +219,133 @@ func (i *Importer) ApplyWithOptions(ctx context.Context, def *schema.Definition,
 	notifyTriggerMutationBestEffort(ctx, "apply")
 
 	return result, nil
+}
+
+// applyTx reconciles one validated definition inside tx. The guard runs before
+// any write, so a refused definition writes nothing.
+func (i *Importer) applyTx(ctx context.Context, tx *gorm.DB, def *schema.Definition, opts *ApplyOptions) (*models.Job, error) {
+	existing, err := i.findJobByAliasTx(tx, def.Metadata.Alias)
+	if err != nil {
+		return nil, err
+	}
+	if err := i.guardJobMutationTx(tx, existing, def, opts); err != nil {
+		return nil, err
+	}
+
+	jobModel, triggerModel, err := i.upsertJobAndTriggerTx(tx, existing, def, opts)
+	if err != nil {
+		return nil, err
+	}
+	if triggerModel != nil {
+		jobModel.TriggerID = triggerModel.ID
+	}
+
+	taskByName, _, retiredAtomIDs, err := i.reconcileTasksTx(tx, jobModel, def, opts)
+	if err != nil {
+		return nil, err
+	}
+	successors, err := schema.DeriveStepSuccessors(def.Steps)
+	if err != nil {
+		return nil, err
+	}
+	if err := i.reconcileEdgesTx(tx, jobModel, def.Steps, successors, taskByName, opts); err != nil {
+		return nil, err
+	}
+	if err := i.writeSnapshotTx(tx, jobModel, def.Steps, successors, taskByName, opts); err != nil {
+		return nil, err
+	}
+	if err := i.reconcileCallbacksTx(tx, jobModel.ID, def.Callbacks); err != nil {
+		return nil, err
+	}
+	if err := i.reconcileDatasetDeclarationsTx(tx, jobModel, def); err != nil {
+		return nil, err
+	}
+	if err := i.enforceContractsWithOptionsTx(ctx, tx, def, opts); err != nil {
+		return nil, err
+	}
+	if err := i.softDeleteAtomsTx(tx, retiredAtomIDs); err != nil {
+		return nil, err
+	}
+	return jobModel, nil
+}
+
+// BatchPlan is one definition of an ApplyBatchWithOptions call.
+type BatchPlan struct {
+	Def  *schema.Definition
+	Opts *ApplyOptions
+}
+
+// BatchRefusal is a plan whose namespace allowlist refused it.
+type BatchRefusal struct {
+	Index int
+	Err   *NamespaceAllowlistError
+}
+
+// BatchResult reports an ApplyBatchWithOptions call. On error Applied is 0
+// and Refused holds the refusals of the attempt that failed.
+type BatchResult struct {
+	Applied int
+	Refused []BatchRefusal
+}
+
+// ApplyBatchWithOptions applies every plan in one transaction: all of them or
+// none. A plan refused by its namespace allowlist writes nothing and is
+// reported in Refused; any other error rolls the whole batch back. Before
+// commit the trigger-chain and dataset graphs of the stored jobs are validated
+// as the transaction sees them, so a refusal can never leave the effective
+// graph invalid; a failure there wraps ErrBatchInvalid and rolls back too.
+func (i *Importer) ApplyBatchWithOptions(ctx context.Context, plans []BatchPlan) (BatchResult, error) {
+	for _, plan := range plans {
+		if err := plan.Def.Validate(); err != nil {
+			return BatchResult{}, err
+		}
+	}
+
+	var result BatchResult
+	err := withImporterBusyRetry(ctx, func() error {
+		attempt := BatchResult{}
+		err := i.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+			for idx, plan := range plans {
+				if _, err := i.applyTx(ctx, tx, plan.Def, plan.Opts); err != nil {
+					nsErr, ok := errors.AsType[*NamespaceAllowlistError](err)
+					if !ok {
+						return err
+					}
+					attempt.Refused = append(attempt.Refused, BatchRefusal{Index: idx, Err: nsErr})
+					continue
+				}
+				attempt.Applied++
+			}
+			if err := ValidateTriggerChains(ctx, tx, nil); err != nil {
+				return batchInvalid(err)
+			}
+			if err := ValidateDatasetGraph(ctx, tx, nil); err != nil {
+				return batchInvalid(err)
+			}
+			return nil
+		})
+		result = attempt
+		return err
+	})
+	if err != nil {
+		result.Applied = 0
+		return result, err
+	}
+	if result.Applied > 0 {
+		notifyTriggerMutationBestEffort(ctx, "apply")
+	}
+	return result, nil
+}
+
+// ErrBatchInvalid marks an ApplyBatchWithOptions batch whose effective stored
+// graph failed validation; nothing from the batch was written.
+var ErrBatchInvalid = errors.New("batch leaves the stored job graph invalid")
+
+func batchInvalid(err error) error {
+	if isImporterContentionErr(err) {
+		return err // retried, not a validation verdict
+	}
+	return fmt.Errorf("%w: %w", ErrBatchInvalid, err)
 }
 
 // ContractBreakResponse returns the stable 409 payload for an apply-time
