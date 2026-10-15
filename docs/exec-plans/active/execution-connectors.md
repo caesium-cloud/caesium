@@ -334,7 +334,7 @@ Resume unfinished waves. Do not archive this plan while later items remain.
 
 - **Base:** `b796b5672eab30134876f403f257af9e7a1f76da`; W3 implementation
   and plan synchronization are merged.
-- **W4-α / D1:** Ready [PR #636](https://github.com/caesium-cloud/caesium/pull/636),
+- **W4-α / D1:** Draft [PR #636](https://github.com/caesium-cloud/caesium/pull/636),
   head `43e89c438f48e1d794743351e0558139ae6039d6`, implements trusted
   activity/admission correlation and durable local links. Independent source
   review has no open findings. Containerized lint, full race/coverage unit,
@@ -354,9 +354,9 @@ Resume unfinished waves. Do not archive this plan while later items remain.
   retries. Current-head
   [CI run 38786960361](https://github.com/caesium-cloud/caesium/actions/runs/38786960361)
   passed coverage ratchets and all nine required checks, including `ci-ok`. The
-  PR is ready; fresh review state has no reviews or unresolved threads and
-  requires one CODEOWNER approval before merge.
-- **W4-β / D2:** Ready [PR #637](https://github.com/caesium-cloud/caesium/pull/637),
+  PR is draft while the posted review findings below are fixed and the new
+  candidate is verified; one CODEOWNER approval remains required before merge.
+- **W4-β / D2:** Draft [PR #637](https://github.com/caesium-cloud/caesium/pull/637),
   head `bbb663094f730477d82197ec6629f76a6e86b7ca`, implements immutable action
   receipts, guarded dispatch, lookup-only recovery and explicit original-principal
   resubmission. Independent source review is clear. Final containerized lint,
@@ -373,8 +373,8 @@ Resume unfinished waves. Do not archive this plan while later items remain.
   Current-head hosted [CI run 38786078638](https://github.com/caesium-cloud/caesium/actions/runs/38786078638)
   passed coverage ratchets and all nine required checks, including `ci-ok`. The
   Linux browser lane passed 160 scenarios without skips or flaky retries. The
-  PR is ready; fresh review state has no reviews or unresolved threads and
-  requires one CODEOWNER approval before merge.
+  PR is draft while the posted review findings below are fixed and the new
+  candidate is verified; one CODEOWNER approval remains required before merge.
 - **Composition:** A local-only combined candidate resolves two guide status
   hunks by retaining both implemented components. Source/scripts merge cleanly;
   combined unit and all four named real fixture scenarios have not run: a live
@@ -387,8 +387,16 @@ Resume unfinished waves. Do not archive this plan while later items remain.
   containerized baseline checks. Running-server connector HTTP, bidirectional
   public links and process-restart proof remain C1/C2; those routes do not yet
   exist. No D1/D2 checkbox advances before verified merged acceptance.
+- **Review follow-up:** The user authorized addressing all posted findings.
+  D1 has two open findings: unrelated pending activities can hide heartbeat and
+  attempt evidence, and an older history start can lower Describe's current
+  attempt. D2 has four open findings: transient preflight refusal becomes
+  terminal, failed lookup erases prior acceptance, an evidence envelope can
+  prevent a legal maximum result from completing, and a same-key retry can hide
+  a failed evidence write. Fixes and independent review are in progress in the
+  existing worktrees; no finding is resolved before verified publication.
 - **Merge/plan status:** All three PRs remain open and require one CODEOWNER
-  approval and the protected squash merge queue. No review threads are open.
+  approval and the protected squash merge queue.
   Plan validation includes an earlier full containerized race/coverage unit pass
   with documentation guardrails; subsequent progress edits pass item/dependency,
   local-link, template-token and whitespace checks. A final targeted container
@@ -403,7 +411,7 @@ Resume unfinished waves. Do not archive this plan while later items remain.
 | A | Generic contract, configuration and catalog (2 items) | P0 | Shipped (A1, A2) |
 | B | Temporal inspection and declared messages (2 items) | P0 | Shipped (B1, B2) |
 | C | Authenticated REST and composition (2 items) | P0 | Not started |
-| D | Verified correlation and action durability (2 items) | P0 | W4 review PRs; approval required |
+| D | Verified correlation and action durability (2 items) | P0 | W4 review fixes in progress |
 | E | Console monitoring, data links and approval (3 items) | P0 | Not started |
 | F | Real fixture, CI, qualification and promotion (4 items) | P0 | F1 shipped; F2–F4 not started |
 | N | Operator guidance and reconciliation (1 item) | P0 | Not started |
