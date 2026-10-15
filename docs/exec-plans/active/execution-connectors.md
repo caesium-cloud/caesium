@@ -365,8 +365,9 @@ Resume unfinished waves. Do not archive this plan while later items remain.
   Server 1.32.0, SDK 1.49.0 and CLI 1.9.1 are verified. Full default integration
   passed in 876.192 seconds. Current-head [CI run 38807694976](https://github.com/caesium-cloud/caesium/actions/runs/38807694976)
   is running. The earlier
-  browser-only repair remains unchanged. Threads stay open until verified
-  publication; one CODEOWNER approval remains required before merge.
+  browser-only repair remains unchanged. Both posted findings have verified
+  replies and resolved threads at this head; one CODEOWNER approval remains
+  required before merge.
 - **W4-β / D2:** Draft [PR #637](https://github.com/caesium-cloud/caesium/pull/637),
   head `f5ab6072905a6b356cc7f33a87af6d8c410cef13`, implements immutable action
   receipts, guarded dispatch, lookup-only recovery and explicit original-principal
@@ -385,8 +386,8 @@ Resume unfinished waves. Do not archive this plan while later items remain.
   CLI 1.9.1. Component evidence records five Update sends and three logical
   effects across lost replies, admission crash and explicit confirmation.
   Default/agent integration and [CI run 38808433945](https://github.com/caesium-cloud/caesium/actions/runs/38808433945)
-  remain pending. Threads stay open until verified publication; one CODEOWNER approval
-  remains required before merge.
+  remain pending. All four posted findings have verified replies and resolved
+  threads at this head; one CODEOWNER approval remains required before merge.
 - **Composition:** The earlier uncommitted combined candidate is preserved.
   The orchestrator now owns the shared Docker lane for review-fix verification.
   A fresh local-only candidate will integrate both published fixes, retain both
@@ -399,15 +400,13 @@ Resume unfinished waves. Do not archive this plan while later items remain.
   containerized baseline checks. Running-server connector HTTP, bidirectional
   public links and process-restart proof remain C1/C2; those routes do not yet
   exist. No D1/D2 checkbox advances before verified merged acceptance.
-- **Review follow-up:** The user authorized addressing all posted findings.
-  D1 has two open findings: unrelated pending activities can hide heartbeat and
-  attempt evidence, and an older history start can lower Describe's current
-  attempt. D2 has four open findings: transient preflight refusal becomes
-  terminal, failed lookup erases prior acceptance, an evidence envelope can
-  prevent a legal maximum result from completing, and a same-key retry can hide
-  a failed evidence write. Fixes are published and independently reviewed.
-  Both local baselines passed; fresh provider/integration and hosted checks are
-  running. No finding is resolved before verified publication.
+- **Review follow-up:** All six posted findings are fixed in the published
+  candidates, independently reviewed and covered by passing race/unit/tagged and
+  real-provider checks. Six thread-specific replies cite the fixing heads and
+  completed evidence, explicitly labeling broader pending checks. Fresh paginated
+  GitHub reads verify D1's two threads and D2's four threads resolved, with no
+  remaining open findings. Full D2 default/agent integration, combined
+  qualification, final plan guardrails and hosted CI are still in progress.
 - **Merge/plan status:** All three PRs remain open and require one CODEOWNER
   approval and the protected squash merge queue.
   Plan validation includes an earlier full containerized race/coverage unit pass
