@@ -1154,6 +1154,9 @@ coverage_journey_server_env() {
         CAESIUM_JOBDEF_GIT_ONCE=false
         CAESIUM_JOBDEF_GIT_INTERVAL=500ms
         "CAESIUM_JOBDEF_GIT_SOURCES=$COVERAGE_GIT_SOURCES_JSON"
+        # The namespace-allowlist scenario reads the system:git-sync audit rows
+        # through the read-only DB console; /v1/auth/audit needs an auth mode.
+        CAESIUM_DATABASE_CONSOLE_ENABLED=true
       )
       ;;
     distributed|owner-memory)
@@ -1246,6 +1249,7 @@ print(json.dumps([{
     "source_id": source_id,
     "interval": "500ms",
     "once": False,
+    "namespaces": ["default"],
 }], separators=(",", ":")))
 PY
 )" || { coverage_journey_fail "cannot encode the isolated Git source configuration"; return 1; }
@@ -1810,8 +1814,8 @@ PY
 
   coverage_journey_run_lane \
     git-sync git-sync \
-    'TestIntegrationTestSuite/TestJobdefGitSyncLocalRepositoryUpdatesAndPrunes' \
-    1 "$cli_dir" TestJobdefGitSyncLocalRepositoryUpdatesAndPrunes || return 1
+    'TestIntegrationTestSuite/(TestJobdefGitSyncLocalRepositoryUpdatesAndPrunes|TestJobdefGitSyncNamespaceAllowlistSkipsForeignManifests)' \
+    2 "$cli_dir" TestJobdefGitSyncLocalRepositoryUpdatesAndPrunes TestJobdefGitSyncNamespaceAllowlistSkipsForeignManifests || return 1
 
   local sso_log sso_rc
   sso_log="$(mktemp "$ARTIFACTS/journeys/sso-driver-$ID.XXXXXX.log")" \

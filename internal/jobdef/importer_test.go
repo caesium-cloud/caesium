@@ -19,6 +19,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/stretchr/testify/suite"
 	"gorm.io/datatypes"
+	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
 )
 
@@ -1065,4 +1066,194 @@ func (s *ImporterTestSuite) TestNamespaceApplyMovesJobInPlace() {
 	exported, err := NewExporter(s.db).Export(context.Background(), first.ID)
 	s.Require().NoError(err)
 	s.Equal("finance", exported.Metadata.Namespace)
+}
+
+// The apply guard and PruneMissing read rows they then write; on PostgreSQL the
+// reads must lock them. A dry run on the postgres dialector builds the SQL
+// without a server.
+func TestImporterLocksGuardedJobRowsOnPostgres(t *testing.T) {
+	db, err := gorm.Open(postgres.New(postgres.Config{DSN: "host=127.0.0.1 port=1 user=caesium dbname=caesium sslmode=disable"}),
+		&gorm.Config{DryRun: true, DisableAutomaticPing: true})
+	require.NoError(t, err)
+	var statements []string
+	require.NoError(t, db.Callback().Query().After("gorm:query").Register("allowlist:capture", func(tx *gorm.DB) {
+		statements = append(statements, tx.Statement.SQL.String())
+	}))
+
+	_, err = NewImporter(db).findJobByAliasTx(db, "nightly")
+	require.NoError(t, err)
+	var jobs []models.Job
+	require.NoError(t, pruneScopeTx(db, &PruneOptions{SourceID: "git-a"}).Find(&jobs).Error)
+
+	require.Len(t, statements, 2)
+	for _, statement := range statements {
+		require.True(t, strings.HasSuffix(statement, " FOR UPDATE"), statement)
+	}
+	require.Contains(t, statements[0], "alias = $1")
+	require.Contains(t, statements[1], "provenance_source_id = $1")
+}
+
+// allowlistApply applies SampleJob under alias in namespace, owned by source.
+func (s *ImporterTestSuite) allowlistApply(alias, namespace, source, commit string, opts ApplyOptions) (*models.Job, error) {
+	def, err := schema.Parse([]byte(strings.Replace(testutil.SampleJob, "csv-to-parquet", alias, 1)))
+	s.Require().NoError(err)
+	def.Metadata.Namespace = namespace
+	opts.Provenance = &Provenance{SourceID: source, Commit: commit}
+	return s.importer.ApplyWithOptions(context.Background(), def, &opts)
+}
+
+func (s *ImporterTestSuite) allowlistRow(alias string) models.Job {
+	var job models.Job
+	s.Require().NoError(s.db.Unscoped().Where("alias = ?", alias).First(&job).Error)
+	return job
+}
+
+func (s *ImporterTestSuite) requireAllowlistRefusal(err error, reason, requested, stored string) {
+	s.Require().ErrorIs(err, ErrNamespaceNotAllowed)
+	nsErr, ok := errors.AsType[*NamespaceAllowlistError](err)
+	s.Require().True(ok, "expected *NamespaceAllowlistError, got %T", err)
+	s.Equal(reason, nsErr.Reason)
+	s.Equal(requested, nsErr.RequestedNamespace)
+	s.Equal(stored, nsErr.StoredNamespace)
+}
+
+func (s *ImporterTestSuite) TestApplyAllowlistRefusesRequestedNamespace() {
+	_, err := s.allowlistApply("ns-job", "marketing", "git-a", "c1", ApplyOptions{NamespaceAllowlist: []string{"default"}})
+	s.requireAllowlistRefusal(err, NamespaceReasonRequested, "marketing", "")
+	s.Contains(err.Error(), "ns-job")
+	testutil.AssertCount(s.T(), s.db, &models.Job{}, 0)
+
+	// An empty manifest namespace is the default namespace.
+	_, err = s.allowlistApply("ns-job", "", "git-a", "c1", ApplyOptions{NamespaceAllowlist: []string{"marketing"}})
+	s.requireAllowlistRefusal(err, NamespaceReasonRequested, "default", "")
+}
+
+func (s *ImporterTestSuite) TestApplyAllowlistRefusesStoredNamespace() {
+	_, err := s.allowlistApply("ns-job", "finance", "git-a", "c1", ApplyOptions{})
+	s.Require().NoError(err)
+	before := s.allowlistRow("ns-job")
+
+	// A narrowed source cannot move a job it owned into its allowlist.
+	_, err = s.allowlistApply("ns-job", "marketing", "git-a", "c2", ApplyOptions{NamespaceAllowlist: []string{"marketing"}})
+	s.requireAllowlistRefusal(err, NamespaceReasonStored, "marketing", "finance")
+
+	after := s.allowlistRow("ns-job")
+	s.Equal(before.ID, after.ID)
+	s.Equal("finance", after.Namespace)
+	s.Equal("c1", after.ProvenanceCommit)
+	s.Equal(before.Labels, after.Labels)
+	s.True(before.UpdatedAt.Equal(after.UpdatedAt))
+}
+
+func (s *ImporterTestSuite) TestApplyAllowlistRefusesMoveOut() {
+	_, err := s.allowlistApply("ns-job", "marketing", "git-a", "c1", ApplyOptions{NamespaceAllowlist: []string{"marketing"}})
+	s.Require().NoError(err)
+
+	_, err = s.allowlistApply("ns-job", "finance", "git-a", "c2", ApplyOptions{NamespaceAllowlist: []string{"marketing"}})
+	s.requireAllowlistRefusal(err, NamespaceReasonRequested, "finance", "marketing")
+	row := s.allowlistRow("ns-job")
+	s.Equal("marketing", row.Namespace)
+	s.Equal("c1", row.ProvenanceCommit)
+}
+
+func (s *ImporterTestSuite) TestApplyAllowlistIgnoresForce() {
+	_, err := s.allowlistApply("ns-job", "marketing", "git-a", "c1", ApplyOptions{})
+	s.Require().NoError(err)
+
+	_, err = s.allowlistApply("ns-job", "finance", "git-a", "c2", ApplyOptions{Force: true, NamespaceAllowlist: []string{"marketing"}})
+	s.requireAllowlistRefusal(err, NamespaceReasonRequested, "finance", "marketing")
+	// A foreign-owned row in a foreign namespace is a namespace refusal, not a
+	// provenance conflict, even with Force.
+	_, err = s.allowlistApply("ns-job", "finance", "git-b", "c2", ApplyOptions{Force: true, NamespaceAllowlist: []string{"finance"}})
+	s.requireAllowlistRefusal(err, NamespaceReasonStored, "finance", "marketing")
+	s.NotErrorIs(err, ErrProvenanceConflict)
+	row := s.allowlistRow("ns-job")
+	s.Equal("marketing", row.Namespace)
+	s.Equal("git-a", row.ProvenanceSourceID)
+}
+
+func (s *ImporterTestSuite) TestApplyAllowlistChecksRetiredRow() {
+	_, err := s.allowlistApply("ns-job", "finance", "git-a", "c1", ApplyOptions{})
+	s.Require().NoError(err)
+	pruned, err := s.importer.PruneMissing(context.Background(), nil, &PruneOptions{SourceID: "git-a"})
+	s.Require().NoError(err)
+	s.Equal(1, pruned)
+
+	_, err = s.allowlistApply("ns-job", "marketing", "git-a", "c2", ApplyOptions{NamespaceAllowlist: []string{"marketing"}})
+	s.requireAllowlistRefusal(err, NamespaceReasonStored, "marketing", "finance")
+	row := s.allowlistRow("ns-job")
+	s.True(row.DeletedAt.Valid, "retired row must stay retired")
+	s.Equal("finance", row.Namespace)
+	testutil.AssertCount(s.T(), s.db, &models.Job{}, 0)
+}
+
+func (s *ImporterTestSuite) TestApplyAllowlistAllowsListedNamespace() {
+	allow := ApplyOptions{NamespaceAllowlist: []string{"default", "marketing"}}
+	created, err := s.allowlistApply("ns-job", "marketing", "git-a", "c1", allow)
+	s.Require().NoError(err)
+	updated, err := s.allowlistApply("ns-job", "marketing", "git-a", "c2", allow)
+	s.Require().NoError(err)
+	s.Equal(created.ID, updated.ID)
+	// A move between two listed namespaces is allowed.
+	moved, err := s.allowlistApply("ns-job", "default", "git-a", "c3", allow)
+	s.Require().NoError(err)
+	s.Equal(created.ID, moved.ID)
+	row := s.allowlistRow("ns-job")
+	s.Equal("default", row.Namespace)
+	s.Equal("c3", row.ProvenanceCommit)
+}
+
+func (s *ImporterTestSuite) TestPruneMissingAllowlistLeavesForeignJobs() {
+	_, err := s.allowlistApply("ns-a", "default", "git-a", "c1", ApplyOptions{})
+	s.Require().NoError(err)
+	_, err = s.allowlistApply("ns-b", "finance", "git-a", "c1", ApplyOptions{})
+	s.Require().NoError(err)
+	_, err = s.allowlistApply("ns-other", "default", "git-b", "c1", ApplyOptions{})
+	s.Require().NoError(err)
+
+	var skipped []PruneSkip
+	pruned, err := s.importer.PruneMissing(context.Background(), nil, &PruneOptions{
+		SourceID: "git-a", NamespaceAllowlist: []string{"default"}, Skipped: &skipped,
+	})
+	s.Require().NoError(err)
+	s.Equal(1, pruned)
+	s.Equal([]PruneSkip{{Alias: "ns-b", Namespace: "finance"}}, skipped)
+	s.True(s.allowlistRow("ns-a").DeletedAt.Valid)
+	s.False(s.allowlistRow("ns-b").DeletedAt.Valid)
+	s.False(s.allowlistRow("ns-other").DeletedAt.Valid)
+}
+
+func (s *ImporterTestSuite) TestPruneMissingNilAllowlistUnchanged() {
+	_, err := s.allowlistApply("ns-a", "default", "git-a", "c1", ApplyOptions{})
+	s.Require().NoError(err)
+	_, err = s.allowlistApply("ns-b", "finance", "git-a", "c1", ApplyOptions{})
+	s.Require().NoError(err)
+
+	pruned, err := s.importer.PruneMissing(context.Background(), nil, &PruneOptions{SourceID: "git-a"})
+	s.Require().NoError(err)
+	s.Equal(2, pruned)
+	testutil.AssertCount(s.T(), s.db, &models.Job{}, 0)
+
+	var skipped []PruneSkip
+	_, err = s.importer.PruneMissing(context.Background(), nil, &PruneOptions{SourceID: "git-a", Skipped: &skipped})
+	s.Require().NoError(err)
+	s.Empty(skipped)
+}
+
+func (s *ImporterTestSuite) TestStoredNamespacesIncludesRetiredRows() {
+	_, err := s.allowlistApply("ns-a", "finance", "git-a", "c1", ApplyOptions{})
+	s.Require().NoError(err)
+	_, err = s.allowlistApply("ns-b", "marketing", "git-b", "c1", ApplyOptions{})
+	s.Require().NoError(err)
+	_, err = s.importer.PruneMissing(context.Background(), nil, &PruneOptions{SourceID: "git-b"})
+	s.Require().NoError(err)
+
+	stored, err := s.importer.StoredNamespaces(context.Background(), []string{"ns-a", "ns-b", "ns-c"})
+	s.Require().NoError(err)
+	s.Equal(map[string]string{"ns-a": "finance", "ns-b": "marketing"}, stored)
+
+	stored, err = s.importer.StoredNamespaces(context.Background(), nil)
+	s.Require().NoError(err)
+	s.NotNil(stored)
+	s.Empty(stored)
 }

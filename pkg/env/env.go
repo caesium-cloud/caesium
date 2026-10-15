@@ -22,12 +22,12 @@ func Process() error {
 	next := &Environment{MaxParallelTasks: runtime.NumCPU()}
 
 	if err := envconfig.Process("caesium", next); err != nil {
-		// envconfig's ParseError echoes the offending value. For the registry
-		// credential mapping that value is exactly what an operator might have
-		// mistakenly set to a literal credential, so report the key and cause
-		// without the value.
+		// envconfig's ParseError echoes the offending value. The registry
+		// credential mapping may hold a literal credential by mistake, and a
+		// git source may carry inline auth (password, SSH key, passphrase), so
+		// for both report the key and cause without the value.
 		perr, ok := errors.AsType[*envconfig.ParseError](err)
-		if ok && perr.KeyName == "CAESIUM_REGISTRY_AUTH" {
+		if ok && (perr.KeyName == "CAESIUM_REGISTRY_AUTH" || perr.KeyName == "CAESIUM_JOBDEF_GIT_SOURCES") {
 			return fmt.Errorf("failed to process environment variables: %s: %w", perr.KeyName, perr.Err)
 		}
 		return fmt.Errorf("failed to process environment variables: %w", err)

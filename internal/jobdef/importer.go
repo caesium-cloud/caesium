@@ -11,6 +11,7 @@ import (
 	"math/rand/v2"
 	"net/url"
 	"reflect"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -31,6 +32,7 @@ import (
 	"github.com/google/uuid"
 	"gorm.io/datatypes"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 var (
@@ -39,6 +41,8 @@ var (
 	ErrJobRunning         = errors.New("job has a running run")
 	ErrContractBreak      = contractenforce.ErrContractBreakBlocked
 	ErrContractAck        = contractenforce.ErrInvalidContractAck
+	// ErrNamespaceNotAllowed is wrapped by *NamespaceAllowlistError.
+	ErrNamespaceNotAllowed = errors.New("job namespace is outside the source namespace allowlist")
 
 	importerBusyRetryBackoffs = []time.Duration{
 		10 * time.Millisecond,
@@ -76,9 +80,64 @@ func notifyTriggerMutationBestEffort(ctx context.Context, action string) {
 	}
 }
 
+// Reasons a NamespaceAllowlistError reports.
+const (
+	NamespaceReasonRequested = "requested_namespace_not_allowed"
+	NamespaceReasonStored    = "stored_namespace_not_allowed"
+)
+
+// NamespaceAllowlistError reports which side of an apply left the allowlist:
+// the namespace the definition requests, or the one its stored row has.
+type NamespaceAllowlistError struct {
+	Alias              string
+	RequestedNamespace string
+	StoredNamespace    string // "" when the alias has no row
+	Allowed            []string
+	Reason             string // NamespaceReasonRequested or NamespaceReasonStored
+}
+
+func (e *NamespaceAllowlistError) Error() string {
+	return fmt.Sprintf("%s: alias %s (%s; requested %q, stored %q, allowed %q)",
+		ErrNamespaceNotAllowed, e.Alias, e.Reason, e.RequestedNamespace, e.StoredNamespace, e.Allowed)
+}
+
+func (e *NamespaceAllowlistError) Unwrap() error { return ErrNamespaceNotAllowed }
+
+// namespaceAllowed reports whether ns is listed; a nil allowlist allows all.
+func namespaceAllowed(allowlist []string, ns string) bool {
+	return allowlist == nil || slices.Contains(allowlist, models.NamespaceOrDefault(ns))
+}
+
 // Importer coordinates persistence of job definitions.
 type Importer struct {
 	db *gorm.DB
+}
+
+// DB returns the connection the importer writes to; git sync records its
+// audit row in the same catalog.
+func (i *Importer) DB() *gorm.DB { return i.db }
+
+// StoredNamespaces maps each alias in aliases that has a jobs row, soft-deleted
+// rows included (the same view as findJobByAliasTx), to that row's namespace.
+// It reads outside any transaction so callers can keep definitions that the
+// apply guard will refuse out of ValidateBatch; the guard stays the authority.
+func (i *Importer) StoredNamespaces(ctx context.Context, aliases []string) (map[string]string, error) {
+	stored := make(map[string]string, len(aliases))
+	if len(aliases) == 0 {
+		return stored, nil
+	}
+	var rows []struct {
+		Alias     string
+		Namespace string
+	}
+	if err := i.db.WithContext(ctx).Unscoped().Model(&models.Job{}).Select("alias", "namespace").
+		Where("alias IN ?", aliases).Scan(&rows).Error; err != nil {
+		return nil, err
+	}
+	for _, row := range rows {
+		stored[row.Alias] = models.NamespaceOrDefault(row.Namespace)
+	}
+	return stored, nil
 }
 
 // NewImporter creates a new importer. The provided db connection must be non-nil.
@@ -100,11 +159,28 @@ type ApplyOptions struct {
 	Force            bool
 	ContractAck      *contractenforce.AllowBreaking
 	ContractWarnings *[]contractenforce.ContractWarning
+	// NamespaceAllowlist confines the apply: both the requested namespace and
+	// the namespace of an existing row (retired rows included) must be listed.
+	// nil means unrestricted. Force does not bypass it.
+	NamespaceAllowlist []string
+}
+
+// PruneSkip names a job PruneMissing left in place because its namespace is
+// outside PruneOptions.NamespaceAllowlist.
+type PruneSkip struct {
+	Alias     string `json:"alias"`
+	Namespace string `json:"namespace"`
 }
 
 // PruneOptions scope the set of jobs that should be retired when pruning.
 type PruneOptions struct {
 	SourceID string
+	// NamespaceAllowlist, when non-nil, limits pruning to jobs whose namespace
+	// is listed; the others are left untouched.
+	NamespaceAllowlist []string
+	// Skipped, when non-nil, receives the jobs left untouched because of
+	// NamespaceAllowlist, sorted by alias.
+	Skipped *[]PruneSkip
 }
 
 // Provenance captures metadata describing the origin of a job definition.
@@ -131,10 +207,8 @@ func (i *Importer) ApplyWithOptions(ctx context.Context, def *schema.Definition,
 			if err != nil {
 				return err
 			}
-			if existing != nil {
-				if err := i.guardJobMutationTx(tx, existing, opts); err != nil {
-					return err
-				}
+			if err := i.guardJobMutationTx(tx, existing, def, opts); err != nil {
+				return err
 			}
 
 			jobModel, triggerModel, err := i.upsertJobAndTriggerTx(tx, existing, def, opts)
@@ -234,17 +308,19 @@ func (i *Importer) PruneMissing(ctx context.Context, desiredAliases []string, op
 		desiredSet[alias] = struct{}{}
 	}
 
+	var allowlist []string
+	if opts != nil {
+		allowlist = opts.NamespaceAllowlist
+	}
+
 	var pruned int
+	var skipped []PruneSkip
 	err := withImporterBusyRetry(ctx, func() error {
 		var attemptPruned int
+		attemptSkipped := make([]PruneSkip, 0)
 		err := i.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-			query := tx.Model(&models.Job{})
-			if opts != nil && strings.TrimSpace(opts.SourceID) != "" {
-				query = query.Where("provenance_source_id = ?", strings.TrimSpace(opts.SourceID))
-			}
-
 			var jobs []models.Job
-			if err := query.Find(&jobs).Error; err != nil {
+			if err := pruneScopeTx(tx, opts).Find(&jobs).Error; err != nil {
 				return err
 			}
 
@@ -252,6 +328,10 @@ func (i *Importer) PruneMissing(ctx context.Context, desiredAliases []string, op
 			for idx := range jobs {
 				jobModel := &jobs[idx]
 				if _, ok := desiredSet[jobModel.Alias]; ok {
+					continue
+				}
+				if !namespaceAllowed(allowlist, jobModel.Namespace) {
+					attemptSkipped = append(attemptSkipped, PruneSkip{Alias: jobModel.Alias, Namespace: models.NamespaceOrDefault(jobModel.Namespace)})
 					continue
 				}
 				toRetire = append(toRetire, jobModel)
@@ -272,10 +352,15 @@ func (i *Importer) PruneMissing(ctx context.Context, desiredAliases []string, op
 			return err
 		}
 		pruned = attemptPruned
+		skipped = attemptSkipped
 		return nil
 	})
 	if err != nil {
 		return pruned, err
+	}
+	if opts != nil && opts.Skipped != nil {
+		slices.SortFunc(skipped, func(a, b PruneSkip) int { return strings.Compare(a.Alias, b.Alias) })
+		*opts.Skipped = skipped
 	}
 	if pruned > 0 {
 		notifyTriggerMutationBestEffort(ctx, "prune")
@@ -320,9 +405,28 @@ func isImporterContentionErr(err error) bool {
 	return dqlite.IsContentionError(err)
 }
 
+// lockJobRows makes a jobs read take row locks (SELECT ... FOR UPDATE) where
+// the backend has them. The apply guard and PruneMissing check a row's
+// namespace and provenance and then write it in the same transaction; on
+// PostgreSQL READ COMMITTED a concurrent apply could otherwise move the row in
+// between. The SQLite and dqlite dialects drop the clause: their transactions
+// are already serializable.
+func lockJobRows(tx *gorm.DB) *gorm.DB {
+	return tx.Clauses(clause.Locking{Strength: "UPDATE"})
+}
+
+// pruneScopeTx selects the active jobs PruneMissing may retire, locked.
+func pruneScopeTx(tx *gorm.DB, opts *PruneOptions) *gorm.DB {
+	query := lockJobRows(tx).Model(&models.Job{})
+	if opts != nil && strings.TrimSpace(opts.SourceID) != "" {
+		query = query.Where("provenance_source_id = ?", strings.TrimSpace(opts.SourceID))
+	}
+	return query
+}
+
 func (i *Importer) findJobByAliasTx(tx *gorm.DB, alias string) (*models.Job, error) {
 	var jobModel models.Job
-	err := tx.Unscoped().Where("alias = ?", alias).First(&jobModel).Error
+	err := lockJobRows(tx).Unscoped().Where("alias = ?", alias).First(&jobModel).Error
 	switch {
 	case errors.Is(err, gorm.ErrRecordNotFound):
 		return nil, nil
@@ -333,7 +437,26 @@ func (i *Importer) findJobByAliasTx(tx *gorm.DB, alias string) (*models.Job, err
 	}
 }
 
-func (i *Importer) guardJobMutationTx(tx *gorm.DB, jobModel *models.Job, opts *ApplyOptions) error {
+func (i *Importer) guardJobMutationTx(tx *gorm.DB, jobModel *models.Job, def *schema.Definition, opts *ApplyOptions) error {
+	// The allowlist runs first: Force must not bypass it, and a foreign-owned
+	// row in a foreign namespace is a namespace refusal, not a provenance one.
+	if opts != nil && opts.NamespaceAllowlist != nil {
+		reason := ""
+		stored := ""
+		if jobModel != nil {
+			stored = models.NamespaceOrDefault(jobModel.Namespace)
+		}
+		switch {
+		case !namespaceAllowed(opts.NamespaceAllowlist, def.Metadata.Namespace):
+			reason = NamespaceReasonRequested
+		case jobModel != nil && !namespaceAllowed(opts.NamespaceAllowlist, stored):
+			reason = NamespaceReasonStored
+		}
+		if reason != "" {
+			return &NamespaceAllowlistError{Alias: def.Metadata.Alias, RequestedNamespace: models.NamespaceOrDefault(def.Metadata.Namespace),
+				StoredNamespace: stored, Allowed: slices.Clone(opts.NamespaceAllowlist), Reason: reason}
+		}
+	}
 	if jobModel == nil {
 		return nil
 	}

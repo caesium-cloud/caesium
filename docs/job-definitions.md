@@ -844,6 +844,7 @@ CAESIUM_REGISTRY_AUTH="ghcr.io=secret://env/GHCR_PULL,registry.example.com:5000=
     "globs": ["**/*.job.yaml"],
     "source_id": "jobs-main",
     "interval": "2m",
+    "namespaces": ["marketing"],
     "auth": {
       "username_ref": "secret://env/GIT_USERNAME",
       "password_ref": "secret://vault/secret/data/git?field=password"
@@ -853,3 +854,14 @@ CAESIUM_REGISTRY_AUTH="ghcr.io=secret://env/GHCR_PULL,registry.example.com:5000=
 ```
 
 The scheduler now bootstraps the Git watcher automatically using these settings, reusing the same resolver chain as the CLI lint command so secret references remain out of manifests.
+
+### Namespace allowlist
+
+A source with `namespaces` may only apply manifests whose `metadata.namespace` (empty means `default`) is listed. A source without the field is unrestricted, exactly as before.
+
+- **Skipped, not deleted.** A manifest outside the list is skipped and reported per manifest (a warning log line naming its path, alias and namespace); the rest of the sync goes ahead. Its alias still counts as present for pruning, so a forbidden move leaves the existing job active and unchanged instead of retiring it.
+- **Stored namespace counts too.** The check runs inside the importer transaction against both the requested namespace and the namespace of the job already stored under that alias (retired jobs included), and `force` does not bypass it. A narrowed source can neither move a job it used to own into its list nor out of it.
+- **Prune stays inside the list.** Pruning retires only this source's jobs whose namespace is listed. Its jobs in other namespaces are left untouched and reported.
+- **Audit.** Each sync of the source writes one audit row: actor `system:git-sync`, action `jobdef.git_sync`, resource `git_source` / the `source_id`. Its outcome is `success`, `denied` (a manifest was skipped or a job was left unpruned) or `error`, and its metadata holds the source URL (credentials, query and fragment removed), ref, commit, `namespaces`, `applied`, `violations`, `pruned` and `prune_skipped`. Read it with `caesium auth audit --action jobdef.git_sync` (needs an auth mode). Unrestricted sources write no audit row.
+- **Startup checks.** With git sync enabled, the server refuses to start (`git sync configuration failure`) when `namespaces` is `[]` or holds `""`, `*` or an entry that is not a DNS label, or when a source with `namespaces` lacks a non-empty `source_id` or shares it with another source (ownership and pruning follow `source_id`). A `namespaces` value of `null`, a singular `namespace` key, or two case variants of `namespaces` in one entry are rejected while the environment is parsed (`environment failure`), so they fail every `caesium` command, even with git sync disabled. Neither error echoes the `CAESIUM_JOBDEF_GIT_SOURCES` value, which can hold inline credentials.
+- Entries are checked for syntax only, not against declared namespaces.

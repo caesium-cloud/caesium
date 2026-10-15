@@ -70,8 +70,13 @@ settings plus these **same server and runner** variables:
 CAESIUM_JOBDEF_GIT_ENABLED=true
 CAESIUM_JOBDEF_GIT_ONCE=false
 CAESIUM_JOBDEF_GIT_INTERVAL=500ms
-CAESIUM_JOBDEF_GIT_SOURCES=[{"url":"git://<owned-alias>:9418/coverage.git","ref":"main","path":"jobs","globs":["**/*.job.yaml"],"source_id":"coverage-git-<run-id>","interval":"500ms","once":false}]
+CAESIUM_JOBDEF_GIT_SOURCES=[{"url":"git://<owned-alias>:9418/coverage.git","ref":"main","path":"jobs","globs":["**/*.job.yaml"],"source_id":"coverage-git-<run-id>","interval":"500ms","once":false,"namespaces":["default"]}]
 ```
+
+The main server additionally sets `CAESIUM_DATABASE_CONSOLE_ENABLED=true`, so the
+runner can read the source's `system:git-sync` audit rows through the read-only
+`POST /v1/database/query` (this lane runs without auth, so `/v1/auth/audit` is
+not mounted).
 
 Runner-only variables:
 
@@ -83,7 +88,8 @@ CAESIUM_JOBDEF_GIT_RECEIPT=/coverage-evidence/git-sync.json
 
 Mount a fresh, collector-owned evidence directory as `/coverage-evidence` on the
 runner and require `TestIntegrationTestSuite/TestJobdefGitSyncLocalRepositoryUpdatesAndPrunes`
-to PASS without skip. The runner keeps the candidate CLI path/GOCOVERDIR and
+and `TestIntegrationTestSuite/TestJobdefGitSyncNamespaceAllowlistSkipsForeignManifests`
+to PASS without skip (in that order: the first needs HEAD at the initial commit). The runner keeps the candidate CLI path/GOCOVERDIR and
 Docker socket from the ordinary public-surface lanes. Only the candidate CLI and
 main server supply eligible counters. Fixture/helper/test-binary counters cannot
 replace either original process contribution.
@@ -99,6 +105,24 @@ single Git source, validates real fixture paths/initial native HEAD, and observe
    task with output marker `updated`.
 4. A real native deletion commit, exact imported JobID 404/alias absence, and
    unchanged sentinel ID surviving source-scoped prune.
+
+The second scenario drives the source's `["default"]` namespace allowlist with
+four more native commits, each awaited through its single `system:git-sync`
+audit row, and assumes no particular HEAD:
+
+1. Two `default` manifests and one in `marketing`: the `marketing` one is
+   skipped and reported (`requested_namespace_not_allowed`), never applied.
+2. After a candidate CLI apply with `--provenance-source-id` plants a
+   source-owned job in `marketing`, a commit moving a `default` manifest to
+   `marketing`: the move is refused, the job keeps its ID, namespace and
+   previous commit, and prune leaves the planted job untouched (`prune_skipped`).
+3. A manifest claiming the planted alias for `default`: refused on its stored
+   namespace (`stored_namespace_not_allowed`); the planted job is unchanged.
+4. Deleting all four manifests (`jobs/ignored.txt` stays): only the two
+   `default` jobs are pruned; the planted job stays and is reported.
+
+It writes no receipt; the lane's clean server exit shows that no skip reached
+the watcher's fatal error path.
 
 The fresh receipt records schema version 1, `source` (the complete initial state),
 `initial_commit`, `updated_commit`, `deleted_commit`, `job_id`, `sentinel_id`,

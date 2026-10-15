@@ -39,6 +39,9 @@ type Source struct {
 	SourceID string
 	Globs    []string
 	LocalDir string
+	// Namespaces confines the source to these tenancy namespaces (sorted and
+	// de-duplicated by runtime.BuildGitWatches). nil means unrestricted.
+	Namespaces []string
 }
 
 // BasicAuth holds optional credentials for HTTPS remotes.
@@ -65,9 +68,16 @@ type SSHAuth struct {
 
 // Sync clones/fetches the repository and applies manifests via the importer.
 func (s *Source) Sync(ctx context.Context, importer *jobdef.Importer) error {
+	_, err := s.SyncWithReport(ctx, importer)
+	return err
+}
+
+// SyncWithReport is Sync that also returns what the sync applied, skipped and
+// pruned.
+func (s *Source) SyncWithReport(ctx context.Context, importer *jobdef.Importer) (SyncReport, error) {
 	dir, hash, cleanup, err := s.cloneRepo(ctx)
 	if err != nil {
-		return err
+		return SyncReport{}, err
 	}
 	defer cleanup()
 
@@ -84,6 +94,7 @@ type WatchOptions struct {
 type applyFilePlan struct {
 	def  *schema.Definition
 	opts *jobdef.ApplyOptions
+	path string
 }
 
 // Watch performs an initial sync and optionally continues on an interval until ctx is cancelled.
@@ -144,7 +155,9 @@ func Watch(ctx context.Context, importer *jobdef.Importer, opts WatchOptions) er
 			return nil
 		}
 
-		if err := opts.Source.applyDir(syncCtx, importer, cloneDir, hash); err != nil {
+		// Namespace violations are reported, never returned, so lastHash
+		// advances and each one is reported once per commit.
+		if _, err := opts.Source.applyDir(syncCtx, importer, cloneDir, hash); err != nil {
 			if syncCtx.Err() != nil {
 				return context.Cause(syncCtx)
 			}
@@ -214,7 +227,25 @@ func (s *Source) cloneRepo(ctx context.Context) (string, string, func(), error) 
 	return dir, hash, cleanup, nil
 }
 
-func (s *Source) applyDir(ctx context.Context, importer *jobdef.Importer, dir string, commit string) error {
+// applyDir applies one checkout. A source with Namespaces records one audit
+// row per call, whatever the outcome; namespace violations and prune skips are
+// reported, never returned (a returned error stops the server).
+func (s *Source) applyDir(ctx context.Context, importer *jobdef.Importer, dir string, commit string) (SyncReport, error) {
+	report := SyncReport{
+		SourceID:   strings.TrimSpace(s.SourceID),
+		URL:        redactSourceURL(s.URL),
+		Ref:        s.Ref,
+		Commit:     commit,
+		Namespaces: s.Namespaces,
+	}
+	err := s.applyCheckout(ctx, importer, dir, commit, &report)
+	if s.Namespaces != nil {
+		s.auditSync(importer, report, err)
+	}
+	return report, err
+}
+
+func (s *Source) applyCheckout(ctx context.Context, importer *jobdef.Importer, dir string, commit string, report *SyncReport) error {
 	root := filepath.Join(dir, strings.TrimPrefix(s.Path, "/"))
 	if strings.TrimSpace(s.Path) == "" {
 		root = dir
@@ -251,7 +282,6 @@ func (s *Source) applyDir(ctx context.Context, importer *jobdef.Importer, dir st
 	slices.Sort(files)
 
 	plans := make([]applyFilePlan, 0)
-	defs := make([]schema.Definition, 0)
 	desiredAliases := make([]string, 0)
 	for _, path := range files {
 		relToRepo, err := filepath.Rel(dir, path)
@@ -266,35 +296,85 @@ func (s *Source) applyDir(ctx context.Context, importer *jobdef.Importer, dir st
 			Path:     filepath.ToSlash(relToRepo),
 		}
 
-		opts := &jobdef.ApplyOptions{Provenance: prov}
+		opts := &jobdef.ApplyOptions{Provenance: prov, NamespaceAllowlist: s.Namespaces}
 		fileDefs, err := collectFileDefinitions(path)
 		if err != nil {
 			return err
 		}
 		for _, def := range fileDefs {
+			// Every alias stays desired, so a manifest refused for its
+			// namespace protects the existing job from pruning.
 			desiredAliases = append(desiredAliases, def.Metadata.Alias)
-			defs = append(defs, def)
-			plans = append(plans, applyFilePlan{def: &def, opts: opts})
+			plans = append(plans, applyFilePlan{def: &def, opts: opts, path: prov.Path})
 		}
 	}
 
-	if err := importer.ValidateBatch(ctx, defs); err != nil {
+	if s.Namespaces != nil {
+		if err := rejectDuplicateAliases(plans); err != nil {
+			return err
+		}
+		allowed, err := s.allowedPlans(ctx, importer, plans, report)
+		if err != nil {
+			return err
+		}
+		plans = allowed
+	}
+
+	if err := importer.ValidateBatch(ctx, planDefinitions(plans)); err != nil {
 		return err
 	}
 
-	for _, plan := range plans {
-		if _, err := importer.ApplyWithOptions(ctx, plan.def, plan.opts); err != nil {
-			return err
+	for idx, plan := range plans {
+		if applyHookForTest != nil {
+			applyHookForTest(plan.def.Metadata.Alias)
 		}
+		if _, err := importer.ApplyWithOptions(ctx, plan.def, plan.opts); err != nil {
+			nsErr, ok := errors.AsType[*jobdef.NamespaceAllowlistError](err)
+			if !ok {
+				return err
+			}
+			// The in-transaction guard is the authority: a row that moved
+			// after the pre-filter is still a per-manifest skip. The rest of
+			// the batch was validated against the refused proposal, so
+			// revalidate it against the stored row that stays live.
+			s.reportViolation(report, plan.path, nsErr.Alias, nsErr.RequestedNamespace, nsErr.StoredNamespace, nsErr.Reason)
+			if err := importer.ValidateBatch(ctx, planDefinitions(plans[idx+1:])); err != nil {
+				return err
+			}
+			continue
+		}
+		report.Applied++
 	}
 
 	if strings.TrimSpace(s.SourceID) != "" {
-		if _, err := importer.PruneMissing(ctx, desiredAliases, &jobdef.PruneOptions{SourceID: s.SourceID}); err != nil {
+		pruneOpts := &jobdef.PruneOptions{SourceID: s.SourceID}
+		if s.Namespaces != nil {
+			pruneOpts.NamespaceAllowlist = s.Namespaces
+			pruneOpts.Skipped = &report.PruneSkipped
+		}
+		pruned, err := importer.PruneMissing(ctx, desiredAliases, pruneOpts)
+		if err != nil {
 			return err
+		}
+		report.Pruned = pruned
+		for _, skip := range report.PruneSkipped {
+			log.Warn("git sync left a job outside the source namespace allowlist unpruned",
+				"source_id", report.SourceID, "url", report.URL, "commit", commit,
+				"alias", skip.Alias, "namespace", skip.Namespace, "allowed", s.Namespaces)
 		}
 	}
 
 	return nil
+}
+
+// planDefinitions copies the plans' definitions for ValidateBatch, which
+// normalises its input in place.
+func planDefinitions(plans []applyFilePlan) []schema.Definition {
+	defs := make([]schema.Definition, 0, len(plans))
+	for _, plan := range plans {
+		defs = append(defs, *plan.def)
+	}
+	return defs
 }
 
 func collectFileDefinitions(path string) ([]schema.Definition, error) {
