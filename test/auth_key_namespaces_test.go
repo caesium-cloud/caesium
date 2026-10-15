@@ -102,6 +102,74 @@ func (s *IntegrationTestSuite) TestAuthKeyNamespacesGrantResolution() {
 	s.requireKeyStatus(created.Plaintext, http.StatusForbidden)
 }
 
+// TestAuthKeyRotationKeepsNamespaces drives `caesium auth key rotate` on a
+// confined key and proves the replacement secret stays confined: rotation
+// must never turn a namespace-confined key into a cluster key. A NULL key
+// rotates to NULL, so ordinary keys keep their cluster role.
+func (s *IntegrationTestSuite) TestAuthKeyRotationKeepsNamespaces() {
+	s.requireAuthLane()
+
+	catalogDB := s.openIntegrationCatalogDB()
+	defer func() { s.Require().NoError(catalogDB.Close()) }()
+	var minted []string
+	defer func() {
+		for _, id := range minted {
+			out, err := s.runCLIStdout("auth", "key", "revoke", "--id", id, "--server", s.caesiumURL)
+			s.NoError(err, "caesium auth key revoke %s failed:\n%s", id, out)
+		}
+	}()
+	rotate := func(id string) createdAPIKey {
+		s.T().Helper()
+		out, err := s.runCLIStdout("auth", "key", "rotate", "--id", id, "--grace-period", "1m", "--server", s.caesiumURL)
+		s.Require().NoError(err, "caesium auth key rotate failed:\n%s", out)
+		rotated := s.parseCreatedKey(out)
+		minted = append(minted, rotated.Meta.ID)
+		return rotated
+	}
+	storedNamespaces := func(id string) (string, bool) {
+		s.T().Helper()
+		var value *string
+		s.Require().NoError(catalogDB.QueryRowContext(s.T().Context(),
+			`SELECT namespaces FROM api_keys WHERE id = ?`, id).Scan(&value))
+		if value == nil {
+			return "", false
+		}
+		return *value, true
+	}
+
+	confined := s.createAPIKeyCLI("--role", "viewer", "--description",
+		fmt.Sprintf("auth-lane rotate confined key %d", time.Now().UnixNano()))
+	minted = append(minted, confined.Meta.ID)
+	result, err := catalogDB.ExecContext(s.T().Context(),
+		`UPDATE api_keys SET namespaces = ? WHERE id = ?`, `["marketing"]`, confined.Meta.ID)
+	s.Require().NoError(err)
+	affected, err := result.RowsAffected()
+	s.Require().NoError(err)
+	s.Require().Equal(int64(1), affected)
+	s.requireKeyStatus(confined.Plaintext, http.StatusForbidden)
+
+	rotated := rotate(confined.Meta.ID)
+	s.NotEqual(confined.Meta.ID, rotated.Meta.ID)
+	s.requireKeyStatus(rotated.Plaintext, http.StatusForbidden)
+	stored, ok := storedNamespaces(rotated.Meta.ID)
+	s.Require().True(ok, "the rotated key must not store NULL (cluster-wide) namespaces")
+	s.JSONEq(`["marketing"]`, stored)
+
+	listed := s.listAPIKeysRaw()
+	s.Require().Contains(listed, rotated.Meta.ID)
+	s.JSONEq(`["marketing"]`, string(listed[rotated.Meta.ID]["namespaces"]),
+		"`auth key list` must show the rotated key still confined")
+
+	// Control: an unconfined key rotates to NULL and keeps its cluster role.
+	cluster := s.createAPIKeyCLI("--role", "viewer", "--description",
+		fmt.Sprintf("auth-lane rotate cluster key %d", time.Now().UnixNano()))
+	minted = append(minted, cluster.Meta.ID)
+	rotatedCluster := rotate(cluster.Meta.ID)
+	_, ok = storedNamespaces(rotatedCluster.Meta.ID)
+	s.False(ok, "a NULL-namespaces key must rotate to NULL")
+	s.requireKeyStatus(rotatedCluster.Plaintext, http.StatusOK)
+}
+
 // requireKeyStatus asserts GET /v1/atoms with the given key answers status.
 func (s *IntegrationTestSuite) requireKeyStatus(token string, want int) {
 	s.T().Helper()
