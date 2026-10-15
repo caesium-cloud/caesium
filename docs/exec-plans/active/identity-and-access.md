@@ -1,6 +1,6 @@
 # Identity and Access — Namespaces, Grants, Policy-as-Code, Corporate SSO
 
-Last updated: 2026-10-13
+Last updated: 2026-10-15
 
 Caesium's authentication is shipped and native (OIDC, SAML, LDAP; `docs/sso-authentication.md`),
 but authorization is a single global role ladder keyed per HTTP route, SSO users cannot be
@@ -71,17 +71,18 @@ fairness was parked by `docs/exec-plans/active/window-scheduling.md` (its §"Glo
 vs. per-job load ceiling"); Stream D of this plan owns the v1 slice (issue #395) and
 window-scheduling's parked note points here.
 
-## Progress (as of 2026-10-13)
+## Progress (as of 2026-10-15)
 
-No implementation waves have shipped yet. W1's available foundation items are
-verified at the authorized review-PR endpoint against master
-`150bbaa472bdd35af518d000b52436e824959be5`. Item checkboxes remain unchecked
-until merged acceptance evidence exists.
+W1 merged on 2026-10-13: A1 (#624), B1 (#625), the separately authorized DB
+repair (#626) and the W1 plan sync (#622). W2 raised A2 (#638), D3 (#640) and
+B3 (#639) on 2026-10-15. All three are green, and they combine with master
+without conflicts. They await CODEOWNER merge. B3 also carries one design
+decision for the user (see Wave 2).
 
 ### Wave 1 — Foundations (2026-10-09)
 
-- **W1-α / A1 — policy package:** ready for review [PR #624](https://github.com/caesium-cloud/caesium/pull/624),
-  head `4417f69ddc1be034674d304ed2fee03ba44b2ed3`. Independent security review
+- **W1-α / A1 — policy package:** merged [PR #624](https://github.com/caesium-cloud/caesium/pull/624)
+  as `e618f921` on 2026-10-13 (reviewed head `4417f69ddc1be034674d304ed2fee03ba44b2ed3`). Independent security review
   passed after email-confusable, traversal, Vault delimiter and strict YAML fixes.
   Current-head hosted lint and both full race unit suites passed, including all
   security regressions (policy coverage 99.6%); the tested merge has the same tree.
@@ -95,9 +96,9 @@ until merged acceptance evidence exists.
   errors; unchanged base and exact-head revalidation passed (269 passed, 41
   lane-specific skips; recheck 886.772s). Original failed evidence is preserved;
   the confirmed base pool defects do not establish its causal chain.
-- **W1-β / B1 — namespace persistence and cache identity:** ready for review
-  [PR #625](https://github.com/caesium-cloud/caesium/pull/625), head
-  `e5380a79a5a05ff307cbf5ede9d855daffc67c5d`. Independent review passed after
+- **W1-β / B1 — namespace persistence and cache identity:** merged
+  [PR #625](https://github.com/caesium-cloud/caesium/pull/625) as `062c5bba` on 2026-10-13
+  (reviewed head `e5380a79a5a05ff307cbf5ede9d855daffc67c5d`). Independent review passed after
   correcting namespace-only CLI/REST/approval diffs and explaining unsafe replay
   refusal. Real schema CLI, namespace incident recovery, and enhanced cache/diff/
   replay journeys are required by coverage; ten selection guard tests passed.
@@ -118,8 +119,8 @@ until merged acceptance evidence exists.
   one DB shard; populated hot/cold-shard and PostgreSQL upgrades are unqualified.
   Owned containers/network were cleaned; cold backup and evidence are retained.
   Strict constraints and coordinated upgrade guidance travel together in this PR.
-- **Separately authorized DB repair:** ready for review [PR #626](https://github.com/caesium-cloud/caesium/pull/626),
-  head `a8e92a34f9975dc9f847722c6184f8847f709da1`. Independent review passed after
+- **Separately authorized DB repair:** merged [PR #626](https://github.com/caesium-cloud/caesium/pull/626)
+  as `4d7a7c98` on 2026-10-13 (reviewed head `a8e92a34f9975dc9f847722c6184f8847f709da1`). Independent review passed after
   adding a fresh-installer regression, removing unnecessary reinstallation logic,
   and hardening routing tests/fixtures/documentation. Actual SQL detects a deliberate
   Config-only wiring mutation; restored package race tests and vet passed. Full
@@ -130,22 +131,129 @@ until merged acceptance evidence exists.
   `839e8e0c` passed all hosted checks and full
   local integration (822.055s; 269 passed, 41 lane-specific skips). This repair does
   not change identity dependencies or prove the original failure's causal chain.
-- **A2 and D3:** not dispatched. A2 requires A1 to land; D3 requires B1 to land.
-  The suggested W1 includes these follow-ups, but the review-PR endpoint leaves
-  them pending until their prerequisite PRs merge. H-1, H-2, and N-1 require A4.
-- **Plan sync:** ready for review [PR #622](https://github.com/caesium-cloud/caesium/pull/622);
-  documentation guardrails and local links passed. No merges were performed;
-  required human reviews and all unmerged worktrees are retained. Remaining
-  streams retain their original dependencies.
+- **A2 and D3:** not dispatched in W1 because their prerequisites had not merged.
+  Both went into W2 after A1 and B1 merged.
+- **Plan sync:** merged [PR #622](https://github.com/caesium-cloud/caesium/pull/622) as `ccff3bc0`.
+
+### Wave 2 — Grants, shared-object namespaces, git-sync allowlist (2026-10-15)
+
+Each stream was implemented from a brief grounded at master `b796b567`. Each brief
+was adversarially critiqued and revised before dispatch. Every PR had a pre-PR
+Codex adversarial review, an independent three-lens review (security, data and
+migration, surface and tests) in which every finding faced two or three
+refuters, and Codex rounds on the PR head. Each stream agent ran lint, the full
+race unit suite, `integration-test` and `integration-test-agent` under the host
+lane lock. The orchestrator also ran the same chain on the combined tree
+(A2 + D3 + B3 merged onto `b796b567`; see below).
+
+- **W2-α / A2 — grants on the principal:** [PR #638](https://github.com/caesium-cloud/caesium/pull/638),
+  head `ba0a46c7`. `Principal.Role` is replaced by `Grants` (`RoleIn`, `ClusterRole`,
+  `AllowedNamespaces`; empty grants are never "unrestricted"). Grants are resolved
+  per request through a new `policy.Source`. `RoleMapper` is the env adapter,
+  checked against the pre-A2 `Resolve` by an oracle test. SSO login denies with
+  `no_binding`. `APIKey.Namespaces` is NULL ⇒ `["*"]`, and undecodable, `null` or
+  `[]` values fail closed. `User.EmailVerified` is an untagged nullable bool. No
+  policy file means byte-identical RBAC, audit and metric labels. Evidence:
+  - lint, unit and `integration-test` (891s) all pass;
+  - `integration-test-agent` passes 46 scenarios, including the new
+    `TestAuthKeyNamespacesGrantResolution`;
+  - hosted CI, `coverage-ratchets` and `ci-ok` are green;
+  - Codex (pre-PR and round 1) and the three-lens review found no defects.
+  **Decision for sign-off:** in v1 only OIDC `email_verified=true` email is
+  trusted. SAML and LDAP email never satisfies `users:` bindings; groups still
+  work everywhere. Obligations recorded in the PR:
+  - G3: a live per-request-resolution proof.
+  - A4/G1: a live rejection of an unverified email.
+  - A5: `RotateKey` copies `Namespaces`; the bootstrap reset; `AdminKeyExists`
+    ignores confined keys; minting is limited to a subset of the caller's grants;
+    `key_create.go` still checks `Role`.
+  - Interim: whoami shows `role:""` for a confined-only principal until A3 and A5.
+- **W2-β / D3 — namespaces on shared objects:** [PR #640](https://github.com/caesium-cloud/caesium/pull/640),
+  head `8fd784c8`.
+  - **What changed:** `NotificationChannel`, `NotificationPolicy` and `AgentProfile`
+    carry a create-only `namespace` (text, not null, default `default`, indexed; `*`
+    is cluster-shared). A PATCH that changes it returns 400. A policy may reference
+    only a visible channel. Server-side lint and apply (and so git sync and the
+    incident patch, through `Importer.ValidateBatch`) reject a profile or escalation
+    channel outside the job's namespace or `*`. The rule lives in
+    `internal/jobdef/agent_profile_refs.go`, not `internal/jobdef/lint/`. A3 must
+    reuse `models.NormalizeObjectNamespace` for POST bodies.
+  - **Triage-only profile:** the built-in `triage-only` profile is seeded and
+    migrated to `*`. Spec §10.4 and §15 are amended in the same PR, by orchestrator
+    decision.
+  - **Native dqlite probe:** native dqlite honours `PRAGMA foreign_keys = OFF`
+    (read-back 0). SET NULL and CASCADE child rows survive the pre-existing
+    parent-table rebuilds.
+  - **Evidence:** lint, unit, `integration-test` and `integration-test-agent` (the
+    three new scenarios pass on their lanes) all pass. Hosted CI is 41/41 green.
+    Codex (pre-PR and round 1) and the three-lens review found no defects.
+- **W2-γ / B3 — git-sync namespace allowlist:** [PR #639](https://github.com/caesium-cloud/caesium/pull/639),
+  head `97fd1c82`.
+  - **What changed:** `GitSourceConfig.Namespaces`. Fail-open spellings (`null`,
+    singular `namespace`, case-variant duplicates) are rejected at decode time.
+    `[]`, `*`, a missing `source_id` and a shared `source_id` are rejected at
+    startup. The requested and stored namespaces are both enforced by the
+    in-transaction `guardJobMutationTx` (ahead of `Force`). `PruneMissing` is
+    confined, and skips are reported. A read-only `StoredNamespaces` pre-filter
+    runs before `ValidateBatch`. Only allowlisted sources write a
+    `jobdef.git_sync` audit row (`system:git-sync`); unrestricted sources are
+    unchanged.
+  - **Review fixes:** guarded rows are locked (`FOR UPDATE` on Postgres). The
+    remaining batch is revalidated after an in-transaction refusal.
+    `CAESIUM_JOBDEF_GIT_SOURCES` is redacted from env decode errors, which
+    previously leaked inline git credentials.
+  - **Live scenario:** `TestJobdefGitSyncNamespaceAllowlistSkipsForeignManifests`
+    runs on the coverage-ratchets `git-sync` lane. `file://` against
+    `integration-up` is infeasible.
+  - **Open decision for the user:** Codex rated this P1 in three rounds. A
+    concurrent REST move of a later manifest can leave an earlier, already
+    committed manifest in a persisted trigger cycle. The sync then fails loudly,
+    and it fails again on restart. The orchestrator assesses this as a
+    pre-existing design property: master already persists a partial batch when a
+    later manifest fails (for example `ErrProvenanceConflict`), and an invalid
+    batch is fatal. It recommends accepting this with the follow-up below
+    instead of an atomic batch, which would hold the dqlite writer across every
+    manifest. Regressions pin the loud failure.
+- **Combined gate:** A2 + D3 + B3 merge cleanly onto `b796b567` (78 files). The
+  full chain on the combined tree passed: lint (0 issues), the full race unit suite,
+  `integration-test` and `integration-test-agent`. That is 309 scenarios passed
+  and 47 lane-specific skips, with no failures. D3's three scenarios pass on
+  their lanes. A2's scenario passes on the auth lane and skips on the default lane
+  by design. Both git-sync scenarios skip outside the coverage `git-sync` lane by
+  design.
+- **Plan-doc conflict rules updated:** `internal/models/user.go` (A2 → E1),
+  `pkg/env/env.go` (B3's redaction), `internal/auth/audit.go` (B3),
+  `internal/jobdef/lint/` (D3 did not touch it), and the new
+  `internal/models/namespace.go` line.
+- **Follow-ups filed by this wave:**
+  - D4:
+    - reject undeclared namespaces when a shared object is created (needs the
+      A4 policy holder);
+    - global object names: a cross-namespace 409 discloses that the name exists
+      elsewhere, and names can be squatted;
+    - with A8, runtime by-name profile resolution in
+      `internal/incident/playbook_resolve.go` ignores namespace.
+  - B2: the git-sync coverage lane needs a policy fixture that declares
+    `marketing` once undeclared namespaces are rejected.
+  - Git sync: make invalid-batch failures non-fatal (a per-source degraded
+    state) instead of stopping the server. This is pre-existing; B3 adds a
+    racy trigger for it.
+  - Boot cost: dqlite rebuilds default-tagged tables several times per
+    AutoMigrate. This is pre-existing and safe per the D3 probe, but slow.
+  - A4: warn when a policy has `users:` bindings but no provider can supply a
+    trusted email. N-1: document which providers can.
+- **Next wave (W3 candidates once W2 merges):** A3 (needs A2 + D3), A4 (A2) and
+  E1 (A2), as the original W2 suggestion planned, then the W3 row of the
+  suggested-waves table.
 
 ### Stream Status
 
 | Stream | Scope | Priority | Status |
 |--------|-------|----------|--------|
-| A | Policy file, grants, principal, route classes, namespace-aware middleware, keys with namespaces, SSO-admin key management | **P0** | W1 A1 review #624; A2 waits for A1 merge |
-| B | `metadata.namespace` on jobs: schema, columns, importer, lint, apply/prune/move, git-sync allowlist, collection filtering, aggregate collapse | **P0** | W1 B1 review #625 |
+| A | Policy file, grants, principal, route classes, namespace-aware middleware, keys with namespaces, SSO-admin key management | **P0** | A1 merged #624; A2 ready #638; A3/A4 next |
+| B | `metadata.namespace` on jobs: schema, columns, importer, lint, apply/prune/move, git-sync allowlist, collection filtering, aggregate collapse | **P0** | B1 merged #625; B3 ready #639 (one open decision) |
 | C | Runtime isolation: per-namespace Kubernetes namespace + service account, scoped secret resolution, Helm RBAC | P1 | Not started |
-| D | Run quota + round-robin fairness (#395 v1 slice); namespaced notification channels, policies, agent profiles | P1 | Not started |
+| D | Run quota + round-robin fairness (#395 v1 slice); namespaced notification channels, policies, agent profiles | P1 | D3 ready #640 |
 | E | Identity lifecycle: IdP group refresh, user/session administration, user-bound keys, `caesium login` | P1 | Not started |
 | F | Console: grants-aware gating, namespace switcher, namespace chips, quota label, Access page | P1 | Not started |
 | G | Keycloak: realm fixture, CI lane, Playwright + Go scenarios, operator guidance | P1 | Not started |
@@ -164,7 +272,7 @@ collections, gives API keys namespaces, and makes every `/v1/auth/*` controller 
 any principal so SSO admins are first-class. With no policy file the env role mapping is
 translated into cluster-wide bindings and behaviour is unchanged.
 
-- [ ] A1. Add the policy package: `AccessPolicy` schema (namespaces with `kubernetes`,
+- [x] A1. Add the policy package: `AccessPolicy` schema (namespaces with `kubernetes`,
       `secrets.allow`, `quotas`; bindings with `subjects.{groups,users}`, `role`,
       `namespaces`), YAML parse, validation per spec §6.2 (DNS-label namespaces, `*`
       rejected as a key, declared-namespace check on bindings, role validity,
@@ -324,7 +432,7 @@ importer, server-side lint, apply/prune/move semantics, the git-sync per-source
 allowlist, and the collection filtering and aggregate collapse that Stream A's
 middleware relies on.
 
-- [ ] B1. Add `metadata.namespace` to the manifest and the columns behind it:
+- [x] B1. Add `metadata.namespace` to the manifest and the columns behind it:
       `Metadata.Namespace` in the definition (syntax validation in `Validate()`,
       default `default`), `Job.Namespace` / `JobRun.Namespace` / `Backfill.Namespace`
       (text, not null, default `'default'`, indexed) and `Incident.Namespace`
@@ -944,8 +1052,9 @@ Regenerate the table from the edges if items move.
 
 **Cross-stream file conflicts**
 
-- `pkg/env/env.go`: A4 (policy file + reload interval), E4 (CLI key TTL), E2 (refresh
-  interval, staleness, SAML TTL), A6 (deprecations). Additive fields; sequence
+- `pkg/env/env.go`: B3 (W2: `CAESIUM_JOBDEF_GIT_SOURCES` redaction in `Process`), A4
+  (policy file + reload interval), E4 (CLI key TTL), E2 (refresh interval, staleness,
+  SAML TTL), A6 (deprecations). Additive fields; sequence
   A4 → E4 → E2 → A6, never two in the same wave.
 - `cmd/start/start.go`: A2 (the SSO block: `policy.Source` wiring, replacing the
   `RoleMapper`/`SSOService` construction), A4 (file loader behind the same interface,
@@ -959,10 +1068,15 @@ Regenerate the table from the edges if items move.
 - `internal/auth/rbac.go`: A3 reshapes the table (classes) and A4 adds two entries;
   both sit in W2, so the orchestrator merges A3 first and A4 rebases its entries onto
   the classified shape. E3 adds classified entries after A3.
-- `internal/auth/audit.go`: A3, A4, A6, E2, E3 add action constants. Additive; rebase.
+- `internal/auth/audit.go`: B3 (W2, `jobdef.git_sync`), A3, A4, A6, E2, E3 add action
+  constants. Additive; rebase.
 - `internal/metrics/metrics.go`: A4, D1, E2 add collectors (two edit sites). Additive.
 - `internal/models/api_key.go`: A2 (`Namespaces`) → E4 (`UserID`). Sequential.
-- `internal/models/user.go`: E1 (`RefreshGrant*`, `GroupsRefreshedAt`) only.
+- `internal/models/user.go`: A2 (`EmailVerified`, W2) → E1 (`RefreshGrant*`,
+  `GroupsRefreshedAt`).
+- `internal/models/namespace.go`: D3 (W2) added `ClusterNamespace`,
+  `NormalizeObjectNamespace`, `ObjectVisibleFrom`, `CheckNamespaceUnchanged`. A3 and D4
+  reuse them; do not add a second `*` constant.
 - `internal/models/models.go`: **no new tables** in this plan; columns only.
 - `internal/run/store.go`: B1 (namespace on run creation), D1 (`namespaceCapacityTx`
   in `admit` / `readmitRetryTx`), C1 (descriptor / runtime id), B4 (`List` filter).
@@ -982,7 +1096,8 @@ Regenerate the table from the edges if items move.
 - `pkg/jobdef/definition.go`: B1 only.
 - `internal/cache/hash.go`: B1 (namespace in the key + test) → C1 (hash the resolved
   Kubernetes target). Sequential.
-- `internal/jobdef/lint/`: B2, C4, D3. Different files where possible; B2 → D3 → C4.
+- `internal/jobdef/lint/`: B2, C4. Different files where possible; B2 → C4. (D3's
+  reference check lives in `internal/jobdef/agent_profile_refs.go`.)
 - `internal/job/job.go` and `internal/worker/runtime_executor.go`: C2 and C4 both edit
   the secret-resolution call site region. Sequence C4 → C2.
 - `internal/runqueue/dequeuer.go`: D1 here **and** `window-scheduling.md` (sibling,
