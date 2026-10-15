@@ -335,7 +335,7 @@ Resume unfinished waves. Do not archive this plan while later items remain.
 - **Base:** `b796b5672eab30134876f403f257af9e7a1f76da`; W3 implementation
   and plan synchronization are merged.
 - **W4-α / D1:** Draft [PR #636](https://github.com/caesium-cloud/caesium/pull/636),
-  head `4997efb535479dd0e09ae025620cc4578434eb21`, implements trusted
+  head `43e89c438f48e1d794743351e0558139ae6039d6`, implements trusted
   activity/admission correlation and durable local links. Containerized lint,
   full race/coverage unit tests and all required tagged hermetic checks passed
   on the committed contents. Independent source review has no open findings.
@@ -349,8 +349,10 @@ Resume unfinished waves. Do not archive this plan while later items remain.
   A required hosted browser test exposed a navigation timing race before
   unmount. Its reviewed test-only repair now holds the response and proves
   exact-request cancellation through real SPA navigation; product UI, strict
-  flaky-test policy and limits are unchanged. Local UI checks and current-head
-  [CI run 38785888503](https://github.com/caesium-cloud/caesium/actions/runs/38785888503)
+  flaky-test policy and limits are unchanged. The local repair also exposed a Playwright route-cleanup deadlock; the
+  handler now completes its route action after natural cancellation. The
+  corrected full UI checks and current-head
+  [CI run 38786960361](https://github.com/caesium-cloud/caesium/actions/runs/38786960361)
   are running. The superseded run's coverage collection did not complete.
 - **W4-β / D2:** Draft [PR #637](https://github.com/caesium-cloud/caesium/pull/637),
   head `bbb663094f730477d82197ec6629f76a6e86b7ca`, implements immutable action
