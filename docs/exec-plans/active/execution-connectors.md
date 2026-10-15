@@ -369,7 +369,7 @@ Resume unfinished waves. Do not archive this plan while later items remain.
   have verified replies and resolved threads. D1 component acceptance is merged;
   C1/C2 still own the public HTTP composition.
 - **W4-β / D2:** [PR #637](https://github.com/caesium-cloud/caesium/pull/637),
-  head `997b9ba849cab33fc0e8de640f7c043e8d0dae4c`, implements immutable action
+  head `50d1362fb537d4d219a60a41460335e4ebd1c591`, implements immutable action
   receipts, guarded dispatch, lookup-only recovery and explicit original-principal
   resubmission. It merges actual D1 `master`, preserving both implementations;
   only two guide status paragraphs conflicted and were reconciled semantically.
@@ -390,28 +390,31 @@ Resume unfinished waves. Do not archive this plan while later items remain.
   seconds), with verified source/image provenance and observed Server 1.32.0,
   SDK 1.49.0 and CLI 1.9.1. Component evidence records five Update sends and
   three logical effects across lost replies, admission crash and explicit
-  confirmation. The merged candidate's complete tree matches the combined unit
-  candidate below. New-head [CI run 38816506079](https://github.com/caesium-cloud/caesium/actions/runs/38816506079)
-  attempt 1 failed only Kubernetes integration shard 3: a competing admission
-  POST returned EOF while the accepted-run count passed. The server recorded
-  one durable admission and no pod restart or panic. The precise transport
-  cause is unconfirmed. The one isolated retry (attempt 2) reproduced the same
-  EOF and missing conflict response on the unchanged head. The earlier standalone
-  heads ran this test successfully in shard 2; the combined method set assigns
-  it to shard 3. Local connection tracing and sequence reproduction are in
-  progress. Prior standalone CI is not current-head qualification. All four
+  confirmation. Base-integration commit `997b9ba8` matched the earlier combined
+  unit tree. Its [CI run 38816506079](https://github.com/caesium-cloud/caesium/actions/runs/38816506079)
+  failed Kubernetes shard 3 twice with a competing admission POST returning EOF;
+  the accepted-run count passed. Both earlier standalone candidates had passed
+  that test in shard 2. The precise hosted transport cause remains unconfirmed.
+  Current commit `50d1362f` gives the concurrency test its own HTTP transport
+  and reports worker errors in the parent test, preserving both real POSTs and
+  exact one-accepted/one-conflict assertions without retries, delays or skips.
+  Independent source review is clear. Final contents passed fresh containerized
+  lint (zero issues), the full 152-package race/coverage unit suite, and a clean
+  Kubernetes 1.37.0 / Helm 3.22.0 shard-3 run (307.305 seconds; 146 passing tests,
+  32 expected off-lane skips). Targeted atomic/strategy scenarios passed in 7.99
+  seconds; the direct-database stale-claim subcase is expected off this lane.
+  [Current-head CI run 38825609471](https://github.com/caesium-cloud/caesium/actions/runs/38825609471)
+  is running; prior-head CI is not current-head qualification. All four
   posted findings have verified replies and resolved threads. D2 stays unchecked
   pending verified merge, current checks and required review.
-- **Composition:** Before the actual D1 merge, a local combined candidate passed
-  the full containerized root-module race/coverage unit suite: 152 packages,
-  zero failures or race warnings. Its tree
-  `0ac9102f5a038e14d5736c679bf9d4732235a7a3` exactly matches all 1,992 tracked
-  entries in current D2 commit `997b9ba8`; an independent comparison also verifies
-  all 27 frozen manifest hashes. D1's squash merge has the same complete tree as
-  its tested head. This binds the existing combined unit result to the resolved
-  candidate without repeating an identical suite. Fresh combined qualification
-  with all four named real fixture scenarios remains pending; the shared Docker
-  lane is currently occupied by another verification run.
+- **Composition:** Current clean `50d1362f` contains merged D1 and the D2
+  implementation. Fresh real Temporal qualification passed all four required
+  named scenarios: Fixture, Messages, Correlation and Operations, without skips
+  (16.19 seconds). Candidate/source/image identities match this exact head;
+  observed Server 1.32.0, SDK 1.49.0 and CLI 1.9.1 match the pins. Activity retry
+  was activated; operation evidence records five raw Update sends and three
+  logical approval effects. This supplements the fresh full unit and clean
+  Kubernetes checks above. Owned fixture containers were cleaned after the run.
 - **Verification boundary:** Real Temporal component scenarios supplement
   containerized baseline checks. Running-server connector HTTP, bidirectional
   public links and process-restart proof remain C1/C2; those routes do not yet
@@ -420,15 +423,18 @@ Resume unfinished waves. Do not archive this plan while later items remain.
   reviewed, covered by passing regressions, replied to in their own threads and
   resolved. Fresh paginated GitHub reads verify D1's two threads and D2's four
   threads resolved, with no remaining open findings. Standalone default/agent
-  integration and combined unit qualification have passed; combined real-provider
-  qualification, final plan guardrails and new-head D2 CI remain pending.
+  integration, fresh combined unit and all-four-scenario real-provider
+  qualification have passed. Targeted containerized plan guardrails passed
+  (14.071 seconds); current-head D2 CI remains pending.
 - **Merge/plan status:** D1 is merged. D2 and the dashboard
   [PR #635](https://github.com/caesium-cloud/caesium/pull/635) remain open;
   protected checks/review and the squash merge queue still apply. Plan validation
   includes an earlier full containerized race/coverage unit pass with documentation
   guardrails. Subsequent progress edits pass item/dependency, local-link,
-  template-token and whitespace checks. A final targeted container guardrail
-  refresh awaits the shared lane. W4 is not shipped while D2 and plan sync remain
+  template-token and whitespace checks. Targeted containerized guardrails passed
+  on the updated dashboard; final status edits retain the static checks. Owned
+  fixture resources and the shared lane were released after all local gates.
+  W4 is not shipped while D2 and plan sync remain
   open.
 - **Remaining:** C, E, F2–F4 and N are outside this wave. No later wave is
   dispatched while W4 remains open.
