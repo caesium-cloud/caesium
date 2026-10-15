@@ -1,9 +1,19 @@
 package run
 
 import (
+	"math"
+
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/google/uuid"
 )
+
+// maxReportedSequenceGaps bounds RecoveryResult.SequenceGaps. An owner crash
+// strands only the few sequences it had allocated but not yet persisted, so
+// real gaps are a handful. A terminal_sequence that jumps by billions comes
+// from a corrupted row or checkpoint, and listing every missing value would
+// exhaust memory mid-takeover: a fatal runtime error rather than a recoverable
+// panic, repeated by every owner that tries the run next.
+const maxReportedSequenceGaps = 1024
 
 // RecoveryResult summarizes what a recovering owner must do after reconstructing
 // a run's state from a checkpoint plus the post-checkpoint terminal rows.
@@ -21,7 +31,7 @@ type RecoveryResult struct {
 	// and the highest observed row.  A gap means the previous owner allocated a
 	// sequence but crashed before persisting the row; the affected task is
 	// treated as never-completed and recovered via ReDispatch.  Reported for
-	// observability; not an error.
+	// observability; not an error.  Lists at most maxReportedSequenceGaps.
 	SequenceGaps []int64
 	// Complete is true when every task is already terminal (nothing to do).
 	Complete bool
@@ -82,7 +92,7 @@ func RecoverRunStateWithFanOut(
 	}
 
 	var res RecoveryResult
-	expected := start + 1
+	expected := nextSequence(start)
 	for i := range terminalRows {
 		row := &terminalRows[i]
 		id := row.TaskID
@@ -93,13 +103,14 @@ func RecoverRunStateWithFanOut(
 
 		// Dense-sequence gap check: every persisted terminal_sequence should be
 		// the next after the previous. A hole means a sequence was allocated but
-		// its row never landed (owner crashed mid-write).
-		for expected < row.TerminalSequence {
+		// its row never landed (owner crashed mid-write). Past the report bound,
+		// expected jumps over the remaining holes instead of walking them.
+		for expected < row.TerminalSequence && len(res.SequenceGaps) < maxReportedSequenceGaps {
 			res.SequenceGaps = append(res.SequenceGaps, expected)
 			expected++
 		}
 		if row.TerminalSequence >= expected {
-			expected = row.TerminalSequence + 1
+			expected = nextSequence(row.TerminalSequence)
 		}
 	}
 
@@ -112,4 +123,14 @@ func RecoverRunStateWithFanOut(
 	res.Ready = rs.ReadyTasks()
 	res.Complete = rs.IsComplete()
 	return rs, res, nil
+}
+
+// nextSequence is s+1, saturating at math.MaxInt64: a corrupted maximal
+// sequence must not wrap the gap check's cursor to math.MinInt64 and report
+// every value below the next row as missing.
+func nextSequence(s int64) int64 {
+	if s == math.MaxInt64 {
+		return s
+	}
+	return s + 1
 }

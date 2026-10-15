@@ -200,6 +200,10 @@ func FuzzRecoverRunStateTerminalRows(f *testing.F) {
 		`[{"task":9,"status":"succeeded","seq":1}]`,
 		`[{"task":0,"status":"not-a-real-status","seq":1}]`,
 		`[{"task":2,"status":"succeeded","seq":1},{"task":0,"status":"succeeded","seq":100}]`,
+		// A corrupted jump the gap check once walked one value at a time until
+		// the process ran out of memory, and a maximal sequence that wrapped it.
+		`[{"task":0,"status":"succeeded","seq":1},{"task":1,"status":"succeeded","seq":4000000000}]`,
+		`[{"task":0,"status":"succeeded","seq":9223372036854775807},{"task":1,"status":"succeeded","seq":1}]`,
 	}
 	for _, s := range seeds {
 		f.Add([]byte(s))
