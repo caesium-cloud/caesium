@@ -334,11 +334,18 @@ Resume unfinished waves. Do not archive this plan while later items remain.
   full race/coverage unit tests and all required tagged hermetic checks passed
   on the committed contents. Independent source review has no open findings.
   The static fixture build and dependency checks pass with the isolated service
-  package. Default integration, real Temporal qualification and current-head
-  hosted CI remain pending.
+  package. Fresh real Temporal qualification passed all three named Fixture,
+  Messages and Correlation scenarios without skips (15.72 seconds), including
+  queued promotion, retry, worker restart and opaque evidence. Source/image
+  provenance identifies this clean head and Server 1.32.0, SDK 1.49.0 and CLI
+  1.9.1. Default integration is running; current-head hosted CI remains pending.
 - **W4-β / D2:** Implementing immutable action receipts, guarded dispatch,
-  lookup-only recovery and explicit original-principal resubmission. PR and
-  candidate checks pending.
+  lookup-only recovery and explicit original-principal resubmission. The
+  pre-refinement candidate passed lint, full race/coverage unit and tagged
+  checks. Review found that an unrelated global configuration epoch change
+  could strand an uncertain receipt. A compatibility fix preserves the origin
+  epoch and immutable destination while fencing the current node; regression,
+  final candidate checks and PR publication remain pending.
 - **Verification boundary:** Real Temporal component scenarios supplement
   containerized baseline checks. Running-server connector HTTP, bidirectional
   public links and process-restart proof remain C1/C2; those routes do not yet
