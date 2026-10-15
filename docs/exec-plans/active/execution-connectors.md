@@ -138,7 +138,9 @@ reads/history supply detail; bindings supply explicit business semantics.
    may retry only after a current-epoch transactional revision claim consumes
    durable proof that this initial attempt issued no Update. The proof defaults
    false; admission, a crash or a failed evidence write cannot manufacture it.
-   Other nonterminal same-key replays reconcile by lookup only. Acceptance and
+   Other nonterminal same-key replays may only reconcile by lookup or report an
+   explicit pending error while initial dispatch ownership is unsettled; an
+   unobserved outcome is never reported as success. Acceptance and
    its evidence survive weaker/error lookup results. Validated completion clears
    the guard even when its result must be omitted to fit the complete metadata
    envelope. Lookup or resend preflight refusal retains prior uncertainty and its
@@ -348,27 +350,20 @@ Resume unfinished waves. Do not archive this plan while later items remain.
 - **Base:** `b796b5672eab30134876f403f257af9e7a1f76da`; W3 implementation
   and plan synchronization are merged.
 - **W4-α / D1:** Draft [PR #636](https://github.com/caesium-cloud/caesium/pull/636),
-  head `43e89c438f48e1d794743351e0558139ae6039d6`, implements trusted
-  activity/admission correlation and durable local links. Independent source
-  review has no open findings. Containerized lint, full race/coverage unit,
-  required tagged hermetic, static fixture and dependency checks passed at
-  `9cff274473ff970356e9842e1642930a1441724a`. Fresh real Temporal qualification
-  passed all three named Fixture, Messages and Correlation scenarios without
-  skips (15.72 seconds), including queued promotion, retry, worker restart and
-  opaque evidence. Source/image artifacts identify that clean candidate and
-  Server 1.32.0, SDK 1.49.0 and CLI 1.9.1. Default integration passed there
-  (868.869 seconds). All sixteen feature files are byte-identical at the current
-  head; the only follow-up repairs the required browser cancellation test.
-  The reviewed test now holds its response and proves exact-request abort
-  through real SPA navigation, with bounded route cleanup. Current-head UI lint,
-  474 unit tests, build/budgets and strict local Playwright pass (154 passed,
-  six expected macOS visual skips, zero flaky). The current-head Linux browser
-  lane passed all 160 scenarios, including both themes, without skips or flaky
-  retries. Current-head
-  [CI run 38786960361](https://github.com/caesium-cloud/caesium/actions/runs/38786960361)
-  passed coverage ratchets and all nine required checks, including `ci-ok`. The
-  PR is draft while the posted review findings below are fixed and the new
-  candidate is verified; one CODEOWNER approval remains required before merge.
+  head `5c2ee804ac110017b4f5129d2084dcc57aa0a926`, implements trusted
+  activity/admission correlation and durable local links. The two posted review
+  findings are fixed: unrelated pending activities cannot discard recognized
+  heartbeat/attempt evidence, and older history starts cannot lower Describe's
+  current attempt or advance its source event. Mixed/conflicting hints refuse
+  verification instead of silently losing reported values. Independent source
+  review is clear. Containerized focused race/static fixture/dependency checks,
+  lint (zero issues), full race/coverage unit and required tagged checks passed
+  on these committed contents. Five new regression groups drive the adapter
+  through actual StartWithResult admissions and typed persistence. Current-head
+  real Temporal/default integration and hosted CI are pending; prior provider
+  artifacts at `9cff2744` do not qualify this changed implementation. The earlier
+  browser-only repair remains unchanged. Threads stay open until verified
+  publication; one CODEOWNER approval remains required before merge.
 - **W4-β / D2:** Draft [PR #637](https://github.com/caesium-cloud/caesium/pull/637),
   head `bbb663094f730477d82197ec6629f76a6e86b7ca`, implements immutable action
   receipts, guarded dispatch, lookup-only recovery and explicit original-principal
