@@ -351,9 +351,11 @@ Resume unfinished waves. Do not archive this plan while later items remain.
   exact-request cancellation through real SPA navigation; product UI, strict
   flaky-test policy and limits are unchanged. The local repair also exposed a Playwright route-cleanup deadlock; the
   handler now completes its route action after natural cancellation. The
-  corrected full UI checks and current-head
+  corrected UI lint, 474 unit tests, build/budgets and strict Playwright pass
+  (154 passed, six expected macOS visual skips, zero flaky). The repaired test
+  passes once in both themes. Linux visuals remain hosted proof. Current-head
   [CI run 38786960361](https://github.com/caesium-cloud/caesium/actions/runs/38786960361)
-  are running. The superseded run's coverage collection did not complete.
+  is running. The superseded run's coverage collection did not complete.
 - **W4-β / D2:** Draft [PR #637](https://github.com/caesium-cloud/caesium/pull/637),
   head `bbb663094f730477d82197ec6629f76a6e86b7ca`, implements immutable action
   receipts, guarded dispatch, lookup-only recovery and explicit original-principal
@@ -362,8 +364,18 @@ Resume unfinished waves. Do not archive this plan while later items remain.
   race/dependency checks passed on these committed contents. The reviewed epoch
   refinement preserves origin provenance and immutable destination while fencing
   the current node; actual cross-epoch reopen/compatibility regressions pass.
-  Real provider, default integration and normal agent-auth regression remain
-  pending behind the serialized Docker lane, along with current-head hosted CI.
+  Real provider qualification passed all three named Fixture, Messages and
+  Operations scenarios without skips (6.92 seconds) on this clean head. Raw
+  component evidence records five sends, lookup-only recovery and three logical
+  effects across lost replies, admission crash and explicit confirmation.
+  Default integration is running; normal agent-auth regression follows, along
+  with current-head hosted [CI run 38786078638](https://github.com/caesium-cloud/caesium/actions/runs/38786078638).
+- **Composition:** A local-only combined candidate resolves two guide status
+  hunks by retaining both implemented components. Source/scripts merge cleanly;
+  combined unit and all four named real fixture scenarios are queued. This is
+  additional composition evidence, not a feature PR or merge. After the first
+  sibling merges, integrate updated `master` into the second, retain that guide
+  wording and refresh current-candidate verification before its merge.
 - **Verification boundary:** Real Temporal component scenarios supplement
   containerized baseline checks. Running-server connector HTTP, bidirectional
   public links and process-restart proof remain C1/C2; those routes do not yet
