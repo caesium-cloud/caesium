@@ -329,11 +329,13 @@ Resume unfinished waves. Do not archive this plan while later items remain.
 - **Base:** `b796b5672eab30134876f403f257af9e7a1f76da`; W3 implementation
   and plan synchronization are merged.
 - **W4-α / D1:** Draft [PR #636](https://github.com/caesium-cloud/caesium/pull/636),
-  head `1d4e7a318e50359264b27c3221a0d34cfe718258`, implements trusted
+  head `9cff274473ff970356e9842e1642930a1441724a`, implements trusted
   activity/admission correlation and durable local links. Containerized lint,
   full race/coverage unit tests and all required tagged hermetic checks passed
   on the committed contents. Independent source review has no open findings.
-  Default integration, real Temporal qualification and hosted CI remain pending.
+  The static fixture build and dependency checks pass with the isolated service
+  package. Default integration, real Temporal qualification and current-head
+  hosted CI remain pending.
 - **W4-β / D2:** Implementing immutable action receipts, guarded dispatch,
   lookup-only recovery and explicit original-principal resubmission. PR and
   candidate checks pending.
@@ -496,13 +498,15 @@ auth chokepoints. Every endpoint includes a live HTTP integration scenario.
   A1-defined heartbeat/result hints against that identity and #560's records;
   persist typed links with source evidence. Follow queued promotion without
   starting work. Extend the Temporal recipe using the already-frozen envelope.
-  Files: new `internal/connector/correlation.go`,
-  new `internal/connector/correlation_store.go`,
-  new `internal/connector/correlation_test.go`,
+  Files: new `internal/connector/correlation/correlation.go`,
+  new `internal/connector/correlation/correlation_store.go`,
+  new `internal/connector/correlation/correlation_test.go`,
   new `internal/connector/temporal/correlation.go` and its tests,
   new `internal/models/external_execution_correlation.go`,
   `internal/models/models.go`, `pkg/db/migrations_test.go`,
   `internal/run/start_idempotency.go`, `internal/run/start_idempotency_test.go`,
+  new `internal/runadmission/admission.go` (shared lightweight admission types
+  and key validation, preserving the run package exports),
   new `test/connectors_correlation_test.go`,
   `scripts/connectors-fixture.sh`, `scripts/test_connectors_fixture.py`
   (strict named component selection), `docs/connectors.md` (storage boundary),
@@ -520,10 +524,12 @@ auth chokepoints. Every endpoint includes a live HTTP integration scenario.
   actor context and stable Update ID before dispatch; concurrent callers/restart
   attach to the original pinned operation. Only explicit original-principal
   confirmation can resend an unknown operation. Bound/redact persisted content.
-  Files: new `internal/connector/operations.go`,
-  new `internal/connector/operation_store.go`,
-  new `internal/connector/operations_test.go`,
+  Files: new `internal/connector/operations/operations.go`,
+  new `internal/connector/operations/operation_store.go`,
+  new `internal/connector/operations/operations_test.go`,
   `internal/connector/store.go` (operation admission/state seam),
+  `internal/connector/config.go`, `internal/connector/fingerprint.go`
+  (shared payload validation and canonical binding serialization),
   `internal/models/connector_operation.go` (immutable dispatch/evidence fields),
   new `internal/connector/temporal/operations.go` and its tests,
   new `test/connectors_operations_test.go`,
@@ -732,6 +738,14 @@ unchecked sibling work is not a hidden prerequisite.
   accumulates master promotion evidence, promotes and documents the release.
 
 ### Shared file ownership and merge order
+
+D1 and D2 compose the core contract in dedicated service/repository packages.
+The startup-loaded `internal/connector` package keeps configuration and the
+shipped A2 catalog/admission/epoch API; it does not import the services.
+Temporal and later C1/C2 composition import the relevant service packages.
+Component/provider evidence qualifies D1/D2 before wiring. C1/C2 must exercise
+those services through the instrumented application after importing them;
+package separation is not public-surface acceptance.
 
 | Surface | One writer / explicit order |
 | --- | --- |
