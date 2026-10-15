@@ -143,8 +143,8 @@ test("final pass SYNTHETIC: retained lifecycle bursts coalesce paged job history
     try {
       if (held) await heldResponse;
       else await new Promise(resolve => setTimeout(resolve, 200));
-      // Natural query cancellation has already ended this exact request.
-      if (held && route.request().failure()) return;
+      // Finish the Playwright route action after release even if the browser
+      // cancelled it, so unrouteAll(wait) can finish the handler.
       await route.fulfill({ json: history.slice(offset, offset + 500), headers: { "X-Caesium-Total-Count": "1500", ...(offset + 500 < 1500 ? { "X-Caesium-Next-Offset": String(offset + 500) } : {}) } });
     } finally { inFlight--; }
   });
