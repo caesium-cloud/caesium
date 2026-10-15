@@ -362,8 +362,9 @@ Resume unfinished waves. Do not archive this plan while later items remain.
   through actual StartWithResult admissions and typed persistence. Fresh clean
   current-head real Temporal qualification passed Fixture, Messages and
   Correlation without skips (16.04 seconds); source/image provenance and observed
-  Server 1.32.0, SDK 1.49.0 and CLI 1.9.1 are verified. Default integration and
-  hosted CI remain pending. The earlier
+  Server 1.32.0, SDK 1.49.0 and CLI 1.9.1 are verified. Full default integration
+  passed in 876.192 seconds. Current-head [CI run 38807694976](https://github.com/caesium-cloud/caesium/actions/runs/38807694976)
+  is running. The earlier
   browser-only repair remains unchanged. Threads stay open until verified
   publication; one CODEOWNER approval remains required before merge.
 - **W4-β / D2:** Draft [PR #637](https://github.com/caesium-cloud/caesium/pull/637),
@@ -378,9 +379,13 @@ Resume unfinished waves. Do not archive this plan while later items remain.
   unit and required tagged checks passed on these committed contents. All ten
   new regression groups passed, including real Messenger/Temporal-bridge calls,
   concurrent retry claims, injected database errors and an exact legal result
-  ceiling. Current-head real provider/default/agent integration and hosted CI are
-  pending; previous `bbb66309` artifacts do not qualify this changed state
-  machine. Threads stay open until verified publication; one CODEOWNER approval
+  ceiling. Fresh clean current-head real Temporal qualification passed all three
+  named Fixture, Messages and Operations scenarios without skips (7.05 seconds),
+  with verified source/image provenance and observed Server 1.32.0, SDK 1.49.0 and
+  CLI 1.9.1. Component evidence records five Update sends and three logical
+  effects across lost replies, admission crash and explicit confirmation.
+  Default/agent integration and [CI run 38808433945](https://github.com/caesium-cloud/caesium/actions/runs/38808433945)
+  remain pending. Threads stay open until verified publication; one CODEOWNER approval
   remains required before merge.
 - **Composition:** The earlier uncommitted combined candidate is preserved.
   The orchestrator now owns the shared Docker lane for review-fix verification.
