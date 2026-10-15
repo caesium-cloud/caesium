@@ -395,8 +395,11 @@ Resume unfinished waves. Do not archive this plan while later items remain.
   attempt 1 failed only Kubernetes integration shard 3: a competing admission
   POST returned EOF while the accepted-run count passed. The server recorded
   one durable admission and no pod restart or panic. The precise transport
-  cause is unconfirmed; only that failed job is rerunning once as attempt 2
-  on the unchanged head. Prior standalone CI is not current-head qualification. All four
+  cause is unconfirmed. The one isolated retry (attempt 2) reproduced the same
+  EOF and missing conflict response on the unchanged head. The earlier standalone
+  heads ran this test successfully in shard 2; the combined method set assigns
+  it to shard 3. Local connection tracing and sequence reproduction are in
+  progress. Prior standalone CI is not current-head qualification. All four
   posted findings have verified replies and resolved threads. D2 stays unchecked
   pending verified merge, current checks and required review.
 - **Composition:** Before the actual D1 merge, a local combined candidate passed
