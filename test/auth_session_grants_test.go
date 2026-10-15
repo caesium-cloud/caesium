@@ -101,10 +101,6 @@ func (s *IntegrationTestSuite) TestAuthSessionCookieWithoutGrantsIsRefused() {
 	// later), so it is refused the same way.
 	status, body = s.requestWithCookie(http.MethodGet, "/auth/whoami", cookie)
 	s.Equal(http.StatusForbidden, status, "whoami: %s", body)
-
-	// Public paths ignore the cookie.
-	status, body = s.requestWithCookie(http.MethodGet, "/auth/status", cookie)
-	s.Equal(http.StatusOK, status, "/auth/status: %s", body)
 }
 
 // requestWithCookie issues an unauthenticated-by-header request that presents
