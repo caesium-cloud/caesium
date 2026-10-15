@@ -7,6 +7,7 @@ import ReactFlow, {
   useReactFlow,
   useStore,
   type Node,
+  type NodeChange,
   type Edge,
   type FitViewOptions,
   Position,
@@ -146,6 +147,23 @@ function FitViewOnResize({ fitViewOptions }: { fitViewOptions: FitViewOptions })
 
 export function JobDAG({ dag, runStartedAt, runStatus, runCompletedAt, atoms, taskDefinitions, taskStatus, taskMetadata, taskRunData, onNodeClick, selectedTaskId }: JobDAGProps) {
     const [selectedEdge, setSelectedEdge] = useState<EdgeDetailsState | null>(null);
+    const [nodeDimensions, setNodeDimensions] = useState<Record<string, { width: number; height: number }>>({});
+    const handleNodesChange = useCallback((changes: NodeChange[]) => {
+      // Controlled nodes must retain React Flow's measured dimensions when
+      // selection or run data changes. Otherwise it hides them for a fresh
+      // measurement, discarding keyboard focus just restored by the panel.
+      setNodeDimensions((previous) => {
+        let next = previous;
+        for (const change of changes) {
+          if (change.type !== "dimensions" || !change.dimensions) continue;
+          const current = next[change.id];
+          const { width, height } = change.dimensions;
+          if (current?.width === width && current?.height === height) continue;
+          next = { ...next, [change.id]: { width, height } };
+        }
+        return next;
+      });
+    }, []);
     const resolvedTaskStatus = useMemo(() => {
         const statusByTask: Record<string, string> = {};
 
@@ -190,6 +208,7 @@ export function JobDAG({ dag, runStartedAt, runStatus, runCompletedAt, atoms, ta
             return {
                 id: n.id,
                 type: nodeType,
+                ...nodeDimensions[n.id],
                 data: {
                   label: taskDefinition?.name || "task",
                   runStartedAt,
@@ -213,7 +232,7 @@ export function JobDAG({ dag, runStartedAt, runStatus, runCompletedAt, atoms, ta
                 position: { x: 0, y: 0 }
             }
         });
-    }, [dag, runStartedAt, runStatus, runCompletedAt, atoms, taskDefinitions, resolvedTaskStatus, taskMetadata, taskRunData, taskStatus, selectedTaskId, edgeDegreeByNode]);
+    }, [dag, runStartedAt, runStatus, runCompletedAt, atoms, taskDefinitions, resolvedTaskStatus, taskMetadata, taskRunData, taskStatus, selectedTaskId, edgeDegreeByNode, nodeDimensions]);
 
     const initialEdges: Edge[] = useMemo(() => {
         if (!dag.edges) return [];
@@ -319,6 +338,7 @@ export function JobDAG({ dag, runStartedAt, runStatus, runCompletedAt, atoms, ta
           nodeTypes={nodeTypes}
           edgeTypes={edgeTypes}
           onNodeClick={handleNodeClick}
+          onNodesChange={handleNodesChange}
           fitViewOptions={fitViewOptions}
           minZoom={dagMinZoom}
           maxZoom={dagMaxZoom}

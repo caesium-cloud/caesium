@@ -311,6 +311,36 @@ test("job detail run page (DAG + task panel) is free of critical/serious violati
   expect(activeIsAttached).toBe(true);
 });
 
+test("DAG nodes retain focus and measured visibility across repeated task selection", async ({ page, request }) => {
+  const { job, run } = await applyAndRun(request, "run-history.job.yaml", { status: "succeeded" });
+  await page.goto(`/jobs/${job.id}/runs/${run.id}`);
+  const node = page.locator(".react-flow__node").first();
+  await expect(node).toBeVisible();
+  await node.focus();
+  // Record even transient hiding: a later successful remeasurement cannot
+  // excuse losing the user's focus during a controlled-node update.
+  await node.evaluate((element) => {
+    element.setAttribute("data-hidden-during-selection", "false");
+    const observer = new MutationObserver((records) => {
+      if ((element as HTMLElement).style.visibility === "hidden" ||
+          records.some((record) => record.oldValue?.includes("visibility: hidden"))) {
+        element.setAttribute("data-hidden-during-selection", "true");
+      }
+    });
+    observer.observe(element, { attributes: true, attributeFilter: ["style"], attributeOldValue: true });
+  });
+  for (let cycle = 0; cycle < 4; cycle++) {
+    await page.keyboard.press("Enter");
+    const panel = page.getByTestId("task-detail-panel");
+    await expect(panel).toBeVisible();
+    await expect(panel.locator(":focus")).toHaveCount(1);
+    await page.keyboard.press("Escape");
+    await expect(page.getByTestId("task-detail-panel")).toBeHidden();
+    await expect(node).toBeFocused();
+    await expect(node).toHaveAttribute("data-hidden-during-selection", "false");
+  }
+});
+
 test("Trigger Job dialog is a labeled, focus-trapped dialog reachable and dismissible by keyboard", async ({
   page,
   request,

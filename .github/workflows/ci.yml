@@ -577,10 +577,10 @@ jobs:
           name: reagent-toolchain-amd64
       - name: Unit tests
         run: just tag=${{ env.IMAGE_TAG }}-amd64 unit-test
-      - name: Hermetic integration-tagged unit tests
-        run: just tag=${{ env.IMAGE_TAG }}-amd64 tagged-unit-test
       - name: Reagents unit tests
         run: just tag=${{ env.IMAGE_TAG }}-amd64 reagents-test
+      - name: Hermetic integration-tagged unit tests
+        run: just tag=${{ env.IMAGE_TAG }}-amd64 tagged-unit-test
 
   unit-test-arm64:
     needs: [changes, builder-arm64]

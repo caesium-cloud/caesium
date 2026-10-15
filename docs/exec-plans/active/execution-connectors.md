@@ -12,10 +12,10 @@ prerequisite for monitoring them.
 
 At drafting, [PR #560](https://github.com/caesium-cloud/caesium/pull/560) supplied
 idempotent Caesium starts, explicit created/queued/skipped/dropped outcomes and
-an operator recipe. W1/W2 have since added the connector contract, catalog, and
-Temporal observation adapter; HTTP monitoring and operator action surfaces
-remain pending. The Console's existing
-run, dataset, freshness, lineage, receipt and incident views are the data
+an operator recipe. W1–W3 have since added the connector contract, catalog,
+Temporal adapter and real development fixture; HTTP monitoring and operator
+action surfaces remain pending. The Console's existing run, dataset, freshness,
+lineage, receipt and incident views are the data
 evidence this integration should join to external process state.
 
 The first release includes one optional Temporal connector, file-configured
@@ -221,10 +221,11 @@ write. Limits are validated configuration with conservative hard ceilings fixed
 by A1 before dependent work. C1/F3 measure unchanged-poll write count, catalog
 cardinality and closed-workflow Query dispatch count through the live surface.
 
-## Progress (as of 2026-10-14)
+## Progress (as of 2026-10-15)
 
-W1, W2 and W3 B2 have merged. W3 F1 remains open in PR #633 with review follow-ups verified locally,
-current CI running and required CODEOWNER review pending. C, D, E, F2–F4 and N are not started. Drafting base:
+W1, W2 and both W3 feature PRs have merged. B2 and F1 passed their final-head
+checks; the W3 plan sync remains open in PR #631 pending required CODEOWNER
+review. C, D, E, F2–F4 and N are not started. Drafting base:
 `a0e862171b898a64b64828b1a5376226e85b106a`. An open PR or a fixture-only pass
 is not completion. The SHAs below are the squash merges read from GitHub.
 
@@ -250,7 +251,7 @@ Resume unfinished waves. Do not archive this plan while later items remain.
   payloads. List and history keep a JSON prefix inside the 64 KiB metadata
   ceiling and omit the server token when a tail is dropped. A non-empty new
   run id on failed, timed out, completed, or continued-as-new is a
-  continuation. F1 has not run this adapter against real Temporal.
+  continuation. W3 F1 subsequently qualified this adapter against real Temporal.
 - **W2-α / A2:** [PR #628](https://github.com/caesium-cloud/caesium/pull/628)
   merged `331ccce7a1897f19ea0c6c7d2ca24b427d87df79` at 2026-10-14T00:09:41Z.
   Head `7f39fe437d98a9f6dd013e0aa3fbc143da6a0578`. `ci-ok`, coverage, unit
@@ -260,9 +261,8 @@ Resume unfinished waves. Do not archive this plan while later items remain.
   remains C1. An earlier arm64 stress smoke on a pre-rewrite SHA reported
   `terminal_oom_unconfirmed` (exit 137, `oom=false`); the merged head's
   `images-arm64` check succeeded.
-- **Next ready:** Finish F1. D1 still needs F1. C1 still needs D1 and F1.
 
-### W3 — B2 merged; F1 review follow-ups verified locally
+### W3 — B2 and F1 merged (2026-10-15)
 
 - **W3-α / B2:** [PR #632](https://github.com/caesium-cloud/caesium/pull/632)
   merged `adab46d0981fc6f30da6fb220963d2454354ff23` at 2026-10-15T01:21:33Z.
@@ -271,8 +271,9 @@ Resume unfinished waves. Do not archive this plan while later items remain.
   including `ci-ok`. Preflight refusals remain distinct from uncertain dispatch;
   completed failures retain unknown origin and never imply validator rejection
   or no effect. Queries require a closed schema and exact workflow type.
-- **W3-β / F1:** [PR #633](https://github.com/caesium-cloud/caesium/pull/633),
-  candidate `3f3751e8dcd28e0e1812492f48e35b9b81b13eb4`, integrates merged B2
+- **W3-β / F1:** [PR #633](https://github.com/caesium-cloud/caesium/pull/633)
+  merged `8aac3383e6f2cfcba9825a537a9f71d2a80a9ea9` at 2026-10-15T15:47:38Z.
+  Head `3f3751e8dcd28e0e1812492f48e35b9b81b13eb4` integrates merged B2
   and retains both guide sections. The intact fixture configuration now passes
   the hermetic schema gate that failed on both architectures in
   [run 38569974495](https://github.com/caesium-cloud/caesium/actions/runs/38569974495).
@@ -302,21 +303,23 @@ Resume unfinished waves. Do not archive this plan while later items remain.
   and all three real inspection artifacts satisfy the new allowlist. Owned
   containers and lane locks were cleaned after qualification.
   Current-head [CI run 38744014617](https://github.com/caesium-cloud/caesium/actions/runs/38744014617)
-  is pending; required CODEOWNER review also remains pending. Prior-head
-  [run 38666620120](https://github.com/caesium-cloud/caesium/actions/runs/38666620120)
-  passed both unit architectures, all 160 Linux browser cases, coverage and
-  `ci-ok` at `434ca812`; the UI implementation is unchanged by these follow-ups.
-- **Earlier provider/regression evidence:** The B2/F1 Go and fixture inputs
-  match clean combined candidate `3553f37f15c5cb1922a9d7e8f847da29b63a13c8`.
-  Its real fixture passed Fixture and Messages without skips (6.64 seconds),
+  succeeded on that head, including lint, both unit architectures, coverage,
+  browser/authenticated browser suites, all selected integration lanes and
+  `ci-ok`. Release qualification and publishing were unselected on the PR.
+- **Earlier provider/regression evidence:** Before the later fixture
+  orchestration and metadata hardening, clean combined candidate
+  `3553f37f15c5cb1922a9d7e8f847da29b63a13c8` passed its real Fixture and
+  Messages scenarios without skips (6.64 seconds),
   with observed Server 1.32.0, raw effects and activated reply loss. Default
   integration passed in 867.5 seconds and normal agent auth passed 45 scenarios
   in 35.2 seconds. Eleven review replies/resolutions were verified at feature
   heads `190353f3`/`8e9a82fc`; the current F1 follow-up dispositions are above.
-- **Remaining:** F1 stays unchecked until its normal merge after current CI and
-  required CODEOWNER review. D1/D2/C1/C2 and later items are not dispatched.
-  Local arm64 evidence does not qualify Cloud or other versions. Plan sync
-  remains open in [PR #631](https://github.com/caesium-cloud/caesium/pull/631).
+- **Next ready:** D1 and D2 have merged prerequisites and disjoint core files.
+  Neither is dispatched; C1 still needs D1, and C2 still needs C1 and D2.
+- **Remaining:** C, D, E, F2–F4 and N are not dispatched. Local arm64 evidence
+  does not qualify Cloud or other versions. Plan sync remains open in
+  [PR #631](https://github.com/caesium-cloud/caesium/pull/631) pending required
+  CODEOWNER review; W3 closeout awaits that merge.
 
 ### Stream Status
 
@@ -327,7 +330,7 @@ Resume unfinished waves. Do not archive this plan while later items remain.
 | C | Authenticated REST and composition (2 items) | P0 | Not started |
 | D | Verified correlation and action durability (2 items) | P0 | Not started |
 | E | Console monitoring, data links and approval (3 items) | P0 | Not started |
-| F | Real fixture, CI, qualification and promotion (4 items) | P0 | F1 open PR #633; F2–F4 not started |
+| F | Real fixture, CI, qualification and promotion (4 items) | P0 | F1 shipped; F2–F4 not started |
 | N | Operator guidance and reconciliation (1 item) | P0 | Not started |
 
 ## Streams
@@ -569,7 +572,7 @@ joined to existing Caesium pages. No cross-provider global pagination in v1.
 One owner serializes the local Docker/browser lane. Reuse the builder and
 compiled integration-runner approach; fixture code stays in the root module.
 
-- [ ] F1. Build a pinned isolated Temporal development fixture with real SDK
+- [x] F1. Build a pinned isolated Temporal development fixture with real SDK
   worker: external-only workflow, and publication workflow that invokes a Caesium
   job through #560, reports A1's frozen correlation envelope, awaits approval
   and invokes a second job. Include Query, validator rejection, worker restart,
@@ -584,6 +587,7 @@ compiled integration-runner approach; fixture code stays in the root module.
   new `test/connectors_fixture_test.go`, new `scripts/test_connectors_fixture.py`,
   new `test/connectors/testdata/connections.yaml`,
   new `build/Dockerfile.connector-fixture`, new `scripts/connectors-fixture.sh`,
+  new `scripts/connectors-fixture-metadata.py`,
   `scripts/integration-hermetic-tests.py`, `scripts/test_integration_hermetic_tests.py`,
   `justfile` (fixture-check recipe), `docs/connectors.md` (fixture instructions).
   Depends on: B1, B2 (the fixture configuration declares its Query result schema).
@@ -679,9 +683,9 @@ compiled integration-runner approach; fixture code stays in the root module.
 **16 included items in seven streams.** Dependencies are explicit above;
 unchecked sibling work is not a hidden prerequisite.
 
-- **A1, A2, and B1** are merged. See Progress for the merge SHAs.
-- In-flight items: **B2 and F1**. Merge B2 before F1's schema-bearing fixture.
-  B2 needs no Temporal Cloud account; F1 needs the pinned dev server.
+- **A1, A2, B1, B2 and F1** are merged. See Progress for the merge SHAs.
+  B2 landed before F1's schema-bearing fixture; the pinned development server
+  supplied real provider qualification without a Temporal Cloud account.
 - **D1** needs A2/B1/F1; **D2** needs A2/B2/F1. Core files are disjoint.
 - **C1** joins A2/B1/D1/F1; **C2** follows C1/B2/D2.
 - **E1** can run on merged C1 while C2 develops; **E2 -> E3** serializes

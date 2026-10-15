@@ -9,7 +9,10 @@ import json
 import subprocess
 import sys
 
-TESTS = {'./test/robustness': ['TestSoakStartIncompleteBodyReconcilesOnlyWithSameKey',
+TESTS = {'./test/connectors/fixture': ['TestFixtureConfigMatchesPublicationState',
+                                    'TestFixtureVersionsRejectUnqualifiedObservations',
+                                    'TestFixtureJournalRecordsEveryEffectExecution'],
+ './test/robustness': ['TestSoakStartIncompleteBodyReconcilesOnlyWithSameKey',
                        'TestNoKeyHealReadErrorPreservesPossibleIdentityAndStatus',
                        'TestHealThroughInterposerIncompleteResponseNeverBlindRetries',
                        'TestSoakQueueDepthRejectsIncompleteEvidence',
@@ -50,6 +53,7 @@ TESTS = {'./test/robustness': ['TestSoakStartIncompleteBodyReconcilesOnlyWithSam
 
 
 def main():
+    failed = False
     for package, expected in TESTS.items():
         selector = "^(" + "|".join(expected) + ")$"
         result = subprocess.run(
@@ -60,16 +64,25 @@ def main():
         sys.stdout.write(result.stdout)
         sys.stderr.write(result.stderr)
         passed = set()
+        malformed = False
         for line in result.stdout.splitlines():
-            event = json.loads(line)
+            try:
+                event = json.loads(line)
+                if not isinstance(event, dict):
+                    raise ValueError("event must be an object")
+            except ValueError:
+                malformed = True
+                continue
             if event.get("Action") == "pass" and event.get("Test") in expected:
                 passed.add(event["Test"])
         missing = set(expected) - passed
-        if result.returncode or missing:
-            print(f"{package}: required named passes missing: {sorted(missing)}", file=sys.stderr)
-            return 1
-        print(f"{package}: {len(expected)} required hermetic regressions passed")
-    return 0
+        if result.returncode or missing or malformed:
+            print(f"{package}: exit={result.returncode}, malformed_json={malformed}, "
+                  f"required named passes missing: {sorted(missing)}", file=sys.stderr)
+            failed = True
+        else:
+            print(f"{package}: {len(expected)} required hermetic regressions passed")
+    return int(failed)
 
 
 if __name__ == "__main__":

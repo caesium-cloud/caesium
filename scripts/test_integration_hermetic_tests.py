@@ -24,11 +24,12 @@ SHUTDOWN_RESULT_TESTS = {
 class HermeticIntegrationSelectorTests(unittest.TestCase):
     def test_all_original_requirements_and_shutdown_validators_are_selected(self):
         expected = [name for names in runner.TESTS.values() for name in names]
-        self.assertEqual(len(expected), 38)
-        self.assertEqual(len(set(expected)), 38)
+        self.assertEqual(len(expected), 41)
+        self.assertEqual(len(set(expected)), 41)
         self.assertEqual(
             {package: len(names) for package, names in runner.TESTS.items()},
             {
+                "./test/connectors/fixture": 3,
                 "./test/robustness": 10,
                 "./test/lifecycle": 8,
                 "./test/robustness/cluster": 15,
@@ -78,8 +79,48 @@ class HermeticIntegrationSelectorTests(unittest.TestCase):
         with patch.object(runner.subprocess, "run", side_effect=fake_go_test), \
                 redirect_stdout(io.StringIO()), redirect_stderr(stderr):
             self.assertEqual(runner.main(), 1)
-        self.assertEqual(len(commands), 1)
+        self.assertEqual(len(commands), len(runner.TESTS))
         self.assertIn(missing, stderr.getvalue())
+
+    def test_fixture_failure_does_not_hide_later_failures_or_passes(self):
+        for failure in ("missing", "exit", "malformed"):
+            with self.subTest(failure=failure):
+                commands = []
+
+                def fake_go_test(command, **kwargs):
+                    package = command[-1]
+                    commands.append(package)
+                    names = runner.TESTS[package]
+                    if package == "./test/connectors/fixture" and failure == "missing":
+                        names = names[1:]
+                    if package == "./test/robustness":
+                        names = names[1:]
+                    output = "\n".join(json.dumps({"Action": "pass", "Test": name}) for name in names)
+                    bad = package == "./test/connectors/fixture"
+                    if bad and failure == "malformed":
+                        output += "\nnot JSON\n[]"
+                    return subprocess.CompletedProcess(command, int(bad and failure == "exit"), output, "")
+
+                stderr = io.StringIO()
+                stdout = io.StringIO()
+                with patch.object(runner.subprocess, "run", side_effect=fake_go_test), \
+                        redirect_stdout(stdout), redirect_stderr(stderr):
+                    self.assertEqual(runner.main(), 1)
+                self.assertEqual(commands, list(runner.TESTS))
+                self.assertIn("./test/connectors/fixture:", stderr.getvalue())
+                self.assertIn("./test/robustness:", stderr.getvalue())
+                self.assertIn("./test/performance: 5 required hermetic regressions passed", stdout.getvalue())
+
+    def test_fixture_missing_or_skipped_named_pass_fails_closed(self):
+        for missing in runner.TESTS["./test/connectors/fixture"]:
+            with self.subTest(missing=missing):
+                events = [json.dumps({"Action": "skip" if name == missing else "pass", "Test": name})
+                          for name in runner.TESTS["./test/connectors/fixture"]]
+                result = subprocess.CompletedProcess([], 0, "\n".join(events) + "\n", "")
+                with patch.object(runner.subprocess, "run", return_value=result), \
+                        redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                    self.assertEqual(runner.main(), 1)
+
 
 
 if __name__ == "__main__":

@@ -202,6 +202,12 @@ def browser_nsenter_invocation(script):
 
 
 class GateTests(unittest.TestCase):
+    def test_reagents_are_not_hidden_by_a_hermetic_fixture_failure(self):
+        commands = [step.get("run", "") for step in JOBS["unit-test"]["steps"]]
+        reagents = next(i for i, command in enumerate(commands) if command.endswith(" reagents-test"))
+        hermetic = next(i for i, command in enumerate(commands) if command.endswith(" tagged-unit-test"))
+        self.assertLess(reagents, hermetic)
+
     def setUp(self):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
