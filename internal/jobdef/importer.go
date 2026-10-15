@@ -349,11 +349,23 @@ func (i *Importer) ApplyBatchWithOptions(ctx context.Context, plans []BatchPlan)
 // graph failed validation; nothing from the batch was written.
 var ErrBatchInvalid = errors.New("batch leaves the stored job graph invalid")
 
+// batchInvalidVerdicts are the validator errors that mean the effective graph
+// is invalid. Anything else (a cancelled context, a read or leadership error,
+// contention) is returned as itself, not blamed on the batch.
+var batchInvalidVerdicts = []error{
+	ErrTriggerChainCycle,
+	freshness.ErrDatasetMultipleProducers,
+	freshness.ErrDatasetUnresolvedConsumes,
+	freshness.ErrDatasetGraphCycle,
+}
+
 func batchInvalid(err error) error {
-	if isImporterContentionErr(err) {
-		return err // retried, not a validation verdict
+	for _, verdict := range batchInvalidVerdicts {
+		if errors.Is(err, verdict) {
+			return fmt.Errorf("%w: %w", ErrBatchInvalid, err)
+		}
 	}
-	return fmt.Errorf("%w: %w", ErrBatchInvalid, err)
+	return err
 }
 
 // ContractBreakResponse returns the stable 409 payload for an apply-time

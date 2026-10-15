@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/caesium-cloud/caesium/internal/freshness"
 	"github.com/caesium-cloud/caesium/internal/jobdef/testutil"
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/caesium-cloud/caesium/pkg/container"
@@ -1156,6 +1157,69 @@ func (s *ImporterTestSuite) TestApplyBatchRetriesWithoutDuplicatingRefusals() {
 	s.Equal(1, result.Refused[0].Index)
 	s.Equal(NamespaceReasonRequested, result.Refused[0].Err.Reason)
 	testutil.AssertCount(s.T(), s.db, &models.Job{}, 1)
+}
+
+func (s *ImporterTestSuite) allowlistDatasetDef(alias, namespace string, produces bool) *schema.Definition {
+	datasets := ""
+	if produces {
+		datasets = "    datasets:\n      produces:\n        - name: ds.allowlist\n"
+	}
+	def, err := schema.Parse([]byte("apiVersion: v1\nkind: Job\nmetadata:\n  alias: " + alias +
+		"\ntrigger:\n  type: cron\n  configuration:\n    cron: \"0 * * * *\"\nsteps:\n  - name: run\n    image: busybox:1.36.1\n    command: [\"sh\", \"-c\", \"echo ok\"]\n" + datasets))
+	s.Require().NoError(err)
+	def.Metadata.Namespace = namespace
+	return def
+}
+
+// Only the in-transaction dataset check catches this: the refused job keeps
+// its stored producer of D while an allowed job also claims D. The trigger
+// graph stays acyclic.
+func (s *ImporterTestSuite) TestApplyBatchRollsBackDatasetProducerConflict() {
+	ctx := context.Background()
+	_, err := s.importer.Apply(ctx, s.allowlistDatasetDef("batch-r", "marketing", true))
+	s.Require().NoError(err)
+	_, err = s.importer.Apply(ctx, s.allowlistDatasetDef("batch-a", "", false))
+	s.Require().NoError(err)
+	before := s.allowlistRow("batch-a")
+
+	opts := &ApplyOptions{NamespaceAllowlist: []string{"default"}}
+	result, err := s.importer.ApplyBatchWithOptions(ctx, []BatchPlan{
+		{Def: s.allowlistDatasetDef("batch-a", "", true), Opts: opts},
+		{Def: s.allowlistDatasetDef("batch-r", "", false), Opts: opts},
+	})
+	s.Require().ErrorIs(err, ErrBatchInvalid)
+	s.Require().ErrorIs(err, freshness.ErrDatasetMultipleProducers)
+	s.Equal(0, result.Applied)
+	s.Require().Len(result.Refused, 1)
+	s.Equal(NamespaceReasonStored, result.Refused[0].Err.Reason)
+
+	after := s.allowlistRow("batch-a")
+	s.True(before.UpdatedAt.Equal(after.UpdatedAt), "a's stored row must be unchanged")
+	var aDecls, producers int64
+	s.Require().NoError(s.db.Model(&models.DatasetDeclaration{}).Where("job_id = ?", before.ID).Count(&aDecls).Error)
+	s.Zero(aDecls)
+	s.Require().NoError(s.db.Model(&models.DatasetDeclaration{}).
+		Where("name = ? AND direction = ?", "ds.allowlist", models.DatasetDirectionProduces).Count(&producers).Error)
+	s.Equal(int64(1), producers)
+}
+
+// A non-verdict error from the in-transaction validation (here a cancelled
+// context surfacing from a read) is returned as itself, never as
+// ErrBatchInvalid, so git sync does not blame the repository for it.
+func (s *ImporterTestSuite) TestApplyBatchKeepsNonVerdictValidationErrors() {
+	s.Require().NoError(s.db.Callback().Query().After("gorm:query").Register("allowlist:cancel", func(tx *gorm.DB) {
+		if strings.Contains(tx.Statement.SQL.String(), "JOIN triggers") {
+			_ = tx.AddError(context.Canceled)
+		}
+	}))
+	result, err := s.importer.ApplyBatchWithOptions(context.Background(), []BatchPlan{
+		{Def: s.allowlistDef("batch-a", ""), Opts: &ApplyOptions{NamespaceAllowlist: []string{"default"}}},
+	})
+	s.Require().ErrorIs(err, context.Canceled)
+	s.NotErrorIs(err, ErrBatchInvalid)
+	s.NotContains(err.Error(), "fix the repository")
+	s.Equal(0, result.Applied)
+	testutil.AssertCount(s.T(), s.db, &models.Job{}, 0)
 }
 
 func (s *ImporterTestSuite) TestApplyBatchRollsBackInvalidGraph() {
