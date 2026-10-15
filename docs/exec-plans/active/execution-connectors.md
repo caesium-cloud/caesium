@@ -392,7 +392,11 @@ Resume unfinished waves. Do not archive this plan while later items remain.
   three logical effects across lost replies, admission crash and explicit
   confirmation. The merged candidate's complete tree matches the combined unit
   candidate below. New-head [CI run 38816506079](https://github.com/caesium-cloud/caesium/actions/runs/38816506079)
-  is running; prior standalone CI is not current-head qualification. All four
+  attempt 1 failed only Kubernetes integration shard 3: a competing admission
+  POST returned EOF while the accepted-run count passed. The server recorded
+  one durable admission and no pod restart or panic. The precise transport
+  cause is unconfirmed; only that failed job is rerunning once as attempt 2
+  on the unchanged head. Prior standalone CI is not current-head qualification. All four
   posted findings have verified replies and resolved threads. D2 stays unchecked
   pending verified merge, current checks and required review.
 - **Composition:** Before the actual D1 merge, a local combined candidate passed
