@@ -1,5 +1,5 @@
 import AxeBuilder from "@axe-core/playwright";
-import { expect, test, type Page } from "@playwright/test";
+import { expect, test, type Page, type Request } from "@playwright/test";
 import { applyDefinitions, awaitRun, failOnUnexpectedPageErrors, findJobByAlias, triggerJob, uniqueSuffix } from "./helpers/fixtures";
 
 failOnUnexpectedPageErrors();
@@ -129,13 +129,22 @@ test("final pass SYNTHETIC: retained lifecycle bursts coalesce paged job history
   const history = Array.from({ length: 1500 }, (_, index) => ({ ...first, id: index === 0 ? first.id : `review-history-${index}`,
     started_at: new Date(Date.parse(first.started_at) - index * 1000).toISOString(), tasks: [] }));
   let reads = 0, inFlight = 0, maxInFlight = 0;
+  let holdNextWalk = false;
+  let heldRequest: Request | undefined;
+  let releaseHeld!: () => void;
+  const heldResponse = new Promise<void>(resolve => { releaseHeld = resolve; });
   await page.route(`**/v1/jobs/${job.id}/runs?**`, async route => {
     const url = new URL(route.request().url());
     if (url.searchParams.get("limit") !== "500") return route.continue();
     reads++; inFlight++; maxInFlight = Math.max(maxInFlight, inFlight);
     const offset = Number(url.searchParams.get("offset") ?? 0);
+    const held = holdNextWalk && offset === 0;
+    if (held) { holdNextWalk = false; heldRequest = route.request(); }
     try {
-      await new Promise(resolve => setTimeout(resolve, 200));
+      if (held) await heldResponse;
+      else await new Promise(resolve => setTimeout(resolve, 200));
+      // Natural query cancellation has already ended this exact request.
+      if (held && route.request().failure()) return;
       await route.fulfill({ json: history.slice(offset, offset + 500), headers: { "X-Caesium-Total-Count": "1500", ...(offset + 500 < 1500 ? { "X-Caesium-Next-Offset": String(offset + 500) } : {}) } });
     } finally { inFlight--; }
   });
@@ -145,18 +154,55 @@ test("final pass SYNTHETIC: retained lifecycle bursts coalesce paged job history
     for (let index = 0; index < 500; index++) source.dispatchEvent(new MessageEvent("run_completed", { data: JSON.stringify({ sequence: 1000000 + index, type: "run_completed", job_id: jobId, run_id: run.id, timestamp: new Date().toISOString(), payload: run }) }));
   }, { jobId: job.id, run: first });
   await expect(page.getByTestId("view-featured-run")).toBeVisible();
-  await page.waitForTimeout(1500);
+  // Observe a completed three-page walk and idle reads across the coalescer's
+  // 250ms trailing window before arming a distinct cancellation walk.
+  await expect.poll(async () => {
+    if (inFlight !== 0 || reads === 0 || reads % 3 !== 0) return false;
+    const settledReads = reads;
+    await page.waitForTimeout(350);
+    return inFlight === 0 && reads === settledReads;
+  }).toBe(true);
   expect(reads).toBeLessThanOrEqual(6);
   expect(maxInFlight).toBe(1);
-  // Start a new slow walk, leave the route while its first page is in flight,
-  // and ensure its AbortSignal prevents background paging.
+  // Hold the next walk's first response until SPA unmount cancels that exact
+  // request. Navigation latency cannot let page 500 start before this check.
   const before = reads;
-  await emit(page, "run_started", { sequence: 2000000, type: "run_started", job_id: job.id, run_id: first.id, timestamp: new Date().toISOString() });
-  await expect.poll(() => reads).toBe(before + 1);
-  await page.goto("/triggers");
-  await page.waitForTimeout(800);
-  expect(reads).toBe(before + 1);
-  await page.unrouteAll({ behavior: "wait" });
+  const documentToken = uniqueSuffix();
+  await page.evaluate(token => {
+    (window as unknown as { qaHistoryDocument: string }).qaHistoryDocument = token;
+  }, documentToken);
+  holdNextWalk = true;
+  let abortedRequest: Request | undefined;
+  const observeAbort = (candidate: Request) => {
+    if (candidate === heldRequest) abortedRequest = candidate;
+  };
+  page.on("requestfailed", observeAbort);
+  try {
+    await emit(page, "run_started", { sequence: 2000000, type: "run_started", job_id: job.id, run_id: first.id, timestamp: new Date().toISOString() });
+    await expect.poll(() => heldRequest !== undefined).toBe(true);
+    expect(reads).toBe(before + 1);
+    expect(heldRequest?.failure()).toBeNull();
+    expect(abortedRequest).toBeUndefined();
+    await page.locator('aside nav a[href="/triggers"]').click();
+    await expect(page).toHaveURL(/\/triggers$/);
+    await expect(page.getByRole("heading", { name: "Triggers", exact: true })).toBeVisible();
+    expect(await page.evaluate(() => (window as unknown as { qaHistoryDocument: string }).qaHistoryDocument)).toBe(documentToken);
+    await expect.poll(() => abortedRequest === heldRequest, {
+      timeout: 5000,
+      message: "SPA unmount must abort the held history request before its response is released",
+    }).toBe(true);
+    expect(abortedRequest?.failure()?.errorText).toMatch(/ERR_ABORTED/);
+    expect(reads).toBe(before + 1);
+    releaseHeld();
+    await expect.poll(() => inFlight).toBe(0);
+    await page.waitForTimeout(800);
+    expect(reads).toBe(before + 1);
+    expect(maxInFlight).toBe(1);
+  } finally {
+    page.off("requestfailed", observeAbort);
+    releaseHeld();
+    await page.unrouteAll({ behavior: "wait" });
+  }
 });
 
 test("final pass: a missed run event is reconciled with a cheap job read", async ({ page, request }) => {
