@@ -1,6 +1,7 @@
 package run
 
 import (
+	"math"
 	"sync"
 	"testing"
 	"time"
@@ -118,6 +119,45 @@ func TestOwnerManager_RecoverThenLoopFlow(t *testing.T) {
 	require.NoError(t, db.Where("job_run_id = ? AND task_id = ?", runID, taskA).First(&aRow).Error)
 	require.Equal(t, string(TaskStatusSucceeded), aRow.Status)
 	require.Greater(t, aRow.TerminalSequence, int64(0), "owner completion must stamp a terminal_sequence > 0")
+}
+
+// A recovered owner whose terminal_sequence is already math.MaxInt64 (a
+// corrupted row) used to wrap B's stamp to math.MinInt64. The result was not
+// Durable, so Complete wrote nothing yet answered Owned with no error and the
+// dispatch handler acknowledged the completion with 200.
+func TestOwnerManager_ExhaustedSequenceFailsCompletion(t *testing.T) {
+	db := testutil.OpenTestDB(t)
+	t.Cleanup(func() { testutil.CloseDB(db) })
+	store := NewStore(db)
+	runID, taskA, taskB := seedTwoTaskRun(t, db, store, "")
+	require.NoError(t, db.Model(&models.TaskRun{}).
+		Where("job_run_id = ? AND task_id = ?", runID, taskA).
+		Updates(map[string]any{"status": string(TaskStatusSucceeded), "terminal_sequence": int64(math.MaxInt64)}).Error)
+
+	mgr := NewOwnerManager(store, CheckpointConfig{Events: 1, Interval: time.Hour, KeepFulls: 3})
+	_, err := mgr.Recover(runID, 1)
+	require.NoError(t, err)
+	ready := mgr.ReadyForDispatch(runID)
+	require.Len(t, ready, 1)
+	require.Equal(t, taskB, ready[0].TaskID)
+	mgr.MarkDispatched(runID, taskB, "node-1", 1, 0)
+	require.NoError(t, db.Model(&models.TaskRun{}).
+		Where("job_run_id = ? AND task_id = ?", runID, taskB).
+		Updates(map[string]any{"status": string(TaskStatusRunning), "claimed_by": "node-1"}).Error)
+
+	res, err := mgr.Complete(runID, taskB, TaskStatusSucceeded, "success", "", "node-1", nil, nil)
+	require.ErrorIs(t, err, ErrTerminalSequenceExhausted)
+	require.True(t, res.Owned)
+
+	var bRow models.TaskRun
+	require.NoError(t, db.Where("job_run_id = ? AND task_id = ?", runID, taskB).First(&bRow).Error)
+	require.Equal(t, string(TaskStatusRunning), bRow.Status, "an unstamped completion must not be written")
+	or, ok := mgr.get(runID)
+	require.True(t, ok)
+	bState, known := or.state.TaskState(taskB)
+	require.True(t, known)
+	require.False(t, IsTerminal(bState.Status), "an unstamped completion must not be published")
+	require.Equal(t, int64(math.MaxInt64), or.state.Sequence(), "the cursor must not wrap")
 }
 
 // A failed reset must leave recovery unpublished. Otherwise a checkpoint that

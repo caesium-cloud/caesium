@@ -568,6 +568,11 @@ func (m *OwnerManager) MarkDispatched(runID, taskID uuid.UUID, worker string, at
 	or.state.MarkDispatched(taskID, worker, attempt, leaseExpiresAtMs)
 }
 
+// ErrTerminalSequenceExhausted fails a completion whose run's terminal_sequence
+// is already math.MaxInt64, which only a corrupted row or checkpoint produces.
+// The completion is neither persisted nor acknowledged.
+var ErrTerminalSequenceExhausted = errors.New("run: terminal_sequence exhausted")
+
 // CompleteResult reports the outcome of applying a worker completion.
 type CompleteResult struct {
 	Ready    []uuid.UUID // tasks that newly became ready to dispatch
@@ -707,6 +712,13 @@ func (m *OwnerManager) CompleteInstance(runID, taskID, taskRunID uuid.UUID, stat
 	if len(expansionSkipped) > 0 {
 		res.Skipped = append(expansionSkipped, res.Skipped...)
 		staged.prependCompletionSkips(identity, expansionSkipped)
+	}
+	if staged.SequenceExhausted() {
+		// A transition could not be stamped, so the result is not Durable and
+		// the block below would persist nothing yet still report success.
+		// Discard the staged state and fail the completion like a failed write.
+		or.mu.Unlock()
+		return CompleteResult{Owned: true}, fmt.Errorf("%w: run %s", ErrTerminalSequenceExhausted, runID)
 	}
 	if !res.Applied {
 		// The DAG had already advanced for this task when this completion arrived

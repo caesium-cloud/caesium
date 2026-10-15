@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"maps"
+	"math"
 	"sort"
 	"time"
 
@@ -108,6 +109,7 @@ type RunState struct {
 	ready         []uuid.UUID
 	inReady       map[uuid.UUID]bool
 	seq           int64 // per-run terminal_sequence cursor (monotonic, dense)
+	seqExhausted  bool  // a transition needed a sequence past math.MaxInt64; see SequenceExhausted
 	terminalCount int
 	total         int
 	// completions records, per completed task, the durable effect its completion
@@ -227,10 +229,17 @@ func (rs *RunState) removeReady(id uuid.UUID) {
 // markTerminal sets a task's terminal status, records its outcome, allocates and
 // stamps the next terminal_sequence, removes it from the ready queue, and bumps
 // the terminal count.  Returns the stamped sequence.  No-op (returns 0) if the
-// task is unknown or already terminal.
+// task is unknown or already terminal, or if the cursor is exhausted.
 func (rs *RunState) markTerminal(id uuid.UUID, status TaskStatus) int64 {
 	ts := rs.tasks[id]
 	if ts == nil || IsTerminal(ts.Status) {
+		return 0
+	}
+	if rs.seq == math.MaxInt64 {
+		// Only a corrupted row or checkpoint puts the cursor here. Wrapping to
+		// math.MinInt64 would leave the result non-Durable, and the owner would
+		// acknowledge a completion it never wrote.
+		rs.seqExhausted = true
 		return 0
 	}
 	rs.seq++
@@ -820,6 +829,11 @@ func (rs *RunState) HasFailures() bool {
 // Sequence returns the current terminal_sequence cursor (the highest stamped).
 func (rs *RunState) Sequence() int64 { return rs.seq }
 
+// SequenceExhausted reports whether a transition on this state needed a
+// terminal_sequence past math.MaxInt64 and was left unapplied.  The caller must
+// fail the completion: nothing it staged can be persisted or published.
+func (rs *RunState) SequenceExhausted() bool { return rs.seqExhausted }
+
 // ExpandTask replaces the single catalog-keyed entry for taskID with N
 // instance-keyed entries (TaskRun IDs), raising total in the same critical
 // section. Unfanned runs never call this.
@@ -1364,6 +1378,7 @@ func (rs *RunState) Clone() *RunState {
 		ready:         append([]uuid.UUID(nil), rs.ready...),
 		inReady:       make(map[uuid.UUID]bool, len(rs.inReady)),
 		seq:           rs.seq,
+		seqExhausted:  rs.seqExhausted,
 		terminalCount: rs.terminalCount,
 		total:         rs.total,
 		completions:   make(map[uuid.UUID]completionRecord, len(rs.completions)),
