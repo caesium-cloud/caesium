@@ -337,6 +337,16 @@ func (s *Source) applyCheckout(ctx context.Context, importer *jobdef.Importer, d
 			// after the pre-filter is still a per-manifest skip. The rest of
 			// the batch was validated against the refused proposal, so
 			// revalidate it against the stored row that stays live.
+			//
+			// Known residual: each manifest commits in its own transaction
+			// (as before B3), so manifests applied before this refusal stay
+			// applied. If they relied on the refused proposal (say a trigger
+			// chain it would have broken), the stored graph is now invalid;
+			// this validation then fails the sync loudly instead of leaving
+			// a silent cycle, and the same checkout keeps failing until an
+			// operator fixes one side (a new commit, or a REST apply with git
+			// sync disabled). It needs a concurrent move of a source-owned
+			// job to race the watcher between the pre-filter and this apply.
 			s.reportViolation(report, plan.path, nsErr.Alias, nsErr.RequestedNamespace, nsErr.StoredNamespace, nsErr.Reason)
 			if err := importer.ValidateBatch(ctx, planDefinitions(plans[idx+1:])); err != nil {
 				return err
