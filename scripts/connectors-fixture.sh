@@ -266,10 +266,12 @@ for _attempt in $(seq 1 60); do
 done
 [ -n "$admin_key" ] || { echo "tracked auth server bootstrap key did not appear" >&2; exit 1; }
 [ ! -e "$fixture_cid" ] || { echo "fixture CID file already exists" >&2; exit 1; }
+control_listen=127.0.0.1:7240
+if [ -n "$browser_hook" ]; then control_listen=0.0.0.0:7240; fi
 "$cli" create --platform "$platform" --name "$fixture_name" --cidfile "$fixture_cid" \
     --network="container:$network_id" --user "$host_user" \
     -e USER=caesium-fixture -e HOME=/tmp -v "$artifacts:/artifacts" \
-    -e CAESIUM_CONNECTORS_CANDIDATE_SHA="$candidate" \
+    -e CAESIUM_CONNECTORS_CANDIDATE_SHA="$candidate" -e CAESIUM_CONNECTORS_CONTROL_LISTEN="$control_listen" \
     -e CAESIUM_MANUAL_TRIGGER_API_KEY=integration-test-key "$image" >"$artifacts/fixture-create.log"
 fixture_id=$(created_id "$fixture_cid")
 "$cli" start "$fixture_id" >"$artifacts/fixture-start.log"
