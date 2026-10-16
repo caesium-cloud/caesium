@@ -70,6 +70,19 @@ const (
 	ActorPolicyLoader        = "system:policy-loader"
 )
 
+// User and session administration (spec §8.4, §11.2). ActionSessionsRevoked
+// carries metadata {"reason", "count"}; it is written only when sessions were
+// actually revoked.
+const (
+	ActionUserDisable     = "user.disable"
+	ActionUserEnable      = "user.enable"
+	ActionSessionsRevoked = "auth.sessions_revoked"
+
+	SessionsRevokedReasonUserDisabled = "user_disabled"
+	SessionsRevokedReasonUserEnabled  = "user_enabled"
+	SessionsRevokedReasonAdmin        = "admin"
+)
+
 // AuditLogger writes structured audit log entries to the database.
 type AuditLogger struct {
 	db *gorm.DB

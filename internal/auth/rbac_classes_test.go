@@ -140,6 +140,14 @@ var routesAddedAfterMaster = map[string]RoutePolicy{
 	"GET /v1/connectors/:id/executions/:id/history":       {Role: models.RoleViewer, Class: RouteClassCluster},
 	"GET /v1/connectors/:id/executions/:id/relationships": {Role: models.RoleViewer, Class: RouteClassCluster},
 	"GET /v1/jobs/:id/runs/:id/external-executions":       {Role: models.RoleViewer, Class: RouteClassNamespaced},
+
+	// User and session administration (E3).
+	"GET /v1/auth/users":                      {Role: models.RoleAdmin, Class: RouteClassCluster},
+	"GET /v1/auth/users/:id":                  {Role: models.RoleAdmin, Class: RouteClassCluster},
+	"POST /v1/auth/users/:id/disable":         {Role: models.RoleAdmin, Class: RouteClassCluster},
+	"POST /v1/auth/users/:id/enable":          {Role: models.RoleAdmin, Class: RouteClassCluster},
+	"POST /v1/auth/users/:id/sessions/revoke": {Role: models.RoleAdmin, Class: RouteClassCluster},
+	"GET /v1/auth/sessions":                   {Role: models.RoleAdmin, Class: RouteClassCluster},
 }
 
 // TestRoutePolicyRolesMatchMaster pins every route's role to master's: route

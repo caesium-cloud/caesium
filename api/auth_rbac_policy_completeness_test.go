@@ -95,6 +95,9 @@ func TestAuthMiddlewareMountedRoutesHaveRBACPolicy(t *testing.T) {
 		"GET /v1/incidents/:id",
 		"POST /v1/incidents/:id/approvals/:id/approve",
 		"POST /v1/incidents/:id/approvals/:id/reject",
+		"GET /v1/auth/users",
+		"POST /v1/auth/users/:id/sessions/revoke",
+		"GET /v1/auth/sessions",
 	} {
 		require.Contains(t, mounted, key)
 	}

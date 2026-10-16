@@ -156,7 +156,9 @@ func (f *refreshFixture) handleAt(t *testing.T, id uuid.UUID) string {
 
 func (f *refreshFixture) newSession(t *testing.T, userID uuid.UUID) uuid.UUID {
 	t.Helper()
-	_, sess, err := f.sessions.Create(t.Context(), CreateSessionRequest{UserID: userID, AuthMethod: "oidc"})
+	var user models.User
+	require.NoError(t, f.db.Where("id = ?", userID).Take(&user).Error)
+	_, sess, err := f.sessions.Create(t.Context(), CreateSessionRequest{UserID: userID, AuthMethod: "oidc", DisableGeneration: user.DisableGeneration})
 	require.NoError(t, err)
 	return sess.ID
 }

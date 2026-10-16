@@ -57,6 +57,9 @@ func All(g *echo.Group, bus internal_event.Bus, authSvc *auth.Service, auditor *
 		}))
 		if authSvc != nil {
 			bindAuth(protected, authctrl.New(authSvc, auditor))
+			if admin := auth.NewUserAdmin(sessions); admin != nil {
+				bindUserAdmin(protected, authctrl.NewUserAdmin(admin, auditor))
+			}
 		}
 	}
 
@@ -299,4 +302,15 @@ func bindAuth(g *echo.Group, controller *authctrl.Controller) {
 	g.GET("/auth/audit", controller.QueryAudit)
 	g.GET("/auth/policy", controller.GetPolicy)
 	g.POST("/auth/policy/reload", controller.ReloadPolicy)
+}
+
+// bindUserAdmin mounts user and session administration (identity-and-access
+// E3); every route is cluster-admin only (internal/auth/rbac.go).
+func bindUserAdmin(g *echo.Group, controller *authctrl.UserAdminController) {
+	g.GET("/auth/users", controller.ListUsers)
+	g.GET("/auth/users/:id", controller.GetUser)
+	g.POST("/auth/users/:id/disable", controller.DisableUser)
+	g.POST("/auth/users/:id/enable", controller.EnableUser)
+	g.POST("/auth/users/:id/sessions/revoke", controller.RevokeUserSessions)
+	g.GET("/auth/sessions", controller.ListSessions)
 }

@@ -365,6 +365,13 @@ var endpointPolicy = map[string]RoutePolicy{
 	// The access policy itself (A4).
 	"GET /v1/auth/policy":         clusterRoute(admin),
 	"POST /v1/auth/policy/reload": clusterRoute(admin),
+	// User and session administration (E3): cluster admins only.
+	"GET /v1/auth/users":                      clusterRoute(admin),
+	"GET /v1/auth/users/:id":                  clusterRoute(admin),
+	"POST /v1/auth/users/:id/disable":         clusterRoute(admin),
+	"POST /v1/auth/users/:id/enable":          clusterRoute(admin),
+	"POST /v1/auth/users/:id/sessions/revoke": clusterRoute(admin),
+	"GET /v1/auth/sessions":                   clusterRoute(admin),
 	// Removes a stale dqlite member from the raft configuration (#582
 	// follow-up). Unscoped admins only: the scope middleware denies any
 	// job-scoped key on a route it has no job to check against.

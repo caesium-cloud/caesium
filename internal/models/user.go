@@ -24,6 +24,13 @@ type User struct {
 	CreatedAt     time.Time  `gorm:"not null" json:"created_at"`
 	LastLoginAt   *time.Time `json:"last_login_at,omitempty"`
 	DisabledAt    *time.Time `json:"disabled_at,omitempty"`
+	// DisableGeneration counts the user's disables (identity-and-access E3).
+	// A login reads it first and fences both its profile update and its
+	// session insert on it, so a login checked before a disable never takes
+	// effect after it, even once the user is enabled again. Only a disable
+	// advances it: concurrent logins and group refreshes leave it alone.
+	// Nullable with no default; rows from before it existed read 0.
+	DisableGeneration int64 `json:"-"`
 
 	// Group-refresh state (identity-and-access §11.1). Every column is
 	// nullable with no default, so rows from before it existed read as zero

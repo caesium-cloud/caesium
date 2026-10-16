@@ -220,21 +220,33 @@ func (us *UserStore) updateExisting(ctx context.Context, user *models.User, ext 
 		"refresh_lease_until":   nil,
 		"refresh_uncertain":     false,
 	}
+	// The write is fenced on the row as this login read it: still enabled and
+	// still at the disable generation read above (kept across retries). A
+	// user disabled in between is left untouched and the re-read reports it
+	// disabled. A generation that moved means a disable committed since the
+	// read, perhaps already undone by an enable; the login is refused with
+	// ErrUserChanged rather than applied, so an assertion checked before a
+	// disable never outlives it. Concurrent logins do not move the
+	// generation, so they all apply (the newest grant wins).
+	observed := user.DisableGeneration
 	var stored models.User
+	var applied bool
 	err := us.transaction(ctx, func(tx *gorm.DB) error {
-		stored = models.User{}
-		// disabled_at IS NULL closes the window between the read above and
-		// this write: a user disabled in between is left untouched and the
-		// re-read reports it disabled.
-		if err := tx.Model(&models.User{}).
-			Where("id = ? AND disabled_at IS NULL", user.ID).
-			Updates(updates).Error; err != nil {
-			return err
+		stored, applied = models.User{}, false
+		res := tx.Model(&models.User{}).
+			Where("id = ? AND disabled_at IS NULL AND COALESCE(disable_generation, 0) = ?", user.ID, observed).
+			Updates(updates)
+		if res.Error != nil {
+			return res.Error
 		}
+		applied = res.RowsAffected == 1
 		return tx.Where("id = ?", user.ID).Take(&stored).Error
 	})
 	if err != nil {
 		return nil, fmt.Errorf("update user: %w", err)
+	}
+	if !applied && !stored.IsDisabled() {
+		return nil, ErrUserChanged
 	}
 	return &stored, nil
 }
@@ -559,4 +571,275 @@ func (us *UserStore) CompleteRefreshDefinitive(ctx context.Context, userID uuid.
 		return DefinitiveResult{}, fmt.Errorf("record definitive refresh failure: %w", err)
 	}
 	return result, nil
+}
+
+// ErrUserNotFound reports an administration request for an unknown user.
+var ErrUserNotFound = errors.New("user not found")
+
+// UserFilter selects users for administration (identity-and-access E3).
+// Issuer matches exactly; Email is a case-insensitive substring (the database LOWER on both sides);
+// Disabled, when set, keeps only disabled (true) or enabled (false) users.
+// Limit must be positive.
+type UserFilter struct {
+	Issuer   string
+	Email    string
+	Disabled *bool
+	Limit    int
+	Offset   int
+}
+
+// UserPage is one page of users, newest first, with the filter's total.
+// HasMore comes from the page query's limit+1 probe.
+type UserPage struct {
+	Users   []models.User
+	Total   int64
+	HasMore bool
+}
+
+// ListUsers returns one page of users matching f, ordered by creation time
+// (newest first) with the id as the tie-breaker.
+func (us *UserStore) ListUsers(ctx context.Context, f UserFilter) (UserPage, error) {
+	if f.Limit <= 0 {
+		return UserPage{}, errors.New("list users: limit must be positive")
+	}
+	if f.Offset < 0 {
+		return UserPage{}, errors.New("list users: offset must not be negative")
+	}
+	scope := func() *gorm.DB {
+		q := us.db.WithContext(ctx).Model(&models.User{})
+		if f.Issuer != "" {
+			q = q.Where("issuer = ?", f.Issuer)
+		}
+		if f.Email != "" {
+			// The database folds both operands with the same LOWER, so the
+			// match is consistent on every backend (ASCII-only on SQLite and
+			// dqlite, the database locale on PostgreSQL).
+			q = q.Where("LOWER(email) LIKE LOWER(?) ESCAPE '!'", "%"+escapeLikePattern(f.Email)+"%")
+		}
+		if f.Disabled != nil {
+			if *f.Disabled {
+				q = q.Where("disabled_at IS NOT NULL")
+			} else {
+				q = q.Where("disabled_at IS NULL")
+			}
+		}
+		return q
+	}
+	var page UserPage
+	if err := scope().Count(&page.Total).Error; err != nil {
+		return UserPage{}, fmt.Errorf("count users: %w", err)
+	}
+	var rows []models.User
+	if err := scope().Order("created_at DESC").Order("id DESC").
+		Limit(f.Limit + 1).Offset(f.Offset).Find(&rows).Error; err != nil {
+		return UserPage{}, fmt.Errorf("list users: %w", err)
+	}
+	if len(rows) > f.Limit {
+		rows = rows[:f.Limit]
+		page.HasMore = true
+	}
+	page.Users = rows
+	return page, nil
+}
+
+// escapeLikePattern escapes LIKE metacharacters for ESCAPE '!', so a filter
+// value matches literally on SQLite, dqlite and PostgreSQL alike.
+func escapeLikePattern(s string) string {
+	return strings.NewReplacer("!", "!!", "%", "!%", "_", "!_").Replace(s)
+}
+
+// GetUser loads one user by id.
+func (us *UserStore) GetUser(ctx context.Context, id uuid.UUID) (*models.User, error) {
+	var user models.User
+	err := us.db.WithContext(ctx).Where("id = ?", id).Take(&user).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, ErrUserNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("load user: %w", err)
+	}
+	return &user, nil
+}
+
+// UserChange reports a disable or enable: the user as stored afterwards,
+// whether this call changed its state, and how many sessions the same
+// transaction revoked.
+type UserChange struct {
+	User            models.User
+	Changed         bool
+	SessionsRevoked int64
+}
+
+// DisableUser disables a user and, in the same transaction (retried as a
+// whole on catalog contention), revokes every unrevoked session of the user,
+// clears the refresh grant and advances the disable generation. The
+// generation is the login fence: a login that read the user before this
+// commit can no longer apply its profile update (UserStore.updateExisting) or
+// insert a session (SessionStore.Create), even after an enable. Clearing the
+// grant advances refresh_grant_version, so an in-flight group refresh can no
+// longer record its outcome either. Disabling a disabled user changes
+// nothing (Changed=false).
+func (us *UserStore) DisableUser(ctx context.Context, id uuid.UUID) (UserChange, error) {
+	now := us.now().UTC()
+	var change UserChange
+	err := us.transaction(ctx, func(tx *gorm.DB) error {
+		change = UserChange{}
+		updates := clearGrantUpdates()
+		updates["disabled_at"] = now
+		updates["disable_generation"] = gorm.Expr("COALESCE(disable_generation, 0) + 1")
+		res := tx.Model(&models.User{}).Where("id = ? AND disabled_at IS NULL", id).Updates(updates)
+		if res.Error != nil {
+			return res.Error
+		}
+		if res.RowsAffected == 1 {
+			revoked, err := revokeUserSessionsTx(tx, id, now)
+			if err != nil {
+				return err
+			}
+			change.Changed, change.SessionsRevoked = true, revoked
+		}
+		return takeUserTx(tx, id, &change.User)
+	})
+	if err != nil {
+		return UserChange{}, wrapUserAdminError("disable user", err)
+	}
+	return change, nil
+}
+
+// EnableUser clears a user's disabled_at. It never un-revokes a session. On
+// the transition it also revokes any unrevoked session of the user in the
+// same transaction: none should exist (the disable revoked them all and the
+// mint fence refuses disabled users), so this is a second line of defence
+// should a session ever have been inserted while the user was disabled.
+// Enabling an enabled user changes nothing (Changed=false).
+func (us *UserStore) EnableUser(ctx context.Context, id uuid.UUID) (UserChange, error) {
+	now := us.now().UTC()
+	var change UserChange
+	err := us.transaction(ctx, func(tx *gorm.DB) error {
+		change = UserChange{}
+		res := tx.Model(&models.User{}).Where("id = ? AND disabled_at IS NOT NULL", id).
+			Updates(map[string]any{"disabled_at": nil})
+		if res.Error != nil {
+			return res.Error
+		}
+		if res.RowsAffected == 1 {
+			swept, err := revokeUserSessionsTx(tx, id, now)
+			if err != nil {
+				return err
+			}
+			change.Changed, change.SessionsRevoked = true, swept
+		}
+		return takeUserTx(tx, id, &change.User)
+	})
+	if err != nil {
+		return UserChange{}, wrapUserAdminError("enable user", err)
+	}
+	return change, nil
+}
+
+// RevokeUserSessions revokes every unrevoked session of an existing user
+// ("log out everywhere") and returns how many it revoked.
+func (us *UserStore) RevokeUserSessions(ctx context.Context, id uuid.UUID) (int64, error) {
+	now := us.now().UTC()
+	var revoked int64
+	err := us.transaction(ctx, func(tx *gorm.DB) error {
+		revoked = 0
+		var user models.User
+		if err := takeUserTx(tx, id, &user); err != nil {
+			return err
+		}
+		n, err := revokeUserSessionsTx(tx, id, now)
+		revoked = n
+		return err
+	})
+	if err != nil {
+		return 0, wrapUserAdminError("revoke user sessions", err)
+	}
+	return revoked, nil
+}
+
+func takeUserTx(tx *gorm.DB, id uuid.UUID, out *models.User) error {
+	err := tx.Where("id = ?", id).Take(out).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return ErrUserNotFound
+	}
+	return err
+}
+
+func wrapUserAdminError(op string, err error) error {
+	if errors.Is(err, ErrUserNotFound) {
+		return ErrUserNotFound
+	}
+	return fmt.Errorf("%s: %w", op, err)
+}
+
+// UserAdmin is the cluster-admin surface over users and their sessions
+// (identity-and-access E3, spec §11.2). It is where the user lifecycle
+// cascades meet: E4 joins user-bound API keys here (listed in the detail,
+// revoked alongside revokeUserSessionsTx).
+type UserAdmin struct {
+	users    *UserStore
+	sessions *SessionStore
+}
+
+// NewUserAdmin builds the administration surface over the session store's
+// catalog connection and clock. It returns nil when sessions is nil.
+func NewUserAdmin(sessions *SessionStore) *UserAdmin {
+	if sessions == nil {
+		return nil
+	}
+	return &UserAdmin{
+		users:    NewUserStore(sessions.db, WithUserStoreNow(sessions.now)),
+		sessions: sessions,
+	}
+}
+
+// DetailSessionLimit caps the sessions embedded in a user detail; the rest
+// are paged through ListSessions.
+const DetailSessionLimit = 100
+
+// UserDetail is one user with the newest of its active sessions.
+type UserDetail struct {
+	User          models.User
+	Sessions      []models.Session
+	SessionsTotal int64
+}
+
+// ListUsers pages users matching f.
+func (a *UserAdmin) ListUsers(ctx context.Context, f UserFilter) (UserPage, error) {
+	return a.users.ListUsers(ctx, f)
+}
+
+// GetUser returns a user and at most DetailSessionLimit of its newest active
+// sessions, with their total.
+func (a *UserAdmin) GetUser(ctx context.Context, id uuid.UUID) (UserDetail, error) {
+	user, err := a.users.GetUser(ctx, id)
+	if err != nil {
+		return UserDetail{}, err
+	}
+	page, err := a.sessions.ListActive(ctx, SessionFilter{UserID: &id, Limit: DetailSessionLimit})
+	if err != nil {
+		return UserDetail{}, err
+	}
+	return UserDetail{User: *user, Sessions: page.Sessions, SessionsTotal: page.Total}, nil
+}
+
+// DisableUser disables a user and revokes its sessions (UserStore.DisableUser).
+func (a *UserAdmin) DisableUser(ctx context.Context, id uuid.UUID) (UserChange, error) {
+	return a.users.DisableUser(ctx, id)
+}
+
+// EnableUser re-enables a user (UserStore.EnableUser).
+func (a *UserAdmin) EnableUser(ctx context.Context, id uuid.UUID) (UserChange, error) {
+	return a.users.EnableUser(ctx, id)
+}
+
+// RevokeUserSessions logs a user out everywhere (UserStore.RevokeUserSessions).
+func (a *UserAdmin) RevokeUserSessions(ctx context.Context, id uuid.UUID) (int64, error) {
+	return a.users.RevokeUserSessions(ctx, id)
+}
+
+// ListSessions pages active sessions (SessionStore.ListActive).
+func (a *UserAdmin) ListSessions(ctx context.Context, f SessionFilter) (SessionPage, error) {
+	return a.sessions.ListActive(ctx, f)
 }
