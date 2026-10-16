@@ -100,6 +100,15 @@ func TestRoleMapperTranslatedPolicyValidates(t *testing.T) {
 	}
 	// Deduped last-entry-wins, sorted, wildcard last.
 	require.Equal(t, []string{"a=operator", "b=viewer", "*=viewer"}, groups)
+
+	view, fallback := m.Translated()
+	require.Same(t, m.static.Policy, view)
+	require.Equal(t, models.RoleViewer, fallback)
+
+	var nilMapper *RoleMapper
+	view, fallback = nilMapper.Translated()
+	require.Equal(t, policy.EmptyPolicy(), view)
+	require.Empty(t, fallback)
 }
 
 func TestRoleMapperNilReceiver(t *testing.T) {

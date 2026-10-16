@@ -106,3 +106,13 @@ func (m *RoleMapper) Resolve(groups []string, _ string) policy.Grants {
 	}
 	return m.static.Resolve(trimmed, "")
 }
+
+// Translated returns the cluster-wide policy the env mapping was translated
+// into and its fallback role, for display (GET /v1/auth/policy). Callers must
+// not modify the policy.
+func (m *RoleMapper) Translated() (*policy.AccessPolicy, models.Role) {
+	if m == nil || m.static == nil {
+		return policy.EmptyPolicy(), ""
+	}
+	return m.static.Policy, m.static.DefaultRole
+}

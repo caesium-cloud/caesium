@@ -46,6 +46,7 @@ type Service struct {
 	sleep                       func(time.Duration)
 	now                         func() time.Time
 	policySource                policy.Source
+	policyHolder                *policy.Holder
 
 	// lastUsedMu protects the async last_used_at update buffer.
 	lastUsedMu sync.Mutex
@@ -75,6 +76,25 @@ func (s *Service) PolicySource() policy.Source {
 		return nil
 	}
 	return s.policySource
+}
+
+// WithPolicyHolder configures the access policy holder behind
+// GET /v1/auth/policy, POST /v1/auth/policy/reload and namespace settings.
+// It is independent of WithPolicySource: with no policy file the holder only
+// renders the env translation and the grant source stays the RoleMapper (or
+// nil).
+func WithPolicyHolder(h *policy.Holder) ServiceOption {
+	return func(s *Service) {
+		s.policyHolder = h
+	}
+}
+
+// PolicyHolder returns the configured access policy holder, or nil.
+func (s *Service) PolicyHolder() *policy.Holder {
+	if s == nil {
+		return nil
+	}
+	return s.policyHolder
 }
 
 // WithValidationFailureMinLatency configures the minimum latency for auth failures.

@@ -282,4 +282,6 @@ func bindAuth(g *echo.Group, controller *authctrl.Controller) {
 	g.POST("/auth/keys/:id/revoke", controller.RevokeKey)
 	g.POST("/auth/keys/:id/rotate", controller.RotateKey)
 	g.GET("/auth/audit", controller.QueryAudit)
+	g.GET("/auth/policy", controller.GetPolicy)
+	g.POST("/auth/policy/reload", controller.ReloadPolicy)
 }

@@ -415,6 +415,17 @@ var (
 		},
 	)
 
+	// AuthPolicyReloadFailuresTotal counts access policy reload attempts
+	// that kept the last good revision. The poller counts a given bad file
+	// once; every API reload attempt counts.
+	AuthPolicyReloadFailuresTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "caesium_auth_policy_reload_failures_total",
+			Help: "Access policy reload attempts rejected (invalid or unreadable file), by trigger (poll, api).",
+		},
+		[]string{"trigger"},
+	)
+
 	AuditLogEntriesTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "caesium_audit_log_entries_total",
@@ -784,6 +795,7 @@ func Register() {
 			AuthRequestsTotal,
 			AuthFailuresTotal,
 			AuthKeyAgeSeconds,
+			AuthPolicyReloadFailuresTotal,
 			AuditLogEntriesTotal,
 			SSOLoginsTotal,
 			SSOLoginDurationSeconds,
