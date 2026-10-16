@@ -448,6 +448,32 @@ func TestPollDiscardsAReadTheFileChangedUnder(t *testing.T) {
 	require.Len(t, events.all(), 1)
 }
 
+// An observed write between two matching reads resets the stability gate:
+// the matching reads were not consecutive, so the second one is only a new
+// first sighting.
+func TestPollUnstableReadResetsAPendingSighting(t *testing.T) {
+	t.Parallel()
+	h, path, events := loadTestHolder(t, loaderPolicyB, HolderOptions{})
+
+	require.NoError(t, os.WriteFile(path, []byte(loaderPolicyA), 0o600))
+	h.poll(t.Context())
+	require.NotEmpty(t, h.pendingKey, "the first stable read of a change is a sighting")
+
+	h.afterRead = func() { appendToFile(t, path, loaderPolicyAFull[len(loaderPolicyA):]) }
+	h.poll(t.Context())
+	h.afterRead = nil
+	require.Empty(t, h.pendingKey, "an unstable read discards the earlier sighting")
+
+	require.NoError(t, os.WriteFile(path, []byte(loaderPolicyA), 0o600))
+	h.poll(t.Context())
+	require.Equal(t, sha(loaderPolicyB), h.Current().Hash, "matching reads separated by a write must not publish")
+	require.Empty(t, events.all())
+
+	h.poll(t.Context())
+	require.Equal(t, sha(loaderPolicyA), h.Current().Hash)
+	require.Len(t, events.all(), 1)
+}
+
 // An API reload acts on one read, so it re-reads (briefly) when the file
 // changed under it, and refuses a file that keeps changing.
 func TestAPIReloadSettlesAReadTheFileChangedUnder(t *testing.T) {

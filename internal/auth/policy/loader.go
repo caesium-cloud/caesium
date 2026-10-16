@@ -381,6 +381,9 @@ func (h *Holder) poll(ctx context.Context) {
 	read := h.readFile()
 	if read.unstable {
 		// A writer changed the file while it was read; look again next tick.
+		// Forget any earlier sighting too: two matching reads only prove the
+		// file is stable when no write was observed between them.
+		h.pendingKey = ""
 		return
 	}
 	cur := h.current.Load()
