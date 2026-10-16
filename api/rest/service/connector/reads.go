@@ -18,6 +18,7 @@ import (
 
 	core "github.com/caesium-cloud/caesium/internal/connector"
 	"github.com/caesium-cloud/caesium/internal/connector/correlation"
+	"github.com/caesium-cloud/caesium/internal/connector/operations"
 	"github.com/caesium-cloud/caesium/internal/connector/temporal"
 	"github.com/caesium-cloud/caesium/internal/jobdef/secret"
 	"github.com/caesium-cloud/caesium/internal/models"
@@ -39,17 +40,21 @@ type Runtime struct {
 	activationErr error
 	cursorKey     []byte
 	readBudget    *core.ReadGuard
+	queryBudget   *core.ReadGuard
 	resolver      secret.Resolver
 	mu            sync.Mutex
 	closed        atomic.Bool
 	connections   map[string]*connection
 }
 type connection struct {
-	config   core.Connection
-	guard    *core.ReadGuard
-	mu       sync.Mutex
-	client   client.Client
-	observer *temporal.Observer
+	config      core.Connection
+	guard       *core.ReadGuard
+	mu          sync.Mutex
+	client      client.Client
+	observer    *temporal.Observer
+	messenger   *temporal.Messenger
+	operations  *operations.Service
+	queryBudget *core.ReadGuard
 }
 
 // New activates only catalog configuration. Dialing and certificate reads are
@@ -60,6 +65,9 @@ func New(ctx context.Context, db *gorm.DB, cfg *core.Config, fingerprint, previo
 	defer cancel()
 	r.cursorKey = []byte(cursorSecret)
 	r.readBudget = core.NewReadGuard(r.store, fingerprint, core.DefaultLimits())
+	queryLimits := core.DefaultLimits()
+	queryLimits.ReadsPerMinute = queryLimits.QueriesPerMinute
+	r.queryBudget = core.NewReadGuard(r.store, fingerprint, queryLimits)
 	if len(r.cursorKey) < 32 {
 		r.activationErr = errors.New("connector cursor signing secret unavailable")
 	} else {
@@ -67,7 +75,9 @@ func New(ctx context.Context, db *gorm.DB, cfg *core.Config, fingerprint, previo
 	}
 	for _, config := range cfg.Connections {
 		if config.Enabled {
-			r.connections[config.ID] = &connection{config: config, guard: core.NewReadGuard(r.store, fingerprint, config.Limits)}
+			queryLimits := config.Limits
+			queryLimits.ReadsPerMinute = queryLimits.QueriesPerMinute
+			r.connections[config.ID] = &connection{config: config, guard: core.NewReadGuard(r.store, fingerprint, config.Limits), queryBudget: core.NewReadGuard(r.store, fingerprint, queryLimits)}
 		}
 	}
 	return r
@@ -96,6 +106,8 @@ func (r *Runtime) Close() {
 			c.client.Close()
 			c.client = nil
 			c.observer = nil
+			c.messenger = nil
+			c.operations = nil
 		}
 		c.mu.Unlock()
 	}
@@ -142,6 +154,7 @@ func (r *Runtime) Connections(ctx context.Context, principal string) (Connection
 		caps := []core.Capability{}
 		if cfg.Enabled {
 			caps = append(caps, ReadCapabilities...)
+			caps = append(caps, messageCapabilities(cfg)...)
 		}
 		out.Connections = append(out.Connections, ConnectionView{ID: cfg.ID, Provider: cfg.Provider, Scope: cfg.Scope, UIURL: cfg.UIURL, ConsoleRefreshMS: cfg.Limits.ConsoleRefresh.Milliseconds(), Enabled: cfg.Enabled, Capabilities: caps})
 	}
@@ -218,7 +231,13 @@ func (r *Runtime) observer(ctx context.Context, c *connection) (*temporal.Observ
 		cli.Close()
 		return nil, err
 	}
+	messenger, err := temporal.NewMessengerFromClient(cli, cfg.ID, cfg.Scope, cfg.Bindings, apiKey, cfg.Limits.RPCDeadline, cfg.Limits.MaxPageMetadataBytes)
+	if err != nil {
+		cli.Close()
+		return nil, err
+	}
 	c.client = cli
+	c.messenger = messenger
 	c.observer = observer
 	return observer, nil
 }
@@ -240,6 +259,7 @@ type Execution struct {
 	Completeness       string             `json:"completeness"`
 	ObservedAt         time.Time          `json:"observed_at"`
 	SnapshotObservedAt *time.Time         `json:"snapshot_observed_at,omitempty"`
+	Binding            *BindingView       `json:"binding,omitempty"`
 }
 
 func execution(id string, x temporal.Execution) (Execution, error) {
@@ -437,6 +457,7 @@ func (r *Runtime) detail(ctx context.Context, c *connection, ref core.ExecutionR
 		if decodeErr != nil {
 			return nil, decodeErr
 		}
+		out.Binding = bindingView(c.config, x.WorkflowType, false)
 		out.Availability = core.AvailabilityStale
 		out.ObservedAt = snapshot.ObservedAt
 		out.SnapshotObservedAt = &snapshot.ObservedAt
@@ -459,6 +480,7 @@ func (r *Runtime) detail(ctx context.Context, c *connection, ref core.ExecutionR
 	if err != nil {
 		return nil, err
 	}
+	out.Binding = bindingView(c.config, x.WorkflowType, true)
 	out.SnapshotObservedAt = &stored.ObservedAt
 	return bound(out, c.config.Limits.MaxPageMetadataBytes)
 }

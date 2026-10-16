@@ -75,6 +75,11 @@ func Protected(g *echo.Group, bus internal_event.Bus, auditor *auth.AuditLogger,
 		g.GET("/connectors/:connection_id/executions/:execution_id", cc.Detail)
 		g.GET("/connectors/:connection_id/executions/:execution_id/history", cc.History)
 		g.GET("/connectors/:connection_id/executions/:execution_id/relationships", cc.Relationships)
+		g.POST("/connectors/:connection_id/executions/:execution_id/queries/:query_id", cc.Query)
+		g.POST("/connectors/:connection_id/executions/:execution_id/actions/:action_id", cc.Submit)
+		g.GET("/connectors/:connection_id/executions/:execution_id/operations", cc.Operations)
+		g.GET("/connectors/:connection_id/operations/:operation_id", cc.Lookup)
+		g.POST("/connectors/:connection_id/operations/:operation_id/resubmit", cc.Resubmit)
 		g.GET("/jobs/:id/runs/:run_id/external-executions", cc.RunLinks)
 	}
 	// events

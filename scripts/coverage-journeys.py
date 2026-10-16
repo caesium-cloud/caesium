@@ -327,16 +327,21 @@ class ConnectorOutputLimit(JourneyError):
         self.limit, self.observed = limit, observed
 
 
-def connector_http(base, key, method, path, body=None):
+def connector_http(base, key, method, path, body=None, headers=None):
     """Bounded public protocol; native errors and response bodies stay private."""
-    headers = {"Content-Type": "application/json"}
+    extra = {} if headers is None else headers
+    if (not isinstance(extra, dict) or set(extra) - {"Idempotency-Key"}
+            or any(not isinstance(value, str) or not value or len(value) > 256
+                   or "\r" in value or "\n" in value for value in extra.values())):
+        raise JourneyError("connector public request headers refused")
+    headers = {"Content-Type": "application/json", **extra}
     if key:
         headers["Authorization"] = "Bearer " + key
     request = Request(base + path, data=None if body is None else json.dumps(body).encode(),
                       method=method, headers=headers)
     try:
         with urlopen(request, timeout=12) as response:
-            if response.status not in (200, 201):
+            if response.status not in (200, 201, 202):
                 raise JourneyError("connector HTTP status refused")
             value = json.loads(complete_response_bytes(response, 2 * 1024 * 1024))
     except Exception:
@@ -352,8 +357,55 @@ def connector_started_at(info):
     return value
 
 
+CONNECTOR_RPC_METHODS = ("ListWorkflowExecutions", "DescribeWorkflowExecution", "GetWorkflowExecutionHistory",
+                         "QueryWorkflow", "UpdateWorkflowExecution", "PollWorkflowExecutionUpdate")
+
+
+def validate_connector_semantic_receipt(record):
+    """Replay phase-separated raw RPC counts and the required C1/C2 witnesses."""
+    if not isinstance(record, dict) or any(record.get(name) is not True for name in
+            ("verified_delegation", "reverse_link", "local_run_succeeded")):
+        raise JourneyError("connector read semantic proof is incomplete")
+    actions = record.get("actions")
+    if (not isinstance(actions, dict) or any(actions.get(name) is not True for name in
+            ("status_query", "approval", "operation_list", "receipt_lookup", "principal_verified",
+             "workflow_actor_verified", "second_local_run_succeeded", "dispatch_audit"))
+            or type(actions.get("effect_count")) is not int or actions["effect_count"] != 1
+            or type(actions.get("explicit_status_queries")) is not int
+            or not 2 <= actions["explicit_status_queries"] <= 12
+            or not isinstance(actions.get("operation_id"), str) or not UUID_RE.fullmatch(actions["operation_id"])
+            or not isinstance(actions.get("principal_id"), str) or not UUID_RE.fullmatch(actions["principal_id"])
+            or not isinstance(actions.get("second_run_id"), str) or not UUID_RE.fullmatch(actions["second_run_id"])
+            or actions["second_run_id"] == record.get("run_id")
+            or actions.get("principal_kind") != "api_key" or actions.get("role") != "operator"
+            or not isinstance(actions.get("external_update_id"), str)
+            or not re.fullmatch(r"caesium-[0-9a-f]{64}", actions["external_update_id"])):
+        raise JourneyError("connector action semantic proof is incomplete")
+    evidence = record.get("provider_rpc_evidence")
+    if not isinstance(evidence, dict):
+        raise JourneyError("connector raw RPC proof is missing")
+    counts = {}
+    for phase, field in (("reads", "provider_rpc_delta"), ("actions", "action_provider_rpc_delta")):
+        methods = evidence.get(phase)
+        if (not isinstance(methods, list) or len(methods) > 10000
+                or any(method not in CONNECTOR_RPC_METHODS for method in methods)):
+            raise JourneyError("connector raw RPC phase is malformed")
+        counts[phase] = {method: methods.count(method) for method in CONNECTOR_RPC_METHODS}
+        delta = record.get(field)
+        if (not isinstance(delta, dict) or set(delta) != set(CONNECTOR_RPC_METHODS)
+                or any(type(value) is not int or value < 0 for value in delta.values())
+                or delta != counts[phase]):
+            raise JourneyError("connector RPC delta differs from raw phase evidence")
+    if (any(counts["reads"][method] <= 0 for method in CONNECTOR_RPC_METHODS[:3])
+            or any(counts["reads"][method] != 0 for method in CONNECTOR_RPC_METHODS[3:])
+            or counts["actions"]["QueryWorkflow"] != actions["explicit_status_queries"]
+            or counts["actions"]["UpdateWorkflowExecution"] != 1
+            or counts["actions"]["DescribeWorkflowExecution"] <= 0):
+        raise JourneyError("connector RPC phases do not prove explicit single approval")
+
+
 def connector_read_semantics(command, args, request=connector_http, expected_started_at=""):
-    """Real C1 reads join provider history to one actual local admission/run."""
+    """Real C1 reads and C2 messages share one continuously measured server."""
     def require(condition, reason):
         if not condition:
             raise JourneyError(reason)
@@ -440,12 +492,17 @@ def connector_read_semantics(command, args, request=connector_http, expected_sta
                 "connector provider RPC journal is incomplete")
         return events
 
-    def rpc_counts(events):
-        methods = ("ListWorkflowExecutions", "DescribeWorkflowExecution", "GetWorkflowExecutionHistory", "QueryWorkflow")
-        return {name: sum(event.get("kind") == "provider_rpc" and isinstance(event.get("method"), str)
-                          and event["method"].endswith("/" + name) for event in events) for name in methods}
+    def rpc_names(events):
+        return [event["method"].rsplit("/", 1)[-1] for event in events
+                if event.get("kind") == "provider_rpc" and isinstance(event.get("method"), str)
+                and event["method"].rsplit("/", 1)[-1] in CONNECTOR_RPC_METHODS]
 
-    before = rpc_counts(journal())
+    def rpc_counts(events):
+        names = rpc_names(events)
+        return {name: names.count(name) for name in CONNECTOR_RPC_METHODS}
+
+    initial_journal = journal()
+    before = rpc_counts(initial_journal)
     aliases = ("connector-fixture-publish", "connector-fixture-notify")
     definitions = [{"apiVersion": "v1", "kind": "Job", "metadata": {"alias": alias},
                     "trigger": {"type": "cron", "configuration": {"cron": "0 0 31 2 *"}},
@@ -460,6 +517,7 @@ def connector_read_semantics(command, args, request=connector_http, expected_sta
                and entry.get("alias") in aliases}
     require(set(job_ids) == set(aliases) and all(isinstance(value, str) and UUID_RE.fullmatch(value) for value in job_ids.values()),
             "connector real job identities are missing")
+    key_metadata = {}
     def key(role, scope=None):
         body = {"role": role, "description": "connector coverage " + role}
         if scope is not None:
@@ -467,6 +525,7 @@ def connector_read_semantics(command, args, request=connector_http, expected_sta
         value = request(base, admin, "POST", "/v1/auth/keys", body)
         require(isinstance(value, dict) and isinstance(value.get("key"), str)
                 and KEY_RE.fullmatch(value["key"]), "connector real principal creation failed")
+        key_metadata[value["key"]] = value.get("api_key", {})
         return value["key"]
     runner, viewer = key("runner", list(aliases)), key("viewer")
     configured = request(control, "", "POST", "/configure", {"runner_key": runner})
@@ -555,10 +614,140 @@ def connector_read_semantics(command, args, request=connector_http, expected_sta
                 and event["hint"].get("idempotency_key") == correlation["idempotency_key"]
                 and event["hint"].get("outcome") == "created" for event in witnessed),
             "connector provider admission witness differs from public verified correlation")
+    require(witnessed[:len(initial_journal)] == initial_journal,
+            "connector provider journal reset during read collection")
     after = rpc_counts(witnessed)
     delta = {name: after[name] - before[name] for name in before}
-    require(all(delta[name] > 0 for name in ("ListWorkflowExecutions", "DescribeWorkflowExecution", "GetWorkflowExecutionHistory"))
-            and delta["QueryWorkflow"] == 0, "connector provider journal does not prove read-only real RPCs")
+    require(all(delta[name] > 0 for name in CONNECTOR_RPC_METHODS[:3])
+            and all(delta[name] == 0 for name in CONNECTOR_RPC_METHODS[3:]),
+            "connector provider journal does not prove read-only real RPCs")
+    read_rpc_evidence = rpc_names(witnessed[len(initial_journal):])
+
+    # The read-only baseline above is frozen before the first explicit Query or
+    # action. The same instrumented process now drives declared C2 HTTP routes.
+    operator = key("operator")
+    operator_metadata = key_metadata[operator]
+    identity = request(base, operator, "GET", "/auth/whoami")
+    require(isinstance(identity, dict) and identity.get("kind") == "api_key" and identity.get("role") == "operator"
+            and isinstance(operator_metadata, dict) and isinstance(operator_metadata.get("id"), str)
+            and UUID_RE.fullmatch(operator_metadata["id"])
+            and identity.get("subject") == operator_metadata.get("key_prefix"),
+            "connector operator principal is not authenticated")
+    signal = request(control, "", "POST", "/signal", {"id": started["workflow_id"], "run_id": started["run_id"],
+                     "name": "fixture_eligibility", "value": True})
+    require(isinstance(signal, dict) and signal.get("sent") is True, "connector fixture eligibility signal failed")
+    query_body = {"binding_name": "publication", "binding_version": "1"}
+    explicit_queries = 0
+    query_state = None
+    for _ in range(6):
+        result = request(base, operator, "POST", path + "/queries/publication_status", query_body)
+        explicit_queries += 1
+        query_state = result.get("result") if isinstance(result, dict) else None
+        require(isinstance(query_state, dict), "connector declared Query result is malformed")
+        if query_state.get("stage") == "awaiting_approval" and query_state.get("eligible") is True:
+            break
+        time.sleep(0.5)
+    require(query_state.get("stage") == "awaiting_approval" and query_state.get("eligible") is True
+            and query_state.get("approved") is False and query_state.get("approval_effects") == 0,
+            "connector explicit Query did not observe actual approval eligibility")
+    submitted = request(base, operator, "POST", path + "/actions/approve_publication",
+                        {**query_body, "input": {"note": "coverage approval"}},
+                        headers={"Idempotency-Key": args.run_id + "-approval"})
+    operation = submitted.get("operation") if isinstance(submitted, dict) else None
+    require(isinstance(operation, dict) and submitted.get("created") is True
+            and isinstance(operation.get("id"), str) and UUID_RE.fullmatch(operation["id"])
+            and isinstance(operation.get("external_update_id"), str)
+            and re.fullmatch(r"caesium-[0-9a-f]{64}", operation["external_update_id"])
+            and operation.get("connection_id") == "fixture" and operation.get("execution_id") == found["id"]
+            and operation.get("execution", {}).get("coordinates") == started
+            and operation.get("state") in ("submitted", "accepted", "completed"),
+            "connector authorized approval did not return its pinned durable receipt")
+    expected_actor = {"principal_kind": "api_key", "stable_id": operator_metadata["id"],
+                      "subject": identity["subject"], "role": "operator", "operation_id": operation["id"], "binding_version": "1"}
+    require(operation.get("actor") == expected_actor, "connector receipt actor is not the actual authenticated operator")
+    before_refresh = rpc_counts(journal())
+    operations = request(base, viewer, "GET", path + "/operations")
+    require(isinstance(operations, dict) and isinstance(operations.get("operations"), list)
+            and len(operations["operations"]) == 1 and operations["operations"][0].get("id") == operation["id"],
+            "connector public operation refresh did not recover the original receipt")
+    require(rpc_counts(journal()) == before_refresh, "connector operation listing dispatched a provider RPC")
+    recovered = None
+    for _ in range(30):
+        lookup = request(base, viewer, "GET", "/v1/connectors/fixture/operations/" + operation["id"])
+        recovered = lookup.get("operation") if isinstance(lookup, dict) else None
+        require(isinstance(recovered, dict) and recovered.get("id") == operation["id"]
+                and recovered.get("external_update_id") == operation["external_update_id"]
+                and recovered.get("actor") == expected_actor and recovered.get("execution", {}).get("coordinates") == started,
+                "connector public receipt lookup changed the pinned operation")
+        if recovered.get("state") == "completed":
+            break
+        time.sleep(0.5)
+    require(recovered.get("state") == "completed" and recovered.get("evidence", {}).get("result", {}).get("approved") is True,
+            "connector public receipt did not prove validated approval completion")
+    second_hint = None
+    final_events = None
+    for _ in range(60):
+        final_events = journal()
+        starts = [event for event in final_events if event.get("kind") == "http_start"
+                  and event.get("workflow_id") == started["workflow_id"] and isinstance(event.get("hint"), dict)
+                  and event["hint"].get("job_id") == job_ids[aliases[1]] and event["hint"].get("outcome") == "created"]
+        if starts:
+            require(len(starts) == 1, "connector approval caused multiple second-job admissions")
+            second_hint = starts[0]["hint"]
+            require(second_hint.get("idempotency_key") == started["run_id"] + "/" + starts[0].get("activity_id", ""),
+                    "connector second-job admission lost its exact workflow activity identity")
+            break
+        time.sleep(0.5)
+    require(isinstance(second_hint, dict) and isinstance(second_hint.get("run_id"), str)
+            and UUID_RE.fullmatch(second_hint["run_id"]) and second_hint["run_id"] != correlation["run_id"],
+            "connector actual approval did not admit its distinct second local run")
+    second_run = None
+    for _ in range(30):
+        second_run = request(base, viewer, "GET", "/v1/jobs/" + job_ids[aliases[1]] + "/runs/" + second_hint["run_id"])
+        if isinstance(second_run, dict) and second_run.get("status") == "succeeded":
+            break
+        time.sleep(0.5)
+    require(isinstance(second_run, dict) and second_run.get("id") == second_hint["run_id"]
+            and second_run.get("job_id") == job_ids[aliases[1]] and second_run.get("status") == "succeeded",
+            "connector second actual local run did not succeed")
+    # A fresh viewer keeps final explicit status observation within each real
+    # principal's six/minute budget even if worker startup needed all attempts.
+    status_viewer = key("viewer")
+    final_state = None
+    for _ in range(6):
+        result = request(base, status_viewer, "POST", path + "/queries/publication_status", query_body)
+        explicit_queries += 1
+        final_state = result.get("result") if isinstance(result, dict) else None
+        require(isinstance(final_state, dict), "connector final declared Query result is malformed")
+        if final_state.get("stage") == "published":
+            break
+        time.sleep(0.5)
+    require(final_state.get("stage") == "published" and final_state.get("approved") is True
+            and type(final_state.get("approval_effects")) is int and final_state["approval_effects"] == 1
+            and final_state.get("actor") == expected_actor and final_state.get("second") == second_hint,
+            "connector workflow did not expose exactly one approval effect and its actual principal/second admission")
+    final_events = journal()
+    require(final_events[:len(witnessed)] == witnessed, "connector provider journal reset during action collection")
+    effects = [event for event in final_events if event.get("kind") == "approval_effect" and event.get("run_id") == started["run_id"]]
+    require(len(effects) == 1 and effects[0].get("actor") == expected_actor,
+            "connector independent activity journal does not prove exactly one actor-bound effect")
+    audits = request(base, admin, "GET", "/v1/auth/audit?action=connector.action_dispatch&limit=1000")
+    require(isinstance(audits, list) and any(isinstance(row, dict) and row.get("action") == "connector.action_dispatch"
+            and row.get("actor") == identity["subject"] and row.get("outcome") == "success"
+            and row.get("metadata", {}).get("operation_id") == operation["id"]
+            and row.get("metadata", {}).get("stable_id") == operator_metadata["id"]
+            and row.get("metadata", {}).get("connection_id") == "fixture"
+            and row.get("metadata", {}).get("execution_id") == found["id"] for row in audits),
+            "connector action lacks durable actor/target dispatch audit")
+    action_after = rpc_counts(final_events)
+    action_delta = {name: action_after[name] - after[name] for name in after}
+    action_rpc_evidence = rpc_names(final_events[len(witnessed):])
+    actions = {"status_query": True, "approval": True, "operation_list": True, "receipt_lookup": True,
+               "principal_verified": True, "workflow_actor_verified": True, "effect_count": 1,
+               "second_local_run_succeeded": True, "dispatch_audit": True,
+               "explicit_status_queries": explicit_queries, "operation_id": operation["id"],
+               "external_update_id": operation["external_update_id"], "principal_id": operator_metadata["id"],
+               "principal_kind": "api_key", "role": "operator", "second_run_id": second_hint["run_id"]}
     task_identity()
     require(hashlib.sha256(config.read_bytes()).hexdigest() == config_digest, "connector configuration changed during collection")
     final_provider = guarded_resource(command, "container", args.provider_id, "owned", args.owner, args.run_id,
@@ -566,7 +755,7 @@ def connector_read_semantics(command, args, request=connector_http, expected_sta
     require(final_provider.get("State", {}).get("Running") is True
             and connector_started_at(final_provider) == provider_started_at,
             "connector provider process generation changed during journal collection")
-    return {"schema_version": 1, "candidate_sha": args.owner, "image_id": args.image,
+    receipt = {"schema_version": 1, "candidate_sha": args.owner, "image_id": args.image,
             "provider_container_id": args.provider_id, "provider_image_id": args.provider_image,
             "server_started_at": server_started_at, "provider_started_at": provider_started_at,
             "builder_image_id": args.builder_image, "platform": args.platform,
@@ -574,7 +763,11 @@ def connector_read_semantics(command, args, request=connector_http, expected_sta
             "config_sha256": config_digest, "versions": {name: versions[name] for name in ("sdk", "cli", "server")},
             "workflow": started, "job_id": job_ids[aliases[0]], "run_id": correlation["run_id"],
             "correlation_id": correlation["id"], "provider_rpc_delta": delta,
-            "verified_delegation": True, "reverse_link": True, "local_run_succeeded": True}
+            "verified_delegation": True, "reverse_link": True, "local_run_succeeded": True,
+            "actions": actions, "action_provider_rpc_delta": action_delta,
+            "provider_rpc_evidence": {"reads": read_rpc_evidence, "actions": action_rpc_evidence}}
+    validate_connector_semantic_receipt(receipt)
+    return receipt
 
 
 def connector_shutdown(command, identity: str, owner: str, run_id: str, image: str,
@@ -630,8 +823,9 @@ def connector_shutdown(command, identity: str, owner: str, run_id: str, image: s
         if semantics is not None:
             expected_started_at = connector_started_at(info)
             diagnostics["readiness_started_at"] = expected_started_at
-            diagnostics["refusal_category"] = "semantic_reads_failed"
+            diagnostics["refusal_category"] = "semantic_protocol_failed"
             semantic_receipt = semantics(expected_started_at)
+            validate_connector_semantic_receipt(semantic_receipt)
             if (not isinstance(semantic_receipt, dict) or semantic_receipt.get("verified_delegation") is not True
                     or semantic_receipt.get("server_started_at") != expected_started_at):
                 raise JourneyError("connector semantic receipt is incomplete")

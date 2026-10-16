@@ -9,13 +9,13 @@
 > activity correlation against existing Caesium admissions, and durable receipt
 > admission with lookup-only component recovery. Authenticated HTTP monitoring
 > exposes discovery, detail, history, relationships and verified local run links.
+> Declared HTTP Queries/actions and operation receipts compose those services.
 > Console monitoring exposes configured connections and exact external runs.
-> HTTP Queries/actions/receipts and Console relationship/approval journeys remain
-> plan items C2, E2 and E3.
+> Console relationship/approval journeys remain plan items E2 and E3.
 > Job-definition YAML is unchanged.
 
-An execution connector lets Caesium inspect an external workflow system and,
-later, submit one declared operator action. The first provider name the
+An execution connector lets Caesium inspect an external workflow system and
+submit one declared operator action. The first provider name the
 configuration file accepts is `temporal`. The core registry is not a Temporal
 client: an adapter registers an opaque identity and a capability set, and
 execution references carry only that adapter's coordinates.
@@ -399,8 +399,9 @@ connections; removed connections use the global ceilings.
 
 Identical concurrent reads share in-flight work. Read budgets, RPC deadlines and
 per-connection concurrency limits apply before provider calls; exhaustion returns
-`429`. Only discovery, inspection, history and relationships are advertised.
-Status Query and action capabilities remain unavailable through HTTP until C2.
+`429`. Capabilities advertise the read and declared-message methods wired into this
+server. A binding must still declare a supported Query or action for the exact
+workflow type and version; a capability does not authorize arbitrary handlers.
 
 The selected C1 fixture extends `just connectors-fixture-check` with real HTTP
 reads, faults and process restart. Its owned server enables the existing
@@ -418,8 +419,93 @@ authenticated HTTP/browser CI lane remains F2; this command does not promote it.
 The existing G2 coverage cohort uses the same pinned Temporal fixture for a
 real publication, authenticated monitoring, verified delegation and reverse
 lookup. It requires provider RPC evidence, a succeeded local run and complete
-instrumented counters from a cleanly stopped process. Full fault/restart and
+instrumented counters from a cleanly stopped process. It first proves monitoring
+issues no Query or Update, then explicitly queries status and submits an
+authenticated approval. Receipt recovery, the workflow-visible principal, one
+independent approval effect, the succeeded second local job and durable dispatch
+audit are required before accepting its profiles. Read and action RPC phases
+are validated separately. Full fault/restart and
 browser scenario selection remains F2.
+
+## Declared HTTP messages and receipts
+
+Connector reads and the explicit status Query require an unscoped cluster
+viewer or higher. Submissions and resubmissions require cluster operator or
+admin. Runner credentials can read but cannot submit an action. Namespace-only,
+job-scoped and agent-session credentials cannot use these routes. The ordinary
+session CSRF checks apply to POSTs.
+
+| Request | Purpose |
+| --- | --- |
+| `POST /v1/connectors/:connection_id/executions/:execution_id/queries/:query_id` | Invoke the one binding-declared status Query explicitly. |
+| `POST /v1/connectors/:connection_id/executions/:execution_id/actions/:action_id` | Admit a pinned action and submit or attach to its durable receipt. |
+| `GET /v1/connectors/:connection_id/executions/:execution_id/operations` | Recover stored receipts after refresh or from another tab. |
+| `GET /v1/connectors/:connection_id/operations/:operation_id` | Read a receipt and reconcile an uncertain outcome by lookup only. |
+| `POST /v1/connectors/:connection_id/operations/:operation_id/resubmit` | Explicitly confirm a resend of an unknown receipt by its original principal. |
+
+Use the opaque execution ID returned by discovery. Its provider reference pins
+both Workflow ID and Run ID. A Query body names `binding_name` and
+`binding_version`; it accepts no arbitrary handler or workflow input. An action
+body additionally contains an `input` JSON object that must match the declared
+schema. For the fixture binding, the submission shape is:
+
+```json
+{"binding_name":"publication","binding_version":"1","input":{"note":"Reviewed"}}
+```
+
+Send exactly one nonempty `Idempotency-Key` header with an action. The server
+persists the authenticated actor, pinned target, binding snapshot and stable
+external Update ID before dispatch. Public JSON cannot supply `_caesium_actor`
+or replace any actor field. The workflow receives the server-derived principal;
+an API key remains identified as that key.
+
+The response contains `operation`, `created`, `conflict` and `pending`. A new
+synchronous receipt returns `201`, an attached or read receipt returns `200`,
+and an unsettled submission returns `202`. An open target/action conflict returns
+`409` with the existing receipt. Changed reuse of an idempotency key or stale
+binding/revision also returns `409`; invalid input returns `400`. Budget limits
+return `429`, and unavailable or mismatched configuration returns `503`.
+The receipt distinguishes submitted, accepted, completed, rejected,
+not-dispatched and unknown outcomes. A timeout or missing lookup never implies
+success, rejection or absence of effects.
+
+New actions can use a valid stateless execution reference from discovery. Before
+admitting a fresh key, the server describes that exact run and type and persists
+a bounded direct observation. It refuses unavailable or stale evidence. An
+existing-key replay continues to recover its durable receipt.
+
+Operation lists accept `page_size` and `cursor`; follow the returned cursor for
+the same execution. They read the catalog without issuing Updates. Receipt
+lookup can query the original Update handle to strengthen evidence, but cannot
+submit it. Public receipts omit request input, idempotency keys, credential
+references and internal snapshots. Results remain schema-bound and may be
+explicitly omitted to fit the response budget without changing a validated
+completion. If descriptive metadata still exceeds the response budget,
+`metadata_omitted: true` returns a compact receipt with the immutable operation,
+execution target, action, binding, revision, state, Update ID and original
+principal kind/stable ID. The complete evidence remains durably stored. Capacity
+for this response and paginated recovery is checked before a fresh dispatch or
+resend; a budget that cannot fit it is refused before provider work.
+
+An unknown receipt can be resubmitted only by its original principal using the
+currently displayed revision:
+
+```json
+{"confirmed":true,"revision":5}
+```
+
+Refresh the receipt before confirming. The server rechecks current authorization,
+configuration and binding compatibility, then resends the immutable original
+Update ID to its pinned run. A different principal, stale revision, changed
+binding or terminal receipt cannot authorize that resend. Reload, restart and
+background lookup never make that decision. A definitive initial preflight
+refusal is `not_dispatched`; a refusal while resolving an earlier uncertain
+send retains that uncertainty. Redacted audit records retain the actor, target,
+operation and outcome without copying action input or arbitrary remote errors.
+
+Queries are explicit, use the configured per-principal Query budget (at most
+six per minute), and share bounded RPC concurrency/deadlines with reads and
+actions. Closed workflow polling never invokes the Query automatically.
 
 ## Console monitoring
 
@@ -457,7 +543,8 @@ Health, a filtered visibility list, direct describe, and bounded history are
 implemented. Declared Queries, Updates, trusted activity correlation, and durable
 receipt admission with lookup-only recovery are implemented as separate
 components. HTTP monitoring composes the read adapter and correlation store;
-HTTP Queries/actions/receipts and Console surfaces remain C2 and E. With
+Declared HTTP messages and receipts compose the durable operation service;
+Console surfaces are Stream E. With
 `CAESIUM_CONNECTORS_ENABLED` left at its default
 false, the process dials no Temporal server, starts no worker, and needs no
 Temporal credentials.
@@ -898,6 +985,6 @@ Mount the artifact directory at `/artifacts` for the configuration's certificate
 paths. Its two job aliases are examples; substitute actual lane job aliases
 before later correlation-route qualification. F1's self-check uses real SDK
 calls to qualify the adapter boundary. The selected manual fixture also requires
-`TestConnectorsRead` to pass against the real HTTP surface. The authenticated
-HTTP/browser CI lane and public operation-receipt qualification remain later
-items, and the existing default integration lane keeps connectors off.
+`TestConnectorsRead` and `TestConnectorsActions` to pass against the real HTTP
+surface. The authenticated HTTP/browser CI lane remains F2; the existing default
+integration lane keeps connectors off.
