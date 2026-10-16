@@ -584,7 +584,7 @@ principal confined to some namespaces is treated:
 | Class | Rule for a confined principal |
 | --- | --- |
 | identity | Allowed whatever its grants, even none: `GET /auth/whoami`, `POST /auth/logout`, `GET /v1/system/features`. |
-| cluster | Always denied (403 `insufficient_role`): metrics, nodes and workers, atoms, logs, database, cache prune, `POST /v1/triggers`, and `GET /v1/auth/policy` plus `POST /v1/auth/policy/reload`. |
+| cluster | Always denied (403 `insufficient_role`): metrics, nodes and workers, atoms, logs, database, cache prune, `POST /v1/triggers`, the connector reads (`/v1/connectors*`), and `GET /v1/auth/policy` plus `POST /v1/auth/policy/reload`. |
 | namespaced | Caesium resolves the namespace of the target the handler will act on and requires the route's role in it (in every resolved namespace; once B6 ships, dataset reads will need it in any one). A target with no owning namespace is cluster-only. |
 | collection | The handler may only return rows from the namespaces where the principal holds the route's role. No collection route is live yet (see below). |
 
@@ -605,7 +605,9 @@ target's namespace:
 - **Runs** (the job's current namespace and the run's persisted namespace; a run
   of another job is 404): read a run, its logs, receipt, task descriptors and task partitions;
   verify a receipt; retry runs, partitions and callbacks. Replay needs runner in
-  the job's namespace and viewer in the baseline run's namespace.
+  the job's namespace and viewer in the baseline run's namespace. A run's
+  external executions are listed only to a cluster viewer, so a confined
+  principal gets an empty list.
 - **Backfills** (the job's and the backfill's namespace): read and cancel.
 - **Triggers:** `GET /v1/triggers/:id` and `POST /v1/triggers/:id/fire`, requiring
   the role in every job the trigger serves.
