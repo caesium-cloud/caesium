@@ -4,6 +4,7 @@ import (
 	"errors"
 	"strings"
 
+	"github.com/caesium-cloud/caesium/internal/dbretry"
 	"github.com/mattn/go-sqlite3"
 )
 
@@ -39,15 +40,9 @@ func IsContentionError(err error) bool {
 		}
 	}
 
-	msg := strings.ToLower(err.Error())
-	return strings.Contains(msg, "database is locked") ||
-		strings.Contains(msg, "database table is locked") ||
-		strings.Contains(msg, "database schema is locked") ||
-		strings.Contains(msg, "database is busy") ||
-		strings.Contains(msg, "checkpoint in progress") ||
-		strings.Contains(msg, "sqlite_busy") ||
-		strings.Contains(msg, "sqlite_locked") ||
-		strings.Contains(msg, "cannot start a transaction within a transaction")
+	// The message list is shared with callers that must not link a driver
+	// (internal/auth's catalog transactions); it lives in internal/dbretry.
+	return dbretry.IsLockContention(err)
 }
 
 // IsConnPoolPoisonedError matches the narrow case where a pooled connection has
