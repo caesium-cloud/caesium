@@ -20,6 +20,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"gorm.io/gorm"
 )
 
 const (
@@ -749,6 +750,9 @@ func TestRefreshGroupsWithoutAnIDToken(t *testing.T) {
 		"userinfo with a malformed groups claim": func(m *mockIssuer) {
 			m.userinfo = userinfoResponder(t, map[string]any{"sub": "subject-123", "groups": 7}, http.StatusOK, nil)
 		},
+		"userinfo with a null groups claim": func(m *mockIssuer) {
+			m.userinfo = userinfoResponder(t, map[string]any{"sub": "subject-123", "groups": nil}, http.StatusOK, nil)
+		},
 	} {
 		t.Run(name+" keeps the rotation", func(t *testing.T) {
 			issuer := newMockIssuer(t, "groups")
@@ -765,4 +769,234 @@ func TestRefreshGroupsWithoutAnIDToken(t *testing.T) {
 		})
 	}
 	requireNoTokenInLogs(t)
+}
+
+// leasedLogin is a user logged in through SSOService.Complete (login groups
+// caesium-admins and data-eng, grant storedRefreshToken at version 1) whose
+// grant is leased for one refresh.
+type leasedLogin struct {
+	db          *gorm.DB
+	users       *authpkg.UserStore
+	userID      uuid.UUID
+	owner       string
+	req         authpkg.RefreshRequest
+	groups      string
+	refreshedAt time.Time
+}
+
+func newLeasedLogin(t *testing.T, issuer *mockIssuer, provider *Provider) *leasedLogin {
+	t.Helper()
+	issuer.loginRefreshToken = storedRefreshToken
+	identity := completeLogin(t, issuer, provider)
+	db := testutil.OpenTestDB(t)
+	t.Cleanup(func() { testutil.CloseDB(db) })
+	users := authpkg.NewUserStore(db, authpkg.WithRefreshGrantSecret(testHashSecret))
+	mapper, err := authpkg.NewRoleMapper("caesium-admins=admin", "")
+	require.NoError(t, err)
+	_, sess, err := authpkg.NewSSOService(users, authpkg.NewSessionStore(db), mapper).
+		Complete(t.Context(), identity, ProviderName, "", "")
+	require.NoError(t, err)
+	l := &leasedLogin{db: db, users: users, userID: sess.UserID, owner: authpkg.NewRefreshLeaseOwner("refresh-test")}
+	l.groups, l.refreshedAt = l.stored(t)
+	require.JSONEq(t, `["caesium-admins","data-eng"]`, l.groups)
+	claimed, err := users.ClaimRefreshLease(t.Context(), l.userID, 1, l.owner, time.Now(), time.Minute)
+	require.NoError(t, err)
+	require.True(t, claimed)
+	l.req, err = users.LoadLeasedRefreshGrant(t.Context(), l.userID, 1, l.owner, time.Now())
+	require.NoError(t, err)
+	return l
+}
+
+// stored returns the user's stored groups and GroupsRefreshedAt.
+func (l *leasedLogin) stored(t *testing.T) (string, time.Time) {
+	t.Helper()
+	var groups string
+	var at time.Time
+	require.NoError(t, l.db.Raw("SELECT groups, groups_refreshed_at FROM users WHERE id = ?", l.userID).Row().Scan(&groups, &at))
+	return groups, at
+}
+
+// record persists a successful redemption the way the refresher does: the
+// groups when they are known, otherwise only the (possibly rotated) handle.
+func (l *leasedLogin) record(t *testing.T, result authpkg.GroupRefresh, at time.Time) {
+	t.Helper()
+	rotated := l.req.Grant
+	rotated.Handle = result.Handle
+	var applied bool
+	var err error
+	if result.GroupsKnown {
+		applied, err = l.users.CompleteRefreshSuccess(t.Context(), l.userID, 1, l.owner, result.Groups, &rotated, at)
+	} else {
+		applied, err = l.users.CompleteRefreshGroupsUnknown(t.Context(), l.userID, 1, l.owner, &rotated)
+	}
+	require.NoError(t, err)
+	require.True(t, applied)
+}
+
+// storedHandle leases the grant at its next version and returns its handle.
+func (l *leasedLogin) storedHandle(t *testing.T) string {
+	t.Helper()
+	owner := l.owner + "-next"
+	claimed, err := l.users.ClaimRefreshLease(t.Context(), l.userID, 2, owner, time.Now(), time.Minute)
+	require.NoError(t, err)
+	require.True(t, claimed)
+	req, err := l.users.LoadLeasedRefreshGrant(t.Context(), l.userID, 2, owner, time.Now())
+	require.NoError(t, err)
+	return req.Grant.Handle.Reveal()
+}
+
+// TestRefreshGroupsThinIDTokenKeepsTheStoredGroups is the review finding on
+// #646: the refresh POST sends no scope, so an IdP may answer with a verified
+// ID token that carries only iss/sub/aud/exp. A missing groups claim says
+// nothing about the user's groups: the provider asks userinfo, and when that
+// has no groups either, the rotated token is stored while the groups from
+// login and their timestamp stay as they are.
+func TestRefreshGroupsThinIDTokenKeepsTheStoredGroups(t *testing.T) {
+	for name, body := range map[string]map[string]any{
+		"no userinfo endpoint":              nil,
+		"userinfo without the groups claim": {"sub": "subject-123"},
+		"userinfo with a null groups claim": {"sub": "subject-123", "groups": nil},
+	} {
+		t.Run(name, func(t *testing.T) {
+			issuer := newMockIssuer(t, "groups")
+			var bearer string
+			if body != nil {
+				issuer.userinfo = userinfoResponder(t, body, http.StatusOK, &bearer)
+			}
+			provider := newTestProvider(t, issuer, "groups")
+			l := newLeasedLogin(t, issuer, provider)
+
+			issuer.refreshRotateTo = rotatedRefreshToken
+			issuer.refreshClaims = func(c map[string]any) { delete(c, "groups") }
+			result, err := provider.RefreshGroups(t.Context(), l.req)
+			require.NoError(t, err)
+			require.False(t, result.GroupsKnown)
+			require.Nil(t, result.Groups)
+			require.True(t, result.Rotated)
+			if body != nil {
+				require.Equal(t, "refreshed-access-token", bearer, "a thin ID token falls back to userinfo")
+			}
+			l.record(t, result, time.Now().Add(time.Hour))
+
+			groups, at := l.stored(t)
+			require.JSONEq(t, l.groups, groups, "a missing claim never clears the stored groups")
+			require.True(t, at.Equal(l.refreshedAt), "GroupsRefreshedAt is unchanged")
+			require.Equal(t, rotatedRefreshToken, l.storedHandle(t), "the rotated token is stored")
+		})
+	}
+	requireNoTokenInLogs(t)
+}
+
+// TestRefreshGroupsThinIDTokenTakesGroupsFromUserInfo: a verified ID token
+// without the groups claim falls back to userinfo, which supplies the groups
+// under the same identity checks as a response with no ID token.
+func TestRefreshGroupsThinIDTokenTakesGroupsFromUserInfo(t *testing.T) {
+	t.Run("groups applied", func(t *testing.T) {
+		issuer := newMockIssuer(t, "groups")
+		var bearer string
+		issuer.userinfo = userinfoResponder(t, map[string]any{"sub": "subject-123", "groups": []string{"from-userinfo"}}, http.StatusOK, &bearer)
+		provider := newTestProvider(t, issuer, "groups")
+		l := newLeasedLogin(t, issuer, provider)
+
+		issuer.refreshRotateTo = rotatedRefreshToken
+		issuer.refreshClaims = func(c map[string]any) { delete(c, "groups") }
+		result, err := provider.RefreshGroups(t.Context(), l.req)
+		require.NoError(t, err)
+		require.True(t, result.GroupsKnown)
+		require.Equal(t, []string{"from-userinfo"}, result.Groups)
+		require.Equal(t, "refreshed-access-token", bearer)
+		refreshedAt := time.Now().Add(time.Hour).UTC().Truncate(time.Second)
+		l.record(t, result, refreshedAt)
+
+		groups, at := l.stored(t)
+		require.JSONEq(t, `["from-userinfo"]`, groups)
+		require.True(t, at.Equal(refreshedAt))
+		require.Equal(t, rotatedRefreshToken, l.storedHandle(t))
+	})
+	t.Run("userinfo for another subject is uncertain", func(t *testing.T) {
+		issuer := newMockIssuer(t, "groups")
+		issuer.userinfo = userinfoResponder(t, map[string]any{"sub": "someone-else", "groups": []string{"caesium-admins"}}, http.StatusOK, nil)
+		issuer.refreshRotateTo = rotatedRefreshToken
+		issuer.refreshClaims = func(c map[string]any) { delete(c, "groups") }
+		provider := newTestProvider(t, issuer, "groups")
+		result, err := provider.RefreshGroups(t.Context(), refreshRequestFor(issuer, storedRefreshToken))
+		requireRefreshError(t, err, authpkg.RefreshUncertain, "identity_mismatch")
+		require.Zero(t, result.Groups)
+		require.True(t, result.Handle.IsZero())
+	})
+	t.Run("userinfo for another client keeps the rotation", func(t *testing.T) {
+		issuer := newMockIssuer(t, "groups")
+		issuer.userinfo = userinfoResponder(t, map[string]any{"sub": "subject-123", "aud": "another-client", "groups": []string{"caesium-admins"}}, http.StatusOK, nil)
+		issuer.refreshRotateTo = rotatedRefreshToken
+		issuer.refreshClaims = func(c map[string]any) { delete(c, "groups") }
+		provider := newTestProvider(t, issuer, "groups")
+		result, err := provider.RefreshGroups(t.Context(), refreshRequestFor(issuer, storedRefreshToken))
+		require.NoError(t, err)
+		require.False(t, result.GroupsKnown)
+		require.Nil(t, result.Groups)
+		require.Equal(t, rotatedRefreshToken, result.Handle.Reveal())
+	})
+	requireNoTokenInLogs(t)
+}
+
+// TestRefreshGroupsExplicitEmptyClaimEmptiesTheGroups: a present, empty
+// groups claim is a known-empty set. It is applied (stored as [], not null)
+// without asking userinfo.
+func TestRefreshGroupsExplicitEmptyClaimEmptiesTheGroups(t *testing.T) {
+	issuer := newMockIssuer(t, "groups")
+	var bearer string
+	issuer.userinfo = userinfoResponder(t, map[string]any{"sub": "subject-123", "groups": []string{"from-userinfo"}}, http.StatusOK, &bearer)
+	provider := newTestProvider(t, issuer, "groups")
+	l := newLeasedLogin(t, issuer, provider)
+
+	issuer.refreshClaims = func(c map[string]any) { c["groups"] = []string{} }
+	result, err := provider.RefreshGroups(t.Context(), l.req)
+	require.NoError(t, err)
+	require.True(t, result.GroupsKnown)
+	require.NotNil(t, result.Groups)
+	require.Empty(t, result.Groups)
+	require.Empty(t, bearer, "a present claim does not consult userinfo")
+	refreshedAt := time.Now().Add(time.Hour).UTC().Truncate(time.Second)
+	l.record(t, result, refreshedAt)
+
+	groups, at := l.stored(t)
+	require.Equal(t, "[]", groups)
+	require.True(t, at.Equal(refreshedAt))
+}
+
+// TestRefreshGroupsReadsOnlyAPresentGroupsClaim pins how each shape of the
+// refreshed ID token's groups claim is read when there is no userinfo.
+func TestRefreshGroupsReadsOnlyAPresentGroupsClaim(t *testing.T) {
+	for name, tc := range map[string]struct {
+		claim any
+		omit  bool
+		known bool
+		want  []string
+	}{
+		"an explicit empty array": {claim: []string{}, known: true, want: []string{}},
+		"an empty string":         {claim: "", known: true, want: []string{}},
+		"a single string":         {claim: "solo", known: true, want: []string{"solo"}},
+		"an array":                {claim: []string{"a", "b"}, known: true, want: []string{"a", "b"}},
+		"a null claim":            {claim: nil},
+		"no claim":                {omit: true},
+		"a malformed claim":       {claim: map[string]any{"a": 1}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			issuer := newMockIssuer(t, "groups")
+			issuer.refreshRotateTo = rotatedRefreshToken
+			issuer.refreshClaims = func(c map[string]any) {
+				if tc.omit {
+					delete(c, "groups")
+					return
+				}
+				c["groups"] = tc.claim
+			}
+			provider := newTestProvider(t, issuer, "groups")
+			result, err := provider.RefreshGroups(t.Context(), refreshRequestFor(issuer, storedRefreshToken))
+			require.NoError(t, err)
+			require.Equal(t, tc.known, result.GroupsKnown)
+			require.Equal(t, tc.want, result.Groups)
+			require.Equal(t, rotatedRefreshToken, result.Handle.Reveal())
+		})
+	}
 }

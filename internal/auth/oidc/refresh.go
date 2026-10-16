@@ -60,11 +60,14 @@ type refreshTokenResponse struct {
 //
 // A successful redemption whose groups cannot be verified is never a failure:
 // the token endpoint has redeemed the grant, so a rotated token must be kept.
-// Groups then come from a verified ID token, else (no ID token, OpenID Connect
-// Core §12.2) from the userinfo endpoint; failing those (an ID token that
-// cannot be verified, no usable userinfo answer) the result carries
-// GroupsKnown=false, so the caller persists the rotated token and keeps the
-// stored groups and their timestamp.
+// Groups then come from the groups claim of a verified ID token, else (no ID
+// token, OpenID Connect Core §12.2, or a verified one without the claim) from
+// the userinfo endpoint; failing those (an ID token that cannot be verified, a
+// malformed claim, no usable userinfo answer, no claim anywhere) the result
+// carries GroupsKnown=false, so the caller persists the rotated token and
+// keeps the stored groups and their timestamp. Unlike at login, a missing
+// claim on a refresh says nothing about the user's groups: only a present,
+// well-formed claim replaces them, and an explicit empty one empties them.
 func (p *Provider) RefreshGroups(ctx context.Context, req authpkg.RefreshRequest) (authpkg.GroupRefresh, error) {
 	grant := req.Grant
 	if grant.Provider != ProviderName {
@@ -97,12 +100,21 @@ func (p *Provider) RefreshGroups(ctx context.Context, req authpkg.RefreshRequest
 
 	oauthCtx := p.oauthContext(ctx)
 	if token.IDToken != "" {
-		groups, known, err := p.groupsFromRefreshedIDToken(oauthCtx, token.IDToken, req)
+		groups, outcome, err := p.groupsFromRefreshedIDToken(oauthCtx, token.IDToken, req)
 		if err != nil {
 			return authpkg.GroupRefresh{}, err
 		}
-		result.Groups, result.GroupsKnown = groups, known
-		return result, nil
+		switch outcome {
+		case idTokenGroupsPresent:
+			result.Groups, result.GroupsKnown = groups, true
+			return result, nil
+		case idTokenGroupsUnusable:
+			return result, nil
+		case idTokenGroupsAbsent:
+			// A verified token for this user that carries no groups claim
+			// (an IdP that keeps its refreshed ID tokens thin). Ask userinfo
+			// below, with the same checks as when there is no ID token.
+		}
 	}
 	groups, known, err := p.groupsFromUserInfo(oauthCtx, token, req)
 	if err != nil {
@@ -225,32 +237,82 @@ func (p *Provider) refreshHTTPClient() *http.Client {
 // refresh) and requires it to name the user's own issuer and subject before
 // anything else is read from it.
 //
-// Its groups count only from a token that passes all of that. When it cannot
-// be verified (a JWKS fetch failing on a cold cache, the deadline spent, a bad
-// signature, audience, expiry or authorized party, a malformed groups claim),
-// the result is GroupsKnown=false: the token endpoint, reached over the
-// configured connection with the client's credentials, has already redeemed
-// the grant, so its rotated refresh token is the only live one and is kept,
-// while the stored groups and their timestamp stay as they are. Only a
-// VERIFIED token that names another identity is uncertain: nothing from that
-// response is kept, not even its rotated token.
-func (p *Provider) groupsFromRefreshedIDToken(ctx context.Context, rawIDToken string, req authpkg.RefreshRequest) ([]string, bool, error) {
+// Its groups count only from a token that passes all of that and carries the
+// configured groups claim (idTokenGroupsPresent). When it cannot be verified
+// (a JWKS fetch failing on a cold cache, the deadline spent, a bad signature,
+// audience, expiry or authorized party, a malformed groups claim), the result
+// is idTokenGroupsUnusable, which the caller returns as GroupsKnown=false: the
+// token endpoint, reached over the configured connection with the client's
+// credentials, has already redeemed the grant, so its rotated refresh token
+// is the only live one and is kept, while the stored groups and their
+// timestamp stay as they are. A verified token for the user without the
+// claim is idTokenGroupsAbsent, and the caller asks userinfo. Only a VERIFIED
+// token that names another identity is uncertain: nothing from that response
+// is kept, not even its rotated token.
+func (p *Provider) groupsFromRefreshedIDToken(ctx context.Context, rawIDToken string, req authpkg.RefreshRequest) ([]string, idTokenGroups, error) {
 	idToken, err := p.verifier.Verify(ctx, rawIDToken)
 	if err != nil {
 		log.Warn("refreshed oidc id_token failed verification; keeping stored groups", "user_id", req.UserID.String())
-		return nil, false, nil
+		return nil, idTokenGroupsUnusable, nil
 	}
 	if idToken.Issuer != req.Issuer || idToken.Subject != req.Subject {
 		log.Warn("refreshed oidc id_token names another identity; ignoring it", "user_id", req.UserID.String())
-		return nil, false, authpkg.NewRefreshError(authpkg.RefreshUncertain, "identity_mismatch", nil)
+		return nil, idTokenGroupsUnusable, authpkg.NewRefreshError(authpkg.RefreshUncertain, "identity_mismatch", nil)
 	}
-	identity, err := p.identityFromIDToken(idToken)
-	if err != nil {
+	if _, err := p.identityFromIDToken(idToken); err != nil {
 		log.Warn("refreshed oidc id_token is not acceptable; keeping stored groups",
 			"user_id", req.UserID.String(), "claim", p.groupsClaim, "malformed_groups", errors.Is(err, ErrInvalidGroupsClaim))
+		return nil, idTokenGroupsUnusable, nil
+	}
+	var claims map[string]json.RawMessage
+	if err := idToken.Claims(&claims); err != nil {
+		return nil, idTokenGroupsUnusable, nil
+	}
+	groups, present, err := refreshedGroups(claims, p.groupsClaim)
+	switch {
+	case err != nil:
+		return nil, idTokenGroupsUnusable, nil
+	case !present:
+		return nil, idTokenGroupsAbsent, nil
+	default:
+		return groups, idTokenGroupsPresent, nil
+	}
+}
+
+// idTokenGroups is what a verified, refreshed ID token says about the user's
+// groups.
+type idTokenGroups uint8
+
+const (
+	// idTokenGroupsUnusable: the token cannot be trusted for groups; keep the
+	// stored ones.
+	idTokenGroupsUnusable idTokenGroups = iota
+	// idTokenGroupsAbsent: the token is the user's but carries no groups
+	// claim; it says nothing about groups.
+	idTokenGroupsAbsent
+	// idTokenGroupsPresent: the token carries a well-formed groups claim.
+	idTokenGroupsPresent
+)
+
+// refreshedGroups reads the configured groups claim from a refresh answer. A
+// missing or null claim is absent: it says nothing about the user's groups,
+// so the stored ones stay. A present claim must be well formed, and an empty
+// one (an empty array or string) is the known-empty set, returned as a
+// non-nil empty slice so it is stored as [] rather than null. Login keeps
+// reading a missing claim as "no groups" (extractGroups).
+func refreshedGroups(claims map[string]json.RawMessage, claim string) (groups []string, present bool, err error) {
+	raw, ok := claims[claim]
+	if trimmed := strings.TrimSpace(string(raw)); !ok || trimmed == "" || trimmed == "null" {
 		return nil, false, nil
 	}
-	return identity.Groups, true, nil
+	groups, err = extractGroups(raw)
+	if err != nil {
+		return nil, true, err
+	}
+	if groups == nil {
+		groups = []string{}
+	}
+	return groups, true, nil
 }
 
 // groupsFromUserInfo asks the userinfo endpoint with the refreshed access
@@ -307,12 +369,13 @@ func (p *Provider) groupsFromUserInfo(ctx context.Context, token refreshTokenRes
 		log.Warn("oidc userinfo after refresh is expired or not yet valid; keeping stored groups", "user_id", req.UserID.String())
 		return nil, false, nil
 	}
-	raw, ok := claims[p.groupsClaim]
-	if !ok {
+	groups, present, err := refreshedGroups(claims, p.groupsClaim)
+	if err != nil {
+		log.Warn("oidc userinfo after refresh has a malformed groups claim; keeping stored groups",
+			"user_id", req.UserID.String(), "claim", p.groupsClaim)
 		return nil, false, nil
 	}
-	groups, err := extractGroups(raw)
-	if err != nil {
+	if !present {
 		return nil, false, nil
 	}
 	return groups, true, nil

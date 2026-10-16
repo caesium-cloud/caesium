@@ -418,7 +418,12 @@ func (us *UserStore) fencedUpdate(ctx context.Context, op string, userID uuid.UU
 // the IdP rotated the handle (nil keeps the stored grant), advances the grant
 // version, clears the uncertainty (the grant demonstrably works) and releases
 // the lease. It applies only while the caller holds the lease at version.
+// groups is the known set; nil is the empty set and is stored as [], never
+// null.
 func (us *UserStore) CompleteRefreshSuccess(ctx context.Context, userID uuid.UUID, version int64, owner string, groups []string, rotated *RefreshGrant, now time.Time) (bool, error) {
+	if groups == nil {
+		groups = []string{}
+	}
 	groupsJSON, err := json.Marshal(groups)
 	if err != nil {
 		return false, fmt.Errorf("marshal groups: %w", err)

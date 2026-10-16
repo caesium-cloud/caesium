@@ -620,6 +620,19 @@ func TestSuccessStoresGroupsAndTheRotatedHandle(t *testing.T) {
 	require.False(t, applied, "an outcome is recorded once")
 }
 
+// TestSuccessWithNoGroupsStoresTheEmptySet: a known-empty group set is stored
+// as [], never as JSON null.
+func TestSuccessWithNoGroupsStoresTheEmptySet(t *testing.T) {
+	f := newRefreshFixture(t)
+	user := f.login(t, oidcIdentity("ada", "token-1", "eng"))
+	require.True(t, f.claim(t, user.ID, 1, "node-a/1"))
+
+	applied, err := f.users.CompleteRefreshSuccess(t.Context(), user.ID, 1, "node-a/1", nil, nil, f.clock.Now())
+	require.NoError(t, err)
+	require.True(t, applied)
+	require.JSONEq(t, `[]`, string(f.row(t, user.ID).Groups))
+}
+
 func TestSuccessWithoutRotationKeepsTheHandle(t *testing.T) {
 	f := newRefreshFixture(t)
 	user := f.login(t, oidcIdentity("ada", "token-1", "eng"))
