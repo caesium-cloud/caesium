@@ -1,6 +1,6 @@
 # Identity and Access — Namespaces, Grants, Policy-as-Code, Corporate SSO
 
-Last updated: 2026-10-15
+Last updated: 2026-10-16
 
 Caesium's authentication is shipped and native (OIDC, SAML, LDAP; `docs/sso-authentication.md`),
 but authorization is a single global role ladder keyed per HTTP route, SSO users cannot be
@@ -71,14 +71,14 @@ fairness was parked by `docs/exec-plans/active/window-scheduling.md` (its §"Glo
 vs. per-job load ceiling"); Stream D of this plan owns the v1 slice (issue #395) and
 window-scheduling's parked note points here.
 
-## Progress (as of 2026-10-15)
+## Progress (as of 2026-10-16)
 
 W1 merged on 2026-10-13: A1 (#624), B1 (#625), the separately authorized DB
-repair (#626) and the W1 plan sync (#622). W2 raised A2 (#638), D3 (#640) and
-B3 (#639) on 2026-10-15. Every review comment is addressed, including a
-user review round on #638 and a Codex atomicity finding on #639, which is now
-fixed rather than documented. All three are green, and they combine with
-master without conflicts. They await CODEOWNER merge.
+repair (#626) and the W1 plan sync (#622). W2 merged on 2026-10-16: A2 (#638
+`48da0880`), D3 (#640 `2646b0a9`), B3 (#639 `f733fcc0`) and the W2 plan sync
+(#641 `53b375b4`). Every review comment was addressed before merge, including a
+user review round on #638 and a Codex atomicity finding on #639, which was fixed
+rather than documented.
 
 ### Wave 1 — Foundations (2026-10-09)
 
@@ -147,8 +147,8 @@ race unit suite, `integration-test` and `integration-test-agent` under the host
 lane lock. The orchestrator also ran the same chain on the combined tree
 (A2 + D3 + B3 merged onto `b796b567`; see below).
 
-- **W2-α / A2 — grants on the principal:** [PR #638](https://github.com/caesium-cloud/caesium/pull/638),
-  head `25a10ae0`. `Principal.Role` is replaced by `Grants` (`RoleIn`, `ClusterRole`,
+- **W2-α / A2 — grants on the principal:** merged [PR #638](https://github.com/caesium-cloud/caesium/pull/638)
+  as `48da0880` on 2026-10-16 (reviewed head `25a10ae0`). `Principal.Role` is replaced by `Grants` (`RoleIn`, `ClusterRole`,
   `AllowedNamespaces`; empty grants are never "unrestricted"). Grants are resolved
   per request through a new `policy.Source`. `RoleMapper` is the env adapter,
   checked against the pre-A2 `Resolve` by an oracle test. SSO login denies with
@@ -179,8 +179,8 @@ lane lock. The orchestrator also ran the same chain on the combined tree
     still checks `Role`. Rotation, bootstrap and `AdminKeyExists` were fixed in
     #638.
   - Interim: whoami shows `role:""` for a confined-only principal until A3 and A5.
-- **W2-β / D3 — namespaces on shared objects:** [PR #640](https://github.com/caesium-cloud/caesium/pull/640),
-  head `8fd784c8`.
+- **W2-β / D3 — namespaces on shared objects:** merged [PR #640](https://github.com/caesium-cloud/caesium/pull/640)
+  as `2646b0a9` on 2026-10-16 (reviewed head `8fd784c8`).
   - **What changed:** `NotificationChannel`, `NotificationPolicy` and `AgentProfile`
     carry a create-only `namespace` (text, not null, default `default`, indexed; `*`
     is cluster-shared). A PATCH that changes it returns 400. A policy may reference
@@ -198,8 +198,8 @@ lane lock. The orchestrator also ran the same chain on the combined tree
   - **Evidence:** lint, unit, `integration-test` and `integration-test-agent` (the
     three new scenarios pass on their lanes) all pass. Hosted CI is 41/41 green.
     Codex (pre-PR and round 1) and the three-lens review found no defects.
-- **W2-γ / B3 — git-sync namespace allowlist:** [PR #639](https://github.com/caesium-cloud/caesium/pull/639),
-  head `26bfe040`.
+- **W2-γ / B3 — git-sync namespace allowlist:** merged [PR #639](https://github.com/caesium-cloud/caesium/pull/639)
+  as `f733fcc0` on 2026-10-16 (reviewed head `26bfe040`).
   - **What changed:** `GitSourceConfig.Namespaces`. Fail-open spellings (`null`,
     singular `namespace`, case-variant duplicates) are rejected at decode time.
     `[]`, `*`, a missing `source_id` and a shared `source_id` are rejected at
@@ -235,7 +235,7 @@ lane lock. The orchestrator also ran the same chain on the combined tree
     small follow-ups (a dataset-graph rollback test and graph-verdict-only error
     labelling) are in `26bfe040`.
 - **Combined gate:** the final heads (A2 `25a10ae0` + D3 `8fd784c8` + B3 `26bfe040`)
-  merge cleanly onto current master `2615c874`, which already includes #636 (81 files).
+  merge cleanly onto master `2615c874`, which already includes #636 (81 files).
   The full chain on that combined tree passed: lint (0 issues), the full race unit
   suite, `integration-test` and `integration-test-agent`. That is 311 scenarios
   passed and 50 lane-specific skips, with no failures.
@@ -273,7 +273,10 @@ lane lock. The orchestrator also ran the same chain on the combined tree
     AutoMigrate. This is pre-existing and safe per the D3 probe, but slow.
   - A4: warn when a policy has `users:` bindings but no provider can supply a
     trusted email. N-1: document which providers can.
-- **Next wave (W3 candidates once W2 merges):** A3 (needs A2 + D3), A4 (A2) and
+- **Plan sync:** merged [PR #641](https://github.com/caesium-cloud/caesium/pull/641) as `53b375b4`.
+  It landed before #639 and still described W2 as open; this follow-up records
+  the merges.
+- **Next wave (W3 candidates, unblocked by W2):** A3 (needs A2 + D3), A4 (A2) and
   E1 (A2), as the original W2 suggestion planned, then the W3 row of the
   suggested-waves table.
 
@@ -281,10 +284,10 @@ lane lock. The orchestrator also ran the same chain on the combined tree
 
 | Stream | Scope | Priority | Status |
 |--------|-------|----------|--------|
-| A | Policy file, grants, principal, route classes, namespace-aware middleware, keys with namespaces, SSO-admin key management | **P0** | A1 merged #624; A2 ready #638; A3/A4 next |
-| B | `metadata.namespace` on jobs: schema, columns, importer, lint, apply/prune/move, git-sync allowlist, collection filtering, aggregate collapse | **P0** | B1 merged #625; B3 ready #639 |
+| A | Policy file, grants, principal, route classes, namespace-aware middleware, keys with namespaces, SSO-admin key management | **P0** | A1 merged #624; A2 merged #638; A3/A4 next |
+| B | `metadata.namespace` on jobs: schema, columns, importer, lint, apply/prune/move, git-sync allowlist, collection filtering, aggregate collapse | **P0** | B1 merged #625; B3 merged #639 |
 | C | Runtime isolation: per-namespace Kubernetes namespace + service account, scoped secret resolution, Helm RBAC | P1 | Not started |
-| D | Run quota + round-robin fairness (#395 v1 slice); namespaced notification channels, policies, agent profiles | P1 | D3 ready #640 |
+| D | Run quota + round-robin fairness (#395 v1 slice); namespaced notification channels, policies, agent profiles | P1 | D3 merged #640 |
 | E | Identity lifecycle: IdP group refresh, user/session administration, user-bound keys, `caesium login` | P1 | Not started |
 | F | Console: grants-aware gating, namespace switcher, namespace chips, quota label, Access page | P1 | Not started |
 | G | Keycloak: realm fixture, CI lane, Playwright + Go scenarios, operator guidance | P1 | Not started |
