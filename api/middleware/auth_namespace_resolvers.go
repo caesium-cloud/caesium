@@ -94,6 +94,7 @@ var namespaceResolvers = map[string]namespaceResolver{
 	"POST /v1/jobs/:id/runs/:id/receipt/verify":                 resolveJobRun,
 	"GET /v1/jobs/:id/runs/:id/tasks/:id/descriptor":            resolveJobRun,
 	"GET /v1/jobs/:id/runs/:id/tasks/:id/partitions":            resolveJobRun,
+	"GET /v1/jobs/:id/runs/:id/external-executions":             resolveJobRun,
 	"POST /v1/jobs/:id/runs/:id/retry":                          resolveJobRun,
 	"POST /v1/jobs/:id/runs/:id/tasks/:id/partitions/:id/retry": resolveJobRun,
 	"POST /v1/jobs/:id/runs/:id/callbacks/retry":                resolveJobRun,

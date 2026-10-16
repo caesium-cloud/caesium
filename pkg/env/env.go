@@ -107,6 +107,27 @@ func validate() error {
 		return err
 	}
 
+	if err := validateAuthPolicyFile(); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// validateAuthPolicyFile checks the policy file settings without reading the
+// file; caesium start loads and validates it. A non-positive interval would
+// panic the poller's ticker, so it fails configuration before anything starts.
+// With no file set, the interval is ignored.
+func validateAuthPolicyFile() error {
+	if strings.TrimSpace(variables.AuthPolicyFile) == "" {
+		return nil
+	}
+	if strings.TrimSpace(variables.AuthRoleMapping) != "" {
+		return errors.New("CAESIUM_AUTH_POLICY_FILE and CAESIUM_AUTH_ROLE_MAPPING are both set: move the role mapping into the policy file's bindings and unset CAESIUM_AUTH_ROLE_MAPPING")
+	}
+	if variables.AuthPolicyReloadInterval <= 0 {
+		return errors.New("CAESIUM_AUTH_POLICY_RELOAD_INTERVAL must be greater than 0 when CAESIUM_AUTH_POLICY_FILE is set")
+	}
 	return nil
 }
 
@@ -361,6 +382,8 @@ type Environment struct {
 	AuthSessionCookieName        string        `envconfig:"AUTH_SESSION_COOKIE_NAME" default:"caesium_session"`
 	AuthRoleMapping              string        `envconfig:"AUTH_ROLE_MAPPING" default:""`
 	AuthDefaultRole              string        `envconfig:"AUTH_DEFAULT_ROLE" default:""`
+	AuthPolicyFile               string        `envconfig:"AUTH_POLICY_FILE" default:""`               // access policy file; unset keeps the role-mapping translation
+	AuthPolicyReloadInterval     time.Duration `envconfig:"AUTH_POLICY_RELOAD_INTERVAL" default:"10s"` // policy file poll; ignored without a file
 	AuthOIDCEnabled              bool          `envconfig:"AUTH_OIDC_ENABLED" default:"false"`
 	AuthOIDCIssuerURL            string        `envconfig:"AUTH_OIDC_ISSUER_URL" default:""`
 	AuthOIDCClientID             string        `envconfig:"AUTH_OIDC_CLIENT_ID" default:""`

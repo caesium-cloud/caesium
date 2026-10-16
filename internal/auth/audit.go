@@ -62,6 +62,14 @@ const (
 // sync of a namespace-restricted source as ActionJobdefGitSync.
 const ActorGitSync = "system:git-sync"
 
+// Access policy reloads (spec §6.1, §8.4). The poller audits as
+// ActorPolicyLoader (policy.PollActor); an API reload audits as the caller.
+const (
+	ActionPolicyReloaded     = "policy.reloaded"
+	ActionPolicyReloadFailed = "policy.reload_failed"
+	ActorPolicyLoader        = "system:policy-loader"
+)
+
 // AuditLogger writes structured audit log entries to the database.
 type AuditLogger struct {
 	db *gorm.DB

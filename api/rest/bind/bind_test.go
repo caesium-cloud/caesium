@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -113,6 +114,8 @@ func TestProtectedRoutesAllHaveAnRBACEntry(t *testing.T) {
 	t.Setenv("CAESIUM_CONTRACT_ENFORCEMENT", "fail")
 	t.Setenv("CAESIUM_AGENT_REMEDIATION_ENABLED", "true")
 	t.Setenv("CAESIUM_AUTH_MODE", "api-key")
+	t.Setenv("CAESIUM_CONNECTORS_ENABLED", "true")
+	t.Setenv("CAESIUM_CONNECTORS_CONFIG_FILE", "/route-only-connectors.yaml")
 	t.Setenv("CAESIUM_LOG_CONSOLE_ENABLED", "true")
 	t.Setenv("CAESIUM_DATABASE_CONSOLE_ENABLED", "true")
 	require.NoError(t, env.Process())
@@ -123,6 +126,8 @@ func TestProtectedRoutesAllHaveAnRBACEntry(t *testing.T) {
 
 	e := echo.New()
 	Protected(e.Group("/v1"), nil, nil)
+	require.True(t, hasRoute(e, http.MethodGet, "/v1/connectors"))
+	require.True(t, hasRoute(e, http.MethodGet, "/v1/jobs/:id/runs/:run_id/external-executions"))
 
 	for _, route := range e.Router().Routes() {
 		path := authmw.NormalizeRoutePath(route.Path)
@@ -141,4 +146,18 @@ func hasRoute(e *echo.Echo, method, path string) bool {
 		}
 	}
 	return false
+}
+
+func TestProtectedGatesConnectorReadRoutes(t *testing.T) {
+	t.Setenv("CAESIUM_AUTH_MODE", "api-key")
+	t.Setenv("CAESIUM_CONNECTORS_CONFIG_FILE", "/not-read-at-bind.yaml")
+	for _, enabled := range []bool{false, true} {
+		t.Setenv("CAESIUM_CONNECTORS_ENABLED", strconv.FormatBool(enabled))
+		require.NoError(t, env.Process())
+		e := echo.New()
+		Protected(e.Group("/v1"), nil, nil)
+		for _, path := range []string{"/v1/connectors", "/v1/connectors/:connection_id/executions", "/v1/connectors/:connection_id/executions/:execution_id", "/v1/connectors/:connection_id/executions/:execution_id/history", "/v1/connectors/:connection_id/executions/:execution_id/relationships", "/v1/jobs/:id/runs/:run_id/external-executions"} {
+			require.Equal(t, enabled, hasRoute(e, http.MethodGet, path), path)
+		}
+	}
 }

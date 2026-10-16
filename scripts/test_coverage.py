@@ -1099,7 +1099,8 @@ class CollectorCollectTests(unittest.TestCase):
         CollectorMergeProvenanceTests.setUp(self)
         self.bin = self.art / "bin"
         self.bin.mkdir()
-        self.env.update(CAESIUM_COVERAGE_ID="cov-test", CAESIUM_COVERAGE_KEEP="0",
+        self.env.update(CAESIUM_COVERAGE_CONNECTOR_FIXTURE_IMAGE="sha256:" + "9" * 64,
+                        CAESIUM_COVERAGE_ID="cov-test", CAESIUM_COVERAGE_KEEP="0",
                         CAESIUM_CONTAINER_CLI="docker", CAESIUM_PLATFORM="linux/amd64")
         self.env["PATH"] = str(self.bin) + os.pathsep + self.env["PATH"]
         self.env["FAKE_BROWSER_CHECKER"] = str(BROWSER_CHECKER)
@@ -1176,12 +1177,13 @@ else:
     name = value("--name")
     if args[:2] == ["image", "inspect"]:
         reference = args[-1]
-        image_id = "sha256:"+("b" if "builder" in reference else "c")*64
+        image_id = "sha256:"+("9" if reference == "sha256:"+"9"*64 else "b" if "builder" in reference else "c")*64
         if "builder" in reference and "@" in reference and scenario == "builder-mismatch": image_id="sha256:"+"d"*64
         if reference == "caesiumcloud/caesium-coverage:latest" and (root/"retagged").exists(): image_id="sha256:"+"d"*64
         fmt = value("--format")
         if fmt: print("a"*40 if "revision" in fmt else "linux" if ".Os" in fmt else "amd64" if ".Architecture" in fmt else image_id)
-        else: print(json.dumps([{"Id":image_id,"Os":"linux","Architecture":"amd64","RepoTags":[reference]}]))
+        else: print(json.dumps([{"Id":image_id,"Os":"linux","Architecture":"amd64","RepoTags":[reference],
+            "Config":{"Labels":{"org.opencontainers.image.revision":"a"*40,"caesium.coverage.builder":"sha256:"+"b"*64}}}]))
     elif args and args[0] == "network":
         operation = args[1]
         if operation == "create":
@@ -1195,7 +1197,7 @@ else:
             cid=hashlib.sha256(name.encode()).hexdigest()
             image_id=next((arg for arg in args if re.fullmatch(r"sha256:[0-9a-f]{64}", arg)), "sha256:"+"c"*64)
             state["containers"][cid]={"Id":cid,"Name":"/"+name,"Image":image_id,"RestartCount":0,
-                "Config":{"Labels":labels},"State":{"Running":op=="run","ExitCode":0,"OOMKilled":False,"FinishedAt":"2026-10-04T12:00:02Z"}}
+                "Config":{"Labels":labels},"State":{"Running":op=="run","ExitCode":0,"OOMKilled":False,"StartedAt":"2026-10-04T12:00:00Z","FinishedAt":"2026-10-04T12:00:02Z"}}
             if scenario == "retag": (root/"retagged").write_text("other candidate owns the tag")
             if scenario == "connector-silent" and name.endswith("-connectors"): state["containers"][cid]["State"]["Running"]=False
             print(cid)
@@ -1248,6 +1250,7 @@ else:
         if scenario == "connector-silent": print("caesium start",flush=True)
         else:
             print('{"msg":"connector config loaded","fingerprint":"' + 'a'*64 + '"}',flush=True)
+            print('csk_coverage_fixture_bootstrap',flush=True)
             try:
                 for i in range(4000): print("startup",i,flush=True)
             except BrokenPipeError: raise SystemExit(141)
@@ -1296,6 +1299,28 @@ run_coverage_journeys() {
   COVERAGE_JOURNEY_SERVER_DIRS+=("$RAW/harness-additive/server")
 }
 ''')
+        # The original base-lifecycle harness substitutes only the new HTTP
+        # semantic producer, just as it substitutes additive journeys above.
+        # The real guard's CLI requirements, receipt gating, clean stop and raw
+        # hashes still run. test_coverage_journeys.py tests semantic refusals;
+        # only an actual provider run supplies acceptance evidence.
+        semantic = self.art / "connector-semantic-harness.py"
+        semantic.write_text("""import importlib.util, sys
+spec=importlib.util.spec_from_file_location('journeys',sys.argv[1])
+module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
+sys.argv=[sys.argv[1],*sys.argv[2:]]
+def structural_semantics(command,args,expected_started_at=""):
+    return {'schema_version':1,'candidate_sha':args.owner,'image_id':args.image,
+        'provider_container_id':args.provider_id,'provider_image_id':args.provider_image,
+        'server_started_at':'2026-10-04T12:00:00Z','provider_started_at':'2026-10-04T12:00:00Z',
+        'verified_delegation':True,'reverse_link':True,'local_run_succeeded':True,
+        'provider_rpc_delta':{'ListWorkflowExecutions':1,'DescribeWorkflowExecution':1,'GetWorkflowExecutionHistory':1,'QueryWorkflow':0}}
+module.connector_read_semantics=structural_semantics
+raise SystemExit(module.main())
+""")
+        invocation = 'python3 "$ROOT/scripts/coverage-journeys.py" connector'
+        assert source.count(invocation) == 1
+        source = source.replace(invocation, 'python3 ' + shlex.quote(str(semantic)) + ' "$ROOT/scripts/coverage-journeys.py" connector')
         self.collector.write_text(source)
 
     def collect(self, scenario):
@@ -1304,6 +1329,8 @@ run_coverage_journeys() {
         # Each fake collector invocation models a fresh diagnostic attempt;
         # browser profiles stay intact for the existing stale/refusal controls.
         (self.art / "audit/connector-diagnostics.json").unlink(missing_ok=True)
+        (self.art / "audit/connector-reads.json").unlink(missing_ok=True)
+        shutil.rmtree(self.art / "connectors-provider", ignore_errors=True)
         return subprocess.run(["bash", str(self.collector), "collect"], capture_output=True, text=True,
                               env=self.env, cwd=str(ROOT), timeout=30)
 
@@ -1381,6 +1408,15 @@ run_coverage_journeys() {
                         "the refusal must occur after the actual base lifecycle finalized")
         self.assertNotEqual(json.loads((self.art / "report.json").read_text())["verdict"], "pass")
 
+    def test_connector_startup_only_guard_cannot_contribute_without_semantic_receipt(self):
+        source = self.collector.read_text()
+        self.assertIn('--require-semantics', source)
+        self.collector.write_text(source.replace('--require-semantics', '', 1))
+        result = self.collect('clean')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse((self.art / 'audit/connector-reads.json').exists())
+        self.assertEqual(json.loads((self.art / 'report.json').read_text())['verdict'], 'incomplete')
+
     def test_connector_start_without_a_loaded_fingerprint_fails_the_journey(self):
         result = self.collect("connector-silent")
         self.assertNotEqual(result.returncode, 0, output(result))
@@ -1450,7 +1486,8 @@ run_coverage_journeys() {
         for args in launches:
             self.assertNotIn("caesiumcloud/caesium-coverage:latest", args)
             self.assertNotIn("caesiumcloud/caesium-builder:latest", args)
-            self.assertTrue(IMAGE_ID in args or "sha256:" + "b" * 64 in args, args)
+            self.assertTrue(any(image in args for image in (IMAGE_ID, "sha256:" + "b" * 64,
+                                                          "sha256:" + "9" * 64)), args)
         for source in ("cli", "server", "integration", "browser"):
             self.assertEqual(json.loads((self.profiles / f"{source}.provenance.json").read_text())["image_id"], IMAGE_ID)
 

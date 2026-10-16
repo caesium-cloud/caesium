@@ -1870,8 +1870,24 @@ must prepare those same native prerequisites and exact identities; a missing
 file fails closed. A prior candidate's profiles or missing supplier receipts
 cannot be substituted. The former bare collector command is insufficient.
 
+The authenticated connector cohort also requires
+`CAESIUM_COVERAGE_CONNECTOR_FIXTURE_IMAGE`, the immutable image ID prepared by
+the coverage job's pinned Temporal fixture step. Its candidate, builder and
+platform must match the instrumented server. The cohort drives real discovery,
+detail, history and relationship reads, admits a publication job, observes its
+succeeded run, and verifies the reverse link against the provider's journal.
+It accepts counters only after the semantic receipt, continuous process
+identities, complete raw-file hashes and exit exactly 0 are verified. Missing
+provider, RPC or correlation evidence fails the existing coverage gate; the
+zero-uncovered-path floor is unchanged. Artifact upload selects public report,
+audit, raw-profile and journey roots, plus the provider journal and version files.
+The provider's private TLS directory and runtime database are excluded without
+changing their permissions. The full connector HTTP/browser lane remains
+execution-connectors F2.
+
 ```sh
 : "${CAESIUM_COVERAGE_BACKEND_INPUTS:?absolute path to verified backend-inputs.json required}"
+: "${CAESIUM_COVERAGE_CONNECTOR_FIXTURE_IMAGE:?prepared immutable Temporal fixture image ID required}"
 CAESIUM_COVERAGE_ID="cov-$(uuidgen | tr '[:upper:]' '[:lower:]' | tr -d - | cut -c1-12)" \
 CAESIUM_COVERAGE_ARTIFACTS="$(mktemp -d)" \
   bash scripts/integration-coverage.sh
@@ -1882,7 +1898,7 @@ a signal death, or a missing exit observation is incomplete: it does not prove
 Go coverage buffers flushed. This intentionally tightens the former exit-143
 allowance. Backend/journey execution gate mode also requires `complete: true`;
 metadata-only discovery and a single backend are not complete qualification.
-`just tagged-unit-test` runs 38 hermetic named regressions from integration-tagged
+`just tagged-unit-test` runs 41 hermetic named regressions from integration-tagged
 helper packages in the builder, without a Docker socket/cluster; both hosted
 unit architectures execute it in addition to the ordinary untagged suite.
 The shutdown result validator's three tests are included explicitly; compiling
@@ -2470,6 +2486,12 @@ Lanes that go through `just integration-up*`:
 `integration-arm64` Docker / infra.
 CI sets `CAESIUM_SKIP_IMAGE_BUILD=true` and docker-loads the `images`
 job's artifacts first, so those recipes do not recompile.
+The agent-auth lane also serves an access policy file: `integration-up-agent`
+seeds `.tmp/auth-policy/policy.yaml` from `test/testdata/policy/auth-lane-reload.yaml`,
+mounts that directory read-only at `/etc/caesium/policy`
+(`CAESIUM_AUTH_POLICY_FILE`, `CAESIUM_AUTH_POLICY_RELOAD_INTERVAL=1s`), and
+`integration-test-agent` passes the runner-side path as
+`CAESIUM_IT_AUTH_POLICY_PATH` so the `TestAuthPolicy*` scenarios can rewrite it.
 
 Lanes that set server env inline and do **not** go through any
 `integration-up*` recipe:

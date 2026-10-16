@@ -19,6 +19,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 source "$ROOT/scripts/helm-pod-replacement-membership.sh"
+source "$ROOT/scripts/helm-cluster-fixture.sh"
 
 log() { printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*"; }
 die() { log "ERROR: $*"; exit 1; }
@@ -139,24 +140,16 @@ if printf '%s\n' "$existing" | grep -qxF "$REPLACEMENT_ID"; then
 fi
 
 log "creating kind cluster $REPLACEMENT_ID ($KIND_IMAGE)"
+helm_fixture_create_cluster "$REPLACEMENT_ID" "$KIND_IMAGE" "$KUBECONFIG_PATH" \
+  || die "kind cluster creation failed; refusing to claim it"
 OWNED_CLUSTER="$REPLACEMENT_ID"
-kind create cluster \
-  --name "$REPLACEMENT_ID" \
-  --image "$KIND_IMAGE" \
-  --kubeconfig "$KUBECONFIG_PATH" \
-  --wait 180s
 
 # Docker 29's containerd image store keeps a pulled tag's whole multi-platform
 # index but only this platform's blobs, so `kind load docker-image` fails in
 # the node's `ctr import --all-platforms` ("content digest ... not found").
 # Load a single-platform archive instead, as scripts/lifecycle-tests.sh does.
 kind_load() {
-  local image="$1" archive platform
-  platform="$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "$image")"
-  archive="$(mktemp "${TMPDIR:-/tmp}/kind-image.XXXXXX")"
-  docker image save --platform "$platform" --output "$archive" "$image"
-  kind load image-archive --name "$REPLACEMENT_ID" "$archive"
-  rm -f "$archive"
+  helm_fixture_load_image "$REPLACEMENT_ID" "$1"
 }
 
 log "loading images into the cluster"
@@ -166,8 +159,7 @@ kind_load "$TASK_IMAGE"
 kc create namespace "$NAMESPACE"
 
 log "installing the chart: 3 replicas, persistence enabled"
-if ! helm --kubeconfig "$KUBECONFIG_PATH" install "$RELEASE" ./helm/caesium \
-  --namespace "$NAMESPACE" \
+if ! helm_fixture_install_chart "$KUBECONFIG_PATH" "$NAMESPACE" "$RELEASE" ./helm/caesium \
   --values "$VALUES" \
   --set "image.repository=${CHART_REPO}" \
   --set "image.tag=${CHART_TAG}" \

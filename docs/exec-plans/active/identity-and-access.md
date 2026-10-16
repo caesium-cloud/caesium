@@ -385,7 +385,9 @@ translated into cluster-wide bindings and behaviour is unchanged.
       the namespace a keyed start was admitted in, and a retry is authorised against
       it before the request is compared. Also fixed concurrency admission persisting
       runs in `default`.)
-- [ ] A4. Wire the policy loader: `CAESIUM_AUTH_POLICY_FILE`,
+- [x] A4. (W3-β: `policy.Holder` in `internal/auth/policy/loader.go`; content-hash poll,
+      not mtime; no-file `POST` reload answers 409, a rejected file 422.)
+      Wire the policy loader: `CAESIUM_AUTH_POLICY_FILE`,
       `CAESIUM_AUTH_POLICY_RELOAD_INTERVAL` (default `10s`); parse at startup (fatal on
       error; fatal when both the file and `CAESIUM_AUTH_ROLE_MAPPING` are set); an
       `atomic.Pointer` holder consulted by the middleware and by every consumer of
@@ -804,7 +806,7 @@ Refresh handles on sessions, an asynchronous single-flight group refresher, the 
 session admin surface, user-bound API keys that resolve grants at use time, and the
 server-brokered `caesium login` flow that works for every provider.
 
-- [ ] E1. One refresh grant per user: `User.RefreshGrant` (AES-256-GCM under an
+- [x] E1. One refresh grant per user: `User.RefreshGrant` (AES-256-GCM under an
       HKDF-SHA256 key derived from `CAESIUM_AUTH_KEY_HASH_SECRET`, info
       `caesium/session-refresh/v1`, nonce per row), `User.RefreshGrantVersion` and
       `User.GroupsRefreshedAt`, shared by every credential type — sessions and keys
@@ -827,6 +829,20 @@ server-brokered `caesium login` flow that works for every provider.
       `internal/auth/oidc/provider.go`, `internal/auth/ldap/provider.go`,
       `internal/auth/ldap/openldap_integration_test.go`.
       Depends on: A2.
+      (W3-γ: lease/fence primitives in `internal/auth/users.go`, OIDC refresh in new
+      `internal/auth/oidc/refresh.go`; every grant change advances the version,
+      abandoned-lease takeover is uncertain, and a definitive refusal on an
+      uncertain grant only clears it. LDAP refresh is deferred to E1b: an LDAP login
+      stores no grant (NULL, as for SAML) and `internal/auth/ldap` is unchanged. E2
+      must bound each redemption by the lease, TTL ≥ 2× timeout.)
+- [ ] E1b. LDAP group refresh with a live LDAP journey: re-apply the preserved branch
+      `iaa-e1-ldap-refresh-preserved` (DN + login-predicate re-check, current-username
+      group search, context-bounded I/O, the OpenLDAP fixture cases) and add an LDAP
+      coverage journey (an OpenLDAP container in the coverage lane and the auth lane)
+      so the diff ratchet covers `internal/auth/ldap`. Must land before E2 relies on
+      LDAP refresh; until then LDAP users have no refresh grant and the E2 staleness
+      bound forces re-login, as for SAML.
+      Depends on: E1.
 - [ ] E2. The async refresher for **both** credential types: on `SessionStore.Validate`
       and on `ValidateKey` for a user-bound key (E4), a user whose `GroupsRefreshedAt`
       is older than `CAESIUM_AUTH_GROUP_REFRESH_INTERVAL` (default `15m`) is queued to
@@ -1006,7 +1022,8 @@ group refresh, user disable, CLI login) is asserted here against a live Keycloak
       `test/auth_lane_test.go`, `test/auth_keys_test.go` (helpers),
       `test/integration_test.go` (suite wiring).
       Depends on: A4.
-- [ ] H-2. `--json` stdout discipline for every new CLI verb (`auth policy`, `auth user`,
+- [x] H-2. (W3-β: `runCLIJSON[T]` / `runCLIJSONFailure[T]` over `decodeCLIJSONStdout`.)
+      `--json` stdout discipline for every new CLI verb (`auth policy`, `auth user`,
       `login`/`whoami`, `job queue` held reason): each scenario captures stdout with
       `runCLIStdout` and parses it; a shared assertion helper fails on any non-JSON
       byte. Lands with the first verb (A4) and is reused after.

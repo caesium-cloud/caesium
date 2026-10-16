@@ -1,6 +1,6 @@
 # Execution Connectors — Temporal Monitoring and Operator Actions
 
-Last updated: 2026-10-15
+Last updated: 2026-10-16
 
 Caesium should let an operator follow a data process across Temporal workflows
 and Caesium jobs, understand the data consequence, and perform a declared
@@ -12,10 +12,10 @@ prerequisite for monitoring them.
 
 At drafting, [PR #560](https://github.com/caesium-cloud/caesium/pull/560) supplied
 idempotent Caesium starts, explicit created/queued/skipped/dropped outcomes and
-an operator recipe. W1–W3 have since added the connector contract, catalog,
-Temporal adapter and real development fixture; HTTP monitoring and operator
-action surfaces remain pending. The Console's existing run, dataset, freshness,
-lineage, receipt and incident views are the data
+an operator recipe. W1–W5 have since added the connector contract, catalog,
+Temporal adapter, real development fixture and authenticated HTTP monitoring.
+Operator action APIs and Console surfaces remain pending. The Console's existing
+run, dataset, freshness, lineage, receipt and incident views are the data
 evidence this integration should join to external process state.
 
 The first release includes one optional Temporal connector, file-configured
@@ -245,10 +245,11 @@ write. Limits are validated configuration with conservative hard ceilings fixed
 by A1 before dependent work. C1/F3 measure unchanged-poll write count, catalog
 cardinality and closed-workflow Query dispatch count through the live surface.
 
-## Progress (as of 2026-10-15)
+## Progress (as of 2026-10-16)
 
-W1, W2 and W3 have merged. W4 D1 and D2 have merged in PRs #636 and #637.
-C, E, F2–F4 and N remain later work. An open PR or a component-only pass
+W1 through W4 have merged, including the W4 dashboard in PR #635.
+W5 C1 is merged in PR #644; dashboard PR #643 records its verified acceptance.
+C2, E, F2–F4 and N remain later work. An open PR or a component-only pass
 is not completion. The SHAs below are the squash merges read from GitHub.
 
 The orchestrator owns this dashboard: PR URLs, exact tested heads/merge SHAs,
@@ -433,6 +434,10 @@ Resume unfinished waves. Do not archive this plan while later items remain.
 - **Merge/plan status:** D1 and D2 are merged. The dashboard
   [PR #635](https://github.com/caesium-cloud/caesium/pull/635) records W4 closure;
   normal protected review/checks and the squash merge queue govern its merge.
+  It merged as `fa34a62cbf3f099e10262b3c8ec0c41dc69a9875` at
+  2026-10-16T00:41:03Z. Tested head `0252bf2639446d81ee6eb5d350c09cd3f3da3235`
+  passed [CI run 38830053875](https://github.com/caesium-cloud/caesium/actions/runs/38830053875),
+  including `ci-ok` and expected documentation-only skips.
   Plan validation includes an earlier full containerized race/coverage unit pass
   with documentation guardrails. Subsequent progress edits pass item/dependency, local-link,
   template-token and whitespace checks. Targeted containerized guardrails passed
@@ -442,13 +447,112 @@ Resume unfinished waves. Do not archive this plan while later items remain.
 - **Remaining:** C, E, F2–F4 and N are outside this wave. No later wave is
   dispatched in this execution.
 
+### W5 — Authenticated monitoring and configuration enforcement (C1 merged 2026-10-16)
+
+- **Base and scope:** `3194fe68f3c5bd84d166b92049edad4eea46ac35` includes
+  merged A2, B1, D1 and F1. C1 is the only selected item. Identity-and-access W2
+  has also merged; C1 uses its existing principal, cluster-role and scope policy.
+  C2's C1 prerequisite is now satisfied. Console work and F2–F4/N remain future
+  waves.
+- **W5-α / C1:** [PR #644](https://github.com/caesium-cloud/caesium/pull/644)
+  merged `fd26b67400b0b846b17dc8523917fdd1ef96e96e` at 2026-10-16T14:16:46Z.
+  Tested head `8069f73bc489f5f8a0ae4a5c5fc3d371ff940202` supplies startup/client
+  composition, authenticated monitoring and scope-safe reverse links, bounded observation
+  persistence and guarded configuration activation. Persistent connection
+  identities supplement the epoch so a coordinated change cannot repoint a
+  referenced connection ID. The candidate contains the implementation and
+  its real HTTP and shared-catalog cluster scenarios. Independent backend/auth
+  review found and corrected clock-dependent observation generations,
+  unauthenticated cursor rebinding, configuration and reverse-link bounds,
+  startup transport validation and a persistence-codec compatibility risk.
+  HTTP reference encoding is separate from the unchanged W4 receipt format;
+  a literal target and known fingerprint regression exercises lookup-only replay.
+- **Verification:** Containerized lint passed with zero issues. The full
+  155-package root race/coverage suite and integration-test image build passed
+  on the review fix. All 41 required tagged checks passed. Earlier focused races
+  across 12 connector/API/auth/database package groups passed; fresh 30
+  orchestration probes, 166 CI helper tests, actionlint and
+  shell validation passed. Independent backend/auth and fixture review has no
+  remaining concrete finding.
+- **Real-provider HTTP:** All five selected scenarios passed without skips on
+  `8069f73b`: correlation, fixture, messages, operations and HTTP reads (68.93
+  seconds). Public pagination found all six new real execution IDs without
+  duplicates or catalog inserts; unchanged detail reads caused zero snapshot or
+  identity updates.
+  Live retention evicted all expired snapshots, new terminal evidence persisted
+  within the four-row cap, and repeated closed-workflow reads sent zero automatic
+  Queries. Dated stale detail recovered after outage. Genuine queued promotion,
+  child identity and scope-safe reverse links survived actual server restart.
+  A second connection observed a genuine link to the same admission through
+  HTTP. Guarded disable/removal and actual process restarts preserved both
+  reverse-link IDs, scoped empty responses and genuine missing-run refusals,
+  with zero provider RPCs for the historical lookups.
+  The invalid-enabled and gate-off startup proofs passed. All six owned fixture
+  containers were verified absent after cleanup.
+- **Shared-catalog cluster:** The real kind/Helm scenario passed without skips
+  in 58.16 seconds on `2fa55d20`. Three ready Caesium members retained distinct
+  PVCs and immutable image/container identities. Matching files worked; skewed
+  files, a stale node after guarded epoch activation, and a connection repoint
+  were refused with zero additional provider RPCs. Expected image identities
+  came from the loaded candidate's validated CRI metadata before app deployment,
+  including its imported parent index. All owned cluster resources were removed.
+  This is a three-process shared-catalog proof on one kind node.
+- **Local baselines:** Clean `8069f73b` passed the complete default integration
+  suite (868.027 seconds) and normal agent auth suite (36.592 seconds),
+  including configured connector startup.
+  Separate selected connector and cluster scenarios above passed without skips.
+- **Instrumented coverage:** The existing G2 cohort now drives real publication
+  admission, discovery/detail/history/relationships and reverse links. All 52
+  semantic and 80 collector probes pass; independent review is clear. Its exact
+  collector function passed live on `33d86e60` with pinned provider RPCs, no
+  Query, a succeeded local job, verified reverse link and clean exit 0 with
+  complete counter hashes. The arm64 profile covers 145 observation and 68
+  correlation-persistence statements.
+- **Hosted qualification:** Exact-head
+  [run 38903470303](https://github.com/caesium-cloud/caesium/actions/runs/38903470303)
+  passed on `8069f73b`, including all nine protected checks, `ci-ok`, both image
+  and unit architectures, both browser suites and selected integration/cluster
+  lanes. The tested PR merge is `21b34278d27a05656ccf17afbcaf5d8c3e5cfca4`
+  against base `3194fe68`. Full G2 passed at 61.6% integration and 62.2%
+  all-surfaces coverage with zero uncovered changed paths. The downloaded amd64
+  receipt proves List/Describe/History RPCs, zero Query, succeeded admission and
+  reverse lookup, continuous process identity, clean exit 0 and matching raw
+  counter hashes. Upload succeeded with 574 public files. Its provider subset
+  contains exactly the journal and two version files; private TLS/runtime files
+  are excluded without permission or coverage-floor changes. Uploader tests
+  preserve all 569 previous artifacts and reproduce the old unreadable-directory
+  failure. F2's dedicated connector lane remains future.
+- **Review follow-up:** The #644 review identified a reverse lookup returning
+  404 when a stored link belongs to a disabled or removed connection. Commit
+  `8069f73b` preserves those historical links alongside enabled connections,
+  retaining process/read budgets and the strictest applicable response limits.
+  New unit and real-provider HTTP retirement regressions pass; the mixed-link regression
+  fails against the original source with `connector: not found`. The #643
+  inventory finding is corrected in `c5eb230c`: C1 lists all 46 changed files,
+  including startup composition and its tests, read/auth tests and the
+  persistence codec regression; the unchanged `internal/connector/types.go`
+  entry is removed.
+  Both findings have fix-specific replies
+  ([#644](https://github.com/caesium-cloud/caesium/pull/644#discussion_r4294868493),
+  [#643](https://github.com/caesium-cloud/caesium/pull/643#discussion_r4294791592))
+  and are resolved, verified against current heads with complete review-thread
+  pages. Independent source review found no remaining concrete issue.
+- **Publication and acceptance:** The user explicitly authorized admin squash
+  merges for this train. PR #644 merged after all nine required checks passed;
+  its complete tree equals both the tested head and the CI-tested merge above.
+  C1 is checked against that merged code and the recorded HTTP, integration and
+  configuration-epoch evidence. Dashboard PR #643 integrates the implementation
+  merge and records this acceptance. Its own merge is verified separately.
+  Repository protection settings are unchanged. C2 and later items remain
+  deferred.
+
 ### Stream Status
 
 | Stream | Scope | Priority | Status |
 | --- | --- | --- | --- |
 | A | Generic contract, configuration and catalog (2 items) | P0 | Shipped (A1, A2) |
 | B | Temporal inspection and declared messages (2 items) | P0 | Shipped (B1, B2) |
-| C | Authenticated REST and composition (2 items) | P0 | Not started |
+| C | Authenticated REST and composition (2 items) | P0 | C1 shipped; C2 not started |
 | D | Verified correlation and action durability (2 items) | P0 | Shipped (D1, D2) |
 | E | Console monitoring, data links and approval (3 items) | P0 | Not started |
 | F | Real fixture, CI, qualification and promotion (4 items) | P0 | F1 shipped; F2–F4 not started |
@@ -541,7 +645,7 @@ Resume unfinished waves. Do not archive this plan while later items remain.
 This stream owns startup, API dependency plumbing, route binding and shared
 auth chokepoints. Every endpoint includes a live HTTP integration scenario.
 
-- [ ] C1. Wire clients/observation into startup and feature discovery. Add
+- [x] C1. Wire clients/observation into startup and feature discovery. Add
   connection list, per-connection execution list/detail/history/relationships
   and reverse links from a Caesium run. Persist bounded direct observations;
   return dated stale detail explicitly on failed refresh. Enforce read/scope,
@@ -549,14 +653,35 @@ auth chokepoints. Every endpoint includes a live HTTP integration scenario.
   and connector readiness on multi-node config mismatch.
   Files: new `internal/connector/observe.go`, new `internal/connector/observe_test.go`,
   new `api/rest/service/connector/reads.go`,
-  new `api/rest/controller/connector/reads.go`, `api/rest/bind/bind.go`,
+  new `api/rest/service/connector/reads_test.go`,
+  new `api/rest/controller/connector/reads.go`,
+  new `api/rest/controller/connector/reads_test.go`, `api/rest/bind/bind.go`,
   `api/rest/bind/bind_test.go`, `api/api.go`, `cmd/start/start.go`,
+  new `cmd/start/connectors.go`, new `cmd/start/connectors_test.go`,
+  `api/rest/controller/system/system.go`,
   `api/rest/service/system/system.go`, `api/rest/service/system/system_test.go`,
   `internal/auth/rbac.go`, `api/middleware/auth_scope.go`,
+  `api/middleware/auth_scope_test.go`,
   `api/auth_rbac_policy_completeness_test.go`,
   new `test/connectors_read_test.go`, new `test/connectors_config_cluster_test.go`,
   `scripts/connectors-fixture.sh` (extend F1's fixture for the config-skew proof),
-  `docs/connectors.md` (REST/read policy).
+  new `scripts/connectors-config-cluster.sh`, new `scripts/helm-cluster-fixture.sh`,
+  `scripts/helm-pod-replacement.sh` (share existing cluster setup),
+  new `scripts/connectors-fixture-control.py`,
+  new `scripts/test_connectors_config_cluster.py`, `scripts/test_connectors_fixture.py`,
+  `test/connectors/fixture/main.go`, `justfile` (optional manual-fixture mounts),
+  `scripts/integration-coverage.sh`, `scripts/coverage-journeys.py`,
+  `scripts/test_coverage.py`, `scripts/test_coverage_journeys.py`,
+  `.github/workflows/ci.yml`, `scripts/test_ci.py`
+  (existing G2 provider/read cohort and public evidence upload, unchanged floors),
+  `docs/ci.md` (cohort prerequisite and proof),
+  `internal/connector/store.go`,
+  `internal/connector/operations/persistence_codec_test.go`,
+  `internal/connector/correlation/correlation_store.go` (epoch write fencing),
+  `internal/connector/temporal/client.go`, `internal/connector/temporal/observe.go`,
+  `internal/models/connector_configuration.go`, `pkg/db/migrations_test.go`
+  (durable connection identities),
+  `docs/connectors.md` (REST/read policy), `docs/temporal.md` (monitoring boundary).
   Depends on: A2, B1, D1, F1.
   Verify: live HTTP finds a Temporal-only workflow, pages the unchanged fixture
   without duplicates, exposes genuine IDs/relations, preserves stale detail on
@@ -835,7 +960,7 @@ compiled integration-runner approach; fixture code stays in the root module.
 **16 included items in seven streams.** Dependencies are explicit above;
 unchecked sibling work is not a hidden prerequisite.
 
-- **A1, A2, B1, B2, F1, D1 and D2** are merged. See Progress for the merge SHAs.
+- **A1, A2, B1, B2, F1, D1, D2 and C1** are merged. See Progress for the merge SHAs.
   B2 landed before F1's schema-bearing fixture; the pinned development server
   supplied real provider qualification without a Temporal Cloud account.
 - **D1** needs A2/B1/F1; **D2** needs A2/B2/F1. Core files are disjoint.

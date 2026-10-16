@@ -127,10 +127,19 @@ var masterEndpointRoles = map[string]models.Role{
 }
 
 // routesAddedAfterMaster are entries endpointPolicy carries that master did
-// not: A4's policy routes, pre-added in their classified shape.
+// not: A4's policy routes, pre-added in their classified shape, and the
+// connector reads master gained after the W3 base (execution-connectors W5,
+// #644, all viewer there).
 var routesAddedAfterMaster = map[string]RoutePolicy{
 	"GET /v1/auth/policy":         {Role: models.RoleAdmin, Class: RouteClassCluster},
 	"POST /v1/auth/policy/reload": {Role: models.RoleAdmin, Class: RouteClassCluster},
+
+	"GET /v1/connectors":                                  {Role: models.RoleViewer, Class: RouteClassCluster},
+	"GET /v1/connectors/:id/executions":                   {Role: models.RoleViewer, Class: RouteClassCluster},
+	"GET /v1/connectors/:id/executions/:id":               {Role: models.RoleViewer, Class: RouteClassCluster},
+	"GET /v1/connectors/:id/executions/:id/history":       {Role: models.RoleViewer, Class: RouteClassCluster},
+	"GET /v1/connectors/:id/executions/:id/relationships": {Role: models.RoleViewer, Class: RouteClassCluster},
+	"GET /v1/jobs/:id/runs/:id/external-executions":       {Role: models.RoleViewer, Class: RouteClassNamespaced},
 }
 
 // TestRoutePolicyRolesMatchMaster pins every route's role to master's: route

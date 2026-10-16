@@ -26,6 +26,8 @@ func mountEveryRoute(t *testing.T) *echo.Echo {
 	})
 
 	t.Setenv("CAESIUM_AUTH_MODE", "api-key")
+	t.Setenv("CAESIUM_CONNECTORS_ENABLED", "true")
+	t.Setenv("CAESIUM_CONNECTORS_CONFIG_FILE", "/route-only-connectors.yaml")
 	t.Setenv("CAESIUM_AUTH_OIDC_ENABLED", "true")
 	t.Setenv("CAESIUM_AUTH_SAML_ENABLED", "true")
 	t.Setenv("CAESIUM_AUTH_LDAP_ENABLED", "true")
@@ -76,6 +78,9 @@ func TestAuthMiddlewareMountedRoutesHaveRBACPolicy(t *testing.T) {
 
 	// Spot-check that every gate really mounted its routes.
 	for _, key := range []string{
+		"GET /v1/connectors",
+		"GET /v1/connectors/:id/executions/:id/relationships",
+		"GET /v1/jobs/:id/runs/:id/external-executions",
 		"GET /metrics",
 		"GET /auth/whoami",
 		"GET /v1/events",

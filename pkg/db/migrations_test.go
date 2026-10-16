@@ -460,3 +460,17 @@ func TestNamespaceMigrationKeepsExplicitTriageOnlyNamespace(t *testing.T) {
 	require.NoError(t, conn.Table("agent_profiles").Where("name = ?", models.DefaultTriageOnlyProfileName).Pluck("namespace", &namespaces).Error)
 	require.Equal(t, []string{"finance"}, namespaces)
 }
+
+// The C1 identity manifest extends the existing singleton without moving it
+// into execution shards or losing the active epoch during an upgrade.
+func TestConnectorConfigurationIdentityManifestUpgrade(t *testing.T) {
+	conn := openMigrationTestDB(t)
+	require.NoError(t, conn.Exec(`CREATE TABLE connector_configurations (id TEXT PRIMARY KEY, fingerprint TEXT NOT NULL, updated_at DATETIME NOT NULL)`).Error)
+	require.NoError(t, conn.Exec(`INSERT INTO connector_configurations (id,fingerprint,updated_at) VALUES (?,?,?)`, models.ConnectorConfigurationID, "old-epoch", time.Now().UTC()).Error)
+	require.NoError(t, migrateModels(conn, models.All...))
+	require.True(t, conn.Migrator().HasColumn(&models.ConnectorConfiguration{}, "identities"))
+	var row models.ConnectorConfiguration
+	require.NoError(t, conn.First(&row, "id = ?", models.ConnectorConfigurationID).Error)
+	require.Equal(t, "old-epoch", row.Fingerprint)
+	require.Empty(t, row.Identities)
+}

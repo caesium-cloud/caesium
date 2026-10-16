@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"testing"
@@ -404,6 +405,129 @@ bindings:
 	require.Equal(t, models.RoleViewer, user.Role)
 	require.Equal(t, models.RoleViewer, PrincipalFromUser(&user, src).ClusterRole(),
 		"the session principal must lose the email-only grant")
+}
+
+func newRefreshSSO(t *testing.T) (*refreshFixture, *SSOService, *AuditLogger) {
+	t.Helper()
+	f := newRefreshFixture(t)
+	mapper, err := NewRoleMapper("eng=operator", "")
+	require.NoError(t, err)
+	auditor := NewAuditLogger(f.db)
+	return f, NewSSOService(f.users, f.sessions, mapper, WithSSOAuditLogger(auditor)), auditor
+}
+
+func TestSSOServiceCompleteReplacesTheGrantOnEveryLogin(t *testing.T) {
+	f, sso, auditor := newRefreshSSO(t)
+	const firstToken, secondToken = "first-refresh-token-xyz", "second-refresh-token-xyz"
+
+	cookie, sess, err := sso.Complete(t.Context(), oidcIdentity("ada", firstToken, "eng"), "oidc", "203.0.113.1", "agent")
+	require.NoError(t, err)
+	require.NotEmpty(t, cookie)
+	user := f.row(t, sess.UserID)
+	require.Equal(t, int64(1), user.RefreshGrantVersion)
+	require.True(t, user.GroupsRefreshedAt.Equal(f.clock.Now()))
+	require.False(t, bytes.Contains(user.RefreshGrant, []byte(firstToken)))
+	require.Equal(t, firstToken, f.handleAt(t, user.ID))
+
+	f.clock.Advance(time.Hour)
+	_, sess2, err := sso.Complete(t.Context(), oidcIdentity("ada", secondToken, "eng"), "oidc", "203.0.113.1", "agent")
+	require.NoError(t, err)
+	require.Equal(t, user.ID, sess2.UserID)
+	user = f.row(t, user.ID)
+	require.Equal(t, int64(2), user.RefreshGrantVersion)
+	require.True(t, user.GroupsRefreshedAt.Equal(f.clock.Now()))
+	require.Equal(t, secondToken, f.handleAt(t, user.ID))
+
+	// A SAML login carries no grant: it clears the stored one and advances
+	// the version, so any refresh of the old grant is discarded.
+	_, _, err = sso.Complete(t.Context(), oidcIdentity("ada", "", "eng"), "saml", "203.0.113.1", "agent")
+	require.NoError(t, err)
+	user = f.row(t, user.ID)
+	require.Nil(t, user.RefreshGrant)
+	require.Equal(t, int64(3), user.RefreshGrantVersion)
+
+	// No audit row carries a token.
+	entries, err := auditor.Query(&AuditQueryRequest{Limit: 100})
+	require.NoError(t, err)
+	require.NotEmpty(t, entries)
+	for _, entry := range entries {
+		raw, err := json.Marshal(entry)
+		require.NoError(t, err)
+		require.NotContains(t, string(raw), firstToken)
+		require.NotContains(t, string(raw), secondToken)
+	}
+}
+
+func TestSSOServiceCompleteDisabledUserLeavesRefreshStateUntouched(t *testing.T) {
+	f, sso, auditor := newRefreshSSO(t)
+	_, sess, err := sso.Complete(t.Context(), oidcIdentity("ada", "token-1", "eng"), "oidc", "", "")
+	require.NoError(t, err)
+	require.True(t, f.claim(t, sess.UserID, 1, "node-a/1"))
+	applied, err := f.users.CompleteRefreshUncertain(t.Context(), sess.UserID, 1, "node-a/1")
+	require.NoError(t, err)
+	require.True(t, applied)
+	require.True(t, f.claim(t, sess.UserID, 1, "node-b/1"))
+	require.NoError(t, f.db.Model(&models.User{}).Where("id = ?", sess.UserID).Update("disabled_at", f.clock.Now()).Error)
+	before := f.row(t, sess.UserID)
+
+	f.clock.Advance(time.Hour)
+	cookie, denied, err := sso.Complete(t.Context(), oidcIdentity("ada", "token-2", "eng"), "oidc", "", "")
+	require.ErrorIs(t, err, ErrLoginDenied)
+	require.Empty(t, cookie)
+	require.Nil(t, denied)
+	requireSameRefreshState(t, before, f.row(t, sess.UserID))
+
+	deniedEntries, err := auditor.Query(&AuditQueryRequest{Action: ActionAuthLoginDenied, Limit: 10})
+	require.NoError(t, err)
+	require.Len(t, deniedEntries, 1)
+	var metadata map[string]any
+	require.NoError(t, json.Unmarshal(deniedEntries[0].Metadata, &metadata))
+	require.Equal(t, "user_disabled", metadata["reason"])
+}
+
+// TestSSOServiceCompleteUserDisabledMidLogin covers a user disabled between
+// the login's read and its write: the write is fenced on disabled_at, so the
+// login is denied and nothing rotates.
+func TestSSOServiceCompleteUserDisabledMidLogin(t *testing.T) {
+	f, sso, _ := newRefreshSSO(t)
+	_, sess, err := sso.Complete(t.Context(), oidcIdentity("ada", "token-1", "eng"), "oidc", "", "")
+	require.NoError(t, err)
+	userID := sess.UserID
+	before := f.row(t, userID)
+
+	const callback = "test:disable_user_mid_login"
+	disabled := false
+	require.NoError(t, f.db.Callback().Update().Before("gorm:update").Register(callback, func(tx *gorm.DB) {
+		if disabled || tx.Statement.Table != "users" {
+			return
+		}
+		disabled = true
+		tx.Session(&gorm.Session{NewDB: true}).Exec("UPDATE users SET disabled_at = ? WHERE id = ?", f.clock.Now(), userID)
+	}))
+	t.Cleanup(func() { _ = f.db.Callback().Update().Remove(callback) })
+
+	_, _, err = sso.Complete(t.Context(), oidcIdentity("ada", "token-2", "eng"), "oidc", "", "")
+	require.ErrorIs(t, err, ErrLoginDenied)
+	require.True(t, disabled)
+	after := f.row(t, userID)
+	require.NotNil(t, after.DisabledAt)
+	requireSameRefreshState(t, before, after)
+	require.JSONEq(t, string(before.Groups), string(after.Groups))
+	require.Equal(t, int64(1), f.liveSessions(t, userID), "no session minted for the disabled login")
+}
+
+func requireSameRefreshState(t *testing.T, before, after models.User) {
+	t.Helper()
+	require.Equal(t, before.RefreshGrant, after.RefreshGrant)
+	require.Equal(t, before.RefreshGrantVersion, after.RefreshGrantVersion)
+	require.Equal(t, before.RefreshUncertain, after.RefreshUncertain)
+	require.Equal(t, before.RefreshLeaseOwner, after.RefreshLeaseOwner)
+	require.Equal(t, before.RefreshLeaseUntil == nil, after.RefreshLeaseUntil == nil)
+	if before.RefreshLeaseUntil != nil {
+		require.True(t, before.RefreshLeaseUntil.Equal(*after.RefreshLeaseUntil))
+	}
+	require.True(t, before.GroupsRefreshedAt.Equal(*after.GroupsRefreshedAt))
+	require.Equal(t, before.LastLoginAt.Unix(), after.LastLoginAt.Unix())
 }
 
 func requireUserAndSessionCounts(t *testing.T, db *gorm.DB, users, sessions int64) {

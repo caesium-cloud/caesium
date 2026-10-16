@@ -3,6 +3,7 @@ package system
 import (
 	"net/http"
 
+	connectorsvc "github.com/caesium-cloud/caesium/api/rest/service/connector"
 	"github.com/caesium-cloud/caesium/api/rest/service/system"
 	"github.com/labstack/echo/v5"
 )
@@ -25,4 +26,14 @@ func Features(c *echo.Context) error {
 		return echo.NewHTTPError(http.StatusInternalServerError, "internal server error").Wrap(err)
 	}
 	return c.JSON(http.StatusOK, resp)
+}
+
+func FeaturesWithConnectors(runtime *connectorsvc.Runtime) echo.HandlerFunc {
+	return func(c *echo.Context) error {
+		resp, err := system.New(c.Request().Context()).WithConnectors(runtime).Features()
+		if err != nil {
+			return echo.NewHTTPError(http.StatusInternalServerError, "internal server error").Wrap(err)
+		}
+		return c.JSON(http.StatusOK, resp)
+	}
 }

@@ -458,7 +458,7 @@ printf 'runner_name_length=%s\nremoval_attempts=%s\n' "${#full_runner_name}" "$a
         info = self.info()
         info["Config"].update(Env=["TOKEN=never-persist-env"])
         info["Config"]["Labels"][b.LABEL_LANE] = "base-connectors"
-        info["State"].update(Running=fault != "stopped", Error="never-persist-native-error")
+        info["State"].update(Running=fault != "stopped", Error="never-persist-native-error", StartedAt="2026-10-05T12:00:00Z")
         calls, polls = [], []
         logs = json.dumps({"msg": "connector config loaded", "fingerprint": "a" * 64, "level": "info", "ts": "2026-10-05T12:00:00Z",
                            "error": "csk_neverpersist", "token": "never-persist-token"}) + "\n" + json.dumps(
@@ -514,6 +514,149 @@ printf 'runner_name_length=%s\nremoval_attempts=%s\n' "${#full_runner_name}" "$a
         for secret in ('never-persist', 'eyJheader', 'TOKEN=', 'Bearer', 'Config', 'Env', 'Error'):
             self.assertNotIn(secret, raw)
         self.assertIn('connector config loaded', raw)
+
+    def connector_semantic_fixture(self, fault=None):
+        command, audit, calls = self.connector_fixture([(0, '{"status":"healthy"}')])
+        provider_id, provider_image, builder = 'f' * 64, INDEX, CONFIG
+        task_image_id = 'sha256:' + '8' * 64
+        secret = self.tmp / ('key-' + str(len(list(self.tmp.iterdir()))))
+        secret.write_text('csk_private_fixture_admin')
+        secret.chmod(0o600)
+        config = self.tmp / ('config-' + str(len(list(self.tmp.iterdir()))))
+        config.write_text('version: 1')
+        raw = self.pair('semantic-raw-' + str(len(list(self.tmp.iterdir()))))
+        args = SimpleNamespace(name=CID, owner=OWNER, run_id='owned', image=IMAGE,
+            provider_id=provider_id, provider_image=provider_image, builder_image=builder,
+            platform='linux/amd64', task_image='alpine:3.23', task_image_id=task_image_id,
+            key_file=str(secret), config=str(config), raw_dir=str(raw))
+        inspections = {CID: 0, provider_id: 0}
+        def inspect(*values, **kwargs):
+            if values[:2] == ('image', 'inspect'):
+                reference = values[-1]
+                is_task = reference == args.task_image
+                value = {'Id': task_image_id if is_task else provider_image, 'Os': 'linux', 'Architecture': 'amd64',
+                         'RepoTags': [reference], 'Config': {'Labels': {'org.opencontainers.image.revision': OWNER,
+                             'caesium.coverage.builder': builder}}}
+                if fault == 'image' and not is_task:
+                    value['Config']['Labels']['org.opencontainers.image.revision'] = 'foreign'
+                return subprocess.CompletedProcess(values, 0, json.dumps([value]), '')
+            if values[:2] == ('container', 'inspect'):
+                inspections[values[-1]] += 1
+                if values[-1] == provider_id:
+                    info = self.info()
+                    info.update(Id=provider_id, Image=provider_image)
+                    info['State'].update(Running=True, StartedAt='2026-10-05T12:00:00Z')
+                    if fault == 'provider-restart' and inspections[provider_id] >= 3:
+                        info['State']['StartedAt'] = '2026-10-05T12:00:01Z'
+                    info['Config']['Labels'][b.LABEL_LANE] = 'base-connectors-provider'
+                    info['HostConfig'] = {'NetworkMode': 'container:' + CID}
+                    if fault == 'network':
+                        info['HostConfig']['NetworkMode'] = 'host'
+                    return subprocess.CompletedProcess(values, 0, json.dumps([info]), '')
+                result = command(*values, **kwargs)
+                info = json.loads(result.stdout)[0]
+                if ((fault == 'server-readiness-restart' and inspections[CID] >= 2)
+                        or (fault == 'server-preflush-restart' and inspections[CID] >= 4)
+                        or (fault == 'server-poststop-restart' and not info['State']['Running'])):
+                    info['State']['StartedAt'] = '2026-10-05T12:00:01Z'
+                info['NetworkSettings'] = {'Ports': {'8080/tcp': [{'HostIp': '127.0.0.1', 'HostPort': '12345'}],
+                    '7240/tcp': [{'HostIp': '127.0.0.1', 'HostPort': '12346'}]}}
+                return subprocess.CompletedProcess(values, 0, json.dumps([info]), '')
+            return command(*values, **kwargs)
+        workflow = {'workflow_id': 'owned-coverage-publication', 'run_id': RUN}
+        jobs = {'connector-fixture-publish': '33333333-3333-4333-8333-333333333333',
+                'connector-fixture-notify': '44444444-4444-4444-8444-444444444444'}
+        correlation = {'id': '55555555-5555-4555-8555-555555555555', 'run_id': TASK,
+            'job_id': jobs['connector-fixture-publish'], 'outcome': 'created', 'relation_type': 'delegation',
+            'connection_id': 'fixture', 'activity_id': '1', 'activity_type': 'caesium.start',
+            'idempotency_key': RUN + '/1', 'source_event_id': 5}
+        rpc_calls = []
+        http_calls = []
+        def request(base, key, method, path, body=None):
+            http_calls.append((method, path))
+            if path == '/health':
+                return {'ready': True, 'sdk': '1.49.0', 'cli': '1.9.1', 'server': 'other' if fault == 'matrix' else '1.32.0'}
+            if path == '/evidence':
+                rpc_calls.append(True)
+                return [] if len(rpc_calls) == 1 or fault == 'rpc' else [
+                    {'kind': 'provider_rpc', 'method': '/temporal.api.WorkflowService/' + name}
+                    for name in ('ListWorkflowExecutions', 'DescribeWorkflowExecution', 'GetWorkflowExecutionHistory')] + [
+                    {'kind': 'fixture_started', 'candidate': OWNER},
+                    {'kind': 'workflow_started', **workflow, 'workflow_type': 'publication'},
+                    {'kind': 'http_start', 'workflow_id': workflow['workflow_id'], 'activity_id': '1',
+                     'hint': {'job_id': correlation['job_id'], 'run_id': TASK, 'idempotency_key': RUN + '/1', 'outcome': 'created'}}]
+            if path == '/v1/jobdefs/apply':
+                self.assertEqual([entry['steps'][0]['image'] for entry in body['definitions']], ['alpine:3.23'] * 2)
+                return {'applied': 2}
+            if path == '/v1/jobs?limit=100':
+                return [{'alias': alias, 'id': identity} for alias, identity in jobs.items()]
+            if path == '/v1/auth/keys':
+                return {'key': 'csk_' + body['role']}
+            if path == '/configure':
+                self.assertEqual(body, {'runner_key': 'csk_runner'})
+                return {'configured': True}
+            if path == '/start':
+                self.assertEqual(body['input']['first_job'], jobs['connector-fixture-publish'])
+                return workflow
+            if '?workflow_type=' in path:
+                return {'executions': [{'id': 'opaque', 'reference': {'connection_id': 'fixture', 'coordinates': workflow}}]}
+            if path.endswith('/history'):
+                return {'run_id': RUN, 'events': [{'event_id': 1}]}
+            if path.endswith('/relationships'):
+                return {'correlations': [] if fault == 'correlation' else [correlation]}
+            if path.endswith('/external-executions'):
+                return {'executions': [] if fault == 'reverse' else [correlation]}
+            if '/v1/jobs/' in path:
+                return {'id': TASK, 'job_id': jobs['connector-fixture-publish'],
+                        'status': 'failed' if fault == 'run' else 'succeeded'}
+            return {'availability': 'available', 'reference': {'connection_id': 'fixture', 'coordinates': workflow}}
+        return args, inspect, request, audit, raw, calls, http_calls
+
+    def test_connector_semantic_guard_requires_real_protocol_witness_before_cleanstop_and_raw_receipt(self):
+        args, command, request, audit, raw, calls, http_calls = self.connector_semantic_fixture()
+        result = b.connector_shutdown(command, CID, OWNER, 'owned', IMAGE, audit,
+            semantics=lambda started_at: b.connector_read_semantics(command, args, request=request, expected_started_at=started_at), raw_dir=raw)
+        self.assertEqual(result['State']['ExitCode'], 0)
+        receipt = json.loads((audit / 'connector-reads.json').read_text())
+        self.assertTrue(receipt['complete'] and receipt['verified_delegation'] and receipt['reverse_link'])
+        self.assertEqual(receipt['raw_files'], b.raw_files(raw))
+        self.assertEqual(receipt['provider_rpc_delta']['QueryWorkflow'], 0)
+        self.assertTrue(any(path.endswith('/external-executions') for _, path in http_calls))
+        self.assertNotIn('csk_', (audit / 'connector-reads.json').read_text())
+        self.assertEqual(len([call for call in calls if call[1] == 'kill']), 1)
+
+    def test_connector_semantic_failures_never_signal_or_write_eligible_receipt(self):
+        for fault in ('image', 'network', 'matrix', 'rpc', 'correlation', 'reverse', 'run',
+                      'server-readiness-restart', 'server-preflush-restart', 'provider-restart'):
+            with self.subTest(fault=fault):
+                args, command, request, audit, raw, calls, _ = self.connector_semantic_fixture(fault)
+                with self.assertRaises(b.JourneyError):
+                    b.connector_shutdown(command, CID, OWNER, 'owned', IMAGE, audit,
+                        semantics=lambda started_at: b.connector_read_semantics(command, args, request=request, expected_started_at=started_at), raw_dir=raw)
+                self.assertFalse((audit / 'connector-reads.json').exists())
+                self.assertFalse(any(call[1] == 'kill' for call in calls))
+                self.assertFalse(json.loads((audit / 'connector-diagnostics.json').read_text())['complete'])
+
+    def test_connector_semantic_pass_cannot_hide_missing_counter_or_failed_shutdown(self):
+        for fault in ('counters', 'exit', 'server-poststop-restart'):
+            with self.subTest(fault=fault):
+                args, command, request, audit, raw, calls, _ = self.connector_semantic_fixture(fault)
+                if fault == 'counters':
+                    next(raw.glob('covcounters.*')).unlink()
+                elif fault == 'exit':
+                    original = command
+                    def command(*values, **kwargs):
+                        result = original(*values, **kwargs)
+                        if values[:2] == ('container', 'inspect'):
+                            records = json.loads(result.stdout)
+                            if records[0]['Id'] == CID and not records[0]['State']['Running']:
+                                records[0]['State']['ExitCode'] = 17
+                                return subprocess.CompletedProcess(values, 0, json.dumps(records), '')
+                        return result
+                with self.assertRaises(b.JourneyError):
+                    b.connector_shutdown(command, CID, OWNER, 'owned', IMAGE, audit,
+                        semantics=lambda started_at: b.connector_read_semantics(command, args, request=request, expected_started_at=started_at), raw_dir=raw)
+                self.assertFalse((audit / 'connector-reads.json').exists())
 
     def test_connector_never_ready_stopped_and_invalid_complete_json_do_not_signal(self):
         for rc, body in ((0, '{"status":"unhealthy"}'), (0, '{"healthy":true}'),

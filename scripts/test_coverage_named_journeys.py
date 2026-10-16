@@ -296,7 +296,8 @@ fi
         added = {
             "local": {"TestCacheCLIListsInvalidatesAndPrunes", "TestNativeTaskSIGTERMResultClassification",
                       "TestJobSchemaNamespaceDocumentation", "TestCacheNamespaceMove"},
-            "auth": {"TestPublicListingsOrderByAndRefuseInvalidTerms", "TestIncidentNamespaceLifecycle"},
+            "auth": {"TestPublicListingsOrderByAndRefuseInvalidTerms", "TestIncidentNamespaceLifecycle",
+                     "TestAuthPolicyShowAndReloadSurface"},
         }
         for lane, original in (("local", original_local), ("auth", original_auth)):
             self.assertEqual(set(lanes[lane]["names"]), original | added[lane])
@@ -311,7 +312,8 @@ fi
         lanes = self._actual_lane_selection()
         new = {"local": ["TestCacheCLIListsInvalidatesAndPrunes", "TestNativeTaskSIGTERMResultClassification",
                          "TestJobSchemaNamespaceDocumentation", "TestCacheNamespaceMove"],
-               "auth": ["TestPublicListingsOrderByAndRefuseInvalidTerms", "TestIncidentNamespaceLifecycle"]}
+               "auth": ["TestPublicListingsOrderByAndRefuseInvalidTerms", "TestIncidentNamespaceLifecycle",
+                        "TestAuthPolicyShowAndReloadSurface"]}
         for lane, names in new.items():
             required = lanes[lane]["names"]
             lines = {name: "    --- PASS: " + SUITE + "/" + name + " (0.01s)\n" for name in required}

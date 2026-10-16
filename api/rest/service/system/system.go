@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	connectorsvc "github.com/caesium-cloud/caesium/api/rest/service/connector"
 	contractsvc "github.com/caesium-cloud/caesium/api/rest/service/contract"
 	clustersvc "github.com/caesium-cloud/caesium/internal/cluster"
 	"github.com/caesium-cloud/caesium/internal/models"
@@ -51,6 +52,8 @@ type Node struct {
 }
 
 type Features struct {
+	ConnectorsEnabled          bool   `json:"connectors_enabled"`
+	ConnectorsReady            bool   `json:"connectors_ready"`
 	DatabaseConsoleEnabled     bool   `json:"database_console_enabled"`
 	LogConsoleEnabled          bool   `json:"log_console_enabled"`
 	ExternalURL                string `json:"external_url,omitempty"`
@@ -81,8 +84,9 @@ type nodeUsage struct {
 }
 
 type Service struct {
-	ctx context.Context
-	db  *gorm.DB
+	ctx        context.Context
+	connectors *connectorsvc.Runtime
+	db         *gorm.DB
 	// snapshot and enrich are fields so the bound can be proven with a
 	// deliberately blocking query, without a database.
 	snapshot func() clustersvc.View
@@ -270,9 +274,16 @@ func roleFromCluster(role string) NodeRole {
 	}
 }
 
+func (s *Service) WithConnectors(runtime *connectorsvc.Runtime) *Service {
+	s.connectors = runtime
+	return s
+}
+
 func (s *Service) Features() (*Features, error) {
 	v := env.Variables()
 	return &Features{
+		ConnectorsEnabled:          v.ConnectorsEnabled,
+		ConnectorsReady:            v.ConnectorsEnabled && s.connectors != nil && s.connectors.Ready(s.ctx) == nil,
 		DatabaseConsoleEnabled:     v.DatabaseConsoleEnabled,
 		LogConsoleEnabled:          v.LogConsoleEnabled,
 		ExternalURL:                v.APIExternalURL,

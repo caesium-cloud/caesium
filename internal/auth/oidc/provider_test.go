@@ -13,6 +13,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -463,6 +464,26 @@ type mockIssuer struct {
 	nextExpiry          time.Time
 	nextEmailVerified   any // nil omits the email_verified claim
 	lastTokenForm       url.Values
+
+	// loginRefreshToken is returned by the code exchange when set.
+	loginRefreshToken string
+	// tokenAuthMethods populates token_endpoint_auth_methods_supported.
+	tokenAuthMethods []string
+	// userinfo, when set before the provider is built, advertises and serves
+	// the userinfo endpoint.
+	userinfo http.HandlerFunc
+
+	// Refresh-token grant behaviour (see refresh_test.go).
+	refreshCalls       atomic.Int32
+	lastRefreshForm    url.Values
+	lastRefreshAuth    string
+	onRefresh          func(w http.ResponseWriter, r *http.Request) bool
+	refreshRotateTo    string
+	refreshOmitIDToken bool
+	refreshClaims      func(claims map[string]any)
+	refreshSigningKey  *rsa.PrivateKey
+	// keysUnavailable makes the JWKS endpoint answer 503.
+	keysUnavailable atomic.Bool
 }
 
 func newMockIssuer(t *testing.T, groupsClaim string) *mockIssuer {
@@ -479,6 +500,13 @@ func newMockIssuer(t *testing.T, groupsClaim string) *mockIssuer {
 	})
 	mux.HandleFunc("/token", issuer.token)
 	mux.HandleFunc("/keys", issuer.keys)
+	mux.HandleFunc("/userinfo", func(w http.ResponseWriter, r *http.Request) {
+		if issuer.userinfo == nil {
+			http.NotFound(w, r)
+			return
+		}
+		issuer.userinfo(w, r)
+	})
 	issuer.server = httptest.NewServer(mux)
 	t.Cleanup(issuer.server.Close)
 	return issuer
@@ -493,7 +521,7 @@ func (m *mockIssuer) Client() *http.Client {
 }
 
 func (m *mockIssuer) discovery(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, map[string]any{
+	doc := map[string]any{
 		"issuer":                                m.URL(),
 		"authorization_endpoint":                m.URL() + "/authorize",
 		"token_endpoint":                        m.URL() + "/token",
@@ -502,12 +530,23 @@ func (m *mockIssuer) discovery(w http.ResponseWriter, _ *http.Request) {
 		"subject_types_supported":               []string{"public"},
 		"id_token_signing_alg_values_supported": []string{"RS256"},
 		"scopes_supported":                      []string{"openid", "profile", "email", "groups"},
-	})
+	}
+	if len(m.tokenAuthMethods) > 0 {
+		doc["token_endpoint_auth_methods_supported"] = m.tokenAuthMethods
+	}
+	if m.userinfo != nil {
+		doc["userinfo_endpoint"] = m.URL() + "/userinfo"
+	}
+	writeJSON(w, doc)
 }
 
 func (m *mockIssuer) token(w http.ResponseWriter, r *http.Request) {
 	if err := r.ParseForm(); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if r.PostForm.Get("grant_type") == "refresh_token" {
+		m.refresh(w, r)
 		return
 	}
 	m.lastTokenForm = cloneValues(r.PostForm)
@@ -551,15 +590,23 @@ func (m *mockIssuer) token(w http.ResponseWriter, r *http.Request) {
 		claims["email_verified"] = m.nextEmailVerified
 	}
 	idToken := m.signIDToken(claims)
-	writeJSON(w, map[string]any{
+	response := map[string]any{
 		"access_token": "access-token",
 		"token_type":   "Bearer",
 		"expires_in":   3600,
 		"id_token":     idToken,
-	})
+	}
+	if m.loginRefreshToken != "" {
+		response["refresh_token"] = m.loginRefreshToken
+	}
+	writeJSON(w, response)
 }
 
 func (m *mockIssuer) keys(w http.ResponseWriter, _ *http.Request) {
+	if m.keysUnavailable.Load() {
+		http.Error(w, "jwks unavailable", http.StatusServiceUnavailable)
+		return
+	}
 	publicKey := m.key.PublicKey
 	writeJSON(w, map[string]any{
 		"keys": []map[string]any{
@@ -576,6 +623,10 @@ func (m *mockIssuer) keys(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (m *mockIssuer) signIDToken(claims map[string]any) string {
+	return signJWT(m.key, claims)
+}
+
+func signJWT(key *rsa.PrivateKey, claims map[string]any) string {
 	header := map[string]any{"alg": "RS256", "kid": "test-key", "typ": "JWT"}
 	headerJSON, err := json.Marshal(header)
 	if err != nil {
@@ -587,7 +638,7 @@ func (m *mockIssuer) signIDToken(claims map[string]any) string {
 	}
 	signingInput := base64.RawURLEncoding.EncodeToString(headerJSON) + "." + base64.RawURLEncoding.EncodeToString(claimsJSON)
 	digest := sha256.Sum256([]byte(signingInput))
-	signature, err := rsa.SignPKCS1v15(rand.Reader, m.key, crypto.SHA256, digest[:])
+	signature, err := rsa.SignPKCS1v15(rand.Reader, key, crypto.SHA256, digest[:])
 	if err != nil {
 		panic(err)
 	}

@@ -146,6 +146,15 @@ var endpointPolicy = map[string]RoutePolicy{
 	// task names, so a namespace-confined principal must not scrape it.
 	"GET /metrics": clusterRoute(viewer),
 
+	// Connector reads (execution-connectors W5). The handler answers only a
+	// caller with a cluster viewer grant (connector.readPrincipal reads
+	// ClusterRole), and a connection's executions span every namespace's runs.
+	"GET /v1/connectors":                                  clusterRoute(viewer),
+	"GET /v1/connectors/:id/executions":                   clusterRoute(viewer),
+	"GET /v1/connectors/:id/executions/:id":               clusterRoute(viewer),
+	"GET /v1/connectors/:id/executions/:id/history":       clusterRoute(viewer),
+	"GET /v1/connectors/:id/executions/:id/relationships": clusterRoute(viewer),
+
 	// Jobs. GET /v1/jobs/:id attaches the latest run, and the history reads
 	// below return runs by job id alone; under a moved job those rows can sit
 	// in the old namespace (B4 filters them by the run's persisted namespace).
@@ -175,6 +184,9 @@ var endpointPolicy = map[string]RoutePolicy{
 	"POST /v1/jobs/:id/runs/:id/receipt/verify":      namespacedRoute(viewer),
 	"GET /v1/jobs/:id/runs/:id/tasks/:id/descriptor": namespacedRoute(viewer),
 	"GET /v1/jobs/:id/runs/:id/tasks/:id/partitions": namespacedRoute(viewer),
+	// A run's external executions: the run is gated like the routes above, and
+	// the handler lists links only for a cluster viewer (others get an empty list).
+	"GET /v1/jobs/:id/runs/:id/external-executions": namespacedRoute(viewer),
 	// The why explainer diffs against a baseline run (the cache origin or the
 	// prior run of the task), which can be another namespace's history.
 	"GET /v1/jobs/:id/runs/:id/why": namespacedRoute(viewer).pendingOn("B4"),
