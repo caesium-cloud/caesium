@@ -85,9 +85,16 @@ export function connectorRefreshSchedule(connection?: ConnectorConnection): { in
   return { interval: refreshMs, description: `Refresh every ${refreshMs / 1000}s.` };
 }
 
-export function observationAge(observedAt: string, now = Date.now()): string {
-  const observed = Date.parse(observedAt);
-  if (!Number.isFinite(observed)) return "Observation time unavailable";
+export function observationTimestamp(observedAt: string | null | undefined): number | undefined {
+  const observed = typeof observedAt === "string" ? Date.parse(observedAt) : NaN;
+  // Missing and zero-value provider timestamps are unknown, rather than a
+  // centuries-old observation. Connector executions postdate the Unix epoch.
+  return Number.isFinite(observed) && observed > 0 ? observed : undefined;
+}
+
+export function observationAge(observedAt: string | null | undefined, now = Date.now()): string {
+  const observed = observationTimestamp(observedAt);
+  if (observed === undefined) return "Observation time unavailable";
   const seconds = Math.max(0, Math.floor((now - observed) / 1000));
   return seconds < 60 ? `${seconds}s ago` : seconds < 3600 ? `${Math.floor(seconds / 60)}m ago` : `${Math.floor(seconds / 3600)}h ago`;
 }

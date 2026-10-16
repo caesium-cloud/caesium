@@ -61,7 +61,7 @@ function ExecutionObservation() {
       </section>
     </>}
     <section aria-label="Execution history" className="space-y-3">
-      <div className="flex flex-wrap items-center justify-between gap-3"><h2 className="text-base text-text-1">History metadata</h2><label className="text-sm">History events per page <select className="h-9 rounded-md border border-border bg-background px-3" value={historyParams.page_size} onChange={event => changePage({ page_size: Number(event.target.value) })}>{[1, 5, 10, 25, 50, 100].map(size => <option key={size}>{size}</option>)}</select></label></div>
+      <div className="flex flex-wrap items-center justify-between gap-3"><h2 className="text-base text-text-1">History metadata</h2><div className="flex items-center gap-2 text-sm"><label htmlFor="connector-history-events-per-page">History events per page</label><select id="connector-history-events-per-page" className="h-9 rounded-md border border-border bg-background px-3" value={historyParams.page_size} onChange={event => changePage({ page_size: Number(event.target.value) })}>{[1, 5, 10, 25, 50, 100].map(size => <option key={size}>{size}</option>)}</select></div></div>
       {!connection.capabilities.includes("history") ? <p className="text-sm text-text-3">History unavailable: this capability is not advertised.</p> : <>
         {history.isPending && <p role="status">Loading history…</p>}
         {history.error && <p role="alert" className="text-warning">History unavailable. {history.data ? "Previously observed history is stale." : "No history page is available."} {retryDescription}</p>}

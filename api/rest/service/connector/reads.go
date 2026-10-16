@@ -359,7 +359,14 @@ func (r *Runtime) List(ctx context.Context, principal, id, workflowType, pageCur
 		if len(page.NextPageToken) > 0 && out.Cursor == "" {
 			out.Incomplete = true
 		}
+		// Discovery observes this provider page now without referencing its rows
+		// in the catalog. Temporal visibility entries do not carry an observation
+		// timestamp; retain one if an adapter supplied it, otherwise date this read.
+		observedAt := time.Now().UTC()
 		for _, x := range page.Executions {
+			if x.ObservedAt.IsZero() {
+				x.ObservedAt = observedAt
+			}
 			e, err := execution(id, x)
 			if err != nil {
 				return nil, err

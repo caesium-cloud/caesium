@@ -7,7 +7,7 @@ import { InsufficientAccess } from "@/features/auth/InsufficientAccess";
 import { canReadConnectors, isInsufficientAccessError } from "@/features/auth/access";
 import { api } from "@/lib/api";
 import { usePrincipal } from "@/lib/auth";
-import { connectorRefreshSchedule, observationAge, type ConnectorSearch } from "./types";
+import { connectorRefreshSchedule, observationAge, observationTimestamp, type ConnectorSearch } from "./types";
 
 const fieldClass = "h-9 rounded-md border border-border bg-background px-3 text-sm text-text-1";
 
@@ -23,11 +23,11 @@ export function ConnectorGate({ children }: { children: ReactNode }) {
   return children;
 }
 
-export function ObservationTime({ value }: { value: string }) {
+export function ObservationTime({ value }: { value?: string | null }) {
   const [now, setNow] = useState(Date.now);
   useEffect(() => { const timer = window.setInterval(() => setNow(Date.now()), 1000); return () => window.clearInterval(timer); }, []);
-  const valid = Number.isFinite(Date.parse(value));
-  return <span>{valid ? <><time dateTime={value} title={value}>{new Date(value).toISOString()}</time> · {observationAge(value, now)}</> : "Observation time unavailable"}</span>;
+  const observed = observationTimestamp(value);
+  return <span>{observed !== undefined ? <><time dateTime={value ?? undefined} title={value ?? undefined}>{new Date(observed).toISOString()}</time> · {observationAge(value, now)}</> : "Observation time unavailable"}</span>;
 }
 
 export function ConnectionsPage() {
@@ -55,11 +55,11 @@ function ConnectionBrowser() {
   return <div className="space-y-6 p-6">
     <div><h1 className="text-xl text-text-1">Connections</h1><p className="mt-1 text-sm text-text-3">Inspect external workflow runs alongside Caesium. Discovery can lag behind direct observations.</p></div>
     <form key={search.workflow_type ?? ""} className="flex flex-wrap items-end gap-3" onSubmit={event => { event.preventDefault(); const workflowType = String(new FormData(event.currentTarget).get("workflow_type") ?? ""); update({ ...search, connection: connection?.id, workflow_type: workflowType.trim() || undefined, cursor: undefined }); }}>
-      <label className="flex flex-col gap-1 text-sm">Connection<select className={fieldClass} value={connection?.id ?? ""} onChange={event => update({ ...search, connection: event.target.value, cursor: undefined })}>
+      <div className="flex flex-col gap-1 text-sm"><label htmlFor="connector-connection">Connection</label><select id="connector-connection" className={fieldClass} value={connection?.id ?? ""} onChange={event => update({ ...search, connection: event.target.value, cursor: undefined })}>
         <option value="" disabled>Select a connection</option>{connections.data.connections.map(c => <option key={c.id} value={c.id}>{c.id} · {c.provider} · {c.scope}{c.enabled ? "" : " (disabled)"}</option>)}
-      </select></label>
-      <label className="flex flex-col gap-1 text-sm">Workflow type<input name="workflow_type" className={fieldClass} defaultValue={search.workflow_type ?? ""} placeholder="All workflow types" /></label>
-      <label className="flex flex-col gap-1 text-sm">Executions per page<select className={fieldClass} value={params.page_size} onChange={event => update({ ...search, page_size: Number(event.target.value), cursor: undefined })}>{[1, 5, 10, 25, 50, 100].map(size => <option key={size}>{size}</option>)}</select></label>
+      </select></div>
+      <div className="flex flex-col gap-1 text-sm"><label htmlFor="connector-workflow-type">Workflow type</label><input id="connector-workflow-type" name="workflow_type" className={fieldClass} defaultValue={search.workflow_type ?? ""} placeholder="All workflow types" /></div>
+      <div className="flex flex-col gap-1 text-sm"><label htmlFor="connector-executions-per-page">Executions per page</label><select id="connector-executions-per-page" className={fieldClass} value={params.page_size} onChange={event => update({ ...search, page_size: Number(event.target.value), cursor: undefined })}>{[1, 5, 10, 25, 50, 100].map(size => <option key={size}>{size}</option>)}</select></div>
       <Button type="submit" variant="outline">Apply filters</Button>
     </form>
     {!connection ? <EmptyState title="No connection selected" subtitle="Select a configured connection to discover executions." /> : !connection.enabled ? <EmptyState title="Connection disabled" subtitle="This connection does not make provider requests." /> : <>

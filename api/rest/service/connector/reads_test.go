@@ -18,6 +18,7 @@ import (
 	"github.com/stretchr/testify/require"
 	commonpb "go.temporal.io/api/common/v1"
 	enumspb "go.temporal.io/api/enums/v1"
+	historypb "go.temporal.io/api/history/v1"
 	"go.temporal.io/api/serviceerror"
 	workflowpb "go.temporal.io/api/workflow/v1"
 	"go.temporal.io/api/workflowservice/v1"
@@ -60,9 +61,11 @@ func TestCursorAuthenticatesConnectionFilterAndEpochAcrossReplicas(t *testing.T)
 
 type describeService struct {
 	workflowservice.WorkflowServiceClient
-	unavailable atomic.Bool
-	block       atomic.Bool
-	calls       atomic.Int64
+	unavailable  atomic.Bool
+	block        atomic.Bool
+	calls        atomic.Int64
+	listCalls    atomic.Int64
+	historyCalls atomic.Int64
 }
 
 func (s *describeService) DescribeWorkflowExecution(ctx context.Context, req *workflowservice.DescribeWorkflowExecutionRequest, opts ...grpc.CallOption) (*workflowservice.DescribeWorkflowExecutionResponse, error) {
@@ -76,6 +79,82 @@ func (s *describeService) DescribeWorkflowExecution(ctx context.Context, req *wo
 	}
 	return &workflowservice.DescribeWorkflowExecutionResponse{WorkflowExecutionInfo: &workflowpb.WorkflowExecutionInfo{Execution: req.Execution, Type: &commonpb.WorkflowType{Name: "TemporalOnly"}, HistoryLength: 3, Status: enumspb.WORKFLOW_EXECUTION_STATUS_RUNNING}}, nil
 }
+func (s *describeService) ListWorkflowExecutions(_ context.Context, _ *workflowservice.ListWorkflowExecutionsRequest, _ ...grpc.CallOption) (*workflowservice.ListWorkflowExecutionsResponse, error) {
+	s.listCalls.Add(1)
+	return &workflowservice.ListWorkflowExecutionsResponse{Executions: []*workflowpb.WorkflowExecutionInfo{
+		{Execution: &commonpb.WorkflowExecution{WorkflowId: "temporal-only-a", RunId: "run-a"}, Type: &commonpb.WorkflowType{Name: "TemporalOnly"}, Status: enumspb.WORKFLOW_EXECUTION_STATUS_RUNNING},
+		{Execution: &commonpb.WorkflowExecution{WorkflowId: "temporal-only-b", RunId: "run-b"}, Type: &commonpb.WorkflowType{Name: "TemporalOnly"}, Status: enumspb.WORKFLOW_EXECUTION_STATUS_COMPLETED},
+	}}, nil
+}
+func (s *describeService) GetWorkflowExecutionHistory(_ context.Context, _ *workflowservice.GetWorkflowExecutionHistoryRequest, _ ...grpc.CallOption) (*workflowservice.GetWorkflowExecutionHistoryResponse, error) {
+	s.historyCalls.Add(1)
+	return &workflowservice.GetWorkflowExecutionHistoryResponse{History: &historypb.History{}}, nil
+}
+
+func TestListAndHistoryDateSuccessfulObservationsWithoutCatalogWrites(t *testing.T) {
+	r, db := testRuntime(t)
+	svc := &describeService{}
+	observer, err := temporal.NewObserver(svc, "default", "", time.Second, 100, 20<<10)
+	require.NoError(t, err)
+	r.connections["primary"].observer = observer
+	var writes atomic.Int64
+	count := func(*gorm.DB) { writes.Add(1) }
+	require.NoError(t, db.Callback().Create().Before("gorm:create").Register("test-page-create", count))
+	require.NoError(t, db.Callback().Update().Before("gorm:update").Register("test-page-update", count))
+	require.NoError(t, db.Callback().Delete().Before("gorm:delete").Register("test-page-delete", count))
+	cardinality := func() []int64 {
+		tables := []any{&models.ExternalExecution{}, &models.ExternalExecutionSnapshot{}, &models.ExternalExecutionRelation{}, &models.ConnectorOperation{}}
+		out := make([]int64, len(tables))
+		for i, table := range tables {
+			require.NoError(t, db.Model(table).Count(&out[i]).Error)
+		}
+		return out
+	}
+	beforeCardinality := cardinality()
+	var previous Page
+	for range 2 {
+		before := time.Now().UTC()
+		raw, err := r.List(t.Context(), "actor", "primary", "", "", 100)
+		after := time.Now().UTC()
+		require.NoError(t, err)
+		var page Page
+		require.NoError(t, json.Unmarshal(raw, &page))
+		require.Len(t, page.Executions, 2)
+		for i, execution := range page.Executions {
+			require.False(t, execution.ObservedAt.IsZero())
+			require.False(t, execution.ObservedAt.Before(before), "row must be dated by this successful observation")
+			require.False(t, execution.ObservedAt.After(after), "row cannot be dated after its response")
+			require.Equal(t, time.UTC, execution.ObservedAt.Location())
+			require.Equal(t, execution.ObservedAt, execution.Metadata.ObservedAt)
+			require.Nil(t, execution.SnapshotObservedAt, "discovery must not manufacture a catalog snapshot")
+			if previous.Executions != nil {
+				require.Equal(t, previous.Executions[i].ID, execution.ID)
+				require.False(t, execution.ObservedAt.Before(previous.Executions[i].ObservedAt))
+			}
+		}
+		require.Equal(t, page.Executions[0].ObservedAt, page.Executions[1].ObservedAt, "one provider page shares an observation time")
+		previous = page
+	}
+	ref, err := core.NewExecutionReference("primary", map[string]string{"workflow_id": "temporal-only-a", "run_id": "run-a"})
+	require.NoError(t, err)
+	for range 2 {
+		before := time.Now().UTC()
+		raw, err := r.History(t.Context(), "actor", "primary", core.ReferenceID(ref), "", 100)
+		after := time.Now().UTC()
+		require.NoError(t, err)
+		var history History
+		require.NoError(t, json.Unmarshal(raw, &history))
+		require.False(t, history.ObservedAt.IsZero())
+		require.False(t, history.ObservedAt.Before(before))
+		require.False(t, history.ObservedAt.After(after))
+	}
+	require.Equal(t, int64(2), svc.listCalls.Load())
+	require.Equal(t, int64(2), svc.historyCalls.Load())
+	require.Zero(t, writes.Load(), "unchanged list/history polling must perform no catalog write")
+	require.Equal(t, beforeCardinality, cardinality(), "stateless list/history reads must not grow the catalog")
+	require.Equal(t, []int64{0, 0, 0, 0}, beforeCardinality)
+}
+
 func TestDetailReportsLiveTimeWithoutCatalogWritesAndDatedStaleFallback(t *testing.T) {
 	r, db := testRuntime(t)
 	svc := &describeService{}

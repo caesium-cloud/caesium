@@ -5,9 +5,9 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { api, ApiError } from "@/lib/api";
 import type { PrincipalState } from "@/lib/auth";
 import { canReadConnectors } from "@/features/auth/access";
-import { ConnectionsPage } from "../ConnectionsPage";
+import { ConnectionsPage, ObservationTime } from "../ConnectionsPage";
 import { ExecutionDetailPage } from "../ExecutionDetailPage";
-import { connectorRefreshMs, connectorRefreshSchedule, temporalExecutionURL, type ConnectorConnection, type ExternalExecution } from "../types";
+import { connectorRefreshMs, connectorRefreshSchedule, observationAge, temporalExecutionURL, type ConnectorConnection, type ExternalExecution } from "../types";
 
 const { principal, search, navigate } = vi.hoisted(() => ({
   principal: { kind: "api_key", subject: "viewer", role: "viewer", isScoped: false, scopeKnown: true, canRunner: false } as PrincipalState,
@@ -84,6 +84,39 @@ describe("connector monitoring", () => {
     expect(navigate).toHaveBeenLastCalledWith({ to: "/connectors", search: { connection: "fixture", cursor: "next/executions" } });
   });
 
+  it("exposes exact selectable filter names independently of option text", async () => {
+    show(<ConnectionsPage />);
+    const connectionSelect = await screen.findByRole("combobox", { name: "Connection" });
+    expect(connectionSelect).toHaveAccessibleName("Connection");
+    expect(screen.getByLabelText("Connection", { exact: true })).toBe(connectionSelect);
+    fireEvent.change(connectionSelect, { target: { value: "fixture" } });
+    expect(navigate).toHaveBeenLastCalledWith({ to: "/connectors", search: { connection: "fixture", cursor: undefined } });
+    const pageSizeSelect = screen.getByRole("combobox", { name: "Executions per page" });
+    expect(pageSizeSelect).toHaveAccessibleName("Executions per page");
+    fireEvent.change(pageSizeSelect, { target: { value: "5" } });
+    expect(navigate).toHaveBeenLastCalledWith({ to: "/connectors", search: { page_size: 5, cursor: undefined } });
+    expect(screen.getByRole("textbox", { name: "Workflow type" })).toBe(screen.getByLabelText("Workflow type", { exact: true }));
+  });
+
+  it("exposes an exact selectable history page-size name independently of option text", async () => {
+    show(<ExecutionDetailPage />);
+    const pageSizeSelect = await screen.findByRole("combobox", { name: "History events per page" });
+    expect(pageSizeSelect).toHaveAccessibleName("History events per page");
+    expect(screen.getByLabelText("History events per page", { exact: true })).toBe(pageSizeSelect);
+    fireEvent.change(pageSizeSelect, { target: { value: "1" } });
+    expect(navigate).toHaveBeenLastCalledWith({ to: "/connectors/$connectionId/executions/$executionId", params: { connectionId: "fixture", executionId: "opaque/reference" }, search: { page_size: 1 } });
+  });
+
+  it.each([ConnectionsPage, ExecutionDetailPage])("shows an unavailable observation time for a provider zero timestamp in %s", async Page => {
+    const zeroTimestamp = "0001-01-01T00:00:00Z";
+    vi.mocked(api.getConnectorExecutions).mockResolvedValue({ executions: [{ ...execution, observed_at: zeroTimestamp }] });
+    vi.mocked(api.getConnectorExecution).mockResolvedValue({ ...execution, observed_at: zeroTimestamp });
+    const { container } = show(<Page />);
+    expect(await screen.findByText("Observation time unavailable")).toBeVisible();
+    expect(screen.queryByText(/0001-01-01|1757713h/)).not.toBeInTheDocument();
+    expect(container.querySelector(`time[datetime="${zeroTimestamp}"]`)).toBeNull();
+  });
+
   it("shows partial history and reported attempts without claiming complete history or workflow failure", async () => {
     vi.mocked(api.getConnectorExecution).mockResolvedValue({ ...execution, completeness: "partial" });
     vi.mocked(api.getConnectorHistory).mockResolvedValue({ workflow_id: "external/only", run_id: "actual-run", scope: "team/a", observed_at: execution.observed_at, incomplete: true, events: [{ event_id: 7, event_type: "EVENT_TYPE_WORKFLOW_TASK_TIMED_OUT" }], problems: [{ event_id: 7, cause: "TIMEOUT_TYPE_START_TO_CLOSE" }] });
@@ -140,6 +173,12 @@ describe("connector monitoring", () => {
 });
 
 describe("connector boundary helpers", () => {
+  it.each([undefined, null, "", "invalid", "0001-01-01T00:00:00Z", "1969-12-31T23:59:59Z", "1970-01-01T00:00:00Z"])("renders unknown observation time without a date or age for %s", value => {
+    const { container } = show(<ObservationTime value={value} />);
+    expect(screen.getByText("Observation time unavailable")).toBeVisible();
+    expect(container.querySelector("time")).toBeNull();
+    expect(observationAge(value)).toBe("Observation time unavailable");
+  });
   it("honors slower refresh and clamps invalid/faster refresh", () => {
     expect(connectorRefreshMs(connection)).toBe(15_000);
     expect(connectorRefreshMs({ ...connection, console_refresh_ms: 1000 })).toBe(10_000);
