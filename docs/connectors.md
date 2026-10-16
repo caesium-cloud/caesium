@@ -399,6 +399,12 @@ Run it serially with other container/cluster lanes. Candidate, image, provider,
 topology and fault evidence stays in the reported artifact directory. The
 authenticated HTTP/browser CI lane remains F2; this command does not promote it.
 
+The existing G2 coverage cohort uses the same pinned Temporal fixture for a
+real publication, authenticated monitoring, verified delegation and reverse
+lookup. It requires provider RPC evidence, a succeeded local run and complete
+instrumented counters from a cleanly stopped process. Full fault/restart and
+browser scenario selection remains F2.
+
 ## Temporal observation
 
 `internal/connector/temporal` compiles `go.temporal.io/sdk` v1.49.0.

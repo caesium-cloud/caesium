@@ -2084,6 +2084,21 @@ jobs:
         env:
           CAESIUM_SKIP_IMAGE_BUILD: "false"
         run: just tag=${{ env.IMAGE_TAG }}-amd64 stress-image-test
+      - name: Prepare pinned Temporal fixture for existing coverage cohort
+        run: |
+          set -euo pipefail
+          builder="caesiumcloud/caesium-builder:${{ env.IMAGE_TAG }}-amd64"
+          builder_id="$(docker image inspect --format '{{.Id}}' "$builder")"
+          [[ "$builder_id" =~ ^sha256:[0-9a-f]{64}$ ]]
+          fixture="caesiumcloud/caesium-connectors-fixture:${{ env.IMAGE_TAG }}-coverage-amd64"
+          docker build --platform linux/amd64 \
+            --build-arg BUILDER_IMAGE="$builder@$builder_id" \
+            --label "org.opencontainers.image.revision=$CANDIDATE_SHA" \
+            --label "caesium.coverage.builder=$builder_id" \
+            -f build/Dockerfile.connector-fixture -t "$fixture" .
+          fixture_id="$(docker image inspect --format '{{.Id}}' "$fixture")"
+          [[ "$fixture_id" =~ ^sha256:[0-9a-f]{64}$ ]]
+          echo "CAESIUM_COVERAGE_CONNECTOR_FIXTURE_IMAGE=$fixture_id" >>"$GITHUB_ENV"
       - name: Coverage collection against the ratchets
         env:
           CAESIUM_RESOURCE_STRESS_IMAGE: caesiumcloud/resource-stress:${{ env.IMAGE_TAG }}-amd64
