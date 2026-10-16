@@ -50,8 +50,8 @@ without inventing.
 5. List the existing wave history (if any) — sibling plans that recently
    shipped tell you what just landed and what's actively in flight; new
    plans should not collide with active work. Check recent commits
-   (`git log --oneline -30`) and the two live initiatives (SSO under
-   `docs/sso-authentication.md`; Volumes & workload-identity under
+   (`git log --oneline -30`) and the two live initiatives (identity and access under
+   `docs/identity-and-access.md`; Volumes & workload-identity under
    `docs/design/2026-05-29-volumes-and-workload-identity-design.md`).
 
 **Output of phase 1**: a one-paragraph summary of the initiative, the

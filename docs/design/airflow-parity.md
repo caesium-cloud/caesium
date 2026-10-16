@@ -8,7 +8,7 @@ This plan closes the feature gaps between Caesium and Apache Airflow while prese
 
 ## What shipped
 
-Operator-facing behaviour for the shipped subset lives in [job-definitions.md](../job-definitions.md), [backfill.md](../backfill.md), and [sso-authentication.md](../sso-authentication.md). Condensed record (the "why" is preserved; full implementation now lives in code):
+Operator-facing behaviour for the shipped subset lives in [job-definitions.md](../job-definitions.md), [backfill.md](../backfill.md), and [identity-and-access.md](../identity-and-access.md). Condensed record (the "why" is preserved; full implementation now lives in code):
 
 | WS | Feature | Why it mattered | Lands in |
 |----|---------|-----------------|----------|
@@ -20,7 +20,7 @@ Operator-facing behaviour for the shipped subset lives in [job-definitions.md](.
 | 8 | Task outputs / XCom — `##caesium::output` → `CAESIUM_OUTPUT_<STEP>_<KEY>` env (64KB, last-write-wins) | inter-task data passing with no external system | `pkg/task/output.go` (`ParseOutput`) |
 | 10 | Pause / unpause — `Paused`, `PUT /v1/jobs/{id}/pause`\|`/unpause`, 409 on manual run | suspend a schedule without deleting it | `api/rest/controller/job/pause.go` |
 | 12 | Run timeout — `runTimeout` wraps the run in `context.WithTimeout` | cap runaway pipelines | `internal/job/job.go` |
-| 15 | Auth & API keys — keyed-hash API-key middleware + roles, and native **SSO** (OIDC/SAML/LDAP) built on top | secure the API | `internal/auth/`, [../sso-authentication.md](../sso-authentication.md) |
+| 15 | Auth & API keys — keyed-hash API-key middleware + roles, and native **SSO** (OIDC/SAML/LDAP) built on top | secure the API | `internal/auth/`, [../identity-and-access.md](../identity-and-access.md) |
 
 Operator notes for the shipped subset:
 

@@ -24,7 +24,7 @@ is and what is still in flight; they are not operator documentation.
 | Guide | What it covers |
 | --- | --- |
 | [rest-api.md](rest-api.md) | REST endpoints, auth endpoints, the SSE event stream, and the gated operator consoles. |
-| [sso-authentication.md](sso-authentication.md) | API keys, roles, and native OIDC / SAML / LDAP sign-in. |
+| [identity-and-access.md](identity-and-access.md) | Identity and access operator guide: namespaces, grants, the access policy file, API keys, and native OIDC / SAML / LDAP sign-in. |
 | [distributed-execution.md](distributed-execution.md) | Execution modes, every worker and dqlite environment variable, run-owner mode, Raft log retention, database sharding, troubleshooting. |
 | [kubernetes-deployment.md](kubernetes-deployment.md) | The Helm chart, three-node Raft clusters, Kueue delegation, backup and member replacement, air-gapped notes. |
 | [sovereignty.md](sovereignty.md) | The air-gapped quickstart and the free-versus-paywalled comparison with other orchestrators. |

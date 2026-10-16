@@ -174,4 +174,4 @@ ssh user@airgapped-host "systemctl restart caesium"
 - [`design/differentiation-strategy.md`](design/differentiation-strategy.md) — the full positioning thesis: why sovereignty sells by constraint, not comparison, and the kill-conditions that test the thesis.
 - [`kubernetes-deployment.md`](kubernetes-deployment.md) — Helm-based Kubernetes deployment, including air-gapped cluster notes.
 - [`design/data-plane-memory.md`](design/data-plane-memory.md) — the data-plane memory substrate: `caesium why`, reproducibility receipts, and value-verified skip — the "second act" differentiator within sovereignty.
-- [`sso-authentication.md`](sso-authentication.md) — native OIDC, SAML, and LDAP SSO configuration.
+- [`identity-and-access.md`](identity-and-access.md) — native OIDC, SAML, and LDAP SSO configuration.

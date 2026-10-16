@@ -1,0 +1,54 @@
+# Identity and Access
+
+> Status: Current operator guide for authentication, authorization, and tenancy.
+> Sections marked **Planned** describe work tracked in
+> [the identity-and-access plan](exec-plans/active/identity-and-access.md) and
+> are not available yet.
+
+Caesium supports API keys for machines and optional browser SSO for interactive
+users. SSO is additive: keep `CAESIUM_AUTH_MODE=api-key` enabled and turn on one
+or more providers with `CAESIUM_AUTH_OIDC_ENABLED`,
+`CAESIUM_AUTH_SAML_ENABLED`, or `CAESIUM_AUTH_LDAP_ENABLED`. Who may do what is
+decided by roles granted per namespace, either from an access policy file
+(recommended) or from the legacy `CAESIUM_AUTH_ROLE_MAPPING` variable.
+
+Contents: [Overview and concepts](#overview-and-concepts) |
+[Providers](#providers) | [Policy file](#policy-file) |
+[Namespaces and isolation](#namespaces-and-isolation) |
+[API keys and CLI login](#api-keys-and-cli-login) |
+[Users and sessions](#users-and-sessions) | [Audit and metrics](#audit-and-metrics) |
+[Security checks](#security-checks) |
+[Migration from the env mapping](#migration-from-the-env-mapping)
+
+## Overview and concepts
+
+- **Role.** Roles form a ladder: `viewer < runner < operator < admin`.
+- **Namespace.** A tenancy boundary that owns jobs and, through them, their
+  runs, backfills and incidents. A namespace name is a DNS label
+  (`^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$`). `default` always exists, and `*` is
+  reserved for cluster-wide grants and is never a real namespace. A job joins a
+  namespace with `metadata.namespace`; omitting it means `default`.
+  Namespaces are declared in the policy file's `namespaces:` map.
+- **Grant.** A grant is a `(role, namespace)` pair; namespace `*` means
+  cluster-wide. A principal carries a map of namespace to its highest role. The
+  effective role in namespace N is `max(grants[N], grants["*"])`.
+- **Principal.** The authenticated caller: an API key, or an SSO user.
+  The audit actor is the key prefix or the user's email. The cluster role (the
+  grant at `*`) is what audit rows, metrics labels, and `GET /auth/whoami`'s
+  `role` report.
+- **Tenancy namespace versus dataset namespace.** These are two unrelated
+  axes. The tenancy namespace described in this guide decides who may see and
+  change jobs and the objects that belong to them. The dataset namespace is the
+  OpenLineage namespace carried by dataset declarations, dataset metrics, and
+  the `/v1/datasets/:ns/:name` path; it is reserved for cross-instance datasets
+  and has nothing to do with tenancy or grants. This guide says "namespace"
+  for the tenancy axis and "dataset namespace" for the other.
+- **Job alias.** `metadata.alias` keeps its global unique index. Every
+  alias-addressed surface (CLI verbs, key job scopes, lineage, receipts) is
+  unchanged by namespaces.
+
+With no policy file and no namespaces declared, the cluster behaves as a single
+`default` namespace in which every principal holds its role at `*`.
+
+## Providers
+
