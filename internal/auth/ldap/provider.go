@@ -164,9 +164,24 @@ func defaultDial(ctx context.Context, cfg Config) (Conn, error) {
 	conn := gldap.NewConn(netConn, isTLS)
 	conn.Start()
 	if cfg.StartTLS {
-		stop := context.AfterFunc(ctx, func() { _ = conn.Close() })
+		// StartTLS swaps the Conn's transport without a lock, and Conn.Close
+		// reads it, so cancellation must not go through Conn.Close while the
+		// upgrade runs. Closing the raw socket is safe at any moment and
+		// unblocks both the extended operation and the TLS handshake.
+		cancelled := make(chan struct{})
+		stop := context.AfterFunc(ctx, func() {
+			_ = netConn.Close()
+			close(cancelled)
+		})
 		err := conn.StartTLS(cfg.tlsConfig())
-		stop()
+		if !stop() {
+			// The callback has started: wait for it, then fail even if the
+			// upgrade won the race, because the socket is gone.
+			<-cancelled
+			if err == nil {
+				err = ctx.Err()
+			}
+		}
 		if err != nil {
 			_ = conn.Close()
 			return nil, fmt.Errorf("start ldap TLS: %w", err)

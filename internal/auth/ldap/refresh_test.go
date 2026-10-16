@@ -2,8 +2,16 @@ package ldap
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/hex"
 	"errors"
+	"io"
+	"math/big"
 	"net"
 	"strings"
 	"testing"
@@ -475,6 +483,144 @@ func TestRefreshGroupsHonoursTheContext(t *testing.T) {
 		_, err = provider.RefreshGroups(ctx, ldapRefreshRequest(aliceDN))
 		requireLDAPRefreshError(t, err, authpkg.RefreshTransient, "context_done")
 		require.False(t, dialed)
+	})
+}
+
+// startTLSServer is a minimal directory that answers a StartTLS extended
+// request with success and then either never speaks TLS (stall) or completes
+// a real TLS handshake.
+func startTLSServer(t *testing.T, stall bool) string {
+	t.Helper()
+	cert := selfSignedCert(t)
+	listener, err := (&net.ListenConfig{}).Listen(t.Context(), "tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = listener.Close() })
+	go func() {
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			go func() {
+				defer func() { _ = conn.Close() }()
+				id, err := readLDAPMessageID(conn)
+				if err != nil {
+					return
+				}
+				// ExtendedResponse [APPLICATION 24] { resultCode success,
+				// matchedDN "", diagnosticMessage "" }.
+				body := append([]byte{0x02, byte(len(id))}, id...)
+				body = append(body, 0x78, 0x07, 0x0a, 0x01, 0x00, 0x04, 0x00, 0x04, 0x00)
+				if _, err := conn.Write(append([]byte{0x30, byte(len(body))}, body...)); err != nil {
+					return
+				}
+				if stall {
+					_, _ = io.Copy(io.Discard, conn)
+					return
+				}
+				tlsConn := tls.Server(conn, &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12})
+				if err := tlsConn.Handshake(); err != nil {
+					return
+				}
+				_, _ = io.Copy(io.Discard, tlsConn)
+			}()
+		}
+	}()
+	return listener.Addr().String()
+}
+
+// readLDAPMessageID reads one LDAPMessage and returns its messageID bytes.
+func readLDAPMessageID(r io.Reader) ([]byte, error) {
+	header := make([]byte, 2)
+	if _, err := io.ReadFull(r, header); err != nil {
+		return nil, err
+	}
+	if header[0] != 0x30 {
+		return nil, errors.New("not an LDAPMessage")
+	}
+	length := int(header[1])
+	if length&0x80 != 0 {
+		size := make([]byte, length&0x7f)
+		if _, err := io.ReadFull(r, size); err != nil {
+			return nil, err
+		}
+		length = 0
+		for _, b := range size {
+			length = length<<8 | int(b)
+		}
+	}
+	body := make([]byte, length)
+	if _, err := io.ReadFull(r, body); err != nil {
+		return nil, err
+	}
+	if len(body) < 3 || body[0] != 0x02 || int(body[1]) > len(body)-2 {
+		return nil, errors.New("no messageID")
+	}
+	return body[2 : 2+int(body[1])], nil
+}
+
+func selfSignedCert(t *testing.T) tls.Certificate {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	require.NoError(t, err)
+	template := &x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		Subject:      pkix.Name{CommonName: "127.0.0.1"},
+		IPAddresses:  []net.IP{net.ParseIP("127.0.0.1")},
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(time.Hour),
+	}
+	der, err := x509.CreateCertificate(rand.Reader, template, template, &key.PublicKey, key)
+	require.NoError(t, err)
+	return tls.Certificate{Certificate: [][]byte{der}, PrivateKey: key}
+}
+
+func startTLSConfig(t *testing.T, addr string) Config {
+	t.Helper()
+	cfg := baseConfig()
+	cfg.URL = "ldap://" + addr
+	cfg.StartTLS = true
+	cfg.TLSConfig = &tls.Config{InsecureSkipVerify: true} //nolint:gosec // the test server's certificate is generated per run.
+	cfg.Timeout = time.Minute
+	normalized, err := cfg.normalize()
+	require.NoError(t, err)
+	return normalized
+}
+
+// TestDefaultDialStartTLSCancellation covers the pre-PR review finding on
+// #646: StartTLS swaps the connection's transport without a lock, so
+// cancellation closes the raw socket instead of calling Conn.Close. Run with
+// -race.
+func TestDefaultDialStartTLSCancellation(t *testing.T) {
+	t.Run("upgrade completes", func(t *testing.T) {
+		conn, err := defaultDial(t.Context(), startTLSConfig(t, startTLSServer(t, false)))
+		require.NoError(t, err)
+		require.NoError(t, conn.Close())
+	})
+	t.Run("cancelled during a stalled handshake", func(t *testing.T) {
+		cfg := startTLSConfig(t, startTLSServer(t, true))
+		ctx, cancel := context.WithTimeout(t.Context(), 200*time.Millisecond)
+		defer cancel()
+		start := time.Now()
+		_, err := defaultDial(ctx, cfg)
+		require.Error(t, err)
+		require.Less(t, time.Since(start), 10*time.Second)
+	})
+	t.Run("cancelled racing the upgrade", func(t *testing.T) {
+		cfg := startTLSConfig(t, startTLSServer(t, false))
+		for i := range 40 {
+			ctx, cancel := context.WithCancel(t.Context())
+			delay := time.Duration(i%8) * 250 * time.Microsecond
+			go func() {
+				time.Sleep(delay)
+				cancel()
+			}()
+			conn, err := defaultDial(ctx, cfg)
+			if err == nil {
+				require.NoError(t, conn.Close())
+			}
+			cancel()
+		}
 	})
 }
 
