@@ -438,7 +438,7 @@ Resume unfinished waves. Do not archive this plan while later items remain.
   template-token and whitespace checks. Targeted containerized guardrails passed
   on the updated dashboard; final status edits retain the static checks. Owned
   fixture resources and the shared lane were released after all local gates.
-  W4 implementation is shipped; dashboard publication remains pending its merge.
+  W4 implementation is shipped; this dashboard records its merged acceptance.
 - **Remaining:** C, E, F2–F4 and N are outside this wave. No later wave is
   dispatched in this execution.
 
