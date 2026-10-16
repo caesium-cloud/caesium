@@ -78,7 +78,9 @@ repair (#626) and the W1 plan sync (#622). W2 merged on 2026-10-16: A2 (#638
 `48da0880`), D3 (#640 `2646b0a9`), B3 (#639 `f733fcc0`) and the W2 plan sync
 (#641 `53b375b4`). Every review comment was addressed before merge, including a
 user review round on #638 and a Codex atomicity finding on #639, which was fixed
-rather than documented.
+rather than documented. W3 merged on 2026-10-16: E1 (#646 `b1c8eef3`), A4 with
+H-2 (#645 `831e5229`), A3 (#647 `3d065b68`) and N-1 (#648 `608fe6a3`); LDAP group
+refresh was split out of E1 into the new item E1b.
 
 ### Wave 1 — Foundations (2026-10-09)
 
@@ -280,19 +282,102 @@ lane lock. The orchestrator also ran the same chain on the combined tree
   E1 (A2), as the original W2 suggestion planned, then the W3 row of the
   suggested-waves table.
 
+### Wave 3 — Route classes, policy loader, refresh grant, guide (2026-10-16)
+
+Briefs were grounded at master `3194fe68` and critiqued by Codex before dispatch
+(A3: 6 P1 + 6 P2, A4: 1 P1 + 5 P2, E1: 5 P1 + 4 P2, all folded in). Every PR had
+pre-PR Codex rounds, Codex rounds on the PR head and an independent multi-lens
+review whose findings each faced three refuters. All review threads, including a
+parallel user review, were answered before merge. The four PRs were admin-merged
+in the order #646 → #645 → #647 → #648.
+
+- **W3-γ / E1 — refresh grant:** merged [PR #646](https://github.com/caesium-cloud/caesium/pull/646)
+  as `b1c8eef3` (head `63342d74`). One AES-256-GCM refresh grant per user under an
+  HKDF-SHA256 key from `CAESIUM_AUTH_KEY_HASH_SECRET` (AAD = user id), lease and
+  fence primitives (CAS on `refresh_grant_version`), and an OIDC `GroupRefresher`
+  that keeps rotated tokens, re-checks issuer and subject, validates userinfo time
+  bounds, and treats a missing groups claim as unknown rather than empty.
+  - **Split (decision for sign-off):** the coverage diff ratchet needs a live
+    caller for every changed file, and no LDAP journey exists, so LDAP group
+    refresh moved to the new item E1b. The full LDAP work is preserved on
+    `iaa-e1-ldap-refresh-preserved` (`cc0cfb87`). Its refresh re-runs the exact
+    login filter, rendered with the name the user typed, against the stored DN;
+    re-rendering with the username attribute would have revoked every user under
+    some valid configurations.
+  - **E2/E4 obligations recorded in the PR:** refresh deadline below the lease,
+    lease TTL at least twice the timeout, `ErrRefreshGrantInvalid` discards the
+    grant, a policy for users with NULL `GroupsRefreshedAt`, an audited
+    `sessions_revoked`; E4 extends `revokeUserSessionsTx` to user-bound keys.
+- **W3-β / A4 + H-2 — policy loader:** merged [PR #645](https://github.com/caesium-cloud/caesium/pull/645)
+  as `831e5229` (head `7cf8d548`). `CAESIUM_AUTH_POLICY_FILE` is parsed at startup
+  (fatal on error, or alongside `CAESIUM_AUTH_ROLE_MAPPING`); `policy.Holder` reloads
+  on a stable content-hash poll (not mtime) and on `POST /v1/auth/policy/reload`
+  with serialised writers; `policy.reloaded` / `policy.reload_failed` are audited at
+  namespace `*`; `GET /v1/auth/policy` and `caesium auth policy lint|show|reload`
+  are new. A no-file reload answers 409, a rejected file 422. H-2's
+  `runCLIJSON[T]` / `runCLIJSONFailure[T]` helpers ship here. The agent lane mounts
+  a reload fixture; H-1 adds the two-namespace fixture to both servers later.
+- **W3-α / A3 — route classes:** merged [PR #647](https://github.com/caesium-cloud/caesium/pull/647)
+  as `3d065b68` (head `a0dfbd3b`). Every route has a role and a class (identity,
+  cluster, namespaced, collection); a principal holding the role at `*` is decided
+  exactly as before (an oracle test checks every route and role against master's
+  decision, with no DB read). Routes whose handlers can still return another
+  namespace's rows are fail-closed behind `pendingOn("<item>")` (B2, B4, B5, B6,
+  D4, A5, A6, A8). New `internal/authz`, `AuditLog.Namespace` with
+  `caesium auth audit --namespace`, and `run_start_idempotency.namespace` so a
+  confined idempotent replay is authorised before its request is compared (D9).
+  Fixed on the way: concurrency-admitted runs were persisted in `default`.
+  - **Master moved under the wave:** #644 added six connector read routes. The
+    five `/v1/connectors*` reads are cluster routes (their handler already answers
+    only a cluster viewer); a run's external executions is a namespaced run route
+    that lists links only to a cluster viewer. `TestAuthNamespacedRoutesConfineKey`
+    drives a confined key through both.
+  - **Accepted residual risk (decision for sign-off):** a concurrent namespace move
+    of the exact target can land between the namespace check and the handler; run
+    admission and replay re-check in their own transactions, and B2/B4 own
+    in-transaction guards for the other mutations.
+  - **Migration note:** keyed starts recorded before the upgrade carry no
+    namespace, so a namespace-confined key retrying one whose start was skipped or
+    dropped gets 403.
+- **W3-δ / N-1 — the guide:** merged [PR #648](https://github.com/caesium-cloud/caesium/pull/648)
+  as `608fe6a3`. `docs/sso-authentication.md` became `docs/identity-and-access.md`
+  and grew into the operator guide (policy file, namespaces and route classes,
+  keys, users and sessions, audit, migration). A 72-agent fact-check against the
+  combined code kept 23 corrections; unshipped features are short **Planned**
+  paragraphs naming their item. Rebased onto the merged code before merge.
+- **Combined gates:** the full chain (lint, race unit suite, `integration-test`,
+  `integration-test-agent`) passed three times on combined trees: all four heads on
+  `3194fe68` (agent lane 58), the final heads on `3194fe68` (319 / 59), and
+  master `831e5229` + A3's merge resolution (380 passed, 0 failed; agent lane 60).
+- **CI flakes:** the stress smoke `terminal_oom_unconfirmed` (#645, #646);
+  `pkg/dqlite` `TestFreshOrdinalZeroJoinsLiveClusterThroughBootstrapPeers` (#645);
+  an early-evidence kind probe (#647); and on #647's final head a
+  `No such image: debian:12-slim@sha256:…` in one integration shard. All were
+  rerun green.
+- **Follow-ups filed by this wave:**
+  - Docker engine: the image pull reads the progress stream with `io.ReadAll` and
+    ignores in-stream errors, so a failed pull is logged as pulled and surfaces as
+    "No such image" at container create (`internal/atom/docker/engine.go`).
+  - B4: filter `LatestRunForLogicalDate` by namespace (backfill date dedupe).
+  - Clear the `pendingOn` markers as B2, B4, B5, B6, D4, A5, A6 and A8 land.
+  - A policy file keeps existing SSO sessions alive after an SSO provider is
+    disabled (documented in the guide; revisit with E3).
+- **Next wave (W4 candidates):** the suggested W3 row's remaining items — A5, A8,
+  B2, B5, C4, D1, E3, H-1 — and E1b; confirm each item's `Depends on` at dispatch.
+
 ### Stream Status
 
 | Stream | Scope | Priority | Status |
 |--------|-------|----------|--------|
-| A | Policy file, grants, principal, route classes, namespace-aware middleware, keys with namespaces, SSO-admin key management | **P0** | A1 merged #624; A2 merged #638; A3/A4 next |
+| A | Policy file, grants, principal, route classes, namespace-aware middleware, keys with namespaces, SSO-admin key management | **P0** | A1 #624, A2 #638, A3 #647, A4 #645 merged; A5/A8 next |
 | B | `metadata.namespace` on jobs: schema, columns, importer, lint, apply/prune/move, git-sync allowlist, collection filtering, aggregate collapse | **P0** | B1 merged #625; B3 merged #639 |
 | C | Runtime isolation: per-namespace Kubernetes namespace + service account, scoped secret resolution, Helm RBAC | P1 | Not started |
 | D | Run quota + round-robin fairness (#395 v1 slice); namespaced notification channels, policies, agent profiles | P1 | D3 merged #640 |
-| E | Identity lifecycle: IdP group refresh, user/session administration, user-bound keys, `caesium login` | P1 | Not started |
+| E | Identity lifecycle: IdP group refresh, user/session administration, user-bound keys, `caesium login` | P1 | E1 merged #646 (LDAP refresh split to E1b); E3 next |
 | F | Console: grants-aware gating, namespace switcher, namespace chips, quota label, Access page | P1 | Not started |
 | G | Keycloak: realm fixture, CI lane, Playwright + Go scenarios, operator guidance | P1 | Not started |
-| H- | Harness: integration server policy fixture, `--json` stdout discipline for new verbs | — | Not started |
-| N- | Docs: rename + grow the identity-and-access guide; roadmap, README, sovereignty | — | Not started |
+| H- | Harness: integration server policy fixture, `--json` stdout discipline for new verbs | — | H-2 merged #645; H-1 next |
+| N- | Docs: rename + grow the identity-and-access guide; roadmap, README, sovereignty | — | N-1 merged #648; N-2 at close-out |
 
 ## Streams
 
