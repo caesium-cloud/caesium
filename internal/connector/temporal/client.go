@@ -17,6 +17,7 @@ import (
 
 	"github.com/caesium-cloud/caesium/internal/connector"
 	"go.temporal.io/sdk/client"
+	"google.golang.org/grpc"
 )
 
 // minRedactedSecretLen matches the connector config redactor. Shorter values
@@ -27,6 +28,8 @@ const minRedactedSecretLen = 8
 // Namespace is the connection scope. APIKey is optional and is never logged.
 // CertificatePaths are classified by base name only.
 type DialConfig struct {
+	// BeforeRPC fences the catalog epoch immediately before every SDK RPC.
+	BeforeRPC        func(context.Context) error
 	Endpoint         string
 	Namespace        string
 	APIKey           string
@@ -81,6 +84,14 @@ func buildClientOptions(cfg DialConfig, secrets *[]string) (client.Options, erro
 		Namespace: cfg.Namespace,
 		Logger:    discardLog{},
 	}
+	if cfg.BeforeRPC != nil {
+		opts.ConnectionOptions.DialOptions = append(opts.ConnectionOptions.DialOptions, grpc.WithChainUnaryInterceptor(func(ctx context.Context, method string, req, reply any, cc *grpc.ClientConn, invoke grpc.UnaryInvoker, opts ...grpc.CallOption) error {
+			if err := cfg.BeforeRPC(ctx); err != nil {
+				return err
+			}
+			return invoke(ctx, method, req, reply, cc, opts...)
+		}))
+	}
 	if cfg.APIKey != "" {
 		opts.Credentials = client.NewAPIKeyStaticCredentials(cfg.APIKey)
 	}
@@ -111,24 +122,9 @@ func loopbackHost(endpoint string) (bool, error) {
 }
 
 func tlsConfigFor(paths []string, secrets *[]string) (*tls.Config, error) {
-	var cas, certs, keys []string
-	for _, certPath := range paths {
-		switch path.Base(certPath) {
-		case "ca.crt", "ca.pem":
-			cas = append(cas, certPath)
-		case "tls.crt", "client.crt":
-			certs = append(certs, certPath)
-		case "tls.key", "client.key":
-			keys = append(keys, certPath)
-		default:
-			return nil, fmt.Errorf("unrecognized certificate file %q", path.Base(certPath))
-		}
-	}
-	if len(certs) > 1 || len(keys) > 1 {
-		return nil, errors.New("only one client certificate and one key are allowed")
-	}
-	if len(certs) != len(keys) {
-		return nil, errors.New("client certificate and key must both be set")
+	cas, certs, keys, err := classifyCertificatePaths(paths)
+	if err != nil {
+		return nil, err
 	}
 	cfg := &tls.Config{MinVersion: tls.VersionTLS12}
 	if len(cas) > 0 {
@@ -183,3 +179,42 @@ func (discardLog) Debug(string, ...any) {}
 func (discardLog) Info(string, ...any)  {}
 func (discardLog) Warn(string, ...any)  {}
 func (discardLog) Error(string, ...any) {}
+
+// ValidateConnectionShape rejects deterministic unsupported transport settings
+// without reading mounted files, resolving secrets, or contacting the provider.
+// Missing/temporarily unavailable mounted material stays request availability.
+func ValidateConnectionShape(conn connector.Connection) error {
+	if len(conn.SecretRefs) > 1 {
+		return errors.New("temporal permits one API key reference")
+	}
+	if _, err := loopbackHost(conn.Endpoint); err != nil {
+		return err
+	}
+	if strings.TrimSpace(conn.Scope) == "" {
+		return errors.New("temporal namespace is required")
+	}
+	_, _, _, err := classifyCertificatePaths(conn.CertificatePaths)
+	return err
+}
+func classifyCertificatePaths(paths []string) (cas, certs, keys []string, err error) {
+	for _, certPath := range paths {
+		switch path.Base(certPath) {
+		case "ca.crt", "ca.pem":
+			cas = append(cas, certPath)
+		case "tls.crt", "client.crt":
+			certs = append(certs, certPath)
+		case "tls.key", "client.key":
+			keys = append(keys, certPath)
+		default:
+			return nil, nil, nil, fmt.Errorf("unrecognized certificate file %q", path.Base(certPath))
+		}
+	}
+	if len(certs) > 1 || len(keys) > 1 {
+		return nil, nil, nil, errors.New("only one client certificate and one key are allowed")
+	}
+	if len(certs) != len(keys) {
+		return nil, nil, nil, errors.New("client certificate and key must both be set")
+	}
+
+	return cas, certs, keys, nil
+}

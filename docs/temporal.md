@@ -10,8 +10,9 @@
 > Caesium's REST API. The adapter is described in [connectors.md](connectors.md).
 
 The optional adapter observes Temporal workflows and implements binding-declared
-JSON Queries and Updates. It does not add HTTP monitoring or Console pages.
-Durable action admission and the operator action surface remain proposed in the
+JSON Queries and Updates. Authenticated HTTP monitoring and verified links to
+Caesium runs are described in [the connector guide](connectors.md).
+Console pages and the public operator action surface remain proposed in the
 [execution-connectors plan](exec-plans/active/execution-connectors.md).
 That plan is not complete. The patterns below are the unchanged REST recipe.
 
@@ -321,8 +322,9 @@ The typed catalog link keeps one admission identity across retries, queue
 promotion and restarts, with source event ID/type and verification time.
 Repeated unchanged reads do not write evidence. This verifies the declared
 protocol identity, not the HTTP caller or arbitrary data provenance. It creates
-no local work, synthetic runs or dataset evidence. The public bidirectional
-monitoring surface remains pending in the execution-connectors plan.
+no local work, synthetic runs or dataset evidence. The authenticated
+[monitoring routes](connectors.md#authenticated-http-monitoring) expose these
+links in both directions while retaining the local job's scope checks.
 
 Operational notes:
 

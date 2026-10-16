@@ -11,6 +11,7 @@ memory and communicates the SAML replay-store restart barrier over stdin/stdout.
 from __future__ import annotations
 
 import argparse
+import base64
 from collections import deque
 import datetime
 import hashlib
@@ -188,7 +189,7 @@ def backend_module():
     return module
 
 
-def guarded_resource(command, kind: str, name: str, action: str, owner: str, run_id: str, lane: str = "", image: str = "", diagnostics: dict[str, Any] | None = None) -> dict[str, Any]:
+def guarded_resource(command, kind: str, name: str, action: str, owner: str, run_id: str, lane: str = "", image: str = "", diagnostics: dict[str, Any] | None = None, expected_started_at: str = "") -> dict[str, Any]:
     result = command(kind, "inspect", name, check=False)
     if missing_object(result, kind, name):
         if action in ("absent", "remove"):
@@ -217,6 +218,8 @@ def guarded_resource(command, kind: str, name: str, action: str, owner: str, run
             raise JourneyError("owned resource removal is unproved")
         return {"absent": True, "Id": identity}
     if action == "stop":
+        if expected_started_at and info.get("State", {}).get("StartedAt") != expected_started_at:
+            raise JourneyError("owned process generation changed before shutdown")
         if diagnostics is not None:
             diagnostics["pre_stop"] = safe_process_state(info)
         flush = command("container", "kill", "--signal=SIGUSR2", identity, check=False)
@@ -324,8 +327,259 @@ class ConnectorOutputLimit(JourneyError):
         self.limit, self.observed = limit, observed
 
 
+def connector_http(base, key, method, path, body=None):
+    """Bounded public protocol; native errors and response bodies stay private."""
+    headers = {"Content-Type": "application/json"}
+    if key:
+        headers["Authorization"] = "Bearer " + key
+    request = Request(base + path, data=None if body is None else json.dumps(body).encode(),
+                      method=method, headers=headers)
+    try:
+        with urlopen(request, timeout=12) as response:
+            if response.status not in (200, 201):
+                raise JourneyError("connector HTTP status refused")
+            value = json.loads(complete_response_bytes(response, 2 * 1024 * 1024))
+    except Exception:
+        raise JourneyError("connector public protocol refused") from None
+    return value
+
+
+def connector_started_at(info):
+    value = info.get("State", {}).get("StartedAt")
+    if (not isinstance(value, str) or not re.fullmatch(r"[0-9T:.+Z-]{1,40}", value)
+            or value.startswith("0001-") or info.get("RestartCount") != 0):
+        raise JourneyError("connector process generation is unproved")
+    return value
+
+
+def connector_read_semantics(command, args, request=connector_http, expected_started_at=""):
+    """Real C1 reads join provider history to one actual local admission/run."""
+    def require(condition, reason):
+        if not condition:
+            raise JourneyError(reason)
+
+    def inventory(kind, identity):
+        result = command(kind, "inspect", identity)
+        value = json.loads(result.stdout)
+        require(isinstance(value, list) and len(value) == 1 and isinstance(value[0], dict),
+                "connector inventory is ambiguous")
+        return value[0]
+
+    guarded_resource(command, "container", args.name, "owned", args.owner, args.run_id,
+                     "base-connectors", args.image)
+    guarded_resource(command, "container", args.provider_id, "owned", args.owner, args.run_id,
+                     "base-connectors-provider", args.provider_image)
+    server = inventory("container", args.name)
+    provider = inventory("container", args.provider_id)
+    require(server.get("Id") == args.name and provider.get("Id") == args.provider_id,
+            "connector immutable process identity differs")
+    require(server.get("State", {}).get("Running") is True and provider.get("State", {}).get("Running") is True,
+            "connector provider/server is stopped")
+    require(provider.get("HostConfig", {}).get("NetworkMode") == "container:" + args.name,
+            "connector provider must share the exact owned server network")
+    server_started_at, provider_started_at = connector_started_at(server), connector_started_at(provider)
+    require(not expected_started_at or server_started_at == expected_started_at,
+            "connector measured process changed between readiness and semantic reads")
+    fixture_image = inventory("image", args.provider_image)
+    labels = fixture_image.get("Config", {}).get("Labels") or {}
+    require(fixture_image.get("Id") == args.provider_image
+            and labels.get("org.opencontainers.image.revision") == args.owner
+            and labels.get("caesium.coverage.builder") == args.builder_image,
+            "connector provider image is not bound to this candidate/builder")
+    os_name, arch = args.platform.split("/")
+    require(fixture_image.get("Os") == os_name and fixture_image.get("Architecture") == arch,
+            "connector provider image platform differs")
+
+    def task_identity():
+        actual = inventory("image", args.task_image)
+        require(actual.get("Id") == args.task_image_id and actual.get("Os") == os_name
+                and actual.get("Architecture") == arch
+                and args.task_image in (actual.get("RepoTags") or []),
+                "connector task image differs from the verified producer prerequisite")
+    task_identity()
+
+    def loopback(port):
+        bindings = server.get("NetworkSettings", {}).get("Ports", {}).get(str(port) + "/tcp")
+        require(isinstance(bindings, list) and len(bindings) == 1 and isinstance(bindings[0], dict),
+                "connector loopback port inventory is ambiguous")
+        value = bindings[0]
+        require(value.get("HostIp") == "127.0.0.1" and isinstance(value.get("HostPort"), str)
+                and re.fullmatch(r"[0-9]{1,5}", value["HostPort"])
+                and 0 < int(value["HostPort"]) < 65536, "connector port is not isolated loopback")
+        return "http://127.0.0.1:" + value["HostPort"]
+
+    base, control = loopback(8080), loopback(7240)
+    secret_path = pathlib.Path(args.key_file)
+    info = secret_path.lstat()
+    require(stat.S_ISREG(info.st_mode) and info.st_uid == os.geteuid()
+            and stat.S_IMODE(info.st_mode) == 0o600 and info.st_size <= 256,
+            "connector bootstrap key file is not private")
+    with secret_path.open() as source:
+        admin = source.read(257).strip()
+    require(KEY_RE.fullmatch(admin) is not None, "connector bootstrap key is unavailable")
+    config = pathlib.Path(args.config)
+    require(config.is_file() and not config.is_symlink(), "connector config receipt is unavailable")
+    config_digest = hashlib.sha256(config.read_bytes()).hexdigest()
+
+    versions = None
+    for _ in range(90):
+        try:
+            versions = request(control, "", "GET", "/health")
+            if isinstance(versions, dict) and versions.get("ready") is True:
+                break
+        except JourneyError:
+            pass
+        time.sleep(1)
+    require(isinstance(versions, dict) and versions.get("ready") is True
+            and (versions.get("sdk"), versions.get("cli"), versions.get("server"))
+            == ("1.49.0", "1.9.1", "1.32.0"), "connector real provider/worker matrix did not become ready")
+
+    def journal():
+        events = request(control, "", "GET", "/evidence")
+        require(isinstance(events, list) and len(events) <= 10000 and all(isinstance(v, dict) for v in events),
+                "connector provider RPC journal is incomplete")
+        return events
+
+    def rpc_counts(events):
+        methods = ("ListWorkflowExecutions", "DescribeWorkflowExecution", "GetWorkflowExecutionHistory", "QueryWorkflow")
+        return {name: sum(event.get("kind") == "provider_rpc" and isinstance(event.get("method"), str)
+                          and event["method"].endswith("/" + name) for event in events) for name in methods}
+
+    before = rpc_counts(journal())
+    aliases = ("connector-fixture-publish", "connector-fixture-notify")
+    definitions = [{"apiVersion": "v1", "kind": "Job", "metadata": {"alias": alias},
+                    "trigger": {"type": "cron", "configuration": {"cron": "0 0 31 2 *"}},
+                    "steps": [{"name": "work", "image": args.task_image,
+                               "command": ["sh", "-c", "sleep 1; echo connector-coverage"]}]}
+                   for alias in aliases]
+    applied = request(base, admin, "POST", "/v1/jobdefs/apply", {"definitions": definitions})
+    require(isinstance(applied, dict) and applied.get("applied") == 2, "connector real job application failed")
+    jobs = request(base, admin, "GET", "/v1/jobs?limit=100")
+    require(isinstance(jobs, list), "connector local job inventory is malformed")
+    job_ids = {entry.get("alias"): entry.get("id") for entry in jobs if isinstance(entry, dict)
+               and entry.get("alias") in aliases}
+    require(set(job_ids) == set(aliases) and all(isinstance(value, str) and UUID_RE.fullmatch(value) for value in job_ids.values()),
+            "connector real job identities are missing")
+    def key(role, scope=None):
+        body = {"role": role, "description": "connector coverage " + role}
+        if scope is not None:
+            body["scope"] = {"jobs": scope}
+        value = request(base, admin, "POST", "/v1/auth/keys", body)
+        require(isinstance(value, dict) and isinstance(value.get("key"), str)
+                and KEY_RE.fullmatch(value["key"]), "connector real principal creation failed")
+        return value["key"]
+    runner, viewer = key("runner", list(aliases)), key("viewer")
+    configured = request(control, "", "POST", "/configure", {"runner_key": runner})
+    require(isinstance(configured, dict) and configured.get("configured") is True,
+            "connector fixture did not authenticate its real runner")
+    started = request(control, "", "POST", "/start", {"id": args.run_id + "-coverage-publication", "type": "publication",
+                      "input": {"first_job": job_ids[aliases[0]], "second_job": job_ids[aliases[1]], "eligible": False}})
+    require(isinstance(started, dict) and isinstance(started.get("workflow_id"), str)
+            and started["workflow_id"] == args.run_id + "-coverage-publication"
+            and isinstance(started.get("run_id"), str) and UUID_RE.fullmatch(started["run_id"]),
+            "connector real workflow start did not return pinned coordinates")
+    found = None
+    for _ in range(20):
+        page = request(base, viewer, "GET", "/v1/connectors/fixture/executions?workflow_type=publication&page_size=100")
+        require(isinstance(page, dict) and isinstance(page.get("executions"), list), "connector public discovery page is malformed")
+        for item in page["executions"]:
+            if isinstance(item, dict) and item.get("reference", {}).get("coordinates") == started:
+                found = item
+        if found is not None:
+            break
+        time.sleep(0.5)
+    require(isinstance(found, dict) and isinstance(found.get("id"), str)
+            and re.fullmatch(r"[A-Za-z0-9_-]{1,8192}", found["id"])
+            and found.get("reference", {}).get("connection_id") == "fixture",
+            "connector real workflow was not discovered through public HTTP")
+    path = "/v1/connectors/fixture/executions/" + found["id"]
+    detail = request(base, viewer, "GET", path)
+    require(isinstance(detail, dict) and detail.get("availability") == "available"
+            and detail.get("reference", {}).get("coordinates") == started
+            and detail.get("reference", {}).get("connection_id") == "fixture",
+            "connector public detail does not match real pinned workflow")
+    history = request(base, viewer, "GET", path + "/history")
+    require(isinstance(history, dict) and history.get("run_id") == started["run_id"]
+            and isinstance(history.get("events"), list) and history["events"],
+            "connector public history is unavailable")
+    correlation = None
+    for _ in range(30):
+        relations = request(base, viewer, "GET", path + "/relationships")
+        require(isinstance(relations, dict) and isinstance(relations.get("correlations"), list),
+                "connector public relationships are malformed")
+        if len(relations["correlations"]) == 1:
+            candidate = relations["correlations"][0]
+            if isinstance(candidate, dict) and candidate.get("run_id"):
+                correlation = candidate
+                break
+        time.sleep(0.5)
+    require(isinstance(correlation, dict) and correlation.get("relation_type") == "delegation"
+            and correlation.get("connection_id") == "fixture"
+            and correlation.get("activity_type") == "caesium.start"
+            and isinstance(correlation.get("activity_id"), str) and correlation["activity_id"]
+            and correlation.get("job_id") == job_ids[aliases[0]] and correlation.get("outcome") == "created"
+            and isinstance(correlation.get("id"), str) and UUID_RE.fullmatch(correlation["id"])
+            and isinstance(correlation.get("run_id"), str) and UUID_RE.fullmatch(correlation["run_id"])
+            and isinstance(correlation.get("idempotency_key"), str)
+            and correlation["idempotency_key"] == started["run_id"] + "/" + correlation["activity_id"]
+            and isinstance(correlation.get("source_event_id"), int) and correlation["source_event_id"] > 0,
+            "connector real admission did not produce a verified pinned delegation")
+    run_path = "/v1/jobs/" + job_ids[aliases[0]] + "/runs/" + correlation["run_id"]
+    run = None
+    for _ in range(30):
+        run = request(base, viewer, "GET", run_path)
+        if isinstance(run, dict) and run.get("status") == "succeeded":
+            break
+        time.sleep(0.5)
+    require(isinstance(run, dict) and run.get("id") == correlation["run_id"]
+            and run.get("job_id") == job_ids[aliases[0]] and run.get("status") == "succeeded",
+            "connector admitted local run did not actually succeed")
+    reverse = request(base, viewer, "GET", run_path + "/external-executions")
+    require(isinstance(reverse, dict) and isinstance(reverse.get("executions"), list)
+            and len(reverse["executions"]) == 1 and reverse["executions"][0].get("id") == correlation["id"],
+            "connector public reverse link does not recover the verified delegation")
+    repeated = request(base, viewer, "GET", path + "/relationships")
+    require(isinstance(repeated, dict) and len(repeated.get("correlations", [])) == 1
+            and repeated["correlations"][0].get("id") == correlation["id"],
+            "connector repeated relationships changed the durable delegation identity")
+    witnessed = journal()
+    require(any(event.get("kind") == "fixture_started" and event.get("candidate") == args.owner for event in witnessed),
+            "connector fixture journal belongs to another candidate")
+    require(any(event.get("kind") == "workflow_started" and event.get("workflow_id") == started["workflow_id"]
+                and event.get("run_id") == started["run_id"] and event.get("workflow_type") == "publication"
+                for event in witnessed), "connector provider did not witness the pinned workflow start")
+    require(any(event.get("kind") == "http_start" and event.get("workflow_id") == started["workflow_id"]
+                and event.get("activity_id") == correlation["activity_id"] and isinstance(event.get("hint"), dict)
+                and event["hint"].get("job_id") == correlation["job_id"]
+                and event["hint"].get("run_id") == correlation["run_id"]
+                and event["hint"].get("idempotency_key") == correlation["idempotency_key"]
+                and event["hint"].get("outcome") == "created" for event in witnessed),
+            "connector provider admission witness differs from public verified correlation")
+    after = rpc_counts(witnessed)
+    delta = {name: after[name] - before[name] for name in before}
+    require(all(delta[name] > 0 for name in ("ListWorkflowExecutions", "DescribeWorkflowExecution", "GetWorkflowExecutionHistory"))
+            and delta["QueryWorkflow"] == 0, "connector provider journal does not prove read-only real RPCs")
+    task_identity()
+    require(hashlib.sha256(config.read_bytes()).hexdigest() == config_digest, "connector configuration changed during collection")
+    final_provider = guarded_resource(command, "container", args.provider_id, "owned", args.owner, args.run_id,
+                                      "base-connectors-provider", args.provider_image)
+    require(final_provider.get("State", {}).get("Running") is True
+            and connector_started_at(final_provider) == provider_started_at,
+            "connector provider process generation changed during journal collection")
+    return {"schema_version": 1, "candidate_sha": args.owner, "image_id": args.image,
+            "provider_container_id": args.provider_id, "provider_image_id": args.provider_image,
+            "server_started_at": server_started_at, "provider_started_at": provider_started_at,
+            "builder_image_id": args.builder_image, "platform": args.platform,
+            "task_image_ref": args.task_image, "task_image_id": args.task_image_id,
+            "config_sha256": config_digest, "versions": {name: versions[name] for name in ("sdk", "cli", "server")},
+            "workflow": started, "job_id": job_ids[aliases[0]], "run_id": correlation["run_id"],
+            "correlation_id": correlation["id"], "provider_rpc_delta": delta,
+            "verified_delegation": True, "reverse_link": True, "local_run_succeeded": True}
+
+
 def connector_shutdown(command, identity: str, owner: str, run_id: str, image: str,
-                       audit: pathlib.Path) -> dict[str, Any]:
+                       audit: pathlib.Path, semantics=None, raw_dir=None) -> dict[str, Any]:
+    semantic_receipt = None
     diagnostics: dict[str, Any] = {"schema_version": 1, "complete": False, "fingerprint": False,
         "healthy": False, "polls": 0, "refusal_category": "readiness_pending", "log_records": []}
     destination = audit / "connector-diagnostics.json"
@@ -372,9 +626,30 @@ def connector_shutdown(command, identity: str, owner: str, run_id: str, image: s
         else:
             diagnostics["refusal_category"] = "never_ready"
             raise JourneyError("connector did not reach loaded fingerprint and health readiness")
+        expected_started_at = ""
+        if semantics is not None:
+            expected_started_at = connector_started_at(info)
+            diagnostics["readiness_started_at"] = expected_started_at
+            diagnostics["refusal_category"] = "semantic_reads_failed"
+            semantic_receipt = semantics(expected_started_at)
+            if (not isinstance(semantic_receipt, dict) or semantic_receipt.get("verified_delegation") is not True
+                    or semantic_receipt.get("server_started_at") != expected_started_at):
+                raise JourneyError("connector semantic receipt is incomplete")
         diagnostics["refusal_category"] = "stop_operation_failed"
         final = guarded_resource(command, "container", identity, "stop", owner, run_id, "base-connectors", image,
-                                 diagnostics=diagnostics)
+                                 diagnostics=diagnostics, expected_started_at=expected_started_at)
+        if expected_started_at and connector_started_at(final) != expected_started_at:
+            raise JourneyError("connector measured process generation changed before exit")
+        if semantic_receipt is not None:
+            diagnostics["refusal_category"] = "raw_counters_incomplete"
+            files = raw_files(pathlib.Path(raw_dir))
+            semantic_receipt.update(complete=True, raw_files=files, process=safe_process_state(final),
+                                    flush_rc=final["flush_rc"], stop_rc=final["stop_rc"])
+            receipt = audit / "connector-reads.json"
+            with os.fdopen(os.open(receipt, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "w") as stream:
+                stream.write(json.dumps(semantic_receipt, indent=2) + "\n")
+            diagnostics["semantic_receipt_sha256"] = hashlib.sha256(receipt.read_bytes()).hexdigest()
+            diagnostics["refusal_category"] = "none"
         diagnostics["complete"] = True
         return {**safe_process_state(final), "flush_rc": final["flush_rc"], "stop_rc": final["stop_rc"]}
     except Exception as exc:
@@ -2422,6 +2697,9 @@ def parse_args() -> argparse.Namespace:
     connector = modes.add_parser("connector")
     for name in ("name", "owner", "run-id", "image", "audit"):
         connector.add_argument("--" + name, required=True)
+    connector.add_argument("--require-semantics", action="store_true")
+    for name in ("provider-id", "provider-image", "builder-image", "platform", "task-image", "task-image-id", "raw-dir", "key-file", "config"):
+        connector.add_argument("--" + name)
     resource = modes.add_parser("resource")
     for name in ("kind", "name", "action", "owner", "run-id"):
         resource.add_argument("--" + name, required=True)
@@ -2490,8 +2768,20 @@ def main() -> int:
     if args.mode in ("resource", "connector", "validate-raw", "validate-inputs", "invalidate"):
         try:
             if args.mode == "connector":
+                semantic = None
+                if args.require_semantics:
+                    required = ("provider_id", "provider_image", "builder_image", "platform", "task_image", "task_image_id", "raw_dir", "key_file", "config")
+                    if any(not getattr(args, name) for name in required):
+                        raise JourneyError("connector semantic inputs are missing")
+                    if (not re.fullmatch(r"[0-9a-f]{64}", args.provider_id)
+                            or any(not re.fullmatch(r"sha256:[0-9a-f]{64}", getattr(args, name)) for name in ("provider_image", "builder_image", "task_image_id"))
+                            or args.platform not in ("linux/amd64", "linux/arm64")
+                            or not re.fullmatch(r"[a-z0-9][a-z0-9./:_-]+", args.task_image)
+                            or args.task_image.endswith(":latest")):
+                        raise JourneyError("connector semantic identities are invalid")
+                    semantic = lambda started_at: connector_read_semantics(connector_command, args, expected_started_at=started_at)
                 print(json.dumps(connector_shutdown(connector_command, args.name, args.owner, args.run_id,
-                                                    args.image, pathlib.Path(args.audit))))
+                                                    args.image, pathlib.Path(args.audit), semantics=semantic, raw_dir=args.raw_dir)))
             elif args.mode == "invalidate":
                 invalidate_collection(pathlib.Path(args.profiles), pathlib.Path(args.raw), pathlib.Path(args.artifacts))
             elif args.mode == "validate-raw":

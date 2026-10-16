@@ -20,7 +20,7 @@ args=sys.argv[1:]
 state=Path(os.environ['MOCK_STATE'])
 with (state/'calls.jsonl').open('a') as out: out.write(json.dumps(args)+'\n')
 def option(name): return args[args.index(name)+1]
-def role(cid): return {'1'*64:'server','2'*64:'fixture','3'*64:'runner','f'*64:'foreign'}.get(cid,'unknown')
+def role(cid): return {'1'*64:'server','2'*64:'fixture','3'*64:'runner','4'*64:'gateoff','5'*64:'invalid','6'*64:'anchor','f'*64:'foreign'}.get(cid,'unknown')
 if args[0]=='version':
  print(json.dumps({'Platform':{'Name':os.environ.get('MOCK_ENGINE','Docker Engine - Community')},'Os':'linux','Components':[{'Name':'Engine'}]}))
  if os.environ.get('MOCK_VERSION_FAIL'): sys.exit(1)
@@ -32,8 +32,14 @@ elif args[:2]==['container','inspect'] or args[0]=='inspect':
  cid=target if len(target)==64 else ('f'*64 if (state/'names'/target).exists() else '')
  if not cid: sys.exit(1)
  if '--format' in args:
-  print({'{{.Id}}':cid,'{{.Image}}':'sha256:'+'a'*64,'{{.State.Running}}':'true'}[option('--format')])
- else: print(json.dumps([{'Id':cid,'Image':'sha256:'+'a'*64,'Config':{'Env':['CAESIUM_AUTH_MODE=api-key','SAMPLE_SECRET=private','ARBITRARY=unusual-credential','CAESIUM_REGISTRY_AUTH=secret://env/ARBITRARY','CAESIUM_DATABASE_DSN=postgres://u:password@db','CAESIUM_IT_REGISTRY_CREDS=ci-user:ci-pass'],'Cmd':['--auth=argv-credential']},'Args':['argv-credential'],'State':{'Running':True,'Error':'state-credential','Health':{'Log':[{'Output':'health-credential'}]}}}]))
+  restarts=(state/'server-restarts').read_text() if (state/'server-restarts').exists() else '0'
+  print({'{{.Id}}':cid,'{{.Image}}':'sha256:'+'a'*64,'{{.State.Running}}':'true','{{.State.StartedAt}}':'2026-10-15T00:00:0'+restarts+'Z'}[option('--format')])
+ else:
+  container_state={'Running':True,'Error':'state-credential','Health':{'Log':[{'Output':'health-credential'}]}}
+  if role(cid)=='invalid':
+   container_state={'Running':False,'OOMKilled':False,'ExitCode':int(os.environ.get('MOCK_INVALID_EXIT','1')),'StartedAt':'2026-10-15T00:00:00Z','FinishedAt':'2026-10-15T00:00:01Z'}
+   if os.environ.get('MOCK_INVALID_MISSING_STATE'): container_state.pop('ExitCode')
+  print(json.dumps([{'Id':cid,'Image':'sha256:'+'a'*64,'Config':{'Env':['CAESIUM_AUTH_MODE=api-key','SAMPLE_SECRET=private','ARBITRARY=unusual-credential','CAESIUM_REGISTRY_AUTH=secret://env/ARBITRARY','CAESIUM_DATABASE_DSN=postgres://u:password@db','CAESIUM_IT_REGISTRY_CREDS=ci-user:ci-pass'],'Cmd':['--auth=argv-credential']},'Args':['argv-credential'],'State':container_state}]))
 elif args[:2]==['image','inspect']:
  print(json.dumps([{'Id':args[-1],'Config':{'Env':['LABELLESS=image-credential'],'Cmd':['argv-credential'],'Labels':{'x':'label-credential'}}}]))
  if os.environ.get('MOCK_IMAGE_INSPECT_FAIL'): sys.exit(1)
@@ -42,14 +48,15 @@ elif args[0]=='create':
  try:
   fd=os.open(reservation,os.O_CREAT|os.O_EXCL|os.O_WRONLY);os.close(fd)
  except FileExistsError: sys.exit(17)
- kind='fixture' if 'fixture-' in name else 'runner' if 'runner-' in name else 'server'
- cid={'server':'1','fixture':'2','runner':'3'}[kind]*64
+ kind='fixture' if 'fixture-' in name else 'runner' if 'runner-' in name else 'gateoff' if 'gateoff-' in name else 'invalid' if 'invalid-startup-' in name else 'anchor' if 'network-anchor-' in name else 'server'
+ cid={'server':'1','fixture':'2','runner':'3','gateoff':'4','invalid':'5','anchor':'6'}[kind]*64
  Path(option('--cidfile')).write_text(cid+'\n')
  print(cid,flush=True)
  if os.environ.get('MOCK_SIGNAL_AFTER_CREATE')==kind:
   os.killpg(os.getpgrp(),signal.SIGTERM);time.sleep(1)
 elif args[0]=='start':
  cid=args[-1]
+ if role(cid)=='invalid': (state/'invalid-started').touch()
  if os.environ.get('MOCK_FAIL_START')==role(cid): sys.exit(21)
  if '-a' in args:
   (state/'runner-attached').touch()
@@ -60,8 +67,22 @@ elif args[0]=='start':
   if os.environ.get('MOCK_SKIPPED_SCENARIO'):
    print('    --- SKIP: TestIntegrationTestSuite/TestConnectors'+os.environ['MOCK_SKIPPED_SCENARIO']+'/nested (0.01s)')
  else: print(cid)
-elif args[0]=='logs': print('bootstrap csk_live_fixture_bootstrap')
-elif args[0]=='exec': print('{"ready":true}')
+elif args[0]=='restart':
+ if os.environ.get('MOCK_FAIL_RESTART'): sys.exit(21)
+ path=state/'server-restarts'; path.write_text(str(int(path.read_text() if path.exists() else '0')+1))
+elif args[0]=='wait':
+ if os.environ.get('MOCK_INVALID_WAIT_FAIL'): sys.exit(21)
+ print(os.environ.get('MOCK_INVALID_EXIT','1'))
+elif args[0]=='logs':
+ if role(args[-1])=='invalid':
+  print('startup failed' if os.environ.get('MOCK_INVALID_WRONG_ERROR') else 'yaml: field inlineToken not found in type connector.fileCredentials')
+  if os.environ.get('MOCK_INVALID_LOG_CANARY'): print('fixture-invalid-inline-credential-canary')
+ else: print('bootstrap csk_live_fixture_bootstrap')
+elif args[0]=='exec':
+ if args[-1].endswith('/evidence'):
+  if os.environ.get('MOCK_INVALID_MISSING_RPC_PROOF'): print('{"ready":true}')
+  else: print(json.dumps([{'kind':'provider_rpc'}] if os.environ.get('MOCK_INVALID_RPC') and (state/'invalid-started').exists() else []))
+ else: print('{"ready":true,"sdk":"1.49.0","cli":"1.9.1","server":"1.32.0"}')
 elif args[0]=='cp': Path(args[-1]).write_text('fixture CLI')
 elif args[0] in ['build','rm']: pass
 else: raise SystemExit('unexpected mock engine command: '+repr(args))
@@ -92,6 +113,7 @@ class ConnectorFixtureOrchestrationTests(unittest.TestCase):
         (self.root/'scripts').mkdir()
         shutil.copy(ROOT/'scripts/connectors-fixture.sh', self.root/'scripts/connectors-fixture.sh')
         shutil.copy(ROOT/'scripts/connectors-fixture-metadata.py', self.root/'scripts/connectors-fixture-metadata.py')
+        shutil.copy(ROOT/'scripts/connectors-fixture-control.py', self.root/'scripts/connectors-fixture-control.py')
         shutil.copy(ROOT/'justfile', self.root/'justfile')
         # integration-up-agent seeds the auth lane's policy file from this fixture.
         (self.root/'test/testdata/policy').mkdir(parents=True)
@@ -143,6 +165,168 @@ class ConnectorFixtureOrchestrationTests(unittest.TestCase):
 
     def removed(self):
         return [call[-1] for call in self.calls() if call[0] == 'rm']
+
+    def select_reads(self):
+        (self.root/'test'/'connectors'/'testdata').mkdir(parents=True, exist_ok=True)
+        (self.root/'test'/'connectors_read_test.go').touch()
+        shutil.copy(ROOT/'test/connectors/testdata/connections.yaml',
+                    self.root/'test/connectors/testdata/connections.yaml')
+
+    def wait_path(self, path, seconds=10):
+        deadline = time.monotonic() + seconds
+        while time.monotonic() < deadline:
+            if path.exists():
+                return
+            time.sleep(.02)
+        self.fail(f'fixture never produced {path}')
+
+    def test_http_selection_requires_real_config_restart_and_gateoff_owned_ids(self):
+        self.select_reads()
+        process = self.launch(MOCK_SCENARIOS='Fixture,Read', MOCK_BLOCK_RUNNER='true')
+        try:
+            self.wait_path(self.state/'runner-attached')
+            request = {'id': 'bcb00000-0000-4000-8000-000000000001', 'action': 'restart'}
+            (self.artifacts/'control'/'request.json').write_text(json.dumps(request))
+            response_path = self.artifacts/'control'/'response.json'
+            self.wait_path(response_path)
+            response = json.loads(response_path.read_text())
+            self.assertEqual(response['id'], request['id'])
+            self.assertEqual(response['status'], 'ok')
+            self.assertNotEqual(response['started_before'], response['started_after'])
+            self.assertEqual([c for c in self.calls() if c[0] == 'restart'], [['restart', '1'*64]])
+            (self.state/'release').touch()
+            code, _, error = self.finish(process)
+            self.assertEqual(code, 0, error)
+        finally:
+            if process.poll() is None:
+                os.killpg(process.pid, signal.SIGTERM)
+                process.communicate(timeout=10)
+        self.assertCountEqual(self.removed(), ['1'*64, '2'*64, '3'*64, '4'*64, '5'*64, '6'*64])
+        self.assertEqual(self.removed()[-1], '6'*64, 'network namespace owner must be removed last')
+        startup = json.loads((self.artifacts/'invalid-startup-evidence.json').read_text())
+        self.assertEqual(startup['candidate_sha'], (self.artifacts/'candidate-sha.txt').read_text().strip())
+        self.assertEqual(startup['container_id'], '5'*64)
+        self.assertEqual(startup['exit_code'], 1)
+        self.assertEqual(startup['wait_exit_code'], 1)
+        self.assertEqual(startup['provider_rpc_before'], startup['provider_rpc_after'])
+        self.assertTrue(startup['log_canary_absent'])
+        self.assertTrue(startup['strict_parser_error_observed'])
+        self.assertEqual(startup['sdk'], '1.49.0')
+        self.assertNotIn('fixture-invalid-inline-credential-canary', (self.artifacts/'invalid-startup.log').read_text())
+        config = (self.artifacts/'http-connections.yaml').read_text()
+        self.assertIn('maxUnreferencedSnapshots: 4', config)
+        self.assertIn('unreferencedSnapshotMaxAge: 10s', config)
+        calls = [c for c in self.calls() if c[0] == 'create']
+        server = next(c for c in calls if c[c.index('--name')+1] == 'caesium-server-agent-test')
+        self.assertIn(str(self.artifacts)+'/http-connections.yaml:/etc/caesium/connectors/connections.yaml:ro', server)
+        self.assertIn(str(self.artifacts)+':/artifacts:ro', server)
+        self.assertEqual(server[server.index('--entrypoint')+1], '/artifacts/control/start-server.sh')
+        wrapper = self.artifacts/'control'/'start-server.sh'
+        self.assertTrue(os.access(wrapper, os.X_OK))
+        self.assertIn('CAESIUM_CONNECTORS_CONFIG_PREVIOUS_FINGERPRINT', wrapper.read_text())
+        anchor = next(c for c in calls if 'network-anchor-' in c[c.index('--name')+1])
+        self.assertEqual(anchor[anchor.index('-p')+1], '8080:8080')
+        self.assertEqual(anchor[anchor.index('--user')+1], f'{os.getuid()}:{os.getgid()}')
+        self.assertIn('USER=caesium-fixture', anchor)
+        self.assertIn('HOME=/tmp', anchor)
+        self.assertEqual(anchor[-3:], ['busybox:1.36.1', 'sleep', '2147483647'])
+        for call in calls:
+            if call != anchor:
+                self.assertIn('--network=container:'+'6'*64, call)
+                self.assertNotIn('-p', call, 'only the stable namespace owner publishes the port')
+            if any(part in call[call.index('--name')+1] for part in ('invalid-startup-', 'gateoff-')):
+                self.assertEqual(call[call.index('--entrypoint')+1], '/bin/caesium')
+        runner = next(c for c in calls if 'caesium-connectors-runner-' in c[c.index('--name')+1])
+        self.assertIn('CAESIUM_CONNECTORS_READ_FIXTURE=true', runner)
+        self.assertIn('CAESIUM_CONNECTORS_OWNED_SERVER=true', runner)
+        self.assertIn('CAESIUM_CONNECTORS_GATE_OFF_URL=http://127.0.0.1:8081', runner)
+        self.assertEqual(runner[-1], 'TestIntegrationTestSuite/(TestConnectorsFixture|TestConnectorsRead)')
+
+    def test_http_qualification_refuses_borrowed_server_before_mutation(self):
+        self.select_reads()
+        code, _, error = self.finish(self.launch(CAESIUM_CONNECTORS_EXISTING_SERVER='true'))
+        self.assertNotEqual(code, 0)
+        self.assertIn('requires an owned server', error)
+        self.assertFalse(any(c[0] in ('create', 'build', 'restart', 'rm') for c in self.calls()))
+
+    def test_http_missing_or_skipped_read_scenario_cannot_qualify(self):
+        self.select_reads()
+        for extra in ({'MOCK_SCENARIOS': 'Fixture'},
+                      {'MOCK_SCENARIOS': 'Fixture,Read', 'MOCK_SKIPPED_SCENARIO': 'Read'}):
+            with self.subTest(results=extra):
+                for child in (self.artifacts, self.state):
+                    if child.exists(): shutil.rmtree(child)
+                (self.state/'names').mkdir(parents=True)
+                code, _, error = self.finish(self.launch(**extra))
+                self.assertNotEqual(code, 0)
+                self.assertIn('scenario', error)
+                self.assertCountEqual(self.removed(), ['1'*64, '2'*64, '3'*64, '4'*64, '5'*64, '6'*64])
+
+    def test_http_gateoff_creation_is_preserved_for_owned_cleanup_on_signal(self):
+        self.select_reads()
+        code, _, _ = self.finish(self.launch(MOCK_SIGNAL_AFTER_CREATE='gateoff'))
+        self.assertNotEqual(code, 0)
+        self.assertCountEqual(self.removed(), ['1'*64, '2'*64, '4'*64, '5'*64, '6'*64])
+
+    def test_invalid_enabled_startup_requires_exact_failure_redaction_and_zero_rpc(self):
+        self.select_reads()
+        for extra in ({'MOCK_INVALID_EXIT': '0'}, {'MOCK_INVALID_EXIT': '137'},
+                      {'MOCK_INVALID_WAIT_FAIL': 'true'}, {'MOCK_INVALID_MISSING_STATE': 'true'},
+                      {'MOCK_INVALID_WRONG_ERROR': 'true'}, {'MOCK_INVALID_LOG_CANARY': 'true'},
+                      {'MOCK_INVALID_RPC': 'true'}, {'MOCK_INVALID_MISSING_RPC_PROOF': 'true'}):
+            with self.subTest(failure=extra):
+                for child in (self.artifacts, self.state):
+                    if child.exists(): shutil.rmtree(child)
+                (self.state/'names').mkdir(parents=True)
+                code, _, _ = self.finish(self.launch(**extra))
+                self.assertNotEqual(code, 0)
+                self.assertFalse((self.artifacts/'invalid-startup-evidence.json').exists())
+                self.assertCountEqual(self.removed(), ['1'*64, '2'*64, '5'*64, '6'*64])
+                self.assertEqual(self.removed()[-1], '6'*64)
+                self.assertFalse(any(c[0] == 'create' and ('runner-' in c[c.index('--name')+1] or
+                                                         'gateoff-' in c[c.index('--name')+1])
+                                     for c in self.calls()))
+                log = self.artifacts/'invalid-startup.log'
+                if log.exists():
+                    self.assertNotIn('fixture-invalid-inline-credential-canary', log.read_text())
+
+    def test_invalid_enabled_startup_cleanup_uses_owned_cid_after_create_signal(self):
+        self.select_reads()
+        code, _, _ = self.finish(self.launch(MOCK_SIGNAL_AFTER_CREATE='invalid'))
+        self.assertNotEqual(code, 0)
+        self.assertCountEqual(self.removed(), ['1'*64, '2'*64, '5'*64, '6'*64])
+
+    def test_anchor_creation_and_start_failures_cleanup_only_owned_anchor(self):
+        self.select_reads()
+        for extra in ({'MOCK_SIGNAL_AFTER_CREATE': 'anchor'}, {'MOCK_FAIL_START': 'anchor'}):
+            with self.subTest(failure=extra):
+                for child in (self.artifacts, self.state):
+                    if child.exists(): shutil.rmtree(child)
+                (self.state/'names').mkdir(parents=True)
+                code, _, _ = self.finish(self.launch(**extra))
+                self.assertNotEqual(code, 0)
+                self.assertEqual(self.removed(), ['6'*64])
+                self.assertFalse(any(c[0] == 'restart' for c in self.calls()))
+
+    def test_restart_failure_returns_failure_evidence_and_never_uses_a_name(self):
+        self.select_reads()
+        process = self.launch(MOCK_SCENARIOS='Fixture,Read', MOCK_BLOCK_RUNNER='true', MOCK_FAIL_RESTART='true')
+        try:
+            self.wait_path(self.state/'runner-attached')
+            request = {'id': 'bcb00000-0000-4000-8000-000000000002', 'action': 'restart'}
+            (self.artifacts/'control'/'request.json').write_text(json.dumps(request))
+            response_path = self.artifacts/'control'/'response.json'
+            self.wait_path(response_path)
+            response = json.loads(response_path.read_text())
+            self.assertEqual(response['status'], 'error')
+            self.assertNotIn('started_after', response)
+            self.assertEqual([c for c in self.calls() if c[0] == 'restart'], [['restart', '1'*64]])
+            (self.state/'release').touch()
+            self.assertEqual(self.finish(process)[0], 0)
+        finally:
+            if process.poll() is None:
+                os.killpg(process.pid, signal.SIGTERM)
+                process.communicate(timeout=10)
 
     def test_owned_run_ignores_host_keys_records_source_and_server_and_host_user(self):
         (self.root/'justfile').write_text((self.root/'justfile').read_text()+'\n# staged probe\n')

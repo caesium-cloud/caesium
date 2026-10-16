@@ -1,6 +1,7 @@
 package models
 
 import (
+	"encoding/json"
 	"testing"
 	"time"
 
@@ -112,6 +113,120 @@ func TestUserLegacyTableGainsNullableEmailVerified(t *testing.T) {
 	require.NoError(t, db.Model(&User{}).Where("id = ?", created.ID).Updates(map[string]any{"email_verified": true}).Error)
 	require.NoError(t, db.First(&fresh, "id = ?", created.ID).Error)
 	require.True(t, fresh.EmailVerified)
+}
+
+// preRefreshUser is the users model as it stood before the E1 refresh
+// columns, used to build a pre-upgrade table and rows.
+type preRefreshUser struct {
+	ID            uuid.UUID `gorm:"type:uuid;primaryKey"`
+	Issuer        string    `gorm:"type:text;not null;uniqueIndex:idx_users_identity"`
+	Subject       string    `gorm:"type:text;not null;uniqueIndex:idx_users_identity"`
+	Email         string    `gorm:"type:text;index"`
+	DisplayName   string    `gorm:"type:text"`
+	Groups        []byte    `gorm:"type:json"`
+	Role          Role      `gorm:"type:text;not null"`
+	EmailVerified bool
+	CreatedAt     time.Time `gorm:"not null"`
+	LastLoginAt   *time.Time
+	DisabledAt    *time.Time
+}
+
+func (preRefreshUser) TableName() string { return "users" }
+
+// TestUserPreRefreshTableGainsNullableRefreshState proves the E1 upgrade
+// path: a users table and rows created with the pre-E1 model gain the refresh
+// columns as nullable with no default, survive repeated migrations with their
+// indexes, and read every new field as its zero value.
+func TestUserPreRefreshTableGainsNullableRefreshState(t *testing.T) {
+	db := openEmptyModelTestDB(t)
+	require.NoError(t, db.AutoMigrate(&preRefreshUser{}))
+	now := time.Now().UTC()
+	legacy := []preRefreshUser{
+		{ID: uuid.New(), Issuer: "oidc", Subject: "pre-1", Email: "one@example.com", Groups: []byte(`["eng"]`),
+			Role: RoleOperator, EmailVerified: true, CreatedAt: now, LastLoginAt: &now},
+		{ID: uuid.New(), Issuer: "ldap", Subject: "uid=pre-2", Role: RoleViewer, CreatedAt: now},
+	}
+	require.NoError(t, db.Create(&legacy).Error)
+
+	columns := []string{
+		"refresh_grant", "refresh_grant_version", "groups_refreshed_at",
+		"refresh_lease_owner", "refresh_lease_until", "refresh_uncertain",
+	}
+	for _, column := range columns {
+		require.False(t, db.Migrator().HasColumn(&User{}, column), column)
+	}
+	for range 2 {
+		require.NoError(t, db.AutoMigrate(&User{}))
+	}
+	for _, column := range columns {
+		require.True(t, db.Migrator().HasColumn(&User{}, column), column)
+	}
+	require.True(t, db.Migrator().HasIndex(&User{}, "idx_users_identity"))
+	require.True(t, db.Migrator().HasIndex(&User{}, "idx_users_email"))
+
+	for _, column := range columns {
+		var nulls int64
+		require.NoError(t, db.Raw("SELECT COUNT(*) FROM users WHERE "+column+" IS NULL").Scan(&nulls).Error)
+		require.Equal(t, int64(len(legacy)), nulls, "%s must stay NULL on existing rows rather than gain a default", column)
+	}
+	columnTypes, err := db.Migrator().ColumnTypes(&User{})
+	require.NoError(t, err)
+	for _, ct := range columnTypes {
+		for _, column := range columns {
+			if ct.Name() != column {
+				continue
+			}
+			if nullable, ok := ct.Nullable(); ok {
+				require.True(t, nullable, "%s must be nullable", column)
+			}
+			_, hasDefault := ct.DefaultValue()
+			require.False(t, hasDefault, "%s must not carry a default", column)
+		}
+	}
+
+	for _, want := range legacy {
+		var got User
+		require.NoError(t, db.First(&got, "id = ?", want.ID).Error)
+		require.Equal(t, want.Subject, got.Subject)
+		require.Equal(t, want.EmailVerified, got.EmailVerified)
+		require.Nil(t, got.RefreshGrant)
+		require.Zero(t, got.RefreshGrantVersion)
+		require.Nil(t, got.GroupsRefreshedAt)
+		require.Nil(t, got.RefreshLeaseOwner)
+		require.Nil(t, got.RefreshLeaseUntil)
+		require.False(t, got.RefreshUncertain)
+	}
+
+	// A writer that omits the new columns (the pre-E1 model) still succeeds.
+	late := preRefreshUser{ID: uuid.New(), Issuer: "oidc", Subject: "pre-3", Role: RoleViewer, CreatedAt: now}
+	require.NoError(t, db.Create(&late).Error)
+	var got User
+	require.NoError(t, db.First(&got, "id = ?", late.ID).Error)
+	require.Zero(t, got.RefreshGrantVersion)
+	require.Nil(t, got.RefreshGrant)
+}
+
+func TestUserRefreshStateNeverSerialises(t *testing.T) {
+	owner := "node-a/1"
+	now := time.Now().UTC()
+	u := User{
+		ID: uuid.New(), Issuer: "oidc", Subject: "s", Role: RoleViewer,
+		RefreshGrant: []byte("sealed-grant-bytes"), RefreshGrantVersion: 7, GroupsRefreshedAt: &now,
+		RefreshLeaseOwner: &owner, RefreshLeaseUntil: &now, RefreshUncertain: true,
+	}
+	raw, err := json.Marshal(u)
+	require.NoError(t, err)
+	var fields map[string]any
+	require.NoError(t, json.Unmarshal(raw, &fields))
+	for _, key := range []string{
+		"refresh_grant", "RefreshGrant", "refresh_grant_version", "RefreshGrantVersion",
+		"groups_refreshed_at", "GroupsRefreshedAt", "refresh_lease_owner", "RefreshLeaseOwner",
+		"refresh_lease_until", "RefreshLeaseUntil", "refresh_uncertain", "RefreshUncertain",
+	} {
+		require.NotContains(t, fields, key)
+	}
+	require.NotContains(t, string(raw), "sealed-grant-bytes")
+	require.NotContains(t, string(raw), owner)
 }
 
 func orJSONNull(raw []byte) []byte {

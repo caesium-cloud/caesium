@@ -957,10 +957,17 @@ integration-up-agent: build-stress build-test build-triage-agent
         [ ! -e "$CAESIUM_CONNECTORS_SERVER_CIDFILE" ] || { echo "server CID file already exists" >&2; exit 1; }; \
         set -- create --cidfile "$CAESIUM_CONNECTORS_SERVER_CIDFILE"; \
     else set -- run -d; fi; \
+    if [ -n "${CAESIUM_CONNECTORS_SERVER_ARTIFACTS:-}" ]; then \
+        set -- "$@" -v "$CAESIUM_CONNECTORS_SERVER_ARTIFACTS:/artifacts:ro" \
+            --entrypoint /artifacts/control/start-server.sh \
+            -e CAESIUM_DATABASE_CONSOLE_ENABLED=true; \
+    fi; \
+    if [ -n "${CAESIUM_CONNECTORS_NETWORK_ANCHOR:-}" ]; then \
+        set -- "$@" --network="container:$CAESIUM_CONNECTORS_NETWORK_ANCHOR"; \
+    else set -- "$@" -p {{ port }}:8080; fi; \
     {{ container_cli }} "$@" --platform {{ platform }} \
         --name {{ agent_it_container }} \
         --privileged \
-        -p {{ port }}:8080 \
         -v {{ sock }}:/var/run/docker.sock \
         -e DOCKER_HOST=unix:///var/run/docker.sock \
         --user 0:0 \
@@ -974,7 +981,7 @@ integration-up-agent: build-stress build-test build-triage-agent
         -v {{ repo_dir }}/.tmp/auth-policy:/etc/caesium/policy:ro \
         -e CAESIUM_AUTH_POLICY_FILE=/etc/caesium/policy/policy.yaml \
         -e CAESIUM_AUTH_POLICY_RELOAD_INTERVAL=1s \
-        -v {{ repo_dir }}/test/fixtures/connectors/connections.yaml:/etc/caesium/connectors/connections.yaml:ro \
+        -v "${CAESIUM_CONNECTORS_SERVER_CONFIG:-{{ repo_dir }}/test/fixtures/connectors/connections.yaml}:/etc/caesium/connectors/connections.yaml:ro" \
         -e CAESIUM_CONNECTORS_ENABLED=true \
         -e CAESIUM_CONNECTORS_CONFIG_FILE=/etc/caesium/connectors/connections.yaml \
         -e TEMPORAL_TOKEN=agent-integration-connector-token \

@@ -21,6 +21,7 @@
 #   CAESIUM_COVERAGE_BROWSER_PROFILE / CAESIUM_COVERAGE_BROWSER_PROVENANCE
 #   CAESIUM_COVERAGE_RATCHET / CAESIUM_COVERAGE_WRITE_BASELINE
 #   CAESIUM_COVERAGE_CHANGED_PATHS / CAESIUM_COVERAGE_DIFF_BASE
+#   CAESIUM_COVERAGE_CONNECTOR_FIXTURE_IMAGE  required immutable prepared provider image
 #   CAESIUM_COVERAGE_SKIP_BUILD=1
 #   CAESIUM_COVERAGE_KEEP=1
 #   Browser evidence is required by collect, check, and merge.
@@ -802,11 +803,32 @@ fi
 
 # The main server stays on CAESIUM_AUTH_MODE=none, where the connector gate
 # fails closed. A second instrumented start loads one file, then stops. That
-# file resolves an env secret and shape-checks Kubernetes and Vault references.
-# It does not dial either provider. Counters share the server GOCOVERDIR.
+# enabled connection resolves one env API key; parked connections retain
+# Kubernetes/Vault reference-shape coverage without resolving those providers.
+# Its cert/key pair is shape-valid and remains lazy: no external read is made.
+# Counters share the server GOCOVERDIR.
 # Loaded fingerprint and actual complete public /health readiness are required
 # before signalling; a failure retains only safe bounded diagnostics.
 load_connector_for_coverage() {
+  local provider_image="${CAESIUM_COVERAGE_CONNECTOR_FIXTURE_IMAGE:-}" provider_name="${ID}-connector-provider"
+  local provider_id provider_dir="$ARTIFACTS/connectors-provider" key_file task_image task_image_id
+  [[ "$provider_image" =~ ^sha256:[0-9a-f]{64}$ ]] || { log "connector provider prerequisite image is missing"; return 1; }
+  "$CONTAINER_CLI" image inspect "$provider_image" | python3 -c '
+import json, sys
+items = json.load(sys.stdin)
+if not isinstance(items, list) or len(items) != 1 or not isinstance(items[0], dict):
+    raise SystemExit("connector provider image inventory is ambiguous")
+item = items[0]
+labels = item.get("Config", {}).get("Labels") or {}
+if (item.get("Id") != sys.argv[1] or labels.get("org.opencontainers.image.revision") != sys.argv[2]
+        or labels.get("caesium.coverage.builder") != sys.argv[3]
+        or "/".join((item.get("Os", ""), item.get("Architecture", ""))) != sys.argv[4]):
+    raise SystemExit("connector provider image is not the prepared candidate/builder/platform")
+' "$provider_image" "$CANDIDATE_SHA" "$BUILDER_RUN_IMAGE" "$PLATFORM" || return 1
+  coverage_journey_require_absent container "$provider_name" || return 1
+  [[ ! -e "$provider_dir" && ! -L "$provider_dir" ]] || return 1
+  mkdir "$provider_dir" || return 1
+  chmod 0777 "$provider_dir" || return 1
   cat > "$ARTIFACTS/connectors.yaml" <<'YAML'
 version: 1
 connections:
@@ -818,10 +840,9 @@ connections:
     credentials:
       secretRefs:
         - secret://env/TEMPORAL_TOKEN?name=TEMPORAL_TOKEN
-        - secret://k8s/temporal-creds/api-token
-        - secret://vault/kv/data/temporal?field=token
       certificatePaths:
         - /var/run/secrets/caesium/temporal/tls.crt
+        - /var/run/secrets/caesium/temporal/tls.key
     bindings:
       - name: publication
         version: "1"
@@ -844,9 +865,28 @@ connections:
               properties:
                 approved:
                   type: boolean
+  - id: kubernetes-reference
+    provider: temporal
+    endpoint: frontend.temporal.svc:7233
+    scope: default
+    enabled: false
+    credentials:
+      secretRefs:
+        - secret://k8s/temporal-creds/api-token
+  - id: vault-reference
+    provider: temporal
+    endpoint: frontend.temporal.svc:7233
+    scope: default
+    enabled: false
+    credentials:
+      secretRefs:
+        - secret://vault/kv/data/temporal?field=token
 YAML
+  # Reuse the qualified real mTLS connection and declared correlation allowlist.
+  # Only its provider is started; the env/parked connections retain parser coverage.
+  sed '1,/^connections:$/d' "$ROOT/test/connectors/testdata/connections.yaml" >> "$ARTIFACTS/connectors.yaml"
   chmod 0644 "$ARTIFACTS/connectors.yaml"
-  log "loading a connector config on an instrumented start"
+  log "loading real connector reads on an instrumented start"
   coverage_journey_require_absent container "$CONNECTOR_NAME" || return 1
   mkdir -p "$RAW/connectors"
   chmod 0777 "$RAW/connectors"
@@ -858,6 +898,7 @@ YAML
     --label caesium.coverage.lane=base-connectors \
     --platform "$PLATFORM" \
     --network "$NETWORK_ID" \
+    -p 127.0.0.1::8080 -p 127.0.0.1::7240 \
     --user 10001:10001 \
     --group-add "$SOCK_GID" \
     -e GOCOVERDIR=/var/lib/caesium/coverage \
@@ -871,6 +912,7 @@ YAML
     -e TEMPORAL_TOKEN=coverage-connector-token \
     -v "$SOCK:/var/run/docker.sock" \
     -v "$ARTIFACTS/connectors.yaml:/etc/caesium/connectors/connections.yaml:ro" \
+    -v "$provider_dir:/artifacts:ro" \
     -v "$RAW/connectors:/var/lib/caesium/coverage" \
     "$IMAGE_ID" start)"; then
     log "connector start could not be created"
@@ -878,9 +920,50 @@ YAML
   fi
   coverage_journey_track_id "$CONNECTOR_ID"
   coverage_journey_resource owned container "$CONNECTOR_ID" >/dev/null || return 1
+  # Pending-name registration retains the fixture's own expected image for EXIT
+  # cleanup; it never masquerades as a measured coverage-image process.
+  coverage_journey_track_pending_name "$provider_name" "$provider_image" || return 1
+  provider_id="$("$CONTAINER_CLI" run -d --pull=never --platform "$PLATFORM" \
+    --name "$provider_name" --network="container:$CONNECTOR_ID" --user 10001:10001 \
+    --label "caesium.coverage.owner=$CANDIDATE_SHA" --label "caesium.coverage.run=$ID" \
+    --label caesium.coverage.lane=base-connectors-provider \
+    -e USER=caesium-fixture -e HOME=/tmp -e CAESIUM_CONNECTORS_CONTROL_LISTEN=0.0.0.0:7240 \
+    -e "CAESIUM_CONNECTORS_CANDIDATE_SHA=$CANDIDATE_SHA" \
+    -v "$provider_dir:/artifacts" "$provider_image")" || return 1
+  [[ "$provider_id" =~ ^[0-9a-f]{64}$ ]] || return 1
+  coverage_journey_resource owned container "$provider_id" "$provider_image" base-connectors-provider >/dev/null || return 1
+  key_file="$(mktemp "${TMPDIR:-/tmp}/caesium-connector-key-$ID.XXXXXX")" || return 1
+  chmod 0600 "$key_file" || return 1
+  COVERAGE_JOURNEY_SECRET_FILES+=("$key_file")
+  for _attempt in $(seq 1 60); do
+    "$CONTAINER_CLI" logs --tail 100 "$CONNECTOR_ID" 2>&1 | awk '!found && /csk_/ {for(i=1;i<=NF;i++) if($i ~ /^csk_/) {print $i;found=1;break}}' | tr -d '\r' > "$key_file" || return 1
+    [[ ! -s "$key_file" ]] || break
+    [[ "$("$CONTAINER_CLI" inspect --format '{{.State.Running}}' "$CONNECTOR_ID")" == true ]] || break
+    sleep 1
+  done
+  task_image="$(python3 - "$COVERAGE_BACKEND_PRODUCER_INPUTS" "$COVERAGE_BACKEND_PRODUCER_INPUTS_SHA256" <<'PY_TASK'
+import hashlib, json, pathlib, sys
+raw = pathlib.Path(sys.argv[1]).read_bytes()
+if hashlib.sha256(raw).hexdigest() != sys.argv[2]:
+    raise SystemExit('connector task prerequisite changed')
+print(json.loads(raw)['task_image_ref'])
+PY_TASK
+)" || return 1
+  task_image_id="$(python3 - "$COVERAGE_BACKEND_PRODUCER_INPUTS" "$COVERAGE_BACKEND_PRODUCER_INPUTS_SHA256" <<'PY_TASK'
+import hashlib, json, pathlib, sys
+raw = pathlib.Path(sys.argv[1]).read_bytes()
+if hashlib.sha256(raw).hexdigest() != sys.argv[2]:
+    raise SystemExit('connector task prerequisite changed')
+value = json.loads(raw)
+print(value.get('task_docker_image_id', value['task_image_id']))
+PY_TASK
+)" || return 1
   if ! connector_stopped="$(python3 "$ROOT/scripts/coverage-journeys.py" connector \
     --name "$CONNECTOR_ID" --owner "$CANDIDATE_SHA" --run-id "$ID" \
-    --image "$IMAGE_ID" --audit "$AUDIT")"; then
+    --image "$IMAGE_ID" --audit "$AUDIT" --require-semantics \
+    --provider-id "$provider_id" --provider-image "$provider_image" --builder-image "$BUILDER_RUN_IMAGE" \
+    --platform "$PLATFORM" --task-image "$task_image" --task-image-id "$task_image_id" \
+    --raw-dir "$RAW/connectors" --key-file "$key_file" --config "$ARTIFACTS/connectors.yaml")"; then
     log "connector loaded-fingerprint/health/clean-stop guard refused; see safe audit/connector-diagnostics.json when available"
     return 1
   fi
@@ -888,6 +971,29 @@ YAML
     return 1
   fi
   gocoverdir_complete "$RAW/connectors" || return 1
+  # A removed semantic flag or startup-only guard cannot silently contribute.
+  python3 - "$AUDIT/connector-reads.json" "$CANDIDATE_SHA" "$IMAGE_ID" "$CONNECTOR_ID" "$provider_id" "$provider_image" "$RAW/connectors" <<'PY_RECEIPT' || return 1
+import hashlib, json, pathlib, sys
+path = pathlib.Path(sys.argv[1])
+if path.is_symlink():
+    raise SystemExit('connector semantic receipt is unsafe')
+record = json.loads(path.read_bytes())
+raw = pathlib.Path(sys.argv[7])
+files = {p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in raw.iterdir() if p.is_file()}
+process = record.get('process', {})
+state = process.get('State', {})
+if (record.get('complete') is not True or record.get('candidate_sha') != sys.argv[2]
+        or record.get('image_id') != sys.argv[3] or process.get('Id') != sys.argv[4]
+        or process.get('Image') != sys.argv[3] or state.get('ExitCode') != 0
+        or state.get('Running') is not False or state.get('OOMKilled') is not False
+        or record.get('provider_container_id') != sys.argv[5] or record.get('provider_image_id') != sys.argv[6]
+        or record.get('raw_files') != files or record.get('flush_rc') != 0 or record.get('stop_rc') != 0
+        or any(record.get(name) is not True for name in ('verified_delegation', 'reverse_link', 'local_run_succeeded'))
+        or any(record.get('provider_rpc_delta', {}).get(name, 0) <= 0 for name in
+               ('ListWorkflowExecutions', 'DescribeWorkflowExecution', 'GetWorkflowExecutionHistory'))):
+    raise SystemExit('connector semantic/RPC/process/raw evidence is incomplete')
+PY_RECEIPT
+  coverage_journey_resource remove container "$provider_id" "$provider_image" base-connectors-provider >/dev/null || return 1
   printf '%s\n' "$connector_stopped" >"$AUDIT/connector-process.json"
   coverage_journey_remove_owned "$CONNECTOR_ID" || return 1
   COVERAGE_JOURNEY_SERVER_DIRS+=("$RAW/connectors")
