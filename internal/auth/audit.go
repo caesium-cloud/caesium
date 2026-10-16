@@ -47,8 +47,13 @@ const (
 	ActionDBQuery            = "database.query"
 	// ActionClusterMemberRemove records a stale dqlite member removed through
 	// DELETE /v1/system/nodes/:id.
-	ActionClusterMemberRemove = "cluster.member_remove"
-	ActionWebhookDenied       = "webhook.denied"
+	ActionClusterMemberRemove      = "cluster.member_remove"
+	ActionWebhookDenied            = "webhook.denied"
+	ActionConnectorActionDispatch  = "connector.action_dispatch"
+	ActionConnectorActionSubmit    = "connector.action_submit"
+	ActionConnectorActionResubmit  = "connector.action_resubmit"
+	ActionConnectorOperationLookup = "connector.operation_lookup"
+	ActionConnectorStatusQuery     = "connector.status_query"
 
 	ActionNotificationChannelCreate = "notification_channel.create"
 	ActionNotificationChannelUpdate = "notification_channel.update"

@@ -405,18 +405,28 @@ func (s *IntegrationTestSuite) TestConnectorsRead() {
 	s.Require().Equal(external.ID, detail.ID)
 	s.Require().Equal(refs[0].RunID, detail.Metadata.RunID)
 	s.Require().Equal("available", detail.Availability)
+	// Operations/verified links protect their execution snapshots. The retention
+	// ceiling applies only to unreferenced identities, including when Actions ran
+	// first in this same live server. Retention must preserve protected evidence.
+	const protectedSnapshots = "SELECT s.* FROM external_execution_snapshots s JOIN external_executions e ON e.opaque_id = s.opaque_id WHERE s.connection_id = 'fixture' AND e.referenced = 1 ORDER BY s.id"
+	const unreferencedSnapshots = "SELECT s.id FROM external_execution_snapshots s JOIN external_executions e ON e.opaque_id = s.opaque_id WHERE s.connection_id = 'fixture' AND e.referenced = 0 ORDER BY s.id"
+	protectedBefore := s.connectorRows(protectedSnapshots)
+	if len(s.connectorRows("SELECT id FROM connector_operations WHERE connection_id = 'fixture'")) > 0 {
+		s.Require().NotEmpty(protectedBefore, "real operations must retain protected observation evidence")
+	}
 	// Each insertion is caused by a direct public read of a distinct real
 	// workflow. The fixture's small configured cap makes eviction observable.
 	for _, ref := range refs {
 		s.connectorRead("/v1/connectors/fixture/executions/"+url.PathEscape(seen[ref.RunID].ID), &detail)
 	}
-	rows := s.connectorRows("SELECT id FROM external_execution_snapshots WHERE connection_id = 'fixture' ORDER BY id")
+	rows := s.connectorRows(unreferencedSnapshots)
 	s.Require().LessOrEqual(len(rows), 4, "configured unreferenced snapshot cap must hold through HTTP")
 	s.Require().NotEmpty(rows)
 	time.Sleep(11 * time.Second)
 	s.connectorRead(path, &detail)
-	rows = s.connectorRows("SELECT id FROM external_execution_snapshots WHERE connection_id = 'fixture' ORDER BY id")
+	rows = s.connectorRows(unreferencedSnapshots)
 	s.Require().Empty(rows, "age retention must evict old unreferenced public snapshots; unchanged evidence cannot recreate them")
+	s.Require().Equal(protectedBefore, s.connectorRows(protectedSnapshots), "count/age retention must preserve operation and relation snapshot evidence")
 	// Advance real provider evidence after expiry, then read the closed workflow
 	// repeatedly. Inspection must never dispatch an automatic status Query.
 	closedViewer := s.createAPIKeyCLI("--role", "viewer", "--description", "closed connector workflow witness")
@@ -428,8 +438,11 @@ func (s *IntegrationTestSuite) TestConnectorsRead() {
 	}, 10*time.Second, time.Second)
 	advanced := s.connectorRows("SELECT * FROM external_execution_snapshots ORDER BY id")
 	s.Require().NotEmpty(advanced, "new real terminal evidence must persist after retention expiry")
-	s.Require().LessOrEqual(len(advanced), 4, "polls through genuine closing evidence must preserve the configured retention cap")
-	s.Require().Equal([][]any{{float64(1)}}, s.connectorRows("SELECT COUNT(*) FROM external_execution_snapshots WHERE terminal = 1"), "the real terminal observation must be durable")
+	s.Require().LessOrEqual(len(s.connectorRows(unreferencedSnapshots)), 4, "polls through genuine closing evidence must preserve the configured unreferenced retention cap")
+	terminalRef, err := connector.NewExecutionReference("fixture", map[string]string{"workflow_id": refs[0].WorkflowID, "run_id": refs[0].RunID})
+	s.Require().NoError(err)
+	terminalSQL := fmt.Sprintf("SELECT COUNT(*) FROM external_execution_snapshots WHERE opaque_id = '%s' AND terminal = 1", terminalRef.OpaqueID())
+	s.Require().Equal([][]any{{float64(1)}}, s.connectorRows(terminalSQL), "this exact run's real terminal observation must be durable")
 	for range 3 {
 		connectorReadHTTP(s.T(), s.caesiumURL, closedViewer.Plaintext, http.MethodGet, path, nil, &detail)
 		s.Require().True(detail.Metadata.Terminal)
