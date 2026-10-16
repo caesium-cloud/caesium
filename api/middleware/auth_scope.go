@@ -122,6 +122,10 @@ func authorizeScope(c *echo.Context, svc *auth.Service, scopeJSON []byte, routeP
 		return &scopeAuditContext{}, nil
 	}
 
+	if strings.HasPrefix(routePath, "/v1/connectors") {
+		return nil, echo.NewHTTPError(http.StatusForbidden, "connectors require an unscoped principal")
+	}
+
 	state := &scopeAuditContext{}
 
 	switch routePath {

@@ -2,8 +2,10 @@ package start
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/caesium-cloud/caesium/internal/connector"
+	"github.com/caesium-cloud/caesium/internal/connector/temporal"
 	"github.com/caesium-cloud/caesium/pkg/db"
 	"github.com/caesium-cloud/caesium/pkg/env"
 	"github.com/caesium-cloud/caesium/pkg/log"
@@ -20,6 +22,14 @@ func loadConnectorFile(vars env.Environment) error {
 	cfg, fingerprint, err := connector.LoadFile(vars.ConnectorsConfigFile)
 	if err != nil {
 		return err
+	}
+	for _, conn := range cfg.Connections {
+		if conn.Enabled {
+			if err := temporal.ValidateConnectionShape(conn); err != nil {
+				connector.Clear()
+				return fmt.Errorf("connector %q configuration rejected: %w", conn.ID, err)
+			}
+		}
 	}
 	connections := 0
 	if cfg != nil {

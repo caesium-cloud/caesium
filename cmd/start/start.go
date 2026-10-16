@@ -17,6 +17,7 @@ import (
 	"github.com/caesium-cloud/caesium/api"
 	authmw "github.com/caesium-cloud/caesium/api/middleware"
 	agentsvc "github.com/caesium-cloud/caesium/api/rest/service/agent"
+	connectorsvc "github.com/caesium-cloud/caesium/api/rest/service/connector"
 	incidentsvc "github.com/caesium-cloud/caesium/api/rest/service/incident"
 	jsvc "github.com/caesium-cloud/caesium/api/rest/service/job"
 	runsvc "github.com/caesium-cloud/caesium/api/rest/service/run"
@@ -26,6 +27,7 @@ import (
 	authoidc "github.com/caesium-cloud/caesium/internal/auth/oidc"
 	"github.com/caesium-cloud/caesium/internal/auth/policy"
 	authsaml "github.com/caesium-cloud/caesium/internal/auth/saml"
+	connectorcore "github.com/caesium-cloud/caesium/internal/connector"
 	"github.com/caesium-cloud/caesium/internal/dispatch"
 	dispatchpki "github.com/caesium-cloud/caesium/internal/dispatch/pki"
 	"github.com/caesium-cloud/caesium/internal/event"
@@ -896,6 +898,15 @@ func start(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		log.Fatal("secret resolver configuration failure", "error", err)
 	}
+	var connectorRuntime *connectorsvc.Runtime
+	if vars.ConnectorsEnabled {
+		cfg, fingerprint, _ := connectorcore.Current()
+		connectorRuntime = connectorsvc.New(ctx, db.Connection(), cfg, fingerprint, vars.ConnectorsConfigPreviousFingerprint, resolver, vars.AuthKeyHashSecret)
+		if err := connectorRuntime.Ready(ctx); err != nil {
+			log.Warn("connectors unavailable; local service remains ready", "error", err)
+		}
+		runAsync(func() { <-ctx.Done(); connectorRuntime.Close() })
+	}
 	triggerhttp.SetSecretResolver(resolver)
 	// Registry credentials for image digest resolution (cache.pinDigests):
 	// CAESIUM_REGISTRY_AUTH maps registry hosts to secret:// references that the
@@ -1030,7 +1041,7 @@ func start(cmd *cobra.Command, args []string) error {
 
 	runAsync(func() {
 		log.Info("spinning up api")
-		if err := api.Start(ctx, bus, authSvc, auditor, limiter, sessions, sso, ssoProviders, internalWakeupHandler); err != nil && ctx.Err() == nil {
+		if err := api.Start(ctx, bus, authSvc, auditor, limiter, sessions, sso, ssoProviders, internalWakeupHandler, connectorRuntime); err != nil && ctx.Err() == nil {
 			reportErr(err)
 		}
 	})

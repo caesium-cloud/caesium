@@ -170,6 +170,8 @@ func NewStore(db *gorm.DB, clock ...func() time.Time) *Store {
 // the matching hard ceiling. A value outside 1..ceiling is rejected. C1 passes
 // the connection limits. Callers that omit the argument stay on the ceilings.
 type WriteBounds struct {
+	// ExpectedEpoch fences composing request writes in their own transaction.
+	ExpectedEpoch            string
 	MaxMetadataBytes         int
 	MaxUnreferencedSnapshots int
 }
@@ -185,6 +187,19 @@ func (s *Store) RecordSnapshot(ctx context.Context, obs Observation, bounds ...W
 	limit, err := resolveWriteBounds(bounds...)
 	if err != nil {
 		return SnapshotResult{}, err
+	}
+	if limit.ExpectedEpoch != "" {
+		var result SnapshotResult
+		err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+			if err := requireOperationEpoch(tx, limit.ExpectedEpoch); err != nil {
+				return err
+			}
+			limit.ExpectedEpoch = ""
+			var err error
+			result, err = NewStore(tx).RecordSnapshot(ctx, obs, limit)
+			return err
+		})
+		return result, err
 	}
 	prepared, terminal, digest, err := prepareObservation(obs, limit.MaxMetadataBytes)
 	if err != nil {
@@ -246,6 +261,11 @@ func (s *Store) RecordRelation(ctx context.Context, from, to ExecutionReference,
 	}
 
 	err = s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if limit.ExpectedEpoch != "" {
+			if err := requireOperationEpoch(tx, limit.ExpectedEpoch); err != nil {
+				return err
+			}
+		}
 		if err := identityExists(tx, fromID); err != nil {
 			return err
 		}
@@ -735,6 +755,7 @@ func resolveWriteBounds(bounds ...WriteBounds) (WriteBounds, error) {
 		return out, nil
 	}
 	in := bounds[0]
+	out.ExpectedEpoch = in.ExpectedEpoch
 	if in.MaxMetadataBytes != 0 {
 		if in.MaxMetadataBytes < 1 || in.MaxMetadataBytes > MaxPageMetadataBytes {
 			return WriteBounds{}, ErrRetentionLimit

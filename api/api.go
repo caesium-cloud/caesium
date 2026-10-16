@@ -16,6 +16,7 @@ import (
 	authmw "github.com/caesium-cloud/caesium/api/middleware"
 	"github.com/caesium-cloud/caesium/api/rest/bind"
 	authctrl "github.com/caesium-cloud/caesium/api/rest/controller/auth"
+	connectorsvc "github.com/caesium-cloud/caesium/api/rest/service/connector"
 	"github.com/caesium-cloud/caesium/api/streaming"
 	"github.com/caesium-cloud/caesium/internal/auth"
 	"github.com/caesium-cloud/caesium/internal/event"
@@ -49,7 +50,7 @@ var apiServer struct {
 // are deliberately NOT served here — they live on a dedicated mutually
 // authenticated TLS listener (see dispatch.InternalServer) so the public API
 // can remain plain HTTP behind the operator's proxy.
-func Start(ctx context.Context, bus event.Bus, authSvc *auth.Service, auditor *auth.AuditLogger, limiter *auth.RateLimiter, sessions *auth.SessionStore, sso *auth.SSOService, providers SSOProviders, wakeupHandler InternalWakeupHandler) error {
+func Start(ctx context.Context, bus event.Bus, authSvc *auth.Service, auditor *auth.AuditLogger, limiter *auth.RateLimiter, sessions *auth.SessionStore, sso *auth.SSOService, providers SSOProviders, wakeupHandler InternalWakeupHandler, connectors ...*connectorsvc.Runtime) error {
 	// Echo 5.3 registers implicit 404 handlers on groups (v4-style). Keep the
 	// previous v5.0 behavior: unknown /v1 paths are not synthetic routes that
 	// inherit group middleware (and therefore RBAC).
@@ -73,7 +74,7 @@ func Start(ctx context.Context, bus event.Bus, authSvc *auth.Service, auditor *a
 	registerMetrics(e, vars, authSvc, auditor, limiter, sessions)
 
 	// REST
-	bind.All(e.Group("/v1"), bus, authSvc, auditor, limiter, sessions)
+	bind.All(e.Group("/v1"), bus, authSvc, auditor, limiter, sessions, connectors...)
 
 	// Embedded web UI
 	RegisterUI(e)
