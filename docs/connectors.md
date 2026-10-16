@@ -9,7 +9,9 @@
 > activity correlation against existing Caesium admissions, and durable receipt
 > admission with lookup-only component recovery. Authenticated HTTP monitoring
 > exposes discovery, detail, history, relationships and verified local run links.
-> HTTP Queries/actions/receipts and Console pages remain plan items C2 and E.
+> Console monitoring exposes configured connections and exact external runs.
+> HTTP Queries/actions/receipts and Console relationship/approval journeys remain
+> plan items C2, E2 and E3.
 > Job-definition YAML is unchanged.
 
 An execution connector lets Caesium inspect an external workflow system and,
@@ -194,6 +196,15 @@ discovery, inspection, history, relationships, status query, action submission,
 and receipt lookup. A test adapter can register a different identity and a
 different subset. Nothing in the registry requires a Temporal module.
 
+The optional connection field `uiURL` names the browser console base URL, for
+example `https://temporal.example.test/console`. Only absolute HTTP(S) URLs
+without credentials, query parameters or fragments are accepted. The value is
+returned as `ui_url`; it never changes the connector RPC destination. Omit it
+when the provider console is unavailable. The connection response also exposes
+`console_refresh_ms` from the configured `consoleRefresh` interval (at least
+10 seconds). A configured browser URL changes the configuration fingerprint;
+omitting this field preserves existing fingerprints and receipt compatibility.
+
 ## Fingerprint and rollout
 
 Equivalent files produce one canonical SHA-256 fingerprint. Key order,
@@ -257,8 +268,8 @@ extraVolumeMounts:
 ```
 
 `caesium start` logs the loaded fingerprint as `connector config loaded`.
-Nothing else stores it yet, and the previous-fingerprint check is not
-enforced. Copy that logged value into
+The catalog stores the active fingerprint and enforces the previous-fingerprint
+check during coordinated changes. Copy that logged value into
 `CAESIUM_CONNECTORS_CONFIG_PREVIOUS_FINGERPRINT` before replacing the
 ConfigMap, then roll the replicas together so they all see one file. Secret
 rotation does not require that variable to change. API-key mode also requires
@@ -409,6 +420,34 @@ real publication, authenticated monitoring, verified delegation and reverse
 lookup. It requires provider RPC evidence, a succeeded local run and complete
 instrumented counters from a cleanly stopped process. Full fault/restart and
 browser scenario selection remains F2.
+
+## Console monitoring
+
+With connectors enabled and an unscoped cluster viewer or higher, choose
+**Connections** in the sidebar. Select a configured connection and optionally
+filter by exact workflow type. Discovery is eventually consistent; pagination
+belongs to that one connection and filter.
+
+Follow a Workflow ID to its immutable Run ID, native status, dated provider
+observation, reported activity attempts and bounded history pages. History
+payloads are unavailable. Partial pages say so; reduce the page size when a
+metadata limit leaves no continuation cursor. Unbound workflows remain
+inspectable without invented business controls.
+
+A provider outage keeps dated cached details visibly stale while automatic
+refresh retries at the configured `consoleRefresh` interval, at least 10
+seconds. Failed history reads retain an explicit unavailable state. Recovery
+observes the same pinned run. For intervals beyond the browser timer range,
+automatic refresh is disabled and the view says so. A configured `uiURL` provides
+a Temporal UI link containing the exact namespace, Workflow ID and Run ID.
+Omitting it leaves that link absent.
+
+Gate-off, scoped, namespace-only, agent and unauthenticated routes disclose no
+external workflow details. The monitoring view performs no automatic status
+Queries or actions. Relationship journeys and the approval form remain E2/E3.
+The dedicated `connectors` Playwright project uses the real development fixture;
+default and auth projects exclude its specifications. A selected connector
+browser test fails if its gate, authentication or real-worker markers are absent.
 
 ## Temporal observation
 

@@ -108,11 +108,13 @@ func (r *Runtime) Fingerprint() string {
 }
 
 type ConnectionView struct {
-	ID           string            `json:"id"`
-	Provider     string            `json:"provider"`
-	Scope        string            `json:"scope"`
-	Enabled      bool              `json:"enabled"`
-	Capabilities []core.Capability `json:"capabilities"`
+	ID               string            `json:"id"`
+	Provider         string            `json:"provider"`
+	Scope            string            `json:"scope"`
+	UIURL            string            `json:"ui_url,omitempty"`
+	ConsoleRefreshMS int64             `json:"console_refresh_ms"`
+	Enabled          bool              `json:"enabled"`
+	Capabilities     []core.Capability `json:"capabilities"`
 }
 type Connections struct {
 	Connections []ConnectionView `json:"connections"`
@@ -141,7 +143,7 @@ func (r *Runtime) Connections(ctx context.Context, principal string) (Connection
 		if cfg.Enabled {
 			caps = append(caps, ReadCapabilities...)
 		}
-		out.Connections = append(out.Connections, ConnectionView{ID: cfg.ID, Provider: cfg.Provider, Scope: cfg.Scope, Enabled: cfg.Enabled, Capabilities: caps})
+		out.Connections = append(out.Connections, ConnectionView{ID: cfg.ID, Provider: cfg.Provider, Scope: cfg.Scope, UIURL: cfg.UIURL, ConsoleRefreshMS: cfg.Limits.ConsoleRefresh.Milliseconds(), Enabled: cfg.Enabled, Capabilities: caps})
 	}
 	out.Ready = true
 	if len(out.Connections) > core.MaxPageEntries {

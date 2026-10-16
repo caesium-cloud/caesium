@@ -1,4 +1,11 @@
 import { type ApiError } from "@/lib/api";
+import type { PrincipalState } from "@/lib/auth";
+
+/** Connector reads require an authenticated, unscoped cluster principal. */
+export function canReadConnectors(principal: PrincipalState): boolean {
+  return (principal.kind === "user" || principal.kind === "api_key") && !!principal.subject && principal.scopeKnown && !principal.isScoped &&
+    ["viewer", "runner", "operator", "admin"].includes(principal.role ?? "");
+}
 
 /**
  * Type-guard for a typed 403 insufficient-access error from the API client.
