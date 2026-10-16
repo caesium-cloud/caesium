@@ -375,7 +375,9 @@ translated into cluster-wide bindings and behaviour is unchanged.
       `internal/auth/audit.go`, `api/rest/controller/auth/audit_query.go`,
       `cmd/auth/audit.go`, `api/auth_rbac_policy_completeness_test.go`.
       Depends on: A2 + B1 + D3.
-- [ ] A4. Wire the policy loader: `CAESIUM_AUTH_POLICY_FILE`,
+- [x] A4. (W3-β: `policy.Holder` in `internal/auth/policy/loader.go`; content-hash poll,
+      not mtime; no-file `POST` reload answers 409, a rejected file 422.)
+      Wire the policy loader: `CAESIUM_AUTH_POLICY_FILE`,
       `CAESIUM_AUTH_POLICY_RELOAD_INTERVAL` (default `10s`); parse at startup (fatal on
       error; fatal when both the file and `CAESIUM_AUTH_ROLE_MAPPING` are set); an
       `atomic.Pointer` holder consulted by the middleware and by every consumer of
@@ -1010,7 +1012,8 @@ group refresh, user disable, CLI login) is asserted here against a live Keycloak
       `test/auth_lane_test.go`, `test/auth_keys_test.go` (helpers),
       `test/integration_test.go` (suite wiring).
       Depends on: A4.
-- [ ] H-2. `--json` stdout discipline for every new CLI verb (`auth policy`, `auth user`,
+- [x] H-2. (W3-β: `runCLIJSON[T]` / `runCLIJSONFailure[T]` over `decodeCLIJSONStdout`.)
+      `--json` stdout discipline for every new CLI verb (`auth policy`, `auth user`,
       `login`/`whoami`, `job queue` held reason): each scenario captures stdout with
       `runCLIStdout` and parses it; a shared assertion helper fails on any non-JSON
       byte. Lands with the first verb (A4) and is reused after.

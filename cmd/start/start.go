@@ -1138,39 +1138,85 @@ func initSAMLProvider(ctx context.Context, vars env.Environment) auth.RedirectAu
 }
 
 // newPolicySource returns the grant source for SSO logins and session
-// principals. With no policy file, CAESIUM_AUTH_ROLE_MAPPING and
-// CAESIUM_AUTH_DEFAULT_ROLE are translated into cluster-wide bindings, parsed
-// only when SSO is enabled (an unused mapping was never a startup error).
-// A4 replaces this body with the policy file loader; callers do not change.
-func newPolicySource(vars env.Environment) (policy.Source, error) {
+// principals, and the policy holder behind /v1/auth/policy and namespace
+// settings.
+//
+// With CAESIUM_AUTH_POLICY_FILE set, the file is read and fully validated (any
+// error names it) and the holder is the grant source in api-key mode, with or
+// without SSO; in any other mode there is no grant source, but the holder still
+// serves the file's namespace settings.
+//
+// With no file, the grant source is exactly what it was before the file
+// existed: CAESIUM_AUTH_ROLE_MAPPING and CAESIUM_AUTH_DEFAULT_ROLE translated
+// into cluster-wide bindings, parsed only when SSO is enabled in api-key mode
+// (an unused mapping was never a startup error), and nil otherwise. The holder
+// then only renders that translation (or the empty policy).
+func newPolicySource(ctx context.Context, vars env.Environment, knownGroups policy.KnownGroupsFunc) (policy.Source, *policy.Holder, error) {
+	if path := strings.TrimSpace(vars.AuthPolicyFile); path != "" {
+		if strings.TrimSpace(vars.AuthRoleMapping) != "" {
+			return nil, nil, errors.New("CAESIUM_AUTH_POLICY_FILE and CAESIUM_AUTH_ROLE_MAPPING are both set; move the mapping into the policy file")
+		}
+		defaultRole := models.Role(strings.TrimSpace(vars.AuthDefaultRole))
+		if defaultRole != "" && !models.ValidRole(string(defaultRole)) {
+			return nil, nil, fmt.Errorf("invalid CAESIUM_AUTH_DEFAULT_ROLE %q", defaultRole)
+		}
+		holder, err := policy.LoadFile(ctx, policy.HolderOptions{
+			Path:                 path,
+			DefaultRole:          defaultRole,
+			TrustedEmailProvider: vars.AuthOIDCEnabled,
+			KnownGroups:          knownGroups,
+		})
+		if err != nil {
+			return nil, nil, err
+		}
+		if vars.AuthMode != "api-key" {
+			return nil, holder, nil
+		}
+		return holder, holder, nil
+	}
+
 	if vars.AuthMode != "api-key" || !vars.SSOEnabled() {
-		return nil, nil
+		return nil, policy.NewEnvHolder(policy.EmptyPolicy(), "", nil), nil
 	}
 	mapper, err := auth.NewRoleMapper(vars.AuthRoleMapping, vars.AuthDefaultRole)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
+	view, fallback := mapper.Translated()
 	// Return the mapper only on success: a nil *RoleMapper inside the
 	// interface would not compare equal to nil.
-	return mapper, nil
+	return mapper, policy.NewEnvHolder(view, fallback, mapper), nil
 }
 
 // initAuth sets up authentication services based on CAESIUM_AUTH_MODE.
 // Returns nil services when auth is disabled so callers can pass them through safely.
 func initAuth(ctx context.Context, vars env.Environment, runAsync func(func())) (*auth.Service, *auth.AuditLogger, *auth.RateLimiter, *auth.SessionStore, *auth.SSOService) {
 	conn := db.Connection()
-	policySource, err := newPolicySource(vars)
+	policySource, policyHolder, err := newPolicySource(ctx, vars, auth.KnownUserGroups(conn))
 	if err != nil {
+		if strings.TrimSpace(vars.AuthPolicyFile) != "" {
+			log.Fatal("invalid CAESIUM_AUTH_POLICY_FILE", "error", err)
+		}
 		log.Fatal("invalid CAESIUM_AUTH_ROLE_MAPPING", "error", err)
 	}
 	authSvc := auth.NewService(conn,
 		auth.WithKeyHashSecret(vars.AuthKeyHashSecret),
 		auth.WithPolicySource(policySource),
+		auth.WithPolicyHolder(policyHolder),
 	)
 	auditor := auth.NewAuditLogger(conn)
 	limiter := auth.NewRateLimiter(vars.AuthRateLimitPerMinute, time.Minute)
 	var sessions *auth.SessionStore
 	var sso *auth.SSOService
+
+	// Reloads are audited in every auth mode; each node polls its own copy of
+	// the file. The poller starts only after the startup load succeeded.
+	policyHolder.SetObserver(auth.PolicyReloadAuditor(auditor))
+	if policyHolder.FileBacked() {
+		runAsync(func() {
+			policyHolder.Run(ctx, vars.AuthPolicyReloadInterval)
+		})
+	}
 
 	switch vars.AuthMode {
 	case "none", "":

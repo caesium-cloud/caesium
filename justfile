@@ -605,6 +605,7 @@ integration-test-agent: integration-runner
         -e CAESIUM_AUTH_MODE=api-key \
         -e CAESIUM_AGENT_REMEDIATION_ENABLED=true \
         -e CAESIUM_AUTH_KEY_HASH_SECRET=agent-integration-auth-key-hash-secret-000001 \
+        -e CAESIUM_IT_AUTH_POLICY_PATH={{ bld_dir }}/.tmp/auth-policy/policy.yaml \
         -e CAESIUM_CONNECTORS_ENABLED=true \
         -e CAESIUM_CONNECTORS_CONFIG_FILE={{ bld_dir }}/test/fixtures/connectors/connections.yaml \
         -e TEMPORAL_TOKEN=agent-integration-connector-token \
@@ -944,8 +945,14 @@ integration-test-infra: integration-runner
     echo "infra integration lane executed $passes scenario(s) (minimum {{ infra_integration_min_pass }})"; \
     {{ container_cli }} rm -f {{ infra_it_container }} >/dev/null 2>&1 || true
 
+# The auth lane serves an access policy file: a fresh copy of
+# test/testdata/policy/auth-lane-reload.yaml in .tmp/auth-policy, whose
+# directory is bind-mounted read-only so the TestAuthPolicy scenarios can
+# replace the file from the runner (CAESIUM_IT_AUTH_POLICY_PATH) and watch
+# the 1s poller pick it up.
 integration-up-agent: build-stress build-test build-triage-agent
     @if [ -z "${CAESIUM_CONNECTORS_SERVER_CIDFILE:-}" ]; then {{ container_cli }} rm -f {{ agent_it_container }} >/dev/null 2>&1 || true; fi
+    @rm -rf {{ repo_dir }}/.tmp/auth-policy && mkdir -p {{ repo_dir }}/.tmp/auth-policy && cp {{ repo_dir }}/test/testdata/policy/auth-lane-reload.yaml {{ repo_dir }}/.tmp/auth-policy/policy.yaml
     @if [ -n "${CAESIUM_CONNECTORS_SERVER_CIDFILE:-}" ]; then \
         [ ! -e "$CAESIUM_CONNECTORS_SERVER_CIDFILE" ] || { echo "server CID file already exists" >&2; exit 1; }; \
         set -- create --cidfile "$CAESIUM_CONNECTORS_SERVER_CIDFILE"; \
@@ -971,6 +978,9 @@ integration-up-agent: build-stress build-test build-triage-agent
         -e CAESIUM_AUTH_MODE=api-key \
         -e CAESIUM_AUTH_KEY_HASH_SECRET=agent-integration-auth-key-hash-secret-000001 \
         -e CAESIUM_AUTH_REQUIRE_TLS=false \
+        -v {{ repo_dir }}/.tmp/auth-policy:/etc/caesium/policy:ro \
+        -e CAESIUM_AUTH_POLICY_FILE=/etc/caesium/policy/policy.yaml \
+        -e CAESIUM_AUTH_POLICY_RELOAD_INTERVAL=1s \
         -v "${CAESIUM_CONNECTORS_SERVER_CONFIG:-{{ repo_dir }}/test/fixtures/connectors/connections.yaml}:/etc/caesium/connectors/connections.yaml:ro" \
         -e CAESIUM_CONNECTORS_ENABLED=true \
         -e CAESIUM_CONNECTORS_CONFIG_FILE=/etc/caesium/connectors/connections.yaml \

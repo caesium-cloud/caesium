@@ -1,0 +1,12 @@
+# Valid, but with lint warnings: a namespace without secret rules, and a user
+# binding (TestAuthPolicyLintOffline).
+apiVersion: v1
+kind: AccessPolicy
+namespaces:
+  finance: {}
+bindings:
+  - subjects:
+      groups: ["finance-eng"]
+      users: ["alice@example.com"]
+    role: operator
+    namespaces: ["finance"]

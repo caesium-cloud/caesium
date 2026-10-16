@@ -2486,6 +2486,12 @@ Lanes that go through `just integration-up*`:
 `integration-arm64` Docker / infra.
 CI sets `CAESIUM_SKIP_IMAGE_BUILD=true` and docker-loads the `images`
 job's artifacts first, so those recipes do not recompile.
+The agent-auth lane also serves an access policy file: `integration-up-agent`
+seeds `.tmp/auth-policy/policy.yaml` from `test/testdata/policy/auth-lane-reload.yaml`,
+mounts that directory read-only at `/etc/caesium/policy`
+(`CAESIUM_AUTH_POLICY_FILE`, `CAESIUM_AUTH_POLICY_RELOAD_INTERVAL=1s`), and
+`integration-test-agent` passes the runner-side path as
+`CAESIUM_IT_AUTH_POLICY_PATH` so the `TestAuthPolicy*` scenarios can rewrite it.
 
 Lanes that set server env inline and do **not** go through any
 `integration-up*` recipe:

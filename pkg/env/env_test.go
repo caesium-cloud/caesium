@@ -43,6 +43,53 @@ func (s *EnvTestSuite) TestProcess() {
 	assert.Equal(s.T(), "displayName", Variables().AuthLDAPDisplayNameAttribute)
 	assert.Equal(s.T(), 10*time.Second, Variables().AuthLDAPTimeout)
 	assert.False(s.T(), Variables().SSOEnabled())
+	assert.Empty(s.T(), Variables().AuthPolicyFile)
+	assert.Equal(s.T(), 10*time.Second, Variables().AuthPolicyReloadInterval)
+}
+
+func (s *EnvTestSuite) TestAuthPolicyFileConflictsWithRoleMapping() {
+	// The file is never read here: a path that does not exist still passes,
+	// and only the configuration conflict fails.
+	s.T().Setenv("CAESIUM_AUTH_POLICY_FILE", "/nonexistent/policy.yaml")
+	s.Require().NoError(Process())
+	s.Equal("/nonexistent/policy.yaml", Variables().AuthPolicyFile)
+
+	s.T().Setenv("CAESIUM_AUTH_ROLE_MAPPING", "admins=admin")
+	err := Process()
+	s.Require().Error(err)
+	s.Contains(err.Error(), "CAESIUM_AUTH_POLICY_FILE")
+	s.Contains(err.Error(), "CAESIUM_AUTH_ROLE_MAPPING")
+
+	// A blank mapping is unset, as NewRoleMapper treats it.
+	s.T().Setenv("CAESIUM_AUTH_ROLE_MAPPING", "  ")
+	s.Require().NoError(Process())
+
+	// Without a file the mapping alone is today's configuration.
+	s.T().Setenv("CAESIUM_AUTH_POLICY_FILE", "")
+	s.T().Setenv("CAESIUM_AUTH_ROLE_MAPPING", "admins=admin")
+	s.Require().NoError(Process())
+}
+
+func (s *EnvTestSuite) TestAuthPolicyReloadIntervalValidatedOnlyWithFile() {
+	for _, interval := range []string{"0s", "-1s"} {
+		s.T().Setenv("CAESIUM_AUTH_POLICY_RELOAD_INTERVAL", interval)
+		s.T().Setenv("CAESIUM_AUTH_POLICY_FILE", "")
+		s.Require().NoError(Process(), "no file: the interval %s is ignored", interval)
+
+		s.T().Setenv("CAESIUM_AUTH_POLICY_FILE", "/etc/caesium/policy.yaml")
+		err := Process()
+		s.Require().Error(err, "interval %s with a file", interval)
+		s.Contains(err.Error(), "CAESIUM_AUTH_POLICY_RELOAD_INTERVAL must be greater than 0")
+	}
+
+	s.T().Setenv("CAESIUM_AUTH_POLICY_RELOAD_INTERVAL", "250ms")
+	s.Require().NoError(Process())
+	s.Equal(250*time.Millisecond, Variables().AuthPolicyReloadInterval)
+
+	s.T().Setenv("CAESIUM_AUTH_POLICY_RELOAD_INTERVAL", "soon")
+	err := Process()
+	s.Require().Error(err)
+	s.Contains(err.Error(), "CAESIUM_AUTH_POLICY_RELOAD_INTERVAL")
 }
 
 func (s *EnvTestSuite) TestSSOEnabled() {

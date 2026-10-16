@@ -170,6 +170,9 @@ var endpointPolicy = map[string]models.Role{
 	"POST /v1/auth/keys/:id/revoke": models.RoleAdmin,
 	"POST /v1/auth/keys/:id/rotate": models.RoleAdmin,
 	"GET /v1/auth/audit":            models.RoleAdmin,
+	// Access policy view and reload (identity-and-access A4).
+	"GET /v1/auth/policy":         models.RoleAdmin,
+	"POST /v1/auth/policy/reload": models.RoleAdmin,
 	// Removes a stale dqlite member from the raft configuration (#582
 	// follow-up). Unscoped admins only: the scope middleware denies any
 	// job-scoped key on a route it has no job to check against.

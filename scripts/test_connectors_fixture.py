@@ -115,6 +115,9 @@ class ConnectorFixtureOrchestrationTests(unittest.TestCase):
         shutil.copy(ROOT/'scripts/connectors-fixture-metadata.py', self.root/'scripts/connectors-fixture-metadata.py')
         shutil.copy(ROOT/'scripts/connectors-fixture-control.py', self.root/'scripts/connectors-fixture-control.py')
         shutil.copy(ROOT/'justfile', self.root/'justfile')
+        # integration-up-agent seeds the auth lane's policy file from this fixture.
+        (self.root/'test/testdata/policy').mkdir(parents=True)
+        shutil.copy(ROOT/'test/testdata/policy/auth-lane-reload.yaml', self.root/'test/testdata/policy/auth-lane-reload.yaml')
         self.state = self.root/'mock'
         (self.state/'names').mkdir(parents=True)
         self.bin = self.root/'bin'
@@ -368,7 +371,7 @@ class ConnectorFixtureOrchestrationTests(unittest.TestCase):
                 self.assertTrue(all(call[0] in ('version', 'info') for call in self.calls()))
 
     def test_all_present_component_scenarios_are_selected_and_required(self):
-        (self.root/'test').mkdir()
+        (self.root/'test').mkdir(exist_ok=True)
         for component in ('messages', 'correlation', 'operations'):
             (self.root/'test'/f'connectors_{component}_test.go').touch()
         code, _, error = self.finish(self.launch(MOCK_SCENARIOS='Fixture,Messages,Correlation,Operations'))
@@ -378,7 +381,7 @@ class ConnectorFixtureOrchestrationTests(unittest.TestCase):
         self.assertEqual(runner[-1], 'TestIntegrationTestSuite/(TestConnectorsFixture|TestConnectorsMessages|TestConnectorsCorrelation|TestConnectorsOperations)')
 
     def test_missing_or_skipped_component_cannot_satisfy_qualification(self):
-        (self.root/'test').mkdir()
+        (self.root/'test').mkdir(exist_ok=True)
         (self.root/'test'/'connectors_operations_test.go').touch()
         for extra in ({'MOCK_SCENARIOS': 'Fixture'},
                       {'MOCK_SCENARIOS': 'Fixture,Operations', 'MOCK_SKIPPED_SCENARIO': 'Operations'},

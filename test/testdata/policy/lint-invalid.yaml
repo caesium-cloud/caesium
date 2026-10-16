@@ -1,0 +1,9 @@
+# Invalid: the binding names a namespace the policy does not declare
+# (TestAuthPolicyLintOffline).
+apiVersion: v1
+kind: AccessPolicy
+bindings:
+  - subjects:
+      groups: ["finance-eng"]
+    role: operator
+    namespaces: ["finance"]

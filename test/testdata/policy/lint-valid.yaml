@@ -1,0 +1,22 @@
+# A valid access policy with no lint warnings (TestAuthPolicyLintOffline).
+apiVersion: v1
+kind: AccessPolicy
+namespaces:
+  marketing:
+    kubernetes:
+      namespace: caesium-marketing
+    secrets:
+      allow:
+        - vault/secret/data/marketing/*
+        - env/MARKETING_*
+    quotas:
+      maxConcurrentRuns: 4
+bindings:
+  - subjects:
+      groups: ["CN=Caesium Admins,OU=Groups,DC=example,DC=com"]
+    role: admin
+    namespaces: ["*"]
+  - subjects:
+      groups: ["marketing-eng"]
+    role: operator
+    namespaces: ["marketing"]

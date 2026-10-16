@@ -22,11 +22,13 @@ import (
 // stored on the user row.
 //
 // The auth lane runs CAESIUM_AUTH_MODE=api-key with no SSO provider, so
-// initAuth still installs a SessionStore (every AuthDeps site gets it) but no
-// policy source: a valid cookie reaches PrincipalFromUser, resolves no grants,
-// and must be refused. The seeded user stores role=admin and groups that would
-// have mapped under any env mapping, so the old frozen-role behaviour would
-// have answered 200 here.
+// initAuth still installs a SessionStore (every AuthDeps site gets it), and
+// the policy source is the lane's policy file
+// (test/testdata/policy/auth-lane-reload.yaml), which binds no group this user
+// holds: a valid cookie reaches PrincipalFromUser, resolves no grants, and must
+// be refused. The seeded user stores role=admin and groups that would have
+// mapped under any env mapping, so the old frozen-role behaviour would have
+// answered 200 here.
 //
 // The session is minted with the real SessionStore over the live catalog, keyed
 // with the lane's CAESIUM_AUTH_KEY_HASH_SECRET, exactly as a login would.
