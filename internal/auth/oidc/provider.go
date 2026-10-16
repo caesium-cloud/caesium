@@ -29,6 +29,14 @@ var (
 type Provider struct {
 	oauth2Config oauth2.Config
 	verifier     *gooidc.IDTokenVerifier
+	discovered   *gooidc.Provider
+	// issuer is the discovered issuer; go-oidc requires it to equal the
+	// configured issuer URL, and every verified ID token carries it.
+	issuer string
+	// tokenAuthInParams sends the client credentials in the refresh request
+	// body (client_secret_post) instead of HTTP Basic; set only when the
+	// IdP advertises post and not basic.
+	tokenAuthInParams bool
 
 	groupsClaim     string
 	stateCookieName string
@@ -62,6 +70,17 @@ func New(ctx context.Context, cfg Config) (*Provider, error) {
 	if err != nil {
 		return nil, fmt.Errorf("parse oidc redirect URL: %w", err)
 	}
+	var metadata struct {
+		Issuer           string   `json:"issuer"`
+		TokenAuthMethods []string `json:"token_endpoint_auth_methods_supported"`
+	}
+	if err := discovered.Claims(&metadata); err != nil {
+		return nil, fmt.Errorf("decode oidc discovery metadata: %w", err)
+	}
+	issuer := metadata.Issuer
+	if issuer == "" {
+		issuer = cfg.IssuerURL
+	}
 	return &Provider{
 		oauth2Config: oauth2.Config{
 			ClientID:     cfg.ClientID,
@@ -70,15 +89,18 @@ func New(ctx context.Context, cfg Config) (*Provider, error) {
 			RedirectURL:  cfg.RedirectURL,
 			Scopes:       append([]string(nil), cfg.Scopes...),
 		},
-		verifier:        discovered.Verifier(&gooidc.Config{ClientID: cfg.ClientID}),
-		groupsClaim:     cfg.GroupsClaim,
-		stateCookieName: cfg.StateCookieName,
-		stateTTL:        cfg.StateTTL,
-		cookieSecure:    cfg.CookieSecure,
-		cookieSecret:    append([]byte(nil), cfg.CookieSecret...),
-		publicOrigin:    &url.URL{Scheme: redirectURL.Scheme, Host: redirectURL.Host},
-		httpClient:      cfg.HTTPClient,
-		now:             time.Now,
+		verifier:          discovered.Verifier(&gooidc.Config{ClientID: cfg.ClientID}),
+		discovered:        discovered,
+		issuer:            issuer,
+		tokenAuthInParams: postOnlyClientAuth(metadata.TokenAuthMethods),
+		groupsClaim:       cfg.GroupsClaim,
+		stateCookieName:   cfg.StateCookieName,
+		stateTTL:          cfg.StateTTL,
+		cookieSecure:      cfg.CookieSecure,
+		cookieSecret:      append([]byte(nil), cfg.CookieSecret...),
+		publicOrigin:      &url.URL{Scheme: redirectURL.Scheme, Host: redirectURL.Host},
+		httpClient:        cfg.HTTPClient,
+		now:               time.Now,
 	}, nil
 }
 
@@ -164,6 +186,15 @@ func (p *Provider) CompleteWithReturnTo(r *http.Request) (*authpkg.ExternalIdent
 	identity, err := p.identityFromIDToken(idToken)
 	if err != nil {
 		return nil, "", err
+	}
+	// The refresh token becomes the user's refresh grant (§11.1); the login
+	// tail seals it. An IdP that issues none leaves the user without one.
+	if token.RefreshToken != "" {
+		identity.Refresh = &authpkg.RefreshGrant{
+			Provider: ProviderName,
+			Issuer:   identity.Issuer,
+			Handle:   authpkg.NewRefreshHandle(token.RefreshToken),
+		}
 	}
 	return identity, state.ReturnTo, nil
 }

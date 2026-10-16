@@ -794,7 +794,7 @@ Refresh handles on sessions, an asynchronous single-flight group refresher, the 
 session admin surface, user-bound API keys that resolve grants at use time, and the
 server-brokered `caesium login` flow that works for every provider.
 
-- [ ] E1. One refresh grant per user: `User.RefreshGrant` (AES-256-GCM under an
+- [x] E1. One refresh grant per user: `User.RefreshGrant` (AES-256-GCM under an
       HKDF-SHA256 key derived from `CAESIUM_AUTH_KEY_HASH_SECRET`, info
       `caesium/session-refresh/v1`, nonce per row), `User.RefreshGrantVersion` and
       `User.GroupsRefreshedAt`, shared by every credential type — sessions and keys
@@ -817,6 +817,10 @@ server-brokered `caesium login` flow that works for every provider.
       `internal/auth/oidc/provider.go`, `internal/auth/ldap/provider.go`,
       `internal/auth/ldap/openldap_integration_test.go`.
       Depends on: A2.
+      (W3-γ: lease/fence primitives in `internal/auth/users.go`, provider refresh in
+      new `internal/auth/{oidc,ldap}/refresh.go`; every grant change advances the
+      version, abandoned-lease takeover is uncertain, LDAP refresh is never
+      uncertain. E2 must bound each redemption by the lease, TTL ≥ 2× timeout.)
 - [ ] E2. The async refresher for **both** credential types: on `SessionStore.Validate`
       and on `ValidateKey` for a user-bound key (E4), a user whose `GroupsRefreshedAt`
       is older than `CAESIUM_AUTH_GROUP_REFRESH_INTERVAL` (default `15m`) is queued to

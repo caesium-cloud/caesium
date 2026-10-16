@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 
@@ -74,6 +75,10 @@ func TestAuthenticateSearchBindAndGroupFlow(t *testing.T) {
 
 	require.Equal(t, ProviderName, identity.Issuer)
 	require.Equal(t, "uid=al(ice),ou=People,dc=example,dc=com", identity.Subject)
+	require.NotNil(t, identity.Refresh, "the user DN is the LDAP refresh grant")
+	require.Equal(t, ProviderName, identity.Refresh.Provider)
+	require.Equal(t, ProviderName, identity.Refresh.Issuer)
+	require.Equal(t, identity.Subject, identity.Refresh.Handle.Reveal())
 	require.Equal(t, "alice@example.com", identity.Email)
 	require.Equal(t, "Alice Example", identity.DisplayName)
 	require.Equal(t, []string{"eng", "ops"}, identity.Groups)
@@ -259,10 +264,50 @@ type fakeConn struct {
 	groupResult    *gldap.SearchResult
 	userBindErr    error
 	groupSearchErr error
+
+	// Refresh lookups: base-scope searches answer from entries by DN, else
+	// noSuchObject; baseSearchErr overrides. The user base entry is visible
+	// unless userBaseHidden.
+	entries        map[string]*gldap.Entry
+	baseSearchErr  error
+	userBaseHidden bool
+	serviceErr     error
+	// blockBind / blockSearchBase block that call until Close, signalling
+	// blocked first, like a directory that stops answering.
+	blockBind       bool
+	blockSearchBase string
+	blocked         chan struct{}
+
+	mu     sync.Mutex
+	doneCh chan struct{}
+	closes int
+}
+
+func (f *fakeConn) done() chan struct{} {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.doneCh == nil {
+		f.doneCh = make(chan struct{})
+	}
+	return f.doneCh
+}
+
+func (f *fakeConn) blockUntilClosed() error {
+	if f.blocked != nil {
+		close(f.blocked)
+	}
+	<-f.done()
+	return gldap.NewError(gldap.ErrorNetwork, errors.New("ldap: connection closed"))
 }
 
 func (f *fakeConn) Bind(username, password string) error {
 	f.binds = append(f.binds, bindCall{dn: username, password: password})
+	if f.blockBind {
+		return f.blockUntilClosed()
+	}
+	if username == baseConfig().BindDN && f.serviceErr != nil {
+		return f.serviceErr
+	}
 	if username != baseConfig().BindDN && f.userBindErr != nil {
 		return f.userBindErr
 	}
@@ -271,6 +316,27 @@ func (f *fakeConn) Bind(username, password string) error {
 
 func (f *fakeConn) Search(req *gldap.SearchRequest) (*gldap.SearchResult, error) {
 	f.searches = append(f.searches, req)
+	if f.blockSearchBase != "" && req.BaseDN == f.blockSearchBase {
+		return nil, f.blockUntilClosed()
+	}
+	if req.Scope == gldap.ScopeBaseObject {
+		if req.BaseDN == baseConfig().UserBaseDN {
+			if f.userBaseHidden {
+				return nil, gldap.NewError(gldap.LDAPResultNoSuchObject, errors.New("no such object"))
+			}
+			return &gldap.SearchResult{Entries: []*gldap.Entry{gldap.NewEntry(req.BaseDN, nil)}}, nil
+		}
+		if f.baseSearchErr != nil {
+			return nil, f.baseSearchErr
+		}
+		if entry, ok := f.entries[req.BaseDN]; ok {
+			if entry == nil {
+				return &gldap.SearchResult{}, nil
+			}
+			return &gldap.SearchResult{Entries: []*gldap.Entry{entry}}, nil
+		}
+		return nil, gldap.NewError(gldap.LDAPResultNoSuchObject, errors.New("no such object"))
+	}
 	switch req.BaseDN {
 	case baseConfig().UserBaseDN:
 		if f.nilUserResult {
@@ -299,6 +365,17 @@ func (f *fakeConn) SetTimeout(timeout time.Duration) {
 }
 
 func (f *fakeConn) Close() error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.closed = true
+	f.closes++
+	if f.doneCh == nil {
+		f.doneCh = make(chan struct{})
+	}
+	select {
+	case <-f.doneCh:
+	default:
+		close(f.doneCh)
+	}
 	return nil
 }

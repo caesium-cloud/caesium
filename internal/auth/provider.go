@@ -11,6 +11,7 @@ import (
 	"github.com/caesium-cloud/caesium/internal/metrics"
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/caesium-cloud/caesium/pkg/log"
+	"github.com/google/uuid"
 )
 
 // ErrLoginDenied is returned when an external identity is not allowed to log in.
@@ -30,6 +31,12 @@ type ExternalIdentity struct {
 	// assert it. Only then may Email match policy users: bindings. The zero
 	// value is untrusted.
 	EmailVerified bool
+	// Refresh is the provider's refresh grant from this login: the OIDC
+	// refresh token, or the LDAP user DN. Nil when the provider has none
+	// (SAML, or an IdP that issued no refresh token). The login tail seals it
+	// onto the user row, replacing any earlier grant; its handle redacts
+	// itself in every log, error and JSON form.
+	Refresh *RefreshGrant `json:"-"`
 }
 
 // RedirectAuthenticator is implemented by browser-redirect providers.
@@ -43,6 +50,142 @@ type RedirectAuthenticator interface {
 type CredentialAuthenticator interface {
 	Name() string
 	Authenticate(ctx context.Context, username, password string) (*ExternalIdentity, error)
+}
+
+// GroupRefresher is implemented by providers that can re-read a user's
+// groups from a stored refresh grant without the user present (OIDC, LDAP).
+// The caller owns the user's refresh lease (UserStore.ClaimRefreshLease)
+// before calling, and records the outcome under the same fence.
+//
+// A nil error is a successful redemption. Every failure is a *RefreshError
+// whose Kind says what the caller may do with the grant; an error of any
+// other type is treated as RefreshUncertain (ClassifyRefreshError).
+type GroupRefresher interface {
+	Name() string
+	RefreshGroups(ctx context.Context, req RefreshRequest) (GroupRefresh, error)
+}
+
+// RefreshRequest is one redemption of a user's refresh grant. Issuer and
+// Subject are the user row's identity; a provider never applies groups from
+// a response that names a different one.
+type RefreshRequest struct {
+	UserID  uuid.UUID
+	Issuer  string
+	Subject string
+	Grant   RefreshGrant
+}
+
+// GroupRefresh is the result of a successful redemption.
+type GroupRefresh struct {
+	// Groups is the user's current group set; meaningful only when
+	// GroupsKnown is set.
+	Groups []string
+	// GroupsKnown is false when the IdP accepted the grant but returned no
+	// verifiable groups (an OIDC refresh without an ID token or a usable
+	// userinfo answer). The caller then persists Handle and keeps the stored
+	// groups and their timestamp.
+	GroupsKnown bool
+	// Handle is the handle to store from now on: the rotated one when the IdP
+	// rotated it, otherwise the one just redeemed.
+	Handle RefreshHandle
+	// Rotated reports that the IdP issued a new handle.
+	Rotated bool
+}
+
+// RefreshErrorKind classifies a failed redemption. There are exactly three.
+type RefreshErrorKind uint8
+
+const (
+	// RefreshTransient: nothing reached the IdP, or what did consumed nothing
+	// (dial/DNS failure, cancelled before send, provider not configured for
+	// the grant, an LDAP read that failed). Keep the grant; retry later.
+	RefreshTransient RefreshErrorKind = iota + 1
+	// RefreshUncertain: the request may have reached the IdP and redeemed
+	// (and rotated) the grant, but no definitive answer came back (timeout
+	// after send, connection reset mid-request, 5xx, an unparsable or
+	// unverifiable response). Mark the grant uncertain; never revoke on it.
+	RefreshUncertain
+	// RefreshDefinitive: the IdP definitively refused (OIDC invalid_grant; the
+	// LDAP user entry is gone). See DenialScope for how it interacts with an
+	// uncertain grant.
+	RefreshDefinitive
+)
+
+// String returns the kind as a stable, lower-case label.
+func (k RefreshErrorKind) String() string {
+	switch k {
+	case RefreshTransient:
+		return "transient"
+	case RefreshUncertain:
+		return "uncertain"
+	case RefreshDefinitive:
+		return "definitive"
+	default:
+		return "unknown"
+	}
+}
+
+// DenialScope says what a definitive refusal is about.
+type DenialScope uint8
+
+const (
+	// DenialOfGrant: the IdP rejected this grant (OIDC invalid_grant). A grant
+	// that may already have been redeemed is rejected for that reason alone,
+	// so on an uncertain grant the refusal only clears the grant.
+	DenialOfGrant DenialScope = iota
+	// DenialOfSubject: the IdP says the user is gone (LDAP entry not found).
+	// No earlier redemption can cause that, so it revokes even when the
+	// grant is uncertain.
+	DenialOfSubject
+)
+
+// RefreshError is a classified redemption failure. Its text never contains
+// the handle, a token or a response body.
+type RefreshError struct {
+	Kind RefreshErrorKind
+	// Scope is meaningful for RefreshDefinitive only.
+	Scope DenialScope
+	// Reason is a short, fixed, token-free code for logs and metrics, such
+	// as "invalid_grant" or "timeout_after_send".
+	Reason string
+	// Err is the underlying cause, if any; it never carries a credential.
+	Err error
+}
+
+// NewRefreshError builds a classified failure.
+func NewRefreshError(kind RefreshErrorKind, reason string, cause error) *RefreshError {
+	return &RefreshError{Kind: kind, Reason: reason, Err: cause}
+}
+
+// NewRefreshDenial builds a definitive failure with its scope.
+func NewRefreshDenial(scope DenialScope, reason string) *RefreshError {
+	return &RefreshError{Kind: RefreshDefinitive, Scope: scope, Reason: reason}
+}
+
+func (e *RefreshError) Error() string {
+	msg := "group refresh " + e.Kind.String()
+	if e.Reason != "" {
+		msg += ": " + e.Reason
+	}
+	if e.Err != nil {
+		msg += ": " + e.Err.Error()
+	}
+	return msg
+}
+
+func (e *RefreshError) Unwrap() error { return e.Err }
+
+// ClassifyRefreshError returns the kind of a redemption failure: zero for
+// nil, the kind of a *RefreshError, and RefreshUncertain for anything else,
+// because uncertain is the outcome that never revokes.
+func ClassifyRefreshError(err error) RefreshErrorKind {
+	if err == nil {
+		return 0
+	}
+	if refreshErr, ok := errors.AsType[*RefreshError](err); ok && refreshErr.Kind != 0 {
+		return refreshErr.Kind
+	}
+	return RefreshUncertain
 }
 
 // SSOService is the shared tail: resolve grants, provision the user, mint a session.

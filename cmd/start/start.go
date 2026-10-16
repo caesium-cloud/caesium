@@ -1228,7 +1228,7 @@ func initAuth(ctx context.Context, vars env.Environment, runAsync func(func())) 
 			auth.WithSessionTTLs(vars.AuthSessionIdleTTL, vars.AuthSessionAbsoluteTTL),
 		)
 		if vars.SSOEnabled() {
-			sso = auth.NewSSOService(auth.NewUserStore(conn), sessions, policySource, auth.WithSSOAuditLogger(auditor))
+			sso = auth.NewSSOService(auth.NewUserStore(conn, auth.WithRefreshGrantSecret(vars.AuthKeyHashSecret)), sessions, policySource, auth.WithSSOAuditLogger(auditor))
 			runAsync(func() {
 				sessions.RunLastSeenFlusher(ctx)
 			})
