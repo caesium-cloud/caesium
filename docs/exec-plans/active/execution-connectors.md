@@ -465,35 +465,32 @@ Resume unfinished waves. Do not archive this plan while later items remain.
   startup transport validation and a persistence-codec compatibility risk.
   HTTP reference encoding is separate from the unchanged W4 receipt format;
   a literal target and known fingerprint regression exercises lookup-only replay.
-- **Verification:** The initial dashboard passed the full containerized root
-  race/coverage unit suite, including documentation guardrails. Live
-  verification remains pending. Focused containerized race tests passed across the
-  connector, API, startup, auth and database packages. Full candidate lint passed
-  with zero issues; the full 155-package race/coverage suite and all 41 required
-  tagged hermetic checks passed. Lint, the full 155-package suite and the
-  integration-test image build passed again after the fixture corrections. All 166 CI helper tests,
-  actionlint and shell validation passed. The manual fixture adds a
-  stable owned network container so process restarts preserve the provider and
-  runner transport, plus redacted invalid-enabled-startup evidence. Required
-  remaining evidence includes real-provider HTTP and cluster qualification,
-  existing default/auth regression lanes, real
-  Temporal HTTP reads/faults/restart, unchanged-read write/cardinality bounds,
-  and two actual Caesium nodes using the existing isolated kind/Helm fixture
-  for matching files, skew and guarded epoch transition. Selected scenarios
-  must pass without skips. No new connector CI lane is claimed before F2.
-- **Live and hosted results:** The first real-provider attempt passed the four
-  inherited component scenarios; the new HTTP scenario stopped at the existing
-  database diagnostic because its fixture had not enabled that admin-only
-  endpoint. The corrected head enables that diagnostic only in the owned
-  fixture, awaits all six real Visibility IDs with bounded setup reads, and
-  verifies durable terminal advancement without automatic Queries. Its live
-  rerun is pending; cluster/default/auth qualification has not run.
-  Hosted CI on `fcdf81ee` passed lint, both unit architectures and all arm64
-  Docker/infra shards. It failed the native stress image proof (exit 137 with
-  `OOMKilled=false`) and the existing coverage fixture's now-invalid enabled
-  credentials. The coverage fixture now uses one enabled API-key reference and
-  a matched certificate/key pair. Current-head CI must requalify both failures;
-  neither earlier failure is classified as a pass or a demonstrated flake.
+- **Verification:** Containerized lint passed with zero issues. The full
+  155-package root race/coverage suite and integration-test image build passed
+  after the fixture corrections. All 41 required tagged checks passed for the
+  unchanged runtime, as did focused races across 12 connector/API/auth/database
+  package groups, 30 orchestration probes, 166 CI helper tests, actionlint and
+  shell validation. Independent backend/auth and fixture review has no remaining
+  concrete finding.
+- **Real-provider HTTP:** All five selected scenarios passed without skips on
+  `a25a9980`: correlation, fixture, messages, operations and HTTP reads. Public
+  pagination found all six new real execution IDs without duplicates or catalog
+  inserts; unchanged detail reads caused zero snapshot or identity updates.
+  Live retention evicted all expired snapshots, new terminal evidence persisted
+  within the four-row cap, and repeated closed-workflow reads sent zero automatic
+  Queries. Dated stale detail recovered after outage. Genuine queued promotion,
+  child identity and scope-safe reverse links survived actual server restart.
+  The invalid-enabled and gate-off startup proofs passed. All six owned fixture
+  containers were verified absent after cleanup.
+- **Remaining qualification:** The isolated kind/Helm shared-catalog scenario is
+  running; cluster skew, guarded epoch activation and repointing acceptance are
+  not yet claimed. Local default/auth regressions have not run. Current-head
+  hosted native and arm64 images, lint, arm64 units and both UI suites passed;
+  native stress records exit 137 with `OOMKilled=true`. Coverage and remaining
+  required jobs are pending. The coverage startup fixture now uses one enabled
+  API-key reference and a matched certificate/key pair under the new transport
+  validation. Selected scenarios must pass without skips. No new connector CI
+  lane is claimed before F2.
 - **Publication and acceptance:** C1 is published as a draft. No acceptance is
   claimed. C1 remains unchecked. Normal protected review/checks and the merge queue apply;
   new review dispositions are prepared locally unless replies are authorized.
