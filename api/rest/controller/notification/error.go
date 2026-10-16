@@ -7,6 +7,7 @@ import (
 
 	"github.com/caesium-cloud/caesium/api/internal/orderby"
 	svc "github.com/caesium-cloud/caesium/api/rest/service/notification"
+	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/labstack/echo/v5"
 	"gorm.io/gorm"
 )
@@ -20,6 +21,11 @@ var allowedOrderColumns = map[string]struct{}{
 	"updated_at": {},
 }
 
+// namespaceImmutableMessage is the fixed 400 message for an update that tries
+// to move an object to another namespace. It names no stored data, so clients
+// can tell it apart from a generic "bad request" without a disclosure.
+const namespaceImmutableMessage = "namespace is create-only; delete and recreate the object to move it"
+
 func serviceError(err error) error {
 	switch {
 	case err == nil:
@@ -29,6 +35,8 @@ func serviceError(err error) error {
 	case errors.Is(err, svc.ErrChannelNameConflict),
 		errors.Is(err, svc.ErrPolicyNameConflict):
 		return echo.NewHTTPError(http.StatusConflict, "conflict").Wrap(err)
+	case errors.Is(err, models.ErrNamespaceImmutable):
+		return echo.NewHTTPError(http.StatusBadRequest, namespaceImmutableMessage).Wrap(err)
 	case errors.Is(err, svc.ErrInvalidChannel),
 		errors.Is(err, svc.ErrInvalidPolicy):
 		return echo.NewHTTPError(http.StatusBadRequest, "bad request").Wrap(err)

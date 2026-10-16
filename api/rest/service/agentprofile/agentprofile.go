@@ -29,10 +29,10 @@ var (
 	ErrProfileNameConflict = errors.New("agent profile name conflict")
 )
 
-// DefaultTriageOnlyProfileName is the shipped zero-risk default profile name.
-// It is defined canonically on the model so internal/jobdef's server-side
-// lint can treat it as always resolvable; re-exported here for callers of
-// this package.
+// DefaultTriageOnlyProfileName is the shipped zero-risk default profile name,
+// seeded into the cluster-shared namespace "*". It is defined canonically on
+// the model so internal/jobdef's server-side lint can resolve it while no row
+// exists; re-exported here for callers of this package.
 const DefaultTriageOnlyProfileName = models.DefaultTriageOnlyProfileName
 
 // allowedSecretProviders is the set of secret:// providers a SecretRefs entry
@@ -105,7 +105,10 @@ type ListRequest struct {
 	OrderBy []string
 }
 
+// CreateRequest creates a profile. Namespace is optional: blank means
+// "default", "*" makes the profile cluster-shared.
 type CreateRequest struct {
+	Namespace  string            `json:"namespace,omitempty"`
 	Name       string            `json:"name"`
 	Image      string            `json:"image"`
 	Engine     models.AtomEngine `json:"engine,omitempty"`
@@ -115,7 +118,11 @@ type CreateRequest struct {
 	Playbook   map[string]any    `json:"playbook,omitempty"`
 }
 
+// UpdateRequest patches a profile. Namespace is create-only: an omitted or
+// blank value, or the stored namespace echoed back, is accepted; any other
+// value is rejected with models.ErrNamespaceImmutable.
 type UpdateRequest struct {
+	Namespace  *string            `json:"namespace,omitempty"`
 	Name       *string            `json:"name,omitempty"`
 	Image      *string            `json:"image,omitempty"`
 	Engine     *models.AtomEngine `json:"engine,omitempty"`
@@ -160,6 +167,10 @@ func (s *service) Create(req *CreateRequest) (*models.AgentProfile, error) {
 	if image == "" {
 		return nil, fmt.Errorf("%w: image is required", ErrInvalidProfile)
 	}
+	namespace, err := models.NormalizeObjectNamespace(req.Namespace)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrInvalidProfile, err)
+	}
 	engine, err := validateEngine(req.Engine)
 	if err != nil {
 		return nil, err
@@ -191,6 +202,7 @@ func (s *service) Create(req *CreateRequest) (*models.AgentProfile, error) {
 
 	p := models.AgentProfile{
 		ID:         uuid.New(),
+		Namespace:  namespace,
 		Name:       name,
 		Image:      image,
 		Engine:     engine,
@@ -210,6 +222,11 @@ func (s *service) Update(id uuid.UUID, req *UpdateRequest) (*models.AgentProfile
 	var p models.AgentProfile
 	if err := s.db.WithContext(s.ctx).First(&p, "id = ?", id).Error; err != nil {
 		return nil, err
+	}
+
+	// Namespace is create-only; check before any other validation or write.
+	if err := models.CheckNamespaceUnchanged(p.Namespace, req.Namespace); err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrInvalidProfile, err)
 	}
 
 	updates := map[string]any{}
@@ -407,12 +424,15 @@ func SeedDefaults(ctx context.Context, conn *gorm.DB) error {
 		return err
 	}
 
+	// The built-in default is cluster-shared so every job namespace may
+	// reference it (design §10.4); pkg/db migrates a legacy unset row there too.
 	p := models.AgentProfile{
-		ID:       uuid.New(),
-		Name:     DefaultTriageOnlyProfileName,
-		Image:    "caesiumcloud/triage-agent:latest",
-		Engine:   models.AtomEngineDocker,
-		Playbook: datatypes.JSON(playbook),
+		ID:        uuid.New(),
+		Namespace: models.ClusterNamespace,
+		Name:      DefaultTriageOnlyProfileName,
+		Image:     "caesiumcloud/triage-agent:latest",
+		Engine:    models.AtomEngineDocker,
+		Playbook:  datatypes.JSON(playbook),
 	}
 	if err := conn.WithContext(ctx).Create(&p).Error; err != nil {
 		// A concurrent seeder or an operator-created row with the same name

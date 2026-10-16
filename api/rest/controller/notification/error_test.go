@@ -1,8 +1,41 @@
 package notification
 
 import (
+	"errors"
+	"fmt"
+	"net/http"
 	"testing"
+
+	svc "github.com/caesium-cloud/caesium/api/rest/service/notification"
+	"github.com/caesium-cloud/caesium/internal/models"
+	"github.com/labstack/echo/v5"
+	"github.com/stretchr/testify/require"
 )
+
+func TestServiceErrorMapsNamespaceImmutable(t *testing.T) {
+	for _, base := range []error{svc.ErrInvalidChannel, svc.ErrInvalidPolicy} {
+		err := serviceError(fmt.Errorf("%w: %w", base, fmt.Errorf("%w: object is in namespace %q", models.ErrNamespaceImmutable, "finance")))
+		var httpErr *echo.HTTPError
+		require.True(t, errors.As(err, &httpErr))
+		require.Equal(t, http.StatusBadRequest, httpErr.Code)
+		require.Equal(t, namespaceImmutableMessage, httpErr.Message)
+		require.Contains(t, httpErr.Message, "create-only")
+		require.NotContains(t, httpErr.Message, "finance", "the fixed message must not echo stored data")
+	}
+
+	// Other invalid-input errors (including namespace syntax) stay generic.
+	err := serviceError(fmt.Errorf("%w: namespace %q must be a DNS label", svc.ErrInvalidChannel, "Bad_NS"))
+	var httpErr *echo.HTTPError
+	require.True(t, errors.As(err, &httpErr))
+	require.Equal(t, http.StatusBadRequest, httpErr.Code)
+	require.Equal(t, "bad request", httpErr.Message)
+}
+
+func TestRedactChannelCarriesNamespace(t *testing.T) {
+	require.Equal(t, "marketing", redactChannel(models.NotificationChannel{Namespace: "marketing"}).Namespace)
+	require.Equal(t, models.ClusterNamespace, redactChannel(models.NotificationChannel{Namespace: models.ClusterNamespace}).Namespace)
+	require.Equal(t, models.DefaultNamespace, redactChannel(models.NotificationChannel{}).Namespace, "legacy empty reads as default")
+}
 
 func TestParseSafeOrderBy(t *testing.T) {
 	tests := []struct {

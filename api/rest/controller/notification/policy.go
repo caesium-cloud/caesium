@@ -57,6 +57,7 @@ func (ctrl *Controller) CreatePolicy(c *echo.Context) error {
 		SourceIP:     c.RealIP(),
 		Outcome:      auth.OutcomeSuccess,
 		Metadata: map[string]any{
+			"namespace":   models.NamespaceOrDefault(p.Namespace),
 			"name":        p.Name,
 			"channel_id":  p.ChannelID.String(),
 			"event_types": req.EventTypes,

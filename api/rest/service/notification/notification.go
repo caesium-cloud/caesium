@@ -60,20 +60,31 @@ type ListRequest struct {
 	OrderBy []string
 }
 
+// CreateChannelRequest creates a channel. Namespace is optional: blank means
+// "default", "*" makes the channel cluster-shared.
 type CreateChannelRequest struct {
-	Name    string             `json:"name"`
-	Type    models.ChannelType `json:"type"`
-	Config  map[string]any     `json:"config"`
-	Enabled *bool              `json:"enabled,omitempty"`
+	Namespace string             `json:"namespace,omitempty"`
+	Name      string             `json:"name"`
+	Type      models.ChannelType `json:"type"`
+	Config    map[string]any     `json:"config"`
+	Enabled   *bool              `json:"enabled,omitempty"`
 }
 
+// UpdateChannelRequest patches a channel. Namespace is create-only: an omitted
+// or blank value, or the stored namespace echoed back, is accepted; any other
+// value is rejected with models.ErrNamespaceImmutable.
 type UpdateChannelRequest struct {
-	Name    *string        `json:"name,omitempty"`
-	Config  map[string]any `json:"config,omitempty"`
-	Enabled *bool          `json:"enabled,omitempty"`
+	Namespace *string        `json:"namespace,omitempty"`
+	Name      *string        `json:"name,omitempty"`
+	Config    map[string]any `json:"config,omitempty"`
+	Enabled   *bool          `json:"enabled,omitempty"`
 }
 
+// CreatePolicyRequest creates a policy. Namespace is optional (blank means
+// "default"; it is never inherited from the channel), and the channel must be
+// in the policy's namespace or "*".
 type CreatePolicyRequest struct {
+	Namespace  string         `json:"namespace,omitempty"`
 	Name       string         `json:"name"`
 	ChannelID  uuid.UUID      `json:"channel_id"`
 	EventTypes []string       `json:"event_types"`
@@ -81,7 +92,10 @@ type CreatePolicyRequest struct {
 	Enabled    *bool          `json:"enabled,omitempty"`
 }
 
+// UpdatePolicyRequest patches a policy. Namespace is create-only, as for
+// UpdateChannelRequest.
 type UpdatePolicyRequest struct {
+	Namespace  *string        `json:"namespace,omitempty"`
 	Name       *string        `json:"name,omitempty"`
 	ChannelID  *uuid.UUID     `json:"channel_id,omitempty"`
 	EventTypes []string       `json:"event_types,omitempty"`
@@ -125,6 +139,11 @@ func (s *service) CreateChannel(req *CreateChannelRequest) (*models.Notification
 		return nil, fmt.Errorf("%w: name is required", ErrInvalidChannel)
 	}
 
+	namespace, err := models.NormalizeObjectNamespace(req.Namespace)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrInvalidChannel, err)
+	}
+
 	if err := ensureChannelNameAvailable(s.db.WithContext(s.ctx), name, uuid.Nil); err != nil {
 		return nil, err
 	}
@@ -135,11 +154,12 @@ func (s *service) CreateChannel(req *CreateChannelRequest) (*models.Notification
 	}
 
 	ch := models.NotificationChannel{
-		ID:      uuid.New(),
-		Name:    name,
-		Type:    req.Type,
-		Config:  configJSON,
-		Enabled: true,
+		ID:        uuid.New(),
+		Namespace: namespace,
+		Name:      name,
+		Type:      req.Type,
+		Config:    configJSON,
+		Enabled:   true,
 	}
 	if req.Enabled != nil {
 		ch.Enabled = *req.Enabled
@@ -155,6 +175,11 @@ func (s *service) UpdateChannel(id uuid.UUID, req *UpdateChannelRequest) (*model
 	var ch models.NotificationChannel
 	if err := s.db.WithContext(s.ctx).First(&ch, "id = ?", id).Error; err != nil {
 		return nil, err
+	}
+
+	// Namespace is create-only; check before any other validation or write.
+	if err := models.CheckNamespaceUnchanged(ch.Namespace, req.Namespace); err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrInvalidChannel, err)
 	}
 
 	updates := map[string]any{}
@@ -231,16 +256,24 @@ func (s *service) CreatePolicy(req *CreatePolicyRequest) (*models.NotificationPo
 		return nil, fmt.Errorf("%w: name is required", ErrInvalidPolicy)
 	}
 
+	namespace, err := models.NormalizeObjectNamespace(req.Namespace)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrInvalidPolicy, err)
+	}
+
 	if err := ensurePolicyNameAvailable(s.db.WithContext(s.ctx), name, uuid.Nil); err != nil {
 		return nil, err
 	}
 
-	// Validate channel exists
+	// Validate channel exists and is visible from the policy's namespace.
 	var ch models.NotificationChannel
 	if err := s.db.WithContext(s.ctx).First(&ch, "id = ?", req.ChannelID).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, fmt.Errorf("%w: channel %s not found", ErrInvalidPolicy, req.ChannelID)
 		}
+		return nil, err
+	}
+	if err := ensureChannelVisible(namespace, &ch); err != nil {
 		return nil, err
 	}
 
@@ -266,6 +299,7 @@ func (s *service) CreatePolicy(req *CreatePolicyRequest) (*models.NotificationPo
 
 	p := models.NotificationPolicy{
 		ID:         uuid.New(),
+		Namespace:  namespace,
 		Name:       name,
 		ChannelID:  req.ChannelID,
 		EventTypes: eventTypesJSON,
@@ -288,6 +322,11 @@ func (s *service) UpdatePolicy(id uuid.UUID, req *UpdatePolicyRequest) (*models.
 		return nil, err
 	}
 
+	// Namespace is create-only; check before any other validation or write.
+	if err := models.CheckNamespaceUnchanged(p.Namespace, req.Namespace); err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrInvalidPolicy, err)
+	}
+
 	updates := map[string]any{}
 
 	if req.Name != nil {
@@ -307,6 +346,9 @@ func (s *service) UpdatePolicy(id uuid.UUID, req *UpdatePolicyRequest) (*models.
 			if errors.Is(err, gorm.ErrRecordNotFound) {
 				return nil, fmt.Errorf("%w: channel %s not found", ErrInvalidPolicy, req.ChannelID)
 			}
+			return nil, err
+		}
+		if err := ensureChannelVisible(p.Namespace, &ch); err != nil {
 			return nil, err
 		}
 		updates["channel_id"] = *req.ChannelID
@@ -355,6 +397,16 @@ func (s *service) DeletePolicy(id uuid.UUID) error {
 }
 
 // --- Helpers ---
+
+// ensureChannelVisible enforces that a policy references only a channel in its
+// own namespace or the cluster-shared namespace (design §10.4).
+func ensureChannelVisible(policyNamespace string, ch *models.NotificationChannel) error {
+	if models.ObjectVisibleFrom(policyNamespace, ch.Namespace) {
+		return nil
+	}
+	return fmt.Errorf("%w: channel %s is in namespace %q; a policy in namespace %q may reference only channels in its own namespace or %q",
+		ErrInvalidPolicy, ch.ID, models.NamespaceOrDefault(ch.Namespace), models.NamespaceOrDefault(policyNamespace), models.ClusterNamespace)
+}
 
 func validateChannelType(ct models.ChannelType) error {
 	valid := notification.ValidChannelTypes()

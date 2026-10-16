@@ -371,7 +371,7 @@ trigger:
   defaultParams: {mode: incremental}          # top-level; paramOverrides is validated against these
 ```
 
-- `profile` (required) names a server-side `AgentProfile`; offline lint emits a scope note, server-side lint/apply verify it.
+- `profile` (required) names a server-side `AgentProfile`; offline lint emits a scope note, server-side lint/apply verify it exists in the job's namespace or the cluster-shared `*` (the same applies to `escalation.channel`). The built-in `triage-only` profile is in `*`, so any namespace may reference it.
 - `classes` (≥1): `transient_infra`, `schema_violation`, `sla_risk`, `data_unavailable`, `auth_failure`, `oom`, `quota`, `unknown`.
 - Action names for `allow` / `perClass[].allow` / `perClass[].requireApproval` / `requireApproval`: `auto_retry_backoff`, `snooze_until_cron`, `snooze_retry`, `retry_from_failure`, `retry_callbacks`, `notify`, `quarantine_replay`, `rerun_with_params`, `pause_job`, `unpause_job`, `clear_cache_entry`, `suppress_downstream_alerts`, `extend_sla_once`, `skip_task`, `override_schema_gate`, `apply_jobdef_patch`, `escalate`. A tier-3 action always creates an ApprovalRequest regardless of `allow`. See the [generated reference](job-schema-reference.md#remediation).
 - `perClass.<class>` (keys must be known failure classes) only ever NARROWS: `allow` intersects with the surrounding allow-list, `requireApproval` unions with it, `paramOverrides` keeps only the keys and values both permit. It cannot grant an action the job or its profile withholds; a class with no entry inherits the surrounding policy.

@@ -95,8 +95,17 @@ These back the investigation verbs described in
 | `GET /incidents`, `GET /incidents/:id` | Incidents opened by the remediation runtime. Gated by `CAESIUM_AGENT_REMEDIATION_ENABLED`. |
 | `POST /incidents/:id/approvals/:approval_id/approve`, `…/reject` | Decide a tier-3 approval. |
 | `GET /agent/incidents/:id/bundle`, `GET /agent/incidents/:id/context/*`, `POST /agent/incidents/:id/actions`, `POST /agent/incidents/:id/notes`, `POST /agent/incidents/:id/mcp` | The scoped surface the agent runtime uses. See [design/agent-in-the-loop.md](design/agent-in-the-loop.md). |
-| `GET /agentprofiles`, `POST /agentprofiles`, `GET /agentprofiles/:id`, `PATCH /agentprofiles/:id`, `DELETE /agentprofiles/:id` | Agent profiles referenced by `metadata.remediation`. |
-| `GET /notifications/channels`, `GET /notifications/policies` (plus create, read, patch, delete) | Notification channels and policies. |
+| `GET /agentprofiles`, `POST /agentprofiles`, `GET /agentprofiles/:id`, `PATCH /agentprofiles/:id`, `DELETE /agentprofiles/:id` | Agent profiles referenced by `metadata.remediation`. Carries a tenancy `namespace` (see below). |
+| `GET /notifications/channels`, `GET /notifications/policies` (plus create, read, patch, delete) | Notification channels and policies. Both carry a tenancy `namespace` (see below); a policy may reference only a channel in its own namespace or `*`, on create and on a `channel_id` patch (400 otherwise). |
+
+Agent profiles, notification channels, and notification policies are shared
+objects with a tenancy `namespace`, returned on every read. A create body may
+set it: omitted or blank means `default`, `*` makes the object cluster-shared,
+and anything else must be a DNS label (400 otherwise). The namespace is
+create-only: a `PATCH` may omit it or echo the stored value, but a `PATCH` that
+changes it returns 400 with `namespace is create-only; delete and recreate the
+object to move it`, and nothing in that patch is written. Moving an object is
+delete + create.
 
 ## System and operator surfaces
 
