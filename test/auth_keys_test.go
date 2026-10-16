@@ -37,6 +37,8 @@ type apiKeyMetadata struct {
 	Scope       *struct {
 		Jobs []string `json:"jobs"`
 	} `json:"scope"`
+	// Namespaces is absent (nil) for a cluster-wide key.
+	Namespaces []string `json:"namespaces"`
 }
 
 // createdAPIKey pairs a freshly minted key's plaintext with its metadata. The
@@ -241,13 +243,15 @@ func (s *IntegrationTestSuite) TestAuthAuditCLI() {
 }
 
 type auditEntry struct {
-	ID           string    `json:"id"`
-	Timestamp    time.Time `json:"timestamp"`
-	Actor        string    `json:"actor"`
-	Action       string    `json:"action"`
-	ResourceType string    `json:"resource_type"`
-	ResourceID   string    `json:"resource_id"`
-	Outcome      string    `json:"outcome"`
+	ID           string          `json:"id"`
+	Timestamp    time.Time       `json:"timestamp"`
+	Actor        string          `json:"actor"`
+	Action       string          `json:"action"`
+	ResourceType string          `json:"resource_type"`
+	ResourceID   string          `json:"resource_id"`
+	Outcome      string          `json:"outcome"`
+	Namespace    string          `json:"namespace"`
+	Metadata     json.RawMessage `json:"metadata"`
 }
 
 // TestAuthKeysREST hits the key-management REST surface directly — the same

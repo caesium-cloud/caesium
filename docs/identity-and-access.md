@@ -35,8 +35,9 @@ Contents: [Overview and concepts](#overview-and-concepts) |
   The effective role in namespace N is `max(grants[N], grants["*"])`.
 - **Principal.** The authenticated caller: an API key or an SSO user. The audit
   actor is the key prefix or the user's email. The cluster role (the grant at
-  `*`) is what audit rows, metrics labels, and the `role` field of
-  `GET /auth/whoami` report.
+  `*`) is what audit rows, metrics labels, and the `role` and `cluster_role`
+  fields of `GET /auth/whoami` report; whoami's `grants` and `namespaces`
+  fields list every grant.
 - **Tenancy namespace versus dataset namespace.** These are two unrelated
   axes. The tenancy namespace described in this guide decides which jobs, and
   which objects that belong to them, a principal may see and change. The
@@ -152,10 +153,14 @@ SSO method objects include `type`, stable `id`, display `label`, same-origin
 `credential` for LDAP. API-key auth is advertised as `{ "type": "api-key" }`
 when `CAESIUM_AUTH_MODE=api-key` is enabled.
 
-`GET /auth/whoami` requires a valid API key or session cookie. Cookie-session
-responses include `csrf_token` alongside the principal fields (`kind`,
-`subject`, `email`, and `role`). Browser clients should keep that token in
-memory and send it as `X-CSRF-Token` on unsafe cookie-session requests.
+`GET /auth/whoami` requires a valid API key or session cookie. It returns the
+principal: `kind`, `subject`, `email` (users), `role` and `cluster_role` (the
+role at `*`, empty for a principal confined to namespaces), `grants` (namespace
+to role, `*` for cluster-wide) and `namespaces` (the sorted namespaces it can
+read, `["*"]` with a cluster grant, `[]` with none). A job-scoped key also
+gets `scope`. Cookie-session responses include `csrf_token`; browser clients
+should keep it in memory and send it as `X-CSRF-Token` on unsafe cookie-session
+requests.
 
 `POST /auth/logout` revokes the current cookie session and clears the session
 cookie. Because logout is an unsafe cookie-session request, browser callers
@@ -586,7 +591,7 @@ principal confined to some namespaces is treated:
 | identity | Allowed whatever its grants, even none: `GET /auth/whoami`, `POST /auth/logout`, `GET /v1/system/features`. |
 | cluster | Always denied (403 `insufficient_role`): metrics, nodes and workers, atoms, logs, database, cache prune, `POST /v1/triggers`, the connector reads (`/v1/connectors*`), and `GET /v1/auth/policy` plus `POST /v1/auth/policy/reload`. |
 | namespaced | Caesium resolves the namespace of the target the handler will act on and requires the route's role in it (in every resolved namespace; once B6 ships, dataset reads will need it in any one). A target with no owning namespace is cluster-only. |
-| collection | The handler may only return rows from the namespaces where the principal holds the route's role. No collection route is live yet (see below). |
+| collection | The handler may only return rows from the namespaces where the principal holds the route's role. Only the API key list is live so far (see below). |
 
 A principal is *confined* on a route when its cluster role (its grant at `*`)
 is below the route's role. An unconfined principal is authorised exactly as
@@ -615,6 +620,8 @@ target's namespace:
   policy or agent profile by id. `*` objects are readable by viewers anywhere
   and writable only with the role at `*`.
 - **Incidents:** reject an approval.
+- **API keys:** list, create, revoke and rotate keys confined to namespaces
+  where it is admin (see [API keys and CLI login](#api-keys-and-cli-login)).
 - **Audit:** `GET /v1/auth/audit` is authorised on its `?namespace=` filter (a
   namespace or `*`). An omitted filter means `*`, so a namespace admin must pass
   one.
@@ -632,7 +639,6 @@ that makes it namespace-aware lands (unconfined principals are unaffected):
 
 | Item | Routes |
 | --- | --- |
-| A5 | API key list, create, revoke, rotate (`/v1/auth/keys`) |
 | A6 | `POST /v1/events` |
 | A8 | `/v1/agent/incidents/*`, incident detail `GET /v1/incidents/:id`, approval approve |
 | B2 | `POST /v1/jobs`, `/v1/jobdefs/apply`, `/lint`, `/diff`, `GET /v1/jobs/:id/manifest`, `PATCH /v1/triggers/:id` |
@@ -670,12 +676,45 @@ API key before any session cookie. Key lifecycle is `caesium auth key` and the
 `/v1/auth/keys` endpoints, and a key may be further narrowed to a list of job
 aliases.
 
-Keys carry a `namespaces` column. A NULL value (every key minted before
-namespaces existed) means cluster-wide, so each existing key keeps its meaning.
-Any other empty or undecodable value grants nothing. **Planned (A5):** minting
-and rotating keys confined to namespaces (`--namespace`), the rule that a caller
-can mint only keys within its own grants, and SSO-admin key management. Until
-then every key is cluster-wide.
+A key holds its role in a set of namespaces. Without `--namespace` it is
+cluster-wide, as every key minted before namespaces existed is (their
+`namespaces` column is NULL):
+
+```sh
+caesium auth key create --role operator --namespace marketing [--namespace finance] [--jobs a,b] [--expires 90d]
+```
+
+`--namespace` is repeatable (or comma-separated); `POST /v1/auth/keys` takes
+the same list as `namespaces`. Names must be DNS labels; `*` alone is a
+cluster key, and an empty list, an empty name (`--namespace ""`) or `*` mixed
+with names is `400`. With a policy
+file, every named namespace must be declared in it (`400` naming the one that
+is not); with no file any valid name is accepted. `--jobs` (or its older
+spelling `--scope-jobs`) narrows the key further to a list of job aliases; an
+empty value is refused rather than minting a key that is not narrowed.
+
+**Minting is limited to the caller's own grants.** Creating a key needs admin
+in every namespace it names (`*` for a cluster key), so a namespace admin
+(`admin` in `marketing`) can create keys confined to `marketing` at any role,
+and only a cluster admin can create a cluster key. Revoking or rotating a key
+needs admin in every namespace the key is confined to. A refused request is an
+audited `403` (`auth.denied`). Job-scoped and agent-session keys cannot manage
+keys. `GET /v1/auth/keys` (`caesium auth key list`) shows a cluster admin every
+key; a namespace admin sees only the keys confined to namespaces where it is
+admin, never a cluster key. A listed key shows `namespaces` only when it is
+confined.
+
+SSO users manage keys exactly like key-authenticated callers, from their
+browser session (unsafe requests still need the `X-CSRF-Token` header). The
+key's `created_by` and the audit actor are the user's email.
+
+Rotation replaces the secret, not the grant: the new key has the same role,
+job list, namespaces and expiry as the old one, and the old key stays valid
+for the grace period (`--grace-period`, default 24h) but never past its own
+expiry. A revoked or expired key cannot be rotated, nor can a key whose
+namespaces are no longer all declared in the policy file (`409`); revoke it and
+create a new one. A key whose stored namespaces are unreadable grants nothing;
+only a cluster admin can revoke it, and it cannot be rotated.
 
 **Planned (E5):** `caesium login`, `caesium logout` and `caesium whoami` for
 interactive CLI sign-in through the server's configured provider.

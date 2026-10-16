@@ -148,6 +148,13 @@ var namespaceResolvers = map[string]namespaceResolver{
 
 	// The audit log authorises on ?namespace= (omitted ⇒ "*").
 	"GET /v1/auth/audit": resolveAuditNamespace,
+	// API keys (A5): minting needs the role in every namespace the body asks
+	// for ("*" when it names none); revoke and rotate need it in every
+	// namespace the stored key is confined to (NULL, and an unusable value,
+	// ⇒ "*": only a cluster principal may act).
+	"POST /v1/auth/keys":            resolveKeyCreateNamespaces,
+	"POST /v1/auth/keys/:id/revoke": resolveStoredKeyNamespaces,
+	"POST /v1/auth/keys/:id/rotate": resolveStoredKeyNamespaces,
 }
 
 // HasNamespaceResolver reports whether the namespaced route identified by
@@ -383,6 +390,36 @@ func resolveAuditNamespace(c *echo.Context, _ *auth.Service, role models.Role) (
 	return []nsRequirement{every(role, namespace)}, nil
 }
 
+// resolveKeyCreateNamespaces reads the namespaces a key create body asks for,
+// normalised exactly as the handler normalises them (omitted ⇒ "*").
+func resolveKeyCreateNamespaces(c *echo.Context, _ *auth.Service, role models.Role) ([]nsRequirement, error) {
+	var payload struct {
+		Namespaces *[]string `json:"namespaces"`
+	}
+	if err := peekJSONBody(c, &payload); err != nil {
+		return nil, err
+	}
+	_, namespaces, err := auth.NormalizeKeyNamespaces(payload.Namespaces)
+	if err != nil {
+		return nil, echo.NewHTTPError(http.StatusBadRequest, err.Error()).Wrap(err)
+	}
+	return []nsRequirement{every(role, namespaces...)}, nil
+}
+
+// resolveStoredKeyNamespaces reads the namespaces the stored key is confined
+// to ("*" for a cluster key and for an unusable stored value).
+func resolveStoredKeyNamespaces(c *echo.Context, svc *auth.Service, role models.Role) ([]nsRequirement, error) {
+	keyID, err := pathUUID(c, "id")
+	if err != nil {
+		return nil, err
+	}
+	namespaces, err := svc.KeyNamespacesByID(c.Request().Context(), keyID)
+	if err != nil {
+		return nil, lookupError(err)
+	}
+	return []nsRequirement{every(role, namespaces...)}, nil
+}
+
 // DatasetPathIdentity returns the dataset identity a /v1/datasets/:ns/:name
 // route addresses. It is the one decoding the dataset handlers and the auth
 // middleware share: Echo leaves parameters escaped when the request has a
@@ -413,28 +450,38 @@ func DatasetPathIdentity(c *echo.Context) (string, string) {
 // JSON (415 otherwise). The decode is json.Unmarshal over the whole body, as
 // Echo's default serializer does.
 func peekJSONNamespace(c *echo.Context) (string, error) {
+	var payload struct {
+		Namespace string `json:"namespace"`
+	}
+	if err := peekJSONBody(c, &payload); err != nil {
+		return "", err
+	}
+	return payload.Namespace, nil
+}
+
+// peekJSONBody decodes a request body into out exactly as the handler's
+// c.Bind will (see peekJSONNamespace) and leaves the body readable for the
+// handler. An empty body leaves out unchanged.
+func peekJSONBody(c *echo.Context, out any) error {
 	req := c.Request()
 	if req.ContentLength == 0 {
-		return "", nil
+		return nil
 	}
 	base, _, _ := strings.Cut(req.Header.Get(echo.HeaderContentType), ";")
 	if strings.TrimSpace(base) != echo.MIMEApplicationJSON {
-		return "", echo.NewHTTPError(http.StatusUnsupportedMediaType, "request body must be application/json")
+		return echo.NewHTTPError(http.StatusUnsupportedMediaType, "request body must be application/json")
 	}
 	body, err := readAndRestoreBodyLimited(c, namespaceBodyPeekLimit)
 	if err != nil {
 		if errors.Is(err, errBodyTooLarge) {
-			return "", echo.NewHTTPError(http.StatusRequestEntityTooLarge, "request body too large").Wrap(err)
+			return echo.NewHTTPError(http.StatusRequestEntityTooLarge, "request body too large").Wrap(err)
 		}
-		return "", badRequest(err)
+		return badRequest(err)
 	}
-	var payload struct {
-		Namespace string `json:"namespace"`
+	if err := json.Unmarshal(body, out); err != nil {
+		return badRequest(err)
 	}
-	if err := json.Unmarshal(body, &payload); err != nil {
-		return "", badRequest(err)
-	}
-	return payload.Namespace, nil
+	return nil
 }
 
 // confinedBodyBufferLimit caps the body a namespace-confined principal may
