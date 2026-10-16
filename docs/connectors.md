@@ -380,6 +380,11 @@ and local-job allowlist. They can persist verified links to existing admissions;
 they never create local runs. Follow a verified local job/run into its existing
 logs, receipts and data APIs. An authorized scoped caller of the reverse-link
 route receives an empty external list; the job/run ownership check still applies.
+Verified reverse links remain available after their connection is disabled or
+removed, without contacting the provider. The process read budget and each
+participating enabled connection's read budget still apply. Response ceilings
+use the strictest participating configured limits, including disabled
+connections; removed connections use the global ceilings.
 
 Identical concurrent reads share in-flight work. Read budgets, RPC deadlines and
 per-connection concurrency limits apply before provider calls; exhaustion returns
@@ -546,7 +551,8 @@ for the frozen payload. The real fixture qualifies provider identity, queued
 promotion, retry and actual public job starts. Component tests separately
 exercise typed persistence and database reopen. `TestConnectorsRead` drives the
 public relationship and reverse-link routes against the running server,
-including queued promotion and an actual process restart.
+including queued promotion, actual process restarts and historical reverse
+links after guarded connection disable/removal.
 
 ## Temporal messages
 

@@ -159,6 +159,82 @@ func TestReverseLinksHonorStrictestParticipatingConnectionBudget(t *testing.T) {
 	_, err = r.RunLinks(context.Background(), "actor", jobID, runID)
 	require.ErrorIs(t, err, core.ErrPayloadTooLarge)
 }
+
+func seedRunLink(t *testing.T, db *gorm.DB, connectionID, opaqueID string, jobID, runID uuid.UUID) models.ExternalExecutionCorrelation {
+	t.Helper()
+	row := models.ExternalExecutionCorrelation{ID: uuid.New(), OpaqueID: opaqueID, ConnectionID: connectionID, ActivityID: uuid.NewString(), ActivityType: "declared", RelationType: core.RelationDelegation, BindingVersion: "v1", AdmissionID: uuid.New(), JobID: jobID, RunID: &runID, IdempotencyKey: uuid.NewString(), Outcome: "created", SourceEventID: 1, Evidence: datatypes.JSON(`{}`), EvidenceDigest: uuid.NewString(), VerifiedAt: time.Now(), CreatedAt: time.Now(), UpdatedAt: time.Now()}
+	require.NoError(t, db.Create(&row).Error)
+	return row
+}
+
+func TestReverseLinksRetainDisabledAndRemovedConnections(t *testing.T) {
+	r, db := testRuntime(t)
+	disabled := r.cfg.Connections[0]
+	disabled.ID, disabled.Enabled = "disabled", false
+	r.cfg.Connections = append(r.cfg.Connections, disabled)
+	limits := core.DefaultLimits()
+	limits.ReadsPerMinute = 1
+	r.connections["primary"].guard = core.NewReadGuard(r.store, r.fingerprint, limits)
+	jobID, runID := uuid.New(), uuid.New()
+	var expected []models.ExternalExecutionCorrelation
+	for i, id := range []string{"disabled", "removed", "primary", "primary"} {
+		expected = append(expected, seedRunLink(t, db, id, fmt.Sprint(i), jobID, runID))
+	}
+	rows, err := r.RunLinks(context.Background(), "actor", jobID, runID)
+	require.NoError(t, err, "retired links must not hide active links, regardless of row order")
+	require.Len(t, rows, len(expected))
+	for i := range expected {
+		require.Equal(t, expected[i].ID, rows[i].ID)
+	}
+	_, err = r.RunLinks(context.Background(), "actor", jobID, runID)
+	require.ErrorIs(t, err, core.ErrReadBudget, "duplicate rows charge the active connection only once per request")
+	require.Nil(t, r.connections["primary"].client)
+	require.Nil(t, r.connections["primary"].observer)
+}
+
+func TestReverseLinksHonorDisabledConnectionResponseCeilings(t *testing.T) {
+	for _, ceiling := range []string{"entries", "metadata"} {
+		t.Run(ceiling, func(t *testing.T) {
+			r, db := testRuntime(t)
+			disabled := r.cfg.Connections[0]
+			disabled.ID, disabled.Enabled = "disabled", false
+			if ceiling == "entries" {
+				disabled.Limits.MaxPageEntries = 1
+			} else {
+				disabled.Limits.MaxPageMetadataBytes = 100
+			}
+			r.cfg.Connections = append(r.cfg.Connections, disabled)
+			jobID, runID := uuid.New(), uuid.New()
+			seedRunLink(t, db, "disabled", "0", jobID, runID)
+			seedRunLink(t, db, "primary", "1", jobID, runID)
+			_, err := r.RunLinks(context.Background(), "actor", jobID, runID)
+			require.ErrorIs(t, err, core.ErrPayloadTooLarge)
+		})
+	}
+}
+
+func TestReverseLinksWithoutEnabledConnectionsStillUseProcessBudget(t *testing.T) {
+	for _, connectionID := range []string{"disabled", "removed", "empty"} {
+		t.Run(connectionID, func(t *testing.T) {
+			r, db := testRuntime(t)
+			disabled := r.cfg.Connections[0]
+			disabled.ID, disabled.Enabled = "disabled", false
+			r.cfg.Connections = append(r.cfg.Connections, disabled)
+			limits := core.DefaultLimits()
+			limits.ReadsPerMinute = 1
+			r.readBudget = core.NewReadGuard(r.store, r.fingerprint, limits)
+			jobID, runID := uuid.New(), uuid.New()
+			if connectionID != "empty" {
+				seedRunLink(t, db, connectionID, "0", jobID, runID)
+			}
+			_, err := r.RunLinks(context.Background(), "actor", jobID, runID)
+			require.NoError(t, err)
+			_, err = r.RunLinks(context.Background(), "actor", jobID, runID)
+			require.ErrorIs(t, err, core.ErrReadBudget)
+		})
+	}
+}
+
 func TestServiceObservationGenerationAdvancesFromAnotherNodesStoredFence(t *testing.T) {
 	r, _ := testRuntime(t)
 	svc := &describeService{}

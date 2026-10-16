@@ -101,6 +101,16 @@ if [ -f test/connectors_read_test.go ]; then
     http_reads=true
     [ "$existing" = false ] || { echo "selected connector HTTP/restart qualification requires an owned server" >&2; exit 1; }
     mkdir "$artifacts/control"
+    cat >"$artifacts/control/start-server.sh" <<'SH'
+#!/bin/sh
+set -eu
+if [ -f /artifacts/control/previous-fingerprint ]; then
+    CAESIUM_CONNECTORS_CONFIG_PREVIOUS_FINGERPRINT=$(cat /artifacts/control/previous-fingerprint)
+    export CAESIUM_CONNECTORS_CONFIG_PREVIOUS_FINGERPRINT
+fi
+exec /bin/caesium "$@"
+SH
+    chmod 0755 "$artifacts/control/start-server.sh"
     python3 - "$artifacts/http-connections.yaml" <<'PY'
 from pathlib import Path
 import sys

@@ -20,6 +20,7 @@ import (
 	"github.com/caesium-cloud/caesium/pkg/env"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
+	"gopkg.in/yaml.v3"
 )
 
 // These wire types deliberately decode the public HTTP response. No test calls
@@ -540,5 +541,109 @@ func (s *IntegrationTestSuite) connectorReadCorrelation(viewer, scoped createdAP
 	connectorReadHTTP(s.T(), s.caesiumURL, viewer.Plaintext, http.MethodGet, reversePath, nil, &reverse)
 	s.Require().Len(reverse.Executions, 1)
 	s.Require().Equal(link.ID, reverse.Executions[0].ID, "public reverse link must survive an actual Caesium process restart")
-	s.Require().NoError(os.WriteFile(filepath.Join(os.Getenv("CAESIUM_CONNECTORS_ARTIFACTS"), "read-correlation-http-evidence.json"), mustConnectorJSON(s.T(), map[string]any{"candidate_sha": os.Getenv("CAESIUM_CONNECTORS_CANDIDATE_SHA"), "workflow": ref, "queued": queued, "promoted": promoted, "reverse": reverse, "relationship_http_reads": relationshipReads}), 0600))
+	retirement := s.connectorReadRetiredCorrelation(viewer, scoped, reference, link, reversePath)
+	s.Require().NoError(os.WriteFile(filepath.Join(os.Getenv("CAESIUM_CONNECTORS_ARTIFACTS"), "read-correlation-http-evidence.json"), mustConnectorJSON(s.T(), map[string]any{"candidate_sha": os.Getenv("CAESIUM_CONNECTORS_CANDIDATE_SHA"), "workflow": ref, "queued": queued, "promoted": promoted, "reverse": reverse, "relationship_http_reads": relationshipReads, "retired_connection": retirement}), 0600))
+}
+
+// Configuration changes go through the same file parser, guarded activation,
+// and actual process restart as an operator's change. The runner never writes
+// correlation or configuration rows into the database.
+func (s *IntegrationTestSuite) connectorReadReconfigure(viewer createdAPIKey, raw []byte) map[string]any {
+	s.T().Helper()
+	var before, after connectorReadConnections
+	connectorReadHTTP(s.T(), s.caesiumURL, viewer.Plaintext, http.MethodGet, "/v1/connectors", nil, &before)
+	cfg, err := connector.Parse(raw, nil)
+	s.Require().NoError(err)
+	fingerprint, err := connector.Fingerprint(cfg)
+	s.Require().NoError(err)
+	artifacts := os.Getenv("CAESIUM_CONNECTORS_ARTIFACTS")
+	s.Require().NoError(os.WriteFile(filepath.Join(artifacts, "control", "previous-fingerprint"), []byte(before.Fingerprint), 0600))
+	// Truncate the mounted file rather than replacing its bind-mounted inode.
+	s.Require().NoError(os.WriteFile(filepath.Join(artifacts, "http-connections.yaml"), raw, 0644))
+	restart := s.connectorHostRestart()
+	connectorReadHTTP(s.T(), s.caesiumURL, viewer.Plaintext, http.MethodGet, "/v1/connectors", nil, &after)
+	s.Require().True(after.Ready)
+	s.Require().Equal(fingerprint, after.Fingerprint)
+	s.Require().NotEqual(before.Fingerprint, after.Fingerprint)
+	return map[string]any{"previous_fingerprint": before.Fingerprint, "fingerprint": after.Fingerprint, "restart": restart}
+}
+
+func (s *IntegrationTestSuite) connectorReadRetiredCorrelation(viewer, scoped createdAPIKey, reference connector.ExecutionReference, link models.ExternalExecutionCorrelation, reversePath string) map[string]any {
+	s.T().Helper()
+	artifacts := os.Getenv("CAESIUM_CONNECTORS_ARTIFACTS")
+	original, err := os.ReadFile(filepath.Join(artifacts, "http-connections.yaml"))
+	s.Require().NoError(err)
+	var document map[string]any
+	s.Require().NoError(yaml.Unmarshal(original, &document))
+	connections, ok := document["connections"].([]any)
+	s.Require().True(ok)
+	s.Require().Len(connections, 1)
+	active, ok := connections[0].(map[string]any)
+	s.Require().True(ok)
+	retired := make(map[string]any, len(active))
+	for key, value := range active {
+		retired[key] = value
+	}
+	retired["id"] = "fixture-retired"
+	document["connections"] = append(connections, retired)
+	encode := func() []byte {
+		raw, e := yaml.Marshal(document)
+		s.Require().NoError(e)
+		return raw
+	}
+	evidence := map[string]any{"enabled": s.connectorReadReconfigure(viewer, encode())}
+	retiredRef, err := connector.NewExecutionReference("fixture-retired", reference.Coordinates)
+	s.Require().NoError(err)
+	retiredPath := "/v1/connectors/fixture-retired/executions/" + url.PathEscape(connector.ReferenceID(retiredRef))
+	var relations connectorReadRelations
+	connectorReadHTTP(s.T(), s.caesiumURL, viewer.Plaintext, http.MethodGet, retiredPath+"/relationships", nil, &relations)
+	s.Require().Len(relations.Correlations, 1, "the second configured connection must observe genuine admission evidence over HTTP")
+	retiredLink := relations.Correlations[0]
+	s.Require().Equal(link.AdmissionID, retiredLink.AdmissionID)
+	s.Require().Equal(link.RunID, retiredLink.RunID)
+	s.Require().Equal("fixture-retired", retiredLink.ConnectionID)
+	s.Require().NotEqual(link.ID, retiredLink.ID)
+	evidence["correlation"] = retiredLink
+	var reverse struct {
+		Executions []models.ExternalExecutionCorrelation `json:"executions"`
+	}
+	assertLinks := func() {
+		beforeRPC := connectorProviderRPCs(s.T())
+		connectorReadHTTP(s.T(), s.caesiumURL, viewer.Plaintext, http.MethodGet, reversePath, nil, &reverse)
+		var ids []uuid.UUID
+		for _, row := range reverse.Executions {
+			ids = append(ids, row.ID)
+		}
+		s.Require().ElementsMatch([]uuid.UUID{link.ID, retiredLink.ID}, ids, "retired correlations must remain visible alongside enabled connections")
+		connectorReadHTTP(s.T(), s.caesiumURL, scoped.Plaintext, http.MethodGet, reversePath, nil, &reverse)
+		s.Require().Empty(reverse.Executions, "retirement must preserve scope-safe reverse lookup")
+		s.Require().Equal(beforeRPC, connectorProviderRPCs(s.T()), "reverse lookup must not dispatch provider RPCs")
+	}
+	assertLinks()
+	for _, phase := range []string{"disabled", "removed"} {
+		if phase == "disabled" {
+			retired["enabled"] = false
+		} else {
+			document["connections"] = connections
+		}
+		evidence[phase] = s.connectorReadReconfigure(viewer, encode())
+		beforeRPC := connectorProviderRPCs(s.T())
+		assertLinks()
+		status, raw := connectorReadHTTP(s.T(), s.caesiumURL, viewer.Plaintext, http.MethodGet, retiredPath, nil, nil)
+		s.Require().Equal(http.StatusNotFound, status, string(raw))
+		missing := fmt.Sprintf("/v1/jobs/%s/runs/%s/external-executions", link.JobID, uuid.New())
+		status, raw = connectorReadHTTP(s.T(), s.caesiumURL, viewer.Plaintext, http.MethodGet, missing, nil, nil)
+		s.Require().Equal(http.StatusNotFound, status, string(raw))
+		s.Require().Equal(beforeRPC, connectorProviderRPCs(s.T()), "retired provider and missing-run refusals must not dispatch RPCs")
+	}
+	// Removing the added connection restores the original parsed configuration.
+	originalConfig, err := connector.Parse(original, nil)
+	s.Require().NoError(err)
+	originalFingerprint, err := connector.Fingerprint(originalConfig)
+	s.Require().NoError(err)
+	var final connectorReadConnections
+	connectorReadHTTP(s.T(), s.caesiumURL, viewer.Plaintext, http.MethodGet, "/v1/connectors", nil, &final)
+	s.Require().Equal(originalFingerprint, final.Fingerprint)
+	evidence["reverse_rpc_delta"] = 0
+	return evidence
 }

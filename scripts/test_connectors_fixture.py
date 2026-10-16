@@ -217,6 +217,10 @@ class ConnectorFixtureOrchestrationTests(unittest.TestCase):
         server = next(c for c in calls if c[c.index('--name')+1] == 'caesium-server-agent-test')
         self.assertIn(str(self.artifacts)+'/http-connections.yaml:/etc/caesium/connectors/connections.yaml:ro', server)
         self.assertIn(str(self.artifacts)+':/artifacts:ro', server)
+        self.assertEqual(server[server.index('--entrypoint')+1], '/artifacts/control/start-server.sh')
+        wrapper = self.artifacts/'control'/'start-server.sh'
+        self.assertTrue(os.access(wrapper, os.X_OK))
+        self.assertIn('CAESIUM_CONNECTORS_CONFIG_PREVIOUS_FINGERPRINT', wrapper.read_text())
         anchor = next(c for c in calls if 'network-anchor-' in c[c.index('--name')+1])
         self.assertEqual(anchor[anchor.index('-p')+1], '8080:8080')
         self.assertEqual(anchor[anchor.index('--user')+1], f'{os.getuid()}:{os.getgid()}')

@@ -952,6 +952,7 @@ integration-up-agent: build-stress build-test build-triage-agent
     else set -- run -d; fi; \
     if [ -n "${CAESIUM_CONNECTORS_SERVER_ARTIFACTS:-}" ]; then \
         set -- "$@" -v "$CAESIUM_CONNECTORS_SERVER_ARTIFACTS:/artifacts:ro" \
+            --entrypoint /artifacts/control/start-server.sh \
             -e CAESIUM_DATABASE_CONSOLE_ENABLED=true; \
     fi; \
     if [ -n "${CAESIUM_CONNECTORS_NETWORK_ANCHOR:-}" ]; then \

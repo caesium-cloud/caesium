@@ -618,16 +618,23 @@ func (r *Runtime) RunLinks(ctx context.Context, principal string, jobID, runID u
 	entries, metadata := core.MaxPageEntries, core.MaxPageMetadataBytes
 	for _, row := range rows {
 		if !seen[row.ConnectionID] {
-			c, ok := r.connections[row.ConnectionID]
-			if !ok {
-				return nil, core.ErrNotFound
+			if c, ok := r.connections[row.ConnectionID]; ok {
+				if err := c.guard.Allow(ctx, principal); err != nil {
+					return nil, err
+				}
+				entries = min(entries, c.config.Limits.MaxPageEntries)
+				metadata = min(metadata, c.config.Limits.MaxPageMetadataBytes)
 			}
-			if err := c.guard.Allow(ctx, principal); err != nil {
-				return nil, err
-			}
-			entries = min(entries, c.config.Limits.MaxPageEntries)
-			metadata = min(metadata, c.config.Limits.MaxPageMetadataBytes)
 			seen[row.ConnectionID] = true
+		}
+	}
+	// Historical links outlive enabled provider clients. Disabled connections
+	// still impose their configured response ceilings; removed connections use
+	// the process ceilings above. Neither requires contacting the provider.
+	for _, c := range r.cfg.Connections {
+		if seen[c.ID] && !c.Enabled {
+			entries = min(entries, c.Limits.MaxPageEntries)
+			metadata = min(metadata, c.Limits.MaxPageMetadataBytes)
 		}
 	}
 	if len(rows) > entries {
