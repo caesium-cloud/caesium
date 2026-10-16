@@ -404,9 +404,9 @@ Resume unfinished waves. Do not archive this plan while later items remain.
   32 expected off-lane skips). Targeted atomic/strategy scenarios passed in 7.99
   seconds; the direct-database stale-claim subcase is expected off this lane.
   [Current-head CI run 38825609471](https://github.com/caesium-cloud/caesium/actions/runs/38825609471)
-  is running; prior-head CI is not current-head qualification. All four
+  passed, including coverage and all nine required checks. All four
   posted findings have verified replies and resolved threads. D2 stays unchecked
-  pending verified merge, current checks and required review.
+  pending verified merge and required review.
 - **Composition:** Current clean `50d1362f` contains merged D1 and the D2
   implementation. Fresh real Temporal qualification passed all four required
   named scenarios: Fixture, Messages, Correlation and Operations, without skips
@@ -425,11 +425,13 @@ Resume unfinished waves. Do not archive this plan while later items remain.
   threads resolved, with no remaining open findings. Standalone default/agent
   integration, fresh combined unit and all-four-scenario real-provider
   qualification have passed. Targeted containerized plan guardrails passed
-  (14.071 seconds); current-head D2 CI remains pending.
+  (14.071 seconds). Current-head D2 CI passed, including `ci-ok`.
 - **Merge/plan status:** D1 is merged. D2 and the dashboard
   [PR #635](https://github.com/caesium-cloud/caesium/pull/635) remain open;
-  protected checks/review and the squash merge queue still apply. Plan validation
-  includes an earlier full containerized race/coverage unit pass with documentation
+  D2 has all nine required checks green and still requires CODEOWNER review.
+  The squash merge queue and normal protected review/checks apply to both PRs.
+  Plan validation includes an earlier full containerized race/coverage unit pass
+  with documentation
   guardrails. Subsequent progress edits pass item/dependency, local-link,
   template-token and whitespace checks. Targeted containerized guardrails passed
   on the updated dashboard; final status edits retain the static checks. Owned
@@ -446,7 +448,7 @@ Resume unfinished waves. Do not archive this plan while later items remain.
 | A | Generic contract, configuration and catalog (2 items) | P0 | Shipped (A1, A2) |
 | B | Temporal inspection and declared messages (2 items) | P0 | Shipped (B1, B2) |
 | C | Authenticated REST and composition (2 items) | P0 | Not started |
-| D | Verified correlation and action durability (2 items) | P0 | D1 shipped; D2 awaiting checks/review |
+| D | Verified correlation and action durability (2 items) | P0 | D1 shipped; D2 awaiting review/merge |
 | E | Console monitoring, data links and approval (3 items) | P0 | Not started |
 | F | Real fixture, CI, qualification and promotion (4 items) | P0 | F1 shipped; F2–F4 not started |
 | N | Operator guidance and reconciliation (1 item) | P0 | Not started |
