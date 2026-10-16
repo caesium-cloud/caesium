@@ -387,7 +387,9 @@ per-connection concurrency limits apply before provider calls; exhaustion return
 Status Query and action capabilities remain unavailable through HTTP until C2.
 
 The selected C1 fixture extends `just connectors-fixture-check` with real HTTP
-reads, faults and process restart. The shared-catalog proof uses
+reads, faults and process restart. Its owned server enables the existing
+admin-only, read-only database diagnostic to observe catalog write and retention
+bounds. Ordinary auth-lane startup retains its defaults. The shared-catalog proof uses
 `bash scripts/connectors-config-cluster.sh` against a clean candidate. It creates
 an isolated kind cluster, the existing distributed Helm topology, a real TLS
 Temporal fixture and three Caesium members with retained PVCs. Its selected

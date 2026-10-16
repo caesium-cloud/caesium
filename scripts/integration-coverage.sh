@@ -802,8 +802,10 @@ fi
 
 # The main server stays on CAESIUM_AUTH_MODE=none, where the connector gate
 # fails closed. A second instrumented start loads one file, then stops. That
-# file resolves an env secret and shape-checks Kubernetes and Vault references.
-# It does not dial either provider. Counters share the server GOCOVERDIR.
+# enabled connection resolves one env API key; parked connections retain
+# Kubernetes/Vault reference-shape coverage without resolving those providers.
+# Its cert/key pair is shape-valid and remains lazy: no external read is made.
+# Counters share the server GOCOVERDIR.
 # Loaded fingerprint and actual complete public /health readiness are required
 # before signalling; a failure retains only safe bounded diagnostics.
 load_connector_for_coverage() {
@@ -818,10 +820,9 @@ connections:
     credentials:
       secretRefs:
         - secret://env/TEMPORAL_TOKEN?name=TEMPORAL_TOKEN
-        - secret://k8s/temporal-creds/api-token
-        - secret://vault/kv/data/temporal?field=token
       certificatePaths:
         - /var/run/secrets/caesium/temporal/tls.crt
+        - /var/run/secrets/caesium/temporal/tls.key
     bindings:
       - name: publication
         version: "1"
@@ -844,6 +845,22 @@ connections:
               properties:
                 approved:
                   type: boolean
+  - id: kubernetes-reference
+    provider: temporal
+    endpoint: frontend.temporal.svc:7233
+    scope: default
+    enabled: false
+    credentials:
+      secretRefs:
+        - secret://k8s/temporal-creds/api-token
+  - id: vault-reference
+    provider: temporal
+    endpoint: frontend.temporal.svc:7233
+    scope: default
+    enabled: false
+    credentials:
+      secretRefs:
+        - secret://vault/kv/data/temporal?field=token
 YAML
   chmod 0644 "$ARTIFACTS/connectors.yaml"
   log "loading a connector config on an instrumented start"

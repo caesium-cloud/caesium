@@ -951,7 +951,8 @@ integration-up-agent: build-stress build-test build-triage-agent
         set -- create --cidfile "$CAESIUM_CONNECTORS_SERVER_CIDFILE"; \
     else set -- run -d; fi; \
     if [ -n "${CAESIUM_CONNECTORS_SERVER_ARTIFACTS:-}" ]; then \
-        set -- "$@" -v "$CAESIUM_CONNECTORS_SERVER_ARTIFACTS:/artifacts:ro"; \
+        set -- "$@" -v "$CAESIUM_CONNECTORS_SERVER_ARTIFACTS:/artifacts:ro" \
+            -e CAESIUM_DATABASE_CONSOLE_ENABLED=true; \
     fi; \
     if [ -n "${CAESIUM_CONNECTORS_NETWORK_ANCHOR:-}" ]; then \
         set -- "$@" --network="container:$CAESIUM_CONNECTORS_NETWORK_ANCHOR"; \

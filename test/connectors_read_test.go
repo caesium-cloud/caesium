@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/caesium-cloud/caesium/internal/connector"
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/caesium-cloud/caesium/pkg/env"
 	"github.com/google/uuid"
@@ -38,6 +39,7 @@ type connectorReadExecution struct {
 	Metadata           struct {
 		WorkflowID string `json:"workflow_id"`
 		RunID      string `json:"run_id"`
+		Terminal   bool   `json:"terminal"`
 	} `json:"metadata"`
 }
 
@@ -101,14 +103,19 @@ func connectorFixtureControlURL() string {
 	return "http://127.0.0.1:7240"
 }
 
-func connectorProviderRPCs(t *testing.T) int {
+func connectorProviderRPCs(t *testing.T, methodSuffix ...string) int {
 	t.Helper()
 	var events []map[string]any
 	connectorReadHTTP(t, connectorFixtureControlURL(), "", http.MethodGet, "/evidence", nil, &events)
 	n := 0
 	for _, event := range events {
 		if event["kind"] == "provider_rpc" {
-			n++
+			method, ok := event["method"].(string)
+			require.True(t, ok)
+			require.NotEmpty(t, method)
+			if len(methodSuffix) == 0 || strings.HasSuffix(method, methodSuffix[0]) {
+				n++
+			}
 		}
 	}
 	return n
@@ -250,15 +257,34 @@ func (s *IntegrationTestSuite) TestConnectorsRead() {
 	for i := range refs {
 		refs[i] = s.fixtureStart(fmt.Sprintf("http-only-%d", i), "external_only", "", "", false, false, false, false)
 	}
+	beforeList := s.connectorRows("SELECT * FROM external_executions ORDER BY opaque_id")
+	visibility := s.createAPIKeyCLI("--role", "viewer", "--description", "connector fixture Visibility readiness")
+	pending := make(map[string]bool, len(refs))
+	for _, ref := range refs {
+		pending[ref.RunID] = true
+	}
+	visibilityCursor, visibilityReads := "", 0
+	// Await these exact new executions, not a page populated by older fixture
+	// workflows. A separate principal bounds setup to 40 reads and preserves the
+	// tested principal's 60/minute budget for the actual pagination assertions.
+	s.Require().Eventually(func() bool {
+		if visibilityReads >= 40 {
+			return false
+		}
+		visibilityReads++
+		var page connectorReadPage
+		connectorReadHTTP(s.T(), s.caesiumURL, visibility.Plaintext, http.MethodGet, "/v1/connectors/fixture/executions?workflow_type=external_only&page_size=100&cursor="+url.QueryEscape(visibilityCursor), nil, &page)
+		for _, execution := range page.Executions {
+			delete(pending, execution.Metadata.RunID)
+		}
+		visibilityCursor = page.Cursor
+		return len(pending) == 0
+	}, 20*time.Second, 500*time.Millisecond, "all six real workflows must enter Visibility before unchanged pagination is tested")
 	listPath := "/v1/connectors/fixture/executions?workflow_type=external_only&page_size=2"
 	var first connectorReadPage
-	// Temporal Visibility is eventually consistent. Only discovery visibility is
-	// awaited; public reads and all later refusal assertions are single attempts.
-	s.Require().Eventually(func() bool {
-		s.connectorRead(listPath, &first)
-		return len(first.Executions) == 2 && first.Cursor != ""
-	}, 20*time.Second, 500*time.Millisecond)
-	beforeList := s.connectorRows("SELECT * FROM external_executions ORDER BY opaque_id")
+	s.connectorRead(listPath, &first)
+	s.Require().Len(first.Executions, 2)
+	s.Require().NotEmpty(first.Cursor)
 	seen := map[string]connectorReadExecution{}
 	cursor, pages := "", 0
 	for {
@@ -390,6 +416,26 @@ func (s *IntegrationTestSuite) TestConnectorsRead() {
 	s.connectorRead(path, &detail)
 	rows = s.connectorRows("SELECT id FROM external_execution_snapshots WHERE connection_id = 'fixture' ORDER BY id")
 	s.Require().Empty(rows, "age retention must evict old unreferenced public snapshots; unchanged evidence cannot recreate them")
+	// Advance real provider evidence after expiry, then read the closed workflow
+	// repeatedly. Inspection must never dispatch an automatic status Query.
+	closedViewer := s.createAPIKeyCLI("--role", "viewer", "--description", "closed connector workflow witness")
+	queriesBefore := connectorProviderRPCs(s.T(), "/QueryWorkflow")
+	s.fixtureSignal(refs[0], "fixture_finish", true)
+	s.Require().Eventually(func() bool {
+		connectorReadHTTP(s.T(), s.caesiumURL, closedViewer.Plaintext, http.MethodGet, path, nil, &detail)
+		return detail.Metadata.Terminal
+	}, 10*time.Second, time.Second)
+	advanced := s.connectorRows("SELECT * FROM external_execution_snapshots ORDER BY id")
+	s.Require().NotEmpty(advanced, "new real terminal evidence must persist after retention expiry")
+	s.Require().LessOrEqual(len(advanced), 4, "polls through genuine closing evidence must preserve the configured retention cap")
+	s.Require().Equal([][]any{{float64(1)}}, s.connectorRows("SELECT COUNT(*) FROM external_execution_snapshots WHERE terminal = 1"), "the real terminal observation must be durable")
+	for range 3 {
+		connectorReadHTTP(s.T(), s.caesiumURL, closedViewer.Plaintext, http.MethodGet, path, nil, &detail)
+		s.Require().True(detail.Metadata.Terminal)
+	}
+	s.Require().Equal(advanced, s.connectorRows("SELECT * FROM external_execution_snapshots ORDER BY id"))
+	closedQueries := connectorProviderRPCs(s.T(), "/QueryWorkflow") - queriesBefore
+	s.Require().Zero(closedQueries, "closed-workflow inspection must not automatically dispatch Queries")
 	// Authenticated startup with the gate disabled ignores even a missing config
 	// file. The sibling is owned by this invocation and has no connector routes.
 	gateOff := os.Getenv("CAESIUM_CONNECTORS_GATE_OFF_URL")
@@ -400,7 +446,7 @@ func (s *IntegrationTestSuite) TestConnectorsRead() {
 	s.Require().Equal(http.StatusNotFound, status, string(raw))
 	connectorReadHTTP(s.T(), gateOff, "", http.MethodGet, "/v1/system/features", nil, &features)
 	s.Require().Equal(false, features["connectors_enabled"])
-	s.Require().NoError(os.WriteFile(filepath.Join(artifacts, "read-http-evidence.json"), mustConnectorJSON(s.T(), map[string]any{"candidate_sha": os.Getenv("CAESIUM_CONNECTORS_CANDIDATE_SHA"), "external_workflows": refs, "list_pages": pages, "connections": connections, "restart": restart, "snapshot_rows_after_retention": len(rows), "unchanged_snapshot_writes": 0, "unchanged_identity_updates": 0}), 0600))
+	s.Require().NoError(os.WriteFile(filepath.Join(artifacts, "read-http-evidence.json"), mustConnectorJSON(s.T(), map[string]any{"candidate_sha": os.Getenv("CAESIUM_CONNECTORS_CANDIDATE_SHA"), "external_workflows": refs, "list_pages": pages, "connections": connections, "restart": restart, "snapshot_rows_after_retention": len(rows), "snapshot_rows_after_terminal_advance": len(advanced), "closed_workflow_query_rpc_delta": closedQueries, "unchanged_snapshot_writes": 0, "unchanged_identity_updates": 0}), 0600))
 	s.connectorReadCorrelation(viewer, scoped)
 	// A fresh principal gets its own finite read window. Budget refusal must
 	// precede provider work, including for cheap connection-list reads.
@@ -434,32 +480,33 @@ func (s *IntegrationTestSuite) connectorReadCorrelation(viewer, scoped createdAP
 	second := s.requireJobByAlias("connector-fixture-notify")
 	runner := s.createAPIKeyCLI("--role", "runner", "--scope-jobs", "connector-fixture-publish,connector-fixture-notify", "--description", "public connector correlation fixture")
 	s.Require().Equal(http.StatusOK, s.fixtureRequest(http.MethodPost, "/configure", map[string]string{"runner_key": runner.Plaintext}, nil))
+	reader := s.createAPIKeyCLI("--role", "viewer", "--description", "connector queued correlation reads")
 	holder := s.postRunStart(job.ID, "http-correlation-holder", `{"params":{}}`)
 	s.Require().Equal(http.StatusAccepted, holder.status)
 	ref := s.fixtureStart("http-correlation", "publication", job.ID, second.ID, true, true, false, true)
-	var execution connectorReadExecution
-	s.Require().Eventually(func() bool {
-		var page connectorReadPage
-		s.connectorRead("/v1/connectors/fixture/executions?workflow_type=publication&page_size=100", &page)
-		for _, candidate := range page.Executions {
-			if candidate.Metadata.RunID == ref.RunID {
-				execution = candidate
-				return true
-			}
-		}
-		return false
-	}, 20*time.Second, 500*time.Millisecond)
-	path := "/v1/connectors/fixture/executions/" + url.PathEscape(execution.ID)
+	// A1's stateless handle can address an actual execution before eventually
+	// consistent Visibility discovers it. Constructing it from the real start
+	// response creates no catalog rows; all observations and links below still
+	// travel through public HTTP. Discovery is qualified separately above.
+	reference, err := connector.NewExecutionReference("fixture", map[string]string{"workflow_id": ref.WorkflowID, "run_id": ref.RunID})
+	s.Require().NoError(err)
+	path := "/v1/connectors/fixture/executions/" + url.PathEscape(connector.ReferenceID(reference))
+	relationshipReads := 0
+	readRelations := func(out *connectorReadRelations) {
+		relationshipReads++
+		s.Require().LessOrEqual(relationshipReads, 58, "correlation polling must stay within the fresh principal's real 60/minute budget")
+		connectorReadHTTP(s.T(), s.caesiumURL, reader.Plaintext, http.MethodGet, path+"/relationships", nil, out)
+	}
 	var queued connectorReadRelations
 	s.Require().Eventually(func() bool {
-		s.connectorRead(path+"/relationships", &queued)
+		readRelations(&queued)
 		return len(queued.Correlations) == 1 && queued.Correlations[0].Outcome == "queued"
-	}, 7*time.Second, 300*time.Millisecond, "public relation must expose the genuine queued admission")
+	}, 7*time.Second, time.Second, "public relation must expose the genuine queued admission")
 	s.Require().NotNil(queued.Correlations[0].QueueID)
 	s.Require().Nil(queued.Correlations[0].RunID)
 	var promoted connectorReadRelations
 	s.Require().Eventually(func() bool {
-		s.connectorRead(path+"/relationships", &promoted)
+		readRelations(&promoted)
 		return len(promoted.Correlations) == 1 && promoted.Correlations[0].RunID != nil
 	}, 30*time.Second, time.Second)
 	link := promoted.Correlations[0]
@@ -478,7 +525,7 @@ func (s *IntegrationTestSuite) connectorReadCorrelation(viewer, scoped createdAP
 	connectorReadHTTP(s.T(), s.caesiumURL, scoped.Plaintext, http.MethodGet, reversePath, nil, &reverse)
 	s.Require().Empty(reverse.Executions, "local job permission must not disclose unrestricted external coordinates")
 	s.Require().Eventually(func() bool {
-		s.connectorRead(path+"/relationships", &promoted)
+		readRelations(&promoted)
 		for _, relation := range promoted.Relationships {
 			if relation.Type == "child" && relation.Reference.Coordinates["run_id"] != "" {
 				return true
@@ -487,11 +534,11 @@ func (s *IntegrationTestSuite) connectorReadCorrelation(viewer, scoped createdAP
 		return false
 	}, 20*time.Second, time.Second, "actual child execution must retain its distinct provider identity")
 	before := s.connectorRows("SELECT * FROM external_execution_correlations ORDER BY id")
-	s.connectorRead(path+"/relationships", &promoted)
+	readRelations(&promoted)
 	s.Require().Equal(before, s.connectorRows("SELECT * FROM external_execution_correlations ORDER BY id"), "repeat reads must retain one durable correlation")
 	s.connectorHostRestart()
 	connectorReadHTTP(s.T(), s.caesiumURL, viewer.Plaintext, http.MethodGet, reversePath, nil, &reverse)
 	s.Require().Len(reverse.Executions, 1)
 	s.Require().Equal(link.ID, reverse.Executions[0].ID, "public reverse link must survive an actual Caesium process restart")
-	s.Require().NoError(os.WriteFile(filepath.Join(os.Getenv("CAESIUM_CONNECTORS_ARTIFACTS"), "read-correlation-http-evidence.json"), mustConnectorJSON(s.T(), map[string]any{"candidate_sha": os.Getenv("CAESIUM_CONNECTORS_CANDIDATE_SHA"), "workflow": ref, "queued": queued, "promoted": promoted, "reverse": reverse}), 0600))
+	s.Require().NoError(os.WriteFile(filepath.Join(os.Getenv("CAESIUM_CONNECTORS_ARTIFACTS"), "read-correlation-http-evidence.json"), mustConnectorJSON(s.T(), map[string]any{"candidate_sha": os.Getenv("CAESIUM_CONNECTORS_CANDIDATE_SHA"), "workflow": ref, "queued": queued, "promoted": promoted, "reverse": reverse, "relationship_http_reads": relationshipReads}), 0600))
 }
