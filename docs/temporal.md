@@ -13,7 +13,8 @@ The optional adapter observes Temporal workflows and implements binding-declared
 JSON Queries and Updates. Authenticated HTTP monitoring and verified links to
 Caesium runs are described in [the connector guide](connectors.md).
 Declared authenticated status Queries, approval submissions and durable operation
-receipts are also available through that guide. Console pages remain Stream E
+receipts are also available through that guide. The Console Connections pages
+provide monitoring and history. Console relationship/approval journeys remain E2/E3
 in the [execution-connectors plan](exec-plans/active/execution-connectors.md).
 That plan is not complete. The patterns below are the unchanged REST recipe.
 

@@ -330,3 +330,14 @@ func TestServiceObservationGenerationAdvancesFromAnotherNodesStoredFence(t *test
 	require.NoError(t, r.db.First(&identity, "opaque_id = ?", ref.OpaqueID()).Error)
 	require.Equal(t, int64(1<<50)+1, *identity.LatestGeneration)
 }
+
+func TestConnectionBrowserMetadataUsesConfiguredValues(t *testing.T) {
+	r, _ := testRuntime(t)
+	r.cfg.Connections[0].UIURL = "https://temporal-ui.example.test/console"
+	r.cfg.Connections[0].Limits.ConsoleRefresh = 30 * time.Second
+	view, err := r.Connections(context.Background(), "viewer")
+	require.NoError(t, err)
+	require.Len(t, view.Connections, 1)
+	require.Equal(t, "https://temporal-ui.example.test/console", view.Connections[0].UIURL)
+	require.Equal(t, int64(30000), view.Connections[0].ConsoleRefreshMS)
+}
