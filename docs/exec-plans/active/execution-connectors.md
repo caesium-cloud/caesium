@@ -1,6 +1,6 @@
 # Execution Connectors — Temporal Monitoring and Operator Actions
 
-Last updated: 2026-10-15
+Last updated: 2026-10-16
 
 Caesium should let an operator follow a data process across Temporal workflows
 and Caesium jobs, understand the data consequence, and perform a declared
@@ -12,10 +12,10 @@ prerequisite for monitoring them.
 
 At drafting, [PR #560](https://github.com/caesium-cloud/caesium/pull/560) supplied
 idempotent Caesium starts, explicit created/queued/skipped/dropped outcomes and
-an operator recipe. W1–W3 have since added the connector contract, catalog,
-Temporal adapter and real development fixture; HTTP monitoring and operator
-action surfaces remain pending. The Console's existing run, dataset, freshness,
-lineage, receipt and incident views are the data
+an operator recipe. W1–W5 have since added the connector contract, catalog,
+Temporal adapter, real development fixture and authenticated HTTP monitoring.
+Operator action APIs and Console surfaces remain pending. The Console's existing
+run, dataset, freshness, lineage, receipt and incident views are the data
 evidence this integration should join to external process state.
 
 The first release includes one optional Temporal connector, file-configured
@@ -248,7 +248,7 @@ cardinality and closed-workflow Query dispatch count through the live surface.
 ## Progress (as of 2026-10-16)
 
 W1 through W4 have merged, including the W4 dashboard in PR #635.
-W5 C1 review findings are addressed and qualified; protected merge remains pending.
+W5 C1 is merged in PR #644; dashboard PR #643 records its verified acceptance.
 C2, E, F2–F4 and N remain later work. An open PR or a component-only pass
 is not completion. The SHAs below are the squash merges read from GitHub.
 
@@ -447,15 +447,17 @@ Resume unfinished waves. Do not archive this plan while later items remain.
 - **Remaining:** C, E, F2–F4 and N are outside this wave. No later wave is
   dispatched in this execution.
 
-### W5 — Authenticated monitoring and configuration enforcement (in progress)
+### W5 — Authenticated monitoring and configuration enforcement (C1 merged 2026-10-16)
 
 - **Base and scope:** `3194fe68f3c5bd84d166b92049edad4eea46ac35` includes
   merged A2, B1, D1 and F1. C1 is the only selected item. Identity-and-access W2
   has also merged; C1 uses its existing principal, cluster-role and scope policy.
-  C2 requires merged C1. Console work and F2–F4/N remain future waves.
-- **W5-α / C1:** [PR #644](https://github.com/caesium-cloud/caesium/pull/644),
-  head `8069f73bc489f5f8a0ae4a5c5fc3d371ff940202`, implements startup/client composition,
-  authenticated monitoring and scope-safe reverse links, bounded observation
+  C2's C1 prerequisite is now satisfied. Console work and F2–F4/N remain future
+  waves.
+- **W5-α / C1:** [PR #644](https://github.com/caesium-cloud/caesium/pull/644)
+  merged `fd26b67400b0b846b17dc8523917fdd1ef96e96e` at 2026-10-16T14:16:46Z.
+  Tested head `8069f73bc489f5f8a0ae4a5c5fc3d371ff940202` supplies startup/client
+  composition, authenticated monitoring and scope-safe reverse links, bounded observation
   persistence and guarded configuration activation. Persistent connection
   identities supplement the epoch so a coordinated change cannot repoint a
   referenced connection ID. The candidate contains the implementation and
@@ -535,9 +537,14 @@ Resume unfinished waves. Do not archive this plan while later items remain.
   [#643](https://github.com/caesium-cloud/caesium/pull/643#discussion_r4294791592))
   and are resolved, verified against current heads with complete review-thread
   pages. Independent source review found no remaining concrete issue.
-- **Publication and acceptance:** Both #644 and this dashboard PR #643 require
-  one CODEOWNER approval; normal protected checks and the merge queue apply.
-  C1 remains unchecked pending merged acceptance.
+- **Publication and acceptance:** The user explicitly authorized admin squash
+  merges for this train. PR #644 merged after all nine required checks passed;
+  its complete tree equals both the tested head and the CI-tested merge above.
+  C1 is checked against that merged code and the recorded HTTP, integration and
+  configuration-epoch evidence. Dashboard PR #643 integrates the implementation
+  merge and records this acceptance. Its own merge is verified separately.
+  Repository protection settings are unchanged. C2 and later items remain
+  deferred.
 
 ### Stream Status
 
@@ -545,7 +552,7 @@ Resume unfinished waves. Do not archive this plan while later items remain.
 | --- | --- | --- | --- |
 | A | Generic contract, configuration and catalog (2 items) | P0 | Shipped (A1, A2) |
 | B | Temporal inspection and declared messages (2 items) | P0 | Shipped (B1, B2) |
-| C | Authenticated REST and composition (2 items) | P0 | C1 reviews addressed and verified, awaiting merge; C2 not started |
+| C | Authenticated REST and composition (2 items) | P0 | C1 shipped; C2 not started |
 | D | Verified correlation and action durability (2 items) | P0 | Shipped (D1, D2) |
 | E | Console monitoring, data links and approval (3 items) | P0 | Not started |
 | F | Real fixture, CI, qualification and promotion (4 items) | P0 | F1 shipped; F2–F4 not started |
@@ -638,7 +645,7 @@ Resume unfinished waves. Do not archive this plan while later items remain.
 This stream owns startup, API dependency plumbing, route binding and shared
 auth chokepoints. Every endpoint includes a live HTTP integration scenario.
 
-- [ ] C1. Wire clients/observation into startup and feature discovery. Add
+- [x] C1. Wire clients/observation into startup and feature discovery. Add
   connection list, per-connection execution list/detail/history/relationships
   and reverse links from a Caesium run. Persist bounded direct observations;
   return dated stale detail explicitly on failed refresh. Enforce read/scope,
@@ -953,7 +960,7 @@ compiled integration-runner approach; fixture code stays in the root module.
 **16 included items in seven streams.** Dependencies are explicit above;
 unchecked sibling work is not a hidden prerequisite.
 
-- **A1, A2, B1, B2, F1, D1 and D2** are merged. See Progress for the merge SHAs.
+- **A1, A2, B1, B2, F1, D1, D2 and C1** are merged. See Progress for the merge SHAs.
   B2 landed before F1's schema-bearing fixture; the pinned development server
   supplied real provider qualification without a Temporal Cloud account.
 - **D1** needs A2/B1/F1; **D2** needs A2/B2/F1. Core files are disjoint.
