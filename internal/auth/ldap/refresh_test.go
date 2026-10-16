@@ -492,7 +492,8 @@ func TestRefreshGroupsHonoursTheContext(t *testing.T) {
 func startTLSServer(t *testing.T, stall bool) string {
 	t.Helper()
 	cert := selfSignedCert(t)
-	listener, err := (&net.ListenConfig{}).Listen(t.Context(), "tcp", "127.0.0.1:0")
+	ctx := t.Context()
+	listener, err := (&net.ListenConfig{}).Listen(ctx, "tcp", "127.0.0.1:0")
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = listener.Close() })
 	go func() {
@@ -519,7 +520,7 @@ func startTLSServer(t *testing.T, stall bool) string {
 					return
 				}
 				tlsConn := tls.Server(conn, &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12})
-				if err := tlsConn.Handshake(); err != nil {
+				if err := tlsConn.HandshakeContext(ctx); err != nil {
 					return
 				}
 				_, _ = io.Copy(io.Discard, tlsConn)
