@@ -75,9 +75,10 @@ window-scheduling's parked note points here.
 
 W1 merged on 2026-10-13: A1 (#624), B1 (#625), the separately authorized DB
 repair (#626) and the W1 plan sync (#622). W2 raised A2 (#638), D3 (#640) and
-B3 (#639) on 2026-10-15. All three are green, and they combine with master
-without conflicts. They await CODEOWNER merge. B3 also carries one design
-decision for the user (see Wave 2).
+B3 (#639) on 2026-10-15. Every review comment is addressed, including a
+user review round on #638 and a Codex atomicity finding on #639, which is now
+fixed rather than documented. All three are green, and they combine with
+master without conflicts. They await CODEOWNER merge.
 
 ### Wave 1 — Foundations (2026-10-09)
 
@@ -147,26 +148,36 @@ lane lock. The orchestrator also ran the same chain on the combined tree
 (A2 + D3 + B3 merged onto `b796b567`; see below).
 
 - **W2-α / A2 — grants on the principal:** [PR #638](https://github.com/caesium-cloud/caesium/pull/638),
-  head `ba0a46c7`. `Principal.Role` is replaced by `Grants` (`RoleIn`, `ClusterRole`,
+  head `25a10ae0`. `Principal.Role` is replaced by `Grants` (`RoleIn`, `ClusterRole`,
   `AllowedNamespaces`; empty grants are never "unrestricted"). Grants are resolved
   per request through a new `policy.Source`. `RoleMapper` is the env adapter,
   checked against the pre-A2 `Resolve` by an oracle test. SSO login denies with
   `no_binding`. `APIKey.Namespaces` is NULL ⇒ `["*"]`, and undecodable, `null` or
   `[]` values fail closed. `User.EmailVerified` is an untagged nullable bool. No
-  policy file means byte-identical RBAC, audit and metric labels. Evidence:
-  - lint, unit and `integration-test` (891s) all pass;
-  - `integration-test-agent` passes 46 scenarios, including the new
-    `TestAuthKeyNamespacesGrantResolution`;
-  - hosted CI, `coverage-ratchets` and `ci-ok` are green;
-  - Codex (pre-PR and round 1) and the three-lens review found no defects.
+  policy file means byte-identical RBAC, audit and metric labels.
+  - **Review round (user review on #638):** `RotateKey` now copies `Namespaces`
+    byte-for-byte, so rotating a confined key keeps it confined. The bootstrap
+    refresh resets `namespaces` to NULL. `AdminKeyExists` counts only keys whose
+    grants give admin at `*`. New live auth-lane scenarios:
+    `TestAuthKeyRotationKeepsNamespaces` (a rotated `["marketing"]` key still gets
+    403) and `TestAuthSessionCookieWithoutGrantsIsRefused` (a real session cookie
+    for a user stored as `role=admin` with no resolvable grants gets 403 and an
+    `insufficient_role` audit row).
+  - **Evidence:**
+    - lint, unit and `integration-test` (824s) all pass;
+    - `integration-test-agent` passes 48 scenarios, including the three new
+      `TestAuth…` scenarios;
+    - hosted CI, `coverage-ratchets` and `ci-ok` are green on `25a10ae0`;
+    - Codex (pre-PR, round 1 and round 2) and two independent multi-lens
+      reviews found no open defects.
   **Decision for sign-off:** in v1 only OIDC `email_verified=true` email is
   trusted. SAML and LDAP email never satisfies `users:` bindings; groups still
   work everywhere. Obligations recorded in the PR:
   - G3: a live per-request-resolution proof.
   - A4/G1: a live rejection of an unverified email.
-  - A5: `RotateKey` copies `Namespaces`; the bootstrap reset; `AdminKeyExists`
-    ignores confined keys; minting is limited to a subset of the caller's grants;
-    `key_create.go` still checks `Role`.
+  - A5: minting is limited to a subset of the caller's grants; `key_create.go`
+    still checks `Role`. Rotation, bootstrap and `AdminKeyExists` were fixed in
+    #638.
   - Interim: whoami shows `role:""` for a confined-only principal until A3 and A5.
 - **W2-β / D3 — namespaces on shared objects:** [PR #640](https://github.com/caesium-cloud/caesium/pull/640),
   head `8fd784c8`.
@@ -188,7 +199,7 @@ lane lock. The orchestrator also ran the same chain on the combined tree
     three new scenarios pass on their lanes) all pass. Hosted CI is 41/41 green.
     Codex (pre-PR and round 1) and the three-lens review found no defects.
 - **W2-γ / B3 — git-sync namespace allowlist:** [PR #639](https://github.com/caesium-cloud/caesium/pull/639),
-  head `97fd1c82`.
+  head `26bfe040`.
   - **What changed:** `GitSourceConfig.Namespaces`. Fail-open spellings (`null`,
     singular `namespace`, case-variant duplicates) are rejected at decode time.
     `[]`, `*`, a missing `source_id` and a shared `source_id` are rejected at
@@ -198,29 +209,41 @@ lane lock. The orchestrator also ran the same chain on the combined tree
     runs before `ValidateBatch`. Only allowlisted sources write a
     `jobdef.git_sync` audit row (`system:git-sync`); unrestricted sources are
     unchanged.
-  - **Review fixes:** guarded rows are locked (`FOR UPDATE` on Postgres). The
-    remaining batch is revalidated after an in-transaction refusal.
-    `CAESIUM_JOBDEF_GIT_SOURCES` is redacted from env decode errors, which
-    previously leaked inline git credentials.
+  - **Atomic per-commit apply:** an allowlisted source applies each commit's
+    allowed manifests in ONE transaction (`ApplyBatchWithOptions`).
+    - An in-transaction namespace refusal writes nothing.
+    - The stored trigger and dataset graphs are validated inside the
+      transaction.
+    - Any failure rolls the whole commit back, so a refusal can never leave a
+      partial batch or a persisted cycle.
+    - Unrestricted sources keep the per-manifest flow.
+    - Trade-off: the dqlite writer is held for the batch, once per new commit,
+      and only for allowlisted sources.
+  - **Review fixes:**
+    - Guarded rows are locked (`FOR UPDATE` on Postgres). Batch and prune
+      lock in one alias order, and Postgres `40P01`/`40001` are retried.
+    - Only genuine graph verdicts are reported as an invalid batch; context
+      cancellation and DB errors surface as themselves.
+    - `CAESIUM_JOBDEF_GIT_SOURCES` is redacted from env decode errors, which
+      previously leaked inline git credentials.
   - **Live scenario:** `TestJobdefGitSyncNamespaceAllowlistSkipsForeignManifests`
     runs on the coverage-ratchets `git-sync` lane. `file://` against
     `integration-up` is infeasible.
-  - **Open decision for the user:** Codex rated this P1 in three rounds. A
-    concurrent REST move of a later manifest can leave an earlier, already
-    committed manifest in a persisted trigger cycle. The sync then fails loudly,
-    and it fails again on restart. The orchestrator assesses this as a
-    pre-existing design property: master already persists a partial batch when a
-    later manifest fails (for example `ErrProvenanceConflict`), and an invalid
-    batch is fatal. It recommends accepting this with the follow-up below
-    instead of an atomic batch, which would hold the dqlite writer across every
-    manifest. Regressions pin the loud failure.
-- **Combined gate:** A2 + D3 + B3 merge cleanly onto `b796b567` (78 files). The
-  full chain on the combined tree passed: lint (0 issues), the full race unit suite,
-  `integration-test` and `integration-test-agent`. That is 309 scenarios passed
-  and 47 lane-specific skips, with no failures. D3's three scenarios pass on
-  their lanes. A2's scenario passes on the auth lane and skips on the default lane
-  by design. Both git-sync scenarios skip outside the coverage `git-sync` lane by
-  design.
+  - **Reviews:** Codex rated the atomicity finding P1 in rounds 1–3. It is now
+    fixed (round 4 approves `26bfe040`). The independent three-lens review of the
+    atomic batch confirmed the transaction, lock-order and compat work. Its two
+    small follow-ups (a dataset-graph rollback test and graph-verdict-only error
+    labelling) are in `26bfe040`.
+- **Combined gate:** the final heads (A2 `25a10ae0` + D3 `8fd784c8` + B3 `26bfe040`)
+  merge cleanly onto current master `2615c874`, which already includes #636 (81 files).
+  The full chain on that combined tree passed: lint (0 issues), the full race unit
+  suite, `integration-test` and `integration-test-agent`. That is 311 scenarios
+  passed and 50 lane-specific skips, with no failures.
+  - All five new `TestAuth…` scenarios pass on the auth lane.
+  - D3's three scenarios pass on their lanes.
+  - Both git-sync scenarios skip outside the coverage `git-sync` lane by design.
+    They pass in hosted `coverage-ratchets`.
+  An earlier gate on `b796b567` with the first heads also passed (309 / 47).
 - **Plan-doc conflict rules updated:** `internal/models/user.go` (A2 → E1),
   `pkg/env/env.go` (B3's redaction), `internal/auth/audit.go` (B3),
   `internal/jobdef/lint/` (D3 did not touch it), and the new
@@ -236,8 +259,16 @@ lane lock. The orchestrator also ran the same chain on the combined tree
   - B2: the git-sync coverage lane needs a policy fixture that declares
     `marketing` once undeclared namespaces are rejected.
   - Git sync: make invalid-batch failures non-fatal (a per-source degraded
-    state) instead of stopping the server. This is pre-existing; B3 adds a
-    racy trigger for it.
+    state) instead of stopping the server. This is pre-existing: an invalid
+    commit still stops the server, but an allowlisted source now rolls the
+    commit back first.
+  - Keys:
+    - `AdminKeyExists` still counts job-scoped admin keys;
+    - `RotateKey` drops `ExpiresAt`, so a TTL'd key rotates to a non-expiring
+      one;
+    - rotating a key with malformed `namespaces` JSON copies it as-is, and the
+      response then fails to serialise (reachable only through DB corruption).
+    All three are pre-existing.
   - Boot cost: dqlite rebuilds default-tagged tables several times per
     AutoMigrate. This is pre-existing and safe per the D3 probe, but slow.
   - A4: warn when a policy has `users:` bindings but no provider can supply a
@@ -251,7 +282,7 @@ lane lock. The orchestrator also ran the same chain on the combined tree
 | Stream | Scope | Priority | Status |
 |--------|-------|----------|--------|
 | A | Policy file, grants, principal, route classes, namespace-aware middleware, keys with namespaces, SSO-admin key management | **P0** | A1 merged #624; A2 ready #638; A3/A4 next |
-| B | `metadata.namespace` on jobs: schema, columns, importer, lint, apply/prune/move, git-sync allowlist, collection filtering, aggregate collapse | **P0** | B1 merged #625; B3 ready #639 (one open decision) |
+| B | `metadata.namespace` on jobs: schema, columns, importer, lint, apply/prune/move, git-sync allowlist, collection filtering, aggregate collapse | **P0** | B1 merged #625; B3 ready #639 |
 | C | Runtime isolation: per-namespace Kubernetes namespace + service account, scoped secret resolution, Helm RBAC | P1 | Not started |
 | D | Run quota + round-robin fairness (#395 v1 slice); namespaced notification channels, policies, agent profiles | P1 | D3 ready #640 |
 | E | Identity lifecycle: IdP group refresh, user/session administration, user-bound keys, `caesium login` | P1 | Not started |
