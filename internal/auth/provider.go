@@ -81,9 +81,9 @@ type GroupRefresh struct {
 	// GroupsKnown is set.
 	Groups []string
 	// GroupsKnown is false when the IdP accepted the grant but returned no
-	// verifiable groups (an OIDC refresh without an ID token or a usable
-	// userinfo answer). The caller then persists Handle and keeps the stored
-	// groups and their timestamp.
+	// verifiable groups (an OIDC refresh whose ID token cannot be verified,
+	// or without one and without a usable userinfo answer). The caller then
+	// persists Handle and keeps the stored groups and their timestamp.
 	GroupsKnown bool
 	// Handle is the handle to store from now on: the rotated one when the IdP
 	// rotated it, otherwise the one just redeemed.
@@ -102,8 +102,9 @@ const (
 	RefreshTransient RefreshErrorKind = iota + 1
 	// RefreshUncertain: the request may have reached the IdP and redeemed
 	// (and rotated) the grant, but no definitive answer came back (timeout
-	// after send, connection reset mid-request, 5xx, an unparsable or
-	// unverifiable response). Mark the grant uncertain; never revoke on it.
+	// after send, connection reset mid-request, 5xx, an unparsable response,
+	// an answer for another identity). Mark the grant uncertain; never revoke
+	// on it.
 	RefreshUncertain
 	// RefreshDefinitive: the IdP definitively refused (OIDC invalid_grant; the
 	// LDAP user entry is gone). See DenialScope for how it interacts with an

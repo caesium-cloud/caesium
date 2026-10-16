@@ -52,14 +52,17 @@ type refreshTokenResponse struct {
 //   - uncertain: the request was, or may have been, written and no
 //     definitive answer came back (a timeout or reset after the write, a 5xx
 //     or 3xx, an unparsable or incomplete body, any OAuth error other than
-//     invalid_grant), or the answer cannot be trusted (an ID token that fails
-//     verification, or an ID token or userinfo answer for another subject);
+//     invalid_grant), or the answer names another identity (a verified ID
+//     token, or a userinfo answer, for another subject or issuer);
 //   - definitive: invalid_grant, only.
 //
-// A successful redemption without an ID token is never a failure (OpenID
-// Connect Core §12.2): groups then come from the userinfo endpoint, and
-// failing that the result carries GroupsKnown=false so the caller persists
-// the rotated token and keeps the stored groups.
+// A successful redemption whose groups cannot be verified is never a failure:
+// the token endpoint has redeemed the grant, so a rotated token must be kept.
+// Groups then come from a verified ID token, else (no ID token, OpenID Connect
+// Core §12.2) from the userinfo endpoint; failing those (an ID token that
+// cannot be verified, no usable userinfo answer) the result carries
+// GroupsKnown=false, so the caller persists the rotated token and keeps the
+// stored groups and their timestamp.
 func (p *Provider) RefreshGroups(ctx context.Context, req authpkg.RefreshRequest) (authpkg.GroupRefresh, error) {
 	grant := req.Grant
 	if grant.Provider != ProviderName {
@@ -218,29 +221,32 @@ func (p *Provider) refreshHTTPClient() *http.Client {
 // groupsFromRefreshedIDToken verifies a refreshed ID token exactly as login
 // does (signature, issuer, audience, expiry, authorized party; no nonce on a
 // refresh) and requires it to name the user's own issuer and subject before
-// anything else is read from it. A token that fails is uncertain: the
-// response cannot be trusted, so neither its groups nor its rotated refresh
-// token are kept. A verified token for the user whose groups claim is
-// malformed yields GroupsKnown=false (the rotation is real).
+// anything else is read from it.
+//
+// Its groups count only from a token that passes all of that. When it cannot
+// be verified (a JWKS fetch failing on a cold cache, the deadline spent, a bad
+// signature, audience, expiry or authorized party, a malformed groups claim),
+// the result is GroupsKnown=false: the token endpoint, reached over the
+// configured connection with the client's credentials, has already redeemed
+// the grant, so its rotated refresh token is the only live one and is kept,
+// while the stored groups and their timestamp stay as they are. Only a
+// VERIFIED token that names another identity is uncertain: nothing from that
+// response is kept, not even its rotated token.
 func (p *Provider) groupsFromRefreshedIDToken(ctx context.Context, rawIDToken string, req authpkg.RefreshRequest) ([]string, bool, error) {
 	idToken, err := p.verifier.Verify(ctx, rawIDToken)
 	if err != nil {
-		return nil, false, authpkg.NewRefreshError(authpkg.RefreshUncertain, "invalid_id_token", nil)
+		log.Warn("refreshed oidc id_token failed verification; keeping stored groups", "user_id", req.UserID.String())
+		return nil, false, nil
 	}
-	// The identity binding comes first: nothing from a token for another
-	// identity is used, not even its rotated refresh token.
 	if idToken.Issuer != req.Issuer || idToken.Subject != req.Subject {
 		log.Warn("refreshed oidc id_token names another identity; ignoring it", "user_id", req.UserID.String())
 		return nil, false, authpkg.NewRefreshError(authpkg.RefreshUncertain, "identity_mismatch", nil)
 	}
 	identity, err := p.identityFromIDToken(idToken)
-	switch {
-	case errors.Is(err, ErrInvalidGroupsClaim):
-		log.Warn("refreshed oidc id_token has a malformed groups claim; keeping stored groups",
-			"user_id", req.UserID.String(), "claim", p.groupsClaim)
+	if err != nil {
+		log.Warn("refreshed oidc id_token is not acceptable; keeping stored groups",
+			"user_id", req.UserID.String(), "claim", p.groupsClaim, "malformed_groups", errors.Is(err, ErrInvalidGroupsClaim))
 		return nil, false, nil
-	case err != nil:
-		return nil, false, authpkg.NewRefreshError(authpkg.RefreshUncertain, "invalid_id_token", nil)
 	}
 	return identity.Groups, true, nil
 }

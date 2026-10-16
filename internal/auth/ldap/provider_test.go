@@ -79,6 +79,7 @@ func TestAuthenticateSearchBindAndGroupFlow(t *testing.T) {
 	require.Equal(t, ProviderName, identity.Refresh.Provider)
 	require.Equal(t, ProviderName, identity.Refresh.Issuer)
 	require.Equal(t, identity.Subject, identity.Refresh.Handle.Reveal())
+	require.Equal(t, "al*)", identity.Refresh.Login, "the typed name the user filter was rendered with")
 	require.Equal(t, "alice@example.com", identity.Email)
 	require.Equal(t, "Alice Example", identity.DisplayName)
 	require.Equal(t, []string{"eng", "ops"}, identity.Groups)
@@ -269,6 +270,7 @@ type fakeConn struct {
 	// noSuchObject; baseSearchErr overrides. The user base entry is visible
 	// unless userBaseHidden.
 	entries        map[string]*gldap.Entry
+	admits         func(entry *gldap.Entry, filter string) bool // nil admits every entry
 	baseSearchErr  error
 	userBaseHidden bool
 	serviceErr     error
@@ -330,7 +332,7 @@ func (f *fakeConn) Search(req *gldap.SearchRequest) (*gldap.SearchResult, error)
 			return nil, f.baseSearchErr
 		}
 		if entry, ok := f.entries[req.BaseDN]; ok {
-			if entry == nil {
+			if entry == nil || (f.admits != nil && !f.admits(entry, req.Filter)) {
 				return &gldap.SearchResult{}, nil
 			}
 			return &gldap.SearchResult{Entries: []*gldap.Entry{entry}}, nil

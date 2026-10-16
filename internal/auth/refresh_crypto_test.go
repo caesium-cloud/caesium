@@ -70,7 +70,7 @@ func TestRefreshGrantRoundTrip(t *testing.T) {
 	userID := uuid.New()
 	for _, grant := range []RefreshGrant{
 		katGrant,
-		{Provider: "ldap", Issuer: "ldap", Handle: NewRefreshHandle("uid=al(ice),ou=People,dc=example,dc=com")},
+		{Provider: "ldap", Issuer: "ldap", Handle: NewRefreshHandle("uid=al(ice),ou=People,dc=example,dc=com"), Login: "alice@example.com"},
 		{Provider: "oidc", Issuer: "https://idp", Handle: NewRefreshHandle(strings.Repeat("jwt.", 1000))},
 	} {
 		sealed, err := c.seal(userID, grant)
@@ -82,6 +82,7 @@ func TestRefreshGrantRoundTrip(t *testing.T) {
 		require.Equal(t, grant.Provider, got.Provider)
 		require.Equal(t, grant.Issuer, got.Issuer)
 		require.True(t, grant.Handle.Equal(got.Handle))
+		require.Equal(t, grant.Login, got.Login)
 	}
 }
 

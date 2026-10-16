@@ -121,11 +121,13 @@ func (p *Provider) Authenticate(ctx context.Context, username, password string) 
 		DisplayName: displayName,
 		Groups:      groups,
 		// The user DN is the LDAP refresh grant (§11.1): groups are
-		// re-queried by DN with the service account.
+		// re-queried by DN with the service account. The typed username is
+		// kept with it so a refresh re-applies this login's user filter.
 		Refresh: &authpkg.RefreshGrant{
 			Provider: ProviderName,
 			Issuer:   ProviderName,
 			Handle:   authpkg.NewRefreshHandle(userEntry.DN),
+			Login:    username,
 		},
 	}, nil
 }

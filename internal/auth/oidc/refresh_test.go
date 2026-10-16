@@ -181,6 +181,71 @@ func TestLoginStoresTheRefreshTokenSealed(t *testing.T) {
 	requireNoTokenInLogs(t)
 }
 
+// TestJWKSFailureAfterARotatingRefreshKeepsTheRotatedToken is the review
+// finding on #646: the IdP rotated T to T2, then the ID token could not be
+// verified (its JWKS failed on a cold cache). The stored grant must become T2
+// (T is dead), while the groups and their timestamp stay untouched.
+func TestJWKSFailureAfterARotatingRefreshKeepsTheRotatedToken(t *testing.T) {
+	const loginToken = "login-refresh-token-jwks"
+	issuer := newMockIssuer(t, "groups")
+	issuer.loginRefreshToken = loginToken
+	identity := completeLogin(t, issuer, newTestProvider(t, issuer, "groups"))
+
+	db := testutil.OpenTestDB(t)
+	t.Cleanup(func() { testutil.CloseDB(db) })
+	users := authpkg.NewUserStore(db, authpkg.WithRefreshGrantSecret(testHashSecret))
+	mapper, err := authpkg.NewRoleMapper("caesium-admins=admin", "")
+	require.NoError(t, err)
+	_, sess, err := authpkg.NewSSOService(users, authpkg.NewSessionStore(db), mapper).
+		Complete(t.Context(), identity, ProviderName, "", "")
+	require.NoError(t, err)
+	var before struct {
+		Groups            string
+		GroupsRefreshedAt time.Time
+	}
+	require.NoError(t, db.Raw("SELECT groups, groups_refreshed_at FROM users WHERE id = ?", sess.UserID).Row().
+		Scan(&before.Groups, &before.GroupsRefreshedAt))
+
+	// Another node, with a cold key cache, refreshes while the JWKS is down.
+	coldNode := newTestProvider(t, issuer, "groups")
+	issuer.keysUnavailable.Store(true)
+	issuer.refreshRotateTo = rotatedRefreshToken
+	issuer.refreshClaims = func(c map[string]any) { c["groups"] = []string{"caesium-admins", "escalated"} }
+
+	owner := authpkg.NewRefreshLeaseOwner("cold-node")
+	claimed, err := users.ClaimRefreshLease(t.Context(), sess.UserID, 1, owner, time.Now(), time.Minute)
+	require.NoError(t, err)
+	require.True(t, claimed)
+	req, err := users.LoadLeasedRefreshGrant(t.Context(), sess.UserID, 1, owner, time.Now())
+	require.NoError(t, err)
+	result, err := coldNode.RefreshGroups(t.Context(), req)
+	require.NoError(t, err)
+	require.False(t, result.GroupsKnown)
+	require.True(t, result.Rotated)
+	rotated := req.Grant
+	rotated.Handle = result.Handle
+	applied, err := users.CompleteRefreshGroupsUnknown(t.Context(), sess.UserID, 1, owner, &rotated)
+	require.NoError(t, err)
+	require.True(t, applied)
+
+	var after struct {
+		Groups            string
+		GroupsRefreshedAt time.Time
+	}
+	require.NoError(t, db.Raw("SELECT groups, groups_refreshed_at FROM users WHERE id = ?", sess.UserID).Row().
+		Scan(&after.Groups, &after.GroupsRefreshedAt))
+	require.JSONEq(t, before.Groups, after.Groups, "unverified groups are never applied")
+	require.True(t, before.GroupsRefreshedAt.Equal(after.GroupsRefreshedAt))
+
+	claimed, err = users.ClaimRefreshLease(t.Context(), sess.UserID, 2, owner+"-2", time.Now(), time.Minute)
+	require.NoError(t, err)
+	require.True(t, claimed)
+	req, err = users.LoadLeasedRefreshGrant(t.Context(), sess.UserID, 2, owner+"-2", time.Now())
+	require.NoError(t, err)
+	require.Equal(t, rotatedRefreshToken, req.Grant.Handle.Reveal(), "the live token T2 is stored, not the dead T")
+	requireNoTokenInLogs(t)
+}
+
 func TestLoginWithoutARefreshTokenCarriesNoGrant(t *testing.T) {
 	issuer := newMockIssuer(t, "groups")
 	provider := newTestProvider(t, issuer, "groups")
@@ -382,24 +447,58 @@ func TestRefreshGroupsTransientOutcomesSendNothing(t *testing.T) {
 func TestRefreshGroupsNeverAcceptsAnUntrustedIDToken(t *testing.T) {
 	otherKey, err := rsa.GenerateKey(rand.Reader, 2048)
 	require.NoError(t, err)
+	// A token that cannot be verified contributes no groups, but the token
+	// endpoint has already redeemed the grant: its rotated token is the only
+	// live one and is kept (GroupsKnown=false).
+	for _, tc := range []struct {
+		name  string
+		setup func(*mockIssuer)
+	}{
+		{name: "wrong signing key", setup: func(m *mockIssuer) { m.refreshSigningKey = otherKey }},
+		{name: "wrong audience", setup: func(m *mockIssuer) {
+			m.refreshClaims = func(c map[string]any) { c["aud"] = "another-client" }
+		}},
+		{name: "expired", setup: func(m *mockIssuer) {
+			m.refreshClaims = func(c map[string]any) { c["exp"] = time.Now().Add(-time.Hour).Unix() }
+		}},
+		{name: "another issuer", setup: func(m *mockIssuer) {
+			m.refreshClaims = func(c map[string]any) { c["iss"] = "https://evil.example.com" }
+		}},
+		{name: "authorized party mismatch", setup: func(m *mockIssuer) {
+			m.refreshClaims = func(c map[string]any) { c["azp"] = "another-client" }
+		}},
+		{name: "JWKS unavailable on a cold cache", setup: func(m *mockIssuer) { m.keysUnavailable.Store(true) }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, rotate := range []bool{true, false} {
+				issuer := newMockIssuer(t, "groups")
+				if rotate {
+					issuer.refreshRotateTo = rotatedRefreshToken
+				}
+				issuer.refreshClaims = func(c map[string]any) { c["groups"] = []string{"caesium-admins"} }
+				tc.setup(issuer)
+				provider := newTestProvider(t, issuer, "groups")
+				result, err := provider.RefreshGroups(t.Context(), refreshRequestFor(issuer, storedRefreshToken))
+				require.NoError(t, err)
+				require.False(t, result.GroupsKnown, "unverified groups are never applied")
+				require.Nil(t, result.Groups)
+				require.Equal(t, rotate, result.Rotated)
+				if rotate {
+					require.Equal(t, rotatedRefreshToken, result.Handle.Reveal(), "the rotated token is the only live one")
+				} else {
+					require.Equal(t, storedRefreshToken, result.Handle.Reveal())
+				}
+			}
+		})
+	}
+
+	// A VERIFIED token for another identity keeps nothing, not even its
+	// rotated token.
 	for _, tc := range []struct {
 		name   string
 		setup  func(*mockIssuer)
 		reason string
 	}{
-		{name: "wrong signing key", setup: func(m *mockIssuer) { m.refreshSigningKey = otherKey }, reason: "invalid_id_token"},
-		{name: "wrong audience", setup: func(m *mockIssuer) {
-			m.refreshClaims = func(c map[string]any) { c["aud"] = "another-client" }
-		}, reason: "invalid_id_token"},
-		{name: "expired", setup: func(m *mockIssuer) {
-			m.refreshClaims = func(c map[string]any) { c["exp"] = time.Now().Add(-time.Hour).Unix() }
-		}, reason: "invalid_id_token"},
-		{name: "another issuer", setup: func(m *mockIssuer) {
-			m.refreshClaims = func(c map[string]any) { c["iss"] = "https://evil.example.com" }
-		}, reason: "invalid_id_token"},
-		{name: "authorized party mismatch", setup: func(m *mockIssuer) {
-			m.refreshClaims = func(c map[string]any) { c["azp"] = "another-client" }
-		}, reason: "invalid_id_token"},
 		{name: "another subject", setup: func(m *mockIssuer) {
 			m.refreshClaims = func(c map[string]any) { c["sub"] = "someone-else" }
 		}, reason: "identity_mismatch"},

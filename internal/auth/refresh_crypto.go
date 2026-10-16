@@ -124,6 +124,11 @@ type RefreshGrant struct {
 	Issuer string
 	// Handle is the credential the provider redeems.
 	Handle RefreshHandle
+	// Login is the name the user signed in with, when the provider needs it
+	// to re-apply its login admission check: for LDAP, the typed username the
+	// user filter was rendered with (it need not be the username attribute).
+	// Empty for OIDC.
+	Login string
 }
 
 func (g RefreshGrant) complete() bool {
@@ -136,6 +141,7 @@ type refreshGrantPayload struct {
 	Provider string `json:"p"`
 	Issuer   string `json:"i"`
 	Handle   string `json:"h"`
+	Login    string `json:"l,omitempty"`
 }
 
 // refreshCipher seals and opens refresh grants for one hash secret.
@@ -198,6 +204,7 @@ func (c *refreshCipher) sealWithNonce(userID uuid.UUID, grant RefreshGrant, nonc
 		Provider: grant.Provider,
 		Issuer:   grant.Issuer,
 		Handle:   grant.Handle.Reveal(),
+		Login:    grant.Login,
 	})
 	if err != nil {
 		return nil, errors.New("encode refresh grant")
@@ -228,7 +235,7 @@ func (c *refreshCipher) open(userID uuid.UUID, sealed []byte) (RefreshGrant, err
 	if err := json.Unmarshal(plaintext, &payload); err != nil {
 		return RefreshGrant{}, ErrRefreshGrantInvalid
 	}
-	grant := RefreshGrant{Provider: payload.Provider, Issuer: payload.Issuer, Handle: NewRefreshHandle(payload.Handle)}
+	grant := RefreshGrant{Provider: payload.Provider, Issuer: payload.Issuer, Handle: NewRefreshHandle(payload.Handle), Login: payload.Login}
 	if !grant.complete() {
 		return RefreshGrant{}, ErrRefreshGrantInvalid
 	}

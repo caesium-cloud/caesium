@@ -108,6 +108,46 @@ func TestProviderAuthenticateOpenLDAPFixture(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, []string{viewersGroupDN}, refreshed.Groups)
 
+	// A refresh re-applies the login filter, rendered with what the user
+	// typed. Sign in by mail (the username attribute stays uid) through a
+	// filter that excludes disabled accounts: the refresh succeeds while the
+	// filter admits the entry, and is a definitive denial once it does not.
+	gatedCfg := openLDAPProviderConfig(endpoint)
+	gatedCfg.UserFilter = "(&(mail={username})(!(description=disabled)))"
+	gated, err := New(gatedCfg)
+	require.NoError(t, err)
+	gatedIdentity, err := gated.Authenticate(ctx, "alice@example.org", openLDAPUserPass)
+	require.NoError(t, err)
+	require.Equal(t, "alice@example.org", gatedIdentity.Refresh.Login)
+	gatedReq := authpkg.RefreshRequest{
+		UserID:  refreshReq.UserID,
+		Issuer:  gatedIdentity.Issuer,
+		Subject: gatedIdentity.Subject,
+		Grant:   *gatedIdentity.Refresh,
+	}
+	refreshed, err = gated.RefreshGroups(ctx, gatedReq)
+	require.NoError(t, err, "a mail login filter with a uid username attribute must not revoke")
+	require.Equal(t, []string{viewersGroupDN}, refreshed.Groups)
+
+	disable := gldap.NewModifyRequest(openLDAPUserDN, nil)
+	disable.Add("description", []string{"disabled"})
+	require.NoError(t, admin.Modify(disable))
+	_, err = gated.RefreshGroups(ctx, gatedReq)
+	requireOpenLDAPDenial(t, err, "user_not_admitted")
+	_, err = gated.Authenticate(ctx, "alice@example.org", openLDAPUserPass)
+	require.Error(t, err, "login agrees: the filter no longer admits alice")
+	// The ungated provider's filter does not mention description.
+	_, err = provider.RefreshGroups(ctx, refreshReq)
+	require.NoError(t, err)
+
+	// A base narrowed so it no longer contains the user denies as well.
+	narrowedCfg := openLDAPProviderConfig(endpoint)
+	narrowedCfg.UserBaseDN = openLDAPGroupBase
+	narrowed, err := New(narrowedCfg)
+	require.NoError(t, err)
+	_, err = narrowed.RefreshGroups(ctx, refreshReq)
+	requireOpenLDAPDenial(t, err, "user_outside_base")
+
 	// An entry that does not exist is a definitive denial of the subject.
 	for _, ghost := range []string{
 		"uid=ghost," + openLDAPPeopleBase,
@@ -130,6 +170,15 @@ func TestProviderAuthenticateOpenLDAPFixture(t *testing.T) {
 	require.Truef(t, ok, "want *RefreshError, got %T: %v", err, err)
 	require.Equal(t, authpkg.RefreshDefinitive, refreshErr.Kind)
 	require.Equal(t, "user_not_found", refreshErr.Reason)
+}
+
+func requireOpenLDAPDenial(t *testing.T, err error, reason string) {
+	t.Helper()
+	refreshErr, ok := err.(*authpkg.RefreshError)
+	require.Truef(t, ok, "want *RefreshError, got %T: %v", err, err)
+	require.Equal(t, authpkg.RefreshDefinitive, refreshErr.Kind)
+	require.Equal(t, authpkg.DenialOfSubject, refreshErr.Scope)
+	require.Equal(t, reason, refreshErr.Reason)
 }
 
 func openLDAPAdmin(t *testing.T, endpoint string) *gldap.Conn {

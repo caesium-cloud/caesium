@@ -482,6 +482,8 @@ type mockIssuer struct {
 	refreshOmitIDToken bool
 	refreshClaims      func(claims map[string]any)
 	refreshSigningKey  *rsa.PrivateKey
+	// keysUnavailable makes the JWKS endpoint answer 503.
+	keysUnavailable atomic.Bool
 }
 
 func newMockIssuer(t *testing.T, groupsClaim string) *mockIssuer {
@@ -601,6 +603,10 @@ func (m *mockIssuer) token(w http.ResponseWriter, r *http.Request) {
 }
 
 func (m *mockIssuer) keys(w http.ResponseWriter, _ *http.Request) {
+	if m.keysUnavailable.Load() {
+		http.Error(w, "jwks unavailable", http.StatusServiceUnavailable)
+		return
+	}
 	publicKey := m.key.PublicKey
 	writeJSON(w, map[string]any{
 		"keys": []map[string]any{
