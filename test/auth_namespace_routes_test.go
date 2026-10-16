@@ -200,6 +200,14 @@ func (s *IntegrationTestSuite) TestAuthNamespacedRoutesConfineKey() {
 	s.awaitRun(mkt, mktRun, runTimeout)
 	s.awaitRun(fin, finRun, runTimeout)
 
+	// A run's external executions is a namespaced run route. The handler lists
+	// links only for a cluster viewer, so the confined key reads an empty list
+	// for its own run; the finance run is refused, and under the wrong job 404.
+	links := s.requireNSStatus(http.StatusOK, http.MethodGet, "/v1/jobs/"+mkt+"/runs/"+mktRun+"/external-executions", mktOperator, "")
+	s.JSONEq(`{"executions":[]}`, links)
+	s.requireNSStatus(http.StatusForbidden, http.MethodGet, "/v1/jobs/"+fin+"/runs/"+finRun+"/external-executions", mktOperator, "")
+	s.requireNSStatus(http.StatusNotFound, http.MethodGet, "/v1/jobs/"+mkt+"/runs/"+finRun+"/external-executions", mktOperator, "")
+
 	// Operator writes on the marketing job only.
 	s.requireNSStatus(http.StatusOK, http.MethodPut, "/v1/jobs/"+mkt+"/pause", mktOperator, "")
 	s.requireNSStatus(http.StatusOK, http.MethodPut, "/v1/jobs/"+mkt+"/unpause", mktOperator, "")
@@ -208,6 +216,8 @@ func (s *IntegrationTestSuite) TestAuthNamespacedRoutesConfineKey() {
 	// Cluster routes and still-pending routes are cluster-only.
 	s.requireNSStatus(http.StatusForbidden, http.MethodGet, "/v1/atoms", mktOperator, "")
 	s.requireNSStatus(http.StatusForbidden, http.MethodGet, "/metrics", mktOperator, "")
+	// Connector reads span every namespace's runs.
+	s.requireNSStatus(http.StatusForbidden, http.MethodGet, "/v1/connectors", mktOperator, "")
 	s.requireNSStatus(http.StatusForbidden, http.MethodGet, "/v1/jobs", mktOperator, "")
 	payload, err := json.Marshal(map[string]any{"definitions": []schema.Definition{s.namespacedJobDefinition(f.mktAlias, "marketing")}})
 	s.Require().NoError(err)
