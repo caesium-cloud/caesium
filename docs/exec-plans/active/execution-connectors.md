@@ -248,7 +248,7 @@ cardinality and closed-workflow Query dispatch count through the live surface.
 ## Progress (as of 2026-10-16)
 
 W1 through W4 have merged, including the W4 dashboard in PR #635.
-W5 C1 is implemented and qualified; protected review/merge remains pending.
+W5 C1 is implemented; its review fix is being requalified before protected merge.
 C2, E, F2–F4 and N remain later work. An open PR or a component-only pass
 is not completion. The SHAs below are the squash merges read from GitHub.
 
@@ -515,11 +515,19 @@ Resume unfinished waves. Do not archive this plan while later items remain.
   are excluded without permission or coverage-floor changes. Uploader tests
   preserve all 569 previous artifacts and reproduce the old unreadable-directory
   failure. F2's dedicated connector lane remains future.
-- **Publication and acceptance:** C1 is ready for review in #644. Fresh GitHub
-  reads found zero reviews, threads or comments. Both #644 and this dashboard
-  PR #643 require one CODEOWNER approval; normal protected checks and the merge
-  queue apply. C1 remains unchecked pending merged acceptance. New review
-  dispositions stay local unless replies are authorized.
+- **Review follow-up:** The #644 review identified a reverse lookup returning
+  404 when a stored link belongs to a disabled or removed connection. The fix
+  preserves those historical links alongside enabled connections, retaining
+  process/read budgets and the strictest applicable response limits. New unit
+  and real-provider HTTP retirement regressions are undergoing qualification;
+  the earlier exact-head results above do not qualify this new fix. The #643
+  inventory finding is corrected: C1 now lists all 46 changed files, including
+  startup composition and its tests, read/auth tests and the persistence codec
+  regression; the unchanged `internal/connector/types.go` entry is removed.
+- **Publication and acceptance:** Both #644 and this dashboard PR #643 require
+  one CODEOWNER approval; normal protected checks and the merge queue apply.
+  C1 remains unchecked pending merged acceptance. Thread-specific replies and
+  resolutions are authorized and will follow published, verified corrections.
 
 ### Stream Status
 
@@ -527,7 +535,7 @@ Resume unfinished waves. Do not archive this plan while later items remain.
 | --- | --- | --- | --- |
 | A | Generic contract, configuration and catalog (2 items) | P0 | Shipped (A1, A2) |
 | B | Temporal inspection and declared messages (2 items) | P0 | Shipped (B1, B2) |
-| C | Authenticated REST and composition (2 items) | P0 | C1 verified, awaiting merge; C2 not started |
+| C | Authenticated REST and composition (2 items) | P0 | C1 review fix undergoing qualification; C2 not started |
 | D | Verified correlation and action durability (2 items) | P0 | Shipped (D1, D2) |
 | E | Console monitoring, data links and approval (3 items) | P0 | Not started |
 | F | Real fixture, CI, qualification and promotion (4 items) | P0 | F1 shipped; F2–F4 not started |
@@ -628,10 +636,15 @@ auth chokepoints. Every endpoint includes a live HTTP integration scenario.
   and connector readiness on multi-node config mismatch.
   Files: new `internal/connector/observe.go`, new `internal/connector/observe_test.go`,
   new `api/rest/service/connector/reads.go`,
-  new `api/rest/controller/connector/reads.go`, `api/rest/bind/bind.go`,
+  new `api/rest/service/connector/reads_test.go`,
+  new `api/rest/controller/connector/reads.go`,
+  new `api/rest/controller/connector/reads_test.go`, `api/rest/bind/bind.go`,
   `api/rest/bind/bind_test.go`, `api/api.go`, `cmd/start/start.go`,
+  new `cmd/start/connectors.go`, new `cmd/start/connectors_test.go`,
+  `api/rest/controller/system/system.go`,
   `api/rest/service/system/system.go`, `api/rest/service/system/system_test.go`,
   `internal/auth/rbac.go`, `api/middleware/auth_scope.go`,
+  `api/middleware/auth_scope_test.go`,
   `api/auth_rbac_policy_completeness_test.go`,
   new `test/connectors_read_test.go`, new `test/connectors_config_cluster_test.go`,
   `scripts/connectors-fixture.sh` (extend F1's fixture for the config-skew proof),
@@ -645,7 +658,8 @@ auth chokepoints. Every endpoint includes a live HTTP integration scenario.
   `.github/workflows/ci.yml`, `scripts/test_ci.py`
   (existing G2 provider/read cohort and public evidence upload, unchanged floors),
   `docs/ci.md` (cohort prerequisite and proof),
-  `internal/connector/store.go`, `internal/connector/types.go`,
+  `internal/connector/store.go`,
+  `internal/connector/operations/persistence_codec_test.go`,
   `internal/connector/correlation/correlation_store.go` (epoch write fencing),
   `internal/connector/temporal/client.go`, `internal/connector/temporal/observe.go`,
   `internal/models/connector_configuration.go`, `pkg/db/migrations_test.go`
