@@ -247,7 +247,7 @@ cardinality and closed-workflow Query dispatch count through the live surface.
 
 ## Progress (as of 2026-10-15)
 
-W1, W2 and W3 have merged. W4 D1 has merged; D2 remains in PR #637.
+W1, W2 and W3 have merged. W4 D1 and D2 have merged in PRs #636 and #637.
 C, E, F2–F4 and N remain later work. An open PR or a component-only pass
 is not completion. The SHAs below are the squash merges read from GitHub.
 
@@ -345,10 +345,11 @@ Resume unfinished waves. Do not archive this plan while later items remain.
   including `ci-ok`. W3 is shipped. Local arm64 evidence does not qualify
   Cloud or other versions.
 
-### W4 — Correlation and action durability (in progress)
+### W4 — Correlation and action durability (implementation merged)
 
 - **Base:** W4 started from `b796b5672eab30134876f403f257af9e7a1f76da`.
-  Current `master` includes D1 at `2615c8745466c5f949f2aa43cc7947d349cb9c47`.
+  Current `master` includes D1 at `2615c8745466c5f949f2aa43cc7947d349cb9c47`
+  and D2 at `2114efcff33e8fcd1bffc5c24bd735b44e0a21bb`.
 - **W4-α / D1:** [PR #636](https://github.com/caesium-cloud/caesium/pull/636)
   merged `2615c8745466c5f949f2aa43cc7947d349cb9c47` at 2026-10-15T22:17:40Z.
   Tested head `5c2ee804ac110017b4f5129d2084dcc57aa0a926` implements trusted
@@ -368,8 +369,9 @@ Resume unfinished waves. Do not archive this plan while later items remain.
   succeeded, including coverage, browser lanes and `ci-ok`. Both posted findings
   have verified replies and resolved threads. D1 component acceptance is merged;
   C1/C2 still own the public HTTP composition.
-- **W4-β / D2:** [PR #637](https://github.com/caesium-cloud/caesium/pull/637),
-  head `50d1362fb537d4d219a60a41460335e4ebd1c591`, implements immutable action
+- **W4-β / D2:** [PR #637](https://github.com/caesium-cloud/caesium/pull/637)
+  merged `2114efcff33e8fcd1bffc5c24bd735b44e0a21bb` at 2026-10-16T00:27:31Z.
+  Tested head `50d1362fb537d4d219a60a41460335e4ebd1c591` implements immutable action
   receipts, guarded dispatch, lookup-only recovery and explicit original-principal
   resubmission. It merges actual D1 `master`, preserving both implementations;
   only two guide status paragraphs conflicted and were reconciled semantically.
@@ -405,8 +407,8 @@ Resume unfinished waves. Do not archive this plan while later items remain.
   seconds; the direct-database stale-claim subcase is expected off this lane.
   [Current-head CI run 38825609471](https://github.com/caesium-cloud/caesium/actions/runs/38825609471)
   passed, including coverage and all nine required checks. All four
-  posted findings have verified replies and resolved threads. D2 stays unchecked
-  pending verified merge and required review.
+  posted findings have verified replies and resolved threads. D2 is checked on
+  verified merged component acceptance.
 - **Composition:** Current clean `50d1362f` contains merged D1 and the D2
   implementation. Fresh real Temporal qualification passed all four required
   named scenarios: Fixture, Messages, Correlation and Operations, without skips
@@ -418,7 +420,9 @@ Resume unfinished waves. Do not archive this plan while later items remain.
 - **Verification boundary:** Real Temporal component scenarios supplement
   containerized baseline checks. Running-server connector HTTP, bidirectional
   public links and process-restart proof remain C1/C2; those routes do not yet
-  exist. D1 is checked on merged component acceptance; D2 remains unchecked.
+  exist. D1 and D2 are checked on merged component acceptance. Merged W4 file
+  contents match tested head `50d1362f`; this is not a new qualification of
+  unrelated identity-and-access changes merged alongside W4.
 - **Review follow-up:** All six posted findings are fixed, independently
   reviewed, covered by passing regressions, replied to in their own threads and
   resolved. Fresh paginated GitHub reads verify D1's two threads and D2's four
@@ -426,20 +430,17 @@ Resume unfinished waves. Do not archive this plan while later items remain.
   integration, fresh combined unit and all-four-scenario real-provider
   qualification have passed. Targeted containerized plan guardrails passed
   (14.071 seconds). Current-head D2 CI passed, including `ci-ok`.
-- **Merge/plan status:** D1 is merged. D2 and the dashboard
-  [PR #635](https://github.com/caesium-cloud/caesium/pull/635) remain open;
-  D2 has all nine required checks green and still requires CODEOWNER review.
-  The squash merge queue and normal protected review/checks apply to both PRs.
+- **Merge/plan status:** D1 and D2 are merged. The dashboard
+  [PR #635](https://github.com/caesium-cloud/caesium/pull/635) records W4 closure;
+  normal protected review/checks and the squash merge queue govern its merge.
   Plan validation includes an earlier full containerized race/coverage unit pass
-  with documentation
-  guardrails. Subsequent progress edits pass item/dependency, local-link,
+  with documentation guardrails. Subsequent progress edits pass item/dependency, local-link,
   template-token and whitespace checks. Targeted containerized guardrails passed
   on the updated dashboard; final status edits retain the static checks. Owned
   fixture resources and the shared lane were released after all local gates.
-  W4 is not shipped while D2 and plan sync remain
-  open.
+  W4 implementation is shipped; dashboard publication remains pending its merge.
 - **Remaining:** C, E, F2–F4 and N are outside this wave. No later wave is
-  dispatched while W4 remains open.
+  dispatched in this execution.
 
 ### Stream Status
 
@@ -448,7 +449,7 @@ Resume unfinished waves. Do not archive this plan while later items remain.
 | A | Generic contract, configuration and catalog (2 items) | P0 | Shipped (A1, A2) |
 | B | Temporal inspection and declared messages (2 items) | P0 | Shipped (B1, B2) |
 | C | Authenticated REST and composition (2 items) | P0 | Not started |
-| D | Verified correlation and action durability (2 items) | P0 | D1 shipped; D2 awaiting review/merge |
+| D | Verified correlation and action durability (2 items) | P0 | Shipped (D1, D2) |
 | E | Console monitoring, data links and approval (3 items) | P0 | Not started |
 | F | Real fixture, CI, qualification and promotion (4 items) | P0 | F1 shipped; F2–F4 not started |
 | N | Operator guidance and reconciliation (1 item) | P0 | Not started |
@@ -616,7 +617,7 @@ auth chokepoints. Every endpoint includes a live HTTP integration scenario.
   payloads or reconstructing start request hashes. Repeat reads/retries create
   one relation; promotion/restart preserve identity. Existing #560 regressions pass.
 
-- [ ] D2. Implement transactional receipt admission/dedupe, the target/action
+- [x] D2. Implement transactional receipt admission/dedupe, the target/action
   open-operation guard and lookup-only provider resolution. Snapshot the binding,
   actor context and stable Update ID before dispatch; concurrent callers/restart
   attach to the original pinned operation. Only explicit original-principal
@@ -834,7 +835,7 @@ compiled integration-runner approach; fixture code stays in the root module.
 **16 included items in seven streams.** Dependencies are explicit above;
 unchecked sibling work is not a hidden prerequisite.
 
-- **A1, A2, B1, B2, F1 and D1** are merged. See Progress for the merge SHAs.
+- **A1, A2, B1, B2, F1, D1 and D2** are merged. See Progress for the merge SHAs.
   B2 landed before F1's schema-bearing fixture; the pinned development server
   supplied real provider qualification without a Temporal Cloud account.
 - **D1** needs A2/B1/F1; **D2** needs A2/B2/F1. Core files are disjoint.
