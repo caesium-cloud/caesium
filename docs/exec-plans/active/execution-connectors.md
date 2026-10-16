@@ -453,22 +453,49 @@ Resume unfinished waves. Do not archive this plan while later items remain.
   merged A2, B1, D1 and F1. C1 is the only selected item. Identity-and-access W2
   has also merged; C1 uses its existing principal, cluster-role and scope policy.
   C2 requires merged C1. Console work and F2–F4/N remain future waves.
-- **W5-α / C1:** Implementation is in progress for startup/client composition,
+- **W5-α / C1:** [PR #644](https://github.com/caesium-cloud/caesium/pull/644),
+  draft head `a25a9980fb95a384ffd234b5b9f99ee7b47dafb6`, implements startup/client composition,
   authenticated monitoring and scope-safe reverse links, bounded observation
   persistence and guarded configuration activation. Persistent connection
   identities supplement the epoch so a coordinated change cannot repoint a
   referenced connection ID. One candidate will contain the implementation and
-  its real HTTP and shared-catalog cluster scenarios.
+  its real HTTP and shared-catalog cluster scenarios. Independent backend/auth
+  review found and corrected clock-dependent observation generations,
+  unauthenticated cursor rebinding, configuration and reverse-link bounds,
+  startup transport validation and a persistence-codec compatibility risk.
+  HTTP reference encoding is separate from the unchanged W4 receipt format;
+  a literal target and known fingerprint regression exercises lookup-only replay.
 - **Verification:** The initial dashboard passed the full containerized root
-  race/coverage unit suite, including documentation guardrails. Runtime
-  verification is pending. Required evidence includes containerized lint,
-  full race/coverage unit and existing default/auth regression lanes, real
+  race/coverage unit suite, including documentation guardrails. Live
+  verification remains pending. Focused containerized race tests passed across the
+  connector, API, startup, auth and database packages. Full candidate lint passed
+  with zero issues; the full 155-package race/coverage suite and all 41 required
+  tagged hermetic checks passed. Lint, the full 155-package suite and the
+  integration-test image build passed again after the fixture corrections. All 166 CI helper tests,
+  actionlint and shell validation passed. The manual fixture adds a
+  stable owned network container so process restarts preserve the provider and
+  runner transport, plus redacted invalid-enabled-startup evidence. Required
+  remaining evidence includes real-provider HTTP and cluster qualification,
+  existing default/auth regression lanes, real
   Temporal HTTP reads/faults/restart, unchanged-read write/cardinality bounds,
   and two actual Caesium nodes using the existing isolated kind/Helm fixture
   for matching files, skew and guarded epoch transition. Selected scenarios
   must pass without skips. No new connector CI lane is claimed before F2.
-- **Publication and acceptance:** No C1 PR or candidate acceptance yet. C1
-  remains unchecked. Normal protected review/checks and the merge queue apply;
+- **Live and hosted results:** The first real-provider attempt passed the four
+  inherited component scenarios; the new HTTP scenario stopped at the existing
+  database diagnostic because its fixture had not enabled that admin-only
+  endpoint. The corrected head enables that diagnostic only in the owned
+  fixture, awaits all six real Visibility IDs with bounded setup reads, and
+  verifies durable terminal advancement without automatic Queries. Its live
+  rerun is pending; cluster/default/auth qualification has not run.
+  Hosted CI on `fcdf81ee` passed lint, both unit architectures and all arm64
+  Docker/infra shards. It failed the native stress image proof (exit 137 with
+  `OOMKilled=false`) and the existing coverage fixture's now-invalid enabled
+  credentials. The coverage fixture now uses one enabled API-key reference and
+  a matched certificate/key pair. Current-head CI must requalify both failures;
+  neither earlier failure is classified as a pass or a demonstrated flake.
+- **Publication and acceptance:** C1 is published as a draft. No acceptance is
+  claimed. C1 remains unchecked. Normal protected review/checks and the merge queue apply;
   new review dispositions are prepared locally unless replies are authorized.
 
 ### Stream Status
@@ -585,7 +612,18 @@ auth chokepoints. Every endpoint includes a live HTTP integration scenario.
   `api/auth_rbac_policy_completeness_test.go`,
   new `test/connectors_read_test.go`, new `test/connectors_config_cluster_test.go`,
   `scripts/connectors-fixture.sh` (extend F1's fixture for the config-skew proof),
-  `docs/connectors.md` (REST/read policy).
+  new `scripts/connectors-config-cluster.sh`, new `scripts/helm-cluster-fixture.sh`,
+  `scripts/helm-pod-replacement.sh` (share existing cluster setup),
+  new `scripts/connectors-fixture-control.py`,
+  new `scripts/test_connectors_config_cluster.py`, `scripts/test_connectors_fixture.py`,
+  `test/connectors/fixture/main.go`, `justfile` (optional manual-fixture mounts),
+  `scripts/integration-coverage.sh` (valid enabled transport for startup proof),
+  `internal/connector/store.go`, `internal/connector/types.go`,
+  `internal/connector/correlation/correlation_store.go` (epoch write fencing),
+  `internal/connector/temporal/client.go`, `internal/connector/temporal/observe.go`,
+  `internal/models/connector_configuration.go`, `pkg/db/migrations_test.go`
+  (durable connection identities),
+  `docs/connectors.md` (REST/read policy), `docs/temporal.md` (monitoring boundary).
   Depends on: A2, B1, D1, F1.
   Verify: live HTTP finds a Temporal-only workflow, pages the unchanged fixture
   without duplicates, exposes genuine IDs/relations, preserves stale detail on
