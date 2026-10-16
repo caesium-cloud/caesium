@@ -560,14 +560,18 @@ Resume unfinished waves. Do not archive this plan while later items remain.
   HTTP action/recovery/restart/effect and protected/unreferenced retention proof,
   with no skips. C2 remains unchecked pending verified merge and current checks.
 - **W6-β / E1:** [PR #651](https://github.com/caesium-cloud/caesium/pull/651),
-  candidate `49f8f67258b9afe3e97be8a4b692f245d6e6ef2c`, implements guarded
+  candidate `ea82d4f0df7b3d7beee3802900fb660554fa7c81`, implements guarded
   connection/execution monitoring, configured refresh/UI links and an isolated
   real-fixture browser project. The clean candidate passed all five selected
   real Temporal scenarios and all three browser journeys with no retries, skips
   or flaky results. Live/stale/recovered screenshots were visually inspected.
+  The replay review fix keeps authenticated empty cluster roles fail-closed
+  across the button, shortcut and dialog submission, while retaining anonymous
+  auth-disabled and cluster-runner replay. Five component regressions and both
+  live authenticated replay browser scenarios passed.
   E1 remains unchecked pending verified merge and current checks.
 - **Verification:** Both runtime candidates passed the full containerized
-  race/coverage suite and lint with zero issues; E1 passed all 513 UI tests,
+  race/coverage suite and lint with zero issues; E1 passed all 518 UI tests,
   production build and bundle budgets. All 41 required tagged hermetic
   regressions, 150 collector regressions, 166 CI helper tests and 23 fixture
   orchestration probes passed. Source/image identities and actual SDK 1.49.0,
@@ -583,8 +587,9 @@ Resume unfinished waves. Do not archive this plan while later items remain.
   source PRs require a CODEOWNER approval and fresh hosted checks; neither has
   merged. Plan synchronization is this dedicated PR and records pending status.
 - **Boundary:** Normal protected review/checks govern eligible merges. No
-  repository settings, administrative bypass, review-message publication or
-  CI-lane promotion is authorized by this wave invocation. The plan stays active.
+  repository settings, administrative bypass or CI-lane promotion is authorized
+  by this wave invocation. The user subsequently authorized addressing review
+  comments, including replies and resolution. The plan stays active.
 
 ### Stream Status
 
@@ -886,6 +891,9 @@ joined to existing Caesium pages. No cross-provider global pagination in v1.
   new `ui/src/features/connectors/ExecutionDetailPage.tsx`,
   new `ui/src/features/connectors/__tests__/monitoring.test.tsx`,
   new `ui/src/features/connectors/types.ts`,
+  `ui/src/features/jobs/ReplayDialog.tsx`,
+  `ui/src/features/jobs/RunDetailPage.tsx`,
+  new `ui/src/features/jobs/__tests__/replay-access.test.tsx`,
   `ui/src/lib/__tests__/auth.test.ts`,
   `ui/src/lib/api.ts`,
   `ui/src/lib/auth.ts`,
