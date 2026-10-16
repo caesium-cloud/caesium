@@ -245,7 +245,7 @@ write. Limits are validated configuration with conservative hard ceilings fixed
 by A1 before dependent work. C1/F3 measure unchanged-poll write count, catalog
 cardinality and closed-workflow Query dispatch count through the live surface.
 
-## Progress (as of 2026-10-15)
+## Progress (as of 2026-10-16)
 
 W1 through W4 have merged, including the W4 dashboard in PR #635.
 W5 starts C1 from verified merged prerequisites. C2, E, F2–F4 and N remain
@@ -473,7 +473,7 @@ Resume unfinished waves. Do not archive this plan while later items remain.
   shell validation. Independent backend/auth and fixture review has no remaining
   concrete finding.
 - **Real-provider HTTP:** All five selected scenarios passed without skips on
-  `a25a9980`: correlation, fixture, messages, operations and HTTP reads. Public
+  `37381879`: correlation, fixture, messages, operations and HTTP reads (50.33 seconds). Public
   pagination found all six new real execution IDs without duplicates or catalog
   inserts; unchanged detail reads caused zero snapshot or identity updates.
   Live retention evicted all expired snapshots, new terminal evidence persisted
@@ -490,17 +490,24 @@ Resume unfinished waves. Do not archive this plan while later items remain.
   came from the loaded candidate's validated CRI metadata before app deployment,
   including its imported parent index. All owned cluster resources were removed.
   This is a three-process shared-catalog proof on one kind node.
-- **Remaining qualification:** Local default/auth regressions are running on
-  `2fa55d20`. Its hosted checks are pending. On unchanged runtime contents at
-  `37381879`, native/arm64 images, lint, both unit architectures, both UI suites
-  and ordinary/auth integration gates passed. Coverage collection completed but
-  failed the zero-uncovered-path floor for Temporal observation and correlation
-  persistence: its existing connector cohort only started a configured server.
-  A follow-up is adding real provider/HTTP reads to that instrumented cohort;
-  the coverage floor remains unchanged. Selected scenarios must pass without
-  skips. No dedicated connector CI lane is claimed before F2.
+- **Local baselines:** Clean `2fa55d20` passed the complete default integration
+  suite (312 passing subtests, 831.573 seconds) and normal agent auth suite
+  (35 passing subtests, 36.712 seconds), including configured connector startup.
+  Separate selected connector and cluster scenarios above passed without skips.
+- **Remaining qualification:** Hosted `37381879` passed native/arm64 images,
+  lint, both unit architectures, both UI suites and ordinary/auth integration.
+  Its full coverage collection failed the zero-uncovered-path floor for Temporal
+  observation and correlation persistence: the existing connector cohort only
+  started a configured server. The follow-up now exercises real provider/HTTP
+  reads, publication admission and reverse correlation in the instrumented cohort.
+  Its 52 semantic and 80 collector probes pass; independent review is clear.
+  Focused live qualification and current-head hosted CI remain pending. The
+  coverage floor is unchanged; no dedicated F2 connector CI lane is claimed.
+  Published `2fa55d20` also has an ARM64 stress check failure: exit 137 with
+  `OOMKilled=false` and no OOM event. This is unconfirmed termination, not a pass.
 - **Publication and acceptance:** C1 is published as a draft. No acceptance is
-  claimed. C1 remains unchecked. Normal protected review/checks and the merge queue apply;
+  claimed. C1 remains unchecked. Both PRs still require CODEOWNER approval; normal protected
+  checks and the merge queue apply;
   new review dispositions are prepared locally unless replies are authorized.
 
 ### Stream Status
