@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"mime"
 	"net/http"
 	"net/http/httptrace"
@@ -13,6 +14,7 @@ import (
 	"slices"
 	"strings"
 	"sync/atomic"
+	"time"
 
 	authpkg "github.com/caesium-cloud/caesium/internal/auth"
 	"github.com/caesium-cloud/caesium/pkg/log"
@@ -257,7 +259,8 @@ func (p *Provider) groupsFromRefreshedIDToken(ctx context.Context, rawIDToken st
 // mismatch names another identity and is uncertain. A signed (application/jwt)
 // answer must verify against the issuer's keys and carry both iss and an aud
 // that includes this client; an answer, signed or not, whose aud does not
-// include this client was issued for another client. Groups count only when
+// include this client was issued for another client, and one outside its
+// exp/nbf bounds is stale. Groups count only when
 // all of that holds and the configured claim is present and well formed.
 // Every other shortfall (no endpoint, a failed or unverifiable call, a missing
 // or foreign audience, no claim) is GroupsKnown=false, which keeps the rotated
@@ -298,6 +301,10 @@ func (p *Provider) groupsFromUserInfo(ctx context.Context, token refreshTokenRes
 		}
 	} else if signed {
 		log.Warn("signed oidc userinfo lacks aud; keeping stored groups", "user_id", req.UserID.String())
+		return nil, false, nil
+	}
+	if !p.userInfoCurrent(claims) {
+		log.Warn("oidc userinfo after refresh is expired or not yet valid; keeping stored groups", "user_id", req.UserID.String())
 		return nil, false, nil
 	}
 	raw, ok := claims[p.groupsClaim]
@@ -350,6 +357,41 @@ func (p *Provider) fetchUserInfo(ctx context.Context, accessToken string) (map[s
 		return nil, false, errors.New("userinfo response is not a JSON object")
 	}
 	return claims, signed, nil
+}
+
+// userInfoNotBeforeSkew is the clock skew allowed on nbf, as go-oidc allows
+// on an ID token's nbf; exp is enforced strictly, as there.
+const userInfoNotBeforeSkew = 5 * time.Minute
+
+// userInfoCurrent enforces the RFC 7519 §4.1.4/§4.1.5 bounds of a userinfo
+// answer's exp and nbf when present (optional claims, usually on a signed
+// answer). A malformed bound counts as not current.
+func (p *Provider) userInfoCurrent(claims map[string]json.RawMessage) bool {
+	now := p.now()
+	if raw, ok := claims["exp"]; ok {
+		exp, ok := numericDate(raw)
+		if !ok || !now.Before(exp) {
+			return false
+		}
+	}
+	if raw, ok := claims["nbf"]; ok {
+		nbf, ok := numericDate(raw)
+		if !ok || now.Add(userInfoNotBeforeSkew).Before(nbf) {
+			return false
+		}
+	}
+	return true
+}
+
+// numericDate decodes a JWT NumericDate (seconds since the epoch, possibly
+// fractional).
+func numericDate(raw json.RawMessage) (time.Time, bool) {
+	var seconds float64
+	if err := json.Unmarshal(raw, &seconds); err != nil || math.IsNaN(seconds) || math.IsInf(seconds, 0) {
+		return time.Time{}, false
+	}
+	whole, frac := math.Modf(seconds)
+	return time.Unix(int64(whole), int64(frac*1e9)), true
 }
 
 func stringClaim(claims map[string]json.RawMessage, name string) (string, bool) {

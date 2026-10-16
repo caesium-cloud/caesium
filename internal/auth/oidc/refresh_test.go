@@ -550,12 +550,12 @@ func userinfoResponder(t *testing.T, body map[string]any, status int, sawToken *
 	}
 }
 
-// TestRefreshGroupsChecksTheUserInfoAudience covers the pre-PR review finding
+// TestRefreshGroupsValidatesTheUserInfoAnswer covers the pre-PR review finding
 // on #646: go-oidc only checks a signed userinfo answer's signature, so this
 // provider checks it as OpenID Connect Core §5.3.2 asks. An answer for
 // another client, or a signed one without iss or aud, applies no group but
 // keeps the rotated token.
-func TestRefreshGroupsChecksTheUserInfoAudience(t *testing.T) {
+func TestRefreshGroupsValidatesTheUserInfoAnswer(t *testing.T) {
 	otherKey, err := rsa.GenerateKey(rand.Reader, 2048)
 	require.NoError(t, err)
 	signedAnswer := func(m *mockIssuer, key *rsa.PrivateKey, edit func(map[string]any)) http.HandlerFunc {
@@ -608,6 +608,33 @@ func TestRefreshGroupsChecksTheUserInfoAudience(t *testing.T) {
 			}},
 		{name: "signed by the wrong key",
 			answer: func(m *mockIssuer) http.HandlerFunc { return signedAnswer(m, otherKey, keep) }},
+		{name: "signed and within its time bounds", accepted: true,
+			answer: func(m *mockIssuer) http.HandlerFunc {
+				return signedAnswer(m, nil, func(c map[string]any) {
+					c["exp"] = time.Now().Add(time.Minute).Unix()
+					c["nbf"] = time.Now().Add(time.Minute).Unix() // within the allowed skew
+				})
+			}},
+		{name: "signed and expired",
+			answer: func(m *mockIssuer) http.HandlerFunc {
+				return signedAnswer(m, nil, func(c map[string]any) { c["exp"] = time.Now().Add(-time.Minute).Unix() })
+			}},
+		{name: "signed and not yet valid",
+			answer: func(m *mockIssuer) http.HandlerFunc {
+				return signedAnswer(m, nil, func(c map[string]any) { c["nbf"] = time.Now().Add(time.Hour).Unix() })
+			}},
+		{name: "signed with a malformed exp",
+			answer: func(m *mockIssuer) http.HandlerFunc {
+				return signedAnswer(m, nil, func(c map[string]any) { c["exp"] = "tomorrow" })
+			}},
+		{name: "signed with a malformed nbf",
+			answer: func(m *mockIssuer) http.HandlerFunc {
+				return signedAnswer(m, nil, func(c map[string]any) { c["nbf"] = []int{1} })
+			}},
+		{name: "plain JSON that has expired",
+			answer: func(*mockIssuer) http.HandlerFunc {
+				return jsonAnswer(func(c map[string]any) { c["exp"] = float64(time.Now().Add(-time.Second).Unix()) + 0.5 })
+			}},
 		{name: "signed by another issuer", reason: "identity_mismatch",
 			answer: func(m *mockIssuer) http.HandlerFunc {
 				return signedAnswer(m, nil, func(c map[string]any) { c["iss"] = "https://evil.example.com" })
