@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"mime"
 	"net/http"
 	"net/http/httptrace"
 	"net/url"
@@ -15,7 +16,6 @@ import (
 
 	authpkg "github.com/caesium-cloud/caesium/internal/auth"
 	"github.com/caesium-cloud/caesium/pkg/log"
-	"golang.org/x/oauth2"
 )
 
 var _ authpkg.GroupRefresher = (*Provider)(nil)
@@ -252,37 +252,53 @@ func (p *Provider) groupsFromRefreshedIDToken(ctx context.Context, rawIDToken st
 }
 
 // groupsFromUserInfo asks the userinfo endpoint with the refreshed access
-// token. Its subject must be the user's (OpenID Connect Core §5.3.2) and an
-// iss, when present, the user's issuer; a mismatch is uncertain. Groups
-// count only when the configured claim is present and well formed. Any other
-// shortfall (no endpoint, a failed call, no claim) is GroupsKnown=false.
+// token and checks the answer as OpenID Connect Core §5.3.2 requires: its
+// subject must be the user's, and a present iss the user's issuer; either
+// mismatch names another identity and is uncertain. A signed (application/jwt)
+// answer must verify against the issuer's keys and carry both iss and an aud
+// that includes this client; an answer, signed or not, whose aud does not
+// include this client was issued for another client. Groups count only when
+// all of that holds and the configured claim is present and well formed.
+// Every other shortfall (no endpoint, a failed or unverifiable call, a missing
+// or foreign audience, no claim) is GroupsKnown=false, which keeps the rotated
+// token without applying any group.
 func (p *Provider) groupsFromUserInfo(ctx context.Context, token refreshTokenResponse, req authpkg.RefreshRequest) ([]string, bool, error) {
 	if p.discovered == nil || p.discovered.UserInfoEndpoint() == "" {
 		return nil, false, nil
 	}
-	info, err := p.discovered.UserInfo(ctx, oauth2.StaticTokenSource(&oauth2.Token{AccessToken: token.AccessToken, TokenType: "Bearer"}))
+	claims, signed, err := p.fetchUserInfo(ctx, token.AccessToken)
 	if err != nil {
-		// The error can quote the response body; it is not logged.
-		log.Warn("oidc userinfo after refresh failed; keeping stored groups", "user_id", req.UserID.String())
+		log.Warn("oidc userinfo after refresh failed; keeping stored groups",
+			"user_id", req.UserID.String(), "reason", err.Error())
 		return nil, false, nil
 	}
-	if info.Subject != req.Subject {
+	subject, ok := stringClaim(claims, "sub")
+	if !ok {
+		log.Warn("oidc userinfo after refresh has no subject; keeping stored groups", "user_id", req.UserID.String())
+		return nil, false, nil
+	}
+	if subject != req.Subject {
 		log.Warn("oidc userinfo after refresh names another subject; ignoring it", "user_id", req.UserID.String())
 		return nil, false, authpkg.NewRefreshError(authpkg.RefreshUncertain, "identity_mismatch", nil)
 	}
-	var claims map[string]json.RawMessage
-	if err := info.Claims(&claims); err != nil {
-		return nil, false, nil
-	}
-	// go-oidc checks neither iss nor aud on userinfo (a signed response is
-	// only signature-checked), so an iss naming another issuer is refused
-	// here, like an ID token for another identity.
-	if rawIssuer, ok := claims["iss"]; ok {
+	if rawIssuer, present := claims["iss"]; present {
 		var issuer string
 		if err := json.Unmarshal(rawIssuer, &issuer); err != nil || issuer != req.Issuer {
 			log.Warn("oidc userinfo after refresh names another issuer; ignoring it", "user_id", req.UserID.String())
 			return nil, false, authpkg.NewRefreshError(authpkg.RefreshUncertain, "identity_mismatch", nil)
 		}
+	} else if signed {
+		log.Warn("signed oidc userinfo lacks iss; keeping stored groups", "user_id", req.UserID.String())
+		return nil, false, nil
+	}
+	if rawAudience, present := claims["aud"]; present {
+		if !audienceIncludes(rawAudience, p.oauth2Config.ClientID) {
+			log.Warn("oidc userinfo after refresh is for another client; keeping stored groups", "user_id", req.UserID.String())
+			return nil, false, nil
+		}
+	} else if signed {
+		log.Warn("signed oidc userinfo lacks aud; keeping stored groups", "user_id", req.UserID.String())
+		return nil, false, nil
 	}
 	raw, ok := claims[p.groupsClaim]
 	if !ok {
@@ -293,4 +309,71 @@ func (p *Provider) groupsFromUserInfo(ctx context.Context, token refreshTokenRes
 		return nil, false, nil
 	}
 	return groups, true, nil
+}
+
+// fetchUserInfo GETs the userinfo endpoint with the access token. It does not
+// follow redirects (the bearer token stays with the issuer) and never returns
+// an error that quotes the response body. A signed (application/jwt) answer is
+// verified against the issuer's JWKS and its payload returned with signed set.
+func (p *Provider) fetchUserInfo(ctx context.Context, accessToken string) (map[string]json.RawMessage, bool, error) {
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, p.discovered.UserInfoEndpoint(), nil)
+	if err != nil {
+		return nil, false, errors.New("bad userinfo endpoint")
+	}
+	httpReq.Header.Set("Authorization", "Bearer "+accessToken)
+	httpReq.Header.Set("Accept", "application/json, application/jwt")
+	resp, err := p.refreshHTTPClient().Do(httpReq)
+	if err != nil {
+		return nil, false, errors.New("userinfo request failed")
+	}
+	defer func() { _ = resp.Body.Close() }()
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxTokenResponseBytes+1))
+	if err != nil || len(body) > maxTokenResponseBytes {
+		return nil, false, errors.New("userinfo response unreadable")
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, false, fmt.Errorf("userinfo answered http %d", resp.StatusCode)
+	}
+	signed := false
+	if mediaType, _, err := mime.ParseMediaType(resp.Header.Get("Content-Type")); err == nil && mediaType == "application/jwt" {
+		if p.userInfoKeys == nil {
+			return nil, false, errors.New("signed userinfo without a jwks_uri")
+		}
+		payload, err := p.userInfoKeys.VerifySignature(ctx, strings.TrimSpace(string(body)))
+		if err != nil {
+			return nil, false, errors.New("signed userinfo failed verification")
+		}
+		body, signed = payload, true
+	}
+	var claims map[string]json.RawMessage
+	if err := json.Unmarshal(body, &claims); err != nil {
+		return nil, false, errors.New("userinfo response is not a JSON object")
+	}
+	return claims, signed, nil
+}
+
+func stringClaim(claims map[string]json.RawMessage, name string) (string, bool) {
+	raw, ok := claims[name]
+	if !ok {
+		return "", false
+	}
+	var value string
+	if err := json.Unmarshal(raw, &value); err != nil || value == "" {
+		return "", false
+	}
+	return value, true
+}
+
+// audienceIncludes reports whether an aud claim (a string or an array of
+// strings) includes clientID.
+func audienceIncludes(raw json.RawMessage, clientID string) bool {
+	var single string
+	if err := json.Unmarshal(raw, &single); err == nil {
+		return single == clientID
+	}
+	var many []string
+	if err := json.Unmarshal(raw, &many); err != nil {
+		return false
+	}
+	return slices.Contains(many, clientID)
 }

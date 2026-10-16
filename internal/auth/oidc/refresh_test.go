@@ -550,6 +550,112 @@ func userinfoResponder(t *testing.T, body map[string]any, status int, sawToken *
 	}
 }
 
+// TestRefreshGroupsChecksTheUserInfoAudience covers the pre-PR review finding
+// on #646: go-oidc only checks a signed userinfo answer's signature, so this
+// provider checks it as OpenID Connect Core §5.3.2 asks. An answer for
+// another client, or a signed one without iss or aud, applies no group but
+// keeps the rotated token.
+func TestRefreshGroupsChecksTheUserInfoAudience(t *testing.T) {
+	otherKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	require.NoError(t, err)
+	signedAnswer := func(m *mockIssuer, key *rsa.PrivateKey, edit func(map[string]any)) http.HandlerFunc {
+		return func(w http.ResponseWriter, _ *http.Request) {
+			claims := map[string]any{"iss": m.URL(), "sub": "subject-123", "aud": "caesium", "groups": []string{"from-userinfo"}}
+			edit(claims)
+			if key == nil {
+				key = m.key
+			}
+			w.Header().Set("Content-Type", "application/jwt")
+			_, _ = w.Write([]byte(signJWT(key, claims)))
+		}
+	}
+	jsonAnswer := func(edit func(map[string]any)) http.HandlerFunc {
+		return func(w http.ResponseWriter, _ *http.Request) {
+			claims := map[string]any{"sub": "subject-123", "groups": []string{"from-userinfo"}}
+			edit(claims)
+			writeJSON(w, claims)
+		}
+	}
+	keep := func(map[string]any) {}
+	elsewhere := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		t.Error("a userinfo redirect must not be followed with the bearer token")
+	}))
+	t.Cleanup(elsewhere.Close)
+
+	for _, tc := range []struct {
+		name     string
+		answer   func(*mockIssuer) http.HandlerFunc
+		accepted bool
+		reason   string // set when the outcome is uncertain
+	}{
+		{name: "signed for this client", accepted: true,
+			answer: func(m *mockIssuer) http.HandlerFunc { return signedAnswer(m, nil, keep) }},
+		{name: "signed with an audience list including this client", accepted: true,
+			answer: func(m *mockIssuer) http.HandlerFunc {
+				return signedAnswer(m, nil, func(c map[string]any) { c["aud"] = []string{"api", "caesium"} })
+			}},
+		{name: "signed for another client",
+			answer: func(m *mockIssuer) http.HandlerFunc {
+				return signedAnswer(m, nil, func(c map[string]any) { c["aud"] = "another-client" })
+			}},
+		{name: "signed without an audience",
+			answer: func(m *mockIssuer) http.HandlerFunc {
+				return signedAnswer(m, nil, func(c map[string]any) { delete(c, "aud") })
+			}},
+		{name: "signed without an issuer",
+			answer: func(m *mockIssuer) http.HandlerFunc {
+				return signedAnswer(m, nil, func(c map[string]any) { delete(c, "iss") })
+			}},
+		{name: "signed by the wrong key",
+			answer: func(m *mockIssuer) http.HandlerFunc { return signedAnswer(m, otherKey, keep) }},
+		{name: "signed by another issuer", reason: "identity_mismatch",
+			answer: func(m *mockIssuer) http.HandlerFunc {
+				return signedAnswer(m, nil, func(c map[string]any) { c["iss"] = "https://evil.example.com" })
+			}},
+		{name: "plain JSON for another client",
+			answer: func(*mockIssuer) http.HandlerFunc {
+				return jsonAnswer(func(c map[string]any) { c["aud"] = []string{"another-client"} })
+			}},
+		{name: "plain JSON naming this client", accepted: true,
+			answer: func(*mockIssuer) http.HandlerFunc {
+				return jsonAnswer(func(c map[string]any) { c["aud"] = "caesium" })
+			}},
+		{name: "plain JSON without a subject",
+			answer: func(*mockIssuer) http.HandlerFunc {
+				return jsonAnswer(func(c map[string]any) { delete(c, "sub") })
+			}},
+		{name: "a redirect is not followed",
+			answer: func(*mockIssuer) http.HandlerFunc {
+				return func(w http.ResponseWriter, r *http.Request) {
+					http.Redirect(w, r, elsewhere.URL+"/userinfo", http.StatusTemporaryRedirect)
+				}
+			}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			issuer := newMockIssuer(t, "groups")
+			issuer.refreshOmitIDToken = true
+			issuer.refreshRotateTo = rotatedRefreshToken
+			issuer.userinfo = tc.answer(issuer)
+			provider := newTestProvider(t, issuer, "groups")
+			result, err := provider.RefreshGroups(t.Context(), refreshRequestFor(issuer, storedRefreshToken))
+			switch {
+			case tc.reason != "":
+				requireRefreshError(t, err, authpkg.RefreshUncertain, tc.reason)
+				require.True(t, result.Handle.IsZero())
+			case tc.accepted:
+				require.NoError(t, err)
+				require.True(t, result.GroupsKnown)
+				require.Equal(t, []string{"from-userinfo"}, result.Groups)
+			default:
+				require.NoError(t, err)
+				require.False(t, result.GroupsKnown, "no group from an answer that is not for this client")
+				require.Nil(t, result.Groups)
+				require.Equal(t, rotatedRefreshToken, result.Handle.Reveal(), "the rotated token is still kept")
+			}
+		})
+	}
+}
+
 // TestRefreshGroupsWithoutAnIDToken covers OpenID Connect Core §12.2: a
 // successful refresh may omit the ID token, possibly while rotating. That is
 // never a failure; groups then come from userinfo or stay unknown.

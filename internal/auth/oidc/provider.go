@@ -37,6 +37,9 @@ type Provider struct {
 	// body (client_secret_post) instead of HTTP Basic; set only when the
 	// IdP advertises post and not basic.
 	tokenAuthInParams bool
+	// userInfoKeys verifies signed (application/jwt) userinfo responses
+	// against the issuer's JWKS; nil when discovery names no jwks_uri.
+	userInfoKeys *gooidc.RemoteKeySet
 
 	groupsClaim     string
 	stateCookieName string
@@ -73,6 +76,7 @@ func New(ctx context.Context, cfg Config) (*Provider, error) {
 	var metadata struct {
 		Issuer           string   `json:"issuer"`
 		TokenAuthMethods []string `json:"token_endpoint_auth_methods_supported"`
+		JWKSURI          string   `json:"jwks_uri"`
 	}
 	if err := discovered.Claims(&metadata); err != nil {
 		return nil, fmt.Errorf("decode oidc discovery metadata: %w", err)
@@ -80,6 +84,14 @@ func New(ctx context.Context, cfg Config) (*Provider, error) {
 	issuer := metadata.Issuer
 	if issuer == "" {
 		issuer = cfg.IssuerURL
+	}
+	var userInfoKeys *gooidc.RemoteKeySet
+	if metadata.JWKSURI != "" {
+		keyCtx := context.Background()
+		if cfg.HTTPClient != nil {
+			keyCtx = gooidc.ClientContext(keyCtx, cfg.HTTPClient)
+		}
+		userInfoKeys = gooidc.NewRemoteKeySet(keyCtx, metadata.JWKSURI)
 	}
 	return &Provider{
 		oauth2Config: oauth2.Config{
@@ -93,6 +105,7 @@ func New(ctx context.Context, cfg Config) (*Provider, error) {
 		discovered:        discovered,
 		issuer:            issuer,
 		tokenAuthInParams: postOnlyClientAuth(metadata.TokenAuthMethods),
+		userInfoKeys:      userInfoKeys,
 		groupsClaim:       cfg.GroupsClaim,
 		stateCookieName:   cfg.StateCookieName,
 		stateTTL:          cfg.StateTTL,
