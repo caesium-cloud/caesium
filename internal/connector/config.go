@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/url"
 	"path"
 	"regexp"
 	"sort"
@@ -52,6 +53,7 @@ type Connection struct {
 	Provider         string
 	Endpoint         string
 	Scope            string
+	UIURL            string
 	SecretRefs       []string
 	CertificatePaths []string
 	Limits           Limits
@@ -134,6 +136,7 @@ type fileConnection struct {
 	Provider    string           `yaml:"provider"`
 	Endpoint    string           `yaml:"endpoint"`
 	Scope       string           `yaml:"scope"`
+	UIURL       string           `yaml:"uiURL"`
 	Credentials *fileCredentials `yaml:"credentials"`
 	Limits      *fileLimits      `yaml:"limits"`
 	Bindings    []fileBinding    `yaml:"bindings"`
@@ -275,6 +278,10 @@ func compileConnection(index int, raw fileConnection) (Connection, error) {
 	if strings.TrimSpace(raw.Scope) == "" || strings.ContainsAny(raw.Scope, " \t\r\n") {
 		return Connection{}, fmt.Errorf("%s: scope is required", where)
 	}
+	uiURL, err := compileUIURL(raw.UIURL)
+	if err != nil {
+		return Connection{}, fmt.Errorf("%s: invalid uiURL", where)
+	}
 	if raw.Credentials == nil {
 		return Connection{}, fmt.Errorf("%s: credentials are required", where)
 	}
@@ -300,11 +307,28 @@ func compileConnection(index int, raw fileConnection) (Connection, error) {
 		Provider:         raw.Provider,
 		Endpoint:         raw.Endpoint,
 		Scope:            raw.Scope,
+		UIURL:            uiURL,
 		SecretRefs:       refs,
 		CertificatePaths: paths,
 		Limits:           limits,
 		Bindings:         bindings,
 	}, nil
+}
+
+// compileUIURL validates a browser-only provider console base. It never chooses
+// a connector RPC destination and cannot carry credentials or query material.
+func compileUIURL(raw string) (string, error) {
+	if raw == "" {
+		return "", nil
+	}
+	if len(raw) > 2048 || raw != strings.TrimSpace(raw) {
+		return "", errors.New("invalid console URL")
+	}
+	u, err := url.Parse(raw)
+	if err != nil || u.Opaque != "" || (u.Scheme != "https" && u.Scheme != "http") || u.Hostname() == "" || u.User != nil || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" || strings.Contains(raw, "#") || strings.Contains(raw, "\\") {
+		return "", errors.New("invalid console URL")
+	}
+	return strings.TrimRight(u.String(), "/"), nil
 }
 
 func compileCredentials(where string, raw *fileCredentials) ([]string, []string, error) {

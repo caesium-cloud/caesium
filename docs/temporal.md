@@ -12,8 +12,9 @@
 The optional adapter observes Temporal workflows and implements binding-declared
 JSON Queries and Updates. Authenticated HTTP monitoring and verified links to
 Caesium runs are described in [the connector guide](connectors.md).
-Console pages and the public operator action surface remain proposed in the
-[execution-connectors plan](exec-plans/active/execution-connectors.md).
+Declared authenticated status Queries, approval submissions and durable operation
+receipts are also available through that guide. Console pages remain Stream E
+in the [execution-connectors plan](exec-plans/active/execution-connectors.md).
 That plan is not complete. The patterns below are the unchanged REST recipe.
 
 [Temporal](https://temporal.io) and Caesium sit at different layers, and they

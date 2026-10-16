@@ -972,12 +972,15 @@ PY_TASK
   fi
   gocoverdir_complete "$RAW/connectors" || return 1
   # A removed semantic flag or startup-only guard cannot silently contribute.
-  python3 - "$AUDIT/connector-reads.json" "$CANDIDATE_SHA" "$IMAGE_ID" "$CONNECTOR_ID" "$provider_id" "$provider_image" "$RAW/connectors" <<'PY_RECEIPT' || return 1
-import hashlib, json, pathlib, sys
+  python3 - "$AUDIT/connector-reads.json" "$CANDIDATE_SHA" "$IMAGE_ID" "$CONNECTOR_ID" "$provider_id" "$provider_image" "$RAW/connectors" "$ROOT/scripts/coverage-journeys.py" <<'PY_RECEIPT' || return 1
+import hashlib, json, pathlib, runpy, sys
 path = pathlib.Path(sys.argv[1])
 if path.is_symlink():
     raise SystemExit('connector semantic receipt is unsafe')
 record = json.loads(path.read_bytes())
+# Re-derive read/action RPC deltas and require every semantic witness before
+# accepting the continuous process's profiles. Old read-only receipts fail.
+runpy.run_path(sys.argv[8])['validate_connector_semantic_receipt'](record)
 raw = pathlib.Path(sys.argv[7])
 files = {p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in raw.iterdir() if p.is_file()}
 process = record.get('process', {})
