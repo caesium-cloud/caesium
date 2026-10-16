@@ -13,7 +13,7 @@ With `CAESIUM_AUTH_MODE=none` (the default) every endpoint is open. With
 bearer API key or a browser session; webhook delivery keeps using per-trigger
 signature configuration rather than bearer tokens. Native OIDC, SAML, and LDAP
 sign-in can be enabled alongside API keys; see
-[sso-authentication.md](sso-authentication.md).
+[identity-and-access.md](identity-and-access.md).
 
 When `CAESIUM_AUTH_MODE=api-key`, also set `CAESIUM_AUTH_KEY_HASH_SECRET` to a
 long random server-side secret. New and rotated API keys are stored as
@@ -31,7 +31,9 @@ For the auth management CLI, supply credentials through `CAESIUM_API_KEY`. The
 | `POST /auth/logout` | Revoke the current browser session. |
 | `GET /v1/auth/keys`, `POST /v1/auth/keys` | List and create API keys. |
 | `POST /v1/auth/keys/:id/revoke`, `POST /v1/auth/keys/:id/rotate` | Revoke or rotate a key. |
-| `GET /v1/auth/audit` | Query the audit log. |
+| `GET /v1/auth/audit` | Query the audit log. `?namespace=` filters on the row's namespace (a namespace or `*`) and is what the request is authorised on; omitted means all rows (cluster admin). |
+| `GET /v1/auth/policy` | Cluster admin. The effective access policy with `revision`, `source`, `loaded_at`, `default_role`, `last_reload` and `warnings`. See [identity-and-access.md](identity-and-access.md#rest-api). |
+| `POST /v1/auth/policy/reload` | Cluster admin. Reload the access policy file on the serving node: `200` (swapped or unchanged), `422` (invalid file, last good revision retained), `409` (no policy file configured). |
 
 ## Jobs, runs, and definitions
 

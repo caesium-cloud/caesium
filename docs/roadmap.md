@@ -303,7 +303,7 @@ Features that were previously on the roadmap and are now shipped:
 | Task retries with exponential backoff | [`design/airflow-parity.md#what-shipped`](design/airflow-parity.md#what-shipped) | Shipped |
 | Trigger rules (all_success, all_done, etc.) | [`design/airflow-parity.md#what-shipped`](design/airflow-parity.md#what-shipped) | Shipped |
 | Embedded web UI with DAG visualization | [`ui_implementation_plan.md`](archive/ui_implementation_plan.md) | Shipped |
-| Native SSO authentication | [`sso-authentication.md`](sso-authentication.md) | Shipped (OIDC, SAML, LDAP) |
+| Native SSO authentication | [`identity-and-access.md`](identity-and-access.md) | Shipped (OIDC, SAML, LDAP) |
 | Freshness-driven scheduling | [`design/freshness-scheduling.md`](design/freshness-scheduling.md) | Shipped ([plan](exec-plans/completed/freshness-scheduling.md); streams A–G) |
 | Cross-job contract enforcement | [`design/contract-enforcement.md`](design/contract-enforcement.md) | Shipped (`exec-plans/completed/contract-enforcement.md`; contract graph/check, apply enforcement, Console graph and diff badges) |
 | Agent-in-the-loop ETL remediation | [`design/agent-in-the-loop.md`](design/agent-in-the-loop.md) | Shipped ([plan](exec-plans/completed/agent-in-the-loop-remediation.md); runtime streams) |

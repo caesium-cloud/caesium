@@ -2,7 +2,7 @@
 
 Last updated: 2026-10-16
 
-Caesium's authentication is shipped and native (OIDC, SAML, LDAP; `docs/sso-authentication.md`),
+Caesium's authentication is shipped and native (OIDC, SAML, LDAP; `docs/identity-and-access.md`),
 but authorization is a single global role ladder keyed per HTTP route, SSO users cannot be
 scoped, there is no tenancy primitive anywhere, SSO admins cannot manage API keys, users have
 no lifecycle, and no SSO path has end-to-end coverage. That is not usable by a corporation
@@ -1033,7 +1033,7 @@ group refresh, user disable, CLI login) is asserted here against a live Keycloak
 
 ## Navigational / Organizational Improvements
 
-- [ ] N-1. Rename `docs/sso-authentication.md` → `docs/identity-and-access.md` (`git mv`)
+- [x] N-1. Rename `docs/sso-authentication.md` → `docs/identity-and-access.md` (`git mv`)
       and grow it into the single operator guide with the section order from spec §16:
       concepts (namespace, grant, role); providers (OIDC, SAML, LDAP/AD; Keycloak
       section arrives with G5); policy file; namespaces & isolation; API keys & CLI
@@ -1044,6 +1044,7 @@ group refresh, user disable, CLI login) is asserted here against a live Keycloak
       exists.
       Files: `docs/sso-authentication.md` → `docs/identity-and-access.md`,
       `docs/README.md`, `docs/roadmap.md`, `docs/sovereignty.md`, `README.md`.
+      (Done in W3-delta: the guide documents A4 (#645) and A3 (#647); merges after both.)
       Depends on: A4.
 - [ ] N-2. Close-out: `docs/sovereignty.md` gains a **Multi-tenancy** row; roadmap §3.1
       flips to Shipped and §3.3's "read-only vs operator role distinction" line is

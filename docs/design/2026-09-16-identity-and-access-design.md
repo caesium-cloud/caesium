@@ -41,7 +41,7 @@ Authentication is shipped and native: OIDC, SAML and LDAP providers in
 `internal/auth/{oidc,saml,ldap}/`, a shared `ExternalIdentity` (issuer, subject,
 email, display name, groups), just-in-time user provisioning keyed on
 (issuer, subject) in `internal/auth/users.go`, dqlite-backed sessions with CSRF,
-rate limiting, and a structured audit log. Operator guide: `docs/sso-authentication.md`.
+rate limiting, and a structured audit log. Operator guide: `docs/identity-and-access.md`.
 
 Authorization is not corporate-ready:
 

@@ -169,7 +169,7 @@ On macOS the CLI runs inside a container, so call the generated wrapper and addr
 | Kubernetes | `helm install caesium ./helm/caesium`, and `--set replicaCount=3` for a Raft cluster. Backup, member replacement, Kueue delegation, and air-gapped image loading are in [docs/kubernetes-deployment.md](docs/kubernetes-deployment.md). |
 | Multi-node, no Kubernetes | Point each binary at its peers with `CAESIUM_NODE_ADDRESS` and `CAESIUM_DATABASE_NODES`. Every execution and dqlite knob is in [docs/distributed-execution.md](docs/distributed-execution.md). |
 
-Authentication, SSO, and the REST API are covered in [docs/sso-authentication.md](docs/sso-authentication.md) and [docs/rest-api.md](docs/rest-api.md).
+Authentication, SSO, and the REST API are covered in [docs/identity-and-access.md](docs/identity-and-access.md) and [docs/rest-api.md](docs/rest-api.md).
 
 ## Documentation
 
