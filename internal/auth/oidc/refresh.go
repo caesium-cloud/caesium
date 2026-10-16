@@ -1,6 +1,7 @@
 package oidc
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -449,6 +450,11 @@ func (p *Provider) userInfoCurrent(claims map[string]json.RawMessage) bool {
 // numericDate decodes a JWT NumericDate (seconds since the epoch, possibly
 // fractional).
 func numericDate(raw json.RawMessage) (time.Time, bool) {
+	// JSON null unmarshals into a float64 without error and would read as the
+	// epoch; a present but null time bound is malformed, not absent.
+	if string(bytes.TrimSpace(raw)) == "null" {
+		return time.Time{}, false
+	}
 	var seconds float64
 	if err := json.Unmarshal(raw, &seconds); err != nil || math.IsNaN(seconds) || math.IsInf(seconds, 0) {
 		return time.Time{}, false

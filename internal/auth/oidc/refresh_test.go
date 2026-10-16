@@ -632,6 +632,14 @@ func TestRefreshGroupsValidatesTheUserInfoAnswer(t *testing.T) {
 			answer: func(m *mockIssuer) http.HandlerFunc {
 				return signedAnswer(m, nil, func(c map[string]any) { c["nbf"] = []int{1} })
 			}},
+		{name: "signed with a null nbf",
+			answer: func(m *mockIssuer) http.HandlerFunc {
+				return signedAnswer(m, nil, func(c map[string]any) { c["nbf"] = nil })
+			}},
+		{name: "plain JSON with a null exp",
+			answer: func(*mockIssuer) http.HandlerFunc {
+				return jsonAnswer(func(c map[string]any) { c["exp"] = nil })
+			}},
 		{name: "plain JSON that has expired",
 			answer: func(*mockIssuer) http.HandlerFunc {
 				return jsonAnswer(func(c map[string]any) { c["exp"] = float64(time.Now().Add(-time.Second).Unix()) + 0.5 })
