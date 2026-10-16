@@ -1879,8 +1879,11 @@ succeeded run, and verifies the reverse link against the provider's journal.
 It accepts counters only after the semantic receipt, continuous process
 identities, complete raw-file hashes and exit exactly 0 are verified. Missing
 provider, RPC or correlation evidence fails the existing coverage gate; the
-zero-uncovered-path floor is unchanged. The full connector HTTP/browser lane
-remains execution-connectors F2.
+zero-uncovered-path floor is unchanged. Artifact upload selects public report,
+audit, raw-profile and journey roots, plus the provider journal and version files.
+The provider's private TLS directory and runtime database are excluded without
+changing their permissions. The full connector HTTP/browser lane remains
+execution-connectors F2.
 
 ```sh
 : "${CAESIUM_COVERAGE_BACKEND_INPUTS:?absolute path to verified backend-inputs.json required}"

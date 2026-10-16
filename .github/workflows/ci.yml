@@ -2116,7 +2116,20 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: coverage-ratchets-artifacts
-          path: .tmp/lane-evidence/coverage-ratchets/
+          # Explicit public roots avoid traversing the fixture's UID-10001
+          # private TLS directory. Negative globs still traverse that ancestor.
+          path: |
+            .tmp/lane-evidence/coverage-ratchets/*.json
+            .tmp/lane-evidence/coverage-ratchets/artifacts/*.json
+            .tmp/lane-evidence/coverage-ratchets/artifacts/*.log
+            .tmp/lane-evidence/coverage-ratchets/artifacts/*.yaml
+            .tmp/lane-evidence/coverage-ratchets/artifacts/audit/
+            .tmp/lane-evidence/coverage-ratchets/artifacts/journeys/
+            .tmp/lane-evidence/coverage-ratchets/artifacts/profiles/
+            .tmp/lane-evidence/coverage-ratchets/artifacts/raw/
+            .tmp/lane-evidence/coverage-ratchets/artifacts/connectors-provider/events.jsonl
+            .tmp/lane-evidence/coverage-ratchets/artifacts/connectors-provider/temporal-version.txt
+            .tmp/lane-evidence/coverage-ratchets/artifacts/connectors-provider/server-version.txt
           if-no-files-found: warn
           retention-days: 7
 
