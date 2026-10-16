@@ -1,6 +1,6 @@
 # Execution Connectors — Temporal Monitoring and Operator Actions
 
-Last updated: 2026-10-14
+Last updated: 2026-10-15
 
 Caesium should let an operator follow a data process across Temporal workflows
 and Caesium jobs, understand the data consequence, and perform a declared
@@ -130,13 +130,32 @@ reads/history supply detail; bindings supply explicit business semantics.
    A transactional guard permits only one open operation per connection/workflow/
    run/action across different keys and operators; conflicts return the existing
    receipt ID. List execution operations so refresh/new tabs recover server state.
-   Distinguish submitted, accepted, completed, rejected and unknown. Timeout is
-   not rejection/completion. Background/restart reconciliation only looks up the
-   same Update handle/ID; it never resubmits. A rejected-before-acceptance Update
+   Distinguish submitted, accepted, completed, rejected and unknown. Definitive
+   initial preflight refusals (`NotFound`, `InvalidArgument`, `FailedPrecondition`,
+   `PermissionDenied`) have the separate terminal state `not_dispatched`; this
+   is not business rejection. Transient or unclassified initial no-send evidence
+   keeps the receipt submitted and its guard open. A same-key explicit submission
+   may retry only after a current-epoch transactional revision claim consumes
+   durable proof that this initial attempt issued no Update. The proof defaults
+   false; admission, a crash or a failed evidence write cannot manufacture it.
+   Other nonterminal same-key replays may only reconcile by lookup or report an
+   explicit pending error while initial dispatch ownership is unsettled; an
+   unobserved outcome is never reported as success. Acceptance and
+   its evidence survive weaker/error lookup results. Validated completion clears
+   the guard even when its result must be omitted to fit the complete metadata
+   envelope. Lookup or resend preflight refusal retains prior uncertainty and its
+   open guard. Timeout is not rejection/completion. Background/restart reconciliation
+   only looks up the same Update handle/ID; it never resubmits. A rejected-before-acceptance Update
    is absent from history, so lookup `NotFound` leaves an uncertain operation
-   unknown, not rejected or safe to retry. Only a fresh explicit confirmation by
-   the original principal may resubmit the immutable receipt/Update ID to its
-   pinned run; audit that decision and recheck authorization/configuration.
+   unknown, not rejected or safe to retry. Only a fresh explicit confirmation of
+   the displayed receipt revision by the original principal may resubmit the
+   immutable receipt/Update ID to its pinned run; audit that decision and recheck
+   authorization/configuration. Preserve the admission epoch as provenance.
+   A current matching node can recover across unrelated global epoch changes
+   only while the server-derived connection identity and canonical binding stay
+   unchanged. Removed/repointed connections and changed bindings refuse before
+   RPC. A resend transaction fences and audits the confirming service's current
+   epoch while retaining the receipt's original actor, target and Update ID.
    Known rejection is terminal and duplicate requests never resend it. Restart
    never retargets a newer run. The remote validator remains authoritative for
    eligibility, and the workflow handler enforces one logical approval effect
@@ -168,7 +187,12 @@ reads/history supply detail; bindings supply explicit business semantics.
    Missing/ambiguous records and mismatched hints stay unverified. Another
    workflow's otherwise valid admission cannot be borrowed. Queue promotion
    resolves to the admitted run; activity retries reuse that admission. Persist
-   source evidence and verification time only when evidence changes. This verifies
+   source evidence and verification time only when evidence changes. Unrelated
+   pending activities cannot consume the recognized-activity evidence budget or
+   hide a present hint. Source event and attempt advance together; an older start
+   cannot lower Describe's current pending attempt. Inconsistent split-page
+   evidence stays incomplete/unverified rather than losing a reported hint.
+   This verifies
    the declared protocol identity, not the identity of #560's HTTP caller or
    arbitrary data provenance. Follow verified local runs to existing data APIs;
    dataset associations are declarations, never proof of freshness,
@@ -223,10 +247,8 @@ cardinality and closed-workflow Query dispatch count through the live surface.
 
 ## Progress (as of 2026-10-15)
 
-W1, W2 and both W3 feature PRs have merged. B2 and F1 passed their final-head
-checks; the W3 plan sync remains open in PR #631 pending required CODEOWNER
-review. C, D, E, F2–F4 and N are not started. Drafting base:
-`a0e862171b898a64b64828b1a5376226e85b106a`. An open PR or a fixture-only pass
+W1, W2 and W3 have merged. W4 D1 and D2 have merged in PRs #636 and #637.
+C, E, F2–F4 and N remain later work. An open PR or a component-only pass
 is not completion. The SHAs below are the squash merges read from GitHub.
 
 The orchestrator owns this dashboard: PR URLs, exact tested heads/merge SHAs,
@@ -315,11 +337,110 @@ Resume unfinished waves. Do not archive this plan while later items remain.
   in 35.2 seconds. Eleven review replies/resolutions were verified at feature
   heads `190353f3`/`8e9a82fc`; the current F1 follow-up dispositions are above.
 - **Next ready:** D1 and D2 have merged prerequisites and disjoint core files.
-  Neither is dispatched; C1 still needs D1, and C2 still needs C1 and D2.
-- **Remaining:** C, D, E, F2–F4 and N are not dispatched. Local arm64 evidence
-  does not qualify Cloud or other versions. Plan sync remains open in
-  [PR #631](https://github.com/caesium-cloud/caesium/pull/631) pending required
-  CODEOWNER review; W3 closeout awaits that merge.
+  Both are dispatched in W4 below; C1 still needs D1, and C2 still needs C1 and D2.
+- **Closeout:** [PR #631](https://github.com/caesium-cloud/caesium/pull/631)
+  merged `b796b5672eab30134876f403f257af9e7a1f76da` at 2026-10-15T17:07:08Z.
+  Head `0503b5b81437889cae14571bdd8ebf8e9c0c5daa` passed current-head
+  [CI run 38764838541](https://github.com/caesium-cloud/caesium/actions/runs/38764838541),
+  including `ci-ok`. W3 is shipped. Local arm64 evidence does not qualify
+  Cloud or other versions.
+
+### W4 — Correlation and action durability (implementation merged)
+
+- **Base:** W4 started from `b796b5672eab30134876f403f257af9e7a1f76da`.
+  Current `master` includes D1 at `2615c8745466c5f949f2aa43cc7947d349cb9c47`
+  and D2 at `2114efcff33e8fcd1bffc5c24bd735b44e0a21bb`.
+- **W4-α / D1:** [PR #636](https://github.com/caesium-cloud/caesium/pull/636)
+  merged `2615c8745466c5f949f2aa43cc7947d349cb9c47` at 2026-10-15T22:17:40Z.
+  Tested head `5c2ee804ac110017b4f5129d2084dcc57aa0a926` implements trusted
+  activity/admission correlation and durable local links. The two posted review
+  findings are fixed: unrelated pending activities cannot discard recognized
+  heartbeat/attempt evidence, and older history starts cannot lower Describe's
+  current attempt or advance its source event. Mixed/conflicting hints refuse
+  verification instead of silently losing reported values. Independent source
+  review is clear. Containerized focused race/static fixture/dependency checks,
+  lint (zero issues), full race/coverage unit and required tagged checks passed.
+  Five new regression groups drive the adapter through actual StartWithResult
+  admissions and typed persistence. Fresh clean real Temporal qualification
+  passed Fixture, Messages and Correlation without skips (16.04 seconds), with
+  verified source/image provenance and observed Server 1.32.0, SDK 1.49.0 and
+  CLI 1.9.1. Full default integration passed in 876.192 seconds. Exact-head
+  [CI run 38807694976](https://github.com/caesium-cloud/caesium/actions/runs/38807694976)
+  succeeded, including coverage, browser lanes and `ci-ok`. Both posted findings
+  have verified replies and resolved threads. D1 component acceptance is merged;
+  C1/C2 still own the public HTTP composition.
+- **W4-β / D2:** [PR #637](https://github.com/caesium-cloud/caesium/pull/637)
+  merged `2114efcff33e8fcd1bffc5c24bd735b44e0a21bb` at 2026-10-16T00:27:31Z.
+  Tested head `50d1362fb537d4d219a60a41460335e4ebd1c591` implements immutable action
+  receipts, guarded dispatch, lookup-only recovery and explicit original-principal
+  resubmission. It merges actual D1 `master`, preserving both implementations;
+  only two guide status paragraphs conflicted and were reconciled semantically.
+  Four posted findings are fixed: durable initial no-send proof and transactional
+  claims permit safe transient retries; weaker/error lookup retains acceptance
+  bytes; validated completion survives result omission at the evidence ceiling;
+  and nonterminal replay repairs failed evidence writes by lookup without another
+  send. Independent review is clear. Standalone head
+  `f5ab6072905a6b356cc7f33a87af6d8c410cef13` passed containerized lint (zero
+  issues), focused race/static fixture/dependency checks, full race/coverage unit,
+  required tagged checks, default integration (821.974 seconds), normal agent
+  integration (35.095 seconds), and
+  [CI run 38808433945](https://github.com/caesium-cloud/caesium/actions/runs/38808433945),
+  including `ci-ok`. All ten new regression groups passed, including actual
+  Messenger/Temporal-bridge calls, concurrent retry claims, injected database
+  errors and an exact legal result ceiling. That clean head's real Temporal
+  qualification passed Fixture, Messages and Operations without skips (7.05
+  seconds), with verified source/image provenance and observed Server 1.32.0,
+  SDK 1.49.0 and CLI 1.9.1. Component evidence records five Update sends and
+  three logical effects across lost replies, admission crash and explicit
+  confirmation. Base-integration commit `997b9ba8` matched the earlier combined
+  unit tree. Its [CI run 38816506079](https://github.com/caesium-cloud/caesium/actions/runs/38816506079)
+  failed Kubernetes shard 3 twice with a competing admission POST returning EOF;
+  the accepted-run count passed. Both earlier standalone candidates had passed
+  that test in shard 2. The precise hosted transport cause remains unconfirmed.
+  Current commit `50d1362f` gives the concurrency test its own HTTP transport
+  and reports worker errors in the parent test, preserving both real POSTs and
+  exact one-accepted/one-conflict assertions without retries, delays or skips.
+  Independent source review is clear. Final contents passed fresh containerized
+  lint (zero issues), the full 152-package race/coverage unit suite, and a clean
+  Kubernetes 1.37.0 / Helm 3.22.0 shard-3 run (307.305 seconds; 146 passing tests,
+  32 expected off-lane skips). Targeted atomic/strategy scenarios passed in 7.99
+  seconds; the direct-database stale-claim subcase is expected off this lane.
+  [Current-head CI run 38825609471](https://github.com/caesium-cloud/caesium/actions/runs/38825609471)
+  passed, including coverage and all nine required checks. All four
+  posted findings have verified replies and resolved threads. D2 is checked on
+  verified merged component acceptance.
+- **Composition:** Current clean `50d1362f` contains merged D1 and the D2
+  implementation. Fresh real Temporal qualification passed all four required
+  named scenarios: Fixture, Messages, Correlation and Operations, without skips
+  (16.19 seconds). Candidate/source/image identities match this exact head;
+  observed Server 1.32.0, SDK 1.49.0 and CLI 1.9.1 match the pins. Activity retry
+  was activated; operation evidence records five raw Update sends and three
+  logical approval effects. This supplements the fresh full unit and clean
+  Kubernetes checks above. Owned fixture containers were cleaned after the run.
+- **Verification boundary:** Real Temporal component scenarios supplement
+  containerized baseline checks. Running-server connector HTTP, bidirectional
+  public links and process-restart proof remain C1/C2; those routes do not yet
+  exist. D1 and D2 are checked on merged component acceptance. Merged W4 file
+  contents match tested head `50d1362f`; this is not a new qualification of
+  unrelated identity-and-access changes merged alongside W4.
+- **Review follow-up:** All six posted findings are fixed, independently
+  reviewed, covered by passing regressions, replied to in their own threads and
+  resolved. Fresh paginated GitHub reads verify D1's two threads and D2's four
+  threads resolved, with no remaining open findings. Standalone default/agent
+  integration, fresh combined unit and all-four-scenario real-provider
+  qualification have passed. Targeted containerized plan guardrails passed
+  (14.071 seconds). Current-head D2 CI passed, including `ci-ok`.
+- **Merge/plan status:** D1 and D2 are merged. The dashboard
+  [PR #635](https://github.com/caesium-cloud/caesium/pull/635) records W4 closure;
+  normal protected review/checks and the squash merge queue govern its merge.
+  Plan validation includes an earlier full containerized race/coverage unit pass
+  with documentation guardrails. Subsequent progress edits pass item/dependency, local-link,
+  template-token and whitespace checks. Targeted containerized guardrails passed
+  on the updated dashboard; final status edits retain the static checks. Owned
+  fixture resources and the shared lane were released after all local gates.
+  W4 implementation is shipped; this dashboard records its merged acceptance.
+- **Remaining:** C, E, F2–F4 and N are outside this wave. No later wave is
+  dispatched in this execution.
 
 ### Stream Status
 
@@ -328,7 +449,7 @@ Resume unfinished waves. Do not archive this plan while later items remain.
 | A | Generic contract, configuration and catalog (2 items) | P0 | Shipped (A1, A2) |
 | B | Temporal inspection and declared messages (2 items) | P0 | Shipped (B1, B2) |
 | C | Authenticated REST and composition (2 items) | P0 | Not started |
-| D | Verified correlation and action durability (2 items) | P0 | Not started |
+| D | Verified correlation and action durability (2 items) | P0 | Shipped (D1, D2) |
 | E | Console monitoring, data links and approval (3 items) | P0 | Not started |
 | F | Real fixture, CI, qualification and promotion (4 items) | P0 | F1 shipped; F2–F4 not started |
 | N | Operator guidance and reconciliation (1 item) | P0 | Not started |
@@ -468,14 +589,26 @@ auth chokepoints. Every endpoint includes a live HTTP integration scenario.
 
 ### Stream D — Correlation and action durability
 
-- [ ] D1. Derive `<RunID>/<ActivityID>` from trusted Temporal identity and use a
+- [x] D1. Derive `<RunID>/<ActivityID>` from trusted Temporal identity and use a
   read-only admission lookup over A1's activity/job allowlist. Validate optional
   A1-defined heartbeat/result hints against that identity and #560's records;
   persist typed links with source evidence. Follow queued promotion without
   starting work. Extend the Temporal recipe using the already-frozen envelope.
-  Files: new `internal/connector/correlation.go`,
-  new `internal/connector/correlation_test.go`, `internal/run/start_idempotency.go`,
-  `internal/run/start_idempotency_test.go`, `docs/temporal.md` (activity envelope).
+  Files: new `internal/connector/correlation/correlation.go`,
+  new `internal/connector/correlation/correlation_store.go`,
+  new `internal/connector/correlation/correlation_test.go`,
+  new `internal/connector/temporal/correlation.go` and its tests,
+  new `internal/models/external_execution_correlation.go`,
+  `internal/models/models.go`, `pkg/db/migrations_test.go`,
+  `internal/run/start_idempotency.go`, `internal/run/start_idempotency_test.go`,
+  new `internal/runadmission/admission.go` (shared lightweight admission types
+  and key validation, preserving the run package exports),
+  new `test/connectors_correlation_test.go`,
+  `scripts/connectors-fixture.sh`, `scripts/test_connectors_fixture.py`
+  (strict named component selection), `docs/connectors.md` (storage boundary),
+  `docs/temporal.md` (activity envelope),
+  `ui/e2e/facelift-review2.spec.ts` (required-CI cancellation test repair only;
+  no product UI changes).
   Depends on: A2, B1, F1.
   Verify: the real fixture reports queued/running/finished admission. C1 proves
   bidirectional public links. Wrong/missing/ambiguous admission, another job's
@@ -484,14 +617,22 @@ auth chokepoints. Every endpoint includes a live HTTP integration scenario.
   payloads or reconstructing start request hashes. Repeat reads/retries create
   one relation; promotion/restart preserve identity. Existing #560 regressions pass.
 
-- [ ] D2. Implement transactional receipt admission/dedupe, the target/action
+- [x] D2. Implement transactional receipt admission/dedupe, the target/action
   open-operation guard and lookup-only provider resolution. Snapshot the binding,
   actor context and stable Update ID before dispatch; concurrent callers/restart
   attach to the original pinned operation. Only explicit original-principal
   confirmation can resend an unknown operation. Bound/redact persisted content.
-  Files: new `internal/connector/operations.go`,
-  new `internal/connector/operation_store.go`,
-  new `internal/connector/operations_test.go`,
+  Files: new `internal/connector/operations/operations.go`,
+  new `internal/connector/operations/operation_store.go`,
+  new `internal/connector/operations/operations_test.go`,
+  `internal/connector/store.go` (operation admission/state seam),
+  `internal/connector/config.go`, `internal/connector/fingerprint.go`
+  (shared payload validation and canonical binding serialization),
+  `internal/models/connector_operation.go` (immutable dispatch/evidence fields),
+  new `internal/connector/temporal/operations.go` and its tests,
+  new `test/connectors_operations_test.go`,
+  `scripts/connectors-fixture.sh`, `scripts/test_connectors_fixture.py`
+  (strict named component selection),
   `docs/connectors.md` (receipt/recovery sections).
   Depends on: A2, B2, F1.
   Verify: real fixture plus store concurrency tests cover lost accepted reply,
@@ -506,6 +647,16 @@ auth chokepoints. Every endpoint includes a live HTTP integration scenario.
   earlier send. A completed submission or lookup failure can have unknown
   acceptance and effects. Neither becomes a
   validator-rejected/no-effect receipt without evidence of validator origin.
+  Reopen under an actual different fingerprint with only an unrelated connection
+  added: identical retries attach to the old receipt, lookup sends nothing, and
+  explicit same-principal confirmation uses its immutable Update ID. Stale nodes
+  and incompatible destinations/bindings refuse without RPC or attempt/audit
+  changes; origin provenance and the confirming current epoch remain distinct.
+  Definitive initial preflight refusal is terminal; transient no-send evidence
+  supports only a transactionally claimed same-key retry. Concurrent retries,
+  restart and failed evidence writes cannot bypass that proof. Weak/error polls
+  preserve accepted state/evidence, legal maximum results complete with bounded
+  stored evidence, and nonterminal replay repairs outcomes by lookup only.
 
 ### Stream E — Console operator experience
 
@@ -625,9 +776,10 @@ compiled integration-runner approach; fixture code stays in the root module.
   Verify: proposed `just integration-test-connectors` executes all manifest-named
   live scenarios and E1's dedicated Playwright project. Run
   `scripts/check-test-evidence.py --manifest test/contracts/scenarios.json --report <report> --require connectors --strict`.
-  Include `TestConnectorsMessages` in the connector lane and require an explicit
-  PASS with no skip, alongside `TestConnectorsFixture`; before F2 this real
-  Temporal adapter scenario runs only through the manual fixture-check recipe.
+  Include `TestConnectorsMessages`, `TestConnectorsCorrelation` and
+  `TestConnectorsOperations` in the connector lane and require each explicit
+  PASS with no skip, alongside `TestConnectorsFixture`; before F2 these real
+  Temporal component scenarios run through the manual fixture-check recipe.
   Gate-off/queue-off misconfiguration, zero count, fixture failure, failed first
   browser attempt, missing artifacts or wrong candidate SHA fail the lane, which
   remains explicitly advisory to `ci-ok` until F4. Env-parity guardrail includes
@@ -683,7 +835,7 @@ compiled integration-runner approach; fixture code stays in the root module.
 **16 included items in seven streams.** Dependencies are explicit above;
 unchecked sibling work is not a hidden prerequisite.
 
-- **A1, A2, B1, B2 and F1** are merged. See Progress for the merge SHAs.
+- **A1, A2, B1, B2, F1, D1 and D2** are merged. See Progress for the merge SHAs.
   B2 landed before F1's schema-bearing fixture; the pinned development server
   supplied real provider qualification without a Temporal Cloud account.
 - **D1** needs A2/B1/F1; **D2** needs A2/B2/F1. Core files are disjoint.
@@ -695,6 +847,14 @@ unchecked sibling work is not a hidden prerequisite.
 
 ### Shared file ownership and merge order
 
+D1 and D2 compose the core contract in dedicated service/repository packages.
+The startup-loaded `internal/connector` package keeps configuration and the
+shipped A2 catalog/admission/epoch API; it does not import the services.
+Temporal and later C1/C2 composition import the relevant service packages.
+Component/provider evidence qualifies D1/D2 before wiring. C1/C2 must exercise
+those services through the instrumented application after importing them;
+package separation is not public-surface acceptance.
+
 | Surface | One writer / explicit order |
 | --- | --- |
 | Generic contracts/env | A1 owns types/registry/config and `pkg/env`; later changes return to A's integration owner |
@@ -705,7 +865,7 @@ unchecked sibling work is not a hidden prerequisite.
 | #560 lookup seam | D1 only; preserve admission behavior/regressions |
 | UI client/navigation | E1 then E3; detail page E1 -> E2 -> E3 |
 | Fixture/CI recipes/guardrail | F1 then F2 for `justfile`; F2 owns tracked recipe/guardrail and advisory CI wiring; F4 owns later promotion in the same CI files |
-| Fixture orchestration | F1 creates `scripts/connectors-fixture.sh`; C1 adds config-skew support, then F2 wires lane execution |
+| Fixture orchestration | F1 creates `scripts/connectors-fixture.sh`; W4 integration owner selects strict D1/D2 component scenarios; C1 adds config-skew support, then F2 wires lane execution |
 | Playwright selection/helper | E1 owns configuration/helper when the first specs land; E2/E3 add specs in its isolated project; F2 selects that existing project |
 | Connector guide | One integration writer; section integration order A1 -> A2 -> B1 -> B2 -> F1 -> D2 -> C1 -> C2 -> E1 -> E2 -> E3 -> F2 -> F4 -> N1 |
 | Other docs/Progress | A1 indexes its new guide; B1 corrects Temporal/strategy dependency claims, D1 extends the frozen envelope recipe, then N1 reconciles. F2 -> F4 own CI lane text/records. Orchestrator owns Progress; F3/F4 contribute evidence |
