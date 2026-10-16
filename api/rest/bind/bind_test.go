@@ -156,8 +156,11 @@ func TestProtectedGatesConnectorReadRoutes(t *testing.T) {
 		require.NoError(t, env.Process())
 		e := echo.New()
 		Protected(e.Group("/v1"), nil, nil)
-		for _, path := range []string{"/v1/connectors", "/v1/connectors/:connection_id/executions", "/v1/connectors/:connection_id/executions/:execution_id", "/v1/connectors/:connection_id/executions/:execution_id/history", "/v1/connectors/:connection_id/executions/:execution_id/relationships", "/v1/jobs/:id/runs/:run_id/external-executions"} {
+		for _, path := range []string{"/v1/connectors", "/v1/connectors/:connection_id/executions", "/v1/connectors/:connection_id/executions/:execution_id", "/v1/connectors/:connection_id/executions/:execution_id/history", "/v1/connectors/:connection_id/executions/:execution_id/relationships", "/v1/jobs/:id/runs/:run_id/external-executions", "/v1/connectors/:connection_id/executions/:execution_id/operations", "/v1/connectors/:connection_id/operations/:operation_id"} {
 			require.Equal(t, enabled, hasRoute(e, http.MethodGet, path), path)
+		}
+		for _, path := range []string{"/v1/connectors/:connection_id/executions/:execution_id/queries/:query_id", "/v1/connectors/:connection_id/executions/:execution_id/actions/:action_id", "/v1/connectors/:connection_id/operations/:operation_id/resubmit"} {
+			require.Equal(t, enabled, hasRoute(e, http.MethodPost, path), path)
 		}
 	}
 }

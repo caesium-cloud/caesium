@@ -79,6 +79,11 @@ func TestAuthMiddlewareMountedRoutesHaveRBACPolicy(t *testing.T) {
 	// Spot-check that every gate really mounted its routes.
 	for _, key := range []string{
 		"GET /v1/connectors",
+		"POST /v1/connectors/:id/executions/:id/queries/:id",
+		"POST /v1/connectors/:id/executions/:id/actions/:id",
+		"GET /v1/connectors/:id/executions/:id/operations",
+		"GET /v1/connectors/:id/operations/:id",
+		"POST /v1/connectors/:id/operations/:id/resubmit",
 		"GET /v1/connectors/:id/executions/:id/relationships",
 		"GET /v1/jobs/:id/runs/:id/external-executions",
 		"GET /metrics",

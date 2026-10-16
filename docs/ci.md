@@ -1876,6 +1876,12 @@ the coverage job's pinned Temporal fixture step. Its candidate, builder and
 platform must match the instrumented server. The cohort drives real discovery,
 detail, history and relationship reads, admits a publication job, observes its
 succeeded run, and verifies the reverse link against the provider's journal.
+It first proves monitoring issues no status Query or Update. It then explicitly
+queries status, submits one authenticated approval, refreshes operations and
+looks up the receipt, and verifies the workflow principal, one independent
+approval effect, the succeeded second local job and durable dispatch audit.
+Read and action RPC phase evidence is replay-validated before profiles are
+accepted.
 It accepts counters only after the semantic receipt, continuous process
 identities, complete raw-file hashes and exit exactly 0 are verified. Missing
 provider, RPC or correlation evidence fails the existing coverage gate; the
