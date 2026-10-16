@@ -79,6 +79,14 @@ func Lint(c *echo.Context) error {
 			resp.Errors = append(resp.Errors, LintMessage{Message: err.Error()})
 		}
 	}
+	// Namespace secret rules (identity-and-access C4): every secret:// reference
+	// must be allowed by its definition's namespace. Checked, never resolved;
+	// a no-op when no namespace has rules.
+	if len(resp.Errors) == 0 {
+		for _, msg := range lint.CheckSecretsAllowed(req.Definitions, lint.ServerSecretResolver) {
+			resp.Errors = append(resp.Errors, LintMessage{Message: msg})
+		}
+	}
 	if len(resp.Errors) == 0 {
 		for _, msg := range lint.CheckVolumeWriters(req.Definitions) {
 			resp.Warnings = append(resp.Warnings, LintMessage{Message: msg})

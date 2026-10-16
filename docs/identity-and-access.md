@@ -337,7 +337,7 @@ namespaces:
     kubernetes:                       # parsed and validated; not enforced yet
       namespace: caesium-marketing
       serviceAccountName: caesium-jobs
-    secrets:                          # parsed and validated; not enforced yet
+    secrets:                          # enforced; see Scoped secrets
       allow:
         - vault/secret/data/marketing/*
         - k8s/marketing-*
@@ -360,8 +360,9 @@ bindings:
     namespaces: ["*"]
 ```
 
-The `kubernetes`, `secrets` and `quotas` blocks are validated and carried in the
-loaded policy, but nothing consumes them yet; see [Namespaces and
+The `secrets` rules are enforced ([Scoped secrets](#scoped-secrets)). The
+`kubernetes` and `quotas` blocks are validated and carried in the loaded policy,
+but nothing consumes them yet; see [Namespaces and
 isolation](#namespaces-and-isolation).
 
 ### Validation rules
@@ -391,8 +392,10 @@ same rules. Any violation is a fatal startup error, or a rejected reload.
   must not be negative.
 - `secrets.allow` entries are `provider/path` globs: `*` matches within one path
   segment and `**` across segments. Literal `.` and `..` segments are rejected.
-  Vault rules select the secret path and allow every field at that path; `#` is
-  reserved as the field delimiter and `#field` patterns are unsupported.
+  The provider must be `env`, `k8s` (alias `kubernetes`) or `vault`; any other
+  provider is an error. Vault rules select the secret path and allow every field
+  at that path; `#` is reserved as the field delimiter and `#field` patterns are
+  unsupported.
 
 Non-fatal warnings: a namespace other than `default` that has no `secrets`
 rules; user bindings when no enabled provider supplies a trusted email (only
@@ -650,15 +653,82 @@ a principal who is operator in both namespaces can land between the namespace
 check and the handler (run admission and replay re-check inside their own
 transactions); in-transaction guards for the other mutations follow in B2/B4.
 
+### Scoped secrets
+
+A namespace's `secrets.allow` rules decide which `secret://` references its jobs
+may resolve. A namespace without a `secrets` block may resolve every reference
+(the pre-namespace behaviour, flagged by a lint warning); `secrets: {allow: []}`
+or `secrets: {}` resolves none.
+
+Rules match the reference's **canonical target**: the provider's own parser
+computes what would actually be read, query overrides included, and only that
+target is matched, never the reference's surface path.
+
+| Provider | Canonical target | Notes |
+| --- | --- | --- |
+| `env` | `env/<NAME>` | `?name=` wins over the path; path segments join with `_` |
+| `vault` | `vault/<path>#<field>` | `?field=` or the final path segment is the field; rules grant every field of an allowed path; a decoded `#` (`%23`) in the path or field is denied |
+| `k8s`, `kubernetes` | `k8s/<namespace>/<secret>` | the path namespace, or the secret resolver's `CAESIUM_JOBDEF_SECRETS_KUBE_NAMESPACE` for `secret://k8s/<secret>/<key>`; `?namespace=` and `?name=` override; the key is not part of the target |
+
+A Kubernetes rule with one path segment (`k8s/marketing-*`, `k8s/**`) is
+relative: it means that secret in the namespace's mapped Kubernetes namespace,
+`kubernetes.namespace`, else `CAESIUM_KUBERNETES_NAMESPACE`. Any other effective
+namespace must be named by a rule with two segments (`k8s/shared/common-*`).
+Until C1 makes relative references resolve in the mapped namespace, a relative
+reference reads in `CAESIUM_JOBDEF_SECRETS_KUBE_NAMESPACE`; when that differs
+from the mapped namespace, the reference does not match a relative rule and is
+denied. Set the two variables to the same namespace, or use
+`secret://k8s/<namespace>/<secret>/<key>`.
+
+Where the rules apply, each reading the policy at the point of use:
+
+- **Task execution**, local and distributed: every secret reference in the step
+  environment is checked before the cache lookup, so a reference the namespace
+  no longer allows is never satisfied from a cached result, and again by each
+  attempt's resolution and by quarantined-replay identity verification. A denial
+  fails the task at once, without retries, with an error naming only the
+  redacted reference (`secret env/FINANCE_TOKEN/… is not allowed by namespace
+  "marketing" secret rules: no rule matches`), and the incident class is
+  `config` (never auto-retried), not `transient_infra`. Each check reads the
+  policy as it is then, so a reload while one reference is being read applies
+  to the next reference of the same step.
+- **Replay** (`caesium run replay`, `POST /v1/jobs/:id/runs/:run_id/replay`): a
+  fully cached replay never reaches an executor, so before a step is reused from
+  cache or its baseline, or re-executed, its references must be allowed by the
+  job namespace's rules; otherwise the replay is refused with 422 naming the
+  redacted reference.
+- **HTTP trigger** webhook secret: every namespace of the trigger's jobs must
+  allow it (a trigger with no jobs uses `default`); a denial answers 500.
+- **Server lint** (`caesium job lint --server`, `POST /v1/jobdefs/lint`) and the
+  apply preview (`caesium job diff`, `POST /v1/jobdefs/diff`) report each
+  denied reference, redacted, without resolving it. `caesium job apply` does not
+  check secret rules; a bypassed lint fails at run time. Offline
+  `caesium job lint --check-secrets` resolves with the operator's own
+  credentials and ignores the server's policy.
+- Git sync credentials, registry credentials (`CAESIUM_REGISTRY_AUTH`) and
+  connector credentials are system secrets and are not scoped.
+
+A run in a namespace this node's policy file does not declare (it was removed
+after the job was applied) resolves no secrets. Work that starts while the
+server is still loading its policy file (queued or freshness-derived runs at
+startup) waits up to 30 seconds for it and resolves no secrets if it is not
+loaded by then. Client-side execution (`caesium dev`, `caesium reproduce`, and
+`caesium run retry` without `--server`) never loads the server's policy, even
+with `CAESIUM_AUTH_POLICY_FILE` set in its environment: like offline lint, it
+resolves every reference with the operator's own credentials and does not wait.
+With no policy file every
+namespace resolves every reference. In distributed mode each node enforces the
+rules from its own copy of the policy file: a worker whose file is missing,
+stale within a reload interval, or of another version enforces older or no
+rules until the owner carries the rules in the dispatch (C2). Mount the same
+file on every node.
+
 ### Planned isolation features
 
 - **Planned (C1): Kubernetes target per namespace.** The `kubernetes` block of
   a namespace in the policy file will select the Kubernetes namespace and
   service account that a namespace's pods run under. Today it is validated but
   every job runs where the engine is configured.
-- **Planned (C4): scoped secrets.** The `secrets.allow` rules will restrict
-  which `secret://` references a namespace's jobs may resolve. Today they are
-  validated but not enforced, and every namespace can resolve every secret.
 - **Planned (D1): run quotas.** `quotas.maxConcurrentRuns` will cap a
   namespace's concurrently active runs. Today it is validated but not enforced.
 
@@ -799,3 +869,10 @@ To move to a policy file:
 Upgrading across the namespace schema changes is a coordinated upgrade: stop
 every node before applying the new binary and restart only upgraded nodes.
 Mixed-version rolling upgrades are unsupported.
+
+Scoped secrets change two things on upgrade. A policy file whose
+`secrets.allow` names a provider other than `env`, `k8s`, `kubernetes` or
+`vault` no longer loads (startup fails; a reload keeps the last good revision),
+so run `caesium auth policy lint` first; such a rule never matched anything.
+And `secrets` rules start to be enforced, so jobs in a namespace with rules stop
+resolving references the rules do not allow.

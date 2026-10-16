@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/caesium-cloud/caesium/internal/cache"
+	"github.com/caesium-cloud/caesium/internal/jobdef/secret"
 	"github.com/caesium-cloud/caesium/internal/metrics"
 	"github.com/caesium-cloud/caesium/internal/run"
 	"github.com/caesium-cloud/caesium/internal/runlife"
@@ -68,7 +69,15 @@ func (l *localRun) runTask(taskID uuid.UUID) ([]uuid.UUID, error) {
 	taskQuarantined := taskQuarantine[taskID] || runQuarantined
 
 	if group, ok := l.lookupFanOutGroup(taskID); ok && len(group.Instances) > 0 {
+		// Each instance runs its own allow-check right before its own cache
+		// lookup (runFannedGroup), since instances wait independently.
 		return l.runFannedGroup(taskID, runner, taskModel, group, outputEnv, predOutputs, predOutputsByID)
+	}
+	// Namespace secret rules are checked before the cache lookup, so a
+	// reference the namespace no longer allows is never served from cache. A
+	// denial is permanent until the policy changes: fail without retrying.
+	if err := l.checkSecretsAllowed(runner); err != nil {
+		return failIdentity(err)
 	}
 	taskTimeout, timingErr := store.LocalTaskExecutionTimeout(ctx, runID, taskID)
 	if timingErr != nil {
@@ -136,6 +145,12 @@ func (l *localRun) runTask(taskID uuid.UUID) ([]uuid.UUID, error) {
 		var found bool
 		var err error
 		if cacheCfg.Enabled && hashArgs.UnresolvedImageIdentity == "" {
+			// Recheck with a fresh scope right before the lookup: identity
+			// resolution above can block on registry I/O, and a rule revoked
+			// meanwhile must not let the cached result through.
+			if denied := l.checkSecretsAllowed(runner); denied != nil {
+				return failIdentity(denied)
+			}
 			entry, found, err = cacheStore.Get(inputHash)
 		}
 		// A cache entry with no recorded partition list (nil, not merely
@@ -392,8 +407,10 @@ func (l *localRun) runTask(taskID uuid.UUID) ([]uuid.UUID, error) {
 		}
 		lastErr = execErr
 
-		// No more attempts — mark as permanently failed.
-		if attempt >= maxAttempts {
+		// No more attempts — mark as permanently failed. A namespace secret
+		// denial (the policy changed after the before-cache check) is
+		// permanent until the policy changes again, so it never retries.
+		if attempt >= maxAttempts || errors.Is(execErr, secret.ErrSecretDenied) {
 			break
 		}
 

@@ -1043,6 +1043,10 @@ func (sr staticResolver) ResolveWithIdentity(_ context.Context, ref string) (str
 	return "", secret.Identity{}, fmt.Errorf("secret %q not found", ref)
 }
 
+func (sr staticResolver) CanonicalTarget(string) (string, error) {
+	return "", errors.New("canonical target unsupported by test stub")
+}
+
 func mustGeneratePrivateKey(tb testing.TB) string {
 	tb.Helper()
 	key, err := rsa.GenerateKey(rand.Reader, 2048)
