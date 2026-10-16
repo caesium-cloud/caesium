@@ -248,8 +248,8 @@ cardinality and closed-workflow Query dispatch count through the live surface.
 ## Progress (as of 2026-10-16)
 
 W1 through W4 have merged, including the W4 dashboard in PR #635.
-W5 starts C1 from verified merged prerequisites. C2, E, F2–F4 and N remain
-later work. An open PR or a component-only pass
+W5 C1 is implemented and qualified; protected review/merge remains pending.
+C2, E, F2–F4 and N remain later work. An open PR or a component-only pass
 is not completion. The SHAs below are the squash merges read from GitHub.
 
 The orchestrator owns this dashboard: PR URLs, exact tested heads/merge SHAs,
@@ -454,11 +454,11 @@ Resume unfinished waves. Do not archive this plan while later items remain.
   has also merged; C1 uses its existing principal, cluster-role and scope policy.
   C2 requires merged C1. Console work and F2–F4/N remain future waves.
 - **W5-α / C1:** [PR #644](https://github.com/caesium-cloud/caesium/pull/644),
-  draft head `e83addc4f03ab1a747b4ef1484034fd14fe78a8e`, implements startup/client composition,
+  head `e83addc4f03ab1a747b4ef1484034fd14fe78a8e`, implements startup/client composition,
   authenticated monitoring and scope-safe reverse links, bounded observation
   persistence and guarded configuration activation. Persistent connection
   identities supplement the epoch so a coordinated change cannot repoint a
-  referenced connection ID. One candidate will contain the implementation and
+  referenced connection ID. The candidate contains the implementation and
   its real HTTP and shared-catalog cluster scenarios. Independent backend/auth
   review found and corrected clock-dependent observation generations,
   unauthenticated cursor rebinding, configuration and reverse-link bounds,
@@ -501,19 +501,25 @@ Resume unfinished waves. Do not archive this plan while later items remain.
   Query, a succeeded local job, verified reverse link and clean exit 0 with
   complete counter hashes. The arm64 profile covers 145 observation and 68
   correlation-persistence statements.
-- **Hosted qualification:** On `33d86e60`, all runtime/image/unit/browser/cluster
-  checks passed, including positive native and ARM64 OOM evidence. Full G2
-  collection passed at 61.6% integration and 62.2% all-surfaces coverage with
-  zero uncovered changed paths. The job then failed artifact upload while
-  traversing the fixture's UID-10001 private TLS directory. `e83addc4` selects
-  public report/audit/raw/journey paths and provider journal/version files.
-  Actual uploader-glob tests preserve all 569 previous files and avoid an
-  unreadable TLS tree; 166 CI helper tests pass. No TLS permissions or coverage
-  floors changed. Current-head CI is pending. F2's dedicated lane remains future.
-- **Publication and acceptance:** C1 is published as a draft. No acceptance is
-  claimed. C1 remains unchecked. Both PRs still require CODEOWNER approval; normal protected
-  checks and the merge queue apply;
-  new review dispositions are prepared locally unless replies are authorized.
+- **Hosted qualification:** Exact-head
+  [run 38852382309](https://github.com/caesium-cloud/caesium/actions/runs/38852382309)
+  passed on `e83addc4`, including all nine protected checks, `ci-ok`, both image
+  and unit architectures, both browser suites and selected integration/cluster
+  lanes. The tested PR merge is `ddd92ba5d8c46f810d680a6e8e4e825a6b9879d0`
+  against base `3194fe68`. Full G2 passed at 61.6% integration and 62.2%
+  all-surfaces coverage with zero uncovered changed paths. The downloaded amd64
+  receipt proves List/Describe/History RPCs, zero Query, succeeded admission and
+  reverse lookup, continuous process identity, clean exit 0 and matching raw
+  counter hashes. Upload succeeded with 574 public files. Its provider subset
+  contains exactly the journal and two version files; private TLS/runtime files
+  are excluded without permission or coverage-floor changes. Uploader tests
+  preserve all 569 previous artifacts and reproduce the old unreadable-directory
+  failure. F2's dedicated connector lane remains future.
+- **Publication and acceptance:** C1 is ready for review in #644. Fresh GitHub
+  reads found zero reviews, threads or comments. Both #644 and this dashboard
+  PR #643 require one CODEOWNER approval; normal protected checks and the merge
+  queue apply. C1 remains unchecked pending merged acceptance. New review
+  dispositions stay local unless replies are authorized.
 
 ### Stream Status
 
@@ -521,7 +527,7 @@ Resume unfinished waves. Do not archive this plan while later items remain.
 | --- | --- | --- | --- |
 | A | Generic contract, configuration and catalog (2 items) | P0 | Shipped (A1, A2) |
 | B | Temporal inspection and declared messages (2 items) | P0 | Shipped (B1, B2) |
-| C | Authenticated REST and composition (2 items) | P0 | C1 in progress; C2 not started |
+| C | Authenticated REST and composition (2 items) | P0 | C1 verified, awaiting merge; C2 not started |
 | D | Verified correlation and action durability (2 items) | P0 | Shipped (D1, D2) |
 | E | Console monitoring, data links and approval (3 items) | P0 | Not started |
 | F | Real fixture, CI, qualification and promotion (4 items) | P0 | F1 shipped; F2–F4 not started |
