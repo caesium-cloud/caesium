@@ -191,6 +191,10 @@ func (f *fixture) proxy(upstream *grpc.ClientConn) grpc.StreamHandler {
 		if err := stream.RecvMsg(&request); err != nil {
 			return err
 		}
+		// Count every connector RPC at the actual TLS frontend, before fault
+		// handling. Worker/control traffic uses the private loopback client and
+		// cannot satisfy the public read or zero-RPC refusal assertions.
+		f.j.add(map[string]any{"kind": "provider_rpc", "method": method})
 		ctx := stream.Context()
 		if md, ok := metadata.FromIncomingContext(ctx); ok {
 			ctx = metadata.NewOutgoingContext(ctx, md.Copy())
@@ -462,6 +466,19 @@ func certificates(dir string) (*tls.Config, error) {
 			return nil, err
 		}
 		cert := &x509.Certificate{SerialNumber: big.NewInt(int64(i + 2)), Subject: pkix.Name{CommonName: name}, NotBefore: ca.NotBefore, NotAfter: ca.NotAfter, KeyUsage: x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment, ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth, x509.ExtKeyUsageClientAuth}, DNSNames: []string{"localhost"}, IPAddresses: []net.IP{net.ParseIP("127.0.0.1")}}
+		// The distributed fixture supplies its owned Service DNS names. Plaintext
+		// Temporal remains loopback-only; only this mutual-TLS proxy is exposed.
+		for _, host := range strings.Split(os.Getenv("CAESIUM_CONNECTORS_TLS_DNS"), ",") {
+			host = strings.TrimSpace(host)
+			if host == "" {
+				continue
+			}
+			if ip := net.ParseIP(host); ip != nil {
+				cert.IPAddresses = append(cert.IPAddresses, ip)
+			} else {
+				cert.DNSNames = append(cert.DNSNames, host)
+			}
+		}
 		der, err := x509.CreateCertificate(rand.Reader, cert, ca, &key.PublicKey, caKey)
 		if err != nil {
 			return nil, err
@@ -563,7 +580,11 @@ func main() {
 		log.Fatal(err)
 	}
 	defer upstream.Close()
-	listener, err := (&net.ListenConfig{}).Listen(ctx, "tcp", "127.0.0.1:7234")
+	proxyAddress := os.Getenv("CAESIUM_CONNECTORS_PROXY_LISTEN")
+	if proxyAddress == "" {
+		proxyAddress = "127.0.0.1:7234"
+	}
+	listener, err := (&net.ListenConfig{}).Listen(ctx, "tcp", proxyAddress)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -574,7 +595,11 @@ func main() {
 		}
 	}()
 	defer proxy.Stop()
-	httpServer := &http.Server{Addr: "127.0.0.1:7240", Handler: f.routes(), ReadHeaderTimeout: 5 * time.Second}
+	controlAddress := os.Getenv("CAESIUM_CONNECTORS_CONTROL_LISTEN")
+	if controlAddress == "" {
+		controlAddress = "127.0.0.1:7240"
+	}
+	httpServer := &http.Server{Addr: controlAddress, Handler: f.routes(), ReadHeaderTimeout: 5 * time.Second}
 	go func() {
 		if err := httpServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			log.Fatal(err)

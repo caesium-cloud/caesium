@@ -112,3 +112,29 @@ func TestMiddlewareScopedKeyStillDeniedOnUnrelatedGlobalRoute(t *testing.T) {
 		require.Equal(t, http.StatusForbidden, he.Code)
 	}
 }
+
+func TestConnectorReadScopes(t *testing.T) {
+	_, svc, auditor, limiter, _ := setupAuth(t)
+	unscoped := createKey(t, svc, models.RoleViewer, nil)
+	scoped := createKey(t, svc, models.RoleAdmin, &models.KeyScope{Jobs: []string{"alpha"}})
+	agent := mintAgentKey(t, svc, uuid.New(), []string{"alpha"})
+	for _, path := range []string{"/v1/connectors", "/v1/connectors/:connection_id/executions", "/v1/connectors/:connection_id/executions/:execution_id", "/v1/connectors/:connection_id/executions/:execution_id/history", "/v1/connectors/:connection_id/executions/:execution_id/relationships"} {
+		route := &echo.RouteInfo{Method: http.MethodGet, Path: path}
+		for _, entry := range []struct {
+			token   string
+			allowed bool
+		}{{unscoped, true}, {scoped, false}, {agent, false}} {
+			request := httptest.NewRequestWithContext(context.Background(), http.MethodGet, path, nil)
+			request.Header.Set("Authorization", "Bearer "+entry.token)
+			called := false
+			_, err := callMiddleware(t, svc, auditor, limiter, request, route, nil, func(c *echo.Context) error { called = true; return c.NoContent(http.StatusOK) })
+			require.Equal(t, entry.allowed, called, path)
+			if entry.allowed {
+				require.NoError(t, err)
+			} else {
+				require.Error(t, err)
+				require.Equal(t, http.StatusForbidden, err.(*echo.HTTPError).Code)
+			}
+		}
+	}
+}

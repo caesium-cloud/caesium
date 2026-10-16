@@ -8,6 +8,7 @@ import (
 	authctrl "github.com/caesium-cloud/caesium/api/rest/controller/auth"
 	"github.com/caesium-cloud/caesium/api/rest/controller/backfill"
 	blamectrl "github.com/caesium-cloud/caesium/api/rest/controller/blame"
+	connectorctrl "github.com/caesium-cloud/caesium/api/rest/controller/connector"
 	contractctrl "github.com/caesium-cloud/caesium/api/rest/controller/contract"
 	"github.com/caesium-cloud/caesium/api/rest/controller/database"
 	datasetctrl "github.com/caesium-cloud/caesium/api/rest/controller/dataset"
@@ -32,6 +33,7 @@ import (
 	"github.com/caesium-cloud/caesium/api/rest/controller/trigger"
 	"github.com/caesium-cloud/caesium/api/rest/controller/webhook"
 	whyctrl "github.com/caesium-cloud/caesium/api/rest/controller/why"
+	connectorsvc "github.com/caesium-cloud/caesium/api/rest/service/connector"
 	contractsvc "github.com/caesium-cloud/caesium/api/rest/service/contract"
 	"github.com/caesium-cloud/caesium/internal/auth"
 	internal_event "github.com/caesium-cloud/caesium/internal/event"
@@ -40,7 +42,7 @@ import (
 )
 
 // All binds all routes to the given group, optionally with auth middleware.
-func All(g *echo.Group, bus internal_event.Bus, authSvc *auth.Service, auditor *auth.AuditLogger, limiter *auth.RateLimiter, sessions *auth.SessionStore) {
+func All(g *echo.Group, bus internal_event.Bus, authSvc *auth.Service, auditor *auth.AuditLogger, limiter *auth.RateLimiter, sessions *auth.SessionStore, connectors ...*connectorsvc.Runtime) {
 	bindWebhooks(g, auditor)
 
 	protected := g.Group("")
@@ -58,10 +60,23 @@ func All(g *echo.Group, bus internal_event.Bus, authSvc *auth.Service, auditor *
 		}
 	}
 
-	Protected(protected, bus, auditor)
+	Protected(protected, bus, auditor, connectors...)
 }
 
-func Protected(g *echo.Group, bus internal_event.Bus, auditor *auth.AuditLogger) {
+func Protected(g *echo.Group, bus internal_event.Bus, auditor *auth.AuditLogger, connectors ...*connectorsvc.Runtime) {
+	var connectorRuntime *connectorsvc.Runtime
+	if len(connectors) > 0 {
+		connectorRuntime = connectors[0]
+	}
+	if env.Variables().ConnectorsEnabled {
+		cc := connectorctrl.New(connectorRuntime)
+		g.GET("/connectors", cc.Connections)
+		g.GET("/connectors/:connection_id/executions", cc.List)
+		g.GET("/connectors/:connection_id/executions/:execution_id", cc.Detail)
+		g.GET("/connectors/:connection_id/executions/:execution_id/history", cc.History)
+		g.GET("/connectors/:connection_id/executions/:execution_id/relationships", cc.Relationships)
+		g.GET("/jobs/:id/runs/:run_id/external-executions", cc.RunLinks)
+	}
 	// events
 	{
 		ctrl := event.New(bus)
@@ -187,7 +202,7 @@ func Protected(g *echo.Group, bus internal_event.Bus, auditor *auth.AuditLogger)
 	// system
 	{
 		g.GET("/system/nodes", system.Nodes)
-		g.GET("/system/features", system.Features)
+		g.GET("/system/features", system.FeaturesWithConnectors(connectorRuntime))
 		// Admin-only removal of the stale raft entry a disk-loss replacement
 		// leaves behind (#582 follow-up). pkg/dqlite refuses everything but a
 		// non-voting member that no longer answers.

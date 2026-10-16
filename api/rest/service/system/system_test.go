@@ -5,7 +5,11 @@ import (
 	"testing"
 	"time"
 
+	connectorsvc "github.com/caesium-cloud/caesium/api/rest/service/connector"
 	clustersvc "github.com/caesium-cloud/caesium/internal/cluster"
+	"github.com/caesium-cloud/caesium/internal/connector"
+	"github.com/caesium-cloud/caesium/internal/jobdef/testutil"
+	"github.com/caesium-cloud/caesium/pkg/env"
 	"github.com/stretchr/testify/require"
 )
 
@@ -161,4 +165,27 @@ func TestNodesCarryTheRaftIDAsAString(t *testing.T) {
 	require.Equal(t, "18446744073709551615", byAddr["10.244.0.9:9001"].ID)
 	require.Equal(t, RoleSpare, byAddr["10.244.0.9:9001"].Role)
 	require.Empty(t, byAddr["10.0.0.99:9001"].ID, "a historical worker is not a raft member")
+}
+
+func TestFeaturesReportConnectorReadinessSeparatelyFromEnablement(t *testing.T) {
+	t.Cleanup(func() { require.NoError(t, env.Process()) })
+	t.Setenv("CAESIUM_AUTH_MODE", "api-key")
+	t.Setenv("CAESIUM_CONNECTORS_CONFIG_FILE", "/unused-features.yaml")
+	t.Setenv("CAESIUM_CONNECTORS_ENABLED", "true")
+	require.NoError(t, env.Process())
+	db := testutil.OpenTestDB(t)
+	t.Cleanup(func() { testutil.CloseDB(db) })
+	cfg := &connector.Config{Version: 1}
+	runtime := connectorsvc.New(context.Background(), db, cfg, "epoch", "", nil, "shared-auth-cursor-signing-secret-at-least-32")
+	t.Cleanup(runtime.Close)
+	svc := (&Service{ctx: context.Background()}).WithConnectors(runtime)
+	features, err := svc.Features()
+	require.NoError(t, err)
+	require.True(t, features.ConnectorsEnabled)
+	require.True(t, features.ConnectorsReady)
+	require.NoError(t, connector.NewStore(db).ActivateConfiguration(context.Background(), cfg, "epoch", "changed"))
+	features, err = svc.Features()
+	require.NoError(t, err)
+	require.True(t, features.ConnectorsEnabled)
+	require.False(t, features.ConnectorsReady)
 }

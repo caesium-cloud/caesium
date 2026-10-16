@@ -20,6 +20,8 @@ func TestAuthMiddlewareMountedRoutesHaveRBACPolicy(t *testing.T) {
 	})
 
 	t.Setenv("CAESIUM_AUTH_MODE", "api-key")
+	t.Setenv("CAESIUM_CONNECTORS_ENABLED", "true")
+	t.Setenv("CAESIUM_CONNECTORS_CONFIG_FILE", "/route-only-connectors.yaml")
 	t.Setenv("CAESIUM_AUTH_OIDC_ENABLED", "true")
 	t.Setenv("CAESIUM_AUTH_SAML_ENABLED", "true")
 	t.Setenv("CAESIUM_AUTH_LDAP_ENABLED", "true")
@@ -64,6 +66,9 @@ func TestAuthMiddlewareMountedRoutesHaveRBACPolicy(t *testing.T) {
 		}
 	}
 
+	require.Contains(t, mounted, "GET /v1/connectors")
+	require.Contains(t, mounted, "GET /v1/connectors/:id/executions/:id/relationships")
+	require.Contains(t, mounted, "GET /v1/jobs/:id/runs/:id/external-executions")
 	require.Contains(t, mounted, "GET /metrics")
 	require.Contains(t, mounted, "GET /auth/whoami")
 	require.Contains(t, mounted, "GET /v1/events")
