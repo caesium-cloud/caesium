@@ -40,10 +40,17 @@ const (
 	PollActor = "system:policy-loader"
 
 	knownGroupsTimeout = 5 * time.Second
+
+	// settleAttempts and settleDelay bound how long the startup load and an
+	// API reload retry a read that the file changed under.
+	settleAttempts = 5
+	settleDelay    = 100 * time.Millisecond
 )
 
 // ErrNoPolicyFile reports a reload request on a holder with no policy file.
 var ErrNoPolicyFile = errors.New("no access policy file is configured (CAESIUM_AUTH_POLICY_FILE is unset)")
+
+var errFileChanging = errors.New("the file kept changing while it was read; retry once it is fully written")
 
 // Revision is one immutable, validated policy revision. Readers must not
 // modify it or anything it points to.
@@ -147,8 +154,15 @@ type Holder struct {
 	// lastFailedKey identifies the bytes (or read error) of the last failed
 	// attempt, so the poller reports one bad file once, not every interval.
 	lastFailedKey string
+	// pendingKey identifies a change the poller has seen once. It acts only
+	// when the next poll reads the same content again, so a file rewritten
+	// in place is never published (or reported) from a half-written read.
+	pendingKey string
 	// afterParse is a test hook run under mu once a changed file has parsed.
 	afterParse func(trigger string)
+	// afterRead is a test hook run between reading the file and re-checking
+	// that it did not change during the read.
+	afterRead func()
 }
 
 // EmptyPolicy returns the policy in force when nothing is configured: the
@@ -201,7 +215,7 @@ func LoadFile(ctx context.Context, opts HolderOptions) (*Holder, error) {
 	if h.now == nil {
 		h.now = time.Now
 	}
-	read := readPolicyFile(h.path)
+	read := h.readSettled(ctx)
 	if read.err != nil {
 		return nil, h.fileError(read.err)
 	}
@@ -321,9 +335,12 @@ func (h *Holder) SetObserver(observer func(ReloadEvent)) {
 	h.observer = observer
 }
 
-// Run polls the file every interval until ctx is done. A poll reloads only
-// when the file's bytes hash differently from the loaded revision (mtimes are
-// not trusted: a ConfigMap update swaps symlinks and can keep one).
+// Run polls the file every interval until ctx is done. A poll acts only when
+// the file's bytes hash differently from the loaded revision (mtimes are not
+// trusted: a ConfigMap update swaps symlinks and can keep one), and only once
+// the change is stable: a read the file changed under is discarded, and a
+// change is published (or reported as a failure) when two consecutive polls
+// read the same bytes. A change therefore takes effect within two intervals.
 func (h *Holder) Run(ctx context.Context, interval time.Duration) {
 	if !h.FileBacked() {
 		return
@@ -344,8 +361,10 @@ func (h *Holder) Run(ctx context.Context, interval time.Duration) {
 	}
 }
 
-// Reload re-reads the file on request. It always reports one event, even when
-// the file is unchanged, and on failure returns the retained revision.
+// Reload re-reads the file on request and acts on it without waiting for a
+// second poll (a read the file changed under is retried briefly). It always
+// reports one event, even when the file is unchanged, and on failure returns
+// the retained revision.
 func (h *Holder) Reload(ctx context.Context, req ReloadRequest) (ReloadResult, error) {
 	if !h.FileBacked() {
 		cur := h.Current()
@@ -353,31 +372,73 @@ func (h *Holder) Reload(ctx context.Context, req ReloadRequest) (ReloadResult, e
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	return h.apply(ctx, readPolicyFile(h.path), TriggerAPI, req.Actor, req.SourceIP)
+	return h.apply(ctx, h.readSettled(ctx), TriggerAPI, req.Actor, req.SourceIP)
 }
 
 func (h *Holder) poll(ctx context.Context) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	read := readPolicyFile(h.path)
+	read := h.readFile()
+	if read.unstable {
+		// A writer changed the file while it was read; look again next tick.
+		return
+	}
 	cur := h.current.Load()
 	if read.err == nil && read.hash == cur.Hash {
 		// The file matches the served revision. Clear a failure recorded
 		// for content that has since been reverted; nothing is audited.
+		h.pendingKey = ""
 		if last := h.attempt.Load(); last != nil && !last.OK {
 			h.lastFailedKey = ""
 			h.attempt.Store(&ReloadAttempt{At: h.now().UTC(), Trigger: TriggerPoll, OK: true, Revision: read.hash})
 		}
 		return
 	}
-	if read.failureKey() == h.lastFailedKey {
+	key := read.contentKey()
+	if key == h.lastFailedKey {
+		h.pendingKey = ""
+		return
+	}
+	if key != h.pendingKey {
+		// First sighting of this content: an in-place rewrite (cp, cat >,
+		// an editor) may still be mid-write. Act only if the next poll
+		// reads the same bytes.
+		h.pendingKey = key
 		return
 	}
 	_, _ = h.apply(ctx, read, TriggerPoll, PollActor, "")
 }
 
+func (h *Holder) readFile() fileRead {
+	return readPolicyFile(h.path, h.afterRead)
+}
+
+// readSettled reads the file for the startup load and the API trigger, which
+// act on one read instead of waiting for a second poll: a read the file
+// changed under is retried briefly, and a file that keeps changing fails.
+func (h *Holder) readSettled(ctx context.Context) fileRead {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	for attempt := 1; ; attempt++ {
+		read := h.readFile()
+		if !read.unstable {
+			return read
+		}
+		if attempt == settleAttempts {
+			return fileRead{err: errFileChanging, errKey: errFileChanging.Error()}
+		}
+		select {
+		case <-ctx.Done():
+			return fileRead{err: ctx.Err(), errKey: ctx.Err().Error()}
+		case <-time.After(settleDelay):
+		}
+	}
+}
+
 // apply validates read and publishes it. The caller holds h.mu.
 func (h *Holder) apply(ctx context.Context, read fileRead, trigger, actor, sourceIP string) (ReloadResult, error) {
+	h.pendingKey = ""
 	prev := h.current.Load()
 	now := h.now().UTC()
 	event := ReloadEvent{
@@ -395,7 +456,7 @@ func (h *Holder) apply(ctx context.Context, read fileRead, trigger, actor, sourc
 	}
 	if err != nil {
 		err = h.fileError(err)
-		h.lastFailedKey = read.failureKey()
+		h.lastFailedKey = read.contentKey()
 		h.attempt.Store(&ReloadAttempt{At: now, Trigger: trigger, Revision: read.hash, Error: err.Error()})
 		metrics.AuthPolicyReloadFailuresTotal.WithLabelValues(trigger).Inc()
 		log.Error("access policy reload failed; keeping the last good revision",
@@ -524,7 +585,7 @@ func LintWarnings(p *AccessPolicy) []string {
 // ReadFile reads a policy file of at most MaxFileBytes, refusing anything that
 // is not a regular file. It returns the exact bytes and their hex SHA-256.
 func ReadFile(path string) ([]byte, string, error) {
-	read := readPolicyFile(path)
+	read := readPolicyFile(path, nil)
 	return read.data, read.hash, read.err
 }
 
@@ -534,18 +595,24 @@ type fileRead struct {
 	err  error
 	// errKey identifies a read failure for de-duplication.
 	errKey string
+	// unstable reports that the file changed (size, mtime or identity)
+	// while it was read, so the bytes may be a half-written file.
+	unstable bool
 }
 
-// failureKey identifies these bytes (or this read failure) so the poller
-// reports the same bad file once.
-func (r fileRead) failureKey() string {
+// contentKey identifies these bytes (or this read failure), so the poller
+// can require the same content on two consecutive polls and report a given
+// bad file once.
+func (r fileRead) contentKey() string {
 	if r.err == nil || r.hash != "" {
 		return "sha256:" + r.hash
 	}
 	return "read:" + r.errKey
 }
 
-func readPolicyFile(path string) fileRead {
+// readPolicyFile reads path. afterRead, when set, runs between the read and
+// the check that the file did not change during it (a test hook).
+func readPolicyFile(path string, afterRead func()) fileRead {
 	// Refuse a non-regular file before opening it: opening a FIFO would
 	// block the writer lock until something wrote to it.
 	pre, err := os.Stat(path)
@@ -573,13 +640,31 @@ func readPolicyFile(path string) fileRead {
 	if err != nil {
 		return fileRead{err: err, errKey: err.Error()}
 	}
+	if afterRead != nil {
+		afterRead()
+	}
+	unstable := changedDuringRead(path, info, len(data))
 	if len(data) > MaxFileBytes {
 		// The bytes are never hashed in full; size and mtime identify this
 		// oversize file for de-duplication.
 		err := fmt.Errorf("file exceeds %d bytes", MaxFileBytes)
-		return fileRead{err: err, errKey: fmt.Sprintf("%s size=%d mtime=%d", err, info.Size(), info.ModTime().UnixNano())}
+		return fileRead{err: err, errKey: fmt.Sprintf("%s size=%d mtime=%d", err, info.Size(), info.ModTime().UnixNano()), unstable: unstable}
 	}
-	return fileRead{data: data, hash: Hash(data)}
+	return fileRead{data: data, hash: Hash(data), unstable: unstable}
+}
+
+// changedDuringRead reports whether path no longer names the file that was
+// opened, or that file's size or mtime moved, or fewer or more bytes were
+// read than it held when opened.
+func changedDuringRead(path string, opened os.FileInfo, read int) bool {
+	now, err := os.Stat(path)
+	if err != nil || !os.SameFile(opened, now) {
+		return true
+	}
+	if now.Size() != opened.Size() || !now.ModTime().Equal(opened.ModTime()) {
+		return true
+	}
+	return read <= MaxFileBytes && int64(read) != opened.Size()
 }
 
 // Hash returns the hex SHA-256 of policy file bytes, the revision identifier.

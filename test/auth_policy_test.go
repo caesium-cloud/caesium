@@ -27,8 +27,14 @@ import (
 const authPolicyPathEnv = "CAESIUM_IT_AUTH_POLICY_PATH"
 
 // authPolicyPollWait bounds how long a scenario waits for the lane's poller
-// (CAESIUM_AUTH_POLICY_RELOAD_INTERVAL=1s) to pick up a rewritten file.
+// (CAESIUM_AUTH_POLICY_RELOAD_INTERVAL=1s) to pick up a rewritten file, which
+// takes up to two intervals (the poller acts once two polls agree), and for
+// its audit row.
 const authPolicyPollWait = 15 * time.Second
+
+// authPolicyQuietWindow is how long the poll scenario watches for a duplicate
+// failure row: several 1s intervals with the same bad file on disk.
+const authPolicyQuietWindow = 4 * time.Second
 
 type policyShowDoc struct {
 	Source      string   `json:"source"`
@@ -178,7 +184,7 @@ func (s *IntegrationTestSuite) TestAuthPolicyReload() {
 		s.Equal(policy.Hash(revoked), meta.PreviousRevision)
 	}
 	s.LessOrEqual(len(rows)-len(api), 1, "the poller reports one bad file once: %+v", rows)
-	s.NotEmpty(s.policyAuditRows(iauth.ActionPolicyReloaded, policy.Hash(revoked)), "the swap to the revoked revision is audited")
+	s.NotEmpty(s.waitForPolicyAuditRows(iauth.ActionPolicyReloaded, policy.Hash(revoked), 1), "the swap to the revoked revision is audited")
 
 	// Restore: the original binding grants again.
 	s.writeAuthPolicy(path, original)
@@ -211,7 +217,9 @@ func (s *IntegrationTestSuite) TestAuthPolicyPollReload() {
 	status, body = s.requestWithCookie(http.MethodGet, "/v1/atoms", cookie)
 	s.Require().Equal(http.StatusOK, status, "the polled revision grants the session: %s", body)
 
-	swaps := s.policyAuditRows(iauth.ActionPolicyReloaded, policy.Hash(granted))
+	// The poller publishes before it writes its audit row, so the revision
+	// can be visible through show while the row is still being written.
+	swaps := s.waitForPolicyAuditRows(iauth.ActionPolicyReloaded, policy.Hash(granted), 1)
 	s.Require().Len(swaps, 1, "%+v", swaps)
 	s.Equal(iauth.ActorPolicyLoader, swaps[0].Actor)
 	s.Equal(policy.TriggerPoll, swaps[0].meta(s).Trigger)
@@ -235,10 +243,16 @@ func (s *IntegrationTestSuite) TestAuthPolicyPollReload() {
 	status, _ = s.requestWithCookie(http.MethodGet, "/v1/atoms", cookie)
 	s.Equal(http.StatusOK, status)
 
-	// Several more intervals pass with the same bad file: still one row.
-	time.Sleep(4 * time.Second)
-	failed := s.policyAuditRows(iauth.ActionPolicyReloadFailed, policy.Hash(invalid))
-	s.Require().Len(failed, 1, "one policy.reload_failed per distinct bad file, not one per interval: %+v", failed)
+	failed := s.waitForPolicyAuditRows(iauth.ActionPolicyReloadFailed, policy.Hash(invalid), 1)
+	s.Require().Len(failed, 1, "%+v", failed)
+	// Several more intervals pass with the same bad file on disk: still one
+	// row. A negative needs an observation window; it fails as soon as a
+	// second row appears.
+	for quietUntil := time.Now().Add(authPolicyQuietWindow); time.Now().Before(quietUntil); {
+		time.Sleep(500 * time.Millisecond)
+		failed = s.policyAuditRows(iauth.ActionPolicyReloadFailed, policy.Hash(invalid))
+		s.Require().Len(failed, 1, "one policy.reload_failed per distinct bad file, not one per interval: %+v", failed)
+	}
 	s.Equal(iauth.ActorPolicyLoader, failed[0].Actor)
 	s.Equal(policy.TriggerPoll, failed[0].meta(s).Trigger)
 	s.Equal(policy.Hash(granted), failed[0].meta(s).PreviousRevision)
@@ -358,6 +372,22 @@ func (s *IntegrationTestSuite) waitForPolicyRevision(revision string) bool {
 		}
 		if time.Now().After(deadline) {
 			return false
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
+}
+
+// waitForPolicyAuditRows polls the audit log until at least atLeast rows for
+// action and revision exist or authPolicyPollWait passes, and returns the
+// last rows read. Use it for rows the poller writes: it publishes a revision
+// before it writes the audit row.
+func (s *IntegrationTestSuite) waitForPolicyAuditRows(action, revision string, atLeast int) []policyAuditRow {
+	s.T().Helper()
+	deadline := time.Now().Add(authPolicyPollWait)
+	for {
+		rows := s.policyAuditRows(action, revision)
+		if len(rows) >= atLeast || time.Now().After(deadline) {
+			return rows
 		}
 		time.Sleep(250 * time.Millisecond)
 	}

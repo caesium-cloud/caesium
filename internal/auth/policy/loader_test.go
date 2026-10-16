@@ -323,6 +323,9 @@ func TestPollReportsEachBadFileOnce(t *testing.T) {
 	before := failures(t, TriggerPoll)
 
 	writePolicy(t, path, loaderPolicyInvalid)
+	h.poll(t.Context())
+	require.Empty(t, events.all(), "a change is acted on only when the next poll reads the same bytes")
+	require.Equal(t, before, failures(t, TriggerPoll))
 	for range 3 {
 		h.poll(t.Context())
 	}
@@ -351,6 +354,7 @@ func TestPollReportsEachBadFileOnce(t *testing.T) {
 	// The first bad file is reported again once it reappears.
 	writePolicy(t, path, loaderPolicyInvalid)
 	h.poll(t.Context())
+	h.poll(t.Context())
 	require.Len(t, events.all(), 3)
 	require.Equal(t, before+3, failures(t, TriggerPoll))
 }
@@ -360,6 +364,9 @@ func TestPollPicksUpAValidChange(t *testing.T) {
 	h, path, events := loadTestHolder(t, loaderPolicyA, HolderOptions{})
 
 	writePolicy(t, path, loaderPolicyB)
+	h.poll(t.Context())
+	require.Equal(t, sha(loaderPolicyA), h.Current().Hash, "the first sighting only marks the change pending")
+	require.Empty(t, events.all())
 	h.poll(t.Context())
 	require.Equal(t, sha(loaderPolicyB), h.Current().Hash)
 	got := events.all()
@@ -371,6 +378,107 @@ func TestPollPicksUpAValidChange(t *testing.T) {
 
 	h.poll(t.Context())
 	require.Len(t, events.all(), 1)
+}
+
+// loaderPolicyAFull extends loaderPolicyA with a trailing admin binding, so a
+// cut-off prefix of it (loaderPolicyA itself) is still a valid document.
+const loaderPolicyAFull = loaderPolicyA + `  - subjects: {groups: [admins]}
+    role: admin
+    namespaces: ["*"]
+`
+
+func appendToFile(t *testing.T, path, text string) {
+	t.Helper()
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0)
+	require.NoError(t, err)
+	_, err = f.WriteString(text)
+	require.NoError(t, err)
+	require.NoError(t, f.Close())
+}
+
+// TestPollNeverActsOnAnInPlaceRewriteMidWrite is the in-place-writer
+// regression: `cp`, `cat >` or an editor rewrites the file non-atomically, so
+// one poll can see it empty or cut off. The poller acts only when two
+// consecutive polls read the same bytes, so neither a spurious failure nor a
+// truncated (but valid) document is published.
+func TestPollNeverActsOnAnInPlaceRewriteMidWrite(t *testing.T) {
+	h, path, events := loadTestHolder(t, loaderPolicyB, HolderOptions{})
+	before := failures(t, TriggerPoll)
+
+	// The writer has truncated the file: an empty read is not a failure yet.
+	require.NoError(t, os.WriteFile(path, nil, 0o600))
+	h.poll(t.Context())
+	// It has written a valid prefix (the trailing admin binding is missing).
+	require.NoError(t, os.WriteFile(path, []byte(loaderPolicyA), 0o600))
+	h.poll(t.Context())
+	// It finishes.
+	appendToFile(t, path, loaderPolicyAFull[len(loaderPolicyA):])
+	h.poll(t.Context())
+	require.Empty(t, events.all(), "no intermediate state is published or reported")
+	require.Equal(t, before, failures(t, TriggerPoll), "the empty read raised no failure")
+	require.Equal(t, sha(loaderPolicyB), h.Current().Hash)
+
+	h.poll(t.Context())
+	require.Equal(t, sha(loaderPolicyAFull), h.Current().Hash, "the complete file is published once stable")
+	require.Equal(t, Grants{"*": models.RoleAdmin}, h.Resolve([]string{"admins"}, ""))
+	got := events.all()
+	require.Len(t, got, 1)
+	require.True(t, got[0].OK)
+	require.Equal(t, sha(loaderPolicyAFull), got[0].Revision)
+}
+
+// TestPollDiscardsAReadTheFileChangedUnder covers a write that lands while the
+// poller is reading: the re-stat after the read sees the size move, and the
+// read is discarded without even counting as a first sighting.
+func TestPollDiscardsAReadTheFileChangedUnder(t *testing.T) {
+	t.Parallel()
+	h, path, events := loadTestHolder(t, loaderPolicyB, HolderOptions{})
+
+	require.NoError(t, os.WriteFile(path, []byte(loaderPolicyA), 0o600))
+	h.afterRead = func() { appendToFile(t, path, loaderPolicyAFull[len(loaderPolicyA):]) }
+	h.poll(t.Context())
+	h.afterRead = nil
+	require.Empty(t, h.pendingKey, "an unstable read is not a sighting")
+	require.Empty(t, events.all())
+
+	h.poll(t.Context())
+	require.Equal(t, sha(loaderPolicyB), h.Current().Hash)
+	h.poll(t.Context())
+	require.Equal(t, sha(loaderPolicyAFull), h.Current().Hash)
+	require.Len(t, events.all(), 1)
+}
+
+// An API reload acts on one read, so it re-reads (briefly) when the file
+// changed under it, and refuses a file that keeps changing.
+func TestAPIReloadSettlesAReadTheFileChangedUnder(t *testing.T) {
+	t.Parallel()
+	h, path, events := loadTestHolder(t, loaderPolicyB, HolderOptions{})
+	good := h.Current()
+
+	require.NoError(t, os.WriteFile(path, []byte(loaderPolicyA), 0o600))
+	reads := 0
+	h.afterRead = func() {
+		reads++
+		if reads == 1 {
+			appendToFile(t, path, loaderPolicyAFull[len(loaderPolicyA):])
+		}
+	}
+	result, err := h.Reload(t.Context(), ReloadRequest{Actor: "a"})
+	require.NoError(t, err)
+	require.Equal(t, 2, reads)
+	require.Equal(t, sha(loaderPolicyAFull), result.Current.Hash, "the settled read is published, not the cut-off one")
+
+	writePolicy(t, path, loaderPolicyB)
+	h.afterRead = func() { appendToFile(t, path, "#\n") }
+	result, err = h.Reload(t.Context(), ReloadRequest{Actor: "a"})
+	h.afterRead = nil
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "kept changing while it was read")
+	require.Equal(t, sha(loaderPolicyAFull), result.Current.Hash, "a file that keeps changing is never published")
+	require.NotSame(t, good, h.Current())
+	got := events.all()
+	require.Len(t, got, 2)
+	require.False(t, got[1].OK)
 }
 
 func TestRunPollsUntilTheContextEnds(t *testing.T) {
@@ -433,6 +541,7 @@ func TestOverlappingReloadsNeverPublishAStaleRevision(t *testing.T) {
 	}
 
 	writePolicy(t, path, loaderPolicyA) // A grants viewers
+	h.poll(context.Background())        // first sighting: A is pending, nothing parsed
 	pollDone := make(chan struct{})
 	go func() {
 		defer close(pollDone)
