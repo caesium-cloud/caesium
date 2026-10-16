@@ -180,12 +180,21 @@ func (s *SessionStore) Revoke(ctx context.Context, id uuid.UUID) error {
 
 // RevokeAllForUser revokes every live session for a user.
 func (s *SessionStore) RevokeAllForUser(ctx context.Context, userID uuid.UUID) error {
-	if err := s.db.WithContext(ctx).Model(&models.Session{}).
-		Where("user_id = ? AND revoked_at IS NULL", userID).
-		Update("revoked_at", s.nowUTC()).Error; err != nil {
+	if _, err := revokeUserSessionsTx(s.db.WithContext(ctx), userID, s.nowUTC()); err != nil {
 		return fmt.Errorf("revoke user sessions: %w", err)
 	}
 	return nil
+}
+
+// revokeUserSessionsTx is the RevokeAllForUser update on a caller-supplied
+// handle, so it can run inside a larger transaction (a definitive group
+// refresh clears the grant and revokes in one). It returns how many live
+// sessions it revoked.
+func revokeUserSessionsTx(tx *gorm.DB, userID uuid.UUID, now time.Time) (int64, error) {
+	res := tx.Model(&models.Session{}).
+		Where("user_id = ? AND revoked_at IS NULL", userID).
+		Update("revoked_at", now)
+	return res.RowsAffected, res.Error
 }
 
 // RunLastSeenFlusher periodically flushes buffered session activity.

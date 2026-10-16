@@ -794,7 +794,7 @@ Refresh handles on sessions, an asynchronous single-flight group refresher, the 
 session admin surface, user-bound API keys that resolve grants at use time, and the
 server-brokered `caesium login` flow that works for every provider.
 
-- [ ] E1. One refresh grant per user: `User.RefreshGrant` (AES-256-GCM under an
+- [x] E1. One refresh grant per user: `User.RefreshGrant` (AES-256-GCM under an
       HKDF-SHA256 key derived from `CAESIUM_AUTH_KEY_HASH_SECRET`, info
       `caesium/session-refresh/v1`, nonce per row), `User.RefreshGrantVersion` and
       `User.GroupsRefreshedAt`, shared by every credential type — sessions and keys
@@ -817,6 +817,20 @@ server-brokered `caesium login` flow that works for every provider.
       `internal/auth/oidc/provider.go`, `internal/auth/ldap/provider.go`,
       `internal/auth/ldap/openldap_integration_test.go`.
       Depends on: A2.
+      (W3-γ: lease/fence primitives in `internal/auth/users.go`, OIDC refresh in new
+      `internal/auth/oidc/refresh.go`; every grant change advances the version,
+      abandoned-lease takeover is uncertain, and a definitive refusal on an
+      uncertain grant only clears it. LDAP refresh is deferred to E1b: an LDAP login
+      stores no grant (NULL, as for SAML) and `internal/auth/ldap` is unchanged. E2
+      must bound each redemption by the lease, TTL ≥ 2× timeout.)
+- [ ] E1b. LDAP group refresh with a live LDAP journey: re-apply the preserved branch
+      `iaa-e1-ldap-refresh-preserved` (DN + login-predicate re-check, current-username
+      group search, context-bounded I/O, the OpenLDAP fixture cases) and add an LDAP
+      coverage journey (an OpenLDAP container in the coverage lane and the auth lane)
+      so the diff ratchet covers `internal/auth/ldap`. Must land before E2 relies on
+      LDAP refresh; until then LDAP users have no refresh grant and the E2 staleness
+      bound forces re-login, as for SAML.
+      Depends on: E1.
 - [ ] E2. The async refresher for **both** credential types: on `SessionStore.Validate`
       and on `ValidateKey` for a user-bound key (E4), a user whose `GroupsRefreshedAt`
       is older than `CAESIUM_AUTH_GROUP_REFRESH_INTERVAL` (default `15m`) is queued to

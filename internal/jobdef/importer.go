@@ -508,10 +508,7 @@ func isImporterContentionErr(err error) bool {
 	// PostgreSQL aborts one side of a row-lock deadlock (40P01) or a
 	// serialization conflict (40001); re-running the whole transaction is the
 	// documented remedy. pgconn.PgError exposes the code as SQLState.
-	if pgErr, ok := errors.AsType[interface {
-		error
-		SQLState() string
-	}](err); ok && (pgErr.SQLState() == "40P01" || pgErr.SQLState() == "40001") {
+	if dbretry.IsSerializationConflict(err) {
 		return true
 	}
 	// Delegate to the single shared classifier so the matched error strings
