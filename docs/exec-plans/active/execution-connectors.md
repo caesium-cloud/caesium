@@ -454,7 +454,7 @@ Resume unfinished waves. Do not archive this plan while later items remain.
   has also merged; C1 uses its existing principal, cluster-role and scope policy.
   C2 requires merged C1. Console work and F2–F4/N remain future waves.
 - **W5-α / C1:** [PR #644](https://github.com/caesium-cloud/caesium/pull/644),
-  draft head `37381879d6bad13b3aa3d710487db5afddffa31d`, implements startup/client composition,
+  draft head `2fa55d2081711942e4c4f2807f2daf9ef1d28d95`, implements startup/client composition,
   authenticated monitoring and scope-safe reverse links, bounded observation
   persistence and guarded configuration activation. Persistent connection
   identities supplement the epoch so a coordinated change cannot repoint a
@@ -482,25 +482,23 @@ Resume unfinished waves. Do not archive this plan while later items remain.
   child identity and scope-safe reverse links survived actual server restart.
   The invalid-enabled and gate-off startup proofs passed. All six owned fixture
   containers were verified absent after cleanup.
-- **Remaining qualification:** The isolated kind/Helm shared-catalog scenario is
-  being rerun. Its first attempt reached three ready replicas but Kubernetes
-  rejected the driver's OnDelete patch because it retained RollingUpdate fields.
-  A one-line patch now removes those fields; shell validation and all six
-  ownership probes passed. The next attempt accepted both StatefulSet patches
-  but exited 141 while an early-exit key parser broke the bootstrap log pipe.
-  A local follow-up drains the complete stream, passes seven probes, and rejects
-  the previous parser in a large-stream negative control. Its fresh cluster run
-  is queued behind another active shared-lane check before publication. Both
-  failed attempts cleaned their verified owned clusters. Cluster skew, guarded
-  epoch activation and repointing acceptance are not yet claimed. Local default/auth regressions have not run. Current-head
-  hosted checks are pending on the driver-only follow-up. On unchanged runtime
-  contents at `a25a9980`, native/arm64 images, lint, both unit architectures and
-  both UI suites passed;
-  native stress records exit 137 with `OOMKilled=true`. Coverage and remaining
-  required jobs are pending. The coverage startup fixture now uses one enabled
-  API-key reference and a matched certificate/key pair under the new transport
-  validation. Selected scenarios must pass without skips. No new connector CI
-  lane is claimed before F2.
+- **Shared-catalog cluster:** The real kind/Helm scenario passed without skips
+  in 58.16 seconds on `2fa55d20`. Three ready Caesium members retained distinct
+  PVCs and immutable image/container identities. Matching files worked; skewed
+  files, a stale node after guarded epoch activation, and a connection repoint
+  were refused with zero additional provider RPCs. Expected image identities
+  came from the loaded candidate's validated CRI metadata before app deployment,
+  including its imported parent index. All owned cluster resources were removed.
+  This is a three-process shared-catalog proof on one kind node.
+- **Remaining qualification:** Local default/auth regressions are running on
+  `2fa55d20`. Its hosted checks are pending. On unchanged runtime contents at
+  `37381879`, native/arm64 images, lint, both unit architectures, both UI suites
+  and ordinary/auth integration gates passed. Coverage collection completed but
+  failed the zero-uncovered-path floor for Temporal observation and correlation
+  persistence: its existing connector cohort only started a configured server.
+  A follow-up is adding real provider/HTTP reads to that instrumented cohort;
+  the coverage floor remains unchanged. Selected scenarios must pass without
+  skips. No dedicated connector CI lane is claimed before F2.
 - **Publication and acceptance:** C1 is published as a draft. No acceptance is
   claimed. C1 remains unchecked. Normal protected review/checks and the merge queue apply;
   new review dispositions are prepared locally unless replies are authorized.
