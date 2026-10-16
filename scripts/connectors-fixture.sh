@@ -96,6 +96,11 @@ runner_cli_pid=
 control_pid=
 existing=${CAESIUM_CONNECTORS_EXISTING_SERVER:-false}
 case "$existing" in true|false) ;; *) echo "existing server option must be true or false" >&2; exit 1 ;; esac
+browser_hook=${CAESIUM_CONNECTORS_BROWSER_HOOK:-}
+if [ -n "$browser_hook" ]; then
+    case "$browser_hook" in /*) ;; *) echo "browser hook must be an absolute executable file" >&2; exit 1 ;; esac
+    [ -f "$browser_hook" ] && [ -x "$browser_hook" ] || { echo "browser hook must be an absolute executable file" >&2; exit 1; }
+fi
 http_reads=false
 if [ -f test/connectors_read_test.go ]; then
     http_reads=true
@@ -111,7 +116,7 @@ fi
 exec /bin/caesium "$@"
 SH
     chmod 0755 "$artifacts/control/start-server.sh"
-    python3 - "$artifacts/http-connections.yaml" <<'PY'
+    python3 - "$artifacts/http-connections.yaml" "$browser_hook" <<'PY'
 from pathlib import Path
 import sys
 raw = Path('test/connectors/testdata/connections.yaml').read_text()
@@ -120,7 +125,8 @@ if raw.count(needle) != 1:
     raise SystemExit('real fixture configuration must have exactly one enabled connection')
 limits = ('    limits:\n      rpcDeadline: 1s\n      maxUnreferencedSnapshots: 4\n'
           '      unreferencedSnapshotMaxAge: 10s\n')
-Path(sys.argv[1]).write_text(raw.replace(needle, needle + limits))
+browser_ui = '    uiURL: https://temporal-ui.example.test/console\n' if sys.argv[2] else ''
+Path(sys.argv[1]).write_text(raw.replace(needle, needle + browser_ui + limits))
 PY
 fi
 host_user=$(id -u):$(id -g)
@@ -226,8 +232,13 @@ if [ "$existing" = false ]; then
         export CAESIUM_CONNECTORS_SERVER_CONFIG="$artifacts/http-connections.yaml"
         export CAESIUM_CONNECTORS_SERVER_ARTIFACTS="$artifacts"
         [ ! -e "$anchor_cid" ] || { echo "network anchor CID file already exists" >&2; exit 1; }
+        set --
+        if [ -n "$browser_hook" ]; then
+            set -- -p "127.0.0.1:${CAESIUM_CONNECTORS_CONTROL_PORT:-7240}:7240" \
+                -p "127.0.0.1:${CAESIUM_CONNECTORS_GATE_OFF_PORT:-8081}:8081"
+        fi
         "$cli" create --platform "$platform" --name "$anchor_name" --cidfile "$anchor_cid" \
-            -p "${CAESIUM_PORT:-8080}:8080" --user "$host_user" \
+            -p "${CAESIUM_PORT:-8080}:8080" "$@" --user "$host_user" \
             -e USER=caesium-fixture -e HOME=/tmp busybox:1.36.1 sleep 2147483647 >"$artifacts/network-anchor-create.log"
         network_id=$(created_id "$anchor_cid")
         "$cli" start "$network_id" >"$artifacts/network-anchor-start.log"
@@ -255,10 +266,12 @@ for _attempt in $(seq 1 60); do
 done
 [ -n "$admin_key" ] || { echo "tracked auth server bootstrap key did not appear" >&2; exit 1; }
 [ ! -e "$fixture_cid" ] || { echo "fixture CID file already exists" >&2; exit 1; }
+control_listen=127.0.0.1:7240
+if [ -n "$browser_hook" ]; then control_listen=0.0.0.0:7240; fi
 "$cli" create --platform "$platform" --name "$fixture_name" --cidfile "$fixture_cid" \
     --network="container:$network_id" --user "$host_user" \
     -e USER=caesium-fixture -e HOME=/tmp -v "$artifacts:/artifacts" \
-    -e CAESIUM_CONNECTORS_CANDIDATE_SHA="$candidate" \
+    -e CAESIUM_CONNECTORS_CANDIDATE_SHA="$candidate" -e CAESIUM_CONNECTORS_CONTROL_LISTEN="$control_listen" \
     -e CAESIUM_MANUAL_TRIGGER_API_KEY=integration-test-key "$image" >"$artifacts/fixture-create.log"
 fixture_id=$(created_id "$fixture_cid")
 "$cli" start "$fixture_id" >"$artifacts/fixture-start.log"
@@ -368,13 +381,14 @@ PY
 fi
 "$cli" cp "$server_id:/bin/caesium" "$artifacts/cli/caesium"
 scenarios=TestConnectorsFixture
-for component in messages correlation operations read; do
+for component in messages correlation operations read actions; do
     if [ -f "test/connectors_${component}_test.go" ]; then
         case "$component" in
             messages) scenario=TestConnectorsMessages ;;
             correlation) scenario=TestConnectorsCorrelation ;;
             operations) scenario=TestConnectorsOperations ;;
             read) scenario=TestConnectorsRead ;;
+            actions) scenario=TestConnectorsActions ;;
         esac
         scenarios="$scenarios $scenario"
     fi
@@ -385,7 +399,7 @@ selection="TestIntegrationTestSuite/($(printf '%s' "$scenarios" | tr ' ' '|'))"
     --network="container:$network_id" --user "$host_user" \
     -e USER=caesium-fixture -e HOME=/tmp -v "$root:/bld/caesium" -v "$artifacts:/artifacts" \
     -e CAESIUM_CLI_PATH=/artifacts/cli/caesium -e CAESIUM_CONNECTORS_FIXTURE=true \
-    -e CAESIUM_CONNECTORS_READ_FIXTURE="$http_reads" -e CAESIUM_CONNECTORS_OWNED_SERVER=true \
+    -e CAESIUM_CONNECTORS_READ_FIXTURE="$http_reads" -e CAESIUM_CONNECTORS_ACTIONS_FIXTURE="$http_reads" -e CAESIUM_CONNECTORS_OWNED_SERVER=true \
     -e CAESIUM_CONNECTORS_GATE_OFF_URL="$gateoff_url" \
     -e CAESIUM_AUTH_KEY_HASH_SECRET=agent-integration-auth-key-hash-secret-000001 \
     -e CAESIUM_CONNECTORS_ARTIFACTS=/artifacts -e CAESIUM_CONNECTORS_CANDIDATE_SHA="$candidate" \
@@ -409,4 +423,23 @@ for scenario in $scenarios; do
         echo "selected $scenario scenario skipped or failed" >&2; exit 1
     fi
 done
+# The optional manual browser hook runs while this invocation still owns the
+# real server/worker and restart controller. It is an executable path, never a
+# shell command string; a failing browser proof fails the whole fixture run.
+if [ -n "$browser_hook" ]; then
+    [ "$http_reads" = true ] || { echo "browser hook requires selected real HTTP fixture" >&2; exit 1; }
+    CAESIUM_API_KEY="$admin_key" CAESIUM_AUTH_ADMIN_KEY="$admin_key" \
+    CAESIUM_E2E_AUTH_ADMIN_KEY="$admin_key" \
+    CAESIUM_BASE_URL="http://127.0.0.1:${CAESIUM_PORT:-8080}" \
+    CAESIUM_URL="http://127.0.0.1:${CAESIUM_PORT:-8080}" \
+    CAESIUM_CONNECTORS_FIXTURE=true CAESIUM_CONNECTORS_READ_FIXTURE=true \
+    CAESIUM_CONNECTORS_ACTIONS_FIXTURE=true CAESIUM_CONNECTORS_OWNED_SERVER=true \
+    CAESIUM_CONNECTORS_FIXTURE_CONTROL_URL="http://127.0.0.1:${CAESIUM_CONNECTORS_CONTROL_PORT:-7240}" \
+    CAESIUM_CONNECTORS_GATE_OFF_URL="http://127.0.0.1:${CAESIUM_CONNECTORS_GATE_OFF_PORT:-8081}" \
+    CAESIUM_CONNECTORS_SERVER_CONTAINER_ID="$server_id" \
+    CAESIUM_CONNECTORS_FIXTURE_CONTAINER_ID="$fixture_id" \
+    CAESIUM_CONNECTORS_NETWORK_CONTAINER_ID="$network_id" \
+    CAESIUM_CONNECTORS_ARTIFACTS="$artifacts" CAESIUM_CONNECTORS_CANDIDATE_SHA="$candidate" \
+    CAESIUM_CONTAINER_CLI="$cli" "$browser_hook"
+fi
 printf 'Connector fixture evidence: %s\n' "$artifacts"
