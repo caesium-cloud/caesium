@@ -10,16 +10,18 @@ import (
 
 // ConnectorOperation is one action receipt. The (connection, idempotency key)
 // unique index collapses retries onto the original row. OpenKey is set while
-// the operation is open and NULL once it is completed or rejected.
+// the operation is open and NULL once it is completed, rejected or provably
+// not dispatched on its initial attempt.
 //
 // dqlite/SQLite unique indexes ignore NULLs, so terminal rows do not collide
 // and a later admission can insert a new row. This is the same nullable
 // unique-key shape as DatasetHold.ActiveKey. A select-then-insert is not the
 // guard; the unique indexes are.
 //
-// The row stores a request fingerprint and a bounded actor record, not secret
-// bytes and not a raw action payload. It is catalog metadata, absent from
-// hotPathModels()/hotTables, and it has no foreign key to job_runs or task_runs.
+// Durable retries retain only validated, bounded, nonsecret action input and
+// the exact binding/target snapshot. These fields are private receipt material.
+// It is catalog metadata, absent from hotPathModels()/hotTables, and it has no
+// foreign key to job_runs or task_runs.
 type ConnectorOperation struct {
 	ID                 uuid.UUID      `gorm:"type:uuid;primaryKey" json:"id"`
 	ConnectionID       string         `gorm:"type:text;not null;uniqueIndex:idx_connector_operations_idempotency,priority:1" json:"connection_id"`
@@ -31,8 +33,20 @@ type ConnectorOperation struct {
 	BindingVersion     string         `gorm:"type:text;not null" json:"binding_version"`
 	ExternalUpdateID   string         `gorm:"type:text;not null" json:"external_update_id"`
 	State              string         `gorm:"type:text;not null;index" json:"state"`
+	Input              datatypes.JSON `gorm:"type:json" json:"-"`
+	Target             datatypes.JSON `gorm:"type:json" json:"-"`
+	BindingSnapshot    datatypes.JSON `gorm:"type:json" json:"-"`
+	ConnectionIdentity datatypes.JSON `gorm:"type:json" json:"-"`
+	ConfigurationEpoch string         `gorm:"type:text" json:"-"`
+	Revision           uint64         `gorm:"not null;default:0" json:"revision"`
+	Attempt            uint64         `gorm:"not null;default:0" json:"attempt"`
+	ProviderEvidence   datatypes.JSON `gorm:"type:json" json:"provider_evidence,omitempty"`
+	// RetryableUnsent is granted only by persisted initial preflight no-send
+	// proof, and consumed transactionally before another provider submission.
+	RetryableUnsent bool           `gorm:"not null;default:false" json:"-"`
+	ResendAudit     datatypes.JSON `gorm:"type:json" json:"resend_audit,omitempty"`
 	// OpenKey guards one open operation per connection, execution, and action.
-	// NULL when State is completed or rejected.
+	// NULL when State is completed, rejected or not_dispatched.
 	OpenKey   *string   `gorm:"type:text;uniqueIndex:idx_connector_operations_open_key" json:"-"`
 	CreatedAt time.Time `gorm:"not null" json:"created_at"`
 	UpdatedAt time.Time `gorm:"not null" json:"updated_at"`

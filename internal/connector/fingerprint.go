@@ -134,6 +134,17 @@ func canonicalConnectionFrom(conn Connection) (canonicalConnection, error) {
 	}, nil
 }
 
+// CanonicalBindingJSON returns the complete binding snapshot using the exact
+// ordering rules used by Fingerprint. Optional services use it to pin immutable
+// binding semantics across harmless configuration reordering.
+func CanonicalBindingJSON(binding Binding) ([]byte, error) {
+	canonical, err := canonicalBindingFrom(binding)
+	if err != nil {
+		return nil, err
+	}
+	return json.Marshal(canonical)
+}
+
 func canonicalBindingFrom(binding Binding) (canonicalBinding, error) {
 	activities := append([]ActivityJob(nil), binding.ActivityAllowlist...)
 	sort.Slice(activities, func(i, j int) bool { return activities[i].ActivityType < activities[j].ActivityType })

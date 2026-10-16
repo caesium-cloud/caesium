@@ -1,6 +1,7 @@
 package connector
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/binary"
@@ -51,6 +52,8 @@ const (
 	OperationCompleted = "completed"
 	OperationRejected  = "rejected"
 	OperationUnknown   = "unknown"
+	// OperationNotDispatched is a terminal, proven-unsent fresh submission.
+	OperationNotDispatched = "not_dispatched"
 )
 
 var (
@@ -118,10 +121,11 @@ type SnapshotResult struct {
 	ObservedAt time.Time
 }
 
-// OperationRequest is the receipt admitted before an action is sent.
-// Actor is bounded JSON. The request fingerprint is stored; the raw payload
-// and secret bytes are not.
+// OperationRequest is the receipt admitted before an action is sent. The
+// composing OperationService supplies bounded, validated nonsecret retry input,
+// actor, target and binding snapshots; no arbitrary provider payload is stored.
 type OperationRequest struct {
+	ID                 uuid.UUID
 	ConnectionID       string
 	IdempotencyKey     string
 	Execution          ExecutionReference
@@ -130,6 +134,11 @@ type OperationRequest struct {
 	Actor              []byte
 	BindingVersion     string
 	ExternalUpdateID   string
+	Input              []byte
+	Target             []byte
+	BindingSnapshot    []byte
+	ConnectionIdentity []byte
+	ConfigurationEpoch string
 }
 
 // OperationDecision is the admission result. Created is true only for a new
@@ -297,11 +306,13 @@ func (s *Store) MarkReferenced(ctx context.Context, opaqueID string) error {
 
 // AdmitOperation inserts one receipt for a connection and idempotency key.
 // The identity must already exist. The same key and the same execution,
-// action, binding version, external update id, and fingerprint returns the
-// original row. Any of those fields differing writes nothing. A second key
+// action, binding version and logical fingerprint returns the original row.
+// Durable service requests retain that winner's UUID/actor/external ID rather
+// than comparing a losing candidate's generated ID. Legacy requests also match
+// the external ID. A differing logical request writes nothing. A second key
 // for the same open connection, execution, and action returns the existing
 // id with Conflict set and writes nothing. A new row marks the identity
-// referenced. bounds, when set, caps the actor JSON.
+// referenced. bounds, when set, caps the JSON snapshots.
 func (s *Store) AdmitOperation(ctx context.Context, req OperationRequest, bounds ...WriteBounds) (OperationDecision, error) {
 	limit, err := resolveWriteBounds(bounds...)
 	if err != nil {
@@ -315,7 +326,7 @@ func (s *Store) AdmitOperation(ctx context.Context, req OperationRequest, bounds
 	openKey := models.OperationOpenKey(req.ConnectionID, opaque, req.Action)
 	now := time.Now().UTC()
 	op := models.ConnectorOperation{
-		ID:                 uuid.New(),
+		ID:                 req.ID,
 		ConnectionID:       req.ConnectionID,
 		IdempotencyKey:     req.IdempotencyKey,
 		OpaqueID:           opaque,
@@ -325,13 +336,28 @@ func (s *Store) AdmitOperation(ctx context.Context, req OperationRequest, bounds
 		BindingVersion:     req.BindingVersion,
 		ExternalUpdateID:   req.ExternalUpdateID,
 		State:              OperationSubmitted,
+		Input:              jsonValue(req.Input),
+		Target:             jsonValue(req.Target),
+		BindingSnapshot:    jsonValue(req.BindingSnapshot),
+		ConnectionIdentity: jsonValue(req.ConnectionIdentity),
+		ConfigurationEpoch: req.ConfigurationEpoch,
+		Revision:           1,
+		Attempt:            1,
 		OpenKey:            &openKey,
 		CreatedAt:          now,
 		UpdatedAt:          now,
 	}
+	if op.ID == uuid.Nil {
+		op.ID = uuid.New()
+	}
 
 	var created bool
 	err = s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if req.ConfigurationEpoch != "" {
+			if err := requireOperationEpoch(tx, req.ConfigurationEpoch); err != nil {
+				return err
+			}
+		}
 		var owner models.ExternalExecution
 		if err := tx.Where("opaque_id = ?", opaque).First(&owner).Error; err != nil {
 			if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -393,9 +419,11 @@ func (s *Store) AdmitOperation(ctx context.Context, req OperationRequest, bounds
 // SetOperationState moves a receipt. submitted and accepted may become
 // accepted, completed, rejected, or unknown. unknown may become submitted,
 // accepted, completed, or rejected and stays open until a terminal state.
-// completed and rejected are terminal: a later change returns an error, does
+// completed, rejected and not_dispatched are terminal: a later change returns an error, does
 // not reopen the guard, and does not insert a row. Moving to a terminal state
-// sets OpenKey NULL so a future admission can insert a new row.
+// sets OpenKey NULL so a future admission can insert a new row. not_dispatched
+// is allowed only for an untouched initial submitted receipt, never after
+// acceptance, uncertainty or an explicit resend.
 func (s *Store) SetOperationState(ctx context.Context, operationID uuid.UUID, next string) (models.ConnectorOperation, error) {
 	if !validOperationState(next) {
 		return models.ConnectorOperation{}, ErrInvalidOperation
@@ -684,11 +712,18 @@ func ensureIdentity(tx *gorm.DB, ref ExecutionReference) error {
 }
 
 func admissionMatches(stored models.ConnectorOperation, req OperationRequest, opaque string) bool {
-	return stored.RequestFingerprint == req.RequestFingerprint &&
+	match := stored.RequestFingerprint == req.RequestFingerprint &&
 		stored.OpaqueID == opaque &&
 		stored.ActionName == req.Action &&
-		stored.BindingVersion == req.BindingVersion &&
-		stored.ExternalUpdateID == req.ExternalUpdateID
+		stored.BindingVersion == req.BindingVersion
+	// Durable service requests derive their external ID and stamped actor from
+	// the winning UUID. Concurrent candidates must attach to that winner.
+	if req.ConfigurationEpoch != "" {
+		// ConfigurationEpoch is the admission's provenance. An unchanged target
+		// and binding can recover through a newer active global configuration.
+		return match && bytes.Equal(stored.ConnectionIdentity, req.ConnectionIdentity)
+	}
+	return match && stored.ExternalUpdateID == req.ExternalUpdateID
 }
 
 func resolveWriteBounds(bounds ...WriteBounds) (WriteBounds, error) {
@@ -739,6 +774,24 @@ func markReferencedTx(tx *gorm.DB, opaqueID string) error {
 
 var errTransitionRace = errors.New("connector: operation transition lost the compare-and-swap")
 
+func operationTerminal(state string) bool {
+	return state == OperationCompleted || state == OperationRejected || state == OperationNotDispatched
+}
+
+func requireOperationEpoch(tx *gorm.DB, expected string) error {
+	var row models.ConnectorConfiguration
+	if err := tx.Where("id = ?", models.ConnectorConfigurationID).First(&row).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return ErrEpochMismatch
+		}
+		return err
+	}
+	if expected == "" || row.Fingerprint != expected {
+		return ErrEpochMismatch
+	}
+	return nil
+}
+
 func (s *Store) transitionOperation(ctx context.Context, operationID uuid.UUID, next string) (models.ConnectorOperation, error) {
 	var out models.ConnectorOperation
 	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
@@ -749,21 +802,26 @@ func (s *Store) transitionOperation(ctx context.Context, operationID uuid.UUID, 
 			}
 			return err
 		}
-		if cur.State == OperationCompleted || cur.State == OperationRejected {
+		if operationTerminal(cur.State) {
 			return ErrOperationTerminal
+		}
+		if next == OperationNotDispatched && (cur.State != OperationSubmitted || cur.Revision != 1 || cur.Attempt != 1) {
+			return ErrInvalidTransition
 		}
 		if !operationTransitionAllowed(cur.State, next) {
 			return ErrInvalidTransition
 		}
 		updates := map[string]any{
-			"state":      next,
-			"updated_at": time.Now().UTC(),
+			"state":            next,
+			"retryable_unsent": false,
+			"revision":         gorm.Expr("revision + 1"),
+			"updated_at":       time.Now().UTC(),
 		}
-		if next == OperationCompleted || next == OperationRejected {
+		if operationTerminal(next) {
 			updates["open_key"] = gorm.Expr("NULL")
 		}
 		res := tx.Model(&models.ConnectorOperation{}).
-			Where("id = ? AND state = ?", operationID, cur.State).
+			Where("id = ? AND state = ? AND revision = ?", operationID, cur.State, cur.Revision).
 			Updates(updates)
 		if res.Error != nil {
 			return res.Error
@@ -803,6 +861,14 @@ func validateOperationRequest(req OperationRequest, maxMetadata int) (ExecutionR
 	if err := boundJSON(req.Actor, maxMetadata); err != nil {
 		return ExecutionReference{}, err
 	}
+	for _, raw := range [][]byte{req.Input, req.Target, req.BindingSnapshot, req.ConnectionIdentity} {
+		if err := boundJSON(raw, maxMetadata); err != nil {
+			return ExecutionReference{}, err
+		}
+	}
+	if req.ConfigurationEpoch != "" && len(req.ConnectionIdentity) == 0 {
+		return ExecutionReference{}, ErrInvalidOperation
+	}
 	ref, err := NewExecutionReference(req.Execution.ConnectionID, req.Execution.Coordinates)
 	if err != nil {
 		return ExecutionReference{}, err
@@ -817,7 +883,7 @@ func operationTransitionAllowed(from, to string) bool {
 	switch from {
 	case OperationSubmitted, OperationAccepted:
 		switch to {
-		case OperationAccepted, OperationCompleted, OperationRejected, OperationUnknown:
+		case OperationAccepted, OperationCompleted, OperationRejected, OperationUnknown, OperationNotDispatched:
 			return true
 		default:
 			return false
@@ -994,7 +1060,7 @@ func validRelationType(value string) bool {
 
 func validOperationState(value string) bool {
 	switch value {
-	case OperationSubmitted, OperationAccepted, OperationCompleted, OperationRejected, OperationUnknown:
+	case OperationSubmitted, OperationAccepted, OperationCompleted, OperationRejected, OperationUnknown, OperationNotDispatched:
 		return true
 	default:
 		return false
