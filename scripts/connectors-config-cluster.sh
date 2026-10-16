@@ -213,7 +213,7 @@ helm_fixture_install_chart "$kubeconfig" "$namespace" caesium helm/caesium \
   --values helm/caesium/ci/test-values-k8s.yaml --values "$artifacts/values.json" --wait --timeout 480s
 # OnDelete lets the scenario restart one exact member while other members keep
 # their startup file. Prefix the actual chart command, preserving peer setup.
-kn patch statefulset caesium --type=merge -p '{"spec":{"updateStrategy":{"type":"OnDelete"}}}'
+kn patch statefulset caesium --type=merge -p '{"spec":{"updateStrategy":{"type":"OnDelete","rollingUpdate":null}}}'
 kn get statefulset caesium -o json >"$artifacts/statefulset.json"
 python3 - "$artifacts/statefulset.json" >"$artifacts/command-patch.json" <<'PY'
 import json,sys
