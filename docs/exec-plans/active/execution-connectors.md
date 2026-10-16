@@ -486,9 +486,13 @@ Resume unfinished waves. Do not archive this plan while later items remain.
   being rerun. Its first attempt reached three ready replicas but Kubernetes
   rejected the driver's OnDelete patch because it retained RollingUpdate fields.
   A one-line patch now removes those fields; shell validation and all six
-  ownership probes passed, and cleanup verified the owned cluster was removed.
-  Cluster skew, guarded epoch activation and repointing acceptance are not yet
-  claimed. Local default/auth regressions have not run. Current-head
+  ownership probes passed. The next attempt accepted both StatefulSet patches
+  but exited 141 while an early-exit key parser broke the bootstrap log pipe.
+  A local follow-up drains the complete stream, passes seven probes, and rejects
+  the previous parser in a large-stream negative control. Its fresh cluster run
+  is queued behind another active shared-lane check before publication. Both
+  failed attempts cleaned their verified owned clusters. Cluster skew, guarded
+  epoch activation and repointing acceptance are not yet claimed. Local default/auth regressions have not run. Current-head
   hosted checks are pending on the driver-only follow-up. On unchanged runtime
   contents at `a25a9980`, native/arm64 images, lint, both unit architectures and
   both UI suites passed;
