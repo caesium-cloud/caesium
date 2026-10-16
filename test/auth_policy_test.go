@@ -50,7 +50,9 @@ type policyShowDoc struct {
 		Error    string `json:"error"`
 	} `json:"last_reload"`
 	Policy struct {
-		Bindings []struct {
+		APIVersion string                     `json:"apiVersion"`
+		Namespaces map[string]json.RawMessage `json:"namespaces"`
+		Bindings   []struct {
 			Subjects struct {
 				Groups []string `json:"groups"`
 			} `json:"subjects"`
@@ -261,6 +263,108 @@ func (s *IntegrationTestSuite) TestAuthPolicyPollReload() {
 	s.Require().True(s.waitForPolicyRevision(policy.Hash(original)), "the poller must pick up the restored file")
 	status, _ = s.requestWithCookie(http.MethodGet, "/v1/atoms", cookie)
 	s.Equal(http.StatusForbidden, status, "the restored file no longer binds iaa-poll-viewers")
+}
+
+// TestAuthPolicyShowAndReloadSurface drives GET /v1/auth/policy and POST
+// /v1/auth/policy/reload over live HTTP and through `caesium auth policy show
+// | reload`, adapting to what the api-key server under test serves:
+//
+//   - CAESIUM_IT_AUTH_POLICY_PATH set (the agent lane mounts a policy file):
+//     the file's source and hash, and an unchanged reload answers 200;
+//   - unset (an api-key server with no policy file and no SSO, such as the
+//     coverage auth journey): the env view (the empty single-default policy),
+//     and a reload is refused with 409 and audits nothing.
+//
+// Both routes are cluster admin: 401 without credentials, 403 for operator.
+func (s *IntegrationTestSuite) TestAuthPolicyShowAndReloadSurface() {
+	s.requireAuthLane()
+	s.Require().NotEmpty(s.authAPIKey, "the auth lane must export an admin key to the runner")
+
+	for _, route := range []struct{ method, path string }{
+		{http.MethodGet, "/v1/auth/policy"},
+		{http.MethodPost, "/v1/auth/policy/reload"},
+	} {
+		req, err := http.NewRequestWithContext(s.T().Context(), route.method, s.caesiumURL+route.path, nil)
+		s.Require().NoError(err)
+		resp, err := http.DefaultClient.Do(req)
+		s.Require().NoError(err)
+		_ = resp.Body.Close()
+		s.Equal(http.StatusUnauthorized, resp.StatusCode, "%s %s without credentials", route.method, route.path)
+	}
+	operator := s.createAPIKeyCLI("--role", "operator", "--description", "policy surface operator")
+	status, body := s.requestWithKey(http.MethodGet, "/v1/auth/policy", operator.Plaintext, nil)
+	s.Equal(http.StatusForbidden, status, "GET /v1/auth/policy is cluster admin: %s", body)
+	status, body = s.requestWithKey(http.MethodPost, "/v1/auth/policy/reload", operator.Plaintext, nil)
+	s.Equal(http.StatusForbidden, status, "POST /v1/auth/policy/reload is cluster admin: %s", body)
+
+	status, body = s.requestWithKey(http.MethodGet, "/v1/auth/policy", s.authAPIKey, nil)
+	s.Require().Equal(http.StatusOK, status, body)
+	var view policyShowDoc
+	s.Require().NoError(json.Unmarshal([]byte(body), &view), body)
+	s.Equal("v1", view.Policy.APIVersion)
+	s.Contains(view.Policy.Namespaces, "default", "the default namespace is always declared")
+	s.NotContains(body, "kind: AccessPolicy", "the raw file is never returned")
+
+	show := runCLIJSON[policyShowDoc](s, "auth", "policy", "show", "--json", "--server", s.caesiumURL)
+	s.Equal(view.Source, show.Source)
+	s.Equal(view.Revision, show.Revision)
+	text, err := s.runCLIStdout("auth", "policy", "show", "--server", s.caesiumURL)
+	s.Require().NoError(err)
+	s.Contains(text, "source:       "+view.Source)
+
+	path := strings.TrimSpace(os.Getenv(authPolicyPathEnv))
+	if path == "" {
+		s.Equal(policy.SourceEnv, view.Source, "no policy file: the env view")
+		s.Empty(view.Revision)
+		s.Empty(view.Path)
+		s.Empty(view.Policy.Bindings, "api-key without SSO translates no role mapping")
+		s.Nil(view.LastReload)
+
+		reloadedBefore := len(s.policyAuditRowsAny(iauth.ActionPolicyReloaded))
+		failedBefore := len(s.policyAuditRowsAny(iauth.ActionPolicyReloadFailed))
+
+		status, body = s.requestWithKey(http.MethodPost, "/v1/auth/policy/reload", s.authAPIKey, nil)
+		s.Equal(http.StatusConflict, status, body)
+		s.Contains(body, "no access policy file is configured")
+
+		stdout, stderr, err := s.runCLISeparate("auth", "policy", "reload", "--server", s.caesiumURL)
+		s.Require().Error(err, "a reload with no policy file must fail; stdout: %s", stdout)
+		s.requireExitCode(err, 1)
+		s.Contains(stderr, "policy reload failed (409)")
+		s.Contains(stderr, "no access policy file is configured")
+		s.Empty(strings.TrimSpace(stdout))
+		stdout, _, err = s.runCLISeparate("auth", "policy", "reload", "--json", "--server", s.caesiumURL)
+		s.Require().Error(err)
+		s.Empty(strings.TrimSpace(stdout), "a 409 carries no reload document")
+
+		s.Len(s.policyAuditRowsAny(iauth.ActionPolicyReloaded), reloadedBefore, "a refused reload audits nothing")
+		s.Len(s.policyAuditRowsAny(iauth.ActionPolicyReloadFailed), failedBefore, "a refused reload audits nothing")
+		return
+	}
+
+	served, err := os.ReadFile(path)
+	s.Require().NoError(err)
+	s.Equal(policy.SourceFile, view.Source)
+	s.Equal(policy.Hash(served), view.Revision, "the revision is the SHA-256 of the served file")
+	s.NotEmpty(view.Path)
+
+	status, body = s.requestWithKey(http.MethodPost, "/v1/auth/policy/reload", s.authAPIKey, nil)
+	s.Require().Equal(http.StatusOK, status, body)
+	var reload policyReloadDoc
+	s.Require().NoError(json.Unmarshal([]byte(body), &reload), body)
+	s.False(reload.Changed, "the served file did not change")
+	s.Equal(policy.Hash(served), reload.Revision)
+	s.Equal(policy.Hash(served), reload.PreviousRevision)
+
+	stdout, err := s.runCLIStdout("auth", "policy", "reload", "--server", s.caesiumURL)
+	s.Require().NoError(err)
+	s.Equal("access policy unchanged: revision "+policy.Hash(served)+"\n", stdout)
+}
+
+// policyAuditRowsAny returns every audit row for action.
+func (s *IntegrationTestSuite) policyAuditRowsAny(action string) []policyAuditRow {
+	s.T().Helper()
+	return runCLIJSON[[]policyAuditRow](s, "auth", "audit", "--action", action, "--limit", "1000", "--server", s.caesiumURL)
 }
 
 // TestAuthPolicyLintOffline drives `caesium auth policy lint`, which needs no

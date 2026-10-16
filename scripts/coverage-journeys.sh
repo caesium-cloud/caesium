@@ -1741,6 +1741,9 @@ PY
 
   local_pattern="${local_pattern%)}|TestJobSchemaNamespaceDocumentation|TestCacheNamespaceMove)"
   auth_pattern="${auth_pattern%)}|TestIncidentNamespaceLifecycle)"
+  # The access policy endpoints (GET/POST /v1/auth/policy): this api-key server
+  # mounts no policy file, so the scenario drives the no-file env view and 409.
+  auth_pattern="${auth_pattern%)}|TestAuthPolicyShowAndReloadSurface)"
 
   local -a local_named_passes=(
     TestCaesiumWhyExplainsHitAndMiss
@@ -1783,6 +1786,7 @@ PY
     TestIncidentBundleFromRealFailure
     TestPublicListingsOrderByAndRefuseInvalidTerms
     TestIncidentNamespaceLifecycle
+    TestAuthPolicyShowAndReloadSurface
   )
   local -a distributed_named_passes=(
     TestNodeWorkersRoute
