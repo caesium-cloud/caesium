@@ -242,6 +242,68 @@ class ConnectorFixtureOrchestrationTests(unittest.TestCase):
         self.assertIn('CAESIUM_CONNECTORS_GATE_OFF_URL=http://127.0.0.1:8081', runner)
         self.assertEqual(runner[-1], 'TestIntegrationTestSuite/(TestConnectorsFixture|TestConnectorsRead)')
 
+    def test_actions_selection_requires_named_pass_and_rejects_nested_skip(self):
+        self.select_reads()
+        (self.root/'test'/'connectors_actions_test.go').touch()
+        for extra, expected in (({'MOCK_SCENARIOS': 'Fixture,Read,Actions'}, 0),
+                                ({'MOCK_SCENARIOS': 'Fixture,Read'}, 1),
+                                ({'MOCK_SCENARIOS': 'Fixture,Read,Actions', 'MOCK_SKIPPED_SCENARIO': 'Actions'}, 1)):
+            with self.subTest(results=extra):
+                for child in (self.artifacts, self.state):
+                    if child.exists(): shutil.rmtree(child)
+                (self.state/'names').mkdir(parents=True)
+                code, _, error = self.finish(self.launch(**extra))
+                self.assertEqual(code == 0, expected == 0, error)
+                runner = next(c for c in self.calls() if c[0] == 'create' and 'runner-' in c[c.index('--name')+1])
+                self.assertIn('CAESIUM_CONNECTORS_ACTIONS_FIXTURE=true', runner)
+                self.assertIn('TestConnectorsActions', runner[-1])
+
+    def test_manual_browser_hook_receives_live_owned_fixture_and_failure_fails_run(self):
+        self.select_reads()
+        hook = self.root/'browser hook.py'
+        hook.write_text("#!/usr/bin/env python3\nimport json,os\nfrom pathlib import Path\n"
+                        "assert os.environ['CAESIUM_AUTH_ADMIN_KEY'] == 'csk_live_fixture_bootstrap'\n"
+                        "assert os.environ['CAESIUM_E2E_AUTH_ADMIN_KEY'] == os.environ['CAESIUM_API_KEY']\n"
+                        "assert os.environ['CAESIUM_CONNECTORS_FIXTURE'] == 'true'\n"
+                        "assert os.environ['CAESIUM_CONNECTORS_FIXTURE_CONTAINER_ID'] == '2'*64\n"
+                        "assert os.environ['CAESIUM_CONNECTORS_SERVER_CONTAINER_ID'] == '1'*64\n"
+                        "assert os.environ['CAESIUM_BASE_URL'] == 'http://127.0.0.1:8080'\n"
+                        "assert os.environ['CAESIUM_CONNECTORS_FIXTURE_CONTROL_URL'] == 'http://127.0.0.1:7240'\n"
+                        "assert os.environ['CAESIUM_CONNECTORS_GATE_OFF_URL'] == 'http://127.0.0.1:8081'\n"
+                        "assert not Path(os.environ['MOCK_STATE'],'hook-before').exists()\n"
+                        "Path(os.environ['MOCK_STATE'],'hook-ran').touch()\n"
+                        "raise SystemExit(int(os.environ.get('MOCK_HOOK_FAIL','0')))\n")
+        hook.chmod(0o755)
+        for failure in ('0', '9'):
+            with self.subTest(failure=failure):
+                for child in (self.artifacts, self.state):
+                    if child.exists(): shutil.rmtree(child)
+                (self.state/'names').mkdir(parents=True)
+                code, output, error = self.finish(self.launch(MOCK_SCENARIOS='Fixture,Read', CAESIUM_CONNECTORS_BROWSER_HOOK=str(hook), MOCK_HOOK_FAIL=failure))
+                self.assertEqual(code, int(failure), error)
+                self.assertTrue((self.state/'hook-ran').exists())
+                anchor = next(c for c in self.calls() if c[0] == 'create' and 'network-anchor-' in c[c.index('--name')+1])
+                self.assertIn('127.0.0.1:7240:7240', anchor)
+                self.assertIn('127.0.0.1:8081:8081', anchor)
+                self.assertNotIn('csk_live_fixture_bootstrap', output+error)
+                self.assertCountEqual(self.removed(), ['1'*64, '2'*64, '3'*64, '4'*64, '5'*64, '6'*64])
+
+    def test_browser_hook_is_not_a_shell_command_and_never_runs_after_missing_go_pass(self):
+        self.select_reads()
+        hook = self.root/'browser-hook'
+        hook.write_text('#!/bin/sh\ntouch "$MOCK_STATE/hook-ran"\n')
+        hook.chmod(0o755)
+        code, _, _ = self.finish(self.launch(MOCK_SCENARIOS='Fixture', CAESIUM_CONNECTORS_BROWSER_HOOK=str(hook)))
+        self.assertNotEqual(code, 0)
+        self.assertFalse((self.state/'hook-ran').exists())
+        for command in ('relative-hook', str(hook)+'; touch '+str(self.state/'injected')):
+            with self.subTest(command=command):
+                if self.artifacts.exists(): shutil.rmtree(self.artifacts)
+                code, _, error = self.finish(self.launch(CAESIUM_CONNECTORS_BROWSER_HOOK=command))
+                self.assertNotEqual(code, 0)
+                self.assertIn('absolute executable file', error)
+                self.assertFalse((self.state/'injected').exists())
+
     def test_http_qualification_refuses_borrowed_server_before_mutation(self):
         self.select_reads()
         code, _, error = self.finish(self.launch(CAESIUM_CONNECTORS_EXISTING_SERVER='true'))

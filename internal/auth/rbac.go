@@ -149,6 +149,13 @@ var endpointPolicy = map[string]RoutePolicy{
 	// Connector reads (execution-connectors W5). The handler answers only a
 	// caller with a cluster viewer grant (connector.readPrincipal reads
 	// ClusterRole), and a connection's executions span every namespace's runs.
+	// Connector messages reuse the cluster role boundary. A Query is an explicit
+	// read despite using POST; mutations always require operator or admin.
+	"POST /v1/connectors/:id/executions/:id/queries/:id":  clusterRoute(viewer),
+	"POST /v1/connectors/:id/executions/:id/actions/:id":  clusterRoute(operator),
+	"GET /v1/connectors/:id/executions/:id/operations":    clusterRoute(viewer),
+	"GET /v1/connectors/:id/operations/:id":               clusterRoute(viewer),
+	"POST /v1/connectors/:id/operations/:id/resubmit":     clusterRoute(operator),
 	"GET /v1/connectors":                                  clusterRoute(viewer),
 	"GET /v1/connectors/:id/executions":                   clusterRoute(viewer),
 	"GET /v1/connectors/:id/executions/:id":               clusterRoute(viewer),
