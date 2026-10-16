@@ -1,4 +1,4 @@
-"""Exercise ownership refusals without creating containers or a cluster."""
+"""Exercise cluster-driver streams and ownership without creating resources."""
 import os
 import json
 from pathlib import Path
@@ -102,6 +102,29 @@ elif name=="helm": print("v3.22.0")
 
     def test_confirmed_owned_cluster_is_cleaned_after_failure(self):
         self.run_probe("owned-load-failed", expect_delete=True)
+
+
+class BootstrapLogTests(unittest.TestCase):
+    def test_large_bootstrap_log_is_drained_under_pipefail(self):
+        source = Path(__file__).with_name("connectors-config-cluster.sh").read_text()
+        assignment = next(line for line in source.splitlines() if line.startswith('admin_key="$('))
+        # Execute the actual driver pipeline against a producer larger than a
+        # pipe buffer. Exiting the key parser early breaks a healthy log stream.
+        producer = """kn() {
+python3 - <<'PY'
+import os
+os.write(1, b'  csk_bootstrap_stream_probe\\r\\n')
+for _ in range(4096):
+    os.write(1, b'ordinary startup log line ' * 64 + b'\\n')
+os.write(1, b'  csk_ignored_second_key\\n')
+PY
+}
+"""
+        result = subprocess.run(["bash", "-c", "set -euo pipefail\n" + producer + assignment +
+                                 '\nprintf "%s" "$admin_key"'],
+                                capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, "csk_bootstrap_stream_probe")
 
 
 if __name__ == "__main__":

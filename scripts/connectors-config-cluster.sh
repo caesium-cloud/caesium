@@ -223,7 +223,7 @@ prefix='previous="/connectors/${POD_NAME}.previous"\nif [ -f "$previous" ]; then
 json.dump([{"op":"replace","path":"/spec/template/spec/containers/0/args/0","value":prefix+original}],sys.stdout)
 PY
 kn patch statefulset caesium --type=json --patch-file "$artifacts/command-patch.json"
-admin_key="$(kn logs caesium-0 2>/dev/null | awk '/csk_/ {for(i=1;i<=NF;i++) if($i ~ /^csk_/) {print $i;exit}}' | tr -d '\r')"
+admin_key="$(kn logs caesium-0 2>/dev/null | awk '/csk_/ && !found {for(i=1;i<=NF;i++) if($i ~ /^csk_/) {print $i;found=1;break}}' | tr -d '\r')"
 [[ -n "$admin_key" ]] || { echo 'cluster bootstrap key missing' >&2; exit 1; }
 printf '%s' "$admin_key" >"$artifacts/admin-key"
 chmod 600 "$artifacts/admin-key"
