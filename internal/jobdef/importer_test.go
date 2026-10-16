@@ -5,20 +5,24 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/url"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/caesium-cloud/caesium/internal/freshness"
 	"github.com/caesium-cloud/caesium/internal/jobdef/testutil"
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/caesium-cloud/caesium/pkg/container"
 	schema "github.com/caesium-cloud/caesium/pkg/jobdef"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/mattn/go-sqlite3"
 	"github.com/stretchr/testify/require"
 	"github.com/stretchr/testify/suite"
 	"gorm.io/datatypes"
+	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
 )
 
@@ -1065,4 +1069,339 @@ func (s *ImporterTestSuite) TestNamespaceApplyMovesJobInPlace() {
 	exported, err := NewExporter(s.db).Export(context.Background(), first.ID)
 	s.Require().NoError(err)
 	s.Equal("finance", exported.Metadata.Namespace)
+}
+
+// The apply guard and PruneMissing read rows they then write; on PostgreSQL the
+// reads must lock them. A dry run on the postgres dialector builds the SQL
+// without a server.
+func TestImporterLocksGuardedJobRowsOnPostgres(t *testing.T) {
+	db, err := gorm.Open(postgres.New(postgres.Config{DSN: "host=127.0.0.1 port=1 user=caesium dbname=caesium sslmode=disable"}),
+		&gorm.Config{DryRun: true, DisableAutomaticPing: true})
+	require.NoError(t, err)
+	var statements []string
+	require.NoError(t, db.Callback().Query().After("gorm:query").Register("allowlist:capture", func(tx *gorm.DB) {
+		statements = append(statements, tx.Statement.SQL.String())
+	}))
+
+	_, err = NewImporter(db).findJobByAliasTx(db, "nightly")
+	require.NoError(t, err)
+	var jobs []models.Job
+	require.NoError(t, pruneScopeTx(db, &PruneOptions{SourceID: "git-a"}).Find(&jobs).Error)
+	require.NoError(t, lockBatchJobsTx(db, []string{"b", "a"}))
+
+	require.Len(t, statements, 3)
+	for _, statement := range statements {
+		require.True(t, strings.HasSuffix(statement, " FOR UPDATE"), statement)
+	}
+	require.Contains(t, statements[0], "alias = $1")
+	// The two multi-row locks share one byte order, so a git batch and a
+	// concurrent prune cannot deadlock.
+	require.Contains(t, statements[1], "provenance_source_id = $1")
+	require.True(t, strings.HasSuffix(statements[1], `ORDER BY alias COLLATE "C" FOR UPDATE`), statements[1])
+	require.Contains(t, statements[2], "alias IN ($1,$2)")
+	require.True(t, strings.HasSuffix(statements[2], `ORDER BY alias COLLATE "C" FOR UPDATE`), statements[2])
+}
+
+func TestImporterContentionClassifierRetriesPostgresConflicts(t *testing.T) {
+	for code, want := range map[string]bool{"40P01": true, "40001": true, "23505": false, "57014": false} {
+		err := fmt.Errorf("apply: %w", &pgconn.PgError{Code: code})
+		require.Equal(t, want, isImporterContentionErr(err), code)
+	}
+	require.True(t, isImporterContentionErr(sqlite3.Error{Code: sqlite3.ErrBusy}))
+	require.False(t, isImporterContentionErr(errors.New("job alias already exists")))
+}
+
+func (s *ImporterTestSuite) TestApplyBatchLocksJobsInAliasOrderFirst() {
+	var statements []string
+	s.Require().NoError(s.db.Callback().Query().After("gorm:query").Register("allowlist:capture", func(tx *gorm.DB) {
+		if tx.Statement.Table == "jobs" {
+			statements = append(statements, tx.Statement.SQL.String())
+		}
+	}))
+	_, err := s.importer.ApplyBatchWithOptions(context.Background(), []BatchPlan{
+		{Def: s.allowlistDef("batch-c", ""), Opts: &ApplyOptions{}},
+		{Def: s.allowlistDef("batch-a", ""), Opts: &ApplyOptions{}},
+	})
+	s.Require().NoError(err)
+	s.Require().NotEmpty(statements)
+	// SQLite drops the FOR UPDATE clause; the order it would lock in remains.
+	s.Contains(statements[0], "alias IN (")
+	s.True(strings.HasSuffix(strings.TrimSpace(statements[0]), "ORDER BY alias"), statements[0])
+	testutil.AssertCount(s.T(), s.db, &models.Job{}, 2)
+}
+
+func (s *ImporterTestSuite) allowlistDef(alias, namespace string) *schema.Definition {
+	def, err := schema.Parse([]byte(strings.Replace(testutil.SampleJob, "csv-to-parquet", alias, 1)))
+	s.Require().NoError(err)
+	def.Metadata.Namespace = namespace
+	return def
+}
+
+func (s *ImporterTestSuite) TestApplyBatchRetriesWithoutDuplicatingRefusals() {
+	busy := true
+	s.Require().NoError(s.db.Callback().Query().After("gorm:query").Register("allowlist:busy-once", func(tx *gorm.DB) {
+		if busy && strings.Contains(tx.Statement.SQL.String(), "JOIN triggers") {
+			busy = false
+			_ = tx.AddError(sqlite3.Error{Code: sqlite3.ErrBusy})
+		}
+	}))
+	opts := &ApplyOptions{NamespaceAllowlist: []string{"default"}}
+	result, err := s.importer.ApplyBatchWithOptions(context.Background(), []BatchPlan{
+		{Def: s.allowlistDef("batch-a", ""), Opts: opts},
+		{Def: s.allowlistDef("batch-b", "marketing"), Opts: opts},
+	})
+	s.Require().NoError(err)
+	s.False(busy, "the first attempt must hit contention and retry")
+	s.Equal(1, result.Applied)
+	s.Require().Len(result.Refused, 1)
+	s.Equal(1, result.Refused[0].Index)
+	s.Equal(NamespaceReasonRequested, result.Refused[0].Err.Reason)
+	testutil.AssertCount(s.T(), s.db, &models.Job{}, 1)
+}
+
+func (s *ImporterTestSuite) allowlistDatasetDef(alias, namespace string, produces bool) *schema.Definition {
+	datasets := ""
+	if produces {
+		datasets = "    datasets:\n      produces:\n        - name: ds.allowlist\n"
+	}
+	def, err := schema.Parse([]byte("apiVersion: v1\nkind: Job\nmetadata:\n  alias: " + alias +
+		"\ntrigger:\n  type: cron\n  configuration:\n    cron: \"0 * * * *\"\nsteps:\n  - name: run\n    image: busybox:1.36.1\n    command: [\"sh\", \"-c\", \"echo ok\"]\n" + datasets))
+	s.Require().NoError(err)
+	def.Metadata.Namespace = namespace
+	return def
+}
+
+// Only the in-transaction dataset check catches this: the refused job keeps
+// its stored producer of D while an allowed job also claims D. The trigger
+// graph stays acyclic.
+func (s *ImporterTestSuite) TestApplyBatchRollsBackDatasetProducerConflict() {
+	ctx := context.Background()
+	_, err := s.importer.Apply(ctx, s.allowlistDatasetDef("batch-r", "marketing", true))
+	s.Require().NoError(err)
+	_, err = s.importer.Apply(ctx, s.allowlistDatasetDef("batch-a", "", false))
+	s.Require().NoError(err)
+	before := s.allowlistRow("batch-a")
+
+	opts := &ApplyOptions{NamespaceAllowlist: []string{"default"}}
+	result, err := s.importer.ApplyBatchWithOptions(ctx, []BatchPlan{
+		{Def: s.allowlistDatasetDef("batch-a", "", true), Opts: opts},
+		{Def: s.allowlistDatasetDef("batch-r", "", false), Opts: opts},
+	})
+	s.Require().ErrorIs(err, ErrBatchInvalid)
+	s.Require().ErrorIs(err, freshness.ErrDatasetMultipleProducers)
+	s.Equal(0, result.Applied)
+	s.Require().Len(result.Refused, 1)
+	s.Equal(NamespaceReasonStored, result.Refused[0].Err.Reason)
+
+	after := s.allowlistRow("batch-a")
+	s.True(before.UpdatedAt.Equal(after.UpdatedAt), "a's stored row must be unchanged")
+	var aDecls, producers int64
+	s.Require().NoError(s.db.Model(&models.DatasetDeclaration{}).Where("job_id = ?", before.ID).Count(&aDecls).Error)
+	s.Zero(aDecls)
+	s.Require().NoError(s.db.Model(&models.DatasetDeclaration{}).
+		Where("name = ? AND direction = ?", "ds.allowlist", models.DatasetDirectionProduces).Count(&producers).Error)
+	s.Equal(int64(1), producers)
+}
+
+// A non-verdict error from the in-transaction validation (here a cancelled
+// context surfacing from a read) is returned as itself, never as
+// ErrBatchInvalid, so git sync does not blame the repository for it.
+func (s *ImporterTestSuite) TestApplyBatchKeepsNonVerdictValidationErrors() {
+	s.Require().NoError(s.db.Callback().Query().After("gorm:query").Register("allowlist:cancel", func(tx *gorm.DB) {
+		if strings.Contains(tx.Statement.SQL.String(), "JOIN triggers") {
+			_ = tx.AddError(context.Canceled)
+		}
+	}))
+	result, err := s.importer.ApplyBatchWithOptions(context.Background(), []BatchPlan{
+		{Def: s.allowlistDef("batch-a", ""), Opts: &ApplyOptions{NamespaceAllowlist: []string{"default"}}},
+	})
+	s.Require().ErrorIs(err, context.Canceled)
+	s.NotErrorIs(err, ErrBatchInvalid)
+	s.NotContains(err.Error(), "fix the repository")
+	s.Equal(0, result.Applied)
+	testutil.AssertCount(s.T(), s.db, &models.Job{}, 0)
+}
+
+func (s *ImporterTestSuite) TestApplyBatchRollsBackInvalidGraph() {
+	chain := func(alias, upstream string) *schema.Definition {
+		def, err := schema.Parse([]byte("apiVersion: v1\nkind: Job\nmetadata:\n  alias: " + alias +
+			"\ntrigger:\n  type: event\n  configuration:\n    events:\n      - type: run_completed\n        source: caesium\n        filter:\n          job_alias: " + upstream +
+			"\nsteps:\n  - name: run\n    image: busybox:1.36.1\n    command: [\"sh\", \"-c\", \"echo ok\"]\n"))
+		s.Require().NoError(err)
+		return def
+	}
+	result, err := s.importer.ApplyBatchWithOptions(context.Background(), []BatchPlan{
+		{Def: s.allowlistDef("batch-plain", ""), Opts: &ApplyOptions{}},
+		{Def: chain("batch-a", "batch-b"), Opts: &ApplyOptions{}},
+		{Def: chain("batch-b", "batch-a"), Opts: &ApplyOptions{}},
+	})
+	s.Require().ErrorIs(err, ErrBatchInvalid)
+	s.Require().ErrorIs(err, ErrTriggerChainCycle)
+	s.Equal(0, result.Applied)
+	testutil.AssertCount(s.T(), s.db, &models.Job{}, 0)
+}
+
+// allowlistApply applies SampleJob under alias in namespace, owned by source.
+func (s *ImporterTestSuite) allowlistApply(alias, namespace, source, commit string, opts ApplyOptions) (*models.Job, error) {
+	def, err := schema.Parse([]byte(strings.Replace(testutil.SampleJob, "csv-to-parquet", alias, 1)))
+	s.Require().NoError(err)
+	def.Metadata.Namespace = namespace
+	opts.Provenance = &Provenance{SourceID: source, Commit: commit}
+	return s.importer.ApplyWithOptions(context.Background(), def, &opts)
+}
+
+func (s *ImporterTestSuite) allowlistRow(alias string) models.Job {
+	var job models.Job
+	s.Require().NoError(s.db.Unscoped().Where("alias = ?", alias).First(&job).Error)
+	return job
+}
+
+func (s *ImporterTestSuite) requireAllowlistRefusal(err error, reason, requested, stored string) {
+	s.Require().ErrorIs(err, ErrNamespaceNotAllowed)
+	nsErr, ok := errors.AsType[*NamespaceAllowlistError](err)
+	s.Require().True(ok, "expected *NamespaceAllowlistError, got %T", err)
+	s.Equal(reason, nsErr.Reason)
+	s.Equal(requested, nsErr.RequestedNamespace)
+	s.Equal(stored, nsErr.StoredNamespace)
+}
+
+func (s *ImporterTestSuite) TestApplyAllowlistRefusesRequestedNamespace() {
+	_, err := s.allowlistApply("ns-job", "marketing", "git-a", "c1", ApplyOptions{NamespaceAllowlist: []string{"default"}})
+	s.requireAllowlistRefusal(err, NamespaceReasonRequested, "marketing", "")
+	s.Contains(err.Error(), "ns-job")
+	testutil.AssertCount(s.T(), s.db, &models.Job{}, 0)
+
+	// An empty manifest namespace is the default namespace.
+	_, err = s.allowlistApply("ns-job", "", "git-a", "c1", ApplyOptions{NamespaceAllowlist: []string{"marketing"}})
+	s.requireAllowlistRefusal(err, NamespaceReasonRequested, "default", "")
+}
+
+func (s *ImporterTestSuite) TestApplyAllowlistRefusesStoredNamespace() {
+	_, err := s.allowlistApply("ns-job", "finance", "git-a", "c1", ApplyOptions{})
+	s.Require().NoError(err)
+	before := s.allowlistRow("ns-job")
+
+	// A narrowed source cannot move a job it owned into its allowlist.
+	_, err = s.allowlistApply("ns-job", "marketing", "git-a", "c2", ApplyOptions{NamespaceAllowlist: []string{"marketing"}})
+	s.requireAllowlistRefusal(err, NamespaceReasonStored, "marketing", "finance")
+
+	after := s.allowlistRow("ns-job")
+	s.Equal(before.ID, after.ID)
+	s.Equal("finance", after.Namespace)
+	s.Equal("c1", after.ProvenanceCommit)
+	s.Equal(before.Labels, after.Labels)
+	s.True(before.UpdatedAt.Equal(after.UpdatedAt))
+}
+
+func (s *ImporterTestSuite) TestApplyAllowlistRefusesMoveOut() {
+	_, err := s.allowlistApply("ns-job", "marketing", "git-a", "c1", ApplyOptions{NamespaceAllowlist: []string{"marketing"}})
+	s.Require().NoError(err)
+
+	_, err = s.allowlistApply("ns-job", "finance", "git-a", "c2", ApplyOptions{NamespaceAllowlist: []string{"marketing"}})
+	s.requireAllowlistRefusal(err, NamespaceReasonRequested, "finance", "marketing")
+	row := s.allowlistRow("ns-job")
+	s.Equal("marketing", row.Namespace)
+	s.Equal("c1", row.ProvenanceCommit)
+}
+
+func (s *ImporterTestSuite) TestApplyAllowlistIgnoresForce() {
+	_, err := s.allowlistApply("ns-job", "marketing", "git-a", "c1", ApplyOptions{})
+	s.Require().NoError(err)
+
+	_, err = s.allowlistApply("ns-job", "finance", "git-a", "c2", ApplyOptions{Force: true, NamespaceAllowlist: []string{"marketing"}})
+	s.requireAllowlistRefusal(err, NamespaceReasonRequested, "finance", "marketing")
+	// A foreign-owned row in a foreign namespace is a namespace refusal, not a
+	// provenance conflict, even with Force.
+	_, err = s.allowlistApply("ns-job", "finance", "git-b", "c2", ApplyOptions{Force: true, NamespaceAllowlist: []string{"finance"}})
+	s.requireAllowlistRefusal(err, NamespaceReasonStored, "finance", "marketing")
+	s.NotErrorIs(err, ErrProvenanceConflict)
+	row := s.allowlistRow("ns-job")
+	s.Equal("marketing", row.Namespace)
+	s.Equal("git-a", row.ProvenanceSourceID)
+}
+
+func (s *ImporterTestSuite) TestApplyAllowlistChecksRetiredRow() {
+	_, err := s.allowlistApply("ns-job", "finance", "git-a", "c1", ApplyOptions{})
+	s.Require().NoError(err)
+	pruned, err := s.importer.PruneMissing(context.Background(), nil, &PruneOptions{SourceID: "git-a"})
+	s.Require().NoError(err)
+	s.Equal(1, pruned)
+
+	_, err = s.allowlistApply("ns-job", "marketing", "git-a", "c2", ApplyOptions{NamespaceAllowlist: []string{"marketing"}})
+	s.requireAllowlistRefusal(err, NamespaceReasonStored, "marketing", "finance")
+	row := s.allowlistRow("ns-job")
+	s.True(row.DeletedAt.Valid, "retired row must stay retired")
+	s.Equal("finance", row.Namespace)
+	testutil.AssertCount(s.T(), s.db, &models.Job{}, 0)
+}
+
+func (s *ImporterTestSuite) TestApplyAllowlistAllowsListedNamespace() {
+	allow := ApplyOptions{NamespaceAllowlist: []string{"default", "marketing"}}
+	created, err := s.allowlistApply("ns-job", "marketing", "git-a", "c1", allow)
+	s.Require().NoError(err)
+	updated, err := s.allowlistApply("ns-job", "marketing", "git-a", "c2", allow)
+	s.Require().NoError(err)
+	s.Equal(created.ID, updated.ID)
+	// A move between two listed namespaces is allowed.
+	moved, err := s.allowlistApply("ns-job", "default", "git-a", "c3", allow)
+	s.Require().NoError(err)
+	s.Equal(created.ID, moved.ID)
+	row := s.allowlistRow("ns-job")
+	s.Equal("default", row.Namespace)
+	s.Equal("c3", row.ProvenanceCommit)
+}
+
+func (s *ImporterTestSuite) TestPruneMissingAllowlistLeavesForeignJobs() {
+	_, err := s.allowlistApply("ns-a", "default", "git-a", "c1", ApplyOptions{})
+	s.Require().NoError(err)
+	_, err = s.allowlistApply("ns-b", "finance", "git-a", "c1", ApplyOptions{})
+	s.Require().NoError(err)
+	_, err = s.allowlistApply("ns-other", "default", "git-b", "c1", ApplyOptions{})
+	s.Require().NoError(err)
+
+	var skipped []PruneSkip
+	pruned, err := s.importer.PruneMissing(context.Background(), nil, &PruneOptions{
+		SourceID: "git-a", NamespaceAllowlist: []string{"default"}, Skipped: &skipped,
+	})
+	s.Require().NoError(err)
+	s.Equal(1, pruned)
+	s.Equal([]PruneSkip{{Alias: "ns-b", Namespace: "finance"}}, skipped)
+	s.True(s.allowlistRow("ns-a").DeletedAt.Valid)
+	s.False(s.allowlistRow("ns-b").DeletedAt.Valid)
+	s.False(s.allowlistRow("ns-other").DeletedAt.Valid)
+}
+
+func (s *ImporterTestSuite) TestPruneMissingNilAllowlistUnchanged() {
+	_, err := s.allowlistApply("ns-a", "default", "git-a", "c1", ApplyOptions{})
+	s.Require().NoError(err)
+	_, err = s.allowlistApply("ns-b", "finance", "git-a", "c1", ApplyOptions{})
+	s.Require().NoError(err)
+
+	pruned, err := s.importer.PruneMissing(context.Background(), nil, &PruneOptions{SourceID: "git-a"})
+	s.Require().NoError(err)
+	s.Equal(2, pruned)
+	testutil.AssertCount(s.T(), s.db, &models.Job{}, 0)
+
+	var skipped []PruneSkip
+	_, err = s.importer.PruneMissing(context.Background(), nil, &PruneOptions{SourceID: "git-a", Skipped: &skipped})
+	s.Require().NoError(err)
+	s.Empty(skipped)
+}
+
+func (s *ImporterTestSuite) TestStoredNamespacesIncludesRetiredRows() {
+	_, err := s.allowlistApply("ns-a", "finance", "git-a", "c1", ApplyOptions{})
+	s.Require().NoError(err)
+	_, err = s.allowlistApply("ns-b", "marketing", "git-b", "c1", ApplyOptions{})
+	s.Require().NoError(err)
+	_, err = s.importer.PruneMissing(context.Background(), nil, &PruneOptions{SourceID: "git-b"})
+	s.Require().NoError(err)
+
+	stored, err := s.importer.StoredNamespaces(context.Background(), []string{"ns-a", "ns-b", "ns-c"})
+	s.Require().NoError(err)
+	s.Equal(map[string]string{"ns-a": "finance", "ns-b": "marketing"}, stored)
+
+	stored, err = s.importer.StoredNamespaces(context.Background(), nil)
+	s.Require().NoError(err)
+	s.NotNil(stored)
+	s.Empty(stored)
 }

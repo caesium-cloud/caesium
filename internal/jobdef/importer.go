@@ -11,6 +11,7 @@ import (
 	"math/rand/v2"
 	"net/url"
 	"reflect"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -31,6 +32,7 @@ import (
 	"github.com/google/uuid"
 	"gorm.io/datatypes"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 var (
@@ -39,6 +41,8 @@ var (
 	ErrJobRunning         = errors.New("job has a running run")
 	ErrContractBreak      = contractenforce.ErrContractBreakBlocked
 	ErrContractAck        = contractenforce.ErrInvalidContractAck
+	// ErrNamespaceNotAllowed is wrapped by *NamespaceAllowlistError.
+	ErrNamespaceNotAllowed = errors.New("job namespace is outside the source namespace allowlist")
 
 	importerBusyRetryBackoffs = []time.Duration{
 		10 * time.Millisecond,
@@ -76,9 +80,64 @@ func notifyTriggerMutationBestEffort(ctx context.Context, action string) {
 	}
 }
 
+// Reasons a NamespaceAllowlistError reports.
+const (
+	NamespaceReasonRequested = "requested_namespace_not_allowed"
+	NamespaceReasonStored    = "stored_namespace_not_allowed"
+)
+
+// NamespaceAllowlistError reports which side of an apply left the allowlist:
+// the namespace the definition requests, or the one its stored row has.
+type NamespaceAllowlistError struct {
+	Alias              string
+	RequestedNamespace string
+	StoredNamespace    string // "" when the alias has no row
+	Allowed            []string
+	Reason             string // NamespaceReasonRequested or NamespaceReasonStored
+}
+
+func (e *NamespaceAllowlistError) Error() string {
+	return fmt.Sprintf("%s: alias %s (%s; requested %q, stored %q, allowed %q)",
+		ErrNamespaceNotAllowed, e.Alias, e.Reason, e.RequestedNamespace, e.StoredNamespace, e.Allowed)
+}
+
+func (e *NamespaceAllowlistError) Unwrap() error { return ErrNamespaceNotAllowed }
+
+// namespaceAllowed reports whether ns is listed; a nil allowlist allows all.
+func namespaceAllowed(allowlist []string, ns string) bool {
+	return allowlist == nil || slices.Contains(allowlist, models.NamespaceOrDefault(ns))
+}
+
 // Importer coordinates persistence of job definitions.
 type Importer struct {
 	db *gorm.DB
+}
+
+// DB returns the connection the importer writes to; git sync records its
+// audit row in the same catalog.
+func (i *Importer) DB() *gorm.DB { return i.db }
+
+// StoredNamespaces maps each alias in aliases that has a jobs row, soft-deleted
+// rows included (the same view as findJobByAliasTx), to that row's namespace.
+// It reads outside any transaction so callers can keep definitions that the
+// apply guard will refuse out of ValidateBatch; the guard stays the authority.
+func (i *Importer) StoredNamespaces(ctx context.Context, aliases []string) (map[string]string, error) {
+	stored := make(map[string]string, len(aliases))
+	if len(aliases) == 0 {
+		return stored, nil
+	}
+	var rows []struct {
+		Alias     string
+		Namespace string
+	}
+	if err := i.db.WithContext(ctx).Unscoped().Model(&models.Job{}).Select("alias", "namespace").
+		Where("alias IN ?", aliases).Scan(&rows).Error; err != nil {
+		return nil, err
+	}
+	for _, row := range rows {
+		stored[row.Alias] = models.NamespaceOrDefault(row.Namespace)
+	}
+	return stored, nil
 }
 
 // NewImporter creates a new importer. The provided db connection must be non-nil.
@@ -100,11 +159,28 @@ type ApplyOptions struct {
 	Force            bool
 	ContractAck      *contractenforce.AllowBreaking
 	ContractWarnings *[]contractenforce.ContractWarning
+	// NamespaceAllowlist confines the apply: both the requested namespace and
+	// the namespace of an existing row (retired rows included) must be listed.
+	// nil means unrestricted. Force does not bypass it.
+	NamespaceAllowlist []string
+}
+
+// PruneSkip names a job PruneMissing left in place because its namespace is
+// outside PruneOptions.NamespaceAllowlist.
+type PruneSkip struct {
+	Alias     string `json:"alias"`
+	Namespace string `json:"namespace"`
 }
 
 // PruneOptions scope the set of jobs that should be retired when pruning.
 type PruneOptions struct {
 	SourceID string
+	// NamespaceAllowlist, when non-nil, limits pruning to jobs whose namespace
+	// is listed; the others are left untouched.
+	NamespaceAllowlist []string
+	// Skipped, when non-nil, receives the jobs left untouched because of
+	// NamespaceAllowlist, sorted by alias.
+	Skipped *[]PruneSkip
 }
 
 // Provenance captures metadata describing the origin of a job definition.
@@ -127,53 +203,9 @@ func (i *Importer) ApplyWithOptions(ctx context.Context, def *schema.Definition,
 	err := withImporterBusyRetry(ctx, func() error {
 		var attemptResult *models.Job
 		err := i.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-			existing, err := i.findJobByAliasTx(tx, def.Metadata.Alias)
-			if err != nil {
-				return err
-			}
-			if existing != nil {
-				if err := i.guardJobMutationTx(tx, existing, opts); err != nil {
-					return err
-				}
-			}
-
-			jobModel, triggerModel, err := i.upsertJobAndTriggerTx(tx, existing, def, opts)
-			if err != nil {
-				return err
-			}
-			if triggerModel != nil {
-				jobModel.TriggerID = triggerModel.ID
-			}
-
-			taskByName, _, retiredAtomIDs, err := i.reconcileTasksTx(tx, jobModel, def, opts)
-			if err != nil {
-				return err
-			}
-			successors, err := schema.DeriveStepSuccessors(def.Steps)
-			if err != nil {
-				return err
-			}
-			if err := i.reconcileEdgesTx(tx, jobModel, def.Steps, successors, taskByName, opts); err != nil {
-				return err
-			}
-			if err := i.writeSnapshotTx(tx, jobModel, def.Steps, successors, taskByName, opts); err != nil {
-				return err
-			}
-			if err := i.reconcileCallbacksTx(tx, jobModel.ID, def.Callbacks); err != nil {
-				return err
-			}
-			if err := i.reconcileDatasetDeclarationsTx(tx, jobModel, def); err != nil {
-				return err
-			}
-			if err := i.enforceContractsWithOptionsTx(ctx, tx, def, opts); err != nil {
-				return err
-			}
-			if err := i.softDeleteAtomsTx(tx, retiredAtomIDs); err != nil {
-				return err
-			}
-
+			jobModel, err := i.applyTx(ctx, tx, def, opts)
 			attemptResult = jobModel
-			return nil
+			return err
 		})
 		if err != nil {
 			return err
@@ -187,6 +219,153 @@ func (i *Importer) ApplyWithOptions(ctx context.Context, def *schema.Definition,
 	notifyTriggerMutationBestEffort(ctx, "apply")
 
 	return result, nil
+}
+
+// applyTx reconciles one validated definition inside tx. The guard runs before
+// any write, so a refused definition writes nothing.
+func (i *Importer) applyTx(ctx context.Context, tx *gorm.DB, def *schema.Definition, opts *ApplyOptions) (*models.Job, error) {
+	existing, err := i.findJobByAliasTx(tx, def.Metadata.Alias)
+	if err != nil {
+		return nil, err
+	}
+	if err := i.guardJobMutationTx(tx, existing, def, opts); err != nil {
+		return nil, err
+	}
+
+	jobModel, triggerModel, err := i.upsertJobAndTriggerTx(tx, existing, def, opts)
+	if err != nil {
+		return nil, err
+	}
+	if triggerModel != nil {
+		jobModel.TriggerID = triggerModel.ID
+	}
+
+	taskByName, _, retiredAtomIDs, err := i.reconcileTasksTx(tx, jobModel, def, opts)
+	if err != nil {
+		return nil, err
+	}
+	successors, err := schema.DeriveStepSuccessors(def.Steps)
+	if err != nil {
+		return nil, err
+	}
+	if err := i.reconcileEdgesTx(tx, jobModel, def.Steps, successors, taskByName, opts); err != nil {
+		return nil, err
+	}
+	if err := i.writeSnapshotTx(tx, jobModel, def.Steps, successors, taskByName, opts); err != nil {
+		return nil, err
+	}
+	if err := i.reconcileCallbacksTx(tx, jobModel.ID, def.Callbacks); err != nil {
+		return nil, err
+	}
+	if err := i.reconcileDatasetDeclarationsTx(tx, jobModel, def); err != nil {
+		return nil, err
+	}
+	if err := i.enforceContractsWithOptionsTx(ctx, tx, def, opts); err != nil {
+		return nil, err
+	}
+	if err := i.softDeleteAtomsTx(tx, retiredAtomIDs); err != nil {
+		return nil, err
+	}
+	return jobModel, nil
+}
+
+// BatchPlan is one definition of an ApplyBatchWithOptions call.
+type BatchPlan struct {
+	Def  *schema.Definition
+	Opts *ApplyOptions
+}
+
+// BatchRefusal is a plan whose namespace allowlist refused it.
+type BatchRefusal struct {
+	Index int
+	Err   *NamespaceAllowlistError
+}
+
+// BatchResult reports an ApplyBatchWithOptions call. On error Applied is 0
+// and Refused holds the refusals of the attempt that failed.
+type BatchResult struct {
+	Applied int
+	Refused []BatchRefusal
+}
+
+// ApplyBatchWithOptions applies every plan in one transaction: all of them or
+// none. A plan refused by its namespace allowlist writes nothing and is
+// reported in Refused; any other error rolls the whole batch back. Before
+// commit the trigger-chain and dataset graphs of the stored jobs are validated
+// as the transaction sees them, so a refusal can never leave the effective
+// graph invalid; a failure there wraps ErrBatchInvalid and rolls back too.
+func (i *Importer) ApplyBatchWithOptions(ctx context.Context, plans []BatchPlan) (BatchResult, error) {
+	for _, plan := range plans {
+		if err := plan.Def.Validate(); err != nil {
+			return BatchResult{}, err
+		}
+	}
+
+	aliases := make([]string, 0, len(plans))
+	for _, plan := range plans {
+		aliases = append(aliases, plan.Def.Metadata.Alias)
+	}
+
+	var result BatchResult
+	err := withImporterBusyRetry(ctx, func() error {
+		attempt := BatchResult{}
+		err := i.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+			if err := lockBatchJobsTx(tx, aliases); err != nil {
+				return err
+			}
+			for idx, plan := range plans {
+				if _, err := i.applyTx(ctx, tx, plan.Def, plan.Opts); err != nil {
+					nsErr, ok := errors.AsType[*NamespaceAllowlistError](err)
+					if !ok {
+						return err
+					}
+					attempt.Refused = append(attempt.Refused, BatchRefusal{Index: idx, Err: nsErr})
+					continue
+				}
+				attempt.Applied++
+			}
+			if err := ValidateTriggerChains(ctx, tx, nil); err != nil {
+				return batchInvalid(err)
+			}
+			if err := ValidateDatasetGraph(ctx, tx, nil); err != nil {
+				return batchInvalid(err)
+			}
+			return nil
+		})
+		result = attempt
+		return err
+	})
+	if err != nil {
+		result.Applied = 0
+		return result, err
+	}
+	if result.Applied > 0 {
+		notifyTriggerMutationBestEffort(ctx, "apply")
+	}
+	return result, nil
+}
+
+// ErrBatchInvalid marks an ApplyBatchWithOptions batch whose effective stored
+// graph failed validation; nothing from the batch was written.
+var ErrBatchInvalid = errors.New("batch leaves the stored job graph invalid")
+
+// batchInvalidVerdicts are the validator errors that mean the effective graph
+// is invalid. Anything else (a cancelled context, a read or leadership error,
+// contention) is returned as itself, not blamed on the batch.
+var batchInvalidVerdicts = []error{
+	ErrTriggerChainCycle,
+	freshness.ErrDatasetMultipleProducers,
+	freshness.ErrDatasetUnresolvedConsumes,
+	freshness.ErrDatasetGraphCycle,
+}
+
+func batchInvalid(err error) error {
+	for _, verdict := range batchInvalidVerdicts {
+		if errors.Is(err, verdict) {
+			return fmt.Errorf("%w: %w", ErrBatchInvalid, err)
+		}
+	}
+	return err
 }
 
 // ContractBreakResponse returns the stable 409 payload for an apply-time
@@ -234,17 +413,19 @@ func (i *Importer) PruneMissing(ctx context.Context, desiredAliases []string, op
 		desiredSet[alias] = struct{}{}
 	}
 
+	var allowlist []string
+	if opts != nil {
+		allowlist = opts.NamespaceAllowlist
+	}
+
 	var pruned int
+	var skipped []PruneSkip
 	err := withImporterBusyRetry(ctx, func() error {
 		var attemptPruned int
+		attemptSkipped := make([]PruneSkip, 0)
 		err := i.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-			query := tx.Model(&models.Job{})
-			if opts != nil && strings.TrimSpace(opts.SourceID) != "" {
-				query = query.Where("provenance_source_id = ?", strings.TrimSpace(opts.SourceID))
-			}
-
 			var jobs []models.Job
-			if err := query.Find(&jobs).Error; err != nil {
+			if err := pruneScopeTx(tx, opts).Find(&jobs).Error; err != nil {
 				return err
 			}
 
@@ -252,6 +433,10 @@ func (i *Importer) PruneMissing(ctx context.Context, desiredAliases []string, op
 			for idx := range jobs {
 				jobModel := &jobs[idx]
 				if _, ok := desiredSet[jobModel.Alias]; ok {
+					continue
+				}
+				if !namespaceAllowed(allowlist, jobModel.Namespace) {
+					attemptSkipped = append(attemptSkipped, PruneSkip{Alias: jobModel.Alias, Namespace: models.NamespaceOrDefault(jobModel.Namespace)})
 					continue
 				}
 				toRetire = append(toRetire, jobModel)
@@ -272,10 +457,15 @@ func (i *Importer) PruneMissing(ctx context.Context, desiredAliases []string, op
 			return err
 		}
 		pruned = attemptPruned
+		skipped = attemptSkipped
 		return nil
 	})
 	if err != nil {
 		return pruned, err
+	}
+	if opts != nil && opts.Skipped != nil {
+		slices.SortFunc(skipped, func(a, b PruneSkip) int { return strings.Compare(a.Alias, b.Alias) })
+		*opts.Skipped = skipped
 	}
 	if pruned > 0 {
 		notifyTriggerMutationBestEffort(ctx, "prune")
@@ -315,14 +505,66 @@ func jitterImporterBusyRetryBackoff(base time.Duration) time.Duration {
 }
 
 func isImporterContentionErr(err error) bool {
+	// PostgreSQL aborts one side of a row-lock deadlock (40P01) or a
+	// serialization conflict (40001); re-running the whole transaction is the
+	// documented remedy. pgconn.PgError exposes the code as SQLState.
+	if pgErr, ok := errors.AsType[interface {
+		error
+		SQLState() string
+	}](err); ok && (pgErr.SQLState() == "40P01" || pgErr.SQLState() == "40001") {
+		return true
+	}
 	// Delegate to the single shared classifier so the matched error strings
 	// live in exactly one place (pkg/dqlite).
 	return dqlite.IsContentionError(err)
 }
 
+// lockJobRows makes a jobs read take row locks (SELECT ... FOR UPDATE) where
+// the backend has them. The apply guard and PruneMissing check a row's
+// namespace and provenance and then write it in the same transaction; on
+// PostgreSQL READ COMMITTED a concurrent apply could otherwise move the row in
+// between. The SQLite and dqlite dialects drop the clause: their transactions
+// are already serializable.
+func lockJobRows(tx *gorm.DB) *gorm.DB {
+	return tx.Clauses(clause.Locking{Strength: "UPDATE"})
+}
+
+// jobAliasLockOrder orders multi-row job locks: PruneMissing and
+// ApplyBatchWithOptions take theirs in this one order, so they cannot deadlock
+// each other on PostgreSQL. COLLATE "C" pins byte order there regardless of the
+// database collation; SQLite's default BINARY collation is already byte order.
+func jobAliasLockOrder(tx *gorm.DB) string {
+	if tx.Name() == "postgres" {
+		return `alias COLLATE "C"`
+	}
+	return "alias"
+}
+
+// lockBatchJobsTx locks every existing row (retired ones included) of a batch's
+// aliases up front, in jobAliasLockOrder, before the batch applies them in its
+// own order.
+func lockBatchJobsTx(tx *gorm.DB, aliases []string) error {
+	if len(aliases) == 0 {
+		return nil
+	}
+	var ids []uuid.UUID
+	return lockJobRows(tx).Unscoped().Model(&models.Job{}).Where("alias IN ?", aliases).
+		Order(jobAliasLockOrder(tx)).Pluck("id", &ids).Error
+}
+
+// pruneScopeTx selects the active jobs PruneMissing may retire, locked in
+// jobAliasLockOrder.
+func pruneScopeTx(tx *gorm.DB, opts *PruneOptions) *gorm.DB {
+	query := lockJobRows(tx).Model(&models.Job{}).Order(jobAliasLockOrder(tx))
+	if opts != nil && strings.TrimSpace(opts.SourceID) != "" {
+		query = query.Where("provenance_source_id = ?", strings.TrimSpace(opts.SourceID))
+	}
+	return query
+}
+
 func (i *Importer) findJobByAliasTx(tx *gorm.DB, alias string) (*models.Job, error) {
 	var jobModel models.Job
-	err := tx.Unscoped().Where("alias = ?", alias).First(&jobModel).Error
+	err := lockJobRows(tx).Unscoped().Where("alias = ?", alias).First(&jobModel).Error
 	switch {
 	case errors.Is(err, gorm.ErrRecordNotFound):
 		return nil, nil
@@ -333,7 +575,26 @@ func (i *Importer) findJobByAliasTx(tx *gorm.DB, alias string) (*models.Job, err
 	}
 }
 
-func (i *Importer) guardJobMutationTx(tx *gorm.DB, jobModel *models.Job, opts *ApplyOptions) error {
+func (i *Importer) guardJobMutationTx(tx *gorm.DB, jobModel *models.Job, def *schema.Definition, opts *ApplyOptions) error {
+	// The allowlist runs first: Force must not bypass it, and a foreign-owned
+	// row in a foreign namespace is a namespace refusal, not a provenance one.
+	if opts != nil && opts.NamespaceAllowlist != nil {
+		reason := ""
+		stored := ""
+		if jobModel != nil {
+			stored = models.NamespaceOrDefault(jobModel.Namespace)
+		}
+		switch {
+		case !namespaceAllowed(opts.NamespaceAllowlist, def.Metadata.Namespace):
+			reason = NamespaceReasonRequested
+		case jobModel != nil && !namespaceAllowed(opts.NamespaceAllowlist, stored):
+			reason = NamespaceReasonStored
+		}
+		if reason != "" {
+			return &NamespaceAllowlistError{Alias: def.Metadata.Alias, RequestedNamespace: models.NamespaceOrDefault(def.Metadata.Namespace),
+				StoredNamespace: stored, Allowed: slices.Clone(opts.NamespaceAllowlist), Reason: reason}
+		}
+	}
 	if jobModel == nil {
 		return nil
 	}

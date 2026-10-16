@@ -534,7 +534,7 @@ middleware relies on.
       `api/rest/controller/jobdef/diff.go`, `internal/jobdef/diff/`,
       `test/jobdef_runtime_test.go`, new `test/jobdef_namespace_test.go`.
       Depends on: B1 + A3 + A4.
-- [ ] B3. Git-sync per-source namespace allowlist: `GitSourceConfig.Namespaces
+- [x] B3. Git-sync per-source namespace allowlist: `GitSourceConfig.Namespaces
       []string` in the JSON source entry; a source with the field applies only
       manifests whose namespace is listed, reports and skips violations per manifest
       (their aliases stay **protected from pruning** in `desiredAliases`, so a
@@ -559,6 +559,7 @@ middleware relies on.
       `internal/jobdef/importer_test.go`, `internal/jobdef/runtime/config.go`,
       new `test/git_sync_test.go`.
       Depends on: B1.
+      (`file://` against `integration-up` is infeasible — no repo mount, go-git's file transport needs native `git-upload-pack`, a failed first sync stops the shared server; the live scenario is `TestJobdefGitSyncNamespaceAllowlistSkipsForeignManifests` on the coverage-ratchets `git-sync` lane in `test/jobdef_git_sync_test.go`. Only allowlisted sources are audited.)
 - [ ] B4. Collection filtering in job-derived handlers: job list (replacing the
       scoped-alias branch with `authz.NamespaceFilter` layered on it), triggers list,
       incidents list, stats and stats summary, the events stream (with `run_id`: the

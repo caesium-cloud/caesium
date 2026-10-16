@@ -1,8 +1,12 @@
 package env
 
 import (
+	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"maps"
+	"slices"
 	"strings"
 	"time"
 )
@@ -24,8 +28,38 @@ func (g *GitSources) Decode(value string) error {
 	if err := json.Unmarshal([]byte(value), &sources); err != nil {
 		return fmt.Errorf("decode git sources: %w", err)
 	}
+	// encoding/json matches keys case-insensitively (last one wins) and turns
+	// null into a nil slice, so these spellings would silently yield an
+	// unrestricted source. Every other key stays lenient.
+	var entries []map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(value), &entries); err != nil {
+		return fmt.Errorf("decode git sources: %w", err)
+	}
+	for idx, entry := range entries {
+		if err := checkNamespacesKeys(entry); err != nil {
+			return fmt.Errorf("decode git sources: entry %d: %w", idx, err)
+		}
+	}
 
 	*g = sources
+	return nil
+}
+
+func checkNamespacesKeys(entry map[string]json.RawMessage) error {
+	found := ""
+	for _, key := range slices.Sorted(maps.Keys(entry)) {
+		switch {
+		case strings.EqualFold(key, "namespace"):
+			return fmt.Errorf("unknown key %q (did you mean \"namespaces\"?)", key)
+		case !strings.EqualFold(key, "namespaces"):
+			continue
+		case found != "":
+			return fmt.Errorf("duplicate \"namespaces\" keys %q and %q", found, key)
+		case bytes.Equal(bytes.TrimSpace(entry[key]), []byte("null")):
+			return errors.New(`"namespaces" must be a non-empty list; omit the field for an unrestricted source`)
+		}
+		found = key
+	}
 	return nil
 }
 
@@ -41,6 +75,10 @@ type GitSourceConfig struct {
 	Once     *bool         `json:"once,omitempty"`
 	Auth     *GitBasicAuth `json:"auth,omitempty"`
 	SSH      *GitSSHAuth   `json:"ssh,omitempty"`
+	// Namespaces confines the source to these tenancy namespaces. Absent (nil)
+	// means unrestricted; BuildGitWatches rejects an empty list, so never
+	// collapse one to nil.
+	Namespaces []string `json:"namespaces,omitempty"`
 }
 
 // GitBasicAuth captures HTTPS credential configuration for a Git source.

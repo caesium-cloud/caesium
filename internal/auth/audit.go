@@ -40,6 +40,7 @@ const (
 	ActionRunQueueCancel     = "run_queue.cancel"
 	ActionBackfill           = "run.backfill"
 	ActionJobdefApply        = "jobdef.apply"
+	ActionJobdefGitSync      = "jobdef.git_sync"
 	ActionCachePrune         = "cache.prune"
 	ActionCacheDelete        = "cache.delete"
 	ActionLogLevel           = "log.set_level"
@@ -56,6 +57,10 @@ const (
 	ActionNotificationPolicyUpdate  = "notification_policy.update"
 	ActionNotificationPolicyDelete  = "notification_policy.delete"
 )
+
+// ActorGitSync is the audit actor of the git sync watcher; it records each
+// sync of a namespace-restricted source as ActionJobdefGitSync.
+const ActorGitSync = "system:git-sync"
 
 // AuditLogger writes structured audit log entries to the database.
 type AuditLogger struct {
