@@ -385,21 +385,34 @@ func TestNamespacedRunRoutesRequireBothNamespaces(t *testing.T) {
 		post("/v1/jobs/:id/runs/:run_id/replay", pv("id", f.mktJob.String(), "run_id", f.mktRun.String()), "")).status)
 }
 
+// TestNamespacedBackfillRoutes: backfill create, read and cancel are pending
+// B4 for confined principals, even on their own namespace's job — a
+// backfill's total_runs is deduplicated against the job's runs by job id
+// alone, so under a moved job it counts the old namespace's history.
+// Unrestricted principals are unaffected. The job+backfill resolver B4 will
+// switch on is exercised in TestBackfillResolver.
 func TestNamespacedBackfillRoutes(t *testing.T) {
 	f := newNSFixture(t)
 	mktOperator := f.key(t, models.RoleOperator, `["marketing"]`)
-	read := func(job, backfill uuid.UUID) int {
-		return f.do(t, mktOperator, get("/v1/jobs/:id/backfills/:backfill_id", pv("id", job.String(), "backfill_id", backfill.String()))).status
+	clusterOperator := f.key(t, models.RoleOperator, "")
+	backfillParams := func(job, backfill uuid.UUID) echo.PathValues {
+		return pv("id", job.String(), "backfill_id", backfill.String())
 	}
-	cancel := func(job, backfill uuid.UUID) int {
-		return f.do(t, mktOperator, nsCall{method: http.MethodPut, pattern: "/v1/jobs/:id/backfills/:backfill_id/cancel",
-			params: pv("id", job.String(), "backfill_id", backfill.String())}).status
+	for _, call := range []nsCall{
+		post("/v1/jobs/:id/backfill", pv("id", f.mktJob.String()), `{}`),
+		get("/v1/jobs/:id/backfills/:backfill_id", backfillParams(f.mktJob, f.mktBackfill)),
+		{method: http.MethodPut, pattern: "/v1/jobs/:id/backfills/:backfill_id/cancel", params: backfillParams(f.mktJob, f.mktBackfill)},
+	} {
+		require.Equal(t, http.StatusForbidden, f.do(t, mktOperator, call).status, call.pattern)
+		denial := f.lastDenial(t)
+		requireAuditMetadata(t, denial, map[string]any{"reason": "insufficient_role", "pending": "B4"})
+		require.Equal(t, "marketing", denial.Namespace, "%s: a pending denial is still audited against the target's namespace", call.pattern)
+		require.Equal(t, http.StatusOK, f.do(t, clusterOperator, call).status, call.pattern)
 	}
-	require.Equal(t, http.StatusOK, read(f.mktJob, f.mktBackfill))
-	require.Equal(t, http.StatusOK, cancel(f.mktJob, f.mktBackfill))
-	require.Equal(t, http.StatusForbidden, read(f.finJob, f.finBackfill))
-	require.Equal(t, http.StatusForbidden, cancel(f.finJob, f.finBackfill))
-	require.Equal(t, http.StatusNotFound, read(f.mktJob, f.finBackfill), "a backfill of another job is 404")
+	// A backfill of another job stays a pending 403 (resolution only feeds
+	// the audit row, best-effort, and cannot turn the denial into a 404).
+	require.Equal(t, http.StatusForbidden, f.do(t, mktOperator, get("/v1/jobs/:id/backfills/:backfill_id", backfillParams(f.mktJob, f.finBackfill))).status)
+	require.Empty(t, f.lastDenial(t).Namespace)
 }
 
 func TestNamespacedTriggerRoutes(t *testing.T) {
@@ -463,9 +476,11 @@ func TestNamespacedSharedObjects(t *testing.T) {
 	mktViewer := f.key(t, models.RoleViewer, `["marketing"]`)
 	clusterOperator := f.key(t, models.RoleOperator, "")
 
-	// Reads and deletes by id are live; creates and edits of every shared
-	// object are pending D4 (notification dispatch and agent-profile
-	// resolution are not namespace-aware yet). The create-body resolver is
+	// Reads by id and notification deletes are live; creates and edits of
+	// every shared object, and agent-profile deletes, are pending D4
+	// (notification dispatch and agent-profile resolution by name are not
+	// namespace-aware yet, so a confined delete could remove the profile
+	// another namespace's incidents resolve). The create-body resolver is
 	// exercised in TestCreateBodyNamespaceResolver.
 	cases := []struct {
 		name   string
@@ -482,7 +497,8 @@ func TestNamespacedSharedObjects(t *testing.T) {
 		{"read a * profile", mktViewer, get("/v1/agentprofiles/:id", pv("id", f.sharedProfile.String())), http.StatusOK},
 		{"missing object", mktViewer, get("/v1/agentprofiles/:id", pv("id", uuid.NewString())), http.StatusNotFound},
 		{"delete a marketing channel", mktOperator, nsCall{method: http.MethodDelete, pattern: "/v1/notifications/channels/:id", params: pv("id", f.mktChannel.String())}, http.StatusOK},
-		{"delete a marketing profile", mktOperator, nsCall{method: http.MethodDelete, pattern: "/v1/agentprofiles/:id", params: pv("id", f.mktProfile.String())}, http.StatusOK},
+		{"delete a marketing profile is pending D4", mktOperator, nsCall{method: http.MethodDelete, pattern: "/v1/agentprofiles/:id", params: pv("id", f.mktProfile.String())}, http.StatusForbidden},
+		{"cluster operator deletes a marketing profile", clusterOperator, nsCall{method: http.MethodDelete, pattern: "/v1/agentprofiles/:id", params: pv("id", f.mktProfile.String())}, http.StatusOK},
 		{"delete a * policy", mktOperator, nsCall{method: http.MethodDelete, pattern: "/v1/notifications/policies/:id", params: pv("id", f.sharedPolicy.String())}, http.StatusForbidden},
 		{"delete a finance profile", mktOperator, nsCall{method: http.MethodDelete, pattern: "/v1/agentprofiles/:id", params: pv("id", f.finProfile.String())}, http.StatusForbidden},
 		{"patch a marketing profile is pending D4", mktOperator, nsCall{method: http.MethodPatch, pattern: "/v1/agentprofiles/:id", params: pv("id", f.mktProfile.String()), body: `{}`}, http.StatusForbidden},
@@ -502,6 +518,11 @@ func TestNamespacedSharedObjects(t *testing.T) {
 			require.Equal(t, tc.call.body, res.body, "%s: the handler must still read the whole body", tc.name)
 		}
 	}
+	// A confined profile delete names its owning item and is still audited
+	// against the profile's namespace.
+	f.do(t, mktOperator, nsCall{method: http.MethodDelete, pattern: "/v1/agentprofiles/:id", params: pv("id", f.mktProfile.String())})
+	requireAuditMetadata(t, f.lastDenial(t), map[string]any{"reason": "insufficient_role", "pending": "D4"})
+	require.Equal(t, "marketing", f.lastDenial(t).Namespace)
 	// A * object denial is audited against *.
 	f.do(t, mktOperator, nsCall{method: http.MethodDelete, pattern: "/v1/notifications/policies/:id", params: pv("id", f.sharedPolicy.String())})
 	require.Equal(t, "*", f.lastDenial(t).Namespace)

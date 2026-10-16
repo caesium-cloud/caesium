@@ -76,7 +76,7 @@ var namespaceResolvers = map[string]namespaceResolver{
 	"PUT /v1/jobs/:id/pause":            resolveJobByID,
 	"PUT /v1/jobs/:id/unpause":          resolveJobByID,
 	"POST /v1/jobs/:id/run":             resolveJobByID,
-	"POST /v1/jobs/:id/backfill":        resolveJobByID,
+	"POST /v1/jobs/:id/backfill":        resolveJobByID, // pending B4
 	"DELETE /v1/jobs/:id/queue/:id":     resolveJobByID, // queue entries run in the job's namespace
 	"DELETE /v1/jobs/:id/cache":         resolveJobByID,
 	"DELETE /v1/jobs/:id/cache/:id":     resolveJobByID,
@@ -102,8 +102,8 @@ var namespaceResolvers = map[string]namespaceResolver{
 	"POST /v1/jobs/:id/runs/:id/replay": resolveJobRunReplay,
 
 	// One backfill: the job's namespace AND the backfill's.
-	"GET /v1/jobs/:id/backfills/:id":        resolveJobBackfill,
-	"PUT /v1/jobs/:id/backfills/:id/cancel": resolveJobBackfill,
+	"GET /v1/jobs/:id/backfills/:id":        resolveJobBackfill, // pending B4
+	"PUT /v1/jobs/:id/backfills/:id/cancel": resolveJobBackfill, // pending B4
 
 	// Triggers: every job the trigger serves.
 	"GET /v1/triggers/:id":        resolveTrigger,
@@ -131,7 +131,7 @@ var namespaceResolvers = map[string]namespaceResolver{
 	"DELETE /v1/notifications/policies/:id": resolveSharedObject(auth.SharedObjectNotificationPolicy),
 	"GET /v1/agentprofiles/:id":             resolveSharedObject(auth.SharedObjectAgentProfile),
 	"PATCH /v1/agentprofiles/:id":           resolveSharedObject(auth.SharedObjectAgentProfile),
-	"DELETE /v1/agentprofiles/:id":          resolveSharedObject(auth.SharedObjectAgentProfile),
+	"DELETE /v1/agentprofiles/:id":          resolveSharedObject(auth.SharedObjectAgentProfile), // pending D4
 	"POST /v1/notifications/channels":       resolveCreateBodyNamespace,
 	"POST /v1/notifications/policies":       resolveCreateBodyNamespace,
 	"POST /v1/agentprofiles":                resolveCreateBodyNamespace,

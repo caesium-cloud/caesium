@@ -179,7 +179,13 @@ var endpointPolicy = map[string]RoutePolicy{
 	// prior run of the task), which can be another namespace's history.
 	"GET /v1/jobs/:id/runs/:id/why": namespacedRoute(viewer).pendingOn("B4"),
 
-	"GET /v1/jobs/:id/backfills/:id": namespacedRoute(viewer),
+	// A backfill's total_runs is computed when it starts by deduplicating
+	// dates against the job's runs by job id alone
+	// (internal/backfill/store.go LatestRunForLogicalDate), so under a moved
+	// job it counts the old namespace's per-date runs and outcomes; reading
+	// or cancelling it returns that row (B4 filters the dedupe by the run's
+	// persisted namespace).
+	"GET /v1/jobs/:id/backfills/:id": namespacedRoute(viewer).pendingOn("B4"),
 
 	// Events and stats aggregate every job.
 	"GET /v1/events":          collectionRoute(viewer).pendingOn("B4"),
@@ -269,7 +275,9 @@ var endpointPolicy = map[string]RoutePolicy{
 	"POST /v1/jobs/:id/runs/:id/retry":                          namespacedRoute(runner),
 	"POST /v1/jobs/:id/runs/:id/tasks/:id/partitions/:id/retry": namespacedRoute(runner),
 	"POST /v1/jobs/:id/runs/:id/callbacks/retry":                namespacedRoute(runner),
-	"POST /v1/jobs/:id/backfill":                                namespacedRoute(runner),
+	// Backfill creation deduplicates dates against the job's runs by job id
+	// alone, so total_runs would report another namespace's history (B4).
+	"POST /v1/jobs/:id/backfill": namespacedRoute(runner).pendingOn("B4"),
 	// Ingest routes an event to every matching job (A6 splits delivery by
 	// namespace and reports skips).
 	"POST /v1/events":            namespacedRoute(runner).pendingOn("A6"),
@@ -288,7 +296,7 @@ var endpointPolicy = map[string]RoutePolicy{
 	"DELETE /v1/jobs/:id/queue/:id":         namespacedRoute(operator),
 	"DELETE /v1/jobs/:id/cache":             namespacedRoute(operator),
 	"DELETE /v1/jobs/:id/cache/:id":         namespacedRoute(operator),
-	"PUT /v1/jobs/:id/backfills/:id/cancel": namespacedRoute(operator),
+	"PUT /v1/jobs/:id/backfills/:id/cancel": namespacedRoute(operator).pendingOn("B4"), // returns the backfill row (see GET)
 	// A new trigger serves no job yet, so it has no namespace to resolve.
 	"POST /v1/triggers": clusterRoute(operator),
 	// Editing a trigger's configuration can subscribe it to another
@@ -310,11 +318,12 @@ var endpointPolicy = map[string]RoutePolicy{
 	// A job references its agent profile by name, and runtime resolution
 	// (internal/incident playbook resolution) looks the name up globally, so a
 	// confined create or rename could stand in for another namespace's
-	// profile (D4 makes runtime resolution namespace-aware). Reads and
-	// deletes by id stay live.
+	// profile, and a confined delete could remove the profile other
+	// namespaces' incidents resolve, disabling their remediation (D4 makes
+	// runtime resolution namespace-aware). Reads by id stay live.
 	"POST /v1/agentprofiles":       namespacedRoute(operator).pendingOn("D4"),
 	"PATCH /v1/agentprofiles/:id":  namespacedRoute(operator).pendingOn("D4"),
-	"DELETE /v1/agentprofiles/:id": namespacedRoute(operator),
+	"DELETE /v1/agentprofiles/:id": namespacedRoute(operator).pendingOn("D4"),
 	// Tier-3 approval decisions (agent-in-the-loop D1). Operator-gated; agent
 	// session tokens are additionally rejected outright in authorizeScope.
 	// Approving executes the proposed action against the incident's job (a

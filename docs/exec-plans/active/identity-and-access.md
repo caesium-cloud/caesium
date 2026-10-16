@@ -378,8 +378,10 @@ translated into cluster-wide bindings and behaviour is unchanged.
       (W3-α: routes whose handlers can still return another namespace's rows carry
       `pendingOn("<item>")` and are cluster-only for confined principals until B2, B4,
       B5, B6, D4, A5, A6 or A8 clears them; resolvers live in
-      `api/middleware/auth_namespace_resolvers.go`. Also fixed concurrency admission
-      persisting runs in `default`.)
+      `api/middleware/auth_namespace_resolvers.go`. Backfill create, read and cancel
+      wait on B4, whose history filter must also cover the backfill date dedupe
+      (`LatestRunForLogicalDate` reads runs by job id alone); agent-profile delete
+      waits on D4. Also fixed concurrency admission persisting runs in `default`.)
 - [ ] A4. Wire the policy loader: `CAESIUM_AUTH_POLICY_FILE`,
       `CAESIUM_AUTH_POLICY_RELOAD_INTERVAL` (default `10s`); parse at startup (fatal on
       error; fatal when both the file and `CAESIUM_AUTH_ROLE_MAPPING` are set); an

@@ -275,9 +275,10 @@ func (s *IntegrationTestSuite) TestAuthNamespacedSharedObjectsAndTriggers() {
 	s.requireNSStatus(http.StatusNoContent, http.MethodDelete, "/v1/notifications/policies/"+mktPolicy, mktOperator, "")
 	s.requireNSStatus(http.StatusNoContent, http.MethodDelete, "/v1/notifications/channels/"+mktChannel, mktOperator, "")
 
-	// Agent profiles: reads and deletes by the object's namespace; creates
-	// and edits are pending D4 (jobs reference a profile by name, resolved
-	// globally at runtime).
+	// Agent profiles: reads by the object's namespace; creates, edits and
+	// deletes are pending D4 (jobs reference a profile by name, resolved
+	// globally at runtime, so a confined delete could disable another
+	// namespace's remediation).
 	profileBody := func(namespace, suffix string) string {
 		return fmt.Sprintf(`{"namespace":%q,"name":%q,"image":"busybox:1.36.1"}`, namespace, name("prof-"+suffix))
 	}
@@ -295,7 +296,10 @@ func (s *IntegrationTestSuite) TestAuthNamespacedSharedObjectsAndTriggers() {
 	s.requireNSStatus(http.StatusForbidden, http.MethodPatch, "/v1/agentprofiles/"+sharedProfile, mktOperator, `{"image":"busybox:1.36.1"}`)
 	s.requireNSStatus(http.StatusForbidden, http.MethodDelete, "/v1/agentprofiles/"+finProfile, mktOperator, "")
 	s.requireNSStatus(http.StatusForbidden, http.MethodDelete, "/v1/agentprofiles/"+sharedProfile, mktOperator, "")
-	s.requireNSStatus(http.StatusNoContent, http.MethodDelete, "/v1/agentprofiles/"+mktProfile, mktOperator, "")
+	s.requireNSStatus(http.StatusForbidden, http.MethodDelete, "/v1/agentprofiles/"+mktProfile, mktOperator, "")
+	s.requireNSStatus(http.StatusOK, http.MethodGet, "/v1/agentprofiles/"+mktProfile, admin, "")
+	s.requireNSStatus(http.StatusNoContent, http.MethodDelete, "/v1/agentprofiles/"+mktProfile, admin, "")
+	s.requireNSStatus(http.StatusNotFound, http.MethodGet, "/v1/agentprofiles/"+mktProfile, admin, "")
 
 	// Triggers: the marketing job's own trigger is marketing's; a trigger that
 	// also drives a finance job needs the role in finance too. A trigger may
@@ -359,8 +363,8 @@ func (s *IntegrationTestSuite) TestAuthNamespacedSharedObjectsAndTriggers() {
 
 // TestAuthNamespacedDatasetsBackfillsIncidents: dataset writes are cluster-only
 // for confined principals until B6 (their producer resolvers are unit-tested);
-// backfills resolve to the job's and the backfill's namespace, and the live
-// incident route to the incident's.
+// backfills are cluster-only for them until B4; and the live incident route
+// resolves to the incident's namespace.
 func (s *IntegrationTestSuite) TestAuthNamespacedDatasetsBackfillsIncidents() {
 	s.requireAuthLane()
 	f := s.newNamespacedRoutesFixture("data")
@@ -441,20 +445,33 @@ func (s *IntegrationTestSuite) TestAuthNamespacedDatasetsBackfillsIncidents() {
 	s.requireNSStatus(http.StatusOK, http.MethodPost, "/v1/datasets/holds/"+sharedHold+"/release", s.authAPIKey, release)
 	s.Equal("released", holdStatus(sharedHold), "the cluster admin releases exactly as before")
 
-	// Backfills (the jobs' cron never fires, so a backfill schedules nothing).
+	// Backfills (the jobs' cron never fires, so a backfill schedules nothing)
+	// are pending B4 for confined principals, even on their own namespace's
+	// job: a backfill's total_runs is deduplicated against the job's runs by
+	// job id alone, so under a moved job it would count the old namespace's
+	// history. The cluster admin creates, reads and cancels exactly as before;
+	// the job+backfill resolver is unit-tested.
 	window := fmt.Sprintf(`{"start":%q,"end":%q}`, now.Add(-2*time.Hour).Format(time.RFC3339), now.Add(-time.Hour).Format(time.RFC3339))
-	mktBackfill := decodeID(s, s.requireNSStatus(http.StatusAccepted, http.MethodPost, "/v1/jobs/"+f.mktJob.ID+"/backfill", mktOperator, window))
-	finBackfill := decodeID(s, s.requireNSStatus(http.StatusAccepted, http.MethodPost, "/v1/jobs/"+f.finJob.ID+"/backfill", s.authAPIKey, window))
-	s.requireNSStatus(http.StatusForbidden, http.MethodPost, "/v1/jobs/"+f.finJob.ID+"/backfill", mktOperator, window)
-	s.requireNSStatus(http.StatusOK, http.MethodGet, "/v1/jobs/"+f.mktJob.ID+"/backfills/"+mktBackfill, mktOperator, "")
+	for _, key := range []string{mktOperator, bothOperator} {
+		s.requireNSStatus(http.StatusForbidden, http.MethodPost, "/v1/jobs/"+f.mktJob.ID+"/backfill", key, window)
+	}
+	mktBackfill := decodeID(s, s.requireNSStatus(http.StatusAccepted, http.MethodPost, "/v1/jobs/"+f.mktJob.ID+"/backfill", s.authAPIKey, window))
+	for _, key := range []string{mktOperator, bothOperator} {
+		s.requireNSStatus(http.StatusForbidden, http.MethodGet, "/v1/jobs/"+f.mktJob.ID+"/backfills/"+mktBackfill, key, "")
+		s.requireNSStatus(http.StatusForbidden, http.MethodPut, "/v1/jobs/"+f.mktJob.ID+"/backfills/"+mktBackfill+"/cancel", key, "")
+	}
+	var created struct {
+		Namespace string `json:"namespace"`
+		JobID     string `json:"job_id"`
+	}
+	s.Require().NoError(json.Unmarshal([]byte(s.requireNSStatus(http.StatusOK, http.MethodGet, "/v1/jobs/"+f.mktJob.ID+"/backfills/"+mktBackfill, s.authAPIKey, "")), &created))
+	s.Equal("marketing", created.Namespace, "the backfill carries its job's namespace")
+	s.Equal(f.mktJob.ID, created.JobID)
 	// The backfill schedules nothing, so it may already be complete: the
-	// handler then answers 409 ("not running"); either way the request was
-	// authorised and reached it.
-	status, body = s.nsRequest(http.MethodPut, "/v1/jobs/"+f.mktJob.ID+"/backfills/"+mktBackfill+"/cancel", mktOperator, "", nil)
+	// handler then answers 409 ("not running"); either way the admin's
+	// request was authorised and reached it.
+	status, body = s.nsRequest(http.MethodPut, "/v1/jobs/"+f.mktJob.ID+"/backfills/"+mktBackfill+"/cancel", s.authAPIKey, "", nil)
 	s.Contains([]int{http.StatusOK, http.StatusConflict}, status, body)
-	s.requireNSStatus(http.StatusForbidden, http.MethodGet, "/v1/jobs/"+f.finJob.ID+"/backfills/"+finBackfill, mktOperator, "")
-	s.requireNSStatus(http.StatusForbidden, http.MethodPut, "/v1/jobs/"+f.finJob.ID+"/backfills/"+finBackfill+"/cancel", mktOperator, "")
-	s.requireNSStatus(http.StatusNotFound, http.MethodGet, "/v1/jobs/"+f.mktJob.ID+"/backfills/"+finBackfill, mktOperator, "")
 
 	// Incidents (seeded closed, so remediation never picks them up).
 	incident := func(job *jobSummary, namespace string) string {

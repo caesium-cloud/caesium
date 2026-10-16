@@ -213,6 +213,14 @@ func TestRoutePolicyClassesPinned(t *testing.T) {
 		"POST /v1/agent/incidents/:id/mcp":             {Role: models.RoleRunner, Class: RouteClassNamespaced, PendingItem: "A8"},
 		"POST /v1/incidents/:id/approvals/:id/approve": {Role: models.RoleOperator, Class: RouteClassNamespaced, PendingItem: "A8"},
 		"POST /v1/incidents/:id/approvals/:id/reject":  {Role: models.RoleOperator, Class: RouteClassNamespaced},
+		// Backfill date dedupe reads the job's runs by job id alone, so a
+		// backfill's total_runs can count a moved job's old-namespace history.
+		"POST /v1/jobs/:id/backfill":            {Role: models.RoleRunner, Class: RouteClassNamespaced, PendingItem: "B4"},
+		"GET /v1/jobs/:id/backfills/:id":        {Role: models.RoleViewer, Class: RouteClassNamespaced, PendingItem: "B4"},
+		"PUT /v1/jobs/:id/backfills/:id/cancel": {Role: models.RoleOperator, Class: RouteClassNamespaced, PendingItem: "B4"},
+		// Agent profiles resolve by name across namespaces at runtime.
+		"DELETE /v1/agentprofiles/:id": {Role: models.RoleOperator, Class: RouteClassNamespaced, PendingItem: "D4"},
+		"GET /v1/agentprofiles/:id":    {Role: models.RoleViewer, Class: RouteClassNamespaced},
 	}
 	policies := RoutePolicies()
 	for key, want := range cases {

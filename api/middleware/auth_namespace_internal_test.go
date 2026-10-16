@@ -407,6 +407,80 @@ func TestDatasetReadResolverUsesAnyMode(t *testing.T) {
 	require.NoError(t, err)
 }
 
+// TestBackfillResolver: one backfill resolves to the job's current namespace
+// AND the backfill's own, and a backfill under another job's path is 404. The
+// backfill routes are pending B4 today; this is the resolver B4 switches on.
+func TestBackfillResolver(t *testing.T) {
+	db := testutil.OpenTestDB(t)
+	t.Cleanup(func() { testutil.CloseDB(db) })
+	svc := auth.NewService(db)
+	now := time.Now().UTC()
+	triggerID := uuid.New()
+	require.NoError(t, db.Create(&models.Trigger{ID: triggerID, Type: models.TriggerTypeCron, CreatedAt: now, UpdatedAt: now}).Error)
+	job := func(alias, namespace string) uuid.UUID {
+		id := uuid.New()
+		require.NoError(t, db.Create(&models.Job{ID: id, Alias: alias, Namespace: namespace, TriggerID: triggerID, CreatedAt: now, UpdatedAt: now}).Error)
+		return id
+	}
+	backfill := func(jobID uuid.UUID, namespace string) uuid.UUID {
+		id := uuid.New()
+		require.NoError(t, db.Create(&models.Backfill{ID: id, JobID: jobID, Namespace: namespace, Status: models.BackfillStatusRunning,
+			Start: now, End: now.Add(time.Hour), MaxConcurrent: 1, Reprocess: models.ReprocessNone, CreatedAt: now, UpdatedAt: now}).Error)
+		return id
+	}
+	mktJob, movedJob := job("bf-mkt", "marketing"), job("bf-moved", "finance")
+	mktBackfill := backfill(mktJob, "marketing")
+	// Started while the job lived in marketing; the job has since moved.
+	movedBackfill := backfill(movedJob, "marketing")
+
+	marketing := &auth.Principal{Grants: policy.Grants{"marketing": models.RoleOperator}}
+	finance := &auth.Principal{Grants: policy.Grants{"finance": models.RoleOperator}}
+	both := &auth.Principal{Grants: policy.Grants{"marketing": models.RoleOperator, "finance": models.RoleOperator}}
+	for _, route := range []struct {
+		method, path, key string
+		role              models.Role
+	}{
+		{http.MethodGet, "/v1/jobs/:id/backfills/:backfill_id", "GET /v1/jobs/:id/backfills/:id", models.RoleViewer},
+		{http.MethodPut, "/v1/jobs/:id/backfills/:backfill_id/cancel", "PUT /v1/jobs/:id/backfills/:id/cancel", models.RoleOperator},
+	} {
+		live := auth.RoutePolicy{Role: route.role, Class: auth.RouteClassNamespaced} // as B4 will leave it
+		authorize := func(p *auth.Principal, jobID, backfillID string) (*authz.Decision, error) {
+			c := routeContext(route.method, route.path, "")
+			pv := echo.PathValues{{Name: "id", Value: jobID}, {Name: "backfill_id", Value: backfillID}}
+			c.InitializeRoute(&echo.RouteInfo{Path: route.path, Method: route.method}, &pv)
+			return authorizeRoute(c, svc, p, route.key, live)
+		}
+
+		decision, err := authorize(marketing, mktJob.String(), mktBackfill.String())
+		require.NoError(t, err, route.key)
+		require.Equal(t, []string{"marketing"}, decision.Namespaces, route.key)
+		_, err = authorize(finance, mktJob.String(), mktBackfill.String())
+		require.IsType(t, &routeDenial{}, err, route.key)
+
+		// Under a moved job the role is needed in both namespaces.
+		_, err = authorize(marketing, movedJob.String(), movedBackfill.String())
+		require.IsType(t, &routeDenial{}, err, "%s: the job now lives in finance", route.key)
+		_, err = authorize(finance, movedJob.String(), movedBackfill.String())
+		require.IsType(t, &routeDenial{}, err, "%s: the backfill was started in marketing", route.key)
+		decision, err = authorize(both, movedJob.String(), movedBackfill.String())
+		require.NoError(t, err, route.key)
+		require.Equal(t, []string{"finance", "marketing"}, decision.Namespaces, route.key)
+
+		// Another job's backfill, an unknown backfill, an unknown job, and
+		// malformed ids.
+		_, err = authorize(both, mktJob.String(), movedBackfill.String())
+		require.Equal(t, http.StatusNotFound, echo.StatusCode(err), "%s: a backfill of another job", route.key)
+		_, err = authorize(both, mktJob.String(), uuid.NewString())
+		require.Equal(t, http.StatusNotFound, echo.StatusCode(err), route.key)
+		_, err = authorize(both, uuid.NewString(), mktBackfill.String())
+		require.Equal(t, http.StatusNotFound, echo.StatusCode(err), route.key)
+		_, err = authorize(both, mktJob.String(), "not-a-backfill")
+		require.Equal(t, http.StatusBadRequest, echo.StatusCode(err), route.key)
+		_, err = authorize(both, "not-a-job", mktBackfill.String())
+		require.Equal(t, http.StatusBadRequest, echo.StatusCode(err), route.key)
+	}
+}
+
 // TestCreateBodyNamespaceResolver: a shared-object create resolves the body
 // namespace exactly as the handler's binder will read it (JSON only, the
 // whole body, NormalizeObjectNamespace), refuses anything it could read
