@@ -248,7 +248,7 @@ cardinality and closed-workflow Query dispatch count through the live surface.
 ## Progress (as of 2026-10-16)
 
 W1 through W4 have merged, including the W4 dashboard in PR #635.
-W5 C1 is implemented; its review fix is being requalified before protected merge.
+W5 C1 review findings are addressed and qualified; protected merge remains pending.
 C2, E, F2–F4 and N remain later work. An open PR or a component-only pass
 is not completion. The SHAs below are the squash merges read from GitHub.
 
@@ -454,7 +454,7 @@ Resume unfinished waves. Do not archive this plan while later items remain.
   has also merged; C1 uses its existing principal, cluster-role and scope policy.
   C2 requires merged C1. Console work and F2–F4/N remain future waves.
 - **W5-α / C1:** [PR #644](https://github.com/caesium-cloud/caesium/pull/644),
-  head `e83addc4f03ab1a747b4ef1484034fd14fe78a8e`, implements startup/client composition,
+  head `8069f73bc489f5f8a0ae4a5c5fc3d371ff940202`, implements startup/client composition,
   authenticated monitoring and scope-safe reverse links, bounded observation
   persistence and guarded configuration activation. Persistent connection
   identities supplement the epoch so a coordinated change cannot repoint a
@@ -467,19 +467,24 @@ Resume unfinished waves. Do not archive this plan while later items remain.
   a literal target and known fingerprint regression exercises lookup-only replay.
 - **Verification:** Containerized lint passed with zero issues. The full
   155-package root race/coverage suite and integration-test image build passed
-  after the fixture corrections. All 41 required tagged checks passed for the
-  unchanged runtime, as did focused races across 12 connector/API/auth/database
-  package groups, 30 orchestration probes, 166 CI helper tests, actionlint and
-  shell validation. Independent backend/auth and fixture review has no remaining
-  concrete finding.
+  on the review fix. All 41 required tagged checks passed. Earlier focused races
+  across 12 connector/API/auth/database package groups passed; fresh 30
+  orchestration probes, 166 CI helper tests, actionlint and
+  shell validation passed. Independent backend/auth and fixture review has no
+  remaining concrete finding.
 - **Real-provider HTTP:** All five selected scenarios passed without skips on
-  `37381879`: correlation, fixture, messages, operations and HTTP reads (50.33 seconds). Public
-  pagination found all six new real execution IDs without duplicates or catalog
-  inserts; unchanged detail reads caused zero snapshot or identity updates.
+  `8069f73b`: correlation, fixture, messages, operations and HTTP reads (68.93
+  seconds). Public pagination found all six new real execution IDs without
+  duplicates or catalog inserts; unchanged detail reads caused zero snapshot or
+  identity updates.
   Live retention evicted all expired snapshots, new terminal evidence persisted
   within the four-row cap, and repeated closed-workflow reads sent zero automatic
   Queries. Dated stale detail recovered after outage. Genuine queued promotion,
   child identity and scope-safe reverse links survived actual server restart.
+  A second connection observed a genuine link to the same admission through
+  HTTP. Guarded disable/removal and actual process restarts preserved both
+  reverse-link IDs, scoped empty responses and genuine missing-run refusals,
+  with zero provider RPCs for the historical lookups.
   The invalid-enabled and gate-off startup proofs passed. All six owned fixture
   containers were verified absent after cleanup.
 - **Shared-catalog cluster:** The real kind/Helm scenario passed without skips
@@ -490,9 +495,9 @@ Resume unfinished waves. Do not archive this plan while later items remain.
   came from the loaded candidate's validated CRI metadata before app deployment,
   including its imported parent index. All owned cluster resources were removed.
   This is a three-process shared-catalog proof on one kind node.
-- **Local baselines:** Clean `2fa55d20` passed the complete default integration
-  suite (312 passing subtests, 831.573 seconds) and normal agent auth suite
-  (35 passing subtests, 36.712 seconds), including configured connector startup.
+- **Local baselines:** Clean `8069f73b` passed the complete default integration
+  suite (868.027 seconds) and normal agent auth suite (36.592 seconds),
+  including configured connector startup.
   Separate selected connector and cluster scenarios above passed without skips.
 - **Instrumented coverage:** The existing G2 cohort now drives real publication
   admission, discovery/detail/history/relationships and reverse links. All 52
@@ -502,10 +507,10 @@ Resume unfinished waves. Do not archive this plan while later items remain.
   complete counter hashes. The arm64 profile covers 145 observation and 68
   correlation-persistence statements.
 - **Hosted qualification:** Exact-head
-  [run 38852382309](https://github.com/caesium-cloud/caesium/actions/runs/38852382309)
-  passed on `e83addc4`, including all nine protected checks, `ci-ok`, both image
+  [run 38903470303](https://github.com/caesium-cloud/caesium/actions/runs/38903470303)
+  passed on `8069f73b`, including all nine protected checks, `ci-ok`, both image
   and unit architectures, both browser suites and selected integration/cluster
-  lanes. The tested PR merge is `ddd92ba5d8c46f810d680a6e8e4e825a6b9879d0`
+  lanes. The tested PR merge is `21b34278d27a05656ccf17afbcaf5d8c3e5cfca4`
   against base `3194fe68`. Full G2 passed at 61.6% integration and 62.2%
   all-surfaces coverage with zero uncovered changed paths. The downloaded amd64
   receipt proves List/Describe/History RPCs, zero Query, succeeded admission and
@@ -516,18 +521,23 @@ Resume unfinished waves. Do not archive this plan while later items remain.
   preserve all 569 previous artifacts and reproduce the old unreadable-directory
   failure. F2's dedicated connector lane remains future.
 - **Review follow-up:** The #644 review identified a reverse lookup returning
-  404 when a stored link belongs to a disabled or removed connection. The fix
-  preserves those historical links alongside enabled connections, retaining
-  process/read budgets and the strictest applicable response limits. New unit
-  and real-provider HTTP retirement regressions are undergoing qualification;
-  the earlier exact-head results above do not qualify this new fix. The #643
-  inventory finding is corrected: C1 now lists all 46 changed files, including
-  startup composition and its tests, read/auth tests and the persistence codec
-  regression; the unchanged `internal/connector/types.go` entry is removed.
+  404 when a stored link belongs to a disabled or removed connection. Commit
+  `8069f73b` preserves those historical links alongside enabled connections,
+  retaining process/read budgets and the strictest applicable response limits.
+  New unit and real-provider HTTP retirement regressions pass; the mixed-link regression
+  fails against the original source with `connector: not found`. The #643
+  inventory finding is corrected in `c5eb230c`: C1 lists all 46 changed files,
+  including startup composition and its tests, read/auth tests and the
+  persistence codec regression; the unchanged `internal/connector/types.go`
+  entry is removed.
+  Both findings have fix-specific replies
+  ([#644](https://github.com/caesium-cloud/caesium/pull/644#discussion_r4294868493),
+  [#643](https://github.com/caesium-cloud/caesium/pull/643#discussion_r4294791592))
+  and are resolved, verified against current heads with complete review-thread
+  pages. Independent source review found no remaining concrete issue.
 - **Publication and acceptance:** Both #644 and this dashboard PR #643 require
   one CODEOWNER approval; normal protected checks and the merge queue apply.
-  C1 remains unchecked pending merged acceptance. Thread-specific replies and
-  resolutions are authorized and will follow published, verified corrections.
+  C1 remains unchecked pending merged acceptance.
 
 ### Stream Status
 
@@ -535,7 +545,7 @@ Resume unfinished waves. Do not archive this plan while later items remain.
 | --- | --- | --- | --- |
 | A | Generic contract, configuration and catalog (2 items) | P0 | Shipped (A1, A2) |
 | B | Temporal inspection and declared messages (2 items) | P0 | Shipped (B1, B2) |
-| C | Authenticated REST and composition (2 items) | P0 | C1 review fix undergoing qualification; C2 not started |
+| C | Authenticated REST and composition (2 items) | P0 | C1 reviews addressed and verified, awaiting merge; C2 not started |
 | D | Verified correlation and action durability (2 items) | P0 | Shipped (D1, D2) |
 | E | Console monitoring, data links and approval (3 items) | P0 | Not started |
 | F | Real fixture, CI, qualification and promotion (4 items) | P0 | F1 shipped; F2–F4 not started |
