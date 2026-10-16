@@ -127,5 +127,106 @@ PY
         self.assertEqual(result.stdout, "csk_bootstrap_stream_probe")
 
 
+class LoadedImageIdentityTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.artifacts = self.root / "artifacts"
+        self.artifacts.mkdir()
+        (self.root / "bin").mkdir()
+        (self.root / "test" / "robustness").mkdir(parents=True)
+        repository = Path(__file__).resolve().parents[1]
+        shutil.copyfile(repository / "test" / "robustness" / "hostlogic.py",
+                        self.root / "test" / "robustness" / "hostlogic.py")
+        source = (repository / "scripts" / "connectors-config-cluster.sh").read_text()
+        begin = source.index('node="$(head -n1 "$artifacts/kind-nodes.txt")"')
+        end = source.index('kc create namespace "$namespace"')
+        self.assertLess(begin, end, "candidate identities must be fixed before app deployment")
+        # Execute the real driver's complete identity block and its real shared
+        # parser. Only containerd/CRI metadata transport is replaced here.
+        self.block = source[begin:end]
+        self.image = "caesiumcloud/caesium:identity-probe-test"
+        (self.artifacts / "kind-nodes.txt").write_text("owned-control-plane\n")
+        (self.artifacts / "server-image-id.txt").write_text("sha256:" + "a" * 64 + "\n")
+        (self.root / "listing").write_text(
+            "REF TYPE DIGEST SIZE\n"
+            "docker.io/" + self.image + " application/vnd.oci.image.manifest.v1+json sha256:" + "b" * 64 + " 1MiB\n"
+            "sha256:" + "c" * 64 + " application/vnd.oci.image.manifest.v1+json sha256:" + "b" * 64 + " 1MiB\n"
+            "import-2026-10-16@sha256:" + "d" * 64 + " application/vnd.oci.image.index.v1+json sha256:" + "d" * 64 + " 1MiB\n"
+            "docker.io/library/foreign:tag application/vnd.oci.image.manifest.v1+json sha256:" + "e" * 64 + " 1MiB\n")
+        docker = self.root / "bin" / "docker"
+        docker.write_text('''#!/usr/bin/env python3
+import json,os,sys
+from pathlib import Path
+root=Path(os.environ["PROBE_ROOT"])
+args=sys.argv[1:]
+with (root/"calls").open("a") as log: log.write(json.dumps(args)+"\\n")
+if args==["exec","owned-control-plane","ctr","-n","k8s.io","images","ls"]:
+    print((root/"listing").read_text())
+elif args==["exec","owned-control-plane","crictl","inspecti",os.environ["server_image"]]:
+    print((root/"cri-payload").read_text())
+else:
+    raise SystemExit("unexpected metadata command")
+''')
+        docker.chmod(0o700)
+
+    def metadata(self):
+        return {"status": {"id": "sha256:" + "c" * 64,
+                           "repoTags": ["docker.io/" + self.image],
+                           "repoDigests": ["docker.io/library/import-2026-10-16@sha256:" + "d" * 64]},
+                "info": {"imageSpec": {"rootfs": {"diff_ids": ["sha256:" + "f" * 64]},
+                                       "config": {"Env": ["PRIVATE=identity-secret-canary"],
+                                                  "Labels": {"credential": "identity-label-canary"}}}}}
+
+    def run_identity_block(self, document):
+        (self.root / "cri-payload").write_text(document if isinstance(document, str) else json.dumps(document))
+        env = dict(os.environ, PATH=str(self.root / "bin") + os.pathsep + os.environ["PATH"],
+                   PROBE_ROOT=str(self.root), artifacts=str(self.artifacts), server_image=self.image)
+        return subprocess.run(["bash", "-c", "set -euo pipefail\n" + self.block],
+                              cwd=self.root, env=env, capture_output=True, text=True, timeout=10)
+
+    def test_loaded_tag_cri_parent_index_is_trusted_only_through_saved_identity(self):
+        result = self.run_identity_block(self.metadata())
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        identities = set((self.artifacts / "candidate-identities.txt").read_text().strip().split(","))
+        self.assertEqual(identities, {"sha256:" + character * 64 for character in "abcd"})
+        projected = json.loads((self.artifacts / "loaded-candidate-cri.json").read_text())
+        self.assertEqual(projected, {"status": self.metadata()["status"]})
+        persisted = "\n".join(path.read_text() for path in self.artifacts.iterdir() if path.is_file())
+        self.assertNotIn("identity-secret-canary", persisted)
+        self.assertNotIn("identity-label-canary", persisted)
+        self.assertNotIn("sha256:" + "f" * 64, persisted)
+        calls = [json.loads(line) for line in (self.root / "calls").read_text().splitlines()]
+        self.assertEqual(calls[-1], ["exec", "owned-control-plane", "crictl", "inspecti", self.image])
+
+    def test_foreign_cri_config_cannot_introduce_its_parent_index(self):
+        document = self.metadata()
+        document["status"]["id"] = "sha256:" + "e" * 64
+        result = self.run_identity_block(document)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("not in expected", result.stderr)
+        self.assertFalse((self.artifacts / "candidate-identities.txt").exists())
+
+    def test_missing_or_invalid_candidate_cri_proof_fails_closed(self):
+        mutations = [lambda doc: doc.update(status=None),
+                     lambda doc: doc["status"].pop("id"),
+                     lambda doc: doc["status"].update(id="not-a-digest"),
+                     lambda doc: doc["status"].update(repoTags=["docker.io/foreign:tag"]),
+                     lambda doc: doc["status"].update(repoTags="docker.io/" + self.image),
+                     lambda doc: doc["status"].update(repoDigests=[]),
+                     lambda doc: doc["status"].update(repoDigests=["not-a-digest"])]
+        documents = ["not JSON"]
+        for mutate in mutations:
+            document = self.metadata()
+            mutate(document)
+            documents.append(document)
+        for document in documents:
+            with self.subTest(document=document):
+                result = self.run_identity_block(document)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertFalse((self.artifacts / "candidate-identities.txt").exists())
+
+
 if __name__ == "__main__":
     unittest.main()

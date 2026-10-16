@@ -132,15 +132,47 @@ for ref in "$server_image" "$fixture_image" "$runner_image" busybox:1.36.1; do
   docker image inspect "$ref" >/dev/null 2>&1 || docker pull "$ref"
   load_image "$ref"
 done
-# The runtime can report the imported manifest or config digest. Reuse the
-# existing distributed fixture's identity parser; keep both expected identities
-# from the image we loaded rather than adopting a running pod's observation.
+# Derive runtime identities from the loaded candidate before creating any app
+# pods. CRI can report an import index whose digest is absent from the tagged
+# manifest row, so first bind its status.id to our saved/imported seed IDs.
 node="$(head -n1 "$artifacts/kind-nodes.txt")"
 docker exec "$node" ctr -n k8s.io images ls >"$artifacts/imported-images.txt"
 python3 test/robustness/hostlogic.py ctr-image-shas "$server_image" \
   <"$artifacts/imported-images.txt" >"$artifacts/imported-server-digests.txt"
+python3 test/robustness/hostlogic.py collect-identities \
+  "$artifacts/server-image-id.txt" "$artifacts/imported-server-digests.txt" >"$artifacts/candidate-seed-identities.txt"
+python3 - "$node" "$server_image" "$artifacts" <<'PY'
+import json, re, subprocess, sys
+from pathlib import Path
+node, image, directory = sys.argv[1:]
+try:
+    raw = subprocess.run(['docker', 'exec', node, 'crictl', 'inspecti', image], check=True,
+                         stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30).stdout
+    document = json.loads(raw)
+except (OSError, ValueError, subprocess.SubprocessError):
+    raise SystemExit('loaded candidate CRI inspection is unavailable or invalid') from None
+status = document.get('status') if isinstance(document, dict) else None
+if not isinstance(status, dict) or not isinstance(status.get('id'), str) or not re.fullmatch(r'sha256:[0-9a-f]{64}', status['id']):
+    raise SystemExit('loaded candidate CRI inspection lacks a valid status.id')
+tags, digests = status.get('repoTags'), status.get('repoDigests')
+if not isinstance(tags, list) or not all(isinstance(tag, str) for tag in tags):
+    raise SystemExit('loaded candidate CRI inspection lacks valid repoTags')
+canonical = image if image.startswith('docker.io/') else 'docker.io/' + image
+if canonical not in tags:
+    raise SystemExit('loaded candidate CRI inspection does not name the canonical candidate tag')
+if not isinstance(digests, list) or not digests or not all(isinstance(digest, str) and re.fullmatch(r'[^@\s]+@sha256:[0-9a-f]{64}', digest) for digest in digests):
+    raise SystemExit('loaded candidate CRI inspection lacks valid repoDigests')
+artifacts = Path(directory)
+# Persist only identity fields. Raw imageSpec, environment values and labels
+# never become artifacts or inputs to identity extraction.
+projected = {'status': {'id': status['id'], 'repoTags': tags, 'repoDigests': digests}}
+(artifacts / 'loaded-candidate-cri.json').write_text(json.dumps(projected, indent=2) + '\n')
+(artifacts / 'loaded-candidate-cri-id.txt').write_text(status['id'] + '\n')
+PY
+python3 test/robustness/hostlogic.py image-match "$artifacts/candidate-seed-identities.txt" \
+  "$(cat "$artifacts/loaded-candidate-cri-id.txt")"
 candidate_digest="$(python3 test/robustness/hostlogic.py collect-identities \
-  "$artifacts/server-image-id.txt" "$artifacts/imported-server-digests.txt" | paste -sd, -)"
+  "$artifacts/candidate-seed-identities.txt" "$artifacts/loaded-candidate-cri.json" | paste -sd, -)"
 [[ "$candidate_digest" == sha256:* ]] || { echo 'loaded candidate identity missing' >&2; exit 1; }
 printf '%s\n' "$candidate_digest" >"$artifacts/candidate-identities.txt"
 kc create namespace "$namespace"
