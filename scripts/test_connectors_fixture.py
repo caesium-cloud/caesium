@@ -217,6 +217,8 @@ class ConnectorFixtureOrchestrationTests(unittest.TestCase):
         self.assertIn('maxUnreferencedSnapshots: 4', config)
         self.assertIn('unreferencedSnapshotMaxAge: 10s', config)
         calls = [c for c in self.calls() if c[0] == 'create']
+        fixture = next(c for c in calls if 'fixture-' in c[c.index('--name')+1])
+        self.assertIn('CAESIUM_CONNECTORS_CONTROL_LISTEN=127.0.0.1:7240', fixture)
         server = next(c for c in calls if c[c.index('--name')+1] == 'caesium-server-agent-test')
         self.assertIn(str(self.artifacts)+'/http-connections.yaml:/etc/caesium/connectors/connections.yaml:ro', server)
         self.assertIn(str(self.artifacts)+':/artifacts:ro', server)
@@ -285,6 +287,8 @@ class ConnectorFixtureOrchestrationTests(unittest.TestCase):
                 anchor = next(c for c in self.calls() if c[0] == 'create' and 'network-anchor-' in c[c.index('--name')+1])
                 self.assertIn('127.0.0.1:7240:7240', anchor)
                 self.assertIn('127.0.0.1:8081:8081', anchor)
+                fixture = next(c for c in self.calls() if c[0] == 'create' and 'fixture-' in c[c.index('--name')+1])
+                self.assertIn('CAESIUM_CONNECTORS_CONTROL_LISTEN=0.0.0.0:7240', fixture)
                 self.assertNotIn('csk_live_fixture_bootstrap', output+error)
                 self.assertCountEqual(self.removed(), ['1'*64, '2'*64, '3'*64, '4'*64, '5'*64, '6'*64])
 
