@@ -122,6 +122,7 @@ func (s *Store) StartWithResult(ctx context.Context, jobID uuid.UUID, triggerID 
 		idempotencyKey:   key,
 		result:           &result,
 		namespaceGuard:   startOpts.NamespaceGuard,
+		replayGuard:      startOpts.ReplayGuard,
 	})
 	if err != nil && !errors.Is(err, ErrRunSkipped) && !errors.Is(err, ErrRunQueued) {
 		return StartResult{}, err
@@ -159,7 +160,7 @@ func (s *Store) FindIdempotentStart(ctx context.Context, jobID uuid.UUID, opts .
 		return StartResult{}, false, err
 	}
 	var result StartResult
-	_, err = s.replayIdempotentStart(conn, existing, startRequestHash(startOpts.Params, startOpts.Priority), &result)
+	_, err = s.replayIdempotentStart(conn, existing, startRequestHash(startOpts.Params, startOpts.Priority), startOpts.ReplayGuard, &result)
 	if err != nil && !errors.Is(err, ErrRunSkipped) && !errors.Is(err, ErrRunQueued) {
 		return StartResult{}, false, err
 	}
@@ -208,8 +209,8 @@ func findStartIdempotency(conn *gorm.DB, jobID uuid.UUID, key string) (*models.R
 // admission is the promotion of a queued start — resolves any idempotency
 // record waiting on that queue entry. Refusals (admissionFailed) record
 // nothing: the queue entry is released and a later drain retries it.
-func recordStartOutcomeTx(tx *gorm.DB, req startRunRequest, runID uuid.UUID, admission admissionResult) error {
-	outcome, reason, recordRunID, queueID, ok := startOutcomeOf(runID, admission)
+func recordStartOutcomeTx(tx *gorm.DB, req startRunRequest, model *models.JobRun, admission admissionResult) error {
+	outcome, reason, recordRunID, queueID, ok := startOutcomeOf(model.ID, admission)
 	if !ok {
 		return nil
 	}
@@ -242,8 +243,10 @@ func recordStartOutcomeTx(tx *gorm.DB, req startRunRequest, runID uuid.UUID, adm
 		Reason:         reason,
 		RunID:          recordRunID,
 		QueueID:        queueID,
-		CreatedAt:      now,
-		UpdatedAt:      now,
+		// admit froze the owning job's namespace on the model before deciding.
+		Namespace: models.NamespaceOrDefault(model.Namespace),
+		CreatedAt: now,
+		UpdatedAt: now,
 	}).Error
 }
 
@@ -273,7 +276,21 @@ func startOutcomeOf(runID uuid.UUID, admission admissionResult) (outcome StartOu
 // result and returns what startRun would have returned for the original
 // admission: the run for created, ErrRunQueued for queued, ErrRunSkipped for
 // skipped and dropped.
-func (s *Store) replayIdempotentStart(conn *gorm.DB, existing *models.RunStartIdempotency, requestHash string, result *StartResult) (*JobRun, error) {
+//
+// guard (StartOptions.ReplayGuard), when set, authorises the record before
+// anything about it is revealed: it runs ahead of the request-hash comparison,
+// so a caller that may not read the recorded start gets the guard's error
+// whether or not its request matches.
+func (s *Store) replayIdempotentStart(conn *gorm.DB, existing *models.RunStartIdempotency, requestHash string, guard func([]string) error, result *StartResult) (*JobRun, error) {
+	if guard != nil {
+		namespaces, err := idempotentStartNamespaces(conn, existing)
+		if err != nil {
+			return nil, err
+		}
+		if err := guard(namespaces); err != nil {
+			return nil, err
+		}
+	}
 	if existing.RequestHash != requestHash {
 		return nil, ErrIdempotencyKeyReused
 	}
@@ -301,7 +318,8 @@ func (s *Store) replayIdempotentStart(conn *gorm.DB, existing *models.RunStartId
 				return nil, err
 			}
 			if StartOutcome(refreshed.Outcome) != StartOutcomeQueued {
-				return s.replayIdempotentStart(conn, refreshed, requestHash, result)
+				// The promotion may have named a run: authorise it too.
+				return s.replayIdempotentStart(conn, refreshed, requestHash, guard, result)
 			}
 			out.Outcome = StartOutcomeDropped
 		}
@@ -332,6 +350,31 @@ func (s *Store) replayIdempotentStart(conn *gorm.DB, existing *models.RunStartId
 		*result = out
 	}
 	return run, err
+}
+
+// idempotentStartNamespaces returns, sorted, every namespace a recorded start
+// is attributed to: the namespace admission recorded it in and, when the
+// record names a run (a created start, a dataset-hold skip, a promoted queued
+// start), that run's persisted namespace. The result is empty when the record
+// cannot be attributed: it names a run that no longer exists, or it predates
+// the namespace column and names no run.
+func idempotentStartNamespaces(conn *gorm.DB, existing *models.RunStartIdempotency) ([]string, error) {
+	var namespaces []string
+	if namespace := strings.TrimSpace(existing.Namespace); namespace != "" {
+		namespaces = append(namespaces, namespace)
+	}
+	if existing.RunID != nil {
+		var runs []models.JobRun
+		if err := conn.Model(&models.JobRun{}).Select("id", "namespace").Where("id = ?", *existing.RunID).Limit(1).Find(&runs).Error; err != nil {
+			return nil, err
+		}
+		if len(runs) == 0 {
+			return nil, nil
+		}
+		namespaces = append(namespaces, models.NamespaceOrDefault(runs[0].Namespace))
+	}
+	slices.Sort(namespaces)
+	return slices.Compact(namespaces), nil
 }
 
 // StartAdmission is a read-only projection of the accepted start protocol. It

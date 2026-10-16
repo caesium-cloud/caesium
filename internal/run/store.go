@@ -431,12 +431,27 @@ type StartOptions struct {
 	// against the row the run is created from, closing the window between
 	// request authorisation and admission (a job moved in between).
 	NamespaceGuard func(namespace string) error
+	// ReplayGuard, when set, is called before an idempotent start answers from
+	// a recorded start, and before the request is compared with it, with
+	// every namespace the record is attributed to (see
+	// idempotentStartNamespaces); the set is empty when the record cannot be
+	// attributed. A non-nil error is returned unchanged, so a caller that may
+	// not read the recorded start learns nothing about it — not its outcome,
+	// and not whether its parameters match.
+	ReplayGuard func(namespaces []string) error
 }
 
 // WithStartNamespaceGuard sets StartOptions.NamespaceGuard.
 func WithStartNamespaceGuard(guard func(namespace string) error) StartOption {
 	return func(opts *StartOptions) {
 		opts.NamespaceGuard = guard
+	}
+}
+
+// WithStartReplayGuard sets StartOptions.ReplayGuard.
+func WithStartReplayGuard(guard func(namespaces []string) error) StartOption {
+	return func(opts *StartOptions) {
+		opts.ReplayGuard = guard
 	}
 }
 
@@ -725,6 +740,8 @@ type startRunRequest struct {
 	result *StartResult
 	// namespaceGuard is StartOptions.NamespaceGuard.
 	namespaceGuard func(namespace string) error
+	// replayGuard is StartOptions.ReplayGuard.
+	replayGuard func(namespaces []string) error
 }
 
 // storeBusyRetryBackoffs aliases the shared contention-retry schedule so
@@ -1466,7 +1483,7 @@ func (s *Store) startRun(req startRunRequest) (*JobRun, error) {
 	if req.idempotencyKey != "" {
 		existing, err := findStartIdempotency(conn, req.jobID, req.idempotencyKey)
 		if err == nil {
-			return s.replayIdempotentStart(conn, existing, startRequestHash(req.requestParams, req.priorityOverride), req.result)
+			return s.replayIdempotentStart(conn, existing, startRequestHash(req.requestParams, req.priorityOverride), req.replayGuard, req.result)
 		}
 		if !errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, err
@@ -1524,16 +1541,16 @@ func (s *Store) startRun(req startRunRequest) (*JobRun, error) {
 				// the others and are published after commit; there is no
 				// run_started, because nothing started.
 				attemptEvents = append(attemptEvents, result.heldEvents...)
-				return recordStartOutcomeTx(tx, req, model.ID, attemptAdmission)
+				return recordStartOutcomeTx(tx, req, model, attemptAdmission)
 			case admissionSkipped, admissionQueued:
-				return recordStartOutcomeTx(tx, req, model.ID, attemptAdmission)
+				return recordStartOutcomeTx(tx, req, model, attemptAdmission)
 			case admissionFailed:
 				return nil
 			default:
 				return fmt.Errorf("run: unknown admission decision %d", result.decision)
 			}
 
-			if err := recordStartOutcomeTx(tx, req, model.ID, attemptAdmission); err != nil {
+			if err := recordStartOutcomeTx(tx, req, model, attemptAdmission); err != nil {
 				return err
 			}
 
@@ -1563,7 +1580,7 @@ func (s *Store) startRun(req startRunRequest) (*JobRun, error) {
 			// transaction (including anything admission did) rolled back.
 			// Answer with the winner's outcome.
 			if existing, loadErr := findStartIdempotency(conn, req.jobID, req.idempotencyKey); loadErr == nil {
-				return s.replayIdempotentStart(conn, existing, startRequestHash(req.requestParams, req.priorityOverride), req.result)
+				return s.replayIdempotentStart(conn, existing, startRequestHash(req.requestParams, req.priorityOverride), req.replayGuard, req.result)
 			}
 		}
 		return nil, err
@@ -1615,7 +1632,7 @@ func (s *Store) startRun(req startRunRequest) (*JobRun, error) {
 			// collides with that record on insert; a refusal inserts nothing,
 			// so look again before refusing.
 			if existing, err := findStartIdempotency(conn, req.jobID, req.idempotencyKey); err == nil {
-				return s.replayIdempotentStart(conn, existing, startRequestHash(req.requestParams, req.priorityOverride), req.result)
+				return s.replayIdempotentStart(conn, existing, startRequestHash(req.requestParams, req.priorityOverride), req.replayGuard, req.result)
 			}
 		}
 		return nil, ErrMaxConcurrentRunsReached

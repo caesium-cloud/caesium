@@ -476,11 +476,12 @@ func TestNamespacedSharedObjects(t *testing.T) {
 	mktViewer := f.key(t, models.RoleViewer, `["marketing"]`)
 	clusterOperator := f.key(t, models.RoleOperator, "")
 
-	// Reads by id and notification deletes are live; creates and edits of
-	// every shared object, and agent-profile deletes, are pending D4
-	// (notification dispatch and agent-profile resolution by name are not
-	// namespace-aware yet, so a confined delete could remove the profile
-	// another namespace's incidents resolve). The create-body resolver is
+	// Reads by id are live; every create, edit and delete of a shared object
+	// is pending D4. Notification dispatch matches policies across
+	// namespaces (the marketing fixture policy has no job filter, so it
+	// handles finance's run_failed events too) and agent profiles resolve by
+	// name across namespaces, so a confined delete could silence another
+	// namespace's alerts or remediation. The create-body resolver is
 	// exercised in TestCreateBodyNamespaceResolver.
 	cases := []struct {
 		name   string
@@ -496,7 +497,10 @@ func TestNamespacedSharedObjects(t *testing.T) {
 		{"read a finance profile", mktViewer, get("/v1/agentprofiles/:id", pv("id", f.finProfile.String())), http.StatusForbidden},
 		{"read a * profile", mktViewer, get("/v1/agentprofiles/:id", pv("id", f.sharedProfile.String())), http.StatusOK},
 		{"missing object", mktViewer, get("/v1/agentprofiles/:id", pv("id", uuid.NewString())), http.StatusNotFound},
-		{"delete a marketing channel", mktOperator, nsCall{method: http.MethodDelete, pattern: "/v1/notifications/channels/:id", params: pv("id", f.mktChannel.String())}, http.StatusOK},
+		{"delete a marketing channel is pending D4", mktOperator, nsCall{method: http.MethodDelete, pattern: "/v1/notifications/channels/:id", params: pv("id", f.mktChannel.String())}, http.StatusForbidden},
+		{"delete a marketing policy is pending D4", mktOperator, nsCall{method: http.MethodDelete, pattern: "/v1/notifications/policies/:id", params: pv("id", f.mktPolicy.String())}, http.StatusForbidden},
+		{"cluster operator deletes a marketing channel", clusterOperator, nsCall{method: http.MethodDelete, pattern: "/v1/notifications/channels/:id", params: pv("id", f.mktChannel.String())}, http.StatusOK},
+		{"cluster operator deletes a marketing policy", clusterOperator, nsCall{method: http.MethodDelete, pattern: "/v1/notifications/policies/:id", params: pv("id", f.mktPolicy.String())}, http.StatusOK},
 		{"delete a marketing profile is pending D4", mktOperator, nsCall{method: http.MethodDelete, pattern: "/v1/agentprofiles/:id", params: pv("id", f.mktProfile.String())}, http.StatusForbidden},
 		{"cluster operator deletes a marketing profile", clusterOperator, nsCall{method: http.MethodDelete, pattern: "/v1/agentprofiles/:id", params: pv("id", f.mktProfile.String())}, http.StatusOK},
 		{"delete a * policy", mktOperator, nsCall{method: http.MethodDelete, pattern: "/v1/notifications/policies/:id", params: pv("id", f.sharedPolicy.String())}, http.StatusForbidden},
@@ -518,11 +522,20 @@ func TestNamespacedSharedObjects(t *testing.T) {
 			require.Equal(t, tc.call.body, res.body, "%s: the handler must still read the whole body", tc.name)
 		}
 	}
-	// A confined profile delete names its owning item and is still audited
-	// against the profile's namespace.
-	f.do(t, mktOperator, nsCall{method: http.MethodDelete, pattern: "/v1/agentprofiles/:id", params: pv("id", f.mktProfile.String())})
-	requireAuditMetadata(t, f.lastDenial(t), map[string]any{"reason": "insufficient_role", "pending": "D4"})
-	require.Equal(t, "marketing", f.lastDenial(t).Namespace)
+	// A confined delete of each shared kind names its owning item and is
+	// still audited against the object's namespace.
+	for _, pattern := range []struct {
+		path string
+		id   uuid.UUID
+	}{
+		{"/v1/agentprofiles/:id", f.mktProfile},
+		{"/v1/notifications/channels/:id", f.mktChannel},
+		{"/v1/notifications/policies/:id", f.mktPolicy},
+	} {
+		f.do(t, mktOperator, nsCall{method: http.MethodDelete, pattern: pattern.path, params: pv("id", pattern.id.String())})
+		requireAuditMetadata(t, f.lastDenial(t), map[string]any{"reason": "insufficient_role", "pending": "D4"})
+		require.Equal(t, "marketing", f.lastDenial(t).Namespace, pattern.path)
+	}
 	// A * object denial is audited against *.
 	f.do(t, mktOperator, nsCall{method: http.MethodDelete, pattern: "/v1/notifications/policies/:id", params: pv("id", f.sharedPolicy.String())})
 	require.Equal(t, "*", f.lastDenial(t).Namespace)

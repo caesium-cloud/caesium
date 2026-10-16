@@ -243,10 +243,10 @@ func (s *IntegrationTestSuite) TestAuthNamespacedSharedObjectsAndTriggers() {
 		})
 	}
 
-	// Notification channels and policies: reads and deletes by id are live;
-	// creates and edits are pending D4 (dispatch does not yet match policies
+	// Notification channels and policies: reads by id are live; creates,
+	// edits and deletes are pending D4. Dispatch does not yet match policies
 	// by namespace, so a new channel or policy could receive other
-	// namespaces' events).
+	// namespaces' events, and deleting one could silence them.
 	channelBody := func(namespace, suffix string) string {
 		return fmt.Sprintf(`{"namespace":%q,"name":%q,"type":"webhook","config":{"url":"https://example.invalid/a3"}}`, namespace, name("ch-"+suffix))
 	}
@@ -264,16 +264,26 @@ func (s *IntegrationTestSuite) TestAuthNamespacedSharedObjectsAndTriggers() {
 	s.requireNSStatus(http.StatusForbidden, http.MethodDelete, "/v1/notifications/channels/"+sharedChannel, mktOperator, "")
 	s.requireNSStatus(http.StatusForbidden, http.MethodDelete, "/v1/notifications/channels/"+finChannel, mktOperator, "")
 
-	policyBody := func(namespace, channel, suffix string) string {
+	policyBody := func(namespace, channel, suffix, job string) string {
 		return fmt.Sprintf(`{"namespace":%q,"name":%q,"channel_id":%q,"event_types":["run_failed"],"filters":{"job_ids":[%q]}}`,
-			namespace, name("pol-"+suffix), channel, f.mktJob.ID)
+			namespace, name("pol-"+suffix), channel, job)
 	}
-	s.requireNSStatus(http.StatusForbidden, http.MethodPost, "/v1/notifications/policies", mktOperator, policyBody("marketing", mktChannel, "mkt-denied"))
-	mktPolicy := decodeID(s, s.requireNSStatus(http.StatusCreated, http.MethodPost, "/v1/notifications/policies", admin, policyBody("marketing", mktChannel, "mkt")))
+	s.requireNSStatus(http.StatusForbidden, http.MethodPost, "/v1/notifications/policies", mktOperator, policyBody("marketing", mktChannel, "mkt-denied", f.mktJob.ID))
+	// A marketing policy that today handles finance's failures: dispatch
+	// matches its job filter, not its namespace.
+	mktPolicy := decodeID(s, s.requireNSStatus(http.StatusCreated, http.MethodPost, "/v1/notifications/policies", admin, policyBody("marketing", mktChannel, "mkt", f.finJob.ID)))
+	deleteAfter("/v1/notifications/policies/" + mktPolicy)
 	s.requireNSStatus(http.StatusOK, http.MethodGet, "/v1/notifications/policies/"+mktPolicy, mktOperator, "")
 	s.requireNSStatus(http.StatusForbidden, http.MethodGet, "/v1/notifications/policies/"+mktPolicy, s.namespacedKey(f, "operator", `["finance"]`).Plaintext, "")
-	s.requireNSStatus(http.StatusNoContent, http.MethodDelete, "/v1/notifications/policies/"+mktPolicy, mktOperator, "")
-	s.requireNSStatus(http.StatusNoContent, http.MethodDelete, "/v1/notifications/channels/"+mktChannel, mktOperator, "")
+	// The marketing operator can delete neither the policy nor its channel
+	// (either would silence finance's alerts); the admin deletes both.
+	s.requireNSStatus(http.StatusForbidden, http.MethodDelete, "/v1/notifications/policies/"+mktPolicy, mktOperator, "")
+	s.requireNSStatus(http.StatusForbidden, http.MethodDelete, "/v1/notifications/channels/"+mktChannel, mktOperator, "")
+	s.requireNSStatus(http.StatusOK, http.MethodGet, "/v1/notifications/policies/"+mktPolicy, admin, "")
+	s.requireNSStatus(http.StatusOK, http.MethodGet, "/v1/notifications/channels/"+mktChannel, admin, "")
+	s.requireNSStatus(http.StatusNoContent, http.MethodDelete, "/v1/notifications/policies/"+mktPolicy, admin, "")
+	s.requireNSStatus(http.StatusNoContent, http.MethodDelete, "/v1/notifications/channels/"+mktChannel, admin, "")
+	s.requireNSStatus(http.StatusNotFound, http.MethodGet, "/v1/notifications/policies/"+mktPolicy, admin, "")
 
 	// Agent profiles: reads by the object's namespace; creates, edits and
 	// deletes are pending D4 (jobs reference a profile by name, resolved
@@ -342,7 +352,10 @@ func (s *IntegrationTestSuite) TestAuthNamespacedSharedObjectsAndTriggers() {
 
 	// D9: an idempotent start recorded while the job was in marketing; the job
 	// then moves to finance. A finance-only runner retrying with the same key
-	// gets 403 and no run body; a key that can also read marketing gets the run.
+	// gets an audited 403 and no run body, whether or not its request matches
+	// the recorded one (the record is authorised before it is compared, so a
+	// mismatch cannot be told from a match); a key that can also read
+	// marketing gets the run, or 422 for a different request.
 	key := map[string]string{"Idempotency-Key": fmt.Sprintf("a3-d9-%d", f.stamp)}
 	status, body = s.nsRequest(http.MethodPost, "/v1/jobs/"+sharedJob.ID+"/run", admin, "", key)
 	s.Require().Equal(http.StatusAccepted, status, body)
@@ -351,14 +364,34 @@ func (s *IntegrationTestSuite) TestAuthNamespacedSharedObjectsAndTriggers() {
 	s.catalogExec(f, 1, `UPDATE jobs SET namespace = 'finance' WHERE id = ?`, sharedJob.ID)
 	f.undo = append(f.undo, func() { s.catalogExec(f, 1, `UPDATE jobs SET namespace = 'marketing' WHERE id = ?`, sharedJob.ID) })
 
-	finRunner := s.namespacedKey(f, "runner", `["finance"]`).Plaintext
-	status, body = s.nsRequest(http.MethodPost, "/v1/jobs/"+sharedJob.ID+"/run", finRunner, "", key)
-	s.Require().Equal(http.StatusForbidden, status, body)
-	s.NotContains(body, recorded, "the refused replay must not carry the recorded run")
+	const different = `{"priority":"high"}`
+	finRunner := s.namespacedKey(f, "runner", `["finance"]`)
+	for _, request := range []string{"", different} {
+		status, body = s.nsRequest(http.MethodPost, "/v1/jobs/"+sharedJob.ID+"/run", finRunner.Plaintext, request, key)
+		s.Require().Equal(http.StatusForbidden, status, "request %q: %s", request, body)
+		s.NotContains(body, recorded, "the refused replay must not carry the recorded run")
+	}
+	denials, err := s.auditCLI("--namespace", "marketing", "--actor", finRunner.Meta.KeyPrefix)
+	s.Require().NoError(err)
+	s.Require().Len(denials, 2, "both refused retries are audited against the record's namespace")
+	for _, row := range denials {
+		s.Equal("auth.denied", row.Action)
+		var meta struct {
+			Reason       string   `json:"reason"`
+			RequiredRole string   `json:"required_role"`
+			Namespaces   []string `json:"namespaces"`
+		}
+		s.Require().NoError(json.Unmarshal(row.Metadata, &meta))
+		s.Equal("insufficient_role", meta.Reason)
+		s.Equal("viewer", meta.RequiredRole)
+		s.Equal([]string{"marketing"}, meta.Namespaces)
+	}
 	bothRunner := s.namespacedKey(f, "runner", `["finance","marketing"]`).Plaintext
 	status, body = s.nsRequest(http.MethodPost, "/v1/jobs/"+sharedJob.ID+"/run", bothRunner, "", key)
 	s.Require().Equal(http.StatusAccepted, status, body)
 	s.Equal(recorded, decodeID(s, body), "a caller that can read the run's namespace gets the original run")
+	status, body = s.nsRequest(http.MethodPost, "/v1/jobs/"+sharedJob.ID+"/run", bothRunner, different, key)
+	s.Require().Equal(http.StatusUnprocessableEntity, status, "a readable record still refuses a different request: %s", body)
 }
 
 // TestAuthNamespacedDatasetsBackfillsIncidents: dataset writes are cluster-only
@@ -541,14 +574,16 @@ func (s *IntegrationTestSuite) TestAuthAuditNamespaceFilter() {
 	s.requireNSStatus(http.StatusOK, http.MethodPut, "/v1/jobs/"+f.mktJob.ID+"/unpause", mkt.Plaintext, "")
 	s.requireNSStatus(http.StatusForbidden, http.MethodPut, "/v1/jobs/"+f.finJob.ID+"/pause", mkt.Plaintext, "")
 	s.requireNSStatus(http.StatusForbidden, http.MethodGet, "/v1/atoms", mkt.Plaintext, "")
-	// The controller-owned row: the confined operator deletes a marketing
-	// channel the admin created (channel writes other than delete are D4's).
+	// The controller-owned row: a cluster operator deletes a marketing
+	// channel the admin created, and the row carries the channel's namespace
+	// (every shared-object write by a confined caller is D4's).
+	clusterOperator := s.namespacedKey(f, "operator", "")
 	channel := decodeID(s, s.requireNSStatus(http.StatusCreated, http.MethodPost, "/v1/notifications/channels", s.authAPIKey,
 		fmt.Sprintf(`{"namespace":"marketing","name":"a3-audit-%d","type":"webhook","config":{"url":"https://example.invalid/a3"}}`, f.stamp)))
 	f.undo = append(f.undo, func() {
 		s.nsRequest(http.MethodDelete, "/v1/notifications/channels/"+channel, s.authAPIKey, "", nil)
 	})
-	s.requireNSStatus(http.StatusNoContent, http.MethodDelete, "/v1/notifications/channels/"+channel, mkt.Plaintext, "")
+	s.requireNSStatus(http.StatusNoContent, http.MethodDelete, "/v1/notifications/channels/"+channel, clusterOperator.Plaintext, "")
 	// An unrestricted caller's audited read (the queue) is recorded against
 	// the job's namespace too.
 	clusterViewer := s.namespacedKey(f, "viewer", "")
@@ -572,7 +607,7 @@ func (s *IntegrationTestSuite) TestAuthAuditNamespaceFilter() {
 	}
 
 	// --namespace marketing (cluster admin from the runner env) returns only
-	// marketing rows, including the controller-owned channel row.
+	// marketing rows.
 	rows, err := s.auditCLI("--namespace", "marketing", "--actor", mkt.Meta.KeyPrefix)
 	s.Require().NoError(err)
 	s.Require().NotEmpty(rows)
@@ -582,8 +617,12 @@ func (s *IntegrationTestSuite) TestAuthAuditNamespaceFilter() {
 	actions := byAction(rows)
 	s.Contains(actions, "job.pause")
 	s.Contains(actions, "job.unpause")
-	s.Contains(actions, "notification_channel.delete")
 	s.NotContains(actions, "auth.denied", "the denials named finance and *, not marketing")
+
+	// The controller-owned channel row is filed under the channel's namespace.
+	rows, err = s.auditCLI("--namespace", "marketing", "--actor", clusterOperator.Meta.KeyPrefix)
+	s.Require().NoError(err)
+	s.Contains(byAction(rows), "notification_channel.delete")
 
 	rows, err = s.auditCLI("--namespace", "marketing", "--actor", clusterViewer.Meta.KeyPrefix)
 	s.Require().NoError(err)

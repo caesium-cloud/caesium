@@ -80,13 +80,6 @@ var (
 	postGetRun = func(runID uuid.UUID) (*runstorage.JobRun, error) {
 		return postRunStore().Get(runID)
 	}
-	postReplayedRunNamespace = func(ctx context.Context, runID uuid.UUID) (string, error) {
-		var run models.JobRun
-		if err := postRunStore().DB().WithContext(ctx).Select("id", "namespace").First(&run, "id = ?", runID).Error; err != nil {
-			return "", err
-		}
-		return run.Namespace, nil
-	}
 	postFinalizeCommittedRun = func(runID uuid.UUID, cause error) (bool, error) {
 		return postRunStore().CompleteIfActive(runID, cause)
 	}
@@ -122,6 +115,9 @@ func Post(c *echo.Context) error {
 	if guard := admissionNamespaceGuard(c); guard != nil {
 		startOpts = append(startOpts, runstorage.WithStartNamespaceGuard(guard))
 	}
+	if guard := replayNamespaceGuard(c); guard != nil {
+		startOpts = append(startOpts, runstorage.WithStartReplayGuard(guard))
+	}
 
 	j, err := postGetJob(ctx, id)
 	if err != nil {
@@ -148,6 +144,10 @@ func Post(c *echo.Context) error {
 		if idempotencyKey != "" {
 			result, found, err := postFindIdempotentStart(ctx, j.ID, startOpts...)
 			if err != nil {
+				if _, denied := errors.AsType[*authz.Denial](err); denied {
+					// The replay guard refused the recorded start.
+					return err
+				}
 				return startError(err)
 			}
 			if found {
@@ -160,7 +160,8 @@ func Post(c *echo.Context) error {
 	result, err := postStartRun(ctx, j.ID, startOpts...)
 	if err != nil {
 		if _, denied := errors.AsType[*authz.Denial](err); denied {
-			// The admission guard refused: nothing was written.
+			// The admission guard refused (nothing was written), or the replay
+			// guard refused a recorded start the caller cannot read.
 			return err
 		}
 		// A readback failure can follow durable admission. Finalize only the
@@ -199,9 +200,6 @@ func startError(err error) error {
 // StartOutcomeResponse otherwise.
 func writeStartResult(c *echo.Context, jobID uuid.UUID, result runstorage.StartResult) error {
 	if result.Replayed {
-		if err := authorizeReplayedStart(c, result); err != nil {
-			return err
-		}
 		c.Response().Header().Set(IdempotentReplayedHeader, "true")
 	}
 	if result.Outcome == "" {
@@ -235,39 +233,41 @@ func admissionNamespaceGuard(c *echo.Context) func(string) error {
 	}
 }
 
-// authorizeReplayedStart is the outcome check of identity-and-access A3 (D9).
-// An idempotent start answers a retry with the run recorded for (job, key),
-// a lookup with no namespace dimension: if the job moved since, that run's
-// persisted namespace is no longer the job's, and the route's authorisation
-// (runner in the job's current namespace) says nothing about it. A
-// namespace-confined caller therefore also needs viewer in the run's
-// namespace, or gets an audited 403 with no run body. Callers whose cluster
-// role covers viewer, and auth-off servers, are unchanged.
-func authorizeReplayedStart(c *echo.Context, result runstorage.StartResult) error {
+// replayNamespaceGuard is the outcome check of identity-and-access A3 (D9).
+// An idempotent start answers a retry from the start recorded for (job, key),
+// a lookup with no namespace dimension: if the job moved since, the record and
+// its run belong to the old namespace, and the route's authorisation (runner
+// in the job's current namespace) says nothing about them. A
+// namespace-confined caller therefore also needs viewer in every namespace the
+// record is attributed to (the namespace it was admitted in and its run's
+// persisted namespace). The store runs the guard before it compares the
+// request with the record, on every replay path (the up-front lookup, the
+// paused-job lookup, and the concurrent-winner fallbacks), so a refused
+// caller gets the same audited 403 whether or not its parameters match. A
+// record that cannot be attributed is refused. Callers whose cluster role
+// covers viewer, and auth-off servers, get no guard.
+func replayNamespaceGuard(c *echo.Context) func([]string) error {
 	principal := authmw.GetPrincipal(c)
 	if principal == nil || iauth.HasRole(principal.ClusterRole(), models.RoleViewer) {
 		return nil
 	}
-	var namespace string
-	switch {
-	case result.Run != nil:
-		namespace = result.Run.Namespace
-	case result.RunID != nil:
-		ns, err := postReplayedRunNamespace(c.Request().Context(), *result.RunID)
-		if err != nil {
-			if errors.Is(err, gorm.ErrRecordNotFound) {
-				// The recorded run is gone; its namespace cannot be proven.
-				return &authz.Denial{Reason: "insufficient_role", Required: models.RoleViewer, Message: "insufficient permissions"}
-			}
-			return echo.NewHTTPError(http.StatusInternalServerError, "internal server error").Wrap(err)
+	return func(namespaces []string) error {
+		denial := &authz.Denial{
+			Reason:     "insufficient_role",
+			Required:   models.RoleViewer,
+			Namespaces: append([]string(nil), namespaces...),
+			Message:    "insufficient permissions",
 		}
-		namespace = ns
-	default:
-		// A queued or dropped start names no run, only the job and its queue
-		// entry, both in the job's current namespace.
+		if len(namespaces) == 0 {
+			return denial
+		}
+		for _, namespace := range namespaces {
+			if authz.RequireRoleIn(principal, models.RoleViewer, namespace) != nil {
+				return denial
+			}
+		}
 		return nil
 	}
-	return authz.RequireRoleIn(principal, models.RoleViewer, namespace)
 }
 
 func launchRun(ctx context.Context, j *models.Job, r *runstorage.JobRun, releaseWork func()) {

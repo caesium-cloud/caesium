@@ -125,10 +125,10 @@ var namespaceResolvers = map[string]namespaceResolver{
 	// write and viewer anywhere to read. Creates use the body namespace.
 	"GET /v1/notifications/channels/:id":    resolveSharedObject(auth.SharedObjectNotificationChannel),
 	"PATCH /v1/notifications/channels/:id":  resolveSharedObject(auth.SharedObjectNotificationChannel),
-	"DELETE /v1/notifications/channels/:id": resolveSharedObject(auth.SharedObjectNotificationChannel),
+	"DELETE /v1/notifications/channels/:id": resolveSharedObject(auth.SharedObjectNotificationChannel), // pending D4
 	"GET /v1/notifications/policies/:id":    resolveSharedObject(auth.SharedObjectNotificationPolicy),
 	"PATCH /v1/notifications/policies/:id":  resolveSharedObject(auth.SharedObjectNotificationPolicy),
-	"DELETE /v1/notifications/policies/:id": resolveSharedObject(auth.SharedObjectNotificationPolicy),
+	"DELETE /v1/notifications/policies/:id": resolveSharedObject(auth.SharedObjectNotificationPolicy), // pending D4
 	"GET /v1/agentprofiles/:id":             resolveSharedObject(auth.SharedObjectAgentProfile),
 	"PATCH /v1/agentprofiles/:id":           resolveSharedObject(auth.SharedObjectAgentProfile),
 	"DELETE /v1/agentprofiles/:id":          resolveSharedObject(auth.SharedObjectAgentProfile), // pending D4

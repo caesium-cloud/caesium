@@ -305,16 +305,18 @@ var endpointPolicy = map[string]RoutePolicy{
 	"PATCH /v1/triggers/:id": namespacedRoute(operator).pendingOn("B2"),
 	"POST /v1/atoms":         clusterRoute(operator),
 	"DELETE /v1/atoms/:id":   clusterRoute(operator),
-	// Notification dispatch matches policies by event type and filters
-	// only, not by namespace, so creating or editing a channel or policy
-	// would route other namespaces' events to it (D4 makes dispatch
-	// namespace-aware). Reads and deletes by id stay live.
+	// Notification dispatch (internal/notification MatchPolicies) matches
+	// policies by event type and filters only, not by namespace, so creating
+	// or editing a channel or policy would route other namespaces' events to
+	// it, and deleting one (a policy with no job filter, or its channel) could
+	// silence another namespace's alerts and policy-driven remediation (D4
+	// makes dispatch namespace-aware). Reads by id stay live.
 	"POST /v1/notifications/channels":       namespacedRoute(operator).pendingOn("D4"),
 	"PATCH /v1/notifications/channels/:id":  namespacedRoute(operator).pendingOn("D4"),
-	"DELETE /v1/notifications/channels/:id": namespacedRoute(operator),
+	"DELETE /v1/notifications/channels/:id": namespacedRoute(operator).pendingOn("D4"),
 	"POST /v1/notifications/policies":       namespacedRoute(operator).pendingOn("D4"),
 	"PATCH /v1/notifications/policies/:id":  namespacedRoute(operator).pendingOn("D4"),
-	"DELETE /v1/notifications/policies/:id": namespacedRoute(operator),
+	"DELETE /v1/notifications/policies/:id": namespacedRoute(operator).pendingOn("D4"),
 	// A job references its agent profile by name, and runtime resolution
 	// (internal/incident playbook resolution) looks the name up globally, so a
 	// confined create or rename could stand in for another namespace's

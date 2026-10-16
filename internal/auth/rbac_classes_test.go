@@ -218,9 +218,14 @@ func TestRoutePolicyClassesPinned(t *testing.T) {
 		"POST /v1/jobs/:id/backfill":            {Role: models.RoleRunner, Class: RouteClassNamespaced, PendingItem: "B4"},
 		"GET /v1/jobs/:id/backfills/:id":        {Role: models.RoleViewer, Class: RouteClassNamespaced, PendingItem: "B4"},
 		"PUT /v1/jobs/:id/backfills/:id/cancel": {Role: models.RoleOperator, Class: RouteClassNamespaced, PendingItem: "B4"},
-		// Agent profiles resolve by name across namespaces at runtime.
-		"DELETE /v1/agentprofiles/:id": {Role: models.RoleOperator, Class: RouteClassNamespaced, PendingItem: "D4"},
-		"GET /v1/agentprofiles/:id":    {Role: models.RoleViewer, Class: RouteClassNamespaced},
+		// Agent profiles resolve by name, and notification policies match
+		// events, across namespaces at runtime: deletes wait on D4.
+		"DELETE /v1/agentprofiles/:id":          {Role: models.RoleOperator, Class: RouteClassNamespaced, PendingItem: "D4"},
+		"DELETE /v1/notifications/channels/:id": {Role: models.RoleOperator, Class: RouteClassNamespaced, PendingItem: "D4"},
+		"DELETE /v1/notifications/policies/:id": {Role: models.RoleOperator, Class: RouteClassNamespaced, PendingItem: "D4"},
+		"GET /v1/agentprofiles/:id":             {Role: models.RoleViewer, Class: RouteClassNamespaced},
+		"GET /v1/notifications/channels/:id":    {Role: models.RoleViewer, Class: RouteClassNamespaced},
+		"GET /v1/notifications/policies/:id":    {Role: models.RoleViewer, Class: RouteClassNamespaced},
 	}
 	policies := RoutePolicies()
 	for key, want := range cases {
