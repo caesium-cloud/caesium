@@ -454,7 +454,7 @@ Resume unfinished waves. Do not archive this plan while later items remain.
   has also merged; C1 uses its existing principal, cluster-role and scope policy.
   C2 requires merged C1. Console work and F2–F4/N remain future waves.
 - **W5-α / C1:** [PR #644](https://github.com/caesium-cloud/caesium/pull/644),
-  draft head `a25a9980fb95a384ffd234b5b9f99ee7b47dafb6`, implements startup/client composition,
+  draft head `37381879d6bad13b3aa3d710487db5afddffa31d`, implements startup/client composition,
   authenticated monitoring and scope-safe reverse links, bounded observation
   persistence and guarded configuration activation. Persistent connection
   identities supplement the epoch so a coordinated change cannot repoint a
@@ -483,9 +483,15 @@ Resume unfinished waves. Do not archive this plan while later items remain.
   The invalid-enabled and gate-off startup proofs passed. All six owned fixture
   containers were verified absent after cleanup.
 - **Remaining qualification:** The isolated kind/Helm shared-catalog scenario is
-  running; cluster skew, guarded epoch activation and repointing acceptance are
-  not yet claimed. Local default/auth regressions have not run. Current-head
-  hosted native and arm64 images, lint, arm64 units and both UI suites passed;
+  being rerun. Its first attempt reached three ready replicas but Kubernetes
+  rejected the driver's OnDelete patch because it retained RollingUpdate fields.
+  A one-line patch now removes those fields; shell validation and all six
+  ownership probes passed, and cleanup verified the owned cluster was removed.
+  Cluster skew, guarded epoch activation and repointing acceptance are not yet
+  claimed. Local default/auth regressions have not run. Current-head
+  hosted checks are pending on the driver-only follow-up. On unchanged runtime
+  contents at `a25a9980`, native/arm64 images, lint, both unit architectures and
+  both UI suites passed;
   native stress records exit 137 with `OOMKilled=true`. Coverage and remaining
   required jobs are pending. The coverage startup fixture now uses one enabled
   API-key reference and a matched certificate/key pair under the new transport
