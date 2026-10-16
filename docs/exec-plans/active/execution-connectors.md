@@ -247,8 +247,9 @@ cardinality and closed-workflow Query dispatch count through the live surface.
 
 ## Progress (as of 2026-10-15)
 
-W1, W2 and W3 have merged. W4 D1 and D2 have merged in PRs #636 and #637.
-C, E, F2–F4 and N remain later work. An open PR or a component-only pass
+W1 through W4 have merged, including the W4 dashboard in PR #635.
+W5 starts C1 from verified merged prerequisites. C2, E, F2–F4 and N remain
+later work. An open PR or a component-only pass
 is not completion. The SHAs below are the squash merges read from GitHub.
 
 The orchestrator owns this dashboard: PR URLs, exact tested heads/merge SHAs,
@@ -433,6 +434,10 @@ Resume unfinished waves. Do not archive this plan while later items remain.
 - **Merge/plan status:** D1 and D2 are merged. The dashboard
   [PR #635](https://github.com/caesium-cloud/caesium/pull/635) records W4 closure;
   normal protected review/checks and the squash merge queue govern its merge.
+  It merged as `fa34a62cbf3f099e10262b3c8ec0c41dc69a9875` at
+  2026-10-16T00:41:03Z. Tested head `0252bf2639446d81ee6eb5d350c09cd3f3da3235`
+  passed [CI run 38830053875](https://github.com/caesium-cloud/caesium/actions/runs/38830053875),
+  including `ci-ok` and expected documentation-only skips.
   Plan validation includes an earlier full containerized race/coverage unit pass
   with documentation guardrails. Subsequent progress edits pass item/dependency, local-link,
   template-token and whitespace checks. Targeted containerized guardrails passed
@@ -442,13 +447,37 @@ Resume unfinished waves. Do not archive this plan while later items remain.
 - **Remaining:** C, E, F2–F4 and N are outside this wave. No later wave is
   dispatched in this execution.
 
+### W5 — Authenticated monitoring and configuration enforcement (in progress)
+
+- **Base and scope:** `3194fe68f3c5bd84d166b92049edad4eea46ac35` includes
+  merged A2, B1, D1 and F1. C1 is the only selected item. Identity-and-access W2
+  has also merged; C1 uses its existing principal, cluster-role and scope policy.
+  C2 requires merged C1. Console work and F2–F4/N remain future waves.
+- **W5-α / C1:** Implementation is in progress for startup/client composition,
+  authenticated monitoring and scope-safe reverse links, bounded observation
+  persistence and guarded configuration activation. Persistent connection
+  identities supplement the epoch so a coordinated change cannot repoint a
+  referenced connection ID. One candidate will contain the implementation and
+  its real HTTP and shared-catalog cluster scenarios.
+- **Verification:** The initial dashboard passed the full containerized root
+  race/coverage unit suite, including documentation guardrails. Runtime
+  verification is pending. Required evidence includes containerized lint,
+  full race/coverage unit and existing default/auth regression lanes, real
+  Temporal HTTP reads/faults/restart, unchanged-read write/cardinality bounds,
+  and two actual Caesium nodes using the existing isolated kind/Helm fixture
+  for matching files, skew and guarded epoch transition. Selected scenarios
+  must pass without skips. No new connector CI lane is claimed before F2.
+- **Publication and acceptance:** No C1 PR or candidate acceptance yet. C1
+  remains unchecked. Normal protected review/checks and the merge queue apply;
+  new review dispositions are prepared locally unless replies are authorized.
+
 ### Stream Status
 
 | Stream | Scope | Priority | Status |
 | --- | --- | --- | --- |
 | A | Generic contract, configuration and catalog (2 items) | P0 | Shipped (A1, A2) |
 | B | Temporal inspection and declared messages (2 items) | P0 | Shipped (B1, B2) |
-| C | Authenticated REST and composition (2 items) | P0 | Not started |
+| C | Authenticated REST and composition (2 items) | P0 | C1 in progress; C2 not started |
 | D | Verified correlation and action durability (2 items) | P0 | Shipped (D1, D2) |
 | E | Console monitoring, data links and approval (3 items) | P0 | Not started |
 | F | Real fixture, CI, qualification and promotion (4 items) | P0 | F1 shipped; F2–F4 not started |
