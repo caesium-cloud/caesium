@@ -2462,7 +2462,18 @@ class SystemSuiteLaneWiringTests(unittest.TestCase):
         self.assertEqual(upload["with"]["path"], ".tmp/coverage-backends/proof/")
         self.assertEqual(upload["with"]["if-no-files-found"], "error")
         original = next(step for step in steps if step.get("name") == "Upload lane artifacts")
-        self.assertEqual(original["with"]["path"], ".tmp/lane-evidence/coverage-ratchets/")
+        # The private fixture TLS tree must never be traversed or uploaded.
+        # Positive roots retain every existing report/raw/profile/journey root;
+        # a negative glob beneath the old broad root still causes EACCES.
+        root = ".tmp/lane-evidence/coverage-ratchets/"
+        self.assertEqual(original["with"]["path"].splitlines(), [
+            root + "*.json", root + "artifacts/*.json", root + "artifacts/*.log",
+            root + "artifacts/*.yaml", root + "artifacts/audit/", root + "artifacts/journeys/",
+            root + "artifacts/profiles/", root + "artifacts/raw/",
+            root + "artifacts/connectors-provider/events.jsonl",
+            root + "artifacts/connectors-provider/temporal-version.txt",
+            root + "artifacts/connectors-provider/server-version.txt",
+        ])
         self.assertLess(steps.index(upload), next(i for i, step in enumerate(steps)
                        if step.get("name") == "Coverage collection against the ratchets"))
 

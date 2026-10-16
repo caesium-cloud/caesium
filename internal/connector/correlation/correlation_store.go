@@ -43,6 +43,11 @@ func (s *Store) recordCorrelation(ctx context.Context, version string, source Ac
 		QueueID: admission.QueueID, RunID: admission.RunID, SourceEventID: source.SourceEventID,
 		Evidence: datatypes.JSON(evidence), EvidenceDigest: digestBytes(evidence), VerifiedAt: at, CreatedAt: at, UpdatedAt: at}
 	err = s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if len(bounds) > 0 && bounds[0].ExpectedEpoch != "" {
+			if err := connector.NewStore(tx).RequireEpoch(ctx, bounds[0].ExpectedEpoch); err != nil {
+				return err
+			}
+		}
 		if err := identityExists(tx, row.OpaqueID); err != nil {
 			return err
 		}

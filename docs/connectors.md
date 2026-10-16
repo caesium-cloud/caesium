@@ -3,14 +3,14 @@
 > Status: In progress. This guide records the provider-neutral contract and
 > configuration file frozen for review. The catalog store persists identities,
 > direct snapshots, relations, the configuration epoch, and operation receipts.
-> Startup reads the epoch after migration and does not compare it. Temporal
-> observation is implemented and dials only when the connector gate is on.
+> Startup joins or activates the configuration epoch after migration. Temporal
+> clients connect on demand after checking that epoch.
 > The adapter implements binding-declared JSON Queries and Updates, trusted
 > activity correlation against existing Caesium admissions, and durable receipt
-> admission with lookup-only component recovery. HTTP and Console surfaces remain
-> plan items C1/C2 and E.
-> There are still no connector HTTP routes or Console pages. Job-definition
-> YAML is unchanged.
+> admission with lookup-only component recovery. Authenticated HTTP monitoring
+> exposes discovery, detail, history, relationships and verified local run links.
+> HTTP Queries/actions/receipts and Console pages remain plan items C2 and E.
+> Job-definition YAML is unchanged.
 
 An execution connector lets Caesium inspect an external workflow system and,
 later, submit one declared operator action. The first provider name the
@@ -41,8 +41,8 @@ edits are not part of this contract.
 The main integration server started by `just integration-up` does not set this
 gate. The auth-enabled agent lane (`just integration-up-agent`) sets the gate
 and mounts the example below, so a file the parser rejects fails that lane
-before `/health` answers. The multi-node fingerprint rollout is still plan
-item C1 in `exec-plans/active/execution-connectors.md`.
+before `/health` answers. Provider outages and configuration skew do not fail
+local job readiness; connector readiness is reported separately.
 
 ```yaml
 version: 1
@@ -209,12 +209,17 @@ It does not cover resolved secret bytes. Rotating a secret under the same
 `CAESIUM_CONNECTORS_CONFIG_PREVIOUS_FINGERPRINT` is also outside the fingerprint.
 It names the stored value a later rollout expects to replace.
 
-That rollout is not enforced yet. When it is, every replica must load the same
-file. A new file is activated only when the previous-fingerprint variable
-matches the stored value. Nodes still running the old file refuse connector
+Every replica must load the same file. Initial startup establishes the active
+fingerprint and durable connection identities. A matching replica joins without
+changing that record. A new file is activated only when the previous-fingerprint
+variable matches the stored value. Nodes still running the old file refuse connector
 work until they restart with the new file. There is no implicit adoption, and
-a connection id cannot be repointed at a new target. Concurrent incompatible
-transitions fail closed. Local job execution stays independent of that check.
+a connection id cannot be repointed at a new target, including after removal
+and readdition. Concurrent incompatible transitions fail closed. Every connector
+request and provider RPC checks the active epoch; observation and relationship
+writes check it transactionally. Local job execution stays independent of that
+check. A mismatched node returns `503` on connector reads and reports
+`connectors_ready: false` from `GET /v1/system/features`.
 
 Mount the same file on every Helm replica with the chart's existing
 `config.extraEnv`, `extraVolumes`, and `extraVolumeMounts`. Do not add a chart
@@ -315,9 +320,11 @@ A later admission is a new row.
 The active configuration fingerprint is one catalog row. Activation is a
 compare-and-swap on the previous fingerprint. Concurrent callers that start
 from the same previous value have one winner, and the loser leaves the stored
-fingerprint unchanged. When the connector gate is on, startup reads this
-row after migration. A missing row is left empty. A query error stops the
-process. Startup does not compare the fingerprint to the loaded config.
+fingerprint unchanged. When the connector gate is on, startup activates or joins
+this row after migration, retaining its non-secret connection identity history.
+An epoch or identity mismatch leaves connector reads unavailable without stopping
+the scheduler. Provider connections remain lazy, so an unavailable Temporal
+frontend does not prevent startup.
 
 Unreferenced historical snapshots are deleted past the configured age and
 then capped at that count. An identity's latest snapshot stays, including
@@ -329,8 +336,79 @@ identity — one with relation evidence or an operation — keeps its snapshots.
 Identities, relations, receipts, and the epoch row are not pruned. The
 catalog is not a full history mirror.
 
-Public read proof is still plan item C1. This store has no connector HTTP
-routes and no Console pages.
+The monitoring surface applies the configured age and total count to all
+unreferenced detail snapshots, including the latest snapshot. It retains identity
+watermarks after snapshot expiry. A live unchanged poll returns fresh observation
+time without recreating an expired snapshot or changing stored evidence.
+Explicitly referenced relationship/operation evidence remains retained.
+
+## Authenticated HTTP monitoring
+
+Set the feature gate and mount the same configuration on every server. Use a
+Caesium API key or SSO session with an unscoped cluster role of viewer or higher.
+Namespace-only grants, job-scoped keys and agent-session credentials cannot read
+the global connector surfaces. A connection's external namespace is not a
+Caesium namespace grant.
+
+| Request | Response |
+| --- | --- |
+| `GET /v1/connectors` | Configured connections, wired read capabilities, readiness and the active process fingerprint. |
+| `GET /v1/connectors/:connection_id/executions` | One provider's execution page, native metadata, opaque execution IDs and an optional cursor. |
+| `GET /v1/connectors/:connection_id/executions/:execution_id` | A direct observation, or explicitly dated stale detail when refresh fails. |
+| `GET /v1/connectors/:connection_id/executions/:execution_id/history` | Bounded metadata-only history and an optional cursor. |
+| `GET /v1/connectors/:connection_id/executions/:execution_id/relationships` | Typed parent/child/continuation relationships and verified Caesium admission links. |
+| `GET /v1/jobs/:id/runs/:run_id/external-executions` | Verified reverse links for an existing local run. |
+
+List requests accept `workflow_type`, `page_size` and `cursor`. History and
+relationship requests accept `page_size` and `cursor`. Follow returned cursors
+with the same connection, filter and page size; configuration changes invalidate
+them. Use the returned opaque execution ID in subsequent URLs. Temporal Workflow
+ID and Run ID remain in the provider metadata; every direct target pins both.
+Workflow-type restrictions apply to discovery and direct reads.
+
+List and history pages create no catalog executions or snapshots. Direct detail
+persists evidence only when it advances; polling unchanged evidence does not
+update snapshot time or generation. `observed_at` describes the returned read;
+`snapshot_observed_at` dates durable evidence. On an outage, cached detail has
+`availability: stale` and retains its original observation time. An uncached or
+expired execution returns `503`; no successful workflow outcome is inferred.
+Metadata limits cover the whole public JSON response. Partial pages explicitly
+report incompleteness rather than silently claiming complete history.
+
+Relationship reads compose trusted Temporal evidence with the declared activity
+and local-job allowlist. They can persist verified links to existing admissions;
+they never create local runs. Follow a verified local job/run into its existing
+logs, receipts and data APIs. An authorized scoped caller of the reverse-link
+route receives an empty external list; the job/run ownership check still applies.
+Verified reverse links remain available after their connection is disabled or
+removed, without contacting the provider. The process read budget and each
+participating enabled connection's read budget still apply. Response ceilings
+use the strictest participating configured limits, including disabled
+connections; removed connections use the global ceilings.
+
+Identical concurrent reads share in-flight work. Read budgets, RPC deadlines and
+per-connection concurrency limits apply before provider calls; exhaustion returns
+`429`. Only discovery, inspection, history and relationships are advertised.
+Status Query and action capabilities remain unavailable through HTTP until C2.
+
+The selected C1 fixture extends `just connectors-fixture-check` with real HTTP
+reads, faults and process restart. Its owned server enables the existing
+admin-only, read-only database diagnostic to observe catalog write and retention
+bounds. Ordinary auth-lane startup retains its defaults. The shared-catalog proof uses
+`bash scripts/connectors-config-cluster.sh` against a clean candidate. It creates
+an isolated kind cluster, the existing distributed Helm topology, a real TLS
+Temporal fixture and three Caesium members with retained PVCs. Its selected
+`TestConnectorsConfigCluster` exercises matching files, mismatch refusal before
+RPC, a guarded epoch transition, stale-node refusal and connection repointing.
+Run it serially with other container/cluster lanes. Candidate, image, provider,
+topology and fault evidence stays in the reported artifact directory. The
+authenticated HTTP/browser CI lane remains F2; this command does not promote it.
+
+The existing G2 coverage cohort uses the same pinned Temporal fixture for a
+real publication, authenticated monitoring, verified delegation and reverse
+lookup. It requires provider RPC evidence, a succeeded local run and complete
+instrumented counters from a cleanly stopped process. Full fault/restart and
+browser scenario selection remains F2.
 
 ## Temporal observation
 
@@ -338,7 +416,8 @@ routes and no Console pages.
 Health, a filtered visibility list, direct describe, and bounded history are
 implemented. Declared Queries, Updates, trusted activity correlation, and durable
 receipt admission with lookup-only recovery are implemented as separate
-components. HTTP and Console surfaces remain plan items C1/C2 and E. With
+components. HTTP monitoring composes the read adapter and correlation store;
+HTTP Queries/actions/receipts and Console surfaces remain C2 and E. With
 `CAESIUM_CONNECTORS_ENABLED` left at its default
 false, the process dials no Temporal server, starts no worker, and needs no
 Temporal credentials.
@@ -470,8 +549,10 @@ verify the declared admission protocol, not arbitrary data provenance.
 See [the activity envelope recipe](temporal.md#optional-verified-activity-correlation)
 for the frozen payload. The real fixture qualifies provider identity, queued
 promotion, retry and actual public job starts. Component tests separately
-exercise typed persistence and database reopen. Public bidirectional links
-and running-server integration remain C1.
+exercise typed persistence and database reopen. `TestConnectorsRead` drives the
+public relationship and reverse-link routes against the running server,
+including queued promotion, actual process restarts and historical reverse
+links after guarded connection disable/removal.
 
 ## Temporal messages
 
@@ -666,7 +747,9 @@ prove lost accepted-reply recovery, crash after admission, lost validator reply
 followed by eligibility without automatic approval, original-principal
 confirmation and one logical effect across terminal/new Update IDs. Its artifact
 is `operations-component-evidence.json`. This is component recovery evidence;
-live Caesium process restart/catalog and public route qualification remain C1/C2.
+public operation receipts and operation recovery through a live Caesium process
+restart remain C2. C1's separate HTTP read scenario qualifies snapshot and
+verified-link persistence across process restart.
 
 ## Real Temporal development fixture
 
@@ -696,20 +779,13 @@ Cloud or other server versions.
 just tag=connector-local connectors-fixture-check
 ```
 
-For a controller-owned existing tracked server, pass its exact name without
-transferring cleanup ownership. Only this mode uses an exported
-`CAESIUM_AUTH_ADMIN_KEY` or `CAESIUM_API_KEY`; an owned server always supplies its
-own fresh bootstrap credential.
-
-```sh
-CAESIUM_CONNECTORS_EXISTING_SERVER=true \
-CAESIUM_CONNECTORS_SERVER_CONTAINER=caesium-server-agent-test \
-just tag=connector-local connectors-fixture-check
-```
+The selected HTTP scenario requires a server created by this invocation because
+it restarts the actual process. It rejects existing-server mode before builds
+or container creation. The owned server supplies its own fresh bootstrap
+credential; exported host API keys do not replace it.
 
 The script records immutable container IDs as creation succeeds and cleans only
-those IDs on ordinary exit, HUP, INT or TERM, including under dash. A borrowed
-server name is resolved once and never grants cleanup ownership. The fixture and
+those IDs on ordinary exit, HUP, INT or TERM, including under dash. The fixture and
 runner use the host UID/GID, so Linux hosts can read and remove their evidence;
 `check` refuses rootless Docker, Podman and unknown engines before builds or
 container creation. Docker Desktop with its rootful Linux engine is supported;
@@ -723,7 +799,7 @@ Evidence remains under `.tmp/connectors-fixture/`, or the absolute directory in
 include the candidate SHA, working-tree status, the diff against HEAD (including
 staged changes), hashes for all tracked and untracked source paths, observed
 versions, fixture/runner image identities, and the actual server container and
-image in both ownership modes. Container and image inspection records use an
+image. Container and image inspection records use an
 allowlist of identity, state, platform and network fields. Environment names
 are retained without values; commands, arguments, labels, health logs and error
 text are omitted. Retained server logs mask bootstrap API keys; these test logs
@@ -776,6 +852,7 @@ selected scenario fails qualification.
 Mount the artifact directory at `/artifacts` for the configuration's certificate
 paths. Its two job aliases are examples; substitute actual lane job aliases
 before later correlation-route qualification. F1's self-check uses real SDK
-calls because connector REST routes land in C1/C2. The authenticated HTTP/browser
-CI lane and receipt/restart qualification remain later plan items, and the
-existing default integration lane stays off by default.
+calls to qualify the adapter boundary. The selected manual fixture also requires
+`TestConnectorsRead` to pass against the real HTTP surface. The authenticated
+HTTP/browser CI lane and public operation-receipt qualification remain later
+items, and the existing default integration lane keeps connectors off.

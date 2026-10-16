@@ -109,6 +109,8 @@ func NewObserverFromClient(c client.Client, namespace, apiKey string, deadline t
 // Failure is true only for WORKFLOW_EXECUTION_STATUS_FAILED.
 // Continued-as-new is terminal and is not a failure.
 type Execution struct {
+	WorkflowType  string            `json:"workflow_type"`
+	SourceEventID int64             `json:"source_event_id"`
 	WorkflowID    string            `json:"workflow_id"`
 	RunID         string            `json:"run_id"`
 	Scope         string            `json:"scope"`
@@ -344,6 +346,8 @@ func (o *Observer) executionFromInfo(info *workflowpb.WorkflowExecutionInfo) Exe
 		runID = execution.GetRunId()
 	}
 	out := Execution{
+		WorkflowType:  info.GetType().GetName(),
+		SourceEventID: info.GetHistoryLength(),
 		WorkflowID:    workflowID,
 		RunID:         runID,
 		Scope:         o.scope,
