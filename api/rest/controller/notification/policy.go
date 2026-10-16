@@ -56,6 +56,7 @@ func (ctrl *Controller) CreatePolicy(c *echo.Context) error {
 		ResourceID:   p.ID.String(),
 		SourceIP:     c.RealIP(),
 		Outcome:      auth.OutcomeSuccess,
+		Namespace:    models.NamespaceOrDefault(p.Namespace),
 		Metadata: map[string]any{
 			"namespace":   models.NamespaceOrDefault(p.Namespace),
 			"name":        p.Name,
@@ -90,6 +91,7 @@ func (ctrl *Controller) UpdatePolicy(c *echo.Context) error {
 		ResourceID:   p.ID.String(),
 		SourceIP:     c.RealIP(),
 		Outcome:      auth.OutcomeSuccess,
+		Namespace:    models.NamespaceOrDefault(p.Namespace),
 		Metadata: map[string]any{
 			"name":        p.Name,
 			"channel_id":  p.ChannelID.String(),
@@ -122,7 +124,15 @@ func (ctrl *Controller) DeletePolicy(c *echo.Context) error {
 		return echo.NewHTTPError(http.StatusBadRequest, "bad request").Wrap(err)
 	}
 
-	if err := newService(c.Request().Context()).DeletePolicy(id); err != nil {
+	service := newService(c.Request().Context())
+	// Best-effort: the audit row names the policy's namespace, read before
+	// the delete. A missing policy or a failed read leaves it empty and
+	// changes nothing else (delete stays idempotent).
+	namespace := ""
+	if p, err := service.GetPolicy(id); err == nil && p != nil {
+		namespace = models.NamespaceOrDefault(p.Namespace)
+	}
+	if err := service.DeletePolicy(id); err != nil {
 		return serviceError(err)
 	}
 
@@ -133,6 +143,7 @@ func (ctrl *Controller) DeletePolicy(c *echo.Context) error {
 		ResourceID:   id.String(),
 		SourceIP:     c.RealIP(),
 		Outcome:      auth.OutcomeSuccess,
+		Namespace:    namespace,
 	}))
 
 	return c.NoContent(http.StatusNoContent)

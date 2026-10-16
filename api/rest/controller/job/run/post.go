@@ -8,9 +8,12 @@ import (
 	"strings"
 	"time"
 
+	authmw "github.com/caesium-cloud/caesium/api/middleware"
 	"github.com/caesium-cloud/caesium/api/rest/manualparams"
 	jsvc "github.com/caesium-cloud/caesium/api/rest/service/job"
 	runsvc "github.com/caesium-cloud/caesium/api/rest/service/run"
+	iauth "github.com/caesium-cloud/caesium/internal/auth"
+	"github.com/caesium-cloud/caesium/internal/authz"
 	"github.com/caesium-cloud/caesium/internal/dbretry"
 	"github.com/caesium-cloud/caesium/internal/job"
 	"github.com/caesium-cloud/caesium/internal/models"
@@ -109,6 +112,12 @@ func Post(c *echo.Context) error {
 		runstorage.WithStartPriority(req.Priority),
 		runstorage.WithStartIdempotencyKey(idempotencyKey),
 	}
+	if guard := admissionNamespaceGuard(c); guard != nil {
+		startOpts = append(startOpts, runstorage.WithStartNamespaceGuard(guard))
+	}
+	if guard := replayNamespaceGuard(c); guard != nil {
+		startOpts = append(startOpts, runstorage.WithStartReplayGuard(guard))
+	}
 
 	j, err := postGetJob(ctx, id)
 	if err != nil {
@@ -135,6 +144,10 @@ func Post(c *echo.Context) error {
 		if idempotencyKey != "" {
 			result, found, err := postFindIdempotentStart(ctx, j.ID, startOpts...)
 			if err != nil {
+				if _, denied := errors.AsType[*authz.Denial](err); denied {
+					// The replay guard refused the recorded start.
+					return err
+				}
 				return startError(err)
 			}
 			if found {
@@ -146,6 +159,11 @@ func Post(c *echo.Context) error {
 
 	result, err := postStartRun(ctx, j.ID, startOpts...)
 	if err != nil {
+		if _, denied := errors.AsType[*authz.Denial](err); denied {
+			// The admission guard refused (nothing was written), or the replay
+			// guard refused a recorded start the caller cannot read.
+			return err
+		}
 		// A readback failure can follow durable admission. Finalize only the
 		// exact committed row before releasing its server reservation. The
 		// store owns bounded contention retries; unresolved writes stay visible.
@@ -197,6 +215,59 @@ func writeStartResult(c *echo.Context, jobID uuid.UUID, result runstorage.StartR
 		RunID:   result.RunID,
 		QueueID: result.QueueID,
 	})
+}
+
+// admissionNamespaceGuard re-checks a namespace-confined caller's runner grant
+// inside the admission transaction, against the namespace admission freezes
+// from the job row (identity-and-access A3). The auth middleware authorised
+// the job's namespace before the handler ran; a job moved in between would
+// otherwise get a run the caller may not start. Callers whose cluster role
+// covers runner, and auth-off servers, get no guard.
+func admissionNamespaceGuard(c *echo.Context) func(string) error {
+	principal := authmw.GetPrincipal(c)
+	if principal == nil || iauth.HasRole(principal.ClusterRole(), models.RoleRunner) {
+		return nil
+	}
+	return func(namespace string) error {
+		return authz.RequireRoleIn(principal, models.RoleRunner, namespace)
+	}
+}
+
+// replayNamespaceGuard is the outcome check of identity-and-access A3 (D9).
+// An idempotent start answers a retry from the start recorded for (job, key),
+// a lookup with no namespace dimension: if the job moved since, the record and
+// its run belong to the old namespace, and the route's authorisation (runner
+// in the job's current namespace) says nothing about them. A
+// namespace-confined caller therefore also needs viewer in every namespace the
+// record is attributed to (the namespace it was admitted in and its run's
+// persisted namespace). The store runs the guard before it compares the
+// request with the record, on every replay path (the up-front lookup, the
+// paused-job lookup, and the concurrent-winner fallbacks), so a refused
+// caller gets the same audited 403 whether or not its parameters match. A
+// record that cannot be attributed is refused. Callers whose cluster role
+// covers viewer, and auth-off servers, get no guard.
+func replayNamespaceGuard(c *echo.Context) func([]string) error {
+	principal := authmw.GetPrincipal(c)
+	if principal == nil || iauth.HasRole(principal.ClusterRole(), models.RoleViewer) {
+		return nil
+	}
+	return func(namespaces []string) error {
+		denial := &authz.Denial{
+			Reason:     "insufficient_role",
+			Required:   models.RoleViewer,
+			Namespaces: append([]string(nil), namespaces...),
+			Message:    "insufficient permissions",
+		}
+		if len(namespaces) == 0 {
+			return denial
+		}
+		for _, namespace := range namespaces {
+			if authz.RequireRoleIn(principal, models.RoleViewer, namespace) != nil {
+				return denial
+			}
+		}
+		return nil
+	}
 }
 
 func launchRun(ctx context.Context, j *models.Job, r *runstorage.JobRun, releaseWork func()) {

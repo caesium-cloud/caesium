@@ -68,6 +68,7 @@ func (ctrl *Controller) CreateChannel(c *echo.Context) error {
 		ResourceID:   ch.ID.String(),
 		SourceIP:     c.RealIP(),
 		Outcome:      auth.OutcomeSuccess,
+		Namespace:    models.NamespaceOrDefault(ch.Namespace),
 		Metadata: map[string]any{
 			"namespace": models.NamespaceOrDefault(ch.Namespace),
 			"name":      ch.Name,
@@ -105,6 +106,7 @@ func (ctrl *Controller) UpdateChannel(c *echo.Context) error {
 		ResourceID:   ch.ID.String(),
 		SourceIP:     c.RealIP(),
 		Outcome:      auth.OutcomeSuccess,
+		Namespace:    models.NamespaceOrDefault(ch.Namespace),
 		Metadata: map[string]any{
 			"name":           ch.Name,
 			"enabled":        ch.Enabled,
@@ -121,7 +123,15 @@ func (ctrl *Controller) DeleteChannel(c *echo.Context) error {
 		return echo.NewHTTPError(http.StatusBadRequest, "bad request").Wrap(err)
 	}
 
-	if err := newService(c.Request().Context()).DeleteChannel(id); err != nil {
+	service := newService(c.Request().Context())
+	// Best-effort: the audit row names the channel's namespace, read before
+	// the delete. A missing channel or a failed read leaves it empty and
+	// changes nothing else (delete stays idempotent).
+	namespace := ""
+	if ch, err := service.GetChannel(id); err == nil && ch != nil {
+		namespace = models.NamespaceOrDefault(ch.Namespace)
+	}
+	if err := service.DeleteChannel(id); err != nil {
 		return serviceError(err)
 	}
 
@@ -132,6 +142,7 @@ func (ctrl *Controller) DeleteChannel(c *echo.Context) error {
 		ResourceID:   id.String(),
 		SourceIP:     c.RealIP(),
 		Outcome:      auth.OutcomeSuccess,
+		Namespace:    namespace,
 	}))
 
 	return c.NoContent(http.StatusNoContent)

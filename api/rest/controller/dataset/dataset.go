@@ -5,10 +5,10 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
-	"net/url"
 	"strconv"
 	"strings"
 
+	authmw "github.com/caesium-cloud/caesium/api/middleware"
 	svc "github.com/caesium-cloud/caesium/api/rest/service/dataset"
 	"github.com/labstack/echo/v5"
 	"gorm.io/gorm"
@@ -119,20 +119,14 @@ func (ctrl *Controller) Advance(c *echo.Context) error {
 	return c.JSON(http.StatusOK, result)
 }
 
+// datasetPath returns the dataset identity the route addresses. It is the
+// decoding the auth middleware authorises against (authmw.DatasetPathIdentity),
+// so the handler acts on exactly the dataset whose owners were checked: Echo
+// leaves parameters escaped when the request has a RawPath, so they are
+// decoded exactly once (unconditional unescaping would confuse a literal %2F
+// name with a slash), and "_" names the empty dataset namespace.
 func datasetPath(c *echo.Context) (string, string) {
-	namespace, name := c.Param("ns"), c.Param("name")
-	// Echo's default router uses RawPath when present and leaves its parameters
-	// escaped. Otherwise it uses the already-decoded Path. Decode exactly once:
-	// unconditional unescaping would confuse a literal %2F name with a slash.
-	if c.Request().URL.RawPath != "" {
-		if decoded, err := url.PathUnescape(namespace); err == nil {
-			namespace = decoded
-		}
-		if decoded, err := url.PathUnescape(name); err == nil {
-			name = decoded
-		}
-	}
-	return svc.NamespaceFromPath(namespace), strings.TrimSpace(name)
+	return authmw.DatasetPathIdentity(c)
 }
 
 func parsePagination(c *echo.Context, limit, offset *int) error {

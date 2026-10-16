@@ -407,7 +407,7 @@ func TestReplayIdempotentStartRereadsRecordWhenQueueEntryIsGone(t *testing.T) {
 	promoted := promoteQueued(t, store, job.ID)
 
 	var result StartResult
-	run, err := store.replayIdempotentStart(db, stale, startRequestHash(nil, ""), &result)
+	run, err := store.replayIdempotentStart(db, stale, startRequestHash(nil, ""), nil, &result)
 	require.NoError(t, err)
 	require.Equal(t, StartOutcomeCreated, result.Outcome, "a promoted start must never be reported as dropped")
 	require.NotNil(t, run)

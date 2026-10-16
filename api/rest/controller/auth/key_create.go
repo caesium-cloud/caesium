@@ -72,6 +72,7 @@ func (ctrl *Controller) CreateKey(c *echo.Context) error {
 		ResourceID:   resp.Key.ID.String(),
 		SourceIP:     c.RealIP(),
 		Outcome:      auth.OutcomeSuccess,
+		Namespace:    auth.KeyAuditNamespace(resp.Key.Namespaces),
 		Metadata: map[string]any{
 			"role":        req.Role,
 			"description": req.Description,

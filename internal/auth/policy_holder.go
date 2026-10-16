@@ -86,6 +86,8 @@ func PolicyReloadAuditEntry(event policy.ReloadEvent) AuditEntry {
 		SourceIP:     event.SourceIP,
 		Outcome:      outcome,
 		Metadata:     metadata,
+		// A policy reload is a cluster decision (A3's audit namespace rule).
+		Namespace: models.ClusterNamespace,
 	}
 }
 

@@ -89,6 +89,9 @@ type AuditEntry struct {
 	SourceIP     string
 	Outcome      string
 	Metadata     map[string]any
+	// Namespace is AuditLog.Namespace: the namespace of the object the action
+	// was about ("*" for cluster-wide or multi-namespace, "" when none).
+	Namespace string
 }
 
 // Log writes an audit entry to the database.
@@ -112,6 +115,7 @@ func (a *AuditLogger) Log(entry AuditEntry) error {
 		SourceIP:     entry.SourceIP,
 		Outcome:      entry.Outcome,
 		Metadata:     metaJSON,
+		Namespace:    entry.Namespace,
 	}
 
 	if err := a.db.Create(record).Error; err != nil {
@@ -127,8 +131,12 @@ type AuditQueryRequest struct {
 	Until  *time.Time
 	Actor  string
 	Action string
-	Limit  int
-	Offset int
+	// Namespace, when non-empty, returns only rows whose namespace equals it
+	// exactly. Empty applies no namespace filter (every row, including
+	// identity rows and rows written before the column existed).
+	Namespace string
+	Limit     int
+	Offset    int
 }
 
 // Query returns audit log entries matching the given filters.
@@ -146,6 +154,9 @@ func (a *AuditLogger) Query(req *AuditQueryRequest) ([]models.AuditLog, error) {
 	}
 	if req.Action != "" {
 		q = q.Where("action = ?", req.Action)
+	}
+	if req.Namespace != "" {
+		q = q.Where("namespace = ?", req.Namespace)
 	}
 
 	limit := req.Limit

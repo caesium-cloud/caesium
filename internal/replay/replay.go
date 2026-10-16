@@ -104,6 +104,16 @@ type PreparedReplay struct {
 	plans       []plannedTask
 }
 
+// Namespace is the job namespace the replay run will be created in. Materialize
+// refuses if the job is no longer in it, so a check against this value holds
+// for the run that is actually committed.
+func (p *PreparedReplay) Namespace() string {
+	if p == nil {
+		return ""
+	}
+	return p.namespace
+}
+
 // RequiresDispatch reports whether this replay has tasks that must re-execute.
 func (p *PreparedReplay) RequiresDispatch() bool {
 	if p == nil {

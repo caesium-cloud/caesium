@@ -99,10 +99,18 @@ func (s *IntegrationTestSuite) TestAuthSessionCookieWithoutGrantsIsRefused() {
 	s.Equal("insufficient_role", metadata.Reason)
 	s.Equal("/v1/atoms", metadata.Path)
 
-	// whoami still requires viewer at "*" (identity routes are classified
-	// later), so it is refused the same way.
+	// whoami is an identity route (identity-and-access A3): any authenticated
+	// principal may ask who it is, even with no grant, and the answer names
+	// no role.
 	status, body = s.requestWithCookie(http.MethodGet, "/auth/whoami", cookie)
-	s.Equal(http.StatusForbidden, status, "whoami: %s", body)
+	s.Require().Equal(http.StatusOK, status, "whoami: %s", body)
+	var whoami struct {
+		Kind string `json:"kind"`
+		Role string `json:"role"`
+	}
+	s.Require().NoError(json.Unmarshal([]byte(body), &whoami), body)
+	s.Equal("user", whoami.Kind)
+	s.Empty(whoami.Role, "a grant-less session holds no role")
 }
 
 // requestWithCookie issues an unauthenticated-by-header request that presents

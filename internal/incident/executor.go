@@ -497,11 +497,25 @@ func (e *Executor) mirrorAudit(ctx context.Context, action *models.AgentAction, 
 		ResourceID:   action.IncidentID.String(),
 		Outcome:      outcome,
 		Metadata:     encodeJSON(map[string]any{"action_id": action.ID.String(), "tier": action.Tier}),
+		// The incident's namespace (identity-and-access A3), best-effort: a
+		// failed read leaves it empty and still writes the row.
+		Namespace: e.incidentAuditNamespace(ctx, action.IncidentID),
 	}
 	if err := e.store.DB().WithContext(ctx).Create(entry).Error; err != nil {
 		log.Warn("incident: failed to mirror action to audit log", "action_id", action.ID, "error", err)
 	}
 	metrics.AuditLogEntriesTotal.WithLabelValues(entry.Action, outcome).Inc()
+}
+
+// incidentAuditNamespace returns the incident's namespace for an audit row, or
+// "" when it cannot be read.
+func (e *Executor) incidentAuditNamespace(ctx context.Context, incidentID uuid.UUID) string {
+	var namespaces []string
+	if err := e.store.DB().WithContext(ctx).Model(&models.Incident{}).
+		Where("id = ?", incidentID).Limit(1).Pluck("namespace", &namespaces).Error; err != nil || len(namespaces) == 0 {
+		return ""
+	}
+	return models.NamespaceOrDefault(namespaces[0])
 }
 
 // RegisterTimerHandlers wires the durable-timer handlers this executor owns onto

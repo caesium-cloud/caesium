@@ -6,6 +6,7 @@ import (
 	"time"
 
 	iauth "github.com/caesium-cloud/caesium/internal/auth"
+	"github.com/caesium-cloud/caesium/internal/authz"
 	"github.com/labstack/echo/v5"
 )
 
@@ -13,6 +14,17 @@ func (ctrl *Controller) QueryAudit(c *echo.Context) error {
 	req := &iauth.AuditQueryRequest{
 		Actor:  c.QueryParam("actor"),
 		Action: c.QueryParam("action"),
+	}
+
+	// ?namespace=X returns only rows recorded against X ("*" or a DNS label);
+	// omitted applies no namespace filter. The auth middleware authorised
+	// the caller on the same value (omitted ⇒ admin at "*").
+	namespace, present, err := authz.ParseNamespaceQuery(c.QueryParam("namespace"))
+	if err != nil {
+		return echo.NewHTTPError(http.StatusBadRequest, "invalid namespace parameter").Wrap(err)
+	}
+	if present {
+		req.Namespace = namespace
 	}
 
 	if since := c.QueryParam("since"); since != "" {

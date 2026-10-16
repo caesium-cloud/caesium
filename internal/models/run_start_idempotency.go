@@ -34,7 +34,16 @@ type RunStartIdempotency struct {
 	// wrote. A queued start gains it when it is promoted.
 	RunID *uuid.UUID `gorm:"type:uuid;index" json:"run_id,omitempty"`
 	// QueueID is the run_queue row a queued start is waiting in.
-	QueueID   *uuid.UUID `gorm:"type:uuid;index" json:"queue_id,omitempty"`
-	CreatedAt time.Time  `gorm:"not null" json:"created_at"`
-	UpdatedAt time.Time  `gorm:"not null" json:"updated_at"`
+	QueueID *uuid.UUID `gorm:"type:uuid;index" json:"queue_id,omitempty"`
+	// Namespace is the job's namespace as admission froze it when the start
+	// was recorded (identity-and-access A3), so a retry can be authorised
+	// against the namespace of the original request even after the job moved
+	// and even when the outcome names no run. It is not rewritten when a
+	// queued start is promoted (the run carries its own namespace). Rows
+	// written before the column existed are NULL. Nullable and deliberately
+	// without a default: tag (dqlite re-tightens default-tagged columns on
+	// every AutoMigrate).
+	Namespace string    `gorm:"type:text" json:"namespace,omitempty"`
+	CreatedAt time.Time `gorm:"not null" json:"created_at"`
+	UpdatedAt time.Time `gorm:"not null" json:"updated_at"`
 }

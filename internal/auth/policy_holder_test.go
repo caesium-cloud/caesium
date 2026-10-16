@@ -86,7 +86,7 @@ func TestPolicyReloadAuditEntry(t *testing.T) {
 	})
 	require.Equal(t, auth.AuditEntry{
 		Actor: "csk_live_admin", Action: auth.ActionPolicyReloaded, ResourceType: "access_policy", ResourceID: "new",
-		SourceIP: "198.51.100.8", Outcome: auth.OutcomeSuccess,
+		SourceIP: "198.51.100.8", Outcome: auth.OutcomeSuccess, Namespace: "*",
 		Metadata: map[string]any{
 			"trigger": "api", "path": "/etc/caesium/policy.yaml", "revision": "new", "previous_revision": "old", "changed": true,
 		},
@@ -98,7 +98,7 @@ func TestPolicyReloadAuditEntry(t *testing.T) {
 	})
 	require.Equal(t, auth.AuditEntry{
 		Actor: "system:policy-loader", Action: auth.ActionPolicyReloadFailed, ResourceType: "access_policy", ResourceID: "bad",
-		Outcome: auth.OutcomeError,
+		Outcome: auth.OutcomeError, Namespace: "*",
 		Metadata: map[string]any{
 			"trigger": "poll", "path": "/p.yaml", "revision": "bad", "previous_revision": "old",
 			"error": `access policy file /p.yaml: bindings[0].role: invalid role "x"`,

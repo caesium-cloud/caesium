@@ -346,7 +346,7 @@ translated into cluster-wide bindings and behaviour is unchanged.
       `internal/models/api_key.go` (`Namespaces datatypes.JSON`),
       `api/middleware/auth.go`, `api/rest/controller/auth/sso.go`, `cmd/start/start.go`.
       Depends on: A1.
-- [ ] A3. Classify every route and make the middleware namespace-aware: `endpointPolicy`
+- [x] A3. Classify every route and make the middleware namespace-aware: `endpointPolicy`
       values become `RoutePolicy{Role, Class}` with classes `cluster | namespaced |
       collection | identity` per spec §8.1; the middleware requires the cluster role for
       `cluster`, resolves the target namespace(s) for `namespaced` (jobs by id, runs,
@@ -375,6 +375,16 @@ translated into cluster-wide bindings and behaviour is unchanged.
       `internal/auth/audit.go`, `api/rest/controller/auth/audit_query.go`,
       `cmd/auth/audit.go`, `api/auth_rbac_policy_completeness_test.go`.
       Depends on: A2 + B1 + D3.
+      (W3-α: routes whose handlers can still return another namespace's rows carry
+      `pendingOn("<item>")` and are cluster-only for confined principals until B2, B4,
+      B5, B6, D4, A5, A6 or A8 clears them; resolvers live in
+      `api/middleware/auth_namespace_resolvers.go`. Backfill create, read and cancel
+      wait on B4, whose history filter must also cover the backfill date dedupe
+      (`LatestRunForLogicalDate` reads runs by job id alone); agent-profile and
+      notification channel/policy deletes wait on D4. `run_start_idempotency` records
+      the namespace a keyed start was admitted in, and a retry is authorised against
+      it before the request is compared. Also fixed concurrency admission persisting
+      runs in `default`.)
 - [x] A4. (W3-β: `policy.Holder` in `internal/auth/policy/loader.go`; content-hash poll,
       not mtime; no-file `POST` reload answers 409, a rejected file 422.)
       Wire the policy loader: `CAESIUM_AUTH_POLICY_FILE`,

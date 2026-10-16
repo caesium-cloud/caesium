@@ -1,6 +1,7 @@
 package middleware
 
 import (
+	"errors"
 	"fmt"
 	"net/http"
 	"regexp"
@@ -9,6 +10,7 @@ import (
 
 	"github.com/caesium-cloud/caesium/api/internal/auditlog"
 	"github.com/caesium-cloud/caesium/internal/auth"
+	"github.com/caesium-cloud/caesium/internal/authz"
 	"github.com/caesium-cloud/caesium/internal/metrics"
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/caesium-cloud/caesium/pkg/log"
@@ -53,6 +55,12 @@ type AuthDeps struct {
 	Limiter    *auth.RateLimiter
 	Sessions   *auth.SessionStore
 	CookieName string
+
+	// RequireCollectionFilter is test-only: when set, a confined principal's
+	// successful request to a collection route whose handler did not call
+	// authz.NamespaceFilter or authz.MarkFiltered fails with 500. Production
+	// leaves it unset (the response is already written by then).
+	RequireCollectionFilter bool
 }
 
 // Auth returns Echo middleware that enforces API-key or session-cookie
@@ -125,24 +133,44 @@ func Auth(d AuthDeps) echo.MiddlewareFunc {
 				return echo.NewHTTPError(http.StatusUnauthorized, "missing credentials")
 			}
 
-			// Determine the required role for this endpoint.
+			// Determine the route's policy.
+			method := c.Request().Method
 			routePath := normalisePath(c)
-			required, ok := auth.RequiredRole(c.Request().Method, routePath)
+			policyKey := method + " " + routePath
+			policy, ok := lookupRoutePolicy(method, routePath)
 			if !ok {
 				return denyAccess(c, d.Auditor, principal.Subject, principal.ClusterRole(), routePath, "unknown_route", "")
 			}
+			required := policy.Role
 
-			if !auth.HasRole(principal.ClusterRole(), required) {
-				return denyAccess(c, d.Auditor, principal.Subject, principal.ClusterRole(), routePath, "insufficient_role", required)
+			// Namespace decision (A3): identity routes pass, a principal whose
+			// cluster role satisfies the route passes exactly as before, and a
+			// confined principal is authorised per route class.
+			decision, err := authorizeRoute(c, d.Service, principal, policyKey, policy)
+			if err != nil {
+				if denial, ok := errors.AsType[*routeDenial](err); ok {
+					resolveAuditNamespaces(c, d.Service, policyKey, decision)
+					return denyDecision(c, d.Auditor, principal, routePath, decision, denial)
+				}
+				return err
 			}
 
 			// Store authenticated identity in context for downstream handlers.
 			scopeContext, err := authorizeScope(c, d.Service, principal.Scope, routePath)
 			if err != nil {
 				if he, ok := err.(*echo.HTTPError); ok && he.Code == http.StatusForbidden {
-					return denyAccessWithMessage(c, d.Auditor, principal.Subject, principal.ClusterRole(), routePath, "insufficient_scope", required, forbiddenMessage(he))
+					resolveAuditNamespaces(c, d.Service, policyKey, decision)
+					return denyAccessAudited(c, d.Auditor, principal.Subject, principal.ClusterRole(), routePath, "insufficient_scope", required, forbiddenMessage(he), decision, nil)
 				}
 				return err
+			}
+
+			// An unrestricted principal's decision resolved no namespace; the
+			// write routes that write an audit row resolve it best-effort for
+			// the row. Read routes never pay for an audit lookup (their row,
+			// if any, keeps an empty namespace).
+			if decision.Unrestricted && method != http.MethodGet && routeWritesAudit(method, routePath) {
+				resolveAuditNamespaces(c, d.Service, policyKey, decision)
 			}
 
 			if key != nil {
@@ -150,13 +178,24 @@ func Auth(d AuthDeps) echo.MiddlewareFunc {
 				metrics.AuthKeyAgeSeconds.Observe(time.Since(key.CreatedAt).Seconds())
 			}
 			c.Set(ContextKeyPrincipal, principal)
+			authz.SetDecision(c, decision)
+			injectCollectionScope(c, decision)
 
 			if err := next(c); err != nil {
+				if denial, ok := errors.AsType[*authz.Denial](err); ok {
+					return denyHandlerDenial(c, d.Auditor, principal, routePath, decision, denial)
+				}
 				return err
 			}
 
+			if d.RequireCollectionFilter {
+				if err := checkCollectionFiltered(c, decision, routePath); err != nil {
+					return err
+				}
+			}
+
 			metrics.AuthRequestsTotal.WithLabelValues("success", string(principal.ClusterRole()), c.Request().Method, routePath).Inc()
-			logSuccessfulAction(d.Auditor, c, principal, routePath, scopeContext)
+			logSuccessfulAction(d.Auditor, c, principal, routePath, scopeContext, decision)
 			return nil
 		}
 	}
@@ -297,6 +336,24 @@ func denyAccessWithMessage(
 	required models.Role,
 	message string,
 ) error {
+	return denyAccessAudited(c, auditor, actor, keyRole, routePath, reason, required, message, nil, nil)
+}
+
+// denyAccessAudited answers 403 with message, counts the denial and audits it.
+// The row's namespace comes from the decision (nil: none). The fixed metadata
+// fields keep their pre-namespace shape; extra fields are added to them.
+func denyAccessAudited(
+	c *echo.Context,
+	auditor *auth.AuditLogger,
+	actor string,
+	keyRole models.Role,
+	routePath string,
+	reason string,
+	required models.Role,
+	message string,
+	decision *authz.Decision,
+	extra map[string]any,
+) error {
 	metrics.AuthRequestsTotal.WithLabelValues("denied", string(keyRole), c.Request().Method, routePath).Inc()
 
 	metadata := map[string]any{
@@ -309,15 +366,72 @@ func denyAccessWithMessage(
 	if required != "" {
 		metadata["required_role"] = string(required)
 	}
+	auditDecisionMetadata(metadata, decision)
+	for k, v := range extra {
+		metadata[k] = v
+	}
 
 	auditlog.LogFailure(auditor.Log(auth.AuditEntry{
-		Actor:    actor,
-		Action:   auth.ActionAuthDenied,
-		SourceIP: c.RealIP(),
-		Outcome:  auth.OutcomeDenied,
-		Metadata: metadata,
+		Actor:     actor,
+		Action:    auth.ActionAuthDenied,
+		SourceIP:  c.RealIP(),
+		Outcome:   auth.OutcomeDenied,
+		Metadata:  metadata,
+		Namespace: decision.AuditNamespace(),
 	}))
 	return echo.NewHTTPError(http.StatusForbidden, message)
+}
+
+// denyDecision audits a namespace-decision denial. A confined principal's row
+// also names the namespaces it was checked against and the pending plan item;
+// a principal holding nothing beyond its cluster role keeps the pre-namespace
+// metadata.
+func denyDecision(c *echo.Context, auditor *auth.AuditLogger, principal *auth.Principal, routePath string, decision *authz.Decision, denial *routeDenial) error {
+	extra := map[string]any{}
+	if confinedPrincipal(principal) {
+		if decision != nil && len(decision.Namespaces) > 0 {
+			extra["namespaces"] = append([]string(nil), decision.Namespaces...)
+		}
+		if denial.pending != "" {
+			extra["pending"] = denial.pending
+		}
+	}
+	return denyAccessAudited(c, auditor, principal.Subject, principal.ClusterRole(), routePath, denial.reason, denial.required, denial.message, decision, extra)
+}
+
+// denyHandlerDenial audits a refusal a handler returned as *authz.Denial (for
+// example an idempotent start replaying a run the caller cannot read).
+func denyHandlerDenial(c *echo.Context, auditor *auth.AuditLogger, principal *auth.Principal, routePath string, decision *authz.Decision, denial *authz.Denial) error {
+	audited := &authz.Decision{Class: auth.RouteClassNamespaced, Role: denial.Required, Namespaces: denial.Namespaces}
+	if decision != nil {
+		audited.Class = decision.Class
+	}
+	reason := denial.Reason
+	if reason == "" {
+		reason = "insufficient_role"
+	}
+	message := denial.Message
+	if message == "" {
+		message = "insufficient permissions"
+	}
+	extra := map[string]any{"namespaces": append([]string(nil), denial.Namespaces...)}
+	return denyAccessAudited(c, auditor, principal.Subject, principal.ClusterRole(), routePath, reason, denial.Required, message, audited, extra)
+}
+
+// confinedPrincipal reports whether p holds a grant outside "*" stronger than
+// its cluster role: the only principals a namespace decision can treat
+// differently from a cluster-role check.
+func confinedPrincipal(p *auth.Principal) bool {
+	if p == nil {
+		return false
+	}
+	cluster := models.RoleLevel(p.ClusterRole())
+	for namespace, role := range p.Grants {
+		if namespace != models.ClusterNamespace && models.RoleLevel(role) > cluster {
+			return true
+		}
+	}
+	return false
 }
 
 func forbiddenMessage(err *echo.HTTPError) string {
@@ -335,6 +449,7 @@ func logSuccessfulAction(
 	principal *auth.Principal,
 	routePath string,
 	scopeContext *scopeAuditContext,
+	decision *authz.Decision,
 ) {
 	action := auditActionForRoute(c.Request().Method, routePath)
 	if action == "" {
@@ -354,7 +469,9 @@ func logSuccessfulAction(
 			"method": c.Request().Method,
 			"path":   routePath,
 		},
+		Namespace: decision.AuditNamespace(),
 	}
+	auditDecisionMetadata(entry.Metadata, decision)
 
 	if scopeContext != nil && len(scopeContext.jobAliases) > 0 {
 		entry.ResourceType = "job"
