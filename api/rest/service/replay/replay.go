@@ -42,6 +42,15 @@ type Request struct {
 	Set            map[string]string
 	IdempotencyKey string
 	Principal      *iauth.Principal
+	// NamespaceGuard, when set, is called with the namespace of the replay
+	// run the request would act on — an existing replay found under the
+	// request's fingerprint, before it is resumed or returned, or a new one,
+	// after it is prepared and before it is materialized (Materialize refuses
+	// if the job left that namespace meanwhile). A non-nil error refuses the
+	// request unchanged; nothing is written or dispatched. The fingerprint
+	// carries the principal's identity, not its grants, and the job may move
+	// after the request was authorised (identity-and-access A3).
+	NamespaceGuard func(namespace string) error
 }
 
 // Result is the replay endpoint result.
@@ -162,6 +171,9 @@ func (s *Service) replay(req Request) (*Result, error) {
 	}
 
 	if existing, err := s.findByFingerprint(fingerprint); err == nil {
+		if err := guardExisting(req, existing); err != nil {
+			return nil, err
+		}
 		return s.returnExisting(req.JobID, existing.ID, fingerprint)
 	} else if !errors.Is(err, gorm.ErrRecordNotFound) {
 		return nil, err
@@ -183,6 +195,11 @@ func (s *Service) replay(req Request) (*Result, error) {
 	if err != nil {
 		return nil, err
 	}
+	if req.NamespaceGuard != nil {
+		if err := req.NamespaceGuard(models.NamespaceOrDefault(prepared.Namespace())); err != nil {
+			return nil, err
+		}
+	}
 	if prepared.RequiresDispatch() && !s.isDistributedExecutionMode() {
 		return nil, ErrReplayRequiresDistributedMode
 	}
@@ -197,12 +214,23 @@ func (s *Service) replay(req Request) (*Result, error) {
 
 	existing, loadErr := s.findByFingerprint(fingerprint)
 	if loadErr == nil {
+		if err := guardExisting(req, existing); err != nil {
+			return nil, err
+		}
 		return s.returnExisting(req.JobID, existing.ID, fingerprint)
 	}
 	if errors.Is(loadErr, gorm.ErrRecordNotFound) {
 		return nil, fmt.Errorf("replay: materialize idempotency reservation: %w", err)
 	}
 	return nil, fmt.Errorf("replay: load existing idempotency reservation: %w", loadErr)
+}
+
+// guardExisting applies Request.NamespaceGuard to an existing replay.
+func guardExisting(req Request, existing *models.JobRun) error {
+	if req.NamespaceGuard == nil || existing == nil {
+		return nil
+	}
+	return req.NamespaceGuard(models.NamespaceOrDefault(existing.Namespace))
 }
 
 func (s *Service) returnExisting(jobID, runID uuid.UUID, fingerprint string) (*Result, error) {

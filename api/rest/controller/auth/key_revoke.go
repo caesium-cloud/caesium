@@ -36,6 +36,7 @@ func (ctrl *Controller) RevokeKey(c *echo.Context) error {
 		ResourceID:   id.String(),
 		SourceIP:     c.RealIP(),
 		Outcome:      iauth.OutcomeSuccess,
+		Namespace:    ctrl.service.KeyAuditNamespaceByID(c.Request().Context(), id),
 	}))
 
 	return c.JSON(http.StatusOK, map[string]string{"status": "revoked"})

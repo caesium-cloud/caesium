@@ -188,6 +188,9 @@ func (s *Source) auditSync(importer *jobdef.Importer, report SyncReport, syncErr
 	if err := auth.NewAuditLogger(importer.DB()).Log(auth.AuditEntry{
 		Actor: auth.ActorGitSync, Action: auth.ActionJobdefGitSync, ResourceType: "git_source",
 		ResourceID: resourceID, Outcome: outcome, Metadata: metadata,
+		// A sync is a cluster-level act: its metadata names every manifest
+		// the source carried, including skipped ones outside the allowlist.
+		Namespace: models.ClusterNamespace,
 	}); err != nil {
 		log.Warn("git sync audit write failed", "source_id", report.SourceID, "url", report.URL, "error", err)
 	}

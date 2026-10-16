@@ -12,19 +12,21 @@ import (
 )
 
 var (
-	auditSince  string
-	auditActor  string
-	auditAction string
-	auditLimit  int
-	auditServer string
-	auditAPIKey string
+	auditSince     string
+	auditActor     string
+	auditAction    string
+	auditNamespace string
+	auditLimit     int
+	auditServer    string
+	auditAPIKey    string
 )
 
 var auditCmd = &cobra.Command{
-	Use:     "audit",
-	Args:    cobra.NoArgs,
-	Short:   "Query the audit log",
-	Example: `  caesium auth audit --since 24h --actor csk_live_a1b2`,
+	Use:   "audit",
+	Args:  cobra.NoArgs,
+	Short: "Query the audit log",
+	Example: `  caesium auth audit --since 24h --actor csk_live_a1b2
+  caesium auth audit --namespace marketing`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		server := strings.TrimSuffix(auditServer, "/")
 		apiKey := resolveAPIKey(cmd, auditAPIKey)
@@ -38,6 +40,9 @@ var auditCmd = &cobra.Command{
 		}
 		if auditAction != "" {
 			params.Set("action", auditAction)
+		}
+		if auditNamespace != "" {
+			params.Set("namespace", auditNamespace)
 		}
 		if auditLimit > 0 {
 			params.Set("limit", fmt.Sprintf("%d", auditLimit))
@@ -73,6 +78,7 @@ func init() {
 	auditCmd.Flags().StringVar(&auditSince, "since", "", "Show entries since duration (e.g. 24h) or RFC3339 timestamp")
 	auditCmd.Flags().StringVar(&auditActor, "actor", "", "Filter by actor (key prefix or OIDC subject)")
 	auditCmd.Flags().StringVar(&auditAction, "action", "", "Filter by action (e.g. job.create, api_key.revoke)")
+	auditCmd.Flags().StringVar(&auditNamespace, "namespace", "", `Only entries recorded against this namespace ("*" for cluster-wide); a namespace admin must set it`)
 	auditCmd.Flags().IntVar(&auditLimit, "limit", 100, "Maximum number of entries to return")
 	auditCmd.Flags().StringVar(&auditServer, "server", "http://localhost:8080", "Caesium server base URL")
 	auditCmd.Flags().StringVar(&auditAPIKey, "api-key", "", apiKeyFlagUsage("Admin"))

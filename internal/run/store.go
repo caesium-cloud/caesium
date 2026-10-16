@@ -424,6 +424,20 @@ type StartOptions struct {
 	// the same job with the same key returns this start's outcome instead of
 	// admitting again. See start_idempotency.go.
 	IdempotencyKey string
+	// NamespaceGuard, when set, is called inside the admission transaction
+	// with the owning job's namespace as admission freezes it, before
+	// anything is written. A non-nil error aborts the start and is returned
+	// unchanged. It lets an authorised caller re-check its namespace grant
+	// against the row the run is created from, closing the window between
+	// request authorisation and admission (a job moved in between).
+	NamespaceGuard func(namespace string) error
+}
+
+// WithStartNamespaceGuard sets StartOptions.NamespaceGuard.
+func WithStartNamespaceGuard(guard func(namespace string) error) StartOption {
+	return func(opts *StartOptions) {
+		opts.NamespaceGuard = guard
+	}
 }
 
 type StartOption func(*StartOptions)
@@ -709,6 +723,8 @@ type startRunRequest struct {
 	requestParams  map[string]string
 	// result, when non-nil, receives the admission outcome.
 	result *StartResult
+	// namespaceGuard is StartOptions.NamespaceGuard.
+	namespaceGuard func(namespace string) error
 }
 
 // storeBusyRetryBackoffs aliases the shared contention-retry schedule so
@@ -1276,6 +1292,11 @@ func (s *Store) admit(tx *gorm.DB, model *models.JobRun, req startRunRequest) (a
 		return admissionResult{}, err
 	}
 	model.Namespace = models.NamespaceOrDefault(owner.Namespace)
+	if req.namespaceGuard != nil {
+		if err := req.namespaceGuard(model.Namespace); err != nil {
+			return admissionResult{}, err
+		}
+	}
 
 	// The data circuit breaker's downstream gate runs FIRST, before any
 	// concurrency policy: a run that must not exist should not consume a slot,
@@ -1383,12 +1404,15 @@ func (s *Store) insertRunIfSlotTx(tx *gorm.DB, model *models.JobRun, maxRuns int
 	// statement through Raft, so concurrent nodes derive admission from
 	// RowsAffected instead of racing through CountActive-then-Create. Backfill
 	// rows are intentionally excluded; they are governed by backfill maxConcurrent.
+	// The namespace column is written explicitly: admit froze the owning
+	// job's namespace on the model, and omitting it here persisted the column
+	// default ("default") for every run admitted under a concurrency policy.
 	result := tx.Exec(`
 INSERT INTO job_runs (
-	id, job_id, backfill_id, trigger_id, status, priority, params, quarantine,
+	namespace, id, job_id, backfill_id, trigger_id, status, priority, params, quarantine,
 	started_at, created_at, updated_at
 )
-SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
 WHERE (
 	SELECT count(*)
 	FROM job_runs
@@ -1397,6 +1421,7 @@ WHERE (
 		AND quarantine <> true
 		AND backfill_id IS NULL
 ) < ?`,
+		models.NamespaceOrDefault(model.Namespace),
 		model.ID,
 		model.JobID,
 		backfillID,

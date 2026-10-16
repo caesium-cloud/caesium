@@ -13,6 +13,9 @@ import (
 	jsvc "github.com/caesium-cloud/caesium/api/rest/service/job"
 	replaysvc "github.com/caesium-cloud/caesium/api/rest/service/replay"
 	runsvc "github.com/caesium-cloud/caesium/api/rest/service/run"
+	iauth "github.com/caesium-cloud/caesium/internal/auth"
+	"github.com/caesium-cloud/caesium/internal/authz"
+	"github.com/caesium-cloud/caesium/internal/models"
 	replaycore "github.com/caesium-cloud/caesium/internal/replay"
 	"github.com/caesium-cloud/caesium/internal/runlife"
 	"github.com/google/uuid"
@@ -90,14 +93,32 @@ func Post(c *echo.Context) error {
 	// below). Re-introducing a pre-check here would silently shadow that
 	// decision, since this collapsed view carries no descriptors.
 
-	result, err := replaysvc.New(ctx).Replay(replaysvc.Request{
+	principal := authmw.GetPrincipal(c)
+	replayReq := replaysvc.Request{
 		JobID:          jobID,
 		BaselineRunID:  baselineRunID,
 		Set:            req.Set,
 		IdempotencyKey: idempotencyKey,
-		Principal:      authmw.GetPrincipal(c),
-	})
+		Principal:      principal,
+	}
+	// A namespace-confined caller needs runner in the namespace of the replay
+	// run it acts on, checked inside the replay service before anything is
+	// written, resumed or dispatched: an idempotent retry returns the replay
+	// recorded under its fingerprint (identity, not grants), which may sit in
+	// a namespace the job has left, and a new replay is created in the job's
+	// namespace as Prepare reads it, which may differ from the one the
+	// middleware authorised (identity-and-access A3, D9). Unrestricted callers
+	// get no guard.
+	if principal != nil && !iauth.HasRole(principal.ClusterRole(), models.RoleRunner) {
+		replayReq.NamespaceGuard = func(namespace string) error {
+			return authz.RequireRoleIn(principal, models.RoleRunner, namespace)
+		}
+	}
+	result, err := replaysvc.New(ctx).Replay(replayReq)
 	if err != nil {
+		if _, denied := errors.AsType[*authz.Denial](err); denied {
+			return err
+		}
 		return replayError(err)
 	}
 

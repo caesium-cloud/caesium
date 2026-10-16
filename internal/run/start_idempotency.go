@@ -121,6 +121,7 @@ func (s *Store) StartWithResult(ctx context.Context, jobID uuid.UUID, triggerID 
 		priorityOverride: startOpts.Priority,
 		idempotencyKey:   key,
 		result:           &result,
+		namespaceGuard:   startOpts.NamespaceGuard,
 	})
 	if err != nil && !errors.Is(err, ErrRunSkipped) && !errors.Is(err, ErrRunQueued) {
 		return StartResult{}, err

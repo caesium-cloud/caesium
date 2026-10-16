@@ -38,6 +38,10 @@ type ReleaseHoldParams struct {
 	// release so the next reader knows the hold was acked knowingly rather
 	// than dismissed.
 	Tolerances map[string]string
+	// AuditNamespace is AuditLog.Namespace for the release's audit rows: the
+	// namespace of the dataset's owners as the auth middleware resolved it
+	// ("*" when they span several, "" when unresolved).
+	AuditNamespace string
 }
 
 // ReleaseHoldResult is the response shape for POST /v1/datasets/holds/:id/release.
@@ -109,6 +113,7 @@ func (s *Service) holdReleaseAuditEntry(params ReleaseHoldParams, principal, out
 		SourceIP:     params.SourceIP,
 		Outcome:      outcome,
 		Metadata:     encodeAuditMetadata(metadata),
+		Namespace:    params.AuditNamespace,
 	}
 }
 

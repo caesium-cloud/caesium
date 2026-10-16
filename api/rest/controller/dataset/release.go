@@ -11,6 +11,7 @@ import (
 
 	authmw "github.com/caesium-cloud/caesium/api/middleware"
 	svc "github.com/caesium-cloud/caesium/api/rest/service/dataset"
+	"github.com/caesium-cloud/caesium/internal/authz"
 	runstore "github.com/caesium-cloud/caesium/internal/run"
 	"github.com/caesium-cloud/caesium/pkg/env"
 	"github.com/google/uuid"
@@ -125,6 +126,9 @@ func (ctrl *Controller) Release(c *echo.Context) error {
 		SourceIP:   c.RealIP(),
 		Reason:     reason,
 		Tolerances: tolerances,
+		// The owners' namespace(s) the auth middleware resolved for this
+		// release (identity-and-access A3).
+		AuditNamespace: authz.AuditNamespace(c),
 	})
 	if err != nil {
 		switch {
