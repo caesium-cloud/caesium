@@ -34,10 +34,10 @@ func TestProviderAuthenticateIntegration(t *testing.T) {
 	if mapping := os.Getenv("CAESIUM_TEST_LDAP_ROLE_MAPPING"); strings.TrimSpace(mapping) != "" {
 		mapper, err := authpkg.NewRoleMapper(mapping, "")
 		require.NoError(t, err)
-		role, ok := mapper.Resolve(identity.Groups)
-		require.True(t, ok, "expected LDAP groups to resolve with CAESIUM_TEST_LDAP_ROLE_MAPPING")
+		grants := mapper.Resolve(identity.Groups, "")
+		require.NotEmpty(t, grants, "expected LDAP groups to resolve with CAESIUM_TEST_LDAP_ROLE_MAPPING")
 		if expectedRole := strings.TrimSpace(os.Getenv("CAESIUM_TEST_LDAP_EXPECTED_ROLE")); expectedRole != "" {
-			require.Equal(t, models.Role(expectedRole), role)
+			require.Equal(t, models.Role(expectedRole), grants.ClusterRole())
 		}
 	}
 }

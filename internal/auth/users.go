@@ -43,15 +43,16 @@ func (us *UserStore) upsert(ctx context.Context, ext *ExternalIdentity, role mod
 	switch {
 	case errors.Is(err, gorm.ErrRecordNotFound):
 		user = models.User{
-			ID:          uuid.New(),
-			Issuer:      ext.Issuer,
-			Subject:     ext.Subject,
-			Email:       ext.Email,
-			DisplayName: ext.DisplayName,
-			Groups:      groupsJSON,
-			Role:        role,
-			CreatedAt:   now,
-			LastLoginAt: &now,
+			ID:            uuid.New(),
+			Issuer:        ext.Issuer,
+			Subject:       ext.Subject,
+			Email:         ext.Email,
+			DisplayName:   ext.DisplayName,
+			Groups:        groupsJSON,
+			Role:          role,
+			EmailVerified: ext.EmailVerified,
+			CreatedAt:     now,
+			LastLoginAt:   &now,
 		}
 		if err := us.db.WithContext(ctx).Create(&user).Error; err != nil {
 			if sqlerr.IsUniqueConstraint(err) {
@@ -83,12 +84,15 @@ func (us *UserStore) updateExisting(ctx context.Context, user *models.User, ext 
 		return user, nil
 	}
 
+	// A map update writes false too, so a later unverified login downgrades
+	// the stored email trust.
 	updates := map[string]any{
-		"email":         ext.Email,
-		"display_name":  ext.DisplayName,
-		"groups":        groupsJSON,
-		"role":          role,
-		"last_login_at": now,
+		"email":          ext.Email,
+		"display_name":   ext.DisplayName,
+		"groups":         groupsJSON,
+		"role":           role,
+		"email_verified": ext.EmailVerified,
+		"last_login_at":  now,
 	}
 	if err := us.db.WithContext(ctx).Model(user).Updates(updates).Error; err != nil {
 		return nil, fmt.Errorf("update user: %w", err)
@@ -97,6 +101,7 @@ func (us *UserStore) updateExisting(ctx context.Context, user *models.User, ext 
 	user.DisplayName = ext.DisplayName
 	user.Groups = groupsJSON
 	user.Role = role
+	user.EmailVerified = ext.EmailVerified
 	user.LastLoginAt = &now
 	return user, nil
 }

@@ -461,6 +461,7 @@ type mockIssuer struct {
 	nextAudiences       []string
 	nextAuthorizedParty string
 	nextExpiry          time.Time
+	nextEmailVerified   any // nil omits the email_verified claim
 	lastTokenForm       url.Values
 }
 
@@ -545,6 +546,9 @@ func (m *mockIssuer) token(w http.ResponseWriter, r *http.Request) {
 	}
 	if m.nextAuthorizedParty != "" {
 		claims["azp"] = m.nextAuthorizedParty
+	}
+	if m.nextEmailVerified != nil {
+		claims["email_verified"] = m.nextEmailVerified
 	}
 	idToken := m.signIDToken(claims)
 	writeJSON(w, map[string]any{

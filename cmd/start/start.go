@@ -24,6 +24,7 @@ import (
 	"github.com/caesium-cloud/caesium/internal/auth"
 	authldap "github.com/caesium-cloud/caesium/internal/auth/ldap"
 	authoidc "github.com/caesium-cloud/caesium/internal/auth/oidc"
+	"github.com/caesium-cloud/caesium/internal/auth/policy"
 	authsaml "github.com/caesium-cloud/caesium/internal/auth/saml"
 	"github.com/caesium-cloud/caesium/internal/dispatch"
 	dispatchpki "github.com/caesium-cloud/caesium/internal/dispatch/pki"
@@ -1125,11 +1126,36 @@ func initSAMLProvider(ctx context.Context, vars env.Environment) auth.RedirectAu
 	return provider
 }
 
+// newPolicySource returns the grant source for SSO logins and session
+// principals. With no policy file, CAESIUM_AUTH_ROLE_MAPPING and
+// CAESIUM_AUTH_DEFAULT_ROLE are translated into cluster-wide bindings, parsed
+// only when SSO is enabled (an unused mapping was never a startup error).
+// A4 replaces this body with the policy file loader; callers do not change.
+func newPolicySource(vars env.Environment) (policy.Source, error) {
+	if vars.AuthMode != "api-key" || !vars.SSOEnabled() {
+		return nil, nil
+	}
+	mapper, err := auth.NewRoleMapper(vars.AuthRoleMapping, vars.AuthDefaultRole)
+	if err != nil {
+		return nil, err
+	}
+	// Return the mapper only on success: a nil *RoleMapper inside the
+	// interface would not compare equal to nil.
+	return mapper, nil
+}
+
 // initAuth sets up authentication services based on CAESIUM_AUTH_MODE.
 // Returns nil services when auth is disabled so callers can pass them through safely.
 func initAuth(ctx context.Context, vars env.Environment, runAsync func(func())) (*auth.Service, *auth.AuditLogger, *auth.RateLimiter, *auth.SessionStore, *auth.SSOService) {
 	conn := db.Connection()
-	authSvc := auth.NewService(conn, auth.WithKeyHashSecret(vars.AuthKeyHashSecret))
+	policySource, err := newPolicySource(vars)
+	if err != nil {
+		log.Fatal("invalid CAESIUM_AUTH_ROLE_MAPPING", "error", err)
+	}
+	authSvc := auth.NewService(conn,
+		auth.WithKeyHashSecret(vars.AuthKeyHashSecret),
+		auth.WithPolicySource(policySource),
+	)
 	auditor := auth.NewAuditLogger(conn)
 	limiter := auth.NewRateLimiter(vars.AuthRateLimitPerMinute, time.Minute)
 	var sessions *auth.SessionStore
@@ -1202,11 +1228,7 @@ func initAuth(ctx context.Context, vars env.Environment, runAsync func(func())) 
 			auth.WithSessionTTLs(vars.AuthSessionIdleTTL, vars.AuthSessionAbsoluteTTL),
 		)
 		if vars.SSOEnabled() {
-			mapper, err := auth.NewRoleMapper(vars.AuthRoleMapping, vars.AuthDefaultRole)
-			if err != nil {
-				log.Fatal("invalid CAESIUM_AUTH_ROLE_MAPPING", "error", err)
-			}
-			sso = auth.NewSSOService(auth.NewUserStore(conn), sessions, mapper, auth.WithSSOAuditLogger(auditor))
+			sso = auth.NewSSOService(auth.NewUserStore(conn), sessions, policySource, auth.WithSSOAuditLogger(auditor))
 			runAsync(func() {
 				sessions.RunLastSeenFlusher(ctx)
 			})

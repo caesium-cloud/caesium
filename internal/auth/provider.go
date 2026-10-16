@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/caesium-cloud/caesium/internal/auth/policy"
 	"github.com/caesium-cloud/caesium/internal/metrics"
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/caesium-cloud/caesium/pkg/log"
@@ -25,6 +26,10 @@ type ExternalIdentity struct {
 	Email       string
 	DisplayName string
 	Groups      []string
+	// EmailVerified reports that the provider verified Email or is trusted to
+	// assert it. Only then may Email match policy users: bindings. The zero
+	// value is untrusted.
+	EmailVerified bool
 }
 
 // RedirectAuthenticator is implemented by browser-redirect providers.
@@ -40,11 +45,11 @@ type CredentialAuthenticator interface {
 	Authenticate(ctx context.Context, username, password string) (*ExternalIdentity, error)
 }
 
-// SSOService is the shared tail: provision the user, map a role, mint a session.
+// SSOService is the shared tail: resolve grants, provision the user, mint a session.
 type SSOService struct {
 	users    *UserStore
 	sessions *SessionStore
-	roles    *RoleMapper
+	policy   policy.Source
 	auditor  *AuditLogger
 }
 
@@ -58,9 +63,10 @@ func WithSSOAuditLogger(auditor *AuditLogger) SSOServiceOption {
 	}
 }
 
-// NewSSOService creates a shared SSO login pipeline.
-func NewSSOService(users *UserStore, sessions *SessionStore, roles *RoleMapper, opts ...SSOServiceOption) *SSOService {
-	s := &SSOService{users: users, sessions: sessions, roles: roles}
+// NewSSOService creates a shared SSO login pipeline that resolves grants
+// through src. A nil src denies every login.
+func NewSSOService(users *UserStore, sessions *SessionStore, src policy.Source, opts ...SSOServiceOption) *SSOService {
+	s := &SSOService{users: users, sessions: sessions, policy: src}
 	for _, opt := range opts {
 		opt(s)
 	}
@@ -82,13 +88,22 @@ func (s *SSOService) Complete(ctx context.Context, ext *ExternalIdentity, method
 		return "", nil, ErrInvalidExternalIdentity
 	}
 
-	role, ok := s.roles.Resolve(ext.Groups)
-	if !ok {
+	email := ""
+	if ext.EmailVerified {
+		email = ext.Email
+	}
+	var grants policy.Grants
+	if s.policy != nil {
+		grants = s.policy.Resolve(ext.Groups, email)
+	}
+	if len(grants) == 0 {
 		outcome = OutcomeDenied
-		s.auditLoginDenied(ext, method, ip, "no_role_mapping")
+		s.auditLoginDenied(ext, method, ip, "no_binding")
 		return "", nil, ErrLoginDenied
 	}
-	user, created, err := s.users.upsert(ctx, ext, role)
+	// User.Role keeps only the cluster role at last login (possibly "" for a
+	// confined user); requests resolve their grants afresh.
+	user, created, err := s.users.upsert(ctx, ext, grants.ClusterRole())
 	if err != nil {
 		s.auditLoginError(ext, method, ip, "user_upsert_failed")
 		return "", nil, err

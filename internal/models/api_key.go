@@ -46,6 +46,11 @@ func ValidRole(r string) bool {
 
 // APIKey represents an API key stored in the database.
 // The plaintext key is never persisted — only a versioned stored hash.
+//
+// Namespaces is the JSON list of namespaces the key's Role applies in; ["*"]
+// is cluster-wide. SQL NULL, the state of every key minted before namespaces
+// existed, also means cluster-wide. Any other empty or undecodable value grants
+// nothing.
 type APIKey struct {
 	ID            uuid.UUID      `gorm:"type:uuid;primaryKey" json:"id"`
 	KeyPrefix     string         `gorm:"type:text;size:12;not null;index" json:"key_prefix"`
@@ -54,6 +59,7 @@ type APIKey struct {
 	Description   string         `gorm:"type:text" json:"description,omitempty"`
 	Role          Role           `gorm:"type:text;not null" json:"role"`
 	Scope         datatypes.JSON `gorm:"type:json" json:"scope,omitempty"`
+	Namespaces    datatypes.JSON `gorm:"type:json" json:"namespaces,omitempty"` // NULL means ["*"]; see below
 	CreatedBy     string         `gorm:"type:text" json:"created_by,omitempty"`
 	CreatedAt     time.Time      `gorm:"not null" json:"created_at"`
 	ExpiresAt     *time.Time     `json:"expires_at,omitempty"`

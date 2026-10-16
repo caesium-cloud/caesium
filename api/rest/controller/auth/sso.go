@@ -73,7 +73,7 @@ func (s *SSOController) Whoami(c *echo.Context) error {
 	body := map[string]any{
 		"kind":    principal.Kind,
 		"subject": principal.Subject,
-		"role":    principal.Role,
+		"role":    principal.ClusterRole(),
 	}
 	if principal.Kind == iauth.PrincipalUser {
 		body["email"] = principal.Subject

@@ -98,4 +98,38 @@ func TestUserStoreUpsertDoesNotRetryUnrelatedDuplicateMessage(t *testing.T) {
 	require.NoError(t, db.Where("issuer = ? AND subject = ?", "oidc", "sub-unrelated").First(&persisted).Error)
 	require.Equal(t, "original@example.com", persisted.Email)
 	require.Equal(t, models.RoleViewer, persisted.Role)
+	// The raw INSERT omits email_verified: the NULL column reads as untrusted.
+	require.False(t, persisted.EmailVerified)
+}
+
+func TestUserStoreUpsertPersistsEmailVerified(t *testing.T) {
+	db := testutil.OpenTestDB(t)
+	defer testutil.CloseDB(db)
+	us := NewUserStore(db)
+	ext := &ExternalIdentity{Issuer: "oidc", Subject: "sub-verified", Email: "v@example.com", EmailVerified: true}
+
+	created, err := us.Upsert(t.Context(), ext, models.RoleViewer)
+	require.NoError(t, err)
+	require.True(t, created.EmailVerified)
+	requireStoredEmailVerified(t, db, created.ID, true)
+
+	ext.EmailVerified = false
+	downgraded, err := us.Upsert(t.Context(), ext, models.RoleViewer)
+	require.NoError(t, err)
+	require.Equal(t, created.ID, downgraded.ID)
+	require.False(t, downgraded.EmailVerified)
+	requireStoredEmailVerified(t, db, created.ID, false)
+
+	ext.EmailVerified = true
+	upgraded, err := us.Upsert(t.Context(), ext, models.RoleViewer)
+	require.NoError(t, err)
+	require.True(t, upgraded.EmailVerified)
+	requireStoredEmailVerified(t, db, created.ID, true)
+}
+
+func requireStoredEmailVerified(t *testing.T, db *gorm.DB, id uuid.UUID, want bool) {
+	t.Helper()
+	var stored models.User
+	require.NoError(t, db.First(&stored, "id = ?", id).Error)
+	require.Equal(t, want, stored.EmailVerified)
 }

@@ -208,12 +208,32 @@ func (p *Provider) identityFromIDToken(idToken *gooidc.IDToken) (*authpkg.Extern
 	}
 
 	return &authpkg.ExternalIdentity{
-		Issuer:      idToken.Issuer,
-		Subject:     idToken.Subject,
-		Email:       claims.Email,
-		DisplayName: displayName,
-		Groups:      groups,
+		Issuer:        idToken.Issuer,
+		Subject:       idToken.Subject,
+		Email:         claims.Email,
+		EmailVerified: emailVerified(allClaims["email_verified"]),
+		DisplayName:   displayName,
+		Groups:        groups,
 	}, nil
+}
+
+// emailVerified reads the email_verified claim leniently: only JSON true or
+// the string "true" count. Anything else, including a missing claim, is
+// unverified; a malformed claim never fails the login. It is decoded from the
+// raw claims because a typed bool field would reject IdPs that send a string.
+func emailVerified(raw json.RawMessage) bool {
+	var value any
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return false
+	}
+	switch v := value.(type) {
+	case bool:
+		return v
+	case string:
+		return v == "true"
+	default:
+		return false
+	}
 }
 
 func validateIdentityShape(idToken *gooidc.IDToken, claims map[string]json.RawMessage, clientID string) error {

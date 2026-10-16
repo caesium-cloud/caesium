@@ -10,6 +10,7 @@ import (
 
 	authmw "github.com/caesium-cloud/caesium/api/middleware"
 	iauth "github.com/caesium-cloud/caesium/internal/auth"
+	"github.com/caesium-cloud/caesium/internal/auth/policy"
 	"github.com/caesium-cloud/caesium/internal/jobdef/testutil"
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/google/uuid"
@@ -31,7 +32,7 @@ func TestBuildFilterIncludesQuarantineOnlyForAccessibleRun(t *testing.T) {
 	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/events?run_id="+runID.String(), nil)
 	rec := httptest.NewRecorder()
 	c := echo.New().NewContext(req, rec)
-	c.Set(authmw.ContextKeyPrincipal, &iauth.Principal{Role: models.RoleViewer, Scope: scopeJSON})
+	c.Set(authmw.ContextKeyPrincipal, &iauth.Principal{Grants: policy.Grants{"*": models.RoleViewer}, Scope: scopeJSON})
 
 	filter, err := New(nil).WithAuthService(iauth.NewService(db)).buildFilter(c)
 	require.NoError(t, err)
@@ -64,7 +65,7 @@ func TestBuildFilterRejectsQuarantineForOutOfScopeRun(t *testing.T) {
 	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/events?run_id="+runID.String(), nil)
 	rec := httptest.NewRecorder()
 	c := echo.New().NewContext(req, rec)
-	c.Set(authmw.ContextKeyPrincipal, &iauth.Principal{Role: models.RoleViewer, Scope: scopeJSON})
+	c.Set(authmw.ContextKeyPrincipal, &iauth.Principal{Grants: policy.Grants{"*": models.RoleViewer}, Scope: scopeJSON})
 
 	filter, err := New(nil).WithAuthService(iauth.NewService(db)).buildFilter(c)
 	require.Error(t, err)

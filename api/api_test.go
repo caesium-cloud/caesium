@@ -22,6 +22,7 @@ import (
 	"github.com/labstack/echo/v5"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/require"
+	"gorm.io/datatypes"
 )
 
 func TestAuthStatusReflectsAuthMode(t *testing.T) {
@@ -137,7 +138,7 @@ func TestRegisterSSORoutesProtectsLogoutWithCSRF(t *testing.T) {
 	db := testutil.OpenTestDB(t)
 	t.Cleanup(func() { testutil.CloseDB(db) })
 
-	svc := iauth.NewService(db)
+	svc := iauth.NewService(db, iauth.WithPolicySource(mustViewerRoleMapper(t)))
 	auditor := iauth.NewAuditLogger(db)
 	limiter := iauth.NewRateLimiter(5, time.Minute)
 	sessions := iauth.NewSessionStore(db)
@@ -146,6 +147,7 @@ func TestRegisterSSORoutesProtectsLogoutWithCSRF(t *testing.T) {
 		Issuer:    "oidc",
 		Subject:   "sub-1",
 		Email:     "viewer@example.com",
+		Groups:    datatypes.JSON(`["viewers"]`),
 		Role:      models.RoleViewer,
 		CreatedAt: time.Now().UTC(),
 	}
@@ -171,6 +173,15 @@ func TestRegisterSSORoutesProtectsLogoutWithCSRF(t *testing.T) {
 
 	_, _, err = sessions.Validate(t.Context(), token)
 	require.ErrorIs(t, err, iauth.ErrSessionRevoked)
+}
+
+// mustViewerRoleMapper is the env-mapping policy source the cookie-session
+// route tests resolve their user's grants through.
+func mustViewerRoleMapper(t *testing.T) *iauth.RoleMapper {
+	t.Helper()
+	mapper, err := iauth.NewRoleMapper("viewers=viewer", "")
+	require.NoError(t, err)
+	return mapper
 }
 
 func TestRegisterSSORoutesBearerLogoutSkipsCSRFAndKeepsCredentials(t *testing.T) {
@@ -236,7 +247,7 @@ func TestRegisterSSORoutesWhoamiReturnsSessionCSRF(t *testing.T) {
 	db := testutil.OpenTestDB(t)
 	t.Cleanup(func() { testutil.CloseDB(db) })
 
-	svc := iauth.NewService(db)
+	svc := iauth.NewService(db, iauth.WithPolicySource(mustViewerRoleMapper(t)))
 	auditor := iauth.NewAuditLogger(db)
 	limiter := iauth.NewRateLimiter(5, time.Minute)
 	sessions := iauth.NewSessionStore(db)
@@ -245,7 +256,8 @@ func TestRegisterSSORoutesWhoamiReturnsSessionCSRF(t *testing.T) {
 		Issuer:    "oidc",
 		Subject:   "sub-1",
 		Email:     "viewer@example.com",
-		Role:      models.RoleViewer,
+		Groups:    datatypes.JSON(`["viewers"]`),
+		Role:      models.RoleAdmin, // stale stored role: whoami reports the resolved one
 		CreatedAt: time.Now().UTC(),
 	}
 	require.NoError(t, db.Create(user).Error)

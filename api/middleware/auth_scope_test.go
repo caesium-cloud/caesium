@@ -39,7 +39,7 @@ func TestMiddlewareWhoamiAllowsScopedAPIKey(t *testing.T) {
 	require.Equal(t, http.StatusOK, rec.Code)
 	require.NotNil(t, principal)
 	require.Equal(t, auth.PrincipalAPIKey, principal.Kind)
-	require.Equal(t, models.RoleViewer, principal.Role)
+	require.Equal(t, models.RoleViewer, principal.ClusterRole())
 
 	// The allow grants identity only: no job aliases are injected, so the
 	// handler cannot infer any resource access from having passed the gate.

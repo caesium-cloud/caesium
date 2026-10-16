@@ -9,10 +9,12 @@ import (
 	"sync"
 	"time"
 
+	"github.com/caesium-cloud/caesium/internal/auth/policy"
 	"github.com/caesium-cloud/caesium/internal/dbretry"
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/caesium-cloud/caesium/pkg/log"
 	"github.com/google/uuid"
+	"gorm.io/datatypes"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 )
@@ -43,6 +45,7 @@ type Service struct {
 	validationFailureMinLatency time.Duration
 	sleep                       func(time.Duration)
 	now                         func() time.Time
+	policySource                policy.Source
 
 	// lastUsedMu protects the async last_used_at update buffer.
 	lastUsedMu sync.Mutex
@@ -57,6 +60,21 @@ func WithKeyHashSecret(secret string) ServiceOption {
 	return func(s *Service) {
 		s.keyHashSecret = secret
 	}
+}
+
+// WithPolicySource configures the grant source for session principals.
+func WithPolicySource(src policy.Source) ServiceOption {
+	return func(s *Service) {
+		s.policySource = src
+	}
+}
+
+// PolicySource returns the configured grant source, or nil when there is none.
+func (s *Service) PolicySource() policy.Source {
+	if s == nil {
+		return nil
+	}
+	return s.policySource
 }
 
 // WithValidationFailureMinLatency configures the minimum latency for auth failures.
@@ -179,8 +197,11 @@ type CreateKeyRequest struct {
 	Description string
 	Role        models.Role
 	Scope       *models.KeyScope
-	CreatedBy   string
-	ExpiresAt   *time.Time
+	// Namespaces is persisted verbatim. nil (or empty) stores SQL NULL, which
+	// grants Role cluster-wide; see PrincipalFromKey.
+	Namespaces datatypes.JSON
+	CreatedBy  string
+	ExpiresAt  *time.Time
 }
 
 // CreateKeyResponse is returned on key creation — the only time the plaintext is available.
@@ -215,6 +236,7 @@ func (s *Service) CreateKey(req *CreateKeyRequest) (*CreateKeyResponse, error) {
 		Description: req.Description,
 		Role:        req.Role,
 		Scope:       scopeJSON,
+		Namespaces:  req.Namespaces,
 		CreatedBy:   req.CreatedBy,
 		CreatedAt:   s.nowUTC(),
 		ExpiresAt:   req.ExpiresAt,
@@ -262,7 +284,9 @@ func (s *Service) RotateKey(id uuid.UUID, gracePeriod time.Duration, actor strin
 		return nil, ErrKeyRevoked
 	}
 
-	// Create new key with same role and scope.
+	// Create new key with the same role, scope and namespaces. Namespaces are
+	// copied byte-for-byte: NULL stays cluster-wide, a confined key stays
+	// confined, and a fail-closed value stays fail-closed.
 	var scope *models.KeyScope
 	if len(oldKey.Scope) > 0 {
 		scope = &models.KeyScope{}
@@ -275,6 +299,7 @@ func (s *Service) RotateKey(id uuid.UUID, gracePeriod time.Duration, actor strin
 		Description: oldKey.Description + " (rotated)",
 		Role:        oldKey.Role,
 		Scope:       scope,
+		Namespaces:  oldKey.Namespaces,
 		CreatedBy:   actor,
 	})
 	if err != nil {
@@ -290,19 +315,28 @@ func (s *Service) RotateKey(id uuid.UUID, gracePeriod time.Duration, actor strin
 	return resp, nil
 }
 
-// AdminKeyExists returns true if at least one non-revoked, non-expired admin key exists.
+// AdminKeyExists returns true if at least one non-revoked, non-expired key
+// grants admin cluster-wide. A key confined to namespaces does not count.
+// Candidates are filtered with the same grant logic requests use, so the
+// startup check and RBAC cannot disagree about which keys are cluster admins.
 func (s *Service) AdminKeyExists() (bool, error) {
 	var exists bool
 	err := s.withReadRetry(func() error {
-		var count int64
-		err := s.db.Model(&models.APIKey{}).
+		var keys []models.APIKey
+		err := s.db.
 			Where(
 				"role = ? AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at > ?)",
 				models.RoleAdmin,
 				s.nowUTC(),
 			).
-			Count(&count).Error
-		exists = count > 0
+			Find(&keys).Error
+		exists = false
+		for i := range keys {
+			if keyGrants(&keys[i]).ClusterRole() == models.RoleAdmin {
+				exists = true
+				break
+			}
+		}
 		return err
 	})
 	if err != nil {
@@ -361,8 +395,9 @@ func (s *Service) Bootstrap() (string, error) {
 		return "", nil
 	}
 
-	// The bootstrap slot exists but the key is revoked/expired — refresh it with a
-	// new UUID so the old audit entries remain unambiguous.
+	// The bootstrap slot exists but the key is revoked, expired or confined to
+	// namespaces — refresh it with a new UUID so the old audit entries remain
+	// unambiguous.
 	newID := uuid.New()
 	rowsAffected, err = s.tryRefreshBootstrapKey(newID, prefix, hash, now)
 	if err != nil {
@@ -415,11 +450,15 @@ func (s *Service) tryCreateBootstrapKey(key *models.APIKey) (int64, error) {
 	})
 }
 
+// tryRefreshBootstrapKey restores the bootstrap slot to a fresh cluster admin
+// key. It runs only after AdminKeyExists found no cluster admin, and matches a
+// bootstrap key that is revoked, expired or confined to namespaces (an active
+// cluster bootstrap key has NULL namespaces and is never replaced).
 func (s *Service) tryRefreshBootstrapKey(newID uuid.UUID, prefix, hash string, now time.Time) (int64, error) {
 	return s.withBootstrapRetry(func() (int64, error) {
 		result := s.db.Model(&models.APIKey{}).
 			Where(
-				"bootstrap_slot = ? AND (revoked_at IS NOT NULL OR (expires_at IS NOT NULL AND expires_at <= ?))",
+				"bootstrap_slot = ? AND (revoked_at IS NOT NULL OR (expires_at IS NOT NULL AND expires_at <= ?) OR namespaces IS NOT NULL)",
 				bootstrapAdminSlot,
 				now,
 			).
@@ -430,6 +469,7 @@ func (s *Service) tryRefreshBootstrapKey(newID uuid.UUID, prefix, hash string, n
 				"description":  "Bootstrap admin key",
 				"role":         models.RoleAdmin,
 				"scope":        nil,
+				"namespaces":   nil,
 				"created_by":   "system",
 				"created_at":   now,
 				"expires_at":   nil,
