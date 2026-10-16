@@ -1,4 +1,5 @@
-import { expect, test, type Page, type TestInfo } from "@playwright/test";
+import { expect, test, type Page, type Response, type TestInfo } from "@playwright/test";
+import type { ExternalHistoryPage } from "../../src/features/connectors/types";
 import { authHeaders, loginAtUrl } from "../helpers/auth";
 import { findExternalExecution, fixturePost, requireConnectorBrowserLane, startExternalWorkflow, type ConnectorBrowserLane, type FixtureWorkflow } from "../helpers/connectors";
 
@@ -8,7 +9,18 @@ let companion: FixtureWorkflow;
 let executionId: string;
 const detailPath = () => `/connectors/${encodeURIComponent(lane.connectionId)}/executions/${encodeURIComponent(executionId)}`;
 
+function isRequestedHistoryResponse(response: Response, cursor?: string): boolean {
+  const url = new URL(response.url());
+  return response.request().method() === "GET" && url.pathname === `/v1${detailPath()}/history` &&
+    url.searchParams.get("page_size") === "1" &&
+    (cursor === undefined ? !url.searchParams.has("cursor") : url.searchParams.get("cursor") === cursor);
+}
+
 async function captureObservation(page: Page, testInfo: TestInfo, stage: string) {
+  const observation = page.getByRole("region", { name: "Execution observation" });
+  await observation.scrollIntoViewIfNeeded();
+  await expect(page.getByTestId("execution-availability")).toBeVisible();
+  await expect(observation.locator("time")).toBeVisible();
   const path = testInfo.outputPath(`external-observation-${stage}.png`);
   await page.screenshot({ path, fullPage: true });
   await testInfo.attach(`External execution — ${stage}`, { path, contentType: "image/png" });
@@ -57,12 +69,35 @@ test("viewer filters and inspects a real external-only workflow, pages history a
   } else {
     await expect(page.getByRole("link", { name: "Open in Temporal UI ↗" })).toHaveCount(0);
   }
-  await page.getByLabel("History events per page").selectOption("1");
-  await expect(page.getByTestId("external-history-event")).toHaveCount(1);
-  const firstEvent = await page.getByTestId("external-history-event").textContent();
+  const firstHistoryResponse = page.waitForResponse(response => isRequestedHistoryResponse(response));
+  await page.getByLabel("Requested history page size", { exact: true }).selectOption("1");
+  const firstResponse = await firstHistoryResponse;
+  expect(firstResponse.status()).toBe(200);
+  const firstHistory = await firstResponse.json() as ExternalHistoryPage;
+  expect(firstHistory).toMatchObject({ workflow_id: workflow.workflow_id, run_id: workflow.run_id });
+  const firstEvents = firstHistory.events ?? [];
+  expect(firstEvents.length).toBeGreaterThan(0);
+  expect(firstEvents[0].event_id).toBe(1);
+  expect(firstHistory.cursor).toEqual(expect.any(String));
+  expect(firstHistory.cursor).not.toBe("");
+  // Temporal pages contain native storage batches. Prove every actual response
+  // event is rendered, rather than assuming the requested size is a row count.
+  await expect(page.getByTestId("external-history-event")).toHaveText(firstEvents.map(event => `#${event.event_id}${event.event_type}`));
+  await expect(page.getByLabel("Requested history page size", { exact: true })).toHaveValue("1");
+  await testInfo.attach("History first native page", { body: JSON.stringify(firstHistory, null, 2), contentType: "application/json" });
+  const nextHistoryResponse = page.waitForResponse(response => isRequestedHistoryResponse(response, firstHistory.cursor));
   await page.getByRole("button", { name: "Next history", exact: true }).click();
-  await expect(page.getByTestId("external-history-event")).toHaveCount(1);
-  await expect(page.getByTestId("external-history-event")).not.toHaveText(firstEvent!);
+  const nextResponse = await nextHistoryResponse;
+  expect(nextResponse.status()).toBe(200);
+  const nextHistory = await nextResponse.json() as ExternalHistoryPage;
+  expect(nextHistory).toMatchObject({ workflow_id: workflow.workflow_id, run_id: workflow.run_id });
+  const nextEvents = nextHistory.events ?? [];
+  expect(nextEvents.length).toBeGreaterThan(0);
+  const eventIDs = [...firstEvents, ...nextEvents].map(event => event.event_id);
+  expect(new Set(eventIDs).size).toBe(eventIDs.length);
+  expect(nextEvents[0].event_id).toBe(firstEvents[firstEvents.length - 1].event_id + 1);
+  await expect(page.getByTestId("external-history-event")).toHaveText(nextEvents.map(event => `#${event.event_id}${event.event_type}`));
+  await testInfo.attach("History next native page", { body: JSON.stringify(nextHistory, null, 2), contentType: "application/json" });
   const observed = await page.getByRole("region", { name: "Execution observation" }).locator("time").getAttribute("datetime");
   expect(Date.parse(observed!)).toBeGreaterThan(0);
   await captureObservation(page, testInfo, "live");

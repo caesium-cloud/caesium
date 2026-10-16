@@ -100,11 +100,23 @@ describe("connector monitoring", () => {
 
   it("exposes an exact selectable history page-size name independently of option text", async () => {
     show(<ExecutionDetailPage />);
-    const pageSizeSelect = await screen.findByRole("combobox", { name: "History events per page" });
-    expect(pageSizeSelect).toHaveAccessibleName("History events per page");
-    expect(screen.getByLabelText("History events per page", { exact: true })).toBe(pageSizeSelect);
+    const pageSizeSelect = await screen.findByRole("combobox", { name: "Requested history page size" });
+    expect(pageSizeSelect).toHaveAccessibleName("Requested history page size");
+    expect(screen.getByLabelText("Requested history page size", { exact: true })).toBe(pageSizeSelect);
     fireEvent.change(pageSizeSelect, { target: { value: "1" } });
     expect(navigate).toHaveBeenLastCalledWith({ to: "/connectors/$connectionId/executions/$executionId", params: { connectionId: "fixture", executionId: "opaque/reference" }, search: { page_size: 1 } });
+  });
+
+  it("retains the complete native event batch and cursor when it exceeds the requested history page size", async () => {
+    search.page_size = 1;
+    vi.mocked(api.getConnectorHistory).mockResolvedValue({ workflow_id: "external/only", run_id: "actual-run", scope: "team/a", observed_at: execution.observed_at, events: [{ event_id: 1, event_type: "EVENT_TYPE_WORKFLOW_EXECUTION_STARTED" }, { event_id: 2, event_type: "EVENT_TYPE_WORKFLOW_TASK_SCHEDULED" }], cursor: "native-batch-cursor" });
+    show(<ExecutionDetailPage />);
+    expect(await screen.findAllByTestId("external-history-event")).toHaveLength(2);
+    expect(screen.getByLabelText("Requested history page size", { exact: true })).toHaveValue("1");
+    expect(screen.getByText(/Temporal returns native event batches/)).toBeVisible();
+    expect(screen.getAllByTestId("external-history-event").map(row => row.textContent)).toEqual(["#1EVENT_TYPE_WORKFLOW_EXECUTION_STARTED", "#2EVENT_TYPE_WORKFLOW_TASK_SCHEDULED"]);
+    fireEvent.click(screen.getByRole("button", { name: "Next history" }));
+    expect(navigate).toHaveBeenLastCalledWith({ to: "/connectors/$connectionId/executions/$executionId", params: { connectionId: "fixture", executionId: "opaque/reference" }, search: { page_size: 1, cursor: "native-batch-cursor" } });
   });
 
   it.each([ConnectionsPage, ExecutionDetailPage])("shows an unavailable observation time for a provider zero timestamp in %s", async Page => {

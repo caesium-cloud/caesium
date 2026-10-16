@@ -430,8 +430,9 @@ belongs to that one connection and filter.
 
 Follow a Workflow ID to its immutable Run ID, native status, dated provider
 observation, reported activity attempts and bounded history pages. History
-payloads are unavailable. Partial pages say so; reduce the page size when a
-metadata limit leaves no continuation cursor. Unbound workflows remain
+payloads are unavailable. Requested history page size is a provider hint: native
+batches can contain more or fewer events. Partial pages identify unavailable
+events and omit a cursor that would skip them. Unbound workflows remain
 inspectable without invented business controls.
 
 A provider outage keeps dated cached details visibly stale while automatic
@@ -493,7 +494,11 @@ state name. `LastFailure` and heartbeat payloads are not copied. The same
 metadata budget applies. `incomplete` on a describe means the pending list was
 shortened to a prefix. Describe is not paged.
 
-History is one bounded page. `WaitNewEvent` stays false, so the call does not
+History is one bounded page. Requested page size is a provider hint: Temporal
+returns native event batches, so the displayed event count can differ. The
+configured event and byte ceilings still apply; truncation marks the page
+incomplete and omits the native cursor to avoid skipping discarded events.
+`WaitNewEvent` stays false, so the call does not
 follow the workflow. Workflow inputs, results, and activity payloads are not
 copied. An encoded raw-history blob is not decoded; that response is an
 availability error. A history response does not echo a run id. When the caller
@@ -503,8 +508,9 @@ and `ContinuedExecutionRunId` is the previous run, so neither labels this page.
 The run id is resolved before the metadata budget is measured. A history page
 that does not fit keeps an event prefix and sets `incomplete`, with no server
 token. Activities, relations, and problems on that page come only from the
-kept events. The caller repeats the same request token with a smaller page
-size. One event over the budget is an error.
+kept events. A smaller requested size may reduce the native batches returned, but a single
+batch can still exceed the configured ceiling. One event over the byte budget
+is an error.
 Activity attempts
 come from `ActivityTaskStarted` and carry the scheduled event id, attempt, and
 history event id. Activity id and type are filled only when `ActivityTaskScheduled`
