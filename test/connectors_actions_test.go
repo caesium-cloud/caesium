@@ -18,6 +18,7 @@ import (
 
 	"github.com/caesium-cloud/caesium/internal/connector"
 	ctemporal "github.com/caesium-cloud/caesium/internal/connector/temporal"
+	"github.com/caesium-cloud/caesium/pkg/env"
 	"github.com/google/uuid"
 	"go.temporal.io/sdk/client"
 	"go.temporal.io/sdk/converter"
@@ -272,6 +273,9 @@ func (s *IntegrationTestSuite) TestConnectorsActions() {
 	viewer := s.createAPIKeyCLI("--role", "viewer", "--description", "connector HTTP explicit Query viewer")
 	runner := s.createAPIKeyCLI("--role", "runner", "--description", "connector HTTP denied action runner")
 	scoped := s.createAPIKeyCLI("--role", "operator", "--scope-jobs", "connector-fixture-publish", "--description", "connector HTTP denied scoped operator")
+	// Direct credential setup must use the same configured hash secret as the
+	// live server, including when this is the first selected scenario.
+	s.Require().NoError(env.Process())
 	agent := s.mintAgentSessionToken(uuid.NewString(), "connector-fixture-publish")
 	for _, credential := range []string{operator.Plaintext, other.Plaintext, viewer.Plaintext, runner.Plaintext, scoped.Plaintext, agent} {
 		proof.addCredential(credential)
