@@ -42,7 +42,7 @@ function ExecutionObservation() {
     {!execution && detail.error && <p role="alert" className="text-warning">Execution unavailable. No cached observation is available. {retryDescription}</p>}
     {execution && <>
       <section aria-label="Execution observation" className="space-y-3 rounded-md border border-border p-4 text-sm">
-        <p role="status" data-testid="execution-availability" className={stale ? "text-warning" : "text-text-2"}>{stale ? "Stale observation — provider unavailable" : "Live provider observation"}</p>
+        <p role="status" data-testid="execution-availability" className={stale ? "text-warning" : "text-text-2"}>{stale ? "Stale observation — refresh unavailable" : "Live provider observation"}</p>
         {stale && <p className="text-warning">Cached details describe a previous observation. They do not establish the workflow's current state. {retryDescription}</p>}
         {(execution.completeness !== "complete" || execution.metadata.incomplete) && <p role="alert" className="text-warning">Partial execution metadata. The reported activity list may be incomplete.</p>}
         <dl className="grid gap-3 sm:grid-cols-[150px_minmax(0,1fr)]">
