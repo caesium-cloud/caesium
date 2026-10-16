@@ -454,7 +454,7 @@ Resume unfinished waves. Do not archive this plan while later items remain.
   has also merged; C1 uses its existing principal, cluster-role and scope policy.
   C2 requires merged C1. Console work and F2–F4/N remain future waves.
 - **W5-α / C1:** [PR #644](https://github.com/caesium-cloud/caesium/pull/644),
-  draft head `2fa55d2081711942e4c4f2807f2daf9ef1d28d95`, implements startup/client composition,
+  draft head `33d86e60e0f71eb93ca0c636a39476697ed761dc`, implements startup/client composition,
   authenticated monitoring and scope-safe reverse links, bounded observation
   persistence and guarded configuration activation. Persistent connection
   identities supplement the epoch so a coordinated change cannot repoint a
@@ -501,8 +501,11 @@ Resume unfinished waves. Do not archive this plan while later items remain.
   started a configured server. The follow-up now exercises real provider/HTTP
   reads, publication admission and reverse correlation in the instrumented cohort.
   Its 52 semantic and 80 collector probes pass; independent review is clear.
-  Focused live qualification and current-head hosted CI remain pending. The
-  coverage floor is unchanged; no dedicated F2 connector CI lane is claimed.
+  The exact collector function passed live on `33d86e60`: pinned real provider
+  List/Describe/History RPCs, no Query, succeeded local job, verified reverse
+  link and clean exit 0 with complete counter hashes. Its arm64 profile covers
+  145 observation and 68 correlation-persistence statements. The full hosted
+  G2 and current-head required checks remain pending. The coverage floor is unchanged; no dedicated F2 connector CI lane is claimed.
   Published `2fa55d20` also has an ARM64 stress check failure: exit 137 with
   `OOMKilled=false` and no OOM event. This is unconfirmed termination, not a pass.
 - **Publication and acceptance:** C1 is published as a draft. No acceptance is
@@ -629,7 +632,10 @@ auth chokepoints. Every endpoint includes a live HTTP integration scenario.
   new `scripts/connectors-fixture-control.py`,
   new `scripts/test_connectors_config_cluster.py`, `scripts/test_connectors_fixture.py`,
   `test/connectors/fixture/main.go`, `justfile` (optional manual-fixture mounts),
-  `scripts/integration-coverage.sh` (valid enabled transport for startup proof),
+  `scripts/integration-coverage.sh`, `scripts/coverage-journeys.py`,
+  `scripts/test_coverage.py`, `scripts/test_coverage_journeys.py`,
+  `.github/workflows/ci.yml` (existing G2 provider/read cohort, unchanged floors),
+  `docs/ci.md` (cohort prerequisite and proof),
   `internal/connector/store.go`, `internal/connector/types.go`,
   `internal/connector/correlation/correlation_store.go` (epoch write fencing),
   `internal/connector/temporal/client.go`, `internal/connector/temporal/observe.go`,
