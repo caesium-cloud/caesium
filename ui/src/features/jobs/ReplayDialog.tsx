@@ -15,6 +15,8 @@ import {
 } from "@/components/ui/dialog";
 import { StatusBadge } from "@/components/ui/status-badge";
 import { InsufficientAccess } from "@/features/auth/InsufficientAccess";
+import { canReplayRuns } from "@/features/auth/access";
+import { usePrincipal } from "@/lib/auth";
 import { ApiError, api, type JobRun, type ReplayResponse } from "@/lib/api";
 import { RunDiffView } from "./RunDiffView";
 
@@ -38,6 +40,7 @@ export function ReplayDialog({
   onOpenChange,
 }: ReplayDialogProps) {
   const queryClient = useQueryClient();
+  const canLaunchReplay = canReplayRuns(usePrincipal());
   const [overrideRows, setOverrideRows] = useState<OverrideRow[]>(() => [newOverrideRow()]);
   const [idempotencyKey, setIdempotencyKey] = useState("");
   const [submittedKey, setSubmittedKey] = useState<string | null>(null);
@@ -95,6 +98,8 @@ export function ReplayDialog({
     setShowDiff(false);
     setInlineError(null);
     setLastError(null);
+
+    if (!canLaunchReplay) return;
 
     const parsed = parseOverrides(overrideRows);
     if (typeof parsed === "string") {
@@ -239,11 +244,12 @@ export function ReplayDialog({
             </div>
           ) : null}
 
+          {!canLaunchReplay && <p role="alert" className="text-sm text-text-3">Requires runner role</p>}
           <div className="flex justify-end">
             <Button
               type="submit"
               size="sm"
-              disabled={mutation.isPending}
+              disabled={mutation.isPending || !canLaunchReplay}
               data-testid="replay-submit"
             >
 

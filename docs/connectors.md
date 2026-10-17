@@ -10,7 +10,8 @@
 > admission with lookup-only component recovery. Authenticated HTTP monitoring
 > exposes discovery, detail, history, relationships and verified local run links.
 > Declared HTTP Queries/actions and operation receipts compose those services.
-> Console pages remain Stream E in the execution plan.
+> Console monitoring exposes configured connections and exact external runs.
+> Console relationship/approval journeys remain plan items E2 and E3.
 > Job-definition YAML is unchanged.
 
 An execution connector lets Caesium inspect an external workflow system and
@@ -505,6 +506,35 @@ operation and outcome without copying action input or arbitrary remote errors.
 Queries are explicit, use the configured per-principal Query budget (at most
 six per minute), and share bounded RPC concurrency/deadlines with reads and
 actions. Closed workflow polling never invokes the Query automatically.
+
+## Console monitoring
+
+With connectors enabled and an unscoped cluster viewer or higher, choose
+**Connections** in the sidebar. Select a configured connection and optionally
+filter by exact workflow type. Discovery is eventually consistent; pagination
+belongs to that one connection and filter.
+
+Follow a Workflow ID to its immutable Run ID, native status, dated provider
+observation, reported activity attempts and bounded history pages. History
+payloads are unavailable. Requested history page size is a provider hint: native
+batches can contain more or fewer events. Partial pages identify unavailable
+events and omit a cursor that would skip them. Unbound workflows remain
+inspectable without invented business controls.
+
+A provider outage keeps dated cached details visibly stale while automatic
+refresh retries at the configured `consoleRefresh` interval, at least 10
+seconds. Failed history reads retain an explicit unavailable state. Recovery
+observes the same pinned run. For intervals beyond the browser timer range,
+automatic refresh is disabled and the view says so. A configured `uiURL` provides
+a Temporal UI link containing the exact namespace, Workflow ID and Run ID.
+Omitting it leaves that link absent.
+
+Gate-off, scoped, namespace-only, agent and unauthenticated routes disclose no
+external workflow details. The monitoring view performs no automatic status
+Queries or actions. Relationship journeys and the approval form remain E2/E3.
+The dedicated `connectors` Playwright project uses the real development fixture;
+default and auth projects exclude its specifications. A selected connector
+browser test fails if its gate, authentication or real-worker markers are absent.
 
 ## Temporal observation
 

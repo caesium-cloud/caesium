@@ -65,13 +65,16 @@ test("network recovery selection retains every ordinary browser scenario", () =>
   const browserReport = path.join(uiRoot, "playwright-results.json");
   const reportBefore = existsSync(browserReport) ? readFileSync(browserReport) : undefined;
   const all = listedProjects();
-  expect([...all.keys()].sort()).toEqual(["auth", "cluster-recovery", "default", "light", "network-recovery"]);
+  expect([...all.keys()].sort()).toEqual(["auth", "cluster-recovery", "connectors", "default", "light", "network-recovery"]);
 
   const ordinary = all.get("default") ?? new Set<string>();
   const recovery = all.get("network-recovery") ?? new Set<string>();
   const auth = all.get("auth") ?? new Set<string>();
   const cluster = all.get("cluster-recovery") ?? new Set<string>();
-  for (const membership of [ordinary, recovery, auth, cluster]) expect(membership.size).toBeGreaterThan(0);
+  const connectors = all.get("connectors") ?? new Set<string>();
+  for (const membership of [ordinary, recovery, auth, cluster, connectors]) expect(membership.size).toBeGreaterThan(0);
+  expect([...connectors].every(identity => identity.startsWith("connectors/"))).toBe(true);
+  expect(intersection(connectors, union(ordinary, recovery, auth, cluster, all.get("light") ?? new Set()))).toEqual(new Set());
 
   expect(intersection(ordinary, recovery)).toEqual(new Set());
   expect(intersection(ordinary, auth)).toEqual(new Set());
@@ -97,6 +100,9 @@ test("network recovery selection retains every ordinary browser scenario", () =>
   const selectedCluster = listedProjects("cluster-recovery");
   expect([...selectedCluster.keys()].sort()).toEqual(["cluster-recovery"]);
   expect(selectedCluster.get("cluster-recovery")).toEqual(cluster);
+  const selectedConnectors = listedProjects("connectors");
+  expect([...selectedConnectors.keys()]).toEqual(["connectors"]);
+  expect(selectedConnectors.get("connectors")).toEqual(connectors);
   const reportAfter = existsSync(browserReport) ? readFileSync(browserReport) : undefined;
   expect(reportAfter).toEqual(reportBefore);
 }, 90_000);

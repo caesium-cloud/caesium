@@ -1,5 +1,6 @@
 import { parseAllDocuments } from "yaml";
 import { clearApiKey, withAuthHeaders } from "./auth";
+import type { ConnectorConnections, ConnectorListQuery, ConnectorPageQuery, ExternalExecution, ExternalExecutionPage, ExternalHistoryPage } from "@/features/connectors/types";
 
 export interface Job {
   id: string;
@@ -518,6 +519,8 @@ export interface Node {
 }
 
 export interface SystemFeatures {
+  connectors_enabled?: boolean;
+  connectors_ready?: boolean;
   database_console_enabled: boolean;
   log_console_enabled: boolean;
   agent_remediation_enabled: boolean;
@@ -1431,6 +1434,13 @@ export interface AllJobRunsResult {
 }
 
 export const api = {
+  getConnectorConnections: (signal?: AbortSignal) => request<ConnectorConnections>("/connectors", { signal }),
+  getConnectorExecutions: (connectionId: string, params: ConnectorListQuery = {}, signal?: AbortSignal) =>
+    request<ExternalExecutionPage>(`/connectors/${encodeURIComponent(connectionId)}/executions?${queryString({ ...params })}`, { signal }),
+  getConnectorExecution: (connectionId: string, executionId: string, signal?: AbortSignal) =>
+    request<ExternalExecution>(`/connectors/${encodeURIComponent(connectionId)}/executions/${encodeURIComponent(executionId)}`, { signal }),
+  getConnectorHistory: (connectionId: string, executionId: string, params: ConnectorPageQuery = {}, signal?: AbortSignal) =>
+    request<ExternalHistoryPage>(`/connectors/${encodeURIComponent(connectionId)}/executions/${encodeURIComponent(executionId)}/history?${queryString({ ...params })}`, { signal }),
   getJobs: () => request<Job[]>("/jobs"),
   getJob: (id: string) => request<Job>(`/jobs/${id}`),
   /** One page of a job's runs. See `JobRunsPage`; use `getAllJobRuns` for the whole history. */
