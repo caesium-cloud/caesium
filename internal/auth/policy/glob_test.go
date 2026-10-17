@@ -15,6 +15,12 @@ func TestMatchGlob(t *testing.T) {
 		want    bool
 	}{
 		{"env/MARKETING_*", "env/MARKETING_TOKEN", true},
+		// kubernetes is an alias of k8s on both sides of the match.
+		{"kubernetes/caesium/marketing-*", "k8s/caesium/marketing-token", true},
+		{"k8s/caesium/marketing-*", "kubernetes/caesium/marketing-token", true},
+		{"kubernetes/caesium/marketing-*", "k8s/other/marketing-token", false},
+		// An unsupported target provider never matches.
+		{"env/**", "aws/token", false},
 		{"env/MARKETING_*", "env/FINANCE_TOKEN", false},
 		{"env/MARKETING_*", "env/MARKETING_", true},
 		{"env/MARKETING_*", "env/MARKETING_TOKEN/other", false},
@@ -100,6 +106,9 @@ func TestInvalidGlobs(t *testing.T) {
 		"", "env", "env/", "/token", "*/token", "Env/token", "secret://env/token",
 		"env//token", "env/token/", "env/[", "env/[]", "env/[z-a", `env/token\`,
 		"vault/secret/../token", "vault/secret/./token", "vault/secret/token#field", "vault/secret/token#*",
+		// Unsupported providers are rejected, including near-misses of the
+		// supported names.
+		"aws/token", "evn/TOKEN", "k8/secret", "vault2/secret/token", "secret/env/token",
 	} {
 		t.Run(pattern, func(t *testing.T) {
 			t.Parallel()
@@ -109,4 +118,17 @@ func TestInvalidGlobs(t *testing.T) {
 			require.False(t, matched)
 		})
 	}
+}
+
+func TestSecretProviders(t *testing.T) {
+	t.Parallel()
+	require.Equal(t, []string{"env", "k8s", "kubernetes", "vault"}, policy.SecretProviders())
+	require.Equal(t, "k8s", policy.CanonicalSecretProvider("kubernetes"))
+	require.Equal(t, "k8s", policy.CanonicalSecretProvider("k8s"))
+	require.Equal(t, "vault", policy.CanonicalSecretProvider("vault"))
+	require.Equal(t, "env", policy.CanonicalSecretProvider("env"))
+	require.Empty(t, policy.CanonicalSecretProvider("aws"))
+	require.Empty(t, policy.CanonicalSecretProvider("Env"))
+	require.ErrorContains(t, policy.ValidateGlob("aws/token"), `unsupported provider "aws" (want one of env, k8s, kubernetes, vault)`)
+	require.NoError(t, policy.ValidateGlob("kubernetes/marketing-*"))
 }

@@ -210,7 +210,9 @@ func launchLocalWholeRunRetry(ctx context.Context, j *models.Job, r *runstorage.
 }
 
 var localRetryExecution = func(ctx context.Context, j *models.Job, params map[string]string) error {
-	return job.New(j, job.WithTriggerID(nil), job.WithParams(params)).Run(ctx)
+	// The CLI executes the retry itself, client-side: no server access policy
+	// is loaded in this process.
+	return job.New(j, job.WithTriggerID(nil), job.WithParams(params), job.WithClientProcess()).Run(ctx)
 }
 
 func init() {

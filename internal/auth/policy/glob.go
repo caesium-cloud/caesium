@@ -4,12 +4,42 @@ import (
 	"fmt"
 	"path"
 	"regexp"
+	"slices"
 	"strings"
 )
 
 var providerName = regexp.MustCompile(`^[a-z][a-z0-9_-]*$`)
 
-// ValidateGlob checks a provider/path rule. Providers are exact names. Each path
+// secretProviders are the secret:// providers a rule may name, mapped to their
+// canonical spelling: kubernetes is an alias of k8s, exactly as the resolver
+// chain registers it (internal/jobdef/secret NewConfiguredResolver). A parity
+// test in that package pins this set to the registered providers.
+var secretProviders = map[string]string{
+	"env":        "env",
+	"k8s":        "k8s",
+	"kubernetes": "k8s",
+	"vault":      "vault",
+}
+
+// SecretProviders returns the sorted provider names a secret rule may use,
+// aliases included.
+func SecretProviders() []string {
+	names := make([]string, 0, len(secretProviders))
+	for name := range secretProviders {
+		names = append(names, name)
+	}
+	slices.Sort(names)
+	return names
+}
+
+// CanonicalSecretProvider maps a supported provider name to its canonical
+// spelling (kubernetes -> k8s). It returns "" for an unsupported provider.
+func CanonicalSecretProvider(provider string) string {
+	return secretProviders[provider]
+}
+
+// ValidateGlob checks a provider/path rule. Providers must be supported
+// secret:// providers (env, k8s or its alias kubernetes, vault). Each path
 // segment follows path.Match syntax; a whole unescaped "**" segment matches zero
 // or more segments. In other segments, repeated stars, escapes and character
 // classes retain path.Match semantics within that segment. Neither patterns nor
@@ -20,6 +50,9 @@ func ValidateGlob(pattern string) error {
 	provider, rest, ok := strings.Cut(pattern, "/")
 	if !ok || !providerName.MatchString(provider) || rest == "" {
 		return fmt.Errorf("invalid secret glob %q: expected provider/path", pattern)
+	}
+	if CanonicalSecretProvider(provider) == "" {
+		return fmt.Errorf("invalid secret glob %q: unsupported provider %q (want one of %s)", pattern, provider, strings.Join(SecretProviders(), ", "))
 	}
 	if provider == "vault" && strings.Contains(rest, "#") {
 		return fmt.Errorf("invalid secret glob %q: Vault rules select paths without #field", pattern)
@@ -44,12 +77,18 @@ func ValidateGlob(pattern string) error {
 // MatchGlob matches a validated provider/path rule against a canonical target.
 // A single star never crosses a slash. Globstar can cross any number of segments,
 // including zero; the provider itself can never be matched by a wildcard.
+// Providers compare by their canonical spelling, so a kubernetes/ rule matches
+// a k8s/ target.
 func MatchGlob(pattern, target string) (bool, error) {
 	if err := ValidateGlob(pattern); err != nil {
 		return false, err
 	}
 	provider, rest, ok := strings.Cut(target, "/")
 	if !ok || !providerName.MatchString(provider) || rest == "" {
+		return false, nil
+	}
+	provider = CanonicalSecretProvider(provider)
+	if provider == "" {
 		return false, nil
 	}
 	if provider == "vault" {
@@ -70,7 +109,7 @@ func MatchGlob(pattern, target string) (bool, error) {
 		}
 	}
 	patternProvider, patternPath, _ := strings.Cut(pattern, "/")
-	if provider != patternProvider {
+	if provider != CanonicalSecretProvider(patternProvider) {
 		return false, nil
 	}
 	segments := strings.Split(patternPath, "/")

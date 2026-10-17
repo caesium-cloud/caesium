@@ -837,3 +837,28 @@ func TestReadFileHashesExactBytes(t *testing.T) {
 	require.Equal(t, hash, Hash(data))
 	require.Len(t, hash, 64)
 }
+
+// TestReloadWithUnsupportedSecretProviderKeepsLastGood pins that a secret rule
+// naming a provider outside env/k8s/kubernetes/vault is a validation error at
+// reload, so the last good revision (and its enforced rules) keeps serving.
+func TestReloadWithUnsupportedSecretProviderKeepsLastGood(t *testing.T) {
+	h, path, _ := loadTestHolder(t, loaderPolicyA, HolderOptions{})
+	good := h.Current()
+
+	writePolicy(t, path, strings.Replace(loaderPolicyA, `"env/MARKETING_*"`, `"env/MARKETING_*", "aws/marketing/token"`, 1))
+	result, err := h.Reload(t.Context(), ReloadRequest{Actor: "csk_live_admin"})
+	require.ErrorContains(t, err, `unsupported provider "aws"`)
+	require.False(t, result.Changed)
+	require.Same(t, good, h.Current(), "an unsupported provider never replaces the last good revision")
+	ns, declared := h.Namespace("marketing")
+	require.True(t, declared)
+	require.Equal(t, []string{"env/MARKETING_*"}, ns.Secrets.Allow)
+
+	// The kubernetes alias is a supported provider and is served verbatim.
+	writePolicy(t, path, strings.Replace(loaderPolicyA, `"env/MARKETING_*"`, `"env/MARKETING_*", "kubernetes/marketing-*"`, 1))
+	result, err = h.Reload(t.Context(), ReloadRequest{Actor: "csk_live_admin"})
+	require.NoError(t, err)
+	require.True(t, result.Changed)
+	ns, _ = h.Namespace("marketing")
+	require.Equal(t, []string{"env/MARKETING_*", "kubernetes/marketing-*"}, ns.Secrets.Allow)
+}

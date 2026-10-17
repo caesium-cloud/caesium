@@ -773,6 +773,12 @@ func (c *Constructor) planTasks(ctx context.Context, groups []*baselineGroup, pa
 				descriptor: task.descriptor,
 			}
 
+			// Before any reuse or re-execution: a reused result was computed
+			// with the step's secret references, and re-execution verifies
+			// them, so the namespace must allow them now.
+			if err := c.checkSecretsAllowed(task, namespace); err != nil {
+				return nil, err
+			}
 			if unchanged && pending == 0 {
 				source, err := c.cacheSourceForUnchanged(ctx, task, replayHash)
 				if err != nil {
@@ -1033,6 +1039,30 @@ func (c *Constructor) cacheSourceForUnchanged(ctx context.Context, task *baselin
 	return cacheSource{}, fmt.Errorf("%w: step %q hash %s has neither a live TaskCache entry nor recorded baseline result/output", ErrUnavailableBaselineProof, task.taskName, shortHash(replayHash))
 }
 
+// checkSecretsAllowed runs the namespace secret allow-check over the step's
+// captured secret references (canonicalised, never resolved) before the plan
+// reuses a cached or baseline result for it or verifies its secrets for
+// re-execution, exactly as an executor checks before its own cache lookup: a
+// fully cached replay never reaches an executor. A namespace without rules
+// returns at once; a denial names only the redacted reference.
+func (c *Constructor) checkSecretsAllowed(task *baselineTask, namespace string) error {
+	if secret.ForNamespace(nil, namespace).AllowsAll() {
+		return nil
+	}
+	inner := c.secretResolver
+	if inner == nil {
+		resolver, err := jobdefruntime.ProcessSecretResolver()
+		if err != nil {
+			return fmt.Errorf("%w: step %q: secret rules of namespace %q cannot be checked: %v", ErrSecretIdentity, task.taskName, namespace, err)
+		}
+		inner = resolver
+	}
+	if err := jobdefruntime.CheckContainerSpecSecretsAllowed(secret.ForNamespace(inner, namespace), task.descriptor.ContainerSpec); err != nil {
+		return fmt.Errorf("%w: step %q: %w", ErrSecretIdentity, task.taskName, err)
+	}
+	return nil
+}
+
 func (c *Constructor) authorizeReexecution(ctx context.Context, task *baselineTask) error {
 	if !task.row.ReplaySafe {
 		return fmt.Errorf("%w: step %q would re-execute but baseline task_run replay_safe=false", ErrReplayUnsafe, task.taskName)
@@ -1106,6 +1136,13 @@ func VerifyReplaySecretIdentities(ctx context.Context, resolver secret.Resolver,
 			return fmt.Errorf("replay secret %s for env %s resolved value unavailable", ref.Ref, ref.EnvKey)
 		}
 		if err := VerifyResolvedReplaySecretIdentity(ctx, resolver, ref, value, resolved.Identity); err != nil {
+			if errors.Is(err, secret.ErrSecretDenied) {
+				// A namespace denial at verification (the policy changed
+				// after resolution) keeps its type for the executor's
+				// terminal-failure handling and never re-attaches the raw
+				// reference: the denial already carries the redacted one.
+				return fmt.Errorf("replay secret for env %s: %w", ref.EnvKey, err)
+			}
 			return fmt.Errorf("replay secret %s for env %s %v", ref.Ref, ref.EnvKey, err)
 		}
 	}
