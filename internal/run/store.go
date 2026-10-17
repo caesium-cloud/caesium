@@ -2762,12 +2762,18 @@ func (s *Store) EnsureTaskRunStartable(runID, taskRef uuid.UUID, claimedBy strin
 // follows the same TaskRun-primary-key-or-catalog-task-ID contract, so a worker
 // executing a fan-out instance must pass the instance's TaskRun ID.
 func (s *Store) StartTaskClaimed(runID, taskRef uuid.UUID, runtimeID, claimedBy string) error {
+	return s.StartTaskClaimedContext(context.Background(), runID, taskRef, runtimeID, claimedBy)
+}
+
+// StartTaskClaimedContext also bounds the transaction and its contention waits
+// by the worker's claim context and task/run deadline.
+func (s *Store) StartTaskClaimedContext(ctx context.Context, runID, taskRef uuid.UUID, runtimeID, claimedBy string) error {
 	var pendingEvents []event.Event
 	var counts dbWriteCounts
-	err := withStoreBusyRetry(func() error {
+	err := withStoreBusyRetryContext(ctx, func() error {
 		counts.reset()
 		attemptEvents := make([]event.Event, 0, 1)
-		err := s.db.Transaction(func(tx *gorm.DB) error {
+		err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 			now := time.Now().UTC()
 			row, err := loadTaskRunByIDOrUnique(tx, runID, taskRef)
 			if err != nil {
