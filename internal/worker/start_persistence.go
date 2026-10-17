@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/caesium-cloud/caesium/internal/models"
+	"github.com/caesium-cloud/caesium/internal/run"
 	"github.com/caesium-cloud/caesium/pkg/log"
 )
 
@@ -19,8 +20,9 @@ func (e *runtimeExecutor) persistTaskStart(ctx context.Context, taskRun *models.
 	// deadlines or claim-loss/shutdown cancellation still win.
 	ctx, cancel := context.WithTimeoutCause(ctx, defaultLeaseTTL, errTaskStartNotPersisted)
 	defer cancel()
+	claim := run.TaskClaim{ClaimedBy: taskRun.ClaimedBy, ClaimAttempt: taskRun.ClaimAttempt}
 	for {
-		err := e.store.StartTaskClaimedContext(ctx, taskRun.JobRunID, taskRun.ID, runtimeID, taskRun.ClaimedBy)
+		err := e.store.StartTaskClaimedContext(ctx, taskRun.JobRunID, taskRun.ID, runtimeID, claim)
 		if err == nil {
 			return nil
 		}

@@ -2762,12 +2762,16 @@ func (s *Store) EnsureTaskRunStartable(runID, taskRef uuid.UUID, claimedBy strin
 // follows the same TaskRun-primary-key-or-catalog-task-ID contract, so a worker
 // executing a fan-out instance must pass the instance's TaskRun ID.
 func (s *Store) StartTaskClaimed(runID, taskRef uuid.UUID, runtimeID, claimedBy string) error {
-	return s.StartTaskClaimedContext(context.Background(), runID, taskRef, runtimeID, claimedBy)
+	return s.startTaskClaimed(context.Background(), runID, taskRef, runtimeID, claimedBy, nil)
 }
 
-// StartTaskClaimedContext also bounds the transaction and its contention waits
-// by the worker's claim context and task/run deadline.
-func (s *Store) StartTaskClaimedContext(ctx context.Context, runID, taskRef uuid.UUID, runtimeID, claimedBy string) error {
+// StartTaskClaimedContext fences the captured claim token on every retry and
+// bounds the transaction and contention waits by the worker's context.
+func (s *Store) StartTaskClaimedContext(ctx context.Context, runID, taskRef uuid.UUID, runtimeID string, claim TaskClaim) error {
+	return s.startTaskClaimed(ctx, runID, taskRef, runtimeID, claim.ClaimedBy, &claim.ClaimAttempt)
+}
+
+func (s *Store) startTaskClaimed(ctx context.Context, runID, taskRef uuid.UUID, runtimeID, claimedBy string, claimAttempt *int) error {
 	var pendingEvents []event.Event
 	var counts dbWriteCounts
 	err := withStoreBusyRetryContext(ctx, func() error {
@@ -2782,13 +2786,16 @@ func (s *Store) StartTaskClaimedContext(ctx context.Context, runID, taskRef uuid
 				}
 				return err
 			}
-			result := tx.Model(&models.TaskRun{}).
-				Where("id = ? AND claimed_by = ? AND status = ?", row.ID, claimedBy, string(TaskStatusRunning)).
-				Updates(map[string]any{
-					"runtime_id":             runtimeID,
-					"started_at":             now,
-					"rate_limit_retry_after": nil,
-				})
+			query := tx.Model(&models.TaskRun{}).
+				Where("id = ? AND claimed_by = ? AND status = ?", row.ID, claimedBy, string(TaskStatusRunning))
+			if claimAttempt != nil {
+				query = query.Where("claim_attempt = ?", *claimAttempt)
+			}
+			result := query.Updates(map[string]any{
+				"runtime_id":             runtimeID,
+				"started_at":             now,
+				"rate_limit_retry_after": nil,
+			})
 			if result.Error != nil {
 				return result.Error
 			}

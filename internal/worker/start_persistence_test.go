@@ -175,6 +175,70 @@ func TestRuntimeExecutorStartPersistenceHonorsClaimLossAfterContention(t *testin
 	require.Empty(t, row.RuntimeID)
 }
 
+func TestRuntimeExecutorStartPersistenceFencesSameWorkerReclaim(t *testing.T) {
+	store, db, taskRun := seedClaimedTaskRun(t)
+	taskRun.ClaimAttempt = 1
+	require.NoError(t, db.Model(&models.TaskRun{}).Where("id = ?", taskRun.ID).
+		Updates(map[string]any{"claim_attempt": taskRun.ClaimAttempt, "claim_expires_at": time.Now().Add(-time.Minute)}).Error)
+	contended := make(chan struct{})
+	var once sync.Once
+	var reclaimed atomic.Bool
+	injectStartWriteError(t, db, func() error {
+		once.Do(func() { close(contended) })
+		if !reclaimed.Load() {
+			return errors.New("database is locked")
+		}
+		return nil
+	})
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	reassigned := make(chan error, 1)
+	go func() {
+		select {
+		case <-contended:
+		case <-ctx.Done():
+			reassigned <- ctx.Err()
+			return
+		}
+		claimer := NewClaimer(taskRun.ClaimedBy, store, time.Minute)
+		err := claimer.ReclaimExpired(ctx)
+		if err == nil {
+			var replacement *models.TaskRun
+			replacement, err = claimer.ClaimNext(ctx)
+			if err == nil {
+				if replacement == nil || replacement.ID != taskRun.ID || replacement.ClaimAttempt != taskRun.ClaimAttempt+1 {
+					err = errors.New("same-worker reclaim did not advance this task's claim token")
+				} else {
+					err = store.StartTaskClaimed(replacement.JobRunID, replacement.ID, "replacement-runtime", replacement.ClaimedBy)
+				}
+			}
+		}
+		reclaimed.Store(err == nil)
+		reassigned <- err
+	}()
+	engine := &startPersistenceEngine{}
+	sink := &fakeSink{}
+	(&runtimeExecutor{
+		store: store, localSink: sink,
+		engineFactory: func(context.Context, models.AtomEngine) (atom.Engine, error) { return engine, nil },
+	}).Execute(ctx, taskRun)
+
+	require.NoError(t, <-reassigned)
+	require.NoError(t, ctx.Err(), "the captured claim token must fence the stale start before its timeout")
+	require.Equal(t, 1, engine.stopCalls)
+	require.Equal(t, "runtime", engine.stopRequest.ID)
+	require.True(t, engine.stopRequest.Force)
+	require.False(t, engine.waited, "the stale atom must not reach monitoring or completion")
+	require.Zero(t, sink.failed)
+	require.Zero(t, sink.succeeded)
+	var row models.TaskRun
+	require.NoError(t, db.First(&row, "id = ?", taskRun.ID).Error)
+	require.Equal(t, taskRun.ClaimedBy, row.ClaimedBy)
+	require.Equal(t, taskRun.ClaimAttempt+1, row.ClaimAttempt)
+	require.Equal(t, "replacement-runtime", row.RuntimeID)
+	require.Equal(t, string(run.TaskStatusRunning), row.Status)
+}
+
 type startPersistenceEngine struct {
 	cancelOnCreateEngine
 	stopCalls   int
