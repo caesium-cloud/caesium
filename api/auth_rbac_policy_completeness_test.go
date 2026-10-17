@@ -116,6 +116,14 @@ func TestAuthMiddlewareMountedRoutesHaveRBACPolicy(t *testing.T) {
 
 var planItemPattern = regexp.MustCompile(`^[A-H][0-9]+$`)
 
+// guardedCollectionRoutes are the live collection routes, each mapped to the
+// test that proves its handler filters: the test serves the real handler
+// behind the real auth middleware with AuthDeps.RequireCollectionFilter set,
+// as a namespace-confined principal, and asserts the response holds only rows
+// from the allowed namespaces. A collection route clears its pending marker
+// only by being listed here with such a test.
+var guardedCollectionRoutes = map[string]string{}
+
 // TestMountedRoutesAreClassified is the A3 build gate: every mounted route has
 // a valid role and class; every live namespaced route has a namespace
 // resolver (the middleware denies a confined principal on one that does not);
@@ -151,9 +159,16 @@ func TestMountedRoutesAreClassified(t *testing.T) {
 				problems = append(problems, key+": live namespaced route has no namespace resolver")
 			}
 		case iauth.RouteClassCollection:
-			if !policy.Pending() {
-				problems = append(problems, key+": live collection route; drive its handler through the collection guard (AuthDeps.RequireCollectionFilter) before clearing its pending marker")
+			if !policy.Pending() && guardedCollectionRoutes[key] == "" {
+				problems = append(problems, key+": live collection route; drive its handler through the collection guard (AuthDeps.RequireCollectionFilter) and list it in guardedCollectionRoutes before clearing its pending marker")
 			}
+		}
+	}
+	for key, test := range guardedCollectionRoutes {
+		policy, ok := policies[key]
+		_, isMounted := mounted[key]
+		if !ok || !isMounted || policy.Class != iauth.RouteClassCollection || policy.Pending() || test == "" {
+			problems = append(problems, key+": guardedCollectionRoutes entry must name a test for a mounted, live collection route")
 		}
 	}
 	sort.Strings(problems)
