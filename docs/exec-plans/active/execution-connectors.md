@@ -606,7 +606,7 @@ Resume unfinished waves. Do not archive this plan while later items remain.
   merged E1 and D1. E2 is the only selected item. E3 requires merged E2;
   F2–F4/N remain later work.
 - **W7-α / E2:** [PR #658](https://github.com/caesium-cloud/caesium/pull/658),
-  head `9ac0ed647a9d8a61a8f6bca6b9fad95db2cb8ffd`, implements typed
+  head `b957758da43c1d24e1a4885facad4e8bc098c666`, implements typed
   parent/child/continuation relationships, verified local admission/run links
   and reverse navigation from existing run evidence. An additive HTTP
   correlation projection supplies the routable execution ID; the existing
@@ -614,16 +614,36 @@ Resume unfinished waves. Do not archive this plan while later items remain.
   apply to the expanded response. Current job dataset declarations are labeled
   separately from observed logs, outputs, assertions and receipt evidence.
 - **Verification:** Independent implementation and browser-test source review
-  is clear. The exact candidate passed containerized lint/vet (zero issues),
-  the full root race/coverage unit suite, all required tagged hermetic checks,
-  integration compilation, 536 UI tests in 67 files, production build and bundle
-  budgets. Containerized plan guardrails passed. Browser discovery selects all
-  five connector scenarios and excludes them from default/auth; absent fixture
-  markers fail closed. Clean-head real Temporal HTTP/browser qualification,
-  default/auth integration baselines and current-head hosted checks are pending.
-- **Acceptance/publication:** PR #658 is draft pending live qualification.
+  is clear, including scoped global-feature/catalog denial and warm-cache
+  regressions. `just tag=ec-w7 connectors-fixture-check` on the clean head
+  passed all six real Temporal HTTP scenarios (95.06s), all five connector
+  browser scenarios (97.91s) and all nine authenticated browser scenarios
+  (6.40s), with no selected skips, retries, errors or flaky outcomes. The journey
+  reaches actual uncached logs, outputs, receipt and dataset watermark, retains
+  queued admission identity, follows native relationships and proves scoped
+  local evidence without external requests. Candidate/source checksums, server
+  image ID and SDK 1.49.0 / CLI 1.9.1 / server 1.32.0 are retained; all six owned
+  fixture containers were cleaned up normally. Opaque work gains no data evidence.
+- **Baselines:** Full container race/coverage, lint/vet, tagged hermetic checks
+  and integration compilation passed on identical Go/module contents. Current
+  hosted UI checks passed 539 tests in 67 files, lint, TypeScript, production
+  build and bundle budgets on an identical UI subtree. Current integrated CI
+  passed all three default Docker shards and agent/auth integration, plus 160
+  default and nine authenticated browser tests with zero retries/skips. The
+  integration baseline retains mode exclusions and two missing-image
+  prerequisite skips (automatic retry and cache CLI); those skipped scenarios
+  are not claimed as qualified. Current native OOM qualification passed; the
+  initial failed attempt's cause remains unconfirmed. Containerized plan
+  guardrails and plan structure/link/unchanged-checkbox checks passed.
+- **Hosted qualification:** [CI run 39054077538](https://github.com/caesium-cloud/caesium/actions/runs/39054077538)
+  tests merge `b1ed842ff45890bb15cba7443af09fe51cc2a532` of master
+  `141ac76bbb95ca74d83c1ad7f1cd23200e7f25f2` and the PR head above. The
+  newer base adds unrelated auth-process changes; this is integrated-candidate
+  evidence, while local live qualification targets the exact PR head. Required
+  checks, CODEOWNER review and the merge queue remain acceptance gates.
+- **Acceptance/publication:** PR #658 is ready for protected review.
   E2 remains unchecked; implementation and this plan sync are unmerged.
-  Normal protected review/checks and the merge queue govern this wave.
+  E3 and F2–F4/N remain later work. This records qualification, not shipment.
 
 ### Stream Status
 
