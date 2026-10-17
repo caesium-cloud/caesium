@@ -216,14 +216,14 @@ func TestRoutePolicyClassesPinned(t *testing.T) {
 		"POST /v1/database/query":                      {Role: models.RoleAdmin, Class: RouteClassCluster},
 		"POST /v1/cache/prune":                         {Role: models.RoleOperator, Class: RouteClassCluster},
 		"POST /v1/triggers":                            {Role: models.RoleOperator, Class: RouteClassCluster},
-		"GET /v1/jobs":                                 {Role: models.RoleViewer, Class: RouteClassCollection, PendingItem: "B4"},
+		"GET /v1/jobs":                                 {Role: models.RoleViewer, Class: RouteClassCollection},
 		"GET /v1/auth/keys":                            {Role: models.RoleAdmin, Class: RouteClassCollection},
 		"POST /v1/auth/keys":                           {Role: models.RoleAdmin, Class: RouteClassNamespaced},
 		"POST /v1/auth/keys/:id/revoke":                {Role: models.RoleAdmin, Class: RouteClassNamespaced},
 		"POST /v1/auth/keys/:id/rotate":                {Role: models.RoleAdmin, Class: RouteClassNamespaced},
 		"GET /v1/jobs/:id/dag":                         {Role: models.RoleViewer, Class: RouteClassNamespaced},
 		"GET /v1/jobs/:id/manifest":                    {Role: models.RoleViewer, Class: RouteClassNamespaced, PendingItem: "B9"},
-		"GET /v1/jobs/:id":                             {Role: models.RoleViewer, Class: RouteClassNamespaced, PendingItem: "B4"},
+		"GET /v1/jobs/:id":                             {Role: models.RoleViewer, Class: RouteClassNamespaced},
 		"POST /v1/jobs/:id/run":                        {Role: models.RoleRunner, Class: RouteClassNamespaced},
 		"POST /v1/jobs/:id/runs/:id/replay":            {Role: models.RoleRunner, Class: RouteClassNamespaced},
 		"POST /v1/jobdefs/apply":                       {Role: models.RoleOperator, Class: RouteClassNamespaced, PendingItem: "B9"},
@@ -240,11 +240,14 @@ func TestRoutePolicyClassesPinned(t *testing.T) {
 		"POST /v1/agent/incidents/:id/mcp":             {Role: models.RoleRunner, Class: RouteClassNamespaced, PendingItem: "A8"},
 		"POST /v1/incidents/:id/approvals/:id/approve": {Role: models.RoleOperator, Class: RouteClassNamespaced, PendingItem: "A8"},
 		"POST /v1/incidents/:id/approvals/:id/reject":  {Role: models.RoleOperator, Class: RouteClassNamespaced},
-		// Backfill date dedupe reads the job's runs by job id alone, so a
-		// backfill's total_runs can count a moved job's old-namespace history.
-		"POST /v1/jobs/:id/backfill":            {Role: models.RoleRunner, Class: RouteClassNamespaced, PendingItem: "B4"},
-		"GET /v1/jobs/:id/backfills/:id":        {Role: models.RoleViewer, Class: RouteClassNamespaced, PendingItem: "B4"},
-		"PUT /v1/jobs/:id/backfills/:id/cancel": {Role: models.RoleOperator, Class: RouteClassNamespaced, PendingItem: "B4"},
+		// Backfill date dedupe counts only the backfill's own namespace (B4).
+		"POST /v1/jobs/:id/backfill":            {Role: models.RoleRunner, Class: RouteClassNamespaced},
+		"GET /v1/jobs/:id/backfills/:id":        {Role: models.RoleViewer, Class: RouteClassNamespaced},
+		"PUT /v1/jobs/:id/backfills/:id/cancel": {Role: models.RoleOperator, Class: RouteClassNamespaced},
+		// DAG snapshots record no namespace (B7).
+		"GET /v1/jobs/:id/blame":            {Role: models.RoleViewer, Class: RouteClassNamespaced, PendingItem: "B7"},
+		"GET /v1/jobs/:id/topology":         {Role: models.RoleViewer, Class: RouteClassNamespaced, PendingItem: "B7"},
+		"GET /v1/jobs/:id/topology/history": {Role: models.RoleViewer, Class: RouteClassNamespaced, PendingItem: "B7"},
 		// Agent profiles resolve by name, and notification policies match
 		// events, across namespaces at runtime: deletes wait on D4.
 		"DELETE /v1/agentprofiles/:id":          {Role: models.RoleOperator, Class: RouteClassNamespaced, PendingItem: "D4"},
@@ -266,12 +269,19 @@ func TestRoutePolicyClassesPinned(t *testing.T) {
 // namespace (each is also listed, with the test that proves it, in
 // api/auth_rbac_policy_completeness_test.go guardedCollectionRoutes).
 var liveCollectionRoutes = map[string]bool{
-	"GET /v1/auth/keys": true, // A5
+	"GET /v1/auth/keys":       true, // A5
+	"GET /v1/jobs":            true, // B4
+	"GET /v1/triggers":        true,
+	"GET /v1/incidents":       true,
+	"GET /v1/stats":           true,
+	"GET /v1/stats/summary":   true,
+	"GET /v1/events":          true,
+	"GET /v1/events/ingested": true,
 }
 
 // TestPendingRoutesListed logs the pending set so a reviewer sees every route
 // still fail-closed for confined principals, and pins that every collection
-// route outside liveCollectionRoutes is pending (B4, B5, B6, D4 filter them).
+// route outside liveCollectionRoutes is pending (B5, B6, D4 filter them).
 func TestPendingRoutesListed(t *testing.T) {
 	var pending []string
 	for key, policy := range RoutePolicies() {

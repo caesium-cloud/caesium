@@ -115,7 +115,7 @@ func (ctrl *Controller) ListIngested(c *echo.Context) error {
 		return echo.NewHTTPError(http.StatusBadRequest, "bad request").Wrap(err)
 	}
 
-	events, err := eventsvc.New(c.Request().Context()).ListIngested(req)
+	events, err := ingestedEventService(c.Request().Context()).ListIngested(req)
 	if err != nil {
 		return echo.NewHTTPError(http.StatusInternalServerError, "internal server error").Wrap(err)
 	}
@@ -169,3 +169,8 @@ func runsStarted(result *triggerevent.RouteResult) int {
 	}
 	return total
 }
+
+// ingestedEventService builds the event service for a list request; a seam
+// for the collection-guard test, which serves the real handler over a test
+// database.
+var ingestedEventService = eventsvc.New

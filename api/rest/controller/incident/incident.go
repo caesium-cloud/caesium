@@ -57,7 +57,7 @@ func (ctrl *Controller) List(c *echo.Context) error {
 		params.Offset = n
 	}
 
-	result, err := svc.New(c.Request().Context()).List(params)
+	result, err := incidentService(c.Request().Context()).List(params)
 	if err != nil {
 		return echo.NewHTTPError(http.StatusInternalServerError, "internal server error").Wrap(err)
 	}
@@ -90,3 +90,8 @@ func parseBool(raw string) bool {
 		return false
 	}
 }
+
+// incidentService builds the incident service for a list request; a seam for
+// the collection-guard test, which serves the real handler over a test
+// database.
+var incidentService = svc.New

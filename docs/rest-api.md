@@ -54,8 +54,8 @@ For the auth management CLI, supply credentials through `CAESIUM_API_KEY`. The
 | `GET /jobs/:id/queue`, `DELETE /jobs/:id/queue/:queue_id` | Inspect or drop queued runs under a `queue` concurrency strategy. |
 | `GET /jobs/:id/runs`, `GET /jobs/:id/runs/:run_id` | List runs; read one run with its tasks. |
 | `GET /jobs/:id/runs/:run_id/logs?task_id=<task-id>` | Stream or fetch task logs. |
-| `POST /jobs/:id/runs/:run_id/retry` | Retry a failed run, preserving succeeded and cached tasks. |
-| `POST /jobs/:id/runs/:run_id/tasks/:task_id/partitions/:index/retry` | Retry one partition of a fanned-out task. |
+| `POST /jobs/:id/runs/:run_id/retry` | Retry a failed run, preserving succeeded and cached tasks. A run left in a namespace its job has since moved out of answers `409` with `error: namespace_moved`, `run_namespace` and `job_namespace`; replay it instead. |
+| `POST /jobs/:id/runs/:run_id/tasks/:task_id/partitions/:index/retry` | Retry one partition of a fanned-out task. Refused with the same `409 namespace_moved` as a run retry. |
 | `GET /jobs/:id/runs/:run_id/tasks/:task_id/partitions` | List a fanned-out task's partitions. |
 | `POST /jobs/:id/runs/:run_id/callbacks/retry` | Retry failed callbacks. |
 | `POST /jobdefs/apply`, `POST /jobdefs/diff`, `POST /jobdefs/lint` | Apply, diff, or lint manifests against the server's catalog. With a policy file loaded, lint and apply reject undeclared namespaces. The diff response lists the `namespaces` an apply would touch. Lint and diff answer a namespace-confined caller from its own namespaces only ([identity-and-access.md](identity-and-access.md#route-classes-and-enforcement)). Lint reports, and diff rejects with 400, each `secret://` reference its namespace's `secrets.allow` rules deny, redacted ([Scoped secrets](identity-and-access.md#scoped-secrets)); apply does not check them. |
@@ -72,7 +72,7 @@ For the auth management CLI, supply credentials through `CAESIUM_API_KEY`. The
 | `PUT /jobs/:id/backfills/:backfill_id/cancel` | Cancel a backfill. |
 | `GET /jobs/:id/cache`, `DELETE /jobs/:id/cache`, `DELETE /jobs/:id/cache/:task_name` | Inspect or invalidate a job's task cache. See [job-definitions.md](job-definitions.md#caching). |
 | `POST /cache/prune` | Prune expired cache entries. |
-| `GET /events` | Subscribe to lifecycle events over SSE. |
+| `GET /events` | Subscribe to lifecycle events over SSE. A namespace-confined caller receives only run and task events of its namespaces' runs (see [identity-and-access.md](identity-and-access.md#collections-and-history-under-a-job)). |
 | `POST /events`, `GET /events/ingested` | Ingest an external event for event triggers; list ingested events. |
 | `POST /hooks/*` | Webhook receiver for HTTP triggers. |
 

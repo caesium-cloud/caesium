@@ -385,12 +385,11 @@ func TestNamespacedRunRoutesRequireBothNamespaces(t *testing.T) {
 		post("/v1/jobs/:id/runs/:run_id/replay", pv("id", f.mktJob.String(), "run_id", f.mktRun.String()), "")).status)
 }
 
-// TestNamespacedBackfillRoutes: backfill create, read and cancel are pending
-// B4 for confined principals, even on their own namespace's job — a
-// backfill's total_runs is deduplicated against the job's runs by job id
-// alone, so under a moved job it counts the old namespace's history.
-// Unrestricted principals are unaffected. The job+backfill resolver B4 will
-// switch on is exercised in TestBackfillResolver.
+// TestNamespacedBackfillRoutes: backfill create, read and cancel are live for
+// confined principals (B4): a backfill deduplicates against its own
+// namespace, so a confined caller acts on its own namespace's backfills, is
+// refused another namespace's (audited against it), and a backfill of another
+// job is 404. Unrestricted principals are unaffected.
 func TestNamespacedBackfillRoutes(t *testing.T) {
 	f := newNSFixture(t)
 	mktOperator := f.key(t, models.RoleOperator, `["marketing"]`)
@@ -398,21 +397,60 @@ func TestNamespacedBackfillRoutes(t *testing.T) {
 	backfillParams := func(job, backfill uuid.UUID) echo.PathValues {
 		return pv("id", job.String(), "backfill_id", backfill.String())
 	}
+	cancel := func(job, backfill uuid.UUID) nsCall {
+		return nsCall{method: http.MethodPut, pattern: "/v1/jobs/:id/backfills/:backfill_id/cancel", params: backfillParams(job, backfill)}
+	}
 	for _, call := range []nsCall{
 		post("/v1/jobs/:id/backfill", pv("id", f.mktJob.String()), `{}`),
+		get("/v1/jobs/:id/backfills", pv("id", f.mktJob.String())),
 		get("/v1/jobs/:id/backfills/:backfill_id", backfillParams(f.mktJob, f.mktBackfill)),
-		{method: http.MethodPut, pattern: "/v1/jobs/:id/backfills/:backfill_id/cancel", params: backfillParams(f.mktJob, f.mktBackfill)},
+		cancel(f.mktJob, f.mktBackfill),
+	} {
+		require.Equal(t, http.StatusOK, f.do(t, mktOperator, call).status, call.pattern)
+		require.Equal(t, http.StatusOK, f.do(t, clusterOperator, call).status, call.pattern)
+	}
+	for _, call := range []nsCall{
+		post("/v1/jobs/:id/backfill", pv("id", f.finJob.String()), `{}`),
+		get("/v1/jobs/:id/backfills/:backfill_id", backfillParams(f.finJob, f.finBackfill)),
+		cancel(f.finJob, f.finBackfill),
 	} {
 		require.Equal(t, http.StatusForbidden, f.do(t, mktOperator, call).status, call.pattern)
 		denial := f.lastDenial(t)
-		requireAuditMetadata(t, denial, map[string]any{"reason": "insufficient_role", "pending": "B4"})
-		require.Equal(t, "marketing", denial.Namespace, "%s: a pending denial is still audited against the target's namespace", call.pattern)
+		requireAuditMetadata(t, denial, map[string]any{"reason": "insufficient_role"})
+		require.Equal(t, "finance", denial.Namespace, call.pattern)
 		require.Equal(t, http.StatusOK, f.do(t, clusterOperator, call).status, call.pattern)
 	}
-	// A backfill of another job stays a pending 403 (resolution only feeds
-	// the audit row, best-effort, and cannot turn the denial into a 404).
-	require.Equal(t, http.StatusForbidden, f.do(t, mktOperator, get("/v1/jobs/:id/backfills/:backfill_id", backfillParams(f.mktJob, f.finBackfill))).status)
-	require.Empty(t, f.lastDenial(t).Namespace)
+	// A backfill of another job is the handler's 404.
+	require.Equal(t, http.StatusNotFound, f.do(t, mktOperator, get("/v1/jobs/:id/backfills/:backfill_id", backfillParams(f.mktJob, f.finBackfill))).status)
+}
+
+// TestRunDiffResolvesBothRuns: GET /v1/jobs/:id/runs/diff needs viewer in the
+// job's namespace and in both compared runs' persisted namespaces (B4), with
+// the handler's own 400/404 for a malformed request or another job's run.
+func TestRunDiffResolvesBothRuns(t *testing.T) {
+	f := newNSFixture(t)
+	mktViewer := f.key(t, models.RoleViewer, `["marketing"]`)
+	finViewer := f.key(t, models.RoleViewer, `["finance"]`)
+	bothViewer := f.key(t, models.RoleViewer, `["marketing","finance"]`)
+	diff := func(job uuid.UUID, query string) nsCall {
+		call := get("/v1/jobs/:id/runs/diff", pv("id", job.String()))
+		call.query = query
+		return call
+	}
+	same := "left=" + f.mktRun.String() + "&right=" + f.mktRun.String()
+	require.Equal(t, http.StatusOK, f.do(t, mktViewer, diff(f.mktJob, same)).status)
+
+	// The moved job is in finance; its run stayed in marketing.
+	moved := "left=" + f.movedRun.String() + "&right=" + f.movedRun.String()
+	require.Equal(t, http.StatusForbidden, f.do(t, finViewer, diff(f.movedJob, moved)).status, "the run's namespace is required")
+	requireAuditMetadata(t, f.lastDenial(t), map[string]any{"reason": "insufficient_role"})
+	require.Equal(t, http.StatusForbidden, f.do(t, mktViewer, diff(f.movedJob, moved)).status, "the job's namespace is required")
+	require.Equal(t, http.StatusOK, f.do(t, bothViewer, diff(f.movedJob, moved)).status)
+
+	require.Equal(t, http.StatusNotFound, f.do(t, mktViewer, diff(f.mktJob, "left="+f.mktRun.String()+"&right="+f.finRun.String())).status, "a run of another job")
+	require.Equal(t, http.StatusBadRequest, f.do(t, mktViewer, diff(f.mktJob, "left="+f.mktRun.String())).status)
+	require.Equal(t, http.StatusBadRequest, f.do(t, mktViewer, diff(f.mktJob, "left=nope&right="+f.mktRun.String())).status)
+	require.Equal(t, http.StatusNotFound, f.do(t, mktViewer, diff(f.mktJob, "left="+f.mktRun.String()+"&right="+uuid.NewString())).status)
 }
 
 func TestNamespacedTriggerRoutes(t *testing.T) {
@@ -612,9 +650,8 @@ func TestNamespacedClusterAndPendingRoutes(t *testing.T) {
 		call    nsCall
 		pending string
 	}{
-		{get("/v1/jobs", nil), "B4"},
-		{get("/v1/jobs/:id", pv("id", f.mktJob.String())), "B4"},
-		{get("/v1/jobs/:id/runs", pv("id", f.mktJob.String())), "B4"},
+		{get("/v1/jobs/:id/blame", pv("id", f.mktJob.String())), "B7"},
+		{get("/v1/jobs/:id/topology", pv("id", f.mktJob.String())), "B7"},
 		{post("/v1/jobdefs/apply", nil, `{"definitions":[]}`), "B9"},
 		{post("/v1/events", nil, `{}`), "A6"},
 		{get("/v1/lineage/impact", nil), "B5"},
@@ -624,7 +661,7 @@ func TestNamespacedClusterAndPendingRoutes(t *testing.T) {
 		requireAuditMetadata(t, f.lastDenial(t), map[string]any{"reason": "insufficient_role", "pending": tc.pending})
 	}
 	// A pending job route still audits against the job's namespace.
-	f.do(t, mktAdmin, get("/v1/jobs/:id/runs", pv("id", f.finJob.String())))
+	f.do(t, mktAdmin, get("/v1/jobs/:id/topology", pv("id", f.finJob.String())))
 	require.Equal(t, "finance", f.lastDenial(t).Namespace)
 
 	// Identity routes pass any authenticated principal, even with no grants.

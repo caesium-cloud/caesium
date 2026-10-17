@@ -170,10 +170,12 @@ func TestAuthNamespacedKeyHasNoClusterRole(t *testing.T) {
 	require.NoError(t, err)
 
 	get := func() (int, *auth.Principal) {
-		req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/jobs", nil)
+		// A cluster route: the confined key below is refused on it whatever its
+		// namespace (GET /v1/jobs went live as a collection in B4).
+		req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/atoms", nil)
 		req.Header.Set("Authorization", "Bearer "+created.Plaintext)
 		var captured *auth.Principal
-		rec, err := callMiddleware(t, svc, auditor, limiter, req, &echo.RouteInfo{Path: "/v1/jobs", Method: http.MethodGet}, nil,
+		rec, err := callMiddleware(t, svc, auditor, limiter, req, &echo.RouteInfo{Path: "/v1/atoms", Method: http.MethodGet}, nil,
 			func(c *echo.Context) error {
 				captured = authmw.GetPrincipal(c)
 				return c.String(http.StatusOK, "ok")

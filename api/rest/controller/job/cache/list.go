@@ -3,6 +3,8 @@ package cache
 import (
 	"net/http"
 
+	authmw "github.com/caesium-cloud/caesium/api/middleware"
+	"github.com/caesium-cloud/caesium/internal/authz"
 	"github.com/caesium-cloud/caesium/internal/cache"
 	"github.com/caesium-cloud/caesium/pkg/db"
 	"github.com/google/uuid"
@@ -15,8 +17,11 @@ func List(c *echo.Context) error {
 		return echo.NewHTTPError(http.StatusBadRequest, "bad request").Wrap(err)
 	}
 
+	// Cache entries are history: each one lists the run that filled it, so a
+	// confined caller sees only entries filled in namespaces it may read (B4).
+	ctx := authz.WithHistoryScope(c.Request().Context(), authmw.GetPrincipal(c))
 	store := cache.NewStore(db.Connection())
-	entries, err := store.ListByJob(id)
+	entries, err := store.ListByJobContext(ctx, id)
 	if err != nil {
 		return echo.NewHTTPError(http.StatusInternalServerError, "internal server error").Wrap(err)
 	}

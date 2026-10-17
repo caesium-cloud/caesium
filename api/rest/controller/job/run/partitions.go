@@ -210,6 +210,12 @@ func RetryPartition(c *echo.Context) error {
 	if err != nil || runEntry == nil || runEntry.JobID != jobID {
 		return echo.ErrNotFound
 	}
+	// A partition retry relaunches the job's current model inside this run,
+	// exactly like a whole-run retry: refused once the job left the run's
+	// namespace (B4).
+	if moved := runstorage.CheckRunNamespace(runID, runEntry.Namespace, j.Namespace); moved != nil {
+		return namespaceMovedConflict(c, j, moved)
+	}
 	taskID, err := resolveTaskRef(jobID, taskParam)
 	if err != nil {
 		return echo.NewHTTPError(http.StatusBadRequest, "bad request").Wrap(err)
@@ -255,6 +261,9 @@ func RetryPartition(c *echo.Context) error {
 		transferred = true
 	}
 	if err != nil {
+		if errors.Is(err, runstorage.ErrRunNamespaceMoved) {
+			return namespaceMovedConflict(c, j, err)
+		}
 		return retryPartitionHTTPError(err)
 	}
 

@@ -218,7 +218,6 @@ func (s *IntegrationTestSuite) TestAuthNamespacedRoutesConfineKey() {
 	s.requireNSStatus(http.StatusForbidden, http.MethodGet, "/metrics", mktOperator, "")
 	// Connector reads span every namespace's runs.
 	s.requireNSStatus(http.StatusForbidden, http.MethodGet, "/v1/connectors", mktOperator, "")
-	s.requireNSStatus(http.StatusForbidden, http.MethodGet, "/v1/jobs", mktOperator, "")
 	payload, err := json.Marshal(map[string]any{"definitions": []schema.Definition{s.namespacedJobDefinition(f.mktAlias, "marketing")}})
 	s.Require().NoError(err)
 	s.requireNSStatus(http.StatusForbidden, http.MethodPost, "/v1/jobdefs/apply", mktOperator, string(payload)) // pending B9
@@ -407,8 +406,8 @@ func (s *IntegrationTestSuite) TestAuthNamespacedSharedObjectsAndTriggers() {
 
 // TestAuthNamespacedDatasetsBackfillsIncidents: dataset writes are cluster-only
 // for confined principals until B6 (their producer resolvers are unit-tested);
-// backfills are cluster-only for them until B4; and the live incident route
-// resolves to the incident's namespace.
+// backfills resolve to their job's and their own namespace (B4); and the live
+// incident route resolves to the incident's namespace.
 func (s *IntegrationTestSuite) TestAuthNamespacedDatasetsBackfillsIncidents() {
 	s.requireAuthLane()
 	f := s.newNamespacedRoutesFixture("data")
@@ -490,19 +489,16 @@ func (s *IntegrationTestSuite) TestAuthNamespacedDatasetsBackfillsIncidents() {
 	s.Equal("released", holdStatus(sharedHold), "the cluster admin releases exactly as before")
 
 	// Backfills (the jobs' cron never fires, so a backfill schedules nothing)
-	// are pending B4 for confined principals, even on their own namespace's
-	// job: a backfill's total_runs is deduplicated against the job's runs by
-	// job id alone, so under a moved job it would count the old namespace's
-	// history. The cluster admin creates, reads and cancels exactly as before;
-	// the job+backfill resolver is unit-tested.
+	// are live for confined principals since B4 (a backfill deduplicates
+	// against its own namespace): marketing's operator creates and reads one
+	// on the marketing job and is refused the finance job's. The moved-job
+	// dedupe and a deterministic cancel are TestAuthNamespaceDeliveriesAndBackfills.
 	window := fmt.Sprintf(`{"start":%q,"end":%q}`, now.Add(-2*time.Hour).Format(time.RFC3339), now.Add(-time.Hour).Format(time.RFC3339))
-	for _, key := range []string{mktOperator, bothOperator} {
-		s.requireNSStatus(http.StatusForbidden, http.MethodPost, "/v1/jobs/"+f.mktJob.ID+"/backfill", key, window)
-	}
+	s.requireNSStatus(http.StatusAccepted, http.MethodPost, "/v1/jobs/"+f.mktJob.ID+"/backfill", mktOperator, window)
+	s.requireNSStatus(http.StatusForbidden, http.MethodPost, "/v1/jobs/"+f.finJob.ID+"/backfill", mktOperator, window)
 	mktBackfill := decodeID(s, s.requireNSStatus(http.StatusAccepted, http.MethodPost, "/v1/jobs/"+f.mktJob.ID+"/backfill", s.authAPIKey, window))
 	for _, key := range []string{mktOperator, bothOperator} {
-		s.requireNSStatus(http.StatusForbidden, http.MethodGet, "/v1/jobs/"+f.mktJob.ID+"/backfills/"+mktBackfill, key, "")
-		s.requireNSStatus(http.StatusForbidden, http.MethodPut, "/v1/jobs/"+f.mktJob.ID+"/backfills/"+mktBackfill+"/cancel", key, "")
+		s.requireNSStatus(http.StatusOK, http.MethodGet, "/v1/jobs/"+f.mktJob.ID+"/backfills/"+mktBackfill, key, "")
 	}
 	var created struct {
 		Namespace string `json:"namespace"`

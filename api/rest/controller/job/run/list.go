@@ -7,8 +7,10 @@ import (
 	"strconv"
 	"strings"
 
+	authmw "github.com/caesium-cloud/caesium/api/middleware"
 	jsvc "github.com/caesium-cloud/caesium/api/rest/service/job"
 	runsvc "github.com/caesium-cloud/caesium/api/rest/service/run"
+	"github.com/caesium-cloud/caesium/internal/authz"
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v5"
 	"gorm.io/gorm"
@@ -35,7 +37,10 @@ const (
 )
 
 func List(c *echo.Context) error {
-	ctx := c.Request().Context()
+	// The job is authorised on its current namespace; its runs are history
+	// and keep their persisted namespace, so a confined caller sees (and
+	// counts) only runs in namespaces it may read (B4).
+	ctx := authz.WithHistoryScope(c.Request().Context(), authmw.GetPrincipal(c))
 
 	id, err := uuid.Parse(c.Param("id"))
 	if err != nil {

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	triggersvc "github.com/caesium-cloud/caesium/api/rest/service/trigger"
+	"github.com/caesium-cloud/caesium/internal/authz"
 	"github.com/caesium-cloud/caesium/internal/event"
 	"github.com/caesium-cloud/caesium/internal/models"
 	runstorage "github.com/caesium-cloud/caesium/internal/run"
@@ -146,6 +147,9 @@ func (j *jobService) List(req *ListRequest) (models.Jobs, error) {
 	if len(req.Aliases) > 0 {
 		q = q.Where("alias IN ?", req.Aliases)
 	}
+	// A namespace-confined caller lists only its namespaces' jobs; a job-scoped
+	// key's alias filter above narrows it further, never widens it (B4).
+	q = authz.NamespaceFilter(q, "jobs.namespace")
 
 	for _, orderBy := range req.OrderBy {
 		q = q.Order(orderBy)
@@ -204,6 +208,9 @@ func (j *jobService) ListRecentRuns(jobIDs []uuid.UUID, limit int) (map[uuid.UUI
 			) AS rn
 		`).
 		Where("job_runs.job_id IN ? AND job_runs.quarantine IS NOT TRUE", jobIDs)
+	// Rank only the runs the caller may read, so a confined caller still gets
+	// up to limit runs of its own namespaces under a moved job (B4).
+	ranked = authz.NamespaceFilter(ranked, "job_runs.namespace")
 
 	var rows []recentRunRow
 	err := j.db.WithContext(j.ctx).
@@ -283,6 +290,8 @@ func (j *jobService) GetByIDPrefix(rawID string) (*models.Job, error) {
 	return job, nil
 }
 
+// attachLatestRun runs under the service's context: a history scope on it
+// limits the attached run to namespaces the caller may read (B4).
 func (j *jobService) attachLatestRun(job *models.Job) {
 	runStore := runstorage.NewStore(j.db.WithContext(j.ctx))
 	if latest, err := runStore.Latest(job.ID); err == nil && latest != nil {
