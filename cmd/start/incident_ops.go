@@ -326,6 +326,14 @@ func (o *incidentActionOps) ApplyJobdefPatch(ctx context.Context, jobID uuid.UUI
 	if def.Metadata.Alias != job.Alias {
 		return nil, fmt.Errorf("%w: patch targets %q, job is %q", errPatchAliasMismatch, def.Metadata.Alias, job.Alias)
 	}
+	// The declared-namespace check (B2) runs BEFORE the dry-run return, so the
+	// git-synced route refuses an undeclared namespace with the same error as
+	// the direct route (whose ValidateBatch runs it again below). Escalating it
+	// instead would hand a human a manifest that, once committed, fails git
+	// sync's ValidateBatch.
+	if err := internaljobdef.ValidateDeclaredNamespaces([]schema.Definition{def}); err != nil {
+		return nil, fmt.Errorf("incident: proposed job definition failed server-side validation: %w", err)
+	}
 
 	rendered, err := o.renderJobdefDiff(ctx, &def, job.Alias)
 	if err != nil {

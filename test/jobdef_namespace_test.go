@@ -472,3 +472,97 @@ func (s *IntegrationTestSuite) findJobByAlias(alias string) *jobSummary {
 	}
 	return nil
 }
+
+// TestIncidentApplyJobdefPatchRefusesUndeclaredNamespace: an approved agent
+// patch on a GIT-SYNCED job (that route renders a dry-run diff and escalates
+// it to a human instead of applying) which moves the job into a namespace the
+// policy fixture does not declare is refused at execution, as the direct
+// route is. Escalating it would hand a human a manifest whose commit then
+// fails git sync's validation and stops the server (B2).
+func (s *IntegrationTestSuite) TestIncidentApplyJobdefPatchRefusesUndeclaredNamespace() {
+	s.requireAuthLane()
+	s.requirePolicyFixture()
+
+	alias := fmt.Sprintf("b2-git-patch-%d", time.Now().UnixNano())
+	def := failingJobDefinition(alias, s.engineType)
+	def.Metadata.Remediation = &schema.MetadataRemediation{
+		Profile: "triage-only",
+		Classes: []string{"unknown"},
+	}
+	// Applied with git provenance, as git sync records it: the patch takes
+	// the escalate route.
+	payload, err := json.Marshal(map[string]any{
+		"definitions": []schema.Definition{def},
+		"provenance": map[string]any{
+			"source_id": "b2-it-git-" + alias,
+			"repo":      "https://git.example.invalid/jobs.git",
+			"ref":       "main",
+			"path":      alias + ".job.yaml",
+		},
+	})
+	s.Require().NoError(err)
+	resp, err := s.doJSONRequest(http.MethodPost, s.caesiumURL+"/v1/jobdefs/apply", bytes.NewReader(payload))
+	s.Require().NoError(err)
+	applied, err := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	s.Require().NoError(err)
+	s.Require().Equal(http.StatusOK, resp.StatusCode, "apply %s: %s", alias, applied)
+
+	job := s.requireJobByAlias(alias)
+	runID := s.triggerRun(job.ID)
+	s.awaitRun(job.ID, runID, runTimeout)
+	incident := s.awaitIncidentForJobTask(job.ID, "gate", 60*time.Second)
+	token := s.mintAgentSessionToken(incident.ID, alias)
+
+	moved := def
+	moved.Metadata.Namespace = "sales"
+	patch, err := json.Marshal(moved)
+	s.Require().NoError(err)
+	status, body := s.postWithToken(
+		fmt.Sprintf("%s/v1/agent/incidents/%s/actions", s.caesiumURL, incident.ID),
+		token,
+		map[string]any{
+			"type":   "apply_jobdef_patch",
+			"params": map[string]any{"definition": json.RawMessage(patch)},
+		})
+	s.Require().Equal(http.StatusAccepted, status, string(body))
+	var proposal struct {
+		Action approvalAction `json:"action"`
+	}
+	s.Require().NoError(json.Unmarshal(body, &proposal))
+
+	detail := s.awaitIncidentStatus(incident.ID, "awaiting_approval", 30*time.Second)
+	var pending approvalRequest
+	for _, a := range detail.Approvals {
+		if a.ActionID == proposal.Action.ID && a.Decision == "pending" {
+			pending = a
+			break
+		}
+	}
+	s.Require().NotEmpty(pending.ID, "no pending approval for the namespace-moving patch")
+	out, err := s.runCLIStdout(s.incidentCLIArgs("approve", incident.ID,
+		"--approval", pending.ID, "--reason", "move to the sales team")...)
+	s.Require().NoError(err, "caesium incident approve failed:\n%s", out)
+
+	after := s.incidentDetail(incident.ID)
+	executed := requireActionByID(s, after, proposal.Action.ID)
+	s.Require().Equal("failed", executed.Status,
+		"an approved git-synced patch into an undeclared namespace must be refused, not escalated")
+	var result map[string]any
+	s.Require().NoError(json.Unmarshal(executed.Result, &result))
+	s.Require().Contains(fmt.Sprint(result["error"]), undeclaredNamespaceMessage(alias, "sales"),
+		"the refusal names the namespace and the job: %v", result)
+	s.NotContains(fmt.Sprint(result), "escalate", "nothing was escalated: %v", result)
+	s.NotEqual("escalated", after.Incident.Status)
+
+	var jobs []struct {
+		Alias     string `json:"alias"`
+		Namespace string `json:"namespace"`
+	}
+	s.getJSON("/v1/jobs", &jobs)
+	for _, j := range jobs {
+		if j.Alias == alias {
+			s.Equal("default", j.Namespace, "the job did not move")
+		}
+	}
+}
