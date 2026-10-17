@@ -144,7 +144,10 @@ function principalFromWhoami(body: unknown): PrincipalState | null {
   }
 
   const obj = body as Record<string, unknown>;
-  const role = normalizeRole(obj.role) ?? "viewer";
+  // An explicit empty role means this principal has no cluster grant (for
+  // example a namespace-only user). Keep it distinct from an older server
+  // that omitted the role field.
+  const role = obj.role === "" ? null : normalizeRole(obj.role) ?? "viewer";
 
   const kind =
     typeof obj.kind === "string" && obj.kind.trim() !== "" ? obj.kind.trim() : null;

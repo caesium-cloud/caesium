@@ -36,6 +36,7 @@ type canonicalConnection struct {
 	Provider         string             `json:"provider"`
 	Endpoint         string             `json:"endpoint"`
 	Scope            string             `json:"scope"`
+	UIURL            string             `json:"uiURL,omitempty"`
 	SecretRefs       []string           `json:"secretRefs"`
 	CertificatePaths []string           `json:"certificatePaths"`
 	Limits           canonicalLimits    `json:"limits"`
@@ -117,6 +118,7 @@ func canonicalConnectionFrom(conn Connection) (canonicalConnection, error) {
 		Provider:         conn.Provider,
 		Endpoint:         conn.Endpoint,
 		Scope:            conn.Scope,
+		UIURL:            conn.UIURL,
 		SecretRefs:       secretRefs,
 		CertificatePaths: certPaths,
 		Limits: canonicalLimits{

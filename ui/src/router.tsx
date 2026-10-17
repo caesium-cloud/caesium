@@ -21,6 +21,11 @@ import { SystemPage } from "./features/system/SystemPage";
 import { TriggersPage } from "./features/triggers/TriggersPage";
 import { api } from "./lib/api";
 import { normalizeStatusFilter } from "./features/datasets/freshness-utils";
+import { ConnectionsPage } from "./features/connectors/ConnectionsPage";
+import { ExecutionDetailPage } from "./features/connectors/ExecutionDetailPage";
+import { canReadConnectors } from "./features/auth/access";
+import { getPrincipal } from "./lib/auth";
+import type { ConnectorPageQuery, ConnectorSearch } from "./features/connectors/types";
 
 const rootRoute = createRootRoute({
   component: AppShell,
@@ -31,6 +36,38 @@ const indexRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/",
   loader: () => { throw redirect({ to: '/jobs' }) },
+});
+
+async function requireConnectorsEnabled() {
+  if (!canReadConnectors(getPrincipal()) || !(await api.getSystemFeatures()).connectors_enabled) throw redirect({ to: "/jobs" });
+}
+
+function connectorPageSearch(search: Record<string, unknown>): ConnectorPageQuery {
+  const size = Number(search.page_size);
+  return {
+    cursor: typeof search.cursor === "string" ? search.cursor : undefined,
+    page_size: [1, 5, 10, 25, 50, 100].includes(size) ? size : undefined,
+  };
+}
+
+const connectionsRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "connectors",
+  validateSearch: (search: Record<string, unknown>): ConnectorSearch => ({
+    ...connectorPageSearch(search),
+    connection: typeof search.connection === "string" ? search.connection : undefined,
+    workflow_type: typeof search.workflow_type === "string" ? search.workflow_type : undefined,
+  }),
+  loader: requireConnectorsEnabled,
+  component: ConnectionsPage,
+});
+
+const externalExecutionRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "connectors/$connectionId/executions/$executionId",
+  validateSearch: connectorPageSearch,
+  loader: requireConnectorsEnabled,
+  component: ExecutionDetailPage,
 });
 
 const jobsRoute = createRoute({
@@ -251,6 +288,8 @@ const jobDefsRoute = createRoute({
 
 const routeTree = rootRoute.addChildren([
   indexRoute,
+  connectionsRoute,
+  externalExecutionRoute,
   jobsRoute,
   jobDetailRoute,
   jobRunsRoute,

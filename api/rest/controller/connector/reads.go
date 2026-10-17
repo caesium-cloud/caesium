@@ -1,6 +1,7 @@
 package connector
 
 import (
+	"encoding/json"
 	"errors"
 	"net/http"
 	"strconv"
@@ -25,6 +26,16 @@ func readPrincipal(c *echo.Context) (string, error) {
 	if p == nil || !auth.HasRole(p.ClusterRole(), models.RoleViewer) {
 		return "", echo.ErrForbidden
 	}
+	// A persisted agent marker never grants access to connector surfaces, even
+	// if its claim is malformed or lacks the incident UUID required at minting.
+	var scope struct {
+		Agent json.RawMessage `json:"agent"`
+	}
+	if len(p.Scope) > 0 {
+		if json.Unmarshal(p.Scope, &scope) != nil || (len(scope.Agent) > 0 && string(scope.Agent) != "null") {
+			return "", echo.ErrForbidden
+		}
+	}
 	claim, err := auth.DecodeAgentClaim(p.Scope)
 	if err != nil || claim != nil {
 		return "", echo.ErrForbidden
@@ -34,10 +45,10 @@ func readPrincipal(c *echo.Context) (string, error) {
 		return "", echo.ErrForbidden
 	}
 	if p.KeyID != nil {
-		return "key:" + p.KeyID.String(), nil
+		return string(p.Kind) + ":" + p.KeyID.String(), nil
 	}
 	if p.UserID != nil {
-		return "user:" + p.UserID.String(), nil
+		return string(p.Kind) + ":" + p.UserID.String(), nil
 	}
 	return "", echo.ErrForbidden
 }

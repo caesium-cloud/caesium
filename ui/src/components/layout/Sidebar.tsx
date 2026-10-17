@@ -10,6 +10,8 @@ import { useNavCounts } from "@/features/jobs/useNavCounts";
 import { deriveQuorumView, type QuorumView } from "@/features/system/quorum";
 import { useClusterHealth, type ClusterHealthState } from "@/features/system/useClusterHealth";
 import { api } from "@/lib/api";
+import { usePrincipal } from "@/lib/auth";
+import { canReadConnectors } from "@/features/auth/access";
 import { events } from "@/lib/events";
 import { cn } from "@/lib/utils";
 import { Kbd } from "@/components/ui/kbd";
@@ -72,6 +74,7 @@ interface SidebarProps {
 
 export function Sidebar({ className, onNavigate }: SidebarProps) {
   const queryClient = useQueryClient();
+  const principal = usePrincipal();
   const counts = useNavCounts();
   const health = useClusterHealth();
   const quorum = deriveQuorumView(health.raw?.checks?.cluster, { stale: health.stale });
@@ -124,6 +127,9 @@ export function Sidebar({ className, onNavigate }: SidebarProps) {
     { to: "/jobs", label: "Jobs", hint: "j", count: counts.jobs },
     { to: "/triggers", label: "Triggers", hint: "t", count: counts.triggers },
     { to: "/atoms", label: "Atoms", hint: "a", count: counts.atoms },
+    ...(features?.connectors_enabled === true && canReadConnectors(principal)
+      ? [{ to: "/connectors", label: "Connections", count: null }]
+      : []),
     ...(freshnessEnabled
       ? [{ to: "/datasets", label: "Datasets", count: counts.datasets }]
       : []),

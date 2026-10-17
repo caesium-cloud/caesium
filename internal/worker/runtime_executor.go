@@ -590,7 +590,7 @@ func (e *runtimeExecutor) Execute(ctx context.Context, taskRun *models.TaskRun) 
 			return
 		}
 
-		if errors.Is(execErr, errOwnerCompletionNotDelivered) || errors.Is(execErr, context.Canceled) || (ctx.Err() != nil && errors.Is(execErr, ctx.Err())) {
+		if errors.Is(execErr, errTaskStartNotPersisted) || errors.Is(execErr, errOwnerCompletionNotDelivered) || errors.Is(execErr, context.Canceled) || (ctx.Err() != nil && errors.Is(execErr, ctx.Err())) {
 			log.Info("worker task canceled", "task_id", taskRun.TaskID, "run_id", taskRun.JobRunID)
 			return
 		}
@@ -1001,20 +1001,15 @@ func (e *runtimeExecutor) executeTask(ctx context.Context, taskRun *models.TaskR
 		return nil, err
 	}
 
-	if err := e.store.StartTaskClaimed(taskRun.JobRunID, taskRun.ID, a.ID(), taskRun.ClaimedBy); err != nil {
-		// The authoritative fence: the row is no longer running-and-claimed by
-		// this worker, so the task was resolved while Create was in flight. The
-		// container is already up, so tear it down rather than leaving it to run
-		// to completion against a terminal row — the orphaned-container shape.
-		// Execute treats ErrTaskClaimMismatch as "abandon quietly": no
-		// completion is posted and no failure is recorded.
-		if errors.Is(err, run.ErrTaskClaimMismatch) {
-			log.Info("worker task resolved before start; stopping container",
-				"run_id", taskRun.JobRunID, "task_id", taskRun.TaskID, "task_run_id", taskRun.ID, "atom_id", a.ID())
-			if stopErr := engine.Stop(&atom.EngineStopRequest{ID: a.ID(), Force: true}); stopErr != nil {
-				log.Warn("failed to stop container for a task resolved before start",
-					"run_id", taskRun.JobRunID, "task_id", taskRun.TaskID, "atom_id", a.ID(), "error", stopErr)
-			}
+	if err := e.persistTaskStart(taskCtx, taskRun, a.ID()); err != nil {
+		// Create already started this atom, but its identity was not committed.
+		// Clean it up on every failure, including lost claims and deadlines,
+		// before abandoning the claim or reporting a permanent error.
+		log.Info("worker task start not persisted; stopping container",
+			"run_id", taskRun.JobRunID, "task_id", taskRun.TaskID, "task_run_id", taskRun.ID, "atom_id", a.ID(), "error", err)
+		if stopErr := engine.Stop(&atom.EngineStopRequest{ID: a.ID(), Force: true}); stopErr != nil {
+			log.Warn("failed to stop container after task start persistence failed",
+				"run_id", taskRun.JobRunID, "task_id", taskRun.TaskID, "atom_id", a.ID(), "error", stopErr)
 		}
 		return nil, err
 	}

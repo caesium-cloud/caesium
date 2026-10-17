@@ -1108,3 +1108,29 @@ connections:
     provider: temporal
     id: primary
 `
+
+func TestConnectionUIURLIsOptionalBoundedAndFingerprintBound(t *testing.T) {
+	original := mustParse(t, validConfig, nil)
+	baseFingerprint, err := Fingerprint(original)
+	if err != nil {
+		t.Fatal(err)
+	}
+	withURL := mustParse(t, strings.Replace(validConfig, "    scope: default", "    scope: default\n    uiURL: https://temporal.example.test/console/", 1), nil)
+	if got := withURL.Connections[0].UIURL; got != "https://temporal.example.test/console" {
+		t.Fatalf("console URL = %q", got)
+	}
+	if original.Connections[0].Identity() != withURL.Connections[0].Identity() {
+		t.Fatal("browser console URL changed RPC identity")
+	}
+	fingerprint, err := Fingerprint(withURL)
+	if err != nil || fingerprint == baseFingerprint {
+		t.Fatalf("configured URL must alter fingerprint: %s, %v", fingerprint, err)
+	}
+	for _, raw := range []string{"javascript:alert(1)", "//temporal.example.test", "https://operator:secret@temporal.example.test", "https://temporal.example.test?token=secret", "https://temporal.example.test?", "https://temporal.example.test#", "https://temporal.example.test/#secret", "https:///missing-host", " https://temporal.example.test", "https://temporal.example.test/" + strings.Repeat("x", 2048)} {
+		t.Run(strconv.Itoa(len(raw))+"-"+strings.Split(raw, ":")[0], func(t *testing.T) {
+			if _, err := compileUIURL(raw); err == nil {
+				t.Fatal("unsafe console URL accepted")
+			}
+		})
+	}
+}

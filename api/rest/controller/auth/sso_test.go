@@ -57,6 +57,7 @@ func TestWhoamiReturnsPrincipalAndCSRF(t *testing.T) {
 	require.Equal(t, "viewer@example.com", body["email"])
 	require.Equal(t, string(models.RoleViewer), body["role"])
 	require.Equal(t, "csrf-token", body["csrf_token"])
+	require.Equal(t, false, body["is_scoped"])
 	require.NotContains(t, body, "scope", "an unscoped principal must not gain a scope key")
 }
 
@@ -80,6 +81,7 @@ func TestWhoamiNamesTheScopeOfAScopedKey(t *testing.T) {
 	var body map[string]any
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
 	require.Equal(t, string(iauth.PrincipalAPIKey), body["kind"])
+	require.Equal(t, true, body["is_scoped"])
 	require.NotContains(t, body, "email", "an api-key principal has no email")
 
 	scope, ok := body["scope"].(map[string]any)
@@ -105,6 +107,42 @@ func TestWhoamiRoleIsClusterRole(t *testing.T) {
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
 	require.Contains(t, body, "role")
 	require.Equal(t, "", body["role"])
+}
+
+func TestWhoamiExplicitlyClassifiesAPIKeyScope(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		scope  string
+		scoped bool
+	}{
+		{name: "unscoped"},
+		{name: "empty jobs", scope: `{"jobs":[]}`},
+		{name: "null scope", scope: `null`},
+		{name: "null agent", scope: `{"agent":null}`},
+		{name: "job scope", scope: `{"jobs":["publication"]}`, scoped: true},
+		{name: "malformed JSON", scope: `{"jobs":`, scoped: true},
+		{name: "malformed jobs", scope: `{"jobs":"publication"}`, scoped: true},
+		{name: "agent without jobs", scope: `{"agent":{"incident_id":"11111111-1111-1111-1111-111111111111"}}`, scoped: true},
+		{name: "empty agent marker", scope: `{"agent":{}}`, scoped: true},
+		{name: "invalid agent marker", scope: `{"agent":false}`, scoped: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, role := range []models.Role{models.RoleViewer, models.RoleRunner} {
+				ctrl := NewSSO(nil, nil, "caesium_session")
+				c, rec := newAuthContext(t, http.MethodGet, "/auth/whoami", "")
+				c.Set(authmw.ContextKeyPrincipal, &iauth.Principal{
+					Kind: iauth.PrincipalAPIKey, Subject: "csk_live_classified",
+					Grants: policy.Grants{"*": role}, Scope: []byte(tc.scope),
+				})
+				require.NoError(t, ctrl.Whoami(c))
+				require.Equal(t, http.StatusOK, rec.Code)
+				var body map[string]any
+				require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+				require.Equal(t, tc.scoped, body["is_scoped"])
+				require.Equal(t, string(role), body["role"], "scope classification must not change the role")
+			}
+		})
+	}
 }
 
 func TestNewSSORetainsCompletionService(t *testing.T) {

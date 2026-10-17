@@ -100,3 +100,12 @@ func TestFixtureJournalRecordsEveryEffectExecution(t *testing.T) {
 		require.NotZero(t, event["attempt"])
 	}
 }
+
+func TestFixtureFaultMatchesPinnedExecution(t *testing.T) {
+	require.True(t, faultMatches("update", "", "", "update", "workflow", "run"))
+	require.True(t, faultMatches("", "workflow", "run", "server-allocated-update", "workflow", "run"))
+	for _, coordinates := range [][2]string{{"workflow", "new-run"}, {"other", "run"}, {"", "run"}, {"workflow", ""}} {
+		require.False(t, faultMatches("", "workflow", "run", "update", coordinates[0], coordinates[1]))
+	}
+	require.False(t, faultMatches("", "", "", "update", "workflow", "run"))
+}

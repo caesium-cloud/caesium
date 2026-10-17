@@ -190,9 +190,10 @@ type WorkflowTaskProblem struct {
 // HistoryPage is one bounded history page. Payloads are not copied.
 // A non-empty NextPageToken means the server has more history. It does not
 // mean the workflow failed. Incomplete means this response kept an event
-// prefix, or dropped the server token, so the JSON stays within the metadata
-// budget. Activities, relations, and problems match that prefix. The caller
-// repeats the same request token with a smaller page size.
+// prefix, or dropped the server token, so the response stays within the
+// configured entry and metadata budgets. Activities, relations, and problems
+// match that prefix. Truncation omits the native token because it would skip
+// dropped events; a smaller request hint may still return the same native batch.
 type HistoryPage struct {
 	WorkflowID    string                `json:"workflow_id"`
 	RunID         string                `json:"run_id"`
@@ -713,9 +714,15 @@ func (o *Observer) boundDescribe(execution Execution) (Execution, error) {
 }
 
 func (o *Observer) boundHistory(base HistoryPage, workflowID string, events []*historypb.HistoryEvent, token []byte) (HistoryPage, error) {
-	full := o.historyPrefix(base, workflowID, events, len(events))
-	full.NextPageToken = cloneToken(token)
-	full.Incomplete = false
+	// Temporal may return a native batch larger than the requested page hint.
+	// The configured ceiling is still a hard bound on exposed events. A native
+	// token points past the entire batch, so keep it only when no event is lost.
+	count := min(len(events), int(o.clampPageSize(0)))
+	full := o.historyPrefix(base, workflowID, events, count)
+	full.Incomplete = count < len(events)
+	if !full.Incomplete {
+		full.NextPageToken = cloneToken(token)
+	}
 	ok, err := o.withinBudget(full)
 	if err != nil {
 		return HistoryPage{}, o.redact(err)
@@ -723,7 +730,7 @@ func (o *Observer) boundHistory(base HistoryPage, workflowID string, events []*h
 	if ok {
 		return full, nil
 	}
-	best, err := longestPrefix(len(events), func(count int) (bool, error) {
+	best, err := longestPrefix(count, func(count int) (bool, error) {
 		trial := o.historyPrefix(base, workflowID, events, count)
 		trial.Incomplete = true
 		return o.withinBudget(trial)
