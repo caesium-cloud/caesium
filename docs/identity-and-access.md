@@ -35,8 +35,9 @@ Contents: [Overview and concepts](#overview-and-concepts) |
   The effective role in namespace N is `max(grants[N], grants["*"])`.
 - **Principal.** The authenticated caller: an API key or an SSO user. The audit
   actor is the key prefix or the user's email. The cluster role (the grant at
-  `*`) is what audit rows, metrics labels, and the `role` field of
-  `GET /auth/whoami` report.
+  `*`) is what audit rows, metrics labels, and the `role` and `cluster_role`
+  fields of `GET /auth/whoami` report; whoami's `grants` and `namespaces`
+  fields list every grant.
 - **Tenancy namespace versus dataset namespace.** These are two unrelated
   axes. The tenancy namespace described in this guide decides which jobs, and
   which objects that belong to them, a principal may see and change. The
@@ -52,9 +53,10 @@ With no policy file every principal holds its role at `*`, so authorization
 behaves exactly as before namespaces existed. Namespaces themselves still take
 effect without a file: a manifest may set any DNS-label `metadata.namespace`,
 and the step cache key, incident deduplication, the git-sync `namespaces`
-allowlist and the shared-object reference rules all use it. Nothing yet checks a
-manifest's namespace against the declared ones (server-side rejection of an
-undeclared namespace is planned, B2), so a typo creates a new namespace.
+allowlist and the shared-object reference rules all use it. Without a policy
+file nothing checks a manifest's namespace against a declared list, so a typo
+creates a new namespace; with one, undeclared namespaces are rejected (see
+[Namespaces on jobs](#namespaces-on-jobs)).
 
 ## Providers
 
@@ -155,10 +157,14 @@ SSO method objects include `type`, stable `id`, display `label`, same-origin
 `credential` for LDAP. API-key auth is advertised as `{ "type": "api-key" }`
 when `CAESIUM_AUTH_MODE=api-key` is enabled.
 
-`GET /auth/whoami` requires a valid API key or session cookie. Cookie-session
-responses include `csrf_token` alongside the principal fields (`kind`,
-`subject`, `email`, and `role`). Browser clients should keep that token in
-memory and send it as `X-CSRF-Token` on unsafe cookie-session requests.
+`GET /auth/whoami` requires a valid API key or session cookie. It returns the
+principal: `kind`, `subject`, `email` (users), `role` and `cluster_role` (the
+role at `*`, empty for a principal confined to namespaces), `grants` (namespace
+to role, `*` for cluster-wide) and `namespaces` (the sorted namespaces it can
+read, `["*"]` with a cluster grant, `[]` with none). A job-scoped key also
+gets `scope`. Cookie-session responses include `csrf_token`; browser clients
+should keep it in memory and send it as `X-CSRF-Token` on unsafe cookie-session
+requests.
 
 `POST /auth/logout` revokes the current cookie session and clears the session
 cookie. Because logout is an unsafe cookie-session request, browser callers
@@ -340,7 +346,7 @@ namespaces:
     kubernetes:                       # parsed and validated; not enforced yet
       namespace: caesium-marketing
       serviceAccountName: caesium-jobs
-    secrets:                          # parsed and validated; not enforced yet
+    secrets:                          # enforced; see Scoped secrets
       allow:
         - vault/secret/data/marketing/*
         - k8s/marketing-*
@@ -363,8 +369,9 @@ bindings:
     namespaces: ["*"]
 ```
 
-The `kubernetes`, `secrets` and `quotas` blocks are validated and carried in the
-loaded policy, but nothing consumes them yet; see [Namespaces and
+The `secrets` rules are enforced ([Scoped secrets](#scoped-secrets)). The
+`kubernetes` and `quotas` blocks are validated and carried in the loaded policy,
+but nothing consumes them yet; see [Namespaces and
 isolation](#namespaces-and-isolation).
 
 ### Validation rules
@@ -394,8 +401,10 @@ same rules. Any violation is a fatal startup error, or a rejected reload.
   must not be negative.
 - `secrets.allow` entries are `provider/path` globs: `*` matches within one path
   segment and `**` across segments. Literal `.` and `..` segments are rejected.
-  Vault rules select the secret path and allow every field at that path; `#` is
-  reserved as the field delimiter and `#field` patterns are unsupported.
+  The provider must be `env`, `k8s` (alias `kubernetes`) or `vault`; any other
+  provider is an error. Vault rules select the secret path and allow every field
+  at that path; `#` is reserved as the field delimiter and `#field` patterns are
+  unsupported.
 
 Non-fatal warnings: a namespace other than `default` that has no `secrets`
 rules; user bindings when no enabled provider supplies a trusted email (only
@@ -520,8 +529,25 @@ never returned.
 ### Namespaces on jobs
 
 Set `metadata.namespace` in the job manifest (`caesium job schema` documents the
-field). It defaults to `default` and must be a DNS label. It is not yet checked
-against the namespaces declared in the policy file (planned, B2).
+field). It defaults to `default` and must be a DNS label.
+
+While a policy file is loaded, the namespace must also be declared in it
+(`default` always is). Server lint (`caesium job lint --server`,
+`POST /v1/jobdefs/lint`) reports every undeclared namespace as
+`metadata.namespace "x" of job "y" is not declared in the access policy`, and
+apply (`caesium job apply`, `POST /v1/jobdefs/apply`), the legacy
+`POST /v1/jobs`, git sync and agent remediation patches refuse the whole batch
+with that message before writing anything. The check reads the policy in force
+at the time, so removing a namespace from the file takes effect at the next
+apply; its existing jobs keep running. A git-sync source that still holds
+manifests in a removed namespace fails its next sync, which today stops the
+server like any invalid batch (a known follow-up makes such failures
+non-fatal). Offline `caesium job lint` checks syntax only.
+
+No policy file: any syntactically valid namespace is accepted (B1
+compatibility); undeclared namespaces are rejected only when a policy file is
+loaded. Amended in identity-and-access W4 (orchestrator decision, pending
+maintainer sign-off).
 
 - Runs, backfills and incidents carry a copy of the job's namespace when they
   are created, so global lists can filter without a join. Triggers, task runs,
@@ -530,7 +556,10 @@ against the namespaces declared in the policy file (planned, B2).
   job's current namespace and the run's persisted namespace.
 - Moving a job is an apply that changes `metadata.namespace`. History (runs,
   receipts, incidents) keeps its original namespace. `caesium job diff` shows the
-  change as a metadata diff.
+  change as a metadata diff and lists both namespaces under
+  `Namespaces touched` (`namespaces` in `--json` and in the
+  `POST /v1/jobdefs/diff` response; `--prune` adds the namespaces of the jobs
+  it would delete).
 - The namespace is part of the step cache key, so a move invalidates cached
   step outputs; results produced under one namespace are never republished under
   another. A replay of a moved job re-executes every step instead of reusing
@@ -589,7 +618,7 @@ principal confined to some namespaces is treated:
 | identity | Allowed whatever its grants, even none: `GET /auth/whoami`, `POST /auth/logout`, `GET /v1/system/features`. |
 | cluster | Always denied (403 `insufficient_role`): metrics, nodes and workers, atoms, logs, database, cache prune, `POST /v1/triggers`, the connector reads (`/v1/connectors*`), and `GET /v1/auth/policy` plus `POST /v1/auth/policy/reload`. |
 | namespaced | Caesium resolves the namespace of the target the handler will act on and requires the route's role in it (in every resolved namespace; once B6 ships, dataset reads will need it in any one). A target with no owning namespace is cluster-only. |
-| collection | The handler may only return rows from the namespaces where the principal holds the route's role. No collection route is live yet (see below). |
+| collection | The handler may only return rows from the namespaces where the principal holds the route's role. Only the API key list is live so far (see below). |
 
 A principal is *confined* on a route when its cluster role (its grant at `*`)
 is below the route's role. An unconfined principal is authorised exactly as
@@ -618,6 +647,23 @@ target's namespace:
   policy or agent profile by id. `*` objects are readable by viewers anywhere
   and writable only with the role at `*`.
 - **Incidents:** reject an approval.
+- **API keys:** list, create, revoke and rotate keys confined to namespaces
+  where it is admin (see [API keys and CLI login](#api-keys-and-cli-login)).
+- **Job definitions:** server lint and diff (`POST /v1/jobdefs/lint`,
+  `/diff`) need viewer in every definition's namespace and in the stored
+  namespace of every alias they name; with no definitions, any viewer grant
+  passes. Validation still runs against every job, but the answer is
+  restricted to the caller's namespaces: the diff baseline (and so its
+  `removed` list) holds only their jobs, a trigger a baseline job shares with
+  a job elsewhere has its configuration replaced by a `redacted` marker,
+  contract findings keep only edges between jobs the caller can read (and
+  drop inferred findings, which come from a consumer's trigger, when that
+  trigger also serves a job elsewhere), and validator errors (trigger-chain
+  cycles, dataset producers and consumers, remediation references) name
+  another namespace's job only as "a job in another namespace", without its
+  dataset or namespace. Each of these is read in one snapshot together with
+  the ownership checks that decide what it may show, so a job moving between
+  namespaces mid-request is judged by where it was when it was read.
 - **Audit:** `GET /v1/auth/audit` is authorised on its `?namespace=` filter (a
   namespace or `*`). An omitted filter means `*`, so a namespace admin must pass
   one.
@@ -635,23 +681,94 @@ that makes it namespace-aware lands (unconfined principals are unaffected):
 
 | Item | Routes |
 | --- | --- |
-| A5 | API key list, create, revoke, rotate (`/v1/auth/keys`) |
 | A6 | `POST /v1/events` |
 | A8 | `/v1/agent/incidents/*`, incident detail `GET /v1/incidents/:id`, approval approve |
-| B2 | `POST /v1/jobs`, `/v1/jobdefs/apply`, `/lint`, `/diff`, `GET /v1/jobs/:id/manifest`, `PATCH /v1/triggers/:id` |
 | B4 | `GET /v1/jobs/:id` and the job, run, backfill, trigger, event, stats and incident lists; `runs/diff`, run `why`, `blame`, `topology` and `topology/history`, the job `cache` read, `GET /v1/triggers/:id/events` |
 | B5 | `GET /v1/lineage/impact`, `GET /v1/contracts/graph` |
 | B6 | every `/v1/datasets*` route |
+| B9 | `POST /v1/jobs`, `POST /v1/jobdefs/apply`, `GET /v1/jobs/:id/manifest`, `PATCH /v1/triggers/:id` (confined job writes and trigger tenancy) |
 | D4 | shared-object lists, and creating or editing channels, policies and agent profiles |
 
 Every namespace denial is `403 insufficient permissions` and is audited as
-`auth.denied` with reason `insufficient_role`. For a confined principal the row
+`auth.denied` with reason `insufficient_role`. Lint and diff, where the caller
+named the namespaces itself, say which it lacks:
+`insufficient permissions: viewer required in namespace "finance"`. For a confined principal the row
 also lists the namespaces checked and, for a pending route, the plan item.
 
 One residual race is accepted for now: a concurrent move of the exact target by
 a principal who is operator in both namespaces can land between the namespace
 check and the handler (run admission and replay re-check inside their own
-transactions); in-transaction guards for the other mutations follow in B2/B4.
+transactions); in-transaction guards for the other mutations follow in B9/B4.
+
+### Scoped secrets
+
+A namespace's `secrets.allow` rules decide which `secret://` references its jobs
+may resolve. A namespace without a `secrets` block may resolve every reference
+(the pre-namespace behaviour, flagged by a lint warning); `secrets: {allow: []}`
+or `secrets: {}` resolves none.
+
+Rules match the reference's **canonical target**: the provider's own parser
+computes what would actually be read, query overrides included, and only that
+target is matched, never the reference's surface path.
+
+| Provider | Canonical target | Notes |
+| --- | --- | --- |
+| `env` | `env/<NAME>` | `?name=` wins over the path; path segments join with `_` |
+| `vault` | `vault/<path>#<field>` | `?field=` or the final path segment is the field; rules grant every field of an allowed path; a decoded `#` (`%23`) in the path or field is denied |
+| `k8s`, `kubernetes` | `k8s/<namespace>/<secret>` | the path namespace, or the secret resolver's `CAESIUM_JOBDEF_SECRETS_KUBE_NAMESPACE` for `secret://k8s/<secret>/<key>`; `?namespace=` and `?name=` override; the key is not part of the target |
+
+A Kubernetes rule with one path segment (`k8s/marketing-*`, `k8s/**`) is
+relative: it means that secret in the namespace's mapped Kubernetes namespace,
+`kubernetes.namespace`, else `CAESIUM_KUBERNETES_NAMESPACE`. Any other effective
+namespace must be named by a rule with two segments (`k8s/shared/common-*`).
+Until C1 makes relative references resolve in the mapped namespace, a relative
+reference reads in `CAESIUM_JOBDEF_SECRETS_KUBE_NAMESPACE`; when that differs
+from the mapped namespace, the reference does not match a relative rule and is
+denied. Set the two variables to the same namespace, or use
+`secret://k8s/<namespace>/<secret>/<key>`.
+
+Where the rules apply, each reading the policy at the point of use:
+
+- **Task execution**, local and distributed: every secret reference in the step
+  environment is checked before the cache lookup, so a reference the namespace
+  no longer allows is never satisfied from a cached result, and again by each
+  attempt's resolution and by quarantined-replay identity verification. A denial
+  fails the task at once, without retries, with an error naming only the
+  redacted reference (`secret env/FINANCE_TOKEN/… is not allowed by namespace
+  "marketing" secret rules: no rule matches`), and the incident class is
+  `config` (never auto-retried), not `transient_infra`. Each check reads the
+  policy as it is then, so a reload while one reference is being read applies
+  to the next reference of the same step.
+- **Replay** (`caesium run replay`, `POST /v1/jobs/:id/runs/:run_id/replay`): a
+  fully cached replay never reaches an executor, so before a step is reused from
+  cache or its baseline, or re-executed, its references must be allowed by the
+  job namespace's rules; otherwise the replay is refused with 422 naming the
+  redacted reference.
+- **HTTP trigger** webhook secret: every namespace of the trigger's jobs must
+  allow it (a trigger with no jobs uses `default`); a denial answers 500.
+- **Server lint** (`caesium job lint --server`, `POST /v1/jobdefs/lint`) and the
+  apply preview (`caesium job diff`, `POST /v1/jobdefs/diff`) report each
+  denied reference, redacted, without resolving it. `caesium job apply` does not
+  check secret rules; a bypassed lint fails at run time. Offline
+  `caesium job lint --check-secrets` resolves with the operator's own
+  credentials and ignores the server's policy.
+- Git sync credentials, registry credentials (`CAESIUM_REGISTRY_AUTH`) and
+  connector credentials are system secrets and are not scoped.
+
+A run in a namespace this node's policy file does not declare (it was removed
+after the job was applied) resolves no secrets. Work that starts while the
+server is still loading its policy file (queued or freshness-derived runs at
+startup) waits up to 30 seconds for it and resolves no secrets if it is not
+loaded by then. Client-side execution (`caesium dev`, `caesium reproduce`, and
+`caesium run retry` without `--server`) never loads the server's policy, even
+with `CAESIUM_AUTH_POLICY_FILE` set in its environment: like offline lint, it
+resolves every reference with the operator's own credentials and does not wait.
+With no policy file every
+namespace resolves every reference. In distributed mode each node enforces the
+rules from its own copy of the policy file: a worker whose file is missing,
+stale within a reload interval, or of another version enforces older or no
+rules until the owner carries the rules in the dispatch (C2). Mount the same
+file on every node.
 
 ### Planned isolation features
 
@@ -659,9 +776,6 @@ transactions); in-transaction guards for the other mutations follow in B2/B4.
   a namespace in the policy file will select the Kubernetes namespace and
   service account that a namespace's pods run under. Today it is validated but
   every job runs where the engine is configured.
-- **Planned (C4): scoped secrets.** The `secrets.allow` rules will restrict
-  which `secret://` references a namespace's jobs may resolve. Today they are
-  validated but not enforced, and every namespace can resolve every secret.
 - **Planned (D1): run quotas.** `quotas.maxConcurrentRuns` will cap a
   namespace's concurrently active runs. Today it is validated but not enforced.
 
@@ -673,12 +787,49 @@ API key before any session cookie. Key lifecycle is `caesium auth key` and the
 `/v1/auth/keys` endpoints, and a key may be further narrowed to a list of job
 aliases.
 
-Keys carry a `namespaces` column. A NULL value (every key minted before
-namespaces existed) means cluster-wide, so each existing key keeps its meaning.
-Any other empty or undecodable value grants nothing. **Planned (A5):** minting
-and rotating keys confined to namespaces (`--namespace`), the rule that a caller
-can mint only keys within its own grants, and SSO-admin key management. Until
-then every key is cluster-wide.
+A key holds its role in a set of namespaces. Without `--namespace` it is
+cluster-wide, as every key minted before namespaces existed is (their
+`namespaces` column is NULL):
+
+```sh
+caesium auth key create --role operator --namespace marketing [--namespace finance] [--jobs a,b] [--expires 90d]
+```
+
+`--namespace` is repeatable (or comma-separated); `POST /v1/auth/keys` takes
+the same list as `namespaces`. Names must be DNS labels; `*` alone is a
+cluster key, and an empty list, an empty name (`--namespace ""`) or `*` mixed
+with names is `400`. With a policy file, every named namespace must be
+declared in it; with no file any valid name is accepted. A cluster admin who
+names an undeclared namespace gets a `400` naming it. A namespace admin holds
+no grant in an undeclared namespace, so its request is refused first by the
+minting constraint below, with an audited `403` that does not name the
+namespace. `--jobs` (or its older spelling `--scope-jobs`) narrows the key
+further to a list of job aliases. An empty value (`scope.jobs` of `[]` or only
+blank aliases over REST) is a `400` for every caller, cluster admins included;
+such a key used to be minted unscoped.
+
+**Minting is limited to the caller's own grants.** Creating a key needs admin
+in every namespace it names (`*` for a cluster key), so a namespace admin
+(`admin` in `marketing`) can create keys confined to `marketing` at any role,
+and only a cluster admin can create a cluster key. Revoking or rotating a key
+needs admin in every namespace the key is confined to. A refused request is an
+audited `403` (`auth.denied`). Job-scoped and agent-session keys cannot manage
+keys. `GET /v1/auth/keys` (`caesium auth key list`) shows a cluster admin every
+key; a namespace admin sees only the keys confined to namespaces where it is
+admin, never a cluster key. A listed key shows `namespaces` only when it is
+confined.
+
+SSO users manage keys exactly like key-authenticated callers, from their
+browser session (unsafe requests still need the `X-CSRF-Token` header). The
+key's `created_by` and the audit actor are the user's email.
+
+Rotation replaces the secret, not the grant: the new key has the same role,
+job list, namespaces and expiry as the old one, and the old key stays valid
+for the grace period (`--grace-period`, default 24h) but never past its own
+expiry. A revoked or expired key cannot be rotated, nor can a key whose
+namespaces are no longer all declared in the policy file (`409`); revoke it and
+create a new one. A key whose stored namespaces are unreadable grants nothing;
+only a cluster admin can revoke it, and it cannot be rotated.
 
 **Planned (E5):** `caesium login`, `caesium logout` and `caesium whoami` for
 interactive CLI sign-in through the server's configured provider.
@@ -873,3 +1024,10 @@ To move to a policy file:
 Upgrading across the namespace schema changes is a coordinated upgrade: stop
 every node before applying the new binary and restart only upgraded nodes.
 Mixed-version rolling upgrades are unsupported.
+
+Scoped secrets change two things on upgrade. A policy file whose
+`secrets.allow` names a provider other than `env`, `k8s`, `kubernetes` or
+`vault` no longer loads (startup fails; a reload keeps the last good revision),
+so run `caesium auth policy lint` first; such a rule never matched anything.
+And `secrets` rules start to be enforced, so jobs in a namespace with rules stop
+resolving references the rules do not allow.

@@ -27,10 +27,10 @@ For the auth management CLI, supply credentials through `CAESIUM_API_KEY`. The
 | Endpoint | Purpose |
 | --- | --- |
 | `GET /auth/status` | Report the API-key and SSO methods available, so the console knows whether to show a login. |
-| `GET /auth/whoami` | Return the current API-key or session principal, including the CSRF token cookie sessions must send on unsafe requests. |
+| `GET /auth/whoami` | Return the current API-key or session principal: `role` and `cluster_role` (the role at `*`), `grants` (namespace → role) and `namespaces` (`["*"]` with a cluster grant), plus the CSRF token cookie sessions must send on unsafe requests. |
 | `POST /auth/logout` | Revoke the current browser session. |
-| `GET /v1/auth/keys`, `POST /v1/auth/keys` | List and create API keys. |
-| `POST /v1/auth/keys/:id/revoke`, `POST /v1/auth/keys/:id/rotate` | Revoke or rotate a key. |
+| `GET /v1/auth/keys`, `POST /v1/auth/keys` | List and create API keys. The create body's `namespaces` confines the key (omitted: cluster-wide); the caller needs admin in every one. A `scope.jobs` that names no job (`[]`, or only blank aliases) is `400` for every caller, cluster admins included: such a key used to be minted unscoped. A `scope.agent` without an `incident_id` is `400` too. A namespace admin's list holds only keys confined to its namespaces. See [identity-and-access.md](identity-and-access.md#api-keys-and-cli-login). |
+| `POST /v1/auth/keys/:id/revoke`, `POST /v1/auth/keys/:id/rotate` | Revoke or rotate a key; needs admin in every namespace the key is confined to. A rotation keeps the key's role, scope, namespaces and expiry. |
 | `GET /v1/auth/audit` | Query the audit log. `?namespace=` filters on the row's namespace (a namespace or `*`) and is what the request is authorised on; omitted means all rows (cluster admin). |
 | `GET /v1/auth/policy` | Cluster admin. The effective access policy with `revision`, `source`, `loaded_at`, `default_role`, `last_reload` and `warnings`. See [identity-and-access.md](identity-and-access.md#rest-api). |
 | `POST /v1/auth/policy/reload` | Cluster admin. Reload the access policy file on the serving node: `200` (swapped or unchanged), `422` (invalid file, last good revision retained), `409` (no policy file configured). |
@@ -58,7 +58,7 @@ For the auth management CLI, supply credentials through `CAESIUM_API_KEY`. The
 | `POST /jobs/:id/runs/:run_id/tasks/:task_id/partitions/:index/retry` | Retry one partition of a fanned-out task. |
 | `GET /jobs/:id/runs/:run_id/tasks/:task_id/partitions` | List a fanned-out task's partitions. |
 | `POST /jobs/:id/runs/:run_id/callbacks/retry` | Retry failed callbacks. |
-| `POST /jobdefs/apply`, `POST /jobdefs/diff`, `POST /jobdefs/lint` | Apply, diff, or lint manifests against the server's catalog. |
+| `POST /jobdefs/apply`, `POST /jobdefs/diff`, `POST /jobdefs/lint` | Apply, diff, or lint manifests against the server's catalog. With a policy file loaded, lint and apply reject undeclared namespaces. The diff response lists the `namespaces` an apply would touch. Lint and diff answer a namespace-confined caller from its own namespaces only ([identity-and-access.md](identity-and-access.md#route-classes-and-enforcement)). Lint reports, and diff rejects with 400, each `secret://` reference its namespace's `secrets.allow` rules deny, redacted ([Scoped secrets](identity-and-access.md#scoped-secrets)); apply does not check them. |
 | `GET /triggers`, `POST /triggers`, `GET /triggers/:id`, `PATCH /triggers/:id` | Manage triggers. |
 | `POST /triggers/:id/fire` | Fire a trigger manually with optional params. |
 | `GET /triggers/:id/events` | Events matched by an event trigger. |
@@ -86,7 +86,7 @@ These back the investigation verbs described in
 | `GET /jobs/:id/runs/:run_id/why` | Why a task ran, was skipped, or failed (`caesium why`). |
 | `GET /jobs/:id/blame` | Which change broke the job (`caesium blame`). |
 | `GET /jobs/:id/runs/diff` | Compare two runs (`caesium run diff`). |
-| `POST /jobs/:id/runs/:run_id/replay` | Start a quarantined replay (`caesium run replay`). |
+| `POST /jobs/:id/runs/:run_id/replay` | Start a quarantined replay (`caesium run replay`). Refused with 422 when the job namespace's `secrets.allow` rules deny a step's `secret://` reference. |
 | `GET /jobs/:id/runs/:run_id/tasks/:task/descriptor` | The recorded execution descriptor `caesium reproduce` rebuilds from. |
 | `GET /jobs/:id/runs/:run_id/receipt`, `POST /jobs/:id/runs/:run_id/receipt/verify` | Fetch and verify a receipt (`caesium receipt get`, `caesium verify`). |
 | `GET /lineage/impact` | Cross-job lineage impact. See [open-lineage.md](open-lineage.md). |

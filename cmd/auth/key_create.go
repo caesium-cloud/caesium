@@ -18,6 +18,8 @@ var (
 	createServer      string
 	createAPIKey      string
 	createScopeJobs   []string
+	createJobs        []string
+	createNamespaces  []string
 )
 
 var keyCreateCmd = &cobra.Command{
@@ -25,7 +27,8 @@ var keyCreateCmd = &cobra.Command{
 	Args:  cobra.NoArgs,
 	Short: "Create a new API key",
 	Example: `  caesium auth key create --role operator --description "CI deploy key" --expires 90d
-  caesium auth key create --role runner --description "ETL runner" --scope-jobs etl-daily,etl-hourly`,
+  caesium auth key create --role runner --description "ETL runner" --jobs etl-daily,etl-hourly
+  caesium auth key create --role operator --namespace marketing --namespace finance`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		server := strings.TrimSuffix(createServer, "/")
 		apiKey := resolveAPIKey(cmd, createAPIKey)
@@ -37,9 +40,24 @@ var keyCreateCmd = &cobra.Command{
 		if createExpiresIn != "" {
 			body["expires_in"] = createExpiresIn
 		}
-		if len(createScopeJobs) > 0 {
+		// A given --namespace is always sent, even when it names nothing, so
+		// `--namespace "$NS"` with an empty NS is refused by the server rather
+		// than minting a cluster-wide key.
+		if cmd.Flags().Changed("namespace") {
+			body["namespaces"] = splitFlagList(createNamespaces)
+		}
+		// --jobs and --scope-jobs are one setting (mutually exclusive flags).
+		// Given but empty would mint an unscoped key, so it is refused.
+		jobs := createScopeJobs
+		if len(createJobs) > 0 {
+			jobs = createJobs
+		}
+		if (cmd.Flags().Changed("jobs") || cmd.Flags().Changed("scope-jobs")) && !namesAJob(jobs) {
+			return fmt.Errorf("--jobs needs at least one job alias; omit it for a key that is not narrowed to jobs")
+		}
+		if len(jobs) > 0 {
 			body["scope"] = map[string]any{
-				"jobs": createScopeJobs,
+				"jobs": jobs,
 			}
 		}
 
@@ -91,7 +109,31 @@ func init() {
 	keyCreateCmd.Flags().StringVar(&createServer, "server", "http://localhost:8080", "Caesium server base URL")
 	keyCreateCmd.Flags().StringVar(&createAPIKey, "api-key", "", apiKeyFlagUsage("Admin"))
 	keyCreateCmd.Flags().StringSliceVar(&createScopeJobs, "scope-jobs", nil, "Restrict key to specific job aliases (comma-separated)")
+	keyCreateCmd.Flags().StringSliceVar(&createJobs, "jobs", nil, "Restrict key to specific job aliases (comma-separated; same as --scope-jobs)")
+	keyCreateCmd.Flags().StringArrayVar(&createNamespaces, "namespace", nil, "Confine the key's role to a namespace (repeatable or comma-separated; omit for a cluster-wide key)")
+	keyCreateCmd.MarkFlagsMutuallyExclusive("jobs", "scope-jobs")
 	_ = keyCreateCmd.MarkFlagRequired("role")
 
 	keyCmd.AddCommand(keyCreateCmd)
+}
+
+// namesAJob reports whether aliases holds a non-blank job alias. The server
+// drops blank aliases, and a job list left empty narrows nothing.
+func namesAJob(aliases []string) bool {
+	for _, alias := range aliases {
+		if strings.TrimSpace(alias) != "" {
+			return true
+		}
+	}
+	return false
+}
+
+// splitFlagList splits each comma-separated flag value, keeping empty entries
+// so the server refuses them instead of the CLI silently dropping them.
+func splitFlagList(values []string) []string {
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		out = append(out, strings.Split(value, ",")...)
+	}
+	return out
 }

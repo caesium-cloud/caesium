@@ -1,0 +1,40 @@
+# The integration servers' access policy (plan item H-1, design §17).
+#
+# justfile `integration-up` (and every recipe tracking its env) mounts this
+# file read-only; `integration-up-agent` serves a fresh copy from
+# .tmp/auth-policy/policy.yaml that scenarios may rewrite and must restore
+# (start from the served bytes, append, reload, restore, wait for the
+# original revision). Keep it a valid base for that.
+#
+# - The FIRST binding is the policy-reload scenarios' viewer group:
+#   TestAuthPolicyReload reads bindings[0] and renames that group's first
+#   occurrence in this file, so no comment may name it.
+# - Never bind caesium-admins (TestAuthSessionCookieWithoutGrantsIsRefused
+#   seeds it and expects a refusal) or the "*" group wildcard.
+# - marketing carries secret rules and a run quota of one; finance carries no
+#   settings. Every namespace an integration scenario uses must be declared
+#   here: undeclared namespaces are rejected while a policy file is loaded.
+apiVersion: v1
+kind: AccessPolicy
+namespaces:
+  default: {}
+  marketing:
+    secrets:
+      allow:
+        - env/MARKETING_*
+    quotas:
+      maxConcurrentRuns: 1
+  finance: {}
+bindings:
+  - subjects:
+      groups: ["iaa-reload-viewers"]
+    role: viewer
+    namespaces: ["*"]
+  - subjects:
+      groups: ["marketing-eng"]
+    role: operator
+    namespaces: ["marketing"]
+  - subjects:
+      groups: ["finance-eng"]
+    role: operator
+    namespaces: ["finance"]

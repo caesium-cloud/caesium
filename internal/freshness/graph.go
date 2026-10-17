@@ -23,6 +23,25 @@ var (
 	ErrDatasetGraphCycle = errors.New("dataset dependency cycle detected")
 )
 
+// GraphError is a declared-graph violation. Error() is the historical message;
+// the fields name the identities in it so a response boundary can redact the
+// ones a namespace-confined caller may not see (identity-and-access B2).
+type GraphError struct {
+	// Err is ErrDatasetMultipleProducers, ErrDatasetUnresolvedConsumes or
+	// ErrDatasetGraphCycle.
+	Err error
+	// Dataset is the dataset concerned; empty for a cycle.
+	Dataset string
+	// Jobs are the producer aliases (multiple producers), the consumer alias
+	// (unresolved consume) or the cycle path (cycle), in message order.
+	Jobs []string
+	msg  string
+}
+
+func (e *GraphError) Error() string { return e.msg }
+
+func (e *GraphError) Unwrap() error { return e.Err }
+
 // ValidateGraph runs the cross-job declared-graph checks over the full set of
 // declarations — the applied set plus any persisted declarations from jobs not
 // being replaced:
@@ -67,7 +86,8 @@ func ValidateGraph(decls []models.DatasetDeclaration) error {
 	for _, name := range sortedMapKeys(producers) {
 		if len(producers[name]) > 1 {
 			owners := sortedSetKeys(producers[name])
-			return fmt.Errorf("%w: %q produced by %s", ErrDatasetMultipleProducers, name, strings.Join(owners, ", "))
+			return &GraphError{Err: ErrDatasetMultipleProducers, Dataset: name, Jobs: owners,
+				msg: fmt.Sprintf("%s: %q produced by %s", ErrDatasetMultipleProducers, name, strings.Join(owners, ", "))}
 		}
 	}
 
@@ -85,7 +105,8 @@ func ValidateGraph(decls []models.DatasetDeclaration) error {
 		if _, ok := sources[c.name]; ok {
 			continue
 		}
-		return fmt.Errorf("%w: job %q consumes %q which is not produced by any job or declared as a source", ErrDatasetUnresolvedConsumes, c.alias, c.name)
+		return &GraphError{Err: ErrDatasetUnresolvedConsumes, Dataset: c.name, Jobs: []string{c.alias},
+			msg: fmt.Sprintf("%s: job %q consumes %q which is not produced by any job or declared as a source", ErrDatasetUnresolvedConsumes, c.alias, c.name)}
 	}
 
 	// Cross-job cycle detection over producer→consumer edges. An edge P→C means
@@ -106,7 +127,8 @@ func ValidateGraph(decls []models.DatasetDeclaration) error {
 		}
 	}
 	if cycle := detectGraphCycle(graph); len(cycle) > 0 {
-		return fmt.Errorf("%w: %s", ErrDatasetGraphCycle, strings.Join(cycle, " -> "))
+		return &GraphError{Err: ErrDatasetGraphCycle, Jobs: cycle,
+			msg: fmt.Sprintf("%s: %s", ErrDatasetGraphCycle, strings.Join(cycle, " -> "))}
 	}
 
 	return nil

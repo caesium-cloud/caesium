@@ -1790,6 +1790,7 @@ local -a runner_args=() runner_payload_args=()
   if [[ "$mode" == auth ]]; then
     [[ " ${runner_payload_args[*]} " == *" --env-file /owned/auth.env "* ]]
     [[ " ${runner_payload_args[*]} " == *" CAESIUM_AGENT_AUTH_LANE=true "* ]]
+    [[ " ${runner_payload_args[*]} " == *" CAESIUM_IT_AUTH_POLICY=none "* ]]
     [[ " ${runner_payload_args[*]} " == *" CAESIUM_AUTH_MODE=api-key "* ]]
   elif [[ "$mode" == distributed || "$mode" == owner-memory ]]; then
     [[ " ${runner_payload_args[*]} " == *" CAESIUM_EXECUTION_MODE=distributed "* ]]
@@ -1801,6 +1802,7 @@ local -a runner_args=() runner_payload_args=()
   else
     [[ " ${runner_payload_args[*]} " != *CAESIUM_EXECUTION_MODE* ]]
     [[ " ${runner_payload_args[*]} " != *CAESIUM_AGENT_AUTH_LANE* ]]
+    [[ " ${runner_payload_args[*]} " != *CAESIUM_IT_AUTH_POLICY* ]]
   fi
 }
 ID=owned CANDIDATE_SHA=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa PLATFORM=linux/arm64

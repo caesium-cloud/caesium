@@ -491,7 +491,11 @@ translated into cluster-wide bindings and behaviour is unchanged.
       whatever shape the table has when it lands (plain role before A3, classified
       after).
       Depends on: A1 + A2.
-- [ ] A5. API keys with namespaces and SSO-admin key management: `Namespaces` column
+- [x] A5. (W4-α: an explicit `["*"]` is stored as NULL; with a policy file, create
+      and rotate refuse undeclared namespaces; rotation keeps the key's expiry and
+      never extends the old key; `--jobs` is an alias of `--scope-jobs`; the key
+      list stays JSON; whoami asserted over REST until E5's `caesium whoami`.)
+      API keys with namespaces and SSO-admin key management: `Namespaces` column
       (NULL ⇒ cluster), `caesium auth key create --role R --namespace NS [--namespace …]
       [--jobs …]`, `POST /v1/auth/keys` accepts `namespaces`; the minting constraint (a
       caller may only mint/rotate grants ⊆ its own, per namespace); `GET /v1/auth/keys`
@@ -615,7 +619,8 @@ middleware relies on.
       (required real schema, incident and cache/diff/replay journeys),
       `internal/jobdef/exporter.go`, `docs/examples/`,
       `docs/caesium-job-llm-reference.md`, `docs/job-definitions.md`.
-- [ ] B2. Server-side namespace semantics: `POST /v1/jobdefs/lint` and apply reject an
+- [x] B2. (W4-γ: confined apply/move/prune and POST /v1/jobs moved to B9.)
+      Server-side namespace semantics: `POST /v1/jobdefs/lint` and apply reject an
       undeclared namespace (from the A4 policy holder) naming it; a namespace move keeps
       history (runs, receipts, incidents) on the original namespace and rewrites only
       `jobs.namespace`; the apply preview lists namespaces touched. B1 supplies the
@@ -774,7 +779,7 @@ resolver refuses references outside the namespace's allow-list at lint and at ru
       `helm/caesium/templates/rolebinding.yaml`, `helm/caesium/ci/test-values-k8s.yaml`,
       `test/` (k8s lane scenario), `docs/kubernetes-deployment.md`.
       Depends on: C1 + C2.
-- [ ] C4. Scoped secret resolution: `secret.ScopedResolver{inner, namespace, rules}`
+- [x] C4. Scoped secret resolution: `secret.ScopedResolver{inner, namespace, rules}`
       **canonicalises before matching** — the Kubernetes resolver accepts a
       namespace in the path and `?namespace=`, `?name=`, `?key=` overrides
       (`kubernetes.go` `parseReference`), so the scoped resolver computes the effective
@@ -808,6 +813,12 @@ resolver refuses references outside the namespace's allow-list at lint and at ru
       `internal/worker/runtime_executor.go` (cache path and resolution), `internal/trigger/http/http.go`, `internal/jobdef/lint/secret.go`,
       `internal/incident/classifier.go`.
       Depends on: A4 + B1.
+      (W4-ε: also checks `POST /v1/jobdefs/diff`; fan-out instances check
+      before their own cache lookup; a denial is terminal in every retry loop;
+      unsupported rule providers fail policy validation; rules are node-local
+      until C2; `why` surfacing of the class is left to C5; client-side runs
+      never wait for a server policy; replays check before reusing a step. Live: `TestAuthSecretScope`,
+      `TestAuthSecretScopeWebhook`, `TestDevOnceSecretWithAPolicyFileConfigured`.)
 - [ ] C5. Secret-scoping end to end: with the H-1 fixture's `marketing` allow-list, a
       manifest referencing `env/FINANCE_*` is rejected by `caesium job lint` (server)
       naming the redacted reference; applied with lint bypassed it fails the task with
@@ -1096,7 +1107,10 @@ group refresh, user disable, CLI login) is asserted here against a live Keycloak
 
 ## Harness Strengthening
 
-- [ ] H-1. Policy fixture on **both** integration servers: `test/testdata/policy/two-namespaces.yaml`
+- [x] H-1. (W4-γ: `requireAuthLane` fails without the served fixture; the coverage
+      journey's no-policy api-key lane is marked `CAESIUM_IT_AUTH_POLICY=none`;
+      `mintNamespacedKey` in `test/namespaced_keys_test.go`.)
+      Policy fixture on **both** integration servers: `test/testdata/policy/two-namespaces.yaml`
       (`default`, `marketing` with secret rules and a quota of one, `finance`;
       bindings for the three lane groups) mounted with `CAESIUM_AUTH_POLICY_FILE` into
       `just integration-up` (no auth mode — exercises namespace *settings*: secret

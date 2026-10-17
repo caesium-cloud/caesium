@@ -255,7 +255,7 @@ func TestRotateKey(t *testing.T) {
 	require.NoError(t, err)
 
 	// Rotate with 1-hour grace period.
-	rotated, err := svc.RotateKey(original.Key.ID, time.Hour, "admin")
+	rotated, err := svc.RotateKeyAuthorized(t.Context(), original.Key.ID, time.Hour, "admin", allowKey)
 	require.NoError(t, err)
 	require.NotEmpty(t, rotated.Plaintext)
 	require.NotEqual(t, original.Plaintext, rotated.Plaintext)
@@ -285,7 +285,7 @@ func TestRotateKeyRevokedFails(t *testing.T) {
 	err = svc.RevokeKey(resp.Key.ID)
 	require.NoError(t, err)
 
-	_, err = svc.RotateKey(resp.Key.ID, time.Hour, "admin")
+	_, err = svc.RotateKeyAuthorized(t.Context(), resp.Key.ID, time.Hour, "admin", allowKey)
 	require.ErrorIs(t, err, auth.ErrKeyRevoked)
 }
 
@@ -294,7 +294,7 @@ func TestRotateKeyNotFound(t *testing.T) {
 	defer testutil.CloseDB(db)
 	svc := auth.NewService(db)
 
-	_, err := svc.RotateKey([16]byte{}, time.Hour, "admin")
+	_, err := svc.RotateKeyAuthorized(t.Context(), [16]byte{}, time.Hour, "admin", allowKey)
 	require.ErrorIs(t, err, auth.ErrKeyNotFound)
 }
 

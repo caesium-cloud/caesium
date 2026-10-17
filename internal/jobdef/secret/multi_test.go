@@ -2,6 +2,7 @@ package secret
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/stretchr/testify/suite"
@@ -24,6 +25,10 @@ func (s *stubResolver) ResolveWithIdentity(_ context.Context, ref string) (strin
 		return "", Identity{}, s.err
 	}
 	return s.value, Identity{Provider: "env", Ref: ref, Verifiable: false, UnverifiableReason: "test stub"}, nil
+}
+
+func (s *stubResolver) CanonicalTarget(string) (string, error) {
+	return "", errors.New("canonical target unsupported by test stub")
 }
 
 type MultiResolverSuite struct {

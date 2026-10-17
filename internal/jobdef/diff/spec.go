@@ -3,6 +3,7 @@ package diff
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -14,6 +15,7 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/caesium-cloud/caesium/internal/authz"
 	"github.com/caesium-cloud/caesium/internal/jobdef/yamlpath"
 	"github.com/caesium-cloud/caesium/internal/models"
 	schema "github.com/caesium-cloud/caesium/pkg/jobdef"
@@ -149,10 +151,73 @@ func LoadDefinitions(paths []string) (map[string]JobSpec, error) {
 	return specs, nil
 }
 
-// LoadDatabaseSpecs loads all jobs from the database into specs keyed by alias.
+// RedactedTriggerConfiguration replaces, in a namespace-confined caller's
+// baseline, the configuration of a trigger that also serves a job in a
+// namespace the caller cannot read: reading a trigger needs the role in every
+// job it serves (GET /v1/triggers/:id), and its configuration can carry that
+// other namespace's webhook secret.
+var RedactedTriggerConfiguration = map[string]any{"redacted": "the trigger also serves a job in another namespace"}
+
+// LoadDatabaseSpecs loads all live jobs from the database into specs keyed by
+// alias. When ctx carries a namespace restriction
+// (internal/authz.WithAllowedNamespaces, set for a namespace-confined caller),
+// only jobs in those namespaces are loaded and the configuration of a trigger
+// shared with a job outside them is replaced by RedactedTriggerConfiguration.
+//
+// The restricted baseline is read in one read-only snapshot transaction, so
+// which jobs it holds, which triggers they share, and the trigger
+// configurations it returns all come from the same catalog state: a
+// concurrent apply that moves a job out of the caller's namespaces (and
+// rewrites its trigger in place) can never pair a namespace check from before
+// the move with a configuration from after it.
 func LoadDatabaseSpecs(ctx context.Context, db *gorm.DB) (map[string]JobSpec, error) {
+	if _, restricted := authz.AllowedNamespaces(ctx); !restricted {
+		return loadDatabaseSpecs(ctx, db)
+	}
+	var specs map[string]JobSpec
+	err := ReadSnapshot(ctx, db, func(tx *gorm.DB) error {
+		var err error
+		specs, err = loadDatabaseSpecs(ctx, tx)
+		return err
+	})
+	if err != nil {
+		return nil, err
+	}
+	return specs, nil
+}
+
+// ReadSnapshot runs fn in one read-only transaction on db, so every read fn
+// makes through tx sees the same catalog state. It is what a
+// namespace-confined caller's lint and diff read through (the baseline here,
+// the contract graph in api/rest/controller/jobdef).
+//
+// Read-only, so the read/write split serves it from the read pool and it never
+// holds the single catalog writer (internal/run PredecessorExecutionInputs uses
+// the same options). SQLite and dqlite keep one read view per transaction;
+// PostgreSQL's READ COMMITTED would take a new one per statement.
+func ReadSnapshot(ctx context.Context, db *gorm.DB, fn func(tx *gorm.DB) error) error {
+	options := &sql.TxOptions{ReadOnly: true}
+	if db.Name() == "postgres" {
+		options.Isolation = sql.LevelRepeatableRead
+	}
+	return db.WithContext(ctx).Transaction(fn, options)
+}
+
+// afterBaselineJobsLoaded, when set (tests only), runs between loading the
+// baseline's jobs and reading their triggers, where a concurrent apply would
+// interleave.
+var afterBaselineJobsLoaded func()
+
+func loadDatabaseSpecs(ctx context.Context, db *gorm.DB) (map[string]JobSpec, error) {
 	var jobs []models.Job
-	if err := db.WithContext(ctx).Find(&jobs).Error; err != nil {
+	if err := authz.NamespaceFilter(db.WithContext(ctx), "namespace").Find(&jobs).Error; err != nil {
+		return nil, err
+	}
+	if afterBaselineJobsLoaded != nil {
+		afterBaselineJobsLoaded()
+	}
+	shared, err := foreignSharedTriggers(ctx, db, jobs)
+	if err != nil {
 		return nil, err
 	}
 
@@ -163,9 +228,37 @@ func LoadDatabaseSpecs(ctx context.Context, db *gorm.DB) (map[string]JobSpec, er
 		if err != nil {
 			return nil, err
 		}
+		if _, redact := shared[job.TriggerID]; redact {
+			spec.Trigger.Configuration = maps.Clone(RedactedTriggerConfiguration)
+		}
 		specs[job.Alias] = spec
 	}
 	return specs, nil
+}
+
+// foreignSharedTriggers returns, for a restricted ctx, the triggers of jobs
+// that also serve a live job outside the allowed namespaces; nil when ctx is
+// unrestricted.
+func foreignSharedTriggers(ctx context.Context, db *gorm.DB, jobs []models.Job) (map[uuid.UUID]struct{}, error) {
+	allowed, restricted := authz.AllowedNamespaces(ctx)
+	if !restricted || len(jobs) == 0 {
+		return nil, nil
+	}
+	triggerIDs := make([]uuid.UUID, 0, len(jobs))
+	for i := range jobs {
+		triggerIDs = append(triggerIDs, jobs[i].TriggerID)
+	}
+	var peers []models.Job
+	if err := db.WithContext(ctx).Select("id", "trigger_id", "namespace").Where("trigger_id IN ?", triggerIDs).Find(&peers).Error; err != nil {
+		return nil, err
+	}
+	shared := make(map[uuid.UUID]struct{})
+	for i := range peers {
+		if !slices.Contains(allowed, models.NamespaceOrDefault(peers[i].Namespace)) {
+			shared[peers[i].TriggerID] = struct{}{}
+		}
+	}
+	return shared, nil
 }
 
 func buildJobSpec(ctx context.Context, db *gorm.DB, job *models.Job) (JobSpec, error) {

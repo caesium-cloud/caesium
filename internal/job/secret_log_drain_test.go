@@ -42,6 +42,11 @@ func (r localStaticSecretResolver) ResolveWithIdentity(_ context.Context, ref st
 	return r[ref], secret.Identity{Provider: "env", Ref: ref, Verifiable: false, UnverifiableReason: "test"}, nil
 }
 
+// CanonicalTarget canonicalises env references with the real env provider.
+func (r localStaticSecretResolver) CanonicalTarget(ref string) (string, error) {
+	return secret.NewEnvResolver().CanonicalTarget(ref)
+}
+
 func TestSecretLogDrainTimeoutFailsLocalTaskAfterStop(t *testing.T) {
 	originalDrain, originalAbort := secretLogDrainTimeout, secretLogAbortTimeout
 	secretLogDrainTimeout, secretLogAbortTimeout = time.Millisecond, time.Second

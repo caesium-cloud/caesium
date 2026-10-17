@@ -1,11 +1,13 @@
 package auth
 
 import (
+	"errors"
 	"net/http"
 
 	"github.com/caesium-cloud/caesium/api/internal/auditlog"
 	"github.com/caesium-cloud/caesium/api/middleware"
 	iauth "github.com/caesium-cloud/caesium/internal/auth"
+	"github.com/caesium-cloud/caesium/internal/authz"
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v5"
 )
@@ -16,27 +18,31 @@ func (ctrl *Controller) RevokeKey(c *echo.Context) error {
 		return echo.NewHTTPError(http.StatusBadRequest, "invalid key id").Wrap(err)
 	}
 
-	if err := ctrl.service.RevokeKey(id); err != nil {
-		if err == iauth.ErrKeyNotFound {
+	caller := middleware.GetPrincipal(c)
+	if caller == nil {
+		return echo.NewHTTPError(http.StatusUnauthorized, "authentication required")
+	}
+
+	key, err := ctrl.service.RevokeKeyAuthorized(c.Request().Context(), id, storedKeyAuthorizer(caller))
+	if err != nil {
+		if _, ok := errors.AsType[*authz.Denial](err); ok {
+			return err
+		}
+		if errors.Is(err, iauth.ErrKeyNotFound) {
 			return echo.NewHTTPError(http.StatusNotFound, "api key not found")
 		}
 		return echo.NewHTTPError(http.StatusInternalServerError, "failed to revoke api key").Wrap(err)
 	}
 
-	caller := middleware.GetAuthKey(c)
-	actor := "unknown"
-	if caller != nil {
-		actor = caller.KeyPrefix
-	}
-
 	auditlog.LogFailure(ctrl.auditor.Log(iauth.AuditEntry{
-		Actor:        actor,
+		Actor:        caller.Subject,
 		Action:       iauth.ActionKeyRevoke,
 		ResourceType: "api_key",
 		ResourceID:   id.String(),
 		SourceIP:     c.RealIP(),
 		Outcome:      iauth.OutcomeSuccess,
-		Namespace:    ctrl.service.KeyAuditNamespaceByID(c.Request().Context(), id),
+		Namespace:    iauth.KeyAuditNamespace(key.Namespaces),
+		Metadata:     keyAuditMetadata(nil, key),
 	}))
 
 	return c.JSON(http.StatusOK, map[string]string{"status": "revoked"})

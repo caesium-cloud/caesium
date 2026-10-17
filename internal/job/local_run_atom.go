@@ -34,7 +34,6 @@ func (l *localRun) executeAtom(taskCtx context.Context, taskID, instanceID uuid.
 	store := l.store
 	snapshot := l.snapshot
 	vars := l.vars
-	secretResolver := l.secretResolver
 	runID := l.runID
 	runQuarantined := l.runQuarantined
 	paramEnv := l.paramEnv
@@ -83,7 +82,9 @@ func (l *localRun) executeAtom(taskCtx context.Context, taskID, instanceID uuid.
 	}
 	spec.Env = interpolated
 	rawSecretEnv := spec.Env
-	spec, secretIdentities, err := jobdefruntime.ResolveContainerSpecSecretsWithIdentities(taskCtx, secretResolver, spec)
+	// A fresh namespace scope per attempt: a policy reload since the
+	// before-cache check applies here, and a denial is terminal (no retry).
+	spec, secretIdentities, err := jobdefruntime.ResolveContainerSpecSecretsWithIdentities(taskCtx, l.secretScope().Resolver(), spec)
 	if err != nil {
 		return "", nil, nil, nil, run.MetricsCapture{}, nil, err
 	}

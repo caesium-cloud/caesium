@@ -115,6 +115,7 @@ SAML, and any OIDC issuer.
 - **Declared, not implicit.** The policy file's `namespaces:` map declares every
   namespace and its settings. Server-side lint and apply reject an undeclared
   namespace. `default` is implicitly declared with empty settings.
+  **Amendment (W4):** No policy file: any syntactically valid namespace is accepted (B1 compatibility); undeclared namespaces are rejected only when a policy file is loaded. Amended in identity-and-access W4 (orchestrator decision, pending maintainer sign-off).
 - **Carried by:** `Job.Namespace` (text, not null, default `'default'`, indexed).
   Denormalised copies on `JobRun.Namespace`, `Backfill.Namespace`,
   `Incident.Namespace` so global lists filter without a join. Triggers, task runs,
@@ -273,7 +274,8 @@ Validation rules (all enforced by `internal/auth/policy` and by
 - No policy file ⇒ `CAESIUM_AUTH_ROLE_MAPPING` and `CAESIUM_AUTH_DEFAULT_ROLE` are
   translated at startup into cluster-wide bindings (`group=role` ⇒
   `{groups:[group], role, namespaces:["*"]}`) and a single `default` namespace.
-  Behaviour is byte-for-byte today's. The env-mapping adapter preserves
+  Behaviour is byte-for-byte today's.
+  **Amendment (W4):** No policy file: any syntactically valid namespace is accepted (B1 compatibility); undeclared namespaces are rejected only when a policy file is loaded. Amended in identity-and-access W4 (orchestrator decision, pending maintainer sign-off). The env-mapping adapter preserves
   `RoleMapper`'s trimming of incoming groups; policy-file group matching remains exact.
 - Policy file **and** `CAESIUM_AUTH_ROLE_MAPPING` both set ⇒ fatal startup error
   naming both. The env mapping is documented as deprecated.
