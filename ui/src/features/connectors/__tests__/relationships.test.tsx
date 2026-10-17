@@ -23,7 +23,8 @@ vi.mock("@tanstack/react-router", () => ({
 }));
 vi.mock("@/hooks/useDagHeight", () => ({ useDagHeight: () => [vi.fn(), 300] }));
 vi.mock("@/lib/events", () => ({ events: { isHealthy: () => true, subscribe: vi.fn(), unsubscribe: vi.fn(), subscribeConnection: vi.fn(), unsubscribeConnection: vi.fn() } }));
-vi.mock("@/features/jobs/JobDAG", () => ({ JobDAG: () => null }));
+vi.mock("@/features/jobs/JobDAG", () => ({ JobDAG: ({ dag, taskDefinitions, atoms, onNodeClick }: { dag: { nodes: { id: string }[] }; taskDefinitions: Record<string, { name: string }>; atoms: Record<string, unknown>; onNodeClick: (taskId: string) => void }) => <div data-testid="local-dag" data-atom-count={Object.keys(atoms).length}><pre>{JSON.stringify(atoms)}</pre>{dag.nodes.map(node => <button key={node.id} onClick={() => onNodeClick(node.id)}>{taskDefinitions[node.id]?.name} node</button>)}</div> }));
+vi.mock("@/features/jobs/LogViewer", () => ({ LogViewer: ({ jobId, runId, taskId }: { jobId: string; runId: string; taskId: string }) => <p data-testid="local-log-target">{jobId}/{runId}/{taskId}</p> }));
 vi.mock("@/features/jobs/RunTimeline", () => ({ RunTimeline: () => null }));
 vi.mock("@/features/jobs/RunProposalSummary", () => ({ RunProposalSummary: () => null }));
 vi.mock("@/features/jobs/RunPicker", () => ({ RunPicker: () => null }));
@@ -38,8 +39,9 @@ const delegation: ExternalDelegation = {
 const page: ExternalRelationshipsPage = { relationships: [], correlations: [delegation], incomplete: false };
 const baseline: JobRun = { id: "local-run", job_id: "job-1", status: "succeeded", tasks: [], started_at: "2026-10-17T12:00:00Z", created_at: "2026-10-17T12:00:00Z", updated_at: "2026-10-17T12:00:01Z" };
 
-function show(children: ReactNode) {
+function show(children: ReactNode, prepare?: (client: QueryClient) => void) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } });
+  prepare?.(client);
   const wrapper = ({ children }: { children: ReactNode }) => <QueryClientProvider client={client}>{children}</QueryClientProvider>;
   return { ...render(children, { wrapper }), client };
 }
@@ -196,21 +198,41 @@ describe("local run external links and data evidence", () => {
     expect(screen.queryByText("No dataset declarations in the current job manifest.")).not.toBeInTheDocument();
   });
 
-  it("keeps scoped users on permitted local run evidence and current declarations", async () => {
-    principal.isScoped = true;
+  it.each([{ scoped: true, warmCatalog: false, namespaceOnly: false }, { scoped: false, warmCatalog: false, namespaceOnly: false }, { scoped: false, warmCatalog: true, namespaceOnly: false }, { scoped: false, warmCatalog: true, namespaceOnly: true }])("keeps local evidence usable after global denials (scoped=$scoped, warm catalog=$warmCatalog, namespace only=$namespaceOnly)", async ({ scoped, warmCatalog, namespaceOnly }) => {
+    principal.isScoped = scoped;
+    if (namespaceOnly) Object.assign(principal, { kind: "user", role: null });
+    vi.mocked(api.getSystemFeatures).mockRejectedValue(new ApiError(403, "insufficient permissions", "insufficient_access"));
     vi.spyOn(api, "getJob").mockResolvedValue({ id: "job-1", alias: "publish", labels: {}, annotations: {}, trigger_id: "trigger-1", paused: false, created_at: baseline.created_at, updated_at: baseline.updated_at });
-    vi.spyOn(api, "getJobRun").mockResolvedValue(baseline);
+    vi.spyOn(api, "getJobRun").mockResolvedValue({ ...baseline, tasks: [{ id: "task-run-1", job_run_id: baseline.id, task_id: "task-1", atom_id: "atom-1", engine: "docker", image: "alpine:3.23", command: "echo", status: "succeeded", created_at: baseline.created_at, updated_at: baseline.updated_at, output: { rows: "42", processed_through: "2026-10-17T12:00:00Z" } }] });
     vi.spyOn(api, "getReceipt").mockRejectedValue(new Error("No receipt"));
-    vi.spyOn(api, "getJobDAG").mockResolvedValue({ job_id: "job-1", nodes: [], edges: [] });
-    vi.spyOn(api, "getJobTasks").mockResolvedValue([]);
+    vi.spyOn(api, "getJobDAG").mockResolvedValue({ job_id: "job-1", nodes: [{ id: "task-1", atom_id: "atom-1" }], edges: [] });
+    vi.spyOn(api, "getJobTasks").mockResolvedValue([{ id: "task-1", job_id: "job-1", atom_id: "atom-1", name: "work", retries: 0, retry_delay: 0, retry_backoff: false, trigger_rule: "all_success", created_at: baseline.created_at, updated_at: baseline.updated_at }]);
     vi.spyOn(api, "getJobRuns").mockResolvedValue({ runs: [baseline], total: 1, nextOffset: null });
-    vi.spyOn(api, "getAtoms").mockResolvedValue([]);
-    show(<RunDetailPage />);
+    vi.spyOn(api, "getAtoms").mockRejectedValue(new ApiError(403, "insufficient permissions", "insufficient_access"));
+    // A known namespace-only principal must not expose retained cluster data
+    // while waiting for a denial, or even issue the global request.
+    if (namespaceOnly) vi.mocked(api.getAtoms).mockImplementation(() => new Promise(() => {}));
+    show(<RunDetailPage />, client => {
+      if (warmCatalog) client.setQueryData(["atoms"], [{ id: "atom-1", engine: "docker", image: "alpine:3.23", command: "retained-global-command-secret", spec: { token: "retained-global-spec-secret" }, created_at: baseline.created_at, updated_at: baseline.updated_at }]);
+    });
     const evidence = await screen.findByTestId("run-data-evidence");
     expect(await within(evidence).findByText("publish · produces · publication.output")).toBeVisible();
+    expect(api.getJobManifest).toHaveBeenCalledWith("job-1");
     expect(within(evidence).queryByTestId("declared-dataset-link")).not.toBeInTheDocument();
     expect(screen.queryByTestId("run-external-executions")).not.toBeInTheDocument();
     expect(api.getRunExternalExecutions).not.toHaveBeenCalled();
+    expect(await screen.findByText(/^Global atom metadata is unavailable/)).toBeVisible();
+    await waitFor(() => expect(screen.getByTestId("local-dag")).toHaveAttribute("data-atom-count", "0"));
+    expect(screen.queryByText(/retained-global-command-secret|retained-global-spec-secret/)).not.toBeInTheDocument();
+    if (scoped || namespaceOnly) expect(api.getAtoms).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "work node" }));
+    expect(await screen.findByTestId("local-log-target")).toHaveTextContent("job-1/local-run/task-1");
+    const task = screen.getByTestId("task-detail-panel");
+    fireEvent.click(within(task).getByRole("button", { name: "Details" }));
+    expect(await within(task).findByText("42")).toBeVisible();
+    expect(within(task).getByText("2026-10-17T12:00:00Z")).toBeVisible();
+    expect(task).not.toHaveTextContent(/retained-global-command-secret|retained-global-spec-secret/);
+    fireEvent.click(within(task).getByRole("button", { name: "Close task panel" }));
     fireEvent.click(within(evidence).getByRole("link", { name: "Run receipt" }));
     expect(await screen.findByText("Existing run receipt")).toBeVisible();
   });

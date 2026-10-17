@@ -28,7 +28,7 @@ import { INCIDENT_EVENT_TYPES } from "@/features/incidents/incident-utils";
 import { useDagHeight } from "@/hooks/useDagHeight";
 import { api, type Atom, type Incident, type JobRun, type JobTask, type TaskRun } from "@/lib/api";
 import { usePrincipal } from "@/lib/auth";
-import { canReplayRuns } from "@/features/auth/access";
+import { canReadConnectors, canReplayRuns } from "@/features/auth/access";
 import { events, type CaesiumEvent } from "@/lib/events";
 import { formatUTCTimestamp, shortId } from "@/lib/utils";
 import { getRunCacheStats, isTerminalRunStatus, mergeTerminalRunUpdate } from "./cache-utils";
@@ -44,6 +44,7 @@ import { RunTimeline } from "./RunTimeline";
 import { TaskDetailPanel } from "./TaskDetailPanel";
 
 const COMPARE_RUN_PICKER_LIMIT = 50;
+const EMPTY_ATOMS: Record<string, Atom> = {};
 
 export function RunDetailPage() {
   const { jobId, runId } = useParams({ strict: false }) as { jobId: string; runId: string };
@@ -56,6 +57,10 @@ export function RunDetailPage() {
   const [replayDialogOpen, setReplayDialogOpen] = useState(false);
   const [compareOpen, setCompareOpen] = useState(false);
   const principal = usePrincipal();
+  // Atom metadata is global, requiring the same cluster authority as connector
+  // reads. Anonymous access preserves the existing auth-disabled local mode.
+  const canReadGlobalAtoms = canReadConnectors(principal) ||
+    (principal.kind === null && principal.subject === null && principal.role === null);
 
   const { data: job } = useQuery({ queryKey: ["job", jobId], queryFn: () => api.getJob(jobId) });
 
@@ -89,9 +94,10 @@ export function RunDetailPage() {
     queryFn: () => api.getJobRuns(jobId, { limit: COMPARE_RUN_PICKER_LIMIT }),
   });
 
-  const { data: atoms, isLoading: isLoadingAtoms } = useQuery({
+  const { data: atoms, error: atomsError } = useQuery({
     queryKey: ["atoms"],
     queryFn: api.getAtoms,
+    enabled: canReadGlobalAtoms,
     select: (data) => {
       const map: Record<string, Atom> = {};
       data.forEach((atom) => {
@@ -100,6 +106,8 @@ export function RunDetailPage() {
       return map;
     },
   });
+  const atomsUnavailable = !canReadGlobalAtoms || !!atomsError;
+  const effectiveAtoms = atomsUnavailable ? EMPTY_ATOMS : atoms ?? EMPTY_ATOMS;
 
   const { data: features } = useQuery({
     queryKey: ["system-features"],
@@ -114,7 +122,9 @@ export function RunDetailPage() {
     refetchInterval: 30_000,
   });
 
-  const isLoading = isLoadingRun || isLoadingDAG || isLoadingAtoms || isLoadingTasks;
+  // The global atom catalog is optional presentation metadata. Authorized job
+  // DAG/task/run reads still provide task selection and execution evidence.
+  const isLoading = isLoadingRun || isLoadingDAG || isLoadingTasks;
   const [dagContainerRef, dagHeight] = useDagHeight(isLoading);
 
   const handleTaskSelect = (taskId: string) => setSelectedTaskId((prev) => (prev === taskId ? null : taskId));
@@ -490,7 +500,7 @@ export function RunDetailPage() {
       ) : null}
 
       <HoldSkipReason reason={run.tasks?.find((task) => task.error?.startsWith("dataset_hold:"))?.error ?? run.skip_reason} />
-      {features?.connectors_enabled && <RunDataEvidence jobId={jobId} freshnessEnabled={features.freshness_enabled === true} onOpenReceipt={() => setReproducibilityOpen(true)} />}
+      <RunDataEvidence jobId={jobId} freshnessEnabled={features?.freshness_enabled === true} onOpenReceipt={() => setReproducibilityOpen(true)} />
       <RunExternalExecutions jobId={jobId} runId={runId} />
       {run.tasks?.filter((task) => task.data_violations?.length || task.schema_violations?.length).map((task) => <DataAssertionsPanel key={task.id} task={task} />)}
       {/* Cache summary */}
@@ -551,18 +561,19 @@ export function RunDetailPage() {
             {dag?.nodes?.length ?? 0} nodes
           </span>
         </div>
+        {atomsUnavailable && <p className="px-4 py-2 text-xs text-text-3">Global atom metadata is unavailable. Select a task to inspect this run's permitted logs, outputs and data assertions.</p>}
         <div
           ref={dagContainerRef}
           data-testid="run-dag-canvas-viewport"
           className="relative overflow-hidden bg-card"
           style={{ height: dagHeight ? `${dagHeight}px` : "600px" }}
         >
-          {dag && atoms ? (
+          {dag ? (
             <JobDAG
               dag={dag}
               runStatus={run?.status}
               runCompletedAt={run?.completed_at}
-              atoms={atoms}
+              atoms={effectiveAtoms}
               taskDefinitions={taskDefinitions}
               runStartedAt={run.started_at}
               taskMetadata={taskMetadata}
