@@ -1305,16 +1305,32 @@ run_coverage_journeys() {
         # hashes still run. test_coverage_journeys.py tests semantic refusals;
         # only an actual provider run supplies acceptance evidence.
         semantic = self.art / "connector-semantic-harness.py"
-        semantic.write_text("""import importlib.util, sys
+        semantic.write_text("""import importlib.util, os, sys
 spec=importlib.util.spec_from_file_location('journeys',sys.argv[1])
 module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
 sys.argv=[sys.argv[1],*sys.argv[2:]]
 def structural_semantics(command,args,expected_started_at=""):
+    reads=['ListWorkflowExecutions','DescribeWorkflowExecution','GetWorkflowExecutionHistory']
+    actions=['DescribeWorkflowExecution','QueryWorkflow','DescribeWorkflowExecution','UpdateWorkflowExecution',
+             'DescribeWorkflowExecution','PollWorkflowExecutionUpdate','DescribeWorkflowExecution','QueryWorkflow']
+    proof={'status_query':True,'approval':True,'operation_list':True,'receipt_lookup':True,
+        'principal_verified':True,'workflow_actor_verified':True,'effect_count':1,
+        'second_local_run_succeeded':True,'dispatch_audit':True,'explicit_status_queries':2,
+        'operation_id':'66666666-6666-4666-8666-666666666666','external_update_id':'caesium-'+'9'*64,
+        'principal_id':'88888888-8888-4888-8888-888888888888','principal_kind':'api_key','role':'operator',
+        'second_run_id':'77777777-7777-4777-8777-777777777777'}
+    scenario=os.environ.get('FAKE_SCENARIO')
+    if scenario=='connector-empty-action': proof={}
+    if scenario=='connector-hollow-action': proof['approval']=False
+    if scenario=='connector-foreign-action': proof['role']='viewer'
     return {'schema_version':1,'candidate_sha':args.owner,'image_id':args.image,
         'provider_container_id':args.provider_id,'provider_image_id':args.provider_image,
         'server_started_at':'2026-10-04T12:00:00Z','provider_started_at':'2026-10-04T12:00:00Z',
         'verified_delegation':True,'reverse_link':True,'local_run_succeeded':True,
-        'provider_rpc_delta':{'ListWorkflowExecutions':1,'DescribeWorkflowExecution':1,'GetWorkflowExecutionHistory':1,'QueryWorkflow':0}}
+        'run_id':'22222222-2222-4222-8222-222222222222','actions':proof,
+        'provider_rpc_delta':{method:reads.count(method) for method in module.CONNECTOR_RPC_METHODS},
+        'action_provider_rpc_delta':{method:actions.count(method) for method in module.CONNECTOR_RPC_METHODS},
+        'provider_rpc_evidence':{'reads':reads,'actions':actions}}
 module.connector_read_semantics=structural_semantics
 raise SystemExit(module.main())
 """)
@@ -1416,6 +1432,17 @@ raise SystemExit(module.main())
         self.assertNotEqual(result.returncode, 0)
         self.assertFalse((self.art / 'audit/connector-reads.json').exists())
         self.assertEqual(json.loads((self.art / 'report.json').read_text())['verdict'], 'incomplete')
+
+    def test_connector_empty_foreign_or_hollow_action_proof_cannot_contribute_profiles(self):
+        for scenario in ('connector-empty-action', 'connector-foreign-action', 'connector-hollow-action'):
+            with self.subTest(scenario=scenario):
+                result = self.collect(scenario)
+                self.assertNotEqual(result.returncode, 0, output(result))
+                self.assertFalse((self.art / 'audit/connector-reads.json').exists())
+                diagnostics = json.loads((self.art / 'audit/connector-diagnostics.json').read_text())
+                self.assertFalse(diagnostics['complete'])
+                self.assertEqual(diagnostics['refusal_category'], 'semantic_protocol_failed')
+                self.assertEqual(json.loads((self.art / 'report.json').read_text())['verdict'], 'incomplete')
 
     def test_connector_start_without_a_loaded_fingerprint_fails_the_journey(self):
         result = self.collect("connector-silent")

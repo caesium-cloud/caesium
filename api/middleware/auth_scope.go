@@ -82,6 +82,17 @@ func authorizeScope(c *echo.Context, svc *auth.Service, scopeJSON []byte, routeP
 	// job-scope path because an agent key carries an empty job list — treating it
 	// as "unrestricted" (the len==0 branch below) would be a privilege escalation,
 	// letting an agent token reach every unscoped route.
+	// Connector confinement also rejects malformed/zero-incident agent
+	// markers. DecodeAgentClaim intentionally treats those as no valid claim;
+	// they must not become unscoped connector credentials as a consequence.
+	if strings.HasPrefix(routePath, "/v1/connectors") && len(scopeJSON) > 0 {
+		var scope struct {
+			Agent json.RawMessage `json:"agent"`
+		}
+		if json.Unmarshal(scopeJSON, &scope) != nil || (len(scope.Agent) > 0 && string(scope.Agent) != "null") {
+			return nil, echo.NewHTTPError(http.StatusForbidden, AgentScopeDenyMessage)
+		}
+	}
 	agentClaim, err := auth.DecodeAgentClaim(scopeJSON)
 	if err != nil {
 		return nil, echo.NewHTTPError(http.StatusForbidden, "insufficient permissions")

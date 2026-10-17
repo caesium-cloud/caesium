@@ -148,6 +148,18 @@ describe("auth", () => {
     expect(withAuthHeaders()).not.toHaveProperty("X-CSRF-Token");
   });
 
+  it("preserves an explicit absent cluster role for a namespace-only principal", async () => {
+    mockFetch.mockResolvedValueOnce({ ok: true, json: async () => ({ kind: "api_key", subject: "namespace-key", role: "" }) });
+    await expect(apiKeyLogin("csk_live_namespace")).resolves.toBe("success");
+    expect(getPrincipal()).toMatchObject({ role: null, canRunner: false });
+  });
+
+  it("keeps malformed or agent-like API-key scope unknown without an explicit server classification", async () => {
+    mockFetch.mockResolvedValueOnce({ ok: true, json: async () => whoami("operator", { scope: { jobs: "not-an-array", agent: { id: "agent-like" } } }) });
+    await expect(apiKeyLogin("csk_live_unknown_scope")).resolves.toBe("success");
+    expect(getPrincipal()).toMatchObject({ scopeKnown: false });
+  });
+
   it("builds a same-page return target for SSO callbacks", () => {
     expect(
       currentReturnTo({
@@ -365,6 +377,12 @@ describe("auth", () => {
   });
 
   it.each([
+    {
+      label: "explicit is_scoped false",
+      extra: { is_scoped: false },
+      isScoped: false,
+      scopeKnown: true,
+    },
     {
       label: "explicit is_scoped true",
       extra: { is_scoped: true },

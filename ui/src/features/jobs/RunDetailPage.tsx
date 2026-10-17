@@ -27,6 +27,7 @@ import { INCIDENT_EVENT_TYPES } from "@/features/incidents/incident-utils";
 import { useDagHeight } from "@/hooks/useDagHeight";
 import { api, type Atom, type Incident, type JobRun, type JobTask, type TaskRun } from "@/lib/api";
 import { usePrincipal } from "@/lib/auth";
+import { canReplayRuns } from "@/features/auth/access";
 import { events, type CaesiumEvent } from "@/lib/events";
 import { formatUTCTimestamp, shortId } from "@/lib/utils";
 import { getRunCacheStats, isTerminalRunStatus, mergeTerminalRunUpdate } from "./cache-utils";
@@ -341,8 +342,8 @@ export function RunDetailPage() {
     ? runIncidents.filter((incident) => incidentMatchesTask(incident, selectedTaskId, selectedTask?.name))
     : [];
   const isLive = run.status === "running";
-  const canLaunchReplay = principal.role === null || principal.canRunner;
-  const replayGateReason = principal.role !== null && !principal.canRunner ? "Requires runner role" : undefined;
+  const canLaunchReplay = canReplayRuns(principal);
+  const replayGateReason = canLaunchReplay ? undefined : "Requires runner role";
   const compareDisabledReason = isLoadingJobRuns
     ? "Loading runs to compare"
     : compareRuns.length === 0
