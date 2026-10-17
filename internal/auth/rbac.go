@@ -163,9 +163,9 @@ var endpointPolicy = map[string]RoutePolicy{
 	"GET /v1/jobs/:id/tasks": namespacedRoute(viewer),
 	"GET /v1/jobs/:id/dag":   namespacedRoute(viewer),
 	// The manifest exports the job's trigger configuration (webhook secrets
-	// included), and a trigger may also serve another namespace's job (B2 owns
+	// included), and a trigger may also serve another namespace's job (B9 owns
 	// shared-trigger ownership on the apply/export round trip).
-	"GET /v1/jobs/:id/manifest":         namespacedRoute(viewer).pendingOn("B2"),
+	"GET /v1/jobs/:id/manifest":         namespacedRoute(viewer).pendingOn("B9"),
 	"GET /v1/jobs/:id/queue":            namespacedRoute(viewer),
 	"GET /v1/jobs/:id/runs":             namespacedRoute(viewer).pendingOn("B4"),
 	"GET /v1/jobs/:id/runs/diff":        namespacedRoute(viewer).pendingOn("B4"),
@@ -229,10 +229,12 @@ var endpointPolicy = map[string]RoutePolicy{
 	"GET /v1/agentprofiles":              collectionRoute(viewer).pendingOn("D4"),
 	"GET /v1/agentprofiles/:id":          namespacedRoute(viewer),
 
-	// Lint and diff report cross-job contract findings and diff baselines
-	// over every job (B2 redacts and filters them).
-	"POST /v1/jobdefs/lint": namespacedRoute(viewer).pendingOn("B2"),
-	"POST /v1/jobdefs/diff": namespacedRoute(viewer).pendingOn("B2"),
+	// Lint and diff resolve every definition's namespace and the stored
+	// namespace of every alias they name; their handlers restrict the diff
+	// baseline and the cross-job findings to the caller's namespaces and
+	// redact foreign identities in validator errors (B2).
+	"POST /v1/jobdefs/lint": namespacedRoute(viewer),
+	"POST /v1/jobdefs/diff": namespacedRoute(viewer),
 
 	// Incident operator read API (agent-in-the-loop D2). The detail carries
 	// the incident's frozen agent allowlist, which a lineage walk fills with
@@ -296,14 +298,14 @@ var endpointPolicy = map[string]RoutePolicy{
 	"POST /v1/triggers/:id/fire": namespacedRoute(runner),
 
 	// Operator
-	// Create and apply resolve every definition's namespace, the stored
+	// Create and apply must resolve every definition's namespace, the stored
 	// namespace of every existing alias, the triggers an apply updates in place
-	// and the prune set (B2).
-	"POST /v1/jobs":                         namespacedRoute(operator).pendingOn("B2"),
+	// (and their webhook-path subscribers) and the prune set, atomically (B9).
+	"POST /v1/jobs":                         namespacedRoute(operator).pendingOn("B9"),
 	"DELETE /v1/jobs/:id":                   namespacedRoute(operator),
 	"PUT /v1/jobs/:id/pause":                namespacedRoute(operator),
 	"PUT /v1/jobs/:id/unpause":              namespacedRoute(operator),
-	"POST /v1/jobdefs/apply":                namespacedRoute(operator).pendingOn("B2"),
+	"POST /v1/jobdefs/apply":                namespacedRoute(operator).pendingOn("B9"),
 	"POST /v1/cache/prune":                  clusterRoute(operator),
 	"DELETE /v1/jobs/:id/queue/:id":         namespacedRoute(operator),
 	"DELETE /v1/jobs/:id/cache":             namespacedRoute(operator),
@@ -313,8 +315,8 @@ var endpointPolicy = map[string]RoutePolicy{
 	"POST /v1/triggers": clusterRoute(operator),
 	// Editing a trigger's configuration can subscribe it to another
 	// namespace's webhook path (paths may repeat, and a delivery fans out to
-	// every trigger on the path); B2 owns trigger subscription ownership.
-	"PATCH /v1/triggers/:id": namespacedRoute(operator).pendingOn("B2"),
+	// every trigger on the path); B9 owns trigger subscription ownership.
+	"PATCH /v1/triggers/:id": namespacedRoute(operator).pendingOn("B9"),
 	"POST /v1/atoms":         clusterRoute(operator),
 	"DELETE /v1/atoms/:id":   clusterRoute(operator),
 	// Notification dispatch (internal/notification MatchPolicies) matches

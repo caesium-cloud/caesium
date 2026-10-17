@@ -134,6 +134,36 @@ func (s *Service) TriggerJobNamespaces(ctx context.Context, id uuid.UUID) ([]str
 	return normalizeNamespaceSet(namespaces), nil
 }
 
+// JobNamespacesByAlias returns the namespaces of the jobs rows (retired rows
+// included, the importer's view of an alias) whose alias is one of aliases,
+// matched both as given and trimmed. Aliases with no row contribute nothing;
+// no aliases (or no rows) is an empty set.
+func (s *Service) JobNamespacesByAlias(ctx context.Context, aliases []string) ([]string, error) {
+	lookup := make([]string, 0, 2*len(aliases))
+	for _, alias := range aliases {
+		lookup = append(lookup, alias)
+		if trimmed := strings.TrimSpace(alias); trimmed != alias {
+			lookup = append(lookup, trimmed)
+		}
+	}
+	if len(lookup) == 0 {
+		return []string{}, nil
+	}
+	conn, err := s.readDB(ctx)
+	if err != nil {
+		return nil, err
+	}
+	var namespaces []string
+	err = s.withReadRetry(func() error {
+		namespaces = nil
+		return conn.Unscoped().Model(&models.Job{}).Where("alias IN ?", lookup).Pluck("namespace", &namespaces).Error
+	})
+	if err != nil {
+		return nil, err
+	}
+	return normalizeNamespaceSet(namespaces), nil
+}
+
 // IncidentNamespace returns an incident's namespace (the failing run's
 // ownership, fixed when the incident opened).
 func (s *Service) IncidentNamespace(ctx context.Context, id uuid.UUID) (string, error) {

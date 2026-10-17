@@ -334,7 +334,7 @@ func TestNamespacedJobRoutes(t *testing.T) {
 
 // TestNamespacedManifestPrefix: the manifest exports the job's trigger
 // configuration, which another namespace's job may share, so it is pending
-// B2 for confined principals; its id-or-prefix resolver (shared with GET
+// B9 for confined principals; its id-or-prefix resolver (shared with GET
 // /v1/jobs/:id) is exercised in TestJobPrefixResolverMatchesHandler.
 func TestNamespacedManifestPrefix(t *testing.T) {
 	f := newNSFixture(t)
@@ -344,7 +344,7 @@ func TestNamespacedManifestPrefix(t *testing.T) {
 	}
 	for _, id := range []string{mktJobID, "aaaa1111", "aaaa", "zz"} {
 		require.Equal(t, http.StatusForbidden, manifest(mktViewer, id).status, id)
-		requireAuditMetadata(t, f.lastDenial(t), map[string]any{"pending": "B2"})
+		requireAuditMetadata(t, f.lastDenial(t), map[string]any{"pending": "B9"})
 	}
 	require.Equal(t, http.StatusOK, manifest(f.key(t, models.RoleViewer, ""), "aaaa1111").status, "a cluster viewer is unchanged")
 }
@@ -427,10 +427,10 @@ func TestNamespacedTriggerRoutes(t *testing.T) {
 		}
 	}
 	// Editing a trigger's configuration can subscribe it to another
-	// namespace's webhook path: pending B2.
+	// namespace's webhook path: pending B9.
 	patch := nsCall{method: http.MethodPatch, pattern: "/v1/triggers/:id", params: pv("id", f.mktTrigger.String()), body: `{}`}
 	require.Equal(t, http.StatusForbidden, f.do(t, both, patch).status)
-	requireAuditMetadata(t, f.lastDenial(t), map[string]any{"pending": "B2"})
+	requireAuditMetadata(t, f.lastDenial(t), map[string]any{"pending": "B9"})
 	for _, call := range calls(f.sharedTrigger) {
 		require.Equal(t, http.StatusForbidden, f.do(t, mktOperator, call).status, "a trigger shared with a finance job: %s", call.method)
 		require.Equal(t, http.StatusOK, f.do(t, both, call).status)
@@ -615,8 +615,7 @@ func TestNamespacedClusterAndPendingRoutes(t *testing.T) {
 		{get("/v1/jobs", nil), "B4"},
 		{get("/v1/jobs/:id", pv("id", f.mktJob.String())), "B4"},
 		{get("/v1/jobs/:id/runs", pv("id", f.mktJob.String())), "B4"},
-		{post("/v1/jobdefs/apply", nil, `{"definitions":[]}`), "B2"},
-		{post("/v1/jobdefs/diff", nil, `{"definitions":[]}`), "B2"},
+		{post("/v1/jobdefs/apply", nil, `{"definitions":[]}`), "B9"},
 		{post("/v1/events", nil, `{}`), "A6"},
 		{get("/v1/auth/keys", nil), "A5"},
 		{get("/v1/lineage/impact", nil), "B5"},

@@ -46,11 +46,14 @@ import (
 // be satisfied, which is how "no owner ⇒ cluster-only" fails closed.
 // AnyGrant is satisfied by Role in any namespace at all (reading a "*"
 // cluster-shared object).
+// Disclose names the namespaces the principal lacks in the 403 body; it is
+// set only where the caller named them (or an alias living there) itself.
 type nsRequirement struct {
 	Namespaces []string
 	Role       models.Role
 	Any        bool
 	AnyGrant   bool
+	Disclose   bool
 }
 
 type namespaceResolver func(c *echo.Context, svc *auth.Service, role models.Role) ([]nsRequirement, error)
@@ -84,7 +87,12 @@ var namespaceResolvers = map[string]namespaceResolver{
 	// Jobs by id or unique id prefix (models.FindJobByIDPrefix, like get.go
 	// and manifest.go).
 	"GET /v1/jobs/:id":          resolveJobByIDPrefix, // pending B4
-	"GET /v1/jobs/:id/manifest": resolveJobByIDPrefix,
+	"GET /v1/jobs/:id/manifest": resolveJobByIDPrefix, // pending B9
+
+	// Job definitions read against the catalog: every definition's namespace
+	// and the stored namespace of every alias the request names.
+	"POST /v1/jobdefs/lint": resolveJobdefRead,
+	"POST /v1/jobdefs/diff": resolveJobdefRead,
 
 	// One run: the job's current namespace AND the run's persisted namespace.
 	"GET /v1/jobs/:id/runs/:id":                                 resolveJobRun,
@@ -108,7 +116,7 @@ var namespaceResolvers = map[string]namespaceResolver{
 
 	// Triggers: every job the trigger serves.
 	"GET /v1/triggers/:id":        resolveTrigger,
-	"PATCH /v1/triggers/:id":      resolveTrigger,
+	"PATCH /v1/triggers/:id":      resolveTrigger, // pending B9
 	"POST /v1/triggers/:id/fire":  resolveTrigger,
 	"GET /v1/triggers/:id/events": resolveTrigger, // pending B4
 
@@ -207,6 +215,64 @@ func resolveJobByIDPrefix(c *echo.Context, svc *auth.Service, role models.Role) 
 		return nil, lookupError(err)
 	}
 	return []nsRequirement{every(role, namespace)}, nil
+}
+
+// jobdefReadBody is the part of a lint or diff body (controller/jobdef
+// LintRequest, DiffRequest: definitions of pkg/jobdef.Definition) the
+// resolver needs. It decodes with the same field names and encoding/json
+// rules, so the handler's c.Bind sees the same aliases and namespaces
+// (auth_namespace_jobdef_test.go pins the parity).
+type jobdefReadBody struct {
+	Definitions []struct {
+		Metadata jobdefReadMetadata `json:"metadata"`
+	} `json:"definitions"`
+}
+
+// jobdefReadMetadata decodes like pkg/jobdef.Metadata: its UnmarshalJSON
+// replaces the whole value, so a repeated "metadata" key (or a null one)
+// resets the fields a previous occurrence set rather than merging them.
+type jobdefReadMetadata struct {
+	Alias     string `json:"alias"`
+	Namespace string `json:"namespace"`
+}
+
+func (m *jobdefReadMetadata) UnmarshalJSON(data []byte) error {
+	type plain jobdefReadMetadata
+	var decoded plain
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+	*m = jobdefReadMetadata(decoded)
+	return nil
+}
+
+// resolveJobdefRead resolves POST /v1/jobdefs/lint and /diff: the role in
+// every definition's namespace (blank means default) and in the stored
+// namespace of every alias the request names that already has a jobs row, so
+// a caller cannot lint or diff against another namespace's job by naming its
+// alias. A request with no definitions names no namespace: any grant of the
+// role passes, and the handler returns only the caller's namespaces' rows.
+func resolveJobdefRead(c *echo.Context, svc *auth.Service, role models.Role) ([]nsRequirement, error) {
+	var body jobdefReadBody
+	if err := peekJSONBody(c, confinedBodyBufferLimit, &body); err != nil {
+		return nil, err
+	}
+	if len(body.Definitions) == 0 {
+		return []nsRequirement{{Role: role, AnyGrant: true}}, nil
+	}
+	namespaces := make([]string, 0, len(body.Definitions))
+	aliases := make([]string, 0, len(body.Definitions))
+	for _, def := range body.Definitions {
+		namespaces = append(namespaces, models.NamespaceOrDefault(def.Metadata.Namespace))
+		aliases = append(aliases, def.Metadata.Alias)
+	}
+	stored, err := svc.JobNamespacesByAlias(c.Request().Context(), aliases)
+	if err != nil {
+		return nil, lookupError(err)
+	}
+	requirement := every(role, append(namespaces, stored...)...)
+	requirement.Disclose = true
+	return []nsRequirement{requirement}, nil
 }
 
 // jobAndRunNamespaces resolves the job in the path and the run in the path,
@@ -413,28 +479,39 @@ func DatasetPathIdentity(c *echo.Context) (string, string) {
 // JSON (415 otherwise). The decode is json.Unmarshal over the whole body, as
 // Echo's default serializer does.
 func peekJSONNamespace(c *echo.Context) (string, error) {
-	req := c.Request()
-	if req.ContentLength == 0 {
-		return "", nil
-	}
-	base, _, _ := strings.Cut(req.Header.Get(echo.HeaderContentType), ";")
-	if strings.TrimSpace(base) != echo.MIMEApplicationJSON {
-		return "", echo.NewHTTPError(http.StatusUnsupportedMediaType, "request body must be application/json")
-	}
-	body, err := readAndRestoreBodyLimited(c, namespaceBodyPeekLimit)
-	if err != nil {
-		if errors.Is(err, errBodyTooLarge) {
-			return "", echo.NewHTTPError(http.StatusRequestEntityTooLarge, "request body too large").Wrap(err)
-		}
-		return "", badRequest(err)
-	}
 	var payload struct {
 		Namespace string `json:"namespace"`
 	}
-	if err := json.Unmarshal(body, &payload); err != nil {
-		return "", badRequest(err)
+	if err := peekJSONBody(c, namespaceBodyPeekLimit, &payload); err != nil {
+		return "", err
 	}
 	return payload.Namespace, nil
+}
+
+// peekJSONBody decodes a request body into target exactly as the handler's
+// c.Bind will (see peekJSONNamespace) and leaves the body readable. An empty
+// body leaves target zero, as Echo binds nothing then; a body over limit is
+// 413, a non-JSON media type 415 and an undecodable body 400.
+func peekJSONBody(c *echo.Context, limit int64, target any) error {
+	req := c.Request()
+	if req.ContentLength == 0 {
+		return nil
+	}
+	base, _, _ := strings.Cut(req.Header.Get(echo.HeaderContentType), ";")
+	if strings.TrimSpace(base) != echo.MIMEApplicationJSON {
+		return echo.NewHTTPError(http.StatusUnsupportedMediaType, "request body must be application/json")
+	}
+	body, err := readAndRestoreBodyLimited(c, limit)
+	if err != nil {
+		if errors.Is(err, errBodyTooLarge) {
+			return echo.NewHTTPError(http.StatusRequestEntityTooLarge, "request body too large").Wrap(err)
+		}
+		return badRequest(err)
+	}
+	if err := json.Unmarshal(body, target); err != nil {
+		return badRequest(err)
+	}
+	return nil
 }
 
 // confinedBodyBufferLimit caps the body a namespace-confined principal may

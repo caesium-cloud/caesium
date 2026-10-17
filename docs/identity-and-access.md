@@ -52,9 +52,10 @@ With no policy file every principal holds its role at `*`, so authorization
 behaves exactly as before namespaces existed. Namespaces themselves still take
 effect without a file: a manifest may set any DNS-label `metadata.namespace`,
 and the step cache key, incident deduplication, the git-sync `namespaces`
-allowlist and the shared-object reference rules all use it. Nothing yet checks a
-manifest's namespace against the declared ones (server-side rejection of an
-undeclared namespace is planned, B2), so a typo creates a new namespace.
+allowlist and the shared-object reference rules all use it. Without a policy
+file nothing checks a manifest's namespace against a declared list, so a typo
+creates a new namespace; with one, undeclared namespaces are rejected (see
+[Namespaces on jobs](#namespaces-on-jobs)).
 
 ## Providers
 
@@ -517,8 +518,25 @@ never returned.
 ### Namespaces on jobs
 
 Set `metadata.namespace` in the job manifest (`caesium job schema` documents the
-field). It defaults to `default` and must be a DNS label. It is not yet checked
-against the namespaces declared in the policy file (planned, B2).
+field). It defaults to `default` and must be a DNS label.
+
+While a policy file is loaded, the namespace must also be declared in it
+(`default` always is). Server lint (`caesium job lint --server`,
+`POST /v1/jobdefs/lint`) reports every undeclared namespace as
+`metadata.namespace "x" of job "y" is not declared in the access policy`, and
+apply (`caesium job apply`, `POST /v1/jobdefs/apply`), the legacy
+`POST /v1/jobs`, git sync and agent remediation patches refuse the whole batch
+with that message before writing anything. The check reads the policy in force
+at the time, so removing a namespace from the file takes effect at the next
+apply; its existing jobs keep running. A git-sync source that still holds
+manifests in a removed namespace fails its next sync, which today stops the
+server like any invalid batch (a known follow-up makes such failures
+non-fatal). Offline `caesium job lint` checks syntax only.
+
+No policy file: any syntactically valid namespace is accepted (B1
+compatibility); undeclared namespaces are rejected only when a policy file is
+loaded. Amended in identity-and-access W4 (orchestrator decision, pending
+maintainer sign-off).
 
 - Runs, backfills and incidents carry a copy of the job's namespace when they
   are created, so global lists can filter without a join. Triggers, task runs,
@@ -527,7 +545,10 @@ against the namespaces declared in the policy file (planned, B2).
   job's current namespace and the run's persisted namespace.
 - Moving a job is an apply that changes `metadata.namespace`. History (runs,
   receipts, incidents) keeps its original namespace. `caesium job diff` shows the
-  change as a metadata diff.
+  change as a metadata diff and lists both namespaces under
+  `Namespaces touched` (`namespaces` in `--json` and in the
+  `POST /v1/jobdefs/diff` response; `--prune` adds the namespaces of the jobs
+  it would delete).
 - The namespace is part of the step cache key, so a move invalidates cached
   step outputs; results produced under one namespace are never republished under
   another. A replay of a moved job re-executes every step instead of reusing
@@ -615,6 +636,21 @@ target's namespace:
   policy or agent profile by id. `*` objects are readable by viewers anywhere
   and writable only with the role at `*`.
 - **Incidents:** reject an approval.
+- **Job definitions:** server lint and diff (`POST /v1/jobdefs/lint`,
+  `/diff`) need viewer in every definition's namespace and in the stored
+  namespace of every alias they name; with no definitions, any viewer grant
+  passes. Validation still runs against every job, but the answer is
+  restricted to the caller's namespaces: the diff baseline (and so its
+  `removed` list) holds only their jobs, a trigger a baseline job shares with
+  a job elsewhere has its configuration replaced by a `redacted` marker,
+  contract findings keep only edges between jobs the caller can read (and
+  drop inferred findings, which come from a consumer's trigger, when that
+  trigger also serves a job elsewhere), and validator errors (trigger-chain
+  cycles, dataset producers and consumers, remediation references) name
+  another namespace's job only as "a job in another namespace", without its
+  dataset or namespace. Each of these is read in one snapshot together with
+  the ownership checks that decide what it may show, so a job moving between
+  namespaces mid-request is judged by where it was when it was read.
 - **Audit:** `GET /v1/auth/audit` is authorised on its `?namespace=` filter (a
   namespace or `*`). An omitted filter means `*`, so a namespace admin must pass
   one.
@@ -635,20 +671,22 @@ that makes it namespace-aware lands (unconfined principals are unaffected):
 | A5 | API key list, create, revoke, rotate (`/v1/auth/keys`) |
 | A6 | `POST /v1/events` |
 | A8 | `/v1/agent/incidents/*`, incident detail `GET /v1/incidents/:id`, approval approve |
-| B2 | `POST /v1/jobs`, `/v1/jobdefs/apply`, `/lint`, `/diff`, `GET /v1/jobs/:id/manifest`, `PATCH /v1/triggers/:id` |
 | B4 | `GET /v1/jobs/:id` and the job, run, backfill, trigger, event, stats and incident lists; `runs/diff`, run `why`, `blame`, `topology` and `topology/history`, the job `cache` read, `GET /v1/triggers/:id/events` |
 | B5 | `GET /v1/lineage/impact`, `GET /v1/contracts/graph` |
 | B6 | every `/v1/datasets*` route |
+| B9 | `POST /v1/jobs`, `POST /v1/jobdefs/apply`, `GET /v1/jobs/:id/manifest`, `PATCH /v1/triggers/:id` (confined job writes and trigger tenancy) |
 | D4 | shared-object lists, and creating or editing channels, policies and agent profiles |
 
 Every namespace denial is `403 insufficient permissions` and is audited as
-`auth.denied` with reason `insufficient_role`. For a confined principal the row
+`auth.denied` with reason `insufficient_role`. Lint and diff, where the caller
+named the namespaces itself, say which it lacks:
+`insufficient permissions: viewer required in namespace "finance"`. For a confined principal the row
 also lists the namespaces checked and, for a pending route, the plan item.
 
 One residual race is accepted for now: a concurrent move of the exact target by
 a principal who is operator in both namespaces can land between the namespace
 check and the handler (run admission and replay re-check inside their own
-transactions); in-transaction guards for the other mutations follow in B2/B4.
+transactions); in-transaction guards for the other mutations follow in B9/B4.
 
 ### Planned isolation features
 
