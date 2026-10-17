@@ -33,7 +33,7 @@ export default defineConfig({
   projects: [
     {
       name: "default",
-      testIgnore: ["**/auth/**/*.spec.ts", "**/network-recovery.spec.ts", "**/cluster-recovery.spec.ts"],
+      testIgnore: ["**/auth/**/*.spec.ts", "**/connectors/**/*.spec.ts", "**/network-recovery.spec.ts", "**/cluster-recovery.spec.ts"],
     },
     {
       name: "light",
@@ -56,6 +56,13 @@ export default defineConfig({
     {
       name: "auth",
       testMatch: "**/auth/**/*.spec.ts",
+    },
+    {
+      // Real authenticated connector/Temporal fixture only. Deliberately has
+      // no default/auth dependencies; missing lane prerequisites fail tests.
+      name: "connectors",
+      testMatch: "**/connectors/**/*.spec.ts",
+      retries: 0,
     },
     {
       // Owner-crash console journey. CI selects network-recovery (which pulls

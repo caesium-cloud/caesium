@@ -127,14 +127,15 @@ func validateVersions(sdk, cliOutput, server string) (versionMatrix, error) {
 }
 
 type fixture struct {
-	mu                 sync.Mutex
-	c                  client.Client
-	w                  worker.Worker
-	a                  *activities
-	j                  *journal
-	faultID, faultMode string
-	outage             bool
-	versions           versionMatrix
+	mu                          sync.Mutex
+	c                           client.Client
+	w                           worker.Worker
+	a                           *activities
+	j                           *journal
+	faultID, faultMode          string
+	faultWorkflowID, faultRunID string
+	outage                      bool
+	versions                    versionMatrix
 }
 
 func (f *fixture) startWorker() error {
@@ -202,6 +203,7 @@ func (f *fixture) proxy(upstream *grpc.ClientConn) grpc.StreamHandler {
 		f.mu.Lock()
 		outage := f.outage
 		faultID, faultMode := f.faultID, f.faultMode
+		faultWorkflowID, faultRunID := f.faultWorkflowID, f.faultRunID
 		f.mu.Unlock()
 		if outage {
 			f.j.add(map[string]any{"kind": "proxy_interruption", "method": method})
@@ -224,8 +226,9 @@ func (f *fixture) proxy(upstream *grpc.ClientConn) grpc.StreamHandler {
 			}
 			id := req.GetRequest().GetMeta().GetUpdateId()
 			rejected := res.GetOutcome().GetFailure() != nil
-			event := map[string]any{"kind": "update_rpc", "update_id": id, "rpc_code": status.Code(err).String(), "stage": res.GetStage().String(), "rejected": rejected, "fault_mode": faultMode, "response_update_id": res.GetUpdateRef().GetUpdateId(), "response_workflow_id": res.GetUpdateRef().GetWorkflowExecution().GetWorkflowId(), "response_run_id": res.GetUpdateRef().GetWorkflowExecution().GetRunId()}
-			drop := id == faultID && faultID != "" && ((faultMode == "accepted" && err == nil && !rejected) || (faultMode == "rejected" && err == nil && rejected))
+			event := map[string]any{"kind": "update_rpc", "update_id": id, "rpc_code": status.Code(err).String(), "stage": res.GetStage().String(), "rejected": rejected, "fault_mode": faultMode, "request_workflow_id": req.GetWorkflowExecution().GetWorkflowId(), "request_run_id": req.GetWorkflowExecution().GetRunId(), "response_update_id": res.GetUpdateRef().GetUpdateId(), "response_workflow_id": res.GetUpdateRef().GetWorkflowExecution().GetWorkflowId(), "response_run_id": res.GetUpdateRef().GetWorkflowExecution().GetRunId()}
+			matches := faultMatches(faultID, faultWorkflowID, faultRunID, id, req.GetWorkflowExecution().GetWorkflowId(), req.GetWorkflowExecution().GetRunId())
+			drop := matches && ((faultMode == "accepted" && err == nil && !rejected) || (faultMode == "rejected" && err == nil && rejected))
 			event["reply_dropped"] = drop
 			f.j.add(event)
 			if drop {
@@ -250,6 +253,16 @@ func (f *fixture) proxy(upstream *grpc.ClientConn) grpc.StreamHandler {
 		}
 		return stream.SendMsg(&response)
 	}
+}
+
+// faultMatches selects one immutable execution before Caesium allocates its
+// durable Update ID. Both coordinates are required, so a continuation or another
+// workflow cannot consume a response-loss fault intended for this run.
+func faultMatches(id, workflowID, runID, actualID, actualWorkflowID, actualRunID string) bool {
+	if id != "" {
+		return id == actualID
+	}
+	return workflowID != "" && runID != "" && workflowID == actualWorkflowID && runID == actualRunID
 }
 
 type fixtureConverter struct{ converter.DataConverter }
@@ -352,9 +365,11 @@ func (f *fixture) routes() http.Handler {
 	})
 	mux.HandleFunc("POST /fault", func(w http.ResponseWriter, r *http.Request) {
 		var in struct {
-			UpdateID string `json:"update_id"`
-			Mode     string `json:"mode"`
-			Outage   bool   `json:"outage"`
+			UpdateID   string `json:"update_id"`
+			WorkflowID string `json:"workflow_id"`
+			RunID      string `json:"run_id"`
+			Mode       string `json:"mode"`
+			Outage     bool   `json:"outage"`
 		}
 		if !decode(w, r, &in) {
 			return
@@ -363,12 +378,18 @@ func (f *fixture) routes() http.Handler {
 			http.Error(w, "unknown fault", http.StatusBadRequest)
 			return
 		}
+		if (in.WorkflowID == "") != (in.RunID == "") || (in.UpdateID != "" && in.WorkflowID != "") || (in.Mode != "" && in.UpdateID == "" && in.WorkflowID == "") {
+			http.Error(w, "fault requires one pinned Update ID or workflow/run pair", http.StatusBadRequest)
+			return
+		}
 		f.mu.Lock()
 		f.faultID = in.UpdateID
+		f.faultWorkflowID = in.WorkflowID
+		f.faultRunID = in.RunID
 		f.faultMode = in.Mode
 		f.outage = in.Outage
 		f.mu.Unlock()
-		f.j.add(map[string]any{"kind": "fault_armed", "update_id": in.UpdateID, "mode": in.Mode, "outage": in.Outage})
+		f.j.add(map[string]any{"kind": "fault_armed", "update_id": in.UpdateID, "workflow_id": in.WorkflowID, "run_id": in.RunID, "mode": in.Mode, "outage": in.Outage})
 		writeJSON(w, in)
 	})
 	mux.HandleFunc("POST /start", func(w http.ResponseWriter, r *http.Request) {

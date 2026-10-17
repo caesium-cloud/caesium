@@ -249,7 +249,9 @@ cardinality and closed-workflow Query dispatch count through the live surface.
 
 W1 through W4 have merged, including the W4 dashboard in PR #635.
 W5 C1 is merged in PR #644; dashboard PR #643 records its verified acceptance.
-C2, E, F2–F4 and N remain later work. An open PR or a component-only pass
+W6 C2 and E1 are merged in PRs #652 and #651; this dashboard records their
+verified acceptance.
+E2/E3, F2–F4 and N remain later work. An open PR or a component-only pass
 is not completion. The SHAs below are the squash merges read from GitHub.
 
 The orchestrator owns this dashboard: PR URLs, exact tested heads/merge SHAs,
@@ -546,15 +548,66 @@ Resume unfinished waves. Do not archive this plan while later items remain.
   Repository protection settings are unchanged. C2 and later items remain
   deferred.
 
+### W6 — Declared action API and Console monitoring (merged 2026-10-16)
+
+- **Base and scope:** `0fd86c2441a6a2b5ccefcb67809dc9753950c379` includes
+  merged C1/B2/D2 and identity/access W3. C2 and E1 prerequisites were satisfied.
+  E2/E3 and F2–F4/N remain excluded from this wave.
+- **W6-α / C2:** [PR #652](https://github.com/caesium-cloud/caesium/pull/652)
+  merged `20954dace5bd4cc4336775ac855d6ea7f9242f65` at 2026-10-16T22:50:10Z.
+  Tested head `4435e1a617aaeeea992cbf2c6409f45216a3a833` implements declared
+  Queries/actions, operation listing/lookup, explicit original-principal
+  resubmission, actor/scope policy and durable redacted audits. All six selected
+  real Temporal scenarios passed without skips, including public HTTP
+  action/recovery/restart/effect and protected/unreferenced retention proof.
+  All nine protected checks, including `ci-ok`, passed on the exact head.
+  The squash-merged tree exactly matched the qualified candidate.
+- **W6-β / E1:** [PR #651](https://github.com/caesium-cloud/caesium/pull/651)
+  merged `627e7e053cafe67257d6b6e163c6d896601e47e2` at 2026-10-16T23:47:38Z.
+  Tested integrated head `e2ab716053f1a1c01a9ff9d789cc2546432d6250` contains
+  C2's actual merge and implements guarded connection/execution monitoring,
+  configured refresh/UI links and the isolated real-fixture browser project.
+  The clean integrated candidate passed all six real Temporal scenarios,
+  three connector browser journeys and both authenticated replay browser
+  scenarios, with no retries, skips or flaky results. Live/stale/recovered
+  screenshots were visually inspected. The replay review fix keeps
+  authenticated empty cluster roles fail-closed across the button, shortcut
+  and dialog submission; five component regressions preserve auth-disabled
+  and cluster-runner replay. The review thread was replied to, resolved and
+  re-fetched without outstanding findings. All nine protected checks passed.
+  The squash-merged tree exactly matched the qualified candidate.
+- **Verification:** Both runtime candidates passed the full containerized
+  race/coverage suite and lint with zero issues; the integrated E1 candidate
+  passed all 518 UI tests, production build and bundle budgets. All 41 required
+  tagged hermetic regressions, 150 collector regressions, 166 CI helper tests
+  and 23 fixture orchestration probes passed. Source/image identities and actual
+  SDK 1.49.0, CLI 1.9.1 and server 1.32.0 pins were captured; owned fixture
+  containers were cleaned up. Fresh exact-head hosted checks qualified each
+  implementation merge.
+- **Integration and review:** C2 merged before E1. Shared guide conflicts were
+  resolved to retain the action API and Console monitoring behavior. Common
+  configuration, adapter and fixture changes landed with C2; E1 records its
+  final 22-file diff against that merged base. Optional `uiURL` preserves
+  existing fingerprints when absent. Explicit whoami scope
+  fails closed. Native history pages treat requested size as a hint while
+  enforcing configured event/byte ceilings; truncation omits a cursor that
+  would skip discarded events. This dedicated plan PR checks only C2 and E1;
+  later items remain unchecked and the plan stays active.
+- **Boundary:** The user explicitly authorized the admin-merge train after
+  authorizing review fixes, replies and resolution. Required checks remained
+  enforced as acceptance evidence; the administrative merge bypass covered
+  the missing CODEOWNER approval and merge queue. Repository settings and
+  CI-lane promotion remain unchanged.
+
 ### Stream Status
 
 | Stream | Scope | Priority | Status |
 | --- | --- | --- | --- |
 | A | Generic contract, configuration and catalog (2 items) | P0 | Shipped (A1, A2) |
 | B | Temporal inspection and declared messages (2 items) | P0 | Shipped (B1, B2) |
-| C | Authenticated REST and composition (2 items) | P0 | C1 shipped; C2 not started |
+| C | Authenticated REST and composition (2 items) | P0 | Shipped (C1, C2) |
 | D | Verified correlation and action durability (2 items) | P0 | Shipped (D1, D2) |
-| E | Console monitoring, data links and approval (3 items) | P0 | Not started |
+| E | Console monitoring, data links and approval (3 items) | P0 | E1 shipped; E2/E3 not started |
 | F | Real fixture, CI, qualification and promotion (4 items) | P0 | F1 shipped; F2–F4 not started |
 | N | Operator guidance and reconciliation (1 item) | P0 | Not started |
 
@@ -692,16 +745,44 @@ auth chokepoints. Every endpoint includes a live HTTP integration scenario.
   before RPC, and enforce a guarded epoch transition including stale-node requests. Reuse
   the existing distributed fixture rather than inventing another cluster harness.
 
-- [ ] C2. Expose declared status Queries, action submissions, per-execution
+- [x] C2. Expose declared status Queries, action submissions, per-execution
   operation listing, receipt lookup and explicit original-principal resubmission.
   Enforce operator policy, reserved actor context, schema/conflict errors and
   audited outcomes; lookup never sends an Update or invents completion.
-  Files: new `api/rest/service/connector/actions.go`,
-  new `api/rest/controller/connector/actions.go`, `api/rest/bind/bind.go`,
-  `api/rest/bind/bind_test.go`, `internal/auth/rbac.go`,
-  `api/middleware/auth_scope.go`, `api/middleware/auth.go`,
-  `internal/auth/audit.go`, `api/auth_rbac_policy_completeness_test.go`,
-  new `test/connectors_actions_test.go`, `docs/connectors.md` (action REST/policy).
+  Files: `api/auth_rbac_policy_completeness_test.go`,
+  new `api/middleware/auth_connector_actions_test.go`,
+  `api/middleware/auth_scope.go`,
+  `api/middleware/auth_scope_agent_internal_test.go`,
+  `api/rest/bind/bind.go`,
+  `api/rest/bind/bind_test.go`,
+  new `api/rest/controller/connector/actions.go`,
+  new `api/rest/controller/connector/actions_test.go`,
+  `api/rest/controller/connector/reads.go`,
+  new `api/rest/service/connector/actions.go`,
+  new `api/rest/service/connector/actions_test.go`,
+  `api/rest/service/connector/reads.go`,
+  `api/rest/service/connector/reads_test.go`,
+  `docs/ci.md`,
+  `docs/connectors.md`,
+  `docs/temporal.md`,
+  `internal/auth/audit.go`,
+  `internal/auth/rbac.go`,
+  `internal/auth/rbac_classes_test.go`,
+  `internal/connector/config.go`,
+  `internal/connector/config_test.go`,
+  `internal/connector/fingerprint.go`,
+  `internal/connector/temporal/observe.go`,
+  `internal/connector/temporal/observe_test.go`,
+  `scripts/connectors-fixture.sh`,
+  `scripts/coverage-journeys.py`,
+  `scripts/integration-coverage.sh`,
+  `scripts/test_connectors_fixture.py`,
+  `scripts/test_coverage.py`,
+  `scripts/test_coverage_journeys.py`,
+  `test/connectors/fixture/fixture_test.go`,
+  `test/connectors/fixture/main.go`,
+  new `test/connectors_actions_test.go`,
+  `test/connectors_read_test.go`.
   Depends on: C1, B2, D2.
   Verify: live HTTP covers Query/approval, viewer/runner/scoped/agent denial,
   undeclared handlers, stale binding/run targets, bad schema, concurrent duplicate
@@ -788,7 +869,7 @@ auth chokepoints. Every endpoint includes a live HTTP integration scenario.
 Use one external-execution feature area with provider/connection selection,
 joined to existing Caesium pages. No cross-provider global pagination in v1.
 
-- [ ] E1. Add connection/execution navigation, typed API calls, filters,
+- [x] E1. Add connection/execution navigation, typed API calls, filters,
   paginated detail/history, native status, observation age and connection health.
   Show unbound workflows, unavailable payloads/partial history, error/recovery
   states and configured Temporal UI links. Gate navigation and direct routes.
@@ -796,14 +877,28 @@ joined to existing Caesium pages. No cross-provider global pagination in v1.
   no default/auth dependencies; exclude its directory from the default project.
   Its helper asserts connector/auth/real-fixture lane markers and server features
   when selected, rather than skipping absent prerequisites.
-  Files: new `ui/src/features/connectors/ConnectionsPage.tsx`,
+  Files: `api/rest/controller/auth/sso.go`,
+  `api/rest/controller/auth/sso_test.go`,
+  `api/rest/service/connector/reads_test.go`,
+  `docs/connectors.md`,
+  `docs/temporal.md`,
+  new `ui/e2e/connectors/monitoring.spec.ts`,
+  new `ui/e2e/helpers/connectors.ts`,
+  `ui/playwright.config.ts`,
+  `ui/src/components/layout/Sidebar.tsx`,
+  `ui/src/features/auth/access.ts`,
+  new `ui/src/features/connectors/ConnectionsPage.tsx`,
   new `ui/src/features/connectors/ExecutionDetailPage.tsx`,
-  new `ui/src/features/connectors/types.ts`,
   new `ui/src/features/connectors/__tests__/monitoring.test.tsx`,
-  `ui/src/lib/api.ts`, `ui/src/router.tsx`,
-  `ui/src/components/layout/Sidebar.tsx`, `ui/src/features/auth/access.ts`,
-  `ui/playwright.config.ts`, new `ui/e2e/helpers/connectors.ts`,
-  new `ui/e2e/connectors/monitoring.spec.ts`, `docs/connectors.md` (Console tour).
+  new `ui/src/features/connectors/types.ts`,
+  `ui/src/features/jobs/ReplayDialog.tsx`,
+  `ui/src/features/jobs/RunDetailPage.tsx`,
+  new `ui/src/features/jobs/__tests__/replay-access.test.tsx`,
+  `ui/src/lib/__tests__/auth.test.ts`,
+  `ui/src/lib/api.ts`,
+  `ui/src/lib/auth.ts`,
+  `ui/src/router.tsx`,
+  `ui/tests/playwright-projects.test.ts`.
   Depends on: C1.
   Verify: browser filters/inspects the actual external-only workflow, sees dated
   stale details on outage, recovers and renders unsupported capabilities honestly.

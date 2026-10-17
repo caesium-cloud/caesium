@@ -704,6 +704,105 @@ func TestPageSizeClampsToObserverMaximum(t *testing.T) {
 	}
 }
 
+func TestHistoryConfiguredCeilingBoundsNativeBatches(t *testing.T) {
+	for _, tc := range []struct {
+		name                                  string
+		configured, requested, returned, want int
+		incomplete                            bool
+	}{
+		{name: "configured one native two", configured: 1, requested: 1, returned: 2, want: 1, incomplete: true},
+		{name: "configured two native three", configured: 2, requested: 1, returned: 3, want: 2, incomplete: true},
+		{name: "full batch at configured ceiling retains cursor", configured: 2, requested: 1, returned: 2, want: 2},
+		{name: "default hundred native hundred one", requested: 100, returned: 101, want: 100, incomplete: true},
+		{name: "requested one retains full native two", configured: 100, requested: 1, returned: 2, want: 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			events := make([]*historypb.HistoryEvent, tc.returned)
+			for i := range events {
+				events[i] = &historypb.HistoryEvent{EventId: int64(i + 1), EventType: enumspb.EVENT_TYPE_TIMER_FIRED}
+			}
+			token := []byte("native-next-page")
+			fake := &fakeService{history: &workflowservice.GetWorkflowExecutionHistoryResponse{History: &historypb.History{Events: events}, NextPageToken: token}}
+			obs, err := NewObserver(fake, "payments", "", 0, tc.configured, connector.MaxPageMetadataBytes)
+			if err != nil {
+				t.Fatal(err)
+			}
+			page, err := obs.History(t.Context(), "order", "pinned-run", nil, tc.requested)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(page.Events) != tc.want || page.Incomplete != tc.incomplete {
+				t.Fatalf("events=%d incomplete=%v, want %d/%v", len(page.Events), page.Incomplete, tc.want, tc.incomplete)
+			}
+			for i, event := range page.Events {
+				if event.ID != int64(i+1) {
+					t.Fatalf("retained prefix event %d = %d", i, event.ID)
+				}
+			}
+			if tc.incomplete {
+				if page.NextPageToken != nil {
+					t.Fatalf("truncated native batch retained skipping token %q", page.NextPageToken)
+				}
+			} else if !bytes.Equal(token, page.NextPageToken) {
+				t.Fatalf("complete native batch lost cursor: %q", page.NextPageToken)
+			}
+			if len(fake.histories) != 1 || fake.histories[0].GetMaximumPageSize() != int32(tc.requested) {
+				t.Fatalf("request hint changed: %#v", fake.histories)
+			}
+			if len(fake.describes) != 0 {
+				t.Fatal("pinned history retargeted through Describe")
+			}
+			raw, err := json.Marshal(page)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(raw) > connector.MaxPageMetadataBytes {
+				t.Fatalf("exposed history exceeds byte ceiling: %d", len(raw))
+			}
+		})
+	}
+}
+
+func TestHistoryEntryCeilingProjectsOnlyRetainedEvidence(t *testing.T) {
+	events := []*historypb.HistoryEvent{
+		{EventId: 1, EventType: enumspb.EVENT_TYPE_ACTIVITY_TASK_SCHEDULED, Attributes: &historypb.HistoryEvent_ActivityTaskScheduledEventAttributes{ActivityTaskScheduledEventAttributes: &historypb.ActivityTaskScheduledEventAttributes{ActivityId: "retained-activity", ActivityType: &commonpb.ActivityType{Name: "Retained"}}}},
+		{EventId: 2, EventType: enumspb.EVENT_TYPE_ACTIVITY_TASK_STARTED, Attributes: &historypb.HistoryEvent_ActivityTaskStartedEventAttributes{ActivityTaskStartedEventAttributes: &historypb.ActivityTaskStartedEventAttributes{ScheduledEventId: 1, Attempt: 2}}},
+		{EventId: 3, EventType: enumspb.EVENT_TYPE_CHILD_WORKFLOW_EXECUTION_STARTED, Attributes: &historypb.HistoryEvent_ChildWorkflowExecutionStartedEventAttributes{ChildWorkflowExecutionStartedEventAttributes: &historypb.ChildWorkflowExecutionStartedEventAttributes{WorkflowExecution: &commonpb.WorkflowExecution{WorkflowId: "discarded-child", RunId: "discarded-run"}}}},
+		{EventId: 4, EventType: enumspb.EVENT_TYPE_WORKFLOW_TASK_FAILED, Attributes: &historypb.HistoryEvent_WorkflowTaskFailedEventAttributes{WorkflowTaskFailedEventAttributes: &historypb.WorkflowTaskFailedEventAttributes{Cause: enumspb.WORKFLOW_TASK_FAILED_CAUSE_UNHANDLED_COMMAND}}},
+		{EventId: 5, EventType: enumspb.EVENT_TYPE_ACTIVITY_TASK_SCHEDULED, Attributes: &historypb.HistoryEvent_ActivityTaskScheduledEventAttributes{ActivityTaskScheduledEventAttributes: &historypb.ActivityTaskScheduledEventAttributes{ActivityId: "discarded-activity", ActivityType: &commonpb.ActivityType{Name: "Discarded"}}}},
+		{EventId: 6, EventType: enumspb.EVENT_TYPE_ACTIVITY_TASK_STARTED, Attributes: &historypb.HistoryEvent_ActivityTaskStartedEventAttributes{ActivityTaskStartedEventAttributes: &historypb.ActivityTaskStartedEventAttributes{ScheduledEventId: 5, Attempt: 1}}},
+	}
+	fake := &fakeService{history: &workflowservice.GetWorkflowExecutionHistoryResponse{History: &historypb.History{Events: events}, NextPageToken: []byte("after-discarded-evidence")}}
+	obs, err := NewObserver(fake, "payments", "", 0, 2, connector.MaxPageMetadataBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	page, err := obs.History(t.Context(), "order", "pinned-run", nil, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(page.Events) != 2 || !page.Incomplete || page.NextPageToken != nil {
+		t.Fatalf("history prefix = %#v", page)
+	}
+	if len(page.Activities) != 1 {
+		t.Fatalf("retained activities = %#v", page.Activities)
+	}
+	activity := page.Activities[0]
+	if activity.EventID != 2 || activity.ScheduledEventID != 1 || activity.ActivityID != "retained-activity" || activity.ActivityType != "Retained" || activity.Attempt != 2 {
+		t.Fatalf("retained activity changed: %#v", activity)
+	}
+	if len(page.Relations) != 0 || len(page.Problems) != 0 {
+		t.Fatalf("discarded metadata escaped: relations=%#v problems=%#v", page.Relations, page.Problems)
+	}
+	raw, err := json.Marshal(page)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), "discarded") || strings.Contains(string(raw), "Discarded") {
+		t.Fatalf("discarded evidence appeared in projection: %s", raw)
+	}
+}
+
 func TestActivityIdentityStaysOnThePage(t *testing.T) {
 	startedOnly := &workflowservice.GetWorkflowExecutionHistoryResponse{
 		History: &historypb.History{Events: []*historypb.HistoryEvent{{

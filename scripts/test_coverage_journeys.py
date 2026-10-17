@@ -570,45 +570,115 @@ printf 'runner_name_length=%s\nremoval_attempts=%s\n' "${#full_runner_name}" "$a
             'job_id': jobs['connector-fixture-publish'], 'outcome': 'created', 'relation_type': 'delegation',
             'connection_id': 'fixture', 'activity_id': '1', 'activity_type': 'caesium.start',
             'idempotency_key': RUN + '/1', 'source_event_id': 5}
-        rpc_calls = []
+        operation_id = '66666666-6666-4666-8666-666666666666'
+        second_run = '77777777-7777-4777-8777-777777777777'
+        operator_id = '88888888-8888-4888-8888-888888888888'
+        update_id = 'caesium-' + '9' * 64
+        actor = {'principal_kind': 'api_key', 'stable_id': operator_id, 'subject': 'operator-prefix',
+                 'role': 'operator', 'operation_id': operation_id, 'binding_version': '1'}
+        second_hint = {'version': 'v1', 'job_id': jobs['connector-fixture-notify'],
+                       'run_id': second_run, 'idempotency_key': RUN + '/2', 'outcome': 'created'}
+        receipt = {'id': operation_id, 'connection_id': 'fixture', 'execution_id': 'opaque',
+                   'execution': {'connection_id': 'fixture', 'coordinates': workflow},
+                   'external_update_id': update_id, 'state': 'accepted', 'actor': actor}
+        events = [{'kind': 'fixture_started', 'candidate': OWNER}]
+        approved = False
         http_calls = []
-        def request(base, key, method, path, body=None):
+        def rpc(name):
+            if fault != 'rpc' and not (fault == 'no-update-rpc' and name == 'UpdateWorkflowExecution'):
+                events.append({'kind': 'provider_rpc', 'method': '/temporal.api.WorkflowService/' + name})
+        def request(base, key, method, path, body=None, headers=None):
+            nonlocal approved
             http_calls.append((method, path))
             if path == '/health':
                 return {'ready': True, 'sdk': '1.49.0', 'cli': '1.9.1', 'server': 'other' if fault == 'matrix' else '1.32.0'}
             if path == '/evidence':
-                rpc_calls.append(True)
-                return [] if len(rpc_calls) == 1 or fault == 'rpc' else [
-                    {'kind': 'provider_rpc', 'method': '/temporal.api.WorkflowService/' + name}
-                    for name in ('ListWorkflowExecutions', 'DescribeWorkflowExecution', 'GetWorkflowExecutionHistory')] + [
-                    {'kind': 'fixture_started', 'candidate': OWNER},
-                    {'kind': 'workflow_started', **workflow, 'workflow_type': 'publication'},
-                    {'kind': 'http_start', 'workflow_id': workflow['workflow_id'], 'activity_id': '1',
-                     'hint': {'job_id': correlation['job_id'], 'run_id': TASK, 'idempotency_key': RUN + '/1', 'outcome': 'created'}}]
+                return copy.deepcopy(events)
             if path == '/v1/jobdefs/apply':
                 self.assertEqual([entry['steps'][0]['image'] for entry in body['definitions']], ['alpine:3.23'] * 2)
                 return {'applied': 2}
             if path == '/v1/jobs?limit=100':
                 return [{'alias': alias, 'id': identity} for alias, identity in jobs.items()]
             if path == '/v1/auth/keys':
-                return {'key': 'csk_' + body['role']}
+                return {'key': 'csk_' + body['role'], 'api_key': {'id': operator_id, 'key_prefix': body['role'] + '-prefix', 'role': body['role']}}
+            if path == '/auth/whoami':
+                return {'kind': 'api_key', 'role': 'operator', 'subject': 'operator-prefix'}
             if path == '/configure':
                 self.assertEqual(body, {'runner_key': 'csk_runner'})
                 return {'configured': True}
             if path == '/start':
                 self.assertEqual(body['input']['first_job'], jobs['connector-fixture-publish'])
+                events.extend([{'kind': 'workflow_started', **workflow, 'workflow_type': 'publication'},
+                    {'kind': 'http_start', 'workflow_id': workflow['workflow_id'], 'activity_id': '1',
+                     'hint': {'job_id': correlation['job_id'], 'run_id': TASK, 'idempotency_key': RUN + '/1', 'outcome': 'created'}}])
                 return workflow
+            if path == '/signal':
+                self.assertEqual(body['run_id'], RUN)
+                return {'sent': True}
             if '?workflow_type=' in path:
+                rpc('ListWorkflowExecutions')
                 return {'executions': [{'id': 'opaque', 'reference': {'connection_id': 'fixture', 'coordinates': workflow}}]}
             if path.endswith('/history'):
+                rpc('GetWorkflowExecutionHistory')
                 return {'run_id': RUN, 'events': [{'event_id': 1}]}
             if path.endswith('/relationships'):
+                rpc('DescribeWorkflowExecution')
+                rpc('GetWorkflowExecutionHistory')
                 return {'correlations': [] if fault == 'correlation' else [correlation]}
             if path.endswith('/external-executions'):
                 return {'executions': [] if fault == 'reverse' else [correlation]}
             if '/v1/jobs/' in path:
-                return {'id': TASK, 'job_id': jobs['connector-fixture-publish'],
-                        'status': 'failed' if fault == 'run' else 'succeeded'}
+                second = second_run in path
+                return {'id': second_run if second else TASK,
+                        'job_id': jobs['connector-fixture-notify' if second else 'connector-fixture-publish'],
+                        'status': 'failed' if fault == ('second-run' if second else 'run') else 'succeeded'}
+            if '/queries/publication_status' in path:
+                self.assertEqual(body, {'binding_name': 'publication', 'binding_version': '1'})
+                rpc('DescribeWorkflowExecution')
+                if fault != 'no-query-rpc':
+                    rpc('QueryWorkflow')
+                state = {'stage': 'published' if approved else 'awaiting_approval', 'eligible': True,
+                         'approved': approved, 'approval_effects': 1 if approved else 0}
+                if approved:
+                    state.update(actor=actor, second=second_hint)
+                if fault == 'query':
+                    state['stage'] = 'starting'
+                return {'result': state}
+            if '/actions/approve_publication' in path:
+                self.assertEqual(key, 'csk_operator')
+                self.assertEqual(headers, {'Idempotency-Key': 'owned-approval'})
+                self.assertEqual(body['input'], {'note': 'coverage approval'})
+                rpc('DescribeWorkflowExecution')
+                rpc('UpdateWorkflowExecution')
+                if fault == 'extra-update-rpc':
+                    rpc('UpdateWorkflowExecution')
+                approved = True
+                if fault != 'second-admission':
+                    events.append({'kind': 'http_start', 'workflow_id': workflow['workflow_id'], 'activity_id': '2', 'hint': second_hint})
+                for _ in range(2 if fault == 'duplicate-effect' else 0 if fault == 'effect' else 1):
+                    events.append({'kind': 'approval_effect', 'run_id': RUN, 'actor': actor})
+                returned = copy.deepcopy(receipt)
+                if fault == 'actor':
+                    returned['actor']['stable_id'] = 'different'
+                if fault == 'action':
+                    returned['state'] = 'unknown'
+                return {'operation': returned, 'created': True}
+            if path.endswith('/operations'):
+                if fault == 'operation-list-rpc':
+                    rpc('QueryWorkflow')
+                return {'operations': [] if fault == 'operation-list' else [receipt]}
+            if '/operations/' in path:
+                rpc('DescribeWorkflowExecution')
+                rpc('PollWorkflowExecutionUpdate')
+                return {'operation': {**receipt, 'state': 'unknown' if fault == 'lookup' else 'completed',
+                                      'evidence': {'result': {'approved': True}}}}
+            if path.startswith('/v1/auth/audit'):
+                return [] if fault == 'audit' else [{'actor': 'operator-prefix', 'action': 'connector.action_dispatch',
+                    'outcome': 'success', 'metadata': {'operation_id': operation_id, 'stable_id': operator_id,
+                    'connection_id': 'fixture', 'execution_id': 'opaque'}}]
+            rpc('DescribeWorkflowExecution')
+            if fault == 'automatic-query':
+                rpc('QueryWorkflow')
             return {'availability': 'available', 'reference': {'connection_id': 'fixture', 'coordinates': workflow}}
         return args, inspect, request, audit, raw, calls, http_calls
 
@@ -621,13 +691,21 @@ printf 'runner_name_length=%s\nremoval_attempts=%s\n' "${#full_runner_name}" "$a
         self.assertTrue(receipt['complete'] and receipt['verified_delegation'] and receipt['reverse_link'])
         self.assertEqual(receipt['raw_files'], b.raw_files(raw))
         self.assertEqual(receipt['provider_rpc_delta']['QueryWorkflow'], 0)
+        self.assertEqual(receipt['action_provider_rpc_delta']['QueryWorkflow'], 2)
+        self.assertEqual(receipt['action_provider_rpc_delta']['UpdateWorkflowExecution'], 1)
+        self.assertEqual(receipt['actions']['effect_count'], 1)
+        self.assertTrue(receipt['actions']['dispatch_audit'] and receipt['actions']['second_local_run_succeeded'])
+        self.assertTrue(any(path.endswith('/operations') for _, path in http_calls))
         self.assertTrue(any(path.endswith('/external-executions') for _, path in http_calls))
         self.assertNotIn('csk_', (audit / 'connector-reads.json').read_text())
         self.assertEqual(len([call for call in calls if call[1] == 'kill']), 1)
 
     def test_connector_semantic_failures_never_signal_or_write_eligible_receipt(self):
         for fault in ('image', 'network', 'matrix', 'rpc', 'correlation', 'reverse', 'run',
-                      'server-readiness-restart', 'server-preflush-restart', 'provider-restart'):
+                      'server-readiness-restart', 'server-preflush-restart', 'provider-restart',
+                      'automatic-query', 'query', 'action', 'actor', 'operation-list', 'operation-list-rpc',
+                      'lookup', 'second-admission', 'second-run', 'effect', 'duplicate-effect', 'audit',
+                      'no-update-rpc', 'extra-update-rpc', 'no-query-rpc'):
             with self.subTest(fault=fault):
                 args, command, request, audit, raw, calls, _ = self.connector_semantic_fixture(fault)
                 with self.assertRaises(b.JourneyError):
@@ -657,6 +735,45 @@ printf 'runner_name_length=%s\nremoval_attempts=%s\n' "${#full_runner_name}" "$a
                     b.connector_shutdown(command, CID, OWNER, 'owned', IMAGE, audit,
                         semantics=lambda started_at: b.connector_read_semantics(command, args, request=request, expected_started_at=started_at), raw_dir=raw)
                 self.assertFalse((audit / 'connector-reads.json').exists())
+
+    def test_connector_action_receipt_mutations_cannot_forge_or_omit_protocol_proof(self):
+        args, command, request, audit, raw, calls, _ = self.connector_semantic_fixture()
+        receipt = b.connector_read_semantics(command, args, request=request)
+        b.validate_connector_semantic_receipt(receipt)
+        for mutation in ('missing-actions', 'hollow-action', 'duplicate-effect', 'forged-rpc-delta',
+                         'missing-rpc-evidence', 'forged-rpc-method', 'hidden-automatic-query',
+                         'changed-principal', 'missing-second-run'):
+            with self.subTest(mutation=mutation):
+                value = copy.deepcopy(receipt)
+                if mutation == 'missing-actions': value.pop('actions')
+                if mutation == 'hollow-action': value['actions']['receipt_lookup'] = False
+                if mutation == 'duplicate-effect': value['actions']['effect_count'] = 2
+                if mutation == 'forged-rpc-delta': value['action_provider_rpc_delta']['UpdateWorkflowExecution'] = 2
+                if mutation == 'missing-rpc-evidence': value.pop('provider_rpc_evidence')
+                if mutation == 'forged-rpc-method': value['provider_rpc_evidence']['actions'].append('UnknownMethod')
+                if mutation == 'hidden-automatic-query':
+                    value['provider_rpc_evidence']['reads'].append('QueryWorkflow')
+                    value['provider_rpc_delta']['QueryWorkflow'] = 1
+                if mutation == 'changed-principal': value['actions']['principal_kind'] = 'service'
+                if mutation == 'missing-second-run': value['actions']['second_run_id'] = value['run_id']
+                with self.assertRaises(b.JourneyError): b.validate_connector_semantic_receipt(value)
+
+    def test_connector_optional_headers_only_allow_bounded_idempotency_key(self):
+        response = io.BytesIO(b'{}')
+        response.status = 201
+        response.headers = {'Content-Length': '2'}
+        with patch.object(b, 'urlopen', return_value=response) as opened:
+            self.assertEqual(b.connector_http('http://127.0.0.1', 'csk_private', 'POST', '/action', {},
+                headers={'Idempotency-Key': 'one-explicit-action'}), {})
+            sent = opened.call_args.args[0]
+            self.assertEqual(sent.get_header('Idempotency-key'), 'one-explicit-action')
+            self.assertEqual(sent.get_header('Authorization'), 'Bearer csk_private')
+        for headers in ({'Authorization': 'override'}, {'Idempotency-Key': 'bad\r\nheader'},
+                        {'Idempotency-Key': ''}, {'Idempotency-Key': 'x' * 257}):
+            with self.subTest(headers=headers), patch.object(b, 'urlopen') as opened:
+                with self.assertRaises(b.JourneyError):
+                    b.connector_http('http://127.0.0.1', 'csk_private', 'POST', '/action', {}, headers=headers)
+                opened.assert_not_called()
 
     def test_connector_never_ready_stopped_and_invalid_complete_json_do_not_signal(self):
         for rc, body in ((0, '{"status":"unhealthy"}'), (0, '{"healthy":true}'),

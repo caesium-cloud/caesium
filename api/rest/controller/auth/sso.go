@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"encoding/json"
 	"errors"
 	"net"
 	"net/http"
@@ -69,11 +70,28 @@ func (s *SSOController) Whoami(c *echo.Context) error {
 	if principal == nil {
 		return echo.NewHTTPError(http.StatusUnauthorized, "not authenticated")
 	}
+	jobs, scopeErr := iauth.ScopeJobs(principal.Scope)
+	scoped := scopeErr != nil || len(jobs) > 0
+	if len(principal.Scope) > 0 {
+		// DecodeScope deliberately treats an empty job allowlist as unrestricted.
+		// A non-null agent marker is still restricted, even if its claim is
+		// malformed or has no incident id. Never advertise such a key as an
+		// unscoped cluster principal to the Console.
+		var rawScope struct {
+			Agent json.RawMessage `json:"agent"`
+		}
+		if err := json.Unmarshal(principal.Scope, &rawScope); err != nil {
+			scoped = true
+		} else if len(rawScope.Agent) > 0 && strings.TrimSpace(string(rawScope.Agent)) != "null" {
+			scoped = true
+		}
+	}
 
 	body := map[string]any{
-		"kind":    principal.Kind,
-		"subject": principal.Subject,
-		"role":    principal.ClusterRole(),
+		"kind":      principal.Kind,
+		"subject":   principal.Subject,
+		"role":      principal.ClusterRole(),
+		"is_scoped": scoped,
 	}
 	if principal.Kind == iauth.PrincipalUser {
 		body["email"] = principal.Subject
@@ -82,9 +100,9 @@ func (s *SSOController) Whoami(c *echo.Context) error {
 	// middleware allows GET /auth/whoami for every API-key principal), so the
 	// answer has to say what it is scoped TO — otherwise a caller cannot tell a
 	// scoped key from an unscoped one and has no way to learn which jobs it may
-	// reach. Unscoped principals keep the previous body verbatim: the key is
-	// omitted rather than emitted empty.
-	if jobs, err := iauth.ScopeJobs(principal.Scope); err == nil && len(jobs) > 0 {
+	// reach. The optional jobs object is omitted for unscoped principals;
+	// is_scoped always explicitly classifies the current principal.
+	if scopeErr == nil && len(jobs) > 0 {
 		body["scope"] = map[string]any{"jobs": jobs}
 	}
 	if csrf := authmw.GetCSRFToken(c); csrf != "" {
