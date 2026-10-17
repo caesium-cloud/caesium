@@ -2492,12 +2492,23 @@ Lanes that go through `just integration-up*`:
 `integration-arm64` Docker / infra.
 CI sets `CAESIUM_SKIP_IMAGE_BUILD=true` and docker-loads the `images`
 job's artifacts first, so those recipes do not recompile.
-The agent-auth lane also serves an access policy file: `integration-up-agent`
-seeds `.tmp/auth-policy/policy.yaml` from `test/testdata/policy/auth-lane-reload.yaml`,
-mounts that directory read-only at `/etc/caesium/policy`
-(`CAESIUM_AUTH_POLICY_FILE`, `CAESIUM_AUTH_POLICY_RELOAD_INTERVAL=1s`), and
-`integration-test-agent` passes the runner-side path as
-`CAESIUM_IT_AUTH_POLICY_PATH` so the `TestAuthPolicy*` scenarios can rewrite it.
+Every justfile integration server serves the access policy fixture
+`test/testdata/policy/two-namespaces.yaml` (`default`, `marketing` with secret
+rules and a run quota of one, `finance`; plan item H-1). `integration-up` and
+every recipe tracking its env mount `test/testdata/policy` read-only and set
+`CAESIUM_AUTH_POLICY_FILE`; `integration-test` passes
+`CAESIUM_IT_POLICY_FIXTURE=two-namespaces` to its runner. The agent-auth lane
+serves a copy instead: `integration-up-agent` seeds
+`.tmp/auth-policy/policy.yaml` from the fixture, mounts that directory
+read-only at `/etc/caesium/policy` (`CAESIUM_AUTH_POLICY_FILE`,
+`CAESIUM_AUTH_POLICY_RELOAD_INTERVAL=1s`), and `integration-test-agent` passes
+the runner-side path as `CAESIUM_IT_AUTH_POLICY_PATH` so scenarios can rewrite
+it (start from the served bytes, append, reload, restore). `requireAuthLane`
+fails, never skips, when that served file is missing or does not declare
+`marketing` and `finance`; the coverage journey's api-key lane serves no policy
+file on purpose and says so with `CAESIUM_IT_AUTH_POLICY=none`. Lanes without a
+policy file (podman, kind/helm, coverage journeys) accept every valid
+namespace, so the B1 namespace scenarios run there unchanged.
 
 Lanes that set server env inline and do **not** go through any
 `integration-up*` recipe:

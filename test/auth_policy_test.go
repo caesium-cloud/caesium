@@ -213,7 +213,10 @@ func (s *IntegrationTestSuite) TestAuthPolicyPollReload() {
 	status, body := s.requestWithCookie(http.MethodGet, "/v1/atoms", cookie)
 	s.Require().Equal(http.StatusForbidden, status, "the lane fixture does not bind iaa-poll-viewers: %s", body)
 
-	granted := []byte(fmt.Sprintf("apiVersion: v1\nkind: AccessPolicy\nbindings:\n  - subjects: {groups: [iaa-poll-viewers]}\n    role: viewer\n    namespaces: [\"*\"]\n# %s\n", uuid.NewString()))
+	// The served fixture plus one binding (its bindings list is last), so the
+	// declared namespaces stay in force while this revision is served.
+	s.Require().True(strings.HasSuffix(string(original), "\n"), "the served policy must end with a newline")
+	granted := []byte(string(original) + fmt.Sprintf("  - subjects: {groups: [iaa-poll-viewers]}\n    role: viewer\n    namespaces: [\"*\"]\n# %s\n", uuid.NewString()))
 	s.writeAuthPolicy(path, granted)
 	s.Require().True(s.waitForPolicyRevision(policy.Hash(granted)), "the poller must pick up the changed file within %s", authPolicyPollWait)
 	status, body = s.requestWithCookie(http.MethodGet, "/v1/atoms", cookie)

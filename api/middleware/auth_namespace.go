@@ -1,8 +1,11 @@
 package middleware
 
 import (
+	"fmt"
 	"net/http"
 	"slices"
+	"strconv"
+	"strings"
 
 	"github.com/caesium-cloud/caesium/internal/auth"
 	"github.com/caesium-cloud/caesium/internal/authz"
@@ -98,7 +101,15 @@ func authorizeRoute(c *echo.Context, svc *auth.Service, p *auth.Principal, polic
 		}
 		decision.Namespaces = requirementNamespaces(requirements)
 		if !requirementsSatisfied(p, requirements) {
-			return decision, denyInsufficientRole(rp.Role)
+			denial := denyInsufficientRole(rp.Role)
+			if missing := disclosedMissingNamespaces(p, requirements); len(missing) > 0 {
+				noun := "namespace"
+				if len(missing) > 1 {
+					noun = "namespaces"
+				}
+				denial.message = fmt.Sprintf("insufficient permissions: %s required in %s %s", rp.Role, noun, quotedList(missing))
+			}
+			return decision, denial
 		}
 		return decision, nil
 	default:
@@ -168,6 +179,35 @@ func requirementsSatisfied(p *auth.Principal, requirements []nsRequirement) bool
 		}
 	}
 	return true
+}
+
+// disclosedMissingNamespaces returns, sorted and de-duplicated, the
+// namespaces of the Disclose requirements in which p lacks the role: the
+// namespaces a 403 may name because the caller's own request named them.
+func disclosedMissingNamespaces(p *auth.Principal, requirements []nsRequirement) []string {
+	var missing []string
+	for _, requirement := range requirements {
+		if !requirement.Disclose || requirement.Any || requirement.AnyGrant {
+			continue
+		}
+		for _, namespace := range requirement.Namespaces {
+			namespace = models.NamespaceOrDefault(namespace)
+			if !auth.HasRole(p.RoleIn(namespace), requirement.Role) {
+				missing = append(missing, namespace)
+			}
+		}
+	}
+	slices.Sort(missing)
+	return slices.Compact(missing)
+}
+
+// quotedList renders namespaces as `"a", "b"`.
+func quotedList(namespaces []string) string {
+	quoted := make([]string, len(namespaces))
+	for i, namespace := range namespaces {
+		quoted[i] = strconv.Quote(namespace)
+	}
+	return strings.Join(quoted, ", ")
 }
 
 // requirementNamespaces is the sorted, de-duplicated union of the namespaces

@@ -3,9 +3,12 @@
 package test
 
 import (
+	"fmt"
 	"os"
 	"strings"
+	"time"
 
+	"github.com/caesium-cloud/caesium/internal/auth/policy"
 	"github.com/caesium-cloud/caesium/pkg/env"
 )
 
@@ -44,6 +47,80 @@ func (s *IntegrationTestSuite) requireAuthLane() {
 		"%s=true but the runner has CAESIUM_AUTH_MODE=%q: the auth lane is misconfigured, not skippable", authLaneEnv, vars.AuthMode)
 	s.Require().True(vars.AgentRemediationEnabled,
 		"%s=true but the runner has CAESIUM_AGENT_REMEDIATION_ENABLED unset: the auth lane is misconfigured, not skippable", authLaneEnv)
+
+	// The auth lane serves the two-namespace policy fixture (plan item H-1).
+	// Only the coverage journey's api-key lane runs without a policy file, on
+	// purpose, and it says so; anywhere else a missing fixture is a broken
+	// lane, never a skip.
+	if authLaneWithoutPolicy() {
+		return
+	}
+	path := strings.TrimSpace(os.Getenv(authPolicyPathEnv))
+	s.Require().NotEmpty(path,
+		"%s=true but the runner has no %s: the auth lane must serve %s (justfile integration-up-agent / integration-test-agent)", authLaneEnv, authPolicyPathEnv, policyFixtureFile)
+	served, err := os.ReadFile(path)
+	s.Require().NoError(err, "read the auth lane's served policy file")
+	parsed, err := policy.Parse(served)
+	s.Require().NoError(err, "the auth lane's served policy file must parse")
+	for _, namespace := range policyFixtureNamespaces {
+		s.Require().Contains(parsed.Namespaces, namespace,
+			"the auth lane's served policy must declare %q (it is seeded from %s)", namespace, policyFixtureFile)
+	}
+}
+
+// authLanePolicyEnv marks the one auth lane that intentionally serves no
+// policy file (scripts/coverage-journeys.sh sets it to "none").
+const authLanePolicyEnv = "CAESIUM_IT_AUTH_POLICY"
+
+// policyFixtureEnv is set by the no-auth runner (justfile integration-test)
+// whose server mounts the policy fixture. Lanes without a policy file
+// (podman, kind/helm, coverage journeys) leave it unset.
+const policyFixtureEnv = "CAESIUM_IT_POLICY_FIXTURE"
+
+// policyFixtureFile is the fixture every justfile integration server serves.
+const policyFixtureFile = "test/testdata/policy/two-namespaces.yaml"
+
+// policyFixtureNamespaces are the namespaces the fixture declares besides
+// default.
+var policyFixtureNamespaces = []string{"marketing", "finance"}
+
+func authLaneWithoutPolicy() bool {
+	return strings.TrimSpace(os.Getenv(authLanePolicyEnv)) == "none"
+}
+
+// requirePolicyFixture gates a scenario on a server that serves the
+// two-namespace policy fixture, and fails (never skips) when the lane says it
+// does but the live server does not enforce it:
+//
+//   - on the auth lane, requireAuthLane already failed unless the fixture is
+//     served (the coverage journey's no-policy lane skips here);
+//   - on the no-auth lane, the runner carries CAESIUM_IT_POLICY_FIXTURE;
+//     lanes that never mount a policy file (podman, kind) skip;
+//
+// and either way server lint must reject an undeclared namespace.
+func (s *IntegrationTestSuite) requirePolicyFixture() {
+	s.T().Helper()
+
+	switch {
+	case onAuthLane():
+		s.requireAuthLane()
+		if authLaneWithoutPolicy() {
+			s.T().Skipf("%s needs the policy fixture; this auth lane (%s=none) serves no policy file", s.T().Name(), authLanePolicyEnv)
+		}
+	case strings.TrimSpace(os.Getenv(policyFixtureEnv)) == "":
+		s.T().Skipf("%s needs a server serving %s (just integration-test / integration-test-agent); this lane runs without a policy file", s.T().Name(), policyFixtureFile)
+	}
+
+	probe := fmt.Sprintf("h1-undeclared-probe-%d", time.Now().UnixNano()%1_000_000)
+	resp := s.serverLint(s.authAPIKey, namespaceProbeDefinition("h1-fixture-probe", probe))
+	found := false
+	for _, msg := range resp.Errors {
+		if strings.Contains(msg.Message, fmt.Sprintf("%q", probe)) && strings.Contains(msg.Message, "not declared") {
+			found = true
+		}
+	}
+	s.Require().True(found, "%s is set but the server does not reject undeclared namespace %q: it is not serving %s (lint: %+v)",
+		policyFixtureEnv, probe, policyFixtureFile, resp)
 }
 
 // skipOnAuthLane is the inverse guard, for scenarios that assert a route is

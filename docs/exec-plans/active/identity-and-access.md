@@ -619,7 +619,8 @@ middleware relies on.
       (required real schema, incident and cache/diff/replay journeys),
       `internal/jobdef/exporter.go`, `docs/examples/`,
       `docs/caesium-job-llm-reference.md`, `docs/job-definitions.md`.
-- [ ] B2. Server-side namespace semantics: `POST /v1/jobdefs/lint` and apply reject an
+- [x] B2. (W4-γ: confined apply/move/prune and POST /v1/jobs moved to B9.)
+      Server-side namespace semantics: `POST /v1/jobdefs/lint` and apply reject an
       undeclared namespace (from the A4 policy holder) naming it; a namespace move keeps
       history (runs, receipts, incidents) on the original namespace and rewrites only
       `jobs.namespace`; the apply preview lists namespaces touched. B1 supplies the
@@ -1106,7 +1107,10 @@ group refresh, user disable, CLI login) is asserted here against a live Keycloak
 
 ## Harness Strengthening
 
-- [ ] H-1. Policy fixture on **both** integration servers: `test/testdata/policy/two-namespaces.yaml`
+- [x] H-1. (W4-γ: `requireAuthLane` fails without the served fixture; the coverage
+      journey's no-policy api-key lane is marked `CAESIUM_IT_AUTH_POLICY=none`;
+      `mintNamespacedKey` in `test/namespaced_keys_test.go`.)
+      Policy fixture on **both** integration servers: `test/testdata/policy/two-namespaces.yaml`
       (`default`, `marketing` with secret rules and a quota of one, `finance`;
       bindings for the three lane groups) mounted with `CAESIUM_AUTH_POLICY_FILE` into
       `just integration-up` (no auth mode — exercises namespace *settings*: secret

@@ -90,8 +90,8 @@ func ValidateAgentProfileRefs(ctx context.Context, conn *gorm.DB, defs []schema.
 			case !found:
 				return fmt.Errorf("metadata.remediation.profile %q does not reference an existing AgentProfile", ref.profile)
 			case !models.ObjectVisibleFrom(ref.namespace, namespace):
-				return fmt.Errorf("job %q (namespace %q): metadata.remediation.profile %q references an AgentProfile in namespace %q; a job may reference only objects in its own namespace or the shared namespace %q",
-					ref.alias, ref.namespace, ref.profile, models.NamespaceOrDefault(namespace), models.ClusterNamespace)
+				return &ObjectRefNamespaceError{Alias: ref.alias, JobNamespace: ref.namespace, Field: "metadata.remediation.profile",
+					Ref: ref.profile, ObjectKind: "an AgentProfile", ObjectNamespace: models.NamespaceOrDefault(namespace)}
 			}
 		}
 		if ref.channel != "" {
@@ -100,8 +100,8 @@ func ValidateAgentProfileRefs(ctx context.Context, conn *gorm.DB, defs []schema.
 			case !found:
 				return fmt.Errorf("metadata.remediation.escalation.channel %q does not reference an existing notification channel", ref.channel)
 			case !models.ObjectVisibleFrom(ref.namespace, namespace):
-				return fmt.Errorf("job %q (namespace %q): metadata.remediation.escalation.channel %q references a notification channel in namespace %q; a job may reference only objects in its own namespace or the shared namespace %q",
-					ref.alias, ref.namespace, ref.channel, models.NamespaceOrDefault(namespace), models.ClusterNamespace)
+				return &ObjectRefNamespaceError{Alias: ref.alias, JobNamespace: ref.namespace, Field: "metadata.remediation.escalation.channel",
+					Ref: ref.channel, ObjectKind: "a notification channel", ObjectNamespace: models.NamespaceOrDefault(namespace)}
 			}
 		}
 	}
@@ -133,4 +133,31 @@ func lookupNamespaces(ctx context.Context, conn *gorm.DB, model any, want map[st
 		namespaces[row.Name] = row.Namespace
 	}
 	return namespaces, nil
+}
+
+// ObjectRefNamespaceError is a remediation reference to a shared object in a
+// namespace the job cannot see. Error() is the historical message; Redacted
+// omits the object's namespace for a caller who cannot read it
+// (identity-and-access B2).
+type ObjectRefNamespaceError struct {
+	Alias           string
+	JobNamespace    string
+	Field           string
+	Ref             string
+	ObjectKind      string // "an AgentProfile", "a notification channel"
+	ObjectNamespace string
+}
+
+func (e *ObjectRefNamespaceError) Error() string {
+	return e.render(fmt.Sprintf("in namespace %q", e.ObjectNamespace))
+}
+
+// Redacted is the message without the object's namespace.
+func (e *ObjectRefNamespaceError) Redacted() string {
+	return e.render("in another namespace")
+}
+
+func (e *ObjectRefNamespaceError) render(where string) string {
+	return fmt.Sprintf("job %q (namespace %q): %s %q references %s %s; a job may reference only objects in its own namespace or the shared namespace %q",
+		e.Alias, e.JobNamespace, e.Field, e.Ref, e.ObjectKind, where, models.ClusterNamespace)
 }

@@ -184,7 +184,7 @@ func (s *IntegrationTestSuite) TestAuthNamespacedRoutesConfineKey() {
 		s.requireNSStatus(http.StatusForbidden, http.MethodGet, fmt.Sprintf(path, fin), mktOperator, "")
 	}
 	// The manifest (by full id or unique prefix) exports the job's trigger
-	// configuration, which a finance job could share: pending B2.
+	// configuration, which a finance job could share: pending B9.
 	s.requireNSStatus(http.StatusForbidden, http.MethodGet, "/v1/jobs/"+mkt+"/manifest", mktOperator, "")
 	s.requireNSStatus(http.StatusForbidden, http.MethodGet, "/v1/jobs/"+mkt[:13]+"/manifest", mktOperator, "")
 	s.requireNSStatus(http.StatusOK, http.MethodGet, "/v1/jobs/"+mkt[:13]+"/manifest", clusterViewer, "")
@@ -221,8 +221,9 @@ func (s *IntegrationTestSuite) TestAuthNamespacedRoutesConfineKey() {
 	s.requireNSStatus(http.StatusForbidden, http.MethodGet, "/v1/jobs", mktOperator, "")
 	payload, err := json.Marshal(map[string]any{"definitions": []schema.Definition{s.namespacedJobDefinition(f.mktAlias, "marketing")}})
 	s.Require().NoError(err)
-	s.requireNSStatus(http.StatusForbidden, http.MethodPost, "/v1/jobdefs/apply", mktOperator, string(payload))
-	s.requireNSStatus(http.StatusForbidden, http.MethodPost, "/v1/jobdefs/diff", mktOperator, string(payload))
+	s.requireNSStatus(http.StatusForbidden, http.MethodPost, "/v1/jobdefs/apply", mktOperator, string(payload)) // pending B9
+	// Diff is live (B2): the marketing job resolves to marketing.
+	s.requireNSStatus(http.StatusOK, http.MethodPost, "/v1/jobdefs/diff", mktOperator, string(payload))
 
 	// Identity routes answer any authenticated principal.
 	s.requireNSStatus(http.StatusOK, http.MethodGet, "/auth/whoami", mktOperator, "")
@@ -345,7 +346,7 @@ func (s *IntegrationTestSuite) TestAuthNamespacedSharedObjectsAndTriggers() {
 
 	s.requireNSStatus(http.StatusOK, http.MethodGet, "/v1/triggers/"+mktTrigger, mktOperator, "")
 	// Editing a trigger's configuration could subscribe it to another
-	// namespace's webhook path: pending B2 for confined principals.
+	// namespace's webhook path: pending B9 for confined principals.
 	newAlias := fmt.Sprintf("a3-trigger-%d", f.stamp)
 	s.requireNSStatus(http.StatusForbidden, http.MethodPatch, "/v1/triggers/"+mktTrigger, mktOperator, fmt.Sprintf(`{"alias":%q}`, newAlias))
 	s.NotContains(s.requireNSStatus(http.StatusOK, http.MethodGet, "/v1/triggers/"+mktTrigger, s.authAPIKey, ""), newAlias,

@@ -58,7 +58,7 @@ For the auth management CLI, supply credentials through `CAESIUM_API_KEY`. The
 | `POST /jobs/:id/runs/:run_id/tasks/:task_id/partitions/:index/retry` | Retry one partition of a fanned-out task. |
 | `GET /jobs/:id/runs/:run_id/tasks/:task_id/partitions` | List a fanned-out task's partitions. |
 | `POST /jobs/:id/runs/:run_id/callbacks/retry` | Retry failed callbacks. |
-| `POST /jobdefs/apply`, `POST /jobdefs/diff`, `POST /jobdefs/lint` | Apply, diff, or lint manifests against the server's catalog. Lint reports, and diff rejects with 400, each `secret://` reference its namespace's `secrets.allow` rules deny, redacted ([Scoped secrets](identity-and-access.md#scoped-secrets)); apply does not check them. |
+| `POST /jobdefs/apply`, `POST /jobdefs/diff`, `POST /jobdefs/lint` | Apply, diff, or lint manifests against the server's catalog. With a policy file loaded, lint and apply reject undeclared namespaces. The diff response lists the `namespaces` an apply would touch. Lint and diff answer a namespace-confined caller from its own namespaces only ([identity-and-access.md](identity-and-access.md#route-classes-and-enforcement)). Lint reports, and diff rejects with 400, each `secret://` reference its namespace's `secrets.allow` rules deny, redacted ([Scoped secrets](identity-and-access.md#scoped-secrets)); apply does not check them. |
 | `GET /triggers`, `POST /triggers`, `GET /triggers/:id`, `PATCH /triggers/:id` | Manage triggers. |
 | `POST /triggers/:id/fire` | Fire a trigger manually with optional params. |
 | `GET /triggers/:id/events` | Events matched by an event trigger. |
