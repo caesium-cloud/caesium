@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -11,12 +12,22 @@ import (
 
 	authmw "github.com/caesium-cloud/caesium/api/middleware"
 	iauth "github.com/caesium-cloud/caesium/internal/auth"
+	"github.com/caesium-cloud/caesium/internal/auth/policy"
+	"github.com/caesium-cloud/caesium/internal/authz"
 	"github.com/caesium-cloud/caesium/internal/jobdef/testutil"
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v5"
 	"github.com/stretchr/testify/require"
 )
+
+// setPrincipal authenticates c as a principal with subject and grants, the
+// way the auth middleware does.
+func setPrincipal(c *echo.Context, subject string, grants policy.Grants) *iauth.Principal {
+	p := &iauth.Principal{Kind: iauth.PrincipalAPIKey, Subject: subject, Grants: grants}
+	c.Set(authmw.ContextKeyPrincipal, p)
+	return p
+}
 
 func setupControllerDeps(t *testing.T) (*Controller, *iauth.Service, *iauth.AuditLogger) {
 	t.Helper()
@@ -60,7 +71,7 @@ func TestCreateKeyCreatesScopedKeyAndAuditEntry(t *testing.T) {
 		"expires_in":"2d"
 	}`)
 
-	c.Set(authmw.ContextKeyAuth, &models.APIKey{KeyPrefix: "csk_live_admin", Role: models.RoleAdmin})
+	setPrincipal(c, "csk_live_admin", policy.Grants{"*": models.RoleAdmin})
 
 	err := ctrl.CreateKey(c)
 	require.NoError(t, err)
@@ -122,7 +133,7 @@ func TestRevokeKeyRevokesAndAudits(t *testing.T) {
 
 	c, rec := newAuthContext(t, http.MethodPost, "/v1/auth/keys/"+resp.Key.ID.String()+"/revoke", "")
 	c.SetPathValues(echo.PathValues{{Name: "id", Value: resp.Key.ID.String()}})
-	c.Set(authmw.ContextKeyAuth, &models.APIKey{KeyPrefix: "csk_live_admin"})
+	setPrincipal(c, "csk_live_admin", policy.Grants{"*": models.RoleAdmin})
 
 	err = ctrl.RevokeKey(c)
 	require.NoError(t, err)
@@ -144,7 +155,7 @@ func TestRotateKeyReturnsNewKeyAndAuditEntry(t *testing.T) {
 
 	c, rec := newAuthContext(t, http.MethodPost, "/v1/auth/keys/"+original.Key.ID.String()+"/rotate", `{"grace_period":"2h"}`)
 	c.SetPathValues(echo.PathValues{{Name: "id", Value: original.Key.ID.String()}})
-	c.Set(authmw.ContextKeyAuth, &models.APIKey{KeyPrefix: "csk_live_admin"})
+	setPrincipal(c, "csk_live_admin", policy.Grants{"*": models.RoleAdmin})
 
 	err = ctrl.RotateKey(c)
 	require.NoError(t, err)
@@ -231,6 +242,7 @@ func TestRotateKeyRejectsRevokedKey(t *testing.T) {
 
 	c, _ := newAuthContext(t, http.MethodPost, "/v1/auth/keys/"+resp.Key.ID.String()+"/rotate", `{}`)
 	c.SetPathValues(echo.PathValues{{Name: "id", Value: resp.Key.ID.String()}})
+	setPrincipal(c, "csk_live_admin", policy.Grants{"*": models.RoleAdmin})
 
 	err = ctrl.RotateKey(c)
 	require.Error(t, err)
@@ -279,14 +291,14 @@ func TestCreateKeyRequiresAuthenticatedCaller(t *testing.T) {
 func TestCreateKeyRejectsHigherPrivilegeRoleThanCaller(t *testing.T) {
 	ctrl, _, auditor := setupControllerDeps(t)
 	c, _ := newAuthContext(t, http.MethodPost, "/v1/auth/keys", `{"role":"admin"}`)
-	c.Set(authmw.ContextKeyAuth, &models.APIKey{KeyPrefix: "csk_live_operator", Role: models.RoleOperator})
+	setPrincipal(c, "csk_live_operator", policy.Grants{"*": models.RoleOperator})
 
 	err := ctrl.CreateKey(c)
-	require.Error(t, err)
-
-	he, ok := err.(*echo.HTTPError)
-	require.True(t, ok)
-	require.Equal(t, http.StatusForbidden, he.Code)
+	denial, ok := errors.AsType[*authz.Denial](err)
+	require.True(t, ok, "the refusal must be an audited handler denial, got %v", err)
+	require.Equal(t, higherPrivilegeMessage, denial.Message)
+	require.Equal(t, models.RoleAdmin, denial.Required)
+	require.Equal(t, []string{"*"}, denial.Namespaces)
 
 	entries, err := auditor.Query(&iauth.AuditQueryRequest{Action: iauth.ActionKeyCreate})
 	require.NoError(t, err)

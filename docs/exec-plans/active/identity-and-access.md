@@ -491,7 +491,11 @@ translated into cluster-wide bindings and behaviour is unchanged.
       whatever shape the table has when it lands (plain role before A3, classified
       after).
       Depends on: A1 + A2.
-- [ ] A5. API keys with namespaces and SSO-admin key management: `Namespaces` column
+- [x] A5. (W4-α: an explicit `["*"]` is stored as NULL; with a policy file, create
+      and rotate refuse undeclared namespaces; rotation keeps the key's expiry and
+      never extends the old key; `--jobs` is an alias of `--scope-jobs`; the key
+      list stays JSON; whoami asserted over REST until E5's `caesium whoami`.)
+      API keys with namespaces and SSO-admin key management: `Namespaces` column
       (NULL ⇒ cluster), `caesium auth key create --role R --namespace NS [--namespace …]
       [--jobs …]`, `POST /v1/auth/keys` accepts `namespaces`; the minting constraint (a
       caller may only mint/rotate grants ⊆ its own, per namespace); `GET /v1/auth/keys`
