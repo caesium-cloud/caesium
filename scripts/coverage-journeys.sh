@@ -1748,6 +1748,11 @@ PY
   # The access policy endpoints (GET/POST /v1/auth/policy): this api-key server
   # mounts no policy file, so the scenario drives the no-file env view and 409.
   auth_pattern="${auth_pattern%)}|TestAuthPolicyShowAndReloadSurface)"
+  # User and session administration (/v1/auth/users*, /v1/auth/sessions and
+  # `caesium auth user`): the api-key lifecycle and the non-cluster-admin
+  # denials. The cookie-admin scenario rewrites a policy file, which this
+  # server does not mount, so it runs on the agent lane only.
+  auth_pattern="${auth_pattern%)}|TestAuthUserAdministrationLifecycle|TestAuthUserAdministrationDeniesNonClusterAdmins)"
 
   local -a local_named_passes=(
     TestCaesiumWhyExplainsHitAndMiss
@@ -1791,6 +1796,8 @@ PY
     TestPublicListingsOrderByAndRefuseInvalidTerms
     TestIncidentNamespaceLifecycle
     TestAuthPolicyShowAndReloadSurface
+    TestAuthUserAdministrationLifecycle
+    TestAuthUserAdministrationDeniesNonClusterAdmins
   )
   local -a distributed_named_passes=(
     TestNodeWorkersRoute
