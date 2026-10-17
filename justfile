@@ -443,6 +443,7 @@ integration-test: integration-runner
         -e CAESIUM_TEST_SHARD_INDEX \
         -e CAESIUM_TEST_SHARD_COUNT \
         -e CAESIUM_EVENT_INGEST_API_KEY={{ event_ingest_api_key }} \
+        -e CAESIUM_IT_POLICY_FIXTURE=two-namespaces \
         -e DOCKER_HOST=unix:///var/run/docker.sock \
         --network=container:{{ it_container }} \
         -w {{ bld_dir }} \
@@ -709,6 +710,11 @@ hydrate:
         -v {{ repo_dir }}/docs/examples:/examples:ro \
         {{ local_image_ref }}:{{ tag }} job apply --server http://127.0.0.1:{{ port }} --path /examples
 
+# Every integration server serves test/testdata/policy/two-namespaces.yaml
+# (plan item H-1): `default`, `marketing` (secret rules, a run quota of one)
+# and `finance` are declared, so undeclared namespaces are rejected there. The
+# podman, kind/helm and coverage-journey lanes run without a policy file and
+# keep accepting every valid namespace (B1 compatibility).
 integration-up: build-stress build-test
     {{ container_cli }} rm -f {{ it_container }} >/dev/null 2>&1 || true
     # Keep this CI path sharded to exercise the multi-shard database router.
@@ -718,6 +724,8 @@ integration-up: build-stress build-test
         -v {{ sock }}:/var/run/docker.sock \
         -e DOCKER_HOST=unix:///var/run/docker.sock \
         --user 0:0 \
+        -v {{ repo_dir }}/test/testdata/policy:/etc/caesium/policy-fixture:ro \
+        -e CAESIUM_AUTH_POLICY_FILE=/etc/caesium/policy-fixture/two-namespaces.yaml \
         -e CAESIUM_MANUAL_TRIGGER_API_KEY=integration-test-key \
         -e CAESIUM_EVENT_INGEST_API_KEY={{ event_ingest_api_key }} \
         -e CAESIUM_LOG_LEVEL=debug \
@@ -754,6 +762,8 @@ integration-up-distributed: build-stress build-test
         -v {{ sock }}:/var/run/docker.sock \
         -e DOCKER_HOST=unix:///var/run/docker.sock \
         --user 0:0 \
+        -v {{ repo_dir }}/test/testdata/policy:/etc/caesium/policy-fixture:ro \
+        -e CAESIUM_AUTH_POLICY_FILE=/etc/caesium/policy-fixture/two-namespaces.yaml \
         -e CAESIUM_MANUAL_TRIGGER_API_KEY=integration-test-key \
         -e CAESIUM_EVENT_INGEST_API_KEY={{ event_ingest_api_key }} \
         -e CAESIUM_LOG_LEVEL=debug \
@@ -802,6 +812,8 @@ integration-up-owner-memory: build-stress build-test
         -v {{ sock }}:/var/run/docker.sock \
         -e DOCKER_HOST=unix:///var/run/docker.sock \
         --user 0:0 \
+        -v {{ repo_dir }}/test/testdata/policy:/etc/caesium/policy-fixture:ro \
+        -e CAESIUM_AUTH_POLICY_FILE=/etc/caesium/policy-fixture/two-namespaces.yaml \
         -e CAESIUM_MANUAL_TRIGGER_API_KEY=integration-test-key \
         -e CAESIUM_EVENT_INGEST_API_KEY={{ event_ingest_api_key }} \
         -e CAESIUM_LOG_LEVEL=debug \
@@ -870,6 +882,8 @@ integration-up-infra: build-stress build-test build-reagents
         -v {{ sock }}:/var/run/docker.sock \
         -e DOCKER_HOST=unix:///var/run/docker.sock \
         --user 0:0 \
+        -v {{ repo_dir }}/test/testdata/policy:/etc/caesium/policy-fixture:ro \
+        -e CAESIUM_AUTH_POLICY_FILE=/etc/caesium/policy-fixture/two-namespaces.yaml \
         -e CAESIUM_MANUAL_TRIGGER_API_KEY=integration-test-key \
         -e CAESIUM_EVENT_INGEST_API_KEY={{ event_ingest_api_key }} \
         -e CAESIUM_LOG_LEVEL=debug \
@@ -946,13 +960,13 @@ integration-test-infra: integration-runner
     {{ container_cli }} rm -f {{ infra_it_container }} >/dev/null 2>&1 || true
 
 # The auth lane serves an access policy file: a fresh copy of
-# test/testdata/policy/auth-lane-reload.yaml in .tmp/auth-policy, whose
+# test/testdata/policy/two-namespaces.yaml in .tmp/auth-policy, whose
 # directory is bind-mounted read-only so the TestAuthPolicy scenarios can
 # replace the file from the runner (CAESIUM_IT_AUTH_POLICY_PATH) and watch
 # the 1s poller pick it up.
 integration-up-agent: build-stress build-test build-triage-agent
     @if [ -z "${CAESIUM_CONNECTORS_SERVER_CIDFILE:-}" ]; then {{ container_cli }} rm -f {{ agent_it_container }} >/dev/null 2>&1 || true; fi
-    @rm -rf {{ repo_dir }}/.tmp/auth-policy && mkdir -p {{ repo_dir }}/.tmp/auth-policy && cp {{ repo_dir }}/test/testdata/policy/auth-lane-reload.yaml {{ repo_dir }}/.tmp/auth-policy/policy.yaml
+    @rm -rf {{ repo_dir }}/.tmp/auth-policy && mkdir -p {{ repo_dir }}/.tmp/auth-policy && cp {{ repo_dir }}/test/testdata/policy/two-namespaces.yaml {{ repo_dir }}/.tmp/auth-policy/policy.yaml
     @if [ -n "${CAESIUM_CONNECTORS_SERVER_CIDFILE:-}" ]; then \
         [ ! -e "$CAESIUM_CONNECTORS_SERVER_CIDFILE" ] || { echo "server CID file already exists" >&2; exit 1; }; \
         set -- create --cidfile "$CAESIUM_CONNECTORS_SERVER_CIDFILE"; \

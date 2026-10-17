@@ -21,6 +21,38 @@ import (
 
 var ErrTriggerChainCycle = errors.New("trigger chain cycle detected")
 
+// TriggerChainCycleError is a trigger-chain cycle. Error() is the historical
+// message; Path (job aliases, the first repeated last) lets a response
+// boundary redact aliases a namespace-confined caller may not see.
+type TriggerChainCycleError struct {
+	Path []string
+}
+
+func (e *TriggerChainCycleError) Error() string {
+	return fmt.Sprintf("%s: %s", ErrTriggerChainCycle, strings.Join(e.Path, " -> "))
+}
+
+func (e *TriggerChainCycleError) Unwrap() error { return ErrTriggerChainCycle }
+
+// TriggerChainJobError is a trigger-chain validation failure attributed to
+// one job: a stored trigger whose configuration does not parse (Stored), or a
+// job whose event patterns do not. Error() is the historical message; Alias
+// lets a response boundary redact a job a confined caller may not see.
+type TriggerChainJobError struct {
+	Alias  string
+	Stored bool
+	Err    error
+}
+
+func (e *TriggerChainJobError) Error() string {
+	if e.Stored {
+		return fmt.Sprintf("existing trigger %s configuration: %v", e.Alias, e.Err)
+	}
+	return fmt.Sprintf("definition %s: %v", e.Alias, e.Err)
+}
+
+func (e *TriggerChainJobError) Unwrap() error { return e.Err }
+
 type triggerChainNode struct {
 	id            uuid.UUID
 	alias         string
@@ -33,6 +65,9 @@ func (i *Importer) ValidateBatch(ctx context.Context, defs []schema.Definition) 
 		if err := defs[idx].Validate(); err != nil {
 			return fmt.Errorf("definition %s: %w", defs[idx].Metadata.Alias, err)
 		}
+	}
+	if err := ValidateDeclaredNamespaces(defs); err != nil {
+		return err
 	}
 	if err := ValidateTriggerChains(ctx, i.db, defs); err != nil {
 		return err
@@ -149,7 +184,7 @@ func existingTriggerChainNodes(ctx context.Context, conn *gorm.DB, incomingAlias
 		cfg := make(map[string]any)
 		if strings.TrimSpace(row.Configuration) != "" {
 			if err := json.Unmarshal([]byte(row.Configuration), &cfg); err != nil {
-				return nil, fmt.Errorf("existing trigger %s configuration: %w", alias, err)
+				return nil, &TriggerChainJobError{Alias: alias, Stored: true, Err: err}
 			}
 		}
 		nodes = append(nodes, triggerChainNode{
@@ -190,7 +225,7 @@ func triggerChainGraph(nodes []triggerChainNode) (map[string][]string, error) {
 		}
 		patterns, err := eventmatch.ParseTriggerEventPatterns(node.configuration)
 		if err != nil {
-			return nil, fmt.Errorf("definition %s: %w", node.alias, err)
+			return nil, &TriggerChainJobError{Alias: node.alias, Err: err}
 		}
 		for _, pattern := range patterns {
 			if !patternCanMatchCaesiumLifecycle(pattern) {
@@ -292,7 +327,7 @@ func rejectTriggerChainCycle(graph map[string][]string) error {
 			continue
 		}
 		if cycle := visit(node); len(cycle) > 0 {
-			return fmt.Errorf("%w: %s", ErrTriggerChainCycle, strings.Join(cycle, " -> "))
+			return &TriggerChainCycleError{Path: cycle}
 		}
 	}
 	return nil

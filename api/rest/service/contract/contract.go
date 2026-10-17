@@ -52,6 +52,12 @@ func New(ctx context.Context) *Service {
 	return &Service{ctx: ctx, db: db.Connection()}
 }
 
+// NewWithDatabase is New over conn (for example one read-only snapshot
+// transaction) instead of the process's catalog connection.
+func NewWithDatabase(ctx context.Context, conn *gorm.DB) *Service {
+	return &Service{ctx: ctx, db: conn}
+}
+
 func (s *Service) WithDatabase(conn *gorm.DB) *Service {
 	cp := *s
 	cp.db = conn

@@ -117,7 +117,7 @@ class ConnectorFixtureOrchestrationTests(unittest.TestCase):
         shutil.copy(ROOT/'justfile', self.root/'justfile')
         # integration-up-agent seeds the auth lane's policy file from this fixture.
         (self.root/'test/testdata/policy').mkdir(parents=True)
-        shutil.copy(ROOT/'test/testdata/policy/auth-lane-reload.yaml', self.root/'test/testdata/policy/auth-lane-reload.yaml')
+        shutil.copy(ROOT/'test/testdata/policy/two-namespaces.yaml', self.root/'test/testdata/policy/two-namespaces.yaml')
         self.state = self.root/'mock'
         (self.state/'names').mkdir(parents=True)
         self.bin = self.root/'bin'

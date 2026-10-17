@@ -1551,9 +1551,13 @@ coverage_journey_run_lane() {
         -w /source
       )
       if [[ "$mode" == "auth" ]]; then
+        # This api-key server deliberately mounts no policy file (it drives the
+        # env view and the 409 reload); CAESIUM_IT_AUTH_POLICY=none says so, and
+        # requireAuthLane fails on any other auth lane without its fixture.
         runner_payload_args+=(
           --env-file "$auth_env"
           -e CAESIUM_AGENT_AUTH_LANE=true
+          -e CAESIUM_IT_AUTH_POLICY=none
           -e CAESIUM_AUTH_MODE=api-key
           -e CAESIUM_AGENT_REMEDIATION_ENABLED=true
           -e CAESIUM_AUTH_KEY_HASH_SECRET=agent-integration-auth-key-hash-secret-000001

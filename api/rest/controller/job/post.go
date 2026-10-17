@@ -10,6 +10,7 @@ import (
 	"github.com/caesium-cloud/caesium/api/rest/service/taskedge"
 	"github.com/caesium-cloud/caesium/api/rest/service/trigger"
 	"github.com/caesium-cloud/caesium/internal/event"
+	internaljobdef "github.com/caesium-cloud/caesium/internal/jobdef"
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/caesium-cloud/caesium/pkg/db"
 	"github.com/caesium-cloud/caesium/pkg/jobdef"
@@ -29,6 +30,10 @@ func Post(c *echo.Context) error {
 		namespace = req.Metadata.Namespace
 	}
 	if err := jobdef.ValidateNamespace(namespace); err != nil {
+		return echo.NewHTTPError(http.StatusBadRequest, err.Error()).Wrap(err)
+	}
+	// With a policy file loaded, the namespace must be declared (B2).
+	if err := internaljobdef.ValidateDeclaredNamespace(req.Alias, namespace); err != nil {
 		return echo.NewHTTPError(http.StatusBadRequest, err.Error()).Wrap(err)
 	}
 

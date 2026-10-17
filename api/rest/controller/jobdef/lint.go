@@ -9,14 +9,15 @@ import (
 	"strings"
 
 	contractsvc "github.com/caesium-cloud/caesium/api/rest/service/contract"
+	internalcontract "github.com/caesium-cloud/caesium/internal/contract"
 	internaljobdef "github.com/caesium-cloud/caesium/internal/jobdef"
 	"github.com/caesium-cloud/caesium/internal/jobdef/lint"
 	"github.com/caesium-cloud/caesium/internal/lineage"
-	"github.com/caesium-cloud/caesium/pkg/db"
 	"github.com/caesium-cloud/caesium/pkg/env"
 	schema "github.com/caesium-cloud/caesium/pkg/jobdef"
 	"github.com/caesium-cloud/caesium/pkg/log"
 	"github.com/labstack/echo/v5"
+	"gorm.io/gorm"
 )
 
 type LintRequest struct {
@@ -58,25 +59,40 @@ func Lint(c *echo.Context) error {
 		Errors:   make([]LintMessage, 0),
 		Warnings: make([]LintMessage, 0),
 	}
+	ctx := c.Request().Context()
+	// A namespace-confined caller's view (nil: unrestricted, unchanged).
+	scope := newReadScope(c, catalog(), req.Definitions)
 
 	for _, def := range req.Definitions {
 		if err := def.Validate(); err != nil {
 			resp.Errors = append(resp.Errors, LintMessage{Message: err.Error()})
 		}
 	}
+	// With a policy file loaded, every namespace must be declared (B2).
 	if len(resp.Errors) == 0 {
-		if err := internaljobdef.ValidateTriggerChains(c.Request().Context(), db.Connection(), req.Definitions); err != nil {
-			resp.Errors = append(resp.Errors, LintMessage{Message: err.Error()})
+		for _, msg := range internaljobdef.UndeclaredNamespaceMessages(req.Definitions) {
+			resp.Errors = append(resp.Errors, LintMessage{Message: msg})
 		}
 	}
 	if len(resp.Errors) == 0 {
-		if err := internaljobdef.ValidateDatasetGraph(c.Request().Context(), db.Connection(), req.Definitions); err != nil {
-			resp.Errors = append(resp.Errors, LintMessage{Message: err.Error()})
+		if msg := scope.validate(ctx, catalog(), func(conn *gorm.DB) error {
+			return internaljobdef.ValidateTriggerChains(ctx, conn, req.Definitions)
+		}); msg != "" {
+			resp.Errors = append(resp.Errors, LintMessage{Message: msg})
 		}
 	}
 	if len(resp.Errors) == 0 {
-		if err := internaljobdef.ValidateAgentProfileRefs(c.Request().Context(), db.Connection(), req.Definitions); err != nil {
-			resp.Errors = append(resp.Errors, LintMessage{Message: err.Error()})
+		if msg := scope.validate(ctx, catalog(), func(conn *gorm.DB) error {
+			return internaljobdef.ValidateDatasetGraph(ctx, conn, req.Definitions)
+		}); msg != "" {
+			resp.Errors = append(resp.Errors, LintMessage{Message: msg})
+		}
+	}
+	if len(resp.Errors) == 0 {
+		if msg := scope.validate(ctx, catalog(), func(conn *gorm.DB) error {
+			return internaljobdef.ValidateAgentProfileRefs(ctx, conn, req.Definitions)
+		}); msg != "" {
+			resp.Errors = append(resp.Errors, LintMessage{Message: msg})
 		}
 	}
 	// Namespace secret rules (identity-and-access C4): every secret:// reference
@@ -97,7 +113,7 @@ func Lint(c *echo.Context) error {
 	// capture: with capture off there are no observed rows at all, so every
 	// declaration would be reported and the warning would be noise.
 	if len(resp.Errors) == 0 && env.Variables().DataAssertionsEnabled && env.Variables().OpenLineageEnabled {
-		msgs, err := lineage.CheckDeclaredDatasetsObserved(c.Request().Context(), db.Connection(), req.Definitions)
+		msgs, err := lineage.CheckDeclaredDatasetsObserved(c.Request().Context(), catalog(), req.Definitions)
 		if err != nil {
 			log.Warn("declared-dataset observation check failed", "error", err)
 		}
@@ -108,18 +124,20 @@ func Lint(c *echo.Context) error {
 
 	if len(resp.Errors) == 0 {
 		if contractsvc.Enabled() {
-			graph, err := contractsvc.New(c.Request().Context()).Graph("", req.Definitions)
-			if err != nil {
-				return echo.NewHTTPError(http.StatusInternalServerError, "failed to derive contract graph").Wrap(err)
-			}
 			// The derived graph unions these definitions with every job
 			// already applied on the server, so it carries breaking pairs
 			// between jobs this request never mentioned. Lint gates on
 			// resp.Contracts.Breaking, so scope the graph to the linted job
-			// set (and its direct producers/consumers) before reporting.
-			scoped := contractsvc.ScopeGraphToDefinitions(*graph, req.Definitions)
+			// set (and its direct producers/consumers) before reporting. A
+			// confined caller sees only edges between jobs it can read.
+			scoped, visible, err := scope.contractGraph(ctx, req.Definitions, func(graph internalcontract.Graph) internalcontract.Graph {
+				return contractsvc.ScopeGraphToDefinitions(graph, req.Definitions)
+			})
+			if err != nil {
+				return echo.NewHTTPError(http.StatusInternalServerError, "failed to derive contract graph").Wrap(err)
+			}
 			contractsvc.RecordFindings(scoped)
-			summary := contractsvc.SummaryFromGraph(scoped)
+			summary := contractsvc.SummaryFromGraph(visible)
 			resp.Contracts = &summary
 		}
 

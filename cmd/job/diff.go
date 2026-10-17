@@ -21,6 +21,7 @@ const (
 	defaultDiffServer    = "http://localhost:8080"
 	jobDiffJSONVersion   = 1
 	jobDiffWouldPruneHdr = "Would delete if --prune"
+	jobDiffNamespacesHdr = "Namespaces touched"
 )
 
 var (
@@ -108,9 +109,10 @@ type jobDiffRequest struct {
 }
 
 type jobDiffResponse struct {
-	Added    []json.RawMessage `json:"added"`
-	Removed  []json.RawMessage `json:"removed"`
-	Modified []json.RawMessage `json:"modified"`
+	Added      []json.RawMessage `json:"added"`
+	Removed    []json.RawMessage `json:"removed"`
+	Modified   []json.RawMessage `json:"modified"`
+	Namespaces []string          `json:"namespaces"`
 }
 
 type scopedJobDiff struct {
@@ -118,6 +120,10 @@ type scopedJobDiff struct {
 	Modified   []json.RawMessage
 	Removed    []json.RawMessage
 	WouldPrune []json.RawMessage
+	// Namespaces an apply of these definitions would touch: the server's
+	// list (creates and updates, both sides of a move), plus the namespaces
+	// of the deletes under --prune.
+	Namespaces []string
 }
 
 type jobDiffJSON struct {
@@ -126,6 +132,7 @@ type jobDiffJSON struct {
 	Modified   []json.RawMessage `json:"modified"`
 	Removed    []json.RawMessage `json:"removed"`
 	WouldPrune []json.RawMessage `json:"wouldPrune,omitempty"`
+	Namespaces []string          `json:"namespaces"`
 }
 
 type jobDiffAlias struct {
@@ -241,12 +248,31 @@ func scopeJobDiff(resp *jobDiffResponse, prune bool) scopedJobDiff {
 		Removed:  []json.RawMessage{},
 	}
 	removed := emptyRaw(resp.Removed)
+	namespaces := append([]string{}, resp.Namespaces...)
 	if prune {
 		out.Removed = removed
+		for _, spec := range removed {
+			if namespace := rawNamespace(spec); namespace != "" {
+				namespaces = append(namespaces, namespace)
+			}
+		}
 	} else {
 		out.WouldPrune = removed
 	}
+	slices.Sort(namespaces)
+	out.Namespaces = slices.Compact(namespaces)
 	return out
+}
+
+// rawNamespace reads a diff entry's namespace ("" when absent).
+func rawNamespace(raw json.RawMessage) string {
+	var entry struct {
+		Namespace string `json:"namespace"`
+	}
+	if err := json.Unmarshal(raw, &entry); err != nil {
+		return ""
+	}
+	return strings.TrimSpace(entry.Namespace)
 }
 
 func (s scopedJobDiff) inScope() bool {
@@ -255,10 +281,11 @@ func (s scopedJobDiff) inScope() bool {
 
 func (s scopedJobDiff) jsonOutput() jobDiffJSON {
 	out := jobDiffJSON{
-		Version:  jobDiffJSONVersion,
-		Added:    emptyRaw(s.Added),
-		Modified: emptyRaw(s.Modified),
-		Removed:  emptyRaw(s.Removed),
+		Version:    jobDiffJSONVersion,
+		Added:      emptyRaw(s.Added),
+		Modified:   emptyRaw(s.Modified),
+		Removed:    emptyRaw(s.Removed),
+		Namespaces: append([]string{}, s.Namespaces...),
 	}
 	if len(s.WouldPrune) > 0 {
 		out.WouldPrune = s.WouldPrune
@@ -360,6 +387,18 @@ func renderJobDiff(cmd *cobra.Command, scoped scopedJobDiff) error {
 			if err := renderJobDiffFindings(cmd, rawFindings(spec)); err != nil {
 				return err
 			}
+		}
+		wrote = true
+	}
+
+	if scoped.inScope() && len(scoped.Namespaces) > 0 {
+		if len(scoped.Removed) > 0 {
+			if err := writeCmdOut(cmd, "\n"); err != nil {
+				return err
+			}
+		}
+		if err := writeCmdOut(cmd, "%s: %s\n", jobDiffNamespacesHdr, strings.Join(scoped.Namespaces, ", ")); err != nil {
+			return err
 		}
 		wrote = true
 	}
