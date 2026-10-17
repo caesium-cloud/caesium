@@ -152,17 +152,38 @@ func TestFilterDatesRespectsReprocessPolicies(t *testing.T) {
 
 	dates := []time.Time{date1, date2, date3}
 
-	all, err := FilterDates(store, jobID, dates, models.ReprocessAll)
+	all, err := FilterDates(store, jobID, models.DefaultNamespace, dates, models.ReprocessAll)
 	require.NoError(t, err)
 	require.Equal(t, dates, all)
 
-	none, err := FilterDates(store, jobID, dates, models.ReprocessNone)
+	none, err := FilterDates(store, jobID, models.DefaultNamespace, dates, models.ReprocessNone)
 	require.NoError(t, err)
 	require.Equal(t, []time.Time{date3}, none)
 
-	failed, err := FilterDates(store, jobID, dates, models.ReprocessFailed)
+	failed, err := FilterDates(store, jobID, models.DefaultNamespace, dates, models.ReprocessFailed)
 	require.NoError(t, err)
 	require.Equal(t, []time.Time{date2, date3}, failed)
+
+	// identity-and-access B4: a backfill deduplicates against its own
+	// namespace only. A moved job's runs in another namespace neither skip a
+	// date nor decide its reprocess outcome.
+	movedRun := &models.JobRun{
+		ID: uuid.New(), JobID: jobID, Namespace: "marketing", Status: "succeeded",
+		Params:    datatypes.JSON(`{"logical_date":"` + date3.UTC().Format(time.RFC3339) + `"}`),
+		StartedAt: date3, CreatedAt: date3, UpdatedAt: date3,
+	}
+	require.NoError(t, db.Create(movedRun).Error)
+	none, err = FilterDates(store, jobID, models.DefaultNamespace, dates, models.ReprocessNone)
+	require.NoError(t, err)
+	require.Equal(t, []time.Time{date3}, none, "a marketing run must not skip a default backfill's date")
+	marketing, err := FilterDates(store, jobID, "marketing", dates, models.ReprocessNone)
+	require.NoError(t, err)
+	require.Equal(t, []time.Time{date1, date2}, marketing, "a marketing backfill ignores the default namespace's runs")
+	// A legacy run with an empty namespace counts as default.
+	require.NoError(t, db.Model(&models.JobRun{}).Where("id = ?", movedRun.ID).Update("namespace", "").Error)
+	none, err = FilterDates(store, jobID, models.DefaultNamespace, dates, models.ReprocessNone)
+	require.NoError(t, err)
+	require.Empty(t, none)
 }
 
 func TestShouldStopBackfillHonorsCancelRequest(t *testing.T) {

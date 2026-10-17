@@ -231,7 +231,7 @@ func EvaluateDataAssertionsClaimed(ctx context.Context, store *Store, runID, tas
 	// `created_at < asOf` cut is the second guard; neither relies on the
 	// TaskRun's status, which at this seam is still `running` on all three
 	// executor paths.)
-	baselines := loadAssertionBaselines(ctx, store.db, contracts, now)
+	baselines := loadAssertionBaselines(ctx, store.db, row.JobRunID, contracts, now)
 
 	verdicts := evaluateContracts(contracts, observed, baselines, now, capture.UnavailableReason())
 
@@ -375,20 +375,35 @@ func rejectedMetrics(verdicts []datasetVerdict) map[metricRef]struct{} {
 // A read error yields no baseline for that metric, which the pure core reads as
 // "no history": a deltaFromBaseline assertion then produces no verdict at all
 // rather than a fabricated breach.
-func loadAssertionBaselines(ctx context.Context, conn *gorm.DB, contracts []declaredContract, now time.Time) map[string]map[string]*BaselineStats {
+//
+// Each baseline counts only samples of runs persisted in the evaluated run's
+// tenancy namespace (OwnedBaseline, identity-and-access B4): a moved job's old
+// history stays with its old owner. When that namespace cannot be read, every
+// baseline is treated as unreadable.
+func loadAssertionBaselines(ctx context.Context, conn *gorm.DB, jobRunID uuid.UUID, contracts []declaredContract, now time.Time) map[string]map[string]*BaselineStats {
 	if len(contracts) == 0 {
 		return nil
 	}
 	window := BaselineWindow()
 	baselines := make(map[string]map[string]*BaselineStats, len(contracts))
+	var owner *string
 	for _, contract := range contracts {
 		metricNames := BaselineMetrics(contract.assertions)
 		if len(metricNames) == 0 {
 			continue
 		}
+		if owner == nil {
+			namespace, err := persistedRunNamespace(ctx, conn, jobRunID)
+			if err != nil {
+				log.Warn("failed to read the run's namespace for its assertion baselines; evaluating without history",
+					"run_id", jobRunID, "error", err)
+				return baselines
+			}
+			owner = &namespace
+		}
 		perMetric := make(map[string]*BaselineStats, len(metricNames))
 		for _, metric := range metricNames {
-			stats, err := Baseline(ctx, conn, contract.namespace, contract.name, metric, window, now)
+			stats, err := OwnedBaseline(ctx, conn, *owner, contract.namespace, contract.name, metric, window, now)
 			if err != nil {
 				log.Warn("failed to load baseline for a declared assertion; evaluating without history",
 					"dataset", contract.name, "metric", metric, "error", err)
@@ -399,6 +414,19 @@ func loadAssertionBaselines(ctx context.Context, conn *gorm.DB, contracts []decl
 		baselines[contract.name] = perMetric
 	}
 	return baselines
+}
+
+// persistedRunNamespace is a run's persisted tenancy namespace ("" for a
+// legacy row, which counts as "default").
+func persistedRunNamespace(ctx context.Context, conn *gorm.DB, jobRunID uuid.UUID) (string, error) {
+	var row struct{ Namespace *string }
+	if err := conn.WithContext(ctx).Model(&models.JobRun{}).Select("namespace").Where("id = ?", jobRunID).Take(&row).Error; err != nil {
+		return "", err
+	}
+	if row.Namespace == nil {
+		return "", nil
+	}
+	return *row.Namespace, nil
 }
 
 // observedByDataset groups the emitted samples by the dataset they attribute

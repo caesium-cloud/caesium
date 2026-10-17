@@ -1,9 +1,11 @@
 package cache
 
 import (
+	"context"
 	"encoding/json"
 	"time"
 
+	"github.com/caesium-cloud/caesium/internal/authz"
 	"github.com/caesium-cloud/caesium/internal/models"
 	pkgtask "github.com/caesium-cloud/caesium/pkg/task"
 	"github.com/google/uuid"
@@ -195,10 +197,29 @@ func (s *Store) InvalidateJob(jobID uuid.UUID) error {
 
 // ListByJob returns all cache entries for a job.
 func (s *Store) ListByJob(jobID uuid.UUID) ([]Entry, error) {
+	return s.listByJob(s.db, jobID)
+}
+
+// ListByJobContext is ListByJob for a REST history read (identity-and-access
+// B4). A cache entry carries the run id and result of the run that filled it,
+// so under a history scope on ctx (authz.WithHistoryScope) only entries whose
+// filling run sits in a namespace the caller may read are listed. The join is
+// an inner join: an entry whose run row is gone has no provable owner and is
+// hidden from a confined caller (never treated as "default"). Without a
+// scope it is exactly ListByJob.
+func (s *Store) ListByJobContext(ctx context.Context, jobID uuid.UUID) ([]Entry, error) {
+	return s.listByJob(s.db.WithContext(ctx), jobID)
+}
+
+func (s *Store) listByJob(db *gorm.DB, jobID uuid.UUID) ([]Entry, error) {
 	var cacheModels []models.TaskCache
 	now := time.Now().UTC()
-	if err := s.db.Where("job_id = ? AND (expires_at IS NULL OR expires_at > ?)", jobID, now).
-		Find(&cacheModels).Error; err != nil {
+	q := db.Where("task_caches.job_id = ? AND (task_caches.expires_at IS NULL OR task_caches.expires_at > ?)", jobID, now)
+	if db.Statement != nil && authz.Restricted(db.Statement.Context) {
+		q = authz.NamespaceFilter(q.Select("task_caches.*").
+			Joins("JOIN job_runs ON job_runs.id = task_caches.run_id"), "job_runs.namespace")
+	}
+	if err := q.Find(&cacheModels).Error; err != nil {
 		return nil, err
 	}
 

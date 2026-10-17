@@ -660,7 +660,8 @@ middleware relies on.
       new `test/git_sync_test.go`.
       Depends on: B1.
       (`file://` against `integration-up` is infeasible — no repo mount, go-git's file transport needs native `git-upload-pack`, a failed first sync stops the shared server; the live scenario is `TestJobdefGitSyncNamespaceAllowlistSkipsForeignManifests` on the coverage-ratchets `git-sync` lane in `test/jobdef_git_sync_test.go`. Only allowlisted sources are audited.)
-- [ ] B4. Collection filtering in job-derived handlers: job list (replacing the
+- [x] B4. (W4-δ: history reads use `authz.WithHistoryScope`; blame, topology and topology/history stay pending under B7 because DAG snapshots record no namespace; retry and partition retry answer `409 namespace_moved` in the handler and inside the store transaction, the agent retry path included; backfill children are admitted only in the backfill's namespace; event deliveries are owned by the runs they started; the event stream sends a confined subscriber an audited allow-list of run and task types.)
+      Collection filtering in job-derived handlers: job list (replacing the
       scoped-alias branch with `authz.NamespaceFilter` layered on it), triggers list,
       incidents list, stats and stats summary, the events stream (with `run_id`: the
       existing rule; without: only allowed namespaces reach the subscriber), ingested

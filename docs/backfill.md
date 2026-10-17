@@ -38,6 +38,12 @@ Supported `reprocess` values:
 - `failed`: rerun dates whose latest run did not succeed.
 - `all`: queue every logical date in the interval.
 
+Only runs in the backfill's namespace (the job's namespace when the backfill
+was created) count for `none` and `failed`: after a job moves, its old
+namespace's runs neither skip a date nor decide its outcome. A backfill stops
+and finishes as `failed` if the job moves to another namespace while it runs.
+See [identity-and-access.md](identity-and-access.md).
+
 Inspect backfills:
 
 - `GET /v1/jobs/{id}/backfills`

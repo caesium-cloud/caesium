@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/caesium-cloud/caesium/internal/authz"
 	"github.com/caesium-cloud/caesium/internal/cache"
 	"github.com/caesium-cloud/caesium/internal/event"
 	"github.com/caesium-cloud/caesium/internal/models"
@@ -565,8 +566,19 @@ func (s *Store) loadTrigger(ctx context.Context, jobRun *models.JobRun) WhyTrigg
 // subjectStartedAt is the subject run's start time (already loaded by the
 // caller); the prior-run lookup uses it to consider only strictly-earlier runs,
 // avoiding a redundant re-query.
+//
+// A history scope on ctx (authz.WithHistoryScope, identity-and-access B4)
+// limits every baseline to runs whose persisted namespace the caller may read:
+// under a moved job the old owner's runs are never used, and when no visible
+// baseline exists the answer is Kind "none".
 func (s *Store) resolveBaseline(ctx context.Context, subject *models.TaskRun, jobID uuid.UUID, subjectStartedAt time.Time) ([]byte, WhyBaseline, error) {
 	db := s.db.WithContext(ctx)
+	// visibleRuns is nil for an unrestricted caller, so its queries are
+	// unchanged; otherwise it is the subquery of readable run ids.
+	var visibleRuns *gorm.DB
+	if authz.Restricted(ctx) {
+		visibleRuns = authz.NamespaceFilter(db.Model(&models.JobRun{}).Select("job_runs.id"), "job_runs.namespace")
+	}
 
 	// A cached task is always a cache hit, regardless of whether
 	// CacheOriginRunID is populated: try the named origin task-run first, then
@@ -580,9 +592,12 @@ func (s *Store) resolveBaseline(ctx context.Context, subject *models.TaskRun, jo
 			// identity that produced this hit is per-instance. An unscoped
 			// .First() would prove the hit against a sibling's inputs.
 			var origin models.TaskRun
-			err := db.Where("job_run_id = ? AND task_id = ? AND COALESCE(partition_value, '') = ?",
-				*subject.CacheOriginRunID, subject.TaskID, subject.PartitionValue).
-				First(&origin).Error
+			originQuery := db.Where("job_run_id = ? AND task_id = ? AND COALESCE(partition_value, '') = ?",
+				*subject.CacheOriginRunID, subject.TaskID, subject.PartitionValue)
+			if visibleRuns != nil {
+				originQuery = originQuery.Where("job_run_id IN (?)", visibleRuns)
+			}
+			err := originQuery.First(&origin).Error
 			if err == nil {
 				b := WhyBaseline{Kind: "cache_origin", RunID: subject.CacheOriginRunID, TaskRunID: &origin.ID}
 				if originStart := origin.StartedAt; originStart != nil {
@@ -599,7 +614,11 @@ func (s *Store) resolveBaseline(ctx context.Context, subject *models.TaskRun, jo
 		// Fall back to the live cache entry keyed by the subject's hash.
 		if subject.Hash != "" {
 			var entry models.TaskCache
-			if err := db.Where("hash = ?", subject.Hash).First(&entry).Error; err == nil {
+			entryQuery := db.Where("hash = ?", subject.Hash)
+			if visibleRuns != nil {
+				entryQuery = entryQuery.Where("run_id IN (?)", visibleRuns)
+			}
+			if err := entryQuery.First(&entry).Error; err == nil {
 				b := WhyBaseline{Kind: "cache_origin"}
 				originRunID := entry.RunID
 				b.RunID = &originRunID
@@ -619,10 +638,10 @@ func (s *Store) resolveBaseline(ctx context.Context, subject *models.TaskRun, jo
 	// partition of the prior run — comparing partition "a" against partition "c"
 	// would report every per-partition input as a discriminating change.
 	var prior models.TaskRun
-	err := db.
+	err := authz.NamespaceFilter(db.
 		Joins("JOIN job_runs ON job_runs.id = task_runs.job_run_id").
 		Where("task_runs.task_id = ? AND job_runs.job_id = ? AND task_runs.job_run_id <> ? AND job_runs.started_at < ? AND task_runs.hash_input_blob IS NOT NULL AND COALESCE(task_runs.partition_value, '') = ?",
-			subject.TaskID, jobID, subject.JobRunID, subjectStartedAt, subject.PartitionValue).
+			subject.TaskID, jobID, subject.JobRunID, subjectStartedAt, subject.PartitionValue), "job_runs.namespace").
 		Order("job_runs.started_at DESC").
 		First(&prior).Error
 	if err != nil {

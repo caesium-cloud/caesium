@@ -3,6 +3,7 @@ package run
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 
 	jsvc "github.com/caesium-cloud/caesium/api/rest/service/job"
@@ -51,6 +52,14 @@ func Retry(c *echo.Context) error {
 		return echo.ErrNotFound
 	}
 
+	// Retry reuses this historical run row but launches the job's CURRENT
+	// model. A run left in the job's previous namespace is refused for every
+	// caller (identity-and-access B4); the store re-checks inside its
+	// transaction. Further admission checks go after this guard.
+	if moved := runstorage.CheckRunNamespace(runID, runEntry.Namespace, j.Namespace); moved != nil {
+		return namespaceMovedConflict(c, j, moved)
+	}
+
 	workCtx, releaseWork, err := runlife.FromContext(ctx).Reserve(ctx)
 	if err != nil {
 		return echo.NewHTTPError(http.StatusServiceUnavailable, err.Error()).Wrap(err)
@@ -75,6 +84,9 @@ func Retry(c *echo.Context) error {
 				"job_id", jobID, "run_id", runID, "error", err)
 			return c.JSON(http.StatusAccepted, fallback)
 		}
+		if moved, ok := errors.AsType[*runstorage.RunNamespaceMovedError](err); ok {
+			return namespaceMovedConflict(c, j, moved)
+		}
 		return echo.NewHTTPError(http.StatusConflict, err.Error())
 	}
 	retryLaunch(cancelCtx, j, r, release)
@@ -98,4 +110,33 @@ func launchWholeRunRetry(ctx context.Context, j *models.Job, r *runstorage.JobRu
 			log.Error("job retry run failure", "id", j.ID, "run_id", r.ID, "error", err)
 		}
 	}()
+}
+
+// NamespaceMovedResponse is the 409 body of a refused retry whose run sits in
+// a namespace its job has left.
+type NamespaceMovedResponse struct {
+	Error        string `json:"error"`
+	Message      string `json:"message"`
+	RunID        string `json:"run_id"`
+	RunNamespace string `json:"run_namespace"`
+	JobNamespace string `json:"job_namespace"`
+}
+
+// namespaceMovedConflict answers 409 namespace_moved, naming both namespaces
+// and pointing at replay, which creates a new run in the job's namespace.
+func namespaceMovedConflict(c *echo.Context, j *models.Job, err error) error {
+	moved, ok := errors.AsType[*runstorage.RunNamespaceMovedError](err)
+	if !ok {
+		return echo.NewHTTPError(http.StatusConflict, err.Error())
+	}
+	return c.JSON(http.StatusConflict, NamespaceMovedResponse{
+		Error: "namespace_moved",
+		Message: fmt.Sprintf("run %s belongs to namespace %q, but job %q is now in namespace %q; "+
+			"a retry would execute the current job model inside the old namespace's run. "+
+			"Replay the run instead (POST /v1/jobs/%s/runs/%s/replay), which starts a new run in namespace %q",
+			moved.RunID, moved.RunNamespace, j.Alias, moved.JobNamespace, j.ID, moved.RunID, moved.JobNamespace),
+		RunID:        moved.RunID.String(),
+		RunNamespace: moved.RunNamespace,
+		JobNamespace: moved.JobNamespace,
+	})
 }

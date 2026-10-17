@@ -6,6 +6,7 @@ import (
 	"sort"
 	"time"
 
+	"github.com/caesium-cloud/caesium/internal/authz"
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/caesium-cloud/caesium/pkg/env"
 	"gorm.io/gorm"
@@ -31,6 +32,9 @@ type BaselineStats struct {
 	// AsOf echoes the cut the window was computed against, so a backtest
 	// verdict can be reproduced from its recorded baseline.
 	AsOf time.Time `json:"as_of"`
+	// Scope is BaselineScopeNamespace for an OwnedBaseline; a verdict copies
+	// it into DataViolation.BaselineScope. Not part of the read surface.
+	Scope string `json:"-"`
 }
 
 // Baseline computes the rolling baseline for one (namespace, name, metric) over
@@ -60,11 +64,30 @@ func Baseline(ctx context.Context, conn *gorm.DB, namespace, name, metric string
 // exact samples used, oldest-first. Operator reads use these identities to
 // explain baseline membership without reimplementing the cleanliness filters.
 func BaselineWithSamples(ctx context.Context, conn *gorm.DB, namespace, name, metric string, window int, asOf time.Time) (*BaselineStats, []models.DatasetMetric, error) {
+	return baselineWithSamples(ctx, conn, nil, namespace, name, metric, window, asOf)
+}
+
+// OwnedBaseline is Baseline over the samples emitted by runs persisted in the
+// tenancy namespace owner only (identity-and-access B4; a legacy empty run
+// namespace counts as "default"). The live assertion evaluator judges a run
+// against its own namespace's history: a violation records the baseline's
+// median and sample count, so after a job moves (or when producers in two
+// namespaces share a dataset name) another owner's metrics must neither decide
+// nor appear in the verdict. Operator reads and backtests keep Baseline.
+func OwnedBaseline(ctx context.Context, conn *gorm.DB, owner, namespace, name, metric string, window int, asOf time.Time) (*BaselineStats, error) {
+	stats, _, err := baselineWithSamples(ctx, conn, &owner, namespace, name, metric, window, asOf)
+	return stats, err
+}
+
+func baselineWithSamples(ctx context.Context, conn *gorm.DB, owner *string, namespace, name, metric string, window int, asOf time.Time) (*BaselineStats, []models.DatasetMetric, error) {
 	stats := &BaselineStats{
 		Namespace: namespace,
 		Name:      name,
 		Metric:    metric,
 		AsOf:      asOf.UTC(),
+	}
+	if owner != nil {
+		stats.Scope = BaselineScopeNamespace
 	}
 	if conn == nil || name == "" || metric == "" {
 		return stats, nil, nil
@@ -73,8 +96,16 @@ func BaselineWithSamples(ctx context.Context, conn *gorm.DB, namespace, name, me
 		window = DefaultBaselineWindow
 	}
 
+	queryCtx := ctx
+	if owner != nil {
+		queryCtx = authz.WithAllowedNamespaces(ctx, []string{models.NamespaceOrDefault(*owner)})
+	}
+	query := cleanSampleQuery(queryCtx, conn, namespace, name, metric, asOf)
+	if owner != nil {
+		query = authz.NamespaceFilter(query.Joins("JOIN job_runs ON job_runs.id = task_runs.job_run_id"), "job_runs.namespace")
+	}
 	var rows []models.DatasetMetric
-	err := cleanSampleQuery(ctx, conn, namespace, name, metric, asOf).
+	err := query.
 		Order("dataset_metrics.created_at DESC").
 		Order("dataset_metrics.id DESC").
 		Limit(window).

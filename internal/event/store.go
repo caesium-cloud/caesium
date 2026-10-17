@@ -6,6 +6,7 @@ import (
 	"errors"
 	"time"
 
+	"github.com/caesium-cloud/caesium/internal/authz"
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/caesium-cloud/caesium/pkg/ptr"
 	"github.com/google/uuid"
@@ -111,6 +112,17 @@ func (s *Store) LatestSequence(ctx context.Context) (uint64, error) {
 }
 
 func (s *Store) ListSince(ctx context.Context, after uint64, limit int, filter Filter) ([]Event, error) {
+	return s.ListRange(ctx, after, 0, limit, filter, false)
+}
+
+// ListRange is ListSince bounded above by through (inclusive; 0 means
+// unbounded), so a catch-up scan over a fixed high-water mark always makes
+// progress. With runScoped set and a namespace restriction on ctx (the event
+// stream of a namespace-confined subscriber, identity-and-access B4), only
+// events of streamable runs (RunOwnership.Streamable) whose persisted
+// namespace the restriction allows are returned; events that name no run are
+// never returned to it.
+func (s *Store) ListRange(ctx context.Context, after, through uint64, limit int, filter Filter, runScoped bool) ([]Event, error) {
 	if limit <= 0 {
 		limit = 500
 	}
@@ -121,6 +133,14 @@ func (s *Store) ListSince(ctx context.Context, after uint64, limit int, filter F
 		Where("sequence > ?", after).
 		Order("sequence ASC").
 		Limit(limit)
+	if through > 0 {
+		query = query.Where("sequence <= ?", through)
+	}
+	if runScoped && authz.Restricted(ctx) {
+		readableRuns := authz.NamespaceFilter(s.db.WithContext(ctx).Model(&models.JobRun{}).Select("job_runs.id").
+			Where("COALESCE(job_runs.skip_reason, '') = ''"), "job_runs.namespace")
+		query = query.Where("run_id IN (?)", readableRuns)
+	}
 	if !filter.IncludeQuarantine {
 		query = query.Where("quarantine IS NOT TRUE")
 	}
@@ -148,6 +168,29 @@ func (s *Store) ListSince(ctx context.Context, after uint64, limit int, filter F
 		events = append(events, modelToEvent(row))
 	}
 	return events, nil
+}
+
+// RunOwnership is what the event stream needs to decide whether a run's
+// events may reach a namespace-confined subscriber (identity-and-access B4).
+type RunOwnership struct {
+	// Namespace is the run's persisted namespace.
+	Namespace string
+	// SkipReason is set on a run admission refused and created terminal
+	// (today: a consumed dataset is held). Its task rows carry the upstream
+	// hold's dataset and id, so such a run's events are cluster-only.
+	SkipReason string
+}
+
+// Streamable reports whether the run's events may reach a confined subscriber
+// that may read its namespace.
+func (o RunOwnership) Streamable() bool { return o.SkipReason == "" }
+
+// RunOwnership loads a run's ownership; gorm.ErrRecordNotFound when the run
+// does not exist.
+func (s *Store) RunOwnership(ctx context.Context, runID uuid.UUID) (RunOwnership, error) {
+	var row RunOwnership
+	err := s.db.WithContext(ctx).Model(&models.JobRun{}).Select("namespace", "skip_reason").Where("id = ?", runID).Take(&row).Error
+	return row, err
 }
 
 func uuidPtr(id uuid.UUID) *uuid.UUID {
