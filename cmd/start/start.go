@@ -1199,6 +1199,9 @@ func initAuth(ctx context.Context, vars env.Environment, runAsync func(func())) 
 		}
 		log.Fatal("invalid CAESIUM_AUTH_ROLE_MAPPING", "error", err)
 	}
+	// Namespace settings (declared namespaces, secret rules, quotas) are read
+	// process-wide, in every auth mode.
+	policy.SetProcessHolder(policyHolder)
 	authSvc := auth.NewService(conn,
 		auth.WithKeyHashSecret(vars.AuthKeyHashSecret),
 		auth.WithPolicySource(policySource),

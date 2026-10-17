@@ -4,13 +4,18 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
+	"slices"
+	"strings"
 	"sync"
 	"time"
 
+	"github.com/caesium-cloud/caesium/internal/dbretry"
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/caesium-cloud/caesium/pkg/log"
 	"github.com/google/uuid"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 var (
@@ -18,6 +23,10 @@ var (
 	ErrSessionRevoked = errors.New("session revoked")
 	ErrSessionExpired = errors.New("session expired")
 	ErrUserDisabled   = errors.New("user disabled")
+	// ErrUserChanged reports that the user was disabled (and perhaps enabled
+	// again) after the login read it: its disable generation moved. The
+	// login is refused and must be repeated at the IdP.
+	ErrUserChanged = errors.New("user changed during login")
 )
 
 const sessionFlushBatchSize = 900
@@ -33,6 +42,11 @@ type SessionStore struct {
 
 	seenMu sync.RWMutex
 	seen   map[uuid.UUID]time.Time
+
+	retry dbretry.Policy
+	// beforeMint, when set (tests only), runs inside Create's transaction
+	// after the user row was locked and checked, before the session insert.
+	beforeMint func()
 }
 
 // SessionStoreOption customizes session-store behavior.
@@ -70,6 +84,7 @@ func NewSessionStore(db *gorm.DB, opts ...SessionStoreOption) *SessionStore {
 		absoluteTTL: 24 * time.Hour,
 		now:         time.Now,
 		seen:        make(map[uuid.UUID]time.Time),
+		retry:       catalogRetryPolicy(),
 	}
 	for _, opt := range opts {
 		opt(s)
@@ -83,9 +98,23 @@ type CreateSessionRequest struct {
 	AuthMethod string
 	SourceIP   string
 	UserAgent  string
+	// DisableGeneration is the user's disable generation as the login read
+	// it. Every disable advances it, so Create refuses a login that was
+	// checked before a disable even when the user was enabled again before
+	// the insert. A NULL generation compares as 0.
+	DisableGeneration int64
 }
 
 // Create mints a new session and returns the plaintext token for the cookie.
+//
+// The insert is fenced on the user's lifecycle (identity-and-access E3): one
+// transaction locks the user row (FOR UPDATE on PostgreSQL; the SQLite and
+// dqlite dialects drop the clause because their write transactions are
+// serialised), requires the user to exist, be enabled and still be at
+// req.DisableGeneration, and only then inserts. A concurrent disable therefore
+// either commits first (Create returns ErrUserDisabled or ErrUserChanged) or
+// waits for the insert and revokes the new session with the others. The whole
+// transaction is retried on catalog contention.
 func (s *SessionStore) Create(ctx context.Context, req CreateSessionRequest) (string, *models.Session, error) {
 	plaintext, err := GenerateToken()
 	if err != nil {
@@ -113,10 +142,44 @@ func (s *SessionStore) Create(ctx context.Context, req CreateSessionRequest) (st
 		SourceIP:          req.SourceIP,
 		UserAgent:         req.UserAgent,
 	}
-	if err := s.db.WithContext(ctx).Create(sess).Error; err != nil {
+	err = dbretry.Retry(ctx, s.retry, func() error {
+		return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+			return s.mintTx(tx, req.UserID, req.DisableGeneration, sess)
+		})
+	})
+	switch {
+	case err == nil:
+		return plaintext, sess, nil
+	case errors.Is(err, ErrUserDisabled), errors.Is(err, ErrUserChanged), errors.Is(err, ErrUserNotFound):
+		return "", nil, err
+	default:
 		return "", nil, fmt.Errorf("create session: %w", err)
 	}
-	return plaintext, sess, nil
+}
+
+// mintTx is Create's transaction: lock and check the user row, then insert.
+func (s *SessionStore) mintTx(tx *gorm.DB, userID uuid.UUID, generation int64, sess *models.Session) error {
+	var user models.User
+	err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+		Select("id", "disabled_at", "disable_generation").
+		Where("id = ?", userID).
+		Take(&user).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return ErrUserNotFound
+	}
+	if err != nil {
+		return err
+	}
+	if user.IsDisabled() {
+		return ErrUserDisabled
+	}
+	if user.DisableGeneration != generation {
+		return ErrUserChanged
+	}
+	if s.beforeMint != nil {
+		s.beforeMint()
+	}
+	return tx.Create(sess).Error
 }
 
 // Validate resolves a plaintext token to its live session and user.
@@ -195,6 +258,121 @@ func revokeUserSessionsTx(tx *gorm.DB, userID uuid.UUID, now time.Time) (int64, 
 		Where("user_id = ? AND revoked_at IS NULL", userID).
 		Update("revoked_at", now)
 	return res.RowsAffected, res.Error
+}
+
+// SessionFilter selects active sessions for administration (E3). A nil
+// UserID selects every user's sessions. Limit must be positive.
+type SessionFilter struct {
+	UserID *uuid.UUID
+	Limit  int
+	Offset int
+}
+
+// SessionPage is one page of active sessions, newest first, and the total
+// number of active sessions the filter matches. HasMore is decided by the
+// page query itself (a limit+1 probe), not by comparing against Total.
+type SessionPage struct {
+	Sessions []models.Session
+	Total    int64
+	HasMore  bool
+}
+
+// ListActive returns the sessions Validate on this node would accept now:
+// not revoked, within the absolute lifetime, and within the idle lifetime
+// once this node's buffered activity is applied, exactly as Validate applies
+// it. The buffer is applied before selection, counting and paging, and the
+// rows carry the effective idle expiry and last-seen time. Nothing is written:
+// flushing would stamp the flush time and so extend sessions. Activity still
+// buffered on another node is invisible here, as it is to this node's
+// Validate; revocation never filters on expiry, so it is unaffected.
+func (s *SessionStore) ListActive(ctx context.Context, f SessionFilter) (SessionPage, error) {
+	if f.Limit <= 0 {
+		return SessionPage{}, errors.New("list sessions: limit must be positive")
+	}
+	if f.Offset < 0 {
+		return SessionPage{}, errors.New("list sessions: offset must not be negative")
+	}
+	now := s.nowUTC()
+	pending := s.pendingSnapshot()
+
+	// Sessions whose persisted idle expiry has lapsed but whose buffered
+	// activity keeps them valid. With the flusher running this set is
+	// almost always empty.
+	var candidates []uuid.UUID
+	for id, seenAt := range pending {
+		if !now.After(seenAt.Add(s.idleTTL)) {
+			candidates = append(candidates, id)
+		}
+	}
+	slices.SortFunc(candidates, func(a, b uuid.UUID) int { return strings.Compare(a.String(), b.String()) })
+	var rescued []uuid.UUID
+	for start := 0; start < len(candidates); start += sessionFlushBatchSize {
+		end := min(start+sessionFlushBatchSize, len(candidates))
+		var ids []uuid.UUID
+		q := s.activeScope(s.db.WithContext(ctx), f.UserID, now).
+			Where("id IN ? AND idle_expires_at < ?", candidates[start:end], now)
+		if err := q.Model(&models.Session{}).Pluck("id", &ids).Error; err != nil {
+			return SessionPage{}, fmt.Errorf("list sessions: %w", err)
+		}
+		rescued = append(rescued, ids...)
+	}
+
+	selectActive := func() *gorm.DB {
+		q := s.activeScope(s.db.WithContext(ctx).Model(&models.Session{}), f.UserID, now)
+		if len(rescued) == 0 {
+			return q.Where("idle_expires_at >= ?", now)
+		}
+		return q.Where("(idle_expires_at >= ? OR id IN ?)", now, rescued)
+	}
+
+	var page SessionPage
+	if err := selectActive().Count(&page.Total).Error; err != nil {
+		return SessionPage{}, fmt.Errorf("count sessions: %w", err)
+	}
+	var rows []models.Session
+	if err := selectActive().
+		Order("created_at DESC").Order("id DESC").
+		Limit(f.Limit + 1).Offset(f.Offset).
+		Find(&rows).Error; err != nil {
+		return SessionPage{}, fmt.Errorf("list sessions: %w", err)
+	}
+	if len(rows) > f.Limit {
+		rows = rows[:f.Limit]
+		page.HasMore = true
+	}
+	for i := range rows {
+		seenAt, ok := pending[rows[i].ID]
+		if !ok {
+			continue
+		}
+		if idle := seenAt.Add(s.idleTTL); idle.After(rows[i].IdleExpiresAt) {
+			rows[i].IdleExpiresAt = idle
+		}
+		if rows[i].LastSeenAt == nil || seenAt.After(*rows[i].LastSeenAt) {
+			seen := seenAt
+			rows[i].LastSeenAt = &seen
+		}
+	}
+	page.Sessions = rows
+	return page, nil
+}
+
+// activeScope narrows q to unrevoked sessions within their absolute lifetime
+// (Validate rejects only once now is after the expiry), optionally of one
+// user.
+func (s *SessionStore) activeScope(q *gorm.DB, userID *uuid.UUID, now time.Time) *gorm.DB {
+	q = q.Where("revoked_at IS NULL AND absolute_expires_at >= ?", now)
+	if userID != nil {
+		q = q.Where("user_id = ?", *userID)
+	}
+	return q
+}
+
+// pendingSnapshot copies this node's buffered session activity.
+func (s *SessionStore) pendingSnapshot() map[uuid.UUID]time.Time {
+	s.seenMu.RLock()
+	defer s.seenMu.RUnlock()
+	return maps.Clone(s.seen)
 }
 
 // RunLastSeenFlusher periodically flushes buffered session activity.

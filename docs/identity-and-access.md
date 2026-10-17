@@ -98,9 +98,12 @@ enabled, so a leftover unexpired cookie session keeps resolving grants from its
 stored groups. Even without a file, a session with no grants is still accepted
 on the identity routes (`GET /auth/whoami`, `POST /auth/logout`,
 `GET /v1/system/features`; `whoami` reports an empty role) and refused
-elsewhere. Today a session ends at logout or at its idle or absolute TTL; to cut
-a user off sooner, remove their bindings from the policy file (grants are
-resolved on every request). Operator-driven session revocation arrives with E3.
+elsewhere. A session ends at logout, at its idle or absolute TTL, or when a
+cluster admin revokes it: `caesium auth user logout USER_ID` revokes one user's
+sessions and `caesium auth user disable USER_ID` also blocks the user's next
+login (see [User administration](#user-administration)). There is no single
+"revoke every session" call; removing a user's bindings from the policy file
+also cuts them off at once (grants are resolved on every request).
 
 The browser session cookie is HTTP-only and `SameSite=Lax`. Unsafe requests from
 cookie sessions must include the CSRF token surfaced by `GET /auth/whoami`.
@@ -696,8 +699,69 @@ Each OIDC login stores the IdP refresh token as a sealed refresh grant (see
 [OIDC](#oidc)); LDAP and SAML logins store none, and nothing redeems the grant
 yet. **Planned (E2):** refreshing OIDC users' groups during a session, so group
 changes apply without a new login. **Planned (E1b):** the same for LDAP, with a
-live LDAP coverage journey. **Planned (E3):** user and session administration
-endpoints and CLI.
+live LDAP coverage journey.
+
+### User administration
+
+A cluster admin (admin at `*`; a namespace-confined admin is refused with 403)
+can list users, see their active sessions, disable and re-enable them, and log
+them out everywhere. The routes are mounted only when authentication is on
+(with `CAESIUM_AUTH_MODE=none` they answer 404, or 405 for the POST routes).
+Users appear after their first SSO
+login; Caesium never creates them otherwise.
+
+| Route | Behaviour |
+| --- | --- |
+| `GET /v1/auth/users?issuer=&email=&disabled=&limit=&offset=` | Users, newest first. `issuer` matches exactly, `email` is a case-insensitive substring (SQLite and dqlite fold only ASCII letters), `disabled` is `true` or `false`. |
+| `GET /v1/auth/users/:id` | One user plus its 100 newest active sessions and `sessions_total`. |
+| `POST /v1/auth/users/:id/disable` | Disables the user. In the same transaction it revokes every session of the user and clears the stored refresh grant. |
+| `POST /v1/auth/users/:id/enable` | Re-enables the user. Revoked sessions stay revoked; the user signs in again. |
+| `POST /v1/auth/users/:id/sessions/revoke` | Revokes every session of the user ("log out everywhere") without disabling it. |
+| `GET /v1/auth/sessions?user_id=&limit=&offset=` | Active sessions, newest first; without `user_id`, every user's. |
+
+- **Lists** return a bare JSON array. `X-Caesium-Total-Count` carries the total
+  and `X-Caesium-Next-Offset` the next page's offset while there is one.
+  `limit` defaults to 100 and must be 1 to 1000; an out-of-range `limit`, a
+  negative `offset`, a malformed id or a bad `disabled` value is a 400, and an
+  unknown user is a 404.
+- **A user** is `{"id", "issuer", "subject", "email", "email_verified",
+  "display_name", "groups", "last_login_role", "created_at", "last_login_at",
+  "disabled_at"}`. `last_login_role` is the cluster role resolved at the last
+  login, a record only: requests resolve grants afresh. No credential material
+  (the refresh grant, its lease) is ever returned.
+- **A session** is `{"id", "user_id", "auth_method", "created_at",
+  "last_seen_at", "idle_expires_at", "absolute_expires_at", "source_ip",
+  "user_agent"}`; never the token or its CSRF token. A session is active while
+  it is unrevoked and within both lifetimes. The serving node includes the
+  activity it has buffered but not yet written (written every 30 seconds while
+  SSO is enabled); activity buffered on another node shows once it is written.
+  Revocation does not depend on this: it revokes every unrevoked session of the
+  user.
+- **Disable and enable** answer `{"user", "changed", "sessions_revoked"}`.
+  Repeating either is a 200 with `"changed": false` and changes nothing. After a
+  disable the user's next request on any session is a 401, and a login is
+  refused with `auth.login_denied` reason `user_disabled`. A login already in
+  flight when the user is disabled cannot create a session afterwards, even if
+  the user is re-enabled before it finishes (it is refused with reason
+  `user_changed`; the user signs in again). An admin cannot disable the user
+  behind its own request (409).
+- **Revoke** answers `{"user_id", "sessions_revoked"}`. An admin may revoke its
+  own sessions.
+
+CLI (`--server` defaults to `http://localhost:8080`; the key comes from
+`CAESIUM_API_KEY` or `--api-key`; `--json` prints the response on stdout and
+nothing else; errors go to stderr and exit 1):
+
+- `caesium auth user list [--issuer ISSUER] [--email TEXT] [--disabled true|false] [--limit N] [--offset N] [--json]`
+  prints a table by default. When there is another page it prints
+  `N users in total; next page: --offset M` to stderr.
+- `caesium auth user get USER_ID [--json]` prints the user and its newest
+  active sessions.
+- `caesium auth user disable USER_ID [--json]`,
+  `caesium auth user enable USER_ID [--json]` and
+  `caesium auth user logout USER_ID [--json]` print a one-line summary.
+
+Find a user's id with `caesium auth user list --email`.
 
 ## Audit and metrics
 
@@ -707,7 +771,17 @@ SSO login and logout lifecycle events are written to the audit log with actions
 shared login tail creates the local user record. Audit metadata includes the
 provider and denial reason where applicable. A login whose groups match no
 mapping (and with no default role) is denied with reason `no_binding`; a
-disabled user is denied with reason `user_disabled`.
+disabled user is denied with reason `user_disabled`, and a login that raced a
+disable is denied with reason `user_changed`.
+
+User administration writes, with `actor` the caller (API key prefix or user
+email), `resource_type` `user`, `resource_id` the user id and namespace `*`:
+
+- `user.disable` (`metadata.sessions_revoked`) and `user.enable`, only when the
+  call changed the user (a repeat writes nothing);
+- `auth.sessions_revoked` with `metadata.reason` (`user_disabled`, `admin` for
+  `caesium auth user logout`, or `user_enabled` when an enable revoked a stray
+  session) and `metadata.count`, only when at least one session was revoked.
 
 Prometheus exposes SSO counters and timing:
 
