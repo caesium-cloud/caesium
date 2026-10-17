@@ -2,9 +2,11 @@ package jobdef
 
 import (
 	"net/http"
+	"strings"
 
 	contractsvc "github.com/caesium-cloud/caesium/api/rest/service/contract"
 	jobdiff "github.com/caesium-cloud/caesium/internal/jobdef/diff"
+	"github.com/caesium-cloud/caesium/internal/jobdef/lint"
 	"github.com/caesium-cloud/caesium/pkg/db"
 	schema "github.com/caesium-cloud/caesium/pkg/jobdef"
 	"github.com/labstack/echo/v5"
@@ -43,6 +45,12 @@ func Diff(c *echo.Context) error {
 			return echo.NewHTTPError(http.StatusBadRequest, err.Error())
 		}
 		desired[def.Metadata.Alias] = jobdiff.FromDefinition(def)
+	}
+	// Namespace secret rules (identity-and-access C4): the apply preview
+	// rejects a secret:// reference its definition's namespace does not allow,
+	// as server lint does. Apply itself does not; the run fails instead.
+	if msgs := lint.CheckSecretsAllowed(req.Definitions, lint.ServerSecretResolver); len(msgs) > 0 {
+		return echo.NewHTTPError(http.StatusBadRequest, strings.Join(msgs, "; "))
 	}
 
 	ctx := c.Request().Context()

@@ -884,6 +884,11 @@ func (r staticSecretResolver) ResolveWithIdentity(_ context.Context, ref string)
 	return value, secret.Identity{Provider: "env", Ref: ref, Verifiable: false, UnverifiableReason: "test stub"}, nil
 }
 
+// CanonicalTarget canonicalises env references with the real env provider.
+func (r staticSecretResolver) CanonicalTarget(ref string) (string, error) {
+	return secret.NewEnvResolver().CanonicalTarget(ref)
+}
+
 type captureCreateEngine struct {
 	createReq *atom.EngineCreateRequest
 	// logs is what the container "printed"; empty (the default) is a silent

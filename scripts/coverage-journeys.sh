@@ -1127,7 +1127,14 @@ coverage_journey_server_env() {
   )
   case "$mode" in
     local)
-      COVERAGE_JOURNEY_SERVER_ENV+=(CAESIUM_AUTH_MODE=none)
+      # Auth stays off. The policy file exists so startup validates secret
+      # globs inside this instrumented process: internal/auth/policy/glob.go
+      # otherwise never runs on a coverage server, and the diff ratchet
+      # rejects the changed file. The auth lane stays file-less on purpose.
+      COVERAGE_JOURNEY_SERVER_ENV+=(
+        CAESIUM_AUTH_MODE=none
+        CAESIUM_AUTH_POLICY_FILE=/etc/caesium/policy/policy.yaml
+      )
       ;;
     auth)
       COVERAGE_JOURNEY_SERVER_ENV+=(
@@ -1461,6 +1468,11 @@ coverage_journey_run_lane() {
   if [[ "$mode" == "auth" ]]; then
     server_args+=(
       -v "$ROOT/test/fixtures/connectors/connections.yaml:/etc/caesium/connectors/connections.yaml:ro"
+    )
+  fi
+  if [[ "$mode" == "local" ]]; then
+    server_args+=(
+      -v "$ROOT/test/testdata/policy/coverage-secret-glob.yaml:/etc/caesium/policy/policy.yaml:ro"
     )
   fi
   local env_value

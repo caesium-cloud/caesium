@@ -116,6 +116,7 @@ func TestParseRejectsInvalidPolicies(t *testing.T) {
 		{"long service account", header + "namespaces: {default: {kubernetes: {serviceAccountName: " + strings.Repeat("a", 254) + "}}}", "DNS subdomain"},
 		{"empty service account label", header + "namespaces: {default: {kubernetes: {serviceAccountName: team..foo}}}", "DNS subdomain"},
 		{"invalid secret glob", header + "namespaces: {default: {secrets: {allow: ['env/[']}}}", "invalid secret glob"},
+		{"unsupported secret provider", header + "namespaces: {default: {secrets: {allow: ['env/OK', 'aws/token']}}}", `namespaces["default"].secrets.allow[1]: invalid secret glob "aws/token": unsupported provider "aws"`},
 		{"unknown root field", header + "binding: []", "unknown field"},
 		{"unknown namespace field", header + "namespaces: {default: {secret: {}}}", "unknown field"},
 		{"unknown kubernetes field", header + "namespaces: {default: {kubernetes: {serviceAccount: jobs}}}", "unknown field"},

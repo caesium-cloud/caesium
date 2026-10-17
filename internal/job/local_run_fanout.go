@@ -11,6 +11,7 @@ import (
 
 	"github.com/caesium-cloud/caesium/internal/cache"
 	jobdefruntime "github.com/caesium-cloud/caesium/internal/jobdef/runtime"
+	"github.com/caesium-cloud/caesium/internal/jobdef/secret"
 	"github.com/caesium-cloud/caesium/internal/metrics"
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/caesium-cloud/caesium/internal/run"
@@ -291,6 +292,16 @@ func (l *localRun) runFannedGroup(
 			}
 			results <- instanceResult{taskRunID: taskRunID, partition: m.partition.Key, err: cause, abort: persistErr != nil}
 		}
+		// Each instance (and each re-entered attempt) checks the namespace
+		// secret rules right before its own cache lookup: instances wait on
+		// parallelism, predecessors and rate limits independently, so a
+		// policy revoked while the group is open must stop the next instance
+		// from consuming its cached result. A denial fails the instance
+		// without retrying.
+		if err := l.checkSecretsAllowed(runner); err != nil {
+			failIdentity(err)
+			return
+		}
 
 		partEnv := map[string]string{
 			envName: m.partition.Key,
@@ -453,7 +464,9 @@ func (l *localRun) runFannedGroup(
 			// Retries cover execution errors only, matching the unfanned
 			// local path: a container that ran and exited non-zero is a
 			// terminal result, not a transient fault.
-			if attempt < m.maxAttempt {
+			// A namespace secret denial is permanent until the policy
+			// changes, so it never takes the retry branch.
+			if attempt < m.maxAttempt && !errors.Is(execErr, secret.ErrSecretDenied) {
 				if !taskQuarantined {
 					metrics.TaskRetriesTotal.WithLabelValues(j.alias, taskID.String(), strconv.Itoa(attempt)).Inc()
 				}

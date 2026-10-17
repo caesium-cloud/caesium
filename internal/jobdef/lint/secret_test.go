@@ -72,3 +72,8 @@ func (f *fakeResolver) ResolveWithIdentity(_ context.Context, ref string) (strin
 	}
 	return "", secret.Identity{Provider: "env", Ref: ref, Verifiable: false, UnverifiableReason: "test stub"}, nil
 }
+
+// CanonicalTarget canonicalises env references with the real env provider.
+func (f *fakeResolver) CanonicalTarget(ref string) (string, error) {
+	return secret.NewEnvResolver().CanonicalTarget(ref)
+}
