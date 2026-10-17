@@ -1,6 +1,6 @@
 # Execution Connectors — Temporal Monitoring and Operator Actions
 
-Last updated: 2026-10-16
+Last updated: 2026-10-17
 
 Caesium should let an operator follow a data process across Temporal workflows
 and Caesium jobs, understand the data consequence, and perform a declared
@@ -12,9 +12,9 @@ prerequisite for monitoring them.
 
 At drafting, [PR #560](https://github.com/caesium-cloud/caesium/pull/560) supplied
 idempotent Caesium starts, explicit created/queued/skipped/dropped outcomes and
-an operator recipe. W1–W5 have since added the connector contract, catalog,
-Temporal adapter, real development fixture and authenticated HTTP monitoring.
-Operator action APIs and Console surfaces remain pending. The Console's existing
+an operator recipe. W1–W6 have since added the connector contract, catalog, Temporal adapter,
+real development fixture, authenticated HTTP monitoring/actions and Console
+monitoring. Console relationship and approval journeys remain in progress. The Console's existing
 run, dataset, freshness, lineage, receipt and incident views are the data
 evidence this integration should join to external process state.
 
@@ -245,13 +245,14 @@ write. Limits are validated configuration with conservative hard ceilings fixed
 by A1 before dependent work. C1/F3 measure unchanged-poll write count, catalog
 cardinality and closed-workflow Query dispatch count through the live surface.
 
-## Progress (as of 2026-10-16)
+## Progress (as of 2026-10-17)
 
 W1 through W4 have merged, including the W4 dashboard in PR #635.
 W5 C1 is merged in PR #644; dashboard PR #643 records its verified acceptance.
 W6 C2 and E1 are merged in PRs #652 and #651; this dashboard records their
 verified acceptance.
-E2/E3, F2–F4 and N remain later work. An open PR or a component-only pass
+W7 implements E2 below; its acceptance remains pending.
+E3, F2–F4 and N remain later work. An open PR or a component-only pass
 is not completion. The SHAs below are the squash merges read from GitHub.
 
 The orchestrator owns this dashboard: PR URLs, exact tested heads/merge SHAs,
@@ -599,6 +600,31 @@ Resume unfinished waves. Do not archive this plan while later items remain.
   the missing CODEOWNER approval and merge queue. Repository settings and
   CI-lane promotion remain unchanged.
 
+### W7 — Console relationship and data-evidence journey (in progress)
+
+- **Base and scope:** `a78bcdaf7c94db188c25ec14f59bff46874f482e` includes
+  merged E1 and D1. E2 is the only selected item. E3 requires merged E2;
+  F2–F4/N remain later work.
+- **W7-α / E2:** [PR #658](https://github.com/caesium-cloud/caesium/pull/658),
+  head `9ac0ed647a9d8a61a8f6bca6b9fad95db2cb8ffd`, implements typed
+  parent/child/continuation relationships, verified local admission/run links
+  and reverse navigation from existing run evidence. An additive HTTP
+  correlation projection supplies the routable execution ID; the existing
+  catalog digest is not a route parameter. Scope checks and response ceilings
+  apply to the expanded response. Current job dataset declarations are labeled
+  separately from observed logs, outputs, assertions and receipt evidence.
+- **Verification:** Independent implementation and browser-test source review
+  is clear. The exact candidate passed containerized lint/vet (zero issues),
+  the full root race/coverage unit suite, all required tagged hermetic checks,
+  integration compilation, 536 UI tests in 67 files, production build and bundle
+  budgets. Containerized plan guardrails passed. Browser discovery selects all
+  five connector scenarios and excludes them from default/auth; absent fixture
+  markers fail closed. Clean-head real Temporal HTTP/browser qualification,
+  default/auth integration baselines and current-head hosted checks are pending.
+- **Acceptance/publication:** PR #658 is draft pending live qualification.
+  E2 remains unchecked; implementation and this plan sync are unmerged.
+  Normal protected review/checks and the merge queue govern this wave.
+
 ### Stream Status
 
 | Stream | Scope | Priority | Status |
@@ -607,7 +633,7 @@ Resume unfinished waves. Do not archive this plan while later items remain.
 | B | Temporal inspection and declared messages (2 items) | P0 | Shipped (B1, B2) |
 | C | Authenticated REST and composition (2 items) | P0 | Shipped (C1, C2) |
 | D | Verified correlation and action durability (2 items) | P0 | Shipped (D1, D2) |
-| E | Console monitoring, data links and approval (3 items) | P0 | E1 shipped; E2/E3 not started |
+| E | Console monitoring, data links and approval (3 items) | P0 | E1 shipped; E2 in progress; E3 not started |
 | F | Real fixture, CI, qualification and promotion (4 items) | P0 | F1 shipped; F2–F4 not started |
 | N | Operator guidance and reconciliation (1 item) | P0 | Not started |
 
@@ -912,8 +938,14 @@ joined to existing Caesium pages. No cross-provider global pagination in v1.
   Files: new `ui/src/features/connectors/RelationshipsPanel.tsx`,
   new `ui/src/features/connectors/__tests__/relationships.test.tsx`,
   `ui/src/features/connectors/ExecutionDetailPage.tsx`,
+  `ui/src/features/connectors/types.ts`, `ui/src/lib/api.ts`,
   `ui/src/features/jobs/RunDetailPage.tsx`,
-  new `ui/e2e/connectors/correlation.spec.ts`, `docs/connectors.md` (data tour).
+  new `ui/e2e/connectors/correlation.spec.ts`,
+  `api/rest/service/connector/reads.go`,
+  `api/rest/service/connector/reads_test.go`,
+  `api/rest/controller/connector/reads.go`, `test/connectors_read_test.go`
+  (additive routable execution identity on verified HTTP correlations),
+  `docs/connectors.md` (data tour), `docs/temporal.md` (Console status).
   Depends on: E1, D1.
   Verify: browser follows workflow -> admitted run -> existing receipt/data
   evidence -> workflow; queue promotion becomes the same run. Opaque external
