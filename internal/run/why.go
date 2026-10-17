@@ -251,6 +251,15 @@ func (s *Store) WhyTaskPartition(ctx context.Context, runID uuid.UUID, taskRef, 
 	if err != nil {
 		return nil, err
 	}
+	// The group summary copies a failed instance's error into firstFailure
+	// and the one-line summary. A confined caller must not learn another
+	// owner's baseline from a verdict recorded before baselines were
+	// namespace-owned. These rows are the read model; nothing is written back.
+	if authz.Restricted(ctx) {
+		for i := range instances {
+			instances[i].Error = WithholdQuotedBaselineEvidence(instances[i].Error, instances[i].DataViolations)
+		}
+	}
 
 	subject, err := selectWhyInstance(instances, taskName, partition)
 	if err != nil {

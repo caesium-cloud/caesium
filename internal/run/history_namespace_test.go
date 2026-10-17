@@ -280,4 +280,20 @@ func TestWithholdUnownedBaselineEvidence(t *testing.T) {
 	task := map[string]any{"data_violations": "not-a-list", "error": "x"}
 	WithholdUnownedBaselineEvidenceJSON(task)
 	require.NotContains(t, task, "data_violations", "a malformed verdict list is dropped")
+
+	// A task error or an incident last_error quotes the verdict messages and
+	// carries the verdict list separately. The quoted form withholds the same
+	// messages, and a payload that is not a verdict list withholds nothing.
+	raw, err := json.Marshal([]DataViolation{legacy, own, absolute})
+	require.NoError(t, err)
+	quoted := "prefix " + legacyMessage + " tail " + own.Message + " and " + absolute.Message
+	gotText := WithholdQuotedBaselineEvidence(quoted, raw)
+	require.NotContains(t, gotText, "10000")
+	require.NotContains(t, gotText, "9990")
+	require.Contains(t, gotText, BaselineEvidenceWithheld)
+	require.Contains(t, gotText, own.Message, "a namespace-owned message stays quoted")
+	require.Contains(t, gotText, absolute.Message, "a verdict without a baseline stays quoted")
+	require.Equal(t, quoted, WithholdQuotedBaselineEvidence(quoted, []byte("not-json")))
+	require.Equal(t, quoted, WithholdQuotedBaselineEvidence(quoted, nil))
+	require.Empty(t, WithholdQuotedBaselineEvidence("", raw))
 }

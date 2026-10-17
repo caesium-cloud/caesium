@@ -658,9 +658,9 @@ func (s *IntegrationTestSuite) TestAuthNamespaceStreamOwnership() {
 // and sample count came from marketing's samples. The verdict is seeded through
 // the catalog (task row and error, a persisted task event and the lifecycle
 // bridge's event data) as the precondition only. A finance-confined viewer
-// reads the run, the event stream backlog, the delivery history and the
-// ingested events without the baseline numbers or the message that renders
-// them; an unrestricted caller still reads them.
+// reads the run, the event stream backlog, the delivery history, the
+// ingested events and the incident list without the baseline numbers or the
+// message that renders them; an unrestricted caller still reads them.
 func (s *IntegrationTestSuite) TestAuthNamespaceLegacyBaselineEvidenceWithheld() {
 	s.requireAuthLane()
 	f := s.newNamespacedRoutesFixture("b4legacy")
@@ -704,6 +704,15 @@ func (s *IntegrationTestSuite) TestAuthNamespaceLegacyBaselineEvidenceWithheld()
 		`SELECT COUNT(*) FROM ingested_events WHERE source = 'caesium' AND json_extract(data, '$.run_id') = ?`, runID).Scan(&lifecycleEvents))
 	s.Require().Positive(lifecycleEvents)
 	s.catalogExec(f, int64(lifecycleEvents), `UPDATE ingested_events SET data = ? WHERE source = 'caesium' AND json_extract(data, '$.run_id') = ?`, lifecycleData, runID)
+	var taskID string
+	s.Require().NoError(f.catalogDB.QueryRowContext(s.T().Context(),
+		`SELECT task_id FROM task_runs WHERE job_run_id = ?`, runID).Scan(&taskID))
+	s.Require().NotEmpty(taskID)
+	incidentID := uuid.NewString()
+	opened := time.Now().UTC()
+	s.catalogExec(f, 1, `INSERT INTO incidents (id, namespace, job_id, run_id, task_id, class, status, dedupe_key, last_error, opened_at, closed_at, created_at, updated_at) VALUES (?, 'finance', ?, ?, ?, 'b4_legacy_baseline', 'closed', ?, ?, ?, ?, ?, ?)`,
+		incidentID, sourceJob.ID, runID, taskID, "b4/legacy/"+incidentID, taskError, opened, opened, opened, opened)
+	f.undo = append(f.undo, func() { s.catalogExec(f, -1, `DELETE FROM incidents WHERE id = ?`, incidentID) })
 
 	withheld := "baseline evidence withheld"
 	legacy := []string{"31337", "15668", "baseline median"}
@@ -714,6 +723,12 @@ func (s *IntegrationTestSuite) TestAuthNamespaceLegacyBaselineEvidenceWithheld()
 		"an unrestricted caller still reads the recorded verdict")
 	body = s.requireNSStatus(http.StatusOK, http.MethodGet, "/v1/jobs/"+sourceJob.ID+"/runs", finViewer, "")
 	s.requireBodyFree(body, "runs list", legacy...)
+	body = s.requireNSStatus(http.StatusOK, http.MethodGet, "/v1/incidents?job_id="+sourceJob.ID, finViewer, "")
+	s.Contains(body, incidentID)
+	s.requireBodyFree(body, "incident list", legacy...)
+	s.Contains(body, withheld)
+	s.Contains(s.requireNSStatus(http.StatusOK, http.MethodGet, "/v1/incidents?job_id="+sourceJob.ID, s.authAPIKey, ""), "31337",
+		"an unrestricted caller still reads the incident's recorded failure")
 
 	events := s.streamEventsWithKey("?run_id="+runID, finViewer, 20*time.Second, func(events []event.Event) bool {
 		for _, evt := range events {
@@ -737,6 +752,81 @@ func (s *IntegrationTestSuite) TestAuthNamespaceLegacyBaselineEvidenceWithheld()
 	body = s.requireNSStatus(http.StatusOK, http.MethodGet, "/v1/events/ingested?source=caesium&limit=500", finViewer, "")
 	s.requireBodyFree(body, "ingested events", legacy...)
 	s.Contains(s.requireNSStatus(http.StatusOK, http.MethodGet, deliveries, s.authAPIKey, ""), "31337")
+}
+
+// TestAuthNamespaceLegacyFanoutWhyEvidenceWithheld is the fan-out half of the
+// upgrade-history regression: a finance run's failed partition was judged
+// against a baseline recorded before baselines were namespace-owned. The
+// group explanation (no partition selector) must not disclose that median in
+// firstFailure.error or the summary. An unrestricted caller still reads it.
+func (s *IntegrationTestSuite) TestAuthNamespaceLegacyFanoutWhyEvidenceWithheld() {
+	s.requireAuthLane()
+	f := s.newNamespacedRoutesFixture("b4fanwhy")
+	defer s.closeNamespacedRoutesFixture(f)
+	finViewer := s.namespacedKey(f, "viewer", `["finance"]`).Plaintext
+
+	alias := fmt.Sprintf("b4-fanwhy-%d", f.stamp)
+	s.applyDefinition(s.legacyFanoutWhyDefinition(alias, "finance"))
+	job := s.requireJobByAlias(alias)
+	f.jobs = append(f.jobs, job.ID)
+	runID := s.triggerRun(job.ID)
+	run := s.awaitRun(job.ID, runID, runTimeout)
+	s.Require().Equal("failed", run.Status, "the failed partition fails the run")
+
+	var failed int
+	s.Require().NoError(f.catalogDB.QueryRowContext(s.T().Context(),
+		`SELECT COUNT(*) FROM task_runs WHERE job_run_id = ? AND partition_value = ? AND status = 'failed'`,
+		runID, "beta").Scan(&failed))
+	s.Require().Equal(1, failed, "beta is the group's failed instance")
+
+	message := "observed 10 deviates 31327 from the baseline median 31337 (5 sample(s)), more than the declared 50%"
+	verdicts := `[{"dataset":"b4.legacy","metric":"rowCount","assertion":"deltaFromBaseline","observed":10,"bound":15668.5,` +
+		`"delta_from_baseline":"50%","baseline_median":31337,"baseline_samples":5,"message":"` + message + `"}]`
+	taskError := "task violates its declared data assertions: " + message
+	s.catalogExec(f, 1, `UPDATE task_runs SET data_violations = ?, error = ? WHERE job_run_id = ? AND partition_value = ?`,
+		verdicts, taskError, runID, "beta")
+
+	path := "/v1/jobs/" + job.ID + "/runs/" + runID + "/why?task=process"
+	body := s.requireNSStatus(http.StatusOK, http.MethodGet, path, finViewer, "")
+	s.Contains(body, `"firstFailure"`)
+	s.Contains(body, "baseline evidence withheld")
+	s.requireBodyFree(body, "fan-out why", "31337", "15668", "baseline median")
+	s.Contains(s.requireNSStatus(http.StatusOK, http.MethodGet, path, s.authAPIKey, ""), "31337",
+		"an unrestricted caller still reads the recorded partition failure")
+}
+
+// legacyFanoutWhyDefinition is a finance job whose process step fans out from
+// list. The beta partition exits 1; alpha succeeds. failurePolicy continue
+// lets both finish so the failed instance is beta on every lane.
+func (s *IntegrationTestSuite) legacyFanoutWhyDefinition(alias, namespace string) schema.Definition {
+	engine := ""
+	if s.engineType != "" && s.engineType != "docker" {
+		engine = s.engineType
+	}
+	step := func(name, command string) schema.Step {
+		return schema.Step{
+			Name:    name,
+			Engine:  engine,
+			Image:   "busybox:1.36.1",
+			Command: []string{"sh", "-c", command},
+		}
+	}
+	list := step("list", `echo '##caesium::partitions ["alpha","beta"]'`)
+	list.Next = []string{"process"}
+	process := step("process", `if [ "$CAESIUM_PARTITION" = "beta" ]; then echo fail; exit 1; fi; echo ok`)
+	process.DependsOn = []string{"list"}
+	process.FanOut = &schema.FanOut{
+		From:          "list",
+		MaxPartitions: 8,
+		FailurePolicy: schema.FanOutFailureContinue,
+	}
+	return schema.Definition{
+		APIVersion: "v1",
+		Kind:       "Job",
+		Metadata:   schema.Metadata{Alias: alias, Namespace: namespace},
+		Trigger:    schema.Trigger{Type: "cron", Configuration: map[string]any{"cron": "0 0 31 2 *"}},
+		Steps:      []schema.Step{list, process},
+	}
 }
 
 // TestRunRetryRefusesMovedNamespace runs on every lane: a run left in its

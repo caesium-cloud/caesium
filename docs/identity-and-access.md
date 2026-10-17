@@ -582,7 +582,9 @@ maintainer sign-off).
   carry `baseline_scope: namespace`; a confined caller reading a verdict
   recorded without it (before this release) gets it without `baseline_median`,
   `baseline_samples`, the derived `bound` and the message that renders them,
-  on run reads, the event stream and lifecycle event history.
+  on run reads, the event stream, lifecycle event history, an incident list's
+  `last_error`, and a fanned step's `why` group (`firstFailure.error` and
+  `summary`).
 
 ### Git sync allowlist
 
@@ -802,7 +804,7 @@ gets exactly the rows it got before.
 | --- | --- |
 | `GET /v1/jobs` | Jobs in its namespaces (a job-scoped key's alias list narrows this further). Each job's recent runs and latest run hold only runs it may read. `order_by` takes only column names (`id`, `alias`, `namespace`, `trigger_id`, `priority`, `paused`, `created_at`, `updated_at`) and `asc`/`desc`, for every caller; anything else is 400. |
 | `GET /v1/triggers` | Triggers that serve at least one live job, where it may read every namespace the trigger serves (the `GET /v1/triggers/:id` rule). `order_by` takes only `id`, `alias`, `type`, `created_at`, `updated_at` (400 otherwise, for every caller). |
-| `GET /v1/incidents` | Incidents in its namespaces, counted in `total`, without the frozen agent allowlist (`allowed_jobs`), which can name other namespaces' jobs. |
+| `GET /v1/incidents` | Incidents in its namespaces, counted in `total`, without the frozen agent allowlist (`allowed_jobs`), which can name other namespaces' jobs. `last_error` loses a pre-upgrade baseline's median, sample count and the message that renders them. |
 | `GET /v1/stats`, `/v1/stats/summary` | Every total, rate, top list and trend point computed over its namespaces' jobs and runs only. |
 | `GET /v1/events` | Events of runs persisted in its namespaces, of the run and task lifecycle types plus `incident_opened`. Events naming no run, and types whose payloads can name other namespaces' jobs or datasets (dataset, freshness, contract, SLA, held-upstream, agent action, approval and escalation events), are not sent. Events of a run admission refused because a consumed dataset is held are not sent either, and job labels are removed from payloads. Filtering happens on the server for the catch-up and for every live event. A `run_id` in another namespace is a 403. |
 | `GET /v1/events/ingested` | Ingested events whose every delivery started runs, all in its namespaces, with no skip and no error. An event the lifecycle bridge derived from a run (source `caesium`) also needs that run to be readable, and its data loses the job labels it copied from the job. |
@@ -811,7 +813,9 @@ History under a job (`/v1/jobs/:id/...`) is authorised on the job's current
 namespace and then filtered by each row's persisted namespace: runs (and the
 `X-Caesium-Total-Count` header), the latest run on a job read, backfills, cache
 entries (by the run that filled them), and the baseline `why` compares against
-(none when the only candidate is unreadable). A run diff needs viewer in both
+(none when the only candidate is unreadable). A fanned step's group explanation
+withholds that same pre-upgrade baseline text from `firstFailure.error` and
+`summary`. A run diff needs viewer in both
 runs' namespaces. A trigger's event history shows only deliveries whose every
 started run the caller may read (the same rule, lifecycle provenance and label removal included). A job read embeds the job's trigger only when
 the caller may read every namespace that trigger serves.

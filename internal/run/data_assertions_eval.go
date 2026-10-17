@@ -1,6 +1,7 @@
 package run
 
 import (
+	"encoding/json"
 	"fmt"
 	"maps"
 	"math"
@@ -300,6 +301,32 @@ func withholdMessages(text string, messages []string) string {
 		}
 	}
 	return text
+}
+
+// WithholdQuotedBaselineEvidence replaces, in text, every message of a
+// baseline verdict that was not computed over the evaluated run's own
+// namespace. A confined reader is shown a task error or an incident
+// last_error this way: those strings quote the verdict messages but do not
+// carry the verdict list. violationsJSON is the task row's data_violations.
+// A payload that does not decode as a verdict list leaves text unchanged,
+// because there is no structured verdict to withhold from.
+func WithholdQuotedBaselineEvidence(text string, violationsJSON []byte) string {
+	if text == "" || len(violationsJSON) == 0 {
+		return text
+	}
+	var violations []DataViolation
+	if err := json.Unmarshal(violationsJSON, &violations); err != nil {
+		return text
+	}
+	messages := make([]string, 0, len(violations))
+	for i := range violations {
+		v := &violations[i]
+		if !withholdsBaselineEvidence(v.BaselineScope, v.Assertion, v.BaselineMedian != nil, v.BaselineSamples != 0) {
+			continue
+		}
+		messages = append(messages, v.Message)
+	}
+	return withholdMessages(text, messages)
 }
 
 // String renders the violation for a task failure message: it names the
