@@ -175,6 +175,10 @@ type SSOService struct {
 	sessions *SessionStore
 	policy   policy.Source
 	auditor  *AuditLogger
+
+	// beforeMint, when set (tests only), runs between the login's disabled
+	// check and the session insert.
+	beforeMint func()
 }
 
 // SSOServiceOption customizes the shared SSO login pipeline.
@@ -228,6 +232,11 @@ func (s *SSOService) Complete(ctx context.Context, ext *ExternalIdentity, method
 	// User.Role keeps only the cluster role at last login (possibly "" for a
 	// confined user); requests resolve their grants afresh.
 	user, created, err := s.users.upsert(ctx, ext, grants.ClusterRole())
+	if errors.Is(err, ErrUserChanged) {
+		outcome = OutcomeDenied
+		s.auditLoginDenied(ext, method, ip, "user_changed")
+		return "", nil, ErrLoginDenied
+	}
 	if err != nil {
 		s.auditLoginError(ext, method, ip, "user_upsert_failed")
 		return "", nil, err
@@ -240,12 +249,28 @@ func (s *SSOService) Complete(ctx context.Context, ext *ExternalIdentity, method
 		s.auditLoginDenied(ext, method, ip, "user_disabled")
 		return "", nil, ErrLoginDenied
 	}
+	if s.beforeMint != nil {
+		s.beforeMint()
+	}
+	// The insert is fenced on the disable generation this login read: a
+	// disable committed since refuses it even if the user was re-enabled.
 	cookie, sess, err := s.sessions.Create(ctx, CreateSessionRequest{
-		UserID:     user.ID,
-		AuthMethod: method,
-		SourceIP:   ip,
-		UserAgent:  ua,
+		UserID:            user.ID,
+		AuthMethod:        method,
+		SourceIP:          ip,
+		UserAgent:         ua,
+		DisableGeneration: user.DisableGeneration,
 	})
+	switch {
+	case errors.Is(err, ErrUserDisabled):
+		outcome = OutcomeDenied
+		s.auditLoginDenied(ext, method, ip, "user_disabled")
+		return "", nil, ErrLoginDenied
+	case errors.Is(err, ErrUserChanged):
+		outcome = OutcomeDenied
+		s.auditLoginDenied(ext, method, ip, "user_changed")
+		return "", nil, ErrLoginDenied
+	}
 	if err != nil {
 		s.auditLoginError(ext, method, ip, "session_create_failed")
 		return "", nil, err
