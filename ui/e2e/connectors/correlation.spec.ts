@@ -63,7 +63,7 @@ async function createKey(request: APIRequestContext, role: "viewer" | "runner", 
 async function applyPublicationJobs(request: APIRequestContext): Promise<[Job, Job]> {
   const definitions = ["connector-fixture-publish", "connector-fixture-notify"].map((alias, index) => ({
     apiVersion: "v1", kind: "Job",
-    metadata: { alias, concurrency: { maxRuns: 1, strategy: "queue" }, datasets: { skipWhenFresh: false } },
+    metadata: { alias, cache: false, concurrency: { maxRuns: 1, strategy: "queue" }, datasets: { skipWhenFresh: false } },
     trigger: { type: "cron", configuration: { cron: "0 0 1 1 *" } },
     steps: [{
       name: "work", image: "alpine:3.23",
@@ -193,8 +193,9 @@ test("real queued delegation promotes one admission and joins existing run data,
   await expect(page).toHaveURL(new RegExp(`/jobs/${job.id}/runs/${promoted.run_id}$`));
   await expect.poll(async () => (await readJSON<{ status: string }>(request, `/v1/jobs/${job.id}/runs/${promoted.run_id}`, observer)).status,
     { timeout: 90_000, intervals: [2000, 4000] }).toBe("succeeded");
-  const completed = await readJSON<{ tasks: { output: { rows: string; processed_through: string } }[] }>(request, `/v1/jobs/${job.id}/runs/${promoted.run_id}`, observer);
+  const completed = await readJSON<{ tasks: { status: string; cache_hit: boolean; output: { rows: string; processed_through: string } }[] }>(request, `/v1/jobs/${job.id}/runs/${promoted.run_id}`, observer);
   expect(completed.tasks).toHaveLength(1);
+  expect(completed.tasks[0]).toMatchObject({ status: "succeeded", cache_hit: false });
   const watermark = completed.tasks[0].output.processed_through;
   expect(completed.tasks[0].output.rows).toBe("42");
   expect(Date.parse(watermark)).toBeGreaterThan(0);
