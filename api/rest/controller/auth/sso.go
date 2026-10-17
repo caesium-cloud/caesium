@@ -87,11 +87,17 @@ func (s *SSOController) Whoami(c *echo.Context) error {
 		}
 	}
 
+	// role is the cluster role, as before namespaces existed (empty for a
+	// principal confined to namespaces); grants, namespaces and cluster_role
+	// say where the principal holds what (design §14, §15).
 	body := map[string]any{
-		"kind":      principal.Kind,
-		"subject":   principal.Subject,
-		"role":      principal.ClusterRole(),
-		"is_scoped": scoped,
+		"kind":         principal.Kind,
+		"subject":      principal.Subject,
+		"role":         principal.ClusterRole(),
+		"cluster_role": principal.ClusterRole(),
+		"grants":       whoamiGrants(principal),
+		"namespaces":   whoamiNamespaces(principal),
+		"is_scoped":    scoped,
 	}
 	if principal.Kind == iauth.PrincipalUser {
 		body["email"] = principal.Subject
@@ -109,6 +115,28 @@ func (s *SSOController) Whoami(c *echo.Context) error {
 		body["csrf_token"] = csrf
 	}
 	return c.JSON(http.StatusOK, body)
+}
+
+// whoamiGrants is the principal's grants (namespace → role, "*" for
+// cluster-wide), without entries that name no recognised role.
+func whoamiGrants(p *iauth.Principal) map[string]models.Role {
+	grants := make(map[string]models.Role, len(p.Grants))
+	for namespace, role := range p.Grants {
+		if namespace != "" && models.ValidRole(string(role)) {
+			grants[namespace] = role
+		}
+	}
+	return grants
+}
+
+// whoamiNamespaces is the sorted list of namespaces the principal may read:
+// ["*"] when it holds a role cluster-wide, [] when it holds none.
+func whoamiNamespaces(p *iauth.Principal) []string {
+	allowed := p.AllowedNamespaces()
+	if allowed == nil {
+		return []string{models.ClusterNamespace}
+	}
+	return allowed
 }
 
 func (s *SSOController) OIDCLogin(c *echo.Context) error {

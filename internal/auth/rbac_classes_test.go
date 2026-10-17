@@ -145,6 +145,14 @@ var routesAddedAfterMaster = map[string]RoutePolicy{
 	"GET /v1/connectors/:id/executions/:id/history":       {Role: models.RoleViewer, Class: RouteClassCluster},
 	"GET /v1/connectors/:id/executions/:id/relationships": {Role: models.RoleViewer, Class: RouteClassCluster},
 	"GET /v1/jobs/:id/runs/:id/external-executions":       {Role: models.RoleViewer, Class: RouteClassNamespaced},
+
+	// User and session administration (E3).
+	"GET /v1/auth/users":                      {Role: models.RoleAdmin, Class: RouteClassCluster},
+	"GET /v1/auth/users/:id":                  {Role: models.RoleAdmin, Class: RouteClassCluster},
+	"POST /v1/auth/users/:id/disable":         {Role: models.RoleAdmin, Class: RouteClassCluster},
+	"POST /v1/auth/users/:id/enable":          {Role: models.RoleAdmin, Class: RouteClassCluster},
+	"POST /v1/auth/users/:id/sessions/revoke": {Role: models.RoleAdmin, Class: RouteClassCluster},
+	"GET /v1/auth/sessions":                   {Role: models.RoleAdmin, Class: RouteClassCluster},
 }
 
 // TestRoutePolicyRolesMatchMaster pins every route's role to master's: route
@@ -209,7 +217,10 @@ func TestRoutePolicyClassesPinned(t *testing.T) {
 		"POST /v1/cache/prune":                         {Role: models.RoleOperator, Class: RouteClassCluster},
 		"POST /v1/triggers":                            {Role: models.RoleOperator, Class: RouteClassCluster},
 		"GET /v1/jobs":                                 {Role: models.RoleViewer, Class: RouteClassCollection, PendingItem: "B4"},
-		"GET /v1/auth/keys":                            {Role: models.RoleAdmin, Class: RouteClassCollection, PendingItem: "A5"},
+		"GET /v1/auth/keys":                            {Role: models.RoleAdmin, Class: RouteClassCollection},
+		"POST /v1/auth/keys":                           {Role: models.RoleAdmin, Class: RouteClassNamespaced},
+		"POST /v1/auth/keys/:id/revoke":                {Role: models.RoleAdmin, Class: RouteClassNamespaced},
+		"POST /v1/auth/keys/:id/rotate":                {Role: models.RoleAdmin, Class: RouteClassNamespaced},
 		"GET /v1/jobs/:id/dag":                         {Role: models.RoleViewer, Class: RouteClassNamespaced},
 		"GET /v1/jobs/:id/manifest":                    {Role: models.RoleViewer, Class: RouteClassNamespaced, PendingItem: "B2"},
 		"GET /v1/jobs/:id":                             {Role: models.RoleViewer, Class: RouteClassNamespaced, PendingItem: "B4"},
@@ -249,9 +260,16 @@ func TestRoutePolicyClassesPinned(t *testing.T) {
 	}
 }
 
+// liveCollectionRoutes are the collection routes whose handlers filter by
+// namespace (each is also listed, with the test that proves it, in
+// api/auth_rbac_policy_completeness_test.go guardedCollectionRoutes).
+var liveCollectionRoutes = map[string]bool{
+	"GET /v1/auth/keys": true, // A5
+}
+
 // TestPendingRoutesListed logs the pending set so a reviewer sees every route
 // still fail-closed for confined principals, and pins that every collection
-// route is pending: no collection handler filters yet (B4, B5, B6, D4, A5).
+// route outside liveCollectionRoutes is pending (B4, B5, B6, D4 filter them).
 func TestPendingRoutesListed(t *testing.T) {
 	var pending []string
 	for key, policy := range RoutePolicies() {
@@ -259,8 +277,11 @@ func TestPendingRoutesListed(t *testing.T) {
 			pending = append(pending, policy.PendingItem+" "+key)
 		}
 		if policy.Class == RouteClassCollection {
-			require.True(t, policy.Pending(), "collection route %s has no filtering handler yet; it must stay pending", key)
+			require.Equal(t, !liveCollectionRoutes[key], policy.Pending(), "collection route %s: pending unless listed in liveCollectionRoutes", key)
 		}
+	}
+	for key := range liveCollectionRoutes {
+		require.Equal(t, RouteClassCollection, RoutePolicies()[key].Class, "liveCollectionRoutes entry %s must be a collection route", key)
 	}
 	sort.Strings(pending)
 	for _, line := range pending {

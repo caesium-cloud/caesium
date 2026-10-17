@@ -206,6 +206,46 @@ func TestUserPreRefreshTableGainsNullableRefreshState(t *testing.T) {
 	require.Nil(t, got.RefreshGrant)
 }
 
+// TestUserTableGainsNullableDisableGeneration: the E3 login fence column is
+// added to an existing table as nullable with no default, existing rows read
+// 0, and it never serialises.
+func TestUserTableGainsNullableDisableGeneration(t *testing.T) {
+	db := openEmptyModelTestDB(t)
+	require.NoError(t, db.AutoMigrate(&preRefreshUser{}))
+	now := time.Now().UTC()
+	legacy := preRefreshUser{ID: uuid.New(), Issuer: "oidc", Subject: "pre-gen", Role: RoleViewer, CreatedAt: now}
+	require.NoError(t, db.Create(&legacy).Error)
+	require.False(t, db.Migrator().HasColumn(&User{}, "disable_generation"))
+	for range 2 {
+		require.NoError(t, db.AutoMigrate(&User{}))
+	}
+	require.True(t, db.Migrator().HasColumn(&User{}, "disable_generation"))
+
+	var nulls int64
+	require.NoError(t, db.Raw("SELECT COUNT(*) FROM users WHERE disable_generation IS NULL").Scan(&nulls).Error)
+	require.Equal(t, int64(1), nulls, "existing rows stay NULL rather than gain a default")
+	columnTypes, err := db.Migrator().ColumnTypes(&User{})
+	require.NoError(t, err)
+	for _, ct := range columnTypes {
+		if ct.Name() != "disable_generation" {
+			continue
+		}
+		if nullable, ok := ct.Nullable(); ok {
+			require.True(t, nullable)
+		}
+		_, hasDefault := ct.DefaultValue()
+		require.False(t, hasDefault)
+	}
+	var got User
+	require.NoError(t, db.First(&got, "id = ?", legacy.ID).Error)
+	require.Zero(t, got.DisableGeneration)
+
+	raw, err := json.Marshal(User{ID: uuid.New(), DisableGeneration: 9})
+	require.NoError(t, err)
+	require.NotContains(t, string(raw), "disable_generation")
+	require.NotContains(t, string(raw), "DisableGeneration")
+}
+
 func TestUserRefreshStateNeverSerialises(t *testing.T) {
 	owner := "node-a/1"
 	now := time.Now().UTC()

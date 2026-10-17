@@ -35,8 +35,9 @@ Contents: [Overview and concepts](#overview-and-concepts) |
   The effective role in namespace N is `max(grants[N], grants["*"])`.
 - **Principal.** The authenticated caller: an API key or an SSO user. The audit
   actor is the key prefix or the user's email. The cluster role (the grant at
-  `*`) is what audit rows, metrics labels, and the `role` field of
-  `GET /auth/whoami` report.
+  `*`) is what audit rows, metrics labels, and the `role` and `cluster_role`
+  fields of `GET /auth/whoami` report; whoami's `grants` and `namespaces`
+  fields list every grant.
 - **Tenancy namespace versus dataset namespace.** These are two unrelated
   axes. The tenancy namespace described in this guide decides which jobs, and
   which objects that belong to them, a principal may see and change. The
@@ -98,9 +99,12 @@ enabled, so a leftover unexpired cookie session keeps resolving grants from its
 stored groups. Even without a file, a session with no grants is still accepted
 on the identity routes (`GET /auth/whoami`, `POST /auth/logout`,
 `GET /v1/system/features`; `whoami` reports an empty role) and refused
-elsewhere. Today a session ends at logout or at its idle or absolute TTL; to cut
-a user off sooner, remove their bindings from the policy file (grants are
-resolved on every request). Operator-driven session revocation arrives with E3.
+elsewhere. A session ends at logout, at its idle or absolute TTL, or when a
+cluster admin revokes it: `caesium auth user logout USER_ID` revokes one user's
+sessions and `caesium auth user disable USER_ID` also blocks the user's next
+login (see [User administration](#user-administration)). There is no single
+"revoke every session" call; removing a user's bindings from the policy file
+also cuts them off at once (grants are resolved on every request).
 
 The browser session cookie is HTTP-only and `SameSite=Lax`. Unsafe requests from
 cookie sessions must include the CSRF token surfaced by `GET /auth/whoami`.
@@ -152,10 +156,14 @@ SSO method objects include `type`, stable `id`, display `label`, same-origin
 `credential` for LDAP. API-key auth is advertised as `{ "type": "api-key" }`
 when `CAESIUM_AUTH_MODE=api-key` is enabled.
 
-`GET /auth/whoami` requires a valid API key or session cookie. Cookie-session
-responses include `csrf_token` alongside the principal fields (`kind`,
-`subject`, `email`, and `role`). Browser clients should keep that token in
-memory and send it as `X-CSRF-Token` on unsafe cookie-session requests.
+`GET /auth/whoami` requires a valid API key or session cookie. It returns the
+principal: `kind`, `subject`, `email` (users), `role` and `cluster_role` (the
+role at `*`, empty for a principal confined to namespaces), `grants` (namespace
+to role, `*` for cluster-wide) and `namespaces` (the sorted namespaces it can
+read, `["*"]` with a cluster grant, `[]` with none). A job-scoped key also
+gets `scope`. Cookie-session responses include `csrf_token`; browser clients
+should keep it in memory and send it as `X-CSRF-Token` on unsafe cookie-session
+requests.
 
 `POST /auth/logout` revokes the current cookie session and clears the session
 cookie. Because logout is an unsafe cookie-session request, browser callers
@@ -589,7 +597,7 @@ principal confined to some namespaces is treated:
 | identity | Allowed whatever its grants, even none: `GET /auth/whoami`, `POST /auth/logout`, `GET /v1/system/features`. |
 | cluster | Always denied (403 `insufficient_role`): metrics, nodes and workers, atoms, logs, database, cache prune, `POST /v1/triggers`, the connector reads (`/v1/connectors*`), and `GET /v1/auth/policy` plus `POST /v1/auth/policy/reload`. |
 | namespaced | Caesium resolves the namespace of the target the handler will act on and requires the route's role in it (in every resolved namespace; once B6 ships, dataset reads will need it in any one). A target with no owning namespace is cluster-only. |
-| collection | The handler may only return rows from the namespaces where the principal holds the route's role. No collection route is live yet (see below). |
+| collection | The handler may only return rows from the namespaces where the principal holds the route's role. Only the API key list is live so far (see below). |
 
 A principal is *confined* on a route when its cluster role (its grant at `*`)
 is below the route's role. An unconfined principal is authorised exactly as
@@ -618,6 +626,8 @@ target's namespace:
   policy or agent profile by id. `*` objects are readable by viewers anywhere
   and writable only with the role at `*`.
 - **Incidents:** reject an approval.
+- **API keys:** list, create, revoke and rotate keys confined to namespaces
+  where it is admin (see [API keys and CLI login](#api-keys-and-cli-login)).
 - **Audit:** `GET /v1/auth/audit` is authorised on its `?namespace=` filter (a
   namespace or `*`). An omitted filter means `*`, so a namespace admin must pass
   one.
@@ -635,7 +645,6 @@ that makes it namespace-aware lands (unconfined principals are unaffected):
 
 | Item | Routes |
 | --- | --- |
-| A5 | API key list, create, revoke, rotate (`/v1/auth/keys`) |
 | A6 | `POST /v1/events` |
 | A8 | `/v1/agent/incidents/*`, incident detail `GET /v1/incidents/:id`, approval approve |
 | B2 | `POST /v1/jobs`, `/v1/jobdefs/apply`, `/lint`, `/diff`, `GET /v1/jobs/:id/manifest`, `PATCH /v1/triggers/:id` |
@@ -740,12 +749,49 @@ API key before any session cookie. Key lifecycle is `caesium auth key` and the
 `/v1/auth/keys` endpoints, and a key may be further narrowed to a list of job
 aliases.
 
-Keys carry a `namespaces` column. A NULL value (every key minted before
-namespaces existed) means cluster-wide, so each existing key keeps its meaning.
-Any other empty or undecodable value grants nothing. **Planned (A5):** minting
-and rotating keys confined to namespaces (`--namespace`), the rule that a caller
-can mint only keys within its own grants, and SSO-admin key management. Until
-then every key is cluster-wide.
+A key holds its role in a set of namespaces. Without `--namespace` it is
+cluster-wide, as every key minted before namespaces existed is (their
+`namespaces` column is NULL):
+
+```sh
+caesium auth key create --role operator --namespace marketing [--namespace finance] [--jobs a,b] [--expires 90d]
+```
+
+`--namespace` is repeatable (or comma-separated); `POST /v1/auth/keys` takes
+the same list as `namespaces`. Names must be DNS labels; `*` alone is a
+cluster key, and an empty list, an empty name (`--namespace ""`) or `*` mixed
+with names is `400`. With a policy file, every named namespace must be
+declared in it; with no file any valid name is accepted. A cluster admin who
+names an undeclared namespace gets a `400` naming it. A namespace admin holds
+no grant in an undeclared namespace, so its request is refused first by the
+minting constraint below, with an audited `403` that does not name the
+namespace. `--jobs` (or its older spelling `--scope-jobs`) narrows the key
+further to a list of job aliases. An empty value (`scope.jobs` of `[]` or only
+blank aliases over REST) is a `400` for every caller, cluster admins included;
+such a key used to be minted unscoped.
+
+**Minting is limited to the caller's own grants.** Creating a key needs admin
+in every namespace it names (`*` for a cluster key), so a namespace admin
+(`admin` in `marketing`) can create keys confined to `marketing` at any role,
+and only a cluster admin can create a cluster key. Revoking or rotating a key
+needs admin in every namespace the key is confined to. A refused request is an
+audited `403` (`auth.denied`). Job-scoped and agent-session keys cannot manage
+keys. `GET /v1/auth/keys` (`caesium auth key list`) shows a cluster admin every
+key; a namespace admin sees only the keys confined to namespaces where it is
+admin, never a cluster key. A listed key shows `namespaces` only when it is
+confined.
+
+SSO users manage keys exactly like key-authenticated callers, from their
+browser session (unsafe requests still need the `X-CSRF-Token` header). The
+key's `created_by` and the audit actor are the user's email.
+
+Rotation replaces the secret, not the grant: the new key has the same role,
+job list, namespaces and expiry as the old one, and the old key stays valid
+for the grace period (`--grace-period`, default 24h) but never past its own
+expiry. A revoked or expired key cannot be rotated, nor can a key whose
+namespaces are no longer all declared in the policy file (`409`); revoke it and
+create a new one. A key whose stored namespaces are unreadable grants nothing;
+only a cluster admin can revoke it, and it cannot be rotated.
 
 **Planned (E5):** `caesium login`, `caesium logout` and `caesium whoami` for
 interactive CLI sign-in through the server's configured provider.
@@ -766,8 +812,69 @@ Each OIDC login stores the IdP refresh token as a sealed refresh grant (see
 [OIDC](#oidc)); LDAP and SAML logins store none, and nothing redeems the grant
 yet. **Planned (E2):** refreshing OIDC users' groups during a session, so group
 changes apply without a new login. **Planned (E1b):** the same for LDAP, with a
-live LDAP coverage journey. **Planned (E3):** user and session administration
-endpoints and CLI.
+live LDAP coverage journey.
+
+### User administration
+
+A cluster admin (admin at `*`; a namespace-confined admin is refused with 403)
+can list users, see their active sessions, disable and re-enable them, and log
+them out everywhere. The routes are mounted only when authentication is on
+(with `CAESIUM_AUTH_MODE=none` they answer 404, or 405 for the POST routes).
+Users appear after their first SSO
+login; Caesium never creates them otherwise.
+
+| Route | Behaviour |
+| --- | --- |
+| `GET /v1/auth/users?issuer=&email=&disabled=&limit=&offset=` | Users, newest first. `issuer` matches exactly, `email` is a case-insensitive substring (SQLite and dqlite fold only ASCII letters), `disabled` is `true` or `false`. |
+| `GET /v1/auth/users/:id` | One user plus its 100 newest active sessions and `sessions_total`. |
+| `POST /v1/auth/users/:id/disable` | Disables the user. In the same transaction it revokes every session of the user and clears the stored refresh grant. |
+| `POST /v1/auth/users/:id/enable` | Re-enables the user. Revoked sessions stay revoked; the user signs in again. |
+| `POST /v1/auth/users/:id/sessions/revoke` | Revokes every session of the user ("log out everywhere") without disabling it. |
+| `GET /v1/auth/sessions?user_id=&limit=&offset=` | Active sessions, newest first; without `user_id`, every user's. |
+
+- **Lists** return a bare JSON array. `X-Caesium-Total-Count` carries the total
+  and `X-Caesium-Next-Offset` the next page's offset while there is one.
+  `limit` defaults to 100 and must be 1 to 1000; an out-of-range `limit`, a
+  negative `offset`, a malformed id or a bad `disabled` value is a 400, and an
+  unknown user is a 404.
+- **A user** is `{"id", "issuer", "subject", "email", "email_verified",
+  "display_name", "groups", "last_login_role", "created_at", "last_login_at",
+  "disabled_at"}`. `last_login_role` is the cluster role resolved at the last
+  login, a record only: requests resolve grants afresh. No credential material
+  (the refresh grant, its lease) is ever returned.
+- **A session** is `{"id", "user_id", "auth_method", "created_at",
+  "last_seen_at", "idle_expires_at", "absolute_expires_at", "source_ip",
+  "user_agent"}`; never the token or its CSRF token. A session is active while
+  it is unrevoked and within both lifetimes. The serving node includes the
+  activity it has buffered but not yet written (written every 30 seconds while
+  SSO is enabled); activity buffered on another node shows once it is written.
+  Revocation does not depend on this: it revokes every unrevoked session of the
+  user.
+- **Disable and enable** answer `{"user", "changed", "sessions_revoked"}`.
+  Repeating either is a 200 with `"changed": false` and changes nothing. After a
+  disable the user's next request on any session is a 401, and a login is
+  refused with `auth.login_denied` reason `user_disabled`. A login already in
+  flight when the user is disabled cannot create a session afterwards, even if
+  the user is re-enabled before it finishes (it is refused with reason
+  `user_changed`; the user signs in again). An admin cannot disable the user
+  behind its own request (409).
+- **Revoke** answers `{"user_id", "sessions_revoked"}`. An admin may revoke its
+  own sessions.
+
+CLI (`--server` defaults to `http://localhost:8080`; the key comes from
+`CAESIUM_API_KEY` or `--api-key`; `--json` prints the response on stdout and
+nothing else; errors go to stderr and exit 1):
+
+- `caesium auth user list [--issuer ISSUER] [--email TEXT] [--disabled true|false] [--limit N] [--offset N] [--json]`
+  prints a table by default. When there is another page it prints
+  `N users in total; next page: --offset M` to stderr.
+- `caesium auth user get USER_ID [--json]` prints the user and its newest
+  active sessions.
+- `caesium auth user disable USER_ID [--json]`,
+  `caesium auth user enable USER_ID [--json]` and
+  `caesium auth user logout USER_ID [--json]` print a one-line summary.
+
+Find a user's id with `caesium auth user list --email`.
 
 ## Audit and metrics
 
@@ -777,7 +884,17 @@ SSO login and logout lifecycle events are written to the audit log with actions
 shared login tail creates the local user record. Audit metadata includes the
 provider and denial reason where applicable. A login whose groups match no
 mapping (and with no default role) is denied with reason `no_binding`; a
-disabled user is denied with reason `user_disabled`.
+disabled user is denied with reason `user_disabled`, and a login that raced a
+disable is denied with reason `user_changed`.
+
+User administration writes, with `actor` the caller (API key prefix or user
+email), `resource_type` `user`, `resource_id` the user id and namespace `*`:
+
+- `user.disable` (`metadata.sessions_revoked`) and `user.enable`, only when the
+  call changed the user (a repeat writes nothing);
+- `auth.sessions_revoked` with `metadata.reason` (`user_disabled`, `admin` for
+  `caesium auth user logout`, or `user_enabled` when an enable revoked a stray
+  session) and `metadata.count`, only when at least one session was revoked.
 
 Prometheus exposes SSO counters and timing:
 

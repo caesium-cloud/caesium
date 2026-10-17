@@ -361,17 +361,25 @@ var endpointPolicy = map[string]RoutePolicy{
 	"GET /v1/logs/stream":     clusterRoute(admin),
 	"GET /v1/database/schema": clusterRoute(admin),
 	"POST /v1/database/query": clusterRoute(admin),
-	// Key minting and key administration move to the key's namespaces in A5
-	// (minting constraint, principal switch, namespace-admin key list).
-	"GET /v1/auth/keys":             collectionRoute(admin).pendingOn("A5"),
-	"POST /v1/auth/keys":            namespacedRoute(admin).pendingOn("A5"),
-	"POST /v1/auth/keys/:id/revoke": namespacedRoute(admin).pendingOn("A5"),
-	"POST /v1/auth/keys/:id/rotate": namespacedRoute(admin).pendingOn("A5"),
+	// API keys (A5): a namespace admin lists, mints, revokes and rotates keys
+	// confined to its namespaces; minting resolves the body's namespaces ("*"
+	// when none), revoke and rotate the stored key's.
+	"GET /v1/auth/keys":             collectionRoute(admin),
+	"POST /v1/auth/keys":            namespacedRoute(admin),
+	"POST /v1/auth/keys/:id/revoke": namespacedRoute(admin),
+	"POST /v1/auth/keys/:id/rotate": namespacedRoute(admin),
 	// The audit query authorises on ?namespace= (omitted means "*").
 	"GET /v1/auth/audit": namespacedRoute(admin),
 	// The access policy itself (A4).
 	"GET /v1/auth/policy":         clusterRoute(admin),
 	"POST /v1/auth/policy/reload": clusterRoute(admin),
+	// User and session administration (E3): cluster admins only.
+	"GET /v1/auth/users":                      clusterRoute(admin),
+	"GET /v1/auth/users/:id":                  clusterRoute(admin),
+	"POST /v1/auth/users/:id/disable":         clusterRoute(admin),
+	"POST /v1/auth/users/:id/enable":          clusterRoute(admin),
+	"POST /v1/auth/users/:id/sessions/revoke": clusterRoute(admin),
+	"GET /v1/auth/sessions":                   clusterRoute(admin),
 	// Removes a stale dqlite member from the raft configuration (#582
 	// follow-up). Unscoped admins only: the scope middleware denies any
 	// job-scoped key on a route it has no job to check against.

@@ -100,6 +100,9 @@ func TestAuthMiddlewareMountedRoutesHaveRBACPolicy(t *testing.T) {
 		"GET /v1/incidents/:id",
 		"POST /v1/incidents/:id/approvals/:id/approve",
 		"POST /v1/incidents/:id/approvals/:id/reject",
+		"GET /v1/auth/users",
+		"POST /v1/auth/users/:id/sessions/revoke",
+		"GET /v1/auth/sessions",
 	} {
 		require.Contains(t, mounted, key)
 	}
@@ -122,7 +125,9 @@ var planItemPattern = regexp.MustCompile(`^[A-H][0-9]+$`)
 // as a namespace-confined principal, and asserts the response holds only rows
 // from the allowed namespaces. A collection route clears its pending marker
 // only by being listed here with such a test.
-var guardedCollectionRoutes = map[string]string{}
+var guardedCollectionRoutes = map[string]string{
+	"GET /v1/auth/keys": "api/rest/controller/auth TestKeyRoutesCollectionGuard", // A5
+}
 
 // TestMountedRoutesAreClassified is the A3 build gate: every mounted route has
 // a valid role and class; every live namespaced route has a namespace
