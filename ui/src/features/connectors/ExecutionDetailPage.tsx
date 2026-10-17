@@ -7,6 +7,7 @@ import { isInsufficientAccessError } from "@/features/auth/access";
 import { api, ApiError } from "@/lib/api";
 import { usePrincipal } from "@/lib/auth";
 import { ConnectorGate, ObservationTime } from "./ConnectionsPage";
+import { RelationshipsPanel } from "./RelationshipsPanel";
 import { connectorRefreshSchedule, temporalExecutionURL, type ConnectorPageQuery } from "./types";
 
 export function ExecutionDetailPage() {
@@ -60,6 +61,7 @@ function ExecutionObservation() {
         {execution.metadata.pending_activities?.length ? <div className="overflow-x-auto"><table className="w-full text-left text-sm"><thead className="text-text-3"><tr><th className="p-2">Activity ID</th><th className="p-2">Type</th><th className="p-2">Reported attempt</th><th className="p-2">Native state</th></tr></thead><tbody>{execution.metadata.pending_activities.map(activity => <tr key={activity.activity_id}><td className="break-all p-2">{activity.activity_id}</td><td className="p-2">{activity.activity_type}</td><td className="p-2">{activity.attempt}{activity.maximum_attempts ? ` / ${activity.maximum_attempts}` : ""}</td><td className="p-2">{activity.state}</td></tr>)}</tbody></table></div> : <p className="text-sm text-text-3">No pending activity metadata reported.</p>}
       </section>
     </>}
+    {execution && <RelationshipsPanel key={`${connectionId}:${executionId}`} connection={connection} executionId={executionId} observationStale={stale} />}
     <section aria-label="Execution history" className="space-y-3">
       <div className="flex flex-wrap items-center justify-between gap-3"><h2 className="text-base text-text-1">History metadata</h2><div className="flex items-center gap-2 text-sm"><label htmlFor="connector-history-events-per-page">Requested history page size</label><select id="connector-history-events-per-page" aria-describedby="connector-history-page-size-help" className="h-9 rounded-md border border-border bg-background px-3" value={historyParams.page_size} onChange={event => changePage({ page_size: Number(event.target.value) })}>{[1, 5, 10, 25, 50, 100].map(size => <option key={size}>{size}</option>)}</select></div></div>
       <p id="connector-history-page-size-help" className="text-xs text-text-3">Temporal returns native event batches, so a page may contain more or fewer events than requested.</p>

@@ -341,3 +341,63 @@ func TestConnectionBrowserMetadataUsesConfiguredValues(t *testing.T) {
 	require.Equal(t, "https://temporal-ui.example.test/console", view.Connections[0].UIURL)
 	require.Equal(t, int64(30000), view.Connections[0].ConsoleRefreshMS)
 }
+
+func TestCorrelationHTTPIdentityRequiresMatchingPersistedEvidence(t *testing.T) {
+	ref, err := core.NewExecutionReference("primary", map[string]string{"workflow_id": "publication", "run_id": "pinned-run"})
+	require.NoError(t, err)
+	raw, err := json.Marshal(map[string]any{"execution": ref})
+	require.NoError(t, err)
+	original := models.ExternalExecutionCorrelation{ConnectionID: ref.ConnectionID, OpaqueID: ref.OpaqueID(), Evidence: raw}
+	for _, name := range []string{"matching", "wrong connection", "wrong catalog digest", "malformed evidence", "missing evidence", "missing run", "extra coordinate"} {
+		t.Run(name, func(t *testing.T) {
+			row := original
+			switch name {
+			case "wrong connection":
+				row.ConnectionID = "other"
+			case "wrong catalog digest":
+				row.OpaqueID = "other"
+			case "malformed evidence":
+				row.Evidence = []byte(`{"execution":`)
+			case "missing evidence":
+				row.Evidence = []byte(`{}`)
+			case "missing run", "extra coordinate":
+				coordinates := map[string]string{"workflow_id": "publication"}
+				if name == "extra coordinate" {
+					coordinates["run_id"], coordinates["extra"] = "pinned-run", "unexpected"
+				}
+				invalid, e := core.NewExecutionReference("primary", coordinates)
+				require.NoError(t, e)
+				row.OpaqueID = invalid.OpaqueID()
+				row.Evidence, e = json.Marshal(map[string]any{"execution": invalid})
+				require.NoError(t, e)
+			}
+			views := correlationViews([]models.ExternalExecutionCorrelation{row})
+			require.Len(t, views, 1)
+			require.Equal(t, row, views[0].ExternalExecutionCorrelation)
+			if name == "matching" {
+				require.Equal(t, core.ReferenceID(ref), views[0].ExecutionID)
+				require.Equal(t, httpReference(ref), *views[0].Reference)
+				require.NotEqual(t, row.OpaqueID, views[0].ExecutionID)
+			} else {
+				require.Empty(t, views[0].ExecutionID)
+				require.Nil(t, views[0].Reference, "invalid historical identity must not create a navigable target")
+			}
+		})
+	}
+}
+
+func TestReverseLinkBudgetIncludesHTTPNavigationIdentity(t *testing.T) {
+	r, db := testRuntime(t)
+	jobID, runID := uuid.New(), uuid.New()
+	ref, err := core.NewExecutionReference("primary", map[string]string{"workflow_id": "publication", "run_id": "pinned-run"})
+	require.NoError(t, err)
+	row := seedRunLink(t, db, ref.ConnectionID, ref.OpaqueID(), jobID, runID)
+	row.Evidence, err = json.Marshal(map[string]any{"execution": ref})
+	require.NoError(t, err)
+	require.NoError(t, db.Model(&row).Update("evidence", row.Evidence).Error)
+	oldEnvelope, err := json.Marshal(map[string]any{"executions": []models.ExternalExecutionCorrelation{row}})
+	require.NoError(t, err)
+	r.connections["primary"].config.Limits.MaxPageMetadataBytes = len(oldEnvelope)
+	_, err = r.RunLinks(t.Context(), "reader", jobID, runID)
+	require.ErrorIs(t, err, core.ErrPayloadTooLarge, "the additive navigation fields must fit the complete response budget")
+}

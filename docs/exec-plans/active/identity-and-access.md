@@ -491,7 +491,11 @@ translated into cluster-wide bindings and behaviour is unchanged.
       whatever shape the table has when it lands (plain role before A3, classified
       after).
       Depends on: A1 + A2.
-- [ ] A5. API keys with namespaces and SSO-admin key management: `Namespaces` column
+- [x] A5. (W4-α: an explicit `["*"]` is stored as NULL; with a policy file, create
+      and rotate refuse undeclared namespaces; rotation keeps the key's expiry and
+      never extends the old key; `--jobs` is an alias of `--scope-jobs`; the key
+      list stays JSON; whoami asserted over REST until E5's `caesium whoami`.)
+      API keys with namespaces and SSO-admin key management: `Namespaces` column
       (NULL ⇒ cluster), `caesium auth key create --role R --namespace NS [--namespace …]
       [--jobs …]`, `POST /v1/auth/keys` accepts `namespaces`; the minting constraint (a
       caller may only mint/rotate grants ⊆ its own, per namespace); `GET /v1/auth/keys`
@@ -949,7 +953,7 @@ server-brokered `caesium login` flow that works for every provider.
       `internal/auth/session.go`, `internal/auth/service.go`, `pkg/env/env.go`,
       `cmd/start/start.go`, `internal/metrics/metrics.go`, `internal/auth/audit.go`.
       Depends on: E1 + E4.
-- [ ] E3. User and session administration: `GET /v1/auth/users` (filters, paging),
+- [x] E3. User and session administration: `GET /v1/auth/users` (filters, paging),
       `GET /v1/auth/users/:id` (with sessions; user-bound keys join in E4),
       `POST …/disable` (revokes sessions, audits `user.disable`; E4 extends the
       cascade to user-bound keys), `POST …/enable`, `POST …/sessions/revoke`,
@@ -962,6 +966,11 @@ server-brokered `caesium login` flow that works for every provider.
       `api/rest/bind/bind.go`, new `cmd/auth/user.go`, `internal/auth/audit.go`,
       `internal/auth/rbac.go` (entries).
       Depends on: A3.
+      (W4-β: `internal/auth.UserAdmin` is the cascade seam E4 extends; disable
+      also clears the refresh grant, and `SessionStore.Create` is fenced on the
+      user row and `refresh_grant_version`, so a login checked before a disable
+      cannot mint a session. Live scenarios seed SSO users through the catalog
+      on the api-key lanes; G3 still drives a real SSO user.)
 - [ ] E4. User-bound API keys: `APIKey.UserID`; `csk_user_` prefix; on validation the
       service loads the user (disabled ⇒ invalid) and resolves grants from the policy;
       user-bound keys are listed under the user in `GET /v1/auth/users/:id` and
