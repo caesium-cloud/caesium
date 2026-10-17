@@ -200,7 +200,7 @@ func (s *Controller) RunLinks(c *echo.Context) error {
 		return readError(err)
 	}
 	if rows == nil {
-		rows = []models.ExternalExecutionCorrelation{}
+		rows = []service.Correlation{}
 	}
 	return c.JSON(http.StatusOK, map[string]any{"executions": rows})
 }

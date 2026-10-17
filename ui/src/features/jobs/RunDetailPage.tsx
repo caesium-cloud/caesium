@@ -23,6 +23,7 @@ import { Kbd } from "@/components/ui/kbd";
 import { DataAssertionsPanel } from "@/features/datasets/DataAssertionsPanel";
 import { HoldSkipReason } from "@/features/datasets/HoldSkipReason";
 import { IncidentRibbon } from "@/features/incidents/IncidentRibbon";
+import { RunDataEvidence, RunExternalExecutions } from "@/features/connectors/RelationshipsPanel";
 import { INCIDENT_EVENT_TYPES } from "@/features/incidents/incident-utils";
 import { useDagHeight } from "@/hooks/useDagHeight";
 import { api, type Atom, type Incident, type JobRun, type JobTask, type TaskRun } from "@/lib/api";
@@ -489,6 +490,8 @@ export function RunDetailPage() {
       ) : null}
 
       <HoldSkipReason reason={run.tasks?.find((task) => task.error?.startsWith("dataset_hold:"))?.error ?? run.skip_reason} />
+      {features?.connectors_enabled && <RunDataEvidence jobId={jobId} freshnessEnabled={features.freshness_enabled === true} onOpenReceipt={() => setReproducibilityOpen(true)} />}
+      <RunExternalExecutions jobId={jobId} runId={runId} />
       {run.tasks?.filter((task) => task.data_violations?.length || task.schema_violations?.length).map((task) => <DataAssertionsPanel key={task.id} task={task} />)}
       {/* Cache summary */}
       <div className="flex items-center gap-4">
@@ -539,7 +542,7 @@ export function RunDetailPage() {
       </div>
 
       {/* Interactive DAG with task selection */}
-      <div data-testid="run-interactive-dag-section" className="overflow-hidden rounded-md border border-border/50 bg-card">
+      <div id="run-interactive-dag-section" data-testid="run-interactive-dag-section" className="overflow-hidden rounded-md border border-border/50 bg-card">
         <div className="flex items-center gap-2 border-b border-border/50 px-4 py-2.5">
           <span className="text-[11px] font-bold lowercase text-text-3">
             graph
@@ -608,7 +611,7 @@ export function RunDetailPage() {
         </Card>
       ) : null}
 
-      <div data-testid="run-reproducibility-section" className="overflow-hidden rounded-md border border-border/50 bg-card">
+      <div id="run-reproducibility-section" data-testid="run-reproducibility-section" className="overflow-hidden rounded-md border border-border/50 bg-card">
         <button
           type="button"
           className="flex w-full items-center gap-2 px-4 py-2.5 text-left hover:bg-obsidian/30 transition-colors"

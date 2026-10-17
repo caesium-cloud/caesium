@@ -10,8 +10,9 @@
 > admission with lookup-only component recovery. Authenticated HTTP monitoring
 > exposes discovery, detail, history, relationships and verified local run links.
 > Declared HTTP Queries/actions and operation receipts compose those services.
-> Console monitoring exposes configured connections and exact external runs.
-> Console relationship/approval journeys remain plan items E2 and E3.
+> Console monitoring exposes configured connections and exact external runs,
+> typed workflow relationships and verified links to existing Caesium runs.
+> The Console approval journey remains plan item E3.
 > Job-definition YAML is unchanged.
 
 An execution connector lets Caesium inspect an external workflow system and
@@ -389,8 +390,12 @@ report incompleteness rather than silently claiming complete history.
 Relationship reads compose trusted Temporal evidence with the declared activity
 and local-job allowlist. They can persist verified links to existing admissions;
 they never create local runs. Follow a verified local job/run into its existing
-logs, receipts and data APIs. An authorized scoped caller of the reverse-link
-route receives an empty external list; the job/run ownership check still applies.
+logs, receipts and data APIs. Correlation rows include a routable `execution_id`
+and public `reference` when their stored evidence matches the catalog identity.
+The existing `opaque_id` is a catalog digest, not a route parameter. Historical
+rows with unavailable identity evidence omit navigation fields rather than
+inventing a target. An authorized scoped caller of the reverse-link route
+receives an empty external list; the job/run ownership check still applies.
 Verified reverse links remain available after their connection is disabled or
 removed, without contacting the provider. The process read budget and each
 participating enabled connection's read budget still apply. Response ceilings
@@ -531,10 +536,39 @@ Omitting it leaves that link absent.
 
 Gate-off, scoped, namespace-only, agent and unauthenticated routes disclose no
 external workflow details. The monitoring view performs no automatic status
-Queries or actions. Relationship journeys and the approval form remain E2/E3.
+Queries or actions. The approval form remains E3.
 The dedicated `connectors` Playwright project uses the real development fixture;
 default and auth projects exclude its specifications. A selected connector
 browser test fails if its gate, authentication or real-worker markers are absent.
+
+### Follow workflow and run evidence
+
+On an external execution, **External relationships** separates parent, child
+and continuation links from **Verified Caesium delegations**. Each external link
+pins its own Workflow ID and Run ID. A continuation is another execution; it
+never changes the target of the current page. Relationship pages have their own
+pagination and explicitly identify partial or unavailable evidence.
+
+A verified admission records the recognized activity, local job, admission
+outcome and any queue/run IDs. While an admission is queued, it has no run to
+open. After promotion, the same admission and queue identity gain a link to the
+admitted run. Refreshing relationships reads existing admission state and never
+starts or retries a local job.
+
+Open that run to use its existing task logs, reproducibility receipt and output
+or assertion evidence. **External execution links** on the run page returns to the
+pinned workflow. These links verify the declared activity/admission protocol;
+they do not prove that an arbitrary external workflow produced a dataset.
+Dataset declarations describe intended associations. Freshness, materialization
+and reproducibility require the local run's actual evidence. An opaque or
+unbound workflow receives no invented lineage or freshness.
+
+Run pages retain their existing permissions. A job-scoped or namespace-only
+principal can inspect permitted local evidence without revealing external
+workflow identities. Only an unscoped cluster viewer or higher sees the
+external-execution panel. A provider outage leaves relationship information
+explicitly unavailable or stale; historical verified reverse links remain
+readable without contacting the provider.
 
 ## Temporal observation
 

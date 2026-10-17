@@ -56,6 +56,50 @@ export interface ExternalHistoryPage {
   problems?: { event_id: number; cause: string }[];
 }
 
+export interface ConnectorExecutionReference {
+  connection_id: string;
+  coordinates: Record<string, string>;
+}
+
+export interface ExternalRelationship {
+  type: "parent" | "child" | "continuation" | (string & {});
+  id: string;
+  reference: ConnectorExecutionReference;
+  event_id?: number;
+}
+
+/** Verified local admission identity, rather than inferred data provenance. */
+export interface ExternalDelegation {
+  id: string;
+  opaque_id: string;
+  execution_id?: string;
+  reference?: ConnectorExecutionReference;
+  connection_id: string;
+  activity_id: string;
+  activity_type: string;
+  relation_type: string;
+  binding_version: string;
+  admission_id: string;
+  job_id: string;
+  idempotency_key: string;
+  outcome: string;
+  queue_id?: string;
+  run_id?: string;
+  source_event_id: number;
+  verified_at: string;
+}
+
+export interface ExternalRelationshipsPage {
+  relationships: ExternalRelationship[];
+  correlations: ExternalDelegation[];
+  incomplete: boolean;
+  cursor?: string;
+}
+
+export interface RunExternalExecutions {
+  executions: ExternalDelegation[];
+}
+
 export interface ConnectorPageQuery {
   cursor?: string;
   page_size?: number;

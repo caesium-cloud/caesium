@@ -60,13 +60,19 @@ type connectorReadConnections struct {
 	} `json:"connections"`
 }
 
+type connectorReadCorrelation struct {
+	models.ExternalExecutionCorrelation
+	ExecutionID string                 `json:"execution_id"`
+	Reference   connectorReadReference `json:"reference"`
+}
+
 type connectorReadRelations struct {
 	Relationships []struct {
 		Type      string                 `json:"type"`
 		ID        string                 `json:"id"`
 		Reference connectorReadReference `json:"reference"`
 	} `json:"relationships"`
-	Correlations []models.ExternalExecutionCorrelation `json:"correlations"`
+	Correlations []connectorReadCorrelation `json:"correlations"`
 }
 
 func connectorReadHTTP(t *testing.T, base, key, method, path string, in, out any) (int, []byte) {
@@ -530,12 +536,23 @@ func (s *IntegrationTestSuite) connectorReadCorrelation(viewer, scoped createdAP
 	s.Require().Equal("delegation", link.RelationType)
 	s.Require().True(strings.HasPrefix(link.IdempotencyKey, ref.RunID+"/"))
 	var reverse struct {
-		Executions []models.ExternalExecutionCorrelation `json:"executions"`
+		Executions []connectorReadCorrelation `json:"executions"`
 	}
 	reversePath := fmt.Sprintf("/v1/jobs/%s/runs/%s/external-executions", job.ID, link.RunID)
 	connectorReadHTTP(s.T(), s.caesiumURL, viewer.Plaintext, http.MethodGet, reversePath, nil, &reverse)
 	s.Require().Len(reverse.Executions, 1)
 	s.Require().Equal(link.ID, reverse.Executions[0].ID)
+	s.Require().Equal(connector.ReferenceID(reference), link.ExecutionID)
+	s.Require().Equal(link.ExecutionID, reverse.Executions[0].ExecutionID)
+	s.Require().Equal("fixture", reverse.Executions[0].Reference.ConnectionID)
+	s.Require().Equal(reference.Coordinates, reverse.Executions[0].Reference.Coordinates)
+	s.Require().NotEqual(link.OpaqueID, reverse.Executions[0].ExecutionID, "catalog digest is not an HTTP execution target")
+	var navigated connectorReadExecution
+	status, raw := connectorReadHTTP(s.T(), s.caesiumURL, viewer.Plaintext, http.MethodGet,
+		"/v1/connectors/fixture/executions/"+url.PathEscape(reverse.Executions[0].ExecutionID), nil, &navigated)
+	s.Require().Equal(http.StatusOK, status, string(raw))
+	s.Require().Equal(link.ExecutionID, navigated.ID)
+	s.Require().Equal(reference.Coordinates, navigated.Reference.Coordinates, "reverse navigation must inspect the original immutable execution")
 	connectorReadHTTP(s.T(), s.caesiumURL, scoped.Plaintext, http.MethodGet, reversePath, nil, &reverse)
 	s.Require().Empty(reverse.Executions, "local job permission must not disclose unrestricted external coordinates")
 	s.Require().Eventually(func() bool {
@@ -554,7 +571,8 @@ func (s *IntegrationTestSuite) connectorReadCorrelation(viewer, scoped createdAP
 	connectorReadHTTP(s.T(), s.caesiumURL, viewer.Plaintext, http.MethodGet, reversePath, nil, &reverse)
 	s.Require().Len(reverse.Executions, 1)
 	s.Require().Equal(link.ID, reverse.Executions[0].ID, "public reverse link must survive an actual Caesium process restart")
-	retirement := s.connectorReadRetiredCorrelation(viewer, scoped, reference, link, reversePath)
+	s.Require().Equal(link.ExecutionID, reverse.Executions[0].ExecutionID, "restart must preserve the routable execution identity")
+	retirement := s.connectorReadRetiredCorrelation(viewer, scoped, reference, link.ExternalExecutionCorrelation, reversePath)
 	s.Require().NoError(os.WriteFile(filepath.Join(os.Getenv("CAESIUM_CONNECTORS_ARTIFACTS"), "read-correlation-http-evidence.json"), mustConnectorJSON(s.T(), map[string]any{"candidate_sha": os.Getenv("CAESIUM_CONNECTORS_CANDIDATE_SHA"), "workflow": ref, "queued": queued, "promoted": promoted, "reverse": reverse, "relationship_http_reads": relationshipReads, "retired_connection": retirement}), 0600))
 }
 
@@ -618,7 +636,7 @@ func (s *IntegrationTestSuite) connectorReadRetiredCorrelation(viewer, scoped cr
 	s.Require().NotEqual(link.ID, retiredLink.ID)
 	evidence["correlation"] = retiredLink
 	var reverse struct {
-		Executions []models.ExternalExecutionCorrelation `json:"executions"`
+		Executions []connectorReadCorrelation `json:"executions"`
 	}
 	assertLinks := func() {
 		beforeRPC := connectorProviderRPCs(s.T())
@@ -626,6 +644,11 @@ func (s *IntegrationTestSuite) connectorReadRetiredCorrelation(viewer, scoped cr
 		var ids []uuid.UUID
 		for _, row := range reverse.Executions {
 			ids = append(ids, row.ID)
+			expectedRef, err := connector.NewExecutionReference(row.ConnectionID, reference.Coordinates)
+			s.Require().NoError(err)
+			s.Require().Equal(connector.ReferenceID(expectedRef), row.ExecutionID, "historical links retain their exact HTTP identity without provider reads")
+			s.Require().Equal(expectedRef.ConnectionID, row.Reference.ConnectionID)
+			s.Require().Equal(expectedRef.Coordinates, row.Reference.Coordinates)
 		}
 		s.Require().ElementsMatch([]uuid.UUID{link.ID, retiredLink.ID}, ids, "retired correlations must remain visible alongside enabled connections")
 		connectorReadHTTP(s.T(), s.caesiumURL, scoped.Plaintext, http.MethodGet, reversePath, nil, &reverse)
