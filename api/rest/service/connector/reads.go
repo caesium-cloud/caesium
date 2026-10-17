@@ -532,11 +532,43 @@ type Relationship struct {
 	Reference Reference `json:"reference"`
 	EventID   int64     `json:"event_id,omitempty"`
 }
+
+// Correlation keeps the persisted admission evidence and adds the HTTP identity
+// needed to navigate back to its exact execution. OpaqueID remains a catalog
+// digest and must never be used as an execution route parameter.
+type Correlation struct {
+	models.ExternalExecutionCorrelation
+	ExecutionID string     `json:"execution_id,omitempty"`
+	Reference   *Reference `json:"reference,omitempty"`
+}
+
+func correlationViews(rows []models.ExternalExecutionCorrelation) []Correlation {
+	out := make([]Correlation, 0, len(rows))
+	for _, row := range rows {
+		view := Correlation{ExternalExecutionCorrelation: row}
+		var evidence struct {
+			Execution core.ExecutionReference `json:"execution"`
+		}
+		if json.Unmarshal(row.Evidence, &evidence) == nil {
+			ref, err := core.NewExecutionReference(evidence.Execution.ConnectionID, evidence.Execution.Coordinates)
+			if err == nil && ref.ConnectionID == row.ConnectionID && ref.OpaqueID() == row.OpaqueID {
+				id := core.ReferenceID(ref)
+				if _, err := parseReference(row.ConnectionID, id); err == nil {
+					reference := httpReference(ref)
+					view.ExecutionID, view.Reference = id, &reference
+				}
+			}
+		}
+		out = append(out, view)
+	}
+	return out
+}
+
 type Relationships struct {
-	Relationships []Relationship                        `json:"relationships"`
-	Correlations  []models.ExternalExecutionCorrelation `json:"correlations"`
-	Incomplete    bool                                  `json:"incomplete"`
-	Cursor        string                                `json:"cursor,omitempty"`
+	Relationships []Relationship `json:"relationships"`
+	Correlations  []Correlation  `json:"correlations"`
+	Incomplete    bool           `json:"incomplete"`
+	Cursor        string         `json:"cursor,omitempty"`
 }
 
 func (r *Runtime) Relationships(ctx context.Context, principal, id, opaque, pageCursor string, size int) ([]byte, error) {
@@ -577,7 +609,7 @@ func (r *Runtime) Relationships(ctx context.Context, principal, id, opaque, page
 		if err != nil {
 			return nil, err
 		}
-		out := Relationships{Relationships: []Relationship{}, Correlations: []models.ExternalExecutionCorrelation{}, Incomplete: page.Incomplete || len(page.NextPageToken) > 0, Cursor: r.encodeCursor(id, filter, page.NextPageToken)}
+		out := Relationships{Relationships: []Relationship{}, Correlations: []Correlation{}, Incomplete: page.Incomplete || len(page.NextPageToken) > 0, Cursor: r.encodeCursor(id, filter, page.NextPageToken)}
 		relations := page.Relations
 		if inspected.Metadata.Parent != nil {
 			relations = append(relations, *inspected.Metadata.Parent)
@@ -625,14 +657,15 @@ func (r *Runtime) Relationships(ctx context.Context, principal, id, opaque, page
 		if err := r.Ready(call); err != nil {
 			return nil, err
 		}
-		out.Correlations, err = catalog.Correlations(call, ref)
+		rows, err := catalog.Correlations(call, ref)
 		if err != nil {
 			return nil, err
 		}
+		out.Correlations = correlationViews(rows)
 		return boundRelationships(out, c.config.Limits)
 	})
 }
-func (r *Runtime) RunLinks(ctx context.Context, principal string, jobID, runID uuid.UUID) ([]models.ExternalExecutionCorrelation, error) {
+func (r *Runtime) RunLinks(ctx context.Context, principal string, jobID, runID uuid.UUID) ([]Correlation, error) {
 	ctx, cancel := context.WithTimeout(ctx, core.MaxRPCDeadline)
 	defer cancel()
 	if err := r.Ready(ctx); err != nil {
@@ -671,10 +704,11 @@ func (r *Runtime) RunLinks(ctx context.Context, principal string, jobID, runID u
 	if len(rows) > entries {
 		return nil, core.ErrPayloadTooLarge
 	}
-	if _, err := bound(map[string]any{"executions": rows}, metadata); err != nil {
+	out := correlationViews(rows)
+	if _, err := bound(map[string]any{"executions": out}, metadata); err != nil {
 		return nil, err
 	}
-	return rows, nil
+	return out, nil
 }
 
 func (r *Runtime) String() string { return fmt.Sprintf("connector runtime %s", r.fingerprint) }

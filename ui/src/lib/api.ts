@@ -1,6 +1,6 @@
 import { parseAllDocuments } from "yaml";
 import { clearApiKey, withAuthHeaders } from "./auth";
-import type { ConnectorConnections, ConnectorListQuery, ConnectorPageQuery, ExternalExecution, ExternalExecutionPage, ExternalHistoryPage } from "@/features/connectors/types";
+import type { ConnectorConnections, ConnectorListQuery, ConnectorPageQuery, ExternalExecution, ExternalExecutionPage, ExternalHistoryPage, ExternalRelationshipsPage, RunExternalExecutions } from "@/features/connectors/types";
 
 export interface Job {
   id: string;
@@ -1441,6 +1441,10 @@ export const api = {
     request<ExternalExecution>(`/connectors/${encodeURIComponent(connectionId)}/executions/${encodeURIComponent(executionId)}`, { signal }),
   getConnectorHistory: (connectionId: string, executionId: string, params: ConnectorPageQuery = {}, signal?: AbortSignal) =>
     request<ExternalHistoryPage>(`/connectors/${encodeURIComponent(connectionId)}/executions/${encodeURIComponent(executionId)}/history?${queryString({ ...params })}`, { signal }),
+  getConnectorRelationships: (connectionId: string, executionId: string, params: ConnectorPageQuery = {}, signal?: AbortSignal) =>
+    request<ExternalRelationshipsPage>(`/connectors/${encodeURIComponent(connectionId)}/executions/${encodeURIComponent(executionId)}/relationships?${queryString({ ...params })}`, { signal }),
+  getRunExternalExecutions: (jobId: string, runId: string, signal?: AbortSignal) =>
+    request<RunExternalExecutions>(`/jobs/${encodeURIComponent(jobId)}/runs/${encodeURIComponent(runId)}/external-executions`, { signal }),
   getJobs: () => request<Job[]>("/jobs"),
   getJob: (id: string) => request<Job>(`/jobs/${id}`),
   /** One page of a job's runs. See `JobRunsPage`; use `getAllJobRuns` for the whole history. */
