@@ -56,6 +56,15 @@ func TestRuntimeExecutorStartPersistenceStopsUntrackedAtom(t *testing.T) {
 	for _, scenario := range []string{"claim-context-cancelled", "claim-context-cause", "task-deadline", "run-deadline", "retention-expired", "permanent-write-error"} {
 		t.Run(scenario, func(t *testing.T) {
 			store, db, taskRun := seedClaimedTaskRun(t)
+			// database/sql may discard the transaction's connection when its
+			// context is cancelled. Keep the shared in-memory database alive
+			// while leaving only one other connection available for queries.
+			sqlDB, err := db.DB()
+			require.NoError(t, err)
+			sqlDB.SetMaxOpenConns(2)
+			keeper, err := sqlDB.Conn(context.Background())
+			require.NoError(t, err)
+			t.Cleanup(func() { require.NoError(t, keeper.Close()) })
 			ctx, cancel := context.WithCancel(t.Context())
 			defer cancel()
 			if scenario == "claim-context-cause" {
