@@ -127,6 +127,8 @@ func (r *Runner) RunWithResult(ctx context.Context, def *schema.Definition) (*Ru
 		job.WithAtomServiceFactory(dbAtomService(db)),
 		job.WithTaskEdgeServiceFactory(dbTaskEdgeService(db)),
 		job.WithDispatchRunCallbacks(func(context.Context, uuid.UUID, uuid.UUID, error) error { return nil }),
+		// Client-side: no server access policy is loaded in this process.
+		job.WithClientProcess(),
 	}
 	if r.cfg.EngineFactory != nil {
 		factory := r.cfg.EngineFactory

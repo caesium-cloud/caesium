@@ -23,6 +23,12 @@ type Identity struct {
 type Resolver interface {
 	Resolve(ctx context.Context, ref string) (string, error)
 	ResolveWithIdentity(ctx context.Context, ref string) (string, Identity, error)
+	// CanonicalTarget returns the provider/path the reference would actually
+	// read, derived from the provider's own effective-target parser (query
+	// overrides included) without reading the secret: env/<name>,
+	// vault/<path>#<field> or k8s/<namespace>/<secret>. Namespace secret rules
+	// (ScopedResolver) match against this string, never the surface path.
+	CanonicalTarget(ref string) (string, error)
 }
 
 // IdentityVerifier verifies a previously captured identity without relying on

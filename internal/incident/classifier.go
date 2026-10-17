@@ -8,9 +8,11 @@ package incident
 
 import (
 	"regexp"
+	"strings"
 
 	"github.com/caesium-cloud/caesium/internal/atom"
 	"github.com/caesium-cloud/caesium/internal/event"
+	"github.com/caesium-cloud/caesium/internal/jobdef/secret"
 )
 
 // FailureClass buckets a failure for remediation routing. The classifier is
@@ -35,6 +37,11 @@ const (
 	ClassOOM FailureClass = "oom"
 	// ClassQuota covers rate limits / quota exhaustion.
 	ClassQuota FailureClass = "quota"
+	// ClassConfig covers a task refused by configuration rather than by a
+	// runtime fault — today a secret reference its namespace's secret rules
+	// do not allow. Retrying cannot clear it, so no deterministic rule retries
+	// it; an operator changes the policy or the manifest.
+	ClassConfig FailureClass = "config"
 	// ClassUnknown is the fallback — always agent-eligible.
 	ClassUnknown FailureClass = "unknown"
 )
@@ -142,10 +149,11 @@ func (c *Classifier) WithLogRule(pattern string, class FailureClass) (*Classifie
 //  1. run_timed_out / sla_missed          → sla_risk
 //  2. schema_violation event / violations → schema_violation
 //  3. Runtime OOMKilled evidence          → oom; known false suppresses 137 fallback
-//  4. StartupFailure / ResourceFailure    → transient_infra
-//  5. log-tail regex table                → data_unavailable|auth_failure|oom|quota
-//  6. exit-code table                     → (default 137 → oom)
-//  7. fallback                            → unknown
+//  4. Error carries the secret denial     → config (Error only, never LogTail)
+//  5. StartupFailure / ResourceFailure    → transient_infra
+//  6. log-tail regex table                → data_unavailable|auth_failure|oom|quota
+//  7. exit-code table                     → (default 137 → oom)
+//  8. fallback                            → unknown
 func (c *Classifier) Classify(sig Signal) FailureClass {
 	switch event.Type(sig.EventType) {
 	case event.TypeRunTimedOut, event.TypeSLAMissed:
@@ -160,6 +168,13 @@ func (c *Classifier) Classify(sig Signal) FailureClass {
 
 	if sig.OOMKilled {
 		return ClassOOM
+	}
+
+	// A namespace secret denial is written by the executor into the task
+	// error, never by the container, so only Error is consulted: a container
+	// printing the phrase into its log cannot make itself config.
+	if strings.Contains(sig.Error, secret.DeniedMarker) {
+		return ClassConfig
 	}
 
 	switch atom.Result(sig.Result) {

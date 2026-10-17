@@ -778,7 +778,7 @@ resolver refuses references outside the namespace's allow-list at lint and at ru
       `helm/caesium/templates/rolebinding.yaml`, `helm/caesium/ci/test-values-k8s.yaml`,
       `test/` (k8s lane scenario), `docs/kubernetes-deployment.md`.
       Depends on: C1 + C2.
-- [ ] C4. Scoped secret resolution: `secret.ScopedResolver{inner, namespace, rules}`
+- [x] C4. Scoped secret resolution: `secret.ScopedResolver{inner, namespace, rules}`
       **canonicalises before matching** — the Kubernetes resolver accepts a
       namespace in the path and `?namespace=`, `?name=`, `?key=` overrides
       (`kubernetes.go` `parseReference`), so the scoped resolver computes the effective
@@ -812,6 +812,12 @@ resolver refuses references outside the namespace's allow-list at lint and at ru
       `internal/worker/runtime_executor.go` (cache path and resolution), `internal/trigger/http/http.go`, `internal/jobdef/lint/secret.go`,
       `internal/incident/classifier.go`.
       Depends on: A4 + B1.
+      (W4-ε: also checks `POST /v1/jobdefs/diff`; fan-out instances check
+      before their own cache lookup; a denial is terminal in every retry loop;
+      unsupported rule providers fail policy validation; rules are node-local
+      until C2; `why` surfacing of the class is left to C5; client-side runs
+      never wait for a server policy; replays check before reusing a step. Live: `TestAuthSecretScope`,
+      `TestAuthSecretScopeWebhook`, `TestDevOnceSecretWithAPolicyFileConfigured`.)
 - [ ] C5. Secret-scoping end to end: with the H-1 fixture's `marketing` allow-list, a
       manifest referencing `env/FINANCE_*` is rejected by `caesium job lint` (server)
       naming the redacted reference; applied with lint bypassed it fails the task with

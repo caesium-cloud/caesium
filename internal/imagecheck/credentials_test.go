@@ -27,6 +27,10 @@ func (m mapResolver) ResolveWithIdentity(_ context.Context, ref string) (string,
 	return v, secret.Identity{}, nil
 }
 
+func (m mapResolver) CanonicalTarget(string) (string, error) {
+	return "", errors.New("canonical target unsupported by test stub")
+}
+
 func TestCredentialsFromSecrets_LookupAndNormalisation(t *testing.T) {
 	resolver := mapResolver{
 		"secret://env/HUB":     "hubuser:hubpass",
