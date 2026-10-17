@@ -37,6 +37,8 @@ type apiKeyMetadata struct {
 	Scope       *struct {
 		Jobs []string `json:"jobs"`
 	} `json:"scope"`
+	// Namespaces is absent (nil) for a cluster-wide key.
+	Namespaces []string `json:"namespaces"`
 }
 
 // createdAPIKey pairs a freshly minted key's plaintext with its metadata. The
@@ -241,13 +243,15 @@ func (s *IntegrationTestSuite) TestAuthAuditCLI() {
 }
 
 type auditEntry struct {
-	ID           string    `json:"id"`
-	Timestamp    time.Time `json:"timestamp"`
-	Actor        string    `json:"actor"`
-	Action       string    `json:"action"`
-	ResourceType string    `json:"resource_type"`
-	ResourceID   string    `json:"resource_id"`
-	Outcome      string    `json:"outcome"`
+	ID           string          `json:"id"`
+	Timestamp    time.Time       `json:"timestamp"`
+	Actor        string          `json:"actor"`
+	Action       string          `json:"action"`
+	ResourceType string          `json:"resource_type"`
+	ResourceID   string          `json:"resource_id"`
+	Outcome      string          `json:"outcome"`
+	Namespace    string          `json:"namespace"`
+	Metadata     json.RawMessage `json:"metadata"`
 }
 
 // TestAuthKeysREST hits the key-management REST surface directly — the same
@@ -259,7 +263,7 @@ func (s *IntegrationTestSuite) TestAuthKeysREST() {
 		"the auth lane must export an admin key (CAESIUM_API_KEY / CAESIUM_AUTH_ADMIN_KEY) to the runner")
 
 	description := fmt.Sprintf("auth-lane rest key %d", time.Now().UnixNano())
-	payload := fmt.Sprintf(`{"role":"viewer","description":%q}`, description)
+	payload := fmt.Sprintf(`{"role":"viewer","description":%q,"expires_in":"90d"}`, description)
 
 	status, body := s.requestWithKey(http.MethodPost, "/v1/auth/keys", s.authAPIKey, strings.NewReader(payload))
 	s.Require().Equal(http.StatusCreated, status, body)
@@ -274,13 +278,35 @@ func (s *IntegrationTestSuite) TestAuthKeysREST() {
 	s.Equal("viewer", createResp.APIKey.Role)
 	s.NotContains(body, `"key_hash"`, "the stored hash must never leave the server")
 
-	// GET /v1/auth/keys lists it.
+	// A scope that would read back as unscoped is a 400 even for a cluster
+	// admin, and no credential is issued: a job list naming no job, alone or
+	// beside an agent claim with no incident (which reads back as no claim).
+	refusedDescription := fmt.Sprintf("auth-lane refused scope %d", time.Now().UnixNano())
+	for scope, want := range map[string]string{
+		`{"jobs":[" "],"agent":{}}`: "scope.agent must name an incident_id",
+		`{"jobs":[],"agent":{"incident_id":"00000000-0000-0000-0000-000000000000"}}`: "scope.agent must name an incident_id",
+		`{"jobs":[]}`:      "scope.jobs must name at least one job alias",
+		`{"jobs":[" "]}`:   "scope.jobs must name at least one job alias",
+		`{"agent":{}}`:     "scope.agent must name an incident_id",
+		`{"jobs":["",""]}`: "scope.jobs must name at least one job alias",
+	} {
+		refused := fmt.Sprintf(`{"role":"runner","description":%q,"scope":%s}`, refusedDescription, scope)
+		status, body := s.requestWithKey(http.MethodPost, "/v1/auth/keys", s.authAPIKey, strings.NewReader(refused))
+		s.Equal(http.StatusBadRequest, status, "scope %s: %s", scope, body)
+		s.Contains(body, want, "scope %s", scope)
+		s.NotContains(body, "csk_", "scope %s must issue no credential", scope)
+	}
+
+	// GET /v1/auth/keys lists the minted key, and none of the refused ones.
 	status, body = s.requestWithKey(http.MethodGet, "/v1/auth/keys", s.authAPIKey, nil)
 	s.Require().Equal(http.StatusOK, status, body)
 	var listed []apiKeyMetadata
 	s.Require().NoError(json.Unmarshal([]byte(body), &listed))
 	s.True(containsAPIKeyID(listed, createResp.APIKey.ID),
 		"key %s must appear in GET /v1/auth/keys", createResp.APIKey.ID)
+	for _, key := range listed {
+		s.NotEqual(refusedDescription, key.Description, "a refused scope must not mint key %s", key.ID)
+	}
 
 	// A viewer-role key may NOT mint keys (RBAC: POST /v1/auth/keys is admin).
 	status, body = s.requestWithKey(
@@ -290,7 +316,10 @@ func (s *IntegrationTestSuite) TestAuthKeysREST() {
 	s.Equal(http.StatusForbidden, status,
 		"a viewer-role key must be denied POST /v1/auth/keys: %s", body)
 
-	// Rotate through REST.
+	// Rotate through REST: the 90-day key's replacement keeps the 90 days and
+	// the old key's expiry is cut to the 1m grace.
+	s.Require().NotNil(createResp.APIKey.ExpiresAt)
+	rotatedAt := time.Now().UTC()
 	status, body = s.requestWithKey(
 		http.MethodPost,
 		fmt.Sprintf("/v1/auth/keys/%s/rotate", createResp.APIKey.ID),
@@ -304,6 +333,13 @@ func (s *IntegrationTestSuite) TestAuthKeysREST() {
 	}
 	s.Require().NoError(json.Unmarshal([]byte(body), &rotateResp))
 	s.NotEqual(createResp.APIKey.ID, rotateResp.APIKey.ID)
+	s.Require().NotNil(rotateResp.APIKey.ExpiresAt)
+	s.True(rotateResp.APIKey.ExpiresAt.Equal(*createResp.APIKey.ExpiresAt),
+		"replacement expiry %s, want the original %s", rotateResp.APIKey.ExpiresAt, createResp.APIKey.ExpiresAt)
+	graceExpiry := s.listedKey(createResp.APIKey.ID).ExpiresAt
+	s.Require().NotNil(graceExpiry)
+	s.WithinDuration(rotatedAt.Add(time.Minute), *graceExpiry, time.Minute,
+		"the old 90-day key must expire with the 1m grace, not at %s", graceExpiry)
 
 	status, body = s.requestWithKey(http.MethodGet, "/v1/jobs", rotateResp.Key, nil)
 	s.Require().Equal(http.StatusOK, status, body)

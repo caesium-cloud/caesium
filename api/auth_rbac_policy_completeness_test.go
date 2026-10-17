@@ -125,7 +125,9 @@ var planItemPattern = regexp.MustCompile(`^[A-H][0-9]+$`)
 // as a namespace-confined principal, and asserts the response holds only rows
 // from the allowed namespaces. A collection route clears its pending marker
 // only by being listed here with such a test.
-var guardedCollectionRoutes = map[string]string{}
+var guardedCollectionRoutes = map[string]string{
+	"GET /v1/auth/keys": "api/rest/controller/auth TestKeyRoutesCollectionGuard", // A5
+}
 
 // TestMountedRoutesAreClassified is the A3 build gate: every mounted route has
 // a valid role and class; every live namespaced route has a namespace

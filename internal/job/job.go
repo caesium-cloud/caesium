@@ -173,6 +173,9 @@ type job struct {
 	newPodmanEngine     func(context.Context) atom.Engine
 	atomPollInterval    time.Duration
 	secretResolver      secret.Resolver
+	// clientProcess marks a run a client process executes (WithClientProcess):
+	// its secret scope never waits for a server access policy.
+	clientProcess bool
 	// imageResolver is the digest resolver pinDigests uses. Nil falls back to
 	// imagecheck.Default(); tests inject a stub so Create can be asserted
 	// against a known digest without a registry.
@@ -543,6 +546,18 @@ func WithSecretResolver(resolver secret.Resolver) JobOption {
 	}
 }
 
+// WithClientProcess marks the run as executed by a client process (`caesium
+// dev`, `caesium reproduce`, a no-server `caesium run retry`) rather than by
+// the server. A client never installs the server's access policy, so its
+// secret scope ignores a CAESIUM_AUTH_POLICY_FILE inherited from the
+// environment instead of waiting for a policy no initialisation in the process
+// will load (secret.ForClientNamespace).
+func WithClientProcess() JobOption {
+	return func(j *job) {
+		j.clientProcess = true
+	}
+}
+
 func (j *job) digestResolver() *imagecheck.Resolver {
 	if j != nil && j.imageResolver != nil {
 		return j.imageResolver
@@ -642,6 +657,8 @@ func (j *job) startReplacementRun(ctx context.Context, runID uuid.UUID, params m
 			// the engine that spawned it.
 			engine.beforeComplete = j.beforeComplete
 			engine.rateLimitClock = j.rateLimitClock
+			// A client process's replacement is still client-side.
+			engine.clientProcess = j.clientProcess
 		}
 		if err := replacement.Run(runCtx); err != nil {
 			log.Error("partition retry replacement run failure", "id", j.id, "run_id", runID, "error", err)

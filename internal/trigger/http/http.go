@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"maps"
 	stdhttp "net/http"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -287,5 +288,46 @@ func (h *HTTP) resolveSecret(ctx context.Context, value string) (string, error) 
 	if h.secretResolver == nil {
 		return "", fmt.Errorf("secret resolver is not configured")
 	}
+	if err := h.checkSecretScope(ctx, value); err != nil {
+		return "", err
+	}
 	return h.secretResolver.Resolve(ctx, value)
+}
+
+// checkSecretScope applies namespace secret rules to the trigger's secret: it
+// belongs to the trigger's jobs, so every namespace those jobs live in must
+// allow the reference (a trigger shared across namespaces needs all of them).
+// A trigger with no jobs is checked against the default namespace. With no
+// policy rules anywhere this is a no-op and lists nothing.
+func (h *HTTP) checkSecretScope(ctx context.Context, ref string) error {
+	if !secret.ScopingActive() {
+		return nil
+	}
+	jobs, err := h.listJobs(ctx, h.id.String())
+	if err != nil {
+		return fmt.Errorf("list trigger jobs for the secret scope check: %w", err)
+	}
+	seen := make(map[string]struct{}, len(jobs))
+	namespaces := make([]string, 0, len(jobs))
+	for _, j := range jobs {
+		if j == nil {
+			continue
+		}
+		namespace := models.NamespaceOrDefault(j.Namespace)
+		if _, ok := seen[namespace]; ok {
+			continue
+		}
+		seen[namespace] = struct{}{}
+		namespaces = append(namespaces, namespace)
+	}
+	if len(namespaces) == 0 {
+		namespaces = append(namespaces, models.DefaultNamespace)
+	}
+	slices.Sort(namespaces)
+	for _, namespace := range namespaces {
+		if err := secret.ForNamespace(h.secretResolver, namespace).Allow(ref); err != nil {
+			return err
+		}
+	}
+	return nil
 }

@@ -232,6 +232,18 @@ type CreateKeyResponse struct {
 
 // CreateKey generates a new API key and persists its hash.
 func (s *Service) CreateKey(req *CreateKeyRequest) (*CreateKeyResponse, error) {
+	resp, err := s.newKey(req)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.db.Create(resp.Key).Error; err != nil {
+		return nil, fmt.Errorf("persist api key: %w", err)
+	}
+	return resp, nil
+}
+
+// newKey generates a key and its record without persisting it.
+func (s *Service) newKey(req *CreateKeyRequest) (*CreateKeyResponse, error) {
 	plaintext, prefix, err := GenerateKey()
 	if err != nil {
 		return nil, err
@@ -261,11 +273,6 @@ func (s *Service) CreateKey(req *CreateKeyRequest) (*CreateKeyResponse, error) {
 		CreatedAt:   s.nowUTC(),
 		ExpiresAt:   req.ExpiresAt,
 	}
-
-	if err := s.db.Create(key).Error; err != nil {
-		return nil, fmt.Errorf("persist api key: %w", err)
-	}
-
 	return &CreateKeyResponse{Plaintext: plaintext, Key: key}, nil
 }
 
@@ -278,7 +285,9 @@ func (s *Service) ListKeys() ([]models.APIKey, error) {
 	return keys, nil
 }
 
-// RevokeKey sets revoked_at on the specified key.
+// RevokeKey sets revoked_at on the specified key. It is the trusted internal
+// revocation (the incident supervisor revokes the agent-session keys it
+// minted); request handlers use RevokeKeyAuthorized.
 func (s *Service) RevokeKey(id uuid.UUID) error {
 	result := s.db.Model(&models.APIKey{}).Where("id = ? AND revoked_at IS NULL", id).Update("revoked_at", s.nowUTC())
 	if result.Error != nil {
@@ -290,53 +299,195 @@ func (s *Service) RevokeKey(id uuid.UUID) error {
 	return nil
 }
 
-// RotateKey creates a new key and sets expires_at on the old key to allow a grace period.
-func (s *Service) RotateKey(id uuid.UUID, gracePeriod time.Duration, actor string) (*CreateKeyResponse, error) {
-	var oldKey models.APIKey
-	if err := s.db.First(&oldKey, id).Error; err != nil {
+// errNoKeyAuthorizer guards the authorized key operations against a missing
+// authorization callback: they never act without one.
+var errNoKeyAuthorizer = errors.New("api key operation requires an authorizer")
+
+// keyWriteHook, when set (tests only), runs inside the authorized key
+// transactions between reading the stored key and writing, so a test can
+// interleave a competing change deterministically. An error it returns fails
+// that attempt as a statement error would.
+var keyWriteHook func(tx *gorm.DB, id uuid.UUID) error
+
+// keyTransaction runs fn in one transaction and retries the whole
+// transaction on catalog contention (catalogRetryPolicy: a dqlite/SQLite lock
+// or busy error, such as a read snapshot another connection's commit kept
+// from upgrading, or a PostgreSQL serialization failure). A rolled-back
+// attempt leaves nothing behind, so fn must reset anything it reports.
+func (s *Service) keyTransaction(ctx context.Context, fn func(tx *gorm.DB) error) error {
+	return dbretry.Retry(ctx, catalogRetryPolicy(), func() error {
+		return s.db.WithContext(ctx).Transaction(fn)
+	})
+}
+
+// lockKeyRow reads the stored key for update: SELECT ... FOR UPDATE where the
+// backend has row locks (PostgreSQL), so a concurrent revoke or rotation of
+// the same key waits for this transaction. The SQLite and dqlite dialects
+// drop the clause; their write transactions are already serialised.
+func lockKeyRow(tx *gorm.DB, id uuid.UUID) (*models.APIKey, error) {
+	var key models.APIKey
+	if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&key, "id = ?", id).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, ErrKeyNotFound
 		}
-		return nil, fmt.Errorf("lookup old key: %w", err)
+		return nil, fmt.Errorf("lookup api key: %w", err)
 	}
+	return &key, nil
+}
 
-	if oldKey.IsRevoked() {
-		return nil, ErrKeyRevoked
+// RevokeKeyAuthorized revokes a key on behalf of a request: it reads the
+// stored key, lets authorize decide against that row, and revokes it, all in
+// one transaction. The revocation applies only to a key still active when it
+// is written. It returns the revoked key.
+func (s *Service) RevokeKeyAuthorized(ctx context.Context, id uuid.UUID, authorize KeyAuthorizer) (*models.APIKey, error) {
+	if authorize == nil {
+		return nil, errNoKeyAuthorizer
 	}
-
-	// Create new key with the same role, scope and namespaces. Namespaces are
-	// copied byte-for-byte: NULL stays cluster-wide, a confined key stays
-	// confined, and a fail-closed value stays fail-closed.
-	var scope *models.KeyScope
-	if len(oldKey.Scope) > 0 {
-		scope = &models.KeyScope{}
-		if err := json.Unmarshal(oldKey.Scope, scope); err != nil {
-			return nil, fmt.Errorf("unmarshal old scope: %w", err)
+	var revoked *models.APIKey
+	err := s.keyTransaction(ctx, func(tx *gorm.DB) error {
+		revoked = nil
+		key, err := lockKeyRow(tx, id)
+		if err != nil {
+			return err
 		}
-	}
-
-	resp, err := s.CreateKey(&CreateKeyRequest{
-		Description: oldKey.Description + " (rotated)",
-		Role:        oldKey.Role,
-		Scope:       scope,
-		Namespaces:  oldKey.Namespaces,
-		CreatedBy:   actor,
+		if err := authorize(key); err != nil {
+			return err
+		}
+		if key.IsRevoked() {
+			return ErrKeyNotFound
+		}
+		if keyWriteHook != nil {
+			if err := keyWriteHook(tx, id); err != nil {
+				return err
+			}
+		}
+		now := s.nowUTC()
+		result := tx.Model(&models.APIKey{}).Where("id = ? AND revoked_at IS NULL", id).Update("revoked_at", now)
+		if result.Error != nil {
+			return fmt.Errorf("revoke api key: %w", result.Error)
+		}
+		if result.RowsAffected == 0 {
+			return ErrKeyNotFound
+		}
+		key.RevokedAt = &now
+		revoked = key
+		return nil
 	})
 	if err != nil {
 		return nil, err
 	}
+	return revoked, nil
+}
 
-	// Set grace period on old key.
-	graceExpiry := s.nowUTC().Add(gracePeriod)
-	if err := s.db.Model(&models.APIKey{}).Where("id = ?", id).Update("expires_at", graceExpiry).Error; err != nil {
-		return nil, fmt.Errorf("set grace period: %w", err)
+// RotateKeyAuthorized replaces a key on behalf of a request. In one
+// transaction it reads the stored key, lets authorize decide against that
+// row, mints a replacement with the same role, scope, namespaces and expiry
+// (rotation replaces the secret, never the grant or its lifetime), and lets
+// the old key live on for gracePeriod at most: its expiry is never moved
+// later. A key that is revoked, expired, has unusable namespaces, or is
+// confined to a namespace the policy file does not declare is refused, and
+// nothing is written.
+func (s *Service) RotateKeyAuthorized(ctx context.Context, id uuid.UUID, gracePeriod time.Duration, actor string, authorize KeyAuthorizer) (*CreateKeyResponse, error) {
+	if authorize == nil {
+		return nil, errNoKeyAuthorizer
 	}
+	var resp *CreateKeyResponse
+	err := s.keyTransaction(ctx, func(tx *gorm.DB) error {
+		resp = nil
+		oldKey, err := lockKeyRow(tx, id)
+		if err != nil {
+			return err
+		}
+		if err := authorize(oldKey); err != nil {
+			return err
+		}
+		if oldKey.IsRevoked() {
+			return ErrKeyRevoked
+		}
+		if s.isExpired(oldKey) {
+			return ErrKeyExpired
+		}
+		namespaces, err := StoredKeyNamespaces(oldKey.Namespaces)
+		if err != nil {
+			return err
+		}
+		if undeclared := UndeclaredKeyNamespaces(namespaces); len(undeclared) > 0 {
+			return &UndeclaredNamespacesError{Namespaces: undeclared}
+		}
+		var scope *models.KeyScope
+		if len(oldKey.Scope) > 0 {
+			scope = &models.KeyScope{}
+			if err := json.Unmarshal(oldKey.Scope, scope); err != nil {
+				return fmt.Errorf("unmarshal old scope: %w", err)
+			}
+		}
+		if keyWriteHook != nil {
+			if err := keyWriteHook(tx, id); err != nil {
+				return err
+			}
+		}
 
+		// The old key's grace: now+gracePeriod, but never later than the
+		// expiry it already has. The update applies only while the key is
+		// unrevoked and its stored expiry is later than the grace, so a
+		// competing change is never overwritten with a later expiry, and a
+		// key revoked since it was read gets no replacement.
+		graceExpiry := s.nowUTC().Add(gracePeriod)
+		if oldKey.ExpiresAt != nil && oldKey.ExpiresAt.Before(graceExpiry) {
+			graceExpiry = *oldKey.ExpiresAt
+		}
+		result := tx.Model(&models.APIKey{}).
+			Where("id = ? AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at > ?)", id, graceExpiry).
+			Update("expires_at", graceExpiry)
+		if result.Error != nil {
+			return fmt.Errorf("set grace period: %w", result.Error)
+		}
+		if result.RowsAffected == 0 {
+			var current models.APIKey
+			if err := tx.Select("id", "revoked_at").First(&current, "id = ?", id).Error; err != nil {
+				if errors.Is(err, gorm.ErrRecordNotFound) {
+					return ErrKeyNotFound
+				}
+				return fmt.Errorf("recheck api key: %w", err)
+			}
+			if current.IsRevoked() {
+				return ErrKeyRevoked
+			}
+			// Otherwise the stored expiry is already no later than the grace.
+		}
+
+		var expiresAt *time.Time
+		if oldKey.ExpiresAt != nil {
+			expiry := *oldKey.ExpiresAt
+			expiresAt = &expiry
+		}
+		// Namespaces are copied byte for byte: NULL stays cluster-wide and a
+		// confined key stays confined.
+		resp, err = s.newKey(&CreateKeyRequest{
+			Description: oldKey.Description + " (rotated)",
+			Role:        oldKey.Role,
+			Scope:       scope,
+			Namespaces:  oldKey.Namespaces,
+			CreatedBy:   actor,
+			ExpiresAt:   expiresAt,
+		})
+		if err != nil {
+			return err
+		}
+		if err := tx.Create(resp.Key).Error; err != nil {
+			return fmt.Errorf("persist api key: %w", err)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
 	return resp, nil
 }
 
 // AdminKeyExists returns true if at least one non-revoked, non-expired key
-// grants admin cluster-wide. A key confined to namespaces does not count.
+// grants admin cluster-wide with no further restriction. A key confined to
+// namespaces, to a job allow-list or to an agent session does not count.
 // Candidates are filtered with the same grant logic requests use, so the
 // startup check and RBAC cannot disagree about which keys are cluster admins.
 func (s *Service) AdminKeyExists() (bool, error) {
@@ -352,7 +503,7 @@ func (s *Service) AdminKeyExists() (bool, error) {
 			Find(&keys).Error
 		exists = false
 		for i := range keys {
-			if keyGrants(&keys[i]).ClusterRole() == models.RoleAdmin {
+			if keyGrants(&keys[i]).ClusterRole() == models.RoleAdmin && !ScopeRestricts(keys[i].Scope) {
 				exists = true
 				break
 			}
@@ -472,13 +623,14 @@ func (s *Service) tryCreateBootstrapKey(key *models.APIKey) (int64, error) {
 
 // tryRefreshBootstrapKey restores the bootstrap slot to a fresh cluster admin
 // key. It runs only after AdminKeyExists found no cluster admin, and matches a
-// bootstrap key that is revoked, expired or confined to namespaces (an active
-// cluster bootstrap key has NULL namespaces and is never replaced).
+// bootstrap key that is revoked, expired, confined to namespaces or scoped (an
+// active cluster bootstrap key has NULL namespaces and scope and is never
+// replaced).
 func (s *Service) tryRefreshBootstrapKey(newID uuid.UUID, prefix, hash string, now time.Time) (int64, error) {
 	return s.withBootstrapRetry(func() (int64, error) {
 		result := s.db.Model(&models.APIKey{}).
 			Where(
-				"bootstrap_slot = ? AND (revoked_at IS NOT NULL OR (expires_at IS NOT NULL AND expires_at <= ?) OR namespaces IS NOT NULL)",
+				"bootstrap_slot = ? AND (revoked_at IS NOT NULL OR (expires_at IS NOT NULL AND expires_at <= ?) OR namespaces IS NOT NULL OR scope IS NOT NULL)",
 				bootstrapAdminSlot,
 				now,
 			).

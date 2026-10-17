@@ -258,6 +258,15 @@ func (e *runtimeExecutor) Execute(ctx context.Context, taskRun *models.TaskRun) 
 		atomSpec.Env = interpolatedEnv
 	}
 
+	// Namespace secret rules, read from this node's policy for the run's
+	// persisted namespace, are checked before the cache lookup so a reference
+	// the namespace no longer allows is never served from cache (and again
+	// right before the lookup). A denial is a configuration failure: reported
+	// once, never retried.
+	if e.secretsDenied(ctx, sink, taskRun, runNamespace, atomSpec, timeouts) {
+		return
+	}
+
 	// Capture execution inputs before any identity or cache work. The absolute
 	// run deadline applies to acquisition; the per-attempt timer starts only
 	// when executeTask begins an actual attempt.
@@ -439,6 +448,12 @@ func (e *runtimeExecutor) Execute(ctx context.Context, taskRun *models.TaskRun) 
 		}
 
 		if cacheStore != nil {
+			// Recheck with a fresh scope right before the lookup: input
+			// acquisition and digest resolution above can block, and a rule
+			// revoked meanwhile must not let the cached result through.
+			if e.secretsDenied(ctx, sink, taskRun, runNamespace, atomSpec, timeouts) {
+				return
+			}
 			entry, found, getErr := cacheStore.Get(cacheHash)
 			// A cache entry with no recorded partition list (nil, not merely
 			// empty — see cache.Entry.Partitions) is ambiguous for a task with a
@@ -545,7 +560,7 @@ func (e *runtimeExecutor) Execute(ctx context.Context, taskRun *models.TaskRun) 
 
 	var lastErr error
 	for attempt := currentAttempt; attempt <= maxAttempts; attempt++ {
-		emitted, execErr := e.executeTask(ctx, taskRun, sink, atomSpec, runParams, outputEnv, resolveJobAlias(), descriptor, fanOut, resolvedImageDigest, timeouts, attempt >= maxAttempts)
+		emitted, execErr := e.executeTask(ctx, taskRun, sink, atomSpec, runParams, outputEnv, resolveJobAlias(), runNamespace, descriptor, fanOut, resolvedImageDigest, timeouts, attempt >= maxAttempts)
 		// executeTask performs log parsing, schema checks, and data assertions
 		// after the atom exits. Any of those can return an ordinary error after
 		// the absolute run budget expired. Classify at this central seam before
@@ -581,7 +596,9 @@ func (e *runtimeExecutor) Execute(ctx context.Context, taskRun *models.TaskRun) 
 		}
 
 		lastErr = execErr
-		if run.IsRunDeadlineError(execErr) || errors.Is(execErr, dispatch.ErrCompletionApplicationRejected) {
+		// A namespace secret denial (the policy changed after the before-cache
+		// check) is permanent until the policy changes again: no retry.
+		if run.IsRunDeadlineError(execErr) || errors.Is(execErr, dispatch.ErrCompletionApplicationRejected) || errors.Is(execErr, secret.ErrSecretDenied) {
 			break
 		}
 
@@ -652,6 +669,20 @@ func (e *runtimeExecutor) Execute(ctx context.Context, taskRun *models.TaskRun) 
 
 // reportInputFailure refuses terminal writes when acquisition outlived its
 // ownership or absolute run window. The owner remains authoritative for both.
+// secretsDenied runs the namespace secret allow-check over every reference
+// in spec with a scope read from this node's policy now, and reports a denial
+// as a terminal input failure (true). It runs before the cache lookup, so a
+// reference the namespace no longer allows is never served from cache.
+func (e *runtimeExecutor) secretsDenied(ctx context.Context, sink CompletionSink, taskRun *models.TaskRun, runNamespace string, spec container.Spec, timeouts executionTimeouts) bool {
+	err := jobdefruntime.CheckContainerSpecSecretsAllowed(secret.ForNamespace(e.secretResolver, runNamespace), spec)
+	if err == nil {
+		return false
+	}
+	log.Error("worker task secret reference denied", "task_id", taskRun.TaskID, "run_id", taskRun.JobRunID, "namespace", runNamespace, "error", err)
+	e.reportInputFailure(ctx, sink, taskRun, err, timeouts)
+	return true
+}
+
 func (e *runtimeExecutor) reportInputFailure(ctx context.Context, sink CompletionSink, taskRun *models.TaskRun, failure error, timeouts executionTimeouts) {
 	if errors.Is(failure, run.ErrTaskClaimMismatch) || ctx.Err() != nil || e.deferRunDeadline(taskRun, timeouts, "input_failure", time.Now()) {
 		return
@@ -875,7 +906,7 @@ func buildRunParamEnv(runID uuid.UUID, jobAlias string, params map[string]string
 // failure is returned to the retry loop and NOTHING is persisted, so the row
 // stays this worker's to reset. A successful result is always reported: success
 // ends the task whatever the attempt budget said.
-func (e *runtimeExecutor) executeTask(ctx context.Context, taskRun *models.TaskRun, sink CompletionSink, atomSpec container.Spec, runParams map[string]string, outputEnv map[string]string, jobAlias string, descriptor *models.TaskExecutionDescriptor, fanOut *jobdefschema.FanOut, resolvedImageDigest string, timeouts executionTimeouts, finalAttempt bool) ([]pkgtask.Partition, error) {
+func (e *runtimeExecutor) executeTask(ctx context.Context, taskRun *models.TaskRun, sink CompletionSink, atomSpec container.Spec, runParams map[string]string, outputEnv map[string]string, jobAlias, runNamespace string, descriptor *models.TaskExecutionDescriptor, fanOut *jobdefschema.FanOut, resolvedImageDigest string, timeouts executionTimeouts, finalAttempt bool) ([]pkgtask.Partition, error) {
 	taskCtx, cancel := timeouts.attemptContext(ctx, time.Now())
 	defer cancel()
 	if err := context.Cause(taskCtx); err != nil {
@@ -903,12 +934,15 @@ func (e *runtimeExecutor) executeTask(ctx context.Context, taskRun *models.TaskR
 		atomName = fmt.Sprintf("%s-attempt%d", atomName, taskRun.ClaimAttempt)
 	}
 
-	spec, secretIdentities, err := jobdefruntime.ResolveContainerSpecSecretsWithIdentities(taskCtx, e.secretResolver, atomSpec)
+	// Resolution and replay identity verification each read the namespace's
+	// secret rules afresh: a policy reload since the before-cache check — or
+	// during the resolution itself — applies to the next operation.
+	spec, secretIdentities, err := jobdefruntime.ResolveContainerSpecSecretsWithIdentities(taskCtx, secret.ForNamespace(e.secretResolver, runNamespace).Resolver(), atomSpec)
 	if err != nil {
 		return nil, err
 	}
 	if descriptor != nil && taskRun.Quarantine {
-		if err := replay.VerifyReplaySecretIdentities(taskCtx, e.secretResolver, descriptor.SecretRefs, secretIdentities, spec.Env); err != nil {
+		if err := replay.VerifyReplaySecretIdentities(taskCtx, secret.ForNamespace(e.secretResolver, runNamespace).Resolver(), descriptor.SecretRefs, secretIdentities, spec.Env); err != nil {
 			return nil, err
 		}
 	}

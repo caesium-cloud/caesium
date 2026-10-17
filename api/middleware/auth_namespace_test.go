@@ -617,7 +617,6 @@ func TestNamespacedClusterAndPendingRoutes(t *testing.T) {
 		{get("/v1/jobs/:id/runs", pv("id", f.mktJob.String())), "B4"},
 		{post("/v1/jobdefs/apply", nil, `{"definitions":[]}`), "B9"},
 		{post("/v1/events", nil, `{}`), "A6"},
-		{get("/v1/auth/keys", nil), "A5"},
 		{get("/v1/lineage/impact", nil), "B5"},
 	} {
 		res := f.do(t, mktAdmin, tc.call)

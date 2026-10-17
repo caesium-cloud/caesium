@@ -156,6 +156,13 @@ var namespaceResolvers = map[string]namespaceResolver{
 
 	// The audit log authorises on ?namespace= (omitted ⇒ "*").
 	"GET /v1/auth/audit": resolveAuditNamespace,
+	// API keys (A5): minting needs the role in every namespace the body asks
+	// for ("*" when it names none); revoke and rotate need it in every
+	// namespace the stored key is confined to (NULL, and an unusable value,
+	// ⇒ "*": only a cluster principal may act).
+	"POST /v1/auth/keys":            resolveKeyCreateNamespaces,
+	"POST /v1/auth/keys/:id/revoke": resolveStoredKeyNamespaces,
+	"POST /v1/auth/keys/:id/rotate": resolveStoredKeyNamespaces,
 }
 
 // HasNamespaceResolver reports whether the namespaced route identified by
@@ -447,6 +454,36 @@ func resolveAuditNamespace(c *echo.Context, _ *auth.Service, role models.Role) (
 		namespace = models.ClusterNamespace
 	}
 	return []nsRequirement{every(role, namespace)}, nil
+}
+
+// resolveKeyCreateNamespaces reads the namespaces a key create body asks for,
+// normalised exactly as the handler normalises them (omitted ⇒ "*").
+func resolveKeyCreateNamespaces(c *echo.Context, _ *auth.Service, role models.Role) ([]nsRequirement, error) {
+	var payload struct {
+		Namespaces *[]string `json:"namespaces"`
+	}
+	if err := peekJSONBody(c, namespaceBodyPeekLimit, &payload); err != nil {
+		return nil, err
+	}
+	_, namespaces, err := auth.NormalizeKeyNamespaces(payload.Namespaces)
+	if err != nil {
+		return nil, echo.NewHTTPError(http.StatusBadRequest, err.Error()).Wrap(err)
+	}
+	return []nsRequirement{every(role, namespaces...)}, nil
+}
+
+// resolveStoredKeyNamespaces reads the namespaces the stored key is confined
+// to ("*" for a cluster key and for an unusable stored value).
+func resolveStoredKeyNamespaces(c *echo.Context, svc *auth.Service, role models.Role) ([]nsRequirement, error) {
+	keyID, err := pathUUID(c, "id")
+	if err != nil {
+		return nil, err
+	}
+	namespaces, err := svc.KeyNamespacesByID(c.Request().Context(), keyID)
+	if err != nil {
+		return nil, lookupError(err)
+	}
+	return []nsRequirement{every(role, namespaces...)}, nil
 }
 
 // DatasetPathIdentity returns the dataset identity a /v1/datasets/:ns/:name

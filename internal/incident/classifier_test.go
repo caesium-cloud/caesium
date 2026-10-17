@@ -1,11 +1,52 @@
 package incident
 
 import (
+	"fmt"
 	"testing"
 
 	"github.com/caesium-cloud/caesium/internal/atom"
 	"github.com/caesium-cloud/caesium/internal/event"
+	"github.com/caesium-cloud/caesium/internal/jobdef/secret"
 )
+
+// TestClassifySecretDenialIsConfig pins that a namespace secret denial — as
+// the executors write it into TaskRun.Error — is the config class, ahead of
+// the transient_infra branch (which would auto-retry it) and of the
+// auth_failure log rule, and that only the executor-written Error counts,
+// never the container's own log.
+func TestClassifySecretDenialIsConfig(t *testing.T) {
+	c := NewClassifier()
+	denial := &secret.SecretDeniedError{Namespace: "marketing", Ref: "env/FINANCE_TOKEN/…", Reason: "no rule matches"}
+	for _, text := range []string{
+		fmt.Errorf("env FINANCE: %w", denial).Error(),
+		fmt.Errorf("resolve env FINANCE: %w", denial).Error(),
+		fmt.Errorf("replay secret for env FINANCE: baseline identity verification failed: %w", denial).Error(),
+		fmt.Errorf("access denied: %w", denial).Error(),
+	} {
+		for _, sig := range []Signal{
+			{EventType: string(event.TypeTaskFailed), Error: text},
+			{EventType: string(event.TypeTaskFailed), Error: text, Result: string(atom.StartupFailure)},
+			{EventType: string(event.TypeRunFailed), Error: text, ExitCode: intPtr(137)},
+		} {
+			if got := c.Classify(sig); got != ClassConfig {
+				t.Fatalf("Classify(%+v) = %q, want %q", sig, got, ClassConfig)
+			}
+		}
+	}
+	// The marker in the container log is not the executor's verdict.
+	logOnly := Signal{EventType: string(event.TypeTaskFailed), Result: string(atom.StartupFailure), LogTail: denial.Error()}
+	if got := c.Classify(logOnly); got != ClassTransientInfra {
+		t.Fatalf("Classify(log-only marker) = %q, want %q", got, ClassTransientInfra)
+	}
+	// SLA precedence still wins.
+	if got := c.Classify(Signal{EventType: string(event.TypeRunTimedOut), Error: denial.Error()}); got != ClassSLARisk {
+		t.Fatalf("run timeout with a denial = %q, want %q", got, ClassSLARisk)
+	}
+	// No deterministic rule acts on config: a denial is never auto-retried.
+	if _, ok := DefaultRuleSet().Match(ClassConfig); ok {
+		t.Fatal("config must not match a deterministic remediation rule")
+	}
+}
 
 func intPtr(value int) *int { return &value }
 
