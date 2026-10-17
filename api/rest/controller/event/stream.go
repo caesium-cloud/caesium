@@ -19,6 +19,7 @@ import (
 	"github.com/caesium-cloud/caesium/internal/authz"
 	"github.com/caesium-cloud/caesium/internal/event"
 	"github.com/caesium-cloud/caesium/internal/models"
+	runstorage "github.com/caesium-cloud/caesium/internal/run"
 	"github.com/caesium-cloud/caesium/pkg/db"
 	"github.com/caesium-cloud/caesium/pkg/env"
 	"github.com/caesium-cloud/caesium/pkg/log"
@@ -364,10 +365,13 @@ func newRunNamespaceCache() *runNamespaceCache {
 // redactStreamPayload removes what an event payload carries about the job's
 // CURRENT owner rather than the run: its labels, read from the job row when
 // the event is built, so a run that outlives a move would otherwise hand the
-// new owner's labels to the old owner. Confined subscribers only; a payload
-// that names labels but is not a JSON object is dropped.
+// new owner's labels to the old owner. Data-assertion verdicts recorded before
+// baselines were namespace-owned lose their baseline evidence
+// (run.WithholdUnownedBaselineEvidenceJSON). Confined subscribers only; a
+// payload that names labels or verdicts but is not a JSON object is dropped.
 func redactStreamPayload(evt event.Event) event.Event {
-	if len(evt.Payload) == 0 || !bytes.Contains(evt.Payload, []byte(`"job_labels"`)) {
+	if len(evt.Payload) == 0 ||
+		(!bytes.Contains(evt.Payload, []byte(`"job_labels"`)) && !bytes.Contains(evt.Payload, []byte(`"data_violations"`))) {
 		return evt
 	}
 	var payload map[string]any
@@ -386,6 +390,7 @@ func redactStreamPayload(evt event.Event) event.Event {
 			}
 		}
 	}
+	runstorage.WithholdUnownedBaselineEvidenceJSON(payload)
 	redacted, err := json.Marshal(payload)
 	if err != nil {
 		evt.Payload = nil

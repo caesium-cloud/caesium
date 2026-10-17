@@ -546,7 +546,11 @@ against the namespaces declared in the policy file (planned, B2).
   it skips dates, and stops as failed if the job moves while it runs. A
   `deltaFromBaseline` data assertion is judged only against samples of runs
   in the evaluated run's namespace, so after a move it starts from no
-  baseline instead of reading (and recording) the old owner's.
+  baseline instead of reading (and recording) the old owner's. Such verdicts
+  carry `baseline_scope: namespace`; a confined caller reading a verdict
+  recorded without it (before this release) gets it without `baseline_median`,
+  `baseline_samples`, the derived `bound` and the message that renders them,
+  on run reads, the event stream and lifecycle event history.
 
 ### Git sync allowlist
 

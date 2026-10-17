@@ -215,7 +215,8 @@ func TestEventStreamCollectionGuard(t *testing.T) {
 	payload := json.RawMessage(`{"secret":"` + f.finSecret + `"}`)
 	// The job's current labels ride on run and task payloads; a confined
 	// subscriber never receives them (they may belong to a new owner).
-	labelled := json.RawMessage(`{"id":"` + f.mktRun.String() + `","job_labels":{"owner":"` + f.finSecret + `"},"tasks":[{"name":"t","job_labels":{"owner":"` + f.finSecret + `"}}],"attempt":12345678901234567}`)
+	labelled := json.RawMessage(`{"id":"` + f.mktRun.String() + `","job_labels":{"owner":"` + f.finSecret + `"},"tasks":[{"name":"t","job_labels":{"owner":"` + f.finSecret + `"},` +
+		`"data_violations":[{"assertion":"deltaFromBaseline","baseline_median":31337,"baseline_samples":5,"message":"legacy median 31337"}]}],"attempt":12345678901234567}`)
 	f.append(t, event.Event{Type: event.TypeRunStarted, JobID: f.jobID, RunID: f.mktRun, Payload: labelled})
 	// A run admission refused (its consumed dataset is held) names the hold.
 	held := uuid.New()
@@ -244,6 +245,7 @@ func TestEventStreamCollectionGuard(t *testing.T) {
 	require.Equal(t, event.TypeTaskStarted, events[1].Type)
 	for _, evt := range events {
 		require.NotContains(t, string(evt.Payload), f.finSecret)
+		require.NotContains(t, string(evt.Payload), "31337", "a legacy baseline never reaches a confined subscriber")
 		require.Contains(t, string(evt.Payload), `"attempt":12345678901234567`, "the rest of the payload is unchanged")
 	}
 
@@ -264,6 +266,7 @@ func TestEventStreamCollectionGuard(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, events, 5, "an unrestricted subscriber gets every persisted event")
 	require.Contains(t, string(events[0].Payload), f.finSecret, "and its payloads unredacted")
+	require.Contains(t, string(events[0].Payload), "31337")
 }
 
 // TestEventStreamCatchupEndsOnHiddenTail is the regression for a catch-up that

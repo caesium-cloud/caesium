@@ -32,6 +32,9 @@ type BaselineStats struct {
 	// AsOf echoes the cut the window was computed against, so a backtest
 	// verdict can be reproduced from its recorded baseline.
 	AsOf time.Time `json:"as_of"`
+	// Scope is BaselineScopeNamespace for an OwnedBaseline; a verdict copies
+	// it into DataViolation.BaselineScope. Not part of the read surface.
+	Scope string `json:"-"`
 }
 
 // Baseline computes the rolling baseline for one (namespace, name, metric) over
@@ -82,6 +85,9 @@ func baselineWithSamples(ctx context.Context, conn *gorm.DB, owner *string, name
 		Name:      name,
 		Metric:    metric,
 		AsOf:      asOf.UTC(),
+	}
+	if owner != nil {
+		stats.Scope = BaselineScopeNamespace
 	}
 	if conn == nil || name == "" || metric == "" {
 		return stats, nil, nil

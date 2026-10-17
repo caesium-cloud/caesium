@@ -4,8 +4,10 @@ import (
 	"errors"
 	"net/http"
 
+	authmw "github.com/caesium-cloud/caesium/api/middleware"
 	jsvc "github.com/caesium-cloud/caesium/api/rest/service/job"
 	runsvc "github.com/caesium-cloud/caesium/api/rest/service/run"
+	"github.com/caesium-cloud/caesium/internal/authz"
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v5"
 	"gorm.io/gorm"
@@ -32,7 +34,10 @@ func Get(c *echo.Context) error {
 		return echo.NewHTTPError(http.StatusInternalServerError, "internal server error").Wrap(err)
 	}
 
-	runEntry, err := runsvc.New(ctx).Get(runID)
+	// The run is history: a namespace-confined reader gets it without the
+	// baseline evidence of verdicts recorded before baselines were
+	// namespace-owned (identity-and-access B4).
+	runEntry, err := runsvc.New(authz.WithHistoryScope(ctx, authmw.GetPrincipal(c))).Get(runID)
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return echo.ErrNotFound

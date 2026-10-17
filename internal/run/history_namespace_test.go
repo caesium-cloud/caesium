@@ -2,12 +2,14 @@ package run
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"testing"
 	"time"
 
 	"github.com/caesium-cloud/caesium/internal/authz"
 	"github.com/caesium-cloud/caesium/internal/models"
+	"github.com/caesium-cloud/caesium/pkg/jobdef"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 	"gorm.io/datatypes"
@@ -212,8 +214,70 @@ func TestOwnedBaselineCountsOnlyTheRunsNamespace(t *testing.T) {
 	all, err := Baseline(context.Background(), db, "", "warehouse/orders", "rowCount", 20, now)
 	require.NoError(t, err)
 	require.Equal(t, 4, all.Samples, "the operator baseline is unchanged")
+	require.Equal(t, BaselineScopeNamespace, finance.Scope)
+	require.Empty(t, all.Scope, "the operator baseline is not namespace-owned")
 
 	namespace, err := persistedRunNamespace(context.Background(), db, uuid.New())
 	require.ErrorIs(t, err, gorm.ErrRecordNotFound, "an unknown run has no namespace to scope a baseline by")
 	require.Empty(t, namespace)
+
+	// A verdict records whether its baseline was namespace-owned.
+	spec := jobdef.AssertionSpec{DeltaFromBaseline: "50%"}
+	owned := evaluateDelta("warehouse/orders", "rowCount", spec, 1000, finance, 0)
+	require.NotNil(t, owned)
+	require.Equal(t, BaselineScopeNamespace, owned.BaselineScope)
+	unowned := evaluateDelta("warehouse/orders", "rowCount", spec, 1000, all, 0)
+	require.NotNil(t, unowned)
+	require.Empty(t, unowned.BaselineScope)
+}
+
+// TestWithholdUnownedBaselineEvidence: a confined reader's copy of a verdict
+// recorded before baselines were namespace-owned loses its baseline median,
+// sample count, derived bound and the message that renders them (also where
+// the task's and the run's error quote it); a namespace-owned verdict and a
+// verdict with no baseline pass unchanged. The JSON form, used for event
+// payloads and lifecycle data, applies the same rule (identity-and-access B4).
+func TestWithholdUnownedBaselineEvidence(t *testing.T) {
+	median, bound, observed, ownMedian, ownBound, minimum := 10000.0, 5000.0, 10.0, 42.0, 21.0, 7.0
+	legacyMessage := "observed 10 deviates 9990 from the baseline median 10000 (5 sample(s)), more than the declared 50%"
+	legacy := DataViolation{Dataset: "d", Metric: "rowCount", Assertion: AssertionDeltaFromBaseline, Observed: &observed,
+		Bound: &bound, DeltaFromBaseline: "50%", BaselineMedian: &median, BaselineSamples: 5, Message: legacyMessage}
+	own := DataViolation{Dataset: "d", Metric: "rowCount", Assertion: AssertionDeltaFromBaseline, Observed: &observed,
+		Bound: &ownBound, DeltaFromBaseline: "50%", BaselineMedian: &ownMedian, BaselineSamples: 6,
+		BaselineScope: BaselineScopeNamespace, Message: "own baseline median 42"}
+	absolute := DataViolation{Dataset: "d", Metric: "rowCount", Assertion: "min", Observed: &observed, Bound: &minimum, Message: "below the declared min 7"}
+	run := &JobRun{
+		Error: "task failed: " + legacyMessage,
+		Tasks: []*TaskRun{{DataViolations: []DataViolation{legacy, own, absolute}, Error: "violates: " + legacyMessage}},
+	}
+	encoded, err := json.Marshal(run)
+	require.NoError(t, err)
+
+	run.WithholdUnownedBaselineEvidence()
+	got := run.Tasks[0].DataViolations
+	require.Nil(t, got[0].BaselineMedian)
+	require.Zero(t, got[0].BaselineSamples)
+	require.Nil(t, got[0].Bound, "a delta bound is derived from the baseline median")
+	require.Equal(t, BaselineEvidenceWithheld, got[0].Message)
+	require.Equal(t, observed, *got[0].Observed, "the run's own observation is kept")
+	require.Equal(t, own, got[1], "a namespace-owned verdict is unchanged")
+	require.Equal(t, absolute, got[2], "a verdict without a baseline is unchanged")
+	require.Equal(t, "violates: "+BaselineEvidenceWithheld, run.Tasks[0].Error)
+	require.Equal(t, "task failed: "+BaselineEvidenceWithheld, run.Error)
+	(*JobRun)(nil).WithholdUnownedBaselineEvidence()
+
+	var payload map[string]any
+	require.NoError(t, json.Unmarshal(encoded, &payload))
+	WithholdUnownedBaselineEvidenceJSON(payload)
+	redacted, err := json.Marshal(payload)
+	require.NoError(t, err)
+	require.NotContains(t, string(redacted), "10000", "neither the median nor the message that renders it remains")
+	require.NotContains(t, string(redacted), "5000")
+	require.Contains(t, string(redacted), BaselineEvidenceWithheld)
+	require.Contains(t, string(redacted), "own baseline median 42")
+	require.Contains(t, string(redacted), `"baseline_scope":"namespace"`)
+
+	task := map[string]any{"data_violations": "not-a-list", "error": "x"}
+	WithholdUnownedBaselineEvidenceJSON(task)
+	require.NotContains(t, task, "data_violations", "a malformed verdict list is dropped")
 }

@@ -652,6 +652,93 @@ func (s *IntegrationTestSuite) TestAuthNamespaceStreamOwnership() {
 	}
 }
 
+// TestAuthNamespaceLegacyBaselineEvidenceWithheld is the upgrade-history
+// regression: a finance run carries a data-assertion verdict recorded before
+// baselines were namespace-owned (no baseline_scope), whose baseline median
+// and sample count came from marketing's samples. The verdict is seeded through
+// the catalog (task row and error, a persisted task event and the lifecycle
+// bridge's event data) as the precondition only. A finance-confined viewer
+// reads the run, the event stream backlog, the delivery history and the
+// ingested events without the baseline numbers or the message that renders
+// them; an unrestricted caller still reads them.
+func (s *IntegrationTestSuite) TestAuthNamespaceLegacyBaselineEvidenceWithheld() {
+	s.requireAuthLane()
+	f := s.newNamespacedRoutesFixture("b4legacy")
+	defer s.closeNamespacedRoutesFixture(f)
+	finViewer := s.namespacedKey(f, "viewer", `["finance"]`).Plaintext
+
+	sourceAlias := fmt.Sprintf("b4-legacy-src-%d", f.stamp)
+	s.applyDefinition(s.namespacedJobDefinition(sourceAlias, "finance"))
+	sourceJob := s.requireJobByAlias(sourceAlias)
+	f.jobs = append(f.jobs, sourceJob.ID)
+	listenerAlias := fmt.Sprintf("b4-legacy-dst-%d", f.stamp)
+	listener := s.namespacedJobDefinition(listenerAlias, "finance")
+	listener.Trigger = schema.Trigger{Type: "event", Configuration: map[string]any{
+		"events": []any{map[string]any{"type": "run_completed", "source": "caesium", "filter": map[string]any{"job_alias": sourceAlias}}},
+	}}
+	s.applyDefinition(listener)
+	listenerJob := s.requireJobByAlias(listenerAlias)
+	f.jobs = append(f.jobs, listenerJob.ID)
+	var listenerTrigger string
+	s.Require().NoError(f.catalogDB.QueryRowContext(s.T().Context(), `SELECT trigger_id FROM jobs WHERE id = ?`, listenerJob.ID).Scan(&listenerTrigger))
+	runID := s.triggerRun(sourceJob.ID)
+	s.awaitRun(sourceJob.ID, runID, runTimeout)
+	deliveries := "/v1/triggers/" + listenerTrigger + "/events"
+	s.Require().Eventually(func() bool {
+		_, _, body := s.nsGet(deliveries, s.authAPIKey)
+		return strings.Contains(body, runID)
+	}, runTimeout, time.Second, "the lifecycle bridge delivers the completion")
+	s.awaitJobIdle(listenerJob.ID)
+
+	// Precondition: the legacy verdict, as a pre-upgrade evaluator wrote it.
+	message := "observed 10 deviates 31327 from the baseline median 31337 (5 sample(s)), more than the declared 50%"
+	verdicts := `[{"dataset":"b4.legacy","metric":"rowCount","assertion":"deltaFromBaseline","observed":10,"bound":15668.5,` +
+		`"delta_from_baseline":"50%","baseline_median":31337,"baseline_samples":5,"message":"` + message + `"}]`
+	taskError := "task violates its declared data assertions: " + message
+	s.catalogExec(f, 1, `UPDATE task_runs SET data_violations = ?, error = ? WHERE job_run_id = ?`, verdicts, taskError, runID)
+	s.catalogExec(f, 1, `INSERT INTO execution_events (type, job_id, run_id, payload, quarantine, bus_dispatch_pending, created_at) VALUES ('task_failed', ?, ?, ?, false, false, ?)`,
+		sourceJob.ID, runID, `{"job_run_id":"`+runID+`","status":"failed","error":"`+taskError+`","data_violations":`+verdicts+`}`, time.Now().UTC())
+	lifecycleData := `{"run_id":"` + runID + `","id":"` + runID + `","job_alias":"` + sourceAlias + `","status":"succeeded","tasks":[{"error":"` + taskError + `","data_violations":` + verdicts + `}]}`
+	var lifecycleEvents int
+	s.Require().NoError(f.catalogDB.QueryRowContext(s.T().Context(),
+		`SELECT COUNT(*) FROM ingested_events WHERE source = 'caesium' AND json_extract(data, '$.run_id') = ?`, runID).Scan(&lifecycleEvents))
+	s.Require().Positive(lifecycleEvents)
+	s.catalogExec(f, int64(lifecycleEvents), `UPDATE ingested_events SET data = ? WHERE source = 'caesium' AND json_extract(data, '$.run_id') = ?`, lifecycleData, runID)
+
+	withheld := "baseline evidence withheld"
+	legacy := []string{"31337", "15668", "baseline median"}
+	body := s.requireNSStatus(http.StatusOK, http.MethodGet, "/v1/jobs/"+sourceJob.ID+"/runs/"+runID, finViewer, "")
+	s.requireBodyFree(body, "run detail", legacy...)
+	s.Contains(body, withheld)
+	s.Contains(s.requireNSStatus(http.StatusOK, http.MethodGet, "/v1/jobs/"+sourceJob.ID+"/runs/"+runID, s.authAPIKey, ""), "31337",
+		"an unrestricted caller still reads the recorded verdict")
+	body = s.requireNSStatus(http.StatusOK, http.MethodGet, "/v1/jobs/"+sourceJob.ID+"/runs", finViewer, "")
+	s.requireBodyFree(body, "runs list", legacy...)
+
+	events := s.streamEventsWithKey("?run_id="+runID, finViewer, 20*time.Second, func(events []event.Event) bool {
+		for _, evt := range events {
+			if evt.Type == event.TypeTaskFailed && strings.Contains(string(evt.Payload), withheld) {
+				return true
+			}
+		}
+		return false
+	})
+	served := false
+	for _, evt := range events {
+		s.requireBodyFree(string(evt.Payload), "event "+string(evt.Type), legacy...)
+		served = served || strings.Contains(string(evt.Payload), withheld)
+	}
+	s.True(served, "the seeded legacy event is served from the backlog, withheld")
+
+	body = s.requireNSStatus(http.StatusOK, http.MethodGet, deliveries, finViewer, "")
+	s.Contains(body, runID, "the finance delivery is the finance viewer's")
+	s.requireBodyFree(body, "delivery history", legacy...)
+	s.Contains(body, withheld)
+	body = s.requireNSStatus(http.StatusOK, http.MethodGet, "/v1/events/ingested?source=caesium&limit=500", finViewer, "")
+	s.requireBodyFree(body, "ingested events", legacy...)
+	s.Contains(s.requireNSStatus(http.StatusOK, http.MethodGet, deliveries, s.authAPIKey, ""), "31337")
+}
+
 // TestRunRetryRefusesMovedNamespace runs on every lane: a run left in its
 // job's previous namespace is never retried, for an unrestricted caller too,
 // and the 409 names both namespaces and points at replay.

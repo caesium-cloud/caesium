@@ -12,6 +12,7 @@ import (
 
 	"github.com/caesium-cloud/caesium/internal/authz"
 	"github.com/caesium-cloud/caesium/internal/models"
+	runstorage "github.com/caesium-cloud/caesium/internal/run"
 	"github.com/caesium-cloud/caesium/pkg/db"
 	"github.com/google/uuid"
 	"gorm.io/datatypes"
@@ -221,10 +222,12 @@ func (s *service) provenanceOwnedSQL(alias string) (string, []any) {
 // from its run payload (top level and per task) before a namespace-confined
 // caller receives it: they are read from the job's current row when the event
 // is built, the same rule the event stream applies (identity-and-access B4).
-// Other sources pass through; lifecycle data that is not a JSON object is
-// dropped.
+// Data-assertion verdicts recorded before baselines were namespace-owned lose
+// their baseline evidence (run.WithholdUnownedBaselineEvidenceJSON). Other
+// sources pass through; lifecycle data that is not a JSON object is dropped.
 func redactLifecycleData(source string, data datatypes.JSON) datatypes.JSON {
-	if source != LifecycleEventSource || len(data) == 0 || !bytes.Contains(data, []byte(`"job_labels"`)) {
+	if source != LifecycleEventSource || len(data) == 0 ||
+		(!bytes.Contains(data, []byte(`"job_labels"`)) && !bytes.Contains(data, []byte(`"data_violations"`))) {
 		return data
 	}
 	var payload map[string]any
@@ -241,6 +244,7 @@ func redactLifecycleData(source string, data datatypes.JSON) datatypes.JSON {
 			}
 		}
 	}
+	runstorage.WithholdUnownedBaselineEvidenceJSON(payload)
 	redacted, err := json.Marshal(payload)
 	if err != nil {
 		return nil

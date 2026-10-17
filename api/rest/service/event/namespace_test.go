@@ -79,7 +79,9 @@ func TestTriggerEventsOwnedDeliveriesOnly(t *testing.T) {
 	financeSource := run("finance")
 	lifecycle := uuid.New()
 	require.NoError(t, db.Create(&models.IngestedEvent{ID: lifecycle, Type: "run_completed", Source: LifecycleEventSource,
-		Data: datatypes.JSON(`{"run_id":"` + financeSource.String() + `","secret":"finance-completion","job_labels":{"owner":"label-secret"},"tasks":[{"job_labels":{"owner":"label-secret"}}]}`), CreatedAt: now}).Error)
+		Data: datatypes.JSON(`{"run_id":"` + financeSource.String() + `","secret":"finance-completion","job_labels":{"owner":"label-secret"},"tasks":[{"job_labels":{"owner":"label-secret"},"error":"violates: legacy median 31337 (5 sample(s))","data_violations":[` +
+			`{"assertion":"deltaFromBaseline","baseline_median":31337,"baseline_samples":5,"bound":15668.5,"message":"legacy median 31337 (5 sample(s))"},` +
+			`{"assertion":"deltaFromBaseline","baseline_median":4242,"baseline_samples":6,"baseline_scope":"namespace","message":"own median 4242"}]}]}`), CreatedAt: now}).Error)
 	require.NoError(t, db.Create(&models.EventTriggerMatch{ID: uuid.New(), EventID: lifecycle, TriggerID: trigger, MatchedAt: now,
 		RunsStarted: runs(run("marketing"))}).Error)
 	require.NotContains(t, types(marketing, 10), "run_completed")
@@ -97,7 +99,13 @@ func TestTriggerEventsOwnedDeliveriesOnly(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, events, 1)
 	require.NotContains(t, string(events[0].Data), "label-secret")
+	for _, data := range []string{string(ingested[0].Data), string(events[0].Data)} {
+		require.NotContains(t, data, "31337", "a legacy baseline never reaches a confined caller")
+		require.NotContains(t, data, "15668")
+		require.Contains(t, data, "own median 4242", "a namespace-owned baseline is kept")
+	}
 	unrestricted, err := NewWithDatabase(context.Background(), db).ListIngested(&ListRequest{Limit: 10, Source: LifecycleEventSource})
 	require.NoError(t, err)
 	require.Contains(t, string(unrestricted[0].Data), "label-secret", "an unrestricted caller's data is unchanged")
+	require.Contains(t, string(unrestricted[0].Data), "31337")
 }

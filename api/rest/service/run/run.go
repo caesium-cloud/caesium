@@ -4,6 +4,7 @@ import (
 	"context"
 	"sync"
 
+	"github.com/caesium-cloud/caesium/internal/authz"
 	"github.com/caesium-cloud/caesium/internal/event"
 	runstorage "github.com/caesium-cloud/caesium/internal/run"
 	"github.com/google/uuid"
@@ -91,7 +92,9 @@ func (r *runService) detachedContext() context.Context {
 }
 
 func (r *runService) Get(runID uuid.UUID) (*runstorage.JobRun, error) {
-	return r.runStore().Get(runID)
+	run, err := r.runStore().Get(runID)
+	r.withholdForConfinedReader(run)
+	return run, err
 }
 
 func (r *runService) GetTaskLogSnapshot(runID, taskID uuid.UUID) (*runstorage.TaskLogSnapshot, error) {
@@ -102,11 +105,27 @@ func (r *runService) GetTaskLogSnapshot(runID, taskID uuid.UUID) (*runstorage.Ta
 // handler put on it (authz.WithHistoryScope) narrows them to the run
 // namespaces the caller may read (identity-and-access B4).
 func (r *runService) List(jobID uuid.UUID, limit, offset int) ([]*runstorage.JobRun, int64, bool, error) {
-	return r.runStore().ListContext(r.queryContext(), jobID, limit, offset)
+	runs, total, more, err := r.runStore().ListContext(r.queryContext(), jobID, limit, offset)
+	r.withholdForConfinedReader(runs...)
+	return runs, total, more, err
 }
 
 func (r *runService) Latest(jobID uuid.UUID) (*runstorage.JobRun, error) {
-	return r.runStore().LatestContext(r.queryContext(), jobID)
+	run, err := r.runStore().LatestContext(r.queryContext(), jobID)
+	r.withholdForConfinedReader(run)
+	return run, err
+}
+
+// withholdForConfinedReader: a namespace-confined reader (a history scope on
+// the service's context) never receives baseline evidence recorded before
+// baselines were namespace-owned (identity-and-access B4).
+func (r *runService) withholdForConfinedReader(runs ...*runstorage.JobRun) {
+	if !authz.Restricted(r.queryContext()) {
+		return
+	}
+	for _, run := range runs {
+		run.WithholdUnownedBaselineEvidence()
+	}
 }
 
 func (r *runService) queryContext() context.Context {
