@@ -536,6 +536,17 @@ against the namespaces declared in the policy file (planned, B2).
 - Incident deduplication includes the run's namespace, so a failure after a
   move opens a new incident in the new namespace instead of folding into an open
   one from the old owner.
+- A moved job's history stays with its old owner. Reads under the job are
+  authorised on its current namespace, then each run, backfill and cache entry
+  is shown only to callers who may read the namespace it was written in (see
+  [History under a job](#collections-and-history-under-a-job)). A retry of a run
+  left in the previous namespace answers `409 namespace_moved` for every caller,
+  because it would execute the current job model inside the old owner's run;
+  replay the run instead. A backfill counts only runs in its own namespace when
+  it skips dates, and stops as failed if the job moves while it runs. A
+  `deltaFromBaseline` data assertion is judged only against samples of runs
+  in the evaluated run's namespace, so after a move it starts from no
+  baseline instead of reading (and recording) the old owner's.
 
 ### Git sync allowlist
 
@@ -586,7 +597,7 @@ principal confined to some namespaces is treated:
 | identity | Allowed whatever its grants, even none: `GET /auth/whoami`, `POST /auth/logout`, `GET /v1/system/features`. |
 | cluster | Always denied (403 `insufficient_role`): metrics, nodes and workers, atoms, logs, database, cache prune, `POST /v1/triggers`, the connector reads (`/v1/connectors*`), and `GET /v1/auth/policy` plus `POST /v1/auth/policy/reload`. |
 | namespaced | Caesium resolves the namespace of the target the handler will act on and requires the route's role in it (in every resolved namespace; once B6 ships, dataset reads will need it in any one). A target with no owning namespace is cluster-only. |
-| collection | The handler may only return rows from the namespaces where the principal holds the route's role. No collection route is live yet (see below). |
+| collection | The handler returns only rows from the namespaces where the principal holds the route's role (see [Collections](#collections-and-history-under-a-job)). |
 
 A principal is *confined* on a route when its cluster role (its grant at `*`)
 is below the route's role. An unconfined principal is authorised exactly as
@@ -608,9 +619,14 @@ target's namespace:
   the job's namespace and viewer in the baseline run's namespace. A run's
   external executions are listed only to a cluster viewer, so a confined
   principal gets an empty list.
-- **Backfills** (the job's and the backfill's namespace): read and cancel.
-- **Triggers:** `GET /v1/triggers/:id` and `POST /v1/triggers/:id/fire`, requiring
-  the role in every job the trigger serves.
+- **Job history** (the job's current namespace, then filtered per row): read a
+  job with its latest run, list its runs and backfills, read its cache entries,
+  explain a run (`why`), and diff two runs (both runs' namespaces are required).
+- **Backfills** (the job's and the backfill's namespace): create, read and
+  cancel. Create re-checks runner on the job row it stamps the backfill with.
+- **Triggers:** `GET /v1/triggers/:id`, its event history and
+  `POST /v1/triggers/:id/fire`, requiring the role in every job the trigger
+  serves.
 - **Shared objects:** read and delete a notification channel, notification
   policy or agent profile by id. `*` objects are readable by viewers anywhere
   and writable only with the role at `*`.
@@ -636,7 +652,7 @@ that makes it namespace-aware lands (unconfined principals are unaffected):
 | A6 | `POST /v1/events` |
 | A8 | `/v1/agent/incidents/*`, incident detail `GET /v1/incidents/:id`, approval approve |
 | B2 | `POST /v1/jobs`, `/v1/jobdefs/apply`, `/lint`, `/diff`, `GET /v1/jobs/:id/manifest`, `PATCH /v1/triggers/:id` |
-| B4 | `GET /v1/jobs/:id` and the job, run, backfill, trigger, event, stats and incident lists; `runs/diff`, run `why`, `blame`, `topology` and `topology/history`, the job `cache` read, `GET /v1/triggers/:id/events` |
+| B7 | `GET /v1/jobs/:id/blame`, `topology` and `topology/history` (DAG snapshots record no namespace yet) |
 | B5 | `GET /v1/lineage/impact`, `GET /v1/contracts/graph` |
 | B6 | every `/v1/datasets*` route |
 | D4 | shared-object lists, and creating or editing channels, policies and agent profiles |
@@ -648,7 +664,33 @@ also lists the namespaces checked and, for a pending route, the plan item.
 One residual race is accepted for now: a concurrent move of the exact target by
 a principal who is operator in both namespaces can land between the namespace
 check and the handler (run admission and replay re-check inside their own
-transactions); in-transaction guards for the other mutations follow in B2/B4.
+transactions); retries and backfill children re-check inside theirs (B4);
+in-transaction guards for apply follow in B2.
+
+### Collections and history under a job
+
+For a confined principal the collection routes return only rows from the
+namespaces where it holds the route's role, filtered in SQL before paging, so
+limits, offsets and totals describe what it can see. An unconfined principal
+gets exactly the rows it got before.
+
+| Route | What a confined principal gets |
+| --- | --- |
+| `GET /v1/jobs` | Jobs in its namespaces (a job-scoped key's alias list narrows this further). Each job's recent runs and latest run hold only runs it may read. `order_by` takes only column names (`id`, `alias`, `namespace`, `trigger_id`, `priority`, `paused`, `created_at`, `updated_at`) and `asc`/`desc`, for every caller; anything else is 400. |
+| `GET /v1/triggers` | Triggers that serve at least one live job, where it may read every namespace the trigger serves (the `GET /v1/triggers/:id` rule). `order_by` takes only `id`, `alias`, `type`, `created_at`, `updated_at` (400 otherwise, for every caller). |
+| `GET /v1/incidents` | Incidents in its namespaces, counted in `total`, without the frozen agent allowlist (`allowed_jobs`), which can name other namespaces' jobs. |
+| `GET /v1/stats`, `/v1/stats/summary` | Every total, rate, top list and trend point computed over its namespaces' jobs and runs only. |
+| `GET /v1/events` | Events of runs persisted in its namespaces, of the run and task lifecycle types plus `incident_opened`. Events naming no run, and types whose payloads can name other namespaces' jobs or datasets (dataset, freshness, contract, SLA, held-upstream, agent action, approval and escalation events), are not sent. Events of a run admission refused because a consumed dataset is held are not sent either, and job labels are removed from payloads. Filtering happens on the server for the catch-up and for every live event. A `run_id` in another namespace is a 403. |
+| `GET /v1/events/ingested` | Ingested events whose every delivery started runs, all in its namespaces, with no skip and no error. An event the lifecycle bridge derived from a run (source `caesium`) also needs that run to be readable, and its data loses the job labels it copied from the job. |
+
+History under a job (`/v1/jobs/:id/...`) is authorised on the job's current
+namespace and then filtered by each row's persisted namespace: runs (and the
+`X-Caesium-Total-Count` header), the latest run on a job read, backfills, cache
+entries (by the run that filled them), and the baseline `why` compares against
+(none when the only candidate is unreadable). A run diff needs viewer in both
+runs' namespaces. A trigger's event history shows only deliveries whose every
+started run the caller may read (the same rule, lifecycle provenance and label removal included). A job read embeds the job's trigger only when
+the caller may read every namespace that trigger serves.
 
 ### Planned isolation features
 

@@ -98,12 +98,22 @@ func (r *runService) GetTaskLogSnapshot(runID, taskID uuid.UUID) (*runstorage.Ta
 	return r.runStore().GetTaskLogSnapshot(runID, taskID)
 }
 
+// List and Latest run under the service's context, so a history scope the
+// handler put on it (authz.WithHistoryScope) narrows them to the run
+// namespaces the caller may read (identity-and-access B4).
 func (r *runService) List(jobID uuid.UUID, limit, offset int) ([]*runstorage.JobRun, int64, bool, error) {
-	return r.runStore().List(jobID, limit, offset)
+	return r.runStore().ListContext(r.queryContext(), jobID, limit, offset)
 }
 
 func (r *runService) Latest(jobID uuid.UUID) (*runstorage.JobRun, error) {
-	return r.runStore().Latest(jobID)
+	return r.runStore().LatestContext(r.queryContext(), jobID)
+}
+
+func (r *runService) queryContext() context.Context {
+	if r.ctx == nil {
+		return context.Background()
+	}
+	return r.ctx
 }
 
 // WithDatabase allows tests to override the database backing the store.

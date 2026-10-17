@@ -155,11 +155,15 @@ var endpointPolicy = map[string]RoutePolicy{
 	"GET /v1/connectors/:id/executions/:id/history":       clusterRoute(viewer),
 	"GET /v1/connectors/:id/executions/:id/relationships": clusterRoute(viewer),
 
-	// Jobs. GET /v1/jobs/:id attaches the latest run, and the history reads
-	// below return runs by job id alone; under a moved job those rows can sit
-	// in the old namespace (B4 filters them by the run's persisted namespace).
-	"GET /v1/jobs":           collectionRoute(viewer).pendingOn("B4"),
-	"GET /v1/jobs/:id":       namespacedRoute(viewer).pendingOn("B4"),
+	// Jobs. The history reads under a job (its runs, latest run, run diff,
+	// why baselines, cache entries and backfills) are authorised on the job's
+	// current namespace and then filtered by each row's persisted namespace
+	// (B4), so a moved job's old history stays with its old owner. Blame and
+	// topology read the job's DAG snapshots, which record no namespace: under
+	// a moved job the old owner's topology history would reach the new owner
+	// (B7 makes snapshots namespace-aware).
+	"GET /v1/jobs":           collectionRoute(viewer),
+	"GET /v1/jobs/:id":       namespacedRoute(viewer),
 	"GET /v1/jobs/:id/tasks": namespacedRoute(viewer),
 	"GET /v1/jobs/:id/dag":   namespacedRoute(viewer),
 	// The manifest exports the job's trigger configuration (webhook secrets
@@ -167,14 +171,14 @@ var endpointPolicy = map[string]RoutePolicy{
 	// shared-trigger ownership on the apply/export round trip).
 	"GET /v1/jobs/:id/manifest":         namespacedRoute(viewer).pendingOn("B2"),
 	"GET /v1/jobs/:id/queue":            namespacedRoute(viewer),
-	"GET /v1/jobs/:id/runs":             namespacedRoute(viewer).pendingOn("B4"),
-	"GET /v1/jobs/:id/runs/diff":        namespacedRoute(viewer).pendingOn("B4"),
-	"GET /v1/jobs/:id/blame":            namespacedRoute(viewer).pendingOn("B4"),
-	"GET /v1/jobs/:id/topology":         namespacedRoute(viewer).pendingOn("B4"),
-	"GET /v1/jobs/:id/topology/history": namespacedRoute(viewer).pendingOn("B4"),
-	// Cache entries carry the run ids and results of the runs that filled them.
-	"GET /v1/jobs/:id/cache":     namespacedRoute(viewer).pendingOn("B4"),
-	"GET /v1/jobs/:id/backfills": namespacedRoute(viewer).pendingOn("B4"),
+	"GET /v1/jobs/:id/runs":             namespacedRoute(viewer),
+	"GET /v1/jobs/:id/runs/diff":        namespacedRoute(viewer),
+	"GET /v1/jobs/:id/blame":            namespacedRoute(viewer).pendingOn("B7"),
+	"GET /v1/jobs/:id/topology":         namespacedRoute(viewer).pendingOn("B7"),
+	"GET /v1/jobs/:id/topology/history": namespacedRoute(viewer).pendingOn("B7"),
+	// Cache entries are filtered by the namespace of the run that filled them.
+	"GET /v1/jobs/:id/cache":     namespacedRoute(viewer),
+	"GET /v1/jobs/:id/backfills": namespacedRoute(viewer),
 
 	// One run of a job: the job's current namespace and the run's persisted
 	// namespace are both required.
@@ -188,22 +192,20 @@ var endpointPolicy = map[string]RoutePolicy{
 	// the handler lists links only for a cluster viewer (others get an empty list).
 	"GET /v1/jobs/:id/runs/:id/external-executions": namespacedRoute(viewer),
 	// The why explainer diffs against a baseline run (the cache origin or the
-	// prior run of the task), which can be another namespace's history.
-	"GET /v1/jobs/:id/runs/:id/why": namespacedRoute(viewer).pendingOn("B4"),
+	// prior run of the task); a baseline in a namespace the caller cannot read
+	// is never used.
+	"GET /v1/jobs/:id/runs/:id/why": namespacedRoute(viewer),
 
-	// A backfill's total_runs is computed when it starts by deduplicating
-	// dates against the job's runs by job id alone
-	// (internal/backfill/store.go LatestRunForLogicalDate), so under a moved
-	// job it counts the old namespace's per-date runs and outcomes; reading
-	// or cancelling it returns that row (B4 filters the dedupe by the run's
-	// persisted namespace).
-	"GET /v1/jobs/:id/backfills/:id": namespacedRoute(viewer).pendingOn("B4"),
+	// A backfill's total_runs deduplicates dates against the job's runs in
+	// the backfill's own persisted namespace only.
+	"GET /v1/jobs/:id/backfills/:id": namespacedRoute(viewer),
 
-	// Events and stats aggregate every job.
-	"GET /v1/events":          collectionRoute(viewer).pendingOn("B4"),
-	"GET /v1/events/ingested": collectionRoute(viewer).pendingOn("B4"),
-	"GET /v1/stats":           collectionRoute(viewer).pendingOn("B4"),
-	"GET /v1/stats/summary":   collectionRoute(viewer).pendingOn("B4"),
+	// Events and stats aggregate every job; they are filtered to the
+	// caller's namespaces.
+	"GET /v1/events":          collectionRoute(viewer),
+	"GET /v1/events/ingested": collectionRoute(viewer),
+	"GET /v1/stats":           collectionRoute(viewer),
+	"GET /v1/stats/summary":   collectionRoute(viewer),
 
 	// Cluster state.
 	"GET /v1/system/nodes":      clusterRoute(viewer),
@@ -216,10 +218,11 @@ var endpointPolicy = map[string]RoutePolicy{
 	"GET /v1/lineage/impact":  collectionRoute(viewer).pendingOn("B5"),
 
 	// Triggers resolve to the namespaces of every job they serve. A trigger's
-	// event history is keyed by trigger id alone.
-	"GET /v1/triggers":            collectionRoute(viewer).pendingOn("B4"),
+	// event history shows a confined caller only deliveries whose every
+	// started run sits in its namespaces.
+	"GET /v1/triggers":            collectionRoute(viewer),
 	"GET /v1/triggers/:id":        namespacedRoute(viewer),
-	"GET /v1/triggers/:id/events": namespacedRoute(viewer).pendingOn("B4"),
+	"GET /v1/triggers/:id/events": namespacedRoute(viewer),
 
 	// Shared objects resolve to the object's own namespace ("*" = shared).
 	"GET /v1/notifications/channels":     collectionRoute(viewer).pendingOn("D4"),
@@ -237,7 +240,7 @@ var endpointPolicy = map[string]RoutePolicy{
 	// Incident operator read API (agent-in-the-loop D2). The detail carries
 	// the incident's frozen agent allowlist, which a lineage walk fills with
 	// downstream job aliases from any namespace (A8 confines it).
-	"GET /v1/incidents":     collectionRoute(viewer).pendingOn("B4"),
+	"GET /v1/incidents":     collectionRoute(viewer),
 	"GET /v1/incidents/:id": namespacedRoute(viewer).pendingOn("A8"),
 
 	// Dataset freshness operator surface (freshness-scheduling E1). A dataset
@@ -287,9 +290,8 @@ var endpointPolicy = map[string]RoutePolicy{
 	"POST /v1/jobs/:id/runs/:id/retry":                          namespacedRoute(runner),
 	"POST /v1/jobs/:id/runs/:id/tasks/:id/partitions/:id/retry": namespacedRoute(runner),
 	"POST /v1/jobs/:id/runs/:id/callbacks/retry":                namespacedRoute(runner),
-	// Backfill creation deduplicates dates against the job's runs by job id
-	// alone, so total_runs would report another namespace's history (B4).
-	"POST /v1/jobs/:id/backfill": namespacedRoute(runner).pendingOn("B4"),
+	// Backfill dates deduplicate against the backfill's own namespace (B4).
+	"POST /v1/jobs/:id/backfill": namespacedRoute(runner),
 	// Ingest routes an event to every matching job (A6 splits delivery by
 	// namespace and reports skips).
 	"POST /v1/events":            namespacedRoute(runner).pendingOn("A6"),
@@ -308,7 +310,7 @@ var endpointPolicy = map[string]RoutePolicy{
 	"DELETE /v1/jobs/:id/queue/:id":         namespacedRoute(operator),
 	"DELETE /v1/jobs/:id/cache":             namespacedRoute(operator),
 	"DELETE /v1/jobs/:id/cache/:id":         namespacedRoute(operator),
-	"PUT /v1/jobs/:id/backfills/:id/cancel": namespacedRoute(operator).pendingOn("B4"), // returns the backfill row (see GET)
+	"PUT /v1/jobs/:id/backfills/:id/cancel": namespacedRoute(operator),
 	// A new trigger serves no job yet, so it has no namespace to resolve.
 	"POST /v1/triggers": clusterRoute(operator),
 	// Editing a trigger's configuration can subscribe it to another

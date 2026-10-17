@@ -3,8 +3,8 @@ package job
 import (
 	"net/http"
 	"strconv"
-	"strings"
 
+	"github.com/caesium-cloud/caesium/api/internal/orderby"
 	"github.com/caesium-cloud/caesium/api/middleware"
 	"github.com/caesium-cloud/caesium/api/rest/service/job"
 	"github.com/caesium-cloud/caesium/internal/models"
@@ -14,6 +14,15 @@ import (
 )
 
 const jobListRunHistoryLimit = 10
+
+// jobListOrderColumns are the columns ?order_by= may sort the job list by. A
+// raw expression reached GORM's Order verbatim, so a caller could sort by a
+// subquery over rows it may not read (and, for a namespace-confined caller,
+// learn about other namespaces through it; identity-and-access B4).
+var jobListOrderColumns = map[string]struct{}{
+	"id": {}, "alias": {}, "namespace": {}, "trigger_id": {}, "priority": {}, "paused": {},
+	"created_at": {}, "updated_at": {},
+}
 
 type ListJobResponse struct {
 	*models.Job
@@ -30,7 +39,7 @@ func List(c *echo.Context) error {
 		req.Aliases = aliases
 	}
 
-	svc := job.Service(c.Request().Context())
+	svc := jobListService(c.Request().Context())
 	jobs, err := svc.List(req)
 	if err != nil {
 		return echo.NewHTTPError(http.StatusInternalServerError, "internal server error").Wrap(err)
@@ -84,8 +93,14 @@ func parseListRequest(c *echo.Context) (req *job.ListRequest, err error) {
 	}
 
 	if orderBy := c.QueryParam("order_by"); orderBy != "" {
-		req.OrderBy = strings.Split(orderBy, ",")
+		if req.OrderBy, err = orderby.Parse(orderBy, jobListOrderColumns); err != nil {
+			return nil, err
+		}
 	}
 
 	return
 }
+
+// jobListService builds the job service for a list request; a seam for the
+// collection-guard test, which serves the real handler over a test database.
+var jobListService = job.Service

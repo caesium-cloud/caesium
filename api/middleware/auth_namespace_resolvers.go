@@ -65,31 +65,31 @@ var namespaceResolvers = map[string]namespaceResolver{
 	"GET /v1/jobs/:id/tasks":            resolveJobByID,
 	"GET /v1/jobs/:id/dag":              resolveJobByID,
 	"GET /v1/jobs/:id/queue":            resolveJobByID,
-	"GET /v1/jobs/:id/runs":             resolveJobByID, // pending B4
-	"GET /v1/jobs/:id/runs/diff":        resolveJobByID, // pending B4
-	"GET /v1/jobs/:id/blame":            resolveJobByID, // pending B4
-	"GET /v1/jobs/:id/topology":         resolveJobByID, // pending B4
-	"GET /v1/jobs/:id/topology/history": resolveJobByID, // pending B4
-	"GET /v1/jobs/:id/cache":            resolveJobByID, // pending B4
-	"GET /v1/jobs/:id/backfills":        resolveJobByID, // pending B4
+	"GET /v1/jobs/:id/runs":             resolveJobByID,
+	"GET /v1/jobs/:id/runs/diff":        resolveJobRunPair,
+	"GET /v1/jobs/:id/blame":            resolveJobByID, // pending B7
+	"GET /v1/jobs/:id/topology":         resolveJobByID, // pending B7
+	"GET /v1/jobs/:id/topology/history": resolveJobByID, // pending B7
+	"GET /v1/jobs/:id/cache":            resolveJobByID,
+	"GET /v1/jobs/:id/backfills":        resolveJobByID,
 	"DELETE /v1/jobs/:id":               resolveJobByID,
 	"PUT /v1/jobs/:id/pause":            resolveJobByID,
 	"PUT /v1/jobs/:id/unpause":          resolveJobByID,
 	"POST /v1/jobs/:id/run":             resolveJobByID,
-	"POST /v1/jobs/:id/backfill":        resolveJobByID, // pending B4
+	"POST /v1/jobs/:id/backfill":        resolveJobByID,
 	"DELETE /v1/jobs/:id/queue/:id":     resolveJobByID, // queue entries run in the job's namespace
 	"DELETE /v1/jobs/:id/cache":         resolveJobByID,
 	"DELETE /v1/jobs/:id/cache/:id":     resolveJobByID,
 
 	// Jobs by id or unique id prefix (models.FindJobByIDPrefix, like get.go
 	// and manifest.go).
-	"GET /v1/jobs/:id":          resolveJobByIDPrefix, // pending B4
+	"GET /v1/jobs/:id":          resolveJobByIDPrefix,
 	"GET /v1/jobs/:id/manifest": resolveJobByIDPrefix,
 
 	// One run: the job's current namespace AND the run's persisted namespace.
 	"GET /v1/jobs/:id/runs/:id":                                 resolveJobRun,
 	"GET /v1/jobs/:id/runs/:id/logs":                            resolveJobRun,
-	"GET /v1/jobs/:id/runs/:id/why":                             resolveJobRun, // pending B4
+	"GET /v1/jobs/:id/runs/:id/why":                             resolveJobRun,
 	"GET /v1/jobs/:id/runs/:id/receipt":                         resolveJobRun,
 	"POST /v1/jobs/:id/runs/:id/receipt/verify":                 resolveJobRun,
 	"GET /v1/jobs/:id/runs/:id/tasks/:id/descriptor":            resolveJobRun,
@@ -103,14 +103,14 @@ var namespaceResolvers = map[string]namespaceResolver{
 	"POST /v1/jobs/:id/runs/:id/replay": resolveJobRunReplay,
 
 	// One backfill: the job's namespace AND the backfill's.
-	"GET /v1/jobs/:id/backfills/:id":        resolveJobBackfill, // pending B4
-	"PUT /v1/jobs/:id/backfills/:id/cancel": resolveJobBackfill, // pending B4
+	"GET /v1/jobs/:id/backfills/:id":        resolveJobBackfill,
+	"PUT /v1/jobs/:id/backfills/:id/cancel": resolveJobBackfill,
 
 	// Triggers: every job the trigger serves.
 	"GET /v1/triggers/:id":        resolveTrigger,
 	"PATCH /v1/triggers/:id":      resolveTrigger,
 	"POST /v1/triggers/:id/fire":  resolveTrigger,
-	"GET /v1/triggers/:id/events": resolveTrigger, // pending B4
+	"GET /v1/triggers/:id/events": resolveTrigger,
 
 	// Incidents: incidents.namespace.
 	"GET /v1/incidents/:id":                        resolveIncident,
@@ -241,6 +241,47 @@ func resolveJobRun(c *echo.Context, svc *auth.Service, role models.Role) ([]nsRe
 		return nil, err
 	}
 	return []nsRequirement{every(role, jobNamespace, runNamespace)}, nil
+}
+
+// resolveJobRunPair resolves GET /v1/jobs/:id/runs/diff: the job in the path
+// and the two runs named by ?left= and ?right=, parsed and checked exactly as
+// the handler does (a missing or unparseable id is the handler's 400, a run of
+// another job its 404). The caller needs the role in the job's current
+// namespace and in both runs' persisted namespaces, like a single-run read.
+func resolveJobRunPair(c *echo.Context, svc *auth.Service, role models.Role) ([]nsRequirement, error) {
+	jobID, err := pathUUID(c, "id")
+	if err != nil {
+		return nil, err
+	}
+	leftRaw, rightRaw := c.QueryParam("left"), c.QueryParam("right")
+	if leftRaw == "" || rightRaw == "" {
+		return nil, echo.NewHTTPError(http.StatusBadRequest, "left and right query parameters are required")
+	}
+	runIDs := make([]uuid.UUID, 0, 2)
+	for _, raw := range []string{leftRaw, rightRaw} {
+		id, err := uuid.Parse(raw)
+		if err != nil {
+			return nil, badRequest(err)
+		}
+		runIDs = append(runIDs, id)
+	}
+	ctx := c.Request().Context()
+	jobNamespace, err := svc.JobNamespace(ctx, jobID)
+	if err != nil {
+		return nil, lookupError(err)
+	}
+	namespaces := []string{jobNamespace}
+	for _, runID := range runIDs {
+		runJobID, runNamespace, err := svc.RunNamespace(ctx, runID)
+		if err != nil {
+			return nil, lookupError(err)
+		}
+		if runJobID != jobID {
+			return nil, echo.ErrNotFound
+		}
+		namespaces = append(namespaces, runNamespace)
+	}
+	return []nsRequirement{every(role, namespaces...)}, nil
 }
 
 func resolveJobRunReplay(c *echo.Context, svc *auth.Service, role models.Role) ([]nsRequirement, error) {

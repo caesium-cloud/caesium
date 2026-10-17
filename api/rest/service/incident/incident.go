@@ -7,6 +7,7 @@ package incident
 import (
 	"context"
 
+	"github.com/caesium-cloud/caesium/internal/authz"
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/caesium-cloud/caesium/pkg/db"
 	"github.com/google/uuid"
@@ -29,6 +30,11 @@ type Service struct {
 // New creates a Service backed by the default DB connection.
 func New(ctx context.Context) *Service {
 	return &Service{ctx: ctx, db: db.Connection()}
+}
+
+// NewWithDatabase creates a Service backed by conn; used by tests.
+func NewWithDatabase(ctx context.Context, conn *gorm.DB) *Service {
+	return &Service{ctx: ctx, db: conn}
 }
 
 // WithDatabase returns a copy of the Service backed by conn; used by tests.
@@ -110,6 +116,9 @@ func (s *Service) List(p ListParams) (*ListResult, error) {
 	if p.NeedsApproval {
 		q = q.Where("EXISTS (?)", pendingApprovalSubquery(s.db.WithContext(s.ctx)))
 	}
+	// A namespace-confined caller lists only its namespaces' incidents, and the
+	// total counts only those (B4).
+	q = authz.NamespaceFilter(q, "incidents.namespace")
 
 	var total int64
 	if err := q.Count(&total).Error; err != nil {
@@ -123,6 +132,15 @@ func (s *Service) List(p ListParams) (*ListResult, error) {
 		Offset(offset).
 		Find(&incidents).Error; err != nil {
 		return nil, err
+	}
+
+	// The frozen agent allowlist is filled from a lineage walk and names
+	// downstream jobs in any namespace: a confined caller never receives it
+	// from the list (A8 owns confining it; B4).
+	if authz.Restricted(s.ctx) {
+		for i := range incidents {
+			incidents[i].AllowedJobs = nil
+		}
 	}
 
 	return &ListResult{

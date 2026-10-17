@@ -7,6 +7,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/caesium-cloud/caesium/internal/authz"
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/caesium-cloud/caesium/pkg/db"
 	jobdefschema "github.com/caesium-cloud/caesium/pkg/jobdef"
@@ -91,6 +92,7 @@ func (t *triggerService) List(req *ListRequest) (models.Triggers, error) {
 	if req.Type != "" {
 		q = q.Where("type = ?", req.Type)
 	}
+	q = t.namespaceFilter(q)
 
 	for _, orderBy := range req.OrderBy {
 		q = q.Order(orderBy)
@@ -105,6 +107,25 @@ func (t *triggerService) List(req *ListRequest) (models.Triggers, error) {
 	}
 
 	return triggers, q.Find(&triggers).Error
+}
+
+// namespaceFilter narrows a trigger list for a namespace-confined caller
+// (identity-and-access B4) with the trigger read rule of
+// GET /v1/triggers/:id: a trigger is listed only when it serves at least one
+// live job and the caller may read every namespace of the live jobs it
+// serves. A trigger shared with another namespace's job, and one serving no
+// job, stay cluster-only. Unrestricted callers get q unchanged.
+func (t *triggerService) namespaceFilter(q *gorm.DB) *gorm.DB {
+	if !authz.Restricted(t.ctx) {
+		return q
+	}
+	db := t.db.WithContext(t.ctx)
+	readable := authz.NamespaceFilter(db.Model(&models.Job{}).Select("jobs.id"), "jobs.namespace")
+	served := db.Model(&models.Job{}).Select("1").
+		Where("jobs.trigger_id = triggers.id AND jobs.deleted_at IS NULL")
+	foreign := db.Model(&models.Job{}).Select("1").
+		Where("jobs.trigger_id = triggers.id AND jobs.deleted_at IS NULL AND jobs.id NOT IN (?)", readable)
+	return q.Where("EXISTS (?) AND NOT EXISTS (?)", served, foreign)
 }
 
 func (t *triggerService) ListByPath(path string) (models.Triggers, error) {
