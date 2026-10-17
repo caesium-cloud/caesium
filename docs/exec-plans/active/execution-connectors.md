@@ -1,6 +1,6 @@
 # Execution Connectors — Temporal Monitoring and Operator Actions
 
-Last updated: 2026-10-16
+Last updated: 2026-10-17
 
 Caesium should let an operator follow a data process across Temporal workflows
 and Caesium jobs, understand the data consequence, and perform a declared
@@ -12,11 +12,12 @@ prerequisite for monitoring them.
 
 At drafting, [PR #560](https://github.com/caesium-cloud/caesium/pull/560) supplied
 idempotent Caesium starts, explicit created/queued/skipped/dropped outcomes and
-an operator recipe. W1–W5 have since added the connector contract, catalog,
-Temporal adapter, real development fixture and authenticated HTTP monitoring.
-Operator action APIs and Console surfaces remain pending. The Console's existing
-run, dataset, freshness, lineage, receipt and incident views are the data
-evidence this integration should join to external process state.
+an operator recipe. W1–W7 have since added the connector contract, catalog,
+Temporal adapter, real development fixture, authenticated HTTP monitoring/actions
+and Console monitoring with verified workflow/run relationships and data links.
+The Console approval journey remains E3; connector CI qualification and promotion
+remain F2–F4. The Console's existing run, dataset, freshness, lineage, receipt and
+incident views provide the local data evidence joined to external process state.
 
 The first release includes one optional Temporal connector, file-configured
 connections and optional workflow bindings, authenticated monitoring, verified
@@ -245,13 +246,14 @@ write. Limits are validated configuration with conservative hard ceilings fixed
 by A1 before dependent work. C1/F3 measure unchanged-poll write count, catalog
 cardinality and closed-workflow Query dispatch count through the live surface.
 
-## Progress (as of 2026-10-16)
+## Progress (as of 2026-10-17)
 
 W1 through W4 have merged, including the W4 dashboard in PR #635.
 W5 C1 is merged in PR #644; dashboard PR #643 records its verified acceptance.
 W6 C2 and E1 are merged in PRs #652 and #651; this dashboard records their
 verified acceptance.
-E2/E3, F2–F4 and N remain later work. An open PR or a component-only pass
+W7 E2 is merged in PR #658; this dashboard records its verified acceptance.
+E3, F2–F4 and N remain later work. An open PR or a component-only pass
 is not completion. The SHAs below are the squash merges read from GitHub.
 
 The orchestrator owns this dashboard: PR URLs, exact tested heads/merge SHAs,
@@ -599,6 +601,65 @@ Resume unfinished waves. Do not archive this plan while later items remain.
   the missing CODEOWNER approval and merge queue. Repository settings and
   CI-lane promotion remain unchanged.
 
+### W7 — Console relationship and data-evidence journey (implementation merged 2026-10-17)
+
+- **Base and scope:** Dispatch base `a78bcdaf7c94db188c25ec14f59bff46874f482e`
+  includes merged E1 and D1. Before acceptance, the source branch integrated
+  namespaced-key and user/session-administration master `5f5fb92c9f250ed9cb56ce1bc7901a7d9bbd6f99` and was requalified.
+  E2 is the only selected item. E3 requires merged E2; F2–F4/N remain later work.
+- **W7-α / E2:** [PR #658](https://github.com/caesium-cloud/caesium/pull/658),
+  accepted head `89a213a67d78bf13f94c5380b532e74a2a4d5358`, merged `8778aaa4c814689958b5be935448cc75c2ae1729`
+  at 2026-10-17T20:01:04Z. Typed parent/child/continuation relationships, verified local
+  admission/run links and reverse navigation join existing run evidence. An
+  additive HTTP correlation projection supplies the routable execution ID;
+  the catalog digest is not a route parameter. Scope checks and response
+  ceilings apply to the expanded response. Current job dataset declarations
+  remain distinct from observed logs, outputs, assertions and receipt evidence.
+- **Verification:** Independent implementation and browser-test source review
+  is clear, including scoped global-feature/catalog denial and warm-cache
+  regressions. `just tag=ec-w7 connectors-fixture-check` on the clean accepted
+  head passed all six real Temporal HTTP scenarios (94.67s), all five connector
+  browser scenarios (100.25s) and all nine authenticated browser scenarios
+  (6.36s), with no selected skips, retries, errors or flaky outcomes. The journey
+  reaches actual uncached logs, outputs, receipt and dataset watermark, retains
+  queued admission identity, follows native relationships and proves scoped
+  local evidence without external requests. Candidate/source checksums and
+  server image `sha256:3ab83c0bb93ab8a4bd6f535ce496b153fea47eec73617540f33acc940d071463`
+  are retained with SDK 1.49.0 / CLI 1.9.1 / server 1.32.0. All six owned fixture
+  containers were cleaned up normally. Opaque work gains no invented data evidence.
+- **Baselines:** Full container Go race/coverage passed on the exact integrated
+  tree before commit; tracked fingerprints were unchanged when bound to the
+  accepted head. Current hosted lint/vet, both unit architectures, tagged
+  hermetic checks, integration and UI checks passed. The current UI job passed
+  539 tests in 67 files, lint, TypeScript, production build and bundle budgets.
+  All three default Docker shards and agent/auth integration passed, including
+  `TestAuthUserAdministrationCookieAdmin`,
+  `TestAuthUserAdministrationDeniesNonClusterAdmins` and
+  `TestAuthUserAdministrationLifecycle`, plus namespaced-key minting, SSO key
+  administration, REST refusal, rotation and grant-resolution scenarios from
+  the new base. Default browser tests
+  passed 160 cases and authenticated browser tests passed nine, without retries
+  or skips. Go integration retains mode exclusions and two missing-image
+  prerequisite skips (automatic retry and cache CLI); those skipped scenarios
+  are not claimed as qualified. Current strict native OOM qualification passed;
+  the earlier failed candidate's prerequisite cause remains unconfirmed.
+- **Hosted qualification:** [CI run 39061863063](https://github.com/caesium-cloud/caesium/actions/runs/39061863063)
+  passed, including coverage ratchets, candidate-bound evidence validation and
+  all nine required checks with `ci-ok`. It tested synthetic merge
+  `393b26b5268407f7b8fc0213e741ff976f558dfd` of master `5f5fb92c9f250ed9cb56ce1bc7901a7d9bbd6f99`
+  and the accepted PR head. Its full tree, the accepted head and the actual
+  source squash merge all equal `fd4fb44ee2bbcb581c5c33f3c003998f678afe7c`.
+  Local live proof therefore covers the same integrated source contents.
+- **Acceptance/publication:** The source merge changed exactly the 13 E2 files
+  listed below; E2 alone is newly checked. Fresh GitHub review reads found no
+  findings or unresolved threads. The user authorized the admin-squash train;
+  CODEOWNER approval and queue requirements were bypassed after passing checks,
+  without changing repository protections or fabricating an approval. The
+  dedicated [plan-sync PR #659](https://github.com/caesium-cloud/caesium/pull/659)
+  records this source acceptance; its own checks and merge are independently
+  verified before wave closeout. E3 and F2–F4/N remain later work, and this plan
+  remains active.
+
 ### Stream Status
 
 | Stream | Scope | Priority | Status |
@@ -607,7 +668,7 @@ Resume unfinished waves. Do not archive this plan while later items remain.
 | B | Temporal inspection and declared messages (2 items) | P0 | Shipped (B1, B2) |
 | C | Authenticated REST and composition (2 items) | P0 | Shipped (C1, C2) |
 | D | Verified correlation and action durability (2 items) | P0 | Shipped (D1, D2) |
-| E | Console monitoring, data links and approval (3 items) | P0 | E1 shipped; E2/E3 not started |
+| E | Console monitoring, data links and approval (3 items) | P0 | E1 and E2 shipped; E3 not started |
 | F | Real fixture, CI, qualification and promotion (4 items) | P0 | F1 shipped; F2–F4 not started |
 | N | Operator guidance and reconciliation (1 item) | P0 | Not started |
 
@@ -906,14 +967,20 @@ joined to existing Caesium pages. No cross-provider global pagination in v1.
   proves existing default/auth projects select no connector specs; the connector
   project selects all its specs and fails on missing gate/auth/fixture markers.
 
-- [ ] E2. Render typed parent/child/delegated-run relations and reverse links
+- [x] E2. Render typed parent/child/delegated-run relations and reverse links
   on existing run detail. Follow verified runs to logs, receipts and data evidence
   with original permissions. Label dataset declarations separately from evidence.
   Files: new `ui/src/features/connectors/RelationshipsPanel.tsx`,
   new `ui/src/features/connectors/__tests__/relationships.test.tsx`,
   `ui/src/features/connectors/ExecutionDetailPage.tsx`,
+  `ui/src/features/connectors/types.ts`, `ui/src/lib/api.ts`,
   `ui/src/features/jobs/RunDetailPage.tsx`,
-  new `ui/e2e/connectors/correlation.spec.ts`, `docs/connectors.md` (data tour).
+  new `ui/e2e/connectors/correlation.spec.ts`,
+  `api/rest/service/connector/reads.go`,
+  `api/rest/service/connector/reads_test.go`,
+  `api/rest/controller/connector/reads.go`, `test/connectors_read_test.go`
+  (additive routable execution identity on verified HTTP correlations),
+  `docs/connectors.md` (data tour), `docs/temporal.md` (Console status).
   Depends on: E1, D1.
   Verify: browser follows workflow -> admitted run -> existing receipt/data
   evidence -> workflow; queue promotion becomes the same run. Opaque external
