@@ -308,8 +308,13 @@ func (s *IntegrationTestSuite) TestAuthSecretScopeWebhook() {
 // CAESIUM_AUTH_POLICY_FILE from the operator's shell, but only the server
 // loads that file, so a secret-bearing step must resolve at once with the
 // operator's own credentials rather than wait for a policy that never loads
-// and then fail denied. It needs no server, so it runs on every lane.
+// and then fail denied. It needs no server. The kubernetes lane stamps
+// engine kubernetes onto the manifest, and the CLI there has no kubeconfig,
+// so local execution is covered on the docker and podman lanes.
 func (s *IntegrationTestSuite) TestDevOnceSecretWithAPolicyFileConfigured() {
+	if s.engineType == "kubernetes" {
+		s.T().Skip("caesium dev --once executes locally; the kubernetes lane has no CLI kubeconfig. Covered on the docker and podman lanes")
+	}
 	const (
 		namespace = "iaa-c4-dev"
 		envName   = "CAESIUM_IT_C4_DEV_TOKEN"
