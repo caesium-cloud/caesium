@@ -687,11 +687,15 @@ caesium auth key create --role operator --namespace marketing [--namespace finan
 `--namespace` is repeatable (or comma-separated); `POST /v1/auth/keys` takes
 the same list as `namespaces`. Names must be DNS labels; `*` alone is a
 cluster key, and an empty list, an empty name (`--namespace ""`) or `*` mixed
-with names is `400`. With a policy
-file, every named namespace must be declared in it (`400` naming the one that
-is not); with no file any valid name is accepted. `--jobs` (or its older
-spelling `--scope-jobs`) narrows the key further to a list of job aliases; an
-empty value is refused rather than minting a key that is not narrowed.
+with names is `400`. With a policy file, every named namespace must be
+declared in it; with no file any valid name is accepted. A cluster admin who
+names an undeclared namespace gets a `400` naming it. A namespace admin holds
+no grant in an undeclared namespace, so its request is refused first by the
+minting constraint below, with an audited `403` that does not name the
+namespace. `--jobs` (or its older spelling `--scope-jobs`) narrows the key
+further to a list of job aliases. An empty value (`scope.jobs` of `[]` or only
+blank aliases over REST) is a `400` for every caller, cluster admins included;
+such a key used to be minted unscoped.
 
 **Minting is limited to the caller's own grants.** Creating a key needs admin
 in every namespace it names (`*` for a cluster key), so a namespace admin

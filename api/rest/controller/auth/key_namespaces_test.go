@@ -156,6 +156,38 @@ func TestCreateKeyRejectsAJobListNamingNoJob(t *testing.T) {
 	}
 }
 
+// TestCreateKeyRejectsAMalformedAgentClaim: an agent claim without an incident
+// is read back as no claim at all (auth.DecodeAgentClaim), so it is refused as
+// malformed and never exempts a job list that names no job — that pair used to
+// mint a key that is unscoped on every job route.
+func TestCreateKeyRejectsAMalformedAgentClaim(t *testing.T) {
+	ctrl, svc, _ := setupControllerDeps(t)
+	admin := &iauth.Principal{Kind: iauth.PrincipalAPIKey, Subject: "csk_live_root", Grants: policy.Grants{"*": models.RoleAdmin}}
+	for _, scope := range []string{
+		`{"jobs":[" "],"agent":{}}`,
+		`{"jobs":[],"agent":{}}`,
+		`{"agent":{}}`,
+		`{"agent":{"jobs":["etl"]}}`,
+		`{"jobs":["etl"],"agent":{"incident_id":"00000000-0000-0000-0000-000000000000"}}`,
+	} {
+		_, err := createKeyAs(t, ctrl, admin, `{"role":"runner","scope":`+scope+`}`)
+		requireHTTPError(t, err, http.StatusBadRequest, "scope.agent must name an incident_id")
+	}
+	keys, err := svc.ListKeys()
+	require.NoError(t, err)
+	require.Empty(t, keys, "a malformed agent claim mints no key")
+
+	// A claim that names an incident still mints (REST scope.agent is
+	// unchanged until A8) and is read back as an agent-session key.
+	incident := uuid.New()
+	read, err := createKeyAs(t, ctrl, admin, `{"role":"runner","scope":{"jobs":[" "],"agent":{"incident_id":"`+incident.String()+`"}}}`)
+	require.NoError(t, err)
+	claim, err := iauth.DecodeAgentClaim(read().APIKey.Scope)
+	require.NoError(t, err)
+	require.NotNil(t, claim)
+	require.Equal(t, incident, claim.IncidentID)
+}
+
 func TestCreateKeyRejectsUndeclaredNamespaceWhenFileBacked(t *testing.T) {
 	ctrl, _, _ := setupControllerDeps(t)
 	admin := &iauth.Principal{Kind: iauth.PrincipalAPIKey, Subject: "csk_live_root", Grants: policy.Grants{"*": models.RoleAdmin}}

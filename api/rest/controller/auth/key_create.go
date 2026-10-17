@@ -11,6 +11,7 @@ import (
 	"github.com/caesium-cloud/caesium/api/middleware"
 	"github.com/caesium-cloud/caesium/internal/auth"
 	"github.com/caesium-cloud/caesium/internal/models"
+	"github.com/google/uuid"
 	"github.com/labstack/echo/v5"
 )
 
@@ -38,10 +39,20 @@ func (ctrl *Controller) CreateKey(c *echo.Context) error {
 	if !models.ValidRole(req.Role) {
 		return echo.NewHTTPError(http.StatusBadRequest, fmt.Sprintf("invalid role: %s (must be admin, operator, runner, or viewer)", req.Role))
 	}
-	// A job list that names no job would be dropped as blank and leave the key
-	// narrowed to nothing, i.e. unscoped: refuse it rather than fail open.
-	if req.Scope != nil && req.Scope.Agent == nil && req.Scope.Jobs != nil && !namesAJob(req.Scope.Jobs) {
-		return echo.NewHTTPError(http.StatusBadRequest, "scope.jobs must name at least one job alias; omit scope for a key that is not narrowed to jobs")
+	if req.Scope != nil {
+		// An agent claim with no incident is read back as no claim at all
+		// (auth.DecodeAgentClaim), so it must not exempt the key from the
+		// job-list check below: refuse it as malformed.
+		if req.Scope.Agent != nil && req.Scope.Agent.IncidentID == uuid.Nil {
+			return echo.NewHTTPError(http.StatusBadRequest, "scope.agent must name an incident_id; omit scope.agent for a key that is not an agent-session credential")
+		}
+		// A job list that names no job would be dropped as blank and leave the
+		// key narrowed to nothing, i.e. unscoped: refuse it rather than fail
+		// open. Only a valid agent claim (which restricts the key to one
+		// incident's agent routes whatever its jobs) is exempt.
+		if req.Scope.Agent == nil && req.Scope.Jobs != nil && !namesAJob(req.Scope.Jobs) {
+			return echo.NewHTTPError(http.StatusBadRequest, "scope.jobs must name at least one job alias; omit scope for a key that is not narrowed to jobs")
+		}
 	}
 
 	var expiresAt *time.Time

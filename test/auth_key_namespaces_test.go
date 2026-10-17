@@ -383,13 +383,20 @@ func (s *IntegrationTestSuite) TestAuthNamespacedKeyMintingCLI() {
 	}
 	s.ElementsMatch([]string{"finance", "*", "*"}, deniedNamespaces, "one audited denial per refused mint")
 
-	// Undeclared or malformed namespaces are refused before anything else.
+	// A cluster admin naming an undeclared or malformed namespace gets a 400
+	// naming it.
 	for _, ns := range []string{"iaa-a5-nowhere", "Bad_NS"} {
 		stdout, stderr, err := s.runCLISeparate("auth", "key", "create", "--role", "viewer", "--namespace", ns, "--server", s.caesiumURL)
 		s.Require().Error(err, "--namespace %s must be refused; stdout: %s", ns, stdout)
 		s.Contains(stderr, "(400)")
 		s.Contains(stderr, ns)
 	}
+	// A namespace admin holds no grant in an undeclared namespace, so the
+	// middleware refuses it first: an audited 403.
+	stdout, stderr, err = keyCLI("create", "--role", "viewer", "--namespace", "iaa-a5-nowhere", "--description", describe("undeclared"))
+	s.Require().Error(err, "an undeclared namespace must be refused; stdout: %s", stdout)
+	s.Contains(stderr, "(403)")
+	s.Empty(strings.TrimSpace(stdout), "a refused mint prints no key")
 	// An empty --namespace (say, an unset "$NS") or --jobs never widens the
 	// key to cluster-wide or unscoped: no credential is issued.
 	emptyDescription := describe("empty flag")
@@ -426,6 +433,7 @@ func (s *IntegrationTestSuite) TestAuthNamespacedKeyMintingCLI() {
 	// Rotate within marketing: the replacement keeps namespaces and expiry.
 	storedExpiry := s.listedKey(mktOperator.Meta.ID).ExpiresAt
 	s.Require().NotNil(storedExpiry)
+	rotatedAt := time.Now().UTC()
 	stdout, stderr, err = keyCLI("rotate", "--id", mktOperator.Meta.ID, "--grace-period", "1m")
 	s.Require().NoError(err, "stderr: %s", stderr)
 	rotated := s.parseCreatedKey(stdout)
@@ -433,6 +441,12 @@ func (s *IntegrationTestSuite) TestAuthNamespacedKeyMintingCLI() {
 	s.Require().NotNil(rotated.Meta.ExpiresAt)
 	s.True(rotated.Meta.ExpiresAt.Equal(*storedExpiry), "rotated expiry %s, want %s", rotated.Meta.ExpiresAt, storedExpiry)
 	s.Equal(mktAdmin.Meta.KeyPrefix, rotated.Meta.CreatedBy)
+	// The old key's 2h TTL is cut to the 1m grace: a leaked secret stops when
+	// the grace ends, not when the TTL would have.
+	graceExpiry := s.listedKey(mktOperator.Meta.ID).ExpiresAt
+	s.Require().NotNil(graceExpiry)
+	s.WithinDuration(rotatedAt.Add(time.Minute), *graceExpiry, time.Minute, "old key expiry %s after a 1m grace", graceExpiry)
+	s.True(graceExpiry.Before(storedExpiry.Add(-time.Hour)), "old key expiry %s must be cut well below its TTL %s", graceExpiry, storedExpiry)
 
 	// Another namespace's key: neither rotated nor revoked.
 	for _, verb := range []string{"rotate", "revoke"} {

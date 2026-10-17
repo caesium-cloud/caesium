@@ -202,6 +202,35 @@ func TestRotateKeyKeepsTheRemainingLifetime(t *testing.T) {
 	require.WithinDuration(t, before.Add(time.Hour), *grace, time.Minute)
 }
 
+// TestRotateKeyCutsALongTTLToTheGrace: rotating a key that still has 90 days
+// to live cuts the OLD key's expiry to the grace window, so a leaked secret
+// stops working when the grace ends rather than at the end of its TTL; the
+// replacement keeps the 90 days.
+func TestRotateKeyCutsALongTTLToTheGrace(t *testing.T) {
+	db := testutil.OpenTestDB(t)
+	t.Cleanup(func() { testutil.CloseDB(db) })
+	clock := time.Now().UTC().Truncate(time.Second)
+	svc := auth.NewService(db, auth.WithNow(func() time.Time { return clock }), auth.WithValidationFailureMinLatency(0))
+	ttl := clock.Add(90 * 24 * time.Hour)
+	original, err := svc.CreateKey(&auth.CreateKeyRequest{Role: models.RoleViewer, CreatedBy: "test", ExpiresAt: &ttl})
+	require.NoError(t, err)
+
+	rotated, err := svc.RotateKeyAuthorized(t.Context(), original.Key.ID, 24*time.Hour, "admin", allowKey)
+	require.NoError(t, err)
+	old := keyRow(t, db, original.Key.ID).ExpiresAt
+	require.NotNil(t, old)
+	require.True(t, old.Equal(clock.Add(24*time.Hour)), "the old key's 90-day expiry must be cut to the 24h grace, got %s", old)
+	require.True(t, keyRow(t, db, rotated.Key.ID).ExpiresAt.Equal(ttl), "the replacement keeps the remaining 90 days")
+
+	_, err = svc.ValidateKey(original.Plaintext)
+	require.NoError(t, err, "the old key works during the grace")
+	clock = clock.Add(25 * time.Hour)
+	_, err = svc.ValidateKey(original.Plaintext)
+	require.ErrorIs(t, err, auth.ErrKeyExpired, "the old key stops when the grace ends")
+	_, err = svc.ValidateKey(rotated.Plaintext)
+	require.NoError(t, err, "the replacement outlives the grace")
+}
+
 func TestRotateKeyRefusesExpiredKey(t *testing.T) {
 	db, svc := newKeyService(t)
 	past := time.Now().UTC().Add(-time.Minute)

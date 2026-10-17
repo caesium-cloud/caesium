@@ -23,16 +23,30 @@ import (
 
 // keyRoutesServer serves the real key handlers behind the real auth
 // middleware, with the test-only collection guard on: a confined principal's
-// successful key list must have been namespace-filtered, or the response is a
-// 500 (api/auth_rbac_policy_completeness_test.go guardedCollectionRoutes).
+// successful key list must have been namespace-filtered, or the middleware
+// returns errCollectionUnfiltered (api/auth_rbac_policy_completeness_test.go
+// guardedCollectionRoutes). The guard runs after the handler has committed
+// its 200, and echo's default error handler drops an error on a committed
+// response, so the server's error handler records such a late error and do
+// fails the test on it.
 type keyRoutesServer struct {
 	db       *gorm.DB
 	svc      *iauth.Service
 	e        *echo.Echo
 	sessions *iauth.SessionStore
+	// lateErr is the error the middleware chain returned after the response
+	// was committed during the last request, if any.
+	lateErr error
 }
 
 func newKeyRoutesServer(t *testing.T) *keyRoutesServer {
+	t.Helper()
+	return newKeyRoutesServerListing(t, (*Controller).ListKeys)
+}
+
+// newKeyRoutesServerListing mounts list as GET /v1/auth/keys, so the
+// harness's self-test can serve a list handler that forgets the filter.
+func newKeyRoutesServerListing(t *testing.T, list func(*Controller, *echo.Context) error) *keyRoutesServer {
 	t.Helper()
 	db := testutil.OpenTestDB(t)
 	t.Cleanup(func() { testutil.CloseDB(db) })
@@ -52,16 +66,25 @@ bindings:
 	sessions := iauth.NewSessionStore(db)
 	ctrl := New(svc, auditor)
 
-	e := echo.New()
-	g := e.Group("/v1", authmw.Auth(authmw.AuthDeps{
+	s := &keyRoutesServer{db: db, svc: svc, sessions: sessions}
+	s.e = echo.New()
+	render := echo.DefaultHTTPErrorHandler(false)
+	s.e.HTTPErrorHandler = func(c *echo.Context, err error) {
+		if resp, _ := echo.UnwrapResponse(c.Response()); resp != nil && resp.Committed {
+			s.lateErr = err
+			return
+		}
+		render(c, err)
+	}
+	g := s.e.Group("/v1", authmw.Auth(authmw.AuthDeps{
 		Service: svc, Auditor: auditor, Limiter: iauth.NewRateLimiter(1000, time.Minute),
 		Sessions: sessions, CookieName: "caesium_session", RequireCollectionFilter: true,
 	}))
-	g.GET("/auth/keys", ctrl.ListKeys)
+	g.GET("/auth/keys", func(c *echo.Context) error { return list(ctrl, c) })
 	g.POST("/auth/keys", ctrl.CreateKey)
 	g.POST("/auth/keys/:id/revoke", ctrl.RevokeKey)
 	g.POST("/auth/keys/:id/rotate", ctrl.RotateKey)
-	return &keyRoutesServer{db: db, svc: svc, e: e, sessions: sessions}
+	return s
 }
 
 // key seeds a key with role and namespaces stored verbatim ("" = SQL NULL).
@@ -81,8 +104,19 @@ type keyRequest struct {
 	cookie, csrf       string
 }
 
+// do serves r and fails the test if the middleware chain returned an error
+// after the response was committed (the collection guard's failure).
 func (s *keyRoutesServer) do(t *testing.T, r keyRequest) (int, string) {
 	t.Helper()
+	status, body, late := s.serve(t, r)
+	require.NoError(t, late, "%s %s: the middleware failed the request after the handler committed %d", r.method, r.path, status)
+	return status, body
+}
+
+// serve is do without the check: it also returns the late error.
+func (s *keyRoutesServer) serve(t *testing.T, r keyRequest) (int, string, error) {
+	t.Helper()
+	s.lateErr = nil
 	req := httptest.NewRequestWithContext(context.Background(), r.method, r.path, strings.NewReader(r.body))
 	if r.body != "" {
 		req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
@@ -98,7 +132,7 @@ func (s *keyRoutesServer) do(t *testing.T, r keyRequest) (int, string) {
 	}
 	rec := httptest.NewRecorder()
 	s.e.ServeHTTP(rec, req)
-	return rec.Code, rec.Body.String()
+	return rec.Code, rec.Body.String(), s.lateErr
 }
 
 func (s *keyRoutesServer) lastDenial(t *testing.T) models.AuditLog {
@@ -119,9 +153,38 @@ func listedIDs(t *testing.T, body string) []string {
 	return ids
 }
 
+// TestKeyRoutesHarnessSeesAnUnfilteredList proves the harness can fail: a
+// list handler that returns every key without the namespace filter commits
+// its 200, and the collection guard's error still reaches the test. Without
+// this, TestKeyRoutesCollectionGuard would pass with the filter mark removed.
+func TestKeyRoutesHarnessSeesAnUnfilteredList(t *testing.T) {
+	forgetful := func(ctrl *Controller, c *echo.Context) error {
+		keys, err := ctrl.service.ListKeys()
+		if err != nil {
+			return err
+		}
+		return c.JSON(http.StatusOK, keys)
+	}
+	s := newKeyRoutesServerListing(t, forgetful)
+	mktAdmin, _ := s.key(t, models.RoleAdmin, `["marketing"]`)
+	clusterAdmin, _ := s.key(t, models.RoleAdmin, "")
+
+	status, _, late := s.serve(t, keyRequest{method: http.MethodGet, path: "/v1/auth/keys", bearer: mktAdmin})
+	require.Equal(t, http.StatusOK, status, "the handler committed its 200 before the guard ran")
+	var he *echo.HTTPError
+	require.ErrorAs(t, late, &he, "the collection guard's failure must reach the test")
+	require.Equal(t, http.StatusInternalServerError, he.Code)
+	require.Contains(t, he.Message, "did not apply the namespace filter")
+
+	_, _, late = s.serve(t, keyRequest{method: http.MethodGet, path: "/v1/auth/keys", bearer: clusterAdmin})
+	require.NoError(t, late, "an unrestricted principal has nothing to filter")
+}
+
 // TestKeyRoutesCollectionGuard is the guardedCollectionRoutes proof for
-// GET /v1/auth/keys, and drives the rest of the key surface as a namespace
-// admin through the real middleware and handlers.
+// GET /v1/auth/keys (it fails if ListKeys stops marking its response
+// filtered; see TestKeyRoutesHarnessSeesAnUnfilteredList), and drives the
+// rest of the key surface as a namespace admin through the real middleware
+// and handlers.
 func TestKeyRoutesCollectionGuard(t *testing.T) {
 	s := newKeyRoutesServer(t)
 	mktAdmin, mktAdminKey := s.key(t, models.RoleAdmin, `["marketing"]`)
