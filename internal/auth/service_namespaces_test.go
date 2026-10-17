@@ -29,6 +29,7 @@ func setStoredNamespaces(t *testing.T, db *gorm.DB, id uuid.UUID, value string) 
 
 // TestRotateKeyPreservesNamespaces: rotation must never widen (or narrow) a
 // key. The replacement row carries the old namespaces byte-for-byte.
+// Unusable values are refused (TestRotateKeyRefusesUnusableNamespaces).
 func TestRotateKeyPreservesNamespaces(t *testing.T) {
 	for _, tc := range []struct {
 		name       string
@@ -37,9 +38,6 @@ func TestRotateKeyPreservesNamespaces(t *testing.T) {
 		{"null is cluster", nil},
 		{"confined", ptr(`["marketing"]`)},
 		{"explicit cluster", ptr(`["*"]`)},
-		{"empty list fails closed", ptr(`[]`)},
-		{"json null fails closed", ptr(`null`)},
-		{"malformed fails closed", ptr(`{bad`)},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			db := testutil.OpenTestDB(t)
@@ -53,7 +51,7 @@ func TestRotateKeyPreservesNamespaces(t *testing.T) {
 			}
 			before := storedNamespaces(t, db, original.Key.ID)
 
-			rotated, err := svc.RotateKey(original.Key.ID, time.Hour, "admin")
+			rotated, err := svc.RotateKeyAuthorized(t.Context(), original.Key.ID, time.Hour, "admin", allowKey)
 			require.NoError(t, err)
 			after := storedNamespaces(t, db, rotated.Key.ID)
 			require.Equal(t, before, after, "rotation must copy namespaces verbatim")
