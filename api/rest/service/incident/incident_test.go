@@ -7,10 +7,13 @@ import (
 	"testing"
 	"time"
 
+	"github.com/caesium-cloud/caesium/internal/authz"
 	"github.com/caesium-cloud/caesium/internal/jobdef/testutil"
 	"github.com/caesium-cloud/caesium/internal/models"
+	"github.com/caesium-cloud/caesium/internal/run"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
+	"gorm.io/datatypes"
 	"gorm.io/gorm"
 )
 
@@ -68,6 +71,101 @@ func seedAwaitingApproval(t *testing.T, db *gorm.DB, jobID uuid.UUID, class stri
 	require.NoError(t, db.Create(&approval).Error)
 
 	return inc, action, approval
+}
+
+// TestListWithholdsUnownedBaselineLastError: a finance-confined list loses a
+// pre-upgrade baseline quoted in LastError, using the verdicts of the task
+// the incident names. A namespace-owned verdict, a sibling task's verdict,
+// a payload that does not decode, and a missing task row leave the text
+// alone. An unrestricted list and the stored column still carry the median.
+func TestListWithholdsUnownedBaselineLastError(t *testing.T) {
+	svc, db := newTestService(t)
+	now := time.Now().UTC()
+	jobID, runID := uuid.New(), uuid.New()
+	taskID, otherTask := uuid.New(), uuid.New()
+	require.NoError(t, db.Create(&models.JobRun{
+		ID: runID, JobID: jobID, Namespace: "finance", Status: "failed",
+		TriggerType: "cron", TriggerAlias: "nightly", StartedAt: now,
+	}).Error)
+	require.NoError(t, db.Create(&models.Task{ID: taskID, JobID: jobID, AtomID: uuid.New(), Name: "process"}).Error)
+	require.NoError(t, db.Create(&models.Task{ID: otherTask, JobID: jobID, AtomID: uuid.New(), Name: "other"}).Error)
+
+	legacyMessage := "observed 10 deviates from the baseline median 31337 (5 sample(s))"
+	ownedMessage := "own baseline median 42"
+	foreignMessage := "foreign baseline median 88888"
+	legacyJSON := `[{"dataset":"d","metric":"rowCount","assertion":"deltaFromBaseline","observed":10,"bound":15668.5,"baseline_median":31337,"baseline_samples":5,"message":"` + legacyMessage + `"}]`
+	ownedJSON := `[{"dataset":"d","metric":"rowCount","assertion":"deltaFromBaseline","baseline_scope":"namespace","baseline_median":42,"baseline_samples":6,"message":"` + ownedMessage + `"}]`
+	foreignJSON := `[{"dataset":"d","metric":"rowCount","assertion":"deltaFromBaseline","baseline_median":88888,"baseline_samples":3,"message":"` + foreignMessage + `"}]`
+
+	seedRow := func(task uuid.UUID, violations string) {
+		t.Helper()
+		require.NoError(t, db.Create(&models.TaskRun{
+			ID: uuid.New(), JobRunID: runID, TaskID: task, AtomID: uuid.New(),
+			Engine: models.AtomEngineDocker, Image: "busybox:1.36.1", Command: `["echo"]`,
+			Status: "failed", Attempt: 1, DataViolations: datatypes.JSON(violations),
+			CreatedAt: now, UpdatedAt: now,
+		}).Error)
+	}
+	seedRow(taskID, legacyJSON)
+	seedRow(otherTask, foreignJSON)
+	ownedTask := uuid.New()
+	require.NoError(t, db.Create(&models.Task{ID: ownedTask, JobID: jobID, AtomID: uuid.New(), Name: "owned"}).Error)
+	seedRow(ownedTask, ownedJSON)
+	badTask := uuid.New()
+	require.NoError(t, db.Create(&models.Task{ID: badTask, JobID: jobID, AtomID: uuid.New(), Name: "bad"}).Error)
+	seedRow(badTask, "not-json")
+
+	allowlist := datatypes.JSON(`["other-job"]`)
+	seedIncident := func(task *uuid.UUID, lastError string, opened time.Time) models.Incident {
+		t.Helper()
+		inc := models.Incident{
+			ID: uuid.New(), Namespace: "finance", JobID: jobID, RunID: &runID, TaskID: task,
+			Class: "b4_legacy_baseline", Status: models.IncidentStatusClosed,
+			DedupeKey: "b4/" + uuid.NewString(), AllowedJobs: allowlist, LastError: lastError,
+			OpenedAt: opened, ClosedAt: &opened, CreatedAt: opened, UpdatedAt: opened,
+		}
+		require.NoError(t, db.Create(&inc).Error)
+		return inc
+	}
+	legacy := seedIncident(&taskID, "task violates its declared data assertions: "+legacyMessage, now.Add(4*time.Second))
+	owned := seedIncident(&ownedTask, ownedMessage, now.Add(3*time.Second))
+	sibling := seedIncident(&taskID, foreignMessage, now.Add(2*time.Second))
+	bad := seedIncident(&badTask, "baseline median 77777", now.Add(time.Second))
+	missingTask := uuid.New()
+	missing := seedIncident(&missingTask, "baseline median 66666", now)
+	var noTask *uuid.UUID
+	unscoped := seedIncident(noTask, "task violates its declared data assertions: "+legacyMessage, now.Add(5*time.Second))
+
+	restricted := &Service{ctx: authz.WithAllowedNamespaces(context.Background(), []string{"finance"}), db: db}
+	listed, err := restricted.List(ListParams{JobID: &jobID})
+	require.NoError(t, err)
+	byID := map[uuid.UUID]models.Incident{}
+	for _, inc := range listed.Incidents {
+		byID[inc.ID] = inc
+		require.Nil(t, inc.AllowedJobs)
+	}
+	require.Contains(t, byID[legacy.ID].LastError, run.BaselineEvidenceWithheld)
+	require.NotContains(t, byID[legacy.ID].LastError, "31337")
+	require.NotContains(t, byID[legacy.ID].LastError, "15668")
+	require.Equal(t, ownedMessage, byID[owned.ID].LastError)
+	require.Equal(t, foreignMessage, byID[sibling.ID].LastError, "a sibling task's verdict does not rewrite this task's error")
+	require.Equal(t, "baseline median 77777", byID[bad.ID].LastError)
+	require.Equal(t, "baseline median 66666", byID[missing.ID].LastError)
+	require.Contains(t, byID[unscoped.ID].LastError, run.BaselineEvidenceWithheld)
+	require.NotContains(t, byID[unscoped.ID].LastError, "31337")
+
+	open, err := svc.List(ListParams{JobID: &jobID})
+	require.NoError(t, err)
+	openByID := map[uuid.UUID]models.Incident{}
+	for _, inc := range open.Incidents {
+		openByID[inc.ID] = inc
+	}
+	require.Contains(t, openByID[legacy.ID].LastError, "31337")
+	require.JSONEq(t, string(allowlist), string(openByID[legacy.ID].AllowedJobs))
+
+	var stored models.Incident
+	require.NoError(t, db.First(&stored, "id = ?", legacy.ID).Error)
+	require.Contains(t, stored.LastError, "31337", "the persisted last_error is unchanged")
 }
 
 func TestListFiltersAndPaginates(t *testing.T) {

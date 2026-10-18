@@ -7,8 +7,10 @@ import (
 	"sync"
 	"time"
 
+	authmw "github.com/caesium-cloud/caesium/api/middleware"
 	jsvc "github.com/caesium-cloud/caesium/api/rest/service/job"
 	tsvc "github.com/caesium-cloud/caesium/api/rest/service/trigger"
+	"github.com/caesium-cloud/caesium/internal/authz"
 	backfillstore "github.com/caesium-cloud/caesium/internal/backfill"
 	internalJob "github.com/caesium-cloud/caesium/internal/job"
 	"github.com/caesium-cloud/caesium/internal/models"
@@ -62,6 +64,14 @@ func Post(c *echo.Context) error {
 			return echo.ErrNotFound
 		}
 		return echo.NewHTTPError(http.StatusInternalServerError, "internal server error").Wrap(err)
+	}
+
+	// The backfill is stamped with, and its children admitted in, the
+	// namespace of the job row loaded here; re-check a confined caller's
+	// runner grant against it, since the job may have moved after the
+	// middleware authorised the request (B4). No-op for unrestricted callers.
+	if err := authz.RequireRoleIn(authmw.GetPrincipal(c), models.RoleRunner, j.Namespace); err != nil {
+		return err
 	}
 
 	if j.Paused {
@@ -161,7 +171,10 @@ func List(c *echo.Context) error {
 		return echo.NewHTTPError(http.StatusInternalServerError, "internal server error").Wrap(err)
 	}
 
-	backfills, err := backfillstore.Default().List(jobID)
+	// Backfills are history under the job: a confined caller lists only the
+	// ones persisted in namespaces it may read (B4).
+	historyCtx := authz.WithHistoryScope(ctx, authmw.GetPrincipal(c))
+	backfills, err := backfillstore.Default().ListContext(historyCtx, jobID)
 	if err != nil {
 		return echo.NewHTTPError(http.StatusInternalServerError, "internal server error").Wrap(err)
 	}

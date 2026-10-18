@@ -15,6 +15,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/caesium-cloud/caesium/internal/authz"
 	"github.com/caesium-cloud/caesium/internal/cache"
 	"github.com/caesium-cloud/caesium/internal/dbretry"
 	"github.com/caesium-cloud/caesium/internal/event"
@@ -606,7 +607,60 @@ var (
 	// retry is refused because the job is paused. A human pause outranks an agent
 	// retry (docs/design/agent-in-the-loop.md, retry safety valves).
 	ErrJobPaused = errors.New("run: cannot retry while job is paused")
+	// ErrRunNamespaceMoved is matched by every *RunNamespaceMovedError.
+	ErrRunNamespaceMoved = errors.New("run: run namespace differs from its job's namespace")
 )
+
+// RunNamespaceMovedError refuses to re-execute a historical run whose
+// persisted namespace differs from its job's current namespace
+// (identity-and-access B4). A retry reuses the run row, which history keeps in
+// the old owner's namespace, but executes the job's CURRENT model under the
+// new owner's secrets and Kubernetes identity; a replay creates a new run in
+// the job's namespace instead. It applies to every caller, unrestricted ones
+// included, and to every retry entry point (whole run, one partition, an
+// incident agent's retry).
+type RunNamespaceMovedError struct {
+	RunID        uuid.UUID
+	RunNamespace string
+	JobNamespace string
+}
+
+func (e *RunNamespaceMovedError) Error() string {
+	return fmt.Sprintf("run: run %s belongs to namespace %q but its job is now in namespace %q", e.RunID, e.RunNamespace, e.JobNamespace)
+}
+
+// Is makes errors.Is(err, ErrRunNamespaceMoved) match.
+func (e *RunNamespaceMovedError) Is(target error) bool { return target == ErrRunNamespaceMoved }
+
+// CheckRunNamespace returns a *RunNamespaceMovedError when a run persisted in
+// runNamespace can no longer be retried under a job now in jobNamespace (a
+// legacy empty namespace is "default"), and nil otherwise.
+func CheckRunNamespace(runID uuid.UUID, runNamespace, jobNamespace string) error {
+	runNamespace = models.NamespaceOrDefault(strings.TrimSpace(runNamespace))
+	jobNamespace = models.NamespaceOrDefault(strings.TrimSpace(jobNamespace))
+	if runNamespace == jobNamespace {
+		return nil
+	}
+	return &RunNamespaceMovedError{RunID: runID, RunNamespace: runNamespace, JobNamespace: jobNamespace}
+}
+
+// runNamespaceGuardTx re-checks CheckRunNamespace against the job row inside a
+// retry transaction, so a move that lands after the handler's own check still
+// refuses the retry. The job is read unscoped: a soft-deleted job's namespace
+// still decides. With no job row at all there is no current job model in
+// another namespace to execute, so the retry keeps its existing behaviour
+// (the handlers' job load answers 404, and the agent retry's pause check
+// still refuses a missing job); any other read error refuses the retry.
+func runNamespaceGuardTx(tx *gorm.DB, jobRun *models.JobRun) error {
+	var job models.Job
+	if err := tx.Unscoped().Select("id", "namespace").First(&job, "id = ?", jobRun.JobID).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil
+		}
+		return err
+	}
+	return CheckRunNamespace(jobRun.ID, jobRun.Namespace, job.Namespace)
+}
 
 // RunCommittedError reports a start or retry that failed to read its run back
 // after committing admission or reopening. The row is live and its events and
@@ -1803,12 +1857,37 @@ func (s *Store) AdmitRun(jobID uuid.UUID, triggerID *uuid.UUID, opts ...StartOpt
 // StartForBackfill creates a JobRun pre-linked to a backfill ID. The caller
 // should then execute the job with run.WithContext(ctx, r.ID) so the executor
 // resumes from this pre-created record rather than creating a new one.
-func (s *Store) StartForBackfill(jobID, backfillID uuid.UUID, params map[string]string) (*JobRun, error) {
+//
+// opts may carry a NamespaceGuard (WithStartNamespaceGuard): the backfill
+// driver passes BackfillNamespaceGuard so every child is admitted only while
+// the job is still in the backfill's namespace (identity-and-access B4).
+func (s *Store) StartForBackfill(jobID, backfillID uuid.UUID, params map[string]string, opts ...StartOption) (*JobRun, error) {
+	startOpts := startOptionsFrom(opts)
 	return s.startRun(startRunRequest{
-		jobID:      jobID,
-		backfillID: &backfillID,
-		params:     params,
+		jobID:          jobID,
+		backfillID:     &backfillID,
+		params:         params,
+		namespaceGuard: startOpts.NamespaceGuard,
 	})
+}
+
+// ErrBackfillNamespaceMoved refuses a backfill child once the job has left the
+// namespace the backfill was created in (identity-and-access B4).
+var ErrBackfillNamespaceMoved = errors.New("run: the job left the backfill's namespace")
+
+// BackfillNamespaceGuard is the admission guard for a backfill's children: a
+// child is admitted only in the backfill's persisted namespace, checked inside
+// the admission transaction against the job row it freezes. A backfill is
+// authorised, deduplicated and owned in that namespace, so a job moved since
+// must not keep receiving its runs under the new owner.
+func BackfillNamespaceGuard(backfillNamespace string) func(namespace string) error {
+	backfillNamespace = models.NamespaceOrDefault(strings.TrimSpace(backfillNamespace))
+	return func(namespace string) error {
+		if models.NamespaceOrDefault(strings.TrimSpace(namespace)) != backfillNamespace {
+			return fmt.Errorf("%w: backfill namespace %q, job namespace %q", ErrBackfillNamespaceMoved, backfillNamespace, namespace)
+		}
+		return nil
+	}
 }
 
 // StartQueuedRun creates a fresh JobRun from an already-claimed run_queue row.
@@ -5916,8 +5995,20 @@ var listCountToPageHook func()
 // same collapseFanOutGroups/summarizeTasks pipeline convertRunModel uses for
 // the detail endpoint guarantees the two agree, fan-out groups included.
 func (s *Store) List(jobID uuid.UUID, limit, offset int) (runs []*JobRun, total int64, hasMore bool, err error) {
-	if err := s.db.Model(&models.JobRun{}).
-		Where("job_id = ? AND quarantine IS NOT TRUE", jobID).
+	return s.listRuns(s.db, jobID, limit, offset)
+}
+
+// ListContext is List for a REST history read: the queries run under ctx, so
+// a history scope on it (authz.WithHistoryScope, identity-and-access B4)
+// narrows the page AND the total to runs whose persisted namespace the caller
+// may read. Without a scope it is exactly List.
+func (s *Store) ListContext(ctx context.Context, jobID uuid.UUID, limit, offset int) (runs []*JobRun, total int64, hasMore bool, err error) {
+	return s.listRuns(s.db.WithContext(ctx), jobID, limit, offset)
+}
+
+func (s *Store) listRuns(db *gorm.DB, jobID uuid.UUID, limit, offset int) (runs []*JobRun, total int64, hasMore bool, err error) {
+	if err := authz.NamespaceFilter(db.Model(&models.JobRun{}).
+		Where("job_id = ? AND quarantine IS NOT TRUE", jobID), "job_runs.namespace").
 		Count(&total).Error; err != nil {
 		return nil, 0, false, err
 	}
@@ -5933,11 +6024,11 @@ func (s *Store) List(jobID uuid.UUID, limit, offset int) (runs []*JobRun, total 
 		TriggerAlias string
 	}
 
-	q := s.db.Table("job_runs").
+	q := authz.NamespaceFilter(db.Table("job_runs").
 		Select("job_runs.*, jobs.alias as job_alias, triggers.type as trigger_type, triggers.alias as trigger_alias").
 		Joins("join jobs on jobs.id = job_runs.job_id").
 		Joins("left join triggers on triggers.id = job_runs.trigger_id").
-		Where("job_runs.job_id = ? AND job_runs.quarantine IS NOT TRUE", jobID).
+		Where("job_runs.job_id = ? AND job_runs.quarantine IS NOT TRUE", jobID), "job_runs.namespace").
 		Order("job_runs.created_at DESC, job_runs.id DESC")
 	if limit > 0 {
 		// Fetch one extra row so "is there more" is answered by this same
@@ -6024,8 +6115,20 @@ func (s *Store) pageTaskRunsByJobRunID(runIDs []uuid.UUID) (map[uuid.UUID][]*mod
 }
 
 func (s *Store) Latest(jobID uuid.UUID) (*JobRun, error) {
+	return s.latestRun(s.db, jobID)
+}
+
+// LatestContext is Latest for a REST history read: a history scope on ctx
+// (authz.WithHistoryScope) limits it to runs whose persisted namespace the
+// caller may read, so a moved job's latest run is the newest one the caller
+// can see. Without a scope it is exactly Latest.
+func (s *Store) LatestContext(ctx context.Context, jobID uuid.UUID) (*JobRun, error) {
+	return s.latestRun(s.db.WithContext(ctx), jobID)
+}
+
+func (s *Store) latestRun(db *gorm.DB, jobID uuid.UUID) (*JobRun, error) {
 	var model models.JobRun
-	err := s.db.Where("job_id = ? AND quarantine IS NOT TRUE", jobID).
+	err := authz.NamespaceFilter(db.Where("job_id = ? AND quarantine IS NOT TRUE", jobID), "job_runs.namespace").
 		Order("started_at DESC").
 		First(&model).Error
 	if err != nil {
@@ -7276,6 +7379,10 @@ func (s *Store) RetryPartition(ctx context.Context, runID, taskRunID uuid.UUID) 
 			}
 			jobID = jobRun.JobID
 			quarantine = jobRun.Quarantine
+			// A partition retry relaunches the job's current model too (B4).
+			if err := runNamespaceGuardTx(tx, &jobRun); err != nil {
+				return err
+			}
 
 			switch jobRun.Status {
 			case string(StatusRunning), string(StatusFailed), string(StatusSucceeded):
@@ -7599,6 +7706,12 @@ func (s *Store) retryFromFailure(runID uuid.UUID, admit bool) (*JobRun, error) {
 		jobID = jobRun.JobID
 		namespace = models.NamespaceOrDefault(jobRun.Namespace)
 		quarantine = jobRun.Quarantine
+
+		// A run left behind in its job's previous namespace is never re-executed
+		// under the job's current model (B4).
+		if err := runNamespaceGuardTx(tx, &jobRun); err != nil {
+			return err
+		}
 
 		// Safety valve 1 (agent retries only): a human pause outranks an agent
 		// retry, so refuse while the owning job is paused.

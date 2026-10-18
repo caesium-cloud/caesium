@@ -408,8 +408,7 @@ func TestDatasetReadResolverUsesAnyMode(t *testing.T) {
 }
 
 // TestBackfillResolver: one backfill resolves to the job's current namespace
-// AND the backfill's own, and a backfill under another job's path is 404. The
-// backfill routes are pending B4 today; this is the resolver B4 switches on.
+// AND the backfill's own, and a backfill under another job's path is 404.
 func TestBackfillResolver(t *testing.T) {
 	db := testutil.OpenTestDB(t)
 	t.Cleanup(func() { testutil.CloseDB(db) })
@@ -443,7 +442,7 @@ func TestBackfillResolver(t *testing.T) {
 		{http.MethodGet, "/v1/jobs/:id/backfills/:backfill_id", "GET /v1/jobs/:id/backfills/:id", models.RoleViewer},
 		{http.MethodPut, "/v1/jobs/:id/backfills/:backfill_id/cancel", "PUT /v1/jobs/:id/backfills/:id/cancel", models.RoleOperator},
 	} {
-		live := auth.RoutePolicy{Role: route.role, Class: auth.RouteClassNamespaced} // as B4 will leave it
+		live := auth.RoutePolicy{Role: route.role, Class: auth.RouteClassNamespaced}
 		authorize := func(p *auth.Principal, jobID, backfillID string) (*authz.Decision, error) {
 			c := routeContext(route.method, route.path, "")
 			pv := echo.PathValues{{Name: "id", Value: jobID}, {Name: "backfill_id", Value: backfillID}}

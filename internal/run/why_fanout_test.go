@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/caesium-cloud/caesium/internal/authz"
 	"github.com/caesium-cloud/caesium/internal/cache"
 	"github.com/caesium-cloud/caesium/internal/jobdef/testutil"
 	"github.com/caesium-cloud/caesium/internal/models"
@@ -105,6 +106,53 @@ func TestWhyTask_FannedGroupReturnsGroupSummary(t *testing.T) {
 	require.Contains(t, exp.Summary, "FANNED GROUP")
 	require.Contains(t, exp.Summary, "--partition")
 	require.Contains(t, exp.Summary, `first failure partition "b"`)
+}
+
+// TestWhyTask_RestrictedGroupWithholdsUnownedBaseline: a confined caller's
+// group explanation loses a pre-upgrade baseline quoted in the failed
+// instance's error, in both firstFailure and the summary. A namespace-owned
+// verdict quoted beside it stays. An unrestricted caller and the persisted
+// row still carry the recorded median.
+func TestWhyTask_RestrictedGroupWithholdsUnownedBaseline(t *testing.T) {
+	db := testutil.OpenTestDB(t)
+	t.Cleanup(func() { testutil.CloseDB(db) })
+	store := NewStore(db)
+
+	jobID := uuid.New()
+	runID, _, ids := seedFanOutWhy(t, db, jobID,
+		[]TaskStatus{TaskStatusSucceeded, TaskStatusFailed, TaskStatusSucceeded})
+
+	unowned := "observed 10 deviates from the baseline median 31337 (5 sample(s))"
+	owned := "own baseline median 42"
+	verdicts := `[{"dataset":"d","metric":"rowCount","assertion":"deltaFromBaseline","observed":10,"bound":15668.5,"baseline_median":31337,"baseline_samples":5,"message":"` + unowned + `"},{"dataset":"d","metric":"rowCount","assertion":"deltaFromBaseline","observed":10,"bound":21,"baseline_scope":"namespace","baseline_median":42,"baseline_samples":6,"message":"` + owned + `"}]`
+	errText := "task violates its declared data assertions: " + unowned + "; " + owned
+	require.NoError(t, db.Model(&models.TaskRun{}).Where("id = ?", ids[1]).Updates(map[string]any{
+		"error":           errText,
+		"data_violations": []byte(verdicts),
+	}).Error)
+
+	restricted := authz.WithAllowedNamespaces(context.Background(), []string{"finance"})
+	exp, err := store.WhyTask(restricted, runID, "process")
+	require.NoError(t, err)
+	require.NotNil(t, exp.Group)
+	require.NotNil(t, exp.Group.FirstFailure)
+	require.NotContains(t, exp.Group.FirstFailure.Error, "31337")
+	require.NotContains(t, exp.Group.FirstFailure.Error, "15668")
+	require.NotContains(t, exp.Summary, "31337")
+	require.Contains(t, exp.Group.FirstFailure.Error, BaselineEvidenceWithheld)
+	require.Contains(t, exp.Summary, BaselineEvidenceWithheld)
+	require.Contains(t, exp.Group.FirstFailure.Error, owned)
+	require.Contains(t, exp.Summary, owned)
+
+	var persisted models.TaskRun
+	require.NoError(t, db.First(&persisted, "id = ?", ids[1]).Error)
+	require.Contains(t, persisted.Error, "31337", "the persisted task error is unchanged")
+
+	open, err := store.WhyTask(context.Background(), runID, "process")
+	require.NoError(t, err)
+	require.Contains(t, open.Group.FirstFailure.Error, "31337")
+	require.Contains(t, open.Summary, "31337")
+	require.Contains(t, open.Group.FirstFailure.Error, owned)
 }
 
 func TestWhyTask_PartitionSelectorPicksThatInstance(t *testing.T) {

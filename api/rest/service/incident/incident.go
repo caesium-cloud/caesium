@@ -7,7 +7,9 @@ package incident
 import (
 	"context"
 
+	"github.com/caesium-cloud/caesium/internal/authz"
 	"github.com/caesium-cloud/caesium/internal/models"
+	"github.com/caesium-cloud/caesium/internal/run"
 	"github.com/caesium-cloud/caesium/pkg/db"
 	"github.com/google/uuid"
 	"gorm.io/gorm"
@@ -29,6 +31,11 @@ type Service struct {
 // New creates a Service backed by the default DB connection.
 func New(ctx context.Context) *Service {
 	return &Service{ctx: ctx, db: db.Connection()}
+}
+
+// NewWithDatabase creates a Service backed by conn; used by tests.
+func NewWithDatabase(ctx context.Context, conn *gorm.DB) *Service {
+	return &Service{ctx: ctx, db: conn}
 }
 
 // WithDatabase returns a copy of the Service backed by conn; used by tests.
@@ -110,6 +117,9 @@ func (s *Service) List(p ListParams) (*ListResult, error) {
 	if p.NeedsApproval {
 		q = q.Where("EXISTS (?)", pendingApprovalSubquery(s.db.WithContext(s.ctx)))
 	}
+	// A namespace-confined caller lists only its namespaces' incidents, and the
+	// total counts only those (B4).
+	q = authz.NamespaceFilter(q, "incidents.namespace")
 
 	var total int64
 	if err := q.Count(&total).Error; err != nil {
@@ -125,12 +135,90 @@ func (s *Service) List(p ListParams) (*ListResult, error) {
 		return nil, err
 	}
 
+	// The frozen agent allowlist is filled from a lineage walk and names
+	// downstream jobs in any namespace: a confined caller never receives it
+	// from the list (A8 owns confining it; B4). LastError is the task error
+	// copied when the incident opened, so the same caller also loses a
+	// pre-upgrade baseline quoted there. The persisted column is unchanged.
+	if authz.Restricted(s.ctx) {
+		for i := range incidents {
+			incidents[i].AllowedJobs = nil
+		}
+		if err := s.withholdIncidentLastErrors(incidents); err != nil {
+			return nil, err
+		}
+	}
+
 	return &ListResult{
 		Incidents: incidents,
 		Total:     total,
 		Limit:     limit,
 		Offset:    offset,
 	}, nil
+}
+
+// withholdIncidentLastErrors rewrites each confined reader's LastError from
+// the task row the incident names. A verdict recorded before baselines were
+// namespace-owned loses the message that renders its median and sample count.
+// When the incident names a task, only that task's rows apply, including
+// every partition of a fanned step; otherwise every task row of the run
+// applies. A row whose data_violations do not decode leaves the text quoted
+// from it unchanged.
+func (s *Service) withholdIncidentLastErrors(incidents []models.Incident) error {
+	seen := make(map[uuid.UUID]struct{}, len(incidents))
+	runIDs := make([]uuid.UUID, 0, len(incidents))
+	for i := range incidents {
+		inc := &incidents[i]
+		if inc.RunID == nil || inc.LastError == "" {
+			continue
+		}
+		if _, ok := seen[*inc.RunID]; ok {
+			continue
+		}
+		seen[*inc.RunID] = struct{}{}
+		runIDs = append(runIDs, *inc.RunID)
+	}
+	if len(runIDs) == 0 {
+		return nil
+	}
+
+	var rows []models.TaskRun
+	if err := s.db.WithContext(s.ctx).
+		Select("job_run_id", "task_id", "data_violations").
+		Where("job_run_id IN ?", runIDs).
+		Find(&rows).Error; err != nil {
+		return err
+	}
+
+	type taskKey struct {
+		run  uuid.UUID
+		task uuid.UUID
+	}
+	byTask := make(map[taskKey][][]byte, len(rows))
+	byRun := make(map[uuid.UUID][][]byte, len(runIDs))
+	for i := range rows {
+		blob := []byte(rows[i].DataViolations)
+		byRun[rows[i].JobRunID] = append(byRun[rows[i].JobRunID], blob)
+		key := taskKey{rows[i].JobRunID, rows[i].TaskID}
+		byTask[key] = append(byTask[key], blob)
+	}
+
+	for i := range incidents {
+		inc := &incidents[i]
+		if inc.RunID == nil || inc.LastError == "" {
+			continue
+		}
+		var blobs [][]byte
+		if inc.TaskID != nil {
+			blobs = byTask[taskKey{*inc.RunID, *inc.TaskID}]
+		} else {
+			blobs = byRun[*inc.RunID]
+		}
+		for _, blob := range blobs {
+			inc.LastError = run.WithholdQuotedBaselineEvidence(inc.LastError, blob)
+		}
+	}
+	return nil
 }
 
 // Detail is the full incident timeline: the incident plus its actions,

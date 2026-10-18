@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/caesium-cloud/caesium/api/internal/aggregatetime"
+	"github.com/caesium-cloud/caesium/internal/authz"
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/caesium-cloud/caesium/pkg/db"
 	"gorm.io/gorm"
@@ -72,6 +73,11 @@ func New(ctx context.Context) *Service {
 	return &Service{ctx: ctx, db: db.Connection()}
 }
 
+// NewWithDatabase creates a Service backed by conn; used by tests.
+func NewWithDatabase(ctx context.Context, conn *gorm.DB) *Service {
+	return &Service{ctx: ctx, db: conn}
+}
+
 // durationExpr returns a SQL expression computing the difference in seconds
 // between completed_at and started_at.
 func (s *Service) durationExpr() string {
@@ -109,13 +115,13 @@ func (s *Service) Summary(window string) (*StatsResponse, error) {
 	}
 
 	// Total distinct jobs (not windowed)
-	if err := s.db.WithContext(s.ctx).Model(&models.Job{}).Count(&resp.Jobs.Total).Error; err != nil {
+	if err := s.jobs().Count(&resp.Jobs.Total).Error; err != nil {
 		return nil, err
 	}
 
 	// Recent runs (always 24h as per spec KPI)
 	recentSince := time.Now().UTC().Add(-24 * time.Hour)
-	if err := s.db.WithContext(s.ctx).Model(&models.JobRun{}).
+	if err := s.runs().
 		Where("started_at >= ? AND quarantine IS NOT TRUE", recentSince).
 		Count(&resp.Jobs.RecentRuns).Error; err != nil {
 		return nil, err
@@ -124,12 +130,12 @@ func (s *Service) Summary(window string) (*StatsResponse, error) {
 	// Success rate in window
 	var totalCompleted int64
 	var totalSucceeded int64
-	if err := s.db.WithContext(s.ctx).Model(&models.JobRun{}).
+	if err := s.runs().
 		Where("status IN ? AND started_at >= ? AND quarantine IS NOT TRUE", []string{"succeeded", "failed"}, since).
 		Count(&totalCompleted).Error; err != nil {
 		return nil, err
 	}
-	if err := s.db.WithContext(s.ctx).Model(&models.JobRun{}).
+	if err := s.runs().
 		Where("status = ? AND started_at >= ? AND quarantine IS NOT TRUE", "succeeded", since).
 		Count(&totalSucceeded).Error; err != nil {
 		return nil, err
@@ -140,7 +146,7 @@ func (s *Service) Summary(window string) (*StatsResponse, error) {
 
 	// Average duration in window
 	var avgResult struct{ Avg float64 }
-	if err := s.db.WithContext(s.ctx).Model(&models.JobRun{}).
+	if err := s.runs().
 		Select("AVG("+durExpr+") as avg").
 		Where("completed_at IS NOT NULL AND started_at >= ? AND quarantine IS NOT TRUE", since).
 		Scan(&avgResult).Error; err != nil {
@@ -155,7 +161,7 @@ func (s *Service) Summary(window string) (*StatsResponse, error) {
 		LastFailure  sql.NullString
 	}
 	var failRows []failRow
-	if err := s.db.WithContext(s.ctx).Model(&models.JobRun{}).
+	if err := s.runs().
 		Select("job_id, COUNT(*) as failure_count, MAX(completed_at) as last_failure").
 		Where("status = ? AND started_at >= ? AND quarantine IS NOT TRUE", "failed", since).
 		Group("job_id").
@@ -189,7 +195,7 @@ func (s *Service) Summary(window string) (*StatsResponse, error) {
 		AtomName     string
 		FailureCount int64
 	}
-	if err := s.db.WithContext(s.ctx).Model(&models.TaskRun{}).
+	if err := s.taskRuns().
 		Select("job_runs.job_id, tasks.name as atom_name, COUNT(*) as failure_count").
 		Joins("JOIN job_runs ON job_runs.id = task_runs.job_run_id").
 		Joins("JOIN tasks ON tasks.id = task_runs.task_id").
@@ -221,7 +227,7 @@ func (s *Service) Summary(window string) (*StatsResponse, error) {
 		Avg   float64
 	}
 	var slowRows []slowRow
-	if err := s.db.WithContext(s.ctx).Model(&models.JobRun{}).
+	if err := s.runs().
 		Select("job_id, AVG("+durExpr+") as avg").
 		Where("completed_at IS NOT NULL AND started_at >= ? AND quarantine IS NOT TRUE", since).
 		Group("job_id").
@@ -264,7 +270,7 @@ func (s *Service) Summary(window string) (*StatsResponse, error) {
 		}
 	}
 
-	if err := s.db.WithContext(s.ctx).Model(&models.JobRun{}).
+	if err := s.runs().
 		Select(pointExpr+" as point, COUNT(*) as run_count, SUM(CASE WHEN status = 'succeeded' THEN 1 ELSE 0 END) as succ").
 		Where("started_at >= ? AND status IN ? AND quarantine IS NOT TRUE", since, []string{"succeeded", "failed"}).
 		Group("point").
@@ -315,6 +321,23 @@ func (s *Service) Summary(window string) (*StatsResponse, error) {
 	}
 
 	return resp, nil
+}
+
+// jobs, runs and taskRuns start every aggregate query. For a namespace-confined
+// caller they keep only rows in its namespaces (B4): jobs by their namespace,
+// runs and their task runs by the run's persisted namespace, so no total,
+// rate, top list or trend point counts another namespace's history.
+func (s *Service) jobs() *gorm.DB {
+	return authz.NamespaceFilter(s.db.WithContext(s.ctx).Model(&models.Job{}), "jobs.namespace")
+}
+
+func (s *Service) runs() *gorm.DB {
+	return authz.NamespaceFilter(s.db.WithContext(s.ctx).Model(&models.JobRun{}), "job_runs.namespace")
+}
+
+func (s *Service) taskRuns() *gorm.DB {
+	// The caller's query joins job_runs (task_runs.job_run_id) itself.
+	return authz.NamespaceFilter(s.db.WithContext(s.ctx).Model(&models.TaskRun{}), "job_runs.namespace")
 }
 
 func (s *Service) lookupAlias(jobID string) (string, error) {

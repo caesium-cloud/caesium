@@ -5,9 +5,11 @@ import (
 	"encoding/json"
 	"errors"
 	"math/rand/v2"
+	"strings"
 	"sync"
 	"time"
 
+	"github.com/caesium-cloud/caesium/internal/authz"
 	"github.com/caesium-cloud/caesium/internal/dbretry"
 	"github.com/caesium-cloud/caesium/internal/metrics"
 	"github.com/caesium-cloud/caesium/internal/models"
@@ -63,8 +65,16 @@ func (s *Store) Get(id uuid.UUID) (*models.Backfill, error) {
 }
 
 func (s *Store) List(jobID uuid.UUID) ([]*models.Backfill, error) {
+	return s.ListContext(context.Background(), jobID)
+}
+
+// ListContext is List for a REST history read: under a history scope on ctx
+// (authz.WithHistoryScope, identity-and-access B4) only backfills whose
+// persisted namespace the caller may read are listed.
+func (s *Store) ListContext(ctx context.Context, jobID uuid.UUID) ([]*models.Backfill, error) {
 	var backfills []*models.Backfill
-	if err := s.db.Where("job_id = ?", jobID).Order("created_at desc").Find(&backfills).Error; err != nil {
+	q := authz.NamespaceFilter(s.db.WithContext(ctx).Where("job_id = ?", jobID), "backfills.namespace")
+	if err := q.Order("created_at desc").Find(&backfills).Error; err != nil {
 		return nil, err
 	}
 	return backfills, nil
@@ -178,15 +188,25 @@ func (s *Store) IsCancelRequested(id uuid.UUID) (bool, error) {
 // LatestRunForLogicalDate returns the status of the most recent run for a job
 // whose params contain the given logical_date value, or "" if none exists.
 // It uses Go-side filtering to remain portable across SQLite and Postgres.
-func (s *Store) LatestRunForLogicalDate(jobID uuid.UUID, logicalDate string) (string, error) {
+//
+// Only runs persisted in namespace count (a legacy empty or NULL namespace is
+// "default"): a backfill deduplicates against its own namespace's history, so
+// under a moved job the old owner's runs neither skip the new owner's dates
+// nor reveal their outcomes through total_runs (identity-and-access B4).
+func (s *Store) LatestRunForLogicalDate(jobID uuid.UUID, namespace, logicalDate string) (string, error) {
 	type runRow struct {
 		Status string
 		Params []byte
 	}
+	namespace = models.NamespaceOrDefault(strings.TrimSpace(namespace))
+	namespacePredicate := "namespace = ?"
+	if namespace == models.DefaultNamespace {
+		namespacePredicate = "(namespace = ? OR namespace = '' OR namespace IS NULL)"
+	}
 	var rows []runRow
 	err := s.db.Raw(
-		`SELECT status, params FROM job_runs WHERE job_id = ? AND params IS NOT NULL ORDER BY created_at DESC`,
-		jobID,
+		`SELECT status, params FROM job_runs WHERE job_id = ? AND `+namespacePredicate+` AND params IS NOT NULL ORDER BY created_at DESC`,
+		jobID, namespace,
 	).Scan(&rows).Error
 	if err != nil {
 		return "", err

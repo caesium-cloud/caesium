@@ -17,8 +17,10 @@ import (
 	"errors"
 	"net/http"
 
+	authmw "github.com/caesium-cloud/caesium/api/middleware"
 	jsvc "github.com/caesium-cloud/caesium/api/rest/service/job"
 	whysvc "github.com/caesium-cloud/caesium/api/rest/service/why"
+	"github.com/caesium-cloud/caesium/internal/authz"
 	runstorage "github.com/caesium-cloud/caesium/internal/run"
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v5"
@@ -27,7 +29,10 @@ import (
 
 // Get handles GET /v1/jobs/:id/runs/:run_id/why?task=<task>.
 func Get(c *echo.Context) error {
-	ctx := c.Request().Context()
+	// The run is authorised on the job's and the run's namespaces; the
+	// baseline it is diffed against is history and must sit in a namespace
+	// the caller may read (B4).
+	ctx := authz.WithHistoryScope(c.Request().Context(), authmw.GetPrincipal(c))
 
 	jobID, err := uuid.Parse(c.Param("id"))
 	if err != nil {

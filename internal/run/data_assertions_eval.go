@@ -1,6 +1,7 @@
 package run
 
 import (
+	"encoding/json"
 	"fmt"
 	"maps"
 	"math"
@@ -102,6 +103,13 @@ type DataViolation struct {
 	// verdict was computed against. Absent for absolute bounds.
 	BaselineMedian  *float64 `json:"baseline_median,omitempty"`
 	BaselineSamples int      `json:"baseline_samples,omitempty"`
+	// BaselineScope is BaselineScopeNamespace when the baseline counted only
+	// samples of runs in the evaluated run's own tenancy namespace
+	// (OwnedBaseline, identity-and-access B4). Absent on verdicts recorded
+	// before that, whose baseline may hold another owner's samples; a
+	// namespace-confined reader never receives their baseline evidence
+	// (WithholdUnownedBaselineEvidence).
+	BaselineScope string `json:"baseline_scope,omitempty"`
 	// Seeding marks a cold-start verdict: the baseline held fewer than the
 	// configured minimum samples, so this violation is recorded and surfaced
 	// but NEVER enforced, whatever onViolation says.
@@ -173,6 +181,152 @@ func unavailableMessage(metric, reason string) string {
 			"declared metric %q could not be observed: the ##caesium::metrics stream was lost (%s); recorded as unavailable rather than missing, and never enforced",
 			metric, reason)
 	}
+}
+
+// BaselineScopeNamespace is DataViolation.BaselineScope for a baseline computed
+// over the evaluated run's own tenancy namespace only.
+const BaselineScopeNamespace = "namespace"
+
+// BaselineEvidenceWithheld replaces the message of a verdict whose baseline
+// evidence a namespace-confined reader does not receive.
+const BaselineEvidenceWithheld = "baseline evidence withheld: recorded before namespace-owned baselines"
+
+// withholdsBaselineEvidence reports whether v carries baseline evidence (the
+// median, the sample count, the bound derived from them and the message that
+// renders them) that was not computed over the evaluated run's own namespace.
+func withholdsBaselineEvidence(scope, assertion string, hasMedian, hasSamples bool) bool {
+	if scope == BaselineScopeNamespace {
+		return false
+	}
+	return hasMedian || hasSamples || assertion == AssertionDeltaFromBaseline
+}
+
+// WithholdUnownedBaselineEvidence is what a namespace-confined reader receives
+// of a run's data-assertion verdicts (identity-and-access B4): a verdict
+// recorded before baselines were namespace-owned loses its baseline median,
+// sample count and the bound derived from them, and its message (also quoted
+// in the task's and the run's error) becomes BaselineEvidenceWithheld. Verdicts
+// with BaselineScopeNamespace pass unchanged. r is modified in place.
+func (r *JobRun) WithholdUnownedBaselineEvidence() {
+	if r == nil {
+		return
+	}
+	var withheld []string
+	for _, task := range r.Tasks {
+		if task == nil {
+			continue
+		}
+		var own []string
+		for i := range task.DataViolations {
+			v := &task.DataViolations[i]
+			if !withholdsBaselineEvidence(v.BaselineScope, v.Assertion, v.BaselineMedian != nil, v.BaselineSamples != 0) {
+				continue
+			}
+			own = append(own, v.Message)
+			v.BaselineMedian, v.BaselineSamples, v.Message = nil, 0, BaselineEvidenceWithheld
+			if v.Assertion == AssertionDeltaFromBaseline {
+				v.Bound = nil
+			}
+		}
+		task.Error = withholdMessages(task.Error, own)
+		withheld = append(withheld, own...)
+	}
+	r.Error = withholdMessages(r.Error, withheld)
+}
+
+// WithholdUnownedBaselineEvidenceJSON applies WithholdUnownedBaselineEvidence
+// to a decoded run or task payload (an event payload or the lifecycle bridge's
+// event data): its own data_violations and error, and each tasks[] entry's. A
+// data_violations value that is not a list is dropped.
+func WithholdUnownedBaselineEvidenceJSON(payload map[string]any) {
+	var withheld []string
+	if tasks, ok := payload["tasks"].([]any); ok {
+		for _, task := range tasks {
+			if fields, ok := task.(map[string]any); ok {
+				withheld = append(withheld, withholdViolationsJSON(fields)...)
+			}
+		}
+	}
+	withheld = append(withheld, withholdViolationsJSON(payload)...)
+	if raw, ok := payload["error"].(string); ok {
+		payload["error"] = withholdMessages(raw, withheld)
+	}
+}
+
+func withholdViolationsJSON(fields map[string]any) []string {
+	raw, present := fields["data_violations"]
+	if !present || raw == nil {
+		return nil
+	}
+	list, ok := raw.([]any)
+	if !ok {
+		delete(fields, "data_violations")
+		return nil
+	}
+	var withheld []string
+	for i, item := range list {
+		v, ok := item.(map[string]any)
+		if !ok {
+			list[i] = nil
+			continue
+		}
+		scope, _ := v["baseline_scope"].(string)
+		assertion, _ := v["assertion"].(string)
+		_, hasMedian := v["baseline_median"]
+		_, hasSamples := v["baseline_samples"]
+		if !withholdsBaselineEvidence(scope, assertion, hasMedian, hasSamples) {
+			continue
+		}
+		if message, ok := v["message"].(string); ok {
+			withheld = append(withheld, message)
+		}
+		delete(v, "baseline_median")
+		delete(v, "baseline_samples")
+		if assertion == AssertionDeltaFromBaseline {
+			delete(v, "bound")
+		}
+		v["message"] = BaselineEvidenceWithheld
+	}
+	if raw, ok := fields["error"].(string); ok {
+		fields["error"] = withholdMessages(raw, withheld)
+	}
+	return withheld
+}
+
+// withholdMessages replaces every withheld verdict message quoted in text.
+func withholdMessages(text string, messages []string) string {
+	for _, message := range messages {
+		if message != "" && message != BaselineEvidenceWithheld {
+			text = strings.ReplaceAll(text, message, BaselineEvidenceWithheld)
+		}
+	}
+	return text
+}
+
+// WithholdQuotedBaselineEvidence replaces, in text, every message of a
+// baseline verdict that was not computed over the evaluated run's own
+// namespace. A confined reader is shown a task error or an incident
+// last_error this way: those strings quote the verdict messages but do not
+// carry the verdict list. violationsJSON is the task row's data_violations.
+// A payload that does not decode as a verdict list leaves text unchanged,
+// because there is no structured verdict to withhold from.
+func WithholdQuotedBaselineEvidence(text string, violationsJSON []byte) string {
+	if text == "" || len(violationsJSON) == 0 {
+		return text
+	}
+	var violations []DataViolation
+	if err := json.Unmarshal(violationsJSON, &violations); err != nil {
+		return text
+	}
+	messages := make([]string, 0, len(violations))
+	for i := range violations {
+		v := &violations[i]
+		if !withholdsBaselineEvidence(v.BaselineScope, v.Assertion, v.BaselineMedian != nil, v.BaselineSamples != 0) {
+			continue
+		}
+		messages = append(messages, v.Message)
+	}
+	return withholdMessages(text, messages)
 }
 
 // String renders the violation for a task failure message: it names the
@@ -525,6 +679,7 @@ func evaluateDelta(dataset, metric string, spec jobdef.AssertionSpec, value floa
 		DeltaFromBaseline: raw,
 		BaselineMedian:    floatPtr(median),
 		BaselineSamples:   baseline.Samples,
+		BaselineScope:     baseline.Scope,
 		Seeding:           seeding,
 		Message:           message,
 	}

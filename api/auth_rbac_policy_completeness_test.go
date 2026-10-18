@@ -127,6 +127,14 @@ var planItemPattern = regexp.MustCompile(`^[A-H][0-9]+$`)
 // only by being listed here with such a test.
 var guardedCollectionRoutes = map[string]string{
 	"GET /v1/auth/keys": "api/rest/controller/auth TestKeyRoutesCollectionGuard", // A5
+	// identity-and-access B4.
+	"GET /v1/jobs":            "api/rest/controller/job.TestJobListCollectionGuard",
+	"GET /v1/triggers":        "api/rest/controller/trigger.TestTriggerListCollectionGuard",
+	"GET /v1/incidents":       "api/rest/controller/incident.TestIncidentListCollectionGuard",
+	"GET /v1/stats":           "api/rest/controller/stats.TestStatsCollectionGuard",
+	"GET /v1/stats/summary":   "api/rest/controller/stats.TestStatsCollectionGuard",
+	"GET /v1/events":          "api/rest/controller/event.TestEventStreamCollectionGuard",
+	"GET /v1/events/ingested": "api/rest/controller/event.TestIngestedEventsCollectionGuard",
 }
 
 // TestMountedRoutesAreClassified is the A3 build gate: every mounted route has

@@ -76,7 +76,10 @@ func EnumerateLogicalDates(schedule cron.Schedule, start, end time.Time, loc *ti
 //	"none"   — skip dates that have any existing run
 //	"failed" — skip dates whose latest run succeeded
 //	"all"    — keep all dates
-func FilterDates(store *backfillstore.Store, jobID uuid.UUID, dates []time.Time, reprocess models.ReprocessPolicy) ([]time.Time, error) {
+//
+// Only runs in namespace (the backfill's persisted namespace) count, so a
+// moved job's old history never decides the new owner's dates.
+func FilterDates(store *backfillstore.Store, jobID uuid.UUID, namespace string, dates []time.Time, reprocess models.ReprocessPolicy) ([]time.Time, error) {
 	if reprocess == models.ReprocessAll {
 		return dates, nil
 	}
@@ -84,7 +87,7 @@ func FilterDates(store *backfillstore.Store, jobID uuid.UUID, dates []time.Time,
 	var filtered []time.Time
 	for _, d := range dates {
 		logicalDate := d.UTC().Format(time.RFC3339)
-		status, err := store.LatestRunForLogicalDate(jobID, logicalDate)
+		status, err := store.LatestRunForLogicalDate(jobID, namespace, logicalDate)
 		if err != nil {
 			return nil, err
 		}
@@ -190,7 +193,7 @@ func runBackfill(ctx context.Context, b *models.Backfill, j *models.Job, schedul
 
 	dates := EnumerateLogicalDates(schedule, b.Start, b.End, loc)
 
-	filtered, err := FilterDates(bStore, b.JobID, dates, b.Reprocess)
+	filtered, err := FilterDates(bStore, b.JobID, b.Namespace, dates, b.Reprocess)
 	if err != nil {
 		log.Error("backfill: failed to filter dates", "backfill_id", b.ID, "error", err)
 		if serverShutdown(ctx) {
@@ -299,8 +302,19 @@ func runBackfill(ctx context.Context, b *models.Backfill, j *models.Job, schedul
 			log.Info("backfill: child submission refused", "backfill_id", b.ID, "logical_date", logicalDate, "error", err)
 			break
 		}
-		r, err := rStore.StartForBackfill(j.ID, b.ID, params)
+		r, err := rStore.StartForBackfill(j.ID, b.ID, params, runstore.WithStartNamespaceGuard(runstore.BackfillNamespaceGuard(b.Namespace)))
 		if err != nil {
+			if errors.Is(err, runstore.ErrBackfillNamespaceMoved) {
+				// The job left the backfill's namespace: no further date may run
+				// under the new owner. Stop launching and finish as failed (B4).
+				releaseWork()
+				sem.Release(1)
+				log.Warn("backfill: job moved out of the backfill's namespace; stopping",
+					"backfill_id", b.ID, "logical_date", logicalDate, "error", err)
+				metrics.BackfillRunsTotal.WithLabelValues(j.Alias, backfillDateFailed).Inc()
+				failCount.Add(1)
+				break
+			}
 			// A failed readback can follow a committed insertion. Responsibility
 			// for that exact row stays reserved until conditional finalization.
 			if committedID, ok := runstore.CommittedRunID(err); ok {
