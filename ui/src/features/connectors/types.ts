@@ -23,6 +23,7 @@ export interface ExternalExecution {
   completeness: string;
   observed_at: string;
   snapshot_observed_at?: string;
+  binding?: ConnectorBinding;
   metadata: {
     workflow_type: string;
     workflow_id: string;
@@ -157,4 +158,78 @@ export function temporalExecutionURL(connection: ConnectorConnection | undefined
   } catch {
     return;
   }
+}
+
+/** The configured, closed JSON schema exposed by the authenticated server. */
+export interface ConnectorSchema {
+  type?: string | string[];
+  title?: string;
+  description?: string;
+  properties?: Record<string, ConnectorSchema>;
+  required?: string[];
+  enum?: unknown[];
+  minimum?: number;
+  maximum?: number;
+  minLength?: number;
+  maxLength?: number;
+  [keyword: string]: unknown;
+}
+
+export interface ConnectorAction {
+  name: string;
+  input_schema: ConnectorSchema;
+  result_schema: ConnectorSchema;
+  minimum_role: string;
+  available: boolean;
+}
+
+export interface ConnectorBinding {
+  name: string;
+  version: string;
+  display_name: string;
+  available: boolean;
+  actions: ConnectorAction[];
+  status_query?: string;
+  status_query_result_schema?: ConnectorSchema;
+}
+
+export interface ConnectorOperation {
+  id: string;
+  connection_id: string;
+  execution_id: string;
+  execution?: ConnectorExecutionReference;
+  action: string;
+  binding_name: string;
+  binding_version: string;
+  state: "submitted" | "accepted" | "completed" | "rejected" | "not_dispatched" | "unknown" | (string & {});
+  revision: number;
+  attempt: number;
+  actor: { principal_kind: string; stable_id: string; subject?: string; role?: string };
+  external_update_id: string;
+  configuration_epoch?: string;
+  metadata_omitted?: boolean;
+  evidence?: {
+    state: string;
+    native_stage?: string;
+    preflight_rpc_code?: string;
+    rpc_code?: string;
+    result?: unknown;
+    failure_kind?: string;
+    rejection_proof?: string;
+    result_omitted?: boolean;
+  };
+  created_at?: string;
+  updated_at?: string;
+}
+
+export interface ConnectorOperationResult {
+  operation: ConnectorOperation;
+  created: boolean;
+  conflict: boolean;
+  pending: boolean;
+}
+
+export interface ConnectorOperationPage {
+  operations: ConnectorOperation[];
+  cursor?: string;
 }

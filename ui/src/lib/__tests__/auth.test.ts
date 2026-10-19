@@ -345,6 +345,23 @@ describe("auth", () => {
     expect(withAuthHeaders()).not.toHaveProperty("X-CSRF-Token");
   });
 
+  it.each(["api_key", "user"])("retains stable %s identity and clears it when authentication ends", async (kind) => {
+    mockFetch.mockResolvedValueOnce({
+      ok: true, status: 200,
+      json: async () => whoami("operator", { kind, stable_id: "11111111-1111-4111-8111-111111111111" }),
+    });
+    await expect(apiKeyLogin("csk_live_secret")).resolves.toBe("success");
+    expect(getPrincipal()).toMatchObject({ kind, stableId: "11111111-1111-4111-8111-111111111111" });
+    clearApiKey();
+    expect(getPrincipal().stableId).toBeNull();
+  });
+
+  it.each([undefined, null, "", "   ", 123])("does not infer stable identity from a subject when stable_id is %s", async (stable_id) => {
+    mockFetch.mockResolvedValueOnce({ ok: true, status: 200, json: async () => whoami("operator", { stable_id }) });
+    await expect(apiKeyLogin("csk_live_secret")).resolves.toBe("success");
+    expect(getPrincipal().stableId).toBeNull();
+  });
+
   it.each([
     { role: "viewer" as const, canRunner: false },
     { role: "runner" as const, canRunner: true },

@@ -280,6 +280,17 @@ func (s *IntegrationTestSuite) TestConnectorsActions() {
 	for _, credential := range []string{operator.Plaintext, other.Plaintext, viewer.Plaintext, runner.Plaintext, scoped.Plaintext, agent} {
 		proof.addCredential(credential)
 	}
+	// The browser gates explicit resend by the authenticated stable identity,
+	// never by a key prefix. Drive the real auth route for both operators.
+	for _, principal := range []createdAPIKey{operator, other} {
+		var identity struct {
+			Kind     string `json:"kind"`
+			StableID string `json:"stable_id"`
+		}
+		s.connectorActionHTTP(proof, principal.Plaintext, http.MethodGet, "/auth/whoami", "", nil, &identity, http.StatusOK)
+		s.Require().Equal("api_key", identity.Kind)
+		s.Require().Equal(principal.Meta.ID, identity.StableID)
+	}
 	for _, alias := range []string{"connector-fixture-publish", "connector-fixture-notify"} {
 		manifest := fmt.Sprintf("apiVersion: v1\nkind: Job\nmetadata:\n  alias: %s\ntrigger:\n  type: cron\n  configuration:\n    cron: '0 0 1 1 *'\nsteps:\n  - name: work\n    image: alpine:3.23\n    command: [sh, -c, 'echo connector-http-approval']\n", alias)
 		dir := s.writeJobManifest(manifest)

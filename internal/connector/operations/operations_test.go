@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -21,11 +22,20 @@ import (
 type operationTestProvider struct {
 	mu             sync.Mutex
 	sends, lookups []OperationDispatch
+	stableID       func(string) (string, error)
 	submit         func(OperationDispatch) (OperationEvidence, error)
 	lookup         func(OperationDispatch) (OperationEvidence, error)
 }
 
-func (*operationTestProvider) StableOperationID(id string) (string, error) { return "fake-" + id, nil }
+func (p *operationTestProvider) StableOperationID(id string) (string, error) {
+	p.mu.Lock()
+	fn := p.stableID
+	p.mu.Unlock()
+	if fn != nil {
+		return fn(id)
+	}
+	return "fake-" + id, nil
+}
 func (p *operationTestProvider) SubmitOperation(_ context.Context, d OperationDispatch) (OperationEvidence, error) {
 	p.mu.Lock()
 	p.sends = append(p.sends, d)
@@ -188,6 +198,118 @@ func TestOperationsAdmissionCrashReopenLookupOnly(t *testing.T) {
 	require.NoError(t, e)
 	require.Len(t, p.lookups, 4)
 }
+
+func TestOperationsSubmitPublishesAdmissionWithInitialClaim(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "atomic-admission.db")
+	db := openSQLiteFile(t, path)
+	migrateStore(t, db)
+	observer := openSQLiteFile(t, path)
+	store := NewStore(db)
+	require.NoError(t, store.catalog.ActivateEpoch(t.Context(), "", "epoch"))
+	provider := &operationTestProvider{submit: func(OperationDispatch) (OperationEvidence, error) {
+		return OperationEvidence{State: connector.OperationAccepted}, nil
+	}}
+	service := operationTestService(t, store, provider)
+	request := operationTestRequest(t, store)
+	entered, release := make(chan struct{}), make(chan struct{})
+	var releaseOnce, pauseOnce sync.Once
+	unblock := func() { releaseOnce.Do(func() { close(release) }) }
+	t.Cleanup(unblock)
+	require.NoError(t, db.Callback().Update().Before("gorm:update").Register("operations:test_initial_claim_publication", func(tx *gorm.DB) {
+		values, ok := tx.Statement.Dest.(map[string]any)
+		if ok && tx.Statement.Table == "connector_operations" && values["revision"] == uint64(2) && values["retryable_unsent"] == false {
+			if _, evidence := values["provider_evidence"]; !evidence {
+				pauseOnce.Do(func() { close(entered); <-release })
+			}
+		}
+	}))
+	result := make(chan error, 1)
+	go func() { _, err := service.Submit(t.Context(), request); result <- err }()
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Submit did not reach its initial dispatch claim")
+	}
+	// A separate WAL connection can read committed receipts during this pause.
+	// Publishing admission first exposes revision 1 and permits a lookup to
+	// invalidate its pending claim; atomic admission leaves no visible row.
+	var visible int64
+	readErr := observer.Model(&models.ConnectorOperation{}).Where("idempotency_key = ?", request.IdempotencyKey).Count(&visible).Error
+	unblock()
+	require.NoError(t, <-result)
+	require.NoError(t, readErr)
+	require.Zero(t, visible, "Submit exposed an admission before durably claiming its initial send")
+	var operation models.ConnectorOperation
+	require.NoError(t, observer.Where("idempotency_key = ?", request.IdempotencyKey).First(&operation).Error)
+	require.Equal(t, connector.OperationAccepted, operation.State)
+	require.Greater(t, operation.Revision, uint64(1))
+	require.False(t, operation.RetryableUnsent)
+	require.Len(t, provider.sends, 1)
+}
+
+func TestOperationsConflictingLookupCannotSuppressInitialDispatch(t *testing.T) {
+	store := NewStore(openStoreDB(t))
+	require.NoError(t, store.catalog.ActivateEpoch(t.Context(), "", "epoch"))
+	provider := &operationTestProvider{}
+	service := operationTestService(t, store, provider)
+	request := operationTestRequest(t, store)
+	entered, release := make(chan struct{}), make(chan struct{})
+	var releaseOnce sync.Once
+	unblock := func() { releaseOnce.Do(func() { close(release) }) }
+	t.Cleanup(unblock)
+	var validations atomic.Int32
+	provider.stableID = func(id string) (string, error) {
+		// The second validation occurs after admission and immediately before
+		// Submit's dispatch. Hold it while another operator recovers the receipt.
+		if validations.Add(1) == 2 {
+			close(entered)
+			<-release
+		}
+		return "fake-" + id, nil
+	}
+	var dispatched atomic.Bool
+	provider.submit = func(OperationDispatch) (OperationEvidence, error) {
+		dispatched.Store(true)
+		return OperationEvidence{State: connector.OperationCompleted, Result: json.RawMessage(`{"approved":true}`)}, nil
+	}
+	provider.lookup = func(OperationDispatch) (OperationEvidence, error) {
+		if dispatched.Load() {
+			return OperationEvidence{State: connector.OperationCompleted, Result: json.RawMessage(`{"approved":true}`)}, nil
+		}
+		return OperationEvidence{State: connector.OperationUnknown, RPCCode: "NotFound"}, errors.New("Update has not been sent")
+	}
+	result := make(chan error, 1)
+	go func() { _, err := service.Submit(t.Context(), request); result <- err }()
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Submit did not reach post-admission dispatch validation")
+	}
+	other := request
+	other.IdempotencyKey = "other-operator-key"
+	other.Principal = operationTestPrincipal()
+	conflict, err := service.Submit(t.Context(), other)
+	require.NoError(t, err)
+	require.True(t, conflict.Conflict)
+	unknown, err := service.Reconcile(t.Context(), conflict.Operation.ID)
+	require.ErrorIs(t, err, ErrOperationProvider)
+	require.Equal(t, connector.OperationUnknown, unknown.State)
+	require.False(t, unknown.RetryableUnsent)
+	unblock()
+	// The lookup can supersede initial evidence through the existing CAS, but
+	// it must not revoke the winner's already committed one-send authorization.
+	require.ErrorIs(t, <-result, ErrOperationChanged)
+	require.Len(t, provider.sends, 1, "a conflicting receipt lookup suppressed the admitted operator's only send")
+	require.Greater(t, conflict.Operation.Revision, uint64(1))
+	recovered, err := service.Reconcile(t.Context(), unknown.ID)
+	require.NoError(t, err)
+	require.Equal(t, connector.OperationCompleted, recovered.State)
+	require.Equal(t, conflict.Operation.ExternalUpdateID, recovered.ExternalUpdateID)
+	require.Equal(t, uint64(1), recovered.Attempt)
+	require.Nil(t, recovered.OpenKey)
+	require.Len(t, provider.sends, 1)
+}
+
 func TestOperationsEvidenceMappingPreservesUncertainty(t *testing.T) {
 	cases := []struct {
 		name   string

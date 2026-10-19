@@ -30,6 +30,31 @@ func operationTerminal(state string) bool {
 	return state == connector.OperationCompleted || state == connector.OperationRejected || state == connector.OperationNotDispatched
 }
 
+// admitOperation publishes a new Submit receipt only after its initial send
+// claim is durable. Otherwise a competing receipt lookup can advance its
+// revision between admission and claim, suppressing the only authorized send.
+// Explicit admission without dispatch keeps its separate lookup-only recovery.
+func (s *Store) admitOperation(ctx context.Context, request connector.OperationRequest, bounds connector.WriteBounds, claimInitial bool) (connector.OperationDecision, error) {
+	if !claimInitial {
+		return s.catalog.AdmitOperation(ctx, request, bounds)
+	}
+	var decision connector.OperationDecision
+	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		transaction := NewStore(tx)
+		var err error
+		decision, err = transaction.catalog.AdmitOperation(ctx, request, bounds)
+		if err != nil || !decision.Created {
+			return err
+		}
+		decision.Operation, err = transaction.claimDispatch(ctx, decision.Operation, request.ConfigurationEpoch, true)
+		return err
+	})
+	if err != nil {
+		return connector.OperationDecision{}, err
+	}
+	return decision, nil
+}
+
 // Operation returns a durable receipt without making a provider call.
 func (s *Store) Operation(ctx context.Context, id uuid.UUID) (models.ConnectorOperation, error) {
 	var op models.ConnectorOperation

@@ -36,6 +36,7 @@ export type PrincipalRole = "viewer" | "runner" | "operator" | "admin";
 
 export interface PrincipalState {
   kind: string | null;
+  stableId?: string | null;
   subject: string | null;
   role: PrincipalRole | null;
   canRunner: boolean;
@@ -48,6 +49,7 @@ let cookieSession = false;
 let csrfToken: string | null = null;
 const anonymousPrincipal: PrincipalState = Object.freeze({
   kind: null,
+  stableId: null,
   subject: null,
   role: null,
   canRunner: false,
@@ -155,9 +157,14 @@ function principalFromWhoami(body: unknown): PrincipalState | null {
     typeof obj.subject === "string" && obj.subject.trim() !== ""
       ? obj.subject.trim()
       : null;
+  const stableId =
+    typeof obj.stable_id === "string" && obj.stable_id.trim() !== ""
+      ? obj.stable_id.trim()
+      : null;
   const scope = scopeFromWhoami(obj, kind);
   return {
     kind,
+    stableId,
     subject,
     role,
     canRunner: roleLevel(role) >= roleLevel("runner"),

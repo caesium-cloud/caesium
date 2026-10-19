@@ -61,6 +61,41 @@ func TestWhoamiReturnsPrincipalAndCSRF(t *testing.T) {
 	require.NotContains(t, body, "scope", "an unscoped principal must not gain a scope key")
 }
 
+// Stable identity must follow the credential kind even when subjects overlap.
+func TestWhoamiStableIdentity(t *testing.T) {
+	userID, keyID := uuid.New(), uuid.New()
+	for _, tc := range []struct {
+		name          string
+		kind          iauth.PrincipalKind
+		userID, keyID *uuid.UUID
+		want          string
+	}{
+		{name: "user", kind: iauth.PrincipalUser, userID: &userID, keyID: &keyID, want: userID.String()},
+		{name: "key", kind: iauth.PrincipalAPIKey, userID: &userID, keyID: &keyID, want: keyID.String()},
+		{name: "missing user", kind: iauth.PrincipalUser, keyID: &keyID},
+		{name: "missing key", kind: iauth.PrincipalAPIKey, userID: &userID},
+		{name: "zero user", kind: iauth.PrincipalUser, userID: &uuid.Nil},
+		{name: "unknown kind", kind: "other", userID: &userID, keyID: &keyID},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctrl := NewSSO(nil, nil, "caesium_session")
+			c, rec := newAuthContext(t, http.MethodGet, "/auth/whoami", "")
+			c.Set(authmw.ContextKeyPrincipal, &iauth.Principal{
+				Kind: tc.kind, Subject: "shared-subject", UserID: tc.userID, KeyID: tc.keyID,
+				Grants: policy.Grants{"*": models.RoleOperator},
+			})
+			require.NoError(t, ctrl.Whoami(c))
+			var body map[string]any
+			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+			if tc.want == "" {
+				require.NotContains(t, body, "stable_id")
+			} else {
+				require.Equal(t, tc.want, body["stable_id"])
+			}
+		})
+	}
+}
+
 // TestWhoamiNamesTheScopeOfAScopedKey pins the C1 half that makes the allow
 // useful: a job-scoped API key may now reach whoami, so the answer has to name
 // what the key is scoped to — otherwise the caller cannot distinguish a scoped

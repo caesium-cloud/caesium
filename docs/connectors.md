@@ -12,7 +12,8 @@
 > Declared HTTP Queries/actions and operation receipts compose those services.
 > Console monitoring exposes configured connections and exact external runs,
 > typed workflow relationships and verified links to existing Caesium runs.
-> The Console approval journey remains plan item E3.
+> The Console also exposes declared approval forms and server-backed receipts;
+> release qualification and CI-lane promotion remain in progress.
 > Job-definition YAML is unchanged.
 
 An execution connector lets Caesium inspect an external workflow system and
@@ -460,7 +461,11 @@ schema. For the fixture binding, the submission shape is:
 
 Send exactly one nonempty `Idempotency-Key` header with an action. The server
 persists the authenticated actor, pinned target, binding snapshot and stable
-external Update ID before dispatch. Public JSON cannot supply `_caesium_actor`
+external Update ID before dispatch. A fresh submission records admission and
+its initial dispatch claim atomically, so a concurrent receipt lookup cannot
+suppress the first dispatch by changing its revision. A crash after that claim
+still leaves an uncertain outcome; recovery only looks up the same Update.
+Public JSON cannot supply `_caesium_actor`
 or replace any actor field. The workflow receives the server-derived principal;
 an API key remains identified as that key.
 
@@ -535,8 +540,8 @@ a Temporal UI link containing the exact namespace, Workflow ID and Run ID.
 Omitting it leaves that link absent.
 
 Gate-off, scoped, namespace-only, agent and unauthenticated routes disclose no
-external workflow details. The monitoring view performs no automatic status
-Queries or actions. The approval form remains E3.
+external workflow details. Refresh performs no automatic status Queries or
+action submissions.
 The dedicated `connectors` Playwright project uses the real development fixture;
 default and auth projects exclude its specifications. A selected connector
 browser test fails if its gate, authentication or real-worker markers are absent.
@@ -569,6 +574,44 @@ workflow identities. Only an unscoped cluster viewer or higher sees the
 external-execution panel. A provider outage leaves relationship information
 explicitly unavailable or stale; historical verified reverse links remain
 readable without contacting the provider.
+
+### Approve a declared action and recover its receipt
+
+On a bound execution, an unscoped cluster operator or admin can submit the
+binding-declared approval. Inspect the exact connection, Workflow ID, Run ID
+and binding version before confirming. The form uses the declared input schema;
+the server validates that input and derives the actor. An available capability
+alone does not authorize an action. Unbound workflows, stale observations,
+unavailable bindings, and principals without action authority cannot submit.
+
+Receipts come from the server's operation list, so refresh or a new tab recovers
+existing work after authentication. Browser storage is not the authority for an
+operation. Duplicate requests attach to the original receipt; a different key
+or operator encountering an open action receives that existing receipt. Inspect
+its original principal and pinned run before deciding what to do next.
+
+A submitted or accepted operation is still pending. Completion requires a
+validated result; a timeout never produces a success message. The receipt
+separates completed, independently proven rejection, initial non-dispatch and
+unknown outcomes. A reported remote failure with unknown origin remains
+unknown: Temporal's failure outcome alone cannot establish validator rejection
+or absence of effects. Results or descriptive metadata omitted at the configured
+response limit are labeled unavailable, without inventing a result.
+
+Receipt refresh performs lookup only. An unknown receipt offers a separate
+explicit resend confirmation only to its original principal, identified by the
+stable user/key ID from authenticated `/auth/whoami`, with current operator or
+admin authority. Confirm the displayed receipt revision and immutable target;
+the server rechecks authorization, binding and configuration, then sends the
+same Update ID and original input. Changing eligibility, waiting, polling,
+reloading or opening another tab never authorizes a resend. Another operator
+can inspect that receipt but cannot confirm on the original principal's behalf.
+A continuation remains a distinct execution and cannot retarget an old receipt.
+
+The publication fixture's approval advances to its second Caesium job. Follow
+the verified links to inspect that job's observed evidence. The remote workflow
+owns business eligibility and enforces one logical approval effect even for a
+later action with another Update ID; a new receipt does not prove another effect.
 
 ## Temporal observation
 
