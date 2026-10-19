@@ -292,7 +292,9 @@ func (s *Service) Submit(ctx context.Context, request OperationSubmission) (conn
 		if decision.Operation.Revision == 1 && len(decision.Operation.ProviderEvidence) == 0 {
 			return decision, ErrOperationPending
 		}
+		before := decision.Operation
 		decision.Operation, err = s.Reconcile(ctx, decision.Operation.ID)
+		err = submissionEvidenceError(before, decision.Operation, err)
 		if err == nil && (decision.Operation.State == connector.OperationUnknown || decision.Operation.State == connector.OperationSubmitted) {
 			err = ErrOperationPending
 		}
@@ -309,8 +311,23 @@ func (s *Service) Submit(ctx context.Context, request OperationSubmission) (conn
 			return decision, err
 		}
 	}
-	decision.Operation, err = s.call(ctx, decision.Operation, true)
+	before := decision.Operation
+	decision.Operation, err = s.call(ctx, before, true)
+	err = submissionEvidenceError(before, decision.Operation, err)
 	return decision, err
+}
+
+// An identical submission attaches to the current receipt when only evidence
+// for its own attempt advanced. A lost claim or a newer explicit resend is a
+// different authorization decision and retains its revision conflict.
+func submissionEvidenceError(before, current models.ConnectorOperation, err error) error {
+	if !errors.Is(err, ErrOperationChanged) || before.ID != current.ID || before.ExternalUpdateID != current.ExternalUpdateID || before.Attempt != current.Attempt {
+		return err
+	}
+	if operationTerminal(current.State) || current.State == connector.OperationAccepted {
+		return nil
+	}
+	return ErrOperationPending
 }
 
 // Reconcile is safe for restarts/background use and only looks up the same ID.

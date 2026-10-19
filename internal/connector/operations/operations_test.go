@@ -108,7 +108,7 @@ func TestOperationsConcurrentAdmissionAndOpenGuard(t *testing.T) {
 	require.Equal(t, 1, created)
 	for e := range errs {
 		if e != nil {
-			require.True(t, errors.Is(e, ErrOperationProvider) || errors.Is(e, ErrOperationPending) || errors.Is(e, ErrOperationChanged), "unexpected concurrent result: %v", e)
+			require.True(t, errors.Is(e, ErrOperationProvider) || errors.Is(e, ErrOperationPending), "unexpected concurrent result: %v", e)
 		}
 	}
 	require.Len(t, p.sends, 1)
@@ -296,9 +296,9 @@ func TestOperationsConflictingLookupCannotSuppressInitialDispatch(t *testing.T) 
 	require.Equal(t, connector.OperationUnknown, unknown.State)
 	require.False(t, unknown.RetryableUnsent)
 	unblock()
-	// The lookup can supersede initial evidence through the existing CAS, but
-	// it must not revoke the winner's already committed one-send authorization.
-	require.ErrorIs(t, <-result, ErrOperationChanged)
+	// The weak lookup cannot revoke the winner's one-send authorization or
+	// discard the validated completion once that authorized send returns.
+	require.NoError(t, <-result)
 	require.Len(t, provider.sends, 1, "a conflicting receipt lookup suppressed the admitted operator's only send")
 	require.Greater(t, conflict.Operation.Revision, uint64(1))
 	recovered, err := service.Reconcile(t.Context(), unknown.ID)
@@ -308,6 +308,195 @@ func TestOperationsConflictingLookupCannotSuppressInitialDispatch(t *testing.T) 
 	require.Equal(t, uint64(1), recovered.Attempt)
 	require.Nil(t, recovered.OpenKey)
 	require.Len(t, provider.sends, 1)
+}
+
+func TestOperationsConcurrentIdenticalSubmissionsAttachAcrossEvidenceRaces(t *testing.T) {
+	for _, state := range []string{connector.OperationUnknown, connector.OperationAccepted, connector.OperationCompleted, connector.OperationNotDispatched} {
+		t.Run(state, func(t *testing.T) {
+			store := NewStore(openStoreDB(t))
+			require.NoError(t, store.catalog.ActivateEpoch(t.Context(), "", "epoch"))
+			provider := &operationTestProvider{}
+			service := operationTestService(t, store, provider)
+			request := operationTestRequest(t, store)
+			entered, release := make(chan struct{}), make(chan struct{})
+			var releaseOnce sync.Once
+			unblock := func() { releaseOnce.Do(func() { close(release) }) }
+			t.Cleanup(unblock)
+			provider.submit = func(OperationDispatch) (OperationEvidence, error) {
+				close(entered)
+				<-release
+				evidence := OperationEvidence{State: state}
+				if state == connector.OperationCompleted {
+					evidence.Result = json.RawMessage(`{"approved":true}`)
+				}
+				if state == connector.OperationUnknown {
+					return evidence, errors.New("initial response lost")
+				}
+				if state == connector.OperationNotDispatched {
+					evidence.PreflightRPCCode = "NotFound"
+					return evidence, errors.New("initial preflight refused before sending")
+				}
+				return evidence, nil
+			}
+			type result struct {
+				decision connector.OperationDecision
+				err      error
+			}
+			winner := make(chan result, 1)
+			go func() { decision, err := service.Submit(t.Context(), request); winner <- result{decision, err} }()
+			select {
+			case <-entered:
+			case <-time.After(5 * time.Second):
+				t.Fatal("initial Submit did not reach the provider")
+			}
+			// The same-key request looks up the stable handle before the initial
+			// send's reply arrives. Its NotFound evidence wins the first CAS.
+			duplicate, err := service.Submit(t.Context(), request)
+			require.ErrorIs(t, err, ErrOperationProvider)
+			require.False(t, duplicate.Created)
+			require.False(t, duplicate.Conflict)
+			require.Equal(t, connector.OperationUnknown, duplicate.Operation.State)
+			unblock()
+			first := <-winner
+			switch state {
+			case connector.OperationUnknown:
+				require.ErrorIs(t, first.err, ErrOperationPending)
+			case connector.OperationNotDispatched:
+				require.ErrorIs(t, first.err, ErrOperationProvider)
+			default:
+				require.NoError(t, first.err)
+			}
+			require.True(t, first.decision.Created)
+			require.Equal(t, duplicate.Operation.ID, first.decision.Operation.ID)
+			require.Equal(t, duplicate.Operation.ExternalUpdateID, first.decision.Operation.ExternalUpdateID)
+			require.Equal(t, state, first.decision.Operation.State)
+			require.Equal(t, uint64(1), first.decision.Operation.Attempt)
+			require.Equal(t, operationTerminal(state), first.decision.Operation.OpenKey == nil)
+			require.Len(t, provider.sends, 1)
+			persisted, err := store.Operation(t.Context(), first.decision.Operation.ID)
+			require.NoError(t, err)
+			require.Equal(t, state, persisted.State)
+			if state == connector.OperationCompleted {
+				require.Contains(t, string(persisted.ProviderEvidence), `"approved":true`)
+			}
+			if state == connector.OperationNotDispatched {
+				require.Contains(t, string(persisted.ProviderEvidence), `"preflight_rpc_code":"NotFound"`)
+			}
+			if state == connector.OperationAccepted {
+				weaker, err := service.Reconcile(t.Context(), persisted.ID)
+				require.ErrorIs(t, err, ErrOperationProvider)
+				require.Equal(t, connector.OperationAccepted, weaker.State)
+				require.Equal(t, persisted.ProviderEvidence, weaker.ProviderEvidence)
+			}
+		})
+	}
+}
+
+func TestOperationsIdenticalReplayAttachesWhenLateWeakLookupLosesEvidenceCAS(t *testing.T) {
+	for _, state := range []string{connector.OperationAccepted, connector.OperationCompleted} {
+		t.Run(state, func(t *testing.T) {
+			store := NewStore(openStoreDB(t))
+			require.NoError(t, store.catalog.ActivateEpoch(t.Context(), "", "epoch"))
+			provider := &operationTestProvider{}
+			service := operationTestService(t, store, provider)
+			request := operationTestRequest(t, store)
+			sendEntered, sendRelease := make(chan struct{}), make(chan struct{})
+			lookupEntered, lookupRelease := make(chan struct{}), make(chan struct{})
+			var sendOnce, lookupOnce sync.Once
+			releaseSend := func() { sendOnce.Do(func() { close(sendRelease) }) }
+			releaseLookup := func() { lookupOnce.Do(func() { close(lookupRelease) }) }
+			t.Cleanup(releaseSend)
+			t.Cleanup(releaseLookup)
+			provider.submit = func(OperationDispatch) (OperationEvidence, error) {
+				close(sendEntered)
+				<-sendRelease
+				evidence := OperationEvidence{State: state}
+				if state == connector.OperationCompleted {
+					evidence.Result = json.RawMessage(`{"approved":true}`)
+				}
+				return evidence, nil
+			}
+			provider.lookup = func(OperationDispatch) (OperationEvidence, error) {
+				close(lookupEntered)
+				<-lookupRelease
+				return OperationEvidence{State: connector.OperationUnknown, RPCCode: "NotFound"}, errors.New("late weak lookup")
+			}
+			type result struct {
+				decision connector.OperationDecision
+				err      error
+			}
+			winner, duplicate := make(chan result, 1), make(chan result, 1)
+			go func() { decision, err := service.Submit(t.Context(), request); winner <- result{decision, err} }()
+			select {
+			case <-sendEntered:
+			case <-time.After(5 * time.Second):
+				t.Fatal("initial Submit did not reach the provider")
+			}
+			go func() { decision, err := service.Submit(t.Context(), request); duplicate <- result{decision, err} }()
+			select {
+			case <-lookupEntered:
+			case <-time.After(5 * time.Second):
+				t.Fatal("duplicate Submit did not look up the pending receipt")
+			}
+			releaseSend()
+			first := <-winner
+			require.NoError(t, first.err)
+			releaseLookup()
+			attached := <-duplicate
+			require.NoError(t, attached.err)
+			require.False(t, attached.decision.Created)
+			require.False(t, attached.decision.Conflict)
+			require.Equal(t, first.decision.Operation.ID, attached.decision.Operation.ID)
+			require.Equal(t, state, attached.decision.Operation.State)
+			require.Equal(t, first.decision.Operation.ProviderEvidence, attached.decision.Operation.ProviderEvidence)
+			require.Len(t, provider.sends, 1)
+		})
+	}
+}
+
+func TestOperationsLateInitialEvidenceCannotCrossConfirmedAttempt(t *testing.T) {
+	store := NewStore(openStoreDB(t))
+	require.NoError(t, store.catalog.ActivateEpoch(t.Context(), "", "epoch"))
+	provider := &operationTestProvider{}
+	service := operationTestService(t, store, provider)
+	request := operationTestRequest(t, store)
+	entered, release := make(chan struct{}), make(chan struct{})
+	var releaseOnce sync.Once
+	unblock := func() { releaseOnce.Do(func() { close(release) }) }
+	t.Cleanup(unblock)
+	var sends atomic.Int32
+	provider.submit = func(OperationDispatch) (OperationEvidence, error) {
+		if sends.Add(1) == 1 {
+			close(entered)
+			<-release
+			return OperationEvidence{State: connector.OperationAccepted}, nil
+		}
+		return OperationEvidence{State: connector.OperationCompleted, Result: json.RawMessage(`{"approved":true}`)}, nil
+	}
+	result := make(chan error, 1)
+	go func() { _, err := service.Submit(t.Context(), request); result <- err }()
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("initial Submit did not reach the provider")
+	}
+	rows, err := store.Operations(t.Context(), request.Target.Execution, 100)
+	require.NoError(t, err)
+	require.Len(t, rows, 1)
+	unknown, err := service.Reconcile(t.Context(), rows[0].ID)
+	require.ErrorIs(t, err, ErrOperationProvider)
+	confirmed, err := service.ConfirmResend(t.Context(), unknown.ID, unknown.Revision, request.Principal, true)
+	require.NoError(t, err)
+	require.Equal(t, uint64(2), confirmed.Attempt)
+	unblock()
+	require.ErrorIs(t, <-result, ErrOperationChanged)
+	current, err := store.Operation(t.Context(), confirmed.ID)
+	require.NoError(t, err)
+	require.Equal(t, connector.OperationCompleted, current.State)
+	require.Equal(t, confirmed.Revision, current.Revision)
+	require.Equal(t, confirmed.ProviderEvidence, current.ProviderEvidence)
+	require.Equal(t, confirmed.ResendAudit, current.ResendAudit)
+	require.Len(t, provider.sends, 2)
 }
 
 func TestOperationsEvidenceMappingPreservesUncertainty(t *testing.T) {
@@ -989,7 +1178,7 @@ func TestOperationsTransientNoSendProofIsClaimedOnceBeforeRetry(t *testing.T) {
 	require.Len(t, provider.lookups, 1)
 	close(release)
 	e = <-result
-	require.True(t, errors.Is(e, ErrOperationProvider) || errors.Is(e, ErrOperationChanged))
+	require.ErrorIs(t, e, ErrOperationPending)
 	_, e = service.Submit(t.Context(), request)
 	require.ErrorIs(t, e, ErrOperationProvider)
 	require.Len(t, provider.sends, 2)

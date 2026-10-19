@@ -80,8 +80,9 @@ func (s *Store) Operations(ctx context.Context, execution connector.ExecutionRef
 	return rows, err
 }
 
-// recordOperationEvidence never overwrites a newer lookup, dispatch attempt or
-// terminal result. A stale response returns the current receipt for recovery.
+// recordOperationEvidence fences dispatch attempts and terminal results. A
+// validated positive outcome can supersede a weaker lookup from the same
+// attempt; other stale responses return the current receipt for recovery.
 func (s *Store) recordOperationEvidence(ctx context.Context, before models.ConnectorOperation, state string, evidence []byte, unsent ...bool) (models.ConnectorOperation, error) {
 	if operationTerminal(before.State) {
 		return before, nil
@@ -90,22 +91,51 @@ func (s *Store) recordOperationEvidence(ctx context.Context, before models.Conne
 		return s.Operation(ctx, before.ID)
 	}
 	retryable := len(unsent) > 0 && unsent[0] && before.Attempt == 1 && state == connector.OperationSubmitted
-	updates := map[string]any{"state": state, "provider_evidence": jsonValue(evidence), "retryable_unsent": retryable, "revision": before.Revision + 1, "updated_at": time.Now().UTC()}
-	if operationTerminal(state) {
-		updates["open_key"] = gorm.Expr("NULL")
+	op := before
+	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		write := func(expected models.ConnectorOperation) *gorm.DB {
+			updates := map[string]any{"state": state, "provider_evidence": jsonValue(evidence), "retryable_unsent": retryable, "revision": expected.Revision + 1, "updated_at": time.Now().UTC()}
+			if operationTerminal(state) {
+				updates["open_key"] = gorm.Expr("NULL")
+			}
+			return tx.Model(&models.ConnectorOperation{}).Where("id = ? AND external_update_id = ? AND revision = ? AND attempt = ? AND state = ?", expected.ID, before.ExternalUpdateID, expected.Revision, before.Attempt, expected.State).Updates(updates)
+		}
+		res := write(before)
+		if res.Error != nil {
+			return res.Error
+		}
+		if err := tx.Where("id = ?", before.ID).First(&op).Error; err != nil {
+			return err
+		}
+		if res.RowsAffected == 1 {
+			return nil
+		}
+		if op.ExternalUpdateID != before.ExternalUpdateID || op.Attempt != before.Attempt || !strongerOperationState(op.State, state) {
+			return ErrOperationChanged
+		}
+		// Keep the failed write, reload and stronger-evidence CAS in one
+		// transaction so another weak lookup cannot interleave with the merge.
+		res = write(op)
+		if res.Error != nil {
+			return res.Error
+		}
+		if res.RowsAffected != 1 {
+			return ErrOperationChanged
+		}
+		return tx.Where("id = ?", before.ID).First(&op).Error
+	})
+	return op, err
+}
+
+func strongerOperationState(current, incoming string) bool {
+	switch current {
+	case connector.OperationSubmitted, connector.OperationUnknown:
+		return incoming == connector.OperationAccepted || incoming == connector.OperationCompleted || incoming == connector.OperationRejected || incoming == connector.OperationNotDispatched
+	case connector.OperationAccepted:
+		return incoming == connector.OperationCompleted
+	default:
+		return false
 	}
-	res := s.db.WithContext(ctx).Model(&models.ConnectorOperation{}).Where("id = ? AND revision = ? AND attempt = ? AND state = ?", before.ID, before.Revision, before.Attempt, before.State).Updates(updates)
-	if res.Error != nil {
-		return before, res.Error
-	}
-	op, err := s.Operation(ctx, before.ID)
-	if err != nil {
-		return op, err
-	}
-	if res.RowsAffected != 1 {
-		return op, ErrOperationChanged
-	}
-	return op, nil
 }
 
 // claimDispatch durably consumes exactly one send authorization. Defaults and
