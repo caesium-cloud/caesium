@@ -1,13 +1,18 @@
 #!/usr/bin/env python3
 """Install and verify the native CI Docker runtime before candidate image work."""
 
+import fcntl
 import hashlib
 import io
 import json
+import os
 from pathlib import Path
 import platform
 import re
+import shlex
+import stat
 import subprocess
+import sys
 import tarfile
 import tempfile
 import urllib.request
@@ -29,6 +34,8 @@ EXPECTED = {
     "ServerVersion": "29.9.1",
     "ContainerdCommit": CONTAINERD_REVISION,
     "RuncCommit": "v1.5.2-0-g29dd3dc2",
+    "CgroupDriver": "cgroupfs",
+    "CgroupVersion": "2",
 }
 
 # This read-only probe runs under sudo. It prints only bound process identity;
@@ -112,6 +119,149 @@ REPOSITORY_ARCHITECTURES = {
 
 def run(*command, **kwargs):
     return subprocess.run(command, check=True, text=True, **kwargs)
+
+
+def validate_docker_arguments(arguments):
+    if not arguments or not Path(arguments[0]).is_absolute() or Path(arguments[0]).name != "dockerd":
+        raise RuntimeError("Docker service does not identify a direct dockerd command")
+    if any(argument == "--exec-opt" or argument.startswith("--exec-opt=") for argument in arguments[1:]):
+        # Docker rejects any directive present in both flags and daemon.json,
+        # including a CLI exec-opt unrelated to the cgroup driver.
+        raise RuntimeError("refusing conflicting Docker CLI exec-opt configuration")
+    paths = []
+    for index, argument in enumerate(arguments[1:], 1):
+        if argument == "--config-file":
+            if index + 1 >= len(arguments):
+                raise RuntimeError("Docker config-file argument is incomplete")
+            paths.append(arguments[index + 1])
+        elif argument.startswith("--config-file="):
+            paths.append(argument.split("=", 1)[1])
+    if len(paths) > 1 or (paths and paths != ["/etc/docker/daemon.json"]):
+        raise RuntimeError("refusing custom or ambiguous Docker config-file arguments")
+
+
+def merged_docker_config(body):
+    def unique(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise RuntimeError("Docker daemon configuration has duplicate JSON keys")
+            result[key] = value
+        return result
+    def invalid_constant(_value):
+        raise ValueError("non-JSON constant")
+    try:
+        config = json.loads(body, object_pairs_hook=unique, parse_constant=invalid_constant)
+    except (ValueError, UnicodeError) as error:
+        raise RuntimeError("Docker daemon configuration is not valid JSON") from error
+    if not isinstance(config, dict):
+        raise RuntimeError("Docker daemon configuration must be an object")
+    options = config.get("exec-opts", [])
+    if not isinstance(options, list) or any(not isinstance(option, str) for option in options):
+        raise RuntimeError("Docker daemon exec-opts must be a list of strings")
+    seen, merged = set(), []
+    for option in options:
+        key, separator, value = option.partition("=")
+        if (not separator or not re.fullmatch(r"[A-Za-z0-9_.-]+", key)
+                or not value or any(ord(character) < 32 for character in value)):
+            raise RuntimeError("Docker daemon exec-opt is malformed")
+        if key in seen:
+            raise RuntimeError("Docker daemon exec-opts contain duplicate option names")
+        seen.add(key)
+        if key == "native.cgroupdriver":
+            if value not in ("systemd", "cgroupfs"):
+                raise RuntimeError("Docker daemon cgroup driver is unsupported")
+            option = "native.cgroupdriver=cgroupfs"
+        merged.append(option)
+    if "native.cgroupdriver" not in seen:
+        merged.append("native.cgroupdriver=cgroupfs")
+    config["exec-opts"] = merged
+    return config
+
+
+def config_fingerprint(metadata):
+    return (metadata.st_dev, metadata.st_ino, metadata.st_mode, metadata.st_uid, metadata.st_gid,
+            metadata.st_nlink, metadata.st_size, metadata.st_mtime_ns, metadata.st_ctime_ns)
+
+
+def read_docker_config(directory_fd):
+    try:
+        descriptor = os.open("daemon.json", os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory_fd)
+    except FileNotFoundError:
+        return None, b"{}"
+    with os.fdopen(descriptor, "rb") as stream:
+        metadata = os.fstat(stream.fileno())
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+            raise RuntimeError("Docker daemon configuration must be a regular file with one link")
+        body = stream.read(1024 * 1024 + 1)
+        if len(body) > 1024 * 1024 or config_fingerprint(metadata) != config_fingerprint(os.fstat(stream.fileno())):
+            raise RuntimeError("Docker daemon configuration changed or exceeded its size bound")
+    return metadata, body
+
+
+def configure_docker_cgroupfs(directory=Path("/etc/docker"), proc_root=Path("/proc")):
+    if os.geteuid() != 0:
+        raise RuntimeError("Docker daemon configuration requires root ownership")
+    command = run("systemctl", "show", "--property=ExecStart", "--value",
+                  "docker.service", capture_output=True).stdout
+    arguments = re.findall(r"argv\[\]=([^;]*?)\s*;", command)
+    if len(arguments) != 1 or any(character in arguments[0] for character in ("\\", "$", "%")):
+        raise RuntimeError("Docker ExecStart arguments cannot be resolved safely")
+    try:
+        configured = shlex.split(arguments[0])
+    except ValueError:
+        raise RuntimeError("Docker ExecStart arguments cannot be resolved safely") from None
+    validate_docker_arguments(configured)
+    pid = run("systemctl", "show", "--property=MainPID", "--value",
+              "docker.service", capture_output=True).stdout.strip()
+    if not re.fullmatch(r"[1-9][0-9]*", pid):
+        raise RuntimeError("Docker has no running MainPID")
+    try:
+        actual = (proc_root / pid / "cmdline").read_bytes().rstrip(b"\0").decode().split("\0")
+    except UnicodeError:
+        raise RuntimeError("running Docker arguments cannot be resolved safely") from None
+    validate_docker_arguments(actual)
+    directory.mkdir(mode=0o755, parents=False, exist_ok=True)
+    directory_fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    temporary = None
+    try:
+        # Serialize this helper and reject observed changes or substitutions
+        # before atomically publishing the updated configuration.
+        fcntl.flock(directory_fd, fcntl.LOCK_EX)
+        metadata, body = read_docker_config(directory_fd)
+        config = merged_docker_config(body)
+        if metadata is not None and config == json.loads(body):
+            return False
+        temporary = ".caesium-ci-" + uuid.uuid4().hex + ".json"
+        descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                             0o600, dir_fd=directory_fd)
+        with os.fdopen(descriptor, "w") as stream:
+            os.fchmod(stream.fileno(), stat.S_IMODE(metadata.st_mode) if metadata else 0o644)
+            if metadata:
+                os.fchown(stream.fileno(), metadata.st_uid, metadata.st_gid)
+            json.dump(config, stream, indent=2)
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        current, current_body = read_docker_config(directory_fd)
+        if (current_body != body or (current is None) != (metadata is None)
+                or (current is not None and config_fingerprint(current) != config_fingerprint(metadata))):
+            raise RuntimeError("Docker daemon configuration changed before replacement")
+        if metadata is None:
+            # A link publishes a new file atomically without replacing a file
+            # another writer may have created after the final absence check.
+            os.link(temporary, "daemon.json", src_dir_fd=directory_fd, dst_dir_fd=directory_fd,
+                    follow_symlinks=False)
+            os.unlink(temporary, dir_fd=directory_fd)
+        else:
+            os.replace(temporary, "daemon.json", src_dir_fd=directory_fd, dst_dir_fd=directory_fd)
+        temporary = None
+        os.fsync(directory_fd)
+        return True
+    finally:
+        if temporary is not None:
+            os.unlink(temporary, dir_fd=directory_fd)
+        os.close(directory_fd)
 
 
 def archive_url(architecture):
@@ -227,7 +377,7 @@ def verify_running_shim(architecture, binary_directory, hashes):
         run("docker", "rm", "--force", cid, timeout=30)
 
 
-def setup():
+def native_architecture():
     architecture = REPOSITORY_ARCHITECTURES.get(platform.machine())
     host_error = "Docker setup requires a native Ubuntu 26.04 amd64 or arm64 CI runner"
     if platform.system() != "Linux" or architecture is None:
@@ -236,11 +386,22 @@ def setup():
     if (release.get("ID") != "ubuntu" or release.get("VERSION_ID") != "26.04"
             or release.get("VERSION_CODENAME") != "resolute"):
         raise RuntimeError(host_error)
+    return architecture
+
+
+def setup():
+    architecture = native_architecture()
 
     data = download_archive(architecture)
+    # Configure the selected ephemeral CI host before any install/restart. A
+    # separate root mode owns the checked atomic update without exposing config
+    # values in process arguments or logs.
+    configured = run("sudo", "python3", str(Path(__file__).resolve()), "--configure-docker-cgroupfs",
+                     capture_output=True, timeout=30)
+    print(configured.stdout.strip(), flush=True)
 
-    # Replace only Docker's repository definitions. Keep daemon, storage and
-    # cgroup configuration, and preserve package configuration during install.
+    # Replace only Docker's repository definitions. Preserve all other daemon
+    # and storage settings, and preserve package configuration during install.
     run("sudo", "install", "-m", "0755", "-d", "/etc/apt/keyrings")
     run("sudo", "curl", "-fsSL", "https://download.docker.com/linux/ubuntu/gpg",
         "-o", "/etc/apt/keyrings/docker.asc")
@@ -269,6 +430,8 @@ def setup():
         "ServerVersion": info.get("ServerVersion"),
         "ContainerdCommit": (info.get("ContainerdCommit") or {}).get("ID"),
         "RuncCommit": (info.get("RuncCommit") or {}).get("ID"),
+        "CgroupDriver": info.get("CgroupDriver"),
+        "CgroupVersion": info.get("CgroupVersion"),
     }
     print(json.dumps({"kind": "ci-docker-components", "architecture": architecture,
                       "observed": observed, "expected": EXPECTED}), flush=True)
@@ -286,4 +449,11 @@ def setup():
 
 
 if __name__ == "__main__":
-    setup()
+    if sys.argv[1:] == ["--configure-docker-cgroupfs"]:
+        native_architecture()
+        changed = configure_docker_cgroupfs()
+        print(json.dumps({"kind": "ci-docker-cgroup-config", "changed": changed, "driver": "cgroupfs"}))
+    elif not sys.argv[1:]:
+        setup()
+    else:
+        raise SystemExit("unsupported CI runtime setup arguments")

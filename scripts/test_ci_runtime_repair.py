@@ -7,6 +7,7 @@ import io
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 import tarfile
@@ -50,7 +51,7 @@ class NativeRuntimeTests(unittest.TestCase):
 
     def run_setup(self, info=None, install_fails=False, machine="aarch64", shim_fails=False,
                   cleanup_fails=False, daemon_fails=False, create_ack=None, foreign_probe=False,
-                  custom_service=False):
+                  custom_service=False, cgroup_config_fails=False):
         commands = []
         self.commands = commands
         owner, probe_name = "", ""
@@ -60,6 +61,7 @@ class NativeRuntimeTests(unittest.TestCase):
                 "ServerVersion": RUNTIME.EXPECTED["ServerVersion"],
                 "ContainerdCommit": {"ID": RUNTIME.EXPECTED["ContainerdCommit"]},
                 "RuncCommit": {"ID": RUNTIME.EXPECTED["RuncCommit"]},
+                "CgroupDriver": "cgroupfs", "CgroupVersion": "2",
             }
 
         def run(*command, **kwargs):
@@ -73,6 +75,10 @@ class NativeRuntimeTests(unittest.TestCase):
             elif command[:2] == ("systemctl", "show"):
                 extra = " --config /custom/containerd.toml" if custom_service else ""
                 response = "{ path=/usr/bin/containerd ; argv[]=/usr/bin/containerd" + extra + " ; ignore_errors=no ; }"
+            elif command[-1] == "--configure-docker-cgroupfs":
+                if cgroup_config_fails:
+                    raise subprocess.CalledProcessError(1, command)
+                response = json.dumps({"kind": "ci-docker-cgroup-config", "changed": True, "driver": "cgroupfs"})
             elif command[:3] == ("sudo", "python3", "-c"):
                 mode = command[4]
                 if mode == "path":
@@ -110,6 +116,7 @@ class NativeRuntimeTests(unittest.TestCase):
                 mock.patch.object(RUNTIME, "run", side_effect=run), \
                 contextlib.redirect_stdout(output):
             RUNTIME.setup()
+        self.reports = [json.loads(line) for line in output.getvalue().splitlines()]
         return commands, json.loads(output.getvalue().splitlines()[-1])
 
     def test_exact_packages_are_installed_before_running_daemon_verification(self):
@@ -126,6 +133,9 @@ class NativeRuntimeTests(unittest.TestCase):
                 self.assertNotIn("--allow-downgrades", install)
                 restart = next(command for command in args if "restart" in command)
                 verify = next(command for command in args if command[:2] == ("docker", "info"))
+                configure = next(command for command in args if command[-1] == "--configure-docker-cgroupfs")
+                first_stop = next(command for command in args if "stop" in command and "systemctl" in command)
+                self.assertLess(args.index(configure), args.index(first_stop))
                 self.assertLess(args.index(install), args.index(restart))
                 self.assertLess(args.index(restart), args.index(verify))
                 source = next(kwargs["input"] for command, kwargs in commands
@@ -134,6 +144,10 @@ class NativeRuntimeTests(unittest.TestCase):
                                  "https://download.docker.com/linux/ubuntu resolute stable\n")
                 self.assertEqual(report["architecture"], architecture)
                 self.assertEqual(report["observed"], RUNTIME.EXPECTED)
+                for kind in ("ci-docker-components", "ci-docker-runtime"):
+                    observation = next(item for item in self.reports if item["kind"] == kind)
+                    self.assertEqual(observation["observed"]["CgroupDriver"], "cgroupfs")
+                    self.assertEqual(observation["observed"]["CgroupVersion"], "2")
                 self.assertEqual(report["upstream_containerd"]["archive_sha256"], RUNTIME.CONTAINERD_ARCHIVES[architecture])
                 self.assertEqual(report["running_daemon"]["executable"],
                                  f"/opt/caesium-ci/containerd/2.3.7/{architecture}/bin/containerd")
@@ -160,18 +174,28 @@ class NativeRuntimeTests(unittest.TestCase):
                             "ServerVersion": RUNTIME.EXPECTED["ServerVersion"],
                             "ContainerdCommit": {"ID": RUNTIME.EXPECTED["ContainerdCommit"]},
                             "RuncCommit": {"ID": RUNTIME.EXPECTED["RuncCommit"]},
+                            "CgroupDriver": "cgroupfs", "CgroupVersion": "2",
                         }
                         if failure == "missing":
                             del info[field]
                         else:
-                            info[field] = "29.4.2" if field == "ServerVersion" else {"ID": "outdated"}
+                            info[field] = {"ServerVersion": "29.4.2", "CgroupDriver": "systemd",
+                                           "CgroupVersion": "1"}.get(field, {"ID": "outdated"})
                         with self.assertRaisesRegex(RuntimeError, "running Docker runtime"):
                             self.run_setup(info, machine=machine)
+                        self.assertFalse(any(command[:2] in (("docker", "pull"), ("docker", "create"))
+                                             for command, _ in self.commands))
 
     def test_install_failure_is_fatal(self):
         for machine in ("x86_64", "aarch64"):
             with self.subTest(machine=machine), self.assertRaises(subprocess.CalledProcessError):
                 self.run_setup(install_fails=True, machine=machine)
+
+    def test_refused_docker_configuration_prevents_install_stop_and_probe(self):
+        with self.assertRaises(subprocess.CalledProcessError):
+            self.run_setup(cgroup_config_fails=True)
+        self.assertFalse(any("apt-get" in command or "systemctl" in command or command[0] == "docker"
+                             for command, _ in self.commands))
 
     def test_wrong_running_daemon_or_shim_and_cleanup_failure_are_fatal(self):
         for failure in ("daemon_fails", "shim_fails", "cleanup_fails"):
@@ -253,6 +277,159 @@ class NativeRuntimeTests(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError, "Ubuntu 26.04 amd64 or arm64"):
                     RUNTIME.setup()
                 run.assert_not_called()
+
+
+class DockerCgroupConfigTests(unittest.TestCase):
+    @staticmethod
+    def configure(root, configured=None, actual=None):
+        configured = configured or "/usr/bin/dockerd -H fd:// --containerd=/run/containerd/containerd.sock"
+        actual = actual or ["/usr/bin/dockerd", "-H", "fd://", "--containerd=/run/containerd/containerd.sock"]
+        proc = root / "proc" / "123"
+        proc.mkdir(parents=True, exist_ok=True)
+        (proc / "cmdline").write_bytes(("\0".join(actual) + "\0").encode())
+        def run(*command, **_kwargs):
+            if "--property=MainPID" in command:
+                response = "123\n"
+            else:
+                response = "{ path=/usr/bin/dockerd ; argv[]=" + configured + " ; ignore_errors=no ; }"
+            return subprocess.CompletedProcess(command, 0, response)
+        with mock.patch.object(RUNTIME.os, "geteuid", return_value=0), \
+                mock.patch.object(RUNTIME, "run", side_effect=run):
+            return RUNTIME.configure_docker_cgroupfs(root / "docker", root / "proc")
+
+    def test_atomic_merge_preserves_options_features_and_permissions_and_is_idempotent(self):
+        original = {"features": {"containerd-snapshotter": True, "unrelated": False},
+                    "log-opts": {"max-size": "10m"}, "dns": ["192.0.2.1"],
+                    "exec-opts": ["native.option=unchanged=value", "native.cgroupdriver=systemd"]}
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            directory = root / "docker"
+            directory.mkdir()
+            config = directory / "daemon.json"
+            config.write_text(json.dumps(original))
+            config.chmod(0o640)
+            before = config.stat().st_ino
+            self.assertTrue(self.configure(root))
+            expected = {**original, "exec-opts": ["native.option=unchanged=value", "native.cgroupdriver=cgroupfs"]}
+            self.assertEqual(json.loads(config.read_text()), expected)
+            self.assertNotEqual(config.stat().st_ino, before)
+            self.assertEqual(config.stat().st_mode & 0o777, 0o640)
+            current = config.stat().st_ino
+            self.assertFalse(self.configure(root))
+            self.assertEqual(config.stat().st_ino, current)
+            self.assertEqual(list(directory.iterdir()), [config])
+
+    def test_missing_config_is_published_without_replacing_an_existing_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.assertTrue(self.configure(root))
+            config = root / "docker" / "daemon.json"
+            self.assertEqual(json.loads(config.read_text()), {"exec-opts": ["native.cgroupdriver=cgroupfs"]})
+            self.assertEqual(config.stat().st_mode & 0o777, 0o644)
+
+    def test_malformed_types_duplicate_keys_and_duplicate_options_are_never_overwritten(self):
+        invalid = ["{", "[]", "null", '{"value":NaN}', '{"exec-opts":null}',
+                   '{"exec-opts":"native.cgroupdriver=systemd"}', '{"exec-opts":[7]}',
+                   '{"exec-opts":["native.cgroupdriver"]}', '{"exec-opts":["native.cgroupdriver="]}',
+                   '{"exec-opts":["native.cgroupdriver=other"]}',
+                   '{"exec-opts":["native.cgroupdriver=systemd","native.cgroupdriver=systemd"]}',
+                   '{"exec-opts":["native.option=a","native.option=b"]}',
+                   '{"exec-opts":[],"exec-opts":[]}', '{"features":{"custom":true,"custom":false}}']
+        for value in invalid:
+            with self.subTest(config=value), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                directory = root / "docker"
+                directory.mkdir()
+                config = directory / "daemon.json"
+                config.write_text(value)
+                with self.assertRaises(RuntimeError):
+                    self.configure(root)
+                self.assertEqual(config.read_text(), value)
+                self.assertEqual(list(directory.iterdir()), [config])
+
+    def test_cli_exec_opts_and_custom_config_files_are_refused_in_configured_and_running_daemon(self):
+        options = [["--exec-opt", "native.cgroupdriver=systemd"],
+                   ["--exec-opt=native.cgroupdriver=cgroupfs"], ["--exec-opt", "native.other=value"],
+                   ["--config-file", "/custom/daemon.json"], ["--config-file="],
+                   ["--config-file"], ["--config-file=/etc/docker/daemon.json"] * 2]
+        for option in options:
+            for source in ("configured", "actual"):
+                with self.subTest(option=option, source=source), tempfile.TemporaryDirectory() as tmp:
+                    root = Path(tmp)
+                    arguments = ["/usr/bin/dockerd", *option]
+                    kwargs = {source: " ".join(arguments) if source == "configured" else arguments}
+                    with self.assertRaises(RuntimeError):
+                        self.configure(root, **kwargs)
+                    self.assertFalse((root / "docker").exists())
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.assertTrue(self.configure(root, configured="/usr/bin/dockerd --log-level debug --config-file=/etc/docker/daemon.json"))
+
+    def test_unresolved_service_expansion_and_indirect_daemon_are_refused(self):
+        for command in ["/usr/bin/dockerd $DOCKER_OPTS", "/usr/bin/dockerd %i", "/usr/bin/dockerd \\x20",
+                        "/usr/bin/dockerd --log-level 'debug",
+                        "/bin/sh -c dockerd", "/usr/bin/dockerd ; argv[]=/usr/bin/dockerd"]:
+            with self.subTest(command=command), tempfile.TemporaryDirectory() as tmp, self.assertRaises(RuntimeError):
+                self.configure(Path(tmp), configured=command)
+
+    def test_symlink_hardlink_and_nonregular_config_are_refused_without_changing_targets(self):
+        for kind in ("symlink", "hardlink", "directory", "fifo"):
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                directory = root / "docker"
+                directory.mkdir()
+                target = root / "sentinel.json"
+                target.write_text('{"preserve":true}')
+                config = directory / "daemon.json"
+                if kind == "symlink":
+                    config.symlink_to(target)
+                elif kind == "hardlink":
+                    os.link(target, config)
+                elif kind == "directory":
+                    config.mkdir()
+                else:
+                    os.mkfifo(config)
+                with self.assertRaises((OSError, RuntimeError)):
+                    self.configure(root)
+                self.assertEqual(target.read_text(), '{"preserve":true}')
+
+    def test_changed_config_and_racing_new_config_are_preserved(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            directory = root / "docker"
+            directory.mkdir()
+            config = directory / "daemon.json"
+            config.write_text('{"before":true}')
+            original_read = RUNTIME.read_docker_config
+            reads = 0
+            def read(descriptor):
+                nonlocal reads
+                reads += 1
+                if reads == 2:
+                    config.write_text('{"new_writer":true}')
+                return original_read(descriptor)
+            with mock.patch.object(RUNTIME, "read_docker_config", side_effect=read), \
+                    self.assertRaisesRegex(RuntimeError, "changed before replacement"):
+                self.configure(root)
+            self.assertEqual(config.read_text(), '{"new_writer":true}')
+            self.assertEqual(list(directory.iterdir()), [config])
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = root / "docker" / "daemon.json"
+            original_link = os.link
+            def publish(*args, **kwargs):
+                config.write_text('{"new_writer":true}')
+                return original_link(*args, **kwargs)
+            with mock.patch.object(RUNTIME.os, "link", side_effect=publish), self.assertRaises(FileExistsError):
+                self.configure(root)
+            self.assertEqual(config.read_text(), '{"new_writer":true}')
+            self.assertEqual(list(config.parent.iterdir()), [config])
+
+    def test_unprivileged_configuration_cannot_read_services_or_write_config(self):
+        with mock.patch.object(RUNTIME.os, "geteuid", return_value=1001), \
+                mock.patch.object(RUNTIME, "run") as command, self.assertRaisesRegex(RuntimeError, "root ownership"):
+            RUNTIME.configure_docker_cgroupfs()
+        command.assert_not_called()
 
 
 class HelmDiagnosticsTests(unittest.TestCase):
@@ -344,6 +521,19 @@ class RemediationWorkflowTests(unittest.TestCase):
         self.assertIn("sudo systemctl restart docker", command)
         self.assertNotIn("need=29.0", command)
         self.assertNotIn("apt-get", command)
+        # Execute the workflow's real JSON transform. A replacement object here
+        # would silently discard the cgroup driver before the coverage restart.
+        expressions = re.findall(r"\bjq '([^']+)'", command)
+        self.assertEqual(len(expressions), 1)
+        config = RUNTIME.merged_docker_config(json.dumps({
+            "features": {"unrelated": False}, "log-driver": "local",
+            "exec-opts": ["native.cgroupdriver=systemd", "native.other=preserved"],
+        }))
+        transformed = subprocess.run(["jq", expressions[0]], input=json.dumps(config),
+                                     capture_output=True, text=True, check=True, timeout=5)
+        observed = json.loads(transformed.stdout)
+        self.assertEqual(observed, {**config, "features": {"unrelated": False, "containerd-snapshotter": True}})
+        self.assertIn("native.cgroupdriver=cgroupfs", observed["exec-opts"])
 
     def test_same_attempt_diagnostics_are_uploaded_before_cleanup_even_on_failure(self):
         steps = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text())["jobs"]["helm-integration-test"]["steps"]

@@ -423,15 +423,24 @@ includes fixes for GHSA-vwhp-8p66-mq4f, GHSA-8647-2jxj-p2rc, and
 GHSA-hc94-p972-ch66. The script checks the running daemon's
 component commits and executable hash, then checks the actual `moby` shim's
 executable hash using a bounded, owned container from a pinned Alpine image.
-This runtime is a compatibility candidate until the unchanged native stress
-smoke qualifies it. Each selected integration consumer also smokes its loaded
-candidate image. Exit 137 still requires positive native OOM metadata. The coverage
-collector retains its containerd image store setting.
+The installer also selects Docker's `cgroupfs` driver on cgroup v2 for these
+hosts, preserving other daemon settings and exec options. It verifies the
+actual driver before image work and refuses conflicting command-line overrides.
+This configuration avoids the documented
+[systemd scope garbage-collection race](https://github.com/containerd/containerd/blob/v2.3.7/script/critest.sh#L72-L92),
+which can remove the cgroup before containerd reads its OOM status. The runtime
+configuration remains a compatibility candidate until the unchanged native
+stress smoke qualifies it. Each selected integration consumer also smokes its
+loaded candidate image. Exit 137 still requires positive native OOM metadata.
+The coverage collector retains its containerd image store setting.
 
 Native smoke steps also log bounded host observations from
 `scripts/collect-stress-host-diagnostics.py`. The root-owned observer retains
 only journal messages matching an exact smoke container ID and the same
 two-minute window, plus reduced runtime identity and probe exit statuses.
+MESSAGE filtering and selection of the required JSON fields happen before the
+64 KiB capture limit, so unrelated journal traffic and metadata cannot crowd
+out the owned-container records.
 Missing evidence remains unknown; these observations never qualify an OOM or
 change the smoke result. API keys and bearer credentials are redacted.
 

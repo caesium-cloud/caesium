@@ -19,6 +19,7 @@ MAX_RECORDS = 100
 MAX_MESSAGE = 2048
 PROBE_SECONDS = 3
 UNITS = ("docker.service", "containerd.service", "systemd-oomd.service")
+JOURNAL_FIELDS = "MESSAGE,_TRANSPORT,_SYSTEMD_UNIT,__REALTIME_TIMESTAMP"
 CID_LINE = re.compile(r"^stress smoke: cid=([0-9a-f]{64})(?:[ \t]|$)")
 INTERRUPTED = False
 
@@ -173,11 +174,17 @@ def collect(smoke_log, since, now=None):
         report["error"] = str(error) if isinstance(error, ValueError) else type(error).__name__
         return report
     report["container_ids"] = ids
+    # journalctl filters MESSAGE before JSON serialization and our byte bound.
+    # Only validated literal CIDs enter this PCRE2 pattern. Keep its token
+    # boundaries aligned with the independent reducer and disable smart case.
+    message_pattern = r"(?<![A-Za-z0-9])(?:" + "|".join(re.escape(cid) for cid in ids) + r")(?![A-Za-z0-9])"
     until_text = datetime.datetime.fromtimestamp(until, datetime.timezone.utc).strftime("%Y-%m-%d %H:%M:%S.%f UTC")
     report["window"] = {"since_seconds": since, "until": until_text}
     for name, options in (("kernel", ["-k"]),
                           ("units", [argument for unit in UNITS for argument in ("-u", unit)])):
         command = ["journalctl", "--no-pager", "--output=json",
+                   "--output-fields=" + JOURNAL_FIELDS,
+                   "--grep", message_pattern, "--case-sensitive=yes",
                    "--since", "@" + str(since), "--until", until_text, *options]
         status, body = capture(command)
         report["probes"][name] = status

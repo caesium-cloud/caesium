@@ -34,6 +34,60 @@ def journal(message, *, source="kernel", unit=None, stamp=1_005_000_000):
     return json.dumps(record)
 
 
+def controlled_journal_commands(directory, kernel, units=(), behavior="normal"):
+    """A real executable applying journalctl's MESSAGE/field/case filters."""
+    dataset = directory / "journal.json"
+    dataset.write_text(json.dumps({"kernel": kernel, "units": units, "behavior": behavior}))
+    arguments = directory / "journal-arguments.jsonl"
+    journalctl = directory / "journalctl"
+    journalctl.write_text(f"#!{sys.executable}\n" + f"DATASET = {str(dataset)!r}\nARGUMENTS = {str(arguments)!r}\n" + r'''
+import datetime
+import json
+import re
+import sys
+import time
+
+args = sys.argv[1:]
+with open(ARGUMENTS, "a") as output:
+    output.write(json.dumps(args) + "\n")
+with open(DATASET) as stream:
+    dataset = json.load(stream)
+if "-k" in args and dataset["behavior"] == "timeout":
+    time.sleep(60)
+if "-k" in args and dataset["behavior"] == "failure":
+    sys.exit(7)
+pattern = args[args.index("--grep") + 1] if "--grep" in args else None
+case_sensitive = "--case-sensitive=yes" in args
+selected = next((arg.split("=", 1)[1].split(",") for arg in args if arg.startswith("--output-fields=")), None)
+# journalctl retains these small metadata fields even with --output-fields.
+always = ("__CURSOR", "__REALTIME_TIMESTAMP", "__MONOTONIC_TIMESTAMP", "_BOOT_ID")
+since = int(args[args.index("--since") + 1][1:]) * 1_000_000
+until = datetime.datetime.strptime(args[args.index("--until") + 1], "%Y-%m-%d %H:%M:%S.%f UTC").replace(tzinfo=datetime.timezone.utc).timestamp() * 1_000_000
+unit_names = [args[index + 1] for index, arg in enumerate(args) if arg == "-u"]
+for record in dataset["kernel" if "-k" in args else "units"]:
+    if "-k" in args and record.get("_TRANSPORT") != "kernel":
+        continue
+    if "-k" not in args and record.get("_SYSTEMD_UNIT") not in unit_names:
+        continue
+    stamp = record.get("__REALTIME_TIMESTAMP", "")
+    if stamp.isdigit() and not since <= int(stamp) <= until:
+        continue
+    message = record.get("MESSAGE")
+    if pattern is not None and (not isinstance(message, str) or not re.search(pattern, message, 0 if case_sensitive else re.I)):
+        continue
+    if selected is not None:
+        record = {key: value for key, value in record.items() if key in selected or key in always}
+    print(json.dumps(record), flush=True)
+''')
+    docker = directory / "docker"
+    docker.write_text(f"#!{sys.executable}\nprint('{{}}')\n")
+    systemctl = directory / "systemctl"
+    systemctl.write_text(f"#!{sys.executable}\nimport sys\nprint('inactive')\nsys.exit(3)\n")
+    for command in (journalctl, docker, systemctl):
+        command.chmod(0o755)
+    return arguments
+
+
 class CaptureTests(unittest.TestCase):
     def test_real_success_and_literal_failure_exit_status(self):
         status, body = DIAGNOSTICS.capture([sys.executable, "-c", "print('observed')"])
@@ -203,6 +257,122 @@ class ReducerTests(unittest.TestCase):
             self.assertNotIn("must-not-save", json.dumps(report))
             self.assertNotIn("csk_kernel-secret", json.dumps(report))
             self.assertNotIn("csk_security-secret", json.dumps(report))
+
+
+class JournalPrefilterTests(unittest.TestCase):
+    def setUp(self):
+        privileged = mock.patch.object(DIAGNOSTICS.os, "geteuid", return_value=0)
+        privileged.start()
+        self.addCleanup(privileged.stop)
+
+    def test_real_prefilter_preserves_owned_evidence_amid_foreign_noise_and_large_metadata(self):
+        second = "c" * 64
+        noise = [json.loads(journal(f"foreign {FOREIGN} " + "noise" * 300)) for _ in range(60)]
+        owned = json.loads(journal(f"oom-kill:constraint=CONSTRAINT_MEMCG,task_memcg=/docker/{CID} csk_owned-secret"))
+        owned["PRIVATE_METADATA"] = "private-metadata-value" * 10000
+        owned["__CURSOR"] = "cursor"
+        owned["__MONOTONIC_TIMESTAMP"] = "100"
+        owned["_BOOT_ID"] = "boot"
+        another = json.loads(journal(f"container {second} disconnected"))
+        units = [json.loads(journal(f"shim {second} disconnected", source="units", unit="containerd.service"))]
+        self.assertGreater(len(json.dumps(noise)), DIAGNOSTICS.MAX_BYTES)
+        self.assertGreater(len(json.dumps(owned)), DIAGNOSTICS.MAX_BYTES)
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            arguments = controlled_journal_commands(directory, noise + [owned, another], units)
+            smoke = directory / "smoke.log"
+            smoke.write_text(f"stress smoke: cid={CID} status=exited\nstress smoke: cid={second}\n")
+            with mock.patch.dict(os.environ, {"PATH": tmp}):
+                report = DIAGNOSTICS.collect(smoke, str(SINCE), now=UNTIL)
+            calls = [json.loads(line) for line in arguments.read_text().splitlines()]
+        self.assertEqual(report["classification"], "memcg_oom")
+        self.assertEqual(report["qualification"], "unchanged")
+        self.assertEqual(len(report["records"]), 3)
+        self.assertEqual({cid for record in report["records"] for cid in record["container_ids"]}, {CID, second})
+        for probe in ("kernel", "units"):
+            self.assertEqual(report["probes"][probe], {"exit_code": 0, "rejected_records": 0})
+        self.assertEqual(len(calls), 2)
+        for call in calls:
+            self.assertIn("--output-fields=MESSAGE,_TRANSPORT,_SYSTEMD_UNIT,__REALTIME_TIMESTAMP", call)
+            self.assertIn("--case-sensitive=yes", call)
+            pattern = call[call.index("--grep") + 1]
+            self.assertIn(CID, pattern)
+            self.assertIn(second, pattern)
+            self.assertNotIn(FOREIGN, pattern)
+        encoded = json.dumps(report)
+        for value in ("private-metadata-value", "PRIVATE_METADATA", "csk_owned-secret", "__CURSOR", "_BOOT_ID"):
+            self.assertNotIn(value, encoded)
+        self.assertIn("[REDACTED_API_KEY]", encoded)
+
+    def test_real_prefilter_matches_exact_case_sensitive_message_tokens_and_ignores_injection_text(self):
+        rejected = [f"x{CID}", f"{CID}x", f"0{CID}", f"{CID}0", CID.upper(), FOREIGN]
+        records = [json.loads(journal(f"constraint=CONSTRAINT_MEMCG {text}")) for text in rejected]
+        metadata_only = json.loads(journal("unrelated message"))
+        metadata_only["CONTAINER_ID"] = CID
+        records.append(metadata_only)
+        valid = [f"docker-{CID}.scope", f"/docker/{CID}", f"({CID})"]
+        records.extend(json.loads(journal(message)) for message in valid)
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            arguments = controlled_journal_commands(directory, records)
+            smoke = directory / "smoke.log"
+            # Extra smoke text is never interpolated into the PCRE expression.
+            smoke.write_text(f"stress smoke: cid={CID} (?i:.*)|{FOREIGN} --output=verbose\n")
+            with mock.patch.dict(os.environ, {"PATH": tmp}):
+                report = DIAGNOSTICS.collect(smoke, str(SINCE), now=UNTIL)
+            calls = [json.loads(line) for line in arguments.read_text().splitlines()]
+        self.assertEqual(report["classification"], "unknown")
+        self.assertEqual([record["message"] for record in report["records"]], valid)
+        self.assertEqual(report["probes"]["kernel"]["rejected_records"], 0)
+        for call in calls:
+            pattern = call[call.index("--grep") + 1]
+            self.assertNotIn("(?i:", pattern)
+            self.assertNotIn(FOREIGN, pattern)
+            self.assertNotIn("--output=verbose", pattern)
+
+    def test_invalid_and_regex_injected_smoke_identities_never_start_commands(self):
+        identities = [CID + "f", "x" + CID, CID.upper(), "(" + CID + ")", CID + "|" + FOREIGN,
+                      CID[:63] + ".", CID + "(?i:.*)", CID + "$(touch should-not-exist)"]
+        for identity in identities:
+            with self.subTest(identity=identity), tempfile.TemporaryDirectory() as tmp:
+                directory = Path(tmp)
+                arguments = controlled_journal_commands(directory, [])
+                smoke = directory / "smoke.log"
+                smoke.write_text(f"stress smoke: cid={identity}\n")
+                with mock.patch.dict(os.environ, {"PATH": tmp}):
+                    report = DIAGNOSTICS.collect(smoke, str(SINCE), now=UNTIL)
+                self.assertEqual(report["error"], "smoke_identity_unproved")
+                self.assertEqual(report["classification"], "unknown")
+                self.assertEqual(report["probes"], {})
+                self.assertFalse(arguments.exists())
+
+    def test_owned_overflow_record_limits_timeout_and_failures_still_remain_unknown(self):
+        self.assertEqual(DIAGNOSTICS.MAX_BYTES, 65536)
+        self.assertEqual(DIAGNOSTICS.PROBE_SECONDS, 3)
+        cases = [
+            ("oversize", [json.loads(journal(CID + " " + "x" * 65536))], "normal", "oversize"),
+            ("record_limit", [json.loads(journal(CID))] * 101, "normal", "invalid_journal"),
+            ("timeout", [], "timeout", "timeout"),
+            ("failure", [], "failure", "exit_nonzero"),
+            ("message_limit", [json.loads(journal(CID + " " + "x" * 2048))], "normal", None),
+        ]
+        for name, records, behavior, expected in cases:
+            with self.subTest(case=name), tempfile.TemporaryDirectory() as tmp:
+                directory = Path(tmp)
+                controlled_journal_commands(directory, records, behavior=behavior)
+                smoke = directory / "smoke.log"
+                smoke.write_text(f"stress smoke: cid={CID}\n")
+                with mock.patch.dict(os.environ, {"PATH": tmp}):
+                    report = DIAGNOSTICS.collect(smoke, str(SINCE), now=UNTIL)
+                self.assertEqual(report["classification"], "unknown")
+                self.assertEqual(report["qualification"], "unchanged")
+                self.assertEqual(report["records"], [])
+                status = report["probes"]["kernel"]
+                self.assertEqual(status.get("error"), expected)
+                if name == "failure":
+                    self.assertEqual(status["exit_code"], 7)
+                elif name == "message_limit":
+                    self.assertEqual(status["rejected_records"], 1)
 
 
 class WorkflowOwnershipTests(unittest.TestCase):
