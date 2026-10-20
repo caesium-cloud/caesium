@@ -457,11 +457,15 @@ func (s *IntegrationTestSuite) TestAuthUserAdministrationCookieAdmin() {
 	status, body := s.requestWithCookie(http.MethodGet, "/auth/whoami", adminCookie)
 	s.Require().Equal(http.StatusOK, status, body)
 	var who struct {
+		Kind      string `json:"kind"`
+		StableID  string `json:"stable_id"`
 		Role      string `json:"role"`
 		CSRFToken string `json:"csrf_token"`
 	}
 	s.Require().NoError(json.Unmarshal([]byte(body), &who), body)
 	s.Require().Equal("admin", who.Role, "the appended binding makes the session a cluster admin")
+	s.Require().Equal("user", who.Kind)
+	s.Require().Equal(admin.ID.String(), who.StableID, "whoami identifies the authenticated user independently of email or session ID")
 	s.Require().NotEmpty(who.CSRFToken)
 
 	status, body, _ = s.adminHTTP(http.MethodGet, "/v1/auth/users?issuer="+f.issuer, "", adminCookie, nil)

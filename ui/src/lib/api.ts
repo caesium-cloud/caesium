@@ -1,6 +1,6 @@
 import { parseAllDocuments } from "yaml";
 import { clearApiKey, withAuthHeaders } from "./auth";
-import type { ConnectorConnections, ConnectorListQuery, ConnectorPageQuery, ExternalExecution, ExternalExecutionPage, ExternalHistoryPage, ExternalRelationshipsPage, RunExternalExecutions } from "@/features/connectors/types";
+import type { ConnectorConnections, ConnectorListQuery, ConnectorPageQuery, ConnectorOperationPage, ConnectorOperationResult, ExternalExecution, ExternalExecutionPage, ExternalHistoryPage, ExternalRelationshipsPage, RunExternalExecutions } from "@/features/connectors/types";
 
 export interface Job {
   id: string;
@@ -1216,6 +1216,7 @@ async function requestURL<T>(
   url: string,
   options?: RequestInit,
   errorKindForStatus?: ErrorKindMapper,
+  acceptOperationConflict = false,
 ): Promise<T> {
   const headers = withAuthHeaders({
     "Content-Type": "application/json",
@@ -1234,7 +1235,16 @@ async function requestURL<T>(
   }
 
   if (!response.ok) {
-    const message = parseErrorMessage(await response.text());
+    const body = await response.text();
+    // Connector 409 responses may carry the winning durable receipt. Other
+    // conflicts remain errors; a status alone must never imply a submission.
+    if (acceptOperationConflict && response.status === 409) {
+      try {
+        const result = JSON.parse(body) as ConnectorOperationResult;
+        if (result.conflict === true && typeof result.operation?.id === "string" && typeof result.operation?.execution_id === "string") return result as T;
+      } catch { /* Ordinary HTTP conflict, handled below. */ }
+    }
+    const message = parseErrorMessage(body);
     throw new ApiError(response.status, message, classifyApiError(response.status, message, errorKindForStatus));
   }
 
@@ -1434,6 +1444,14 @@ export interface AllJobRunsResult {
 }
 
 export const api = {
+  getConnectorOperations: (connectionId: string, executionId: string, params: ConnectorPageQuery = {}, signal?: AbortSignal) =>
+    request<ConnectorOperationPage>(`/connectors/${encodeURIComponent(connectionId)}/executions/${encodeURIComponent(executionId)}/operations?${queryString({ ...params })}`, { signal }),
+  getConnectorOperation: (connectionId: string, operationId: string, signal?: AbortSignal) =>
+    request<ConnectorOperationResult>(`/connectors/${encodeURIComponent(connectionId)}/operations/${encodeURIComponent(operationId)}`, { signal }),
+  submitConnectorAction: (connectionId: string, executionId: string, actionId: string, body: { binding_name: string; binding_version: string; input: Record<string, unknown> }, idempotencyKey: string) =>
+    requestURL<ConnectorOperationResult>(`${API_BASE_URL}/connectors/${encodeURIComponent(connectionId)}/executions/${encodeURIComponent(executionId)}/actions/${encodeURIComponent(actionId)}`, { method: "POST", headers: { "Idempotency-Key": idempotencyKey }, body: JSON.stringify(body) }, undefined, true),
+  resubmitConnectorOperation: (connectionId: string, operationId: string, revision: number) =>
+    requestURL<ConnectorOperationResult>(`${API_BASE_URL}/connectors/${encodeURIComponent(connectionId)}/operations/${encodeURIComponent(operationId)}/resubmit`, { method: "POST", body: JSON.stringify({ confirmed: true, revision }) }, undefined, true),
   getConnectorConnections: (signal?: AbortSignal) => request<ConnectorConnections>("/connectors", { signal }),
   getConnectorExecutions: (connectionId: string, params: ConnectorListQuery = {}, signal?: AbortSignal) =>
     request<ExternalExecutionPage>(`/connectors/${encodeURIComponent(connectionId)}/executions?${queryString({ ...params })}`, { signal }),

@@ -200,6 +200,10 @@ func (s *Service) action(target OperationTarget, name string) (connector.Binding
 // Admit persists the complete dispatch snapshot without contacting the provider.
 // A crash immediately afterward is recovered exclusively through Reconcile.
 func (s *Service) Admit(ctx context.Context, request OperationSubmission) (connector.OperationDecision, error) {
+	return s.admit(ctx, request, false)
+}
+
+func (s *Service) admit(ctx context.Context, request OperationSubmission, claimInitial bool) (connector.OperationDecision, error) {
 	if len(request.IdempotencyKey) > 256 {
 		return connector.OperationDecision{}, connector.ErrInvalidOperation
 	}
@@ -271,24 +275,26 @@ func (s *Service) Admit(ctx context.Context, request OperationSubmission) (conne
 	if err != nil {
 		return connector.OperationDecision{}, connector.ErrInvalidPayload
 	}
-	return s.store.catalog.AdmitOperation(ctx, connector.OperationRequest{ID: id, ConnectionID: s.connection.ID, IdempotencyKey: request.IdempotencyKey, Execution: request.Target.Execution, Action: request.Action, RequestFingerprint: requestFingerprint(logical), Actor: actorJSON, BindingVersion: binding.Version, ExternalUpdateID: externalID, Input: input, Target: target, BindingSnapshot: snapshot, ConnectionIdentity: identityJSON, ConfigurationEpoch: s.epoch}, connector.WriteBounds{MaxMetadataBytes: s.maxBytes})
+	return s.store.admitOperation(ctx, connector.OperationRequest{ID: id, ConnectionID: s.connection.ID, IdempotencyKey: request.IdempotencyKey, Execution: request.Target.Execution, Action: request.Action, RequestFingerprint: requestFingerprint(logical), Actor: actorJSON, BindingVersion: binding.Version, ExternalUpdateID: externalID, Input: input, Target: target, BindingSnapshot: snapshot, ConnectionIdentity: identityJSON, ConfigurationEpoch: s.epoch}, connector.WriteBounds{MaxMetadataBytes: s.maxBytes}, claimInitial)
 }
 
 // Submit claims a fresh admission or persisted initial no-send proof before
 // dispatch. Other same-key nonterminal replays only reconcile; an admission
 // without a claimed send returns pending. A conflicting key never does work.
 func (s *Service) Submit(ctx context.Context, request OperationSubmission) (connector.OperationDecision, error) {
-	decision, err := s.Admit(ctx, request)
+	decision, err := s.admit(ctx, request, true)
 	if err != nil || decision.Conflict || operationTerminal(decision.Operation.State) {
 		return decision, err
 	}
 	if !decision.Created && !decision.Operation.RetryableUnsent {
-		// A fresh winner may still be taking its first claim. Do not let a
-		// duplicate lookup invalidate that claim, and never infer no-send here.
+		// An admission-only row has no send authorization. A replay must not
+		// turn a crash before dispatch into proof that sending is safe.
 		if decision.Operation.Revision == 1 && len(decision.Operation.ProviderEvidence) == 0 {
 			return decision, ErrOperationPending
 		}
+		before := decision.Operation
 		decision.Operation, err = s.Reconcile(ctx, decision.Operation.ID)
+		err = submissionEvidenceError(before, decision.Operation, err)
 		if err == nil && (decision.Operation.State == connector.OperationUnknown || decision.Operation.State == connector.OperationSubmitted) {
 			err = ErrOperationPending
 		}
@@ -297,12 +303,31 @@ func (s *Service) Submit(ctx context.Context, request OperationSubmission) (conn
 	if _, err = s.dispatch(decision.Operation); err != nil {
 		return decision, err
 	}
-	decision.Operation, err = s.store.claimDispatch(ctx, decision.Operation, s.epoch, decision.Created)
-	if err != nil {
-		return decision, err
+	if !decision.Created {
+		// Fresh admissions already own their initial claim at publication.
+		// Only persisted initial no-send proof requires a later retry claim.
+		decision.Operation, err = s.store.claimDispatch(ctx, decision.Operation, s.epoch, false)
+		if err != nil {
+			return decision, err
+		}
 	}
-	decision.Operation, err = s.call(ctx, decision.Operation, true)
+	before := decision.Operation
+	decision.Operation, err = s.call(ctx, before, true)
+	err = submissionEvidenceError(before, decision.Operation, err)
 	return decision, err
+}
+
+// An identical submission attaches to the current receipt when only evidence
+// for its own attempt advanced. A lost claim or a newer explicit resend is a
+// different authorization decision and retains its revision conflict.
+func submissionEvidenceError(before, current models.ConnectorOperation, err error) error {
+	if !errors.Is(err, ErrOperationChanged) || before.ID != current.ID || before.ExternalUpdateID != current.ExternalUpdateID || before.Attempt != current.Attempt {
+		return err
+	}
+	if operationTerminal(current.State) || current.State == connector.OperationAccepted {
+		return nil
+	}
+	return ErrOperationPending
 }
 
 // Reconcile is safe for restarts/background use and only looks up the same ID.

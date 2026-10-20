@@ -17,6 +17,9 @@ inputs:
   load-robustness:
     description: Load the robustness runner image artifact (early-evidence lane)
     default: "false"
+  verify-native-stress:
+    description: Qualify the loaded stress image on this consumer's native Docker runtime
+    default: "false"
   shard-index:
     description: One-based shard index (empty runs the unsharded suite)
     default: ""
@@ -46,6 +49,18 @@ runs:
       uses: ./.github/actions/load-docker-images
       with:
         name: robustness-${{ inputs.arch }}
+    - name: Verify native resource stress runtime
+      id: native_stress
+      if: ${{ inputs.verify-native-stress == 'true' }}
+      shell: bash
+      run: |
+        set -euo pipefail
+        date +%s >"$RUNNER_TEMP/stress-smoke.since"
+        bash build/stress/smoke.sh docker caesiumcloud/resource-stress:${{ env.IMAGE_TAG }}-${{ inputs.arch }} 2>&1 | tee "$RUNNER_TEMP/stress-smoke.log"
+    - name: Observe native stress host
+      if: ${{ always() && inputs.verify-native-stress == 'true' && steps.native_stress.outcome != 'skipped' }}
+      shell: bash
+      run: sudo -n --preserve-env=GITHUB_SHA,GITHUB_RUN_ID,GITHUB_RUN_ATTEMPT python3 scripts/collect-stress-host-diagnostics.py --smoke-log "$RUNNER_TEMP/stress-smoke.log" --since "$(cat "$RUNNER_TEMP/stress-smoke.since")"
     - name: Run ${{ inputs.recipe }}
       shell: bash
       env:

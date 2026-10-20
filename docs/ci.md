@@ -410,6 +410,47 @@ Two ubuntu-26.04 host differences matter to every kind lane:
   enter kind as platform-scoped archives (`docker image save --platform` +
   `kind load image-archive`), never through `kind load docker-image`.
 
+The AMD64 and ARM64 product producers, the `integration` and
+`integration-arm64` job matrices, and the coverage collector install pinned
+Docker 29.9.1 and the secure containerd.io
+2.4.2 package from Docker's signed Ubuntu repository. The package supplies runc
+1.5.2. `scripts/setup-ci-docker.py` explicitly selects the upstream containerd
+2.3.7 LTS daemon and shim from checksum-pinned native release archives in
+`/opt/caesium-ci/containerd/`; it preserves the daemon configuration and records
+this override separately from apt package identity. The official
+[2.3.7 release](https://github.com/containerd/containerd/releases/tag/v2.3.7)
+includes fixes for GHSA-vwhp-8p66-mq4f, GHSA-8647-2jxj-p2rc, and
+GHSA-hc94-p972-ch66. The script checks the running daemon's
+component commits and executable hash, then checks the actual `moby` shim's
+executable hash using a bounded, owned container from a pinned Alpine image.
+The installer also selects Docker's `cgroupfs` driver on cgroup v2 for these
+hosts, preserving other daemon settings and exec options. It verifies the
+actual driver before image work and refuses conflicting command-line overrides.
+This configuration avoids the documented
+[systemd scope garbage-collection race](https://github.com/containerd/containerd/blob/v2.3.7/script/critest.sh#L72-L92),
+which can remove the cgroup before containerd reads its OOM status. The runtime
+configuration remains a compatibility candidate until the unchanged native
+stress smoke qualifies it. Each selected integration consumer also smokes its
+loaded candidate image. Exit 137 still requires positive native OOM metadata.
+The coverage collector retains its containerd image store setting.
+
+Native smoke steps also log bounded host observations from
+`scripts/collect-stress-host-diagnostics.py`. The root-owned observer retains
+only journal messages matching an exact smoke container ID and the same
+two-minute window, plus reduced runtime identity and probe exit statuses.
+MESSAGE filtering and selection of the required JSON fields happen before the
+64 KiB capture limit, so unrelated journal traffic and metadata cannot crowd
+out the owned-container records.
+Missing evidence remains unknown; these observations never qualify an OOM or
+change the smoke result. API keys and bearer credentials are redacted.
+
+Every Helm shard retains separate port-forward logs for its full-suite,
+cache-identity and deadline phases, plus bounded cluster/server diagnostics.
+The `helm-integration-diag-<shard>-<attempt>` artifact is collected and uploaded
+even after setup or test failure, before the port-forward process is stopped.
+Missing logs and failed diagnostic probes are explicit in its report; API keys
+and bearer credentials are redacted. It contains no kubeconfig or secret dump.
+
 Docker (amd64 and arm64), Podman, and Helm each retain the complete
 integration test package. Each engine uses three isolated servers/runners.
 `test/shard_test.go` discovers the same Test* methods as testify and assigns

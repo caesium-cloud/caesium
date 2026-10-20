@@ -14,6 +14,7 @@ import (
 	"github.com/caesium-cloud/caesium/internal/metrics"
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/caesium-cloud/caesium/pkg/log"
+	"github.com/google/uuid"
 	"github.com/labstack/echo/v5"
 )
 
@@ -99,8 +100,18 @@ func (s *SSOController) Whoami(c *echo.Context) error {
 		"namespaces":   whoamiNamespaces(principal),
 		"is_scoped":    scoped,
 	}
-	if principal.Kind == iauth.PrincipalUser {
+	// Stable identity lets the Console compare an operation's original actor
+	// without treating a mutable email or key prefix as that identity.
+	switch principal.Kind {
+	case iauth.PrincipalUser:
 		body["email"] = principal.Subject
+		if principal.UserID != nil && *principal.UserID != uuid.Nil {
+			body["stable_id"] = principal.UserID.String()
+		}
+	case iauth.PrincipalAPIKey:
+		if principal.KeyID != nil && *principal.KeyID != uuid.Nil {
+			body["stable_id"] = principal.KeyID.String()
+		}
 	}
 	// A job-scoped API key may now resolve its own principal (the scope
 	// middleware allows GET /auth/whoami for every API-key principal), so the

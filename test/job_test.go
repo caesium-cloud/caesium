@@ -8,12 +8,15 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync/atomic"
+	"testing"
 	"time"
 
 	"github.com/caesium-cloud/caesium/api/rest/controller/job"
@@ -22,6 +25,7 @@ import (
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func (s *IntegrationTestSuite) TestCronJob() {
@@ -281,6 +285,10 @@ func (s *IntegrationTestSuite) createJobWithTrigger(alias string, metadata *job.
 }
 
 func (s *IntegrationTestSuite) createJobWithTriggerConfig(alias string, metadata *job.MetadataRequest, trigType models.TriggerType, config map[string]any) *models.Job {
+	return s.createJobWithTriggerConfigUsingRequest(alias, metadata, trigType, config, s.doJSONRequest)
+}
+
+func (s *IntegrationTestSuite) createJobWithTriggerConfigUsingRequest(alias string, metadata *job.MetadataRequest, trigType models.TriggerType, config map[string]any, sendJSON func(string, string, io.Reader) (*http.Response, error)) *models.Job {
 	if config == nil {
 		config = map[string]any{}
 	}
@@ -313,16 +321,63 @@ func (s *IntegrationTestSuite) createJobWithTriggerConfig(alias string, metadata
 	}
 
 	buf, err := json.Marshal(req)
-	assert.Nil(s.T(), err)
+	s.Require().NoError(err, "encode job %q for creation", alias)
 
-	resp, err := s.doJSONRequest(http.MethodPost, fmt.Sprintf("%v/v1/jobs", s.caesiumURL), bytes.NewBuffer(buf))
-	assert.Nil(s.T(), err)
-	assert.Equal(s.T(), http.StatusCreated, resp.StatusCode)
+	target := fmt.Sprintf("%v/v1/jobs", s.caesiumURL)
+	resp, err := sendJSON(http.MethodPost, target, bytes.NewBuffer(buf))
+	s.Require().NoError(err, "POST %s while creating job %q", target, alias)
 	defer resp.Body.Close()
+	s.Require().Equal(http.StatusCreated, resp.StatusCode, "POST %s while creating job %q", target, alias)
 
 	var created models.Job
-	assert.Nil(s.T(), json.NewDecoder(resp.Body).Decode(&created))
+	s.Require().NoError(json.NewDecoder(resp.Body).Decode(&created), "decode POST %s response for job %q", target, alias)
 	return &created
+}
+
+// A server may receive a mutation and lose its reply. Exercise the real HTTP
+// error path in a subprocess because a fatal test prerequisite must stop its
+// goroutine, preserve the original error, and never retry an uncertain POST.
+func TestCreateJobReplyLossFailsWithOriginalErrorAndOneAttempt(t *testing.T) {
+	const childMarker = "CAESIUM_TEST_CREATE_JOB_REPLY_LOSS_CHILD"
+	if os.Getenv(childMarker) == "true" {
+		var attempts atomic.Int32
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodPost || r.URL.Path != "/v1/jobs" {
+				http.Error(w, "unexpected request", http.StatusBadRequest)
+				return
+			}
+			_, err := io.Copy(io.Discard, r.Body)
+			if err != nil {
+				t.Errorf("read received job creation request: %v", err)
+				return
+			}
+			attempts.Add(1)
+			connection, _, err := http.NewResponseController(w).Hijack()
+			if err != nil {
+				t.Errorf("take ownership of job creation connection: %v", err)
+				return
+			}
+			_ = connection.Close()
+		}))
+		defer server.Close()
+		defer func() { fmt.Fprintf(os.Stderr, "observed_create_attempts=%d\n", attempts.Load()) }()
+		s := &IntegrationTestSuite{caesiumURL: server.URL, engineType: "docker"}
+		s.SetT(t)
+		s.createJob("received-but-reply-lost", nil)
+		t.Fatal("job creation continued after its response was lost")
+	}
+
+	command := exec.CommandContext(t.Context(), os.Args[0], "-test.run=^TestCreateJobReplyLossFailsWithOriginalErrorAndOneAttempt$", "-test.count=1")
+	command.Env = append(os.Environ(), childMarker+"=true")
+	output, err := command.CombinedOutput()
+	var exited *exec.ExitError
+	require.ErrorAs(t, err, &exited, "fault probe must fail its fatal prerequisite: %s", output)
+	require.Equal(t, 1, exited.ExitCode(), "fault probe must fail without a secondary panic: %s", output)
+	require.Contains(t, string(output), "Post ")
+	require.Contains(t, string(output), "/v1/jobs\": EOF")
+	require.Contains(t, strings.Split(string(output), "\n"), "observed_create_attempts=1")
+	require.NotContains(t, string(output), "invalid memory address")
+	require.NotContains(t, string(output), "job creation continued")
 }
 
 func (s *IntegrationTestSuite) jobDetailByAlias(alias string) map[string]any {

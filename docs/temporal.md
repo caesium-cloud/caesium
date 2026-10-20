@@ -15,7 +15,8 @@ Caesium runs are described in [the connector guide](connectors.md).
 Declared authenticated status Queries, approval submissions and durable operation
 receipts are also available through that guide. The Console Connections pages
 provide monitoring, history, typed workflow relationships and verified links to
-local run evidence. The Console approval journey remains E3 in the
+local run evidence, declared approvals and durable server-backed operation
+receipts. Release qualification and connector CI-lane promotion remain in the
 [execution-connectors plan](exec-plans/active/execution-connectors.md).
 That plan is not complete. The patterns below are the unchanged REST recipe.
 

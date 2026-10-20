@@ -60,7 +60,8 @@ test("viewer filters and inspects a real external-only workflow, pages history a
   await expect(page.getByTestId("external-native-status")).toHaveText("WORKFLOW_EXECUTION_STATUS_RUNNING");
   await expect(page.getByTestId("execution-availability")).toHaveText("Live provider observation");
   await expect(page.getByText(/Workflow inputs\/results and undeclared payloads are unavailable/)).toBeVisible();
-  await expect(page.getByText(/This monitoring view does not invoke Queries or actions/)).toBeVisible();
+  await expect(page.getByText(/Queries are never invoked automatically\./)).toBeVisible();
+  await expect(page.getByText(/Actions require explicit submission\./)).toBeVisible();
   await expect(page.getByRole("button", { name: /approve|query|retry|cancel/i })).toHaveCount(0);
   const expectedUIBase = process.env.CAESIUM_CONNECTORS_EXPECTED_UI_URL;
   if (expectedUIBase) {

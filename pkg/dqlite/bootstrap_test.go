@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -203,6 +204,99 @@ func TestFreshNodeWithSeedsJoins(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, byID, 2)
 	require.Equal(t, "127.0.0.1:9522", byID[joined.ID()].Address)
+}
+
+// The app's join marker does not exist until New starts a fresh seeded node.
+// Hold its leader connection immediately before the initial Add so address
+// repair has an opportunity to race admission. Cancellation must close the
+// still-joining app without ever registering it through the repair path.
+func TestFreshSeededNodeWaitsForInitialJoin(t *testing.T) {
+	ctx, cancel := context.WithTimeout(t.Context(), time.Minute)
+	defer cancel()
+	leader := startTunedNode(t, ctx, t.TempDir(), "127.0.0.1:9551", nil)
+	defer func() { _ = leader.Close() }()
+
+	dir := t.TempDir()
+	address := "127.0.0.1:9552"
+	seeds := []string{leader.Address()}
+	initialJoinHeld := make(chan struct{})
+	releaseInitialJoin := make(chan struct{})
+	var holdOnce, releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(releaseInitialJoin) }) }
+	logFunc := func(_ client.LogLevel, format string, args ...any) {
+		message := fmt.Sprintf(format, args...)
+		if !strings.Contains(message, "connected on fast path") && !strings.Contains(message, "connected on fallback path") {
+			return
+		}
+		holdOnce.Do(func() {
+			close(initialJoinHeld)
+			select {
+			case <-releaseInitialJoin:
+			case <-ctx.Done():
+			}
+		})
+	}
+	opts := []dqliteapp.Option{
+		dqliteapp.WithAddress(address),
+		dqliteapp.WithCluster(seeds),
+		dqliteapp.WithRolesAdjustmentFrequency(testRolesAdjustment),
+		dqliteapp.WithLogFunc(logFunc),
+	}
+	joinCtx, cancelJoin := context.WithTimeout(ctx, 5*time.Second)
+	type result struct {
+		app *dqliteapp.App
+		err error
+	}
+	results := make(chan result, 1)
+	go func() {
+		app, err := openNativeApp(joinCtx, dir, address, seeds, nil, opts...)
+		results <- result{app: app, err: err}
+	}()
+	var completed *result
+	finish := func() result {
+		if completed != nil {
+			return *completed
+		}
+		select {
+		case observed := <-results:
+			completed = &observed
+			return observed
+		case <-time.After(10 * time.Second):
+			t.Fatal("joining native app did not close after release and cancellation")
+			return result{}
+		}
+	}
+	defer func() {
+		cancelJoin()
+		release()
+		if observed := finish(); observed.app != nil {
+			_ = observed.app.Close()
+		}
+	}()
+	select {
+	case <-initialJoinHeld:
+	case <-joinCtx.Done():
+		t.Fatal("initial native join did not reach its admission barrier")
+	}
+	info, exists, err := readNodeIdentity(dir)
+	require.NoError(t, err)
+	require.True(t, exists)
+	require.True(t, fileExists(dir, joinFileName))
+
+	// Keep the SDK Add held through cancellation. The independent leader
+	// connection observes any admission the address-repair path performed.
+	<-joinCtx.Done()
+	byID, members, err := leaderMembers(ctx, leader)
+	require.NoError(t, err)
+	_, prematurelyAdded := byID[info.ID]
+	repairStarted := fileExists(dir, repairFileName)
+	release()
+	observed := finish()
+	require.ErrorIs(t, observed.err, context.DeadlineExceeded)
+	require.Nil(t, observed.app)
+	require.False(t, prematurelyAdded, "fresh node was admitted while its initial Add was held: %s", membershipView(members))
+	require.False(t, repairStarted, "fresh node started an address repair before joining")
+	require.Len(t, members, 1)
 }
 
 // TestFreshNodeBootstrapsWhenNoBootstrapPeerAnswers covers a new install: the
