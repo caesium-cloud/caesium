@@ -3419,14 +3419,114 @@ class IntegrationRunnerTests(unittest.TestCase):
 
 
 class ResourceHarnessTests(unittest.TestCase):
+    def assert_product_stress_prerequisite(self, job, arch):
+        steps = job["steps"]
+        builds = [i for i, step in enumerate(steps) if "build-stress" in step.get("run", "")]
+        smokes = [i for i, step in enumerate(steps) if "build/stress/smoke.sh" in step.get("run", "")]
+        saves = [i for i, step in enumerate(steps)
+                 if step.get("uses") == "./.github/actions/save-docker-images"
+                 and step.get("with", {}).get("name") == f"product-{arch}"]
+        self.assertEqual(len(builds), 1)
+        self.assertEqual(len(smokes), 1)
+        self.assertEqual(len(saves), 1)
+        build, smoke, save = builds[0], smokes[0], saves[0]
+        self.assertLess(build, smoke)
+        self.assertLess(smoke, save)
+        self.assertFalse(job.get("continue-on-error", False))
+        for index in (build, smoke):
+            self.assertNotIn("if", steps[index])
+            self.assertFalse(steps[index].get("continue-on-error", False))
+        self.assertEqual(steps[build]["run"], f"just tag=${{{{ env.IMAGE_TAG }}}}-{arch} build-stress")
+        skip = steps[build].get("env", {}).get(
+            "CAESIUM_SKIP_IMAGE_BUILD", job.get("env", {}).get(
+                "CAESIUM_SKIP_IMAGE_BUILD", WORKFLOW.get("env", {}).get("CAESIUM_SKIP_IMAGE_BUILD", "false")))
+        self.assertEqual(skip, "false")
+        exact = f"caesiumcloud/resource-stress:${{{{ env.IMAGE_TAG }}}}-{arch}"
+        self.assertEqual(steps[smoke].get("id"), "native_stress")
+        self.assertEqual(steps[smoke]["run"].splitlines(), [
+            "set -euo pipefail",
+            'date +%s >"$RUNNER_TEMP/stress-smoke.since"',
+            f'bash build/stress/smoke.sh docker {exact} 2>&1 | tee "$RUNNER_TEMP/stress-smoke.log"',
+        ])
+        self.assertNotIn("stress-image-test", "\n".join(step.get("run", "") for step in steps))
+        images = steps[save]["with"]["images"].replace("${{ env.IMAGE_TAG }}", "candidate-sha")
+        self.assertIn(f"caesiumcloud/resource-stress:candidate-sha-{arch}", images.split())
+
     def test_exact_fixture_is_built_before_each_product_artifact(self):
-        for arch, job in (("amd64", "images"), ("arm64", "images-arm64")):
-            steps = JOBS[job]["steps"]
-            build = next(i for i, step in enumerate(steps) if "stress-image-test" in step.get("run", ""))
-            save = next(i for i, step in enumerate(steps) if step.get("with", {}).get("name") == f"product-{arch}")
-            self.assertLess(build, save)
-            self.assertIn(f"tag=${{{{ env.IMAGE_TAG }}}}-{arch}", steps[build]["run"])
-            self.assertIn(f"caesiumcloud/resource-stress:${{{{ env.IMAGE_TAG }}}}-{arch}", steps[save]["with"]["images"])
+        for arch, name in (("amd64", "images"), ("arm64", "images-arm64")):
+            with self.subTest(arch=arch):
+                self.assert_product_stress_prerequisite(JOBS[name], arch)
+
+    def test_product_stress_build_or_smoke_cannot_be_bypassed_repeated_or_transferred_early(self):
+        faults = ("missing-build", "missing-smoke", "duplicate-build", "duplicate-smoke", "early-smoke",
+                  "late-smoke", "optional-build", "optional-smoke", "ignored-build", "ignored-smoke",
+                  "wrong-build-tag", "wrong-smoke-tag", "wrong-transfer-tag", "skip-build", "no-pipefail",
+                  "swallowed-failure", "retry-smoke")
+        for arch, name in (("amd64", "images"), ("arm64", "images-arm64")):
+            self.assert_product_stress_prerequisite(JOBS[name], arch)
+            for fault in faults:
+                with self.subTest(arch=arch, fault=fault):
+                    job = copy.deepcopy(JOBS[name])
+                    steps = job["steps"]
+                    build = next(step for step in steps if "build-stress" in step.get("run", ""))
+                    smoke = next(step for step in steps if "build/stress/smoke.sh" in step.get("run", ""))
+                    save = next(step for step in steps if step.get("with", {}).get("name") == f"product-{arch}")
+                    if fault == "missing-build":
+                        steps.remove(build)
+                    elif fault == "missing-smoke":
+                        steps.remove(smoke)
+                    elif fault == "duplicate-build":
+                        steps.insert(steps.index(build), copy.deepcopy(build))
+                    elif fault == "duplicate-smoke":
+                        steps.insert(steps.index(smoke), copy.deepcopy(smoke))
+                    elif fault == "early-smoke":
+                        steps.remove(smoke)
+                        steps.insert(steps.index(build), smoke)
+                    elif fault == "late-smoke":
+                        steps.remove(smoke)
+                        steps.insert(steps.index(save) + 1, smoke)
+                    elif fault.startswith("optional-"):
+                        (build if fault.endswith("build") else smoke)["if"] = "false"
+                    elif fault.startswith("ignored-"):
+                        (build if fault.endswith("build") else smoke)["continue-on-error"] = True
+                    elif fault == "wrong-build-tag":
+                        build["run"] = build["run"].replace("}-" + arch, "}-foreign")
+                    elif fault == "wrong-smoke-tag":
+                        smoke["run"] = smoke["run"].replace("}-" + arch, "}-foreign")
+                    elif fault == "wrong-transfer-tag":
+                        save["with"]["images"] = save["with"]["images"].replace(
+                            "caesiumcloud/resource-stress:", "foreign/resource-stress:")
+                    elif fault == "skip-build":
+                        build.setdefault("env", {})["CAESIUM_SKIP_IMAGE_BUILD"] = "true"
+                    elif fault == "no-pipefail":
+                        smoke["run"] = smoke["run"].replace("set -euo pipefail", "set -eu")
+                    elif fault == "swallowed-failure":
+                        smoke["run"] += " || true"
+                    elif fault == "retry-smoke":
+                        smoke["run"] += "\n" + smoke["run"].splitlines()[-1]
+                    with self.assertRaises(AssertionError):
+                        self.assert_product_stress_prerequisite(job, arch)
+
+    def test_actual_product_smoke_shell_preserves_single_call_and_failure_through_tee(self):
+        for arch, name in (("amd64", "images"), ("arm64", "images-arm64")):
+            smoke = next(step for step in JOBS[name]["steps"] if step.get("id") == "native_stress")
+            for exit_code in (0, 17):
+                with self.subTest(arch=arch, exit_code=exit_code), tempfile.TemporaryDirectory() as temporary:
+                    directory = Path(temporary)
+                    fixture = directory / "build/stress/smoke.sh"
+                    fixture.parent.mkdir(parents=True)
+                    fixture.write_text('printf "%s\\n" "$*" >>"$SMOKE_CALLS"\nprintf "observed fixture\\n"\nexit "$SMOKE_EXIT"\n')
+                    calls = directory / "calls"
+                    command = smoke["run"].replace("${{ env.IMAGE_TAG }}", "harness-candidate")
+                    result = subprocess.run(["bash", "-c", command], cwd=directory,
+                                            env={**os.environ, "RUNNER_TEMP": temporary,
+                                                 "SMOKE_CALLS": str(calls), "SMOKE_EXIT": str(exit_code)},
+                                            capture_output=True, text=True, timeout=5)
+                    self.assertEqual(result.returncode, exit_code, result.stdout + result.stderr)
+                    self.assertEqual(calls.read_text().splitlines(),
+                                     [f"docker caesiumcloud/resource-stress:harness-candidate-{arch}"])
+                    self.assertEqual((directory / "stress-smoke.log").read_text(), "observed fixture\n")
+                    self.assertRegex((directory / "stress-smoke.since").read_text(), r"^[0-9]+\n$")
 
     def test_every_local_server_and_runner_receives_resource_configuration(self):
         for recipe in (

@@ -285,6 +285,10 @@ func (s *IntegrationTestSuite) createJobWithTrigger(alias string, metadata *job.
 }
 
 func (s *IntegrationTestSuite) createJobWithTriggerConfig(alias string, metadata *job.MetadataRequest, trigType models.TriggerType, config map[string]any) *models.Job {
+	return s.createJobWithTriggerConfigUsingRequest(alias, metadata, trigType, config, s.doJSONRequest)
+}
+
+func (s *IntegrationTestSuite) createJobWithTriggerConfigUsingRequest(alias string, metadata *job.MetadataRequest, trigType models.TriggerType, config map[string]any, sendJSON func(string, string, io.Reader) (*http.Response, error)) *models.Job {
 	if config == nil {
 		config = map[string]any{}
 	}
@@ -320,7 +324,7 @@ func (s *IntegrationTestSuite) createJobWithTriggerConfig(alias string, metadata
 	s.Require().NoError(err, "encode job %q for creation", alias)
 
 	target := fmt.Sprintf("%v/v1/jobs", s.caesiumURL)
-	resp, err := s.doJSONRequest(http.MethodPost, target, bytes.NewBuffer(buf))
+	resp, err := sendJSON(http.MethodPost, target, bytes.NewBuffer(buf))
 	s.Require().NoError(err, "POST %s while creating job %q", target, alias)
 	defer resp.Body.Close()
 	s.Require().Equal(http.StatusCreated, resp.StatusCode, "POST %s while creating job %q", target, alias)

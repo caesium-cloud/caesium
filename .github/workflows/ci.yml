@@ -354,6 +354,8 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
+      - name: Install qualified native Docker runtime
+        run: python3 scripts/setup-ci-docker.py
       - uses: taiki-e/install-action@just
       - uses: ./.github/actions/bake-images
         with:
@@ -366,8 +368,17 @@ jobs:
           cache-group: product
       - name: Build triage-agent
         run: just tag=${{ env.IMAGE_TAG }}-amd64 build-triage-agent
-      - name: Build and verify resource stress image (amd64)
-        run: just tag=${{ env.IMAGE_TAG }}-amd64 stress-image-test
+      - name: Build resource stress image (amd64)
+        run: just tag=${{ env.IMAGE_TAG }}-amd64 build-stress
+      - name: Verify resource stress image (amd64)
+        id: native_stress
+        run: |
+          set -euo pipefail
+          date +%s >"$RUNNER_TEMP/stress-smoke.since"
+          bash build/stress/smoke.sh docker caesiumcloud/resource-stress:${{ env.IMAGE_TAG }}-amd64 2>&1 | tee "$RUNNER_TEMP/stress-smoke.log"
+      - name: Observe native stress host
+        if: always() && steps.native_stress.outcome != 'skipped'
+        run: sudo -n --preserve-env=GITHUB_SHA,GITHUB_RUN_ID,GITHUB_RUN_ATTEMPT python3 scripts/collect-stress-host-diagnostics.py --smoke-log "$RUNNER_TEMP/stress-smoke.log" --since "$(cat "$RUNNER_TEMP/stress-smoke.since")"
       - name: Extract static CLI (amd64)
         run: |
           set -euo pipefail
@@ -432,16 +443,25 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
-      - name: Install qualified ARM64 Docker runtime
-        run: python3 scripts/setup-ci-arm64-docker.py
+      - name: Install qualified native Docker runtime
+        run: python3 scripts/setup-ci-docker.py
       - uses: ./.github/actions/bake-images
         with:
           arch: arm64
           targets: product
           cache-group: product
       - uses: taiki-e/install-action@just
-      - name: Build and verify resource stress image (arm64)
-        run: just tag=${{ env.IMAGE_TAG }}-arm64 stress-image-test
+      - name: Build resource stress image (arm64)
+        run: just tag=${{ env.IMAGE_TAG }}-arm64 build-stress
+      - name: Verify resource stress image (arm64)
+        id: native_stress
+        run: |
+          set -euo pipefail
+          date +%s >"$RUNNER_TEMP/stress-smoke.since"
+          bash build/stress/smoke.sh docker caesiumcloud/resource-stress:${{ env.IMAGE_TAG }}-arm64 2>&1 | tee "$RUNNER_TEMP/stress-smoke.log"
+      - name: Observe native stress host
+        if: always() && steps.native_stress.outcome != 'skipped'
+        run: sudo -n --preserve-env=GITHUB_SHA,GITHUB_RUN_ID,GITHUB_RUN_ATTEMPT python3 scripts/collect-stress-host-diagnostics.py --smoke-log "$RUNNER_TEMP/stress-smoke.log" --since "$(cat "$RUNNER_TEMP/stress-smoke.since")"
       - name: Extract static CLI (arm64)
         run: |
           set -euo pipefail
@@ -654,9 +674,12 @@ jobs:
             timeout: 45
     steps:
       - uses: actions/checkout@v7
+      - name: Install qualified native Docker runtime
+        run: python3 scripts/setup-ci-docker.py
       - uses: ./.github/actions/run-integration
         with:
           arch: amd64
+          verify-native-stress: "true"
           recipe: ${{ matrix.recipe }}
           shard-index: ${{ matrix.shard }}
           shard-count: ${{ matrix.id == 'docker' && '3' || '' }}
@@ -726,8 +749,8 @@ jobs:
             timeout: 60
     steps:
       - uses: actions/checkout@v7
-      - name: Install qualified ARM64 Docker runtime
-        run: python3 scripts/setup-ci-arm64-docker.py
+      - name: Install qualified native Docker runtime
+        run: python3 scripts/setup-ci-docker.py
       - uses: ./.github/actions/run-integration
         with:
           arch: arm64
@@ -1712,28 +1735,14 @@ jobs:
         run: |
           npm ci --prefer-offline
           npx playwright install --with-deps chromium
-      # scripts/integration-coverage.sh pins the builder as `name@<image id>`
-      # for Docker FROM. That reference resolves locally only where an image id
-      # is a content digest (the containerd image store) AND the engine's
-      # BuildKit resolves a local digest reference (Docker Desktop's engine
-      # does; the hosted image's 28.0.4 goes to the registry instead). Upgrade
-      # the engine from Docker's own apt repository and switch the store before
-      # anything is loaded, rather than weaken the script's immutable pin.
-      - name: Docker engine with the containerd image store
+      # Keep the engine and containerd pair identical to the native image
+      # producers. Coverage also needs the containerd image store: the immutable
+      # builder reference in integration-coverage.sh must resolve locally.
+      - name: Install qualified native Docker runtime
+        run: python3 scripts/setup-ci-docker.py
+      - name: Docker containerd image store
         run: |
           set -euo pipefail
-          need=29.0
-          have="$(docker version --format '{{.Server.Version}}')"
-          echo "docker server $have"
-          if [ "$(printf '%s\n%s\n' "$need" "$have" | sort -V | head -1)" != "$need" ]; then
-            sudo install -m 0755 -d /etc/apt/keyrings
-            sudo curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
-            sudo chmod a+r /etc/apt/keyrings/docker.asc
-            echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo "$VERSION_CODENAME") stable" \
-              | sudo tee /etc/apt/sources.list.d/docker.list >/dev/null
-            sudo apt-get update -q
-            sudo apt-get install -y -q docker-ce docker-ce-cli containerd.io docker-buildx-plugin
-          fi
           conf=/etc/docker/daemon.json
           if [ -s "$conf" ]; then current="$(sudo cat "$conf")"; else current='{}'; fi
           printf '%s' "$current" | jq '.features["containerd-snapshotter"] = true' | sudo tee "$conf" >/dev/null
@@ -2098,10 +2107,19 @@ jobs:
           path: .tmp/coverage-backends/proof/
           if-no-files-found: error
           retention-days: 7
-      - name: Build and verify coverage resource stress image
+      - name: Build coverage resource stress image
         env:
           CAESIUM_SKIP_IMAGE_BUILD: "false"
-        run: just tag=${{ env.IMAGE_TAG }}-amd64 stress-image-test
+        run: just tag=${{ env.IMAGE_TAG }}-amd64 build-stress
+      - name: Verify coverage resource stress image
+        id: native_stress
+        run: |
+          set -euo pipefail
+          date +%s >"$RUNNER_TEMP/stress-smoke.since"
+          bash build/stress/smoke.sh docker caesiumcloud/resource-stress:${{ env.IMAGE_TAG }}-amd64 2>&1 | tee "$RUNNER_TEMP/stress-smoke.log"
+      - name: Observe native stress host
+        if: always() && steps.native_stress.outcome != 'skipped'
+        run: sudo -n --preserve-env=GITHUB_SHA,GITHUB_RUN_ID,GITHUB_RUN_ATTEMPT python3 scripts/collect-stress-host-diagnostics.py --smoke-log "$RUNNER_TEMP/stress-smoke.log" --since "$(cat "$RUNNER_TEMP/stress-smoke.since")"
       - name: Prepare pinned Temporal fixture for existing coverage cohort
         run: |
           set -euo pipefail

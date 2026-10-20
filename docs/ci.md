@@ -410,14 +410,30 @@ Two ubuntu-26.04 host differences matter to every kind lane:
   enter kind as platform-scoped archives (`docker image save --platform` +
   `kind load image-archive`), never through `kind load docker-image`.
 
-The ARM64 product producer and integration consumers install the same pinned
-Docker 29.9.1 / containerd 2.4.2 / runc 1.5.2 runtime before creating BuildKit
-containers or loading images. `scripts/setup-ci-arm64-docker.py` verifies the
-running daemon's exact version and component commits after package installation;
-a successful package install alone does not qualify the runtime. Each consumer
-also runs the unchanged native stress smoke against its loaded candidate image.
-Exit 137 still requires positive native OOM metadata. Runtime modernization
-preserves the current containerd security fixes and existing daemon configuration.
+The AMD64 and ARM64 product producers, the `integration` and
+`integration-arm64` job matrices, and the coverage collector install pinned
+Docker 29.9.1 and the secure containerd.io
+2.4.2 package from Docker's signed Ubuntu repository. The package supplies runc
+1.5.2. `scripts/setup-ci-docker.py` explicitly selects the upstream containerd
+2.3.7 LTS daemon and shim from checksum-pinned native release archives in
+`/opt/caesium-ci/containerd/`; it preserves the daemon configuration and records
+this override separately from apt package identity. The official
+[2.3.7 release](https://github.com/containerd/containerd/releases/tag/v2.3.7)
+includes fixes for GHSA-vwhp-8p66-mq4f, GHSA-8647-2jxj-p2rc, and
+GHSA-hc94-p972-ch66. The script checks the running daemon's
+component commits and executable hash, then checks the actual `moby` shim's
+executable hash using a bounded, owned container from a pinned Alpine image.
+This runtime is a compatibility candidate until the unchanged native stress
+smoke qualifies it. Each selected integration consumer also smokes its loaded
+candidate image. Exit 137 still requires positive native OOM metadata. The coverage
+collector retains its containerd image store setting.
+
+Native smoke steps also log bounded host observations from
+`scripts/collect-stress-host-diagnostics.py`. The root-owned observer retains
+only journal messages matching an exact smoke container ID and the same
+two-minute window, plus reduced runtime identity and probe exit statuses.
+Missing evidence remains unknown; these observations never qualify an OOM or
+change the smoke result. API keys and bearer credentials are redacted.
 
 Every Helm shard retains separate port-forward logs for its full-suite,
 cache-identity and deadline phases, plus bounded cluster/server diagnostics.

@@ -1,6 +1,7 @@
 """Regression checks for live runtime verification and retained Helm evidence."""
 
 import contextlib
+import hashlib
 import importlib.util
 import io
 import json
@@ -8,6 +9,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import tarfile
 import tempfile
 import unittest
 from unittest import mock
@@ -25,74 +27,232 @@ def load(name, filename):
     return module
 
 
-RUNTIME = load("ci_arm64_runtime", "setup-ci-arm64-docker.py")
+RUNTIME = load("ci_docker_runtime", "setup-ci-docker.py")
 DIAGNOSTICS = load("helm_diagnostics", "collect-helm-diagnostics.py")
 
 
 class NativeRuntimeTests(unittest.TestCase):
-    def run_setup(self, info=None, install_fails=False):
+    @staticmethod
+    def archive(extra=None):
+        output = io.BytesIO()
+        with tarfile.open(fileobj=output, mode="w:gz") as archive:
+            directory = tarfile.TarInfo("bin")
+            directory.type = tarfile.DIRTYPE
+            archive.addfile(directory)
+            for name in RUNTIME.CONTAINERD_BINARIES:
+                payload = ("verified fixture " + name).encode()
+                member = tarfile.TarInfo("bin/" + name)
+                member.size = len(payload)
+                archive.addfile(member, io.BytesIO(payload))
+            if extra is not None:
+                archive.addfile(extra, io.BytesIO(b"x") if extra.isfile() else None)
+        return output.getvalue()
+
+    def run_setup(self, info=None, install_fails=False, machine="aarch64", shim_fails=False,
+                  cleanup_fails=False, daemon_fails=False, create_ack=None, foreign_probe=False,
+                  custom_service=False):
         commands = []
-        info = info or {
-            "ServerVersion": RUNTIME.EXPECTED["ServerVersion"],
-            "ContainerdCommit": {"ID": RUNTIME.EXPECTED["ContainerdCommit"]},
-            "RuncCommit": {"ID": RUNTIME.EXPECTED["RuncCommit"]},
-        }
+        self.commands = commands
+        owner, probe_name = "", ""
+        cid = "c" * 64
+        if info is None:
+            info = {
+                "ServerVersion": RUNTIME.EXPECTED["ServerVersion"],
+                "ContainerdCommit": {"ID": RUNTIME.EXPECTED["ContainerdCommit"]},
+                "RuncCommit": {"ID": RUNTIME.EXPECTED["RuncCommit"]},
+            }
 
         def run(*command, **kwargs):
+            nonlocal owner, probe_name
             commands.append((command, kwargs))
             if install_fails and "install" in command and "apt-get" in command:
                 raise subprocess.CalledProcessError(100, command)
-            return subprocess.CompletedProcess(command, 0, json.dumps(info))
+            response = ""
+            if command[:2] == ("docker", "info"):
+                response = json.dumps(info)
+            elif command[:2] == ("systemctl", "show"):
+                extra = " --config /custom/containerd.toml" if custom_service else ""
+                response = "{ path=/usr/bin/containerd ; argv[]=/usr/bin/containerd" + extra + " ; ignore_errors=no ; }"
+            elif command[:3] == ("sudo", "python3", "-c"):
+                mode = command[4]
+                if mode == "path":
+                    response = json.dumps({"path": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"})
+                elif (mode == "shim" and shim_fails) or (mode == "daemon" and daemon_fails):
+                    raise subprocess.CalledProcessError(1, command)
+                else:
+                    record = {"pid": 123, "executable": command[5], "sha256": command[6]}
+                    if mode == "shim":
+                        record.update(namespace="moby", container_id=command[7])
+                    response = json.dumps(record)
+            elif command[0].endswith("/containerd-shim-runc-v2"):
+                response = ("containerd-shim-runc-v2:\n  Version:  v" + RUNTIME.CONTAINERD_VERSION
+                            + "\n  Revision: " + RUNTIME.CONTAINERD_REVISION + "\n")
+            elif command[:2] == ("docker", "create"):
+                probe_name = command[command.index("--name") + 1]
+                owner = command[command.index("--label") + 1].split("=", 1)[1]
+                response = cid if create_ack is None else create_ack
+            elif command[:2] == ("docker", "start"):
+                response = cid
+            elif command[:2] == ("docker", "inspect"):
+                response = json.dumps({"Id": cid, "Name": "/" + probe_name, "State": {"Running": True},
+                                       "Config": {"Image": RUNTIME.PROBE_IMAGE,
+                                                  "Labels": {"caesium.ci.runtime.probe": "foreign" if foreign_probe else owner}}})
+            elif command[:2] == ("docker", "rm") and cleanup_fails:
+                raise subprocess.CalledProcessError(1, command)
+            return subprocess.CompletedProcess(command, 0, response)
 
+        output = io.StringIO()
         with mock.patch.object(RUNTIME.platform, "system", return_value="Linux"), \
-                mock.patch.object(RUNTIME.platform, "machine", return_value="aarch64"), \
+                mock.patch.object(RUNTIME.platform, "machine", return_value=machine), \
                 mock.patch.object(RUNTIME.platform, "freedesktop_os_release", return_value={
                     "ID": "ubuntu", "VERSION_ID": "26.04", "VERSION_CODENAME": "resolute"}), \
+                mock.patch.object(RUNTIME, "download_archive", return_value=self.archive()), \
                 mock.patch.object(RUNTIME, "run", side_effect=run), \
-                contextlib.redirect_stdout(io.StringIO()):
+                contextlib.redirect_stdout(output):
             RUNTIME.setup()
-        return commands
+        return commands, json.loads(output.getvalue().splitlines()[-1])
 
     def test_exact_packages_are_installed_before_running_daemon_verification(self):
-        commands = self.run_setup()
-        args = [command for command, _ in commands]
-        install = next(command for command in args if "apt-get" in command and "install" in command)
-        self.assertIn("docker-ce=" + RUNTIME.ENGINE_PACKAGE, install)
-        self.assertIn("docker-ce-cli=" + RUNTIME.ENGINE_PACKAGE, install)
-        self.assertIn("containerd.io=" + RUNTIME.CONTAINERD_PACKAGE, install)
-        self.assertIn("Dpkg::Options::=--force-confold", install)
-        self.assertNotIn("--allow-downgrades", install)
-        restart = next(command for command in args if "restart" in command)
-        verify = next(command for command in args if command[:2] == ("docker", "info"))
-        self.assertLess(args.index(install), args.index(restart))
-        self.assertLess(args.index(restart), args.index(verify))
-        source = next(kwargs["input"] for command, kwargs in commands if "tee" in command)
-        self.assertIn("arch=arm64 signed-by=/etc/apt/keyrings/docker.asc", source)
-        self.assertIn("https://download.docker.com/linux/ubuntu resolute stable", source)
+        for machine, architecture in [("x86_64", "amd64"), ("amd64", "amd64"),
+                                      ("aarch64", "arm64"), ("arm64", "arm64")]:
+            with self.subTest(machine=machine):
+                commands, report = self.run_setup(machine=machine)
+                args = [command for command, _ in commands]
+                install = next(command for command in args if "apt-get" in command and "install" in command)
+                self.assertIn("docker-ce=" + RUNTIME.ENGINE_PACKAGE, install)
+                self.assertIn("docker-ce-cli=" + RUNTIME.ENGINE_PACKAGE, install)
+                self.assertIn("containerd.io=" + RUNTIME.CONTAINERD_PACKAGE, install)
+                self.assertIn("Dpkg::Options::=--force-confold", install)
+                self.assertNotIn("--allow-downgrades", install)
+                restart = next(command for command in args if "restart" in command)
+                verify = next(command for command in args if command[:2] == ("docker", "info"))
+                self.assertLess(args.index(install), args.index(restart))
+                self.assertLess(args.index(restart), args.index(verify))
+                source = next(kwargs["input"] for command, kwargs in commands
+                              if command[-1] == "/etc/apt/sources.list.d/docker.list")
+                self.assertEqual(source, f"deb [arch={architecture} signed-by=/etc/apt/keyrings/docker.asc] "
+                                 "https://download.docker.com/linux/ubuntu resolute stable\n")
+                self.assertEqual(report["architecture"], architecture)
+                self.assertEqual(report["observed"], RUNTIME.EXPECTED)
+                self.assertEqual(report["upstream_containerd"]["archive_sha256"], RUNTIME.CONTAINERD_ARCHIVES[architecture])
+                self.assertEqual(report["running_daemon"]["executable"],
+                                 f"/opt/caesium-ci/containerd/2.3.7/{architecture}/bin/containerd")
+                self.assertEqual(report["running_shim"]["container_id"], "c" * 64)
+                self.assertEqual(report["running_shim"]["namespace"], "moby")
+                override = next(kwargs["input"] for command, kwargs in commands
+                                if command[-1].endswith("/caesium-ci-runtime.conf"))
+                self.assertIn(f"ExecStart=/opt/caesium-ci/containerd/2.3.7/{architecture}/bin/containerd\n", override)
+                self.assertIn(f'Environment="PATH=/opt/caesium-ci/containerd/2.3.7/{architecture}/bin:', override)
+                self.assertIn(":/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin", override)
+                probe = next(command for command in args if command[:2] == ("docker", "create"))
+                for option in ("--network", "--read-only", "--cap-drop", "--security-opt", "--pids-limit"):
+                    self.assertIn(option, probe)
+                self.assertEqual(probe[-2:], (RUNTIME.PROBE_IMAGE, "30"))
+                removed = [command for command in args if command[:2] == ("docker", "rm")]
+                self.assertEqual(removed, [("docker", "rm", "--force", "c" * 64)])
 
     def test_successful_package_install_cannot_hide_old_or_missing_daemon_components(self):
-        for field in RUNTIME.EXPECTED:
-            with self.subTest(field=field):
-                info = {
-                    "ServerVersion": "29.9.1",
-                    "ContainerdCommit": {"ID": RUNTIME.EXPECTED["ContainerdCommit"]},
-                    "RuncCommit": {"ID": RUNTIME.EXPECTED["RuncCommit"]},
-                }
-                info[field] = "29.4.2" if field == "ServerVersion" else {}
-                with self.assertRaisesRegex(RuntimeError, "running Docker runtime"):
-                    self.run_setup(info)
+        for machine in ("x86_64", "aarch64"):
+            for field in RUNTIME.EXPECTED:
+                for failure in ("outdated", "missing"):
+                    with self.subTest(machine=machine, field=field, failure=failure):
+                        info = {
+                            "ServerVersion": RUNTIME.EXPECTED["ServerVersion"],
+                            "ContainerdCommit": {"ID": RUNTIME.EXPECTED["ContainerdCommit"]},
+                            "RuncCommit": {"ID": RUNTIME.EXPECTED["RuncCommit"]},
+                        }
+                        if failure == "missing":
+                            del info[field]
+                        else:
+                            info[field] = "29.4.2" if field == "ServerVersion" else {"ID": "outdated"}
+                        with self.assertRaisesRegex(RuntimeError, "running Docker runtime"):
+                            self.run_setup(info, machine=machine)
 
     def test_install_failure_is_fatal(self):
-        with self.assertRaises(subprocess.CalledProcessError):
-            self.run_setup(install_fails=True)
+        for machine in ("x86_64", "aarch64"):
+            with self.subTest(machine=machine), self.assertRaises(subprocess.CalledProcessError):
+                self.run_setup(install_fails=True, machine=machine)
+
+    def test_wrong_running_daemon_or_shim_and_cleanup_failure_are_fatal(self):
+        for failure in ("daemon_fails", "shim_fails", "cleanup_fails"):
+            with self.subTest(failure=failure), self.assertRaises(subprocess.CalledProcessError):
+                self.run_setup(**{failure: True})
+            removed = [command for command, _ in self.commands if command[:2] == ("docker", "rm")]
+            self.assertEqual(removed, [] if failure == "daemon_fails" else [("docker", "rm", "--force", "c" * 64)])
+
+    def test_uncertain_probe_acknowledgement_never_removes_an_unbound_container(self):
+        with self.assertRaisesRegex(RuntimeError, "reconciliation required"), \
+                mock.patch.object(RUNTIME, "owned_probe") as owned:
+            self.run_setup(create_ack="not-a-confirmed-id")
+        owned.assert_not_called()
+
+    def test_foreign_probe_is_never_removed_and_custom_service_arguments_are_preserved(self):
+        with self.assertRaisesRegex(RuntimeError, "ownership is not confirmed"):
+            self.run_setup(foreign_probe=True)
+        self.assertFalse(any(command[:2] == ("docker", "rm") for command, _ in self.commands))
+        with self.assertRaisesRegex(RuntimeError, "custom containerd service arguments"):
+            self.run_setup(custom_service=True)
+        self.assertFalse(any(command[-1].endswith("caesium-ci-runtime.conf") for command, _ in self.commands))
+
+    def test_archive_digest_is_checked_before_installing_any_package(self):
+        for architecture in ("amd64", "arm64"):
+            with self.subTest(architecture=architecture), \
+                    mock.patch.object(RUNTIME.urllib.request, "urlopen", return_value=io.BytesIO(b"tampered")), \
+                    self.assertRaisesRegex(RuntimeError, "archive checksum"):
+                RUNTIME.download_archive(architecture)
+
+    def test_archive_extraction_refuses_links_unknown_paths_and_duplicates(self):
+        extras = [tarfile.TarInfo("../outside"), tarfile.TarInfo("bin/containerd")]
+        link = tarfile.TarInfo("bin/foreign-link")
+        link.type, link.linkname = tarfile.SYMTYPE, "/etc/shadow"
+        extras.append(link)
+        for extra in extras:
+            with self.subTest(name=extra.name), tempfile.TemporaryDirectory() as temporary, \
+                    self.assertRaisesRegex(RuntimeError, "archive inventory"):
+                RUNTIME.stage_archive(self.archive(extra), Path(temporary))
+
+    def test_read_only_probe_checks_actual_process_executable_hash_and_exact_moby_container(self):
+        namespace = {"__name__": "ci_runtime_probe_test"}
+        exec(RUNTIME.PROCESS_PROBE, namespace)
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            namespace["PROC_ROOT"] = root / "proc"
+            process = namespace["PROC_ROOT"] / "123"
+            process.mkdir(parents=True)
+            executable = root / "containerd-shim-runc-v2"
+            executable.write_bytes(b"approved upstream shim")
+            expected_hash = hashlib.sha256(executable.read_bytes()).hexdigest()
+            (process / "exe").symlink_to(executable)
+            cid = "a" * 64
+            (process / "cmdline").write_bytes((str(executable) + "\0-namespace\0moby\0-id\0" + cid + "\0").encode())
+            record = namespace["inspect_shim"](cid, str(executable), expected_hash)
+            self.assertEqual(record["pid"], 123)
+            self.assertEqual(record["container_id"], cid)
+            for path, digest in [(str(root / "wrong-shim"), expected_hash), (str(executable), "0" * 64)]:
+                with self.subTest(path=path, digest=digest), self.assertRaisesRegex(RuntimeError, "executable differs"):
+                    namespace["inspect_shim"](cid, path, digest)
+            (process / "cmdline").write_bytes((str(executable) + "\0-namespace\0other\0-id\0" + cid + "\0").encode())
+            with self.assertRaisesRegex(RuntimeError, "no unique running moby shim"):
+                namespace["inspect_shim"](cid, str(executable), expected_hash)
 
     def test_non_native_host_fails_before_privileged_commands(self):
-        with mock.patch.object(RUNTIME.platform, "freedesktop_os_release", return_value={}), \
-                mock.patch.object(RUNTIME.platform, "system", return_value="Darwin"), \
-                mock.patch.object(RUNTIME, "run") as run:
-            with self.assertRaisesRegex(RuntimeError, "Ubuntu 26.04 ARM64"):
-                RUNTIME.setup()
-            run.assert_not_called()
+        valid_release = {"ID": "ubuntu", "VERSION_ID": "26.04", "VERSION_CODENAME": "resolute"}
+        hosts = [("Darwin", "arm64", valid_release), ("Windows", "amd64", valid_release),
+                 ("Linux", "riscv64", valid_release)]
+        for machine in ("x86_64", "aarch64"):
+            for release in ({}, {**valid_release, "ID": "debian"},
+                            {**valid_release, "VERSION_ID": "24.04"},
+                            {**valid_release, "VERSION_CODENAME": "noble"}):
+                hosts.append(("Linux", machine, release))
+        for system, machine, release in hosts:
+            with self.subTest(system=system, machine=machine, release=release), \
+                    mock.patch.object(RUNTIME.platform, "freedesktop_os_release", return_value=release), \
+                    mock.patch.object(RUNTIME.platform, "system", return_value=system), \
+                    mock.patch.object(RUNTIME.platform, "machine", return_value=machine), \
+                    mock.patch.object(RUNTIME, "run") as run:
+                with self.assertRaisesRegex(RuntimeError, "Ubuntu 26.04 amd64 or arm64"):
+                    RUNTIME.setup()
+                run.assert_not_called()
 
 
 class HelmDiagnosticsTests(unittest.TestCase):
@@ -145,14 +305,18 @@ class HelmDiagnosticsTests(unittest.TestCase):
 class RemediationWorkflowTests(unittest.TestCase):
     def test_native_setup_precedes_all_image_operations_and_consumer_smoke(self):
         jobs = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text())["jobs"]
-        for name, action in [("images-arm64", "bake-images"), ("integration-arm64", "run-integration")]:
+        for name, action in [("images", "bake-images"), ("images-arm64", "bake-images"),
+                             ("integration", "run-integration"), ("integration-arm64", "run-integration")]:
             steps = jobs[name]["steps"]
-            setup = next(i for i, step in enumerate(steps) if step.get("run") == "python3 scripts/setup-ci-arm64-docker.py")
+            setups = [i for i, step in enumerate(steps) if step.get("run") == "python3 scripts/setup-ci-docker.py"]
+            self.assertEqual(len(setups), 1, name)
+            setup = setups[0]
             use = next(i for i, step in enumerate(steps) if step.get("uses") == "./.github/actions/" + action)
-            self.assertLess(setup, use)
-            self.assertNotIn("if", steps[setup])
-            self.assertFalse(steps[setup].get("continue-on-error", False))
-        self.assertEqual(steps[use]["with"]["verify-native-stress"], "true")
+            self.assertLess(setup, use, name)
+            self.assertNotIn("if", steps[setup], name)
+            self.assertFalse(steps[setup].get("continue-on-error", False), name)
+            if action == "run-integration":
+                self.assertEqual(steps[use]["with"]["verify-native-stress"], "true", name)
         action = yaml.safe_load((ROOT / ".github/actions/run-integration/action.yml").read_text())
         inner = action["runs"]["steps"]
         product = next(i for i, step in enumerate(inner) if step.get("with", {}).get("name") == "product-${{ inputs.arch }}")
@@ -162,6 +326,24 @@ class RemediationWorkflowTests(unittest.TestCase):
         self.assertLess(smoke, run)
         self.assertIn("bash build/stress/smoke.sh docker", inner[smoke]["run"])
         self.assertNotIn("continue-on-error", inner[smoke])
+
+    def test_coverage_pins_runtime_before_preserving_store_configuration_and_loading_images(self):
+        steps = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text())["jobs"]["coverage-ratchets"]["steps"]
+        setups = [i for i, step in enumerate(steps) if step.get("run") == "python3 scripts/setup-ci-docker.py"]
+        self.assertEqual(len(setups), 1)
+        setup = setups[0]
+        configure = next(i for i, step in enumerate(steps) if 'jq \'.features["containerd-snapshotter"] = true\'' in step.get("run", ""))
+        load = next(i for i, step in enumerate(steps) if step.get("uses") == "./.github/actions/load-docker-images")
+        self.assertLess(setup, configure)
+        self.assertLess(configure, load)
+        self.assertNotIn("if", steps[setup])
+        self.assertFalse(steps[setup].get("continue-on-error", False))
+        command = steps[configure]["run"]
+        self.assertIn('if [ -s "$conf" ]; then current="$(sudo cat "$conf")"', command)
+        self.assertIn('printf \'%s\' "$current" | jq', command)
+        self.assertIn("sudo systemctl restart docker", command)
+        self.assertNotIn("need=29.0", command)
+        self.assertNotIn("apt-get", command)
 
     def test_same_attempt_diagnostics_are_uploaded_before_cleanup_even_on_failure(self):
         steps = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text())["jobs"]["helm-integration-test"]["steps"]
