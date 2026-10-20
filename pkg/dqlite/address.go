@@ -764,10 +764,11 @@ func openNativeApp(ctx context.Context, dir, address string, seeds, bootstrapPee
 			"node_address", migration.NewAddress)
 	}
 
-	// app.New clears the join marker once a brand new node has joined, so read
-	// it before starting: a node that has never been a member has no membership
-	// to repair, and must not race its own join.
-	joining := fileExists(dir, joinFileName)
+	// app.New creates the join marker for a fresh seeded node, then clears it
+	// asynchronously once admission succeeds. Capture both fresh join intent
+	// and an interrupted join before starting: neither has membership to repair,
+	// and address repair must not race the app's initial Add.
+	joining := fileExists(dir, joinFileName) || (!fileExists(dir, infoFileName) && len(seeds) > 0)
 
 	app, err := dqliteapp.New(dir, opts...)
 	if err != nil {
