@@ -432,6 +432,8 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
+      - name: Install qualified ARM64 Docker runtime
+        run: python3 scripts/setup-ci-arm64-docker.py
       - uses: ./.github/actions/bake-images
         with:
           arch: arm64
@@ -724,9 +726,12 @@ jobs:
             timeout: 60
     steps:
       - uses: actions/checkout@v7
+      - name: Install qualified ARM64 Docker runtime
+        run: python3 scripts/setup-ci-arm64-docker.py
       - uses: ./.github/actions/run-integration
         with:
           arch: arm64
+          verify-native-stress: "true"
           recipe: ${{ matrix.recipe }}
           shard-index: ${{ matrix.shard }}
           shard-count: ${{ matrix.id == 'docker' && '3' || '' }}
@@ -1234,7 +1239,7 @@ jobs:
           kind_load caesiumcloud/resource-stress:${{ env.IMAGE_TAG }}-amd64
       - name: Start port-forward to Caesium
         run: |
-          kubectl port-forward service/caesium 8080:8080 >/tmp/port-forward.log 2>&1 &
+          kubectl port-forward service/caesium 8080:8080 >/tmp/port-forward-full.log 2>&1 &
           echo $! > /tmp/port-forward.pid
 
           tries=0
@@ -1242,7 +1247,7 @@ jobs:
             tries=$((tries + 1))
             if [ "$tries" -gt 30 ]; then
               echo "Port-forward did not become ready in time"
-              cat /tmp/port-forward.log || true
+              cat /tmp/port-forward-full.log || true
               kubectl get pods -A || true
               exit 1
             fi
@@ -1285,14 +1290,14 @@ jobs:
           kill "$(cat /tmp/port-forward.pid)" 2>/dev/null || true
           kubectl set env statefulset/caesium CAESIUM_EXECUTION_MODE=distributed
           kubectl rollout status statefulset/caesium --timeout=240s
-          kubectl port-forward service/caesium 8080:8080 >/tmp/port-forward.log 2>&1 &
+          kubectl port-forward service/caesium 8080:8080 >/tmp/port-forward-cache-identity.log 2>&1 &
           echo $! > /tmp/port-forward.pid
           ready=false
           for _ in $(seq 1 30); do
             if curl -sf http://127.0.0.1:8080/health >/dev/null; then ready=true; break; fi
             sleep 1
           done
-          if [ "$ready" != true ]; then cat /tmp/port-forward.log; exit 1; fi
+          if [ "$ready" != true ]; then cat /tmp/port-forward-cache-identity.log; exit 1; fi
           python3 test/kubernetes_cache_identity.py --cli .tmp/cache-identity-cli/caesium-linux-amd64 --mode distributed 2>&1 | tee .tmp/kubernetes-cache-identity/distributed.log
       - name: Record Kubernetes cache identity scenarios that could not run
         if: always() && matrix.shard == 1
@@ -1333,7 +1338,7 @@ jobs:
             CAESIUM_WORKER_LEASE_TTL=30s
           # Preserve the chart's POD_IP-based database/node address.
           kubectl rollout status statefulset/caesium --timeout=240s
-          kubectl port-forward service/caesium 8080:8080 >/tmp/port-forward.log 2>&1 &
+          kubectl port-forward service/caesium 8080:8080 >/tmp/port-forward-deadlines.log 2>&1 &
           echo $! > /tmp/port-forward.pid
           ready=false
           for _ in $(seq 1 30); do
@@ -1344,7 +1349,7 @@ jobs:
             sleep 1
           done
           if [ "$ready" != true ]; then
-            cat /tmp/port-forward.log
+            cat /tmp/port-forward-deadlines.log
             exit 1
           fi
 
@@ -1391,6 +1396,19 @@ jobs:
             echo "Distributed Kubernetes deadline scenario skipped required coverage" >&2
             exit 1
           fi
+      - name: Collect Helm integration diagnostics
+        if: always()
+        env:
+          HELM_SHARD: ${{ matrix.shard }}
+        run: python3 scripts/collect-helm-diagnostics.py
+      - name: Upload Helm integration diagnostics
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: helm-integration-diag-${{ matrix.shard }}-${{ github.run_attempt }}
+          path: .tmp/helm-integration-diagnostics/
+          if-no-files-found: error
+          retention-days: 14
       - name: Stop port-forward
         if: always()
         run: kill "$(cat /tmp/port-forward.pid)" 2>/dev/null || true

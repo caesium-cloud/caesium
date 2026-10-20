@@ -21,17 +21,19 @@ func (s *IntegrationTestSuite) TestSSEStream() {
 	// 1. Subscribe to SSE stream
 	eventsURL := fmt.Sprintf("%v/v1/events", s.caesiumURL)
 	req, err := http.NewRequestWithContext(s.T().Context(), http.MethodGet, eventsURL, nil)
-	assert.Nil(s.T(), err)
+	s.Require().NoError(err, "create GET %s subscription request", eventsURL)
 	req.Header.Set("Accept", "text/event-stream")
+	s.authorize(req)
 
 	client := &http.Client{}
 	//nolint:bodyclose // The SSE response body stays open for the lifetime of the streaming test and is closed on function exit.
 	resp, err := client.Do(req)
-	assert.Nil(s.T(), err)
-	assert.Equal(s.T(), http.StatusOK, resp.StatusCode)
+	s.Require().NoError(err, "GET %s while subscribing to execution events", eventsURL)
 
 	// Ensure body is closed at the end
 	defer resp.Body.Close()
+	s.Require().Equal(http.StatusOK, resp.StatusCode, "GET %s while subscribing to execution events", eventsURL)
+	s.Require().Contains(resp.Header.Get("Content-Type"), "text/event-stream", "GET %s must return an SSE stream", eventsURL)
 
 	eventChan := make(chan event.Event, 100)
 	errChan := make(chan error, 1)

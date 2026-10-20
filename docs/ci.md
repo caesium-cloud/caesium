@@ -410,6 +410,22 @@ Two ubuntu-26.04 host differences matter to every kind lane:
   enter kind as platform-scoped archives (`docker image save --platform` +
   `kind load image-archive`), never through `kind load docker-image`.
 
+The ARM64 product producer and integration consumers install the same pinned
+Docker 29.9.1 / containerd 2.4.2 / runc 1.5.2 runtime before creating BuildKit
+containers or loading images. `scripts/setup-ci-arm64-docker.py` verifies the
+running daemon's exact version and component commits after package installation;
+a successful package install alone does not qualify the runtime. Each consumer
+also runs the unchanged native stress smoke against its loaded candidate image.
+Exit 137 still requires positive native OOM metadata. Runtime modernization
+preserves the current containerd security fixes and existing daemon configuration.
+
+Every Helm shard retains separate port-forward logs for its full-suite,
+cache-identity and deadline phases, plus bounded cluster/server diagnostics.
+The `helm-integration-diag-<shard>-<attempt>` artifact is collected and uploaded
+even after setup or test failure, before the port-forward process is stopped.
+Missing logs and failed diagnostic probes are explicit in its report; API keys
+and bearer credentials are redacted. It contains no kubeconfig or secret dump.
+
 Docker (amd64 and arm64), Podman, and Helm each retain the complete
 integration test package. Each engine uses three isolated servers/runners.
 `test/shard_test.go` discovers the same Test* methods as testify and assigns

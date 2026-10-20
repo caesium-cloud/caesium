@@ -17,6 +17,9 @@ inputs:
   load-robustness:
     description: Load the robustness runner image artifact (early-evidence lane)
     default: "false"
+  verify-native-stress:
+    description: Qualify the loaded stress image on this consumer's native Docker runtime
+    default: "false"
   shard-index:
     description: One-based shard index (empty runs the unsharded suite)
     default: ""
@@ -46,6 +49,10 @@ runs:
       uses: ./.github/actions/load-docker-images
       with:
         name: robustness-${{ inputs.arch }}
+    - name: Verify native resource stress runtime
+      if: ${{ inputs.verify-native-stress == 'true' }}
+      shell: bash
+      run: bash build/stress/smoke.sh docker caesiumcloud/resource-stress:${{ env.IMAGE_TAG }}-${{ inputs.arch }}
     - name: Run ${{ inputs.recipe }}
       shell: bash
       env:
