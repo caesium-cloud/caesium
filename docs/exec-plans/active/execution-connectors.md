@@ -827,14 +827,9 @@ Resume unfinished waves. Do not archive this plan while later items remain.
   only for the loaded, immutable three-image CI cohort. Preserve every scenario,
   first-attempt browser requirement, runtime identity check and owned cleanup.
 - **Merged delivery:** [PR #674](https://github.com/caesium-cloud/caesium/pull/674)
-  merged as `805f3252ec79d800efb7dab313d12ef4a6db5a2f`. Its reviewed head
-  `014849de36794e0824ab98a22e77d943962123b9` passed all 45 selected CI jobs and
-  all nine required checks. The formerly failing owner-memory lane passed its
-  exact 37-outcome set with no failures or skips. The strict connector report
-  qualified all six Go scenarios, ten first-attempt browser journeys and the
-  configuration proof; completion was 14m32s after `changes`. This is PR
-  qualification, not the required master streak. Intervening identity changes
-  require fresh evidence on the merged master candidates.
+  merged as `805f3252ec79d800efb7dab313d12ef4a6db5a2f`; its PR description retains
+  the qualification evidence. F4 still requires fresh evidence on merged master
+  candidates, including the intervening identity changes.
 - **Acceptance boundary:** These changes prepare fresh qualification; they do not
   promote the lane. F4 remains unchecked and advisory until ten consecutive
   selected master runs have strict candidate reports and meet the budget, followed
