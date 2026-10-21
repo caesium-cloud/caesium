@@ -714,6 +714,67 @@ Resume unfinished waves. Do not archive this plan while later items remain.
   closeout. F2–F4/N1 stay unchecked; F2 is the next dependency-ready item.
   The plan remains active and no connector lane is promoted by this change.
 
+### W10 — Merged-candidate release qualification (F3, 2026-10-21)
+
+- **Scope and dependency:** F2 implementation [PR #664](https://github.com/caesium-cloud/caesium/pull/664)
+  merged as `9985cff5d9059f368708d2f6e04f613b68a706f1`. This is the qualified
+  release candidate, tree `33843fb4afbac2c7a2b6258e4bdfcdde3d2ff17f`.
+  The independently owned F2 dashboard [PR #669](https://github.com/caesium-cloud/caesium/pull/669)
+  remains responsible for its checkbox and W9 record. This wave adds F3's
+  acceptance record only; later commits require their own applicable gates.
+- **Fresh post-merge evidence:** Push [run 39587157019](https://github.com/caesium-cloud/caesium/actions/runs/39587157019)
+  tested that exact merged SHA. Its connector job passed all six named
+  Fixture/Messages/Correlation/Operations/Read/Actions scenarios in 188.64 seconds,
+  all ten browser cases in 162.008 seconds, and the persistent configuration
+  scenario in 79.42 seconds, each once with no selected skips, retries, flakes or errors.
+  The downloaded [report](https://github.com/caesium-cloud/caesium/actions/runs/39587157019/artifacts/12341380135)
+  was independently rebuilt from the [public observations](https://github.com/caesium-cloud/caesium/actions/runs/39587157019/artifacts/12341235230);
+  its three scenario rows matched and passed the shared strict checker.
+- **Identity and compatibility:** Both 2,150-file source inventories matched
+  the candidate archive. Producer `image-ids-amd64/test.txt` and the running
+  server matched `sha256:b0aeb3d67732a1e362132eb66d9f4ed33596e55528eb8984803715969907323c`;
+  the runner matched `sha256:9e1610ef28292d65b46402ab5d9b1efa8ba47ef6758d1e0528abd4a6c7164083`.
+  The real worker image was `sha256:3afe9ee07a4c7fe28fab4f63eeebb9b6bec2d930db4137dd831083edfad0ba9a`.
+  Observed Temporal Server 1.32.0, CLI 1.9.1 and Go SDK 1.49.0 matched the pins.
+- **Business and recovery proof:** HTTP/browser inspection found external-only
+  work without inferred local data evidence. Real queued publication promoted
+  one admission, activity attempt two reused its run, and both directions led
+  to existing run/receipt/data evidence. Approval started the second job;
+  independent Update history, raw effect records and durable receipts agreed.
+  The three completed HTTP receipts recorded one, one and two Update sends
+  respectively, with exactly one logical effect each. Receipt
+  `f1a246b5-f500-4665-b74d-6da49410aab4` is the explicitly confirmed lost-rejection case.
+  Lost accepted and rejected replies were activated. Lookup and Caesium restart
+  retained actor, Run ID and Update ID without resending; lost rejection stayed
+  unknown after eligibility changed until the original principal confirmed the
+  current revision. Distinct actors/keys conflicted on the open receipt, and
+  terminal/new-ID attempts added no second effect. Validator refusal was
+  independently observed; public failures with unknown origin remained unknown.
+  Worker stop/start replay, provider outage/stale recovery and genuine Caesium
+  process restarts passed. Continue-as-new had a distinct Run ID: the native
+  old-run Update was refused with zero effects on the new run; immutable HTTP
+  receipt recovery and messenger identity checks preserved that same pin.
+- **Bounds and configuration:** Six external workflows paged without catalog
+  inserts; unchanged reads wrote zero identities/snapshots and closed reads sent
+  zero automatic Queries. Live tests enforced expiry, the four-row unreferenced
+  cap, retained referenced evidence, read limits and six explicit Queries per
+  minute. Three distinct persistent Helm members on one kind node accepted
+  matching files, refused skew/stale epochs before RPC, activated a guarded
+  epoch transition and refused connection repointing. Loaded CRI identities
+  matched the qualified server image.
+- **Default-disabled regressions:** The same SHA passed lint, full race/coverage
+  unit suites on amd64 and arm64, all three default Docker integration shards
+  without a Temporal fixture, the 160-case default browser suite and auth browser
+  suite. Separate selected connector proofs above cover their expected off-lane
+  skips. Invalid enabled configuration exited 1 with redacted errors and zero
+  provider RPCs; the gate-off browser case hid navigation and refused routes.
+  The workflow's final coverage/aggregate result is still pending at drafting.
+- **Acceptance boundary:** F3 is proposed complete on the exact merged candidate;
+  this record requires its own protected PR merge. F4 and N1 stay open, the lane
+  stays advisory, and no ten-run promotion claim is made. This qualifies the
+  recorded development-server matrix and single-node kind topology, not
+  Temporal Cloud, other versions or a multi-host deployment.
+
 ### Stream Status
 
 | Stream | Scope | Priority | Status |
@@ -1156,7 +1217,7 @@ compiled integration-runner approach; fixture code stays in the root module.
   the new recipe with no bypass; report/mutation tests use the existing checker.
   Run actionlint and existing CI regression tests, including shared-path selection.
 
-- [ ] F3. Record first-release acceptance on the merged candidate: external-only
+- [x] F3. Record first-release acceptance on the merged candidate: external-only
   monitoring, correlated publication, approval/rejection, activity retry, reply
   loss (accepted and rejected), server/worker restart, outage/recovery, distinct
   actors/keys, config skew/transition, bounded polling/storage and continuation
