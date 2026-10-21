@@ -1765,6 +1765,11 @@ PY
   # denials. The cookie-admin scenario rewrites a policy file, which this
   # server does not mount, so it runs on the agent lane only.
   auth_pattern="${auth_pattern%)}|TestAuthUserAdministrationLifecycle|TestAuthUserAdministrationDeniesNonClusterAdmins)"
+  # User-bound API keys (E4): validation, listing under the user, rotation
+  # refusal and every revocation path. Its user matches no binding, so it
+  # passes on this no-policy server; the policy-dependent grant scenario
+  # (TestAuthUserBoundKeyGrantsFollowPolicy) runs on the agent lane only.
+  auth_pattern="${auth_pattern%)}|TestAuthUserBoundKeyLifecycle)"
   # Confined job writes and trigger tenancy (identity-and-access B9): the
   # confined apply, legacy create and webhook-path race. Rule 1 only, which
   # needs no policy file (this server mounts none) nor a catalog connection.
@@ -1814,6 +1819,7 @@ PY
     TestAuthPolicyShowAndReloadSurface
     TestAuthUserAdministrationLifecycle
     TestAuthUserAdministrationDeniesNonClusterAdmins
+    TestAuthUserBoundKeyLifecycle
     TestAuthJobdefApplyLateRefusalRollsBack
     TestAuthLegacyJobCreateConfined
     TestAuthTriggerTenancyWebhookPathRace

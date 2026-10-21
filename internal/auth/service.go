@@ -24,6 +24,10 @@ var (
 	ErrKeyRevoked  = errors.New("api key revoked")
 	ErrKeyExpired  = errors.New("api key expired")
 	ErrForbidden   = errors.New("insufficient permissions")
+
+	// ErrUserBoundKeyRotation refuses rotating a user-bound key: a login
+	// mints a new one instead (E4).
+	ErrUserBoundKeyRotation = errors.New("user-bound api keys cannot be rotated")
 )
 
 const (
@@ -47,6 +51,7 @@ type Service struct {
 	now                         func() time.Time
 	policySource                policy.Source
 	policyHolder                *policy.Holder
+	userKeyTTL                  time.Duration
 
 	// lastUsedMu protects the async last_used_at update buffer.
 	lastUsedMu sync.Mutex
@@ -180,9 +185,23 @@ func (s *Service) recordLastUsed(id uuid.UUID) {
 	s.lastUsedMu.Unlock()
 }
 
-// ValidateKey looks up a plaintext API key, verifies it is active, and returns
-// the key record. On success it asynchronously updates last_used_at.
-func (s *Service) ValidateKey(plaintext string) (_ *models.APIKey, retErr error) {
+// ValidateKey looks up a plaintext API key, verifies it is active (for a
+// user-bound key, that its user is too; see AuthenticateKey), and returns the
+// key record. On success it asynchronously updates last_used_at.
+func (s *Service) ValidateKey(plaintext string) (*models.APIKey, error) {
+	key, _, err := s.AuthenticateKey(context.Background(), plaintext)
+	return key, err
+}
+
+// AuthenticateKey validates a bearer token and returns its stored key and the
+// principal it authenticates. The stored row decides the kind, never the
+// token's prefix: a row without user_id is a plain key (PrincipalFromKey); a
+// row with one is user-bound and authenticates its user, resolved afresh on
+// every call (validateUserKey). Every refusal is one of the validation
+// sentinels and is padded to the same minimum latency, so a caller cannot
+// tell a disabled user from a revoked key. On success it asynchronously
+// updates last_used_at.
+func (s *Service) AuthenticateKey(ctx context.Context, plaintext string) (_ *models.APIKey, _ *Principal, retErr error) {
 	startedAt := s.now()
 	defer func() {
 		s.applyFailureLatency(startedAt, retErr)
@@ -190,26 +209,36 @@ func (s *Service) ValidateKey(plaintext string) (_ *models.APIKey, retErr error)
 
 	hash, err := HashKey(plaintext, s.keyHashSecret)
 	if err != nil {
-		return nil, fmt.Errorf("hash api key: %w", err)
+		return nil, nil, fmt.Errorf("hash api key: %w", err)
 	}
 
 	var key models.APIKey
 	if err := s.db.Where("key_hash = ?", hash).First(&key).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return nil, ErrKeyNotFound
+			return nil, nil, ErrKeyNotFound
 		}
-		return nil, fmt.Errorf("lookup api key: %w", err)
+		return nil, nil, fmt.Errorf("lookup api key: %w", err)
 	}
 
 	if key.IsRevoked() {
-		return nil, ErrKeyRevoked
+		return nil, nil, ErrKeyRevoked
 	}
 	if s.isExpired(&key) {
-		return nil, ErrKeyExpired
+		return nil, nil, ErrKeyExpired
+	}
+
+	var principal *Principal
+	if key.IsUserBound() {
+		principal, err = s.validateUserKey(ctx, &key)
+		if err != nil {
+			return nil, nil, err
+		}
+	} else {
+		principal = PrincipalFromKey(&key)
 	}
 
 	s.recordLastUsed(key.ID)
-	return &key, nil
+	return &key, principal, nil
 }
 
 // CreateKeyRequest holds the parameters for creating a new API key.
@@ -384,9 +413,11 @@ func (s *Service) RevokeKeyAuthorized(ctx context.Context, id uuid.UUID, authori
 // row, mints a replacement with the same role, scope, namespaces and expiry
 // (rotation replaces the secret, never the grant or its lifetime), and lets
 // the old key live on for gracePeriod at most: its expiry is never moved
-// later. A key that is revoked, expired, has unusable namespaces, or is
-// confined to a namespace the policy file does not declare is refused, and
-// nothing is written.
+// later. A key that is revoked, expired, user-bound (a login mints a new one),
+// has unusable namespaces, or is confined to a namespace the policy file does
+// not declare is refused, and nothing is written. Every refusal comes after
+// authorize, so a caller that may not administer the key learns nothing about
+// it.
 func (s *Service) RotateKeyAuthorized(ctx context.Context, id uuid.UUID, gracePeriod time.Duration, actor string, authorize KeyAuthorizer) (*CreateKeyResponse, error) {
 	if authorize == nil {
 		return nil, errNoKeyAuthorizer
@@ -400,6 +431,9 @@ func (s *Service) RotateKeyAuthorized(ctx context.Context, id uuid.UUID, gracePe
 		}
 		if err := authorize(oldKey); err != nil {
 			return err
+		}
+		if oldKey.IsUserBound() {
+			return ErrUserBoundKeyRotation
 		}
 		if oldKey.IsRevoked() {
 			return ErrKeyRevoked
@@ -608,7 +642,8 @@ func (s *Service) applyFailureLatency(startedAt time.Time, err error) {
 }
 
 func isValidationFailure(err error) bool {
-	return errors.Is(err, ErrKeyNotFound) || errors.Is(err, ErrKeyRevoked) || errors.Is(err, ErrKeyExpired)
+	return errors.Is(err, ErrKeyNotFound) || errors.Is(err, ErrKeyRevoked) || errors.Is(err, ErrKeyExpired) ||
+		errors.Is(err, ErrUserDisabled)
 }
 
 func (s *Service) tryCreateBootstrapKey(key *models.APIKey) (int64, error) {
@@ -623,14 +658,14 @@ func (s *Service) tryCreateBootstrapKey(key *models.APIKey) (int64, error) {
 
 // tryRefreshBootstrapKey restores the bootstrap slot to a fresh cluster admin
 // key. It runs only after AdminKeyExists found no cluster admin, and matches a
-// bootstrap key that is revoked, expired, confined to namespaces or scoped (an
-// active cluster bootstrap key has NULL namespaces and scope and is never
-// replaced).
+// bootstrap key that is revoked, expired, confined to namespaces, scoped or
+// bound to a user (an active cluster bootstrap key has NULL namespaces, scope
+// and user and is never replaced).
 func (s *Service) tryRefreshBootstrapKey(newID uuid.UUID, prefix, hash string, now time.Time) (int64, error) {
 	return s.withBootstrapRetry(func() (int64, error) {
 		result := s.db.Model(&models.APIKey{}).
 			Where(
-				"bootstrap_slot = ? AND (revoked_at IS NOT NULL OR (expires_at IS NOT NULL AND expires_at <= ?) OR namespaces IS NOT NULL OR scope IS NOT NULL)",
+				"bootstrap_slot = ? AND (revoked_at IS NOT NULL OR (expires_at IS NOT NULL AND expires_at <= ?) OR namespaces IS NOT NULL OR scope IS NOT NULL OR user_id IS NOT NULL)",
 				bootstrapAdminSlot,
 				now,
 			).
@@ -647,6 +682,7 @@ func (s *Service) tryRefreshBootstrapKey(newID uuid.UUID, prefix, hash string, n
 				"expires_at":   nil,
 				"last_used_at": nil,
 				"revoked_at":   nil,
+				"user_id":      nil,
 			})
 		return result.RowsAffected, result.Error
 	})

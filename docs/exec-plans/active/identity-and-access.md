@@ -1025,7 +1025,7 @@ server-brokered `caesium login` flow that works for every provider.
       user row and `refresh_grant_version`, so a login checked before a disable
       cannot mint a session. Live scenarios seed SSO users through the catalog
       on the api-key lanes; G3 still drives a real SSO user.)
-- [ ] E4. User-bound API keys: `APIKey.UserID`; `csk_user_` prefix; on validation the
+- [x] E4. User-bound API keys: `APIKey.UserID`; `csk_user_` prefix; on validation the
       service loads the user (disabled ⇒ invalid) and resolves grants from the policy;
       user-bound keys are listed under the user in `GET /v1/auth/users/:id` and
       revoked by the E3 disable cascade;
@@ -1036,6 +1036,18 @@ server-brokered `caesium login` flow that works for every provider.
       `internal/auth/service_test.go`, `internal/auth/principal.go`, `pkg/env/env.go`,
       `api/rest/controller/auth/users.go`.
       Depends on: A5 + E3.
+      (W5-β: the mint seam is `Service.MintUserBoundKey(ctx, MintUserKeyRequest{UserID,
+      DisableGeneration, …})`, fenced on the user row like `SessionStore.Create`; no
+      route mints a key yet. The principal is the user (`Kind=user`, `UserKeyID` set,
+      `KeyID` nil because connector reads and replay key identity on `KeyID`); a
+      disabled or missing user, an expired key and a malformed row get the revoked
+      key's 401. Disable, the enable sweep, `sessions/revoke` (a deliberate widening
+      of the §11.2 row) and `CompleteRefreshDefinitive` revoke the user's keys in the
+      same transaction; rotation is a 409. E2 hooks in at the marked point in
+      `validateUserKey`. **E5 must:** make `POST /auth/logout` with a user-bound
+      bearer revoke exactly that key (tested with bearer + cookie: only the bearer
+      dies) and wire the key service into `SSOController`; until then logout does
+      not revoke a user-bound key.)
 - [ ] E5. `caesium login`, `logout`, `whoami`: server routes `GET /auth/cli/start`
       (public; stores a login transaction — `state`, loopback port, PKCE-style
       `challenge`, hostname hint, 5m expiry), `GET /auth/cli/finish` (identity class;
