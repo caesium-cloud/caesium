@@ -538,6 +538,20 @@ func (i *Importer) pruneMissingTx(tx *gorm.DB, desiredSet map[string]struct{}, o
 	return len(toRetire), skipped, nil
 }
 
+// existingBatchJobsTx returns the stored rows (retired ones included) of a
+// batch's aliases, which lockBatchJobsTx has locked.
+func existingBatchJobsTx(tx *gorm.DB, aliases []string) ([]*models.Job, error) {
+	var rows []models.Job
+	if err := tx.Unscoped().Model(&models.Job{}).Select("id", "alias").Where("alias IN ?", aliases).Find(&rows).Error; err != nil {
+		return nil, err
+	}
+	jobs := make([]*models.Job, 0, len(rows))
+	for idx := range rows {
+		jobs = append(jobs, &rows[idx])
+	}
+	return jobs, nil
+}
+
 // currentRunCheckTimeout bounds the confined prune's out-of-snapshot running
 // check, which needs a second pooled connection while the batch holds one: a
 // starved pool fails the apply (nothing is pruned) instead of waiting forever.
@@ -548,8 +562,9 @@ const currentRunCheckTimeout = 15 * time.Second
 // its candidates: where a run admitted after the batch's snapshot commits.
 var beforeConfinedPrune func()
 
-// confinedRunCheck is a confined batch's running check against the current
-// committed state rather than its REPEATABLE READ snapshot (PostgreSQL only;
+// confinedRunCheck is a confined batch's running check, over the jobs it
+// updates and the jobs it prunes, against the current committed state rather
+// than its REPEATABLE READ snapshot (PostgreSQL only;
 // SQLite and dqlite transactions are serialisable). Run admission inserts a
 // job_runs row without writing the job row, so a run committed after the
 // snapshot neither conflicts with the candidate row locks nor shows in the
@@ -658,6 +673,20 @@ func (i *Importer) ApplyConfinedBatch(ctx context.Context, plans []BatchPlan, op
 		err := writeTx(ctx, i.db, keys, txOpts, func(tx *gorm.DB) error {
 			if err := lockBatchJobsTx(tx, aliases); err != nil {
 				return err
+			}
+			// The jobs the batch updates, checked for running runs against
+			// the current committed state before anything is written (see
+			// confinedRunCheck): a run admitted after the snapshot, whose
+			// insert the row lock above may have waited for, is invisible to
+			// guardJobMutationTx's in-snapshot check.
+			if check := i.confinedRunCheck(ctx); check != nil {
+				existing, err := existingBatchJobsTx(tx, aliases)
+				if err != nil {
+					return err
+				}
+				if err := check(existing); err != nil {
+					return err
+				}
 			}
 			for _, plan := range plans {
 				if _, err := i.applyTx(ctx, tx, plan.Def, plan.Opts); err != nil {

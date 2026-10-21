@@ -352,6 +352,50 @@ func TestPostgresConfinedPruneSeesRunAdmittedAfterSnapshot(t *testing.T) {
 	require.False(t, f.jobExists(incoming), "nothing from the batch was applied")
 }
 
+// A run admitted for a job a confined batch updates: the admission's insert
+// (uncommitted, holding its foreign-key lock on the job row) is in flight when
+// the batch takes its REPEATABLE READ snapshot and waits for that row; the
+// admission commits; the batch gets the row (PR #668 review r4). Its
+// in-snapshot check cannot see the run, so the current-state check must: the
+// batch refuses and rolls back, and the running job is not rewritten.
+func TestPostgresConfinedUpdateSeesRunAdmittedDuringItsLock(t *testing.T) {
+	db := openTenancyPostgres(t)
+	f := &tenancyFixture{t: t, db: db, importer: NewImporter(db)}
+	busy := uniqueName("busy")
+	busyJob := f.mustApply(busy, "marketing", "")
+	before := f.job(busy).UpdatedAt
+	def := f.def(busy, "marketing", "")
+	opts := &ApplyOptions{NamespaceAllowlist: []string{"marketing"}}
+
+	admission := db.Begin()
+	require.NoError(t, admission.Error)
+	require.NoError(t, admission.Create(&models.JobRun{ID: uuid.New(), JobID: busyJob.ID, Namespace: "marketing", Status: "running"}).Error)
+	done := make(chan error, 1)
+	go func() {
+		_, err := f.importer.ApplyConfinedBatch(context.Background(), []BatchPlan{{Def: def, Opts: opts}}, ConfinedBatchOptions{})
+		done <- err
+	}()
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		var waiting int64
+		require.NoError(t, db.Raw("SELECT count(*) FROM pg_stat_activity WHERE wait_event_type = 'Lock'").Scan(&waiting).Error)
+		if waiting > 0 {
+			break
+		}
+		require.True(t, time.Now().Before(deadline), "the batch never waited for the admission's row lock")
+		time.Sleep(20 * time.Millisecond)
+	}
+	require.NoError(t, admission.Commit().Error)
+
+	select {
+	case err := <-done:
+		require.ErrorIs(t, err, ErrJobRunning)
+	case <-time.After(30 * time.Second):
+		t.Fatal("the batch did not finish")
+	}
+	require.Equal(t, before, f.job(busy).UpdatedAt, "the running job was not rewritten")
+}
+
 func requireOneSubscribingNamespace(t *testing.T, db *gorm.DB, path string) {
 	t.Helper()
 	var namespaces []string
