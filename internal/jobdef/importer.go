@@ -639,13 +639,13 @@ func (i *Importer) confinedRunCheck(ctx context.Context) func(jobs []*models.Job
 	}
 }
 
+// desiredAliasSet is a confined batch's prune protection: the exact raw
+// aliases the batch persists, never trimmed, because pruneMissingTx compares
+// stored aliases byte for byte (a trimmed "payroll" would not protect a
+// stored "payroll "; PR #668 review r7).
 func desiredAliasSet(aliases []string) map[string]struct{} {
 	set := make(map[string]struct{}, len(aliases))
 	for _, alias := range aliases {
-		alias = strings.TrimSpace(alias)
-		if alias == "" {
-			continue
-		}
 		set[alias] = struct{}{}
 	}
 	return set

@@ -315,7 +315,9 @@ func (s *IntegrationTestSuite) TestAuthJobdefApplyRepairsLegacySharedTrigger() {
 // review). When that non-canonical job exists and is running, the apply's
 // refusal is the same 403, body for body, as while it is idle: the scope is
 // decided before any running check, so it is no oracle on a job outside the
-// key's scope (PR #668 review r6). The exact alias still applies.
+// key's scope (PR #668 review r6). A namespace-confined operator's
+// apply-with-prune of a variant is refused too, applying and pruning nothing
+// (review r7). The exact alias still applies.
 func (s *IntegrationTestSuite) TestAuthJobScopedKeyRefusesNonCanonicalAlias() {
 	s.requireAuthLane()
 	stamp := time.Now().UnixNano()
@@ -348,6 +350,28 @@ func (s *IntegrationTestSuite) TestAuthJobScopedKeyRefusesNonCanonicalAlias() {
 	}
 	s.Nil(s.b9Job(alias))
 
+	// A namespace-confined operator without a key alias scope is held to the
+	// canonical alias too (PR #668 review r7): its apply-with-prune of a
+	// variant is 403 and applies and prunes nothing (its own marketing job
+	// stays). Before, the apply stored the variant and the prune, protecting
+	// only the trimmed alias, retired it and the operator's other jobs.
+	mktOperator := s.mintNamespacedKey("operator", "marketing")
+	kept := fmt.Sprintf("b9-exact-kept-%d", stamp)
+	mktAlias := fmt.Sprintf("b9-exact-mkt-%d", stamp)
+	mktVariants := []string{mktAlias + " ", " " + mktAlias}
+	s.b9Cleanup(append([]string{kept, mktAlias}, mktVariants...)...)
+	status, body := s.b9Apply(mktOperator.Plaintext, false, s.b9Def(kept, "marketing", ""))
+	s.Require().Equal(http.StatusOK, status, body)
+	for _, variant := range mktVariants {
+		def := s.b9Def(mktAlias, "marketing", "")
+		def.Metadata.Alias = variant
+		status, body = s.b9Apply(mktOperator.Plaintext, true, def)
+		s.Equal(http.StatusForbidden, status, "apply-with-prune %q: %s", variant, body)
+		s.Contains(body, "insufficient permissions")
+		s.Nil(s.b9Job(variant), "no job %q was applied", variant)
+		s.NotNil(s.b9Job(kept), "nothing was pruned")
+	}
+
 	// An existing non-canonical job, created by the admin through the real
 	// apply and run through the real run route: idle and running, the scoped
 	// key's apply of it is the same 403.
@@ -355,7 +379,7 @@ func (s *IntegrationTestSuite) TestAuthJobScopedKeyRefusesNonCanonicalAlias() {
 	existing := s.b9Def(alias, "default", "")
 	existing.Metadata.Alias = held
 	existing.Steps[0].Command = []string{"sh", "-c", "sleep 20"}
-	status, body := s.b9Apply(s.authAPIKey, false, existing)
+	status, body = s.b9Apply(s.authAPIKey, false, existing)
 	s.Require().Equal(http.StatusOK, status, body)
 	heldJob := s.b9RequireJob(held)
 	probe := s.b9Def(alias, "default", "")

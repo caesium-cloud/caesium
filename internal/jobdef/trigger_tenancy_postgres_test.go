@@ -586,6 +586,33 @@ func TestPostgresConfinedBatchAuthorizesBeforeRunCheck(t *testing.T) {
 	require.Equal(t, fmt.Sprintf("%s: payroll", ErrJobRunning), err.Error(), "a 409 names only the writer's own job")
 }
 
+// A namespace-confined apply-with-prune naming a non-canonical alias (PR #668
+// review r7): refused with the generic 403, nothing applied, nothing pruned.
+// Before, the batch stored "payroll " and its prune, whose protected set held
+// the trimmed "payroll", retired it and every other marketing job again and
+// reported success.
+func TestPostgresNamespaceConfinedPruneRefusesNonCanonicalAlias(t *testing.T) {
+	db := openTenancyPostgres(t)
+	f := &tenancyFixture{t: t, db: db, importer: NewImporter(db)}
+	ctx := context.Background()
+	f.mustApply("keep", "marketing", "")
+	opts := &ApplyOptions{NamespaceAllowlist: []string{"marketing"}}
+	scope := NewTenancyScope([]string{"marketing"}, nil)
+	for _, alias := range nonCanonicalAliases {
+		def := f.def("payroll", "marketing", "")
+		def.Metadata.Alias = alias
+		result, err := f.importer.ApplyConfinedBatch(ctx, []BatchPlan{{Def: def, Opts: opts}},
+			ConfinedBatchOptions{Prune: true, PruneNamespaces: []string{"marketing"}})
+		requireTenancyRefusal(t, err, NamespaceReasonNonCanonicalAlias)
+		require.Equal(t, ConfinedBatchResult{}, result)
+		denial, _ := WriteRefusal(err, scope)
+		require.NotNil(t, denial)
+		require.Equal(t, "insufficient permissions", denial.Message)
+		require.False(t, f.jobExists(alias), "no job %q was written", alias)
+		require.False(t, f.job("keep").DeletedAt.Valid, "nothing was pruned")
+	}
+}
+
 func requireOneSubscribingNamespace(t *testing.T, db *gorm.DB, path string) {
 	t.Helper()
 	var namespaces []string

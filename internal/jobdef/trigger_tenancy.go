@@ -51,6 +51,9 @@ const (
 	// NamespaceReasonAliasScope: a job-scoped writer's alias is not exactly
 	// an element of its key's alias scope.
 	NamespaceReasonAliasScope = "alias_outside_key_scope"
+	// NamespaceReasonNonCanonicalAlias: a confined writer's alias carries
+	// leading or trailing whitespace (Unicode spaces included).
+	NamespaceReasonNonCanonicalAlias = "alias_not_canonical"
 )
 
 // TenancyScope confines a write (or, for a manifest export, a read) to
@@ -88,22 +91,31 @@ func (s *TenancyScope) Allows(alias, namespace string) bool {
 	return true
 }
 
-// aliasScopeRefusal refuses a job-scoped writer's write of alias unless the
+// aliasScopeRefusal refuses a confined writer's write of alias unless the
 // alias exactly as it will be stored is canonical (no leading or trailing
-// whitespace, Unicode spaces included) and an element of the key's alias
-// scope. The route middleware and the key-scope check compare trimmed
-// aliases, while the importer and the legacy create store the raw string, so
-// without this a key scoped to "payroll" could create "payroll " (PR #668
-// review). nil for a writer without an alias scope.
+// whitespace, Unicode spaces included) and, for a job-scoped writer, an
+// element of the key's alias scope. The route middleware, the key-scope check
+// and the prune's desired set compare trimmed aliases in places, while the
+// importer and the legacy create store the raw string, so without this a key
+// scoped to "payroll" could create "payroll " (PR #668 review) and a
+// namespace-confined apply with prune could retire the "payroll " it just
+// wrote (review r7). nil for an unrestricted writer (nil scope).
 func aliasScopeRefusal(alias, namespace string, scope *TenancyScope) *NamespaceAllowlistError {
-	if scope == nil || scope.JobAliases == nil {
+	if scope == nil {
 		return nil
 	}
-	if alias == strings.TrimSpace(alias) && slices.Contains(scope.JobAliases, alias) {
+	canonical := alias == strings.TrimSpace(alias)
+	reason := ""
+	switch {
+	case scope.JobAliases != nil && (!canonical || !slices.Contains(scope.JobAliases, alias)):
+		reason = NamespaceReasonAliasScope
+	case !canonical:
+		reason = NamespaceReasonNonCanonicalAlias
+	default:
 		return nil
 	}
 	return &NamespaceAllowlistError{Alias: alias, RequestedNamespace: models.NamespaceOrDefault(namespace),
-		Allowed: slices.Clone(scope.Namespaces), Reason: NamespaceReasonAliasScope}
+		Allowed: slices.Clone(scope.Namespaces), Reason: reason}
 }
 
 // TriggerTenancyError is a rule-2 violation: the write would leave a webhook
@@ -709,8 +721,9 @@ func namespaceDenial(e *NamespaceAllowlistError) *authz.Denial {
 			Message: fmt.Sprintf("insufficient permissions: %s required in namespace %q", models.RoleOperator, namespace)}
 	case NamespaceReasonWebhookPath:
 		return tenancyDenial(e.RequestedNamespace, fmt.Sprintf("insufficient permissions: webhook path %q is subscribed by a job outside your access", e.WebhookPath))
-	case NamespaceReasonAliasScope:
-		// The key-scope gate's own refusal, audited the same way.
+	case NamespaceReasonAliasScope, NamespaceReasonNonCanonicalAlias:
+		// The key-scope gate's own refusal, audited the same way; a
+		// non-canonical alias gets the same generic refusal.
 		return &authz.Denial{Reason: "insufficient_scope", Required: models.RoleOperator,
 			Namespaces: []string{e.RequestedNamespace}, Message: "insufficient permissions"}
 	default:

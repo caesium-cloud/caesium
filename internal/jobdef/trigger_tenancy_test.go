@@ -522,18 +522,98 @@ func TestJobScopedWriterNeedsExactAlias(t *testing.T) {
 				_, err := f.importer.ApplyWithOptions(ctx, taken, nil)
 				require.NoError(t, err)
 				require.NoError(t, CheckJobCreateTx(f.db, "taken", "default", "cron", nil, NewTenancyScope(namespaces, nil)), "a different stored alias")
-				requireTenancyRefusal(t, CheckJobCreateTx(f.db, "taken ", "default", "cron", nil, NewTenancyScope(namespaces, nil)), NamespaceReasonStored)
+				// A namespace-confined writer may not name it at all (review r7).
+				requireTenancyRefusal(t, CheckJobCreateTx(f.db, "taken ", "default", "cron", nil, NewTenancyScope(namespaces, nil)), NamespaceReasonNonCanonicalAlias)
 			}
 		})
 	}
 
-	// Without an alias scope nothing changes (no policy file: no check at all).
+	// An unrestricted writer is unchanged (no policy file: no check at all).
 	f := newTenancyFixture(t, false)
 	def := f.def("payroll", "default", "")
 	def.Metadata.Alias = "payroll "
 	_, err := f.importer.ApplyWithOptions(ctx, def, nil)
 	require.NoError(t, err)
 	require.NoError(t, CheckJobCreateTx(f.db, "other ", "default", "cron", nil, nil))
+}
+
+// Every confined writer writes only canonical aliases (PR #668 review r7):
+// a namespace-confined writer without a key alias scope that names "payroll"
+// with an ASCII or Unicode space is refused inside the transaction on every
+// write path with the generic 403, apply-with-prune included, and nothing is
+// written or pruned. Before, the apply stored "payroll " and the prune, whose
+// protected set held the trimmed "payroll", retired the job it had just
+// written and reported success.
+func TestNamespaceConfinedWriterNeedsCanonicalAlias(t *testing.T) {
+	ctx := context.Background()
+	f := newTenancyFixture(t, false)
+	keep := f.mustApply("keep", "default", "")
+	opts := &ApplyOptions{NamespaceAllowlist: []string{"default"}}
+	scope := NewTenancyScope([]string{"default"}, nil)
+	for _, alias := range nonCanonicalAliases {
+		def := f.def("payroll", "default", "")
+		def.Metadata.Alias = alias
+
+		_, err := f.importer.ApplyWithOptions(ctx, def, opts)
+		requireTenancyRefusal(t, err, NamespaceReasonNonCanonicalAlias)
+		for _, prune := range []bool{false, true} {
+			result, err := f.importer.ApplyConfinedBatch(ctx, []BatchPlan{{Def: def, Opts: opts}},
+				ConfinedBatchOptions{Prune: prune, PruneNamespaces: []string{"default"}})
+			requireTenancyRefusal(t, err, NamespaceReasonNonCanonicalAlias)
+			require.Equal(t, ConfinedBatchResult{}, result)
+		}
+		err = CheckJobCreateTx(f.db, alias, "default", "cron", nil, scope)
+		requireTenancyRefusal(t, err, NamespaceReasonNonCanonicalAlias)
+		require.False(t, f.jobExists(alias), "no job %q was written", alias)
+		require.False(t, f.job("keep").DeletedAt.Valid, "nothing was pruned")
+
+		denial, _ := WriteRefusal(err, scope)
+		require.NotNil(t, denial)
+		require.Equal(t, "insufficient permissions", denial.Message)
+	}
+	require.Equal(t, keep.ID, f.job("keep").ID)
+
+	// The canonical alias still applies and prunes.
+	f.mustApply("gone", "default", "")
+	result, err := f.importer.ApplyConfinedBatch(ctx, []BatchPlan{{Def: f.def("keep", "default", ""), Opts: opts}},
+		ConfinedBatchOptions{Prune: true, PruneNamespaces: []string{"default"}})
+	require.NoError(t, err)
+	require.Equal(t, ConfinedBatchResult{Applied: 1, Pruned: 1}, result)
+	require.True(t, f.job("gone").DeletedAt.Valid)
+}
+
+// The confined prune's protected set is the exact raw aliases the batch
+// persists (PR #668 review r7): a stored "payroll " is protected by
+// "payroll " and not by "payroll", which is another job.
+func TestConfinedPruneDesiredSetIsExact(t *testing.T) {
+	for _, alias := range nonCanonicalAliases {
+		require.Equal(t, map[string]struct{}{alias: {}}, desiredAliasSet([]string{alias}))
+	}
+	f := newTenancyFixture(t, false)
+	for _, alias := range nonCanonicalAliases {
+		def := f.def("payroll", "default", "")
+		def.Metadata.Alias = alias
+		_, err := f.importer.ApplyWithOptions(context.Background(), def, nil)
+		require.NoError(t, err)
+	}
+	prune := func(desired []string) int {
+		t.Helper()
+		rollback := errors.New("roll back")
+		var pruned int
+		err := f.db.Transaction(func(tx *gorm.DB) error {
+			namespaces := []string{"default"}
+			var err error
+			pruned, _, err = f.importer.pruneMissingTx(tx, desiredAliasSet(desired), &PruneOptions{candidateNamespaces: namespaces}, namespaces)
+			if err != nil {
+				return err
+			}
+			return rollback
+		})
+		require.ErrorIs(t, err, rollback)
+		return pruned
+	}
+	require.Equal(t, 0, prune(nonCanonicalAliases), "the exact aliases protect every stored job")
+	require.Equal(t, len(nonCanonicalAliases), prune([]string{"payroll"}), "a trimmed alias protects none of them")
 }
 
 func TestCheckTriggerPatchTx(t *testing.T) {
