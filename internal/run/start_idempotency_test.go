@@ -544,7 +544,13 @@ func TestLookupStartAdmissionRefusesCorruptRunOrQueueOwnership(t *testing.T) {
 					promoted, err := store.StartQueuedRun(t.Context(), pending)
 					require.NoError(t, err)
 					require.NotNil(t, promoted)
-					// Inspect before the dequeuer deletes the retained queue row.
+					// The admission consumed the queue row with the run it
+					// created, so the record's ownership now rests on that run.
+					var left int64
+					require.NoError(t, db.Model(&models.RunQueue{}).Where("id = ?", *queued.QueueID).Count(&left).Error)
+					require.Zero(t, left)
+					require.NoError(t, db.Model(&models.JobRun{}).Where("id = ?", promoted.ID).Update("job_id", other.ID).Error)
+					break
 				}
 				require.NoError(t, db.Model(&models.RunQueue{}).Where("id = ?", *queued.QueueID).Update("job_id", other.ID).Error)
 			}

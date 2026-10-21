@@ -844,7 +844,7 @@ What happens at the cap depends on the kind of run:
 
 | Run kind | At the cap |
 | --- | --- |
-| Cron, HTTP, event, freshness triggers and manual `POST /v1/jobs/:id/run` | Parked in the run queue with `held_reason: namespace_quota`, whatever the job's own concurrency strategy says. The manual start answers `202 {"outcome":"queued","reason":"namespace_quota","queue_id":…}`. |
+| Cron, HTTP, event, freshness triggers and manual `POST /v1/jobs/:id/run` | Parked in the run queue with `held_reason: namespace_quota`, whatever the job's own concurrency strategy says. That includes a trigger firing again while its job's own run holds the slot: the fire is queued, not folded into the running run. The manual start answers `202 {"outcome":"queued","reason":"namespace_quota","queue_id":…}`. |
 | Retry, partition retry, quarantined replay | Refused: `409 {"error":"namespace_quota","namespace":…,"max_concurrent_runs":…}` with `Retry-After: 5`. Nothing is written. |
 | Incident agent `retry_from_failure` / `snooze_retry` | Deferred: the action records `retry deferred` with the quota as its cause, and a snoozed retry re-arms. |
 | Backfill child | Never queued. The backfill waits (backoff up to 15 s) and retries the same date, so its counters stay exact; it stays cancellable while it waits, and a server shutdown leaves it to recovery. |
@@ -855,7 +855,11 @@ one run at a time, so one job's deep queue cannot starve the others; every
 promotion re-checks the quota and the job's own concurrency. A queued run
 belongs to the namespace it was queued in: if its job moves before it starts,
 it is dropped (an idempotent start replays as `dropped`, reason
-`namespace_moved`) rather than started under the new owner. When a policy
+`namespace_moved`) rather than started under the new owner. A promotion
+removes its queued row in the same transaction that creates the run, and only
+while the dequeuer still holds the row's claim, so a node whose claim went
+stale and was taken over by another (on PostgreSQL every node drains) starts
+nothing. When a policy
 file is configured the dequeuer always runs: with `CAESIUM_RUN_QUEUE_ENABLED`
 and `CAESIUM_RUN_QUEUE_DEQUEUER_ENABLED` both off it drains only quota-held
 runs and leaves rows a job's own queue policy parked untouched. A quota added

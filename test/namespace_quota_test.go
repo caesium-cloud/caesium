@@ -817,3 +817,75 @@ func (s *IntegrationTestSuite) TestAuthNamespaceQueuedRequestKeepsItsOwner() {
 	s.Empty(s.fetchRuns(mover.ID), "marketing's request must never start in finance")
 	s.awaitRun(mktHolder.ID, mktRun, runTimeout)
 }
+
+// TestNamespaceQuotaParksSecondHTTPTriggerOfARunningJob: native triggers admit
+// through AdmitRun. With marketing's one slot held by a policy-free job's own
+// HTTP-triggered run, a second fire of the hook used to resume that live run
+// (resetting its in-flight task, which then ran again) instead of reaching
+// Start. It is now parked with held_reason namespace_quota whatever the job's
+// policy (design §10.3): the live task keeps its container, no second run
+// exists while marketing is full, and the parked fire runs once it frees.
+func (s *IntegrationTestSuite) TestNamespaceQuotaParksSecondHTTPTriggerOfARunningJob() {
+	s.requireMarketingQuota()
+	suffix := time.Now().UnixNano()
+	alias := fmt.Sprintf("quota-http-%d", suffix)
+	hook := fmt.Sprintf("quota-http-%d", suffix)
+	def := s.quotaDefinition(alias, "marketing", "sleep 15")
+	def.Trigger = schema.Trigger{Type: "http", Configuration: map[string]any{"path": "/hooks/" + hook}}
+	s.applyDefinition(def)
+	job := s.requireJobByAlias(alias)
+	fire := func() {
+		resp, err := s.doJSONRequest(http.MethodPost, fmt.Sprintf("%s/v1/hooks/%s", s.caesiumURL, hook), strings.NewReader(`{}`))
+		s.Require().NoError(err)
+		body, err := io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+		s.Require().NoError(err)
+		s.Require().Equal(http.StatusAccepted, resp.StatusCode, "fire %s: %s", hook, body)
+	}
+
+	// A run another scenario left behind may park this first fire too; it
+	// starts when that run ends.
+	fire()
+	var live runResponse
+	s.Require().Eventually(func() bool {
+		for _, run := range s.fetchRuns(job.ID) {
+			if run.Status != "running" {
+				continue
+			}
+			detail := s.fetchRun(job.ID, run.ID)
+			if len(detail.Tasks) == 1 && detail.Tasks[0].Status == "running" && detail.Tasks[0].RuntimeID != "" {
+				live = detail
+				return true
+			}
+		}
+		return false
+	}, runTimeout, 250*time.Millisecond, "the first fire never reached a running container")
+	liveTask := live.Tasks[0]
+
+	fire()
+	s.Require().Eventually(func() bool {
+		for _, row := range s.jobQueueREST(job.ID) {
+			if row.HeldReason == "namespace_quota" {
+				return true
+			}
+		}
+		return false
+	}, 30*time.Second, 250*time.Millisecond, "the second fire must be parked by marketing's quota")
+	s.Require().Len(s.fetchRuns(job.ID), 1, "the second fire must not create a run while marketing is full")
+	after := s.fetchRun(job.ID, live.ID)
+	s.Require().Len(after.Tasks, 1)
+	s.Equal(liveTask.RuntimeID, after.Tasks[0].RuntimeID, "the live run's task must not be reset and run again")
+	s.Equal(liveTask.StartedAt, after.Tasks[0].StartedAt)
+
+	s.Equal("succeeded", s.awaitRun(job.ID, live.ID, runTimeout).Status)
+	s.awaitQueueEmpty(job.ID)
+	s.Require().Eventually(func() bool {
+		succeeded := 0
+		for _, run := range s.fetchRuns(job.ID) {
+			if run.Status == "succeeded" {
+				succeeded++
+			}
+		}
+		return succeeded == 2
+	}, runTimeout, 500*time.Millisecond, "the parked fire must run once marketing frees")
+}

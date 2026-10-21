@@ -253,6 +253,38 @@ func TestDequeuerQuotaOnlyWaitsForThePolicy(t *testing.T) {
 	require.Empty(t, rec.launched)
 }
 
+// TestTwoDrainersPromoteAReclaimedRequestOnce: drainer A claims a request and
+// stalls past the stale threshold; drainer B's reaper releases the claim and
+// B promotes the request. When A resumes, its promotion creates nothing: the
+// admission consumes the row only under the claim that is current.
+func TestTwoDrainersPromoteAReclaimedRequestOnce(t *testing.T) {
+	db := testutil.OpenTestDB(t)
+	t.Cleanup(func() { testutil.CloseDB(db) })
+	useDequeuerPolicy(t, dequeuerQuotaPolicy)
+	job := quotaJob(t, db, "two-drainers", "quota-b", nil)
+	seedQueueRow(t, db, job.ID, ptr("quota-b"), true, time.Minute)
+	store := runstorage.NewStore(db)
+
+	stalled, err := store.DequeueNextQuotaRun(t.Context(), job.ID, "node-a/stalled")
+	require.NoError(t, err)
+	require.NotNil(t, stalled)
+	require.NoError(t, db.Model(&models.RunQueue{}).Where("id = ?", stalled.ID).
+		Update("claimed_at", time.Now().UTC().Add(-time.Hour)).Error)
+
+	rec := &launchRecorder{db: db}
+	require.NoError(t, newQuotaDequeuer(db, rec, true).DrainOnce(t.Context()))
+	require.Equal(t, []uuid.UUID{job.ID}, rec.launched, "drainer B reclaims and promotes")
+
+	_, err = store.StartQueuedRun(t.Context(), stalled)
+	require.ErrorIs(t, err, runstorage.ErrQueuedRunClaimLost)
+	var runs int64
+	require.NoError(t, db.Model(&models.JobRun{}).Where("job_id = ?", job.ID).Count(&runs).Error)
+	require.Equal(t, int64(1), runs, "one request, one run")
+	var left int64
+	require.NoError(t, db.Model(&models.RunQueue{}).Count(&left).Error)
+	require.Zero(t, left)
+}
+
 // TestDequeuerQuotaOnlyDrainsRowsAfterThePolicyIsRemoved: a policy file parked
 // quota-held rows, then the operator removed it and restarted. The server
 // starts the quota-only dequeuer for them (runQueueDrainMode) with no policy

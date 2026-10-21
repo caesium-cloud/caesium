@@ -464,6 +464,13 @@ func (d *Dequeuer) promoteOne(ctx context.Context, jobID uuid.UUID, quotaRowsOnl
 	started, err := d.store.StartQueuedRun(ctx, queued)
 	if err != nil {
 		switch {
+		case errors.Is(err, runstorage.ErrQueuedRunClaimLost):
+			// Another drainer reclaimed this row after our claim went stale
+			// and owns it now (or already promoted it). Admission created
+			// nothing; the row is not ours to release.
+			log.Warn("run queue dequeuer lost its claim on a queued run before promoting it",
+				"queue_id", queued.ID, "job_id", queued.JobID, "claim", claim)
+			return promotionEmpty, nil
 		case errors.Is(err, runstorage.ErrRunSkipped):
 			if err := d.store.DeleteQueuedRun(ctx, queued); err != nil {
 				d.release(ctx, queued, claim, "skipped")
@@ -505,9 +512,7 @@ func (d *Dequeuer) promoteOne(ctx context.Context, jobID uuid.UUID, quotaRowsOnl
 		}
 		return promotionJobFull, nil
 	}
-	if err := d.store.DeleteQueuedRun(ctx, queued); err != nil {
-		return promotionEmpty, err
-	}
+	// The admission that created the run consumed the row in its transaction.
 	if err := d.launch(ctx, started); err != nil {
 		return promotionEmpty, err
 	}

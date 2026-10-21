@@ -791,6 +791,11 @@ type startRunRequest struct {
 	// queueID is the run_queue row a fromQueue start is promoting, so the
 	// admission can resolve an idempotent start that was waiting on it.
 	queueID *uuid.UUID
+	// queueClaim is the claimed_by token the promoter holds on that row. The
+	// admission that creates the run deletes the row only while it still
+	// carries this token, in the same transaction, so a promoter whose claim
+	// was reclaimed and re-claimed by another drainer creates nothing.
+	queueClaim string
 	// queuedNamespace is the namespace the promoted run_queue row recorded at
 	// enqueue (nil for a row queued before the column existed). Admission
 	// refuses to promote it into any other namespace.
@@ -1365,6 +1370,19 @@ func (s *Store) admit(tx *gorm.DB, model *models.JobRun, req startRunRequest) (a
 	if model == nil {
 		return admissionResult{}, errors.New("run: admission requires a run model")
 	}
+	if req.fromQueue && req.queueID != nil {
+		// A promoter that no longer holds its row's claim decides nothing for
+		// it (no skip, drop or hold). This read only fails fast: the
+		// authority is consumeQueuedRunClaimTx, which deletes the row with
+		// the run it creates.
+		var claimed int64
+		if err := tx.Model(&models.RunQueue{}).Where("id = ? AND claimed_by = ?", *req.queueID, req.queueClaim).Count(&claimed).Error; err != nil {
+			return admissionResult{}, err
+		}
+		if claimed == 0 {
+			return admissionResult{}, ErrQueuedRunClaimLost
+		}
+	}
 
 	// Freeze ownership in the admission transaction before any path inserts
 	// the run, including terminal-skipped runs and queued promotions.
@@ -1423,17 +1441,13 @@ func (s *Store) admit(tx *gorm.DB, model *models.JobRun, req startRunRequest) (a
 		return admissionResult{}, err
 	}
 	result := admissionResult{decision: admissionNoPolicy, jobAlias: cfg.jobAlias, namespace: model.Namespace}
-	if !ok && req.policyOnly {
-		// AdmitRun inserts nothing for a policy-free job: its caller resumes a
-		// running run or starts one through Start, whose admission applies the
-		// namespace gate below.
-		return result, nil
-	}
 	if quotaLimit > 0 {
 		// The namespace run quota (design §10.3), ahead of the job's own
 		// policy: at cap a trigger-originated start is parked whatever that
 		// policy says, a queued promotion stays queued, and a backfill child
-		// waits in its driver.
+		// waits in its driver. That includes AdmitRun for a policy-free job
+		// (native cron, HTTP and event triggers): its caller would otherwise
+		// resume the job's running run instead of reaching Start.
 		if err := namespaceCapacityLimitTx(tx, model.Namespace, quotaLimit); err != nil {
 			if !errors.Is(err, ErrNamespaceQuota) || req.fromQueue || model.BackfillID != nil {
 				return admissionResult{}, err
@@ -1450,6 +1464,8 @@ func (s *Store) admit(tx *gorm.DB, model *models.JobRun, req startRunRequest) (a
 		}
 	}
 	if !ok {
+		// A policy-free job: AdmitRun inserts nothing (its caller resumes a
+		// running run or starts one through Start); Start inserts the run.
 		return result, nil
 	}
 	if model.BackfillID != nil {
@@ -1656,6 +1672,12 @@ func (s *Store) startRun(req startRunRequest) (*JobRun, error) {
 				return fmt.Errorf("run: unknown admission decision %d", result.decision)
 			}
 
+			if req.fromQueue && req.queueID != nil {
+				// The run exists only if this promoter still owns the row.
+				if err := consumeQueuedRunClaimTx(tx, *req.queueID, req.queueClaim); err != nil {
+					return err
+				}
+			}
 			if err := recordStartOutcomeTx(tx, req, model, attemptAdmission); err != nil {
 				return err
 			}
@@ -1954,15 +1976,44 @@ func (s *Store) StartQueuedRun(ctx context.Context, queued *models.RunQueue) (*J
 	if queued == nil {
 		return nil, errors.New("run: queued run is nil")
 	}
-	return s.startRun(startRunRequest{
+	started, err := s.startRun(startRunRequest{
 		ctx:              ctx,
 		jobID:            queued.JobID,
 		params:           decodeRunParams(queued.Params),
 		priorityOverride: PriorityLabel(queued.Priority),
 		fromQueue:        true,
 		queueID:          &queued.ID,
+		queueClaim:       queued.ClaimedBy,
 		queuedNamespace:  queued.Namespace,
 	})
+	if err == nil && started != nil {
+		// The admission consumed the row with the run it created.
+		s.observeQueuedRunRemoved(queued, true)
+	}
+	return started, err
+}
+
+// ErrQueuedRunClaimLost refuses a promotion whose claim on its run_queue row
+// is gone: the row was reclaimed as stale and claimed (or already promoted)
+// by another drainer. Nothing is written; the row is no longer this
+// promoter's to release.
+var ErrQueuedRunClaimLost = errors.New("run: the queued run's claim was lost to another drainer")
+
+// consumeQueuedRunClaimTx deletes the promoted run_queue row inside the
+// admission transaction that creates its run, but only while the row still
+// carries claim. On PostgreSQL every node drains, and a claimant that paused
+// past the stale threshold can resume after another node reclaimed and
+// promoted the same row; matching zero rows aborts its admission, so one
+// request never yields two runs.
+func consumeQueuedRunClaimTx(tx *gorm.DB, queueID uuid.UUID, claim string) error {
+	result := tx.Where("id = ? AND claimed_by = ?", queueID, claim).Delete(&models.RunQueue{})
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected == 0 {
+		return ErrQueuedRunClaimLost
+	}
+	return nil
 }
 
 func (s *Store) RegisterTask(runID uuid.UUID, task *models.Task, atom *models.Atom, outstanding int) error {
@@ -5961,7 +6012,14 @@ func (s *Store) DeleteQueuedRun(ctx context.Context, queued *models.RunQueue) er
 	if result.Error != nil {
 		return result.Error
 	}
-	if result.RowsAffected > 0 {
+	s.observeQueuedRunRemoved(queued, result.RowsAffected > 0)
+	return nil
+}
+
+// observeQueuedRunRemoved records a queued run's wait (when this caller
+// removed it) and its job's queue depth.
+func (s *Store) observeQueuedRunRemoved(queued *models.RunQueue, removed bool) {
+	if removed {
 		alias, err := s.jobAlias(queued.JobID)
 		if err != nil {
 			log.Warn("run queue: failed to load job alias for wait metric", "job_id", queued.JobID, "error", err)
@@ -5972,7 +6030,6 @@ func (s *Store) DeleteQueuedRun(ctx context.Context, queued *models.RunQueue) er
 	if err := s.observeRunQueueDepth(queued.JobID); err != nil {
 		log.Warn("run queue: failed to observe depth after delete", "job_id", queued.JobID, "error", err)
 	}
-	return nil
 }
 
 func (s *Store) jobAlias(jobID uuid.UUID) (string, error) {

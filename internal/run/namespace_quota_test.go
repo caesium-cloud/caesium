@@ -205,25 +205,92 @@ func TestNamespaceQuotaConcurrentStartsAdmitExactlyCap(t *testing.T) {
 	require.Equal(t, int64(starts-1), held)
 }
 
-// TestNamespaceQuotaAdmitRunDefersToStart: AdmitRun writes nothing for a
-// policy-free job, so the executor's following Start is the one the quota
-// gates — the legacy resume path is untouched.
-func TestNamespaceQuotaAdmitRunDefersToStart(t *testing.T) {
+// TestNamespaceQuotaAdmitRunParksAPolicyFreeTriggerAtCap: a native trigger
+// (cron, HTTP, event) admits through AdmitRun, and for a policy-free job
+// whose run is live the executor used to resume that run (resetting its
+// in-flight tasks) instead of reaching Start. At the namespace's cap AdmitRun
+// now parks the trigger with held_reason namespace_quota and leaves the live
+// run alone (design §10.3). Under the cap, and with no policy file, it still
+// writes nothing and the legacy resume path is untouched.
+func TestNamespaceQuotaAdmitRunParksAPolicyFreeTriggerAtCap(t *testing.T) {
 	db, store := openIdempotencyStore(t)
 	useAccessPolicy(t, quotaPolicy)
-	holder := createNamespacedJob(t, db, "quota-admit-holder", "quota-a", nil)
-	_, err := store.Start(holder.ID, nil)
-	require.NoError(t, err)
 	job := createNamespacedJob(t, db, "quota-admit", "quota-a", nil)
+	live, err := store.Start(job.ID, nil)
+	require.NoError(t, err)
+	before := quotaDeferrals(t, "quota-a")
 
 	admitted, handled, err := store.AdmitRun(job.ID, nil)
+	require.ErrorIs(t, err, ErrRunQueuedByQuota)
+	require.True(t, handled, "the executor must not fall through to resuming the live run")
+	require.Nil(t, admitted)
+	rows := quotaHeldRows(t, db, job.ID)
+	require.Len(t, rows, 1)
+	require.True(t, rows[0].IsQuotaHeld())
+	require.Equal(t, before+1, quotaDeferrals(t, "quota-a"))
+	var liveRow models.JobRun
+	require.NoError(t, db.First(&liveRow, "id = ?", live.ID).Error)
+	require.Equal(t, string(StatusRunning), liveRow.Status)
+	require.Equal(t, int64(1), countJobRuns(t, db, job.ID))
+
+	// Under the cap (quota-b has none) nothing is written.
+	free := createNamespacedJob(t, db, "quota-admit-free", "quota-b", nil)
+	admitted, handled, err = store.AdmitRun(free.ID, nil)
 	require.NoError(t, err)
 	require.False(t, handled)
 	require.Nil(t, admitted)
-	require.Empty(t, quotaHeldRows(t, db, job.ID), "AdmitRun must not park a policy-free start")
+	require.Empty(t, quotaHeldRows(t, db, free.ID))
 
+	// Without a policy file, byte-identical to before: no gate at all.
+	policy.SetProcessHolder(nil)
+	admitted, handled, err = store.AdmitRun(job.ID, nil)
+	require.NoError(t, err)
+	require.False(t, handled)
+	require.Nil(t, admitted)
+	require.Len(t, quotaHeldRows(t, db, job.ID), 1, "no new row without a policy")
+}
+
+// TestQueuedPromotionConsumesOnlyItsOwnClaim: promotion deletes its run_queue
+// row inside the admission transaction, and only while the row still carries
+// the promoter's claim. A claimant whose claim went stale and was reclaimed
+// and re-claimed by another drainer creates no run, before or after the new
+// claimant promotes: one request, one run.
+func TestQueuedPromotionConsumesOnlyItsOwnClaim(t *testing.T) {
+	db, store := openIdempotencyStore(t)
+	useAccessPolicy(t, quotaPolicy)
+	holder := createNamespacedJob(t, db, "claim-holder", "quota-a", nil)
+	holderRun, err := store.Start(holder.ID, nil)
+	require.NoError(t, err)
+	job := createNamespacedJob(t, db, "claim-job", "quota-a", nil)
 	_, err = store.Start(job.ID, nil)
 	require.ErrorIs(t, err, ErrRunQueuedByQuota)
+	require.NoError(t, db.Model(&models.JobRun{}).Where("id = ?", holderRun.ID).Update("status", string(StatusSucceeded)).Error)
+
+	stale, err := store.DequeueNextQuotaRun(t.Context(), job.ID, "node-a/1")
+	require.NoError(t, err)
+	require.NotNil(t, stale)
+	// The stale-claim reaper (another node's dequeuer) releases it…
+	require.NoError(t, db.Model(&models.RunQueue{}).Where("id = ?", stale.ID).
+		Updates(map[string]any{"claimed_by": "", "claimed_at": nil}).Error)
+	// …and that node claims it.
+	current, err := store.DequeueNextQuotaRun(t.Context(), job.ID, "node-b/1")
+	require.NoError(t, err)
+	require.NotNil(t, current)
+	require.Equal(t, stale.ID, current.ID)
+
+	_, err = store.StartQueuedRun(t.Context(), stale)
+	require.ErrorIs(t, err, ErrQueuedRunClaimLost, "the stale claimant resumes first")
+	require.Zero(t, countJobRuns(t, db, job.ID), "its admission rolled back")
+	require.Len(t, quotaHeldRows(t, db, job.ID), 1, "the row stays with its current claimant")
+
+	started, err := store.StartQueuedRun(t.Context(), current)
+	require.NoError(t, err)
+	require.NotNil(t, started)
+	require.Empty(t, quotaHeldRows(t, db, job.ID), "the row is consumed with the run it created")
+
+	_, err = store.StartQueuedRun(t.Context(), stale)
+	require.ErrorIs(t, err, ErrQueuedRunClaimLost, "the stale claimant resumes last")
+	require.Equal(t, int64(1), countJobRuns(t, db, job.ID))
 }
 
 // TestNamespaceQuotaCountsReplaysAndBackfills: quarantined replays and
