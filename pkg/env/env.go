@@ -111,6 +111,27 @@ func validate() error {
 		return err
 	}
 
+	if err := validateAuthCLIKeyTTL(); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// MaxAuthCLIKeyTTL is the longest lifetime CAESIUM_AUTH_CLI_KEY_TTL may give
+// a user-bound API key (identity-and-access E4); internal/auth.MaxUserKeyTTL
+// enforces the same bound at mint time.
+const MaxAuthCLIKeyTTL = 7 * 24 * time.Hour
+
+// validateAuthCLIKeyTTL bounds the user-bound key lifetime: every such key
+// expires, and never later than MaxAuthCLIKeyTTL after it is minted.
+func validateAuthCLIKeyTTL() error {
+	if variables.AuthCLIKeyTTL <= 0 {
+		return errors.New("CAESIUM_AUTH_CLI_KEY_TTL must be greater than 0")
+	}
+	if variables.AuthCLIKeyTTL > MaxAuthCLIKeyTTL {
+		return fmt.Errorf("CAESIUM_AUTH_CLI_KEY_TTL must be at most %s (7 days)", MaxAuthCLIKeyTTL)
+	}
 	return nil
 }
 
@@ -380,6 +401,7 @@ type Environment struct {
 	AuthSessionIdleTTL           time.Duration `envconfig:"AUTH_SESSION_IDLE_TTL" default:"8h"`
 	AuthSessionAbsoluteTTL       time.Duration `envconfig:"AUTH_SESSION_ABSOLUTE_TTL" default:"24h"`
 	AuthSessionCookieName        string        `envconfig:"AUTH_SESSION_COOKIE_NAME" default:"caesium_session"`
+	AuthCLIKeyTTL                time.Duration `envconfig:"AUTH_CLI_KEY_TTL" default:"12h"` // user-bound (caesium login) key lifetime; at most 7d
 	AuthRoleMapping              string        `envconfig:"AUTH_ROLE_MAPPING" default:""`
 	AuthDefaultRole              string        `envconfig:"AUTH_DEFAULT_ROLE" default:""`
 	AuthPolicyFile               string        `envconfig:"AUTH_POLICY_FILE" default:""`               // access policy file; unset keeps the role-mapping translation

@@ -1206,6 +1206,7 @@ func initAuth(ctx context.Context, vars env.Environment, runAsync func(func())) 
 		auth.WithKeyHashSecret(vars.AuthKeyHashSecret),
 		auth.WithPolicySource(policySource),
 		auth.WithPolicyHolder(policyHolder),
+		auth.WithUserKeyTTL(vars.AuthCLIKeyTTL),
 	)
 	auditor := auth.NewAuditLogger(conn)
 	limiter := auth.NewRateLimiter(vars.AuthRateLimitPerMinute, time.Minute)

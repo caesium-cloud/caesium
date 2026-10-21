@@ -131,6 +131,37 @@ func TestUserGetCommandPrintsDetail(t *testing.T) {
 	require.Equal(t, float64(3), out["sessions_total"])
 }
 
+func TestUserCommandsReportUserBoundKeys(t *testing.T) {
+	t.Cleanup(func() { userGetFlags.reset(); userDisableFlags.reset(); userLogoutFlags.reset() })
+	detail := cliUserJSON[:len(cliUserJSON)-1] + `,"sessions":[],"sessions_total":0,
+"user_keys":[{"id":"33333333-3333-3333-3333-333333333333","key_prefix":"csk_user_AbCd","description":"laptop",
+"created_at":"2026-10-16T09:00:00Z","expires_at":"2026-10-16T21:00:00Z","last_used_at":null}],"user_keys_total":2}`
+	server, _ := userAdminServer(t, http.StatusOK, nil, detail)
+	userGetFlags.server = server.URL
+	stdout, _, err := runUserCmd(t, userGetCmd, "11111111-1111-1111-1111-111111111111")
+	require.NoError(t, err)
+	require.Contains(t, stdout, "active sessions: 0\nactive user-bound keys: 2\n")
+	require.Contains(t, stdout, "33333333-3333-3333-3333-333333333333")
+	require.Contains(t, stdout, "csk_user_AbCd")
+	require.Contains(t, stdout, "2026-10-16T21:00:00Z")
+	require.Contains(t, stdout, "laptop")
+	require.Contains(t, stdout, "showing the 1 newest of 2 user-bound keys")
+	require.NotContains(t, stdout, "IDLE EXPIRES", "no session table without sessions")
+
+	changed := `{"user":` + cliUserJSON + `,"changed":true,"sessions_revoked":1,"keys_revoked":2}`
+	server, _ = userAdminServer(t, http.StatusOK, nil, changed)
+	userDisableFlags.server = server.URL
+	stdout, _, err = runUserCmd(t, userDisableCmd, "11111111-1111-1111-1111-111111111111")
+	require.NoError(t, err)
+	require.Equal(t, "user 11111111-1111-1111-1111-111111111111 (ada@example.com) disabled; 1 session(s) and 2 user-bound key(s) revoked\n", stdout)
+
+	server, _ = userAdminServer(t, http.StatusOK, nil, `{"user_id":"11111111-1111-1111-1111-111111111111","sessions_revoked":0,"keys_revoked":1}`)
+	userLogoutFlags.server = server.URL
+	stdout, _, err = runUserCmd(t, userLogoutCmd, "11111111-1111-1111-1111-111111111111")
+	require.NoError(t, err)
+	require.Equal(t, "revoked 0 session(s) and 1 user-bound key(s) of user 11111111-1111-1111-1111-111111111111\n", stdout)
+}
+
 func TestUserDisableEnableLogoutCommands(t *testing.T) {
 	t.Cleanup(func() { userDisableFlags.reset(); userEnableFlags.reset(); userLogoutFlags.reset() })
 	changed := `{"user":` + cliUserJSON + `,"changed":true,"sessions_revoked":2}`
