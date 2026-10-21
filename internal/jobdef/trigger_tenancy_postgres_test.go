@@ -28,6 +28,13 @@ import (
 
 func openTenancyPostgres(t *testing.T) *gorm.DB {
 	t.Helper()
+	return openTenancyPostgresPool(t, 8)
+}
+
+// openTenancyPostgresPool is openTenancyPostgres with a writer pool of
+// maxOpen connections.
+func openTenancyPostgresPool(t *testing.T, maxOpen int) *gorm.DB {
+	t.Helper()
 	dsn := strings.TrimSpace(os.Getenv("CAESIUM_TEST_POSTGRES_DSN"))
 	if dsn == "" {
 		t.Skip("CAESIUM_TEST_POSTGRES_DSN is not set; PostgreSQL tenancy race tests are opt-in")
@@ -52,7 +59,7 @@ func openTenancyPostgres(t *testing.T) *gorm.DB {
 	require.NoError(t, err)
 	sqlDB, err := db.DB()
 	require.NoError(t, err)
-	sqlDB.SetMaxOpenConns(8)
+	sqlDB.SetMaxOpenConns(maxOpen)
 	t.Cleanup(func() {
 		require.NoError(t, sqlDB.Close())
 		require.NoError(t, admin.Exec("DROP SCHEMA "+schemaName+" CASCADE").Error)
@@ -394,6 +401,93 @@ func TestPostgresConfinedUpdateSeesRunAdmittedDuringItsLock(t *testing.T) {
 		t.Fatal("the batch did not finish")
 	}
 	require.Equal(t, before, f.job(busy).UpdatedAt, "the running job was not rewritten")
+}
+
+// With a writer pool of one connection, which the confined batch holds for
+// its whole transaction, the running check still answers at once (PR #668
+// review r5): an idle job is updated and an idle candidate pruned promptly,
+// and a running one is still refused.
+func TestPostgresConfinedRunCheckWithWriterPoolOfOne(t *testing.T) {
+	db := openTenancyPostgresPool(t, 1)
+	f := &tenancyFixture{t: t, db: db, importer: NewImporter(db)}
+	idle, gone, busy := uniqueName("idle"), uniqueName("gone"), uniqueName("busy")
+	f.mustApply(idle, "marketing", "")
+	f.mustApply(gone, "marketing", "")
+	busyJob := f.mustApply(busy, "finance", "")
+	require.NoError(t, db.Create(&models.JobRun{ID: uuid.New(), JobID: busyJob.ID, Namespace: "finance", Status: "running"}).Error)
+	ctx := context.Background()
+
+	start := time.Now()
+	mkt := &ApplyOptions{NamespaceAllowlist: []string{"marketing"}}
+	result, err := f.importer.ApplyConfinedBatch(ctx, []BatchPlan{{Def: f.def(idle, "marketing", ""), Opts: mkt}},
+		ConfinedBatchOptions{Prune: true, PruneNamespaces: []string{"marketing"}})
+	require.NoError(t, err)
+	require.Equal(t, ConfinedBatchResult{Applied: 1, Pruned: 1}, result)
+	require.Less(t, time.Since(start), 5*time.Second, "the check never waits for a writer connection")
+	require.True(t, f.job(gone).DeletedAt.Valid)
+
+	start = time.Now()
+	fin := &ApplyOptions{NamespaceAllowlist: []string{"finance"}}
+	_, err = f.importer.ApplyConfinedBatch(ctx, []BatchPlan{{Def: f.def(busy, "finance", ""), Opts: fin}}, ConfinedBatchOptions{})
+	require.ErrorIs(t, err, ErrJobRunning)
+	require.Less(t, time.Since(start), 5*time.Second)
+}
+
+// Every writer connection busy: the batch holds one and two more writers of
+// the same alias hold the rest while they wait for its advisory lock. The
+// batch's running check still answers at once (it reads through its own side
+// pool), the batch commits, and the waiting writers then apply in turn.
+func TestPostgresConfinedRunCheckWithSaturatedWriterPool(t *testing.T) {
+	const poolSize = 3
+	db := openTenancyPostgresPool(t, poolSize)
+	f := &tenancyFixture{t: t, db: db, importer: NewImporter(db)}
+	alias := uniqueName("contested")
+	f.mustApply(alias, "marketing", "")
+	def := f.def(alias, "marketing", "")
+	opts := &ApplyOptions{NamespaceAllowlist: []string{"marketing"}}
+	apply := func() error {
+		_, err := f.importer.ApplyConfinedBatch(context.Background(), []BatchPlan{{Def: def, Opts: opts}}, ConfinedBatchOptions{})
+		return err
+	}
+
+	monitor, err := gorm.Open(postgres.Open(db.Dialector.(*postgres.Dialector).DSN), &gorm.Config{})
+	require.NoError(t, err)
+	monitorSQL, err := monitor.DB()
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = monitorSQL.Close() })
+
+	waiters := make(chan error, poolSize-1)
+	var once sync.Once
+	lockSessionHook = func([]string) {
+		once.Do(func() {
+			for range poolSize - 1 {
+				go func() { waiters <- apply() }()
+			}
+			deadline := time.Now().Add(10 * time.Second)
+			for {
+				var parked int64
+				require.NoError(t, monitor.Raw("SELECT count(*) FROM pg_stat_activity WHERE wait_event_type = 'Lock' AND wait_event = 'advisory'").Scan(&parked).Error)
+				if parked >= poolSize-1 {
+					return
+				}
+				require.True(t, time.Now().Before(deadline), "the other writers never parked on the advisory lock")
+				time.Sleep(20 * time.Millisecond)
+			}
+		})
+	}
+	t.Cleanup(func() { lockSessionHook = nil })
+
+	start := time.Now()
+	require.NoError(t, apply())
+	require.Less(t, time.Since(start), 10*time.Second, "the check never waits for a writer connection")
+	for range poolSize - 1 {
+		select {
+		case err := <-waiters:
+			require.NoError(t, err)
+		case <-time.After(30 * time.Second):
+			t.Fatal("a parked writer never applied")
+		}
+	}
 }
 
 func requireOneSubscribingNamespace(t *testing.T, db *gorm.DB, path string) {

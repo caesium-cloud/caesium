@@ -32,6 +32,7 @@ import (
 	"github.com/caesium-cloud/caesium/pkg/log"
 	"github.com/google/uuid"
 	"gorm.io/datatypes"
+	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 )
@@ -552,10 +553,52 @@ func existingBatchJobsTx(tx *gorm.DB, aliases []string) ([]*models.Job, error) {
 	return jobs, nil
 }
 
-// currentRunCheckTimeout bounds the confined prune's out-of-snapshot running
-// check, which needs a second pooled connection while the batch holds one: a
-// starved pool fails the apply (nothing is pruned) instead of waiting forever.
+// currentRunCheckTimeout bounds the confined batch's out-of-snapshot running
+// check; an expired check fails the apply (nothing is written).
 const currentRunCheckTimeout = 15 * time.Second
+
+// runCheckPoolSize caps each side pool the confined running check reads
+// through (see runCheckDB).
+const runCheckPoolSize = 2
+
+var (
+	runCheckPoolsMu sync.Mutex
+	// runCheckPools are the side pools of runCheckDB, one per DSN.
+	runCheckPools = map[string]*gorm.DB{}
+)
+
+// runCheckDB is the connection pool the confined running check reads
+// job_runs through: a small pool of its own, opened lazily from the writer's
+// PostgreSQL DSN and kept, never the writer pool. The batch holds one writer
+// connection for its whole transaction and other writers park theirs on its
+// advisory locks, so borrowing a second writer connection could wait on the
+// batch itself (a pool of one always would). The check is a plain READ
+// COMMITTED read that takes no locks, so a side-pool connection never waits
+// on a writer: at worst it waits for another check's quick read.
+func (i *Importer) runCheckDB() (*gorm.DB, error) {
+	dialector, ok := i.db.Dialector.(*postgres.Dialector)
+	if !ok || dialector.Config == nil || strings.TrimSpace(dialector.DSN) == "" {
+		return nil, errors.New("jobdef: the confined running check needs the PostgreSQL DSN the writer was opened with")
+	}
+	dsn := dialector.DSN
+	runCheckPoolsMu.Lock()
+	defer runCheckPoolsMu.Unlock()
+	if pool, ok := runCheckPools[dsn]; ok {
+		return pool, nil
+	}
+	pool, err := gorm.Open(postgres.Open(dsn), &gorm.Config{Logger: i.db.Logger})
+	if err != nil {
+		return nil, fmt.Errorf("jobdef: open the running-check pool: %w", err)
+	}
+	sqlDB, err := pool.DB()
+	if err != nil {
+		return nil, err
+	}
+	sqlDB.SetMaxOpenConns(runCheckPoolSize)
+	sqlDB.SetMaxIdleConns(1)
+	runCheckPools[dsn] = pool
+	return pool, nil
+}
 
 // beforeConfinedPrune, when set (tests only), runs inside ApplyConfinedBatch's
 // transaction after the definitions are applied and before the prune locks
@@ -568,9 +611,10 @@ var beforeConfinedPrune func()
 // SQLite and dqlite transactions are serialisable). Run admission inserts a
 // job_runs row without writing the job row, so a run committed after the
 // snapshot neither conflicts with the candidate row locks nor shows in the
-// in-transaction check. This read runs after the candidates are locked, on
-// its own connection at READ COMMITTED, so it sees every run committed before
-// it, as the unrestricted (READ COMMITTED) prune's check does. A run admitted
+// in-transaction check. This read runs after the jobs are locked, at READ
+// COMMITTED on a side pool of its own (runCheckDB), so it sees every run
+// committed before it, as the unrestricted (READ COMMITTED) prune's check
+// does, and never needs a spare writer connection. A run admitted
 // after it is the same residual the unrestricted prune has: closing it needs
 // admission to take a lock that conflicts with the candidate row locks.
 func (i *Importer) confinedRunCheck(ctx context.Context) func(jobs []*models.Job) error {
@@ -578,9 +622,13 @@ func (i *Importer) confinedRunCheck(ctx context.Context) func(jobs []*models.Job
 		return nil
 	}
 	return func(jobs []*models.Job) error {
+		pool, err := i.runCheckDB()
+		if err != nil {
+			return err
+		}
 		checkCtx, cancel := context.WithTimeout(ctx, currentRunCheckTimeout)
 		defer cancel()
-		return i.ensureJobsNotRunningTx(i.db.WithContext(checkCtx), jobs)
+		return i.ensureJobsNotRunningTx(pool.WithContext(checkCtx), jobs)
 	}
 }
 
