@@ -7,6 +7,7 @@ import (
 	"errors"
 	"strings"
 
+	"github.com/caesium-cloud/caesium/internal/auth/policy"
 	"github.com/caesium-cloud/caesium/internal/event"
 	"github.com/caesium-cloud/caesium/internal/models"
 	runstorage "github.com/caesium-cloud/caesium/internal/run"
@@ -16,9 +17,14 @@ import (
 	"gorm.io/gorm"
 )
 
-// Routing is namespace-aware (identity-and-access D4, design §10.4): a
-// notification policy delivers only the events its own namespace owns, and a
-// cluster-shared policy (namespace "*") delivers every event.
+// Routing is namespace-aware (identity-and-access D4, design §10.4) while a
+// policy file is loaded: a notification policy delivers only the events its
+// own namespace owns, and a cluster-shared policy (namespace "*") delivers
+// every event. With no policy file (design §§1/15: behaviour unchanged) every
+// policy matches by event type and filters and receives the event as built,
+// as before D4. In both modes a delivery needs an existing, enabled channel
+// visible from the policy (the create and patch rule, so no reachable row is
+// affected).
 //
 // An event's owner is the persisted ownership of what it is about, never the
 // job's current namespace when something more specific exists:
@@ -78,7 +84,10 @@ func RouteEvent(ctx context.Context, db *gorm.DB, evt event.Event) ([]Delivery, 
 		return nil, err
 	}
 
-	router := eventRouter{ctx: ctx, db: db, evt: evt}
+	// Namespace isolation needs a policy file (design §§1/15: with none,
+	// behaviour is unchanged), read at the point of use as B2's declared
+	// namespaces are.
+	router := eventRouter{ctx: ctx, db: db, evt: evt, isolated: policy.ProcessHolder().FileBacked()}
 	var matched []Delivery
 	for _, p := range candidates {
 		if !policyMatchesEvent(p, evt) {
@@ -161,6 +170,10 @@ type eventRouter struct {
 	ctx context.Context
 	db  *gorm.DB
 	evt event.Event
+	// isolated: a policy file is loaded, so policies match only the events
+	// their namespace owns. Without one every policy matches as it always
+	// did, and receives the event unchanged.
+	isolated bool
 
 	owner    *eventOwner
 	contract map[string]contractScope // per destination namespace
@@ -183,7 +196,7 @@ type contractScope struct {
 // scopeFor decides whether policy p may receive the event and returns the
 // event as p's destination may see it.
 func (r *eventRouter) scopeFor(p models.NotificationPolicy) (event.Event, bool) {
-	if p.Namespace == models.ClusterNamespace {
+	if p.Namespace == models.ClusterNamespace || !r.isolated {
 		return r.evt, true
 	}
 	owner := r.resolveOwner()

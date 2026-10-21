@@ -3,8 +3,11 @@ package incident
 import (
 	"context"
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"testing"
 
+	"github.com/caesium-cloud/caesium/internal/auth/policy"
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
@@ -30,6 +33,18 @@ func seedNamespacedProfile(t *testing.T, db *gorm.DB, name, namespace string, al
 	}).Error)
 }
 
+// withPolicyFile serves a policy file for the test: the namespace rule
+// applies only while one is loaded (design §§1/15).
+func withPolicyFile(t *testing.T) {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "policy.yaml")
+	require.NoError(t, os.WriteFile(path, []byte("apiVersion: v1\nkind: AccessPolicy\nnamespaces:\n  marketing: {}\n  finance: {}\n"), 0o600))
+	holder, err := policy.LoadFile(t.Context(), policy.HolderOptions{Path: path})
+	require.NoError(t, err)
+	policy.SetProcessHolder(holder)
+	t.Cleanup(func() { policy.SetProcessHolder(nil) })
+}
+
 func setJobProfile(t *testing.T, db *gorm.DB, jobID uuid.UUID, profile string) {
 	t.Helper()
 	block, err := json.Marshal(map[string]any{"profile": profile})
@@ -38,6 +53,7 @@ func setJobProfile(t *testing.T, db *gorm.DB, jobID uuid.UUID, profile string) {
 }
 
 func TestResolvePlaybookRefusesProfilesOutsideTheIncidentNamespace(t *testing.T) {
+	withPolicyFile(t)
 	db, store, _, _ := newExecutorTest(t)
 	seedNamespacedProfile(t, db, "mkt-profile", "marketing", ActionTypePauseJob)
 	seedNamespacedProfile(t, db, "fin-profile", "finance", ActionTypePauseJob)
@@ -72,6 +88,7 @@ func TestResolvePlaybookRefusesProfilesOutsideTheIncidentNamespace(t *testing.T)
 }
 
 func TestResolvePlaybookRefusesADefaultProfileOutsideTheIncidentNamespace(t *testing.T) {
+	withPolicyFile(t)
 	db, store, _, _ := newExecutorTest(t)
 	seedNamespacedProfile(t, db, "corp-default", "finance", ActionTypePauseJob)
 	seedNamespacedProfile(t, db, "shared-default", models.ClusterNamespace, ActionTypePauseJob)
@@ -100,9 +117,39 @@ func TestResolvePlaybookRefusesADefaultProfileOutsideTheIncidentNamespace(t *tes
 	require.Equal(t, decisionDeny, foreign.decide(ActionTypeRetryFromFailure, TierAutonomous),
 		"the refused default denies tier 1 under a job block too")
 	require.Equal(t, decisionExecute, ResolvePlaybook(context.Background(), db, inc.ID, "mkt-default").decide(ActionTypePauseJob, TierGated))
+
+	// The job's own autonomy block must not widen a refused default: the
+	// refusal fails resolution before any job override is applied.
+	require.NoError(t, db.Model(&models.Job{}).Where("id = ?", inc.JobID).
+		Update("remediation", datatypes.JSON(`{"classes":["unknown"],"autonomy":{"allow":["retry_from_failure","pause_job"]}}`)).Error)
+	overridden := ResolvePlaybook(context.Background(), db, inc.ID, "corp-default")
+	require.Equal(t, DenyAllPlaybook(), overridden)
+	require.Equal(t, decisionDeny, overridden.decide(ActionTypeRetryFromFailure, TierAutonomous))
+	require.Equal(t, decisionExecute, ResolvePlaybook(context.Background(), db, inc.ID, "mkt-default").decide(ActionTypeRetryFromFailure, TierAutonomous),
+		"a visible default still takes the job's override")
+}
+
+// TestProfileResolutionIgnoresNamespacesWithoutAPolicyFile: with no policy
+// file (design §§1/15) profiles resolve by name alone, as before D4.
+func TestProfileResolutionIgnoresNamespacesWithoutAPolicyFile(t *testing.T) {
+	policy.SetProcessHolder(nil)
+	db, store, _, _ := newExecutorTest(t)
+	seedNamespacedProfile(t, db, "fin-profile", "finance", ActionTypePauseJob)
+
+	inc, _, _ := seedJobIncident(t, db, store, "gate", "")
+	require.NoError(t, db.Model(&models.Incident{}).Where("id = ?", inc.ID).Update("namespace", "marketing").Error)
+
+	require.Equal(t, decisionExecute, ResolvePlaybook(context.Background(), db, inc.ID, "fin-profile").decide(ActionTypePauseJob, TierGated),
+		"the deployment default resolves by name")
+	setJobProfile(t, db, inc.JobID, "fin-profile")
+	require.Equal(t, decisionExecute, ResolvePlaybook(context.Background(), db, inc.ID, "").decide(ActionTypePauseJob, TierGated),
+		"a job-declared profile resolves by name")
+	require.Equal(t, "fin-profile", ResolveProfile(context.Background(), db, inc.ID, "").Name)
+	require.Equal(t, "fin-profile", ResolveProfile(context.Background(), db, uuid.New(), "fin-profile").Name)
 }
 
 func TestResolveProfileRefusesProfilesOutsideTheIncidentNamespace(t *testing.T) {
+	withPolicyFile(t)
 	db, store, _, _ := newExecutorTest(t)
 	seedNamespacedProfile(t, db, "mkt-profile", "marketing")
 	seedNamespacedProfile(t, db, "fin-profile", "finance")

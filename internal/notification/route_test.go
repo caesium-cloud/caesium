@@ -3,10 +3,13 @@ package notification
 import (
 	"context"
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"slices"
 	"testing"
 	"time"
 
+	"github.com/caesium-cloud/caesium/internal/auth/policy"
 	"github.com/caesium-cloud/caesium/internal/event"
 	"github.com/caesium-cloud/caesium/internal/jobdef/testutil"
 	"github.com/caesium-cloud/caesium/internal/models"
@@ -26,7 +29,21 @@ type routeFixture struct {
 	db *gorm.DB
 }
 
+// newRouteFixture serves a policy file: namespace isolation applies only
+// while one is loaded (design §§1/15). newLegacyRouteFixture serves none.
 func newRouteFixture(t *testing.T) *routeFixture {
+	f := newLegacyRouteFixture(t)
+	path := filepath.Join(t.TempDir(), "policy.yaml")
+	require.NoError(t, os.WriteFile(path, []byte("apiVersion: v1\nkind: AccessPolicy\nnamespaces:\n  marketing: {}\n  finance: {}\n"), 0o600))
+	holder, err := policy.LoadFile(t.Context(), policy.HolderOptions{Path: path})
+	require.NoError(t, err)
+	policy.SetProcessHolder(holder)
+	return f
+}
+
+func newLegacyRouteFixture(t *testing.T) *routeFixture {
+	policy.SetProcessHolder(nil)
+	t.Cleanup(func() { policy.SetProcessHolder(nil) })
 	db := testutil.OpenTestDB(t)
 	t.Cleanup(func() { testutil.CloseDB(db) })
 	return &routeFixture{t: t, db: db}
@@ -119,11 +136,44 @@ func TestRouteEventMatchesTheOwningNamespaceAndShared(t *testing.T) {
 	got := f.route(event.Event{Type: event.TypeRunCompleted, JobID: mkt, RunID: run, Payload: runPayload(t, "mkt-job", nil)})
 	require.Equal(t, []string{"pol-*", "pol-marketing"}, policyNames(got))
 
-	// A default policy never receives another namespace's events, with or
-	// without a policy file (namespace matching never consults the holder).
+	// With a policy file a default policy never receives another namespace's
+	// events.
 	fin := f.job("fin-job", "finance", nil)
 	got = f.route(event.Event{Type: event.TypeRunCompleted, JobID: fin, RunID: f.run(fin, "finance")})
 	require.Equal(t, []string{"pol-*", "pol-finance"}, policyNames(got))
+}
+
+// TestRouteEventWithoutAPolicyFileMatchesAsBefore: with no policy file
+// (design §§1/15) every policy matches by event type and filters, whatever
+// its namespace and the event's, and receives the event exactly as built:
+// no ownership, label, contract or baseline scoping. Channel eligibility
+// (existing, enabled, visible from the policy) still applies.
+func TestRouteEventWithoutAPolicyFileMatchesAsBefore(t *testing.T) {
+	f := newLegacyRouteFixture(t)
+	f.policies(event.TypeRunCompleted, "*", "marketing", "finance", "default")
+	f.policy("pol-fin-labels", "finance", f.channel("ch-fin-labels", "finance", true), event.TypeRunCompleted, `{"labels":{"owner":"finance-team"}}`)
+	f.policy("pol-foreign-channel", "default", f.channel("ch-foreign", "finance", true), event.TypeRunCompleted, "")
+	job := f.job("moved-job", "finance", map[string]any{"owner": "finance-team"})
+	run := f.run(job, "marketing")
+	legacy := map[string]any{"assertion": "deltaFromBaseline", "observed": 5, "baseline_median": 10, "message": "below the baseline median 10"}
+	evt := event.Event{Type: event.TypeRunCompleted, JobID: job, RunID: run, Payload: mustJSON(t, map[string]any{
+		"job_alias": "moved-job", "job_labels": map[string]string{"owner": "finance-team"}, "data_violations": []map[string]any{legacy}})}
+
+	got := f.route(evt)
+	require.Equal(t, []string{"pol-*", "pol-default", "pol-fin-labels", "pol-finance", "pol-marketing"}, policyNames(got),
+		"every namespace's policy matches a marketing run of a job now in finance, as before D4")
+	for name, d := range got {
+		require.Equal(t, evt, d.Event, "%s receives the event as built", name)
+	}
+
+	// Contract breaks are not scoped either.
+	f.policy("pol-cb-fin", "finance", f.channel("ch-cb-fin", "finance", true), event.TypeContractBreakDeclared, "")
+	f.job("producer-l", "marketing", nil)
+	consumer := f.consumerJob("consumer-l", "marketing")
+	payload := contractPayload(t, "consumer-l", [2]string{"producer-l", "consumer-l"})
+	got = f.route(event.Event{Type: event.TypeContractBreakDeclared, JobID: consumer, Payload: payload})
+	require.Equal(t, []string{"pol-cb-fin"}, policyNames(got))
+	require.Equal(t, payload, got["pol-cb-fin"].Event.Payload)
 }
 
 // TestRouteEventAllDefaultIsByteIdentical: a deployment that keeps everything

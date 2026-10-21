@@ -117,8 +117,10 @@ policy`. For a namespace-confined caller the lists return its namespaces'
 objects plus the `*` ones, and writes need operator in the object's namespace
 (at `*` for a `*` object). Names are unique across namespaces: a create or
 rename onto a taken name returns 409 `conflict`, and a delete releases the
-name (a name may not contain `~deleted~`, which marks deleted objects). A policy delivers only events its own namespace owns (a `*` policy
-delivers all); see the identity-and-access guide's Shared objects section.
+name (a name may not contain `~deleted~`, which marks deleted objects).
+While a policy file is loaded, a policy delivers only events its own namespace
+owns (a `*` policy delivers all); with none, routing is unchanged. See the
+identity-and-access guide's Shared objects section.
 
 ## System and operator surfaces
 

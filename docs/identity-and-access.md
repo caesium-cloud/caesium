@@ -636,7 +636,10 @@ See [rest-api.md](rest-api.md).
 - **Declared namespaces.** While a policy file is loaded, creating an object in
   a namespace the file does not declare returns 400 naming it, as for jobs and
   keys. `*` is always valid.
-- **Notification routing.** A policy delivers only the events its own
+- **Notification routing.** Notification isolation needs a policy file. With
+  no policy file, routing is unchanged: every policy matches by event type and
+  filters, whatever its namespace, and receives the event as built. While a
+  policy file is loaded, a policy delivers only the events its own
   namespace owns; a `*` policy delivers every event. An event about an incident
   belongs to the incident's namespace, one about a run to the run's persisted
   namespace (a run that outlived its job's move alerts the old owner), a
@@ -654,21 +657,18 @@ See [rest-api.md](rest-api.md).
   break by a producer in another namespace reaches only `*` policies.
   Data-assertion verdicts recorded before baselines were namespace-owned
   reach a namespace's policies without their baseline evidence, as confined
-  reads of runs and events show them. A policy whose
-  channel is disabled, missing or outside its namespace delivers nothing, and an
-  agent escalation reports itself routed only when some policy delivers it.
-  This holds with or without a policy file: a deployment that keeps every job
-  and policy in `default` delivers exactly as before (except that an event
-  dispatched after its job's labels changed loses those labels at namespaced
-  policies), but one that runs jobs in
-  other namespaces with `default` policies stops delivering those jobs' events
-  to them. Recreate such a policy in `*` to keep it cluster-wide.
-- **Agent profiles at incident time.** An incident uses a profile (the job's or
-  the deployment default, `CAESIUM_AGENT_DEFAULT_PROFILE`) only when it lives in
-  the incident's namespace or `*`. Any other is treated as a missing profile: a
-  job-declared one denies every autonomous action, and so does a configured
-  default that lives in another namespace (a default that does not exist
-  leaves the playbook unconfigured, as before).
+  reads of runs and events show them. With or without a policy file, a policy
+  whose channel is disabled, missing or outside its namespace delivers
+  nothing, and an agent escalation reports itself routed only when some policy
+  delivers it.
+- **Agent profiles at incident time.** While a policy file is loaded, an
+  incident uses a profile (the job's or the deployment default,
+  `CAESIUM_AGENT_DEFAULT_PROFILE`) only when it lives in the incident's
+  namespace or `*`. Any other is treated as a missing profile: a job-declared
+  one denies every autonomous action, and so does a configured default that
+  lives in another namespace, whatever the job's own autonomy block says (a
+  default that does not exist leaves the playbook unconfigured, as before).
+  With no policy file, profiles resolve by name alone, as before.
 - **Names are global (v1).** Jobs reference channels and profiles by name, so a
   name is unique across namespaces. A create or rename onto a name held
   elsewhere returns 409 `conflict` without saying where. A namespace can
