@@ -768,9 +768,9 @@ Resume unfinished waves. Do not archive this plan while later items remain.
   suite. Separate selected connector proofs above cover their expected off-lane
   skips. Invalid enabled configuration exited 1 with redacted errors and zero
   provider RPCs; the gate-off browser case hid navigation and refused routes.
-  The workflow's final coverage/aggregate result is still pending at drafting.
 - **Acceptance boundary:** F3 is proposed complete on the exact merged candidate;
-  this record requires its own protected PR merge. F4 and N1 stay open, the lane
+  this record in [PR #670](https://github.com/caesium-cloud/caesium/pull/670)
+  requires its own protected merge. F4 and N1 stay open, the lane
   stays advisory, and no ten-run promotion claim is made. This qualifies the
   recorded development-server matrix and single-node kind topology, not
   Temporal Cloud, other versions or a multi-host deployment.
