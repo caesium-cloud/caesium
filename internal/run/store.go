@@ -771,6 +771,12 @@ type admissionResult struct {
 	heldEvents []event.Event
 	// queueID is the run_queue row an admissionQueued decision wrote.
 	queueID uuid.UUID
+	// heldReason is the run_queue held_reason an admissionQueued decision
+	// recorded: models.RunQueueHeldReasonNamespaceQuota when the namespace
+	// run quota parked the start, empty when the job's own policy did.
+	heldReason string
+	// namespace is the namespace admission froze on the run.
+	namespace string
 }
 
 type startRunRequest struct {
@@ -785,6 +791,10 @@ type startRunRequest struct {
 	// queueID is the run_queue row a fromQueue start is promoting, so the
 	// admission can resolve an idempotent start that was waiting on it.
 	queueID *uuid.UUID
+	// queuedNamespace is the namespace the promoted run_queue row recorded at
+	// enqueue (nil for a row queued before the column existed). Admission
+	// refuses to promote it into any other namespace.
+	queuedNamespace *string
 	// idempotencyKey makes this start idempotent (see start_idempotency.go);
 	// requestParams are the params as the caller sent them, before
 	// enrichment, which is what the key's request hash covers.
@@ -1368,6 +1378,22 @@ func (s *Store) admit(tx *gorm.DB, model *models.JobRun, req startRunRequest) (a
 			return admissionResult{}, err
 		}
 	}
+	// A queued request belongs to the namespace it was enqueued in. If its job
+	// moved since, it is never promoted under the new owner (the dequeuer
+	// drops it). A row from before the column existed records nothing and
+	// keeps the pre-existing behaviour.
+	if req.queuedNamespace != nil {
+		if queued := models.NamespaceOrDefault(strings.TrimSpace(*req.queuedNamespace)); queued != model.Namespace {
+			return admissionResult{}, &QueuedRunNamespaceMovedError{QueueNamespace: queued, JobNamespace: model.Namespace}
+		}
+	}
+	// The namespace's settings under the policy being served now. An
+	// undeclared namespace (a reload removed it) is refused before anything
+	// is written; without a policy file this is free and always unlimited.
+	quotaLimit, err := NamespaceRunLimit(model.Namespace)
+	if err != nil {
+		return admissionResult{}, err
+	}
 
 	// The data circuit breaker's downstream gate runs FIRST, before any
 	// concurrency policy: a run that must not exist should not consume a slot,
@@ -1396,7 +1422,33 @@ func (s *Store) admit(tx *gorm.DB, model *models.JobRun, req startRunRequest) (a
 	if err != nil {
 		return admissionResult{}, err
 	}
-	result := admissionResult{decision: admissionNoPolicy, jobAlias: cfg.jobAlias}
+	result := admissionResult{decision: admissionNoPolicy, jobAlias: cfg.jobAlias, namespace: model.Namespace}
+	if !ok && req.policyOnly {
+		// AdmitRun inserts nothing for a policy-free job: its caller resumes a
+		// running run or starts one through Start, whose admission applies the
+		// namespace gate below.
+		return result, nil
+	}
+	if quotaLimit > 0 {
+		// The namespace run quota (design §10.3), ahead of the job's own
+		// policy: at cap a trigger-originated start is parked whatever that
+		// policy says, a queued promotion stays queued, and a backfill child
+		// waits in its driver.
+		if err := namespaceCapacityLimitTx(tx, model.Namespace, quotaLimit); err != nil {
+			if !errors.Is(err, ErrNamespaceQuota) || req.fromQueue || model.BackfillID != nil {
+				return admissionResult{}, err
+			}
+			heldReason := models.RunQueueHeldReasonNamespaceQuota
+			queueID, err := s.enqueueRunTx(tx, model.JobID, model.Namespace, model.Params, model.Priority, env.Variables().RunQueueMaxDepth, &heldReason)
+			if err != nil {
+				return result, err
+			}
+			result.decision = admissionQueued
+			result.queueID = queueID
+			result.heldReason = heldReason
+			return result, nil
+		}
+	}
 	if !ok {
 		return result, nil
 	}
@@ -1429,7 +1481,7 @@ func (s *Store) admit(tx *gorm.DB, model *models.JobRun, req startRunRequest) (a
 			result.decision = admissionFailed
 			return result, nil
 		}
-		queueID, err := s.enqueueRunTx(tx, model.JobID, model.Params, model.Priority, env.Variables().RunQueueMaxDepth)
+		queueID, err := s.enqueueRunTx(tx, model.JobID, model.Namespace, model.Params, model.Priority, env.Variables().RunQueueMaxDepth, nil)
 		if err != nil {
 			return result, err
 		}
@@ -1691,10 +1743,15 @@ func (s *Store) startRun(req startRunRequest) (*JobRun, error) {
 		}
 		return nil, ErrMaxConcurrentRunsReached
 	case admissionQueued:
-		log.Info("run queued by concurrency policy", "job_id", req.jobID, "job_alias", admission.jobAlias)
 		if err := s.observeRunQueueDepth(req.jobID); err != nil {
 			log.Warn("run queue: failed to observe depth", "job_id", req.jobID, "error", err)
 		}
+		if admission.heldReason == models.RunQueueHeldReasonNamespaceQuota {
+			log.Info("run queued by its namespace's concurrent-run quota", "job_id", req.jobID, "job_alias", admission.jobAlias, "namespace", admission.namespace)
+			RecordNamespaceQuotaDeferrals(admission.namespace, 1)
+			return nil, ErrRunQueuedByQuota
+		}
+		log.Info("run queued by concurrency policy", "job_id", req.jobID, "job_alias", admission.jobAlias)
 		return nil, ErrRunQueued
 	}
 
@@ -1904,6 +1961,7 @@ func (s *Store) StartQueuedRun(ctx context.Context, queued *models.RunQueue) (*J
 		priorityOverride: PriorityLabel(queued.Priority),
 		fromQueue:        true,
 		queueID:          &queued.ID,
+		queuedNamespace:  queued.Namespace,
 	})
 }
 
@@ -5749,7 +5807,11 @@ func (s *Store) CountActive(jobID uuid.UUID) (int64, error) {
 	return count, err
 }
 
-func (s *Store) enqueueRunTx(tx *gorm.DB, jobID uuid.UUID, params datatypes.JSON, priority, maxDepth int) (uuid.UUID, error) {
+// enqueueRunTx parks a start in run_queue. namespace is the namespace
+// admission froze on the run — the queued request belongs to it — and
+// heldReason is models.RunQueueHeldReasonNamespaceQuota when the namespace
+// run quota parked it, nil when the job's own policy did.
+func (s *Store) enqueueRunTx(tx *gorm.DB, jobID uuid.UUID, namespace string, params datatypes.JSON, priority, maxDepth int, heldReason *string) (uuid.UUID, error) {
 	if priority <= 0 {
 		priority = PriorityNormalValue
 	}
@@ -5757,13 +5819,16 @@ func (s *Store) enqueueRunTx(tx *gorm.DB, jobID uuid.UUID, params datatypes.JSON
 		maxDepth = 100
 	}
 	now := time.Now().UTC()
+	owner := models.NamespaceOrDefault(strings.TrimSpace(namespace))
 	row := &models.RunQueue{
-		ID:        uuid.New(),
-		JobID:     jobID,
-		Params:    append(datatypes.JSON(nil), params...),
-		Priority:  priority,
-		ClaimedBy: "",
-		CreatedAt: now,
+		ID:         uuid.New(),
+		JobID:      jobID,
+		Params:     append(datatypes.JSON(nil), params...),
+		Priority:   priority,
+		ClaimedBy:  "",
+		CreatedAt:  now,
+		Namespace:  &owner,
+		HeldReason: heldReason,
 	}
 	if err := tx.Create(row).Error; err != nil {
 		return uuid.Nil, err
@@ -5791,9 +5856,26 @@ WHERE id IN (
 }
 
 func (s *Store) DequeueNextRun(ctx context.Context, jobID uuid.UUID, claimedBy string) (*models.RunQueue, error) {
+	return s.dequeueNextRun(ctx, jobID, claimedBy, false)
+}
+
+// DequeueNextQuotaRun is DequeueNextRun restricted to rows held by the
+// namespace run quota: the only rows a job without a queue policy has, and
+// the only rows the quota-only dequeuer touches.
+func (s *Store) DequeueNextQuotaRun(ctx context.Context, jobID uuid.UUID, claimedBy string) (*models.RunQueue, error) {
+	return s.dequeueNextRun(ctx, jobID, claimedBy, true)
+}
+
+func (s *Store) dequeueNextRun(ctx context.Context, jobID uuid.UUID, claimedBy string, quotaHeldOnly bool) (*models.RunQueue, error) {
 	claimedBy = strings.TrimSpace(claimedBy)
 	if claimedBy == "" {
 		claimedBy = uuid.NewString()
+	}
+	filter := ""
+	args := []any{claimedBy, time.Now().UTC(), jobID}
+	if quotaHeldOnly {
+		filter = " AND held_reason = ?"
+		args = append(args, models.RunQueueHeldReasonNamespaceQuota)
 	}
 	result := s.db.WithContext(ctx).Exec(`
 UPDATE run_queue
@@ -5801,11 +5883,11 @@ SET claimed_by = ?, claimed_at = ?
 WHERE id = (
 	SELECT id
 	FROM run_queue
-	WHERE job_id = ? AND claimed_by = ''
+	WHERE job_id = ? AND claimed_by = ''`+filter+`
 	ORDER BY priority DESC, created_at ASC
 	LIMIT 1
 )
-AND claimed_by = ''`, claimedBy, time.Now().UTC(), jobID)
+AND claimed_by = ''`, args...)
 	if result.Error != nil {
 		return nil, result.Error
 	}
@@ -7040,7 +7122,16 @@ func effectiveTaskHash(hash, effectiveHash string) string {
 // running count for the job is under maxRuns, so an agent retry can never exceed
 // the declared concurrency nor replace-cancel a live run. On a full job it
 // returns ErrMaxConcurrentRunsReached and leaves the run terminal.
+//
+// Every flip first passes the namespace run quota (identity-and-access D1):
+// manual, agent and quarantined retries alike, because each makes a run
+// running again. At cap it returns a *NamespaceQuotaError and leaves the run
+// terminal; in a namespace the policy file no longer declares, a
+// *NamespaceUndeclaredError.
 func (s *Store) readmitRetryTx(tx *gorm.DB, jobRun *models.JobRun, admit bool) error {
+	if err := namespaceCapacityTx(tx, jobRun.Namespace); err != nil {
+		return err
+	}
 	now := time.Now().UTC()
 	unconditional := func() error {
 		return tx.Model(jobRun).Updates(map[string]any{
@@ -7383,6 +7474,12 @@ func (s *Store) RetryPartition(ctx context.Context, runID, taskRunID uuid.UUID) 
 			if err := runNamespaceGuardTx(tx, &jobRun); err != nil {
 				return err
 			}
+			// Re-executing in a namespace the policy file no longer declares is
+			// refused even when the run is still running; reopening a finished
+			// run also passes the quota (readmitRetryTx below).
+			if err := CheckNamespaceDeclared(jobRun.Namespace); err != nil {
+				return err
+			}
 
 			switch jobRun.Status {
 			case string(StatusRunning), string(StatusFailed), string(StatusSucceeded):
@@ -7497,6 +7594,7 @@ func (s *Store) RetryPartition(ctx context.Context, runID, taskRunID uuid.UUID) 
 		return txErr
 	})
 	if err != nil {
+		RecordNamespaceQuotaDeferral(err)
 		return nil, false, err
 	}
 
@@ -7695,6 +7793,13 @@ func (s *Store) retryFromFailure(runID uuid.UUID, admit bool) (*JobRun, error) {
 	var counts dbWriteCounts
 
 	err := s.db.Transaction(func(tx *gorm.DB) error {
+		// Lock the run row first on PostgreSQL, the order RetryPartition takes
+		// it in: run row, then (in readmitRetryTx) the namespace quota's
+		// advisory lock. The reverse order would let a concurrent whole-run
+		// and partition retry of this run deadlock (identity-and-access D1).
+		if err := lockJobRunForPartitionRetryTx(tx, runID); err != nil {
+			return err
+		}
 		// 1. Verify the run exists and is in a terminal state (failed/succeeded).
 		var jobRun models.JobRun
 		if err := tx.First(&jobRun, "id = ?", runID).Error; err != nil {
@@ -7818,6 +7923,7 @@ func (s *Store) retryFromFailure(runID uuid.UUID, admit bool) (*JobRun, error) {
 		return nil
 	})
 	if err != nil {
+		RecordNamespaceQuotaDeferral(err)
 		return nil, err
 	}
 

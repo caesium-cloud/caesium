@@ -307,6 +307,13 @@ The lease is `CAESIUM_RUN_QUEUE_CLAIM_STALE_AFTER` (default `2m`); the reaper
 and the queue view share it, so a row shown as `stale` is exactly a row the
 reaper is about to release.
 
+A row can also wait on its namespace rather than its job: with an access policy
+file, a namespace's `quotas.maxConcurrentRuns` parks trigger and manual starts
+in this queue whatever the job's strategy, and such rows carry
+`held_reason: namespace_quota` (the `REASON` column of `caesium job queue`).
+They drain as runs in the namespace finish; see
+[identity-and-access.md](identity-and-access.md#run-quotas).
+
 ### Starting runs from other systems: outcomes and idempotency
 
 `POST /v1/jobs/:id/run` answers every accepted start with `202` and a JSON body

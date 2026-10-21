@@ -208,7 +208,13 @@ func (s *Service) replay(req Request) (*Result, error) {
 	if err == nil {
 		return &Result{Run: result.Run, Fingerprint: fingerprint}, nil
 	}
-	if !isUniqueReplayFingerprintError(err) {
+	// A concurrent identical request that committed first makes this insert
+	// fail on the fingerprint — or, in a namespace with a run quota, makes the
+	// quota gate refuse it first, because the winner's replay now occupies the
+	// slot (identity-and-access D1). Either way the winner's replay is this
+	// request's answer; only a refusal with no such replay stands.
+	quotaRefused := errors.Is(err, runstorage.ErrNamespaceQuota)
+	if !isUniqueReplayFingerprintError(err) && !quotaRefused {
 		return nil, err
 	}
 
@@ -220,6 +226,10 @@ func (s *Service) replay(req Request) (*Result, error) {
 		return s.returnExisting(req.JobID, existing.ID, fingerprint)
 	}
 	if errors.Is(loadErr, gorm.ErrRecordNotFound) {
+		if quotaRefused {
+			runstorage.RecordNamespaceQuotaDeferral(err)
+			return nil, err
+		}
 		return nil, fmt.Errorf("replay: materialize idempotency reservation: %w", err)
 	}
 	return nil, fmt.Errorf("replay: load existing idempotency reservation: %w", loadErr)

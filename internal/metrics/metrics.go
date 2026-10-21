@@ -255,6 +255,34 @@ var (
 		[]string{"job_alias"},
 	)
 
+	// NamespaceRunningRuns is the number of running job runs in each namespace
+	// that carries quotas.maxConcurrentRuns (identity-and-access D1). The
+	// leader's run-queue dequeuer refreshes it every tick from one grouped
+	// count; other nodes export no series, so a sum across nodes is the cluster
+	// value (on PostgreSQL every node drains, so each reports the cluster
+	// count). Labels are only namespaces the access policy declares with a
+	// quota, so the cardinality is bounded by the policy file.
+	NamespaceRunningRuns = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "caesium_namespace_running_runs",
+			Help: "Running job runs in each namespace that carries a concurrent-run quota (exported by the node draining the run queue).",
+		},
+		[]string{"namespace"},
+	)
+
+	// NamespaceQuotaDeferralsTotal counts starts a namespace run quota
+	// deferred: a trigger start queued, a retry, partition retry or replay
+	// refused, a backfill date that had to wait, and a queued row first found
+	// waiting on the quota. The label only ever names a namespace the access
+	// policy declares with a quota.
+	NamespaceQuotaDeferralsTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "caesium_namespace_quota_deferrals_total",
+			Help: "Total run starts deferred by a namespace's concurrent-run quota.",
+		},
+		[]string{"namespace"},
+	)
+
 	DatasetStalenessSeconds = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Name: "caesium_dataset_staleness_seconds",
@@ -782,6 +810,8 @@ func Register() {
 			RunReplacedTotal,
 			RunQueueDepth,
 			RunQueueWaitSeconds,
+			NamespaceRunningRuns,
+			NamespaceQuotaDeferralsTotal,
 			DatasetStalenessSeconds,
 			DatasetDerivationsTotal,
 			FreshnessViolationsTotal,

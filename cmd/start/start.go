@@ -484,17 +484,30 @@ func start(cmd *cobra.Command, args []string) error {
 	// reconciler re-derives the answer from the run rows on a timer, so a lost
 	// event costs one interval instead of the whole run.
 	job.StartRunCancelReconciler(ctx, runStore, vars.CancelReconcileInterval)
-	if vars.RunQueueEnabled || vars.RunQueueDequeuerEnabled {
+	// A namespace run quota parks trigger starts in run_queue whatever the
+	// queue flags say, so a configured access policy file (the only source of
+	// quotas; an invalid one is fatal in initAuth) always starts the
+	// dequeuer. With both flags off it runs quota-only: it drains rows the
+	// quota holds and leaves every ordinary queue row exactly as before. The
+	// dequeuer reads the policy at each tick, so quotas a reload adds drain.
+	// initAuth installs the file only after the dequeuer and the freshness
+	// evaluator start, so until then the namespace gate refuses (and the
+	// dequeuer claims nothing) rather than admitting past an unread quota.
+	queueDrain := vars.RunQueueEnabled || vars.RunQueueDequeuerEnabled
+	quotaDrain := strings.TrimSpace(vars.AuthPolicyFile) != ""
+	run.ExpectNamespacePolicy(quotaDrain)
+	if queueDrain || quotaDrain {
 		dequeuer := runqueue.NewDequeuer(runqueue.Config{
 			DB:                  db.Connection(),
 			Store:               runStore,
 			NodeID:              vars.NodeAddress,
 			Interval:            vars.RunQueueDequeueInterval,
 			StaleClaimThreshold: vars.RunQueueClaimStaleAfter,
-			LeaderCheck:         dqlite.IsLocalLeader,
+			LeaderCheck:         dequeuerLeaderCheck(vars.DatabaseType),
+			QuotaOnly:           !queueDrain,
 		})
 		runAsync(func() {
-			log.Info("launching run queue dequeuer", "interval", vars.RunQueueDequeueInterval, "stale_claim_after", vars.RunQueueClaimStaleAfter, "max_depth", vars.RunQueueMaxDepth)
+			log.Info("launching run queue dequeuer", "interval", vars.RunQueueDequeueInterval, "stale_claim_after", vars.RunQueueClaimStaleAfter, "max_depth", vars.RunQueueMaxDepth, "quota_only", !queueDrain)
 			dequeuer.Run(ctx)
 		})
 	}
@@ -1069,6 +1082,18 @@ func start(cmd *cobra.Command, args []string) error {
 		log.Info("gracefully shutting down due to OS signal")
 		return shutdown()
 	}
+}
+
+// dequeuerLeaderCheck gates the run-queue dequeuer on dqlite leadership. A
+// PostgreSQL deployment has no dqlite app (IsLocalLeader would fail every
+// tick and strand every queued run), so — like the cron scheduler — every
+// node drains there: claims are atomic and admission, with the namespace
+// gate's advisory lock, is the authority.
+func dequeuerLeaderCheck(databaseType string) runqueue.LeaderCheck {
+	if usesInternalDqlite(databaseType) {
+		return dqlite.IsLocalLeader
+	}
+	return nil
 }
 
 func usesInternalDqlite(databaseType string) bool {

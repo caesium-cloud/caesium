@@ -484,11 +484,12 @@ integration-test-distributed: integration-runner
         -e CAESIUM_CLI_PATH={{ bld_dir }}/.tmp/caesium-cli/caesium \
         -e CAESIUM_EVENT_INGEST_API_KEY={{ event_ingest_api_key }} \
         -e CAESIUM_EXECUTION_MODE=distributed \
+        -e CAESIUM_IT_POLICY_FIXTURE=two-namespaces \
         -e DOCKER_HOST=unix:///var/run/docker.sock \
         --network=container:{{ it_container }} \
         -w {{ bld_dir }} \
         {{ integration_runner_image }} \
-        sh -c 'sh scripts/integration-test.sh -test.run "TestIntegrationTestSuite/(TestRunConcurrencyStrategies|TestPriorityRunStartSurfacesAndCronDefault|TestFanOut|TestPlainFailure|TestSecretLogs|TestHaltPolicy|TestReplaceCancel|TestRetryAfterApplyExecutesRegisteredCommand|TestRetryValidatesAgainstTheRegisteredOutputSchema|TestDataAssertionsMetricsPersisted|TestResourceStats|TestCacheNamespaceMove|TestNamespaceLegacyPost)"' 2>&1; echo $? >"$log.rc"; } | tee "$log"; \
+        sh -c 'sh scripts/integration-test.sh -test.run "TestIntegrationTestSuite/(TestRunConcurrencyStrategies|TestPriorityRunStartSurfacesAndCronDefault|TestFanOut|TestPlainFailure|TestSecretLogs|TestHaltPolicy|TestReplaceCancel|TestRetryAfterApplyExecutesRegisteredCommand|TestRetryValidatesAgainstTheRegisteredOutputSchema|TestDataAssertionsMetricsPersisted|TestResourceStats|TestCacheNamespaceMove|TestNamespaceLegacyPost|TestNamespaceQuotaRefusesReplayAtCap)"' 2>&1; echo $? >"$log.rc"; } | tee "$log"; \
     rc=$(cat "$log.rc"); \
     passes=$(grep -cE '^[[:space:]]*--- PASS: TestIntegrationTestSuite/' "$log" 2>/dev/null || true); \
     passes=${passes:-0}; \

@@ -506,6 +506,10 @@ func (s *IntegrationTestSuite) TestAuthNamespaceDeliveriesAndBackfills() {
 		_, _, adminBody := s.nsGet("/v1/triggers/"+listenerTrigger+"/events", s.authAPIKey)
 		return strings.Contains(adminBody, sourceRun)
 	}, runTimeout, time.Second, "the lifecycle bridge delivers the finance completion to the marketing listener")
+	// The delivery started a marketing run; marketing's quota of one (the H-1
+	// fixture, identity-and-access D1) would park the next marketing start
+	// behind it, so let it finish first.
+	s.awaitJobIdle(listenerJob.ID)
 	body = s.requireNSStatus(http.StatusOK, http.MethodGet, "/v1/triggers/"+listenerTrigger+"/events", mktViewer, "")
 	s.requireBodyFree(body, "lifecycle deliveries", sourceRun)
 	body = s.requireNSStatus(http.StatusOK, http.MethodGet, "/v1/events/ingested?source=caesium&limit=500", mktViewer, "")
@@ -539,6 +543,7 @@ func (s *IntegrationTestSuite) TestAuthNamespaceDeliveriesAndBackfills() {
 		_, _, adminBody := s.nsGet(ownEvents, s.authAPIKey)
 		return strings.Contains(adminBody, ownRun)
 	}, runTimeout, time.Second, "the lifecycle bridge delivers the marketing completion to the marketing listener")
+	s.awaitJobIdle(ownListenerJob.ID) // see above: marketing runs one at a time
 	s.Contains(s.requireNSStatus(http.StatusOK, http.MethodGet, ownEvents, s.authAPIKey, ""), labelSecret, "an unrestricted caller still receives the labels")
 	body = s.requireNSStatus(http.StatusOK, http.MethodGet, ownEvents, mktViewer, "")
 	s.Contains(body, ownRun, "the owned lifecycle delivery is listed")

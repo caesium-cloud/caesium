@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	authmw "github.com/caesium-cloud/caesium/api/middleware"
+	"github.com/caesium-cloud/caesium/api/rest/namespaceadmission"
 	jsvc "github.com/caesium-cloud/caesium/api/rest/service/job"
 	replaysvc "github.com/caesium-cloud/caesium/api/rest/service/replay"
 	runsvc "github.com/caesium-cloud/caesium/api/rest/service/run"
@@ -118,6 +119,10 @@ func Post(c *echo.Context) error {
 	if err != nil {
 		if _, denied := errors.AsType[*authz.Denial](err); denied {
 			return err
+		}
+		// A replay that would execute consumes its namespace's run quota.
+		if handled, writeErr := namespaceadmission.WriteConflict(c, err); handled {
+			return writeErr
 		}
 		return replayError(err)
 	}

@@ -161,6 +161,71 @@ func waitForBackfillSlot(
 	}
 }
 
+// Backoff between attempts to admit a backfill date its namespace's run
+// quota refused. Variables so tests can shorten them.
+var (
+	backfillQuotaBackoffBase = time.Second
+	backfillQuotaBackoffMax  = 15 * time.Second
+)
+
+// admitBackfillDate reserves the server's transient ownership and creates one
+// date's run through start. A backfill child is never queued: when the
+// namespace run quota (identity-and-access D1) refuses it, the reservation is
+// released and the driver waits with bounded exponential backoff, then
+// retries the SAME date, until it is admitted or shouldStop reports a stop
+// (cancellation, completion elsewhere, or server shutdown).
+//
+// It returns the reservation and start outcome of the attempt that ended the
+// wait. held is true when it stopped while the date was quota-held, with
+// nothing reserved; workCtx is nil (and err the reason) when the reservation
+// itself was refused. Each date counts one deferral however long it waits.
+func admitBackfillDate(ctx context.Context, start func() (*runstore.JobRun, error), shouldStop func() bool) (workCtx context.Context, releaseWork func(), r *runstore.JobRun, held bool, err error) {
+	backoff := backfillQuotaBackoffBase
+	deferred := false
+	for {
+		workCtx, releaseWork, err = reserveLocalChild(ctx)
+		if err != nil {
+			return nil, nil, nil, false, err
+		}
+		r, err = start()
+		if !errors.Is(err, runstore.ErrNamespaceQuota) {
+			return workCtx, releaseWork, r, false, err
+		}
+		releaseWork()
+		if !deferred {
+			deferred = true
+			runstore.RecordNamespaceQuotaDeferral(err)
+			log.Info("backfill: date waits on its namespace's concurrent-run quota", "error", err)
+		}
+		if !waitBackfillQuota(ctx, backoff, shouldStop) {
+			return nil, nil, nil, true, nil
+		}
+		backoff = min(backoff*2, backfillQuotaBackoffMax)
+	}
+}
+
+// waitBackfillQuota sleeps for d, polling shouldStop, and reports whether the
+// driver should try the date again.
+func waitBackfillQuota(ctx context.Context, d time.Duration, shouldStop func() bool) bool {
+	deadline := time.Now().Add(d)
+	for {
+		if serverShutdown(ctx) || shouldStop() {
+			return false
+		}
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return true
+		}
+		timer := time.NewTimer(min(remaining, backfillAcquirePollInterval))
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return false
+		case <-timer.C:
+		}
+	}
+}
+
 // RunBackfill executes a backfill by enumerating logical dates, filtering by
 // the reprocess policy, and running each date through the standard job executor
 // with a semaphore controlling max concurrency.
@@ -295,21 +360,35 @@ func runBackfill(ctx context.Context, b *models.Backfill, j *models.Job, schedul
 		logicalDate := d.UTC().Format(time.RFC3339)
 		params := map[string]string{"logical_date": logicalDate}
 
-		workCtx, releaseWork, err := reserveLocalChild(ctx)
-		if err != nil {
+		workCtx, releaseWork, r, held, err := admitBackfillDate(ctx, func() (*runstore.JobRun, error) {
+			return rStore.StartForBackfill(j.ID, b.ID, params, runstore.WithStartNamespaceGuard(runstore.BackfillNamespaceGuard(b.Namespace)))
+		}, func() bool {
+			return shouldStopBackfill(ctx, bStore, b.ID)
+		})
+		if held {
+			// Stopped while the namespace quota held this date: nothing was
+			// created and nothing is reserved. The date is neither failed nor
+			// completed. A server shutdown leaves the backfill to recovery
+			// (the serverShutdown return below); a cancellation marks it.
+			sem.Release(1)
+			cancelled = true
+			log.Info("backfill: stopped while its namespace quota held a date", "backfill_id", b.ID, "logical_date", logicalDate)
+			break
+		}
+		if workCtx == nil {
 			sem.Release(1)
 			cancelled = true
 			log.Info("backfill: child submission refused", "backfill_id", b.ID, "logical_date", logicalDate, "error", err)
 			break
 		}
-		r, err := rStore.StartForBackfill(j.ID, b.ID, params, runstore.WithStartNamespaceGuard(runstore.BackfillNamespaceGuard(b.Namespace)))
 		if err != nil {
-			if errors.Is(err, runstore.ErrBackfillNamespaceMoved) {
-				// The job left the backfill's namespace: no further date may run
-				// under the new owner. Stop launching and finish as failed (B4).
+			if errors.Is(err, runstore.ErrBackfillNamespaceMoved) || errors.Is(err, runstore.ErrNamespaceUndeclared) {
+				// The job left the backfill's namespace (B4), or a policy reload
+				// removed the namespace (D1): no further date may run. Stop
+				// launching and finish as failed.
 				releaseWork()
 				sem.Release(1)
-				log.Warn("backfill: job moved out of the backfill's namespace; stopping",
+				log.Warn("backfill: the backfill's namespace no longer admits its runs; stopping",
 					"backfill_id", b.ID, "logical_date", logicalDate, "error", err)
 				metrics.BackfillRunsTotal.WithLabelValues(j.Alias, backfillDateFailed).Inc()
 				failCount.Add(1)

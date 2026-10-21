@@ -39,7 +39,12 @@ type queueItem struct {
 	ClaimState string            `json:"claim_state"`
 	Stale      bool              `json:"stale"`
 	ClaimedBy  string            `json:"claimed_by,omitempty"`
+	HeldReason string            `json:"held_reason,omitempty"`
 }
+
+// queueHeldReasonNamespaceQuota is the held_reason of a row waiting on its
+// namespace's concurrent-run quota (identity-and-access D2).
+const queueHeldReasonNamespaceQuota = "namespace_quota"
 
 var queueCmd = &cobra.Command{
 	Use:   "queue <alias>",
@@ -145,23 +150,37 @@ func renderQueueTable(cmd *cobra.Command, rows []queueItem) {
 	}
 
 	tw := tabwriter.NewWriter(out, 0, 4, 2, ' ', 0)
-	_, _ = fmt.Fprintln(tw, "POSITION\tPRIORITY\tSTATE\tENQUEUED_AT\tPARAMS")
+	_, _ = fmt.Fprintln(tw, "POSITION\tPRIORITY\tSTATE\tREASON\tENQUEUED_AT\tPARAMS")
 	stale := make([]string, 0, len(rows))
+	quotaHeld := 0
 	for _, row := range rows {
 		if row.Stale {
 			stale = append(stale, fmt.Sprintf("#%d held by %s", row.Position, formatQueueClaimHolder(row)))
 		}
+		if strings.TrimSpace(row.HeldReason) == queueHeldReasonNamespaceQuota {
+			quotaHeld++
+		}
 		_, _ = fmt.Fprintf(
 			tw,
-			"%d\t%s\t%s\t%s\t%s\n",
+			"%d\t%s\t%s\t%s\t%s\t%s\n",
 			row.Position,
 			runstorage.PriorityLabel(row.Priority),
 			formatQueueClaimState(row),
+			formatQueueHeldReason(row),
 			row.EnqueuedAt.UTC().Format(time.RFC3339),
 			formatQueueParams(row.Params),
 		)
 	}
 	_ = tw.Flush()
+
+	if quotaHeld > 0 {
+		_, _ = fmt.Fprintf(
+			out,
+			"\n%d queued run(s) wait on their namespace's concurrent-run quota (quotas.maxConcurrentRuns): "+
+				"they start as runs in the namespace finish, whatever this job's own concurrency allows.\n",
+			quotaHeld,
+		)
+	}
 
 	if len(stale) > 0 {
 		_, _ = fmt.Fprintf(
@@ -172,6 +191,15 @@ func renderQueueTable(cmd *cobra.Command, rows []queueItem) {
 			strings.Join(stale, ", "),
 		)
 	}
+}
+
+// formatQueueHeldReason renders why the row waits beyond the job's own
+// policy as a single token: `namespace_quota`, or `-`.
+func formatQueueHeldReason(row queueItem) string {
+	if reason := strings.TrimSpace(row.HeldReason); reason != "" {
+		return reason
+	}
+	return "-"
 }
 
 // formatQueueClaimState renders the row's claim state as a single token, so the

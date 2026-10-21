@@ -29,12 +29,12 @@ func TestRenderQueueTableSurfacesClaimState(t *testing.T) {
 
 	lines := strings.Split(strings.TrimSpace(out), "\n")
 	require.GreaterOrEqual(t, len(lines), 4)
-	require.Equal(t, []string{"POSITION", "PRIORITY", "STATE", "ENQUEUED_AT", "PARAMS"}, strings.Fields(lines[0]))
+	require.Equal(t, []string{"POSITION", "PRIORITY", "STATE", "REASON", "ENQUEUED_AT", "PARAMS"}, strings.Fields(lines[0]))
 
 	// Every row's state must be a single field, so the table stays parseable.
-	require.Equal(t, []string{"1", "high", "stale", "2026-09-09T12:00:00Z", "-"}, strings.Fields(lines[1]))
-	require.Equal(t, []string{"2", "normal", "claimed", "2026-09-09T12:00:00Z", "-"}, strings.Fields(lines[2]))
-	require.Equal(t, []string{"3", "low", "pending", "2026-09-09T12:00:00Z", "lane=queued"}, strings.Fields(lines[3]))
+	require.Equal(t, []string{"1", "high", "stale", "-", "2026-09-09T12:00:00Z", "-"}, strings.Fields(lines[1]))
+	require.Equal(t, []string{"2", "normal", "claimed", "-", "2026-09-09T12:00:00Z", "-"}, strings.Fields(lines[2]))
+	require.Equal(t, []string{"3", "low", "pending", "-", "2026-09-09T12:00:00Z", "lane=queued"}, strings.Fields(lines[3]))
 
 	require.Contains(t, out, "1 queued run(s) hold an expired claim")
 	require.Contains(t, out, "#1 held by node-a/9c1",
@@ -58,6 +58,25 @@ func TestRenderQueueTableTolerantOfServerWithoutClaimState(t *testing.T) {
 	require.Len(t, lines, 2)
 	require.Equal(t, "-", strings.Fields(lines[1])[2],
 		"an absent claim state must read as unknown, not as pending")
+}
+
+// TestRenderQueueTableNamesTheNamespaceQuotaHold pins D2: a row the namespace
+// run quota holds says so in its own field and the footer explains it; a row
+// without a reason reads "-" and adds no footer.
+func TestRenderQueueTableNamesTheNamespaceQuotaHold(t *testing.T) {
+	enqueued := time.Date(2026, 10, 20, 12, 0, 0, 0, time.UTC)
+	out := renderQueue(t, []queueItem{
+		{Position: 1, Priority: 2, EnqueuedAt: enqueued, ClaimState: "pending", HeldReason: "namespace_quota"},
+		{Position: 2, Priority: 2, EnqueuedAt: enqueued, ClaimState: "pending"},
+	})
+	lines := strings.Split(strings.TrimSpace(out), "\n")
+	require.GreaterOrEqual(t, len(lines), 3)
+	require.Equal(t, []string{"1", "normal", "pending", "namespace_quota", "2026-10-20T12:00:00Z", "-"}, strings.Fields(lines[1]))
+	require.Equal(t, []string{"2", "normal", "pending", "-", "2026-10-20T12:00:00Z", "-"}, strings.Fields(lines[2]))
+	require.Contains(t, out, "1 queued run(s) wait on their namespace's concurrent-run quota")
+
+	plain := renderQueue(t, []queueItem{{Position: 1, Priority: 2, EnqueuedAt: enqueued, ClaimState: "pending"}})
+	require.NotContains(t, plain, "concurrent-run quota")
 }
 
 func TestRenderQueueTableEmpty(t *testing.T) {

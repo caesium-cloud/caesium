@@ -352,7 +352,7 @@ namespaces:
         - vault/secret/data/marketing/*
         - k8s/marketing-*
         - env/MARKETING_*
-    quotas:                           # parsed and validated; not enforced yet
+    quotas:                           # at most 8 marketing runs running at once
       maxConcurrentRuns: 8
 bindings:
   - subjects:
@@ -370,9 +370,9 @@ bindings:
     namespaces: ["*"]
 ```
 
-The `secrets` rules are enforced ([Scoped secrets](#scoped-secrets)). The
-`kubernetes` and `quotas` blocks are validated and carried in the loaded policy,
-but nothing consumes them yet; see [Namespaces and
+The `secrets` rules ([Scoped secrets](#scoped-secrets)) and `quotas` ([Run
+quotas](#run-quotas)) are enforced. The `kubernetes` block is validated and
+carried in the loaded policy, but nothing consumes it yet; see [Namespaces and
 isolation](#namespaces-and-isolation).
 
 ### Validation rules
@@ -819,7 +819,61 @@ withholds that same pre-upgrade baseline text from `firstFailure.error` and
 `summary`. A run diff needs viewer in both
 runs' namespaces. A trigger's event history shows only deliveries whose every
 started run the caller may read (the same rule, lifecycle provenance and label removal included). A job read embeds the job's trigger only when
-the caller may read every namespace that trigger serves.
+the caller may read every namespace that trigger serves. The run queue
+(`GET /v1/jobs/:id/queue`) shows only queued requests recorded in a namespace
+the caller may read, numbered among themselves; a row queued before the
+upgrade records no namespace and is shown only to unconfined callers.
+`DELETE /v1/jobs/:id/queue/:queue_id` answers 404 for a row the caller cannot
+see, and 403 unless the caller also holds `operator` in the namespace the row
+was queued in (not only in the job's current namespace).
+
+### Run quotas
+
+`namespaces.<ns>.quotas.maxConcurrentRuns` caps how many of a namespace's runs
+may be `running` at once (0 or omitted is unlimited). Every running run
+counts, including quarantined replays and backfill children. The cap is one
+check inside the transaction that makes a run running: a new run's admission,
+a retry reopening a finished run (whole-run, partition and agent retries), and
+a quarantined replay that will execute. On dqlite and SQLite the check and the
+write are serialized with every other writer; on PostgreSQL a
+transaction-scoped advisory lock per namespace serializes the check.
+
+What happens at the cap depends on the kind of run:
+
+| Run kind | At the cap |
+| --- | --- |
+| Cron, HTTP, event, freshness triggers and manual `POST /v1/jobs/:id/run` | Parked in the run queue with `held_reason: namespace_quota`, whatever the job's own concurrency strategy says. The manual start answers `202 {"outcome":"queued","reason":"namespace_quota","queue_id":…}`. |
+| Retry, partition retry, quarantined replay | Refused: `409 {"error":"namespace_quota","namespace":…,"max_concurrent_runs":…}` with `Retry-After: 5`. Nothing is written. |
+| Incident agent `retry_from_failure` / `snooze_retry` | Deferred: the action records `retry deferred` with the quota as its cause, and a snoozed retry re-arms. |
+| Backfill child | Never queued. The backfill waits (backoff up to 15 s) and retries the same date, so its counters stay exact; it stays cancellable while it waits, and a server shutdown leaves it to recovery. |
+
+The run queue dequeuer drains quota-held runs as slots free. Namespaces are
+served in rotating order and, inside a namespace with a quota, jobs take turns
+one run at a time, so one job's deep queue cannot starve the others; every
+promotion re-checks the quota and the job's own concurrency. A queued run
+belongs to the namespace it was queued in: if its job moves before it starts,
+it is dropped (an idempotent start replays as `dropped`, reason
+`namespace_moved`) rather than started under the new owner. When a policy
+file is configured the dequeuer always runs: with `CAESIUM_RUN_QUEUE_ENABLED`
+and `CAESIUM_RUN_QUEUE_DEQUEUER_ENABLED` both off it drains only quota-held
+runs and leaves rows a job's own queue policy parked untouched. A quota added
+by a reload applies to the next admission. During server startup, until the
+configured policy file is loaded, no run is admitted and the dequeuer promotes
+nothing, so a restart cannot start queued runs past their quota.
+
+While a policy file is loaded, a namespace it does not declare (removed by a
+reload while jobs remain in it) admits no run at all: starts, retries and
+replays answer `409 {"error":"namespace_undeclared"}`, a backfill stops as
+failed, and a queued run is dropped with reason `namespace_undeclared`.
+Without a policy file every namespace is unlimited and no quota check runs.
+
+`caesium job queue <alias>` shows the hold in its `REASON` column (and
+`held_reason` in `--json`). Prometheus exposes
+`caesium_namespace_running_runs{namespace}` (on the internal database exported
+by the leader only, so a sum across nodes is the cluster value; on PostgreSQL,
+where every node drains the queue, each node reports the cluster count) and
+`caesium_namespace_quota_deferrals_total{namespace}`, both labelled only with
+namespaces the policy declares with a quota.
 
 ### Planned isolation features
 
@@ -827,8 +881,6 @@ the caller may read every namespace that trigger serves.
   a namespace in the policy file will select the Kubernetes namespace and
   service account that a namespace's pods run under. Today it is validated but
   every job runs where the engine is configured.
-- **Planned (D1): run quotas.** `quotas.maxConcurrentRuns` will cap a
-  namespace's concurrently active runs. Today it is validated but not enforced.
 
 ## API keys and CLI login
 

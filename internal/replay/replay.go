@@ -1311,6 +1311,17 @@ func (c *Constructor) materialize(ctx context.Context, baseline models.JobRun, p
 			status = string(run.StatusSucceeded)
 			completedAt = &now
 		}
+		// A quarantined replay is real compute: one that will execute passes
+		// the namespace run quota like any other run (identity-and-access D1).
+		// An all-cached replay is inserted already succeeded and takes no slot,
+		// but is still refused in a namespace the policy no longer declares.
+		if allCached {
+			if err := run.CheckNamespaceDeclared(namespace); err != nil {
+				return err
+			}
+		} else if err := run.CheckNamespaceCapacityTx(tx, namespace); err != nil {
+			return err
+		}
 		model := models.JobRun{
 			ID:                replayID,
 			JobID:             baseline.JobID,
@@ -1348,6 +1359,9 @@ func (c *Constructor) materialize(ctx context.Context, baseline models.JobRun, p
 		return nil
 	})
 	if err != nil {
+		// A quota refusal is counted by the caller once it stands: an
+		// identical concurrent request that won the slot is this request's
+		// answer, not a deferral (api/rest/service/replay).
 		return uuid.Nil, err
 	}
 	c.store.PublishEvents(pendingEvents...)

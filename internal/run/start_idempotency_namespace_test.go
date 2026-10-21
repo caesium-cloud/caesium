@@ -169,6 +169,10 @@ func TestReplayGuardCoversRecordsWithoutRun(t *testing.T) {
 
 // TestReplayGuardSeesPromotedRunNamespace: a start queued in marketing and
 // promoted after the job moved to finance is attributed to both namespaces.
+// Since identity-and-access D1 a queued row records its namespace and is
+// never promoted across a move (TestQueuedRunNeverPromotedAcrossANamespaceMove),
+// so the only row that can still be promoted this way is one queued before
+// the column existed: its namespace is NULL and promotion keeps the old rule.
 func TestReplayGuardSeesPromotedRunNamespace(t *testing.T) {
 	ctx := context.Background()
 	db, store := openIdempotencyStore(t)
@@ -179,6 +183,8 @@ func TestReplayGuardSeesPromotedRunNamespace(t *testing.T) {
 	queued, err := store.StartWithResult(ctx, job.ID, nil, WithStartIdempotencyKey("q"))
 	require.NoError(t, err)
 	require.Equal(t, StartOutcomeQueued, queued.Outcome)
+	require.NoError(t, db.Model(&models.RunQueue{}).Where("job_id = ?", job.ID).Update("namespace", nil).Error,
+		"simulate a row queued before run_queue.namespace existed")
 
 	moveJob(t, db, job.ID, "finance")
 	finishRun(t, db, holder.Run.ID)

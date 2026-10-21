@@ -295,7 +295,9 @@ fi
         }
         added = {
             "local": {"TestCacheCLIListsInvalidatesAndPrunes", "TestNativeTaskSIGTERMResultClassification",
-                      "TestJobSchemaNamespaceDocumentation", "TestCacheNamespaceMove"},
+                      "TestJobSchemaNamespaceDocumentation", "TestCacheNamespaceMove",
+                      "TestNamespaceQuotaHoldsSecondPolicyFreeRun", "TestNamespaceQuotaRefusesRetryAtCap",
+                      "TestNamespaceQuotaBackfillWaitsAndCompletes"},
             "auth": {"TestPublicListingsOrderByAndRefuseInvalidTerms", "TestIncidentNamespaceLifecycle",
                      "TestAuthPolicyShowAndReloadSurface", "TestAuthUserAdministrationLifecycle",
                      "TestAuthUserAdministrationDeniesNonClusterAdmins",
@@ -313,7 +315,9 @@ fi
     def test_floor_gap_admission_refuses_skip_nested_duplicate_or_missing(self) -> None:
         lanes = self._actual_lane_selection()
         new = {"local": ["TestCacheCLIListsInvalidatesAndPrunes", "TestNativeTaskSIGTERMResultClassification",
-                         "TestJobSchemaNamespaceDocumentation", "TestCacheNamespaceMove"],
+                         "TestJobSchemaNamespaceDocumentation", "TestCacheNamespaceMove",
+                         "TestNamespaceQuotaHoldsSecondPolicyFreeRun", "TestNamespaceQuotaRefusesRetryAtCap",
+                         "TestNamespaceQuotaBackfillWaitsAndCompletes"],
                "auth": ["TestPublicListingsOrderByAndRefuseInvalidTerms", "TestIncidentNamespaceLifecycle",
                         "TestAuthPolicyShowAndReloadSurface", "TestAuthUserAdministrationLifecycle",
                         "TestAuthUserAdministrationDeniesNonClusterAdmins",

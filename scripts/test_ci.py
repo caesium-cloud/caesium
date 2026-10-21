@@ -3642,7 +3642,12 @@ class ResourceHarnessTests(unittest.TestCase):
                             "TestCacheNamespaceMove",
                             "TestNamespaceLegacyPostAndBackfill",
                             "TestNamespaceLegacyPostDefaultsAndRejectsInvalid",
+                            # identity-and-access D1: a re-executing replay
+                            # reaches the namespace quota only in distributed
+                            # mode, so this lane must say it serves the fixture.
+                            "TestNamespaceQuotaRefusesReplayAtCap",
                         )
+                        self.assertIn("-e CAESIUM_IT_POLICY_FIXTURE=two-namespaces", commands)
                     for scenario in selected_scenarios:
                         self.assertRegex(scenario, scenario_filter)
                     self.assertNotRegex("TestHealth", scenario_filter)

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 
+	"github.com/caesium-cloud/caesium/api/rest/namespaceadmission"
 	jsvc "github.com/caesium-cloud/caesium/api/rest/service/job"
 	runsvc "github.com/caesium-cloud/caesium/api/rest/service/run"
 	"github.com/caesium-cloud/caesium/internal/job"
@@ -86,6 +87,9 @@ func Retry(c *echo.Context) error {
 		}
 		if moved, ok := errors.AsType[*runstorage.RunNamespaceMovedError](err); ok {
 			return namespaceMovedConflict(c, j, moved)
+		}
+		if handled, writeErr := namespaceadmission.WriteConflict(c, err); handled {
+			return writeErr
 		}
 		return echo.NewHTTPError(http.StatusConflict, err.Error())
 	}

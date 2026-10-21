@@ -184,7 +184,7 @@ func TestEnqueueRunEvictsOldestWhenDepthExceeded(t *testing.T) {
 	}).Error)
 
 	require.NoError(t, db.Transaction(func(tx *gorm.DB) error {
-		_, err := store.enqueueRunTx(tx, job.ID, datatypes.JSON(`{"kind":"new"}`), PriorityNormalValue, 2)
+		_, err := store.enqueueRunTx(tx, job.ID, models.DefaultNamespace, datatypes.JSON(`{"kind":"new"}`), PriorityNormalValue, 2, nil)
 		return err
 	}))
 

@@ -10,6 +10,7 @@ import (
 
 	authmw "github.com/caesium-cloud/caesium/api/middleware"
 	"github.com/caesium-cloud/caesium/api/rest/manualparams"
+	"github.com/caesium-cloud/caesium/api/rest/namespaceadmission"
 	jsvc "github.com/caesium-cloud/caesium/api/rest/service/job"
 	runsvc "github.com/caesium-cloud/caesium/api/rest/service/run"
 	iauth "github.com/caesium-cloud/caesium/internal/auth"
@@ -172,6 +173,11 @@ func Post(c *echo.Context) error {
 				log.Error("manual run: committed admission could not be finalized; leaving it for an operator",
 					"job_id", j.ID, "run_id", committedID, "error", completeErr)
 			}
+		}
+		// A namespace the served policy no longer declares admits no run
+		// (identity-and-access D1); nothing was written.
+		if handled, writeErr := namespaceadmission.WriteConflict(c, err); handled {
+			return writeErr
 		}
 		return startError(err)
 	}

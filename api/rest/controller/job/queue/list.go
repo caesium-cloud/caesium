@@ -4,6 +4,7 @@ import (
 	"errors"
 	"net/http"
 
+	authmw "github.com/caesium-cloud/caesium/api/middleware"
 	jsvc "github.com/caesium-cloud/caesium/api/rest/service/job"
 	"github.com/caesium-cloud/caesium/internal/authz"
 	"github.com/google/uuid"
@@ -31,7 +32,11 @@ func List(c *echo.Context) error {
 	// the audit row gets it without a second lookup (identity-and-access A3).
 	authz.NoteNamespace(c, j.Namespace)
 
-	rows, err := svc.Queue(id)
+	// Queued requests keep the namespace they were enqueued in: a confined
+	// caller sees only those of namespaces it may read (identity-and-access
+	// D1), exactly as it sees a moved job's history.
+	historyCtx := authz.WithHistoryScope(ctx, authmw.GetPrincipal(c))
+	rows, err := jsvc.Service(historyCtx).Queue(id)
 	if err != nil {
 		return echo.NewHTTPError(http.StatusInternalServerError, "internal server error").Wrap(err)
 	}
