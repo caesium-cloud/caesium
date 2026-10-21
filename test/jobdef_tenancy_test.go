@@ -13,6 +13,7 @@ import (
 	"time"
 
 	schema "github.com/caesium-cloud/caesium/pkg/jobdef"
+	"github.com/google/uuid"
 )
 
 // Confined job writes and trigger tenancy (identity-and-access B9), driven
@@ -531,6 +532,53 @@ func (s *IntegrationTestSuite) TestAuthLegacyJobCreateConfined() {
 	out = s.requireNSStatus(http.StatusForbidden, http.MethodPost, "/v1/jobs", mktOperator.Plaintext, body(fmt.Sprintf("b9-legacy-z-%d", stamp), "marketing", finPath))
 	s.Contains(out, "is subscribed by a job outside your access")
 	s.NotContains(out, fin)
+}
+
+// TestAuthLegacyJobCreateRefusesForeignDependency: a marketing operator's
+// POST /v1/jobs whose tasks[].depends_on names a finance task (by its UUID)
+// (or any task outside the job it creates) is refused with a 400 that names
+// no task, and nothing is persisted: the job, its tasks and edges commit in
+// one transaction (PR #668 review r9). The same create without the foreign
+// dependency succeeds.
+func (s *IntegrationTestSuite) TestAuthLegacyJobCreateRefusesForeignDependency() {
+	s.requireAuthLane()
+	stamp := time.Now().UnixNano()
+	mktOperator := s.mintNamespacedKey("operator", "marketing")
+	fin := fmt.Sprintf("b9-dep-fin-%d", stamp)
+	refused := fmt.Sprintf("b9-dep-mkt-%d", stamp)
+	s.b9Cleanup(fin, refused)
+	s.applyDefinition(s.b9Def(fin, "finance", ""))
+	var finTasks []struct {
+		ID string `json:"id"`
+	}
+	s.getJSON("/v1/jobs/"+s.b9RequireJob(fin).ID+"/tasks", &finTasks)
+	s.Require().NotEmpty(finTasks)
+	foreign := finTasks[0].ID
+	body := func(dependsOn ...string) string {
+		task := map[string]any{"atom": map[string]any{"engine": s.engineOrDocker(), "image": "busybox:1.36.1", "command": []string{"true"}}}
+		if len(dependsOn) > 0 {
+			task["depends_on"] = dependsOn
+		}
+		payload, err := json.Marshal(map[string]any{
+			"alias":    refused,
+			"metadata": map[string]any{"namespace": "marketing"},
+			"trigger":  map[string]any{"alias": refused, "type": "cron", "configuration": map[string]any{"expression": "0 0 1 1 *"}},
+			"tasks":    []any{task},
+		})
+		s.Require().NoError(err)
+		return string(payload)
+	}
+
+	for _, dep := range []string{foreign, uuid.NewString()} {
+		out := s.requireNSStatus(http.StatusBadRequest, http.MethodPost, "/v1/jobs", mktOperator.Plaintext, body(dep))
+		s.Contains(out, "may only reference tasks of the job being created")
+		s.NotContains(out, dep)
+		s.NotContains(out, fin)
+		s.Nil(s.b9Job(refused), "no job was persisted")
+	}
+
+	s.requireNSStatus(http.StatusCreated, http.MethodPost, "/v1/jobs", mktOperator.Plaintext, body())
+	s.Equal("marketing", s.b9RequireJob(refused).Namespace)
 }
 
 func (s *IntegrationTestSuite) engineOrDocker() string {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -387,4 +388,46 @@ func TestReadScopeWithholdsAmbiguousTrimmedAlias(t *testing.T) {
 		require.True(t, newReadScopeFor([]string{"finance"}, lone, nil).aliasVisible(ctx, "consumer"), "its own namespace reads it")
 		require.False(t, newReadScopeForKey(nil, []string{"consumer"}, lone, nil).aliasVisible(ctx, "consumer"), "a key scope never covers the twin")
 	}
+}
+
+// The whitespace-alias rows, whose patterns cannot use the alias index, are
+// read once per read snapshot, not once per resolved name (PR #668 review
+// r9): N findings about N distinct consumers cost one such query, and a new
+// snapshot reads them again.
+func TestReadScopeReadsWhitespaceAliasesOncePerSnapshot(t *testing.T) {
+	ctx := context.Background()
+	const n = 12
+	defs := []schema.Definition{scopeDefinition("producer", "marketing")}
+	for i := range n {
+		defs = append(defs, scopeDefinition(fmt.Sprintf("consumer-%d", i), "marketing"))
+	}
+	twin := scopeDefinition("consumer-0", "finance")
+	twin.Metadata.Alias = "consumer-0 "
+	conn := freshCatalog(t, append(defs, twin)...)
+
+	var whitespaceQueries, queries int
+	name := "test:count_resolve_queries"
+	require.NoError(t, conn.Callback().Query().After("gorm:query").Register(name, func(tx *gorm.DB) {
+		queries++
+		if strings.Contains(tx.Statement.SQL.String(), "LIKE") {
+			whitespaceQueries++
+		}
+	}))
+	t.Cleanup(func() { _ = conn.Callback().Query().Remove(name) })
+
+	view := newReadScopeFor([]string{"marketing"}, conn, nil)
+	for i := range n {
+		finding := internalcontract.ContractFinding{Producer: "producer", Consumer: fmt.Sprintf("consumer-%d", i), EdgeClass: string(internalcontract.EdgeClassDeclared)}
+		require.Equal(t, i != 0, view.findingVisible(ctx, finding), "consumer-%d", i)
+	}
+	require.Equal(t, 1, whitespaceQueries, "one whitespace-alias read for %d names", n)
+	require.LessOrEqual(t, queries, 3*n+1, "the exact lookups use the alias index, one name at a time at most")
+
+	whitespaceQueries = 0
+	require.NoError(t, view.withSnapshot(ctx, conn, func(*gorm.DB) error {
+		require.False(t, view.aliasVisible(ctx, "consumer-0"))
+		require.True(t, view.aliasVisible(ctx, "consumer-1"))
+		return nil
+	}))
+	require.Equal(t, 1, whitespaceQueries, "a new snapshot reads them again, once")
 }

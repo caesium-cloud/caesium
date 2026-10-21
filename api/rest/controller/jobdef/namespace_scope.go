@@ -59,6 +59,10 @@ type readScope struct {
 	sharesForeign map[string]bool
 	// requested maps the request's own aliases to their namespaces.
 	requested map[string]string
+	// whitespaceRows caches the stored rows whose alias carries surrounding
+	// whitespace (whitespaceAliasRows) once whitespaceLoaded is set.
+	whitespaceRows   []models.Job
+	whitespaceLoaded bool
 	// strict applies the design's foreign-edge boundary (§8.3) to validator
 	// errors: an error touching a job the caller cannot read names no dataset
 	// either. Apply sets it; lint and diff keep B2's rendering.
@@ -186,15 +190,20 @@ func (s *readScope) resolve(ctx context.Context, aliases []string) {
 	}
 	// The aliases resolved here are trimmed (contract derivation, the
 	// request keys and findings all trim), so read every stored row whose
-	// alias trims to one of them: the exact rows and every row whose alias
-	// carries surrounding whitespace.
-	nonCanonical, nonCanonicalArgs := nonCanonicalAliasClause()
+	// alias trims to one of them: the exact rows (by the alias index) and
+	// every row whose alias carries surrounding whitespace (read once per
+	// snapshot, see whitespaceAliasRows).
 	var rows []models.Job
-	if err := s.db.WithContext(ctx).Unscoped().Select("alias", "namespace", "trigger_id").
-		Where("alias IN ? OR ("+nonCanonical+")", append([]any{lookup}, nonCanonicalArgs...)...).Find(&rows).Error; err != nil {
+	if err := s.db.WithContext(ctx).Unscoped().Select("alias", "namespace", "trigger_id").Where("alias IN ?", lookup).Find(&rows).Error; err != nil {
 		failClosed(err)
 		return
 	}
+	twins, err := s.whitespaceAliasRows(ctx)
+	if err != nil {
+		failClosed(err)
+		return
+	}
+	rows = append(rows, twins...)
 	wanted := make(map[string]struct{}, len(lookup))
 	for _, alias := range lookup {
 		wanted[alias] = struct{}{}
@@ -260,6 +269,23 @@ func nonCanonicalAliasClause() (string, []any) {
 		nonCanonicalAliasSQL = strings.Join(parts, " OR ")
 	})
 	return nonCanonicalAliasSQL, slices.Clone(nonCanonicalAliasArgs)
+}
+
+// whitespaceAliasRows returns the stored rows (live or retired) whose alias
+// carries surrounding whitespace, read once per snapshot (withSnapshot
+// resets it) rather than once per resolved name: the whitespace patterns
+// cannot use the alias index, and the set is normally empty.
+func (s *readScope) whitespaceAliasRows(ctx context.Context) ([]models.Job, error) {
+	if s.whitespaceLoaded {
+		return s.whitespaceRows, nil
+	}
+	clause, args := nonCanonicalAliasClause()
+	var rows []models.Job
+	if err := s.db.WithContext(ctx).Unscoped().Select("alias", "namespace", "trigger_id").Where(clause, args...).Find(&rows).Error; err != nil {
+		return nil, err
+	}
+	s.whitespaceRows, s.whitespaceLoaded = rows, true
+	return rows, nil
 }
 
 func (s *readScope) aliasVisible(ctx context.Context, alias string) bool {
@@ -425,6 +451,7 @@ func (s *readScope) withSnapshot(ctx context.Context, conn *gorm.DB, fn func(con
 		s.db = tx
 		clear(s.visible)
 		clear(s.sharesForeign)
+		s.whitespaceRows, s.whitespaceLoaded = nil, false
 		return fn(tx)
 	})
 }

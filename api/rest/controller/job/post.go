@@ -1,6 +1,7 @@
 package job
 
 import (
+	"errors"
 	"fmt"
 	"net/http"
 
@@ -16,6 +17,7 @@ import (
 	"github.com/caesium-cloud/caesium/pkg/db"
 	"github.com/caesium-cloud/caesium/pkg/jobdef"
 	"github.com/caesium-cloud/caesium/pkg/log"
+	"github.com/google/uuid"
 	"github.com/labstack/echo/v5"
 	"gorm.io/gorm"
 )
@@ -129,6 +131,16 @@ func Post(c *echo.Context) error {
 			}
 		}
 
+		// A confined writer's dependencies may only name tasks of the job it
+		// is creating: an edge to another job's task would read that task
+		// into this job's run descriptor (PR #668 review r9). The check reads
+		// nothing, so the refusal never depends on the named task.
+		if scope != nil {
+			if err := requireOwnDependencies(createdTasks, explicitEdges); err != nil {
+				return err
+			}
+		}
+
 		edgeSvc := taskedge.Service(ctx).WithDatabase(tx)
 		switch {
 		case len(explicitEdges) > 0:
@@ -157,6 +169,9 @@ func Post(c *echo.Context) error {
 		return nil
 	})
 	if err != nil {
+		if errors.Is(err, errForeignDependency) {
+			return echo.NewHTTPError(http.StatusBadRequest, errForeignDependency.Error()).Wrap(err)
+		}
 		if denial, conflict := internaljobdef.WriteRefusal(err, scope); denial != nil {
 			return denial
 		} else if conflict != "" {
@@ -202,6 +217,32 @@ type TaskRequest struct {
 type edgeSpec struct {
 	from string
 	to   string
+}
+
+// errForeignDependency refuses a confined writer's create whose
+// tasks[].depends_on names a task outside the job being created.
+var errForeignDependency = errors.New("tasks[].depends_on may only reference tasks of the job being created")
+
+// requireOwnDependencies returns errForeignDependency unless every edge's
+// source is one of the created tasks (task IDs compared as UUIDs; an
+// unparsable one is foreign).
+func requireOwnDependencies(created []string, edges []edgeSpec) error {
+	own := make(map[uuid.UUID]struct{}, len(created))
+	for _, id := range created {
+		if parsed, err := uuid.Parse(id); err == nil {
+			own[parsed] = struct{}{}
+		}
+	}
+	for _, edge := range edges {
+		from, err := uuid.Parse(edge.from)
+		if err != nil {
+			return errForeignDependency
+		}
+		if _, ok := own[from]; !ok {
+			return errForeignDependency
+		}
+	}
+	return nil
 }
 
 type MetadataRequest struct {
