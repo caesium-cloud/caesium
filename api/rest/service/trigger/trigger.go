@@ -8,6 +8,7 @@ import (
 	"sync"
 
 	"github.com/caesium-cloud/caesium/internal/authz"
+	internaljobdef "github.com/caesium-cloud/caesium/internal/jobdef"
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/caesium-cloud/caesium/pkg/db"
 	jobdefschema "github.com/caesium-cloud/caesium/pkg/jobdef"
@@ -211,16 +212,66 @@ func (t *triggerService) Create(req *CreateRequest) (*models.Trigger, error) {
 type UpdateRequest struct {
 	Alias         *string        `json:"alias,omitempty"`
 	Configuration map[string]any `json:"configuration,omitempty"`
+	// Scope is the writer's trigger-tenancy scope (identity-and-access B9),
+	// set by the controller from the principal; nil is unrestricted. It is
+	// never bound from the request body.
+	Scope *internaljobdef.TenancyScope `json:"-"`
 }
 
+// Update edits a trigger. A confined writer, and every writer once a policy
+// file is loaded, updates under trigger tenancy (B9): in one transaction (on
+// PostgreSQL holding the new webhook path's advisory lock) the jobs the
+// trigger serves are locked and re-authorised, the row must serve one
+// namespace, and a new webhook path must not be subscribed from another
+// namespace or by a job outside the writer's scope. Otherwise it updates
+// exactly as before.
 func (t *triggerService) Update(id uuid.UUID, req *UpdateRequest) (*models.Trigger, error) {
+	if req.Scope == nil && !internaljobdef.TenancyInvariantEnforced() {
+		return t.update(t.db.WithContext(t.ctx), id, req)
+	}
+	// The configuration is read as an HTTP trigger's here, with no read of
+	// the row's type: the type is decided inside the transaction, from the
+	// locked row (CheckTriggerPatchTx), so a concurrent apply that turns the
+	// row into an HTTP trigger cannot slip a webhook path past the check. The
+	// path's advisory lock is held either way (harmless for any other type).
+	patch := internaljobdef.TriggerPatch{TriggerID: id, PathChanges: req.Configuration != nil}
+	var keys []string
+	if patch.PathChanges {
+		patch.Path = internaljobdef.ProposedWebhookPath(string(models.TriggerTypeHTTP), req.Configuration)
+		if patch.Path != "" {
+			keys = append(keys, internaljobdef.PathLockKey(patch.Path))
+		}
+	}
+	if beforePatchTx != nil {
+		beforePatchTx(id)
+	}
+	var updated *models.Trigger
+	err := internaljobdef.WriteTx(t.ctx, t.db, keys, func(tx *gorm.DB) error {
+		if err := internaljobdef.CheckTriggerPatchTx(tx, patch, req.Scope); err != nil {
+			return err
+		}
+		var err error
+		updated, err = t.update(tx, id, req)
+		return err
+	})
+	if err != nil {
+		return nil, err
+	}
+	return updated, nil
+}
+
+// beforePatchTx, when set (tests only), runs in a tenancy-checked Update just
+// before its transaction, where a concurrent apply would interleave.
+var beforePatchTx func(id uuid.UUID)
+
+func (t *triggerService) update(conn *gorm.DB, id uuid.UUID, req *UpdateRequest) (*models.Trigger, error) {
 	var trigger models.Trigger
-	if err := t.db.WithContext(t.ctx).First(&trigger, "id = ?", id).Error; err != nil {
+	if err := conn.First(&trigger, "id = ?", id).Error; err != nil {
 		return nil, err
 	}
 
 	if req.Alias != nil {
-		if err := ensureAliasAvailable(t.db.WithContext(t.ctx), strings.TrimSpace(*req.Alias), id); err != nil {
+		if err := ensureAliasAvailable(conn, strings.TrimSpace(*req.Alias), id); err != nil {
 			return nil, err
 		}
 		trigger.Alias = *req.Alias
@@ -244,7 +295,7 @@ func (t *triggerService) Update(id uuid.UUID, req *UpdateRequest) (*models.Trigg
 		"configuration":   trigger.Configuration,
 		"normalized_path": trigger.NormalizedPath,
 	}
-	if err := t.db.WithContext(t.ctx).Model(&trigger).Updates(updates).Error; err != nil {
+	if err := conn.Model(&trigger).Updates(updates).Error; err != nil {
 		return nil, err
 	}
 

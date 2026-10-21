@@ -9,8 +9,9 @@ import (
 	jobdefsvc "github.com/caesium-cloud/caesium/api/rest/service/jobdef"
 	contractenforce "github.com/caesium-cloud/caesium/internal/contract"
 	internaljobdef "github.com/caesium-cloud/caesium/internal/jobdef"
-	"github.com/caesium-cloud/caesium/pkg/db"
+	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/labstack/echo/v5"
+	"gorm.io/gorm"
 )
 
 type ApplyProvenance = jobdefsvc.ApplyProvenance
@@ -27,7 +28,7 @@ func Apply(c *echo.Context) error {
 		return echo.NewHTTPError(http.StatusBadRequest, "definitions are required")
 	}
 
-	importer := internaljobdef.NewImporter(db.Connection())
+	importer := internaljobdef.NewImporter(catalog())
 	ctx := c.Request().Context()
 	applied := 0
 	aliases := make([]string, 0, len(req.Definitions))
@@ -45,6 +46,15 @@ func Apply(c *echo.Context) error {
 		Provenance:       prov,
 		ContractAck:      contractAck,
 		ContractWarnings: &contractWarnings,
+	}
+	// A confined writer (namespace-confined, or a job-scoped key) applies
+	// atomically (B9); everyone else keeps the per-definition flow below.
+	scope, err := writerScope(c)
+	if err != nil {
+		return err
+	}
+	if scope != nil {
+		return applyConfined(c, importer, &req, opts, scope)
 	}
 	if err := importer.ValidateBatch(ctx, req.Definitions); err != nil {
 		return echo.NewHTTPError(http.StatusBadRequest, err.Error())
@@ -67,7 +77,8 @@ func Apply(c *echo.Context) error {
 			if errors.Is(err, internaljobdef.ErrContractAck) {
 				return echo.NewHTTPError(http.StatusBadRequest, err.Error())
 			}
-			if errors.Is(err, internaljobdef.ErrDuplicateJob) || errors.Is(err, internaljobdef.ErrProvenanceConflict) || errors.Is(err, internaljobdef.ErrJobRunning) {
+			if errors.Is(err, internaljobdef.ErrDuplicateJob) || errors.Is(err, internaljobdef.ErrProvenanceConflict) || errors.Is(err, internaljobdef.ErrJobRunning) ||
+				errors.Is(err, internaljobdef.ErrTriggerTenancy) {
 				return echo.NewHTTPError(http.StatusConflict, err.Error())
 			}
 			return echo.NewHTTPError(http.StatusInternalServerError, "internal server error").Wrap(err)
@@ -88,6 +99,90 @@ func Apply(c *echo.Context) error {
 	}
 
 	return c.JSON(http.StatusOK, ApplyResponse{Applied: applied, Pruned: pruned, ContractWarnings: contractWarnings})
+}
+
+// writerScope is the tenancy scope of the request's principal for a job
+// write (internaljobdef.TenancyScope): its operator namespaces when it is
+// namespace-confined, its key's job aliases when it is job-scoped; nil when
+// neither (or auth is off). An undecodable key scope denies.
+func writerScope(c *echo.Context) (*internaljobdef.TenancyScope, error) {
+	namespaces, aliases, err := authmw.WriteConfinement(authmw.GetPrincipal(c), models.RoleOperator)
+	if err != nil {
+		return nil, echo.NewHTTPError(http.StatusForbidden, "insufficient permissions").Wrap(err)
+	}
+	return internaljobdef.NewTenancyScope(namespaces, aliases), nil
+}
+
+// applyConfined is a confined writer's apply (identity-and-access B9): every
+// definition and the prune commit in one transaction or not at all. The
+// importer re-checks, inside it, each definition's requested and stored
+// namespace (a job created or moved since the middleware decided) and trigger
+// tenancy, and a refusal is an audited 403 naming only what the caller named.
+// A namespace-confined caller prunes only within the namespaces where it is
+// operator; jobs elsewhere are never candidates. Contract findings, warnings
+// and validator errors that touch a job the caller cannot read are withheld.
+func applyConfined(c *echo.Context, importer *internaljobdef.Importer, req *ApplyRequest, opts *internaljobdef.ApplyOptions, scope *internaljobdef.TenancyScope) error {
+	ctx := c.Request().Context()
+	if req.Prune && scope.JobAliases != nil {
+		// The middleware already refuses a job-scoped key's prune.
+		return echo.NewHTTPError(http.StatusForbidden, "insufficient permissions")
+	}
+	view := newReadScope(c, catalog(), req.Definitions)
+	if view != nil {
+		view.strict = true
+	}
+	if msg := view.validate(ctx, catalog(), func(conn *gorm.DB) error {
+		return internaljobdef.NewImporter(conn).ValidateBatch(ctx, req.Definitions)
+	}); msg != "" {
+		return echo.NewHTTPError(http.StatusBadRequest, msg)
+	}
+
+	withheld := 0
+	opts.NamespaceAllowlist = scope.Namespaces
+	opts.JobAliasScope = scope.JobAliases
+	opts.ContractAudience = view.contractAudience(ctx)
+	opts.ContractWarningsWithheld = &withheld
+	plans := make([]internaljobdef.BatchPlan, 0, len(req.Definitions))
+	for i := range req.Definitions {
+		plans = append(plans, internaljobdef.BatchPlan{Def: &req.Definitions[i], Opts: opts})
+	}
+	result, err := importer.ApplyConfinedBatch(ctx, plans, internaljobdef.ConfinedBatchOptions{Prune: req.Prune, PruneNamespaces: scope.Namespaces})
+	if err != nil {
+		if errors.Is(err, internaljobdef.ErrContractBreak) {
+			if payload, ok := internaljobdef.ContractBreakResponse(err); ok {
+				return c.JSON(http.StatusConflict, payload)
+			}
+		}
+		return confinedApplyError(err, scope)
+	}
+	return c.JSON(http.StatusOK, ApplyResponse{
+		Applied:                  result.Applied,
+		Pruned:                   result.Pruned,
+		ContractWarnings:         *opts.ContractWarnings,
+		WithheldContractWarnings: withheld,
+	})
+}
+
+// confinedApplyError maps a refused confined apply. Nothing was written.
+func confinedApplyError(err error, scope *internaljobdef.TenancyScope) error {
+	if denial, _ := internaljobdef.WriteRefusal(err, scope); denial != nil {
+		return denial
+	}
+	switch {
+	case errors.Is(err, internaljobdef.ErrContractBreak):
+		return echo.NewHTTPError(http.StatusConflict, "contract enforcement blocked the apply")
+	case errors.Is(err, internaljobdef.ErrContractAck):
+		return echo.NewHTTPError(http.StatusBadRequest, err.Error())
+	case errors.Is(err, internaljobdef.ErrBatchInvalid):
+		// The stored graph changed under the apply (the validation before it
+		// passed): say so without naming jobs the caller may not read.
+		return echo.NewHTTPError(http.StatusConflict, "the stored job graph changed during the apply; nothing was applied, retry").Wrap(err)
+	case errors.Is(err, internaljobdef.ErrDuplicateJob) || errors.Is(err, internaljobdef.ErrProvenanceConflict) || errors.Is(err, internaljobdef.ErrJobRunning):
+		// Each names a job of the caller's own namespaces: the requested
+		// definition, or a prune candidate (only its namespaces are pruned).
+		return echo.NewHTTPError(http.StatusConflict, err.Error())
+	}
+	return echo.NewHTTPError(http.StatusInternalServerError, "internal server error").Wrap(err)
 }
 
 func applyProvenanceFromRequest(p *ApplyProvenance) (*internaljobdef.Provenance, error) {

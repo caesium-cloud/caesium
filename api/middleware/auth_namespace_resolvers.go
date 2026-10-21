@@ -12,6 +12,7 @@ import (
 	"github.com/caesium-cloud/caesium/internal/auth"
 	"github.com/caesium-cloud/caesium/internal/authz"
 	"github.com/caesium-cloud/caesium/internal/models"
+	"github.com/caesium-cloud/caesium/pkg/jobdef"
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v5"
 	"gorm.io/gorm"
@@ -38,8 +39,9 @@ import (
 // the moved row. A confined caller cannot cause the move, and the middleware
 // reads the whole request body before deciding, so the window is server-side
 // only. Run admission and replay re-check the grant inside their transactions
-// (runstorage.WithStartNamespaceGuard, replaysvc.Request.NamespaceGuard);
-// in-transaction guards for the other REST mutations are a B2/B4 follow-up.
+// (runstorage.WithStartNamespaceGuard, replaysvc.Request.NamespaceGuard), as
+// do retries and backfills (B4) and job-definition apply, the legacy create,
+// trigger PATCH and the manifest export (B9).
 
 // nsRequirement is one namespace check: the principal needs Role in every
 // namespace (or, with Any, in at least one). An empty Namespaces list can never
@@ -87,12 +89,19 @@ var namespaceResolvers = map[string]namespaceResolver{
 	// Jobs by id or unique id prefix (models.FindJobByIDPrefix, like get.go
 	// and manifest.go).
 	"GET /v1/jobs/:id":          resolveJobByIDPrefix,
-	"GET /v1/jobs/:id/manifest": resolveJobByIDPrefix, // pending B9
+	"GET /v1/jobs/:id/manifest": resolveJobByIDPrefix,
 
-	// Job definitions read against the catalog: every definition's namespace
-	// and the stored namespace of every alias the request names.
-	"POST /v1/jobdefs/lint": resolveJobdefRead,
-	"POST /v1/jobdefs/diff": resolveJobdefRead,
+	// Job definitions read against the catalog, or applied to it: every
+	// definition's namespace and the stored namespace of every alias the
+	// request names (an apply that moves a job needs operator in both). The
+	// apply re-checks both inside its transaction, and prunes only in the
+	// namespaces where the caller is operator (B9).
+	"POST /v1/jobdefs/lint":  resolveJobdefRead,
+	"POST /v1/jobdefs/diff":  resolveJobdefRead,
+	"POST /v1/jobdefs/apply": resolveJobdefRead,
+	// The legacy create: the body's metadata.namespace and the stored
+	// namespace of its alias, re-checked inside the create's transaction.
+	"POST /v1/jobs": resolveJobCreate,
 
 	// One run: the job's current namespace AND the run's persisted namespace.
 	"GET /v1/jobs/:id/runs/:id":                                 resolveJobRun,
@@ -116,7 +125,7 @@ var namespaceResolvers = map[string]namespaceResolver{
 
 	// Triggers: every job the trigger serves.
 	"GET /v1/triggers/:id":        resolveTrigger,
-	"PATCH /v1/triggers/:id":      resolveTrigger, // pending B9
+	"PATCH /v1/triggers/:id":      resolveTrigger,
 	"POST /v1/triggers/:id/fire":  resolveTrigger,
 	"GET /v1/triggers/:id/events": resolveTrigger,
 
@@ -253,12 +262,14 @@ func (m *jobdefReadMetadata) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
-// resolveJobdefRead resolves POST /v1/jobdefs/lint and /diff: the role in
-// every definition's namespace (blank means default) and in the stored
-// namespace of every alias the request names that already has a jobs row, so
-// a caller cannot lint or diff against another namespace's job by naming its
-// alias. A request with no definitions names no namespace: any grant of the
-// role passes, and the handler returns only the caller's namespaces' rows.
+// resolveJobdefRead resolves POST /v1/jobdefs/lint, /diff and /apply: the
+// role in every definition's namespace (blank means default) and in the
+// stored namespace of every alias the request names that already has a jobs
+// row, so a caller cannot lint, diff or apply against another namespace's job
+// by naming its alias (for apply, a move needs operator in both namespaces).
+// A request with no definitions names no namespace: any grant of the role
+// passes, and the handler returns only the caller's namespaces' rows (apply
+// refuses it with 400).
 func resolveJobdefRead(c *echo.Context, svc *auth.Service, role models.Role) ([]nsRequirement, error) {
 	var body jobdefReadBody
 	if err := peekJSONBody(c, confinedBodyBufferLimit, &body); err != nil {
@@ -278,6 +289,42 @@ func resolveJobdefRead(c *echo.Context, svc *auth.Service, role models.Role) ([]
 		return nil, lookupError(err)
 	}
 	requirement := every(role, append(namespaces, stored...)...)
+	requirement.Disclose = true
+	return []nsRequirement{requirement}, nil
+}
+
+// jobCreateBody is the part of a legacy create body (controller/job
+// PostRequest) the resolver needs, decoded with the same field names and
+// shapes (a pointer metadata object), so the handler's c.Bind sees the same
+// alias and namespace.
+type jobCreateBody struct {
+	Alias    string `json:"alias"`
+	Metadata *struct {
+		Namespace string `json:"namespace"`
+	} `json:"metadata"`
+}
+
+// resolveJobCreate resolves POST /v1/jobs: the role in the body's namespace
+// (blank means default) and in the stored namespace of its alias, if it
+// already has a jobs row (retired rows included). An invalid namespace is the
+// handler's 400.
+func resolveJobCreate(c *echo.Context, svc *auth.Service, role models.Role) ([]nsRequirement, error) {
+	var body jobCreateBody
+	if err := peekJSONBody(c, confinedBodyBufferLimit, &body); err != nil {
+		return nil, err
+	}
+	namespace := ""
+	if body.Metadata != nil {
+		namespace = body.Metadata.Namespace
+	}
+	if err := jobdef.ValidateNamespace(namespace); err != nil {
+		return nil, echo.NewHTTPError(http.StatusBadRequest, err.Error()).Wrap(err)
+	}
+	stored, err := svc.JobNamespacesByAlias(c.Request().Context(), []string{body.Alias})
+	if err != nil {
+		return nil, lookupError(err)
+	}
+	requirement := every(role, append([]string{models.NamespaceOrDefault(namespace)}, stored...)...)
 	requirement.Disclose = true
 	return []nsRequirement{requirement}, nil
 }

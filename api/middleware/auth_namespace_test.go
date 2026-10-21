@@ -332,20 +332,20 @@ func TestNamespacedJobRoutes(t *testing.T) {
 		"an unrestricted principal reaches the handler: no resolver runs, so no resolver 404")
 }
 
-// TestNamespacedManifestPrefix: the manifest exports the job's trigger
-// configuration, which another namespace's job may share, so it is pending
-// B9 for confined principals; its id-or-prefix resolver (shared with GET
-// /v1/jobs/:id) is exercised in TestJobPrefixResolverMatchesHandler.
+// TestNamespacedManifestPrefix: the manifest resolves the job by id or
+// unique prefix (the resolver shared with GET /v1/jobs/:id, exercised in
+// TestJobPrefixResolverMatchesHandler); the handler withholds a trigger
+// shared with another namespace's job (B9).
 func TestNamespacedManifestPrefix(t *testing.T) {
 	f := newNSFixture(t)
 	mktViewer := f.key(t, models.RoleViewer, `["marketing"]`)
 	manifest := func(who cred, id string) nsResult {
 		return f.do(t, who, get("/v1/jobs/:id/manifest", pv("id", id)))
 	}
-	for _, id := range []string{mktJobID, "aaaa1111", "aaaa", "zz"} {
-		require.Equal(t, http.StatusForbidden, manifest(mktViewer, id).status, id)
-		requireAuditMetadata(t, f.lastDenial(t), map[string]any{"pending": "B9"})
+	for _, id := range []string{mktJobID, "aaaa1111"} {
+		require.Equal(t, http.StatusOK, manifest(mktViewer, id).status, id)
 	}
+	require.Equal(t, http.StatusForbidden, manifest(mktViewer, finJobID).status)
 	require.Equal(t, http.StatusOK, manifest(f.key(t, models.RoleViewer, ""), "aaaa1111").status, "a cluster viewer is unchanged")
 }
 
@@ -464,11 +464,13 @@ func TestNamespacedTriggerRoutes(t *testing.T) {
 			post("/v1/triggers/:id/fire", params, ""),
 		}
 	}
-	// Editing a trigger's configuration can subscribe it to another
-	// namespace's webhook path: pending B9.
+	// Editing a trigger needs the role in every job it serves; the handler
+	// re-checks that and the webhook path inside its transaction (B9).
 	patch := nsCall{method: http.MethodPatch, pattern: "/v1/triggers/:id", params: pv("id", f.mktTrigger.String()), body: `{}`}
-	require.Equal(t, http.StatusForbidden, f.do(t, both, patch).status)
-	requireAuditMetadata(t, f.lastDenial(t), map[string]any{"pending": "B9"})
+	require.Equal(t, http.StatusOK, f.do(t, mktOperator, patch).status)
+	sharedPatch := nsCall{method: http.MethodPatch, pattern: "/v1/triggers/:id", params: pv("id", f.sharedTrigger.String()), body: `{}`}
+	require.Equal(t, http.StatusForbidden, f.do(t, mktOperator, sharedPatch).status)
+	require.Equal(t, http.StatusOK, f.do(t, both, sharedPatch).status)
 	for _, call := range calls(f.sharedTrigger) {
 		require.Equal(t, http.StatusForbidden, f.do(t, mktOperator, call).status, "a trigger shared with a finance job: %s", call.method)
 		require.Equal(t, http.StatusOK, f.do(t, both, call).status)
@@ -652,7 +654,6 @@ func TestNamespacedClusterAndPendingRoutes(t *testing.T) {
 	}{
 		{get("/v1/jobs/:id/blame", pv("id", f.mktJob.String())), "B7"},
 		{get("/v1/jobs/:id/topology", pv("id", f.mktJob.String())), "B7"},
-		{post("/v1/jobdefs/apply", nil, `{"definitions":[]}`), "B9"},
 		{post("/v1/events", nil, `{}`), "A6"},
 		{get("/v1/lineage/impact", nil), "B5"},
 	} {

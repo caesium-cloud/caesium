@@ -530,10 +530,14 @@ under another. Replays of a moved job run under the job's current namespace.
 
 ### 9.5 Prune
 
-Unchanged semantics (same provenance source, not in the set). The middleware checks
-operator in the namespace of every job in the server-computed prune set; any miss
-fails the whole apply with 403 naming the namespace. Job-scoped keys still cannot
-prune at all.
+Unchanged semantics for an unrestricted caller (the server-computed set of jobs not
+in the request). **Amendment (W5):** for a namespace-confined caller the prune
+candidates are that server-computed set intersected with the namespaces where the
+caller holds operator, computed inside the apply's transaction (one definition for
+the middleware and the transaction), so jobs in other namespaces are never
+candidates and no 403 discloses them. Job-scoped keys still cannot prune at all.
+Amended in identity-and-access W5 (B9, orchestrator decision, pending maintainer
+sign-off).
 
 ## 10. Isolation
 

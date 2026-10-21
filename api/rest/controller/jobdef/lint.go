@@ -2,12 +2,14 @@ package jobdef
 
 import (
 	"cmp"
+	"errors"
 	"fmt"
 	"net/http"
 	"slices"
 	"sort"
 	"strings"
 
+	authmw "github.com/caesium-cloud/caesium/api/middleware"
 	contractsvc "github.com/caesium-cloud/caesium/api/rest/service/contract"
 	internalcontract "github.com/caesium-cloud/caesium/internal/contract"
 	internaljobdef "github.com/caesium-cloud/caesium/internal/jobdef"
@@ -91,6 +93,27 @@ func Lint(c *echo.Context) error {
 	if len(resp.Errors) == 0 {
 		if msg := scope.validate(ctx, catalog(), func(conn *gorm.DB) error {
 			return internaljobdef.ValidateAgentProfileRefs(ctx, conn, req.Definitions)
+		}); msg != "" {
+			resp.Errors = append(resp.Errors, LintMessage{Message: msg})
+		}
+	}
+	// Trigger tenancy (B9): the trigger rows and webhook paths the apply would
+	// touch, previewed without locks in the caller's read snapshot, against
+	// what the caller may read (and, with a policy file, one namespace per
+	// row and path).
+	if len(resp.Errors) == 0 {
+		namespaces, aliases, err := authmw.ReadConfinement(authmw.GetPrincipal(c))
+		if err != nil {
+			return echo.NewHTTPError(http.StatusForbidden, "insufficient permissions").Wrap(err)
+		}
+		tenancy := internaljobdef.NewTenancyScope(namespaces, aliases)
+		if msg := scope.validate(ctx, catalog(), func(conn *gorm.DB) error {
+			err := internaljobdef.ValidateTriggerTenancy(ctx, conn, req.Definitions, tenancy)
+			if _, ok := errors.AsType[*internaljobdef.NamespaceAllowlistError](err); ok {
+				// A refusal never names who else is on the row or path.
+				return errors.New(internaljobdef.RedactedTenancyMessage(err))
+			}
+			return err
 		}); msg != "" {
 			resp.Errors = append(resp.Errors, LintMessage{Message: msg})
 		}

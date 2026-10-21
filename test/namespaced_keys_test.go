@@ -3,7 +3,6 @@
 package test
 
 import (
-	"encoding/json"
 	"fmt"
 	"time"
 )
@@ -12,32 +11,24 @@ import (
 // namespaces: role cluster-wide) and revokes it when the scenario ends (plan
 // item H-1).
 //
-// The key is minted through the real `caesium auth key create`; until A5's
-// `--namespace` flag lands, its namespaces column is then seeded in the
-// catalog, exactly as A3's namespacedKey does. Seeding produces the
-// precondition only: every assertion still goes through the server.
+// The key is minted through the real `caesium auth key create --namespace`
+// (A5), as the admin key the lane exports, so the namespaces are stored and
+// validated by the server exactly as an operator's mint would be.
 func (s *IntegrationTestSuite) mintNamespacedKey(role string, namespaces ...string) createdAPIKey {
 	s.T().Helper()
 
-	key := s.createAPIKeyCLI("--role", role, "--description",
-		fmt.Sprintf("h1 %s %v %d", role, namespaces, time.Now().UnixNano()))
+	args := []string{"--role", role, "--description", fmt.Sprintf("h1 %s %v %d", role, namespaces, time.Now().UnixNano())}
+	for _, namespace := range namespaces {
+		args = append(args, "--namespace", namespace)
+	}
+	key := s.createAPIKeyCLI(args...)
 	s.T().Cleanup(func() {
 		if out, err := s.runCLIStdout("auth", "key", "revoke", "--id", key.Meta.ID, "--server", s.caesiumURL); err != nil {
 			s.T().Errorf("revoke namespaced key %s: %v\n%s", key.Meta.ID, err, out)
 		}
 	})
-	if len(namespaces) == 0 {
-		return key
+	if len(namespaces) > 0 {
+		s.Require().ElementsMatch(namespaces, key.Meta.Namespaces, "the minted key holds %s in %v", role, namespaces)
 	}
-
-	encoded, err := json.Marshal(namespaces)
-	s.Require().NoError(err)
-	catalog := s.openIntegrationCatalogDB()
-	defer func() { s.NoError(catalog.Close()) }()
-	result, err := catalog.ExecContext(s.T().Context(), `UPDATE api_keys SET namespaces = ? WHERE id = ?`, string(encoded), key.Meta.ID)
-	s.Require().NoError(err)
-	affected, err := result.RowsAffected()
-	s.Require().NoError(err)
-	s.Require().Equal(int64(1), affected, "seed the namespaces of key %s", key.Meta.ID)
 	return key
 }

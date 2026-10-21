@@ -174,9 +174,10 @@ var endpointPolicy = map[string]RoutePolicy{
 	"GET /v1/jobs/:id/tasks": namespacedRoute(viewer),
 	"GET /v1/jobs/:id/dag":   namespacedRoute(viewer),
 	// The manifest exports the job's trigger configuration (webhook secrets
-	// included), and a trigger may also serve another namespace's job (B9 owns
-	// shared-trigger ownership on the apply/export round trip).
-	"GET /v1/jobs/:id/manifest":         namespacedRoute(viewer).pendingOn("B9"),
+	// included); for a confined viewer the handler re-checks the job and
+	// withholds the configuration of a trigger that also serves a job it
+	// cannot read, in one read snapshot (B9).
+	"GET /v1/jobs/:id/manifest":         namespacedRoute(viewer),
 	"GET /v1/jobs/:id/queue":            namespacedRoute(viewer),
 	"GET /v1/jobs/:id/runs":             namespacedRoute(viewer),
 	"GET /v1/jobs/:id/runs/diff":        namespacedRoute(viewer),
@@ -307,14 +308,15 @@ var endpointPolicy = map[string]RoutePolicy{
 	"POST /v1/triggers/:id/fire": namespacedRoute(runner),
 
 	// Operator
-	// Create and apply must resolve every definition's namespace, the stored
-	// namespace of every existing alias, the triggers an apply updates in place
-	// (and their webhook-path subscribers) and the prune set, atomically (B9).
-	"POST /v1/jobs":                         namespacedRoute(operator).pendingOn("B9"),
+	// Create and apply resolve every definition's namespace and the stored
+	// namespace of every existing alias; for a confined writer the handler
+	// re-checks both, trigger tenancy (the rows and webhook paths a write
+	// touches) and the prune set inside one transaction (B9).
+	"POST /v1/jobs":                         namespacedRoute(operator),
 	"DELETE /v1/jobs/:id":                   namespacedRoute(operator),
 	"PUT /v1/jobs/:id/pause":                namespacedRoute(operator),
 	"PUT /v1/jobs/:id/unpause":              namespacedRoute(operator),
-	"POST /v1/jobdefs/apply":                namespacedRoute(operator).pendingOn("B9"),
+	"POST /v1/jobdefs/apply":                namespacedRoute(operator),
 	"POST /v1/cache/prune":                  clusterRoute(operator),
 	"DELETE /v1/jobs/:id/queue/:id":         namespacedRoute(operator),
 	"DELETE /v1/jobs/:id/cache":             namespacedRoute(operator),
@@ -322,10 +324,10 @@ var endpointPolicy = map[string]RoutePolicy{
 	"PUT /v1/jobs/:id/backfills/:id/cancel": namespacedRoute(operator),
 	// A new trigger serves no job yet, so it has no namespace to resolve.
 	"POST /v1/triggers": clusterRoute(operator),
-	// Editing a trigger's configuration can subscribe it to another
-	// namespace's webhook path (paths may repeat, and a delivery fans out to
-	// every trigger on the path); B9 owns trigger subscription ownership.
-	"PATCH /v1/triggers/:id": namespacedRoute(operator).pendingOn("B9"),
+	// Editing a trigger needs the role in every job it serves; the handler
+	// re-checks that and the webhook path it subscribes in its transaction
+	// (B9 trigger tenancy).
+	"PATCH /v1/triggers/:id": namespacedRoute(operator),
 	"POST /v1/atoms":         clusterRoute(operator),
 	"DELETE /v1/atoms/:id":   clusterRoute(operator),
 	// Notification dispatch (internal/notification MatchPolicies) matches

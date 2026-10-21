@@ -1765,6 +1765,10 @@ PY
   # denials. The cookie-admin scenario rewrites a policy file, which this
   # server does not mount, so it runs on the agent lane only.
   auth_pattern="${auth_pattern%)}|TestAuthUserAdministrationLifecycle|TestAuthUserAdministrationDeniesNonClusterAdmins)"
+  # Confined job writes and trigger tenancy (identity-and-access B9): the
+  # confined apply, legacy create and webhook-path race. Rule 1 only, which
+  # needs no policy file (this server mounts none) nor a catalog connection.
+  auth_pattern="${auth_pattern%)}|TestAuthJobdefApplyLateRefusalRollsBack|TestAuthLegacyJobCreateConfined|TestAuthTriggerTenancyWebhookPathRace)"
 
   local -a local_named_passes=(
     TestCaesiumWhyExplainsHitAndMiss
@@ -1810,6 +1814,9 @@ PY
     TestAuthPolicyShowAndReloadSurface
     TestAuthUserAdministrationLifecycle
     TestAuthUserAdministrationDeniesNonClusterAdmins
+    TestAuthJobdefApplyLateRefusalRollsBack
+    TestAuthLegacyJobCreateConfined
+    TestAuthTriggerTenancyWebhookPathRace
   )
   local -a distributed_named_passes=(
     TestNodeWorkersRoute

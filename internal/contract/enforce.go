@@ -57,6 +57,10 @@ type EnforcementResponse struct {
 	Error    string            `json:"error"`
 	Message  string            `json:"message"`
 	Findings []ContractFinding `json:"findings"`
+	// WithheldFindings counts the blocking findings withheld from a
+	// namespace-confined caller because they touch a job outside its
+	// namespaces (ApplyOptions.Visible); omitted otherwise.
+	WithheldFindings int `json:"withheld_findings,omitempty"`
 }
 
 // ContractWarning is returned on successful apply calls that rely on an active
@@ -118,11 +122,39 @@ type ApplyOptions struct {
 	EventStore         EventAppender
 	IncomingAliases    map[string]struct{}
 	SuppressAckNoMatch bool
+	// Visible, when set, is a namespace-confined caller's view (identity-and-
+	// access B9): it reports whether the caller may read a finding, which
+	// needs both of its jobs. A finding it may not read is withheld whole
+	// (alias, dataset, schema keys, path and detail) from the 409 and from
+	// the warnings, and only counted, with the design's foreign-edge message.
+	Visible func(ContractFinding) bool
 }
 
 // EnforcementResult carries non-blocking warnings produced by enforcement.
 type EnforcementResult struct {
 	Warnings []ContractWarning
+	// WithheldWarnings counts the warnings withheld by ApplyOptions.Visible.
+	WithheldWarnings int
+}
+
+// ForeignContractMessage is what a namespace-confined caller is told about
+// contract findings it may not read.
+const ForeignContractMessage = "a contract with a job outside your namespaces is affected"
+
+// splitVisible partitions findings by visible (nil: all visible).
+func splitVisible(findings []ContractFinding, visible func(ContractFinding) bool) (shown []ContractFinding, withheld int) {
+	if visible == nil {
+		return findings, 0
+	}
+	shown = make([]ContractFinding, 0, len(findings))
+	for _, finding := range findings {
+		if visible(finding) {
+			shown = append(shown, finding)
+			continue
+		}
+		withheld++
+	}
+	return shown, withheld
 }
 
 // EventAppender is the transactional subset of internal/event.Store used to
@@ -249,7 +281,11 @@ func EvaluateGraphWithOptions(ctx context.Context, db *gorm.DB, graph Graph, mod
 			if opts.AllowBreaking != nil && allowBreakingMatches(opts.AllowBreaking, group) {
 				allowMatched = true
 			}
-			result.Warnings = append(result.Warnings, warningsForAcknowledgedGroup(group, ack, opts.IncomingAliases)...)
+			shown, withheld := splitVisible(group.findings, opts.Visible)
+			result.WithheldWarnings += withheld
+			shownGroup := group
+			shownGroup.findings = shown
+			result.Warnings = append(result.Warnings, warningsForAcknowledgedGroup(shownGroup, ack, opts.IncomingAliases)...)
 			continue
 		}
 
@@ -266,6 +302,13 @@ func EvaluateGraphWithOptions(ctx context.Context, db *gorm.DB, graph Graph, mod
 			if err := emitContractBreakDeclaredEvents(ctx, db, opts.EventStore, group, ack); err != nil {
 				return EnforcementResult{}, err
 			}
+			// The declared warning summarises the whole group (its offending
+			// keys and first consumer); a confined caller gets it only when it
+			// may read every finding of the group.
+			if _, withheld := splitVisible(group.findings, opts.Visible); withheld > 0 {
+				result.WithheldWarnings++
+				continue
+			}
 			result.Warnings = append(result.Warnings, warningForDeclaredGroup(group, ack))
 			continue
 		}
@@ -281,13 +324,29 @@ func EvaluateGraphWithOptions(ctx context.Context, db *gorm.DB, graph Graph, mod
 		return result, nil
 	}
 	sortContractFindings(blocked)
+	shown, withheld := splitVisible(blocked, opts.Visible)
+	message := contractBreakMessage(blocked)
+	if withheld > 0 {
+		message = withheldContractBreakMessage(shown, withheld)
+	}
 	return EnforcementResult{}, &EnforcementError{
 		Response: EnforcementResponse{
-			Error:    "contract_breaking_change",
-			Message:  contractBreakMessage(blocked),
-			Findings: blocked,
+			Error:            "contract_breaking_change",
+			Message:          message,
+			Findings:         shown,
+			WithheldFindings: withheld,
 		},
 	}
+}
+
+// withheldContractBreakMessage is contractBreakMessage for a confined caller:
+// the findings it may read are listed as usual, the others only counted.
+func withheldContractBreakMessage(shown []ContractFinding, withheld int) string {
+	note := fmt.Sprintf("%s (%d finding(s))", ForeignContractMessage, withheld)
+	if len(shown) == 0 {
+		return fmt.Sprintf("contract enforcement blocked %d breaking finding(s): %s", withheld, note)
+	}
+	return contractBreakMessage(shown) + "; " + note
 }
 
 func breakingGroupsFromGraph(graph Graph, incomingAliases map[string]struct{}) ([]breakingGroup, error) {

@@ -9,6 +9,7 @@ import (
 
 	"github.com/caesium-cloud/caesium/internal/auth/policy"
 	"github.com/caesium-cloud/caesium/internal/models"
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 )
 
@@ -105,20 +106,77 @@ func TestJobdefReadRoutesUnrestrictedOracle(t *testing.T) {
 	}
 }
 
-// TestJobdefWriteRoutesPendingB9: confined writes of job definitions wait on
-// B9 (trigger tenancy and an atomic confined apply).
-func TestJobdefWriteRoutesPendingB9(t *testing.T) {
+// TestJobdefWriteRoutesResolveNamespaces (B9): apply and the legacy create
+// need operator in every namespace the body names and in the stored namespace
+// of each alias it names (a move needs both); the 403 names the namespaces
+// the caller lacks, as it named them itself.
+func TestJobdefWriteRoutesResolveNamespaces(t *testing.T) {
 	f := newNSFixture(t)
-	mktAdmin := f.key(t, models.RoleAdmin, `["marketing"]`)
-	for _, call := range []nsCall{
-		post("/v1/jobdefs/apply", nil, jobdefBody("brand-new", "marketing")),
-		post("/v1/jobs", nil, `{"alias":"brand-new","metadata":{"namespace":"marketing"}}`),
-		{method: http.MethodPatch, pattern: "/v1/triggers/:id", params: pv("id", f.mktTrigger.String()), body: `{}`},
-		get("/v1/jobs/:id/manifest", pv("id", f.mktJob.String())),
+	mktOperator := f.key(t, models.RoleOperator, `["marketing"]`)
+	both := f.key(t, models.RoleOperator, `["marketing","finance"]`)
+	mktViewer := f.key(t, models.RoleViewer, `["marketing"]`)
+
+	ok := f.do(t, mktOperator, post("/v1/jobdefs/apply", nil, jobdefBody("brand-new", "marketing")))
+	require.Equal(t, http.StatusOK, ok.status)
+	require.Equal(t, []string{"marketing"}, ok.decision.Namespaces)
+	require.Equal(t, jobdefBody("brand-new", "marketing"), ok.body, "the handler reads the whole body")
+
+	for _, body := range []string{jobdefBody("brand-new", "finance"), jobdefBody("ns-fin", "marketing")} {
+		res := f.do(t, mktOperator, post("/v1/jobdefs/apply", nil, body))
+		require.Equal(t, http.StatusForbidden, res.status, body)
+		require.Equal(t, `insufficient permissions: operator required in namespace "finance"`, res.message, body)
+		requireAuditMetadata(t, f.lastDenial(t), map[string]any{"reason": "insufficient_role"})
+	}
+	require.Equal(t, http.StatusOK, f.do(t, both, post("/v1/jobdefs/apply", nil, jobdefBody("ns-fin", "marketing"))).status, "a move with operator in both")
+	require.Equal(t, http.StatusForbidden, f.do(t, mktViewer, post("/v1/jobdefs/apply", nil, jobdefBody("brand-new", "marketing"))).status)
+
+	create := func(body string) nsResult { return f.do(t, mktOperator, post("/v1/jobs", nil, body)) }
+	res := create(`{"alias":"brand-new","metadata":{"namespace":"marketing"}}`)
+	require.Equal(t, http.StatusOK, res.status)
+	require.Equal(t, []string{"marketing"}, res.decision.Namespaces)
+	for body, want := range map[string]string{
+		`{"alias":"brand-new","metadata":{"namespace":"finance"}}`: `insufficient permissions: operator required in namespace "finance"`,
+		`{"alias":"ns-fin","metadata":{"namespace":"marketing"}}`:  `insufficient permissions: operator required in namespace "finance"`,
+		`{"alias":"brand-new"}`:                 `insufficient permissions: operator required in namespace "default"`,
+		`{"alias":"brand-new","metadata":null}`: `insufficient permissions: operator required in namespace "default"`,
 	} {
-		res := f.do(t, mktAdmin, call)
-		require.Equal(t, http.StatusForbidden, res.status, call.pattern)
-		require.Equal(t, "insufficient permissions", res.message, call.pattern)
-		requireAuditMetadata(t, f.lastDenial(t), map[string]any{"pending": "B9"})
+		res := create(body)
+		require.Equal(t, http.StatusForbidden, res.status, body)
+		require.Equal(t, want, res.message, body)
+	}
+	require.Equal(t, http.StatusBadRequest, create(`{"alias":"x","metadata":{"namespace":"Bad_NS"}}`).status, "the handler's 400")
+	require.Equal(t, http.StatusBadRequest, create(`{"alias":`).status)
+
+	// PATCH and the manifest resolve the trigger's jobs and the job.
+	patch := func(id uuid.UUID) nsResult {
+		return f.do(t, mktOperator, nsCall{method: http.MethodPatch, pattern: "/v1/triggers/:id", params: pv("id", id.String()), body: `{}`})
+	}
+	require.Equal(t, http.StatusOK, patch(f.mktTrigger).status)
+	require.Equal(t, http.StatusForbidden, patch(f.sharedTrigger).status, "a trigger also serving a finance job")
+	require.Equal(t, http.StatusForbidden, patch(f.idleTrigger).status, "a trigger serving no job is cluster-only")
+	require.Equal(t, http.StatusOK, f.do(t, mktViewer, get("/v1/jobs/:id/manifest", pv("id", f.mktJob.String()))).status)
+	require.Equal(t, http.StatusForbidden, f.do(t, mktViewer, get("/v1/jobs/:id/manifest", pv("id", f.finJob.String()))).status)
+}
+
+// TestJobdefWriteRoutesUnrestrictedOracle: a principal holding operator at
+// "*" is decided as before B9 (no namespace check, the body untouched); the
+// only change is that the audit row of an apply or a legacy create now
+// records the namespaces the request names, as every other namespaced write
+// already does (B9 decision Q3).
+func TestJobdefWriteRoutesUnrestrictedOracle(t *testing.T) {
+	f := newNSFixture(t)
+	for _, who := range []cred{f.key(t, models.RoleOperator, ""), f.key(t, models.RoleAdmin, "")} {
+		for _, call := range []nsCall{
+			post("/v1/jobdefs/apply", nil, jobdefBody("brand-new", "finance")),
+			post("/v1/jobs", nil, `{"alias":"brand-new","metadata":{"namespace":"finance"}}`),
+		} {
+			res := f.do(t, who, call)
+			require.Equal(t, http.StatusOK, res.status, call.pattern)
+			require.True(t, res.decision.Unrestricted, call.pattern)
+			require.Equal(t, call.body, res.body)
+			var entry models.AuditLog
+			require.NoError(t, f.db.Order("timestamp desc").First(&entry).Error)
+			require.Equal(t, "finance", entry.Namespace, call.pattern)
+		}
 	}
 }

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/http"
 
+	authmw "github.com/caesium-cloud/caesium/api/middleware"
 	"github.com/caesium-cloud/caesium/api/rest/service/atom"
 	"github.com/caesium-cloud/caesium/api/rest/service/job"
 	"github.com/caesium-cloud/caesium/api/rest/service/task"
@@ -49,8 +50,34 @@ func Post(c *echo.Context) error {
 	// transaction commits — never for a rolled-back or retried attempt.
 	ctx := event.WithDeferredBusDispatch(c.Request().Context())
 
+	// A confined writer (namespace-confined, or a job-scoped key), and every
+	// writer once a policy file is loaded, creates under trigger tenancy
+	// (B9): the alias and the webhook path are checked, and on PostgreSQL
+	// locked, inside the transaction before anything is written.
+	namespaces, aliases, err := authmw.WriteConfinement(authmw.GetPrincipal(c), models.RoleOperator)
+	if err != nil {
+		return echo.NewHTTPError(http.StatusForbidden, "insufficient permissions").Wrap(err)
+	}
+	scope := internaljobdef.NewTenancyScope(namespaces, aliases)
+	run := func(fn func(tx *gorm.DB) error) error { return db.Transaction(ctx, fn) }
+	if scope != nil || internaljobdef.TenancyInvariantEnforced() {
+		path := internaljobdef.ProposedWebhookPath(req.Trigger.Type, req.Trigger.Configuration)
+		keys := []string{internaljobdef.AliasLockKey(req.Alias)}
+		if path != "" {
+			keys = append(keys, internaljobdef.PathLockKey(path))
+		}
+		run = func(fn func(tx *gorm.DB) error) error {
+			return internaljobdef.WriteTx(ctx, db.Connection(), keys, func(tx *gorm.DB) error {
+				if err := internaljobdef.CheckJobCreateTx(tx, req.Alias, namespace, req.Trigger.Type, req.Trigger.Configuration, scope); err != nil {
+					return err
+				}
+				return fn(tx)
+			})
+		}
+	}
+
 	var created *models.Job
-	err := db.Transaction(ctx, func(tx *gorm.DB) error {
+	err = run(func(tx *gorm.DB) error {
 		var (
 			tsvc          = task.Service(ctx).WithDatabase(tx)
 			asvc          = atom.Service(ctx).WithDatabase(tx)
@@ -130,6 +157,11 @@ func Post(c *echo.Context) error {
 		return nil
 	})
 	if err != nil {
+		if denial, conflict := internaljobdef.WriteRefusal(err, scope); denial != nil {
+			return denial
+		} else if conflict != "" {
+			return echo.NewHTTPError(http.StatusConflict, conflict).Wrap(err)
+		}
 		log.Error("failed to apply job", "alias", req.Alias, "error", err)
 		return echo.NewHTTPError(http.StatusInternalServerError, "internal server error").Wrap(err)
 	}

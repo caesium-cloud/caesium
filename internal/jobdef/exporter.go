@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"sort"
 	"strings"
 
@@ -69,6 +70,44 @@ func (e *Exporter) Export(ctx context.Context, jobID uuid.UUID) (*schema.Definit
 		return nil, err
 	}
 	return BuildDefinition(records)
+}
+
+// ExportConfinedTx rebuilds the manifest of the job rawID names (a full id
+// or unique prefix) for a reader confined to scope (identity-and-access B9),
+// reading everything from tx, a read snapshot: the job must be inside scope
+// (otherwise errOutside, the reader is denied), and the configuration of a
+// trigger that also serves a live job outside scope is replaced with
+// redacted (its webhook secret would let the reader fire that job). Because
+// the job's namespace, its records and the trigger's other jobs come from one
+// snapshot, a concurrent move or apply cannot pair an authorisation with data
+// from another moment.
+func ExportConfinedTx(tx *gorm.DB, rawID string, scope *TenancyScope, redacted map[string]any, errOutside func(job *models.Job) error) (*schema.Definition, error) {
+	job, err := models.FindJobByIDPrefix(tx, rawID)
+	if err != nil {
+		return nil, err
+	}
+	if !scope.Allows(job.Alias, job.Namespace) {
+		return nil, errOutside(job)
+	}
+	records, err := loadJobRecordsTx(tx, job.ID)
+	if err != nil {
+		return nil, err
+	}
+	def, err := BuildDefinition(records)
+	if err != nil {
+		return nil, err
+	}
+	if records.Trigger != nil {
+		shared, err := TriggerServesOutsideTx(tx, records.Trigger.ID, scope)
+		if err != nil {
+			return nil, err
+		}
+		if shared {
+			def.Trigger.Configuration = maps.Clone(redacted)
+			def.Trigger.DefaultParams = nil
+		}
+	}
+	return def, nil
 }
 
 // ErrJobChangedDuringExport means a concurrent apply committed while the

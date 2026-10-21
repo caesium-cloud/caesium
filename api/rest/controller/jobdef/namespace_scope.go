@@ -42,8 +42,14 @@ var catalog = db.Connection
 // A nil *readScope is an unrestricted caller (a cluster viewer, or auth
 // disabled); every method then returns its input unchanged.
 type readScope struct {
-	db      *gorm.DB
+	db *gorm.DB
+	// allowed is the namespaces the caller may read; nil when it may read
+	// every namespace (a job-scoped key holding its role at "*"), in which
+	// case only aliases restricts it.
 	allowed []string
+	// aliases is the caller's key job-alias scope (B9): a job outside it is
+	// foreign even in a readable namespace. nil when the key is unscoped.
+	aliases []string
 	// visible caches alias -> whether the caller may see it.
 	visible map[string]bool
 	// sharesForeign marks aliases whose stored trigger also serves a live job
@@ -51,28 +57,46 @@ type readScope struct {
 	sharesForeign map[string]bool
 	// requested maps the request's own aliases to their namespaces.
 	requested map[string]string
+	// strict applies the design's foreign-edge boundary (§8.3) to validator
+	// errors: an error touching a job the caller cannot read names no dataset
+	// either. Apply sets it; lint and diff keep B2's rendering.
+	strict bool
 }
 
-// newReadScope returns the confined view for the request, or nil. Only an
-// authenticated principal whose viewer grants do not cover "*" is restricted;
-// with auth disabled there is no principal and nothing changes. A principal
-// with no grants at all is restricted to nothing (fail closed).
+// newReadScope returns the confined view for the request, or nil. An
+// authenticated principal whose viewer grants do not cover "*", or whose API
+// key is scoped to job aliases (B9), is restricted; with auth disabled there
+// is no principal and nothing changes. A principal with no grants at all, or
+// an undecodable key scope, is restricted to nothing (fail closed).
 func newReadScope(c *echo.Context, conn *gorm.DB, defs []schema.Definition) *readScope {
 	principal := authmw.GetPrincipal(c)
 	if principal == nil {
 		return nil
 	}
-	return newReadScopeFor(principal.AllowedNamespaces(), conn, defs)
+	allowed, aliases, err := authmw.ReadConfinement(principal)
+	if err != nil {
+		log.Warn("jobdef read scope: undecodable key scope; restricting the caller to nothing", "error", err)
+		return newReadScopeForKey([]string{}, []string{}, conn, defs)
+	}
+	return newReadScopeForKey(allowed, aliases, conn, defs)
 }
 
 // newReadScopeFor is newReadScope for an allowed set (nil: unrestricted).
 func newReadScopeFor(allowed []string, conn *gorm.DB, defs []schema.Definition) *readScope {
-	if allowed == nil {
+	return newReadScopeForKey(allowed, nil, conn, defs)
+}
+
+// newReadScopeForKey is newReadScopeFor with a key's job-alias scope too
+// (nil: unscoped). It is nil when neither restricts the caller. An empty,
+// non-nil allowed set or alias scope restricts the caller to nothing.
+func newReadScopeForKey(allowed, aliases []string, conn *gorm.DB, defs []schema.Definition) *readScope {
+	if allowed == nil && aliases == nil {
 		return nil
 	}
 	scope := &readScope{
 		db:            conn,
-		allowed:       slices.Clone(allowed),
+		allowed:       cloneKeepingEmpty(allowed),
+		aliases:       cloneKeepingEmpty(aliases),
 		visible:       make(map[string]bool),
 		sharesForeign: make(map[string]bool),
 		requested:     make(map[string]string, len(defs)),
@@ -83,16 +107,35 @@ func newReadScopeFor(allowed []string, conn *gorm.DB, defs []schema.Definition) 
 	return scope
 }
 
+// cloneKeepingEmpty copies values, trimmed; nil stays nil (unrestricted)
+// and an empty set stays a non-nil empty set (restricted to nothing).
+func cloneKeepingEmpty(values []string) []string {
+	if values == nil {
+		return nil
+	}
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		out = append(out, strings.TrimSpace(value))
+	}
+	return out
+}
+
 // allows reports whether the caller may read namespace.
 func (s *readScope) allows(namespace string) bool {
-	return slices.Contains(s.allowed, models.NamespaceOrDefault(namespace))
+	return s.allowed == nil || slices.Contains(s.allowed, models.NamespaceOrDefault(namespace))
+}
+
+// readable reports whether the caller may read the job alias in namespace:
+// the namespace is readable and the alias is inside the key's scope.
+func (s *readScope) readable(alias, namespace string) bool {
+	return s.allows(namespace) && (s.aliases == nil || slices.Contains(s.aliases, strings.TrimSpace(alias)))
 }
 
 // baselineContext restricts the diff baseline (internal/jobdef/diff
 // LoadDatabaseSpecs reads it through authz.NamespaceFilter) to the caller's
 // namespaces.
 func (s *readScope) baselineContext(ctx context.Context) context.Context {
-	if s == nil {
+	if s == nil || s.allowed == nil {
 		return ctx
 	}
 	return authz.WithAllowedNamespaces(ctx, s.allowed)
@@ -116,7 +159,7 @@ func (s *readScope) resolve(ctx context.Context, aliases []string) {
 			continue
 		}
 		namespace, requested := s.requested[alias]
-		if requested && !s.allows(namespace) {
+		if requested && !s.readable(alias, namespace) {
 			s.visible[alias] = false
 			continue
 		}
@@ -140,7 +183,7 @@ func (s *readScope) resolve(ctx context.Context, aliases []string) {
 	aliasesByTrigger := make(map[uuid.UUID][]string, len(rows))
 	for _, row := range rows {
 		alias := strings.TrimSpace(row.Alias)
-		if !s.allows(row.Namespace) {
+		if !s.readable(alias, row.Namespace) {
 			s.visible[alias] = false
 			continue
 		}
@@ -151,12 +194,12 @@ func (s *readScope) resolve(ctx context.Context, aliases []string) {
 		return
 	}
 	var peers []models.Job
-	if err := s.db.WithContext(ctx).Select("id", "trigger_id", "namespace").Where("trigger_id IN ?", slices.Collect(maps.Keys(aliasesByTrigger))).Find(&peers).Error; err != nil {
+	if err := s.db.WithContext(ctx).Select("id", "alias", "trigger_id", "namespace").Where("trigger_id IN ?", slices.Collect(maps.Keys(aliasesByTrigger))).Find(&peers).Error; err != nil {
 		failClosed(err)
 		return
 	}
 	for _, peer := range peers {
-		if !s.allows(peer.Namespace) {
+		if !s.readable(peer.Alias, peer.Namespace) {
 			for _, alias := range aliasesByTrigger[peer.TriggerID] {
 				s.sharesForeign[alias] = true
 			}
@@ -210,7 +253,50 @@ func (s *readScope) errorMessage(ctx context.Context, err error) string {
 		}
 		return refErr.Redacted()
 	}
+	// Trigger tenancy (B9): a confined caller is told which of its own
+	// webhook paths or jobs is affected, never by whom.
+	if msg := internaljobdef.RedactedTenancyMessage(err); msg != "" {
+		return msg
+	}
 	return err.Error()
+}
+
+// findingVisible reports whether a confined caller may read a contract
+// finding: both of its jobs, and for an inferred edge (derived from a
+// consumer's trigger) neither trigger shared with a job it cannot read, as
+// filterGraph decides for lint. Unresolvable aliases are foreign.
+func (s *readScope) findingVisible(ctx context.Context, finding internalcontract.ContractFinding) bool {
+	if s == nil {
+		return true
+	}
+	producer, consumer := strings.TrimSpace(finding.Producer), strings.TrimSpace(finding.Consumer)
+	if producer == "" || consumer == "" {
+		return false
+	}
+	s.resolve(ctx, []string{producer, consumer})
+	if !s.visible[producer] || !s.visible[consumer] {
+		return false
+	}
+	if internalcontract.EdgeClass(finding.EdgeClass) == internalcontract.EdgeClassInferred && (s.sharesForeign[producer] || s.sharesForeign[consumer]) {
+		return false
+	}
+	return true
+}
+
+// contractAudience is the importer's ContractAudience for a confined apply:
+// bound to the apply transaction (whose REPEATABLE READ snapshot on
+// PostgreSQL also produced the findings), with the visibility caches cleared
+// so a retried attempt never reuses a verdict from an earlier snapshot.
+func (s *readScope) contractAudience(ctx context.Context) func(tx *gorm.DB) func(internalcontract.ContractFinding) bool {
+	if s == nil {
+		return nil
+	}
+	return func(tx *gorm.DB) func(internalcontract.ContractFinding) bool {
+		s.db = tx
+		clear(s.visible)
+		clear(s.sharesForeign)
+		return func(finding internalcontract.ContractFinding) bool { return s.findingVisible(ctx, finding) }
+	}
 }
 
 func (s *readScope) graphErrorMessage(ctx context.Context, e *freshness.GraphError) string {
@@ -224,9 +310,10 @@ func (s *readScope) graphErrorMessage(ctx context.Context, e *freshness.GraphErr
 			hidden++
 		}
 	}
-	// The dataset is named only when one of the caller's own jobs declares it.
+	// The dataset is named only when one of the caller's own jobs declares it
+	// (and, for apply, only when no foreign job is involved at all).
 	dataset := "a dataset"
-	if len(visible) > 0 {
+	if len(visible) > 0 && (!s.strict || hidden == 0) {
 		dataset = fmt.Sprintf("%q", e.Dataset)
 	}
 	switch {
