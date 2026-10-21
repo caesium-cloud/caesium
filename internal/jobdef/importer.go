@@ -212,6 +212,10 @@ type PruneOptions struct {
 	// PostgreSQL, locked) to these namespaces: a confined apply's prune, whose
 	// out-of-scope jobs are never candidates nor reported.
 	candidateNamespaces []string
+	// currentRunCheck, when set, runs after the in-transaction running check
+	// over the locked candidates (a confined batch's check outside its
+	// REPEATABLE READ snapshot); an error refuses the prune.
+	currentRunCheck func(jobs []*models.Job) error
 }
 
 // Provenance captures metadata describing the origin of a job definition.
@@ -523,10 +527,46 @@ func (i *Importer) pruneMissingTx(tx *gorm.DB, desiredSet map[string]struct{}, o
 	if err := i.ensureJobsNotRunningTx(tx, toRetire); err != nil {
 		return 0, nil, err
 	}
+	if opts != nil && opts.currentRunCheck != nil {
+		if err := opts.currentRunCheck(toRetire); err != nil {
+			return 0, nil, err
+		}
+	}
 	if err := i.retireJobsTx(tx, toRetire); err != nil {
 		return 0, nil, err
 	}
 	return len(toRetire), skipped, nil
+}
+
+// currentRunCheckTimeout bounds the confined prune's out-of-snapshot running
+// check, which needs a second pooled connection while the batch holds one: a
+// starved pool fails the apply (nothing is pruned) instead of waiting forever.
+const currentRunCheckTimeout = 15 * time.Second
+
+// beforeConfinedPrune, when set (tests only), runs inside ApplyConfinedBatch's
+// transaction after the definitions are applied and before the prune locks
+// its candidates: where a run admitted after the batch's snapshot commits.
+var beforeConfinedPrune func()
+
+// confinedRunCheck is a confined batch's running check against the current
+// committed state rather than its REPEATABLE READ snapshot (PostgreSQL only;
+// SQLite and dqlite transactions are serialisable). Run admission inserts a
+// job_runs row without writing the job row, so a run committed after the
+// snapshot neither conflicts with the candidate row locks nor shows in the
+// in-transaction check. This read runs after the candidates are locked, on
+// its own connection at READ COMMITTED, so it sees every run committed before
+// it, as the unrestricted (READ COMMITTED) prune's check does. A run admitted
+// after it is the same residual the unrestricted prune has: closing it needs
+// admission to take a lock that conflicts with the candidate row locks.
+func (i *Importer) confinedRunCheck(ctx context.Context) func(jobs []*models.Job) error {
+	if i.db.Name() != "postgres" {
+		return nil
+	}
+	return func(jobs []*models.Job) error {
+		checkCtx, cancel := context.WithTimeout(ctx, currentRunCheckTimeout)
+		defer cancel()
+		return i.ensureJobsNotRunningTx(i.db.WithContext(checkCtx), jobs)
+	}
 }
 
 func desiredAliasSet(aliases []string) map[string]struct{} {
@@ -632,8 +672,12 @@ func (i *Importer) ApplyConfinedBatch(ctx context.Context, plans []BatchPlan, op
 				return batchInvalid(err)
 			}
 			if opts.Prune {
+				if beforeConfinedPrune != nil {
+					beforeConfinedPrune()
+				}
 				namespaces := slices.Clone(opts.PruneNamespaces)
-				pruned, _, err := i.pruneMissingTx(tx, desiredAliasSet(aliases), &PruneOptions{candidateNamespaces: namespaces}, namespaces)
+				pruneOpts := &PruneOptions{candidateNamespaces: namespaces, currentRunCheck: i.confinedRunCheck(ctx)}
+				pruned, _, err := i.pruneMissingTx(tx, desiredAliasSet(aliases), pruneOpts, namespaces)
 				if err != nil {
 					return err
 				}

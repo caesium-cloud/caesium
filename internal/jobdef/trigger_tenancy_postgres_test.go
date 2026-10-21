@@ -318,6 +318,40 @@ func TestPostgresTriggerPatchSeesRevivalOnSharedRow(t *testing.T) {
 	require.Equal(t, fin, f.trigger(row).Alias, "the refused PATCH left the finance job's trigger alone")
 }
 
+// A run admitted after a confined batch's REPEATABLE READ snapshot, and
+// committed before its prune locks the candidates, is still seen (PR #668
+// review r3): run admission writes no job row, so only the prune's running
+// check against the current committed state can catch it. The batch refuses
+// and rolls back; the running job is not retired.
+func TestPostgresConfinedPruneSeesRunAdmittedAfterSnapshot(t *testing.T) {
+	db := openTenancyPostgres(t)
+	f := &tenancyFixture{t: t, db: db, importer: NewImporter(db)}
+	keep, busy, incoming := uniqueName("keep"), uniqueName("busy"), uniqueName("new")
+	f.mustApply(keep, "marketing", "")
+	busyJob := f.mustApply(busy, "marketing", "")
+	admitted := false
+	beforeConfinedPrune = func() {
+		if admitted {
+			return
+		}
+		admitted = true
+		// Another connection, autocommit: the run commits now, after the
+		// batch's snapshot and before its prune.
+		require.NoError(t, db.Create(&models.JobRun{ID: uuid.New(), JobID: busyJob.ID, Namespace: "marketing", Status: "running"}).Error)
+	}
+	t.Cleanup(func() { beforeConfinedPrune = nil })
+
+	opts := &ApplyOptions{NamespaceAllowlist: []string{"marketing"}}
+	_, err := f.importer.ApplyConfinedBatch(context.Background(), []BatchPlan{
+		{Def: f.def(keep, "marketing", ""), Opts: opts},
+		{Def: f.def(incoming, "marketing", ""), Opts: opts},
+	}, ConfinedBatchOptions{Prune: true, PruneNamespaces: []string{"marketing"}})
+	require.True(t, admitted)
+	require.ErrorIs(t, err, ErrJobRunning)
+	require.False(t, f.job(busy).DeletedAt.Valid, "the running job is not retired")
+	require.False(t, f.jobExists(incoming), "nothing from the batch was applied")
+}
+
 func requireOneSubscribingNamespace(t *testing.T, db *gorm.DB, path string) {
 	t.Helper()
 	var namespaces []string
