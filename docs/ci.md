@@ -392,7 +392,7 @@ publish ← tag only, needs the full matrix and ci-ok
 | `helm-pod-replacement-test` | ubuntu-26.04 | `[changes, images, helm-lint]` | 45 | `scripts/helm-pod-replacement.sh` — kind + `helm install` at three replicas with retained PVCs, then replaces every pod and proves it rejoins (issue #493) | three kind pods via the Helm chart |
 | `podman-integration-test` | ubuntu-26.04 | `images` | 45 | inline `docker run` + full suite in three shards | inline `docker run --name caesium-server-podman` |
 | `early-evidence` | ubuntu-26.04 | `changes`, `images`, `helm-lint` | 60 | `integration-test-sql-budget`, `robustness-test`, `check-evidence` (kind + Helm, three persistent replicas) | `integration-up`, then three kind pods via the Helm chart |
-| `ci-config` | ubuntu-26.04 | — | 5 | actionlint + wildcard `scripts/test_*.py` discovery | none |
+| `ci-config` | ubuntu-26.04 | — | 15 | actionlint + wildcard `scripts/test_*.py` discovery | none |
 | `build-and-integration-test` / `build-and-integration-test-agent-auth` | ubuntu-26.04 | `changes`, `images`, `integration` | 5 | legacy required-context adapters | none |
 | `ci-ok` | ubuntu-26.04 | see §1 | 5 | `scripts/ci-ok.py` | none |
 | `publish` | ubuntu-26.04 | see §3 | 30 | none — direct `docker push`/`docker manifest`, and release asset upload (§6) | none |

@@ -82,7 +82,12 @@ func (s *IntegrationTestSuite) TestDataAssertionsDatasetOperatorReads() {
 	s.NotEmpty(hold.Violations)
 
 	var detail datasetsvc.Detail
-	s.fetchDatasetOperatorJSON(datasetOperatorPath(dataset), &detail)
+	// Terminal run status precedes the asynchronous freshness projection. Wait
+	// for this producer before comparing the two read-only detail variants.
+	s.Require().Eventually(func() bool {
+		s.fetchDatasetOperatorJSON(datasetOperatorPath(dataset), &detail)
+		return detail.State.LastRunID != nil && detail.State.LastRunID.String() == breach.ID
+	}, 30*time.Second, 250*time.Millisecond, "dataset state must observe the completed breach producer")
 	s.Require().NotNil(detail.Hold)
 	s.Equal(hold.ID, detail.Hold.ID)
 	s.Equal("active", detail.HoldStatus)

@@ -247,7 +247,7 @@ jobs:
 
   ci-config:
     runs-on: ubuntu-26.04
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
       - uses: taiki-e/install-action@just

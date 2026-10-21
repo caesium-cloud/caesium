@@ -264,9 +264,9 @@ class WorkflowTests(unittest.TestCase):
         self.assertIn("bash scripts/test_helm_pod_replacement_membership.sh", commands)
 
     def test_ci_config_discovers_all_validator_tests(self):
-        # The complete hosted suite already took 294s before wrapper/action
-        # overhead; retain every test while providing a bounded ten-minute job.
-        self.assertEqual(JOBS["ci-config"]["timeout-minutes"], 10)
+        # Run 39527413068 reached only 896/952 passing tests before its 10m
+        # limit; retain full discovery with a bounded fifteen-minute budget.
+        self.assertEqual(JOBS["ci-config"]["timeout-minutes"], 15)
         commands = [line.strip() for step in JOBS["ci-config"]["steps"]
                     for line in step.get("run", "").splitlines()
                     if "unittest discover" in line]
