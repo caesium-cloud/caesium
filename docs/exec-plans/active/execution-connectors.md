@@ -1,6 +1,6 @@
 # Execution Connectors — Temporal Monitoring and Operator Actions
 
-Last updated: 2026-10-17
+Last updated: 2026-10-20
 
 Caesium should let an operator follow a data process across Temporal workflows
 and Caesium jobs, understand the data consequence, and perform a declared
@@ -12,12 +12,13 @@ prerequisite for monitoring them.
 
 At drafting, [PR #560](https://github.com/caesium-cloud/caesium/pull/560) supplied
 idempotent Caesium starts, explicit created/queued/skipped/dropped outcomes and
-an operator recipe. W1–W7 have since added the connector contract, catalog,
+an operator recipe. W1–W8 have since added the connector contract, catalog,
 Temporal adapter, real development fixture, authenticated HTTP monitoring/actions
-and Console monitoring with verified workflow/run relationships and data links.
-The Console approval journey remains E3; connector CI qualification and promotion
-remain F2–F4. The Console's existing run, dataset, freshness, lineage, receipt and
-incident views provide the local data evidence joined to external process state.
+and Console monitoring, verified workflow/run relationships, data links and
+declared approvals with durable receipt recovery. Connector CI qualification
+and promotion remain F2–F4. The Console's existing run, dataset, freshness,
+lineage, receipt and incident views provide the local data evidence joined to
+external process state.
 
 The first release includes one optional Temporal connector, file-configured
 connections and optional workflow bindings, authenticated monitoring, verified
@@ -246,14 +247,15 @@ write. Limits are validated configuration with conservative hard ceilings fixed
 by A1 before dependent work. C1/F3 measure unchanged-poll write count, catalog
 cardinality and closed-workflow Query dispatch count through the live surface.
 
-## Progress (as of 2026-10-17)
+## Progress (as of 2026-10-20)
 
 W1 through W4 have merged, including the W4 dashboard in PR #635.
 W5 C1 is merged in PR #644; dashboard PR #643 records its verified acceptance.
 W6 C2 and E1 are merged in PRs #652 and #651; this dashboard records their
 verified acceptance.
 W7 E2 is merged in PR #658; this dashboard records its verified acceptance.
-E3, F2–F4 and N remain later work. An open PR or a component-only pass
+W8 E3 is merged in PR #662; this dashboard records its verified acceptance.
+F2–F4 and N remain later work. An open PR or a component-only pass
 is not completion. The SHAs below are the squash merges read from GitHub.
 
 The orchestrator owns this dashboard: PR URLs, exact tested heads/merge SHAs,
@@ -660,6 +662,58 @@ Resume unfinished waves. Do not archive this plan while later items remain.
   verified before wave closeout. E3 and F2–F4/N remain later work, and this plan
   remains active.
 
+### W8 — Console approvals and receipt recovery (implementation merged 2026-10-20)
+
+- **W8-α / E3:** [PR #662](https://github.com/caesium-cloud/caesium/pull/662)
+  merged `c351bc260f01fa6b6dd0f4577858a8e51e72309d` at 2026-10-20T10:48:50Z.
+  Accepted head `e351cabebd06fc041d5522aa0e37b428445bc666` supplies declared
+  approval forms, exact targets, validated results and server-backed receipt
+  recovery. Refresh/poll only looks up operations; uncertain outcomes require
+  explicit original-principal confirmation of the displayed revision. Stable
+  authenticated user/key identity and atomic initial dispatch claims support
+  that journey. Stronger same-attempt evidence survives weaker concurrent reads.
+- **Real-provider/browser verification:** On that clean head,
+  `just tag=ec-w8 connectors-fixture-check`, with the connector/auth browser hook,
+  passed all six named real-Temporal scenarios (94.94 seconds), including live
+  HTTP action/read/correlation coverage, ten connector browser cases and nine
+  authenticated browser cases. Every selected case ran
+  once with zero skips, retries, errors or flaky outcomes. Evidence covers the
+  second local job and one logical approval effect, duplicate clicks/keys,
+  receipt recovery after empty-storage reload, lost accepted/rejected replies,
+  two operators, explicit revision confirmation, and denied/unbound/stale views.
+  Ambiguous remote failure remains unknown rather than an invented rejection.
+  Actual SDK 1.49.0 / CLI 1.9.1 / server 1.32.0, 2,148 source checksums and
+  immutable images bind the cohort; server image is
+  `sha256:f3e39c265fe61d1ca3dbb205e7de08d7f7ac309775b302d387153fe700e5a284`.
+  Receipt/conflict screenshots were inspected; all six owned containers were
+  verified absent after cleanup. This local fixture does not qualify Cloud or
+  other Temporal releases.
+- **Baseline and CI repairs:** Full containerized lint/vet, root race/coverage,
+  tagged hermetic checks, integration compilation and UI checks passed on the
+  matching source contents; UI tests passed 590 cases. Required CI repairs add
+  isolated SSE clients/read cleanup, preserve original HTTP failures without
+  retrying POSTs, serialize fresh dqlite join admission, and retain bounded Helm
+  and host diagnostics. Both architectures use verified Docker/containerd/runc
+  identities and cgroupfs/v2 before the unchanged strict native OOM smoke.
+  Earlier OOM-false/EOF incidents retain unknown causes; no failed job was
+  retried or relabeled a flake. The final inventory is the 34 files in E3 below.
+- **Hosted qualification:** [CI run 39358460511](https://github.com/caesium-cloud/caesium/actions/runs/39358460511),
+  attempt 1, passed 41 jobs and all nine protected checks including `ci-ok`;
+  three release-only jobs were unselected on this PR. It tested synthetic merge
+  `d834bc171b244ce83a3328bb4255843b5c915dda` of base
+  `2a0cffefbd6593c83a1cdfbeb8e4f86d3fbddf06` and the accepted head. Source,
+  synthetic and actual squash-merge trees all equal
+  `d4c3e7cf647a98b541e2e6e11a524427ce62af84`. All eleven native hosts passed
+  strict OOM qualification; both unit architectures, default/agent integration,
+  all three Helm shards, early SQL/owner-crash evidence and default 160/auth nine
+  browser cases passed. Combined integration/browser coverage was 61.8%, with
+  no uncovered changed production paths. Fresh paginated review reads found no
+  comments, reviews or threads; the merge itself is independently confirmed.
+- **Plan boundary:** E3 alone is newly checked. This dedicated plan-sync PR
+  records source acceptance and requires its own checks and merge before W8
+  closeout. F2–F4/N1 stay unchecked; F2 is the next dependency-ready item.
+  The plan remains active and no connector lane is promoted by this change.
+
 ### Stream Status
 
 | Stream | Scope | Priority | Status |
@@ -668,7 +722,7 @@ Resume unfinished waves. Do not archive this plan while later items remain.
 | B | Temporal inspection and declared messages (2 items) | P0 | Shipped (B1, B2) |
 | C | Authenticated REST and composition (2 items) | P0 | Shipped (C1, C2) |
 | D | Verified correlation and action durability (2 items) | P0 | Shipped (D1, D2) |
-| E | Console monitoring, data links and approval (3 items) | P0 | E1 and E2 shipped; E3 not started |
+| E | Console monitoring, data links and approval (3 items) | P0 | Shipped (E1, E2, E3) |
 | F | Real fixture, CI, qualification and promotion (4 items) | P0 | F1 shipped; F2–F4 not started |
 | N | Operator guidance and reconciliation (1 item) | P0 | Not started |
 
@@ -986,17 +1040,46 @@ joined to existing Caesium pages. No cross-provider global pagination in v1.
   evidence -> workflow; queue promotion becomes the same run. Opaque external
   work has no invented lineage/freshness; scoped users see permitted local data.
 
-- [ ] E3. Render the declared approval form, server operation list/receipt,
+- [x] E3. Render the declared approval form, server operation list/receipt,
   exact target, acceptance/completion distinction and validator result. Recover
   from server state after refresh/new tab; browser key storage is not authority.
   Unknown receipts expose an explicit original-principal resend confirmation;
   refresh/poll never resends. Gate on live observation, binding compatibility,
   authorization and capability; no timeout success toast.
-  Files: new `ui/src/features/connectors/ActionPanel.tsx`,
-  new `ui/src/features/connectors/OperationReceipt.tsx`,
-  new `ui/src/features/connectors/__tests__/actions.test.tsx`,
-  `ui/src/features/connectors/ExecutionDetailPage.tsx`, `ui/src/lib/api.ts`,
-  new `ui/e2e/connectors/actions.spec.ts`, `docs/connectors.md` (approval tour).
+  Files: `.github/actions/run-integration/action.yml`,
+  `.github/workflows/ci.yml`,
+  `api/rest/controller/auth/sso.go`,
+  `api/rest/controller/auth/sso_test.go`,
+  `docs/ci.md`,
+  `docs/connectors.md`,
+  `docs/temporal.md`,
+  `internal/connector/operations/operation_store.go`,
+  `internal/connector/operations/operations.go`,
+  `internal/connector/operations/operations_test.go`,
+  `pkg/dqlite/address.go`,
+  `pkg/dqlite/bootstrap_test.go`,
+  `scripts/collect-helm-diagnostics.py`,
+  `scripts/collect-stress-host-diagnostics.py`,
+  `scripts/setup-ci-docker.py`,
+  `scripts/test_ci.py`,
+  `scripts/test_ci_runtime_repair.py`,
+  `scripts/test_coverage_stress_prerequisite.py`,
+  `scripts/test_stress_host_diagnostics.py`,
+  `test/auth_users_test.go`,
+  `test/connectors_actions_test.go`,
+  `test/job_test.go`,
+  `test/sse_test.go`,
+  `ui/e2e/connectors/actions.spec.ts`,
+  `ui/e2e/connectors/monitoring.spec.ts`,
+  `ui/src/features/connectors/ActionPanel.tsx`,
+  `ui/src/features/connectors/ExecutionDetailPage.tsx`,
+  `ui/src/features/connectors/OperationReceipt.tsx`,
+  `ui/src/features/connectors/__tests__/actions.test.tsx`,
+  `ui/src/features/connectors/types.ts`,
+  `ui/src/lib/__tests__/api.connectors.test.ts`,
+  `ui/src/lib/__tests__/auth.test.ts`,
+  `ui/src/lib/api.ts`,
+  `ui/src/lib/auth.ts`.
   Depends on: E2, C2.
   Verify: real approval advances the workflow; rejection is explicit. Lost reply
   stays pending/unknown until resolved; refresh without local storage, duplicate
