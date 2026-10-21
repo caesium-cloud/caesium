@@ -348,7 +348,9 @@ jobs:
     permissions:
       contents: read
       actions: read # BuildKit cache lookup; uploads use the runtime token.
-    needs: [changes, builder]
+    # Bake constructs its own candidate-bound ci-builder graph. The separate
+    # builder job remains required by ci-ok, without delaying product readiness.
+    needs: [changes]
     if: needs.changes.outputs.images == 'true'
     runs-on: ubuntu-26.04
     timeout-minutes: 30

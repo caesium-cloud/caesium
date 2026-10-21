@@ -248,6 +248,18 @@ class GateTests(unittest.TestCase):
         needs["ui-e2e-auth"]["result"] = "skipped"
         self.gate(needs, 1)
 
+    def test_failed_builder_cannot_hide_behind_independently_successful_images(self):
+        self.assertIn("builder", JOBS["ci-ok"]["needs"])
+        for status in ("failure", "cancelled", "skipped", None):
+            with self.subTest(builder=status):
+                needs = results(selected_outputs(("ui",)))
+                self.assertEqual(needs["images"]["result"], "success")
+                if status is None:
+                    del needs["builder"]
+                else:
+                    needs["builder"]["result"] = status
+                self.gate(needs, 1)
+
     def test_invalid_inputs(self):
         for needs in (None, [], {}, {"changes": "success"}):
             self.gate(needs, 1)
@@ -728,6 +740,31 @@ class WorkflowTests(unittest.TestCase):
             self.assertIn(f"builder-{arch}", saved)
             self.assertIn(f"reagents-{arch}", saved)
             self.assertIn(f"integration-runner-{arch}", saved)
+
+    def test_amd64_images_use_their_own_builder_graph_without_waiting_for_builder_job(self):
+        images = JOBS["images"]
+        self.assertEqual(images["needs"], ["changes"])
+        self.assertEqual(images["if"], "needs.changes.outputs.images == 'true'")
+        self.assertNotIn("needs.builder", json.dumps(images))
+        self.assertNotIn("builder-amd64", json.dumps(images))
+        bake = next(step["with"] for step in images["steps"]
+                    if step.get("uses") == "./.github/actions/bake-images")
+        self.assertEqual(bake["arch"], "amd64")
+        self.assertEqual(set(bake["targets"].split()), {"product", "robustness"})
+        override = (ROOT / "build/ci.docker-bake-cache.hcl").read_text()
+        builder = override.split('target "ci-builder"', 1)[1].split('\n}', 1)[0]
+        self.assertIn('dockerfile = "build/Dockerfile.build"', builder)
+        self.assertIn('target = "builder"', builder)
+        self.assertIn('args = { TARGETARCH = CACHE_ARCH }', builder)
+        for name in ("release", "integration-runner", "robustness-runner"):
+            with self.subTest(target=name):
+                target = override.split(f'target "{name}"', 1)[1].split('\n}', 1)[0]
+                self.assertIn('BUILDER_IMAGE = "ci-builder"', target)
+                self.assertIn('contexts = { ci-builder = "target:ci-builder" }', target)
+        # Only the measured amd64 product edge changes; other producer and
+        # architecture ordering keeps its existing contract.
+        self.assertEqual(JOBS["images-arm64"]["needs"], ["changes", "builder-arm64"])
+        self.assertEqual(JOBS["connector-fixture-images"]["needs"], ["changes", "builder"])
 
     def test_integration_consumers_do_not_download_compilers(self):
         action = yaml.safe_load((ROOT / ".github/actions/run-integration/action.yml").read_text())

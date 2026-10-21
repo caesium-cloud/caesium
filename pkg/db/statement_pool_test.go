@@ -26,14 +26,9 @@ func instrumentedGORM(t *testing.T, pool gorm.ConnPool) *gorm.DB {
 }
 
 func TestRetryPluginRetriesRealGORMOperations(t *testing.T) {
-	for _, operation := range []string{"exec", "query", "begin"} {
+	for _, operation := range []string{"exec", "query"} {
 		t.Run(operation, func(t *testing.T) {
 			pool := newCountingPool(t, 1, errors.New("checkpoint in progress"))
-			if operation == "begin" {
-				pool.failBefore = 0
-				pool.beginFailBefore = 1
-				pool.beginErr = errors.New("cannot start a transaction within a transaction")
-			}
 			gdb := instrumentedGORM(t, pool)
 			require.NoError(t, gdb.Use(retryPlugin{}))
 			// Exercise GORM's cloned statement and real SQL callbacks, rather
@@ -46,19 +41,9 @@ func TestRetryPluginRetriesRealGORMOperations(t *testing.T) {
 				err = query.Exec("SELECT 1").Error
 			case "query":
 				err = query.Raw("SELECT 1").Scan(&value).Error
-			case "begin":
-				err = query.Transaction(func(tx *gorm.DB) error {
-					require.IsType(t, &sql.Tx{}, tx.Statement.ConnPool)
-					return tx.Raw("SELECT 1").Scan(&value).Error
-				})
 			}
 			require.NoError(t, err)
-			if operation == "begin" {
-				require.Equal(t, int32(2), pool.beginAttempt.Load(), "poisoned BEGIN must be cleared and retried")
-				require.Equal(t, int32(1), pool.execAttempt.Load(), "one recovery ROLLBACK; in-tx SQL bypasses pool retry")
-			} else {
-				require.Equal(t, int32(2), pool.execAttempt.Load())
-			}
+			require.Equal(t, int32(2), pool.execAttempt.Load())
 			if operation != "exec" {
 				require.Equal(t, 1, value)
 			}
@@ -155,15 +140,16 @@ func TestReadWriteSplitRoutesRealGORMReadsAndTransactions(t *testing.T) {
 	require.Equal(t, int32(2), readPool.execAttempt.Load())
 	require.Equal(t, int32(0), writePool.execAttempt.Load())
 	require.NoError(t, gdb.WithContext(t.Context()).Transaction(func(tx *gorm.DB) error {
-		require.IsType(t, &sql.Tx{}, tx.Statement.ConnPool)
+		require.IsType(t, &guardedTx{}, tx.Statement.ConnPool)
+		require.Equal(t, 1, readPool.db.Stats().InUse)
+		require.Zero(t, writePool.db.Stats().InUse)
 		return tx.Raw("SELECT 1").Scan(&value).Error
 	}, &sql.TxOptions{ReadOnly: true}))
-	require.Equal(t, int32(1), readPool.beginAttempt.Load())
-	require.Equal(t, int32(0), writePool.beginAttempt.Load())
 	require.NoError(t, gdb.WithContext(t.Context()).Transaction(func(tx *gorm.DB) error {
+		require.Equal(t, 1, writePool.db.Stats().InUse)
+		require.Zero(t, readPool.db.Stats().InUse)
 		return tx.Exec("SELECT 1").Error
 	}))
-	require.Equal(t, int32(1), writePool.beginAttempt.Load())
 	require.NoError(t, gdb.WithContext(t.Context()).Exec("SELECT 1").Error)
 	require.Equal(t, int32(1), writePool.execAttempt.Load())
 }

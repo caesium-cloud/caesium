@@ -94,62 +94,63 @@ func TestRetryConnPoolDoesNotRetryNonContention(t *testing.T) {
 		"non-contention errors must not be retried")
 }
 
-// TestRetryConnPoolBeginTxReturnsRawTx is the critical safety guard: BeginTx
-// must return a raw *sql.Tx, NOT a *retryConnPool. This is what guarantees that
-// statements executed inside an explicit transaction bypass the per-statement
-// retry — re-running one statement of a transaction the DB may have rolled back
-// would corrupt state.
-func TestRetryConnPoolBeginTxReturnsRawTx(t *testing.T) {
+// The completion guard delegates statements directly to its raw *sql.Tx,
+// bypassing the pool's per-statement retry.
+func TestRetryConnPoolTransactionStatementsBypassPoolRetry(t *testing.T) {
 	pool := newCountingPool(t, 0, nil)
 	rp := newRetryConnPool(pool)
 
 	tx, err := rp.BeginTx(context.Background(), nil)
 	require.NoError(t, err)
-	t.Cleanup(func() { _ = tx.Rollback() })
+	t.Cleanup(func() { _ = tx.(gorm.Tx).Rollback() })
 
-	// The returned value is a *sql.Tx, which does not carry the retry wrapper.
-	require.IsType(t, &sql.Tx{}, tx)
+	guard, ok := tx.(*guardedTx)
+	require.True(t, ok)
+	require.IsType(t, &sql.Tx{}, guard.Tx)
+	_, err = tx.ExecContext(t.Context(), "SELECT 1")
+	require.NoError(t, err)
+	require.Zero(t, pool.execAttempt.Load(), "transaction statements must bypass the retry pool")
 	_, isRetry := any(tx).(*retryConnPool)
 	require.False(t, isRetry, "BeginTx must not return a retry-wrapped pool")
 }
 
 // TestRetryConnPoolBeginTxRetriesPoisonedConnection proves a BEGIN that fails on
-// a poisoned pooled connection ("cannot start a transaction within a
-// transaction") is retried — with a best-effort ROLLBACK to clear the leftover
-// BEGIN — and then succeeds, returning a raw *sql.Tx. This is what makes bare
+// a poisoned connection ("cannot start a transaction within a transaction") is
+// discarded and retried, and then succeeds. This is what makes bare
 // db.Transaction(fn) call sites (e.g. the job-apply path) recover from a
 // poisoned BEGIN instead of surfacing a 500.
 func TestRetryConnPoolBeginTxRetriesPoisonedConnection(t *testing.T) {
-	pool := newCountingPool(t, 0, nil)
-	pool.beginFailBefore = 2
-	pool.beginErr = errors.New("cannot start a transaction within a transaction")
+	_, _, pool, state := faultSQLite(t)
+	state.err = errors.New("cannot start a transaction within a transaction")
+	state.arm("begin", 2)
 	rp := newRetryConnPool(pool)
 
 	tx, err := rp.BeginTx(context.Background(), nil)
 	require.NoError(t, err)
-	t.Cleanup(func() { _ = tx.Rollback() })
+	t.Cleanup(func() { _ = tx.(gorm.Tx).Rollback() })
 
-	require.IsType(t, &sql.Tx{}, tx, "BeginTx must still return a raw *sql.Tx")
-	require.Equal(t, int32(3), pool.beginAttempt.Load(),
+	require.IsType(t, &guardedTx{}, tx)
+	require.Equal(t, 3, state.count("begin"),
 		"BEGIN should be retried past 2 poisoned failures and succeed on attempt 3")
-	require.Equal(t, int32(2), pool.execAttempt.Load(),
-		"each of the 2 poisoned BEGINs should trigger exactly one best-effort ROLLBACK clear")
+	require.True(t, state.wasClosed(1))
+	require.True(t, state.wasClosed(2), "each failed BEGIN must discard its own physical connection")
+	require.Zero(t, state.count("rollback"), "recovery must not issue ROLLBACK through another pool member")
 }
 
 // TestRetryConnPoolBeginTxDoesNotRetryNonContention proves a non-contention
 // BEGIN error returns immediately without retry.
 func TestRetryConnPoolBeginTxDoesNotRetryNonContention(t *testing.T) {
-	pool := newCountingPool(t, 0, nil)
-	pool.beginFailBefore = 1
-	pool.beginErr = errors.New("disk I/O error")
+	_, _, pool, state := faultSQLite(t)
+	state.err = errors.New("disk I/O error")
+	state.arm("begin", 1)
 	rp := newRetryConnPool(pool)
 
 	_, err := rp.BeginTx(context.Background(), nil)
 	require.Error(t, err)
-	require.Equal(t, int32(1), pool.beginAttempt.Load(),
+	require.Equal(t, 1, state.count("begin"),
 		"a non-contention BEGIN error must not be retried")
-	require.Equal(t, int32(0), pool.execAttempt.Load(),
-		"no ROLLBACK clear on a non-poisoned error")
+	require.True(t, state.wasClosed(1))
+	require.Zero(t, state.count("rollback"), "no pool-wide ROLLBACK clear")
 }
 
 // TestPluginInstallsRetryPool proves the plugin wraps the gorm connection pool
@@ -297,9 +298,9 @@ func TestRWSplitRoutesReadsAndWrites(t *testing.T) {
 
 	tx, err := sp.BeginTx(context.Background(), nil)
 	require.NoError(t, err)
-	require.NoError(t, tx.Rollback())
-	require.Equal(t, int32(1), writePool.beginAttempt.Load(), "transactions must begin on the write pool")
-	require.Equal(t, int32(0), readPool.beginAttempt.Load(), "transactions must not begin on the read pool")
+	require.Equal(t, 1, writePool.db.Stats().InUse, "transactions must pin the write pool")
+	require.Zero(t, readPool.db.Stats().InUse)
+	require.NoError(t, tx.(gorm.Tx).Rollback())
 }
 
 // TestRWSplitCloseClosesBothPools proves Close releases both pools — the read
@@ -431,18 +432,18 @@ func TestRWSplitReadOnlyTransactionDoesNotWaitForSerializedWriter(t *testing.T) 
 	split := newRWSplitConnPool(writePool, readPool)
 	writer, err := split.BeginTx(t.Context(), nil)
 	require.NoError(t, err)
-	t.Cleanup(func() { _ = writer.Rollback() })
+	t.Cleanup(func() { _ = writer.(gorm.Tx).Rollback() })
 	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
 	defer cancel()
 	reader, err := split.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
 	require.NoError(t, err, "read-only acquisition must succeed while the only writer is held")
-	t.Cleanup(func() { _ = reader.Rollback() })
+	t.Cleanup(func() { _ = reader.(gorm.Tx).Rollback() })
 	var value int
 	require.NoError(t, reader.QueryRowContext(ctx, "SELECT 1").Scan(&value))
 	require.Equal(t, 1, value)
-	require.Equal(t, int32(1), writePool.beginAttempt.Load())
-	require.Equal(t, int32(1), readPool.beginAttempt.Load())
-	require.IsType(t, &sql.Tx{}, reader, "snapshot statements bypass per-statement retry")
+	require.Equal(t, 1, writePool.db.Stats().InUse)
+	require.Equal(t, 1, readPool.db.Stats().InUse)
+	require.IsType(t, &guardedTx{}, reader, "snapshot statements bypass per-statement retry")
 }
 
 func TestDatabaseRetryPathsUseInjectedWaitSchedule(t *testing.T) {

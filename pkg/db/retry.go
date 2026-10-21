@@ -76,10 +76,9 @@ func busyRetryPolicy(backoffs []time.Duration, wait func(context.Context, time.D
 //
 // SAFETY: this only ever wraps the connection POOL, never a transaction. GORM
 // runs an explicit transaction (db.Transaction(fn) / db.Begin()) by calling
-// BeginTx and then issuing every statement against the returned *sql.Tx. This
-// decorator's BeginTx delegates to the underlying *sql.DB and returns the raw
-// *sql.Tx unwrapped, so statements executed inside a transaction bypass this
-// decorator entirely and are NEVER retried individually — re-running one
+// BeginTx and then issuing every statement against a raw *sql.Tx. The returned
+// transaction guards its connection at completion, while statement methods
+// delegate directly to that *sql.Tx and are NEVER retried individually — re-running one
 // statement against a transaction the DB may have already rolled back would
 // corrupt state. Whole-transaction retry remains owned by the existing
 // withStoreBusyRetry / withBusyRetry closures, which re-run the entire
@@ -99,9 +98,9 @@ type retryConnPool struct {
 // Compile-time assertions that the decorator satisfies the interfaces GORM
 // type-asserts on the connection pool.
 var (
-	_ gorm.ConnPool       = (*retryConnPool)(nil)
-	_ gorm.TxBeginner     = (*retryConnPool)(nil)
-	_ gorm.GetDBConnector = (*retryConnPool)(nil)
+	_ gorm.ConnPool         = (*retryConnPool)(nil)
+	_ gorm.ConnPoolBeginner = (*retryConnPool)(nil)
+	_ gorm.GetDBConnector   = (*retryConnPool)(nil)
 )
 
 func newRetryConnPool(pool gorm.ConnPool) *retryConnPool {
@@ -175,42 +174,18 @@ func (p *retryConnPool) QueryRowContext(ctx context.Context, query string, args 
 	return p.pool.QueryRowContext(ctx, query, args...)
 }
 
-// BeginTx returns the raw *sql.Tx from the underlying pool (unwrapped) so that
-// statements executed inside the transaction bypass this decorator — see the
-// type doc for why in-tx statements must never be individually retried.
-//
-// The BEGIN itself, however, IS retried on transient contention. dqlite can
-// hand out a pooled connection left with a still-active transaction after a
-// checkpoint blip interrupted a prior rollback; the next BEGIN on it then fails
-// with "cannot start a transaction within a transaction", which previously
-// surfaced as a 500 (e.g. the job-apply path). Retrying BEGIN is safe precisely
-// because no transaction statements have run yet, so re-running it cannot
-// double-apply anything. On the poisoned-connection case we first issue a
-// best-effort ROLLBACK to clear the leftover BEGIN so the retry can draw a
-// usable connection. This makes every gorm transaction path — including bare
-// db.Transaction(fn) call sites with no closure-level retry — recover from a
-// poisoned/contended BEGIN uniformly.
-func (p *retryConnPool) BeginTx(ctx context.Context, opts *sql.TxOptions) (*sql.Tx, error) {
-	beginner, ok := p.pool.(gorm.TxBeginner)
-	if !ok {
-		return nil, gorm.ErrInvalidTransaction
+// BeginTx retries acquisition/BEGIN only. A pinned connection keeps failed
+// transaction cleanup from returning an active SQLite snapshot to the pool.
+// The guard delegates statements directly and never retries COMMIT/ROLLBACK.
+func (p *retryConnPool) BeginTx(ctx context.Context, opts *sql.TxOptions) (gorm.ConnPool, error) {
+	pool, err := p.GetDBConn()
+	if err != nil {
+		return nil, err
 	}
-	var tx *sql.Tx
-	err := p.retry(ctx, func() error {
+	var tx gorm.ConnPool
+	err = p.retry(ctx, func() error {
 		var beginErr error
-		tx, beginErr = beginner.BeginTx(ctx, opts)
-		if beginErr != nil && dqlite.IsConnPoolPoisonedError(beginErr) {
-			// Best-effort: clear the leftover BEGIN on the poisoned pooled
-			// connection. Harmless ("no transaction is active") on a clean one.
-			// Caveat: database/sql hands out idle connections FIFO, so with
-			// several pooled connections this ROLLBACK may land on a clean
-			// connection rather than the poisoned one just returned. That is
-			// acceptable — the poisoned connection clears once it reaches the
-			// front of the idle queue on a later attempt/request, and meanwhile
-			// the retry below draws a different (likely clean) connection for the
-			// next BEGIN.
-			_, _ = p.pool.ExecContext(ctx, "ROLLBACK")
-		}
+		tx, beginErr = beginGuardedTransaction(ctx, pool, opts)
 		return beginErr
 	})
 	return tx, err
@@ -311,10 +286,10 @@ type rwSplitConnPool struct {
 }
 
 var (
-	_ gorm.ConnPool       = (*rwSplitConnPool)(nil)
-	_ gorm.TxBeginner     = (*rwSplitConnPool)(nil)
-	_ gorm.GetDBConnector = (*rwSplitConnPool)(nil)
-	_ io.Closer           = (*rwSplitConnPool)(nil)
+	_ gorm.ConnPool         = (*rwSplitConnPool)(nil)
+	_ gorm.ConnPoolBeginner = (*rwSplitConnPool)(nil)
+	_ gorm.GetDBConnector   = (*rwSplitConnPool)(nil)
+	_ io.Closer             = (*rwSplitConnPool)(nil)
 )
 
 func newRWSplitConnPool(writePool, readPool gorm.ConnPool) *rwSplitConnPool {
@@ -356,10 +331,10 @@ func (p *rwSplitConnPool) PrepareContext(ctx context.Context, query string) (*sq
 	return p.write.PrepareContext(ctx, query)
 }
 
-func (p *rwSplitConnPool) BeginTx(ctx context.Context, opts *sql.TxOptions) (*sql.Tx, error) {
+func (p *rwSplitConnPool) BeginTx(ctx context.Context, opts *sql.TxOptions) (gorm.ConnPool, error) {
 	if opts != nil && opts.ReadOnly {
 		// Keep snapshot reads away from the single serialized writer. Returning
-		// the raw transaction still bypasses per-statement retry in either pool.
+		// guarded transaction still bypasses per-statement retry in either pool.
 		return p.read.BeginTx(ctx, opts)
 	}
 	return p.write.BeginTx(ctx, opts)

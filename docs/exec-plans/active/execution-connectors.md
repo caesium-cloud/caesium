@@ -820,7 +820,9 @@ Resume unfinished waves. Do not archive this plan while later items remain.
 - **Remediation scope:** Return the current durable receipt after a same-Update,
   same-attempt lookup race while retaining dispatch/resend fences. Add deterministic
   ordering tests and concurrent two-operator HTTP polling with independent send
-  and effect counts. Prepare a candidate-bound fixture alongside product images,
+  and effect counts. Failed database transaction completion must discard its
+  exact connection before a stale snapshot can hide newly admitted runs.
+  Prepare a candidate-bound fixture alongside product images,
   install browser prerequisites once, and overlap independent configuration proof
   only for the loaded, immutable three-image CI cohort. Preserve every scenario,
   first-attempt browser requirement, runtime identity check and owned cleanup.

@@ -357,12 +357,12 @@ sources unless a precompiled runner is explicitly selected.
 changes
   ├─ ui-test
   ├─ reagents ────────────────────── lint, unit-test (also need builder)
-  ├─ builder ─┬─ images ─────────┬─ integration (3 Docker shards + agent-auth + keycloak)
-  │           │                  ├─ ui-e2e, ui-e2e-auth, ui-e2e-keycloak (also need ui-test)
-  │           │                  ├─ helm/podman (3 full-suite shards each)
-  │           │                  ├─ early-evidence (also needs helm-lint)
-  │           │                  └─ integration-extra (also needs reagents)
-  │           └─ connector-fixture-images ── connectors (also needs images, ui-test)
+  ├─ builder ─── connector-fixture-images ── connectors (also needs images, ui-test)
+  ├─ images ────────────────────┬─ integration (3 Docker shards + agent-auth + keycloak)
+  │                              ├─ ui-e2e, ui-e2e-auth, ui-e2e-keycloak (also need ui-test)
+  │                              ├─ helm/podman (3 full-suite shards each)
+  │                              ├─ early-evidence (also needs helm-lint)
+  │                              └─ integration-extra (also needs reagents)
   ├─ reagents-arm64 ───────────────────┐
   └─ builder-arm64 ─┬─ unit-test-arm64  │
                     └─ images-arm64 ───┴─ integration-arm64
@@ -376,7 +376,7 @@ publish ← tag only, needs the full matrix and ci-ok
 | `changes` | ubuntu-26.04 | — | 5 | path filter (`dorny/paths-filter`) | none |
 | `builder` | ubuntu-26.04 | `changes` | 30 | `docker/build-push-action` `builder-full` (GHA cache) | none |
 | `builder-arm64` | ubuntu-26.04-arm | `changes` | 30 | arm64 twin of the above | none |
-| `images` | ubuntu-26.04 | `builder` | 30 | `build/ci.docker-bake.hcl` `product`, `build-triage-agent`, `stress-image-test`, CLI smoke | none |
+| `images` | ubuntu-26.04 | `changes` | 30 | `build/ci.docker-bake.hcl` `product`, `build-triage-agent`, `stress-image-test`, CLI smoke | none |
 | `images-arm64` | ubuntu-26.04-arm | `builder-arm64` | 30 | arm64 twin of `images` (parallel) | none |
 | `reagents` | ubuntu-26.04 | `changes` | 20 | `build/ci.docker-bake.hcl` `reagents` (parallel with `images`) | none |
 | `reagents-arm64` | ubuntu-26.04-arm | `changes` | 20 | `reagent-roles` bake group (no unused arm64 lint/test toolchain) | none |
@@ -551,7 +551,10 @@ kind requests/limits + metrics-server assertions remain later plan items.
 CI uses `build/ci.docker-bake-cache.hcl` and the `bake-images` composite action
 to persist product and reagent layers with separate target/architecture
 GHA scopes. A Bake target context reuses the cached lean builder graph,
-so image producers no longer download the builder image. Go compilation
+so image producers no longer download the builder image. The amd64 `images`
+job starts after path selection and evaluates that candidate's builder graph
+itself, without waiting for the separate full-builder job. The full builder
+remains required by `ci-ok` and supplies its other consumers. Go compilation
 and npm cache mounts are restored separately with `actions/cache` and
 `buildkit-cache-dance`; GHA layer exports alone do not preserve cache mounts.
 Compilation cache keys include the architecture, product/reagent group, and
