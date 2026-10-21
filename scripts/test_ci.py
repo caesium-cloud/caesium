@@ -764,6 +764,65 @@ def job_selectors(name):
     return set(re.findall(r"needs\.changes\.outputs\.(\w+) == 'true'", JOBS[name].get("if", "")))
 
 
+class ConnectorsLaneWiringTests(unittest.TestCase):
+    def test_connector_lane_runs_for_shared_dependencies_and_stays_advisory(self):
+        job = JOBS["connectors"]
+        selectors = job_selectors("connectors")
+        self.assertEqual(selectors, {"go", "ui", "ci"})
+        self.assertEqual(job["if"], " || ".join(
+            f"needs.changes.outputs.{key} == 'true'" for key in ("go", "ui", "ci")
+        ))
+        for path in (
+            "internal/auth/rbac.go", "internal/run/start_idempotency.go",
+            "ui/src/lib/auth.ts", "ui/src/features/jobs/RunDetailPage.tsx",
+            "scripts/connectors-test.sh", "test/contracts/scenarios.json",
+            "test/connectors_actions_test.go", "justfile",
+        ):
+            with self.subTest(path=path):
+                self.assertTrue(selected_groups(path) & selectors)
+        self.assertFalse(selected_groups("docs/connectors.md") & selectors)
+        self.assertIn("connectors", UNPROMOTED_LANES)
+        self.assertNotIn("connectors", SELECTORS)
+        self.assertNotIn("connectors", EVIDENCE_LANES)
+        self.assertNotIn("connectors", JOBS["ci-ok"]["needs"])
+        self.assertNotIn("connectors", QUALIFICATION["RELEASE_REQUIRED_EVIDENCE"])
+        self.assertEqual(set(job["needs"]), {"changes", "builder", "images", "ui-test"})
+
+    def test_connector_job_drives_tracked_recipe_and_uploads_only_public_artifacts(self):
+        job = JOBS["connectors"]
+        self.assertEqual(job["env"]["CANDIDATE_SHA"], "${{ github.sha }}")
+        run_step = next(step for step in job["steps"]
+                        if step.get("name") == "Run real Temporal connector lane")
+        self.assertEqual(run_step["env"]["CAESIUM_INTEGRATION_RUNNER_IMAGE"],
+                         "caesiumcloud/caesium-integration:${{ env.IMAGE_TAG }}-amd64")
+        loaded = {step.get("with", {}).get("name") for step in job["steps"]
+                  if step.get("uses") == "./.github/actions/load-docker-images"}
+        self.assertEqual(loaded, {"builder-amd64", "product-amd64", "integration-runner-amd64"})
+        run = run_step["run"]
+        self.assertIn("CAESIUM_CONNECTORS_EXPECTED_IMAGE_ID", run)
+        self.assertIn("$(cat .tmp/connectors-image-ids/test.txt)", run)
+        self.assertIn("$(cat .tmp/connectors-image-ids/integration-runner.txt)", run)
+        self.assertIn("CAESIUM_CONNECTORS_EXPECTED_RUNNER_IMAGE_ID", run)
+        identities = next(step for step in job["steps"]
+                          if step.get("with", {}).get("name") == "image-ids-amd64")
+        self.assertEqual(identities["with"]["path"], ".tmp/connectors-image-ids")
+        producer = next(step["run"] for step in JOBS["images"]["steps"]
+                        if step.get("name") == "Record release image identity")
+        self.assertIn('"caesiumcloud/caesium:${{ env.IMAGE_TAG }}-amd64-test" >/tmp/image-ids-amd64/test.txt', producer)
+        self.assertIn('"caesiumcloud/caesium-integration:${{ env.IMAGE_TAG }}-amd64" >/tmp/image-ids-amd64/integration-runner.txt', producer)
+        self.assertIn("just tag=${{ env.IMAGE_TAG }}-amd64 integration-test-connectors", run)
+        self.assertNotIn("continue-on-error", job)
+        uploads = [step for step in job["steps"]
+                   if step.get("uses") == "actions/upload-artifact@v7"]
+        self.assertEqual({step["with"]["path"] for step in uploads}, {
+            ".tmp/lane-evidence/connectors/evidence.json",
+            ".tmp/lane-evidence/connectors/public/",
+        })
+        for step in uploads:
+            self.assertEqual(step["if"], "always()")
+            self.assertEqual(step["with"]["if-no-files-found"], "error")
+
+
 class EarlyEvidenceLaneTests(unittest.TestCase):
     """The first persistent three-node lane: selection, wiring and fail-closed."""
 
@@ -2888,8 +2947,11 @@ class NightlyLaneTests(unittest.TestCase):
                     or job in preexisting_optional or job in structural,
                     f"{job} is neither merge-blocking nor labelled unpromoted",
                 )
-        self.assertEqual(set(UNPROMOTED_LANES), set(QUAL_LANES))
-        for job in UNPROMOTED_LANES:
+        # The connector lane runs on broad PR/push selectors in CI itself;
+        # the other advisory lanes belong to the reusable nightly workflow.
+        self.assertEqual(set(UNPROMOTED_LANES), set(QUAL_LANES) | {"connectors"})
+        self.assertIn("connectors", JOBS)
+        for job in set(UNPROMOTED_LANES) - {"connectors"}:
             self.assertIn(job, LANE_JOBS)
 
 

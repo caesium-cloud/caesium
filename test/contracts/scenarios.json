@@ -1867,6 +1867,214 @@
         "kind": "",
         "required_observations": []
       }
+    },
+    {
+      "id": "connectors-http-temporal",
+      "name": "Authenticated HTTP and real Temporal connector scenarios",
+      "selector": "TestIntegrationTestSuite/TestConnectors{Fixture,Messages,Correlation,Operations,Read,Actions}",
+      "contract_ids": [],
+      "category": "execution-connectors",
+      "status": "proven",
+      "owner_item": "F2",
+      "registered_by": "execution-connectors-F2",
+      "gates": [
+        "connectors"
+      ],
+      "notes": "Executed by just integration-test-connectors. The workflow lane is advisory until F4 promotion; registration does not certify F3 first-release acceptance. The shared collector derives observations and fault activation from retained raw artifacts, then the existing strict checker validates this contract. F2 reuses the source-built or producer-bound fixture images in the cluster and records the actual member images and validated CRI import identities; a standalone manual cluster run may build its own candidate images.",
+      "topology": {
+        "kind": "docker-connectors-fixture",
+        "replicas": 1,
+        "persistence": false,
+        "engine": "docker"
+      },
+      "mode": {
+        "execution": "local",
+        "surface": "http+temporal"
+      },
+      "feature_flags": {
+        "CAESIUM_CONNECTORS_ENABLED": "true",
+        "CAESIUM_AUTH_MODE": "api-key",
+        "CAESIUM_RUN_QUEUE_ENABLED": "true",
+        "CAESIUM_RUN_QUEUE_DEQUEUER_ENABLED": "true"
+      },
+      "expected_observations": [
+        {
+          "id": "candidate_source_image_bound",
+          "description": "Retained whole-source hashes match the candidate tree; the running server matches the inspected image."
+        },
+        {
+          "id": "authenticated_configured_queue_runtime_observed",
+          "description": "The inspected live server has the enabled connector configuration, authenticated API and both queue components."
+        },
+        {
+          "id": "six_named_go_scenarios_once_without_skip",
+          "description": "All six named Go scenarios run and pass exactly once without selected skips or failures."
+        },
+        {
+          "id": "running_provider_versions_pinned",
+          "description": "The actual ready provider records SDK 1.49.0, CLI 1.9.1 and server 1.32.0."
+        },
+        {
+          "id": "raw_http_receipts_and_independent_effects",
+          "description": "Raw HTTP responses and durable receipts retain their actor, operation and independent provider effect identities."
+        },
+        {
+          "id": "queued_correlation_and_activity_retry_observed",
+          "description": "The real activity retry and queued admission retain a promoted run identity."
+        },
+        {
+          "id": "bounded_read_and_storage_observed",
+          "description": "The live read evidence records external-only workflows and zero unchanged writes or closed-workflow automatic Queries."
+        }
+      ],
+      "allowed_skips": [],
+      "evidence": {
+        "require_candidate_sha": true,
+        "require_candidate_digest": true,
+        "require_recorder": true,
+        "artifact_identity": "connectors-http-temporal",
+        "min_samples": 6
+      },
+      "fault_activation": {
+        "required": true,
+        "kind": "temporal-reply-loss-outage-and-restart",
+        "required_observations": [
+          "accepted_reply_lost",
+          "rejected_reply_lost",
+          "provider_outage_observed",
+          "actual_server_restart_observed"
+        ]
+      }
+    },
+    {
+      "id": "connectors-browser",
+      "name": "Dedicated real connector Console journeys",
+      "selector": "ui/e2e/connectors/*.spec.ts (project=connectors)",
+      "contract_ids": [],
+      "category": "execution-connectors",
+      "status": "proven",
+      "owner_item": "F2",
+      "registered_by": "execution-connectors-F2",
+      "gates": [
+        "connectors"
+      ],
+      "notes": "Executed by just integration-test-connectors. The workflow lane is advisory until F4 promotion; registration does not certify F3 first-release acceptance. The shared collector derives observations and fault activation from retained raw artifacts, then the existing strict checker validates this contract. F2 reuses the source-built or producer-bound fixture images in the cluster and records the actual member images and validated CRI import identities; a standalone manual cluster run may build its own candidate images.",
+      "topology": {
+        "kind": "docker-connectors-fixture",
+        "replicas": 1,
+        "persistence": false,
+        "engine": "docker"
+      },
+      "mode": {
+        "execution": "local",
+        "surface": "browser"
+      },
+      "feature_flags": {
+        "CAESIUM_CONNECTORS_ENABLED": "true",
+        "CAESIUM_AUTH_MODE": "api-key",
+        "CAESIUM_RUN_QUEUE_ENABLED": "true",
+        "CAESIUM_RUN_QUEUE_DEQUEUER_ENABLED": "true"
+      },
+      "expected_observations": [
+        {
+          "id": "candidate_source_image_bound",
+          "description": "Browser candidate and server image markers match the source-verified live fixture."
+        },
+        {
+          "id": "ten_browser_cases_once_without_retry",
+          "description": "All ten exact dedicated connector cases pass on their sole initial attempt with zero skipped, flaky or unexpected cases."
+        },
+        {
+          "id": "raw_browser_receipts_and_effects",
+          "description": "Retained browser JSON attachments contain candidate-bound receipts and their independent provider effects."
+        }
+      ],
+      "allowed_skips": [],
+      "evidence": {
+        "require_candidate_sha": true,
+        "require_candidate_digest": true,
+        "require_recorder": true,
+        "artifact_identity": "connectors-browser",
+        "min_samples": 10
+      },
+      "fault_activation": {
+        "required": true,
+        "kind": "temporal-reply-loss-and-outage",
+        "required_observations": [
+          "accepted_reply_lost",
+          "rejected_reply_lost",
+          "provider_outage_observed"
+        ]
+      }
+    },
+    {
+      "id": "connectors-config-cluster",
+      "name": "Shared-catalog connector configuration equality and epoch fencing",
+      "selector": "TestConnectorsConfigCluster",
+      "contract_ids": [],
+      "category": "execution-connectors",
+      "status": "proven",
+      "owner_item": "F2",
+      "registered_by": "execution-connectors-F2",
+      "gates": [
+        "connectors"
+      ],
+      "notes": "Executed by just integration-test-connectors. The workflow lane is advisory until F4 promotion; registration does not certify F3 first-release acceptance. The shared collector derives observations and fault activation from retained raw artifacts, then the existing strict checker validates this contract. F2 reuses the source-built or producer-bound fixture images in the cluster and records the actual member images and validated CRI import identities; a standalone manual cluster run may build its own candidate images.",
+      "topology": {
+        "kind": "kind-helm-statefulset",
+        "replicas": 3,
+        "persistence": true,
+        "engine": "kubernetes"
+      },
+      "mode": {
+        "execution": "distributed",
+        "surface": "http"
+      },
+      "feature_flags": {
+        "CAESIUM_CONNECTORS_ENABLED": "true",
+        "CAESIUM_AUTH_MODE": "api-key",
+        "CAESIUM_RUN_QUEUE_ENABLED": "true",
+        "CAESIUM_RUN_QUEUE_DEQUEUER_ENABLED": "true"
+      },
+      "expected_observations": [
+        {
+          "id": "candidate_source_image_bound",
+          "description": "Retained source hashes match the candidate and the loaded CRI identities bind every observed member image."
+        },
+        {
+          "id": "three_distinct_persistent_members_observed",
+          "description": "Three distinct live member, container and PVC identities retain their actual node placement."
+        },
+        {
+          "id": "matching_configurations_reach_provider",
+          "description": "Two members with equal fingerprints make real provider RPCs."
+        },
+        {
+          "id": "guarded_epoch_transition_preserves_identity",
+          "description": "The guarded transition advances the fingerprint and provider reads while stale members refuse."
+        },
+        {
+          "id": "cluster_scenario_once_without_skip",
+          "description": "The exact shared-catalog scenario passes once with no selected skip or failure."
+        }
+      ],
+      "allowed_skips": [],
+      "evidence": {
+        "require_candidate_sha": true,
+        "require_candidate_digest": false,
+        "require_recorder": true,
+        "artifact_identity": "connectors-config-cluster",
+        "min_samples": 3
+      },
+      "fault_activation": {
+        "required": true,
+        "kind": "connector-configuration-skew",
+        "required_observations": [
+          "configuration_skew_refuses_without_rpc",
+          "stale_epoch_refuses_without_rpc",
+          "immutable_repoint_refuses_without_epoch_change"
+        ]
+      }
     }
   ]
 }
