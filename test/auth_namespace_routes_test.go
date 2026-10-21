@@ -253,14 +253,15 @@ func (s *IntegrationTestSuite) TestAuthNamespacedSharedObjectsAndTriggers() {
 		})
 	}
 
-	// Notification channels and policies: reads by id are live; creates,
-	// edits and deletes are pending D4. Dispatch does not yet match policies
-	// by namespace, so a new channel or policy could receive other
-	// namespaces' events, and deleting one could silence them.
+	// Notification channels and policies (D4): the object's namespace
+	// decides, and a "*" object needs the role at "*" for writes.
+	// TestAuthSharedObjectsConfinedToNamespaces drives the confined writes
+	// and lists in full.
 	channelBody := func(namespace, suffix string) string {
 		return fmt.Sprintf(`{"namespace":%q,"name":%q,"type":"webhook","config":{"url":"https://example.invalid/a3"}}`, namespace, name("ch-"+suffix))
 	}
-	s.requireNSStatus(http.StatusForbidden, http.MethodPost, "/v1/notifications/channels", mktOperator, channelBody("marketing", "mkt-denied"))
+	ownChannel := decodeID(s, s.requireNSStatus(http.StatusCreated, http.MethodPost, "/v1/notifications/channels", mktOperator, channelBody("marketing", "mkt-own")))
+	deleteAfter("/v1/notifications/channels/" + ownChannel)
 	mktChannel := decodeID(s, s.requireNSStatus(http.StatusCreated, http.MethodPost, "/v1/notifications/channels", admin, channelBody("marketing", "mkt")))
 	deleteAfter("/v1/notifications/channels/" + mktChannel)
 	finChannel := decodeID(s, s.requireNSStatus(http.StatusCreated, http.MethodPost, "/v1/notifications/channels", admin, channelBody("finance", "fin")))
@@ -270,7 +271,8 @@ func (s *IntegrationTestSuite) TestAuthNamespacedSharedObjectsAndTriggers() {
 	s.requireNSStatus(http.StatusOK, http.MethodGet, "/v1/notifications/channels/"+mktChannel, mktOperator, "")
 	s.requireNSStatus(http.StatusOK, http.MethodGet, "/v1/notifications/channels/"+sharedChannel, mktOperator, "")
 	s.requireNSStatus(http.StatusForbidden, http.MethodGet, "/v1/notifications/channels/"+finChannel, mktOperator, "")
-	s.requireNSStatus(http.StatusForbidden, http.MethodPatch, "/v1/notifications/channels/"+mktChannel, mktOperator, `{"enabled":false}`)
+	s.requireNSStatus(http.StatusOK, http.MethodPatch, "/v1/notifications/channels/"+mktChannel, mktOperator, `{"enabled":false}`)
+	s.requireNSStatus(http.StatusForbidden, http.MethodPatch, "/v1/notifications/channels/"+finChannel, mktOperator, `{"enabled":false}`)
 	s.requireNSStatus(http.StatusForbidden, http.MethodDelete, "/v1/notifications/channels/"+sharedChannel, mktOperator, "")
 	s.requireNSStatus(http.StatusForbidden, http.MethodDelete, "/v1/notifications/channels/"+finChannel, mktOperator, "")
 
@@ -278,34 +280,32 @@ func (s *IntegrationTestSuite) TestAuthNamespacedSharedObjectsAndTriggers() {
 		return fmt.Sprintf(`{"namespace":%q,"name":%q,"channel_id":%q,"event_types":["run_failed"],"filters":{"job_ids":[%q]}}`,
 			namespace, name("pol-"+suffix), channel, job)
 	}
-	s.requireNSStatus(http.StatusForbidden, http.MethodPost, "/v1/notifications/policies", mktOperator, policyBody("marketing", mktChannel, "mkt-denied", f.mktJob.ID))
-	// A marketing policy that today handles finance's failures: dispatch
-	// matches its job filter, not its namespace.
+	ownPolicy := decodeID(s, s.requireNSStatus(http.StatusCreated, http.MethodPost, "/v1/notifications/policies", mktOperator, policyBody("marketing", mktChannel, "mkt-own", f.mktJob.ID)))
+	deleteAfter("/v1/notifications/policies/" + ownPolicy)
+	// A marketing policy filtered on a finance job never matches it: dispatch
+	// matches the events marketing owns only (D4).
 	mktPolicy := decodeID(s, s.requireNSStatus(http.StatusCreated, http.MethodPost, "/v1/notifications/policies", admin, policyBody("marketing", mktChannel, "mkt", f.finJob.ID)))
 	deleteAfter("/v1/notifications/policies/" + mktPolicy)
 	s.requireNSStatus(http.StatusOK, http.MethodGet, "/v1/notifications/policies/"+mktPolicy, mktOperator, "")
 	s.requireNSStatus(http.StatusForbidden, http.MethodGet, "/v1/notifications/policies/"+mktPolicy, s.namespacedKey(f, "operator", `["finance"]`).Plaintext, "")
-	// The marketing operator can delete neither the policy nor its channel
-	// (either would silence finance's alerts); the admin deletes both.
-	s.requireNSStatus(http.StatusForbidden, http.MethodDelete, "/v1/notifications/policies/"+mktPolicy, mktOperator, "")
-	s.requireNSStatus(http.StatusForbidden, http.MethodDelete, "/v1/notifications/channels/"+mktChannel, mktOperator, "")
+	// Marketing's own policy and channel are marketing's to delete.
+	s.requireNSStatus(http.StatusNoContent, http.MethodDelete, "/v1/notifications/policies/"+ownPolicy, mktOperator, "")
+	s.requireNSStatus(http.StatusNoContent, http.MethodDelete, "/v1/notifications/channels/"+ownChannel, mktOperator, "")
 	s.requireNSStatus(http.StatusOK, http.MethodGet, "/v1/notifications/policies/"+mktPolicy, admin, "")
 	s.requireNSStatus(http.StatusOK, http.MethodGet, "/v1/notifications/channels/"+mktChannel, admin, "")
 	s.requireNSStatus(http.StatusNoContent, http.MethodDelete, "/v1/notifications/policies/"+mktPolicy, admin, "")
 	s.requireNSStatus(http.StatusNoContent, http.MethodDelete, "/v1/notifications/channels/"+mktChannel, admin, "")
 	s.requireNSStatus(http.StatusNotFound, http.MethodGet, "/v1/notifications/policies/"+mktPolicy, admin, "")
 
-	// Agent profiles: reads by the object's namespace; creates, edits and
-	// deletes are pending D4 (jobs reference a profile by name, resolved
-	// globally at runtime, so a confined delete could disable another
-	// namespace's remediation).
+	// Agent profiles (D4): the object's namespace decides; an incident
+	// resolves only a profile in its own namespace or "*".
 	profileBody := func(namespace, suffix string) string {
 		return fmt.Sprintf(`{"namespace":%q,"name":%q,"image":"busybox:1.36.1"}`, namespace, name("prof-"+suffix))
 	}
-	s.requireNSStatus(http.StatusForbidden, http.MethodPost, "/v1/agentprofiles", mktOperator, profileBody("marketing", "mkt-denied"))
-	mktProfile := decodeID(s, s.requireNSStatus(http.StatusCreated, http.MethodPost, "/v1/agentprofiles", admin, profileBody("marketing", "mkt")))
+	s.requireNSStatus(http.StatusForbidden, http.MethodPost, "/v1/agentprofiles", mktOperator, profileBody("finance", "fin-denied"))
+	mktProfile := decodeID(s, s.requireNSStatus(http.StatusCreated, http.MethodPost, "/v1/agentprofiles", mktOperator, profileBody("marketing", "mkt")))
 	deleteAfter("/v1/agentprofiles/" + mktProfile)
-	s.requireNSStatus(http.StatusForbidden, http.MethodPatch, "/v1/agentprofiles/"+mktProfile, mktOperator, `{"image":"busybox:1.36.1"}`)
+	s.requireNSStatus(http.StatusOK, http.MethodPatch, "/v1/agentprofiles/"+mktProfile, mktOperator, `{"image":"busybox:1.36.1"}`)
 	finProfile := decodeID(s, s.requireNSStatus(http.StatusCreated, http.MethodPost, "/v1/agentprofiles", admin, profileBody("finance", "fin")))
 	deleteAfter("/v1/agentprofiles/" + finProfile)
 	sharedProfile := decodeID(s, s.requireNSStatus(http.StatusCreated, http.MethodPost, "/v1/agentprofiles", admin, profileBody("*", "shared")))
@@ -316,9 +316,8 @@ func (s *IntegrationTestSuite) TestAuthNamespacedSharedObjectsAndTriggers() {
 	s.requireNSStatus(http.StatusForbidden, http.MethodPatch, "/v1/agentprofiles/"+sharedProfile, mktOperator, `{"image":"busybox:1.36.1"}`)
 	s.requireNSStatus(http.StatusForbidden, http.MethodDelete, "/v1/agentprofiles/"+finProfile, mktOperator, "")
 	s.requireNSStatus(http.StatusForbidden, http.MethodDelete, "/v1/agentprofiles/"+sharedProfile, mktOperator, "")
-	s.requireNSStatus(http.StatusForbidden, http.MethodDelete, "/v1/agentprofiles/"+mktProfile, mktOperator, "")
 	s.requireNSStatus(http.StatusOK, http.MethodGet, "/v1/agentprofiles/"+mktProfile, admin, "")
-	s.requireNSStatus(http.StatusNoContent, http.MethodDelete, "/v1/agentprofiles/"+mktProfile, admin, "")
+	s.requireNSStatus(http.StatusNoContent, http.MethodDelete, "/v1/agentprofiles/"+mktProfile, mktOperator, "")
 	s.requireNSStatus(http.StatusNotFound, http.MethodGet, "/v1/agentprofiles/"+mktProfile, admin, "")
 
 	// Triggers: the marketing job's own trigger is marketing's; a trigger that
@@ -583,7 +582,7 @@ func (s *IntegrationTestSuite) TestAuthAuditNamespaceFilter() {
 	s.requireNSStatus(http.StatusForbidden, http.MethodGet, "/v1/atoms", mkt.Plaintext, "")
 	// The controller-owned row: a cluster operator deletes a marketing
 	// channel the admin created, and the row carries the channel's namespace
-	// (every shared-object write by a confined caller is D4's).
+	// (a confined caller's shared-object writes: TestAuthSharedObjectsConfinedToNamespaces).
 	clusterOperator := s.namespacedKey(f, "operator", "")
 	channel := decodeID(s, s.requireNSStatus(http.StatusCreated, http.MethodPost, "/v1/notifications/channels", s.authAPIKey,
 		fmt.Sprintf(`{"namespace":"marketing","name":"a3-audit-%d","type":"webhook","config":{"url":"https://example.invalid/a3"}}`, f.stamp)))

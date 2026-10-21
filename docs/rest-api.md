@@ -111,7 +111,14 @@ and anything else must be a DNS label (400 otherwise). The namespace is
 create-only: a `PATCH` may omit it or echo the stored value, but a `PATCH` that
 changes it returns 400 with `namespace is create-only; delete and recreate the
 object to move it`, and nothing in that patch is written. Moving an object is
-delete + create.
+delete + create. With a policy file loaded, a create in a namespace the file
+does not declare returns 400 `namespace "<name>" is not declared in the access
+policy`. For a namespace-confined caller the lists return its namespaces'
+objects plus the `*` ones, and writes need operator in the object's namespace
+(at `*` for a `*` object). Names are unique across namespaces: a create or
+rename onto a taken name returns 409 `conflict`, and a delete releases the
+name (a name may not contain `~deleted~`, which marks deleted objects). A policy delivers only events its own namespace owns (a `*` policy
+delivers all); see the identity-and-access guide's Shared objects section.
 
 ## System and operator surfaces
 

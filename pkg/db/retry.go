@@ -45,6 +45,13 @@ func Transaction(ctx context.Context, fn func(tx *gorm.DB) error) error {
 	return transaction(ctx, Connection(), fn)
 }
 
+// TransactionOn is Transaction against conn: the whole transaction is retried
+// on transient contention. Services that hold their own connection (and tests
+// that hand them one) use it for multi-statement writes.
+func TransactionOn(ctx context.Context, conn *gorm.DB, fn func(tx *gorm.DB) error) error {
+	return transaction(ctx, conn, fn)
+}
+
 func transaction(ctx context.Context, conn *gorm.DB, fn func(tx *gorm.DB) error) error {
 	return transactionWithPolicy(ctx, conn, busyRetryPolicy(BusyRetryBackoffs, sleepRetry), fn)
 }

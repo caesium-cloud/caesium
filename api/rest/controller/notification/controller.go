@@ -19,12 +19,16 @@ func New(auditor *auth.AuditLogger) *Controller {
 	return &Controller{auditor: auditor}
 }
 
-// auditActor extracts the caller's key prefix from the echo context for the
-// audit "actor" field, defaulting to "unknown" — the same fallback used by
-// api/rest/controller/auth's RevokeKey/RotateKey handlers.
+// auditActor names the caller for the audit "actor" field: an API key's
+// prefix, else the authenticated principal's subject (a session user's email,
+// or a credential without a plain key row), else "unknown" — the same
+// fallback used by api/rest/controller/auth's RevokeKey/RotateKey handlers.
 func auditActor(c *echo.Context) string {
 	if caller := middleware.GetAuthKey(c); caller != nil {
 		return caller.KeyPrefix
+	}
+	if principal := middleware.GetPrincipal(c); principal != nil && principal.Subject != "" {
+		return principal.Subject
 	}
 	return "unknown"
 }
