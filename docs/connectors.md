@@ -420,7 +420,8 @@ Temporal fixture and three Caesium members with retained PVCs. Its selected
 RPC, a guarded epoch transition, stale-node refusal and connection repointing.
 Run it serially with other container/cluster lanes. Candidate, image, provider,
 topology and fault evidence stays in the reported artifact directory. The
-authenticated HTTP/browser CI lane remains F2; this command does not promote it.
+authenticated HTTP/browser CI lane also runs this proof; the lane remains
+advisory until its separate promotion qualification.
 
 The existing G2 coverage cohort uses the same pinned Temporal fixture for a
 real publication, authenticated monitoring, verified delegation and reverse
@@ -960,6 +961,43 @@ public operation receipts and operation recovery through a live Caesium process
 restart remain C2. C1's separate HTTP read scenario qualifies snapshot and
 verified-link persistence across process restart.
 
+## Authenticated connector verification lane
+
+From a clean candidate with the repository builder, rootful Linux Docker,
+Python 3, Node/npm with Playwright Chromium, and kind/kubectl/Helm available:
+
+```sh
+(cd ui && npm ci && npx playwright install chromium)
+just tag=connector-local integration-test-connectors
+```
+
+Serialize this with other Docker/browser lanes. The controller invokes the
+tracked `integration-up-connectors` server recipe with authentication, connector
+configuration, and the run queue/dequeuer enabled. It runs all six named real
+Temporal scenarios and the dedicated `connectors` browser project, requiring
+every selected case to pass once without skips or retries. It then runs the
+existing configuration-equality proof with three persistent Caesium members on
+one isolated kind node. Containers and cluster resources belong to this run.
+
+Set `CAESIUM_CONNECTORS_ARTIFACTS` to an absolute empty directory to choose where
+the lane retains source/image identities, provider pins and effect journals,
+HTTP receipts, browser results and config-cluster observations. The default is
+under `.tmp/lane-evidence/connectors/`. The existing shared evidence collector
+produces `evidence.json`, checked by:
+
+```sh
+python3 scripts/check-test-evidence.py --manifest test/contracts/scenarios.json \
+  --report <lane>/evidence.json --require connectors --strict
+```
+
+Wrong candidate identities, missing artifacts/prerequisites, an empty or skipped
+selection and failed first browser attempts fail this command. CI uploads the
+report and a sanitized public artifact allowlist; raw browser traces, TLS keys,
+control credentials and kubeconfigs stay outside that upload. See the
+[CI runbook](ci.md#advisory-connector-lane-execution-connectors-f2) for selectors
+and the promotion procedure. The lane is initially advisory to `ci-ok`; first
+release acceptance and promotion remain separate F3/F4 work.
+
 ## Real Temporal development fixture
 
 `just connectors-fixture-check` builds the fixture and integration runner from
@@ -1063,5 +1101,6 @@ paths. Its two job aliases are examples; substitute actual lane job aliases
 before later correlation-route qualification. F1's self-check uses real SDK
 calls to qualify the adapter boundary. The selected manual fixture also requires
 `TestConnectorsRead` and `TestConnectorsActions` to pass against the real HTTP
-surface. The authenticated HTTP/browser CI lane remains F2; the existing default
+surface. The authenticated HTTP/browser lane above additionally requires the
+isolated browser project and configuration-equality proof. The existing default
 integration lane keeps connectors off.

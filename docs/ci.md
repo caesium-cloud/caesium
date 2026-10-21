@@ -390,11 +390,12 @@ publish ← tag only, needs the full matrix and ci-ok
 | `ui-e2e` | ubuntu-26.04 | `[ui-test, images]` | 45 | host-installed Playwright process joined only to the server network namespace, reusing the `product-amd64` artifact | inline `docker run --name caesium-server` |
 | `ui-e2e-auth` | ubuntu-26.04 | `[ui-test, images]` | 45 | inline `docker run` | inline `docker run --name caesium-server-auth` |
 | `ui-e2e-keycloak` | ubuntu-26.04 | `[ui-test, images]` | 20 | `integration-up-keycloak`, then host Playwright `--project=keycloak` | Keycloak + `caesium-server-keycloak-test` via `integration-up-keycloak` |
+| `connectors` | ubuntu-26.04 | `[changes, builder, images, ui-test]` | 45 | `integration-test-connectors` (advisory) | `integration-up-connectors`, then three persistent Helm members on one kind node |
 | `helm-integration-test` | ubuntu-26.04 | `[images, helm-lint]` | 60 | kind + `helm install` + `helm test` + full suite in three shards | kind pod via the Helm chart |
 | `helm-pod-replacement-test` | ubuntu-26.04 | `[changes, images, helm-lint]` | 45 | `scripts/helm-pod-replacement.sh` — kind + `helm install` at three replicas with retained PVCs, then replaces every pod and proves it rejoins (issue #493) | three kind pods via the Helm chart |
 | `podman-integration-test` | ubuntu-26.04 | `images` | 45 | inline `docker run` + full suite in three shards | inline `docker run --name caesium-server-podman` |
 | `early-evidence` | ubuntu-26.04 | `changes`, `images`, `helm-lint` | 60 | `integration-test-sql-budget`, `robustness-test`, `check-evidence` (kind + Helm, three persistent replicas) | `integration-up`, then three kind pods via the Helm chart |
-| `ci-config` | ubuntu-26.04 | — | 5 | actionlint + wildcard `scripts/test_*.py` discovery | none |
+| `ci-config` | ubuntu-26.04 | — | 15 | actionlint + wildcard `scripts/test_*.py` discovery | none |
 | `build-and-integration-test` / `build-and-integration-test-agent-auth` | ubuntu-26.04 | `changes`, `images`, `integration` | 5 | legacy required-context adapters | none |
 | `ci-ok` | ubuntu-26.04 | see §1 | 5 | `scripts/ci-ok.py` | none |
 | `publish` | ubuntu-26.04 | see §3 | 30 | none — direct `docker push`/`docker manifest`, and release asset upload (§6) | none |
@@ -2336,6 +2337,52 @@ delivery and ambiguous response timeout histories must still pass on the
 candidate. The merged C3 head passed the candidate probes and all eight
 mutation rejections. Its ordinary Go/Python probes run in existing unit/config
 lanes; the full mutation script is not yet a CI job (G6 owns promotion).
+
+### Advisory connector lane (execution-connectors F2)
+
+The `connectors` job runs on the existing broad `go`, `ui` or `ci` selectors
+for pull requests and merge groups; master/tag pushes select it too. Shared
+auth, admission, API and UI changes therefore exercise the lane without a new
+path-filter output. It loads the candidate builder, product and integration
+runner artifacts, verifies loaded server/runner identities against the producer's
+`image-ids-amd64` artifact, installs Chromium and the existing kind/Helm tools,
+then runs:
+
+```sh
+just tag=<candidate-image-tag> integration-test-connectors
+```
+
+The tracked `integration-up-connectors` recipe preserves baseline server envs,
+enables authentication/connectors and both queue flags, and mounts the fixture
+configuration. The controller creates its own server, pinned real Temporal
+server/worker and isolated config-equality cluster. It requires explicit PASS
+records for Fixture, Messages, Correlation, Operations, Read and Actions, every
+test in the isolated `connectors` Playwright project on its first attempt, and
+the matching/skew/transition/repoint configuration scenario. The config proof
+uses three persistent Caesium replicas on one kind node; it does not claim a
+multi-host deployment. Default/auth Playwright projects remain separate.
+
+The shared collector reduces retained source/image identities, raw provider
+effects/faults, receipt and configuration observations into `evidence.json`.
+The lane runs the existing validator:
+
+```sh
+python3 scripts/check-test-evidence.py --manifest test/contracts/scenarios.json \
+  --report <lane>/evidence.json --require connectors --strict
+```
+
+Missing prerequisites, skipped/empty selections, a failed first browser attempt,
+missing observations/artifacts or a foreign candidate fail the lane. CI uploads
+`connectors-evidence` and the harness's sanitized public allowlist as
+`connectors-artifacts`; private TLS/control files, kubeconfigs and raw browser
+traces/HTML are excluded. Local raw artifacts stay in the selected directory.
+
+This job is registered in `UNPROMOTED_LANES`. It is advisory to `ci-ok` and
+release qualification: a successful aggregate is not a connector-lane pass.
+F3 records release acceptance after merge. F4 alone can promote this lane,
+after ten consecutive green selected master runs finish within fifteen minutes
+after `changes`, with candidate-bound evidence and actual promoted PR/merge-group
+proof. This change adds no required check or repository setting.
 
 ### Promoted system suites and the nightly set (distributed-testing W9/G6)
 

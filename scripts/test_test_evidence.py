@@ -123,6 +123,39 @@ def output(result):
 
 
 class CommittedManifestTests(unittest.TestCase):
+    def test_connector_advisory_gate_registers_exact_real_surface_rows(self):
+        doc = json.loads(MANIFEST_PATH.read_text())
+        selected = [item for item in doc["scenarios"] if "connectors" in item["gates"]]
+        self.assertEqual([item["id"] for item in selected], [
+            "connectors-http-temporal", "connectors-browser", "connectors-config-cluster",
+        ])
+        for item in selected:
+            self.assertEqual(item["allowed_skips"], [])
+            self.assertTrue(item["fault_activation"]["required"])
+            self.assertEqual(item["feature_flags"]["CAESIUM_CONNECTORS_ENABLED"], "true")
+            self.assertEqual(item["feature_flags"]["CAESIUM_RUN_QUEUE_ENABLED"], "true")
+            self.assertEqual(item["feature_flags"]["CAESIUM_RUN_QUEUE_DEQUEUER_ENABLED"], "true")
+        report = passing_report(doc, results=[passing_result(item) for item in selected])
+        result = run_checker(doc, report, extra=("--require", "connectors", "--strict"))
+        self.assertEqual(result.returncode, 0, output(result))
+
+    def test_connector_gate_rejects_absent_foreign_hollow_and_failed_reports(self):
+        doc = json.loads(MANIFEST_PATH.read_text())
+        selected = [item for item in doc["scenarios"] if "connectors" in item["gates"]]
+        for mutation in ("missing", "foreign-sha", "foreign-artifact", "hollow", "failed", "skip", "fault"):
+            with self.subTest(mutation=mutation):
+                report = passing_report(doc, results=[passing_result(item) for item in selected])
+                row = report["scenarios"][0]
+                if mutation == "missing": report["scenarios"].pop(0)
+                elif mutation == "foreign-sha": row["candidate_sha"] = "b" * 40
+                elif mutation == "foreign-artifact": row["artifact_identity"] = "other-lane"
+                elif mutation == "hollow": row.update(observations=[], recorder={"present": False, "sample_count": 0})
+                elif mutation == "failed": row["status"] = "fail"
+                elif mutation == "skip": row.update(status="skip", skip_reason="fixture unavailable")
+                elif mutation == "fault": row["fault_activation"]["observations"] = []
+                result = run_checker(doc, report, extra=("--require", "connectors", "--strict"))
+                self.assertEqual(result.returncode, 1, output(result))
+
     def test_committed_manifest_is_schema_valid_and_honest(self):
         doc = json.loads(MANIFEST_PATH.read_text())
         issues = CHECKER["validate_manifest"](doc)

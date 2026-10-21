@@ -247,7 +247,7 @@ jobs:
 
   ci-config:
     runs-on: ubuntu-26.04
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
       - uses: taiki-e/install-action@just
@@ -412,11 +412,15 @@ jobs:
       # distributed-testing G6: the producer records the release image's id at
       # build time, so a consumer that runs a supplied image (lifecycle-standalone)
       # can bind what it qualified to what this job built from this commit.
+      # The advisory connector consumer also checks the test server and runner
+      # against these producer observations rather than trusting mutable tags.
       - name: Record release image identity
         run: |
           set -euo pipefail
           mkdir -p /tmp/image-ids-amd64
           docker image inspect --format '{{.Id}}' "caesiumcloud/caesium:${{ env.IMAGE_TAG }}-amd64" >/tmp/image-ids-amd64/release.txt
+          docker image inspect --format '{{.Id}}' "caesiumcloud/caesium:${{ env.IMAGE_TAG }}-amd64-test" >/tmp/image-ids-amd64/test.txt
+          docker image inspect --format '{{.Id}}' "caesiumcloud/caesium-integration:${{ env.IMAGE_TAG }}-amd64" >/tmp/image-ids-amd64/integration-runner.txt
           cat /tmp/image-ids-amd64/release.txt
       - uses: actions/upload-artifact@v7
         with:
@@ -1196,6 +1200,87 @@ jobs:
       - name: Stop auth-enabled Caesium server
         if: always()
         run: docker rm -f caesium-server-auth >/dev/null 2>&1 || true
+
+  # execution-connectors F2: validate the lane's own candidate-bound evidence,
+  # but keep it outside ci-ok until the separate F4 promotion criteria hold.
+  connectors:
+    needs: [changes, builder, images, ui-test]
+    if: needs.changes.outputs.go == 'true' || needs.changes.outputs.ui == 'true' || needs.changes.outputs.ci == 'true'
+    runs-on: ubuntu-26.04
+    timeout-minutes: 45
+    env:
+      CANDIDATE_SHA: ${{ github.sha }}
+      CAESIUM_SKIP_IMAGE_BUILD: "true"
+      CAESIUM_CONNECTORS_ARTIFACTS: ${{ github.workspace }}/.tmp/lane-evidence/connectors
+    steps:
+      - uses: actions/checkout@v7
+      - uses: taiki-e/install-action@just
+      - uses: ./.github/actions/load-docker-images
+        with:
+          name: builder-amd64
+      - uses: ./.github/actions/load-docker-images
+        with:
+          name: product-amd64
+      - uses: ./.github/actions/load-docker-images
+        with:
+          name: integration-runner-amd64
+      - uses: actions/download-artifact@v8
+        with:
+          name: image-ids-amd64
+          path: .tmp/connectors-image-ids
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+      - name: Install connector browser prerequisites
+        working-directory: ui
+        run: |
+          npm ci --prefer-offline
+          npx playwright install --with-deps chromium
+      - name: Raise inotify limits for kind
+        run: sudo sysctl -w fs.inotify.max_user_watches=655360 fs.inotify.max_user_instances=1280
+      - name: Install isolated cluster tools
+        run: |
+          set -euo pipefail
+          tools="$RUNNER_TEMP/connectors-tools"
+          mkdir -p "$tools"
+          curl -fsSL https://kind.sigs.k8s.io/dl/v0.33.0/kind-linux-amd64 -o "$tools/kind"
+          echo "aee6151561422756b764a4ae28e7f44cda5af5a9eead3cc9985112b1de8d8e0d  $tools/kind" | sha256sum -c -
+          curl -fsSL https://dl.k8s.io/release/v1.36.1/bin/linux/amd64/kubectl -o "$tools/kubectl"
+          echo "629d3f410e09bf49b64ae7079f7f0bda1191efed311f7d37fdbab0ad5b0ec2b7  $tools/kubectl" | sha256sum -c -
+          chmod +x "$tools/kind" "$tools/kubectl"
+          echo "$tools" >>"$GITHUB_PATH"
+      - uses: azure/setup-helm@v5
+        with:
+          version: v3.22.0
+      - name: Run real Temporal connector lane
+        env:
+          CAESIUM_INTEGRATION_RUNNER_IMAGE: caesiumcloud/caesium-integration:${{ env.IMAGE_TAG }}-amd64
+        run: |
+          set -euo pipefail
+          CAESIUM_CONNECTORS_EXPECTED_IMAGE_ID="$(cat .tmp/connectors-image-ids/test.txt)"
+          CAESIUM_CONNECTORS_EXPECTED_RUNNER_IMAGE_ID="$(cat .tmp/connectors-image-ids/integration-runner.txt)"
+          export CAESIUM_CONNECTORS_EXPECTED_IMAGE_ID CAESIUM_CONNECTORS_EXPECTED_RUNNER_IMAGE_ID
+          just tag=${{ env.IMAGE_TAG }}-amd64 integration-test-connectors
+      - name: Upload connector evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: connectors-evidence
+          path: .tmp/lane-evidence/connectors/evidence.json
+          if-no-files-found: error
+          retention-days: 7
+      - name: Upload public connector diagnostics
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: connectors-artifacts
+          # The harness exports a sanitized allowlist. TLS material, control
+          # credentials, kubeconfigs and raw browser traces stay private.
+          path: .tmp/lane-evidence/connectors/public/
+          if-no-files-found: error
+          retention-days: 7
 
   # identity-and-access G1: the Playwright `keycloak` project against the
   # Keycloak lane. The lane comes up through the same justfile recipe the Go

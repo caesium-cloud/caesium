@@ -97,7 +97,7 @@ func Auth(d AuthDeps) echo.MiddlewareFunc {
 			}
 
 			if token != "" {
-				validKey, err := d.Service.ValidateKey(token)
+				validKey, keyPrincipal, err := d.Service.AuthenticateKey(c.Request().Context(), token)
 				if err != nil {
 					reason := classifyAuthError(err)
 					if recordCredentialFailure(c, d, ip, tokenPrefix(token), reason) {
@@ -106,8 +106,13 @@ func Auth(d AuthDeps) echo.MiddlewareFunc {
 					return echo.NewHTTPError(http.StatusUnauthorized, "invalid or expired api key")
 				}
 
-				key = validKey
-				principal = auth.PrincipalFromKey(validKey)
+				principal = keyPrincipal
+				// A user-bound key authenticates its user (E4) and is then
+				// treated exactly like that user's session: no API-key
+				// context, so GetAuthKey stays nil for it.
+				if keyPrincipal.Kind == auth.PrincipalAPIKey {
+					key = validKey
+				}
 			} else if d.Sessions != nil {
 				if cookie, err := c.Request().Cookie(d.CookieName); err == nil && cookie.Value != "" {
 					sess, user, verr := d.Sessions.Validate(c.Request().Context(), cookie.Value)
@@ -269,6 +274,10 @@ func classifyAuthError(err error) string {
 		return "expired"
 	case auth.ErrKeyRevoked:
 		return "revoked"
+	case auth.ErrUserDisabled:
+		// A user-bound key whose user is disabled (E4). The client gets
+		// the same 401 as for a revoked key; only the label differs.
+		return "user_disabled"
 	default:
 		log.Error("unexpected auth validation error", "error", err)
 		return "error"

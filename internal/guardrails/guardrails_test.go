@@ -436,6 +436,7 @@ var integrationUpTrackingRecipes = []string{
 	"integration-up-infra",
 	"integration-up-agent",
 	"integration-up-keycloak",
+	"integration-up-connectors",
 }
 
 // integrationUpEnvAllowlist names, per tracking recipe, baseline env vars
@@ -566,6 +567,29 @@ func TestAgentLaneBootsDocumentedConnectorFile(t *testing.T) {
 	runner := justRecipeBody(justfile, "integration-test-agent")
 	if !strings.Contains(runner, "CAESIUM_CONNECTORS_ENABLED=true") {
 		t.Error("integration-test-agent runner must set CAESIUM_CONNECTORS_ENABLED so the boot scenario cannot skip")
+	}
+}
+
+func TestConnectorLaneBootsTrackedAuthenticatedServer(t *testing.T) {
+	root := repoRoot(t)
+	data, err := os.ReadFile(filepath.Join(root, "justfile"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := justRecipeBody(string(data), "integration-up-connectors")
+	for _, required := range []string{
+		"CAESIUM_CONNECTORS_ENABLED=true",
+		"CAESIUM_CONNECTORS_CONFIG_FILE=/etc/caesium/connectors/connections.yaml",
+		"CAESIUM_AUTH_MODE=api-key", "CAESIUM_RUN_QUEUE_ENABLED=true",
+		"CAESIUM_RUN_QUEUE_DEQUEUER_ENABLED=true", "CAESIUM_CONNECTORS_SERVER_CIDFILE",
+	} {
+		if !strings.Contains(server, required) {
+			t.Errorf("integration-up-connectors is missing %s", required)
+		}
+	}
+	runner := justRecipeBody(string(data), "integration-test-connectors")
+	if !strings.Contains(runner, "bash scripts/connectors-test.sh") {
+		t.Error("connector lane must invoke its tracked real-surface driver")
 	}
 }
 

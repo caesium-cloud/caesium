@@ -39,7 +39,7 @@ elif args[:2]==['container','inspect'] or args[0]=='inspect':
   if role(cid)=='invalid':
    container_state={'Running':False,'OOMKilled':False,'ExitCode':int(os.environ.get('MOCK_INVALID_EXIT','1')),'StartedAt':'2026-10-15T00:00:00Z','FinishedAt':'2026-10-15T00:00:01Z'}
    if os.environ.get('MOCK_INVALID_MISSING_STATE'): container_state.pop('ExitCode')
-  print(json.dumps([{'Id':cid,'Image':'sha256:'+'a'*64,'Config':{'Env':['CAESIUM_AUTH_MODE=api-key','SAMPLE_SECRET=private','ARBITRARY=unusual-credential','CAESIUM_REGISTRY_AUTH=secret://env/ARBITRARY','CAESIUM_DATABASE_DSN=postgres://u:password@db','CAESIUM_IT_REGISTRY_CREDS=ci-user:ci-pass'],'Cmd':['--auth=argv-credential']},'Args':['argv-credential'],'State':container_state}]))
+  print(json.dumps([{'Id':cid,'Image':'sha256:'+'a'*64,'Config':{'Env':['CAESIUM_AUTH_MODE='+os.environ.get('MOCK_AUTH_MODE','api-key'),'CAESIUM_CONNECTORS_CONFIG_FILE=/etc/caesium/connectors/connections.yaml','CAESIUM_CONNECTORS_ENABLED='+os.environ.get('MOCK_GATE_ENABLED','true'),'CAESIUM_RUN_QUEUE_ENABLED='+os.environ.get('MOCK_QUEUE_ENABLED','true'),'CAESIUM_RUN_QUEUE_DEQUEUER_ENABLED='+os.environ.get('MOCK_DEQUEUER_ENABLED','true'),'SAMPLE_SECRET=private','ARBITRARY=unusual-credential','CAESIUM_REGISTRY_AUTH=secret://env/ARBITRARY','CAESIUM_DATABASE_DSN=postgres://u:password@db','CAESIUM_IT_REGISTRY_CREDS=ci-user:ci-pass'],'Cmd':['--auth=argv-credential']},'Args':['argv-credential'],'State':container_state}]))
 elif args[:2]==['image','inspect']:
  print(json.dumps([{'Id':args[-1],'Config':{'Env':['LABELLESS=image-credential'],'Cmd':['argv-credential'],'Labels':{'x':'label-credential'}}}]))
  if os.environ.get('MOCK_IMAGE_INSPECT_FAIL'): sys.exit(1)
@@ -92,15 +92,16 @@ JUST = r'''#!/usr/bin/env python3
 import os, re, subprocess, sys
 from pathlib import Path
 state=Path(os.environ['MOCK_STATE'])
-if 'integration-up-agent' not in sys.argv:
+recipe='integration-up-connectors' if 'integration-up-connectors' in sys.argv else 'integration-up-agent'
+if recipe not in sys.argv:
  if os.environ.get('MOCK_RACE_NAME'): (state/'names'/'caesium-server-agent-test').touch()
  raise SystemExit(0)
-text=Path('justfile').read_text().split('integration-up-agent:',1)[1].splitlines()[1:]
+text=Path('justfile').read_text().split(recipe+':',1)[1].splitlines()[1:]
 lines=[]
 for line in text:
  if line and not line.startswith(' '): break
  lines.append(line.strip().removeprefix('@'))
-values={'container_cli':os.environ['CAESIUM_CONTAINER_CLI'],'agent_it_container':'caesium-server-agent-test','platform':'linux/amd64','port':'8080','sock':'/var/run/docker.sock','repo_dir':str(Path.cwd()),'local_image_ref':'caesiumcloud/caesium','tag':'probe','event_ingest_api_key':'fixture-event','agent_api_external_url':'http://fixture','contract_deprecation_window':'5s'}
+values={'container_cli':os.environ['CAESIUM_CONTAINER_CLI'],'agent_it_container':'caesium-server-agent-test','connectors_it_container':'caesium-server-connectors-test','platform':'linux/amd64','port':'8080','sock':'/var/run/docker.sock','repo_dir':str(Path.cwd()),'local_image_ref':'caesiumcloud/caesium','tag':'probe','event_ingest_api_key':'fixture-event','agent_api_external_url':'http://fixture','contract_deprecation_window':'5s'}
 body=re.sub(r'{{\s*(\w+)\s*}}',lambda m:values[m.group(1)],'\n'.join(lines))
 raise SystemExit(subprocess.run(['sh','-ec',body]).returncode)
 '''
@@ -171,6 +172,109 @@ class ConnectorFixtureOrchestrationTests(unittest.TestCase):
         (self.root/'test'/'connectors_read_test.go').touch()
         shutil.copy(ROOT/'test/connectors/testdata/connections.yaml',
                     self.root/'test/connectors/testdata/connections.yaml')
+
+    def test_loaded_precompiled_runner_is_reused_without_source_rebuild(self):
+        result, out, err = self.finish(self.launch(
+            CAESIUM_INTEGRATION_RUNNER_IMAGE='caesiumcloud/caesium-integration:candidate'))
+        self.assertEqual(result, 0, out + err)
+        runner = next(call for call in self.calls() if call[0] == 'create' and
+                      'caesium-connectors-runner-' in call[call.index('--name')+1])
+        self.assertIn('caesiumcloud/caesium-integration:candidate', runner)
+        self.assertFalse(any(call[0] == 'build' and 'build/Dockerfile.integration' in call for call in self.calls()))
+
+    def test_connector_recipe_refusal_preserves_existing_policy_and_cid(self):
+        policy = self.root/'.tmp/connectors-auth-policy/policy.yaml'
+        policy.parent.mkdir(parents=True)
+        policy.write_text('foreign mounted policy sentinel')
+        baseline = self.root/'test/testdata/policy/two-namespaces.yaml'
+        baseline_before = baseline.read_bytes()
+        cid = self.root/'foreign-server-cid'
+        cid.write_text('foreign container identity')
+        result = subprocess.run([str(self.bin/'just'), 'integration-up-connectors'], cwd=self.root,
+            env=self.env(CAESIUM_CONNECTORS_SERVER_CIDFILE=str(cid)), capture_output=True, text=True, timeout=10)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('server CID file already exists', result.stderr)
+        self.assertEqual(policy.read_text(), 'foreign mounted policy sentinel')
+        self.assertEqual(baseline.read_bytes(), baseline_before)
+        self.assertEqual(cid.read_text(), 'foreign container identity')
+        self.assertFalse(self.calls())
+
+    def select_lane(self):
+        self.select_reads()
+        for component in ('fixture', 'messages', 'correlation', 'operations', 'actions'):
+            (self.root/'test'/f'connectors_{component}_test.go').touch()
+        return {'CAESIUM_CONNECTORS_LANE': 'true',
+                'MOCK_SCENARIOS': 'Fixture,Messages,Correlation,Operations,Read,Actions'}
+
+    def test_lane_uses_tracked_connector_recipe_and_observes_flags(self):
+        result, out, err = self.finish(self.launch(**self.select_lane()))
+        self.assertEqual(result, 0, out + err)
+        server = next(call for call in self.calls() if call[0] == 'create' and
+                      call[call.index('--name')+1] == 'caesium-server-connectors-test')
+        self.assertIn('CAESIUM_CONNECTORS_ENABLED=true', server)
+        self.assertIn('CAESIUM_RUN_QUEUE_ENABLED=true', server)
+        self.assertIn('CAESIUM_RUN_QUEUE_DEQUEUER_ENABLED=true', server)
+        observed = json.loads((self.artifacts/'server-env.json').read_text())
+        self.assertEqual(observed['CAESIUM_AUTH_MODE'], 'api-key')
+        self.assertNotIn('SAMPLE_SECRET', observed)
+
+    def test_lane_missing_scenario_refuses_before_creation(self):
+        lane = self.select_lane()
+        (self.root/'test'/'connectors_operations_test.go').unlink()
+        result, out, err = self.finish(self.launch(**lane))
+        self.assertNotEqual(result, 0)
+        self.assertIn('missing operations scenario', err)
+        self.assertFalse(any(call[0] == 'create' for call in self.calls()))
+
+    def test_lane_observed_gate_queue_and_auth_misconfiguration_refuse(self):
+        for setting, value in (('MOCK_GATE_ENABLED', 'false'), ('MOCK_QUEUE_ENABLED', 'false'),
+                               ('MOCK_DEQUEUER_ENABLED', 'false'), ('MOCK_AUTH_MODE', 'none')):
+            with self.subTest(setting=setting):
+                # Each probe owns a fresh resource namespace/artifact directory.
+                self.tearDown(); self.setUp()
+                result, out, err = self.finish(self.launch(**self.select_lane(), **{setting: value}))
+                self.assertNotEqual(result, 0)
+                self.assertFalse((self.state/'runner-attached').exists())
+                self.assertEqual(set(self.removed()), {'1'*64, '6'*64})
+
+    def test_lane_loaded_runner_requires_producer_identity(self):
+        result, out, err = self.finish(self.launch(**self.select_lane(),
+            CAESIUM_INTEGRATION_RUNNER_IMAGE='caesiumcloud/caesium-integration:candidate'))
+        self.assertNotEqual(result, 0)
+        self.assertIn('requires producer image identity', err)
+        self.assertFalse(any(call[0] == 'create' for call in self.calls()))
+
+    def test_lane_wrong_runner_identity_refuses_before_dispatch(self):
+        result, out, err = self.finish(self.launch(**self.select_lane(),
+            CAESIUM_INTEGRATION_RUNNER_IMAGE='caesiumcloud/caesium-integration:candidate',
+            CAESIUM_CONNECTORS_EXPECTED_RUNNER_IMAGE_ID='sha256:'+'b'*64))
+        self.assertNotEqual(result, 0)
+        self.assertIn('runner image differs', err)
+        self.assertFalse((self.state/'runner-attached').exists())
+
+    def test_lane_loaded_runtime_identity_matches_producer(self):
+        result, out, err = self.finish(self.launch(**self.select_lane(),
+            CAESIUM_SKIP_IMAGE_BUILD='true',
+            CAESIUM_CONNECTORS_EXPECTED_IMAGE_ID='sha256:'+'a'*64,
+            CAESIUM_INTEGRATION_RUNNER_IMAGE='caesiumcloud/caesium-integration:candidate',
+            CAESIUM_CONNECTORS_EXPECTED_RUNNER_IMAGE_ID='sha256:'+'a'*64))
+        self.assertEqual(result, 0, out + err)
+        provenance = json.loads((self.artifacts/'image-provenance.json').read_text())
+        for role in ('server', 'runner'):
+            self.assertEqual(provenance[role]['origin'], 'loaded')
+            self.assertEqual(provenance[role]['expected_image_id'], provenance[role]['observed_image_id'])
+
+    def test_lane_wrong_loaded_image_refuses_before_dispatch(self):
+        result, out, err = self.finish(self.launch(**self.select_lane(),
+            CAESIUM_CONNECTORS_EXPECTED_IMAGE_ID='sha256:'+'b'*64))
+        self.assertNotEqual(result, 0)
+        self.assertIn('differs from loaded candidate', err)
+        self.assertFalse((self.state/'runner-attached').exists())
+
+    def test_duplicate_selected_pass_refuses(self):
+        result, out, err = self.finish(self.launch(MOCK_SCENARIOS='Fixture,Fixture'))
+        self.assertNotEqual(result, 0)
+        self.assertIn('did not pass exactly once', err)
 
     def wait_path(self, path, seconds=10):
         deadline = time.monotonic() + seconds

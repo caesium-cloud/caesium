@@ -121,15 +121,15 @@ func TestConnectorsConfigCluster(t *testing.T) {
 	next, err := connector.Fingerprint(changedConfig)
 	require.NoError(t, err)
 	require.NotEqual(t, initial.Fingerprint, next)
-	steps := []map[string]any{{"phase": "matching", "fingerprint": initial.Fingerprint, "members": []string{a.Name, b.Name}, "provider_rpc_count": connectorProviderRPCs(t)}}
+	steps := []map[string]any{{"phase": "matching", "fingerprint": initial.Fingerprint, "member_fingerprints": []string{initial.Fingerprint, matching.Fingerprint}, "members": []string{a.Name, b.Name}, "provider_rpc_before": beforeMatch, "provider_rpc_count": connectorProviderRPCs(t)}}
 	// A harmless limit change is still a genuine configuration mismatch. It
 	// must not implicitly adopt the stored epoch or interfere with local jobs.
 	beforeMismatch := connectorProviderRPCs(t)
 	connectorClusterSetConfig(t, kube, ns, cmName, b.Name, changed, "")
 	b = connectorClusterRestart(t, kube, ns, b)
 	require.Equal(t, beforeMismatch, connectorProviderRPCs(t), "mismatched startup must not dial or send a provider RPC")
-	connectorClusterRefused(t, b.HTTPBase(), key, path)
-	steps = append(steps, map[string]any{"phase": "mismatch_refused", "member": b.Name, "uid": b.UID, "provider_rpc_count": connectorProviderRPCs(t)})
+	mismatch := connectorClusterRefused(t, b.HTTPBase(), key, path)
+	steps = append(steps, map[string]any{"phase": "mismatch_refused", "member": b.Name, "uid": b.UID, "startup_provider_rpc_before": beforeMismatch, "provider_rpc_count": connectorProviderRPCs(t), "refusal": mismatch})
 	// The expected-previous value is supplied explicitly, never learned or
 	// adopted by startup. This activates the new epoch in the shared catalog.
 	connectorClusterSetConfig(t, kube, ns, cmName, b.Name, changed, initial.Fingerprint)
@@ -143,8 +143,8 @@ func TestConnectorsConfigCluster(t *testing.T) {
 	require.Equal(t, ref.RunID, detail.Metadata.RunID)
 	// A process which was already serving the old epoch must recheck it for
 	// every request, including an existing client/pooled transport's direct read.
-	connectorClusterRefused(t, a.HTTPBase(), key, path)
-	steps = append(steps, map[string]any{"phase": "guarded_transition_and_stale_node", "fingerprint": next, "active_member": b.Name, "stale_member": a.Name, "provider_rpc_count": connectorProviderRPCs(t)})
+	stale := connectorClusterRefused(t, a.HTTPBase(), key, path)
+	steps = append(steps, map[string]any{"phase": "guarded_transition_and_stale_node", "fingerprint": next, "active_member": b.Name, "stale_member": a.Name, "provider_rpc_count": connectorProviderRPCs(t), "refusal": stale, "observed_run_id": detail.Metadata.RunID, "observed_coordinates": detail.Reference.Coordinates})
 	connectorClusterSetConfig(t, kube, ns, cmName, a.Name, changed, "")
 	a = connectorClusterRestart(t, kube, ns, a)
 	connectorReadHTTP(t, a.HTTPBase(), key, http.MethodGet, path, nil, &detail)
@@ -156,10 +156,10 @@ func TestConnectorsConfigCluster(t *testing.T) {
 	connectorClusterSetConfig(t, kube, ns, cmName, b.Name, repointed, next)
 	b = connectorClusterRestart(t, kube, ns, b)
 	require.Equal(t, beforeRepoint, connectorProviderRPCs(t), "repointed startup must refuse before any provider RPC")
-	connectorClusterRefused(t, b.HTTPBase(), key, path)
+	repoint := connectorClusterRefused(t, b.HTTPBase(), key, path)
 	connectorReadHTTP(t, a.HTTPBase(), key, http.MethodGet, "/v1/connectors", nil, &transitioned)
 	require.Equal(t, next, transitioned.Fingerprint, "refused repoint must not advance the shared catalog epoch")
-	steps = append(steps, map[string]any{"phase": "immutable_repoint_refused", "member": b.Name, "uid": b.UID, "fingerprint": transitioned.Fingerprint, "provider_rpc_count": connectorProviderRPCs(t)})
+	steps = append(steps, map[string]any{"phase": "immutable_repoint_refused", "member": b.Name, "uid": b.UID, "fingerprint": transitioned.Fingerprint, "startup_provider_rpc_before": beforeRepoint, "provider_rpc_count": connectorProviderRPCs(t), "refusal": repoint})
 	require.NoError(t, os.WriteFile(filepath.Join(artifacts, "config-cluster-evidence.json"), mustConnectorJSON(t, map[string]any{"candidate_sha": candidate, "candidate_image_digest": digest, "namespace": ns, "initial_members": memberEvidence, "workflow": ref, "steps": steps}), 0600))
 }
 
@@ -248,19 +248,24 @@ func connectorClusterStatus(ctx context.Context, target string) int {
 	return resp.StatusCode
 }
 
-func connectorClusterRefused(t *testing.T, base, key, detail string) {
+func connectorClusterRefused(t *testing.T, base, key, detail string) map[string]any {
 	t.Helper()
-	require.Equal(t, http.StatusOK, connectorClusterStatus(t.Context(), base+"/health/ready"), "connector mismatch must preserve local job readiness")
+	ready := connectorClusterStatus(t.Context(), base+"/health/ready")
+	require.Equal(t, http.StatusOK, ready, "connector mismatch must preserve local job readiness")
 	before := connectorProviderRPCs(t)
+	statuses := []int{}
 	for _, path := range []string{"/v1/connectors", "/v1/connectors/fixture/executions", detail, detail + "/history", detail + "/relationships"} {
 		status, raw := connectorReadHTTP(t, base, key, http.MethodGet, path, nil, nil)
 		require.Equal(t, http.StatusServiceUnavailable, status, "%s: %s", path, raw)
+		statuses = append(statuses, status)
 	}
-	require.Equal(t, before, connectorProviderRPCs(t), "mismatched, stale and repointed processes must refuse before any provider RPC")
+	after := connectorProviderRPCs(t)
+	require.Equal(t, before, after, "mismatched, stale and repointed processes must refuse before any provider RPC")
 	var features map[string]any
 	connectorReadHTTP(t, base, key, http.MethodGet, "/v1/system/features", nil, &features)
 	require.Equal(t, true, features["connectors_enabled"])
 	require.Equal(t, false, features["connectors_ready"])
 	// Do not retain any PodSpec environment values in evidence artifacts.
 	t.Logf("observed connector-only refusal at %s with zero additional provider RPCs (%d)", strings.TrimPrefix(base, "http://"), before)
+	return map[string]any{"ready_status": ready, "connector_statuses": statuses, "provider_rpc_before": before, "provider_rpc_after": after, "connectors_enabled": features["connectors_enabled"], "connectors_ready": features["connectors_ready"]}
 }

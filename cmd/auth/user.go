@@ -81,16 +81,28 @@ type userSessionView struct {
 	SourceIP          string     `json:"source_ip"`
 }
 
+type userKeyView struct {
+	ID          string     `json:"id"`
+	KeyPrefix   string     `json:"key_prefix"`
+	Description string     `json:"description"`
+	CreatedAt   time.Time  `json:"created_at"`
+	ExpiresAt   *time.Time `json:"expires_at"`
+	LastUsedAt  *time.Time `json:"last_used_at"`
+}
+
 type userDetailView struct {
 	userView
 	Sessions      []userSessionView `json:"sessions"`
 	SessionsTotal int64             `json:"sessions_total"`
+	UserKeys      []userKeyView     `json:"user_keys"`
+	UserKeysTotal int64             `json:"user_keys_total"`
 }
 
 type userChangeView struct {
 	User            userView `json:"user"`
 	Changed         bool     `json:"changed"`
 	SessionsRevoked int64    `json:"sessions_revoked"`
+	KeysRevoked     int64    `json:"keys_revoked"`
 }
 
 var userListCmd = &cobra.Command{
@@ -145,7 +157,7 @@ var userListCmd = &cobra.Command{
 var userGetCmd = &cobra.Command{
 	Use:   "get USER_ID",
 	Args:  cobra.ExactArgs(1),
-	Short: "Show a user and its active sessions (GET /v1/auth/users/:id)",
+	Short: "Show a user, its active sessions and user-bound keys (GET /v1/auth/users/:id)",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		cmd.SilenceUsage = true
 		flags := &userGetFlags
@@ -167,11 +179,11 @@ var userGetCmd = &cobra.Command{
 var userDisableCmd = &cobra.Command{
 	Use:   "disable USER_ID",
 	Args:  cobra.ExactArgs(1),
-	Short: "Disable a user and revoke all its sessions",
-	Long: `Disable a user (POST /v1/auth/users/:id/disable). The user's sessions are
-revoked in the same transaction, its stored refresh grant is cleared, and its
-logins are refused until it is enabled again. Disabling a disabled user changes
-nothing.`,
+	Short: "Disable a user and revoke all its sessions and user-bound keys",
+	Long: `Disable a user (POST /v1/auth/users/:id/disable). The user's sessions and
+user-bound API keys are revoked in the same transaction, its stored refresh
+grant is cleared, and its logins are refused until it is enabled again.
+Disabling a disabled user changes nothing.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return runUserChange(cmd, &userDisableFlags, args[0], "disable")
 	},
@@ -181,8 +193,8 @@ var userEnableCmd = &cobra.Command{
 	Use:   "enable USER_ID",
 	Args:  cobra.ExactArgs(1),
 	Short: "Enable a disabled user",
-	Long: `Enable a user (POST /v1/auth/users/:id/enable). Sessions revoked by the
-disable stay revoked: the user signs in again.`,
+	Long: `Enable a user (POST /v1/auth/users/:id/enable). Sessions and user-bound
+keys revoked by the disable stay revoked: the user signs in again.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return runUserChange(cmd, &userEnableFlags, args[0], "enable")
 	},
@@ -191,7 +203,7 @@ disable stay revoked: the user signs in again.`,
 var userLogoutCmd = &cobra.Command{
 	Use:   "logout USER_ID",
 	Args:  cobra.ExactArgs(1),
-	Short: "Revoke every session of a user (log out everywhere)",
+	Short: "Revoke every session and user-bound key of a user (log out everywhere)",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		cmd.SilenceUsage = true
 		flags := &userLogoutFlags
@@ -206,11 +218,12 @@ var userLogoutCmd = &cobra.Command{
 		var result struct {
 			UserID          string `json:"user_id"`
 			SessionsRevoked int64  `json:"sessions_revoked"`
+			KeysRevoked     int64  `json:"keys_revoked"`
 		}
 		if err := json.Unmarshal(body, &result); err != nil {
 			return fmt.Errorf("auth user logout response was not valid JSON: %w", err)
 		}
-		_, err = fmt.Fprintf(cmd.OutOrStdout(), "revoked %d session(s) of user %s\n", result.SessionsRevoked, result.UserID)
+		_, err = fmt.Fprintf(cmd.OutOrStdout(), "revoked %d session(s)%s of user %s\n", result.SessionsRevoked, keysRevokedSuffix(result.KeysRevoked), result.UserID)
 		return err
 	},
 }
@@ -234,8 +247,17 @@ func runUserChange(cmd *cobra.Command, flags *userCommonFlags, id, verb string) 
 		_, err = fmt.Fprintf(out, "user %s (%s) was already %sd\n", change.User.ID, change.User.Email, verb)
 		return err
 	}
-	_, err = fmt.Fprintf(out, "user %s (%s) %sd; %d session(s) revoked\n", change.User.ID, change.User.Email, verb, change.SessionsRevoked)
+	_, err = fmt.Fprintf(out, "user %s (%s) %sd; %d session(s)%s revoked\n", change.User.ID, change.User.Email, verb, change.SessionsRevoked, keysRevokedSuffix(change.KeysRevoked))
 	return err
+}
+
+// keysRevokedSuffix mentions revoked user-bound keys only when there were
+// some, so a summary about sessions alone reads as before.
+func keysRevokedSuffix(keys int64) string {
+	if keys <= 0 {
+		return ""
+	}
+	return fmt.Sprintf(" and %d user-bound key(s)", keys)
 }
 
 // userAdminRequest performs an authenticated request and returns the body
@@ -287,9 +309,17 @@ func writeUserDetail(w io.Writer, d userDetailView) error {
 	fmt.Fprintf(&b, "last login:      %s\n", formatOptionalTime(d.LastLoginAt))
 	fmt.Fprintf(&b, "disabled:        %s\n", formatOptionalTime(d.DisabledAt))
 	fmt.Fprintf(&b, "active sessions: %d\n", d.SessionsTotal)
+	fmt.Fprintf(&b, "active user-bound keys: %d\n", d.UserKeysTotal)
 	if _, err := io.WriteString(w, b.String()); err != nil {
 		return err
 	}
+	if err := writeUserSessions(w, d); err != nil {
+		return err
+	}
+	return writeUserKeys(w, d)
+}
+
+func writeUserSessions(w io.Writer, d userDetailView) error {
 	if len(d.Sessions) == 0 {
 		return nil
 	}
@@ -305,6 +335,29 @@ func writeUserDetail(w io.Writer, d userDetailView) error {
 	}
 	if int64(len(d.Sessions)) < d.SessionsTotal {
 		_, err := fmt.Fprintf(w, "showing the %d newest of %d; page the rest with GET /v1/auth/sessions?user_id=%s\n", len(d.Sessions), d.SessionsTotal, d.ID)
+		return err
+	}
+	return nil
+}
+
+// writeUserKeys lists the user's active user-bound API keys (E4); every key
+// of the user is in `caesium auth key list`.
+func writeUserKeys(w io.Writer, d userDetailView) error {
+	if len(d.UserKeys) == 0 {
+		return nil
+	}
+	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	_, _ = fmt.Fprintln(tw, "\nUSER KEY\tPREFIX\tCREATED\tEXPIRES\tLAST USED\tDESCRIPTION")
+	for _, k := range d.UserKeys {
+		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\n",
+			k.ID, k.KeyPrefix, k.CreatedAt.UTC().Format(time.RFC3339), formatOptionalTime(k.ExpiresAt),
+			formatOptionalTime(k.LastUsedAt), dash(k.Description))
+	}
+	if err := tw.Flush(); err != nil {
+		return err
+	}
+	if int64(len(d.UserKeys)) < d.UserKeysTotal {
+		_, err := fmt.Fprintf(w, "showing the %d newest of %d user-bound keys; see the rest with caesium auth key list\n", len(d.UserKeys), d.UserKeysTotal)
 		return err
 	}
 	return nil

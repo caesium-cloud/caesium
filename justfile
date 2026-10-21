@@ -14,6 +14,7 @@ bld_dir := "/bld/caesium"
 repo_dir := `pwd`
 it_container := "caesium-server-test"
 agent_it_container := "caesium-server-agent-test"
+connectors_it_container := "caesium-server-connectors-test"
 infra_it_container := "caesium-server-infra-test"
 uid := `id -u`
 
@@ -1019,6 +1020,65 @@ integration-up-agent: build-stress build-test build-triage-agent
         -e CAESIUM_AGENT_INCIDENT_COOLDOWN=1s \
         -e CAESIUM_AGENT_APPROVAL_REDRIVE_INTERVAL=5s \
         -e CAESIUM_API_EXTERNAL_URL={{ agent_api_external_url }} \
+        -e CAESIUM_OPEN_LINEAGE_ENABLED=true \
+        -e CAESIUM_OPEN_LINEAGE_TRANSPORT=console \
+        -e CAESIUM_FRESHNESS_ENABLED=true \
+        -e CAESIUM_DATA_ASSERTIONS_ENABLED=true \
+        -e CAESIUM_RESOURCE_STATS_ENABLED=true \
+        -e CAESIUM_RESOURCE_STATS_SAMPLE_INTERVAL=100ms \
+        -e CAESIUM_RIGHT_SIZING_ENABLED=true \
+        -e CAESIUM_CONTRACT_ENFORCEMENT=fail \
+        -e CAESIUM_CONTRACT_DEPRECATION_WINDOW={{ contract_deprecation_window }} \
+        -e CAESIUM_CACHE_PIN_DIGESTS=true \
+        -e CAESIUM_REGISTRY_AUTH=127.0.0.1=secret://env/CAESIUM_IT_REGISTRY_CREDS \
+        -e CAESIUM_IT_REGISTRY_CREDS=ci-user:ci-pass \
+        -e CAESIUM_CACHE_ENABLED=true \
+        -e CAESIUM_NOTIFICATION_WATCHER_INTERVAL=1s \
+        -e CAESIUM_RATE_LIMIT_PRUNER_ENABLED=true \
+        -e CAESIUM_RATE_LIMIT_PRUNE_INTERVAL=500ms \
+        -e CAESIUM_RUN_QUEUE_ENABLED=true \
+        -e CAESIUM_RUN_QUEUE_DEQUEUER_ENABLED=true \
+        -e CAESIUM_RUN_QUEUE_DEQUEUE_INTERVAL=500ms \
+        -e CAESIUM_FANOUT_MAX_PARTITIONS=8 \
+        -e CAESIUM_CANCEL_RECONCILE_INTERVAL=2s \
+        {{ local_image_ref }}:{{ tag }}-test start
+
+# Owned authenticated connector server. The lane supplies the CID file and real fixture configuration.
+integration-up-connectors: build-stress build-test
+    @test -n "${CAESIUM_CONNECTORS_SERVER_CIDFILE:-}" || { echo "connector server requires an owned CID file" >&2; exit 1; }
+    @if [ -n "${CAESIUM_CONNECTORS_SERVER_CIDFILE:-}" ]; then \
+        [ ! -e "$CAESIUM_CONNECTORS_SERVER_CIDFILE" ] || { echo "server CID file already exists" >&2; exit 1; }; \
+        set -- create --cidfile "$CAESIUM_CONNECTORS_SERVER_CIDFILE"; \
+    else set -- run -d; fi; \
+    if [ -n "${CAESIUM_CONNECTORS_SERVER_ARTIFACTS:-}" ]; then \
+        set -- "$@" -v "$CAESIUM_CONNECTORS_SERVER_ARTIFACTS:/artifacts:ro" \
+            --entrypoint /artifacts/control/start-server.sh \
+            -e CAESIUM_DATABASE_CONSOLE_ENABLED=true; \
+    fi; \
+    if [ -n "${CAESIUM_CONNECTORS_NETWORK_ANCHOR:-}" ]; then \
+        set -- "$@" --network="container:$CAESIUM_CONNECTORS_NETWORK_ANCHOR"; \
+    else set -- "$@" -p {{ port }}:8080; fi; \
+    {{ container_cli }} "$@" --platform {{ platform }} \
+        --name {{ connectors_it_container }} \
+        --privileged \
+        -v {{ sock }}:/var/run/docker.sock \
+        -e DOCKER_HOST=unix:///var/run/docker.sock \
+        --user 0:0 \
+        -e CAESIUM_MANUAL_TRIGGER_API_KEY=integration-test-key \
+        -e CAESIUM_EVENT_INGEST_API_KEY={{ event_ingest_api_key }} \
+        -e CAESIUM_LOG_LEVEL=debug \
+        -e CAESIUM_DATABASE_SHARDS=4 \
+        -e CAESIUM_AUTH_MODE=api-key \
+        -e CAESIUM_AUTH_KEY_HASH_SECRET=agent-integration-auth-key-hash-secret-000001 \
+        -e CAESIUM_AUTH_REQUIRE_TLS=false \
+        -v {{ repo_dir }}/test/testdata/policy:/etc/caesium/policy-fixture:ro \
+        -e CAESIUM_AUTH_POLICY_FILE=/etc/caesium/policy-fixture/two-namespaces.yaml \
+        -e CAESIUM_AUTH_POLICY_RELOAD_INTERVAL=1s \
+        -v "${CAESIUM_CONNECTORS_SERVER_CONFIG:-{{ repo_dir }}/test/fixtures/connectors/connections.yaml}:/etc/caesium/connectors/connections.yaml:ro" \
+        -e CAESIUM_CONNECTORS_ENABLED=true \
+        -e CAESIUM_CONNECTORS_CONFIG_FILE=/etc/caesium/connectors/connections.yaml \
+        -e TEMPORAL_TOKEN=agent-integration-connector-token \
+        -e CAESIUM_AGENT_REMEDIATION_ENABLED=true \
         -e CAESIUM_OPEN_LINEAGE_ENABLED=true \
         -e CAESIUM_OPEN_LINEAGE_TRANSPORT=console \
         -e CAESIUM_FRESHNESS_ENABLED=true \
@@ -2235,3 +2295,9 @@ connectors-fixture-check: integration-runner
     CAESIUM_CONTAINER_CLI={{ container_cli }} CAESIUM_PLATFORM={{ platform }} \
         CAESIUM_CONNECTORS_TAG={{ tag }} CAESIUM_CONNECTORS_BUILDER_IMAGE={{ local_builder_ref }}:{{ tag }}-full \
         sh scripts/connectors-fixture.sh check
+
+# Advisory connector lane: real Temporal, public HTTP/Console, and isolated config skew.
+integration-test-connectors: integration-runner
+    CANDIDATE_SHA={{ candidate_sha }} CAESIUM_CONTAINER_CLI={{ container_cli }} CAESIUM_PLATFORM={{ platform }} \
+        CAESIUM_CONNECTORS_TAG={{ tag }} CAESIUM_CONNECTORS_BUILDER_IMAGE={{ local_builder_ref }}:{{ tag }}-full \
+        bash scripts/connectors-test.sh

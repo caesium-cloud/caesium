@@ -51,6 +51,12 @@ func ValidRole(r string) bool {
 // is cluster-wide. SQL NULL, the state of every key minted before namespaces
 // existed, also means cluster-wide. Any other empty or undecodable value grants
 // nothing.
+//
+// UserID, when set, makes the key user-bound (identity-and-access E4, design
+// §7.3): it stores no role, namespaces or scope, and every request resolves
+// the user's grants afresh. The stored row decides the kind, never the
+// token's prefix. The column is nullable with no default, so every key minted
+// before it existed reads NULL and stays a plain key.
 type APIKey struct {
 	ID            uuid.UUID      `gorm:"type:uuid;primaryKey" json:"id"`
 	KeyPrefix     string         `gorm:"type:text;size:12;not null;index" json:"key_prefix"`
@@ -65,6 +71,12 @@ type APIKey struct {
 	ExpiresAt     *time.Time     `json:"expires_at,omitempty"`
 	LastUsedAt    *time.Time     `json:"last_used_at,omitempty"`
 	RevokedAt     *time.Time     `json:"revoked_at,omitempty"`
+	UserID        *uuid.UUID     `gorm:"type:uuid;index" json:"user_id,omitempty"`
+}
+
+// IsUserBound reports whether the stored key belongs to a user (E4).
+func (k *APIKey) IsUserBound() bool {
+	return k != nil && k.UserID != nil
 }
 
 // IsRevoked returns true when the key has been revoked.

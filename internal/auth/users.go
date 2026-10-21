@@ -519,9 +519,9 @@ const (
 	// the echo of an earlier redemption; the grant was cleared and nothing
 	// revoked. The staleness bound then forces a re-login.
 	DefinitiveGrantCleared
-	// DefinitiveRevoked: the grant was cleared and every live session of the
-	// user revoked, in one transaction. The caller audits
-	// auth.sessions_revoked (reason idp_refresh_denied).
+	// DefinitiveRevoked: the grant was cleared and every live session and
+	// user-bound key of the user revoked, in one transaction. The caller
+	// audits auth.sessions_revoked (reason idp_refresh_denied).
 	DefinitiveRevoked
 )
 
@@ -529,14 +529,15 @@ const (
 type DefinitiveResult struct {
 	Outcome         DefinitiveOutcome
 	SessionsRevoked int64
+	KeysRevoked     int64
 }
 
 // CompleteRefreshDefinitive records a definitive IdP refusal under the lease
 // fence. On an uncertain grant the refusal may be the echo of an earlier
 // redemption, so it only clears the grant; on a certain grant it clears the
-// grant and revokes all the user's sessions in the same transaction, which is
-// retried as a whole on catalog contention. Nothing is applied when the fence
-// fails.
+// grant and revokes all the user's sessions and user-bound keys in the same
+// transaction, which is retried as a whole on catalog contention. Nothing is
+// applied when the fence fails.
 func (us *UserStore) CompleteRefreshDefinitive(ctx context.Context, userID uuid.UUID, version int64, owner string, now time.Time) (DefinitiveResult, error) {
 	now = now.UTC()
 	var result DefinitiveResult
@@ -560,11 +561,11 @@ func (us *UserStore) CompleteRefreshDefinitive(ctx context.Context, userID uuid.
 			result.Outcome = DefinitiveDiscarded
 			return nil
 		}
-		revoked, err := revokeUserSessionsTx(tx, userID, now)
+		revoked, err := revokeUserCredentialsTx(tx, userID, now)
 		if err != nil {
 			return err
 		}
-		result = DefinitiveResult{Outcome: DefinitiveRevoked, SessionsRevoked: revoked}
+		result = DefinitiveResult{Outcome: DefinitiveRevoked, SessionsRevoked: revoked.Sessions, KeysRevoked: revoked.Keys}
 		return nil
 	})
 	if err != nil {
@@ -662,22 +663,47 @@ func (us *UserStore) GetUser(ctx context.Context, id uuid.UUID) (*models.User, e
 }
 
 // UserChange reports a disable or enable: the user as stored afterwards,
-// whether this call changed its state, and how many sessions the same
-// transaction revoked.
+// whether this call changed its state, and how many sessions and user-bound
+// keys the same transaction revoked.
 type UserChange struct {
 	User            models.User
 	Changed         bool
 	SessionsRevoked int64
+	KeysRevoked     int64
+}
+
+// RevokedCredentials counts what one revocation of a user's credentials
+// revoked: its sessions and its user-bound API keys (E4).
+type RevokedCredentials struct {
+	Sessions int64
+	Keys     int64
+}
+
+// revokeUserCredentialsTx revokes every unrevoked session and user-bound key
+// of a user on a caller-supplied handle, so the user lifecycle (disable, the
+// enable sweep, log out everywhere, a definitive group-refresh denial) kills
+// both credential types in one transaction.
+func revokeUserCredentialsTx(tx *gorm.DB, userID uuid.UUID, now time.Time) (RevokedCredentials, error) {
+	sessions, err := revokeUserSessionsTx(tx, userID, now)
+	if err != nil {
+		return RevokedCredentials{}, err
+	}
+	keys, err := revokeUserKeysTx(tx, userID, now)
+	if err != nil {
+		return RevokedCredentials{}, err
+	}
+	return RevokedCredentials{Sessions: sessions, Keys: keys}, nil
 }
 
 // DisableUser disables a user and, in the same transaction (retried as a
-// whole on catalog contention), revokes every unrevoked session of the user,
-// clears the refresh grant and advances the disable generation. The
-// generation is the login fence: a login that read the user before this
-// commit can no longer apply its profile update (UserStore.updateExisting) or
-// insert a session (SessionStore.Create), even after an enable. Clearing the
-// grant advances refresh_grant_version, so an in-flight group refresh can no
-// longer record its outcome either. Disabling a disabled user changes
+// whole on catalog contention), revokes every unrevoked session and
+// user-bound key of the user, clears the refresh grant and advances the
+// disable generation. The generation is the login fence: a login that read
+// the user before this commit can no longer apply its profile update
+// (UserStore.updateExisting), insert a session (SessionStore.Create) or mint
+// a user-bound key (Service.MintUserBoundKey), even after an enable. Clearing
+// the grant advances refresh_grant_version, so an in-flight group refresh can
+// no longer record its outcome either. Disabling a disabled user changes
 // nothing (Changed=false).
 func (us *UserStore) DisableUser(ctx context.Context, id uuid.UUID) (UserChange, error) {
 	now := us.now().UTC()
@@ -692,11 +718,11 @@ func (us *UserStore) DisableUser(ctx context.Context, id uuid.UUID) (UserChange,
 			return res.Error
 		}
 		if res.RowsAffected == 1 {
-			revoked, err := revokeUserSessionsTx(tx, id, now)
+			revoked, err := revokeUserCredentialsTx(tx, id, now)
 			if err != nil {
 				return err
 			}
-			change.Changed, change.SessionsRevoked = true, revoked
+			change.Changed, change.SessionsRevoked, change.KeysRevoked = true, revoked.Sessions, revoked.Keys
 		}
 		return takeUserTx(tx, id, &change.User)
 	})
@@ -706,12 +732,12 @@ func (us *UserStore) DisableUser(ctx context.Context, id uuid.UUID) (UserChange,
 	return change, nil
 }
 
-// EnableUser clears a user's disabled_at. It never un-revokes a session. On
-// the transition it also revokes any unrevoked session of the user in the
-// same transaction: none should exist (the disable revoked them all and the
-// mint fence refuses disabled users), so this is a second line of defence
-// should a session ever have been inserted while the user was disabled.
-// Enabling an enabled user changes nothing (Changed=false).
+// EnableUser clears a user's disabled_at. It never un-revokes a session or a
+// key. On the transition it also revokes any unrevoked session or user-bound
+// key of the user in the same transaction: none should exist (the disable
+// revoked them all and the mint fences refuse disabled users), so this is a
+// second line of defence should one ever have been inserted while the user
+// was disabled. Enabling an enabled user changes nothing (Changed=false).
 func (us *UserStore) EnableUser(ctx context.Context, id uuid.UUID) (UserChange, error) {
 	now := us.now().UTC()
 	var change UserChange
@@ -723,11 +749,11 @@ func (us *UserStore) EnableUser(ctx context.Context, id uuid.UUID) (UserChange, 
 			return res.Error
 		}
 		if res.RowsAffected == 1 {
-			swept, err := revokeUserSessionsTx(tx, id, now)
+			swept, err := revokeUserCredentialsTx(tx, id, now)
 			if err != nil {
 				return err
 			}
-			change.Changed, change.SessionsRevoked = true, swept
+			change.Changed, change.SessionsRevoked, change.KeysRevoked = true, swept.Sessions, swept.Keys
 		}
 		return takeUserTx(tx, id, &change.User)
 	})
@@ -737,23 +763,25 @@ func (us *UserStore) EnableUser(ctx context.Context, id uuid.UUID) (UserChange, 
 	return change, nil
 }
 
-// RevokeUserSessions revokes every unrevoked session of an existing user
-// ("log out everywhere") and returns how many it revoked.
-func (us *UserStore) RevokeUserSessions(ctx context.Context, id uuid.UUID) (int64, error) {
+// RevokeUserSessions revokes every unrevoked session and user-bound key of an
+// existing user ("log out everywhere") and returns how many of each it
+// revoked. A user-bound key is a login credential like a session, so logging
+// a user out everywhere must not leave its CLI keys alive.
+func (us *UserStore) RevokeUserSessions(ctx context.Context, id uuid.UUID) (RevokedCredentials, error) {
 	now := us.now().UTC()
-	var revoked int64
+	var revoked RevokedCredentials
 	err := us.transaction(ctx, func(tx *gorm.DB) error {
-		revoked = 0
+		revoked = RevokedCredentials{}
 		var user models.User
 		if err := takeUserTx(tx, id, &user); err != nil {
 			return err
 		}
-		n, err := revokeUserSessionsTx(tx, id, now)
+		n, err := revokeUserCredentialsTx(tx, id, now)
 		revoked = n
 		return err
 	})
 	if err != nil {
-		return 0, wrapUserAdminError("revoke user sessions", err)
+		return RevokedCredentials{}, wrapUserAdminError("revoke user sessions", err)
 	}
 	return revoked, nil
 }
@@ -775,8 +803,8 @@ func wrapUserAdminError(op string, err error) error {
 
 // UserAdmin is the cluster-admin surface over users and their sessions
 // (identity-and-access E3, spec §11.2). It is where the user lifecycle
-// cascades meet: E4 joins user-bound API keys here (listed in the detail,
-// revoked alongside revokeUserSessionsTx).
+// cascades meet: user-bound API keys (E4) are listed in the detail and
+// revoked with the sessions (revokeUserCredentialsTx).
 type UserAdmin struct {
 	users    *UserStore
 	sessions *SessionStore
@@ -798,11 +826,14 @@ func NewUserAdmin(sessions *SessionStore) *UserAdmin {
 // are paged through ListSessions.
 const DetailSessionLimit = 100
 
-// UserDetail is one user with the newest of its active sessions.
+// UserDetail is one user with the newest of its active sessions and active
+// user-bound keys (each capped at DetailSessionLimit, with their totals).
 type UserDetail struct {
 	User          models.User
 	Sessions      []models.Session
 	SessionsTotal int64
+	UserKeys      []models.APIKey
+	UserKeysTotal int64
 }
 
 // ListUsers pages users matching f.
@@ -810,8 +841,9 @@ func (a *UserAdmin) ListUsers(ctx context.Context, f UserFilter) (UserPage, erro
 	return a.users.ListUsers(ctx, f)
 }
 
-// GetUser returns a user and at most DetailSessionLimit of its newest active
-// sessions, with their total.
+// GetUser returns a user, at most DetailSessionLimit of its newest active
+// sessions and at most DetailSessionLimit of its newest active user-bound
+// keys, with their totals.
 func (a *UserAdmin) GetUser(ctx context.Context, id uuid.UUID) (UserDetail, error) {
 	user, err := a.users.GetUser(ctx, id)
 	if err != nil {
@@ -821,10 +853,21 @@ func (a *UserAdmin) GetUser(ctx context.Context, id uuid.UUID) (UserDetail, erro
 	if err != nil {
 		return UserDetail{}, err
 	}
-	return UserDetail{User: *user, Sessions: page.Sessions, SessionsTotal: page.Total}, nil
+	keys, keysTotal, err := activeUserKeys(ctx, a.users.db, id, a.users.now().UTC(), DetailSessionLimit)
+	if err != nil {
+		return UserDetail{}, err
+	}
+	return UserDetail{
+		User:          *user,
+		Sessions:      page.Sessions,
+		SessionsTotal: page.Total,
+		UserKeys:      keys,
+		UserKeysTotal: keysTotal,
+	}, nil
 }
 
-// DisableUser disables a user and revokes its sessions (UserStore.DisableUser).
+// DisableUser disables a user and revokes its sessions and user-bound keys
+// (UserStore.DisableUser).
 func (a *UserAdmin) DisableUser(ctx context.Context, id uuid.UUID) (UserChange, error) {
 	return a.users.DisableUser(ctx, id)
 }
@@ -834,8 +877,9 @@ func (a *UserAdmin) EnableUser(ctx context.Context, id uuid.UUID) (UserChange, e
 	return a.users.EnableUser(ctx, id)
 }
 
-// RevokeUserSessions logs a user out everywhere (UserStore.RevokeUserSessions).
-func (a *UserAdmin) RevokeUserSessions(ctx context.Context, id uuid.UUID) (int64, error) {
+// RevokeUserSessions logs a user out everywhere, sessions and user-bound keys
+// alike (UserStore.RevokeUserSessions).
+func (a *UserAdmin) RevokeUserSessions(ctx context.Context, id uuid.UUID) (RevokedCredentials, error) {
 	return a.users.RevokeUserSessions(ctx, id)
 }
 

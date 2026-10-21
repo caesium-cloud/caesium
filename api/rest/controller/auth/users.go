@@ -60,25 +60,55 @@ type UserView struct {
 }
 
 // UserDetailView is a user with the newest of its active sessions (at most
-// iauth.DetailSessionLimit) and their total; page the rest through
-// GET /v1/auth/sessions?user_id=.
+// iauth.DetailSessionLimit) and their total, page the rest through
+// GET /v1/auth/sessions?user_id=, and the newest of its active user-bound
+// API keys (at most iauth.DetailSessionLimit) and their total.
 type UserDetailView struct {
 	UserView
 	Sessions      []SessionView `json:"sessions"`
 	SessionsTotal int64         `json:"sessions_total"`
+	UserKeys      []UserKeyView `json:"user_keys"`
+	UserKeysTotal int64         `json:"user_keys_total"`
 }
 
-// UserChangeResponse is the body of the disable and enable routes.
+// UserKeyView is the administration view of a user-bound API key (E4). It is
+// built field by field from models.APIKey so that the hash, and the role,
+// namespaces and scope a user-bound key never holds, cannot reach a response.
+type UserKeyView struct {
+	ID          uuid.UUID  `json:"id"`
+	KeyPrefix   string     `json:"key_prefix"`
+	Description string     `json:"description"`
+	CreatedAt   time.Time  `json:"created_at"`
+	ExpiresAt   *time.Time `json:"expires_at"`
+	LastUsedAt  *time.Time `json:"last_used_at"`
+}
+
+// UserChangeResponse is the body of the disable and enable routes. A change
+// that revoked no user-bound key omits keys_revoked.
 type UserChangeResponse struct {
 	User            UserView `json:"user"`
 	Changed         bool     `json:"changed"`
 	SessionsRevoked int64    `json:"sessions_revoked"`
+	KeysRevoked     int64    `json:"keys_revoked,omitempty"`
 }
 
 // SessionsRevokedResponse is the body of POST /v1/auth/users/:id/sessions/revoke.
+// A revoke that revoked no user-bound key omits keys_revoked.
 type SessionsRevokedResponse struct {
 	UserID          uuid.UUID `json:"user_id"`
 	SessionsRevoked int64     `json:"sessions_revoked"`
+	KeysRevoked     int64     `json:"keys_revoked,omitempty"`
+}
+
+func newUserKeyView(k *models.APIKey) UserKeyView {
+	return UserKeyView{
+		ID:          k.ID,
+		KeyPrefix:   k.KeyPrefix,
+		Description: k.Description,
+		CreatedAt:   k.CreatedAt,
+		ExpiresAt:   k.ExpiresAt,
+		LastUsedAt:  k.LastUsedAt,
+	}
 }
 
 func newUserView(u *models.User) UserView {
@@ -149,15 +179,21 @@ func (ctrl *UserAdminController) GetUser(c *echo.Context) error {
 	for i := range detail.Sessions {
 		sessions = append(sessions, newSessionView(&detail.Sessions[i]))
 	}
+	keys := make([]UserKeyView, 0, len(detail.UserKeys))
+	for i := range detail.UserKeys {
+		keys = append(keys, newUserKeyView(&detail.UserKeys[i]))
+	}
 	return c.JSON(http.StatusOK, UserDetailView{
 		UserView:      newUserView(&detail.User),
 		Sessions:      sessions,
 		SessionsTotal: detail.SessionsTotal,
+		UserKeys:      keys,
+		UserKeysTotal: detail.UserKeysTotal,
 	})
 }
 
 // DisableUser serves POST /v1/auth/users/:id/disable: it disables the user
-// and revokes every session in one transaction. Disabling a disabled user is
+// and revokes every session and user-bound key in one transaction. Disabling a disabled user is
 // a 200 with changed=false and writes no audit row. An admin cannot disable
 // the user behind its own request (409), so a session cannot lock itself out
 // by accident.
@@ -174,13 +210,18 @@ func (ctrl *UserAdminController) DisableUser(c *echo.Context) error {
 		return userAdminError(err, "failed to disable user")
 	}
 	if change.Changed {
-		ctrl.audit(c, iauth.ActionUserDisable, id, map[string]any{"sessions_revoked": change.SessionsRevoked})
-		ctrl.auditSessionsRevoked(c, id, iauth.SessionsRevokedReasonUserDisabled, change.SessionsRevoked)
+		metadata := map[string]any{"sessions_revoked": change.SessionsRevoked}
+		if change.KeysRevoked > 0 {
+			metadata["keys_revoked"] = change.KeysRevoked
+		}
+		ctrl.audit(c, iauth.ActionUserDisable, id, metadata)
+		ctrl.auditSessionsRevoked(c, id, iauth.SessionsRevokedReasonUserDisabled, change.SessionsRevoked, change.KeysRevoked)
 	}
 	return c.JSON(http.StatusOK, UserChangeResponse{
 		User:            newUserView(&change.User),
 		Changed:         change.Changed,
 		SessionsRevoked: change.SessionsRevoked,
+		KeysRevoked:     change.KeysRevoked,
 	})
 }
 
@@ -198,17 +239,19 @@ func (ctrl *UserAdminController) EnableUser(c *echo.Context) error {
 	}
 	if change.Changed {
 		ctrl.audit(c, iauth.ActionUserEnable, id, nil)
-		ctrl.auditSessionsRevoked(c, id, iauth.SessionsRevokedReasonUserEnabled, change.SessionsRevoked)
+		ctrl.auditSessionsRevoked(c, id, iauth.SessionsRevokedReasonUserEnabled, change.SessionsRevoked, change.KeysRevoked)
 	}
 	return c.JSON(http.StatusOK, UserChangeResponse{
 		User:            newUserView(&change.User),
 		Changed:         change.Changed,
 		SessionsRevoked: change.SessionsRevoked,
+		KeysRevoked:     change.KeysRevoked,
 	})
 }
 
 // RevokeUserSessions serves POST /v1/auth/users/:id/sessions/revoke ("log out
-// everywhere"). Revoking the caller's own sessions is allowed.
+// everywhere"): every session and every user-bound key of the user, in one
+// transaction. Revoking the caller's own credentials is allowed.
 func (ctrl *UserAdminController) RevokeUserSessions(c *echo.Context) error {
 	id, err := parseUserID(c)
 	if err != nil {
@@ -218,17 +261,23 @@ func (ctrl *UserAdminController) RevokeUserSessions(c *echo.Context) error {
 	if err != nil {
 		return userAdminError(err, "failed to revoke user sessions")
 	}
-	ctrl.auditSessionsRevoked(c, id, iauth.SessionsRevokedReasonAdmin, revoked)
-	return c.JSON(http.StatusOK, SessionsRevokedResponse{UserID: id, SessionsRevoked: revoked})
+	ctrl.auditSessionsRevoked(c, id, iauth.SessionsRevokedReasonAdmin, revoked.Sessions, revoked.Keys)
+	return c.JSON(http.StatusOK, SessionsRevokedResponse{UserID: id, SessionsRevoked: revoked.Sessions, KeysRevoked: revoked.Keys})
 }
 
-// auditSessionsRevoked writes auth.sessions_revoked when count > 0: a revoke
-// of nothing changes no access, so it is not audited.
-func (ctrl *UserAdminController) auditSessionsRevoked(c *echo.Context, userID uuid.UUID, reason string, count int64) {
-	if count <= 0 {
+// auditSessionsRevoked writes auth.sessions_revoked when sessions or
+// user-bound keys were revoked: a revoke of nothing changes no access, so it
+// is not audited. count is the sessions; keys_revoked is added only when a
+// user-bound key was revoked, so a row about sessions alone is unchanged.
+func (ctrl *UserAdminController) auditSessionsRevoked(c *echo.Context, userID uuid.UUID, reason string, sessions, keys int64) {
+	if sessions <= 0 && keys <= 0 {
 		return
 	}
-	ctrl.audit(c, iauth.ActionSessionsRevoked, userID, map[string]any{"reason": reason, "count": count})
+	metadata := map[string]any{"reason": reason, "count": sessions}
+	if keys > 0 {
+		metadata["keys_revoked"] = keys
+	}
+	ctrl.audit(c, iauth.ActionSessionsRevoked, userID, metadata)
 }
 
 // audit records an administration action on a user, after the change has
