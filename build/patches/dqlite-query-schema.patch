@@ -1,0 +1,51 @@
+--- a/src/query.c
++++ b/src/query.c
+@@ -101,6 +101,14 @@
+ 	char *cursor;
+ 	int rc;
+ 
++	/* Stepping can recompile a statement after a schema change. Read the
++	 * result metadata only after that refresh, or SELECT * plus joined
++	 * aliases can label the new values with the old column names. */
++	rc = sqlite3_step(stmt);
++	if (rc != SQLITE_ROW && rc != SQLITE_DONE) {
++		return rc;
++	}
++
+ 	column_count = sqlite3_column_count(stmt);
+ 	if (column_count < 0) {
+ 		return SQLITE_ERROR;
+@@ -122,25 +130,19 @@
+ 		text__encode(&name, &cursor);
+ 	}
+ 
+-	/* Insert the rows. */
+-	do {
++	/* Insert the current row before stepping again. On a full batch the
++	 * next call advances past the last row we encoded, exactly once. */
++	while (rc == SQLITE_ROW) {
++		rc = encode_row(stmt, buffer, column_count);
++		if (rc != SQLITE_OK) {
++			break;
++		}
+ 		if (buffer__offset(buffer) >= buffer->page_size) {
+-			/* If we are already filled a memory page, let's break
+-			 * for now, we'll send more rows in a separate
+-			 * response. */
+ 			rc = SQLITE_ROW;
+ 			break;
+ 		}
+ 		rc = sqlite3_step(stmt);
+-		if (rc != SQLITE_ROW) {
+-			break;
+-		}
+-		rc = encode_row(stmt, buffer, column_count);
+-		if (rc != SQLITE_OK) {
+-			break;
+-		}
+-
+-	} while (1);
++	}
+ 
+ 	return rc;
+ }
