@@ -92,6 +92,29 @@ func (s *EnvTestSuite) TestAuthPolicyReloadIntervalValidatedOnlyWithFile() {
 	s.Contains(err.Error(), "CAESIUM_AUTH_POLICY_RELOAD_INTERVAL")
 }
 
+func (s *EnvTestSuite) TestAuthCLIKeyTTLDefaultAndBounds() {
+	s.Require().NoError(Process())
+	s.Equal(12*time.Hour, Variables().AuthCLIKeyTTL)
+
+	for _, ok := range []string{"1m", "168h"} {
+		s.T().Setenv("CAESIUM_AUTH_CLI_KEY_TTL", ok)
+		s.Require().NoError(Process(), "a TTL of %s is within (0, 7d]", ok)
+	}
+	s.Equal(MaxAuthCLIKeyTTL, Variables().AuthCLIKeyTTL)
+
+	for _, bad := range []string{"0s", "-1h", "169h"} {
+		s.T().Setenv("CAESIUM_AUTH_CLI_KEY_TTL", bad)
+		err := Process()
+		s.Require().Error(err, "a TTL of %s must be refused", bad)
+		s.Contains(err.Error(), "CAESIUM_AUTH_CLI_KEY_TTL")
+	}
+
+	s.T().Setenv("CAESIUM_AUTH_CLI_KEY_TTL", "later")
+	err := Process()
+	s.Require().Error(err)
+	s.Contains(err.Error(), "AUTH_CLI_KEY_TTL")
+}
+
 func (s *EnvTestSuite) TestSSOEnabled() {
 	env := Environment{AuthOIDCEnabled: true}
 	assert.True(s.T(), env.SSOEnabled())

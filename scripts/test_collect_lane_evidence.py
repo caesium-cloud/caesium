@@ -813,5 +813,286 @@ class LaneReportTests(unittest.TestCase):
             self.assertEqual(duplicate.returncode, 1)
 
 
+class ConnectorsEvidenceTests(unittest.TestCase):
+    """Synthetic artifact mutations test the consumer, never qualify Temporal."""
+
+    @classmethod
+    def setUpClass(cls):
+        import hashlib
+        import io
+        import tarfile
+        cls.candidate = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
+        raw = subprocess.check_output(["git", "archive", "--format=tar", cls.candidate], cwd=ROOT)
+        with tarfile.open(fileobj=io.BytesIO(raw)) as archive:
+            cls.sources = [{"path": entry.name, "sha256": hashlib.sha256(
+                entry.linkname.encode() if entry.issym() else archive.extractfile(entry).read()).hexdigest()}
+                for entry in archive if entry.isfile() or entry.issym()]
+        module = runpy.run_path(str(SCRIPT))
+        cls.go_names = module["CONNECTORS_GO"]
+        cls.browser_names = module["CONNECTORS_BROWSER"]
+        cls.pins = module["CONNECTORS_PINS"]
+        cls.flags = dict(module["CONNECTORS_FLAGS"], CAESIUM_CONNECTORS_CONFIG_FILE="/fixture/connections.yaml")
+
+    def write(self, path, value):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(value) if not isinstance(value, str) else value)
+
+    def setUp(self):
+        import base64
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        self.out = self.root / "evidence.json"
+        self.fixture, self.browser, self.cluster = (self.root / name for name in ("fixture", "browser", "cluster"))
+        for path in (self.fixture, self.cluster):
+            self.write(path / "candidate-sha.txt", self.candidate)
+            self.write(path / "source-checksums.json", self.sources)
+        startup = dict(self.pins, kind="fixture_started", candidate=self.candidate)
+        self.events = [startup,
+                       {"kind": "update_rpc", "reply_dropped": True, "rejected": False, "rpc_code": "OK", "update_id": "accepted", "response_run_id": "run"},
+                       {"kind": "update_rpc", "reply_dropped": True, "rejected": True, "rpc_code": "OK", "update_id": "rejected"},
+                       {"kind": "proxy_interruption"},
+                       {"kind": "approval_effect", "run_id": "run", "actor": {"operation_id": "op"}}]
+        self.receipt = {"id": "op", "external_update_id": "accepted", "state": "completed",
+                        "actor": {"operation_id": "op", "stable_id": "principal"}}
+        self.write(self.fixture / "events.jsonl", "\n".join(json.dumps(event) for event in self.events))
+        self.write(self.fixture / "health.json", dict(self.pins, ready=True))
+        self.write(self.fixture / "server-env.json", self.flags)
+        self.write(self.fixture / "server-image.json", [{"Id": IMAGE_ID}])
+        self.write(self.fixture / "images.json", [{"Id": DIGEST}, {"Id": BUILDER_ID}])
+        self.write(self.fixture / "image-provenance.json", {"candidate_sha": self.candidate,
+            "server": {"origin": "loaded", "expected_image_id": IMAGE_ID, "observed_image_id": IMAGE_ID},
+            "runner": {"origin": "loaded", "expected_image_id": BUILDER_ID, "observed_image_id": BUILDER_ID}})
+        self.write(self.fixture / "server.json", [{"Id": "container", "Image": IMAGE_ID,
+            "State": {"Running": True, "OOMKilled": False}, "Config": {"EnvNames": list(self.flags)}}])
+        self.write(self.fixture / "test.log", "\n".join(f"=== RUN   {name}\n--- PASS: {name} (1.00s)" for name in self.go_names))
+        self.write(self.fixture / "exit-status", "0")
+        for filename in ("fixture-evidence.json", "messages-provider-evidence.json", "correlation-evidence.json",
+                         "operations-component-evidence.json", "read-http-evidence.json", "read-correlation-http-evidence.json",
+                         "actions-http-evidence.json", "actions-http-responses.json"):
+            self.write(self.fixture / filename, {"candidate_sha": self.candidate, "events": self.events})
+        for filename in ("operations-component-evidence.json", "actions-http-evidence.json"):
+            self.mutate(self.fixture / filename, lambda doc: doc.update(receipts=[self.receipt], restart=[
+                {"status": "ok", "started_before": "2026-10-20T10:00:00Z", "started_after": "2026-10-20T10:01:00Z"}]))
+        self.mutate(self.fixture / "actions-http-responses.json", lambda doc: doc.update(responses=[
+            {"method": "POST", "path": "/v1/connectors/fixture/executions/id/actions/approve_publication",
+             "status": 201, "body": {"operation": self.receipt}}]))
+        self.mutate(self.fixture / "correlation-evidence.json", lambda doc: doc.update(
+            activity_retry_activated=True, queued={"outcome": "queued"}, promoted_run_id="local-run"))
+        self.mutate(self.fixture / "read-http-evidence.json", lambda doc: doc.update(
+            unchanged_snapshot_writes=0, unchanged_identity_updates=0, closed_workflow_query_rpc_delta=0,
+            external_workflows=[{"run_id": "external-run"}]))
+        # Actions retain only workflow-specific events. The monitoring case
+        # supplies its own named capture with events observed after arming the
+        # browser outage; earlier Go-phase proxy events cannot satisfy it.
+        capture = {"candidate_sha": self.candidate, "receipts": [self.receipt], "events": [
+            event for event in self.events if event["kind"] not in ("proxy_interruption", "fault_armed")]}
+        specs = [{"title": title, "ok": True, "tests": [{"projectName": "connectors", "expectedStatus": "passed",
+                  "status": "expected", "results": [{"status": "passed", "retry": 0, "errors": [], "attachments": [{
+                      "contentType": "application/json", "body": base64.b64encode(json.dumps(capture).encode()).decode()}]}]}]}
+                 for title in self.browser_names]
+        outage = {"kind": "connector_browser_outage", "candidate_sha": self.candidate,
+                  "workflow_id": "browser-workflow", "run_id": "browser-run",
+                  "observed_run_id": "browser-run", "availability": "Stale observation",
+                  "observed_at": "2026-10-20T10:00:00Z",
+                  "events": [{"kind": "fault_armed", "outage": True}, {"kind": "proxy_interruption"}]}
+        monitoring = next(spec for spec in specs if spec["title"].startswith("viewer filters and inspects"))
+        monitoring["tests"][0]["results"][0]["attachments"].append({"name": "Connector provider outage",
+            "contentType": "application/json", "body": base64.b64encode(json.dumps(outage).encode()).decode()})
+        self.write(self.browser / "playwright-results.json", {"suites": [{"specs": specs}], "errors": [],
+            "stats": {"expected": 10, "unexpected": 0, "flaky": 0, "skipped": 0}})
+        self.write(self.browser / "candidate-sha.txt", self.candidate)
+        self.write(self.browser / "server-image-id.txt", IMAGE_ID)
+        self.write(self.browser / "exit-status", "0")
+        self.write(self.cluster / "events.jsonl", json.dumps(startup))
+        self.write(self.cluster / "fixture-health.json", dict(self.pins, ready=True))
+        self.write(self.cluster / "server-image-id.txt", IMAGE_ID)
+        self.write(self.cluster / "reuse-image-identities.json", {"candidate_sha": self.candidate,
+            **{role: {"expected_image_id": value, "observed_image_id": value}
+               for role, value in (("server", IMAGE_ID), ("runner", BUILDER_ID), ("fixture", DIGEST))}})
+        self.write(self.cluster / "candidate-identities.txt", IMAGE_ID + "," + DIGEST)
+        self.write(self.cluster / "candidate-seed-identities.txt", IMAGE_ID + "\n" + DIGEST)
+        self.write(self.cluster / "imported-server-digests.txt", DIGEST)
+        self.write(self.cluster / "loaded-candidate-cri.json", {"status": {"id": IMAGE_ID,
+            "repoTags": ["docker.io/caesiumcloud/caesium:test"], "repoDigests": ["caesiumcloud/caesium@" + DIGEST]}})
+        self.write(self.cluster / "kind-node-ids.json", {"owned-control-plane": "c" * 64})
+        self.write(self.cluster / "statefulset.json", {"spec": {"replicas": 3, "volumeClaimTemplates": [{"metadata": {"name": "data"}}],
+            "template": {"spec": {"containers": [{"image": "caesiumcloud/caesium:test", "env": [
+                {"name": key, "value": value} for key, value in dict(self.flags, CAESIUM_EXECUTION_MODE="distributed").items()]}]}}}})
+        members = [{"name": "caesium-" + str(i), "uid": "uid" + str(i), "ip": "10.0.0." + str(i),
+                    "node": "owned-control-plane", "pvc": "pvc" + str(i), "volume": "vol" + str(i),
+                    "image_id": "containerd://" + IMAGE_ID, "container_id": "container" + str(i)} for i in range(3)]
+        def refusal(count):
+            return {"ready_status": 200, "connector_statuses": [503] * 5, "provider_rpc_before": count,
+                    "provider_rpc_after": count, "connectors_enabled": True, "connectors_ready": False}
+        steps = [{"phase": "matching", "fingerprint": "old", "member_fingerprints": ["old", "old"], "members": ["caesium-0", "caesium-1"],
+                  "provider_rpc_before": 0, "provider_rpc_count": 2},
+                 {"phase": "mismatch_refused", "member": "caesium-1", "uid": "new-uid1", "startup_provider_rpc_before": 2,
+                  "provider_rpc_count": 2, "refusal": refusal(2)},
+                 {"phase": "guarded_transition_and_stale_node", "fingerprint": "new", "active_member": "caesium-1", "stale_member": "caesium-0",
+                  "provider_rpc_count": 3, "refusal": refusal(3), "observed_run_id": "run", "observed_coordinates": {"workflow_id": "external", "run_id": "run"}},
+                 {"phase": "immutable_repoint_refused", "member": "caesium-1", "uid": "new-uid2", "fingerprint": "new",
+                  "startup_provider_rpc_before": 4, "provider_rpc_count": 4, "refusal": refusal(4)}]
+        self.write(self.cluster / "config-cluster-evidence.json", {"candidate_sha": self.candidate,
+            "candidate_image_digest": IMAGE_ID + "," + DIGEST, "initial_members": members, "steps": steps,
+            "workflow": {"workflow_id": "external", "run_id": "run"}})
+        self.write(self.cluster / "connector-config-test.log", "=== RUN   TestConnectorsConfigCluster\n--- PASS: TestConnectorsConfigCluster (1.00s)\n")
+        self.write(self.cluster / "exit-status", "0")
+
+    def mutate(self, path, action):
+        doc = json.loads(path.read_text())
+        action(doc)
+        self.write(path, doc)
+
+    def collect(self):
+        return run("connectors", "--artifacts", str(self.root), "--candidate-sha", self.candidate, "--out", str(self.out))
+
+    def assert_fails_closed(self):
+        result = self.collect()
+        if result.returncode == 0:
+            checked = check(json.loads(self.out.read_text()), "connectors")
+            self.assertEqual(checked.returncode, 1, checked.stdout + checked.stderr)
+        else:
+            self.assertEqual(result.returncode, 1, result.stderr)
+
+    def test_complete_candidate_bound_artifacts_pass_shared_strict_checker(self):
+        result = self.collect()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        report = json.loads(self.out.read_text())
+        checked = check(report, "connectors")
+        self.assertEqual(checked.returncode, 0, checked.stdout + checked.stderr)
+        self.assertEqual(report["candidate_digest"], IMAGE_ID)
+        self.assertNotIn("candidate_digest", report["scenarios"][2])
+        self.assertEqual(report["scenarios"][2]["observed_nodes"], ["owned-control-plane"])
+
+    def test_missing_hollow_foreign_and_dirty_source_artifacts_fail_closed(self):
+        for filename, value in (("fixture/actions-http-evidence.json", None),
+                                ("fixture/health.json", {}),
+                                ("fixture/read-http-evidence.json", {"candidate_sha": SHA}),
+                                ("fixture/source-checksums.json", []),
+                                ("cluster/source-checksums.json", self.sources[:-1])):
+            with self.subTest(filename=filename):
+                path = self.root / filename
+                previous = path.read_text()
+                if value is None: path.unlink()
+                else: self.write(path, value)
+                self.assert_fails_closed()
+                path.write_text(previous)
+
+    def test_wrong_sha_server_runner_and_browser_image_bindings_fail_closed(self):
+        for path, mutate in (
+            (self.fixture / "candidate-sha.txt", None),
+            (self.fixture / "image-provenance.json", lambda doc: doc["runner"].update(expected_image_id=DIGEST)),
+            (self.fixture / "server.json", lambda doc: doc[0].update(Image=DIGEST)),
+            (self.browser / "server-image-id.txt", None),
+            (self.cluster / "reuse-image-identities.json", lambda doc: doc["runner"].update(
+                expected_image_id=DIGEST, observed_image_id=DIGEST)),
+            (self.cluster / "reuse-image-identities.json", lambda doc: doc["fixture"].update(
+                expected_image_id=BUILDER_ID, observed_image_id=BUILDER_ID)),
+            (self.cluster / "loaded-candidate-cri.json", lambda doc: doc["status"].update(id=COVERAGE_ID))):
+            with self.subTest(path=path.name):
+                previous = path.read_text()
+                if mutate is None: path.write_text(SHA)
+                else: self.mutate(path, mutate)
+                self.assert_fails_closed()
+                path.write_text(previous)
+
+    def test_coherently_foreign_cluster_image_fails_fixture_binding(self):
+        # Change every cluster identity consistently, leaving the real fixture
+        # candidate intact. Internal CRI/seed/member agreement is insufficient.
+        foreign = "sha256:" + "f1" * 32
+        for name in ("server-image-id.txt", "candidate-identities.txt", "candidate-seed-identities.txt",
+                     "imported-server-digests.txt", "loaded-candidate-cri.json", "config-cluster-evidence.json"):
+            path = self.cluster / name
+            path.write_text(path.read_text().replace(IMAGE_ID, foreign))
+        self.assert_fails_closed()
+
+    def test_browser_outage_requires_its_own_fresh_target_bound_capture(self):
+        import base64
+        path = self.browser / "playwright-results.json"
+        original = path.read_text()
+        def outage_attachment(doc):
+            spec = next(spec for spec in doc["suites"][0]["specs"]
+                        if spec["title"].startswith("viewer filters and inspects"))
+            return spec["tests"][0]["results"][0]["attachments"][-1]
+        for change in (lambda capture: capture.update(kind="old_go_fault"),
+                       lambda capture: capture.update(candidate_sha=SHA),
+                       lambda capture: capture.update(observed_run_id="foreign-run"),
+                       lambda capture: capture.update(availability="live"),
+                       lambda capture: capture.update(events=[{"kind": "proxy_interruption"}]),
+                       lambda capture: capture.update(events=[{"kind": "fault_armed", "outage": True}])):
+            doc = json.loads(original)
+            attachment = outage_attachment(doc)
+            capture = json.loads(base64.b64decode(attachment["body"]))
+            change(capture)
+            attachment["body"] = base64.b64encode(json.dumps(capture).encode()).decode()
+            self.write(path, doc)
+            self.assert_fails_closed()
+        # A global event in an action capture does not replace monitoring proof.
+        doc = json.loads(original)
+        outage_attachment(doc).clear()
+        first = doc["suites"][0]["specs"][0]["tests"][0]["results"][0]["attachments"][0]
+        capture = json.loads(base64.b64decode(first["body"]))
+        capture["events"].extend([{"kind": "fault_armed", "outage": True}, {"kind": "proxy_interruption"}])
+        first["body"] = base64.b64encode(json.dumps(capture).encode()).decode()
+        self.write(path, doc)
+        self.assert_fails_closed()
+        path.write_text(original)
+
+    def test_missing_duplicate_skipped_and_failed_named_go_scenarios_fail(self):
+        path = self.fixture / "test.log"
+        original = path.read_text()
+        for log in ("", original.replace("--- PASS:", "--- SKIP:", 1),
+                    original + "\n--- FAIL: " + self.go_names[0] + " (0s)\n",
+                    original + "\n=== RUN   " + self.go_names[0] + "\n--- PASS: " + self.go_names[0] + " (0s)\n"):
+            path.write_text(log)
+            self.assert_fails_closed()
+        path.write_text(original)
+
+    def test_gate_off_queue_off_and_fixture_failure_fail(self):
+        for key in ("CAESIUM_CONNECTORS_ENABLED", "CAESIUM_RUN_QUEUE_ENABLED", "CAESIUM_RUN_QUEUE_DEQUEUER_ENABLED"):
+            self.mutate(self.fixture / "server-env.json", lambda doc: doc.update({key: "false"}))
+            self.assert_fails_closed()
+            self.write(self.fixture / "server-env.json", self.flags)
+        self.write(self.fixture / "exit-status", "1")
+        self.assert_fails_closed()
+
+    def test_failed_first_browser_attempt_wrong_project_zero_and_duplicate_fail(self):
+        path = self.browser / "playwright-results.json"
+        original = path.read_text()
+        mutations = [lambda doc: doc["suites"][0]["specs"][0]["tests"][0]["results"].insert(0, {"status": "failed", "retry": 0}),
+                     lambda doc: doc["suites"][0]["specs"][0]["tests"][0]["results"][0].update(retry=1),
+                     lambda doc: doc["suites"][0]["specs"][0]["tests"][0].update(projectName="default"),
+                     lambda doc: doc.update(suites=[]),
+                     lambda doc: doc["suites"][0]["specs"].append(copy.deepcopy(doc["suites"][0]["specs"][0]))]
+        for action in mutations:
+            self.mutate(path, action)
+            self.assert_fails_closed()
+            path.write_text(original)
+
+    def test_absent_fault_journal_or_duplicate_effect_never_passes(self):
+        original = (self.fixture / "events.jsonl").read_text()
+        self.write(self.fixture / "events.jsonl", json.dumps(self.events[0]))
+        self.assert_fails_closed()
+        self.write(self.fixture / "events.jsonl", original)
+        self.mutate(self.fixture / "actions-http-evidence.json", lambda doc: doc["events"].append(copy.deepcopy(self.events[-1])))
+        self.assert_fails_closed()
+
+    def test_cluster_labels_without_observed_faults_and_wrong_topology_fail(self):
+        path = self.cluster / "config-cluster-evidence.json"
+        original = path.read_text()
+        mutations = [lambda doc: doc["steps"][1].pop("refusal"),
+                     lambda doc: doc["steps"][2]["refusal"].update(provider_rpc_after=99),
+                     lambda doc: doc["steps"][2].update(observed_run_id="retargeted"),
+                     lambda doc: doc["steps"][3].update(fingerprint="invented-epoch"),
+                     lambda doc: doc["initial_members"][1].update(pvc="pvc0"),
+                     lambda doc: doc["initial_members"][1].update(node="unobserved-node"),
+                     lambda doc: doc["initial_members"][1].update(image_id=COVERAGE_ID)]
+        for action in mutations:
+            self.mutate(path, action)
+            self.assert_fails_closed()
+            path.write_text(original)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -59,6 +59,8 @@ func (ctrl *Controller) RotateKey(c *echo.Context) error {
 			return echo.NewHTTPError(http.StatusConflict, "cannot rotate an expired key")
 		case errors.Is(err, iauth.ErrKeyNamespacesUnusable):
 			return echo.NewHTTPError(http.StatusConflict, "cannot rotate a key whose namespaces are unusable; revoke it and create a new key")
+		case errors.Is(err, iauth.ErrUserBoundKeyRotation):
+			return echo.NewHTTPError(http.StatusConflict, "cannot rotate a user-bound key; it is replaced by signing in again")
 		}
 		return echo.NewHTTPError(http.StatusInternalServerError, "failed to rotate api key").Wrap(err)
 	}

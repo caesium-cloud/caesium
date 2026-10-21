@@ -58,12 +58,13 @@ elif name=="helm": print("v3.22.0")
         for command in ("git", "kind", "docker", "just", "kubectl", "helm"):
             (self.root / "bin" / command).symlink_to(fake)
 
-    def run_probe(self, scenario, expect_delete=False):
+    def run_probe(self, scenario, expect_delete=False, **extra):
         env = dict(os.environ, PATH=str(self.root / "bin") + os.pathsep + os.environ["PATH"],
                    TMPDIR=str(self.root / "scratch"), PROBE_ROOT=str(self.root),
                    PROBE_SCENARIO=scenario, CAESIUM_CONNECTORS_CLUSTER_ID="probe-owned",
                    CAESIUM_CONNECTORS_CLUSTER_ARTIFACTS=str(self.root / "artifacts"))
         env.pop("CANDIDATE_SHA", None)
+        env.update(extra)
         result = subprocess.run(["bash", str(self.root / "scripts" / "connectors-config-cluster.sh")],
                                 env=env, capture_output=True, text=True, timeout=15)
         calls = [json.loads(line) for line in (self.root / "calls").read_text().splitlines()]
@@ -102,6 +103,102 @@ elif name=="helm": print("v3.22.0")
 
     def test_confirmed_owned_cluster_is_cleaned_after_failure(self):
         self.run_probe("owned-load-failed", expect_delete=True)
+    def reuse_options(self, server='b', runner='b', fixture='b'):
+        return {'CAESIUM_CONNECTORS_REUSE_IMAGES':'true',
+                'CAESIUM_CONNECTORS_REUSE_SERVER_IMAGE_ID':'sha256:'+server*64,
+                'CAESIUM_CONNECTORS_REUSE_RUNNER_IMAGE_ID':'sha256:'+runner*64,
+                'CAESIUM_CONNECTORS_REUSE_FIXTURE_IMAGE_ID':'sha256:'+fixture*64}
+
+    def test_reuse_requires_firstphase_identities_before_cluster_creation(self):
+        result, calls = self.run_probe('create-failed', CAESIUM_CONNECTORS_REUSE_IMAGES='true')
+        self.assertIn('requires first-phase immutable server identity', result.stderr)
+        self.assertFalse(any(call[:3] == ['kind','create','cluster'] for call in calls))
+
+    def test_coherently_replaced_tags_refuse_before_cluster_creation(self):
+        result, calls = self.run_probe('create-failed', **self.reuse_options('a','a','a'))
+        self.assertIn('tag differs from tested first-phase image', result.stderr)
+        self.assertFalse(any(call[:3] == ['kind','create','cluster'] for call in calls))
+        self.assertFalse(any(call[:3] == ['docker','image','save'] for call in calls))
+
+    def test_changed_runner_tag_refuses_before_cluster_creation(self):
+        result, calls = self.run_probe('create-failed', **self.reuse_options(runner='a'))
+        self.assertIn('runner tag differs from tested first-phase image', result.stderr)
+        self.assertFalse(any(call[:3] == ['kind','create','cluster'] for call in calls))
+
+    def test_changed_fixture_tag_refuses_before_cluster_creation(self):
+        result, calls = self.run_probe('create-failed', **self.reuse_options(fixture='a'))
+        self.assertIn('fixture tag differs from tested first-phase image', result.stderr)
+        self.assertFalse(any(call[:3] == ['kind','create','cluster'] for call in calls))
+
+    def test_reuse_must_agree_with_loaded_producer(self):
+        result, calls = self.run_probe('create-failed', **self.reuse_options(),
+            CAESIUM_CONNECTORS_EXPECTED_IMAGE_ID='sha256:'+'a'*64)
+        self.assertIn('differs from producer server identity', result.stderr)
+        self.assertFalse(any(call[:3] == ['kind','create','cluster'] for call in calls))
+
+    def test_malformed_firstphase_fixture_identity_refuses_before_creation(self):
+        options = self.reuse_options()
+        options['CAESIUM_CONNECTORS_REUSE_FIXTURE_IMAGE_ID'] = 'sha256:invalid'
+        result, calls = self.run_probe('create-failed', **options)
+        self.assertIn('requires first-phase immutable fixture identity', result.stderr)
+        self.assertFalse(any(call[:3] == ['kind','create','cluster'] for call in calls))
+
+    def test_reuse_runner_must_agree_with_loaded_producer(self):
+        result, calls = self.run_probe('create-failed', **self.reuse_options(),
+            CAESIUM_CONNECTORS_EXPECTED_RUNNER_IMAGE_ID='sha256:'+'a'*64)
+        self.assertIn('differs from producer runner identity', result.stderr)
+        self.assertFalse(any(call[:3] == ['kind','create','cluster'] for call in calls))
+
+    def test_matching_firstphase_images_are_recorded_and_rechecked_before_import(self):
+        result, calls = self.run_probe('owned-load-failed', expect_delete=True, **self.reuse_options())
+        self.assertTrue(any(call[:3] == ['kind','create','cluster'] for call in calls))
+        receipt = json.loads((self.root/'artifacts/reuse-image-identities.json').read_text())
+        for role in ('server','runner','fixture'):
+            self.assertEqual(receipt[role]['expected_image_id'], 'sha256:'+'b'*64)
+            self.assertEqual(receipt[role]['expected_image_id'], receipt[role]['observed_image_id'])
+        # Each reference is checked before creation and again before import.
+        for role in ('server','runner','fixture'):
+            ref = receipt[role]['tag']
+            checks = [call for call in calls if call == ['docker','image','inspect','--format','{{.Id}}',ref]]
+            self.assertGreaterEqual(len(checks), 2)
+
+
+class ClusterBaselineEnvironmentTests(unittest.TestCase):
+    def test_cluster_preserves_baseline_and_tracked_kubernetes_topology(self):
+        repository = Path(__file__).resolve().parents[1]
+        source = (repository/'scripts/connectors-config-cluster.sh').read_text()
+        begin = source.index('import json,re,sys\nfrom pathlib import Path\nbase=json.load')
+        block = source[begin:].split('\nPY', 1)[0]
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            shutil.copyfile(repository/'justfile', root/'justfile')
+            baseline = root/'baseline.json'
+            baseline.write_text(json.dumps({'spec': {'template': {'spec': {'containers': [{'env': [
+                {'name': 'CAESIUM_ENGINE', 'value': 'kubernetes'},
+                {'name': 'CAESIUM_DATABASE_SHARDS', 'value': '4'},
+                {'name': 'POD_NAME', 'value': 'chart-native'},
+            ]}]}}}}))
+            result = subprocess.run(['python3', '-c', block, str(baseline), 'candidate'],
+                                    cwd=root, capture_output=True, text=True, check=True)
+            values = json.loads(result.stdout)
+            env = {v['name']: v.get('value') for v in values['config']['extraEnv']}
+            self.assertEqual(env['CAESIUM_ENGINE'], 'kubernetes')
+            self.assertEqual(env['CAESIUM_EXECUTION_MODE'], 'distributed')
+            self.assertEqual(env['CAESIUM_DATABASE_SHARDS'], '1')
+            self.assertEqual(env['CAESIUM_CONNECTORS_ENABLED'], 'true')
+            self.assertEqual(env['CAESIUM_AUTH_MODE'], 'api-key')
+            self.assertEqual(env['CAESIUM_RUN_QUEUE_ENABLED'], 'true')
+            self.assertEqual(env['CAESIUM_RUN_QUEUE_DEQUEUER_ENABLED'], 'true')
+            self.assertNotIn('POD_NAME', env)
+            self.assertEqual(values['replicaCount'], 3)
+            # A future baseline feature must join the cluster without another copy.
+            justfile = root/'justfile'
+            justfile.write_text(justfile.read_text().replace('integration-up: build-stress build-test',
+                'integration-up: build-stress build-test\n    -e CAESIUM_FUTURE_GATE=true '+chr(92)))
+            next_result = subprocess.run(['python3', '-c', block, str(baseline), 'candidate'],
+                                        cwd=root, capture_output=True, text=True, check=True)
+            next_env = {v['name']: v.get('value') for v in json.loads(next_result.stdout)['config']['extraEnv']}
+            self.assertEqual(next_env['CAESIUM_FUTURE_GATE'], 'true')
 
 
 class BootstrapLogTests(unittest.TestCase):

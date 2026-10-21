@@ -1,6 +1,5 @@
 #!/bin/sh
-# Manual real-provider qualification. C1 adds HTTP/restart proof on the tracked
-# authenticated server; F2 owns the later broad CI/browser lane.
+# Real-provider qualification shared by manual checks and the advisory connector lane.
 set -eu
 mode=${1:-check}
 if [ "$mode" = serve ]; then
@@ -89,7 +88,24 @@ runner_name=caesium-connectors-runner-$tag-$$
 gateoff_name=caesium-connectors-gateoff-$tag-$$
 invalid_name=caesium-connectors-invalid-startup-$tag-$$
 anchor_name=caesium-connectors-network-anchor-$tag-$$
-server_name=${CAESIUM_CONNECTORS_SERVER_CONTAINER:-caesium-server-agent-test}
+lane=${CAESIUM_CONNECTORS_LANE:-false}
+case "$lane" in true|false) ;; *) echo "connector lane option must be true or false" >&2; exit 1 ;; esac
+server_recipe=integration-up-agent
+default_server_name=caesium-server-agent-test
+if [ "$lane" = true ]; then
+    server_recipe=integration-up-connectors
+    default_server_name=caesium-server-connectors-test
+    if [ -n "${CAESIUM_INTEGRATION_RUNNER_IMAGE:-}" ]; then
+        [ -n "${CAESIUM_CONNECTORS_EXPECTED_RUNNER_IMAGE_ID:-}" ] || { echo "loaded connector runner requires producer image identity" >&2; exit 1; }
+    fi
+    if [ "${CAESIUM_SKIP_IMAGE_BUILD:-false}" = true ]; then
+        [ -n "${CAESIUM_CONNECTORS_EXPECTED_IMAGE_ID:-}" ] || { echo "loaded connector server requires producer image identity" >&2; exit 1; }
+    fi
+    for component in fixture messages correlation operations read actions; do
+        [ -f "test/connectors_${component}_test.go" ] || { echo "connector lane missing $component scenario" >&2; exit 1; }
+    done
+fi
+server_name=${CAESIUM_CONNECTORS_SERVER_CONTAINER:-$default_server_name}
 server_id=
 network_id=
 runner_cli_pid=
@@ -131,6 +147,7 @@ PY
 fi
 host_user=$(id -u):$(id -g)
 candidate=$(git rev-parse HEAD)
+[ "${CANDIDATE_SHA:-$candidate}" = "$candidate" ] || { echo "candidate does not match HEAD" >&2; exit 1; }
 git status --porcelain >"$artifacts/source-status.txt"
 git diff --binary HEAD >"$artifacts/source-diff.patch"
 printf '%s\n' "$candidate" >"$artifacts/candidate-sha.txt"
@@ -175,6 +192,7 @@ record_server() {
     mv "$artifacts/server-image.tmp" "$artifacts/server-image.json"
 }
 cleanup() {
+    result=$?
     # EXIT cleanup also runs when an explicit signal trap exits under dash.
     # Read CID files here: interruption can happen after creation but before a
     # shell variable is assigned. Names never authorize removal.
@@ -213,6 +231,8 @@ cleanup() {
         python3 "$root/scripts/connectors-fixture-metadata.py" image "$cli" busybox:1.36.1 >"$artifacts/network-anchor-image.json" 2>/dev/null || true
         "$cli" rm -f "$cleanup_id" >/dev/null 2>&1 || true
     fi
+    printf '%s\n' "$result" >"$artifacts/exit-status"
+    return "$result"
 }
 trap cleanup EXIT
 trap 'exit 129' HUP
@@ -220,13 +240,19 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 "$cli" build --platform "$platform" --build-arg BUILDER_IMAGE="$builder" \
     -f build/Dockerfile.connector-fixture -t "$image" .
+if [ -n "${CAESIUM_INTEGRATION_RUNNER_IMAGE:-}" ]; then
+    runner=$CAESIUM_INTEGRATION_RUNNER_IMAGE
+    "$cli" image inspect "$runner" >/dev/null
+else
 "$cli" build --platform "$platform" --build-arg BUILDER_IMAGE="$builder" \
     -f build/Dockerfile.integration -t "$runner" .
+fi
 if [ "$existing" = false ]; then
-    [ "$server_name" = caesium-server-agent-test ] || { echo "tracked integration-up-agent uses caesium-server-agent-test" >&2; exit 1; }
+    [ "$server_name" = "$default_server_name" ] || { echo "tracked $server_recipe uses $default_server_name" >&2; exit 1; }
     # Build before the atomic create. The tracked recipe has one shared env
     # body and its CID-file mode neither removes nor starts an existing name.
-    just tag="$tag" build-stress build-test build-triage-agent
+    if [ "$lane" = true ]; then just tag="$tag" build-stress build-test;
+    else just tag="$tag" build-stress build-test build-triage-agent; fi
     [ ! -e "$server_cid" ] || { echo "server CID file already exists" >&2; exit 1; }
     if [ "$http_reads" = true ]; then
         export CAESIUM_CONNECTORS_SERVER_CONFIG="$artifacts/http-connections.yaml"
@@ -245,7 +271,7 @@ if [ "$existing" = false ]; then
         export CAESIUM_CONNECTORS_NETWORK_ANCHOR="$network_id"
     fi
     CAESIUM_SKIP_IMAGE_BUILD=true CAESIUM_CONNECTORS_SERVER_CIDFILE="$server_cid" \
-        just --quiet tag="$tag" integration-up-agent >"$artifacts/server-create.log"
+        just --quiet tag="$tag" "$server_recipe" >"$artifacts/server-create.log"
     server_id=$(created_id "$server_cid")
     record_server "$server_id"
     "$cli" start "$server_id" >"$artifacts/server-start.log"
@@ -255,6 +281,25 @@ else
     record_server "$server_id"
 fi
 [ -n "$network_id" ] || network_id=$server_id
+if [ "$lane" = true ]; then
+    python3 - "$cli" "$server_id" "$artifacts/server-env.json" "${CAESIUM_CONNECTORS_EXPECTED_IMAGE_ID:-}" <<'PYENV'
+import json, subprocess, sys
+cli, cid, target, expected_image = sys.argv[1:]
+record, = json.loads(subprocess.check_output([cli, 'container', 'inspect', cid]))
+if expected_image and record.get('Image') != expected_image:
+    raise SystemExit('connector server image differs from loaded candidate')
+raw = dict(value.split('=', 1) for value in record.get('Config', {}).get('Env', []) if '=' in value)
+names = ('CAESIUM_CONNECTORS_ENABLED', 'CAESIUM_CONNECTORS_CONFIG_FILE', 'CAESIUM_AUTH_MODE', 'CAESIUM_RUN_QUEUE_ENABLED',
+         'CAESIUM_RUN_QUEUE_DEQUEUER_ENABLED', 'CAESIUM_EXECUTION_MODE', 'CAESIUM_RUN_OWNER_ENABLED')
+observed = {name: raw[name] for name in names if name in raw}
+for name in ('CAESIUM_CONNECTORS_ENABLED', 'CAESIUM_RUN_QUEUE_ENABLED', 'CAESIUM_RUN_QUEUE_DEQUEUER_ENABLED'):
+    if observed.get(name) != 'true':
+        raise SystemExit(name + ' must be true on the connector server')
+if observed['CAESIUM_AUTH_MODE'] != 'api-key':
+    raise SystemExit('connector lane must use authenticated server')
+with open(target, 'w') as output: json.dump(observed, output, indent=2)
+PYENV
+fi
 # Host credentials belong only to an explicitly borrowed server. An owned
 # server always supplies its own freshly generated bootstrap key.
 admin_key=
@@ -407,6 +452,29 @@ selection="TestIntegrationTestSuite/($(printf '%s' "$scenarios" | tr ' ' '|'))"
     -e CAESIUM_MANUAL_TRIGGER_API_KEY=integration-test-key -w /bld/caesium "$runner" \
     sh scripts/integration-test.sh -test.run "$selection" >"$artifacts/runner-create.log"
 runner_id=$(created_id "$runner_cid")
+if [ "$lane" = true ]; then
+    python3 - "$cli" "$server_id" "$runner_id" "$candidate" "$artifacts/image-provenance.json" <<'PYIMAGE'
+import json, os, re, subprocess, sys
+cli, server, runner, candidate, target = sys.argv[1:]
+result = {'candidate_sha': candidate}
+for role, cid, expected_name, loaded in (
+    ('server', server, 'CAESIUM_CONNECTORS_EXPECTED_IMAGE_ID', os.environ.get('CAESIUM_SKIP_IMAGE_BUILD') == 'true'),
+    ('runner', runner, 'CAESIUM_CONNECTORS_EXPECTED_RUNNER_IMAGE_ID', bool(os.environ.get('CAESIUM_INTEGRATION_RUNNER_IMAGE'))),
+):
+    record, = json.loads(subprocess.check_output([cli, 'container', 'inspect', cid]))
+    observed = record.get('Image')
+    expected = os.environ.get(expected_name, '')
+    if not isinstance(observed, str) or not re.fullmatch(r'sha256:[0-9a-f]{64}', observed):
+        raise SystemExit('missing immutable ' + role + ' runtime image identity')
+    if loaded and not expected:
+        raise SystemExit('loaded ' + role + ' requires producer image identity')
+    if expected and expected != observed:
+        raise SystemExit(role + ' image differs from producer candidate image')
+    result[role] = {'origin': 'loaded' if loaded else 'source-build',
+                    'expected_image_id': expected, 'observed_image_id': observed}
+with open(target, 'w') as output: json.dump(result, output, indent=2)
+PYIMAGE
+fi
 "$cli" start -a "$runner_id" >"$artifacts/test.log" 2>&1 &
 runner_cli_pid=$!
 runner_rc=0
@@ -416,8 +484,8 @@ if [ "$runner_rc" -ne 0 ]; then cat "$artifacts/test.log"; exit "$runner_rc"; fi
 cat "$artifacts/test.log"
 # A selected fixture scenario cannot pass via a skip or a zero-match command.
 for scenario in $scenarios; do
-    if ! grep -q -- "--- PASS: TestIntegrationTestSuite/$scenario " "$artifacts/test.log"; then
-        echo "selected $scenario scenario did not pass" >&2; exit 1
+    if [ "$(grep -c -- "--- PASS: TestIntegrationTestSuite/$scenario " "$artifacts/test.log" || true)" -ne 1 ]; then
+        echo "selected $scenario scenario did not pass exactly once" >&2; exit 1
     fi
     if grep -qE -- "--- (SKIP|FAIL): TestIntegrationTestSuite/$scenario([ /]|$)" "$artifacts/test.log"; then
         echo "selected $scenario scenario skipped or failed" >&2; exit 1
@@ -440,6 +508,6 @@ if [ -n "$browser_hook" ]; then
     CAESIUM_CONNECTORS_FIXTURE_CONTAINER_ID="$fixture_id" \
     CAESIUM_CONNECTORS_NETWORK_CONTAINER_ID="$network_id" \
     CAESIUM_CONNECTORS_ARTIFACTS="$artifacts" CAESIUM_CONNECTORS_CANDIDATE_SHA="$candidate" \
-    CAESIUM_CONTAINER_CLI="$cli" "$browser_hook"
+    CAESIUM_CONTAINER_CLI="$cli" CAESIUM_CONNECTORS_BROWSER_PHASE=true "$browser_hook"
 fi
 printf 'Connector fixture evidence: %s\n' "$artifacts"

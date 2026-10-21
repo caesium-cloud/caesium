@@ -19,6 +19,7 @@ Subcommands, one per lane:
   coverage     G2 coverage-ratchet row from `scripts/integration-coverage.sh`.
   console      D3 console cluster-recovery row from the Playwright
                `cluster-recovery` project's `d3-evidence.json`.
+  connectors   F2 authenticated Temporal, Console and configuration evidence.
   performance  E4 performance-gate row from `scripts/performance.sh`'s gate.
   report       Merge fragments into one report for a named lane gate.
 
@@ -28,10 +29,15 @@ Dependency-free (Python 3 stdlib only), like the checker it feeds.
 from __future__ import annotations
 
 import argparse
+import base64
+import hashlib
+import io
 import importlib.util
 import json
 import re
 import sys
+import subprocess
+import tarfile
 from pathlib import Path
 
 
@@ -1109,6 +1115,391 @@ def build_performance(artifacts, candidate_sha):
 # Report assembly
 # --------------------------------------------------------------------------
 
+# --------------------------------------------------------------------------
+# Execution connectors F2 authenticated Temporal/Console/configuration lane
+# --------------------------------------------------------------------------
+
+CONNECTORS_GO = tuple("TestIntegrationTestSuite/TestConnectors" + name for name in
+                      ("Fixture", "Messages", "Correlation", "Operations", "Read", "Actions"))
+CONNECTORS_BROWSER = (
+    "real Console approval survives duplicate clicks, advances the second Caesium job and has one effect across terminal fresh keys",
+    "lost accepted reply recovers the server receipt after reload with empty browser storage without another Update",
+    "lost rejected reply stays unknown across two operators and eligibility changes until the original principal confirms the displayed revision",
+    "a real validator failure with unknown origin is visibly unresolved and never presented as a business rejection",
+    "viewer, runner and scoped principals cannot approve; unbound and stale observations expose no usable approval",
+    "viewer filters and inspects a real external-only workflow, pages history and recovers dated observations after provider outage",
+    "job-scoped and anonymous direct routes disclose no workflow details",
+    "gate-off server hides navigation and refuses connector API and direct routes",
+    "real queued delegation promotes one admission and joins existing run data, receipt and scoped evidence to typed workflow relationships",
+    "opaque external-only work has no inferred Caesium runs, receipts, lineage or freshness",
+)
+CONNECTORS_PINS = {"sdk": "1.49.0", "cli": "1.9.1", "server": "1.32.0"}
+CONNECTORS_FLAGS = {"CAESIUM_CONNECTORS_ENABLED": "true", "CAESIUM_AUTH_MODE": "api-key",
+                    "CAESIUM_RUN_QUEUE_ENABLED": "true", "CAESIUM_RUN_QUEUE_DEQUEUER_ENABLED": "true"}
+CONNECTORS_SAFE_FLAGS = set(CONNECTORS_FLAGS) | {
+    "CAESIUM_CONNECTORS_CONFIG_FILE", "CAESIUM_EXECUTION_MODE", "CAESIUM_RUN_OWNER_ENABLED",
+    "CAESIUM_DATABASE_SHARDS", "CAESIUM_DATABASE_VOTERS", "CAESIUM_DATABASE_STANDBYS",
+}
+
+
+def _connector_sources(artifacts, sha):
+    """Compare the retained whole-source snapshot to the exact committed tree.
+
+    A SHA marker alone cannot bind an image built from a dirty checkout. Both
+    builders retain hashes before building; use Git's archive as the independent
+    inventory, including symlink targets, without trusting the current worktree.
+    """
+    if read_text(artifacts / "candidate-sha.txt").strip() != sha:
+        raise EvidenceError(f"{artifacts}: foreign candidate marker")
+    records = read_json(artifacts / "source-checksums.json")
+    if not isinstance(records, list) or not records:
+        raise EvidenceError(f"{artifacts}: empty source inventory")
+    actual = {}
+    for record in records:
+        if not isinstance(record, dict) or not _nonempty(record.get("path")) or record["path"] in actual:
+            raise EvidenceError(f"{artifacts}: malformed or repeated source path")
+        actual[record["path"]] = record.get("sha256")
+    try:
+        result = subprocess.run(["git", "archive", "--format=tar", sha], cwd=SCRIPTS.parent,
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
+        with tarfile.open(fileobj=io.BytesIO(result.stdout)) as archive:
+            expected = {entry.name: hashlib.sha256(
+                entry.linkname.encode() if entry.issym() else archive.extractfile(entry).read()
+            ).hexdigest() for entry in archive if entry.isfile() or entry.issym()}
+    except (OSError, subprocess.CalledProcessError, tarfile.TarError) as error:
+        raise EvidenceError(f"cannot read candidate source tree {sha}: {error}") from error
+    if actual != expected:
+        differing = sorted(key for key in actual.keys() | expected.keys() if actual.get(key) != expected.get(key))
+        raise EvidenceError(f"{artifacts}: source inventory differs from candidate {sha}: {differing[:8]}")
+
+
+def _connector_json(path, sha=None):
+    record = read_json(path)
+    if not isinstance(record, dict) or (sha is not None and record.get("candidate_sha") != sha):
+        raise EvidenceError(f"{path}: missing object or foreign candidate")
+    return record
+
+
+def _connector_events(path, sha):
+    try:
+        events = [json.loads(line) for line in read_text(path).splitlines() if line.strip()]
+    except json.JSONDecodeError as error:
+        raise EvidenceError(f"{path}: malformed event journal") from error
+    if not events or not all(isinstance(event, dict) for event in events):
+        raise EvidenceError(f"{path}: empty or malformed event journal")
+    started = [event for event in events if event.get("kind") == "fixture_started"]
+    if len(started) != 1 or started[0].get("candidate") != sha or any(
+            started[0].get(key) != value for key, value in CONNECTORS_PINS.items()):
+        raise EvidenceError(f"{path}: fixture candidate or running provider pins do not match")
+    return events
+
+
+def _connector_go(log, selectors):
+    """A selected pass must be unique; PASS cannot hide a prior failure/skip."""
+    passed = []
+    for selector in selectors:
+        escaped = re.escape(selector)
+        runs = re.findall(rf"^=== RUN\s+{escaped}\s*$", log, re.M)
+        outcomes = re.findall(rf"^\s*--- (PASS|FAIL|SKIP): {escaped}(?:\s|\()", log, re.M)
+        if len(runs) == 1 and outcomes == ["PASS"]:
+            passed.append(selector)
+    selected = "|".join(re.escape(selector) for selector in selectors)
+    bad = bool(re.search(rf"^\s*--- (?:FAIL|SKIP): (?:{selected})(?:/|\s|\()", log, re.M))
+    return passed, len(passed) == len(selectors) and not bad
+
+
+def _connector_loss(events, rejected):
+    return any(event.get("kind") == "update_rpc" and event.get("reply_dropped") is True
+               and event.get("rejected") is rejected and event.get("rpc_code") == "OK"
+               and _nonempty(event.get("update_id")) for event in events)
+
+
+def _connector_receipts(record):
+    receipts, events = record.get("receipts"), record.get("events")
+    if not isinstance(receipts, list) or not receipts or not isinstance(events, list):
+        return False
+    witnessed_effect = False
+    for receipt in receipts:
+        if not isinstance(receipt, dict):
+            return False
+        actor = receipt.get("actor") or {}
+        if not all(_nonempty(receipt.get(key)) for key in ("id", "external_update_id", "state")) \
+                or actor.get("operation_id") != receipt.get("id") or not _nonempty(actor.get("stable_id")):
+            return False
+        if receipt.get("state") == "completed":
+            runs = {event.get("response_run_id") for event in events if isinstance(event, dict)
+                    and event.get("kind") == "update_rpc" and event.get("update_id") == receipt["external_update_id"]
+                    and event.get("rpc_code") == "OK" and event.get("rejected") is False
+                    and _nonempty(event.get("response_run_id"))}
+            if len(runs) != 1 or sum(event.get("kind") == "approval_effect" and event.get("run_id") in runs
+                                     for event in events if isinstance(event, dict)) != 1:
+                return False
+            witnessed_effect = True
+    return witnessed_effect
+
+
+def _connector_row(sid, sha, digest, topology, flags, surface):
+    row = {"id": sid, "artifact_identity": sid, "candidate_sha": sha,
+           "topology": topology, "feature_flags": flags,
+           "mode": BASE.observed_mode(flags, surface), "observations": [],
+           "recorder": {"present": True, "sample_count": 0}, "checker": {"timed_out": False},
+           "fault_activation": _no_fault(), "status": "inconclusive"}
+    if digest is not None:
+        row["candidate_digest"] = digest
+    return row
+
+
+def _connector_browser_specs(suites):
+    for suite in suites:
+        if not isinstance(suite, dict):
+            raise EvidenceError("Playwright suite is not an object")
+        yield from suite.get("specs") or []
+        yield from _connector_browser_specs(suite.get("suites") or [])
+
+
+def _connector_browser(artifacts, sha, digest, topology, flags):
+    if read_text(artifacts / "candidate-sha.txt").strip() != sha \
+            or read_text(artifacts / "server-image-id.txt").strip() != digest:
+        raise EvidenceError("browser candidate/server identity does not match live fixture")
+    report = _connector_json(artifacts / "playwright-results.json")
+    specs = list(_connector_browser_specs(report.get("suites") or []))
+    good, captures, errors = [], [], []
+    for spec in specs:
+        tests = spec.get("tests") or []
+        if len(tests) != 1:
+            errors.append("missing or duplicate browser project")
+            continue
+        test = tests[0]
+        results = test.get("results") or []
+        if spec.get("title") in good:
+            errors.append("duplicate browser title")
+        if test.get("projectName") == "connectors" and test.get("expectedStatus") == "passed" \
+                and test.get("status") == "expected" and len(results) == 1 \
+                and results[0].get("status") == "passed" and results[0].get("retry") == 0 \
+                and not results[0].get("errors") and spec.get("ok") is True:
+            good.append(spec.get("title"))
+        for result in results:
+            for attachment in result.get("attachments") or []:
+                if attachment.get("contentType") != "application/json" or not attachment.get("body"):
+                    continue
+                try:
+                    capture = json.loads(base64.b64decode(attachment["body"], validate=True))
+                except (ValueError, TypeError, json.JSONDecodeError) as error:
+                    raise EvidenceError("malformed browser JSON attachment") from error
+                if isinstance(capture, dict) and "candidate_sha" in capture:
+                    if capture["candidate_sha"] != sha:
+                        raise EvidenceError("foreign browser attachment candidate")
+                    if capture.get("kind") == "connector_browser_outage" and (
+                            attachment.get("name") != "Connector provider outage"
+                            or spec.get("title") != CONNECTORS_BROWSER[5]):
+                        raise EvidenceError("browser outage capture is outside the monitoring scenario")
+                    captures.append(capture)
+    row = _connector_row("connectors-browser", sha, digest, topology, flags, "browser")
+    once = not errors and len(specs) == len(CONNECTORS_BROWSER) and sorted(good) == sorted(CONNECTORS_BROWSER) \
+        and read_text(artifacts / "exit-status").strip() == "0" and not report.get("errors") \
+        and all(_get(report, "stats", key) == 0 for key in ("unexpected", "flaky", "skipped")) \
+        and _get(report, "stats", "expected") == len(CONNECTORS_BROWSER)
+    events = [event for capture in captures for event in capture.get("events") or [] if isinstance(event, dict)]
+    faults = []
+    if _connector_loss(events, False): faults.append("accepted_reply_lost")
+    if _connector_loss(events, True): faults.append("rejected_reply_lost")
+    outages = [capture for capture in captures
+               if capture.get("kind") == "connector_browser_outage"]
+    if any(isinstance(capture.get("availability"), str)
+           and capture["availability"].startswith("Stale observation")
+           and _nonempty(capture.get("workflow_id")) and _nonempty(capture.get("run_id"))
+           and capture.get("observed_run_id") == capture["run_id"]
+           and _nonempty(capture.get("observed_at"))
+           and any(event.get("kind") == "fault_armed" and event.get("outage") is True
+                   for event in capture.get("events") or [] if isinstance(event, dict))
+           and any(event.get("kind") == "proxy_interruption"
+                   for event in capture.get("events") or [] if isinstance(event, dict))
+           for capture in outages):
+        faults.append("provider_outage_observed")
+    observations = ["candidate_source_image_bound"]
+    if once: observations.append("ten_browser_cases_once_without_retry")
+    if any(_connector_receipts(capture) for capture in captures): observations.append("raw_browser_receipts_and_effects")
+    row.update(status="pass" if once else "fail", observations=observations,
+               recorder={"present": bool(captures), "sample_count": len(good)},
+               fault_activation={"activated": bool(faults), "kind": "temporal-reply-loss-and-outage", "observations": faults},
+               observed_browser_cases=good)
+    return row
+
+
+def _connector_refusal(record):
+    return isinstance(record, dict) and record.get("ready_status") == 200 \
+        and record.get("connector_statuses") == [503] * 5 \
+        and _int(record.get("provider_rpc_before")) is not None \
+        and record.get("provider_rpc_after") == record["provider_rpc_before"] \
+        and record.get("connectors_enabled") is True and record.get("connectors_ready") is False
+
+
+def _connector_cluster(artifacts, sha, fixture_images):
+    _connector_sources(artifacts, sha)
+    record = _connector_json(artifacts / "config-cluster-evidence.json", sha)
+    events = _connector_events(artifacts / "events.jsonl", sha)
+    health = _connector_json(artifacts / "fixture-health.json")
+    if health.get("ready") is not True or any(health.get(key) != value for key, value in CONNECTORS_PINS.items()):
+        raise EvidenceError("cluster running provider pins do not match")
+    image = read_text(artifacts / "server-image-id.txt").strip()
+    if image != fixture_images["server"]:
+        raise EvidenceError("cluster server image differs from the qualified fixture candidate")
+    reused = _connector_json(artifacts / "reuse-image-identities.json", sha)
+    for role, expected in fixture_images.items():
+        if _get(reused, role, "expected_image_id") != expected \
+                or _get(reused, role, "observed_image_id") != expected:
+            raise EvidenceError(f"cluster {role} image differs from the qualified fixture candidate")
+    identities = set(read_text(artifacts / "candidate-identities.txt").strip().split(","))
+    cri = _get(_connector_json(artifacts / "loaded-candidate-cri.json"), "status") or {}
+    seed = set(read_text(artifacts / "candidate-seed-identities.txt").split())
+    imported = set(read_text(artifacts / "imported-server-digests.txt").split())
+    cri_digests = {str(value).rsplit("@", 1)[-1] for value in cri.get("repoDigests") or []}
+    if not DIGEST.match(image) or image not in seed or not identities or any(not DIGEST.match(item) for item in identities) \
+            or seed != imported | {image} or cri.get("id") not in seed \
+            or identities != seed | cri_digests | {cri.get("id")} \
+            or set(str(record.get("candidate_image_digest") or "").split(",")) != identities:
+        raise EvidenceError("cluster candidate image import identities do not agree")
+    members = record.get("initial_members") or []
+    nodes = _connector_json(artifacts / "kind-node-ids.json")
+    sts = _connector_json(artifacts / "statefulset.json")
+    env = {item["name"]: item["value"] for item in
+           (_get(sts, "spec", "template", "spec", "containers") or [{}])[0].get("env", [])
+           if isinstance(item, dict) and isinstance(item.get("value"), str)
+           and item.get("name") in CONNECTORS_SAFE_FLAGS}
+    complete = len(members) == 3 and all(isinstance(member, dict) and all(
+        _nonempty(member.get(key)) for key in ("name", "uid", "ip", "node", "pvc", "volume", "image_id", "container_id")
+    ) for member in members)
+    if complete:
+        complete = all(len({member[key] for member in members}) == 3 for key in ("name", "uid", "ip", "pvc", "container_id")) \
+            and all(member["node"] in nodes and any(member["image_id"].endswith(identity) for identity in identities)
+                    for member in members) and _get(sts, "spec", "replicas") == 3 \
+            and bool(_get(sts, "spec", "volumeClaimTemplates")) and bool(nodes) \
+            and all(re.fullmatch(r"[a-f0-9]{64}", node_id or "") for node_id in nodes.values())
+    topology = {"kind": "kind-helm-statefulset", "replicas": len(members), "persistence": bool(complete), "engine": "kubernetes"}
+    row = _connector_row("connectors-config-cluster", sha, None, topology, env, "http")
+    observations, faults = ["candidate_source_image_bound"], []
+    if complete: observations.append("three_distinct_persistent_members_observed")
+    steps = record.get("steps") or []
+    phases = [step.get("phase") for step in steps if isinstance(step, dict)]
+    expected = ["matching", "mismatch_refused", "guarded_transition_and_stale_node", "immutable_repoint_refused"]
+    if phases == expected:
+        match, skew, transition, repoint = steps
+        workflow = record.get("workflow") or {}
+        fingerprints = match.get("member_fingerprints")
+        matching = isinstance(fingerprints, list) and len(fingerprints) == 2 \
+            and _nonempty(match.get("fingerprint")) and fingerprints == [match["fingerprint"]] * 2 \
+            and len(set(match.get("members") or [])) == 2 \
+            and _int(match.get("provider_rpc_before")) is not None \
+            and (_int(match.get("provider_rpc_count")) or 0) > match["provider_rpc_before"]
+        if matching: observations.append("matching_configurations_reach_provider")
+        if _connector_refusal(skew.get("refusal")) \
+                and _int(skew.get("startup_provider_rpc_before")) is not None \
+                and skew.get("provider_rpc_count") == skew["startup_provider_rpc_before"] \
+                and any(member.get("name") == skew.get("member") and member.get("uid") != skew.get("uid") for member in members):
+            faults.append("configuration_skew_refuses_without_rpc")
+        if _connector_refusal(transition.get("refusal")) and _nonempty(transition.get("fingerprint")) \
+                and transition.get("fingerprint") != match.get("fingerprint") \
+                and transition.get("active_member") != transition.get("stale_member") \
+                and transition.get("active_member") == skew.get("member") \
+                and _nonempty(workflow.get("run_id")) and _nonempty(workflow.get("workflow_id")) \
+                and transition.get("observed_run_id") == workflow["run_id"] \
+                and transition.get("observed_coordinates") == {"run_id": workflow["run_id"], "workflow_id": workflow["workflow_id"]} \
+                and (_int(transition.get("provider_rpc_count")) or 0) > (_int(skew.get("provider_rpc_count")) or 0):
+            observations.append("guarded_epoch_transition_preserves_identity")
+            faults.append("stale_epoch_refuses_without_rpc")
+        if _connector_refusal(repoint.get("refusal")) and _int(repoint.get("startup_provider_rpc_before")) is not None \
+                and repoint.get("provider_rpc_count") == repoint["startup_provider_rpc_before"] \
+                and repoint.get("fingerprint") == transition.get("fingerprint") \
+                and repoint.get("member") == transition.get("active_member") \
+                and _nonempty(repoint.get("uid")) and repoint.get("uid") != skew.get("uid"):
+            faults.append("immutable_repoint_refuses_without_epoch_change")
+    passed, go_ok = _connector_go(read_text(artifacts / "connector-config-test.log"), ("TestConnectorsConfigCluster",))
+    if go_ok and read_text(artifacts / "exit-status").strip() == "0": observations.append("cluster_scenario_once_without_skip")
+    row.update(status="pass" if go_ok else "fail", observations=observations,
+               recorder={"present": bool(events), "sample_count": len(members)},
+               fault_activation={"activated": bool(faults), "kind": "connector-configuration-skew", "observations": faults},
+               observed_candidate_image_id=image, observed_candidate_cri_identities=sorted(identities),
+               observed_nodes=sorted(nodes), observed_members=members)
+    return row
+
+
+def build_connectors(artifacts, candidate_sha):
+    artifacts, sha = Path(artifacts), _require_sha(candidate_sha)
+    fixture = artifacts / "fixture"
+    _connector_sources(fixture, sha)
+    image_records = read_json(fixture / "server-image.json")
+    server_records = read_json(fixture / "server.json")
+    if not isinstance(image_records, list) or len(image_records) != 1 \
+            or not isinstance(server_records, list) or len(server_records) != 1:
+        raise EvidenceError("missing single live server/image inspection")
+    digest, server = image_records[0].get("Id"), server_records[0]
+    if not DIGEST.match(digest or "") or server.get("Image") != digest or not _nonempty(server.get("Id")) \
+            or _get(server, "State", "Running") is not True or _get(server, "State", "OOMKilled") is not False:
+        raise EvidenceError("fixture live server image/state does not match")
+    provenance = _connector_json(fixture / "image-provenance.json", sha)
+    images = read_json(fixture / "images.json")
+    if not isinstance(images, list) or len(images) != 2 or not all(
+            isinstance(image, dict) and DIGEST.match(image.get("Id") or "") for image in images):
+        raise EvidenceError("fixture/runner image inspection is absent or invalid")
+    for name, observed in (("server", digest), ("runner", images[1]["Id"])):
+        binding = provenance.get(name) or {}
+        if binding.get("observed_image_id") != observed or binding.get("origin") not in ("source-build", "loaded") \
+                or (binding.get("origin") == "loaded" and binding.get("expected_image_id") != observed):
+            raise EvidenceError(f"{name} image does not match its source-build or producer binding")
+    flags = _connector_json(fixture / "server-env.json")
+    if not all(isinstance(key, str) and isinstance(value, str) and not BASE.SECRET_ENV.search(key) for key, value in flags.items()):
+        raise EvidenceError("server environment must contain only safe string values")
+    health = _connector_json(fixture / "health.json")
+    events = _connector_events(fixture / "events.jsonl", sha)
+    topology = {"kind": "docker-connectors-fixture", "replicas": 1, "persistence": False, "engine": "docker"}
+    row = _connector_row("connectors-http-temporal", sha, digest, topology, flags, "http+temporal")
+    passed, go_ok = _connector_go(read_text(fixture / "test.log"), CONNECTORS_GO)
+    observations, faults = ["candidate_source_image_bound"], []
+    server_env_names = _get(server, "Config", "EnvNames") or []
+    if all(flags.get(key) == value and key in server_env_names for key, value in CONNECTORS_FLAGS.items()) \
+            and _nonempty(flags.get("CAESIUM_CONNECTORS_CONFIG_FILE")) \
+            and "CAESIUM_CONNECTORS_CONFIG_FILE" in server_env_names:
+        observations.append("authenticated_configured_queue_runtime_observed")
+    if go_ok and read_text(fixture / "exit-status").strip() == "0":
+        observations.append("six_named_go_scenarios_once_without_skip")
+    if health.get("ready") is True and all(health.get(key) == value for key, value in CONNECTORS_PINS.items()):
+        observations.append("running_provider_versions_pinned")
+    records = {name: _connector_json(fixture / name, sha) for name in (
+        "fixture-evidence.json", "messages-provider-evidence.json", "correlation-evidence.json",
+        "operations-component-evidence.json", "read-http-evidence.json", "read-correlation-http-evidence.json",
+        "actions-http-evidence.json", "actions-http-responses.json")}
+    if _connector_receipts(records["actions-http-evidence.json"]) \
+            and _connector_receipts(records["operations-component-evidence.json"]) \
+            and records["actions-http-responses.json"].get("responses"):
+        observations.append("raw_http_receipts_and_independent_effects")
+    if records["correlation-evidence.json"].get("activity_retry_activated") is True \
+            and _get(records["correlation-evidence.json"], "queued", "outcome") == "queued" \
+            and _nonempty(records["correlation-evidence.json"].get("promoted_run_id")):
+        observations.append("queued_correlation_and_activity_retry_observed")
+    read = records["read-http-evidence.json"]
+    if read.get("unchanged_snapshot_writes") == 0 and read.get("unchanged_identity_updates") == 0 \
+            and read.get("closed_workflow_query_rpc_delta") == 0 and read.get("external_workflows"):
+        observations.append("bounded_read_and_storage_observed")
+    for rejected, name in ((False, "accepted_reply_lost"), (True, "rejected_reply_lost")):
+        if _connector_loss(events, rejected): faults.append(name)
+    if any(event.get("kind") == "proxy_interruption" for event in events): faults.append("provider_outage_observed")
+    restarts = records["actions-http-evidence.json"].get("restart") or []
+    if restarts and all(isinstance(item, dict) and item.get("status") == "ok" and _nonempty(item.get("started_before"))
+                        and _nonempty(item.get("started_after")) and item["started_after"] != item["started_before"] for item in restarts):
+        faults.append("actual_server_restart_observed")
+    row.update(status="pass" if go_ok else "fail", observations=observations,
+               recorder={"present": bool(events), "sample_count": len(passed)},
+               fault_activation={"activated": bool(faults), "kind": "temporal-reply-loss-outage-and-restart", "observations": faults},
+               observed_go_scenarios=passed, provider_versions={key: health.get(key) for key in CONNECTORS_PINS},
+               observed_runner_image_id=images[1]["Id"], observed_fixture_image_id=images[0]["Id"],
+               image_provenance=provenance)
+    return {"candidate_sha": sha, "candidate_digest": digest, "gate": "connectors", "gate_enabled": True,
+            "disabled_gates": [], "scenarios": [row,
+                _connector_browser(artifacts / "browser", sha, digest, topology, flags),
+                _connector_cluster(artifacts / "cluster", sha,
+                    {"server": digest, "runner": images[1]["Id"], "fixture": images[0]["Id"]})]}
+
+
 def build_report(fragment_paths, gate, digest=None):
     """One report per lane gate. The lane names its own artifact identity.
 
@@ -1199,6 +1590,11 @@ def parse_args(argv=None):
     con.add_argument("--playwright-exit", type=int, required=True)
     con.add_argument("--out", required=True)
 
+    connectors = sub.add_parser("connectors", help="F2 authenticated connector lane report")
+    connectors.add_argument("--artifacts", required=True)
+    connectors.add_argument("--candidate-sha", required=True)
+    connectors.add_argument("--out", required=True)
+
     perf = sub.add_parser("performance", help="E4 performance-gate fragment")
     perf.add_argument("--artifacts", required=True)
     perf.add_argument("--candidate-sha", required=True)
@@ -1225,6 +1621,8 @@ def main(argv=None):
             payload = build_coverage(args.report, args.candidate_sha)
         elif args.command == "console":
             payload = build_console(args.artifacts, args.candidate_sha, args.playwright_exit)
+        elif args.command == "connectors":
+            payload = build_connectors(args.artifacts, args.candidate_sha)
         elif args.command == "performance":
             payload = build_performance(args.artifacts, args.candidate_sha)
         else:

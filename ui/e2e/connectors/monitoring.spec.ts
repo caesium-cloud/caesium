@@ -103,6 +103,9 @@ test("viewer filters and inspects a real external-only workflow, pages history a
   expect(Date.parse(observed!)).toBeGreaterThan(0);
   await captureObservation(page, testInfo, "live");
   try {
+    const beforeOutage = await request.get(`${lane.controlURL}/evidence`);
+    expect(beforeOutage.ok()).toBe(true);
+    const beforeOutageEvents = await beforeOutage.json() as Record<string, unknown>[];
     await fixturePost(request, lane, "/fault", { outage: true });
     await expect(page.getByTestId("execution-availability")).toContainText("Stale observation", { timeout: 45_000 });
     await expect(page.getByTestId("external-run-id")).toHaveText(workflow.run_id);
@@ -117,6 +120,19 @@ test("viewer filters and inspects a real external-only workflow, pages history a
     const events = await evidence.json() as Record<string, unknown>[];
     expect(events.some(event => event.kind === "fault_armed" && event.outage === true)).toBe(true);
     expect(events.some(event => event.kind === "proxy_interruption")).toBe(true);
+    await testInfo.attach("Connector provider outage", {
+      body: JSON.stringify({
+        kind: "connector_browser_outage",
+        candidate_sha: process.env.CAESIUM_CONNECTORS_CANDIDATE_SHA,
+        workflow_id: workflow.workflow_id,
+        run_id: workflow.run_id,
+        observed_run_id: (await page.getByTestId("external-run-id").textContent())?.trim(),
+        availability: await page.getByTestId("execution-availability").textContent(),
+        observed_at: staleObserved,
+        events: events.slice(beforeOutageEvents.length),
+      }),
+      contentType: "application/json",
+    });
     await captureObservation(page, testInfo, "stale");
   } finally {
     await fixturePost(request, lane, "/fault", { outage: false });

@@ -10,6 +10,11 @@ const (
 	// KeyPrefixLive is the scannable prefix for production API keys.
 	KeyPrefixLive = "csk_live_"
 
+	// KeyPrefixUser is the scannable prefix for user-bound keys (E4). It is a
+	// label for humans and scanners only: whether a key is user-bound is read
+	// from its stored row, never from the prefix a caller presents.
+	KeyPrefixUser = "csk_user_"
+
 	// SessionTokenPrefix marks opaque session tokens.
 	SessionTokenPrefix = "css_"
 
@@ -27,12 +32,22 @@ const base62Chars = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvw
 // Returns (plaintext_key, key_prefix, error).
 // The plaintext key must be shown exactly once at creation time.
 func GenerateKey() (plaintext, prefix string, err error) {
+	return generateKeyWithPrefix(KeyPrefixLive)
+}
+
+// GenerateUserKey produces a new user-bound API key (csk_user_…) and its
+// display prefix.
+func GenerateUserKey() (plaintext, prefix string, err error) {
+	return generateKeyWithPrefix(KeyPrefixUser)
+}
+
+func generateKeyWithPrefix(scheme string) (plaintext, prefix string, err error) {
 	random, err := base62Encode(randomBytes)
 	if err != nil {
 		return "", "", fmt.Errorf("generate key: %w", err)
 	}
 
-	plaintext = KeyPrefixLive + random
+	plaintext = scheme + random
 	prefix = plaintext[:displayPrefixLen]
 	return plaintext, prefix, nil
 }

@@ -98,6 +98,7 @@ var (
 		"id", "issuer", "last_login_at", "last_login_role", "subject"}
 	wantSessionKeys = []string{"absolute_expires_at", "auth_method", "created_at", "id", "idle_expires_at",
 		"last_seen_at", "source_ip", "user_agent", "user_id"}
+	wantUserKeyViewKeys = []string{"created_at", "description", "expires_at", "id", "key_prefix", "last_used_at"}
 )
 
 func requireHTTPStatus(t *testing.T, err error, code int) {
@@ -134,19 +135,38 @@ func TestUserAdminViewsCarryNoCredentials(t *testing.T) {
 	require.Empty(t, rec.Header().Get(headerNextOffset), "the last page has no continuation")
 	require.Contains(t, rec.Body.String(), older.ID.String())
 
+	userKey, err := iauth.NewService(f.db).MintUserBoundKey(t.Context(), iauth.MintUserKeyRequest{
+		UserID: newer.ID, DisableGeneration: newer.DisableGeneration, Description: "laptop", CreatedBy: newer.Email,
+	})
+	require.NoError(t, err)
+
 	c, rec = adminContext(t, http.MethodGet, "/v1/auth/users/"+newer.ID.String(), newer.ID.String(), adminKeyPrincipal)
 	require.NoError(t, f.ctrl.GetUser(c))
 	require.Equal(t, http.StatusOK, rec.Code)
 	raw := rec.Body.Bytes()
-	require.Equal(t, sortedCopy(append(append([]string{}, wantUserKeys...), "sessions", "sessions_total")), keysOf(t, raw))
+	require.Equal(t, sortedCopy(append(append([]string{}, wantUserKeys...), "sessions", "sessions_total", "user_keys", "user_keys_total")), keysOf(t, raw))
 	var detail struct {
 		Sessions      []json.RawMessage `json:"sessions"`
 		SessionsTotal int64             `json:"sessions_total"`
+		UserKeys      []json.RawMessage `json:"user_keys"`
+		UserKeysTotal int64             `json:"user_keys_total"`
 	}
 	require.NoError(t, json.Unmarshal(raw, &detail))
 	require.Equal(t, int64(1), detail.SessionsTotal)
 	require.Len(t, detail.Sessions, 1)
 	require.Equal(t, wantSessionKeys, keysOf(t, detail.Sessions[0]))
+	require.Equal(t, int64(1), detail.UserKeysTotal)
+	require.Len(t, detail.UserKeys, 1)
+	require.Equal(t, wantUserKeyViewKeys, keysOf(t, detail.UserKeys[0]))
+	var keyView UserKeyView
+	require.NoError(t, json.Unmarshal(detail.UserKeys[0], &keyView))
+	require.Equal(t, userKey.Key.ID, keyView.ID)
+	require.Equal(t, userKey.Key.KeyPrefix, keyView.KeyPrefix)
+	require.Equal(t, "laptop", keyView.Description)
+	require.NotNil(t, keyView.ExpiresAt)
+	require.NotContains(t, string(raw), userKey.Key.KeyHash)
+	require.NotContains(t, string(raw), userKey.Plaintext)
+	require.NotContains(t, string(raw), `"role"`)
 
 	c, rec = adminContext(t, http.MethodGet, "/v1/auth/sessions?user_id="+newer.ID.String(), "", adminKeyPrincipal)
 	require.NoError(t, f.ctrl.ListSessions(c))
@@ -280,6 +300,67 @@ func TestUserAdminDisableEnableRevokeAudit(t *testing.T) {
 	require.NoError(t, f.ctrl.RevokeUserSessions(c))
 	require.Zero(t, readJSONBody[SessionsRevokedResponse](t, rec).SessionsRevoked)
 	require.Len(t, auditRows(t, f.auditor, iauth.ActionSessionsRevoked), 2, "revoking nothing is not audited")
+}
+
+// TestUserAdminCascadesCountUserBoundKeys: disable and log-out-everywhere
+// revoke the user's user-bound keys with its sessions and say so in the body
+// and the audit rows; with no user-bound key every body is the E3 shape.
+func TestUserAdminCascadesCountUserBoundKeys(t *testing.T) {
+	f := newUserAdminFixture(t)
+	svc := iauth.NewService(f.db)
+	mintKey := func(u *models.User) *iauth.CreateKeyResponse {
+		t.Helper()
+		resp, err := svc.MintUserBoundKey(t.Context(), iauth.MintUserKeyRequest{UserID: u.ID, DisableGeneration: f.row(t, u.ID).DisableGeneration})
+		require.NoError(t, err)
+		return resp
+	}
+
+	// No user-bound key: the body keys are exactly E3's.
+	plainUser := f.seedUser(t, "plain@example.com", time.Now().UTC())
+	f.mint(t, plainUser)
+	pid := plainUser.ID.String()
+	c, rec := adminContext(t, http.MethodPost, "/v1/auth/users/"+pid+"/disable", pid, adminKeyPrincipal)
+	require.NoError(t, f.ctrl.DisableUser(c))
+	require.Equal(t, []string{"changed", "sessions_revoked", "user"}, keysOf(t, rec.Body.Bytes()))
+	require.NotContains(t, auditMeta(t, auditRows(t, f.auditor, iauth.ActionUserDisable)[0]), "keys_revoked")
+	c, rec = adminContext(t, http.MethodPost, "/v1/auth/users/"+pid+"/sessions/revoke", pid, adminKeyPrincipal)
+	require.NoError(t, f.ctrl.RevokeUserSessions(c))
+	require.Equal(t, []string{"sessions_revoked", "user_id"}, keysOf(t, rec.Body.Bytes()))
+
+	// Keys only, no session: the revocation is still audited.
+	user := f.seedUser(t, "keys@example.com", time.Now().UTC())
+	id := user.ID.String()
+	k1 := mintKey(user)
+	c, rec = adminContext(t, http.MethodPost, "/v1/auth/users/"+id+"/sessions/revoke", id, adminKeyPrincipal)
+	require.NoError(t, f.ctrl.RevokeUserSessions(c))
+	out := readJSONBody[SessionsRevokedResponse](t, rec)
+	require.Equal(t, SessionsRevokedResponse{UserID: user.ID, SessionsRevoked: 0, KeysRevoked: 1}, out)
+	_, _, err := svc.AuthenticateKey(t.Context(), k1.Plaintext)
+	require.ErrorIs(t, err, iauth.ErrKeyRevoked)
+	revokes := auditRows(t, f.auditor, iauth.ActionSessionsRevoked)
+	require.Equal(t, map[string]any{"reason": "admin", "count": float64(0), "keys_revoked": float64(1)}, auditMeta(t, revokes[0]))
+
+	// Disable: sessions and keys in one transaction, both counted.
+	mintKey(user)
+	mintKey(user)
+	f.mint(t, user)
+	c, rec = adminContext(t, http.MethodPost, "/v1/auth/users/"+id+"/disable", id, adminKeyPrincipal)
+	require.NoError(t, f.ctrl.DisableUser(c))
+	resp := readJSONBody[UserChangeResponse](t, rec)
+	require.True(t, resp.Changed)
+	require.Equal(t, int64(1), resp.SessionsRevoked)
+	require.Equal(t, int64(2), resp.KeysRevoked)
+	disables := auditRows(t, f.auditor, iauth.ActionUserDisable)
+	require.Equal(t, map[string]any{"sessions_revoked": float64(1), "keys_revoked": float64(2)}, auditMeta(t, disables[0]))
+	revokes = auditRows(t, f.auditor, iauth.ActionSessionsRevoked)
+	require.Equal(t, map[string]any{"reason": "user_disabled", "count": float64(1), "keys_revoked": float64(2)}, auditMeta(t, revokes[0]))
+
+	c, rec = adminContext(t, http.MethodGet, "/v1/auth/users/"+id, id, adminKeyPrincipal)
+	require.NoError(t, f.ctrl.GetUser(c))
+	detail := readJSONBody[UserDetailView](t, rec)
+	require.Empty(t, detail.UserKeys, "revoked keys are not active")
+	require.NotNil(t, detail.UserKeys)
+	require.Zero(t, detail.UserKeysTotal)
 }
 
 func (f *userAdminFixture) row(t *testing.T, id uuid.UUID) models.User {
