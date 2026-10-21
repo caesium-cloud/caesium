@@ -431,3 +431,44 @@ func TestReadScopeReadsWhitespaceAliasesOncePerSnapshot(t *testing.T) {
 	}))
 	require.Equal(t, 1, whitespaceQueries, "a new snapshot reads them again, once")
 }
+
+// The read scope's caches live exactly one transaction (PR #668 review r10).
+// The importer binds the contract audience to each apply attempt's
+// transaction; between two attempts (a serialization-conflict retry) an
+// unrestricted writer moves the lone "consumer " from marketing to finance,
+// and the retried attempt must withhold the finding rather than reuse the
+// previous attempt's whitespace-alias rows. Leaving a snapshot drops what was
+// read inside it as well.
+func TestReadScopeCachesLiveOneTransaction(t *testing.T) {
+	ctx := context.Background()
+	twin := scopeDefinition("consumer", "marketing")
+	twin.Metadata.Alias = "consumer "
+	conn := freshCatalog(t, scopeDefinition("producer", "marketing"), twin)
+	finding := internalcontract.ContractFinding{Producer: "producer", Consumer: "consumer", EdgeClass: string(internalcontract.EdgeClassDeclared)}
+	move := func(namespace string) {
+		t.Helper()
+		require.NoError(t, conn.Model(&models.Job{}).Where("alias = ?", "consumer ").Update("namespace", namespace).Error)
+	}
+
+	audience := newReadScopeFor([]string{"marketing"}, conn, nil).contractAudience(ctx)
+	attempt := func() bool {
+		t.Helper()
+		var visible bool
+		require.NoError(t, conn.Transaction(func(tx *gorm.DB) error {
+			visible = audience(tx)(finding)
+			return nil
+		}))
+		return visible
+	}
+	require.True(t, attempt(), "first attempt: the lone marketing \"consumer \" is marketing's own")
+	move("finance")
+	require.False(t, attempt(), "the retried attempt reads the moved row")
+
+	view := newReadScopeFor([]string{"marketing"}, conn, nil)
+	require.NoError(t, view.withSnapshot(ctx, conn, func(*gorm.DB) error {
+		require.False(t, view.aliasVisible(ctx, "consumer"), "in finance inside the snapshot")
+		return nil
+	}))
+	move("marketing")
+	require.True(t, view.aliasVisible(ctx, "consumer"), "nothing read inside the snapshot outlives it")
+}

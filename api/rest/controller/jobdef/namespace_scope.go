@@ -373,16 +373,14 @@ func (s *readScope) findingVisible(ctx context.Context, finding internalcontract
 
 // contractAudience is the importer's ContractAudience for a confined apply:
 // bound to the apply transaction (whose REPEATABLE READ snapshot on
-// PostgreSQL also produced the findings), with the visibility caches cleared
-// so a retried attempt never reuses a verdict from an earlier snapshot.
+// PostgreSQL also produced the findings), with every cache dropped (bind) so
+// a retried attempt never reuses a verdict or a row from an earlier snapshot.
 func (s *readScope) contractAudience(ctx context.Context) func(tx *gorm.DB) func(internalcontract.ContractFinding) bool {
 	if s == nil {
 		return nil
 	}
 	return func(tx *gorm.DB) func(internalcontract.ContractFinding) bool {
-		s.db = tx
-		clear(s.visible)
-		clear(s.sharesForeign)
+		s.bind(tx)
 		return func(finding internalcontract.ContractFinding) bool { return s.findingVisible(ctx, finding) }
 	}
 }
@@ -446,14 +444,23 @@ func (s *readScope) withSnapshot(ctx context.Context, conn *gorm.DB, fn func(con
 		return fn(conn)
 	}
 	outer := s.db
-	defer func() { s.db = outer }()
+	defer s.bind(outer)
 	return jobdiff.ReadSnapshot(ctx, outer, func(tx *gorm.DB) error {
-		s.db = tx
-		clear(s.visible)
-		clear(s.sharesForeign)
-		s.whitespaceRows, s.whitespaceLoaded = nil, false
+		s.bind(tx)
 		return fn(tx)
 	})
+}
+
+// bind points the scope at conn (a new transaction or snapshot, or the
+// connection it is handed back to) and drops every cache read through the
+// previous one: the visibility verdicts, the shared-trigger marks and the
+// whitespace-alias rows. Every rebind goes through here, so each cache lives
+// exactly one transaction (PR #668 review r10).
+func (s *readScope) bind(conn *gorm.DB) {
+	s.db = conn
+	clear(s.visible)
+	clear(s.sharesForeign)
+	s.whitespaceRows, s.whitespaceLoaded = nil, false
 }
 
 // validate runs a cross-job validator over the catalog (conn for an
