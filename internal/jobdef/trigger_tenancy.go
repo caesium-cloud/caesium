@@ -233,6 +233,43 @@ func servedJobsTx(tx *gorm.DB, triggerIDs []uuid.UUID, lock bool) ([]servedJob, 
 	return served, nil
 }
 
+// afterTenancyPeerRead, when set (tests only), runs in a writer's tenancy
+// check between its first read of a trigger row's jobs and its lock of the
+// row, where a concurrent revival onto the row would interleave.
+var afterTenancyPeerRead func()
+
+// lockServedRowTx returns the live jobs a trigger row serves and the row
+// itself (retired rows included; nil when there is none), all locked: the
+// jobs first, then the row (the importer's lock order). The jobs are read
+// again once the row is locked. Every write that puts a job on a row (a
+// revival or an in-place apply, upsertTriggerTx) or edits it (a PATCH)
+// locks the row, so from here on the row and the jobs it serves cannot
+// change before this transaction writes; the second read sees any such
+// write that committed while the first was taken (READ COMMITTED), and
+// under REPEATABLE READ the row lock fails with a serialization error
+// instead, which the caller's contention retry absorbs.
+func lockServedRowTx(tx *gorm.DB, triggerID uuid.UUID) ([]servedJob, *models.Trigger, error) {
+	ids := []uuid.UUID{triggerID}
+	if _, err := servedJobsTx(tx, ids, true); err != nil {
+		return nil, nil, err
+	}
+	if afterTenancyPeerRead != nil {
+		afterTenancyPeerRead()
+	}
+	var rows []models.Trigger
+	if err := lockJobRows(tx).Unscoped().Select("id", "type", "deleted_at").Where("id = ?", triggerID).Find(&rows).Error; err != nil {
+		return nil, nil, err
+	}
+	served, err := servedJobsTx(tx, ids, true)
+	if err != nil {
+		return nil, nil, err
+	}
+	if len(rows) == 0 {
+		return served, nil, nil
+	}
+	return served, &rows[0], nil
+}
+
 // webhookSubscribersTx returns the live jobs served by the live HTTP triggers
 // on path, other than the trigger row excluded (uuid.Nil excludes none).
 func webhookSubscribersTx(tx *gorm.DB, path string, excluded uuid.UUID, lock bool) ([]servedJob, error) {
@@ -290,7 +327,13 @@ func checkApplyTenancyTx(tx *gorm.DB, existing *models.Job, def *schema.Definiti
 	}
 	var peers []servedJob
 	if target.TriggerID != uuid.Nil {
-		served, err := servedJobsTx(tx, []uuid.UUID{target.TriggerID}, lock)
+		var served []servedJob
+		var err error
+		if lock {
+			served, _, err = lockServedRowTx(tx, target.TriggerID)
+		} else {
+			served, err = servedJobsTx(tx, []uuid.UUID{target.TriggerID}, false)
+		}
 		if err != nil {
 			return tenancyVerdict{}, err
 		}
@@ -378,16 +421,16 @@ func CheckTriggerPatchTx(tx *gorm.DB, patch TriggerPatch, scope *TenancyScope) e
 	if scope == nil && !enforce {
 		return nil
 	}
-	served, err := servedJobsTx(tx, []uuid.UUID{patch.TriggerID}, true)
+	// The row is locked with its jobs, and whether the configuration proposes
+	// a webhook path depends on its type as locked, so a concurrent apply can
+	// change neither the row nor the jobs it serves between this check and
+	// the write.
+	served, row, err := lockServedRowTx(tx, patch.TriggerID)
 	if err != nil {
 		return err
 	}
-	// Whether the configuration proposes a webhook path depends on the row's
-	// type, read here locked (after its jobs, the importer's lock order) so a
-	// concurrent apply cannot change it between this check and the write.
-	var row models.Trigger
-	if err := lockJobRows(tx).Select("id", "type").Where("id = ?", patch.TriggerID).First(&row).Error; err != nil {
-		return err
+	if row == nil || row.DeletedAt.Valid {
+		return gorm.ErrRecordNotFound
 	}
 	if row.Type != models.TriggerTypeHTTP {
 		patch.Path = ""

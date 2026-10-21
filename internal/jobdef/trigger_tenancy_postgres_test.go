@@ -243,6 +243,81 @@ func TestPostgresPruneKeepsRowOfConcurrentlyRevivedJob(t *testing.T) {
 	}
 }
 
+// sharedRowWithRetiredFinanceJob is a legacy trigger row serving a live
+// marketing job and a retired finance job (no policy file).
+func sharedRowWithRetiredFinanceJob(t *testing.T, f *tenancyFixture) (mkt, fin string, row uuid.UUID) {
+	t.Helper()
+	mkt, fin = uniqueName("mkt"), uniqueName("fin")
+	f.mustApply(mkt, "marketing", "")
+	f.mustApply(fin, "finance", "")
+	row = f.share(mkt, fin)
+	_, err := f.importer.PruneMissing(context.Background(), []string{mkt}, nil)
+	require.NoError(t, err)
+	require.True(t, f.job(fin).DeletedAt.Valid)
+	require.False(t, f.trigger(row).DeletedAt.Valid, "the marketing job keeps the row")
+	return mkt, fin, row
+}
+
+// reviveDuringPeerRead makes the next tenancy check, between its first read
+// of the row's jobs and its lock of the row, wait for an unrestricted apply
+// that revives the finance job onto the row and commits (PR #668 review r1).
+func reviveDuringPeerRead(t *testing.T, f *tenancyFixture, fin string) *bool {
+	t.Helper()
+	revived := false
+	afterTenancyPeerRead = func() {
+		if revived {
+			return
+		}
+		revived = true
+		_, err := f.importer.ApplyWithOptions(context.Background(), f.def(fin, "finance", ""), nil)
+		require.NoError(t, err)
+	}
+	t.Cleanup(func() { afterTenancyPeerRead = nil })
+	return &revived
+}
+
+// An allowlisted git-sync batch (READ COMMITTED) reads a shared row's live
+// jobs; before it writes, an unrestricted apply revives a retired finance job
+// onto the row and commits. The sync must see the revived job and skip the
+// definition, never rewrite the live finance job's trigger.
+func TestPostgresAllowlistedSyncSeesRevivalOnSharedRow(t *testing.T) {
+	db := openTenancyPostgres(t)
+	f := &tenancyFixture{t: t, db: db, importer: NewImporter(db)}
+	mkt, fin, row := sharedRowWithRetiredFinanceJob(t, f)
+	revived := reviveDuringPeerRead(t, f, fin)
+
+	result, err := f.importer.ApplyBatchWithOptions(context.Background(), []BatchPlan{
+		{Def: f.def(mkt, "marketing", ""), Opts: &ApplyOptions{NamespaceAllowlist: []string{"marketing"}}},
+	})
+	require.NoError(t, err)
+	require.True(t, *revived)
+	require.Len(t, result.Refused, 1, "the sync saw the revived finance job on the row")
+	require.Equal(t, NamespaceReasonTriggerShared, result.Refused[0].Err.Reason)
+	job := f.job(fin)
+	require.False(t, job.DeletedAt.Valid)
+	require.Equal(t, row, job.TriggerID)
+	require.Equal(t, fin, f.trigger(row).Alias, "the finance job's trigger is as its own apply wrote it")
+}
+
+// The same interleaving against a confined trigger PATCH.
+func TestPostgresTriggerPatchSeesRevivalOnSharedRow(t *testing.T) {
+	db := openTenancyPostgres(t)
+	f := &tenancyFixture{t: t, db: db, importer: NewImporter(db)}
+	_, fin, row := sharedRowWithRetiredFinanceJob(t, f)
+	revived := reviveDuringPeerRead(t, f, fin)
+
+	scope := NewTenancyScope([]string{"marketing"}, nil)
+	err := WriteTx(context.Background(), db, nil, func(tx *gorm.DB) error {
+		if err := CheckTriggerPatchTx(tx, TriggerPatch{TriggerID: row}, scope); err != nil {
+			return err
+		}
+		return tx.Model(&models.Trigger{}).Where("id = ?", row).Update("alias", "patched").Error
+	})
+	require.True(t, *revived)
+	requireTenancyRefusal(t, err, NamespaceReasonTriggerShared)
+	require.Equal(t, fin, f.trigger(row).Alias, "the refused PATCH left the finance job's trigger alone")
+}
+
 func requireOneSubscribingNamespace(t *testing.T, db *gorm.DB, path string) {
 	t.Helper()
 	var namespaces []string
