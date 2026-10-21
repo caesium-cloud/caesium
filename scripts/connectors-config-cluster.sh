@@ -96,15 +96,49 @@ for raw in paths:
     records.append({"path":str(p),"sha256":hashlib.sha256(data).hexdigest()})
 json.dump(records,sys.stdout,indent=2)
 ' >"$artifacts/source-checksums.json"
-# These recipes build the current checkout. Do not inherit stale-image skips.
-CAESIUM_SKIP_IMAGE_BUILD=false just tag="$tag" builder-full build-test
-runner_image="caesiumcloud/caesium-connectors-runner:$tag"
-docker build --build-arg "BUILDER_IMAGE=caesiumcloud/caesium-builder:$tag-full" \
-  -f build/Dockerfile.integration -t "$runner_image" .
-CAESIUM_CONNECTORS_TAG="$tag" CAESIUM_CONNECTORS_BUILDER_IMAGE="caesiumcloud/caesium-builder:$tag-full" \
-  sh scripts/connectors-fixture.sh build
 server_image="caesiumcloud/caesium:$tag-test"
 fixture_image="caesiumcloud/caesium-connectors-fixture:$tag"
+runner_image="${CAESIUM_INTEGRATION_RUNNER_IMAGE:-caesiumcloud/caesium-connectors-runner:$tag}"
+case "${CAESIUM_CONNECTORS_REUSE_IMAGES:-false}" in
+  true)
+    verify_reuse_images() {
+    python3 - "$candidate" "$artifacts/reuse-image-identities.json" "$server_image" "$runner_image" "$fixture_image" <<'PYREUSE'
+import json, os, re, subprocess, sys
+candidate, target, *refs = sys.argv[1:]
+roles = ('server', 'runner', 'fixture')
+result = {'candidate_sha': candidate}
+for role, ref in zip(roles, refs):
+    expected = os.environ.get('CAESIUM_CONNECTORS_REUSE_' + role.upper() + '_IMAGE_ID', '')
+    if not re.fullmatch(r'sha256:[0-9a-f]{64}', expected):
+        raise SystemExit('image reuse requires first-phase immutable ' + role + ' identity')
+    producer_name = {'server': 'CAESIUM_CONNECTORS_EXPECTED_IMAGE_ID',
+                     'runner': 'CAESIUM_CONNECTORS_EXPECTED_RUNNER_IMAGE_ID'}.get(role)
+    if producer_name and os.environ.get(producer_name) and os.environ[producer_name] != expected:
+        raise SystemExit('image reuse differs from producer ' + role + ' identity')
+    try:
+        observed = subprocess.check_output(['docker', 'image', 'inspect', '--format', '{{.Id}}', ref],
+                                           text=True, stderr=subprocess.PIPE, timeout=30).strip()
+    except (OSError, subprocess.SubprocessError):
+        raise SystemExit('image reuse cannot inspect ' + role + ' tag') from None
+    if observed != expected:
+        raise SystemExit('image reuse ' + role + ' tag differs from tested first-phase image')
+    result[role] = {'tag': ref, 'expected_image_id': expected, 'observed_image_id': observed}
+with open(target, 'w') as output: json.dump(result, output, indent=2)
+PYREUSE
+    }
+    verify_reuse_images
+    ;;
+  false)
+    # Independent manual qualification builds this clean candidate. The F2
+    # lane can reuse the images its fixture just built or loaded for this SHA.
+    CAESIUM_SKIP_IMAGE_BUILD=false just tag="$tag" builder-full build-test
+    docker build --build-arg "BUILDER_IMAGE=caesiumcloud/caesium-builder:$tag-full" \
+      -f build/Dockerfile.integration -t "$runner_image" .
+    CAESIUM_CONNECTORS_TAG="$tag" CAESIUM_CONNECTORS_BUILDER_IMAGE="caesiumcloud/caesium-builder:$tag-full" \
+      sh scripts/connectors-fixture.sh build
+    ;;
+  *) echo 'image reuse option must be true or false' >&2; exit 1 ;;
+esac
 kind_image="${CAESIUM_CONNECTORS_KIND_IMAGE:-kindest/node:v1.37.0}"
 docker image inspect "$kind_image" >/dev/null 2>&1 || docker pull "$kind_image"
 docker image inspect --format '{{.Id}}' "$server_image" >"$artifacts/server-image-id.txt"
@@ -128,6 +162,9 @@ owned=true
 load_image() {
   helm_fixture_load_image "$cluster" "$1" "$artifacts"
 }
+# Recheck after cluster startup, immediately before import; no changed tag can
+# enter this topology under an earlier receipt.
+if [[ "${CAESIUM_CONNECTORS_REUSE_IMAGES:-false}" == true ]]; then verify_reuse_images; fi
 for ref in "$server_image" "$fixture_image" "$runner_image" busybox:1.36.1; do
   docker image inspect "$ref" >/dev/null 2>&1 || docker pull "$ref"
   load_image "$ref"
@@ -220,13 +257,16 @@ kn create configmap connectors-config \
   --from-file=caesium-0.yaml="$artifacts/connections.yaml" \
   --from-file=caesium-1.yaml="$artifacts/connections.yaml" \
   --from-file=caesium-2.yaml="$artifacts/connections.yaml"
+# The Docker baseline policy path is preserved below, so mount its actual file.
+kn create configmap connector-policy --from-file=two-namespaces.yaml=test/testdata/policy/two-namespaces.yaml
 # Derive the environment from the tracked Kubernetes baseline instead of
 # duplicating its feature flags. The same Helm chart supplies peer discovery.
 helm template caesium helm/caesium --namespace "$namespace" --values helm/caesium/ci/test-values-k8s.yaml \
   --show-only templates/statefulset.yaml >"$artifacts/baseline.yaml"
 kc create --dry-run=client --validate=false -f "$artifacts/baseline.yaml" -o json >"$artifacts/baseline.json"
 python3 - "$artifacts/baseline.json" "$tag" >"$artifacts/values.json" <<'PY'
-import json,sys
+import json,re,sys
+from pathlib import Path
 base=json.load(open(sys.argv[1]))
 native={"POD_NAME","POD_NAMESPACE","POD_IP","CAESIUM_LOG_LEVEL","CAESIUM_PORT","CAESIUM_NODE_ADDRESS",
         "CAESIUM_DATABASE_PATH","CAESIUM_DATABASE_TYPE","CAESIUM_KUBERNETES_NAMESPACE"}
@@ -235,11 +275,24 @@ extra={"CAESIUM_EXECUTION_MODE":"distributed","CAESIUM_DATABASE_SHARDS":"1","CAE
        "CAESIUM_DATABASE_STANDBYS":"0","CAESIUM_AUTH_MODE":"api-key","CAESIUM_AUTH_REQUIRE_TLS":"false",
        "CAESIUM_AUTH_KEY_HASH_SECRET":"connector-config-cluster-test-key-hash-secret-000001",
        "CAESIUM_CONNECTORS_ENABLED":"true","CAESIUM_CONNECTORS_CONFIG_FILE":"/connectors/$(POD_NAME).yaml"}
+# Track the Docker baseline's CAESIUM feature envs, including future gates.
+# Preserve chart-specific values (Kubernetes engine, distributed topology).
+recipe = Path('justfile').read_text().split('integration-up:', 1)[1].split('\n\n', 1)[0]
+for line in recipe.splitlines():
+    match = re.match(r'\s*-e (CAESIUM_[A-Z0-9_]+)=(.*)', line)
+    if not match:
+        continue
+    name, value = match.groups()
+    value = value.strip().removesuffix(chr(92)).strip()
+    value = value.replace('{{ event_ingest_api_key }}', 'integration-test-key').replace('{{ contract_deprecation_window }}', '5s')
+    if '{{' in value:
+        raise SystemExit('unresolved baseline connector cluster env: ' + name)
+    env.setdefault(name, {"name":name,"value":value})
 env.update({k:{"name":k,"value":v} for k,v in extra.items()})
 json.dump({"replicaCount":3,"image":{"repository":"caesiumcloud/caesium","tag":sys.argv[2]+"-test","pullPolicy":"Never"},
  "config":{"extraEnv":list(env.values())},"persistence":{"enabled":True},"resources":{"limits":{"cpu":"1000m","memory":"768Mi"}},
- "extraVolumes":[{"name":"connectors","configMap":{"name":"connectors-config"}},{"name":"connector-tls","secret":{"secretName":"connector-tls","defaultMode":288}}],
- "extraVolumeMounts":[{"name":"connectors","mountPath":"/connectors","readOnly":True},{"name":"connector-tls","mountPath":"/artifacts/tls","readOnly":True}]},sys.stdout)
+ "extraVolumes":[{"name":"connector-policy","configMap":{"name":"connector-policy"}},{"name":"connectors","configMap":{"name":"connectors-config"}},{"name":"connector-tls","secret":{"secretName":"connector-tls","defaultMode":288}}],
+ "extraVolumeMounts":[{"name":"connector-policy","mountPath":"/etc/caesium/policy-fixture","readOnly":True},{"name":"connectors","mountPath":"/connectors","readOnly":True},{"name":"connector-tls","mountPath":"/artifacts/tls","readOnly":True}]},sys.stdout)
 PY
 helm_fixture_install_chart "$kubeconfig" "$namespace" caesium helm/caesium \
   --values helm/caesium/ci/test-values-k8s.yaml --values "$artifacts/values.json" --wait --timeout 480s
@@ -293,7 +346,7 @@ for ((i=0; i<1260; i++)); do
 done
 collect
 [[ "$finished" == true && "$(cat "$artifacts/test-exit")" == 0 ]] || { echo 'cluster scenario failed or timed out' >&2; exit 1; }
-grep -q '^--- PASS: TestConnectorsConfigCluster ' "$artifacts/connector-config-test.log"
+[[ "$(grep -c '^--- PASS: TestConnectorsConfigCluster ' "$artifacts/connector-config-test.log" || true)" == 1 ]] || { echo 'cluster scenario must pass exactly once' >&2; exit 1; }
 if grep -qE -- '--- (FAIL|SKIP): TestConnectorsConfigCluster([ /]|$)' "$artifacts/connector-config-test.log"; then
   echo 'selected cluster scenario skipped or failed' >&2; exit 1
 fi
