@@ -32,6 +32,8 @@ name=Path(sys.argv[0]).name
 root=Path(os.environ['PROBE_ROOT'])
 with (root/'artifacts/calls').open('a') as out: out.write(json.dumps([name,*sys.argv[1:]])+'\\n')
 if name=='npx' and 'test' in sys.argv:
+    (root/'artifacts/browser-env.json').write_text(json.dumps({name:os.environ.get(name) for name in
+        ('CAESIUM_CONNECTORS_EXPECTED_UI_URL','CAESIUM_MANUAL_TRIGGER_API_KEY')}))
     Path(os.environ['PLAYWRIGHT_JSON_OUTPUT_NAME']).write_text(json.dumps({'stats':{'expected':10},'error':'csk_browser_private','attachments':[{'contentType':'application/json','body':'eyJrZXkiOiJjc2tfYnJvd3Nlcl9wcml2YXRlIn0='}]}))
     raise SystemExit(int(os.environ.get('BROWSER_EXIT','0')))
 ''')
@@ -119,6 +121,9 @@ if '--out' in sys.argv: Path(sys.argv[sys.argv.index('--out')+1]).write_text('{}
         browser = next(call for call in calls if call[:3] == ['npx', 'playwright', 'test'])
         self.assertIn('--project=connectors', browser)
         self.assertIn('--retries=0', browser)
+        browser_env = json.loads((self.root / 'artifacts/browser-env.json').read_text())
+        self.assertEqual(browser_env['CAESIUM_CONNECTORS_EXPECTED_UI_URL'], 'https://temporal-ui.example.test/console')
+        self.assertEqual(browser_env['CAESIUM_MANUAL_TRIGGER_API_KEY'], 'integration-test-key')
         lane = self.root / 'artifacts/lane'
         self.assertEqual((lane / 'browser/candidate-sha.txt').read_text().strip(), self.sha)
         identities = json.loads((lane/'cluster/received-image-ids.json').read_text())

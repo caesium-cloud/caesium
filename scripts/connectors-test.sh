@@ -18,6 +18,8 @@ record, = json.load(open(sys.argv[1]))
 print(record['Image'])
 PY
     export CI=true PLAYWRIGHT_BASE_URL="$CAESIUM_BASE_URL"
+    export CAESIUM_CONNECTORS_EXPECTED_UI_URL=https://temporal-ui.example.test/console
+    export CAESIUM_MANUAL_TRIGGER_API_KEY=integration-test-key
     export PLAYWRIGHT_JSON_OUTPUT_NAME="$browser/playwright-results.json"
     cd "$ROOT/ui"
     npm ci >"$browser/npm.log" 2>&1
