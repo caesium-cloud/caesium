@@ -862,7 +862,9 @@ class ConnectorsEvidenceTests(unittest.TestCase):
         self.write(self.fixture / "images.json", [{"Id": DIGEST}, {"Id": BUILDER_ID}])
         self.write(self.fixture / "image-provenance.json", {"candidate_sha": self.candidate,
             "server": {"origin": "loaded", "expected_image_id": IMAGE_ID, "observed_image_id": IMAGE_ID},
-            "runner": {"origin": "loaded", "expected_image_id": BUILDER_ID, "observed_image_id": BUILDER_ID}})
+            "runner": {"origin": "loaded", "expected_image_id": BUILDER_ID, "observed_image_id": BUILDER_ID},
+            "fixture": {"origin": "loaded", "expected_image_id": DIGEST, "observed_image_id": DIGEST,
+                        "producer_candidate_sha": self.candidate}})
         self.write(self.fixture / "server.json", [{"Id": "container", "Image": IMAGE_ID,
             "State": {"Running": True, "OOMKilled": False}, "Config": {"EnvNames": list(self.flags)}}])
         self.write(self.fixture / "test.log", "\n".join(f"=== RUN   {name}\n--- PASS: {name} (1.00s)" for name in self.go_names))
@@ -983,6 +985,9 @@ class ConnectorsEvidenceTests(unittest.TestCase):
         for path, mutate in (
             (self.fixture / "candidate-sha.txt", None),
             (self.fixture / "image-provenance.json", lambda doc: doc["runner"].update(expected_image_id=DIGEST)),
+            (self.fixture / "image-provenance.json", lambda doc: doc["fixture"].update(expected_image_id=BUILDER_ID)),
+            (self.fixture / "image-provenance.json", lambda doc: doc["fixture"].update(producer_candidate_sha=SHA)),
+            (self.fixture / "image-provenance.json", lambda doc: doc.pop("fixture")),
             (self.fixture / "server.json", lambda doc: doc[0].update(Image=DIGEST)),
             (self.browser / "server-image-id.txt", None),
             (self.cluster / "reuse-image-identities.json", lambda doc: doc["runner"].update(

@@ -943,7 +943,11 @@ refusal remains unknown because it says nothing about an earlier send.
 
 Provider observations use receipt revision/attempt compare-and-swap. A delayed
 lookup or older send cannot overwrite terminal state, a newer attempt's evidence,
-or its guard. Provider results are validated against the frozen result schema and
+or its guard. Concurrent receipt refreshes for the same Update and attempt return
+the current durable receipt when another lookup has already advanced it. An
+unknown receipt stays unknown; accepted or terminal evidence is preserved. This
+does not authorize another send or absorb a conflict with a confirmed newer attempt.
+Provider results are validated against the frozen result schema and
 withheld when credential/PEM bytes remain; arbitrary remote errors and failure
 messages are never persisted. The complete serialized evidence envelope fits the
 metadata ceiling. A validated completion remains terminal and clears the guard
@@ -964,10 +968,9 @@ verified-link persistence across process restart.
 ## Authenticated connector verification lane
 
 From a clean candidate with the repository builder, rootful Linux Docker,
-Python 3, Node/npm with Playwright Chromium, and kind/kubectl/Helm available:
+Python 3, Node/npm, and kind/kubectl/Helm available:
 
 ```sh
-(cd ui && npm ci && npx playwright install chromium)
 just tag=connector-local integration-test-connectors
 ```
 
@@ -978,6 +981,18 @@ Temporal scenarios and the dedicated `connectors` browser project, requiring
 every selected case to pass once without skips or retries. It then runs the
 existing configuration-equality proof with three persistent Caesium members on
 one isolated kind node. Containers and cluster resources belong to this run.
+The browser hook installs the locked npm dependencies and Chromium once. Install
+the browser's operating-system dependencies separately on a new local host; CI
+explicitly requests Playwright's dependency installation in that hook.
+
+CI prepares the candidate's pinned Temporal fixture in a separate producer job
+alongside product images. The consumer checks the producer candidate and immutable
+fixture, server and runner image IDs before starting either proof. Only this
+loaded-image path may run the independent config cluster alongside the HTTP and
+browser phase. Both phases must finish successfully and their observed image
+identities must agree before evidence is collected. Failure or interruption stops
+both owned process groups and waits for their cleanup. Local source builds retain
+the sequential path above.
 
 Set `CAESIUM_CONNECTORS_ARTIFACTS` to an absolute empty directory to choose where
 the lane retains source/image identities, provider pins and effect journals,
@@ -995,8 +1010,10 @@ selection and failed first browser attempts fail this command. CI uploads the
 report and a sanitized public artifact allowlist; raw browser traces, TLS keys,
 control credentials and kubeconfigs stay outside that upload. See the
 [CI runbook](ci.md#advisory-connector-lane-execution-connectors-f2) for selectors
-and the promotion procedure. The lane is initially advisory to `ci-ok`; first
-release acceptance and promotion remain separate F3/F4 work.
+and the promotion procedure. The lane remains advisory to `ci-ok`; F3 records
+first-release acceptance, while F4 still requires ten qualifying master runs and
+actual promotion evidence. Preparation and concurrency changes alone do not
+establish the fifteen-minute budget.
 
 ## Real Temporal development fixture
 

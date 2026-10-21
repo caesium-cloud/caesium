@@ -357,11 +357,12 @@ sources unless a precompiled runner is explicitly selected.
 changes
   ├─ ui-test
   ├─ reagents ────────────────────── lint, unit-test (also need builder)
-  ├─ builder ─── images ─────────┬─ integration (3 Docker shards + agent-auth + keycloak)
-  │                              ├─ ui-e2e, ui-e2e-auth, ui-e2e-keycloak (also need ui-test)
-  │                              ├─ helm/podman (3 full-suite shards each)
-  │                              ├─ early-evidence (also needs helm-lint)
-  │                              └─ integration-extra (also needs reagents)
+  ├─ builder ─┬─ images ─────────┬─ integration (3 Docker shards + agent-auth + keycloak)
+  │           │                  ├─ ui-e2e, ui-e2e-auth, ui-e2e-keycloak (also need ui-test)
+  │           │                  ├─ helm/podman (3 full-suite shards each)
+  │           │                  ├─ early-evidence (also needs helm-lint)
+  │           │                  └─ integration-extra (also needs reagents)
+  │           └─ connector-fixture-images ── connectors (also needs images, ui-test)
   ├─ reagents-arm64 ───────────────────┐
   └─ builder-arm64 ─┬─ unit-test-arm64  │
                     └─ images-arm64 ───┴─ integration-arm64
@@ -390,7 +391,8 @@ publish ← tag only, needs the full matrix and ci-ok
 | `ui-e2e` | ubuntu-26.04 | `[ui-test, images]` | 45 | host-installed Playwright process joined only to the server network namespace, reusing the `product-amd64` artifact | inline `docker run --name caesium-server` |
 | `ui-e2e-auth` | ubuntu-26.04 | `[ui-test, images]` | 45 | inline `docker run` | inline `docker run --name caesium-server-auth` |
 | `ui-e2e-keycloak` | ubuntu-26.04 | `[ui-test, images]` | 20 | `integration-up-keycloak`, then host Playwright `--project=keycloak` | Keycloak + `caesium-server-keycloak-test` via `integration-up-keycloak` |
-| `connectors` | ubuntu-26.04 | `[changes, builder, images, ui-test]` | 45 | `integration-test-connectors` (advisory) | `integration-up-connectors`, then three persistent Helm members on one kind node |
+| `connector-fixture-images` | ubuntu-26.04 | `[changes, builder]` | 30 | Bake pinned fixture and retain candidate/image identity | none |
+| `connectors` | ubuntu-26.04 | `[changes, images, connector-fixture-images, ui-test]` | 45 | `integration-test-connectors` (advisory) | `integration-up-connectors` and three persistent Helm members on one kind node |
 | `helm-integration-test` | ubuntu-26.04 | `[images, helm-lint]` | 60 | kind + `helm install` + `helm test` + full suite in three shards | kind pod via the Helm chart |
 | `helm-pod-replacement-test` | ubuntu-26.04 | `[changes, images, helm-lint]` | 45 | `scripts/helm-pod-replacement.sh` — kind + `helm install` at three replicas with retained PVCs, then replaces every pod and proves it rejoins (issue #493) | three kind pods via the Helm chart |
 | `podman-integration-test` | ubuntu-26.04 | `images` | 45 | inline `docker run` + full suite in three shards | inline `docker run --name caesium-server-podman` |
@@ -2343,10 +2345,11 @@ lanes; the full mutation script is not yet a CI job (G6 owns promotion).
 The `connectors` job runs on the existing broad `go`, `ui` or `ci` selectors
 for pull requests and merge groups; master/tag pushes select it too. Shared
 auth, admission, API and UI changes therefore exercise the lane without a new
-path-filter output. It loads the candidate builder, product and integration
-runner artifacts, verifies loaded server/runner identities against the producer's
-`image-ids-amd64` artifact, installs Chromium and the existing kind/Helm tools,
-then runs:
+path-filter output. The `connector-fixture-images` job builds the pinned Temporal
+fixture alongside product images and publishes its candidate SHA and immutable
+image ID. The consumer loads that fixture plus product and integration runner
+artifacts, checks the fixture producer candidate and all three expected image
+IDs, installs the existing kind/Helm tools, then runs:
 
 ```sh
 just tag=<candidate-image-tag> integration-test-connectors
@@ -2361,6 +2364,16 @@ test in the isolated `connectors` Playwright project on its first attempt, and
 the matching/skew/transition/repoint configuration scenario. The config proof
 uses three persistent Caesium replicas on one kind node; it does not claim a
 multi-host deployment. Default/auth Playwright projects remain separate.
+
+The browser hook performs one locked npm install and Chromium installation;
+CI requests its operating-system dependencies there. The loaded-image CI path
+freezes all three producer image IDs before running the independent config
+cluster alongside the HTTP/browser phase. Both owned process groups must finish
+successfully, and the collector compares the cluster's identities with the
+HTTP/browser phase's actual runtime observations before producing a report.
+Any failed phase or interruption stops and joins both groups, including cleanup.
+The local source-build path remains sequential and builds the fixture from the
+candidate. Neither path accepts a retagged image or a partial successful report.
 
 The shared collector reduces retained source/image identities, raw provider
 effects/faults, receipt and configuration observations into `evidence.json`.
@@ -2383,6 +2396,8 @@ F3 records release acceptance after merge. F4 alone can promote this lane,
 after ten consecutive green selected master runs finish within fifteen minutes
 after `changes`, with candidate-bound evidence and actual promoted PR/merge-group
 proof. This change adds no required check or repository setting.
+The preparation and concurrency changes require fresh hosted timing; they do
+not establish that the fifteen-minute budget or ten-run streak has been met.
 
 ### Promoted system suites and the nightly set (distributed-testing W9/G6)
 

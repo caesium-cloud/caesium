@@ -1441,11 +1441,13 @@ def build_connectors(artifacts, candidate_sha):
     if not isinstance(images, list) or len(images) != 2 or not all(
             isinstance(image, dict) and DIGEST.match(image.get("Id") or "") for image in images):
         raise EvidenceError("fixture/runner image inspection is absent or invalid")
-    for name, observed in (("server", digest), ("runner", images[1]["Id"])):
+    for name, observed in (("server", digest), ("runner", images[1]["Id"]), ("fixture", images[0]["Id"])):
         binding = provenance.get(name) or {}
         if binding.get("observed_image_id") != observed or binding.get("origin") not in ("source-build", "loaded") \
                 or (binding.get("origin") == "loaded" and binding.get("expected_image_id") != observed):
             raise EvidenceError(f"{name} image does not match its source-build or producer binding")
+        if name == "fixture" and binding.get("origin") == "loaded" and binding.get("producer_candidate_sha") != sha:
+            raise EvidenceError("fixture image does not match its producer candidate")
     flags = _connector_json(fixture / "server-env.json")
     if not all(isinstance(key, str) and isinstance(value, str) and not BASE.SECRET_ENV.search(key) for key, value in flags.items()):
         raise EvidenceError("server environment must contain only safe string values")

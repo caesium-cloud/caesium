@@ -212,6 +212,52 @@ func (s *IntegrationTestSuite) connectorActionRefresh(proof *connectorActionProo
 	return connectorActionReceipt{}
 }
 
+func (s *IntegrationTestSuite) connectorActionConcurrentLookups(proof *connectorActionProof, original, other createdAPIKey, receipt connectorActionReceipt, ref messageFixtureRef) {
+	s.T().Helper()
+	path := connectorActionOperationPath(receipt.ID)
+	type result struct {
+		status int
+		raw    []byte
+		err    error
+	}
+	// Both operators may poll the same unknown receipt after eligibility changes.
+	// Every request must return the pinned receipt, without another Update.
+	for range 2 {
+		start := make(chan struct{})
+		results := make(chan result, 2)
+		before := connectorProviderRPCs(s.T(), "/PollWorkflowExecutionUpdate")
+		for _, key := range []string{original.Plaintext, other.Plaintext} {
+			go func() {
+				<-start
+				status, raw, err := connectorActionRequest(s.T().Context(), s.caesiumURL, key, http.MethodGet, path, "", nil)
+				results <- result{status, raw, err}
+			}()
+		}
+		close(start)
+		for range 2 {
+			response := <-results
+			s.Require().NoError(response.err)
+			proof.capture(http.MethodGet, path, response.status, response.raw)
+			s.Require().Equal(http.StatusOK, response.status, "concurrent receipt lookup must not return a revision conflict")
+			var decoded connectorActionResponse
+			s.Require().NoError(json.Unmarshal(response.raw, &decoded))
+			current := decoded.Operation
+			s.Require().Equal(connector.OperationUnknown, current.State)
+			s.Require().Contains(string(current.Evidence), "NotFound")
+			s.Require().Equal(receipt.ID, current.ID)
+			s.Require().Equal(receipt.ExternalUpdateID, current.ExternalUpdateID)
+			s.Require().Equal(receipt.Attempt, current.Attempt)
+			s.Require().Equal(receipt.Actor, current.Actor)
+			s.Require().Equal(receipt.Execution, current.Execution)
+			s.Require().Equal(receipt.ExecutionID, current.ExecutionID)
+			s.Require().Equal(receipt.ConfigurationEpoch, current.ConfigurationEpoch)
+		}
+		s.Require().Equal(before+2, connectorProviderRPCs(s.T(), "/PollWorkflowExecutionUpdate"), "both concurrent GETs must drive real lookup RPCs")
+		s.Require().Equal(1, messageFixtureCount(s.messageFixtureEvents(), "update_rpc", receipt.ExternalUpdateID, ""))
+		s.Require().Zero(messageFixtureCount(s.messageFixtureEvents(), "approval_effect", "", ref.RunID))
+	}
+}
+
 func (s *IntegrationTestSuite) connectorActionWitness(c client.Client, ref messageFixtureRef, receipt connectorActionReceipt, principal createdAPIKey) {
 	s.T().Helper()
 	state := s.fixtureAwait(c, fixtureRef(ref), "published")
@@ -472,6 +518,9 @@ func (s *IntegrationTestSuite) TestConnectorsActions() {
 			state, e := s.fixtureQuery(c, fixtureRef(lostRef))
 			return e == nil && state.Eligible && !state.Approved
 		}, 10*time.Second, 200*time.Millisecond)
+		s.Run("ConcurrentReceiptLookups", func() {
+			s.connectorActionConcurrentLookups(proof, principal, other, lookup.Operation, lostRef)
+		})
 		s.connectorActionHTTP(proof, principal.Plaintext, http.MethodPost, lostPath+"/actions/approve_publication", lostKey, connectorActionInput("real rejected reply loss"), &lookup, http.StatusAccepted)
 		var conflict connectorActionResponse
 		s.connectorActionHTTP(proof, other.Plaintext, http.MethodPost, lostPath+"/actions/approve_publication", uuid.NewString(), connectorActionInput("bypass open guard"), &conflict, http.StatusConflict)

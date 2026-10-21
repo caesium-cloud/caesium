@@ -507,7 +507,17 @@ func (s *Service) call(ctx context.Context, op models.ConnectorOperation, send b
 	}
 	stored, storeErr := s.store.recordOperationEvidence(ctx, op, state, raw, retryableUnsent)
 	if storeErr != nil {
-		return stored, storeErr
+		// Concurrent lookup-only evidence may have advanced this same attempt.
+		// Return its durable receipt; dispatch/resend claims and newer attempts
+		// still retain their revision conflicts.
+		lookupAdvanced := !send && errors.Is(storeErr, ErrOperationChanged) &&
+			stored.ID == op.ID && stored.ExternalUpdateID == op.ExternalUpdateID && stored.Attempt == op.Attempt
+		if !lookupAdvanced {
+			return stored, storeErr
+		}
+		if operationTerminal(stored.State) || stored.State == connector.OperationAccepted {
+			return stored, nil
+		}
 	}
 	if err != nil {
 		return stored, ErrOperationProvider

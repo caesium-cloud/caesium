@@ -148,6 +148,22 @@ fi
 host_user=$(id -u):$(id -g)
 candidate=$(git rev-parse HEAD)
 [ "${CANDIDATE_SHA:-$candidate}" = "$candidate" ] || { echo "candidate does not match HEAD" >&2; exit 1; }
+prebuilt_fixture=${CAESIUM_CONNECTORS_PREBUILT_FIXTURE:-false}
+case "$prebuilt_fixture" in true|false) ;; *) echo "prebuilt fixture option must be true or false" >&2; exit 1 ;; esac
+if [ "$prebuilt_fixture" = true ]; then
+    [ "${CAESIUM_CONNECTORS_EXPECTED_FIXTURE_CANDIDATE_SHA:-}" = "$candidate" ] || {
+        echo "loaded connector fixture requires matching producer candidate" >&2; exit 1;
+    }
+    python3 - "$cli" "$image" "${CAESIUM_CONNECTORS_EXPECTED_FIXTURE_IMAGE_ID:-}" <<'PYFIXTURE'
+import re, subprocess, sys
+cli, image, expected = sys.argv[1:]
+if not re.fullmatch(r'sha256:[0-9a-f]{64}', expected):
+    raise SystemExit('loaded connector fixture requires producer image identity')
+observed = subprocess.check_output([cli, 'image', 'inspect', '--format', '{{.Id}}', image], text=True).strip()
+if observed != expected:
+    raise SystemExit('loaded connector fixture differs from producer image identity')
+PYFIXTURE
+fi
 git status --porcelain >"$artifacts/source-status.txt"
 git diff --binary HEAD >"$artifacts/source-diff.patch"
 printf '%s\n' "$candidate" >"$artifacts/candidate-sha.txt"
@@ -238,8 +254,10 @@ trap cleanup EXIT
 trap 'exit 129' HUP
 trap 'exit 130' INT
 trap 'exit 143' TERM
-"$cli" build --platform "$platform" --build-arg BUILDER_IMAGE="$builder" \
-    -f build/Dockerfile.connector-fixture -t "$image" .
+if [ "$prebuilt_fixture" = false ]; then
+    "$cli" build --platform "$platform" --build-arg BUILDER_IMAGE="$builder" \
+        -f build/Dockerfile.connector-fixture -t "$image" .
+fi
 if [ -n "${CAESIUM_INTEGRATION_RUNNER_IMAGE:-}" ]; then
     runner=$CAESIUM_INTEGRATION_RUNNER_IMAGE
     "$cli" image inspect "$runner" >/dev/null
@@ -453,13 +471,14 @@ selection="TestIntegrationTestSuite/($(printf '%s' "$scenarios" | tr ' ' '|'))"
     sh scripts/integration-test.sh -test.run "$selection" >"$artifacts/runner-create.log"
 runner_id=$(created_id "$runner_cid")
 if [ "$lane" = true ]; then
-    python3 - "$cli" "$server_id" "$runner_id" "$candidate" "$artifacts/image-provenance.json" <<'PYIMAGE'
+    python3 - "$cli" "$server_id" "$runner_id" "$fixture_id" "$candidate" "$artifacts/image-provenance.json" <<'PYIMAGE'
 import json, os, re, subprocess, sys
-cli, server, runner, candidate, target = sys.argv[1:]
+cli, server, runner, fixture, candidate, target = sys.argv[1:]
 result = {'candidate_sha': candidate}
 for role, cid, expected_name, loaded in (
     ('server', server, 'CAESIUM_CONNECTORS_EXPECTED_IMAGE_ID', os.environ.get('CAESIUM_SKIP_IMAGE_BUILD') == 'true'),
     ('runner', runner, 'CAESIUM_CONNECTORS_EXPECTED_RUNNER_IMAGE_ID', bool(os.environ.get('CAESIUM_INTEGRATION_RUNNER_IMAGE'))),
+    ('fixture', fixture, 'CAESIUM_CONNECTORS_EXPECTED_FIXTURE_IMAGE_ID', os.environ.get('CAESIUM_CONNECTORS_PREBUILT_FIXTURE') == 'true'),
 ):
     record, = json.loads(subprocess.check_output([cli, 'container', 'inspect', cid]))
     observed = record.get('Image')
@@ -472,6 +491,10 @@ for role, cid, expected_name, loaded in (
         raise SystemExit(role + ' image differs from producer candidate image')
     result[role] = {'origin': 'loaded' if loaded else 'source-build',
                     'expected_image_id': expected, 'observed_image_id': observed}
+    if role == 'fixture' and loaded:
+        if os.environ.get('CAESIUM_CONNECTORS_EXPECTED_FIXTURE_CANDIDATE_SHA') != candidate:
+            raise SystemExit('loaded fixture differs from producer candidate')
+        result[role]['producer_candidate_sha'] = candidate
 with open(target, 'w') as output: json.dump(result, output, indent=2)
 PYIMAGE
 fi

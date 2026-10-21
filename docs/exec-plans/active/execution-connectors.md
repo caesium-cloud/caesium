@@ -810,6 +810,25 @@ Resume unfinished waves. Do not archive this plan while later items remain.
   recorded development-server matrix and single-node kind topology, not
   Temporal Cloud, other versions or a multi-host deployment.
 
+### W11 — Promotion prerequisites (F4, in progress)
+
+- **Observed blockers:** Post-F2 master connector runs exceeded the fifteen-minute
+  budget. [Run 39596508157](https://github.com/caesium-cloud/caesium/actions/runs/39596508157)
+  then failed the lost-rejection browser journey when concurrent lookup-only
+  receipt writes raced: the stale compare-and-swap returned HTTP 409. That failed
+  run did not reach configuration qualification and is not timing acceptance.
+- **Remediation scope:** Return the current durable receipt after a same-Update,
+  same-attempt lookup race while retaining dispatch/resend fences. Add deterministic
+  ordering tests and concurrent two-operator HTTP polling with independent send
+  and effect counts. Prepare a candidate-bound fixture alongside product images,
+  install browser prerequisites once, and overlap independent configuration proof
+  only for the loaded, immutable three-image CI cohort. Preserve every scenario,
+  first-attempt browser requirement, runtime identity check and owned cleanup.
+- **Acceptance boundary:** These changes prepare fresh qualification; they do not
+  promote the lane. F4 remains unchecked and advisory until ten consecutive
+  selected master runs have strict candidate reports and meet the budget, followed
+  by the promoted PR and merge-group proof. N1 remains dependent on F4.
+
 ### Stream Status
 
 | Stream | Scope | Priority | Status |
@@ -819,7 +838,7 @@ Resume unfinished waves. Do not archive this plan while later items remain.
 | C | Authenticated REST and composition (2 items) | P0 | Shipped (C1, C2) |
 | D | Verified correlation and action durability (2 items) | P0 | Shipped (D1, D2) |
 | E | Console monitoring, data links and approval (3 items) | P0 | Shipped (E1, E2, E3) |
-| F | Real fixture, CI, qualification and promotion (4 items) | P0 | F1/F2 shipped; F3 acceptance in W10; F4 not started |
+| F | Real fixture, CI, qualification and promotion (4 items) | P0 | F1/F2 shipped; F3 acceptance in W10; F4 prerequisites in W11 |
 | N | Operator guidance and reconciliation (1 item) | P0 | Not started |
 
 ## Streams
