@@ -484,17 +484,29 @@ func start(cmd *cobra.Command, args []string) error {
 	// reconciler re-derives the answer from the run rows on a timer, so a lost
 	// event costs one interval instead of the whole run.
 	job.StartRunCancelReconciler(ctx, runStore, vars.CancelReconcileInterval)
-	if vars.RunQueueEnabled || vars.RunQueueDequeuerEnabled {
+	// A namespace run quota parks trigger starts in run_queue whatever the
+	// queue flags say, so a configured access policy file (the only source of
+	// quotas; an invalid one is fatal in initAuth) always starts the
+	// dequeuer. With both flags off it runs quota-only: it drains rows the
+	// quota holds and leaves every ordinary queue row exactly as before. The
+	// dequeuer reads the policy at each tick, so quotas a reload adds drain.
+	// Rows a since-removed file parked also start it (runQueueDrainMode).
+	// initAuth installs the file only after the dequeuer and the freshness
+	// evaluator start, so until then the namespace gate refuses (and the
+	// dequeuer claims nothing) rather than admitting past an unread quota.
+	run.ExpectNamespacePolicy(strings.TrimSpace(vars.AuthPolicyFile) != "")
+	if startDequeuer, quotaOnly := runQueueDrainMode(ctx, vars, runStore.HasQuotaHeldRuns); startDequeuer {
 		dequeuer := runqueue.NewDequeuer(runqueue.Config{
 			DB:                  db.Connection(),
 			Store:               runStore,
 			NodeID:              vars.NodeAddress,
 			Interval:            vars.RunQueueDequeueInterval,
 			StaleClaimThreshold: vars.RunQueueClaimStaleAfter,
-			LeaderCheck:         dqlite.IsLocalLeader,
+			LeaderCheck:         dequeuerLeaderCheck(vars.DatabaseType),
+			QuotaOnly:           quotaOnly,
 		})
 		runAsync(func() {
-			log.Info("launching run queue dequeuer", "interval", vars.RunQueueDequeueInterval, "stale_claim_after", vars.RunQueueClaimStaleAfter, "max_depth", vars.RunQueueMaxDepth)
+			log.Info("launching run queue dequeuer", "interval", vars.RunQueueDequeueInterval, "stale_claim_after", vars.RunQueueClaimStaleAfter, "max_depth", vars.RunQueueMaxDepth, "quota_only", quotaOnly)
 			dequeuer.Run(ctx)
 		})
 	}
@@ -1069,6 +1081,45 @@ func start(cmd *cobra.Command, args []string) error {
 		log.Info("gracefully shutting down due to OS signal")
 		return shutdown()
 	}
+}
+
+// runQueueDrainMode decides whether this server runs the run-queue dequeuer,
+// and whether quota-only. Either queue flag runs the full dequeuer; a
+// configured access policy file runs it quota-only. With neither, it still
+// runs quota-only when run_queue holds quota-held rows: a policy file that
+// parked them and was then removed would otherwise leave those accepted
+// requests queued forever although their namespace is now unlimited. A
+// deployment that never had a policy pays one indexed LIMIT 1 query and starts
+// nothing. If the check fails, the quota-only dequeuer starts anyway: idle it
+// only reads, and a stranded request is the worse failure.
+func runQueueDrainMode(ctx context.Context, vars env.Environment, hasQuotaHeld func(context.Context) (bool, error)) (start, quotaOnly bool) {
+	if vars.RunQueueEnabled || vars.RunQueueDequeuerEnabled {
+		return true, false
+	}
+	if strings.TrimSpace(vars.AuthPolicyFile) != "" {
+		return true, true
+	}
+	held, err := hasQuotaHeld(ctx)
+	if err != nil {
+		log.Warn("could not check run_queue for quota-held runs; starting the quota-only dequeuer", "error", err)
+		return true, true
+	}
+	if held {
+		log.Info("run_queue holds runs a namespace quota parked and no access policy file is configured; starting the quota-only dequeuer to drain them")
+	}
+	return held, true
+}
+
+// dequeuerLeaderCheck gates the run-queue dequeuer on dqlite leadership. A
+// PostgreSQL deployment has no dqlite app (IsLocalLeader would fail every
+// tick and strand every queued run), so — like the cron scheduler — every
+// node drains there: claims are atomic and admission, with the namespace
+// gate's advisory lock, is the authority.
+func dequeuerLeaderCheck(databaseType string) runqueue.LeaderCheck {
+	if usesInternalDqlite(databaseType) {
+		return dqlite.IsLocalLeader
+	}
+	return nil
 }
 
 func usesInternalDqlite(databaseType string) bool {

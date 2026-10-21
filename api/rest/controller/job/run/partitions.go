@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/caesium-cloud/caesium/api/rest/namespaceadmission"
 	jsvc "github.com/caesium-cloud/caesium/api/rest/service/job"
 	runsvc "github.com/caesium-cloud/caesium/api/rest/service/run"
 	"github.com/caesium-cloud/caesium/internal/job"
@@ -263,6 +264,9 @@ func RetryPartition(c *echo.Context) error {
 	if err != nil {
 		if errors.Is(err, runstorage.ErrRunNamespaceMoved) {
 			return namespaceMovedConflict(c, j, err)
+		}
+		if handled, writeErr := namespaceadmission.WriteConflict(c, err); handled {
+			return writeErr
 		}
 		return retryPartitionHTTPError(err)
 	}

@@ -31,6 +31,7 @@ type queueCLIItem struct {
 	ClaimState string            `json:"claim_state"`
 	Stale      bool              `json:"stale"`
 	ClaimedBy  string            `json:"claimed_by,omitempty"`
+	HeldReason string            `json:"held_reason,omitempty"`
 }
 
 func (s *IntegrationTestSuite) TestJobQueueCLIListsPendingRun() {
@@ -63,13 +64,14 @@ func (s *IntegrationTestSuite) TestJobQueueCLIListsPendingRun() {
 
 	lines := nonEmptyLines(stdout)
 	s.Require().GreaterOrEqual(len(lines), 2, "queue table should have a header and row:\n%s", stdout)
-	s.Equal([]string{"POSITION", "PRIORITY", "STATE", "ENQUEUED_AT", "PARAMS"}, strings.Fields(lines[0]))
+	s.Equal([]string{"POSITION", "PRIORITY", "STATE", "REASON", "ENQUEUED_AT", "PARAMS"}, strings.Fields(lines[0]))
 	fields := strings.Fields(lines[1])
-	s.Require().GreaterOrEqual(len(fields), 5, "queue row should be parseable:\n%s", lines[1])
+	s.Require().GreaterOrEqual(len(fields), 6, "queue row should be parseable:\n%s", lines[1])
 	s.Equal("1", fields[0])
 	s.Equal("high", fields[1])
 	s.Equal("pending", fields[2], "an unclaimed queued run must read as pending, not as a claim")
-	s.Contains(fields[4], "lane=queued")
+	s.Equal("-", fields[3], "a run the job's own policy queued carries no hold reason")
+	s.Contains(fields[5], "lane=queued")
 	s.NotContains(stdout, "expired claim", "no row is stuck, so the stale footer must not appear")
 
 	jsonOut, jsonErr, jsonCmdErr := s.runCLISeparate("job", "queue", alias, "--json", "--server", s.caesiumURL)
@@ -91,6 +93,8 @@ func (s *IntegrationTestSuite) TestJobQueueCLIListsPendingRun() {
 	s.Equal("pending", rows[0].ClaimState)
 	s.False(rows[0].Stale)
 	s.Empty(rows[0].ClaimedBy)
+	s.Empty(rows[0].HeldReason, "a run the job's own policy queued carries no hold reason")
+	s.NotContains(jsonOut, "held_reason", "held_reason is omitted, not empty, on a policy-queued row")
 
 	// The same row through the REST surface the CLI and the Console both read.
 	s.assertQueueRESTRowIsPending(job.ID, rows[0].ID)

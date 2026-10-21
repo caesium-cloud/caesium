@@ -42,6 +42,11 @@ func RunQueueStaleCutoff(now time.Time, staleAfter time.Duration) time.Time {
 	return now.UTC().Add(-staleAfter)
 }
 
+// RunQueueHeldReasonNamespaceQuota is the held_reason of a queued run that
+// waits on its namespace's quotas.maxConcurrentRuns (identity-and-access D1).
+// A row the job's own concurrency policy queued carries no reason (NULL).
+const RunQueueHeldReasonNamespaceQuota = "namespace_quota"
+
 func (RunQueue) TableName() string { return "run_queue" }
 
 type RunQueue struct {
@@ -53,6 +58,25 @@ type RunQueue struct {
 	ClaimedBy string         `gorm:"type:text;not null;default:'';index" json:"claimed_by"`
 	ClaimedAt *time.Time     `gorm:"index" json:"claimed_at,omitempty"`
 	CreatedAt time.Time      `gorm:"not null;index:idx_run_queue_job_priority_created,priority:3,sort:asc" json:"created_at"`
+	// Namespace is the namespace admission froze when the row was enqueued:
+	// the request belongs to that namespace's owner. A row is never promoted
+	// into a different namespace after its job moved, and confined readers see
+	// only rows of namespaces they may read. NULL on rows queued before the
+	// column existed. Nullable with no default tag on purpose (dqlite
+	// AutoMigrate; see the identity-and-access plan's W2/W3 records).
+	Namespace *string `gorm:"type:text" json:"namespace,omitempty"`
+	// HeldReason says why the row waits beyond the job's own policy:
+	// RunQueueHeldReasonNamespaceQuota, or NULL. Once set it is never cleared:
+	// a quota-held row of a job without a queue policy is drained only because
+	// of it.
+	// Indexed for the quota-only dequeuer and the server's startup check for
+	// rows a since-removed policy file parked.
+	HeldReason *string `gorm:"type:text;index" json:"held_reason,omitempty"`
+}
+
+// IsQuotaHeld reports whether the row waits on its namespace's run quota.
+func (r RunQueue) IsQuotaHeld() bool {
+	return r.HeldReason != nil && *r.HeldReason == RunQueueHeldReasonNamespaceQuota
 }
 
 // ClaimState classifies the row's claim against staleCutoff, which callers get

@@ -71,6 +71,11 @@ const (
 	StartSkipReasonDatasetHold    = "dataset_hold"
 )
 
+// StartQueueReasonNamespaceQuota is the reason on a queued StartResult the
+// namespace run quota parked (identity-and-access D1). It equals the
+// run_queue row's held_reason.
+const StartQueueReasonNamespaceQuota = models.RunQueueHeldReasonNamespaceQuota
+
 // StartResult describes how a run start was admitted.
 type StartResult struct {
 	Outcome StartOutcome
@@ -265,8 +270,11 @@ func startOutcomeOf(runID uuid.UUID, admission admissionResult) (outcome StartOu
 		}
 		return StartOutcomeSkipped, reason, nil, nil, true
 	case admissionQueued:
+		// A start the namespace run quota parked says so
+		// (StartQueueReasonNamespaceQuota); one the job's own policy queued
+		// carries no reason, as before.
 		id := admission.queueID
-		return StartOutcomeQueued, "", nil, &id, true
+		return StartOutcomeQueued, admission.heldReason, nil, &id, true
 	default:
 		return "", "", nil, nil, false
 	}

@@ -880,7 +880,7 @@ Two small isolation boundaries with disjoint files. The quota lives where a queu
 becomes running; shared objects get a namespace column with a `*` sentinel for
 cluster-shared instances.
 
-- [ ] D1. Per-namespace `quotas.maxConcurrentRuns` as **one transactional store
+- [x] D1. Per-namespace `quotas.maxConcurrentRuns` as **one transactional store
       primitive on every path that makes a run running**: `namespaceCapacityTx(tx,
       namespace)` (count running runs on the indexed `job_runs.namespace` + status
       inside the caller's transaction) called by `Store.admit`, by `readmitRetryTx`
@@ -909,7 +909,11 @@ cluster-shared instances.
       `internal/models/run_queue.go` (`HeldReason`), `internal/metrics/metrics.go`,
       `cmd/start/start.go` (policy holder into the run store and dequeuer).
       Depends on: B1 + A4.
-- [ ] D2. Surface the hold: `GET /v1/jobs/:id/queue` rows carry the `run_queue`
+      (W5-δ: shipped. Also stamps `run_queue.namespace` so a queued request is
+      never promoted across a job move, refuses every start in a namespace a
+      loaded policy no longer declares (`409 namespace_undeclared`), and runs a
+      quota-only dequeuer whenever a policy file is configured.)
+- [x] D2. Surface the hold: `GET /v1/jobs/:id/queue` rows carry the `run_queue`
       row's `held_reason: namespace_quota`; `caesium job queue` prints it; the Console queue
       page label is F4. Integration (no-auth server, H-1 settings): two policy-free
       jobs in a capped namespace, the second run is queued with the reason and
@@ -918,6 +922,8 @@ cluster-shared instances.
       Files: `api/rest/controller/job/queue/`, `api/rest/service/job/`,
       `cmd/job/queue.go`, `test/job_queue_cli_test.go`.
       Depends on: D1.
+      (W5-δ: shipped; a confined caller sees only queued rows recorded in a
+      namespace it may read.)
 - [x] D3. Namespace column on shared objects: `NotificationChannel.Namespace`,
       `NotificationPolicy.Namespace` (text, not null, default `'default'`),
       `AgentProfile.Namespace` tightened to the same shape; `*` is the cluster-shared

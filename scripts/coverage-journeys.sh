@@ -1580,6 +1580,11 @@ coverage_journey_run_lane() {
           -e CAESIUM_JOBDEF_GIT_RECEIPT=/coverage-evidence/git-sync.json
         )
       fi
+      if [[ "$mode" == "local" ]]; then
+        # The local server mounts coverage-secret-glob.yaml (marketing capped at
+        # one run); requireMarketingQuota fails, not skips, without this signal.
+        runner_payload_args+=(-e CAESIUM_IT_POLICY_FIXTURE=coverage-secret-glob)
+      fi
       runner_payload_args+=("$BUILDER_RUN_IMAGE" sh scripts/integration-test.sh -test.run "$pattern")
       runner_args=(
         run --pull=never --rm --platform "$PLATFORM"
@@ -1756,6 +1761,15 @@ PY
   auth_pattern="${auth_pattern%)}|TestIncidentCLIListJSONStdout|TestIncidentApprovalDecisionsCLI|TestIncidentApprovalWhyExplains|TestIncidentEscalationDeliversNotifiableEvent|TestIncidentOpenedEventObservable|TestIncidentApplyJobdefPatchCannotEditItsOwnPolicy|TestIncidentApprovalSecondPendingRequestStaysDecidable|TestIncidentPerClassNarrowingGatesTheMatchingClass|TestIncidentPerClassNarrowingIgnoresNonMatchingClass|TestScopedKeyWhoamiAllowed|TestScopedKeyAllowDenyMatrix|TestHoldDatasetCLIReleaseReopensTheGate|TestIncidentBundleFromRealFailure|TestPublicListingsOrderByAndRefuseInvalidTerms)"
 
   local_pattern="${local_pattern%)}|TestJobSchemaNamespaceDocumentation|TestCacheNamespaceMove)"
+  # Namespace run quota (identity-and-access D1 + D2): the local server's
+  # policy caps marketing at one run, so these drive the admission gate, the
+  # dequeuer's quota drain, the retry refusals, the backfill wait and the
+  # `caesium job queue` hold.
+  local_pattern="${local_pattern%)}|TestNamespaceQuotaHoldsSecondPolicyFreeRun|TestNamespaceQuotaRefusesRetryAtCap|TestNamespaceQuotaBackfillWaitsAndCompletes)"
+  # Queued-run cancel (DELETE /v1/jobs/:id/queue/:queue_id, whose handler D1
+  # scoped to the row's queued namespace): a queue-policy job parks its second
+  # run and the scenario cancels the row through the live endpoint.
+  local_pattern="${local_pattern%)}|TestJobQueueCancelEndpointDeletesUnclaimedRowOnly)"
   auth_pattern="${auth_pattern%)}|TestIncidentNamespaceLifecycle)"
   # The access policy endpoints (GET/POST /v1/auth/policy): this api-key server
   # mounts no policy file, so the scenario drives the no-file env view and 409.
@@ -1802,6 +1816,10 @@ PY
     TestNativeTaskSIGTERMResultClassification
     TestJobSchemaNamespaceDocumentation
     TestCacheNamespaceMove
+    TestNamespaceQuotaHoldsSecondPolicyFreeRun
+    TestNamespaceQuotaRefusesRetryAtCap
+    TestNamespaceQuotaBackfillWaitsAndCompletes
+    TestJobQueueCancelEndpointDeletesUnclaimedRowOnly
   )
   local -a auth_named_passes=(
     TestIncidentCLIListJSONStdout

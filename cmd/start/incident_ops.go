@@ -74,10 +74,11 @@ func (o *incidentActionOps) RetryFromFailure(_ context.Context, runID uuid.UUID)
 }
 
 func incidentRetryError(err error) error {
-	// A paused job or an exhausted concurrency slot is a transient, retryable
-	// refusal: surface it as incident.ErrRetryDeferred so a fired snooze_retry
-	// timer re-arms instead of dropping the retry.
-	if err != nil && (errors.Is(err, run.ErrJobPaused) || errors.Is(err, run.ErrMaxConcurrentRunsReached)) {
+	// A paused job, an exhausted concurrency slot or a namespace at its run
+	// quota is a transient, retryable refusal: surface it as
+	// incident.ErrRetryDeferred so a fired snooze_retry timer re-arms instead
+	// of dropping the retry, and the action records the deferral.
+	if err != nil && (errors.Is(err, run.ErrJobPaused) || errors.Is(err, run.ErrMaxConcurrentRunsReached) || errors.Is(err, run.ErrNamespaceQuota)) {
 		return fmt.Errorf("%w: %w", incident.ErrRetryDeferred, err)
 	}
 	return err

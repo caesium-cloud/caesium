@@ -674,7 +674,10 @@ type RunCommittedError struct {
 	Namespace string
 	RunID     uuid.UUID
 	JobID     uuid.UUID
-	Err       error
+	// Quarantine is the committed run's quarantine flag: a quarantined run
+	// never dispatches job callbacks, whoever finalizes it.
+	Quarantine bool
+	Err        error
 }
 
 func (e *RunCommittedError) Error() string {
@@ -689,6 +692,84 @@ func CommittedRunID(err error) (uuid.UUID, bool) {
 		return committed.RunID, true
 	}
 	return uuid.Nil, false
+}
+
+// ErrCommittedRunAbandoned reports a committed run RecoverCommittedRun could
+// not read back, and therefore finalized instead of handing to a launcher.
+// Its message carries no driver text on purpose: a caller's contention
+// retrier must not mistake it for a busy database and start the request a
+// second time.
+var ErrCommittedRunAbandoned = errors.New("run: a committed run could not be read back and was finalized")
+
+// CommittedRecovery is what RecoverCommittedRun did with a committed run.
+type CommittedRecovery struct {
+	// Committed reports that the error carried a committed run at all.
+	Committed bool
+	// Run is the committed run, read back: the caller launches it.
+	Run *JobRun
+	// RunID and JobID identify the committed run.
+	RunID uuid.UUID
+	JobID uuid.UUID
+	// Finalized reports that THIS call finalized the unreadable run, failed
+	// with Cause. The caller then owns its completion callbacks — exactly
+	// once, and never for a Quarantine run — because no executor ever ran
+	// it to dispatch them.
+	Finalized  bool
+	Quarantine bool
+	Cause      error
+}
+
+// DispatchCallbacks reports whether the caller must dispatch the job's
+// completion callbacks for the run this recovery finalized.
+func (r CommittedRecovery) DispatchCallbacks() bool {
+	return r.Finalized && !r.Quarantine
+}
+
+// RecoverCommittedRun settles a start that committed its run but failed to
+// read it back (err carries a *RunCommittedError; Committed is false
+// otherwise). It re-reads that exact run — never a look-alike — after each of
+// backoffs, and returns it for the caller to launch. If it still cannot be
+// read, it finalizes the run (CompleteIfActive, failed with the read error) so
+// the run never stays running with nothing to execute it — at a namespace
+// quota of one it would hold the namespace forever — and returns an error
+// matching ErrCommittedRunAbandoned; see CommittedRecovery.Finalized for the
+// callbacks that then fall to the caller.
+func (s *Store) RecoverCommittedRun(ctx context.Context, err error, backoffs []time.Duration) (CommittedRecovery, error) {
+	committed, ok := errors.AsType[*RunCommittedError](err)
+	if !ok || committed.RunID == uuid.Nil {
+		return CommittedRecovery{}, nil
+	}
+	runID := committed.RunID
+	rec := CommittedRecovery{Committed: true, RunID: runID, JobID: committed.JobID, Quarantine: committed.Quarantine}
+	lastErr := err
+	for attempt := 0; ; attempt++ {
+		loaded, readErr := s.loadRunWithDB(s.db.WithContext(context.WithoutCancel(ctx)), runID)
+		if readErr == nil {
+			rec.Run = loaded
+			return rec, nil
+		}
+		lastErr = readErr
+		if attempt >= len(backoffs) || ctx.Err() != nil {
+			break
+		}
+		timer := time.NewTimer(backoffs[attempt])
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+		case <-timer.C:
+		}
+	}
+	cause := fmt.Errorf("run: the committed run could not be read back to launch it: %w", lastErr)
+	finalized, completeErr := s.CompleteIfActive(runID, cause)
+	if completeErr != nil {
+		log.Error("run: a committed run could not be read back or finalized; leaving it for an operator",
+			"run_id", runID, "read_error", lastErr, "error", completeErr)
+		return rec, fmt.Errorf("%w (run %s; finalize failed)", ErrCommittedRunAbandoned, runID)
+	}
+	log.Error("run: a committed run could not be read back; finalized it as failed so it frees its slot",
+		"run_id", runID, "finalized", finalized, "read_error", lastErr)
+	rec.Finalized, rec.Cause = finalized, cause
+	return rec, fmt.Errorf("%w (run %s)", ErrCommittedRunAbandoned, runID)
 }
 
 var (
@@ -771,6 +852,12 @@ type admissionResult struct {
 	heldEvents []event.Event
 	// queueID is the run_queue row an admissionQueued decision wrote.
 	queueID uuid.UUID
+	// heldReason is the run_queue held_reason an admissionQueued decision
+	// recorded: models.RunQueueHeldReasonNamespaceQuota when the namespace
+	// run quota parked the start, empty when the job's own policy did.
+	heldReason string
+	// namespace is the namespace admission froze on the run.
+	namespace string
 }
 
 type startRunRequest struct {
@@ -785,6 +872,15 @@ type startRunRequest struct {
 	// queueID is the run_queue row a fromQueue start is promoting, so the
 	// admission can resolve an idempotent start that was waiting on it.
 	queueID *uuid.UUID
+	// queueClaim is the claimed_by token the promoter holds on that row. The
+	// admission that creates the run deletes the row only while it still
+	// carries this token, in the same transaction, so a promoter whose claim
+	// was reclaimed and re-claimed by another drainer creates nothing.
+	queueClaim string
+	// queuedNamespace is the namespace the promoted run_queue row recorded at
+	// enqueue (nil for a row queued before the column existed). Admission
+	// refuses to promote it into any other namespace.
+	queuedNamespace *string
 	// idempotencyKey makes this start idempotent (see start_idempotency.go);
 	// requestParams are the params as the caller sent them, before
 	// enrichment, which is what the key's request hash covers.
@@ -1355,6 +1451,19 @@ func (s *Store) admit(tx *gorm.DB, model *models.JobRun, req startRunRequest) (a
 	if model == nil {
 		return admissionResult{}, errors.New("run: admission requires a run model")
 	}
+	if req.fromQueue && req.queueID != nil {
+		// A promoter that no longer holds its row's claim decides nothing for
+		// it (no skip, drop or hold). This read only fails fast: the
+		// authority is consumeQueuedRunClaimTx, which deletes the row with
+		// the run it creates.
+		var claimed int64
+		if err := tx.Model(&models.RunQueue{}).Where("id = ? AND claimed_by = ?", *req.queueID, req.queueClaim).Count(&claimed).Error; err != nil {
+			return admissionResult{}, err
+		}
+		if claimed == 0 {
+			return admissionResult{}, ErrQueuedRunClaimLost
+		}
+	}
 
 	// Freeze ownership in the admission transaction before any path inserts
 	// the run, including terminal-skipped runs and queued promotions.
@@ -1367,6 +1476,22 @@ func (s *Store) admit(tx *gorm.DB, model *models.JobRun, req startRunRequest) (a
 		if err := req.namespaceGuard(model.Namespace); err != nil {
 			return admissionResult{}, err
 		}
+	}
+	// A queued request belongs to the namespace it was enqueued in. If its job
+	// moved since, it is never promoted under the new owner (the dequeuer
+	// drops it). A row from before the column existed records nothing and
+	// keeps the pre-existing behaviour.
+	if req.queuedNamespace != nil {
+		if queued := models.NamespaceOrDefault(strings.TrimSpace(*req.queuedNamespace)); queued != model.Namespace {
+			return admissionResult{}, &QueuedRunNamespaceMovedError{QueueNamespace: queued, JobNamespace: model.Namespace}
+		}
+	}
+	// The namespace's settings under the policy being served now. An
+	// undeclared namespace (a reload removed it) is refused before anything
+	// is written; without a policy file this is free and always unlimited.
+	quotaLimit, err := NamespaceRunLimit(model.Namespace)
+	if err != nil {
+		return admissionResult{}, err
 	}
 
 	// The data circuit breaker's downstream gate runs FIRST, before any
@@ -1396,8 +1521,32 @@ func (s *Store) admit(tx *gorm.DB, model *models.JobRun, req startRunRequest) (a
 	if err != nil {
 		return admissionResult{}, err
 	}
-	result := admissionResult{decision: admissionNoPolicy, jobAlias: cfg.jobAlias}
+	result := admissionResult{decision: admissionNoPolicy, jobAlias: cfg.jobAlias, namespace: model.Namespace}
+	if quotaLimit > 0 {
+		// The namespace run quota (design §10.3), ahead of the job's own
+		// policy: at cap a trigger-originated start is parked whatever that
+		// policy says, a queued promotion stays queued, and a backfill child
+		// waits in its driver. That includes AdmitRun for a policy-free job
+		// (native cron, HTTP and event triggers): its caller would otherwise
+		// resume the job's running run instead of reaching Start.
+		if err := namespaceCapacityLimitTx(tx, model.Namespace, quotaLimit); err != nil {
+			if !errors.Is(err, ErrNamespaceQuota) || req.fromQueue || model.BackfillID != nil {
+				return admissionResult{}, err
+			}
+			heldReason := models.RunQueueHeldReasonNamespaceQuota
+			queueID, err := s.enqueueRunTx(tx, model.JobID, model.Namespace, model.Params, model.Priority, env.Variables().RunQueueMaxDepth, &heldReason)
+			if err != nil {
+				return result, err
+			}
+			result.decision = admissionQueued
+			result.queueID = queueID
+			result.heldReason = heldReason
+			return result, nil
+		}
+	}
 	if !ok {
+		// A policy-free job: AdmitRun inserts nothing (its caller resumes a
+		// running run or starts one through Start); Start inserts the run.
 		return result, nil
 	}
 	if model.BackfillID != nil {
@@ -1429,7 +1578,7 @@ func (s *Store) admit(tx *gorm.DB, model *models.JobRun, req startRunRequest) (a
 			result.decision = admissionFailed
 			return result, nil
 		}
-		queueID, err := s.enqueueRunTx(tx, model.JobID, model.Params, model.Priority, env.Variables().RunQueueMaxDepth)
+		queueID, err := s.enqueueRunTx(tx, model.JobID, model.Namespace, model.Params, model.Priority, env.Variables().RunQueueMaxDepth, nil)
 		if err != nil {
 			return result, err
 		}
@@ -1595,15 +1744,29 @@ func (s *Store) startRun(req startRunRequest) (*JobRun, error) {
 				// the others and are published after commit; there is no
 				// run_started, because nothing started.
 				attemptEvents = append(attemptEvents, result.heldEvents...)
+				// Terminal for a promoted request: consumed with the outcome.
+				if err := req.consumeQueueClaimTx(tx); err != nil {
+					return err
+				}
 				return recordStartOutcomeTx(tx, req, model, attemptAdmission)
-			case admissionSkipped, admissionQueued:
+			case admissionSkipped:
+				if err := req.consumeQueueClaimTx(tx); err != nil {
+					return err
+				}
+				return recordStartOutcomeTx(tx, req, model, attemptAdmission)
+			case admissionQueued:
 				return recordStartOutcomeTx(tx, req, model, attemptAdmission)
 			case admissionFailed:
+				// Not terminal: the dequeuer releases its claim (claim-fenced).
 				return nil
 			default:
 				return fmt.Errorf("run: unknown admission decision %d", result.decision)
 			}
 
+			// The run exists only if this promoter still owns the row.
+			if err := req.consumeQueueClaimTx(tx); err != nil {
+				return err
+			}
 			if err := recordStartOutcomeTx(tx, req, model, attemptAdmission); err != nil {
 				return err
 			}
@@ -1691,10 +1854,15 @@ func (s *Store) startRun(req startRunRequest) (*JobRun, error) {
 		}
 		return nil, ErrMaxConcurrentRunsReached
 	case admissionQueued:
-		log.Info("run queued by concurrency policy", "job_id", req.jobID, "job_alias", admission.jobAlias)
 		if err := s.observeRunQueueDepth(req.jobID); err != nil {
 			log.Warn("run queue: failed to observe depth", "job_id", req.jobID, "error", err)
 		}
+		if admission.heldReason == models.RunQueueHeldReasonNamespaceQuota {
+			log.Info("run queued by its namespace's concurrent-run quota", "job_id", req.jobID, "job_alias", admission.jobAlias, "namespace", admission.namespace)
+			RecordNamespaceQuotaDeferrals(admission.namespace, 1)
+			return nil, ErrRunQueuedByQuota
+		}
+		log.Info("run queued by concurrency policy", "job_id", req.jobID, "job_alias", admission.jobAlias)
 		return nil, ErrRunQueued
 	}
 
@@ -1749,7 +1917,7 @@ func (s *Store) startRun(req startRunRequest) (*JobRun, error) {
 		// identity so the caller can drive or finalize THAT run — never a
 		// look-alike found by searching, which on another node would mean
 		// executing someone else's run twice.
-		return nil, &RunCommittedError{RunID: model.ID, JobID: model.JobID, Namespace: model.Namespace, Err: err}
+		return nil, &RunCommittedError{RunID: model.ID, JobID: model.JobID, Namespace: model.Namespace, Quarantine: model.Quarantine, Err: err}
 	}
 	return loaded, nil
 }
@@ -1897,14 +2065,60 @@ func (s *Store) StartQueuedRun(ctx context.Context, queued *models.RunQueue) (*J
 	if queued == nil {
 		return nil, errors.New("run: queued run is nil")
 	}
-	return s.startRun(startRunRequest{
+	started, err := s.startRun(startRunRequest{
 		ctx:              ctx,
 		jobID:            queued.JobID,
 		params:           decodeRunParams(queued.Params),
 		priorityOverride: PriorityLabel(queued.Priority),
 		fromQueue:        true,
 		queueID:          &queued.ID,
+		queueClaim:       queued.ClaimedBy,
+		queuedNamespace:  queued.Namespace,
 	})
+	_, committed := CommittedRunID(err)
+	if (err == nil && started != nil) || committed || errors.Is(err, ErrRunSkipped) {
+		// The admission consumed the row with the run it created (even one
+		// it then failed to read back), or with the skipped (or
+		// held-upstream) outcome it recorded.
+		s.observeQueuedRunRemoved(queued, true)
+	}
+	return started, err
+}
+
+// consumeQueueClaimTx consumes the promoted run_queue row (see
+// consumeQueuedRunClaimTx) when this request is a promotion; otherwise it is
+// a no-op. Every terminal outcome of a promotion — a created run, a skip, a
+// held-upstream run — calls it in the transaction that records the outcome,
+// so a crash can never leave a decided request queued for stale-claim
+// recovery to promote again.
+func (req startRunRequest) consumeQueueClaimTx(tx *gorm.DB) error {
+	if !req.fromQueue || req.queueID == nil {
+		return nil
+	}
+	return consumeQueuedRunClaimTx(tx, *req.queueID, req.queueClaim)
+}
+
+// ErrQueuedRunClaimLost refuses a promotion whose claim on its run_queue row
+// is gone: the row was reclaimed as stale and claimed (or already promoted)
+// by another drainer. Nothing is written; the row is no longer this
+// promoter's to release.
+var ErrQueuedRunClaimLost = errors.New("run: the queued run's claim was lost to another drainer")
+
+// consumeQueuedRunClaimTx deletes the promoted run_queue row inside the
+// admission transaction that records its terminal outcome, but only while
+// the row still carries claim. On PostgreSQL every node drains, and a
+// claimant that paused past the stale threshold can resume after another
+// node reclaimed and promoted the same row; matching zero rows aborts its
+// admission, so one request never yields two outcomes.
+func consumeQueuedRunClaimTx(tx *gorm.DB, queueID uuid.UUID, claim string) error {
+	result := tx.Where("id = ? AND claimed_by = ?", queueID, claim).Delete(&models.RunQueue{})
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected == 0 {
+		return ErrQueuedRunClaimLost
+	}
+	return nil
 }
 
 func (s *Store) RegisterTask(runID uuid.UUID, task *models.Task, atom *models.Atom, outstanding int) error {
@@ -5749,7 +5963,11 @@ func (s *Store) CountActive(jobID uuid.UUID) (int64, error) {
 	return count, err
 }
 
-func (s *Store) enqueueRunTx(tx *gorm.DB, jobID uuid.UUID, params datatypes.JSON, priority, maxDepth int) (uuid.UUID, error) {
+// enqueueRunTx parks a start in run_queue. namespace is the namespace
+// admission froze on the run — the queued request belongs to it — and
+// heldReason is models.RunQueueHeldReasonNamespaceQuota when the namespace
+// run quota parked it, nil when the job's own policy did.
+func (s *Store) enqueueRunTx(tx *gorm.DB, jobID uuid.UUID, namespace string, params datatypes.JSON, priority, maxDepth int, heldReason *string) (uuid.UUID, error) {
 	if priority <= 0 {
 		priority = PriorityNormalValue
 	}
@@ -5757,13 +5975,16 @@ func (s *Store) enqueueRunTx(tx *gorm.DB, jobID uuid.UUID, params datatypes.JSON
 		maxDepth = 100
 	}
 	now := time.Now().UTC()
+	owner := models.NamespaceOrDefault(strings.TrimSpace(namespace))
 	row := &models.RunQueue{
-		ID:        uuid.New(),
-		JobID:     jobID,
-		Params:    append(datatypes.JSON(nil), params...),
-		Priority:  priority,
-		ClaimedBy: "",
-		CreatedAt: now,
+		ID:         uuid.New(),
+		JobID:      jobID,
+		Params:     append(datatypes.JSON(nil), params...),
+		Priority:   priority,
+		ClaimedBy:  "",
+		CreatedAt:  now,
+		Namespace:  &owner,
+		HeldReason: heldReason,
 	}
 	if err := tx.Create(row).Error; err != nil {
 		return uuid.Nil, err
@@ -5775,6 +5996,9 @@ func (s *Store) enqueueRunTx(tx *gorm.DB, jobID uuid.UUID, params datatypes.JSON
 		return uuid.Nil, err
 	}
 	if overflow := int(depth) - maxDepth; overflow > 0 {
+		// The outer claimed_by test fences a row a drainer claims between
+		// the subquery and the delete (PostgreSQL re-checks it on the
+		// updated row); a claimed request is never evicted.
 		if err := tx.Exec(`
 DELETE FROM run_queue
 WHERE id IN (
@@ -5783,7 +6007,8 @@ WHERE id IN (
 	WHERE job_id = ? AND claimed_by = ''
 	ORDER BY created_at ASC
 	LIMIT ?
-)`, jobID, overflow).Error; err != nil {
+)
+AND claimed_by = ''`, jobID, overflow).Error; err != nil {
 			return uuid.Nil, err
 		}
 	}
@@ -5791,9 +6016,26 @@ WHERE id IN (
 }
 
 func (s *Store) DequeueNextRun(ctx context.Context, jobID uuid.UUID, claimedBy string) (*models.RunQueue, error) {
+	return s.dequeueNextRun(ctx, jobID, claimedBy, false)
+}
+
+// DequeueNextQuotaRun is DequeueNextRun restricted to rows held by the
+// namespace run quota: the only rows a job without a queue policy has, and
+// the only rows the quota-only dequeuer touches.
+func (s *Store) DequeueNextQuotaRun(ctx context.Context, jobID uuid.UUID, claimedBy string) (*models.RunQueue, error) {
+	return s.dequeueNextRun(ctx, jobID, claimedBy, true)
+}
+
+func (s *Store) dequeueNextRun(ctx context.Context, jobID uuid.UUID, claimedBy string, quotaHeldOnly bool) (*models.RunQueue, error) {
 	claimedBy = strings.TrimSpace(claimedBy)
 	if claimedBy == "" {
 		claimedBy = uuid.NewString()
+	}
+	filter := ""
+	args := []any{claimedBy, time.Now().UTC(), jobID}
+	if quotaHeldOnly {
+		filter = " AND held_reason = ?"
+		args = append(args, models.RunQueueHeldReasonNamespaceQuota)
 	}
 	result := s.db.WithContext(ctx).Exec(`
 UPDATE run_queue
@@ -5801,11 +6043,11 @@ SET claimed_by = ?, claimed_at = ?
 WHERE id = (
 	SELECT id
 	FROM run_queue
-	WHERE job_id = ? AND claimed_by = ''
+	WHERE job_id = ? AND claimed_by = ''`+filter+`
 	ORDER BY priority DESC, created_at ASC
 	LIMIT 1
 )
-AND claimed_by = ''`, claimedBy, time.Now().UTC(), jobID)
+AND claimed_by = ''`, args...)
 	if result.Error != nil {
 		return nil, result.Error
 	}
@@ -5874,12 +6116,22 @@ func (s *Store) DeleteQueuedRun(ctx context.Context, queued *models.RunQueue) er
 	if queued == nil {
 		return nil
 	}
+	// Claim-fenced: only the holder of the claim queued was loaded with (or
+	// anyone, for an unclaimed row) may remove it.
 	result := s.db.WithContext(ctx).
-		Delete(&models.RunQueue{}, "id = ?", queued.ID)
+		Where("id = ? AND claimed_by = ?", queued.ID, queued.ClaimedBy).
+		Delete(&models.RunQueue{})
 	if result.Error != nil {
 		return result.Error
 	}
-	if result.RowsAffected > 0 {
+	s.observeQueuedRunRemoved(queued, result.RowsAffected > 0)
+	return nil
+}
+
+// observeQueuedRunRemoved records a queued run's wait (when this caller
+// removed it) and its job's queue depth.
+func (s *Store) observeQueuedRunRemoved(queued *models.RunQueue, removed bool) {
+	if removed {
 		alias, err := s.jobAlias(queued.JobID)
 		if err != nil {
 			log.Warn("run queue: failed to load job alias for wait metric", "job_id", queued.JobID, "error", err)
@@ -5890,7 +6142,6 @@ func (s *Store) DeleteQueuedRun(ctx context.Context, queued *models.RunQueue) er
 	if err := s.observeRunQueueDepth(queued.JobID); err != nil {
 		log.Warn("run queue: failed to observe depth after delete", "job_id", queued.JobID, "error", err)
 	}
-	return nil
 }
 
 func (s *Store) jobAlias(jobID uuid.UUID) (string, error) {
@@ -7040,7 +7291,16 @@ func effectiveTaskHash(hash, effectiveHash string) string {
 // running count for the job is under maxRuns, so an agent retry can never exceed
 // the declared concurrency nor replace-cancel a live run. On a full job it
 // returns ErrMaxConcurrentRunsReached and leaves the run terminal.
+//
+// Every flip first passes the namespace run quota (identity-and-access D1):
+// manual, agent and quarantined retries alike, because each makes a run
+// running again. At cap it returns a *NamespaceQuotaError and leaves the run
+// terminal; in a namespace the policy file no longer declares, a
+// *NamespaceUndeclaredError.
 func (s *Store) readmitRetryTx(tx *gorm.DB, jobRun *models.JobRun, admit bool) error {
+	if err := namespaceCapacityTx(tx, jobRun.Namespace); err != nil {
+		return err
+	}
 	now := time.Now().UTC()
 	unconditional := func() error {
 		return tx.Model(jobRun).Updates(map[string]any{
@@ -7383,6 +7643,12 @@ func (s *Store) RetryPartition(ctx context.Context, runID, taskRunID uuid.UUID) 
 			if err := runNamespaceGuardTx(tx, &jobRun); err != nil {
 				return err
 			}
+			// Re-executing in a namespace the policy file no longer declares is
+			// refused even when the run is still running; reopening a finished
+			// run also passes the quota (readmitRetryTx below).
+			if err := CheckNamespaceDeclared(jobRun.Namespace); err != nil {
+				return err
+			}
 
 			switch jobRun.Status {
 			case string(StatusRunning), string(StatusFailed), string(StatusSucceeded):
@@ -7497,6 +7763,7 @@ func (s *Store) RetryPartition(ctx context.Context, runID, taskRunID uuid.UUID) 
 		return txErr
 	})
 	if err != nil {
+		RecordNamespaceQuotaDeferral(err)
 		return nil, false, err
 	}
 
@@ -7695,6 +7962,13 @@ func (s *Store) retryFromFailure(runID uuid.UUID, admit bool) (*JobRun, error) {
 	var counts dbWriteCounts
 
 	err := s.db.Transaction(func(tx *gorm.DB) error {
+		// Lock the run row first on PostgreSQL, the order RetryPartition takes
+		// it in: run row, then (in readmitRetryTx) the namespace quota's
+		// advisory lock. The reverse order would let a concurrent whole-run
+		// and partition retry of this run deadlock (identity-and-access D1).
+		if err := lockJobRunForPartitionRetryTx(tx, runID); err != nil {
+			return err
+		}
 		// 1. Verify the run exists and is in a terminal state (failed/succeeded).
 		var jobRun models.JobRun
 		if err := tx.First(&jobRun, "id = ?", runID).Error; err != nil {
@@ -7818,6 +8092,7 @@ func (s *Store) retryFromFailure(runID uuid.UUID, admit bool) (*JobRun, error) {
 		return nil
 	})
 	if err != nil {
+		RecordNamespaceQuotaDeferral(err)
 		return nil, err
 	}
 
@@ -7840,7 +8115,7 @@ func (s *Store) retryFromFailure(runID uuid.UUID, admit bool) (*JobRun, error) {
 	if err != nil {
 		// The reopen and task resets are committed. Preserve their exact identity
 		// so a read-back failure cannot be mistaken for an unaccepted retry.
-		return nil, &RunCommittedError{RunID: runID, JobID: jobID, Namespace: namespace, Err: err}
+		return nil, &RunCommittedError{RunID: runID, JobID: jobID, Namespace: namespace, Quarantine: quarantine, Err: err}
 	}
 	return loaded, nil
 }

@@ -1084,6 +1084,12 @@ none blocks W1.
    `internal/runqueue/dequeuer.go`; window-scheduled runs must start through
    `admit` so the namespace gate applies to them; whichever plan touches the
    dequeuer first in a wave owns the file for that wave, the other rebases).
+   (Shipped in identity-and-access W5-δ: `namespaceCapacityTx` in `admit`, and a
+   `DrainOnce` that lists queued rows by job namespace. A1's window-row
+   exclusions apply only to the parked `run_queue` population and its queue
+   accounting — that namespace listing, the queue depth and the quota
+   `held_reason` annotation — never to running window JobRuns, which always
+   count toward the namespace quota.)
 4. **Quantile choice** — heavy-tailed jobs may want p99; B1's `HistorySource`
    should make the quantile a parameter so right-sizing (p99) and windows
    (p95) share the reader without sharing the number.

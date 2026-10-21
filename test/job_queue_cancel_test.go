@@ -75,7 +75,7 @@ func (s *IntegrationTestSuite) TestJobQueueCancelEndpointConflictsWithClaimedRow
 	s.Require().NoError(cliErr, "caesium job queue failed:\nstdout=%s\nstderr=%s", stdout, stderr)
 	cliLines := nonEmptyLines(stdout)
 	s.Require().GreaterOrEqual(len(cliLines), 2, "queue table should have a header and row:\n%s", stdout)
-	s.Equal([]string{"POSITION", "PRIORITY", "STATE", "ENQUEUED_AT", "PARAMS"}, strings.Fields(cliLines[0]))
+	s.Equal([]string{"POSITION", "PRIORITY", "STATE", "REASON", "ENQUEUED_AT", "PARAMS"}, strings.Fields(cliLines[0]))
 	s.Equal("claimed", strings.Fields(cliLines[1])[2])
 
 	status, body := s.deleteQueuedRun(job.ID, queued.ID)

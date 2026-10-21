@@ -24,7 +24,7 @@ func TestStartRejectsUnexpectedPositionals(t *testing.T) {
 	require.Empty(t, stdout.String())
 }
 func TestIncidentRetryPreservesBothCauses(t *testing.T) {
-	for _, cause := range []error{run.ErrJobPaused, run.ErrMaxConcurrentRunsReached} {
+	for _, cause := range []error{run.ErrJobPaused, run.ErrMaxConcurrentRunsReached, &run.NamespaceQuotaError{Namespace: "marketing", Limit: 1}} {
 		err := incidentRetryError(cause)
 		require.ErrorIs(t, err, incident.ErrRetryDeferred)
 		require.ErrorIs(t, err, cause)
