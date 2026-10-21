@@ -324,11 +324,32 @@ func TestDequeuerLaunchesAPromotionWhoseReadBackRecovers(t *testing.T) {
 	faultPromotionReadBacks(t, db, 2)
 
 	rec := &launchRecorder{db: db}
-	require.NoError(t, newQuotaDequeuer(db, rec, true).DrainOnce(t.Context()))
+	var dispatched []uuid.UUID
+	require.NoError(t, newReadBackDequeuer(db, rec, &dispatched).DrainOnce(t.Context()))
 	require.Equal(t, []uuid.UUID{job.ID}, rec.launched, "the committed run is launched")
+	require.Empty(t, dispatched, "its executor owns the callbacks")
 	var running int64
 	require.NoError(t, db.Model(&models.JobRun{}).Where("job_id = ? AND status = ?", job.ID, string(runstorage.StatusRunning)).Count(&running).Error)
 	require.Equal(t, int64(1), running)
+}
+
+// newReadBackDequeuer is a quota-only dequeuer that records the runs it
+// dispatches completion callbacks for.
+func newReadBackDequeuer(db *gorm.DB, rec *launchRecorder, dispatched *[]uuid.UUID) *Dequeuer {
+	return NewDequeuer(Config{
+		DB:        db,
+		Store:     runstorage.NewStore(db),
+		NodeID:    "node-q",
+		LaunchRun: rec.launch,
+		QuotaOnly: true,
+		DispatchRunCallbacks: func(_ context.Context, _, runID uuid.UUID, runErr error) error {
+			if runErr == nil {
+				return errors.New("a finalized run's callbacks carry its failure")
+			}
+			*dispatched = append(*dispatched, runID)
+			return nil
+		},
+	})
 }
 
 // TestDequeuerFinalizesAPromotionThatNeverReadsBack: if the committed run
@@ -344,12 +365,15 @@ func TestDequeuerFinalizesAPromotionThatNeverReadsBack(t *testing.T) {
 	disarm := faultPromotionReadBacks(t, db, -1)
 
 	rec := &launchRecorder{db: db}
-	d := newQuotaDequeuer(db, rec, true)
+	var dispatched []uuid.UUID
+	d := newReadBackDequeuer(db, rec, &dispatched)
 	require.NoError(t, d.DrainOnce(t.Context()))
 	require.Empty(t, rec.launched)
-	var status []string
-	require.NoError(t, db.Model(&models.JobRun{}).Where("job_id = ?", stuck.ID).Pluck("status", &status).Error)
-	require.Equal(t, []string{string(runstorage.StatusFailed)}, status, "finalized, never left running")
+	var runs []models.JobRun
+	require.NoError(t, db.Where("job_id = ?", stuck.ID).Find(&runs).Error)
+	require.Len(t, runs, 1)
+	require.Equal(t, string(runstorage.StatusFailed), runs[0].Status, "finalized, never left running")
+	require.Equal(t, []uuid.UUID{runs[0].ID}, dispatched, "its job's callbacks go out once")
 	var left int64
 	require.NoError(t, db.Model(&models.RunQueue{}).Where("job_id = ?", stuck.ID).Count(&left).Error)
 	require.Zero(t, left)
@@ -359,6 +383,7 @@ func TestDequeuerFinalizesAPromotionThatNeverReadsBack(t *testing.T) {
 	seedQueueRow(t, db, next.ID, ptr("quota-a"), true, time.Second)
 	require.NoError(t, d.DrainOnce(t.Context()))
 	require.Equal(t, []uuid.UUID{next.ID}, rec.launched, "quota-a's slot was freed")
+	require.Equal(t, []uuid.UUID{runs[0].ID}, dispatched, "no second dispatch")
 }
 
 // TestDequeuerQuotaOnlyDrainsRowsAfterThePolicyIsRemoved: a policy file parked

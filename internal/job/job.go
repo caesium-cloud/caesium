@@ -121,18 +121,25 @@ func (r contentionRetrier) Do[T any](ctx context.Context, fn func() (T, error)) 
 // retryOnContentionDo, which would then start the request a second time. So
 // the exact run is re-read and executed here; if it never reads back it is
 // finalized (Store.RecoverCommittedRun) and the error returned carries no
-// driver text. Any other result passes through unchanged.
-func adoptCommittedStart(ctx context.Context, store *run.Store, started *run.JobRun, err error) (*run.JobRun, error) {
-	adopted, committed, recoverErr := store.RecoverCommittedRun(ctx, err, runStartReadBackoffs)
-	if !committed {
+// driver text; a run this call finalized gets the job's completion callbacks
+// here, since no executor will (never for a quarantined run). Any other
+// result passes through unchanged.
+func (j *job) adoptCommittedStart(ctx context.Context, store *run.Store, started *run.JobRun, err error) (*run.JobRun, error) {
+	rec, recoverErr := store.RecoverCommittedRun(ctx, err, runStartReadBackoffs)
+	if !rec.Committed {
 		return started, err
 	}
 	if recoverErr != nil {
+		if rec.DispatchCallbacks() {
+			if dispatchErr := j.dispatchRunCallbacks(context.WithoutCancel(ctx), rec.JobID, rec.RunID, rec.Cause); dispatchErr != nil {
+				log.Error("callback dispatch failure", "job_id", rec.JobID, "run_id", rec.RunID, "error", dispatchErr)
+			}
+		}
 		return nil, recoverErr
 	}
 	log.Warn("run start reported a read-back error after committing the run; executing the committed run",
-		"job_id", adopted.JobID, "run_id", adopted.ID, "error", err)
-	return adopted, nil
+		"job_id", rec.Run.JobID, "run_id", rec.Run.ID, "error", err)
+	return rec.Run, nil
 }
 
 func retryOnContention(ctx context.Context, fn func() error) error {
@@ -1106,7 +1113,7 @@ func (j *job) Run(ctx context.Context) (err error) {
 			if err != nil {
 				if errors.Is(err, gorm.ErrRecordNotFound) {
 					started, err := store.Start(j.id, j.triggerID, startOpts...)
-					return adoptCommittedStart(ctx, store, started, err)
+					return j.adoptCommittedStart(ctx, store, started, err)
 				}
 				return nil, err
 			}
@@ -1114,7 +1121,7 @@ func (j *job) Run(ctx context.Context) (err error) {
 		}
 
 		if admitted, handled, err := store.AdmitRun(j.id, j.triggerID, startOpts...); handled || err != nil {
-			return adoptCommittedStart(ctx, store, admitted, err)
+			return j.adoptCommittedStart(ctx, store, admitted, err)
 		}
 
 		running, err := store.FindRunning(j.id)
@@ -1137,7 +1144,7 @@ func (j *job) Run(ctx context.Context) (err error) {
 		}
 
 		started, err := store.Start(j.id, j.triggerID, startOpts...)
-		return adoptCommittedStart(ctx, store, started, err)
+		return j.adoptCommittedStart(ctx, store, started, err)
 	}
 
 	snapshot, err := retryOnContentionDo(ctx, resolveRun)

@@ -1,6 +1,7 @@
 package job
 
 import (
+	"context"
 	"errors"
 	"sync/atomic"
 	"testing"
@@ -31,12 +32,18 @@ func faultStartReadBacks(t *testing.T, db *gorm.DB, n int) {
 	t.Cleanup(func() { _ = db.Callback().Query().Remove(callback) })
 }
 
+type callbackCall struct {
+	jobID, runID uuid.UUID
+	err          error
+}
+
 // TestAdoptCommittedStartExecutesOrFinalizesTheCommittedRun covers the
 // trigger path (cron, HTTP, event → job.Run → AdmitRun/Start): a start whose
 // admission committed but whose read-back failed used to return the error,
 // leaving the run running with nothing executing it — and, because the read
 // error reads as contention, retryOnContentionDo would then start the request
-// again. Now the exact run is executed once it reads back, or finalized, and
+// again. Now the exact run is executed once it reads back (its executor owns
+// the callbacks), or finalized here with the job's callbacks dispatched once;
 // the error never looks like contention.
 func TestAdoptCommittedStartExecutesOrFinalizesTheCommittedRun(t *testing.T) {
 	for _, tc := range []struct {
@@ -48,16 +55,21 @@ func TestAdoptCommittedStartExecutesOrFinalizesTheCommittedRun(t *testing.T) {
 			db := testutil.OpenTestDB(t)
 			t.Cleanup(func() { testutil.CloseDB(db) })
 			store := run.NewStore(db)
-			job := &models.Job{ID: uuid.New(), Alias: "adopt-" + uuid.NewString()[:8]}
-			require.NoError(t, db.Create(job).Error)
+			model := &models.Job{ID: uuid.New(), Alias: "adopt-" + uuid.NewString()[:8]}
+			require.NoError(t, db.Create(model).Error)
+			var calls []callbackCall
+			j := New(model, WithDispatchRunCallbacks(func(_ context.Context, jobID, runID uuid.UUID, err error) error {
+				calls = append(calls, callbackCall{jobID, runID, err})
+				return nil
+			})).(*job)
 			faultStartReadBacks(t, db, tc.faults)
 
-			started, err := store.Start(job.ID, nil)
+			started, err := store.Start(model.ID, nil)
 			committedID, ok := run.CommittedRunID(err)
 			require.True(t, ok, "the start committed: %v", err)
 			require.True(t, dqlite.IsContentionError(err), "the raw error reads as contention")
 
-			adopted, err := adoptCommittedStart(t.Context(), store, started, err)
+			adopted, err := j.adoptCommittedStart(t.Context(), store, started, err)
 			var status string
 			require.NoError(t, db.Table("job_runs").Select("status").Where("id = ?", committedID).Row().Scan(&status))
 			if tc.faults < 0 {
@@ -65,13 +77,18 @@ func TestAdoptCommittedStartExecutesOrFinalizesTheCommittedRun(t *testing.T) {
 				require.False(t, dqlite.IsContentionError(err), "retryOnContentionDo must not start it again")
 				require.Nil(t, adopted)
 				require.Equal(t, string(run.StatusFailed), status)
+				require.Len(t, calls, 1, "the job's callbacks go out exactly once")
+				require.Equal(t, model.ID, calls[0].jobID)
+				require.Equal(t, committedID, calls[0].runID)
+				require.Error(t, calls[0].err)
 			} else {
 				require.NoError(t, err)
 				require.Equal(t, committedID, adopted.ID)
 				require.Equal(t, string(run.StatusRunning), status)
+				require.Empty(t, calls, "the executor that runs it owns the callbacks")
 			}
 			var runs int64
-			require.NoError(t, db.Model(&models.JobRun{}).Where("job_id = ?", job.ID).Count(&runs).Error)
+			require.NoError(t, db.Model(&models.JobRun{}).Where("job_id = ?", model.ID).Count(&runs).Error)
 			require.Equal(t, int64(1), runs)
 		})
 	}

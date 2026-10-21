@@ -674,7 +674,10 @@ type RunCommittedError struct {
 	Namespace string
 	RunID     uuid.UUID
 	JobID     uuid.UUID
-	Err       error
+	// Quarantine is the committed run's quarantine flag: a quarantined run
+	// never dispatches job callbacks, whoever finalizes it.
+	Quarantine bool
+	Err        error
 }
 
 func (e *RunCommittedError) Error() string {
@@ -698,24 +701,52 @@ func CommittedRunID(err error) (uuid.UUID, bool) {
 // second time.
 var ErrCommittedRunAbandoned = errors.New("run: a committed run could not be read back and was finalized")
 
+// CommittedRecovery is what RecoverCommittedRun did with a committed run.
+type CommittedRecovery struct {
+	// Committed reports that the error carried a committed run at all.
+	Committed bool
+	// Run is the committed run, read back: the caller launches it.
+	Run *JobRun
+	// RunID and JobID identify the committed run.
+	RunID uuid.UUID
+	JobID uuid.UUID
+	// Finalized reports that THIS call finalized the unreadable run, failed
+	// with Cause. The caller then owns its completion callbacks — exactly
+	// once, and never for a Quarantine run — because no executor ever ran
+	// it to dispatch them.
+	Finalized  bool
+	Quarantine bool
+	Cause      error
+}
+
+// DispatchCallbacks reports whether the caller must dispatch the job's
+// completion callbacks for the run this recovery finalized.
+func (r CommittedRecovery) DispatchCallbacks() bool {
+	return r.Finalized && !r.Quarantine
+}
+
 // RecoverCommittedRun settles a start that committed its run but failed to
-// read it back (err carries a *RunCommittedError; ok is false otherwise). It
-// re-reads that exact run — never a look-alike — after each of backoffs, and
-// returns it for the caller to launch. If it still cannot be read, it
-// finalizes the run (CompleteIfActive, failed with the read error) so the run
-// never stays running with nothing to execute it — at a namespace quota of
-// one it would hold the namespace forever — and returns an error matching
-// ErrCommittedRunAbandoned.
-func (s *Store) RecoverCommittedRun(ctx context.Context, err error, backoffs []time.Duration) (*JobRun, bool, error) {
-	runID, ok := CommittedRunID(err)
-	if !ok {
-		return nil, false, nil
+// read it back (err carries a *RunCommittedError; Committed is false
+// otherwise). It re-reads that exact run — never a look-alike — after each of
+// backoffs, and returns it for the caller to launch. If it still cannot be
+// read, it finalizes the run (CompleteIfActive, failed with the read error) so
+// the run never stays running with nothing to execute it — at a namespace
+// quota of one it would hold the namespace forever — and returns an error
+// matching ErrCommittedRunAbandoned; see CommittedRecovery.Finalized for the
+// callbacks that then fall to the caller.
+func (s *Store) RecoverCommittedRun(ctx context.Context, err error, backoffs []time.Duration) (CommittedRecovery, error) {
+	committed, ok := errors.AsType[*RunCommittedError](err)
+	if !ok || committed.RunID == uuid.Nil {
+		return CommittedRecovery{}, nil
 	}
+	runID := committed.RunID
+	rec := CommittedRecovery{Committed: true, RunID: runID, JobID: committed.JobID, Quarantine: committed.Quarantine}
 	lastErr := err
 	for attempt := 0; ; attempt++ {
 		loaded, readErr := s.loadRunWithDB(s.db.WithContext(context.WithoutCancel(ctx)), runID)
 		if readErr == nil {
-			return loaded, true, nil
+			rec.Run = loaded
+			return rec, nil
 		}
 		lastErr = readErr
 		if attempt >= len(backoffs) || ctx.Err() != nil {
@@ -728,15 +759,17 @@ func (s *Store) RecoverCommittedRun(ctx context.Context, err error, backoffs []t
 		case <-timer.C:
 		}
 	}
-	finalized, completeErr := s.CompleteIfActive(runID, fmt.Errorf("run: the committed run could not be read back to launch it: %w", lastErr))
+	cause := fmt.Errorf("run: the committed run could not be read back to launch it: %w", lastErr)
+	finalized, completeErr := s.CompleteIfActive(runID, cause)
 	if completeErr != nil {
 		log.Error("run: a committed run could not be read back or finalized; leaving it for an operator",
 			"run_id", runID, "read_error", lastErr, "error", completeErr)
-		return nil, true, fmt.Errorf("%w (run %s; finalize failed)", ErrCommittedRunAbandoned, runID)
+		return rec, fmt.Errorf("%w (run %s; finalize failed)", ErrCommittedRunAbandoned, runID)
 	}
 	log.Error("run: a committed run could not be read back; finalized it as failed so it frees its slot",
 		"run_id", runID, "finalized", finalized, "read_error", lastErr)
-	return nil, true, fmt.Errorf("%w (run %s)", ErrCommittedRunAbandoned, runID)
+	rec.Finalized, rec.Cause = finalized, cause
+	return rec, fmt.Errorf("%w (run %s)", ErrCommittedRunAbandoned, runID)
 }
 
 var (
@@ -1884,7 +1917,7 @@ func (s *Store) startRun(req startRunRequest) (*JobRun, error) {
 		// identity so the caller can drive or finalize THAT run — never a
 		// look-alike found by searching, which on another node would mean
 		// executing someone else's run twice.
-		return nil, &RunCommittedError{RunID: model.ID, JobID: model.JobID, Namespace: model.Namespace, Err: err}
+		return nil, &RunCommittedError{RunID: model.ID, JobID: model.JobID, Namespace: model.Namespace, Quarantine: model.Quarantine, Err: err}
 	}
 	return loaded, nil
 }
@@ -8082,7 +8115,7 @@ func (s *Store) retryFromFailure(runID uuid.UUID, admit bool) (*JobRun, error) {
 	if err != nil {
 		// The reopen and task resets are committed. Preserve their exact identity
 		// so a read-back failure cannot be mistaken for an unaccepted retry.
-		return nil, &RunCommittedError{RunID: runID, JobID: jobID, Namespace: namespace, Err: err}
+		return nil, &RunCommittedError{RunID: runID, JobID: jobID, Namespace: namespace, Quarantine: quarantine, Err: err}
 	}
 	return loaded, nil
 }

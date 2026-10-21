@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/caesium-cloud/caesium/internal/callback"
 	jobexec "github.com/caesium-cloud/caesium/internal/job"
 	"github.com/caesium-cloud/caesium/internal/metrics"
 	"github.com/caesium-cloud/caesium/internal/models"
@@ -32,6 +33,10 @@ type Config struct {
 	StaleClaimThreshold time.Duration
 	LeaderCheck         LeaderCheck
 	LaunchRun           LaunchFunc
+	// DispatchRunCallbacks dispatches a job's completion callbacks for a
+	// promoted run the dequeuer had to finalize itself because nothing ever
+	// executed it (nil: internal/callback's default dispatcher).
+	DispatchRunCallbacks func(ctx context.Context, jobID, runID uuid.UUID, runErr error) error
 	// QuotaOnly runs the dequeuer for the namespace run quota alone
 	// (identity-and-access D1): it drains only rows held by a namespace's
 	// quotas.maxConcurrentRuns and never touches a row a job's own queue
@@ -52,6 +57,7 @@ type Dequeuer struct {
 	staleClaimThreshold time.Duration
 	leaderCheck         LeaderCheck
 	launchRun           LaunchFunc
+	dispatchCallbacks   func(ctx context.Context, jobID, runID uuid.UUID, runErr error) error
 	quotaOnly           bool
 
 	// Round-robin cursors (design §10.3). They live in memory on the leader:
@@ -85,7 +91,14 @@ func NewDequeuer(cfg Config) *Dequeuer {
 	if staleClaimThreshold <= 0 {
 		staleClaimThreshold = models.DefaultRunQueueClaimStaleAfter
 	}
+	dispatchCallbacks := cfg.DispatchRunCallbacks
+	if dispatchCallbacks == nil {
+		dispatchCallbacks = func(ctx context.Context, jobID, runID uuid.UUID, runErr error) error {
+			return callback.Default().Dispatch(ctx, jobID, runID, runErr)
+		}
+	}
 	return &Dequeuer{
+		dispatchCallbacks:   dispatchCallbacks,
 		db:                  cfg.DB,
 		store:               store,
 		nodeID:              nodeID,
@@ -467,12 +480,15 @@ func (d *Dequeuer) promoteOne(ctx context.Context, jobID uuid.UUID, quotaRowsOnl
 		// running — but its read-back failed. Launch exactly that run once it
 		// reads back; if it never does, it was finalized so it frees its
 		// namespace slot instead of holding it with nothing executing it.
-		adopted, _, recoverErr := d.store.RecoverCommittedRun(ctx, err, committedRunReadBackoffs)
+		rec, recoverErr := d.store.RecoverCommittedRun(ctx, err, committedRunReadBackoffs)
 		if recoverErr != nil {
 			log.Error("run queue dequeuer could not read back a promoted run", "queue_id", queued.ID, "job_id", queued.JobID, "error", recoverErr)
+			if rec.DispatchCallbacks() {
+				d.dispatchFinalizedCallbacks(ctx, rec.JobID, rec.RunID, rec.Cause)
+			}
 			return promotionConsumed, nil
 		}
-		started, err = adopted, nil
+		started, err = rec.Run, nil
 	}
 	if err != nil {
 		switch {
@@ -532,12 +548,26 @@ func (d *Dequeuer) promoteOne(ctx context.Context, jobID uuid.UUID, quotaRowsOnl
 	if err := d.launch(ctx, started); err != nil {
 		// The run is committed and running with nothing to execute it:
 		// settle it so it frees its slot.
-		if _, completeErr := d.store.CompleteIfActive(started.ID, fmt.Errorf("run queue dequeuer could not launch the promoted run: %w", err)); completeErr != nil {
+		cause := fmt.Errorf("run queue dequeuer could not launch the promoted run: %w", err)
+		finalized, completeErr := d.store.CompleteIfActive(started.ID, cause)
+		if completeErr != nil {
 			log.Error("run queue dequeuer could not launch or finalize a promoted run", "run_id", started.ID, "error", completeErr)
+		} else if finalized && !started.Quarantine {
+			d.dispatchFinalizedCallbacks(ctx, started.JobID, started.ID, cause)
 		}
 		return promotionEmpty, err
 	}
 	return promotionStarted, nil
+}
+
+// dispatchFinalizedCallbacks dispatches a job's completion callbacks for a
+// promoted run this dequeuer finalized itself (nothing executed it, so no
+// executor will). Callers check that the finalization was theirs and the run
+// is not quarantined, so each run gets them exactly once.
+func (d *Dequeuer) dispatchFinalizedCallbacks(ctx context.Context, jobID, runID uuid.UUID, cause error) {
+	if err := d.dispatchCallbacks(context.WithoutCancel(ctx), jobID, runID, cause); err != nil {
+		log.Error("run queue dequeuer callback dispatch failure", "job_id", jobID, "run_id", runID, "error", err)
+	}
 }
 
 // committedRunReadBackoffs bound how long a promotion whose admission
