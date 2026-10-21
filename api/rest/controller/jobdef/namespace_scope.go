@@ -7,6 +7,8 @@ import (
 	"maps"
 	"slices"
 	"strings"
+	"sync"
+	"unicode"
 
 	authmw "github.com/caesium-cloud/caesium/api/middleware"
 	contractsvc "github.com/caesium-cloud/caesium/api/rest/service/contract"
@@ -182,20 +184,42 @@ func (s *readScope) resolve(ctx context.Context, aliases []string) {
 			s.visible[alias] = false
 		}
 	}
+	// The aliases resolved here are trimmed (contract derivation, the
+	// request keys and findings all trim), so read every stored row whose
+	// alias trims to one of them: the exact rows and every row whose alias
+	// carries surrounding whitespace.
+	nonCanonical, nonCanonicalArgs := nonCanonicalAliasClause()
 	var rows []models.Job
-	if err := s.db.WithContext(ctx).Unscoped().Select("alias", "namespace", "trigger_id").Where("alias IN ?", lookup).Find(&rows).Error; err != nil {
+	if err := s.db.WithContext(ctx).Unscoped().Select("alias", "namespace", "trigger_id").
+		Where("alias IN ? OR ("+nonCanonical+")", append([]any{lookup}, nonCanonicalArgs...)...).Find(&rows).Error; err != nil {
 		failClosed(err)
 		return
 	}
-	aliasesByTrigger := make(map[uuid.UUID][]string, len(rows))
+	wanted := make(map[string]struct{}, len(lookup))
+	for _, alias := range lookup {
+		wanted[alias] = struct{}{}
+	}
+	rowsByAlias := make(map[string][]models.Job, len(lookup))
 	for _, row := range rows {
 		alias := strings.TrimSpace(row.Alias)
-		if !s.readable(alias, row.Namespace) {
+		if _, ok := wanted[alias]; ok {
+			rowsByAlias[alias] = append(rowsByAlias[alias], row)
+		}
+	}
+	aliasesByTrigger := make(map[uuid.UUID][]string, len(rows))
+	for alias, matches := range rowsByAlias {
+		// The job is identified by its trimmed alias only when exactly one
+		// stored row (live or retired) carries it: a retired "consumer" and
+		// a live "consumer " are two jobs the trimmed name cannot tell
+		// apart, so neither is shown (PR #668 review r8). The one row's raw
+		// alias and namespace decide; a key scope never covers a stored
+		// alias with surrounding whitespace.
+		if len(matches) != 1 || !s.readable(matches[0].Alias, matches[0].Namespace) {
 			s.visible[alias] = false
 			continue
 		}
 		s.visible[alias] = true
-		aliasesByTrigger[row.TriggerID] = append(aliasesByTrigger[row.TriggerID], alias)
+		aliasesByTrigger[matches[0].TriggerID] = append(aliasesByTrigger[matches[0].TriggerID], alias)
 	}
 	if len(aliasesByTrigger) == 0 {
 		return
@@ -212,6 +236,30 @@ func (s *readScope) resolve(ctx context.Context, aliases []string) {
 			}
 		}
 	}
+}
+
+var (
+	nonCanonicalAliasOnce sync.Once
+	nonCanonicalAliasSQL  string
+	nonCanonicalAliasArgs []any
+)
+
+// nonCanonicalAliasClause is a SQL condition (with its arguments) selecting
+// the jobs rows whose alias starts or ends with a character strings.TrimSpace
+// strips (every unicode.IsSpace rune). SQL TRIM strips ASCII spaces only.
+func nonCanonicalAliasClause() (string, []any) {
+	nonCanonicalAliasOnce.Do(func() {
+		var parts []string
+		for r := rune(0); r <= unicode.MaxRune; r++ {
+			if !unicode.IsSpace(r) {
+				continue
+			}
+			parts = append(parts, "alias LIKE ?", "alias LIKE ?")
+			nonCanonicalAliasArgs = append(nonCanonicalAliasArgs, string(r)+"%", "%"+string(r))
+		}
+		nonCanonicalAliasSQL = strings.Join(parts, " OR ")
+	})
+	return nonCanonicalAliasSQL, slices.Clone(nonCanonicalAliasArgs)
 }
 
 func (s *readScope) aliasVisible(ctx context.Context, alias string) bool {

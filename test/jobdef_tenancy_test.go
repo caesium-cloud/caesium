@@ -611,6 +611,60 @@ func (s *IntegrationTestSuite) TestAuthJobdefApplyRedactsForeignContractFindings
 	s.NotContains(body, team)
 }
 
+// TestAuthJobdefApplyWithholdsFindingOfWhitespaceTwin: contract findings
+// carry trimmed aliases, so a retired marketing job "consumer" must not
+// authorise a finding about a live finance job "consumer " (which unrestricted
+// writers may still create) consuming a marketing producer. The marketing
+// operator's breaking apply answers 409 with the finding withheld and no
+// finance text (PR #668 review r8); the cluster admin's 409 still names it.
+func (s *IntegrationTestSuite) TestAuthJobdefApplyWithholdsFindingOfWhitespaceTwin() {
+	s.requireAuthLane()
+	stamp := time.Now().UnixNano()
+	mktOperator := s.mintNamespacedKey("operator", "marketing")
+	producer := fmt.Sprintf("b9-twin-producer-%d", stamp)
+	consumer := fmt.Sprintf("b9-twin-consumer-%d", stamp)
+	twin := consumer + " "
+	team := fmt.Sprintf("b9twinteam%d", stamp)
+	s.b9Cleanup(producer, consumer, twin)
+	inNamespace := func(manifest, namespace string) string {
+		return strings.Replace(manifest, "metadata:\n", "metadata:\n  namespace: "+namespace+"\n", 1)
+	}
+	dir := s.writeContractManifests(map[string]string{
+		producer: inNamespace(contractProducerManifest(producer, []string{"customer_id", "row_count"}), "marketing"),
+		consumer: inNamespace(contractConsumerManifest(consumer, producer, team, "customer", "customer_id"), "finance"),
+	})
+	defer os.RemoveAll(dir)
+
+	// The canonical alias belongs to a retired marketing job.
+	status, body := s.b9Apply(s.authAPIKey, false, s.b9Def(consumer, "marketing", ""))
+	s.Require().Equal(http.StatusOK, status, body)
+	status, body = s.requestWithKey(http.MethodDelete, "/v1/jobs/"+s.b9RequireJob(consumer).ID, s.authAPIKey, nil)
+	s.Require().Equal(http.StatusAccepted, status, body)
+	s.Require().Nil(s.b9Job(consumer), "the marketing job is retired")
+
+	// The finance consumer of the marketing producer, under the twin alias.
+	consumerDef := s.parseContractManifest(dir, consumer)
+	consumerDef.Metadata.Alias = twin
+	status, body = s.b9Apply(s.authAPIKey, false, s.parseContractManifest(dir, producer), consumerDef)
+	s.Require().Equal(http.StatusOK, status, body)
+	s.Require().NotNil(s.b9Job(twin))
+
+	broken := s.writeContractManifests(map[string]string{
+		producer: inNamespace(contractProducerManifest(producer, []string{"row_count"}), "marketing"),
+	})
+	defer os.RemoveAll(broken)
+	def := s.parseContractManifest(broken, producer)
+	status, body = s.b9Apply(mktOperator.Plaintext, false, def)
+	s.Require().Equal(http.StatusConflict, status, body)
+	s.Contains(body, `"withheld_findings":1`)
+	for _, foreign := range []string{consumer, team, "customer_id", "finance"} {
+		s.NotContains(body, foreign)
+	}
+	status, body = s.b9Apply(s.authAPIKey, false, def)
+	s.Require().Equal(http.StatusConflict, status, body)
+	s.Contains(body, consumer, "the cluster admin's 409 names the consumer")
+}
+
 // parseContractManifest reads one manifest written by writeContractManifests.
 func (s *IntegrationTestSuite) parseContractManifest(dir, alias string) schema.Definition {
 	s.T().Helper()

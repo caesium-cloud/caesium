@@ -345,3 +345,46 @@ func TestApplyJobScopedKeyValidatorErrorNamesNoOutOfScopeJob(t *testing.T) {
 		})
 	}
 }
+
+// Findings, validator errors and the request keys carry trimmed aliases, so
+// a trimmed alias names a job only when exactly one stored row (live or
+// retired) carries it (PR #668 review r8). A retired marketing "consumer"
+// and a live finance "consumer " (ASCII or Unicode space) are two jobs:
+// "consumer" is withheld from a marketing reader, not authorised by the
+// retired marketing row. A lone finance twin is foreign to marketing; a lone
+// retired marketing "consumer" is marketing's own; a key scoped to
+// "consumer" never covers a stored "consumer ".
+func TestReadScopeWithholdsAmbiguousTrimmedAlias(t *testing.T) {
+	ctx := context.Background()
+	finding := internalcontract.ContractFinding{Producer: "producer", Consumer: "consumer", EdgeClass: string(internalcontract.EdgeClassDeclared)}
+	retireConsumer := func(conn *gorm.DB) {
+		t.Helper()
+		require.NoError(t, conn.Where("alias = ?", "consumer").Delete(&models.Job{}).Error)
+		row, ok := jobRow(t, conn, "consumer")
+		require.True(t, ok)
+		require.True(t, row.DeletedAt.Valid, "the marketing consumer is retired")
+	}
+	for _, space := range []string{" ", " ", " "} {
+		twin := scopeDefinition("consumer", "finance")
+		twin.Metadata.Alias = "consumer" + space
+
+		conn := freshCatalog(t, scopeDefinition("producer", "marketing"), scopeDefinition("consumer", "marketing"))
+		retireConsumer(conn)
+		require.True(t, newReadScopeFor([]string{"marketing"}, conn, nil).findingVisible(ctx, finding), "a lone retired marketing consumer is marketing's own")
+
+		applyDefinitions(t, conn, twin)
+		for name, allowed := range map[string][]string{"marketing": {"marketing"}, "both": {"marketing", "finance"}} {
+			view := newReadScopeFor(allowed, conn, nil)
+			require.False(t, view.findingVisible(ctx, finding), "%s: an ambiguous trimmed consumer is withheld", name)
+			require.Equal(t, hiddenJob, view.aliasOrHidden(ctx, "consumer"), name)
+			require.True(t, view.aliasVisible(ctx, "producer"), name)
+		}
+		var unrestricted *readScope
+		require.True(t, unrestricted.findingVisible(ctx, finding))
+
+		lone := freshCatalog(t, scopeDefinition("producer", "marketing"), twin)
+		require.False(t, newReadScopeFor([]string{"marketing"}, lone, nil).findingVisible(ctx, finding), "the finance twin is foreign")
+		require.True(t, newReadScopeFor([]string{"finance"}, lone, nil).aliasVisible(ctx, "consumer"), "its own namespace reads it")
+		require.False(t, newReadScopeForKey(nil, []string{"consumer"}, lone, nil).aliasVisible(ctx, "consumer"), "a key scope never covers the twin")
+	}
+}
