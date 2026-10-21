@@ -472,10 +472,8 @@ func (d *Dequeuer) promoteOne(ctx context.Context, jobID uuid.UUID, quotaRowsOnl
 				"queue_id", queued.ID, "job_id", queued.JobID, "claim", claim)
 			return promotionEmpty, nil
 		case errors.Is(err, runstorage.ErrRunSkipped):
-			if err := d.store.DeleteQueuedRun(ctx, queued); err != nil {
-				d.release(ctx, queued, claim, "skipped")
-				return promotionEmpty, err
-			}
+			// Skipped or held upstream: the admission consumed the row with
+			// the outcome it recorded, in one transaction.
 			return promotionConsumed, nil
 		case errors.Is(err, runstorage.ErrQueuedRunNamespaceMoved), errors.Is(err, runstorage.ErrNamespaceUndeclared):
 			// The request belongs to a namespace its job has left, or the
@@ -484,12 +482,18 @@ func (d *Dequeuer) promoteOne(ctx context.Context, jobID uuid.UUID, quotaRowsOnl
 			if errors.Is(err, runstorage.ErrNamespaceUndeclared) {
 				reason = runstorage.QueueDropReasonNamespaceUndeclared
 			}
-			log.Warn("run queue dequeuer dropped a queued run that may not start in its job's namespace",
-				"queue_id", queued.ID, "job_id", queued.JobID, "reason", reason, "error", err)
 			if err := d.store.DropQueuedRun(ctx, queued, reason); err != nil {
+				if errors.Is(err, runstorage.ErrQueuedRunClaimLost) {
+					// Another drainer owns the row now; it decides.
+					log.Warn("run queue dequeuer lost its claim on a queued run before dropping it",
+						"queue_id", queued.ID, "job_id", queued.JobID, "claim", claim)
+					return promotionEmpty, nil
+				}
 				d.release(ctx, queued, claim, "dropped")
 				return promotionEmpty, err
 			}
+			log.Warn("run queue dequeuer dropped a queued run that may not start in its job's namespace",
+				"queue_id", queued.ID, "job_id", queued.JobID, "reason", reason, "error", err)
 			return promotionConsumed, nil
 		case errors.Is(err, runstorage.ErrNamespaceQuota):
 			flipped, releaseErr := d.store.ReleaseQueuedRunHeldByQuota(ctx, queued, claim)

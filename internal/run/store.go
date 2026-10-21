@@ -1663,20 +1663,28 @@ func (s *Store) startRun(req startRunRequest) (*JobRun, error) {
 				// the others and are published after commit; there is no
 				// run_started, because nothing started.
 				attemptEvents = append(attemptEvents, result.heldEvents...)
+				// Terminal for a promoted request: consumed with the outcome.
+				if err := req.consumeQueueClaimTx(tx); err != nil {
+					return err
+				}
 				return recordStartOutcomeTx(tx, req, model, attemptAdmission)
-			case admissionSkipped, admissionQueued:
+			case admissionSkipped:
+				if err := req.consumeQueueClaimTx(tx); err != nil {
+					return err
+				}
+				return recordStartOutcomeTx(tx, req, model, attemptAdmission)
+			case admissionQueued:
 				return recordStartOutcomeTx(tx, req, model, attemptAdmission)
 			case admissionFailed:
+				// Not terminal: the dequeuer releases its claim (claim-fenced).
 				return nil
 			default:
 				return fmt.Errorf("run: unknown admission decision %d", result.decision)
 			}
 
-			if req.fromQueue && req.queueID != nil {
-				// The run exists only if this promoter still owns the row.
-				if err := consumeQueuedRunClaimTx(tx, *req.queueID, req.queueClaim); err != nil {
-					return err
-				}
+			// The run exists only if this promoter still owns the row.
+			if err := req.consumeQueueClaimTx(tx); err != nil {
+				return err
 			}
 			if err := recordStartOutcomeTx(tx, req, model, attemptAdmission); err != nil {
 				return err
@@ -1986,11 +1994,25 @@ func (s *Store) StartQueuedRun(ctx context.Context, queued *models.RunQueue) (*J
 		queueClaim:       queued.ClaimedBy,
 		queuedNamespace:  queued.Namespace,
 	})
-	if err == nil && started != nil {
-		// The admission consumed the row with the run it created.
+	if (err == nil && started != nil) || errors.Is(err, ErrRunSkipped) {
+		// The admission consumed the row with the run it created, or with
+		// the skipped (or held-upstream) outcome it recorded.
 		s.observeQueuedRunRemoved(queued, true)
 	}
 	return started, err
+}
+
+// consumeQueueClaimTx consumes the promoted run_queue row (see
+// consumeQueuedRunClaimTx) when this request is a promotion; otherwise it is
+// a no-op. Every terminal outcome of a promotion — a created run, a skip, a
+// held-upstream run — calls it in the transaction that records the outcome,
+// so a crash can never leave a decided request queued for stale-claim
+// recovery to promote again.
+func (req startRunRequest) consumeQueueClaimTx(tx *gorm.DB) error {
+	if !req.fromQueue || req.queueID == nil {
+		return nil
+	}
+	return consumeQueuedRunClaimTx(tx, *req.queueID, req.queueClaim)
 }
 
 // ErrQueuedRunClaimLost refuses a promotion whose claim on its run_queue row
@@ -2000,11 +2022,11 @@ func (s *Store) StartQueuedRun(ctx context.Context, queued *models.RunQueue) (*J
 var ErrQueuedRunClaimLost = errors.New("run: the queued run's claim was lost to another drainer")
 
 // consumeQueuedRunClaimTx deletes the promoted run_queue row inside the
-// admission transaction that creates its run, but only while the row still
-// carries claim. On PostgreSQL every node drains, and a claimant that paused
-// past the stale threshold can resume after another node reclaimed and
-// promoted the same row; matching zero rows aborts its admission, so one
-// request never yields two runs.
+// admission transaction that records its terminal outcome, but only while
+// the row still carries claim. On PostgreSQL every node drains, and a
+// claimant that paused past the stale threshold can resume after another
+// node reclaimed and promoted the same row; matching zero rows aborts its
+// admission, so one request never yields two outcomes.
 func consumeQueuedRunClaimTx(tx *gorm.DB, queueID uuid.UUID, claim string) error {
 	result := tx.Where("id = ? AND claimed_by = ?", queueID, claim).Delete(&models.RunQueue{})
 	if result.Error != nil {
@@ -5891,6 +5913,9 @@ func (s *Store) enqueueRunTx(tx *gorm.DB, jobID uuid.UUID, namespace string, par
 		return uuid.Nil, err
 	}
 	if overflow := int(depth) - maxDepth; overflow > 0 {
+		// The outer claimed_by test fences a row a drainer claims between
+		// the subquery and the delete (PostgreSQL re-checks it on the
+		// updated row); a claimed request is never evicted.
 		if err := tx.Exec(`
 DELETE FROM run_queue
 WHERE id IN (
@@ -5899,7 +5924,8 @@ WHERE id IN (
 	WHERE job_id = ? AND claimed_by = ''
 	ORDER BY created_at ASC
 	LIMIT ?
-)`, jobID, overflow).Error; err != nil {
+)
+AND claimed_by = ''`, jobID, overflow).Error; err != nil {
 			return uuid.Nil, err
 		}
 	}
@@ -6007,8 +6033,11 @@ func (s *Store) DeleteQueuedRun(ctx context.Context, queued *models.RunQueue) er
 	if queued == nil {
 		return nil
 	}
+	// Claim-fenced: only the holder of the claim queued was loaded with (or
+	// anyone, for an unclaimed row) may remove it.
 	result := s.db.WithContext(ctx).
-		Delete(&models.RunQueue{}, "id = ?", queued.ID)
+		Where("id = ? AND claimed_by = ?", queued.ID, queued.ClaimedBy).
+		Delete(&models.RunQueue{})
 	if result.Error != nil {
 		return result.Error
 	}

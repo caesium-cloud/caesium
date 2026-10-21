@@ -412,15 +412,22 @@ func (s *Store) AnnotateQuotaHeldRuns(ctx context.Context, jobID uuid.UUID, slot
 // DropQueuedRun removes a claimed row that must never be promoted — its job
 // moved to another namespace, or its namespace is no longer declared — and
 // resolves an idempotent start waiting on it as dropped with reason, in one
-// transaction.
+// transaction. The delete is fenced by the claim queued was loaded with: if
+// the row no longer carries it (another drainer reclaimed it after this
+// claim went stale), nothing is deleted or resolved and the call returns
+// ErrQueuedRunClaimLost.
 func (s *Store) DropQueuedRun(ctx context.Context, queued *models.RunQueue, reason string) error {
 	if queued == nil {
 		return nil
 	}
 	err := withStoreBusyRetryContext(ctx, func() error {
 		return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-			if err := tx.Delete(&models.RunQueue{}, "id = ?", queued.ID).Error; err != nil {
-				return err
+			result := tx.Where("id = ? AND claimed_by = ?", queued.ID, queued.ClaimedBy).Delete(&models.RunQueue{})
+			if result.Error != nil {
+				return result.Error
+			}
+			if result.RowsAffected != 1 {
+				return ErrQueuedRunClaimLost
 			}
 			return tx.Model(&models.RunStartIdempotency{}).
 				Where("queue_id = ? AND outcome = ?", queued.ID, string(StartOutcomeQueued)).

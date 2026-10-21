@@ -156,3 +156,69 @@ namespaces:
 	require.NoError(t, db.Model(&models.RunQueue{}).Where("job_id = ?", jobID).Count(&left).Error)
 	require.Zero(t, left)
 }
+
+// TestPostgresStaleDropRacingThePromoterKeepsOneOutcome: drainer A decided to
+// drop a request and stalled; B reclaimed and claimed it. A's late drop and
+// B's promotion run at once. A's drop is fenced by its claim, so it deletes
+// and resolves nothing: the request ends `created` by B, every round.
+func TestPostgresStaleDropRacingThePromoterKeepsOneOutcome(t *testing.T) {
+	db, store, jobID := pgClaimFixture(t, "quota-a", `apiVersion: v1
+kind: AccessPolicy
+namespaces:
+  default: {}
+  quota-a:
+    quotas:
+      maxConcurrentRuns: 1
+`)
+	var job models.Job
+	require.NoError(t, db.First(&job, "id = ?", jobID).Error)
+	holder := &models.Job{ID: uuid.New(), TriggerID: job.TriggerID, Alias: "pg-drop-holder", Namespace: "quota-a"}
+	require.NoError(t, db.Create(holder).Error)
+
+	for round := range 5 {
+		holding, err := store.Start(holder.ID, nil)
+		require.NoError(t, err, "round %d", round)
+		key := fmt.Sprintf("pg/drop/%d", round)
+		parked, err := store.StartWithResult(t.Context(), jobID, nil, WithStartIdempotencyKey(key))
+		require.NoError(t, err)
+		require.Equal(t, StartOutcomeQueued, parked.Outcome, "round %d: quota-a is full", round)
+		require.NoError(t, db.Model(&models.JobRun{}).Where("id = ?", holding.ID).Update("status", string(StatusSucceeded)).Error)
+
+		stale, err := store.DequeueNextQuotaRun(t.Context(), jobID, fmt.Sprintf("node-a/drop-%d", round))
+		require.NoError(t, err)
+		require.NotNil(t, stale)
+		require.NoError(t, pgReclaim(db, stale.ID))
+		current, err := store.DequeueNextQuotaRun(t.Context(), jobID, fmt.Sprintf("node-b/drop-%d", round))
+		require.NoError(t, err)
+		require.NotNil(t, current)
+
+		var (
+			wg       sync.WaitGroup
+			dropErr  error
+			startErr error
+			started  *JobRun
+		)
+		start := make(chan struct{})
+		wg.Go(func() {
+			<-start
+			dropErr = store.DropQueuedRun(t.Context(), stale, QueueDropReasonNamespaceMoved)
+		})
+		wg.Go(func() {
+			<-start
+			started, startErr = store.StartQueuedRun(t.Context(), current)
+		})
+		close(start)
+		wg.Wait()
+		require.ErrorIs(t, dropErr, ErrQueuedRunClaimLost, "round %d", round)
+		require.NoError(t, startErr, "round %d", round)
+		admission, found, err := store.LookupStartAdmission(t.Context(), jobID, key)
+		require.NoError(t, err)
+		require.True(t, found)
+		require.Equal(t, StartOutcomeCreated, admission.Outcome, "round %d: only the current claimant decides", round)
+		require.Equal(t, started.ID, *admission.RunID)
+		var left int64
+		require.NoError(t, db.Model(&models.RunQueue{}).Where("job_id = ?", jobID).Count(&left).Error)
+		require.Zero(t, left)
+		require.NoError(t, db.Model(&models.JobRun{}).Where("id = ?", started.ID).Update("status", string(StatusSucceeded)).Error)
+	}
+}

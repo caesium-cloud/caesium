@@ -856,10 +856,11 @@ promotion re-checks the quota and the job's own concurrency. A queued run
 belongs to the namespace it was queued in: if its job moves before it starts,
 it is dropped (an idempotent start replays as `dropped`, reason
 `namespace_moved`) rather than started under the new owner. A promotion
-removes its queued row in the same transaction that creates the run, and only
-while the dequeuer still holds the row's claim, so a node whose claim went
-stale and was taken over by another (on PostgreSQL every node drains) starts
-nothing. When a policy
+removes its queued row in the same transaction that records its outcome (the
+run it creates, a skip, or a run held upstream), and only while the dequeuer
+still holds the row's claim; drops and releases are fenced by the claim too.
+So a node whose claim went stale and was taken over by another (on PostgreSQL
+every node drains) decides nothing for that request. When a policy
 file is configured the dequeuer always runs: with `CAESIUM_RUN_QUEUE_ENABLED`
 and `CAESIUM_RUN_QUEUE_DEQUEUER_ENABLED` both off it drains only quota-held
 runs and leaves rows a job's own queue policy parked untouched. A quota added
