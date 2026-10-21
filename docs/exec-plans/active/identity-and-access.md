@@ -722,6 +722,52 @@ middleware relies on.
       `internal/models/dataset_declaration.go`, `internal/models/dataset_derivation.go`,
       `docs/identity-and-access.md`.
       Depends on: A3 + B1 + N-1.
+- [ ] B7. Namespace-aware DAG snapshots: `dag_snapshots` (written by the importer,
+      read by `GET /v1/jobs/:id/blame`, `/topology` and `/topology/history`) carries no
+      namespace, and an apply that only moves a job writes no new snapshot because
+      snapshots dedupe by content hash. Record the job's namespace on every snapshot
+      write and include it in the dedupe key, so a move writes a fresh snapshot owned by
+      the new namespace. Legacy snapshots, whose owner cannot be recovered, are
+      cluster-only (never back-filled from the job's current namespace, which would
+      hand the previous owner's commands and provenance to the new one). Then clear the
+      three routes' `pendingOn("B7")` markers with history filtered by the snapshot's
+      namespace. Unit tests: move without a topology change, legacy rows, two
+      namespaces. Live: blame and topology of a moved job read by principals confined
+      to each side.
+      Files: `internal/models/dag_snapshot.go`, `internal/jobdef/importer.go`
+      (snapshot write and dedupe), `internal/jobdef/snapshot_query.go`,
+      `api/rest/controller/job/` (blame, topology), `internal/auth/rbac.go`, new
+      `test/` scenario.
+      Depends on: B4 + B9 (both edit the importer; B9 first).
+- [x] B9. (W5-α: all four routes live; one tenancy check (rule 1 always, rule 2 with a policy file) on the proposed state in the importer, legacy create and trigger PATCH; a confined writer's apply is one transaction (REPEATABLE READ plus pre-BEGIN advisory locks on PostgreSQL); a namespace-confined prune is the server-computed set within its operator namespaces (spec §9.5 amended); a legacy cross-namespace trigger row is detached onto a fresh row on apply; contract findings touching a foreign job are withheld and counted; the manifest re-checks the job and withholds a shared trigger in one snapshot.)
+      Confined job writes and trigger tenancy (split from B2 in W4): un-pend
+      `POST /v1/jobdefs/apply`, `POST /v1/jobs`, `PATCH /v1/triggers/:id` and
+      `GET /v1/jobs/:id/manifest` for namespace-confined principals. Needs:
+      - **Trigger tenancy.** A trigger row may serve jobs in only one namespace; a
+        webhook path may be subscribed from only one namespace. Enforce it atomically
+        in the importer, the legacy create and the trigger PATCH (Postgres absent-row
+        races included, not just a READ COMMITTED re-query), and refuse a confined
+        caller whose write would attach to or modify a trigger serving a job outside
+        its namespaces or outside its key's job-alias scope.
+      - **An atomic confined batch.** One transaction for every definition plus the
+        prune, so a late in-transaction refusal (a foreign job created after the
+        middleware check, a concurrent move) leaves neither applied definitions nor
+        pruning effects; namespace refusals inside `guardJobMutationTx` are fatal for a
+        user apply (unlike git sync's skip).
+      - **Move and prune authorisation** (spec §9.4, §9.5): operator in both namespaces
+        for a move; operator in every namespace of the server-computed prune set.
+      - **Redaction** of foreign identities in apply's 409 contract findings and its
+        success `contract_warnings` (`internal/contract/enforce.go`).
+      Integration: apply into `marketing`; move `marketing` → `finance` with operator in
+      both, refused with one; prune refused across namespaces; a scoped key cannot
+      modify a shared trigger of a job outside its scope; two confined callers racing
+      for one webhook path; a late refusal rolls the whole apply back.
+      Files: `internal/jobdef/importer.go`, `internal/models/trigger.go`,
+      `api/rest/controller/jobdef/apply.go`, `api/rest/controller/job/post.go`,
+      `api/rest/service/job/job.go`, `api/rest/controller/trigger/`,
+      `api/middleware/auth_namespace_resolvers.go`, `internal/contract/enforce.go`,
+      `internal/auth/rbac.go`, `test/jobdef_namespace_test.go`.
+      Depends on: B2.
 
 ### Stream C — Runtime isolation: Kubernetes target and scoped secrets
 

@@ -3,6 +3,7 @@ package jobdef
 import (
 	"context"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -31,6 +32,7 @@ import (
 	"github.com/caesium-cloud/caesium/pkg/log"
 	"github.com/google/uuid"
 	"gorm.io/datatypes"
+	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 )
@@ -93,7 +95,12 @@ type NamespaceAllowlistError struct {
 	RequestedNamespace string
 	StoredNamespace    string // "" when the alias has no row
 	Allowed            []string
-	Reason             string // NamespaceReasonRequested or NamespaceReasonStored
+	// Reason is NamespaceReasonRequested, NamespaceReasonStored, or a trigger
+	// tenancy reason (NamespaceReasonTriggerShared, NamespaceReasonWebhookPath).
+	Reason string
+	// WebhookPath is the normalized path a NamespaceReasonWebhookPath refusal
+	// concerns.
+	WebhookPath string
 }
 
 func (e *NamespaceAllowlistError) Error() string {
@@ -163,6 +170,26 @@ type ApplyOptions struct {
 	// the namespace of an existing row (retired rows included) must be listed.
 	// nil means unrestricted. Force does not bypass it.
 	NamespaceAllowlist []string
+	// JobAliasScope confines the apply to a job-scoped key's aliases for
+	// trigger tenancy (B9): the definition's trigger row and webhook path must
+	// not serve a job outside it. nil means unrestricted.
+	JobAliasScope []string
+	// ContractAudience, when set, redacts contract findings and warnings for
+	// a namespace-confined caller: called with the apply transaction, it
+	// returns whether the caller may read a finding (both of its jobs), so the
+	// verdict and the data it hides come from one snapshot.
+	ContractAudience func(tx *gorm.DB) func(contractenforce.ContractFinding) bool
+	// ContractWarningsWithheld, when set, counts the warnings ContractAudience
+	// withheld.
+	ContractWarningsWithheld *int
+}
+
+// tenancyScope is the writer scope trigger tenancy confines the apply to.
+func (o *ApplyOptions) tenancyScope() *TenancyScope {
+	if o == nil {
+		return nil
+	}
+	return NewTenancyScope(o.NamespaceAllowlist, o.JobAliasScope)
 }
 
 // PruneSkip names a job PruneMissing left in place because its namespace is
@@ -181,6 +208,15 @@ type PruneOptions struct {
 	// Skipped, when non-nil, receives the jobs left untouched because of
 	// NamespaceAllowlist, sorted by alias.
 	Skipped *[]PruneSkip
+
+	// candidateNamespaces, when non-nil, restricts the jobs read (and, on
+	// PostgreSQL, locked) to these namespaces: a confined apply's prune, whose
+	// out-of-scope jobs are never candidates nor reported.
+	candidateNamespaces []string
+	// currentRunCheck, when set, runs after the in-transaction running check
+	// over the locked candidates (a confined batch's check outside its
+	// REPEATABLE READ snapshot); an error refuses the prune.
+	currentRunCheck func(jobs []*models.Job) error
 }
 
 // Provenance captures metadata describing the origin of a job definition.
@@ -200,9 +236,10 @@ func (i *Importer) ApplyWithOptions(ctx context.Context, def *schema.Definition,
 	}
 
 	var result *models.Job
+	keys := definitionLockKeys(def)
 	err := withImporterBusyRetry(ctx, func() error {
 		var attemptResult *models.Job
-		err := i.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		err := writeTx(ctx, i.db, keys, nil, func(tx *gorm.DB) error {
 			jobModel, err := i.applyTx(ctx, tx, def, opts)
 			attemptResult = jobModel
 			return err
@@ -231,8 +268,14 @@ func (i *Importer) applyTx(ctx context.Context, tx *gorm.DB, def *schema.Definit
 	if err := i.guardJobMutationTx(tx, existing, def, opts); err != nil {
 		return nil, err
 	}
+	// Trigger tenancy (B9) on the state the definition proposes, before any
+	// write, so a refusal the allowlisted sync skips leaves every row as it was.
+	verdict, err := checkApplyTenancyTx(tx, existing, def, opts.tenancyScope(), TenancyInvariantEnforced(), true)
+	if err != nil {
+		return nil, err
+	}
 
-	jobModel, triggerModel, err := i.upsertJobAndTriggerTx(tx, existing, def, opts)
+	jobModel, triggerModel, err := i.upsertJobAndTriggerTx(tx, existing, def, opts, verdict.Detach)
 	if err != nil {
 		return nil, err
 	}
@@ -302,14 +345,17 @@ func (i *Importer) ApplyBatchWithOptions(ctx context.Context, plans []BatchPlan)
 	}
 
 	aliases := make([]string, 0, len(plans))
+	defs := make([]*schema.Definition, 0, len(plans))
 	for _, plan := range plans {
 		aliases = append(aliases, plan.Def.Metadata.Alias)
+		defs = append(defs, plan.Def)
 	}
+	keys := definitionLockKeys(defs...)
 
 	var result BatchResult
 	err := withImporterBusyRetry(ctx, func() error {
 		attempt := BatchResult{}
-		err := i.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		err := writeTx(ctx, i.db, keys, nil, func(tx *gorm.DB) error {
 			if err := lockBatchJobsTx(tx, aliases); err != nil {
 				return err
 			}
@@ -390,6 +436,9 @@ func (i *Importer) enforceContractsWithOptionsTx(ctx context.Context, tx *gorm.D
 	}
 	if opts != nil {
 		enforceOpts.AllowBreaking = opts.ContractAck
+		if opts.ContractAudience != nil {
+			enforceOpts.Visible = opts.ContractAudience(tx)
+		}
 	}
 	result, err := contractenforce.EnforceApplyWithOptions(ctx, tx, []schema.Definition{*def}, mode, time.Now().UTC(), enforceOpts)
 	if err != nil {
@@ -397,6 +446,9 @@ func (i *Importer) enforceContractsWithOptionsTx(ctx context.Context, tx *gorm.D
 	}
 	if opts != nil && opts.ContractWarnings != nil && len(result.Warnings) > 0 {
 		*opts.ContractWarnings = append(*opts.ContractWarnings, result.Warnings...)
+	}
+	if opts != nil && opts.ContractWarningsWithheld != nil {
+		*opts.ContractWarningsWithheld += result.WithheldWarnings
 	}
 	return nil
 }
@@ -422,36 +474,11 @@ func (i *Importer) PruneMissing(ctx context.Context, desiredAliases []string, op
 	var skipped []PruneSkip
 	err := withImporterBusyRetry(ctx, func() error {
 		var attemptPruned int
-		attemptSkipped := make([]PruneSkip, 0)
+		var attemptSkipped []PruneSkip
 		err := i.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-			var jobs []models.Job
-			if err := pruneScopeTx(tx, opts).Find(&jobs).Error; err != nil {
-				return err
-			}
-
-			toRetire := make([]*models.Job, 0, len(jobs))
-			for idx := range jobs {
-				jobModel := &jobs[idx]
-				if _, ok := desiredSet[jobModel.Alias]; ok {
-					continue
-				}
-				if !namespaceAllowed(allowlist, jobModel.Namespace) {
-					attemptSkipped = append(attemptSkipped, PruneSkip{Alias: jobModel.Alias, Namespace: models.NamespaceOrDefault(jobModel.Namespace)})
-					continue
-				}
-				toRetire = append(toRetire, jobModel)
-			}
-			if len(toRetire) == 0 {
-				return nil
-			}
-			if err := i.ensureJobsNotRunningTx(tx, toRetire); err != nil {
-				return err
-			}
-			if err := i.retireJobsTx(tx, toRetire); err != nil {
-				return err
-			}
-			attemptPruned = len(toRetire)
-			return nil
+			var err error
+			attemptPruned, attemptSkipped, err = i.pruneMissingTx(tx, desiredSet, opts, allowlist)
+			return err
 		})
 		if err != nil {
 			return err
@@ -471,6 +498,299 @@ func (i *Importer) PruneMissing(ctx context.Context, desiredAliases []string, op
 		notifyTriggerMutationBestEffort(ctx, "prune")
 	}
 	return pruned, nil
+}
+
+// pruneMissingTx retires, inside tx, the active jobs in PruneMissing's scope
+// that are absent from desiredSet and whose namespace allowlist admits; the
+// jobs the allowlist leaves out are returned as skipped.
+func (i *Importer) pruneMissingTx(tx *gorm.DB, desiredSet map[string]struct{}, opts *PruneOptions, allowlist []string) (int, []PruneSkip, error) {
+	var jobs []models.Job
+	if err := pruneScopeTx(tx, opts).Find(&jobs).Error; err != nil {
+		return 0, nil, err
+	}
+
+	skipped := make([]PruneSkip, 0)
+	toRetire := make([]*models.Job, 0, len(jobs))
+	for idx := range jobs {
+		jobModel := &jobs[idx]
+		if _, ok := desiredSet[jobModel.Alias]; ok {
+			continue
+		}
+		if !namespaceAllowed(allowlist, jobModel.Namespace) {
+			skipped = append(skipped, PruneSkip{Alias: jobModel.Alias, Namespace: models.NamespaceOrDefault(jobModel.Namespace)})
+			continue
+		}
+		toRetire = append(toRetire, jobModel)
+	}
+	if len(toRetire) == 0 {
+		return 0, skipped, nil
+	}
+	if err := i.ensureJobsNotRunningTx(tx, toRetire); err != nil {
+		return 0, nil, err
+	}
+	if opts != nil && opts.currentRunCheck != nil {
+		if err := opts.currentRunCheck(toRetire); err != nil {
+			return 0, nil, err
+		}
+	}
+	if err := i.retireJobsTx(tx, toRetire); err != nil {
+		return 0, nil, err
+	}
+	return len(toRetire), skipped, nil
+}
+
+// authorizeBatchTx authorises every plan of a confined batch against the
+// stored row (retired ones included; lockBatchJobsTx has locked them) its raw
+// alias names, and returns those rows: only rows the writer may write. It
+// runs before any running check (see authorizeJobWrite).
+func (i *Importer) authorizeBatchTx(tx *gorm.DB, plans []BatchPlan) ([]*models.Job, error) {
+	jobs := make([]*models.Job, 0, len(plans))
+	for _, plan := range plans {
+		jobModel, err := i.findJobByAliasTx(tx, plan.Def.Metadata.Alias)
+		if err != nil {
+			return nil, err
+		}
+		if err := authorizeJobWrite(jobModel, plan.Def, plan.Opts); err != nil {
+			return nil, err
+		}
+		if jobModel != nil {
+			jobs = append(jobs, jobModel)
+		}
+	}
+	return jobs, nil
+}
+
+// currentRunCheckTimeout bounds the confined batch's out-of-snapshot running
+// check; an expired check fails the apply (nothing is written).
+const currentRunCheckTimeout = 15 * time.Second
+
+// runCheckPoolSize caps each side pool the confined running check reads
+// through (see runCheckDB).
+const runCheckPoolSize = 2
+
+var (
+	runCheckPoolsMu sync.Mutex
+	// runCheckPools are the side pools of runCheckDB, one per DSN.
+	runCheckPools = map[string]*gorm.DB{}
+)
+
+// runCheckDB is the connection pool the confined running check reads
+// job_runs through: a small pool of its own, opened lazily from the writer's
+// PostgreSQL DSN and kept, never the writer pool. The batch holds one writer
+// connection for its whole transaction and other writers park theirs on its
+// advisory locks, so borrowing a second writer connection could wait on the
+// batch itself (a pool of one always would). The check is a plain READ
+// COMMITTED read that takes no locks, so a side-pool connection never waits
+// on a writer: at worst it waits for another check's quick read.
+func (i *Importer) runCheckDB() (*gorm.DB, error) {
+	dialector, ok := i.db.Dialector.(*postgres.Dialector)
+	if !ok || dialector.Config == nil || strings.TrimSpace(dialector.DSN) == "" {
+		return nil, errors.New("jobdef: the confined running check needs the PostgreSQL DSN the writer was opened with")
+	}
+	dsn := dialector.DSN
+	runCheckPoolsMu.Lock()
+	defer runCheckPoolsMu.Unlock()
+	if pool, ok := runCheckPools[dsn]; ok {
+		return pool, nil
+	}
+	pool, err := gorm.Open(postgres.Open(dsn), &gorm.Config{Logger: i.db.Logger})
+	if err != nil {
+		return nil, fmt.Errorf("jobdef: open the running-check pool: %w", err)
+	}
+	sqlDB, err := pool.DB()
+	if err != nil {
+		return nil, err
+	}
+	sqlDB.SetMaxOpenConns(runCheckPoolSize)
+	sqlDB.SetMaxIdleConns(1)
+	runCheckPools[dsn] = pool
+	return pool, nil
+}
+
+// beforeConfinedPrune, when set (tests only), runs inside ApplyConfinedBatch's
+// transaction after the definitions are applied and before the prune locks
+// its candidates: where a run admitted after the batch's snapshot commits.
+var beforeConfinedPrune func()
+
+// confinedRunCheck is a confined batch's running check, over the jobs it
+// updates and the jobs it prunes, against the current committed state rather
+// than its REPEATABLE READ snapshot (PostgreSQL only;
+// SQLite and dqlite transactions are serialisable). Run admission inserts a
+// job_runs row without writing the job row, so a run committed after the
+// snapshot neither conflicts with the candidate row locks nor shows in the
+// in-transaction check. This read runs after the jobs are locked, at READ
+// COMMITTED on a side pool of its own (runCheckDB), so it sees every run
+// committed before it, as the unrestricted (READ COMMITTED) prune's check
+// does, and never needs a spare writer connection. A run admitted
+// after it is the same residual the unrestricted prune has: closing it needs
+// admission to take a lock that conflicts with the candidate row locks.
+func (i *Importer) confinedRunCheck(ctx context.Context) func(jobs []*models.Job) error {
+	if i.db.Name() != "postgres" {
+		return nil
+	}
+	return func(jobs []*models.Job) error {
+		pool, err := i.runCheckDB()
+		if err != nil {
+			return err
+		}
+		checkCtx, cancel := context.WithTimeout(ctx, currentRunCheckTimeout)
+		defer cancel()
+		return i.ensureJobsNotRunningTx(pool.WithContext(checkCtx), jobs)
+	}
+}
+
+// desiredAliasSet is a confined batch's prune protection: the exact raw
+// aliases the batch persists, never trimmed, because pruneMissingTx compares
+// stored aliases byte for byte (a trimmed "payroll" would not protect a
+// stored "payroll "; PR #668 review r7).
+func desiredAliasSet(aliases []string) map[string]struct{} {
+	set := make(map[string]struct{}, len(aliases))
+	for _, alias := range aliases {
+		set[alias] = struct{}{}
+	}
+	return set
+}
+
+// ConfinedBatchOptions configure ApplyConfinedBatch.
+type ConfinedBatchOptions struct {
+	// Prune retires the active jobs absent from the batch whose namespace is
+	// in PruneNamespaces, in the batch's transaction. Jobs in other
+	// namespaces are never candidates (nor reported).
+	Prune           bool
+	PruneNamespaces []string
+}
+
+// ConfinedBatchResult reports a committed ApplyConfinedBatch.
+type ConfinedBatchResult struct {
+	Applied int
+	Pruned  int
+}
+
+// beforeConfinedBatchTx, when set (tests only), runs before each attempt of
+// ApplyConfinedBatch's transaction: where a concurrent write that lands after
+// the middleware's namespace check interleaves.
+var beforeConfinedBatchTx func()
+
+// ApplyConfinedBatch is a confined writer's apply (identity-and-access B9): every
+// plan and the prune run in one transaction, and any refusal (a namespace
+// allowlist or trigger tenancy refusal, a contract break, a running job) rolls
+// all of it back and is returned. On PostgreSQL the transaction runs at
+// REPEATABLE READ after taking the batch's advisory locks (writeTx), so the
+// ownership checks, the contract data they redact and the prune set are read
+// from one snapshot that already includes every write it waited for; a
+// serialization failure is retried like any contention.
+func (i *Importer) ApplyConfinedBatch(ctx context.Context, plans []BatchPlan, opts ConfinedBatchOptions) (ConfinedBatchResult, error) {
+	for _, plan := range plans {
+		if err := plan.Def.Validate(); err != nil {
+			return ConfinedBatchResult{}, err
+		}
+	}
+	if opts.Prune && opts.PruneNamespaces == nil {
+		// A nil allowlist would prune every namespace: fail closed.
+		return ConfinedBatchResult{}, errors.New("confined prune requires the namespaces it may prune")
+	}
+	aliases := make([]string, 0, len(plans))
+	defs := make([]*schema.Definition, 0, len(plans))
+	for _, plan := range plans {
+		aliases = append(aliases, plan.Def.Metadata.Alias)
+		defs = append(defs, plan.Def)
+	}
+	keys := definitionLockKeys(defs...)
+	var txOpts *sql.TxOptions
+	if i.db.Name() == "postgres" {
+		txOpts = &sql.TxOptions{Isolation: sql.LevelRepeatableRead}
+	}
+	// Contract warnings accumulate per plan; an attempt that is retried must
+	// not leave its warnings behind.
+	warningBase := make(map[*[]contractenforce.ContractWarning]int)
+	withheldBase := make(map[*int]int)
+	for _, plan := range plans {
+		if plan.Opts != nil && plan.Opts.ContractWarnings != nil {
+			warningBase[plan.Opts.ContractWarnings] = len(*plan.Opts.ContractWarnings)
+		}
+		if plan.Opts != nil && plan.Opts.ContractWarningsWithheld != nil {
+			withheldBase[plan.Opts.ContractWarningsWithheld] = *plan.Opts.ContractWarningsWithheld
+		}
+	}
+
+	var result ConfinedBatchResult
+	err := withImporterBusyRetry(ctx, func() error {
+		for warnings, base := range warningBase {
+			*warnings = (*warnings)[:base]
+		}
+		for withheld, base := range withheldBase {
+			*withheld = base
+		}
+		if beforeConfinedBatchTx != nil {
+			beforeConfinedBatchTx()
+		}
+		attempt := ConfinedBatchResult{}
+		err := writeTx(ctx, i.db, keys, txOpts, func(tx *gorm.DB) error {
+			if err := lockBatchJobsTx(tx, aliases); err != nil {
+				return err
+			}
+			// Every definition is authorised against the stored row its raw
+			// alias names (exact alias scope, requested and stored namespace)
+			// before anything reads run state, so an alias the writer may not
+			// write is refused alike whether or not its job is running, and
+			// the running checks below only ever see (and name) jobs it may
+			// write (PR #668 review r6).
+			existing, err := i.authorizeBatchTx(tx, plans)
+			if err != nil {
+				return err
+			}
+			// The jobs the batch updates, checked for running runs against
+			// the current committed state before anything is written (see
+			// confinedRunCheck): a run admitted after the snapshot, whose
+			// insert the row lock above may have waited for, is invisible to
+			// guardJobMutationTx's in-snapshot check.
+			if check := i.confinedRunCheck(ctx); check != nil {
+				if err := check(existing); err != nil {
+					return err
+				}
+			}
+			for _, plan := range plans {
+				if _, err := i.applyTx(ctx, tx, plan.Def, plan.Opts); err != nil {
+					return err
+				}
+				attempt.Applied++
+			}
+			if err := ValidateTriggerChains(ctx, tx, nil); err != nil {
+				return batchInvalid(err)
+			}
+			if err := ValidateDatasetGraph(ctx, tx, nil); err != nil {
+				return batchInvalid(err)
+			}
+			if opts.Prune {
+				if beforeConfinedPrune != nil {
+					beforeConfinedPrune()
+				}
+				namespaces := slices.Clone(opts.PruneNamespaces)
+				pruneOpts := &PruneOptions{candidateNamespaces: namespaces, currentRunCheck: i.confinedRunCheck(ctx)}
+				pruned, _, err := i.pruneMissingTx(tx, desiredAliasSet(aliases), pruneOpts, namespaces)
+				if err != nil {
+					return err
+				}
+				attempt.Pruned = pruned
+			}
+			return nil
+		})
+		if err != nil {
+			return err
+		}
+		result = attempt
+		return nil
+	})
+	if err != nil {
+		return ConfinedBatchResult{}, err
+	}
+	if result.Applied > 0 {
+		notifyTriggerMutationBestEffort(ctx, "apply")
+	}
+	if result.Pruned > 0 {
+		notifyTriggerMutationBestEffort(ctx, "prune")
+	}
+	return result, nil
 }
 
 func withImporterBusyRetry(ctx context.Context, fn func() error) error {
@@ -556,6 +876,13 @@ func pruneScopeTx(tx *gorm.DB, opts *PruneOptions) *gorm.DB {
 	if opts != nil && strings.TrimSpace(opts.SourceID) != "" {
 		query = query.Where("provenance_source_id = ?", strings.TrimSpace(opts.SourceID))
 	}
+	if opts != nil && opts.candidateNamespaces != nil {
+		namespaces := slices.Clone(opts.candidateNamespaces)
+		if slices.Contains(namespaces, models.DefaultNamespace) {
+			namespaces = append(namespaces, "")
+		}
+		query = query.Where("namespace IN ?", namespaces)
+	}
 	return query
 }
 
@@ -573,24 +900,8 @@ func (i *Importer) findJobByAliasTx(tx *gorm.DB, alias string) (*models.Job, err
 }
 
 func (i *Importer) guardJobMutationTx(tx *gorm.DB, jobModel *models.Job, def *schema.Definition, opts *ApplyOptions) error {
-	// The allowlist runs first: Force must not bypass it, and a foreign-owned
-	// row in a foreign namespace is a namespace refusal, not a provenance one.
-	if opts != nil && opts.NamespaceAllowlist != nil {
-		reason := ""
-		stored := ""
-		if jobModel != nil {
-			stored = models.NamespaceOrDefault(jobModel.Namespace)
-		}
-		switch {
-		case !namespaceAllowed(opts.NamespaceAllowlist, def.Metadata.Namespace):
-			reason = NamespaceReasonRequested
-		case jobModel != nil && !namespaceAllowed(opts.NamespaceAllowlist, stored):
-			reason = NamespaceReasonStored
-		}
-		if reason != "" {
-			return &NamespaceAllowlistError{Alias: def.Metadata.Alias, RequestedNamespace: models.NamespaceOrDefault(def.Metadata.Namespace),
-				StoredNamespace: stored, Allowed: slices.Clone(opts.NamespaceAllowlist), Reason: reason}
-		}
+	if err := authorizeJobWrite(jobModel, def, opts); err != nil {
+		return err
 	}
 	if jobModel == nil {
 		return nil
@@ -611,6 +922,42 @@ func (i *Importer) guardJobMutationTx(tx *gorm.DB, jobModel *models.Job, def *sc
 	existingSourceID := strings.TrimSpace(jobModel.ProvenanceSourceID)
 	if existingSourceID != incomingSourceID && (existingSourceID != "" || incomingSourceID != "") {
 		return fmt.Errorf("%w: alias %s managed by %q, incoming source %q", ErrProvenanceConflict, jobModel.Alias, existingSourceID, incomingSourceID)
+	}
+	return nil
+}
+
+// authorizeJobWrite is a write's authorization over one definition and the
+// stored row its raw alias names (nil when absent): a job-scoped writer's
+// exact alias scope, then the namespace allowlist over the requested and the
+// stored namespace. It reads nothing, so its verdict never depends on the
+// stored job's run state, and every caller decides it before any running
+// check: a refused alias answers the same 403 whether or not its job is
+// running, and ErrJobRunning only ever names a job the writer may write
+// (PR #668 review r6).
+func authorizeJobWrite(jobModel *models.Job, def *schema.Definition, opts *ApplyOptions) error {
+	// A job-scoped writer writes only the exact aliases its key names (the
+	// row jobModel was looked up by that same raw alias).
+	if refusal := aliasScopeRefusal(def.Metadata.Alias, def.Metadata.Namespace, opts.tenancyScope()); refusal != nil {
+		return refusal
+	}
+	// The allowlist runs next: Force must not bypass it, and a foreign-owned
+	// row in a foreign namespace is a namespace refusal, not a provenance one.
+	if opts != nil && opts.NamespaceAllowlist != nil {
+		reason := ""
+		stored := ""
+		if jobModel != nil {
+			stored = models.NamespaceOrDefault(jobModel.Namespace)
+		}
+		switch {
+		case !namespaceAllowed(opts.NamespaceAllowlist, def.Metadata.Namespace):
+			reason = NamespaceReasonRequested
+		case jobModel != nil && !namespaceAllowed(opts.NamespaceAllowlist, stored):
+			reason = NamespaceReasonStored
+		}
+		if reason != "" {
+			return &NamespaceAllowlistError{Alias: def.Metadata.Alias, RequestedNamespace: models.NamespaceOrDefault(def.Metadata.Namespace),
+				StoredNamespace: stored, Allowed: slices.Clone(opts.NamespaceAllowlist), Reason: reason}
+		}
 	}
 	return nil
 }
@@ -670,8 +1017,8 @@ func (i *Importer) ensureJobsNotRunningTx(tx *gorm.DB, jobs []*models.Job) error
 	return fmt.Errorf("%w: %s", ErrJobRunning, alias)
 }
 
-func (i *Importer) upsertJobAndTriggerTx(tx *gorm.DB, existing *models.Job, def *schema.Definition, opts *ApplyOptions) (*models.Job, *models.Trigger, error) {
-	triggerModel, err := i.upsertTriggerTx(tx, existing, def.Metadata.Alias, &def.Trigger, opts)
+func (i *Importer) upsertJobAndTriggerTx(tx *gorm.DB, existing *models.Job, def *schema.Definition, opts *ApplyOptions, detach bool) (*models.Job, *models.Trigger, error) {
+	triggerModel, err := i.upsertTriggerTx(tx, existing, def.Metadata.Alias, &def.Trigger, opts, detach)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -780,7 +1127,11 @@ func (i *Importer) upsertJobAndTriggerTx(tx *gorm.DB, existing *models.Job, def 
 	return existing, triggerModel, nil
 }
 
-func (i *Importer) upsertTriggerTx(tx *gorm.DB, existingJob *models.Job, alias string, trig *schema.Trigger, opts *ApplyOptions) (*models.Trigger, error) {
+// upsertTriggerTx reconciles the job's trigger row in place, or writes a new
+// row for a new job or when detach is set (the job's row also serves jobs in
+// other namespaces, see trigger_tenancy.go): the old row is left untouched for
+// the jobs it still serves, with its history.
+func (i *Importer) upsertTriggerTx(tx *gorm.DB, existingJob *models.Job, alias string, trig *schema.Trigger, opts *ApplyOptions, detach bool) (*models.Trigger, error) {
 	cfgMap := cloneMap(trig.Configuration)
 	if cfgMap == nil {
 		cfgMap = make(map[string]any)
@@ -794,9 +1145,11 @@ func (i *Importer) upsertTriggerTx(tx *gorm.DB, existingJob *models.Job, alias s
 	}
 
 	var triggerModel *models.Trigger
-	if existingJob != nil && existingJob.TriggerID != uuid.Nil {
+	if existingJob != nil && existingJob.TriggerID != uuid.Nil && !detach {
 		var existingTrigger models.Trigger
-		if err := tx.Unscoped().First(&existingTrigger, "id = ?", existingJob.TriggerID).Error; err == nil {
+		// Locked so a prune deciding whether to retire the row (retireJobsTx)
+		// is ordered against this revival of it.
+		if err := lockJobRows(tx).Unscoped().First(&existingTrigger, "id = ?", existingJob.TriggerID).Error; err == nil {
 			triggerModel = &existingTrigger
 		} else if !errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, err
@@ -1317,12 +1670,39 @@ func (i *Importer) retireJobsTx(tx *gorm.DB, jobs []*models.Job) error {
 	if err := i.softDeleteAtomsTx(tx, atomIDs); err != nil {
 		return err
 	}
-	if len(triggerIDs) > 0 {
-		if err := tx.Delete(&models.Trigger{}, triggerIDs).Error; err != nil {
-			return err
-		}
+	if err := retireUnreferencedTriggersTx(tx, triggerIDs, jobIDs); err != nil {
+		return err
 	}
 	return tx.Delete(&models.Job{}, jobIDs).Error
+}
+
+// retireUnreferencedTriggersTx retires the triggers of retired jobs that no
+// job staying live still references (a legacy shared row keeps serving its
+// other jobs), as DELETE /v1/jobs/:id does. The trigger rows are locked
+// first, so an apply reviving one (upsertTriggerTx locks it too) is ordered
+// against the check: either it committed and its job is counted, or it waits
+// and revives the row after this transaction retires it.
+func retireUnreferencedTriggersTx(tx *gorm.DB, triggerIDs, retiredJobIDs []uuid.UUID) error {
+	if len(triggerIDs) == 0 {
+		return nil
+	}
+	slices.SortFunc(triggerIDs, func(a, b uuid.UUID) int { return strings.Compare(a.String(), b.String()) })
+	triggerIDs = slices.Compact(triggerIDs)
+	var locked []uuid.UUID
+	if err := lockJobRows(tx).Unscoped().Model(&models.Trigger{}).Where("id IN ?", triggerIDs).
+		Order("id").Pluck("id", &locked).Error; err != nil {
+		return err
+	}
+	var referenced []uuid.UUID
+	if err := tx.Model(&models.Job{}).Where("trigger_id IN ? AND id NOT IN ?", triggerIDs, retiredJobIDs).
+		Pluck("trigger_id", &referenced).Error; err != nil {
+		return err
+	}
+	retire := slices.DeleteFunc(slices.Clone(triggerIDs), func(id uuid.UUID) bool { return slices.Contains(referenced, id) })
+	if len(retire) == 0 {
+		return nil
+	}
+	return tx.Delete(&models.Trigger{}, retire).Error
 }
 
 func populateTaskFromStep(taskModel *models.Task, atomID uuid.UUID, step *schema.Step, replaySafe bool) error {

@@ -168,9 +168,9 @@ func TestConfinedPendingAndClusterRoutesDeny(t *testing.T) {
 // for the route's role, not just viewer, and an empty set denies.
 func TestConfinedCollectionAllowedSetUsesRouteRole(t *testing.T) {
 	p := &auth.Principal{Grants: policy.Grants{"marketing": models.RoleAdmin, "finance": models.RoleViewer, "ops": models.RoleOperator}}
-	require.Equal(t, []string{"finance", "marketing", "ops"}, namespacesGranting(p, models.RoleViewer))
-	require.Equal(t, []string{"marketing", "ops"}, namespacesGranting(p, models.RoleOperator))
-	require.Equal(t, []string{"marketing"}, namespacesGranting(p, models.RoleAdmin))
+	require.Equal(t, []string{"finance", "marketing", "ops"}, NamespacesGranting(p, models.RoleViewer))
+	require.Equal(t, []string{"marketing", "ops"}, NamespacesGranting(p, models.RoleOperator))
+	require.Equal(t, []string{"marketing"}, NamespacesGranting(p, models.RoleAdmin))
 
 	live := auth.RoutePolicy{Role: models.RoleAdmin, Class: auth.RouteClassCollection}
 	decision, err := authorizeRoute(routeContext(http.MethodGet, "/v1/fake", ""), nil, p, "GET /v1/fake", live)

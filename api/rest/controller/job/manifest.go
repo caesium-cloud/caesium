@@ -5,9 +5,14 @@ import (
 	"net/http"
 	"strings"
 
+	authmw "github.com/caesium-cloud/caesium/api/middleware"
 	jsvc "github.com/caesium-cloud/caesium/api/rest/service/job"
+	"github.com/caesium-cloud/caesium/internal/authz"
 	internaljobdef "github.com/caesium-cloud/caesium/internal/jobdef"
+	jobdiff "github.com/caesium-cloud/caesium/internal/jobdef/diff"
+	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/caesium-cloud/caesium/pkg/db"
+	schema "github.com/caesium-cloud/caesium/pkg/jobdef"
 	"github.com/labstack/echo/v5"
 	"gopkg.in/yaml.v3"
 	"gorm.io/gorm"
@@ -35,31 +40,39 @@ func Manifest(c *echo.Context) error {
 		return echo.NewHTTPError(http.StatusBadRequest, `format must be one of ["yaml","json"]`)
 	}
 
-	j, err := jsvc.Service(ctx).GetByIDPrefix(c.Param("id"))
+	namespaces, aliases, err := authmw.ReadConfinement(authmw.GetPrincipal(c))
 	if err != nil {
-		switch {
-		case errors.Is(err, gorm.ErrRecordNotFound):
-			return echo.ErrNotFound
-		case errors.Is(err, jsvc.ErrInvalidJobIDPrefix):
-			return echo.NewHTTPError(http.StatusBadRequest, err.Error()).Wrap(err)
-		case errors.Is(err, jsvc.ErrAmbiguousJobIDPrefix):
-			return echo.NewHTTPError(http.StatusConflict, err.Error()).Wrap(err)
-		}
-		return echo.NewHTTPError(http.StatusInternalServerError, "internal server error").Wrap(err)
+		return echo.NewHTTPError(http.StatusForbidden, "insufficient permissions").Wrap(err)
 	}
-
-	def, err := internaljobdef.NewExporter(db.Connection()).Export(ctx, j.ID)
-	if err != nil {
-		switch {
-		case errors.Is(err, gorm.ErrRecordNotFound):
-			return echo.ErrNotFound
-		case errors.Is(err, internaljobdef.ErrJobChangedDuringExport):
-			// A concurrent apply kept landing mid-read. Serving a manifest
-			// stitched from two revisions would be worse than telling the
-			// caller to ask again, so this is a retryable 409, not a 500.
-			return echo.NewHTTPError(http.StatusConflict, err.Error()).Wrap(err)
+	var def *schema.Definition
+	if scope := internaljobdef.NewTenancyScope(namespaces, aliases); scope != nil {
+		// A confined reader (B9): the job is re-authorised, exported and its
+		// trigger's other jobs checked in one read snapshot, so a move between
+		// the middleware's check and the export cannot hand it another
+		// namespace's manifest, and a trigger it shares with a job it cannot
+		// read keeps its configuration (webhook secret included) withheld.
+		err = jobdiff.ReadSnapshot(ctx, db.Connection(), func(tx *gorm.DB) error {
+			def, err = internaljobdef.ExportConfinedTx(tx, c.Param("id"), scope, jobdiff.RedactedTriggerConfiguration, func(job *models.Job) error {
+				return &authz.Denial{Reason: "insufficient_role", Required: models.RoleViewer,
+					Namespaces: []string{models.NamespaceOrDefault(job.Namespace)}, Message: "insufficient permissions"}
+			})
+			return err
+		})
+		if err != nil {
+			if denial, ok := errors.AsType[*authz.Denial](err); ok {
+				return denial
+			}
+			return manifestLookupError(err)
 		}
-		return echo.NewHTTPError(http.StatusInternalServerError, "internal server error").Wrap(err)
+	} else {
+		j, err := jsvc.Service(ctx).GetByIDPrefix(c.Param("id"))
+		if err != nil {
+			return manifestLookupError(err)
+		}
+		def, err = internaljobdef.NewExporter(db.Connection()).Export(ctx, j.ID)
+		if err != nil {
+			return manifestLookupError(err)
+		}
 	}
 
 	if format == "json" {
@@ -71,4 +84,21 @@ func Manifest(c *echo.Context) error {
 		return echo.NewHTTPError(http.StatusInternalServerError, "internal server error").Wrap(err)
 	}
 	return c.Blob(http.StatusOK, ManifestContentType, encoded)
+}
+
+func manifestLookupError(err error) error {
+	switch {
+	case errors.Is(err, gorm.ErrRecordNotFound):
+		return echo.ErrNotFound
+	case errors.Is(err, jsvc.ErrInvalidJobIDPrefix):
+		return echo.NewHTTPError(http.StatusBadRequest, err.Error()).Wrap(err)
+	case errors.Is(err, jsvc.ErrAmbiguousJobIDPrefix):
+		return echo.NewHTTPError(http.StatusConflict, err.Error()).Wrap(err)
+	case errors.Is(err, internaljobdef.ErrJobChangedDuringExport):
+		// A concurrent apply kept landing mid-read. Serving a manifest
+		// stitched from two revisions would be worse than telling the
+		// caller to ask again, so this is a retryable 409, not a 500.
+		return echo.NewHTTPError(http.StatusConflict, err.Error()).Wrap(err)
+	}
+	return echo.NewHTTPError(http.StatusInternalServerError, "internal server error").Wrap(err)
 }

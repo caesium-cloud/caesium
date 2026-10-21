@@ -676,7 +676,10 @@ is unrestricted and writes no such row.
   A refused manifest keeps its alias protected from pruning, so a forbidden move
   leaves the existing job active and unchanged.
 - An allowlisted source applies a commit's allowed manifests in one transaction.
-  A namespace refusal skips only the refused manifest. If the stored job graph
+  A namespace refusal skips only the refused manifest, and so does a
+  [trigger tenancy](#confined-job-writes-and-trigger-tenancy) refusal (a
+  manifest whose trigger or webhook path also serves a job outside the
+  allowlist); a skipped manifest writes nothing. If the stored job graph
   (trigger chains, dataset producers) would be invalid with that job left in
   place, or any other error occurs, nothing from the commit is applied and the
   sync fails.
@@ -684,6 +687,74 @@ is unrestricted and writes no such row.
   non-DNS labels, an allowlist without a `source_id`, and a `source_id` shared
   with a restricted source. Parsing rejects `"namespaces": null`, a singular
   `"namespace"` key and duplicate case-variant keys.
+
+### Confined job writes and trigger tenancy
+
+A principal confined to some namespaces, and a job-scoped API key (even one
+holding its role at `*`), can create, apply, move and prune jobs only within
+its reach. A job-scoped key writes only the exact aliases its scope lists (an
+alias with leading or trailing whitespace, Unicode spaces included, is a
+different job and is refused with 403). In detail:
+
+- **Apply** (`caesium job apply`, `POST /v1/jobdefs/apply`) needs operator in
+  every definition's namespace and in the stored namespace of every alias it
+  names, so moving a job needs operator in both namespaces. For such a writer
+  every definition and the prune run in one transaction: a refusal anywhere,
+  including one only the transaction can see (a job created or moved in
+  another namespace since the request was authorised), is a 403 naming the
+  namespace the caller named and applies nothing. On PostgreSQL that
+  transaction runs at `REPEATABLE READ` after taking an advisory lock per alias
+  and webhook path, so two writers racing for one alias or path are
+  serialised and the second is refused cleanly. A principal whose role holds
+  at `*` with an unscoped key keeps the previous per-definition apply.
+- **Prune** by a namespace-confined caller retires only the absent jobs in the
+  namespaces where it is operator; jobs elsewhere are never candidates and
+  are not reported. Job-scoped keys cannot prune. Pruning a job keeps its
+  trigger when another live job still uses it.
+- **The legacy `POST /v1/jobs`** is namespaced on the body's
+  `metadata.namespace` (default `default`) and the stored namespace of its
+  alias.
+- **`PATCH /v1/triggers/:id`** needs operator in every namespace the trigger
+  serves (the transaction re-checks it).
+- **The manifest** (`GET /v1/jobs/:id/manifest`): for a reader confined to
+  namespaces or job aliases the job is re-checked, and the configuration of a
+  trigger it shares with a job the reader cannot read (webhook secret
+  included) is replaced by a `redacted` marker, in one read snapshot.
+- **Contract enforcement:** a blocking finding or a deprecation warning that
+  involves a job the caller cannot read is withheld whole (no alias, team,
+  dataset, schema key, path or detail). The 409's message says `a contract
+  with a job outside your namespaces is affected (N finding(s))` and the body
+  carries `withheld_findings`; a successful apply reports
+  `withheld_contract_warnings`. Validation errors that involve such a job name
+  neither it nor its dataset.
+
+**Trigger tenancy.** A trigger row serves every job that points at it, and a
+webhook delivery fans out to every HTTP trigger on its path. Two rules apply
+to every write of a job or trigger (apply, the legacy create, git sync, a
+trigger `PATCH`), checked on the state the write proposes before it writes:
+
+1. A confined writer (a namespace-confined principal, a job-scoped key, or an
+   allowlisted git-sync source) may not write a job whose trigger also serves,
+   or whose webhook path is also subscribed by, a live job outside its reach.
+   The 403 says `webhook path "p" is subscribed by a job outside your access`
+   or `the trigger of job "a" also serves a job outside your access`, naming
+   neither that job nor its namespace. This holds with or without a policy
+   file.
+2. With a policy file loaded, a webhook path may be subscribed from one
+   namespace only, and a trigger may serve jobs in one namespace only, for
+   every writer. A second namespace subscribing a path is refused: 409 naming
+   the namespace that holds it for an unconfined writer, a non-disclosing 403
+   for a confined one. Jobs of the same namespace still share a path freely.
+   Server lint (`caesium job lint --server`) reports both rules, with the same
+   redaction.
+
+Older catalogs can hold a trigger row shared by jobs in two namespaces (no
+current API path creates one). Rule 2 repairs such a row on the next apply of
+one of its jobs by a writer allowed to write every job the row serves: the
+applied job moves onto a new trigger row carrying its configuration, and the
+old row, with its trigger history, stays with the other jobs. If both still
+use the same webhook path the apply is refused until one of them changes its
+path. A trigger `PATCH` of such a row is refused (409) until it is repaired.
 
 ### Shared objects
 
@@ -774,9 +845,9 @@ a job-scoped key's alias allow-list is still applied afterwards.
 What a confined principal can do today, when it holds the needed role in the
 target's namespace:
 
-- **Jobs:** tasks, dag and queue reads; delete, pause and unpause; run
-  (admission re-checks the grant inside its transaction); backfill; queue-entry
-  and cache deletion.
+- **Jobs:** tasks, dag, queue and manifest reads; delete, pause and unpause;
+  run (admission re-checks the grant inside its transaction); backfill;
+  queue-entry and cache deletion; the legacy create (`POST /v1/jobs`).
 - **Runs** (the job's current namespace and the run's persisted namespace; a run
   of another job is 404): read a run, its logs, receipt, task descriptors and task partitions;
   verify a receipt; retry runs, partitions and callbacks. Replay needs runner in
@@ -788,9 +859,10 @@ target's namespace:
   explain a run (`why`), and diff two runs (both runs' namespaces are required).
 - **Backfills** (the job's and the backfill's namespace): create, read and
   cancel. Create re-checks runner on the job row it stamps the backfill with.
-- **Triggers:** `GET /v1/triggers/:id`, its event history and
-  `POST /v1/triggers/:id/fire`, requiring the role in every job the trigger
-  serves.
+- **Triggers:** `GET /v1/triggers/:id`, its event history,
+  `POST /v1/triggers/:id/fire` and `PATCH /v1/triggers/:id`, requiring the
+  role in every job the trigger serves (see
+  [trigger tenancy](#confined-job-writes-and-trigger-tenancy)).
 - **Shared objects:** read, create, edit and delete a notification channel,
   notification policy or agent profile (a create by the body's `namespace`).
   `*` objects are readable by viewers anywhere and writable only with the role
@@ -799,9 +871,10 @@ target's namespace:
 - **API keys:** list, create, revoke and rotate keys confined to namespaces
   where it is admin (see [API keys and CLI login](#api-keys-and-cli-login)).
 - **Job definitions:** server lint and diff (`POST /v1/jobdefs/lint`,
-  `/diff`) need viewer in every definition's namespace and in the stored
-  namespace of every alias they name; with no definitions, any viewer grant
-  passes. Validation still runs against every job, but the answer is
+  `/diff`) need viewer, and apply operator, in every definition's namespace
+  and in the stored namespace of every alias they name; with no definitions,
+  any viewer grant passes (apply then answers 400). Apply is described in
+  [Confined job writes](#confined-job-writes-and-trigger-tenancy). Validation still runs against every job, but the answer is
   restricted to the caller's namespaces: the diff baseline (and so its
   `removed` list) holds only their jobs, a trigger a baseline job shares with
   a job elsewhere has its configuration replaced by a `redacted` marker,
@@ -834,7 +907,6 @@ that makes it namespace-aware lands (unconfined principals are unaffected):
 | B7 | `GET /v1/jobs/:id/blame`, `topology` and `topology/history` (DAG snapshots record no namespace yet) |
 | B5 | `GET /v1/lineage/impact`, `GET /v1/contracts/graph` |
 | B6 | every `/v1/datasets*` route |
-| B9 | `POST /v1/jobs`, `POST /v1/jobdefs/apply`, `GET /v1/jobs/:id/manifest`, `PATCH /v1/triggers/:id` (confined job writes and trigger tenancy) |
 
 Every namespace denial is `403 insufficient permissions` and is audited as
 `auth.denied` with reason `insufficient_role`. Lint and diff, where the caller
@@ -845,8 +917,8 @@ also lists the namespaces checked and, for a pending route, the plan item.
 One residual race is accepted for now: a concurrent move of the exact target by
 a principal who is operator in both namespaces can land between the namespace
 check and the handler (run admission and replay re-check inside their own
-transactions); retries and backfill children re-check inside theirs (B4);
-in-transaction guards for the other mutations follow in B9.
+transactions); retries and backfill children re-check inside theirs (B4), and
+so do apply, the legacy create, trigger `PATCH` and the manifest export (B9).
 
 ### Scoped secrets
 

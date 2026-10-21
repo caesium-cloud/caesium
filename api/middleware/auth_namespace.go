@@ -74,7 +74,7 @@ func authorizeRoute(c *echo.Context, svc *auth.Service, p *auth.Principal, polic
 
 	switch rp.Class {
 	case auth.RouteClassCollection:
-		allowed := namespacesGranting(p, rp.Role)
+		allowed := NamespacesGranting(p, rp.Role)
 		if len(allowed) == 0 {
 			return decision, denyInsufficientRole(rp.Role)
 		}
@@ -132,9 +132,9 @@ func highestRole(p *auth.Principal) models.Role {
 	return best
 }
 
-// namespacesGranting returns the sorted namespaces (never "*") in which p
+// NamespacesGranting returns the sorted namespaces (never "*") in which p
 // holds at least role.
-func namespacesGranting(p *auth.Principal, role models.Role) []string {
+func NamespacesGranting(p *auth.Principal, role models.Role) []string {
 	allowed := make([]string, 0, len(p.Grants))
 	for namespace := range p.Grants {
 		if namespace == "" || namespace == models.ClusterNamespace {
@@ -146,6 +146,46 @@ func namespacesGranting(p *auth.Principal, role models.Role) []string {
 	}
 	slices.Sort(allowed)
 	return allowed
+}
+
+// WriteConfinement reports how a write by p that needs role is confined
+// (identity-and-access B9): namespaces are where p holds role (nil when it
+// holds role cluster-wide) and aliases are its key's job-alias scope (nil
+// when the key is unscoped). Either one confines the write. A nil p (auth
+// disabled) is unconfined; an undecodable scope is an error, which callers
+// treat as a denial.
+func WriteConfinement(p *auth.Principal, role models.Role) (namespaces, aliases []string, err error) {
+	if p == nil {
+		return nil, nil, nil
+	}
+	if !auth.HasRole(p.ClusterRole(), role) {
+		namespaces = NamespacesGranting(p, role)
+	}
+	jobs, err := auth.ScopeJobs(p.Scope)
+	if err != nil {
+		return nil, nil, err
+	}
+	if len(jobs) > 0 {
+		aliases = jobs
+	}
+	return namespaces, aliases, nil
+}
+
+// ReadConfinement is WriteConfinement for reads: the namespaces p may read
+// (Principal.AllowedNamespaces, nil when unrestricted) and its key's job-alias
+// scope.
+func ReadConfinement(p *auth.Principal) (namespaces, aliases []string, err error) {
+	if p == nil {
+		return nil, nil, nil
+	}
+	jobs, err := auth.ScopeJobs(p.Scope)
+	if err != nil {
+		return nil, nil, err
+	}
+	if len(jobs) > 0 {
+		aliases = jobs
+	}
+	return p.AllowedNamespaces(), aliases, nil
 }
 
 // requirementsSatisfied evaluates every requirement; all must hold. Resolved

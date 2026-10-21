@@ -7,6 +7,8 @@ import (
 	"maps"
 	"slices"
 	"strings"
+	"sync"
+	"unicode"
 
 	authmw "github.com/caesium-cloud/caesium/api/middleware"
 	contractsvc "github.com/caesium-cloud/caesium/api/rest/service/contract"
@@ -42,8 +44,14 @@ var catalog = db.Connection
 // A nil *readScope is an unrestricted caller (a cluster viewer, or auth
 // disabled); every method then returns its input unchanged.
 type readScope struct {
-	db      *gorm.DB
+	db *gorm.DB
+	// allowed is the namespaces the caller may read; nil when it may read
+	// every namespace (a job-scoped key holding its role at "*"), in which
+	// case only aliases restricts it.
 	allowed []string
+	// aliases is the caller's key job-alias scope (B9): a job outside it is
+	// foreign even in a readable namespace. nil when the key is unscoped.
+	aliases []string
 	// visible caches alias -> whether the caller may see it.
 	visible map[string]bool
 	// sharesForeign marks aliases whose stored trigger also serves a live job
@@ -51,28 +59,50 @@ type readScope struct {
 	sharesForeign map[string]bool
 	// requested maps the request's own aliases to their namespaces.
 	requested map[string]string
+	// whitespaceRows caches the stored rows whose alias carries surrounding
+	// whitespace (whitespaceAliasRows) once whitespaceLoaded is set.
+	whitespaceRows   []models.Job
+	whitespaceLoaded bool
+	// strict applies the design's foreign-edge boundary (§8.3) to validator
+	// errors: an error touching a job the caller cannot read names no dataset
+	// either. Apply sets it; lint and diff keep B2's rendering.
+	strict bool
 }
 
-// newReadScope returns the confined view for the request, or nil. Only an
-// authenticated principal whose viewer grants do not cover "*" is restricted;
-// with auth disabled there is no principal and nothing changes. A principal
-// with no grants at all is restricted to nothing (fail closed).
+// newReadScope returns the confined view for the request, or nil. An
+// authenticated principal whose viewer grants do not cover "*", or whose API
+// key is scoped to job aliases (B9), is restricted; with auth disabled there
+// is no principal and nothing changes. A principal with no grants at all, or
+// an undecodable key scope, is restricted to nothing (fail closed).
 func newReadScope(c *echo.Context, conn *gorm.DB, defs []schema.Definition) *readScope {
 	principal := authmw.GetPrincipal(c)
 	if principal == nil {
 		return nil
 	}
-	return newReadScopeFor(principal.AllowedNamespaces(), conn, defs)
+	allowed, aliases, err := authmw.ReadConfinement(principal)
+	if err != nil {
+		log.Warn("jobdef read scope: undecodable key scope; restricting the caller to nothing", "error", err)
+		return newReadScopeForKey([]string{}, []string{}, conn, defs)
+	}
+	return newReadScopeForKey(allowed, aliases, conn, defs)
 }
 
 // newReadScopeFor is newReadScope for an allowed set (nil: unrestricted).
 func newReadScopeFor(allowed []string, conn *gorm.DB, defs []schema.Definition) *readScope {
-	if allowed == nil {
+	return newReadScopeForKey(allowed, nil, conn, defs)
+}
+
+// newReadScopeForKey is newReadScopeFor with a key's job-alias scope too
+// (nil: unscoped). It is nil when neither restricts the caller. An empty,
+// non-nil allowed set or alias scope restricts the caller to nothing.
+func newReadScopeForKey(allowed, aliases []string, conn *gorm.DB, defs []schema.Definition) *readScope {
+	if allowed == nil && aliases == nil {
 		return nil
 	}
 	scope := &readScope{
 		db:            conn,
-		allowed:       slices.Clone(allowed),
+		allowed:       cloneKeepingEmpty(allowed),
+		aliases:       cloneKeepingEmpty(aliases),
 		visible:       make(map[string]bool),
 		sharesForeign: make(map[string]bool),
 		requested:     make(map[string]string, len(defs)),
@@ -83,16 +113,42 @@ func newReadScopeFor(allowed []string, conn *gorm.DB, defs []schema.Definition) 
 	return scope
 }
 
+// cloneKeepingEmpty copies values, trimmed; nil stays nil (unrestricted)
+// and an empty set stays a non-nil empty set (restricted to nothing).
+func cloneKeepingEmpty(values []string) []string {
+	if values == nil {
+		return nil
+	}
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		out = append(out, strings.TrimSpace(value))
+	}
+	return out
+}
+
 // allows reports whether the caller may read namespace.
 func (s *readScope) allows(namespace string) bool {
-	return slices.Contains(s.allowed, models.NamespaceOrDefault(namespace))
+	return s.allowed == nil || slices.Contains(s.allowed, models.NamespaceOrDefault(namespace))
+}
+
+// readable reports whether the caller may read the job alias in namespace:
+// the namespace is readable and the alias is inside the key's scope.
+func (s *readScope) readable(alias, namespace string) bool {
+	return s.allows(namespace) && s.aliasInKeyScope(alias)
+}
+
+// aliasInKeyScope reports whether alias, exactly as given, is inside the
+// key's alias scope (always, for an unscoped key). An alias with surrounding
+// whitespace names a distinct job, never the scoped one.
+func (s *readScope) aliasInKeyScope(alias string) bool {
+	return s.aliases == nil || (alias == strings.TrimSpace(alias) && slices.Contains(s.aliases, alias))
 }
 
 // baselineContext restricts the diff baseline (internal/jobdef/diff
 // LoadDatabaseSpecs reads it through authz.NamespaceFilter) to the caller's
 // namespaces.
 func (s *readScope) baselineContext(ctx context.Context) context.Context {
-	if s == nil {
+	if s == nil || s.allowed == nil {
 		return ctx
 	}
 	return authz.WithAllowedNamespaces(ctx, s.allowed)
@@ -116,7 +172,7 @@ func (s *readScope) resolve(ctx context.Context, aliases []string) {
 			continue
 		}
 		namespace, requested := s.requested[alias]
-		if requested && !s.allows(namespace) {
+		if requested && !s.readable(alias, namespace) {
 			s.visible[alias] = false
 			continue
 		}
@@ -132,31 +188,58 @@ func (s *readScope) resolve(ctx context.Context, aliases []string) {
 			s.visible[alias] = false
 		}
 	}
+	// The aliases resolved here are trimmed (contract derivation, the
+	// request keys and findings all trim), so read every stored row whose
+	// alias trims to one of them: the exact rows (by the alias index) and
+	// every row whose alias carries surrounding whitespace (read once per
+	// snapshot, see whitespaceAliasRows).
 	var rows []models.Job
 	if err := s.db.WithContext(ctx).Unscoped().Select("alias", "namespace", "trigger_id").Where("alias IN ?", lookup).Find(&rows).Error; err != nil {
 		failClosed(err)
 		return
 	}
-	aliasesByTrigger := make(map[uuid.UUID][]string, len(rows))
+	twins, err := s.whitespaceAliasRows(ctx)
+	if err != nil {
+		failClosed(err)
+		return
+	}
+	rows = append(rows, twins...)
+	wanted := make(map[string]struct{}, len(lookup))
+	for _, alias := range lookup {
+		wanted[alias] = struct{}{}
+	}
+	rowsByAlias := make(map[string][]models.Job, len(lookup))
 	for _, row := range rows {
 		alias := strings.TrimSpace(row.Alias)
-		if !s.allows(row.Namespace) {
+		if _, ok := wanted[alias]; ok {
+			rowsByAlias[alias] = append(rowsByAlias[alias], row)
+		}
+	}
+	aliasesByTrigger := make(map[uuid.UUID][]string, len(rows))
+	for alias, matches := range rowsByAlias {
+		// The job is identified by its trimmed alias only when exactly one
+		// stored row (live or retired) carries it: a retired "consumer" and
+		// a live "consumer " are two jobs the trimmed name cannot tell
+		// apart, so neither is shown (PR #668 review r8). The one row's raw
+		// alias and namespace decide; a key scope never covers a stored
+		// alias with surrounding whitespace.
+		if len(matches) != 1 || !s.readable(matches[0].Alias, matches[0].Namespace) {
 			s.visible[alias] = false
 			continue
 		}
 		s.visible[alias] = true
-		aliasesByTrigger[row.TriggerID] = append(aliasesByTrigger[row.TriggerID], alias)
+		aliasesByTrigger[matches[0].TriggerID] = append(aliasesByTrigger[matches[0].TriggerID], alias)
 	}
 	if len(aliasesByTrigger) == 0 {
 		return
 	}
 	var peers []models.Job
-	if err := s.db.WithContext(ctx).Select("id", "trigger_id", "namespace").Where("trigger_id IN ?", slices.Collect(maps.Keys(aliasesByTrigger))).Find(&peers).Error; err != nil {
+	if err := s.db.WithContext(ctx).Select("id", "alias", "trigger_id", "namespace").Where("trigger_id IN ?", slices.Collect(maps.Keys(aliasesByTrigger))).Find(&peers).Error; err != nil {
 		failClosed(err)
 		return
 	}
 	for _, peer := range peers {
-		if !s.allows(peer.Namespace) {
+		if !s.readable(peer.Alias, peer.Namespace) {
 			for _, alias := range aliasesByTrigger[peer.TriggerID] {
 				s.sharesForeign[alias] = true
 			}
@@ -164,7 +247,51 @@ func (s *readScope) resolve(ctx context.Context, aliases []string) {
 	}
 }
 
+var (
+	nonCanonicalAliasOnce sync.Once
+	nonCanonicalAliasSQL  string
+	nonCanonicalAliasArgs []any
+)
+
+// nonCanonicalAliasClause is a SQL condition (with its arguments) selecting
+// the jobs rows whose alias starts or ends with a character strings.TrimSpace
+// strips (every unicode.IsSpace rune). SQL TRIM strips ASCII spaces only.
+func nonCanonicalAliasClause() (string, []any) {
+	nonCanonicalAliasOnce.Do(func() {
+		var parts []string
+		for r := rune(0); r <= unicode.MaxRune; r++ {
+			if !unicode.IsSpace(r) {
+				continue
+			}
+			parts = append(parts, "alias LIKE ?", "alias LIKE ?")
+			nonCanonicalAliasArgs = append(nonCanonicalAliasArgs, string(r)+"%", "%"+string(r))
+		}
+		nonCanonicalAliasSQL = strings.Join(parts, " OR ")
+	})
+	return nonCanonicalAliasSQL, slices.Clone(nonCanonicalAliasArgs)
+}
+
+// whitespaceAliasRows returns the stored rows (live or retired) whose alias
+// carries surrounding whitespace, read once per snapshot (withSnapshot
+// resets it) rather than once per resolved name: the whitespace patterns
+// cannot use the alias index, and the set is normally empty.
+func (s *readScope) whitespaceAliasRows(ctx context.Context) ([]models.Job, error) {
+	if s.whitespaceLoaded {
+		return s.whitespaceRows, nil
+	}
+	clause, args := nonCanonicalAliasClause()
+	var rows []models.Job
+	if err := s.db.WithContext(ctx).Unscoped().Select("alias", "namespace", "trigger_id").Where(clause, args...).Find(&rows).Error; err != nil {
+		return nil, err
+	}
+	s.whitespaceRows, s.whitespaceLoaded = rows, true
+	return rows, nil
+}
+
 func (s *readScope) aliasVisible(ctx context.Context, alias string) bool {
+	if s.aliases != nil && alias != strings.TrimSpace(alias) {
+		return false
+	}
 	s.resolve(ctx, []string{alias})
 	return s.visible[strings.TrimSpace(alias)]
 }
@@ -210,7 +337,52 @@ func (s *readScope) errorMessage(ctx context.Context, err error) string {
 		}
 		return refErr.Redacted()
 	}
+	// Trigger tenancy (B9): a confined caller is told which of its own
+	// webhook paths or jobs is affected, never by whom.
+	if msg := internaljobdef.RedactedTenancyMessage(err); msg != "" {
+		return msg
+	}
 	return err.Error()
+}
+
+// findingVisible reports whether a confined caller may read a contract
+// finding: both of its jobs, and for an inferred edge (derived from a
+// consumer's trigger) neither trigger shared with a job it cannot read, as
+// filterGraph decides for lint. Unresolvable aliases are foreign.
+func (s *readScope) findingVisible(ctx context.Context, finding internalcontract.ContractFinding) bool {
+	if s == nil {
+		return true
+	}
+	producer, consumer := strings.TrimSpace(finding.Producer), strings.TrimSpace(finding.Consumer)
+	if producer == "" || consumer == "" {
+		return false
+	}
+	if s.aliases != nil && (producer != finding.Producer || consumer != finding.Consumer) {
+		// Not the trimmed alias a key scope names (see aliasInKeyScope).
+		return false
+	}
+	s.resolve(ctx, []string{producer, consumer})
+	if !s.visible[producer] || !s.visible[consumer] {
+		return false
+	}
+	if internalcontract.EdgeClass(finding.EdgeClass) == internalcontract.EdgeClassInferred && (s.sharesForeign[producer] || s.sharesForeign[consumer]) {
+		return false
+	}
+	return true
+}
+
+// contractAudience is the importer's ContractAudience for a confined apply:
+// bound to the apply transaction (whose REPEATABLE READ snapshot on
+// PostgreSQL also produced the findings), with every cache dropped (bind) so
+// a retried attempt never reuses a verdict or a row from an earlier snapshot.
+func (s *readScope) contractAudience(ctx context.Context) func(tx *gorm.DB) func(internalcontract.ContractFinding) bool {
+	if s == nil {
+		return nil
+	}
+	return func(tx *gorm.DB) func(internalcontract.ContractFinding) bool {
+		s.bind(tx)
+		return func(finding internalcontract.ContractFinding) bool { return s.findingVisible(ctx, finding) }
+	}
 }
 
 func (s *readScope) graphErrorMessage(ctx context.Context, e *freshness.GraphError) string {
@@ -224,9 +396,10 @@ func (s *readScope) graphErrorMessage(ctx context.Context, e *freshness.GraphErr
 			hidden++
 		}
 	}
-	// The dataset is named only when one of the caller's own jobs declares it.
+	// The dataset is named only when one of the caller's own jobs declares it
+	// (and, for apply, only when no foreign job is involved at all).
 	dataset := "a dataset"
-	if len(visible) > 0 {
+	if len(visible) > 0 && (!s.strict || hidden == 0) {
 		dataset = fmt.Sprintf("%q", e.Dataset)
 	}
 	switch {
@@ -271,13 +444,23 @@ func (s *readScope) withSnapshot(ctx context.Context, conn *gorm.DB, fn func(con
 		return fn(conn)
 	}
 	outer := s.db
-	defer func() { s.db = outer }()
+	defer s.bind(outer)
 	return jobdiff.ReadSnapshot(ctx, outer, func(tx *gorm.DB) error {
-		s.db = tx
-		clear(s.visible)
-		clear(s.sharesForeign)
+		s.bind(tx)
 		return fn(tx)
 	})
+}
+
+// bind points the scope at conn (a new transaction or snapshot, or the
+// connection it is handed back to) and drops every cache read through the
+// previous one: the visibility verdicts, the shared-trigger marks and the
+// whitespace-alias rows. Every rebind goes through here, so each cache lives
+// exactly one transaction (PR #668 review r10).
+func (s *readScope) bind(conn *gorm.DB) {
+	s.db = conn
+	clear(s.visible)
+	clear(s.sharesForeign)
+	s.whitespaceRows, s.whitespaceLoaded = nil, false
 }
 
 // validate runs a cross-job validator over the catalog (conn for an

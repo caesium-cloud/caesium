@@ -35,6 +35,10 @@ type ApplyResponse struct {
 	Applied          int                               `json:"applied"`
 	Pruned           int                               `json:"pruned,omitempty"`
 	ContractWarnings []contractenforce.ContractWarning `json:"contract_warnings,omitempty"`
+	// WithheldContractWarnings counts the contract warnings withheld from a
+	// namespace-confined caller because they concern a job outside its
+	// namespaces (identity-and-access B9).
+	WithheldContractWarnings int `json:"withheld_contract_warnings,omitempty"`
 }
 
 // AllowBreakingRequest requests a bounded contract-break acknowledgement for

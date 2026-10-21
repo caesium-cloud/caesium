@@ -183,10 +183,12 @@ func (s *IntegrationTestSuite) TestAuthNamespacedRoutesConfineKey() {
 		s.requireNSStatus(http.StatusOK, http.MethodGet, fmt.Sprintf(path, mkt), mktOperator, "")
 		s.requireNSStatus(http.StatusForbidden, http.MethodGet, fmt.Sprintf(path, fin), mktOperator, "")
 	}
-	// The manifest (by full id or unique prefix) exports the job's trigger
-	// configuration, which a finance job could share: pending B9.
-	s.requireNSStatus(http.StatusForbidden, http.MethodGet, "/v1/jobs/"+mkt+"/manifest", mktOperator, "")
-	s.requireNSStatus(http.StatusForbidden, http.MethodGet, "/v1/jobs/"+mkt[:13]+"/manifest", mktOperator, "")
+	// The manifest (by full id or unique prefix) is live for the marketing
+	// job (B9; a trigger shared with a finance job would be withheld) and
+	// refused for the finance job.
+	s.requireNSStatus(http.StatusOK, http.MethodGet, "/v1/jobs/"+mkt+"/manifest", mktOperator, "")
+	s.requireNSStatus(http.StatusOK, http.MethodGet, "/v1/jobs/"+mkt[:13]+"/manifest", mktOperator, "")
+	s.requireNSStatus(http.StatusForbidden, http.MethodGet, "/v1/jobs/"+fin+"/manifest", mktOperator, "")
 	s.requireNSStatus(http.StatusOK, http.MethodGet, "/v1/jobs/"+mkt[:13]+"/manifest", clusterViewer, "")
 
 	// Runs: the confined key starts a marketing run and reads it; a finance
@@ -220,7 +222,8 @@ func (s *IntegrationTestSuite) TestAuthNamespacedRoutesConfineKey() {
 	s.requireNSStatus(http.StatusForbidden, http.MethodGet, "/v1/connectors", mktOperator, "")
 	payload, err := json.Marshal(map[string]any{"definitions": []schema.Definition{s.namespacedJobDefinition(f.mktAlias, "marketing")}})
 	s.Require().NoError(err)
-	s.requireNSStatus(http.StatusForbidden, http.MethodPost, "/v1/jobdefs/apply", mktOperator, string(payload)) // pending B9
+	// Apply is live (B9): re-applying the marketing job in marketing.
+	s.requireNSStatus(http.StatusOK, http.MethodPost, "/v1/jobdefs/apply", mktOperator, string(payload))
 	// Diff is live (B2): the marketing job resolves to marketing.
 	s.requireNSStatus(http.StatusOK, http.MethodPost, "/v1/jobdefs/diff", mktOperator, string(payload))
 
@@ -343,12 +346,11 @@ func (s *IntegrationTestSuite) TestAuthNamespacedSharedObjectsAndTriggers() {
 	s.Require().Equal(http.StatusForbidden, status, body)
 
 	s.requireNSStatus(http.StatusOK, http.MethodGet, "/v1/triggers/"+mktTrigger, mktOperator, "")
-	// Editing a trigger's configuration could subscribe it to another
-	// namespace's webhook path: pending B9 for confined principals.
+	// Editing a marketing-only trigger is live for the marketing operator
+	// (B9 re-checks its jobs and any new webhook path in the transaction).
 	newAlias := fmt.Sprintf("a3-trigger-%d", f.stamp)
-	s.requireNSStatus(http.StatusForbidden, http.MethodPatch, "/v1/triggers/"+mktTrigger, mktOperator, fmt.Sprintf(`{"alias":%q}`, newAlias))
-	s.NotContains(s.requireNSStatus(http.StatusOK, http.MethodGet, "/v1/triggers/"+mktTrigger, s.authAPIKey, ""), newAlias,
-		"the refused PATCH changed nothing")
+	s.requireNSStatus(http.StatusOK, http.MethodPatch, "/v1/triggers/"+mktTrigger, mktOperator, fmt.Sprintf(`{"alias":%q}`, newAlias))
+	s.Contains(s.requireNSStatus(http.StatusOK, http.MethodGet, "/v1/triggers/"+mktTrigger, s.authAPIKey, ""), newAlias)
 	status, body = s.nsRequest(http.MethodPost, "/v1/triggers/"+mktTrigger+"/fire", mktOperator, "", fire)
 	s.Require().Equal(http.StatusAccepted, status, "firing a marketing-only HTTP trigger: %s", body)
 	var fired []runResponse
