@@ -210,8 +210,14 @@ function clearPrincipal(): void {
   principal = anonymousPrincipal;
 }
 
+/** The consumed `?login_error=` reason, kept until a sign-in succeeds or is cleared. */
+let pendingLoginError: LoginErrorReason | null = null;
+
 function setPrincipal(nextPrincipal: PrincipalState): void {
   principal = nextPrincipal;
+  // Any successful sign-in ends an earlier denial's hand-off, so it cannot
+  // resurface on the login page after a later sign-out.
+  pendingLoginError = null;
 }
 
 async function readWhoami(response: Response): Promise<PrincipalState | null> {
@@ -434,8 +440,6 @@ export function consumeLoginError(
   pendingLoginError = value === "no_binding" ? "no_binding" : null;
   return pendingLoginError;
 }
-
-let pendingLoginError: LoginErrorReason | null = null;
 
 /** Forget a consumed login error (after a sign-in attempt or dismissal). */
 export function clearLoginError(): void {

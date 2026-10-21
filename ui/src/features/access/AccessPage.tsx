@@ -13,7 +13,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import { api, type AuthNamespace, type AuthUser } from "@/lib/api";
+import { api, ApiError, type AuthNamespace, type AuthUser } from "@/lib/api";
 import { usePrincipal, type PrincipalState } from "@/lib/auth";
 import { CLUSTER_NAMESPACE, roleAtLeast } from "@/lib/roles";
 import { formatUTCTimestamp } from "@/lib/utils";
@@ -21,6 +21,19 @@ import { formatUTCTimestamp } from "@/lib/utils";
 /** Authentication is disabled when no principal was ever resolved. */
 function isAuthDisabled(principal: PrincipalState): boolean {
   return principal.kind === null && principal.subject === null && principal.role === null;
+}
+
+/** A 401/403 means the server no longer lets this principal read the data. */
+function isRefused(error: unknown): boolean {
+  return error instanceof ApiError && (error.status === 401 || error.status === 403);
+}
+
+function refusedNote(what: string) {
+  return (
+    <p role="alert" className="text-sm text-danger" data-testid="access-refused">
+      Your access to {what} was refused. Reload the page to see what you can still read.
+    </p>
+  );
 }
 
 function Section({ title, hint, testId, children }: { title: string; hint?: string; testId: string; children: React.ReactNode }) {
@@ -145,8 +158,8 @@ function NamespacesSection() {
       testId="access-namespaces"
     >
       {isLoading ? <Skeleton className="h-16 w-full" /> : null}
-      {error ? <p role="alert" className="text-sm text-danger">Unable to load namespaces.</p> : null}
-      {data ? (
+      {isRefused(error) ? refusedNote("namespaces") : error ? <p role="alert" className="text-sm text-danger">Unable to load namespaces.</p> : null}
+      {data && !isRefused(error) ? (
         <>
           <p className="text-xs text-text-3" data-testid="access-namespaces-revision">
             policy source {data.source}, revision {shortRevision(data.revision)}
@@ -187,8 +200,8 @@ function PolicySection() {
   return (
     <Section title="Policy" hint="The access policy this node is serving." testId="access-policy">
       {isLoading ? <Skeleton className="h-12 w-full" /> : null}
-      {error ? <p role="alert" className="text-sm text-danger">Unable to load the access policy.</p> : null}
-      {data ? (
+      {isRefused(error) ? refusedNote("the access policy") : error ? <p role="alert" className="text-sm text-danger">Unable to load the access policy.</p> : null}
+      {data && !isRefused(error) ? (
         <dl className="grid max-w-xl grid-cols-[120px_minmax(0,1fr)] gap-x-4 gap-y-1.5 text-sm">
           <dt className="text-text-3">source</dt>
           <dd className="text-text-1">{data.source}</dd>
@@ -264,6 +277,7 @@ function UsersSection() {
     },
   });
 
+  const refused = isRefused(users.error);
   const rows = users.data?.pages.flatMap((page) => page.users) ?? [];
   const total = users.data?.pages[0]?.total ?? null;
 
@@ -274,11 +288,11 @@ function UsersSection() {
       testId="access-users"
     >
       {users.isLoading ? <Skeleton className="h-16 w-full" /> : null}
-      {users.error ? <p role="alert" className="text-sm text-danger">Unable to load users.</p> : null}
+      {isRefused(users.error) ? refusedNote("users") : users.error ? <p role="alert" className="text-sm text-danger">Unable to load users.</p> : null}
       {!users.isLoading && !users.error && rows.length === 0 ? (
         <p className="text-sm text-text-2" data-testid="access-users-empty">No users have signed in yet.</p>
       ) : null}
-      {rows.length > 0 ? (
+      {rows.length > 0 && !refused ? (
         <>
           {total !== null ? <p className="text-xs text-text-3">{total} total</p> : null}
           <Table>
@@ -348,7 +362,7 @@ function UsersSection() {
       ) : null}
 
       <Dialog
-        open={pending !== null}
+        open={pending !== null && !refused}
         onOpenChange={(open) => {
           if (!open && !mutation.isPending) setPending(null);
         }}

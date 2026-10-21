@@ -1,7 +1,7 @@
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { api, type AuthUser } from "@/lib/api";
+import { api, ApiError, type AuthUser } from "@/lib/api";
 import { apiKeyLogin, clearApiKey } from "@/lib/auth";
 import { AccessPage } from "../AccessPage";
 
@@ -116,6 +116,62 @@ describe("AccessPage", () => {
     expect(screen.getByTestId("access-scoped-note")).toBeInTheDocument();
     expect(screen.queryByTestId("access-namespaces")).not.toBeInTheDocument();
     expect(api.getAuthNamespaces).not.toHaveBeenCalled();
+  });
+
+  describe("a refusal after a successful load", () => {
+    const refuse = () => new ApiError(403, "insufficient role", "insufficient_access");
+
+    function showWithClient() {
+      const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+      render(
+        <QueryClientProvider client={client}>
+          <AccessPage />
+        </QueryClientProvider>,
+      );
+      return client;
+    }
+
+    beforeEach(() =>
+      login({ role: "admin", cluster_role: "admin", grants: { "*": "admin" }, namespaces: ["*"] }),
+    );
+
+    it("hides the users rows and controls", async () => {
+      const client = showWithClient();
+      expect(await screen.findByTestId("access-user-row")).toBeInTheDocument();
+      vi.mocked(api.getAuthUsers).mockRejectedValue(refuse());
+      await client.invalidateQueries({ queryKey: ["auth", "users"] });
+      await waitFor(() => expect(screen.queryByTestId("access-user-row")).not.toBeInTheDocument());
+      expect(screen.queryByRole("button", { name: "Disable" })).not.toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: "Log out everywhere" })).not.toBeInTheDocument();
+      expect(within(screen.getByTestId("access-users")).getByTestId("access-refused")).toBeInTheDocument();
+    });
+
+    it("hides the policy details", async () => {
+      const client = showWithClient();
+      expect(await screen.findByTestId("access-policy-revision")).toBeInTheDocument();
+      vi.mocked(api.getAuthPolicy).mockRejectedValue(refuse());
+      await client.invalidateQueries({ queryKey: ["auth", "policy"] });
+      await waitFor(() => expect(screen.queryByTestId("access-policy-revision")).not.toBeInTheDocument());
+      expect(within(screen.getByTestId("access-policy")).getByTestId("access-refused")).toBeInTheDocument();
+    });
+
+    it("hides the namespaces table", async () => {
+      const client = showWithClient();
+      expect(await screen.findAllByTestId("access-namespace-row")).toHaveLength(2);
+      vi.mocked(api.getAuthNamespaces).mockRejectedValue(refuse());
+      await client.invalidateQueries({ queryKey: ["auth", "namespaces"] });
+      await waitFor(() => expect(screen.queryByTestId("access-namespace-row")).not.toBeInTheDocument());
+      expect(within(screen.getByTestId("access-namespaces")).getByTestId("access-refused")).toBeInTheDocument();
+    });
+
+    it("keeps rows on an ordinary failure (not a refusal)", async () => {
+      const client = showWithClient();
+      expect(await screen.findByTestId("access-user-row")).toBeInTheDocument();
+      vi.mocked(api.getAuthUsers).mockRejectedValue(new ApiError(500, "boom"));
+      await client.invalidateQueries({ queryKey: ["auth", "users"] });
+      expect(await screen.findByText("Unable to load users.")).toBeInTheDocument();
+      expect(screen.getByTestId("access-user-row")).toBeInTheDocument();
+    });
   });
 
   describe("user administration", () => {

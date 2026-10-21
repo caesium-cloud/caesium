@@ -166,6 +166,20 @@ describe("LoginPage", () => {
     }
   });
 
+  it("clears the redirect denial banner when a new sign-in attempt starts", () => {
+    window.history.replaceState(null, "", "/?login_error=no_binding");
+    try {
+      render(<LoginPage onLogin={vi.fn()} />);
+      expect(screen.getByRole("alert")).toHaveTextContent("has no access to Caesium");
+      fireEvent.change(screen.getByPlaceholderText("csk_live_..."), { target: { value: "invalid" } });
+      fireEvent.click(screen.getByText("Sign In"));
+      expect(screen.queryByText(/has no access to Caesium/)).not.toBeInTheDocument();
+    } finally {
+      clearLoginError();
+      window.history.replaceState(null, "", "/");
+    }
+  });
+
   it("shows no denial banner on a plain visit", () => {
     render(<LoginPage onLogin={vi.fn()} />);
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();

@@ -150,6 +150,15 @@ describe("consumeLoginError", () => {
     expect(consumeLoginError(at("").location, history)).toBeNull();
   });
 
+  it("forgets the denial once any sign-in succeeds, so it cannot return after logout", async () => {
+    const { location, history } = at("?login_error=no_binding");
+    expect(consumeLoginError(location, history)).toBe("no_binding");
+    okWhoami({ kind: "api_key", subject: "k", role: "viewer" });
+    expect(await apiKeyLogin("csk_live_x")).toBe("success");
+    clearApiKey();
+    expect(consumeLoginError(at("").location, history)).toBeNull();
+  });
+
   it("ignores values it does not understand", () => {
     const { location, history } = at("?login_error=drop_table");
     expect(consumeLoginError(location, history)).toBeNull();

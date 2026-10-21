@@ -69,6 +69,9 @@ export function LoginPage({
     async (e: React.FormEvent) => {
       e.preventDefault();
       setError(null);
+      setNoBinding(false);
+      clearLoginError();
+      setRedirectDenied(null);
 
       const trimmed = key.trim();
       if (!trimmed) {
