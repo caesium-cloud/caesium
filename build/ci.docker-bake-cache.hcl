@@ -34,6 +34,13 @@ target "integration-runner" {
   cache-to = ["type=gha,scope=integration-runner-${CACHE_ARCH},mode=max,ignore-error=true"]
 }
 
+target "connector-fixture" {
+  args = { BUILDER_IMAGE = "ci-builder" }
+  contexts = { ci-builder = "target:ci-builder" }
+  cache-from = ["type=gha,scope=connector-fixture-${CACHE_ARCH}"]
+  cache-to = ["type=gha,scope=connector-fixture-${CACHE_ARCH},mode=max,ignore-error=true"]
+}
+
 target "robustness-runner" {
   args = { BUILDER_IMAGE = "ci-builder" }
   contexts = { ci-builder = "target:ci-builder" }

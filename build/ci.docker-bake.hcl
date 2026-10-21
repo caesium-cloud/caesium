@@ -54,6 +54,16 @@ target "integration-runner" {
   tags = ["caesiumcloud/caesium-integration:${IMAGE_TAG}"]
 }
 
+# Build the pinned provider fixture independently of product images, so its
+# compilation and Temporal CLI download do not serialize the connector lane.
+target "connector-fixture" {
+  context = "."
+  dockerfile = "build/Dockerfile.connector-fixture"
+  target = "fixture"
+  args = { BUILDER_IMAGE = BUILDER_IMAGE }
+  tags = ["caesiumcloud/caesium-connectors-fixture:${IMAGE_TAG}"]
+}
+
 # Early-evidence lane runner. `./test/robustness` is a subpackage, so its tests
 # are NOT in the precompiled ./test binary: this image compiles them explicitly
 # with -tags=integration and layers them onto the candidate release image so the

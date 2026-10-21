@@ -36,6 +36,11 @@ if name=='npx' and 'test' in sys.argv:
         ('CAESIUM_CONNECTORS_EXPECTED_UI_URL','CAESIUM_MANUAL_TRIGGER_API_KEY')}))
     Path(os.environ['PLAYWRIGHT_JSON_OUTPUT_NAME']).write_text(json.dumps({'stats':{'expected':10},'error':'csk_browser_private','attachments':[{'contentType':'application/json','body':'eyJrZXkiOiJjc2tfYnJvd3Nlcl9wcml2YXRlIn0='}]}))
     raise SystemExit(int(os.environ.get('BROWSER_EXIT','0')))
+if name=='docker' and sys.argv[1:3]==['image','inspect']:
+    role = 'fixture' if 'connectors-fixture:' in sys.argv[-1] else 'runner' if 'caesium-integration:' in sys.argv[-1] else 'server'
+    letter = dict(server='a', runner='b', fixture='c')[role]
+    if os.environ.get('PROBE_FREEZE_WRONG_ROLE') == role: letter='d'
+    print('sha256:'+letter*64)
 ''')
         fake.chmod(0o755)
         for name in ('just', 'docker', 'node', 'npm', 'npx', 'kind', 'kubectl', 'helm'):
@@ -48,6 +53,13 @@ if [ "${PROBE_BLOCK_FIXTURE:-false}" = true ]; then
     touch "$CAESIUM_CONNECTORS_ARTIFACTS/started"
     while :; do sleep 1; done
 fi
+touch "$CAESIUM_CONNECTORS_ARTIFACTS/started"
+if [ "${PROBE_REQUIRE_OVERLAP:-false}" = true ] || [ "${PROBE_FAIL_FIXTURE:-false}" = true ]; then
+    python3 -c 'import os,time; from pathlib import Path; p=Path(os.environ["CAESIUM_CONNECTORS_ARTIFACTS"]).parent/"cluster/started"; end=time.monotonic()+5
+while not p.exists() and time.monotonic()<end: time.sleep(.01)
+assert p.exists(), "cluster did not overlap fixture"'
+fi
+if [ "${PROBE_FAIL_FIXTURE:-false}" = true ]; then exit 23; fi
 if [ "${PROBE_EXPORT_FAILURE:-false}" = true ]; then
     touch "$CAESIUM_CONNECTORS_ARTIFACTS/../public"
 fi
@@ -61,8 +73,13 @@ root = Path(os.environ['CAESIUM_CONNECTORS_ARTIFACTS'])
 server, runner, fixture = ('sha256:'+letter*64 for letter in 'abc')
 sha = os.environ['CANDIDATE_SHA']
 if os.environ.get('PROBE_HANDOFF_FAILURE') == 'candidate': sha = 'd'*40
+if os.environ.get('PROBE_COHERENT_FOREIGN') == 'true':
+    server, runner, fixture = ('sha256:'+letter*64 for letter in 'def')
 proof = {'candidate_sha':sha, 'server':{'origin':'source-build','expected_image_id':'','observed_image_id':server},
-         'runner':{'origin':'source-build','expected_image_id':'','observed_image_id':runner}}
+         'runner':{'origin':'source-build','expected_image_id':'','observed_image_id':runner},
+         'fixture':{'origin':'source-build','expected_image_id':'','observed_image_id':fixture}}
+if os.environ.get('CAESIUM_CONNECTORS_PREBUILT_FIXTURE') == 'true':
+    proof['fixture'].update(origin='loaded', expected_image_id=fixture, producer_candidate_sha=sha)
 images = [{'Id':fixture}, {'Id':runner}]
 if os.environ.get('PROBE_HANDOFF_FAILURE') == 'runner': images[1]['Id'] = 'sha256:'+'d'*64
 (root/'image-provenance.json').write_text(json.dumps(proof))
@@ -75,6 +92,29 @@ CAESIUM_E2E_AUTH_ADMIN_KEY=csk_browser_private CAESIUM_BASE_URL=http://fixture \
         (self.root / 'scripts/connectors-config-cluster.sh').write_text('''#!/bin/sh
 set -eu
 mkdir "$CAESIUM_CONNECTORS_CLUSTER_ARTIFACTS"
+if [ "${PROBE_BLOCK_CLUSTER:-false}" = true ]; then
+    python3 -c 'import os,signal,time; from pathlib import Path; p=Path(os.environ["CAESIUM_CONNECTORS_CLUSTER_ARTIFACTS"])
+def stop(*_):
+    (p/"descendant-cleaned").touch(); raise SystemExit(0)
+signal.signal(signal.SIGTERM,stop); (p/"descendant-started").touch()
+while True: time.sleep(.05)' &
+    descendant=$!
+    if [ "${PROBE_SLOW_CLUSTER_CLEANUP:-false}" = true ]; then
+        trap 'trap - TERM; wait "$descendant"; sleep .3; printf cleaned >"$CAESIUM_CONNECTORS_CLUSTER_ARTIFACTS/cleaned"; exit 143' TERM
+    else
+        trap 'wait "$descendant"; printf cleaned >"$CAESIUM_CONNECTORS_CLUSTER_ARTIFACTS/cleaned"; exit 143' TERM
+    fi
+    while [ ! -f "$CAESIUM_CONNECTORS_CLUSTER_ARTIFACTS/descendant-started" ]; do sleep .01; done
+    touch "$CAESIUM_CONNECTORS_CLUSTER_ARTIFACTS/started"
+    while :; do sleep 1; done
+fi
+touch "$CAESIUM_CONNECTORS_CLUSTER_ARTIFACTS/started"
+if [ "${PROBE_REQUIRE_OVERLAP:-false}" = true ] || [ "${PROBE_FAIL_CLUSTER:-false}" = true ]; then
+    python3 -c 'import os,time; from pathlib import Path; p=Path(os.environ["CAESIUM_CONNECTORS_CLUSTER_ARTIFACTS"]).parent/"fixture/started"; end=time.monotonic()+5
+while not p.exists() and time.monotonic()<end: time.sleep(.01)
+assert p.exists(), "fixture did not overlap cluster"'
+fi
+if [ "${PROBE_FAIL_CLUSTER:-false}" = true ]; then exit 24; fi
 python3 - <<'PYIDS'
 import json, os
 from pathlib import Path
@@ -154,6 +194,136 @@ if '--out' in sys.argv: Path(sys.argv[sys.argv.index('--out')+1]).write_text('{}
         self.assertNotEqual(result.returncode, 0)
         self.assertIn('differs from producer server identity', result.stderr)
         self.assertFalse((self.root/'artifacts/order').exists())
+
+    def parallel_options(self):
+        return dict(CAESIUM_CONNECTORS_PARALLEL_CLUSTER='true', CAESIUM_SKIP_IMAGE_BUILD='true',
+                    CAESIUM_CONNECTORS_PREBUILT_FIXTURE='true',
+                    CAESIUM_CONNECTORS_EXPECTED_FIXTURE_CANDIDATE_SHA=self.sha,
+                    CAESIUM_CONNECTORS_EXPECTED_IMAGE_ID='sha256:'+'a'*64,
+                    CAESIUM_INTEGRATION_RUNNER_IMAGE='caesiumcloud/caesium-integration:candidate',
+                    CAESIUM_CONNECTORS_EXPECTED_RUNNER_IMAGE_ID='sha256:'+'b'*64,
+                    CAESIUM_CONNECTORS_EXPECTED_FIXTURE_IMAGE_ID='sha256:'+'c'*64)
+
+    def test_loaded_cohort_overlaps_and_joins_both_before_strict_collection(self):
+        result = self.run_lane(**self.parallel_options(), PROBE_REQUIRE_OVERLAP='true',
+                               CAESIUM_CONNECTORS_BROWSER_INSTALL_DEPS='true')
+        self.assertEqual(result.returncode, 0, result.stdout+result.stderr)
+        calls = [json.loads(line) for line in (self.root/'artifacts/calls').read_text().splitlines()]
+        self.assertEqual(sum(call[:3] == ['docker', 'image', 'inspect'] for call in calls), 3)
+        self.assertEqual(sum(call[:2] == ['npm', 'ci'] for call in calls), 1)
+        self.assertEqual(sum(call[:3] == ['npx', 'playwright', 'install'] for call in calls), 1)
+        self.assertIn(['npx', 'playwright', 'install', '--with-deps', 'chromium'], calls)
+        self.assertEqual((self.root/'artifacts/order').read_text().splitlines(),
+                         ['cluster', 'collect-lane-evidence.py', 'check-test-evidence.py'])
+
+    def test_parallel_requires_every_loaded_identity_and_matching_candidate(self):
+        for field, value in (('CAESIUM_SKIP_IMAGE_BUILD', 'false'),
+                             ('CAESIUM_CONNECTORS_PREBUILT_FIXTURE', 'false'),
+                             ('CAESIUM_CONNECTORS_EXPECTED_FIXTURE_CANDIDATE_SHA', 'f'*40),
+                             ('CAESIUM_CONNECTORS_EXPECTED_FIXTURE_IMAGE_ID', ''),
+                             ('CAESIUM_CONNECTORS_EXPECTED_RUNNER_IMAGE_ID', 'invalid')):
+            with self.subTest(field=field):
+                self.setUp()
+                options = self.parallel_options(); options[field] = value
+                result = self.run_lane(**options)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertFalse((self.root/'artifacts/lane/fixture').exists())
+                self.assertFalse((self.root/'artifacts/lane/cluster').exists())
+
+    def test_changed_fixture_tag_refuses_before_either_parallel_driver(self):
+        result = self.run_lane(**self.parallel_options(), PROBE_FREEZE_WRONG_ROLE='fixture')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('fixture tag differs from producer image', result.stderr)
+        self.assertFalse((self.root/'artifacts/lane/fixture').exists())
+        self.assertFalse((self.root/'artifacts/lane/cluster').exists())
+
+    def test_coherent_retag_after_freeze_fails_late_runtime_handoff(self):
+        result = self.run_lane(**self.parallel_options(), PROBE_COHERENT_FOREIGN='true')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('differs from producer server identity', result.stderr)
+        self.assertTrue((self.root/'artifacts/lane/cluster/started').exists())
+        self.assertEqual((self.root/'artifacts/order').read_text().splitlines(), ['cluster'])
+
+    def wait_path(self, path, process):
+        deadline = time.monotonic()+5
+        while not path.exists() and process.poll() is None and time.monotonic()<deadline: time.sleep(.01)
+        self.assertTrue(path.exists(), str(path))
+
+    def test_parallel_fixture_failure_joins_cluster_and_its_descendants(self):
+        result = self.run_lane(**self.parallel_options(), PROBE_FAIL_FIXTURE='true', PROBE_BLOCK_CLUSTER='true')
+        self.assertEqual(result.returncode, 23, result.stdout+result.stderr)
+        cluster = self.root/'artifacts/lane/cluster'
+        self.assertTrue((cluster/'cleaned').exists())
+        self.assertTrue((cluster/'descendant-cleaned').exists())
+        self.assertFalse((self.root/'artifacts/order').exists())
+
+    def test_parallel_cluster_failure_joins_fixture(self):
+        result = self.run_lane(**self.parallel_options(), PROBE_BLOCK_FIXTURE='true', PROBE_FAIL_CLUSTER='true')
+        self.assertEqual(result.returncode, 24, result.stdout+result.stderr)
+        self.assertTrue((self.root/'artifacts/lane/fixture/cleaned').exists())
+        self.assertFalse((self.root/'artifacts/order').exists())
+
+    def test_parallel_first_browser_failure_stays_failed_and_joins_cluster(self):
+        result = self.run_lane(**self.parallel_options(), BROWSER_EXIT='1', PROBE_BLOCK_CLUSTER='true',
+                               PROBE_REQUIRE_OVERLAP='true')
+        self.assertEqual(result.returncode, 1, result.stdout+result.stderr)
+        self.assertEqual((self.root/'artifacts/lane/browser/exit-status').read_text().strip(), '1')
+        self.assertTrue((self.root/'artifacts/lane/cluster/cleaned').exists())
+        self.assertTrue((self.root/'artifacts/lane/cluster/descendant-cleaned').exists())
+        self.assertFalse((self.root/'artifacts/order').exists())
+
+    def test_parallel_signal_joins_both_cleanup_groups(self):
+        process = self.run_lane(background=True, **self.parallel_options(),
+                                PROBE_BLOCK_FIXTURE='true', PROBE_BLOCK_CLUSTER='true')
+        try:
+            self.wait_path(self.root/'artifacts/lane/fixture/started', process)
+            self.wait_path(self.root/'artifacts/lane/cluster/descendant-started', process)
+            process.send_signal(signal.SIGTERM)
+            out, err = process.communicate(timeout=5)
+            self.assertEqual(process.returncode, 143, out+err)
+            self.assertTrue((self.root/'artifacts/lane/fixture/cleaned').exists())
+            self.assertTrue((self.root/'artifacts/lane/cluster/cleaned').exists())
+            self.assertTrue((self.root/'artifacts/lane/cluster/descendant-cleaned').exists())
+            self.assertFalse((self.root/'artifacts/order').exists())
+        finally:
+            if process.poll() is None: process.kill(); process.communicate(timeout=5)
+
+    def test_parallel_signal_does_not_interrupt_slower_cluster_cleanup(self):
+        process = self.run_lane(background=True, **self.parallel_options(),
+                                PROBE_BLOCK_FIXTURE='true', PROBE_BLOCK_CLUSTER='true',
+                                PROBE_SLOW_CLUSTER_CLEANUP='true')
+        try:
+            self.wait_path(self.root/'artifacts/lane/fixture/started', process)
+            self.wait_path(self.root/'artifacts/lane/cluster/started', process)
+            process.send_signal(signal.SIGTERM)
+            out, err = process.communicate(timeout=5)
+            self.assertEqual(process.returncode, 143, out+err)
+            self.assertTrue((self.root/'artifacts/lane/fixture/cleaned').exists())
+            self.assertTrue((self.root/'artifacts/lane/cluster/cleaned').exists())
+            self.assertTrue((self.root/'artifacts/lane/cluster/descendant-cleaned').exists())
+            self.assertFalse((self.root/'artifacts/order').exists())
+        finally:
+            if process.poll() is None: process.kill(); process.communicate(timeout=5)
+
+    def test_parallel_hup_and_interrupt_use_graceful_cleanup_and_keep_status(self):
+        for signum in (signal.SIGHUP, signal.SIGINT):
+            with self.subTest(signum=signum):
+                self.setUp()
+                process = self.run_lane(background=True, **self.parallel_options(),
+                                        PROBE_BLOCK_FIXTURE='true', PROBE_BLOCK_CLUSTER='true',
+                                        PROBE_SLOW_CLUSTER_CLEANUP='true')
+                try:
+                    self.wait_path(self.root/'artifacts/lane/fixture/started', process)
+                    self.wait_path(self.root/'artifacts/lane/cluster/started', process)
+                    process.send_signal(signum)
+                    out, err = process.communicate(timeout=5)
+                    self.assertEqual(process.returncode, 128+signum, out+err)
+                    self.assertTrue((self.root/'artifacts/lane/fixture/cleaned').exists())
+                    self.assertTrue((self.root/'artifacts/lane/cluster/cleaned').exists())
+                    self.assertTrue((self.root/'artifacts/lane/cluster/descendant-cleaned').exists())
+                    self.assertFalse((self.root/'artifacts/order').exists())
+                finally:
+                    if process.poll() is None: process.kill(); process.communicate(timeout=5)
 
     def test_first_browser_failure_stops_cluster_and_evidence(self):
         result = self.run_lane(BROWSER_EXIT='1')

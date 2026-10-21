@@ -172,11 +172,25 @@ class ClusterBaselineEnvironmentTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             shutil.copyfile(repository/'justfile', root/'justfile')
+            # Docker's operational values must not become extraEnv entries
+            # alongside the chart's native environment (Helm SSA rejects them).
+            docker_native = {
+                'CAESIUM_LOG_LEVEL': 'warn', 'CAESIUM_PORT': '9999',
+                'CAESIUM_NODE_ADDRESS': 'docker-host:9999',
+                'CAESIUM_DATABASE_PATH': '/docker/database',
+                'CAESIUM_DATABASE_TYPE': 'docker-database',
+                'CAESIUM_KUBERNETES_NAMESPACE': 'docker-namespace',
+            }
+            justfile = root/'justfile'
+            insertion = ''.join(f'\n    -e {name}={value} '+chr(92) for name, value in docker_native.items())
+            justfile.write_text(justfile.read_text().replace('integration-up: build-stress build-test',
+                'integration-up: build-stress build-test'+insertion))
             baseline = root/'baseline.json'
             baseline.write_text(json.dumps({'spec': {'template': {'spec': {'containers': [{'env': [
                 {'name': 'CAESIUM_ENGINE', 'value': 'kubernetes'},
                 {'name': 'CAESIUM_DATABASE_SHARDS', 'value': '4'},
                 {'name': 'POD_NAME', 'value': 'chart-native'},
+                *({'name': name, 'value': 'chart-native'} for name in docker_native),
             ]}]}}}}))
             result = subprocess.run(['python3', '-c', block, str(baseline), 'candidate'],
                                     cwd=root, capture_output=True, text=True, check=True)
@@ -190,9 +204,10 @@ class ClusterBaselineEnvironmentTests(unittest.TestCase):
             self.assertEqual(env['CAESIUM_RUN_QUEUE_ENABLED'], 'true')
             self.assertEqual(env['CAESIUM_RUN_QUEUE_DEQUEUER_ENABLED'], 'true')
             self.assertNotIn('POD_NAME', env)
+            for name in docker_native:
+                self.assertNotIn(name, env, f'{name} would duplicate a chart-native environment entry')
             self.assertEqual(values['replicaCount'], 3)
             # A future baseline feature must join the cluster without another copy.
-            justfile = root/'justfile'
             justfile.write_text(justfile.read_text().replace('integration-up: build-stress build-test',
                 'integration-up: build-stress build-test\n    -e CAESIUM_FUTURE_GATE=true '+chr(92)))
             next_result = subprocess.run(['python3', '-c', block, str(baseline), 'candidate'],

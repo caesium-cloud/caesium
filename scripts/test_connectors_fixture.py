@@ -41,7 +41,8 @@ elif args[:2]==['container','inspect'] or args[0]=='inspect':
    if os.environ.get('MOCK_INVALID_MISSING_STATE'): container_state.pop('ExitCode')
   print(json.dumps([{'Id':cid,'Image':'sha256:'+'a'*64,'Config':{'Env':['CAESIUM_AUTH_MODE='+os.environ.get('MOCK_AUTH_MODE','api-key'),'CAESIUM_CONNECTORS_CONFIG_FILE=/etc/caesium/connectors/connections.yaml','CAESIUM_CONNECTORS_ENABLED='+os.environ.get('MOCK_GATE_ENABLED','true'),'CAESIUM_RUN_QUEUE_ENABLED='+os.environ.get('MOCK_QUEUE_ENABLED','true'),'CAESIUM_RUN_QUEUE_DEQUEUER_ENABLED='+os.environ.get('MOCK_DEQUEUER_ENABLED','true'),'SAMPLE_SECRET=private','ARBITRARY=unusual-credential','CAESIUM_REGISTRY_AUTH=secret://env/ARBITRARY','CAESIUM_DATABASE_DSN=postgres://u:password@db','CAESIUM_IT_REGISTRY_CREDS=ci-user:ci-pass'],'Cmd':['--auth=argv-credential']},'Args':['argv-credential'],'State':container_state}]))
 elif args[:2]==['image','inspect']:
- print(json.dumps([{'Id':args[-1],'Config':{'Env':['LABELLESS=image-credential'],'Cmd':['argv-credential'],'Labels':{'x':'label-credential'}}}]))
+ if '--format' in args: print('sha256:'+os.environ.get('MOCK_TAG_ID','a')*64)
+ else: print(json.dumps([{'Id':args[-1],'Config':{'Env':['LABELLESS=image-credential'],'Cmd':['argv-credential'],'Labels':{'x':'label-credential'}}}]))
  if os.environ.get('MOCK_IMAGE_INSPECT_FAIL'): sys.exit(1)
 elif args[0]=='create':
  name=option('--name'); reservation=state/'names'/name
@@ -263,6 +264,56 @@ class ConnectorFixtureOrchestrationTests(unittest.TestCase):
         for role in ('server', 'runner'):
             self.assertEqual(provenance[role]['origin'], 'loaded')
             self.assertEqual(provenance[role]['expected_image_id'], provenance[role]['observed_image_id'])
+
+    def prebuilt_fixture(self):
+        candidate = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=self.root, text=True).strip()
+        return {'CAESIUM_CONNECTORS_PREBUILT_FIXTURE': 'true',
+                'CAESIUM_CONNECTORS_EXPECTED_FIXTURE_CANDIDATE_SHA': candidate,
+                'CAESIUM_CONNECTORS_EXPECTED_FIXTURE_IMAGE_ID': 'sha256:'+'a'*64}
+
+    def test_loaded_fixture_is_candidate_bound_and_never_rebuilt(self):
+        options = self.prebuilt_fixture()
+        result, out, err = self.finish(self.launch(**self.select_lane(), **options))
+        self.assertEqual(result, 0, out+err)
+        self.assertFalse(any(call[0] == 'build' and 'build/Dockerfile.connector-fixture' in call
+                             for call in self.calls()))
+        provenance = json.loads((self.artifacts/'image-provenance.json').read_text())['fixture']
+        self.assertEqual(provenance['origin'], 'loaded')
+        self.assertEqual(provenance['producer_candidate_sha'], options['CAESIUM_CONNECTORS_EXPECTED_FIXTURE_CANDIDATE_SHA'])
+        self.assertEqual(provenance['expected_image_id'], provenance['observed_image_id'])
+
+    def test_source_fixture_is_still_built_by_default(self):
+        result, out, err = self.finish(self.launch())
+        self.assertEqual(result, 0, out+err)
+        self.assertEqual(sum(call[0] == 'build' and 'build/Dockerfile.connector-fixture' in call
+                             for call in self.calls()), 1)
+
+    def test_foreign_loaded_fixture_candidate_refuses_before_build_or_creation(self):
+        options = self.prebuilt_fixture()
+        options['CAESIUM_CONNECTORS_EXPECTED_FIXTURE_CANDIDATE_SHA'] = 'b'*40
+        result, out, err = self.finish(self.launch(**options))
+        self.assertNotEqual(result, 0)
+        self.assertIn('requires matching producer candidate', err)
+        self.assertFalse(any(call[0] in ('build', 'create') for call in self.calls()))
+
+    def test_missing_or_changed_loaded_fixture_identity_refuses_before_creation(self):
+        for expected in ('', 'sha256:'+'b'*64, 'not-a-digest'):
+            with self.subTest(expected=expected):
+                self.tearDown(); self.setUp()
+                options = self.prebuilt_fixture()
+                options['CAESIUM_CONNECTORS_EXPECTED_FIXTURE_IMAGE_ID'] = expected
+                result, out, err = self.finish(self.launch(**options))
+                self.assertNotEqual(result, 0)
+                self.assertIn('producer image identity', err)
+                self.assertFalse(any(call[0] in ('build', 'create') for call in self.calls()))
+
+    def test_loaded_fixture_runtime_must_still_match_its_producer(self):
+        options = self.prebuilt_fixture()
+        options['CAESIUM_CONNECTORS_EXPECTED_FIXTURE_IMAGE_ID'] = 'sha256:'+'b'*64
+        result, out, err = self.finish(self.launch(**self.select_lane(), **options, MOCK_TAG_ID='b'))
+        self.assertNotEqual(result, 0)
+        self.assertIn('fixture image differs from producer candidate image', err)
+        self.assertFalse((self.state/'runner-attached').exists())
 
     def test_lane_wrong_loaded_image_refuses_before_dispatch(self):
         result, out, err = self.finish(self.launch(**self.select_lane(),

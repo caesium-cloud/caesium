@@ -248,6 +248,18 @@ class GateTests(unittest.TestCase):
         needs["ui-e2e-auth"]["result"] = "skipped"
         self.gate(needs, 1)
 
+    def test_failed_builder_cannot_hide_behind_independently_successful_images(self):
+        self.assertIn("builder", JOBS["ci-ok"]["needs"])
+        for status in ("failure", "cancelled", "skipped", None):
+            with self.subTest(builder=status):
+                needs = results(selected_outputs(("ui",)))
+                self.assertEqual(needs["images"]["result"], "success")
+                if status is None:
+                    del needs["builder"]
+                else:
+                    needs["builder"]["result"] = status
+                self.gate(needs, 1)
+
     def test_invalid_inputs(self):
         for needs in (None, [], {}, {"changes": "success"}):
             self.gate(needs, 1)
@@ -729,6 +741,31 @@ class WorkflowTests(unittest.TestCase):
             self.assertIn(f"reagents-{arch}", saved)
             self.assertIn(f"integration-runner-{arch}", saved)
 
+    def test_amd64_images_use_their_own_builder_graph_without_waiting_for_builder_job(self):
+        images = JOBS["images"]
+        self.assertEqual(images["needs"], ["changes"])
+        self.assertEqual(images["if"], "needs.changes.outputs.images == 'true'")
+        self.assertNotIn("needs.builder", json.dumps(images))
+        self.assertNotIn("builder-amd64", json.dumps(images))
+        bake = next(step["with"] for step in images["steps"]
+                    if step.get("uses") == "./.github/actions/bake-images")
+        self.assertEqual(bake["arch"], "amd64")
+        self.assertEqual(set(bake["targets"].split()), {"product", "robustness"})
+        override = (ROOT / "build/ci.docker-bake-cache.hcl").read_text()
+        builder = override.split('target "ci-builder"', 1)[1].split('\n}', 1)[0]
+        self.assertIn('dockerfile = "build/Dockerfile.build"', builder)
+        self.assertIn('target = "builder"', builder)
+        self.assertIn('args = { TARGETARCH = CACHE_ARCH }', builder)
+        for name in ("release", "integration-runner", "robustness-runner"):
+            with self.subTest(target=name):
+                target = override.split(f'target "{name}"', 1)[1].split('\n}', 1)[0]
+                self.assertIn('BUILDER_IMAGE = "ci-builder"', target)
+                self.assertIn('contexts = { ci-builder = "target:ci-builder" }', target)
+        # Only the measured amd64 product edge changes; other producer and
+        # architecture ordering keeps its existing contract.
+        self.assertEqual(JOBS["images-arm64"]["needs"], ["changes", "builder-arm64"])
+        self.assertEqual(JOBS["connector-fixture-images"]["needs"], ["changes", "builder"])
+
     def test_integration_consumers_do_not_download_compilers(self):
         action = yaml.safe_load((ROOT / ".github/actions/run-integration/action.yml").read_text())
         steps = action["runs"]["steps"]
@@ -786,7 +823,7 @@ class ConnectorsLaneWiringTests(unittest.TestCase):
         self.assertNotIn("connectors", EVIDENCE_LANES)
         self.assertNotIn("connectors", JOBS["ci-ok"]["needs"])
         self.assertNotIn("connectors", QUALIFICATION["RELEASE_REQUIRED_EVIDENCE"])
-        self.assertEqual(set(job["needs"]), {"changes", "builder", "images", "ui-test"})
+        self.assertEqual(set(job["needs"]), {"changes", "images", "connector-fixture-images", "ui-test"})
 
     def test_connector_job_drives_tracked_recipe_and_uploads_only_public_artifacts(self):
         job = JOBS["connectors"]
@@ -797,12 +834,16 @@ class ConnectorsLaneWiringTests(unittest.TestCase):
                          "caesiumcloud/caesium-integration:${{ env.IMAGE_TAG }}-amd64")
         loaded = {step.get("with", {}).get("name") for step in job["steps"]
                   if step.get("uses") == "./.github/actions/load-docker-images"}
-        self.assertEqual(loaded, {"builder-amd64", "product-amd64", "integration-runner-amd64"})
+        self.assertEqual(loaded, {"connector-fixture-amd64", "product-amd64", "integration-runner-amd64"})
         run = run_step["run"]
         self.assertIn("CAESIUM_CONNECTORS_EXPECTED_IMAGE_ID", run)
         self.assertIn("$(cat .tmp/connectors-image-ids/test.txt)", run)
         self.assertIn("$(cat .tmp/connectors-image-ids/integration-runner.txt)", run)
         self.assertIn("CAESIUM_CONNECTORS_EXPECTED_RUNNER_IMAGE_ID", run)
+        self.assertIn("$(cat .tmp/connector-fixture-image-ids/fixture.txt)", run)
+        self.assertIn("$(cat .tmp/connector-fixture-image-ids/candidate-sha.txt)", run)
+        self.assertIn("CAESIUM_CONNECTORS_EXPECTED_FIXTURE_IMAGE_ID", run)
+        self.assertIn("CAESIUM_CONNECTORS_EXPECTED_FIXTURE_CANDIDATE_SHA", run)
         identities = next(step for step in job["steps"]
                           if step.get("with", {}).get("name") == "image-ids-amd64")
         self.assertEqual(identities["with"]["path"], ".tmp/connectors-image-ids")
@@ -821,6 +862,27 @@ class ConnectorsLaneWiringTests(unittest.TestCase):
         for step in uploads:
             self.assertEqual(step["if"], "always()")
             self.assertEqual(step["with"]["if-no-files-found"], "error")
+
+    def test_fixture_producer_is_independent_and_parallel_requires_loaded_cohort(self):
+        producer = JOBS["connector-fixture-images"]
+        self.assertEqual(set(producer["needs"]), {"changes", "builder"})
+        self.assertEqual(producer["if"], JOBS["connectors"]["if"])
+        bake = next(step["with"] for step in producer["steps"]
+                    if step.get("uses") == "./.github/actions/bake-images")
+        self.assertEqual(bake, {"arch": "amd64", "targets": "connector-fixture", "cache-group": "connector-fixture"})
+        identity = next(step["run"] for step in producer["steps"]
+                        if step.get("name") == "Record connector fixture producer identity")
+        self.assertIn("'${{ github.sha }}'", identity)
+        self.assertIn("docker image inspect --format '{{.Id}}'", identity)
+        fixture_bake = (ROOT / "build/ci.docker-bake.hcl").read_text().split('target "connector-fixture"', 1)[1].split('\n}', 1)[0]
+        self.assertIn('dockerfile = "build/Dockerfile.connector-fixture"', fixture_bake)
+        fixture_cache = (ROOT / "build/ci.docker-bake-cache.hcl").read_text().split('target "connector-fixture"', 1)[1].split('\n}', 1)[0]
+        self.assertIn('contexts = { ci-builder = "target:ci-builder" }', fixture_cache)
+        for name in ("CAESIUM_CONNECTORS_PREBUILT_FIXTURE", "CAESIUM_CONNECTORS_PARALLEL_CLUSTER",
+                     "CAESIUM_CONNECTORS_BROWSER_INSTALL_DEPS"):
+            self.assertEqual(JOBS["connectors"]["env"][name], "true")
+        self.assertFalse(any('npm ci' in step.get('run', '') or 'playwright install' in step.get('run', '')
+                             for step in JOBS['connectors']['steps']))
 
 
 class EarlyEvidenceLaneTests(unittest.TestCase):
@@ -2939,7 +3001,11 @@ class NightlyLaneTests(unittest.TestCase):
             "integration-arm64", "helm-pod-replacement-test", "reagents-arm64",
         }
         structural = {"ci-ok", "publish", "build-and-integration-test", "build-and-integration-test-agent-auth",
-                      "qualification", "release-qualification"}
+                      "qualification", "release-qualification", "connector-fixture-images"}
+        # The fixture producer supplies the connector consumer's image cohort;
+        # its result is enforced through that lane's selected/advisory status.
+        self.assertIn("connector-fixture-images", JOBS["connectors"]["needs"])
+        self.assertNotIn("connector-fixture-images", JOBS["ci-ok"]["needs"])
         for job in JOBS:
             with self.subTest(job=job):
                 self.assertTrue(
