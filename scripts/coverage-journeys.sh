@@ -1766,6 +1766,10 @@ PY
   # dequeuer's quota drain, the retry refusals, the backfill wait and the
   # `caesium job queue` hold.
   local_pattern="${local_pattern%)}|TestNamespaceQuotaHoldsSecondPolicyFreeRun|TestNamespaceQuotaRefusesRetryAtCap|TestNamespaceQuotaBackfillWaitsAndCompletes)"
+  # Queued-run cancel (DELETE /v1/jobs/:id/queue/:queue_id, whose handler D1
+  # scoped to the row's queued namespace): a queue-policy job parks its second
+  # run and the scenario cancels the row through the live endpoint.
+  local_pattern="${local_pattern%)}|TestJobQueueCancelEndpointDeletesUnclaimedRowOnly)"
   auth_pattern="${auth_pattern%)}|TestIncidentNamespaceLifecycle)"
   # The access policy endpoints (GET/POST /v1/auth/policy): this api-key server
   # mounts no policy file, so the scenario drives the no-file env view and 409.
@@ -1808,6 +1812,7 @@ PY
     TestNamespaceQuotaHoldsSecondPolicyFreeRun
     TestNamespaceQuotaRefusesRetryAtCap
     TestNamespaceQuotaBackfillWaitsAndCompletes
+    TestJobQueueCancelEndpointDeletesUnclaimedRowOnly
   )
   local -a auth_named_passes=(
     TestIncidentCLIListJSONStdout
