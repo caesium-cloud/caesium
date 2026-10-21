@@ -545,9 +545,13 @@ func ValidateTriggerTenancy(ctx context.Context, conn *gorm.DB, defs []schema.De
 		return nil
 	}
 	tx := conn.WithContext(ctx)
+	// The raw aliases, as the importer looks the stored rows up and stores
+	// them: a stored "a " is another job than a definition's "a" (PR #668
+	// review r11), so jobs are tracked by stored ID below, never by a trimmed
+	// alias.
 	aliases := make([]string, 0, len(defs))
 	for i := range defs {
-		aliases = append(aliases, strings.TrimSpace(defs[i].Metadata.Alias))
+		aliases = append(aliases, defs[i].Metadata.Alias)
 	}
 	var existingRows []models.Job
 	if err := tx.Unscoped().Model(&models.Job{}).Where("alias IN ?", aliases).Find(&existingRows).Error; err != nil {
@@ -555,15 +559,16 @@ func ValidateTriggerTenancy(ctx context.Context, conn *gorm.DB, defs []schema.De
 	}
 	existingByAlias := make(map[string]*models.Job, len(existingRows))
 	for i := range existingRows {
-		existingByAlias[strings.TrimSpace(existingRows[i].Alias)] = &existingRows[i]
+		existingByAlias[existingRows[i].Alias] = &existingRows[i]
 	}
 	var (
-		// namespaceOf is the namespace each earlier-written job now has.
-		namespaceOf = make(map[string]string, len(defs))
-		// ownRow marks earlier-written jobs now on a row of their own (new,
-		// or detached from a shared row); proposed and proposedPaths hold
-		// their subscriptions.
-		ownRow        = make(map[string]bool, len(defs))
+		// namespaceOf is the namespace each earlier-written stored job now
+		// has, by job ID.
+		namespaceOf = make(map[uuid.UUID]string, len(defs))
+		// ownRow marks earlier-written stored jobs now on a row of their own
+		// (detached from a shared row), by job ID; proposed and
+		// proposedPaths hold the subscriptions of those and of new jobs.
+		ownRow        = make(map[uuid.UUID]bool, len(defs))
 		proposed      []servedJob
 		proposedPaths []string
 		// rowPath is the webhook path of each existing row an earlier
@@ -575,11 +580,10 @@ func ValidateTriggerTenancy(ctx context.Context, conn *gorm.DB, defs []schema.De
 	current := func(jobs []servedJob) []servedJob {
 		out := make([]servedJob, 0, len(jobs))
 		for _, job := range jobs {
-			alias := strings.TrimSpace(job.Alias)
-			if ownRow[alias] {
+			if ownRow[job.ID] {
 				continue
 			}
-			if namespace, ok := namespaceOf[alias]; ok {
+			if namespace, ok := namespaceOf[job.ID]; ok {
 				job.Namespace = namespace
 			}
 			out = append(out, job)
@@ -597,7 +601,7 @@ func ValidateTriggerTenancy(ctx context.Context, conn *gorm.DB, defs []schema.De
 		def := &defs[i]
 		existing := existingByAlias[aliases[i]]
 		target := tenancyTarget{
-			Alias:     aliases[i],
+			Alias:     strings.TrimSpace(aliases[i]),
 			Namespace: models.NamespaceOrDefault(def.Metadata.Namespace),
 			Path:      ProposedWebhookPath(def.Trigger.Type, def.Trigger.Configuration),
 		}
@@ -638,11 +642,15 @@ func ValidateTriggerTenancy(ctx context.Context, conn *gorm.DB, defs []schema.De
 		if err := evaluatePathTenancy(target, subscribers, scope, enforce); err != nil {
 			return err
 		}
-		namespaceOf[aliases[i]] = target.Namespace
+		if existing != nil {
+			namespaceOf[existing.ID] = target.Namespace
+		}
 		switch {
 		case target.TriggerID == uuid.Nil || verdict.Detach:
-			ownRow[aliases[i]] = true
-			proposed = append(proposed, servedJob{Alias: aliases[i], Namespace: target.Namespace})
+			if existing != nil {
+				ownRow[existing.ID] = true
+			}
+			proposed = append(proposed, servedJob{ID: target.JobID, Alias: aliases[i], Namespace: target.Namespace})
 			proposedPaths = append(proposedPaths, target.Path)
 		default:
 			rowPath[target.TriggerID] = target.Path

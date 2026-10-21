@@ -427,6 +427,33 @@ func TestValidateTriggerTenancyPreviewsTheBatch(t *testing.T) {
 	require.Equal(t, "webhook path \"stored\" is subscribed by a job outside your access", RedactedTenancyMessage(err))
 }
 
+// The preview tracks jobs by stored identity, not by trimmed alias (PR #668
+// review r11): a finance "a " (ASCII or Unicode space) subscribed to "old" is
+// another job than a marketing batch's new "a" on "new", so the batch's "c" on
+// "old" is refused by lint exactly as the apply refuses it.
+func TestValidateTriggerTenancyTracksJobsByIdentity(t *testing.T) {
+	ctx := context.Background()
+	for _, space := range []string{" ", " "} {
+		f := newTenancyFixture(t, false)
+		twin := f.def("a", "finance", "old")
+		twin.Metadata.Alias = "a" + space
+		_, err := f.importer.ApplyWithOptions(ctx, twin, nil)
+		require.NoError(t, err)
+
+		scope := NewTenancyScope([]string{"marketing"}, nil)
+		batch := []schema.Definition{*f.def("a", "marketing", "new"), *f.def("c", "marketing", "old")}
+		err = ValidateTriggerTenancy(ctx, f.db, batch, scope)
+		requireTenancyRefusal(t, err, NamespaceReasonWebhookPath)
+		require.Contains(t, RedactedTenancyMessage(err), `"old"`)
+
+		opts := &ApplyOptions{NamespaceAllowlist: []string{"marketing"}}
+		_, err = f.importer.ApplyConfinedBatch(ctx, []BatchPlan{{Def: &batch[0], Opts: opts}, {Def: &batch[1], Opts: opts}}, ConfinedBatchOptions{})
+		requireTenancyRefusal(t, err, NamespaceReasonWebhookPath)
+		require.False(t, f.jobExists("a"), "the apply agrees and writes nothing")
+		require.False(t, f.jobExists("c"))
+	}
+}
+
 // The preview follows the importer's trigger-row writes: a job written onto a
 // shared row rewrites the row in place, so the row's other job leaves the old
 // path with it, and the apply agrees; a retired job revived on its row

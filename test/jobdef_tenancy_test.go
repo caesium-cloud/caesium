@@ -212,8 +212,9 @@ func (s *IntegrationTestSuite) TestAuthJobdefApplyLateRefusalRollsBack() {
 // TestAuthTriggerTenancyScopedKeyAndPatch: a job-scoped operator key (cluster
 // role, alias scope) cannot rewrite a trigger row shared with a job outside
 // its scope, nor subscribe a webhook path such a job is on; a marketing
-// operator may PATCH its own trigger but not move it onto a finance job's
-// path, nor PATCH a trigger also serving finance.
+// operator may not PATCH a trigger also serving finance. (The rest of the
+// PATCH surface is TestAuthTriggerPatchRechecksTenancy, which needs no
+// catalog connection and so also runs on the auth coverage journey.)
 func (s *IntegrationTestSuite) TestAuthTriggerTenancyScopedKeyAndPatch() {
 	s.requireAuthLane()
 	stamp := time.Now().UnixNano()
@@ -241,30 +242,58 @@ func (s *IntegrationTestSuite) TestAuthTriggerTenancyScopedKeyAndPatch() {
 	s.Contains(body, "also serves a job outside your access")
 	s.NotContains(body, peer)
 
-	// PATCH by a namespace-confined operator.
+	// PATCH by a namespace-confined operator of a row also serving finance.
 	mktOperator := s.mintNamespacedKey("operator", "marketing")
 	mkt := fmt.Sprintf("b9-patch-mkt-%d", stamp)
 	fin := fmt.Sprintf("b9-patch-fin-%d", stamp)
-	finPath := fmt.Sprintf("/hooks/b9-patch-taken-%d", stamp)
 	s.b9Cleanup(mkt, fin)
 	s.applyDefinition(s.b9Def(mkt, "marketing", fmt.Sprintf("/hooks/b9-patch-mkt-%d", stamp)))
-	s.applyDefinition(s.b9Def(fin, "finance", finPath))
+	s.applyDefinition(s.b9Def(fin, "finance", ""))
 	mktTrigger := s.b9RequireJob(mkt).TriggerID
-	renamed := fmt.Sprintf("b9-patch-renamed-%d", stamp)
-	s.requireNSStatus(http.StatusOK, http.MethodPatch, "/v1/triggers/"+mktTrigger, mktOperator.Plaintext, fmt.Sprintf(`{"alias":%q}`, renamed))
-	status, body = s.nsRequest(http.MethodPatch, "/v1/triggers/"+mktTrigger, mktOperator.Plaintext, fmt.Sprintf(`{"configuration":{"path":%q}}`, finPath), nil)
+	s.b9Share(mkt, fin)
+	s.requireNSStatus(http.StatusForbidden, http.MethodPatch, "/v1/triggers/"+mktTrigger, mktOperator.Plaintext, `{}`)
+}
+
+// TestAuthTriggerPatchRechecksTenancy: PATCH /v1/triggers/:id re-checks
+// trigger tenancy for the writer (B9). A marketing operator renames its own
+// trigger (200) but cannot move it onto a webhook path a finance job
+// subscribes (403 naming nothing of finance, nothing changed); with a policy
+// file the cluster admin is refused that path too (409 naming the namespace),
+// and an unrestricted admin's rename is unchanged. It needs no catalog
+// connection, so the auth coverage journey (no policy file) runs it as well.
+func (s *IntegrationTestSuite) TestAuthTriggerPatchRechecksTenancy() {
+	s.requireAuthLane()
+	stamp := time.Now().UnixNano()
+	mktOperator := s.mintNamespacedKey("operator", "marketing")
+	mkt := fmt.Sprintf("b9-tpatch-mkt-%d", stamp)
+	fin := fmt.Sprintf("b9-tpatch-fin-%d", stamp)
+	finPath := fmt.Sprintf("/hooks/b9-tpatch-taken-%d", stamp)
+	s.b9Cleanup(mkt, fin)
+	s.applyDefinition(s.b9Def(mkt, "marketing", fmt.Sprintf("/hooks/b9-tpatch-mkt-%d", stamp)))
+	s.applyDefinition(s.b9Def(fin, "finance", finPath))
+	trigger := "/v1/triggers/" + s.b9RequireJob(mkt).TriggerID
+
+	renamed := fmt.Sprintf("b9-tpatch-renamed-%d", stamp)
+	s.requireNSStatus(http.StatusOK, http.MethodPatch, trigger, mktOperator.Plaintext, fmt.Sprintf(`{"alias":%q}`, renamed))
+	s.Contains(s.requireNSStatus(http.StatusOK, http.MethodGet, trigger, s.authAPIKey, ""), renamed)
+
+	status, body := s.nsRequest(http.MethodPatch, trigger, mktOperator.Plaintext, fmt.Sprintf(`{"configuration":{"path":%q}}`, finPath), nil)
 	s.Require().Equal(http.StatusForbidden, status, body)
+	s.Contains(body, "insufficient permissions")
 	s.NotContains(body, fin)
-	s.NotContains(s.requireNSStatus(http.StatusOK, http.MethodGet, "/v1/triggers/"+mktTrigger, s.authAPIKey, ""), "b9-patch-taken", "the refused PATCH changed nothing")
+	s.NotContains(body, "finance")
+	s.NotContains(s.requireNSStatus(http.StatusOK, http.MethodGet, trigger, s.authAPIKey, ""), "b9-tpatch-taken", "the refused PATCH changed nothing")
 	if !authLaneWithoutPolicy() {
 		// With a policy file the cluster admin is held to one namespace per
 		// webhook path too, told which namespace holds it.
-		status, body = s.nsRequest(http.MethodPatch, "/v1/triggers/"+mktTrigger, s.authAPIKey, fmt.Sprintf(`{"configuration":{"path":%q}}`, finPath), nil)
+		status, body = s.nsRequest(http.MethodPatch, trigger, s.authAPIKey, fmt.Sprintf(`{"configuration":{"path":%q}}`, finPath), nil)
 		s.Require().Equal(http.StatusConflict, status, body)
 		s.Contains(body, `namespace \"finance\"`)
 	}
-	s.b9Share(mkt, fin)
-	s.requireNSStatus(http.StatusForbidden, http.MethodPatch, "/v1/triggers/"+mktTrigger, mktOperator.Plaintext, `{}`)
+
+	adminRenamed := fmt.Sprintf("b9-tpatch-admin-%d", stamp)
+	s.requireNSStatus(http.StatusOK, http.MethodPatch, trigger, s.authAPIKey, fmt.Sprintf(`{"alias":%q}`, adminRenamed))
+	s.Contains(s.requireNSStatus(http.StatusOK, http.MethodGet, trigger, s.authAPIKey, ""), adminRenamed)
 }
 
 // TestAuthJobdefApplyRepairsLegacySharedTrigger: a legacy trigger row serving

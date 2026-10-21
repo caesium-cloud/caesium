@@ -1773,9 +1773,10 @@ PY
   # (TestAuthUserBoundKeyGrantsFollowPolicy) runs on the agent lane only.
   auth_pattern="${auth_pattern%)}|TestAuthUserBoundKeyLifecycle)"
   # Confined job writes and trigger tenancy (identity-and-access B9): the
-  # confined apply, legacy create and webhook-path race. Rule 1 only, which
-  # needs no policy file (this server mounts none) nor a catalog connection.
-  auth_pattern="${auth_pattern%)}|TestAuthJobdefApplyLateRefusalRollsBack|TestAuthLegacyJobCreateConfined|TestAuthTriggerTenancyWebhookPathRace)"
+  # confined apply, legacy create, webhook-path race and trigger PATCH. Rule 1
+  # only, which needs no policy file (this server mounts none) nor a catalog
+  # connection.
+  auth_pattern="${auth_pattern%)}|TestAuthJobdefApplyLateRefusalRollsBack|TestAuthLegacyJobCreateConfined|TestAuthTriggerTenancyWebhookPathRace|TestAuthTriggerPatchRechecksTenancy)"
 
   local -a local_named_passes=(
     TestCaesiumWhyExplainsHitAndMiss
@@ -1826,6 +1827,7 @@ PY
     TestAuthJobdefApplyLateRefusalRollsBack
     TestAuthLegacyJobCreateConfined
     TestAuthTriggerTenancyWebhookPathRace
+    TestAuthTriggerPatchRechecksTenancy
   )
   local -a distributed_named_passes=(
     TestNodeWorkersRoute
