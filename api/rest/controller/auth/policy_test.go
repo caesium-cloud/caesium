@@ -54,6 +54,7 @@ func newPolicyRouter(t *testing.T, holder *policy.Holder) *policyRouter {
 	ctrl := New(svc, auditor)
 	g.GET("/auth/policy", ctrl.GetPolicy)
 	g.POST("/auth/policy/reload", ctrl.ReloadPolicy)
+	g.GET("/auth/namespaces", ctrl.GetNamespaces)
 	return &policyRouter{echo: e, auditor: auditor, keys: keys}
 }
 
@@ -239,4 +240,58 @@ func readJSONField(t *testing.T, rec *httptest.ResponseRecorder, field string) j
 	var body map[string]json.RawMessage
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
 	return body[field]
+}
+
+func TestNamespacesRouteRedactsFailedReloadErrors(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "policy.yaml")
+	writePolicyFile(t, path, controllerPolicy)
+	holder, err := policy.LoadFile(t.Context(), policy.HolderOptions{Path: path})
+	require.NoError(t, err)
+	r := newPolicyRouter(t, holder)
+
+	writePolicyFile(t, path, "apiVersion: v1\nkind: AccessPolicy\nbindings: [not-a-binding-SECRET-TOKEN]\n")
+	require.Equal(t, http.StatusUnprocessableEntity, r.do(t, http.MethodPost, "/v1/auth/policy/reload", models.RoleAdmin).Code)
+
+	// The admin view keeps the diagnostic; the viewer route shows only that it failed.
+	require.Contains(t, r.do(t, http.MethodGet, "/v1/auth/policy", models.RoleAdmin).Body.String(), path)
+	rec := r.do(t, http.MethodGet, "/v1/auth/namespaces", models.RoleViewer)
+	require.Equal(t, http.StatusOK, rec.Code)
+	resp := readJSONBody[NamespacesResponse](t, rec)
+	require.NotNil(t, resp.LastReload)
+	require.False(t, resp.LastReload.OK)
+	for _, leak := range []string{path, "SECRET-TOKEN", "error"} {
+		require.NotContains(t, rec.Body.String(), leak)
+	}
+}
+
+func TestNamespacesRouteIsClusterViewerAndHidesBindings(t *testing.T) {
+	role, ok := iauth.RequiredRole(http.MethodGet, "/v1/auth/namespaces")
+	require.True(t, ok)
+	require.Equal(t, models.RoleViewer, role)
+
+	path := filepath.Join(t.TempDir(), "policy.yaml")
+	writePolicyFile(t, path, controllerPolicy)
+	holder, err := policy.LoadFile(t.Context(), policy.HolderOptions{Path: path})
+	require.NoError(t, err)
+	r := newPolicyRouter(t, holder)
+
+	require.Equal(t, http.StatusUnauthorized, r.do(t, http.MethodGet, "/v1/auth/namespaces", "").Code)
+	rec := r.do(t, http.MethodGet, "/v1/auth/namespaces", models.RoleViewer)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	resp := readJSONBody[NamespacesResponse](t, rec)
+	require.Equal(t, policy.SourceFile, resp.Source)
+	require.Equal(t, policy.Hash([]byte(controllerPolicy)), resp.Revision)
+	require.Len(t, resp.Namespaces, 2)
+	require.Equal(t, "default", resp.Namespaces[0].Name)
+	require.Equal(t, "marketing", resp.Namespaces[1].Name)
+	require.Equal(t, []string{"env/MARKETING_*"}, resp.Namespaces[1].Secrets.Allow)
+	body := rec.Body.String()
+	for _, leak := range []string{"marketing-eng", "bindings", "subjects", "groups", path} {
+		require.NotContains(t, body, leak)
+	}
+
+	empty := newPolicyRouter(t, policy.NewEnvHolder(nil, "", nil))
+	resp = readJSONBody[NamespacesResponse](t, empty.do(t, http.MethodGet, "/v1/auth/namespaces", models.RoleViewer))
+	require.Len(t, resp.Namespaces, 1)
+	require.Equal(t, "default", resp.Namespaces[0].Name)
 }

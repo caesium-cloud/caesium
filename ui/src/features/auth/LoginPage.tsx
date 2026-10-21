@@ -7,7 +7,10 @@ import {
   type AuthMethod,
   authMethodKey,
   authMethodLabel,
+  clearLoginError,
+  consumeLoginError,
   credentialLogin,
+  type LoginErrorReason,
   isCredentialAuthMethod,
   isRedirectAuthMethod,
   ssoLoginUrl,
@@ -20,7 +23,10 @@ interface LoginPageProps {
   returnTo?: () => string;
 }
 
-const defaultNavigate = (url: string) => {
+const NO_BINDING_MESSAGE =
+  "You signed in, but your account has no access to Caesium. Ask an administrator to grant your group a role.";
+
+const defaultNavigate =(url: string) => {
   window.location.assign(url);
 };
 
@@ -43,6 +49,12 @@ export function LoginPage({
   const [password, setPassword] = useState("");
   const [credentialError, setCredentialError] = useState<string | null>(null);
   const [credentialLoading, setCredentialLoading] = useState(false);
+  const [noBinding, setNoBinding] = useState(false);
+  // A redirect (OIDC/SAML) login that was denied for lack of a binding lands
+  // back here with ?login_error=no_binding.
+  const [redirectDenied, setRedirectDenied] = useState<LoginErrorReason | null>(() =>
+    consumeLoginError(),
+  );
   const redirectMethods = methods.filter(isRedirectAuthMethod);
   const credentialMethod = methods.find(isCredentialAuthMethod);
 
@@ -103,6 +115,9 @@ export function LoginPage({
       }
 
       setCredentialError(null);
+      setNoBinding(false);
+      clearLoginError();
+      setRedirectDenied(null);
 
       const trimmedUsername = username.trim();
       if (!trimmedUsername || !password) {
@@ -120,6 +135,9 @@ export function LoginPage({
           break;
         case "invalid":
           setCredentialError("Invalid username or password");
+          break;
+        case "no_binding":
+          setNoBinding(true);
           break;
         case "denied":
           setCredentialError(`${providerName} login is not allowed for this account`);
@@ -149,6 +167,12 @@ export function LoginPage({
         </div>
         <div className="space-y-4 rounded-lg border border-border bg-midnight p-6">
           <p className="text-sm text-text-2">caesium <span className="text-cyan">❯</span> login</p>
+
+        {(noBinding || redirectDenied === "no_binding") && (
+          <p role="alert" className="m-0 text-[0.8rem] text-destructive">
+            {NO_BINDING_MESSAGE}
+          </p>
+        )}
 
         {redirectMethods.length > 0 && (
           <div className="flex flex-col gap-2">

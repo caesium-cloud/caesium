@@ -5,6 +5,8 @@ import type { ConnectorConnections, ConnectorListQuery, ConnectorPageQuery, Conn
 export interface Job {
   id: string;
   alias: string;
+  /** Tenancy namespace; absent from older servers. */
+  namespace?: string;
   trigger_id: string;
   labels: Record<string, unknown>;
   annotations: Record<string, unknown>;
@@ -29,6 +31,8 @@ export interface JobLastRun {
 export interface JobRun {
   id: string;
   job_id: string;
+  /** The run's persisted tenancy namespace; absent from older servers. */
+  namespace?: string;
   backfill_id?: string;
   job_alias?: string;
   trigger_type?: string;
@@ -77,6 +81,8 @@ export interface CallbackRun {
 export interface Backfill {
   id: string;
   job_id: string;
+  /** The backfill's persisted tenancy namespace; absent from older servers. */
+  namespace?: string;
   status: "running" | "succeeded" | "failed" | "cancelled";
   start: string;
   end: string;
@@ -1443,6 +1449,78 @@ export interface AllJobRunsResult {
   truncated: boolean;
 }
 
+/** A user as the administration API returns it (never carries credentials). */
+export interface AuthUser {
+  id: string;
+  issuer: string;
+  subject: string;
+  email: string;
+  email_verified: boolean;
+  display_name: string;
+  groups: string[];
+  last_login_role: string;
+  created_at: string;
+  last_login_at: string | null;
+  disabled_at: string | null;
+}
+
+export interface AuthUsersPage {
+  users: AuthUser[];
+  total: number | null;
+  nextOffset: number | null;
+}
+
+export const AUTH_USERS_PAGE_SIZE = 50;
+
+/** Body of POST /v1/auth/users/:id/{disable,enable}. */
+export interface AuthUserChange {
+  user: AuthUser;
+  changed: boolean;
+  sessions_revoked: number;
+}
+
+/** Body of POST /v1/auth/users/:id/sessions/revoke. */
+export interface AuthSessionsRevoked {
+  user_id: string;
+  sessions_revoked: number;
+}
+
+export interface AuthReloadAttempt {
+  at: string;
+  trigger: string;
+  ok: boolean;
+  changed: boolean;
+  revision?: string;
+  error?: string;
+}
+
+/** Body of GET /v1/auth/policy (cluster admin). Only the fields the Console reads. */
+export interface AuthPolicy {
+  source: string;
+  path?: string;
+  revision: string;
+  loaded_at: string;
+  warnings: string[];
+  last_reload: AuthReloadAttempt | null;
+}
+
+export interface AuthNamespace {
+  name: string;
+  kubernetes?: { namespace?: string; serviceAccountName?: string };
+  /** null means every secret is allowed. */
+  secrets: { allow: string[] } | null;
+  quotas?: { maxConcurrentRuns?: number };
+}
+
+/** Body of GET /v1/auth/namespaces (cluster viewer). */
+export interface AuthNamespaces {
+  source: string;
+  revision: string;
+  loaded_at: string;
+  last_reload: AuthReloadAttempt | null;
+  namespaces: AuthNamespace[];
+}
+
 export const api = {
   getConnectorOperations: (connectionId: string, executionId: string, params: ConnectorPageQuery = {}, signal?: AbortSignal) =>
     request<ConnectorOperationPage>(`/connectors/${encodeURIComponent(connectionId)}/executions/${encodeURIComponent(executionId)}/operations?${queryString({ ...params })}`, { signal }),
@@ -1674,6 +1752,30 @@ export const api = {
     }),
   pauseJob: (jobId: string) => request<Job>(`/jobs/${jobId}/pause`, { method: "PUT" }),
   unpauseJob: (jobId: string) => request<Job>(`/jobs/${jobId}/unpause`, { method: "PUT" }),
+  /** One page of users (cluster admin); pagination rides on response headers. */
+  getAuthUsers: async (offset = 0, limit = AUTH_USERS_PAGE_SIZE): Promise<AuthUsersPage> => {
+    const { data, headers } = await requestWithHeaders<AuthUser[]>(
+      `/auth/users?limit=${limit}&offset=${offset}`,
+    );
+    const total = Number(headers.get("X-Caesium-Total-Count"));
+    const next = headers.get("X-Caesium-Next-Offset");
+    const nextOffset = next !== null && next !== "" && Number.isFinite(Number(next)) ? Number(next) : null;
+    return {
+      users: Array.isArray(data) ? data : [],
+      total: Number.isFinite(total) && headers.get("X-Caesium-Total-Count") !== null ? total : null,
+      nextOffset,
+    };
+  },
+  disableAuthUser: (id: string) =>
+    request<AuthUserChange>(`/auth/users/${encodeURIComponent(id)}/disable`, { method: "POST" }),
+  enableAuthUser: (id: string) =>
+    request<AuthUserChange>(`/auth/users/${encodeURIComponent(id)}/enable`, { method: "POST" }),
+  revokeAuthUserSessions: (id: string) =>
+    request<AuthSessionsRevoked>(`/auth/users/${encodeURIComponent(id)}/sessions/revoke`, { method: "POST" }),
+  /** The effective access policy including bindings (cluster admin). */
+  getAuthPolicy: () => request<AuthPolicy>("/auth/policy"),
+  /** Declared namespaces and their settings, never bindings (cluster viewer). */
+  getAuthNamespaces: () => request<AuthNamespaces>("/auth/namespaces"),
   getTriggers: () => request<Trigger[]>("/triggers"),
   getTrigger: (id: string) => request<Trigger>(`/triggers/${id}`),
   createTrigger: (body: TriggerCreateRequest) =>

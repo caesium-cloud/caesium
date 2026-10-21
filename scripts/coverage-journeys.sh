@@ -1765,6 +1765,8 @@ PY
   # denials. The cookie-admin scenario rewrites a policy file, which this
   # server does not mount, so it runs on the agent lane only.
   auth_pattern="${auth_pattern%)}|TestAuthUserAdministrationLifecycle|TestAuthUserAdministrationDeniesNonClusterAdmins)"
+  # Declared namespaces for cluster viewers (GET /v1/auth/namespaces).
+  auth_pattern="${auth_pattern%)}|TestAuthNamespacesRoute)"
 
   local -a local_named_passes=(
     TestCaesiumWhyExplainsHitAndMiss
@@ -1810,6 +1812,7 @@ PY
     TestAuthPolicyShowAndReloadSurface
     TestAuthUserAdministrationLifecycle
     TestAuthUserAdministrationDeniesNonClusterAdmins
+    TestAuthNamespacesRoute
   )
   local -a distributed_named_passes=(
     TestNodeWorkersRoute

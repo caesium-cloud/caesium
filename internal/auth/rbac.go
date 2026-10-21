@@ -377,6 +377,8 @@ var endpointPolicy = map[string]RoutePolicy{
 	// The access policy itself (A4).
 	"GET /v1/auth/policy":         clusterRoute(admin),
 	"POST /v1/auth/policy/reload": clusterRoute(admin),
+	// Declared namespaces and their settings, never bindings (F3).
+	"GET /v1/auth/namespaces": clusterRoute(viewer),
 	// User and session administration (E3): cluster admins only.
 	"GET /v1/auth/users":                      clusterRoute(admin),
 	"GET /v1/auth/users/:id":                  clusterRoute(admin),

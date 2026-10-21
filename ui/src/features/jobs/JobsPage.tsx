@@ -12,7 +12,9 @@ import { EmptyState } from "@/components/ui/empty-state";
 import { RunStrip, RunStripAxis } from "@/components/ui/run-strip";
 import { IdChip } from "@/components/ui/id-chip";
 import { StatusBadge } from "@/components/ui/status-badge";
+import { canActIn, requiresRoleReason } from "@/features/auth/access";
 import { api, type Job, type JobRun } from "@/lib/api";
+import { usePrincipal } from "@/lib/auth";
 import { cn, formatUTCTimestamp } from "@/lib/utils";
 import { useJobsView, type ActivityEntry, type HistoryWindow, type JobCounts, type StatusFilter, type SortKey } from "./useJobsView";
 
@@ -23,6 +25,7 @@ export function JobsPage() {
 function JobsPageInner() {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
+  const principal = usePrincipal();
   const { rows, counts, search, setSearch, statusFilter, setStatusFilter, sort, setSort, historyWindow, setHistoryWindow, isLoading, error, activity } =
     useJobsView();
 
@@ -138,6 +141,8 @@ function JobsPageInner() {
               const lr = job.latest_run;
               const isRunning = lr?.status === "running";
               const isPaused = job.paused;
+              const mayTrigger = canActIn(principal, "runner", job.namespace);
+              const mayPause = canActIn(principal, "operator", job.namespace);
 
               return (
                 <div
@@ -207,8 +212,8 @@ function JobsPageInner() {
                       size="sm"
                       className="h-7 px-1.5 text-xs"
                       onClick={() => triggerMutation.mutate({ jobId: job.id })}
-                      disabled={triggerMutation.isPending || isPaused}
-                      title={isPaused ? "Unpause before triggering" : "Trigger run"}
+                      disabled={triggerMutation.isPending || isPaused || !mayTrigger}
+                      title={!mayTrigger ? requiresRoleReason("runner", job.namespace) : isPaused ? "Unpause before triggering" : "Trigger run"}
                       aria-label={isPaused ? "Unpause before triggering" : "Trigger run"}
                     >
                       trigger
@@ -220,8 +225,8 @@ function JobsPageInner() {
                       onClick={() =>
                         pauseMutation.mutate({ jobId: job.id, paused: !isPaused, hasActiveRun: isRunning })
                       }
-                      disabled={pauseMutation.isPending}
-                      title={isPaused ? "Unpause" : "Pause future runs"}
+                      disabled={pauseMutation.isPending || !mayPause}
+                      title={!mayPause ? requiresRoleReason("operator", job.namespace) : isPaused ? "Unpause" : "Pause future runs"}
                       aria-label={isPaused ? "Unpause job" : "Pause future runs"}
                     >
                       {isPaused ? "resume" : "pause"}

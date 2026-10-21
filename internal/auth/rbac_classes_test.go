@@ -133,6 +133,7 @@ var masterEndpointRoles = map[string]models.Role{
 var routesAddedAfterMaster = map[string]RoutePolicy{
 	"GET /v1/auth/policy":         {Role: models.RoleAdmin, Class: RouteClassCluster},
 	"POST /v1/auth/policy/reload": {Role: models.RoleAdmin, Class: RouteClassCluster},
+	"GET /v1/auth/namespaces":     {Role: models.RoleViewer, Class: RouteClassCluster},
 
 	"POST /v1/connectors/:id/executions/:id/queries/:id":  {Role: models.RoleViewer, Class: RouteClassCluster},
 	"POST /v1/connectors/:id/executions/:id/actions/:id":  {Role: models.RoleOperator, Class: RouteClassCluster},

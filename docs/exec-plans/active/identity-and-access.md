@@ -1029,13 +1029,14 @@ server-brokered `caesium login` flow that works for every provider.
 The UI is the corporate user's window into all of this; it only needs to read the new
 shapes. Owned separately from the Go streams so it can run on a lighter model.
 
-- [ ] F1. Grants-aware principal: `PrincipalState` gains `grants`, `namespaces`,
+- [x] F1. Grants-aware principal: `PrincipalState` gains `grants`, `namespaces`,
       `clusterRole`, `roleIn(ns)`; gating in `RunDetailPage` (replay), `HoldPanel`
       (release) and the job pages uses `roleIn(job.namespace)`; the login page shows
       the `no_binding` denial reason. Vitest on `roleIn` and the whoami parser.
       Files: `ui/src/lib/auth.ts`, `ui/src/features/auth/`, `ui/src/features/jobs/RunDetailPage.tsx`,
       `ui/src/features/datasets/HoldPanel.tsx`, `ui/src/lib/api.ts`.
       Depends on: A5.
+      (W5-ζ: shipped with a typed `ErrNoBinding` redirect/credential hand-off; every job action is gated by role and namespace.)
 - [ ] F2. Namespace switcher and chips: a header switcher fed by `namespaces` (hidden
       with one), selection persisted in `localStorage` as a view filter, list pages send
       `?namespace=`, job list and job detail show a namespace chip, the lineage graph
@@ -1046,13 +1047,14 @@ shapes. Owned separately from the Go streams so it can run on a lighter model.
       `ui/src/features/auth/NamespaceSwitcher.tsx`, `ui/src/features/jobs/`,
       `ui/src/features/jobs/LineageGraph.tsx`, `ui/src/lib/api.ts`, `ui/e2e/`.
       Depends on: F1 + B4 + B5.
-- [ ] F3. Access page at `/access`: my grants; declared namespaces and their settings
+- [x] F3. Access page at `/access`: my grants; declared namespaces and their settings
       (cluster viewer+); users list with disable / enable / log-out-everywhere (cluster
       admin); policy revision hash and last reload result. Sidebar entry. Playwright
       coverage lands with G2.
       Files: new `ui/src/features/access/AccessPage.tsx`, `ui/src/router.tsx`,
       `ui/src/components/layout/Sidebar.tsx`, `ui/src/lib/api.ts`.
       Depends on: F1 + A4 + E3.
+      (W5-ζ: shipped with `GET /v1/auth/namespaces` for cluster viewers; Playwright in the auth project.)
 - [ ] F4. Queue page shows "held by namespace quota" from `held_reason`.
       Files: `ui/src/features/jobs/` (queue view), `ui/src/lib/api.ts`.
       Depends on: D2 + F1.

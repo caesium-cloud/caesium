@@ -1,10 +1,44 @@
 import { type ApiError } from "@/lib/api";
 import type { PrincipalState } from "@/lib/auth";
+import { roleAtLeast, roleInNamespace, type PrincipalRole } from "@/lib/roles";
 
-/** Replay stays available without auth, while authenticated unknown roles fail closed. */
-export function canReplayRuns(principal: PrincipalState): boolean {
-  return principal.canRunner ||
-    (principal.role === null && principal.kind === null && principal.subject === null);
+function isAnonymous(principal: PrincipalState): boolean {
+  return principal.role === null && principal.kind === null && principal.subject === null;
+}
+
+/**
+ * Whether the principal holds at least `minimum` in every given namespace
+ * (UI convenience; the server stays the authority). Mirrors the server rule
+ * for a namespaced route: the role must hold in the job's namespace and, for a
+ * historical run/backfill mutation, in the persisted namespace too.
+ *
+ * - No namespace known yet (job still loading, older server): the cluster
+ *   role decides, so a confined principal sees fewer actions, never more.
+ * - Anonymous principal (authentication disabled): allowed, as before.
+ */
+export function canActIn(
+  principal: PrincipalState,
+  minimum: PrincipalRole,
+  ...namespaces: Array<string | null | undefined>
+): boolean {
+  if (isAnonymous(principal)) {
+    return true;
+  }
+  const known = namespaces.filter((ns): ns is string => typeof ns === "string" && ns !== "");
+  if (known.length === 0) {
+    return roleAtLeast(roleInNamespace(principal, null), minimum);
+  }
+  return known.every((ns) => roleAtLeast(roleInNamespace(principal, ns), minimum));
+}
+
+/** The tooltip for an action the principal's grants do not allow. */
+export function requiresRoleReason(minimum: PrincipalRole, namespace?: string | null): string {
+  return namespace ? `Requires ${minimum} role in ${namespace}` : `Requires ${minimum} role`;
+}
+
+/** Replay stays available without auth; a runner in the job's namespace may launch it. */
+export function canReplayRuns(principal: PrincipalState, namespace?: string | null): boolean {
+  return canActIn(principal, "runner", namespace);
 }
 
 /** Connector reads require an authenticated, unscoped cluster principal. */
