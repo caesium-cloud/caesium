@@ -766,7 +766,12 @@ func (i *Importer) findJobByAliasTx(tx *gorm.DB, alias string) (*models.Job, err
 }
 
 func (i *Importer) guardJobMutationTx(tx *gorm.DB, jobModel *models.Job, def *schema.Definition, opts *ApplyOptions) error {
-	// The allowlist runs first: Force must not bypass it, and a foreign-owned
+	// A job-scoped writer writes only the exact aliases its key names (the
+	// row jobModel was looked up by that same raw alias).
+	if refusal := aliasScopeRefusal(def.Metadata.Alias, def.Metadata.Namespace, opts.tenancyScope()); refusal != nil {
+		return refusal
+	}
+	// The allowlist runs next: Force must not bypass it, and a foreign-owned
 	// row in a foreign namespace is a namespace refusal, not a provenance one.
 	if opts != nil && opts.NamespaceAllowlist != nil {
 		reason := ""

@@ -111,7 +111,8 @@ func TestTenancyScopeAllows(t *testing.T) {
 	// A job-scoped key at "*" is confined by its aliases alone (B9 fold 1).
 	byAlias := NewTenancyScope(nil, []string{"a"})
 	require.NotNil(t, byAlias)
-	require.True(t, byAlias.Allows(" a ", "finance"))
+	require.True(t, byAlias.Allows("a", "finance"))
+	require.False(t, byAlias.Allows(" a ", "finance"), "a non-canonical alias is a different job (PR #668 review)")
 	require.False(t, byAlias.Allows("b", "default"))
 
 	none := NewTenancyScope([]string{}, nil)
@@ -474,6 +475,65 @@ func TestCheckJobCreateTx(t *testing.T) {
 	g := newTenancyFixture(t, true)
 	g.mustApply("taken", "finance", "/hooks/legacy")
 	require.ErrorIs(t, CheckJobCreateTx(g.db, "fresh", "marketing", "http", cfg, nil), ErrTriggerTenancy)
+}
+
+// nonCanonicalAliases are "payroll" with an ASCII or Unicode space around it:
+// the trimmed form a key scope names, but a distinct stored alias.
+var nonCanonicalAliases = []string{"payroll ", "payroll ", " payroll", " payroll"}
+
+// A job-scoped writer writes only the exact aliases its key names (PR #668
+// review): a non-canonical alias is refused inside the transaction on every
+// write path, nothing is written, and the exact alias still applies. Scoped
+// to "*" and namespace-confined alike; a writer without an alias scope is
+// unchanged.
+func TestJobScopedWriterNeedsExactAlias(t *testing.T) {
+	ctx := context.Background()
+	for name, namespaces := range map[string][]string{"key at *": nil, "namespace-confined": {"default"}} {
+		t.Run(name, func(t *testing.T) {
+			f := newTenancyFixture(t, false)
+			scope := NewTenancyScope(namespaces, []string{"payroll"})
+			opts := &ApplyOptions{NamespaceAllowlist: namespaces, JobAliasScope: []string{"payroll"}}
+			for _, alias := range nonCanonicalAliases {
+				def := f.def("payroll", "default", "")
+				def.Metadata.Alias = alias
+
+				_, err := f.importer.ApplyWithOptions(ctx, def, opts)
+				requireTenancyRefusal(t, err, NamespaceReasonAliasScope)
+				_, err = f.importer.ApplyConfinedBatch(ctx, []BatchPlan{{Def: def, Opts: opts}}, ConfinedBatchOptions{})
+				requireTenancyRefusal(t, err, NamespaceReasonAliasScope)
+				requireTenancyRefusal(t, CheckJobCreateTx(f.db, alias, "default", "cron", nil, scope), NamespaceReasonAliasScope)
+				require.False(t, f.jobExists(alias), "no job %q was written", alias)
+
+				denial, _ := WriteRefusal(err, scope)
+				require.NotNil(t, denial)
+				require.Equal(t, "insufficient_scope", denial.Reason)
+				require.Equal(t, "insufficient permissions", denial.Message)
+				require.False(t, scope.Allows(alias, "default"), "a stored %q is outside the scope", alias)
+			}
+			require.NoError(t, CheckJobCreateTx(f.db, "payroll", "default", "cron", nil, scope))
+			_, err := f.importer.ApplyConfinedBatch(ctx, []BatchPlan{{Def: f.def("payroll", "default", ""), Opts: opts}}, ConfinedBatchOptions{})
+			require.NoError(t, err)
+			require.True(t, f.jobExists("payroll"))
+
+			// The legacy create's stored-row lookup is by the raw alias.
+			if namespaces != nil {
+				taken := f.def("taken", "finance", "")
+				taken.Metadata.Alias = "taken "
+				_, err := f.importer.ApplyWithOptions(ctx, taken, nil)
+				require.NoError(t, err)
+				require.NoError(t, CheckJobCreateTx(f.db, "taken", "default", "cron", nil, NewTenancyScope(namespaces, nil)), "a different stored alias")
+				requireTenancyRefusal(t, CheckJobCreateTx(f.db, "taken ", "default", "cron", nil, NewTenancyScope(namespaces, nil)), NamespaceReasonStored)
+			}
+		})
+	}
+
+	// Without an alias scope nothing changes (no policy file: no check at all).
+	f := newTenancyFixture(t, false)
+	def := f.def("payroll", "default", "")
+	def.Metadata.Alias = "payroll "
+	_, err := f.importer.ApplyWithOptions(ctx, def, nil)
+	require.NoError(t, err)
+	require.NoError(t, CheckJobCreateTx(f.db, "other ", "default", "cron", nil, nil))
 }
 
 func TestCheckTriggerPatchTx(t *testing.T) {

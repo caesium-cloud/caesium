@@ -48,6 +48,9 @@ var ErrTriggerTenancy = errors.New("trigger tenancy conflict")
 const (
 	NamespaceReasonTriggerShared = "trigger_serves_job_outside_scope"
 	NamespaceReasonWebhookPath   = "webhook_path_subscribed_outside_scope"
+	// NamespaceReasonAliasScope: a job-scoped writer's alias is not exactly
+	// an element of its key's alias scope.
+	NamespaceReasonAliasScope = "alias_outside_key_scope"
 )
 
 // TenancyScope confines a write (or, for a manifest export, a read) to
@@ -68,7 +71,10 @@ func NewTenancyScope(namespaces, jobAliases []string) *TenancyScope {
 	return &TenancyScope{Namespaces: slices.Clone(namespaces), JobAliases: slices.Clone(jobAliases)}
 }
 
-// Allows reports whether the job alias in namespace is inside the scope.
+// Allows reports whether the job alias in namespace is inside the scope. The
+// alias must be an exact element of the key's alias scope (scope entries are
+// stored trimmed): a stored alias with surrounding whitespace is a distinct
+// job, never the scoped one.
 func (s *TenancyScope) Allows(alias, namespace string) bool {
 	if s == nil {
 		return true
@@ -76,10 +82,28 @@ func (s *TenancyScope) Allows(alias, namespace string) bool {
 	if s.Namespaces != nil && !slices.Contains(s.Namespaces, models.NamespaceOrDefault(strings.TrimSpace(namespace))) {
 		return false
 	}
-	if s.JobAliases != nil && !slices.Contains(s.JobAliases, strings.TrimSpace(alias)) {
+	if s.JobAliases != nil && !slices.Contains(s.JobAliases, alias) {
 		return false
 	}
 	return true
+}
+
+// aliasScopeRefusal refuses a job-scoped writer's write of alias unless the
+// alias exactly as it will be stored is canonical (no leading or trailing
+// whitespace, Unicode spaces included) and an element of the key's alias
+// scope. The route middleware and the key-scope check compare trimmed
+// aliases, while the importer and the legacy create store the raw string, so
+// without this a key scoped to "payroll" could create "payroll " (PR #668
+// review). nil for a writer without an alias scope.
+func aliasScopeRefusal(alias, namespace string, scope *TenancyScope) *NamespaceAllowlistError {
+	if scope == nil || scope.JobAliases == nil {
+		return nil
+	}
+	if alias == strings.TrimSpace(alias) && slices.Contains(scope.JobAliases, alias) {
+		return nil
+	}
+	return &NamespaceAllowlistError{Alias: alias, RequestedNamespace: models.NamespaceOrDefault(namespace),
+		Allowed: slices.Clone(scope.Namespaces), Reason: NamespaceReasonAliasScope}
 }
 
 // TriggerTenancyError is a rule-2 violation: the write would leave a webhook
@@ -311,6 +335,9 @@ func checkApplyTenancyTx(tx *gorm.DB, existing *models.Job, def *schema.Definiti
 	if scope == nil && !enforce {
 		return tenancyVerdict{}, nil
 	}
+	if refusal := aliasScopeRefusal(def.Metadata.Alias, def.Metadata.Namespace, scope); refusal != nil {
+		return tenancyVerdict{}, refusal
+	}
 	target := tenancyTarget{
 		Alias:     strings.TrimSpace(def.Metadata.Alias),
 		Namespace: models.NamespaceOrDefault(def.Metadata.Namespace),
@@ -373,15 +400,20 @@ func CheckJobCreateTx(tx *gorm.DB, alias, namespace, triggerType string, configu
 	if scope == nil && !enforce {
 		return nil
 	}
+	if refusal := aliasScopeRefusal(alias, namespace, scope); refusal != nil {
+		return refusal
+	}
 	target := tenancyTarget{
 		Alias:     strings.TrimSpace(alias),
 		Namespace: models.NamespaceOrDefault(namespace),
 		Path:      ProposedWebhookPath(triggerType, configuration),
 	}
 	if scope != nil && scope.Namespaces != nil {
+		// The row the create will collide with is the one with exactly the
+		// alias it stores.
 		var rows []models.Job
 		if err := lockJobRows(tx).Unscoped().Model(&models.Job{}).Select("id", "alias", "namespace").
-			Where("alias = ?", target.Alias).Find(&rows).Error; err != nil {
+			Where("alias = ?", alias).Find(&rows).Error; err != nil {
 			return err
 		}
 		for _, row := range rows {
@@ -677,6 +709,10 @@ func namespaceDenial(e *NamespaceAllowlistError) *authz.Denial {
 			Message: fmt.Sprintf("insufficient permissions: %s required in namespace %q", models.RoleOperator, namespace)}
 	case NamespaceReasonWebhookPath:
 		return tenancyDenial(e.RequestedNamespace, fmt.Sprintf("insufficient permissions: webhook path %q is subscribed by a job outside your access", e.WebhookPath))
+	case NamespaceReasonAliasScope:
+		// The key-scope gate's own refusal, audited the same way.
+		return &authz.Denial{Reason: "insufficient_scope", Required: models.RoleOperator,
+			Namespaces: []string{e.RequestedNamespace}, Message: "insufficient permissions"}
 	default:
 		message := "insufficient permissions"
 		if e.Alias != "" {

@@ -128,7 +128,14 @@ func (s *readScope) allows(namespace string) bool {
 // readable reports whether the caller may read the job alias in namespace:
 // the namespace is readable and the alias is inside the key's scope.
 func (s *readScope) readable(alias, namespace string) bool {
-	return s.allows(namespace) && (s.aliases == nil || slices.Contains(s.aliases, strings.TrimSpace(alias)))
+	return s.allows(namespace) && s.aliasInKeyScope(alias)
+}
+
+// aliasInKeyScope reports whether alias, exactly as given, is inside the
+// key's alias scope (always, for an unscoped key). An alias with surrounding
+// whitespace names a distinct job, never the scoped one.
+func (s *readScope) aliasInKeyScope(alias string) bool {
+	return s.aliases == nil || (alias == strings.TrimSpace(alias) && slices.Contains(s.aliases, alias))
 }
 
 // baselineContext restricts the diff baseline (internal/jobdef/diff
@@ -208,6 +215,9 @@ func (s *readScope) resolve(ctx context.Context, aliases []string) {
 }
 
 func (s *readScope) aliasVisible(ctx context.Context, alias string) bool {
+	if s.aliases != nil && alias != strings.TrimSpace(alias) {
+		return false
+	}
 	s.resolve(ctx, []string{alias})
 	return s.visible[strings.TrimSpace(alias)]
 }
@@ -271,6 +281,10 @@ func (s *readScope) findingVisible(ctx context.Context, finding internalcontract
 	}
 	producer, consumer := strings.TrimSpace(finding.Producer), strings.TrimSpace(finding.Consumer)
 	if producer == "" || consumer == "" {
+		return false
+	}
+	if s.aliases != nil && (producer != finding.Producer || consumer != finding.Consumer) {
+		// Not the trimmed alias a key scope names (see aliasInKeyScope).
 		return false
 	}
 	s.resolve(ctx, []string{producer, consumer})

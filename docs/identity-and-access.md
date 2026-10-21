@@ -619,7 +619,9 @@ is unrestricted and writes no such row.
 
 A principal confined to some namespaces, and a job-scoped API key (even one
 holding its role at `*`), can create, apply, move and prune jobs only within
-its reach:
+its reach. A job-scoped key writes only the exact aliases its scope lists (an
+alias with leading or trailing whitespace, Unicode spaces included, is a
+different job and is refused with 403). In detail:
 
 - **Apply** (`caesium job apply`, `POST /v1/jobdefs/apply`) needs operator in
   every definition's namespace and in the stored namespace of every alias it

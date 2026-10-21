@@ -308,7 +308,49 @@ func (s *IntegrationTestSuite) TestAuthJobdefApplyRepairsLegacySharedTrigger() {
 	}
 }
 
-// TestAuthTriggerTenancyWebhookPathRace:a marketing and a finance operator
+// TestAuthJobScopedKeyRefusesNonCanonicalAlias: a key scoped to one alias
+// cannot apply or legacy-create that alias with an ASCII or Unicode space
+// around it (a distinct stored job the trimming key-scope check would take
+// for its own) through either route: 403, and no job is created (PR #668
+// review). The exact alias still applies.
+func (s *IntegrationTestSuite) TestAuthJobScopedKeyRefusesNonCanonicalAlias() {
+	s.requireAuthLane()
+	stamp := time.Now().UnixNano()
+	alias := fmt.Sprintf("b9-exact-%d", stamp)
+	variants := []string{alias + " ", alias + " ", " " + alias}
+	s.b9Cleanup(append([]string{alias}, variants...)...)
+	scoped := s.createAPIKeyCLI("--role", "operator", "--scope-jobs", alias, "--description", fmt.Sprintf("b9 exact alias %d", stamp))
+	s.T().Cleanup(func() {
+		_, _ = s.runCLIStdout("auth", "key", "revoke", "--id", scoped.Meta.ID, "--server", s.caesiumURL)
+	})
+	legacyBody := func(alias string) string {
+		payload, err := json.Marshal(map[string]any{
+			"alias":   alias,
+			"trigger": map[string]any{"alias": fmt.Sprintf("b9-exact-trigger-%d", stamp), "type": "cron", "configuration": map[string]any{"expression": "0 0 1 1 *"}},
+			"tasks":   []any{map[string]any{"atom": map[string]any{"engine": s.engineOrDocker(), "image": "busybox:1.36.1", "command": []string{"true"}}}},
+		})
+		s.Require().NoError(err)
+		return string(payload)
+	}
+
+	for _, variant := range variants {
+		def := s.b9Def(alias, "default", "")
+		def.Metadata.Alias = variant
+		status, body := s.b9Apply(scoped.Plaintext, false, def)
+		s.Equal(http.StatusForbidden, status, "apply %q: %s", variant, body)
+		s.Contains(body, "insufficient permissions")
+		status, body = s.nsRequest(http.MethodPost, "/v1/jobs", scoped.Plaintext, legacyBody(variant), nil)
+		s.Equal(http.StatusForbidden, status, "legacy create %q: %s", variant, body)
+		s.Nil(s.b9Job(variant), "no job %q was created", variant)
+	}
+	s.Nil(s.b9Job(alias))
+
+	status, body := s.b9Apply(scoped.Plaintext, false, s.b9Def(alias, "default", ""))
+	s.Require().Equal(http.StatusOK, status, body)
+	s.NotNil(s.b9Job(alias), "the exact alias applies")
+}
+
+// TestAuthTriggerTenancyWebhookPathRace: a marketing and a finance operator
 // race to subscribe one new webhook path; exactly one wins and the other gets
 // a clean, non-disclosing refusal.
 func (s *IntegrationTestSuite) TestAuthTriggerTenancyWebhookPathRace() {

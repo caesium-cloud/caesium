@@ -281,6 +281,45 @@ func TestReadScopeHonoursKeyJobScope(t *testing.T) {
 	require.False(t, nothing.aliasVisible(ctx, "mkt-other"), "an empty scope reads nothing")
 }
 
+// A job-scoped key applies only the exact aliases its key names (PR #668
+// review): the middleware's scope check trims, the importer stores the raw
+// alias, so "payroll " (ASCII or Unicode space) is refused in the
+// transaction as the key-scope gate would refuse it, and nothing is written.
+func TestApplyJobScopedKeyRefusesNonCanonicalAlias(t *testing.T) {
+	conn := freshCatalog(t)
+	for name, grants := range map[string]policy.Grants{
+		"key at *":           {"*": models.RoleOperator},
+		"namespace-confined": {"default": models.RoleOperator},
+	} {
+		t.Run(name, func(t *testing.T) {
+			scoped := confined(grants)
+			scoped.Scope = []byte(`{"jobs":["payroll"]}`)
+			for _, alias := range []string{"payroll ", "payroll ", " payroll"} {
+				def := scopeDefinition("payroll", "default")
+				def.Metadata.Alias = alias
+				_, _, err := callApply(t, scoped, applyBody(false, def))
+				denial := requireDenial(t, err)
+				require.Equal(t, "insufficient_scope", denial.Reason)
+				require.Equal(t, "insufficient permissions", denial.Message)
+				_, exists := jobRow(t, conn, alias)
+				require.False(t, exists, "no job %q was written", alias)
+			}
+		})
+	}
+	scoped := clusterOperator()
+	scoped.Scope = []byte(`{"jobs":["payroll"]}`)
+	status, _, err := callApply(t, scoped, applyBody(false, scopeDefinition("payroll", "default")))
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, status)
+
+	// A key-scoped reader never sees a stored non-canonical alias as its own.
+	view := newReadScopeForKey(nil, []string{"payroll"}, conn, nil)
+	ctx := context.Background()
+	require.True(t, view.aliasVisible(ctx, "payroll"))
+	require.False(t, view.aliasVisible(ctx, "payroll "))
+	require.False(t, view.findingVisible(ctx, internalcontract.ContractFinding{Producer: "payroll", Consumer: "payroll ", EdgeClass: string(internalcontract.EdgeClassDeclared)}))
+}
+
 // Apply's validator errors for a job-scoped key name neither an out-of-scope
 // job nor its dataset (B9 fold 6), at "*" and namespace-confined.
 func TestApplyJobScopedKeyValidatorErrorNamesNoOutOfScopeJob(t *testing.T) {
