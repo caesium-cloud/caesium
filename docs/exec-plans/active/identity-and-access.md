@@ -640,11 +640,11 @@ fan-outs were used.
   - No PostgreSQL server lane: quota enqueue→promotion on PostgreSQL has unit coverage only.
   - Persist callback intent when recovery finalizes a committed run, so callbacks survive a
     persistent read-back failure (D follow-up; residual accepted on #672).
-- **Next wave (W6 candidates):** the plan's suggested-waves table is out of date (it
-  predates the W3 to W5 re-slicing). Unblocked now: B7 (after B9), B5, B6, A8, C1, C5, A6
-  (A7 after it), E1b, E2 (E1 and E4 merged), E5 (E4 merged), F4 (D2 merged), F2 (after
-  B5), and G3 once E2 lands. Confirm each item's `Depends
-  on` at dispatch.
+- **Next waves:** the plan's suggested-waves table is out of date (it predates the W3 to
+  W5 re-slicing). W6 is dispatched with B7, B5, B6, A8 + A6, C1 + C5 and E5. W7: E1b, E2,
+  C2 (after C1), F2 + F4 (F2 after B5), A7 (after B5, B6 and A8) and G4 (after E5). W8: G3
+  (after E2), C3 (after C2), G2 (after F2) and N-2. Confirm each item's `Depends on` at
+  dispatch.
 
 ### Stream Status
 
