@@ -102,8 +102,8 @@ on the identity routes (`GET /auth/whoami`, `POST /auth/logout`,
 `GET /v1/system/features`; `whoami` reports an empty role) and refused
 elsewhere. A session ends at logout, at its idle or absolute TTL, or when a
 cluster admin revokes it: `caesium auth user logout USER_ID` revokes one user's
-sessions and `caesium auth user disable USER_ID` also blocks the user's next
-login (see [User administration](#user-administration)). There is no single
+sessions (and [user-bound keys](#user-bound-keys)) and
+`caesium auth user disable USER_ID` also blocks the user's next login (see [User administration](#user-administration)). There is no single
 "revoke every session" call; removing a user's bindings from the policy file
 also cuts them off at once (grants are resolved on every request).
 
@@ -129,6 +129,7 @@ IP addresses or CIDR ranges; invalid entries fail the auth startup TLS guard.
 | `CAESIUM_AUTH_SESSION_COOKIE_NAME` | `caesium_session` | Browser session cookie name for SSO callbacks, `/auth/whoami`, and logout. |
 | `CAESIUM_AUTH_SESSION_IDLE_TTL` | `8h` | Sliding idle timeout refreshed by valid session use. |
 | `CAESIUM_AUTH_SESSION_ABSOLUTE_TTL` | `24h` | Hard session expiry. |
+| `CAESIUM_AUTH_CLI_KEY_TTL` | `12h` | Lifetime of a [user-bound API key](#user-bound-keys); must be above 0 and at most `168h` (7 days), or the server refuses to start. |
 | `CAESIUM_TRUSTED_PROXIES` | empty | Comma-separated trusted proxy IPs/CIDRs for forwarded-proto handling. |
 
 ### Browser Auth Endpoint Contract
@@ -881,6 +882,46 @@ namespaces are no longer all declared in the policy file (`409`); revoke it and
 create a new one. A key whose stored namespaces are unreadable grants nothing;
 only a cluster admin can revoke it, and it cannot be rotated.
 
+### User-bound keys
+
+A user-bound key (`csk_user_…`) belongs to an SSO user instead of holding a
+role of its own; it is the credential `caesium login` (E5, below) will store.
+It stores no role, namespaces or job list. On every request the server loads
+its user and resolves the user's grants from the policy exactly as for that
+user's browser session, so a policy reload or a change of the user's stored
+groups applies on the next request. Until E2 refreshes groups during a
+session, those are the groups stored at the user's last login, and only a
+verified email matches a `users:` binding. The principal is the user:
+`GET /auth/whoami` reports `kind` `user`, the user's email as `subject` and the
+user id as `stable_id`, and audit rows name the user's email as the actor. A
+user whose groups match no binding is refused (`403`) on every route but the
+identity routes, as a grant-less session is.
+
+Every user-bound key expires `CAESIUM_AUTH_CLI_KEY_TTL` (default `12h`, at most
+7 days) after it is minted. It stops working when:
+
+- it expires;
+- a cluster admin revokes it (`caesium auth key revoke --id ID`). It is a
+  cluster-only target: a namespace admin can neither revoke nor list it;
+- its user is disabled (`caesium auth user disable`), in the same transaction
+  as the user's sessions; enabling the user again does not revive it;
+- its user is logged out everywhere (`caesium auth user logout`). This revokes
+  the user's user-bound keys as well as its sessions, since both are the
+  user's sign-in credentials (the design's §11.2 table names only sessions for
+  this route);
+- its user is disabled by any means, even if the key itself was left unrevoked.
+
+A refused user-bound key gets the same `401` as a revoked key whatever the
+reason (the `auth.denied` row and the failure metric say `user_disabled` when
+its user is disabled). It cannot be rotated (`409`): signing in again mints a
+new one. `GET /v1/auth/keys` lists user-bound keys only to a cluster admin,
+with their `user_id` and an empty `role`; `GET /v1/auth/users/:id` lists a
+user's active ones.
+
+No route mints a user-bound key yet, and `POST /auth/logout` does not revoke
+one: E5's `caesium login` will mint them, and E5 makes `POST /auth/logout`
+with a user-bound key revoke exactly that key.
+
 **Planned (E5):** `caesium login`, `caesium logout` and `caesium whoami` for
 interactive CLI sign-in through the server's configured provider.
 
@@ -898,15 +939,16 @@ auth endpoint contract](#browser-auth-endpoint-contract).
 
 Each OIDC login stores the IdP refresh token as a sealed refresh grant (see
 [OIDC](#oidc)); LDAP and SAML logins store none, and nothing redeems the grant
-yet. **Planned (E2):** refreshing OIDC users' groups during a session, so group
-changes apply without a new login. **Planned (E1b):** the same for LDAP, with a
+yet. **Planned (E2):** refreshing OIDC users' groups during a session (and
+behind a user-bound key), so group changes apply without a new login. **Planned (E1b):** the same for LDAP, with a
 live LDAP coverage journey.
 
 ### User administration
 
 A cluster admin (admin at `*`; a namespace-confined admin is refused with 403)
-can list users, see their active sessions, disable and re-enable them, and log
-them out everywhere. The routes are mounted only when authentication is on
+can list users, see their active sessions and [user-bound
+keys](#user-bound-keys), disable and re-enable them, and log them out
+everywhere. The routes are mounted only when authentication is on
 (with `CAESIUM_AUTH_MODE=none` they answer 404, or 405 for the POST routes).
 Users appear after their first SSO
 login; Caesium never creates them otherwise.
@@ -914,10 +956,10 @@ login; Caesium never creates them otherwise.
 | Route | Behaviour |
 | --- | --- |
 | `GET /v1/auth/users?issuer=&email=&disabled=&limit=&offset=` | Users, newest first. `issuer` matches exactly, `email` is a case-insensitive substring (SQLite and dqlite fold only ASCII letters), `disabled` is `true` or `false`. |
-| `GET /v1/auth/users/:id` | One user plus its 100 newest active sessions and `sessions_total`. |
-| `POST /v1/auth/users/:id/disable` | Disables the user. In the same transaction it revokes every session of the user and clears the stored refresh grant. |
-| `POST /v1/auth/users/:id/enable` | Re-enables the user. Revoked sessions stay revoked; the user signs in again. |
-| `POST /v1/auth/users/:id/sessions/revoke` | Revokes every session of the user ("log out everywhere") without disabling it. |
+| `GET /v1/auth/users/:id` | One user plus its 100 newest active sessions and `sessions_total`, and its 100 newest active user-bound keys and `user_keys_total`. |
+| `POST /v1/auth/users/:id/disable` | Disables the user. In the same transaction it revokes every session and user-bound key of the user and clears the stored refresh grant. |
+| `POST /v1/auth/users/:id/enable` | Re-enables the user. Revoked sessions and keys stay revoked; the user signs in again. |
+| `POST /v1/auth/users/:id/sessions/revoke` | Revokes every session and user-bound key of the user ("log out everywhere") without disabling it. |
 | `GET /v1/auth/sessions?user_id=&limit=&offset=` | Active sessions, newest first; without `user_id`, every user's. |
 
 - **Lists** return a bare JSON array. `X-Caesium-Total-Count` carries the total
@@ -938,16 +980,21 @@ login; Caesium never creates them otherwise.
   SSO is enabled); activity buffered on another node shows once it is written.
   Revocation does not depend on this: it revokes every unrevoked session of the
   user.
-- **Disable and enable** answer `{"user", "changed", "sessions_revoked"}`.
+- **A user-bound key** is `{"id", "key_prefix", "description", "created_at",
+  "expires_at", "last_used_at"}`; never its hash. It is active while it is
+  unrevoked and unexpired. `last_used_at` is written every 30 seconds, so it can
+  lag. `caesium auth key list` shows all of a user's keys, revoked ones too.
+- **Disable and enable** answer `{"user", "changed", "sessions_revoked"}`, plus
+  `keys_revoked` when the call revoked user-bound keys.
   Repeating either is a 200 with `"changed": false` and changes nothing. After a
-  disable the user's next request on any session is a 401, and a login is
+  disable the user's next request on any session or user-bound key is a 401, and a login is
   refused with `auth.login_denied` reason `user_disabled`. A login already in
   flight when the user is disabled cannot create a session afterwards, even if
   the user is re-enabled before it finishes (it is refused with reason
   `user_changed`; the user signs in again). An admin cannot disable the user
   behind its own request (409).
-- **Revoke** answers `{"user_id", "sessions_revoked"}`. An admin may revoke its
-  own sessions.
+- **Revoke** answers `{"user_id", "sessions_revoked"}`, plus `keys_revoked`
+  when it revoked user-bound keys. An admin may revoke its own sessions.
 
 CLI (`--server` defaults to `http://localhost:8080`; the key comes from
 `CAESIUM_API_KEY` or `--api-key`; `--json` prints the response on stdout and
@@ -956,8 +1003,8 @@ nothing else; errors go to stderr and exit 1):
 - `caesium auth user list [--issuer ISSUER] [--email TEXT] [--disabled true|false] [--limit N] [--offset N] [--json]`
   prints a table by default. When there is another page it prints
   `N users in total; next page: --offset M` to stderr.
-- `caesium auth user get USER_ID [--json]` prints the user and its newest
-  active sessions.
+- `caesium auth user get USER_ID [--json]` prints the user, its newest active
+  sessions and its newest active user-bound keys.
 - `caesium auth user disable USER_ID [--json]`,
   `caesium auth user enable USER_ID [--json]` and
   `caesium auth user logout USER_ID [--json]` print a one-line summary.
@@ -978,11 +1025,14 @@ disable is denied with reason `user_changed`.
 User administration writes, with `actor` the caller (API key prefix or user
 email), `resource_type` `user`, `resource_id` the user id and namespace `*`:
 
-- `user.disable` (`metadata.sessions_revoked`) and `user.enable`, only when the
-  call changed the user (a repeat writes nothing);
+- `user.disable` (`metadata.sessions_revoked`, plus `metadata.keys_revoked`
+  when user-bound keys were revoked) and `user.enable`, only when the call
+  changed the user (a repeat writes nothing);
 - `auth.sessions_revoked` with `metadata.reason` (`user_disabled`, `admin` for
   `caesium auth user logout`, or `user_enabled` when an enable revoked a stray
-  session) and `metadata.count`, only when at least one session was revoked.
+  session or key), `metadata.count` (sessions) and, when user-bound keys were
+  revoked, `metadata.keys_revoked`; only when at least one session or key was
+  revoked.
 
 Prometheus exposes SSO counters and timing:
 

@@ -74,3 +74,59 @@ func TestAPIKeyNamespacesNullRoundTrip(t *testing.T) {
 	require.NoError(t, db.First(&got, "id = ?", key.ID).Error)
 	require.JSONEq(t, `["marketing"]`, string(got.Namespaces))
 }
+
+// preUserBoundAPIKey is api_keys as it was before user-bound keys (E4).
+type preUserBoundAPIKey struct {
+	ID            uuid.UUID      `gorm:"type:uuid;primaryKey"`
+	KeyPrefix     string         `gorm:"type:text;size:12;not null;index"`
+	KeyHash       string         `gorm:"type:text;not null;uniqueIndex"`
+	BootstrapSlot *string        `gorm:"type:text;uniqueIndex"`
+	Description   string         `gorm:"type:text"`
+	Role          Role           `gorm:"type:text;not null"`
+	Scope         datatypes.JSON `gorm:"type:json"`
+	Namespaces    datatypes.JSON `gorm:"type:json"`
+	CreatedBy     string         `gorm:"type:text"`
+	CreatedAt     time.Time      `gorm:"not null"`
+	ExpiresAt     *time.Time
+	LastUsedAt    *time.Time
+	RevokedAt     *time.Time
+}
+
+func (preUserBoundAPIKey) TableName() string { return "api_keys" }
+
+// TestAPIKeyTableGainsNullableUserID: the E4 column is added to an existing
+// table as nullable with no default and an index, existing keys read NULL
+// (plain keys), and the migration is idempotent.
+func TestAPIKeyTableGainsNullableUserID(t *testing.T) {
+	db := openEmptyModelTestDB(t)
+	require.NoError(t, db.AutoMigrate(&preUserBoundAPIKey{}))
+	legacy := preUserBoundAPIKey{ID: uuid.New(), KeyPrefix: "csk_live_old", KeyHash: "old-hash", Role: RoleAdmin, CreatedAt: time.Now().UTC()}
+	require.NoError(t, db.Create(&legacy).Error)
+	require.False(t, db.Migrator().HasColumn(&APIKey{}, "user_id"))
+	for range 2 {
+		require.NoError(t, db.AutoMigrate(&APIKey{}))
+	}
+	require.True(t, db.Migrator().HasColumn(&APIKey{}, "user_id"))
+	require.True(t, db.Migrator().HasIndex(&APIKey{}, "UserID"))
+
+	var nulls int64
+	require.NoError(t, db.Raw("SELECT COUNT(*) FROM api_keys WHERE user_id IS NULL").Scan(&nulls).Error)
+	require.Equal(t, int64(1), nulls, "existing keys stay NULL rather than gain a default")
+	columnTypes, err := db.Migrator().ColumnTypes(&APIKey{})
+	require.NoError(t, err)
+	for _, ct := range columnTypes {
+		if ct.Name() != "user_id" {
+			continue
+		}
+		if nullable, ok := ct.Nullable(); ok {
+			require.True(t, nullable)
+		}
+		_, hasDefault := ct.DefaultValue()
+		require.False(t, hasDefault)
+	}
+	var got APIKey
+	require.NoError(t, db.First(&got, "id = ?", legacy.ID).Error)
+	require.Nil(t, got.UserID)
+	require.False(t, got.IsUserBound())
+	require.Equal(t, RoleAdmin, got.Role)
+}

@@ -107,7 +107,7 @@ func openRefreshPostgres(t *testing.T, dsn string) *gorm.DB {
 	var current string
 	require.NoError(t, db.Raw("SELECT current_schema()").Scan(&current).Error)
 	require.Equal(t, schema, current)
-	require.NoError(t, db.AutoMigrate(&models.User{}, &models.Session{}, &models.AuditLog{}))
+	require.NoError(t, db.AutoMigrate(&models.User{}, &models.Session{}, &models.AuditLog{}, &models.APIKey{}))
 	return db
 }
 

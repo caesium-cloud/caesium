@@ -282,7 +282,7 @@ func TestUserAdminRevokeUserSessions(t *testing.T) {
 
 	revoked, err := admin.RevokeUserSessions(t.Context(), user.ID)
 	require.NoError(t, err)
-	require.Equal(t, int64(2), revoked)
+	require.Equal(t, RevokedCredentials{Sessions: 2}, revoked)
 	revoked, err = admin.RevokeUserSessions(t.Context(), user.ID)
 	require.NoError(t, err)
 	require.Zero(t, revoked)

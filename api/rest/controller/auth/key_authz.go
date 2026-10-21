@@ -94,3 +94,16 @@ func keyAuditMetadata(metadata map[string]any, key *models.APIKey) map[string]an
 	metadata["namespaces"] = namespaces
 	return metadata
 }
+
+// userKeyAuditMetadata names the user a user-bound key belongs to (E4). A
+// plain key's metadata is unchanged.
+func userKeyAuditMetadata(metadata map[string]any, key *models.APIKey) map[string]any {
+	if !key.IsUserBound() {
+		return metadata
+	}
+	if metadata == nil {
+		metadata = map[string]any{}
+	}
+	metadata["user_id"] = key.UserID.String()
+	return metadata
+}

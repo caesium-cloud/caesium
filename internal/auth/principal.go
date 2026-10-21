@@ -18,14 +18,23 @@ const (
 )
 
 // Principal is the unified authenticated identity used by RBAC, scope checks,
-// and audit. It is produced from either an API key or a user session.
+// and audit. It is produced from an API key, a user session, or a user-bound
+// API key.
 type Principal struct {
 	Kind    PrincipalKind
 	Grants  policy.Grants // namespace -> role; "*" is cluster-wide. Constructors never leave it nil.
 	Scope   []byte        // raw KeyScope JSON; nil/empty == unrestricted.
 	Subject string        // audit actor: key prefix or user email.
 	UserID  *uuid.UUID
-	KeyID   *uuid.UUID
+	// KeyID is the plain API key behind an api_key principal; nil for user
+	// principals, including those authenticated by a user-bound key.
+	KeyID *uuid.UUID
+	// UserKeyID is the user-bound key that authenticated a user principal
+	// (E4); nil for sessions and plain keys. It is deliberately not KeyID:
+	// connector reads and replay idempotency derive the principal's identity
+	// from KeyID before UserID, so setting KeyID would make the same user a
+	// different actor from the CLI than from the Console.
+	UserKeyID *uuid.UUID
 }
 
 // RoleIn returns the principal's effective role in namespace ns.
@@ -55,7 +64,8 @@ func (p *Principal) AllowedNamespaces() []string {
 
 // PrincipalFromKey builds a Principal from a validated API key. A key with SQL
 // NULL namespaces holds its role cluster-wide; any other unusable namespaces
-// value grants nothing.
+// value grants nothing. A user-bound key grants nothing here: its grants are
+// the user's, resolved by PrincipalFromUserKey (Service.AuthenticateKey).
 func PrincipalFromKey(k *models.APIKey) *Principal {
 	id := k.ID
 	return &Principal{
@@ -68,6 +78,11 @@ func PrincipalFromKey(k *models.APIKey) *Principal {
 }
 
 func keyGrants(k *models.APIKey) policy.Grants {
+	if k.IsUserBound() {
+		// Its stored role and namespaces are never a grant (a user-bound row
+		// stores none; NULL namespaces would otherwise read as "*").
+		return policy.Grants{}
+	}
 	if len(k.Namespaces) == 0 {
 		return policy.Grants{policy.ClusterNamespace: k.Role}
 	}
@@ -98,6 +113,17 @@ func PrincipalFromUser(u *models.User, src policy.Source) *Principal {
 		Subject: u.Email,
 		UserID:  &id,
 	}
+}
+
+// PrincipalFromUserKey builds the principal of a validated user-bound key: the
+// key's user exactly as PrincipalFromUser resolves it for a session (grants
+// from the stored groups and verified email, Subject = email), plus the key in
+// UserKeyID. The key's own role, namespaces and scope are never consulted.
+func PrincipalFromUserKey(k *models.APIKey, u *models.User, src policy.Source) *Principal {
+	p := PrincipalFromUser(u, src)
+	id := k.ID
+	p.UserKeyID = &id
+	return p
 }
 
 func resolveUserGrants(u *models.User, src policy.Source) policy.Grants {

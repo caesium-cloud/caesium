@@ -1765,6 +1765,11 @@ PY
   # denials. The cookie-admin scenario rewrites a policy file, which this
   # server does not mount, so it runs on the agent lane only.
   auth_pattern="${auth_pattern%)}|TestAuthUserAdministrationLifecycle|TestAuthUserAdministrationDeniesNonClusterAdmins)"
+  # User-bound API keys (E4): validation, listing under the user, rotation
+  # refusal and every revocation path. Its user matches no binding, so it
+  # passes on this no-policy server; the policy-dependent grant scenario
+  # (TestAuthUserBoundKeyGrantsFollowPolicy) runs on the agent lane only.
+  auth_pattern="${auth_pattern%)}|TestAuthUserBoundKeyLifecycle)"
 
   local -a local_named_passes=(
     TestCaesiumWhyExplainsHitAndMiss
@@ -1810,6 +1815,7 @@ PY
     TestAuthPolicyShowAndReloadSurface
     TestAuthUserAdministrationLifecycle
     TestAuthUserAdministrationDeniesNonClusterAdmins
+    TestAuthUserBoundKeyLifecycle
   )
   local -a distributed_named_passes=(
     TestNodeWorkersRoute

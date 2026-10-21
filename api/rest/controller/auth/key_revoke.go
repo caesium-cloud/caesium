@@ -42,7 +42,7 @@ func (ctrl *Controller) RevokeKey(c *echo.Context) error {
 		SourceIP:     c.RealIP(),
 		Outcome:      iauth.OutcomeSuccess,
 		Namespace:    iauth.KeyAuditNamespace(key.Namespaces),
-		Metadata:     keyAuditMetadata(nil, key),
+		Metadata:     userKeyAuditMetadata(keyAuditMetadata(nil, key), key),
 	}))
 
 	return c.JSON(http.StatusOK, map[string]string{"status": "revoked"})
