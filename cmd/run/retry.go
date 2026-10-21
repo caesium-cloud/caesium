@@ -88,6 +88,12 @@ var retryCmd = &cobra.Command{
 			return retryWholeRunOverServer(ctx, cmd, retryFromFailureJobID, retryFromFailureRunID)
 		}
 
+		// Direct mode reopens the run straight against the configured catalog:
+		// under an access policy file it is refused before the store is touched.
+		if err := refuseDirectRetryUnderPolicy(env.Variables()); err != nil {
+			return err
+		}
+
 		j, err := jsvc.Service(ctx).Get(jobID)
 		if err != nil {
 			return fmt.Errorf("failed to get job: %w", err)
@@ -110,6 +116,28 @@ var retryCmd = &cobra.Command{
 		cmd.Printf("Retrying run %s (job %s)\n", runID, jobID)
 		return nil
 	},
+}
+
+// errDirectRetryUnderPolicy refuses a no-server `caesium run retry` where an
+// access policy file is configured.
+var errDirectRetryUnderPolicy = errors.New("CAESIUM_AUTH_POLICY_FILE is set, so namespace run quotas and declared namespaces apply: " +
+	"retry through the server with --server (and --api-key or " + cliutil.APIKeyEnvVar + " when authentication is on)")
+
+// refuseDirectRetryUnderPolicy keeps a no-server retry from reopening a run
+// past the namespace gate (identity-and-access D1). That path writes straight
+// to the configured catalog, and the gate (quotas.maxConcurrentRuns, declared
+// namespaces) reads a policy only `caesium start` installs, so against a shared
+// catalog a direct retry could reopen a run in a full or undeclared namespace.
+// The server is the authority: it serves the reload-current revision of its
+// file, and its route adds RBAC and audit. Loading the file into this process
+// instead would also switch on the namespace secret rules that client-side
+// execution deliberately does not apply (secret.ForClientNamespace). Without a
+// policy file nothing changes.
+func refuseDirectRetryUnderPolicy(vars env.Environment) error {
+	if strings.TrimSpace(vars.AuthPolicyFile) == "" {
+		return nil
+	}
+	return errDirectRetryUnderPolicy
 }
 
 // Register before reopening the row: a cancellation during admission must reach

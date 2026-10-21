@@ -784,9 +784,11 @@ after the job was applied) resolves no secrets. Work that starts while the
 server is still loading its policy file (queued or freshness-derived runs at
 startup) waits up to 30 seconds for it and resolves no secrets if it is not
 loaded by then. Client-side execution (`caesium dev`, `caesium reproduce`, and
-`caesium run retry` without `--server`) never loads the server's policy, even
-with `CAESIUM_AUTH_POLICY_FILE` set in its environment: like offline lint, it
-resolves every reference with the operator's own credentials and does not wait.
+`caesium run retry` without `--server`) never loads the server's policy: like
+offline lint, it resolves every reference with the operator's own credentials
+and does not wait. `caesium dev` and `caesium reproduce` do so even with
+`CAESIUM_AUTH_POLICY_FILE` set in their environment; `caesium run retry`
+without `--server` refuses to run when it is set (see Run quotas).
 With no policy file every
 namespace resolves every reference. In distributed mode each node enforces the
 rules from its own copy of the policy file: a worker whose file is missing,
@@ -859,7 +861,14 @@ and `CAESIUM_RUN_QUEUE_DEQUEUER_ENABLED` both off it drains only quota-held
 runs and leaves rows a job's own queue policy parked untouched. A quota added
 by a reload applies to the next admission. During server startup, until the
 configured policy file is loaded, no run is admitted and the dequeuer promotes
-nothing, so a restart cannot start queued runs past their quota.
+nothing, so a restart cannot start queued runs past their quota. If the policy
+file is removed while quota-held runs are queued, the server still starts the
+dequeuer at its next start, in the same quota-only mode, and those runs drain
+with no quota.
+
+`caesium run retry` without `--server` writes straight to the catalog and
+cannot see the server's policy, so it refuses when `CAESIUM_AUTH_POLICY_FILE`
+is set in its environment; retry through the server with `--server`.
 
 While a policy file is loaded, a namespace it does not declare (removed by a
 reload while jobs remain in it) admits no run at all: starts, retries and

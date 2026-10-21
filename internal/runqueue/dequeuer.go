@@ -10,7 +10,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/caesium-cloud/caesium/internal/auth/policy"
 	jobexec "github.com/caesium-cloud/caesium/internal/job"
 	"github.com/caesium-cloud/caesium/internal/metrics"
 	"github.com/caesium-cloud/caesium/internal/models"
@@ -39,7 +38,9 @@ type Config struct {
 	// policy parked. The server sets it when an access policy file is
 	// configured but CAESIUM_RUN_QUEUE_ENABLED and
 	// CAESIUM_RUN_QUEUE_DEQUEUER_ENABLED are both off, so quota-held starts
-	// always drain while ordinary queue rows behave exactly as before.
+	// always drain while ordinary queue rows behave exactly as before — and
+	// also, with no file, when quota-held rows a since-removed file parked
+	// remain, which then drain under the empty policy.
 	QuotaOnly bool
 }
 
@@ -138,11 +139,13 @@ type queuedJob struct {
 // own concurrency policy still apply. A namespace without a quota drains
 // exactly as it always has: each job in turn, fully.
 func (d *Dequeuer) DrainOnce(ctx context.Context) error {
-	if runstorage.NamespacePolicyPending() || (d.quotaOnly && !policy.ProcessHolder().FileBacked()) {
+	if runstorage.NamespacePolicyPending() {
 		// The dequeuer starts before the server installs its access policy
 		// file. Until then no namespace quota can be read: promoting a row
 		// (in either mode) could start runs past the quota that parked them,
-		// so nothing is claimed. Quota-only mode exists for the file alone.
+		// so nothing is claimed. A server with no file configured is not
+		// pending: a quota-only dequeuer it started for rows a since-removed
+		// file parked drains them, every namespace now being unlimited.
 		return nil
 	}
 	if d.leaderCheck != nil {

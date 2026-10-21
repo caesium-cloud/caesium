@@ -234,19 +234,58 @@ func TestDequeuerQuotaOnlyLeavesOrdinaryRowsAlone(t *testing.T) {
 }
 
 // TestDequeuerQuotaOnlyWaitsForThePolicy: quota-only mode promotes nothing
-// until the server has installed the policy file that gives quotas meaning.
+// until the server has installed the policy file it is configured with.
 func TestDequeuerQuotaOnlyWaitsForThePolicy(t *testing.T) {
 	db := testutil.OpenTestDB(t)
 	t.Cleanup(func() { testutil.CloseDB(db) })
 	previous := policy.ProcessHolder()
-	t.Cleanup(func() { policy.SetProcessHolder(previous) })
+	t.Cleanup(func() {
+		runstorage.ExpectNamespacePolicy(false)
+		policy.SetProcessHolder(previous)
+	})
 	policy.SetProcessHolder(nil)
+	runstorage.ExpectNamespacePolicy(true)
 	job := quotaJob(t, db, "qo-wait", "quota-a", nil)
 	seedQueueRow(t, db, job.ID, ptr("quota-a"), true, time.Second)
 
 	rec := &launchRecorder{db: db}
 	require.NoError(t, newQuotaDequeuer(db, rec, true).DrainOnce(t.Context()))
 	require.Empty(t, rec.launched)
+}
+
+// TestDequeuerQuotaOnlyDrainsRowsAfterThePolicyIsRemoved: a policy file parked
+// quota-held rows, then the operator removed it and restarted. The server
+// starts the quota-only dequeuer for them (runQueueDrainMode) with no policy
+// expected: every namespace is now unlimited, so each held row is promoted,
+// and an ordinary policy row is still left alone.
+func TestDequeuerQuotaOnlyDrainsRowsAfterThePolicyIsRemoved(t *testing.T) {
+	db := testutil.OpenTestDB(t)
+	t.Cleanup(func() { testutil.CloseDB(db) })
+	previous := policy.ProcessHolder()
+	t.Cleanup(func() { policy.SetProcessHolder(previous) })
+	policy.SetProcessHolder(nil)
+	runstorage.ExpectNamespacePolicy(false)
+	free := quotaJob(t, db, "qo-removed-free", "quota-a", nil)
+	seedQueueRow(t, db, free.ID, ptr("quota-a"), true, 3*time.Second)
+	seedQueueRow(t, db, free.ID, ptr("quota-a"), true, 2*time.Second)
+	policyJob := quotaJob(t, db, "qo-removed-policy", "quota-b", &jobdef.Concurrency{MaxRuns: 5, Strategy: jobdef.ConcurrencyStrategyQueue})
+	ordinary := seedQueueRow(t, db, policyJob.ID, ptr("quota-b"), false, time.Second)
+
+	has, err := runstorage.NewStore(db).HasQuotaHeldRuns(t.Context())
+	require.NoError(t, err)
+	require.True(t, has, "the startup check sees the leftover rows")
+
+	rec := &launchRecorder{db: db}
+	require.NoError(t, newQuotaDequeuer(db, rec, true).DrainOnce(t.Context()))
+	require.Equal(t, []uuid.UUID{free.ID, free.ID}, rec.launched,
+		"with no quota left, both held runs of the namespace start")
+	var remaining []uuid.UUID
+	require.NoError(t, db.Model(&models.RunQueue{}).Pluck("id", &remaining).Error)
+	require.Equal(t, []uuid.UUID{ordinary}, remaining)
+
+	has, err = runstorage.NewStore(db).HasQuotaHeldRuns(t.Context())
+	require.NoError(t, err)
+	require.False(t, has, "nothing is left for a later restart to drain")
 }
 
 // TestDequeuerFullModeWaitsForAConfiguredPolicy: with the queue flags on, the

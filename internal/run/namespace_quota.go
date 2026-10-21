@@ -333,6 +333,21 @@ func (s *Store) RunningByNamespace(ctx context.Context) (map[string]int64, error
 	return out, nil
 }
 
+// HasQuotaHeldRuns reports whether run_queue holds any row a namespace quota
+// parked. The server asks once at startup: rows a since-removed policy file
+// parked must still drain, under the now-empty policy, even though nothing
+// else would start the dequeuer.
+func (s *Store) HasQuotaHeldRuns(ctx context.Context) (bool, error) {
+	var ids []uuid.UUID
+	if err := s.db.WithContext(ctx).Model(&models.RunQueue{}).
+		Where("held_reason = ?", models.RunQueueHeldReasonNamespaceQuota).
+		Limit(1).
+		Pluck("id", &ids).Error; err != nil {
+		return false, err
+	}
+	return len(ids) > 0, nil
+}
+
 // ReleaseQueuedRunHeldByQuota releases a claimed row whose promotion the
 // namespace run quota refused, recording that it now waits on the quota. The
 // reason is sticky: it is set here and on a quota enqueue, and never cleared,

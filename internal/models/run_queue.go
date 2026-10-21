@@ -69,7 +69,9 @@ type RunQueue struct {
 	// RunQueueHeldReasonNamespaceQuota, or NULL. Once set it is never cleared:
 	// a quota-held row of a job without a queue policy is drained only because
 	// of it.
-	HeldReason *string `gorm:"type:text" json:"held_reason,omitempty"`
+	// Indexed for the quota-only dequeuer and the server's startup check for
+	// rows a since-removed policy file parked.
+	HeldReason *string `gorm:"type:text;index" json:"held_reason,omitempty"`
 }
 
 // IsQuotaHeld reports whether the row waits on its namespace's run quota.
