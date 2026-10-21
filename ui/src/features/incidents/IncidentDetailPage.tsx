@@ -237,7 +237,12 @@ export function IncidentDetailPage() {
 
           <AgentActivity incident={incident} sessions={sessions} actions={actions} />
 
-          <EvidencePanel incident={incident} replayOpen={replayOpen} setReplayOpen={setReplayOpen} />
+          <EvidencePanel
+            incident={incident}
+            replayOpen={replayOpen}
+            setReplayOpen={setReplayOpen}
+            jobNamespace={jobsQuery.data?.find((job) => job.id === incident.job_id)?.namespace}
+          />
 
           <Card data-testid="incident-timeline" className="overflow-hidden border-graphite/40 bg-midnight/30">
             <CardHeader className="border-b border-border/50 pb-3">
@@ -415,7 +420,10 @@ function EvidencePanel({
   incident,
   replayOpen,
   setReplayOpen,
+  jobNamespace,
 }: {
+  /** The incident job's CURRENT namespace (an incident keeps the one it opened in). */
+  jobNamespace?: string;
   incident: Incident;
   replayOpen: boolean;
   setReplayOpen: (open: boolean) => void;
@@ -511,6 +519,7 @@ function EvidencePanel({
                 <ReplayDialog
                   jobId={incident.job_id}
                   baselineRunId={incident.run_id}
+                  namespace={jobNamespace}
                   open={replayOpen}
                   onOpenChange={setReplayOpen}
                 />

@@ -1765,6 +1765,8 @@ PY
   # denials. The cookie-admin scenario rewrites a policy file, which this
   # server does not mount, so it runs on the agent lane only.
   auth_pattern="${auth_pattern%)}|TestAuthUserAdministrationLifecycle|TestAuthUserAdministrationDeniesNonClusterAdmins)"
+  # Declared namespaces for cluster viewers (GET /v1/auth/namespaces).
+  auth_pattern="${auth_pattern%)}|TestAuthNamespacesRoute)"
   # User-bound API keys (E4): validation, listing under the user, rotation
   # refusal and every revocation path. Its user matches no binding, so it
   # passes on this no-policy server; the policy-dependent grant scenario
@@ -1815,6 +1817,7 @@ PY
     TestAuthPolicyShowAndReloadSurface
     TestAuthUserAdministrationLifecycle
     TestAuthUserAdministrationDeniesNonClusterAdmins
+    TestAuthNamespacesRoute
     TestAuthUserBoundKeyLifecycle
   )
   local -a distributed_named_passes=(

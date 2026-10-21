@@ -240,6 +240,14 @@ func (s *SSOController) beginRedirectLogin(c *echo.Context, provider iauth.Redir
 	return c.Redirect(http.StatusFound, redirectURL)
 }
 
+const (
+	// loginDeniedReasonNoBinding is the machine-readable reason the Console
+	// renders for an identity no policy binding grants any role.
+	loginDeniedReasonNoBinding = "no_binding"
+	// loginErrorNoBindingPath is where a redirect login lands on that denial.
+	loginErrorNoBindingPath = "/?login_error=" + loginDeniedReasonNoBinding
+)
+
 func (s *SSOController) completeRedirectLogin(c *echo.Context, provider iauth.RedirectAuthenticator, fallbackName string) error {
 	if provider == nil {
 		return echo.NewHTTPError(http.StatusServiceUnavailable, fallbackName+" provider unavailable")
@@ -269,6 +277,10 @@ func (s *SSOController) completeRedirectLogin(c *echo.Context, provider iauth.Re
 		c.Request().UserAgent(),
 	)
 	if err != nil {
+		if errors.Is(err, iauth.ErrNoBinding) {
+			// A fixed same-origin path: the Console renders the reason.
+			return c.Redirect(http.StatusFound, loginErrorNoBindingPath)
+		}
 		if errors.Is(err, iauth.ErrLoginDenied) {
 			return echo.NewHTTPError(http.StatusForbidden, "login denied").Wrap(err)
 		}
@@ -322,6 +334,12 @@ func (s *SSOController) completeCredentialLogin(c *echo.Context, provider iauth.
 		c.Request().UserAgent(),
 	)
 	if err != nil {
+		if errors.Is(err, iauth.ErrNoBinding) {
+			return c.JSON(http.StatusForbidden, map[string]string{
+				"message": "login denied",
+				"reason":  loginDeniedReasonNoBinding,
+			})
+		}
 		if errors.Is(err, iauth.ErrLoginDenied) {
 			return echo.NewHTTPError(http.StatusForbidden, "login denied").Wrap(err)
 		}

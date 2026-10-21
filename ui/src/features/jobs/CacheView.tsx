@@ -8,7 +8,9 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import { canActIn, requiresRoleReason } from "@/features/auth/access";
 import { api, type CacheEntry, type Job, type JobRun, type JobTask } from "@/lib/api";
+import { usePrincipal } from "@/lib/auth";
 import { IdChip } from "@/components/ui/id-chip";
 import { describeCachePolicy, describeEffectiveCachePolicy, normalizeCacheConfig } from "./cache-utils";
 import { RunCacheSummary } from "./RunCacheSummary";
@@ -23,6 +25,9 @@ interface CacheViewProps {
 
 export function CacheView({ jobId, job, featuredRun, tasks, taskPoliciesAvailable }: CacheViewProps) {
   const queryClient = useQueryClient();
+  const principal = usePrincipal();
+  const mayInvalidate = canActIn(principal, "operator", job.namespace);
+  const invalidateReason = mayInvalidate ? undefined : requiresRoleReason("operator", job.namespace);
   const [pendingTaskName, setPendingTaskName] = useState<string | null>(null);
 
   const { data, isLoading } = useQuery({
@@ -117,7 +122,8 @@ export function CacheView({ jobId, job, featuredRun, tasks, taskPoliciesAvailabl
           variant="destructive"
           size="sm"
           onClick={() => invalidateAllMutation.mutate()}
-          disabled={invalidateAllMutation.isPending || entries.length === 0}
+          disabled={invalidateAllMutation.isPending || entries.length === 0 || !mayInvalidate}
+          title={invalidateReason}
         >
 
           Invalidate All
@@ -158,6 +164,7 @@ export function CacheView({ jobId, job, featuredRun, tasks, taskPoliciesAvailabl
                     jobCacheConfig={job.cache_config}
                     jobId={jobId}
                     pending={pendingTaskName === entry.task_name && invalidateTaskMutation.isPending}
+                    disabledReason={invalidateReason}
                     onInvalidate={(taskName) => {
                       setPendingTaskName(taskName);
                       invalidateTaskMutation.mutate(taskName);
@@ -180,8 +187,10 @@ function CacheEntryRow({
   jobCacheConfig,
   jobId,
   pending,
+  disabledReason,
   onInvalidate,
 }: {
+  disabledReason?: string;
   entry: CacheEntry;
   task?: JobTask;
   taskPolicyAvailable: boolean;
@@ -212,7 +221,7 @@ function CacheEntryRow({
       </TableCell>
       <TableCell className="text-xs text-muted-foreground"><IdChip value={entry.hash} label="fingerprint" /></TableCell>
       <TableCell className="text-right">
-        <Button variant="destructive" size="sm" onClick={() => onInvalidate(entry.task_name)} disabled={pending}>
+        <Button variant="destructive" size="sm" onClick={() => onInvalidate(entry.task_name)} disabled={pending || disabledReason !== undefined} title={disabledReason}>
           Invalidate Task
         </Button>
       </TableCell>

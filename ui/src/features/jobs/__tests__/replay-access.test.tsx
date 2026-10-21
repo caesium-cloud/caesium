@@ -93,3 +93,32 @@ it("refuses a forced dialog submission after switching to an authenticated princ
   expect(api.postReplay).not.toHaveBeenCalled();
   expect(screen.getByRole("alert")).toHaveTextContent("Requires runner role");
 });
+
+async function loginWithGrants(grants: Record<string, string>) {
+  vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
+    ok: true,
+    json: async () => ({ kind: "api_key", subject: "grants-principal", role: grants["*"] ?? "", grants, namespaces: Object.keys(grants), is_scoped: false }),
+  }));
+  expect(await apiKeyLogin("csk_live_grants")).toBe("success");
+}
+
+function withNamespaces(jobNamespace: string, runNamespace: string) {
+  vi.mocked(api.getJob).mockResolvedValue({ id: "job-1", alias: "replay-access", namespace: jobNamespace, labels: {}, annotations: {}, trigger_id: "trigger-1", paused: false, created_at: baseline.created_at, updated_at: baseline.updated_at });
+  vi.mocked(api.getJobRun).mockResolvedValue({ ...baseline, namespace: runNamespace });
+}
+
+it.each([
+  ["a runner in the job's namespace", { marketing: "runner" }, "marketing", "marketing", true, true],
+  ["a runner in another namespace", { finance: "runner" }, "marketing", "marketing", false, false],
+  ["a viewer in the job's namespace", { marketing: "viewer" }, "marketing", "marketing", false, false],
+  ["a cluster runner", { "*": "runner" }, "marketing", "marketing", true, true],
+  ["a runner who cannot read the run's persisted namespace", { marketing: "runner" }, "marketing", "finance", false, true],
+])("gates Replay and Re-run for %s", async (_label, grants, jobNs, runNs, replayAllowed, rerunAllowed) => {
+  await loginWithGrants(grants);
+  withNamespaces(jobNs, runNs);
+  show(<RunDetailPage />);
+  const replay = await screen.findByTestId("run-replay-trigger");
+  const rerun = screen.getByTestId("run-rerun-trigger");
+  if (replayAllowed) expect(replay).toBeEnabled(); else expect(replay).toBeDisabled();
+  if (rerunAllowed) expect(rerun).toBeEnabled(); else expect(rerun).toBeDisabled();
+});

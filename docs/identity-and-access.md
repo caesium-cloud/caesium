@@ -558,6 +558,26 @@ never returned.
 - `409` `{"message": "no access policy file is configured (CAESIUM_AUTH_POLICY_FILE is unset)"}`
   with no file. Nothing is audited.
 
+**`GET /v1/auth/namespaces`** (cluster viewer, so the Console can show it to
+everyone who may read the cluster) returns the declared namespaces without any
+identity data:
+
+```json
+{
+  "source": "file", "revision": "<hex sha-256>", "loaded_at": "...", "last_reload": null,
+  "namespaces": [
+    {"name": "default", "secrets": null},
+    {"name": "marketing", "secrets": {"allow": ["env/MARKETING_*"]}, "quotas": {"maxConcurrentRuns": 1}}
+  ]
+}
+```
+
+`default` is always listed first, then the rest sorted by name. `secrets` is
+`null` when the namespace allows every secret. The response never carries
+bindings, subjects, groups, emails or the file path. A namespace-confined key
+and a job-scoped key get `403` (cluster route); with authentication disabled the
+route does not exist.
+
 ### CLI
 
 - `caesium auth policy lint --path FILE [--json]` validates a file offline,
@@ -686,7 +706,7 @@ principal confined to some namespaces is treated:
 | Class | Rule for a confined principal |
 | --- | --- |
 | identity | Allowed whatever its grants, even none: `GET /auth/whoami`, `POST /auth/logout`, `GET /v1/system/features`. |
-| cluster | Always denied (403 `insufficient_role`): metrics, nodes and workers, atoms, logs, database, cache prune, `POST /v1/triggers`, the connector reads (`/v1/connectors*`), and `GET /v1/auth/policy` plus `POST /v1/auth/policy/reload`. |
+| cluster | Always denied (403 `insufficient_role`): metrics, nodes and workers, atoms, logs, database, cache prune, `POST /v1/triggers`, the connector reads (`/v1/connectors*`), `GET /v1/auth/namespaces`, and `GET /v1/auth/policy` plus `POST /v1/auth/policy/reload`. |
 | namespaced | Caesium resolves the namespace of the target the handler will act on and requires the route's role in it (in every resolved namespace; once B6 ships, dataset reads will need it in any one). A target with no owning namespace is cluster-only. |
 | collection | The handler returns only rows from the namespaces where the principal holds the route's role. Live today: the API key list, and the job-derived collections in [Collections](#collections-and-history-under-a-job). |
 
@@ -1063,6 +1083,31 @@ nothing else; errors go to stderr and exit 1):
 
 Find a user's id with `caesium auth user list --email`.
 
+## The Console
+
+The Console reads `GET /auth/whoami` (`grants`, `namespaces`, `cluster_role`; an
+older server that sends only `role` is treated as holding it everywhere) and
+decides which controls to offer. This is a convenience: the server enforces
+every route, and a control is hidden or disabled only when the principal's
+grants are known not to allow it.
+
+- **Gating.** `roleIn(namespace)` is the higher of the `*` grant and the grant
+  for that namespace. Every job action uses the job's namespace and the role its
+  route requires: trigger, re-run, replay, backfill and partition retry need
+  `runner`; pause, resume, queue cancel, backfill cancel and cache invalidation
+  need `operator`. A mutation on a historical run or backfill also needs the role
+  in that object's persisted namespace, as the server does. Until the job is
+  loaded, the cluster role decides, so a confined principal sees fewer controls,
+  never more. Dataset hold release still follows the cluster role (a hold carries
+  no tenancy namespace yet).
+- **Access page (`/access`, sidebar entry for everyone).** "My access" shows the
+  subject, kind, cluster role and per-namespace grants. Principals with a
+  cluster role (and no job scope) also see the declared namespaces and their
+  settings (`GET /v1/auth/namespaces`). Cluster admins additionally see the
+  policy revision and last reload result and the users list with Disable,
+  Enable and Log out everywhere (each behind a confirmation). Bindings are never
+  edited in the Console. With authentication disabled the page only says so.
+
 ## Audit and metrics
 
 SSO login and logout lifecycle events are written to the audit log with actions
@@ -1073,6 +1118,13 @@ provider and denial reason where applicable. A login whose groups match no
 mapping (and with no default role) is denied with reason `no_binding`; a
 disabled user is denied with reason `user_disabled`, and a login that raced a
 disable is denied with reason `user_changed`.
+
+Only the `no_binding` denial is visible to the person signing in, so the Console
+can tell them to ask for a role. After an OIDC or SAML callback the browser is
+redirected to `/?login_error=no_binding` (a fixed same-origin path; the login
+page shows the message and strips the parameter). The LDAP login keeps its `403`
+and adds `"reason": "no_binding"` to the JSON body. Every other denial
+(`user_disabled`, `user_changed`) keeps the plain `403 login denied` response.
 
 User administration writes, with `actor` the caller (API key prefix or user
 email), `resource_type` `user`, `resource_id` the user id and namespace `*`:
