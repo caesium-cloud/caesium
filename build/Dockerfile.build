@@ -10,6 +10,11 @@ ARG DQLITE_REF=v1.18.7
 WORKDIR /bld
 RUN git clone --depth 1 --branch ${DQLITE_REF} https://github.com/canonical/dqlite
 WORKDIR /bld/dqlite
+# SQLite may recompile SELECT * on its first step after a peer migrates the
+# schema. Keep the wire metadata aligned with that refreshed result (#613).
+COPY build/patches/dqlite-query-schema.patch /tmp/dqlite-query-schema.patch
+RUN git apply --check /tmp/dqlite-query-schema.patch && \
+    git apply /tmp/dqlite-query-schema.patch
 # --enable-static also emits /usr/lib/libdqlite.a alongside the shared library.
 # The shared library is what the release image links (unchanged); the archive is
 # what build/Dockerfile's `cli-static` stage links for the bare-host CLI

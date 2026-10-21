@@ -1076,7 +1076,15 @@ Gives SSO its first real end-to-end coverage and makes Keycloak a documented,
 proven issuer. Every SSO-only behaviour from Streams A, C and E (SSO-admin key mint,
 group refresh, user disable, CLI login) is asserted here against a live Keycloak.
 
-- [ ] G1. Realm fixture and lane: `test/testdata/keycloak/caesium-realm.json` (client
+- [x] G1. (W5-γ: the Go lane is the `keycloak` leg of the `integration` matrix
+      and the browser smoke is job `ui-e2e-keycloak`, both under `ci-ok`, which
+      has gated merges since 2026-09-28, not only `v*` publication; the lane
+      serves `test/testdata/keycloak/policy.yaml` (two-namespaces' namespaces
+      plus the realm bindings, guardrail-compared) because the shared fixture
+      must never bind `caesium-admins`; it also proves the A2/A4 obligation,
+      an unverified OIDC email denied an email-only admin binding, with a
+      verified-email positive control.)
+      Realm fixture and lane: `test/testdata/keycloak/caesium-realm.json` (client
       `caesium`, group-membership mapper on `groups` with full path off, users
       `admin@example.com` ∈ `caesium-admins`, `bob@example.com` ∈ `marketing-eng`,
       `carol@example.com` in no group), `just integration-test-keycloak` starting
@@ -1114,7 +1122,8 @@ group refresh, user disable, CLI login) is asserted here against a live Keycloak
       makes the next call 401, `caesium logout` cleans the credential file.
       Files: `test/keycloak_lane_test.go`.
       Depends on: G1 + E5.
-- [ ] G5. Keycloak operator guidance in the guide (client, mapper, scopes, refresh
+- [x] G5. (W5-γ: the guide's Keycloak section and docs/ci.md "Keycloak lane".)
+      Keycloak operator guidance in the guide (client, mapper, scopes, refresh
       tokens, issuer URL discovery) and the lane in `docs/ci.md`.
       Files: `docs/identity-and-access.md`, `docs/ci.md`.
       Depends on: N-1 + G1.

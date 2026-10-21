@@ -8,6 +8,8 @@ build
 # image (build/Dockerfile.triage-agent, built with the repo root as context)
 # COPYs this file, so it must remain in the build context.
 !build/triage-agent.sh
+!build/patches/
+!build/patches/dqlite-query-schema.patch
 tools
 **/*_test.go
 caesium
