@@ -490,6 +490,102 @@ func TestPostgresConfinedRunCheckWithSaturatedWriterPool(t *testing.T) {
 	}
 }
 
+// An alias a confined writer may not write is refused alike whether or not
+// its stored job is running (PR #668 review r6). The batch authorises every
+// stored row (exact alias scope, requested and stored namespace) before its
+// committed-state running check; the other way round, an existing running job
+// outside the writer's scope answered 409 naming its raw alias and an idle one
+// 403: a running-state oracle. Shapes: a key scoped to "payroll" naming a
+// stored "payroll" with an ASCII or Unicode space, at "*" and
+// namespace-confined, alone or after its own exact alias (itself running too);
+// and a marketing operator naming a finance job. The writer's own running job
+// is still refused with ErrJobRunning, naming only that job.
+func TestPostgresConfinedBatchAuthorizesBeforeRunCheck(t *testing.T) {
+	db := openTenancyPostgres(t)
+	f := &tenancyFixture{t: t, db: db, importer: NewImporter(db)}
+	ctx := context.Background()
+	own := f.mustApply("payroll", "default", "")
+	targets := make(map[string]*models.Job, len(nonCanonicalAliases))
+	for _, alias := range nonCanonicalAliases {
+		def := f.def("payroll", "default", "")
+		def.Metadata.Alias = alias
+		job, err := f.importer.ApplyWithOptions(ctx, def, nil)
+		require.NoError(t, err)
+		targets[alias] = job
+	}
+	finance := f.mustApply("payroll-finance", "finance", "")
+	setRunning := func(job *models.Job, running bool) {
+		t.Helper()
+		if running {
+			require.NoError(t, db.Create(&models.JobRun{ID: uuid.New(), JobID: job.ID, Namespace: job.Namespace, Status: "running"}).Error)
+			return
+		}
+		require.NoError(t, db.Model(&models.JobRun{}).Where("job_id = ? AND status = ?", job.ID, "running").Update("status", "succeeded").Error)
+	}
+
+	type probe struct {
+		name   string
+		plans  []BatchPlan
+		target *models.Job
+		scope  *TenancyScope
+		reason string
+	}
+	var probes []probe
+	for _, name := range []string{"key at *", "namespace-confined"} {
+		var namespaces []string
+		if name == "namespace-confined" {
+			namespaces = []string{"default"}
+		}
+		opts := &ApplyOptions{NamespaceAllowlist: namespaces, JobAliasScope: []string{"payroll"}}
+		scope := NewTenancyScope(namespaces, []string{"payroll"})
+		for _, alias := range nonCanonicalAliases {
+			def := f.def("payroll", "default", "")
+			def.Metadata.Alias = alias
+			foreign := BatchPlan{Def: def, Opts: opts}
+			exact := BatchPlan{Def: f.def("payroll", "default", ""), Opts: opts}
+			probes = append(probes,
+				probe{fmt.Sprintf("%s %q", name, alias), []BatchPlan{foreign}, targets[alias], scope, NamespaceReasonAliasScope},
+				probe{fmt.Sprintf("%s own then %q", name, alias), []BatchPlan{exact, foreign}, targets[alias], scope, NamespaceReasonAliasScope})
+		}
+	}
+	mkt := &ApplyOptions{NamespaceAllowlist: []string{"marketing"}}
+	probes = append(probes, probe{"marketing operator naming a finance job",
+		[]BatchPlan{{Def: f.def("payroll-finance", "marketing", ""), Opts: mkt}}, finance,
+		NewTenancyScope([]string{"marketing"}, nil), NamespaceReasonStored})
+
+	for _, p := range probes {
+		t.Run(p.name, func(t *testing.T) {
+			refuse := func() error {
+				t.Helper()
+				_, err := f.importer.ApplyConfinedBatch(ctx, p.plans, ConfinedBatchOptions{})
+				requireTenancyRefusal(t, err, p.reason)
+				require.NotErrorIs(t, err, ErrJobRunning)
+				return err
+			}
+			before := f.job(p.target.Alias).UpdatedAt
+			idle := refuse()
+			setRunning(p.target, true)
+			setRunning(own, true)
+			running := refuse()
+			setRunning(p.target, false)
+			setRunning(own, false)
+
+			require.Equal(t, idle.Error(), running.Error(), "the refusal does not depend on the target's run state")
+			idleDenial, _ := WriteRefusal(idle, p.scope)
+			runningDenial, _ := WriteRefusal(running, p.scope)
+			require.NotNil(t, runningDenial)
+			require.Equal(t, idleDenial, runningDenial, "the same 403")
+			require.NotContains(t, runningDenial.Message, p.target.Alias)
+			require.Equal(t, before, f.job(p.target.Alias).UpdatedAt, "the target was not rewritten")
+		})
+	}
+
+	setRunning(own, true)
+	_, err := f.importer.ApplyConfinedBatch(ctx, []BatchPlan{{Def: f.def("payroll", "default", ""), Opts: &ApplyOptions{JobAliasScope: []string{"payroll"}}}}, ConfinedBatchOptions{})
+	require.ErrorIs(t, err, ErrJobRunning)
+	require.Equal(t, fmt.Sprintf("%s: payroll", ErrJobRunning), err.Error(), "a 409 names only the writer's own job")
+}
+
 func requireOneSubscribingNamespace(t *testing.T, db *gorm.DB, path string) {
 	t.Helper()
 	var namespaces []string

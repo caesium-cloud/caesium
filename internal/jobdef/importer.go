@@ -539,16 +539,23 @@ func (i *Importer) pruneMissingTx(tx *gorm.DB, desiredSet map[string]struct{}, o
 	return len(toRetire), skipped, nil
 }
 
-// existingBatchJobsTx returns the stored rows (retired ones included) of a
-// batch's aliases, which lockBatchJobsTx has locked.
-func existingBatchJobsTx(tx *gorm.DB, aliases []string) ([]*models.Job, error) {
-	var rows []models.Job
-	if err := tx.Unscoped().Model(&models.Job{}).Select("id", "alias").Where("alias IN ?", aliases).Find(&rows).Error; err != nil {
-		return nil, err
-	}
-	jobs := make([]*models.Job, 0, len(rows))
-	for idx := range rows {
-		jobs = append(jobs, &rows[idx])
+// authorizeBatchTx authorises every plan of a confined batch against the
+// stored row (retired ones included; lockBatchJobsTx has locked them) its raw
+// alias names, and returns those rows: only rows the writer may write. It
+// runs before any running check (see authorizeJobWrite).
+func (i *Importer) authorizeBatchTx(tx *gorm.DB, plans []BatchPlan) ([]*models.Job, error) {
+	jobs := make([]*models.Job, 0, len(plans))
+	for _, plan := range plans {
+		jobModel, err := i.findJobByAliasTx(tx, plan.Def.Metadata.Alias)
+		if err != nil {
+			return nil, err
+		}
+		if err := authorizeJobWrite(jobModel, plan.Def, plan.Opts); err != nil {
+			return nil, err
+		}
+		if jobModel != nil {
+			jobs = append(jobs, jobModel)
+		}
 	}
 	return jobs, nil
 }
@@ -722,16 +729,22 @@ func (i *Importer) ApplyConfinedBatch(ctx context.Context, plans []BatchPlan, op
 			if err := lockBatchJobsTx(tx, aliases); err != nil {
 				return err
 			}
+			// Every definition is authorised against the stored row its raw
+			// alias names (exact alias scope, requested and stored namespace)
+			// before anything reads run state, so an alias the writer may not
+			// write is refused alike whether or not its job is running, and
+			// the running checks below only ever see (and name) jobs it may
+			// write (PR #668 review r6).
+			existing, err := i.authorizeBatchTx(tx, plans)
+			if err != nil {
+				return err
+			}
 			// The jobs the batch updates, checked for running runs against
 			// the current committed state before anything is written (see
 			// confinedRunCheck): a run admitted after the snapshot, whose
 			// insert the row lock above may have waited for, is invisible to
 			// guardJobMutationTx's in-snapshot check.
 			if check := i.confinedRunCheck(ctx); check != nil {
-				existing, err := existingBatchJobsTx(tx, aliases)
-				if err != nil {
-					return err
-				}
 				if err := check(existing); err != nil {
 					return err
 				}
@@ -887,6 +900,41 @@ func (i *Importer) findJobByAliasTx(tx *gorm.DB, alias string) (*models.Job, err
 }
 
 func (i *Importer) guardJobMutationTx(tx *gorm.DB, jobModel *models.Job, def *schema.Definition, opts *ApplyOptions) error {
+	if err := authorizeJobWrite(jobModel, def, opts); err != nil {
+		return err
+	}
+	if jobModel == nil {
+		return nil
+	}
+
+	if err := i.ensureJobNotRunningTx(tx, jobModel); err != nil {
+		return err
+	}
+
+	if opts != nil && opts.Force {
+		return nil
+	}
+
+	incomingSourceID := ""
+	if opts != nil && opts.Provenance != nil {
+		incomingSourceID = strings.TrimSpace(opts.Provenance.SourceID)
+	}
+	existingSourceID := strings.TrimSpace(jobModel.ProvenanceSourceID)
+	if existingSourceID != incomingSourceID && (existingSourceID != "" || incomingSourceID != "") {
+		return fmt.Errorf("%w: alias %s managed by %q, incoming source %q", ErrProvenanceConflict, jobModel.Alias, existingSourceID, incomingSourceID)
+	}
+	return nil
+}
+
+// authorizeJobWrite is a write's authorization over one definition and the
+// stored row its raw alias names (nil when absent): a job-scoped writer's
+// exact alias scope, then the namespace allowlist over the requested and the
+// stored namespace. It reads nothing, so its verdict never depends on the
+// stored job's run state, and every caller decides it before any running
+// check: a refused alias answers the same 403 whether or not its job is
+// running, and ErrJobRunning only ever names a job the writer may write
+// (PR #668 review r6).
+func authorizeJobWrite(jobModel *models.Job, def *schema.Definition, opts *ApplyOptions) error {
 	// A job-scoped writer writes only the exact aliases its key names (the
 	// row jobModel was looked up by that same raw alias).
 	if refusal := aliasScopeRefusal(def.Metadata.Alias, def.Metadata.Namespace, opts.tenancyScope()); refusal != nil {
@@ -910,26 +958,6 @@ func (i *Importer) guardJobMutationTx(tx *gorm.DB, jobModel *models.Job, def *sc
 			return &NamespaceAllowlistError{Alias: def.Metadata.Alias, RequestedNamespace: models.NamespaceOrDefault(def.Metadata.Namespace),
 				StoredNamespace: stored, Allowed: slices.Clone(opts.NamespaceAllowlist), Reason: reason}
 		}
-	}
-	if jobModel == nil {
-		return nil
-	}
-
-	if err := i.ensureJobNotRunningTx(tx, jobModel); err != nil {
-		return err
-	}
-
-	if opts != nil && opts.Force {
-		return nil
-	}
-
-	incomingSourceID := ""
-	if opts != nil && opts.Provenance != nil {
-		incomingSourceID = strings.TrimSpace(opts.Provenance.SourceID)
-	}
-	existingSourceID := strings.TrimSpace(jobModel.ProvenanceSourceID)
-	if existingSourceID != incomingSourceID && (existingSourceID != "" || incomingSourceID != "") {
-		return fmt.Errorf("%w: alias %s managed by %q, incoming source %q", ErrProvenanceConflict, jobModel.Alias, existingSourceID, incomingSourceID)
 	}
 	return nil
 }

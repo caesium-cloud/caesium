@@ -312,7 +312,10 @@ func (s *IntegrationTestSuite) TestAuthJobdefApplyRepairsLegacySharedTrigger() {
 // cannot apply or legacy-create that alias with an ASCII or Unicode space
 // around it (a distinct stored job the trimming key-scope check would take
 // for its own) through either route: 403, and no job is created (PR #668
-// review). The exact alias still applies.
+// review). When that non-canonical job exists and is running, the apply's
+// refusal is the same 403, body for body, as while it is idle: the scope is
+// decided before any running check, so it is no oracle on a job outside the
+// key's scope (PR #668 review r6). The exact alias still applies.
 func (s *IntegrationTestSuite) TestAuthJobScopedKeyRefusesNonCanonicalAlias() {
 	s.requireAuthLane()
 	stamp := time.Now().UnixNano()
@@ -345,7 +348,34 @@ func (s *IntegrationTestSuite) TestAuthJobScopedKeyRefusesNonCanonicalAlias() {
 	}
 	s.Nil(s.b9Job(alias))
 
-	status, body := s.b9Apply(scoped.Plaintext, false, s.b9Def(alias, "default", ""))
+	// An existing non-canonical job, created by the admin through the real
+	// apply and run through the real run route: idle and running, the scoped
+	// key's apply of it is the same 403.
+	held := variants[0]
+	existing := s.b9Def(alias, "default", "")
+	existing.Metadata.Alias = held
+	existing.Steps[0].Command = []string{"sh", "-c", "sleep 20"}
+	status, body := s.b9Apply(s.authAPIKey, false, existing)
+	s.Require().Equal(http.StatusOK, status, body)
+	heldJob := s.b9RequireJob(held)
+	probe := s.b9Def(alias, "default", "")
+	probe.Metadata.Alias = held
+	idleStatus, idleBody := s.b9Apply(scoped.Plaintext, false, probe)
+	s.Equal(http.StatusForbidden, idleStatus, idleBody)
+	runID := s.triggerRun(heldJob.ID)
+	s.Require().Eventually(func() bool {
+		var run runResponse
+		s.getJSON(fmt.Sprintf("/v1/jobs/%s/runs/%s", heldJob.ID, runID), &run)
+		return run.Status == "running"
+	}, 60*time.Second, 200*time.Millisecond, "the run of %q never reached running", held)
+	runningStatus, runningBody := s.b9Apply(scoped.Plaintext, false, probe)
+	s.Equal(idleStatus, runningStatus, "the refusal does not depend on the job's run state: %s", runningBody)
+	s.Equal(idleBody, runningBody)
+	s.NotContains(runningBody, "running")
+	// Terminal before the cleanup deletes it.
+	s.awaitRun(heldJob.ID, runID, 3*time.Minute)
+
+	status, body = s.b9Apply(scoped.Plaintext, false, s.b9Def(alias, "default", ""))
 	s.Require().Equal(http.StatusOK, status, body)
 	s.NotNil(s.b9Job(alias), "the exact alias applies")
 }
