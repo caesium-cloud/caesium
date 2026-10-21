@@ -145,6 +145,8 @@ export function Sidebar({ className, onNavigate }: SidebarProps) {
     { to: "/stats", label: "Stats", hint: "s", count: null },
     { to: "/system", label: "System", hint: "y", count: null },
     { to: "/jobdefs", label: "JobDefs", hint: "d", count: null },
+    // Every principal sees its own access; the page hides what it may not read.
+    { to: "/access", label: "Access", count: null },
   ];
 
   return (

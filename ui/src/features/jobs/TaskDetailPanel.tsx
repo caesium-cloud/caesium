@@ -24,6 +24,8 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { DataAssertionsPanel } from "@/features/datasets/DataAssertionsPanel";
 import { HoldSkipReason } from "@/features/datasets/HoldSkipReason";
 import { IncidentRibbon } from "@/features/incidents/IncidentRibbon";
+import { canActIn, requiresRoleReason } from "@/features/auth/access";
+import { usePrincipal } from "@/lib/auth";
 import { api, type Incident, type JobTask, type PartitionInstance, type TaskRun } from "@/lib/api";
 import { LogViewer } from "./LogViewer";
 import { TaskWhyView } from "./TaskWhyView";
@@ -76,6 +78,9 @@ interface TaskDetailPanelProps {
   taskType?: string;
   jobId: string;
   runId: string;
+  /** The job's and the run's tenancy namespaces, for action gating. */
+  jobNamespace?: string;
+  runNamespace?: string;
   runStatus?: string;
   runCompletedAt?: string;
   incidents?: Incident[];
@@ -96,6 +101,8 @@ export function TaskDetailPanel({
   taskType,
   jobId,
   runId,
+  jobNamespace,
+  runNamespace,
   runStatus,
   runCompletedAt,
   incidents = [],
@@ -283,6 +290,8 @@ export function TaskDetailPanel({
   // unique per (run, task), so a stale id simply finds no match and the default
   // takes over.
 
+  const principalForCache = usePrincipal();
+  const mayInvalidateCache = canActIn(principalForCache, "operator", jobNamespace);
   const invalidateCacheMutation = useMutation({
     mutationFn: () => {
       if (!task?.name) {
@@ -460,7 +469,8 @@ export function TaskDetailPanel({
                     variant="destructive"
                     size="sm"
                     onClick={() => invalidateCacheMutation.mutate()}
-                    disabled={invalidateCacheMutation.isPending || !task?.name}
+                    disabled={invalidateCacheMutation.isPending || !task?.name || !mayInvalidateCache}
+                    title={mayInvalidateCache ? undefined : requiresRoleReason("operator", jobNamespace)}
                   >
                     Invalidate
                   </Button>
@@ -499,6 +509,8 @@ export function TaskDetailPanel({
                   taskId={catalogTaskId}
                   partitionCount={runTask?.partition_count ?? 1}
                   onShowLogs={showInstanceLogs}
+                  jobNamespace={jobNamespace}
+                  runNamespace={runNamespace}
                 />
               )}
 
@@ -593,14 +605,21 @@ function PartitionTable({
   taskId,
   partitionCount,
   onShowLogs,
+  jobNamespace,
+  runNamespace,
 }: {
   jobId: string;
   runId: string;
   taskId: string;
   partitionCount: number;
   onShowLogs?: (row: PartitionInstance) => void;
+  jobNamespace?: string;
+  runNamespace?: string;
 }) {
   const queryClient = useQueryClient();
+  const principal = usePrincipal();
+  // Partition retry is a runner action in the job's AND the run's namespace.
+  const mayRetry = canActIn(principal, "runner", jobNamespace, runNamespace);
   const [statusFilter, setStatusFilter] = useState("");
   const scrollRef = useRef<HTMLDivElement>(null);
 
@@ -773,7 +792,8 @@ function PartitionTable({
                           variant="outline"
                           className="h-6 px-1.5 text-[11px]"
                           data-testid="partition-retry-button"
-                          disabled={retryPartition.isPending}
+                          disabled={retryPartition.isPending || !mayRetry}
+                          title={mayRetry ? undefined : requiresRoleReason("runner", jobNamespace)}
                           onClick={() => retryPartition.mutate(row.index)}
                         >
                           Retry

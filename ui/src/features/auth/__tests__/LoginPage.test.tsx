@@ -1,7 +1,7 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { LoginPage } from "../LoginPage";
-import { clearApiKey, isAuthenticated } from "@/lib/auth";
+import { clearApiKey, clearLoginError, isAuthenticated } from "@/lib/auth";
 
 const mockFetch = vi.fn();
 globalThis.fetch = mockFetch;
@@ -135,6 +135,54 @@ describe("LoginPage", () => {
     });
     expect(mockFetch).toHaveBeenNthCalledWith(2, "/auth/whoami", { credentials: "include" });
     expect(isAuthenticated()).toBe(true);
+  });
+
+  it("shows the no-binding message for an LDAP identity no binding grants a role", async () => {
+    mockFetch.mockResolvedValueOnce({
+      status: 403,
+      ok: false,
+      json: async () => ({ message: "login denied", reason: "no_binding" }),
+    });
+    const ldap = [{ type: "ldap", mode: "credential", label: "Corporate Directory", loginUrl: "/auth/sso/ldap/login" }];
+    render(<LoginPage methods={ldap} onLogin={vi.fn()} />);
+    fireEvent.change(screen.getByPlaceholderText("Username"), { target: { value: "carol" } });
+    fireEvent.change(screen.getByPlaceholderText("Password"), { target: { value: "secret" } });
+    fireEvent.click(screen.getByRole("button", { name: "Corporate Directory" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("has no access to Caesium");
+    expect(screen.queryByText("Corporate Directory login is not allowed for this account")).not.toBeInTheDocument();
+    expect(isAuthenticated()).toBe(false);
+  });
+
+  it("shows the no-binding message after a redirect login lands with ?login_error=no_binding", () => {
+    window.history.replaceState(null, "", "/?login_error=no_binding");
+    try {
+      render(<LoginPage onLogin={vi.fn()} />);
+      expect(screen.getByRole("alert")).toHaveTextContent("has no access to Caesium");
+      expect(window.location.search).toBe("");
+    } finally {
+      clearLoginError();
+      window.history.replaceState(null, "", "/");
+    }
+  });
+
+  it("clears the redirect denial banner when a new sign-in attempt starts", () => {
+    window.history.replaceState(null, "", "/?login_error=no_binding");
+    try {
+      render(<LoginPage onLogin={vi.fn()} />);
+      expect(screen.getByRole("alert")).toHaveTextContent("has no access to Caesium");
+      fireEvent.change(screen.getByPlaceholderText("csk_live_..."), { target: { value: "invalid" } });
+      fireEvent.click(screen.getByText("Sign In"));
+      expect(screen.queryByText(/has no access to Caesium/)).not.toBeInTheDocument();
+    } finally {
+      clearLoginError();
+      window.history.replaceState(null, "", "/");
+    }
+  });
+
+  it("shows no denial banner on a plain visit", () => {
+    render(<LoginPage onLogin={vi.fn()} />);
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   });
 
   it("shows an LDAP denial without authenticating", async () => {

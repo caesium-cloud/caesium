@@ -306,18 +306,14 @@ func (s *IntegrationTestSuite) requireSSOSession(login *keycloakLogin) keycloakW
 
 // requireNoBindingCallback asserts Caesium's callback answer to a login whose
 // identity resolved no grants (design §6.3, reason no_binding), and that no
-// session was created.
-//
-// Master answers 403 "login denied". W5-ζ (F1-D3) changes the redirect flows
-// to 302 <CAESIUM_AUTH_PUBLIC_BASE_URL>/?login_error=no_binding; when this
-// lane rebases onto it, replace the one status assertion below with
-//
-//	s.Require().Equal(http.StatusFound, login.CallbackStatus, ...)
-//	s.Require().Equal(s.caesiumURL+"/?login_error=no_binding", login.CallbackLocation, ...)
+// session was created. The redirect flow sends the browser to the Console's
+// login page with the reason (W5-ζ, F1-D3); the Location is same-origin and
+// relative, so it resolves under CAESIUM_AUTH_PUBLIC_BASE_URL.
 func (s *IntegrationTestSuite) requireNoBindingCallback(login *keycloakLogin) {
 	s.T().Helper()
 	s.Require().Equal(keycloakOIDCCallbackPath, login.CallbackPath, "hops: %v", login.Hops)
-	s.Require().Equal(http.StatusForbidden, login.CallbackStatus, "no_binding callback; hops: %v", login.Hops)
+	s.Require().Equal(http.StatusFound, login.CallbackStatus, "no_binding callback; hops: %v", login.Hops)
+	s.Require().Equal("/?login_error=no_binding", login.CallbackLocation, "no_binding callback; hops: %v", login.Hops)
 	s.Require().False(login.SessionCookie, "a denied login set a session cookie")
 	status, body := login.get(s, "/auth/whoami")
 	s.Require().Equal(http.StatusUnauthorized, status, "whoami after a denied login: %s", body)

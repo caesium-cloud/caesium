@@ -14,11 +14,14 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/caesium-cloud/caesium/internal/auth"
+	"github.com/caesium-cloud/caesium/internal/authz"
 	"github.com/caesium-cloud/caesium/internal/enginekind"
 	"github.com/caesium-cloud/caesium/internal/incident"
 	"github.com/caesium-cloud/caesium/internal/jobdef/secret"
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/caesium-cloud/caesium/pkg/db"
+	"github.com/caesium-cloud/caesium/pkg/sqlerr"
 	"github.com/google/uuid"
 	"gorm.io/datatypes"
 	"gorm.io/gorm"
@@ -79,6 +82,12 @@ func New(ctx context.Context) Service {
 	return &service{ctx: ctx, db: conn}
 }
 
+// NewWithDatabase returns an AgentProfile service over conn. It does not seed
+// the default profile; callers that need it call SeedDefaults.
+func NewWithDatabase(ctx context.Context, conn *gorm.DB) Service {
+	return &service{ctx: ctx, db: conn}
+}
+
 func ensureSeeded(conn *gorm.DB) {
 	seedMu.RLock()
 	done := seededOK
@@ -134,9 +143,12 @@ type UpdateRequest struct {
 
 // --- CRUD ---
 
+// List lists profiles. A namespace-confined caller (a collection route,
+// identity-and-access D4) sees only its namespaces' profiles and the
+// cluster-shared ones (the built-in triage-only among them).
 func (s *service) List(req *ListRequest) ([]models.AgentProfile, error) {
 	var profiles []models.AgentProfile
-	q := s.db.WithContext(s.ctx)
+	q := authz.SharedObjectFilter(s.db.WithContext(s.ctx), "namespace")
 
 	if req != nil {
 		if req.Limit > 0 {
@@ -163,6 +175,9 @@ func (s *service) Create(req *CreateRequest) (*models.AgentProfile, error) {
 	if name == "" {
 		return nil, fmt.Errorf("%w: name is required", ErrInvalidProfile)
 	}
+	if err := models.CheckSharedObjectName(name); err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrInvalidProfile, err)
+	}
 	image := strings.TrimSpace(req.Image)
 	if image == "" {
 		return nil, fmt.Errorf("%w: image is required", ErrInvalidProfile)
@@ -170,6 +185,11 @@ func (s *service) Create(req *CreateRequest) (*models.AgentProfile, error) {
 	namespace, err := models.NormalizeObjectNamespace(req.Namespace)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrInvalidProfile, err)
+	}
+	// An undeclared namespace (with a policy file loaded) is refused, as for
+	// jobs (B2) and keys (A5); "*" is always valid.
+	if undeclared := auth.UndeclaredKeyNamespaces([]string{namespace}); len(undeclared) > 0 {
+		return nil, &auth.UndeclaredNamespacesError{Namespaces: undeclared}
 	}
 	engine, err := validateEngine(req.Engine)
 	if err != nil {
@@ -212,8 +232,14 @@ func (s *service) Create(req *CreateRequest) (*models.AgentProfile, error) {
 		Playbook:   playbookJSON,
 	}
 
-	if err := s.db.WithContext(s.ctx).Create(&p).Error; err != nil {
-		return nil, err
+	err = db.TransactionOn(s.ctx, s.db, func(tx *gorm.DB) error {
+		if err := claimName(tx, name, uuid.Nil); err != nil {
+			return err
+		}
+		return tx.Create(&p).Error
+	})
+	if err != nil {
+		return nil, nameConflictError(err, name)
 	}
 	return &p, nil
 }
@@ -235,6 +261,9 @@ func (s *service) Update(id uuid.UUID, req *UpdateRequest) (*models.AgentProfile
 		name := strings.TrimSpace(*req.Name)
 		if name == "" {
 			return nil, fmt.Errorf("%w: name cannot be empty", ErrInvalidProfile)
+		}
+		if err := models.CheckSharedObjectName(name); err != nil {
+			return nil, fmt.Errorf("%w: %w", ErrInvalidProfile, err)
 		}
 		if err := ensureNameAvailable(s.db.WithContext(s.ctx), name, id); err != nil {
 			return nil, err
@@ -294,8 +323,17 @@ func (s *service) Update(id uuid.UUID, req *UpdateRequest) (*models.AgentProfile
 	}
 
 	if len(updates) > 0 {
-		if err := s.db.WithContext(s.ctx).Model(&p).Updates(updates).Error; err != nil {
-			return nil, err
+		name, renamed := updates["name"].(string)
+		err := db.TransactionOn(s.ctx, s.db, func(tx *gorm.DB) error {
+			if renamed {
+				if err := claimName(tx, name, id); err != nil {
+					return err
+				}
+			}
+			return tx.Model(&p).Updates(updates).Error
+		})
+		if err != nil {
+			return nil, nameConflictError(err, name)
 		}
 	}
 
@@ -305,8 +343,35 @@ func (s *service) Update(id uuid.UUID, req *UpdateRequest) (*models.AgentProfile
 	return &p, nil
 }
 
+// Delete soft-deletes a profile and releases its name, so the name can be
+// created again (identity-and-access D4). Sessions keep their profile_id.
 func (s *service) Delete(id uuid.UUID) error {
-	return s.db.WithContext(s.ctx).Delete(&models.AgentProfile{}, "id = ?", id).Error
+	return db.TransactionOn(s.ctx, s.db, func(tx *gorm.DB) error {
+		return models.SoftDeleteSharedObject(tx, &models.AgentProfile{}, id)
+	})
+}
+
+// claimName claims a globally unique profile name inside tx: a live holder is
+// a conflict, a tombstone is renamed out of the way
+// (models.ClaimSharedObjectName).
+func claimName(tx *gorm.DB, name string, excludeID uuid.UUID) error {
+	taken, err := models.ClaimSharedObjectName(tx, &models.AgentProfile{}, name, excludeID)
+	if err != nil {
+		return err
+	}
+	if taken {
+		return fmt.Errorf("%w: name %q already exists", ErrProfileNameConflict, name)
+	}
+	return nil
+}
+
+// nameConflictError maps a write that lost a race for a name (the unique
+// index) to the same conflict a claim reports, never a 500.
+func nameConflictError(err error, name string) error {
+	if err != nil && !errors.Is(err, ErrProfileNameConflict) && sqlerr.IsUniqueConstraint(err) {
+		return fmt.Errorf("%w: name %q already exists", ErrProfileNameConflict, name)
+	}
+	return err
 }
 
 // --- Helpers ---
@@ -397,8 +462,13 @@ func SeedDefaults(ctx context.Context, conn *gorm.DB) error {
 	if conn == nil {
 		return errors.New("agentprofile: cannot seed defaults with a nil database connection")
 	}
+	// A deleted built-in stays deleted: its tombstone (soft-deleted, and since
+	// D4 renamed to release the name) counts as seeded, as the soft-deleted
+	// row holding the name always did.
 	var existing models.AgentProfile
-	err := conn.WithContext(ctx).Where("name = ?", DefaultTriageOnlyProfileName).First(&existing).Error
+	err := conn.WithContext(ctx).Unscoped().
+		Where("name = ? OR name LIKE ?", DefaultTriageOnlyProfileName, models.TombstonePrefix(DefaultTriageOnlyProfileName)+"%").
+		First(&existing).Error
 	if err == nil {
 		return nil
 	}

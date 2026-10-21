@@ -88,6 +88,19 @@ var columnPattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za
 // filtered for the collection guard; a db without the request context finds
 // no restriction and is not marked, which is how the guard catches it.
 func NamespaceFilter(db *gorm.DB, column string) *gorm.DB {
+	return namespaceFilter(db, column, false)
+}
+
+// SharedObjectFilter is NamespaceFilter for shared objects (notification
+// channels and policies, agent profiles; design §10.4): a restricted caller
+// also sees the cluster-shared rows (namespace "*"), which every principal
+// with a grant may read. Unrestricted: db is returned unchanged; restricted to
+// nothing still matches no row.
+func SharedObjectFilter(db *gorm.DB, column string) *gorm.DB {
+	return namespaceFilter(db, column, true)
+}
+
+func namespaceFilter(db *gorm.DB, column string, shared bool) *gorm.DB {
 	if db == nil {
 		return nil
 	}
@@ -103,10 +116,14 @@ func NamespaceFilter(db *gorm.DB, column string) *gorm.DB {
 	if !columnPattern.MatchString(column) || len(scope.allowed) == 0 {
 		return db.Where("1 = 0")
 	}
-	if slices.Contains(scope.allowed, models.DefaultNamespace) {
-		return db.Where(fmt.Sprintf("(%[1]s IN ? OR %[1]s = '' OR %[1]s IS NULL)", column), scope.allowed)
+	allowed := scope.allowed
+	if shared {
+		allowed = append(slices.Clone(allowed), models.ClusterNamespace)
 	}
-	return db.Where(fmt.Sprintf("%s IN ?", column), scope.allowed)
+	if slices.Contains(allowed, models.DefaultNamespace) {
+		return db.Where(fmt.Sprintf("(%[1]s IN ? OR %[1]s = '' OR %[1]s IS NULL)", column), allowed)
+	}
+	return db.Where(fmt.Sprintf("%s IN ?", column), allowed)
 }
 
 // MarkFiltered records that the handler filtered its rows to the allowed

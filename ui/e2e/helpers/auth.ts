@@ -67,6 +67,49 @@ export async function loginAtUrl(page: Page, url: string, key: string): Promise<
   return readWhoami(await whoami);
 }
 
+/**
+ * Like loginAtUrl, but returns the raw whoami body and tolerates a principal
+ * with no cluster role (a key confined to namespaces answers role: "").
+ */
+export async function loginRawAtUrl(page: Page, url: string, key: string): Promise<Record<string, unknown>> {
+  await page.goto(url);
+  await expect(page.getByPlaceholder("csk_live_...")).toBeVisible();
+  await page.getByPlaceholder("csk_live_...").fill(key);
+  const whoami = page.waitForResponse(isSuccessfulWhoamiResponse);
+  await page.getByRole("button", { name: "Sign In" }).click();
+  return (await (await whoami).json()) as Record<string, unknown>;
+}
+
+/** Mint a key with the given role and (optionally) namespace confinement. */
+export async function createNamespacedKey(
+  request: APIRequestContext,
+  adminKey: string,
+  role: "viewer" | "runner" | "operator" | "admin",
+  description: string,
+  namespaces?: string[],
+): Promise<string> {
+  const response = await request.post("/v1/auth/keys", {
+    headers: { ...authHeaders(adminKey), "Content-Type": "application/json" },
+    data: { role, description, ...(namespaces ? { namespaces } : {}) },
+  });
+  if (!response.ok()) {
+    throw new Error(`failed to mint ${description}: ${response.status()} ${await response.text()}`);
+  }
+  const key = ((await response.json()) as { key?: unknown }).key;
+  if (typeof key !== "string" || !key.startsWith("csk_")) {
+    throw new Error(`failed to mint ${description}: no plaintext key in the response`);
+  }
+  return key;
+}
+
+export function adminKeyFromEnv(): string {
+  const key = envString("CAESIUM_E2E_AUTH_ADMIN_KEY");
+  if (!key) {
+    throw new Error("auth e2e lane requires CAESIUM_E2E_AUTH_ADMIN_KEY");
+  }
+  return key;
+}
+
 async function seedAuthKeys(request: APIRequestContext): Promise<AuthLaneKeys> {
   const scopedJobAlias = envString("CAESIUM_E2E_AUTH_SCOPED_JOB") ?? "ui-e2e-scoped-job";
   const viewer = envString("CAESIUM_E2E_AUTH_VIEWER_KEY");

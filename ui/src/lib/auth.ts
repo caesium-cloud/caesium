@@ -7,6 +7,7 @@
  */
 
 import { useSyncExternalStore } from "react";
+import { CLUSTER_NAMESPACE, resolveRoleIn, roleLevel, type PrincipalRole } from "./roles";
 
 type AuthChangeListener = () => void;
 
@@ -29,16 +30,26 @@ export type CredentialLoginResult =
   | "success"
   | "invalid"
   | "denied"
+  | "no_binding"
   | "error"
   | "network";
 export type ApiKeyLoginResult = CredentialLoginResult;
-export type PrincipalRole = "viewer" | "runner" | "operator" | "admin";
+export type { PrincipalRole } from "./roles";
 
 export interface PrincipalState {
   kind: string | null;
   stableId?: string | null;
   subject: string | null;
+  /** The cluster-wide role (what `role` always meant); null when confined. */
   role: PrincipalRole | null;
+  /** Roles by namespace; "*" holds a cluster-wide role. */
+  grants: Record<string, PrincipalRole>;
+  /** Namespaces the principal may read; ["*"] when cluster-wide. */
+  namespaces: string[];
+  /** Same as `role`, named for the namespaced model. */
+  clusterRole: PrincipalRole | null;
+  /** The role held in `namespace`: max(grants["*"], grants[namespace]), or null. */
+  roleIn: (namespace: string | null | undefined) => PrincipalRole | null;
   canRunner: boolean;
   isScoped: boolean;
   scopeKnown: boolean;
@@ -52,6 +63,10 @@ const anonymousPrincipal: PrincipalState = Object.freeze({
   stableId: null,
   subject: null,
   role: null,
+  grants: Object.freeze({}) as Record<string, PrincipalRole>,
+  namespaces: Object.freeze([]) as unknown as string[],
+  clusterRole: null,
+  roleIn: () => null,
   canRunner: false,
   isScoped: false,
   scopeKnown: false,
@@ -76,20 +91,6 @@ function cloneHeaders(headers?: HeadersInit): Record<string, string> {
   return { ...headers };
 }
 
-function roleLevel(role: PrincipalRole | null): number {
-  switch (role) {
-    case "admin":
-      return 40;
-    case "operator":
-      return 30;
-    case "runner":
-      return 20;
-    case "viewer":
-      return 10;
-    default:
-      return 0;
-  }
-}
 
 function normalizeRole(value: unknown): PrincipalRole | null {
   if (typeof value !== "string") {
@@ -105,6 +106,30 @@ function normalizeRole(value: unknown): PrincipalRole | null {
     default:
       return null;
   }
+}
+
+function grantsFromWhoami(
+  obj: Record<string, unknown>,
+  clusterRole: PrincipalRole | null,
+): { grants: Record<string, PrincipalRole>; namespaces: string[] } {
+  const raw = obj.grants;
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    // An older server: only the cluster role is known, so it applies everywhere.
+    return clusterRole
+      ? { grants: { [CLUSTER_NAMESPACE]: clusterRole }, namespaces: [CLUSTER_NAMESPACE] }
+      : { grants: {}, namespaces: [] };
+  }
+  const grants: Record<string, PrincipalRole> = {};
+  for (const [namespace, value] of Object.entries(raw as Record<string, unknown>)) {
+    const role = normalizeRole(value);
+    if (namespace !== "" && role) {
+      grants[namespace] = role;
+    }
+  }
+  const namespaces = Array.isArray(obj.namespaces)
+    ? obj.namespaces.filter((n): n is string => typeof n === "string" && n !== "")
+    : Object.keys(grants).sort();
+  return { grants, namespaces };
 }
 
 function scopeFromWhoami(
@@ -162,11 +187,19 @@ function principalFromWhoami(body: unknown): PrincipalState | null {
       ? obj.stable_id.trim()
       : null;
   const scope = scopeFromWhoami(obj, kind);
+  // cluster_role equals role on a current server.
+  const clusterRole =
+    obj.cluster_role === "" ? null : normalizeRole(obj.cluster_role) ?? role;
+  const { grants, namespaces } = grantsFromWhoami(obj, role);
   return {
     kind,
     stableId,
     subject,
     role,
+    grants,
+    namespaces,
+    clusterRole,
+    roleIn: (namespace) => resolveRoleIn(grants, namespace),
     canRunner: roleLevel(role) >= roleLevel("runner"),
     isScoped: scope.isScoped,
     scopeKnown: scope.scopeKnown,
@@ -177,8 +210,14 @@ function clearPrincipal(): void {
   principal = anonymousPrincipal;
 }
 
+/** The consumed `?login_error=` reason, kept until a sign-in succeeds or is cleared. */
+let pendingLoginError: LoginErrorReason | null = null;
+
 function setPrincipal(nextPrincipal: PrincipalState): void {
   principal = nextPrincipal;
+  // Any successful sign-in ends an earlier denial's hand-off, so it cannot
+  // resurface on the login page after a later sign-out.
+  pendingLoginError = null;
 }
 
 async function readWhoami(response: Response): Promise<PrincipalState | null> {
@@ -359,6 +398,54 @@ export async function logout(): Promise<void> {
   }
 }
 
+/** The `reason` of a 403 login-denied body; "" for any other or malformed body. */
+async function deniedReason(response: Response): Promise<string> {
+  try {
+    const body: unknown = await response.json();
+    if (body && typeof body === "object" && !Array.isArray(body)) {
+      const reason = (body as { reason?: unknown }).reason;
+      return typeof reason === "string" ? reason : "";
+    }
+  } catch {
+    // A non-JSON body is an ordinary denial.
+  }
+  return "";
+}
+
+/** The login-error reasons the server hands the SPA on a redirect login. */
+export type LoginErrorReason = "no_binding";
+
+/**
+ * Reads and strips `?login_error=` from the address bar (the redirect login's
+ * denial hand-off). Returns a reason only for values this build understands.
+ */
+export function consumeLoginError(
+  location: Location = window.location,
+  history: Pick<History, "replaceState"> = window.history,
+): LoginErrorReason | null {
+  const params = new URLSearchParams(location.search);
+  const value = params.get("login_error");
+  if (value === null) {
+    // Already stripped by an earlier read on this page load (React strict mode
+    // double-invokes initialisers), so keep answering until it is cleared.
+    return pendingLoginError;
+  }
+  params.delete("login_error");
+  const query = params.toString();
+  try {
+    history.replaceState(null, "", `${location.pathname}${query ? `?${query}` : ""}${location.hash}`);
+  } catch {
+    // Stripping is cosmetic.
+  }
+  pendingLoginError = value === "no_binding" ? "no_binding" : null;
+  return pendingLoginError;
+}
+
+/** Forget a consumed login error (after a sign-in attempt or dismissal). */
+export function clearLoginError(): void {
+  pendingLoginError = null;
+}
+
 /** Submit username/password credentials and cache the resulting cookie session. */
 export async function credentialLogin(
   loginUrl: string,
@@ -377,7 +464,7 @@ export async function credentialLogin(
       return "invalid";
     }
     if (response.status === 403) {
-      return "denied";
+      return (await deniedReason(response)) === "no_binding" ? "no_binding" : "denied";
     }
     if (!response.ok) {
       return "error";
