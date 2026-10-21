@@ -462,6 +462,18 @@ func (d *Dequeuer) promoteOne(ctx context.Context, jobID uuid.UUID, quotaRowsOnl
 		return promotionEmpty, nil
 	}
 	started, err := d.store.StartQueuedRun(ctx, queued)
+	if _, committed := runstorage.CommittedRunID(err); committed {
+		// The admission committed — the row is consumed and the run is
+		// running — but its read-back failed. Launch exactly that run once it
+		// reads back; if it never does, it was finalized so it frees its
+		// namespace slot instead of holding it with nothing executing it.
+		adopted, _, recoverErr := d.store.RecoverCommittedRun(ctx, err, committedRunReadBackoffs)
+		if recoverErr != nil {
+			log.Error("run queue dequeuer could not read back a promoted run", "queue_id", queued.ID, "job_id", queued.JobID, "error", recoverErr)
+			return promotionConsumed, nil
+		}
+		started, err = adopted, nil
+	}
 	if err != nil {
 		switch {
 		case errors.Is(err, runstorage.ErrQueuedRunClaimLost):
@@ -518,10 +530,19 @@ func (d *Dequeuer) promoteOne(ctx context.Context, jobID uuid.UUID, quotaRowsOnl
 	}
 	// The admission that created the run consumed the row in its transaction.
 	if err := d.launch(ctx, started); err != nil {
+		// The run is committed and running with nothing to execute it:
+		// settle it so it frees its slot.
+		if _, completeErr := d.store.CompleteIfActive(started.ID, fmt.Errorf("run queue dequeuer could not launch the promoted run: %w", err)); completeErr != nil {
+			log.Error("run queue dequeuer could not launch or finalize a promoted run", "run_id", started.ID, "error", completeErr)
+		}
 		return promotionEmpty, err
 	}
 	return promotionStarted, nil
 }
+
+// committedRunReadBackoffs bound how long a promotion whose admission
+// committed keeps re-reading its run before finalizing it.
+var committedRunReadBackoffs = []time.Duration{50 * time.Millisecond, 250 * time.Millisecond, time.Second}
 
 func (d *Dequeuer) release(ctx context.Context, queued *models.RunQueue, claim, why string) {
 	if err := d.store.ReleaseQueuedRun(ctx, queued.ID, claim); err != nil {

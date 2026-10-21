@@ -3,9 +3,11 @@ package runqueue
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"slices"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -283,6 +285,80 @@ func TestTwoDrainersPromoteAReclaimedRequestOnce(t *testing.T) {
 	var left int64
 	require.NoError(t, db.Model(&models.RunQueue{}).Count(&left).Error)
 	require.Zero(t, left)
+}
+
+// faultPromotionReadBacks fails detached run read-backs (the joined job_runs
+// load outside a transaction): the first n, or all while n < 0 until disarm.
+func faultPromotionReadBacks(t *testing.T, db *gorm.DB, n int) (disarm func()) {
+	t.Helper()
+	orig := committedRunReadBackoffs
+	committedRunReadBackoffs = []time.Duration{0, 0}
+	var reads atomic.Int64
+	var off atomic.Bool
+	const callback = "test:fault_promotion_read_back"
+	require.NoError(t, db.Callback().Query().Before("gorm:query").Register(callback, func(tx *gorm.DB) {
+		_, transaction := tx.Statement.ConnPool.(gorm.TxCommitter)
+		if off.Load() || tx.Statement.Table != "job_runs" || len(tx.Statement.Joins) == 0 || transaction {
+			return
+		}
+		if seen := reads.Add(1); n < 0 || seen <= int64(n) {
+			_ = tx.AddError(errors.New("database is locked"))
+		}
+	}))
+	t.Cleanup(func() {
+		committedRunReadBackoffs = orig
+		_ = db.Callback().Query().Remove(callback)
+	})
+	return func() { off.Store(true) }
+}
+
+// TestDequeuerLaunchesAPromotionWhoseReadBackRecovers: the admission
+// committed (row consumed, run running) but its read-back failed; the
+// dequeuer re-reads that exact run and launches it.
+func TestDequeuerLaunchesAPromotionWhoseReadBackRecovers(t *testing.T) {
+	db := testutil.OpenTestDB(t)
+	t.Cleanup(func() { testutil.CloseDB(db) })
+	useDequeuerPolicy(t, dequeuerQuotaPolicy)
+	job := quotaJob(t, db, "readback-transient", "quota-a", nil)
+	seedQueueRow(t, db, job.ID, ptr("quota-a"), true, time.Second)
+	faultPromotionReadBacks(t, db, 2)
+
+	rec := &launchRecorder{db: db}
+	require.NoError(t, newQuotaDequeuer(db, rec, true).DrainOnce(t.Context()))
+	require.Equal(t, []uuid.UUID{job.ID}, rec.launched, "the committed run is launched")
+	var running int64
+	require.NoError(t, db.Model(&models.JobRun{}).Where("job_id = ? AND status = ?", job.ID, string(runstorage.StatusRunning)).Count(&running).Error)
+	require.Equal(t, int64(1), running)
+}
+
+// TestDequeuerFinalizesAPromotionThatNeverReadsBack: if the committed run
+// never reads back, the dequeuer finalizes it instead of leaving it running
+// with nothing executing it; quota-a's single slot frees and the next
+// request is promoted.
+func TestDequeuerFinalizesAPromotionThatNeverReadsBack(t *testing.T) {
+	db := testutil.OpenTestDB(t)
+	t.Cleanup(func() { testutil.CloseDB(db) })
+	useDequeuerPolicy(t, dequeuerQuotaPolicy)
+	stuck := quotaJob(t, db, "readback-stuck", "quota-a", nil)
+	seedQueueRow(t, db, stuck.ID, ptr("quota-a"), true, 2*time.Second)
+	disarm := faultPromotionReadBacks(t, db, -1)
+
+	rec := &launchRecorder{db: db}
+	d := newQuotaDequeuer(db, rec, true)
+	require.NoError(t, d.DrainOnce(t.Context()))
+	require.Empty(t, rec.launched)
+	var status []string
+	require.NoError(t, db.Model(&models.JobRun{}).Where("job_id = ?", stuck.ID).Pluck("status", &status).Error)
+	require.Equal(t, []string{string(runstorage.StatusFailed)}, status, "finalized, never left running")
+	var left int64
+	require.NoError(t, db.Model(&models.RunQueue{}).Where("job_id = ?", stuck.ID).Count(&left).Error)
+	require.Zero(t, left)
+
+	disarm()
+	next := quotaJob(t, db, "readback-next", "quota-a", nil)
+	seedQueueRow(t, db, next.ID, ptr("quota-a"), true, time.Second)
+	require.NoError(t, d.DrainOnce(t.Context()))
+	require.Equal(t, []uuid.UUID{next.ID}, rec.launched, "quota-a's slot was freed")
 }
 
 // TestDequeuerQuotaOnlyDrainsRowsAfterThePolicyIsRemoved: a policy file parked

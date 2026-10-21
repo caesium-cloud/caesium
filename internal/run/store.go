@@ -691,6 +691,54 @@ func CommittedRunID(err error) (uuid.UUID, bool) {
 	return uuid.Nil, false
 }
 
+// ErrCommittedRunAbandoned reports a committed run RecoverCommittedRun could
+// not read back, and therefore finalized instead of handing to a launcher.
+// Its message carries no driver text on purpose: a caller's contention
+// retrier must not mistake it for a busy database and start the request a
+// second time.
+var ErrCommittedRunAbandoned = errors.New("run: a committed run could not be read back and was finalized")
+
+// RecoverCommittedRun settles a start that committed its run but failed to
+// read it back (err carries a *RunCommittedError; ok is false otherwise). It
+// re-reads that exact run — never a look-alike — after each of backoffs, and
+// returns it for the caller to launch. If it still cannot be read, it
+// finalizes the run (CompleteIfActive, failed with the read error) so the run
+// never stays running with nothing to execute it — at a namespace quota of
+// one it would hold the namespace forever — and returns an error matching
+// ErrCommittedRunAbandoned.
+func (s *Store) RecoverCommittedRun(ctx context.Context, err error, backoffs []time.Duration) (*JobRun, bool, error) {
+	runID, ok := CommittedRunID(err)
+	if !ok {
+		return nil, false, nil
+	}
+	lastErr := err
+	for attempt := 0; ; attempt++ {
+		loaded, readErr := s.loadRunWithDB(s.db.WithContext(context.WithoutCancel(ctx)), runID)
+		if readErr == nil {
+			return loaded, true, nil
+		}
+		lastErr = readErr
+		if attempt >= len(backoffs) || ctx.Err() != nil {
+			break
+		}
+		timer := time.NewTimer(backoffs[attempt])
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+		case <-timer.C:
+		}
+	}
+	finalized, completeErr := s.CompleteIfActive(runID, fmt.Errorf("run: the committed run could not be read back to launch it: %w", lastErr))
+	if completeErr != nil {
+		log.Error("run: a committed run could not be read back or finalized; leaving it for an operator",
+			"run_id", runID, "read_error", lastErr, "error", completeErr)
+		return nil, true, fmt.Errorf("%w (run %s; finalize failed)", ErrCommittedRunAbandoned, runID)
+	}
+	log.Error("run: a committed run could not be read back; finalized it as failed so it frees its slot",
+		"run_id", runID, "finalized", finalized, "read_error", lastErr)
+	return nil, true, fmt.Errorf("%w (run %s)", ErrCommittedRunAbandoned, runID)
+}
+
 var (
 	// ErrPartitionNotRetryable is returned by RetryPartition when the addressed
 	// instance is terminal but not FAILED. The retryable set is documented at
@@ -1994,9 +2042,11 @@ func (s *Store) StartQueuedRun(ctx context.Context, queued *models.RunQueue) (*J
 		queueClaim:       queued.ClaimedBy,
 		queuedNamespace:  queued.Namespace,
 	})
-	if (err == nil && started != nil) || errors.Is(err, ErrRunSkipped) {
-		// The admission consumed the row with the run it created, or with
-		// the skipped (or held-upstream) outcome it recorded.
+	_, committed := CommittedRunID(err)
+	if (err == nil && started != nil) || committed || errors.Is(err, ErrRunSkipped) {
+		// The admission consumed the row with the run it created (even one
+		// it then failed to read back), or with the skipped (or
+		// held-upstream) outcome it recorded.
 		s.observeQueuedRunRemoved(queued, true)
 	}
 	return started, err
