@@ -283,6 +283,8 @@ for line in recipe.splitlines():
     if not match:
         continue
     name, value = match.groups()
+    if name in native:
+        continue
     value = value.strip().removesuffix(chr(92)).strip()
     value = value.replace('{{ event_ingest_api_key }}', 'integration-test-key').replace('{{ contract_deprecation_window }}', '5s')
     if '{{' in value:
