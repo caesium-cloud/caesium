@@ -1,0 +1,2 @@
+# Unified diff context prefixes precede the native source's tabs and blank lines.
+build/patches/dqlite-query-schema.patch -whitespace

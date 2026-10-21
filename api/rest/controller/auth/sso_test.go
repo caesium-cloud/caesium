@@ -647,12 +647,60 @@ func TestLDAPLoginRejectsDeniedLogin(t *testing.T) {
 	c, rec := newAuthContext(t, http.MethodPost, "/auth/sso/ldap/login", `{"username":"denied","password":"secret"}`)
 
 	err = ctrl.LDAPLogin(c)
-	require.Error(t, err)
-	he, ok := err.(*echo.HTTPError)
-	require.True(t, ok)
-	require.Equal(t, http.StatusForbidden, he.Code)
+	require.NoError(t, err, "no_binding answers a JSON 403 body carrying the reason")
+	require.Equal(t, http.StatusForbidden, rec.Code)
+	require.JSONEq(t, `{"message":"login denied","reason":"no_binding"}`, rec.Body.String())
 	require.True(t, provider.authenticateCalled)
 	require.Nil(t, responseCookie(rec.Result().Cookies(), "caesium_session"))
+}
+
+// disabledUserSSO returns an SSO service whose mapper grants "eng" a role and
+// a disabled user of that identity, so the denial is user_disabled, not
+// no_binding.
+func disabledUserSSO(t *testing.T, ext *iauth.ExternalIdentity) (*iauth.SessionStore, *iauth.SSOService) {
+	t.Helper()
+	db := testutil.OpenTestDB(t)
+	t.Cleanup(func() { testutil.CloseDB(db) })
+	sessions := iauth.NewSessionStore(db)
+	mapper, err := iauth.NewRoleMapper("eng=operator", "")
+	require.NoError(t, err)
+	disabledAt := time.Now().UTC()
+	require.NoError(t, db.Create(&models.User{
+		ID: uuid.New(), Issuer: ext.Issuer, Subject: ext.Subject, Email: ext.Email,
+		Role: models.RoleViewer, CreatedAt: disabledAt, DisabledAt: &disabledAt,
+	}).Error)
+	return sessions, iauth.NewSSOService(iauth.NewUserStore(db), sessions, mapper)
+}
+
+// Only no_binding changes shape: a disabled user keeps today's plain 403 on
+// both flows and mints no session.
+func TestOtherLoginDenialsKeepTheirContract(t *testing.T) {
+	t.Run("redirect flow", func(t *testing.T) {
+		ext := testExternalIdentity("oidc")
+		sessions, sso := disabledUserSSO(t, ext)
+		ctrl := NewSSO(sessions, sso, "caesium_session")
+		ctrl.SetOIDCProvider(&fakeRedirectAuthenticator{name: "oidc", returnTo: "/jobs", identity: ext})
+		c, rec := newAuthContext(t, http.MethodGet, "/auth/sso/oidc/callback?code=abc&state=xyz", "")
+		err := ctrl.OIDCCallback(c)
+		var he *echo.HTTPError
+		require.ErrorAs(t, err, &he)
+		require.Equal(t, http.StatusForbidden, he.Code)
+		require.Empty(t, rec.Header().Get("Location"))
+		require.Nil(t, responseCookie(rec.Result().Cookies(), "caesium_session"))
+	})
+	t.Run("credential flow", func(t *testing.T) {
+		ext := testExternalIdentity("ldap")
+		sessions, sso := disabledUserSSO(t, ext)
+		ctrl := NewSSO(sessions, sso, "caesium_session")
+		ctrl.SetLDAPProvider(&fakeCredentialAuthenticator{name: "ldap", identity: ext})
+		c, rec := newAuthContext(t, http.MethodPost, "/auth/sso/ldap/login", `{"username":"viewer","password":"secret"}`)
+		err := ctrl.LDAPLogin(c)
+		var he *echo.HTTPError
+		require.ErrorAs(t, err, &he)
+		require.Equal(t, http.StatusForbidden, he.Code)
+		require.NotContains(t, rec.Body.String(), "no_binding")
+		require.Nil(t, responseCookie(rec.Result().Cookies(), "caesium_session"))
+	})
 }
 
 func TestLDAPLoginRejectsInvalidCredentials(t *testing.T) {
@@ -869,10 +917,9 @@ func TestOIDCCallbackRejectsDeniedLogin(t *testing.T) {
 	c, rec := newAuthContext(t, http.MethodGet, "/auth/sso/oidc/callback?code=abc&state=xyz", "")
 
 	err = ctrl.OIDCCallback(c)
-	require.Error(t, err)
-	he, ok := err.(*echo.HTTPError)
-	require.True(t, ok)
-	require.Equal(t, http.StatusForbidden, he.Code)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusFound, rec.Code)
+	require.Equal(t, "/?login_error=no_binding", rec.Header().Get("Location"))
 	require.Nil(t, responseCookie(rec.Result().Cookies(), "caesium_session"))
 }
 

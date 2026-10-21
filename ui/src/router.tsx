@@ -18,6 +18,7 @@ import { RunDetailPage } from "./features/jobs/RunDetailPage";
 import { RunDiffRoutePage } from "./features/jobs/RunDiffView";
 import { StatsPage } from "./features/stats/StatsPage";
 import { SystemPage } from "./features/system/SystemPage";
+import { AccessPage } from "./features/access/AccessPage";
 import { TriggersPage } from "./features/triggers/TriggersPage";
 import { api } from "./lib/api";
 import { normalizeStatusFilter } from "./features/datasets/freshness-utils";
@@ -280,6 +281,12 @@ const systemRoute = createRoute({
   component: SystemPage,
 });
 
+const accessRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "access",
+  component: AccessPage,
+});
+
 const jobDefsRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "jobdefs",
@@ -315,6 +322,7 @@ const routeTree = rootRoute.addChildren([
   databaseLegacyRoute,
   databaseRoute,
   jobDefsRoute,
+  accessRoute,
 ]);
 
 export const router = createRouter({ routeTree, scrollRestoration: true, scrollToTopSelectors: ["#main-content"] });

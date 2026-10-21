@@ -1507,7 +1507,7 @@ func TestLifecycleClusterAfterUpgrade(t *testing.T) {
 		if current.Status != "running" || len(r.Tasks) != 1 || len(current.Tasks) != 1 ||
 			current.Tasks[0].ID != r.Tasks[0].ID || current.Tasks[0].Attempt < r.Tasks[0].Attempt ||
 			current.Tasks[0].Status != "running" {
-			failClusterCase(t, "retained-history-and-raw-effects", "in-flight task attempt %s did not survive upgrade to controlled release; status=%s", r.ID, current.Status)
+			failClusterCase(t, "retained-history-and-raw-effects", "in-flight task attempt %s did not survive upgrade to controlled release; status=%s error=%q", r.ID, current.Status, current.Error)
 		}
 		proof, err := readRetainedClusterTaskProof(ctx, h, base, fx.DurableTasks, r.ID, current.Tasks[0].ID)
 		if err != nil {

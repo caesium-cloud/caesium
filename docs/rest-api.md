@@ -33,6 +33,7 @@ For the auth management CLI, supply credentials through `CAESIUM_API_KEY`. The
 | `POST /v1/auth/keys/:id/revoke`, `POST /v1/auth/keys/:id/rotate` | Revoke or rotate a key; needs admin in every namespace the key is confined to (admin at `*` for a user-bound key). A rotation keeps the key's role, scope, namespaces and expiry; a user-bound key is never rotated (`409`). See [identity-and-access.md](identity-and-access.md#user-bound-keys). |
 | `GET /v1/auth/audit` | Query the audit log. `?namespace=` filters on the row's namespace (a namespace or `*`) and is what the request is authorised on; omitted means all rows (cluster admin). |
 | `GET /v1/auth/policy` | Cluster admin. The effective access policy with `revision`, `source`, `loaded_at`, `default_role`, `last_reload` and `warnings`. See [identity-and-access.md](identity-and-access.md#rest-api). |
+| `GET /v1/auth/namespaces` | Cluster viewer. The declared namespaces with their Kubernetes target, secret allow-list and quota, plus the policy `source`, `revision` and `last_reload`; never bindings, groups or emails. A namespace-confined or job-scoped key gets `403`. See [identity-and-access.md](identity-and-access.md#rest-api). |
 | `POST /v1/auth/policy/reload` | Cluster admin. Reload the access policy file on the serving node: `200` (swapped or unchanged), `422` (invalid file, last good revision retained), `409` (no policy file configured). |
 | `GET /v1/auth/users`, `GET /v1/auth/users/:id` | Cluster admin. List users (`?issuer=`, `?email=`, `?disabled=`, `?limit=`, `?offset=`; total and next offset in `X-Caesium-Total-Count` / `X-Caesium-Next-Offset`) or show one with its active sessions and user-bound keys. See [identity-and-access.md](identity-and-access.md#user-administration). |
 | `POST /v1/auth/users/:id/disable`, `POST /v1/auth/users/:id/enable` | Cluster admin. Disable a user (revokes all its sessions and user-bound keys in the same transaction; `409` for the caller's own user) or enable it (revoked sessions and keys stay revoked). Repeats answer `200` with `"changed": false`. |
@@ -111,7 +112,16 @@ and anything else must be a DNS label (400 otherwise). The namespace is
 create-only: a `PATCH` may omit it or echo the stored value, but a `PATCH` that
 changes it returns 400 with `namespace is create-only; delete and recreate the
 object to move it`, and nothing in that patch is written. Moving an object is
-delete + create.
+delete + create. With a policy file loaded, a create in a namespace the file
+does not declare returns 400 `namespace "<name>" is not declared in the access
+policy`. For a namespace-confined caller the lists return its namespaces'
+objects plus the `*` ones, and writes need operator in the object's namespace
+(at `*` for a `*` object). Names are unique across namespaces: a create or
+rename onto a taken name returns 409 `conflict`, and a delete releases the
+name (a name may not contain `~deleted~`, which marks deleted objects).
+While a policy file is loaded, a policy delivers only events its own namespace
+owns (a `*` policy delivers all); with none, routing is unchanged. See the
+identity-and-access guide's Shared objects section.
 
 ## System and operator surfaces
 

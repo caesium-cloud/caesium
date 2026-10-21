@@ -13,6 +13,8 @@ const { mockFetch, terminalWrite, terminalReset, fitAddonFit } = vi.hoisted(() =
 
 vi.mock("@/lib/auth", () => ({
   withAuthHeaders: () => ({}),
+  // Anonymous (auth disabled): every action is offered.
+  usePrincipal: () => ({ kind: null, subject: null, role: null }),
 }));
 
 vi.mock("@xterm/xterm", () => ({

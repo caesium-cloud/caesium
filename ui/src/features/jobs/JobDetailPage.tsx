@@ -47,6 +47,8 @@ import { TaskDetailPanel } from "./TaskDetailPanel";
 import { TaskMetadataPanel } from "./TaskMetadataPanel";
 import { TriggerDialog } from "./TriggerDialog";
 import { useDagHeight } from "@/hooks/useDagHeight";
+import { canActIn, requiresRoleReason } from "@/features/auth/access";
+import { usePrincipal } from "@/lib/auth";
 import { ApiError, api, type Atom, type Incident, type Job, type JobRun, type JobTask, type RunQueueItem, type TaskRun, type Trigger } from "@/lib/api";
 import { events, type CaesiumEvent } from "@/lib/events";
 import { coalescedRefresh } from "@/lib/coalesced-refresh";
@@ -67,6 +69,7 @@ export function JobDetailPage() {
   const { jobId } = useParams({ strict: false }) as { jobId: string };
   const navigate = useNavigate();
   const queryClient = useQueryClient();
+  const principal = usePrincipal();
   const pathname = useRouterState({ select: (state) => state.location.pathname });
   const secondaryView = secondaryViewFromPath(pathname);
   const [streamHealthy, setStreamHealthy] = useState(events.isHealthy());
@@ -479,6 +482,8 @@ export function JobDetailPage() {
     );
   }
 
+  const mayRun = canActIn(principal, "runner", job.namespace);
+  const mayPause = canActIn(principal, "operator", job.namespace);
   const selectedTask = selectedTaskId ? taskDefinitions[selectedTaskId] : undefined;
   const selectedRunTask = selectedTaskId ? featuredRunTasks[selectedTaskId] : undefined;
   const jobIncidents = jobIncidentList?.incidents ?? [];
@@ -515,7 +520,8 @@ export function JobDetailPage() {
                   size="sm"
                   variant={featuredRun ? "outline" : "default"}
                   aria-label="Trigger job"
-                  disabled={triggerMutation.isPending || job.paused}
+                  disabled={triggerMutation.isPending || job.paused || !mayRun}
+                  title={mayRun ? undefined : requiresRoleReason("runner", job.namespace)}
                 >
 
                   Trigger
@@ -536,7 +542,8 @@ export function JobDetailPage() {
               <DropdownMenuContent align="end" className="w-48">
                 <DropdownMenuItem
                   aria-label="Backfill job"
-                  disabled={job.paused || trigger?.type !== "cron"}
+                  disabled={job.paused || trigger?.type !== "cron" || !mayRun}
+                  title={mayRun ? undefined : requiresRoleReason("runner", job.namespace)}
                   onSelect={() => setBackfillDialogOpen(true)}
                 >
 
@@ -544,7 +551,8 @@ export function JobDetailPage() {
                 </DropdownMenuItem>
                 <DropdownMenuItem
                   aria-label={job.paused ? "Unpause job" : "Pause job"}
-                  disabled={pauseMutation.isPending}
+                  disabled={pauseMutation.isPending || !mayPause}
+                  title={mayPause ? undefined : requiresRoleReason("operator", job.namespace)}
                   onSelect={() => pauseMutation.mutate({ jobId: job.id, paused: !job.paused, hasActiveRun: !!activeRun })}
                 >
 
@@ -579,6 +587,7 @@ export function JobDetailPage() {
         jobId={job.id}
         cancelingQueueId={cancelQueueMutation.isPending ? cancelQueueMutation.variables?.queueId : undefined}
         onCancel={(queueId) => cancelQueueMutation.mutate({ jobId: job.id, queueId })}
+        namespace={job.namespace}
       />
 
       {features?.agent_remediation_enabled === true ? (
@@ -656,6 +665,8 @@ export function JobDetailPage() {
             taskType={dag?.nodes?.find(n => n.id === selectedTaskId)?.type}
             jobId={jobId}
             runId={featuredRun.id}
+            jobNamespace={job.namespace}
+            runNamespace={featuredRun.namespace}
             incidents={selectedTaskIncidents}
             onClose={() => handleNodeSelect(null)}
           />
@@ -694,7 +705,7 @@ export function JobDetailPage() {
                 />
               )}
               {secondaryView === "backfills" && (
-                <BackfillsView jobId={job.id} />
+                <BackfillsView jobId={job.id} jobNamespace={job.namespace} />
               )}
               {secondaryView === "cache" && (
                 <CacheView
@@ -726,7 +737,9 @@ function RunQueuePanel({
   jobId,
   cancelingQueueId,
   onCancel,
+  namespace,
 }: {
+  namespace?: string;
   rows?: RunQueueItem[];
   isLoading: boolean;
   jobId: string;
@@ -734,6 +747,8 @@ function RunQueuePanel({
   onCancel: (queueId: string) => void;
 }) {
   const hasRows = (rows?.length ?? 0) > 0;
+  const principal = usePrincipal();
+  const canCancel = canActIn(principal, "operator", namespace);
   const staleCount = rows?.filter(isStaleQueueRow).length ?? 0;
   if (!hasRows && !isLoading) {
     return null;
@@ -824,7 +839,8 @@ function RunQueuePanel({
                   size="sm"
                   className="h-7 px-2 text-xs text-danger hover:text-danger"
                   aria-label={`Cancel queued run ${shortId(row.id)}`}
-                  disabled={cancelingQueueId === row.id}
+                  disabled={cancelingQueueId === row.id || !canCancel}
+                  title={canCancel ? undefined : requiresRoleReason("operator", namespace)}
                   onClick={() => onCancel(row.id)}
                 >
                   <span aria-hidden="true" className="cs-status-glyph cs-status-failed text-danger" />

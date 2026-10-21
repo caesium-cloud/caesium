@@ -299,7 +299,7 @@ fi
             "auth": {"TestPublicListingsOrderByAndRefuseInvalidTerms", "TestIncidentNamespaceLifecycle",
                      "TestAuthPolicyShowAndReloadSurface", "TestAuthUserAdministrationLifecycle",
                      "TestAuthUserAdministrationDeniesNonClusterAdmins",
-                     "TestAuthUserBoundKeyLifecycle",
+                     "TestAuthUserBoundKeyLifecycle", "TestAuthNamespacesRoute",
                      "TestAuthJobdefApplyLateRefusalRollsBack", "TestAuthLegacyJobCreateConfined",
                      "TestAuthTriggerTenancyWebhookPathRace"},
         }
@@ -319,7 +319,7 @@ fi
                "auth": ["TestPublicListingsOrderByAndRefuseInvalidTerms", "TestIncidentNamespaceLifecycle",
                         "TestAuthPolicyShowAndReloadSurface", "TestAuthUserAdministrationLifecycle",
                         "TestAuthUserAdministrationDeniesNonClusterAdmins",
-                        "TestAuthUserBoundKeyLifecycle",
+                        "TestAuthUserBoundKeyLifecycle", "TestAuthNamespacesRoute",
                         "TestAuthJobdefApplyLateRefusalRollsBack", "TestAuthLegacyJobCreateConfined",
                         "TestAuthTriggerTenancyWebhookPathRace"]}
         for lane, names in new.items():

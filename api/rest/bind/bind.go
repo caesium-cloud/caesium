@@ -307,6 +307,7 @@ func bindAuth(g *echo.Group, controller *authctrl.Controller) {
 	g.GET("/auth/audit", controller.QueryAudit)
 	g.GET("/auth/policy", controller.GetPolicy)
 	g.POST("/auth/policy/reload", controller.ReloadPolicy)
+	g.GET("/auth/namespaces", controller.GetNamespaces)
 }
 
 // bindUserAdmin mounts user and session administration (identity-and-access

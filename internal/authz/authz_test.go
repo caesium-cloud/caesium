@@ -98,6 +98,35 @@ func TestNamespaceFilter(t *testing.T) {
 	require.Nil(t, authz.NamespaceFilter(nil, "namespace"))
 }
 
+// TestSharedObjectFilter: shared objects add the cluster-shared "*" rows to a
+// restricted caller's namespaces, and change nothing else.
+func TestSharedObjectFilter(t *testing.T) {
+	db := testutil.OpenTestDB(t)
+	t.Cleanup(func() { testutil.CloseDB(db) })
+	seedNamespacedJobs(t, db)
+	require.NoError(t, db.Exec("UPDATE jobs SET namespace = ? WHERE alias = ?", models.ClusterNamespace, "f1").Error)
+
+	unrestricted := db.WithContext(context.Background())
+	require.Equal(t, []string{"d1", "f1", "legacy", "m1"}, aliases(t, authz.SharedObjectFilter(unrestricted, "namespace")), "unrestricted: a no-op")
+
+	ctx := authz.WithAllowedNamespaces(context.Background(), []string{"marketing"})
+	require.Equal(t, []string{"f1", "m1"}, aliases(t, authz.SharedObjectFilter(db.WithContext(ctx), "namespace")), "marketing plus *")
+	require.True(t, authz.Filtered(ctx))
+	require.Equal(t, []string{"m1"}, aliases(t, authz.NamespaceFilter(db.WithContext(ctx), "namespace")), "NamespaceFilter never adds *")
+
+	ctx = authz.WithAllowedNamespaces(context.Background(), []string{"default"})
+	require.Equal(t, []string{"d1", "f1", "legacy"}, aliases(t, authz.SharedObjectFilter(db.WithContext(ctx), "namespace")), "the legacy default arm is kept")
+
+	ctx = authz.WithAllowedNamespaces(context.Background(), []string{})
+	require.Empty(t, aliases(t, authz.SharedObjectFilter(db.WithContext(ctx), "namespace")), "restricted to nothing still matches nothing")
+	ctx = authz.WithAllowedNamespaces(context.Background(), []string{"marketing"})
+	require.Empty(t, aliases(t, authz.SharedObjectFilter(db.WithContext(ctx), "bad column")))
+
+	// The stored scope is not widened for later filters on the same request.
+	allowed, _ := authz.AllowedNamespaces(ctx)
+	require.Equal(t, []string{"marketing"}, allowed)
+}
+
 func TestMarkFiltered(t *testing.T) {
 	e := echo.New()
 	req := httptest.NewRequestWithContext(authz.WithAllowedNamespaces(context.Background(), []string{"marketing"}), http.MethodGet, "/", nil)

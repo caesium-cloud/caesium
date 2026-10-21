@@ -181,17 +181,19 @@ func (o *incidentActionOps) Escalate(ctx context.Context, incidentID uuid.UUID, 
 	}
 	event.PublishAndMarkBusDispatched(ctx, o.bus, o.eventStore, evt)
 
-	// Ask the SAME matcher the subscriber uses whether anything will carry this.
+	// Ask the SAME routing decision the subscriber sends by whether anything
+	// will carry this: matching policies in the incident's namespace (or "*")
+	// whose channel exists, is enabled and is visible from the policy.
 	// A failure to answer is reported as not-routed rather than as an escalation
 	// failure: the event is already durable, and overstating delivery is the one
 	// outcome to avoid.
 	routed := false
-	policies, err := notification.MatchPolicies(ctx, o.db, evt)
+	deliveries, err := notification.RouteEvent(ctx, o.db, evt)
 	if err != nil {
 		log.Warn("incident: could not determine escalation routing",
 			"incident_id", incidentID, "error", err)
 	} else {
-		routed = len(policies) > 0
+		routed = len(deliveries) > 0
 	}
 	if !routed {
 		log.Warn("incident: escalation raised but no notification policy routes it; nobody was paged",

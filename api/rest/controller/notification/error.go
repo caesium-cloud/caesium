@@ -7,6 +7,7 @@ import (
 
 	"github.com/caesium-cloud/caesium/api/internal/orderby"
 	svc "github.com/caesium-cloud/caesium/api/rest/service/notification"
+	"github.com/caesium-cloud/caesium/internal/auth"
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/labstack/echo/v5"
 	"gorm.io/gorm"
@@ -27,6 +28,10 @@ var allowedOrderColumns = map[string]struct{}{
 const namespaceImmutableMessage = "namespace is create-only; delete and recreate the object to move it"
 
 func serviceError(err error) error {
+	if undeclared, ok := errors.AsType[*auth.UndeclaredNamespacesError](err); ok {
+		// Names only the namespace the caller's own create body asked for.
+		return echo.NewHTTPError(http.StatusBadRequest, undeclared.Error()).Wrap(err)
+	}
 	switch {
 	case err == nil:
 		return nil

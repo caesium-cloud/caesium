@@ -79,8 +79,9 @@ Jobs `ci-ok` evaluates (several may skip on a narrow PR):
 - `builder` / `builder-arm64` / `images` / `images-arm64` / `reagents`
   (producers, including both native static CLI smoke tests)
 - `lint`, `unit-test`, `unit-test-arm64`
-- `ui-test`, `ui-e2e`, `ui-e2e-auth`
-- `integration` (all three Docker shards and the agent-auth lane)
+- `ui-test`, `ui-e2e`, `ui-e2e-auth`, `ui-e2e-keycloak`
+- `integration` (all three Docker shards, the agent-auth lane and the Keycloak
+  lane; see "Keycloak lane" in §4)
 - `helm-lint` and `early-evidence` (distributed-testing G5; see §4)
 - `lifecycle-standalone`, `generated-fuzz`, `generated-oracles` and
   `coverage-ratchets` (distributed-testing G6, W9; each uploads lane evidence
@@ -303,6 +304,7 @@ unit-test-arm64
 ui-test
 ui-e2e
 ui-e2e-auth
+ui-e2e-keycloak
 images
 images-arm64
 reagents
@@ -355,8 +357,8 @@ sources unless a precompiled runner is explicitly selected.
 changes
   ├─ ui-test
   ├─ reagents ────────────────────── lint, unit-test (also need builder)
-  ├─ builder ─── images ─────────┬─ integration (3 Docker shards + agent-auth)
-  │                              ├─ ui-e2e, ui-e2e-auth (also need ui-test)
+  ├─ builder ─── images ─────────┬─ integration (3 Docker shards + agent-auth + keycloak)
+  │                              ├─ ui-e2e, ui-e2e-auth, ui-e2e-keycloak (also need ui-test)
   │                              ├─ helm/podman (3 full-suite shards each)
   │                              ├─ early-evidence (also needs helm-lint)
   │                              └─ integration-extra (also needs reagents)
@@ -382,11 +384,12 @@ publish ← tag only, needs the full matrix and ci-ok
 | `unit-test` | ubuntu-26.04 | `builder`, `reagents` | 30 | `unit-test`, `reagents-test` | none |
 | `unit-test-arm64` | ubuntu-26.04-arm | `builder-arm64` | 30 | `unit-test` only — no `reagents-test` on arm64 | none |
 | `ui-test` | ubuntu-26.04 | `changes` | 30 | Node 24 + cached npm downloads; one `npm ci`, lint + test + `build:ci` | none |
-| `integration` | ubuntu-26.04 | `images` | 45 | matrix: three Docker full-suite shards + agent-auth (`run-integration` composite) | `integration-up` / `integration-up-agent` |
+| `integration` | ubuntu-26.04 | `images` | 45 (keycloak 20) | matrix: three Docker full-suite shards + agent-auth + keycloak (`run-integration` composite) | `integration-up` / `integration-up-agent` / `integration-up-keycloak` |
 | `integration-extra` | ubuntu-26.04 | `images`, `reagents` | 45–60 | matrix: distributed / owner-memory / infra (not required-to-merge) | matching `integration-up-*` |
 | `integration-arm64` | ubuntu-26.04-arm | `images-arm64`, `reagents-arm64` | 45–60 | matrix: three Docker full-suite shards + infra (parallel with amd64) | matching `integration-up*` |
 | `ui-e2e` | ubuntu-26.04 | `[ui-test, images]` | 45 | host-installed Playwright process joined only to the server network namespace, reusing the `product-amd64` artifact | inline `docker run --name caesium-server` |
 | `ui-e2e-auth` | ubuntu-26.04 | `[ui-test, images]` | 45 | inline `docker run` | inline `docker run --name caesium-server-auth` |
+| `ui-e2e-keycloak` | ubuntu-26.04 | `[ui-test, images]` | 20 | `integration-up-keycloak`, then host Playwright `--project=keycloak` | Keycloak + `caesium-server-keycloak-test` via `integration-up-keycloak` |
 | `connectors` | ubuntu-26.04 | `[changes, builder, images, ui-test]` | 45 | `integration-test-connectors` (advisory) | `integration-up-connectors`, then three persistent Helm members on one kind node |
 | `helm-integration-test` | ubuntu-26.04 | `[images, helm-lint]` | 60 | kind + `helm install` + `helm test` + full suite in three shards | kind pod via the Helm chart |
 | `helm-pod-replacement-test` | ubuntu-26.04 | `[changes, images, helm-lint]` | 45 | `scripts/helm-pod-replacement.sh` — kind + `helm install` at three replicas with retained PVCs, then replaces every pod and proves it rejoins (issue #493) | three kind pods via the Helm chart |
@@ -619,9 +622,9 @@ the host-side sanitizer and artifact upload because the browser still runs as
 the runner user in the checkout.
 
 CI retains two Playwright retries for diagnosis and sets `failOnFlakyTests`:
-a test that fails initially and passes on retry still fails the lane. Both
-`ui-e2e` and `ui-e2e-auth` always attempt collection and upload before server
-cleanup, including after setup or test failure. A collection or upload failure
+a test that fails initially and passes on retry still fails the lane.
+`ui-e2e`, `ui-e2e-auth` and `ui-e2e-keycloak` always attempt collection and
+upload before server cleanup, including after setup or test failure. A collection or upload failure
 is also visible as a failing step. Missing reports after an early setup failure
 are not evidence of a passing browser suite.
 
@@ -635,6 +638,13 @@ ZIP; malformed archives fail collection without falling back to raw copies.
 This token-specific redaction is not a general secret detector. For PR runs,
 `candidate_sha` identifies GitHub's tested merge commit; verify its parents
 against the intended PR head and base before reusing the evidence.
+`ui-e2e-keycloak-diag-<run_attempt>` differs on purpose: the `keycloak`
+Playwright project records no trace and no video (a trace stores the session
+and Keycloak cookies and the login form's credentials as structured fields that
+token redaction does not reliably reach), the collection step refuses to upload
+any trace, HAR or video that appears anyway, and its redaction also covers
+`css_` session tokens. It carries the outcomes file, redacted Caesium and
+Keycloak logs, the Playwright reports and failure screenshots.
 
 The local workflow checks are:
 
@@ -651,6 +661,57 @@ returned exit 1 after a successful retry. Its refreshed hosted run
 passed 28 default and 8 auth tests without skips or flaky outcomes; both
 sanitized artifacts were downloaded and checked. This establishes the current
 browser evidence path, not later multi-node fault coverage.
+
+### Keycloak lane (identity-and-access G1)
+
+The only lane that exercises SSO end to end against a real identity provider.
+It is merge-blocking from the start: the Go scenarios are the `keycloak` leg of
+the `integration` matrix, and the browser smoke is the `ui-e2e-keycloak` job;
+both sit under `ci-ok` and in `publish.needs`.
+
+- **Topology.** `just integration-up-keycloak` starts
+  `quay.io/keycloak/keycloak` (`keycloak_image` in the justfile, pinned by
+  version and digest because quay.io re-pushes version tags) as
+  `caesium-keycloak-test` with `start-dev --import-realm` and
+  `--hostname=http://127.0.0.1:8180`. That container owns the network
+  namespace and publishes 8080 and 8180 on host loopback only (the realm has fixture credentials and no TLS). The Caesium server
+  (`caesium-server-keycloak-test`, the `-test` image), the one-shot job-apply
+  container and the Go runner join it, so the issuer
+  `http://127.0.0.1:8180/realms/caesium` and the public base
+  `http://127.0.0.1:8080` are the same URLs for Caesium's back channel, the
+  runner and a host browser. Caesium starts only after the realm's discovery
+  document answers, because it reads it at startup.
+- **Fixtures.** `test/testdata/keycloak/caesium-realm.json` (client `caesium`,
+  the `groups` scope with a flat Group Membership mapper, users admin, bob,
+  carol, dave with an unverified email, erin), `policy.yaml` (the namespaces
+  of `test/testdata/policy/two-namespaces.yaml` plus the realm's bindings,
+  including `caesium-admins`, which the shared fixture must never bind) and
+  `jobs/` (one job each in `marketing` and `finance`, applied with the
+  bootstrap admin key). `internal/guardrails/keycloak_lane_test.go` checks the
+  realm, policy, jobs and recipes agree, so drift fails `unit-test` before it
+  reaches the lane.
+- **Scenarios.** `test/keycloak_lane_test.go` drives the real code flow
+  through Keycloak's HTML login form with a cookie-jar client
+  (`test/keycloak_helpers_test.go`, reusable for G3/G4): admin at `*`, bob
+  confined to `marketing` (finance job absent and refused), carol and dave
+  denied with `no_binding` and no session (dave's bound email is unverified),
+  erin granted by her verified email. `requireKeycloakLane` fails rather than
+  skips on the lane, and the recipe fails below
+  `keycloak_integration_min_pass` Keycloak passes. `ui/e2e/keycloak.spec.ts`
+  signs the admin in through Keycloak's login page and lands in the Console.
+- **Failure handling.** Each recipe installs its cleanup trap before the first
+  container starts. On failure it prints the Caesium and Keycloak logs through
+  `scripts/lane-logs.sh`, which redacts `csk_` and `css_` tokens whether or
+  not the bootstrap key was captured yet, then removes every lane container
+  and exits with the original status.
+- **Run it locally** (under the host lane lock): `just integration-test-keycloak`
+  for the Go scenarios, `just ui-e2e-keycloak` for the browser smoke (host
+  Node and Playwright). `just integration-up-keycloak` leaves the lane running
+  (admin console `http://127.0.0.1:8180/admin/`, fixture-only credentials in
+  the justfile); `just integration-down-keycloak` removes it.
+- **Bumping Keycloak.** Pick a release at least two weeks old, replace both the
+  version and the digest of its multi-arch index in `keycloak_image`, and run
+  both lanes.
 
 ### Load-harness reports and failure handling (distributed-testing W1/E1)
 
@@ -2575,7 +2636,8 @@ automatically pick up new env a feature adds to those recipes — its
 PR, or the lane drifts until something it depends on breaks.
 
 Lanes that go through `just integration-up*`:
-`integration` Docker (`integration-up`) and agent-auth (`integration-up-agent`),
+`integration` Docker (`integration-up`), agent-auth (`integration-up-agent`)
+and keycloak (`integration-up-keycloak`, which `ui-e2e-keycloak` also uses),
 `integration-extra` distributed / owner-memory / infra,
 `integration-arm64` Docker / infra.
 CI sets `CAESIUM_SKIP_IMAGE_BUILD=true` and docker-loads the `images`
@@ -2594,7 +2656,11 @@ the runner-side path as `CAESIUM_IT_AUTH_POLICY_PATH` so scenarios can rewrite
 it (start from the served bytes, append, reload, restore). `requireAuthLane`
 fails, never skips, when that served file is missing or does not declare
 `marketing` and `finance`; the coverage journey's api-key lane serves no policy
-file on purpose and says so with `CAESIUM_IT_AUTH_POLICY=none`. Lanes without a
+file on purpose and says so with `CAESIUM_IT_AUTH_POLICY=none`. The Keycloak
+lane is the one exception to the shared fixture: `integration-up-keycloak`
+serves `test/testdata/keycloak/policy.yaml`, whose namespaces block must equal
+the shared fixture's (a guardrail compares them) and which adds the realm's
+bindings. Lanes without a
 policy file (podman, kind/helm, coverage journeys) accept every valid
 namespace, so the B1 namespace scenarios run there unchanged.
 
@@ -2619,7 +2685,8 @@ Lanes that set server env inline and do **not** go through any
 ### Parity rule and its guardrail
 
 `integration-up-distributed`, `integration-up-owner-memory`,
-`integration-up-infra`, and `integration-up-agent` (justfile) must each set
+`integration-up-infra`, `integration-up-agent` and `integration-up-keycloak`
+(justfile) must each set
 every `CAESIUM_*` feature-gate env var that `integration-up` sets, plus
 whatever lane-specific vars that lane legitimately needs (distributed
 topology, auth, agent remediation, etc.). Each of these recipes starts its

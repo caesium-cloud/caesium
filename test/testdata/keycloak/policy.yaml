@@ -1,0 +1,49 @@
+# The Keycloak lane's access policy (plan item G1, design §12.2).
+#
+# justfile `integration-up-keycloak` mounts test/testdata/keycloak read-only
+# and serves this file. It is NOT test/testdata/policy/two-namespaces.yaml
+# because that fixture must never bind caesium-admins (the api-key lane seeds
+# that group and expects a refusal); this lane binds it to the realm's admin.
+#
+# - `namespaces` must stay identical to two-namespaces.yaml's block
+#   (internal/guardrails/keycloak_lane_test.go compares them).
+# - The users in caesium-realm.json map onto these bindings:
+#     admin@example.com  caesium-admins       -> admin in every namespace
+#     bob@example.com    marketing-eng        -> operator in marketing
+#     carol@example.com  no group, no binding -> denied (no_binding)
+#     dave@example.com   no group, UNVERIFIED email bound below -> denied:
+#                        an unverified OIDC email never satisfies users:
+#     erin@example.com   no group, verified email bound below -> viewer in
+#                        finance (the positive control for dave)
+apiVersion: v1
+kind: AccessPolicy
+namespaces:
+  default: {}
+  marketing:
+    secrets:
+      allow:
+        - env/MARKETING_*
+    quotas:
+      maxConcurrentRuns: 1
+  finance: {}
+bindings:
+  - subjects:
+      groups: ["caesium-admins"]
+    role: admin
+    namespaces: ["*"]
+  - subjects:
+      groups: ["marketing-eng"]
+    role: operator
+    namespaces: ["marketing"]
+  - subjects:
+      groups: ["finance-eng"]
+    role: operator
+    namespaces: ["finance"]
+  - subjects:
+      users: ["dave@example.com"]
+    role: admin
+    namespaces: ["*"]
+  - subjects:
+      users: ["erin@example.com"]
+    role: viewer
+    namespaces: ["finance"]

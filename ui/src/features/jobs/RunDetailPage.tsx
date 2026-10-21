@@ -28,7 +28,7 @@ import { INCIDENT_EVENT_TYPES } from "@/features/incidents/incident-utils";
 import { useDagHeight } from "@/hooks/useDagHeight";
 import { api, type Atom, type Incident, type JobRun, type JobTask, type TaskRun } from "@/lib/api";
 import { usePrincipal } from "@/lib/auth";
-import { canReadConnectors, canReplayRuns } from "@/features/auth/access";
+import { canActIn, canReadConnectors, canReplayRuns, requiresRoleReason } from "@/features/auth/access";
 import { events, type CaesiumEvent } from "@/lib/events";
 import { formatUTCTimestamp, shortId } from "@/lib/utils";
 import { getRunCacheStats, isTerminalRunStatus, mergeTerminalRunUpdate } from "./cache-utils";
@@ -353,8 +353,11 @@ export function RunDetailPage() {
     ? runIncidents.filter((incident) => incidentMatchesTask(incident, selectedTaskId, selectedTask?.name))
     : [];
   const isLive = run.status === "running";
-  const canLaunchReplay = canReplayRuns(principal);
-  const replayGateReason = canLaunchReplay ? undefined : "Requires runner role";
+  // Replay runs in the job's current namespace (runner there) from a baseline
+  // the caller can read (viewer in the run's persisted namespace).
+  const canLaunchReplay = canReplayRuns(principal, job?.namespace) && canActIn(principal, "viewer", run.namespace);
+  const replayGateReason = canLaunchReplay ? undefined : requiresRoleReason("runner", job?.namespace);
+  const canRerun = canActIn(principal, "runner", job?.namespace);
   const compareDisabledReason = isLoadingJobRuns
     ? "Loading runs to compare"
     : compareRuns.length === 0
@@ -468,9 +471,9 @@ export function RunDetailPage() {
               const params = rerunParams(run.params);
               triggerMutation.mutate({ jobId, params });
             }}
-            title="Start a new run with the same parameters"
+            title={canRerun ? "Start a new run with the same parameters" : requiresRoleReason("runner", job?.namespace)}
             data-testid="run-rerun-trigger"
-            disabled={triggerMutation.isPending}
+            disabled={triggerMutation.isPending || !canRerun}
           >
             {triggerMutation.isPending ? "Re-running…" : "Re-run"} <Kbd>Alt R</Kbd>
           </Button>
@@ -494,6 +497,7 @@ export function RunDetailPage() {
         <ReplayDialog
           jobId={jobId}
           baselineRunId={runId}
+          namespace={job?.namespace}
           open={replayDialogOpen}
           onOpenChange={setReplayDialogOpen}
         />
@@ -594,6 +598,8 @@ export function RunDetailPage() {
               taskType={dag?.nodes?.find((n) => n.id === selectedTaskId)?.type}
               jobId={jobId}
               runId={runId}
+              jobNamespace={job?.namespace}
+              runNamespace={run.namespace}
               incidents={selectedTaskIncidents}
               onClose={() => setSelectedTaskId(null)}
             />
