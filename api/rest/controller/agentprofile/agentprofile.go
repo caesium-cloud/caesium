@@ -12,6 +12,7 @@ import (
 
 	"github.com/caesium-cloud/caesium/api/internal/orderby"
 	svc "github.com/caesium-cloud/caesium/api/rest/service/agentprofile"
+	"github.com/caesium-cloud/caesium/internal/auth"
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v5"
@@ -27,13 +28,17 @@ var allowedOrderColumns = map[string]struct{}{
 	"updated_at": {},
 }
 
+// newService constructs the service the handlers use; tests substitute one
+// over a test database.
+var newService = svc.New
+
 func List(c *echo.Context) error {
 	req, err := parseListRequest(c)
 	if err != nil {
 		return echo.NewHTTPError(http.StatusBadRequest, "bad request").Wrap(err)
 	}
 
-	profiles, err := svc.New(c.Request().Context()).List(req)
+	profiles, err := newService(c.Request().Context()).List(req)
 	if err != nil {
 		return echo.NewHTTPError(http.StatusInternalServerError, "internal server error").Wrap(err)
 	}
@@ -51,7 +56,7 @@ func Get(c *echo.Context) error {
 		return echo.NewHTTPError(http.StatusBadRequest, "bad request").Wrap(err)
 	}
 
-	p, err := svc.New(c.Request().Context()).Get(id)
+	p, err := newService(c.Request().Context()).Get(id)
 	if err != nil {
 		return serviceError(err)
 	}
@@ -64,7 +69,7 @@ func Create(c *echo.Context) error {
 		return echo.NewHTTPError(http.StatusBadRequest, "bad request").Wrap(err)
 	}
 
-	p, err := svc.New(c.Request().Context()).Create(req)
+	p, err := newService(c.Request().Context()).Create(req)
 	if err != nil {
 		return serviceError(err)
 	}
@@ -82,7 +87,7 @@ func Update(c *echo.Context) error {
 		return echo.NewHTTPError(http.StatusBadRequest, "bad request").Wrap(err)
 	}
 
-	p, err := svc.New(c.Request().Context()).Update(id, req)
+	p, err := newService(c.Request().Context()).Update(id, req)
 	if err != nil {
 		return serviceError(err)
 	}
@@ -95,7 +100,7 @@ func Delete(c *echo.Context) error {
 		return echo.NewHTTPError(http.StatusBadRequest, "bad request").Wrap(err)
 	}
 
-	if err := svc.New(c.Request().Context()).Delete(id); err != nil {
+	if err := newService(c.Request().Context()).Delete(id); err != nil {
 		return serviceError(err)
 	}
 	return c.NoContent(http.StatusNoContent)
@@ -162,6 +167,10 @@ func toView(p models.AgentProfile) profileView {
 const namespaceImmutableMessage = "namespace is create-only; delete and recreate the object to move it"
 
 func serviceError(err error) error {
+	if undeclared, ok := errors.AsType[*auth.UndeclaredNamespacesError](err); ok {
+		// Names only the namespace the caller's own create body asked for.
+		return echo.NewHTTPError(http.StatusBadRequest, undeclared.Error()).Wrap(err)
+	}
 	switch {
 	case err == nil:
 		return nil

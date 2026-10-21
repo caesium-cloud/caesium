@@ -7,10 +7,13 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/caesium-cloud/caesium/internal/auth"
+	"github.com/caesium-cloud/caesium/internal/authz"
 	"github.com/caesium-cloud/caesium/internal/event"
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/caesium-cloud/caesium/internal/notification"
 	"github.com/caesium-cloud/caesium/pkg/db"
+	"github.com/caesium-cloud/caesium/pkg/sqlerr"
 	"github.com/google/uuid"
 	"gorm.io/gorm"
 )
@@ -46,9 +49,14 @@ type service struct {
 
 // New returns a new notification service.
 func New(ctx context.Context) Service {
+	return NewWithDatabase(ctx, db.Connection())
+}
+
+// NewWithDatabase returns a notification service over conn.
+func NewWithDatabase(ctx context.Context, conn *gorm.DB) Service {
 	return &service{
 		ctx: ctx,
-		db:  db.Connection(),
+		db:  conn,
 	}
 }
 
@@ -105,9 +113,12 @@ type UpdatePolicyRequest struct {
 
 // --- Channel CRUD ---
 
+// ListChannels lists channels. A namespace-confined caller (a collection
+// route, identity-and-access D4) sees only its namespaces' channels and the
+// cluster-shared ones.
 func (s *service) ListChannels(req *ListRequest) ([]models.NotificationChannel, error) {
 	var channels []models.NotificationChannel
-	q := s.db.WithContext(s.ctx)
+	q := authz.SharedObjectFilter(s.db.WithContext(s.ctx), "namespace")
 
 	if req != nil {
 		if req.Limit > 0 {
@@ -138,10 +149,16 @@ func (s *service) CreateChannel(req *CreateChannelRequest) (*models.Notification
 	if name == "" {
 		return nil, fmt.Errorf("%w: name is required", ErrInvalidChannel)
 	}
+	if err := models.CheckSharedObjectName(name); err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrInvalidChannel, err)
+	}
 
 	namespace, err := models.NormalizeObjectNamespace(req.Namespace)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrInvalidChannel, err)
+	}
+	if err := ensureNamespaceDeclared(namespace); err != nil {
+		return nil, err
 	}
 
 	if err := ensureChannelNameAvailable(s.db.WithContext(s.ctx), name, uuid.Nil); err != nil {
@@ -165,8 +182,14 @@ func (s *service) CreateChannel(req *CreateChannelRequest) (*models.Notification
 		ch.Enabled = *req.Enabled
 	}
 
-	if err := s.db.WithContext(s.ctx).Create(&ch).Error; err != nil {
-		return nil, err
+	err = db.TransactionOn(s.ctx, s.db, func(tx *gorm.DB) error {
+		if err := claimName(tx, &models.NotificationChannel{}, name, uuid.Nil, ErrChannelNameConflict); err != nil {
+			return err
+		}
+		return tx.Create(&ch).Error
+	})
+	if err != nil {
+		return nil, nameConflictError(err, ErrChannelNameConflict, name)
 	}
 	return &ch, nil
 }
@@ -189,6 +212,9 @@ func (s *service) UpdateChannel(id uuid.UUID, req *UpdateChannelRequest) (*model
 		if name == "" {
 			return nil, fmt.Errorf("%w: name cannot be empty", ErrInvalidChannel)
 		}
+		if err := models.CheckSharedObjectName(name); err != nil {
+			return nil, fmt.Errorf("%w: %w", ErrInvalidChannel, err)
+		}
 		if err := ensureChannelNameAvailable(s.db.WithContext(s.ctx), name, id); err != nil {
 			return nil, err
 		}
@@ -208,7 +234,7 @@ func (s *service) UpdateChannel(id uuid.UUID, req *UpdateChannelRequest) (*model
 	}
 
 	if len(updates) > 0 {
-		if err := s.db.WithContext(s.ctx).Model(&ch).Updates(updates).Error; err != nil {
+		if err := updateClaimingName(s.ctx, s.db, &models.NotificationChannel{}, &ch, id, updates, ErrChannelNameConflict); err != nil {
 			return nil, err
 		}
 	}
@@ -226,9 +252,10 @@ func (s *service) DeleteChannel(id uuid.UUID) error {
 
 // --- Policy CRUD ---
 
+// ListPolicies lists policies, confined like ListChannels.
 func (s *service) ListPolicies(req *ListRequest) ([]models.NotificationPolicy, error) {
 	var policies []models.NotificationPolicy
-	q := s.db.WithContext(s.ctx)
+	q := authz.SharedObjectFilter(s.db.WithContext(s.ctx), "namespace")
 
 	if req != nil {
 		if req.Limit > 0 {
@@ -255,10 +282,16 @@ func (s *service) CreatePolicy(req *CreatePolicyRequest) (*models.NotificationPo
 	if name == "" {
 		return nil, fmt.Errorf("%w: name is required", ErrInvalidPolicy)
 	}
+	if err := models.CheckSharedObjectName(name); err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrInvalidPolicy, err)
+	}
 
 	namespace, err := models.NormalizeObjectNamespace(req.Namespace)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrInvalidPolicy, err)
+	}
+	if err := ensureNamespaceDeclared(namespace); err != nil {
+		return nil, err
 	}
 
 	if err := ensurePolicyNameAvailable(s.db.WithContext(s.ctx), name, uuid.Nil); err != nil {
@@ -310,8 +343,14 @@ func (s *service) CreatePolicy(req *CreatePolicyRequest) (*models.NotificationPo
 		p.Enabled = *req.Enabled
 	}
 
-	if err := s.db.WithContext(s.ctx).Create(&p).Error; err != nil {
-		return nil, err
+	err = db.TransactionOn(s.ctx, s.db, func(tx *gorm.DB) error {
+		if err := claimName(tx, &models.NotificationPolicy{}, name, uuid.Nil, ErrPolicyNameConflict); err != nil {
+			return err
+		}
+		return tx.Create(&p).Error
+	})
+	if err != nil {
+		return nil, nameConflictError(err, ErrPolicyNameConflict, name)
 	}
 	return &p, nil
 }
@@ -333,6 +372,9 @@ func (s *service) UpdatePolicy(id uuid.UUID, req *UpdatePolicyRequest) (*models.
 		name := strings.TrimSpace(*req.Name)
 		if name == "" {
 			return nil, fmt.Errorf("%w: name cannot be empty", ErrInvalidPolicy)
+		}
+		if err := models.CheckSharedObjectName(name); err != nil {
+			return nil, fmt.Errorf("%w: %w", ErrInvalidPolicy, err)
 		}
 		if err := ensurePolicyNameAvailable(s.db.WithContext(s.ctx), name, id); err != nil {
 			return nil, err
@@ -381,7 +423,7 @@ func (s *service) UpdatePolicy(id uuid.UUID, req *UpdatePolicyRequest) (*models.
 	}
 
 	if len(updates) > 0 {
-		if err := s.db.WithContext(s.ctx).Model(&p).Updates(updates).Error; err != nil {
+		if err := updateClaimingName(s.ctx, s.db, &models.NotificationPolicy{}, &p, id, updates, ErrPolicyNameConflict); err != nil {
 			return nil, err
 		}
 	}
@@ -392,8 +434,12 @@ func (s *service) UpdatePolicy(id uuid.UUID, req *UpdatePolicyRequest) (*models.
 	return &p, nil
 }
 
+// DeletePolicy soft-deletes a policy and releases its name, so the name can
+// be created again (identity-and-access D4).
 func (s *service) DeletePolicy(id uuid.UUID) error {
-	return s.db.WithContext(s.ctx).Delete(&models.NotificationPolicy{}, "id = ?", id).Error
+	return db.TransactionOn(s.ctx, s.db, func(tx *gorm.DB) error {
+		return models.SoftDeleteSharedObject(tx, &models.NotificationPolicy{}, id)
+	})
 }
 
 // --- Helpers ---
@@ -461,6 +507,55 @@ func ensurePolicyNameAvailable(q *gorm.DB, name string, excludeID uuid.UUID) err
 	default:
 		return err
 	}
+}
+
+// ensureNamespaceDeclared rejects a create in a namespace the served policy
+// file does not declare (identity-and-access D4; the rule B2 applies to jobs
+// and A5 to keys). Without a policy file every namespace is accepted, and "*"
+// always is.
+func ensureNamespaceDeclared(namespace string) error {
+	if undeclared := auth.UndeclaredKeyNamespaces([]string{namespace}); len(undeclared) > 0 {
+		return &auth.UndeclaredNamespacesError{Namespaces: undeclared}
+	}
+	return nil
+}
+
+// claimName claims a globally unique shared-object name inside tx: a live
+// holder is conflict, a tombstone is renamed out of the way
+// (models.ClaimSharedObjectName).
+func claimName(tx *gorm.DB, model any, name string, excludeID uuid.UUID, conflict error) error {
+	taken, err := models.ClaimSharedObjectName(tx, model, name, excludeID)
+	if err != nil {
+		return err
+	}
+	if taken {
+		return fmt.Errorf("%w: name %q already exists", conflict, name)
+	}
+	return nil
+}
+
+// updateClaimingName applies updates to row (a loaded row of model's table)
+// in one transaction, claiming the new name first when the update renames it.
+func updateClaimingName(ctx context.Context, conn *gorm.DB, model, row any, id uuid.UUID, updates map[string]any, conflict error) error {
+	name, renamed := updates["name"].(string)
+	err := db.TransactionOn(ctx, conn, func(tx *gorm.DB) error {
+		if renamed {
+			if err := claimName(tx, model, name, id, conflict); err != nil {
+				return err
+			}
+		}
+		return tx.Model(row).Updates(updates).Error
+	})
+	return nameConflictError(err, conflict, name)
+}
+
+// nameConflictError maps a write that lost a race for a name (the unique
+// index) to the same conflict a claim reports, never a 500.
+func nameConflictError(err, conflict error, name string) error {
+	if err != nil && !errors.Is(err, conflict) && sqlerr.IsUniqueConstraint(err) {
+		return fmt.Errorf("%w: name %q already exists", conflict, name)
+	}
+	return err
 }
 
 // validateFilters checks that the filters JSON is a valid PolicyFilter.

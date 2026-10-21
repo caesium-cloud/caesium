@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 	"time"
@@ -16,6 +17,12 @@ import (
 
 // ErrLoginDenied is returned when an external identity is not allowed to log in.
 var ErrLoginDenied = errors.New("login denied")
+
+// ErrNoBinding is the login denial for a valid identity that no policy binding
+// (or fallback role) grants any role. It wraps ErrLoginDenied, so existing
+// errors.Is(err, ErrLoginDenied) checks hold; the Console renders it as a
+// distinct message (identity-and-access F1).
+var ErrNoBinding = fmt.Errorf("%w: no binding", ErrLoginDenied)
 
 // ErrInvalidExternalIdentity is returned when a provider returns an unusable identity.
 var ErrInvalidExternalIdentity = errors.New("invalid external identity")
@@ -227,7 +234,7 @@ func (s *SSOService) Complete(ctx context.Context, ext *ExternalIdentity, method
 	if len(grants) == 0 {
 		outcome = OutcomeDenied
 		s.auditLoginDenied(ext, method, ip, "no_binding")
-		return "", nil, ErrLoginDenied
+		return "", nil, ErrNoBinding
 	}
 	// User.Role keeps only the cluster role at last login (possibly "" for a
 	// confined user); requests resolve their grants afresh.

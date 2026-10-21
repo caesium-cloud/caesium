@@ -5,11 +5,14 @@ import { toast } from "sonner";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { RelativeTime } from "@/components/relative-time";
+import { canActIn, requiresRoleReason } from "@/features/auth/access";
 import { api, type Backfill } from "@/lib/api";
+import { usePrincipal } from "@/lib/auth";
 import { formatUTCTimestamp } from "@/lib/utils";
 
 interface BackfillsViewProps {
   jobId: string;
+  jobNamespace?: string;
 }
 
 function renderBackfillStatus(backfill: Backfill) {
@@ -39,7 +42,18 @@ function formatDateRange(start: string, end: string): string {
   return `${fmt(start)} → ${fmt(end)}`;
 }
 
-function BackfillRow({ jobId, backfill }: { jobId: string; backfill: Backfill }) {
+function BackfillRow({
+  jobId,
+  jobNamespace,
+  backfill,
+}: {
+  jobId: string;
+  jobNamespace?: string;
+  backfill: Backfill;
+}) {
+  const principal = usePrincipal();
+  // The server requires the role in the job's namespace AND the backfill's.
+  const mayCancel = canActIn(principal, "operator", jobNamespace, backfill.namespace);
   const queryClient = useQueryClient();
 
   const cancelMutation = useMutation({
@@ -111,7 +125,8 @@ function BackfillRow({ jobId, backfill }: { jobId: string; backfill: Backfill })
             size="sm"
             className="h-7 px-2 text-xs"
             onClick={() => cancelMutation.mutate()}
-            disabled={cancelMutation.isPending || isCancelling}
+            disabled={cancelMutation.isPending || isCancelling || !mayCancel}
+            title={mayCancel ? undefined : requiresRoleReason("operator", backfill.namespace ?? jobNamespace)}
           >
             <span aria-hidden="true" className="cs-status-glyph cs-status-failed text-danger" />
             {isCancelling ? "Cancelling" : "Cancel"}
@@ -122,7 +137,7 @@ function BackfillRow({ jobId, backfill }: { jobId: string; backfill: Backfill })
   );
 }
 
-export function BackfillsView({ jobId }: BackfillsViewProps) {
+export function BackfillsView({ jobId, jobNamespace }: BackfillsViewProps) {
   const { data: backfills, isLoading } = useQuery({
     queryKey: ["job", jobId, "backfills"],
     queryFn: () => api.getBackfills(jobId),
@@ -150,7 +165,7 @@ export function BackfillsView({ jobId }: BackfillsViewProps) {
           No backfills found for this job.
         </div>
       ) : (
-        sorted.map((b) => <BackfillRow key={b.id} jobId={jobId} backfill={b} />)
+        sorted.map((b) => <BackfillRow key={b.id} jobId={jobId} jobNamespace={jobNamespace} backfill={b} />)
       )}
     </div>
   );

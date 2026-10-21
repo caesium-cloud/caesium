@@ -33,7 +33,7 @@ export default defineConfig({
   projects: [
     {
       name: "default",
-      testIgnore: ["**/auth/**/*.spec.ts", "**/connectors/**/*.spec.ts", "**/network-recovery.spec.ts", "**/cluster-recovery.spec.ts"],
+      testIgnore: ["**/auth/**/*.spec.ts", "**/connectors/**/*.spec.ts", "**/network-recovery.spec.ts", "**/cluster-recovery.spec.ts", "**/keycloak*.spec.ts"],
     },
     {
       name: "light",
@@ -63,6 +63,17 @@ export default defineConfig({
       name: "connectors",
       testMatch: "**/connectors/**/*.spec.ts",
       retries: 0,
+    },
+    {
+      // Real Keycloak SSO lane (just integration-up-keycloak; CI
+      // ui-e2e-keycloak). No dependencies; a server without OIDC fails the
+      // test rather than skipping it. Tracing and video stay off: a trace or
+      // HAR records the session and Keycloak cookies and the login form's
+      // credentials as structured fields that no regex sanitiser reliably
+      // removes. Failure screenshots are enough to diagnose a login page.
+      name: "keycloak",
+      testMatch: "**/keycloak*.spec.ts",
+      use: { trace: "off", video: "off", screenshot: "only-on-failure" },
     },
     {
       // Owner-crash console journey. CI selects network-recovery (which pulls

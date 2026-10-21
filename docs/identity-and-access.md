@@ -211,8 +211,60 @@ bound forces a re-login. Plan a re-login for all users when you change either.
 
 ### Keycloak
 
-The Keycloak section arrives with the Keycloak CI lane (plan item G5). Until
-then, Keycloak works as any other OIDC issuer using the OIDC settings above.
+Keycloak is an OIDC issuer like any other; this is the setup Caesium is tested
+against. The Keycloak CI lane (`just integration-test-keycloak`, see the
+[CI runbook](ci.md)) imports `test/testdata/keycloak/caesium-realm.json`, a
+working example of every step below.
+
+1. **Client.** Create an OpenID Connect client (for example `caesium`) with
+   *Client authentication* on (a confidential client), *Standard flow* on and
+   *Implicit flow* off. Set *Valid redirect URIs* to exactly
+   `<CAESIUM_AUTH_PUBLIC_BASE_URL>/auth/sso/oidc/callback` and *Web origins*
+   to the public base URL. Caesium always sends a PKCE `S256` challenge, so
+   you can require it (*PKCE method* `S256` in the client's advanced
+   settings). Leave *Direct access grants* off; the CI lane enables it only for
+   its test harness. Put the client secret in `CAESIUM_AUTH_OIDC_CLIENT_SECRET`.
+2. **Groups scope and mapper.** Create a client scope named `groups` (OpenID
+   Connect) with a *Group Membership* mapper: token claim name `groups`, *Full
+   group path* off, *Add to ID token* on. Caesium reads groups from the ID
+   token. Assign the scope to the client as *Optional* (Caesium requests it)
+   or *Default*. With *Full group path* off a binding names the group
+   (`marketing-eng`); with it on, the binding must name the path
+   (`/marketing-eng`). `CAESIUM_AUTH_OIDC_SCOPES` (default
+   `openid profile email groups`) must include the scope's name, and every
+   scope it names must be assigned to the client: Keycloak answers a request
+   for a scope the client does not have with `invalid_scope`, and the login
+   fails at Caesium's callback.
+3. **Email.** `users:` bindings match only an email Keycloak reports as
+   verified (`email_verified`); an unverified email never satisfies one, and
+   that user resolves through groups alone. Mark addresses verified (or turn on
+   the realm's *Verify email*) before relying on email bindings.
+4. **Refresh tokens.** Keycloak issues a refresh token with every code-flow
+   login by default (no `offline_access` scope needed), and Caesium stores it
+   sealed (see [OIDC](#oidc)). Its lifetime is bounded by the realm's *SSO
+   Session Idle* and *SSO Session Max*. **Planned (E2):** once group refresh
+   redeems it during a session, those two settings bound how long group
+   changes are picked up before a re-login is required.
+5. **Issuer.** Set `CAESIUM_AUTH_OIDC_ISSUER_URL` to the realm URL,
+   `https://kc.example.com/realms/<realm>` (no `/auth` prefix unless Keycloak
+   sets `http-relative-path`). Caesium reads
+   `<issuer>/.well-known/openid-configuration` at startup and does not start
+   if discovery fails or the document's `issuer` differs from that URL.
+   Keycloak derives the issuer from its `hostname` option (from each request
+   when unset), so pin `hostname` to the one URL that both browsers and
+   Caesium use. Keep the realm's *Require SSL* at `external` or `all` and
+   serve both over HTTPS; the CI lane uses `none` over loopback HTTP only.
+
+```sh
+CAESIUM_AUTH_MODE=api-key
+CAESIUM_AUTH_PUBLIC_BASE_URL=https://caesium.example.com
+CAESIUM_AUTH_OIDC_ENABLED=true
+CAESIUM_AUTH_OIDC_ISSUER_URL=https://kc.example.com/realms/acme
+CAESIUM_AUTH_OIDC_CLIENT_ID=caesium
+CAESIUM_AUTH_OIDC_CLIENT_SECRET=<client secret>
+# CAESIUM_AUTH_OIDC_SCOPES and CAESIUM_AUTH_OIDC_GROUPS_CLAIM: the defaults
+# match the client scope above.
+```
 
 ### SAML
 
@@ -506,6 +558,26 @@ never returned.
 - `409` `{"message": "no access policy file is configured (CAESIUM_AUTH_POLICY_FILE is unset)"}`
   with no file. Nothing is audited.
 
+**`GET /v1/auth/namespaces`** (cluster viewer, so the Console can show it to
+everyone who may read the cluster) returns the declared namespaces without any
+identity data:
+
+```json
+{
+  "source": "file", "revision": "<hex sha-256>", "loaded_at": "...", "last_reload": null,
+  "namespaces": [
+    {"name": "default", "secrets": null},
+    {"name": "marketing", "secrets": {"allow": ["env/MARKETING_*"]}, "quotas": {"maxConcurrentRuns": 1}}
+  ]
+}
+```
+
+`default` is always listed first, then the rest sorted by name. `secrets` is
+`null` when the namespace allows every secret. The response never carries
+bindings, subjects, groups, emails or the file path. A namespace-confined key
+and a job-scoped key get `403` (cluster route); with authentication disabled the
+route does not exist.
+
 ### CLI
 
 - `caesium auth policy lint --path FILE [--json]` validates a file offline,
@@ -621,10 +693,63 @@ means `default`, `*` makes the object cluster-shared, and anything else must be
 a DNS label (400 otherwise). The namespace is create-only: a `PATCH` may echo
 the stored value but one that changes it returns 400 and writes nothing. Moving
 an object is delete and create. A notification policy may reference only a
-channel in its own namespace or `*`. Server-side lint and apply reject a job
-whose remediation profile or escalation channel lives outside the job's
-namespace and `*`. The built-in `triage-only` agent profile lives in `*`, so
-every namespace can reference it. See [rest-api.md](rest-api.md).
+channel in its own namespace or `*`, on create and on a `channel_id` patch; a
+channel the caller cannot read fails with the same 400 as a channel that does
+not exist. Server-side lint and apply reject a job whose remediation profile or
+escalation channel lives outside the job's namespace and `*`. The built-in
+`triage-only` agent profile lives in `*`, so every namespace can reference it.
+See [rest-api.md](rest-api.md).
+
+- **Who may do what.** Reading an object needs viewer in its namespace; a `*`
+  object is readable with viewer in any namespace. Creating, editing and
+  deleting need operator in the object's namespace (the create body's), and an
+  operator at `*` for a `*` object. The lists return the caller's namespaces'
+  objects plus every `*` one.
+- **Declared namespaces.** While a policy file is loaded, creating an object in
+  a namespace the file does not declare returns 400 naming it, as for jobs and
+  keys. `*` is always valid.
+- **Notification routing.** Notification isolation needs a policy file. With
+  no policy file, routing is unchanged: every policy matches by event type and
+  filters, whatever its namespace, and receives the event as built. While a
+  policy file is loaded, a policy delivers only the events its own
+  namespace owns; a `*` policy delivers every event. An event about an incident
+  belongs to the incident's namespace, one about a run to the run's persisted
+  namespace (a run that outlived its job's move alerts the old owner), a
+  `dataset_released` to the namespace of the runs that opened the hold and
+  last breached it (none when those differ), and a
+  job-only event (`sla_missed` without a run, `contract_break_declared`) to the
+  job's namespace. An event whose owner cannot be found reaches only `*`
+  policies. The job labels an event carries are delivered to a namespace's
+  policies only when the job lives in that namespace and still has exactly
+  those labels when the event is dispatched; otherwise they are removed, a
+  label filter does not match, and a contract break is not delivered to that
+  namespace. A contract break reaches a namespace's
+  policies only with the findings between that namespace's jobs, and only
+  while each remaining consumer's recorded team is still its `team` label; a
+  break by a producer in another namespace reaches only `*` policies.
+  Data-assertion verdicts recorded before baselines were namespace-owned
+  reach a namespace's policies without their baseline evidence, as confined
+  reads of runs and events show them. With or without a policy file, a policy
+  whose channel is disabled, missing or outside its namespace delivers
+  nothing, and an agent escalation reports itself routed only when some policy
+  delivers it.
+- **Agent profiles at incident time.** While a policy file is loaded, an
+  incident uses a profile (the job's or the deployment default,
+  `CAESIUM_AGENT_DEFAULT_PROFILE`) only when it lives in the incident's
+  namespace or `*`. Any other is treated as a missing profile: a job-declared
+  one denies every autonomous action, and so does a configured default that
+  lives in another namespace, whatever the job's own autonomy block says (a
+  default that does not exist leaves the playbook unconfigured, as before).
+  With no policy file, profiles resolve by name alone, as before.
+- **Names are global (v1).** Jobs reference channels and profiles by name, so a
+  name is unique across namespaces. A create or rename onto a name held
+  elsewhere returns 409 `conflict` without saying where. A namespace can
+  therefore take a name another namespace wanted; lint and the rules above stop
+  it from using another namespace's objects, so the cost is the name only. A
+  cluster operator recovers it by renaming or deleting the holder: deleting an
+  object releases its name.
+- A `*` policy is readable by every viewer, including its job filters, which
+  may name other namespaces' jobs. Cluster operators author `*` policies.
 
 ### Route classes and enforcement
 
@@ -634,9 +759,9 @@ principal confined to some namespaces is treated:
 | Class | Rule for a confined principal |
 | --- | --- |
 | identity | Allowed whatever its grants, even none: `GET /auth/whoami`, `POST /auth/logout`, `GET /v1/system/features`. |
-| cluster | Always denied (403 `insufficient_role`): metrics, nodes and workers, atoms, logs, database, cache prune, `POST /v1/triggers`, the connector reads (`/v1/connectors*`), and `GET /v1/auth/policy` plus `POST /v1/auth/policy/reload`. |
+| cluster | Always denied (403 `insufficient_role`): metrics, nodes and workers, atoms, logs, database, cache prune, `POST /v1/triggers`, the connector reads (`/v1/connectors*`), `GET /v1/auth/namespaces`, and `GET /v1/auth/policy` plus `POST /v1/auth/policy/reload`. |
 | namespaced | Caesium resolves the namespace of the target the handler will act on and requires the route's role in it (in every resolved namespace; once B6 ships, dataset reads will need it in any one). A target with no owning namespace is cluster-only. |
-| collection | The handler returns only rows from the namespaces where the principal holds the route's role. Live today: the API key list, and the job-derived collections in [Collections](#collections-and-history-under-a-job). |
+| collection | The handler returns only rows from the namespaces where the principal holds the route's role. Live today: the API key list, the shared-object lists ([Shared objects](#shared-objects)), and the job-derived collections in [Collections](#collections-and-history-under-a-job). |
 
 A principal is *confined* on a route when its cluster role (its grant at `*`)
 is below the route's role. An unconfined principal is authorised exactly as
@@ -666,9 +791,10 @@ target's namespace:
 - **Triggers:** `GET /v1/triggers/:id`, its event history and
   `POST /v1/triggers/:id/fire`, requiring the role in every job the trigger
   serves.
-- **Shared objects:** read and delete a notification channel, notification
-  policy or agent profile by id. `*` objects are readable by viewers anywhere
-  and writable only with the role at `*`.
+- **Shared objects:** read, create, edit and delete a notification channel,
+  notification policy or agent profile (a create by the body's `namespace`).
+  `*` objects are readable by viewers anywhere and writable only with the role
+  at `*`.
 - **Incidents:** reject an approval.
 - **API keys:** list, create, revoke and rotate keys confined to namespaces
   where it is admin (see [API keys and CLI login](#api-keys-and-cli-login)).
@@ -694,9 +820,8 @@ target's namespace:
 An idempotent `POST /v1/jobs/:id/run` that would return a recorded run from a
 namespace the confined caller cannot read answers an audited 403 with no run
 body. The request body of a namespaced route is read (up to 8 MiB, else `413`)
-before the decision. Once D4 makes shared-object creates live, a confined
-caller's create body must be `application/json` up to 1 MiB, and any other body
-type will be `415`; until then those creates are denied as pending.
+before the decision. A confined caller's shared-object create body must be
+`application/json` up to 1 MiB; any other body type is `415`.
 
 **Pending routes.** A route whose handler can still return or touch another
 namespace's rows is cluster-only for confined principals until the plan item
@@ -710,7 +835,6 @@ that makes it namespace-aware lands (unconfined principals are unaffected):
 | B5 | `GET /v1/lineage/impact`, `GET /v1/contracts/graph` |
 | B6 | every `/v1/datasets*` route |
 | B9 | `POST /v1/jobs`, `POST /v1/jobdefs/apply`, `GET /v1/jobs/:id/manifest`, `PATCH /v1/triggers/:id` (confined job writes and trigger tenancy) |
-| D4 | shared-object lists, and creating or editing channels, policies and agent profiles |
 
 Every namespace denial is `403 insufficient permissions` and is audited as
 `auth.denied` with reason `insufficient_role`. Lint and diff, where the caller
@@ -1077,6 +1201,31 @@ nothing else; errors go to stderr and exit 1):
 
 Find a user's id with `caesium auth user list --email`.
 
+## The Console
+
+The Console reads `GET /auth/whoami` (`grants`, `namespaces`, `cluster_role`; an
+older server that sends only `role` is treated as holding it everywhere) and
+decides which controls to offer. This is a convenience: the server enforces
+every route, and a control is hidden or disabled only when the principal's
+grants are known not to allow it.
+
+- **Gating.** `roleIn(namespace)` is the higher of the `*` grant and the grant
+  for that namespace. Every job action uses the job's namespace and the role its
+  route requires: trigger, re-run, replay, backfill and partition retry need
+  `runner`; pause, resume, queue cancel, backfill cancel and cache invalidation
+  need `operator`. A mutation on a historical run or backfill also needs the role
+  in that object's persisted namespace, as the server does. Until the job is
+  loaded, the cluster role decides, so a confined principal sees fewer controls,
+  never more. Dataset hold release still follows the cluster role (a hold carries
+  no tenancy namespace yet).
+- **Access page (`/access`, sidebar entry for everyone).** "My access" shows the
+  subject, kind, cluster role and per-namespace grants. Principals with a
+  cluster role (and no job scope) also see the declared namespaces and their
+  settings (`GET /v1/auth/namespaces`). Cluster admins additionally see the
+  policy revision and last reload result and the users list with Disable,
+  Enable and Log out everywhere (each behind a confirmation). Bindings are never
+  edited in the Console. With authentication disabled the page only says so.
+
 ## Audit and metrics
 
 SSO login and logout lifecycle events are written to the audit log with actions
@@ -1087,6 +1236,13 @@ provider and denial reason where applicable. A login whose groups match no
 mapping (and with no default role) is denied with reason `no_binding`; a
 disabled user is denied with reason `user_disabled`, and a login that raced a
 disable is denied with reason `user_changed`.
+
+Only the `no_binding` denial is visible to the person signing in, so the Console
+can tell them to ask for a role. After an OIDC or SAML callback the browser is
+redirected to `/?login_error=no_binding` (a fixed same-origin path; the login
+page shows the message and strips the parameter). The LDAP login keeps its `403`
+and adds `"reason": "no_binding"` to the JSON body. Every other denial
+(`user_disabled`, `user_changed`) keeps the plain `403 login denied` response.
 
 User administration writes, with `actor` the caller (API key prefix or user
 email), `resource_type` `user`, `resource_id` the user id and namespace `*`:

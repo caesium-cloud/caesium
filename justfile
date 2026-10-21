@@ -78,6 +78,19 @@ integration_runner_image := env("CAESIUM_INTEGRATION_RUNNER_IMAGE", local_builde
 infra_deploy_key_env := "CAESIUM_INFRA_FAKE_DEPLOY_KEY"
 infra_deploy_key_value := "caesium-infra-lane-canary-not-a-real-key"
 agent_api_external_url := env("CAESIUM_AGENT_API_EXTERNAL_URL", "http://172.17.0.1:" + port)
+# Keycloak lane (identity-and-access G1; docs/ci.md "Keycloak lane"). The
+# image is digest-pinned because quay.io re-pushes its version tags. Bump it
+# by replacing the version AND the digest (an index covering amd64 + arm64).
+keycloak_image := "quay.io/keycloak/keycloak:26.7.5@sha256:37dbaf6f0722c9ec246335f36e1ef8b2e6cb960f7c27e0d8c615121a3d475a85"
+keycloak_port := "8180"
+keycloak_it_container := "caesium-keycloak-test"
+keycloak_server_container := "caesium-server-keycloak-test"
+keycloak_apply_container := "caesium-keycloak-apply"
+keycloak_runner_container := "caesium-keycloak-runner"
+# Suite-qualified (a bare method name matches nothing), with the same hollow
+# lane floor as the other -run lanes: one PASS per Keycloak scenario.
+keycloak_integration_run := env("CAESIUM_KEYCLOAK_INTEGRATION_RUN", "TestIntegrationTestSuite/TestKeycloak")
+keycloak_integration_min_pass := env("CAESIUM_KEYCLOAK_INTEGRATION_MIN_PASS", "5")
 
 # Local Docker registry used by `just k8s-distributed` to push freshly-built
 # images into the cluster's containerd. Port 5050 sidesteps the macOS
@@ -1089,6 +1102,216 @@ integration-up-connectors: build-stress build-test
         -e CAESIUM_FANOUT_MAX_PARTITIONS=8 \
         -e CAESIUM_CANCEL_RECONCILE_INTERVAL=2s \
         {{ local_image_ref }}:{{ tag }}-test start
+
+# Keycloak lane (identity-and-access G1, design §12.2; docs/ci.md "Keycloak
+# lane"). Keycloak owns the network namespace and publishes both ports on
+# host loopback only (the realm has fixture credentials and no TLS); the
+# Caesium server and every helper container join it. So the issuer
+# http://127.0.0.1:8180/realms/caesium and the public base
+# http://127.0.0.1:8080 are the same URLs for Caesium's back channel, the
+# in-namespace Go runner and a host browser. Caesium serves the lane's own
+# policy (test/testdata/keycloak/policy.yaml: the two-namespace fixture's
+# namespaces plus the realm's bindings) and two jobs, one per namespace, are
+# applied with the bootstrap admin key. On any failure the recipe prints
+# redacted container logs, removes every lane container and exits with the
+# original status; on success it leaves the lane up for a consumer
+# (integration-test-keycloak, CI's ui-e2e-keycloak, ui-e2e-keycloak).
+# The trap is installed before the first container starts, so a partial
+# startup is cleaned up too. Keep the body free of blank lines: the env
+# parity guardrail reads a recipe up to its first blank line.
+integration-up-keycloak: build-stress build-test
+    #!/usr/bin/env bash
+    set -euo pipefail
+    lane_down() {
+        {{ container_cli }} rm -f {{ keycloak_runner_container }} {{ keycloak_apply_container }} {{ keycloak_server_container }} {{ keycloak_it_container }} >/dev/null 2>&1 || true
+    }
+    on_exit() {
+        rc=$?
+        if [ "$rc" -ne 0 ]; then
+            echo "Keycloak lane failed to start (exit $rc); redacted container output follows" >&2
+            bash {{ repo_dir }}/scripts/lane-logs.sh {{ container_cli }} {{ keycloak_it_container }} {{ keycloak_server_container }} >&2
+            lane_down
+        fi
+        exit "$rc"
+    }
+    trap on_exit EXIT
+    lane_down
+    running() {
+        [ "$({{ container_cli }} inspect -f '{{{{.State.Running}}' "$1" 2>/dev/null || true)" = "true" ]
+    }
+    if ! {{ container_cli }} image inspect {{ keycloak_image }} >/dev/null 2>&1; then
+        for attempt in 1 2 3; do
+            if {{ container_cli }} pull {{ keycloak_image }}; then break; fi
+            echo "Keycloak image pull attempt $attempt failed" >&2
+            [ "$attempt" -eq 3 ] || sleep $((attempt * 10))
+        done
+    fi
+    {{ container_cli }} image inspect {{ keycloak_image }} >/dev/null
+    {{ container_cli }} run -d --platform {{ platform }} --name {{ keycloak_it_container }} \
+        -p 127.0.0.1:8080:8080 -p 127.0.0.1:{{ keycloak_port }}:{{ keycloak_port }} \
+        -v {{ repo_dir }}/test/testdata/keycloak/caesium-realm.json:/opt/keycloak/data/import/caesium-realm.json:ro \
+        -e KC_BOOTSTRAP_ADMIN_USERNAME=kc-lane-admin \
+        -e KC_BOOTSTRAP_ADMIN_PASSWORD=kc-lane-admin-console-password \
+        -e "JAVA_OPTS_KC_HEAP=-Xms256m -Xmx768m" \
+        {{ keycloak_image }} start-dev --import-realm --http-port={{ keycloak_port }} --hostname=http://127.0.0.1:{{ keycloak_port }} >/dev/null
+    tries=0
+    until curl -fs -o /dev/null http://127.0.0.1:{{ keycloak_port }}/realms/caesium/.well-known/openid-configuration; do
+        tries=$((tries + 1))
+        running {{ keycloak_it_container }} || { echo "Keycloak exited before importing the caesium realm" >&2; exit 1; }
+        [ "$tries" -le 180 ] || { echo "Keycloak did not serve the caesium realm within 180s" >&2; exit 1; }
+        sleep 1
+    done
+    {{ container_cli }} run -d --platform {{ platform }} \
+        --name {{ keycloak_server_container }} \
+        --network=container:{{ keycloak_it_container }} \
+        --privileged \
+        -v {{ sock }}:/var/run/docker.sock \
+        -e DOCKER_HOST=unix:///var/run/docker.sock \
+        --user 0:0 \
+        -v {{ repo_dir }}/test/testdata/keycloak:/etc/caesium/keycloak-fixture:ro \
+        -e CAESIUM_AUTH_POLICY_FILE=/etc/caesium/keycloak-fixture/policy.yaml \
+        -e CAESIUM_AUTH_MODE=api-key \
+        -e CAESIUM_AUTH_KEY_HASH_SECRET=keycloak-integration-auth-key-hash-secret-001 \
+        -e CAESIUM_AUTH_REQUIRE_TLS=false \
+        -e CAESIUM_AUTH_PUBLIC_BASE_URL=http://127.0.0.1:8080 \
+        -e CAESIUM_AUTH_OIDC_ENABLED=true \
+        -e CAESIUM_AUTH_OIDC_ISSUER_URL=http://127.0.0.1:{{ keycloak_port }}/realms/caesium \
+        -e CAESIUM_AUTH_OIDC_CLIENT_ID=caesium \
+        -e CAESIUM_AUTH_OIDC_CLIENT_SECRET=caesium-keycloak-lane-client-secret \
+        -e CAESIUM_MANUAL_TRIGGER_API_KEY=integration-test-key \
+        -e CAESIUM_EVENT_INGEST_API_KEY={{ event_ingest_api_key }} \
+        -e CAESIUM_LOG_LEVEL=debug \
+        -e CAESIUM_DATABASE_SHARDS=4 \
+        -e CAESIUM_OPEN_LINEAGE_ENABLED=true \
+        -e CAESIUM_OPEN_LINEAGE_TRANSPORT=console \
+        -e CAESIUM_FRESHNESS_ENABLED=true \
+        -e CAESIUM_DATA_ASSERTIONS_ENABLED=true \
+        -e CAESIUM_RESOURCE_STATS_ENABLED=true \
+        -e CAESIUM_RESOURCE_STATS_SAMPLE_INTERVAL=100ms \
+        -e CAESIUM_RIGHT_SIZING_ENABLED=true \
+        -e CAESIUM_CONTRACT_ENFORCEMENT=fail \
+        -e CAESIUM_CONTRACT_DEPRECATION_WINDOW={{ contract_deprecation_window }} \
+        -e CAESIUM_CACHE_PIN_DIGESTS=true \
+        -e CAESIUM_REGISTRY_AUTH=127.0.0.1=secret://env/CAESIUM_IT_REGISTRY_CREDS \
+        -e CAESIUM_IT_REGISTRY_CREDS=ci-user:ci-pass \
+        -e CAESIUM_CACHE_ENABLED=true \
+        -e CAESIUM_NOTIFICATION_WATCHER_INTERVAL=1s \
+        -e CAESIUM_RATE_LIMIT_PRUNER_ENABLED=true \
+        -e CAESIUM_RATE_LIMIT_PRUNE_INTERVAL=500ms \
+        -e CAESIUM_RUN_QUEUE_ENABLED=true \
+        -e CAESIUM_RUN_QUEUE_DEQUEUER_ENABLED=true \
+        -e CAESIUM_RUN_QUEUE_DEQUEUE_INTERVAL=500ms \
+        -e CAESIUM_FANOUT_MAX_PARTITIONS=8 \
+        -e CAESIUM_CANCEL_RECONCILE_INTERVAL=2s \
+        {{ local_image_ref }}:{{ tag }}-test start >/dev/null
+    admin_key=""
+    tries=0
+    until admin_key="$({{ container_cli }} logs {{ keycloak_server_container }} 2>&1 | awk '!found && /csk_/ { for (i = 1; i <= NF; i++) if ($i ~ /^csk_/) { print $i; found = 1; break } }' | tr -d '\r')" && [ -n "$admin_key" ]; do
+        tries=$((tries + 1))
+        running {{ keycloak_server_container }} || { echo "Caesium exited before printing its bootstrap admin key" >&2; exit 1; }
+        [ "$tries" -le 60 ] || { echo "Caesium did not print its bootstrap admin key within 60s" >&2; exit 1; }
+        sleep 1
+    done
+    if [ "${GITHUB_ACTIONS:-}" = "true" ]; then printf '::add-mask::%s\n' "$admin_key"; fi
+    tries=0
+    until curl -fs -o /dev/null http://127.0.0.1:8080/health; do
+        tries=$((tries + 1))
+        running {{ keycloak_server_container }} || { echo "Caesium exited during startup (OIDC discovery runs at startup)" >&2; exit 1; }
+        [ "$tries" -le 120 ] || { echo "Caesium did not become healthy within 120s" >&2; exit 1; }
+        sleep 1
+    done
+    CAESIUM_API_KEY="$admin_key" {{ container_cli }} run --rm --platform {{ platform }} \
+        --name {{ keycloak_apply_container }} \
+        --network=container:{{ keycloak_it_container }} \
+        --entrypoint /bin/caesium \
+        -e CAESIUM_API_KEY \
+        -v {{ repo_dir }}/test/testdata/keycloak/jobs:/keycloak-jobs:ro \
+        {{ local_image_ref }}:{{ tag }}-test job apply --path /keycloak-jobs --server http://127.0.0.1:8080
+    echo "Keycloak lane is up: Caesium http://127.0.0.1:8080, Keycloak http://127.0.0.1:{{ keycloak_port }}/realms/caesium"
+
+# Runs the TestKeycloak* scenarios against integration-up-keycloak. The trap
+# is installed before startup: on failure it prints redacted logs first, then
+# (always) removes every lane container, and the recipe exits with the
+# original status. A run that executes fewer than keycloak_integration_min_pass
+# Keycloak scenarios fails as hollow.
+integration-test-keycloak: integration-runner
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cli_dir={{ repo_dir }}/.tmp/caesium-cli-keycloak
+    log={{ repo_dir }}/.tmp/integration-test-keycloak.log
+    cli_ctr=""
+    on_exit() {
+        rc=$?
+        if [ "$rc" -ne 0 ]; then
+            echo "Keycloak lane failed (exit $rc); redacted container output follows" >&2
+            bash {{ repo_dir }}/scripts/lane-logs.sh {{ container_cli }} {{ keycloak_it_container }} {{ keycloak_server_container }} >&2
+        fi
+        [ -z "$cli_ctr" ] || {{ container_cli }} rm -f "$cli_ctr" >/dev/null 2>&1 || true
+        {{ container_cli }} rm -f {{ keycloak_runner_container }} {{ keycloak_apply_container }} {{ keycloak_server_container }} {{ keycloak_it_container }} >/dev/null 2>&1 || true
+        rm -rf "$cli_dir"
+        exit "$rc"
+    }
+    trap on_exit EXIT
+    just tag={{ tag }} integration-up-keycloak
+    rm -rf "$cli_dir"
+    mkdir -p "$cli_dir"
+    cli_ctr="$({{ container_cli }} create --platform {{ platform }} {{ local_image_ref }}:{{ tag }}-test true)"
+    {{ container_cli }} cp "$cli_ctr":/bin/caesium "$cli_dir/caesium"
+    chmod +x "$cli_dir/caesium"
+    admin_key="$({{ container_cli }} logs {{ keycloak_server_container }} 2>&1 | awk '!found && /csk_/ { for (i = 1; i <= NF; i++) if ($i ~ /^csk_/) { print $i; found = 1; break } }' | tr -d '\r')"
+    [ -n "$admin_key" ] || { echo "Keycloak lane: bootstrap admin key not found in the server log" >&2; exit 1; }
+    if [ "${GITHUB_ACTIONS:-}" = "true" ]; then printf '::add-mask::%s\n' "$admin_key"; fi
+    rm -f "$log"
+    rc=0
+    CAESIUM_API_KEY="$admin_key" {{ container_cli }} run --rm --platform {{ platform }} \
+        --name {{ keycloak_runner_container }} \
+        --network=container:{{ keycloak_it_container }} \
+        -v {{ repo_dir }}:{{ bld_dir }} \
+        -v {{ sock }}:/var/run/docker.sock \
+        -e DOCKER_HOST=unix:///var/run/docker.sock \
+        -e CAESIUM_CLI_PATH={{ bld_dir }}/.tmp/caesium-cli-keycloak/caesium \
+        -e CAESIUM_API_KEY \
+        -e CAESIUM_AUTH_MODE=api-key \
+        -e CAESIUM_KEYCLOAK_LANE=true \
+        -e CAESIUM_KEYCLOAK_URL=http://127.0.0.1:{{ keycloak_port }} \
+        -e CAESIUM_KEYCLOAK_REALM=caesium \
+        -e CAESIUM_MANUAL_TRIGGER_API_KEY=integration-test-key \
+        -e CAESIUM_EVENT_INGEST_API_KEY={{ event_ingest_api_key }} \
+        -w {{ bld_dir }} \
+        {{ integration_runner_image }} \
+        sh -c 'sh scripts/integration-test.sh -test.run "{{ keycloak_integration_run }}"' >"$log" 2>&1 || rc=$?
+    sed -E 's/(csk|css)_[A-Za-z0-9_-]+/[REDACTED_CREDENTIAL]/g' "$log"
+    [ "$rc" -eq 0 ] || { echo "Keycloak lane scenarios failed (exit $rc)" >&2; exit "$rc"; }
+    passes="$(grep -cE '^[[:space:]]*--- PASS: TestIntegrationTestSuite/TestKeycloak' "$log" || true)"
+    if [ "${passes:-0}" -lt {{ keycloak_integration_min_pass }} ]; then
+        echo "Keycloak lane executed only ${passes:-0} Keycloak scenario(s), expected at least {{ keycloak_integration_min_pass }}: the lane is hollow" >&2
+        exit 1
+    fi
+    echo "Keycloak lane executed $passes Keycloak scenario(s) (minimum {{ keycloak_integration_min_pass }})"
+
+integration-down-keycloak:
+    @{{ container_cli }} rm -f {{ keycloak_runner_container }} {{ keycloak_apply_container }} {{ keycloak_server_container }} {{ keycloak_it_container }} >/dev/null 2>&1 || true
+
+# Local twin of CI's ui-e2e-keycloak: the Playwright `keycloak` project
+# against integration-up-keycloak, driven from the host browser through the
+# published ports. Redacted logs on failure; the lane is always torn down.
+ui-e2e-keycloak:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    on_exit() {
+        rc=$?
+        if [ "$rc" -ne 0 ]; then
+            bash {{ repo_dir }}/scripts/lane-logs.sh {{ container_cli }} {{ keycloak_it_container }} {{ keycloak_server_container }} >&2
+        fi
+        just tag={{ tag }} integration-down-keycloak
+        exit "$rc"
+    }
+    trap on_exit EXIT
+    just tag={{ tag }} integration-up-keycloak
+    cd {{ repo_dir }}/ui
+    npm ci
+    npx playwright install chromium
+    npm run test:e2e -- --project=keycloak
 
 lint: builder-full
     {{ container_cli }} run --rm --platform {{ platform }} \

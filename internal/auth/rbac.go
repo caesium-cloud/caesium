@@ -232,11 +232,12 @@ var endpointPolicy = map[string]RoutePolicy{
 	"GET /v1/triggers/:id/events": namespacedRoute(viewer),
 
 	// Shared objects resolve to the object's own namespace ("*" = shared).
-	"GET /v1/notifications/channels":     collectionRoute(viewer).pendingOn("D4"),
+	// Their lists return the caller's namespaces plus "*" (D4).
+	"GET /v1/notifications/channels":     collectionRoute(viewer),
 	"GET /v1/notifications/channels/:id": namespacedRoute(viewer),
-	"GET /v1/notifications/policies":     collectionRoute(viewer).pendingOn("D4"),
+	"GET /v1/notifications/policies":     collectionRoute(viewer),
 	"GET /v1/notifications/policies/:id": namespacedRoute(viewer),
-	"GET /v1/agentprofiles":              collectionRoute(viewer).pendingOn("D4"),
+	"GET /v1/agentprofiles":              collectionRoute(viewer),
 	"GET /v1/agentprofiles/:id":          namespacedRoute(viewer),
 
 	// Lint and diff resolve every definition's namespace and the stored
@@ -328,27 +329,23 @@ var endpointPolicy = map[string]RoutePolicy{
 	"PATCH /v1/triggers/:id": namespacedRoute(operator).pendingOn("B9"),
 	"POST /v1/atoms":         clusterRoute(operator),
 	"DELETE /v1/atoms/:id":   clusterRoute(operator),
-	// Notification dispatch (internal/notification MatchPolicies) matches
-	// policies by event type and filters only, not by namespace, so creating
-	// or editing a channel or policy would route other namespaces' events to
-	// it, and deleting one (a policy with no job filter, or its channel) could
-	// silence another namespace's alerts and policy-driven remediation (D4
-	// makes dispatch namespace-aware). Reads by id stay live.
-	"POST /v1/notifications/channels":       namespacedRoute(operator).pendingOn("D4"),
-	"PATCH /v1/notifications/channels/:id":  namespacedRoute(operator).pendingOn("D4"),
-	"DELETE /v1/notifications/channels/:id": namespacedRoute(operator).pendingOn("D4"),
-	"POST /v1/notifications/policies":       namespacedRoute(operator).pendingOn("D4"),
-	"PATCH /v1/notifications/policies/:id":  namespacedRoute(operator).pendingOn("D4"),
-	"DELETE /v1/notifications/policies/:id": namespacedRoute(operator).pendingOn("D4"),
-	// A job references its agent profile by name, and runtime resolution
-	// (internal/incident playbook resolution) looks the name up globally, so a
-	// confined create or rename could stand in for another namespace's
-	// profile, and a confined delete could remove the profile other
-	// namespaces' incidents resolve, disabling their remediation (D4 makes
-	// runtime resolution namespace-aware). Reads by id stay live.
-	"POST /v1/agentprofiles":       namespacedRoute(operator).pendingOn("D4"),
-	"PATCH /v1/agentprofiles/:id":  namespacedRoute(operator).pendingOn("D4"),
-	"DELETE /v1/agentprofiles/:id": namespacedRoute(operator).pendingOn("D4"),
+	// Shared-object writes need operator in the object's namespace (the
+	// create body's for POST), and at "*" for a cluster-shared object (D4).
+	// A policy in a namespace references only that namespace's channels or
+	// "*" ones and matches only events that namespace owns
+	// (internal/notification RouteEvent), and an incident resolves only a
+	// profile in its own namespace or "*" (internal/incident
+	// ResolvePlaybook), so a confined write cannot route, silence or stand in
+	// for another namespace's alerts or remediation.
+	"POST /v1/notifications/channels":       namespacedRoute(operator),
+	"PATCH /v1/notifications/channels/:id":  namespacedRoute(operator),
+	"DELETE /v1/notifications/channels/:id": namespacedRoute(operator),
+	"POST /v1/notifications/policies":       namespacedRoute(operator),
+	"PATCH /v1/notifications/policies/:id":  namespacedRoute(operator),
+	"DELETE /v1/notifications/policies/:id": namespacedRoute(operator),
+	"POST /v1/agentprofiles":                namespacedRoute(operator),
+	"PATCH /v1/agentprofiles/:id":           namespacedRoute(operator),
+	"DELETE /v1/agentprofiles/:id":          namespacedRoute(operator),
 	// Tier-3 approval decisions (agent-in-the-loop D1). Operator-gated; agent
 	// session tokens are additionally rejected outright in authorizeScope.
 	// Approving executes the proposed action against the incident's job (a
@@ -377,6 +374,8 @@ var endpointPolicy = map[string]RoutePolicy{
 	// The access policy itself (A4).
 	"GET /v1/auth/policy":         clusterRoute(admin),
 	"POST /v1/auth/policy/reload": clusterRoute(admin),
+	// Declared namespaces and their settings, never bindings (F3).
+	"GET /v1/auth/namespaces": clusterRoute(viewer),
 	// User and session administration (E3): cluster admins only.
 	"GET /v1/auth/users":                      clusterRoute(admin),
 	"GET /v1/auth/users/:id":                  clusterRoute(admin),

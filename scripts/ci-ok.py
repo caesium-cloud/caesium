@@ -85,6 +85,9 @@ SELECTORS = {
     "ui-test": ("ui", "go", "ci"),
     "ui-e2e": ("ui", "go", "ci"),
     "ui-e2e-auth": ("ui", "go", "ci"),
+    # identity-and-access G1: the Playwright keycloak project. The Go Keycloak
+    # lane is a leg of the `integration` matrix, covered by that entry.
+    "ui-e2e-keycloak": ("ui", "go", "ci"),
     "integration": ("go", "ci"),
     # Unconditional producer of the promoted lane: it never skips, so a helm
     # chart failure reports as itself instead of as a skipped consumer.

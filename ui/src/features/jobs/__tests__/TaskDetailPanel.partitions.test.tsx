@@ -5,8 +5,13 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { api, type PartitionInstance, type TaskRun } from "@/lib/api";
 import { TaskDetailPanel } from "../TaskDetailPanel";
 
+const auth = vi.hoisted(() => ({
+  // Anonymous (auth disabled): every action is offered.
+  principal: { kind: null, subject: null, role: null } as Record<string, unknown>,
+}));
 vi.mock("@/lib/auth", () => ({
   withAuthHeaders: () => ({}),
+  usePrincipal: () => auth.principal,
 }));
 
 // The default tab renders LogViewer, which drives a real xterm.js terminal.
@@ -311,6 +316,27 @@ describe("TaskDetailPanel partition table", () => {
     await waitFor(() => {
       expect(toast.success).toHaveBeenCalledWith("Partition retry requested");
     });
+  });
+
+  it.each([
+    ["a runner in the job's and the run's namespace", { marketing: "runner" }, "marketing", "marketing", true],
+    ["a viewer", { marketing: "viewer" }, "marketing", "marketing", false],
+    ["a runner elsewhere", { finance: "runner" }, "marketing", "marketing", false],
+    ["a runner who lacks the run's persisted namespace", { marketing: "runner" }, "marketing", "finance", false],
+  ])("gates partition retry for %s", async (_label, grants, jobNs, runNs, allowed) => {
+    auth.principal = { kind: "api_key", subject: "k", role: null, grants };
+    try {
+      renderPanel(
+        <TaskDetailPanel taskId="task-fanned" jobId="job-1" runId="run-1" jobNamespace={jobNs} runNamespace={runNs} runTask={runTask} onClose={() => {}} />,
+      );
+      await openDetailsTab();
+      const table = await screen.findByTestId("partition-table");
+      const bravoRow = within(table).getAllByTestId("partition-row").find((row) => row.textContent?.includes("bravo"));
+      const retry = within(bravoRow as HTMLElement).getByRole("button", { name: /^retry$/i });
+      if (allowed) expect(retry).toBeEnabled(); else expect(retry).toBeDisabled();
+    } finally {
+      auth.principal = { kind: null, subject: null, role: null };
+    }
   });
 
   it("surfaces a retry API error instead of failing silently", async () => {

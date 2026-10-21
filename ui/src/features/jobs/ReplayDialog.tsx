@@ -15,7 +15,7 @@ import {
 } from "@/components/ui/dialog";
 import { StatusBadge } from "@/components/ui/status-badge";
 import { InsufficientAccess } from "@/features/auth/InsufficientAccess";
-import { canReplayRuns } from "@/features/auth/access";
+import { canReplayRuns, requiresRoleReason } from "@/features/auth/access";
 import { usePrincipal } from "@/lib/auth";
 import { ApiError, api, type JobRun, type ReplayResponse } from "@/lib/api";
 import { RunDiffView } from "./RunDiffView";
@@ -23,6 +23,8 @@ import { RunDiffView } from "./RunDiffView";
 interface ReplayDialogProps {
   jobId: string;
   baselineRunId: string;
+  /** The job's tenancy namespace; the replay needs runner there. */
+  namespace?: string;
   open: boolean;
   onOpenChange: (open: boolean) => void;
 }
@@ -36,11 +38,12 @@ type OverrideRow = {
 export function ReplayDialog({
   jobId,
   baselineRunId,
+  namespace,
   open,
   onOpenChange,
 }: ReplayDialogProps) {
   const queryClient = useQueryClient();
-  const canLaunchReplay = canReplayRuns(usePrincipal());
+  const canLaunchReplay = canReplayRuns(usePrincipal(), namespace);
   const [overrideRows, setOverrideRows] = useState<OverrideRow[]>(() => [newOverrideRow()]);
   const [idempotencyKey, setIdempotencyKey] = useState("");
   const [submittedKey, setSubmittedKey] = useState<string | null>(null);
@@ -244,7 +247,7 @@ export function ReplayDialog({
             </div>
           ) : null}
 
-          {!canLaunchReplay && <p role="alert" className="text-sm text-text-3">Requires runner role</p>}
+          {!canLaunchReplay && <p role="alert" className="text-sm text-text-3">{requiresRoleReason("runner", namespace)}</p>}
           <div className="flex justify-end">
             <Button
               type="submit"
