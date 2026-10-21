@@ -1,6 +1,6 @@
 # Execution Connectors — Temporal Monitoring and Operator Actions
 
-Last updated: 2026-10-20
+Last updated: 2026-10-21
 
 Caesium should let an operator follow a data process across Temporal workflows
 and Caesium jobs, understand the data consequence, and perform a declared
@@ -12,13 +12,13 @@ prerequisite for monitoring them.
 
 At drafting, [PR #560](https://github.com/caesium-cloud/caesium/pull/560) supplied
 idempotent Caesium starts, explicit created/queued/skipped/dropped outcomes and
-an operator recipe. W1–W8 have since added the connector contract, catalog,
+an operator recipe. W1–W9 have since added the connector contract, catalog,
 Temporal adapter, real development fixture, authenticated HTTP monitoring/actions
 and Console monitoring, verified workflow/run relationships, data links and
-declared approvals with durable receipt recovery. Connector CI qualification
-and promotion remain F2–F4. The Console's existing run, dataset, freshness,
-lineage, receipt and incident views provide the local data evidence joined to
-external process state.
+declared approvals with durable receipt recovery and an advisory connector CI
+lane. W10 records release qualification on the merged candidate; promotion
+remains F4. The Console's existing run, dataset, freshness, lineage, receipt and
+incident views provide the local data evidence joined to external process state.
 
 The first release includes one optional Temporal connector, file-configured
 connections and optional workflow bindings, authenticated monitoring, verified
@@ -247,7 +247,7 @@ write. Limits are validated configuration with conservative hard ceilings fixed
 by A1 before dependent work. C1/F3 measure unchanged-poll write count, catalog
 cardinality and closed-workflow Query dispatch count through the live surface.
 
-## Progress (as of 2026-10-20)
+## Progress (as of 2026-10-21)
 
 W1 through W4 have merged, including the W4 dashboard in PR #635.
 W5 C1 is merged in PR #644; dashboard PR #643 records its verified acceptance.
@@ -255,8 +255,9 @@ W6 C2 and E1 are merged in PRs #652 and #651; this dashboard records their
 verified acceptance.
 W7 E2 is merged in PR #658; this dashboard records its verified acceptance.
 W8 E3 is merged in PR #662; this dashboard records its verified acceptance.
-F2–F4 and N remain later work. An open PR or a component-only pass
-is not completion. The SHAs below are the squash merges read from GitHub.
+W9 F2 is merged in PR #664; this dashboard records its verified acceptance.
+W10 records F3 acceptance below; F4 and N remain later work. An open PR or a
+component-only pass is not completion. The SHAs below are the squash merges read from GitHub.
 
 The orchestrator owns this dashboard: PR URLs, exact tested heads/merge SHAs,
 executed scenarios, evidence and blockers. Workers update assigned items/notes.
@@ -714,6 +715,101 @@ Resume unfinished waves. Do not archive this plan while later items remain.
   closeout. F2–F4/N1 stay unchecked; F2 is the next dependency-ready item.
   The plan remains active and no connector lane is promoted by this change.
 
+### W9 — Advisory connector CI lane (implementation merged 2026-10-21)
+
+- **W9-α / F2:** [PR #664](https://github.com/caesium-cloud/caesium/pull/664)
+  merged `9985cff5d9059f368708d2f6e04f613b68a706f1` at 2026-10-21T10:47:25Z.
+  Accepted head `bd570fc7b05279da3078b66c2ffa59f0c15c6f0a` adds tracked
+  `integration-up-connectors` and `integration-test-connectors`, baseline env
+  parity, producer-bound immutable images and the existing strict evidence
+  checker. Broad `go`/`ui`/`ci` outputs select the lane; it remains advisory in
+  `UNPROMOTED_LANES` and is not required by `ci-ok`.
+- **Real-provider/browser/config verification:** Fresh hosted qualification
+  passed all six named Temporal Go scenarios (218.70 seconds), all ten
+  connector browser cases (163.20 seconds), and `TestConnectorsConfigCluster`
+  (65.31 seconds). Every selected scenario passed once with zero skips,
+  retries, errors or flaky outcomes. Actual SDK 1.49.0 / CLI 1.9.1 / server
+  1.32.0 and 2,150 source checksums bind the cohort. Three persistent Caesium
+  members ran on one kind node. Evidence covers accepted/rejected reply loss,
+  outage/recovery, actual server restart, config skew, stale-node transition
+  and immutable repoint refusal. The [strict report](https://github.com/caesium-cloud/caesium/actions/runs/39529399438/artifacts/12315019118)
+  is reproduced byte for byte from the [47-file public artifact](https://github.com/caesium-cloud/caesium/actions/runs/39529399438/artifacts/12314964195).
+- **Baseline and hosted qualification:** Containerized lint/vet, full root
+  race/coverage, tagged hermetic checks, UI checks and full local default/auth
+  integration passed. [CI run 39529399438](https://github.com/caesium-cloud/caesium/actions/runs/39529399438),
+  attempt 1, passed 42 jobs and all nine protected checks including `ci-ok`;
+  three release-only jobs were unselected. Synthetic merge
+  `51e85639005005f8294b4ab269f0ba34c636bac0` has parents
+  `e658a17366158fc34eda92c1d2c2e8075d64c532` and the accepted head. Source,
+  synthetic and actual squash-merge trees all equal
+  `33843fb4afbac2c7a2b6258e4bdfcdde3d2ff17f`. The final 20-file inventory is
+  recorded in F2 below. Owned local containers were verified absent and the
+  shared test lane released after cleanup.
+- **Plan boundary:** F2 alone is newly checked. This dedicated plan-sync PR
+  records source acceptance and requires its own checks and merge before W9
+  closeout. F3/F4/N1 stay unchecked; F3 is the next dependency-ready item.
+  The plan remains active.
+
+### W10 — Merged-candidate release qualification (F3, 2026-10-21)
+
+- **Scope and dependency:** F2 implementation [PR #664](https://github.com/caesium-cloud/caesium/pull/664)
+  merged as `9985cff5d9059f368708d2f6e04f613b68a706f1`. This is the qualified
+  release candidate, tree `33843fb4afbac2c7a2b6258e4bdfcdde3d2ff17f`.
+  F2 dashboard [PR #669](https://github.com/caesium-cloud/caesium/pull/669)
+  merged as `05ca21b40ce690fe7346275c4f29c8b0dc8b4b75`. This wave adds F3's
+  acceptance record; later commits require their own applicable gates.
+- **Fresh post-merge evidence:** Push [run 39587157019](https://github.com/caesium-cloud/caesium/actions/runs/39587157019)
+  tested that exact merged SHA. Its connector job passed all six named
+  Fixture/Messages/Correlation/Operations/Read/Actions scenarios in 188.64 seconds,
+  all ten browser cases in 162.008 seconds, and the persistent configuration
+  scenario in 79.42 seconds, each once with no selected skips, retries, flakes or errors.
+  The downloaded [report](https://github.com/caesium-cloud/caesium/actions/runs/39587157019/artifacts/12341380135)
+  was independently rebuilt from the [public observations](https://github.com/caesium-cloud/caesium/actions/runs/39587157019/artifacts/12341235230);
+  its three scenario rows matched and passed the shared strict checker.
+- **Identity and compatibility:** Both 2,150-file source inventories matched
+  the candidate archive. Producer `image-ids-amd64/test.txt` and the running
+  server matched `sha256:b0aeb3d67732a1e362132eb66d9f4ed33596e55528eb8984803715969907323c`;
+  the runner matched `sha256:9e1610ef28292d65b46402ab5d9b1efa8ba47ef6758d1e0528abd4a6c7164083`.
+  The real worker image was `sha256:3afe9ee07a4c7fe28fab4f63eeebb9b6bec2d930db4137dd831083edfad0ba9a`.
+  Observed Temporal Server 1.32.0, CLI 1.9.1 and Go SDK 1.49.0 matched the pins.
+- **Business and recovery proof:** HTTP/browser inspection found external-only
+  work without inferred local data evidence. Real queued publication promoted
+  one admission, activity attempt two reused its run, and both directions led
+  to existing run/receipt/data evidence. Approval started the second job;
+  independent Update history, raw effect records and durable receipts agreed.
+  The three completed HTTP receipts recorded one, one and two Update sends
+  respectively, with exactly one logical effect each. Receipt
+  `f1a246b5-f500-4665-b74d-6da49410aab4` is the explicitly confirmed lost-rejection case.
+  Lost accepted and rejected replies were activated. Lookup and Caesium restart
+  retained actor, Run ID and Update ID without resending; lost rejection stayed
+  unknown after eligibility changed until the original principal confirmed the
+  current revision. Distinct actors/keys conflicted on the open receipt, and
+  terminal/new-ID attempts added no second effect. Validator refusal was
+  independently observed; public failures with unknown origin remained unknown.
+  Worker stop/start replay, provider outage/stale recovery and genuine Caesium
+  process restarts passed. Continue-as-new had a distinct Run ID: the native
+  old-run Update was refused with zero effects on the new run; immutable HTTP
+  receipt recovery and messenger identity checks preserved that same pin.
+- **Bounds and configuration:** Six external workflows paged without catalog
+  inserts; unchanged reads wrote zero identities/snapshots and closed reads sent
+  zero automatic Queries. Live tests enforced expiry, the four-row unreferenced
+  cap, retained referenced evidence, read limits and six explicit Queries per
+  minute. Three distinct persistent Helm members on one kind node accepted
+  matching files, refused skew/stale epochs before RPC, activated a guarded
+  epoch transition and refused connection repointing. Loaded CRI identities
+  matched the qualified server image.
+- **Default-disabled regressions:** The same SHA passed lint, full race/coverage
+  unit suites on amd64 and arm64, all three default Docker integration shards
+  without a Temporal fixture, the 160-case default browser suite and auth browser
+  suite. Separate selected connector proofs above cover their expected off-lane
+  skips. Invalid enabled configuration exited 1 with redacted errors and zero
+  provider RPCs; the gate-off browser case hid navigation and refused routes.
+- **Acceptance boundary:** [PR #670](https://github.com/caesium-cloud/caesium/pull/670)
+  records F3 acceptance on the exact merged candidate. F4 and N1 stay open, the lane
+  stays advisory, and no ten-run promotion claim is made. This qualifies the
+  recorded development-server matrix and single-node kind topology, not
+  Temporal Cloud, other versions or a multi-host deployment.
+
 ### Stream Status
 
 | Stream | Scope | Priority | Status |
@@ -723,7 +819,7 @@ Resume unfinished waves. Do not archive this plan while later items remain.
 | C | Authenticated REST and composition (2 items) | P0 | Shipped (C1, C2) |
 | D | Verified correlation and action durability (2 items) | P0 | Shipped (D1, D2) |
 | E | Console monitoring, data links and approval (3 items) | P0 | Shipped (E1, E2, E3) |
-| F | Real fixture, CI, qualification and promotion (4 items) | P0 | F1 shipped; F2–F4 not started |
+| F | Real fixture, CI, qualification and promotion (4 items) | P0 | F1/F2 shipped; F3 acceptance in W10; F4 not started |
 | N | Operator guidance and reconciliation (1 item) | P0 | Not started |
 
 ## Streams
@@ -1124,7 +1220,7 @@ compiled integration-runner approach; fixture code stays in the root module.
   The fixture consumes A1's schema and does not wait for D1 to define it.
   C1/C2 complete adapter qualification.
 
-- [ ] F2. Add `integration-up-connectors` and `integration-test-connectors`, an
+- [x] F2. Add `integration-up-connectors` and `integration-test-connectors`, an
   authenticated HTTP/browser CI lane initially registered in `UNPROMOTED_LANES`.
   The tracked server recipe preserves baseline `integration-up` envs and adds
   connector/auth/config flags plus `CAESIUM_RUN_QUEUE_ENABLED=true` and
@@ -1141,9 +1237,14 @@ compiled integration-runner approach; fixture code stays in the root module.
   `scripts/ci-ok.py` (`UNPROMOTED_LANES`), `scripts/test_ci.py`,
   `test/contracts/scenarios.json`, `scripts/test_test_evidence.py`,
   new `scripts/connectors-test.sh`, `scripts/connectors-fixture.sh`,
+  `scripts/connectors-config-cluster.sh`, `scripts/collect-lane-evidence.py`,
+  `scripts/test_connectors_test.py`, `scripts/test_connectors_fixture.py`,
+  `scripts/test_connectors_config_cluster.py`,
+  `scripts/test_collect_lane_evidence.py`, `test/connectors_config_cluster_test.go`,
+  `test/dataset_operator_test.go`, `ui/e2e/connectors/monitoring.spec.ts`,
   `docs/ci.md` (connector lane), `docs/connectors.md` (verification commands).
   Depends on: C2, E3, F1.
-  Verify: proposed `just integration-test-connectors` executes all manifest-named
+  Verify: `just integration-test-connectors` executes all manifest-named
   live scenarios and E1's dedicated Playwright project. Run
   `scripts/check-test-evidence.py --manifest test/contracts/scenarios.json --report <report> --require connectors --strict`.
   Include `TestConnectorsMessages`, `TestConnectorsCorrelation` and
@@ -1156,7 +1257,7 @@ compiled integration-runner approach; fixture code stays in the root module.
   the new recipe with no bypass; report/mutation tests use the existing checker.
   Run actionlint and existing CI regression tests, including shared-path selection.
 
-- [ ] F3. Record first-release acceptance on the merged candidate: external-only
+- [x] F3. Record first-release acceptance on the merged candidate: external-only
   monitoring, correlated publication, approval/rejection, activity retry, reply
   loss (accepted and rejected), server/worker restart, outage/recovery, distinct
   actors/keys, config skew/transition, bounded polling/storage and continuation
@@ -1286,10 +1387,10 @@ just integration-test
 ```
 
 UI changes add `just ui-ci` and existing authenticated regression coverage via
-`just ui-e2e-auth`. Connector changes run proposed `just integration-test-connectors`
-once F2 lands. Before F2, use the F1 fixture/candidate server with each item's
-live HTTP/browser scenarios and record the exact containerized command. The new
-recipe is not shipped. Pure adapter/store tests supplement real-surface proof.
+`just ui-e2e-auth`. Connector changes run `just integration-test-connectors`.
+The F1 manual fixture/candidate-server recipe remains available for focused
+live HTTP/browser scenarios; record the exact containerized command. Pure
+adapter/store tests supplement real-surface proof.
 
 Each new REST query/action needs a named live-server scenario under `test/`.
 Infrastructure-dependent tests/packages carry the integration tag; fixture
