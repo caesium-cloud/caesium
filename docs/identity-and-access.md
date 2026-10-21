@@ -210,8 +210,60 @@ bound forces a re-login. Plan a re-login for all users when you change either.
 
 ### Keycloak
 
-The Keycloak section arrives with the Keycloak CI lane (plan item G5). Until
-then, Keycloak works as any other OIDC issuer using the OIDC settings above.
+Keycloak is an OIDC issuer like any other; this is the setup Caesium is tested
+against. The Keycloak CI lane (`just integration-test-keycloak`, see the
+[CI runbook](ci.md)) imports `test/testdata/keycloak/caesium-realm.json`, a
+working example of every step below.
+
+1. **Client.** Create an OpenID Connect client (for example `caesium`) with
+   *Client authentication* on (a confidential client), *Standard flow* on and
+   *Implicit flow* off. Set *Valid redirect URIs* to exactly
+   `<CAESIUM_AUTH_PUBLIC_BASE_URL>/auth/sso/oidc/callback` and *Web origins*
+   to the public base URL. Caesium always sends a PKCE `S256` challenge, so
+   you can require it (*PKCE method* `S256` in the client's advanced
+   settings). Leave *Direct access grants* off; the CI lane enables it only for
+   its test harness. Put the client secret in `CAESIUM_AUTH_OIDC_CLIENT_SECRET`.
+2. **Groups scope and mapper.** Create a client scope named `groups` (OpenID
+   Connect) with a *Group Membership* mapper: token claim name `groups`, *Full
+   group path* off, *Add to ID token* on. Caesium reads groups from the ID
+   token. Assign the scope to the client as *Optional* (Caesium requests it)
+   or *Default*. With *Full group path* off a binding names the group
+   (`marketing-eng`); with it on, the binding must name the path
+   (`/marketing-eng`). `CAESIUM_AUTH_OIDC_SCOPES` (default
+   `openid profile email groups`) must include the scope's name, and every
+   scope it names must be assigned to the client: Keycloak answers a request
+   for a scope the client does not have with `invalid_scope`, and the login
+   fails at Caesium's callback.
+3. **Email.** `users:` bindings match only an email Keycloak reports as
+   verified (`email_verified`); an unverified email never satisfies one, and
+   that user resolves through groups alone. Mark addresses verified (or turn on
+   the realm's *Verify email*) before relying on email bindings.
+4. **Refresh tokens.** Keycloak issues a refresh token with every code-flow
+   login by default (no `offline_access` scope needed), and Caesium stores it
+   sealed (see [OIDC](#oidc)). Its lifetime is bounded by the realm's *SSO
+   Session Idle* and *SSO Session Max*. **Planned (E2):** once group refresh
+   redeems it during a session, those two settings bound how long group
+   changes are picked up before a re-login is required.
+5. **Issuer.** Set `CAESIUM_AUTH_OIDC_ISSUER_URL` to the realm URL,
+   `https://kc.example.com/realms/<realm>` (no `/auth` prefix unless Keycloak
+   sets `http-relative-path`). Caesium reads
+   `<issuer>/.well-known/openid-configuration` at startup and does not start
+   if discovery fails or the document's `issuer` differs from that URL.
+   Keycloak derives the issuer from its `hostname` option (from each request
+   when unset), so pin `hostname` to the one URL that both browsers and
+   Caesium use. Keep the realm's *Require SSL* at `external` or `all` and
+   serve both over HTTPS; the CI lane uses `none` over loopback HTTP only.
+
+```sh
+CAESIUM_AUTH_MODE=api-key
+CAESIUM_AUTH_PUBLIC_BASE_URL=https://caesium.example.com
+CAESIUM_AUTH_OIDC_ENABLED=true
+CAESIUM_AUTH_OIDC_ISSUER_URL=https://kc.example.com/realms/acme
+CAESIUM_AUTH_OIDC_CLIENT_ID=caesium
+CAESIUM_AUTH_OIDC_CLIENT_SECRET=<client secret>
+# CAESIUM_AUTH_OIDC_SCOPES and CAESIUM_AUTH_OIDC_GROUPS_CLAIM: the defaults
+# match the client scope above.
+```
 
 ### SAML
 

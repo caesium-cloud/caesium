@@ -760,9 +760,11 @@ prune at all.
   `test/testdata/keycloak/caesium-realm.json` (users: `admin@example.com` in
   `caesium-admins`; `bob@example.com` in `marketing-eng`; `carol@example.com` in no
   group; direct-access grants enabled for the Go scenario). Caesium started with
-  OIDC enabled, `CAESIUM_AUTH_POLICY_FILE` = `test/testdata/policy/two-namespaces.yaml`
-  (`default`, `marketing`, `finance`; bindings as in §6.2), and two jobs applied,
-  one per namespace.
+  OIDC enabled, `CAESIUM_AUTH_POLICY_FILE` = `test/testdata/keycloak/policy.yaml`
+  (the namespaces of `test/testdata/policy/two-namespaces.yaml` — `default`,
+  `marketing`, `finance` — plus the realm's bindings, which include
+  `caesium-admins`, a group the shared fixture must never bind), and two jobs
+  applied, one per namespace.
 - Playwright (`ui/e2e`, project `keycloak`): admin logs in via the real Keycloak
   login page and sees both namespaces and the switcher; bob sees only `marketing`,
   the finance job is absent from the list and its detail URL renders
@@ -778,8 +780,9 @@ prune at all.
   added to its `needs` list **and** to `scripts/ci-ok.py`'s `SELECTORS` map (a
   required job missing from the map fails `ci-ok` even when green), with the
   path-filter selectors and `scripts/test_ci.py` cases that go with them. `ci-ok`
-  gates `v*` publication rather than merge today (`docs/ci.md` §1); the Keycloak
-  lane inherits exactly that guarantee, no more.
+  has been a required check on `master` with a merge queue since 2026-09-28
+  (`docs/ci.md` §1), so the Keycloak lane blocks merges as well as `v*`
+  publication.
 
 ## 13. CLI login
 

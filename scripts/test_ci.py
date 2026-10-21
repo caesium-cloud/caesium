@@ -812,7 +812,7 @@ class EarlyEvidenceLaneTests(unittest.TestCase):
 
     def test_required_check_jobs_are_preserved(self):
         for name in ("lint", "unit-test", "unit-test-arm64", "ui-test", "ui-e2e",
-                     "ui-e2e-auth", "build-and-integration-test",
+                     "ui-e2e-auth", "ui-e2e-keycloak", "build-and-integration-test",
                      "build-and-integration-test-agent-auth"):
             self.assertIn(name, JOBS, name)
 
@@ -3659,6 +3659,188 @@ class KindHostLimitsTests(unittest.TestCase):
                     self.assertLess(raise_at, first_kind, "inotify limits raised after kind is installed")
         self.assertIn("ci.yml:helm-integration-test", checked)
         self.assertIn("qualification-lanes.yml:console-recovery", checked)
+
+
+class KeycloakLaneTests(unittest.TestCase):
+    """identity-and-access G1: the Keycloak lane's Go leg and browser job."""
+
+    BROWSER = "ui-e2e-keycloak"
+    SERVER = "caesium-server-keycloak-test"
+    KEYCLOAK = "caesium-keycloak-test"
+    # A Caesium startup log as cmd/start/start.go prints it, plus a session
+    # token, so every redaction path sees both credential shapes.
+    BANNER = ("==========================================================\n"
+              "  BOOTSTRAP ADMIN API KEY (shown once, save it now):\n"
+              "  csk_live_0123456789ABCDEFabcdef0123456789ABCDEF\n"
+              "==========================================================\n"
+              "debug session=css_9876543210fedcbaFEDCBA9876543210 issued\n")
+
+    def fake_docker(self, root, fail_logs=False):
+        docker = root / "docker"
+        banner = self.BANNER.replace("\n", "\\n")
+        docker.write_text(
+            '#!/bin/sh\n'
+            'if [ "$1" = logs ]; then\n'
+            f'  printf "log of %s\\n{banner}" "$2"\n'
+            f'  exit {1 if fail_logs else 0}\n'
+            'fi\necho "container status"\n'
+        )
+        docker.chmod(0o755)
+        return docker
+
+    def test_go_lane_is_an_integration_matrix_leg(self):
+        # The current shape (like agent-auth): a leg of `integration`, which
+        # ci-ok and both legacy required wrappers already aggregate.
+        legs = [leg for leg in JOBS["integration"]["strategy"]["matrix"]["include"] if leg["id"] == "keycloak"]
+        self.assertEqual(len(legs), 1)
+        leg = legs[0]
+        self.assertEqual(leg["recipe"], "integration-test-keycloak")
+        self.assertEqual(leg["shard"], "")
+        self.assertEqual(leg["load-triage"], "false")
+        self.assertLessEqual(leg["timeout"], 20)
+        self.assertIn("integration", JOBS["ci-ok"]["needs"])
+        self.assertEqual(SELECTORS["integration"], ("go", "ci"))
+        for wrapper in ("build-and-integration-test", "build-and-integration-test-agent-auth"):
+            self.assertIn("integration", JOBS[wrapper]["needs"])
+
+    def test_browser_lane_is_merge_and_publish_blocking(self):
+        job = JOBS[self.BROWSER]
+        self.assertEqual(job["needs"], ["changes", "ui-test", "images"])
+        self.assertIn(self.BROWSER, JOBS["ci-ok"]["needs"])
+        self.assertEqual(SELECTORS[self.BROWSER], ("ui", "go", "ci"))
+        self.assertIn(self.BROWSER, JOBS["publish"]["needs"])
+        self.assertLessEqual(job["timeout-minutes"], 20)
+        # GateTests.test_failed_cancelled_missing_and_unexpectedly_skipped_jobs
+        # covers every ci-ok need, this one included; a helm-only change must
+        # deselect it rather than require it.
+        self.assertEqual(results(selected_outputs({"helm"}))[self.BROWSER]["result"], "skipped")
+
+    def test_browser_lane_starts_the_lane_through_the_justfile_off_loaded_images(self):
+        steps = JOBS[self.BROWSER]["steps"]
+        uses = [step.get("uses", "") for step in steps]
+        self.assertIn("taiki-e/install-action@just", uses)
+        load = next(step for step in steps if step.get("uses") == "./.github/actions/load-docker-images")
+        self.assertEqual(load["with"]["name"], "product-amd64")
+        self.assertFalse(any("build-push-action" in use or "bake" in use for use in uses))
+        server = next(step for step in steps if step.get("id") == "server")
+        self.assertEqual(server["run"].strip(), "just tag=${{ env.IMAGE_TAG }}-amd64 integration-up-keycloak")
+        self.assertEqual(server["env"]["CAESIUM_SKIP_IMAGE_BUILD"], "true")
+        browser = next(step for step in steps if step.get("id") == "playwright")
+        self.assertIn("--project=keycloak", browser["run"])
+        self.assertLess(steps.index(server), steps.index(browser))
+        collect = next(step for step in steps if step.get("name") == "Collect browser diagnostics")
+        upload = next(step for step in steps if step.get("name") == "Upload browser diagnostics")
+        cleanup = steps[-1]
+        self.assertEqual(cleanup["run"].strip(), "just integration-down-keycloak")
+        for step in (collect, upload, cleanup):
+            self.assertEqual(step["if"], "always()")
+        self.assertLess(steps.index(browser), steps.index(collect))
+        self.assertLess(steps.index(collect), steps.index(upload))
+        self.assertIn(self.BROWSER, upload["with"]["name"])
+        self.assertEqual(upload["with"]["if-no-files-found"], "error")
+
+    def test_keycloak_project_records_no_trace_or_video(self):
+        config = (ROOT / "ui/playwright.config.ts").read_text()
+        project = re.search(r'name: "keycloak",(.*?)\n    \}', config, re.S)
+        self.assertIsNotNone(project, "the keycloak Playwright project is missing")
+        self.assertIn('testMatch: "**/keycloak*.spec.ts"', project[1])
+        self.assertIn('trace: "off"', project[1])
+        self.assertIn('video: "off"', project[1])
+        default = re.search(r'name: "default",\s*testIgnore: \[([^\]]*)\]', config)
+        self.assertIn('"**/keycloak*.spec.ts"', default[1],
+                      "the default project would run the Keycloak spec against a server without OIDC")
+
+    def run_collect(self, root, setup_failed=False, recordings=False):
+        collect = next(step for step in JOBS[self.BROWSER]["steps"]
+                       if step.get("name") == "Collect browser diagnostics")
+        self.fake_docker(root, fail_logs=setup_failed)
+        (root / "ui/test-results/keycloak-admin").mkdir(parents=True)
+        (root / "ui/test-results/keycloak-admin/test-failed-1.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+        if recordings:
+            trace = io.BytesIO()
+            with zipfile.ZipFile(trace, "w") as archive:
+                archive.writestr("0-trace.network", '{"cookies":[{"name":"caesium_session","value":"opaque"}]}')
+            (root / "ui/test-results/keycloak-admin/trace.zip").write_bytes(trace.getvalue())
+            (root / "ui/test-results/keycloak-admin/video.webm").write_bytes(b"\x1aE\xdf\xa3")
+        (root / "ui/playwright-results.json").write_text('{"error":"css_json-session_123","status":"failed"}')
+        outcomes = {"server": {"outcome": "failure" if setup_failed else "success",
+                               "conclusion": "failure" if setup_failed else "success"},
+                    "playwright": {"outcome": "skipped" if setup_failed else "failure",
+                                   "conclusion": "skipped" if setup_failed else "failure"}}
+        return subprocess.run(
+            ["bash", "-e", "-o", "pipefail", "-c", collect["run"]], cwd=root,
+            env={**os.environ, "PATH": str(root) + os.pathsep + os.environ["PATH"],
+                 "STEP_RESULTS": json.dumps(outcomes), "CANDIDATE_SHA": "candidate",
+                 "GITHUB_RUN_ID": "123", "GITHUB_RUN_ATTEMPT": "1", "GITHUB_JOB": self.BROWSER},
+            capture_output=True, text=True,
+        )
+
+    def test_diagnostics_redact_logs_and_keep_screenshots(self):
+        for setup_failed in (False, True):
+            with self.subTest(setup_failed=setup_failed), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                result = self.run_collect(root, setup_failed=setup_failed)
+                self.assertEqual(result.returncode, int(setup_failed), result.stdout + result.stderr)
+                artifacts = root / "ui/ci-artifacts"
+                for name, container in (("server.log", self.SERVER), ("keycloak.log", self.KEYCLOAK)):
+                    log = (artifacts / "ci-diagnostics" / name).read_text()
+                    self.assertIn(container, log)
+                    self.assertIn("[REDACTED_CREDENTIAL]", log)
+                    self.assertNotIn("csk_live_", log)
+                    self.assertNotIn("css_", log)
+                self.assertEqual((artifacts / "test-results/keycloak-admin/test-failed-1.png").read_bytes(),
+                                 b"\x89PNG\r\n\x1a\n")
+                results_json = json.loads((artifacts / "playwright-results.json").read_text())
+                self.assertEqual(results_json["error"], "[REDACTED_CREDENTIAL]")
+                if setup_failed:
+                    self.assertIn("::error::Could not collect", result.stdout)
+
+    def test_diagnostics_refuse_traces_and_videos(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            result = self.run_collect(root, recordings=True)
+            self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+            self.assertIn("::error::Refusing to upload browser recording", result.stdout)
+            uploaded = {path.name for path in (root / "ui/ci-artifacts").rglob("*") if path.is_file()}
+            self.assertNotIn("trace.zip", uploaded)
+            self.assertNotIn("video.webm", uploaded)
+            self.assertIn("test-failed-1.png", uploaded)
+
+    def test_lane_log_dumps_redact_the_bootstrap_key(self):
+        # Codex P1 (W5-γ brief): Caesium prints its bootstrap key before OIDC
+        # discovery can fail, so a startup-failure dump must already be
+        # redacted; scripts/lane-logs.sh is the only path the recipes use.
+        for fail_logs in (False, True):
+            with self.subTest(fail_logs=fail_logs), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                self.fake_docker(root, fail_logs=fail_logs)
+                result = subprocess.run(
+                    ["bash", str(ROOT / "scripts/lane-logs.sh"), "docker", self.KEYCLOAK, self.SERVER],
+                    env={**os.environ, "PATH": str(root) + os.pathsep + os.environ["PATH"]},
+                    capture_output=True, text=True,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                for container in (self.KEYCLOAK, self.SERVER):
+                    self.assertIn(f"----- {container} logs (credentials redacted) -----", result.stdout)
+                    self.assertIn(f"log of {container}", result.stdout)
+                self.assertIn("BOOTSTRAP ADMIN API KEY", result.stdout)
+                self.assertNotIn("csk_live_", result.stdout + result.stderr)
+                self.assertNotIn("css_", result.stdout + result.stderr)
+                self.assertEqual(result.stdout.count("[REDACTED_CREDENTIAL]"), 4)
+
+    def test_lane_recipes_dump_logs_only_through_the_redacting_helper(self):
+        justfile = (ROOT / "justfile").read_text()
+        for recipe in ("integration-up-keycloak", "integration-test-keycloak", "ui-e2e-keycloak"):
+            start = justfile.index(f"\n{recipe}:")
+            end = justfile.index("\n\n", start + 1)
+            body = justfile[start:end]
+            with self.subTest(recipe=recipe):
+                self.assertIn("scripts/lane-logs.sh", body)
+                self.assertLess(body.index("trap on_exit EXIT"), body.index("integration-up-keycloak\n")
+                                if recipe != "integration-up-keycloak" else body.index(" run -d "))
+                for line in body.splitlines():
+                    if " logs " in line:
+                        self.assertTrue("| awk " in line, f"{recipe} prints raw container logs: {line.strip()}")
 
 
 if __name__ == "__main__":

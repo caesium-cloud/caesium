@@ -435,6 +435,7 @@ var integrationUpTrackingRecipes = []string{
 	"integration-up-owner-memory",
 	"integration-up-infra",
 	"integration-up-agent",
+	"integration-up-keycloak",
 }
 
 // integrationUpEnvAllowlist names, per tracking recipe, baseline env vars

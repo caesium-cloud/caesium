@@ -672,6 +672,14 @@ jobs:
             load-triage: "true"
             load-reagents: "false"
             timeout: 45
+          # identity-and-access G1: Keycloak + an OIDC Caesium server; the
+          # TestKeycloak* SSO scenarios (docs/ci.md "Keycloak lane").
+          - id: keycloak
+            shard: ""
+            recipe: integration-test-keycloak
+            load-triage: "false"
+            load-reagents: "false"
+            timeout: 20
     steps:
       - uses: actions/checkout@v7
       - name: Install qualified native Docker runtime
@@ -1188,6 +1196,155 @@ jobs:
       - name: Stop auth-enabled Caesium server
         if: always()
         run: docker rm -f caesium-server-auth >/dev/null 2>&1 || true
+
+  # identity-and-access G1: the Playwright `keycloak` project against the
+  # Keycloak lane. The lane comes up through the same justfile recipe the Go
+  # leg uses (`integration-up-keycloak`), so its server env cannot drift from
+  # the env-parity guardrail. Traces and video are off for this project
+  # (ui/playwright.config.ts): they would record session cookies and the
+  # login form's credentials. The diagnostics step refuses to upload any
+  # trace, HAR or video that appears anyway.
+  ui-e2e-keycloak:
+    needs: [changes, ui-test, images]
+    if: needs.changes.outputs.ui == 'true' || needs.changes.outputs.go == 'true' || needs.changes.outputs.ci == 'true'
+    runs-on: ubuntu-26.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: taiki-e/install-action@just
+      - uses: ./.github/actions/load-docker-images
+        with:
+          name: product-amd64
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+      - name: Install UI dependencies and browsers
+        id: dependencies
+        run: |
+          cd ui
+          npm ci
+          npx playwright install --with-deps chromium
+      - name: Start the Keycloak lane
+        id: server
+        env:
+          CAESIUM_SKIP_IMAGE_BUILD: "true"
+        run: just tag=${{ env.IMAGE_TAG }}-amd64 integration-up-keycloak
+      - name: Run Keycloak Playwright E2E
+        id: playwright
+        working-directory: ui
+        run: npm run test:e2e -- --project=keycloak
+      - name: Collect browser diagnostics
+        if: always()
+        env:
+          STEP_RESULTS: ${{ toJSON(steps) }}
+          CANDIDATE_SHA: ${{ github.sha }}
+        run: |
+          mkdir -p ui/ci-diagnostics
+          python3 - <<'PYTHON'
+          import json
+          import os
+          from pathlib import Path
+
+          steps = json.loads(os.environ["STEP_RESULTS"])
+          report = {
+              "schema_version": 1,
+              "candidate_sha": os.environ["CANDIDATE_SHA"],
+              "run_id": os.environ["GITHUB_RUN_ID"],
+              "run_attempt": os.environ["GITHUB_RUN_ATTEMPT"],
+              "job": os.environ["GITHUB_JOB"],
+              "steps": {name: {key: step[key] for key in ("outcome", "conclusion")}
+                        for name, step in steps.items()},
+          }
+          Path("ui/ci-diagnostics/outcomes.json").write_text(json.dumps(report, indent=2) + "\n")
+          PYTHON
+          # Artifact bytes do not honor the runner's add-mask directives.
+          python3 - <<'PYTHON'
+          import base64
+          import io
+          from pathlib import Path
+          import re
+          import subprocess
+          import sys
+          import zipfile
+
+          # API keys (csk_) and session tokens (css_). With tracing off nothing
+          # should carry them; this is the backstop, not the control.
+          CREDENTIAL = re.compile(r"(?:csk|css)_[A-Za-z0-9_-]+")
+          # A trace or HAR records cookies and form posts as structured
+          # fields, and a video shows the session; none may leave the runner.
+          RECORDINGS = (".har", ".webm", ".trace", ".network")
+
+          def sanitize(data, archive=False):
+              if archive:
+                  output = io.BytesIO()
+                  with zipfile.ZipFile(io.BytesIO(data)) as source, zipfile.ZipFile(output, "w") as target:
+                      for entry in source.infolist():
+                          target.writestr(entry, sanitize(source.read(entry), entry.filename.endswith(".zip")))
+                  return output.getvalue()
+              try:
+                  text = data.decode("utf-8")
+              except UnicodeDecodeError:
+                  return data  # Preserve binary screenshots.
+              # Playwright HTML embeds a base64 ZIP containing its JSON report.
+              text = re.sub(
+                  r"data:application/zip;base64,([A-Za-z0-9+/=]+)",
+                  lambda match: "data:application/zip;base64," + base64.b64encode(
+                      sanitize(base64.b64decode(match[1], validate=True), archive=True)
+                  ).decode("ascii"), text,
+              )
+              return CREDENTIAL.sub("[REDACTED_CREDENTIAL]", text).encode("utf-8")
+
+          def recording(path):
+              if path.suffix in RECORDINGS or path.name.startswith("trace"):
+                  return True
+              if path.suffix == ".zip":
+                  with zipfile.ZipFile(path) as archive:
+                      return any(Path(name).suffix in RECORDINGS for name in archive.namelist())
+              return False
+
+          status = 0
+          for filename, command in (
+              ("server.log", ["docker", "logs", "caesium-server-keycloak-test"]),
+              ("keycloak.log", ["docker", "logs", "caesium-keycloak-test"]),
+              ("containers.log", ["docker", "ps", "-a"]),
+          ):
+              result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+              log = CREDENTIAL.sub("[REDACTED_CREDENTIAL]", result.stdout.decode("utf-8", errors="replace"))
+              Path("ui/ci-diagnostics", filename).write_text(log)
+              if result.returncode:
+                  print(f"::error::Could not collect {filename}; see diagnostic artifact")
+                  status = 1
+          # Upload only the sanitized copy. A malformed archive fails this
+          # step without falling back to raw reports or screenshots.
+          for source in (Path("ui/ci-diagnostics"), Path("ui/playwright-results.json"),
+                         Path("ui/test-results"), Path("ui/playwright-report")):
+              files = source.rglob("*") if source.is_dir() else [source]
+              for path in files:
+                  if not path.is_file():
+                      continue
+                  if recording(path):
+                      print(f"::error::Refusing to upload browser recording {path}; tracing and video must stay off for the keycloak project")
+                      status = 1
+                      continue
+                  clean = sanitize(path.read_bytes(), path.suffix == ".zip")
+                  target = Path("ui/ci-artifacts") / path.relative_to("ui")
+                  target.parent.mkdir(parents=True, exist_ok=True)
+                  target.write_bytes(clean)
+          sys.exit(status)
+          PYTHON
+      - name: Upload browser diagnostics
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: ui-e2e-keycloak-diag-${{ github.run_attempt }}
+          path: ui/ci-artifacts/
+          if-no-files-found: error
+          retention-days: 14
+      - name: Stop the Keycloak lane
+        if: always()
+        run: just integration-down-keycloak
 
   helm-integration-test:
     needs: [changes, images, helm-lint]
@@ -2372,6 +2529,7 @@ jobs:
       - ui-test
       - ui-e2e
       - ui-e2e-auth
+      - ui-e2e-keycloak
       - integration
       - helm-lint
       - early-evidence
@@ -2473,6 +2631,7 @@ jobs:
             ui-test \
             ui-e2e \
             ui-e2e-auth \
+            ui-e2e-keycloak \
             integration \
             helm-lint \
             early-evidence \
@@ -2558,6 +2717,7 @@ jobs:
       - ui-test
       - ui-e2e
       - ui-e2e-auth
+      - ui-e2e-keycloak
       - images
       - images-arm64
       - reagents
