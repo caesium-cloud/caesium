@@ -249,11 +249,14 @@ func TestRoutePolicyClassesPinned(t *testing.T) {
 		"GET /v1/jobs/:id/blame":            {Role: models.RoleViewer, Class: RouteClassNamespaced, PendingItem: "B7"},
 		"GET /v1/jobs/:id/topology":         {Role: models.RoleViewer, Class: RouteClassNamespaced, PendingItem: "B7"},
 		"GET /v1/jobs/:id/topology/history": {Role: models.RoleViewer, Class: RouteClassNamespaced, PendingItem: "B7"},
-		// Agent profiles resolve by name, and notification policies match
-		// events, across namespaces at runtime: deletes wait on D4.
-		"DELETE /v1/agentprofiles/:id":          {Role: models.RoleOperator, Class: RouteClassNamespaced, PendingItem: "D4"},
-		"DELETE /v1/notifications/channels/:id": {Role: models.RoleOperator, Class: RouteClassNamespaced, PendingItem: "D4"},
-		"DELETE /v1/notifications/policies/:id": {Role: models.RoleOperator, Class: RouteClassNamespaced, PendingItem: "D4"},
+		// Shared objects resolve to the object's namespace, and runtime
+		// matching and profile resolution are namespace-aware (D4).
+		"DELETE /v1/agentprofiles/:id":          {Role: models.RoleOperator, Class: RouteClassNamespaced},
+		"DELETE /v1/notifications/channels/:id": {Role: models.RoleOperator, Class: RouteClassNamespaced},
+		"DELETE /v1/notifications/policies/:id": {Role: models.RoleOperator, Class: RouteClassNamespaced},
+		"POST /v1/agentprofiles":                {Role: models.RoleOperator, Class: RouteClassNamespaced},
+		"POST /v1/notifications/policies":       {Role: models.RoleOperator, Class: RouteClassNamespaced},
+		"GET /v1/notifications/channels":        {Role: models.RoleViewer, Class: RouteClassCollection},
 		"GET /v1/agentprofiles/:id":             {Role: models.RoleViewer, Class: RouteClassNamespaced},
 		"GET /v1/notifications/channels/:id":    {Role: models.RoleViewer, Class: RouteClassNamespaced},
 		"GET /v1/notifications/policies/:id":    {Role: models.RoleViewer, Class: RouteClassNamespaced},
@@ -278,6 +281,10 @@ var liveCollectionRoutes = map[string]bool{
 	"GET /v1/stats/summary":   true,
 	"GET /v1/events":          true,
 	"GET /v1/events/ingested": true,
+	// D4: shared objects, the caller's namespaces plus "*".
+	"GET /v1/notifications/channels": true,
+	"GET /v1/notifications/policies": true,
+	"GET /v1/agentprofiles":          true,
 }
 
 // TestPendingRoutesListed logs the pending set so a reviewer sees every route

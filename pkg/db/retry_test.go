@@ -225,6 +225,23 @@ func TestTransactionRetriesContentionThenCommits(t *testing.T) {
 	require.Equal(t, 3, calls, "expected two contention retries before the closure committed")
 }
 
+// TestTransactionOnRetriesContentionThenCommits: the exported variant over a
+// caller's connection retries the whole closure the same way.
+func TestTransactionOnRetriesContentionThenCommits(t *testing.T) {
+	gdb, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{SkipDefaultTransaction: true})
+	require.NoError(t, err)
+
+	calls := 0
+	require.NoError(t, TransactionOn(context.Background(), gdb, func(tx *gorm.DB) error {
+		calls++
+		if calls < 2 {
+			return errors.New("database is locked")
+		}
+		return nil
+	}))
+	require.Equal(t, 2, calls)
+}
+
 // TestTransactionDoesNotRetryNonContention proves a non-contention error from
 // the closure is returned immediately without re-running the transaction.
 func TestTransactionDoesNotRetryNonContention(t *testing.T) {

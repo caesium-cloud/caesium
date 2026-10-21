@@ -9,7 +9,6 @@ import (
 	"github.com/caesium-cloud/caesium/internal/event"
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/caesium-cloud/caesium/pkg/log"
-	"github.com/google/uuid"
 	"gorm.io/gorm"
 )
 
@@ -96,43 +95,17 @@ func (s *Subscriber) handleEvent(ctx context.Context, evt event.Event) {
 	// Record failure/alert metrics.
 	recordEventMetric(evt)
 
-	policies, err := s.matchPolicies(ctx, evt)
+	deliveries, err := RouteEvent(ctx, s.db, evt)
 	if err != nil {
-		log.Error("notification: failed to load policies",
+		log.Error("notification: failed to route event",
 			"event_type", string(evt.Type),
 			"error", err,
 		)
 		return
 	}
 
-	if len(policies) == 0 {
-		return
-	}
-
-	// Batch-load all referenced channels in a single query.
-	channels, err := s.loadChannels(ctx, policies)
-	if err != nil {
-		log.Error("notification: failed to load channels",
-			"error", err,
-		)
-		return
-	}
-
-	payload := buildPayload(evt)
-
-	for _, policy := range policies {
-		channel, ok := channels[policy.ChannelID]
-		if !ok {
-			log.Error("notification: channel not found",
-				"channel_id", policy.ChannelID,
-			)
-			continue
-		}
-
-		if !channel.Enabled {
-			continue
-		}
-
+	for _, delivery := range deliveries {
+		channel := delivery.Channel
 		sender, ok := s.senders[channel.Type]
 		if !ok {
 			log.Warn("notification: no sender registered",
@@ -143,7 +116,7 @@ func (s *Subscriber) handleEvent(ctx context.Context, evt event.Event) {
 		}
 
 		start := time.Now()
-		sendErr := sender.Send(ctx, channel, payload)
+		sendErr := sender.Send(ctx, channel, buildPayload(delivery.Event))
 		duration := time.Since(start)
 
 		NotificationSendDuration.WithLabelValues(string(channel.Type)).Observe(duration.Seconds())
@@ -160,73 +133,6 @@ func (s *Subscriber) handleEvent(ctx context.Context, evt event.Event) {
 			NotificationSendsTotal.WithLabelValues(string(channel.Type), "success").Inc()
 		}
 	}
-}
-
-// loadChannels fetches all unique channels referenced by the given policies
-// in a single query, returning them indexed by ID.
-func (s *Subscriber) loadChannels(ctx context.Context, policies []models.NotificationPolicy) (map[uuid.UUID]models.NotificationChannel, error) {
-	ids := make([]uuid.UUID, 0, len(policies))
-	seen := make(map[uuid.UUID]struct{}, len(policies))
-	for _, p := range policies {
-		if _, dup := seen[p.ChannelID]; !dup {
-			ids = append(ids, p.ChannelID)
-			seen[p.ChannelID] = struct{}{}
-		}
-	}
-
-	var channels []models.NotificationChannel
-	if err := s.db.WithContext(ctx).
-		Where("id IN ?", ids).
-		Find(&channels).Error; err != nil {
-		return nil, err
-	}
-
-	m := make(map[uuid.UUID]models.NotificationChannel, len(channels))
-	for _, ch := range channels {
-		m[ch.ID] = ch
-	}
-	return m, nil
-}
-
-// matchPolicies finds enabled policies whose event_types contain the given
-// event type and whose filters match the event. Uses a SQL-level filter on
-// event type to reduce the rows loaded from the database.
-func (s *Subscriber) matchPolicies(ctx context.Context, evt event.Event) ([]models.NotificationPolicy, error) {
-	return MatchPolicies(ctx, s.db, evt)
-}
-
-// MatchPolicies returns the enabled policies that would deliver evt.
-//
-// Exported because delivery is not always fire-and-forget: an escalation must be
-// able to report whether anything will actually route it, rather than recording
-// itself as delivered into a deployment with no matching policy
-// (cmd/start/incident_ops.go Escalate). Sharing this function is what keeps that
-// answer honest — a separate re-implementation would drift from the filters the
-// subscriber actually applies.
-func MatchPolicies(ctx context.Context, db *gorm.DB, evt event.Event) ([]models.NotificationPolicy, error) {
-	var candidates []models.NotificationPolicy
-	// Filter at the SQL level: only load policies whose event_types JSON
-	// contains the event type string. This is a substring match on the
-	// JSON column — not exact, but it eliminates the vast majority of
-	// non-matching rows. The in-memory policyMatchesEvent check below
-	// is the authoritative filter.
-	if err := db.WithContext(ctx).
-		Where("enabled = ? AND event_types LIKE ?", true, "%"+string(evt.Type)+"%").
-		Find(&candidates).Error; err != nil {
-		return nil, err
-	}
-
-	var matched []models.NotificationPolicy
-	for _, p := range candidates {
-		if !policyMatchesEvent(p, evt) {
-			continue
-		}
-		if !policyFilterMatches(p, evt) {
-			continue
-		}
-		matched = append(matched, p)
-	}
-	return matched, nil
 }
 
 // policyMatchesEvent checks whether the policy's event_types list contains evt.Type.

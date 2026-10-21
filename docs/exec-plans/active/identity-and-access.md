@@ -885,7 +885,7 @@ cluster-shared instances.
       `internal/jobdef/lint/`, `internal/jobdef/agent_profile_refs.go`.
       Depends on: B1.
       (Lint rule lives in `internal/jobdef/agent_profile_refs.go`, not `internal/jobdef/lint/`; the built-in `triage-only` profile is cluster-shared `*`.)
-- [ ] D4. Shared-object semantics through the surface: lists are collections
+- [x] D4. Shared-object semantics through the surface: lists are collections
       (`*` objects always included); writes to `*` objects require operator at `*`;
       notification policies match runs in their own namespace only, shared policies
       everywhere. Integration: a marketing operator cannot edit a finance channel (403),
@@ -895,6 +895,7 @@ cluster-shared instances.
       `internal/notification/watcher.go`, `test/notification_routes_test.go`,
       `test/agent_profile_test.go`.
       Depends on: D3 + A3.
+      (W5-ε: matching lives in `internal/notification/route.go` `RouteEvent`, keyed on the incident's, else the breaching runs' (dataset releases), else the run's persisted, else the job's namespace, only while a policy file is loaded (design §§1/15: no file, routing and profile resolution unchanged; the earlier always-strict fold was overruled); labels not provably the owner's, cross-namespace contract findings and unowned baseline evidence are withheld from namespaced destinations; undeclared namespaces refused on create; deletes release names; runtime profile resolution refuses foreign profiles (file-backed only), the deployment default included (a refused default denies all, before any job override). Follow-up: audit rows for agent-profile writes.)
 
 ### Stream E — Identity lifecycle: group refresh, user administration, CLI login
 

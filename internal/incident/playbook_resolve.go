@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/caesium-cloud/caesium/internal/auth/policy"
 	"github.com/caesium-cloud/caesium/internal/models"
 	schema "github.com/caesium-cloud/caesium/pkg/jobdef"
 	"github.com/caesium-cloud/caesium/pkg/log"
@@ -50,9 +51,20 @@ import (
 //     which permits no autonomous action at all. Falling back to the deployment
 //     default there would substitute a policy the job explicitly replaced, in the
 //     widening direction.
+//
+// While a policy file is loaded (identity-and-access D4; with none, design
+// §§1/15 keep the name-only lookup), a profile resolves only when it lives in
+// the incident's persisted namespace or is cluster-shared ("*"). A refused
+// job-declared profile is treated as a missing one (DenyAllPlaybook), and so
+// is a refused deployment default — before the job's autonomy block is
+// applied, so the block cannot widen the deny-all. Lint refuses such a
+// reference at apply, but a job applied before that, or one that moved after
+// the incident opened, can still name it, and profile names are global:
+// without this a namespace could author the playbook another namespace's
+// incidents run under.
 func ResolvePlaybook(ctx context.Context, db *gorm.DB, incidentID uuid.UUID, defaultProfile string) Playbook {
 	var inc models.Incident
-	if err := db.WithContext(ctx).Select("id", "job_id", "class").First(&inc, "id = ?", incidentID).Error; err != nil {
+	if err := db.WithContext(ctx).Select("id", "job_id", "class", "namespace").First(&inc, "id = ?", incidentID).Error; err != nil {
 		log.Warn("incident: could not load incident for playbook; failing closed",
 			"incident_id", incidentID, "error", err)
 		return Playbook{}
@@ -66,7 +78,11 @@ func ResolvePlaybook(ctx context.Context, db *gorm.DB, incidentID uuid.UUID, def
 	}
 
 	if len(job.Remediation) == 0 {
-		return defaultProfilePlaybook(ctx, db, incidentID, defaultProfile).ForClass(inc.Class)
+		base, ok := defaultProfilePlaybook(ctx, db, incidentID, inc.Namespace, defaultProfile)
+		if !ok {
+			return DenyAllPlaybook()
+		}
+		return base.ForClass(inc.Class)
 	}
 
 	var block schema.MetadataRemediation
@@ -76,7 +92,7 @@ func ResolvePlaybook(ctx context.Context, db *gorm.DB, incidentID uuid.UUID, def
 		return DenyAllPlaybook()
 	}
 
-	base, ok := profilePlaybook(ctx, db, incidentID, block.Profile, defaultProfile)
+	base, ok := profilePlaybook(ctx, db, incidentID, inc.Namespace, block.Profile, defaultProfile)
 	if !ok {
 		return DenyAllPlaybook()
 	}
@@ -94,11 +110,16 @@ func ResolvePlaybook(ctx context.Context, db *gorm.DB, incidentID uuid.UUID, def
 // distinct from ResolvePlaybook, which supplies the enforced policy — and is
 // best-effort: a nil profile means no session can be launched, not that the
 // policy is unknown.
+//
+// Like ResolvePlaybook it resolves only a profile in the incident's namespace
+// or "*"; when the incident cannot be read only a "*" profile resolves.
 func ResolveProfile(ctx context.Context, db *gorm.DB, incidentID uuid.UUID, defaultProfile string) *models.AgentProfile {
 	name := strings.TrimSpace(defaultProfile)
 
 	var inc models.Incident
-	if err := db.WithContext(ctx).Select("id", "job_id").First(&inc, "id = ?", incidentID).Error; err == nil {
+	known := false
+	if err := db.WithContext(ctx).Select("id", "job_id", "namespace").First(&inc, "id = ?", incidentID).Error; err == nil {
+		known = true
 		var job models.Job
 		if err := db.WithContext(ctx).Select("id", "remediation").First(&job, "id = ?", inc.JobID).Error; err == nil && len(job.Remediation) > 0 {
 			var block schema.MetadataRemediation
@@ -111,24 +132,54 @@ func ResolveProfile(ctx context.Context, db *gorm.DB, incidentID uuid.UUID, defa
 		return nil
 	}
 
-	var profile models.AgentProfile
-	if err := db.WithContext(ctx).First(&profile, "name = ?", name).Error; err != nil {
+	profile, err := loadIncidentProfile(ctx, db, inc.Namespace, known, name)
+	if err != nil {
+		if errors.Is(err, errProfileOutsideNamespace) {
+			log.Warn("incident: agent profile is outside the incident's namespace; not using it",
+				"incident_id", incidentID, "profile", name)
+		}
 		return nil
 	}
 	return &profile
+}
+
+// errProfileOutsideNamespace refuses a profile that lives neither in the
+// incident's namespace nor in "*". Callers treat it exactly as a missing
+// profile; it names no stored data.
+var errProfileOutsideNamespace = errors.New("agent profile is outside the incident's namespace")
+
+// loadIncidentProfile loads the profile named name for an incident owned by
+// incidentNamespace (known=false: the incident could not be read, so only a
+// "*" profile is accepted). Profile names are globally unique. The namespace
+// rule applies while a policy file is loaded; with none (design §§1/15:
+// behaviour unchanged) the name alone resolves, as before D4.
+func loadIncidentProfile(ctx context.Context, db *gorm.DB, incidentNamespace string, known bool, name string) (models.AgentProfile, error) {
+	var profile models.AgentProfile
+	if err := db.WithContext(ctx).First(&profile, "name = ?", name).Error; err != nil {
+		return models.AgentProfile{}, err
+	}
+	if !policy.ProcessHolder().FileBacked() {
+		return profile, nil
+	}
+	if profile.Namespace == models.ClusterNamespace || (known && models.ObjectVisibleFrom(incidentNamespace, profile.Namespace)) {
+		return profile, nil
+	}
+	return models.AgentProfile{}, errProfileOutsideNamespace
 }
 
 // profilePlaybook loads a named AgentProfile's playbook. An empty name means the
 // job deferred to the deployment default. The bool reports whether resolution
 // SUCCEEDED — false is a hard failure the caller must fail closed on, and is
 // deliberately distinct from "resolved to an unconfigured (zero) playbook".
-func profilePlaybook(ctx context.Context, db *gorm.DB, incidentID uuid.UUID, name, defaultProfile string) (Playbook, bool) {
+func profilePlaybook(ctx context.Context, db *gorm.DB, incidentID uuid.UUID, incidentNamespace, name, defaultProfile string) (Playbook, bool) {
 	name = strings.TrimSpace(name)
 	if name == "" {
-		return defaultProfilePlaybook(ctx, db, incidentID, defaultProfile), true
+		// A refused default is a failed resolution: the caller denies before
+		// the job's own autonomy block could override the empty allow-list.
+		return defaultProfilePlaybook(ctx, db, incidentID, incidentNamespace, defaultProfile)
 	}
-	var profile models.AgentProfile
-	if err := db.WithContext(ctx).First(&profile, "name = ?", name).Error; err != nil {
+	profile, err := loadIncidentProfile(ctx, db, incidentNamespace, true, name)
+	if err != nil {
 		log.Warn("incident: could not load job-declared agent profile for playbook",
 			"incident_id", incidentID, "profile", name, "error", err)
 		return Playbook{}, false
@@ -137,21 +188,31 @@ func profilePlaybook(ctx context.Context, db *gorm.DB, incidentID uuid.UUID, nam
 }
 
 // defaultProfilePlaybook resolves the deployment default profile's playbook. An
-// unset or unreadable default yields the zero Playbook — never a permissive one.
-func defaultProfilePlaybook(ctx context.Context, db *gorm.DB, incidentID uuid.UUID, defaultProfile string) Playbook {
+// unset or unreadable default yields the zero Playbook, as before. The bool is
+// false when the configured default exists but is refused (outside the
+// incident's namespace): the caller must fail closed with DenyAllPlaybook and
+// apply no job override, since the zero Playbook would be unconfigured (tier
+// 0/1 autonomous) and wider than the restrictive default the incident would
+// otherwise get.
+func defaultProfilePlaybook(ctx context.Context, db *gorm.DB, incidentID uuid.UUID, incidentNamespace, defaultProfile string) (Playbook, bool) {
 	name := strings.TrimSpace(defaultProfile)
 	if name == "" {
-		return Playbook{}
+		return Playbook{}, true
 	}
-	var profile models.AgentProfile
-	if err := db.WithContext(ctx).First(&profile, "name = ?", name).Error; err != nil {
+	profile, err := loadIncidentProfile(ctx, db, incidentNamespace, true, name)
+	if err != nil {
+		if errors.Is(err, errProfileOutsideNamespace) {
+			log.Warn("incident: deployment default agent profile is outside the incident's namespace; denying autonomous actions",
+				"incident_id", incidentID, "profile", name)
+			return Playbook{}, false
+		}
 		if !errors.Is(err, gorm.ErrRecordNotFound) {
 			log.Warn("incident: could not load default profile for playbook",
 				"incident_id", incidentID, "profile", name, "error", err)
 		}
-		return Playbook{}
+		return Playbook{}, true
 	}
-	return DecodePlaybook(profile.Playbook)
+	return DecodePlaybook(profile.Playbook), true
 }
 
 // Document re-encodes a resolved Playbook into the stored document shape, so the

@@ -693,10 +693,63 @@ means `default`, `*` makes the object cluster-shared, and anything else must be
 a DNS label (400 otherwise). The namespace is create-only: a `PATCH` may echo
 the stored value but one that changes it returns 400 and writes nothing. Moving
 an object is delete and create. A notification policy may reference only a
-channel in its own namespace or `*`. Server-side lint and apply reject a job
-whose remediation profile or escalation channel lives outside the job's
-namespace and `*`. The built-in `triage-only` agent profile lives in `*`, so
-every namespace can reference it. See [rest-api.md](rest-api.md).
+channel in its own namespace or `*`, on create and on a `channel_id` patch; a
+channel the caller cannot read fails with the same 400 as a channel that does
+not exist. Server-side lint and apply reject a job whose remediation profile or
+escalation channel lives outside the job's namespace and `*`. The built-in
+`triage-only` agent profile lives in `*`, so every namespace can reference it.
+See [rest-api.md](rest-api.md).
+
+- **Who may do what.** Reading an object needs viewer in its namespace; a `*`
+  object is readable with viewer in any namespace. Creating, editing and
+  deleting need operator in the object's namespace (the create body's), and an
+  operator at `*` for a `*` object. The lists return the caller's namespaces'
+  objects plus every `*` one.
+- **Declared namespaces.** While a policy file is loaded, creating an object in
+  a namespace the file does not declare returns 400 naming it, as for jobs and
+  keys. `*` is always valid.
+- **Notification routing.** Notification isolation needs a policy file. With
+  no policy file, routing is unchanged: every policy matches by event type and
+  filters, whatever its namespace, and receives the event as built. While a
+  policy file is loaded, a policy delivers only the events its own
+  namespace owns; a `*` policy delivers every event. An event about an incident
+  belongs to the incident's namespace, one about a run to the run's persisted
+  namespace (a run that outlived its job's move alerts the old owner), a
+  `dataset_released` to the namespace of the runs that opened the hold and
+  last breached it (none when those differ), and a
+  job-only event (`sla_missed` without a run, `contract_break_declared`) to the
+  job's namespace. An event whose owner cannot be found reaches only `*`
+  policies. The job labels an event carries are delivered to a namespace's
+  policies only when the job lives in that namespace and still has exactly
+  those labels when the event is dispatched; otherwise they are removed, a
+  label filter does not match, and a contract break is not delivered to that
+  namespace. A contract break reaches a namespace's
+  policies only with the findings between that namespace's jobs, and only
+  while each remaining consumer's recorded team is still its `team` label; a
+  break by a producer in another namespace reaches only `*` policies.
+  Data-assertion verdicts recorded before baselines were namespace-owned
+  reach a namespace's policies without their baseline evidence, as confined
+  reads of runs and events show them. With or without a policy file, a policy
+  whose channel is disabled, missing or outside its namespace delivers
+  nothing, and an agent escalation reports itself routed only when some policy
+  delivers it.
+- **Agent profiles at incident time.** While a policy file is loaded, an
+  incident uses a profile (the job's or the deployment default,
+  `CAESIUM_AGENT_DEFAULT_PROFILE`) only when it lives in the incident's
+  namespace or `*`. Any other is treated as a missing profile: a job-declared
+  one denies every autonomous action, and so does a configured default that
+  lives in another namespace, whatever the job's own autonomy block says (a
+  default that does not exist leaves the playbook unconfigured, as before).
+  With no policy file, profiles resolve by name alone, as before.
+- **Names are global (v1).** Jobs reference channels and profiles by name, so a
+  name is unique across namespaces. A create or rename onto a name held
+  elsewhere returns 409 `conflict` without saying where. A namespace can
+  therefore take a name another namespace wanted; lint and the rules above stop
+  it from using another namespace's objects, so the cost is the name only. A
+  cluster operator recovers it by renaming or deleting the holder: deleting an
+  object releases its name.
+- A `*` policy is readable by every viewer, including its job filters, which
+  may name other namespaces' jobs. Cluster operators author `*` policies.
 
 ### Route classes and enforcement
 
@@ -708,7 +761,7 @@ principal confined to some namespaces is treated:
 | identity | Allowed whatever its grants, even none: `GET /auth/whoami`, `POST /auth/logout`, `GET /v1/system/features`. |
 | cluster | Always denied (403 `insufficient_role`): metrics, nodes and workers, atoms, logs, database, cache prune, `POST /v1/triggers`, the connector reads (`/v1/connectors*`), `GET /v1/auth/namespaces`, and `GET /v1/auth/policy` plus `POST /v1/auth/policy/reload`. |
 | namespaced | Caesium resolves the namespace of the target the handler will act on and requires the route's role in it (in every resolved namespace; once B6 ships, dataset reads will need it in any one). A target with no owning namespace is cluster-only. |
-| collection | The handler returns only rows from the namespaces where the principal holds the route's role. Live today: the API key list, and the job-derived collections in [Collections](#collections-and-history-under-a-job). |
+| collection | The handler returns only rows from the namespaces where the principal holds the route's role. Live today: the API key list, the shared-object lists ([Shared objects](#shared-objects)), and the job-derived collections in [Collections](#collections-and-history-under-a-job). |
 
 A principal is *confined* on a route when its cluster role (its grant at `*`)
 is below the route's role. An unconfined principal is authorised exactly as
@@ -738,9 +791,10 @@ target's namespace:
 - **Triggers:** `GET /v1/triggers/:id`, its event history and
   `POST /v1/triggers/:id/fire`, requiring the role in every job the trigger
   serves.
-- **Shared objects:** read and delete a notification channel, notification
-  policy or agent profile by id. `*` objects are readable by viewers anywhere
-  and writable only with the role at `*`.
+- **Shared objects:** read, create, edit and delete a notification channel,
+  notification policy or agent profile (a create by the body's `namespace`).
+  `*` objects are readable by viewers anywhere and writable only with the role
+  at `*`.
 - **Incidents:** reject an approval.
 - **API keys:** list, create, revoke and rotate keys confined to namespaces
   where it is admin (see [API keys and CLI login](#api-keys-and-cli-login)).
@@ -766,9 +820,8 @@ target's namespace:
 An idempotent `POST /v1/jobs/:id/run` that would return a recorded run from a
 namespace the confined caller cannot read answers an audited 403 with no run
 body. The request body of a namespaced route is read (up to 8 MiB, else `413`)
-before the decision. Once D4 makes shared-object creates live, a confined
-caller's create body must be `application/json` up to 1 MiB, and any other body
-type will be `415`; until then those creates are denied as pending.
+before the decision. A confined caller's shared-object create body must be
+`application/json` up to 1 MiB; any other body type is `415`.
 
 **Pending routes.** A route whose handler can still return or touch another
 namespace's rows is cluster-only for confined principals until the plan item
@@ -782,7 +835,6 @@ that makes it namespace-aware lands (unconfined principals are unaffected):
 | B5 | `GET /v1/lineage/impact`, `GET /v1/contracts/graph` |
 | B6 | every `/v1/datasets*` route |
 | B9 | `POST /v1/jobs`, `POST /v1/jobdefs/apply`, `GET /v1/jobs/:id/manifest`, `PATCH /v1/triggers/:id` (confined job writes and trigger tenancy) |
-| D4 | shared-object lists, and creating or editing channels, policies and agent profiles |
 
 Every namespace denial is `403 insufficient permissions` and is audited as
 `auth.denied` with reason `insufficient_role`. Lint and diff, where the caller
