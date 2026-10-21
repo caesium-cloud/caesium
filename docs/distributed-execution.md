@@ -143,6 +143,16 @@ Both values are per node and do not need to match across the cluster. A changed 
 
 Avoid mixed-mode operation (some old local-only schedulers + some distributed claimers), which can lead to duplicate execution windows.
 
+Schema-changing upgrades also depend on the native dqlite library in the
+current leader. Caesium's builder patches dqlite to refresh query column
+metadata after SQLite recompiles a statement following a schema change
+([#613](https://github.com/caesium-cloud/caesium/issues/613)). Without that fix,
+an older leader can return shifted joined fields during migration, including
+an alias in `job_labels`, and a run can fail with a JSON scan error. Upgrading
+a follower does not patch an older leader. When upgrading from an affected
+release such as v0.1.0, drain active work and use a maintenance window to stop
+the old servers before starting the new version and admitting more work.
+
 ## Runtime Verification
 
 Use startup logs:
