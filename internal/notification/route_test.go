@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -301,16 +302,27 @@ func contractPayload(t *testing.T, consumer string, findings ...[2]string) json.
 	t.Helper()
 	var list []map[string]any
 	var impacted []map[string]string
+	var keys []string
 	for _, edge := range findings {
 		// Team fields are read from the consumer's `team` label when the break
-		// is declared; consumerJob gives each consumer that label.
-		list = append(list, map[string]any{"producer": edge[0], "consumer": edge[1], "consumer_team": edge[1] + "-team", "subject": "lake.orders", "detail": "removed customer_id"})
+		// is declared; consumerJob gives each consumer that label. Each
+		// consumer needs its own broken key (contractKey).
+		list = append(list, map[string]any{"producer": edge[0], "consumer": edge[1], "consumer_team": edge[1] + "-team", "subject": "lake.orders",
+			"dataset": "lake.orders", "output_key": contractKey(edge[1]), "detail": "removed " + contractKey(edge[1])})
 		impacted = append(impacted, map[string]string{"alias": edge[1], "team": edge[1] + "-team"})
+		keys = append(keys, contractKey(edge[1]))
 	}
+	slices.Sort(keys)
 	return mustJSON(t, map[string]any{
-		"job_alias": consumer, "consumer": consumer, "producer": findings[0][0], "dataset": "lake.orders",
+		"job_alias": consumer, "consumer": consumer, "producer": findings[0][0], "dataset": "lake.orders", "offending_keys": keys,
 		"impacted_consumers": impacted, "breaking_findings": list, "actor": "someone", "reason": "planned",
 	})
+}
+
+// contractKey is the producer output key only consumer needs, spelled so it
+// does not contain the consumer's alias.
+func contractKey(consumer string) string {
+	return strings.ReplaceAll(consumer, "-", "_") + "_col"
 }
 
 // consumerJob creates a contract consumer whose team label is the one
@@ -330,15 +342,23 @@ func TestRouteEventScopesContractBreaksToTheDestinationNamespace(t *testing.T) {
 	got := f.route(event.Event{Type: event.TypeContractBreakDeclared, JobID: c1, Payload: payload})
 	require.Equal(t, []string{"pol-*", "pol-marketing"}, policyNames(got))
 	require.Equal(t, payload, got["pol-*"].Event.Payload, "a shared destination receives the whole break")
+	require.Contains(t, string(payload), contractKey("consumer-fin"), "the unscoped summary names both consumers' broken keys")
 	var scoped struct {
-		Impacted []map[string]string `json:"impacted_consumers"`
-		Findings []map[string]any    `json:"breaking_findings"`
+		Impacted      []map[string]string `json:"impacted_consumers"`
+		Findings      []map[string]any    `json:"breaking_findings"`
+		OffendingKeys []string            `json:"offending_keys"`
+		Dataset       string              `json:"dataset"`
 	}
 	require.NoError(t, json.Unmarshal(got["pol-marketing"].Event.Payload, &scoped))
 	require.Len(t, scoped.Findings, 1)
 	require.Equal(t, "consumer-mkt", scoped.Findings[0]["consumer"])
 	require.Equal(t, []map[string]string{{"alias": "consumer-mkt", "team": "consumer-mkt-team"}}, scoped.Impacted)
+	require.Equal(t, []string{contractKey("consumer-mkt")}, scoped.OffendingKeys,
+		"the summary's offending keys are recomputed from the kept findings")
+	require.Equal(t, "lake.orders", scoped.Dataset)
 	require.NotContains(t, string(got["pol-marketing"].Event.Payload), "consumer-fin")
+	require.NotContains(t, string(got["pol-marketing"].Event.Payload), contractKey("consumer-fin"),
+		"a key only the removed finance finding needs must not reach marketing")
 
 	// The finance consumer's event: its only finding has a marketing
 	// producer, so nothing about it may reach finance's destination.

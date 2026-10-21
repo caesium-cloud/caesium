@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"slices"
 	"strings"
 
 	"github.com/caesium-cloud/caesium/internal/auth/policy"
@@ -667,9 +668,53 @@ func scopeContractBreak(ctx context.Context, db *gorm.DB, payload json.RawMessag
 	}
 	fields["breaking_findings"] = keptFindings
 	fields["impacted_consumers"] = keptImpacted
+	// The summary fields the emitter derives from the findings
+	// (internal/contract emitContractBreakDeclaredEvents: offendingKeys,
+	// datasetForGroup) are recomputed from the kept ones, so a removed
+	// finding's broken keys do not survive in the summary.
+	if _, present := fields["offending_keys"]; present {
+		fields["offending_keys"] = findingOutputKeys(keptFindings)
+	}
+	if _, present := fields["dataset"]; present {
+		fields["dataset"] = findingDataset(keptFindings)
+	}
 	encoded, err := json.Marshal(fields)
 	if err != nil {
 		return nil, false
 	}
 	return encoded, true
+}
+
+// findingOutputKeys is the sorted, de-duplicated output_key set of findings
+// (internal/contract offendingKeys).
+func findingOutputKeys(findings []any) []string {
+	seen := map[string]struct{}{}
+	for _, entry := range findings {
+		finding, _ := entry.(map[string]any)
+		if key, _ := finding["output_key"].(string); strings.TrimSpace(key) != "" {
+			seen[strings.TrimSpace(key)] = struct{}{}
+		}
+	}
+	keys := make([]string, 0, len(seen))
+	for key := range seen {
+		keys = append(keys, key)
+	}
+	slices.Sort(keys)
+	return keys
+}
+
+// findingDataset is the display name of the first finding's dataset
+// (internal/contract displayDatasetName(datasetForGroup)).
+func findingDataset(findings []any) string {
+	for _, entry := range findings {
+		finding, _ := entry.(map[string]any)
+		dataset, _ := finding["dataset"].(string)
+		if dataset = strings.TrimSpace(dataset); dataset != "" {
+			if strings.HasPrefix(dataset, "/") && !strings.Contains(strings.TrimPrefix(dataset, "/"), "/") {
+				return strings.TrimPrefix(dataset, "/")
+			}
+			return dataset
+		}
+	}
+	return ""
 }

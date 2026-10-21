@@ -381,10 +381,14 @@ func (s *IntegrationTestSuite) TestContractBreakNotificationScopedToNamespace() 
 	cleanup := &sharedObjectCleanup{s: s}
 	defer cleanup.run()
 
+	// Each consumer needs its own key, and the break removes both: the
+	// marketing notice must not carry the key only finance needs.
+	finOnlyKey := fmt.Sprintf("ledger_code_%d", suffix%1_000_000)
+	finConsumerManifest := strings.ReplaceAll(contractDatasetConsumerManifest(finConsumer, dataset, "fin-team"), "customer_id", finOnlyKey)
 	initial := s.writeContractManifests(map[string]string{
-		producer:    d4NamespacedManifest(contractDatasetProducerManifest(producer, dataset, []string{"customer_id", "row_count"}, 1), "marketing"),
+		producer:    d4NamespacedManifest(contractDatasetProducerManifest(producer, dataset, []string{"customer_id", finOnlyKey, "row_count"}, 1), "marketing"),
 		mktConsumer: d4NamespacedManifest(contractDatasetConsumerManifest(mktConsumer, dataset, "mkt-team"), "marketing"),
-		finConsumer: d4NamespacedManifest(contractDatasetConsumerManifest(finConsumer, dataset, "fin-team"), "finance"),
+		finConsumer: d4NamespacedManifest(finConsumerManifest, "finance"),
 	})
 	defer os.RemoveAll(initial)
 	s.runCLI("job", "apply", "--path", initial, "--server", s.caesiumURL)
@@ -416,6 +420,7 @@ func (s *IntegrationTestSuite) TestContractBreakNotificationScopedToNamespace() 
 	shared := strings.Join(captures["*"].Snapshot(), "\n")
 	s.Contains(shared, mktConsumer)
 	s.Contains(shared, finConsumer)
+	s.Contains(shared, finOnlyKey, "the shared notices name the finance consumer's broken key")
 
 	s.Require().Eventually(func() bool { return len(captures["marketing"].Snapshot()) >= 1 }, 30*time.Second, 250*time.Millisecond)
 	s.Require().Never(func() bool { return len(captures["finance"].Snapshot()) > 0 }, 3*time.Second, 250*time.Millisecond,
@@ -426,4 +431,6 @@ func (s *IntegrationTestSuite) TestContractBreakNotificationScopedToNamespace() 
 	s.Contains(marketing[0], producer)
 	s.NotContains(marketing[0], finConsumer, "the marketing notice must not name finance's consumer")
 	s.NotContains(marketing[0], "fin-team")
+	s.Contains(marketing[0], "customer_id", "the marketing notice names its own consumer's broken key")
+	s.NotContains(marketing[0], finOnlyKey, "the marketing notice must not carry a key only finance's consumer needs")
 }
