@@ -7,6 +7,7 @@ import (
 	"crypto/x509"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"strings"
@@ -95,8 +96,14 @@ func (s *IntegrationTestSuite) ldapAdmin() *ldapDirectory {
 	var conn *gldap.Conn
 	deadline := time.Now().Add(30 * time.Second)
 	for {
-		conn, err = gldap.DialURL(os.Getenv(ldapURLEnv), gldap.DialWithTLSConfig(tlsCfg))
+		// Every attempt is bounded: the dial (TCP and the LDAPS handshake)
+		// by the dialer, the bind and every later operation by the
+		// connection's request timeout, so the 30s deadline is reached.
+		attempt := min(ldapOpTimeout, max(time.Until(deadline), time.Second))
+		conn, err = gldap.DialURL(os.Getenv(ldapURLEnv), gldap.DialWithTLSConfig(tlsCfg),
+			gldap.DialWithDialer(&net.Dialer{Timeout: attempt}))
 		if err == nil {
+			conn.SetTimeout(ldapOpTimeout)
 			if err = conn.Bind(ldapAdminDN, ldapAdminPassword); err == nil {
 				break
 			}
@@ -108,6 +115,10 @@ func (s *IntegrationTestSuite) ldapAdmin() *ldapDirectory {
 	s.T().Cleanup(func() { _ = conn.Close() })
 	return &ldapDirectory{s: s, conn: conn}
 }
+
+// ldapOpTimeout bounds each dial and each directory operation of the
+// fixture's admin connection.
+const ldapOpTimeout = 5 * time.Second
 
 func ldapUserDN(uid string) string { return "uid=" + uid + "," + ldapPeopleBase }
 func ldapGroupDN(cn string) string { return "cn=" + cn + "," + ldapGroupBase }
