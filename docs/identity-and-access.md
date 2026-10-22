@@ -1517,7 +1517,11 @@ rotated OIDC refresh token is shared by both.
   marked refused: every session and user-bound key of the user answers
   `401` with body `{"reason":"stale_groups",...}` on every server, even if
   the IdP recovers, until the user signs in again (in the Console, or with
-  `caesium login`).
+  `caesium login`). A refresh that times out for the waiting request but then
+  succeeds races the refusal: if the confirmed groups commit first the user is
+  not marked refused and later requests are admitted on those groups; if the
+  refusal commits first it holds until sign-in. Either way no request is
+  admitted on groups the IdP has not confirmed.
 - **Refused by the IdP** (OIDC `invalid_grant`; an LDAP entry that is gone or
   no longer admitted by the login filter): the grant is cleared and all the
   user's sessions and user-bound keys are revoked in one transaction, audited
