@@ -185,11 +185,15 @@ export function useJobsView() {
 
     // Events for jobs the narrowed list does not hold yet. Each batch waits for
     // a refetch that starts after its newest event (cancelling a staler
-    // in-flight one); entries whose job is then in the list join the activity
-    // feed, the rest belong to other namespaces and are dropped.
+    // in-flight one) and SUCCEEDS; entries whose job is then in the list join
+    // the activity feed, the rest belong to other namespaces and are dropped.
+    // A failed refetch proves nothing, so the batch is kept (and its keys stay
+    // unseen) for the next attempt. Keys are remembered only once decided.
     let disposed = false;
     let settling = false;
-    const unknownJobs: PendingActivityEntry[] = [];
+    let retryTimer: ReturnType<typeof setTimeout> | undefined;
+    const unknownJobs: Array<PendingActivityEntry & { key: string }> = [];
+    const heldKeys = new Set<string>(); // queued or in flight
     const settleUnknownJobs = async () => {
       if (settling) return;
       settling = true;
@@ -203,15 +207,25 @@ export function useJobsView() {
             // list before this event. Cancel explicitly so the request that
             // answers membership starts after the event.
             await queryClient.cancelQueries({ queryKey: key, exact: true });
-            await queryClient.refetchQueries({ queryKey: key, exact: true }, { cancelRefetch: true });
+            await queryClient.refetchQueries({ queryKey: key, exact: true }, { cancelRefetch: true, throwOnError: true });
           } catch {
-            // A failed refetch cannot establish membership; drop the batch.
-            continue;
+            const kept = batch.slice(-ACTIVITY_LIMIT);
+            batch.forEach((held) => kept.includes(held) || heldKeys.delete(held.key));
+            unknownJobs.unshift(...kept);
+            if (!disposed && retryTimer === undefined) {
+              retryTimer = setTimeout(() => {
+                retryTimer = undefined;
+                void settleUnknownJobs();
+              }, 5000);
+            }
+            return;
           }
           if (disposed) return;
           const list = queryClient.getQueryData<Job[]>(key) ?? [];
           const aliases = new Map(list.map((job) => [job.id, job.alias] as const));
-          batch.forEach((draft) => {
+          batch.forEach(({ key: activityId, ...draft }) => {
+            heldKeys.delete(activityId);
+            rememberActivityKey(activityKeysRef.current, activityId);
             const alias = aliases.get(draft.jobId);
             if (alias) appendActivity(draft, alias);
           });
@@ -250,8 +264,11 @@ export function useJobsView() {
       // event until a refetch started after it says whether the job belongs.
       if (namespaceRef.current && !jobAliasesRef.current.has(jobID)) {
         refreshHistory();
-        if (rememberActivityKey(activityKeysRef.current, activityKey(e, jobID, e.run_id ?? run?.id))) {
+        const heldKey = activityKey(e, jobID, e.run_id ?? run?.id);
+        if (!activityKeysRef.current.has(heldKey) && !heldKeys.has(heldKey)) {
+          heldKeys.add(heldKey);
           unknownJobs.push({
+            key: heldKey,
             type: e.type,
             jobId: jobID,
             runId: e.run_id ?? run?.id,
@@ -326,6 +343,7 @@ export function useJobsView() {
 
     return () => {
       disposed = true;
+      if (retryTimer !== undefined) clearTimeout(retryTimer);
       refresh.dispose();
       events.unsubscribeConnection(onConnection);
       RUN_ACTIVITY_EVENTS.forEach((t) => events.unsubscribe(t, onRunEvent));
