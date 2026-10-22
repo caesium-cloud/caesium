@@ -1274,6 +1274,7 @@ func initAuth(ctx context.Context, vars env.Environment, runAsync func(func())) 
 	// the isolation context, with or without run owners (design §10.1).
 	auditReload := auth.PolicyReloadAuditor(auditor)
 	fence := run.NewIsolationFence(run.Default(), policyHolder)
+	run.SetProcessIsolationFence(fence)
 	policyHolder.SetObserver(func(event policy.ReloadEvent) {
 		auditReload(event)
 		fence.Observe(event)

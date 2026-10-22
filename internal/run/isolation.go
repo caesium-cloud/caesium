@@ -6,9 +6,11 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"maps"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/caesium-cloud/caesium/internal/auth/policy"
@@ -251,8 +253,9 @@ func stampIsolationOnResetTx(tx *gorm.DB, rowID uuid.UUID) error {
 }
 
 // FenceIsolation marks every unfinished row that carries no isolation mark
-// (or only the placeholder stamped while a policy file was not loaded yet)
-// when rev isolates its namespace, binding it to rev's settings. A reload (or
+// (or only a blank one, or the placeholder stamped while a policy file was
+// not loaded yet) when rev isolates its namespace, binding it to rev's
+// settings. A reload (or
 // a restart with a changed file) can isolate a namespace after its rows were
 // registered; without this, those rows would stay pullable by a worker that
 // cannot honour the context, and in a cluster without run owners no dispatch
@@ -262,6 +265,39 @@ func stampIsolationOnResetTx(tx *gorm.DB, rowID uuid.UUID) error {
 // dispatches, and a retry reconciles the rows it resets). It returns the
 // number of rows marked.
 func (s *Store) FenceIsolation(ctx context.Context, rev *policy.Revision) (int, error) {
+	return s.fenceIsolation(ctx, rev, nil)
+}
+
+// FenceRunAfterCommit applies the fence to runID's rows under this node's
+// current policy, right after a transaction that inserted them committed. A
+// reload whose sweep read the table before that commit never saw the rows,
+// and its revision is published before its sweep starts, so this read of the
+// current revision covers them. A failed attempt asks the process fence for a
+// full sweep, which retries until it succeeds.
+func (s *Store) FenceRunAfterCommit(ctx context.Context, runID uuid.UUID) {
+	holder := policy.ProcessHolder()
+	if !holder.FileBacked() {
+		return
+	}
+	if _, err := s.fenceIsolation(ctx, holder.Current(), &runID); err != nil {
+		log.Warn("isolation fence: failed to mark a new run's tasks; requesting a full sweep", "run_id", runID, "error", err)
+		requestIsolationSweep()
+	}
+}
+
+// hasIsolationMark reports whether selector carries a real isolation mark:
+// present, not blank (the claim query ignores blank values, as it did before
+// the mark existed), and not the placeholder stamped before a file loaded.
+func hasIsolationMark(selector datatypes.JSONMap) bool {
+	current, ok := selector[IsolationSelectorKey]
+	if !ok || current == nil {
+		return false
+	}
+	value := strings.TrimSpace(fmt.Sprint(current))
+	return value != "" && value != isolationSelectorUnloaded
+}
+
+func (s *Store) fenceIsolation(ctx context.Context, rev *policy.Revision, runID *uuid.UUID) (int, error) {
 	if rev == nil || rev.Policy == nil {
 		return 0, nil
 	}
@@ -270,20 +306,20 @@ func (s *Store) FenceIsolation(ctx context.Context, rev *policy.Revision) (int, 
 		NodeSelector datatypes.JSONMap `gorm:"column:node_selector"`
 		Namespace    string            `gorm:"column:namespace"`
 	}
-	if err := s.db.WithContext(ctx).Table("task_runs").
+	query := s.db.WithContext(ctx).Table("task_runs").
 		Select("task_runs.id AS id, task_runs.node_selector AS node_selector, job_runs.namespace AS namespace").
 		Joins("JOIN job_runs ON job_runs.id = task_runs.job_run_id").
-		Where("task_runs.status IN ?", []string{string(TaskStatusPending), string(TaskStatusRunning)}).
-		Scan(&rows).Error; err != nil {
+		Where("task_runs.status IN ?", []string{string(TaskStatusPending), string(TaskStatusRunning)})
+	if runID != nil {
+		query = query.Where("task_runs.job_run_id = ?", *runID)
+	}
+	if err := query.Scan(&rows).Error; err != nil {
 		return 0, err
 	}
 	stamped := 0
 	for _, row := range rows {
 		isolated, value := RevisionIsolation(rev, row.Namespace)
-		if !isolated {
-			continue
-		}
-		if current, marked := row.NodeSelector[IsolationSelectorKey]; marked && current != isolationSelectorUnloaded {
+		if !isolated || hasIsolationMark(row.NodeSelector) {
 			continue
 		}
 		selector, _ := reconcileIsolationSelector(row.NodeSelector, true, value)
@@ -307,6 +343,10 @@ func (s *Store) FenceIsolation(ctx context.Context, rev *policy.Revision) (int, 
 	}
 	return stamped, nil
 }
+
+// registerBeforeCommit is a test hook run inside RegisterTasks' transaction
+// after the rows are written and before it commits.
+var registerBeforeCommit func()
 
 // fenceBeforeWrite is a test hook run between the fence's read of a row and
 // its conditional write.
@@ -352,6 +392,28 @@ func NewIsolationFence(store *Store, holder *policy.Holder) *IsolationFence {
 	return &IsolationFence{store: store, holder: holder, wake: make(chan struct{}, 1)}
 }
 
+// processIsolationFence is the fence this process runs, if any.
+var processIsolationFence atomic.Pointer[IsolationFence]
+
+// SetProcessIsolationFence registers the fence this process runs, so a
+// failed post-commit fence (FenceRunAfterCommit) can request a full sweep.
+func SetProcessIsolationFence(f *IsolationFence) {
+	processIsolationFence.Store(f)
+}
+
+func requestIsolationSweep() {
+	if f := processIsolationFence.Load(); f != nil {
+		f.requestSweep()
+	}
+}
+
+func (f *IsolationFence) requestSweep() {
+	select {
+	case f.wake <- struct{}{}:
+	default:
+	}
+}
+
 // Observe is a policy reload observer: a reload that published a changed file
 // wakes the fence. It never blocks (the holder calls it under its writer
 // lock).
@@ -359,10 +421,7 @@ func (f *IsolationFence) Observe(event policy.ReloadEvent) {
 	if f == nil || !event.OK || !event.Changed {
 		return
 	}
-	select {
-	case f.wake <- struct{}{}:
-	default:
-	}
+	f.requestSweep()
 }
 
 // Run sweeps at once and after every wake until ctx is done; a failed sweep

@@ -139,6 +139,71 @@ func TestIsolationFenceNeverOverwritesAMarkSetAfterItsRead(t *testing.T) {
 	}
 }
 
+// TestIsolationFenceMarksBlankReservedEntries: a row carrying a blank
+// reserved entry (a node selector valid before the mark existed, which every
+// claim query ignores) counts as unmarked: the sweep and the post-commit
+// fence bind it.
+func TestIsolationFenceMarksBlankReservedEntries(t *testing.T) {
+	db := testutil.OpenTestDB(t)
+	t.Cleanup(func() { testutil.CloseDB(db) })
+	store := NewStore(db)
+	useAccessPolicy(t, "apiVersion: v1\nkind: AccessPolicy\nnamespaces:\n  later:\n    secrets: {allow: []}\n")
+	_, want := NamespaceIsolation("later")
+	atom := &models.Atom{ID: uuid.New(), Engine: models.AtomEngineDocker, Image: "alpine:3.23", Command: `["true"]`}
+	require.NoError(t, db.Create(atom).Error)
+	for i, blank := range []any{"", "   ", nil} {
+		job := createNamespacedJob(t, db, "fence-blank-"+uuid.NewString()[:6], "later", nil)
+		runID := seedNamespacedRun(t, db, job.ID, "later", StatusRunning, nil)
+		task := &models.Task{ID: uuid.New(), JobID: job.ID, AtomID: atom.ID, Name: "step", Type: "task"}
+		require.NoError(t, db.Create(task).Error)
+		require.NoError(t, store.RegisterTasks(runID, []RegisterTaskInput{{Task: task, Atom: atom}}))
+		var row models.TaskRun
+		require.NoError(t, db.First(&row, "job_run_id = ?", runID).Error)
+		require.NoError(t, db.Model(&models.TaskRun{}).Where("id = ?", row.ID).
+			Update("node_selector", datatypes.JSONMap{"zone": "a", IsolationSelectorKey: blank}).Error)
+		if i%2 == 0 {
+			n, err := store.FenceIsolation(t.Context(), policy.ProcessHolder().Current())
+			require.NoError(t, err)
+			require.Equal(t, 1, n)
+		} else {
+			store.FenceRunAfterCommit(t.Context(), runID)
+		}
+		require.NoError(t, db.First(&row, "id = ?", row.ID).Error)
+		require.Equal(t, want, row.NodeSelector[IsolationSelectorKey], "blank entry %q", blank)
+		require.Equal(t, "a", row.NodeSelector["zone"])
+	}
+}
+
+// TestRegistrationIsFencedUnderTheRevisionCurrentAtCommit: a reload published
+// after RegisterTasks computed its rows' marks (inside its transaction) and
+// whose sweep ran before the commit is covered by the fence RegisterTasks
+// runs after committing.
+func TestRegistrationIsFencedUnderTheRevisionCurrentAtCommit(t *testing.T) {
+	db := testutil.OpenTestDB(t)
+	t.Cleanup(func() { testutil.CloseDB(db) })
+	store := NewStore(db)
+	useAccessPolicy(t, "apiVersion: v1\nkind: AccessPolicy\nnamespaces:\n  later: {}\n")
+	atom := &models.Atom{ID: uuid.New(), Engine: models.AtomEngineDocker, Image: "alpine:3.23", Command: `["true"]`}
+	require.NoError(t, db.Create(atom).Error)
+	job := createNamespacedJob(t, db, "fence-register-"+uuid.NewString()[:6], "later", nil)
+	runID := seedNamespacedRun(t, db, job.ID, "later", StatusRunning, nil)
+	task := &models.Task{ID: uuid.New(), JobID: job.ID, AtomID: atom.ID, Name: "step", Type: "task"}
+	require.NoError(t, db.Create(task).Error)
+
+	path := filepath.Join(t.TempDir(), "policy.yaml")
+	require.NoError(t, os.WriteFile(path, []byte("apiVersion: v1\nkind: AccessPolicy\nnamespaces:\n  later:\n    secrets: {allow: []}\n"), 0o600))
+	isolating, err := policy.LoadFile(t.Context(), policy.HolderOptions{Path: path})
+	require.NoError(t, err)
+	t.Cleanup(func() { registerBeforeCommit = nil })
+	registerBeforeCommit = func() { policy.SetProcessHolder(isolating) }
+	require.NoError(t, store.RegisterTasks(runID, []RegisterTaskInput{{Task: task, Atom: atom}}))
+
+	var row models.TaskRun
+	require.NoError(t, db.First(&row, "job_run_id = ?", runID).Error)
+	_, want := RevisionIsolation(isolating.Current(), "later")
+	require.Equal(t, want, row.NodeSelector[IsolationSelectorKey])
+}
+
 // TestWithIsolationSelectorDropsAMarkTheFileNoLongerAsksFor: a selector copied
 // from an earlier row (a replay's source) keeps the step's own entries, loses
 // a stale isolation mark under a file that leaves the namespace unisolated,

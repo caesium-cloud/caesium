@@ -2205,6 +2205,9 @@ func (s *Store) RegisterTasks(runID uuid.UUID, inputs []RegisterTaskInput) error
 			if err != nil {
 				return err
 			}
+			if registerBeforeCommit != nil {
+				registerBeforeCommit()
+			}
 			attemptEvents = events
 			return nil
 		})
@@ -2215,6 +2218,9 @@ func (s *Store) RegisterTasks(runID uuid.UUID, inputs []RegisterTaskInput) error
 	})
 	if err == nil {
 		counts.commit()
+		// A reload whose fence sweep read the table before this commit
+		// never saw these rows (identity-and-access C2).
+		s.FenceRunAfterCommit(context.Background(), runID)
 		s.publishEvents(pendingEvents...)
 	}
 	return err
