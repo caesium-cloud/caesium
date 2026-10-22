@@ -1273,7 +1273,7 @@ func initAuth(ctx context.Context, vars env.Environment, runAsync func(func())) 
 	// a namespace keeps its existing rows from workers that cannot honour
 	// the isolation context, with or without run owners (design §10.1).
 	auditReload := auth.PolicyReloadAuditor(auditor)
-	fence := run.NewIsolationFence(run.Default(), policyHolder)
+	fence := run.NewIsolationFence(run.Default(), policyHolder, vars.AuthPolicyReloadInterval)
 	run.SetProcessIsolationFence(fence)
 	policyHolder.SetObserver(func(event policy.ReloadEvent) {
 		auditReload(event)

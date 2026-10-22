@@ -245,12 +245,19 @@ func stampIsolationOnResetTx(tx *gorm.DB, rowID uuid.UUID) error {
 		return err
 	}
 	isolated, value := NamespaceIsolation(row.Namespace)
+	if resetAfterMark != nil {
+		defer resetAfterMark()
+	}
 	selector, changed := reconcileIsolationSelector(row.NodeSelector, isolated, value)
 	if !changed {
 		return nil
 	}
 	return tx.Model(&models.TaskRun{}).Where("id = ?", rowID).Update("node_selector", selector).Error
 }
+
+// resetAfterMark is a test hook run inside a retry's transaction after the
+// reset row's isolation mark was computed.
+var resetAfterMark func()
 
 // FenceIsolation marks every unfinished row that carries no isolation mark
 // (or only a blank one, or the placeholder stamped while a policy file was
@@ -283,6 +290,26 @@ func (s *Store) FenceRunAfterCommit(ctx context.Context, runID uuid.UUID) {
 		log.Warn("isolation fence: failed to mark a new run's tasks; requesting a full sweep", "run_id", runID, "error", err)
 		requestIsolationSweep()
 	}
+}
+
+// RetryPartition resets ONE fan-out instance of a run for re-execution (see
+// retryPartition), then fences the run's rows after the commit.
+func (s *Store) RetryPartition(ctx context.Context, runID, taskRunID uuid.UUID) (*TaskRun, bool, error) {
+	row, retried, err := s.retryPartition(ctx, runID, taskRunID)
+	if err == nil {
+		s.FenceRunAfterCommit(ctx, runID)
+	}
+	return row, retried, err
+}
+
+// RetryTaskInstance resets one fan-out instance for another attempt (see
+// retryTaskInstance), then fences the run's rows after the commit.
+func (s *Store) RetryTaskInstance(runID, taskRunID uuid.UUID, attempt int) error {
+	err := s.retryTaskInstance(runID, taskRunID, attempt)
+	if err == nil {
+		s.FenceRunAfterCommit(context.Background(), runID)
+	}
+	return err
 }
 
 // hasIsolationMark reports whether selector carries a real isolation mark:
@@ -376,20 +403,26 @@ func unmarkedIsolationPredicateSQL(dialect, column string) (string, []any, error
 var isolationFenceRetry = 5 * time.Second
 
 // IsolationFence keeps unfinished rows fenced under this node's policy file:
-// it sweeps them (FenceIsolation) once at startup and again after every reload
-// that changed the file, on every node that serves one, whether or not run
-// owners are enabled. Owner dispatch loops restamp the runs they own as well;
-// the fence also covers rows no owner dispatches (a cluster without run
-// owners, or a run whose owner died).
+// it sweeps them (FenceIsolation) once at startup, after every reload that
+// changed the file, and every interval, on every node that serves one,
+// whether or not run owners are enabled. The periodic sweep bounds the window
+// of any row a transaction made schedulable with marks computed under the
+// previous revision (a registration, replay, retry or fan-out expansion that
+// committed after a reload's sweep read the table) to one interval, the same
+// bound a reload itself takes to apply. Owner dispatch loops restamp the runs
+// they own as well; the fence also covers rows no owner dispatches (a cluster
+// without run owners, or a run whose owner died).
 type IsolationFence struct {
-	store  *Store
-	holder *policy.Holder
-	wake   chan struct{}
+	store    *Store
+	holder   *policy.Holder
+	interval time.Duration
+	wake     chan struct{}
 }
 
-// NewIsolationFence returns a fence over store's rows for holder's policy.
-func NewIsolationFence(store *Store, holder *policy.Holder) *IsolationFence {
-	return &IsolationFence{store: store, holder: holder, wake: make(chan struct{}, 1)}
+// NewIsolationFence returns a fence over store's rows for holder's policy
+// that also sweeps every interval (none when interval <= 0).
+func NewIsolationFence(store *Store, holder *policy.Holder, interval time.Duration) *IsolationFence {
+	return &IsolationFence{store: store, holder: holder, interval: interval, wake: make(chan struct{}, 1)}
 }
 
 // processIsolationFence is the fence this process runs, if any.
@@ -447,6 +480,12 @@ func (f *IsolationFence) Run(ctx context.Context) {
 			log.Info("isolation fence: marked unfinished tasks as requiring an isolation-capable worker", "revision", rev.Hash, "count", n)
 		}
 	}
+	var periodic <-chan time.Time
+	if f.interval > 0 {
+		ticker := time.NewTicker(f.interval)
+		defer ticker.Stop()
+		periodic = ticker.C
+	}
 	sweep()
 	for {
 		select {
@@ -455,6 +494,8 @@ func (f *IsolationFence) Run(ctx context.Context) {
 		case <-f.wake:
 			sweep()
 		case <-retry:
+			sweep()
+		case <-periodic:
 			sweep()
 		}
 	}

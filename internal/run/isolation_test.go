@@ -204,6 +204,85 @@ func TestRegistrationIsFencedUnderTheRevisionCurrentAtCommit(t *testing.T) {
 	require.Equal(t, want, row.NodeSelector[IsolationSelectorKey])
 }
 
+// TestRetryIsFencedUnderTheRevisionCurrentAtCommit: a retry computes the
+// reset row's mark under `later: {}`, then a reload isolates the namespace
+// before the retry commits (its sweep saw the row failed). The fence the retry
+// runs after committing marks the row.
+func TestRetryIsFencedUnderTheRevisionCurrentAtCommit(t *testing.T) {
+	db := testutil.OpenTestDB(t)
+	t.Cleanup(func() { testutil.CloseDB(db) })
+	store := NewStore(db)
+	useAccessPolicy(t, "apiVersion: v1\nkind: AccessPolicy\nnamespaces:\n  later: {}\n")
+	atom := &models.Atom{ID: uuid.New(), Engine: models.AtomEngineDocker, Image: "alpine:3.23", Command: `["true"]`}
+	require.NoError(t, db.Create(atom).Error)
+	job := createNamespacedJob(t, db, "fence-retry-"+uuid.NewString()[:6], "later", nil)
+	runID := seedNamespacedRun(t, db, job.ID, "later", StatusRunning, nil)
+	task := &models.Task{ID: uuid.New(), JobID: job.ID, AtomID: atom.ID, Name: "step", Type: "task"}
+	require.NoError(t, db.Create(task).Error)
+	require.NoError(t, store.RegisterTasks(runID, []RegisterTaskInput{{Task: task, Atom: atom}}))
+	var row models.TaskRun
+	require.NoError(t, db.First(&row, "job_run_id = ?", runID).Error)
+	require.NoError(t, db.Model(&models.TaskRun{}).Where("id = ?", row.ID).Update("status", string(TaskStatusFailed)).Error)
+	require.NoError(t, db.Model(&models.JobRun{}).Where("id = ?", runID).Updates(map[string]any{"status": string(StatusFailed), "completed_at": time.Now().UTC()}).Error)
+
+	path := filepath.Join(t.TempDir(), "policy.yaml")
+	require.NoError(t, os.WriteFile(path, []byte("apiVersion: v1\nkind: AccessPolicy\nnamespaces:\n  later:\n    secrets: {allow: []}\n"), 0o600))
+	isolating, err := policy.LoadFile(t.Context(), policy.HolderOptions{Path: path})
+	require.NoError(t, err)
+	t.Cleanup(func() { resetAfterMark = nil })
+	resetAfterMark = func() { policy.SetProcessHolder(isolating) }
+	_, err = store.RetryFromFailure(runID)
+	require.NoError(t, err)
+
+	require.NoError(t, db.First(&row, "id = ?", row.ID).Error)
+	require.Equal(t, string(TaskStatusPending), row.Status)
+	_, want := RevisionIsolation(isolating.Current(), "later")
+	require.Equal(t, want, row.NodeSelector[IsolationSelectorKey])
+}
+
+// TestIsolationFenceSweepsPeriodically: a row a transaction made schedulable
+// unmarked after the fence's last sweep (a fan-out expansion copying an
+// unmarked template, say) is marked by the next periodic sweep, with no
+// reload.
+func TestIsolationFenceSweepsPeriodically(t *testing.T) {
+	db := testutil.OpenTestDB(t)
+	t.Cleanup(func() { testutil.CloseDB(db) })
+	store := NewStore(db)
+	path := filepath.Join(t.TempDir(), "policy.yaml")
+	require.NoError(t, os.WriteFile(path, []byte("apiVersion: v1\nkind: AccessPolicy\nnamespaces:\n  later:\n    secrets: {allow: []}\n"), 0o600))
+	holder, err := policy.LoadFile(t.Context(), policy.HolderOptions{Path: path})
+	require.NoError(t, err)
+	previous := policy.ProcessHolder()
+	t.Cleanup(func() { policy.SetProcessHolder(previous) })
+	policy.SetProcessHolder(holder)
+
+	fence := NewIsolationFence(store, holder, 50*time.Millisecond)
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan struct{})
+	go func() { fence.Run(ctx); close(done) }()
+	t.Cleanup(func() { cancel(); <-done })
+
+	atom := &models.Atom{ID: uuid.New(), Engine: models.AtomEngineDocker, Image: "alpine:3.23", Command: `["true"]`}
+	require.NoError(t, db.Create(atom).Error)
+	job := createNamespacedJob(t, db, "fence-periodic-"+uuid.NewString()[:6], "later", nil)
+	runID := seedNamespacedRun(t, db, job.ID, "later", StatusRunning, nil)
+	task := &models.Task{ID: uuid.New(), JobID: job.ID, AtomID: atom.ID, Name: "step", Type: "task"}
+	require.NoError(t, db.Create(task).Error)
+	// Inserted directly, unmarked, as a racing transaction would leave it.
+	row := models.TaskRun{ID: uuid.New(), JobRunID: runID, TaskID: task.ID, AtomID: atom.ID, Engine: atom.Engine, Image: atom.Image,
+		Command: atom.Command, Status: string(TaskStatusPending), Attempt: 1, MaxAttempts: 1, NodeSelector: datatypes.JSONMap{"zone": "a"}}
+	require.NoError(t, db.Create(&row).Error)
+
+	_, want := RevisionIsolation(holder.Current(), "later")
+	require.Eventually(t, func() bool {
+		var got models.TaskRun
+		if db.First(&got, "id = ?", row.ID).Error != nil {
+			return false
+		}
+		return got.NodeSelector[IsolationSelectorKey] == want
+	}, 10*time.Second, 20*time.Millisecond)
+}
+
 // TestWithIsolationSelectorDropsAMarkTheFileNoLongerAsksFor: a selector copied
 // from an earlier row (a replay's source) keeps the step's own entries, loses
 // a stale isolation mark under a file that leaves the namespace unisolated,
@@ -328,7 +407,7 @@ func TestIsolationFenceMarksRowsWhenAReloadIsolatesTheirNamespace(t *testing.T) 
 	require.NoError(t, db.Model(&models.TaskRun{}).Where("id = ?", finished.ID).Update("status", string(TaskStatusSucceeded)).Error)
 	unisolated := register("other")
 
-	fence := NewIsolationFence(store, holder)
+	fence := NewIsolationFence(store, holder, 0)
 	holder.SetObserver(fence.Observe)
 	ctx, cancel := context.WithCancel(t.Context())
 	done := make(chan struct{})
@@ -394,7 +473,7 @@ func TestIsolationFenceMarksRowsWhenAReloadIsolatesTheirNamespace(t *testing.T) 
 
 	// A fence on a node without a policy file never sweeps.
 	quiet := make(chan struct{})
-	go func() { NewIsolationFence(store, nil).Run(t.Context()); close(quiet) }()
+	go func() { NewIsolationFence(store, nil, time.Millisecond).Run(t.Context()); close(quiet) }()
 	select {
 	case <-quiet:
 	case <-time.After(5 * time.Second):

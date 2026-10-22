@@ -25,7 +25,7 @@ import (
 // sibling at worst. The helpers here take the TaskRun primary key and touch
 // exactly one row.
 
-// RetryTaskInstance resets one fan-out instance for another attempt.
+// retryTaskInstance resets one fan-out instance for another attempt.
 //
 // It is the instance-keyed analogue of RetryTask, which resolves its row via
 // loadUniqueTaskRun and therefore cannot address a group member. Only a
@@ -33,7 +33,7 @@ import (
 // an instance that a fail_fast cancellation or an in-group skip cascade has
 // already resolved (the same class of bug as the local replace-cancel
 // resurrection fixed in #275).
-func (s *Store) RetryTaskInstance(runID, taskRunID uuid.UUID, attempt int) error {
+func (s *Store) retryTaskInstance(runID, taskRunID uuid.UUID, attempt int) error {
 	if taskRunID == uuid.Nil {
 		return fmt.Errorf("run: retry task instance: nil task run id")
 	}

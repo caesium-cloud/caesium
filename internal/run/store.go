@@ -5328,7 +5328,13 @@ func (s *Store) failTask(runID, taskRef uuid.UUID, failure error, claimedBy stri
 // claim — the truthful state for a worker that never released the task and is
 // about to launch the next container itself.
 func (s *Store) RetryTask(runID, taskRef uuid.UUID, attempt int) error {
-	return s.retryTask(runID, taskRef, attempt)
+	err := s.retryTask(runID, taskRef, attempt)
+	if err == nil {
+		// A reload whose fence sweep read the row as failed, before this
+		// commit, never saw it pending (identity-and-access C2).
+		s.FenceRunAfterCommit(context.Background(), runID)
+	}
+	return err
 }
 
 // retryTask resets ONE task instance for its next attempt. taskRef follows the
@@ -7412,7 +7418,17 @@ WHERE id = ?
 // concurrency re-admission and does not consult Job.Paused — a human retrying a
 // paused job's run is a deliberate human decision.
 func (s *Store) RetryFromFailure(runID uuid.UUID) (*JobRun, error) {
-	return s.retryFromFailure(runID, false)
+	return s.retryFromFailureFenced(runID, false)
+}
+
+// retryFromFailureFenced is retryFromFailure followed by the post-commit
+// isolation fence over the run's reset rows.
+func (s *Store) retryFromFailureFenced(runID uuid.UUID, admitted bool) (*JobRun, error) {
+	jobRun, err := s.retryFromFailure(runID, admitted)
+	if err == nil {
+		s.FenceRunAfterCommit(context.Background(), runID)
+	}
+	return jobRun, err
 }
 
 // RetryFromFailureAdmitted is the admit-aware retry entry point used by the
@@ -7428,7 +7444,7 @@ func (s *Store) RetryFromFailure(runID uuid.UUID) (*JobRun, error) {
 //     An agent retry must never replace-cancel a live run, nor race the next cron
 //     tick for a slot admission never granted.
 func (s *Store) RetryFromFailureAdmitted(runID uuid.UUID) (*JobRun, error) {
-	return s.retryFromFailure(runID, true)
+	return s.retryFromFailureFenced(runID, true)
 }
 
 // retryResetColumns is the single definition of what "reset an instance for
@@ -7622,7 +7638,7 @@ func partitionRetryRunLockSQL(dialect string) (string, error) {
 	}
 }
 
-// RetryPartition resets ONE fan-out instance of a run for re-execution.
+// retryPartition resets ONE fan-out instance of a run for re-execution.
 //
 // It is the store half of `POST …/tasks/:task_id/partitions/:index/retry`. The
 // controller previously did a bare `db.Model(&row).Updates(...)`: no
@@ -7659,7 +7675,7 @@ func partitionRetryRunLockSQL(dialect string) (string, error) {
 // A post-commit refresh must not be the source of the kickoff signal: if it
 // failed, returning (nil, false, err) would discard a committed reopen and the
 // handler would skip kickoff.
-func (s *Store) RetryPartition(ctx context.Context, runID, taskRunID uuid.UUID) (*TaskRun, bool, error) {
+func (s *Store) retryPartition(ctx context.Context, runID, taskRunID uuid.UUID) (*TaskRun, bool, error) {
 	var (
 		pendingEvents []event.Event
 		counts        dbWriteCounts

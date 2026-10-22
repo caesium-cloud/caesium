@@ -141,8 +141,11 @@ one (recovery after an owner's lease lapses, or a cluster without run owners)
 only when its file gives the namespace the same isolation settings (an edit
 elsewhere in the file does not matter). Every node serving the file, with or
 without a run owner, marks the unmarked unfinished rows of the namespaces it
-isolates at startup and after each reload that changes the file, so a reload
-that isolates a namespace fences rows registered before it. That sweep only
+isolates at startup, after each reload that changes the file, and every
+`CAESIUM_AUTH_POLICY_RELOAD_INTERVAL`, so a reload that isolates a namespace
+fences rows registered before it; a registration, replay or retry also fences
+its run's rows right after it commits, and any other row made schedulable
+under the previous revision is fenced within one interval. That sweep only
 adds marks (a node with a stale file never rebinds or removes one); an owner
 rebinds the rows of the runs it dispatches when its policy changes their
 settings, and a row whose settings changed while it had no owner waits for an
