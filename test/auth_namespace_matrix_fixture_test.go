@@ -217,28 +217,41 @@ func (s *IntegrationTestSuite) newNamespaceMatrixFixture(caps matrixLaneCaps) *n
 	fx.MovedDef = s.movedJobDefinition(fx.name("moved"), nsFinance)
 	fx.Moved = s.matrixApply(f, fx.MovedDef)
 
-	// Runs. Marketing admits one run at a time, so its runs queue.
-	for _, n := range fx.ns {
-		n.Run1 = s.triggerRun(n.Job.ID)
+	// Runs. Marketing admits one run at a time (quotas.maxConcurrentRuns: 1)
+	// and a start over the cap is parked without a run id, so marketing's
+	// runs go one after another while default's and finance's overlap them.
+	succeed := func(jobID, runID string) {
+		s.Require().Equal("succeeded", s.awaitRun(jobID, runID, runTimeout).Status, jobID)
 	}
+	runMarketing := func(jobID string) string {
+		runID := s.triggerRun(jobID)
+		s.awaitRun(jobID, runID, runTimeout)
+		return runID
+	}
+	def.Run1, fin.Run1 = s.triggerRun(def.Job.ID), s.triggerRun(fin.Job.ID)
 	fx.OldRun = s.triggerRun(fx.Moved.ID)
-	for _, n := range []*matrixNamespace{mkt, fin} {
-		if n.FailJob != nil {
-			n.FailRun = s.triggerRun(n.FailJob.ID)
-		}
+	if fin.FailJob != nil {
+		fin.FailRun = s.triggerRun(fin.FailJob.ID)
+	}
+	mkt.Run1 = runMarketing(mkt.Job.ID)
+	succeed(mkt.Job.ID, mkt.Run1)
+	mkt.Run2 = runMarketing(mkt.Job.ID)
+	succeed(mkt.Job.ID, mkt.Run2)
+	for _, n := range []*matrixNamespace{def, fin} {
+		succeed(n.Job.ID, n.Run1)
+		n.Run2 = s.triggerRun(n.Job.ID)
 	}
 	s.Equal(nsFinance, s.awaitRun(fx.Moved.ID, fx.OldRun, runTimeout).Namespace)
 	fx.MovedDef.Metadata.Namespace = nsMarketing
 	s.applyDefinition(fx.MovedDef)
-	fx.NewRun = s.triggerRun(fx.Moved.ID)
-	for _, n := range fx.ns {
-		s.Require().Equal("succeeded", s.awaitRun(n.Job.ID, n.Run1, runTimeout).Status, n.Name)
-		n.Run2 = s.triggerRun(n.Job.ID)
-	}
-	for _, n := range fx.ns {
-		s.Require().Equal("succeeded", s.awaitRun(n.Job.ID, n.Run2, runTimeout).Status, n.Name)
-	}
+	fx.NewRun = runMarketing(fx.Moved.ID)
 	s.Equal(nsMarketing, s.awaitRun(fx.Moved.ID, fx.NewRun, runTimeout).Namespace)
+	if mkt.FailJob != nil {
+		mkt.FailRun = runMarketing(mkt.FailJob.ID)
+	}
+	for _, n := range []*matrixNamespace{def, fin} {
+		succeed(n.Job.ID, n.Run2)
+	}
 	for _, n := range []*matrixNamespace{mkt, fin} {
 		if n.FailJob != nil {
 			n.Incident = s.a8AwaitIncidentForRun(n.FailJob.ID, n.FailRun)
