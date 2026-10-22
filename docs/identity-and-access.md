@@ -1042,11 +1042,17 @@ and does not wait. `caesium dev` and `caesium reproduce` do so even with
 `CAESIUM_AUTH_POLICY_FILE` set in their environment; `caesium run retry`
 without `--server` refuses to run when it is set (see Run quotas).
 With no policy file every
-namespace resolves every reference. In distributed mode each node enforces the
-rules from its own copy of the policy file: a worker whose file is missing,
-stale within a reload interval, or of another version enforces older or no
-rules until the owner carries the rules in the dispatch (C2). Mount the same
-file on every node.
+namespace resolves every reference. In distributed mode with run-owner
+dispatch, the run's owner carries the namespace's rules to the worker in the
+dispatch (its isolation context), and the worker's re-checks before the cache
+lookup, before resolution and during replay verification ask the owner for its
+current rules, so a revocation on the owner applies mid-execution and an owner
+that cannot be asked denies. The worker never reads its own policy file for a
+dispatched task. A namespace with rules (or a mapping, or undeclared) is only
+ever dispatched to a worker advertising `isolation_v1`, and its tasks can only
+be pulled (lease-expiry recovery) by such a worker whose policy file gives the
+namespace the same settings. Upgrade workers before owners; see
+[Isolation context](distributed-execution.md#isolation-context).
 
 ### Collections and history under a job
 
@@ -1408,9 +1414,13 @@ are namespace-local, so a step's PVCs are the mapped namespace's, and relative
   (get) and persistentvolumeclaims in each mapped namespace; pre-create the
   namespaces and grant that access yourself until the Helm chart renders it
   (C3).
-- **Distributed mode.** Like secret rules, each node resolves the mapping from
-  its own copy of the policy file until the owner carries it in the dispatch
-  (C2). Mount the same file on every node.
+- **Distributed mode.** The run's owner resolves the mapping and carries it to
+  the worker with the secret rules (the isolation context), together with its
+  own `CAESIUM_KUBERNETES_NAMESPACE` for an unmapped pod and its
+  `CAESIUM_JOBDEF_SECRETS_KUBE_NAMESPACE` for relative `secret://k8s` reads, so
+  a worker's environment can change neither. Only workers advertising
+  `isolation_v1` receive a mapped namespace's tasks; see
+  [Isolation context](distributed-execution.md#isolation-context).
 - There is no label-based pod reaper; a reaper would list
   `CAESIUM_KUBERNETES_NAMESPACE` plus every mapped namespace.
 

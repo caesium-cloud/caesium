@@ -26,10 +26,13 @@ func NewInternalServer(handler *Handler, addr string, tlsConfig *tls.Config) *In
 	mux := http.NewServeMux()
 	mux.HandleFunc("/internal/dispatch", handler.HandleDispatch)
 	mux.HandleFunc("/internal/complete", handler.HandleComplete)
-	// The peer-capability probe an owner issues before entrusting a fan-out
-	// INSTANCE to this node.  It lives on the same listener as the traffic it
+	// The peer-capability probe an owner issues before entrusting a task whose
+	// isolation context is non-default to this node.  It lives on the same listener as the traffic it
 	// gates, so "reachable for dispatch" and "answered the probe" cannot disagree.
 	mux.HandleFunc("/internal/capabilities", handler.HandleCapabilities)
+	// A worker re-checking a dispatched task's secret references reads the
+	// owner's current isolation context here (identity-and-access §10.1).
+	mux.HandleFunc("/internal/isolation", handler.HandleIsolation)
 	return &InternalServer{
 		srv: &http.Server{
 			Addr:      addr,

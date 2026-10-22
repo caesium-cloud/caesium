@@ -1400,6 +1400,16 @@ func (c *Constructor) materialize(ctx context.Context, baseline models.JobRun, p
 			return err
 		}
 		if len(records) > 0 {
+			// Only a worker able to honour the namespace's isolation
+			// context may pull a row (run.IsolationSelectorKey): the mark
+			// is reconciled with the policy as it is now, inside the
+			// insert's transaction.
+			for i := range records {
+				records[i].NodeSelector = run.WithIsolationSelector(records[i].NodeSelector, namespace)
+			}
+			if materializeHook != nil {
+				materializeHook()
+			}
 			if err := tx.Create(&records).Error; err != nil {
 				return err
 			}
@@ -1421,9 +1431,16 @@ func (c *Constructor) materialize(ctx context.Context, baseline models.JobRun, p
 		// answer, not a deferral (api/rest/service/replay).
 		return uuid.Nil, err
 	}
+	// A reload whose fence sweep read the table before this commit never saw
+	// the replay's rows.
+	c.store.FenceRunAfterCommit(ctx, replayID)
 	c.store.PublishEvents(pendingEvents...)
 	return replayID, nil
 }
+
+// materializeHook is a test hook run inside the materialization transaction
+// after the rows' isolation marks are computed and before they are inserted.
+var materializeHook func()
 
 func taskRunRecord(replayID uuid.UUID, plan plannedTask, now time.Time, priority int) (models.TaskRun, error) {
 	desc := plan.descriptor

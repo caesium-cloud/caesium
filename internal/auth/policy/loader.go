@@ -27,6 +27,13 @@ const (
 	// MaxFileBytes bounds a policy file read; a larger file is invalid.
 	MaxFileBytes = 1 << 20
 
+	// MaxEncodedNamespaceBytes bounds one namespace's settings as JSON. A
+	// run owner carries a namespace's settings to its workers (identity-and-
+	// access §10.1), and YAML aliases can expand a small file far beyond
+	// MaxFileBytes, so the bound is on the decoded value: a policy whose
+	// namespace exceeds it is invalid rather than untransportable.
+	MaxEncodedNamespaceBytes = 6 * MaxFileBytes
+
 	// SourceFile and SourceEnv name where a revision came from: the policy
 	// file, or the CAESIUM_AUTH_ROLE_MAPPING translation when no file is set.
 	SourceFile = "file"
@@ -294,11 +301,17 @@ func (h *Holder) DefaultRole() models.Role {
 // current revision declares it. The default namespace is always declared.
 // A nil holder declares only the default namespace, with no settings.
 func (h *Holder) Namespace(name string) (Namespace, bool) {
-	rev := h.Current()
-	if rev == nil || rev.Policy == nil {
+	return h.Current().Namespace(name)
+}
+
+// Namespace is Holder.Namespace on this one revision, so a caller that needs
+// several settings and the revision hash together reads them all from the
+// same policy (a nil revision is the empty policy).
+func (r *Revision) Namespace(name string) (Namespace, bool) {
+	if r == nil || r.Policy == nil {
 		return Namespace{}, name == DefaultNamespace
 	}
-	ns, declared := rev.Policy.Namespaces[name]
+	ns, declared := r.Policy.Namespaces[name]
 	if !declared {
 		return Namespace{}, name == DefaultNamespace
 	}

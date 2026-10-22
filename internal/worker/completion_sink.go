@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/caesium-cloud/caesium/internal/dispatch"
+	jobdefruntime "github.com/caesium-cloud/caesium/internal/jobdef/runtime"
 	"github.com/caesium-cloud/caesium/internal/metrics"
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/caesium-cloud/caesium/internal/run"
@@ -357,6 +358,11 @@ type dispatchMeta struct {
 	Attempt         int
 	// CompletionTimeout is supplied by the receiving worker, never by the remote envelope.
 	CompletionTimeout time.Duration
+	// Isolation is the owner's isolation context for the task (nil: the owner
+	// serves no policy file, or predates it). With one, the executor reads the
+	// Kubernetes target and the secret rules from it and from the owner, never
+	// from this node's policy (identity-and-access §10.1).
+	Isolation *jobdefruntime.IsolationContext
 }
 
 // dispatchMetaKey is the context key under which a dispatched task's owner

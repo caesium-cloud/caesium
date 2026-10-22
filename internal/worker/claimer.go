@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/caesium-cloud/caesium/internal/auth/policy"
 	"github.com/caesium-cloud/caesium/internal/dbretry"
 	"github.com/caesium-cloud/caesium/internal/event"
 	"github.com/caesium-cloud/caesium/internal/metrics"
@@ -17,6 +18,7 @@ import (
 	"github.com/caesium-cloud/caesium/internal/ratelimit"
 	"github.com/caesium-cloud/caesium/internal/run"
 	"github.com/caesium-cloud/caesium/pkg/dqlite"
+	"github.com/caesium-cloud/caesium/pkg/log"
 	"github.com/caesium-cloud/caesium/pkg/ptr"
 	"github.com/google/uuid"
 	"gorm.io/gorm"
@@ -94,6 +96,12 @@ func NewClaimer(nodeID string, store *run.Store, leaseTTL time.Duration, nodeLab
 	labels := map[string]string{}
 	if len(nodeLabels) > 0 {
 		labels = maps.Clone(nodeLabels[0])
+		// The isolation selector is reserved: only isolationClaimLabels may
+		// add it, for a worker able to honour the namespace's isolation.
+		if _, reserved := labels[run.IsolationSelectorKey]; reserved {
+			log.Warn("ignoring reserved node label", "label", run.IsolationSelectorKey)
+			delete(labels, run.IsolationSelectorKey)
+		}
 		if labels == nil {
 			labels = map[string]string{}
 		}
@@ -391,13 +399,18 @@ func (c *Claimer) nodeSelectorPredicateSQL(dialect, tableAlias string) (string, 
 	}
 
 	iteratorSQL := nodeSelectorIteratorSQL(dialect, jsonExpr)
+	isolationSQL, isolationArgs := c.isolationSelectorPredicateSQL(iteratorSQL, keyExpr, valueExpr)
+	// The reserved isolation entry is matched by isolationSQL, never as an
+	// ordinary label.
 	if len(c.nodeLabels) == 0 {
-		return "NOT EXISTS (SELECT 1 FROM " + iteratorSQL + " WHERE " + valueExpr + " <> '')", nil, nil
+		args := append([]any{run.IsolationSelectorKey}, isolationArgs...)
+		return "NOT EXISTS (SELECT 1 FROM " + iteratorSQL + " WHERE " + valueExpr + " <> '' AND " + keyExpr + " <> ?) AND " + isolationSQL, args, nil
 	}
 
 	keys := slices.Sorted(maps.Keys(c.nodeLabels))
 
-	args := make([]any, 0, len(keys)*3)
+	args := make([]any, 0, len(keys)*3+1+len(isolationArgs))
+	args = append(args, run.IsolationSelectorKey)
 	inPlaceholders := make([]string, 0, len(keys))
 	caseParts := make([]string, 0, len(keys))
 	for _, key := range keys {
@@ -408,11 +421,45 @@ func (c *Claimer) nodeSelectorPredicateSQL(dialect, tableAlias string) (string, 
 		caseParts = append(caseParts, "WHEN ? THEN ?")
 		args = append(args, key, c.nodeLabels[key])
 	}
+	args = append(args, isolationArgs...)
 
-	sql := "NOT EXISTS (SELECT 1 FROM " + iteratorSQL + " WHERE " + valueExpr + " <> '' AND (" + keyExpr + " NOT IN (" +
+	sql := "NOT EXISTS (SELECT 1 FROM " + iteratorSQL + " WHERE " + valueExpr + " <> '' AND " + keyExpr + " <> ? AND (" + keyExpr + " NOT IN (" +
 		strings.Join(inPlaceholders, ",") + ") OR " + valueExpr + " <> CASE " + keyExpr + " " +
-		strings.Join(caseParts, " ") + " ELSE NULL END))"
+		strings.Join(caseParts, " ") + " ELSE NULL END)) AND " + isolationSQL
 	return sql, args, nil
+}
+
+// isolationSelectorPredicateSQL decides rows carrying the reserved isolation
+// selector (run.IsolationSelectorKey). A worker that cannot honour a
+// namespace's isolation context — it withdrew isolation_v1 or serves no policy
+// file — never pulls one. A capable worker pulls one only when its policy
+// gives the row's namespace the same isolation settings the row was stamped
+// with (run.IsolationClaimValues), so a stale or diverging file never runs it,
+// whatever this node's own run-owner setting; an owner restamps rows when its
+// policy changes their namespace's settings.
+func (c *Claimer) isolationSelectorPredicateSQL(iteratorSQL, keyExpr, valueExpr string) (string, []any) {
+	values := isolationClaimValues()
+	args := []any{run.IsolationSelectorKey}
+	sql := "NOT EXISTS (SELECT 1 FROM " + iteratorSQL + " WHERE " + keyExpr + " = ? AND " + valueExpr + " <> ''"
+	if len(values) > 0 {
+		placeholders := make([]string, 0, len(values))
+		for _, value := range values {
+			placeholders = append(placeholders, "?")
+			args = append(args, value)
+		}
+		sql += " AND " + valueExpr + " NOT IN (" + strings.Join(placeholders, ",") + ")"
+	}
+	return sql + ")", args
+}
+
+// isolationClaimValues returns the isolation selector values this worker may
+// pull, read from its policy now (none without the capability or a file).
+func isolationClaimValues() []string {
+	holder := policy.ProcessHolder()
+	if !isolationCapable() || !holder.FileBacked() {
+		return nil
+	}
+	return run.IsolationClaimValues(holder.Current())
 }
 
 func sqliteNodeSelectorJSONExprs(column string) (jsonExpr, valueExpr, keyExpr string) {

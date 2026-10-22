@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strings"
 
 	"github.com/caesium-cloud/caesium/internal/atom"
 	"github.com/caesium-cloud/caesium/internal/auth/policy"
@@ -138,4 +139,147 @@ func mappedKubernetesNamespaces(holder *policy.Holder) []string {
 		}
 	}
 	return out
+}
+
+// IsolationContext is what a run owner resolves, from the run's persisted
+// namespace and its own access policy, and carries to the worker it dispatches
+// a task to (identity-and-access design §10.1, distributed mode): the
+// Kubernetes target, the secret rules and the policy revision they came from.
+// A worker that receives one never reads its own policy file; the effective
+// fallbacks (the owner's default pod namespace and the namespace relative
+// secret://k8s references read in) travel with it, so the worker's own
+// environment can change neither the pod's namespace nor the secret object read.
+//
+// Only an owner serving a policy file sends one: with no file the dispatch is
+// byte-identical to before.
+type IsolationContext struct {
+	// Namespace is the run namespace the context was resolved for.
+	Namespace string `json:"namespace"`
+	// PolicyRevision is the hash of the owner's policy file revision.
+	PolicyRevision string `json:"policy_revision,omitempty"`
+	// Kubernetes is the namespace's mapping (nil: none): the value C1 records
+	// on the descriptor and folds into the cache identity.
+	Kubernetes *atom.KubeTarget `json:"kubernetes,omitempty"`
+	// DefaultKubernetesNamespace is the owner's CAESIUM_KUBERNETES_NAMESPACE,
+	// the pod namespace when the mapping names none.
+	DefaultKubernetesNamespace string `json:"default_kubernetes_namespace,omitempty"`
+	// SecretReadNamespace is the Kubernetes namespace relative
+	// secret://k8s/<secret>/<key> references read in: the mapping, else the
+	// owner's CAESIUM_JOBDEF_SECRETS_KUBE_NAMESPACE.
+	SecretReadNamespace string `json:"secret_read_namespace,omitempty"`
+	// Secrets are the namespace's allow rules (nil: allow all; an empty list
+	// denies all).
+	Secrets *policy.SecretRules `json:"secrets,omitempty"`
+	// SecretRuleKubeNamespace is the Kubernetes namespace a relative
+	// k8s/<secret> rule means: the mapping, else the owner's
+	// CAESIUM_KUBERNETES_NAMESPACE.
+	SecretRuleKubeNamespace string `json:"secret_rule_kube_namespace,omitempty"`
+	// Undeclared: the owner's policy file does not declare the namespace, so
+	// every secret reference is denied and a Kubernetes task is refused.
+	Undeclared bool `json:"undeclared,omitempty"`
+}
+
+// Default reports whether the context isolates nothing: no Kubernetes mapping,
+// no secret rule and a declared namespace. Only a non-default context requires
+// a worker that advertises the isolation capability.
+func (c *IsolationContext) Default() bool {
+	return c == nil || (c.Kubernetes == nil && c.Secrets == nil && !c.Undeclared)
+}
+
+// ResolveIsolationContext resolves namespace's isolation context from this
+// process's access policy, reading one policy revision. carry is false when the
+// process serves no policy file (no context is sent). ready is false while a
+// configured policy file is not installed yet (startup): the caller must not
+// dispatch, since the namespace's isolation cannot be known. It never blocks.
+func ResolveIsolationContext(namespace string) (ctx IsolationContext, carry, ready bool) {
+	namespace = models.NamespaceOrDefault(namespace)
+	holder := policy.ProcessHolder()
+	if holder == nil {
+		if strings.TrimSpace(env.Variables().AuthPolicyFile) != "" {
+			return IsolationContext{}, false, false
+		}
+		return IsolationContext{}, false, true
+	}
+	if !holder.FileBacked() {
+		return IsolationContext{}, false, true
+	}
+	rev := holder.Current()
+	vars := env.Variables()
+	// The owner's effective defaults, normalized as its own engine and
+	// resolver normalize them: an explicitly empty setting means "default",
+	// while an empty field in the context would mean "the worker's own".
+	podDefault := effectiveKubeNamespace(vars.KubernetesNamespace)
+	ctx = IsolationContext{
+		Namespace:                  namespace,
+		DefaultKubernetesNamespace: podDefault,
+		SecretReadNamespace:        effectiveKubeNamespace(vars.JobdefSecretsKubeNamespace),
+		SecretRuleKubeNamespace:    podDefault,
+	}
+	if rev != nil {
+		ctx.PolicyRevision = rev.Hash
+	}
+	settings, declared := rev.Namespace(namespace)
+	if !declared {
+		ctx.Undeclared = true
+		return ctx, true, true
+	}
+	if settings.Kubernetes != nil {
+		target := atom.KubeTarget{Namespace: settings.Kubernetes.Namespace, ServiceAccountName: settings.Kubernetes.ServiceAccountName}
+		ctx.Kubernetes = target.Ptr()
+		if target.Namespace != "" {
+			ctx.SecretReadNamespace = target.Namespace
+			ctx.SecretRuleKubeNamespace = target.Namespace
+		}
+	}
+	if ctx.SecretRuleKubeNamespace == "" {
+		ctx.SecretRuleKubeNamespace = "default"
+	}
+	ctx.Secrets = settings.Secrets
+	return ctx, true, true
+}
+
+// effectiveKubeNamespace is a configured Kubernetes namespace as the engine
+// and the secret resolver apply it: empty means "default".
+func effectiveKubeNamespace(namespace string) string {
+	if strings.TrimSpace(namespace) == "" {
+		return "default"
+	}
+	return namespace
+}
+
+// KubernetesMapping is KubernetesMapping read from the context instead of this
+// node's policy: the namespace's mapping, and a refusal for a Kubernetes task
+// whose namespace the owner's policy file does not declare.
+func (c *IsolationContext) KubernetesMapping(engine models.AtomEngine) (atom.KubeTarget, error) {
+	if c.Undeclared {
+		if engine == models.AtomEngineKubernetes {
+			return atom.KubeTarget{}, &KubernetesTargetError{Namespace: models.NamespaceOrDefault(c.Namespace), Reason: "the namespace is not declared in the run owner's access policy"}
+		}
+		return atom.KubeTarget{}, nil
+	}
+	if c.Kubernetes == nil {
+		return atom.KubeTarget{}, nil
+	}
+	return *c.Kubernetes, nil
+}
+
+// PodTarget is PodTarget with the owner's effective fallback: a Kubernetes
+// task's pod runs in the mapped namespace, else the owner's default namespace,
+// never the worker's own CAESIUM_KUBERNETES_NAMESPACE.
+func (c *IsolationContext) PodTarget(engine models.AtomEngine, mapping atom.KubeTarget) atom.KubeTarget {
+	target := PodTarget(engine, mapping)
+	if engine == models.AtomEngineKubernetes && target.Namespace == "" {
+		target.Namespace = c.DefaultKubernetesNamespace
+	}
+	return target
+}
+
+// SecretRules is the secret part of the context, for secret.ForIsolation.
+func (c *IsolationContext) SecretRules() secret.IsolationRules {
+	return secret.IsolationRules{
+		Namespace:         c.Namespace,
+		Rules:             c.Secrets,
+		RuleKubeNamespace: c.SecretRuleKubeNamespace,
+		Undeclared:        c.Undeclared,
+	}
 }

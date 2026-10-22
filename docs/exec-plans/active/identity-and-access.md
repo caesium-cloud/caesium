@@ -1169,7 +1169,7 @@ resolver refuses references outside the namespace's allow-list at lint and at ru
       replay re-executes a step whose recorded mapping moved; undeclared
       namespace on a file-backed node fails closed as `config`; no production
       reaper exists, so List + `KubernetesNamespaces()` ship for one.)
-- [ ] C2. Carry an isolation context through dispatch, fail closed on old workers:
+- [x] C2. Carry an isolation context through dispatch, fail closed on old workers:
       the owner resolves `IsolationContext{KubeTarget, SecretRules, PolicyRevision}`
       from the run's namespace when building `DispatchRequest`; it travels through
       `HandleDispatch` → `InboundDispatch` → the worker's dispatch metadata
@@ -1189,6 +1189,16 @@ resolver refuses references outside the namespace's allow-list at lint and at ru
       `internal/worker/worker.go`, `internal/worker/runtime_executor.go`,
       `internal/job/job.go`, `internal/metrics/metrics.go`, `test/` (distributed lane).
       Depends on: C1 + C4.
+      (W7-γ: the context also carries the owner's effective pod and secret-read
+      namespaces; the worker's re-checks before the cache lookup, before
+      resolution and in replay verification ask the owner's current rules over
+      `POST /internal/isolation` (fail closed); an isolated envelope carries a
+      tagged `worker_node` an old worker refuses before claiming; isolated rows
+      carry the reserved node selector `caesium.io/isolation: v1` so only a
+      capable, policy-serving worker can pull them; the envelope bound is
+      derived from the policy size limit; `CAESIUM_WORKER_ISOLATION_V1_DISABLED`
+      withdraws the capability; live proof is the three-node
+      `integration-test-isolation` lane.)
 - [ ] C3. Helm multi-namespace RBAC and the kind-lane proof: `jobNamespaces: []` in
       values renders a `Role` + `RoleBinding` (pods, pods/log, secrets get,
       persistentvolumeclaims) per namespace; the kind CI values map one namespace and
