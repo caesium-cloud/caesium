@@ -3,14 +3,17 @@ package incident
 import (
 	"context"
 	"encoding/json"
+	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/caesium-cloud/caesium/internal/jobdef/testutil"
 	"github.com/caesium-cloud/caesium/internal/models"
+	fixturejson "github.com/caesium-cloud/caesium/internal/testutil"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 	"gorm.io/datatypes"
+	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 )
 
@@ -169,30 +172,61 @@ func TestBundleConfinedToIncidentNamespace(t *testing.T) {
 	require.Equal(t, []string{"mkt-b"}, b.LineageImpact.AllowedJobs)
 }
 
-// TestBundleWithholdsDAGOfAJobMovedDuringTheRead: a move that commits between
-// the job read and the task read is caught by the ownership re-check, so the
-// new owner's DAG never reaches the bundle.
-func TestBundleWithholdsDAGOfAJobMovedDuringTheRead(t *testing.T) {
-	db := testutil.OpenTestDB(t)
-	t.Cleanup(func() { testutil.CloseDB(db) })
-	ctx := context.Background()
-	jobA, _, _, failRun := namespacedLineage(t, db)
-	inc := incidentIn(t, db, jobA, &failRun, "marketing", "mkt-a")
-	require.NoError(t, db.Create(&models.Task{ID: uuid.New(), JobID: jobA, Name: "finance-step"}).Error)
-
-	moved := false
-	require.NoError(t, db.Callback().Query().After("gorm:query").Register("a8-move-during-read", func(tx *gorm.DB) {
-		if moved || tx.Statement.Table != "tasks" {
-			return
-		}
-		moved = true
-		require.NoError(t, tx.Session(&gorm.Session{NewDB: true}).Exec(`UPDATE jobs SET namespace = 'finance' WHERE id = ?`, jobA).Error)
-	}))
-	t.Cleanup(func() { _ = db.Callback().Query().Remove("a8-move-during-read") })
-
-	b, err := BuildBundle(ctx, db, inc.ID, nil)
+// TestBundleReadsTopologyAndOwnershipFromOneSnapshot: a job moves to finance
+// (taking a finance DAG) after the bundle reads the job row, and back to
+// marketing (with a new DAG) after it reads the tasks. The bundle's job, tasks
+// and edges come from one snapshot, so it never returns the intermediate
+// finance topology under the restored marketing namespace.
+func TestBundleReadsTopologyAndOwnershipFromOneSnapshot(t *testing.T) {
+	dsn := "file:" + filepath.Join(t.TempDir(), "catalog.db") + "?_journal_mode=WAL&_busy_timeout=5000"
+	reader, err := gorm.Open(sqlite.Open(dsn), &gorm.Config{})
 	require.NoError(t, err)
-	require.True(t, moved, "the move ran between the job and the task reads")
+	t.Cleanup(func() { testutil.CloseDB(reader) })
+	require.NoError(t, reader.AutoMigrate(models.All...))
+	writer, err := gorm.Open(sqlite.Open(dsn), &gorm.Config{})
+	require.NoError(t, err)
+	t.Cleanup(func() { testutil.CloseDB(writer) })
+	ctx := context.Background()
+
+	jobA, _, _, failRun := namespacedLineage(t, writer)
+	inc := incidentIn(t, writer, jobA, &failRun, "marketing", "mkt-a")
+	require.NoError(t, writer.Create(&models.Task{ID: uuid.New(), JobID: jobA, Name: "marketing-step"}).Error)
+	replaceDAG := func(namespace, step string) {
+		require.NoError(t, writer.Transaction(func(tx *gorm.DB) error {
+			if err := tx.Exec(`UPDATE jobs SET namespace = ? WHERE id = ?`, namespace, jobA).Error; err != nil {
+				return err
+			}
+			if err := tx.Exec(`DELETE FROM tasks WHERE job_id = ?`, jobA).Error; err != nil {
+				return err
+			}
+			return tx.Create(&models.Task{ID: uuid.New(), JobID: jobA, Name: step}).Error
+		}))
+	}
+
+	moves := 0
+	require.NoError(t, reader.Callback().Query().After("gorm:query").Register("a8-two-moves", func(tx *gorm.DB) {
+		switch {
+		case moves == 0 && tx.Statement.Table == "jobs" && tx.Statement.Schema != nil && len(tx.Statement.Selects) == 0:
+			moves++
+			replaceDAG("finance", "finance-step")
+		case moves == 1 && tx.Statement.Table == "tasks":
+			moves++
+			replaceDAG("marketing", "marketing-step-v2")
+		}
+	}))
+	t.Cleanup(func() { _ = reader.Callback().Query().Remove("a8-two-moves") })
+
+	b, err := BuildBundle(ctx, reader, inc.ID, nil)
+	require.NoError(t, err)
+	require.Equal(t, 2, moves, "both moves committed during the bundle's reads")
+	require.False(t, b.Job.NamespaceMoved)
+	require.Len(t, b.Job.Tasks, 1)
+	require.Equal(t, "marketing-step", b.Job.Tasks[0].Name, "the DAG the snapshot's marketing owner had; never the intermediate finance DAG")
+
+	// Moved out for good: the next bundle withholds the DAG.
+	replaceDAG("finance", "finance-step")
+	b, err = BuildBundle(ctx, reader, inc.ID, nil)
+	require.NoError(t, err)
 	require.True(t, b.Job.NamespaceMoved)
 	require.Empty(t, b.Job.Tasks)
 }
@@ -370,4 +404,56 @@ func TestVerifyNamespaceBoundaryRefusesForeignRun(t *testing.T) {
 	setRunNamespace(t, db, failRun, "marketing")
 	setJobNamespace(t, db, jobA, "finance")
 	require.ErrorIs(t, verifyNamespaceBoundary(ctx, db, inc, uuid.Nil), ErrNamespaceMoved)
+}
+
+// TestApplyJobdefPatchRefusalNeverQuotesAMovedJobsPolicy: a move to finance
+// that commits after dispatch's namespace check but before the patch reads
+// the job's remediation is refused on the row the remediation comes from, so
+// the refusal recorded on the marketing incident never quotes finance's
+// policy.
+func TestApplyJobdefPatchRefusalNeverQuotesAMovedJobsPolicy(t *testing.T) {
+	enableAuthMode(t)
+	db, store, ops, exec := newExecutorTest(t)
+	inc, _, _ := seedJobIncident(t, db, store, "gate", "")
+	require.NoError(t, db.Model(&models.Incident{}).Where("id = ?", inc.ID).Update("namespace", "marketing").Error)
+	setJobNamespace(t, db, inc.JobID, "marketing")
+	require.NoError(t, db.Model(&models.Job{}).Where("id = ?", inc.JobID).
+		Update("remediation", datatypes.JSON(fixturejson.MustJSONBytes(t, triageOnlyBlock()))).Error)
+	var job models.Job
+	require.NoError(t, db.First(&job, "id = ?", inc.JobID).Error)
+
+	action, err := exec.Execute(context.Background(), ActionRequest{
+		IncidentID: inc.ID,
+		Type:       ActionTypeApplyJobdefPatch,
+		Params:     ActionParams{Definition: remediationPatch(job.Alias, triageOnlyBlock())},
+	})
+	require.NoError(t, err)
+	approveAction(t, db, action.ID, "erin@example.com", "")
+
+	// The boundary check reads only the job's namespace; the move lands right
+	// after it, replacing the remediation with finance's.
+	financePolicy := `{"profile":"fin-wide","autonomy":{"paramOverrides":{"fin_secret_param":["a"]}}}`
+	moved := false
+	require.NoError(t, db.Callback().Query().After("gorm:query").Register("a8-move-after-boundary", func(tx *gorm.DB) {
+		if moved || tx.Statement.Table != "jobs" || len(tx.Statement.Selects) != 2 || tx.Statement.Selects[1] != "namespace" {
+			return
+		}
+		moved = true
+		require.NoError(t, tx.Session(&gorm.Session{NewDB: true}).Exec(
+			`UPDATE jobs SET namespace = 'finance', remediation = ? WHERE id = ?`, financePolicy, inc.JobID).Error)
+	}))
+	t.Cleanup(func() { _ = db.Callback().Query().Remove("a8-move-after-boundary") })
+
+	_, err = exec.ExecuteApproved(context.Background(), action.ID)
+	require.True(t, moved, "the move ran after the boundary check")
+	require.ErrorIs(t, err, ErrNamespaceMoved)
+	require.NotContains(t, err.Error(), "fin_secret_param")
+	require.Empty(t, ops.applyPatch)
+	require.Empty(t, ops.escalate)
+
+	var recorded models.AgentAction
+	require.NoError(t, db.First(&recorded, "id = ?", action.ID).Error)
+	require.Equal(t, models.AgentActionStatusFailed, recorded.Status)
+	require.NotContains(t, string(recorded.Result), "fin_secret_param")
+	require.NotContains(t, string(recorded.Result), "fin-wide")
 }

@@ -589,6 +589,14 @@ func (e *Executor) dispatchApplyJobdefPatch(ctx context.Context, inc *models.Inc
 	if err := e.store.DB().WithContext(ctx).First(&job, "id = ?", jobID).Error; err != nil {
 		return nil, fmt.Errorf("incident: load job for jobdef patch: %w", err)
 	}
+	// The remediation compared (and quoted) below belongs to the job's owner.
+	// dispatch's namespace check ran on an earlier read, so a move committed
+	// since then is caught on THIS row before its remediation is inspected:
+	// another namespace's policy never reaches the incident's timeline
+	// (identity-and-access A8).
+	if models.NamespaceOrDefault(job.Namespace) != IncidentNamespace(inc) {
+		return nil, fmt.Errorf("%w: job %s", ErrNamespaceMoved, job.ID)
+	}
 
 	// Refuse a self-modifying patch BEFORE the provenance router, so neither the
 	// direct route nor the escalate route can carry a policy edit.

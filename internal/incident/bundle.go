@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/caesium-cloud/caesium/internal/authz"
+	jobdiff "github.com/caesium-cloud/caesium/internal/jobdef/diff"
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/google/uuid"
 	"gorm.io/datatypes"
@@ -245,9 +246,20 @@ func BuildBundleFor(ctx context.Context, db *gorm.DB, incidentID uuid.UUID, play
 		}
 	}
 
-	// Job + DAG topology.
-	job, tasks, edges, err := loadJobTopology(ctx, db, inc.JobID)
-	if err != nil {
+	// Job + DAG topology, read in one snapshot: a move commits the job's new
+	// namespace and its new DAG together, so the namespace checked below is
+	// the owner of exactly the tasks and edges read with it, however many
+	// moves commit during the read (identity-and-access A8).
+	var (
+		job   models.Job
+		tasks []BundleTask
+		edges []BundleDAGEdge
+	)
+	if err := jobdiff.ReadSnapshot(ctx, db, func(tx *gorm.DB) error {
+		var err error
+		job, tasks, edges, err = loadJobTopology(ctx, tx, inc.JobID)
+		return err
+	}); err != nil {
 		return nil, err
 	}
 	b.Job = BundleJob{
@@ -257,19 +269,7 @@ func BuildBundleFor(ctx context.Context, db *gorm.DB, incidentID uuid.UUID, play
 		Tasks:            tasks,
 		Edges:            edges,
 	}
-	// The ownership check runs again after the tasks and edges are read: a
-	// move commits the job's new namespace and its new DAG together, so if the
-	// DAG read above saw the new owner's tasks, this read sees the new
-	// namespace and the DAG is withheld.
-	moved := movedOutOfIncident(&inc, &job)
-	if !moved {
-		inside, err := JobInIncidentNamespace(ctx, db, &inc, inc.JobID)
-		if err != nil {
-			return nil, err
-		}
-		moved = !inside
-	}
-	if moved {
+	if movedOutOfIncident(&inc, &job) {
 		b.Job.SchemaValidation = ""
 		b.Job.Tasks = []BundleTask{}
 		b.Job.Edges = []BundleDAGEdge{}
