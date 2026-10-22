@@ -283,6 +283,47 @@ func TestIsolationFenceSweepsPeriodically(t *testing.T) {
 	}, 10*time.Second, 20*time.Millisecond)
 }
 
+// TestIsolationFenceDigestsEachNamespaceOncePerSweep: marked rows never
+// cost a settings digest, and the unmarked rows of one namespace share one.
+func TestIsolationFenceDigestsEachNamespaceOncePerSweep(t *testing.T) {
+	db := testutil.OpenTestDB(t)
+	t.Cleanup(func() { testutil.CloseDB(db) })
+	store := NewStore(db)
+	useAccessPolicy(t, "apiVersion: v1\nkind: AccessPolicy\nnamespaces:\n  later:\n    secrets: {allow: []}\n  other: {}\n")
+	atom := &models.Atom{ID: uuid.New(), Engine: models.AtomEngineDocker, Image: "alpine:3.23", Command: `["true"]`}
+	require.NoError(t, db.Create(atom).Error)
+	seed := func(namespace string, rows int, selector datatypes.JSONMap) {
+		job := createNamespacedJob(t, db, "fence-digest-"+uuid.NewString()[:6], namespace, nil)
+		runID := seedNamespacedRun(t, db, job.ID, namespace, StatusRunning, nil)
+		task := &models.Task{ID: uuid.New(), JobID: job.ID, AtomID: atom.ID, Name: "step", Type: "task"}
+		require.NoError(t, db.Create(task).Error)
+		for i := range rows {
+			row := models.TaskRun{ID: uuid.New(), JobRunID: runID, TaskID: task.ID, AtomID: atom.ID, Engine: atom.Engine, Image: atom.Image,
+				Command: atom.Command, Status: string(TaskStatusPending), Attempt: 1, MaxAttempts: 1, NodeSelector: selector,
+				PartitionIndex: i, PartitionCount: rows}
+			require.NoError(t, db.Create(&row).Error)
+		}
+	}
+	_, value := NamespaceIsolation("later")
+	seed("later", 20, datatypes.JSONMap{IsolationSelectorKey: value})
+	seed("marked-elsewhere", 20, datatypes.JSONMap{IsolationSelectorKey: "v1-other"})
+
+	digests := map[string]int{}
+	t.Cleanup(func() { fenceDigest = nil })
+	fenceDigest = func(namespace string) { digests[namespace]++ }
+	n, err := store.FenceIsolation(t.Context(), policy.ProcessHolder().Current())
+	require.NoError(t, err)
+	require.Zero(t, n)
+	require.Empty(t, digests, "a fully fenced queue digests nothing")
+
+	seed("later", 5, nil)
+	seed("other", 5, nil)
+	n, err = store.FenceIsolation(t.Context(), policy.ProcessHolder().Current())
+	require.NoError(t, err)
+	require.Equal(t, 5, n)
+	require.Equal(t, map[string]int{"later": 1, "other": 1}, digests, "one digest per namespace per sweep")
+}
+
 // TestWithIsolationSelectorDropsAMarkTheFileNoLongerAsksFor: a selector copied
 // from an earlier row (a replay's source) keeps the step's own entries, loses
 // a stale isolation mark under a file that leaves the namespace unisolated,

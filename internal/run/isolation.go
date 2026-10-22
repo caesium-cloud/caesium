@@ -343,10 +343,29 @@ func (s *Store) fenceIsolation(ctx context.Context, rev *policy.Revision, runID 
 	if err := query.Scan(&rows).Error; err != nil {
 		return 0, err
 	}
+	// A marked row is skipped before its namespace's settings are looked at,
+	// and each namespace's settings are digested at most once per sweep: a
+	// periodic sweep over a fully fenced queue does no per-row hashing.
+	type nsIsolation struct {
+		isolated bool
+		value    string
+	}
+	digests := map[string]nsIsolation{}
 	stamped := 0
 	for _, row := range rows {
-		isolated, value := RevisionIsolation(rev, row.Namespace)
-		if !isolated || hasIsolationMark(row.NodeSelector) {
+		if hasIsolationMark(row.NodeSelector) {
+			continue
+		}
+		ns, seen := digests[row.Namespace]
+		if !seen {
+			if fenceDigest != nil {
+				fenceDigest(row.Namespace)
+			}
+			ns.isolated, ns.value = RevisionIsolation(rev, row.Namespace)
+			digests[row.Namespace] = ns
+		}
+		isolated, value := ns.isolated, ns.value
+		if !isolated {
 			continue
 		}
 		selector, _ := reconcileIsolationSelector(row.NodeSelector, true, value)
@@ -374,6 +393,10 @@ func (s *Store) fenceIsolation(ctx context.Context, rev *policy.Revision, runID 
 // registerBeforeCommit is a test hook run inside RegisterTasks' transaction
 // after the rows are written and before it commits.
 var registerBeforeCommit func()
+
+// fenceDigest is a test hook run each time a sweep digests a namespace's
+// isolation settings.
+var fenceDigest func(namespace string)
 
 // fenceBeforeWrite is a test hook run between the fence's read of a row and
 // its conditional write.

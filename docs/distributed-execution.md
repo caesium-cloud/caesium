@@ -263,6 +263,17 @@ Execution events are marked with `bus_dispatch_pending=true` before commit. Norm
 - Confirm workers are running on nodes (`launching distributed worker` log line).
 - Check `GET /v1/nodes/:address/workers` for active claims.
 - Verify pending tasks have `outstanding_predecessors=0`.
+- A pending row whose `node_selector` carries `caesium.io/isolation` is pulled
+  only by a worker that advertises `isolation_v1`, serves a policy file, and
+  gives the namespace the settings the mark was made under (see
+  [Isolation context](#isolation-context)). The isolation fence only adds marks
+  and never removes one. So while nodes serve different policy revisions, a
+  node still serving the stricter file re-marks rows that a retry on an updated
+  node unmarked, and those rows stay marked after the file reaches every node.
+  The run then waits; it never runs without isolation. Run owners still
+  dispatch such rows. In a cluster without owners, roll the file out to every
+  node, then retry the run (`caesium run retry`): the retry reconciles its rows
+  under the current file.
 
 ### High claim contention
 
