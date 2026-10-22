@@ -66,6 +66,37 @@ it("holds an event for a job missing from the narrowed list until a refetch says
   unmount(); client.clear();
 });
 
+it("keeps a held event through a failed refresh and applies it once a refresh succeeds", async () => {
+  const existing = { id: "m", alias: "mkt-job", namespace: "marketing", paused: false } as Job;
+  const created = { id: "n", alias: "new-mkt-job", namespace: "marketing", paused: false } as Job;
+  const other = { id: "f", alias: "fin-job", namespace: "finance", paused: false } as Job;
+  let phase: "initial" | "failing" | "recovered" = "initial";
+  getJobs.mockReset();
+  getJobs.mockImplementation(async (namespace?: string) => {
+    if (!namespace) return [existing, other, created];
+    if (phase === "failing") throw new Error("list unavailable");
+    return phase === "initial" ? [existing] : [existing, created];
+  });
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const wrapper = ({ children }: { children: ReactNode }) => <QueryClientProvider client={client}>{children}</QueryClientProvider>;
+  resetNamespaceViewForTests();
+  setStoredNamespace("marketing");
+  const { result, unmount } = renderHook(useJobsView, { wrapper });
+  await waitFor(() => expect(result.current.rows.map(row => row.alias)).toEqual(["mkt-job"]));
+  phase = "failing";
+  const fire = (sequence: number) => act(() => {
+    handlers.get("run_started")!({ sequence, type: "run_started", job_id: "n", run_id: `run-${sequence}`, timestamp: new Date().toISOString() });
+  });
+  fire(1);
+  await waitFor(() => expect(getJobs.mock.calls.filter(([ns]) => ns === "marketing").length).toBeGreaterThan(1));
+  await new Promise(resolve => setTimeout(resolve, 50));
+  expect(result.current.activity).toEqual([]); // a failed refresh decides nothing
+  phase = "recovered";
+  fire(2); // the next event retries the held batch
+  await waitFor(() => expect(result.current.activity.map(entry => entry.runId).sort()).toEqual(["run-1", "run-2"]));
+  unmount(); client.clear();
+});
+
 it("does not let the in-flight initial list answer for an event that arrived after it started", async () => {
   const existing = { id: "m", alias: "mkt-job", namespace: "marketing", paused: false } as Job;
   const created = { id: "n", alias: "new-mkt-job", namespace: "marketing", paused: false } as Job;
