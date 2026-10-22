@@ -2,10 +2,10 @@ package incident
 
 import (
 	"context"
+	"database/sql"
 	"time"
 
 	"github.com/caesium-cloud/caesium/internal/authz"
-	jobdiff "github.com/caesium-cloud/caesium/internal/jobdef/diff"
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/google/uuid"
 	"gorm.io/datatypes"
@@ -255,7 +255,7 @@ func BuildBundleFor(ctx context.Context, db *gorm.DB, incidentID uuid.UUID, play
 		tasks []BundleTask
 		edges []BundleDAGEdge
 	)
-	if err := jobdiff.ReadSnapshot(ctx, db, func(tx *gorm.DB) error {
+	if err := readSnapshot(ctx, db, func(tx *gorm.DB) error {
 		var err error
 		job, tasks, edges, err = loadJobTopology(ctx, tx, inc.JobID)
 		return err
@@ -315,6 +315,20 @@ func failedPartitionEntries(rows []models.TaskRun) ([]BundleFailedPartition, boo
 		return nil, false
 	}
 	return out, total > len(out)
+}
+
+// readSnapshot runs fn in one read-only transaction, so every read through tx
+// sees the same catalog state: SQLite and dqlite keep one read view per
+// transaction, and PostgreSQL gets REPEATABLE READ (its READ COMMITTED would
+// take a new view per statement). It mirrors the confined diff baseline's
+// internal/jobdef/diff.ReadSnapshot, which this package cannot import (that
+// package's tests import internal/run, which imports this one).
+func readSnapshot(ctx context.Context, db *gorm.DB, fn func(tx *gorm.DB) error) error {
+	options := &sql.TxOptions{ReadOnly: true}
+	if db.Name() == "postgres" {
+		options.Isolation = sql.LevelRepeatableRead
+	}
+	return db.WithContext(ctx).Transaction(fn, options)
 }
 
 func loadJobTopology(ctx context.Context, db *gorm.DB, jobID uuid.UUID) (models.Job, []BundleTask, []BundleDAGEdge, error) {
