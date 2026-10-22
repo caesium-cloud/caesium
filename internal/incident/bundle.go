@@ -4,6 +4,7 @@ import (
 	"context"
 	"time"
 
+	"github.com/caesium-cloud/caesium/internal/authz"
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/google/uuid"
 	"gorm.io/datatypes"
@@ -100,6 +101,10 @@ type BundleJob struct {
 	SchemaValidation string          `json:"schema_validation,omitempty"`
 	Tasks            []BundleTask    `json:"tasks"`
 	Edges            []BundleDAGEdge `json:"edges"`
+	// NamespaceMoved reports that the job has moved out of the incident's
+	// namespace since the incident opened: its current DAG belongs to the new
+	// owner and is withheld (identity-and-access A8).
+	NamespaceMoved bool `json:"namespace_moved,omitempty"`
 }
 
 // BundleTask is one step in the DAG.
@@ -131,8 +136,13 @@ type BundleRun struct {
 // the incident manager computed at open (excluding the failing run's own
 // outputs). The agent reads this instead of the live /v1/lineage/impact route,
 // from which its scoped token is 403'd.
+//
+// AllowedJobs names only jobs that are still in the incident's namespace;
+// External counts the downstream jobs found in other namespaces at open,
+// which are never named (identity-and-access A8).
 type BundleImpact struct {
 	AllowedJobs []string `json:"allowed_jobs"`
+	External    int      `json:"external"`
 	Frozen      bool     `json:"frozen"`
 }
 
@@ -155,8 +165,23 @@ const bundleRunHistoryLimit = 20
 // was constrained when it was not. The failing task's log tail is scrubbed by
 // the A5 scrubber before it enters the bundle.
 func BuildBundle(ctx context.Context, db *gorm.DB, incidentID uuid.UUID, playbook *Playbook) (*Bundle, error) {
+	return BuildBundleFor(ctx, db, incidentID, playbook, ReaderUnrestricted)
+}
+
+// BuildBundleFor is BuildBundle for a reader: a confined reader (a
+// namespace-confined principal or an agent session) gets no note written by a
+// session that predates namespace confinement (identity-and-access A8).
+//
+// The bundle is confined to the incident's namespace for every reader: the
+// allowlist drops jobs that moved out, run history is the runs recorded in
+// the incident's namespace, and a job that moved out shows no DAG.
+func BuildBundleFor(ctx context.Context, db *gorm.DB, incidentID uuid.UUID, playbook *Playbook, reader ReaderConfinement) (*Bundle, error) {
 	var inc models.Incident
 	if err := db.WithContext(ctx).First(&inc, "id = ?", incidentID).Error; err != nil {
+		return nil, err
+	}
+	allowed, err := EffectiveAllowlist(ctx, db, &inc)
+	if err != nil {
 		return nil, err
 	}
 
@@ -174,7 +199,8 @@ func BuildBundle(ctx context.Context, db *gorm.DB, incidentID uuid.UUID, playboo
 		Classification: BundleClass{Class: inc.Class, Evidence: inc.Evidence},
 		Failure:        BundleFailure{Error: inc.LastError},
 		LineageImpact: BundleImpact{
-			AllowedJobs: unmarshalAllowlist(inc.AllowedJobs),
+			AllowedJobs: allowed,
+			External:    inc.AllowedJobsExternal,
 			Frozen:      true,
 		},
 		GeneratedAt: time.Now().UTC(),
@@ -231,15 +257,33 @@ func BuildBundle(ctx context.Context, db *gorm.DB, incidentID uuid.UUID, playboo
 		Tasks:            tasks,
 		Edges:            edges,
 	}
+	// The ownership check runs again after the tasks and edges are read: a
+	// move commits the job's new namespace and its new DAG together, so if the
+	// DAG read above saw the new owner's tasks, this read sees the new
+	// namespace and the DAG is withheld.
+	moved := movedOutOfIncident(&inc, &job)
+	if !moved {
+		inside, err := JobInIncidentNamespace(ctx, db, &inc, inc.JobID)
+		if err != nil {
+			return nil, err
+		}
+		moved = !inside
+	}
+	if moved {
+		b.Job.SchemaValidation = ""
+		b.Job.Tasks = []BundleTask{}
+		b.Job.Edges = []BundleDAGEdge{}
+		b.Job.NamespaceMoved = true
+	}
 
-	// Recent run history + durations.
-	b.RunHistory, err = loadRunHistory(ctx, db, inc.JobID)
+	// Recent run history + durations, recorded in the incident's namespace.
+	b.RunHistory, err = loadRunHistory(ctx, db, inc.JobID, IncidentNamespace(&inc))
 	if err != nil {
 		return nil, err
 	}
 
 	// Prior timeline notes (for resumed sessions).
-	b.Notes = loadNoteHints(ctx, db, inc.ID)
+	b.Notes = loadNoteHints(ctx, db, inc.ID, reader)
 
 	return b, nil
 }
@@ -319,9 +363,9 @@ func loadJobTopology(ctx context.Context, db *gorm.DB, jobID uuid.UUID) (models.
 	return job, tasks, edges, nil
 }
 
-func loadRunHistory(ctx context.Context, db *gorm.DB, jobID uuid.UUID) ([]BundleRun, error) {
+func loadRunHistory(ctx context.Context, db *gorm.DB, jobID uuid.UUID, namespace string) ([]BundleRun, error) {
 	var runs []models.JobRun
-	if err := db.WithContext(ctx).
+	if err := authz.NamespaceFilter(db.WithContext(authz.WithAllowedNamespaces(ctx, []string{namespace})), "namespace").
 		Where("job_id = ?", jobID).
 		Order("created_at DESC").
 		Limit(bundleRunHistoryLimit).
@@ -347,8 +391,9 @@ func loadRunHistory(ctx context.Context, db *gorm.DB, jobID uuid.UUID) ([]Bundle
 }
 
 // loadNoteHints returns prior agent notes recorded on the incident timeline
-// (AgentAction rows of type "note"), best-effort.
-func loadNoteHints(ctx context.Context, db *gorm.DB, incidentID uuid.UUID) []BundleNoteHint {
+// (AgentAction rows of type "note"), best-effort. A confined reader gets none
+// written by a session that predates namespace confinement.
+func loadNoteHints(ctx context.Context, db *gorm.DB, incidentID uuid.UUID, reader ReaderConfinement) []BundleNoteHint {
 	var actions []models.AgentAction
 	if err := db.WithContext(ctx).
 		Where("incident_id = ? AND type = ?", incidentID, AgentActionTypeNote).
@@ -358,6 +403,9 @@ func loadNoteHints(ctx context.Context, db *gorm.DB, incidentID uuid.UUID) []Bun
 	}
 	hints := make([]BundleNoteHint, 0, len(actions))
 	for i := range actions {
+		if reader == ReaderConfined && legacyAgentAction(&actions[i]) {
+			continue
+		}
 		hints = append(hints, BundleNoteHint{
 			CreatedAt: actions[i].CreatedAt,
 			Text:      noteTextFromParams(actions[i].Params),

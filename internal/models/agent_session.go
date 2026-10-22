@@ -47,6 +47,15 @@ type AgentSession struct {
 	State AgentSessionState `gorm:"type:text;index;not null;default:'pending'" json:"state"`
 	// SessionLog is the persisted agent-container log for the UI timeline.
 	SessionLog string `gorm:"type:text" json:"session_log,omitempty"`
+	// NamespaceConfined records that the session was created by a server
+	// that confines agent sessions to the incident's namespace
+	// (identity-and-access A8). A session without it could read other
+	// namespaces' jobs, so its transcript is withheld from namespace-confined
+	// readers.
+	NamespaceConfined bool `gorm:"not null;default:false" json:"-"`
+	// SessionLogWithheld is response-only: a legacy session's transcript was
+	// withheld from this reader.
+	SessionLogWithheld bool `gorm:"-" json:"session_log_withheld,omitempty"`
 
 	// Budget counters. These are best-effort accounting the executor increments.
 	ActionsUsed int `gorm:"not null;default:0" json:"actions_used"`

@@ -133,11 +133,11 @@ var namespaceResolvers = map[string]namespaceResolver{
 	"GET /v1/incidents/:id":                        resolveIncident,
 	"POST /v1/incidents/:id/approvals/:id/approve": resolveIncident,
 	"POST /v1/incidents/:id/approvals/:id/reject":  resolveIncident,
-	"GET /v1/agent/incidents/:id/bundle":           resolveIncident, // pending A8
-	"GET /v1/agent/incidents/:id/context/*":        resolveIncident, // pending A8
-	"POST /v1/agent/incidents/:id/actions":         resolveIncident, // pending A8
-	"POST /v1/agent/incidents/:id/notes":           resolveIncident, // pending A8
-	"POST /v1/agent/incidents/:id/mcp":             resolveIncident, // pending A8
+	"GET /v1/agent/incidents/:id/bundle":           resolveIncident,
+	"GET /v1/agent/incidents/:id/context/*":        resolveIncident,
+	"POST /v1/agent/incidents/:id/actions":         resolveIncident,
+	"POST /v1/agent/incidents/:id/notes":           resolveIncident,
+	"POST /v1/agent/incidents/:id/mcp":             resolveIncident,
 
 	// Shared objects: the object's namespace; "*" needs the role at "*" to
 	// write and viewer anywhere to read. Creates use the body namespace.

@@ -489,25 +489,47 @@ func TestNamespacedTriggerRoutes(t *testing.T) {
 func TestNamespacedIncidentRoutes(t *testing.T) {
 	f := newNSFixture(t)
 	mktOperator := f.key(t, models.RoleOperator, `["marketing"]`)
-	// The detail carries the frozen agent allowlist (downstream aliases from
-	// any namespace): cluster-only until A8.
-	require.Equal(t, http.StatusForbidden, f.do(t, mktOperator, get("/v1/incidents/:id", pv("id", f.mktIncident.String()))).status)
-	requireAuditMetadata(t, f.lastDenial(t), map[string]any{"pending": "A8"})
-	require.Equal(t, "marketing", f.lastDenial(t).Namespace, "a pending denial is still audited against the incident's namespace")
+	mktViewer := f.key(t, models.RoleViewer, `["marketing"]`)
+	// The detail, approvals and the agent tool surface resolve to the
+	// incident's persisted namespace (A8): live in marketing, refused in
+	// finance, with the denial audited against finance and no pending item.
+	for _, call := range []struct {
+		token cred
+		path  string
+		post  bool
+	}{
+		{mktViewer, "/v1/incidents/:id", false},
+		{mktViewer, "/v1/agent/incidents/:id/bundle", false},
+		{mktOperator, "/v1/agent/incidents/:id/notes", true},
+		{mktOperator, "/v1/agent/incidents/:id/actions", true},
+		{mktOperator, "/v1/agent/incidents/:id/mcp", true},
+	} {
+		do := func(incident uuid.UUID) nsResult {
+			if call.post {
+				return f.do(t, call.token, post(call.path, pv("id", incident.String()), "{}"))
+			}
+			return f.do(t, call.token, get(call.path, pv("id", incident.String())))
+		}
+		require.Equal(t, http.StatusOK, do(f.mktIncident).status, call.path)
+		require.Equal(t, http.StatusForbidden, do(f.finIncident).status, call.path)
+		denial := f.lastDenial(t)
+		require.Equal(t, "finance", denial.Namespace, call.path)
+		require.NotContains(t, string(denial.Metadata), "pending", call.path)
+	}
 	decide := func(verb string, incident uuid.UUID) int {
 		return f.do(t, mktOperator, post("/v1/incidents/:id/approvals/:approval_id/"+verb,
 			pv("id", incident.String(), "approval_id", uuid.NewString()), "")).status
 	}
 	require.Equal(t, http.StatusOK, decide("reject", f.mktIncident))
 	require.Equal(t, http.StatusForbidden, decide("reject", f.finIncident))
-	// Approving executes the action against the job, which may have moved:
-	// cluster-only until A8 confines execution.
-	require.Equal(t, http.StatusForbidden, decide("approve", f.mktIncident))
-	requireAuditMetadata(t, f.lastDenial(t), map[string]any{"pending": "A8"})
-	// The agent tool surface stays fail-closed for confined principals (A8).
-	res := f.do(t, mktOperator, get("/v1/agent/incidents/:id/bundle", pv("id", f.mktIncident.String())))
-	require.Equal(t, http.StatusForbidden, res.status)
-	requireAuditMetadata(t, f.lastDenial(t), map[string]any{"pending": "A8"})
+	// Approving executes the action against the job; the executor confines it
+	// to the incident's namespace, so operator there is enough.
+	require.Equal(t, http.StatusOK, decide("approve", f.mktIncident))
+	require.Equal(t, http.StatusForbidden, decide("approve", f.finIncident))
+	// A viewer cannot approve or write to the agent surface.
+	require.Equal(t, http.StatusForbidden, f.do(t, mktViewer, post("/v1/incidents/:id/approvals/:approval_id/approve",
+		pv("id", f.mktIncident.String(), "approval_id", uuid.NewString()), "")).status)
+	require.Equal(t, http.StatusForbidden, f.do(t, mktViewer, post("/v1/agent/incidents/:id/notes", pv("id", f.mktIncident.String()), "{}")).status)
 }
 
 func TestNamespacedSharedObjects(t *testing.T) {

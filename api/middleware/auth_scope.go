@@ -122,7 +122,7 @@ func authorizeScope(c *echo.Context, svc *auth.Service, scopeJSON []byte, routeP
 			return nil, echo.NewHTTPError(http.StatusForbidden, ApprovalAgentTokenDenyMessage)
 		}
 		// C1: confine the agent token to its own incident's /v1/agent/* surface.
-		return authorizeAgentScope(c, agentClaim, routePath)
+		return authorizeAgentScope(c, svc, agentClaim, routePath)
 	}
 
 	scopeJobs, err := auth.ScopeJobs(scopeJSON)
@@ -251,7 +251,12 @@ func authorizeScope(c *echo.Context, svc *auth.Service, scopeJSON []byte, routeP
 // read-only context handlers can gate which jobs' logs/why/history the agent may
 // pull. Server-side enforcement here is the security boundary; the agent's
 // prompt is not.
-func authorizeAgentScope(c *echo.Context, claim *auth.AgentClaimView, routePath string) (*scopeAuditContext, error) {
+//
+// The injected allowlist keeps only the claim's jobs that are still in the
+// incident's namespace (identity-and-access A8): the claim is frozen at
+// incident open, and a job that moved out since must not stay readable. The
+// incident-binding checks above always run first.
+func authorizeAgentScope(c *echo.Context, svc *auth.Service, claim *auth.AgentClaimView, routePath string) (*scopeAuditContext, error) {
 	if !strings.HasPrefix(routePath, AgentRoutePrefix) {
 		return nil, echo.NewHTTPError(http.StatusForbidden, AgentScopeDenyMessage)
 	}
@@ -270,7 +275,13 @@ func authorizeAgentScope(c *echo.Context, claim *auth.AgentClaimView, routePath 
 		return nil, echo.NewHTTPError(http.StatusForbidden, AgentScopeDenyMessage)
 	}
 
-	allowed := append([]string(nil), claim.Jobs...)
+	allowed, err := svc.AgentAllowedJobs(c.Request().Context(), claim.IncidentID, claim.Jobs)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, echo.ErrNotFound
+		}
+		return nil, echo.NewHTTPError(http.StatusInternalServerError, "internal server error").Wrap(err)
+	}
 	c.Set(ContextKeyAllowedJobAliases, allowed)
 	return &scopeAuditContext{jobAliases: allowed}, nil
 }

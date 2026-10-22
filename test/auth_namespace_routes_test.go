@@ -528,9 +528,8 @@ func (s *IntegrationTestSuite) TestAuthNamespacedDatasetsBackfillsIncidents() {
 	// The live incident route (reject) resolves incidents.namespace: on the
 	// marketing incident the request reaches the handler, which answers 404
 	// for an approval that is not there; on the finance incident it is
-	// refused. Incident detail (the frozen agent allowlist names downstream
-	// jobs of any namespace) and approve (executes against the job) stay
-	// cluster-only until A8.
+	// refused. The incident detail resolves it the same way (A8): live for the
+	// marketing operator on the marketing incident, refused on the finance one.
 	reject := func(incident string) (int, string) {
 		return s.nsRequest(http.MethodPost, "/v1/incidents/"+incident+"/approvals/"+uuid.NewString()+"/reject", mktOperator, `{"reason":"a3"}`, nil)
 	}
@@ -538,7 +537,8 @@ func (s *IntegrationTestSuite) TestAuthNamespacedDatasetsBackfillsIncidents() {
 	s.Require().Equal(http.StatusNotFound, status, body)
 	status, body = reject(finIncident)
 	s.Require().Equal(http.StatusForbidden, status, body)
-	s.requireNSStatus(http.StatusForbidden, http.MethodGet, "/v1/incidents/"+mktIncident, mktOperator, "")
+	s.requireNSStatus(http.StatusOK, http.MethodGet, "/v1/incidents/"+mktIncident, mktOperator, "")
+	s.requireNSStatus(http.StatusForbidden, http.MethodGet, "/v1/incidents/"+finIncident, mktOperator, "")
 	s.requireNSStatus(http.StatusOK, http.MethodGet, "/v1/incidents/"+mktIncident, s.authAPIKey, "")
 }
 

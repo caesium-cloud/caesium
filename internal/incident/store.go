@@ -125,7 +125,8 @@ func (s *Store) OpenOrAppend(ctx context.Context, p OpenParams) (*models.Inciden
 	// frozen value; the value computed here is only persisted when this insert
 	// wins the atomic conditional create below, so the allowlist is truly frozen
 	// at FIRST open. Best-effort: an empty result degrades to the job's own alias.
-	allowedJobs := marshalAllowlist(FreezeAllowlist(ctx, s.db, p.JobID, p.RunID))
+	frozen, external := FreezeAllowlist(ctx, s.db, p.JobID, p.RunID, p.Namespace)
+	allowedJobs := marshalAllowlist(frozen)
 
 	activeKey := key
 	inc := &models.Incident{
@@ -143,6 +144,7 @@ func (s *Store) OpenOrAppend(ctx context.Context, p OpenParams) (*models.Inciden
 		BackfillID:             p.BackfillID,
 		RemediationTargetRunID: p.RemediationTargetRunID,
 		AllowedJobs:            allowedJobs,
+		AllowedJobsExternal:    external,
 		LastError:              p.LastError,
 		Evidence:               p.Evidence,
 		OpenedAt:               now,
@@ -492,8 +494,8 @@ func (s *Store) ReserveAgentSession(ctx context.Context, session *models.AgentSe
 	// the COUNT subqueries and the INSERT are atomic relative to any concurrent
 	// reservation on the same database, across processes.
 	const q = `
-INSERT INTO agent_sessions (id, namespace, incident_id, profile_id, engine, token_id, state, actions_used, tokens_used, created_at, updated_at)
-SELECT ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?
+INSERT INTO agent_sessions (id, namespace, incident_id, profile_id, engine, token_id, state, namespace_confined, actions_used, tokens_used, created_at, updated_at)
+SELECT ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?
 WHERE (SELECT COUNT(*) FROM agent_sessions WHERE state IN (?, ?)) < ?
   AND (
     SELECT COUNT(*) FROM agent_sessions ss
@@ -502,7 +504,7 @@ WHERE (SELECT COUNT(*) FROM agent_sessions WHERE state IN (?, ?)) < ?
   ) < ?`
 
 	res := s.db.WithContext(ctx).Exec(q,
-		session.ID, namespace, session.IncidentID, profileID, string(session.Engine), tokenID, string(session.State), session.CreatedAt, session.UpdatedAt,
+		session.ID, namespace, session.IncidentID, profileID, string(session.Engine), tokenID, string(session.State), session.NamespaceConfined, session.CreatedAt, session.UpdatedAt,
 		pending, running, globalCap,
 		jobID, pending, running, perJobCap,
 	)

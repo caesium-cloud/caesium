@@ -114,4 +114,9 @@ type AgentClaim struct {
 	// Jobs is the frozen job allowlist governing which jobs' read-only context
 	// (logs, why, run history) the agent may pull through the context routes.
 	Jobs []string `json:"jobs,omitempty"`
+	// NamespaceConfined marks a credential minted for a session confined to
+	// the incident's namespace (identity-and-access A8). A credential minted
+	// before that could read other namespaces' jobs, so what it writes is
+	// withheld from namespace-confined readers.
+	NamespaceConfined bool `json:"namespace_confined,omitempty"`
 }

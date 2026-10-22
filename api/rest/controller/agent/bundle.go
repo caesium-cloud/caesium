@@ -22,7 +22,7 @@ func Bundle(c *echo.Context) error {
 		return echo.NewHTTPError(http.StatusBadRequest, "invalid incident id")
 	}
 
-	b, err := agentsvc.New(c.Request().Context()).Bundle(id)
+	b, err := agentsvc.New(c.Request().Context()).ForReader(readerConfinement(c)).Bundle(id)
 	if err != nil {
 		if errors.Is(err, agentsvc.ErrIncidentNotFound) {
 			return echo.ErrNotFound

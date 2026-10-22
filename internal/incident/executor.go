@@ -305,6 +305,10 @@ type ActionRequest struct {
 	Params ActionParams
 	// Playbook is the effective policy the action is validated against.
 	Playbook Playbook
+	// NamespaceConfined says the authoring agent credential was minted for a
+	// namespace-confined session (identity-and-access A8). An agent row
+	// without it is withheld from namespace-confined readers.
+	NamespaceConfined bool
 }
 
 // Execute validates a typed action against the effective playbook, records it as
@@ -423,17 +427,18 @@ func (e *Executor) ExecutePolicy(ctx context.Context, incidentID uuid.UUID, acti
 func (e *Executor) newAction(inc *models.Incident, req ActionRequest, tier int, actor models.AgentActionActor) *models.AgentAction {
 	now := time.Now().UTC()
 	return &models.AgentAction{
-		ID:         uuid.New(),
-		Namespace:  &inc.Namespace,
-		IncidentID: inc.ID,
-		SessionID:  req.SessionID,
-		Type:       req.Type,
-		Params:     req.Params.encode(),
-		Tier:       tier,
-		Status:     models.AgentActionStatusProposed,
-		Actor:      actor,
-		CreatedAt:  now,
-		UpdatedAt:  now,
+		ID:                uuid.New(),
+		Namespace:         &inc.Namespace,
+		IncidentID:        inc.ID,
+		SessionID:         req.SessionID,
+		Type:              req.Type,
+		Params:            req.Params.encode(),
+		Tier:              tier,
+		Status:            models.AgentActionStatusProposed,
+		Actor:             actor,
+		NamespaceConfined: actor != models.AgentActionActorAgent || req.NamespaceConfined,
+		CreatedAt:         now,
+		UpdatedAt:         now,
 	}
 }
 
@@ -539,7 +544,19 @@ func (e *Executor) fireSnoozeRetry(ctx context.Context, timer models.Remediation
 	if e.ops == nil {
 		return errors.New("incident: no action ops configured for snooze_retry")
 	}
-	err := e.ops.RetryFromFailure(ctx, payload.RunID)
+	// The job may have moved out of the incident's namespace while the timer
+	// waited (identity-and-access A8): the retry is refused, not re-armed.
+	inc, err := e.store.Get(ctx, timer.IncidentID)
+	if err != nil {
+		return fmt.Errorf("incident: snooze_retry load incident: %w", err)
+	}
+	if inc == nil {
+		return errors.New("incident: snooze_retry incident not found")
+	}
+	if err := verifyNamespaceBoundary(ctx, e.store.DB(), inc, payload.RunID); err != nil {
+		return fmt.Errorf("incident: snooze_retry fire: %w", err)
+	}
+	err = e.ops.RetryFromFailure(ctx, payload.RunID)
 	if err == nil {
 		return nil
 	}
@@ -618,16 +635,17 @@ func (e *Executor) rearmSnooze(ctx context.Context, timer models.RemediationTime
 func (e *Executor) recordSnoozeEvent(ctx context.Context, timer models.RemediationTimer, status models.AgentActionStatus, result map[string]any) {
 	now := time.Now().UTC()
 	action := &models.AgentAction{
-		ID:         uuid.New(),
-		Namespace:  timer.Namespace,
-		IncidentID: timer.IncidentID,
-		Type:       ActionTypeSnoozeRetry,
-		Tier:       TierAutonomous,
-		Status:     status,
-		Actor:      models.AgentActionActorPolicy,
-		Result:     encodeJSON(result),
-		CreatedAt:  now,
-		UpdatedAt:  now,
+		ID:                uuid.New(),
+		Namespace:         timer.Namespace,
+		IncidentID:        timer.IncidentID,
+		Type:              ActionTypeSnoozeRetry,
+		Tier:              TierAutonomous,
+		Status:            status,
+		Actor:             models.AgentActionActorPolicy,
+		NamespaceConfined: true,
+		Result:            encodeJSON(result),
+		CreatedAt:         now,
+		UpdatedAt:         now,
 	}
 	if err := e.store.DB().WithContext(ctx).Create(action).Error; err != nil {
 		log.Warn("incident: failed to record snooze re-arm event", "incident_id", timer.IncidentID, "error", err)

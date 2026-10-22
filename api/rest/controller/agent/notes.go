@@ -32,7 +32,7 @@ func Notes(c *echo.Context) error {
 		return echo.NewHTTPError(http.StatusBadRequest, "text is required")
 	}
 
-	svc := agentsvc.New(c.Request().Context())
+	svc := agentsvc.New(c.Request().Context()).ForLegacyAuthor(legacyAuthor(c))
 	inc, err := svc.Incident(id)
 	if err != nil {
 		if errors.Is(err, agentsvc.ErrIncidentNotFound) {

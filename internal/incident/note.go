@@ -25,23 +25,32 @@ type noteParams struct {
 // AgentAction row. sessionID is optional (nil for a note recorded outside a
 // session). It returns the recorded row.
 func RecordNote(ctx context.Context, db *gorm.DB, incidentID uuid.UUID, sessionID *uuid.UUID, namespace *string, text string) (*models.AgentAction, error) {
+	return RecordNoteBy(ctx, db, incidentID, sessionID, namespace, text, true)
+}
+
+// RecordNoteBy is RecordNote for an author whose namespace confinement is
+// known: confined is false for a credential minted before agent sessions were
+// namespace-confined (identity-and-access A8), whose note is then withheld
+// from namespace-confined readers.
+func RecordNoteBy(ctx context.Context, db *gorm.DB, incidentID uuid.UUID, sessionID *uuid.UUID, namespace *string, text string, confined bool) (*models.AgentAction, error) {
 	params, err := json.Marshal(noteParams{Text: text})
 	if err != nil {
 		return nil, err
 	}
 	now := time.Now().UTC()
 	action := &models.AgentAction{
-		ID:         uuid.New(),
-		Namespace:  namespace,
-		IncidentID: incidentID,
-		SessionID:  sessionID,
-		Type:       AgentActionTypeNote,
-		Params:     datatypes.JSON(params),
-		Tier:       0,
-		Status:     models.AgentActionStatusExecuted,
-		Actor:      models.AgentActionActorAgent,
-		CreatedAt:  now,
-		UpdatedAt:  now,
+		ID:                uuid.New(),
+		Namespace:         namespace,
+		IncidentID:        incidentID,
+		SessionID:         sessionID,
+		Type:              AgentActionTypeNote,
+		Params:            datatypes.JSON(params),
+		Tier:              0,
+		Status:            models.AgentActionStatusExecuted,
+		Actor:             models.AgentActionActorAgent,
+		NamespaceConfined: confined,
+		CreatedAt:         now,
+		UpdatedAt:         now,
 	}
 	if err := db.WithContext(ctx).Create(action).Error; err != nil {
 		return nil, err
