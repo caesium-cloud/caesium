@@ -1819,6 +1819,10 @@ PY
   # scenarios need no policy file; the refusal scenario spends two limiter
   # windows and runs on the agent lane only.
   auth_pattern="${auth_pattern%)}|TestAuthCLILoginManualCodeFlow|TestAuthCLILoginLoopbackFlow)"
+  # List narrowing (identity-and-access W7-delta F2): ?namespace= on the job,
+  # trigger and incident lists as a marketing-confined viewer, so the narrowing
+  # branches of the three list services run. Needs no policy file.
+  auth_pattern="${auth_pattern%)}|TestAuthListNamespaceNarrow)"
 
   local -a local_named_passes=(
     TestCaesiumWhyExplainsHitAndMiss
@@ -1881,6 +1885,7 @@ PY
     TestAuthAggregateRedactionConfinedToOwnNamespaces
     TestAuthCLILoginManualCodeFlow
     TestAuthCLILoginLoopbackFlow
+    TestAuthListNamespaceNarrow
   )
   local -a distributed_named_passes=(
     TestNodeWorkersRoute

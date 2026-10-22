@@ -20,6 +20,7 @@ import { toast } from "sonner";
 import { Clock, Globe, Copy, Check, ChevronDown, ChevronRight } from "lucide-react";
 import { useMemo, useState, useEffect } from "react";
 import { cn, formatUTCTimestamp } from "@/lib/utils";
+import { scopedKey, useNamespaceView } from "@/features/auth/namespaceView";
 import {
   describeTrigger,
   getNextFireDate,
@@ -272,9 +273,10 @@ export function TriggersPage() {
   const [formState, setFormState] = useState<HTTPTriggerFormState>(formStateFromTrigger());
   const [formError, setFormError] = useState<string | null>(null);
 
+  const { selection } = useNamespaceView();
   const { data: triggers, isLoading, error } = useQuery({
-    queryKey: ["triggers"],
-    queryFn: api.getTriggers,
+    queryKey: scopedKey("triggers", selection),
+    queryFn: () => api.getTriggers(selection ?? undefined),
     refetchInterval: 30000,
   });
 

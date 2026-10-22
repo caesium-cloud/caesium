@@ -175,6 +175,8 @@ export interface RunQueueItem {
   pending_reason?: string;
   wait_reason?: string;
   blocked_reason?: string;
+  /** Why the run waits beyond the job's own policy: "namespace_quota" when its namespace is at its run quota. */
+  held_reason?: string;
 }
 
 export interface Atom {
@@ -419,6 +421,8 @@ export interface IncidentListParams {
   class?: string;
   needs_approval?: boolean;
   job_id?: string;
+  /** Narrows the feed to one namespace within the caller's own (view filter). */
+  namespace?: string;
   limit?: number;
   offset?: number;
 }
@@ -1560,7 +1564,8 @@ export const api = {
     request<ExternalRelationshipsPage>(`/connectors/${encodeURIComponent(connectionId)}/executions/${encodeURIComponent(executionId)}/relationships?${queryString({ ...params })}`, { signal }),
   getRunExternalExecutions: (jobId: string, runId: string, signal?: AbortSignal) =>
     request<RunExternalExecutions>(`/jobs/${encodeURIComponent(jobId)}/runs/${encodeURIComponent(runId)}/external-executions`, { signal }),
-  getJobs: () => request<Job[]>("/jobs"),
+  /** `namespace` narrows the list server-side within the caller's own namespaces (view filter). */
+  getJobs: (namespace?: string) => request<Job[]>(`/jobs${namespace ? `?${queryString({ namespace })}` : ""}`),
   getJob: (id: string) => request<Job>(`/jobs/${id}`),
   /** One page of a job's runs. See `JobRunsPage`; use `getAllJobRuns` for the whole history. */
   getJobRuns: (jobId: string, query?: JobRunsQuery): Promise<JobRunsPage> => fetchJobRunsPage(jobId, query),
@@ -1731,6 +1736,7 @@ export const api = {
       class: params.class,
       needs_approval: params.needs_approval,
       job_id: params.job_id,
+      namespace: params.namespace,
       limit: params.limit,
       offset: params.offset,
     });
@@ -1795,7 +1801,8 @@ export const api = {
   getAuthPolicy: () => request<AuthPolicy>("/auth/policy"),
   /** Declared namespaces and their settings, never bindings (cluster viewer). */
   getAuthNamespaces: () => request<AuthNamespaces>("/auth/namespaces"),
-  getTriggers: () => request<Trigger[]>("/triggers"),
+  getTriggers: (namespace?: string) =>
+    request<Trigger[]>(`/triggers${namespace ? `?${queryString({ namespace })}` : ""}`),
   getTrigger: (id: string) => request<Trigger>(`/triggers/${id}`),
   createTrigger: (body: TriggerCreateRequest) =>
     request<Trigger>("/triggers", {

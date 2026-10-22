@@ -30,6 +30,15 @@ export function isStaleQueueRow(row: RunQueueItem) {
   return row.stale === true || row.claim_state === "stale";
 }
 
+/** held_reason of a run parked by its namespace's run quota (models.RunQueueHeldReasonNamespaceQuota). */
+export const NAMESPACE_QUOTA_HELD_REASON = "namespace_quota";
+
+export const namespaceQuotaHeldLabel = "Held by namespace quota";
+
+export function isNamespaceQuotaHeld(row: RunQueueItem) {
+  return row.held_reason === NAMESPACE_QUOTA_HELD_REASON;
+}
+
 export function queuePendingReason(row: RunQueueItem) {
   if (isStaleQueueRow(row)) {
     const holder = row.claimed_by ? ` by ${row.claimed_by}` : "";
@@ -37,6 +46,12 @@ export function queuePendingReason(row: RunQueueItem) {
   }
   if (row.claim_state === "claimed") {
     return row.claimed_by ? `Starting on ${row.claimed_by}` : "Claimed by a dequeuer; starting";
+  }
+  if (isNamespaceQuotaHeld(row)) {
+    return namespaceQuotaHeldLabel;
+  }
+  if (row.held_reason) {
+    return `Held: ${row.held_reason}`;
   }
   const explicitReason = row.pending_reason ?? row.wait_reason ?? row.blocked_reason ?? row.reason;
   if (row.blocked === true) {

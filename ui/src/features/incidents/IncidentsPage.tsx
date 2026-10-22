@@ -9,6 +9,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { StatusBadge } from "@/components/ui/status-badge";
 import { api, type Incident, type IncidentListParams } from "@/lib/api";
 import { events } from "@/lib/events";
+import { useNamespaceView } from "@/features/auth/namespaceView";
 import { ALL_INCIDENT_STATUSES } from "@/lib/status";
 import { cn, shortId } from "@/lib/utils";
 import {
@@ -48,6 +49,7 @@ export function IncidentsPage() {
   const queryClient = useQueryClient();
   const navigate = useNavigate();
   const search = useSearch({ strict: false }) as IncidentSearch;
+  const { selection: namespace } = useNamespaceView();
 
   const { data: features, isLoading: isLoadingFeatures } = useQuery({
     queryKey: ["system-features"],
@@ -62,9 +64,10 @@ export function IncidentsPage() {
       class: search.class,
       job_id: search.job_id,
       needs_approval: search.needs_approval,
+      namespace: namespace ?? undefined,
       limit: pageLimit,
     }),
-    [search.class, search.job_id, search.needs_approval, search.status],
+    [namespace, search.class, search.job_id, search.needs_approval, search.status],
   );
 
   const incidentsQuery = useQuery({
@@ -75,15 +78,15 @@ export function IncidentsPage() {
   });
 
   const pendingQuery = useQuery({
-    queryKey: ["incidents", "pending-approvals"],
-    queryFn: () => api.getIncidents({ needs_approval: true, limit: 20 }),
+    queryKey: ["incidents", "pending-approvals", namespace],
+    queryFn: () => api.getIncidents({ needs_approval: true, namespace: namespace ?? undefined, limit: 20 }),
     enabled: incidentsEnabled,
     refetchInterval: 15_000,
   });
 
   const jobsQuery = useQuery({
     queryKey: ["jobs"],
-    queryFn: api.getJobs,
+    queryFn: () => api.getJobs(),
     enabled: incidentsEnabled,
     staleTime: 30_000,
   });
