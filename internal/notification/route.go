@@ -566,6 +566,38 @@ func scopeContractBreak(ctx context.Context, db *gorm.DB, payload json.RawMessag
 	}
 	findings, _ := fields["breaking_findings"].([]any)
 	impacted, _ := fields["impacted_consumers"].([]any)
+	// finding_contributors (internal/contract emitContractBreakDeclaredEvents)
+	// is present only when colliding edge ids merged another pair's findings
+	// into an edge: aligned with breaking_findings, it lists the job aliases of
+	// every edge merged into each finding, all of which must be the
+	// destination's (identity-and-access W7-ε). Malformed: deliver nothing.
+	rawContributors, hasContributors := fields["finding_contributors"]
+	var contributors []any
+	if hasContributors {
+		list, ok := rawContributors.([]any)
+		if !ok || len(list) != len(findings) {
+			return nil, false
+		}
+		contributors = list
+	}
+	contributorAliases := func(i int) ([]string, bool) {
+		if !hasContributors {
+			return nil, true
+		}
+		list, ok := contributors[i].([]any)
+		if !ok {
+			return nil, false
+		}
+		out := make([]string, 0, len(list))
+		for _, value := range list {
+			alias, ok := value.(string)
+			if !ok {
+				return nil, false
+			}
+			out = append(out, alias)
+		}
+		return out, true
+	}
 
 	aliasSet := map[string]struct{}{}
 	add := func(value any) {
@@ -584,6 +616,12 @@ func scopeContractBreak(ctx context.Context, db *gorm.DB, payload json.RawMessag
 	for _, entry := range impacted {
 		if consumer, ok := entry.(map[string]any); ok {
 			add(consumer["alias"])
+		}
+	}
+	for i := range contributors {
+		list, _ := contributorAliases(i)
+		for _, alias := range list {
+			add(alias)
 		}
 	}
 	aliases := make([]string, 0, len(aliasSet))
@@ -633,10 +671,22 @@ func scopeContractBreak(ctx context.Context, db *gorm.DB, payload json.RawMessag
 	if consumer, present := fields["consumer"]; present && !inNamespace(consumer) {
 		return nil, false
 	}
+	contributorsInNamespace := func(i int) bool {
+		list, ok := contributorAliases(i)
+		if !ok {
+			return false
+		}
+		for _, alias := range list {
+			if !inNamespace(alias) {
+				return false
+			}
+		}
+		return true
+	}
 	keptFindings := make([]any, 0, len(findings))
-	for _, entry := range findings {
+	for i, entry := range findings {
 		finding, ok := entry.(map[string]any)
-		if ok && inNamespace(finding["consumer"]) && inNamespace(finding["producer"]) {
+		if ok && inNamespace(finding["consumer"]) && inNamespace(finding["producer"]) && contributorsInNamespace(i) {
 			keptFindings = append(keptFindings, entry)
 		}
 	}
@@ -663,9 +713,12 @@ func scopeContractBreak(ctx context.Context, db *gorm.DB, payload json.RawMessag
 			return nil, false
 		}
 	}
-	if len(keptFindings) == len(findings) && len(keptImpacted) == len(impacted) {
+	if !hasContributors && len(keptFindings) == len(findings) && len(keptImpacted) == len(impacted) {
 		return payload, true
 	}
+	// The contributor list names every merged pair's jobs; a scoped payload
+	// never carries it.
+	delete(fields, "finding_contributors")
 	fields["breaking_findings"] = keptFindings
 	fields["impacted_consumers"] = keptImpacted
 	// The summary fields the emitter derives from the findings

@@ -641,9 +641,10 @@ not migrated: re-applying its manifest is refused and changes nothing. To
 recover, retire the old job first with `DELETE /v1/jobs/:id` (its own ID, from
 `GET /v1/jobs`), then apply the corrected manifest: it updates a job that
 already holds the canonical alias, if one exists, and creates it otherwise.
-Retire first because dataset and contract validation compare aliases with
-whitespace trimmed, so while both are active they cannot tell the two jobs
-apart. A git source holding both spellings fails its sync as a duplicate
+Retire first: dataset validation counts the two jobs as two producers of any
+dataset both declare, so the corrected manifest is refused while the old job
+is active, and contract validation still compares aliases with whitespace
+trimmed, so it cannot tell the two jobs apart. A git source holding both spellings fails its sync as a duplicate
 alias, as it did before this rule.
 
 - Runs, backfills and incidents carry a copy of the job's namespace when they
@@ -661,7 +662,15 @@ alias, as it did before this rule.
   step outputs; results produced under one namespace are never republished under
   another. A replay of a moved job re-executes every step instead of reusing
   cached output, and fails closed, naming the old and new namespaces, when a
-  step that must re-execute is not replay-safe.
+  step that must re-execute is not replay-safe. Its run, and the baseline
+  descriptors its task runs store, do not carry the freshness views the
+  baseline read in the old namespace (`_consumed_watermarks_start`,
+  `_consumed_watermarks`, `_derived_from_dataset`); other params are copied.
+- A receipt (`GET /v1/jobs/:id/runs/:run_id/receipt` and `/receipt/verify`)
+  attests the topology snapshot at the job's provenance commit, else the
+  newest one. For a namespace-confined reader only snapshots written in a
+  namespace it reads count, never a legacy snapshot without a namespace, so
+  its receipt can differ from an unrestricted reader's, whose is unchanged.
 - Incident deduplication includes the run's namespace, so a failure after a
   move opens a new incident in the new namespace instead of folding into an open
   one from the old owner.
@@ -830,7 +839,11 @@ See [rest-api.md](rest-api.md).
   namespace. A contract break reaches a namespace's
   policies only with the findings between that namespace's jobs, and only
   while each remaining consumer's recorded team is still its `team` label; a
-  break by a producer in another namespace reaches only `*` policies.
+  break by a producer in another namespace reaches only `*` policies. A
+  finding on an edge that merged in colliding edges (see job definitions
+  below) counts as that namespace's only when every merged edge's jobs are;
+  the event then carries `finding_contributors`, which only `*` policies
+  receive.
   Data-assertion verdicts recorded before baselines were namespace-owned
   reach a namespace's policies without their baseline evidence, as confined
   reads of runs and events show them. With or without a policy file, a policy
@@ -919,7 +932,12 @@ target's namespace:
   a job elsewhere has its configuration replaced by a `redacted` marker,
   contract findings keep only edges between jobs the caller can read (and
   drop inferred findings, which come from a consumer's trigger, when that
-  trigger also serves a job elsewhere), and validator errors (trigger-chain
+  trigger also serves a job elsewhere). Derived edge ids are plain
+  concatenations, so an alias or dataset name containing `:` or `/` can make
+  two edges collide, and derivation merges the second into the first; an edge
+  that merged in an edge the caller cannot read is dropped whole, with any of
+  the caller's own findings on it (apply still enforces every finding and only
+  counts the ones it withholds). Validator errors (trigger-chain
   cycles, dataset producers and consumers, remediation references) name
   another namespace's job only as "a job in another namespace", without its
   dataset or namespace. Each of these is read in one snapshot together with

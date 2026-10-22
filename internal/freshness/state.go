@@ -183,10 +183,14 @@ func (s *Store) Advance(ctx context.Context, in AdvanceInput) (AdvanceResult, er
 //     (fresh id, so only the (namespace,name) unique index can conflict). If the
 //     insert created the row we are the first observation and are done. If it
 //     CONFLICTED, the row already exists (pre-existing, or a concurrent
-//     first-writer) — and the INSERT statement has now taken the transaction's
-//     write lock, so we re-SELECT the authoritative row under that lock, re-run
+//     first-writer), so we re-SELECT the authoritative row FOR UPDATE, re-run
 //     the full contract against ITS current watermark, and write only if it
 //     still advances/verifies. A regression exposed by the re-read is dropped.
+//     The row lock is what serialises two advances on PostgreSQL, where the
+//     conflicting INSERT locks nothing: without it both re-read the same
+//     watermark and the later commit overwrites the larger value. On SQLite and
+//     dqlite the INSERT already holds the database write lock (and the dialect
+//     drops the FOR UPDATE clause).
 //
 // The net invariant: after any set of concurrent Advances the stored watermark
 // is the max per the ordering contract, and every non-advancing attempt is
@@ -248,9 +252,9 @@ func (s *Store) advanceTx(ctx context.Context, in AdvanceInput) (AdvanceResult, 
 			return nil
 		}
 
-		// Conflict: the row exists and the INSERT above took the write lock.
-		// Re-read the authoritative row under the lock and re-decide.
-		authoritative, ok, err := loadState(tx, in.Namespace, in.Name)
+		// Conflict: the row exists. Re-read the authoritative row under a row
+		// lock (PostgreSQL's DO NOTHING took none) and re-decide.
+		authoritative, ok, err := loadState(tx.Clauses(clause.Locking{Strength: "UPDATE"}), in.Namespace, in.Name)
 		if err != nil {
 			return err
 		}
@@ -266,11 +270,11 @@ func (s *Store) advanceTx(ctx context.Context, in AdvanceInput) (AdvanceResult, 
 		if res.Outcome == OutcomeAdvanced || res.Outcome == OutcomeVerified {
 			// status, reason and reason_namespace are the evaluator's
 			// (updateStatusTx) and an advance never changes them, so they are
-			// not written back: on PostgreSQL the conflicting INSERT above
-			// locks nothing, and writing back the values read here would
-			// overwrite an evaluation committed in between, pairing an old
-			// producer's reason with the new producer's reason_namespace
-			// (identity-and-access B6).
+			// not written back: an advance owns only the watermark columns,
+			// and writing back status values it read would overwrite an
+			// evaluation with a stale one, pairing an old producer's reason
+			// with the new producer's reason_namespace (identity-and-access
+			// B6).
 			updates := map[string]any{
 				"watermark":        authoritative.Watermark,
 				"watermark_run_at": authoritative.WatermarkRunAt,

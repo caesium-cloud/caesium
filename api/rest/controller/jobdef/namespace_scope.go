@@ -361,12 +361,34 @@ func (s *readScope) findingVisible(ctx context.Context, finding internalcontract
 		// Not the trimmed alias a key scope names (see aliasInKeyScope).
 		return false
 	}
-	s.resolve(ctx, []string{producer, consumer})
-	if !s.visible[producer] || !s.visible[consumer] {
-		return false
+	// Every derived edge merged into the finding's edge must be readable, not
+	// only the producer and consumer it names: colliding edge ids merge
+	// another pair's findings into it (identity-and-access W7-ε).
+	pairs := append([][2]string{{internalcontract.JobNodeID(producer), internalcontract.JobNodeID(consumer)}}, finding.Contributors()...)
+	return s.pairsReadable(ctx, pairs, internalcontract.EdgeClass(finding.EdgeClass))
+}
+
+// pairsReadable reports whether a confined caller may read everything derived
+// from the (from, to) job node pairs merged into one contract edge: every job
+// visible and, for an inferred edge (derived from triggers), no trigger shared
+// with a job it cannot read. A non-job node is foreign.
+func (s *readScope) pairsReadable(ctx context.Context, pairs [][2]string, class internalcontract.EdgeClass) bool {
+	aliases := make([]string, 0, 2*len(pairs))
+	for _, pair := range pairs {
+		from, to := jobNodeAlias(pair[0]), jobNodeAlias(pair[1])
+		if from == "" || to == "" {
+			return false
+		}
+		aliases = append(aliases, from, to)
 	}
-	if internalcontract.EdgeClass(finding.EdgeClass) == internalcontract.EdgeClassInferred && (s.sharesForeign[producer] || s.sharesForeign[consumer]) {
-		return false
+	s.resolve(ctx, aliases)
+	for _, alias := range aliases {
+		if !s.visible[alias] {
+			return false
+		}
+		if class == internalcontract.EdgeClassInferred && s.sharesForeign[alias] {
+			return false
+		}
 	}
 	return true
 }
@@ -529,6 +551,9 @@ func (s *readScope) filterGraph(ctx context.Context, graph internalcontract.Grap
 	aliases := make([]string, 0, 2*len(graph.Edges)+len(graph.Nodes))
 	for _, edge := range graph.Edges {
 		aliases = append(aliases, jobNodeAlias(edge.From), jobNodeAlias(edge.To))
+		for _, pair := range edge.Contributors() {
+			aliases = append(aliases, jobNodeAlias(pair[0]), jobNodeAlias(pair[1]))
+		}
 	}
 	for _, node := range graph.Nodes {
 		if node.Kind == internalcontract.NodeKindJob {
@@ -540,14 +565,17 @@ func (s *readScope) filterGraph(ctx context.Context, graph internalcontract.Grap
 	out := internalcontract.Graph{Nodes: []internalcontract.Node{}, Edges: []internalcontract.Edge{}}
 	var datasets []internalcontract.DatasetRef
 	for _, edge := range graph.Edges {
-		from, to := jobNodeAlias(edge.From), jobNodeAlias(edge.To)
-		if from == "" || to == "" || !s.visible[from] || !s.visible[to] {
-			continue
-		}
-		// An inferred edge is derived from a trigger's configuration (its
-		// event pattern and paramMapping); one shared with a job the caller
-		// cannot read is unreadable to it, so is everything derived from it.
-		if edge.Class == internalcontract.EdgeClassInferred && (s.sharesForeign[from] || s.sharesForeign[to]) {
+		// Every derived edge merged into this one must be readable, not only
+		// the endpoints it shows: colliding edge ids merge another pair's
+		// schemas and findings into it, and lint and diff have no placeholder
+		// to collapse it into, so the whole edge is withheld (with any of the
+		// caller's own findings merged into it; apply still enforces on the
+		// full set and counts what it withholds). An inferred edge is derived
+		// from a trigger's configuration (its event pattern and paramMapping);
+		// one shared with a job the caller cannot read is unreadable to it, so
+		// is everything derived from it.
+		pairs := append([][2]string{{edge.From, edge.To}}, edge.Contributors()...)
+		if !s.pairsReadable(ctx, pairs, edge.Class) {
 			continue
 		}
 		out.Edges = append(out.Edges, edge)
