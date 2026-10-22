@@ -1885,8 +1885,11 @@ PY
   local -a distributed_named_passes=(
     TestNodeWorkersRoute
     TestAutomaticRetryDelayConstantAndBackoff
+    TestReplayIntoMovedNamespaceDropsOldFreshnessViews
   )
   distributed_pattern='TestIntegrationTestSuite/(TestRunConcurrencyStrategies|TestPriorityRunStartSurfacesAndCronDefault|TestFanOut|TestPlainFailure|TestSecretLogs|TestHaltPolicy|TestReplaceCancel|TestRetryAfterApplyExecutesRegisteredCommand|TestRetryValidatesAgainstTheRegisteredOutputSchema|TestDataAssertionsMetricsPersisted|TestResourceStats|TestNodeWorkersRoute|TestAutomaticRetryDelayConstantAndBackoff)'
+  # identity-and-access W7-ε: a moved-namespace replay re-executes (distributed only).
+  distributed_pattern="${distributed_pattern%)}|TestReplayIntoMovedNamespaceDropsOldFreshnessViews)"
   owner_pattern='TestIntegrationTestSuite/(TestFanOut|TestPlainFailure|TestSecretLogs|TestHaltPolicy|TestResourceStats)'
 
   local local_min_pass=39

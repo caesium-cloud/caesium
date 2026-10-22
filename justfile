@@ -502,7 +502,7 @@ integration-test-distributed: integration-runner
         --network=container:{{ it_container }} \
         -w {{ bld_dir }} \
         {{ integration_runner_image }} \
-        sh -c 'sh scripts/integration-test.sh -test.run "TestIntegrationTestSuite/(TestRunConcurrencyStrategies|TestPriorityRunStartSurfacesAndCronDefault|TestFanOut|TestPlainFailure|TestSecretLogs|TestHaltPolicy|TestReplaceCancel|TestRetryAfterApplyExecutesRegisteredCommand|TestRetryValidatesAgainstTheRegisteredOutputSchema|TestDataAssertionsMetricsPersisted|TestResourceStats|TestCacheNamespaceMove|TestNamespaceLegacyPost|TestNamespaceQuotaRefusesReplayAtCap)"' 2>&1; echo $? >"$log.rc"; } | tee "$log"; \
+        sh -c 'sh scripts/integration-test.sh -test.run "TestIntegrationTestSuite/(TestRunConcurrencyStrategies|TestPriorityRunStartSurfacesAndCronDefault|TestFanOut|TestPlainFailure|TestSecretLogs|TestHaltPolicy|TestReplaceCancel|TestRetryAfterApplyExecutesRegisteredCommand|TestRetryValidatesAgainstTheRegisteredOutputSchema|TestDataAssertionsMetricsPersisted|TestResourceStats|TestCacheNamespaceMove|TestNamespaceLegacyPost|TestNamespaceQuotaRefusesReplayAtCap|TestReplayIntoMovedNamespaceDropsOldFreshnessViews)"' 2>&1; echo $? >"$log.rc"; } | tee "$log"; \
     rc=$(cat "$log.rc"); \
     passes=$(grep -cE '^[[:space:]]*--- PASS: TestIntegrationTestSuite/' "$log" 2>/dev/null || true); \
     passes=${passes:-0}; \

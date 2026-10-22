@@ -7,7 +7,9 @@ import (
 	"errors"
 	"net/http"
 
+	authmw "github.com/caesium-cloud/caesium/api/middleware"
 	rsvc "github.com/caesium-cloud/caesium/api/rest/service/receipt"
+	"github.com/caesium-cloud/caesium/internal/authz"
 	ireceipt "github.com/caesium-cloud/caesium/internal/receipt"
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v5"
@@ -34,7 +36,9 @@ func Get(c *echo.Context) error {
 		return echo.NewHTTPError(http.StatusBadRequest, "bad request").Wrap(err)
 	}
 
-	ctx := c.Request().Context()
+	// A namespace-confined reader's receipt attests only snapshots it may read
+	// (internal/receipt manifestContentHash).
+	ctx := authz.WithHistoryScope(c.Request().Context(), authmw.GetPrincipal(c))
 
 	r, err := rsvc.New(ctx).Build(runID)
 	if err != nil {
@@ -83,7 +87,7 @@ func Verify(c *echo.Context) error {
 	// committed receipt by accident.
 	committed.RunID = runID
 
-	ctx := c.Request().Context()
+	ctx := authz.WithHistoryScope(c.Request().Context(), authmw.GetPrincipal(c))
 
 	result, err := rsvc.New(ctx).Verify(&committed)
 	if err != nil {
