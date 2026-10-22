@@ -65,3 +65,32 @@ it("holds an event for a job missing from the narrowed list until a refetch says
   expect(result.current.activity.map(entry => entry.jobAlias)).toEqual(["new-mkt-job"]);
   unmount(); client.clear();
 });
+
+it("does not let the in-flight initial list answer for an event that arrived after it started", async () => {
+  const existing = { id: "m", alias: "mkt-job", namespace: "marketing", paused: false } as Job;
+  const created = { id: "n", alias: "new-mkt-job", namespace: "marketing", paused: false } as Job;
+  const other = { id: "f", alias: "fin-job", namespace: "finance", paused: false } as Job;
+  let scopedLoads = 0;
+  let releaseStale: (jobs: Job[]) => void = () => {};
+  getJobs.mockReset();
+  getJobs.mockImplementation((namespace?: string) => {
+    if (!namespace) return Promise.resolve([existing, other, created]);
+    scopedLoads += 1;
+    // The first scoped load stays unresolved and, when it finally answers, predates the new job.
+    if (scopedLoads === 1) return new Promise<Job[]>(resolve => { releaseStale = resolve; });
+    return Promise.resolve([existing, created]);
+  });
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const wrapper = ({ children }: { children: ReactNode }) => <QueryClientProvider client={client}>{children}</QueryClientProvider>;
+  resetNamespaceViewForTests();
+  setStoredNamespace("marketing");
+  const { result, unmount } = renderHook(useJobsView, { wrapper });
+  await waitFor(() => expect(scopedLoads).toBe(1));
+  act(() => {
+    handlers.get("run_started")!({ sequence: 1, type: "run_started", job_id: "n", run_id: "run-n", timestamp: new Date().toISOString() });
+  });
+  await waitFor(() => expect(result.current.activity.map(entry => entry.jobAlias)).toEqual(["new-mkt-job"]));
+  await act(async () => { releaseStale([existing]); });
+  expect(result.current.activity.map(entry => entry.jobAlias)).toEqual(["new-mkt-job"]);
+  unmount(); client.clear();
+});

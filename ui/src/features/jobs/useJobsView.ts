@@ -198,6 +198,11 @@ export function useJobsView() {
           const batch = unknownJobs.splice(0);
           const key = scopedKey("jobs", namespaceRef.current);
           try {
+            // cancelRefetch only cancels when the query already holds data; the
+            // first load would otherwise be reused although it may have read the
+            // list before this event. Cancel explicitly so the request that
+            // answers membership starts after the event.
+            await queryClient.cancelQueries({ queryKey: key, exact: true });
             await queryClient.refetchQueries({ queryKey: key, exact: true }, { cancelRefetch: true });
           } catch {
             // A failed refetch cannot establish membership; drop the batch.
