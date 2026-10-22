@@ -35,6 +35,7 @@ import json, os, signal, subprocess, sys, time
 from pathlib import Path
 name=Path(sys.argv[0]).name
 root=Path(os.environ['PROBE_ROOT'])
+assert 'GH_TOKEN' not in os.environ and 'GITHUB_TOKEN' not in os.environ, 'API token reached ordinary tool'
 with (root/'artifacts/calls').open('a') as out: out.write(json.dumps([name,*sys.argv[1:]])+'\\n')
 def wait_file(path):
     end=time.monotonic()+5
@@ -98,7 +99,7 @@ if name=='docker' and sys.argv[1:3]==['image','inspect']:
     print('sha256:'+letter*64)
 ''')
         fake.chmod(0o755)
-        for name in ('just', 'docker', 'node', 'npm', 'npx', 'kind', 'kubectl', 'helm'):
+        for name in ('just', 'docker', 'node', 'npm', 'npx', 'kind', 'kubectl', 'helm', 'gh', 'zstd'):
             (self.root / 'bin' / name).symlink_to('tool')
         (self.root / 'scripts/connectors-fixture.sh').write_text('''#!/bin/sh
 set -eu
@@ -206,6 +207,70 @@ root=Path(os.environ['PROBE_ROOT'])
 with (root/'artifacts/order').open('a') as out: out.write(Path(__file__).name+'\\n')
 if '--out' in sys.argv: Path(sys.argv[sys.argv.index('--out')+1]).write_text('{}')
 ''')
+        # The API/artifact helper has its own adversarial module. Here a small
+        # owned producer drives the REAL supervisor's readiness/POST lifetime.
+        (self.root/'scripts/connectors-ci-producers.py').write_text('''import hashlib,json,os,signal,subprocess,sys,time
+from pathlib import Path
+root=Path(os.environ['PROBE_ROOT'])/'artifacts'
+output=Path(sys.argv[sys.argv.index('--output')+1])
+invocation=sys.argv[sys.argv.index('--invocation')+1]
+fd=int(sys.argv[sys.argv.index('--ready-fd')+1])
+assert os.environ['GH_TOKEN']=='probe-private-token'
+(root/'producer-pid').write_text(str(os.getpid()))
+descendant=None
+def wait_file(path):
+ end=time.monotonic()+5
+ while not path.exists() and time.monotonic()<end: time.sleep(.01)
+ assert path.exists(),str(path)
+def stop(*_):
+ signal.signal(signal.SIGTERM,signal.SIG_DFL)
+ if descendant is not None: descendant.wait()
+ (root/'producer-cleaned').touch()
+ raise SystemExit(143)
+signal.signal(signal.SIGTERM,stop)
+if os.environ.get('PROBE_PRODUCER_DESCENDANT')=='true':
+ descendant=subprocess.Popen([sys.executable,'-c',
+  'import os,signal,time; from pathlib import Path; p=Path(os.environ["PROBE_ROOT"])/"artifacts"\\n'
+  'def stop(*_):\\n signal.signal(signal.SIGTERM,signal.SIG_DFL); time.sleep(.3); (p/"producer-descendant-cleaned").touch(); raise SystemExit(0)\\n'
+  'signal.signal(signal.SIGTERM,stop); (p/"producer-descendant-started").touch()\\n'
+  'while True: time.sleep(.05)'])
+ wait_file(root/'producer-descendant-started')
+(root/'producer-started').touch()
+wait_file(root/'prep-started')
+if os.environ.get('PROBE_PRODUCER_HOLD_READY')=='true': wait_file(root/'producer-ready-release')
+if os.environ.get('PROBE_PRODUCER_EARLY_FAIL')=='true': raise SystemExit(25)
+record=dict(version=1,invocation_id=invocation,candidate_sha=os.environ['CANDIDATE_SHA'],status='artifact-ready',
+ repository=os.environ['GITHUB_REPOSITORY'],repository_id=int(os.environ['GITHUB_REPOSITORY_ID']),
+ run_id=int(os.environ['GITHUB_RUN_ID']),run_attempt=int(os.environ['GITHUB_RUN_ATTEMPT']),
+ workflow_ref=os.environ['GITHUB_WORKFLOW_REF'],head_sha=os.environ['CAESIUM_CONNECTORS_CI_HEAD_SHA'],
+ workflow_id=789,event='pull_request',images={role:'sha256:'+letter*64 for role,letter in zip(('server','runner','fixture'),'abc')},
+ producers={name:dict(id=100+index,started_at='2026-10-22T12:00:00Z',completed_at=None,status='in_progress',conclusion=None,
+ barrier_completed_at='2026-10-22T12:01:00Z') for index,name in enumerate(('builder','images','connector-fixture-images','ui-test'))},
+ artifacts={name:dict(id=1000+index,digest='sha256:'+'d'*64,created_at='2026-10-22T12:01:00Z') for index,name in enumerate(
+ ('product-amd64','integration-runner-amd64','connector-fixture-amd64','image-ids-amd64','connector-fixture-image-ids-amd64'))})
+bad=os.environ.get('PROBE_PRODUCER_BAD_READY')
+if bad=='candidate': record['candidate_sha']='f'*40
+if bad=='invocation': record['invocation_id']='f'*32
+if bad=='attempt': record['run_attempt']=999
+if bad=='status': record['status']='failure'
+raw=(json.dumps(record)+'\\n').encode()
+if bad!='missing': (output/'ready.json').write_bytes(raw)
+frame=hashlib.sha256(raw).hexdigest().encode()+b'\\n'
+if bad=='digest': frame=b'f'*64+b'\\n'
+if bad=='partial': frame=frame[:20]
+if bad=='extra': frame+=b'extra'
+os.write(fd,frame);os.close(fd)
+(root/'producer-ready').touch()
+if os.environ.get('PROBE_PRODUCER_FAIL_POST')=='true':
+ wait_file(root/'lane/fixture/started'); raise SystemExit(26)
+if os.environ.get('PROBE_PRODUCER_HOLD_POST')=='true': wait_file(root/'producer-post-release')
+if descendant is not None:
+ os.kill(descendant.pid,signal.SIGTERM);descendant.wait()
+record.update(status='success',exit_code=0)
+for job in record['producers'].values(): job.update(status='completed',conclusion='success',completed_at='2026-10-22T12:04:00Z')
+if os.environ.get('PROBE_PRODUCER_BAD_FINAL')=='true': record['run_attempt']=999
+(output/'status.json').write_text(json.dumps(record))
+''')
         subprocess.run(['git', 'init', '-q'], cwd=self.root, check=True)
         subprocess.run(['git', 'add', '.'], cwd=self.root, check=True)
         subprocess.run(['git', '-c', 'user.name=Probe', '-c', 'user.email=probe@example.test',
@@ -282,6 +347,123 @@ if '--out' in sys.argv: Path(sys.argv[sys.argv.index('--out')+1]).write_text('{}
                     CAESIUM_CONNECTORS_EXPECTED_RUNNER_IMAGE_ID='sha256:'+'b'*64,
                     CAESIUM_CONNECTORS_EXPECTED_FIXTURE_IMAGE_ID='sha256:'+'c'*64)
 
+    def ci_options(self):
+        options = self.parallel_options()
+        for key in tuple(options):
+            if key.startswith('CAESIUM_CONNECTORS_EXPECTED_'): options.pop(key)
+        options.update(CAESIUM_CONNECTORS_CI_HANDOFF='true', GH_TOKEN='probe-private-token',
+                       GITHUB_TOKEN='must-not-reach-tools', GITHUB_REPOSITORY='owner/repo', GITHUB_REPOSITORY_ID='123',
+                       GITHUB_RUN_ID='456', GITHUB_RUN_ATTEMPT='2',
+                       GITHUB_WORKFLOW_REF='owner/repo/.github/workflows/ci.yml@refs/pull/1/merge',
+                       CAESIUM_CONNECTORS_CI_HEAD_SHA='b'*40)
+        return options
+
+    def test_ci_prepares_before_producers_then_runs_during_post_but_waits_final_success(self):
+        process = self.run_lane(background=True, **self.ci_options(), PROBE_PRODUCER_HOLD_READY='true',
+                                PROBE_PRODUCER_HOLD_POST='true')
+        self.addCleanup(self.finish_process, process)
+        self.wait_path(self.root/'artifacts/prep-install-complete', process)
+        self.wait_path(self.root/'artifacts/producer-started', process)
+        self.assertFalse((self.root/'artifacts/lane/fixture').exists())
+        self.assertFalse((self.root/'artifacts/lane/cluster').exists())
+        (self.root/'artifacts/producer-ready-release').touch()
+        self.wait_path(self.root/'artifacts/lane/browser/exit-status', process)
+        self.assertIsNone(process.poll(), 'producer POST must still gate final success')
+        self.assertNotIn('collect-lane-evidence.py', (self.root/'artifacts/order').read_text())
+        self.assertFalse((self.root/'artifacts/lane/public').exists())
+        (self.root/'artifacts/producer-post-release').touch()
+        stdout, stderr = process.communicate(timeout=10)
+        self.assertEqual(process.returncode, 0, stdout+stderr)
+        self.assertEqual(sum(call[:2] == ['npm', 'ci'] for call in self.calls()), 1)
+        self.assertEqual(sum(call[:3] == ['npx', 'playwright', 'install'] for call in self.calls()), 1)
+        self.assertEqual(sum(call[:3] == ['docker', 'image', 'inspect'] for call in self.calls()), 3)
+        public = self.root/'artifacts/lane/public/ci-producers'
+        self.assertTrue((public/'status.json').is_file())
+        self.assertFalse((public/'ready.json').exists())
+        self.assertNotIn('probe-private-token', (public/'status.json').read_text())
+
+    def test_ci_failed_or_unauthenticated_ready_never_launches_resource_drivers(self):
+        for bad in ('candidate', 'invocation', 'attempt', 'status', 'missing', 'digest', 'partial', 'extra'):
+            self.setUp()
+            with self.subTest(bad=bad):
+                result = self.run_lane(**self.ci_options(), PROBE_PRODUCER_BAD_READY=bad)
+                self.assertNotEqual(result.returncode, 0, result.stdout+result.stderr)
+                self.assertFalse((self.root/'artifacts/lane/fixture').exists())
+                self.assertFalse((self.root/'artifacts/lane/cluster').exists())
+                self.assert_no_browser()
+                self.assertFalse((self.root/'artifacts/order').exists())
+
+    def test_ci_early_producer_failure_cancels_and_joins_slow_preparation(self):
+        result = self.run_lane(**self.ci_options(), PROBE_PRODUCER_EARLY_FAIL='true',
+                               PROBE_BLOCK_PREP='true', PROBE_SLOW_PREP_CLEANUP='true')
+        self.assertEqual(result.returncode, 25, result.stdout+result.stderr)
+        self.assertTrue((self.root/'artifacts/prep-cleaned').is_file())
+        self.assertTrue((self.root/'artifacts/prep-descendant-cleaned').is_file())
+        self.assertFalse((self.root/'artifacts/lane/fixture').exists())
+        self.assert_no_browser()
+
+    def test_ci_late_post_failure_aborts_and_joins_all_launched_drivers(self):
+        result = self.run_lane(**self.ci_options(), PROBE_PRODUCER_FAIL_POST='true', PROBE_BLOCK_PREP='true',
+                               PROBE_BLOCK_FIXTURE='true', PROBE_BLOCK_CLUSTER='true', PROBE_SLOW_CLUSTER_CLEANUP='true')
+        self.assertEqual(result.returncode, 26, result.stdout+result.stderr)
+        for path in ('prep-cleaned', 'prep-descendant-cleaned', 'lane/fixture/cleaned',
+                     'lane/cluster/cleaned', 'lane/cluster/descendant-cleaned'):
+            self.assertTrue((self.root/'artifacts'/path).is_file(), path)
+        self.assert_no_browser()
+        self.assertFalse((self.root/'artifacts/lane/evidence.json').exists())
+
+    def test_ci_final_receipt_must_match_authenticated_ready(self):
+        result = self.run_lane(**self.ci_options(), PROBE_PRODUCER_BAD_FINAL='true')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('final success receipt is foreign', result.stderr)
+        self.assertFalse((self.root/'artifacts/lane/evidence.json').exists())
+
+    def test_ci_cancellation_during_producer_post_joins_owned_descendant(self):
+        for signum in (signal.SIGHUP, signal.SIGINT, signal.SIGTERM):
+            self.setUp()
+            unrelated = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'], start_new_session=True)
+            self.addCleanup(lambda process=unrelated: (process.terminate(), process.wait()) if process.poll() is None else None)
+            process = self.run_lane(background=True, **self.ci_options(), PROBE_PRODUCER_HOLD_POST='true',
+                                    PROBE_PRODUCER_DESCENDANT='true', PROBE_BLOCK_FIXTURE='true', PROBE_BLOCK_CLUSTER='true')
+            self.addCleanup(self.finish_process, process)
+            self.wait_path(self.root/'artifacts/lane/fixture/started', process)
+            self.wait_path(self.root/'artifacts/lane/cluster/started', process)
+            process.send_signal(signum)
+            stdout, stderr = process.communicate(timeout=10)
+            with self.subTest(signal=signum):
+                self.assertEqual(process.returncode, 128+signum, stdout+stderr)
+                self.assertTrue((self.root/'artifacts/producer-cleaned').exists())
+                self.assertTrue((self.root/'artifacts/producer-descendant-cleaned').exists())
+                self.assertFalse((self.root/'artifacts/lane/evidence.json').exists())
+                self.assertIsNone(unrelated.poll(), 'CI cancellation must not signal unrelated groups')
+            unrelated.terminate(); unrelated.wait()
+
+    def test_ci_late_producer_registration_is_cancelled_and_joined(self):
+        site = self.root/'artifacts/producer-late-startup'; site.mkdir(parents=True)
+        (site/'sitecustomize.py').write_text('''import os,signal,subprocess,time
+from pathlib import Path
+original=subprocess.Popen
+def popen(*args,**kwargs):
+ child=original(*args,**kwargs)
+ command=args[0] if args else kwargs.get('args',[])
+ if isinstance(command,(list,tuple)) and 'scripts/connectors-ci-producers.py' in command:
+  root=Path(os.environ['PROBE_ROOT'])/'artifacts'; end=time.monotonic()+5
+  markers=[root/'prep-started',root/'producer-started',root/'producer-descendant-started']
+  while not all(marker.exists() for marker in markers) and time.monotonic()<end: time.sleep(.01)
+  assert all(marker.exists() for marker in markers),'late producer did not start'
+  (root/'producer-late-popen-signal').touch();os.kill(os.getpid(),signal.SIGTERM)
+ return child
+subprocess.Popen=popen
+''')
+        result = self.run_lane(**self.ci_options(), PYTHONPATH=str(site), PROBE_PRODUCER_HOLD_READY='true',
+                               PROBE_PRODUCER_DESCENDANT='true', PROBE_BLOCK_PREP='true', PROBE_SLOW_PREP_CLEANUP='true')
+        self.assertEqual(result.returncode, 143, result.stdout+result.stderr)
+        for marker in ('producer-late-popen-signal', 'producer-cleaned', 'producer-descendant-cleaned',
+                       'prep-cleaned', 'prep-descendant-cleaned'):
+            self.assertTrue((self.root/'artifacts'/marker).exists(), marker)
+        self.assertFalse((self.root/'artifacts/lane/fixture').exists())
+        self.assertFalse((self.root/'artifacts/lane/evidence.json').exists())
+
     def test_loaded_cohort_overlaps_and_joins_both_before_strict_collection(self):
         result = self.run_lane(**self.parallel_options(), PROBE_REQUIRE_OVERLAP='true',
                                CAESIUM_CONNECTORS_BROWSER_INSTALL_DEPS='true')
@@ -345,6 +527,7 @@ if '--out' in sys.argv: Path(sys.argv[sys.argv.index('--out')+1]).write_text('{}
                 process.communicate(timeout=5)
         first_error = None
         for path in (self.root/'artifacts/prep-pid',
+                     self.root/'artifacts/producer-pid',
                      self.root/'artifacts/lane/fixture/pid',
                      self.root/'artifacts/lane/cluster/pid'):
             try:
