@@ -1,6 +1,6 @@
 # Identity and Access — Namespaces, Grants, Policy-as-Code, Corporate SSO
 
-Last updated: 2026-10-16
+Last updated: 2026-10-21
 
 Caesium's authentication is shipped and native (OIDC, SAML, LDAP; `docs/identity-and-access.md`),
 but authorization is a single global role ladder keyed per HTTP route, SSO users cannot be
@@ -71,7 +71,7 @@ fairness was parked by `docs/exec-plans/active/window-scheduling.md` (its §"Glo
 vs. per-job load ceiling"); Stream D of this plan owns the v1 slice (issue #395) and
 window-scheduling's parked note points here.
 
-## Progress (as of 2026-10-16)
+## Progress (as of 2026-10-21)
 
 W1 merged on 2026-10-13: A1 (#624), B1 (#625), the separately authorized DB
 repair (#626) and the W1 plan sync (#622). W2 merged on 2026-10-16: A2 (#638
@@ -81,6 +81,14 @@ user review round on #638 and a Codex atomicity finding on #639, which was fixed
 rather than documented. W3 merged on 2026-10-16: E1 (#646 `b1c8eef3`), A4 with
 H-2 (#645 `831e5229`), A3 (#647 `3d065b68`) and N-1 (#648 `608fe6a3`); LDAP group
 refresh was split out of E1 into the new item E1b.
+W4 merged on 2026-10-17/18: the W4 base (#650 `141ac76b`), E3 (#655 `36de6e9e`), A5
+(#654 `5f5fb92c`), C4 (#660 `5058dcde`), B2 with H-1 (#657 `dd4feda0`) and B4 (#661
+`2a0cffef`). The W4 plan sync was not written when the wave merged; the W4 section below
+records it. W5 ran on 2026-10-20/21: E4 (#665 `8071932d`), G1 with G5 (#666 `1fc4951d`),
+F1 with F3 (#667 `9a8c8b93`), D4 (#673 `cd281a51`), B9 (#668 `1697ee78`) and D1 with D2
+(#672 `983e78a0`) are merged; the user merged #665 and asked for admin merges of the
+other five. B2 was split during W4: confined job writes and trigger tenancy moved to the
+new item B9, and B4 added B7 (DAG snapshot namespaces). Every review comment, including parallel user and greptile reviews, was answered before merge.
 
 ### Wave 1 — Foundations (2026-10-09)
 
@@ -365,18 +373,291 @@ in the order #646 → #645 → #647 → #648.
 - **Next wave (W4 candidates):** the suggested W3 row's remaining items — A5, A8,
   B2, B5, C4, D1, E3, H-1 — and E1b; confirm each item's `Depends on` at dispatch.
 
+### Wave 4 — Keys, user administration, declared namespaces, secret scope, collection filtering (2026-10-17)
+
+Briefs were grounded at master `0fd86c24` plus the W4 base and critiqued by Codex before
+dispatch. Every PR had pre-PR Codex rounds and a Codex round on the PR head. The orchestrator
+ran lint, the race unit suite, `integration-test` and `integration-test-agent` on combined
+trees. After a usage-limit interruption the wave ran without workflows: Codex reviews and lean
+finisher agents only. The six PRs merged in the order #650 → #655 → #654 → #660 → #657 →
+#661, each restacked onto the previous merge before CI.
+
+- **W4-base — process policy holder:** merged [PR #650](https://github.com/caesium-cloud/caesium/pull/650)
+  as `141ac76b` on 2026-10-17. `policy.SetProcessHolder` / `ProcessHolder` is the process-wide
+  holder, installed by `initAuth` in every auth mode; `nil` behaves as the empty policy. B2,
+  B4, C4, D1 and C1 read namespace settings through it. Merged by the user first.
+- **W4-β / E3 — user administration:** merged [PR #655](https://github.com/caesium-cloud/caesium/pull/655)
+  as `36de6e9e` on 2026-10-17. `UserAdmin` lists, disables, enables and logs users out;
+  disable revokes sessions, clears the refresh grant and advances the new nullable
+  `users.disable_generation` in one transaction, and a login is fenced on that generation.
+  Six cluster routes, `caesium auth user list|get|disable|enable|logout`, and audit rows
+  `user.disable`, `user.enable`, `auth.sessions_revoked` at namespace `*`. Live:
+  `TestAuthUserAdministrationLifecycle`; PostgreSQL 16 opt-in run passed. Codex r3 approve.
+  - **Decisions for sign-off:**
+    - The fence is a new `disable_generation` column instead of `refresh_grant_version`
+      (deviates from "no new column"): fencing on a counter every login bumps would refuse
+      concurrent logins and break E1's pinned test.
+    - E3-D5: self-disable answers 409; no break-glass guarantee is claimed.
+    - E3-D6: the CLI addresses users by id only, because emails are not unique across issuers.
+- **W4-α / A5 — namespaced keys:** merged [PR #654](https://github.com/caesium-cloud/caesium/pull/654)
+  as `5f5fb92c` on 2026-10-17. `caesium auth key create --namespace` / `--jobs`;
+  `POST /v1/auth/keys` accepts `namespaces`. A namespace admin mints, lists, rotates and
+  revokes only inside its namespaces and cannot mint above its own role; an SSO admin's
+  session can manage keys (it got 401 before). `GET /auth/whoami` adds `grants`, `namespaces`
+  and `cluster_role`. Live: `TestAuthNamespacedKeyMintingCLI`, `TestAuthSSOAdminManagesKeys`.
+  - **Behaviour change (all callers):** a `scope.jobs` that names no job and a `scope.agent`
+    without an `incident_id` now answer 400 (master minted an unscoped key). Rotation keeps
+    the old expiry, never moves it later, and answers 409 for an expired key or unreadable
+    namespaces.
+  - **Decisions for sign-off:** explicit `["*"]` is stored as NULL; undeclared namespaces are
+    rejected only when a policy file is loaded (same rule as B2-D1); whoami `role` equals
+    `cluster_role`, so it is `""` for a confined principal until F1 reads `grants`.
+- **W4-ε / C4 — scoped secret resolution:** merged [PR #660](https://github.com/caesium-cloud/caesium/pull/660)
+  as `5058dcde` on 2026-10-17. `secret.ScopedResolver` matches each reference against
+  `namespaces.<ns>.secrets.allow` before and after the cache lookup, on the local executor,
+  fan-out, the distributed worker, replay planning, the HTTP trigger, server lint and apply
+  preview. A denial is terminal, redacted, classified `config`, and refuses a replay with 422.
+  Live: `TestAuthSecretScope`, `TestAuthSecretScopeWebhook`. Codex r5 approve.
+  - **Decisions for sign-off:**
+    - Distributed residual: each worker enforces its own node's copy of the policy file until
+      C2 carries the isolation context in dispatch; a node with no file fails open.
+    - A relative `k8s/<x>` rule expands against the mapped Kubernetes namespace; when that
+      differs from the resolver's namespace the reference is denied until C1.
+    - An undeclared namespace on a file-backed node is denied.
+- **W4-γ / B2 + H-1 — declared namespaces, confined lint/diff, policy fixture:** merged
+  [PR #657](https://github.com/caesium-cloud/caesium/pull/657) as `dd4feda0` on 2026-10-17.
+  With a policy file, server lint, apply, git sync, incident patches and legacy `POST /v1/jobs`
+  reject undeclared namespaces. `POST /v1/jobdefs/lint` and `/diff` go live for confined
+  callers with a baseline confined to their namespaces and foreign identities redacted; diff
+  gains `namespaces`. `test/testdata/policy/two-namespaces.yaml` is mounted on
+  `integration-up` and every parity-tracked recipe. Apply, `POST /v1/jobs`, `PATCH
+  /v1/triggers/:id` and `GET /v1/jobs/:id/manifest` stay pending, now on B9. Codex r5 approve.
+  - **Decisions for sign-off:**
+    - B2-D1: undeclared namespaces are rejected only while a policy file is loaded, so podman,
+      kind/helm, coverage-journey lanes and post-upgrade re-applies keep working. Design §5.1
+      and §6.4 carry the amendment, marked pending maintainer sign-off.
+    - B2 split: confined writes and trigger tenancy moved to B9.
+    - A confined caller linting an undeclared namespace gets 403, not a lint error.
+- **W4-δ / B4 — namespace filtering of collections and history:** merged
+  [PR #661](https://github.com/caesium-cloud/caesium/pull/661) as `2a0cffef` on 2026-10-18.
+  Jobs, triggers, incidents, stats and the event stream are filtered in SQL before paging;
+  history under a job is filtered by each row's persisted namespace; ingested events show a
+  delivery only when every run it started is readable. Retry of a run whose job has moved
+  answers `409 namespace_moved`. `?order_by=` on the job and trigger lists is an allow-list.
+  Every B4 `pendingOn` is cleared; `blame`, `topology` and `topology/history` move to B7.
+  Codex pre-PR r1 to r6 fixed; the JSONB delivery SQL was checked by inspection only.
+  - **Decisions for sign-off:**
+    - Backfill date dedupe counts only runs in the backfill's own namespace (behaviour change
+      for moved jobs, every caller).
+    - `409 namespace_moved` applies to every principal, unrestricted ones included (spec §8.3).
+    - Verdicts recorded before the upgrade carry no `baseline_scope`, so a confined caller
+      loses their baseline evidence; new verdicts carry `baseline_scope: "namespace"`.
+      Orchestrator decision after Codex P1 (thread 4303672789).
+    - After a move, a job's `deltaFromBaseline` assertions start with no baseline.
+- **New items B9 and B7:** B9 (confined job writes and trigger tenancy, after B2) and B7
+  (namespace-aware DAG snapshots, after B4 and B9) were created by W4. B9 landed in W5 (below).
+- **Combined gates:** four combined trees, each lint + race unit + `integration-test` +
+  `integration-test-agent`, all green; the last (all five feature PRs) had unit 6623,
+  integration 387, agent lane 74. Each PR's chain was rerun on its restacked head. No CI flakes
+  were recorded.
+- **Follow-ups filed by this wave:**
+  - B9 (done in W5-α, with the strict prune mode still open): shared triggers, webhook-path
+    ownership, one transaction for a confined apply, redaction of apply's findings.
+  - B7: `dag_snapshots` namespace column, importer dedupe key, then clear the three routes.
+  - A8: confine the incident `allowed_jobs` allowlist and incident detail.
+  - B5/B6: reopen the withheld event types (dataset, freshness, contract, agent, approval,
+    escalation) once their payloads are confined.
+  - C5: `caesium why --json` surfaces the `config` class and the multi-namespace live
+    fixture. C2: carry the isolation context in dispatch. C1: align relative
+    `secret://k8s/<secret>/<key>` references with relative rules.
+  - D1: enforce marketing's `maxConcurrentRuns: 1` and add `409 namespace_quota` (done in
+    W5-δ). D4: the notification `auditActor` reads `GetAuthKey` only (done in W5-ε).
+  - E4: join user-bound keys to `UserAdmin` and `revokeUserSessionsTx` (done in W5-β). E2:
+    consider `disable_generation` on an IdP `invalid_grant`. G3: drive the E3 lifecycle with a
+    real Keycloak user; watch the shared-IP auth failure limiter for 429s.
+  - Git sync: the non-fatal invalid-batch follow-up also covers a policy reload that removes a
+    namespace a source still uses.
+  - No PostgreSQL lane exercises the key row locks or the delivery-ownership SQL.
+
+### Wave 5 — User-bound keys, Keycloak lane, Console gating, confined writes, quotas, shared objects (2026-10-20)
+
+Briefs were grounded at master `e658a173` and critiqued by Codex before dispatch (every P1
+and P2 folded in; the per-stream counts are in the orchestrator log). Every PR had pre-PR
+Codex rounds, Codex rounds on the PR head, and a sweep of user and greptile threads before
+merge. Six streams ran on worktree-isolated agents under a host lane lock. No Workflow
+fan-outs were used.
+
+- **W5-β / E4 — user-bound API keys:** merged [PR #665](https://github.com/caesium-cloud/caesium/pull/665)
+  as `8071932d` on 2026-10-21 (head `b43ff9d9`). `api_keys.user_id` (nullable, indexed) marks
+  a user-bound key (`csk_user_` prefix) that stores no role, namespaces or scope.
+  `Service.AuthenticateKey` resolves the user's grants from the policy on every request, as
+  a session does; the principal is `Kind=user` with a new `UserKeyID` (not `KeyID`, which
+  `connector/reads.go` and `replay.principalIdentity` key identity on). A missing, disabled,
+  expired, revoked or malformed row all answer the same 401 after the same latency floor.
+  `MintUserBoundKey` (the E5 seam) fences on the user's `DisableGeneration`; expiry comes from
+  `CAESIUM_AUTH_CLI_KEY_TTL` (default `12h`, at most 7 days). Disable, the enable sweep, "log
+  out everywhere" and `CompleteRefreshDefinitive` revoke the user's keys in the same
+  transaction as the sessions. `caesium auth user get` and the user detail list active keys.
+  Live: `TestAuthUserBoundKeyGrantsFollowPolicy`, `TestAuthUserBoundKeyLifecycle` (61.5 s by
+  design, to stay under the runner IP's auth-failure limiter). Codex r1 approve, 0 findings.
+  - **Decisions for sign-off:**
+    - Logout self-revocation is deferred to E5: E4 ships no mint surface, so no user-bound key
+      exists in production, and `sso.go` / `api/api.go` are untouched.
+    - "Log out everywhere" (`sessions/revoke`) also revokes user-bound keys, widening design
+      §11.2 which names only sessions. Both are sign-in credentials; the guide says so.
+    - Until E2, user-bound keys use the groups stored at the user's last login.
+- **W5-γ / G1 + G5 — Keycloak lane:** merged [PR #666](https://github.com/caesium-cloud/caesium/pull/666)
+  as `1fc4951d` on 2026-10-21 (head `0c37b1b9`; admin-merged at the user's request). Realm
+  fixture, lane policy, `integration-up|test|down-keycloak` and `ui-e2e-keycloak` recipes
+  (Keycloak `26.7.5`, digest-pinned, loopback-only ports), a `keycloak` matrix leg and a
+  `ui-e2e-keycloak` job under `ci-ok`. Five Go scenarios drive the real code flow: admin,
+  confined bob, carol denied `no_binding`, dave's unverified-email admin binding refused
+  (closes the A2/A4 live-rejection obligation), erin's verified-email viewer binding. One
+  Playwright admin login with traces and video off. Container logs go through
+  `scripts/lane-logs.sh`, which redacts `csk_` and `css_`. The guide's Keycloak section and
+  `docs/ci.md` replace the G5 placeholder. Codex r1 P1 (bind ports to loopback) fixed, r2
+  approve; local runs 5/5 PASS four times. Master's push run with it and #671 was green.
+  - **Decision for sign-off:** the lane has its own policy file rather than a renamed admin
+    group; `requireNoBindingCallback` asserted master's 403 and moved to F1's 302 in #667.
+- **W5-ζ / F1 + F3 — Console gating and Access page:** merged [PR #667](https://github.com/caesium-cloud/caesium/pull/667)
+  as `9a8c8b93` on 2026-10-21 (head `cdce5525`). The Console principal gains `grants`,
+  `namespaces`, `clusterRole` and `roleIn(ns)`; every job action is gated by the role its
+  route needs in the job's namespace. New `/access` page (my access, declared namespaces,
+  policy revision, users with disable / enable / log out everywhere) and `GET
+  /v1/auth/namespaces` (cluster viewer; never bindings, subjects, groups or the reload error).
+  A `no_binding` OIDC/SAML denial redirects to `/?login_error=no_binding`; LDAP keeps 403 and
+  adds `reason: "no_binding"`. Live: `TestAuthNamespacesRoute`, `access.spec.ts`; `ui-test` 648.
+  Codex r1 raised one P2 (live `no_binding` journey), answered by sequencing: #666 covers OIDC
+  after rebase; the LDAP body is an E1b follow-up. Two greptile P2s fixed in `08f15ce0`.
+- **W5-ε / D4 — shared objects in namespaces:** merged [PR #673](https://github.com/caesium-cloud/caesium/pull/673)
+  as `cd281a51` on 2026-10-21 (head `767d0e58`). Channel, policy and agent-profile lists are
+  live collections filtered in SQL by the new `authz.SharedObjectFilter` (own namespaces plus
+  `*`); the nine create/edit/delete routes are live for confined principals. With a policy
+  file, an undeclared namespace on create is 400. `RouteEvent` replaces `MatchPolicies`: an
+  event is owned by its incident, hold, run or job namespace and a non-`*` destination gets a
+  scoped payload (labels, contract findings and baseline evidence withheld unless provably the
+  owner's). A refused job-declared or configured default profile gives the deny-all playbook.
+  Policy and profile deletes rename the tombstone `<name>~deleted~<id>`, so names are released.
+  The notification audit actor falls back to `principal.Subject`. Codex r3 approve; the pre-PR
+  r4 fix had its own regression test and no extra Codex pass.
+  - **Decisions for sign-off:**
+    - Notification matching and the incident-time profile namespace rule are strict only while
+      a policy file is loaded (`FileBacked()`). The orchestrator first chose strict-always
+      and was overruled by spec §§1/15 after Codex PR r1.
+    - With no file, `Escalate` reports `routed=false` when the channel is disabled or missing
+      (it was `true`); channel eligibility is the same check in both modes.
+    - A cross-namespace contract break reaches only `*` policies until placeholder collapse (B5/B6).
+    - Tombstones are renamed, not deleted, because `agent_sessions.profile_id` would be lost.
+- **W5-α / B9 — confined job writes and trigger tenancy:** [PR #668](https://github.com/caesium-cloud/caesium/pull/668)
+  merged as `1697ee78` on 2026-10-21 (head `f2d262eb`). Clears `pendingOn("B9")` on
+  apply, `POST /v1/jobs`, `PATCH /v1/triggers/:id` and the manifest. Trigger tenancy: a
+  confined writer never writes a job whose trigger row or webhook path serves a live job
+  outside its reach; with a policy file a webhook path and a trigger row each serve one
+  namespace for every writer. `ApplyConfinedBatch` applies definitions and prune in one
+  transaction (PostgreSQL: REPEATABLE READ plus session-level advisory locks taken before
+  BEGIN); a late refusal rolls everything back as an audited 403. A move needs operator in both
+  namespaces. Contract findings and warnings touching an unreadable job are withheld whole.
+  B7 and B9 are added to Stream B. Codex PR rounds r1 to r11 each found a real defect (git-sync
+  revival race, whitespace alias bypass, snapshot hiding admitted runs, running-state oracle,
+  pool starvation, foreign `depends_on`, retry cache reset, trigger PATCH coverage); all were
+  fixed with regressions, and r12 approved.
+  - **Decisions for sign-off:**
+    - A namespace-confined prune is the server-computed set intersected with the caller's
+      operator namespaces; spec §9.5 is amended. Unrestricted prune is unchanged.
+    - A legacy shared trigger row spanning namespaces is detached on write by a writer
+      authorised over every job it serves (the job moves to a fresh row); others are refused.
+    - Confined callers (namespace-confined, job-scoped or allowlisted git sync) are refused
+      non-canonical (whitespace) aliases with a generic 403.
+- **W5-δ / D1 + D2 — namespace quotas and queue reasons:** [PR #672](https://github.com/caesium-cloud/caesium/pull/672)
+  merged as `983e78a0` on 2026-10-21 (head `05c701bd`). `namespaceCapacityTx` caps
+  `quotas.maxConcurrentRuns` on `admit`, retry readmission and quarantined replay (PostgreSQL:
+  transaction-scoped advisory lock per namespace). Trigger and manual starts are parked in
+  `run_queue` with `held_reason: namespace_quota` (`202 queued`); retries and replays answer
+  `409 namespace_quota` with `Retry-After: 5`; backfills wait with backoff. `DrainOnce`
+  round-robins namespaces and jobs. `run_queue.namespace` and `held_reason` are nullable
+  columns; a queued request is dropped after its job moves. `GET /v1/jobs/:id/queue` and
+  `caesium job queue` show the reason; cancel needs operator in the row's namespace. New
+  metrics `caesium_namespace_running_runs` and `caesium_namespace_quota_deferrals_total`. Closes
+  the v1 slice of #395. Codex pre-PR r1 to r5 and PR rounds r1 to r5 (CLI retry bypass,
+  claim consumed atomically, terminal outcomes consume the claim, orphaned run after promotion,
+  recovery callbacks) fixed; r6's remaining P2 (callbacks lost when a committed run never reads
+  back) is accepted as a recorded residual. Live: `TestNamespaceQuota*`,
+  `TestAuthNamespaceQuotaRoundRobinTwoNamespaces`.
+  - **Decisions for sign-off:**
+    - The quota dequeuer starts whenever a policy file is configured (quota-only mode touches
+      only quota-held rows), so policy-free jobs' held rows drain.
+    - An undeclared namespace is refused at start when file-backed: starts, retries and
+      replays get `409 namespace_undeclared`; queued rows are dropped; startup refuses
+      until the configured file is installed (`run.ExpectNamespacePolicy`).
+    - The coverage server caps marketing at 1 (`coverage-secret-glob.yaml`).
+- **Combined gates:** the orchestrator gated combined trees of the open PRs plus merged ones
+  (first four PRs: scripts 917 OK; later chains int 328 to 333, agent lane 81 to 82, distributed
+  54, PostgreSQL opt-in all PASS). Each PR's own chain was rerun after every master merge.
+- **Session-limit kills and finishers:** the shared usage limit killed every agent three times
+  (about 22:40 EDT 10-20, 06:30 EDT 10-21, and after the #667/#673 merges). All agents had
+  committed clean trees. Fresh finisher agents replaced α, δ and ε (their contexts were 475k
+  to 630k) and seeded from the committed tips; β, γ, ζ were resumed by raw id. Later fixes to
+  #668 and #672 ran on fresh fixers.
+- **Disk and builder:** the Docker VM fell to 4.3 GB and 5.1 GB free; build-cache prunes
+  recovered 4.3 GB and more. The builder tag was `iaa-w3` until #671 (dqlite query metadata
+  patch, non-W5, merged `dbaa3961`) landed; patched images were then tagged `iaa-w5-full`
+  and `iaa-w5` for later chains.
+- **CI flakes (all rerun green or infra, none a product defect):** connectors lane Playwright
+  `ECONNRESET` on #666; `agent-auth` server start failure `rename … info.yaml: invalid
+  cross-device link` on #667; `helm-integration-test` `TestDataAssertionsDatasetOperatorReads`
+  `VerifiedAt` drift on #667; `docker.service` start failure in `coverage-ratchets` on #672;
+  `ui-test` project-list pin missing `keycloak` on #666 (a real fix, `8752f215`);
+  `coverage-ratchets` uncovered `api/rest/controller/job/queue/delete.go` on #672 (a real
+  fix); master's push run red once on `podman-integration-test(3)` (pre-existing).
+- **Follow-ups filed by this wave (owner in brackets):**
+  - PostgreSQL per-job concurrency can double-admit in `insertRunIfSlotTx` under READ
+    COMMITTED (new issue; pre-existing, not C5).
+  - PostgreSQL `AutoMigrate` fails on SQLite `blob` columns (`internal_ca_generations`,
+    `internal_node_enrollments`, `run_checkpoints`) (issue).
+  - Run admission takes no lock that conflicts with a confined prune's candidate locks, so a
+    window remains on PostgreSQL (`store.go`; issue).
+  - Unrestricted `PruneMissing` trims against raw stored aliases, and non-canonical aliases
+    should be rejected for every writer (B-stream follow-up).
+  - The agent lane prints raw container logs, which can include the bootstrap key, on failure;
+    route them through `scripts/lane-logs.sh` (issue).
+  - Live LDAP `no_binding` reason and body (E1b). Live OIDC is covered by #666.
+  - E5 obligations from E4: `POST /auth/logout` with a user-bound bearer revokes exactly that
+    key (test bearer plus cookie); wire the key service into `SSOController`; mint through
+    `MintUserBoundKey` from `/auth/cli/authorize` with the session user's `DisableGeneration`.
+    E2 enforces the staleness bound at the marked point in `validateUserKey`.
+  - Agent-profile write audit rows (D4 follow-up Q4).
+  - Placeholder-collapsed cross-namespace contract break delivery (B5/B6).
+  - Scope agent-profile `secret_refs` to the incident's namespace if they are ever resolved (A8).
+  - Other leader-gated loops (freshness evaluator, incident subscribers) use
+    `dqlite.IsLocalLeader`, which fails on PostgreSQL (issue; only the dequeuer was fixed).
+  - B4 test `TestAuthNamespaceLegacyBaselineEvidenceWithheld` asserts a bare `31337` and
+    matched a nanosecond timestamp once; anchor it on `"baseline_median":31337`.
+  - Mixed-grant queue-cancel 403 (viewer@marketing + operator@finance) is unit-tested only;
+    the Keycloak lane can cover it (G-lane).
+  - `HoldPanel` namespace gating (B6); Console `held_reason` label (F4); namespace switcher (F2).
+  - A6: webhook→event-bridge deliveries across namespaces are outside trigger tenancy.
+  - B7 rebases on B9's importer change.
+  - No PostgreSQL server lane: quota enqueue→promotion on PostgreSQL has unit coverage only.
+  - Persist callback intent when recovery finalizes a committed run, so callbacks survive a
+    persistent read-back failure (D follow-up; residual accepted on #672).
+- **Next waves:** the plan's suggested-waves table is out of date (it predates the W3 to
+  W5 re-slicing). W6 is dispatched with B7, B5, B6, A8 + A6, C1 + C5 and E5. W7: E1b, E2,
+  C2 (after C1), F2 + F4 (F2 after B5), A7 (after B5, B6 and A8) and G4 (after E5). W8: G3
+  (after E2), C3 (after C2), G2 (after F2) and N-2. Confirm each item's `Depends on` at
+  dispatch.
+
 ### Stream Status
 
 | Stream | Scope | Priority | Status |
 |--------|-------|----------|--------|
-| A | Policy file, grants, principal, route classes, namespace-aware middleware, keys with namespaces, SSO-admin key management | **P0** | A1 #624, A2 #638, A3 #647, A4 #645 merged; A5/A8 next |
-| B | `metadata.namespace` on jobs: schema, columns, importer, lint, apply/prune/move, git-sync allowlist, collection filtering, aggregate collapse | **P0** | B1 merged #625; B3 merged #639 |
-| C | Runtime isolation: per-namespace Kubernetes namespace + service account, scoped secret resolution, Helm RBAC | P1 | Not started |
-| D | Run quota + round-robin fairness (#395 v1 slice); namespaced notification channels, policies, agent profiles | P1 | D3 merged #640 |
-| E | Identity lifecycle: IdP group refresh, user/session administration, user-bound keys, `caesium login` | P1 | E1 merged #646 (LDAP refresh split to E1b); E3 next |
-| F | Console: grants-aware gating, namespace switcher, namespace chips, quota label, Access page | P1 | Not started |
-| G | Keycloak: realm fixture, CI lane, Playwright + Go scenarios, operator guidance | P1 | Not started |
-| H- | Harness: integration server policy fixture, `--json` stdout discipline for new verbs | — | H-2 merged #645; H-1 next |
+| A | Policy file, grants, principal, route classes, namespace-aware middleware, keys with namespaces, SSO-admin key management | **P0** | A1 #624, A2 #638, A3 #647, A4 #645, A5 #654 merged; A8, A6 next |
+| B | `metadata.namespace` on jobs: schema, columns, importer, lint, apply/prune/move, git-sync allowlist, collection filtering, aggregate collapse | **P0** | B1 #625, B2 #657, B3 #639, B4 #661, B9 #668 merged; B7, B5, B6 next |
+| C | Runtime isolation: per-namespace Kubernetes namespace + service account, scoped secret resolution, Helm RBAC | P1 | C4 merged #660; C1, C5 next |
+| D | Run quota + round-robin fairness (#395 v1 slice); namespaced notification channels, policies, agent profiles | P1 | D1 + D2 #672, D3 #640, D4 #673 merged |
+| E | Identity lifecycle: IdP group refresh, user/session administration, user-bound keys, `caesium login` | P1 | E1 #646 (LDAP refresh split to E1b), E3 #655, E4 #665 merged; E1b, E2, E5 next |
+| F | Console: grants-aware gating, namespace switcher, namespace chips, quota label, Access page | P1 | F1 + F3 merged #667; F2 after B5, F4 after D2 |
+| G | Keycloak: realm fixture, CI lane, Playwright + Go scenarios, operator guidance | P1 | G1 + G5 merged #666; G3 after E2, G4 after E5, G2 after F2 |
+| H- | Harness: integration server policy fixture, `--json` stdout discipline for new verbs | — | H-1 #657, H-2 #645 merged |
 | N- | Docs: rename + grow the identity-and-access guide; roadmap, README, sovereignty | — | N-1 merged #648; N-2 at close-out |
 
 ## Streams
