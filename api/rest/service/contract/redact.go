@@ -97,7 +97,7 @@ func RedactGraph(r *authz.Redactor, graph internalcontract.Graph) internalcontra
 	}
 
 	out := internalcontract.Graph{Nodes: []internalcontract.Node{}, Edges: []internalcontract.Edge{}}
-	var carried []internalcontract.DatasetRef
+	carried := map[internalcontract.DatasetRef]struct{}{}
 	var collapsed []internalcontract.Edge
 	collapsedSeen := map[string]struct{}{}
 	for _, edge := range graph.Edges {
@@ -120,7 +120,7 @@ func RedactGraph(r *authz.Redactor, graph internalcontract.Graph) internalcontra
 		if whole {
 			out.Edges = append(out.Edges, edge)
 			if edge.Dataset != nil {
-				carried = append(carried, trimmedDataset(*edge.Dataset))
+				carried[trimmedDataset(*edge.Dataset)] = struct{}{}
 			}
 			continue
 		}
@@ -134,16 +134,22 @@ func RedactGraph(r *authz.Redactor, graph internalcontract.Graph) internalcontra
 	}
 
 	var placeholders []internalcontract.Node
+	placed := map[string]struct{}{}
 	for _, node := range graph.Nodes {
 		switch node.Kind {
 		case internalcontract.NodeKindJob:
 			if visible[node.ID] {
 				out.Nodes = append(out.Nodes, node)
 			} else {
-				placeholders = append(placeholders, internalcontract.Node{ID: placeholder(node.ID), Kind: internalcontract.NodeKindExternal})
+				id := placeholder(node.ID)
+				placed[id] = struct{}{}
+				placeholders = append(placeholders, internalcontract.Node{ID: id, Kind: internalcontract.NodeKindExternal})
 			}
 		case internalcontract.NodeKindDataset:
-			if node.Dataset != nil && slices.Contains(carried, trimmedDataset(*node.Dataset)) {
+			if node.Dataset == nil {
+				continue
+			}
+			if _, ok := carried[trimmedDataset(*node.Dataset)]; ok {
 				out.Nodes = append(out.Nodes, node)
 			}
 		}
@@ -152,9 +158,10 @@ func RedactGraph(r *authz.Redactor, graph internalcontract.Graph) internalcontra
 	// derived graph stood for.
 	for _, edge := range collapsed {
 		for _, id := range []string{edge.From, edge.To} {
-			if visible[id] || slices.ContainsFunc(placeholders, func(n internalcontract.Node) bool { return n.ID == id }) {
+			if _, ok := placed[id]; visible[id] || ok {
 				continue
 			}
+			placed[id] = struct{}{}
 			placeholders = append(placeholders, internalcontract.Node{ID: id, Kind: internalcontract.NodeKindExternal})
 		}
 	}
