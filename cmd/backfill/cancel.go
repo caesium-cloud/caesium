@@ -31,7 +31,7 @@ var cancelCmd = &cobra.Command{
 		server := strings.TrimSuffix(cancelServer, "/")
 		url := fmt.Sprintf("%s/v1/jobs/%s/backfills/%s/cancel", server, cancelJobID, cancelBackfillID)
 
-		body, status, readErr := clihttp.Exchange(cmd.Context(), http.DefaultClient, http.MethodPut, url, nil, make(http.Header))
+		body, status, readErr := clihttp.Exchange(cmd.Context(), http.DefaultClient, http.MethodPut, url, nil, authHeaders(cmd))
 		if err := clihttp.ResponseError("backfill cancel", status, body, readErr); err != nil {
 			return err
 		}

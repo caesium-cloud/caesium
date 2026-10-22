@@ -142,6 +142,10 @@ var endpointPolicy = map[string]RoutePolicy{
 	"POST /auth/logout":       identityRoute(viewer),
 	"GET /v1/system/features": identityRoute(viewer),
 
+	// `caesium login` confirmation (E5): the signed-in user's own sign-in.
+	"GET /auth/cli/finish":     identityRoute(viewer),
+	"POST /auth/cli/authorize": identityRoute(viewer),
+
 	// The Prometheus registry is global and its series carry job aliases and
 	// task names, so a namespace-confined principal must not scrape it.
 	"GET /metrics": clusterRoute(viewer),

@@ -175,8 +175,11 @@ requests.
 `POST /auth/logout` revokes the current cookie session and clears the session
 cookie. Because logout is an unsafe cookie-session request, browser callers
 must include `X-CSRF-Token` with the value returned by `/auth/whoami`.
-Bearer API-key requests do not require CSRF, and logout does not revoke API
-keys; use the API-key revoke endpoints for key lifecycle.
+Bearer API-key requests do not require CSRF. Logout revokes the credential that
+authenticated the request: with a user-bound key (`csk_user_…`, what
+`caesium login` stores) as the bearer it revokes exactly that key and leaves
+any cookie sent alongside it alone; with a plain API key it revokes nothing
+(an audited no-op), so use the API-key revoke endpoints for key lifecycle.
 
 The operator console sign-out control uses this endpoint and clears local
 in-memory auth state even if the server cannot be reached.
@@ -1343,7 +1346,8 @@ only a cluster admin can revoke it, and it cannot be rotated.
 ### User-bound keys
 
 A user-bound key (`csk_user_…`) belongs to an SSO user instead of holding a
-role of its own; it is the credential `caesium login` (E5, below) will store.
+role of its own; it is the credential `caesium login` ([below](#cli-login))
+stores.
 It stores no role, namespaces or job list. On every request the server loads
 its user and resolves the user's grants from the policy exactly as for that
 user's browser session, so a policy reload or a change of the user's stored
@@ -1359,6 +1363,7 @@ Every user-bound key expires `CAESIUM_AUTH_CLI_KEY_TTL` (default `12h`, at most
 7 days) after it is minted. It stops working when:
 
 - it expires;
+- `caesium logout` revokes it;
 - a cluster admin revokes it (`caesium auth key revoke --id ID`). It is a
   cluster-only target: a namespace admin can neither revoke nor list it;
 - its user is disabled (`caesium auth user disable`), in the same transaction
@@ -1376,12 +1381,81 @@ new one. `GET /v1/auth/keys` lists user-bound keys only to a cluster admin,
 with their `user_id` and an empty `role`; `GET /v1/auth/users/:id` lists a
 user's active ones.
 
-No route mints a user-bound key yet, and `POST /auth/logout` does not revoke
-one: E5's `caesium login` will mint them, and E5 makes `POST /auth/logout`
-with a user-bound key revoke exactly that key.
+`caesium login` is the only way to mint one, and `caesium logout`
+(`POST /auth/logout` with the key as the bearer) revokes exactly that key.
 
-**Planned (E5):** `caesium login`, `caesium logout` and `caesium whoami` for
-interactive CLI sign-in through the server's configured provider.
+### CLI login
+
+`caesium login` signs the CLI in as your SSO user through whatever provider the
+server is configured with (OIDC, SAML or LDAP), and stores a user-bound key for
+that server:
+
+```sh
+caesium login --server https://caesium.example.com            # opens a browser
+caesium login --server https://caesium.example.com --no-open  # prints the URL instead
+caesium login --server https://caesium.example.com --no-browser
+caesium login --server https://caesium.example.com --code <code>
+caesium whoami --server https://caesium.example.com [--json]
+caesium logout --server https://caesium.example.com
+```
+
+The flow is server-brokered and needs nothing from the identity provider:
+
+1. The CLI generates a random verifier and state, starts a listener on
+   `127.0.0.1:<random port>` and opens the browser at `GET /auth/cli/start`
+   (public) with the state, the verifier's S256 challenge, the port and its
+   hostname. The server stores a login transaction (five minutes; only hashes,
+   never a plaintext secret) and redirects to `GET /auth/cli/finish`.
+2. Without a session the finish page offers the server's sign-in methods and
+   returns there afterwards (for LDAP, sign in to the Console in the same
+   browser and reload). With one it shows a confirmation page: the user, the
+   destination port and the hostname the CLI reported (unverified). It mints
+   nothing, cannot be framed, and an unknown, expired or used request is an
+   error page.
+3. **Authorise** sends `POST /auth/cli/authorize` with the session's CSRF
+   token. It consumes the transaction (a second confirmation is `409`), records
+   the user and issues a one-time code valid for 60 seconds (never past the
+   transaction's own expiry), and the browser is sent to
+   `http://127.0.0.1:<port>/callback`. The CLI refuses a callback whose state
+   is not its own.
+4. The CLI sends `POST /auth/cli/exchange {code, code_verifier}` (public). In
+   one transaction the server checks the code, checks that the verifier's S256
+   is the stored challenge and mints the user-bound key with the user's
+   disable generation as recorded at the confirmation, so a user disabled in
+   between gets no key. The key is returned once and audited as
+   `auth.cli_login` (the confirmation is `auth.cli_authorize`). An unknown,
+   used or expired code and a wrong verifier all answer the same `401`; a wrong
+   verifier also burns the code. Exchange refusals count against the
+   authentication-failure limiter, and a limited address cannot start a login
+   either; one address may hold ten unconfirmed logins at a time (`429`).
+
+A key is minted only at the exchange, never at the confirmation (design §13.1
+step 3 as amended by E5): until the CLI proves it holds the verifier, nothing
+exists that could leak. Neither an API key nor a user-bound key
+can confirm a login; only a signed-in browser can.
+
+`--no-browser` is for a machine without a browser: it prints the start URL,
+the confirmation page shows the code instead of redirecting, and
+`caesium login --code <code>` finishes on the same machine (it keeps the
+verifier for five minutes in the credentials file). Never share that code:
+whoever redeems it with the verifier acts as you, so only confirm a login you
+started yourself.
+
+The key is stored in `$XDG_CONFIG_HOME/caesium/credentials.yaml`
+(`~/.config/caesium/credentials.yaml` when `XDG_CONFIG_HOME` is unset), mode
+`0600` in a `0700` directory, keyed by server URL (lower-case scheme and host,
+the default port dropped, the path kept percent-encoded without a trailing
+slash, no query or fragment). The CLI refuses a credentials file other users
+can read. If the exchange succeeds but the key cannot be saved, the CLI
+revokes that key on the server (`POST /auth/logout` with the key as the
+bearer) and exits non-zero; if that revoke fails too, the error names the key
+by its prefix so an admin can revoke it. Every command resolves its credential
+the same way: `--api-key`, then `CAESIUM_API_KEY`, then the stored login for
+its `--server`; an expired stored login is not sent. `caesium whoami` prints
+the principal and grants (`--json` prints the `/auth/whoami` body on stdout).
+`caesium logout` uses only the stored login: it revokes it on the server and
+deletes it locally, and deletes it even when the server cannot be reached (it
+then exits non-zero).
 
 ## Users and sessions
 

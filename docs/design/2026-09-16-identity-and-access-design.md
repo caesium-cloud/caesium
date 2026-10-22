@@ -803,20 +803,28 @@ sign-off).
    Console as today).
 3. `GET /auth/cli/finish` (identity class, session cookie required) **mints
    nothing**: it renders a session-bound confirmation page ("Authorise the Caesium
-   CLI on <hostname hint>, loopback port <p>, as <email>?"). Minting happens only
-   on `POST /auth/cli/authorize {state}` from that page, which is an unsafe
+   CLI on <hostname hint>, loopback port <p>, as <email>?"). Authorisation happens
+   only on `POST /auth/cli/authorize {state}` from that page, which is an unsafe
    cookie-session request and therefore carries the CSRF token; it consumes the
-   transaction atomically (a second POST is a 409), mints the user-bound key (§7.3),
-   stores a one-time `code` (60s) bound to the transaction, audits `auth.cli_login`,
-   and redirects the browser to `http://127.0.0.1:<p>/callback?code=<c>&state=<s>`.
+   transaction atomically (a second POST is a 409), records the authorising user
+   and that user's disable generation, stores a one-time `code` (60s, never past
+   the transaction's expiry; only its hash) bound to the transaction, audits
+   `auth.cli_authorize`, and redirects the browser to
+   `http://127.0.0.1:<p>/callback?code=<c>&state=<s>`. It mints nothing: the
+   user-bound key (§7.3) is minted by the exchange (step 4), in the transaction
+   that consumes the code, fenced on the recorded generation, and audited
+   `auth.cli_login`, so no key material ever rests on the server between the
+   two steps and an unredeemed confirmation leaves no key behind. (Amended in
+   identity-and-access W6, E5, orchestrator decision, pending maintainer
+   sign-off; the original text minted at this step.)
    A GET that arrives with an unknown or consumed `state` shows an error, never a
    key. This closes the ambient-cookie mint: an attacker-planted listener cannot
    obtain a key without the signed-in user clicking the confirmation.
 4. The CLI receives the callback, verifies `state`, and calls
    `POST /auth/cli/exchange {code, code_verifier}` (public path, single use,
-   IP-rate-limited); the server checks `S256(code_verifier) == challenge` and
-   returns the plaintext key once. A callback intercepted without the verifier is
-   useless.
+   IP-rate-limited); the server checks `S256(code_verifier) == challenge`, mints
+   the key and returns the plaintext once. A callback intercepted without the
+   verifier is useless; a wrong verifier burns the code.
 5. `--no-browser`: step 1 prints the start URL; step 3's confirmation page shows
    the code instead of redirecting; the user runs `caesium login --code <c>` (the
    CLI still holds the verifier).

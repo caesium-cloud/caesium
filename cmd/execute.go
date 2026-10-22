@@ -12,6 +12,7 @@ import (
 	"github.com/caesium-cloud/caesium/cmd/event"
 	"github.com/caesium-cloud/caesium/cmd/incident"
 	"github.com/caesium-cloud/caesium/cmd/job"
+	"github.com/caesium-cloud/caesium/cmd/login"
 	"github.com/caesium-cloud/caesium/cmd/receipt"
 	"github.com/caesium-cloud/caesium/cmd/reproduce"
 	"github.com/caesium-cloud/caesium/cmd/run"
@@ -45,6 +46,9 @@ var cmds = []*cobra.Command{
 	trigger.Cmd,
 	verify.Cmd,
 	why.Cmd,
+	login.LoginCmd,
+	login.LogoutCmd,
+	login.WhoamiCmd,
 }
 
 // Execute builds the command tree and executes commands.

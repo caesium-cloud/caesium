@@ -42,6 +42,10 @@ var publicAuthPaths = map[string]bool{
 	"/auth/sso/saml/acs":      true,
 	"/auth/sso/saml/metadata": true,
 	"/auth/sso/ldap/login":    true,
+	// `caesium login` (identity-and-access E5): start stores a transaction and
+	// exchange redeems a one-time code; both carry their own IP limiter.
+	"/auth/cli/start":    true,
+	"/auth/cli/exchange": true,
 }
 
 var publicAuthPathPrefixes = []string{

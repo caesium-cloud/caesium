@@ -1812,6 +1812,13 @@ PY
   # reads the lineage impact query and the contract graph over default-
   # namespace jobs, so the confined redaction path runs. Needs no policy file.
   auth_pattern="${auth_pattern%)}|TestAuthAggregateRedactionConfinedToOwnNamespaces)"
+  # CLI login (identity-and-access E5): `caesium login --no-browser`/`--code`
+  # and the --no-open loopback flow through the live /auth/cli/* routes, the
+  # stored credential driving whoami and cache list, and `caesium logout`'s
+  # self-revocation. Grants are compared with the user's own session, so the
+  # scenarios need no policy file; the refusal scenario spends two limiter
+  # windows and runs on the agent lane only.
+  auth_pattern="${auth_pattern%)}|TestAuthCLILoginManualCodeFlow|TestAuthCLILoginLoopbackFlow)"
 
   local -a local_named_passes=(
     TestCaesiumWhyExplainsHitAndMiss
@@ -1872,6 +1879,8 @@ PY
     TestAuthDagSnapshotsFollowNamespaceMoves
     TestAuthDatasetConfinedProducerChecks
     TestAuthAggregateRedactionConfinedToOwnNamespaces
+    TestAuthCLILoginManualCodeFlow
+    TestAuthCLILoginLoopbackFlow
   )
   local -a distributed_named_passes=(
     TestNodeWorkersRoute

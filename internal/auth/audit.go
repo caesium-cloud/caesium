@@ -88,6 +88,14 @@ const (
 	SessionsRevokedReasonAdmin        = "admin"
 )
 
+// CLI login (spec §13, identity-and-access E5). ActionAuthCLIAuthorize is the
+// signed-in user's confirmation click; ActionAuthCLILogin is the exchange that
+// mints the user-bound key.
+const (
+	ActionAuthCLIAuthorize = "auth.cli_authorize"
+	ActionAuthCLILogin     = "auth.cli_login"
+)
+
 // AuditLogger writes structured audit log entries to the database.
 type AuditLogger struct {
 	db *gorm.DB

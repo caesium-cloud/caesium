@@ -29,6 +29,10 @@ type SSOController struct {
 	ldap           iauth.CredentialAuthenticator
 	cookieName     string
 	trustedProxies []*net.IPNet
+	// keys mints CLI-login user-bound keys and revokes the one a logout
+	// presents (identity-and-access E5).
+	keys      *iauth.Service
+	cliSignIn []CLISignInMethod
 }
 
 // NewSSO constructs a controller for cookie-session endpoints.
@@ -183,8 +187,16 @@ func (s *SSOController) LDAPLogin(c *echo.Context) error {
 	return s.completeCredentialLogin(c, s.ldap, "ldap")
 }
 
+// Logout revokes the credential that authenticated the request (design
+// §13.2): a user-bound bearer key (and nothing else: a cookie sent alongside
+// a bearer did not authenticate it and is left alone), or the cookie session.
+// A plain API key is never revoked by logout; that stays an audited no-op.
 func (s *SSOController) Logout(c *echo.Context) error {
-	if principal := authmw.GetPrincipal(c); principal != nil && principal.Kind == iauth.PrincipalAPIKey {
+	principal := authmw.GetPrincipal(c)
+	if principal != nil && principal.UserKeyID != nil {
+		return s.logoutUserKey(c, principal)
+	}
+	if principal != nil && principal.Kind == iauth.PrincipalAPIKey {
 		s.recordAPIKeyLogoutNoop(c, principal)
 		return c.NoContent(http.StatusNoContent)
 	}

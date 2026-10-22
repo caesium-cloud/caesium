@@ -20,7 +20,7 @@ var pruneCmd = &cobra.Command{
 		server := strings.TrimSuffix(pruneServer, "/")
 		url := fmt.Sprintf("%s/v1/cache/prune", server)
 
-		body, status, readErr := clihttp.Exchange(cmd.Context(), http.DefaultClient, http.MethodPost, url, nil, make(http.Header))
+		body, status, readErr := clihttp.Exchange(cmd.Context(), http.DefaultClient, http.MethodPost, url, nil, authHeaders(cmd))
 		if err := clihttp.ResponseError("cache prune", status, body, readErr); err != nil {
 			return err
 		}
