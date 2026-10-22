@@ -663,6 +663,29 @@ func TestConfinedPruneDesiredSetIsExact(t *testing.T) {
 	require.Equal(t, len(nonCanonicalAliases), prune([]string{"payroll"}), "a trimmed alias protects none of them")
 }
 
+// PruneMissing matches desired aliases exactly, and ProtectTrimmedAliases
+// keeps every job whose trimmed alias is listed (a git manifest skipped for a
+// non-canonical alias): a working "payroll" and a legacy "payroll " both
+// stay, an unrelated job is still pruned.
+func TestPruneMissingProtectsTrimmedAliases(t *testing.T) {
+	f := newTenancyFixture(t, false)
+	f.mustApply("payroll", "default", "")
+	f.seedStoredAlias("payroll-seed", "payroll ", "default")
+	f.mustApply("other", "default", "")
+	pruned, err := f.importer.PruneMissing(context.Background(), []string{" payroll"}, &PruneOptions{ProtectTrimmedAliases: []string{" payroll"}})
+	require.NoError(t, err)
+	require.Equal(t, 1, pruned)
+	require.False(t, f.job("payroll").DeletedAt.Valid)
+	require.False(t, f.job("payroll ").DeletedAt.Valid)
+	require.True(t, f.job("other").DeletedAt.Valid)
+
+	g := newTenancyFixture(t, false)
+	g.mustApply("payroll", "default", "")
+	pruned, err = g.importer.PruneMissing(context.Background(), []string{"payroll "}, nil)
+	require.NoError(t, err)
+	require.Equal(t, 1, pruned, "without protection an exact desired set does not name \"payroll\"")
+}
+
 func TestCheckTriggerPatchTx(t *testing.T) {
 	f := newTenancyFixture(t, true)
 	mkt := f.mustApply("mkt", "marketing", "/hooks/mkt")

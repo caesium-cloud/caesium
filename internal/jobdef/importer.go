@@ -208,6 +208,13 @@ type PruneOptions struct {
 	// Skipped, when non-nil, receives the jobs left untouched because of
 	// NamespaceAllowlist, sorted by alias.
 	Skipped *[]PruneSkip
+	// ProtectTrimmedAliases keeps every candidate whose alias, whitespace
+	// trimmed, is listed: the jobs a skipped manifest with a non-canonical
+	// alias could name (git sync). Turning a working "payroll" manifest into
+	// "payroll " must not retire "payroll". Prune candidates are already
+	// limited to the source's own jobs, so this never keeps another source's
+	// or an unmanaged job alive.
+	ProtectTrimmedAliases []string
 
 	// candidateNamespaces, when non-nil, restricts the jobs read (and, on
 	// PostgreSQL, locked) to these namespaces: a confined apply's prune, whose
@@ -513,11 +520,22 @@ func (i *Importer) pruneMissingTx(tx *gorm.DB, desiredSet map[string]struct{}, o
 		return 0, nil, err
 	}
 
+	protected := make(map[string]struct{})
+	if opts != nil {
+		for _, alias := range opts.ProtectTrimmedAliases {
+			if alias = strings.TrimSpace(alias); alias != "" {
+				protected[alias] = struct{}{}
+			}
+		}
+	}
 	skipped := make([]PruneSkip, 0)
 	toRetire := make([]*models.Job, 0, len(jobs))
 	for idx := range jobs {
 		jobModel := &jobs[idx]
 		if _, ok := desiredSet[jobModel.Alias]; ok {
+			continue
+		}
+		if _, ok := protected[strings.TrimSpace(jobModel.Alias)]; ok {
 			continue
 		}
 		if !namespaceAllowed(allowlist, jobModel.Namespace) {

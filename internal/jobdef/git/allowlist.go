@@ -100,11 +100,14 @@ func rejectDuplicateAliases(plans []applyFilePlan) error {
 // dropNonCanonicalAliases skips, for every source, each manifest whose alias
 // has leading or trailing whitespace: Validate refuses it for every writer, so
 // left in the batch it would fail the whole sync. The manifest is reported
-// (reason alias_not_canonical) and not applied; its raw alias stays desired,
-// so a stored job of exactly that alias (written before the rule) is left as
-// it is rather than pruned.
-func (s *Source) dropNonCanonicalAliases(plans []applyFilePlan, report *SyncReport) []applyFilePlan {
+// (reason alias_not_canonical) and not applied. The skipped aliases are
+// returned for the prune to protect (PruneOptions.ProtectTrimmedAliases):
+// every job of the source whose alias trims to the same value stays, so a
+// legacy "payroll " is not pruned and neither is a working "payroll" whose
+// manifest just gained a stray space.
+func (s *Source) dropNonCanonicalAliases(plans []applyFilePlan, report *SyncReport) ([]applyFilePlan, []string) {
 	kept := make([]applyFilePlan, 0, len(plans))
+	skipped := make([]string, 0)
 	for _, plan := range plans {
 		alias := plan.def.Metadata.Alias
 		if strings.TrimSpace(alias) == "" || schema.ValidateAlias(alias) == nil {
@@ -118,8 +121,9 @@ func (s *Source) dropNonCanonicalAliases(plans []applyFilePlan, report *SyncRepo
 		log.Warn("git sync skipped a manifest whose alias has leading or trailing whitespace",
 			"source_id", report.SourceID, "url", report.URL, "commit", report.Commit, "path", plan.path,
 			"alias", fmt.Sprintf("%q", alias), "namespace", namespace)
+		skipped = append(skipped, alias)
 	}
-	return kept
+	return kept, skipped
 }
 
 // allowedPlans drops every manifest the apply guard would refuse, on its

@@ -1120,6 +1120,42 @@ func (s *GitSyncSuite) TestSyncSkipsNonCanonicalAliasManifest() {
 	}
 }
 
+// A working job's manifest gaining a stray space (PR #682 review): the
+// manifest is skipped as non-canonical, and the prune keeps the job its
+// trimmed alias names, so the job stays active and unchanged rather than
+// being retired by a manifest that was refused. A job the source no longer
+// names at all is still pruned.
+func (s *GitSyncSuite) TestSyncSkippedManifestKeepsItsWorkingJob() {
+	for _, tc := range []struct {
+		name       string
+		namespaces []string
+	}{{"unrestricted", nil}, {"allowlisted", []string{"default"}}} {
+		s.Run(tc.name, func() {
+			repoDir, db, importer := s.allowlistSetup(map[string]string{
+				"jobs/payroll.yaml": allowlistManifest("payroll-work", ""),
+				"jobs/gone.yaml":    allowlistManifest("payroll-gone", ""),
+			})
+			source := Source{URL: repoDir, Ref: "master", Path: "jobs", SourceID: "git-sync", Namespaces: tc.namespaces}
+			_, err := source.SyncWithReport(context.Background(), importer)
+			s.Require().NoError(err)
+			before := s.allowlistJob(db, "payroll-work")
+
+			s.removeAndCommit(repoDir, "jobs/gone.yaml")
+			s.commit(repoDir, map[string]string{"jobs/payroll.yaml": allowlistManifest(`"payroll-work "`, "")})
+			report, err := source.SyncWithReport(context.Background(), importer)
+			s.Require().NoError(err)
+			s.Require().Len(report.Violations, 1)
+			s.Equal(jobdef.NamespaceReasonNonCanonicalAlias, report.Violations[0].Reason)
+			s.Equal(1, report.Pruned, "only the job the source dropped is pruned")
+
+			after := s.allowlistJob(db, "payroll-work")
+			s.False(after.DeletedAt.Valid, "the working job is not retired by its refused manifest")
+			s.True(before.UpdatedAt.Equal(after.UpdatedAt), "and is not changed")
+			s.True(s.allowlistJob(db, "payroll-gone").DeletedAt.Valid)
+		})
+	}
+}
+
 func githubKnownHostEntry() string {
 	return "github.com ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQCj7ndNxQowgcQnjshcLrqPEiiphnt+VTTvDP6mHBL9j1aNUkY4Ue1gvwnGLVlOhGeYrnZaMgRK6+PKCUXaDbC7qtbW8gIkhL7aGCsOr/C56SJMy/BCZfxd1nWzAOxSDPgVsmerOBYfNqltV9/hWCqBywINIR+5dIg6JTJ72pcEpEjcYgXkE2YEFXV1JHnsKgbLWNlhScqb2UmyRkQyytRLtL+38TGxkxCflmO+5Z8CSSNY7GidjMIZ7Q4zMjA2n1nGrlTDkzwDCsw+wqFPGQA179cnfGWOWRVruj16z6XyvxvjJwbz0wQZ75XK5tKSb7FNyeIEs4TT4jk+S4dhPeAUC5y+bDYirYgM4GC7uEnztnZyaVWQ7B381AK4Qdrwt51ZqExKbQpTUNn+EjqoTwvqNj4kqx5QUCI0ThS/YkOxJCXmPUWZbhjpCg56i+2aB6CmK2JGhn57K5mj0MNdBXA4/WnwH6XoPWJzK5Nyu2zB3nAZp+S5hpQs+p1vN1/wsjk="
 }

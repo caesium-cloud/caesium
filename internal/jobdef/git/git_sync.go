@@ -318,7 +318,7 @@ func (s *Source) applyCheckout(ctx context.Context, importer *jobdef.Importer, d
 	if err := rejectDuplicateAliases(plans); err != nil {
 		return err
 	}
-	plans = s.dropNonCanonicalAliases(plans, report)
+	plans, skippedAliases := s.dropNonCanonicalAliases(plans, report)
 	if s.Namespaces != nil {
 		allowed, err := s.allowedPlans(ctx, importer, plans, report)
 		if err != nil {
@@ -345,7 +345,7 @@ func (s *Source) applyCheckout(ctx context.Context, importer *jobdef.Importer, d
 	}
 
 	if strings.TrimSpace(s.SourceID) != "" {
-		pruneOpts := &jobdef.PruneOptions{SourceID: s.SourceID}
+		pruneOpts := &jobdef.PruneOptions{SourceID: s.SourceID, ProtectTrimmedAliases: skippedAliases}
 		if s.Namespaces != nil {
 			pruneOpts.NamespaceAllowlist = s.Namespaces
 			pruneOpts.Skipped = &report.PruneSkipped
