@@ -2375,7 +2375,7 @@ func (s *Store) registerTasksTx(
 				Command:                 command,
 				Status:                  string(TaskStatusPending),
 				Priority:                jobRun.Priority,
-				NodeSelector:            maps.Clone(task.NodeSelector),
+				NodeSelector:            WithIsolationSelector(maps.Clone(task.NodeSelector), jobRun.Namespace),
 				Attempt:                 1,
 				MaxAttempts:             maxAttempts,
 				PartitionIndex:          input.PartitionIndex,
@@ -5376,6 +5376,11 @@ func (s *Store) retryTask(runID, taskRef uuid.UUID, attempt int) error {
 		if resultUpdate.Error != nil {
 			return resultUpdate.Error
 		}
+		if resultUpdate.RowsAffected > 0 {
+			if err := stampIsolationOnResetTx(tx, row.ID); err != nil {
+				return err
+			}
+		}
 		if resultUpdate.RowsAffected == 0 {
 			// Already resolved by a cascade or a cancellation; a retry here
 			// would resurrect a terminal row.
@@ -7749,6 +7754,9 @@ func (s *Store) RetryPartition(ctx context.Context, runID, taskRunID uuid.UUID) 
 				Updates(updates).Error; err != nil {
 				return err
 			}
+			if err := stampIsolationOnResetTx(tx, row.ID); err != nil {
+				return err
+			}
 			// Same reset contract, other table — see clearAttemptDatasetMetricsTx.
 			if err := clearAttemptDatasetMetricsTx(tx, row.ID); err != nil {
 				return err
@@ -8067,6 +8075,9 @@ func (s *Store) retryFromFailure(runID uuid.UUID, admit bool) (*JobRun, error) {
 			status := TaskStatus(tr.Status)
 			if status == TaskStatusFailed || status == TaskStatusSkipped {
 				if err := tx.Model(tr).Where("id = ?", tr.ID).Updates(retryResetColumns()).Error; err != nil {
+					return err
+				}
+				if err := stampIsolationOnResetTx(tx, tr.ID); err != nil {
 					return err
 				}
 				// Same reset contract, other table — see

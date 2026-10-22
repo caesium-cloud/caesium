@@ -30,6 +30,7 @@ const (
 	denyUndeclared  = "the namespace is not declared in this node's access policy"
 	denyNoScope     = "no secret scope is configured"
 	denyNotLoaded   = "the configured access policy is not loaded"
+	denyUnavailable = "the run owner's isolation context is unavailable"
 )
 
 // SecretDeniedError reports a reference its namespace's secret rules do not
@@ -63,7 +64,11 @@ type ScopedResolver struct {
 	undeclared bool
 	// pending: a policy file is configured but its holder was not installed
 	// when the scope was built; Allow resolves the holder on use.
-	pending     bool
+	pending bool
+	// unavailable: the scope's rules come from a run owner's isolation context
+	// that could not be read (unreachable owner, a context for another
+	// namespace); every reference is denied.
+	unavailable bool
 	kubeDefault string
 	// pin, when set, is the Kubernetes namespace relative secret://k8s
 	// references read in for this scope ("" = the resolver's own default),
@@ -173,6 +178,59 @@ func forProcess(inner Resolver, namespace string, holder *policy.Holder, fileCon
 		}
 	}
 	return forNamespace(inner, namespace, holder, kubeDefault, pin)
+}
+
+// IsolationRules is the secret part of a run owner's isolation context
+// (identity-and-access design §10.1): the namespace's allow rules exactly as the
+// owner's policy states them (nil allows all, an empty list denies all), the
+// Kubernetes namespace a relative k8s/<secret> rule means there, and whether a
+// file-backed owner policy leaves the namespace undeclared (deny all).
+type IsolationRules struct {
+	Namespace         string
+	Rules             *policy.SecretRules
+	RuleKubeNamespace string
+	Undeclared        bool
+}
+
+// ForIsolation scopes inner to a dispatched task's namespace with rules the run
+// owner sent: this process's access policy is never read, so a worker serving
+// no policy file, or a stale one, enforces exactly the owner's rules.
+// readKubeNamespace is the Kubernetes namespace relative secret://k8s
+// references read in for the whole execution (the owner's mapping, else the
+// owner's default), so neither the pod nor the secret object depends on the
+// worker's environment.
+//
+// With current == nil the scope enforces initial. Otherwise every check (each
+// Allow, resolution and verification, as with ForNamespace) asks current for
+// the owner's rules as they are now, so a rule the owner revokes applies to the
+// next operation; an error from current, or rules for another namespace, deny
+// every reference (fail closed).
+func ForIsolation(inner Resolver, namespace, readKubeNamespace string, initial IsolationRules, current func() (IsolationRules, error)) *ScopedResolver {
+	namespace = models.NamespaceOrDefault(namespace)
+	pinned := withKubernetesNamespace(inner, readKubeNamespace)
+	build := func(r IsolationRules) *ScopedResolver {
+		switch {
+		case models.NamespaceOrDefault(r.Namespace) != namespace:
+			return &ScopedResolver{inner: pinned, namespace: namespace, unavailable: true}
+		case r.Undeclared:
+			return &ScopedResolver{inner: pinned, namespace: namespace, undeclared: true}
+		}
+		return NewScopedResolver(pinned, namespace, r.Rules, r.RuleKubeNamespace)
+	}
+	if current == nil {
+		return build(initial)
+	}
+	// Every operation rebuilds from the owner's current rules, so the scope
+	// itself never claims to allow all: a caller that skips checks for an
+	// allow-all scope (AllowsAll) must still consult the owner, who may have
+	// added rules since the dispatch, or be unreachable.
+	return &ScopedResolver{inner: pinned, namespace: namespace, reload: func() *ScopedResolver {
+		r, err := current()
+		if err != nil {
+			return &ScopedResolver{inner: pinned, namespace: namespace, unavailable: true}
+		}
+		return build(r)
+	}}
 }
 
 // ServerPolicy returns the access policy this server process enforces for work
@@ -434,6 +492,9 @@ func (s *ScopedResolver) snapshot() *ScopedResolver {
 
 // allow is Allow on a snapshot.
 func (s *ScopedResolver) allow(ref string) error {
+	if s.unavailable {
+		return s.deny(s.redact(ref), denyUnavailable)
+	}
 	if s.allowAll {
 		return nil
 	}

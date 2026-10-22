@@ -875,6 +875,23 @@ integration-up-owner-memory: build-stress build-test
         -e CAESIUM_CANCEL_RECONCILE_INTERVAL=2s \
         {{ local_image_ref }}:{{ tag }}-test start
 
+# Isolation-context lane (identity-and-access C2): a three-node distributed
+# cluster on its own Docker network — an owner serving the policy fixture whose
+# worker withdraws the capability, a capable worker serving NO policy file, and
+# a worker with CAESIUM_WORKER_ISOLATION_V1_DISABLED=true — so an isolated task
+# can only land on the capable worker, under the owner's rules. One scenario,
+# TestDistributedIsolationContextReachesCapableWorker; it skips on every other
+# lane. See scripts/integration-test-isolation.sh.
+integration-test-isolation: integration-runner build-test
+    @CONTAINER_CLI={{ container_cli }} \
+    PLATFORM={{ platform }} \
+    TEST_IMAGE={{ local_image_ref }}:{{ tag }}-test \
+    RUNNER_IMAGE={{ integration_runner_image }} \
+    SOCK={{ sock }} \
+    REPO_DIR={{ repo_dir }} \
+    BLD_DIR={{ bld_dir }} \
+    bash scripts/integration-test-isolation.sh
+
 # The infra lane runs its own server so it can coexist with the default lane,
 # and it builds the reagent images the TestInfra scenarios mount. Those
 # scenarios skip everywhere else (see CAESIUM_INFRA_LANE in

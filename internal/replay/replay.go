@@ -1328,6 +1328,9 @@ func (c *Constructor) materialize(ctx context.Context, baseline models.JobRun, p
 		if err != nil {
 			return uuid.Nil, err
 		}
+		// Only a worker able to honour the namespace's isolation context may
+		// pull the row (run.IsolationSelectorKey).
+		record.NodeSelector = run.WithIsolationSelector(record.NodeSelector, namespace)
 		if plan.reexecute {
 			allCached = false
 		} else if plan.cacheHit && !run.IsSuccessfulTaskResult(plan.source.result) {

@@ -57,6 +57,10 @@ type runtimeExecutor struct {
 	// nil in production → defaults to dispatch.PostComplete; tests inject a fake.
 	completePost   completePoster
 	secretResolver secret.Resolver
+	// isolationFetch reads the run owner's current isolation context for a
+	// dispatched task's secret re-checks. nil in production → defaults to
+	// dispatch.FetchIsolation; tests inject a fake owner.
+	isolationFetch func(ctx context.Context, ownerBaseURL, token string, runID uuid.UUID) (*jobdefruntime.IsolationContext, error)
 	// imageResolver is the digest resolver pinDigests uses. Nil falls back to
 	// imagecheck.Default(); tests inject a stub so Create can be asserted
 	// against a known digest without a registry.
@@ -265,7 +269,11 @@ func (e *runtimeExecutor) Execute(ctx context.Context, taskRun *models.TaskRun) 
 	// in, and the published result all come from this one policy revision. A
 	// Kubernetes task whose target cannot be known fails as a configuration
 	// failure, never retried.
-	kubeMapping, mappingErr := jobdefruntime.KubernetesMapping(runNamespace, taskRun.Engine, false)
+	//
+	// A task dispatched with its owner's isolation context reads the mapping
+	// from that context, never from this node's policy (§10.1); a context
+	// resolved for another namespace is refused.
+	kubeMapping, mappingErr := e.kubernetesMapping(ctx, runNamespace, taskRun.Engine)
 	if mappingErr != nil {
 		log.Error("worker task kubernetes target refused", "task_id", taskRun.TaskID, "run_id", taskRun.JobRunID, "namespace", runNamespace, "error", mappingErr)
 		e.reportInputFailure(ctx, sink, taskRun, mappingErr, timeouts)
@@ -280,7 +288,7 @@ func (e *runtimeExecutor) Execute(ctx context.Context, taskRun *models.TaskRun) 
 	// the namespace no longer allows is never served from cache (and again
 	// right before the lookup). A denial is a configuration failure: reported
 	// once, never retried.
-	if e.secretsDenied(ctx, sink, taskRun, runNamespace, kubeMapping, atomSpec, timeouts) {
+	if e.secretsDenied(ctx, sink, taskRun, runNamespace, kubeMapping, atomSpec, timeouts, false) {
 		return
 	}
 
@@ -471,7 +479,7 @@ func (e *runtimeExecutor) Execute(ctx context.Context, taskRun *models.TaskRun) 
 			// Recheck with a fresh scope right before the lookup: input
 			// acquisition and digest resolution above can block, and a rule
 			// revoked meanwhile must not let the cached result through.
-			if e.secretsDenied(ctx, sink, taskRun, runNamespace, kubeMapping, atomSpec, timeouts) {
+			if e.secretsDenied(ctx, sink, taskRun, runNamespace, kubeMapping, atomSpec, timeouts, true) {
 				return
 			}
 			entry, found, getErr := cacheStore.Get(cacheHash)
@@ -690,17 +698,90 @@ func (e *runtimeExecutor) Execute(ctx context.Context, taskRun *models.TaskRun) 
 // reportInputFailure refuses terminal writes when acquisition outlived its
 // ownership or absolute run window. The owner remains authoritative for both.
 // secretsDenied runs the namespace secret allow-check over every reference
-// in spec with a scope read from this node's policy now, and reports a denial
-// as a terminal input failure (true). It runs before the cache lookup, so a
-// reference the namespace no longer allows is never served from cache.
-func (e *runtimeExecutor) secretsDenied(ctx context.Context, sink CompletionSink, taskRun *models.TaskRun, runNamespace string, kubeMapping atom.KubeTarget, spec container.Spec, timeouts executionTimeouts) bool {
-	err := jobdefruntime.CheckContainerSpecSecretsAllowed(secret.ForNamespaceTarget(e.secretResolver, runNamespace, kubeMapping.Namespace), spec)
+// in spec with a scope read from this node's policy now — or, for a task
+// dispatched with its owner's isolation context, from that context (recheck:
+// from the owner's current rules) — and reports a denial as a terminal input
+// failure (true). It runs before the cache lookup, so a reference the
+// namespace no longer allows is never served from cache.
+func (e *runtimeExecutor) secretsDenied(ctx context.Context, sink CompletionSink, taskRun *models.TaskRun, runNamespace string, kubeMapping atom.KubeTarget, spec container.Spec, timeouts executionTimeouts, recheck bool) bool {
+	err := jobdefruntime.CheckContainerSpecSecretsAllowed(e.secretScope(ctx, taskRun, runNamespace, kubeMapping, recheck), spec)
 	if err == nil {
 		return false
 	}
 	log.Error("worker task secret reference denied", "task_id", taskRun.TaskID, "run_id", taskRun.JobRunID, "namespace", runNamespace, "error", err)
 	e.reportInputFailure(ctx, sink, taskRun, err, timeouts)
 	return true
+}
+
+// errIsolationNamespace is matched by a refusal to run a dispatched task whose
+// isolation context was resolved for a namespace other than its run's. The
+// message carries secret.DeniedMarker so the failure is classified config.
+var errIsolationNamespace = errors.New("isolation context " + secret.DeniedMarker + " of the run")
+
+// dispatchedIsolation returns the owner's isolation context for a task
+// dispatched with one (nil otherwise: a pulled task, or an owner serving no
+// policy file or predating the context).
+func dispatchedIsolation(ctx context.Context) (*jobdefruntime.IsolationContext, dispatchMeta) {
+	meta, ok := dispatchMetaFrom(ctx)
+	if !ok {
+		return nil, dispatchMeta{}
+	}
+	return meta.Isolation, meta
+}
+
+// kubernetesMapping is the run namespace's Kubernetes mapping for this
+// execution: from the owner's isolation context when the task carries one,
+// else from this node's policy (jobdefruntime.KubernetesMapping).
+func (e *runtimeExecutor) kubernetesMapping(ctx context.Context, runNamespace string, engine models.AtomEngine) (atom.KubeTarget, error) {
+	isolation, _ := dispatchedIsolation(ctx)
+	if isolation == nil {
+		return jobdefruntime.KubernetesMapping(runNamespace, engine, false)
+	}
+	if models.NamespaceOrDefault(isolation.Namespace) != models.NamespaceOrDefault(runNamespace) {
+		return atom.KubeTarget{}, fmt.Errorf("%w %q: resolved for namespace %q", errIsolationNamespace, runNamespace, isolation.Namespace)
+	}
+	return isolation.KubernetesMapping(engine)
+}
+
+// podTarget is the target an engine request carries: with the owner's
+// isolation context, an unmapped Kubernetes pod runs in the owner's default
+// namespace rather than this worker's.
+func (e *runtimeExecutor) podTarget(ctx context.Context, engine models.AtomEngine, mapping atom.KubeTarget) atom.KubeTarget {
+	if isolation, _ := dispatchedIsolation(ctx); isolation != nil {
+		return isolation.PodTarget(engine, mapping)
+	}
+	return jobdefruntime.PodTarget(engine, mapping)
+}
+
+// secretScope scopes the secret resolver to the run namespace. A pulled task
+// (or one from an owner that sent no context) reads this node's policy at every
+// check. A task dispatched with its owner's isolation context never does: the
+// first check uses the dispatched rules, and every re-check (consultOwner —
+// right before the cache lookup, resolution, replay verification) asks the
+// owner for its current rules, so a revocation since the dispatch applies; an
+// owner that cannot be asked denies.
+func (e *runtimeExecutor) secretScope(ctx context.Context, taskRun *models.TaskRun, runNamespace string, kubeMapping atom.KubeTarget, consultOwner bool) *secret.ScopedResolver {
+	isolation, meta := dispatchedIsolation(ctx)
+	if isolation == nil {
+		return secret.ForNamespaceTarget(e.secretResolver, runNamespace, kubeMapping.Namespace)
+	}
+	var current func() (secret.IsolationRules, error)
+	if consultOwner {
+		fetch := e.isolationFetch
+		if fetch == nil {
+			fetch = dispatch.FetchIsolation
+		}
+		current = func() (secret.IsolationRules, error) {
+			fresh, err := fetch(ctx, meta.OwnerBaseURL, meta.Token, taskRun.JobRunID)
+			if err != nil {
+				log.Warn("worker task cannot read its owner's isolation context; denying its secret references",
+					"task_id", taskRun.TaskID, "run_id", taskRun.JobRunID, "owner", meta.OwnerBaseURL, "error", err)
+				return secret.IsolationRules{}, err
+			}
+			return fresh.SecretRules(), nil
+		}
+	}
+	return secret.ForIsolation(e.secretResolver, runNamespace, isolation.SecretReadNamespace, isolation.SecretRules(), current)
 }
 
 func (e *runtimeExecutor) reportInputFailure(ctx context.Context, sink CompletionSink, taskRun *models.TaskRun, failure error, timeouts executionTimeouts) {
@@ -955,9 +1036,10 @@ func (e *runtimeExecutor) executeTask(ctx context.Context, taskRun *models.TaskR
 	}
 
 	// Resolution and replay identity verification each read the namespace's
-	// secret rules afresh: a policy reload since the before-cache check — or
+	// secret rules afresh (from the owner, for a dispatched task with its
+	// isolation context): a policy reload since the before-cache check — or
 	// during the resolution itself — applies to the next operation.
-	secretScope := secret.ForNamespaceTarget(e.secretResolver, runNamespace, kubeMapping.Namespace)
+	secretScope := e.secretScope(ctx, taskRun, runNamespace, kubeMapping, true)
 	spec, secretIdentities, err := jobdefruntime.ResolveContainerSpecSecretsWithIdentities(taskCtx, secretScope.Resolver(), atomSpec)
 	if err != nil {
 		return nil, err
@@ -1012,7 +1094,7 @@ func (e *runtimeExecutor) executeTask(ctx context.Context, taskRun *models.TaskR
 		return nil, err
 	}
 
-	podTarget := jobdefruntime.PodTarget(taskRun.Engine, kubeMapping)
+	podTarget := e.podTarget(ctx, taskRun.Engine, kubeMapping)
 	a, err := engine.Create(&atom.EngineCreateRequest{
 		Name:    atomName,
 		Image:   imagecheck.PinReference(taskRun.Image, resolvedImageDigest),

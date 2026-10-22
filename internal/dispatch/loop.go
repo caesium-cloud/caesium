@@ -21,6 +21,7 @@ package dispatch
 
 import (
 	"context"
+	"errors"
 	"net"
 	"net/url"
 	"strconv"
@@ -215,6 +216,10 @@ type DispatchLoop struct {
 	// interval is the whole gate.
 	reclaimMu   sync.Mutex
 	lastReclaim map[uuid.UUID]time.Time
+
+	// iso holds the isolation-context bookkeeping (isolation.go): per-run
+	// namespaces, peer capability probes and rate-limited wait warnings.
+	iso *isolationState
 }
 
 // ownerReclaimInterval is the floor between expired-claim sweeps for one run in
@@ -285,6 +290,7 @@ func NewDispatchLoop(cfg DispatchLoopConfig) *DispatchLoop {
 		capacityBackoff:     make(map[uuid.UUID]map[uuid.UUID]*capacityState),
 		capacityBackoffBase: capacityBackoffBase,
 		capacityBackoffMax:  capacityBackoffMax,
+		iso:                 newIsolationState(),
 	}
 	// Reuse the same nodeAddr→baseURL logic the peer list uses so the owner's
 	// own base URL is built identically (and honors the PeerBaseURL test hook).
@@ -509,6 +515,17 @@ type dispatchCandidate struct {
 }
 
 func (l *DispatchLoop) dispatchCandidates(ctx context.Context, runID uuid.UUID, generation int64, candidates []dispatchCandidate, peers []peer) {
+	// The run's isolation context, resolved once for this tick's dispatches
+	// from one policy revision (nil: this owner serves no policy file). A run
+	// whose context cannot be resolved yet waits.
+	isolation, runQuarantined, ok := l.runIsolationContext(ctx, runID)
+	if !ok {
+		return
+	}
+	isolated := !isolation.Default()
+	if isolated {
+		l.probeCapabilities(ctx, peers)
+	}
 	const maxConcurrent = 16
 	sem := make(chan struct{}, min(len(candidates), maxConcurrent))
 	var wg sync.WaitGroup
@@ -518,7 +535,32 @@ func (l *DispatchLoop) dispatchCandidates(ctx context.Context, runID uuid.UUID, 
 		}
 		idx := l.counter.Add(1) - 1
 		p := peers[idx%uint64(len(peers))]
-		req := DispatchRequest{RunID: runID, TaskID: candidate.taskID, TaskRunID: candidate.taskRunID, OwnerGeneration: generation, Attempt: candidate.attempt, WorkerNode: p.nodeID, OwnerBaseURL: l.ownerBaseURL, Deadline: time.Now().UTC().Add(l.cfg.Deadline)}
+		workerNode := p.nodeID
+		if isolated {
+			// Never dispatch an isolated task to a peer that does not
+			// advertise isolation_v1: take the first capable peer from the
+			// round-robin position, counting each one that answered without
+			// it; with none, the task waits for the next tick.
+			quarantined := candidate.quarantine || runQuarantined
+			found := false
+			for k := range uint64(len(peers)) {
+				next := peers[(idx+k)%uint64(len(peers))]
+				capability := l.peerCapabilityOf(next.nodeID)
+				if capability.isolation {
+					p, found = next, true
+					break
+				}
+				if capability.answered && !quarantined {
+					metrics.DispatchIncompatibleWorkerTotal.Inc()
+				}
+			}
+			if !found {
+				l.warnNoCapablePeer(runID, candidate.executionRef, isolation.Namespace)
+				continue
+			}
+			workerNode = IsolationWorkerNode(p.nodeID)
+		}
+		req := DispatchRequest{RunID: runID, TaskID: candidate.taskID, TaskRunID: candidate.taskRunID, OwnerGeneration: generation, Attempt: candidate.attempt, WorkerNode: workerNode, OwnerBaseURL: l.ownerBaseURL, Deadline: time.Now().UTC().Add(l.cfg.Deadline), Isolation: isolation}
 		wg.Add(1)
 		sem <- struct{}{}
 		go func(p peer, req DispatchRequest, candidate dispatchCandidate) {
@@ -600,6 +642,8 @@ func (l *DispatchLoop) forgetUnownedRuns(owned map[uuid.UUID]int64) {
 		}
 	}
 	l.rateLimitDelayMu.Unlock()
+
+	l.forgetIsolation(owned)
 }
 
 // acquireRateLimit resolves and consumes the task's declared rate-limit budget.
@@ -826,6 +870,14 @@ func (l *DispatchLoop) postOne(ctx context.Context, runID uuid.UUID, p peer, req
 
 	dispatchURL := p.baseURL + "/internal/dispatch"
 	accepted, reason, postErr := PostDispatch(ctx, dispatchURL, l.cfg.Token, req)
+	if errors.Is(postErr, ErrDispatchTooLarge) {
+		// Nothing was sent and the peer is fine; the bound on a valid policy
+		// file makes this unreachable, so it is loud rather than retried
+		// quietly.
+		log.Error("dispatch loop: dispatch envelope exceeds the internal size limit; task held",
+			"run_id", runID, "task_id", req.TaskID, "task_run_id", req.TaskRunID, "limit", MaxDispatchBodyBytes)
+		return
+	}
 	if postErr != nil {
 		if ctx.Err() != nil {
 			return
@@ -854,6 +906,11 @@ func (l *DispatchLoop) postOne(ctx context.Context, runID uuid.UUID, p peer, req
 		// indistinguishable on the dashboard — and made "how much is THIS
 		// workload being refused for capacity" unanswerable.
 		label := rejectionLabel(reason)
+		if reason == ReasonWrongWorker && strings.HasPrefix(req.WorkerNode, isolationWorkerNodePrefix) {
+			// The peer refused an isolated task: it is older than the
+			// isolation context or withdrew the capability. Re-probe it.
+			l.forgetPeerCapability(p.nodeID)
+		}
 		// Only a capacity rejection is backed off.  Every other rejection says
 		// this dispatch was wrong (wrong worker, claim lost, ambiguous identity),
 		// and those are answered by retrying immediately — the round-robin picks

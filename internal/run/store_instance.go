@@ -78,6 +78,9 @@ func (s *Store) RetryTaskInstance(runID, taskRunID uuid.UUID, attempt int) error
 				// would resurrect a terminal row.
 				return ErrTaskInstanceNotRetryable
 			}
+			if err := stampIsolationOnResetTx(tx, taskRunID); err != nil {
+				return err
+			}
 			// Same reset contract, other table: the previous attempt's dataset
 			// metrics must go with its columns, or the retried row carries two
 			// attempts' samples into one baseline.

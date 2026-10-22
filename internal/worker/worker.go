@@ -10,6 +10,7 @@ import (
 	"github.com/caesium-cloud/caesium/internal/dispatch"
 	"github.com/caesium-cloud/caesium/internal/metrics"
 	"github.com/caesium-cloud/caesium/internal/models"
+	"github.com/caesium-cloud/caesium/pkg/env"
 	"github.com/caesium-cloud/caesium/pkg/log"
 	"github.com/google/uuid"
 )
@@ -242,6 +243,24 @@ func (w *Worker) WithInboundDispatch(completionToken string) *Worker {
 // both answer true and the message is unchanged.
 var ErrInboundFull = dispatch.ErrNoCapacity
 
+// Capabilities implements dispatch.CapabilityAdvertiser: this worker executes
+// a dispatched task under the isolation context its owner carries
+// (identity-and-access §10.1), so it advertises isolation_v1 unless
+// CAESIUM_WORKER_ISOLATION_V1_DISABLED=true withdraws it. Withdrawing can only narrow
+// where isolated tasks run: owners skip this worker for them and its claimer
+// never pulls one.
+func (w *Worker) Capabilities() []string {
+	if !isolationCapable() {
+		return nil
+	}
+	return []string{dispatch.CapabilityIsolationV1}
+}
+
+// isolationCapable reports whether this process advertises isolation_v1.
+func isolationCapable() bool {
+	return !env.Variables().WorkerIsolationV1Disabled
+}
+
 // ErrWorkerNotAccepting is returned by SubmitDispatched when the worker is not
 // configured to accept dispatched tasks (WithInboundDispatch was never called).
 var ErrWorkerNotAccepting = errors.New("worker: not accepting dispatched tasks")
@@ -279,6 +298,7 @@ func (w *Worker) SubmitDispatched(d dispatch.InboundDispatch) error {
 		WorkerNode:      d.WorkerNode,
 		OwnerGeneration: d.OwnerGeneration,
 		Attempt:         d.Attempt,
+		Isolation:       d.Isolation,
 	}
 	if !w.pool.TryAcquire() {
 		return ErrInboundFull

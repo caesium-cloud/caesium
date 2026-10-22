@@ -18,7 +18,7 @@ import (
 //   - no credentials: 401;
 //   - a namespace-confined key and a job-scoped key: 403 (cluster route);
 //   - a cluster viewer: 200 with the declared set. The agent lane mounts
-//     two-namespaces.yaml (default, marketing, finance); the coverage auth
+//     two-namespaces.yaml (default, marketing, finance, isolated); the coverage auth
 //     server mounts no policy file and declares `default` only.
 func (s *IntegrationTestSuite) TestAuthNamespacesRoute() {
 	s.requireAuthLane()
@@ -73,7 +73,7 @@ func (s *IntegrationTestSuite) TestAuthNamespacesRoute() {
 	}
 
 	if strings.TrimSpace(os.Getenv(authPolicyPathEnv)) != "" {
-		s.Equal([]string{"default", "finance", "marketing"}, names)
+		s.Equal([]string{"default", "finance", "isolated", "marketing"}, names)
 		s.NotEmpty(view.Revision, "a file-backed policy reports its revision")
 		for _, ns := range view.Namespaces {
 			if ns.Name == "marketing" {
