@@ -1,6 +1,9 @@
 package run
 
 import (
+	"context"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -83,6 +86,35 @@ func TestRetryRestampsRowsUnderTheCurrentPolicy(t *testing.T) {
 	require.Equal(t, string(TaskStatusPending), row.Status)
 	_, want := NamespaceIsolation("later")
 	require.Equal(t, want, row.NodeSelector[IsolationSelectorKey])
+
+	// The row fails again, a reload removes the namespace's rules, and the
+	// retry drops the stale mark: a worker serving the new file pulls it.
+	require.NoError(t, db.Model(&models.TaskRun{}).Where("id = ?", row.ID).Update("status", string(TaskStatusFailed)).Error)
+	require.NoError(t, db.Model(&models.JobRun{}).Where("id = ?", runID).Updates(map[string]any{"status": string(StatusFailed), "completed_at": time.Now().UTC()}).Error)
+	useAccessPolicy(t, "apiVersion: v1\nkind: AccessPolicy\nnamespaces:\n  later: {}\n")
+	_, err = store.RetryFromFailure(runID)
+	require.NoError(t, err)
+	require.NoError(t, db.First(&row, "id = ?", row.ID).Error)
+	require.Equal(t, string(TaskStatusPending), row.Status)
+	require.NotContains(t, row.NodeSelector, IsolationSelectorKey)
+}
+
+// TestWithIsolationSelectorDropsAMarkTheFileNoLongerAsksFor: a selector copied
+// from an earlier row (a replay's source) keeps the step's own entries, loses
+// a stale isolation mark under a file that leaves the namespace unisolated,
+// is rebound under one that isolates it, and is kept as-is by a node serving
+// no file (it cannot judge the mark).
+func TestWithIsolationSelectorDropsAMarkTheFileNoLongerAsksFor(t *testing.T) {
+	copied := datatypes.JSONMap{"zone": "a", IsolationSelectorKey: "v1-stale"}
+	useAccessPolicy(t, isolationRunPolicy)
+	require.Equal(t, datatypes.JSONMap{"zone": "a"}, WithIsolationSelector(copied, "finance"))
+	require.Equal(t, datatypes.JSONMap{"zone": "a"}, WithIsolationSelector(copied, "default"))
+	_, want := NamespaceIsolation("marketing")
+	require.Equal(t, datatypes.JSONMap{"zone": "a", IsolationSelectorKey: want}, WithIsolationSelector(copied, "marketing"))
+	require.Equal(t, "v1-stale", copied[IsolationSelectorKey], "the source selector is never mutated")
+
+	policy.SetProcessHolder(nil)
+	require.Equal(t, copied, WithIsolationSelector(copied, "finance"))
 }
 
 // TestRegisteredRowsOfIsolatedNamespacesAreMarked: a row registered in a
@@ -149,4 +181,106 @@ func TestRegisteredRowsOfIsolatedNamespacesAreMarked(t *testing.T) {
 	require.NoError(t, db.First(&stamped, "id = ?", row.ID).Error)
 	require.Equal(t, "v1-r2", stamped.NodeSelector[IsolationSelectorKey])
 	require.Equal(t, "a", stamped.NodeSelector["zone"])
+}
+
+// TestIsolationFenceMarksRowsWhenAReloadIsolatesTheirNamespace: rows
+// registered while their namespace had no isolation settings are marked as
+// soon as a reload gives it some, by the fence every policy-serving node runs
+// (no run owner involved), restamped when the settings change again, and
+// unmarked when a reload leaves the namespace unisolated. Finished rows and
+// unmarked rows of unisolated namespaces are untouched.
+func TestIsolationFenceMarksRowsWhenAReloadIsolatesTheirNamespace(t *testing.T) {
+	db := testutil.OpenTestDB(t)
+	t.Cleanup(func() { testutil.CloseDB(db) })
+	store := NewStore(db)
+	path := filepath.Join(t.TempDir(), "policy.yaml")
+	write := func(body string) { require.NoError(t, os.WriteFile(path, []byte(body), 0o600)) }
+	write("apiVersion: v1\nkind: AccessPolicy\nnamespaces:\n  later: {}\n  other: {}\n")
+	holder, err := policy.LoadFile(t.Context(), policy.HolderOptions{Path: path})
+	require.NoError(t, err)
+	previous := policy.ProcessHolder()
+	t.Cleanup(func() { policy.SetProcessHolder(previous) })
+	policy.SetProcessHolder(holder)
+
+	atom := &models.Atom{ID: uuid.New(), Engine: models.AtomEngineDocker, Image: "alpine:3.23", Command: `["true"]`}
+	require.NoError(t, db.Create(atom).Error)
+	register := func(namespace string) models.TaskRun {
+		job := createNamespacedJob(t, db, "fence-"+namespace+"-"+uuid.NewString()[:6], namespace, nil)
+		runID := seedNamespacedRun(t, db, job.ID, namespace, StatusRunning, nil)
+		task := &models.Task{ID: uuid.New(), JobID: job.ID, AtomID: atom.ID, Name: "step", Type: "task", NodeSelector: datatypes.JSONMap{"zone": "a"}}
+		require.NoError(t, db.Create(task).Error)
+		require.NoError(t, store.RegisterTasks(runID, []RegisterTaskInput{{Task: task, Atom: atom}}))
+		var row models.TaskRun
+		require.NoError(t, db.First(&row, "job_run_id = ?", runID).Error)
+		require.NotContains(t, row.NodeSelector, IsolationSelectorKey)
+		return row
+	}
+	pending := register("later")
+	running := register("later")
+	require.NoError(t, db.Model(&models.TaskRun{}).Where("id = ?", running.ID).Updates(map[string]any{"status": string(TaskStatusRunning), "claimed_by": "node-a"}).Error)
+	finished := register("later")
+	require.NoError(t, db.Model(&models.TaskRun{}).Where("id = ?", finished.ID).Update("status", string(TaskStatusSucceeded)).Error)
+	unisolated := register("other")
+
+	fence := NewIsolationFence(store, holder)
+	holder.SetObserver(fence.Observe)
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan struct{})
+	go func() { fence.Run(ctx); close(done) }()
+	t.Cleanup(func() { cancel(); <-done })
+
+	selectorOf := func(id uuid.UUID) datatypes.JSONMap {
+		var row models.TaskRun
+		require.NoError(t, db.First(&row, "id = ?", id).Error)
+		return row.NodeSelector
+	}
+	awaitStamp := func(want string) {
+		t.Helper()
+		require.Eventually(t, func() bool {
+			return selectorOf(pending.ID)[IsolationSelectorKey] == want && selectorOf(running.ID)[IsolationSelectorKey] == want
+		}, 10*time.Second, 20*time.Millisecond)
+	}
+
+	write("apiVersion: v1\nkind: AccessPolicy\nnamespaces:\n  later:\n    secrets: {allow: []}\n  other: {}\n")
+	result, err := holder.Reload(t.Context(), policy.ReloadRequest{Actor: "test"})
+	require.NoError(t, err)
+	require.True(t, result.Changed)
+	_, first := RevisionIsolation(holder.Current(), "later")
+	awaitStamp(first)
+	require.Equal(t, "a", selectorOf(pending.ID)["zone"], "the step's own selector is kept")
+
+	write("apiVersion: v1\nkind: AccessPolicy\nnamespaces:\n  later:\n    kubernetes: {namespace: caesium-later}\n  other: {}\n")
+	_, err = holder.Reload(t.Context(), policy.ReloadRequest{Actor: "test"})
+	require.NoError(t, err)
+	_, second := RevisionIsolation(holder.Current(), "later")
+	require.NotEqual(t, first, second)
+	awaitStamp(second)
+
+	require.Equal(t, datatypes.JSONMap{"zone": "a"}, selectorOf(finished.ID), "a finished row is left alone")
+	require.Equal(t, datatypes.JSONMap{"zone": "a"}, selectorOf(unisolated.ID), "an unisolated namespace's row is left alone")
+
+	// The sweep itself, synchronously: idempotent once the rows match.
+	n, err := store.FenceIsolation(t.Context(), holder.Current())
+	require.NoError(t, err)
+	require.Zero(t, n)
+
+	// A reload that leaves the namespace unisolated drops the marks again.
+	write("apiVersion: v1\nkind: AccessPolicy\nnamespaces:\n  later: {}\n  other: {}\n")
+	_, err = holder.Reload(t.Context(), policy.ReloadRequest{Actor: "test"})
+	require.NoError(t, err)
+	require.Eventually(t, func() bool {
+		_, pendingMarked := selectorOf(pending.ID)[IsolationSelectorKey]
+		_, runningMarked := selectorOf(running.ID)[IsolationSelectorKey]
+		return !pendingMarked && !runningMarked
+	}, 10*time.Second, 20*time.Millisecond)
+	require.Equal(t, datatypes.JSONMap{"zone": "a"}, selectorOf(pending.ID))
+
+	// A fence on a node without a policy file never sweeps.
+	quiet := make(chan struct{})
+	go func() { NewIsolationFence(store, nil).Run(t.Context()); close(quiet) }()
+	select {
+	case <-quiet:
+	case <-time.After(5 * time.Second):
+		t.Fatal("a fence without a policy file must return at once")
+	}
 }

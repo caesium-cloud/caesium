@@ -386,7 +386,7 @@ publish ← tag only, needs the full matrix and ci-ok
 | `unit-test-arm64` | ubuntu-26.04-arm | `builder-arm64` | 30 | `unit-test` only — no `reagents-test` on arm64 | none |
 | `ui-test` | ubuntu-26.04 | `changes` | 30 | Node 24 + cached npm downloads; one `npm ci`, lint + test + `build:ci` | none |
 | `integration` | ubuntu-26.04 | `images` | 45 (keycloak 20) | matrix: three Docker full-suite shards + agent-auth + keycloak (`run-integration` composite) | `integration-up` / `integration-up-agent` / `integration-up-keycloak` |
-| `integration-extra` | ubuntu-26.04 | `images`, `reagents` | 30–60 | matrix: distributed / owner-memory / infra / isolation (not required-to-merge) | matching `integration-up-*`; isolation starts its own three-node cluster (`scripts/integration-test-isolation.sh`) |
+| `integration-extra` | ubuntu-26.04 | `images`, `reagents` | 30–60 | matrix: distributed / owner-memory / infra / isolation (not required-to-merge) | matching `integration-up-*`; isolation starts its own four-node cluster (`scripts/integration-test-isolation.sh`) |
 | `integration-arm64` | ubuntu-26.04-arm | `images-arm64`, `reagents-arm64` | 45–60 | matrix: three Docker full-suite shards + infra (parallel with amd64) | matching `integration-up*` |
 | `ui-e2e` | ubuntu-26.04 | `[ui-test, images]` | 45 | host-installed Playwright process joined only to the server network namespace, reusing the `product-amd64` artifact | inline `docker run --name caesium-server` |
 | `ui-e2e-auth` | ubuntu-26.04 | `[ui-test, images]` | 45 | inline `docker run` | inline `docker run --name caesium-server-auth` |

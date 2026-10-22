@@ -80,6 +80,9 @@ const (
 	// ReasonTooLarge rejects an envelope over MaxDispatchBodyBytes. It is
 	// answered before anything is claimed, and never by truncating the body.
 	ReasonTooLarge = "too_large"
+	// ReasonNoIsolationPolicy refuses an isolation re-check on a node that
+	// serves no access policy file: it cannot vouch for any secret rule.
+	ReasonNoIsolationPolicy = "no_isolation_policy"
 )
 
 // CapabilityIsolationV1 is the capability a worker advertises in GET
@@ -1182,8 +1185,8 @@ type IsolationRequest struct {
 // secret references (before the cache lookup, before resolution, and for replay
 // verification) applies a rule the owner revoked since the dispatch. It is
 // guarded by the same bearer token (and, on the internal listener, mTLS) as
-// /internal/dispatch. 503 while the owner's configured policy is not loaded:
-// the worker denies.
+// /internal/dispatch. 503 while the owner's configured policy is not loaded,
+// and 409 when the owner serves no policy file at all: the worker denies.
 func (h *Handler) HandleIsolation(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -1209,9 +1212,18 @@ func (h *Handler) HandleIsolation(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusServiceUnavailable, ErrorResponse{Code: ReasonContention, Message: "run namespace unavailable"})
 		return
 	}
-	isolation, _, ready := jobdefruntime.ResolveIsolationContext(namespace)
+	isolation, carry, ready := jobdefruntime.ResolveIsolationContext(namespace)
 	if !ready {
 		writeJSON(w, http.StatusServiceUnavailable, ErrorResponse{Code: ReasonOwnerNotReady, Message: "access policy not loaded"})
+		return
+	}
+	if !carry {
+		// This node serves no policy file (an owner restarted without
+		// CAESIUM_AUTH_POLICY_FILE after it dispatched the task). Its empty
+		// context would read as "no rules" and allow every secret the task
+		// names; it cannot vouch for any rule, so the worker denies. Only a
+		// worker that received a policy-backed context ever asks.
+		writeJSON(w, http.StatusConflict, ErrorResponse{Code: ReasonNoIsolationPolicy, Message: "this node serves no access policy file"})
 		return
 	}
 	isolation.Namespace = namespace

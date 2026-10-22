@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -271,6 +272,9 @@ func (c *isolationCluster) peers() []string {
 			out = append(out, node)
 		}
 	}
+	// A stable order (capable peers are created last): a map-ordered list
+	// sometimes put the capable peer first, so nothing was skipped.
+	slices.Sort(out)
 	return out
 }
 
@@ -520,4 +524,18 @@ func TestHandleIsolation_AnswersTheOwnersCurrentRules(t *testing.T) {
 	policy.SetProcessHolder(nil)
 	_, err = FetchIsolation(context.Background(), server.URL, testToken, runID)
 	require.ErrorContains(t, err, "503", "an owner whose policy is not loaded cannot vouch for any rule")
+
+	// An owner restarted without its policy file (or serving environment
+	// settings only) has no rules to vouch for: its empty context would read
+	// as "unrestricted", so it refuses.
+	t.Setenv("CAESIUM_AUTH_POLICY_FILE", "")
+	require.NoError(t, env.Process())
+	policy.SetProcessHolder(nil)
+	_, err = FetchIsolation(context.Background(), server.URL, testToken, runID)
+	require.ErrorContains(t, err, "409", "a policyless owner never answers a re-check")
+	view := policy.EmptyPolicy()
+	view.Namespaces["marketing"] = policy.Namespace{}
+	policy.SetProcessHolder(policy.NewEnvHolder(view, "", nil))
+	_, err = FetchIsolation(context.Background(), server.URL, testToken, runID)
+	require.ErrorContains(t, err, "409")
 }

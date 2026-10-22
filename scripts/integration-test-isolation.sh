@@ -8,11 +8,17 @@
 #                      default-namespace tasks, never isolated ones);
 #   node B (capable)   serves NO policy file, advertises isolation_v1;
 #   node C (incapable) serves no policy file and withdraws the capability
-#                      (CAESIUM_WORKER_ISOLATION_V1_DISABLED=true).
+#                      (CAESIUM_WORKER_ISOLATION_V1_DISABLED=true);
+#   node D (pull-only) serves a WRITABLE copy of the fixture, runs no run
+#                      owner and no worker: a run started on it is claimed
+#                      through the pull lane, so only the isolation fence can
+#                      keep a row from workers after a reload isolates its
+#                      namespace.
 #
 # Because B has no policy file, a secret-rule allow or deny observed on B can
-# only have come from A's context. The runner drives A's API and asserts:
-# TestIntegrationTestSuite/TestDistributedIsolationContextReachesCapableWorker.
+# only have come from A's context. The runner drives A's (and D's) API and
+# asserts TestIntegrationTestSuite/TestDistributedIsolationContextReachesCapableWorker
+# and TestIntegrationTestSuite/TestDistributedIsolationReloadFencesPullLaneRows.
 #
 # Invoked by `just integration-test-isolation`; every input comes from the
 # environment so the recipe stays declarative.
@@ -25,10 +31,12 @@ subnet=172.31.251.0/24
 ip_a=172.31.251.10
 ip_b=172.31.251.11
 ip_c=172.31.251.12
+ip_d=172.31.251.13
 token=integration-isolation-internal-token-0123456789
-names=(caesium-iso-a caesium-iso-b caesium-iso-c)
+names=(caesium-iso-a caesium-iso-b caesium-iso-c caesium-iso-d)
 log="$REPO_DIR/.tmp/integration-test-isolation.log"
 cli_dir="$REPO_DIR/.tmp/caesium-cli"
+pull_policy_dir="$REPO_DIR/.tmp/isolation-pull-policy"
 
 cleanup() {
     for name in "${names[@]}"; do
@@ -54,9 +62,17 @@ cli_ctr=$("$CONTAINER_CLI" create --platform "$PLATFORM" "$TEST_IMAGE" true)
 "$CONTAINER_CLI" rm -f "$cli_ctr" >/dev/null
 chmod +x "$cli_dir/caesium"
 
+# Node D's policy: a copy the scenario rewrites and restores.
+rm -rf "$pull_policy_dir"
+mkdir -p "$pull_policy_dir"
+cp "$REPO_DIR/test/testdata/policy/two-namespaces.yaml" "$pull_policy_dir/policy.yaml"
+chmod 0777 "$pull_policy_dir"
+chmod 0666 "$pull_policy_dir/policy.yaml"
+
 "$CONTAINER_CLI" network create --subnet "$subnet" "$net" >/dev/null
 
-# start_node NAME IP [extra docker args...]
+# start_node NAME IP [extra docker args...]; OWNER_ENABLED=false starts a
+# node without a run owner.
 start_node() {
     local name=$1 ip=$2
     shift 2
@@ -72,7 +88,7 @@ start_node() {
         -e CAESIUM_DATABASE_STANDBYS=0 \
         -e CAESIUM_INTERNAL_WAKEUP_TOKEN="$token" \
         -e CAESIUM_INTERNAL_PORT=8443 \
-        -e CAESIUM_RUN_OWNER_ENABLED=true \
+        -e CAESIUM_RUN_OWNER_ENABLED="${OWNER_ENABLED:-true}" \
         -e CAESIUM_RUN_LEASE_TTL=30s \
         -e CAESIUM_RUN_OWNER_DISPATCH_INTERVAL=500ms \
         -e CAESIUM_RUN_OWNER_DISPATCH_DEADLINE=5m \
@@ -114,6 +130,13 @@ start_node caesium-iso-c "$ip_c" \
     -e MARKETING_IT_TOKEN=it-marketing-token \
     -e ISOLATION_IT_DENIED_TOKEN=it-denied-token
 wait_healthy "$ip_c" || { dump_logs; exit 1; }
+OWNER_ENABLED=false start_node caesium-iso-d "$ip_d" \
+    -e CAESIUM_DATABASE_NODES="$ip_a:9001" \
+    -e CAESIUM_WORKER_ENABLED=false \
+    -v "$pull_policy_dir":/etc/caesium/pull-policy \
+    -e CAESIUM_AUTH_POLICY_FILE=/etc/caesium/pull-policy/policy.yaml \
+    -e CAESIUM_AUTH_POLICY_RELOAD_INTERVAL=500ms
+wait_healthy "$ip_d" || { dump_logs; exit 1; }
 
 rm -f "$log"
 set +e
@@ -130,18 +153,22 @@ set +e
     -e CAESIUM_ISOLATION_CAPABLE_NODE="$ip_b:9001" \
     -e CAESIUM_ISOLATION_INCAPABLE_NODE="$ip_c:9001" \
     -e CAESIUM_ISOLATION_OWNER_NODE="$ip_a:9001" \
+    -e CAESIUM_ISOLATION_PULL_URL="http://$ip_d:8080" \
+    -e CAESIUM_ISOLATION_PULL_POLICY_PATH="$BLD_DIR/.tmp/isolation-pull-policy/policy.yaml" \
     -w "$BLD_DIR" \
     "$RUNNER_IMAGE" \
-    sh -c 'sh scripts/integration-test.sh -test.run "TestIntegrationTestSuite/TestDistributedIsolationContextReachesCapableWorker$"' 2>&1 | tee "$log"
+    sh -c 'sh scripts/integration-test.sh -test.run "TestIntegrationTestSuite/(TestDistributedIsolationContextReachesCapableWorker|TestDistributedIsolationReloadFencesPullLaneRows)$"' 2>&1 | tee "$log"
 rc=${PIPESTATUS[0]}
 set -e
 if [ "$rc" -ne 0 ]; then
     dump_logs
     exit "$rc"
 fi
-if ! grep -qE '^[[:space:]]*--- PASS: TestIntegrationTestSuite/TestDistributedIsolationContextReachesCapableWorker' "$log"; then
-    echo "isolation lane: the scenario did not PASS (skipped or absent)" >&2
-    dump_logs
-    exit 1
-fi
+for scenario in TestDistributedIsolationContextReachesCapableWorker TestDistributedIsolationReloadFencesPullLaneRows; do
+    if ! grep -qE "^[[:space:]]*--- PASS: TestIntegrationTestSuite/$scenario" "$log"; then
+        echo "isolation lane: $scenario did not PASS (skipped or absent)" >&2
+        dump_logs
+        exit 1
+    fi
+done
 echo "isolation lane passed"

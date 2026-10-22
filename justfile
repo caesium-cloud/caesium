@@ -875,12 +875,15 @@ integration-up-owner-memory: build-stress build-test
         -e CAESIUM_CANCEL_RECONCILE_INTERVAL=2s \
         {{ local_image_ref }}:{{ tag }}-test start
 
-# Isolation-context lane (identity-and-access C2): a three-node distributed
+# Isolation-context lane (identity-and-access C2): a four-node distributed
 # cluster on its own Docker network — an owner serving the policy fixture whose
-# worker withdraws the capability, a capable worker serving NO policy file, and
-# a worker with CAESIUM_WORKER_ISOLATION_V1_DISABLED=true — so an isolated task
-# can only land on the capable worker, under the owner's rules. One scenario,
-# TestDistributedIsolationContextReachesCapableWorker; it skips on every other
+# worker withdraws the capability, a capable worker serving NO policy file, a
+# worker with CAESIUM_WORKER_ISOLATION_V1_DISABLED=true, and a pull-only node
+# (no run owner, no worker) serving a writable policy copy — so an isolated
+# task can only land on the capable worker, under the owner's rules, and a
+# reload that isolates a namespace fences its pull-lane rows. Two scenarios,
+# TestDistributedIsolationContextReachesCapableWorker and
+# TestDistributedIsolationReloadFencesPullLaneRows; they skip on every other
 # lane. See scripts/integration-test-isolation.sh.
 integration-test-isolation: integration-runner build-test
     @CONTAINER_CLI={{ container_cli }} \

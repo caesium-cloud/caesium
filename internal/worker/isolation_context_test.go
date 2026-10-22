@@ -175,6 +175,55 @@ func TestDispatchedRecheckBeforeTheCacheConsultsTheOwner(t *testing.T) {
 	requireDispatchedDenial(t, rec, engine)
 }
 
+// TestDispatchedRecheckDeniesWhenTheOwnerLostItsPolicy: the task was
+// dispatched under the owner's policy-backed context, then the owner restarted
+// without CAESIUM_AUTH_POLICY_FILE before the re-check. Its real
+// /internal/isolation endpoint refuses (it cannot vouch for any rule), so the
+// re-check denies instead of reading an empty context as "no rules" and
+// serving the cached result.
+func TestDispatchedRecheckDeniesWhenTheOwnerLostItsPolicy(t *testing.T) {
+	t.Cleanup(func() { policy.SetProcessHolder(nil) })
+	const namespace = "c2-policy-lost"
+	f := seedWorkerSecretTask(t, namespace, models.Task{})
+	resolver := staticSecretResolver{"secret://env/C4_TOKEN": "resolved"}
+	installWorkerSecretPolicy(t, namespace, "env/C4_*")
+	f.execute(t, f.newAttempt(t, 1), resolver, NewLocalSink(f.store), &captureCreateEngine{})
+
+	const token = "c2-owner-token"
+	ownerServer := httptest.NewServer(http.HandlerFunc(dispatch.NewHandler(f.store, nil, "owner:9001", token).HandleIsolation))
+	t.Cleanup(ownerServer.Close)
+	viaOwner := func(runID uuid.UUID) *ownerRules {
+		return &ownerRules{current: func(int) (*jobdefruntime.IsolationContext, error) {
+			return dispatch.FetchIsolation(context.Background(), ownerServer.URL, token, runID)
+		}}
+	}
+	allowCtx := isolationFor(namespace, "env/C4_*")
+
+	// Control: the owner still serves its policy file, so the re-check passes
+	// and the attempt is a cache hit.
+	policy.SetProcessHolder(loadWorkerPolicyFile(t, "apiVersion: v1\nkind: AccessPolicy\nnamespaces:\n  "+namespace+":\n    secrets: {allow: [\"env/C4_*\"]}\n"))
+	taskRun := f.newAttempt(t, 1)
+	control := f.executeDispatched(t, taskRun, resolver, allowCtx, viaOwner(taskRun.JobRunID), &captureCreateEngine{})
+	require.Equal(t, string(run.TaskStatusCached), control.only(t).Status, control.only(t).Error)
+
+	// The owner lost its policy file: no holder, no file configured.
+	policy.SetProcessHolder(nil)
+	taskRun = f.newAttempt(t, 1)
+	owner := viaOwner(taskRun.JobRunID)
+	engine := &captureCreateEngine{}
+	rec := f.executeDispatched(t, taskRun, resolver, allowCtx, owner, engine)
+	req := requireDispatchedDenial(t, rec, engine)
+	require.Contains(t, req.Error, "isolation context is unavailable")
+	require.Equal(t, 1, owner.count(), "the re-check asked the owner and was refused")
+
+	// The same for an owner serving environment-derived settings only.
+	installWorkerSecretPolicy(t, namespace, "env/C4_*")
+	taskRun = f.newAttempt(t, 1)
+	engine = &captureCreateEngine{}
+	rec = f.executeDispatched(t, taskRun, resolver, allowCtx, viaOwner(taskRun.JobRunID), engine)
+	requireDispatchedDenial(t, rec, engine)
+}
+
 // TestDispatchedDenialAtResolutionIsTerminal: the owner revoking between the
 // before-cache checks and the attempt's resolution stops the attempt, and the
 // denial is terminal (the distributed form of

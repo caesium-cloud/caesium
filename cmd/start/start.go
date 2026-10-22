@@ -1268,10 +1268,22 @@ func initAuth(ctx context.Context, vars env.Environment, runAsync func(func())) 
 
 	// Reloads are audited in every auth mode; each node polls its own copy of
 	// the file. The poller starts only after the startup load succeeded.
-	policyHolder.SetObserver(auth.PolicyReloadAuditor(auditor))
+	// Every node serving the file also fences unfinished task rows under it
+	// (at startup and after each changed reload), so a reload that isolates
+	// a namespace keeps its existing rows from workers that cannot honour
+	// the isolation context, with or without run owners (design §10.1).
+	auditReload := auth.PolicyReloadAuditor(auditor)
+	fence := run.NewIsolationFence(run.Default(), policyHolder)
+	policyHolder.SetObserver(func(event policy.ReloadEvent) {
+		auditReload(event)
+		fence.Observe(event)
+	})
 	if policyHolder.FileBacked() {
 		runAsync(func() {
 			policyHolder.Run(ctx, vars.AuthPolicyReloadInterval)
+		})
+		runAsync(func() {
+			fence.Run(ctx)
 		})
 	}
 

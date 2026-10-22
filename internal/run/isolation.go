@@ -8,10 +8,12 @@ import (
 	"maps"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/caesium-cloud/caesium/internal/auth/policy"
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/caesium-cloud/caesium/pkg/env"
+	"github.com/caesium-cloud/caesium/pkg/log"
 	"github.com/google/uuid"
 	"gorm.io/datatypes"
 	"gorm.io/gorm"
@@ -99,17 +101,44 @@ func NamespaceIsolation(namespace string) (bool, string) {
 
 // WithIsolationSelector returns selector with the isolation entry added when
 // namespace requires isolation, and selector unchanged otherwise.
+//
+// A selector copied from an earlier row (a replay's source) may carry a mark
+// the current file no longer asks for: when this node serves a policy file
+// that leaves the namespace unisolated, the stale mark is dropped, or no
+// worker serving that file would ever pull the row. A node serving no file
+// cannot judge the mark and keeps it.
 func WithIsolationSelector(selector datatypes.JSONMap, namespace string) datatypes.JSONMap {
 	isolated, value := NamespaceIsolation(namespace)
-	if !isolated {
+	if !isolated && !isolationPolicyServed() {
 		return selector
+	}
+	if out, changed := reconcileIsolationSelector(selector, isolated, value); changed {
+		return out
+	}
+	return selector
+}
+
+// reconcileIsolationSelector returns selector with the isolation entry set to
+// value when isolated, and removed otherwise, and whether that changed it.
+// The caller decides whether its policy may judge the row at all.
+func reconcileIsolationSelector(selector datatypes.JSONMap, isolated bool, value string) (datatypes.JSONMap, bool) {
+	current, marked := selector[IsolationSelectorKey]
+	if isolated && marked && current == value {
+		return selector, false
+	}
+	if !isolated && !marked {
+		return selector, false
 	}
 	out := maps.Clone(selector)
 	if out == nil {
 		out = datatypes.JSONMap{}
 	}
-	out[IsolationSelectorKey] = value
-	return out
+	if isolated {
+		out[IsolationSelectorKey] = value
+	} else {
+		delete(out, IsolationSelectorKey)
+	}
+	return out, true
 }
 
 // RunIsolationInfo returns the run's persisted namespace and whether it is a
@@ -194,7 +223,9 @@ func isolationPolicyServed() bool {
 // returns to the schedulable pool. A row that was terminal when its owner last
 // stamped the run (a reload can isolate a namespace after it failed) would
 // otherwise come back pullable by a worker that cannot honour the namespace's
-// isolation context. Without a policy file it does nothing.
+// isolation context. A mark the current file no longer asks for (a reload
+// removed the namespace's mapping or rules) is dropped, or no worker serving
+// that file would pull the retried row. Without a policy file it does nothing.
 func stampIsolationOnResetTx(tx *gorm.DB, rowID uuid.UUID) error {
 	if !isolationPolicyServed() {
 		return nil
@@ -211,16 +242,119 @@ func stampIsolationOnResetTx(tx *gorm.DB, rowID uuid.UUID) error {
 		return err
 	}
 	isolated, value := NamespaceIsolation(row.Namespace)
-	if !isolated {
+	selector, changed := reconcileIsolationSelector(row.NodeSelector, isolated, value)
+	if !changed {
 		return nil
 	}
-	if current, ok := row.NodeSelector[IsolationSelectorKey]; ok && current == value {
-		return nil
-	}
-	selector := maps.Clone(row.NodeSelector)
-	if selector == nil {
-		selector = datatypes.JSONMap{}
-	}
-	selector[IsolationSelectorKey] = value
 	return tx.Model(&models.TaskRun{}).Where("id = ?", rowID).Update("node_selector", selector).Error
+}
+
+// FenceIsolation brings every unfinished row in line with rev: a row of a
+// namespace whose isolation context rev makes non-default gets the selector
+// value binding it to rev's settings for that namespace. A reload (or a
+// restart with a changed file) can isolate a namespace after its rows were
+// registered; without this, those rows would stay pullable by a worker that
+// cannot honour the context, and in a cluster without run owners no dispatch
+// loop would ever restamp them. A row of a namespace rev declares without
+// isolation settings loses a mark an earlier revision gave it, so a worker
+// serving rev can pull it again. It returns the number of rows changed.
+func (s *Store) FenceIsolation(ctx context.Context, rev *policy.Revision) (int, error) {
+	if rev == nil || rev.Policy == nil {
+		return 0, nil
+	}
+	var rows []struct {
+		ID           uuid.UUID         `gorm:"column:id"`
+		NodeSelector datatypes.JSONMap `gorm:"column:node_selector"`
+		Namespace    string            `gorm:"column:namespace"`
+	}
+	if err := s.db.WithContext(ctx).Table("task_runs").
+		Select("task_runs.id AS id, task_runs.node_selector AS node_selector, job_runs.namespace AS namespace").
+		Joins("JOIN job_runs ON job_runs.id = task_runs.job_run_id").
+		Where("task_runs.status IN ?", []string{string(TaskStatusPending), string(TaskStatusRunning)}).
+		Scan(&rows).Error; err != nil {
+		return 0, err
+	}
+	stamped := 0
+	for _, row := range rows {
+		isolated, value := RevisionIsolation(rev, row.Namespace)
+		selector, changed := reconcileIsolationSelector(row.NodeSelector, isolated, value)
+		if !changed {
+			continue
+		}
+		if err := s.db.WithContext(ctx).Model(&models.TaskRun{}).Where("id = ?", row.ID).Update("node_selector", selector).Error; err != nil {
+			return stamped, err
+		}
+		stamped++
+	}
+	return stamped, nil
+}
+
+// isolationFenceRetry is how long the fence waits before retrying a sweep
+// that failed (a database error); it keeps retrying until one succeeds.
+var isolationFenceRetry = 5 * time.Second
+
+// IsolationFence keeps unfinished rows fenced under this node's policy file:
+// it sweeps them (FenceIsolation) once at startup and again after every reload
+// that changed the file, on every node that serves one, whether or not run
+// owners are enabled. Owner dispatch loops restamp the runs they own as well;
+// the fence also covers rows no owner dispatches (a cluster without run
+// owners, or a run whose owner died).
+type IsolationFence struct {
+	store  *Store
+	holder *policy.Holder
+	wake   chan struct{}
+}
+
+// NewIsolationFence returns a fence over store's rows for holder's policy.
+func NewIsolationFence(store *Store, holder *policy.Holder) *IsolationFence {
+	return &IsolationFence{store: store, holder: holder, wake: make(chan struct{}, 1)}
+}
+
+// Observe is a policy reload observer: a reload that published a changed file
+// wakes the fence. It never blocks (the holder calls it under its writer
+// lock).
+func (f *IsolationFence) Observe(event policy.ReloadEvent) {
+	if f == nil || !event.OK || !event.Changed {
+		return
+	}
+	select {
+	case f.wake <- struct{}{}:
+	default:
+	}
+}
+
+// Run sweeps at once and after every wake until ctx is done; a failed sweep
+// is retried until one succeeds. Without a policy file it returns at once.
+func (f *IsolationFence) Run(ctx context.Context) {
+	if f == nil || f.store == nil || !f.holder.FileBacked() {
+		return
+	}
+	var retry <-chan time.Time
+	sweep := func() {
+		rev := f.holder.Current()
+		n, err := f.store.FenceIsolation(ctx, rev)
+		if err != nil {
+			retry = nil
+			if ctx.Err() == nil {
+				log.Warn("isolation fence: failed to mark unfinished tasks under the access policy; retrying", "revision", rev.Hash, "error", err)
+				retry = time.After(isolationFenceRetry)
+			}
+			return
+		}
+		retry = nil
+		if n > 0 {
+			log.Info("isolation fence: brought unfinished tasks in line with the access policy", "revision", rev.Hash, "count", n)
+		}
+	}
+	sweep()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-f.wake:
+			sweep()
+		case <-retry:
+			sweep()
+		}
+	}
 }

@@ -139,9 +139,16 @@ the `ClaimNext` pull lane never hands them to an older worker, one without a
 policy file, or one with the capability withdrawn, and a capable worker pulls
 one (recovery after an owner's lease lapses, or a cluster without run owners)
 only when its file gives the namespace the same isolation settings (an edit
-elsewhere in the file does not matter). An owner restamps the rows when its
-policy changes them; a row whose namespace settings changed while it had no
-owner waits for an operator to retry or cancel the run. A node serving no
+elsewhere in the file does not matter). Every node serving the file, with or
+without a run owner, restamps the unfinished rows of every run at startup and
+after each reload that changes the file, so a reload that isolates a namespace
+(or changes its settings) fences rows registered before it; an owner also
+restamps the rows of the runs it dispatches. When the file declares a namespace
+without a mapping or secret rules, the same sweep, a retry and a replay drop
+the mark from its rows so the pull lane can run them again (a node serving no
+file keeps a mark it cannot judge). The re-check endpoint answers only
+while the owner serves a policy file: an owner restarted without one refuses
+it (`409 no_isolation_policy`) and the worker denies. A node serving no
 policy file that takes over such a run (owner-memory lease takeover) holds it
 rather than dispatch it unisolated. A node with `CAESIUM_WORKER_ENABLED=false`
 does not renew the leases of the runs it owns (run-lease renewal runs on the
