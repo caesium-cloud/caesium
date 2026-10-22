@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/caesium-cloud/caesium/internal/authz"
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/google/uuid"
 	"gorm.io/gorm"
@@ -109,7 +110,7 @@ func Build(ctx context.Context, db *gorm.DB, runID uuid.UUID) (*Receipt, error) 
 		JobID:               run.JobID,
 		JobAlias:            job.Alias,
 		GitCommit:           gitCommit,
-		ManifestContentHash: manifestContentHash(conn, run.JobID, gitCommit),
+		ManifestContentHash: manifestContentHash(ctx, conn, run.JobID, gitCommit),
 		Tasks:               entries,
 	}
 	receipt.finalize()
@@ -207,10 +208,26 @@ func taskNames(conn *gorm.DB, taskRuns []models.TaskRun) (map[uuid.UUID]string, 
 // (e.g. a job applied before DAG versioning shipped) simply omits the manifest
 // term from the digest rather than failing the build — the per-task identity
 // hashes remain the primary attestation.
-func manifestContentHash(conn *gorm.DB, jobID uuid.UUID, gitCommit string) string {
+//
+// Under a history scope (authz.WithHistoryScope: a namespace-confined reader,
+// identity-and-access W7-ε) only snapshots written in a namespace the reader
+// may read are considered, and a legacy snapshot (no namespace, owner
+// unrecoverable) never is, as for topology history (B7). A job's snapshots
+// span every namespace it has lived in, and a snapshot is selected by commit:
+// one written in another namespace at the job's current commit (the commit
+// re-applied after a move, which reuses the newest row when the topology is
+// unchanged) would otherwise attest another owner's topology. Unrestricted
+// contexts keep the original queries, so their receipts never change.
+func manifestContentHash(ctx context.Context, conn *gorm.DB, jobID uuid.UUID, gitCommit string) string {
+	snapshots := func() *gorm.DB {
+		if !authz.Restricted(ctx) {
+			return conn
+		}
+		return authz.NamespaceFilter(conn, "namespace").Where("namespace IS NOT NULL AND namespace <> ''")
+	}
 	if gitCommit != "" {
 		var snap models.DagSnapshot
-		err := conn.Where("job_id = ? AND git_commit = ?", jobID, gitCommit).
+		err := snapshots().Where("job_id = ? AND git_commit = ?", jobID, gitCommit).
 			Order("created_at DESC").
 			First(&snap).Error
 		if err == nil {
@@ -219,7 +236,7 @@ func manifestContentHash(conn *gorm.DB, jobID uuid.UUID, gitCommit string) strin
 	}
 
 	var snap models.DagSnapshot
-	err := conn.Where("job_id = ?", jobID).
+	err := snapshots().Where("job_id = ?", jobID).
 		Order("created_at DESC").
 		First(&snap).Error
 	if err == nil {

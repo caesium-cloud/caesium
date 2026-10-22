@@ -231,3 +231,39 @@ func withoutStartView(params map[string]string) map[string]string {
 	delete(out, startViewNamespaceParam)
 	return out
 }
+
+// namespaceDerivedParams are the run params freshness derives from the
+// declarations and dataset state of the namespace a run was created in: the
+// start view, its transient owner, and a derived run's decision view and
+// triggering dataset.
+var namespaceDerivedParams = []string{
+	ConsumedWatermarksStartParam,
+	startViewNamespaceParam,
+	freshnessConsumedWatermarksParam,
+	freshnessDerivedFromDatasetParam,
+}
+
+// WithoutNamespaceDerivedParams returns params without the keys freshness
+// derived from another namespace's datasets, for a run created in a namespace
+// other than the one whose params it copies: a replay of a job that moved
+// (identity-and-access W7-ε). Those views would otherwise be persisted on, and
+// shown with, the new namespace's run and its task descriptors; without a
+// start view, completion takes its own fenced read, as after
+// FenceStartParams. Nothing is cloned unless there is something to remove.
+func WithoutNamespaceDerivedParams(params map[string]string) map[string]string {
+	found := false
+	for _, key := range namespaceDerivedParams {
+		if _, ok := params[key]; ok {
+			found = true
+			break
+		}
+	}
+	if !found {
+		return params
+	}
+	out := maps.Clone(params)
+	for _, key := range namespaceDerivedParams {
+		delete(out, key)
+	}
+	return out
+}
