@@ -2219,6 +2219,9 @@ func (s *Store) RegisterTasks(runID uuid.UUID, inputs []RegisterTaskInput) error
 			if err != nil {
 				return err
 			}
+			if registerBeforeCommit != nil {
+				registerBeforeCommit()
+			}
 			attemptEvents = events
 			return nil
 		})
@@ -2229,6 +2232,9 @@ func (s *Store) RegisterTasks(runID uuid.UUID, inputs []RegisterTaskInput) error
 	})
 	if err == nil {
 		counts.commit()
+		// A reload whose fence sweep read the table before this commit
+		// never saw these rows (identity-and-access C2).
+		s.FenceRunAfterCommit(context.Background(), runID)
 		s.publishEvents(pendingEvents...)
 	}
 	return err
@@ -2389,7 +2395,7 @@ func (s *Store) registerTasksTx(
 				Command:                 command,
 				Status:                  string(TaskStatusPending),
 				Priority:                jobRun.Priority,
-				NodeSelector:            maps.Clone(task.NodeSelector),
+				NodeSelector:            WithIsolationSelector(maps.Clone(task.NodeSelector), jobRun.Namespace),
 				Attempt:                 1,
 				MaxAttempts:             maxAttempts,
 				PartitionIndex:          input.PartitionIndex,
@@ -5336,7 +5342,13 @@ func (s *Store) failTask(runID, taskRef uuid.UUID, failure error, claimedBy stri
 // claim — the truthful state for a worker that never released the task and is
 // about to launch the next container itself.
 func (s *Store) RetryTask(runID, taskRef uuid.UUID, attempt int) error {
-	return s.retryTask(runID, taskRef, attempt)
+	err := s.retryTask(runID, taskRef, attempt)
+	if err == nil {
+		// A reload whose fence sweep read the row as failed, before this
+		// commit, never saw it pending (identity-and-access C2).
+		s.FenceRunAfterCommit(context.Background(), runID)
+	}
+	return err
 }
 
 // retryTask resets ONE task instance for its next attempt. taskRef follows the
@@ -5389,6 +5401,11 @@ func (s *Store) retryTask(runID, taskRef uuid.UUID, attempt int) error {
 			Updates(updates)
 		if resultUpdate.Error != nil {
 			return resultUpdate.Error
+		}
+		if resultUpdate.RowsAffected > 0 {
+			if err := stampIsolationOnResetTx(tx, row.ID); err != nil {
+				return err
+			}
 		}
 		if resultUpdate.RowsAffected == 0 {
 			// Already resolved by a cascade or a cancellation; a retry here
@@ -7415,7 +7432,17 @@ WHERE id = ?
 // concurrency re-admission and does not consult Job.Paused — a human retrying a
 // paused job's run is a deliberate human decision.
 func (s *Store) RetryFromFailure(runID uuid.UUID) (*JobRun, error) {
-	return s.retryFromFailure(runID, false)
+	return s.retryFromFailureFenced(runID, false)
+}
+
+// retryFromFailureFenced is retryFromFailure followed by the post-commit
+// isolation fence over the run's reset rows.
+func (s *Store) retryFromFailureFenced(runID uuid.UUID, admitted bool) (*JobRun, error) {
+	jobRun, err := s.retryFromFailure(runID, admitted)
+	if err == nil {
+		s.FenceRunAfterCommit(context.Background(), runID)
+	}
+	return jobRun, err
 }
 
 // RetryFromFailureAdmitted is the admit-aware retry entry point used by the
@@ -7431,7 +7458,7 @@ func (s *Store) RetryFromFailure(runID uuid.UUID) (*JobRun, error) {
 //     An agent retry must never replace-cancel a live run, nor race the next cron
 //     tick for a slot admission never granted.
 func (s *Store) RetryFromFailureAdmitted(runID uuid.UUID) (*JobRun, error) {
-	return s.retryFromFailure(runID, true)
+	return s.retryFromFailureFenced(runID, true)
 }
 
 // retryResetColumns is the single definition of what "reset an instance for
@@ -7625,7 +7652,7 @@ func partitionRetryRunLockSQL(dialect string) (string, error) {
 	}
 }
 
-// RetryPartition resets ONE fan-out instance of a run for re-execution.
+// retryPartition resets ONE fan-out instance of a run for re-execution.
 //
 // It is the store half of `POST …/tasks/:task_id/partitions/:index/retry`. The
 // controller previously did a bare `db.Model(&row).Updates(...)`: no
@@ -7662,7 +7689,7 @@ func partitionRetryRunLockSQL(dialect string) (string, error) {
 // A post-commit refresh must not be the source of the kickoff signal: if it
 // failed, returning (nil, false, err) would discard a committed reopen and the
 // handler would skip kickoff.
-func (s *Store) RetryPartition(ctx context.Context, runID, taskRunID uuid.UUID) (*TaskRun, bool, error) {
+func (s *Store) retryPartition(ctx context.Context, runID, taskRunID uuid.UUID) (*TaskRun, bool, error) {
 	var (
 		pendingEvents []event.Event
 		counts        dbWriteCounts
@@ -7761,6 +7788,9 @@ func (s *Store) RetryPartition(ctx context.Context, runID, taskRunID uuid.UUID) 
 			if err := tx.Model(&models.TaskRun{}).
 				Where("id = ?", row.ID).
 				Updates(updates).Error; err != nil {
+				return err
+			}
+			if err := stampIsolationOnResetTx(tx, row.ID); err != nil {
 				return err
 			}
 			// Same reset contract, other table — see clearAttemptDatasetMetricsTx.
@@ -8081,6 +8111,9 @@ func (s *Store) retryFromFailure(runID uuid.UUID, admit bool) (*JobRun, error) {
 			status := TaskStatus(tr.Status)
 			if status == TaskStatusFailed || status == TaskStatusSkipped {
 				if err := tx.Model(tr).Where("id = ?", tr.ID).Updates(retryResetColumns()).Error; err != nil {
+					return err
+				}
+				if err := stampIsolationOnResetTx(tx, tr.ID); err != nil {
 					return err
 				}
 				// Same reset contract, other table — see

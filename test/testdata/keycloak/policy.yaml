@@ -26,6 +26,10 @@ namespaces:
     quotas:
       maxConcurrentRuns: 1
   finance: {}
+  isolated:
+    kubernetes:
+      namespace: caesium-isolated
+      serviceAccountName: caesium-isolated-runner
 bindings:
   - subjects:
       groups: ["caesium-admins"]

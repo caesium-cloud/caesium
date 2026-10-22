@@ -723,6 +723,11 @@ jobs:
             recipe: integration-test-infra
             load-reagents: "true"
             timeout: 60
+          # Four-node isolation-context cluster (identity-and-access C2).
+          - id: isolation
+            recipe: integration-test-isolation
+            load-reagents: "false"
+            timeout: 30
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/run-integration
