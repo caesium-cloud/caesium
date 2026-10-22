@@ -206,7 +206,10 @@ func (s *IntegrationTestSuite) newNamespaceMatrixFixture(caps matrixLaneCaps) *n
 		}}
 		n.EventJob = s.matrixApply(f, evt)
 		n.EventTrigger = s.matrixJobTrigger(f, n.EventJob.ID)
-		n.FailJob = s.matrixApply(f, s.a8FailingDefinition(fx.name(n.Name+"-fail"), n.Name))
+		if caps.Incidents {
+			// A failing run opens a real incident (agent remediation only).
+			n.FailJob = s.matrixApply(f, s.a8FailingDefinition(fx.name(n.Name+"-fail"), n.Name))
+		}
 	}
 	for _, n := range fx.ns {
 		n.JobTrigger = s.matrixJobTrigger(f, n.Job.ID)
@@ -220,7 +223,9 @@ func (s *IntegrationTestSuite) newNamespaceMatrixFixture(caps matrixLaneCaps) *n
 	}
 	fx.OldRun = s.triggerRun(fx.Moved.ID)
 	for _, n := range []*matrixNamespace{mkt, fin} {
-		n.FailRun = s.triggerRun(n.FailJob.ID)
+		if n.FailJob != nil {
+			n.FailRun = s.triggerRun(n.FailJob.ID)
+		}
 	}
 	s.Equal(nsFinance, s.awaitRun(fx.Moved.ID, fx.OldRun, runTimeout).Namespace)
 	fx.MovedDef.Metadata.Namespace = nsMarketing
@@ -235,7 +240,9 @@ func (s *IntegrationTestSuite) newNamespaceMatrixFixture(caps matrixLaneCaps) *n
 	}
 	s.Equal(nsMarketing, s.awaitRun(fx.Moved.ID, fx.NewRun, runTimeout).Namespace)
 	for _, n := range []*matrixNamespace{mkt, fin} {
-		n.Incident = s.a8AwaitIncidentForRun(n.FailJob.ID, n.FailRun)
+		if n.FailJob != nil {
+			n.Incident = s.a8AwaitIncidentForRun(n.FailJob.ID, n.FailRun)
+		}
 	}
 
 	// Ingested events, each delivered to one namespace's listener only.

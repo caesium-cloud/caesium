@@ -212,7 +212,7 @@ func namespaceMatrixRows() map[string]matrixRow {
 		}},
 		"DELETE /v1/system/nodes/:id": {auth.RouteClassCluster, rA, surfaceCore, func(fx *namespaceMatrixFixture) []matrixProbe {
 			// Never a real member: a decimal id no node holds.
-			return []matrixProbe{probe("unknown member", "/v1/system/nodes/987654321987", http.StatusBadRequest).idem()}
+			return []matrixProbe{probe("unknown member", "/v1/system/nodes/987654321987", http.StatusNotFound).idem()}
 		}},
 		"GET /v1/atoms": {auth.RouteClassCluster, rV, surfaceCore, func(fx *namespaceMatrixFixture) []matrixProbe {
 			return []matrixProbe{probe("atoms", "/v1/atoms", http.StatusOK)}
@@ -311,12 +311,12 @@ func namespaceMatrixRows() map[string]matrixRow {
 			return []matrixProbe{probe("ingested", "/v1/events/ingested?limit=500", http.StatusOK).marks(mark(m.EventID, nsMarketing), mark(f.EventID, nsFinance))}
 		}},
 		"GET /v1/stats": {auth.RouteClassCollection, rV, surfaceCore, func(fx *namespaceMatrixFixture) []matrixProbe {
-			m, f := fx.n(nsMarketing), fx.n(nsFinance)
-			return []matrixProbe{probe("stats", "/v1/stats", http.StatusOK).marks(optMark(m.FailJob.Alias, nsMarketing), optMark(f.FailJob.Alias, nsFinance), optMark(f.alias(), nsFinance))}
+			f := fx.n(nsFinance)
+			return []matrixProbe{probe("stats", "/v1/stats", http.StatusOK).marks(append(fx.failMarks(), optMark(f.alias(), nsFinance))...)}
 		}},
 		"GET /v1/stats/summary": {auth.RouteClassCollection, rV, surfaceCore, func(fx *namespaceMatrixFixture) []matrixProbe {
-			m, f := fx.n(nsMarketing), fx.n(nsFinance)
-			return []matrixProbe{probe("summary", "/v1/stats/summary", http.StatusOK).marks(optMark(m.FailJob.Alias, nsMarketing), optMark(f.FailJob.Alias, nsFinance), optMark(f.alias(), nsFinance))}
+			f := fx.n(nsFinance)
+			return []matrixProbe{probe("summary", "/v1/stats/summary", http.StatusOK).marks(append(fx.failMarks(), optMark(f.alias(), nsFinance))...)}
 		}},
 		"GET /v1/triggers": {auth.RouteClassCollection, rV, surfaceCore, func(fx *namespaceMatrixFixture) []matrixProbe {
 			d, m, f := fx.n(nsDefault), fx.n(nsMarketing), fx.n(nsFinance)
@@ -543,7 +543,7 @@ func namespaceMatrixRows() map[string]matrixRow {
 			d, m, f := fx.n(nsDefault), fx.n(nsMarketing), fx.n(nsFinance)
 			empty := probe("empty body", "/v1/jobdefs/diff", http.StatusOK, needAnyGrant(rV)).idem().body(`{"definitions":[]}`).marks(
 				mark(d.alias(), nsDefault), mark(m.alias(), nsMarketing), mark(f.alias(), nsFinance), mark(fx.MovedDef.Metadata.Alias, nsMarketing),
-				optMark(f.Job.ID, nsFinance), optMark(fx.FinColumn, nsFinance), optMark(fx.FinDataset, nsFinance), optMark(f.FailJob.Alias, nsFinance))
+				optMark(f.Job.ID, nsFinance), optMark(fx.FinColumn, nsFinance), optMark(fx.FinDataset, nsFinance)).marks(fx.failMarks()...)
 			return append(probes, empty)
 		}},
 		"POST /v1/jobdefs/apply": {auth.RouteClassNamespaced, rO, surfaceCore, func(fx *namespaceMatrixFixture) []matrixProbe {
@@ -651,20 +651,20 @@ func namespaceMatrixRows() map[string]matrixRow {
 		"POST /v1/incidents/:id/approvals/:id/reject": {auth.RouteClassNamespaced, rO, surfaceIncidents, func(fx *namespaceMatrixFixture) []matrixProbe {
 			return each(fx.incidentRoute(rO, "/v1/incidents/%s/approvals/"+missingID+"/reject", http.StatusNotFound), func(p matrixProbe) matrixProbe { return p.idem().body(`{"reason":"mx"}`) })
 		}},
-		"GET /v1/agent/incidents/:id/bundle": {auth.RouteClassNamespaced, rV, surfaceCore, func(fx *namespaceMatrixFixture) []matrixProbe {
+		"GET /v1/agent/incidents/:id/bundle": {auth.RouteClassNamespaced, rV, surfaceIncidents, func(fx *namespaceMatrixFixture) []matrixProbe {
 			return fx.incidentRoute(rV, "/v1/agent/incidents/%s/bundle", http.StatusOK)
 		}},
-		"GET /v1/agent/incidents/:id/context/*": {auth.RouteClassNamespaced, rV, surfaceCore, func(fx *namespaceMatrixFixture) []matrixProbe {
+		"GET /v1/agent/incidents/:id/context/*": {auth.RouteClassNamespaced, rV, surfaceIncidents, func(fx *namespaceMatrixFixture) []matrixProbe {
 			return fx.incidentRoute(rV, "/v1/agent/incidents/%s/context/history", http.StatusOK)
 		}},
-		"POST /v1/agent/incidents/:id/actions": {auth.RouteClassNamespaced, rR, surfaceCore, func(fx *namespaceMatrixFixture) []matrixProbe {
+		"POST /v1/agent/incidents/:id/actions": {auth.RouteClassNamespaced, rR, surfaceIncidents, func(fx *namespaceMatrixFixture) []matrixProbe {
 			// An empty proposal is refused by validation: nothing is recorded.
 			return each(fx.incidentRoute(rR, "/v1/agent/incidents/%s/actions", http.StatusBadRequest), func(p matrixProbe) matrixProbe { return p.idem().body(`{}`) })
 		}},
-		"POST /v1/agent/incidents/:id/notes": {auth.RouteClassNamespaced, rR, surfaceCore, func(fx *namespaceMatrixFixture) []matrixProbe {
+		"POST /v1/agent/incidents/:id/notes": {auth.RouteClassNamespaced, rR, surfaceIncidents, func(fx *namespaceMatrixFixture) []matrixProbe {
 			return each(fx.incidentRoute(rR, "/v1/agent/incidents/%s/notes", http.StatusCreated), func(p matrixProbe) matrixProbe { return p.idem().body(`{"text":"mx note"}`) })
 		}},
-		"POST /v1/agent/incidents/:id/mcp": {auth.RouteClassNamespaced, rR, surfaceCore, func(fx *namespaceMatrixFixture) []matrixProbe {
+		"POST /v1/agent/incidents/:id/mcp": {auth.RouteClassNamespaced, rR, surfaceIncidents, func(fx *namespaceMatrixFixture) []matrixProbe {
 			return each(fx.incidentRoute(rR, "/v1/agent/incidents/%s/mcp", http.StatusOK), func(p matrixProbe) matrixProbe {
 				return p.idem().body(`{"jsonrpc":"2.0","id":1,"method":"tools/list"}`)
 			})
@@ -771,10 +771,31 @@ func (fx *namespaceMatrixFixture) creates(path string, body func(namespace strin
 	return probes
 }
 
+// failMarks are the failing jobs' aliases (only when the lane opens
+// incidents, which is when the fixture creates them).
+func (fx *namespaceMatrixFixture) failMarks() []matrixMarker {
+	var marks []matrixMarker
+	for _, n := range fx.pair() {
+		if n.FailJob != nil {
+			marks = append(marks, optMark(n.FailJob.Alias, n.Name))
+		}
+	}
+	return marks
+}
+
+// incidentOrMissing is the namespace's incident, or an id no incident holds
+// on a lane without incidents (the route is then probed as unmounted).
+func (n *matrixNamespace) incidentOrMissing() string {
+	if n.Incident == "" {
+		return uuid.NewString()
+	}
+	return n.Incident
+}
+
 func (fx *namespaceMatrixFixture) incidentRoute(role models.Role, format string, admit int) []matrixProbe {
 	var probes []matrixProbe
 	for _, n := range fx.pair() {
-		p := probe(n.Name+" incident", fmt.Sprintf(format, n.Incident), admit, needEvery(role, n.Name))
+		p := probe(n.Name+" incident", fmt.Sprintf(format, n.incidentOrMissing()), admit, needEvery(role, n.Name))
 		p.Incident = n.Incident
 		probes = append(probes, p)
 	}

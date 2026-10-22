@@ -95,6 +95,9 @@ func (s *IntegrationTestSuite) TestAuthNamespaceAllowDenyMatrix() {
 		conn := s.openIntegrationCatalogGorm()
 		svc := iauth.NewService(conn, iauth.WithKeyHashSecret(env.Variables().AuthKeyHashSecret))
 		for _, n := range fx.pair() {
+			if n.Incident == "" {
+				continue // no incidents on this lane
+			}
 			minted, err := svc.MintAgentSessionKey(uuid.MustParse(n.Incident), []string{n.FailJob.Alias}, time.Hour)
 			s.Require().NoError(err)
 			fx.f.keys = append(fx.f.keys, minted.Key.ID.String())
