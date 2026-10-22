@@ -676,7 +676,6 @@ func TestNamespacedClusterAndPendingRoutes(t *testing.T) {
 		{get("/v1/jobs/:id/blame", pv("id", f.mktJob.String())), "B7"},
 		{get("/v1/jobs/:id/topology", pv("id", f.mktJob.String())), "B7"},
 		{post("/v1/events", nil, `{}`), "A6"},
-		{get("/v1/lineage/impact", nil), "B5"},
 	} {
 		res := f.do(t, mktAdmin, tc.call)
 		require.Equal(t, http.StatusForbidden, res.status, tc.call.pattern)

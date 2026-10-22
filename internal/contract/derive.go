@@ -243,6 +243,10 @@ func (s GORMStore) ListContractEvidence(ctx context.Context) ([]EvidenceRecord, 
 		ProducerJobAlias string    `gorm:"column:producer_job_alias"`
 		ConsumerJobID    uuid.UUID `gorm:"column:consumer_job_id"`
 		ConsumerJobAlias string    `gorm:"column:consumer_job_alias"`
+		ProducerNS       string    `gorm:"column:producer_job_namespace"`
+		ConsumerNS       string    `gorm:"column:consumer_job_namespace"`
+		ProducerRunNS    string    `gorm:"column:producer_run_namespace"`
+		ConsumerRunNS    string    `gorm:"column:consumer_run_namespace"`
 		Namespace        string    `gorm:"column:namespace"`
 		Name             string    `gorm:"column:name"`
 		LastSeen         sqlTime   `gorm:"column:last_seen"`
@@ -255,6 +259,8 @@ func (s GORMStore) ListContractEvidence(ctx context.Context) ([]EvidenceRecord, 
 			Select(
 				"job_runs.job_id AS job_id," +
 					" jobs.alias AS job_alias," +
+					" jobs.namespace AS job_namespace," +
+					" job_runs.namespace AS run_namespace," +
 					" ld.namespace AS namespace," +
 					" ld.name AS name," +
 					" ld.direction AS direction," +
@@ -263,7 +269,7 @@ func (s GORMStore) ListContractEvidence(ctx context.Context) ([]EvidenceRecord, 
 			Joins("JOIN task_runs ON task_runs.id = ld.task_run_id").
 			Joins("JOIN job_runs ON job_runs.id = task_runs.job_run_id").
 			Joins("JOIN jobs ON jobs.id = job_runs.job_id AND jobs.deleted_at IS NULL").
-			Group("job_runs.job_id, jobs.alias, ld.namespace, ld.name, ld.direction")
+			Group("job_runs.job_id, jobs.alias, jobs.namespace, job_runs.namespace, ld.namespace, ld.name, ld.direction")
 	}
 
 	err := s.DB.WithContext(ctx).
@@ -273,6 +279,10 @@ func (s GORMStore) ListContractEvidence(ctx context.Context) ([]EvidenceRecord, 
 				" producer.job_alias AS producer_job_alias,"+
 				" consumer.job_id AS consumer_job_id,"+
 				" consumer.job_alias AS consumer_job_alias,"+
+				" producer.job_namespace AS producer_job_namespace,"+
+				" consumer.job_namespace AS consumer_job_namespace,"+
+				" producer.run_namespace AS producer_run_namespace,"+
+				" consumer.run_namespace AS consumer_run_namespace,"+
 				" producer.namespace AS namespace,"+
 				" producer.name AS name,"+
 				" consumer.last_seen AS last_seen",
@@ -299,6 +309,14 @@ func (s GORMStore) ListContractEvidence(ctx context.Context) ([]EvidenceRecord, 
 			ProducerJobAlias: strings.TrimSpace(row.ProducerJobAlias),
 			ConsumerJobID:    row.ConsumerJobID,
 			ConsumerJobAlias: strings.TrimSpace(row.ConsumerJobAlias),
+			// The four namespaces are kept for the REST boundary's redaction
+			// (identity-and-access B5): a job moved since its runs is split
+			// into one record per run namespace, which addEdge merges back
+			// into the same edge.
+			ProducerNamespace:    models.NamespaceOrDefault(row.ProducerNS),
+			ConsumerNamespace:    models.NamespaceOrDefault(row.ConsumerNS),
+			ProducerRunNamespace: models.NamespaceOrDefault(row.ProducerRunNS),
+			ConsumerRunNamespace: models.NamespaceOrDefault(row.ConsumerRunNS),
 			Dataset: DatasetRef{
 				Namespace: strings.TrimSpace(row.Namespace),
 				Name:      strings.TrimSpace(row.Name),
@@ -370,6 +388,7 @@ func DeriveGraph(input DeriveInput) (Graph, error) {
 	evidence := append([]EvidenceRecord(nil), input.Evidence...)
 	sortJobs(jobs)
 
+	triggerNamespaces := triggerNamespacesByTrigger(jobs)
 	seenAliases := make(map[string]struct{}, len(jobs))
 	for idx := range jobs {
 		jobs[idx].Alias = strings.TrimSpace(jobs[idx].Alias)
@@ -380,7 +399,7 @@ func DeriveGraph(input DeriveInput) (Graph, error) {
 			return Graph{}, fmt.Errorf("duplicate job alias %q", jobs[idx].Alias)
 		}
 		seenAliases[jobs[idx].Alias] = struct{}{}
-		builder.addJob(jobs[idx])
+		builder.addJobSharingTrigger(jobs[idx], triggerNamespaces[jobs[idx].TriggerID])
 	}
 
 	deriveDeclaredEdges(builder, jobs, input.PreviousProducerSchemas)
@@ -432,6 +451,8 @@ func (s GORMStore) persistedContractJobs(ctx context.Context, incomingAliases ma
 	type jobRow struct {
 		ID            uuid.UUID         `gorm:"column:id"`
 		Alias         string            `gorm:"column:alias"`
+		Namespace     string            `gorm:"column:namespace"`
+		TriggerID     uuid.UUID         `gorm:"column:trigger_id"`
 		Labels        datatypes.JSONMap `gorm:"column:labels"`
 		TriggerType   string            `gorm:"column:trigger_type"`
 		Configuration string            `gorm:"column:configuration"`
@@ -440,7 +461,7 @@ func (s GORMStore) persistedContractJobs(ctx context.Context, incomingAliases ma
 
 	err := s.DB.WithContext(ctx).
 		Table("jobs").
-		Select("jobs.id, jobs.alias, jobs.labels, triggers.type AS trigger_type, triggers.configuration").
+		Select("jobs.id, jobs.alias, jobs.namespace, jobs.trigger_id, jobs.labels, triggers.type AS trigger_type, triggers.configuration").
 		Joins("JOIN triggers ON triggers.id = jobs.trigger_id AND triggers.deleted_at IS NULL").
 		Where("jobs.deleted_at IS NULL").
 		Find(&rows).Error
@@ -486,9 +507,11 @@ func (s GORMStore) persistedContractJobs(ctx context.Context, incomingAliases ma
 			return nil, fmt.Errorf("existing job %s dataset declarations: %w", row.Alias, err)
 		}
 		jobs = append(jobs, Job{
-			ID:     row.ID,
-			Alias:  row.Alias,
-			Labels: stringLabels(row.Labels),
+			ID:        row.ID,
+			Alias:     row.Alias,
+			Namespace: models.NamespaceOrDefault(row.Namespace),
+			TriggerID: row.TriggerID,
+			Labels:    stringLabels(row.Labels),
 			Trigger: Trigger{
 				Type:          strings.TrimSpace(row.TriggerType),
 				Configuration: cfg,
@@ -567,9 +590,10 @@ func jobFromDefinition(def schema.Definition) (Job, error) {
 	}
 
 	return Job{
-		Alias:    alias,
-		Labels:   cloneStringMap(def.Metadata.Labels),
-		Incoming: true,
+		Alias:     alias,
+		Namespace: models.NamespaceOrDefault(def.Metadata.Namespace),
+		Labels:    cloneStringMap(def.Metadata.Labels),
+		Incoming:  true,
 		Trigger: Trigger{
 			Type:          strings.TrimSpace(def.Trigger.Type),
 			Configuration: cloneAnyMap(def.Trigger.Configuration),
@@ -1079,8 +1103,8 @@ func deriveEvidenceEdges(builder *graphBuilder, records []EvidenceRecord) {
 			continue
 		}
 
-		builder.addJob(Job{ID: record.ProducerJobID, Alias: producerAlias})
-		builder.addJob(Job{ID: record.ConsumerJobID, Alias: consumerAlias})
+		builder.addJob(Job{ID: record.ProducerJobID, Alias: producerAlias, Namespace: record.ProducerNamespace})
+		builder.addJob(Job{ID: record.ConsumerJobID, Alias: consumerAlias, Namespace: record.ConsumerNamespace})
 		builder.addDataset(dataset)
 
 		lastSeen := record.LastSeen
@@ -1091,6 +1115,10 @@ func deriveEvidenceEdges(builder *graphBuilder, records []EvidenceRecord) {
 			Verdict:  schemacompat.VerdictUnknown,
 			Dataset:  &dataset,
 			LastSeen: &lastSeen,
+			runNamespaces: []string{
+				models.NamespaceOrDefault(record.ProducerRunNamespace),
+				models.NamespaceOrDefault(record.ConsumerRunNamespace),
+			},
 		})
 	}
 }
@@ -1306,25 +1334,61 @@ func newGraphBuilder() *graphBuilder {
 }
 
 func (b *graphBuilder) addJob(job Job) {
+	b.addJobSharingTrigger(job, nil)
+}
+
+// addJobSharingTrigger adds a job node owned by job.Namespace, recording the
+// namespaces of the live jobs sharing its trigger. A node derived twice with
+// owners that disagree (or once without one) is pinned unowned: deny wins.
+func (b *graphBuilder) addJobSharingTrigger(job Job, triggerNamespaces []string) {
 	alias := strings.TrimSpace(job.Alias)
 	if alias == "" {
 		return
 	}
 	id := jobNodeID(alias)
 	node := Node{
-		ID:     id,
-		Kind:   NodeKindJob,
-		Alias:  alias,
-		Labels: cloneStringMap(job.Labels),
+		ID:                id,
+		Kind:              NodeKindJob,
+		Alias:             alias,
+		Labels:            cloneStringMap(job.Labels),
+		owner:             strings.TrimSpace(job.Namespace),
+		triggerNamespaces: unionStrings(nil, triggerNamespaces),
 	}
 	if existing, ok := b.nodes[id]; ok {
 		if len(existing.Labels) == 0 && len(node.Labels) > 0 {
 			existing.Labels = node.Labels
-			b.nodes[id] = existing
 		}
+		if existing.ownerConflict || existing.owner == "" || existing.owner != node.owner {
+			existing.owner, existing.ownerConflict = "", true
+		}
+		existing.triggerNamespaces = unionStrings(existing.triggerNamespaces, node.triggerNamespaces)
+		b.nodes[id] = existing
 		return
 	}
 	b.nodes[id] = node
+}
+
+// triggerNamespacesByTrigger maps each persisted trigger to the namespaces of
+// every job in the merged world that it serves.
+func triggerNamespacesByTrigger(jobs []Job) map[uuid.UUID][]string {
+	out := map[uuid.UUID][]string{}
+	for _, job := range jobs {
+		if job.TriggerID == uuid.Nil {
+			continue
+		}
+		out[job.TriggerID] = unionStrings(out[job.TriggerID], []string{models.NamespaceOrDefault(job.Namespace)})
+	}
+	return out
+}
+
+// unionStrings returns the sorted union of a and b (nil when both are empty).
+func unionStrings(a, b []string) []string {
+	if len(a) == 0 && len(b) == 0 {
+		return nil
+	}
+	out := append(append([]string(nil), a...), b...)
+	sort.Strings(out)
+	return slices.Compact(out)
 }
 
 func (b *graphBuilder) addDataset(dataset DatasetRef) {
@@ -1352,6 +1416,7 @@ func (b *graphBuilder) addEdge(edge Edge) {
 	edge.From = strings.TrimSpace(edge.From)
 	edge.To = strings.TrimSpace(edge.To)
 	edge.ID = edgeID(edge)
+	edge.contributors = [][2]string{{edge.From, edge.To}}
 
 	if existing, ok := b.edges[edge.ID]; ok {
 		b.edges[edge.ID] = mergeEdges(existing, edge)
@@ -1413,6 +1478,12 @@ func mergeEdges(existing, incoming Edge) Edge {
 	if incoming.LastSeen != nil && (existing.LastSeen == nil || incoming.LastSeen.After(*existing.LastSeen)) {
 		lastSeen := *incoming.LastSeen
 		existing.LastSeen = &lastSeen
+	}
+	existing.runNamespaces = unionStrings(existing.runNamespaces, incoming.runNamespaces)
+	for _, contributor := range incoming.contributors {
+		if !slices.Contains(existing.contributors, contributor) {
+			existing.contributors = append(existing.contributors, contributor)
+		}
 	}
 	return existing
 }

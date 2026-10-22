@@ -5,8 +5,13 @@ import (
 	"strconv"
 
 	lsvc "github.com/caesium-cloud/caesium/api/rest/service/lineage"
+	"github.com/caesium-cloud/caesium/internal/authz"
 	"github.com/labstack/echo/v5"
 )
+
+// lineageService builds the service a request reads; handler tests swap it
+// for one over a test database.
+var lineageService = lsvc.New
 
 // Impact handles GET /lineage/impact?namespace=<ns>&name=<name>[&max_depth=N]
 //
@@ -50,7 +55,18 @@ func Impact(c *echo.Context) error {
 
 	ctx := c.Request().Context()
 
-	result, err := lsvc.New(ctx).Impact(namespace, name, maxDepth)
+	// A namespace-confined caller gets the whole-graph answer redacted at the
+	// boundary (identity-and-access B5); everyone else gets it verbatim.
+	if redactor := authz.NewRedactor(ctx); redactor != nil {
+		redacted, err := lineageService(ctx).ConfinedImpact(redactor, namespace, name, maxDepth)
+		if err != nil {
+			return echo.NewHTTPError(http.StatusInternalServerError, "internal server error").Wrap(err)
+		}
+		redactor.Done()
+		return c.JSON(http.StatusOK, redacted)
+	}
+
+	result, err := lineageService(ctx).Impact(namespace, name, maxDepth)
 	if err != nil {
 		return echo.NewHTTPError(http.StatusInternalServerError, "internal server error").Wrap(err)
 	}

@@ -17,7 +17,7 @@ import ReactFlow, {
 } from "reactflow";
 import "reactflow/dist/style.css";
 import dagre from "dagre";
-import { ShieldCheck } from "lucide-react";
+import { EyeOff, ShieldCheck } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 
@@ -32,7 +32,13 @@ import {
 } from "@/features/datasets/freshness-utils";
 import { holdSearch } from "@/features/datasets/hold-utils";
 import { useHoldInvalidation } from "@/features/datasets/useDataAssertions";
-import { api, type DatasetHold, type DatasetState, type ImpactNode } from "@/lib/api";
+import {
+  api,
+  isExternalImpactNode,
+  type DatasetHold,
+  type DatasetState,
+  type ImpactDownstreamNode,
+} from "@/lib/api";
 import { usePrincipal } from "@/lib/auth";
 import { cn, formatUTCTimestamp } from "@/lib/utils";
 
@@ -48,7 +54,7 @@ type LineageSearch = {
 type LineageNodeData = {
   hold?: DatasetHold;
   holdAffected?: boolean;
-  kind: "root" | "downstream";
+  kind: "root" | "downstream" | "external";
   namespace: string;
   name: string;
   jobId?: string;
@@ -144,9 +150,12 @@ export function LineageGraph({
       targets.push({ namespace: ns, name: datasetName });
     };
     push(impactQuery.data.root_namespace, impactQuery.data.root_name);
-    (impactQuery.data.downstream ?? []).forEach((node) =>
-      push(node.dataset_namespace, node.dataset_name),
-    );
+    (impactQuery.data.downstream ?? []).forEach((node) => {
+      // A node another namespace owns names no dataset (identity-and-access B5).
+      if (!isExternalImpactNode(node)) {
+        push(node.dataset_namespace, node.dataset_name);
+      }
+    });
     return targets;
   }, [impactQuery.data]);
 
@@ -191,13 +200,19 @@ export function LineageGraph({
     refetchInterval: 30_000,
   })) });
   const holdAffected = new Set<string>();
-  holdImpactQueries.forEach((query) => query.data?.downstream.forEach((node) => holdAffected.add(datasetKey(node.dataset_namespace, node.dataset_name))));
+  holdImpactQueries.forEach((query) =>
+    query.data?.downstream.forEach((node) => {
+      if (!isExternalImpactNode(node)) {
+        holdAffected.add(datasetKey(node.dataset_namespace, node.dataset_name));
+      }
+    }),
+  );
 
   const graph = (() => {
     if (!impactQuery.data) {
       return { nodes: [] as Node<LineageNodeData>[], edges: [] as Edge[] };
     }
-    return buildGraph(
+    return buildLineageImpactGraph(
       impactQuery.data.root_namespace,
       impactQuery.data.root_name,
       impactQuery.data.downstream ?? [],
@@ -466,10 +481,12 @@ function MetadataCell({ label, value }: { label: string; value: string }) {
   );
 }
 
-function buildGraph(
+// Exported for its unit test (identity-and-access B5 external nodes).
+// eslint-disable-next-line react-refresh/only-export-components
+export function buildLineageImpactGraph(
   rootNamespace: string,
   rootName: string,
-  downstream: ImpactNode[],
+  downstream: ImpactDownstreamNode[],
   freshnessByDataset: Map<string, DatasetState>,
   holdsByDataset: Map<string, DatasetHold>,
   holdAffected: Set<string>,
@@ -507,6 +524,19 @@ function buildGraph(
   const impactRefs: GraphNodeRef[] = [];
 
   downstream.forEach((node, index) => {
+    if (isExternalImpactNode(node)) {
+      // Collapsed for a namespace-confined caller: only its hop is known.
+      const nodeRef = { id: `impact:${node.id}:${index}`, name: externalImpactLabel, depth: node.depth };
+      initialNodes.push({
+        id: nodeRef.id,
+        type: "lineageExternal",
+        data: { kind: "external", namespace: "", name: externalImpactLabel, depth: node.depth },
+        position: { x: 0, y: 0 },
+      });
+      impactRefs.push(nodeRef);
+      nodesByDepth.set(node.depth, [...(nodesByDepth.get(node.depth) ?? []), nodeRef]);
+      return;
+    }
     const nodeId = `impact:${node.dataset_namespace}:${node.dataset_name}:${node.job_id}:${index}`;
     const state = freshnessByDataset.get(datasetKey(node.dataset_namespace, node.dataset_name));
     const inheritedStale = rootIsStale && !isStaleLike(state?.status);
@@ -709,6 +739,36 @@ const LineageDatasetNode = memo(({ data }: NodeProps<LineageNodeData>) => {
 
 LineageDatasetNode.displayName = "LineageDatasetNode";
 
+/** Label of a downstream node another namespace owns (identity-and-access B5). */
+export const externalImpactLabel = "Another namespace";
+
+const LineageExternalNode = memo(({ data }: NodeProps<LineageNodeData>) => {
+  const hop = typeof data.depth === "number" ? data.depth + 1 : undefined;
+  return (
+    <div
+      data-testid="lineage-external-node"
+      data-lineage-node-kind="external"
+      className="relative h-[80px] w-[260px] overflow-visible rounded-lg border border-dashed border-text-4/50 bg-node-surface px-3 py-2"
+      title="A dataset produced in a namespace you cannot read"
+    >
+      <Handle type="target" position={Position.Left} className="h-3 w-3 border-2 border-dag-bg bg-text-4" />
+      <Handle type="source" position={Position.Right} className="h-3 w-3 border-2 border-dag-bg bg-text-4" />
+      <div className="flex h-full flex-col justify-between text-[11px]">
+        <div className="flex min-w-0 items-center gap-2">
+          <EyeOff className="h-4 w-4 shrink-0 text-text-4" aria-hidden="true" />
+          <div className="min-w-0 flex-1 truncate text-sm font-bold text-text-2">{data.name}</div>
+        </div>
+        <div className="flex min-w-0 items-center gap-2 text-text-3">
+          <span className="min-w-0 flex-1 truncate">Outside your namespaces</span>
+          {hop ? <span>Hop {hop}</span> : null}
+        </div>
+      </div>
+    </div>
+  );
+});
+
+LineageExternalNode.displayName = "LineageExternalNode";
+
 const LineageImpactEdge = memo(({
   id,
   sourceX,
@@ -773,6 +833,7 @@ LineageImpactEdge.displayName = "LineageImpactEdge";
 
 const nodeTypes = {
   lineage: LineageDatasetNode,
+  lineageExternal: LineageExternalNode,
 };
 
 const edgeTypes = {

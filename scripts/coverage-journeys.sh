@@ -1791,6 +1791,10 @@ PY
   # only, which needs no policy file (this server mounts none) nor a catalog
   # connection.
   auth_pattern="${auth_pattern%)}|TestAuthJobdefApplyLateRefusalRollsBack|TestAuthLegacyJobCreateConfined|TestAuthTriggerTenancyWebhookPathRace|TestAuthTriggerPatchRechecksTenancy)"
+  # Aggregate redaction (identity-and-access B5): a marketing-confined viewer
+  # reads the lineage impact query and the contract graph over default-
+  # namespace jobs, so the confined redaction path runs. Needs no policy file.
+  auth_pattern="${auth_pattern%)}|TestAuthAggregateRedactionConfinedToOwnNamespaces)"
 
   local -a local_named_passes=(
     TestCaesiumWhyExplainsHitAndMiss
@@ -1846,6 +1850,7 @@ PY
     TestAuthLegacyJobCreateConfined
     TestAuthTriggerTenancyWebhookPathRace
     TestAuthTriggerPatchRechecksTenancy
+    TestAuthAggregateRedactionConfinedToOwnNamespaces
   )
   local -a distributed_named_passes=(
     TestNodeWorkersRoute

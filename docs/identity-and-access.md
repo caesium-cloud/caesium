@@ -832,7 +832,7 @@ principal confined to some namespaces is treated:
 | identity | Allowed whatever its grants, even none: `GET /auth/whoami`, `POST /auth/logout`, `GET /v1/system/features`. |
 | cluster | Always denied (403 `insufficient_role`): metrics, nodes and workers, atoms, logs, database, cache prune, `POST /v1/triggers`, the connector reads (`/v1/connectors*`), `GET /v1/auth/namespaces`, and `GET /v1/auth/policy` plus `POST /v1/auth/policy/reload`. |
 | namespaced | Caesium resolves the namespace of the target the handler will act on and requires the route's role in it (in every resolved namespace; once B6 ships, dataset reads will need it in any one). A target with no owning namespace is cluster-only. |
-| collection | The handler returns only rows from the namespaces where the principal holds the route's role. Live today: the API key list, the shared-object lists ([Shared objects](#shared-objects)), and the job-derived collections in [Collections](#collections-and-history-under-a-job). |
+| collection | The handler returns only rows from the namespaces where the principal holds the route's role. Live today: the API key list, the shared-object lists ([Shared objects](#shared-objects)), the job-derived collections in [Collections](#collections-and-history-under-a-job), and the redacted cross-namespace graphs ([Cross-namespace aggregates](#cross-namespace-aggregates)). |
 
 A principal is *confined* on a route when its cluster role (its grant at `*`)
 is below the route's role. An unconfined principal is authorised exactly as
@@ -905,7 +905,6 @@ that makes it namespace-aware lands (unconfined principals are unaffected):
 | A6 | `POST /v1/events` |
 | A8 | `/v1/agent/incidents/*`, incident detail `GET /v1/incidents/:id`, approval approve |
 | B7 | `GET /v1/jobs/:id/blame`, `topology` and `topology/history` (DAG snapshots record no namespace yet) |
-| B5 | `GET /v1/lineage/impact`, `GET /v1/contracts/graph` |
 | B6 | every `/v1/datasets*` route |
 
 Every namespace denial is `403 insufficient permissions` and is audited as
@@ -1024,6 +1023,38 @@ upgrade records no namespace and is shown only to unconfined callers.
 `DELETE /v1/jobs/:id/queue/:queue_id` answers 404 for a row the caller cannot
 see, and 403 unless the caller also holds `operator` in the namespace the row
 was queued in (not only in the job's current namespace).
+
+### Cross-namespace aggregates
+
+`GET /v1/lineage/impact` and `GET /v1/contracts/graph` are computed over every
+namespace and then redacted for a confined principal, so it sees how its own
+jobs connect to other namespaces without learning what they connect to:
+
+- A node it may not read becomes `{"id": "external:<opaque>", "kind":
+  "external"}`; an impact node keeps its `depth` too. A lineage node is
+  readable when both its job's current namespace and the namespace persisted on
+  the run that wrote it are; a contract job node when its job's namespace is.
+  A node no single job owns (an inferred edge's unknown producer) is never
+  readable.
+- An edge touching such a node keeps only `{"id", "from", "to"}`: the dataset,
+  the producer, consumer and previous schemas, the verdict, the findings, the
+  class and the last-seen time are dropped, and edges that collapse onto the
+  same endpoints are one edge. An evidence edge observed from a run in another
+  namespace is collapsed the same way. An inferred edge whose job shares its
+  trigger with a job the principal cannot read is withheld; the job stays.
+- A dataset node is shown only when an edge shown whole carries it.
+- The collapsed topology is kept: an edge between two foreign jobs is an edge
+  between two placeholders.
+- Placeholder ids are stable within one response and unrelated across
+  responses (an HMAC under a per-response random key).
+- An impact root it does not own answers exactly as a root nobody recorded
+  (`200`, empty `downstream`). A declared dataset is owned by its declared
+  producers; an undeclared one by the runs that wrote it; consuming a dataset
+  never grants it. The graph's `?dataset=` filter is applied after redaction,
+  so a dataset seen only through collapsed edges matches nothing.
+
+Job-scoped API keys and agent-session tokens are still refused both routes.
+An unconfined principal gets the unredacted body, byte for byte.
 
 ### Run quotas
 

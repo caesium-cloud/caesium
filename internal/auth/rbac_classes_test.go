@@ -285,6 +285,9 @@ var liveCollectionRoutes = map[string]bool{
 	"GET /v1/notifications/channels": true,
 	"GET /v1/notifications/policies": true,
 	"GET /v1/agentprofiles":          true,
+	// B5: global graphs, redacted at the boundary.
+	"GET /v1/contracts/graph": true,
+	"GET /v1/lineage/impact":  true,
 }
 
 // TestPendingRoutesListed logs the pending set so a reviewer sees every route

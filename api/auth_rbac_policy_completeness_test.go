@@ -139,6 +139,9 @@ var guardedCollectionRoutes = map[string]string{
 	"GET /v1/notifications/channels": "api/rest/controller/notification.TestChannelListCollectionGuard",
 	"GET /v1/notifications/policies": "api/rest/controller/notification.TestPolicyListCollectionGuard",
 	"GET /v1/agentprofiles":          "api/rest/controller/agentprofile.TestAgentProfileListCollectionGuard",
+	// identity-and-access B5.
+	"GET /v1/contracts/graph": "api/rest/controller/contract.TestContractGraphCollectionGuard",
+	"GET /v1/lineage/impact":  "api/rest/controller/lineage.TestLineageImpactCollectionGuard",
 }
 
 // TestMountedRoutesAreClassified is the A3 build gate: every mounted route has

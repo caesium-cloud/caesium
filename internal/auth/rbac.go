@@ -221,9 +221,10 @@ var endpointPolicy = map[string]RoutePolicy{
 	"GET /v1/atoms/:id":         clusterRoute(viewer),
 	"GET /v1/nodes/:id/workers": clusterRoute(viewer),
 
-	// Global cross-job graphs (B5 redacts them at the boundary).
-	"GET /v1/contracts/graph": collectionRoute(viewer).pendingOn("B5"),
-	"GET /v1/lineage/impact":  collectionRoute(viewer).pendingOn("B5"),
+	// Global cross-job graphs, computed whole and redacted at the boundary
+	// for confined principals (B5, internal/authz/redact.go).
+	"GET /v1/contracts/graph": collectionRoute(viewer),
+	"GET /v1/lineage/impact":  collectionRoute(viewer),
 
 	// Triggers resolve to the namespaces of every job they serve. A trigger's
 	// event history shows a confined caller only deliveries whose every

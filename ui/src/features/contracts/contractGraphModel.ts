@@ -25,7 +25,8 @@ export interface ContractFlowNodeData {
 
 export interface ContractFlowEdgeData {
   edgeId: string;
-  edgeClass: ContractEdgeClass;
+  /** Undefined for an edge collapsed to its endpoints (identity-and-access B5). */
+  edgeClass?: ContractEdgeClass;
   verdict?: ContractVerdict;
   findingCount: number;
   datasetLabel?: string;
@@ -91,8 +92,11 @@ export function buildContractFlow(
 }
 
 export function contractEdgeTestId(edge: ContractGraphEdge): string {
-  return `contract-edge:${edge.class}:${edge.id}`;
+  return `contract-edge:${edge.class ?? "external"}:${edge.id}`;
 }
+
+/** Label of a node another namespace owns (identity-and-access B5). */
+export const externalNodeLabel = "Another namespace";
 
 export function formatDatasetRef(dataset: ContractDatasetRef): string {
   const namespace = dataset.namespace.trim();
@@ -110,6 +114,9 @@ export function contractNodeTestId(data: ContractFlowNodeData): string {
 }
 
 function contractNodeLabel(node: ContractGraphNode): string {
+  if (node.kind === "external") {
+    return externalNodeLabel;
+  }
   if (node.kind === "dataset" && node.dataset) {
     return formatDatasetRef(node.dataset);
   }
@@ -122,6 +129,9 @@ function contractNodeLabel(node: ContractGraphNode): string {
 function contractNodeDetail(node: ContractGraphNode): string {
   if (node.kind === "dataset") {
     return "Dataset";
+  }
+  if (node.kind === "external") {
+    return "Outside your namespaces";
   }
   return "Job";
 }
@@ -137,8 +147,10 @@ function edgeVisualStyle(edge: ContractGraphEdge): CSSProperties {
   };
 }
 
-function edgeDashArray(edgeClass: ContractEdgeClass): string | undefined {
+function edgeDashArray(edgeClass: ContractEdgeClass | undefined): string | undefined {
   switch (edgeClass) {
+    case undefined:
+      return "2 6";
     case "inferred":
       return "8 5";
     case "evidence":
@@ -149,7 +161,7 @@ function edgeDashArray(edgeClass: ContractEdgeClass): string | undefined {
 }
 
 function edgeStrokeColor(edge: ContractGraphEdge): string {
-  if (edge.class === "evidence") {
+  if (edge.class === "evidence" || edge.class === undefined) {
     return "hsl(var(--text-4))";
   }
   switch (edge.verdict) {
