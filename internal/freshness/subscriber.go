@@ -104,16 +104,12 @@ func (c *Capturer) handleRunCompleted(ctx context.Context, evt event.Event) {
 
 	produced := make([]models.DatasetDeclaration, 0, len(decls))
 	consumedNames := make([]string, 0, len(decls))
-	consumedKeys := make([]string, 0, 2*len(decls))
 	for i := range decls {
 		switch decls[i].Direction {
 		case models.DatasetDirectionProduces:
 			produced = append(produced, decls[i])
 		case models.DatasetDirectionConsumes:
 			consumedNames = append(consumedNames, decls[i].Name)
-			// A start-time view keys inputs by name, a derivation-time view by
-			// datasetParamName; either form names a declared input.
-			consumedKeys = append(consumedKeys, decls[i].Name, datasetParamName(decls[i].Namespace, decls[i].Name))
 		}
 	}
 	if len(produced) == 0 {
@@ -131,7 +127,7 @@ func (c *Capturer) handleRunCompleted(ctx context.Context, evt event.Event) {
 	// consumed. A completion-time read would record an input that advanced
 	// mid-run and this run never saw, making the freshness comparison
 	// over-report the output as caught-up.
-	consumed := c.consumedForRun(ctx, info.params, consumedNames, consumedKeys)
+	consumed := c.consumedForRun(ctx, info.params, consumedNames)
 	if !inputsOwnedByRun(decls, info.namespace) {
 		// The job moved since this run was admitted (the subscriber is
 		// asynchronous): its current declarations, and anything read through
@@ -287,11 +283,10 @@ func (c *Capturer) consumedForRun(
 	ctx context.Context,
 	params map[string]string,
 	consumedNames []string,
-	consumedKeys []string,
 ) map[string]string {
 	for _, param := range []string{ConsumedWatermarksStartParam, freshnessConsumedWatermarksParam} {
 		if captured, ok := decodeConsumedParam(params, param); ok {
-			return declaredInputsOnly(captured, consumedKeys)
+			return captured
 		}
 	}
 	snapshot, err := consumedSnapshot(ctx, c.db, c.namespace, consumedNames)
@@ -302,27 +297,6 @@ func (c *Capturer) consumedForRun(
 		return nil
 	}
 	return snapshot
-}
-
-// declaredInputsOnly keeps the captured view's entries for the inputs the job
-// declares now (consumedKeys, read when the run completed). A view captured
-// before an apply that moved the producer to another namespace and changed its
-// inputs would otherwise be recorded as the new namespace's run's inputs
-// (identity-and-access B6); an input the job no longer declares is not one its
-// freshness is judged by. An empty result records nothing, leaving the
-// previous snapshot with the run that wrote it (DatasetState.ConsumedRunID).
-func declaredInputsOnly(captured map[string]string, consumedKeys []string) map[string]string {
-	declared := make(map[string]struct{}, len(consumedKeys))
-	for _, name := range consumedKeys {
-		declared[name] = struct{}{}
-	}
-	out := make(map[string]string, len(captured))
-	for name, watermark := range captured {
-		if _, ok := declared[name]; ok {
-			out[name] = watermark
-		}
-	}
-	return out
 }
 
 // decodeConsumedParam decodes one captured consumed-watermark param. Absent,

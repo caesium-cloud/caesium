@@ -185,11 +185,12 @@ func TestCapturerRecordsConsumedViewCapturedAtRunCreation(t *testing.T) {
 	}
 }
 
-// TestCapturerDropsInputsTheJobNoLongerDeclares: the start view was captured
-// before an apply that (moving the producer to another namespace) removed its
-// input; the completed run must not record that input as its own
-// (identity-and-access B6).
-func TestCapturerDropsInputsTheJobNoLongerDeclares(t *testing.T) {
+// TestCapturerRecordsTheStartViewOfAnUnmovedJobVerbatim (pre-PR r9 P2): an
+// apply that removes an input while the run is in flight, without moving the
+// job, leaves completion exactly as before identity-and-access B6: the view
+// the run started on is recorded as stamped. (A move is fenced at admission,
+// FenceStartParams, and at completion, inputsOwnedByRun.)
+func TestCapturerRecordsTheStartViewOfAnUnmovedJobVerbatim(t *testing.T) {
 	db := openRegistryDB(t)
 	c := NewCapturer(event.New(), db)
 	ctx := context.Background()
@@ -203,6 +204,9 @@ func TestCapturerDropsInputsTheJobNoLongerDeclares(t *testing.T) {
 	if err != nil {
 		t.Fatalf("enrich start params: %v", err)
 	}
+	if enriched, err = FenceStartParams(ctx, db, jobID, models.DefaultNamespace, enriched); err != nil {
+		t.Fatalf("fence start params: %v", err)
+	}
 	if enriched[ConsumedWatermarksStartParam] == "" {
 		t.Fatalf("precondition: the start view captured the input, got %v", enriched)
 	}
@@ -213,15 +217,8 @@ func TestCapturerDropsInputsTheJobNoLongerDeclares(t *testing.T) {
 
 	c.handleRunCompleted(ctx, event.Event{Type: event.TypeRunCompleted, JobID: jobID, RunID: runID})
 
-	st, ok, err := c.store.Get(ctx, nil, "staging.orders")
-	if err != nil || !ok {
-		t.Fatalf("produced state: ok=%v err=%v", ok, err)
-	}
-	if st.LastRunID == nil || *st.LastRunID != runID {
-		t.Fatalf("the run must still advance its output, last run = %v", st.LastRunID)
-	}
-	if len(st.ConsumedWatermarks) != 0 || st.ConsumedRunID != nil {
-		t.Fatalf("an input the job no longer declares was recorded: %s (owner %v)", st.ConsumedWatermarks, st.ConsumedRunID)
+	if consumed := consumedSnapshotOf(t, c, "staging.orders"); len(consumed) != 1 || consumed["raw.vendor_x"] != "vendor-key-1" {
+		t.Fatalf("consumed snapshot = %v, want the start view verbatim", consumed)
 	}
 }
 
