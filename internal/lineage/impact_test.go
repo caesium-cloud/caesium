@@ -530,3 +530,30 @@ func (s *ImpactSuite) TestFailedTaskPersistsInputsAndPartialOutputs() {
 		}
 	}
 }
+
+// TestNamespacesCarriedButNotSerialised: every node carries its job's current
+// namespace and its run's persisted namespace for the REST boundary's
+// redaction (identity-and-access B5), and neither ever reaches the wire.
+func (s *ImpactSuite) TestNamespacesCarriedButNotSerialised() {
+	ns := "test"
+	_, runA := s.createJobAndRun("job-ns-producer", "")
+	s.createDataset(runA, ns, "ns.raw", "output", "extract")
+	consumer, runB := s.createJobAndRun("job-ns-consumer", "")
+	s.createDataset(runB, ns, "ns.raw", "input", "load")
+	s.createDataset(runB, ns, "ns.clean", "output", "load")
+	// The consumer moved to finance after its run, which stayed in marketing.
+	s.Require().NoError(s.db.Model(&models.Job{}).Where("id = ?", consumer.ID).Update("namespace", "finance").Error)
+	s.Require().NoError(s.db.Model(&models.JobRun{}).Where("id = ?", runB.JobRunID).Update("namespace", "marketing").Error)
+
+	result, err := QueryImpact(s.ctx, s.db, ns, "ns.raw", 0)
+	s.Require().NoError(err)
+	s.Require().Len(result.Downstream, 1)
+	s.Equal("finance", result.Downstream[0].JobNamespace)
+	s.Equal("marketing", result.Downstream[0].RunNamespace)
+
+	body, err := json.Marshal(result)
+	s.Require().NoError(err)
+	s.NotContains(string(body), "finance")
+	s.NotContains(string(body), "marketing")
+	s.NotContains(string(body), "namespace\":\"default")
+}

@@ -6,12 +6,14 @@ import (
 	"strings"
 	"time"
 
+	"github.com/caesium-cloud/caesium/internal/auth"
 	"github.com/caesium-cloud/caesium/internal/metrics"
 	"github.com/caesium-cloud/caesium/internal/models"
 	runstore "github.com/caesium-cloud/caesium/internal/run"
 	"github.com/caesium-cloud/caesium/pkg/log"
 	"github.com/google/uuid"
 	"gorm.io/datatypes"
+	"gorm.io/gorm"
 )
 
 // ErrHoldReleaseUnauthenticated is returned when a release is attempted on a
@@ -42,6 +44,10 @@ type ReleaseHoldParams struct {
 	// namespace of the dataset's owners as the auth middleware resolved it
 	// ("*" when they span several, "" when unresolved).
 	AuditNamespace string
+	// Caller is the authenticated principal whose grants decide. A
+	// namespace-confined operator is re-checked inside the release
+	// transaction (B6), and the returned hold is shaped for what it may read.
+	Caller *auth.Principal
 }
 
 // ReleaseHoldResult is the response shape for POST /v1/datasets/holds/:id/release.
@@ -72,13 +78,18 @@ func (s *Service) ReleaseHold(params ReleaseHoldParams) (*ReleaseHoldResult, err
 	// exists to make impossible.
 	entry := s.holdReleaseAuditEntry(params, principal, "success")
 
-	store := runstore.Default()
-	hold, err := store.ReleaseHold(s.ctx, params.HoldID, runstore.ReleaseHoldParams{
-		ReleasedBy: principal,
-		Note:       strings.TrimSpace(params.Reason),
-		Tolerances: params.Tolerances,
-		Audit:      entry,
-	})
+	var hold *models.DatasetHold
+	var err error
+	if confined(params.Caller, ReleaseRole) {
+		hold, err = s.releaseConfined(params, principal, entry)
+	} else {
+		hold, err = runstore.Default().ReleaseHold(s.ctx, params.HoldID, runstore.ReleaseHoldParams{
+			ReleasedBy: principal,
+			Note:       strings.TrimSpace(params.Reason),
+			Tolerances: params.Tolerances,
+			Audit:      entry,
+		})
+	}
 	if err != nil {
 		// A REFUSED release changed nothing, so its audit row cannot ride a
 		// committed transaction; it is written on its own, best-effort.
@@ -89,7 +100,43 @@ func (s *Service) ReleaseHold(params ReleaseHoldParams) (*ReleaseHoldResult, err
 	metrics.AuditLogEntriesTotal.WithLabelValues(entry.Action, entry.Outcome).Inc()
 	log.Info("dataset hold released by operator ack",
 		"hold_id", hold.ID, "dataset", hold.Name, "actor", principal)
+	if err := s.shapeHolds(viewerFor(params.Caller), []*models.DatasetHold{hold}); err != nil {
+		return nil, err
+	}
 	return &ReleaseHoldResult{Hold: hold}, nil
+}
+
+// storeFor is the run store a confined release writes through: a store on
+// the (possibly lock-holding) connection, publishing on the default store's
+// event bus. Tests swap it.
+var storeFor = func(conn *gorm.DB) *runstore.Store {
+	store := runstore.NewStore(conn)
+	store.SetBus(runstore.Default().Bus())
+	return store
+}
+
+// releaseConfined is a namespace-confined operator's release: the held
+// dataset's producers are re-checked inside the release transaction under
+// their advisory locks (guardedWrite), and the release runs on the locked
+// connection with the default store's event bus.
+func (s *Service) releaseConfined(params ReleaseHoldParams, principal string, entry *models.AuditLog) (*models.DatasetHold, error) {
+	var target models.DatasetHold
+	if err := s.db.WithContext(s.ctx).Select("id", "namespace", "name").First(&target, "id = ?", params.HoldID).Error; err != nil {
+		return nil, err
+	}
+	var hold *models.DatasetHold
+	err := s.guardedWrite(params.Caller, ReleaseRole, target.Namespace, target.Name, func(conn *gorm.DB, guard func(tx *gorm.DB) error) error {
+		released, err := storeFor(conn).ReleaseHold(s.ctx, params.HoldID, runstore.ReleaseHoldParams{
+			ReleasedBy: principal,
+			Note:       strings.TrimSpace(params.Reason),
+			Tolerances: params.Tolerances,
+			Audit:      entry,
+			Guard:      guard,
+		})
+		hold = released
+		return err
+	})
+	return hold, err
 }
 
 // holdReleaseAuditEntry builds the AuditLog row for one release attempt. A hold

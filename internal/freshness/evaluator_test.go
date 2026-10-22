@@ -38,6 +38,8 @@ type fakeRunStarter struct {
 	calls       int
 	runIDs      []uuid.UUID
 	launched    []uuid.UUID
+	// namespace is the persisted namespace of the runs it starts.
+	namespace string
 }
 
 func (f *fakeRunStarter) StartWithContext(ctx context.Context, jobID uuid.UUID, triggerID *uuid.UUID, opts ...runstorage.StartOption) (*runstorage.JobRun, error) {
@@ -56,6 +58,17 @@ func (f *fakeRunStarter) StartWithContext(ctx context.Context, jobID uuid.UUID, 
 	for _, opt := range opts {
 		if opt != nil {
 			opt(&startOpts)
+		}
+	}
+	if startOpts.NamespaceGuard != nil {
+		// Like Store.admit: the guard sees the job's namespace as admission
+		// reads it, before anything is written.
+		var job models.Job
+		if err := f.db.Select("namespace").Take(&job, "id = ?", jobID).Error; err != nil {
+			f.t.Fatalf("load job for the namespace guard: %v", err)
+		}
+		if err := startOpts.NamespaceGuard(job.Namespace); err != nil {
+			return nil, err
 		}
 	}
 	params, err := json.Marshal(startOpts.Params)
@@ -89,7 +102,7 @@ func (f *fakeRunStarter) StartWithContext(ctx context.Context, jobID uuid.UUID, 
 		// exact run id — precisely so the caller cannot adopt a look-alike.
 		return nil, &runstorage.RunCommittedError{RunID: runID, JobID: jobID, Err: f.err}
 	}
-	return &runstorage.JobRun{ID: runID, JobID: jobID, Status: runstorage.StatusRunning, Params: startOpts.Params}, nil
+	return &runstorage.JobRun{ID: runID, JobID: jobID, Status: runstorage.StatusRunning, Params: startOpts.Params, Namespace: f.namespace}, nil
 }
 
 // launch stands in for the production RunLauncher (cmd/start's job.Run

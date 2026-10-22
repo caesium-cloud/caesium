@@ -20,7 +20,7 @@ func (ctrl *Controller) Holds(c *echo.Context) error {
 	if err := parsePagination(c, &params.Limit, &params.Offset); err != nil {
 		return err
 	}
-	result, err := svc.New(c.Request().Context()).Holds(params)
+	result, err := newService(c.Request().Context()).Holds(params)
 	if err != nil {
 		if errors.Is(err, svc.ErrHoldStatus) {
 			return echo.NewHTTPError(http.StatusBadRequest, err.Error())
@@ -40,7 +40,7 @@ func (ctrl *Controller) Metrics(c *echo.Context) error {
 	if err := parsePagination(c, &params.Limit, &params.Offset); err != nil {
 		return err
 	}
-	result, err := svc.New(c.Request().Context()).Metrics(namespace, name, strings.TrimSpace(c.QueryParam("metric")), params)
+	result, err := newService(readContext(c)).Metrics(namespace, name, strings.TrimSpace(c.QueryParam("metric")), params)
 	if err != nil {
 		if errors.Is(err, svc.ErrMetricRequired) {
 			return echo.NewHTTPError(http.StatusBadRequest, err.Error())

@@ -405,8 +405,8 @@ func (s *IntegrationTestSuite) TestAuthNamespacedSharedObjectsAndTriggers() {
 	s.Require().Equal(http.StatusUnprocessableEntity, status, "a readable record still refuses a different request: %s", body)
 }
 
-// TestAuthNamespacedDatasetsBackfillsIncidents: dataset writes are cluster-only
-// for confined principals until B6 (their producer resolvers are unit-tested);
+// TestAuthNamespacedDatasetsBackfillsIncidents: dataset writes need the role in
+// every producer namespace (B6);
 // backfills resolve to their job's and their own namespace (B4); and the live
 // incident route resolves to the incident's namespace.
 func (s *IntegrationTestSuite) TestAuthNamespacedDatasetsBackfillsIncidents() {
@@ -443,17 +443,6 @@ func (s *IntegrationTestSuite) TestAuthNamespacedDatasetsBackfillsIncidents() {
 	advance := func(token, dataset string) (int, string) {
 		return s.nsRequest(http.MethodPost, "/v1/datasets/_/"+dataset+"/advance", token, `{"watermark":"2026-10-15"}`, nil)
 	}
-	// Every dataset route is cluster-only for confined principals until B6:
-	// the advance answers with the persisted state (last run, consumed
-	// watermarks), which can predate a producer's move from another
-	// namespace. Even an operator in every producer namespace is refused; the
-	// cluster admin advances exactly as before.
-	for _, dataset := range []string{shared, mktOnly} {
-		for _, token := range []string{mktOperator, bothOperator} {
-			status, body := advance(token, dataset)
-			s.Require().Equal(http.StatusForbidden, status, "advance %s: %s", dataset, body)
-		}
-	}
 	requireWatermark := func(status int, body, dataset string) {
 		s.T().Helper()
 		s.Require().Equal(http.StatusOK, status, body)
@@ -468,7 +457,17 @@ func (s *IntegrationTestSuite) TestAuthNamespacedDatasetsBackfillsIncidents() {
 		s.NotEmpty(out.Outcome, body)
 		s.Equal(dataset, out.State.Name, body)
 	}
-	status, body := advance(s.authAPIKey, shared)
+	// B6: the advance needs runner in every producer namespace. Marketing's
+	// operator advances its own dataset and is refused the one finance
+	// co-produces; an operator in both advances it; the cluster admin
+	// advances exactly as before.
+	status, body := advance(mktOperator, mktOnly)
+	requireWatermark(status, body, mktOnly)
+	status, body = advance(mktOperator, shared)
+	s.Require().Equal(http.StatusForbidden, status, "advance %s: %s", shared, body)
+	status, body = advance(bothOperator, shared)
+	requireWatermark(status, body, shared)
+	status, body = advance(s.authAPIKey, shared)
 	requireWatermark(status, body, shared)
 
 	release := `{"reason":"a3 namespace check"}`
@@ -478,16 +477,13 @@ func (s *IntegrationTestSuite) TestAuthNamespacedDatasetsBackfillsIncidents() {
 		s.Require().NoError(f.catalogDB.QueryRowContext(s.T().Context(), `SELECT status FROM dataset_holds WHERE id = ?`, id).Scan(&status))
 		return status
 	}
-	// A hold release answers with the whole hold, whose impact snapshot names
-	// downstream consumers in any namespace: cluster-only until B6 redacts it,
-	// even for an operator in every producer namespace.
+	// The release needs operator in every producer namespace.
 	s.requireNSStatus(http.StatusForbidden, http.MethodPost, "/v1/datasets/holds/"+sharedHold+"/release", mktOperator, release)
-	s.requireNSStatus(http.StatusForbidden, http.MethodPost, "/v1/datasets/holds/"+sharedHold+"/release", bothOperator, release)
-	s.requireNSStatus(http.StatusForbidden, http.MethodPost, "/v1/datasets/holds/"+mktHold+"/release", mktOperator, release)
 	s.Equal("active", holdStatus(sharedHold), "a refused release changes nothing")
-	s.Equal("active", holdStatus(mktHold))
-	s.requireNSStatus(http.StatusOK, http.MethodPost, "/v1/datasets/holds/"+sharedHold+"/release", s.authAPIKey, release)
-	s.Equal("released", holdStatus(sharedHold), "the cluster admin releases exactly as before")
+	s.requireNSStatus(http.StatusOK, http.MethodPost, "/v1/datasets/holds/"+mktHold+"/release", mktOperator, release)
+	s.Equal("released", holdStatus(mktHold), "marketing releases a hold on its own dataset")
+	s.requireNSStatus(http.StatusOK, http.MethodPost, "/v1/datasets/holds/"+sharedHold+"/release", bothOperator, release)
+	s.Equal("released", holdStatus(sharedHold), "an operator in every producer namespace releases")
 
 	// Backfills (the jobs' cron never fires, so a backfill schedules nothing)
 	// are live for confined principals since B4 (a backfill deduplicates

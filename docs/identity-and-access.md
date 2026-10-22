@@ -44,7 +44,12 @@ Contents: [Overview and concepts](#overview-and-concepts) |
   dataset namespace is the OpenLineage namespace carried by dataset
   declarations, dataset metrics, and the `/v1/datasets/:ns/:name` path; it is
   reserved for cross-instance datasets and has nothing to do with tenancy or
-  grants. Everywhere else this guide says "namespace" for the tenancy axis.
+  grants. A dataset's tenancy namespaces are those of the jobs that declare
+  they produce it (`datasets.produces`), read at request time, so a moved
+  producer takes the dataset with it. A consumer or a `sources` declaration
+  owns nothing, and a dataset with no declared producer is visible only to
+  unconfined principals. See [Datasets](#datasets). Everywhere else this guide
+  says "namespace" for the tenancy axis.
 - **Job alias.** `metadata.alias` keeps its global unique index. Every
   alias-addressed surface (CLI verbs, key job scopes, lineage, receipts) is
   unchanged by namespaces.
@@ -622,6 +627,23 @@ compatibility); undeclared namespaces are rejected only when a policy file is
 loaded. Amended in identity-and-access W4 (orchestrator decision, pending
 maintainer sign-off).
 
+**Canonical aliases.** Job aliases are matched exactly and are case-sensitive.
+Every writer (apply, the legacy `POST /v1/jobs`, git sync, `caesium dev`, lint)
+refuses an alias with leading or trailing whitespace, Unicode spaces included,
+with `400 metadata.alias "payroll " must not have leading or trailing
+whitespace`, so a second job differing only by whitespace can no longer be
+created. Git sync skips such a manifest on its own (reported with reason
+`alias_not_canonical`) and syncs the rest; the alias stays protected from the
+source's prune. A job stored under a non-canonical alias before this rule is
+not migrated: re-applying its manifest is refused and changes nothing. To
+recover, retire the old job first with `DELETE /v1/jobs/:id` (its own ID, from
+`GET /v1/jobs`), then apply the corrected manifest: it updates a job that
+already holds the canonical alias, if one exists, and creates it otherwise.
+Retire first because dataset and contract validation compare aliases with
+whitespace trimmed, so while both are active they cannot tell the two jobs
+apart. A git source holding both spellings fails its sync as a duplicate
+alias, as it did before this rule.
+
 - Runs, backfills and incidents carry a copy of the job's namespace when they
   are created, so global lists can filter without a join. Triggers, task runs,
   events and lineage rows derive it through their job. Run-scoped data
@@ -658,6 +680,15 @@ maintainer sign-off).
   on run reads, the event stream, lifecycle event history, an incident list's
   `last_error`, and a fanned step's `why` group (`firstFailure.error` and
   `summary`).
+- DAG snapshots (the topology history behind `caesium blame`,
+  `GET /v1/jobs/:id/topology` and `topology/history`) record the namespace
+  they were written in. A move writes a fresh snapshot in the new namespace
+  even when the topology is unchanged, so the new owner's topology and blame
+  start at the move and the old owner's history stays with it. Snapshots
+  written before this release record no namespace and are shown only to
+  unconfined callers; the first apply of each existing job after the upgrade
+  writes one namespaced snapshot (same content) so its current owner sees its
+  topology.
 
 ### Git sync allowlist
 
@@ -693,8 +724,8 @@ is unrestricted and writes no such row.
 A principal confined to some namespaces, and a job-scoped API key (even one
 holding its role at `*`), can create, apply, move and prune jobs only within
 its reach. A job-scoped key writes only the exact aliases its scope lists (an
-alias with leading or trailing whitespace, Unicode spaces included, is a
-different job and is refused with 403). In detail:
+alias with leading or trailing whitespace is refused with 400 for every writer,
+see [Canonical aliases](#namespaces-on-jobs)). In detail:
 
 - **Apply** (`caesium job apply`, `POST /v1/jobdefs/apply`) needs operator in
   every definition's namespace and in the stored namespace of every alias it
@@ -831,8 +862,8 @@ principal confined to some namespaces is treated:
 | --- | --- |
 | identity | Allowed whatever its grants, even none: `GET /auth/whoami`, `POST /auth/logout`, `GET /v1/system/features`. |
 | cluster | Always denied (403 `insufficient_role`): metrics, nodes and workers, atoms, logs, database, cache prune, `POST /v1/triggers`, the connector reads (`/v1/connectors*`), `GET /v1/auth/namespaces`, and `GET /v1/auth/policy` plus `POST /v1/auth/policy/reload`. |
-| namespaced | Caesium resolves the namespace of the target the handler will act on and requires the route's role in it (in every resolved namespace; once B6 ships, dataset reads will need it in any one). A target with no owning namespace is cluster-only. |
-| collection | The handler returns only rows from the namespaces where the principal holds the route's role. Live today: the API key list, the shared-object lists ([Shared objects](#shared-objects)), and the job-derived collections in [Collections](#collections-and-history-under-a-job). |
+| namespaced | Caesium resolves the namespace of the target the handler will act on and requires the route's role in it (in every resolved namespace; a dataset read needs it in any one of its producers' namespaces). A target with no owning namespace is cluster-only. |
+| collection | The handler returns only rows from the namespaces where the principal holds the route's role. Live today: the API key list, the shared-object lists ([Shared objects](#shared-objects)), the job-derived collections in [Collections](#collections-and-history-under-a-job), the dataset and hold lists ([Datasets](#datasets)), and the redacted cross-namespace graphs ([Cross-namespace aggregates](#cross-namespace-aggregates)). |
 
 A principal is *confined* on a route when its cluster role (its grant at `*`)
 is below the route's role. An unconfined principal is authorised exactly as
@@ -903,9 +934,6 @@ that makes it namespace-aware lands (unconfined principals are unaffected):
 | Item | Routes |
 | --- | --- |
 | A6 | `POST /v1/events` |
-| B7 | `GET /v1/jobs/:id/blame`, `topology` and `topology/history` (DAG snapshots record no namespace yet) |
-| B5 | `GET /v1/lineage/impact`, `GET /v1/contracts/graph` |
-| B6 | every `/v1/datasets*` route |
 
 Every namespace denial is `403 insufficient permissions` and is audited as
 `auth.denied` with reason `insufficient_role`. Lint and diff, where the caller
@@ -1011,7 +1039,13 @@ History under a job (`/v1/jobs/:id/...`) is authorised on the job's current
 namespace and then filtered by each row's persisted namespace: runs (and the
 `X-Caesium-Total-Count` header), the latest run on a job read, backfills, cache
 entries (by the run that filled them), and the baseline `why` compares against
-(none when the only candidate is unreadable). A fanned step's group explanation
+(none when the only candidate is unreadable). Blame, topology and topology
+history are computed over the DAG snapshots written in a namespace the caller
+may read (legacy snapshots with no namespace only for unconfined callers): an
+element is attributed to the first readable snapshot that introduces it, the
+latest topology is the newest readable snapshot, and a `commit`, `snapshot`,
+`from` or `to` that only an unreadable snapshot carries answers like one that
+does not exist. A fanned step's group explanation
 withholds that same pre-upgrade baseline text from `firstFailure.error` and
 `summary`. A run diff needs viewer in both
 runs' namespaces. A trigger's event history shows only deliveries whose every
@@ -1023,6 +1057,83 @@ upgrade records no namespace and is shown only to unconfined callers.
 `DELETE /v1/jobs/:id/queue/:queue_id` answers 404 for a row the caller cannot
 see, and 403 unless the caller also holds `operator` in the namespace the row
 was queued in (not only in the job's current namespace).
+
+### Datasets
+
+A dataset belongs to the current namespaces of its declared producers (see
+the tenancy versus dataset namespace note at the top). For a confined
+principal:
+
+| Route | Rule |
+| --- | --- |
+| `GET /v1/datasets`, `GET /v1/datasets/holds` | Only datasets (and holds on datasets) with a producer in a namespace where it holds `viewer`, filtered in SQL, so `total` counts what it sees. A declared dataset is listed for its producer's namespace before its first run. |
+| `GET /v1/datasets/:ns/:name`, `/derivations`, `/metrics` | `viewer` in any producer namespace. |
+| `POST /v1/datasets/:ns/:name/advance` | `runner` in every producer namespace. |
+| `POST /v1/datasets/holds/:id/release` | `operator` in every producer namespace. |
+
+A dataset the caller may not read and a dataset that does not exist both
+answer the same audited `403`. The two writes repeat the producer check
+inside their own transaction, holding the advisory lock that job applies
+take for each producer's alias on PostgreSQL. So an apply that moves or
+re-declares a producer is either seen or waited for. If the producer set
+keeps changing under the write, the write answers `409`.
+
+What a confined reader sees of a dataset it may read is decided by who owns
+each piece:
+
+- **Derivations:** each decision is recorded with its producer and that
+  producer's namespace at decision time, skips included, and is shown only in
+  that namespace. A decision recorded before this change is shown only to a
+  caller holding `viewer` in every current producer namespace. A covering
+  run's id is dropped when that run is persisted elsewhere.
+- **Metrics:** the series, its total and the baseline (median, samples,
+  membership) use only samples from runs persisted in the caller's
+  namespaces, the same rule the live assertion evaluator judges a run by.
+- **State:** `last_run_id` and `consumed_watermarks` are kept only when that
+  run is persisted in a readable namespace. `reason` is kept only when the
+  producer whose evaluation wrote it is in one (a reason written before this
+  change is hidden).
+- **Holds:** the holder (job, run, task, step) is kept only when the opening
+  run is persisted in a readable namespace. The latest breach (its run and
+  violations) and the clearing run follow their runs the same way. The
+  `impact` cone, which names downstream jobs anywhere, is always left out.
+- **Producer:** `producing_job` and `declaration` name a producer in a
+  readable namespace. Other producers are left out without a marker.
+
+Unconfined principals, and every request without a policy file, get the
+same rows and bodies as before.
+
+### Cross-namespace aggregates
+
+`GET /v1/lineage/impact` and `GET /v1/contracts/graph` are computed over every
+namespace and then redacted for a confined principal, so it sees how its own
+jobs connect to other namespaces without learning what they connect to:
+
+- A node it may not read becomes `{"id": "external:<opaque>", "kind":
+  "external"}`; an impact node keeps its `depth` too. A lineage node is
+  readable when both its job's current namespace and the namespace persisted on
+  the run that wrote it are; a contract job node when its job's namespace is.
+  A node no single job owns (an inferred edge's unknown producer) is never
+  readable.
+- An edge touching such a node keeps only `{"id", "from", "to"}`: the dataset,
+  the producer, consumer and previous schemas, the verdict, the findings, the
+  class and the last-seen time are dropped, and edges that collapse onto the
+  same endpoints are one edge. An evidence edge observed from a run in another
+  namespace is collapsed the same way. An inferred edge whose job shares its
+  trigger with a job the principal cannot read is withheld; the job stays.
+- A dataset node is shown only when an edge shown whole carries it.
+- The collapsed topology is kept: an edge between two foreign jobs is an edge
+  between two placeholders.
+- Placeholder ids are stable within one response and unrelated across
+  responses (an HMAC under a per-response random key).
+- An impact root it does not own answers exactly as a root nobody recorded
+  (`200`, empty `downstream`). A declared dataset is owned by its declared
+  producers; an undeclared one by the runs that wrote it; consuming a dataset
+  never grants it. The graph's `?dataset=` filter is applied after redaction,
+  so a dataset seen only through collapsed edges matches nothing.
+
+Job-scoped API keys and agent-session tokens are still refused both routes.
+An unconfined principal gets the unredacted body, byte for byte.
 
 ### Incidents and agent sessions
 
@@ -1330,8 +1441,9 @@ grants are known not to allow it.
   need `operator`. A mutation on a historical run or backfill also needs the role
   in that object's persisted namespace, as the server does. Until the job is
   loaded, the cluster role decides, so a confined principal sees fewer controls,
-  never more. Dataset hold release still follows the cluster role (a hold carries
-  no tenancy namespace yet).
+  never more. The Console's dataset hold release control still follows the
+  cluster role: it does not resolve a dataset's producers, while the server
+  requires `operator` in every producer namespace.
 - **Access page (`/access`, sidebar entry for everyone).** "My access" shows the
   subject, kind, cluster role and per-namespace grants. Principals with a
   cluster role (and no job scope) also see the declared namespaces and their
