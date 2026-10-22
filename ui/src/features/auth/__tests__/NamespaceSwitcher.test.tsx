@@ -81,6 +81,18 @@ describe("NamespaceSwitcher", () => {
     expect(declared).toHaveBeenCalled();
   });
 
+  it("treats a legacy job with an empty namespace as default and shows the switcher", async () => {
+    await login({ kind: "api_key", subject: "k", role: "viewer", cluster_role: "viewer", grants: { "*": "viewer" }, namespaces: ["*"], is_scoped: true });
+    vi.spyOn(api, "getJobs").mockResolvedValue([job(""), job("marketing")]);
+    show();
+    const select = await screen.findByTestId("namespace-switcher");
+    expect(Array.from(select.querySelectorAll("option")).map((o) => o.textContent)).toEqual([
+      "All namespaces",
+      "default",
+      "marketing",
+    ]);
+  });
+
   it("never requests the declared namespaces for a job-scoped key", async () => {
     await login({ kind: "api_key", subject: "k", role: "viewer", cluster_role: "viewer", grants: { "*": "viewer" }, namespaces: ["*"], is_scoped: true });
     const declared = vi.spyOn(api, "getAuthNamespaces").mockResolvedValue({ namespaces: [] } as never);

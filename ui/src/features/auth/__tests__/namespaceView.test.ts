@@ -14,6 +14,12 @@ const clusterWide = { namespaces: ["*"], kind: "api_key", subject: "k", role: "a
 const anonymous = { namespaces: [] as string[], kind: null, subject: null, role: null };
 
 describe("namespaceOptions", () => {
+  it("offers legacy jobs with no namespace as default, so the switcher shows", () => {
+    expect(
+      namespaceOptions({ principal: clusterWide, jobNamespaces: ["", undefined, "  ", "marketing"] }),
+    ).toEqual(["default", "marketing"]);
+  });
+
   it("offers a confined principal exactly its own namespaces, sorted with default first", () => {
     expect(namespaceOptions({ principal: confined(["marketing", "default", "finance"]) })).toEqual([
       "default",
