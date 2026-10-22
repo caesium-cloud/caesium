@@ -204,6 +204,8 @@ type job struct {
 	// clientProcess marks a run a client process executes (WithClientProcess):
 	// its secret scope never waits for a server access policy.
 	clientProcess bool
+	// startNamespaceGuard is WithStartNamespaceGuard's admission guard.
+	startNamespaceGuard func(namespace string) error
 	// imageResolver is the digest resolver pinDigests uses. Nil falls back to
 	// imagecheck.Default(); tests inject a stub so Create can be asserted
 	// against a known digest without a registry.
@@ -568,6 +570,20 @@ func WithAtomPollInterval(interval time.Duration) JobOption {
 func WithParams(params map[string]string) JobOption {
 	return func(j *job) {
 		j.params = params
+	}
+}
+
+// WithStartNamespaceGuard carries a caller's authority into this run's
+// admission (identity-and-access A6): the guard is passed to the run store as
+// run.WithStartNamespaceGuard on every admission path Run takes, so it is
+// checked inside the admission transaction against the namespace admission
+// freezes from the job row. A manual trigger fire by a namespace-confined
+// caller uses it, so a job moved out of the caller's namespaces between the
+// request's authorisation and the launch is never admitted. A nil guard
+// changes nothing.
+func WithStartNamespaceGuard(guard func(namespace string) error) JobOption {
+	return func(j *job) {
+		j.startNamespaceGuard = guard
 	}
 }
 
@@ -1111,6 +1127,9 @@ func (j *job) Run(ctx context.Context) (err error) {
 			return nil, runlife.ErrServerShutdown
 		}
 		startOpts := []run.StartOption{run.WithStartParams(j.params)}
+		if j.startNamespaceGuard != nil {
+			startOpts = append(startOpts, run.WithStartNamespaceGuard(j.startNamespaceGuard))
+		}
 		startPriority := strings.TrimSpace(j.priorityOverride)
 		if startPriority == "" {
 			startPriority = strings.TrimSpace(j.priority)
@@ -1141,6 +1160,14 @@ func (j *job) Run(ctx context.Context) (err error) {
 		}
 
 		if running != nil {
+			// A guarded start (identity-and-access A6) never adopts a run
+			// persisted outside the caller's authority: the job may have
+			// moved and been started elsewhere after AdmitRun's check.
+			if j.startNamespaceGuard != nil {
+				if err := j.startNamespaceGuard(running.Namespace); err != nil {
+					return nil, err
+				}
+			}
 			if executionMode == executionModeDistributed {
 				return store.Get(running.ID)
 			}

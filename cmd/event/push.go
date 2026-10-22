@@ -102,5 +102,5 @@ func init() {
 	pushCmd.Flags().StringVar(&pushSource, "source", "", "Event source")
 	pushCmd.Flags().StringVar(&pushData, "data", "{}", "JSON event payload")
 	pushCmd.Flags().StringVar(&pushServer, "server", "http://localhost:8080", "Caesium server base URL")
-	pushCmd.Flags().StringVar(&pushAPIKey, "api-key", "", "Event ingest API key for authentication (prefer "+eventIngestAPIKeyEnvVar+"; --api-key is visible in process listings)")
+	pushCmd.Flags().StringVar(&pushAPIKey, "api-key", "", "API key sent as a bearer token, else "+eventIngestAPIKeyEnvVar+", else CAESIUM_API_KEY: with authentication enabled a runner key (leave the deprecated "+eventIngestAPIKeyEnvVar+" unset); without it the shared secret. --api-key is visible in process listings")
 }

@@ -30,6 +30,9 @@ type HTTP struct {
 	secretResolver secret.Resolver
 	listJobs       func(context.Context, string) (models.Jobs, error)
 	runJob         func(context.Context, *models.Job, map[string]string, string) error
+	// runGuardedJob runs a job whose admission carries a fire's start guard
+	// (WithFireStartGuard).
+	runGuardedJob func(context.Context, *models.Job, map[string]string, string, func(string) error) error
 }
 
 var (
@@ -67,6 +70,17 @@ func WithRunJob(fn func(context.Context, *models.Job, map[string]string, string)
 
 type FireOptions struct {
 	Priority string
+	// Allows, when set, confines the fire to the trigger's jobs it accepts
+	// (by exact stored alias and namespace); the others are not run.
+	Allows func(alias, namespace string) bool
+	// StartGuard, when set, is passed into every fired job's admission
+	// (job.WithStartNamespaceGuard) and checked inside the admission
+	// transaction against the job's namespace there.
+	StartGuard func(job *models.Job, namespace string) error
+	// OnGuardedRunError, when set, is called with a guarded job's run error
+	// after the run returned, outside any admission transaction (to audit
+	// a StartGuard refusal).
+	OnGuardedRunError func(job *models.Job, err error)
 }
 
 type FireOption func(*FireOptions)
@@ -74,6 +88,34 @@ type FireOption func(*FireOptions)
 func WithPriority(priority string) FireOption {
 	return func(opts *FireOptions) {
 		opts.Priority = strings.TrimSpace(priority)
+	}
+}
+
+// WithFireScope confines a manual fire to the jobs allows accepts
+// (identity-and-access A6): a job that joined the trigger after the request
+// was authorised, or whose alias is outside a job-scoped key's scope, is not
+// run.
+func WithFireScope(allows func(alias, namespace string) bool) FireOption {
+	return func(opts *FireOptions) {
+		opts.Allows = allows
+	}
+}
+
+// WithFireStartGuard carries the caller's namespace authority into each fired
+// job's admission (identity-and-access A6), so a job moved out of the
+// caller's namespaces after the request was authorised is never admitted.
+func WithFireStartGuard(guard func(job *models.Job, namespace string) error) FireOption {
+	return func(opts *FireOptions) {
+		opts.StartGuard = guard
+	}
+}
+
+// WithGuardedRunError reports each guarded job's run error once the run
+// returned. The admission guard runs inside the admission transaction, so a
+// refusal is recorded here rather than from the guard.
+func WithGuardedRunError(fn func(job *models.Job, err error)) FireOption {
+	return func(opts *FireOptions) {
+		opts.OnGuardedRunError = fn
 	}
 }
 
@@ -94,6 +136,7 @@ func New(t *models.Trigger, opts ...Option) (*HTTP, error) {
 		secretResolver: defaultSecretResolver,
 		listJobs:       defaultListJobs,
 		runJob:         defaultRunJob,
+		runGuardedJob:  defaultRunGuardedJob,
 	}
 
 	for _, opt := range opts {
@@ -146,12 +189,28 @@ func (h *HTTP) FireWithParams(ctx context.Context, params map[string]string, opt
 			log.Warn("skipping nil job", "trigger_id", h.id)
 			continue
 		}
+		if fireOptions.Allows != nil && !fireOptions.Allows(jobModel.Alias, jobModel.Namespace) {
+			log.Warn("manual fire: skipping a job outside the caller's scope", "trigger_id", h.id, "job_id", jobModel.ID)
+			continue
+		}
 		if jobModel.Paused {
 			log.Info("skipping paused job", "id", j.ID)
 			continue
 		}
 		runtimeParams := cloneParams(mergedParams)
 		priority := fireOptions.Priority
+		if startGuard := fireOptions.StartGuard; startGuard != nil {
+			guard := func(namespace string) error { return startGuard(jobModel, namespace) }
+			go func(jobModel *models.Job, params map[string]string, priority string) {
+				if err := h.runGuardedJob(context.WithoutCancel(ctx), jobModel, params, priority, guard); err != nil {
+					log.Error("job run failure", "id", jobModel.ID, "error", err)
+					if fireOptions.OnGuardedRunError != nil {
+						fireOptions.OnGuardedRunError(jobModel, err)
+					}
+				}
+			}(jobModel, runtimeParams, priority)
+			continue
+		}
 		go func(jobModel *models.Job, params map[string]string, priority string) {
 			if err := h.runJob(context.WithoutCancel(ctx), jobModel, params, priority); err != nil {
 				log.Error("job run failure", "id", jobModel.ID, "error", err)
@@ -237,12 +296,19 @@ var (
 	}
 
 	defaultRunJob = func(ctx context.Context, j *models.Job, params map[string]string, priority string) error {
+		return defaultRunGuardedJob(ctx, j, params, priority, nil)
+	}
+
+	defaultRunGuardedJob = func(ctx context.Context, j *models.Job, params map[string]string, priority string, guard func(namespace string) error) error {
 		if j == nil {
 			return fmt.Errorf("job is nil")
 		}
 		opts := []job.JobOption{job.WithParams(params)}
 		if strings.TrimSpace(priority) != "" {
 			opts = append(opts, job.WithPriorityOverride(priority))
+		}
+		if guard != nil {
+			opts = append(opts, job.WithStartNamespaceGuard(guard))
 		}
 		return job.New(j, opts...).Run(ctx)
 	}

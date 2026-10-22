@@ -36,6 +36,7 @@ import (
 	"github.com/google/uuid"
 	"gorm.io/datatypes"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 type Status string
@@ -1499,7 +1500,16 @@ func (s *Store) admit(tx *gorm.DB, model *models.JobRun, req startRunRequest) (a
 	// Freeze ownership in the admission transaction before any path inserts
 	// the run, including terminal-skipped runs and queued promotions.
 	var owner models.Job
-	if err := tx.Select("namespace").First(&owner, "id = ?", model.JobID).Error; err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+	ownerRead := tx.Select("namespace")
+	if req.namespaceGuard != nil && tx.Name() == "postgres" {
+		// A guarded admission (a confined caller's start) holds the job row
+		// FOR SHARE to commit, so a concurrent move (the importer's FOR
+		// UPDATE) either committed before this read, and the guard sees the
+		// new namespace, or waits for the run this admission inserts
+		// (identity-and-access A6). SQLite and dqlite serialise writers.
+		ownerRead = ownerRead.Clauses(clause.Locking{Strength: clause.LockingStrengthShare})
+	}
+	if err := ownerRead.First(&owner, "id = ?", model.JobID).Error; err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
 		return admissionResult{}, err
 	}
 	model.Namespace = models.NamespaceOrDefault(owner.Namespace)
@@ -2053,6 +2063,10 @@ func (s *Store) AdmitRun(jobID uuid.UUID, triggerID *uuid.UUID, opts ...StartOpt
 		params:           startOpts.Params,
 		priorityOverride: startOpts.Priority,
 		policyOnly:       true,
+		// A confined manual fire's guard (identity-and-access A6) runs here
+		// too, before the policy decision, so a refused job is never
+		// admitted, queued or folded into a running run.
+		namespaceGuard: startOpts.NamespaceGuard,
 	})
 	if r == nil && err == nil {
 		return nil, false, nil
