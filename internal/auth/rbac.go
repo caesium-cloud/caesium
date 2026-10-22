@@ -166,9 +166,9 @@ var endpointPolicy = map[string]RoutePolicy{
 	// why baselines, cache entries and backfills) are authorised on the job's
 	// current namespace and then filtered by each row's persisted namespace
 	// (B4), so a moved job's old history stays with its old owner. Blame and
-	// topology read the job's DAG snapshots, which record no namespace: under
-	// a moved job the old owner's topology history would reach the new owner
-	// (B7 makes snapshots namespace-aware).
+	// topology read the job's DAG snapshots, filtered by the namespace each
+	// snapshot was written in; a legacy snapshot recording none is shown only
+	// to unconfined callers (B7).
 	"GET /v1/jobs":           collectionRoute(viewer),
 	"GET /v1/jobs/:id":       namespacedRoute(viewer),
 	"GET /v1/jobs/:id/tasks": namespacedRoute(viewer),
@@ -181,9 +181,9 @@ var endpointPolicy = map[string]RoutePolicy{
 	"GET /v1/jobs/:id/queue":            namespacedRoute(viewer),
 	"GET /v1/jobs/:id/runs":             namespacedRoute(viewer),
 	"GET /v1/jobs/:id/runs/diff":        namespacedRoute(viewer),
-	"GET /v1/jobs/:id/blame":            namespacedRoute(viewer).pendingOn("B7"),
-	"GET /v1/jobs/:id/topology":         namespacedRoute(viewer).pendingOn("B7"),
-	"GET /v1/jobs/:id/topology/history": namespacedRoute(viewer).pendingOn("B7"),
+	"GET /v1/jobs/:id/blame":            namespacedRoute(viewer),
+	"GET /v1/jobs/:id/topology":         namespacedRoute(viewer),
+	"GET /v1/jobs/:id/topology/history": namespacedRoute(viewer),
 	// Cache entries are filtered by the namespace of the run that filled them.
 	"GET /v1/jobs/:id/cache":     namespacedRoute(viewer),
 	"GET /v1/jobs/:id/backfills": namespacedRoute(viewer),
