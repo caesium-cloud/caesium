@@ -12,6 +12,7 @@ import (
 
 	triggersvc "github.com/caesium-cloud/caesium/api/rest/service/trigger"
 	"github.com/caesium-cloud/caesium/internal/models"
+	triggerhttp "github.com/caesium-cloud/caesium/internal/trigger/http"
 	"github.com/caesium-cloud/caesium/pkg/env"
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v5"
@@ -66,20 +67,23 @@ func TestFireAcceptsOptionalParams(t *testing.T) {
 
 	origTriggerSvcFactory := triggerServiceFactory
 	origFire := fireHTTPTrigger
+	origList := listFireJobs
 	defer func() {
 		triggerServiceFactory = origTriggerSvcFactory
 		fireHTTPTrigger = origFire
+		listFireJobs = origList
 	}()
 
 	triggerServiceFactory = func(context.Context) triggersvc.Trigger {
 		return &stubTriggerService{trigger: created}
 	}
+	listFireJobs = func(context.Context, uuid.UUID) (models.Jobs, error) { return nil, nil }
 
 	var (
 		capturedParams   map[string]string
 		capturedPriority string
 	)
-	fireHTTPTrigger = func(_ context.Context, trig *models.Trigger, params map[string]string, priority string) error {
+	fireHTTPTrigger = func(_ context.Context, trig *models.Trigger, params map[string]string, priority string, _ ...triggerhttp.FireOption) error {
 		require.Equal(t, created.ID, trig.ID)
 		capturedParams = params
 		capturedPriority = priority
@@ -123,7 +127,7 @@ func TestFireRejectsSchedulerParamsBeforeLoadingOrFiringTrigger(t *testing.T) {
 		t.Fatal("reserved params must be rejected before loading the trigger")
 		return nil
 	}
-	fireHTTPTrigger = func(context.Context, *models.Trigger, map[string]string, string) error {
+	fireHTTPTrigger = func(context.Context, *models.Trigger, map[string]string, string, ...triggerhttp.FireOption) error {
 		t.Fatal("reserved params must be rejected before firing the trigger")
 		return nil
 	}

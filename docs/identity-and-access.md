@@ -908,7 +908,13 @@ target's namespace:
 - **Triggers:** `GET /v1/triggers/:id`, its event history,
   `POST /v1/triggers/:id/fire` and `PATCH /v1/triggers/:id`, requiring the
   role in every job the trigger serves (see
-  [trigger tenancy](#confined-job-writes-and-trigger-tenancy)).
+  [trigger tenancy](#confined-job-writes-and-trigger-tenancy)). A fire runs
+  only the jobs still inside the caller's scope (see
+  [Event ingest, manual fire and the shared secrets](#event-ingest-manual-fire-and-the-shared-secrets)).
+- **Event ingest:** `POST /v1/events` needs `runner` in any namespace. The
+  event reaches only matching jobs where the caller holds `runner`, and the
+  response says how many were skipped (see
+  [Event ingest, manual fire and the shared secrets](#event-ingest-manual-fire-and-the-shared-secrets)).
 - **Shared objects:** read, create, edit and delete a notification channel,
   notification policy or agent profile (a create by the body's `namespace`).
   `*` objects are readable by viewers anywhere and writable only with the role
@@ -947,13 +953,12 @@ body. The request body of a namespaced route is read (up to 8 MiB, else `413`)
 before the decision. A confined caller's shared-object create body must be
 `application/json` up to 1 MiB; any other body type is `415`.
 
-**Pending routes.** A route whose handler can still return or touch another
-namespace's rows is cluster-only for confined principals until the plan item
-that makes it namespace-aware lands (unconfined principals are unaffected):
-
-| Item | Routes |
-| --- | --- |
-| A6 | `POST /v1/events` |
+**Pending routes.** None remain. A route whose handler could still return or
+touch another namespace's rows was cluster-only for confined principals
+(unconfined principals were unaffected) until the plan item that made it
+namespace-aware landed. The last one, `POST /v1/events`, became namespaced in
+A6. A route added later with that limitation is marked the same way, and its
+denials name the plan item.
 
 Every namespace denial is `403 insufficient permissions` and is audited as
 `auth.denied` with reason `insufficient_role`. Lint and diff, where the caller
@@ -1126,6 +1131,106 @@ each piece:
 
 Unconfined principals, and every request without a policy file, get the
 same rows and bodies as before.
+
+### Event ingest, manual fire and the shared secrets
+
+A request is confined by its credential's write scope for `runner`. That
+scope has two parts:
+
+- the namespaces where the caller holds `runner`. There is no namespace limit
+  when it holds `runner` at `*`.
+- for a job-scoped key, its job aliases, compared exactly as stored. A
+  cluster-wide role does not lift this limit.
+
+The scope comes from the credential alone. It applies the same way with or
+without a policy file.
+
+**`POST /v1/events`** delivers the event only to the matching triggers' jobs
+inside the caller's scope. The namespace is checked again when each run is
+admitted, so a job moved out in the meantime is not started. The response adds
+three fields to `event_id`, `matched_triggers` and `runs_started`:
+
+| Field | Meaning |
+| --- | --- |
+| `delivered` | Jobs the event was offered to, whatever their start outcome (started, queued, paused or skipped). |
+| `skipped` | Matching jobs outside the caller's scope. |
+| `skipped_namespaces` | The namespaces of those jobs where the caller holds `viewer`. Always a list, empty for a job-scoped key. |
+
+A partial delivery is never silent. A trigger whose every job was skipped is
+left out of `matched_triggers` and records nothing in its event history. A
+trigger with no job at all is reported as before. Callers whose scope is
+unlimited get the same fields as before, plus `skipped: 0` and
+`skipped_namespaces: []`. A job-scoped runner key may ingest; its events
+reach only its own jobs.
+
+**Source dataset arrivals** follow the same scope. An event advances a source
+dataset's watermark only when the caller's scope covers every producer of
+that dataset. A dataset nobody produces belongs to no namespace, so only a
+caller whose scope is unlimited can advance it by event. This includes an
+`external: true` source, which by definition has no producer in Caesium. To
+feed such a source, use a cluster-wide runner key, or give the dataset a
+producing job in the right namespace.
+
+**`POST /v1/triggers/:id/fire`** requires `runner` in every namespace the
+trigger's jobs live in. The handler then reads the jobs again:
+
+- If none is inside the caller's scope any more, the fire is an audited `403`.
+- Otherwise each job inside the scope is fired, and its admission re-checks
+  the namespace. A job that moved out after the request was accepted is not
+  run, and the refusal is audited as `auth.denied` against the job's new
+  namespace.
+
+Queued, paused and concurrency-skipped jobs behave as before: the fire still
+answers `202`. A job-scoped runner key may fire a trigger only when every job
+the trigger serves is one of its own aliases. A trigger with no jobs has no
+owner and is refused.
+
+**Webhooks and run lifecycle events.** These two bridges are confined only
+while a policy file is loaded. With no policy file their fan-out is unchanged.
+
+- A webhook accepted by a trigger's signature is bridged as a `webhook` event
+  only to event triggers' jobs in the namespaces of the jobs the accepted HTTP
+  triggers serve. Its source dataset arrivals follow the same producer rule.
+- A run's `run_completed`, `run_failed` and `run_terminal` events reach only
+  event triggers' jobs in the run's own namespace.
+
+**Deprecated shared secrets.** `CAESIUM_EVENT_INGEST_API_KEY` and
+`CAESIUM_MANUAL_TRIGGER_API_KEY` still work for this release. When either is
+set, startup logs a deprecation warning that names the replacement and never
+the value. The replacement is a runner key confined to a namespace or to a
+job list:
+
+```sh
+caesium auth key create --role runner --namespace marketing
+caesium auth key create --role runner --jobs nightly-load
+```
+
+How the secrets behave depends on whether authentication is enabled:
+
+- **Authentication enabled:** the caller's own credential decides what the
+  request may do, and the secret is no longer needed. A secret is read only
+  from the `X-Caesium-API-Key` header and never widens the caller. A wrong
+  secret in that header is a `401`.
+- **Authentication disabled:** the secret remains the request's only gate,
+  exactly as before. The routes answer `503` while it is unset. The secret is
+  read from the header or a bearer token. It reaches every namespace.
+
+Every request that presents a valid secret is audited as `legacy_secret.used`,
+with actor `legacy:event-ingest` or `legacy:manual-trigger`. The row is
+written whatever the request's outcome, including a failure after the event
+was routed:
+
+- **outcome:** `success`, `denied` or `error`
+- **namespace:** the namespace of the jobs reached. It is `*` with
+  `metadata.namespaces` when several were reached.
+- **metadata:** `route`, `replacement`, the authenticated `principal`,
+  `delivered` and `runs_started`, and `event_id` or `trigger_id`
+
+List these rows with:
+
+```sh
+caesium auth audit --actor legacy:event-ingest --action legacy_secret.used
+```
 
 ### Cross-namespace aggregates
 

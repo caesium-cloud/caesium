@@ -201,3 +201,13 @@ func (a *AuditLogger) Query(req *AuditQueryRequest) ([]models.AuditLog, error) {
 	}
 	return entries, nil
 }
+
+// Deprecated static shared secrets (spec §7.5, identity-and-access A6). A
+// request that presents CAESIUM_EVENT_INGEST_API_KEY or
+// CAESIUM_MANUAL_TRIGGER_API_KEY is audited as ActionLegacySecretUsed with
+// the secret's legacy actor, whatever the request's outcome.
+const (
+	ActionLegacySecretUsed   = "legacy_secret.used"
+	ActorLegacyEventIngest   = "legacy:event-ingest"
+	ActorLegacyManualTrigger = "legacy:manual-trigger"
+)

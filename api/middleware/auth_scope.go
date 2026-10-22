@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"slices"
 	"strings"
 
 	"github.com/caesium-cloud/caesium/internal/auth"
@@ -192,7 +193,44 @@ func authorizeScope(c *echo.Context, svc *auth.Service, scopeJSON []byte, routeP
 		if c.Request().Method == http.MethodGet {
 			return nil, echo.NewHTTPError(http.StatusForbidden, ContractsGraphScopedDenyMessage)
 		}
+	case "/v1/triggers/:id/fire":
+		// A job-scoped runner key may fire a trigger only when every job the
+		// trigger serves is one of its exact aliases (identity-and-access A6);
+		// a trigger with no job has no owner and is refused. The handler
+		// re-reads the jobs and confines each run's admission to the key's
+		// scope, so a job added or moved later does not run.
+		if c.Request().Method != http.MethodPost {
+			break
+		}
+		triggerID, err := uuid.Parse(c.Param("id"))
+		if err != nil {
+			return nil, echo.NewHTTPError(http.StatusBadRequest, "bad request").Wrap(err)
+		}
+		aliases, err := svc.TriggerJobAliases(c.Request().Context(), triggerID)
+		if err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return nil, echo.ErrNotFound
+			}
+			return nil, echo.NewHTTPError(http.StatusInternalServerError, "internal server error").Wrap(err)
+		}
+		if len(aliases) == 0 {
+			return nil, echo.NewHTTPError(http.StatusForbidden, "insufficient permissions")
+		}
+		for _, alias := range aliases {
+			// Exact stored alias: CheckScope trims, and a job stored as
+			// "payroll " is not the key's "payroll".
+			if !slices.Contains(scopeJobs, alias) {
+				return nil, echo.NewHTTPError(http.StatusForbidden, "insufficient permissions")
+			}
+		}
+		state.jobAliases = aliases
+		return state, nil
 	case "/v1/events":
+		if c.Request().Method == http.MethodPost {
+			// Ingest by a job-scoped runner key is delivered only to its exact
+			// aliases (the handler's WriteConfinement scope; A6).
+			return state, nil
+		}
 		if c.Request().Method == http.MethodGet {
 			runIDRaw := strings.TrimSpace(c.QueryParam("run_id"))
 			if runIDRaw == "" {

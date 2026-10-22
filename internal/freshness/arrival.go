@@ -77,7 +77,59 @@ func (o *ArrivalObserver) SetBus(bus event.Bus) {
 	o.bus = bus
 }
 
-func (o *ArrivalObserver) Observe(ctx context.Context, evt *models.IngestedEvent) (ArrivalResult, error) {
+// ObserveOption configures one Observe call.
+type ObserveOption func(*observeConfig)
+
+type observeConfig struct {
+	allows func(alias, namespace string) bool
+}
+
+// WithArrivalScope confines an arrival to the datasets whose producers the
+// caller's delivery scope covers (identity-and-access A6, the B6 tenancy
+// rule): allows must accept every live producer of the dataset (by its exact
+// stored alias and current namespace), read inside the advance transaction,
+// and a dataset with no producer is cluster-only, so a scoped arrival never
+// advances it. A binding outside the scope is skipped, not an error. Without
+// this option (an unconfined caller) every matching binding advances, exactly
+// as before.
+func WithArrivalScope(allows func(alias, namespace string) bool) ObserveOption {
+	return func(cfg *observeConfig) {
+		cfg.allows = allows
+	}
+}
+
+// ErrArrivalOutOfScope is the advance guard's refusal of a dataset outside a
+// scoped arrival; Observe skips the binding.
+var ErrArrivalOutOfScope = errors.New("freshness: arrival is outside the caller's scope")
+
+func arrivalScopeGuard(allows func(alias, namespace string) bool, datasetNamespace, name string) func(tx *gorm.DB) error {
+	if allows == nil {
+		return nil
+	}
+	return func(tx *gorm.DB) error {
+		producers, err := LockProducersTx(tx, datasetNamespace, name)
+		if err != nil {
+			return err
+		}
+		if len(producers) == 0 {
+			return ErrArrivalOutOfScope
+		}
+		for _, producer := range producers {
+			if !allows(producer.Alias, producer.Namespace) {
+				return ErrArrivalOutOfScope
+			}
+		}
+		return nil
+	}
+}
+
+func (o *ArrivalObserver) Observe(ctx context.Context, evt *models.IngestedEvent, opts ...ObserveOption) (ArrivalResult, error) {
+	var cfg observeConfig
+	for _, opt := range opts {
+		if opt != nil {
+			opt(&cfg)
+		}
+	}
 	if o == nil {
 		return ArrivalResult{}, errors.New("freshness: arrival observer is nil")
 	}
@@ -129,7 +181,13 @@ func (o *ArrivalObserver) Observe(ctx context.Context, evt *models.IngestedEvent
 			CompletedAt: eventTime,
 			Consumed:    nil,
 			Backfill:    false,
+			Guard:       arrivalScopeGuard(cfg.allows, nsValue(binding.namespace), binding.name),
 		})
+		if errors.Is(err, ErrArrivalOutOfScope) {
+			log.Debug("freshness: arrival outside the caller's scope; not advancing",
+				"dataset", binding.name, "event_id", evt.ID)
+			continue
+		}
 		if err != nil {
 			return ArrivalResult{}, fmt.Errorf("advance arrival dataset %q for event %s: %w", binding.name, evt.ID, err)
 		}

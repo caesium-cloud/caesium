@@ -1819,6 +1819,10 @@ PY
   # scenarios need no policy file; the refusal scenario spends two limiter
   # windows and runs on the agent lane only.
   auth_pattern="${auth_pattern%)}|TestAuthCLILoginManualCodeFlow|TestAuthCLILoginLoopbackFlow)"
+  # Deprecated shared secrets (identity-and-access A6): a principal presenting
+  # the ingest and fire secrets is audited under the legacy actors and read
+  # back through `caesium auth audit`. Needs no policy file.
+  auth_pattern="${auth_pattern%)}|TestAuthLegacySecretAudited)"
 
   local -a local_named_passes=(
     TestCaesiumWhyExplainsHitAndMiss
@@ -1881,6 +1885,7 @@ PY
     TestAuthAggregateRedactionConfinedToOwnNamespaces
     TestAuthCLILoginManualCodeFlow
     TestAuthCLILoginLoopbackFlow
+    TestAuthLegacySecretAudited
   )
   local -a distributed_named_passes=(
     TestNodeWorkersRoute

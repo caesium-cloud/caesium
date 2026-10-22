@@ -129,6 +129,11 @@ var namespaceResolvers = map[string]namespaceResolver{
 	"POST /v1/triggers/:id/fire":  resolveTrigger,
 	"GET /v1/triggers/:id/events": resolveTrigger,
 
+	// Event ingest: the matching jobs are known only once the event is
+	// routed, so the route needs runner somewhere and the router delivers
+	// only inside the caller's runner scope (A6).
+	"POST /v1/events": resolveEventIngest,
+
 	// Incidents: incidents.namespace.
 	"GET /v1/incidents/:id":                        resolveIncident,
 	"POST /v1/incidents/:id/approvals/:id/approve": resolveIncident,
@@ -450,6 +455,14 @@ func resolveTrigger(c *echo.Context, svc *auth.Service, role models.Role) ([]nsR
 	}
 	// A trigger that serves no job has no owner: empty ⇒ cluster-only.
 	return []nsRequirement{every(role, namespaces...)}, nil
+}
+
+// resolveEventIngest admits a caller holding role in any namespace; the
+// handler confines delivery, admission and arrival to the namespaces where it
+// holds role (WriteConfinement) and reports the rest as skipped
+// (identity-and-access A6). The decision audits against "*".
+func resolveEventIngest(_ *echo.Context, _ *auth.Service, role models.Role) ([]nsRequirement, error) {
+	return []nsRequirement{{Namespaces: []string{models.ClusterNamespace}, Role: role, AnyGrant: true}}, nil
 }
 
 func resolveIncident(c *echo.Context, svc *auth.Service, role models.Role) ([]nsRequirement, error) {

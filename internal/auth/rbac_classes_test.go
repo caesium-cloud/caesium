@@ -238,7 +238,7 @@ func TestRoutePolicyClassesPinned(t *testing.T) {
 		"POST /v1/jobdefs/lint":                        {Role: models.RoleViewer, Class: RouteClassNamespaced},
 		"PATCH /v1/triggers/:id":                       {Role: models.RoleOperator, Class: RouteClassNamespaced},
 		"POST /v1/jobs":                                {Role: models.RoleOperator, Class: RouteClassNamespaced},
-		"POST /v1/events":                              {Role: models.RoleRunner, Class: RouteClassNamespaced, PendingItem: "A6"},
+		"POST /v1/events":                              {Role: models.RoleRunner, Class: RouteClassNamespaced},
 		"POST /v1/datasets/holds/:id/release":          {Role: models.RoleOperator, Class: RouteClassNamespaced},
 		"GET /v1/incidents/:id":                        {Role: models.RoleViewer, Class: RouteClassNamespaced},
 		"POST /v1/datasets/:id/:id/advance":            {Role: models.RoleRunner, Class: RouteClassNamespaced},
@@ -299,9 +299,10 @@ var liveCollectionRoutes = map[string]bool{
 	"GET /v1/lineage/impact":  true,
 }
 
-// TestPendingRoutesListed logs the pending set so a reviewer sees every route
-// still fail-closed for confined principals, and pins that every collection
-// route outside liveCollectionRoutes is pending (B5, B6, D4 filter them).
+// TestPendingRoutesListed pins that no route is still fail-closed for
+// confined principals (A6 cleared the last marker, on POST /v1/events) and
+// that every collection route is live (B5, B6, D4 filter them). A future
+// pending route must name its plan item and be listed here deliberately.
 func TestPendingRoutesListed(t *testing.T) {
 	var pending []string
 	for key, policy := range RoutePolicies() {
@@ -316,10 +317,7 @@ func TestPendingRoutesListed(t *testing.T) {
 		require.Equal(t, RouteClassCollection, RoutePolicies()[key].Class, "liveCollectionRoutes entry %s must be a collection route", key)
 	}
 	sort.Strings(pending)
-	for _, line := range pending {
-		t.Log(line)
-	}
-	require.NotEmpty(t, pending)
+	require.Empty(t, pending, "routes still pending for confined principals")
 }
 
 func TestLookupRoutePolicyUnknown(t *testing.T) {

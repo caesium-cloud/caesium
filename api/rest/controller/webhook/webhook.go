@@ -8,16 +8,19 @@ import (
 	"io"
 	"maps"
 	"net/http"
+	"slices"
 	"strings"
 	"time"
 
 	jsvc "github.com/caesium-cloud/caesium/api/rest/service/job"
 	triggersvc "github.com/caesium-cloud/caesium/api/rest/service/trigger"
 	"github.com/caesium-cloud/caesium/internal/auth"
+	"github.com/caesium-cloud/caesium/internal/auth/policy"
 	"github.com/caesium-cloud/caesium/internal/bodylimit"
 	eventstore "github.com/caesium-cloud/caesium/internal/event"
 	freshnesspkg "github.com/caesium-cloud/caesium/internal/freshness"
 	"github.com/caesium-cloud/caesium/internal/job"
+	"github.com/caesium-cloud/caesium/internal/jobdef"
 	"github.com/caesium-cloud/caesium/internal/metrics"
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/caesium-cloud/caesium/internal/runlife"
@@ -56,13 +59,36 @@ type triggerFailure struct {
 	reason    string
 }
 
-var routeWebhookEvent = func(ctx context.Context, evt *models.IngestedEvent) (*triggerevent.RouteResult, error) {
-	return triggerevent.DefaultRouter().Route(ctx, evt)
+var routeWebhookEvent = func(ctx context.Context, evt *models.IngestedEvent, opts ...triggerevent.RouteOption) (*triggerevent.RouteResult, error) {
+	return triggerevent.DefaultRouter().Route(ctx, evt, opts...)
 }
 
-var observeWebhookArrival = func(ctx context.Context, evt *models.IngestedEvent) error {
-	_, err := freshnesspkg.DefaultArrivalObserver().Observe(ctx, evt)
+var observeWebhookArrival = func(ctx context.Context, evt *models.IngestedEvent, opts ...freshnesspkg.ObserveOption) error {
+	_, err := freshnesspkg.DefaultArrivalObserver().Observe(ctx, evt, opts...)
 	return err
+}
+
+// webhookBridgeScope confines the webhook→event bridge and the webhook's
+// arrival advances to the namespaces of the jobs the signature-accepted HTTP
+// triggers serve (identity-and-access A6): a webhook is authenticated by
+// those triggers' secrets, so it speaks only for their owners. It applies
+// only while a policy file is loaded; with none, the fan-out is exactly as
+// before (nil scope). Accepted triggers with no jobs contribute no namespace.
+func webhookBridgeScope(accepted []acceptedHTTPTrigger) *jobdef.TenancyScope {
+	if !policy.ProcessHolder().FileBacked() {
+		return nil
+	}
+	namespaces := []string{}
+	for _, acceptedTrigger := range accepted {
+		for _, j := range acceptedTrigger.jobs {
+			if j == nil {
+				continue
+			}
+			namespaces = append(namespaces, models.NamespaceOrDefault(j.Namespace))
+		}
+	}
+	slices.Sort(namespaces)
+	return &jobdef.TenancyScope{Namespaces: slices.Compact(namespaces)}
 }
 
 var recordWebhookReceipt = func(ctx context.Context, receipt *models.WebhookEvent) error {
@@ -169,7 +195,12 @@ func ReceiveWithServices(c *echo.Context, trigSvc TriggerLister, jobSvc JobListe
 	// start runs. The event bridge is at-least-once: retrying the same delivery
 	// can route another event-trigger run.
 	ingested := webhookIngestedEvent(c, path, body)
-	result, err := routeWebhookEvent(c.Request().Context(), ingested)
+	bridgeScope := webhookBridgeScope(accepted)
+	var observeOpts []freshnesspkg.ObserveOption
+	if bridgeScope != nil {
+		observeOpts = append(observeOpts, freshnesspkg.WithArrivalScope(bridgeScope.Allows))
+	}
+	result, err := routeWebhookEvent(c.Request().Context(), ingested, triggerevent.WithDeliveryScope(bridgeScope))
 	switch {
 	case err != nil:
 		log.Warn("webhook event bridge failed", "path", path, "error", err)
@@ -179,7 +210,7 @@ func ReceiveWithServices(c *echo.Context, trigSvc TriggerLister, jobSvc JobListe
 		metrics.EventBridgeFailuresTotal.WithLabelValues("webhook").Inc()
 	default:
 		metrics.EventsIngestedTotal.WithLabelValues("webhook").Inc()
-		if err := observeWebhookArrival(c.Request().Context(), ingested); err != nil {
+		if err := observeWebhookArrival(c.Request().Context(), ingested, observeOpts...); err != nil {
 			log.Warn("webhook arrival observer failed", "path", path, "event_id", ingested.ID, "error", err)
 		}
 	}
