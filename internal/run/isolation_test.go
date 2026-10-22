@@ -186,9 +186,10 @@ func TestRegisteredRowsOfIsolatedNamespacesAreMarked(t *testing.T) {
 // TestIsolationFenceMarksRowsWhenAReloadIsolatesTheirNamespace: rows
 // registered while their namespace had no isolation settings are marked as
 // soon as a reload gives it some, by the fence every policy-serving node runs
-// (no run owner involved), restamped when the settings change again, and
-// unmarked when a reload leaves the namespace unisolated. Finished rows and
-// unmarked rows of unisolated namespaces are untouched.
+// (no run owner involved). The sweep only adds marks: a node whose file is
+// stale (other settings, or none for the namespace) never rebinds or removes
+// one, while the placeholder stamped before a file loaded is rebound. Finished
+// rows and rows of unisolated namespaces are untouched.
 func TestIsolationFenceMarksRowsWhenAReloadIsolatesTheirNamespace(t *testing.T) {
 	db := testutil.OpenTestDB(t)
 	t.Cleanup(func() { testutil.CloseDB(db) })
@@ -249,31 +250,42 @@ func TestIsolationFenceMarksRowsWhenAReloadIsolatesTheirNamespace(t *testing.T) 
 	awaitStamp(first)
 	require.Equal(t, "a", selectorOf(pending.ID)["zone"], "the step's own selector is kept")
 
-	write("apiVersion: v1\nkind: AccessPolicy\nnamespaces:\n  later:\n    kubernetes: {namespace: caesium-later}\n  other: {}\n")
-	_, err = holder.Reload(t.Context(), policy.ReloadRequest{Actor: "test"})
-	require.NoError(t, err)
-	_, second := RevisionIsolation(holder.Current(), "later")
-	require.NotEqual(t, first, second)
-	awaitStamp(second)
-
 	require.Equal(t, datatypes.JSONMap{"zone": "a"}, selectorOf(finished.ID), "a finished row is left alone")
 	require.Equal(t, datatypes.JSONMap{"zone": "a"}, selectorOf(unisolated.ID), "an unisolated namespace's row is left alone")
 
-	// The sweep itself, synchronously: idempotent once the rows match.
+	// The sweep itself, synchronously: idempotent once the rows are marked.
 	n, err := store.FenceIsolation(t.Context(), holder.Current())
 	require.NoError(t, err)
 	require.Zero(t, n)
 
-	// A reload that leaves the namespace unisolated drops the marks again.
-	write("apiVersion: v1\nkind: AccessPolicy\nnamespaces:\n  later: {}\n  other: {}\n")
-	_, err = holder.Reload(t.Context(), policy.ReloadRequest{Actor: "test"})
+	// Nodes serving stale files sweep too (at their startup or reload): they
+	// neither rebind nor remove the mark.
+	revisionOf := func(body string) *policy.Revision {
+		stalePath := filepath.Join(t.TempDir(), "policy.yaml")
+		require.NoError(t, os.WriteFile(stalePath, []byte(body), 0o600))
+		stale, err := policy.LoadFile(t.Context(), policy.HolderOptions{Path: stalePath})
+		require.NoError(t, err)
+		return stale.Current()
+	}
+	for _, body := range []string{
+		"apiVersion: v1\nkind: AccessPolicy\nnamespaces:\n  later:\n    kubernetes: {namespace: caesium-later}\n  other: {}\n",
+		"apiVersion: v1\nkind: AccessPolicy\nnamespaces:\n  later: {}\n  other: {}\n",
+	} {
+		n, err = store.FenceIsolation(t.Context(), revisionOf(body))
+		require.NoError(t, err)
+		require.Zero(t, n)
+		require.Equal(t, first, selectorOf(pending.ID)[IsolationSelectorKey])
+		require.Equal(t, first, selectorOf(running.ID)[IsolationSelectorKey])
+	}
+
+	// The placeholder stamped while a configured file was not loaded yet
+	// carries no settings: the sweep binds it.
+	require.NoError(t, db.Model(&models.TaskRun{}).Where("id = ?", pending.ID).
+		Update("node_selector", datatypes.JSONMap{"zone": "a", IsolationSelectorKey: isolationSelectorUnloaded}).Error)
+	n, err = store.FenceIsolation(t.Context(), holder.Current())
 	require.NoError(t, err)
-	require.Eventually(t, func() bool {
-		_, pendingMarked := selectorOf(pending.ID)[IsolationSelectorKey]
-		_, runningMarked := selectorOf(running.ID)[IsolationSelectorKey]
-		return !pendingMarked && !runningMarked
-	}, 10*time.Second, 20*time.Millisecond)
-	require.Equal(t, datatypes.JSONMap{"zone": "a"}, selectorOf(pending.ID))
+	require.Equal(t, 1, n)
+	require.Equal(t, first, selectorOf(pending.ID)[IsolationSelectorKey])
 
 	// A fence on a node without a policy file never sweeps.
 	quiet := make(chan struct{})

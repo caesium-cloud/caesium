@@ -398,6 +398,35 @@ func TestDispatchLoop_PolicylessOwnerHoldsAnIsolatedRun(t *testing.T) {
 	require.Equal(t, 1, total)
 }
 
+// TestDispatchLoop_PolicylessOwnerRereadsANegativeRequirement: a policyless
+// owner that found a run unmarked reads its rows again once the negative
+// answer ages out, so a mark another node's isolation fence adds later holds
+// the run; a positive answer is kept.
+func TestDispatchLoop_PolicylessOwnerRereadsANegativeRequirement(t *testing.T) {
+	policy.SetProcessHolder(nil)
+	c := newIsolationCluster(t, true, true)
+	runID, row := c.seed(t, "marketing", false)
+	loop := NewDispatchLoop(DispatchLoopConfig{
+		NodeID: c.owner, Token: loopToken, Interval: time.Hour, BatchSize: 8, Deadline: time.Minute,
+		LeaseStore: &testOwnerReader{c.ls}, Store: c.store, Peers: &testPeerLister{peers: c.peers()},
+		PeerBaseURL: func(node string) string { return c.urls[node] },
+	})
+	previous := isolationRequirementRecheck
+	t.Cleanup(func() { isolationRequirementRecheck = previous })
+	isolationRequirementRecheck = time.Hour
+
+	require.False(t, loop.runRequiresIsolation(t.Context(), runID))
+	require.NoError(t, c.store.DB().Model(&models.TaskRun{}).Where("id = ?", row).
+		Update("node_selector", datatypes.JSONMap{run.IsolationSelectorKey: "v1-fenced"}).Error)
+	require.False(t, loop.runRequiresIsolation(t.Context(), runID), "a fresh negative answer is reused")
+
+	isolationRequirementRecheck = 0
+	require.True(t, loop.runRequiresIsolation(t.Context(), runID), "an aged negative answer is read again")
+	require.NoError(t, c.store.DB().Model(&models.TaskRun{}).Where("id = ?", row).
+		Update("node_selector", datatypes.JSONMap{}).Error)
+	require.True(t, loop.runRequiresIsolation(t.Context(), runID), "a positive answer is kept")
+}
+
 // TestDispatchLoop_DefaultContextNeedsNoProbe: a namespace without settings
 // is dispatched round-robin exactly as before, carrying its (default) context
 // untagged, and no peer is ever probed.

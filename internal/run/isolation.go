@@ -249,15 +249,17 @@ func stampIsolationOnResetTx(tx *gorm.DB, rowID uuid.UUID) error {
 	return tx.Model(&models.TaskRun{}).Where("id = ?", rowID).Update("node_selector", selector).Error
 }
 
-// FenceIsolation brings every unfinished row in line with rev: a row of a
-// namespace whose isolation context rev makes non-default gets the selector
-// value binding it to rev's settings for that namespace. A reload (or a
-// restart with a changed file) can isolate a namespace after its rows were
+// FenceIsolation marks every unfinished row that carries no isolation mark
+// (or only the placeholder stamped while a policy file was not loaded yet)
+// when rev isolates its namespace, binding it to rev's settings. A reload (or
+// a restart with a changed file) can isolate a namespace after its rows were
 // registered; without this, those rows would stay pullable by a worker that
 // cannot honour the context, and in a cluster without run owners no dispatch
-// loop would ever restamp them. A row of a namespace rev declares without
-// isolation settings loses a mark an earlier revision gave it, so a worker
-// serving rev can pull it again. It returns the number of rows changed.
+// loop would ever mark them. The sweep only ever adds a mark: it never
+// removes or rebinds one, so a node whose file is stale cannot downgrade a
+// mark a node with a newer file set (an owner rebinds the rows of the runs it
+// dispatches, and a retry reconciles the rows it resets). It returns the
+// number of rows marked.
 func (s *Store) FenceIsolation(ctx context.Context, rev *policy.Revision) (int, error) {
 	if rev == nil || rev.Policy == nil {
 		return 0, nil
@@ -277,10 +279,13 @@ func (s *Store) FenceIsolation(ctx context.Context, rev *policy.Revision) (int, 
 	stamped := 0
 	for _, row := range rows {
 		isolated, value := RevisionIsolation(rev, row.Namespace)
-		selector, changed := reconcileIsolationSelector(row.NodeSelector, isolated, value)
-		if !changed {
+		if !isolated {
 			continue
 		}
+		if current, marked := row.NodeSelector[IsolationSelectorKey]; marked && current != isolationSelectorUnloaded {
+			continue
+		}
+		selector, _ := reconcileIsolationSelector(row.NodeSelector, true, value)
 		if err := s.db.WithContext(ctx).Model(&models.TaskRun{}).Where("id = ?", row.ID).Update("node_selector", selector).Error; err != nil {
 			return stamped, err
 		}
@@ -343,7 +348,7 @@ func (f *IsolationFence) Run(ctx context.Context) {
 		}
 		retry = nil
 		if n > 0 {
-			log.Info("isolation fence: brought unfinished tasks in line with the access policy", "revision", rev.Hash, "count", n)
+			log.Info("isolation fence: marked unfinished tasks as requiring an isolation-capable worker", "revision", rev.Hash, "count", n)
 		}
 	}
 	sweep()

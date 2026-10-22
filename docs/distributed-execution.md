@@ -140,17 +140,22 @@ policy file, or one with the capability withdrawn, and a capable worker pulls
 one (recovery after an owner's lease lapses, or a cluster without run owners)
 only when its file gives the namespace the same isolation settings (an edit
 elsewhere in the file does not matter). Every node serving the file, with or
-without a run owner, restamps the unfinished rows of every run at startup and
-after each reload that changes the file, so a reload that isolates a namespace
-(or changes its settings) fences rows registered before it; an owner also
-restamps the rows of the runs it dispatches. When the file declares a namespace
-without a mapping or secret rules, the same sweep, a retry and a replay drop
-the mark from its rows so the pull lane can run them again (a node serving no
-file keeps a mark it cannot judge). The re-check endpoint answers only
-while the owner serves a policy file: an owner restarted without one refuses
-it (`409 no_isolation_policy`) and the worker denies. A node serving no
-policy file that takes over such a run (owner-memory lease takeover) holds it
-rather than dispatch it unisolated. A node with `CAESIUM_WORKER_ENABLED=false`
+without a run owner, marks the unmarked unfinished rows of the namespaces it
+isolates at startup and after each reload that changes the file, so a reload
+that isolates a namespace fences rows registered before it. That sweep only
+adds marks (a node with a stale file never rebinds or removes one); an owner
+rebinds the rows of the runs it dispatches when its policy changes their
+settings, and a row whose settings changed while it had no owner waits for an
+operator to retry or cancel the run. A retry or a replay reconciles the rows
+it resets with the retrying node's file: it marks them, rebinds them, or (when
+the file declares the namespace without a mapping or secret rules) drops the
+mark so the pull lane can run them again; a node serving no file keeps a mark
+it cannot judge. The re-check endpoint answers only while the owner serves a
+policy file: an owner restarted without one refuses it
+(`409 no_isolation_policy`) and the worker denies. A node serving no policy
+file that owns such a run (owner-memory lease takeover, or a run another
+node's sweep marked later; it reads the marks again every 2 s while it finds
+none) holds it rather than dispatch it unisolated. A node with `CAESIUM_WORKER_ENABLED=false`
 does not renew the leases of the runs it owns (run-lease renewal runs on the
 worker loop), so give owner nodes a worker — with
 `CAESIUM_WORKER_ISOLATION_V1_DISABLED=true` if they must not execute isolated

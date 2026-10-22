@@ -57,10 +57,18 @@ type runIsolation struct {
 	stamped         bool
 	stampedRevision string
 	// requirementChecked/requiresIsolation cache, for a node serving no
-	// policy file, whether the run's rows carry the isolation selector.
-	requirementChecked bool
-	requiresIsolation  bool
+	// policy file, whether the run's rows carry the isolation selector. A
+	// positive answer is kept; a negative one only for
+	// isolationRequirementRecheck, since a policy-serving node's isolation
+	// fence can mark the run's rows later.
+	requirementChecked   bool
+	requiresIsolation    bool
+	requirementCheckedAt time.Time
 }
+
+// isolationRequirementRecheck is how long a policyless owner trusts that a
+// run's rows carry no isolation mark before reading them again.
+var isolationRequirementRecheck = 2 * time.Second
 
 // peerCapability is one cached capability probe.
 type peerCapability struct {
@@ -159,7 +167,8 @@ var errNoIsolationReader = errors.New("dispatch store cannot name a run's namesp
 // stub) is read as no requirement.
 func (l *DispatchLoop) runRequiresIsolation(ctx context.Context, runID uuid.UUID) bool {
 	l.iso.mu.Lock()
-	if cached, ok := l.iso.runs[runID]; ok && cached.requirementChecked {
+	if cached, ok := l.iso.runs[runID]; ok && cached.requirementChecked &&
+		(cached.requiresIsolation || time.Since(cached.requirementCheckedAt) < isolationRequirementRecheck) {
 		requires := cached.requiresIsolation
 		l.iso.mu.Unlock()
 		return requires
@@ -185,7 +194,7 @@ func (l *DispatchLoop) runRequiresIsolation(ctx context.Context, runID uuid.UUID
 		entry = &runIsolation{}
 		l.iso.runs[runID] = entry
 	}
-	entry.requirementChecked, entry.requiresIsolation = true, requires
+	entry.requirementChecked, entry.requiresIsolation, entry.requirementCheckedAt = true, requires, time.Now()
 	l.iso.mu.Unlock()
 	return requires
 }
