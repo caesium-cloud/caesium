@@ -44,7 +44,12 @@ Contents: [Overview and concepts](#overview-and-concepts) |
   dataset namespace is the OpenLineage namespace carried by dataset
   declarations, dataset metrics, and the `/v1/datasets/:ns/:name` path; it is
   reserved for cross-instance datasets and has nothing to do with tenancy or
-  grants. Everywhere else this guide says "namespace" for the tenancy axis.
+  grants. A dataset's tenancy namespaces are those of the jobs that declare
+  they produce it (`datasets.produces`), read at request time, so a moved
+  producer takes the dataset with it. A consumer or a `sources` declaration
+  owns nothing, and a dataset with no declared producer is visible only to
+  unconfined principals. See [Datasets](#datasets). Everywhere else this guide
+  says "namespace" for the tenancy axis.
 - **Job alias.** `metadata.alias` keeps its global unique index. Every
   alias-addressed surface (CLI verbs, key job scopes, lineage, receipts) is
   unchanged by namespaces.
@@ -857,8 +862,8 @@ principal confined to some namespaces is treated:
 | --- | --- |
 | identity | Allowed whatever its grants, even none: `GET /auth/whoami`, `POST /auth/logout`, `GET /v1/system/features`. |
 | cluster | Always denied (403 `insufficient_role`): metrics, nodes and workers, atoms, logs, database, cache prune, `POST /v1/triggers`, the connector reads (`/v1/connectors*`), `GET /v1/auth/namespaces`, and `GET /v1/auth/policy` plus `POST /v1/auth/policy/reload`. |
-| namespaced | Caesium resolves the namespace of the target the handler will act on and requires the route's role in it (in every resolved namespace; once B6 ships, dataset reads will need it in any one). A target with no owning namespace is cluster-only. |
-| collection | The handler returns only rows from the namespaces where the principal holds the route's role. Live today: the API key list, the shared-object lists ([Shared objects](#shared-objects)), and the job-derived collections in [Collections](#collections-and-history-under-a-job). |
+| namespaced | Caesium resolves the namespace of the target the handler will act on and requires the route's role in it (in every resolved namespace; a dataset read needs it in any one of its producers' namespaces). A target with no owning namespace is cluster-only. |
+| collection | The handler returns only rows from the namespaces where the principal holds the route's role. Live today: the API key list, the shared-object lists ([Shared objects](#shared-objects)), the job-derived collections in [Collections](#collections-and-history-under-a-job), and the dataset and hold lists ([Datasets](#datasets)). |
 
 A principal is *confined* on a route when its cluster role (its grant at `*`)
 is below the route's role. An unconfined principal is authorised exactly as
@@ -931,7 +936,6 @@ that makes it namespace-aware lands (unconfined principals are unaffected):
 | A6 | `POST /v1/events` |
 | A8 | `/v1/agent/incidents/*`, incident detail `GET /v1/incidents/:id`, approval approve |
 | B5 | `GET /v1/lineage/impact`, `GET /v1/contracts/graph` |
-| B6 | every `/v1/datasets*` route |
 
 Every namespace denial is `403 insufficient permissions` and is audited as
 `auth.denied` with reason `insufficient_role`. Lint and diff, where the caller
@@ -1055,6 +1059,51 @@ upgrade records no namespace and is shown only to unconfined callers.
 `DELETE /v1/jobs/:id/queue/:queue_id` answers 404 for a row the caller cannot
 see, and 403 unless the caller also holds `operator` in the namespace the row
 was queued in (not only in the job's current namespace).
+
+### Datasets
+
+A dataset belongs to the current namespaces of its declared producers (see
+the tenancy versus dataset namespace note at the top). For a confined
+principal:
+
+| Route | Rule |
+| --- | --- |
+| `GET /v1/datasets`, `GET /v1/datasets/holds` | Only datasets (and holds on datasets) with a producer in a namespace where it holds `viewer`, filtered in SQL, so `total` counts what it sees. A declared dataset is listed for its producer's namespace before its first run. |
+| `GET /v1/datasets/:ns/:name`, `/derivations`, `/metrics` | `viewer` in any producer namespace. |
+| `POST /v1/datasets/:ns/:name/advance` | `runner` in every producer namespace. |
+| `POST /v1/datasets/holds/:id/release` | `operator` in every producer namespace. |
+
+A dataset the caller may not read and a dataset that does not exist both
+answer the same audited `403`. The two writes repeat the producer check
+inside their own transaction, holding the advisory lock that job applies
+take for each producer's alias on PostgreSQL. So an apply that moves or
+re-declares a producer is either seen or waited for. If the producer set
+keeps changing under the write, the write answers `409`.
+
+What a confined reader sees of a dataset it may read is decided by who owns
+each piece:
+
+- **Derivations:** each decision is recorded with its producer and that
+  producer's namespace at decision time, skips included, and is shown only in
+  that namespace. A decision recorded before this change is shown only to a
+  caller holding `viewer` in every current producer namespace. A covering
+  run's id is dropped when that run is persisted elsewhere.
+- **Metrics:** the series, its total and the baseline (median, samples,
+  membership) use only samples from runs persisted in the caller's
+  namespaces, the same rule the live assertion evaluator judges a run by.
+- **State:** `last_run_id` and `consumed_watermarks` are kept only when that
+  run is persisted in a readable namespace. `reason` is kept only when the
+  producer whose evaluation wrote it is in one (a reason written before this
+  change is hidden).
+- **Holds:** the holder (job, run, task, step) is kept only when the opening
+  run is persisted in a readable namespace. The latest breach (its run and
+  violations) and the clearing run follow their runs the same way. The
+  `impact` cone, which names downstream jobs anywhere, is always left out.
+- **Producer:** `producing_job` and `declaration` name a producer in a
+  readable namespace. Other producers are left out without a marker.
+
+Unconfined principals, and every request without a policy file, get the
+same rows and bodies as before.
 
 ### Run quotas
 
@@ -1319,8 +1368,9 @@ grants are known not to allow it.
   need `operator`. A mutation on a historical run or backfill also needs the role
   in that object's persisted namespace, as the server does. Until the job is
   loaded, the cluster role decides, so a confined principal sees fewer controls,
-  never more. Dataset hold release still follows the cluster role (a hold carries
-  no tenancy namespace yet).
+  never more. The Console's dataset hold release control still follows the
+  cluster role: it does not resolve a dataset's producers, while the server
+  requires `operator` in every producer namespace.
 - **Access page (`/access`, sidebar entry for everyone).** "My access" shows the
   subject, kind, cluster role and per-namespace grants. Principals with a
   cluster role (and no job scope) also see the declared namespaces and their

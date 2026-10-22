@@ -53,6 +53,17 @@ type DatasetDerivation struct {
 	// cascades into the audit trail.
 	RunID *uuid.UUID `gorm:"type:uuid;index" json:"run_id,omitempty"`
 
+	// ProducerJobID and JobNamespace record which producer the decision was
+	// about and that job's tenancy namespace at decision time (for a derived
+	// run, the run's persisted namespace), so derivation history is owned by
+	// the namespace that made the decision even after the job moves
+	// (identity-and-access B6). Most skips have no run, so the run cannot
+	// stand in for them. Both are NULL on rows written before B6: a reader
+	// treats a row as legacy only when BOTH are NULL. They are not serialised:
+	// the response shape is unchanged for every caller.
+	ProducerJobID *uuid.UUID `gorm:"type:uuid;index" json:"-"`
+	JobNamespace  *string    `gorm:"type:text;index" json:"-"`
+
 	// CreatedAt is the decision time (append-only; rows are never updated).
 	CreatedAt time.Time `gorm:"not null;index:idx_dataset_deriv_created" json:"created_at"`
 }

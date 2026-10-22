@@ -256,18 +256,19 @@ var endpointPolicy = map[string]RoutePolicy{
 
 	// Dataset freshness operator surface (freshness-scheduling E1). A dataset
 	// resolves to the namespaces of its declared producers: any of them for a
-	// read, every one for a write. The reads stay pending until B6 filters
-	// derivations and metrics by the producing run's namespace.
-	"GET /v1/datasets":                     collectionRoute(viewer).pendingOn("B6"),
-	"GET /v1/datasets/holds":               collectionRoute(viewer).pendingOn("B6"),
-	"GET /v1/datasets/:id/:id/metrics":     namespacedRoute(viewer).pendingOn("B6"),
-	"GET /v1/datasets/:id/:id":             namespacedRoute(viewer).pendingOn("B6"),
-	"GET /v1/datasets/:id/:id/derivations": namespacedRoute(viewer).pendingOn("B6"),
-	// The manual watermark advance is a data-plane write at runner. Its
-	// response is the persisted dataset state, whose last run and consumed
-	// watermarks can predate a producer's move from another namespace (B6
-	// filters them by the producing run's namespace).
-	"POST /v1/datasets/:id/:id/advance": namespacedRoute(runner).pendingOn("B6"),
+	// read, every one for a write. The lists hold only datasets with a
+	// producer the caller may read, and every body is shaped by owner (B6:
+	// derivations by their stamped namespace, metrics and a state's last run
+	// by the run's persisted namespace; api/rest/service/dataset/tenancy.go).
+	"GET /v1/datasets":                     collectionRoute(viewer),
+	"GET /v1/datasets/holds":               collectionRoute(viewer),
+	"GET /v1/datasets/:id/:id/metrics":     namespacedRoute(viewer),
+	"GET /v1/datasets/:id/:id":             namespacedRoute(viewer),
+	"GET /v1/datasets/:id/:id/derivations": namespacedRoute(viewer),
+	// The manual watermark advance is a data-plane write at runner. A
+	// confined caller's producer check is repeated inside the advance
+	// transaction, and the returned state is shaped like a read (B6).
+	"POST /v1/datasets/:id/:id/advance": namespacedRoute(runner),
 
 	// Releasing a dataset hold (data-circuit-breaker C3) is an OPERATOR action,
 	// the same tier as approving a tier-3 remediation: it overrides an automated
@@ -275,10 +276,11 @@ var endpointPolicy = map[string]RoutePolicy{
 	// A runner that can trigger runs must not also be able to switch the breaker
 	// off. The route is only mounted when CAESIUM_DATA_ASSERTIONS_ENABLED is on;
 	// this entry is unconditional, because an unlisted route is denied as
-	// "unknown_route" (403) even to a valid admin key. The response is the
-	// whole hold, whose impact snapshot names downstream consumers in any
-	// namespace (B6 redacts it).
-	"POST /v1/datasets/holds/:id/release": namespacedRoute(operator).pendingOn("B6"),
+	// "unknown_route" (403) even to a valid admin key. A confined operator
+	// needs the role in every producer namespace, re-checked inside the
+	// release transaction; the returned hold drops its impact cone and any
+	// run another namespace owns (B6).
+	"POST /v1/datasets/holds/:id/release": namespacedRoute(operator),
 
 	// Agent tool surface (/v1/agent/*). Reachable by an unscoped operator/admin
 	// AND by an agent-session credential minted at the runner role; the

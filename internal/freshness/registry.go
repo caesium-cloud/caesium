@@ -208,13 +208,66 @@ func DeleteForJobsTx(tx *gorm.DB, jobIDs []uuid.UUID) error {
 	return tx.Where("job_id IN ?", jobIDs).Delete(&models.DatasetDeclaration{}).Error
 }
 
-// ListAll returns every declaration in the registry.
+// ListAll returns every declaration in the registry, each carrying its job's
+// tenancy namespace as of the same read (see listWithOwners).
 func (r *Registry) ListAll(ctx context.Context) ([]models.DatasetDeclaration, error) {
-	var out []models.DatasetDeclaration
-	if err := r.db.WithContext(ctx).Find(&out).Error; err != nil {
+	return listWithOwners(r.db.WithContext(ctx))
+}
+
+// declarationWithOwner is a declaration row plus its job's namespace, read in
+// one statement.
+type declarationWithOwner struct {
+	models.DatasetDeclaration
+	OwnerJobID     *uuid.UUID `gorm:"column:owner_job_id"`
+	OwnerNamespace *string    `gorm:"column:owner_namespace"`
+}
+
+// listWithOwners reads the declarations q selects together with their live
+// job's namespace in ONE statement, and records it on each declaration's Job
+// (ID and Namespace only): the owner of everything an evaluation computes from
+// that snapshot (identity-and-access B6). Reading the namespace later would
+// let an apply that moves and re-declares the producer in between stamp the
+// old declarations' reason and inputs as the new namespace's. A declaration
+// whose job is gone keeps a zero Job, and its decisions carry no namespace.
+func listWithOwners(q *gorm.DB) ([]models.DatasetDeclaration, error) {
+	var rows []declarationWithOwner
+	if err := q.Table("dataset_declarations").
+		Select("dataset_declarations.*, jobs.id AS owner_job_id, jobs.namespace AS owner_namespace").
+		Joins("LEFT JOIN jobs ON jobs.id = dataset_declarations.job_id AND jobs.deleted_at IS NULL").
+		Find(&rows).Error; err != nil {
 		return nil, err
 	}
+	out := make([]models.DatasetDeclaration, len(rows))
+	for i, row := range rows {
+		out[i] = row.DatasetDeclaration
+		// Every declaration read here is marked as snapshotted (Job.ID set);
+		// one whose job was not live at the read is marked ownerless, so a
+		// job revived in another namespace afterwards cannot claim it.
+		out[i].Job = models.Job{ID: row.JobID, Namespace: ownerlessSnapshot}
+		if row.OwnerJobID != nil && *row.OwnerJobID == row.JobID && row.OwnerNamespace != nil {
+			out[i].Job.Namespace = *row.OwnerNamespace
+		}
+	}
 	return out, nil
+}
+
+// ownerlessSnapshot marks a declaration listWithOwners read while its job was
+// not live. It is not a valid namespace name.
+const ownerlessSnapshot = "\x00ownerless"
+
+// snapshotOwner reports the tenancy namespace listWithOwners recorded on decl.
+// snapshotted is false for a declaration not read through it (the caller then
+// resolves the owner itself); owner is nil for one read while its job was not
+// live, whose decisions carry no namespace and admit no run.
+func snapshotOwner(decl models.DatasetDeclaration) (owner *string, snapshotted bool) {
+	if decl.JobID == uuid.Nil || decl.Job.ID != decl.JobID {
+		return nil, false
+	}
+	if decl.Job.Namespace == ownerlessSnapshot {
+		return nil, true
+	}
+	namespace := models.NamespaceOrDefault(decl.Job.Namespace)
+	return &namespace, true
 }
 
 // ListArrivalSources returns source declarations that carry an arrival binding.
@@ -230,9 +283,5 @@ func (r *Registry) ListArrivalSources(ctx context.Context) ([]models.DatasetDecl
 
 // ListByJob returns the declarations owned by a single job.
 func (r *Registry) ListByJob(ctx context.Context, jobID uuid.UUID) ([]models.DatasetDeclaration, error) {
-	var out []models.DatasetDeclaration
-	if err := r.db.WithContext(ctx).Where("job_id = ?", jobID).Find(&out).Error; err != nil {
-		return nil, err
-	}
-	return out, nil
+	return listWithOwners(r.db.WithContext(ctx).Where("dataset_declarations.job_id = ?", jobID))
 }

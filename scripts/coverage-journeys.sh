@@ -1798,6 +1798,10 @@ PY
   # Canonical job aliases (W6-α): a whitespace alias is refused through
   # `caesium job apply`, the apply route and the legacy create route.
   local_pattern="${local_pattern%)}|TestJobApplyRejectsNonCanonicalAlias)"
+  # Confined dataset reads and writes (identity-and-access B6): the producer
+  # checks behind a confined viewer's derivations and a confined manual
+  # advance. Rule 1 only, no catalog connection.
+  auth_pattern="${auth_pattern%)}|TestAuthDatasetConfinedProducerChecks)"
 
   local -a local_named_passes=(
     TestCaesiumWhyExplainsHitAndMiss
@@ -1855,6 +1859,7 @@ PY
     TestAuthTriggerTenancyWebhookPathRace
     TestAuthTriggerPatchRechecksTenancy
     TestAuthDagSnapshotsFollowNamespaceMoves
+    TestAuthDatasetConfinedProducerChecks
   )
   local -a distributed_named_passes=(
     TestNodeWorkersRoute

@@ -984,7 +984,12 @@ middleware relies on.
       `api/rest/controller/contract/`, `internal/lineage/impact.go`,
       `internal/contract/graph.go`, new `internal/authz/redact.go`.
       Depends on: A3.
-- [ ] B6. Dataset tenancy via declared producers: a dataset's namespaces are those of
+- [x] B6. (W6-γ: collections SQL-filtered by producer namespace; reads shaped by
+      owner, incl. the state reason via a new `reason_namespace`; advance and
+      release re-check producers in their transaction under the producers'
+      alias advisory locks; uniform audited 403 for foreign and missing
+      datasets; new derivation columns not serialised.)
+      Dataset tenancy via declared producers: a dataset's namespaces are those of
       the jobs referenced by `DatasetDeclaration.JobID` (a `DatasetDerivation` is a
       scheduling decision, frequently without a run, and is not an ownership record);
       `GET /v1/datasets` and `/datasets/holds` include a dataset when the caller holds

@@ -85,22 +85,15 @@ func EnrichStartParams(ctx context.Context, db *gorm.DB, jobID uuid.UUID, params
 	}
 
 	// One indexed read per run creation, which is the whole cost for the common
-	// case of a job that declares no dataset.
-	var decls []models.DatasetDeclaration
-	if err := db.WithContext(ctx).Where("job_id = ?", jobID).Find(&decls).Error; err != nil {
+	// case of a job that declares no dataset. The job's namespace is read in
+	// the same statement (listWithOwners): it is the namespace the view below
+	// is read through, which FenceStartParams binds to the run's admitted one.
+	decls, err := listWithOwners(db.WithContext(ctx).Where("dataset_declarations.job_id = ?", jobID))
+	if err != nil {
 		return withoutStartView(params), err
 	}
 
-	produces := false
-	consumedNames := make([]string, 0, len(decls))
-	for i := range decls {
-		switch decls[i].Direction {
-		case models.DatasetDirectionProduces:
-			produces = true
-		case models.DatasetDirectionConsumes:
-			consumedNames = append(consumedNames, decls[i].Name)
-		}
-	}
+	consumedNames, produces := startViewInputs(decls)
 	// Nothing produced means the completion handler returns before it ever wants
 	// a snapshot; nothing consumed means there is no input view to freeze.
 	if !produces || len(consumedNames) == 0 {
@@ -133,6 +126,88 @@ func EnrichStartParams(ctx context.Context, db *gorm.DB, jobID uuid.UUID, params
 		out = make(map[string]string, 1)
 	}
 	out[ConsumedWatermarksStartParam] = string(canonicalConsumedJSON(snapshot))
+	out[startViewNamespaceParam] = viewNamespace(decls)
+	return out, nil
+}
+
+// startViewNamespaceParam carries, from EnrichStartParams to FenceStartParams,
+// the tenancy namespace the start view was read through. It is transient: the
+// fence removes it in the admission transaction, before the run (or its
+// run_queue row) is written, so persisted params are exactly what they were
+// before identity-and-access B6.
+const startViewNamespaceParam = "_consumed_watermarks_start_namespace"
+
+// startViewInputs reports the consumed inputs a start view covers and whether
+// the job produces anything (the only case completion records a view for).
+func startViewInputs(decls []models.DatasetDeclaration) (consumedNames []string, produces bool) {
+	consumedNames = make([]string, 0, len(decls))
+	for i := range decls {
+		switch decls[i].Direction {
+		case models.DatasetDirectionProduces:
+			produces = true
+		case models.DatasetDirectionConsumes:
+			consumedNames = append(consumedNames, decls[i].Name)
+		}
+	}
+	return consumedNames, produces
+}
+
+// viewNamespace is the single namespace owning decls as listWithOwners read
+// them, or ownerlessSnapshot (never a namespace) when any of them was read
+// without a live owner or the owners disagree.
+func viewNamespace(decls []models.DatasetDeclaration) string {
+	namespace := ""
+	for _, decl := range decls {
+		owner, snapshotted := snapshotOwner(decl)
+		if !snapshotted || owner == nil || (namespace != "" && *owner != namespace) {
+			return ownerlessSnapshot
+		}
+		namespace = *owner
+	}
+	if namespace == "" {
+		return ownerlessSnapshot
+	}
+	return namespace
+}
+
+// FenceStartParams is the run-store admission fence (run.StartParamsFence) for
+// the start view EnrichStartParams stamped before the admission transaction.
+// namespace is the run's namespace as admission froze it.
+//
+// A view read through the admitted namespace's declarations is kept exactly as
+// stamped. One read through another namespace's (an apply moved the job, and
+// possibly changed its inputs, after the enricher's read) would be persisted
+// on, and shown with, a run of the new namespace: it is re-taken here, on tx,
+// from the declarations the admitted namespace owns now, and removed when that
+// cannot be done (they are not that namespace's either, or the read fails),
+// which sends completion to its own fenced read. Params carrying no transient
+// namespace (no view stamped, or no enricher) come back untouched.
+func FenceStartParams(ctx context.Context, tx *gorm.DB, jobID uuid.UUID, namespace string, params map[string]string) (map[string]string, error) {
+	captured, ok := params[startViewNamespaceParam]
+	if !ok {
+		return params, nil
+	}
+	out := maps.Clone(params)
+	delete(out, startViewNamespaceParam)
+	if captured == namespace {
+		return out, nil
+	}
+	if tx == nil || jobID == uuid.Nil {
+		return withoutStartView(out), nil
+	}
+	decls, err := listWithOwners(tx.WithContext(ctx).Where("dataset_declarations.job_id = ?", jobID))
+	if err != nil {
+		return withoutStartView(out), err
+	}
+	consumedNames, produces := startViewInputs(decls)
+	if !produces || len(consumedNames) == 0 || viewNamespace(decls) != namespace {
+		return withoutStartView(out), nil
+	}
+	snapshot, err := consumedSnapshot(ctx, tx, enricherNamespace, consumedNames)
+	if err != nil {
+		return withoutStartView(out), err
+	}
+	out[ConsumedWatermarksStartParam] = string(canonicalConsumedJSON(snapshot))
 	return out, nil
 }
 
@@ -146,10 +221,13 @@ func EnrichStartParams(ctx context.Context, db *gorm.DB, jobID uuid.UUID, params
 // are views of a run that is not this one. Nothing is cloned unless there is
 // something to remove.
 func withoutStartView(params map[string]string) map[string]string {
-	if _, ok := params[ConsumedWatermarksStartParam]; !ok {
+	_, view := params[ConsumedWatermarksStartParam]
+	_, owner := params[startViewNamespaceParam]
+	if !view && !owner {
 		return params
 	}
 	out := maps.Clone(params)
 	delete(out, ConsumedWatermarksStartParam)
+	delete(out, startViewNamespaceParam)
 	return out
 }

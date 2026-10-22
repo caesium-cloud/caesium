@@ -1477,6 +1477,10 @@ func (s *Store) admit(tx *gorm.DB, model *models.JobRun, req startRunRequest) (a
 			return admissionResult{}, err
 		}
 	}
+	// Enriched params are bound to the frozen namespace (start_params_fence.go).
+	if err := fenceStartParamsTx(tx, model, req.params); err != nil {
+		return admissionResult{}, err
+	}
 	// A queued request belongs to the namespace it was enqueued in. If its job
 	// moved since, it is never promoted under the new owner (the dequeuer
 	// drops it). A row from before the column existed records nothing and
@@ -2004,6 +2008,9 @@ func (s *Store) StartWithContext(ctx context.Context, jobID uuid.UUID, triggerID
 		triggerID:        triggerID,
 		params:           startOpts.Params,
 		priorityOverride: startOpts.Priority,
+		// The freshness evaluator fences a derived run to the namespace its
+		// declarations were read in (identity-and-access B6).
+		namespaceGuard: startOpts.NamespaceGuard,
 	})
 }
 
