@@ -99,6 +99,46 @@ func TestRetryRestampsRowsUnderTheCurrentPolicy(t *testing.T) {
 	require.NotContains(t, row.NodeSelector, IsolationSelectorKey)
 }
 
+// TestIsolationFenceNeverOverwritesAMarkSetAfterItsRead: another node marks
+// the row between the sweep's read and its write; the conditional write
+// leaves that mark alone. A placeholder set in between is still bound.
+func TestIsolationFenceNeverOverwritesAMarkSetAfterItsRead(t *testing.T) {
+	db := testutil.OpenTestDB(t)
+	t.Cleanup(func() { testutil.CloseDB(db) })
+	store := NewStore(db)
+	useAccessPolicy(t, "apiVersion: v1\nkind: AccessPolicy\nnamespaces:\n  later: {}\n")
+	atom := &models.Atom{ID: uuid.New(), Engine: models.AtomEngineDocker, Image: "alpine:3.23", Command: `["true"]`}
+	require.NoError(t, db.Create(atom).Error)
+	job := createNamespacedJob(t, db, "fence-race-"+uuid.NewString()[:6], "later", nil)
+	runID := seedNamespacedRun(t, db, job.ID, "later", StatusRunning, nil)
+	task := &models.Task{ID: uuid.New(), JobID: job.ID, AtomID: atom.ID, Name: "step", Type: "task"}
+	require.NoError(t, db.Create(task).Error)
+	require.NoError(t, store.RegisterTasks(runID, []RegisterTaskInput{{Task: task, Atom: atom}}))
+	var row models.TaskRun
+	require.NoError(t, db.First(&row, "job_run_id = ?", runID).Error)
+
+	useAccessPolicy(t, "apiVersion: v1\nkind: AccessPolicy\nnamespaces:\n  later:\n    secrets: {allow: []}\n")
+	_, want := NamespaceIsolation("later")
+	t.Cleanup(func() { fenceBeforeWrite = nil })
+	for _, raced := range []string{"v1-newer", isolationSelectorUnloaded} {
+		require.NoError(t, db.Model(&models.TaskRun{}).Where("id = ?", row.ID).Update("node_selector", datatypes.JSONMap{}).Error)
+		fenceBeforeWrite = func(id uuid.UUID) {
+			require.NoError(t, db.Model(&models.TaskRun{}).Where("id = ?", id).
+				Update("node_selector", datatypes.JSONMap{IsolationSelectorKey: raced}).Error)
+		}
+		n, err := store.FenceIsolation(t.Context(), policy.ProcessHolder().Current())
+		require.NoError(t, err)
+		require.NoError(t, db.First(&row, "id = ?", row.ID).Error)
+		if raced == isolationSelectorUnloaded {
+			require.Equal(t, 1, n)
+			require.Equal(t, want, row.NodeSelector[IsolationSelectorKey], "a placeholder is bound")
+			continue
+		}
+		require.Zero(t, n)
+		require.Equal(t, raced, row.NodeSelector[IsolationSelectorKey], "a mark set after the read is kept")
+	}
+}
+
 // TestWithIsolationSelectorDropsAMarkTheFileNoLongerAsksFor: a selector copied
 // from an earlier row (a replay's source) keeps the step's own entries, loses
 // a stale isolation mark under a file that leaves the namespace unisolated,

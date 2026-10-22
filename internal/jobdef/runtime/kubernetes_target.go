@@ -205,11 +205,15 @@ func ResolveIsolationContext(namespace string) (ctx IsolationContext, carry, rea
 	}
 	rev := holder.Current()
 	vars := env.Variables()
+	// The owner's effective defaults, normalized as its own engine and
+	// resolver normalize them: an explicitly empty setting means "default",
+	// while an empty field in the context would mean "the worker's own".
+	podDefault := effectiveKubeNamespace(vars.KubernetesNamespace)
 	ctx = IsolationContext{
 		Namespace:                  namespace,
-		DefaultKubernetesNamespace: vars.KubernetesNamespace,
-		SecretReadNamespace:        vars.JobdefSecretsKubeNamespace,
-		SecretRuleKubeNamespace:    vars.KubernetesNamespace,
+		DefaultKubernetesNamespace: podDefault,
+		SecretReadNamespace:        effectiveKubeNamespace(vars.JobdefSecretsKubeNamespace),
+		SecretRuleKubeNamespace:    podDefault,
 	}
 	if rev != nil {
 		ctx.PolicyRevision = rev.Hash
@@ -232,6 +236,15 @@ func ResolveIsolationContext(namespace string) (ctx IsolationContext, carry, rea
 	}
 	ctx.Secrets = settings.Secrets
 	return ctx, true, true
+}
+
+// effectiveKubeNamespace is a configured Kubernetes namespace as the engine
+// and the secret resolver apply it: empty means "default".
+func effectiveKubeNamespace(namespace string) string {
+	if strings.TrimSpace(namespace) == "" {
+		return "default"
+	}
+	return namespace
 }
 
 // KubernetesMapping is KubernetesMapping read from the context instead of this

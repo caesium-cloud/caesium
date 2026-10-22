@@ -180,6 +180,37 @@ func TestIsolationPodTargetUsesTheOwnersDefaults(t *testing.T) {
 	require.Nil(t, rules.Rules)
 }
 
+// TestResolveIsolationContextNormalizesEmptyOwnerDefaults: an owner whose
+// CAESIUM_KUBERNETES_NAMESPACE / CAESIUM_JOBDEF_SECRETS_KUBE_NAMESPACE are set
+// but empty uses "default" for both (its engine and resolver normalize them
+// so), and carries "default" — an empty field would hand the choice to the
+// worker's own settings.
+func TestResolveIsolationContextNormalizesEmptyOwnerDefaults(t *testing.T) {
+	t.Cleanup(func() { policy.SetProcessHolder(nil) })
+	setIsolationEnv(t, map[string]string{
+		"CAESIUM_AUTH_POLICY_FILE":              "",
+		"CAESIUM_KUBERNETES_NAMESPACE":          "",
+		"CAESIUM_JOBDEF_SECRETS_KUBE_NAMESPACE": "",
+	})
+	policy.SetProcessHolder(loadIsolationPolicy(t, isolationPolicy))
+	for _, namespace := range []string{"finance", "locked", "accounts", "undeclared"} {
+		ctx, carry, ready := ResolveIsolationContext(namespace)
+		require.True(t, carry, namespace)
+		require.True(t, ready, namespace)
+		require.Equal(t, "default", ctx.DefaultKubernetesNamespace, namespace)
+		require.Equal(t, "default", ctx.SecretReadNamespace, namespace)
+		require.Equal(t, "default", ctx.SecretRuleKubeNamespace, namespace)
+	}
+	mapped, _, _ := ResolveIsolationContext("marketing")
+	require.Equal(t, "caesium-marketing", mapped.SecretReadNamespace, "a mapping still wins")
+
+	// On a worker with its own default, the carried context still names the
+	// owner's.
+	owner, _, _ := ResolveIsolationContext("finance")
+	setIsolationEnv(t, map[string]string{"CAESIUM_KUBERNETES_NAMESPACE": "worker-pods"})
+	require.Equal(t, atom.KubeTarget{Namespace: "default"}, owner.PodTarget(models.AtomEngineKubernetes, atom.KubeTarget{}))
+}
+
 // TestIsolationSecretScopeMatchesInProcess is the secret parity oracle: the
 // scope a worker builds from the owner's context allows exactly what the
 // owner's in-process scope allows, for every reference form.

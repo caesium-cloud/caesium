@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"maps"
 	"slices"
 	"strings"
@@ -286,12 +287,48 @@ func (s *Store) FenceIsolation(ctx context.Context, rev *policy.Revision) (int, 
 			continue
 		}
 		selector, _ := reconcileIsolationSelector(row.NodeSelector, true, value)
-		if err := s.db.WithContext(ctx).Model(&models.TaskRun{}).Where("id = ?", row.ID).Update("node_selector", selector).Error; err != nil {
+		// The write re-checks the row in the same statement: a mark another
+		// node set after the read above is never overwritten.
+		unmarked, unmarkedArgs, err := unmarkedIsolationPredicateSQL(s.db.Name(), "task_runs.node_selector")
+		if err != nil {
 			return stamped, err
 		}
-		stamped++
+		if fenceBeforeWrite != nil {
+			fenceBeforeWrite(row.ID)
+		}
+		result := s.db.WithContext(ctx).Model(&models.TaskRun{}).
+			Where("id = ?", row.ID).
+			Where(unmarked, unmarkedArgs...).
+			Update("node_selector", selector)
+		if result.Error != nil {
+			return stamped, result.Error
+		}
+		stamped += int(result.RowsAffected)
 	}
 	return stamped, nil
+}
+
+// fenceBeforeWrite is a test hook run between the fence's read of a row and
+// its conditional write.
+var fenceBeforeWrite func(rowID uuid.UUID)
+
+// unmarkedIsolationPredicateSQL is a WHERE fragment over column (a
+// node_selector) that holds when it carries no isolation mark other than the
+// placeholder stamped before a policy file loaded.
+func unmarkedIsolationPredicateSQL(dialect, column string) (string, []any, error) {
+	var iterator, keyExpr, valueExpr string
+	switch dialect {
+	case "dqlite", "sqlite", "sqlite3":
+		iterator = "json_each(CASE WHEN " + column + " IS NULL OR " + column + " = '' THEN '{}' ELSE " + column + " END) AS ns"
+		keyExpr, valueExpr = "CAST(ns.key AS TEXT)", "TRIM(CAST(ns.value AS TEXT))"
+	case "postgres":
+		iterator = "json_each_text(COALESCE(" + column + ", '{}'::json)) AS ns(key, value)"
+		keyExpr, valueExpr = "ns.key", "BTRIM(ns.value)"
+	default:
+		return "", nil, errors.New("run: unsupported database dialect for the isolation fence: " + dialect)
+	}
+	return "NOT EXISTS (SELECT 1 FROM " + iterator + " WHERE " + keyExpr + " = ? AND " + valueExpr + " <> '' AND " + valueExpr + " <> ?)",
+		[]any{IsolationSelectorKey, isolationSelectorUnloaded}, nil
 }
 
 // isolationFenceRetry is how long the fence waits before retrying a sweep
