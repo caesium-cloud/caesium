@@ -1802,6 +1802,10 @@ PY
   # checks behind a confined viewer's derivations and a confined manual
   # advance. Rule 1 only, no catalog connection.
   auth_pattern="${auth_pattern%)}|TestAuthDatasetConfinedProducerChecks)"
+  # Aggregate redaction (identity-and-access B5): a marketing-confined viewer
+  # reads the lineage impact query and the contract graph over default-
+  # namespace jobs, so the confined redaction path runs. Needs no policy file.
+  auth_pattern="${auth_pattern%)}|TestAuthAggregateRedactionConfinedToOwnNamespaces)"
 
   local -a local_named_passes=(
     TestCaesiumWhyExplainsHitAndMiss
@@ -1860,6 +1864,7 @@ PY
     TestAuthTriggerPatchRechecksTenancy
     TestAuthDagSnapshotsFollowNamespaceMoves
     TestAuthDatasetConfinedProducerChecks
+    TestAuthAggregateRedactionConfinedToOwnNamespaces
   )
   local -a distributed_named_passes=(
     TestNodeWorkersRoute

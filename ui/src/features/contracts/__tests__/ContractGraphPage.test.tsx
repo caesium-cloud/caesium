@@ -217,4 +217,33 @@ describe("ContractGraph", () => {
       expect(api.getContractGraph).toHaveBeenCalledWith({ dataset: "lake/customers" });
     });
   });
+
+  it("renders collapsed nodes and endpoint-only edges as neutral placeholders (identity-and-access B5)", async () => {
+    mockFeatures(true);
+    vi.mocked(api.getJobs).mockResolvedValue([
+      { id: "producer-id", alias: "producer", trigger_id: "", labels: {}, annotations: {}, paused: false, created_at: "", updated_at: "" },
+    ]);
+    vi.mocked(api.getContractGraph).mockResolvedValue({
+      nodes: [
+        { id: "job:producer", kind: "job", alias: "producer" },
+        { id: "external:0f1e2d", kind: "external" },
+      ],
+      edges: [{ id: "external:9a8b7c", from: "job:producer", to: "external:0f1e2d" }],
+    });
+
+    render(<ContractGraph initialDataset="" onDatasetSubmit={vi.fn()} />, { wrapper: createWrapper() });
+
+    await expect(screen.findByTestId("contracts-graph")).resolves.toBeVisible();
+    const external = screen.getByTestId("contract-node:external:0f1e2d");
+    expect(external).toHaveAttribute("data-node-kind", "external");
+    expect(external).toHaveTextContent("Another namespace");
+    expect(external).toHaveTextContent("External");
+    expect(external).not.toHaveTextContent("Dataset");
+    expect(external).not.toHaveAttribute("href");
+
+    const edge = screen.getByTestId("contract-edge:external:external:9a8b7c");
+    expect(edge).toHaveAttribute("data-edge-class", "undefined");
+    expect(edge).toHaveAttribute("data-stroke", "hsl(var(--text-4))");
+    expect(edge).toHaveAttribute("data-dasharray", "2 6");
+  });
 });

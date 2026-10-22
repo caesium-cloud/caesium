@@ -288,6 +288,9 @@ var liveCollectionRoutes = map[string]bool{
 	// B6: datasets with a producer in the caller's namespaces.
 	"GET /v1/datasets":       true,
 	"GET /v1/datasets/holds": true,
+	// B5: global graphs, redacted at the boundary.
+	"GET /v1/contracts/graph": true,
+	"GET /v1/lineage/impact":  true,
 }
 
 // TestPendingRoutesListed logs the pending set so a reviewer sees every route

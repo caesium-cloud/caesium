@@ -45,6 +45,13 @@ type ImpactNode struct {
 	// Depth is the transitive hop count from the root dataset (0 = direct
 	// consumer, 1 = consumer of a consumer, …).
 	Depth int `json:"depth"`
+
+	// JobNamespace is the producing job's current namespace and RunNamespace
+	// the namespace persisted on the run that wrote the dataset row. They are
+	// never serialised: the REST boundary uses them to collapse a node a
+	// namespace-confined caller may not read (identity-and-access B5).
+	JobNamespace string `json:"-"`
+	RunNamespace string `json:"-"`
 }
 
 // ImpactResult is the response shape returned by QueryImpact.
@@ -174,6 +181,8 @@ func findConsumers(ctx context.Context, db *gorm.DB, frontier []datasetRef) ([]I
 		FacetSummary     []byte
 		JobID            string
 		JobAlias         string
+		JobNamespace     string
+		RunNamespace     string
 		ProvenanceCommit string
 		ProvenanceRepo   string
 		CreatedAt        time.Time
@@ -209,6 +218,7 @@ func findConsumers(ctx context.Context, db *gorm.DB, frontier []datasetRef) ([]I
 			Select(
 				"ld.id, ld.namespace, ld.name, ld.facet_summary, ld.created_at,"+
 					" j.id as job_id, j.alias as job_alias,"+
+					" j.namespace as job_namespace, jr.namespace as run_namespace,"+
 					" j.provenance_commit, j.provenance_repo",
 			).
 			Joins("JOIN task_runs tr ON tr.id = ld.task_run_id").
@@ -252,6 +262,8 @@ func findConsumers(ctx context.Context, db *gorm.DB, frontier []datasetRef) ([]I
 			ProducingStep:    stepNameFromFacet(row.FacetSummary),
 			JobID:            jobID,
 			JobAlias:         row.JobAlias,
+			JobNamespace:     row.JobNamespace,
+			RunNamespace:     row.RunNamespace,
 			ProvenanceCommit: row.ProvenanceCommit,
 			ProvenanceRepo:   row.ProvenanceRepo,
 			LastSeen:         row.CreatedAt,

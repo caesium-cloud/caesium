@@ -307,7 +307,8 @@ fi
                      "TestAuthJobdefApplyLateRefusalRollsBack", "TestAuthLegacyJobCreateConfined",
                      "TestAuthTriggerTenancyWebhookPathRace", "TestAuthTriggerPatchRechecksTenancy",
                      "TestAuthDagSnapshotsFollowNamespaceMoves",
-                     "TestAuthDatasetConfinedProducerChecks"},
+                     "TestAuthDatasetConfinedProducerChecks",
+                     "TestAuthAggregateRedactionConfinedToOwnNamespaces"},
         }
         for lane, original in (("local", original_local), ("auth", original_auth)):
             self.assertEqual(set(lanes[lane]["names"]), original | added[lane])
@@ -333,7 +334,8 @@ fi
                         "TestAuthJobdefApplyLateRefusalRollsBack", "TestAuthLegacyJobCreateConfined",
                         "TestAuthTriggerTenancyWebhookPathRace", "TestAuthTriggerPatchRechecksTenancy",
                         "TestAuthDagSnapshotsFollowNamespaceMoves",
-                        "TestAuthDatasetConfinedProducerChecks"]}
+                        "TestAuthDatasetConfinedProducerChecks",
+                        "TestAuthAggregateRedactionConfinedToOwnNamespaces"]}
         for lane, names in new.items():
             required = lanes[lane]["names"]
             lines = {name: "    --- PASS: " + SUITE + "/" + name + " (0.01s)\n" for name in required}

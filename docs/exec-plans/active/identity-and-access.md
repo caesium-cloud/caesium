@@ -970,7 +970,7 @@ middleware relies on.
       `api/rest/controller/stats/`, `api/rest/controller/event/`,
       `api/rest/service/stats/`, `api/rest/service/event/`.
       Depends on: A3 + B1.
-- [ ] B5. Aggregate redaction: `/v1/lineage/impact` and `/v1/contracts/graph` compute
+- [x] B5. Aggregate redaction: `/v1/lineage/impact` and `/v1/contracts/graph` compute
       over the whole graph then redact at the boundary with a wire-level contract — a
       foreign node becomes `{id: <opaque per-response hash>, kind: "external"}` with
       alias, namespace, producing step and provenance removed; an edge touching a
@@ -984,6 +984,9 @@ middleware relies on.
       `api/rest/controller/contract/`, `internal/lineage/impact.go`,
       `internal/contract/graph.go`, new `internal/authz/redact.go`.
       Depends on: A3.
+      (W6-β: shipped. Ownership rides the derived row (job and persisted run
+      namespaces); impact placeholders keep `depth`; collapsed topology kept;
+      `?dataset=` filters after redaction; a consumer never grants an impact root.)
 - [x] B6. (W6-γ: collections SQL-filtered by producer namespace; reads shaped by
       owner, incl. the state reason via a new `reason_namespace`; advance and
       release re-check producers in their transaction under the producers'

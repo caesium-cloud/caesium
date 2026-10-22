@@ -685,7 +685,6 @@ func TestNamespacedClusterAndPendingRoutes(t *testing.T) {
 		pending string
 	}{
 		{post("/v1/events", nil, `{}`), "A6"},
-		{get("/v1/lineage/impact", nil), "B5"},
 	} {
 		res := f.do(t, mktAdmin, tc.call)
 		require.Equal(t, http.StatusForbidden, res.status, tc.call.pattern)

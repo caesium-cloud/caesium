@@ -142,6 +142,9 @@ var guardedCollectionRoutes = map[string]string{
 	// identity-and-access B6.
 	"GET /v1/datasets":       "api/rest/controller/dataset.TestDatasetListCollectionGuard",
 	"GET /v1/datasets/holds": "api/rest/controller/dataset.TestDatasetHoldsCollectionGuard",
+	// identity-and-access B5.
+	"GET /v1/contracts/graph": "api/rest/controller/contract.TestContractGraphCollectionGuard",
+	"GET /v1/lineage/impact":  "api/rest/controller/lineage.TestLineageImpactCollectionGuard",
 }
 
 // TestMountedRoutesAreClassified is the A3 build gate: every mounted route has

@@ -90,8 +90,8 @@ These back the investigation verbs described in
 | `POST /jobs/:id/runs/:run_id/replay` | Start a quarantined replay (`caesium run replay`). Refused with 422 when the job namespace's `secrets.allow` rules deny a step's `secret://` reference, and with `409 namespace_quota` (`Retry-After`) when a replay that would execute finds its namespace at its run quota. |
 | `GET /jobs/:id/runs/:run_id/tasks/:task/descriptor` | The recorded execution descriptor `caesium reproduce` rebuilds from. |
 | `GET /jobs/:id/runs/:run_id/receipt`, `POST /jobs/:id/runs/:run_id/receipt/verify` | Fetch and verify a receipt (`caesium receipt get`, `caesium verify`). |
-| `GET /lineage/impact` | Cross-job lineage impact. See [open-lineage.md](open-lineage.md). |
-| `GET /contracts/graph` | The cross-job contract graph (`caesium contract graph`). |
+| `GET /lineage/impact` | Cross-job lineage impact. See [open-lineage.md](open-lineage.md). Redacted for a namespace-confined caller ([identity-and-access.md](identity-and-access.md#cross-namespace-aggregates)). |
+| `GET /contracts/graph` | The cross-job contract graph (`caesium contract graph`). Redacted for a namespace-confined caller ([identity-and-access.md](identity-and-access.md#cross-namespace-aggregates)). |
 
 ## Datasets, incidents, and the agent runtime
 

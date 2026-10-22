@@ -459,7 +459,8 @@ handler that never called it.
 - Lineage impact and contracts graph: computed over the whole graph, then redacted
   at the boundary with a wire-level contract: a foreign node becomes
   `{id: <opaque per-response hash>, kind: "external"}` with alias, namespace,
-  producing step and provenance removed; an edge touching a foreign node keeps only
+  producing step and provenance removed (an impact node keeps its `depth`,
+  which the preserved topology already implies); an edge touching a foreign node keeps only
   its endpoints — dataset names, producer/consumer schemas, previous schemas,
   compatibility findings and provenance are dropped (`internal/contract/graph.go`
   `Edge`, `internal/lineage/impact.go` `ImpactNode`). A response-level test asserts
