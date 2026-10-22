@@ -189,6 +189,54 @@ class ProducerHandoffTests(unittest.TestCase):
             with self.subTest(changed=changed), self.assertRaises(MOD.Invalid): self.handoff(client)
             self.assertEqual(client.downloads, [])
 
+    def test_prestart_timestamps_can_change_until_actual_execution_begins(self):
+        for name in MOD.PRODUCERS:
+            for status in ('queued', 'waiting', 'pending'):
+                self.setUp()
+                first, later = jobs(True), jobs(True)
+                for rows, start in ((first, None), (later, '2026-10-22T11:59:30Z')):
+                    row = next(row for row in rows if row['name'] == name)
+                    row.update(status=status, conclusion=None, started_at=start, completed_at=None, steps=[])
+                churn = copy.deepcopy(later)
+                next(row for row in churn if row['name'] == name)['started_at'] = '2026-10-22T11:59:45Z'
+                client = FakeClient([first, later, churn, jobs(True), jobs()])
+                def waiting(_):
+                    if client.polls <= 3:
+                        self.assertEqual(client.downloads, [])
+                        self.assertFalse((self.root/'handoff/ready.json').exists())
+                with self.subTest(name=name, status=status):
+                    output, _ = self.handoff(client, waiting)
+                    final = json.loads((output/'status.json').read_text())
+                    self.assertEqual(final['producers'][name]['started_at'], START)
+                    self.assertEqual(len(client.downloads), 5)
+
+    def test_started_producers_reject_start_drift_null_or_status_regression(self):
+        for name in MOD.PRODUCERS:
+            for key, value in (('started_at', None), ('started_at', '2026-10-22T12:00:01Z'),
+                               ('status', 'queued'), ('status', 'waiting'), ('status', 'pending')):
+                self.setUp(); active = jobs(True)
+                next(row for row in active if row['name'] == name).update(
+                    status='in_progress', conclusion=None, completed_at=None, steps=[])
+                changed = copy.deepcopy(active)
+                next(row for row in changed if row['name'] == name)[key] = value
+                client = FakeClient([active, changed])
+                with self.subTest(name=name, key=key, value=value), self.assertRaisesRegex(
+                        MOD.Invalid, 'producer job (start|execution) changed'):
+                    self.handoff(client)
+                self.assertEqual(client.downloads, [])
+                self.assertFalse((self.root/'handoff/ready.json').exists())
+
+    def test_prestart_producer_cannot_publish_ready_even_with_completed_steps(self):
+        for name in MOD.PRODUCERS:
+            self.setUp(); rows = jobs(True)
+            next(row for row in rows if row['name'] == name).update(status='queued', conclusion=None, completed_at=None)
+            client = FakeClient([rows])
+            def expired(_): raise MOD.Invalid('producer handoff wait expired')
+            with self.subTest(name=name), self.assertRaisesRegex(MOD.Invalid, 'wait expired'):
+                self.handoff(client, expired)
+            self.assertEqual(client.downloads, [])
+            self.assertFalse((self.root/'handoff/ready.json').exists())
+
     def test_barrier_prefix_suffix_and_time_cannot_weaken_readiness(self):
         changes = [lambda row: row['steps'][0].update(conclusion='skipped'),
                    lambda row: row['steps'].append(dict(name='Another regular step', status='queued')),

@@ -213,6 +213,8 @@ def select_jobs(rows, expected):
         else:
             require(status in ('queued', 'in_progress', 'waiting', 'pending'), 'producer job status is invalid')
             finished = False
+            if status != 'in_progress':
+                ready = False
         if name not in BARRIERS:
             ready = ready and status == 'completed'
         else:
@@ -328,9 +330,13 @@ def handoff(client, expected, output, invocation, ready_fd):
             require(seen_ids.get(name, job['id']) == job['id'], 'producer job identity changed')
             seen_ids[name] = job['id']
             if name in seen_started:
+                require(job['status'] in ('in_progress', 'completed'), 'producer job execution changed')
                 require(job.get('started_at') == seen_started[name], 'producer job start changed')
-            elif job.get('started_at') is not None:
-                timestamp(job['started_at']); seen_started[name] = job['started_at']
+            elif job['status'] in ('in_progress', 'completed'):
+                # A queued row can already expose started_at. Freeze the
+                # execution window only once the job actually starts; its
+                # identity remains pinned from the first queued observation.
+                timestamp(job.get('started_at')); seen_started[name] = job['started_at']
             if name in seen_ended:
                 require(job['status'] == 'completed' and job['conclusion'] == 'success'
                         and job['completed_at'] == seen_ended[name], 'completed producer job changed')
