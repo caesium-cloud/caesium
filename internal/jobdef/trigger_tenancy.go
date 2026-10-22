@@ -807,12 +807,26 @@ var lockSessionHook func(keys []string)
 // row lock, so the two kinds cannot deadlock each other. SQLite and dqlite
 // serialise write transactions, so nothing is taken there.
 func writeTx(ctx context.Context, conn *gorm.DB, keys []string, opts *sql.TxOptions, fn func(tx *gorm.DB) error) error {
+	return WithAdvisoryLocks(ctx, conn, keys, func(locked *gorm.DB) error {
+		if opts != nil {
+			return locked.Transaction(fn, opts)
+		}
+		return locked.Transaction(fn)
+	})
+}
+
+// WithAdvisoryLocks runs fn on a connection that holds the PostgreSQL
+// session-level advisory locks for keys (taken in the given order, released
+// when fn returns), so a transaction fn begins starts after every holder of
+// the same keys has committed. Elsewhere (SQLite, dqlite, or no keys) fn runs
+// on conn unchanged: those databases serialise write transactions. writeTx
+// is built on it; other writers that must serialise with a job write (the
+// dataset writes of identity-and-access B6 lock their producers' AliasLockKey)
+// take the same keys through it.
+func WithAdvisoryLocks(ctx context.Context, conn *gorm.DB, keys []string, fn func(locked *gorm.DB) error) error {
 	db := conn.WithContext(ctx)
 	if db.Name() != "postgres" || len(keys) == 0 {
-		if opts != nil {
-			return db.Transaction(fn, opts)
-		}
-		return db.Transaction(fn)
+		return fn(db)
 	}
 	return db.Connection(func(pinned *gorm.DB) (err error) {
 		defer releaseAdvisoryLocks(ctx, pinned)
@@ -824,10 +838,7 @@ func writeTx(ctx context.Context, conn *gorm.DB, keys []string, opts *sql.TxOpti
 		if lockSessionHook != nil {
 			lockSessionHook(keys)
 		}
-		if opts != nil {
-			return pinned.Transaction(fn, opts)
-		}
-		return pinned.Transaction(fn)
+		return fn(pinned)
 	})
 }
 

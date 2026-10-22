@@ -2004,6 +2004,9 @@ func (s *Store) StartWithContext(ctx context.Context, jobID uuid.UUID, triggerID
 		triggerID:        triggerID,
 		params:           startOpts.Params,
 		priorityOverride: startOpts.Priority,
+		// The freshness evaluator fences a derived run to the namespace its
+		// declarations were read in (identity-and-access B6).
+		namespaceGuard: startOpts.NamespaceGuard,
 	})
 }
 

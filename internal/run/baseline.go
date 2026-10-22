@@ -79,14 +79,34 @@ func OwnedBaseline(ctx context.Context, conn *gorm.DB, owner, namespace, name, m
 	return stats, err
 }
 
+// ScopedBaselineWithSamples is BaselineWithSamples for an operator read under
+// the caller's namespace scope (identity-and-access B6): when ctx carries a
+// restriction (authz.WithHistoryScope), only samples emitted by runs persisted
+// in an allowed namespace count, exactly as OwnedBaseline narrows the live
+// evaluator to one owner, so another namespace's values neither shape the
+// median nor appear among the samples. An unrestricted ctx is
+// BaselineWithSamples unchanged.
+func ScopedBaselineWithSamples(ctx context.Context, conn *gorm.DB, namespace, name, metric string, window int, asOf time.Time) (*BaselineStats, []models.DatasetMetric, error) {
+	if !authz.Restricted(ctx) {
+		return BaselineWithSamples(ctx, conn, namespace, name, metric, window, asOf)
+	}
+	return baselineWithSamplesScope(ctx, conn, nil, true, namespace, name, metric, window, asOf)
+}
+
 func baselineWithSamples(ctx context.Context, conn *gorm.DB, owner *string, namespace, name, metric string, window int, asOf time.Time) (*BaselineStats, []models.DatasetMetric, error) {
+	return baselineWithSamplesScope(ctx, conn, owner, false, namespace, name, metric, window, asOf)
+}
+
+// baselineWithSamplesScope narrows the samples to owner's runs when owner is
+// set, and to ctx's namespace restriction when scoped is set.
+func baselineWithSamplesScope(ctx context.Context, conn *gorm.DB, owner *string, scoped bool, namespace, name, metric string, window int, asOf time.Time) (*BaselineStats, []models.DatasetMetric, error) {
 	stats := &BaselineStats{
 		Namespace: namespace,
 		Name:      name,
 		Metric:    metric,
 		AsOf:      asOf.UTC(),
 	}
-	if owner != nil {
+	if owner != nil || scoped {
 		stats.Scope = BaselineScopeNamespace
 	}
 	if conn == nil || name == "" || metric == "" {
@@ -101,7 +121,7 @@ func baselineWithSamples(ctx context.Context, conn *gorm.DB, owner *string, name
 		queryCtx = authz.WithAllowedNamespaces(ctx, []string{models.NamespaceOrDefault(*owner)})
 	}
 	query := cleanSampleQuery(queryCtx, conn, namespace, name, metric, asOf)
-	if owner != nil {
+	if owner != nil || scoped {
 		query = authz.NamespaceFilter(query.Joins("JOIN job_runs ON job_runs.id = task_runs.job_run_id"), "job_runs.namespace")
 	}
 	var rows []models.DatasetMetric

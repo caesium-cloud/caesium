@@ -5,6 +5,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/caesium-cloud/caesium/internal/authz"
 	"github.com/caesium-cloud/caesium/internal/models"
 	runstore "github.com/caesium-cloud/caesium/internal/run"
 	"github.com/caesium-cloud/caesium/pkg/env"
@@ -32,6 +33,9 @@ type HoldSummary struct {
 
 // withHolds enriches only the requested page, using exact namespace/name pairs.
 func (s *Service) withHolds(rows []models.DatasetState) ([]State, error) {
+	if err := s.shapeStates(viewerFrom(s.ctx), statePointers(rows)); err != nil {
+		return nil, err
+	}
 	states := make([]State, len(rows))
 	for i, row := range rows {
 		states[i].DatasetState = row
@@ -111,12 +115,20 @@ func (s *Service) Holds(p HoldsParams) (*HoldsResult, error) {
 	if name := strings.TrimSpace(p.Name); name != "" {
 		q = q.Where("name = ?", name)
 	}
+	q = s.producerVisible(q, "dataset_holds.namespace", "dataset_holds.name")
 	var total int64
 	if err := q.Count(&total).Error; err != nil {
 		return nil, err
 	}
 	rows := make([]models.DatasetHold, 0)
 	if err := q.Order("opened_at DESC").Order("id DESC").Limit(limit).Offset(offset).Find(&rows).Error; err != nil {
+		return nil, err
+	}
+	holds := make([]*models.DatasetHold, len(rows))
+	for i := range rows {
+		holds[i] = &rows[i]
+	}
+	if err := s.shapeHolds(viewerFrom(s.ctx), holds); err != nil {
 		return nil, err
 	}
 	return &HoldsResult{Holds: rows, Total: total, Limit: limit, Offset: offset}, nil
@@ -174,19 +186,31 @@ func (s *Service) Metrics(namespace, name, metric string, p MetricsParams) (*Met
 	}
 	asOf := time.Now().UTC()
 	window := runstore.BaselineWindow()
-	baseline, baselineRows, err := runstore.BaselineWithSamples(s.ctx, s.db, namespace, name, metric, window, asOf)
+	// Under a namespace restriction (B6) the series and the baseline hold only
+	// samples emitted by runs persisted in a namespace the caller may read.
+	baseline, baselineRows, err := runstore.ScopedBaselineWithSamples(s.ctx, s.db, namespace, name, metric, window, asOf)
 	if err != nil {
 		return nil, err
 	}
 	limit, offset := normalizePagination(p.Limit, p.Offset)
 	q := s.db.WithContext(s.ctx).Model(&models.DatasetMetric{}).
-		Where("namespace = ? AND name = ? AND metric = ? AND created_at < ?", namespace, name, metric, asOf)
+		Where("dataset_metrics.namespace = ? AND dataset_metrics.name = ? AND dataset_metrics.metric = ? AND dataset_metrics.created_at < ?", namespace, name, metric, asOf)
+	restricted := authz.Restricted(s.ctx)
+	if restricted {
+		q = authz.NamespaceFilter(q.
+			Joins("JOIN task_runs ON task_runs.id = dataset_metrics.task_run_id").
+			Joins("JOIN job_runs ON job_runs.id = task_runs.job_run_id"), "job_runs.namespace")
+	}
 	var total int64
 	if err := q.Count(&total).Error; err != nil {
 		return nil, err
 	}
+	page := q
+	if restricted {
+		page = page.Select("dataset_metrics.*")
+	}
 	var rows []models.DatasetMetric
-	if err := q.Order("created_at DESC").Order("id DESC").Limit(limit).Offset(offset).Find(&rows).Error; err != nil {
+	if err := page.Order("dataset_metrics.created_at DESC").Order("dataset_metrics.id DESC").Limit(limit).Offset(offset).Find(&rows).Error; err != nil {
 		return nil, err
 	}
 	inBaseline := make(map[uuid.UUID]bool, len(baselineRows))

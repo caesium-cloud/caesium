@@ -92,6 +92,13 @@ type AdvanceInput struct {
 
 	// Backfill marks a backfill run: it never advances a watermark.
 	Backfill bool
+
+	// Guard, when set, runs first inside every attempt's transaction; an error
+	// aborts the attempt with nothing written and is returned unchanged. The
+	// manual advance of a namespace-confined caller re-checks the dataset's
+	// producer namespaces with it (identity-and-access B6), so the check and
+	// the write commit together.
+	Guard func(tx *gorm.DB) error
 }
 
 // AdvanceResult is what the contract decided, plus the resulting state row.
@@ -187,6 +194,11 @@ func (s *Store) Advance(ctx context.Context, in AdvanceInput) (AdvanceResult, er
 func (s *Store) advanceTx(ctx context.Context, in AdvanceInput) (AdvanceResult, error) {
 	var res AdvanceResult
 	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if in.Guard != nil {
+			if err := in.Guard(tx); err != nil {
+				return err
+			}
+		}
 		current, existed, err := loadState(tx, in.Namespace, in.Name)
 		if err != nil {
 			return err
@@ -221,6 +233,7 @@ func (s *Store) advanceTx(ctx context.Context, in AdvanceInput) (AdvanceResult, 
 		insert.ID = uuid.New()
 		if hasConsumed {
 			insert.ConsumedWatermarks = consumedBlob
+			insert.ConsumedRunID = nonNilRun(in.RunID)
 		}
 		created := tx.Clauses(clause.OnConflict{
 			Columns:   []clause.Column{{Name: "namespace"}, {Name: "name"}},
@@ -263,7 +276,9 @@ func (s *Store) advanceTx(ctx context.Context, in AdvanceInput) (AdvanceResult, 
 			// that loses the race here leaves the winner's snapshot untouched.
 			if hasConsumed {
 				updates["consumed_watermarks"] = consumedBlob
+				updates["consumed_run_id"] = nonNilRun(in.RunID)
 				authoritative.ConsumedWatermarks = consumedBlob
+				authoritative.ConsumedRunID = nonNilRun(in.RunID)
 			}
 			if err := tx.Model(&models.DatasetState{}).
 				Where("id = ?", authoritative.ID).

@@ -157,9 +157,9 @@ var namespaceResolvers = map[string]namespaceResolver{
 	// Datasets: the declared producers' namespaces — any of them for a read,
 	// every one for a write. No declared producer ⇒ cluster-only (a consumer
 	// or an external-source declaration owns nothing).
-	"GET /v1/datasets/:id/:id":             resolveDatasetAny, // pending B6
-	"GET /v1/datasets/:id/:id/derivations": resolveDatasetAny, // pending B6
-	"GET /v1/datasets/:id/:id/metrics":     resolveDatasetAny, // pending B6
+	"GET /v1/datasets/:id/:id":             resolveDatasetAny,
+	"GET /v1/datasets/:id/:id/derivations": resolveDatasetAny,
+	"GET /v1/datasets/:id/:id/metrics":     resolveDatasetAny,
 	"POST /v1/datasets/:id/:id/advance":    resolveDatasetEvery,
 	"POST /v1/datasets/holds/:id/release":  resolveDatasetHold,
 
