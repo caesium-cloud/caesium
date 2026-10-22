@@ -32,6 +32,10 @@ vi.mock("@/lib/auth", () => ({
   logout: logoutMock,
 }));
 
+vi.mock("@/features/auth/NamespaceSwitcher", () => ({
+  NamespaceSwitcher: () => null,
+}));
+
 vi.mock("../../command-menu", () => ({
   CommandMenu: () => <button type="button">Search...</button>,
 }));
