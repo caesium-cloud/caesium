@@ -183,6 +183,39 @@ export function useJobsView() {
     );
     const refreshHistory = refresh.request;
 
+    // Events for jobs the narrowed list does not hold yet. Each batch waits for
+    // a refetch that starts after its newest event (cancelling a staler
+    // in-flight one); entries whose job is then in the list join the activity
+    // feed, the rest belong to other namespaces and are dropped.
+    let disposed = false;
+    let settling = false;
+    const unknownJobs: PendingActivityEntry[] = [];
+    const settleUnknownJobs = async () => {
+      if (settling) return;
+      settling = true;
+      try {
+        while (unknownJobs.length > 0 && !disposed) {
+          const batch = unknownJobs.splice(0);
+          const key = scopedKey("jobs", namespaceRef.current);
+          try {
+            await queryClient.refetchQueries({ queryKey: key, exact: true }, { cancelRefetch: true });
+          } catch {
+            // A failed refetch cannot establish membership; drop the batch.
+            continue;
+          }
+          if (disposed) return;
+          const list = queryClient.getQueryData<Job[]>(key) ?? [];
+          const aliases = new Map(list.map((job) => [job.id, job.alias] as const));
+          batch.forEach((draft) => {
+            const alias = aliases.get(draft.jobId);
+            if (alias) appendActivity(draft, alias);
+          });
+        }
+      } finally {
+        settling = false;
+      }
+    };
+
     const onRunEvent = (e: CaesiumEvent) => {
       const payload = e.payload as JobRun | undefined;
       const run = payload && payload.id ? payload : undefined;
@@ -208,8 +241,19 @@ export function useJobsView() {
 
       // Outside the selected namespace the job is not in the narrowed list: keep
       // it out of the activity feed (the lists were already updated above).
+      // The job may simply be new, or the list may still be loading: hold the
+      // event until a refetch started after it says whether the job belongs.
       if (namespaceRef.current && !jobAliasesRef.current.has(jobID)) {
         refreshHistory();
+        if (rememberActivityKey(activityKeysRef.current, activityKey(e, jobID, e.run_id ?? run?.id))) {
+          unknownJobs.push({
+            type: e.type,
+            jobId: jobID,
+            runId: e.run_id ?? run?.id,
+            timestamp: e.timestamp ?? new Date().toISOString(),
+          });
+          void settleUnknownJobs();
+        }
         return;
       }
 
@@ -276,6 +320,7 @@ export function useJobsView() {
     events.subscribe("task_cached", onTaskCached);
 
     return () => {
+      disposed = true;
       refresh.dispose();
       events.unsubscribeConnection(onConnection);
       RUN_ACTIVITY_EVENTS.forEach((t) => events.unsubscribe(t, onRunEvent));

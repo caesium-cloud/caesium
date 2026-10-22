@@ -106,7 +106,12 @@ export function namespaceOptions(input: {
   const names = new Set(explicit);
   if (wide) {
     input.declared?.forEach((n) => parseNamespace(n) && names.add(n));
-    input.jobNamespaces?.forEach((n) => n && parseNamespace(n) && names.add(n));
+    input.jobNamespaces?.forEach((n) => {
+      // A legacy job with no namespace is in `default` (the server and
+      // filterByNamespace agree), so it must be offered as such.
+      const name = n?.trim() || DEFAULT_NAMESPACE;
+      if (parseNamespace(name)) names.add(name);
+    });
   }
   return sortNamespaces(names);
 }
