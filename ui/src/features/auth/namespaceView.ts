@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useSyncExternalStore } from "react";
+import { useCallback, useEffect, useMemo, useSyncExternalStore } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "@/lib/api";
 import { CLUSTER_NAMESPACE, roleAtLeast } from "@/lib/roles";
@@ -179,8 +179,20 @@ export function useNamespaceView(): NamespaceView {
   const ready =
     !(clusterWide || principal.isScoped) ||
     (!jobs.isPending && (!(clusterWide && mayReadDeclared) || !declared.isPending));
-  const selection = effectiveSelection(stored, options, ready);
+  const showSwitcher = options.length > 1;
+  // The switcher is the only control that clears a selection, so a selection
+  // must never outlive it: once the options settle at one namespace (or none)
+  // nothing is applied and the stored value is forgotten. A failed options
+  // query settles to an empty list, which is not evidence the grants shrank,
+  // so the stored value is left alone in that case.
+  const optionsFailed = jobs.isError || declared.isError;
+  const hidden = ready && !showSwitcher;
+  const selection = hidden ? null : effectiveSelection(stored, options, ready);
   const select = useCallback((namespace: string | null) => setStoredNamespace(namespace), []);
 
-  return { selection, options, showSwitcher: options.length > 1, select };
+  useEffect(() => {
+    if (hidden && !optionsFailed && stored) setStoredNamespace(null);
+  }, [hidden, optionsFailed, stored]);
+
+  return { selection, options, showSwitcher, select };
 }
