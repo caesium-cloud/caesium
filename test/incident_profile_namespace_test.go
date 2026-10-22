@@ -94,11 +94,10 @@ func (s *IntegrationTestSuite) probeProfile(inc approvalIncident, alias string) 
 	return probe
 }
 
-// TestIncidentProfileOutsideNamespaceIsRefused: a marketing incident whose job
-// moved to finance and now names finance's profile runs under the deny-all
-// playbook (the profile is withheld from the bundle and refused at
-// enforcement); the same incident shape resolves its own namespace's profile
-// and a shared one. The shared-profile escalation is delivered to the
+// TestIncidentProfileOutsideNamespaceIsRefused: a marketing incident resolves
+// its own namespace's profile and a shared one; once its job moved to finance
+// and names finance's profile, the job's remediation block is ignored (A8)
+// and the incident runs under the deployment default. The shared-profile escalation is delivered to the
 // marketing policy, not the finance one, and without the job's new labels.
 func (s *IntegrationTestSuite) TestIncidentProfileOutsideNamespaceIsRefused() {
 	s.requireAuthLane()
@@ -115,13 +114,15 @@ func (s *IntegrationTestSuite) TestIncidentProfileOutsideNamespaceIsRefused() {
 	s.Equal([]string{"escalate"}, own.allow, "the incident's own namespace's profile is its playbook")
 	s.Equal("executed", own.status)
 
-	// Moved job naming a finance profile: refused as missing (deny-all).
+	// Moved job naming a finance profile: the remediation block the job's new
+	// owner wrote is not consulted at all (A8), so the incident resolves as a
+	// job declaring no remediation does, under the deployment default
+	// (triage-only, shared).
 	alias = fmt.Sprintf("d4-prof-moved-%d", stamp)
 	inc, _ = s.openIncidentUnder(alias, mktProfile, "finance", finProfile, nil)
-	refused := s.probeProfile(inc, alias)
-	s.Empty(refused.allow, "a profile outside the incident's namespace must not reach the agent's brief")
-	s.Equal("rejected", refused.status, "a profile outside the incident's namespace must not be enforced: deny-all")
-	s.requireNoEscalationEvent(inc.ID, 2*time.Second)
+	moved := s.probeProfile(inc, alias)
+	s.Equal([]string{"escalate"}, moved.allow, "a moved job's incident runs under the deployment default, not the new owner's profile")
+	s.Equal("executed", moved.status)
 
 	// Moved job naming the shared triage-only profile: resolved. Its
 	// escalation belongs to the marketing incident.

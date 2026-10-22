@@ -437,6 +437,17 @@ type atomRunner struct {
 	// task. Create pins the runtime image to it so a locally cached tag cannot
 	// execute older content than the cache key recorded.
 	resolvedImageDigest string
+	// kubeMapping is the run namespace's Kubernetes mapping
+	// (identity-and-access C1), resolved once per task execution before its
+	// cache identity and shared by its retries and fan-out instances: the pod
+	// target, the cache key, the descriptor and the namespace relative
+	// secret://k8s references read in all use it.
+	kubeMapping atom.KubeTarget
+	// kubeMappingErr is the refusal to resolve kubeMapping for this execution
+	// (a Kubernetes step whose target cannot be known). An unfanned step
+	// fails on it at once; each fan-out instance fails on it through its own
+	// instance row.
+	kubeMappingErr error
 }
 
 const (

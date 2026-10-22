@@ -20,7 +20,18 @@ import (
 
 type KubernetesTestSuite struct {
 	suite.Suite
-	engine *kubernetesEngine
+	engine  *kubernetesEngine
+	backend *mockKubernetesBackend
+}
+
+// singleNamespaceEngine serves every namespace from one backend, with the
+// engine default namespace "default".
+func singleNamespaceEngine(ctx context.Context, backend kubernetesBackend) *kubernetesEngine {
+	return &kubernetesEngine{
+		ctx:              ctx,
+		pods:             func(string) kubernetesBackend { return backend },
+		defaultNamespace: "default",
+	}
 }
 
 type mockKubernetesBackend struct {
@@ -119,10 +130,8 @@ func newPod(name string, status v1.PodStatus, createdAt, deletedAt time.Time) *v
 }
 
 func (s *KubernetesTestSuite) SetupTest() {
-	s.engine = &kubernetesEngine{
-		backend: &mockKubernetesBackend{},
-		ctx:     context.Background(),
-	}
+	s.backend = &mockKubernetesBackend{}
+	s.engine = singleNamespaceEngine(context.Background(), s.backend)
 }
 
 func TestKubernetesTestSuite(t *testing.T) {

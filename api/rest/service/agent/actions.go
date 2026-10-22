@@ -24,9 +24,12 @@ type ActionRequest struct {
 	// WHICH session proposed the action — the audit spine links the row to the
 	// container that made it, and the approval flow ends that session (not merely
 	// the newest one on the incident) while a human decides.
-	TokenID *uuid.UUID      `json:"-"`
-	Type    string          `json:"type"`
-	Params  json.RawMessage `json:"params,omitempty"`
+	TokenID *uuid.UUID `json:"-"`
+	// NamespaceConfined is set by the service from the caller's credential
+	// (identity-and-access A8), never from the body.
+	NamespaceConfined bool            `json:"-"`
+	Type              string          `json:"type"`
+	Params            json.RawMessage `json:"params,omitempty"`
 }
 
 // ActionResult is what the actions endpoint returns: the recorded AgentAction
@@ -75,6 +78,7 @@ func (s *Service) ProposeAction(inc *models.Incident, req ActionRequest) (*Actio
 		return nil, ErrUnknownActionType
 	}
 	req.IncidentID = inc.ID
+	req.NamespaceConfined = !s.authorLegacy
 
 	if executor != nil {
 		return executor.ExecuteAgentAction(s.ctx, req)
@@ -86,15 +90,16 @@ func (s *Service) ProposeAction(inc *models.Incident, req ActionRequest) (*Actio
 		params = datatypes.JSON(req.Params)
 	}
 	action := &models.AgentAction{
-		ID:         uuid.New(),
-		Namespace:  &inc.Namespace,
-		IncidentID: inc.ID,
-		Type:       req.Type,
-		Params:     params,
-		Status:     models.AgentActionStatusProposed,
-		Actor:      models.AgentActionActorAgent,
-		CreatedAt:  now,
-		UpdatedAt:  now,
+		ID:                uuid.New(),
+		Namespace:         &inc.Namespace,
+		IncidentID:        inc.ID,
+		Type:              req.Type,
+		Params:            params,
+		Status:            models.AgentActionStatusProposed,
+		Actor:             models.AgentActionActorAgent,
+		NamespaceConfined: req.NamespaceConfined,
+		CreatedAt:         now,
+		UpdatedAt:         now,
 	}
 	if err := s.db.WithContext(s.ctx).Create(action).Error; err != nil {
 		return nil, err

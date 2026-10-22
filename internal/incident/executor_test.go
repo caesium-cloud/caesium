@@ -129,7 +129,7 @@ func (f *fakeOps) OverrideSchemaGateOnce(_ context.Context, runID uuid.UUID) err
 	f.overrideGate = append(f.overrideGate, runID)
 	return nil
 }
-func (f *fakeOps) ApplyJobdefPatch(_ context.Context, jobID uuid.UUID, definition json.RawMessage, dryRun bool) (json.RawMessage, error) {
+func (f *fakeOps) ApplyJobdefPatch(_ context.Context, jobID uuid.UUID, _ string, definition json.RawMessage, dryRun bool) (json.RawMessage, error) {
 	f.applyPatch = append(f.applyPatch, applyPatchCall{jobID: jobID, definition: definition, dryRun: dryRun})
 	if f.applyPatchErr != nil {
 		return nil, f.applyPatchErr

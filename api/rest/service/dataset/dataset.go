@@ -10,6 +10,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/caesium-cloud/caesium/internal/auth"
+	"github.com/caesium-cloud/caesium/internal/authz"
 	"github.com/caesium-cloud/caesium/internal/freshness"
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/caesium-cloud/caesium/pkg/db"
@@ -37,6 +39,11 @@ type Service struct {
 // New creates a Service backed by the default DB connection.
 func New(ctx context.Context) *Service {
 	return &Service{ctx: ctx, db: db.Connection()}
+}
+
+// NewWithDatabase creates a Service backed by conn; used by tests.
+func NewWithDatabase(ctx context.Context, conn *gorm.DB) *Service {
+	return &Service{ctx: ctx, db: conn}
 }
 
 // WithDatabase returns a copy of the Service backed by conn; used by tests.
@@ -119,7 +126,18 @@ type AdvanceParams struct {
 	Namespace string
 	Name      string
 	Watermark string
+	// Principal is the authenticated caller (nil when auth is off). A
+	// namespace-confined one is re-checked inside the write (B6).
+	Principal *auth.Principal
 }
+
+// AdvanceRole and ReleaseRole are the roles the manual advance and the hold
+// release require (internal/auth's route table); the in-transaction producer
+// re-check of a confined caller requires them in every producer namespace.
+const (
+	AdvanceRole = models.RoleRunner
+	ReleaseRole = models.RoleOperator
+)
 
 // AdvanceResult is the manual advance outcome plus the resulting state row.
 type AdvanceResult struct {
@@ -208,6 +226,10 @@ func (s *Service) GetWithOptions(namespace, name string, options GetOptions) (*D
 	if !foundState {
 		state = unknownState(namespace, name, decl.CreatedAt, decl.UpdatedAt)
 	}
+	v := viewerFrom(s.ctx)
+	if err := s.shapeStates(v, []*models.DatasetState{&state}); err != nil {
+		return nil, err
+	}
 
 	detail := &Detail{State: state}
 	if options.IncludeHold && env.Variables().DataAssertionsEnabled {
@@ -219,6 +241,9 @@ func (s *Service) GetWithOptions(namespace, name string, options GetOptions) (*D
 			return nil, err
 		}
 		if err == nil {
+			if err := s.shapeHolds(v, []*models.DatasetHold{&hold}); err != nil {
+				return nil, err
+			}
 			detail.HoldStatus, detail.Hold = hold.Status, &hold
 		}
 	}
@@ -237,11 +262,14 @@ func (s *Service) GetWithOptions(namespace, name string, options GetOptions) (*D
 			}
 		}
 	}
-	derivation, foundDerivation, err := s.latestDerivation(namespace, name)
+	derivation, foundDerivation, err := s.latestDerivation(v, namespace, name)
 	if err != nil {
 		return nil, err
 	}
 	if foundDerivation {
+		if err := s.shapeDerivations(v, []*models.DatasetDerivation{&derivation}); err != nil {
+			return nil, err
+		}
 		detail.LastDecision = &derivation
 	}
 	return detail, nil
@@ -262,6 +290,11 @@ func (s *Service) Derivations(p DerivationsParams) (*DerivationsResult, error) {
 		Model(&models.DatasetDerivation{}).
 		Where("name = ?", strings.TrimSpace(p.Name))
 	q = withDerivationNamespace(q, p.Namespace)
+	v := viewerFrom(s.ctx)
+	q, err = s.derivationVisible(q, v, p.Namespace, p.Name)
+	if err != nil {
+		return nil, err
+	}
 
 	var total int64
 	if err := q.Count(&total).Error; err != nil {
@@ -277,6 +310,9 @@ func (s *Service) Derivations(p DerivationsParams) (*DerivationsResult, error) {
 		Find(&rows).Error; err != nil {
 		return nil, err
 	}
+	if err := s.shapeDerivations(v, derivationPointers(rows)); err != nil {
+		return nil, err
+	}
 	return &DerivationsResult{
 		Derivations: rows,
 		Total:       total,
@@ -285,21 +321,34 @@ func (s *Service) Derivations(p DerivationsParams) (*DerivationsResult, error) {
 	}, nil
 }
 
-// Advance applies a manual arrival through the freshness.Store contract.
+// Advance applies a manual arrival through the freshness.Store contract. A
+// namespace-confined principal's advance re-checks the dataset's producer
+// namespaces inside the advance transaction (guardedWrite), and its response
+// is shaped for what it may read.
 func (s *Service) Advance(p AdvanceParams) (*AdvanceResult, error) {
 	now := time.Now().UTC()
-	result, err := freshness.NewStore(s.db).Advance(s.ctx, freshness.AdvanceInput{
-		Namespace:   namespacePtr(p.Namespace),
-		Name:        strings.TrimSpace(p.Name),
-		Watermark:   strings.TrimSpace(p.Watermark),
-		RunID:       uuid.Nil,
-		CompletedAt: now,
-		RunOrder:    now,
+	var result freshness.AdvanceResult
+	err := s.guardedWrite(p.Principal, AdvanceRole, p.Namespace, p.Name, func(conn *gorm.DB, guard func(tx *gorm.DB) error) error {
+		var err error
+		result, err = freshness.NewStore(conn).Advance(s.ctx, freshness.AdvanceInput{
+			Namespace:   namespacePtr(p.Namespace),
+			Name:        strings.TrimSpace(p.Name),
+			Watermark:   strings.TrimSpace(p.Watermark),
+			RunID:       uuid.Nil,
+			CompletedAt: now,
+			RunOrder:    now,
+			Guard:       guard,
+		})
+		return err
 	})
 	if err != nil {
 		return nil, err
 	}
-	return &AdvanceResult{Outcome: result.Outcome, State: result.State}, nil
+	state := result.State
+	if err := s.shapeStates(viewerFor(p.Principal), []*models.DatasetState{&state}); err != nil {
+		return nil, err
+	}
+	return &AdvanceResult{Outcome: result.Outcome, State: state}, nil
 }
 
 func (s *Service) observedStates(status string, limit, offset int) ([]models.DatasetState, int64, error) {
@@ -307,6 +356,7 @@ func (s *Service) observedStates(status string, limit, offset int) ([]models.Dat
 	if status != "" {
 		q = q.Where("status = ?", status)
 	}
+	q = s.producerVisible(q, "dataset_states.namespace", "dataset_states.name")
 
 	var total int64
 	if err := q.Count(&total).Error; err != nil {
@@ -345,10 +395,12 @@ func (s *Service) declarationOnlyStates(limit int) ([]models.DatasetState, int64
 	// declared-but-stateless set is bounded (one row per job/dataset
 	// declaration), so fetching plain columns and deduping in-process is cheap.
 	var decls []models.DatasetDeclaration
-	if err := s.db.WithContext(s.ctx).
+	q := s.db.WithContext(s.ctx).
 		Model(&models.DatasetDeclaration{}).
 		Where("direction IN ?", declarationDirections).
-		Where("NOT EXISTS (SELECT 1 FROM dataset_states ds WHERE ds.name = dataset_declarations.name AND ds.namespace = COALESCE(dataset_declarations.namespace, ''))").
+		Where("NOT EXISTS (SELECT 1 FROM dataset_states ds WHERE ds.name = dataset_declarations.name AND ds.namespace = COALESCE(dataset_declarations.namespace, ''))")
+	q = s.producerVisible(q, "dataset_declarations.namespace", "dataset_declarations.name")
+	if err := q.
 		Order("updated_at DESC").
 		Find(&decls).Error; err != nil {
 		return nil, 0, err
@@ -386,6 +438,28 @@ func (s *Service) getState(namespace, name string) (models.DatasetState, bool, e
 
 func (s *Service) getDeclaration(namespace, name string) (models.DatasetDeclaration, bool, error) {
 	name = strings.TrimSpace(name)
+	if authz.Restricted(s.ctx) {
+		// A restricted caller is shown a producer it may read, never another
+		// namespace's (B6). The middleware let it in on such a producer; a
+		// source-only or consumer declaration owns nothing and is not shown.
+		var decl models.DatasetDeclaration
+		q := s.db.WithContext(s.ctx).
+			Model(&models.DatasetDeclaration{}).
+			Joins("JOIN jobs ON jobs.id = dataset_declarations.job_id AND jobs.deleted_at IS NULL").
+			Where("dataset_declarations.name = ? AND dataset_declarations.direction = ?", name, models.DatasetDirectionProduces).
+			Order("dataset_declarations.job_alias").
+			Limit(1)
+		if ns := strings.TrimSpace(namespace); ns == "" {
+			q = q.Where("(dataset_declarations.namespace IS NULL OR dataset_declarations.namespace = '')")
+		} else {
+			q = q.Where("dataset_declarations.namespace = ?", ns)
+		}
+		res := authz.NamespaceFilter(q, "jobs.namespace").Select("dataset_declarations.*").Find(&decl)
+		if res.Error != nil {
+			return models.DatasetDeclaration{}, false, res.Error
+		}
+		return decl, res.RowsAffected > 0, nil
+	}
 	for _, direction := range declarationDirections {
 		var decl models.DatasetDeclaration
 		q := s.db.WithContext(s.ctx).
@@ -403,7 +477,7 @@ func (s *Service) getDeclaration(namespace, name string) (models.DatasetDeclarat
 	return models.DatasetDeclaration{}, false, nil
 }
 
-func (s *Service) latestDerivation(namespace, name string) (models.DatasetDerivation, bool, error) {
+func (s *Service) latestDerivation(v viewer, namespace, name string) (models.DatasetDerivation, bool, error) {
 	var derivation models.DatasetDerivation
 	q := s.db.WithContext(s.ctx).
 		Where("name = ?", strings.TrimSpace(name)).
@@ -411,6 +485,10 @@ func (s *Service) latestDerivation(namespace, name string) (models.DatasetDeriva
 		Order("id DESC").
 		Limit(1)
 	q = withDerivationNamespace(q, namespace)
+	q, err := s.derivationVisible(q, v, namespace, name)
+	if err != nil {
+		return models.DatasetDerivation{}, false, err
+	}
 	res := q.Find(&derivation)
 	if res.Error != nil {
 		return models.DatasetDerivation{}, false, res.Error

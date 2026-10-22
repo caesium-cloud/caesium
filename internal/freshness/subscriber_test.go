@@ -39,6 +39,16 @@ func seedProducingRunRaw(t *testing.T, db *gorm.DB, jobID, runID uuid.UUID, rawO
 		}
 	}
 
+	// The producing job itself: the capturer attributes the inputs it records
+	// to the job's namespace (identity-and-access B6), so a run whose job row
+	// is missing records none.
+	var jobs int64
+	must(db.Model(&models.Job{}).Where("id = ?", jobID).Count(&jobs).Error)
+	if jobs == 0 {
+		triggerID := uuid.New()
+		must(db.Create(&models.Trigger{ID: triggerID, Type: models.TriggerTypeCron}).Error)
+		must(db.Create(&models.Job{ID: jobID, Alias: "orders-daily-" + jobID.String()[:8], TriggerID: triggerID}).Error)
+	}
 	must(db.Create(&models.Task{ID: taskID, JobID: jobID, AtomID: uuid.New(), Name: "extract"}).Error)
 
 	must(db.Create(&models.TaskRun{
@@ -172,6 +182,76 @@ func TestCapturerRecordsConsumedViewCapturedAtRunCreation(t *testing.T) {
 	consumed := consumedSnapshotOf(t, c, "staging.orders")
 	if consumed["raw.vendor_x"] != "vendor-key-1" {
 		t.Fatalf("consumed snapshot = %v, want the CREATION-time raw.vendor_x=vendor-key-1", consumed)
+	}
+}
+
+// TestCapturerRecordsTheStartViewOfAnUnmovedJobVerbatim (pre-PR r9 P2): an
+// apply that removes an input while the run is in flight, without moving the
+// job, leaves completion exactly as before identity-and-access B6: the view
+// the run started on is recorded as stamped. (A move is fenced at admission,
+// FenceStartParams, and at completion, inputsOwnedByRun.)
+func TestCapturerRecordsTheStartViewOfAnUnmovedJobVerbatim(t *testing.T) {
+	db := openRegistryDB(t)
+	c := NewCapturer(event.New(), db)
+	ctx := context.Background()
+
+	jobID, runID := uuid.New(), uuid.New()
+	seedProducingRun(t, db, jobID, runID, map[string]string{"max_order_ts": "2026-07-03T04:31:00Z"}, nil, "max_order_ts")
+	if _, err := c.store.Advance(ctx, AdvanceInput{Name: "raw.vendor_x", Watermark: "vendor-key-1", RunID: uuid.New(), CompletedAt: t0}); err != nil {
+		t.Fatalf("seed upstream: %v", err)
+	}
+	enriched, err := EnrichStartParams(ctx, db, jobID, nil, false)
+	if err != nil {
+		t.Fatalf("enrich start params: %v", err)
+	}
+	if enriched, err = FenceStartParams(ctx, db, jobID, models.DefaultNamespace, enriched); err != nil {
+		t.Fatalf("fence start params: %v", err)
+	}
+	if enriched[ConsumedWatermarksStartParam] == "" {
+		t.Fatalf("precondition: the start view captured the input, got %v", enriched)
+	}
+	setRunParams(t, db, runID, enriched)
+	if err := db.Where("job_id = ? AND direction = ?", jobID, models.DatasetDirectionConsumes).Delete(&models.DatasetDeclaration{}).Error; err != nil {
+		t.Fatalf("drop the input declaration: %v", err)
+	}
+
+	c.handleRunCompleted(ctx, event.Event{Type: event.TypeRunCompleted, JobID: jobID, RunID: runID})
+
+	if consumed := consumedSnapshotOf(t, c, "staging.orders"); len(consumed) != 1 || consumed["raw.vendor_x"] != "vendor-key-1" {
+		t.Fatalf("consumed snapshot = %v, want the start view verbatim", consumed)
+	}
+}
+
+// TestCapturerRecordsNoInputsForAJobThatMovedBeforeCompletion: the
+// subscriber runs after the run finished; a job moved to another namespace
+// (and given that namespace's inputs) in between must not have those inputs
+// credited to the old namespace's run.
+func TestCapturerRecordsNoInputsForAJobThatMovedBeforeCompletion(t *testing.T) {
+	db := openRegistryDB(t)
+	c := NewCapturer(event.New(), db)
+	ctx := context.Background()
+
+	jobID, runID := uuid.New(), uuid.New()
+	seedProducingRun(t, db, jobID, runID, map[string]string{"max_order_ts": "2026-07-03T04:31:00Z"}, nil, "max_order_ts")
+	if err := db.Model(&models.JobRun{}).Where("id = ?", runID).Update("namespace", "finance").Error; err != nil {
+		t.Fatalf("persist the run in finance: %v", err)
+	}
+	if _, err := c.store.Advance(ctx, AdvanceInput{Name: "raw.vendor_x", Watermark: "mkt-input", RunID: uuid.New(), CompletedAt: t0}); err != nil {
+		t.Fatalf("seed upstream: %v", err)
+	}
+	moveJob(t, db, jobID, "marketing")
+
+	c.handleRunCompleted(ctx, event.Event{Type: event.TypeRunCompleted, JobID: jobID, RunID: runID})
+
+	st, ok, err := c.store.Get(ctx, nil, "staging.orders")
+	if err != nil || !ok {
+		t.Fatalf("produced state: ok=%v err=%v", ok, err)
+	}
+	if st.LastRunID == nil || *st.LastRunID != runID {
+		t.Fatalf("the run must still advance its output, last run = %v", st.LastRunID)
+	}
+	if len(st.ConsumedWatermarks) != 0 || st.ConsumedRunID != nil {
+		t.Fatalf("the moved job's inputs were credited to the finance run: %s (owner %v)", st.ConsumedWatermarks, st.ConsumedRunID)
 	}
 }
 

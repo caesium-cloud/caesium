@@ -66,6 +66,16 @@ type AgentAction struct {
 	Result datatypes.JSON    `gorm:"type:json" json:"result,omitempty"`
 	Actor  AgentActionActor  `gorm:"type:text;index;not null" json:"actor"`
 
+	// NamespaceConfined records that the row was written by a server whose
+	// agent sessions are confined to the incident's namespace
+	// (identity-and-access A8). An agent-authored row without it may quote
+	// another namespace's data its session could read, so its content is
+	// withheld from namespace-confined readers.
+	NamespaceConfined bool `gorm:"not null;default:false" json:"-"`
+	// ContentWithheld is response-only: the params and result of a legacy
+	// agent-authored row were withheld from this reader.
+	ContentWithheld bool `gorm:"-" json:"content_withheld,omitempty"`
+
 	CreatedAt time.Time `gorm:"not null;index" json:"created_at"`
 	UpdatedAt time.Time `gorm:"not null" json:"updated_at"`
 }

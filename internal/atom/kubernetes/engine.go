@@ -52,9 +52,54 @@ type Engine interface {
 }
 
 type kubernetesEngine struct {
-	ctx         context.Context
-	backend     kubernetesBackend
-	statsClient rest.Interface
+	ctx context.Context
+	// pods returns the pod client of one namespace. Every request picks its
+	// namespace (identity-and-access design §10.1): the namespace of a
+	// qualified runtime id, the request's Namespace, else defaultNamespace.
+	pods func(namespace string) kubernetesBackend
+	// defaultNamespace is CAESIUM_KUBERNETES_NAMESPACE when the engine was
+	// built: where unmapped pods run and where an unqualified (legacy) runtime
+	// id resolves.
+	defaultNamespace string
+	statsClient      rest.Interface
+}
+
+// locate resolves a runtime id (and the request's namespace) to the pod client
+// and pod name it addresses.
+func (e *kubernetesEngine) locate(id, namespace string) (kubernetesBackend, string, string, error) {
+	ns, name, err := resolveRuntimeID(id, namespace, e.namespaceOrDefault(""))
+	if err != nil {
+		return nil, "", "", err
+	}
+	return e.pods(ns), ns, name, nil
+}
+
+func (e *kubernetesEngine) namespaceOrDefault(namespace string) string {
+	if namespace != "" {
+		return namespace
+	}
+	if e.defaultNamespace != "" {
+		return e.defaultNamespace
+	}
+	return "default"
+}
+
+// listNamespaces is the sorted, de-duplicated namespace set a List walks: the
+// engine default plus every namespace the request names.
+func (e *kubernetesEngine) listNamespaces(req *atom.EngineListRequest) []string {
+	set := []string{e.namespaceOrDefault("")}
+	if req != nil {
+		if req.Namespace != "" {
+			set = append(set, req.Namespace)
+		}
+		for _, ns := range req.Namespaces {
+			if ns != "" {
+				set = append(set, ns)
+			}
+		}
+	}
+	slices.Sort(set)
+	return slices.Compact(set)
 }
 
 // getKubernetesCore resolves the CoreV1 client from the local kubeconfig,
@@ -119,36 +164,43 @@ func NewEngine(ctx context.Context, core ...corev1.CoreV1Interface) (Engine, err
 		statsClient = nil
 	}
 	return &kubernetesEngine{
-		ctx:         ctx,
-		backend:     backend.Pods(env.Variables().KubernetesNamespace),
-		statsClient: statsClient,
+		ctx:              ctx,
+		pods:             func(namespace string) kubernetesBackend { return backend.Pods(namespace) },
+		defaultNamespace: env.Variables().KubernetesNamespace,
+		statsClient:      statsClient,
 	}, nil
 }
 
 // Get a Caesium Kubernetes pod and its corresponding metadata.
 func (e *kubernetesEngine) Get(req *atom.EngineGetRequest) (atom.Atom, error) {
-	pod, err := e.backend.Get(e.ctx, req.ID, metav1.GetOptions{})
+	pods, namespace, name, err := e.locate(req.ID, req.Namespace)
+	if err != nil {
+		return nil, err
+	}
+	pod, err := pods.Get(e.ctx, name, metav1.GetOptions{})
 	if err != nil {
 		return nil, err
 	}
 
-	return &Atom{metadata: pod}, nil
+	return &Atom{metadata: pod, namespace: namespace}, nil
 }
 
-// List all of Caesium's Kubernetes pods.
+// List Caesium's Kubernetes pods in the engine's namespace and every
+// namespace the request names (a reaper passes each namespace the access
+// policy maps). Each atom's ID is namespace-qualified.
 func (e *kubernetesEngine) List(req *atom.EngineListRequest) ([]atom.Atom, error) {
-	pods, err := e.backend.List(
-		e.ctx,
-		metav1.ListOptions{LabelSelector: atom.Label},
-	)
-	if err != nil {
-		return nil, err
-	}
-
-	atoms := make([]atom.Atom, len(pods.Items))
-
-	for i, pod := range pods.Items {
-		atoms[i] = &Atom{metadata: &pod}
+	var atoms []atom.Atom
+	for _, namespace := range e.listNamespaces(req) {
+		pods, err := e.pods(namespace).List(
+			e.ctx,
+			metav1.ListOptions{LabelSelector: atom.Label},
+		)
+		if err != nil {
+			return nil, err
+		}
+		for i := range pods.Items {
+			atoms = append(atoms, &Atom{metadata: &pods.Items[i], namespace: namespace})
+		}
 	}
 
 	return atoms, nil
@@ -163,9 +215,11 @@ func (e *kubernetesEngine) Create(req *atom.EngineCreateRequest) (atom.Atom, err
 	}
 	envVars := convertEnvVars(req.Spec.Env)
 
+	namespace := e.namespaceOrDefault(req.Target.Namespace)
+	pods := e.pods(namespace)
 	spec := &v1.Pod{
 		Name:      fmt.Sprintf("%s-%s", req.Name, uuid.New()),
-		Namespace: env.Variables().KubernetesNamespace,
+		Namespace: namespace,
 		Labels:    map[string]string{atom.Label: ""},
 		Spec: v1.PodSpec{
 			Containers: []v1.Container{
@@ -203,6 +257,11 @@ func (e *kubernetesEngine) Create(req *atom.EngineCreateRequest) (atom.Atom, err
 		if q := req.Spec.Kubernetes.QueueName; q != "" {
 			spec.Labels[kueueQueueLabel] = q
 		}
+	}
+	// Service account precedence: the step's own kubernetes.serviceAccountName,
+	// then the namespace default from the access policy, then none.
+	if spec.Spec.ServiceAccountName == "" && req.Target.ServiceAccountName != "" {
+		spec.Spec.ServiceAccountName = req.Target.ServiceAccountName
 	}
 
 	// Issue the allocation call itself against a bounded, DETACHED context
@@ -242,7 +301,7 @@ func (e *kubernetesEngine) Create(req *atom.EngineCreateRequest) (atom.Atom, err
 			// Create may return while a delete is in flight. Keep this
 			// individual API call short so joining the watcher cannot add
 			// the full ordinary 30-second Stop budget to completion.
-			err := e.Stop(&atom.EngineStopRequest{ID: spec.Name, Force: true, Timeout: time.Second})
+			err := e.Stop(&atom.EngineStopRequest{ID: spec.Name, Namespace: namespace, Force: true, Timeout: time.Second})
 			if err == nil {
 				return
 			}
@@ -259,7 +318,7 @@ func (e *kubernetesEngine) Create(req *atom.EngineCreateRequest) (atom.Atom, err
 		}
 	})
 
-	pod, err := e.backend.Create(createCtx, spec, metav1.CreateOptions{})
+	pod, err := pods.Create(createCtx, spec, metav1.CreateOptions{})
 	close(createReturned)
 	if !stopEarlyCleanup() {
 		<-earlyCleanupDone
@@ -269,7 +328,7 @@ func (e *kubernetesEngine) Create(req *atom.EngineCreateRequest) (atom.Atom, err
 			// A caller cancellation or the detached request's own deadline
 			// leaves allocation ambiguous: the API server may have persisted
 			// this uniquely named Caesium pod before its response reached us.
-			e.cleanupFailedCreate(spec.Name, err)
+			e.cleanupFailedCreate(spec.Name, namespace, err)
 			if e.ctx.Err() != nil {
 				return nil, e.ctx.Err()
 			}
@@ -280,11 +339,11 @@ func (e *kubernetesEngine) Create(req *atom.EngineCreateRequest) (atom.Atom, err
 		// Create succeeded — the pod exists — but the caller is no longer
 		// waiting for it. Remove it and report the cancellation, not a
 		// spurious success. See #480.
-		e.cleanupFailedCreate(spec.Name, e.ctx.Err())
+		e.cleanupFailedCreate(spec.Name, namespace, e.ctx.Err())
 		return nil, e.ctx.Err()
 	}
 
-	return &Atom{metadata: pod}, nil
+	return &Atom{metadata: pod, namespace: namespace}, nil
 }
 
 // createRequestTimeout bounds the Create API call above, independent of the
@@ -296,9 +355,9 @@ const createRequestTimeout = 30 * time.Second
 // commonly: the caller's context was cancelled around the create request).
 // Stop already deletes against a detached context.Background() (see its own
 // comment), so this is safe to call regardless of why Create is failing.
-func (e *kubernetesEngine) cleanupFailedCreate(name string, cause error) {
-	if err := e.Stop(&atom.EngineStopRequest{ID: name, Force: true}); err != nil && !apierrors.IsNotFound(err) {
-		log.Warn("failed to clean up pod after Create failed", "name", name, "cause", cause, "error", err)
+func (e *kubernetesEngine) cleanupFailedCreate(name, namespace string, cause error) {
+	if err := e.Stop(&atom.EngineStopRequest{ID: name, Namespace: namespace, Force: true}); err != nil && !apierrors.IsNotFound(err) {
+		log.Warn("failed to clean up pod after Create failed", "name", name, "namespace", namespace, "cause", cause, "error", err)
 	}
 }
 
@@ -307,13 +366,17 @@ func (e *kubernetesEngine) Wait(req *atom.EngineWaitRequest) (atom.Atom, error) 
 	if req != nil && req.Context != nil {
 		waitCtx = req.Context
 	}
-	pod, err := e.backend.Get(e.ctx, req.ID, metav1.GetOptions{})
+	pods, namespace, name, err := e.locate(req.ID, req.Namespace)
+	if err != nil {
+		return nil, err
+	}
+	pod, err := pods.Get(e.ctx, name, metav1.GetOptions{})
 	if err == nil && (pod.Status.Phase == v1.PodSucceeded || pod.Status.Phase == v1.PodFailed) {
-		return &Atom{metadata: pod}, nil
+		return &Atom{metadata: pod, namespace: namespace}, nil
 	}
 
-	watcher, err := e.backend.Watch(waitCtx, metav1.ListOptions{
-		FieldSelector: fields.OneTermEqualSelector("metadata.name", req.ID).String(),
+	watcher, err := pods.Watch(waitCtx, metav1.ListOptions{
+		FieldSelector: fields.OneTermEqualSelector("metadata.name", name).String(),
 	})
 	if err != nil {
 		return nil, err
@@ -326,14 +389,14 @@ func (e *kubernetesEngine) Wait(req *atom.EngineWaitRequest) (atom.Atom, error) 
 			return nil, waitCtx.Err()
 		case evt, ok := <-watcher.ResultChan():
 			if !ok {
-				return e.Get(&atom.EngineGetRequest{ID: req.ID})
+				return e.Get(&atom.EngineGetRequest{ID: name, Namespace: namespace})
 			}
 			pod, ok := evt.Object.(*v1.Pod)
 			if !ok || pod == nil {
 				continue
 			}
 			if pod.Status.Phase == v1.PodSucceeded || pod.Status.Phase == v1.PodFailed {
-				return &Atom{metadata: pod}, nil
+				return &Atom{metadata: pod, namespace: namespace}, nil
 			}
 		}
 	}
@@ -346,6 +409,10 @@ func (e *kubernetesEngine) Wait(req *atom.EngineWaitRequest) (atom.Atom, error) 
 // succeeds even when the parent context has been cancelled
 // (e.g. by a run-level timeout).
 func (e *kubernetesEngine) Stop(req *atom.EngineStopRequest) error {
+	pods, _, name, err := e.locate(req.ID, req.Namespace)
+	if err != nil {
+		return err
+	}
 	var (
 		bg   = metav1.DeletePropagationBackground
 		fg   = metav1.DeletePropagationForeground
@@ -369,7 +436,7 @@ func (e *kubernetesEngine) Stop(req *atom.EngineStopRequest) error {
 	ctx, cancel := context.WithTimeout(context.Background(), apiTimeout)
 	defer cancel()
 
-	return e.backend.Delete(ctx, req.ID, opts)
+	return pods.Delete(ctx, name, opts)
 }
 
 // Logs streams the log output from a Caesium Kubernetes pod's
@@ -379,6 +446,10 @@ func (e *kubernetesEngine) Logs(req *atom.EngineLogsRequest) (io.ReadCloser, err
 }
 
 func (e *kubernetesEngine) logsWhenReady(req *atom.EngineLogsRequest, timeout time.Duration) (io.ReadCloser, error) {
+	pods, _, name, err := e.locate(req.ID, req.Namespace)
+	if err != nil {
+		return nil, err
+	}
 	opts := &v1.PodLogOptions{
 		Follow:     true,
 		Timestamps: true,
@@ -405,7 +476,7 @@ func (e *kubernetesEngine) logsWhenReady(req *atom.EngineLogsRequest, timeout ti
 		if ctx.Err() != nil {
 			return nil, context.Cause(ctx)
 		}
-		logs := e.backend.GetLogs(req.ID, opts)
+		logs := pods.GetLogs(name, opts)
 		if logs == nil {
 			return nil, fmt.Errorf("failed to retrieve logs")
 		}
@@ -419,7 +490,7 @@ func (e *kubernetesEngine) logsWhenReady(req *atom.EngineLogsRequest, timeout ti
 			if peekErr == nil || errors.Is(peekErr, io.EOF) {
 				final := false
 				if errors.Is(peekErr, io.EOF) {
-					pod, getErr := e.backend.Get(ctx, req.ID, metav1.GetOptions{})
+					pod, getErr := pods.Get(ctx, name, metav1.GetOptions{})
 					if getErr != nil {
 						_ = reader.Close()
 						if ctx.Err() != nil {
@@ -434,7 +505,7 @@ func (e *kubernetesEngine) logsWhenReady(req *atom.EngineLogsRequest, timeout ti
 					final = pod != nil && (pod.Status.Phase == v1.PodSucceeded || pod.Status.Phase == v1.PodFailed)
 					if !final && !podCanStartLogs(pod) {
 						_ = reader.Close()
-						return nil, fmt.Errorf("empty log stream for unavailable pod %q", req.ID)
+						return nil, fmt.Errorf("empty log stream for unavailable pod %q", name)
 					}
 				}
 				if peekErr == nil || final {
@@ -466,12 +537,12 @@ func (e *kubernetesEngine) logsWhenReady(req *atom.EngineLogsRequest, timeout ti
 			if err == nil {
 				return nil, fmt.Errorf("failed to retrieve log stream")
 			}
-			if !containerLogsPending(err, req.ID) {
+			if !containerLogsPending(err, name) {
 				return nil, err
 			}
 			// A kubelet may not have synced a newly bound pod yet. Confirm the
 			// apiserver object still exists and has no permanent startup failure.
-			pod, getErr := e.backend.Get(ctx, req.ID, metav1.GetOptions{})
+			pod, getErr := pods.Get(ctx, name, metav1.GetOptions{})
 			if getErr != nil {
 				if ctx.Err() != nil {
 					return nil, context.Cause(ctx)

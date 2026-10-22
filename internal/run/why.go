@@ -12,6 +12,7 @@ import (
 	"github.com/caesium-cloud/caesium/internal/authz"
 	"github.com/caesium-cloud/caesium/internal/cache"
 	"github.com/caesium-cloud/caesium/internal/event"
+	"github.com/caesium-cloud/caesium/internal/incident"
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/google/uuid"
 	"gorm.io/gorm"
@@ -104,6 +105,12 @@ type WhyExplanation struct {
 
 	Verdict WhyVerdict `json:"verdict"`
 	Status  string     `json:"status"`
+	// FailureClass is the incident classifier's failure class of a failed task
+	// (config, oom, schema_violation, …), from the same task-run signal the
+	// incident subscriber classifies, so it is present whether or not agent
+	// remediation is enabled. Omitted for a task that did not fail and for the
+	// unknown class, so those explanations are unchanged.
+	FailureClass string `json:"failureClass,omitempty"`
 	// CacheEnabled reflects whether caching applied to this task.
 	CacheEnabled bool `json:"cacheEnabled"`
 	// Hash is this task-run's identity hash.
@@ -206,6 +213,22 @@ type WhyGroupFailure struct {
 	Status         string    `json:"status"`
 	Attempt        int       `json:"attempt"`
 	Error          string    `json:"error,omitempty"`
+	// FailureClass is the failed instance's class, as WhyExplanation.FailureClass.
+	FailureClass string `json:"failureClass,omitempty"`
+}
+
+// whyFailureClass is the incident classifier's class for a failed task run,
+// from the signal the incident subscriber builds for its task_failed event.
+// Empty for any other status and for the unknown class.
+func whyFailureClass(row *models.TaskRun) string {
+	if row == nil || row.Status != string(TaskStatusFailed) {
+		return ""
+	}
+	class := incident.NewClassifier().Classify(incident.TaskRunSignal(string(event.TypeTaskFailed), row))
+	if class == incident.ClassUnknown {
+		return ""
+	}
+	return string(class)
 }
 
 // whyGroupPartitionListCap bounds the partition-value list echoed in a group
@@ -284,6 +307,7 @@ func (s *Store) WhyTaskPartition(ctx context.Context, runID uuid.UUID, taskRef, 
 		TaskRunID:    &taskRunID,
 		Partition:    subject.PartitionValue,
 		Status:       subject.Status,
+		FailureClass: whyFailureClass(subject),
 		CacheEnabled: subject.CacheEnabled,
 		Hash:         subject.Hash,
 		Verdict:      classifyVerdict(subject),
@@ -459,6 +483,7 @@ func newWhyGroupExplanation(runID, jobID, taskID uuid.UUID, taskName string, row
 			Status:         failed.Status,
 			Attempt:        failed.Attempt,
 			Error:          failed.Error,
+			FailureClass:   whyFailureClass(failed),
 		}
 	}
 

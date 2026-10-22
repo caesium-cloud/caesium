@@ -58,39 +58,39 @@ func (s *KubernetesTestSuite) TestGet() {
 		ID: testAtomID,
 	}
 
-	s.engine.backend.(*mockKubernetesBackend).
+	s.backend.
 		On("Get", testAtomID).
 		Return()
 
 	c, err := s.engine.Get(req)
 	assert.Nil(s.T(), err)
-	assert.Equal(s.T(), req.ID, c.ID())
-	s.engine.backend.(*mockKubernetesBackend).AssertExpectations(s.T())
+	assert.Equal(s.T(), "default/"+req.ID, c.ID(), "a legacy unqualified id resolves in the default namespace and comes back qualified")
+	s.backend.AssertExpectations(s.T())
 }
 
 func (s *KubernetesTestSuite) TestGetError() {
 	req := &atom.EngineGetRequest{}
 
-	s.engine.backend.(*mockKubernetesBackend).
+	s.backend.
 		On("Get", "").
 		Return(fmt.Errorf("invalid pod name"))
 
 	c, err := s.engine.Get(req)
 	assert.NotNil(s.T(), err)
 	assert.Nil(s.T(), c)
-	s.engine.backend.(*mockKubernetesBackend).AssertExpectations(s.T())
+	s.backend.AssertExpectations(s.T())
 }
 
 func (s *KubernetesTestSuite) TestList() {
 	req := &atom.EngineListRequest{}
 
-	s.engine.backend.(*mockKubernetesBackend).On("List").Return()
+	s.backend.On("List").Return()
 
 	c, err := s.engine.List(req)
 	assert.Nil(s.T(), err)
 	assert.NotNil(s.T(), c)
 	assert.Len(s.T(), c, 1)
-	s.engine.backend.(*mockKubernetesBackend).AssertExpectations(s.T())
+	s.backend.AssertExpectations(s.T())
 }
 
 func (s *KubernetesTestSuite) TestCreate() {
@@ -100,15 +100,15 @@ func (s *KubernetesTestSuite) TestCreate() {
 		Command: []string{"test", "cmd"},
 	}
 
-	s.engine.backend.(*mockKubernetesBackend).
+	s.backend.
 		On("Create", mock.AnythingOfType("*v1.Pod")).
 		Return()
 
 	c, err := s.engine.Create(req)
 	assert.Nil(s.T(), err)
 	assert.NotNil(s.T(), c)
-	assert.True(s.T(), strings.HasPrefix(c.ID(), testAtomID))
-	s.engine.backend.(*mockKubernetesBackend).AssertExpectations(s.T())
+	assert.True(s.T(), strings.HasPrefix(c.ID(), "default/"+testAtomID), c.ID())
+	s.backend.AssertExpectations(s.T())
 }
 
 // TestCreateUsesDigestPinnedImage locks the kubelet-facing half of pinDigests:
@@ -132,13 +132,13 @@ func (s *KubernetesTestSuite) TestCreateUsesDigestPinnedImage() {
 		return c.Image == pinned && c.ImagePullPolicy == v1.PullIfNotPresent
 	})
 
-	s.engine.backend.(*mockKubernetesBackend).
+	s.backend.
 		On("Create", podMatcher).
 		Return()
 
 	_, err := s.engine.Create(req)
 	s.Require().NoError(err)
-	s.engine.backend.(*mockKubernetesBackend).AssertExpectations(s.T())
+	s.backend.AssertExpectations(s.T())
 }
 
 func (s *KubernetesTestSuite) TestCreateAppliesSpec() {
@@ -171,13 +171,13 @@ func (s *KubernetesTestSuite) TestCreateAppliesSpec() {
 		return true
 	})
 
-	s.engine.backend.(*mockKubernetesBackend).
+	s.backend.
 		On("Create", podMatcher).
 		Return()
 
 	_, err := s.engine.Create(req)
 	s.Require().NoError(err)
-	s.engine.backend.(*mockKubernetesBackend).AssertExpectations(s.T())
+	s.backend.AssertExpectations(s.T())
 }
 
 func (s *KubernetesTestSuite) TestCreateAppliesResolvedVolumesAndIdentity() {
@@ -261,13 +261,13 @@ func (s *KubernetesTestSuite) TestCreateAppliesResolvedVolumesAndIdentity() {
 			pod.Spec.Volumes[2].NFS.Path == "/export/caesium"
 	})
 
-	s.engine.backend.(*mockKubernetesBackend).
+	s.backend.
 		On("Create", podMatcher).
 		Return()
 
 	_, err := s.engine.Create(req)
 	s.Require().NoError(err)
-	s.engine.backend.(*mockKubernetesBackend).AssertExpectations(s.T())
+	s.backend.AssertExpectations(s.T())
 }
 
 // TestCreateDelegatesToKueue asserts that a step declaring a Kueue queue stamps
@@ -298,13 +298,13 @@ func (s *KubernetesTestSuite) TestCreateDelegatesToKueue() {
 		return true
 	})
 
-	s.engine.backend.(*mockKubernetesBackend).
+	s.backend.
 		On("Create", podMatcher).
 		Return()
 
 	_, err := s.engine.Create(req)
 	s.Require().NoError(err)
-	s.engine.backend.(*mockKubernetesBackend).AssertExpectations(s.T())
+	s.backend.AssertExpectations(s.T())
 }
 
 // TestCreateNoQueueOmitsKueueLabel asserts the queue label is absent when no
@@ -321,13 +321,13 @@ func (s *KubernetesTestSuite) TestCreateNoQueueOmitsKueueLabel() {
 		return !hasQueue
 	})
 
-	s.engine.backend.(*mockKubernetesBackend).
+	s.backend.
 		On("Create", podMatcher).
 		Return()
 
 	_, err := s.engine.Create(req)
 	s.Require().NoError(err)
-	s.engine.backend.(*mockKubernetesBackend).AssertExpectations(s.T())
+	s.backend.AssertExpectations(s.T())
 }
 
 func (s *KubernetesTestSuite) TestCreateError() {
@@ -337,14 +337,14 @@ func (s *KubernetesTestSuite) TestCreateError() {
 		Command: []string{"test", "cmd"},
 	}
 
-	s.engine.backend.(*mockKubernetesBackend).
+	s.backend.
 		On("Create", mock.AnythingOfType("*v1.Pod")).
 		Return(fmt.Errorf("invalid pod name"))
 
 	c, err := s.engine.Create(req)
 	assert.NotNil(s.T(), err)
 	assert.Nil(s.T(), c)
-	s.engine.backend.(*mockKubernetesBackend).AssertExpectations(s.T())
+	s.backend.AssertExpectations(s.T())
 }
 
 // TestCreateCancelledDuringCreateRequest covers a round-4 adversarial-review
@@ -363,7 +363,7 @@ func (s *KubernetesTestSuite) TestCreateError() {
 func (s *KubernetesTestSuite) TestCreateCancelledDuringCreateRequest() {
 	ctx, cancel := context.WithCancel(context.Background())
 	backend := &mockKubernetesBackend{}
-	engine := &kubernetesEngine{backend: backend, ctx: ctx}
+	engine := singleNamespaceEngine(ctx, backend)
 
 	req := &atom.EngineCreateRequest{
 		Name:    testAtomID,
@@ -389,7 +389,7 @@ func (s *KubernetesTestSuite) TestCreateCancelledDuringCreateRequest() {
 
 func (s *KubernetesTestSuite) TestCreateDeadlineDuringCreateRequest() {
 	backend := &mockKubernetesBackend{}
-	engine := &kubernetesEngine{backend: backend, ctx: context.Background()}
+	engine := singleNamespaceEngine(context.Background(), backend)
 	req := &atom.EngineCreateRequest{Name: testAtomID, Image: testImage, Command: []string{"test"}}
 
 	backend.On("Create", mock.AnythingOfType("*v1.Pod")).Run(func(args mock.Arguments) {
@@ -407,7 +407,7 @@ func (s *KubernetesTestSuite) TestCreateAlreadyCancelledSkipsAPI() {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	backend := &mockKubernetesBackend{}
-	engine := &kubernetesEngine{backend: backend, ctx: ctx}
+	engine := singleNamespaceEngine(ctx, backend)
 
 	pod, err := engine.Create(&atom.EngineCreateRequest{Name: testAtomID, Image: testImage})
 	s.Nil(pod)
@@ -492,7 +492,7 @@ func (s *KubernetesTestSuite) TestCreateDeadlineDeletesBeforeDelayedResponse() {
 					close(backend.release)
 				}
 			}()
-			engine := &kubernetesEngine{backend: backend, ctx: ctx}
+			engine := singleNamespaceEngine(ctx, backend)
 			result := make(chan error, 1)
 			go func() {
 				_, err := engine.Create(&atom.EngineCreateRequest{Name: testAtomID, Image: testImage})
@@ -569,12 +569,12 @@ func (s *KubernetesTestSuite) TestStop() {
 		ID: testAtomID,
 	}
 
-	s.engine.backend.(*mockKubernetesBackend).
+	s.backend.
 		On("Delete", testAtomID).
 		Return()
 
 	assert.Nil(s.T(), s.engine.Stop(req))
-	backend := s.engine.backend.(*mockKubernetesBackend)
+	backend := s.backend
 	s.True(backend.lastDeleteHasDeadline, "the Kubernetes API call must be bounded even when callers request immediate container termination")
 	s.Nil(backend.lastDeleteOptions.GracePeriodSeconds, "ordinary graceful stop retains the pod's configured grace period")
 	s.Require().NotNil(backend.lastDeleteOptions.PropagationPolicy)
@@ -583,7 +583,7 @@ func (s *KubernetesTestSuite) TestStop() {
 }
 
 func (s *KubernetesTestSuite) TestForceStopKeepsKubeletTerminationAcknowledgement() {
-	backend := s.engine.backend.(*mockKubernetesBackend)
+	backend := s.backend
 	backend.On("Delete", testAtomID).Return()
 
 	s.Require().NoError(s.engine.Stop(&atom.EngineStopRequest{ID: testAtomID, Force: true}))
@@ -601,12 +601,12 @@ func (s *KubernetesTestSuite) TestStopError() {
 		ID: "",
 	}
 
-	s.engine.backend.(*mockKubernetesBackend).
+	s.backend.
 		On("Delete", "").
 		Return(fmt.Errorf("invalid pod name"))
 
 	assert.NotNil(s.T(), s.engine.Stop(req))
-	s.engine.backend.(*mockKubernetesBackend).AssertExpectations(s.T())
+	s.backend.AssertExpectations(s.T())
 }
 
 func (s *KubernetesTestSuite) TestStopTimeout() {
@@ -616,18 +616,18 @@ func (s *KubernetesTestSuite) TestStopTimeout() {
 		Force:   true,
 	}
 
-	s.engine.backend.(*mockKubernetesBackend).
+	s.backend.
 		On("Delete", testAtomID).
 		Return()
 
 	assert.NotNil(s.T(), s.engine.Stop(req))
-	backend := s.engine.backend.(*mockKubernetesBackend)
+	backend := s.backend
 	s.Require().NotNil(backend.lastDeleteOptions.GracePeriodSeconds)
 	s.Equal(int64(1), *backend.lastDeleteOptions.GracePeriodSeconds)
 	s.Require().NotNil(backend.lastDeleteOptions.PropagationPolicy)
 	s.Equal(metav1.DeletePropagationBackground, *backend.lastDeleteOptions.PropagationPolicy)
 	s.True(backend.lastDeleteHasDeadline, "cleanup must be bounded independently of the expired task context")
-	s.engine.backend.(*mockKubernetesBackend).AssertExpectations(s.T())
+	s.backend.AssertExpectations(s.T())
 }
 
 func (s *KubernetesTestSuite) TestLogs() {
@@ -636,7 +636,7 @@ func (s *KubernetesTestSuite) TestLogs() {
 		Since: time.Now(),
 	}
 
-	s.engine.backend.(*mockKubernetesBackend).
+	s.backend.
 		On("GetLogs", testAtomID).
 		Return()
 
@@ -647,18 +647,18 @@ func (s *KubernetesTestSuite) TestLogs() {
 	buf, err := io.ReadAll(logs)
 	assert.Nil(s.T(), err)
 	assert.Equal(s.T(), "logs", string(buf))
-	s.engine.backend.(*mockKubernetesBackend).AssertExpectations(s.T())
+	s.backend.AssertExpectations(s.T())
 }
 
 func (s *KubernetesTestSuite) TestLogsError() {
 	req := &atom.EngineLogsRequest{ID: ""}
 
-	s.engine.backend.(*mockKubernetesBackend).
+	s.backend.
 		On("GetLogs", "").
 		Return()
 
 	logs, err := s.engine.Logs(req)
 	assert.NotNil(s.T(), err)
 	assert.Nil(s.T(), logs)
-	s.engine.backend.(*mockKubernetesBackend).AssertExpectations(s.T())
+	s.backend.AssertExpectations(s.T())
 }

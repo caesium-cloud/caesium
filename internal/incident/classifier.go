@@ -13,6 +13,7 @@ import (
 	"github.com/caesium-cloud/caesium/internal/atom"
 	"github.com/caesium-cloud/caesium/internal/event"
 	"github.com/caesium-cloud/caesium/internal/jobdef/secret"
+	"github.com/caesium-cloud/caesium/internal/models"
 )
 
 // FailureClass buckets a failure for remediation routing. The classifier is
@@ -66,6 +67,26 @@ type Signal struct {
 	LogTail string
 	// Error is the TaskRun.Error text.
 	Error string
+}
+
+// TaskRunSignal is the Signal for a failure event of eventType attributed to
+// row: the event type the caller observed plus every row-derived field. The
+// incident subscriber and `caesium why` (internal/run) build their signal
+// here, so the two cannot classify one task differently. A nil row (a
+// run-level event) carries only the event type.
+func TaskRunSignal(eventType string, row *models.TaskRun) Signal {
+	sig := Signal{EventType: eventType}
+	if row == nil {
+		return sig
+	}
+	sig.Result = row.Result
+	sig.HasSchemaViolations = len(row.SchemaViolations) > 0
+	sig.LogTail = row.LogText
+	sig.Error = row.Error
+	sig.ExitCode = row.ExitCode
+	sig.OOMKnown = row.OOMKnown
+	sig.OOMKilled = row.OOMKilled
+	return sig
 }
 
 // logRule maps a compiled regex over the log tail / error text to a class. Rules

@@ -37,6 +37,7 @@ func TestMintAgentSessionKeyScopeAndExpiry(t *testing.T) {
 	require.NotNil(t, claim)
 	require.Equal(t, incidentID, claim.IncidentID)
 	require.Equal(t, []string{"alpha", "beta"}, claim.Jobs)
+	require.True(t, claim.NamespaceConfined, "every key minted now is for a namespace-confined session (A8)")
 
 	jobs, err := ScopeJobs(resp.Key.Scope)
 	require.NoError(t, err)

@@ -94,8 +94,10 @@ func (c *Capturer) handleRunCompleted(ctx context.Context, evt event.Event) {
 	}
 	backfill, completedAt := info.backfill, info.completedAt
 
-	var decls []models.DatasetDeclaration
-	if err := c.db.WithContext(ctx).Where("job_id = ?", evt.JobID).Find(&decls).Error; err != nil {
+	// The declarations are read with their job's namespace in one statement
+	// (listWithOwners), so the inputs recorded below can be attributed.
+	decls, err := listWithOwners(c.db.WithContext(ctx).Where("dataset_declarations.job_id = ?", evt.JobID))
+	if err != nil {
 		log.Error("freshness: capture failed to load declarations", "job_id", evt.JobID, "error", err)
 		return
 	}
@@ -126,6 +128,15 @@ func (c *Capturer) handleRunCompleted(ctx context.Context, evt event.Event) {
 	// mid-run and this run never saw, making the freshness comparison
 	// over-report the output as caught-up.
 	consumed := c.consumedForRun(ctx, info.params, consumedNames)
+	if !inputsOwnedByRun(decls, info.namespace) {
+		// The job moved since this run was admitted (the subscriber is
+		// asynchronous): its current declarations, and anything read through
+		// them, are another namespace's, and the stamp below would credit
+		// them to this run (DatasetState.ConsumedRunID, identity-and-access
+		// B6). The watermark still advances; the previous input snapshot
+		// stays with the run that wrote it.
+		consumed = nil
+	}
 
 	for i := range produced {
 		p := &produced[i]
@@ -197,6 +208,9 @@ type capturedRun struct {
 	backfill    bool
 	completedAt time.Time
 	params      map[string]string
+	// namespace is the run's persisted tenancy namespace ("default" for a
+	// legacy blank).
+	namespace string
 }
 
 // runInfo reports whether the run is a backfill, its effective completion time
@@ -207,9 +221,10 @@ func (c *Capturer) runInfo(ctx context.Context, runID uuid.UUID) (capturedRun, e
 		CompletedAt *time.Time
 		StartedAt   time.Time
 		Params      datatypes.JSON
+		Namespace   *string
 	}
 	if err := c.db.WithContext(ctx).Table("job_runs").
-		Select("backfill_id", "completed_at", "started_at", "params").
+		Select("backfill_id", "completed_at", "started_at", "params", "namespace").
 		Where("id = ?", runID).Take(&row).Error; err != nil {
 		return capturedRun{}, err
 	}
@@ -223,7 +238,28 @@ func (c *Capturer) runInfo(ctx context.Context, runID uuid.UUID) (capturedRun, e
 		backfill:    row.BackfillID != nil,
 		completedAt: completedAt,
 		params:      decodeParamsJSON(row.Params),
+		namespace:   models.NamespaceOrDefault(derefString(row.Namespace)),
 	}, nil
+}
+
+func derefString(value *string) string {
+	if value == nil {
+		return ""
+	}
+	return *value
+}
+
+// inputsOwnedByRun reports whether the job's declarations, as just read, are
+// still owned by the run's namespace. A job deleted since (an ownerless
+// snapshot) owns nothing.
+func inputsOwnedByRun(decls []models.DatasetDeclaration, runNamespace string) bool {
+	for _, decl := range decls {
+		owner, snapshotted := snapshotOwner(decl)
+		if !snapshotted || owner == nil || *owner != runNamespace {
+			return false
+		}
+	}
+	return true
 }
 
 // consumedForRun resolves the consumed-input watermark snapshot to record

@@ -151,7 +151,9 @@ func (s *IntegrationTestSuite) runDistributedKubernetesDeadlineScenario(
 			return false
 		}
 		for _, pod := range pods.Items {
-			if pod.Name == runningTask.RuntimeID {
+			// The runtime id names the pod's namespace and name,
+			// "<namespace>/<pod>" (identity-and-access C1).
+			if pod.Namespace+"/"+pod.Name == runningTask.RuntimeID {
 				podNamespace = pod.Namespace
 				podUID = string(pod.UID)
 				return podUID != ""

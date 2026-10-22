@@ -233,6 +233,9 @@ func (e *Evaluator) EvaluateEvent(ctx context.Context, evt event.Event) error {
 	if err != nil {
 		return err
 	}
+	if afterRegistrySnapshot != nil {
+		afterRegistrySnapshot()
+	}
 	graph := newRegistrySnapshot(decls)
 
 	start := []datasetIdentity{id}
@@ -282,6 +285,9 @@ func (e *Evaluator) evaluate(ctx context.Context, targets map[datasetIdentity]st
 	decls, err := e.registry.ListAll(ctx)
 	if err != nil {
 		return err
+	}
+	if afterRegistrySnapshot != nil {
+		afterRegistrySnapshot()
 	}
 	return e.evaluateWithSnapshot(ctx, newRegistrySnapshot(decls), targets, triggerDepth)
 }
@@ -336,7 +342,7 @@ func (e *Evaluator) evaluateProducedDataset(ctx context.Context, graph registryS
 
 	status, reason, staleness, seen := e.statusFor(decl, state, now, freshness, maxStaleness, upstreamReady, upstreamReason)
 	if status != models.DatasetStatusUnknown && status != models.DatasetStatusQuarantined {
-		if err := e.updateStatus(ctx, decl.Namespace, decl.Name, status, reason); err != nil {
+		if err := e.updateStatus(ctx, decl, status, reason); err != nil {
 			return err
 		}
 	}
@@ -416,24 +422,37 @@ func (e *Evaluator) statusFor(decl models.DatasetDeclaration, state models.Datas
 	return models.DatasetStatusStale, fmt.Sprintf("freshness SLO exceeded (%s/%s)", formatDuration(staleness), freshness), staleness, true
 }
 
-func (e *Evaluator) updateStatus(ctx context.Context, namespace *string, name, status, reason string) error {
-	return e.updateStatusTx(ctx, e.db, namespace, name, status, reason)
+func (e *Evaluator) updateStatus(ctx context.Context, decl models.DatasetDeclaration, status, reason string) error {
+	return e.updateStatusTx(ctx, e.db, decl, status, reason)
 }
 
 // updateStatusTx is updateStatus bound to an explicit connection (a caller's
 // transaction or e.db). It threads the *gorm.DB rather than reassigning e.db so
 // a shared evaluator stays safe under concurrent ticks.
-func (e *Evaluator) updateStatusTx(ctx context.Context, db *gorm.DB, namespace *string, name, status, reason string) error {
-	name = strings.TrimSpace(name)
+//
+// The reason is one producer's elaboration (decl's) and can name its inputs,
+// so the row records that producer's current tenancy namespace with it
+// (ReasonNamespace, identity-and-access B6): a namespace-confined reader sees
+// the reason only when it may read that namespace.
+func (e *Evaluator) updateStatusTx(ctx context.Context, db *gorm.DB, decl models.DatasetDeclaration, status, reason string) error {
+	name := strings.TrimSpace(decl.Name)
 	if name == "" {
 		return errEmptyDatasetName
 	}
+	reasonNamespace, snapshotted := snapshotOwner(decl)
+	if !snapshotted {
+		var err error
+		if reasonNamespace, err = jobNamespaceTx(db.WithContext(ctx), decl.JobID); err != nil {
+			return err
+		}
+	}
 	row := models.DatasetState{
-		ID:        uuid.New(),
-		Namespace: nsValue(namespace),
-		Name:      name,
-		Status:    status,
-		Reason:    reason,
+		ID:              uuid.New(),
+		Namespace:       nsValue(decl.Namespace),
+		Name:            name,
+		Status:          status,
+		Reason:          reason,
+		ReasonNamespace: reasonNamespace,
 	}
 	// One upsert carrying the real status/reason: insert the row on first
 	// observation, otherwise update the evaluator-owned columns in place. dqlite
@@ -441,9 +460,10 @@ func (e *Evaluator) updateStatusTx(ctx context.Context, db *gorm.DB, namespace *
 	return db.WithContext(ctx).Clauses(clause.OnConflict{
 		Columns: []clause.Column{{Name: "namespace"}, {Name: "name"}},
 		DoUpdates: clause.Assignments(map[string]any{
-			"status":     status,
-			"reason":     reason,
-			"updated_at": e.now().UTC(),
+			"status":           status,
+			"reason":           reason,
+			"reason_namespace": reasonNamespace,
+			"updated_at":       e.now().UTC(),
 		}),
 	}).Create(&row).Error
 }
@@ -691,8 +711,25 @@ func (e *Evaluator) derive(ctx context.Context, decl models.DatasetDeclaration, 
 
 	// ErrRunHeldUpstream wraps ErrRunSkipped, so the data circuit breaker's
 	// refusal is recorded as an admission skip rather than aborting the tick.
-	runRecord, err := e.runStore.StartWithContext(ctx, decl.JobID, trigger.id, runstorage.WithStartParams(params))
+	startOpts := []runstorage.StartOption{runstorage.WithStartParams(params)}
+	if owner, snapshotted := snapshotOwner(decl); snapshotted {
+		// The params (consumed watermarks, reason) were computed from the
+		// declaration snapshot of the namespace read with it. Admission
+		// refuses a job that has since moved, so a run in the new namespace
+		// never carries the old namespace's inputs (identity-and-access B6);
+		// the next evaluation derives from the moved job's own declarations.
+		startOpts = append(startOpts, runstorage.WithStartNamespaceGuard(func(namespace string) error {
+			if owner == nil || models.NamespaceOrDefault(namespace) != *owner {
+				return errProducerMovedSinceSnapshot
+			}
+			return nil
+		}))
+	}
+	runRecord, err := e.runStore.StartWithContext(ctx, decl.JobID, trigger.id, startOpts...)
 	if err != nil {
+		if errors.Is(err, errProducerMovedSinceSnapshot) {
+			return e.recordDerivation(ctx, decl, models.DatasetDecisionSkippedAdmission, err.Error(), consumed, nil)
+		}
 		if errors.Is(err, runstorage.ErrRunSkipped) || errors.Is(err, runstorage.ErrRunQueued) || errors.Is(err, runstorage.ErrMaxConcurrentRunsReached) {
 			return e.recordDerivation(ctx, decl, models.DatasetDecisionSkippedAdmission, err.Error(), consumed, nil)
 		}
@@ -739,7 +776,13 @@ func (e *Evaluator) derive(ctx context.Context, decl models.DatasetDeclaration, 
 	// Record the audit row before dispatching so the derivation names the run
 	// before the run can complete and advance the dataset. The run is launched
 	// either way: a failed audit write must not strand an admitted run.
-	derivationErr := e.recordDerivation(ctx, decl, models.DatasetDecisionDerived, reason, consumed, &runRecord.ID)
+	// The derived decision is owned by the namespace read with the
+	// declarations it was computed from; the run's persisted namespace is the
+	// fallback for a declaration read without one. A run persisted elsewhere
+	// keeps its id out of the other namespace's view (the dataset service
+	// drops run ids readers may not see).
+	runNamespace := models.NamespaceOrDefault(runRecord.Namespace)
+	derivationErr := e.recordDerivationOwned(ctx, e.db, decl, models.DatasetDecisionDerived, reason, consumed, &runRecord.ID, &runNamespace)
 	e.launchRun(ctx, runRecord)
 	return derivationErr
 }
@@ -953,6 +996,15 @@ func sameConsumedWatermarks(a, b map[string]string) bool {
 	return consumed != "" && a[freshnessConsumedWatermarksParam] == consumed
 }
 
+// errProducerMovedSinceSnapshot refuses a derived run whose job left the
+// namespace its declaration snapshot was read in.
+var errProducerMovedSinceSnapshot = errors.New("producer moved to another namespace since this evaluation read it; re-evaluating")
+
+// afterRegistrySnapshot, when set (tests only), runs right after an
+// evaluation read its declaration snapshot: where an apply that moves a
+// producer interleaves.
+var afterRegistrySnapshot func()
+
 func (e *Evaluator) recordDerivation(ctx context.Context, decl models.DatasetDeclaration, decision, reason string, consumed map[string]string, runID *uuid.UUID) error {
 	return e.recordDerivationTx(ctx, e.db, decl, decision, reason, consumed, runID)
 }
@@ -961,8 +1013,35 @@ func (e *Evaluator) recordDerivation(ctx context.Context, decl models.DatasetDec
 // batch of skip decisions can commit atomically. It threads the *gorm.DB rather
 // than reassigning e.db so a shared evaluator stays safe under concurrent ticks.
 func (e *Evaluator) recordDerivationTx(ctx context.Context, db *gorm.DB, decl models.DatasetDeclaration, decision, reason string, consumed map[string]string, runID *uuid.UUID) error {
+	return e.recordDerivationOwned(ctx, db, decl, decision, reason, consumed, runID, nil)
+}
+
+// recordDerivationOwned appends one decision stamped with its producer
+// (identity-and-access B6): ProducerJobID is decl's job, and JobNamespace is
+// jobNamespace when the caller knows it (a derived run's persisted
+// namespace), otherwise the job's current namespace read on db at decision
+// time. A job that no longer exists leaves JobNamespace NULL, a partially
+// stamped row that no namespace-confined reader is shown.
+func (e *Evaluator) recordDerivationOwned(ctx context.Context, db *gorm.DB, decl models.DatasetDeclaration, decision, reason string, consumed map[string]string, runID *uuid.UUID, jobNamespace *string) error {
 	if strings.TrimSpace(decision) == "" {
 		return nil
+	}
+	if owner, snapshotted := snapshotOwner(decl); snapshotted {
+		// The namespace read with the declarations this decision was
+		// computed from wins over a later read (a move in between); a
+		// declaration read while its job was not live stays unowned.
+		jobNamespace = owner
+	} else if jobNamespace == nil {
+		resolved, err := jobNamespaceTx(db.WithContext(ctx), decl.JobID)
+		if err != nil {
+			return err
+		}
+		jobNamespace = resolved
+	}
+	var producerJobID *uuid.UUID
+	if decl.JobID != uuid.Nil {
+		id := decl.JobID
+		producerJobID = &id
 	}
 	metrics.DatasetDerivationsTotal.WithLabelValues(datasetParamName(decl.Namespace, decl.Name), decision).Inc()
 	return db.WithContext(ctx).Create(&models.DatasetDerivation{
@@ -973,6 +1052,8 @@ func (e *Evaluator) recordDerivationTx(ctx context.Context, db *gorm.DB, decl mo
 		Reason:             reason,
 		ConsumedWatermarks: canonicalConsumedJSON(consumed),
 		RunID:              runID,
+		ProducerJobID:      producerJobID,
+		JobNamespace:       jobNamespace,
 		CreatedAt:          e.now().UTC(),
 	}).Error
 }

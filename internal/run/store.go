@@ -15,6 +15,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/caesium-cloud/caesium/internal/atom"
 	"github.com/caesium-cloud/caesium/internal/authz"
 	"github.com/caesium-cloud/caesium/internal/cache"
 	"github.com/caesium-cloud/caesium/internal/dbretry"
@@ -1208,6 +1209,36 @@ func (s *Store) UpdateTaskExecutionDescriptorInputs(runID, taskID uuid.UUID, pre
 	})
 }
 
+// RecordTaskKubernetesTarget records the namespace mapping a task execution
+// resolved (identity-and-access C1) on its descriptor: set when non-zero, and
+// cleared when the execution resolved none but an earlier execution of the
+// row recorded a mapping, so the descriptor names the mapping the latest
+// execution used. current is the row's descriptor as the executor claimed it
+// (executions of one row are serialized by its claim, so a mapping an earlier
+// execution recorded is in it), or nil when the caller does not hold it, in
+// which case a zero target reads the row. With a zero target and no recorded
+// mapping nothing is written, so unmapped descriptors stay byte-identical.
+func (s *Store) RecordTaskKubernetesTarget(runID, taskID uuid.UUID, target atom.KubeTarget, current []byte) error {
+	if target.IsZero() {
+		if current == nil {
+			row, err := loadTaskRunByIDOrUnique(s.db.Select("id", "job_run_id", "task_id", "execution_descriptor").Session(&gorm.Session{}), runID, taskID)
+			if err != nil {
+				if errors.Is(err, gorm.ErrRecordNotFound) {
+					return nil
+				}
+				return err
+			}
+			current = row.ExecutionDescriptor
+		}
+		if !bytes.Contains(current, []byte(`"kubernetesTarget"`)) {
+			return nil
+		}
+	}
+	return s.mutateTaskExecutionDescriptor(runID, taskID, func(desc *models.TaskExecutionDescriptor) {
+		desc.Runtime.KubernetesTarget = target.Ptr()
+	})
+}
+
 func (s *Store) UpdateTaskExecutionDescriptorSecretRefs(runID, taskID uuid.UUID, refs []models.TaskExecutionSecretRef) error {
 	if len(refs) == 0 {
 		return nil
@@ -1476,6 +1507,10 @@ func (s *Store) admit(tx *gorm.DB, model *models.JobRun, req startRunRequest) (a
 		if err := req.namespaceGuard(model.Namespace); err != nil {
 			return admissionResult{}, err
 		}
+	}
+	// Enriched params are bound to the frozen namespace (start_params_fence.go).
+	if err := fenceStartParamsTx(tx, model, req.params); err != nil {
+		return admissionResult{}, err
 	}
 	// A queued request belongs to the namespace it was enqueued in. If its job
 	// moved since, it is never promoted under the new owner (the dequeuer
@@ -2004,6 +2039,9 @@ func (s *Store) StartWithContext(ctx context.Context, jobID uuid.UUID, triggerID
 		triggerID:        triggerID,
 		params:           startOpts.Params,
 		priorityOverride: startOpts.Priority,
+		// The freshness evaluator fences a derived run to the namespace its
+		// declarations were read in (identity-and-access B6).
+		namespaceGuard: startOpts.NamespaceGuard,
 	})
 }
 

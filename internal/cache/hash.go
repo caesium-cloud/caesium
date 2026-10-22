@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/caesium-cloud/caesium/internal/atom"
 	"github.com/caesium-cloud/caesium/pkg/container"
 )
 
@@ -93,21 +94,25 @@ type HashInputBlob struct {
 	// trusting the decomposition.
 	Hash string `json:"hash"`
 
-	Namespace               string                       `json:"namespace,omitempty"`
-	JobAlias                string                       `json:"jobAlias,omitempty"`
-	TaskName                string                       `json:"taskName,omitempty"`
-	Image                   string                       `json:"image,omitempty"`
-	ResolvedImageDigest     string                       `json:"resolvedImageDigest,omitempty"`
-	UnresolvedImageIdentity string                       `json:"unresolvedImageIdentity,omitempty"`
-	Command                 []string                     `json:"command,omitempty"`
-	Env                     map[string]envBlobValue      `json:"env,omitempty"`
-	WorkDir                 string                       `json:"workDir,omitempty"`
-	Mounts                  []container.Mount            `json:"mounts,omitempty"`
-	ResolvedVolumeMounts    []container.VolumeMount      `json:"resolvedVolumeMounts,omitempty"`
-	Kubernetes              *container.KubernetesSpec    `json:"kubernetes,omitempty"`
-	PredecessorHashes       []string                     `json:"predecessorHashes,omitempty"`
-	PredecessorOutputs      map[string]map[string]string `json:"predecessorOutputs,omitempty"`
-	RunParams               map[string]string            `json:"runParams,omitempty"`
+	Namespace               string                    `json:"namespace,omitempty"`
+	JobAlias                string                    `json:"jobAlias,omitempty"`
+	TaskName                string                    `json:"taskName,omitempty"`
+	Image                   string                    `json:"image,omitempty"`
+	ResolvedImageDigest     string                    `json:"resolvedImageDigest,omitempty"`
+	UnresolvedImageIdentity string                    `json:"unresolvedImageIdentity,omitempty"`
+	Command                 []string                  `json:"command,omitempty"`
+	Env                     map[string]envBlobValue   `json:"env,omitempty"`
+	WorkDir                 string                    `json:"workDir,omitempty"`
+	Mounts                  []container.Mount         `json:"mounts,omitempty"`
+	ResolvedVolumeMounts    []container.VolumeMount   `json:"resolvedVolumeMounts,omitempty"`
+	Kubernetes              *container.KubernetesSpec `json:"kubernetes,omitempty"`
+	// KubernetesTarget and KubernetesSecretNamespace mirror the namespace
+	// mapping lines Compute folds in; absent for unmapped tasks.
+	KubernetesTarget          *atom.KubeTarget             `json:"kubernetesTarget,omitempty"`
+	KubernetesSecretNamespace string                       `json:"kubernetesSecretNamespace,omitempty"`
+	PredecessorHashes         []string                     `json:"predecessorHashes,omitempty"`
+	PredecessorOutputs        map[string]map[string]string `json:"predecessorOutputs,omitempty"`
+	RunParams                 map[string]string            `json:"runParams,omitempty"`
 
 	// Chain records the cache chain mode ONLY when it is ChainValues; the
 	// default transitive mode writes nothing, so every blob produced before this
@@ -205,28 +210,30 @@ func redactEnv(env map[string]string) map[string]envBlobValue {
 // value never lands in the blob.
 func (h HashInput) CanonicalJSON(precomputed string) ([]byte, error) {
 	blob := HashInputBlob{
-		BlobVersion:             HashInputBlobVersion,
-		Hash:                    precomputed,
-		Namespace:               h.nonDefaultNamespace(),
-		JobAlias:                h.JobAlias,
-		TaskName:                h.TaskName,
-		Image:                   h.Image,
-		ResolvedImageDigest:     h.ResolvedImageDigest,
-		UnresolvedImageIdentity: h.UnresolvedImageIdentity,
-		Command:                 h.Command,
-		Env:                     redactEnv(h.Env),
-		WorkDir:                 h.WorkDir,
-		Mounts:                  sortedMounts(h.Mounts),
-		ResolvedVolumeMounts:    sortedVolumeMounts(h.ResolvedVolumeMounts),
-		Kubernetes:              hashableKubernetes(h.Kubernetes),
-		PredecessorHashes:       sortedCopy(h.PredecessorHashes),
-		PredecessorOutputs:      h.PredecessorOutputs,
-		RunParams:               h.RunParams,
-		Partition:               h.Partition,
-		PartitionFingerprint:    h.PartitionFingerprint,
-		PartitionAttributes:     h.PartitionAttributes,
-		Chain:                   h.blobChain(),
-		CacheVersion:            h.CacheVersion,
+		BlobVersion:               HashInputBlobVersion,
+		Hash:                      precomputed,
+		Namespace:                 h.nonDefaultNamespace(),
+		JobAlias:                  h.JobAlias,
+		TaskName:                  h.TaskName,
+		Image:                     h.Image,
+		ResolvedImageDigest:       h.ResolvedImageDigest,
+		UnresolvedImageIdentity:   h.UnresolvedImageIdentity,
+		Command:                   h.Command,
+		Env:                       redactEnv(h.Env),
+		WorkDir:                   h.WorkDir,
+		Mounts:                    sortedMounts(h.Mounts),
+		ResolvedVolumeMounts:      sortedVolumeMounts(h.ResolvedVolumeMounts),
+		Kubernetes:                hashableKubernetes(h.Kubernetes),
+		KubernetesTarget:          h.kubernetesTarget(),
+		KubernetesSecretNamespace: h.KubernetesSecretNamespace,
+		PredecessorHashes:         sortedCopy(h.PredecessorHashes),
+		PredecessorOutputs:        h.PredecessorOutputs,
+		RunParams:                 h.RunParams,
+		Partition:                 h.Partition,
+		PartitionFingerprint:      h.PartitionFingerprint,
+		PartitionAttributes:       h.PartitionAttributes,
+		Chain:                     h.blobChain(),
+		CacheVersion:              h.CacheVersion,
 	}
 
 	data, err := json.Marshal(blob)
@@ -239,16 +246,18 @@ func (h HashInput) CanonicalJSON(precomputed string) ([]byte, error) {
 
 	// Degrade gracefully: keep identity + a digest, drop the verbatim fields.
 	oversized := HashInputBlob{
-		BlobVersion:             HashInputBlobVersion,
-		Hash:                    blob.Hash,
-		Namespace:               h.nonDefaultNamespace(),
-		JobAlias:                h.JobAlias,
-		TaskName:                h.TaskName,
-		Image:                   h.Image,
-		ResolvedImageDigest:     h.ResolvedImageDigest,
-		UnresolvedImageIdentity: h.UnresolvedImageIdentity,
-		Chain:                   h.blobChain(),
-		CacheVersion:            h.CacheVersion,
+		BlobVersion:               HashInputBlobVersion,
+		Hash:                      blob.Hash,
+		Namespace:                 h.nonDefaultNamespace(),
+		JobAlias:                  h.JobAlias,
+		TaskName:                  h.TaskName,
+		Image:                     h.Image,
+		ResolvedImageDigest:       h.ResolvedImageDigest,
+		UnresolvedImageIdentity:   h.UnresolvedImageIdentity,
+		KubernetesTarget:          h.kubernetesTarget(),
+		KubernetesSecretNamespace: h.KubernetesSecretNamespace,
+		Chain:                     h.blobChain(),
+		CacheVersion:              h.CacheVersion,
 		Oversized: &oversizedBlob{
 			EnvCount:                  len(h.Env),
 			PredecessorCount:          len(h.PredecessorHashes),
@@ -351,9 +360,19 @@ type HashInput struct {
 	Mounts               []container.Mount
 	ResolvedVolumeMounts []container.VolumeMount
 	Kubernetes           *container.KubernetesSpec
-	PredecessorHashes    []string
-	PredecessorOutputs   map[string]map[string]string
-	RunParams            map[string]string
+	// KubernetesTarget is the pod namespace and default service account a
+	// Kubernetes task's run namespace maps to in the access policy
+	// (identity-and-access §10.1), resolved once per execution. It is hashed
+	// only when set, so every unmapped task keeps its key (no CacheVersion
+	// bump), and a remap re-keys: a miss, never a stale hit.
+	KubernetesTarget *atom.KubeTarget
+	// KubernetesSecretNamespace is, for a task of another engine, the mapped
+	// namespace its relative secret://k8s references read in. Hashed only when
+	// set, for the same reason.
+	KubernetesSecretNamespace string
+	PredecessorHashes         []string
+	PredecessorOutputs        map[string]map[string]string
+	RunParams                 map[string]string
 	// Partition is the instance key. Hashed only when non-empty so unfanned
 	// tasks and pre-fan-out hashes stay byte-identical (no CacheVersion bump).
 	Partition string
@@ -386,6 +405,15 @@ func (h HashInput) blobChain() string {
 		return ChainValues
 	}
 	return ""
+}
+
+// kubernetesTarget is the target folded into the identity: nil when absent or
+// zero (the engine defaults).
+func (h HashInput) kubernetesTarget() *atom.KubeTarget {
+	if h.KubernetesTarget == nil {
+		return nil
+	}
+	return h.KubernetesTarget.Ptr()
 }
 
 // Compute returns the SHA-256 hex digest of the canonicalized input.
@@ -454,6 +482,15 @@ func (h HashInput) Compute() string {
 		for _, k := range keys {
 			w(digest, "kubernetes.annotation:%s=%s\n", k, h.Kubernetes.PodAnnotations[k])
 		}
+	}
+
+	// The namespace mapping (identity-and-access C1): written only when the
+	// policy maps the run namespace, so unmapped keys are byte-identical.
+	if target := h.kubernetesTarget(); target != nil {
+		w(digest, "kubernetes_target:%s\n", canonicalJSON(target))
+	}
+	if h.KubernetesSecretNamespace != "" {
+		w(digest, "kubernetes_secret_namespace:%s\n", canonicalJSON(h.KubernetesSecretNamespace))
 	}
 
 	// Predecessor identity hashes.

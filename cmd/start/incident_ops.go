@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/caesium-cloud/caesium/internal/authz"
 	"github.com/caesium-cloud/caesium/internal/event"
 	"github.com/caesium-cloud/caesium/internal/incident"
 	internaljobdef "github.com/caesium-cloud/caesium/internal/jobdef"
@@ -313,7 +314,14 @@ func (o *incidentActionOps) OverrideSchemaGateOnce(ctx context.Context, runID uu
 // The provenance route is NOT decided here — Executor.dispatchApplyJobdefPatch
 // derives it from the job's git fields and calls this with dryRun accordingly.
 // This method only ever sees "render" or "render and apply".
-func (o *incidentActionOps) ApplyJobdefPatch(ctx context.Context, jobID uuid.UUID, definition json.RawMessage, dryRun bool) (json.RawMessage, error) {
+//
+// namespace is the incident's namespace (identity-and-access A8): the job must
+// still live there, the proposed definition must keep it there, and the apply
+// is confined to it, so the patch cannot touch a trigger or webhook path that
+// also serves another namespace's jobs (B9 trigger tenancy). Both ownership
+// checks run before the dry-run return, so the git-synced route refuses the
+// same patches as the direct one.
+func (o *incidentActionOps) ApplyJobdefPatch(ctx context.Context, jobID uuid.UUID, namespace string, definition json.RawMessage, dryRun bool) (json.RawMessage, error) {
 	var job models.Job
 	if err := o.db.WithContext(ctx).First(&job, "id = ?", jobID).Error; err != nil {
 		return nil, fmt.Errorf("incident: load job for jobdef patch: %w", err)
@@ -337,21 +345,46 @@ func (o *incidentActionOps) ApplyJobdefPatch(ctx context.Context, jobID uuid.UUI
 	if err := internaljobdef.ValidateDeclaredNamespaces([]schema.Definition{def}); err != nil {
 		return nil, fmt.Errorf("incident: proposed job definition failed server-side validation: %w", err)
 	}
+	namespace = models.NamespaceOrDefault(namespace)
+	if models.NamespaceOrDefault(job.Namespace) != namespace {
+		return nil, fmt.Errorf("%w: job %q", incident.ErrNamespaceMoved, job.Alias)
+	}
+	if models.NamespaceOrDefault(def.Metadata.Namespace) != namespace {
+		return nil, fmt.Errorf("%w (incident namespace %q)", incident.ErrPatchMovesNamespace, namespace)
+	}
 
-	rendered, err := o.renderJobdefDiff(ctx, &def, job.Alias)
+	rendered, err := o.renderJobdefDiff(ctx, &def, job.Alias, namespace)
 	if err != nil {
 		return nil, err
+	}
+	// The diff was rendered from the job as stored when it was read. A move
+	// commits the job's namespace and definition together, so re-reading the
+	// namespace after the render refuses a diff that saw the new owner's
+	// definition (identity-and-access A8).
+	var current models.Job
+	if err := o.db.WithContext(ctx).Select("id", "namespace").First(&current, "id = ?", jobID).Error; err != nil {
+		return nil, fmt.Errorf("incident: reload job for jobdef patch: %w", err)
+	}
+	if models.NamespaceOrDefault(current.Namespace) != namespace {
+		return nil, fmt.Errorf("%w: job %q", incident.ErrNamespaceMoved, job.Alias)
 	}
 	if dryRun {
 		return rendered, nil
 	}
 
 	importer := internaljobdef.NewImporter(o.db)
+	// The error is recorded on the incident's action timeline, which readers
+	// confined to the incident's namespace see: another namespace's jobs,
+	// datasets and contract findings are redacted from it (A8).
 	if err := importer.ValidateBatch(ctx, []schema.Definition{def}); err != nil {
-		return nil, fmt.Errorf("incident: proposed job definition failed server-side validation: %w", err)
+		return nil, patchErrorf(ctx, o.db, namespace, job.Alias, "incident: proposed job definition failed server-side validation", err)
 	}
-	if _, err := importer.ApplyWithOptions(ctx, &def, &internaljobdef.ApplyOptions{}); err != nil {
-		return nil, fmt.Errorf("incident: apply proposed job definition: %w", err)
+	opts := &internaljobdef.ApplyOptions{
+		NamespaceAllowlist: []string{namespace},
+		ContractAudience:   patchContractAudience(ctx, namespace, job.Alias),
+	}
+	if _, err := importer.ApplyWithOptions(ctx, &def, opts); err != nil {
+		return nil, patchErrorf(ctx, o.db, namespace, job.Alias, "incident: apply proposed job definition", err)
 	}
 	return rendered, nil
 }
@@ -360,15 +393,22 @@ func (o *incidentActionOps) ApplyJobdefPatch(ctx context.Context, jobID uuid.UUI
 // definition and the job as it stands, SCOPED to the target alias so unrelated
 // jobs never appear as deletions (Compare treats every actual spec the desired
 // map omits as a delete).
-func (o *incidentActionOps) renderJobdefDiff(ctx context.Context, def *schema.Definition, alias string) (json.RawMessage, error) {
-	actual, err := jobdiff.LoadDatabaseSpecs(ctx, o.db)
+//
+// The baseline is read as a reader confined to the incident's namespace
+// (identity-and-access A8): one snapshot of that namespace's jobs only, with
+// the configuration of a trigger that also serves another namespace's job
+// redacted, because the diff lands on the incident's timeline. A job that is
+// not in that snapshot has moved out and is refused.
+func (o *incidentActionOps) renderJobdefDiff(ctx context.Context, def *schema.Definition, alias, namespace string) (json.RawMessage, error) {
+	actual, err := jobdiff.LoadDatabaseSpecs(authz.WithAllowedNamespaces(ctx, []string{namespace}), o.db)
 	if err != nil {
 		return nil, fmt.Errorf("incident: load current job specs for diff: %w", err)
 	}
-	scoped := make(map[string]jobdiff.JobSpec, 1)
-	if spec, ok := actual[alias]; ok {
-		scoped[alias] = spec
+	spec, ok := actual[alias]
+	if !ok {
+		return nil, fmt.Errorf("%w: job %q", incident.ErrNamespaceMoved, alias)
 	}
+	scoped := map[string]jobdiff.JobSpec{alias: spec}
 	result := jobdiff.Compare(map[string]jobdiff.JobSpec{alias: jobdiff.FromDefinition(def)}, scoped)
 
 	payload := map[string]any{"alias": alias, "empty": result.Empty()}

@@ -110,25 +110,28 @@ func (l *localRun) resolveTaskCacheIdentity(
 		}
 	}
 	runner.resolvedImageDigest = resolvedImageDigest
+	kubeTarget, kubeSecretNamespace := jobdefruntime.KubernetesIdentity(runner.engineKind, runner.kubeMapping, mergedEnv)
 
 	return cacheCfg, taskHashInputArgs{
-		JobAlias:                j.alias,
-		Namespace:               snapshot.Namespace,
-		TaskName:                taskName,
-		Image:                   runner.image,
-		ResolvedImageDigest:     resolvedImageDigest,
-		UnresolvedImageIdentity: unresolvedImageIdentity,
-		Command:                 runner.command,
-		Env:                     mergedEnv,
-		WorkDir:                 runner.spec.WorkDir,
-		Mounts:                  runner.spec.Mounts,
-		ResolvedVolumeMounts:    runner.spec.ResolvedVolumeMounts,
-		Kubernetes:              runner.spec.Kubernetes,
-		PredecessorHashes:       predHashes,
-		PredecessorOutputs:      predOutputs,
-		RunParams:               snapshot.Params,
-		CacheVersion:            cacheCfg.Version,
-		Chain:                   cacheCfg.Chain,
+		JobAlias:                  j.alias,
+		Namespace:                 snapshot.Namespace,
+		TaskName:                  taskName,
+		Image:                     runner.image,
+		ResolvedImageDigest:       resolvedImageDigest,
+		UnresolvedImageIdentity:   unresolvedImageIdentity,
+		Command:                   runner.command,
+		Env:                       mergedEnv,
+		WorkDir:                   runner.spec.WorkDir,
+		Mounts:                    runner.spec.Mounts,
+		ResolvedVolumeMounts:      runner.spec.ResolvedVolumeMounts,
+		Kubernetes:                runner.spec.Kubernetes,
+		KubernetesTarget:          kubeTarget,
+		KubernetesSecretNamespace: kubeSecretNamespace,
+		PredecessorHashes:         predHashes,
+		PredecessorOutputs:        predOutputs,
+		RunParams:                 snapshot.Params,
+		CacheVersion:              cacheCfg.Version,
+		Chain:                     cacheCfg.Chain,
 	}, predHashByID, nil
 }
 

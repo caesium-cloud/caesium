@@ -1111,13 +1111,31 @@ export interface ImpactNode {
   depth: number;
 }
 
+/**
+ * A downstream node another namespace owns, collapsed for a namespace-confined
+ * caller (identity-and-access B5): only an opaque per-response id and the hop
+ * depth remain.
+ */
+export interface ImpactExternalNode {
+  id: string;
+  kind: "external";
+  depth: number;
+}
+
+export type ImpactDownstreamNode = ImpactNode | ImpactExternalNode;
+
+export function isExternalImpactNode(node: ImpactDownstreamNode): node is ImpactExternalNode {
+  return (node as ImpactExternalNode).kind === "external";
+}
+
 export interface ImpactResult {
   root_namespace: string;
   root_name: string;
-  downstream: ImpactNode[];
+  downstream: ImpactDownstreamNode[];
 }
 
-export type ContractNodeKind = "job" | "dataset";
+/** "external" is a node collapsed for a namespace-confined caller (B5). */
+export type ContractNodeKind = "job" | "dataset" | "external";
 export type ContractEdgeClass = "declared" | "inferred" | "evidence";
 export type ContractVerdict = "breaking" | "compatible" | "unknown";
 
@@ -1156,7 +1174,8 @@ export interface ContractGraphEdge {
   id: string;
   from: string;
   to: string;
-  class: ContractEdgeClass;
+  /** Absent on an edge collapsed to its endpoints for a confined caller (B5). */
+  class?: ContractEdgeClass;
   verdict?: ContractVerdict;
   findings?: ContractFinding[];
   dataset?: ContractDatasetRef;
