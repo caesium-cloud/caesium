@@ -1,6 +1,7 @@
 package freshness
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"maps"
@@ -9,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/caesium-cloud/caesium/internal/models"
+	"github.com/google/uuid"
 )
 
 var (
@@ -55,37 +57,40 @@ func (e *GraphError) Unwrap() error { return e.Err }
 // without a database; the caller (internal/jobdef) is responsible for gathering
 // the applied + persisted declarations and excluding replaced jobs.
 func ValidateGraph(decls []models.DatasetDeclaration) error {
-	producers := make(map[string]map[string]struct{}) // dataset name -> set of producer job aliases
-	sources := make(map[string]struct{})              // dataset names declared as a source
-	type consumeEdge struct{ alias, name string }
+	producers := make(map[string]map[graphJob]struct{}) // dataset name -> set of producer jobs
+	sources := make(map[string]struct{})                // dataset names declared as a source
+	type consumeEdge struct {
+		job  graphJob
+		name string
+	}
 	consumes := make([]consumeEdge, 0)
 
 	for i := range decls {
 		d := &decls[i]
 		name := strings.TrimSpace(d.Name)
-		alias := strings.TrimSpace(d.JobAlias)
+		job := graphJob{alias: strings.TrimSpace(d.JobAlias), id: d.JobID}
 		if name == "" {
 			continue
 		}
 		switch d.Direction {
 		case models.DatasetDirectionProduces:
 			if producers[name] == nil {
-				producers[name] = make(map[string]struct{})
+				producers[name] = make(map[graphJob]struct{})
 			}
-			if alias != "" {
-				producers[name][alias] = struct{}{}
+			if job.alias != "" {
+				producers[name][job] = struct{}{}
 			}
 		case models.DatasetDirectionSource:
 			sources[name] = struct{}{}
 		case models.DatasetDirectionConsumes:
-			consumes = append(consumes, consumeEdge{alias: alias, name: name})
+			consumes = append(consumes, consumeEdge{job: job, name: name})
 		}
 	}
 
 	// Single-producer: at most one job may produce a given dataset.
-	for _, name := range sortedMapKeys(producers) {
+	for _, name := range slices.Sorted(maps.Keys(producers)) {
 		if len(producers[name]) > 1 {
-			owners := sortedSetKeys(producers[name])
+			owners := graphJobAliases(sortedGraphJobs(producers[name]))
 			return &GraphError{Err: ErrDatasetMultipleProducers, Dataset: name, Jobs: owners,
 				msg: fmt.Sprintf("%s: %q produced by %s", ErrDatasetMultipleProducers, name, strings.Join(owners, ", "))}
 		}
@@ -96,7 +101,7 @@ func ValidateGraph(decls []models.DatasetDeclaration) error {
 		if consumes[i].name != consumes[j].name {
 			return consumes[i].name < consumes[j].name
 		}
-		return consumes[i].alias < consumes[j].alias
+		return consumes[i].job.less(consumes[j].job)
 	})
 	for _, c := range consumes {
 		if _, ok := producers[c.name]; ok {
@@ -105,28 +110,28 @@ func ValidateGraph(decls []models.DatasetDeclaration) error {
 		if _, ok := sources[c.name]; ok {
 			continue
 		}
-		return &GraphError{Err: ErrDatasetUnresolvedConsumes, Dataset: c.name, Jobs: []string{c.alias},
-			msg: fmt.Sprintf("%s: job %q consumes %q which is not produced by any job or declared as a source", ErrDatasetUnresolvedConsumes, c.alias, c.name)}
+		return &GraphError{Err: ErrDatasetUnresolvedConsumes, Dataset: c.name, Jobs: []string{c.job.alias},
+			msg: fmt.Sprintf("%s: job %q consumes %q which is not produced by any job or declared as a source", ErrDatasetUnresolvedConsumes, c.job.alias, c.name)}
 	}
 
 	// Cross-job cycle detection over producer→consumer edges. An edge P→C means
 	// job C consumes a dataset produced by job P.
-	graph := make(map[string]map[string]struct{})
-	addEdge := func(from, to string) {
-		if from == "" || to == "" || from == to {
+	graph := make(map[graphJob]map[graphJob]struct{})
+	addEdge := func(from, to graphJob) {
+		if from.alias == "" || to.alias == "" || from == to {
 			return
 		}
 		if graph[from] == nil {
-			graph[from] = make(map[string]struct{})
+			graph[from] = make(map[graphJob]struct{})
 		}
 		graph[from][to] = struct{}{}
 	}
 	for _, c := range consumes {
 		for producer := range producers[c.name] {
-			addEdge(producer, c.alias)
+			addEdge(producer, c.job)
 		}
 	}
-	if cycle := detectGraphCycle(graph); len(cycle) > 0 {
+	if cycle := graphJobAliases(detectGraphCycle(graph)); len(cycle) > 0 {
 		return &GraphError{Err: ErrDatasetGraphCycle, Jobs: cycle,
 			msg: fmt.Sprintf("%s: %s", ErrDatasetGraphCycle, strings.Join(cycle, " -> "))}
 	}
@@ -134,36 +139,74 @@ func ValidateGraph(decls []models.DatasetDeclaration) error {
 	return nil
 }
 
-func sortedMapKeys(m map[string]map[string]struct{}) []string {
-	keys := make([]string, 0, len(m))
-	return append(keys, slices.Sorted(maps.Keys(m))...)
+// graphJob identifies a job in the declared graph. Persisted declarations
+// carry their job's id; the definitions being validated have none yet
+// (uuid.Nil) and are identified by alias, which ValidateAlias keeps
+// canonical. The alias stored on a declaration is trimmed, so a legacy job
+// whose alias carries surrounding whitespace reads exactly like its canonical
+// twin: keying on the alias alone merged the two into one producer
+// (identity-and-access W7-ε).
+type graphJob struct {
+	alias string
+	id    uuid.UUID
 }
 
-func sortedSetKeys(m map[string]struct{}) []string {
-	keys := make([]string, 0, len(m))
-	return append(keys, slices.Sorted(maps.Keys(m))...)
+// less orders jobs by alias, the order the diagnostics have always used, with
+// the job id as the tie-breaker between same-alias jobs.
+func (j graphJob) less(o graphJob) bool {
+	if j.alias != o.alias {
+		return j.alias < o.alias
+	}
+	return bytes.Compare(j.id[:], o.id[:]) < 0
+}
+
+func sortedGraphJobs(m map[graphJob]struct{}) []graphJob {
+	jobs := slices.Collect(maps.Keys(m))
+	slices.SortFunc(jobs, func(a, b graphJob) int {
+		switch {
+		case a.less(b):
+			return -1
+		case b.less(a):
+			return 1
+		}
+		return 0
+	})
+	return jobs
+}
+
+func graphJobAliases(jobs []graphJob) []string {
+	if jobs == nil {
+		return nil
+	}
+	out := make([]string, len(jobs))
+	for i, job := range jobs {
+		out[i] = job.alias
+	}
+	return out
 }
 
 // detectGraphCycle returns a readable node path if the directed graph contains a
 // cycle, or nil otherwise. Iteration is over sorted nodes/edges for a
 // deterministic path in the error message.
-func detectGraphCycle(graph map[string]map[string]struct{}) []string {
+func detectGraphCycle(graph map[graphJob]map[graphJob]struct{}) []graphJob {
 	const (
 		unvisited = iota
 		visiting
 		visited
 	)
-	state := make(map[string]int, len(graph))
-	stack := make([]string, 0, len(graph))
+	state := make(map[graphJob]int, len(graph))
+	stack := make([]graphJob, 0, len(graph))
 
-	nodes := slices.Sorted(maps.Keys(graph))
+	nodes := make(map[graphJob]struct{}, len(graph))
+	for node := range graph {
+		nodes[node] = struct{}{}
+	}
 
-	var visit func(string) []string
-	visit = func(node string) []string {
+	var visit func(graphJob) []graphJob
+	visit = func(node graphJob) []graphJob {
 		state[node] = visiting
 		stack = append(stack, node)
-		succs := sortedSetKeys(graph[node])
-		for _, next := range succs {
+		for _, next := range sortedGraphJobs(graph[node]) {
 			switch state[next] {
 			case unvisited:
 				if cycle := visit(next); len(cycle) > 0 {
@@ -178,7 +221,7 @@ func detectGraphCycle(graph map[string]map[string]struct{}) []string {
 		return nil
 	}
 
-	for _, node := range nodes {
+	for _, node := range sortedGraphJobs(nodes) {
 		if state[node] != unvisited {
 			continue
 		}
@@ -189,7 +232,7 @@ func detectGraphCycle(graph map[string]map[string]struct{}) []string {
 	return nil
 }
 
-func graphCyclePath(stack []string, repeated string) []string {
+func graphCyclePath(stack []graphJob, repeated graphJob) []graphJob {
 	start := 0
 	for idx, node := range stack {
 		if node == repeated {
@@ -197,7 +240,7 @@ func graphCyclePath(stack []string, repeated string) []string {
 			break
 		}
 	}
-	cycle := append([]string{}, stack[start:]...)
+	cycle := append([]graphJob{}, stack[start:]...)
 	cycle = append(cycle, repeated)
 	return cycle
 }

@@ -96,6 +96,25 @@ type ContractFinding struct {
 	EdgeSetDigest     string `json:"edge_set_digest"`
 	Acknowledged      bool   `json:"acknowledged"`
 	AcknowledgementID string `json:"acknowledgement_id,omitempty"`
+
+	// contributors is the JSON-encoded Edge.Contributors of the edge the
+	// finding was derived from (a string, so ContractFinding stays
+	// comparable). Colliding edge ids merge another pair's findings into one
+	// edge, and every finding of it is attributed to that edge's endpoints:
+	// an audience must check every contributor (identity-and-access W7-ε).
+	// Never serialised.
+	contributors string
+}
+
+// Contributors returns the (from, to) node ids of every derived edge merged
+// into the edge this finding was derived from; a finding built by hand
+// reports its own producer and consumer.
+func (f ContractFinding) Contributors() [][2]string {
+	var out [][2]string
+	if f.contributors != "" && json.Unmarshal([]byte(f.contributors), &out) == nil && len(out) > 0 {
+		return out
+	}
+	return [][2]string{{JobNodeID(f.Producer), JobNodeID(f.Consumer)}}
 }
 
 type breakingGroup struct {
@@ -446,7 +465,16 @@ func contractFindingFromEdge(edge Edge, finding schemacompat.Finding, nodesByID 
 		Detail:          finding.Detail,
 		Verdict:         string(finding.Verdict),
 		EdgeID:          edge.ID,
+		contributors:    encodeContributors(edge.Contributors()),
 	}
+}
+
+func encodeContributors(pairs [][2]string) string {
+	encoded, err := json.Marshal(pairs)
+	if err != nil {
+		return ""
+	}
+	return string(encoded)
 }
 
 func outputKeyFromFinding(finding schemacompat.Finding) string {
@@ -560,8 +588,9 @@ func emitContractBreakDeclaredEvents(ctx context.Context, db *gorm.DB, store Eve
 	if store == nil || ack == nil {
 		return nil
 	}
+	contributors, merged := findingContributorAliases(group.findings)
 	for _, consumer := range contractBreakConsumers(ctx, db, group) {
-		payload, err := json.Marshal(map[string]any{
+		fields := map[string]any{
 			"job_alias":           consumer.Alias,
 			"job_labels":          consumer.Labels,
 			"producer":            group.producer,
@@ -579,7 +608,16 @@ func emitContractBreakDeclaredEvents(ctx context.Context, db *gorm.DB, store Eve
 			"impacted_consumers":  impactedConsumers(group.findings),
 			"breaking_findings":   group.findings,
 			"notification_target": "consumer",
-		})
+		}
+		if merged {
+			// Colliding edge ids merged another pair's findings into an
+			// edge, and every finding of it names that edge's endpoints: a
+			// destination's scope must check the job aliases of every edge
+			// merged into each finding (identity-and-access W7-ε). Present
+			// only then, so other payloads are unchanged.
+			fields["finding_contributors"] = contributors
+		}
+		payload, err := json.Marshal(fields)
 		if err != nil {
 			return err
 		}
@@ -594,6 +632,36 @@ func emitContractBreakDeclaredEvents(ctx context.Context, db *gorm.DB, store Eve
 		}
 	}
 	return nil
+}
+
+// findingContributorAliases returns, aligned with findings, the job aliases
+// of every derived edge merged into each finding's edge (sorted, distinct; a
+// non-job node keeps its raw id, which names no job), and whether any edge
+// merged more than one.
+func findingContributorAliases(findings []ContractFinding) ([][]string, bool) {
+	out := make([][]string, len(findings))
+	merged := false
+	for i, finding := range findings {
+		pairs := finding.Contributors()
+		merged = merged || len(pairs) > 1
+		seen := map[string]struct{}{}
+		for _, pair := range pairs {
+			for _, node := range pair {
+				node = strings.TrimSpace(node)
+				if alias, ok := strings.CutPrefix(node, "job:"); ok {
+					node = strings.TrimSpace(alias)
+				}
+				seen[node] = struct{}{}
+			}
+		}
+		aliases := make([]string, 0, len(seen))
+		for alias := range seen {
+			aliases = append(aliases, alias)
+		}
+		sort.Strings(aliases)
+		out[i] = aliases
+	}
+	return out, merged
 }
 
 type contractBreakConsumer struct {
