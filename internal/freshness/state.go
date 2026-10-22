@@ -259,15 +259,23 @@ func (s *Store) advanceTx(ctx context.Context, in AdvanceInput) (AdvanceResult, 
 			// retry the whole transaction.
 			return errStateRaceRetry
 		}
+		if afterAdvanceReread != nil {
+			afterAdvanceReread(tx)
+		}
 		res = applyContract(&authoritative, in)
 		if res.Outcome == OutcomeAdvanced || res.Outcome == OutcomeVerified {
+			// status, reason and reason_namespace are the evaluator's
+			// (updateStatusTx) and an advance never changes them, so they are
+			// not written back: on PostgreSQL the conflicting INSERT above
+			// locks nothing, and writing back the values read here would
+			// overwrite an evaluation committed in between, pairing an old
+			// producer's reason with the new producer's reason_namespace
+			// (identity-and-access B6).
 			updates := map[string]any{
 				"watermark":        authoritative.Watermark,
 				"watermark_run_at": authoritative.WatermarkRunAt,
 				"advanced_at":      authoritative.AdvancedAt,
 				"verified_at":      authoritative.VerifiedAt,
-				"status":           authoritative.Status,
-				"reason":           authoritative.Reason,
 				"last_run_id":      authoritative.LastRunID,
 			}
 			// Consumed rides the accepted advance so watermark, last_run_id, and
@@ -294,6 +302,10 @@ func (s *Store) advanceTx(ctx context.Context, in AdvanceInput) (AdvanceResult, 
 	}
 	return res, nil
 }
+
+// afterAdvanceReread, when set (tests only), runs inside an accepting
+// advance right after it re-reads the conflicting row and before it writes.
+var afterAdvanceReread func(tx *gorm.DB)
 
 // errStateRaceRetry signals the outer retry loop that a benign row-vanished race
 // occurred and the transaction should be re-run.
