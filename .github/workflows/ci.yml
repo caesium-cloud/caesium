@@ -1284,7 +1284,7 @@ jobs:
           set -euo pipefail
           tools="$RUNNER_TEMP/connectors-tools"
           mkdir -p "$tools"
-          curl -fsSL https://kind.sigs.k8s.io/dl/v0.33.0/kind-linux-amd64 -o "$tools/kind"
+          curl -fsSL https://github.com/kubernetes-sigs/kind/releases/download/v0.33.0/kind-linux-amd64 -o "$tools/kind"
           echo "aee6151561422756b764a4ae28e7f44cda5af5a9eead3cc9985112b1de8d8e0d  $tools/kind" | sha256sum -c -
           curl -fsSL https://dl.k8s.io/release/v1.36.1/bin/linux/amd64/kubectl -o "$tools/kubectl"
           echo "629d3f410e09bf49b64ae7079f7f0bda1191efed311f7d37fdbab0ad5b0ec2b7  $tools/kubectl" | sha256sum -c -
@@ -1492,7 +1492,9 @@ jobs:
         run: sudo sysctl -w fs.inotify.max_user_watches=655360 fs.inotify.max_user_instances=1280
       - name: Install kind
         run: |
-          curl -Lo ./kind https://kind.sigs.k8s.io/dl/latest/kind-linux-amd64
+          set -euo pipefail
+          curl -fsSL https://github.com/kubernetes-sigs/kind/releases/download/v0.33.0/kind-linux-amd64 -o ./kind
+          echo "aee6151561422756b764a4ae28e7f44cda5af5a9eead3cc9985112b1de8d8e0d  ./kind" | sha256sum -c -
           chmod +x ./kind
           sudo mv ./kind /usr/local/bin/kind
       - name: Install kubectl
@@ -1745,7 +1747,9 @@ jobs:
         run: sudo sysctl -w fs.inotify.max_user_watches=655360 fs.inotify.max_user_instances=1280
       - name: Install kind
         run: |
-          curl -Lo ./kind https://kind.sigs.k8s.io/dl/latest/kind-linux-amd64
+          set -euo pipefail
+          curl -fsSL https://github.com/kubernetes-sigs/kind/releases/download/v0.33.0/kind-linux-amd64 -o ./kind
+          echo "aee6151561422756b764a4ae28e7f44cda5af5a9eead3cc9985112b1de8d8e0d  ./kind" | sha256sum -c -
           chmod +x ./kind
           sudo mv ./kind /usr/local/bin/kind
       - name: Install kubectl
@@ -1807,7 +1811,9 @@ jobs:
         run: sudo sysctl -w fs.inotify.max_user_watches=655360 fs.inotify.max_user_instances=1280
       - name: Install kind
         run: |
-          curl -Lo ./kind https://kind.sigs.k8s.io/dl/latest/kind-linux-amd64
+          set -euo pipefail
+          curl -fsSL https://github.com/kubernetes-sigs/kind/releases/download/v0.33.0/kind-linux-amd64 -o ./kind
+          echo "aee6151561422756b764a4ae28e7f44cda5af5a9eead3cc9985112b1de8d8e0d  ./kind" | sha256sum -c -
           chmod +x ./kind
           sudo mv ./kind /usr/local/bin/kind
       - name: Install kubectl
@@ -2025,6 +2031,8 @@ jobs:
           conf=/etc/docker/daemon.json
           if [ -s "$conf" ]; then current="$(sudo cat "$conf")"; else current='{}'; fi
           printf '%s' "$current" | jq '.features["containerd-snapshotter"] = true' | sudo tee "$conf" >/dev/null
+          # Installation already restarted Docker; allow this configuration restart.
+          sudo systemctl reset-failed docker.service
           sudo systemctl restart docker
           docker version --format 'docker client {{.Client.Version}} server {{.Server.Version}}'
           docker info --format '{{json .DriverStatus}}'
@@ -2058,7 +2066,7 @@ jobs:
           set -euo pipefail
           tools="$RUNNER_TEMP/coverage-tools"
           mkdir -p "$tools"
-          curl -fsSL https://kind.sigs.k8s.io/dl/v0.33.0/kind-linux-amd64 -o "$tools/kind"
+          curl -fsSL https://github.com/kubernetes-sigs/kind/releases/download/v0.33.0/kind-linux-amd64 -o "$tools/kind"
           echo "aee6151561422756b764a4ae28e7f44cda5af5a9eead3cc9985112b1de8d8e0d  $tools/kind" | sha256sum -c -
           curl -fsSL https://dl.k8s.io/release/v1.36.1/bin/linux/amd64/kubectl -o "$tools/kubectl"
           echo "629d3f410e09bf49b64ae7079f7f0bda1191efed311f7d37fdbab0ad5b0ec2b7  $tools/kubectl" | sha256sum -c -
