@@ -51,7 +51,7 @@ class NativeRuntimeTests(unittest.TestCase):
 
     def run_setup(self, info=None, install_fails=False, machine="aarch64", shim_fails=False,
                   cleanup_fails=False, daemon_fails=False, create_ack=None, foreign_probe=False,
-                  custom_service=False, cgroup_config_fails=False):
+                  custom_service=False, cgroup_config_fails=False, newer_preinstalled=False):
         commands = []
         self.commands = commands
         owner, probe_name = "", ""
@@ -69,6 +69,10 @@ class NativeRuntimeTests(unittest.TestCase):
             commands.append((command, kwargs))
             if install_fails and "install" in command and "apt-get" in command:
                 raise subprocess.CalledProcessError(100, command)
+            if (newer_preinstalled and "apt-get" in command and "install" in command
+                    and "--allow-downgrades" not in command):
+                raise subprocess.CalledProcessError(100, command, stderr=(
+                    "E: Packages were downgraded and -y was used without --allow-downgrades."))
             response = ""
             if command[:2] == ("docker", "info"):
                 response = json.dumps(info)
@@ -108,6 +112,7 @@ class NativeRuntimeTests(unittest.TestCase):
             return subprocess.CompletedProcess(command, 0, response)
 
         output = io.StringIO()
+        self.output = output
         with mock.patch.object(RUNTIME.platform, "system", return_value="Linux"), \
                 mock.patch.object(RUNTIME.platform, "machine", return_value=machine), \
                 mock.patch.object(RUNTIME.platform, "freedesktop_os_release", return_value={
@@ -118,6 +123,21 @@ class NativeRuntimeTests(unittest.TestCase):
             RUNTIME.setup()
         self.reports = [json.loads(line) for line in output.getvalue().splitlines()]
         return commands, json.loads(output.getvalue().splitlines()[-1])
+
+    def test_newer_preinstalled_runner_packages_converge_to_exact_runtime_pins(self):
+        for machine, architecture in [("x86_64", "amd64"), ("amd64", "amd64"),
+                                      ("aarch64", "arm64"), ("arm64", "arm64")]:
+            with self.subTest(machine=machine):
+                commands, report = self.run_setup(machine=machine, newer_preinstalled=True)
+                self.assertEqual(report["kind"], "ci-docker-runtime")
+                self.assertEqual(report["architecture"], architecture)
+                self.assertEqual(report["observed"], RUNTIME.EXPECTED)
+                self.assertEqual(report["runc_source_package"], RUNTIME.CONTAINERD_PACKAGE)
+                self.assertEqual(report["upstream_containerd"]["archive_sha256"],
+                                 RUNTIME.CONTAINERD_ARCHIVES[architecture])
+                self.assertEqual(report["running_shim"]["container_id"], "c" * 64)
+                self.assertEqual([command for command, _ in commands if command[:2] == ("docker", "rm")],
+                                 [("docker", "rm", "--force", "c" * 64)])
 
     def test_exact_packages_are_installed_before_running_daemon_verification(self):
         for machine, architecture in [("x86_64", "amd64"), ("amd64", "amd64"),
@@ -130,7 +150,16 @@ class NativeRuntimeTests(unittest.TestCase):
                 self.assertIn("docker-ce-cli=" + RUNTIME.ENGINE_PACKAGE, install)
                 self.assertIn("containerd.io=" + RUNTIME.CONTAINERD_PACKAGE, install)
                 self.assertIn("Dpkg::Options::=--force-confold", install)
-                self.assertNotIn("--allow-downgrades", install)
+                self.assertEqual(install.count("--allow-downgrades"), 1)
+                packages = [argument for argument in install[install.index("install") + 1:]
+                            if not argument.startswith(("-", "Dpkg::Options::="))]
+                self.assertEqual(packages, ["docker-ce=" + RUNTIME.ENGINE_PACKAGE,
+                                            "docker-ce-cli=" + RUNTIME.ENGINE_PACKAGE,
+                                            "containerd.io=" + RUNTIME.CONTAINERD_PACKAGE])
+                for bypass in ("--force-yes", "--allow-change-held-packages",
+                               "--allow-remove-essential", "--allow-unauthenticated"):
+                    self.assertFalse(any(argument == bypass or argument.startswith(bypass + "=")
+                                         for argument in install))
                 restart = next(command for command in args if "restart" in command)
                 verify = next(command for command in args if command[:2] == ("docker", "info"))
                 configure = next(command for command in args if command[-1] == "--configure-docker-cgroupfs")
@@ -190,6 +219,11 @@ class NativeRuntimeTests(unittest.TestCase):
         for machine in ("x86_64", "aarch64"):
             with self.subTest(machine=machine), self.assertRaises(subprocess.CalledProcessError):
                 self.run_setup(install_fails=True, machine=machine)
+            reports = [json.loads(line) for line in self.output.getvalue().splitlines()]
+            self.assertFalse(any(report["kind"] in ("ci-docker-components", "ci-docker-runtime")
+                                 for report in reports))
+            self.assertFalse(any(command[:2] in (("docker", "pull"), ("docker", "create"))
+                                 for command, _ in self.commands))
 
     def test_refused_docker_configuration_prevents_install_stop_and_probe(self):
         with self.assertRaises(subprocess.CalledProcessError):

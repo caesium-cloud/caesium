@@ -1,0 +1,14 @@
+diff --git a/src/database/sql/sql.go b/src/database/sql/sql.go
+--- a/src/database/sql/sql.go
++++ b/src/database/sql/sql.go
+@@ -2007,6 +2007,10 @@ func (c *Conn) grabConn(context.Context) (*driverConn, releaseConn, error) {
+ 		c.releaseConnCache = c.closemuRUnlockCondReleaseConn
+ 	})
+ 	c.closemu.RLock()
++	if c.done.Load() {
++		c.closemu.RUnlock()
++		return nil, nil, ErrConnDone
++	}
+ 	return c.dc, c.releaseConnCache, nil
+ }
+ 

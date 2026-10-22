@@ -185,6 +185,54 @@ func (rawCodec) Unmarshal(raw []byte, v any) error {
 	}
 	return proto.Unmarshal(raw, v.(proto.Message))
 }
+
+// readRPCObservation records only an immutable target and timing metadata, never
+// the remote error message, request payload, response payload, or credentials.
+func readRPCObservation(ctx context.Context, method string, request []byte) map[string]any {
+	var execution *commonpb.WorkflowExecution
+	var err error
+	switch method {
+	case "/temporal.api.workflowservice.v1.WorkflowService/QueryWorkflow":
+		req := new(workflowservice.QueryWorkflowRequest)
+		err = proto.Unmarshal(request, req)
+		execution = req.GetExecution()
+	case "/temporal.api.workflowservice.v1.WorkflowService/DescribeWorkflowExecution":
+		req := new(workflowservice.DescribeWorkflowExecutionRequest)
+		err = proto.Unmarshal(request, req)
+		execution = req.GetExecution()
+	default:
+		return nil
+	}
+	event := map[string]any{"kind": "read_rpc", "method": method, "request_decoded": err == nil}
+	if err == nil {
+		event["request_workflow_id"] = execution.GetWorkflowId()
+		event["request_run_id"] = execution.GetRunId()
+	}
+	if deadline, ok := ctx.Deadline(); ok {
+		event["request_deadline_remaining_ns"] = time.Until(deadline).Nanoseconds()
+	}
+	return event
+}
+
+func (f *fixture) recordReadRPC(ctx context.Context, event map[string]any, response []byte, err error) {
+	if event == nil {
+		return
+	}
+	event["rpc_code"] = status.Code(err).String()
+	if event["method"] == "/temporal.api.workflowservice.v1.WorkflowService/QueryWorkflow" && err == nil {
+		res := new(workflowservice.QueryWorkflowResponse)
+		decodeErr := proto.Unmarshal(response, res)
+		event["response_decoded"] = decodeErr == nil
+		if decodeErr == nil {
+			event["query_rejected"] = res.GetQueryRejected() != nil
+		}
+	}
+	if deadline, ok := ctx.Deadline(); ok {
+		event["deadline_remaining_ns"] = time.Until(deadline).Nanoseconds()
+	}
+	f.j.add(event)
+}
+
 func (f *fixture) proxy(upstream *grpc.ClientConn) grpc.StreamHandler {
 	return func(_ any, stream grpc.ServerStream) error {
 		method, _ := grpc.MethodFromServerStream(stream)
@@ -200,6 +248,7 @@ func (f *fixture) proxy(upstream *grpc.ClientConn) grpc.StreamHandler {
 		if md, ok := metadata.FromIncomingContext(ctx); ok {
 			ctx = metadata.NewOutgoingContext(ctx, md.Copy())
 		}
+		readEvent := readRPCObservation(ctx, method, request)
 		f.mu.Lock()
 		outage := f.outage
 		faultID, faultMode := f.faultID, f.faultMode
@@ -207,10 +256,15 @@ func (f *fixture) proxy(upstream *grpc.ClientConn) grpc.StreamHandler {
 		f.mu.Unlock()
 		if outage {
 			f.j.add(map[string]any{"kind": "proxy_interruption", "method": method})
-			return status.Error(codes.Unavailable, "fixture connector path interrupted")
+			err := status.Error(codes.Unavailable, "fixture connector path interrupted")
+			f.recordReadRPC(ctx, readEvent, nil, err)
+			return err
 		}
 		var response []byte
 		err := upstream.Invoke(ctx, method, &request, &response, grpc.ForceCodec(rawCodec{}))
+		// Observe the provider outcome before downstream delivery; a failed
+		// SendMsg must not rewrite a successful upstream RPC into provider failure.
+		f.recordReadRPC(ctx, readEvent, response, err)
 		isUpdate := strings.HasSuffix(method, "/UpdateWorkflowExecution")
 		isLookup := strings.HasSuffix(method, "/PollWorkflowExecutionUpdate")
 		if isUpdate {
