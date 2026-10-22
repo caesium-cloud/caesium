@@ -67,7 +67,7 @@ type kubernetesEngine struct {
 // locate resolves a runtime id (and the request's namespace) to the pod client
 // and pod name it addresses.
 func (e *kubernetesEngine) locate(id, namespace string) (kubernetesBackend, string, string, error) {
-	ns, name, err := atom.ResolveRuntimeID(id, namespace, e.namespaceOrDefault(""))
+	ns, name, err := resolveRuntimeID(id, namespace, e.namespaceOrDefault(""))
 	if err != nil {
 		return nil, "", "", err
 	}

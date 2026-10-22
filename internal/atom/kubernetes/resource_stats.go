@@ -17,7 +17,7 @@ func (e *kubernetesEngine) Stats(req *atom.EngineStatsRequest) (atom.ResourceSta
 	if ctx == nil {
 		ctx = e.ctx
 	}
-	namespace, name, err := atom.ResolveRuntimeID(req.ID, req.Namespace, e.namespaceOrDefault(""))
+	namespace, name, err := resolveRuntimeID(req.ID, req.Namespace, e.namespaceOrDefault(""))
 	if err != nil {
 		return atom.ResourceStats{}, fmt.Errorf("%w: %v", atom.ErrStatsUnavailable, err)
 	}

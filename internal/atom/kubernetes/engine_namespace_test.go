@@ -86,10 +86,10 @@ func TestCreateRunsInTheMappedNamespaceWithServiceAccountPrecedence(t *testing.T
 			}
 			created, err := engine.Create(&atom.EngineCreateRequest{Name: "step", Image: "busybox:1.36.1", Spec: spec, Target: tc.target})
 			require.NoError(t, err)
-			ns, name, err := atom.ResolveRuntimeID(created.ID(), "", "unused")
+			ns, name, err := resolveRuntimeID(created.ID(), "", "unused")
 			require.NoError(t, err)
 			require.Equal(t, tc.wantNS, ns, "runtime id %q", created.ID())
-			require.Equal(t, atom.QualifyRuntimeID(tc.wantNS, name), created.ID(), "new pods always get a qualified runtime id")
+			require.Equal(t, qualifyRuntimeID(tc.wantNS, name), created.ID(), "new pods always get a qualified runtime id")
 
 			pod, err := client.CoreV1().Pods(tc.wantNS).Get(context.Background(), name, metav1.GetOptions{})
 			require.NoError(t, err)
@@ -112,7 +112,7 @@ func TestQualifiedRuntimeIDAddressesItsNamespace(t *testing.T) {
 		terminalPod(testDefaultNamespace, "job-a", v1.PodFailed),
 	)
 	engine := fakeNamespacedEngine(context.Background(), client)
-	qualified := atom.QualifyRuntimeID(testMappedNamespace, "job-a")
+	qualified := qualifyRuntimeID(testMappedNamespace, "job-a")
 
 	got, err := engine.Get(&atom.EngineGetRequest{ID: qualified})
 	require.NoError(t, err)
@@ -127,7 +127,7 @@ func TestQualifiedRuntimeIDAddressesItsNamespace(t *testing.T) {
 	legacy, err := engine.Get(&atom.EngineGetRequest{ID: "job-a"})
 	require.NoError(t, err)
 	require.Equal(t, atom.Failure, legacy.Result())
-	require.Equal(t, atom.QualifyRuntimeID(testDefaultNamespace, "job-a"), legacy.ID())
+	require.Equal(t, qualifyRuntimeID(testDefaultNamespace, "job-a"), legacy.ID())
 
 	// A qualified id never silently addresses another namespace.
 	_, err = engine.Get(&atom.EngineGetRequest{ID: qualified, Namespace: testDefaultNamespace})
@@ -158,7 +158,7 @@ func TestWaitWatchesInTheMappedNamespace(t *testing.T) {
 	}
 	done := make(chan waitResult, 1)
 	go func() {
-		a, err := engine.Wait(&atom.EngineWaitRequest{ID: atom.QualifyRuntimeID(testMappedNamespace, "job-w")})
+		a, err := engine.Wait(&atom.EngineWaitRequest{ID: qualifyRuntimeID(testMappedNamespace, "job-w")})
 		done <- waitResult{a, err}
 	}()
 	// The watch closes without a terminal event: Wait falls back to a Get,
@@ -173,7 +173,7 @@ func TestWaitWatchesInTheMappedNamespace(t *testing.T) {
 	case got := <-done:
 		require.NoError(t, got.err)
 		require.Equal(t, atom.Success, got.atom.Result())
-		require.Equal(t, atom.QualifyRuntimeID(testMappedNamespace, "job-w"), got.atom.ID())
+		require.Equal(t, qualifyRuntimeID(testMappedNamespace, "job-w"), got.atom.ID())
 	case <-time.After(5 * time.Second):
 		t.Fatal("Wait did not return after the watch closed")
 	}
@@ -286,7 +286,7 @@ func TestLogsAndStatsAddressTheMappedNamespace(t *testing.T) {
 		defaultNamespace: testDefaultNamespace,
 		statsClient:      client.RESTClient(),
 	}
-	qualified := atom.QualifyRuntimeID(testMappedNamespace, "job-l")
+	qualified := qualifyRuntimeID(testMappedNamespace, "job-l")
 
 	logs, err := engine.Logs(&atom.EngineLogsRequest{ID: qualified, Namespace: testMappedNamespace})
 	require.NoError(t, err)

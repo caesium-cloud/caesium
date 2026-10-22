@@ -969,7 +969,12 @@ class Driver:
                 '-p', '127.0.0.1::8080', '--mount', 'type=bind,src=' + str(raw) + ',dst=/var/lib/caesium/coverage',
                 '--mount', 'type=volume,src=' + database + ',dst=/var/lib/caesium/dqlite']
         if self.backend == 'kubernetes':
-            env.update(CAESIUM_KUBERNETES_CONFIG='/coverage-kube', CAESIUM_KUBERNETES_NAMESPACE=self.namespace)
+            # Resource sampling drives the engine's Stats path against the live
+            # pod's namespace-qualified runtime id (identity-and-access C1).
+            # kind serves no metrics.k8s.io API, so every sample reads as
+            # unavailable (stats_source none) and the task outcome is unchanged.
+            env.update(CAESIUM_KUBERNETES_CONFIG='/coverage-kube', CAESIUM_KUBERNETES_NAMESPACE=self.namespace,
+                       CAESIUM_RESOURCE_STATS_ENABLED='true', CAESIUM_RESOURCE_STATS_SAMPLE_INTERVAL='1s')
             args += ['--mount', 'type=bind,src=' + str(self.kube_dir) + ',dst=/coverage-kube,readonly']
         else:
             env['CAESIUM_PODMAN_URI'] = 'unix:///run/podman/podman.sock'

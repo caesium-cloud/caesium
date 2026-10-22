@@ -29,7 +29,7 @@ func (c *Atom) ID() string {
 	if namespace == "" {
 		return c.metadata.Name
 	}
-	return atom.QualifyRuntimeID(namespace, c.metadata.Name)
+	return qualifyRuntimeID(namespace, c.metadata.Name)
 }
 
 // State returns the state of the Atom. This function

@@ -46,7 +46,7 @@ type Engine interface {
 type EngineGetRequest struct {
 	ID string
 	// Namespace is the Kubernetes namespace of an unqualified ID (Docker and
-	// Podman ignore it); see ResolveRuntimeID.
+	// Podman ignore it); a namespace-qualified id names its own namespace.
 	Namespace string
 }
 
