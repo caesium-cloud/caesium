@@ -6,7 +6,6 @@ import (
 	"time"
 
 	"github.com/caesium-cloud/caesium/internal/atom"
-	"github.com/caesium-cloud/caesium/pkg/env"
 	"k8s.io/apimachinery/pkg/api/resource"
 )
 
@@ -18,7 +17,11 @@ func (e *kubernetesEngine) Stats(req *atom.EngineStatsRequest) (atom.ResourceSta
 	if ctx == nil {
 		ctx = e.ctx
 	}
-	payload, err := e.statsClient.Get().AbsPath("/apis/metrics.k8s.io/v1beta1/namespaces", env.Variables().KubernetesNamespace, "pods", req.ID).DoRaw(ctx)
+	namespace, name, err := atom.ResolveRuntimeID(req.ID, req.Namespace, e.namespaceOrDefault(""))
+	if err != nil {
+		return atom.ResourceStats{}, fmt.Errorf("%w: %v", atom.ErrStatsUnavailable, err)
+	}
+	payload, err := e.statsClient.Get().AbsPath("/apis/metrics.k8s.io/v1beta1/namespaces", namespace, "pods", name).DoRaw(ctx)
 	if err != nil {
 		return atom.ResourceStats{}, fmt.Errorf("%w: %v", atom.ErrStatsUnavailable, err)
 	}

@@ -84,7 +84,7 @@ These back the investigation verbs described in
 
 | Endpoint | Purpose |
 | --- | --- |
-| `GET /jobs/:id/runs/:run_id/why` | Why a task ran, was skipped, or failed (`caesium why`). |
+| `GET /jobs/:id/runs/:run_id/why` | Why a task ran, was skipped, or failed (`caesium why`). A failed task carries `failureClass` (`config`, `oom`, `schema_violation`, …, from the incident classifier; omitted for the unknown class), as does a fanned group's `firstFailure`. |
 | `GET /jobs/:id/blame` | Which change broke the job (`caesium blame`). |
 | `GET /jobs/:id/runs/diff` | Compare two runs (`caesium run diff`). |
 | `POST /jobs/:id/runs/:run_id/replay` | Start a quarantined replay (`caesium run replay`). Refused with 422 when the job namespace's `secrets.allow` rules deny a step's `secret://` reference, and with `409 namespace_quota` (`Retry-After`) when a replay that would execute finds its namespace at its run quota. |

@@ -396,7 +396,7 @@ kind: AccessPolicy
 namespaces:
   default: {}
   marketing:
-    kubernetes:                       # parsed and validated; not enforced yet
+    kubernetes:                       # enforced; see Kubernetes target
       namespace: caesium-marketing
       serviceAccountName: caesium-jobs
     secrets:                          # enforced; see Scoped secrets
@@ -422,10 +422,9 @@ bindings:
     namespaces: ["*"]
 ```
 
-The `secrets` rules ([Scoped secrets](#scoped-secrets)) and `quotas` ([Run
-quotas](#run-quotas)) are enforced. The `kubernetes` block is validated and
-carried in the loaded policy, but nothing consumes it yet; see [Namespaces and
-isolation](#namespaces-and-isolation).
+The `kubernetes` block ([Kubernetes target](#kubernetes-target)), the
+`secrets` rules ([Scoped secrets](#scoped-secrets)) and `quotas` ([Run
+quotas](#run-quotas)) are enforced.
 
 ### Validation rules
 
@@ -935,16 +934,19 @@ target is matched, never the reference's surface path.
 | --- | --- | --- |
 | `env` | `env/<NAME>` | `?name=` wins over the path; path segments join with `_` |
 | `vault` | `vault/<path>#<field>` | `?field=` or the final path segment is the field; rules grant every field of an allowed path; a decoded `#` (`%23`) in the path or field is denied |
-| `k8s`, `kubernetes` | `k8s/<namespace>/<secret>` | the path namespace, or the secret resolver's `CAESIUM_JOBDEF_SECRETS_KUBE_NAMESPACE` for `secret://k8s/<secret>/<key>`; `?namespace=` and `?name=` override; the key is not part of the target |
+| `k8s`, `kubernetes` | `k8s/<namespace>/<secret>` | the path namespace; for `secret://k8s/<secret>/<key>`, the namespace's mapped `kubernetes.namespace`, else the secret resolver's `CAESIUM_JOBDEF_SECRETS_KUBE_NAMESPACE`; `?namespace=` and `?name=` override; the key is not part of the target |
 
 A Kubernetes rule with one path segment (`k8s/marketing-*`, `k8s/**`) is
 relative: it means that secret in the namespace's mapped Kubernetes namespace,
 `kubernetes.namespace`, else `CAESIUM_KUBERNETES_NAMESPACE`. Any other effective
 namespace must be named by a rule with two segments (`k8s/shared/common-*`).
-Until C1 makes relative references resolve in the mapped namespace, a relative
-reference reads in `CAESIUM_JOBDEF_SECRETS_KUBE_NAMESPACE`; when that differs
-from the mapped namespace, the reference does not match a relative rule and is
-denied. Set the two variables to the same namespace, or use
+A relative reference (`secret://k8s/<secret>/<key>`) of a namespace that maps
+`kubernetes.namespace` reads in that mapped namespace, whatever engine runs the
+step, so a relative rule and a relative reference meet. In a namespace without
+a mapping a relative reference reads in `CAESIUM_JOBDEF_SECRETS_KUBE_NAMESPACE`
+while a relative rule means `CAESIUM_KUBERNETES_NAMESPACE`; when those differ
+the reference does not match a relative rule and is denied. Set the two
+variables to the same namespace, map the namespace, or use
 `secret://k8s/<namespace>/<secret>/<key>`.
 
 Where the rules apply, each reading the policy at the point of use:
@@ -956,7 +958,8 @@ Where the rules apply, each reading the policy at the point of use:
   fails the task at once, without retries, with an error naming only the
   redacted reference (`secret env/FINANCE_TOKEN/… is not allowed by namespace
   "marketing" secret rules: no rule matches`), and the incident class is
-  `config` (never auto-retried), not `transient_infra`. Each check reads the
+  `config` (never auto-retried), not `transient_infra`; `caesium why --json`
+  reports it as `"failureClass": "config"`. Each check reads the
   policy as it is then, so a reload while one reference is being read applies
   to the next reference of the same step.
 - **Replay** (`caesium run replay`, `POST /v1/jobs/:id/runs/:run_id/replay`): a
@@ -1085,12 +1088,52 @@ where every node drains the queue, each node reports the cluster count) and
 `caesium_namespace_quota_deferrals_total{namespace}`, both labelled only with
 namespaces the policy declares with a quota.
 
-### Planned isolation features
+### Kubernetes target
 
-- **Planned (C1): Kubernetes target per namespace.** The `kubernetes` block of
-  a namespace in the policy file will select the Kubernetes namespace and
-  service account that a namespace's pods run under. Today it is validated but
-  every job runs where the engine is configured.
+A namespace's `kubernetes` block selects where its Kubernetes steps run:
+`kubernetes.namespace` is the pod namespace and `kubernetes.serviceAccountName`
+the default service account. Either may be omitted: pods then run in
+`CAESIUM_KUBERNETES_NAMESPACE`, and without a default account under the
+namespace's `default` service account. A step's own
+`kubernetes.serviceAccountName` wins over the namespace default. Volume claims
+are namespace-local, so a step's PVCs are the mapped namespace's, and relative
+`secret://k8s/<secret>/<key>` references read there too (see
+[Scoped secrets](#scoped-secrets)).
+
+- **Resolution.** Each task execution reads the mapping once, from the policy
+  as it is when the execution starts, before its cache lookup, and keeps it for
+  that execution's retries and fan-out instances: the pod, the cache key, the
+  secret reads and the recorded result all use one revision. A reload applies
+  to the next execution. Docker and Podman steps ignore the pod target.
+- **Fail closed.** A Kubernetes step whose namespace this node's policy file
+  does not declare, or that starts while a configured policy file never loads,
+  fails at once with the `config` class (`kubernetes target is not allowed by
+  namespace "…" access policy: …`) and starts no pod.
+- **Runtime ids.** Every new Kubernetes pod's runtime id (`runtime_id` on the
+  run's tasks, in callbacks and in OpenLineage `runtimeId`) is
+  namespace-qualified, `<namespace>/<pod>`, mapped or not, so log streaming and
+  recovery after a restart find the pod without reading the policy. An
+  unqualified id recorded before this release still resolves in
+  `CAESIUM_KUBERNETES_NAMESPACE`. Docker and Podman ids are unchanged.
+- **Cache identity and evidence.** A Kubernetes step's mapping (namespace and
+  default account), and for other engines the namespace their relative
+  `secret://k8s` references read in, enter the cache key only when a mapping
+  applies, so unmapped keys are unchanged and a remap is a cache miss, never a
+  stale hit. The execution descriptor records the mapping
+  (`runtime.kubernetesTarget`), `caesium why` and `run diff` name a changed
+  `kubernetesTarget.namespace`, `kubernetesTarget.serviceAccountName` or
+  `kubernetesSecretNamespace`, and a replay re-executes a step whose baseline
+  ran under a different mapping (a baseline recorded before this release counts
+  as unmapped) instead of reusing it.
+- **Permissions.** Caesium's service account needs pods, pods/log, secrets
+  (get) and persistentvolumeclaims in each mapped namespace; pre-create the
+  namespaces and grant that access yourself until the Helm chart renders it
+  (C3).
+- **Distributed mode.** Like secret rules, each node resolves the mapping from
+  its own copy of the policy file until the owner carries it in the dispatch
+  (C2). Mount the same file on every node.
+- There is no label-based pod reaper; a reaper would list
+  `CAESIUM_KUBERNETES_NAMESPACE` plus every mapped namespace.
 
 ## API keys and CLI login
 

@@ -51,9 +51,11 @@ type explanation struct {
 	Partition string `json:"partition"`
 	Verdict   string `json:"verdict"`
 	Status    string `json:"status"`
-	Hash      string `json:"hash"`
-	Summary   string `json:"summary"`
-	Trigger   struct {
+	// FailureClass is the failed task's incident class; absent otherwise.
+	FailureClass string `json:"failureClass"`
+	Hash         string `json:"hash"`
+	Summary      string `json:"summary"`
+	Trigger      struct {
 		Type   string            `json:"type"`
 		Alias  string            `json:"alias"`
 		Params map[string]string `json:"params"`
@@ -151,6 +153,7 @@ type groupFailure struct {
 	Status         string `json:"status"`
 	Attempt        int    `json:"attempt"`
 	Error          string `json:"error"`
+	FailureClass   string `json:"failureClass"`
 }
 
 // Cmd is the `caesium why` command.
@@ -235,6 +238,9 @@ func renderTable(cmd *cobra.Command, exp *explanation) {
 	}
 	_, _ = fmt.Fprintf(tw, "VERDICT\t%s\n", exp.Verdict)
 	_, _ = fmt.Fprintf(tw, "STATUS\t%s\n", exp.Status)
+	if exp.FailureClass != "" {
+		_, _ = fmt.Fprintf(tw, "FAILURE-CLASS\t%s\n", exp.FailureClass)
+	}
 	if exp.Hash != "" {
 		_, _ = fmt.Fprintf(tw, "HASH\t%s\n", exp.Hash)
 	}
@@ -395,6 +401,9 @@ func renderGroup(out io.Writer, group *groupSummary) {
 		}
 		_, _ = fmt.Fprintf(out, "First failure: partition %q (index %d, attempt %d): %s\n",
 			group.FirstFailure.Partition, group.FirstFailure.PartitionIndex, group.FirstFailure.Attempt, cause)
+		if group.FirstFailure.FailureClass != "" {
+			_, _ = fmt.Fprintf(out, "Failure class: %s\n", group.FirstFailure.FailureClass)
+		}
 	}
 
 	_, _ = fmt.Fprintln(out)

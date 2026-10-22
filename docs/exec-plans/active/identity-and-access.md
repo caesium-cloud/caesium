@@ -777,7 +777,7 @@ policy, the resolved target travels with the dispatch request so workers never r
 the policy file, Helm renders RBAC for each mapped namespace, and a scoped secret
 resolver refuses references outside the namespace's allow-list at lint and at run time.
 
-- [ ] C1. Kubernetes engine resolves the target per request: `KubeTarget{Namespace,
+- [x] C1. Kubernetes engine resolves the target per request: `KubeTarget{Namespace,
       ServiceAccountName}` on `EngineCreateRequest`, and `Namespace` on **every** other
       request type (`EngineGetRequest`, `EngineWaitRequest`, `EngineStopRequest`,
       `EngineLogsRequest`, `EngineListRequest`; Docker/Podman ignore it); the engine
@@ -797,6 +797,12 @@ resolver refuses references outside the namespace's allow-list at lint and at ru
       `internal/cache/hash.go`, `internal/run/store.go` (descriptor capture, runtime id),
       `internal/job/job.go`, `internal/worker/runtime_executor.go` (call sites).
       Depends on: B1 + A4.
+      (W6-ε: resolved once per execution before the cache identity and held
+      across retries/fan-out; every new pod id is `<ns>/<pod>`; Docker steps
+      with relative `secret://k8s` refs key on the mapped secret namespace; a
+      replay re-executes a step whose recorded mapping moved; undeclared
+      namespace on a file-backed node fails closed as `config`; no production
+      reaper exists, so List + `KubernetesNamespaces()` ship for one.)
 - [ ] C2. Carry an isolation context through dispatch, fail closed on old workers:
       the owner resolves `IsolationContext{KubeTarget, SecretRules, PolicyRevision}`
       from the run's namespace when building `DispatchRequest`; it travels through
@@ -866,13 +872,16 @@ resolver refuses references outside the namespace's allow-list at lint and at ru
       until C2; `why` surfacing of the class is left to C5; client-side runs
       never wait for a server policy; replays check before reusing a step. Live: `TestAuthSecretScope`,
       `TestAuthSecretScopeWebhook`, `TestDevOnceSecretWithAPolicyFileConfigured`.)
-- [ ] C5. Secret-scoping end to end: with the H-1 fixture's `marketing` allow-list, a
+- [x] C5. Secret-scoping end to end: with the H-1 fixture's `marketing` allow-list, a
       manifest referencing `env/FINANCE_*` is rejected by `caesium job lint` (server)
       naming the redacted reference; applied with lint bypassed it fails the task with
       the `config` class visible in `caesium why --json`; the allowed reference resolves
       and the task succeeds.
       Files: new `test/secret_scope_test.go`, `test/testdata/policy/two-namespaces.yaml`.
       Depends on: C4 + H-1.
+      (W6-ε: `TestSecretScopeMarketingAllowList` on the no-auth lane and the
+      local coverage journey; the fixture is unchanged, the servers carry
+      `MARKETING_IT_TOKEN`; `caesium why` gained `failureClass`.)
 
 ### Stream D — Run quota and fairness; namespaced shared objects
 

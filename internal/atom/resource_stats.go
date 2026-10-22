@@ -11,8 +11,9 @@ import (
 var ErrStatsUnavailable = errors.New("runtime resource statistics unavailable")
 
 type EngineStatsRequest struct {
-	ID      string
-	Context context.Context
+	ID        string
+	Namespace string
+	Context   context.Context
 }
 
 // ResourceStats is one runtime observation. CPUSeconds is cumulative CPU time

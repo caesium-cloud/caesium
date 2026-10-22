@@ -45,6 +45,9 @@ type Engine interface {
 // an Engine.Get request.
 type EngineGetRequest struct {
 	ID string
+	// Namespace is the Kubernetes namespace of an unqualified ID (Docker and
+	// Podman ignore it); see ResolveRuntimeID.
+	Namespace string
 }
 
 // EngineListRequest defines the input parameters to
@@ -52,6 +55,11 @@ type EngineGetRequest struct {
 type EngineListRequest struct {
 	Since  time.Time
 	Before time.Time
+	// Namespace and Namespaces name Kubernetes namespaces to list in addition
+	// to the engine's configured namespace (Docker and Podman ignore them). A
+	// reaper passes every namespace the access policy maps.
+	Namespace  string
+	Namespaces []string
 }
 
 // EngineCreateRequest defines the input parameters to
@@ -61,26 +69,33 @@ type EngineCreateRequest struct {
 	Image   string
 	Command []string
 	Spec    container.Spec
+	// Target is the Kubernetes namespace and default service account the
+	// run's namespace maps to. The zero value is the engine's configured
+	// namespace and no default service account. Docker and Podman ignore it.
+	Target KubeTarget
 }
 
 type EngineWaitRequest struct {
-	ID      string
-	Context context.Context
+	ID        string
+	Namespace string
+	Context   context.Context
 }
 
 // EngineStopRequest defines the input parameters to
 // an Engine.Stop request.
 type EngineStopRequest struct {
-	ID      string
-	Force   bool
-	Timeout time.Duration
+	ID        string
+	Namespace string
+	Force     bool
+	Timeout   time.Duration
 }
 
 // EngineLogsRequest defines the input parameters to
 // an Engine.Logs request.
 type EngineLogsRequest struct {
-	ID    string
-	Since time.Time
+	ID        string
+	Namespace string
+	Since     time.Time
 }
 
 // State defines the various states a Atom can be in

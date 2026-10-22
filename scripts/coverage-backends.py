@@ -1070,6 +1070,14 @@ class Driver:
         self.record_process('cli', obj, raw, list(args))
         return stdout.stdout.strip()
 
+    def pod_name(self, runtime):
+        # Kubernetes runtime ids are namespace-qualified, "<namespace>/<pod>"
+        # (identity-and-access C1). The owned namespace must be the one named.
+        namespace, sep, name = runtime.partition('/')
+        require(sep == '/' and namespace == self.namespace and name and '/' not in name,
+                'kubernetes runtime id must be <owned namespace>/<pod>')
+        return name
+
     def native(self, run_id, task):
         runtime = task['runtime_id']
         if self.backend == 'podman':
@@ -1079,13 +1087,14 @@ class Driver:
             if obj.get('State', {}).get('Status') != 'running':
                 return None
             return {'run_id': run_id, 'task_id': task['task_id'], 'runtime_id': runtime, 'native_id': obj['Id'], 'image_id': self.task_image, 'status': 'running', 'engine': 'podman'}
-        result = self.kubectl('-n', self.namespace, 'get', 'pod', runtime, '-o', 'json', check=False)
+        pod = self.pod_name(runtime)
+        result = self.kubectl('-n', self.namespace, 'get', 'pod', pod, '-o', 'json', check=False)
         if result.returncode:
-            require('NotFound' in result.stderr and runtime in result.stderr, 'native pod lookup failed')
+            require('NotFound' in result.stderr and pod in result.stderr, 'native pod lookup failed')
             return None
         obj = json.loads(result.stdout)
         metadata, spec, status = obj['metadata'], obj['spec'], obj.get('status', {})
-        require(metadata.get('namespace') == self.namespace and run_id in metadata['name'] and task['task_id'] in metadata['name'] and metadata['name'] == runtime and len(spec.get('containers', [])) == 1, 'foreign backend pod identity')
+        require(metadata.get('namespace') == self.namespace and run_id in metadata['name'] and task['task_id'] in metadata['name'] and metadata['name'] == pod and len(spec.get('containers', [])) == 1, 'foreign backend pod identity')
         container = spec['containers'][0]
         require(container.get('image') == self.task_ref and {'name': 'COVERAGE_BACKEND_OWNER', 'value': self.owner} in container.get('env', []), 'pod image/owner input mismatch')
         if status.get('phase') != 'Running' or not status.get('containerStatuses'):
@@ -1112,7 +1121,7 @@ class Driver:
                 'concrete CRI container state/image identity mismatch')
         labels = native.get('labels', {})
         require(all(labels.get(key) == value for key, value in {
-            'io.kubernetes.pod.uid': metadata['uid'], 'io.kubernetes.pod.name': runtime,
+            'io.kubernetes.pod.uid': metadata['uid'], 'io.kubernetes.pod.name': pod,
             'io.kubernetes.pod.namespace': self.namespace, 'io.kubernetes.container.name': 'atom',
         }.items()), 'concrete CRI container is not bound to the exact owned pod')
         namespace = json.loads(self.kubectl('get', 'namespace', self.namespace, '-o', 'json').stdout)['metadata']
@@ -1120,7 +1129,7 @@ class Driver:
                 'owned namespace changed during native witness')
         # Re-read the exact pod after native reads so a replaced container/pod
         # cannot borrow the original pod's public Running observation.
-        current = json.loads(self.kubectl('-n', self.namespace, 'get', 'pod', runtime, '-o', 'json').stdout)
+        current = json.loads(self.kubectl('-n', self.namespace, 'get', 'pod', pod, '-o', 'json').stdout)
         require(current['metadata'].get('uid') == metadata['uid'] and current.get('spec', {}).get('nodeName') == node and
                 current.get('status', {}).get('phase') == 'Running' and len(current.get('status', {}).get('containerStatuses', [])) == 1 and
                 all(current['status']['containerStatuses'][0].get(key) == pod_container.get(key) for key in ('name', 'image', 'imageID', 'containerID', 'restartCount', 'state')), 'pod/container witness changed during CRI observation')
@@ -1137,10 +1146,11 @@ class Driver:
             require(result.returncode == 1 and not result.stderr.strip(), 'native Libpod absence not proved (API/inventory failure)')
             require(self.podman('version', '--format', 'json').returncode == 0, 'native Libpod API unavailable after absence check')
             return True
-        result = self.kubectl('-n', self.namespace, 'get', 'pod', runtime, '-o', 'json', check=False)
+        pod = self.pod_name(runtime)
+        result = self.kubectl('-n', self.namespace, 'get', 'pod', pod, '-o', 'json', check=False)
         if result.returncode == 0:
             return False
-        require(re.fullmatch(r'Error from server \(NotFound\): pods "' + re.escape(runtime) + r'" not found', result.stderr.strip()), 'native pod absence not proved')
+        require(re.fullmatch(r'Error from server \(NotFound\): pods "' + re.escape(pod) + r'" not found', result.stderr.strip()), 'native pod absence not proved')
         namespace = json.loads(self.kubectl('get', 'namespace', self.namespace, '-o', 'json').stdout)
         require(namespace['metadata']['uid'] == self.namespace_uid and namespace['metadata']['labels'].get('caesium.coverage.backend-owner') == self.owner, 'owned namespace identity unavailable after absence')
         return True

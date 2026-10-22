@@ -37,7 +37,8 @@ func newHTTPLogEngineWithHandler(t *testing.T, ctx context.Context, handler http
 	t.Cleanup(server.Close)
 	client, err := corev1.NewForConfig(&rest.Config{Host: server.URL})
 	require.NoError(t, err)
-	return &kubernetesEngine{ctx: ctx, backend: client.Pods("logs-test")}
+	pods := client.Pods("logs-test")
+	return &kubernetesEngine{ctx: ctx, pods: func(string) kubernetesBackend { return pods }, defaultNamespace: "logs-test"}
 }
 
 func writeLogPod(w http.ResponseWriter, pod *v1.Pod) {

@@ -15,6 +15,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/caesium-cloud/caesium/internal/atom"
 	"github.com/caesium-cloud/caesium/internal/authz"
 	"github.com/caesium-cloud/caesium/internal/cache"
 	"github.com/caesium-cloud/caesium/internal/dbretry"
@@ -1205,6 +1206,36 @@ func (s *Store) UpdateTaskExecutionDescriptorInputs(runID, taskID uuid.UUID, pre
 			desc.Baseline.HashInputBlobStored = true
 			desc.Cache.HashInputBlobStored = true
 		}
+	})
+}
+
+// RecordTaskKubernetesTarget records the namespace mapping a task execution
+// resolved (identity-and-access C1) on its descriptor: set when non-zero, and
+// cleared when the execution resolved none but an earlier execution of the
+// row recorded a mapping, so the descriptor names the mapping the latest
+// execution used. current is the row's descriptor as the executor claimed it
+// (executions of one row are serialized by its claim, so a mapping an earlier
+// execution recorded is in it), or nil when the caller does not hold it, in
+// which case a zero target reads the row. With a zero target and no recorded
+// mapping nothing is written, so unmapped descriptors stay byte-identical.
+func (s *Store) RecordTaskKubernetesTarget(runID, taskID uuid.UUID, target atom.KubeTarget, current []byte) error {
+	if target.IsZero() {
+		if current == nil {
+			row, err := loadTaskRunByIDOrUnique(s.db.Select("id", "job_run_id", "task_id", "execution_descriptor").Session(&gorm.Session{}), runID, taskID)
+			if err != nil {
+				if errors.Is(err, gorm.ErrRecordNotFound) {
+					return nil
+				}
+				return err
+			}
+			current = row.ExecutionDescriptor
+		}
+		if !bytes.Contains(current, []byte(`"kubernetesTarget"`)) {
+			return nil
+		}
+	}
+	return s.mutateTaskExecutionDescriptor(runID, taskID, func(desc *models.TaskExecutionDescriptor) {
+		desc.Runtime.KubernetesTarget = target.Ptr()
 	})
 }
 

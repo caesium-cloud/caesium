@@ -13,12 +13,23 @@ import (
 type Atom struct {
 	atom.Atom
 	metadata *v1.Pod
+	// namespace is the namespace the engine addressed the pod in.
+	namespace string
 }
 
-// ID returns the ID of the Atom. This ID is
-// identical to the Kubernetes pod name.
+// ID returns the namespace-qualified runtime id "<namespace>/<pod>", so
+// recovery, wait, stop, logs and reaping find the pod after a restart without
+// reading the access policy. An id without a namespace (a legacy runtime id)
+// resolves in CAESIUM_KUBERNETES_NAMESPACE.
 func (c *Atom) ID() string {
-	return c.metadata.Name
+	namespace := c.namespace
+	if namespace == "" {
+		namespace = c.metadata.Namespace
+	}
+	if namespace == "" {
+		return c.metadata.Name
+	}
+	return atom.QualifyRuntimeID(namespace, c.metadata.Name)
 }
 
 // State returns the state of the Atom. This function

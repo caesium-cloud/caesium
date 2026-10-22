@@ -1115,6 +1115,7 @@ coverage_journey_server_env() {
     CAESIUM_CACHE_PIN_DIGESTS=true
     CAESIUM_REGISTRY_AUTH=127.0.0.1=secret://env/CAESIUM_IT_REGISTRY_CREDS
     CAESIUM_IT_REGISTRY_CREDS=ci-user:ci-pass
+    MARKETING_IT_TOKEN=it-marketing-token
     CAESIUM_CACHE_ENABLED=true
     CAESIUM_NOTIFICATION_WATCHER_INTERVAL=1s
     CAESIUM_RATE_LIMIT_PRUNER_ENABLED=true
@@ -1770,6 +1771,11 @@ PY
   # scoped to the row's queued namespace): a queue-policy job parks its second
   # run and the scenario cancels the row through the live endpoint.
   local_pattern="${local_pattern%)}|TestJobQueueCancelEndpointDeletesUnclaimedRowOnly)"
+  # Namespace secret scoping end to end (identity-and-access C5): the local
+  # server's fixture gives marketing env/MARKETING_* only, so a FINANCE_
+  # reference is refused by server lint and at run time (config class in
+  # `caesium why`), and the allowed reference resolves.
+  local_pattern="${local_pattern%)}|TestSecretScopeMarketingAllowList)"
   auth_pattern="${auth_pattern%)}|TestIncidentNamespaceLifecycle)"
   # The access policy endpoints (GET/POST /v1/auth/policy): this api-key server
   # mounts no policy file, so the scenario drives the no-file env view and 409.
@@ -1820,6 +1826,7 @@ PY
     TestNamespaceQuotaRefusesRetryAtCap
     TestNamespaceQuotaBackfillWaitsAndCompletes
     TestJobQueueCancelEndpointDeletesUnclaimedRowOnly
+    TestSecretScopeMarketingAllowList
   )
   local -a auth_named_passes=(
     TestIncidentCLIListJSONStdout

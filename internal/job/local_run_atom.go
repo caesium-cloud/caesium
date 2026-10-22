@@ -84,7 +84,7 @@ func (l *localRun) executeAtom(taskCtx context.Context, taskID, instanceID uuid.
 	rawSecretEnv := spec.Env
 	// A fresh namespace scope per attempt: a policy reload since the
 	// before-cache check applies here, and a denial is terminal (no retry).
-	spec, secretIdentities, err := jobdefruntime.ResolveContainerSpecSecretsWithIdentities(taskCtx, l.secretScope().Resolver(), spec)
+	spec, secretIdentities, err := jobdefruntime.ResolveContainerSpecSecretsWithIdentities(taskCtx, l.secretScope(runner).Resolver(), spec)
 	if err != nil {
 		return "", nil, nil, nil, run.MetricsCapture{}, nil, err
 	}
@@ -126,11 +126,13 @@ func (l *localRun) executeAtom(taskCtx context.Context, taskID, instanceID uuid.
 	if ctxErr := attemptContextError(); ctxErr != nil {
 		return "", nil, nil, nil, run.MetricsCapture{}, nil, ctxErr
 	}
+	podTarget := jobdefruntime.PodTarget(runner.engineKind, runner.kubeMapping)
 	a, err := engine.Create(&atom.EngineCreateRequest{
 		Name:    atomName,
 		Image:   image,
 		Command: runner.command,
 		Spec:    spec,
+		Target:  podTarget,
 	})
 	if err != nil {
 		if ctxErr := attemptContextError(); ctxErr != nil {
@@ -139,7 +141,7 @@ func (l *localRun) executeAtom(taskCtx context.Context, taskID, instanceID uuid.
 		return "", nil, nil, nil, run.MetricsCapture{}, nil, err
 	}
 	if ctxErr := attemptContextError(); ctxErr != nil {
-		if stopErr := engine.Stop(&atom.EngineStopRequest{ID: a.ID(), Force: true}); stopErr != nil {
+		if stopErr := engine.Stop(&atom.EngineStopRequest{ID: a.ID(), Namespace: podTarget.Namespace, Force: true}); stopErr != nil {
 			return "", nil, nil, nil, run.MetricsCapture{}, nil, fmt.Errorf("%w; failed to stop atom %s: %v", ctxErr, a.ID(), stopErr)
 		}
 		return "", nil, nil, nil, run.MetricsCapture{}, nil, ctxErr
@@ -174,7 +176,7 @@ func (l *localRun) executeAtom(taskCtx context.Context, taskID, instanceID uuid.
 		secretLogResult    <-chan run.SecretLogCaptureResult
 	)
 	if secretBearing {
-		if stream, streamErr := engine.Logs(&atom.EngineLogsRequest{ID: a.ID()}); streamErr != nil {
+		if stream, streamErr := engine.Logs(&atom.EngineLogsRequest{ID: a.ID(), Namespace: podTarget.Namespace}); streamErr != nil {
 			log.Warn("failed to open scrubbed live task log; will retry after completion",
 				"task_id", taskID, "atom_id", a.ID(), "error", streamErr)
 		} else {
@@ -192,7 +194,7 @@ func (l *localRun) executeAtom(taskCtx context.Context, taskID, instanceID uuid.
 		err  error
 	}, 1)
 	go func() {
-		next, waitErr := engine.Wait(&atom.EngineWaitRequest{ID: a.ID(), Context: taskCtx})
+		next, waitErr := engine.Wait(&atom.EngineWaitRequest{ID: a.ID(), Namespace: podTarget.Namespace, Context: taskCtx})
 		waitResult <- struct {
 			atom atom.Atom
 			err  error
