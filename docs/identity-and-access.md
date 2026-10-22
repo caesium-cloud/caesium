@@ -135,6 +135,10 @@ IP addresses or CIDR ranges; invalid entries fail the auth startup TLS guard.
 | `CAESIUM_AUTH_SESSION_IDLE_TTL` | `8h` | Sliding idle timeout refreshed by valid session use. |
 | `CAESIUM_AUTH_SESSION_ABSOLUTE_TTL` | `24h` | Hard session expiry. |
 | `CAESIUM_AUTH_CLI_KEY_TTL` | `12h` | Lifetime of a [user-bound API key](#user-bound-keys); must be above 0 and at most `168h` (7 days), or the server refuses to start. |
+| `CAESIUM_AUTH_GROUP_REFRESH_INTERVAL` | `15m` | [Group refresh](#group-refresh): a user whose groups are older than this is refreshed from the IdP in the background. |
+| `CAESIUM_AUTH_GROUP_MAX_STALENESS` | `24h` | Past this, the next request waits for one refresh; if it fails, every credential of the user is refused (`401` `stale_groups`) until the user signs in again. At least the interval. |
+| `CAESIUM_AUTH_GROUP_REFRESH_TIMEOUT` | `5s` | Bound of one refresh; shorter than the interval. |
+| `CAESIUM_AUTH_SAML_SESSION_ABSOLUTE_TTL` | `8h` | Absolute lifetime of SAML sessions, replacing `CAESIUM_AUTH_SESSION_ABSOLUTE_TTL` for them (SAML cannot refresh groups). |
 | `CAESIUM_TRUSTED_PROXIES` | empty | Comma-separated trusted proxy IPs/CIDRs for forwarded-proto handling. |
 
 ### Browser Auth Endpoint Contract
@@ -207,10 +211,10 @@ If `CAESIUM_AUTH_OIDC_REDIRECT_URL` is unset, Caesium derives
 Each OIDC login stores the identity provider's refresh token (when the IdP
 issues one) for that user, sealed with AES-256-GCM under a key derived from
 `CAESIUM_AUTH_KEY_HASH_SECRET`; no grant is stored when that secret is empty.
-LDAP and SAML logins store none. Nothing redeems the grant yet: the refresher is
-planned (E2), so group changes still apply at the next login.
+[Group refresh](#group-refresh) redeems it to pick up group changes during a
+session.
 
-**Caution (applies once group refresh, E2, lands):** a grant is bound to the
+**Caution:** a grant is bound to the
 client ID and issuer that minted it. After a client ID change the IdP is
 expected to answer `invalid_grant` for the old tokens, which ends the affected
 sessions. After an issuer change the old grants are not sent to the IdP at all;
@@ -250,8 +254,8 @@ working example of every step below.
 4. **Refresh tokens.** Keycloak issues a refresh token with every code-flow
    login by default (no `offline_access` scope needed), and Caesium stores it
    sealed (see [OIDC](#oidc)). Its lifetime is bounded by the realm's *SSO
-   Session Idle* and *SSO Session Max*. **Planned (E2):** once group refresh
-   redeems it during a session, those two settings bound how long group
+   Session Idle* and *SSO Session Max*. [Group refresh](#group-refresh)
+   redeems it during a session, so those two settings bound how long group
    changes are picked up before a re-login is required.
 5. **Issuer.** Set `CAESIUM_AUTH_OIDC_ISSUER_URL` to the realm URL,
    `https://kc.example.com/realms/<realm>` (no `/auth` prefix unless Keycloak
@@ -320,8 +324,11 @@ CAESIUM_AUTH_LDAP_DISPLAY_NAME_ATTRIBUTE=displayName
 ```
 
 Use `ldaps://` where possible. To use StartTLS on `ldap://`, set
-`CAESIUM_AUTH_LDAP_START_TLS=true`. TLS certificate verification is enabled by
-default through Go's system trust store.
+`CAESIUM_AUTH_LDAP_START_TLS=true`. TLS certificate verification is always on:
+by default against the system trust store, or, with
+`CAESIUM_AUTH_LDAP_CA_FILE` set to a PEM bundle, against exactly those
+certificate authorities (for a directory with an internal CA). A CA file that
+cannot be read or holds no certificate stops the server at startup.
 
 Group lookup is optional. If `CAESIUM_AUTH_LDAP_GROUP_BASE_DN` is set and
 `CAESIUM_AUTH_LDAP_GROUP_FILTER` is omitted, Caesium uses `(member={dn})`.
@@ -343,15 +350,24 @@ CAESIUM_AUTH_LDAP_DISPLAY_NAME_ATTRIBUTE=cn
 
 Keep the disabled-account clause
 `(!(userAccountControl:1.2.840.113556.1.4.803:=2))` in Active Directory user
-filters. Once LDAP group refresh lands (planned, E1b/E2), re-checking the login
-filter against the user's directory entry still cannot observe AD rejecting a
-disabled account's own bind, so the filter is what excludes disabled accounts.
+filters. Each LDAP login stores the user's DN, with the name the user typed,
+as its refresh grant, and [group refresh](#group-refresh) re-checks the login
+with the service account: the DN must still lie under
+`CAESIUM_AUTH_LDAP_USER_BASE_DN` and the user filter, rendered with the typed
+name, must still match the entry; the groups are then searched with the
+entry's current username attribute. An entry that is gone, outside the base,
+or no longer matched by the filter ends the user's sessions and user-bound
+keys (only while the service account still sees the user base, so a
+directory that briefly shows nothing revokes nobody). A refresh cannot observe
+AD refusing a disabled account's own bind, so the filter is what excludes
+disabled accounts.
 
 LDAP attribute and timeout reference:
 
 | Env | Default | Operator note |
 | --- | --- | --- |
 | `CAESIUM_AUTH_LDAP_TIMEOUT` | `10s` | Dial, bind, and search timeout; keep below your load balancer timeout. |
+| `CAESIUM_AUTH_LDAP_CA_FILE` | unset | PEM bundle of the CAs that verify the directory's certificate; unset uses the system trust store. |
 | `CAESIUM_AUTH_LDAP_USERNAME_ATTRIBUTE` | `uid` | Attribute whose value fills `{username}` in the group filter, and the display-name fallback. |
 | `CAESIUM_AUTH_LDAP_EMAIL_ATTRIBUTE` | `mail` | Attribute used for the Caesium user email. |
 | `CAESIUM_AUTH_LDAP_DISPLAY_NAME_ATTRIBUTE` | `displayName` | Attribute used for the display name. |
@@ -378,8 +394,9 @@ role resolution against the seeded directory.
 
 The same package also includes a self-contained OpenLDAP fixture. It starts an
 `osixia/openldap:1.5.0` container seeded from
-`internal/auth/ldap/testdata/openldap/bootstrap.ldif`, skips cleanly when Docker
-is unavailable, and can be run with Docker socket access:
+`internal/auth/ldap/testdata/openldap/bootstrap.ldif` (login, refresh, the
+login-filter and user-base re-checks, a deleted entry), skips cleanly when
+Docker is unavailable, and can be run with Docker socket access:
 
 ```sh
 docker run --rm --platform linux/arm64 \
@@ -388,6 +405,11 @@ docker run --rm --platform linux/arm64 \
   -w /bld/caesium caesiumcloud/caesium-builder:latest-full \
   sh -c 'mkdir -p ui/dist && touch ui/dist/index.html && go test ./internal/auth/ldap -tags=integration -run TestProviderAuthenticateOpenLDAPFixture -v'
 ```
+
+The api-key integration lanes also run an OpenLDAP directory
+(`scripts/ldap-fixture.sh`, seeded from `test/testdata/ldap/bootstrap.ldif`,
+verified over LDAPS through `CAESIUM_AUTH_LDAP_CA_FILE` with a throwaway CA)
+and sign users in through the real login route; see the [CI runbook](ci.md).
 
 ## Policy file
 
@@ -1351,9 +1373,9 @@ stores.
 It stores no role, namespaces or job list. On every request the server loads
 its user and resolves the user's grants from the policy exactly as for that
 user's browser session, so a policy reload or a change of the user's stored
-groups applies on the next request. Until E2 refreshes groups during a
-session, those are the groups stored at the user's last login, and only a
-verified email matches a `users:` binding. The principal is the user:
+groups applies on the next request. The stored groups are kept fresh by
+[group refresh](#group-refresh) through the key's own requests, exactly as
+for a session, and only a verified email matches a `users:` binding. The principal is the user:
 `GET /auth/whoami` reports `kind` `user`, the user's email as `subject` and the
 user id as `stable_id`, and audit rows name the user's email as the actor. A
 user whose groups match no binding is refused (`403`) on every route but the
@@ -1461,19 +1483,63 @@ then exits non-zero).
 
 Caesium stores each user's groups at login and resolves grants again on every
 request from those stored groups, so a policy or mapping change applies to
-existing sessions without a new login. A user's own group changes still take
-effect at their next login. See [Resolution](#resolution) for how groups become
-grants.
+existing sessions without a new login. A user's own group changes at the IdP
+reach the stored groups through [group refresh](#group-refresh). See
+[Resolution](#resolution) for how groups become grants.
 
 The session cookie, idle and absolute lifetimes, CSRF, logout and trusted-proxy
 settings are described under [Common settings](#common-settings) and [Browser
 auth endpoint contract](#browser-auth-endpoint-contract).
 
-Each OIDC login stores the IdP refresh token as a sealed refresh grant (see
-[OIDC](#oidc)); LDAP and SAML logins store none, and nothing redeems the grant
-yet. **Planned (E2):** refreshing OIDC users' groups during a session (and
-behind a user-bound key), so group changes apply without a new login. **Planned (E1b):** the same for LDAP, with a
-live LDAP coverage journey.
+#### Group refresh
+
+Each OIDC login stores the IdP refresh token, and each LDAP login the user's
+DN, as one sealed refresh grant per user (see [OIDC](#oidc) and
+[LDAP](#ldap)); SAML stores none. Sessions and [user-bound
+keys](#user-bound-keys) carry no grant of their own: they refresh through
+their user, so a browser user and a CLI-only user are refreshed alike, and a
+rotated OIDC refresh token is shared by both.
+
+- **Due** (groups older than `CAESIUM_AUTH_GROUP_REFRESH_INTERVAL`, `15m`):
+  the request proceeds with the stored groups and a refresh is queued to a
+  small background pool, one at a time per user. Across servers a short lease
+  on the user row makes sure only one redeems the grant. A change of groups is
+  audited as `auth.groups_refreshed` (actor `system:group-refresh`, metadata
+  `provider`, `added`, `removed`, `trigger`). A failure the IdP did not
+  confirm (unreachable, timeout) keeps everything and is retried on a later
+  request, at most every 30 seconds per user.
+- **Stale** (older than `CAESIUM_AUTH_GROUP_MAX_STALENESS`, `24h`, whatever
+  the reason: repeated IdP failures, no grant, a server that never got to
+  refresh): the next request waits for one refresh, bounded by
+  `CAESIUM_AUTH_GROUP_REFRESH_TIMEOUT` (`5s`). If it succeeds the request is
+  admitted with the refreshed groups. If it fails, or there is nothing to
+  refresh from (SAML; a grant the hash secret no longer opens), the user is
+  marked refused: every session and user-bound key of the user answers
+  `401` with body `{"reason":"stale_groups",...}` on every server, even if
+  the IdP recovers, until the user signs in again (in the Console, or with
+  `caesium login`).
+- **Refused by the IdP** (OIDC `invalid_grant`; an LDAP entry that is gone or
+  no longer admitted by the login filter): the grant is cleared and all the
+  user's sessions and user-bound keys are revoked in one transaction, audited
+  as `auth.sessions_revoked` with reason `idp_refresh_denied`. An OIDC refusal
+  of a grant that may already have been redeemed (the outcome of an earlier
+  attempt was lost) only clears the grant; the staleness bound then asks for
+  a new sign-in.
+
+A login always replaces the grant and confirms the groups, so it lifts a
+`stale_groups` refusal; a refresh that was in flight is discarded rather than
+applied over the newer grant. `caesium_auth_group_refresh_total{provider,outcome}`
+counts attempts (`provider` `oidc`, `ldap` or `other`; `outcome` `success`,
+`groups_unknown`, `transient`, `uncertain`, `definitive`, `discarded_cas`,
+`unusable_grant`), and `caesium_auth_failures_total{reason="stale_groups"}`
+counts the refusals. A logout with a refused session cookie is answered `401`
+too; the cookie is useless and is replaced at the next sign-in.
+
+After an upgrade, a user whose groups were last confirmed more than 24 hours
+ago (a long-lived user-bound key) is refreshed on its next request when it has
+a grant, and must sign in again otherwise. SAML sessions end after
+`CAESIUM_AUTH_SAML_SESSION_ABSOLUTE_TTL` (`8h`), since nothing can refresh
+their groups.
 
 ### User administration
 

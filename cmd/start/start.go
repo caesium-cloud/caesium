@@ -720,8 +720,10 @@ func start(cmd *cobra.Command, args []string) error {
 	}
 
 	// --- Authentication & Authorization ---
-	authSvc, auditor, limiter, sessions, sso := initAuth(ctx, vars, runAsync)
+	// Providers first: the group refresher (identity-and-access E2) redeems
+	// grants through those of them that can.
 	ssoProviders := initSSOProviders(ctx, vars)
+	authSvc, auditor, limiter, sessions, sso := initAuth(ctx, vars, runAsync, groupRefreshers(ssoProviders))
 
 	log.Info(
 		"execution configuration",
@@ -1180,6 +1182,18 @@ func initSSOProviders(ctx context.Context, vars env.Environment) api.SSOProvider
 	return providers
 }
 
+// groupRefreshers returns the configured providers that can refresh a
+// user's groups from a stored grant (OIDC, LDAP; SAML cannot).
+func groupRefreshers(providers api.SSOProviders) []auth.GroupRefresher {
+	var out []auth.GroupRefresher
+	for _, p := range []any{providers.OIDC, providers.SAML, providers.LDAP} {
+		if r, ok := p.(auth.GroupRefresher); ok && r != nil {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
 func initSAMLProvider(ctx context.Context, vars env.Environment) auth.RedirectAuthenticator {
 	cfg := authsaml.ConfigFromEnv(vars)
 	cfg.ReplayCache = authsaml.NewReplayStore(db.Connection())
@@ -1243,7 +1257,7 @@ func newPolicySource(ctx context.Context, vars env.Environment, knownGroups poli
 
 // initAuth sets up authentication services based on CAESIUM_AUTH_MODE.
 // Returns nil services when auth is disabled so callers can pass them through safely.
-func initAuth(ctx context.Context, vars env.Environment, runAsync func(func())) (*auth.Service, *auth.AuditLogger, *auth.RateLimiter, *auth.SessionStore, *auth.SSOService) {
+func initAuth(ctx context.Context, vars env.Environment, runAsync func(func()), refreshers []auth.GroupRefresher) (*auth.Service, *auth.AuditLogger, *auth.RateLimiter, *auth.SessionStore, *auth.SSOService) {
 	conn := db.Connection()
 	policySource, policyHolder, err := newPolicySource(ctx, vars, auth.KnownUserGroups(conn))
 	if err != nil {
@@ -1255,13 +1269,48 @@ func initAuth(ctx context.Context, vars env.Environment, runAsync func(func())) 
 	// Namespace settings (declared namespaces, secret rules, quotas) are read
 	// process-wide, in every auth mode.
 	policy.SetProcessHolder(policyHolder)
-	authSvc := auth.NewService(conn,
+	auditor := auth.NewAuditLogger(conn)
+	serviceOpts := []auth.ServiceOption{
 		auth.WithKeyHashSecret(vars.AuthKeyHashSecret),
 		auth.WithPolicySource(policySource),
 		auth.WithPolicyHolder(policyHolder),
 		auth.WithUserKeyTTL(vars.AuthCLIKeyTTL),
-	)
-	auditor := auth.NewAuditLogger(conn)
+	}
+	sessionOpts := []auth.SessionStoreOption{
+		auth.WithSessionHashSecret(vars.AuthKeyHashSecret),
+		auth.WithSessionTTLs(vars.AuthSessionIdleTTL, vars.AuthSessionAbsoluteTTL),
+		auth.WithSAMLSessionAbsoluteTTL(vars.AuthSAMLSessionAbsoluteTTL),
+	}
+	// Group refresh and the maximum staleness (identity-and-access §11.1)
+	// apply to every session and user-bound key wherever they can exist,
+	// with or without a provider able to refresh: a user nobody can refresh
+	// reaches the staleness bound and must sign in again. Plain API keys
+	// never reach it.
+	if vars.AuthMode == "api-key" {
+		freshness, err := auth.NewGroupRefreshService(ctx, conn, auth.GroupRefreshConfig{
+			Interval:     vars.AuthGroupRefreshInterval,
+			MaxStaleness: vars.AuthGroupMaxStaleness,
+			Timeout:      vars.AuthGroupRefreshTimeout,
+			Node:         vars.NodeAddress,
+		},
+			auth.WithGroupRefreshGrantSecret(vars.AuthKeyHashSecret),
+			auth.WithGroupRefreshAuditor(auditor),
+			auth.WithGroupRefreshers(refreshers...),
+		)
+		if err != nil {
+			log.Fatal("invalid group refresh configuration", "error", err)
+		}
+		// Shutdown waits for in-flight refreshes (each bounded by the
+		// timeout) before the catalog closes, so an outcome a refresh
+		// already obtained (a rotated grant) is recorded.
+		runAsync(func() {
+			<-ctx.Done()
+			freshness.Wait()
+		})
+		serviceOpts = append(serviceOpts, auth.WithGroupFreshness(freshness))
+		sessionOpts = append(sessionOpts, auth.WithSessionGroupFreshness(freshness))
+	}
+	authSvc := auth.NewService(conn, serviceOpts...)
 	limiter := auth.NewRateLimiter(vars.AuthRateLimitPerMinute, time.Minute)
 	var sessions *auth.SessionStore
 	var sso *auth.SSOService
@@ -1337,10 +1386,7 @@ func initAuth(ctx context.Context, vars env.Environment, runAsync func(func())) 
 			}
 		}
 
-		sessions = auth.NewSessionStore(conn,
-			auth.WithSessionHashSecret(vars.AuthKeyHashSecret),
-			auth.WithSessionTTLs(vars.AuthSessionIdleTTL, vars.AuthSessionAbsoluteTTL),
-		)
+		sessions = auth.NewSessionStore(conn, sessionOpts...)
 		if vars.SSOEnabled() {
 			sso = auth.NewSSOService(auth.NewUserStore(conn, auth.WithRefreshGrantSecret(vars.AuthKeyHashSecret)), sessions, policySource, auth.WithSSOAuditLogger(auditor))
 			runAsync(func() {

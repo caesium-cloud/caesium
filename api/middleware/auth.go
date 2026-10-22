@@ -107,6 +107,9 @@ func Auth(d AuthDeps) echo.MiddlewareFunc {
 					if recordCredentialFailure(c, d, ip, tokenPrefix(token), reason) {
 						return rateLimitError(c, d.Limiter, ip)
 					}
+					if errors.Is(err, auth.ErrStaleGroups) {
+						return staleGroupsError(c)
+					}
 					return echo.NewHTTPError(http.StatusUnauthorized, "invalid or expired api key")
 				}
 
@@ -123,6 +126,9 @@ func Auth(d AuthDeps) echo.MiddlewareFunc {
 					if verr != nil {
 						if recordCredentialFailure(c, d, ip, tokenPrefix(cookie.Value), classifySessionAuthError(verr)) {
 							return rateLimitError(c, d.Limiter, ip)
+						}
+						if errors.Is(verr, auth.ErrStaleGroups) {
+							return staleGroupsError(c)
 						}
 						return echo.NewHTTPError(http.StatusUnauthorized, "invalid or expired session")
 					}
@@ -282,6 +288,8 @@ func classifyAuthError(err error) string {
 		// A user-bound key whose user is disabled (E4). The client gets
 		// the same 401 as for a revoked key; only the label differs.
 		return "user_disabled"
+	case auth.ErrStaleGroups:
+		return staleGroupsReason
 	default:
 		log.Error("unexpected auth validation error", "error", err)
 		return "error"
@@ -298,10 +306,27 @@ func classifySessionAuthError(err error) string {
 		return "session_revoked"
 	case auth.ErrUserDisabled:
 		return "user_disabled"
+	case auth.ErrStaleGroups:
+		return staleGroupsReason
 	default:
 		log.Error("unexpected session validation error", "error", err)
 		return "session_error"
 	}
+}
+
+// staleGroupsReason is the 401 reason (and metric and audit label) for a
+// user whose groups are past CAESIUM_AUTH_GROUP_MAX_STALENESS and could not
+// be refreshed (identity-and-access §11.1): every credential of the user is
+// refused until it signs in again.
+const staleGroupsReason = "stale_groups"
+
+// staleGroupsError answers a stale_groups refusal. Unlike the other 401s it
+// says why, so the Console and the CLI can ask for a new sign-in.
+func staleGroupsError(c *echo.Context) error {
+	return c.JSON(http.StatusUnauthorized, map[string]string{
+		"message": "group membership could not be confirmed; sign in again",
+		"reason":  staleGroupsReason,
+	})
 }
 
 func recordCredentialFailure(c *echo.Context, d AuthDeps, ip, actor, reason string) bool {

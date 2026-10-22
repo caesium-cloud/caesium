@@ -24,6 +24,12 @@ keys so the database no longer contains them.
 For the auth management CLI, supply credentials through `CAESIUM_API_KEY`. The
 `--api-key` flag works but is visible in process listings.
 
+A refused credential gets `401` with a plain message, except one refusal that
+explains itself: a session or user-bound key whose user's SSO groups are past
+`CAESIUM_AUTH_GROUP_MAX_STALENESS` and could not be refreshed answers
+`401 {"message": "...", "reason": "stale_groups"}` until the user signs in
+again (see [group refresh](identity-and-access.md#group-refresh)).
+
 | Endpoint | Purpose |
 | --- | --- |
 | `GET /auth/status` | Report the API-key and SSO methods available, so the console knows whether to show a login. |

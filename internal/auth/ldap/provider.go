@@ -120,24 +120,69 @@ func (p *Provider) Authenticate(ctx context.Context, username, password string) 
 		Email:       email,
 		DisplayName: displayName,
 		Groups:      groups,
+		// The user DN is the LDAP refresh grant (§11.1): groups are
+		// re-queried by DN with the service account. The typed username is
+		// kept with it so a refresh re-applies this login's user filter.
+		Refresh: &authpkg.RefreshGrant{
+			Provider: ProviderName,
+			Issuer:   ProviderName,
+			Handle:   authpkg.NewRefreshHandle(userEntry.DN),
+			Login:    username,
+		},
 	}, nil
 }
 
+// defaultDial connects within ctx: the TCP dial, the LDAPS handshake and a
+// StartTLS exchange all end when ctx does.
 func defaultDial(ctx context.Context, cfg Config) (Conn, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	dialer := &net.Dialer{Timeout: cfg.Timeout}
-	opts := []gldap.DialOpt{gldap.DialWithDialer(dialer)}
-	if strings.HasPrefix(strings.ToLower(strings.TrimSpace(cfg.URL)), "ldaps://") {
-		opts = append(opts, gldap.DialWithTLSConfig(cfg.tlsConfig()))
-	}
-	conn, err := gldap.DialURL(cfg.URL, opts...)
+	u, err := parseLDAPURL(cfg.URL)
 	if err != nil {
 		return nil, err
 	}
+	isTLS := u.Scheme == "ldaps"
+	port := u.Port()
+	if port == "" {
+		port = gldap.DefaultLdapPort
+		if isTLS {
+			port = gldap.DefaultLdapsPort
+		}
+	}
+	addr := net.JoinHostPort(u.Hostname(), port)
+	dialer := &net.Dialer{Timeout: cfg.Timeout}
+	var netConn net.Conn
+	if isTLS {
+		netConn, err = (&tls.Dialer{NetDialer: dialer, Config: cfg.tlsConfig()}).DialContext(ctx, "tcp", addr)
+	} else {
+		netConn, err = dialer.DialContext(ctx, "tcp", addr)
+	}
+	if err != nil {
+		return nil, gldap.NewError(gldap.ErrorNetwork, err)
+	}
+	conn := gldap.NewConn(netConn, isTLS)
+	conn.Start()
 	if cfg.StartTLS {
-		if err := conn.StartTLS(cfg.tlsConfig()); err != nil {
+		// StartTLS swaps the Conn's transport without a lock, and Conn.Close
+		// reads it, so cancellation must not go through Conn.Close while the
+		// upgrade runs. Closing the raw socket is safe at any moment and
+		// unblocks both the extended operation and the TLS handshake.
+		cancelled := make(chan struct{})
+		stop := context.AfterFunc(ctx, func() {
+			_ = netConn.Close()
+			close(cancelled)
+		})
+		err := conn.StartTLS(cfg.tlsConfig())
+		if !stop() {
+			// The callback has started: wait for it, then fail even if the
+			// upgrade won the race, because the socket is gone.
+			<-cancelled
+			if err == nil {
+				err = ctx.Err()
+			}
+		}
+		if err != nil {
 			_ = conn.Close()
 			return nil, fmt.Errorf("start ldap TLS: %w", err)
 		}

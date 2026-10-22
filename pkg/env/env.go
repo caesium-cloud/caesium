@@ -115,6 +115,31 @@ func validate() error {
 		return err
 	}
 
+	if err := validateAuthGroupRefresh(); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// validateAuthGroupRefresh checks the group refresh settings
+// (identity-and-access §11.1). The maximum staleness is unconditional, so
+// none of them can be turned off: each is positive, a refresh ends well
+// before the next one is due, and the bound is never shorter than the
+// interval.
+func validateAuthGroupRefresh() error {
+	switch {
+	case variables.AuthGroupRefreshInterval <= 0:
+		return errors.New("CAESIUM_AUTH_GROUP_REFRESH_INTERVAL must be greater than 0")
+	case variables.AuthGroupMaxStaleness < variables.AuthGroupRefreshInterval:
+		return errors.New("CAESIUM_AUTH_GROUP_MAX_STALENESS must be at least CAESIUM_AUTH_GROUP_REFRESH_INTERVAL")
+	case variables.AuthGroupRefreshTimeout <= 0:
+		return errors.New("CAESIUM_AUTH_GROUP_REFRESH_TIMEOUT must be greater than 0")
+	case variables.AuthGroupRefreshTimeout >= variables.AuthGroupRefreshInterval:
+		return errors.New("CAESIUM_AUTH_GROUP_REFRESH_TIMEOUT must be shorter than CAESIUM_AUTH_GROUP_REFRESH_INTERVAL")
+	case variables.AuthSAMLSessionAbsoluteTTL <= 0:
+		return errors.New("CAESIUM_AUTH_SAML_SESSION_ABSOLUTE_TTL must be greater than 0")
+	}
 	return nil
 }
 
@@ -401,7 +426,11 @@ type Environment struct {
 	AuthSessionIdleTTL           time.Duration `envconfig:"AUTH_SESSION_IDLE_TTL" default:"8h"`
 	AuthSessionAbsoluteTTL       time.Duration `envconfig:"AUTH_SESSION_ABSOLUTE_TTL" default:"24h"`
 	AuthSessionCookieName        string        `envconfig:"AUTH_SESSION_COOKIE_NAME" default:"caesium_session"`
-	AuthCLIKeyTTL                time.Duration `envconfig:"AUTH_CLI_KEY_TTL" default:"12h"` // user-bound (caesium login) key lifetime; at most 7d
+	AuthCLIKeyTTL                time.Duration `envconfig:"AUTH_CLI_KEY_TTL" default:"12h"`              // user-bound (caesium login) key lifetime; at most 7d
+	AuthGroupRefreshInterval     time.Duration `envconfig:"AUTH_GROUP_REFRESH_INTERVAL" default:"15m"`   // SSO group refresh: groups older than this are refreshed in the background
+	AuthGroupMaxStaleness        time.Duration `envconfig:"AUTH_GROUP_MAX_STALENESS" default:"24h"`      // past this, one synchronous refresh, else stale_groups until re-login
+	AuthGroupRefreshTimeout      time.Duration `envconfig:"AUTH_GROUP_REFRESH_TIMEOUT" default:"5s"`     // bound of one group refresh
+	AuthSAMLSessionAbsoluteTTL   time.Duration `envconfig:"AUTH_SAML_SESSION_ABSOLUTE_TTL" default:"8h"` // absolute lifetime of SAML sessions (SAML has no refresh grant)
 	AuthRoleMapping              string        `envconfig:"AUTH_ROLE_MAPPING" default:""`
 	AuthDefaultRole              string        `envconfig:"AUTH_DEFAULT_ROLE" default:""`
 	AuthPolicyFile               string        `envconfig:"AUTH_POLICY_FILE" default:""`               // access policy file; unset keeps the role-mapping translation
@@ -426,6 +455,7 @@ type Environment struct {
 	AuthLDAPEnabled              bool          `envconfig:"AUTH_LDAP_ENABLED" default:"false"`
 	AuthLDAPURL                  string        `envconfig:"AUTH_LDAP_URL" default:""`
 	AuthLDAPStartTLS             bool          `envconfig:"AUTH_LDAP_START_TLS" default:"false"`
+	AuthLDAPCAFile               string        `envconfig:"AUTH_LDAP_CA_FILE" default:""` // PEM CA bundle that verifies the directory; empty = system roots
 	AuthLDAPBindDN               string        `envconfig:"AUTH_LDAP_BIND_DN" default:""`
 	AuthLDAPBindPassword         string        `envconfig:"AUTH_LDAP_BIND_PASSWORD" default:""`
 	AuthLDAPUserBaseDN           string        `envconfig:"AUTH_LDAP_USER_BASE_DN" default:""`

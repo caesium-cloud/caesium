@@ -70,7 +70,7 @@ func TestRefreshGrantRoundTrip(t *testing.T) {
 	userID := uuid.New()
 	for _, grant := range []RefreshGrant{
 		katGrant,
-		{Provider: "oidc", Issuer: "https://idp.example.com/realms/a(b)", Handle: NewRefreshHandle(`rt/+=,"quoted"\u0000{}`)},
+		{Provider: "ldap", Issuer: "ldap", Handle: NewRefreshHandle("uid=al(ice),ou=People,dc=example,dc=com"), Login: "alice@example.com"},
 		{Provider: "oidc", Issuer: "https://idp", Handle: NewRefreshHandle(strings.Repeat("jwt.", 1000))},
 	} {
 		sealed, err := c.seal(userID, grant)
@@ -82,6 +82,7 @@ func TestRefreshGrantRoundTrip(t *testing.T) {
 		require.Equal(t, grant.Provider, got.Provider)
 		require.Equal(t, grant.Issuer, got.Issuer)
 		require.True(t, grant.Handle.Equal(got.Handle))
+		require.Equal(t, grant.Login, got.Login)
 	}
 }
 
@@ -248,9 +249,9 @@ func TestRefreshErrorClassification(t *testing.T) {
 	require.Equal(t, RefreshUncertain, ClassifyRefreshError(&RefreshError{}), "a kindless error is uncertain")
 	transient := NewRefreshError(RefreshTransient, "not_sent", errors.New("dial"))
 	require.Equal(t, RefreshTransient, ClassifyRefreshError(fmt.Errorf("wrapped: %w", transient)))
-	denial := NewRefreshError(RefreshDefinitive, "invalid_grant", nil)
+	denial := NewRefreshDenial(DenialOfSubject, "user_not_found")
 	require.Equal(t, RefreshDefinitive, ClassifyRefreshError(denial))
-	require.Equal(t, "group refresh definitive: invalid_grant", denial.Error())
+	require.Equal(t, DenialOfSubject, denial.Scope)
 	require.Equal(t, "group refresh transient: not_sent: dial", transient.Error())
 	require.ErrorContains(t, transient, "dial")
 	for kind, label := range map[RefreshErrorKind]string{

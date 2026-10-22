@@ -2682,6 +2682,26 @@ bindings. Lanes without a
 policy file (podman, kind/helm, coverage journeys) accept every valid
 namespace, so the B1 namespace scenarios run there unchanged.
 
+Both api-key auth lanes also run an OpenLDAP directory for LDAP sign-in and
+group refresh (identity-and-access E1b/E2), through `scripts/ldap-fixture.sh`:
+`tls` writes a throwaway CA and directory certificate (host `openssl`), `run`
+starts the pinned `osixia/openldap` image in the Caesium server's network
+namespace seeded from `test/testdata/ldap/bootstrap.ldif`, and `wait` waits
+for an LDAPS answer verified with that CA. The server trusts the CA through
+`CAESIUM_AUTH_LDAP_CA_FILE` (verification is never relaxed) and the runner gets
+`CAESIUM_IT_LDAP_URL` / `CAESIUM_IT_LDAP_CA_FILE`; the `TestAuthLDAP…` and
+`TestAuthStaleGroups…` scenarios fail, not skip, on an auth lane without
+them. On the agent-auth lane `integration-test-agent` generates the CA, starts
+`integration-up-agent` with `CAESIUM_AGENT_LDAP_TLS_DIR` (which adds the
+`CAESIUM_AUTH_LDAP_*` server env; the connectors lane leaves it unset) and
+starts the directory once the server is ready; `integration-down-agent`
+removes it. The shared policy fixture binds the two fixture groups per
+namespace. The coverage journey's auth lane starts the directory as an owned,
+labelled container and maps the groups with `CAESIUM_AUTH_ROLE_MAPPING`; the
+collector never pulls, so the `coverage-ratchets` job pulls the digest pinned
+in `scripts/ldap-fixture.sh` and passes it by ID as
+`CAESIUM_COVERAGE_LDAP_IMAGE`.
+
 Lanes that set server env inline and do **not** go through any
 `integration-up*` recipe:
 

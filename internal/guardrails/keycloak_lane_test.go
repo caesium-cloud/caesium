@@ -109,6 +109,9 @@ func TestKeycloakLanePolicyMatchesTheSharedFixture(t *testing.T) {
 		if slices.Contains(groups, "iaa-reload-viewers") {
 			continue // the api-key lane's reload scenarios' group, not a realm group
 		}
+		if slices.ContainsFunc(groups, func(g string) bool { return strings.HasPrefix(g, "iaa-ldap-") }) {
+			continue // the api-key lane's OpenLDAP fixture groups (E1b), not realm groups
+		}
 		if !slices.ContainsFunc(lane.Bindings, func(b policy.Binding) bool { return reflect.DeepEqual(b, binding) }) {
 			t.Errorf("the Keycloak lane policy is missing two-namespaces.yaml's binding %+v", binding)
 		}

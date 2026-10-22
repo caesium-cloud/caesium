@@ -2,9 +2,11 @@ package ldap
 
 import (
 	"crypto/tls"
+	"crypto/x509"
 	"fmt"
 	"net"
 	"net/url"
+	"os"
 	"strings"
 	"time"
 	"unicode"
@@ -29,8 +31,12 @@ const (
 type Config struct {
 	Enabled bool
 
-	URL       string
-	StartTLS  bool
+	URL      string
+	StartTLS bool
+	// CAFile, when set, is a PEM bundle of the certificate authorities that
+	// verify the directory's TLS certificate, instead of the system roots.
+	// Verification itself is never disabled.
+	CAFile    string
 	TLSConfig *tls.Config
 	Timeout   time.Duration
 
@@ -57,6 +63,7 @@ func ConfigFromEnv(vars env.Environment) Config {
 		Enabled:              vars.AuthLDAPEnabled,
 		URL:                  vars.AuthLDAPURL,
 		StartTLS:             vars.AuthLDAPStartTLS,
+		CAFile:               vars.AuthLDAPCAFile,
 		Timeout:              vars.AuthLDAPTimeout,
 		BindDN:               vars.AuthLDAPBindDN,
 		BindPassword:         vars.AuthLDAPBindPassword,
@@ -125,6 +132,19 @@ func (c Config) normalize() (Config, error) {
 		return c, errConfig("ldap URL must use ldap or ldaps")
 	}
 
+	if c.CAFile = strings.TrimSpace(c.CAFile); c.CAFile != "" {
+		pool, err := loadCAFile(c.CAFile)
+		if err != nil {
+			return c, err
+		}
+		tlsCfg := &tls.Config{MinVersion: tls.VersionTLS12}
+		if c.TLSConfig != nil {
+			tlsCfg = c.TLSConfig.Clone()
+		}
+		tlsCfg.RootCAs = pool
+		c.TLSConfig = tlsCfg
+	}
+
 	if c.BindDN == "" {
 		return c, errConfig("ldap bind DN is required")
 	}
@@ -159,6 +179,21 @@ func (c Config) normalize() (Config, error) {
 	}
 
 	return c, nil
+}
+
+// loadCAFile reads a PEM bundle into a certificate pool. A file that cannot
+// be read or holds no certificate is a configuration error, never an empty
+// pool (which would trust nothing and fail every login obscurely).
+func loadCAFile(path string) (*x509.CertPool, error) {
+	pemBytes, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("%w: read ldap CA file: %v", ErrInvalidConfig, err)
+	}
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM(pemBytes) {
+		return nil, errConfig("ldap CA file holds no PEM certificate")
+	}
+	return pool, nil
 }
 
 func parseLDAPURL(raw string) (*url.URL, error) {

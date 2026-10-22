@@ -526,7 +526,7 @@ func TestUserLifecycleRevokesUserBoundKeys(t *testing.T) {
 		k := f.mint(t, user)
 		row := f.row(t, user.ID)
 		require.True(t, f.claim(t, user.ID, row.RefreshGrantVersion, "node-a/1"))
-		result, err := f.users.CompleteRefreshDefinitive(t.Context(), user.ID, row.RefreshGrantVersion, "node-a/1", f.clock.Now())
+		result, err := f.users.CompleteRefreshDefinitive(t.Context(), user.ID, row.RefreshGrantVersion, "node-a/1", DenialOfGrant, f.clock.Now())
 		require.NoError(t, err)
 		require.Equal(t, DefinitiveResult{Outcome: DefinitiveRevoked, KeysRevoked: 1}, result)
 		require.NotNil(t, f.keyRow(t, k.Key.ID).RevokedAt)
