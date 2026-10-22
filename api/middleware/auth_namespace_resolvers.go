@@ -72,9 +72,9 @@ var namespaceResolvers = map[string]namespaceResolver{
 	"GET /v1/jobs/:id/queue":            resolveJobByID,
 	"GET /v1/jobs/:id/runs":             resolveJobByID,
 	"GET /v1/jobs/:id/runs/diff":        resolveJobRunPair,
-	"GET /v1/jobs/:id/blame":            resolveJobByID, // pending B7
-	"GET /v1/jobs/:id/topology":         resolveJobByID, // pending B7
-	"GET /v1/jobs/:id/topology/history": resolveJobByID, // pending B7
+	"GET /v1/jobs/:id/blame":            resolveJobByID,
+	"GET /v1/jobs/:id/topology":         resolveJobByID,
+	"GET /v1/jobs/:id/topology/history": resolveJobByID,
 	"GET /v1/jobs/:id/cache":            resolveJobByID,
 	"GET /v1/jobs/:id/backfills":        resolveJobByID,
 	"DELETE /v1/jobs/:id":               resolveJobByID,
@@ -133,11 +133,11 @@ var namespaceResolvers = map[string]namespaceResolver{
 	"GET /v1/incidents/:id":                        resolveIncident,
 	"POST /v1/incidents/:id/approvals/:id/approve": resolveIncident,
 	"POST /v1/incidents/:id/approvals/:id/reject":  resolveIncident,
-	"GET /v1/agent/incidents/:id/bundle":           resolveIncident, // pending A8
-	"GET /v1/agent/incidents/:id/context/*":        resolveIncident, // pending A8
-	"POST /v1/agent/incidents/:id/actions":         resolveIncident, // pending A8
-	"POST /v1/agent/incidents/:id/notes":           resolveIncident, // pending A8
-	"POST /v1/agent/incidents/:id/mcp":             resolveIncident, // pending A8
+	"GET /v1/agent/incidents/:id/bundle":           resolveIncident,
+	"GET /v1/agent/incidents/:id/context/*":        resolveIncident,
+	"POST /v1/agent/incidents/:id/actions":         resolveIncident,
+	"POST /v1/agent/incidents/:id/notes":           resolveIncident,
+	"POST /v1/agent/incidents/:id/mcp":             resolveIncident,
 
 	// Shared objects: the object's namespace; "*" needs the role at "*" to
 	// write and viewer anywhere to read. Creates use the body namespace.
@@ -157,9 +157,9 @@ var namespaceResolvers = map[string]namespaceResolver{
 	// Datasets: the declared producers' namespaces — any of them for a read,
 	// every one for a write. No declared producer ⇒ cluster-only (a consumer
 	// or an external-source declaration owns nothing).
-	"GET /v1/datasets/:id/:id":             resolveDatasetAny, // pending B6
-	"GET /v1/datasets/:id/:id/derivations": resolveDatasetAny, // pending B6
-	"GET /v1/datasets/:id/:id/metrics":     resolveDatasetAny, // pending B6
+	"GET /v1/datasets/:id/:id":             resolveDatasetAny,
+	"GET /v1/datasets/:id/:id/derivations": resolveDatasetAny,
+	"GET /v1/datasets/:id/:id/metrics":     resolveDatasetAny,
 	"POST /v1/datasets/:id/:id/advance":    resolveDatasetEvery,
 	"POST /v1/datasets/holds/:id/release":  resolveDatasetHold,
 

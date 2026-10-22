@@ -520,6 +520,8 @@ func start(cmd *cobra.Command, args []string) error {
 		// created, so a completion is only ever credited with the view the run
 		// actually started from.
 		run.SetStartParamsEnricher(freshness.EnrichStartParams)
+		// ...and bind that view to the namespace the run is admitted in.
+		run.SetStartParamsFence(freshness.FenceStartParams)
 		capturer := freshness.NewCapturer(bus, conn)
 		evaluator := freshness.NewEvaluator(freshness.Config{
 			DB:                    conn,

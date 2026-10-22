@@ -10,6 +10,7 @@ import (
 	"slices"
 	"sort"
 
+	"github.com/caesium-cloud/caesium/internal/authz"
 	"github.com/caesium-cloud/caesium/internal/jobdef"
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/google/uuid"
@@ -85,6 +86,18 @@ func (q *Query) Blame(ctx context.Context, jobID uuid.UUID, opts Options) (*Resu
 		return nil, fmt.Errorf("blame: list snapshots: %w", err)
 	}
 	if len(snaps) == 0 {
+		// A confined caller (identity-and-access B7) with no readable
+		// snapshot names a commit none of its snapshots carries, however
+		// many unreadable ones exist: not found, as for any other missing
+		// commit. An unrestricted caller of a job with no snapshots keeps the
+		// empty result.
+		if authz.Restricted(ctx) && (opts.FromCommit != "" || opts.ToCommit != "") {
+			commit := opts.FromCommit
+			if commit == "" {
+				commit = opts.ToCommit
+			}
+			return nil, fmt.Errorf("%w: commit %q", ErrCommitNotFound, commit)
+		}
 		return result, nil
 	}
 

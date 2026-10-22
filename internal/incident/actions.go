@@ -190,7 +190,7 @@ type ActionOps interface {
 	// the rendered diff as JSON so the action row and the escalation carry the
 	// exact change a human approved. Provenance routing is NOT its decision —
 	// the executor derives the route and calls it with dryRun accordingly.
-	ApplyJobdefPatch(ctx context.Context, jobID uuid.UUID, definition json.RawMessage, dryRun bool) (json.RawMessage, error)
+	ApplyJobdefPatch(ctx context.Context, jobID uuid.UUID, namespace string, definition json.RawMessage, dryRun bool) (json.RawMessage, error)
 }
 
 // errNoOps signals a dispatching action with no ActionOps configured.
@@ -231,6 +231,17 @@ func (e *Executor) verifyActionBoundary(ctx context.Context, inc *models.Inciden
 	return nil
 }
 
+// actionTargetsJob reports whether an action acts on the incident's job or
+// one of its runs (everything except the notification-only actions).
+func actionTargetsJob(actionType string) bool {
+	switch actionType {
+	case ActionTypeNotify, ActionTypeEscalate:
+		return false
+	default:
+		return true
+	}
+}
+
 // resolveRunID picks the params run id, falling back to the incident's
 // remediation target then its run.
 func resolveRunID(inc *models.Incident, params ActionParams) (uuid.UUID, error) {
@@ -262,6 +273,17 @@ func (e *Executor) dispatch(ctx context.Context, actionType string, inc *models.
 	// target must belong to the incident's job.
 	if err := e.verifyActionBoundary(ctx, inc, params); err != nil {
 		return nil, err
+	}
+	// The incident and its agent session are confined to the incident's
+	// namespace (identity-and-access A8): an action that touches the job or a
+	// run refuses a job that moved out since the incident opened, and a run
+	// recorded in another namespace. Notifying and escalating only reach the
+	// incident's own humans.
+	if actionTargetsJob(actionType) {
+		runID, _ := resolveRunID(inc, params)
+		if err := verifyNamespaceBoundary(ctx, e.store.DB(), inc, runID); err != nil {
+			return nil, err
+		}
 	}
 	switch actionType {
 	case ActionTypeRetryFromFailure:
@@ -530,6 +552,13 @@ var ErrPatchDefinitionRequired = errors.New("incident: apply_jobdef_patch requir
 // only the agent's own action surface is refused.
 var ErrPatchAltersRemediation = errors.New("incident: apply_jobdef_patch may not change metadata.remediation: an agent may not edit the policy that governs it")
 
+// ErrPatchMovesNamespace refuses a proposed definition whose metadata.namespace
+// is not the incident's namespace: a remediation acts inside its incident's
+// namespace and may not move the job to another one (identity-and-access A8).
+// ActionOps.ApplyJobdefPatch returns it on both provenance routes, before the
+// dry-run render, after the declared-namespace check.
+var ErrPatchMovesNamespace = errors.New("incident: apply_jobdef_patch may not change metadata.namespace: the job must stay in the incident's namespace")
+
 // dispatchApplyJobdefPatch is the provenance router for the tier-3 jobdef patch.
 //
 // It is enforced SERVER-SIDE and the agent cannot choose the route: for a job
@@ -560,6 +589,14 @@ func (e *Executor) dispatchApplyJobdefPatch(ctx context.Context, inc *models.Inc
 	if err := e.store.DB().WithContext(ctx).First(&job, "id = ?", jobID).Error; err != nil {
 		return nil, fmt.Errorf("incident: load job for jobdef patch: %w", err)
 	}
+	// The remediation compared (and quoted) below belongs to the job's owner.
+	// dispatch's namespace check ran on an earlier read, so a move committed
+	// since then is caught on THIS row before its remediation is inspected:
+	// another namespace's policy never reaches the incident's timeline
+	// (identity-and-access A8).
+	if models.NamespaceOrDefault(job.Namespace) != IncidentNamespace(inc) {
+		return nil, fmt.Errorf("%w: job %s", ErrNamespaceMoved, job.ID)
+	}
 
 	// Refuse a self-modifying patch BEFORE the provenance router, so neither the
 	// direct route nor the escalate route can carry a policy edit.
@@ -568,7 +605,7 @@ func (e *Executor) dispatchApplyJobdefPatch(ctx context.Context, inc *models.Inc
 	}
 
 	if gitSynced(&job) {
-		diff, err := e.ops.ApplyJobdefPatch(ctx, jobID, params.Definition, true)
+		diff, err := e.ops.ApplyJobdefPatch(ctx, jobID, IncidentNamespace(inc), params.Definition, true)
 		if err != nil {
 			return nil, err
 		}
@@ -594,7 +631,7 @@ func (e *Executor) dispatchApplyJobdefPatch(ctx context.Context, inc *models.Inc
 		return out, nil
 	}
 
-	diff, err := e.ops.ApplyJobdefPatch(ctx, jobID, params.Definition, false)
+	diff, err := e.ops.ApplyJobdefPatch(ctx, jobID, IncidentNamespace(inc), params.Definition, false)
 	if err != nil {
 		return nil, err
 	}

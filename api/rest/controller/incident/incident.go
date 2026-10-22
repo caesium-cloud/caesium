@@ -5,6 +5,7 @@ package incident
 
 import (
 	"errors"
+	authmw "github.com/caesium-cloud/caesium/api/middleware"
 	"net/http"
 	"strconv"
 	"strings"
@@ -71,7 +72,13 @@ func (ctrl *Controller) Get(c *echo.Context) error {
 		return echo.NewHTTPError(http.StatusBadRequest, "bad request").Wrap(err)
 	}
 
-	detail, err := svc.New(c.Request().Context()).Get(id)
+	// A namespace-confined reader gets the detail confined to what A8 lets
+	// the incident's namespace see; an unconfined one gets it as stored.
+	confined := false
+	if principal := authmw.GetPrincipal(c); principal != nil {
+		confined = principal.AllowedNamespaces() != nil
+	}
+	detail, err := svc.New(c.Request().Context()).GetForReader(id, confined)
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return echo.ErrNotFound

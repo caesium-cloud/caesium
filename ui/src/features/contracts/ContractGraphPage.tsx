@@ -14,7 +14,7 @@ import ReactFlow, {
   type NodeProps,
 } from "reactflow";
 import "reactflow/dist/style.css";
-import { Database, GitBranch, ShieldCheck } from "lucide-react";
+import { Database, EyeOff, GitBranch, ShieldCheck } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 
@@ -317,12 +317,15 @@ function LegendVerdict({ label, className }: { label: string; className: string 
 
 const ContractNode = memo(({ data }: NodeProps<ContractFlowNodeData>) => {
   const isJob = data.kind === "job";
+  const isExternal = data.kind === "external";
   const testId = contractNodeTestId(data);
   const className = cn(
     "relative block h-[80px] w-[260px] overflow-visible rounded-lg border px-3 py-2 text-left transition-colors",
     isJob
       ? "border-caesium-cyan/45 bg-node-surface"
-      : "border-gold/45 bg-node-surface",
+      : isExternal
+        ? "border-dashed border-text-4/50 bg-node-surface"
+        : "border-gold/45 bg-node-surface",
     isJob && data.jobId ? "cursor-pointer hover:border-caesium-cyan/80" : "",
   );
   const body = (
@@ -342,11 +345,13 @@ const ContractNode = memo(({ data }: NodeProps<ContractFlowNodeData>) => {
           <div className="flex flex-wrap items-center gap-2">
             {isJob ? (
               <GitBranch className="h-4 w-4 shrink-0 text-running" />
+            ) : isExternal ? (
+              <EyeOff className="h-4 w-4 shrink-0 text-text-4" aria-hidden="true" />
             ) : (
               <Database className="h-4 w-4 shrink-0 text-gold" />
             )}
             <Badge variant="outline" className="text-[11px]">
-              {isJob ? "Job" : "Dataset"}
+              {isJob ? "Job" : isExternal ? "External" : "Dataset"}
             </Badge>
           </div>
           <div className="truncate text-sm font-bold text-text-1" title={data.label}>
@@ -440,9 +445,16 @@ const ContractEdge = memo(({
           }}
           title={edgeTitle(data, findingLabel)}
         >
-          <ShieldCheck className="h-3 w-3" aria-hidden="true" /><span className="lowercase">{data?.edgeClass ?? "edge"}</span>
-          <span className="inline-block w-3" aria-hidden="true" />
-          <span>{data?.edgeClass === "evidence" ? "observed" : verdict}</span>
+          <ShieldCheck className="h-3 w-3" aria-hidden="true" />
+          {data?.edgeClass ? (
+            <>
+              <span className="lowercase">{data.edgeClass}</span>
+              <span className="inline-block w-3" aria-hidden="true" />
+              <span>{data.edgeClass === "evidence" ? "observed" : verdict}</span>
+            </>
+          ) : (
+            <span>cross-namespace</span>
+          )}
         </div>
       </EdgeLabelRenderer>
     </>
@@ -460,7 +472,7 @@ const edgeTypes = {
 };
 
 function edgeLabelClass(edgeClass: string | undefined, verdict: string) {
-  if (edgeClass === "evidence") {
+  if (edgeClass === "evidence" || edgeClass === undefined) {
     return "border-text-4/40 text-text-3";
   }
   switch (verdict) {

@@ -324,6 +324,11 @@ type datasetHoldReleaseRequest struct {
 	// the very shape the hold-OPEN path is written to avoid.
 	guardNotBreachRun uuid.UUID
 	guardBreachBefore time.Time
+	// namespaceGuard, when set, runs first inside every attempt's transaction
+	// (identity-and-access B6: a namespace-confined operator's release
+	// re-checks the dataset's producer namespaces in the transaction that
+	// releases). An error aborts the attempt with nothing written.
+	namespaceGuard func(tx *gorm.DB) error
 }
 
 // releaseDatasetHold closes one active hold by id and emits dataset_released.
@@ -345,6 +350,11 @@ func (s *Store) releaseDatasetHold(ctx context.Context, id uuid.UUID, req datase
 		// back attempt's event must never outlive its transaction.
 		evt = nil
 		return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+			if req.namespaceGuard != nil {
+				if err := req.namespaceGuard(tx); err != nil {
+					return err
+				}
+			}
 			ok, err := s.releaseDatasetHoldTx(tx, id, req, &released)
 			if err != nil {
 				return err
@@ -684,6 +694,9 @@ type ReleaseHoldParams struct {
 	// Audit is written in the SAME transaction as the release, so a completed
 	// release can never exist without its audit row.
 	Audit *models.AuditLog
+	// Guard, when set, runs first inside the release transaction; its error
+	// aborts the release unchanged (identity-and-access B6).
+	Guard func(tx *gorm.DB) error
 }
 
 // ReleaseHold acks one hold as a human. It is the exported entry point for
@@ -701,11 +714,12 @@ func (s *Store) ReleaseHold(ctx context.Context, id uuid.UUID, params ReleaseHol
 		return nil, err
 	}
 	return s.releaseDatasetHold(ctx, id, datasetHoldReleaseRequest{
-		reason:     models.DatasetHoldReleaseManualAck,
-		by:         strings.TrimSpace(params.ReleasedBy),
-		note:       strings.TrimSpace(params.Note),
-		tolerances: params.Tolerances,
-		audit:      params.Audit,
+		reason:         models.DatasetHoldReleaseManualAck,
+		by:             strings.TrimSpace(params.ReleasedBy),
+		note:           strings.TrimSpace(params.Note),
+		tolerances:     params.Tolerances,
+		audit:          params.Audit,
+		namespaceGuard: params.Guard,
 	})
 }
 

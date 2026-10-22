@@ -19,6 +19,12 @@ func New(ctx context.Context) *Service {
 	return &Service{ctx: ctx, db: db.Connection()}
 }
 
+// NewWithDatabase is New over conn instead of the process's catalog
+// connection.
+func NewWithDatabase(ctx context.Context, conn *gorm.DB) *Service {
+	return &Service{ctx: ctx, db: conn}
+}
+
 // WithDatabase returns a copy of the Service using the given connection; used
 // in tests to inject an in-memory database without touching the singleton.
 func (s *Service) WithDatabase(conn *gorm.DB) *Service {

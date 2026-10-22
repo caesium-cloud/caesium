@@ -6,6 +6,7 @@ import (
 	"time"
 
 	whysvc "github.com/caesium-cloud/caesium/api/rest/service/why"
+	"github.com/caesium-cloud/caesium/internal/authz"
 	iincident "github.com/caesium-cloud/caesium/internal/incident"
 	"github.com/caesium-cloud/caesium/internal/models"
 	runstorage "github.com/caesium-cloud/caesium/internal/run"
@@ -57,9 +58,14 @@ func (s *Service) FailingLog(inc *models.Incident) (string, bool, error) {
 }
 
 // History returns recent runs for the incident's own job, or — when jobAlias is
-// supplied — for that job PROVIDED it is within the incident's frozen allowlist.
-// A request for an out-of-allowlist job is refused (ErrForbiddenJob), which is
-// the read-scope boundary for agent tokens.
+// supplied — for that job PROVIDED it is within the incident's frozen allowlist
+// and still in the incident's namespace. A request for any other job is refused
+// (ErrForbiddenJob), which is the read-scope boundary for agent tokens.
+//
+// Only runs recorded in the incident's namespace are returned, for the own job
+// and an allow-listed one alike (identity-and-access A8): a job moved in from
+// another namespace brings no foreign history, and a job moved out exposes no
+// run its new owner records.
 func (s *Service) History(inc *models.Incident, jobAlias string, allowed []string) ([]RunSummary, error) {
 	jobID := inc.JobID
 	if jobAlias != "" {
@@ -75,17 +81,20 @@ func (s *Service) History(inc *models.Incident, jobAlias string, allowed []strin
 			return nil, ErrForbiddenJob
 		}
 		var job models.Job
-		if err := s.db.WithContext(s.ctx).Select("id").First(&job, "alias = ?", jobAlias).Error; err != nil {
+		if err := s.db.WithContext(s.ctx).Select("id", "namespace").First(&job, "alias = ?", jobAlias).Error; err != nil {
 			if errors.Is(err, gorm.ErrRecordNotFound) {
 				return nil, ErrForbiddenJob
 			}
 			return nil, err
 		}
+		if jobAlias != ownAlias && models.NamespaceOrDefault(job.Namespace) != iincident.IncidentNamespace(inc) {
+			return nil, ErrForbiddenJob
+		}
 		jobID = job.ID
 	}
 
 	var runs []models.JobRun
-	if err := s.db.WithContext(s.ctx).
+	if err := authz.NamespaceFilter(s.db.WithContext(iincident.HistoryContext(s.ctx, inc)), "namespace").
 		Where("job_id = ?", jobID).
 		Order("created_at DESC").
 		Limit(50).
@@ -101,6 +110,19 @@ func (s *Service) History(inc *models.Incident, jobAlias string, allowed []strin
 		}
 		out = append(out, rs)
 	}
+	if s.reader == iincident.ReaderConfined {
+		ids := make([]uuid.UUID, 0, len(out))
+		for i := range out {
+			ids = append(ids, out[i].ID)
+		}
+		byRun, _, err := s.runViolations(ids)
+		if err != nil {
+			return nil, err
+		}
+		for i := range out {
+			out[i].Error = withholdAll(out[i].Error, byRun[out[i].ID])
+		}
+	}
 	return out, nil
 }
 
@@ -109,7 +131,9 @@ func (s *Service) Why(inc *models.Incident, task string) (*runstorage.WhyExplana
 	if inc.RunID == nil {
 		return nil, ErrNoFailingRun
 	}
-	return whysvc.New(s.ctx).WithDatabase(s.db).Why(*inc.RunID, task)
+	// The explanation reads earlier runs and cache origins as baselines: only
+	// those recorded in the incident's namespace (identity-and-access A8).
+	return whysvc.New(iincident.HistoryContext(s.ctx, inc)).WithDatabase(s.db).Why(*inc.RunID, task)
 }
 
 // incidentJobAlias resolves the alias of the incident's own job (always readable

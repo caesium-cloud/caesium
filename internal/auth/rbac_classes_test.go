@@ -233,22 +233,22 @@ func TestRoutePolicyClassesPinned(t *testing.T) {
 		"PATCH /v1/triggers/:id":                       {Role: models.RoleOperator, Class: RouteClassNamespaced},
 		"POST /v1/jobs":                                {Role: models.RoleOperator, Class: RouteClassNamespaced},
 		"POST /v1/events":                              {Role: models.RoleRunner, Class: RouteClassNamespaced, PendingItem: "A6"},
-		"POST /v1/datasets/holds/:id/release":          {Role: models.RoleOperator, Class: RouteClassNamespaced, PendingItem: "B6"},
-		"GET /v1/incidents/:id":                        {Role: models.RoleViewer, Class: RouteClassNamespaced, PendingItem: "A8"},
-		"POST /v1/datasets/:id/:id/advance":            {Role: models.RoleRunner, Class: RouteClassNamespaced, PendingItem: "B6"},
-		"GET /v1/datasets/:id/:id":                     {Role: models.RoleViewer, Class: RouteClassNamespaced, PendingItem: "B6"},
+		"POST /v1/datasets/holds/:id/release":          {Role: models.RoleOperator, Class: RouteClassNamespaced},
+		"GET /v1/incidents/:id":                        {Role: models.RoleViewer, Class: RouteClassNamespaced},
+		"POST /v1/datasets/:id/:id/advance":            {Role: models.RoleRunner, Class: RouteClassNamespaced},
+		"GET /v1/datasets/:id/:id":                     {Role: models.RoleViewer, Class: RouteClassNamespaced},
 		"GET /v1/auth/audit":                           {Role: models.RoleAdmin, Class: RouteClassNamespaced},
-		"POST /v1/agent/incidents/:id/mcp":             {Role: models.RoleRunner, Class: RouteClassNamespaced, PendingItem: "A8"},
-		"POST /v1/incidents/:id/approvals/:id/approve": {Role: models.RoleOperator, Class: RouteClassNamespaced, PendingItem: "A8"},
+		"POST /v1/agent/incidents/:id/mcp":             {Role: models.RoleRunner, Class: RouteClassNamespaced},
+		"POST /v1/incidents/:id/approvals/:id/approve": {Role: models.RoleOperator, Class: RouteClassNamespaced},
 		"POST /v1/incidents/:id/approvals/:id/reject":  {Role: models.RoleOperator, Class: RouteClassNamespaced},
 		// Backfill date dedupe counts only the backfill's own namespace (B4).
 		"POST /v1/jobs/:id/backfill":            {Role: models.RoleRunner, Class: RouteClassNamespaced},
 		"GET /v1/jobs/:id/backfills/:id":        {Role: models.RoleViewer, Class: RouteClassNamespaced},
 		"PUT /v1/jobs/:id/backfills/:id/cancel": {Role: models.RoleOperator, Class: RouteClassNamespaced},
-		// DAG snapshots record no namespace (B7).
-		"GET /v1/jobs/:id/blame":            {Role: models.RoleViewer, Class: RouteClassNamespaced, PendingItem: "B7"},
-		"GET /v1/jobs/:id/topology":         {Role: models.RoleViewer, Class: RouteClassNamespaced, PendingItem: "B7"},
-		"GET /v1/jobs/:id/topology/history": {Role: models.RoleViewer, Class: RouteClassNamespaced, PendingItem: "B7"},
+		// DAG snapshots are filtered by the namespace they were written in (B7).
+		"GET /v1/jobs/:id/blame":            {Role: models.RoleViewer, Class: RouteClassNamespaced},
+		"GET /v1/jobs/:id/topology":         {Role: models.RoleViewer, Class: RouteClassNamespaced},
+		"GET /v1/jobs/:id/topology/history": {Role: models.RoleViewer, Class: RouteClassNamespaced},
 		// Shared objects resolve to the object's namespace, and runtime
 		// matching and profile resolution are namespace-aware (D4).
 		"DELETE /v1/agentprofiles/:id":          {Role: models.RoleOperator, Class: RouteClassNamespaced},
@@ -285,6 +285,12 @@ var liveCollectionRoutes = map[string]bool{
 	"GET /v1/notifications/channels": true,
 	"GET /v1/notifications/policies": true,
 	"GET /v1/agentprofiles":          true,
+	// B6: datasets with a producer in the caller's namespaces.
+	"GET /v1/datasets":       true,
+	"GET /v1/datasets/holds": true,
+	// B5: global graphs, redacted at the boundary.
+	"GET /v1/contracts/graph": true,
+	"GET /v1/lineage/impact":  true,
 }
 
 // TestPendingRoutesListed logs the pending set so a reviewer sees every route

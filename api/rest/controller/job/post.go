@@ -28,6 +28,12 @@ func Post(c *echo.Context) error {
 		return err
 	}
 
+	// The alias must be canonical for every writer (no leading or trailing
+	// whitespace), exactly as a jobdef apply requires.
+	if err := jobdef.ValidateAlias(req.Alias); err != nil {
+		return echo.NewHTTPError(http.StatusBadRequest, err.Error()).Wrap(err)
+	}
+
 	namespace := ""
 	if req.Metadata != nil {
 		namespace = req.Metadata.Namespace

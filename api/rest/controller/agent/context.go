@@ -23,7 +23,7 @@ func Context(c *echo.Context) error {
 		return echo.NewHTTPError(http.StatusBadRequest, "invalid incident id")
 	}
 
-	svc := agentsvc.New(c.Request().Context())
+	svc := agentsvc.New(c.Request().Context()).ForReader(readerConfinement(c))
 	inc, err := svc.Incident(id)
 	if err != nil {
 		if errors.Is(err, agentsvc.ErrIncidentNotFound) {

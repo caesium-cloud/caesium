@@ -120,7 +120,7 @@ func (ctrl *Controller) Release(c *echo.Context) error {
 			"releasing a dataset hold requires an authenticated principal")
 	}
 
-	result, err := svc.New(c.Request().Context()).ReleaseHold(svc.ReleaseHoldParams{
+	result, err := newService(c.Request().Context()).ReleaseHold(svc.ReleaseHoldParams{
 		HoldID:     id,
 		Principal:  principal,
 		SourceIP:   c.RealIP(),
@@ -129,8 +129,12 @@ func (ctrl *Controller) Release(c *echo.Context) error {
 		// The owners' namespace(s) the auth middleware resolved for this
 		// release (identity-and-access A3).
 		AuditNamespace: authz.AuditNamespace(c),
+		Caller:         authmw.GetPrincipal(c),
 	})
 	if err != nil {
+		if mapped := writeError(err); mapped != nil {
+			return mapped
+		}
 		switch {
 		case errors.Is(err, svc.ErrHoldReleaseUnauthenticated):
 			return echo.NewHTTPError(http.StatusForbidden, err.Error())

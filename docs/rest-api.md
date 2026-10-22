@@ -49,7 +49,7 @@ For the auth management CLI, supply credentials through `CAESIUM_API_KEY`. The
 | `GET /jobs`, `POST /jobs`, `GET /jobs/:id`, `DELETE /jobs/:id` | List, create, read, delete jobs. The list includes each job's recent runs. |
 | `GET /jobs/:id/manifest` | The job's YAML as the server holds it. For a namespace-confined or job-scoped reader, a trigger the job shares with a job it cannot read has its configuration replaced by a `redacted` marker ([identity-and-access.md](identity-and-access.md#confined-job-writes-and-trigger-tenancy)). |
 | `GET /jobs/:id/tasks`, `GET /jobs/:id/dag` | Persisted task definitions and the DAG's nodes and edges. |
-| `GET /jobs/:id/topology`, `GET /jobs/:id/topology/history` | The current DAG snapshot and its append-only history. |
+| `GET /jobs/:id/topology`, `GET /jobs/:id/topology/history` | The current DAG snapshot and its append-only history. A namespace-confined reader sees only snapshots written in namespaces it may read ([identity-and-access.md](identity-and-access.md#collections-and-history-under-a-job)). |
 | `POST /jobs/:id/run` | Start a run. The `202` body's `outcome` is `created`, `queued`, or `skipped`; an `Idempotency-Key` header makes retries safe. A start parked by its namespace's run quota is `queued` with `reason: namespace_quota`. See [job-definitions.md](job-definitions.md#starting-runs-from-other-systems-outcomes-and-idempotency) and [identity-and-access.md](identity-and-access.md#run-quotas). |
 | `PUT /jobs/:id/pause`, `PUT /jobs/:id/unpause` | Suspend or resume scheduling without deleting the job. |
 | `GET /jobs/:id/queue`, `DELETE /jobs/:id/queue/:queue_id` | Inspect or drop queued runs: under a `queue` concurrency strategy, or parked by the namespace run quota (`held_reason: namespace_quota`). A confined caller sees only rows queued in namespaces it may read, and drops one only with `operator` in the namespace it was queued in. |
@@ -85,23 +85,23 @@ These back the investigation verbs described in
 | Endpoint | Purpose |
 | --- | --- |
 | `GET /jobs/:id/runs/:run_id/why` | Why a task ran, was skipped, or failed (`caesium why`). A failed task carries `failureClass` (`config`, `oom`, `schema_violation`, …, from the incident classifier; omitted for the unknown class), as does a fanned group's `firstFailure`. |
-| `GET /jobs/:id/blame` | Which change broke the job (`caesium blame`). |
+| `GET /jobs/:id/blame` | Which change broke the job (`caesium blame`), computed over the DAG snapshots the caller may read. |
 | `GET /jobs/:id/runs/diff` | Compare two runs (`caesium run diff`). |
 | `POST /jobs/:id/runs/:run_id/replay` | Start a quarantined replay (`caesium run replay`). Refused with 422 when the job namespace's `secrets.allow` rules deny a step's `secret://` reference, and with `409 namespace_quota` (`Retry-After`) when a replay that would execute finds its namespace at its run quota. |
 | `GET /jobs/:id/runs/:run_id/tasks/:task/descriptor` | The recorded execution descriptor `caesium reproduce` rebuilds from. |
 | `GET /jobs/:id/runs/:run_id/receipt`, `POST /jobs/:id/runs/:run_id/receipt/verify` | Fetch and verify a receipt (`caesium receipt get`, `caesium verify`). |
-| `GET /lineage/impact` | Cross-job lineage impact. See [open-lineage.md](open-lineage.md). |
-| `GET /contracts/graph` | The cross-job contract graph (`caesium contract graph`). |
+| `GET /lineage/impact` | Cross-job lineage impact. See [open-lineage.md](open-lineage.md). Redacted for a namespace-confined caller ([identity-and-access.md](identity-and-access.md#cross-namespace-aggregates)). |
+| `GET /contracts/graph` | The cross-job contract graph (`caesium contract graph`). Redacted for a namespace-confined caller ([identity-and-access.md](identity-and-access.md#cross-namespace-aggregates)). |
 
 ## Datasets, incidents, and the agent runtime
 
 | Endpoint | Purpose |
 | --- | --- |
-| `GET /datasets`, `GET /datasets/:ns/:name`, `GET /datasets/:ns/:name/derivations`, `POST /datasets/:ns/:name/advance` | Dataset freshness state, derivation history, and watermark advance. Always registered; the freshness evaluator that populates them runs when `CAESIUM_FRESHNESS_ENABLED=true`. |
-| `GET /datasets/:ns/:name/metrics`, `GET /datasets/holds`, `POST /datasets/holds/:id/release` | Recorded `##caesium::metrics` samples and the holds raised by the data circuit breaker. Registered only when `CAESIUM_DATA_ASSERTIONS_ENABLED=true`; otherwise these paths return 404. |
+| `GET /datasets`, `GET /datasets/:ns/:name`, `GET /datasets/:ns/:name/derivations`, `POST /datasets/:ns/:name/advance` | Dataset freshness state, derivation history, and watermark advance. Always registered; the freshness evaluator that populates them runs when `CAESIUM_FRESHNESS_ENABLED=true`. A namespace-confined caller sees a dataset through its declared producers' namespaces ([Datasets](identity-and-access.md#datasets)). |
+| `GET /datasets/:ns/:name/metrics`, `GET /datasets/holds`, `POST /datasets/holds/:id/release` | Recorded `##caesium::metrics` samples and the holds raised by the data circuit breaker. Registered only when `CAESIUM_DATA_ASSERTIONS_ENABLED=true`; otherwise these paths return 404. The same producer-namespace rules apply. |
 | `GET /incidents`, `GET /incidents/:id` | Incidents opened by the remediation runtime. Gated by `CAESIUM_AGENT_REMEDIATION_ENABLED`. |
 | `POST /incidents/:id/approvals/:approval_id/approve`, `…/reject` | Decide a tier-3 approval. |
-| `GET /agent/incidents/:id/bundle`, `GET /agent/incidents/:id/context/*`, `POST /agent/incidents/:id/actions`, `POST /agent/incidents/:id/notes`, `POST /agent/incidents/:id/mcp` | The scoped surface the agent runtime uses. See [design/agent-in-the-loop.md](design/agent-in-the-loop.md). |
+| `GET /agent/incidents/:id/bundle`, `GET /agent/incidents/:id/context/*`, `POST /agent/incidents/:id/actions`, `POST /agent/incidents/:id/notes`, `POST /agent/incidents/:id/mcp` | The scoped surface the agent runtime uses, confined to the incident's namespace (see [identity-and-access.md](identity-and-access.md#incidents-and-agent-sessions)). See [design/agent-in-the-loop.md](design/agent-in-the-loop.md). |
 | `GET /agentprofiles`, `POST /agentprofiles`, `GET /agentprofiles/:id`, `PATCH /agentprofiles/:id`, `DELETE /agentprofiles/:id` | Agent profiles referenced by `metadata.remediation`. Carries a tenancy `namespace` (see below). |
 | `GET /notifications/channels`, `GET /notifications/policies` (plus create, read, patch, delete) | Notification channels and policies. Both carry a tenancy `namespace` (see below); a policy may reference only a channel in its own namespace or `*`, on create and on a `channel_id` patch (400 otherwise). |
 
