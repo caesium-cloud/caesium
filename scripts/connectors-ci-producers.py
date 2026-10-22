@@ -56,6 +56,27 @@ def matches_fields(record, values):
                                             for key, value in values.items())
 
 
+def candidate_parents(candidate):
+    try:
+        raw = subprocess.check_output(['git', '--no-replace-objects', 'cat-file', 'commit', candidate],
+                                      stderr=subprocess.DEVNULL, timeout=30,
+                                      env={key: value for key, value in os.environ.items()
+                                           if key not in ('GH_TOKEN', 'GITHUB_TOKEN')})
+    except (OSError, subprocess.SubprocessError):
+        raise Invalid('CI candidate commit is unreadable') from None
+    # Checkout's depth-one boundary hides parents from revision traversal.
+    # The literal commit object retains them without fetching parent objects;
+    # only headers before the message/signature body establish this identity.
+    header, separator, _message = raw.partition(b'\n\n')
+    require(separator, 'CI candidate commit header is invalid')
+    parents = []
+    for line in header.split(b'\n'):
+        if line.startswith(b'parent '):
+            require(re.fullmatch(b'parent [0-9a-f]{40}', line), 'CI candidate parent header is invalid')
+            parents.append(line[7:].decode('ascii'))
+    return parents
+
+
 def context(env):
     names = ('GITHUB_REPOSITORY', 'GITHUB_REPOSITORY_ID', 'GITHUB_RUN_ID', 'GITHUB_RUN_ATTEMPT',
              'GITHUB_WORKFLOW_REF', 'GITHUB_SHA', 'GITHUB_EVENT_NAME', 'GITHUB_EVENT_PATH',
@@ -70,7 +91,8 @@ def context(env):
         require(re.fullmatch(r'[1-9][0-9]*', env[key]), 'CI identity is invalid')
         ids[key] = int(env[key])
     candidate, head = env['CANDIDATE_SHA'], env['CAESIUM_CONNECTORS_CI_HEAD_SHA']
-    require(SHA.fullmatch(candidate) and SHA.fullmatch(head) and env['GITHUB_SHA'] == candidate,
+    require(type(candidate) is str and type(head) is str and SHA.fullmatch(candidate) and SHA.fullmatch(head)
+            and env['GITHUB_SHA'] == candidate,
             'CI candidate identity is invalid')
     try:
         event = json.loads(Path(env['GITHUB_EVENT_PATH']).read_text())
@@ -81,8 +103,15 @@ def context(env):
     kind = env['GITHUB_EVENT_NAME']
     if kind == 'pull_request':
         pr = event.get('pull_request') or {}
-        require(pr.get('head', {}).get('sha') == head and pr.get('merge_commit_sha') == candidate,
+        require(isinstance(pr, dict), 'CI pull request source is foreign')
+        base, source = pr.get('base'), pr.get('head')
+        require(isinstance(base, dict) and isinstance(source, dict)
+                and type(base.get('sha')) is str and SHA.fullmatch(base['sha']) and source.get('sha') == head,
                 'CI pull request source is foreign')
+        # merge_commit_sha in the frozen opened/synchronize payload may be
+        # null or stale while GitHub computes mergeability. Bind actual C to
+        # that event's B and H using its ordered literal commit parents.
+        require(candidate_parents(candidate) == [base['sha'], head], 'CI pull request candidate parents are foreign')
     elif kind == 'push':
         require(event.get('after') == candidate and head == candidate, 'CI push source is foreign')
     elif kind == 'merge_group':
@@ -121,7 +150,7 @@ class Client:
         return result.stdout
 
     def get(self, endpoint):
-        raw = self.command(['gh', 'api', '--hostname', 'github.com', endpoint], api=True)
+        raw = self.command(['gh', 'api', '--allow-escape-sequences', '--hostname', 'github.com', endpoint], api=True)
         try:
             return json.loads(raw)
         except (ValueError, UnicodeError):
@@ -326,7 +355,7 @@ def handoff(client, expected, output, invocation, ready_fd):
         row = artifacts[name]
         archive = output / (str(row['id']) + '.zip')
         with archive.open('xb') as target:
-            client.command(['gh', 'api', '--hostname', 'github.com',
+            client.command(['gh', 'api', '--allow-escape-sequences', '--hostname', 'github.com',
                             f"repos/{expected['repository']}/actions/artifacts/{row['id']}/zip"], output=target, api=True)
         with archive.open('rb') as source:
             digest = hashlib.file_digest(source, 'sha256').hexdigest()
@@ -394,7 +423,13 @@ def main():
     require(args.ready_fd > 2 and stat.S_ISFIFO(os.fstat(args.ready_fd).st_mode), 'producer readiness channel is invalid')
     os.umask(0o077)
     expected = context(os.environ)
-    require(subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip() == expected['candidate_sha'],
+    try:
+        checkout = subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True, stderr=subprocess.DEVNULL, timeout=30,
+                                           env={key: value for key, value in os.environ.items()
+                                                if key not in ('GH_TOKEN', 'GITHUB_TOKEN')}).strip()
+    except (OSError, subprocess.SubprocessError):
+        raise Invalid('producer checkout is unreadable') from None
+    require(checkout == expected['candidate_sha'],
             'producer checkout differs from candidate')
     # Thirty minutes matches the existing producer job cap, not the separate
     # 900-second promotion criterion. The owning job still caps total time.

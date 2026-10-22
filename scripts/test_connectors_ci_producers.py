@@ -1,5 +1,6 @@
 """Hermetic adversarial checks of the exact-attempt CI producer handoff."""
 import copy
+from contextlib import chdir
 import hashlib
 import importlib.util
 import io
@@ -57,6 +58,7 @@ class FakeClient:
         self.polls = 0
         self.loads = []
         self.downloads = []
+        self.api_commands = []
         self.archives, self.artifacts = {}, []
         for index, (name, (_, members)) in enumerate(MOD.ARTIFACTS.items()):
             contents = {member: b'image archive' if member.endswith('.tar.zst') else
@@ -80,6 +82,7 @@ class FakeClient:
         return copy.deepcopy(self.artifacts)
     def command(self, argv, *, output=None, api=False):
         if api:
+            self.api_commands.append(list(argv))
             ident = int(argv[-1].split('/')[-2]); self.downloads.append(ident)
             output.write(self.archives[ident])
         else:
@@ -118,6 +121,7 @@ class ProducerHandoffTests(unittest.TestCase):
         self.assertTrue(all(job['status'] == 'completed' and job['conclusion'] == 'success' for job in final['producers'].values()))
         self.assertEqual(len(client.downloads), 5)
         self.assertEqual(len(client.loads), 3)
+        self.assertTrue(all('--allow-escape-sequences' in argv for argv in client.api_commands))
         self.assertEqual(set(final['artifacts']), set(MOD.ARTIFACTS))
         self.assertEqual(final['candidate_sha'], C)
         self.assertEqual(final['head_sha'], H)
@@ -252,15 +256,17 @@ class ProducerHandoffTests(unittest.TestCase):
 
     def test_event_candidate_and_repository_binding(self):
         event = self.root/'event.json'
-        payload = dict(repository=dict(id=123, full_name='owner/repo'), pull_request=dict(head=dict(sha=H), merge_commit_sha=C))
+        payload = dict(repository=dict(id=123, full_name='owner/repo'),
+                       pull_request=dict(base=dict(sha='d'*40), head=dict(sha=H), merge_commit_sha=C))
         event.write_text(json.dumps(payload))
         env = dict(GITHUB_REPOSITORY='owner/repo', GITHUB_REPOSITORY_ID='123', GITHUB_RUN_ID='456', GITHUB_RUN_ATTEMPT='2',
                    GITHUB_WORKFLOW_REF=EXPECTED['workflow_ref'], GITHUB_SHA=C, GITHUB_EVENT_NAME='pull_request',
                    GITHUB_EVENT_PATH=str(event), CAESIUM_CONNECTORS_CI_HEAD_SHA=H, CANDIDATE_SHA=C)
-        self.assertEqual(MOD.context(env), EXPECTED)
-        for key, value in (('GITHUB_SHA', H), ('CAESIUM_CONNECTORS_CI_HEAD_SHA', C), ('GITHUB_EVENT_NAME', 'pull_request_target'),
-                           ('GITHUB_REPOSITORY_ID', '999'), ('GITHUB_WORKFLOW_REF', 'owner/repo/foreign.yml@master')):
-            with self.subTest(key=key), self.assertRaises(MOD.Invalid): MOD.context(dict(env, **{key: value}))
+        with patch.object(MOD, 'candidate_parents', return_value=['d'*40, H]):
+            self.assertEqual(MOD.context(env), EXPECTED)
+            for key, value in (('GITHUB_SHA', H), ('CAESIUM_CONNECTORS_CI_HEAD_SHA', C), ('GITHUB_EVENT_NAME', 'pull_request_target'),
+                               ('GITHUB_REPOSITORY_ID', '999'), ('GITHUB_WORKFLOW_REF', 'owner/repo/foreign.yml@master')):
+                with self.subTest(key=key), self.assertRaises(MOD.Invalid): MOD.context(dict(env, **{key: value}))
 
     def test_complete_pagination_duplicate_ids_and_incomplete_pages(self):
         client = MOD.Client(EXPECTED, MOD.time.monotonic()+30)
@@ -277,6 +283,7 @@ class ProducerHandoffTests(unittest.TestCase):
         with patch.dict(os.environ, GH_TOKEN='private', GITHUB_TOKEN='private2', GH_DEBUG='api'), \
                 patch.object(MOD.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0, b'{}')) as invoke:
             client.get('repos/owner/repo/actions/runs/456')
+            self.assertIn('--allow-escape-sequences', invoke.call_args.args[0])
             self.assertLessEqual(invoke.call_args.kwargs['timeout'], 30)
             self.assertEqual(invoke.call_args.kwargs['env']['GH_TOKEN'], 'private')
             self.assertNotIn('GH_DEBUG', invoke.call_args.kwargs['env'])
@@ -286,6 +293,132 @@ class ProducerHandoffTests(unittest.TestCase):
             self.assertGreater(invoke.call_args.kwargs['timeout'], 30)
         with patch.object(MOD.subprocess, 'run', side_effect=subprocess.CalledProcessError(1, ['gh'], stderr=b'private')):
             with self.assertRaisesRegex(MOD.Invalid, '^producer API request failed$'): client.get('endpoint')
+
+
+class PullRequestCheckoutTests(unittest.TestCase):
+    """Use literal Git objects in a real depth-one checkout, without fetching."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(prefix='connectors-pr-checkout-')
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.source, self.checkout = self.root/'source.git', self.root/'checkout'
+        self.git_env = dict(os.environ, GIT_AUTHOR_NAME='Probe', GIT_AUTHOR_EMAIL='probe@example.test',
+                            GIT_COMMITTER_NAME='Probe', GIT_COMMITTER_EMAIL='probe@example.test',
+                            GIT_AUTHOR_DATE='2026-10-22T00:00:00Z', GIT_COMMITTER_DATE='2026-10-22T00:00:00Z')
+        self.git('init', '--bare', '-q', str(self.source), cwd=self.root)
+        self.tree = self.git('mktree', input=b'')
+        self.base = self.git('commit-tree', self.tree, input=b'base\n')
+        self.head = self.git('commit-tree', self.tree, '-p', self.base, input=b'head\n')
+        self.candidate = self.git('commit-tree', self.tree, '-p', self.base, '-p', self.head, input=b'merge\n')
+        self.git('update-ref', 'refs/heads/master', self.candidate)
+        self.git('symbolic-ref', 'HEAD', 'refs/heads/master')
+        self.git('-c', 'protocol.file.allow=always', 'clone', '-q', '--depth=1', '--no-local',
+                 self.source.as_uri(), str(self.checkout), cwd=self.root)
+        self.payload = dict(repository=dict(id=123, full_name='owner/repo'),
+                            pull_request=dict(base=dict(sha=self.base), head=dict(sha=self.head), merge_commit_sha=None))
+        self.event = self.root/'event.json'
+        self.env = dict(GITHUB_REPOSITORY='owner/repo', GITHUB_REPOSITORY_ID='123', GITHUB_RUN_ID='456',
+                        GITHUB_RUN_ATTEMPT='2', GITHUB_WORKFLOW_REF=EXPECTED['workflow_ref'],
+                        GITHUB_SHA=self.candidate, GITHUB_EVENT_NAME='pull_request', GITHUB_EVENT_PATH=str(self.event),
+                        CAESIUM_CONNECTORS_CI_HEAD_SHA=self.head, CANDIDATE_SHA=self.candidate)
+
+    def git(self, *arguments, cwd=None, input=None):
+        result = subprocess.run(['git', '-c', 'core.hooksPath=/dev/null', '-c', 'commit.gpgsign=false', *arguments],
+                                cwd=cwd or self.source, env=self.git_env, input=input, capture_output=True, check=True)
+        return result.stdout.decode().strip()
+
+    def context(self, payload=None, env=None):
+        self.event.write_text(json.dumps(self.payload if payload is None else payload))
+        with chdir(self.checkout):
+            return MOD.context(self.env if env is None else env)
+
+    def store_candidate(self, parents, message='candidate'):
+        raw = ('tree '+self.tree+'\n' + ''.join('parent '+parent+'\n' for parent in parents)
+               + 'author Probe <probe@example.test> 1792627200 +0000\n'
+               + 'committer Probe <probe@example.test> 1792627200 +0000\n\n'+message+'\n').encode()
+        return self.git('hash-object', '-t', 'commit', '-w', '--stdin', cwd=self.checkout, input=raw)
+
+    def run_main(self, env, *, valid=False):
+        self.event.write_text(json.dumps(self.payload))
+        output = self.root/('main-'+str(len(list(self.root.glob('main-*'))))); output.mkdir()
+        read, write = os.pipe()
+        old_mask = os.umask(0o077)
+        try:
+            argv = ['connectors-ci-producers.py', '--output', str(output), '--invocation', 'e'*32, '--ready-fd', str(write)]
+            with patch.dict(os.environ, env), patch.object(MOD.sys, 'argv', argv), \
+                    patch.object(MOD, 'Client') as client, patch.object(MOD, 'handoff') as handoff, chdir(self.checkout):
+                if valid:
+                    MOD.main()
+                    self.assertEqual(handoff.call_args.args[1]['candidate_sha'], env['CANDIDATE_SHA'])
+                    self.assertEqual(handoff.call_args.args[1]['head_sha'], self.head)
+                else:
+                    with self.assertRaises(MOD.Invalid): MOD.main()
+                    client.assert_not_called(); handoff.assert_not_called()
+        finally:
+            os.umask(old_mask)
+            os.close(read); os.close(write)
+
+    def test_real_shallow_checkout_accepts_null_stale_or_absent_payload_merge_sha(self):
+        self.assertEqual((self.checkout/'.git/shallow').read_text().strip(), self.candidate)
+        self.assertEqual(self.git('show', '-s', '--format=%P', 'HEAD', cwd=self.checkout), '')
+        for parent in (self.base, self.head):
+            absent = subprocess.run(['git', 'cat-file', '-e', parent], cwd=self.checkout, capture_output=True)
+            self.assertNotEqual(absent.returncode, 0, 'parent objects must be absent from depth-one fixture')
+        for merge in (None, 'f'*40, 'absent'):
+            payload = copy.deepcopy(self.payload)
+            if merge == 'absent': payload['pull_request'].pop('merge_commit_sha')
+            else: payload['pull_request']['merge_commit_sha'] = merge
+            with self.subTest(merge=merge):
+                record = self.context(payload)
+                self.assertEqual(record, dict(EXPECTED, candidate_sha=self.candidate, head_sha=self.head))
+        self.run_main(self.env, valid=True)
+
+    def test_pr_event_base_and_head_must_match_exact_typed_commit_parents(self):
+        for section in ('base', 'head'):
+            for value in (None, False, 42, 'f'*39, 'f'*41, 'F'*40, 'f'*40):
+                payload = copy.deepcopy(self.payload); payload['pull_request'][section]['sha'] = value
+                with self.subTest(section=section, value=value), self.assertRaises(MOD.Invalid): self.context(payload)
+        payload = copy.deepcopy(self.payload); payload['pull_request'].pop('base')
+        with self.assertRaises(MOD.Invalid): self.context(payload)
+        payload = copy.deepcopy(self.payload); payload['pull_request'].pop('head')
+        with self.assertRaises(MOD.Invalid): self.context(payload)
+
+    def test_ci_candidate_and_head_context_reject_missing_malformed_or_foreign_sha(self):
+        for key in ('CANDIDATE_SHA', 'CAESIUM_CONNECTORS_CI_HEAD_SHA'):
+            for value in (None, False, 42, 'f'*39, 'f'*41, 'F'*40, 'f'*40):
+                env = dict(self.env, **{key: value})
+                if key == 'CANDIDATE_SHA': env['GITHUB_SHA'] = value
+                with self.subTest(key=key, value=value), self.assertRaises(MOD.Invalid): self.context(env=env)
+
+    def test_literal_commit_rejects_missing_reordered_extra_duplicate_or_foreign_parents(self):
+        for parents in ([], [self.base], [self.head, self.base], [self.base, self.head, 'f'*40],
+                        [self.base, self.head, self.head], [self.base, 'f'*40], ['f'*40, self.head]):
+            candidate = self.store_candidate(parents)
+            self.git('update-ref', 'HEAD', candidate, cwd=self.checkout)
+            env = dict(self.env, CANDIDATE_SHA=candidate, GITHUB_SHA=candidate)
+            with self.subTest(parents=parents), self.assertRaises(MOD.Invalid): self.context(env=env)
+
+    def test_parent_lines_in_commit_message_do_not_change_header_identity(self):
+        candidate = self.store_candidate([self.base, self.head], message='message\nparent '+'f'*40)
+        self.git('update-ref', 'HEAD', candidate, cwd=self.checkout)
+        env = dict(self.env, CANDIDATE_SHA=candidate, GITHUB_SHA=candidate)
+        self.assertEqual(self.context(env=env)['candidate_sha'], candidate)
+
+    def test_replace_ref_cannot_substitute_for_literal_candidate_parents(self):
+        candidate = self.store_candidate([self.base, 'f'*40])
+        self.git('update-ref', 'HEAD', candidate, cwd=self.checkout)
+        self.git('update-ref', 'refs/replace/'+candidate, self.candidate, cwd=self.checkout)
+        self.assertIn('parent '+self.head, self.git('cat-file', 'commit', candidate, cwd=self.checkout))
+        env = dict(self.env, CANDIDATE_SHA=candidate, GITHUB_SHA=candidate)
+        with self.assertRaises(MOD.Invalid): self.context(env=env)
+
+    def test_missing_candidate_or_actual_head_rejects_before_api_or_load(self):
+        self.run_main(dict(self.env, CANDIDATE_SHA='f'*40, GITHUB_SHA='f'*40))
+        wrong_checkout = self.store_candidate([self.base, self.head], message='other valid merge')
+        self.run_main(dict(self.env, CANDIDATE_SHA=wrong_checkout, GITHUB_SHA=wrong_checkout))
+        self.git('symbolic-ref', 'HEAD', 'refs/heads/missing', cwd=self.checkout)
+        self.run_main(self.env)
 
 
 if __name__ == '__main__':
