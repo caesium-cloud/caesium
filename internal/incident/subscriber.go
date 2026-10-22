@@ -302,16 +302,9 @@ func (s *Subscriber) handleFailure(ctx context.Context, evt event.Event) {
 		return
 	}
 
-	sig := Signal{EventType: string(evt.Type)}
+	sig := TaskRunSignal(string(evt.Type), fc.taskRun)
 	var exitCode *int
 	if fc.taskRun != nil {
-		sig.Result = fc.taskRun.Result
-		sig.HasSchemaViolations = len(fc.taskRun.SchemaViolations) > 0
-		sig.LogTail = fc.taskRun.LogText
-		sig.Error = fc.taskRun.Error
-		sig.ExitCode = fc.taskRun.ExitCode
-		sig.OOMKnown = fc.taskRun.OOMKnown
-		sig.OOMKilled = fc.taskRun.OOMKilled
 		exitCode = fc.taskRun.ExitCode
 	}
 

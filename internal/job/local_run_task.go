@@ -68,6 +68,12 @@ func (l *localRun) runTask(taskID uuid.UUID) ([]uuid.UUID, error) {
 	taskModel := tasksByID[taskID]
 	taskQuarantined := taskQuarantine[taskID] || runQuarantined
 
+	// The run namespace's Kubernetes mapping, read once for this execution
+	// before its cache identity (and before the fan-out branch, so every
+	// instance shares it). A Kubernetes task whose target cannot be known
+	// fails as a configuration failure, without retrying: an unfanned step
+	// here, each fan-out instance on its own row (runFannedGroup).
+	l.resolveKubernetesMapping(runner)
 	if group, ok := l.lookupFanOutGroup(taskID); ok && len(group.Instances) > 0 {
 		// Each instance runs its own allow-check right before its own cache
 		// lookup (runFannedGroup), since instances wait independently.
@@ -76,9 +82,13 @@ func (l *localRun) runTask(taskID uuid.UUID) ([]uuid.UUID, error) {
 	// Namespace secret rules are checked before the cache lookup, so a
 	// reference the namespace no longer allows is never served from cache. A
 	// denial is permanent until the policy changes: fail without retrying.
+	if runner.kubeMappingErr != nil {
+		return failIdentity(runner.kubeMappingErr)
+	}
 	if err := l.checkSecretsAllowed(runner); err != nil {
 		return failIdentity(err)
 	}
+	l.recordKubernetesTarget(taskID, runner)
 	taskTimeout, timingErr := store.LocalTaskExecutionTimeout(ctx, runID, taskID)
 	if timingErr != nil {
 		return nil, timingErr

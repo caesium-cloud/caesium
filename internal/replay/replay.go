@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/caesium-cloud/caesium/internal/atom"
 	"github.com/caesium-cloud/caesium/internal/cache"
 	"github.com/caesium-cloud/caesium/internal/event"
 	jobdefruntime "github.com/caesium-cloud/caesium/internal/jobdef/runtime"
@@ -763,7 +764,15 @@ func (c *Constructor) planTasks(ctx context.Context, groups []*baselineGroup, pa
 			// Re-execute it (and pending dependents) rather than accepting a legacy
 			// literal-tag entry. A frozen known digest remains reproducible.
 			identityUnavailable := task.descriptor.Cache.Enabled && task.descriptor.Cache.PinDigests && task.descriptor.Runtime.ResolvedImageDigest == ""
-			unchanged := !forceReexecute && !identityUnavailable && hashMatchesBaseline(replayHash, task.computedHash, task.effective)
+			// The namespace's Kubernetes mapping now (identity-and-access C1).
+			// A step whose baseline ran under a different mapping (a descriptor
+			// without one recorded the legacy default) is re-executed rather
+			// than reused: its output was produced in another pod namespace, or
+			// read relative k8s secrets from another one. A target that cannot
+			// be known now re-executes too, and the executor then refuses it.
+			currentMapping, mappingErr := jobdefruntime.KubernetesMapping(namespace, task.descriptor.Runtime.Engine, false)
+			mappingMoved := mappingErr != nil || replayKubernetesMappingChanged(task.descriptor, currentMapping)
+			unchanged := !forceReexecute && !identityUnavailable && !mappingMoved && hashMatchesBaseline(replayHash, task.computedHash, task.effective)
 			plan := plannedTask{
 				base:          task,
 				replayHash:    replayHash,
@@ -776,7 +785,7 @@ func (c *Constructor) planTasks(ctx context.Context, groups []*baselineGroup, pa
 			// Before any reuse or re-execution: a reused result was computed
 			// with the step's secret references, and re-execution verifies
 			// them, so the namespace must allow them now.
-			if err := c.checkSecretsAllowed(task, namespace); err != nil {
+			if err := c.checkSecretsAllowed(task, namespace, currentMapping.Namespace); err != nil {
 				return nil, err
 			}
 			if unchanged && pending == 0 {
@@ -788,7 +797,7 @@ func (c *Constructor) planTasks(ctx context.Context, groups []*baselineGroup, pa
 				plan.source = source
 				plan.effectiveHash = firstNonEmpty(task.effective, replayHash)
 			} else {
-				if err := c.authorizeReexecution(ctx, task); err != nil {
+				if err := c.authorizeReexecution(ctx, task, namespace, currentMapping.Namespace); err != nil {
 					return nil, err
 				}
 				plan.reexecute = true
@@ -947,21 +956,27 @@ func computeDescriptorInstanceHash(
 	if workdir == "" {
 		workdir = desc.Runtime.WorkDir
 	}
+	// The mapping the baseline execution recorded, folded in exactly as the
+	// executors fold the mapping they resolved, so an unchanged replay rebuilds
+	// the baseline's key.
+	kubeTarget, kubeSecretNamespace := jobdefruntime.KubernetesIdentity(desc.Runtime.Engine, jobdefruntime.RecordedKubernetesMapping(desc.Runtime.KubernetesTarget), env)
 	return cache.HashInput{
-		JobAlias:             desc.Baseline.JobAlias,
-		Namespace:            namespace,
-		TaskName:             desc.Baseline.TaskName,
-		Image:                desc.Runtime.Image,
-		ResolvedImageDigest:  desc.Runtime.ResolvedImageDigest,
-		Command:              command,
-		Env:                  env,
-		WorkDir:              workdir,
-		Mounts:               spec.Mounts,
-		ResolvedVolumeMounts: spec.ResolvedVolumeMounts,
-		Kubernetes:           spec.Kubernetes,
-		PredecessorHashes:    append([]string(nil), predHashes...),
-		PredecessorOutputs:   cloneNestedStringMap(predOutputs),
-		RunParams:            maps.Clone(params),
+		JobAlias:                  desc.Baseline.JobAlias,
+		Namespace:                 namespace,
+		TaskName:                  desc.Baseline.TaskName,
+		Image:                     desc.Runtime.Image,
+		ResolvedImageDigest:       desc.Runtime.ResolvedImageDigest,
+		Command:                   command,
+		Env:                       env,
+		WorkDir:                   workdir,
+		Mounts:                    spec.Mounts,
+		ResolvedVolumeMounts:      spec.ResolvedVolumeMounts,
+		Kubernetes:                spec.Kubernetes,
+		KubernetesTarget:          kubeTarget,
+		KubernetesSecretNamespace: kubeSecretNamespace,
+		PredecessorHashes:         append([]string(nil), predHashes...),
+		PredecessorOutputs:        cloneNestedStringMap(predOutputs),
+		RunParams:                 maps.Clone(params),
 		// The chain mode is read from the descriptor, not re-resolved from the
 		// live job definition: replay must rebuild the baseline's key, and a
 		// values-mode step re-hashed as transitive would miss every entry it
@@ -1045,7 +1060,7 @@ func (c *Constructor) cacheSourceForUnchanged(ctx context.Context, task *baselin
 // re-execution, exactly as an executor checks before its own cache lookup: a
 // fully cached replay never reaches an executor. A namespace without rules
 // returns at once; a denial names only the redacted reference.
-func (c *Constructor) checkSecretsAllowed(task *baselineTask, namespace string) error {
+func (c *Constructor) checkSecretsAllowed(task *baselineTask, namespace, kubeNamespace string) error {
 	if secret.ForNamespace(nil, namespace).AllowsAll() {
 		return nil
 	}
@@ -1057,13 +1072,17 @@ func (c *Constructor) checkSecretsAllowed(task *baselineTask, namespace string) 
 		}
 		inner = resolver
 	}
-	if err := jobdefruntime.CheckContainerSpecSecretsAllowed(secret.ForNamespace(inner, namespace), task.descriptor.ContainerSpec); err != nil {
+	if err := jobdefruntime.CheckContainerSpecSecretsAllowed(secret.ForNamespaceTarget(inner, namespace, kubeNamespace), task.descriptor.ContainerSpec); err != nil {
 		return fmt.Errorf("%w: step %q: %w", ErrSecretIdentity, task.taskName, err)
 	}
 	return nil
 }
 
-func (c *Constructor) authorizeReexecution(ctx context.Context, task *baselineTask) error {
+// authorizeReexecution verifies the step's baseline secret identities by
+// re-resolving each reference the way the re-execution will read it: scoped to
+// the run namespace, with relative secret://k8s references in its current
+// Kubernetes mapping (kubeNamespace).
+func (c *Constructor) authorizeReexecution(ctx context.Context, task *baselineTask, namespace, kubeNamespace string) error {
 	if !task.row.ReplaySafe {
 		return fmt.Errorf("%w: step %q would re-execute but baseline task_run replay_safe=false", ErrReplayUnsafe, task.taskName)
 	}
@@ -1084,7 +1103,7 @@ func (c *Constructor) authorizeReexecution(ctx context.Context, task *baselineTa
 			return fmt.Errorf("%w: step %q env %s secret %s has no baseline identity", ErrSecretIdentity, task.taskName, envKey, refValue)
 		}
 		seenRuntimeRefs[key] = struct{}{}
-		if err := c.verifyReplaySecretIdentity(ctx, task.taskName, ref); err != nil {
+		if err := c.verifyReplaySecretIdentity(ctx, task.taskName, namespace, kubeNamespace, ref); err != nil {
 			return err
 		}
 	}
@@ -1096,7 +1115,7 @@ func (c *Constructor) authorizeReexecution(ctx context.Context, task *baselineTa
 	return nil
 }
 
-func (c *Constructor) verifyReplaySecretIdentity(ctx context.Context, taskName string, ref models.TaskExecutionSecretRef) error {
+func (c *Constructor) verifyReplaySecretIdentity(ctx context.Context, taskName, namespace, kubeNamespace string, ref models.TaskExecutionSecretRef) error {
 	if strings.TrimSpace(ref.Ref) == "" {
 		return nil
 	}
@@ -1106,14 +1125,35 @@ func (c *Constructor) verifyReplaySecretIdentity(ctx context.Context, taskName s
 	if c.secretResolver == nil {
 		return fmt.Errorf("%w: step %q secret %s requires a configured resolver", ErrSecretIdentity, taskName, ref.Ref)
 	}
-	value, identity, err := c.secretResolver.ResolveWithIdentity(ctx, ref.Ref)
+	resolver := secret.ForNamespaceTarget(c.secretResolver, namespace, kubeNamespace)
+	value, identity, err := resolver.ResolveWithIdentity(ctx, ref.Ref)
 	if err != nil {
+		if errors.Is(err, secret.ErrSecretDenied) {
+			return fmt.Errorf("%w: step %q: %w", ErrSecretIdentity, taskName, err)
+		}
 		return fmt.Errorf("%w: step %q secret %s re-resolve failed: %v", ErrSecretIdentity, taskName, ref.Ref, err)
 	}
-	if err := VerifyResolvedReplaySecretIdentity(ctx, c.secretResolver, ref, value, identity); err != nil {
+	if err := VerifyResolvedReplaySecretIdentity(ctx, resolver, ref, value, identity); err != nil {
 		return fmt.Errorf("%w: step %q secret %s %v", ErrSecretIdentity, taskName, ref.Ref, err)
 	}
 	return nil
+}
+
+// replayKubernetesMappingChanged reports whether the namespace mapping a
+// baseline step ran under differs, in what the step's identity depends on,
+// from current: the pod target of a Kubernetes step, or the read namespace of
+// another engine's relative secret://k8s references.
+func replayKubernetesMappingChanged(desc models.TaskExecutionDescriptor, current atom.KubeTarget) bool {
+	env := desc.ContainerSpec.Env
+	recordedTarget, recordedSecretNS := jobdefruntime.KubernetesIdentity(desc.Runtime.Engine, jobdefruntime.RecordedKubernetesMapping(desc.Runtime.KubernetesTarget), env)
+	currentTarget, currentSecretNS := jobdefruntime.KubernetesIdentity(desc.Runtime.Engine, current, env)
+	if recordedSecretNS != currentSecretNS {
+		return true
+	}
+	if (recordedTarget == nil) != (currentTarget == nil) {
+		return true
+	}
+	return recordedTarget != nil && *recordedTarget != *currentTarget
 }
 
 // VerifyReplaySecretIdentities verifies descriptor-captured replay secret

@@ -3,6 +3,7 @@ package models
 import (
 	"time"
 
+	"github.com/caesium-cloud/caesium/internal/atom"
 	"github.com/caesium-cloud/caesium/pkg/container"
 	pkgtask "github.com/caesium-cloud/caesium/pkg/task"
 	"github.com/google/uuid"
@@ -400,6 +401,12 @@ type TaskExecutionRuntime struct {
 	RetryCount            int               `json:"retryCount"`
 	RetryDelay            time.Duration     `json:"retryDelay"`
 	RetryBackoff          bool              `json:"retryBackoff"`
+	// KubernetesTarget is the run namespace's Kubernetes mapping the execution
+	// resolved before its cache identity (identity-and-access §10.1): the pod
+	// namespace and default service account, which also set where relative
+	// secret://k8s references read. Absent without a mapping, so unmapped
+	// descriptors are unchanged; a replay compares it with the current mapping.
+	KubernetesTarget *atom.KubeTarget `json:"kubernetesTarget,omitempty"`
 }
 
 type TaskExecutionTiming struct {

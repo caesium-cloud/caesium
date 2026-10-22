@@ -101,24 +101,28 @@ type hashInputBlob struct {
 	BlobVersion int    `json:"blobVersion"`
 	Hash        string `json:"hash"`
 
-	Namespace               string                       `json:"namespace,omitempty"`
-	JobAlias                string                       `json:"jobAlias,omitempty"`
-	TaskName                string                       `json:"taskName,omitempty"`
-	Image                   string                       `json:"image,omitempty"`
-	ResolvedImageDigest     string                       `json:"resolvedImageDigest,omitempty"`
-	UnresolvedImageIdentity string                       `json:"unresolvedImageIdentity,omitempty"`
-	Command                 []string                     `json:"command,omitempty"`
-	Env                     map[string]envBlobValue      `json:"env,omitempty"`
-	WorkDir                 string                       `json:"workDir,omitempty"`
-	Mounts                  json.RawMessage              `json:"mounts,omitempty"`
-	ResolvedVolumeMounts    json.RawMessage              `json:"resolvedVolumeMounts,omitempty"`
-	Kubernetes              json.RawMessage              `json:"kubernetes,omitempty"`
-	PredecessorHashes       []string                     `json:"predecessorHashes,omitempty"`
-	PredecessorOutputs      map[string]map[string]string `json:"predecessorOutputs,omitempty"`
-	RunParams               map[string]string            `json:"runParams,omitempty"`
-	Partition               string                       `json:"partition,omitempty"`
-	PartitionFingerprint    string                       `json:"partitionFingerprint,omitempty"`
-	PartitionAttributes     map[string]string            `json:"partitionAttributes,omitempty"`
+	Namespace               string                  `json:"namespace,omitempty"`
+	JobAlias                string                  `json:"jobAlias,omitempty"`
+	TaskName                string                  `json:"taskName,omitempty"`
+	Image                   string                  `json:"image,omitempty"`
+	ResolvedImageDigest     string                  `json:"resolvedImageDigest,omitempty"`
+	UnresolvedImageIdentity string                  `json:"unresolvedImageIdentity,omitempty"`
+	Command                 []string                `json:"command,omitempty"`
+	Env                     map[string]envBlobValue `json:"env,omitempty"`
+	WorkDir                 string                  `json:"workDir,omitempty"`
+	Mounts                  json.RawMessage         `json:"mounts,omitempty"`
+	ResolvedVolumeMounts    json.RawMessage         `json:"resolvedVolumeMounts,omitempty"`
+	Kubernetes              json.RawMessage         `json:"kubernetes,omitempty"`
+	// KubernetesTarget / KubernetesSecretNamespace are the namespace mapping
+	// lines (identity-and-access C1); absent for unmapped tasks.
+	KubernetesTarget          *kubeTargetBlob              `json:"kubernetesTarget,omitempty"`
+	KubernetesSecretNamespace string                       `json:"kubernetesSecretNamespace,omitempty"`
+	PredecessorHashes         []string                     `json:"predecessorHashes,omitempty"`
+	PredecessorOutputs        map[string]map[string]string `json:"predecessorOutputs,omitempty"`
+	RunParams                 map[string]string            `json:"runParams,omitempty"`
+	Partition                 string                       `json:"partition,omitempty"`
+	PartitionFingerprint      string                       `json:"partitionFingerprint,omitempty"`
+	PartitionAttributes       map[string]string            `json:"partitionAttributes,omitempty"`
 	// Chain is the cache chain mode, written by cache.HashInput.CanonicalJSON
 	// only in values mode (absent means the default transitive). It is what tells
 	// the diff that PredecessorHashes never entered this blob's digest.
@@ -126,6 +130,26 @@ type hashInputBlob struct {
 	CacheVersion int    `json:"cacheVersion"`
 
 	Oversized *oversizedBlob `json:"oversized,omitempty"`
+}
+
+// kubeTargetBlob mirrors atom.KubeTarget's JSON in the blob.
+type kubeTargetBlob struct {
+	Namespace          string `json:"namespace,omitempty"`
+	ServiceAccountName string `json:"serviceAccountName,omitempty"`
+}
+
+func (t *kubeTargetBlob) namespace() string {
+	if t == nil {
+		return ""
+	}
+	return t.Namespace
+}
+
+func (t *kubeTargetBlob) serviceAccountName() string {
+	if t == nil {
+		return ""
+	}
+	return t.ServiceAccountName
 }
 
 // excludesPredecessorHashes reports whether this blob's digest was computed with
@@ -350,6 +374,11 @@ func diffBlobs(before, after *hashInputBlob) []FieldChange {
 	addScalar("resolvedImageDigest", before.ResolvedImageDigest, after.ResolvedImageDigest)
 	addScalar("command", joinCommand(before.Command), joinCommand(after.Command))
 	addScalar("workDir", before.WorkDir, after.WorkDir)
+	// The namespace's Kubernetes mapping: a remap re-keys the task, so it is a
+	// real discriminating change and is named field by field.
+	addScalar("kubernetesTarget.namespace", before.KubernetesTarget.namespace(), after.KubernetesTarget.namespace())
+	addScalar("kubernetesTarget.serviceAccountName", before.KubernetesTarget.serviceAccountName(), after.KubernetesTarget.serviceAccountName())
+	addScalar("kubernetesSecretNamespace", before.KubernetesSecretNamespace, after.KubernetesSecretNamespace)
 	if before.CacheVersion != after.CacheVersion {
 		changes = append(changes, FieldChange{
 			Field:  "cacheVersion",
