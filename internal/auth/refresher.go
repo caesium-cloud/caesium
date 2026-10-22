@@ -135,6 +135,9 @@ type GroupRefreshService struct {
 	// beforeEnqueue, when set (tests only), runs after an asynchronous
 	// flight is published and before it is queued.
 	beforeEnqueue func(userID uuid.UUID)
+	// beforeMarkStale, when set (tests only), runs after refuseIfStale read
+	// the row and before it tries to persist the refusal.
+	beforeMarkStale func(userID uuid.UUID)
 }
 
 var _ GroupFreshness = (*GroupRefreshService)(nil)
@@ -705,27 +708,42 @@ func (s *GroupRefreshService) persistContext() (context.Context, context.CancelF
 // refuseIfStale persists the stale_groups refusal after a failed synchronous
 // attempt, fenced on the grant version it reads: a login (or a successful
 // refresh on another node) since wins.
+//
+// A fence lost to a version change that left the groups stale (another
+// node recording groups-unknown, a transient or uncertain outcome) is not a
+// reason to drop the refusal: the row is re-read and the refusal retried,
+// within the persistence budget, for as long as the user stays stale.
 func (s *GroupRefreshService) refuseIfStale(userID uuid.UUID) {
 	ctx, cancel := s.persistContext()
 	defer cancel()
-	row, err := s.loadUser(ctx, userID)
-	if err != nil {
-		log.Warn("group refresh could not re-read the user to refuse it", "user_id", userID.String(), "error", err)
-		return
+	for attempt := 0; attempt < maxRefuseAttempts && ctx.Err() == nil; attempt++ {
+		row, err := s.loadUser(ctx, userID)
+		if err != nil {
+			log.Warn("group refresh could not re-read the user to refuse it", "user_id", userID.String(), "error", err)
+			return
+		}
+		now := s.now().UTC()
+		if row.IsDisabled() || row.StaleRefusedAt != nil || s.age(row, now) != groupsStale {
+			return
+		}
+		if s.beforeMarkStale != nil {
+			s.beforeMarkStale(userID)
+		}
+		marked, err := s.users.MarkStaleRefused(ctx, userID, row.RefreshGrantVersion, now)
+		if err != nil {
+			log.Warn("group refresh could not persist the stale_groups refusal", "user_id", userID.String(), "error", err)
+			return
+		}
+		if marked {
+			log.Info("user's groups are past the maximum staleness and could not be refreshed; refusing its credentials until it signs in again", "user_id", userID.String())
+			return
+		}
 	}
-	now := s.now().UTC()
-	if row.IsDisabled() || row.StaleRefusedAt != nil || s.age(row, now) != groupsStale {
-		return
-	}
-	marked, err := s.users.MarkStaleRefused(ctx, userID, row.RefreshGrantVersion, now)
-	if err != nil {
-		log.Warn("group refresh could not persist the stale_groups refusal", "user_id", userID.String(), "error", err)
-		return
-	}
-	if marked {
-		log.Info("user's groups are past the maximum staleness and could not be refreshed; refusing its credentials until it signs in again", "user_id", userID.String())
-	}
+	log.Warn("group refresh could not persist the stale_groups refusal within its budget", "user_id", userID.String())
 }
+
+// maxRefuseAttempts bounds refuseIfStale's re-read-and-retry loop.
+const maxRefuseAttempts = 8
 
 func (s *GroupRefreshService) loadUser(ctx context.Context, userID uuid.UUID) (*models.User, error) {
 	var row models.User

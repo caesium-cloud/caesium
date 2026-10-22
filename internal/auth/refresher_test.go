@@ -1097,3 +1097,30 @@ func TestUnconcludedSynchronousAttemptsPersistTheRefusal(t *testing.T) {
 	require.ErrorIs(t, err, ErrStaleGroups, "recovery does not lift the refusal; only a login does")
 	require.Zero(t, fake.Calls())
 }
+
+// TestRefusalSurvivesALostVersionFence: another node advancing the grant
+// version without refreshing the groups (here: between the re-read and the
+// fenced write) must not make the refusal disappear; it is retried on the
+// re-read row while the user stays stale.
+func TestRefusalSurvivesALostVersionFence(t *testing.T) {
+	fake := newFakeRefresher("eng")
+	fake.set(func(f *fakeRefresher) { f.err = NewRefreshError(RefreshTransient, "idp_unavailable", nil) })
+	f := newFreshnessFixture(t, fake)
+	user := f.login(t, oidcIdentity("ada", "token-1", "eng"))
+	token := f.browser(t, user.ID)
+	var bumps atomic.Int32
+	f.svc.beforeMarkStale = func(id uuid.UUID) {
+		if bumps.Add(1) == 1 {
+			// As CompleteRefreshGroupsUnknown on another node: the version
+			// moves, the groups stay stale.
+			require.NoError(t, f.db.Model(&models.User{}).Where("id = ?", id).
+				Update("refresh_grant_version", gorm.Expr("COALESCE(refresh_grant_version, 0) + 1")).Error)
+		}
+	}
+
+	f.clock.Advance(testMaxStale + time.Minute)
+	_, _, err := f.sessions.Validate(t.Context(), token)
+	require.ErrorIs(t, err, ErrStaleGroups)
+	require.EqualValues(t, 2, bumps.Load(), "the lost fence was retried on the re-read row")
+	require.NotNil(t, f.row(t, user.ID).StaleRefusedAt, "the refusal is persisted despite the lost fence")
+}
