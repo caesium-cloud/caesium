@@ -75,12 +75,15 @@ run() {
 
 wait_ready() {
     local cli="${1:?usage: ldap-fixture.sh wait <cli> <name>}" name="${2:?}"
-    local tries=0
+    # Each probe is bounded inside the container (timeout + LDAP network and
+    # server time limits), and the whole wait by an elapsed deadline, so a slapd
+    # that accepts and then stalls in TLS, bind or search cannot hang the lane.
+    local deadline=$((SECONDS + 90))
     until "$cli" exec -e LDAPTLS_CACERT="$CERT_DIR/ca.crt" "$name" \
-        ldapsearch -x -H ldaps://localhost:636 -D "$ADMIN_DN" -w "$ADMIN_PASSWORD" \
+        timeout 5 ldapsearch -o nettimeout=5 -l 5 -x -H ldaps://localhost:636 \
+        -D "$ADMIN_DN" -w "$ADMIN_PASSWORD" \
         -b ou=groups,dc=example,dc=org -s base dn >/dev/null 2>&1; do
-        tries=$((tries + 1))
-        if [ "$tries" -gt 90 ]; then
+        if [ "$SECONDS" -ge "$deadline" ]; then
             echo "OpenLDAP fixture $name did not answer LDAPS within 90s" >&2
             "$cli" logs --tail 60 "$name" >&2 || true
             return 1
