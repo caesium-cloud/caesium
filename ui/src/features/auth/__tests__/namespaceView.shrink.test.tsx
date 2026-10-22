@@ -69,7 +69,9 @@ it("clears an applied namespace filter once the switcher is hidden, so lists sto
   await waitFor(() => {
     expect(getIncidents.mock.calls.some(([p]) => p?.namespace === undefined)).toBe(true);
     expect(getIncidents.mock.calls.some(([p]) => p?.needs_approval === true && p?.namespace === undefined)).toBe(true);
-    expect(getJobs).toHaveBeenCalledWith(undefined);
+    // The unscoped jobs list is already cached, so it is not refetched; what
+    // matters is that the finance-scoped one is no longer requested.
+    expect(getJobs).not.toHaveBeenCalledWith("finance");
     expect(getTriggers).toHaveBeenCalledWith(undefined);
   });
   client.clear();
