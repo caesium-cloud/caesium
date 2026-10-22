@@ -838,6 +838,80 @@ func (s *IntegrationTestSuite) TestIncidentApplyJobdefPatchCannotEditItsOwnPolic
 		s.Require().NotContains(string(j.Remediation), "pause_job",
 			"the agent must not have widened its own allowlist")
 	}
+
+	// The same session keeps working on the incident (identity-and-access A8,
+	// unconfined deployment: every job is in the default namespace). Its note
+	// lands on the timeline and its history read returns the failing run.
+	note := fmt.Sprintf("policy-selfedit-note-%d", time.Now().UnixNano())
+	s.requireNSStatus(http.StatusCreated, http.MethodPost, "/v1/agent/incidents/"+incident.ID+"/notes", token,
+		fmt.Sprintf(`{"text":%q}`, note))
+	s.Require().Contains(s.requireNSStatus(http.StatusOK, http.MethodGet, "/v1/incidents/"+incident.ID, s.authAPIKey, ""), note)
+	s.Require().Contains(s.requireNSStatus(http.StatusOK, http.MethodGet,
+		"/v1/agent/incidents/"+incident.ID+"/context/history", token, ""), runID)
+
+	approvePatch := func(d schema.Definition, reason string) approvalAction {
+		s.T().Helper()
+		patch, err := json.Marshal(d)
+		s.Require().NoError(err)
+		status, body := s.postWithToken(
+			fmt.Sprintf("%s/v1/agent/incidents/%s/actions", s.caesiumURL, incident.ID),
+			token,
+			map[string]any{
+				"type":   "apply_jobdef_patch",
+				"params": map[string]any{"definition": json.RawMessage(patch)},
+			})
+		s.Require().Equal(http.StatusAccepted, status, string(body))
+		var proposed struct {
+			Action approvalAction `json:"action"`
+		}
+		s.Require().NoError(json.Unmarshal(body, &proposed))
+		var approval string
+		for _, a := range s.awaitIncidentStatus(incident.ID, "awaiting_approval", 30*time.Second).Approvals {
+			if a.ActionID == proposed.Action.ID && a.Decision == "pending" {
+				approval = a.ID
+			}
+		}
+		s.Require().NotEmpty(approval, "no pending approval for the patch")
+		out, err := s.runCLIStdout(s.incidentCLIArgs("approve", incident.ID,
+			"--approval", approval, "--reason", reason)...)
+		s.Require().NoError(err, "caesium incident approve failed:\n%s", out)
+		return requireActionByID(s, s.incidentDetail(incident.ID), proposed.Action.ID)
+	}
+	withStep := func(command string, datasets *schema.StepDatasets) schema.Definition {
+		d := def
+		step := def.Steps[0]
+		step.Command = []string{"sh", "-c", command}
+		step.Datasets = datasets
+		d.Steps = []schema.Step{step}
+		return d
+	}
+
+	// A patch making this job a second producer of another job's dataset fails
+	// the importer's validation. Both jobs live in the incident's namespace, so
+	// the diagnostic recorded on the timeline is kept verbatim.
+	producer := alias + "-producer"
+	dataset := alias + "-dataset"
+	producerDef := failingJobDefinition(producer, s.engineType)
+	producerDef.Steps[0].Datasets = &schema.StepDatasets{Produces: []schema.ProducedDataset{{Name: dataset}}}
+	s.applyDefinition(producerDef)
+	conflicting := approvePatch(withStep("echo conflicting; exit 1",
+		&schema.StepDatasets{Produces: []schema.ProducedDataset{{Name: dataset}}}), "second producer")
+	s.Require().Equal("failed", conflicting.Status, "a duplicate producer is refused")
+	s.Require().Contains(string(conflicting.Result), producer,
+		"a conflict inside the incident's namespace keeps its diagnostic")
+
+	// A patch that leaves the policy alone is applied through the importer.
+	applied := approvePatch(withStep("echo patched by the agent; exit 1", nil), "policy unchanged")
+	s.Require().Equal("executed", applied.Status, string(applied.Result))
+	var appliedResult struct {
+		Applied bool `json:"applied"`
+		Diff    struct {
+			Empty bool `json:"empty"`
+		} `json:"diff"`
+	}
+	s.Require().NoError(json.Unmarshal(applied.Result, &appliedResult))
+	s.Require().True(appliedResult.Applied)
+	s.Require().False(appliedResult.Diff.Empty, "the patch changed the step command")
 }
 
 // TestIncidentApprovalSecondPendingRequestStaysDecidable is #417: one incident
