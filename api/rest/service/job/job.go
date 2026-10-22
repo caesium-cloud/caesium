@@ -99,6 +99,9 @@ type ListRequest struct {
 	OrderBy   []string
 	TriggerID string
 	Aliases   []string
+	// Namespace narrows the list to one namespace within the caller's allowed
+	// set (the ?namespace= view filter); empty applies no narrowing.
+	Namespace string
 }
 
 type RunListSummary struct {
@@ -149,6 +152,9 @@ func (j *jobService) List(req *ListRequest) (models.Jobs, error) {
 	// A namespace-confined caller lists only its namespaces' jobs; a job-scoped
 	// key's alias filter above narrows it further, never widens it (B4).
 	q = authz.NamespaceFilter(q, "jobs.namespace")
+	if req.Namespace != "" {
+		q = authz.NarrowToNamespace(q, "jobs.namespace", req.Namespace)
+	}
 
 	for _, orderBy := range req.OrderBy {
 		q = q.Order(orderBy)

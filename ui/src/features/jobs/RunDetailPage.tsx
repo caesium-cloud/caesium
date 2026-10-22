@@ -28,7 +28,8 @@ import { INCIDENT_EVENT_TYPES } from "@/features/incidents/incident-utils";
 import { useDagHeight } from "@/hooks/useDagHeight";
 import { api, type Atom, type Incident, type JobRun, type JobTask, type TaskRun } from "@/lib/api";
 import { usePrincipal } from "@/lib/auth";
-import { canActIn, canReadConnectors, canReplayRuns, requiresRoleReason } from "@/features/auth/access";
+import { canActIn, canReadConnectors, canReplayRuns, isInsufficientAccessError, requiresRoleReason, retryUnlessDenied } from "@/features/auth/access";
+import { JobAccessDenied } from "@/features/auth/JobAccessDenied";
 import { events, type CaesiumEvent } from "@/lib/events";
 import { formatUTCTimestamp, shortId } from "@/lib/utils";
 import { getRunCacheStats, isTerminalRunStatus, mergeTerminalRunUpdate } from "./cache-utils";
@@ -62,13 +63,19 @@ export function RunDetailPage() {
   const canReadGlobalAtoms = canReadConnectors(principal) ||
     (principal.kind === null && principal.subject === null && principal.role === null);
 
-  const { data: job } = useQuery({ queryKey: ["job", jobId], queryFn: () => api.getJob(jobId) });
+  const { data: job, error: jobError } = useQuery({
+    queryKey: ["job", jobId],
+    queryFn: () => api.getJob(jobId),
+    retry: retryUnlessDenied,
+  });
 
-  const { data: run, isLoading: isLoadingRun } = useQuery({
+  const { data: run, isLoading: isLoadingRun, error: runError } = useQuery({
     queryKey: ["job", jobId, "runs", runId],
     queryFn: () => api.getJobRun(jobId, runId),
+    retry: retryUnlessDenied,
     // SSE is immediate; polling reconciles missed events across cluster replicas.
-    refetchInterval: streamHealthy ? 5000 : 3000,
+    // A denied run (a moved job's history in a namespace outside the grants) never changes.
+    refetchInterval: (query) => (isInsufficientAccessError(query.state.error) ? false : streamHealthy ? 5000 : 3000),
   });
 
   const receiptQuery = useQuery({
@@ -328,6 +335,13 @@ export function RunDetailPage() {
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
   }, []);
+
+  // The job read is denied (deep link outside the grants) or, for a moved job, the
+  // run was persisted in a namespace outside them: both answer 403, handled before
+  // the loading and not-found fallbacks.
+  if (isInsufficientAccessError(jobError) || isInsufficientAccessError(runError)) {
+    return <JobAccessDenied />;
+  }
 
   if (isLoading) {
     return (

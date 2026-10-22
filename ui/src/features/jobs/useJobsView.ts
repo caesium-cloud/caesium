@@ -4,6 +4,7 @@ import { api, type Job, type JobRun } from "@/lib/api";
 import { events, type CaesiumEvent } from "@/lib/events";
 import { mergeLatestRun } from "./run-updates";
 import { coalescedRefresh } from "@/lib/coalesced-refresh";
+import { scopedKey, useNamespaceView } from "@/features/auth/namespaceView";
 import type { RunSummary } from "@/components/ui/run-strip";
 
 export type StatusFilter = "all" | "running" | "succeeded" | "failed" | "paused";
@@ -98,19 +99,28 @@ export function useJobsView() {
   const activityIdRef = useRef(0);
   const activityKeysRef = useRef(new Set<string>());
   const jobAliasesRef = useRef(new Map<string, string>());
+  const namespaceRef = useRef<string | null>(null);
   const pendingActivityRef = useRef<PendingActivityEntry[]>([]);
 
   const setStatusFilter = useCallback((f: StatusFilter) => setStatusFilterState(f), []);
   const setSearch = useCallback((s: string) => setSearchState(s), []);
   const setSort = useCallback((s: SortKey) => setSortState(s), []);
 
+  // The view filter narrows server-side (GET /v1/jobs?namespace=) within the
+  // caller's grants; with no selection this is the plain ["jobs"] list.
+  const { selection: namespace } = useNamespaceView();
+
+  useEffect(() => {
+    namespaceRef.current = namespace;
+  }, [namespace]);
+
   useEffect(() => {
     writeUrlParams(statusFilter, search, sort, historyWindow);
   }, [statusFilter, search, sort, historyWindow]);
 
   const { data: jobs, isLoading, error } = useQuery({
-    queryKey: ["jobs"],
-    queryFn: api.getJobs,
+    queryKey: scopedKey("jobs", namespace),
+    queryFn: () => api.getJobs(namespace ?? undefined),
     // The bounded list also reconciles events produced on another replica.
     refetchInterval: streamHealthy ? 60000 : 15000,
   });
@@ -183,7 +193,7 @@ export function useJobsView() {
         return;
       }
 
-      queryClient.setQueryData(["jobs"], (old: Job[] | undefined) =>
+      queryClient.setQueriesData<Job[]>({ queryKey: ["jobs"] }, (old) =>
         old?.map((job) =>
           job.id === jobID
             ? { ...job, latest_run: run ? mergeLatestRun(job.latest_run, run) : job.latest_run }
@@ -194,6 +204,13 @@ export function useJobsView() {
         queryClient.setQueryData(["job", jobID], (old: Job | undefined) =>
           old ? { ...old, latest_run: mergeLatestRun(old.latest_run, run) } : old,
         );
+      }
+
+      // Outside the selected namespace the job is not in the narrowed list: keep
+      // it out of the activity feed (the lists were already updated above).
+      if (namespaceRef.current && !jobAliasesRef.current.has(jobID)) {
+        refreshHistory();
+        return;
       }
 
       const payloadAlias = run?.job_alias?.trim();
@@ -231,7 +248,7 @@ export function useJobsView() {
         refreshHistory();
         return;
       }
-      queryClient.setQueryData(["jobs"], (old: Job[] | undefined) =>
+      queryClient.setQueriesData<Job[]>({ queryKey: ["jobs"] }, (old) =>
         old?.map((job) => (job.id === payload.id ? { ...job, paused: payload.paused } : job)),
       );
       queryClient.setQueryData(["job", payload.id], (old: Job | undefined) =>
@@ -244,7 +261,7 @@ export function useJobsView() {
         refreshHistory();
         return;
       }
-      queryClient.setQueryData(["jobs"], (old: Job[] | undefined) =>
+      queryClient.setQueriesData<Job[]>({ queryKey: ["jobs"] }, (old) =>
         old?.map((job) => {
           const lr = job.latest_run;
           if (job.id !== e.job_id || !lr || lr.id !== e.run_id) return job;
@@ -266,6 +283,13 @@ export function useJobsView() {
       events.unsubscribe("task_cached", onTaskCached);
     };
   }, [appendActivity, queryClient]);
+
+  // Activity collected before the selection changed may name jobs outside it.
+  const visibleActivity = useMemo(() => {
+    if (!namespace) return activity;
+    const ids = new Set((jobs ?? []).map((job) => job.id));
+    return activity.filter((entry) => ids.has(entry.jobId));
+  }, [activity, jobs, namespace]);
 
   const counts = useMemo<JobCounts>(() => {
     if (!jobs) return { all: 0, running: 0, succeeded: 0, failed: 0, paused: 0 };
@@ -349,7 +373,7 @@ export function useJobsView() {
     setHistoryWindow,
     isLoading,
     error: error as Error | null,
-    activity,
+    activity: visibleActivity,
   };
 }
 

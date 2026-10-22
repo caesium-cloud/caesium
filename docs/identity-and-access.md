@@ -1561,6 +1561,31 @@ grants are known not to allow it.
   never more. The Console's dataset hold release control still follows the
   cluster role: it does not resolve a dataset's producers, while the server
   requires `operator` in every producer namespace.
+- **Namespace switcher.** The header offers a namespace switcher when the
+  principal can see more than one namespace (hidden otherwise). A namespace-
+  confined principal is offered its own namespaces; a cluster-wide one also gets
+  the declared namespaces (`GET /v1/auth/namespaces`, requested only by an
+  unscoped cluster viewer or higher, never by a job-scoped key) and the
+  namespaces of the jobs it can read. The choice is a **view filter**: it only
+  narrows what the server already returns for the principal's grants, is kept
+  in the browser's `localStorage` (never the credential), and a stored value the
+  principal cannot see is ignored. The job, trigger and incident lists send it
+  as `?namespace=` (the sidebar counts for jobs, triggers and incidents follow
+  it); the server narrows within the allowed set and answers an empty `200` for a
+  namespace the caller cannot read. Other lists are not narrowed: datasets,
+  holds and lineage use OpenLineage namespaces, which are a different concept,
+  and atoms and the contract graph are shared views.
+- **Chips and foreign links.** Every job on the Jobs page and the job detail
+  header shows its namespace as a chip, whatever the switcher is set to. A deep
+  link to a job (or to a run of a job that moved out of the principal's
+  namespaces) that the server answers `403` renders an access-denied page with a
+  fixed message instead of "Job not found"; the server's text, which can name
+  namespaces, is never shown. A lineage or contract node owned by another
+  namespace appears only as "Another namespace": no alias, dataset, link or
+  tooltip.
+- **Quota-held runs.** A queued run held by its namespace's run quota
+  (`held_reason: namespace_quota`) is labelled "Held by namespace quota" in the
+  job's run queue.
 - **Access page (`/access`, sidebar entry for everyone).** "My access" shows the
   subject, kind, cluster role and per-namespace grants. Principals with a
   cluster role (and no job scope) also see the declared namespaces and their

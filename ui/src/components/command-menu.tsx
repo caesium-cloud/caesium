@@ -16,6 +16,7 @@ import { shortId } from "@/lib/utils"
 import { RelativeTime } from "./relative-time"
 import { commandPaletteFilter } from "./command-filter"
 import { Kbd } from "./ui/kbd"
+import { scopedKey, useNamespaceView } from "@/features/auth/namespaceView"
 
 export function CommandMenu() {
   const [open, setOpen] = React.useState(false)
@@ -24,8 +25,9 @@ export function CommandMenu() {
   const inputRef = React.useRef<HTMLInputElement>(null)
   const shortcut = /Mac|iPhone|iPad/.test(navigator.platform) ? "⌘ K" : "Ctrl K"
 
-  const { data: jobs } = useQuery({ queryKey: ["jobs"], queryFn: api.getJobs, enabled: open });
-  const { data: triggers } = useQuery({ queryKey: ["triggers"], queryFn: api.getTriggers, enabled: open });
+  const { selection } = useNamespaceView();
+  const { data: jobs } = useQuery({ queryKey: scopedKey("jobs", selection), queryFn: () => api.getJobs(selection ?? undefined), enabled: open });
+  const { data: triggers } = useQuery({ queryKey: scopedKey("triggers", selection), queryFn: () => api.getTriggers(selection ?? undefined), enabled: open });
   const { data: atoms } = useQuery({ queryKey: ["atoms"], queryFn: api.getAtoms, enabled: open });
   React.useEffect(() => {
     const down = (e: KeyboardEvent) => {

@@ -7,6 +7,7 @@ import (
 	"github.com/caesium-cloud/caesium/api/internal/orderby"
 	"github.com/caesium-cloud/caesium/api/middleware"
 	"github.com/caesium-cloud/caesium/api/rest/service/job"
+	"github.com/caesium-cloud/caesium/internal/authz"
 	"github.com/caesium-cloud/caesium/internal/models"
 	runstorage "github.com/caesium-cloud/caesium/internal/run"
 	"github.com/google/uuid"
@@ -96,6 +97,13 @@ func parseListRequest(c *echo.Context) (req *job.ListRequest, err error) {
 		if req.OrderBy, err = orderby.Parse(orderBy, jobListOrderColumns); err != nil {
 			return nil, err
 		}
+	}
+
+	// ?namespace= narrows within the caller's allowed set; omitted or "*" does not.
+	if namespace, narrow, nerr := authz.ParseNamespaceNarrow(c.QueryParam("namespace")); nerr != nil {
+		return nil, nerr
+	} else if narrow {
+		req.Namespace = namespace
 	}
 
 	return
