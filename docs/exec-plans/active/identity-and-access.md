@@ -71,7 +71,7 @@ fairness was parked by `docs/exec-plans/active/window-scheduling.md` (its §"Glo
 vs. per-job load ceiling"); Stream D of this plan owns the v1 slice (issue #395) and
 window-scheduling's parked note points here.
 
-## Progress (as of 2026-10-21)
+## Progress (as of 2026-10-22)
 
 W1 merged on 2026-10-13: A1 (#624), B1 (#625), the separately authorized DB
 repair (#626) and the W1 plan sync (#622). W2 merged on 2026-10-16: A2 (#638
@@ -89,6 +89,9 @@ F1 with F3 (#667 `9a8c8b93`), D4 (#673 `cd281a51`), B9 (#668 `1697ee78`) and D1 
 (#672 `983e78a0`) are merged; the user merged #665 and asked for admin merges of the
 other five. B2 was split during W4: confined job writes and trigger tenancy moved to the
 new item B9, and B4 added B7 (DAG snapshot namespaces). Every review comment, including parallel user and greptile reviews, was answered before merge.
+W6 merged on 2026-10-22 by admin merge at the user's request: B7 (#682 `29d1f175`), B6 (#683
+`41ec13cf`), B5 (#685 `b155ed6f`), A8 (#681 `ce68f819`), C1 with C5 (#679 `dcefc911`) and E5
+(#684 `d59be1cc`). A6 moved from W6 to W7.
 
 ### Wave 1 — Foundations (2026-10-09)
 
@@ -479,6 +482,77 @@ finisher agents only. The six PRs merged in the order #650 → #655 → #654 →
     namespace a source still uses.
   - No PostgreSQL lane exercises the key row locks or the delivery-ownership SQL.
 
+### Wave 6 — Snapshots, datasets, aggregates, agent sessions, Kubernetes target, CLI login (2026-10-22)
+
+Briefs were grounded at master `805f3252` and critiqued by Codex before dispatch; every P1
+and P2 was folded in. Each PR had pre-PR Codex rounds, Codex rounds on the PR head and a
+sweep of greptile threads before merge. The six PRs were merged in order onto a scratch
+branch, conflicts resolved by union, and the combined tree passed lint, unit tests, both
+integration lanes (402 and 113 scenarios), the scripts suite and the docs guardrails. Each
+PR was then updated to that tree and admin-merged at the user's request. No Workflow
+fan-outs were used.
+
+- **W6-α / B7 — namespace-aware DAG snapshots, plus canonical aliases:** merged
+  [PR #682](https://github.com/caesium-cloud/caesium/pull/682) as `29d1f175`. Snapshots carry
+  the namespace they were written in and dedupe on it, so a move writes a fresh snapshot.
+  Legacy NULL snapshots are cluster-only. Blame, topology and topology history are live for
+  confined viewers and computed over the snapshots they may read; a commit only an
+  unreadable snapshot carries answers 404. `pkg/jobdef.ValidateAlias` refuses leading or
+  trailing whitespace in `metadata.alias` for every writer (400); git sync skips such a
+  manifest on its own and protects its working job from prune (greptile P1, fixed).
+- **W6-γ / B6 — dataset tenancy via declared producers:** merged
+  [PR #683](https://github.com/caesium-cloud/caesium/pull/683) as `41ec13cf`. A dataset belongs
+  to the current namespaces of its declared producers; the dataset and hold lists filter in
+  SQL; single-dataset reads withhold what another namespace owns (derivations by a new
+  producer-namespace stamp, metrics by run, the state reason by its author, hold runs).
+  Advance and hold release need the role in every producer namespace, re-checked in the
+  write transaction (advisory lock plus `FOR SHARE` on PostgreSQL). A foreign and a
+  nonexistent dataset get the same audited 403. Nine pre-PR rounds and a fixer closed
+  producer-move races, including a start-parameters fence at admission.
+- **W6-β / B5 — aggregate redaction:** merged
+  [PR #685](https://github.com/caesium-cloud/caesium/pull/685) as `b155ed6f`. Lineage impact
+  and the contracts graph redact foreign nodes to `{id, kind: "external"}` (impact
+  placeholders keep `depth`, a one-clause amendment to design §8.3) with per-response HMAC
+  ids, keep collapsed topology, and require every merged edge contributor to be readable.
+  A root the caller does not own answers like a nonexistent one. The Console renders the
+  placeholder.
+- **W6-δ / A8 — agent sessions confined:** merged
+  [PR #681](https://github.com/caesium-cloud/caesium/pull/681) as `ce68f819`. The frozen
+  allow-list keeps only the incident's namespace (foreign downstream jobs are counted);
+  every agent read is confined at serve time by the run's persisted namespace; a moved-out
+  job's DAG and remediation are withheld; jobdef patches cannot move a job; session content
+  written before A8 is hidden from confined readers. A6 was split out to W7.
+- **W6-ε / C1 + C5 — Kubernetes target per request, secret scoping end to end:** merged
+  [PR #679](https://github.com/caesium-cloud/caesium/pull/679) as `dcefc911`. Kubernetes steps
+  run in the namespace and service account their run namespace maps to, resolved once per
+  execution before the cache identity; new pod runtime ids are `<namespace>/<pod>`; relative
+  `secret://k8s` references read in the mapped namespace; replay compares targets.
+  `TestSecretScopeMarketingAllowList` proves C4 end to end, and `caesium why --json` gains an
+  additive `failureClass` (omitted when unknown).
+- **W6-ζ / E5 — `caesium login`, `logout`, `whoami`:** merged
+  [PR #684](https://github.com/caesium-cloud/caesium/pull/684) as `d59be1cc`. Durable login
+  transactions, a CSRF-protected confirmation, and a PKCE-checked exchange that mints the
+  user-bound key; the key is minted at exchange, not at authorize (design §13.1 amended).
+  `POST /auth/logout` revokes the presented user-bound bearer; every CLI command resolves
+  credentials through `cmd/cliutil` (`--api-key` > env > stored login).
+- **Decisions awaiting the user's sign-off:** mint at exchange (#684, §13.1); impact
+  placeholders keep `depth` (#685, §8.3); additive `failureClass` in `why --json` (#679);
+  namespace-qualified Kubernetes `runtime_id` (#679).
+- **CI:** three PRs first failed the hosted coverage diff ratchet (changed files reached only
+  by scenarios that need a policy file); fixers added policy-free journey scenarios without
+  lowering floors. `coverage-ratchets` runs 38–44 of its 45 minutes on master, so a slow
+  runner can time it out. Infra flakes: a `docker.service` start failure and a Docker image
+  store setup failure, both rerun green.
+- **Follow-ups (owner):** W7-ε covers the lint/diff edge-id collision, receipt snapshot
+  binding for confined readers, replay copying the old namespace's start view (params and
+  descriptors), trimmed-alias producer identity, the PostgreSQL advance CAS and a B9 test
+  race. Others: a reaper that uses the multi-namespace `List` (C1); a live kind proof of a
+  mapped target (C3); Windows credential-file locking and an OS keychain (E5); the real
+  policy-backed browser journey for the quota label (G2); raise or split the
+  `coverage-ratchets` timeout (CI).
+- **Next waves:** W7 is dispatched on the W6 tree with A6, E1b + E2, C2, F2 + F4 and the W6
+  follow-ups. W8: A7, G3, G4, C3, G2, then N-2.
+
 ### Wave 5 — User-bound keys, Keycloak lane, Console gating, confined writes, quotas, shared objects (2026-10-20)
 
 Briefs were grounded at master `e658a173` and critiqued by Codex before dispatch (every P1
@@ -650,13 +724,13 @@ fan-outs were used.
 
 | Stream | Scope | Priority | Status |
 |--------|-------|----------|--------|
-| A | Policy file, grants, principal, route classes, namespace-aware middleware, keys with namespaces, SSO-admin key management | **P0** | A1 #624, A2 #638, A3 #647, A4 #645, A5 #654 merged; A8, A6 next |
-| B | `metadata.namespace` on jobs: schema, columns, importer, lint, apply/prune/move, git-sync allowlist, collection filtering, aggregate collapse | **P0** | B1 #625, B2 #657, B3 #639, B4 #661, B9 #668 merged; B7, B5, B6 next |
-| C | Runtime isolation: per-namespace Kubernetes namespace + service account, scoped secret resolution, Helm RBAC | P1 | C4 merged #660; C1, C5 next |
+| A | Policy file, grants, principal, route classes, namespace-aware middleware, keys with namespaces, SSO-admin key management | **P0** | A1 #624, A2 #638, A3 #647, A4 #645, A5 #654, A8 #681 merged; A6 in W7; A7 in W8 |
+| B | `metadata.namespace` on jobs: schema, columns, importer, lint, apply/prune/move, git-sync allowlist, collection filtering, aggregate collapse | **P0** | B1 #625, B2 #657, B3 #639, B4 #661, B9 #668, B7 #682, B6 #683, B5 #685 merged — complete |
+| C | Runtime isolation: per-namespace Kubernetes namespace + service account, scoped secret resolution, Helm RBAC | P1 | C4 #660, C1 + C5 #679 merged; C2 in W7; C3 in W8 |
 | D | Run quota + round-robin fairness (#395 v1 slice); namespaced notification channels, policies, agent profiles | P1 | D1 + D2 #672, D3 #640, D4 #673 merged |
-| E | Identity lifecycle: IdP group refresh, user/session administration, user-bound keys, `caesium login` | P1 | E1 #646 (LDAP refresh split to E1b), E3 #655, E4 #665 merged; E1b, E2, E5 next |
-| F | Console: grants-aware gating, namespace switcher, namespace chips, quota label, Access page | P1 | F1 + F3 merged #667; F2 after B5, F4 after D2 |
-| G | Keycloak: realm fixture, CI lane, Playwright + Go scenarios, operator guidance | P1 | G1 + G5 merged #666; G3 after E2, G4 after E5, G2 after F2 |
+| E | Identity lifecycle: IdP group refresh, user/session administration, user-bound keys, `caesium login` | P1 | E1 #646, E3 #655, E4 #665, E5 #684 merged; E1b + E2 in W7 |
+| F | Console: grants-aware gating, namespace switcher, namespace chips, quota label, Access page | P1 | F1 + F3 merged #667; F2 + F4 in W7 |
+| G | Keycloak: realm fixture, CI lane, Playwright + Go scenarios, operator guidance | P1 | G1 + G5 merged #666; G3, G4, G2 in W8 |
 | H- | Harness: integration server policy fixture, `--json` stdout discipline for new verbs | — | H-1 #657, H-2 #645 merged |
 | N- | Docs: rename + grow the identity-and-access guide; roadmap, README, sovereignty | — | N-1 merged #648; N-2 at close-out |
 
