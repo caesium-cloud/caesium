@@ -482,7 +482,10 @@ func TestLoginDuringRefreshDiscardsEveryOutcome(t *testing.T) {
 	applied, err = f.users.CompleteRefreshDiscard(t.Context(), user.ID, 1, "node-a/1")
 	require.NoError(t, err)
 	require.False(t, applied)
-	result, err := f.users.CompleteRefreshDefinitive(t.Context(), user.ID, 1, "node-a/1", f.clock.Now())
+	result, err := f.users.CompleteRefreshDefinitive(t.Context(), user.ID, 1, "node-a/1", DenialOfGrant, f.clock.Now())
+	require.NoError(t, err)
+	require.Equal(t, DefinitiveDiscarded, result.Outcome)
+	result, err = f.users.CompleteRefreshDefinitive(t.Context(), user.ID, 1, "node-a/1", DenialOfSubject, f.clock.Now())
 	require.NoError(t, err)
 	require.Equal(t, DefinitiveDiscarded, result.Outcome)
 
@@ -516,7 +519,7 @@ func TestUncertainThenInvalidGrantClearsGrantWithoutRevoking(t *testing.T) {
 	require.Equal(t, int64(1), row.RefreshGrantVersion)
 
 	require.True(t, f.claim(t, user.ID, 1, "node-b/1"))
-	result, err := f.users.CompleteRefreshDefinitive(t.Context(), user.ID, 1, "node-b/1", f.clock.Now())
+	result, err := f.users.CompleteRefreshDefinitive(t.Context(), user.ID, 1, "node-b/1", DenialOfGrant, f.clock.Now())
 	require.NoError(t, err)
 	require.Equal(t, DefinitiveResult{Outcome: DefinitiveGrantCleared}, result)
 
@@ -542,7 +545,7 @@ func TestDefinitiveOnCertainGrantRevokesOnlyThatUsersSessions(t *testing.T) {
 
 	require.True(t, f.claim(t, user.ID, 1, "node-a/1"))
 	denialAt := f.clock.Advance(time.Minute)
-	result, err := f.users.CompleteRefreshDefinitive(t.Context(), user.ID, 1, "node-a/1", denialAt)
+	result, err := f.users.CompleteRefreshDefinitive(t.Context(), user.ID, 1, "node-a/1", DenialOfGrant, denialAt)
 	require.NoError(t, err)
 	require.Equal(t, DefinitiveResult{Outcome: DefinitiveRevoked, SessionsRevoked: 2}, result)
 
@@ -567,6 +570,21 @@ func TestDefinitiveOnCertainGrantRevokesOnlyThatUsersSessions(t *testing.T) {
 	require.NotNil(t, f.row(t, other.ID).RefreshGrant)
 }
 
+func TestDenialOfSubjectRevokesEvenWhenUncertain(t *testing.T) {
+	f := newRefreshFixture(t)
+	user := f.login(t, oidcIdentity("ada", "token-1"))
+	f.newSession(t, user.ID)
+	require.True(t, f.claim(t, user.ID, 1, "node-a/1"))
+	f.clock.Advance(time.Minute)
+	require.True(t, f.claim(t, user.ID, 1, "node-b/1"))
+	require.True(t, f.row(t, user.ID).RefreshUncertain)
+
+	result, err := f.users.CompleteRefreshDefinitive(t.Context(), user.ID, 1, "node-b/1", DenialOfSubject, f.clock.Now())
+	require.NoError(t, err)
+	require.Equal(t, DefinitiveRevoked, result.Outcome)
+	require.Zero(t, f.liveSessions(t, user.ID))
+}
+
 // TestCrashAfterRedemptionNeverRevokes is R2: a holder that redeemed (and
 // perhaps rotated) the grant and died without recording anything leaves an
 // expired lease with its owner set; the next claimant's invalid_grant then
@@ -588,7 +606,7 @@ func TestCrashAfterRedemptionNeverRevokes(t *testing.T) {
 	require.Equal(t, "token-T", req.Grant.Handle.Reveal())
 	// The IdP answers node-b's redemption of the rotated-away token with
 	// invalid_grant.
-	result, err := f.users.CompleteRefreshDefinitive(t.Context(), user.ID, 1, "node-b/1", f.clock.Now())
+	result, err := f.users.CompleteRefreshDefinitive(t.Context(), user.ID, 1, "node-b/1", DenialOfGrant, f.clock.Now())
 	require.NoError(t, err)
 	require.Equal(t, DefinitiveGrantCleared, result.Outcome)
 	require.Equal(t, int64(1), f.liveSessions(t, user.ID))
@@ -778,7 +796,7 @@ func TestDefinitiveRetriesTheWholeTransaction(t *testing.T) {
 			require.True(t, f.claim(t, user.ID, 1, "node-a/1"))
 
 			sessionUpdates := failUpdates(t, f.db, "sessions", 1, injected)
-			result, err := f.users.CompleteRefreshDefinitive(t.Context(), user.ID, 1, "node-a/1", f.clock.Now())
+			result, err := f.users.CompleteRefreshDefinitive(t.Context(), user.ID, 1, "node-a/1", DenialOfGrant, f.clock.Now())
 			require.NoError(t, err)
 			require.Equal(t, DefinitiveResult{Outcome: DefinitiveRevoked, SessionsRevoked: 1}, result,
 				"the retry must see the first attempt's grant clear rolled back, or its fence would fail")
@@ -800,7 +818,7 @@ func TestDefinitiveRollsBackOnFailure(t *testing.T) {
 
 	boom := errors.New("disk I/O error")
 	sessionUpdates := failUpdates(t, f.db, "sessions", 100, boom)
-	_, err := f.users.CompleteRefreshDefinitive(t.Context(), user.ID, 1, "node-a/1", f.clock.Now())
+	_, err := f.users.CompleteRefreshDefinitive(t.Context(), user.ID, 1, "node-a/1", DenialOfGrant, f.clock.Now())
 	require.ErrorIs(t, err, boom)
 	require.Equal(t, int32(1), sessionUpdates.Load(), "a non-contention error is not retried")
 

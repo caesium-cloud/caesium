@@ -1001,6 +1001,36 @@ if cleanup_coverage_journeys; then exit 9; fi
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual((self.tmp / 'retained-owned-container-ids.txt').read_text().strip(), 'owned-id')
 
+    def test_shell_remove_owned_guards_each_container_with_its_own_image(self):
+        # The auth lane's OpenLDAP fixture is tracked with its own image; its
+        # removal (success path and failure cleanup) must be guarded against
+        # that image, not the Caesium $IMAGE_ID, or the guard refuses it.
+        shell = '''set -eu
+source "$1/scripts/coverage-journeys.sh"
+ARTIFACTS="$2"; CALLS="$2/calls"
+IMAGE_ID=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+LDAP=sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+coverage_journey_resource() {
+  local image="${4:-}"
+  [[ "$2" == container && -z "$image" ]] && image="$IMAGE_ID"
+  printf '%s %s\\n' "$3" "$image" >>"$CALLS"
+}
+log() { :; }
+coverage_journey_track_id server-id
+coverage_journey_track_id ldap-id "$LDAP"
+coverage_journey_track_id other-id
+coverage_journey_remove_owned ldap-id
+[[ "${COVERAGE_JOURNEY_ACTIVE_IDS[*]}" == "server-id other-id" ]]
+[[ "${COVERAGE_JOURNEY_ACTIVE_ID_IMAGES[*]}" == "$IMAGE_ID $IMAGE_ID" ]]
+coverage_journey_track_id ldap-2 "$LDAP"
+cleanup_coverage_journeys
+'''
+        result = subprocess.run(['bash', '-c', shell, 'hermetic', str(ROOT), str(self.tmp)], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        image, ldap = 'sha256:' + 'a' * 64, 'sha256:' + 'b' * 64
+        self.assertEqual((self.tmp / 'calls').read_text().splitlines(), [
+            f'ldap-id {ldap}', f'server-id {image}', f'other-id {image}', f'ldap-2 {ldap}'])
+
     def test_index_config_receipts_remain_distinct_and_legacy_works(self):
         for config, index in ((CONFIG, INDEX), (CONFIG, CONFIG)):
             c = self.collector()

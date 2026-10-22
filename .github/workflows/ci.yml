@@ -2423,6 +2423,18 @@ jobs:
           fixture_id="$(docker image inspect --format '{{.Id}}' "$fixture")"
           [[ "$fixture_id" =~ ^sha256:[0-9a-f]{64}$ ]]
           echo "CAESIUM_COVERAGE_CONNECTOR_FIXTURE_IMAGE=$fixture_id" >>"$GITHUB_ENV"
+      # The auth journey signs LDAP users in against an OpenLDAP fixture
+      # (identity-and-access E1b). The collector never pulls, so the pinned
+      # image (scripts/ldap-fixture.sh) is pulled here and passed by ID.
+      - name: Prepare pinned OpenLDAP fixture for the auth journey
+        run: |
+          set -euo pipefail
+          ref="$(sed -n 's/^DEFAULT_IMAGE="\(.*\)"$/\1/p' scripts/ldap-fixture.sh)"
+          [[ "$ref" == osixia/openldap:*@sha256:* ]]
+          docker pull --platform linux/amd64 "$ref"
+          ldap_id="$(docker image inspect --format '{{.Id}}' "$ref")"
+          [[ "$ldap_id" =~ ^sha256:[0-9a-f]{64}$ ]]
+          echo "CAESIUM_COVERAGE_LDAP_IMAGE=$ldap_id" >>"$GITHUB_ENV"
       - name: Coverage collection against the ratchets
         env:
           CAESIUM_RESOURCE_STRESS_IMAGE: caesiumcloud/resource-stress:${{ env.IMAGE_TAG }}-amd64

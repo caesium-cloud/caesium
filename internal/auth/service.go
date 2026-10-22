@@ -52,6 +52,9 @@ type Service struct {
 	policySource                policy.Source
 	policyHolder                *policy.Holder
 	userKeyTTL                  time.Duration
+	// groupFreshness, when set, admits a user-bound key's user (group
+	// refresh and the maximum staleness, identity-and-access E2).
+	groupFreshness GroupFreshness
 
 	// lastUsedMu protects the async last_used_at update buffer.
 	lastUsedMu sync.Mutex
@@ -106,6 +109,14 @@ func (s *Service) PolicyHolder() *policy.Holder {
 func WithValidationFailureMinLatency(d time.Duration) ServiceOption {
 	return func(s *Service) {
 		s.validationFailureMinLatency = d
+	}
+}
+
+// WithGroupFreshness makes user-bound key validation admit the key's user
+// through f (identity-and-access E2).
+func WithGroupFreshness(f GroupFreshness) ServiceOption {
+	return func(s *Service) {
+		s.groupFreshness = f
 	}
 }
 
@@ -643,7 +654,7 @@ func (s *Service) applyFailureLatency(startedAt time.Time, err error) {
 
 func isValidationFailure(err error) bool {
 	return errors.Is(err, ErrKeyNotFound) || errors.Is(err, ErrKeyRevoked) || errors.Is(err, ErrKeyExpired) ||
-		errors.Is(err, ErrUserDisabled)
+		errors.Is(err, ErrUserDisabled) || errors.Is(err, ErrStaleGroups)
 }
 
 func (s *Service) tryCreateBootstrapKey(key *models.APIKey) (int64, error) {

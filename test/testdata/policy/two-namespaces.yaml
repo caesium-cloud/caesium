@@ -46,3 +46,14 @@ bindings:
       groups: ["finance-eng"]
     role: operator
     namespaces: ["finance"]
+  # The OpenLDAP fixture's groups (identity-and-access E1b,
+  # test/auth_group_refresh_test.go); the coverage journey's file-less server
+  # maps them with CAESIUM_AUTH_ROLE_MAPPING instead.
+  - subjects:
+      groups: ["iaa-ldap-marketing"]
+    role: operator
+    namespaces: ["marketing"]
+  - subjects:
+      groups: ["iaa-ldap-finance"]
+    role: operator
+    namespaces: ["finance"]

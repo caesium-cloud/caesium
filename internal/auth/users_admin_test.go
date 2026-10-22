@@ -197,7 +197,7 @@ func TestUserAdminDisableFencesAnInFlightRefresh(t *testing.T) {
 	applied, err := f.users.CompleteRefreshSuccess(t.Context(), user.ID, user.RefreshGrantVersion, owner, []string{"admins"}, nil, f.clock.Now())
 	require.NoError(t, err)
 	require.False(t, applied, "a refresh claimed before the disable records nothing")
-	result, err := f.users.CompleteRefreshDefinitive(t.Context(), user.ID, user.RefreshGrantVersion, owner, f.clock.Now())
+	result, err := f.users.CompleteRefreshDefinitive(t.Context(), user.ID, user.RefreshGrantVersion, owner, DenialOfGrant, f.clock.Now())
 	require.NoError(t, err)
 	require.Equal(t, DefinitiveDiscarded, result.Outcome)
 	require.JSONEq(t, `["eng"]`, string(f.row(t, user.ID).Groups))

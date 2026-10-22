@@ -151,6 +151,7 @@ func TestUserPreRefreshTableGainsNullableRefreshState(t *testing.T) {
 	columns := []string{
 		"refresh_grant", "refresh_grant_version", "groups_refreshed_at",
 		"refresh_lease_owner", "refresh_lease_until", "refresh_uncertain",
+		"stale_refused_at",
 	}
 	for _, column := range columns {
 		require.False(t, db.Migrator().HasColumn(&User{}, column), column)
@@ -252,7 +253,7 @@ func TestUserRefreshStateNeverSerialises(t *testing.T) {
 	u := User{
 		ID: uuid.New(), Issuer: "oidc", Subject: "s", Role: RoleViewer,
 		RefreshGrant: []byte("sealed-grant-bytes"), RefreshGrantVersion: 7, GroupsRefreshedAt: &now,
-		RefreshLeaseOwner: &owner, RefreshLeaseUntil: &now, RefreshUncertain: true,
+		RefreshLeaseOwner: &owner, RefreshLeaseUntil: &now, RefreshUncertain: true, StaleRefusedAt: &now,
 	}
 	raw, err := json.Marshal(u)
 	require.NoError(t, err)
@@ -262,6 +263,7 @@ func TestUserRefreshStateNeverSerialises(t *testing.T) {
 		"refresh_grant", "RefreshGrant", "refresh_grant_version", "RefreshGrantVersion",
 		"groups_refreshed_at", "GroupsRefreshedAt", "refresh_lease_owner", "RefreshLeaseOwner",
 		"refresh_lease_until", "RefreshLeaseUntil", "refresh_uncertain", "RefreshUncertain",
+		"stale_refused_at", "StaleRefusedAt",
 	} {
 		require.NotContains(t, fields, key)
 	}

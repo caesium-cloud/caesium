@@ -1370,7 +1370,7 @@ server-brokered `caesium login` flow that works for every provider.
       uncertain grant only clears it. LDAP refresh is deferred to E1b: an LDAP login
       stores no grant (NULL, as for SAML) and `internal/auth/ldap` is unchanged. E2
       must bound each redemption by the lease, TTL ≥ 2× timeout.)
-- [ ] E1b. LDAP group refresh with a live LDAP journey: re-apply the preserved branch
+- [x] E1b. LDAP group refresh with a live LDAP journey: re-apply the preserved branch
       `iaa-e1-ldap-refresh-preserved` (DN + login-predicate re-check, current-username
       group search, context-bounded I/O, the OpenLDAP fixture cases) and add an LDAP
       coverage journey (an OpenLDAP container in the coverage lane and the auth lane)
@@ -1378,7 +1378,10 @@ server-brokered `caesium login` flow that works for every provider.
       LDAP refresh; until then LDAP users have no refresh grant and the E2 staleness
       bound forces re-login, as for SAML.
       Depends on: E1.
-- [ ] E2. The async refresher for **both** credential types: on `SessionStore.Validate`
+      (W7-β: LDAP grant = DN + typed login, `DenialOfSubject`; new
+      `CAESIUM_AUTH_LDAP_CA_FILE`; OpenLDAP over LDAPS on the agent-auth lane and
+      the coverage auth journey via `scripts/ldap-fixture.sh`.)
+- [x] E2. The async refresher for **both** credential types: on `SessionStore.Validate`
       and on `ValidateKey` for a user-bound key (E4), a user whose `GroupsRefreshedAt`
       is older than `CAESIUM_AUTH_GROUP_REFRESH_INTERVAL` (default `15m`) is queued to
       a bounded single-flight-per-user worker using the user's grant; success updates
@@ -1399,6 +1402,9 @@ server-brokered `caesium login` flow that works for every provider.
       `internal/auth/session.go`, `internal/auth/service.go`, `pkg/env/env.go`,
       `cmd/start/start.go`, `internal/metrics/metrics.go`, `internal/auth/audit.go`.
       Depends on: E1 + E4.
+      (W7-β: a failed synchronous refresh past the bound persists
+      `users.stale_refused_at`, cleared only by login; live LDAP scenarios on both
+      auth lanes; Keycloak assertions stay G3.)
 - [x] E3. User and session administration: `GET /v1/auth/users` (filters, paging),
       `GET /v1/auth/users/:id` (with sessions; user-bound keys join in E4),
       `POST …/disable` (revokes sessions, audits `user.disable`; E4 extends the

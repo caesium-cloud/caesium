@@ -216,6 +216,14 @@ func (j *journey) identity(b *browser) (map[string]any, error) {
 	}
 	return value, nil
 }
+
+// Session lifetimes the collector configures on the SSO server
+// (scripts/coverage-journeys.py): the general default and the SAML override.
+const (
+	generalSessionLifetime = 24 * time.Hour
+	samlSessionLifetime    = 2 * time.Hour
+)
+
 func (j *journey) success(l login, provider, target string) (observed, error) {
 	res, err := j.submit(l, provider, false)
 	if err != nil {
@@ -225,15 +233,28 @@ func (j *journey) success(l login, provider, target string) (observed, error) {
 		return res, err
 	}
 	cleared, session := false, false
+	var expires time.Time
 	for _, c := range res.cookies {
 		if c.Name == l.state.Name && c.MaxAge < 0 {
 			cleared = true
 		}
 		if c.Name == "caesium_session" && c.Value != "" && c.HttpOnly {
 			session = true
+			expires = c.Expires
 		}
 	}
 	if err = require(cleared && session, "callback cookie lifecycle mismatch"); err != nil {
+		return res, err
+	}
+	// The session cookie expires with the session's absolute lifetime: SAML
+	// sessions get CAESIUM_AUTH_SAML_SESSION_ABSOLUTE_TTL (the collector sets
+	// samlSessionLifetime), every other provider the general lifetime.
+	want := generalSessionLifetime
+	if provider == "saml" {
+		want = samlSessionLifetime
+	}
+	lifetime := time.Until(expires)
+	if err = require(!expires.IsZero() && lifetime > want-10*time.Minute && lifetime <= want+time.Minute, "session lifetime mismatch"); err != nil {
 		return res, err
 	}
 	who, err := j.identity(l.browser)

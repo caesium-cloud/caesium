@@ -1407,6 +1407,9 @@ class Collector:
             "CAESIUM_AUTH_OIDC_GROUPS_CLAIM": "groups",
             "CAESIUM_AUTH_SAML_ENABLED": "true",
             "CAESIUM_AUTH_SAML_IDP_METADATA_FILE": "/fixture/idp.xml",
+            # Distinct from the general 24h lifetime: the journey asserts each
+            # provider's session cookie expiry (test/fixtures/sso-idp/journey.go).
+            "CAESIUM_AUTH_SAML_SESSION_ABSOLUTE_TTL": "2h",
             "CAESIUM_DATABASE_CONSOLE_ENABLED": "true",
             "CAESIUM_DATABASE_PATH": "/var/lib/caesium/dqlite",
             "DOCKER_HOST": "unix:///var/run/docker.sock",
