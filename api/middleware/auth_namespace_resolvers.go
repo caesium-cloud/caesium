@@ -72,9 +72,9 @@ var namespaceResolvers = map[string]namespaceResolver{
 	"GET /v1/jobs/:id/queue":            resolveJobByID,
 	"GET /v1/jobs/:id/runs":             resolveJobByID,
 	"GET /v1/jobs/:id/runs/diff":        resolveJobRunPair,
-	"GET /v1/jobs/:id/blame":            resolveJobByID, // pending B7
-	"GET /v1/jobs/:id/topology":         resolveJobByID, // pending B7
-	"GET /v1/jobs/:id/topology/history": resolveJobByID, // pending B7
+	"GET /v1/jobs/:id/blame":            resolveJobByID,
+	"GET /v1/jobs/:id/topology":         resolveJobByID,
+	"GET /v1/jobs/:id/topology/history": resolveJobByID,
 	"GET /v1/jobs/:id/cache":            resolveJobByID,
 	"GET /v1/jobs/:id/backfills":        resolveJobByID,
 	"DELETE /v1/jobs/:id":               resolveJobByID,
@@ -157,9 +157,9 @@ var namespaceResolvers = map[string]namespaceResolver{
 	// Datasets: the declared producers' namespaces — any of them for a read,
 	// every one for a write. No declared producer ⇒ cluster-only (a consumer
 	// or an external-source declaration owns nothing).
-	"GET /v1/datasets/:id/:id":             resolveDatasetAny, // pending B6
-	"GET /v1/datasets/:id/:id/derivations": resolveDatasetAny, // pending B6
-	"GET /v1/datasets/:id/:id/metrics":     resolveDatasetAny, // pending B6
+	"GET /v1/datasets/:id/:id":             resolveDatasetAny,
+	"GET /v1/datasets/:id/:id/derivations": resolveDatasetAny,
+	"GET /v1/datasets/:id/:id/metrics":     resolveDatasetAny,
 	"POST /v1/datasets/:id/:id/advance":    resolveDatasetEvery,
 	"POST /v1/datasets/holds/:id/release":  resolveDatasetHold,
 

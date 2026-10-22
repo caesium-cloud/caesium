@@ -605,38 +605,49 @@ func TestNamespacedSharedObjects(t *testing.T) {
 func TestNamespacedDatasetRoutes(t *testing.T) {
 	f := newNSFixture(t)
 	mktOperator := f.key(t, models.RoleOperator, `["marketing"]`)
+	finViewer := f.key(t, models.RoleViewer, `["finance"]`)
+	mktViewer := f.key(t, models.RoleViewer, `["marketing"]`)
 	both := f.key(t, models.RoleOperator, `["marketing","finance"]`)
 	advance := func(who cred, name string) int {
 		return f.do(t, who, post("/v1/datasets/:ns/:name/advance", pv("ns", "_", "name", name), `{"watermark":"x"}`)).status
 	}
-	// Every dataset route is cluster-only for confined principals until B6:
-	// the advance answers with the persisted state, whose last run and
-	// consumed watermarks can predate a producer's move. The producer
-	// resolvers are exercised in the internal tests.
-	for _, name := range []string{"sales", "mkt-only", "orphan", "external"} {
+	// B6: a write needs the role in every producer namespace; a dataset with
+	// no declared producer (only a consumer, only source declarations, or
+	// nothing at all) is cluster-only.
+	require.Equal(t, http.StatusOK, advance(both, "sales"))
+	require.Equal(t, http.StatusOK, advance(mktOperator, "mkt-only"), "a consumer in finance owns nothing")
+	require.Equal(t, http.StatusForbidden, advance(mktOperator, "sales"), "finance co-produces sales")
+	requireAuditMetadata(t, f.lastDenial(t), map[string]any{"pending": nil, "namespaces": []any{"finance", "marketing"}})
+	for _, name := range []string{"orphan", "external"} {
 		require.Equal(t, http.StatusForbidden, advance(both, name), name)
-		requireAuditMetadata(t, f.lastDenial(t), map[string]any{"pending": "B6"})
 	}
-	require.Equal(t, http.StatusForbidden, advance(mktOperator, "mkt-only"))
-	require.Equal(t, http.StatusOK, advance(f.key(t, models.RoleRunner, ""), "sales"), "a cluster runner advances exactly as before")
+	require.Equal(t, http.StatusOK, advance(f.key(t, models.RoleRunner, ""), "orphan"), "a cluster runner advances exactly as before")
 
 	release := func(who cred, hold string) int {
 		return f.do(t, who, post("/v1/datasets/holds/:id/release", pv("id", hold), `{"reason":"ok"}`)).status
 	}
-	// The release response is the whole hold, whose impact snapshot names
-	// downstream consumers in any namespace: cluster-only until B6 redacts
-	// it (the producer resolver is exercised in the internal tests).
-	for _, hold := range []string{f.salesHold.String(), f.mktHold.String(), uuid.NewString(), "not-a-hold"} {
-		require.Equal(t, http.StatusForbidden, release(both, hold), hold)
-		requireAuditMetadata(t, f.lastDenial(t), map[string]any{"pending": "B6"})
-	}
-	clusterOperator := f.key(t, models.RoleOperator, "")
-	require.Equal(t, http.StatusOK, release(clusterOperator, f.salesHold.String()))
+	require.Equal(t, http.StatusForbidden, release(mktOperator, f.salesHold.String()))
+	require.Equal(t, http.StatusOK, release(both, f.salesHold.String()))
+	require.Equal(t, http.StatusOK, release(mktOperator, f.mktHold.String()))
+	require.Equal(t, http.StatusNotFound, release(both, uuid.NewString()))
+	require.Equal(t, http.StatusBadRequest, release(both, "not-a-hold"))
+	require.Equal(t, http.StatusOK, release(f.key(t, models.RoleOperator, ""), f.salesHold.String()))
 
-	// The reads stay pending until B6 filters history by producing run.
-	res := f.do(t, both, get("/v1/datasets/:ns/:name", pv("ns", "_", "name", "sales")))
-	require.Equal(t, http.StatusForbidden, res.status)
-	requireAuditMetadata(t, f.lastDenial(t), map[string]any{"pending": "B6"})
+	// Reads need viewer in any producer namespace. A dataset the caller may
+	// not read and one that does not exist answer the same audited 403.
+	for _, route := range []string{"/v1/datasets/:ns/:name", "/v1/datasets/:ns/:name/derivations", "/v1/datasets/:ns/:name/metrics"} {
+		read := func(who cred, name string) nsResult {
+			return f.do(t, who, get(route, pv("ns", "_", "name", name)))
+		}
+		require.Equal(t, http.StatusOK, read(mktViewer, "sales").status, route)
+		require.Equal(t, http.StatusOK, read(finViewer, "sales").status, route)
+		require.Equal(t, http.StatusOK, read(mktViewer, "mkt-only").status, route)
+		foreign, missing := read(finViewer, "mkt-only"), read(finViewer, "no-such-dataset")
+		require.Equal(t, http.StatusForbidden, foreign.status, route)
+		require.Equal(t, foreign.status, missing.status, route)
+		require.Equal(t, foreign.message, missing.message, route)
+		require.Equal(t, http.StatusForbidden, read(mktViewer, "external").status, route)
+	}
 }
 
 func TestNamespacedAuditQuery(t *testing.T) {
@@ -673,17 +684,19 @@ func TestNamespacedClusterAndPendingRoutes(t *testing.T) {
 		call    nsCall
 		pending string
 	}{
-		{get("/v1/jobs/:id/blame", pv("id", f.mktJob.String())), "B7"},
-		{get("/v1/jobs/:id/topology", pv("id", f.mktJob.String())), "B7"},
 		{post("/v1/events", nil, `{}`), "A6"},
 	} {
 		res := f.do(t, mktAdmin, tc.call)
 		require.Equal(t, http.StatusForbidden, res.status, tc.call.pattern)
 		requireAuditMetadata(t, f.lastDenial(t), map[string]any{"reason": "insufficient_role", "pending": tc.pending})
 	}
-	// A pending job route still audits against the job's namespace.
-	f.do(t, mktAdmin, get("/v1/jobs/:id/topology", pv("id", f.finJob.String())))
-	require.Equal(t, "finance", f.lastDenial(t).Namespace)
+	// Snapshot reads are live for confined principals (B7): allowed in the
+	// job's namespace, and a foreign job's denial audits against its namespace.
+	for _, route := range []string{"/v1/jobs/:id/blame", "/v1/jobs/:id/topology", "/v1/jobs/:id/topology/history"} {
+		require.Equal(t, http.StatusOK, f.do(t, mktAdmin, get(route, pv("id", f.mktJob.String()))).status, route)
+		require.Equal(t, http.StatusForbidden, f.do(t, mktAdmin, get(route, pv("id", f.finJob.String()))).status, route)
+		require.Equal(t, "finance", f.lastDenial(t).Namespace, route)
+	}
 
 	// Identity routes pass any authenticated principal, even with no grants.
 	empty := f.key(t, models.RoleViewer, `[]`)

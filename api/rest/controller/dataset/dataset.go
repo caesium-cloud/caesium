@@ -2,6 +2,7 @@
 package dataset
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -10,12 +11,17 @@ import (
 
 	authmw "github.com/caesium-cloud/caesium/api/middleware"
 	svc "github.com/caesium-cloud/caesium/api/rest/service/dataset"
+	"github.com/caesium-cloud/caesium/internal/authz"
 	"github.com/labstack/echo/v5"
 	"gorm.io/gorm"
 )
 
 // Controller serves the dataset endpoints.
 type Controller struct{}
+
+// newService builds the dataset service for a request; tests swap it to
+// serve the handlers over a test database.
+var newService = svc.New
 
 // New constructs a dataset Controller.
 func New() *Controller {
@@ -31,7 +37,7 @@ func (ctrl *Controller) List(c *echo.Context) error {
 		return err
 	}
 
-	result, err := svc.New(c.Request().Context()).List(params)
+	result, err := newService(c.Request().Context()).List(params)
 	if err != nil {
 		return echo.NewHTTPError(http.StatusInternalServerError, "internal server error").Wrap(err)
 	}
@@ -53,7 +59,7 @@ func (ctrl *Controller) Get(c *echo.Context) error {
 		}
 		options.IncludeHold = include
 	}
-	result, err := svc.New(c.Request().Context()).GetWithOptions(namespace, name, options)
+	result, err := newService(readContext(c)).GetWithOptions(namespace, name, options)
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return echo.ErrNotFound
@@ -78,7 +84,7 @@ func (ctrl *Controller) Derivations(c *echo.Context) error {
 		return err
 	}
 
-	result, err := svc.New(c.Request().Context()).Derivations(params)
+	result, err := newService(readContext(c)).Derivations(params)
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return echo.ErrNotFound
@@ -108,15 +114,41 @@ func (ctrl *Controller) Advance(c *echo.Context) error {
 		return echo.NewHTTPError(http.StatusBadRequest, "watermark is required")
 	}
 
-	result, err := svc.New(c.Request().Context()).Advance(svc.AdvanceParams{
+	result, err := newService(c.Request().Context()).Advance(svc.AdvanceParams{
 		Namespace: namespace,
 		Name:      name,
 		Watermark: watermark,
+		Principal: authmw.GetPrincipal(c),
 	})
 	if err != nil {
+		if mapped := writeError(err); mapped != nil {
+			return mapped
+		}
 		return echo.NewHTTPError(http.StatusInternalServerError, "internal server error").Wrap(err)
 	}
 	return c.JSON(http.StatusOK, result)
+}
+
+// writeError maps the refusals of a confined caller's dataset write (B6):
+// the in-transaction producer re-check's *authz.Denial goes back unchanged,
+// so the auth middleware audits it and answers 403 exactly like its own
+// denials; a producer set that kept changing under the write is a 409. Any
+// other error is nil here (the caller maps it).
+func writeError(err error) error {
+	if denial, ok := errors.AsType[*authz.Denial](err); ok {
+		return denial
+	}
+	if errors.Is(err, svc.ErrProducersChanged) {
+		return echo.NewHTTPError(http.StatusConflict, err.Error())
+	}
+	return nil
+}
+
+// readContext is the context a single-dataset read runs under: narrowed to
+// the namespaces the caller may read when it is namespace-confined (B6), so
+// the service shapes history by owner; unchanged for everyone else.
+func readContext(c *echo.Context) context.Context {
+	return authz.WithHistoryScope(c.Request().Context(), authmw.GetPrincipal(c))
 }
 
 // datasetPath returns the dataset identity the route addresses. It is the

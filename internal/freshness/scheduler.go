@@ -117,7 +117,7 @@ func (e *Evaluator) shouldSkipCronRun(ctx context.Context, jobID uuid.UUID) (Cro
 	// e.db, which would race a shared evaluator across concurrent cron ticks.
 	if err := e.db.Transaction(func(tx *gorm.DB) error {
 		for _, record := range records {
-			if err := e.updateStatusTx(ctx, tx, record.decl.Namespace, record.decl.Name, models.DatasetStatusFresh, strings.TrimPrefix(record.reason, "cron tick skipped: ")); err != nil {
+			if err := e.updateStatusTx(ctx, tx, record.decl, models.DatasetStatusFresh, strings.TrimPrefix(record.reason, "cron tick skipped: ")); err != nil {
 				return err
 			}
 			if err := e.recordDerivationTx(ctx, tx, record.decl, models.DatasetDecisionSkippedFresh, record.reason, record.consumed, nil); err != nil {

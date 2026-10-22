@@ -987,7 +987,12 @@ middleware relies on.
       (W6-β: shipped. Ownership rides the derived row (job and persisted run
       namespaces); impact placeholders keep `depth`; collapsed topology kept;
       `?dataset=` filters after redaction; a consumer never grants an impact root.)
-- [ ] B6. Dataset tenancy via declared producers: a dataset's namespaces are those of
+- [x] B6. (W6-γ: collections SQL-filtered by producer namespace; reads shaped by
+      owner, incl. the state reason via a new `reason_namespace`; advance and
+      release re-check producers in their transaction under the producers'
+      alias advisory locks; uniform audited 403 for foreign and missing
+      datasets; new derivation columns not serialised.)
+      Dataset tenancy via declared producers: a dataset's namespaces are those of
       the jobs referenced by `DatasetDeclaration.JobID` (a `DatasetDerivation` is a
       scheduling decision, frequently without a run, and is not an ownership record);
       `GET /v1/datasets` and `/datasets/holds` include a dataset when the caller holds
@@ -1006,7 +1011,8 @@ middleware relies on.
       `internal/models/dataset_declaration.go`, `internal/models/dataset_derivation.go`,
       `docs/identity-and-access.md`.
       Depends on: A3 + B1 + N-1.
-- [ ] B7. Namespace-aware DAG snapshots: `dag_snapshots` (written by the importer,
+- [x] B7. (W6-α: `dag_snapshots.namespace` is stamped on every write and deduped with the hash, so a move writes a fresh snapshot; blame, topology and topology history are live for confined viewers over the snapshots they may read, legacy snapshots unconfined-only; every writer refuses a non-canonical alias, git sync skips such a manifest per manifest, and `PruneMissing` matches aliases exactly.)
+      Namespace-aware DAG snapshots: `dag_snapshots` (written by the importer,
       read by `GET /v1/jobs/:id/blame`, `/topology` and `/topology/history`) carries no
       namespace, and an apply that only moves a job writes no new snapshot because
       snapshots dedupe by content hash. Record the job's namespace on every snapshot
