@@ -415,8 +415,9 @@ def setup():
     run("sudo", "systemctl", "stop", "docker.service", "docker.socket", "containerd.service")
     # Exact versions are intentional: a major-version check allowed an older
     # Docker daemon to remain paired with a newly updated containerd.
+    # Newer ephemeral runner images can require a downgrade to these exact pins.
     run("sudo", "env", "DEBIAN_FRONTEND=noninteractive", "apt-get", "install", "-y",
-        "--no-install-recommends", "-o", "Dpkg::Options::=--force-confold",
+        "--allow-downgrades", "--no-install-recommends", "-o", "Dpkg::Options::=--force-confold",
         f"docker-ce={ENGINE_PACKAGE}", f"docker-ce-cli={ENGINE_PACKAGE}",
         f"containerd.io={CONTAINERD_PACKAGE}")
     run("sudo", "systemctl", "start", "containerd.service")

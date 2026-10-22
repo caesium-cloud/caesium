@@ -24,12 +24,12 @@ SHUTDOWN_RESULT_TESTS = {
 class HermeticIntegrationSelectorTests(unittest.TestCase):
     def test_all_original_requirements_and_shutdown_validators_are_selected(self):
         expected = [name for names in runner.TESTS.values() for name in names]
-        self.assertEqual(len(expected), 41)
-        self.assertEqual(len(set(expected)), 41)
+        self.assertEqual(len(expected), 45)
+        self.assertEqual(len(set(expected)), 45)
         self.assertEqual(
             {package: len(names) for package, names in runner.TESTS.items()},
             {
-                "./test/connectors/fixture": 3,
+                "./test/connectors/fixture": 7,
                 "./test/robustness": 10,
                 "./test/lifecycle": 8,
                 "./test/robustness/cluster": 15,
@@ -37,6 +37,12 @@ class HermeticIntegrationSelectorTests(unittest.TestCase):
             },
         )
         self.assertTrue(SHUTDOWN_RESULT_TESTS <= set(runner.TESTS["./test/robustness"]))
+        self.assertEqual(set(runner.TESTS["./test/connectors/fixture"][-4:]), {
+            "TestFixtureProxyRecordsSanitizedTerminalReadOutcome",
+            "TestFixtureProxyReadDiagnosticsPreserveOutageAndMalformedRequest",
+            "TestFixtureProxyQueryRejectionAndUndecodableResponses",
+            "TestFixtureReadDiagnosticsIgnoreOtherRPCsAndAbsentDeadline",
+        })
 
         commands = []
 
