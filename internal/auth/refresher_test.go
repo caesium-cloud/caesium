@@ -208,8 +208,12 @@ func (f *freshnessFixture) waitIdle(t *testing.T, id uuid.UUID) {
 	}, 5*time.Second, 5*time.Millisecond)
 }
 
+// auditRows returns the user's audit rows of action once the user's flight
+// has finished and the audit writes it handed off (afterOutcome) are done.
 func (f *freshnessFixture) auditRows(t *testing.T, action string, userID uuid.UUID) []map[string]any {
 	t.Helper()
+	f.waitIdle(t, userID)
+	f.svc.pendingAfter.Wait()
 	var rows []models.AuditLog
 	require.NoError(t, f.db.Where("action = ? AND resource_id = ?", action, userID.String()).Order("timestamp").Find(&rows).Error)
 	out := make([]map[string]any, 0, len(rows))

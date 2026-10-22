@@ -122,6 +122,9 @@ type GroupRefreshService struct {
 
 	queue chan refreshJob
 	wg    sync.WaitGroup
+	// pendingAfter counts afterOutcome work still running (audit rows), so
+	// tests can wait for it without stopping the service.
+	pendingAfter sync.WaitGroup
 
 	mu         sync.Mutex
 	closed     bool
@@ -234,6 +237,7 @@ func (s *GroupRefreshService) afterOutcome(fn func(ctx context.Context)) {
 	tracked := !s.closed
 	if tracked {
 		s.wg.Add(1)
+		s.pendingAfter.Add(1)
 	}
 	s.mu.Unlock()
 	if !tracked {
@@ -242,6 +246,7 @@ func (s *GroupRefreshService) afterOutcome(fn func(ctx context.Context)) {
 	}
 	go func() {
 		defer s.wg.Done()
+		defer s.pendingAfter.Done()
 		run()
 	}()
 }
