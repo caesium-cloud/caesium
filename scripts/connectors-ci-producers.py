@@ -108,10 +108,13 @@ def context(env):
         require(isinstance(base, dict) and isinstance(source, dict)
                 and type(base.get('sha')) is str and SHA.fullmatch(base['sha']) and source.get('sha') == head,
                 'CI pull request source is foreign')
-        # merge_commit_sha in the frozen opened/synchronize payload may be
-        # null or stale while GitHub computes mergeability. Bind actual C to
-        # that event's B and H using its ordered literal commit parents.
-        require(candidate_parents(candidate) == [base['sha'], head], 'CI pull request candidate parents are foreign')
+        # GitHub can regenerate the merge ref after recording the payload:
+        # its base.sha and merge_commit_sha can lag the actual candidate.
+        # As in ci-ok.py, the literal first parent is the tested base; the
+        # second must still bind this exact candidate to the event's head.
+        parents = candidate_parents(candidate)
+        require(len(parents) == 2 and parents[0] != parents[1] and parents[1] == head,
+                'CI pull request candidate parents are foreign')
     elif kind == 'push':
         require(event.get('after') == candidate and head == candidate, 'CI push source is foreign')
     elif kind == 'merge_group':

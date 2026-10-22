@@ -374,9 +374,11 @@ class PullRequestCheckoutTests(unittest.TestCase):
                 self.assertEqual(record, dict(EXPECTED, candidate_sha=self.candidate, head_sha=self.head))
         self.run_main(self.env, valid=True)
 
-    def test_pr_event_base_and_head_must_match_exact_typed_commit_parents(self):
+    def test_pr_event_base_is_typed_and_head_matches_literal_parent(self):
         for section in ('base', 'head'):
             for value in (None, False, 42, 'f'*39, 'f'*41, 'F'*40, 'f'*40):
+                if section == 'base' and value == 'f'*40:
+                    continue  # A valid payload base can lag the literal merge ref.
                 payload = copy.deepcopy(self.payload); payload['pull_request'][section]['sha'] = value
                 with self.subTest(section=section, value=value), self.assertRaises(MOD.Invalid): self.context(payload)
         payload = copy.deepcopy(self.payload); payload['pull_request'].pop('base')
@@ -391,9 +393,27 @@ class PullRequestCheckoutTests(unittest.TestCase):
                 if key == 'CANDIDATE_SHA': env['GITHUB_SHA'] = value
                 with self.subTest(key=key, value=value), self.assertRaises(MOD.Invalid): self.context(env=env)
 
-    def test_literal_commit_rejects_missing_reordered_extra_duplicate_or_foreign_parents(self):
+    def test_regenerated_shallow_merge_accepts_advanced_base_with_same_head(self):
+        advanced = self.git('commit-tree', self.tree, '-p', self.base, input=b'advanced base\n')
+        candidate = self.git('commit-tree', self.tree, '-p', advanced, '-p', self.head, input=b'regenerated merge\n')
+        self.git('update-ref', 'refs/heads/master', candidate)
+        self.checkout = self.root/'advanced-checkout'
+        self.git('-c', 'protocol.file.allow=always', 'clone', '-q', '--depth=1', '--no-local',
+                 self.source.as_uri(), str(self.checkout), cwd=self.root)
+        self.assertEqual((self.checkout/'.git/shallow').read_text().strip(), candidate)
+        for parent in (self.base, advanced, self.head):
+            absent = subprocess.run(['git', 'cat-file', '-e', parent], cwd=self.checkout, capture_output=True)
+            self.assertNotEqual(absent.returncode, 0)
+        self.env.update(CANDIDATE_SHA=candidate, GITHUB_SHA=candidate)
+        self.assertNotEqual(self.payload['pull_request']['base']['sha'], advanced)
+        self.assertEqual(self.context(), dict(EXPECTED, candidate_sha=candidate, head_sha=self.head))
+        self.run_main(self.env, valid=True)
+        payload = copy.deepcopy(self.payload); payload['pull_request']['head']['sha'] = advanced
+        with self.assertRaises(MOD.Invalid): self.context(payload)
+
+    def test_literal_commit_rejects_missing_reordered_extra_duplicate_or_foreign_head_parents(self):
         for parents in ([], [self.base], [self.head, self.base], [self.base, self.head, 'f'*40],
-                        [self.base, self.head, self.head], [self.base, 'f'*40], ['f'*40, self.head]):
+                        [self.base, self.head, self.head], [self.base, 'f'*40], [self.head, self.head]):
             candidate = self.store_candidate(parents)
             self.git('update-ref', 'HEAD', candidate, cwd=self.checkout)
             env = dict(self.env, CANDIDATE_SHA=candidate, GITHUB_SHA=candidate)
