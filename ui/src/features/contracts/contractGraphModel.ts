@@ -74,8 +74,8 @@ export function buildContractFlow(
         findingCount: edge.findings?.length ?? 0,
         datasetLabel: edge.dataset ? formatDatasetRef(edge.dataset) : undefined,
         lastSeen: edge.lastSeen,
-        sourceLabel: nodeLabelById.get(edge.from) ?? edge.from,
-        targetLabel: nodeLabelById.get(edge.to) ?? edge.to,
+        sourceLabel: nodeLabelById.get(edge.from) ?? externalNodeLabel,
+        targetLabel: nodeLabelById.get(edge.to) ?? externalNodeLabel,
         testId: contractEdgeTestId(edge),
       },
       markerEnd: {

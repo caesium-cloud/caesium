@@ -312,7 +312,8 @@ fi
                      "TestAuthAggregateRedactionConfinedToOwnNamespaces",
                      "TestAuthCLILoginManualCodeFlow", "TestAuthCLILoginLoopbackFlow", "TestAuthLegacySecretAudited",
                      "TestAuthLDAPLoginNoBindingBody", "TestAuthLDAPGroupRefreshFollowsDirectory",
-                     "TestAuthLDAPDisabledEntryRevokesCredentials", "TestAuthStaleGroupsRefusedUntilRelogin"},
+                     "TestAuthLDAPDisabledEntryRevokesCredentials", "TestAuthStaleGroupsRefusedUntilRelogin",
+                     "TestAuthListNamespaceNarrow"},
         }
         for lane, original in (("local", original_local), ("auth", original_auth)):
             self.assertEqual(set(lanes[lane]["names"]), original | added[lane])
@@ -343,7 +344,8 @@ fi
                         "TestAuthAggregateRedactionConfinedToOwnNamespaces",
                         "TestAuthCLILoginManualCodeFlow", "TestAuthCLILoginLoopbackFlow", "TestAuthLegacySecretAudited",
                         "TestAuthLDAPLoginNoBindingBody", "TestAuthLDAPGroupRefreshFollowsDirectory",
-                        "TestAuthLDAPDisabledEntryRevokesCredentials", "TestAuthStaleGroupsRefusedUntilRelogin"]}
+                        "TestAuthLDAPDisabledEntryRevokesCredentials", "TestAuthStaleGroupsRefusedUntilRelogin",
+                        "TestAuthListNamespaceNarrow"]}
         for lane, names in new.items():
             required = lanes[lane]["names"]
             lines = {name: "    --- PASS: " + SUITE + "/" + name + " (0.01s)\n" for name in required}

@@ -82,6 +82,10 @@ type ListRequest struct {
 	Offset  uint64
 	OrderBy []string
 	Type    string
+	// Namespace narrows the list to triggers serving at least one live job in
+	// that namespace, within the caller's allowed set (the ?namespace= view
+	// filter); empty applies no narrowing.
+	Namespace string
 }
 
 func (t *triggerService) List(req *ListRequest) (models.Triggers, error) {
@@ -94,6 +98,14 @@ func (t *triggerService) List(req *ListRequest) (models.Triggers, error) {
 		q = q.Where("type = ?", req.Type)
 	}
 	q = t.namespaceFilter(q)
+	if req.Namespace != "" {
+		db := t.db.WithContext(t.ctx)
+		inNamespace := authz.NarrowToNamespace(
+			db.Model(&models.Job{}).Select("1").
+				Where("jobs.trigger_id = triggers.id AND jobs.deleted_at IS NULL"),
+			"jobs.namespace", req.Namespace)
+		q = q.Where("EXISTS (?)", inNamespace)
+	}
 
 	for _, orderBy := range req.OrderBy {
 		q = q.Order(orderBy)

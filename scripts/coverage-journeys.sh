@@ -1899,6 +1899,10 @@ PY
   # mapped by CAESIUM_AUTH_ROLE_MAPPING (no policy file); one 401 each in
   # the last two.
   auth_pattern="${auth_pattern%)}|TestAuthLDAPLoginNoBindingBody|TestAuthLDAPGroupRefreshFollowsDirectory|TestAuthLDAPDisabledEntryRevokesCredentials|TestAuthStaleGroupsRefusedUntilRelogin)"
+  # List narrowing (identity-and-access W7-delta F2): ?namespace= on the job,
+  # trigger and incident lists as a marketing-confined viewer, so the narrowing
+  # branches of the three list services run. Needs no policy file.
+  auth_pattern="${auth_pattern%)}|TestAuthListNamespaceNarrow)"
 
   local -a local_named_passes=(
     TestCaesiumWhyExplainsHitAndMiss
@@ -1966,6 +1970,7 @@ PY
     TestAuthLDAPGroupRefreshFollowsDirectory
     TestAuthLDAPDisabledEntryRevokesCredentials
     TestAuthStaleGroupsRefusedUntilRelogin
+    TestAuthListNamespaceNarrow
   )
   local -a distributed_named_passes=(
     TestNodeWorkersRoute

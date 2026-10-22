@@ -2,6 +2,7 @@ import { useQueries, useQuery } from "@tanstack/react-query";
 import { usePrincipal } from "@/lib/auth";
 import { useDataAssertionsEnabled, useHoldInvalidation } from "@/features/datasets/useDataAssertions";
 import { api } from "@/lib/api";
+import { scopedKey, useNamespaceView } from "@/features/auth/namespaceView";
 
 const REFETCH_MS = 30_000;
 
@@ -26,6 +27,7 @@ export interface NavCounts {
  *   - `GET /v1/jobs/summary` (status counts, used by 1.1)
  */
 export function useNavCounts(): NavCounts {
+  const { selection } = useNamespaceView();
   const assertionsEnabled = useDataAssertionsEnabled();
   const { data: features } = useQuery({
     queryKey: ["system-features"],
@@ -50,14 +52,14 @@ export function useNavCounts(): NavCounts {
   const results = useQueries({
     queries: [
       {
-        queryKey: ["jobs"],
-        queryFn: api.getJobs,
+        queryKey: scopedKey("jobs", selection),
+        queryFn: () => api.getJobs(selection ?? undefined),
         refetchInterval: REFETCH_MS,
         staleTime: REFETCH_MS / 2,
       },
       {
-        queryKey: ["triggers"],
-        queryFn: api.getTriggers,
+        queryKey: scopedKey("triggers", selection),
+        queryFn: () => api.getTriggers(selection ?? undefined),
         refetchInterval: REFETCH_MS,
         staleTime: REFETCH_MS / 2,
       },

@@ -13,6 +13,7 @@ import { RunStrip, RunStripAxis } from "@/components/ui/run-strip";
 import { IdChip } from "@/components/ui/id-chip";
 import { StatusBadge } from "@/components/ui/status-badge";
 import { canActIn, requiresRoleReason } from "@/features/auth/access";
+import { NamespaceChip } from "@/features/auth/NamespaceSwitcher";
 import { api, type Job, type JobRun } from "@/lib/api";
 import { usePrincipal } from "@/lib/auth";
 import { cn, formatUTCTimestamp } from "@/lib/utils";
@@ -45,7 +46,7 @@ function JobsPageInner() {
     mutationFn: ({ jobId, paused }: { jobId: string; paused: boolean; hasActiveRun: boolean }) =>
       paused ? api.pauseJob(jobId) : api.unpauseJob(jobId),
     onSuccess: (job, vars) => {
-      queryClient.setQueryData(["jobs"], (old: Job[] | undefined) =>
+      queryClient.setQueriesData<Job[]>({ queryKey: ["jobs"] }, (old) =>
         old?.map((e) => (e.id === job.id ? { ...e, paused: job.paused } : e)),
       );
       queryClient.setQueryData(["job", job.id], (old: Job | undefined) =>
@@ -169,6 +170,7 @@ function JobsPageInner() {
                       >
                         {job.alias}
                       </Link>
+                      <NamespaceChip namespace={job.namespace} className="shrink-0" />
                       {isPaused && (
                         <StatusBadge status="paused" variant="word" size="sm" />
                       )}

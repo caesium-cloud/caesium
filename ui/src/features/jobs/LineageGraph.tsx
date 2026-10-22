@@ -840,6 +840,10 @@ const edgeTypes = {
   lineage: LineageImpactEdge,
 };
 
+// The registered renderers, exported for the external-node leak test only.
+// eslint-disable-next-line react-refresh/only-export-components
+export { nodeTypes as lineageNodeTypes, edgeTypes as lineageEdgeTypes };
+
 function buildSearch(namespace: string, name: string) {
   return {
     namespace: cleanParam(namespace) ?? "",

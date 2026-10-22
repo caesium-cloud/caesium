@@ -80,7 +80,7 @@ export function ContractGraph({
 
   const jobsQuery = useQuery({
     queryKey: ["jobs"],
-    queryFn: api.getJobs,
+    queryFn: () => api.getJobs(),
     enabled: contractEnabled,
     staleTime: 30_000,
   });
@@ -387,9 +387,9 @@ const ContractNode = memo(({ data }: NodeProps<ContractFlowNodeData>) => {
     <div
       data-testid={testId}
       data-node-kind={data.kind}
-      data-job-alias={data.alias}
-      data-dataset-name={data.dataset?.name}
-      data-dataset-namespace={data.dataset?.namespace}
+      data-job-alias={isExternal ? undefined : data.alias}
+      data-dataset-name={isExternal ? undefined : data.dataset?.name}
+      data-dataset-namespace={isExternal ? undefined : data.dataset?.namespace}
       className={className}
       title={data.label}
     >
