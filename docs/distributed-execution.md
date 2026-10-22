@@ -271,9 +271,18 @@ Execution events are marked with `bus_dispatch_pending=true` before commit. Norm
   node still serving the stricter file re-marks rows that a retry on an updated
   node unmarked, and those rows stay marked after the file reaches every node.
   The run then waits; it never runs without isolation. Run owners still
-  dispatch such rows. In a cluster without owners, roll the file out to every
-  node, then retry the run (`caesium run retry`): the retry reconciles its rows
-  under the current file.
+  dispatch the rows of runs they own. In a cluster without run owners there is
+  no way yet to clear the marks of a run that is still running:
+  `caesium run retry` refuses a run that is not terminal, and enabling a run
+  owner later does not adopt the run (owners take over only runs whose lease
+  expired, and a run started without an owner has no lease). Roll the file out
+  to every node first. A job with `metadata.runTimeout` then fails the waiting
+  run at its deadline (its unfinished tasks fail with it), and
+  `caesium run retry` resets those tasks and reconciles their marks under the
+  current file. Otherwise start a new run, which registers its rows under the
+  current file. The waiting run stays `running` and still counts toward the
+  job's concurrency limit and the namespace's run quota. Clearing stale marks
+  on a running run is a tracked follow-up.
 
 ### High claim contention
 
