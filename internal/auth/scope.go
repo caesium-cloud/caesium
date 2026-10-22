@@ -38,6 +38,9 @@ func DecodeScope(scopeJSON []byte) (*models.KeyScope, error) {
 type AgentClaimView struct {
 	IncidentID uuid.UUID
 	Jobs       []string
+	// NamespaceConfined is AgentClaim.NamespaceConfined: false for a
+	// credential minted before agent sessions were namespace-confined.
+	NamespaceConfined bool
 }
 
 // DecodeAgentClaim returns the agent-session claim carried by a scope payload,
@@ -58,7 +61,7 @@ func DecodeAgentClaim(scopeJSON []byte) (*AgentClaimView, error) {
 		return nil, nil
 	}
 	jobs := normalizeJobAliases(scope.Agent.Jobs)
-	return &AgentClaimView{IncidentID: scope.Agent.IncidentID, Jobs: jobs}, nil
+	return &AgentClaimView{IncidentID: scope.Agent.IncidentID, Jobs: jobs, NamespaceConfined: scope.Agent.NamespaceConfined}, nil
 }
 
 // ScopeJobs returns the normalized scoped job aliases or nil when unrestricted.

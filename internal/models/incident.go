@@ -86,6 +86,11 @@ type Incident struct {
 	// The agent's scoped token carries a copy; this column is the durable source
 	// of truth the session supervisor mints from and the bundle reports.
 	AllowedJobs datatypes.JSON `gorm:"type:json" json:"allowed_jobs,omitempty"`
+	// AllowedJobsExternal counts the downstream jobs the lineage walk found in
+	// other namespaces at open. They never enter AllowedJobs (frozen to the
+	// incident's namespace, identity-and-access A8); the bundle reports the
+	// count so the agent knows the impact reaches beyond what it may read.
+	AllowedJobsExternal int `gorm:"not null;default:0" json:"allowed_jobs_external,omitempty"`
 
 	// LastError is the failing task's error text captured at open, for the feed.
 	LastError string `gorm:"type:text" json:"last_error,omitempty"`

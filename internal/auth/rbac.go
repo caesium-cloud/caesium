@@ -249,11 +249,13 @@ var endpointPolicy = map[string]RoutePolicy{
 	"POST /v1/jobdefs/lint": namespacedRoute(viewer),
 	"POST /v1/jobdefs/diff": namespacedRoute(viewer),
 
-	// Incident operator read API (agent-in-the-loop D2). The detail carries
-	// the incident's frozen agent allowlist, which a lineage walk fills with
-	// downstream job aliases from any namespace (A8 confines it).
+	// Incident operator read API (agent-in-the-loop D2). An incident belongs
+	// to its failing run's namespace. Its frozen agent allowlist names only
+	// jobs in that namespace, and for a confined reader the detail also drops
+	// jobs that moved out and withholds what a pre-A8 agent session wrote
+	// (A8).
 	"GET /v1/incidents":     collectionRoute(viewer),
-	"GET /v1/incidents/:id": namespacedRoute(viewer).pendingOn("A8"),
+	"GET /v1/incidents/:id": namespacedRoute(viewer),
 
 	// Dataset freshness operator surface (freshness-scheduling E1). A dataset
 	// resolves to the namespaces of its declared producers: any of them for a
@@ -289,14 +291,16 @@ var endpointPolicy = map[string]RoutePolicy{
 	// switch (api/middleware/auth_scope.go), which 403s an agent token on any
 	// route outside its own incident. Reads sit at viewer, mutating tool calls
 	// (propose/execute an action, append a note) at runner. MCP multiplexes both
-	// read and write tools over one POST, so it is agent/runner-only. The
-	// bundle, context and MCP handlers return the job's unfiltered run history
-	// and current topology (A8 confines them).
-	"GET /v1/agent/incidents/:id/bundle":    namespacedRoute(viewer).pendingOn("A8"),
-	"GET /v1/agent/incidents/:id/context/*": namespacedRoute(viewer).pendingOn("A8"),
-	"POST /v1/agent/incidents/:id/actions":  namespacedRoute(runner).pendingOn("A8"),
-	"POST /v1/agent/incidents/:id/notes":    namespacedRoute(runner).pendingOn("A8"),
-	"POST /v1/agent/incidents/:id/mcp":      namespacedRoute(runner).pendingOn("A8"),
+	// read and write tools over one POST, so it is agent/runner-only. Every
+	// read is confined to the incident's namespace (A8): allow-listed jobs
+	// that moved out are dropped, history and why baselines are the runs
+	// recorded there, and a job that moved out shows neither its DAG nor its
+	// remediation policy; actions refuse a target outside the namespace.
+	"GET /v1/agent/incidents/:id/bundle":    namespacedRoute(viewer),
+	"GET /v1/agent/incidents/:id/context/*": namespacedRoute(viewer),
+	"POST /v1/agent/incidents/:id/actions":  namespacedRoute(runner),
+	"POST /v1/agent/incidents/:id/notes":    namespacedRoute(runner),
+	"POST /v1/agent/incidents/:id/mcp":      namespacedRoute(runner),
 
 	// Runner
 	"POST /v1/jobs/:id/run":                                     namespacedRoute(runner),
@@ -354,11 +358,12 @@ var endpointPolicy = map[string]RoutePolicy{
 	// Tier-3 approval decisions (agent-in-the-loop D1). Operator-gated; agent
 	// session tokens are additionally rejected outright in authorizeScope.
 	// Approving executes the proposed action against the incident's job (a
-	// jobdef patch, a retry), which may have moved to another namespace since
-	// the incident opened and can touch a trigger shared with other
-	// namespaces; A8 confines execution to its real targets. Rejecting only
+	// jobdef patch, a retry). The executor refuses a job that moved out of the
+	// incident's namespace or a run recorded elsewhere, and confines a jobdef
+	// patch to the namespace, triggers included (A8), so operator in the
+	// incident's namespace covers everything it can touch. Rejecting only
 	// records the decision on the incident.
-	"POST /v1/incidents/:id/approvals/:id/approve": namespacedRoute(operator).pendingOn("A8"),
+	"POST /v1/incidents/:id/approvals/:id/approve": namespacedRoute(operator),
 	"POST /v1/incidents/:id/approvals/:id/reject":  namespacedRoute(operator),
 
 	// Admin

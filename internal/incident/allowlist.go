@@ -30,18 +30,15 @@ import (
 // FreezeAllowlist is best-effort with respect to lineage availability: if the
 // lineage graph is empty or unavailable (e.g. OpenLineage disabled), it returns
 // just the failing job's own alias rather than failing incident open.
-func FreezeAllowlist(ctx context.Context, db *gorm.DB, jobID uuid.UUID, failingRunID *uuid.UUID) []string {
-	allow := map[string]struct{}{}
-
-	// The incident's own job is always in scope.
-	var job models.Job
-	if err := db.WithContext(ctx).Select("alias").First(&job, "id = ?", jobID).Error; err == nil {
-		if job.Alias != "" {
-			allow[job.Alias] = struct{}{}
-		}
-	} else {
-		log.Debug("incident: freeze allowlist could not resolve job alias", "job_id", jobID, "error", err)
-	}
+//
+// The lineage graph is global, so the walk also reaches jobs in other
+// namespaces. Only jobs whose current namespace is the incident's namespace
+// enter the allowlist, the incident's own job included (identity-and-access
+// A8); every other job found is counted in external and never named. Jobs are
+// matched by id, never by alias.
+func FreezeAllowlist(ctx context.Context, db *gorm.DB, jobID uuid.UUID, failingRunID *uuid.UUID, namespace string) (allowed []string, external int) {
+	namespace = models.NamespaceOrDefault(namespace)
+	candidates := map[uuid.UUID]struct{}{jobID: {}}
 
 	// Seed the impact walk from the failing job's TRUSTED output datasets —
 	// every output row for the job EXCEPT those produced by the failing run.
@@ -50,7 +47,7 @@ func FreezeAllowlist(ctx context.Context, db *gorm.DB, jobID uuid.UUID, failingR
 		// Lineage tables may be absent/empty when OpenLineage is disabled; degrade
 		// to the job's own alias rather than blocking incident open.
 		log.Debug("incident: freeze allowlist could not read trusted output datasets", "job_id", jobID, "error", err)
-		return sortedKeys(allow)
+		seeds = nil
 	}
 
 	for _, seed := range seeds {
@@ -60,13 +57,29 @@ func FreezeAllowlist(ctx context.Context, db *gorm.DB, jobID uuid.UUID, failingR
 			continue
 		}
 		for _, node := range impact.Downstream {
-			if node.JobAlias != "" {
-				allow[node.JobAlias] = struct{}{}
+			if node.JobID != uuid.Nil {
+				candidates[node.JobID] = struct{}{}
 			}
 		}
 	}
 
-	return sortedKeys(allow)
+	var jobs []models.Job
+	if err := db.WithContext(ctx).Select("id", "alias", "namespace").
+		Where("id IN ?", slices.Collect(maps.Keys(candidates))).Find(&jobs).Error; err != nil {
+		log.Debug("incident: freeze allowlist could not resolve jobs", "job_id", jobID, "error", err)
+		return []string{}, 0
+	}
+	allow := map[string]struct{}{}
+	for i := range jobs {
+		if models.NamespaceOrDefault(jobs[i].Namespace) != namespace {
+			external++
+			continue
+		}
+		if jobs[i].Alias != "" {
+			allow[jobs[i].Alias] = struct{}{}
+		}
+	}
+	return sortedKeys(allow), external
 }
 
 type datasetSeed struct {

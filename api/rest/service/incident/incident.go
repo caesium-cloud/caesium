@@ -6,12 +6,15 @@ package incident
 
 import (
 	"context"
+	"encoding/json"
 
 	"github.com/caesium-cloud/caesium/internal/authz"
+	iincident "github.com/caesium-cloud/caesium/internal/incident"
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/caesium-cloud/caesium/internal/run"
 	"github.com/caesium-cloud/caesium/pkg/db"
 	"github.com/google/uuid"
+	"gorm.io/datatypes"
 	"gorm.io/gorm"
 )
 
@@ -232,6 +235,17 @@ type Detail struct {
 
 // Get returns the full timeline for one incident, or gorm.ErrRecordNotFound.
 func (s *Service) Get(id uuid.UUID) (*Detail, error) {
+	return s.GetForReader(id, false)
+}
+
+// GetForReader is Get for a reader that may be namespace-confined
+// (identity-and-access A8). A confined reader gets the frozen allowlist minus
+// every job that has moved out of the incident's namespace, the incident's
+// last error under the same baseline rule as the list, and no transcript,
+// note or action content written by an agent session from before sessions
+// were namespace-confined (such a session could read other namespaces' jobs).
+// An unconfined reader gets the rows as stored.
+func (s *Service) GetForReader(id uuid.UUID, confined bool) (*Detail, error) {
 	var inc models.Incident
 	if err := s.db.WithContext(s.ctx).First(&inc, "id = ?", id).Error; err != nil {
 		return nil, err
@@ -259,6 +273,26 @@ func (s *Service) Get(id uuid.UUID) (*Detail, error) {
 		Order("created_at ASC").
 		Find(&sessions).Error; err != nil {
 		return nil, err
+	}
+
+	if confined {
+		allowed, err := iincident.EffectiveAllowlist(s.ctx, s.db, &inc)
+		if err != nil {
+			return nil, err
+		}
+		encoded, err := json.Marshal(allowed)
+		if err != nil {
+			return nil, err
+		}
+		if len(inc.AllowedJobs) > 0 {
+			inc.AllowedJobs = datatypes.JSON(encoded)
+		}
+		one := []models.Incident{inc}
+		if err := s.withholdIncidentLastErrors(one); err != nil {
+			return nil, err
+		}
+		inc = one[0]
+		iincident.WithholdLegacyAgentContent(sessions, actions)
 	}
 
 	return &Detail{

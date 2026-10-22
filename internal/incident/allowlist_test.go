@@ -125,13 +125,14 @@ func TestFreezeAllowlistExcludesFailingRunOutputs(t *testing.T) {
 
 	// Excluding the failing run: allowlist is {job-a, job-b}; job-c is NOT
 	// reachable because the poisoned edge is excluded.
-	frozen := FreezeAllowlist(ctx, db, jobA, &failRun)
+	frozen, external := FreezeAllowlist(ctx, db, jobA, &failRun, "default")
+	require.Zero(t, external)
 	require.ElementsMatch(t, []string{"job-a", "job-b"}, frozen)
 	require.NotContains(t, frozen, "job-c")
 
 	// Contrast: if the failing run's outputs were NOT excluded, job-c leaks in —
 	// this is exactly the widening the exclusion prevents.
-	leaky := FreezeAllowlist(ctx, db, jobA, nil)
+	leaky, _ := FreezeAllowlist(ctx, db, jobA, nil, "default")
 	require.Contains(t, leaky, "job-c")
 }
 
@@ -145,7 +146,7 @@ func TestFreezeAllowlistDegradesToOwnJob(t *testing.T) {
 	tr := mkTrigger(t, db)
 	jobA := mkJob(t, db, tr, "solo")
 
-	frozen := FreezeAllowlist(ctx, db, jobA, nil)
+	frozen, _ := FreezeAllowlist(ctx, db, jobA, nil, "default")
 	require.Equal(t, []string{"solo"}, frozen)
 }
 

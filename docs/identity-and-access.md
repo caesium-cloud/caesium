@@ -934,7 +934,6 @@ that makes it namespace-aware lands (unconfined principals are unaffected):
 | Item | Routes |
 | --- | --- |
 | A6 | `POST /v1/events` |
-| A8 | `/v1/agent/incidents/*`, incident detail `GET /v1/incidents/:id`, approval approve |
 
 Every namespace denial is `403 insufficient permissions` and is audited as
 `auth.denied` with reason `insufficient_role`. Lint and diff, where the caller
@@ -1135,6 +1134,49 @@ jobs connect to other namespaces without learning what they connect to:
 
 Job-scoped API keys and agent-session tokens are still refused both routes.
 An unconfined principal gets the unredacted body, byte for byte.
+
+### Incidents and agent sessions
+
+An incident belongs to the namespace of the run that failed, and never changes
+namespace. The incident detail (`GET /v1/incidents/:id`), its approvals and the
+agent tool surface (`/v1/agent/incidents/:id/*`) need the route's role in that
+namespace. An agent session is confined to it, even though its token is minted
+at `runner` cluster-wide and bound to the one incident:
+
+- **Freeze.** The agent's job allowlist is computed from the lineage graph when
+  the incident opens. Only jobs that live in the incident's namespace enter it;
+  downstream jobs in other namespaces are counted in the incident's
+  `allowed_jobs_external` and the bundle's `lineage_impact.external`, never
+  named.
+- **Serve.** Every read checks the job's namespace again: an allow-listed job
+  that has moved out since is dropped from the bundle and refused by
+  `context/history` (403, or an MCP error). History, the bundle's run history
+  and the `why` baseline contain only runs recorded in the incident's
+  namespace, for the incident's own job too, so a job moved in brings no
+  foreign history and a job moved out exposes none of its new owner's. When the
+  incident's own job has moved out, the bundle shows neither its current DAG
+  (`job.namespace_moved: true`, no tasks or edges) nor its remediation block:
+  the playbook and the session profile resolve as for a job that declares no
+  remediation.
+- **Act.** An action on the job or one of its runs is refused, and recorded
+  `failed` with `namespace_moved`, when the job has moved out of the incident's
+  namespace or the run was recorded in another one. A snoozed retry checks again
+  when its timer fires. An `apply_jobdef_patch` may not change
+  `metadata.namespace`, on the direct and the git-synced route alike, and a
+  direct apply is confined to the incident's namespace, triggers and webhook
+  paths included. Approving an action therefore needs `operator` only in the
+  incident's namespace.
+- **Earlier sessions.** A session started before this confinement could read
+  other namespaces' jobs. For a namespace-confined reader, the incident detail
+  withholds such a session's transcript (`session_log_withheld: true`) and the
+  parameters and result of the agent actions and notes it wrote
+  (`content_withheld: true`), the bundle omits its notes for an agent session
+  and a confined reader, and the detail's `allowed_jobs` drops jobs that have
+  moved out. A reader holding viewer at `*` sees every row as stored.
+
+An agent profile's `secret_refs` are stored but never resolved by Caesium (the
+model credential is injected by the deployment), so they need no namespace
+scoping.
 
 ### Run quotas
 

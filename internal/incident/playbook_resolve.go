@@ -71,10 +71,16 @@ func ResolvePlaybook(ctx context.Context, db *gorm.DB, incidentID uuid.UUID, def
 	}
 
 	var job models.Job
-	if err := db.WithContext(ctx).Select("id", "alias", "remediation").First(&job, "id = ?", inc.JobID).Error; err != nil {
+	if err := db.WithContext(ctx).Select("id", "alias", "namespace", "remediation").First(&job, "id = ?", inc.JobID).Error; err != nil {
 		log.Warn("incident: could not load job for playbook; failing closed",
 			"incident_id", incidentID, "job_id", inc.JobID, "error", err)
 		return Playbook{}
+	}
+	// A job that moved out of the incident's namespace carries its new
+	// owner's remediation block: the incident resolves as if the job declared
+	// none (identity-and-access A8).
+	if movedOutOfIncident(&inc, &job) {
+		job.Remediation = nil
 	}
 
 	if len(job.Remediation) == 0 {
@@ -121,7 +127,7 @@ func ResolveProfile(ctx context.Context, db *gorm.DB, incidentID uuid.UUID, defa
 	if err := db.WithContext(ctx).Select("id", "job_id", "namespace").First(&inc, "id = ?", incidentID).Error; err == nil {
 		known = true
 		var job models.Job
-		if err := db.WithContext(ctx).Select("id", "remediation").First(&job, "id = ?", inc.JobID).Error; err == nil && len(job.Remediation) > 0 {
+		if err := db.WithContext(ctx).Select("id", "namespace", "remediation").First(&job, "id = ?", inc.JobID).Error; err == nil && len(job.Remediation) > 0 && !movedOutOfIncident(&inc, &job) {
 			var block schema.MetadataRemediation
 			if err := json.Unmarshal(job.Remediation, &block); err == nil && strings.TrimSpace(block.Profile) != "" {
 				name = strings.TrimSpace(block.Profile)
@@ -263,4 +269,10 @@ func sortedTrueKeys(set map[string]bool) []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+// movedOutOfIncident reports whether the incident's job now lives in another
+// namespace than the incident.
+func movedOutOfIncident(inc *models.Incident, job *models.Job) bool {
+	return models.NamespaceOrDefault(job.Namespace) != IncidentNamespace(inc)
 }

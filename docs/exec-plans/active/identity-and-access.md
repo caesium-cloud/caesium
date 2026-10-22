@@ -817,7 +817,7 @@ translated into cluster-wide bindings and behaviour is unchanged.
       Files: new `test/auth_namespace_matrix_test.go`, `test/auth_scoped_test.go`
       (shared helpers).
       Depends on: A3 + A5 + B2 + B4 + B5 + B6 + D4 + H-1.
-- [ ] A8. Confine agent-session allow-lists to the incident's namespace:
+- [x] A8. Confine agent-session allow-lists to the incident's namespace (W6-δ: also why baselines, a moved own job's DAG and remediation, executor refusals incl. git-synced patches, legacy-session content withheld from confined readers):
       `FreezeAllowlist` today walks the global lineage graph, so a frozen job list can
       name jobs in other namespaces. At freeze, keep only jobs in the incident's
       namespace and record foreign downstream jobs as an `external` count in the
