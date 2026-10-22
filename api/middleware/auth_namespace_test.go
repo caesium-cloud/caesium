@@ -702,16 +702,19 @@ func TestNamespacedClusterAndPendingRoutes(t *testing.T) {
 		entry := f.lastDenial(t)
 		require.Equal(t, "*", entry.Namespace, call.pattern)
 	}
-	for _, tc := range []struct {
-		call    nsCall
-		pending string
-	}{
-		{post("/v1/events", nil, `{}`), "A6"},
-	} {
-		res := f.do(t, mktAdmin, tc.call)
-		require.Equal(t, http.StatusForbidden, res.status, tc.call.pattern)
-		requireAuditMetadata(t, f.lastDenial(t), map[string]any{"reason": "insufficient_role", "pending": tc.pending})
-	}
+	// Event ingest is live for confined principals (A6): runner anywhere
+	// admits the request and the handler confines delivery; a principal
+	// holding runner nowhere is refused, audited against "*".
+	ingest := f.do(t, mktAdmin, post("/v1/events", nil, `{}`))
+	require.Equal(t, http.StatusOK, ingest.status)
+	require.Equal(t, []string{"*"}, ingest.decision.Namespaces)
+	require.False(t, ingest.decision.Unrestricted)
+	mktViewer := f.key(t, models.RoleViewer, `["marketing"]`)
+	require.Equal(t, http.StatusForbidden, f.do(t, mktViewer, post("/v1/events", nil, `{}`)).status)
+	denial := f.lastDenial(t)
+	require.Equal(t, "*", denial.Namespace)
+	requireAuditMetadata(t, denial, map[string]any{"reason": "insufficient_role"})
+	require.NotContains(t, string(denial.Metadata), "pending")
 	// Snapshot reads are live for confined principals (B7): allowed in the
 	// job's namespace, and a foreign job's denial audits against its namespace.
 	for _, route := range []string{"/v1/jobs/:id/blame", "/v1/jobs/:id/topology", "/v1/jobs/:id/topology/history"} {

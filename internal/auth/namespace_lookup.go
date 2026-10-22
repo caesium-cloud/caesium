@@ -111,6 +111,30 @@ func (s *Service) BackfillNamespace(ctx context.Context, id uuid.UUID) (uuid.UUI
 	return backfill.JobID, models.NamespaceOrDefault(backfill.Namespace), nil
 }
 
+// TriggerJobAliases returns the stored aliases of every live job the trigger
+// serves, exactly as stored (never trimmed: a job-scoped key matches a job only
+// by its exact alias). A trigger that exists but serves no job returns an
+// empty, non-nil slice; a missing trigger is gorm.ErrRecordNotFound.
+func (s *Service) TriggerJobAliases(ctx context.Context, id uuid.UUID) ([]string, error) {
+	conn, err := s.readDB(ctx)
+	if err != nil {
+		return nil, err
+	}
+	aliases := []string{}
+	err = s.withReadRetry(func() error {
+		var trigger models.Trigger
+		if err := conn.Select("id").First(&trigger, "id = ?", id).Error; err != nil {
+			return err
+		}
+		aliases = []string{}
+		return conn.Model(&models.Job{}).Where("trigger_id = ?", id).Order("alias").Pluck("alias", &aliases).Error
+	})
+	if err != nil {
+		return nil, err
+	}
+	return aliases, nil
+}
+
 // TriggerJobNamespaces returns the sorted namespaces of every live job the
 // trigger serves. A trigger that exists but serves no job returns an empty,
 // non-nil slice; a missing trigger is gorm.ErrRecordNotFound.

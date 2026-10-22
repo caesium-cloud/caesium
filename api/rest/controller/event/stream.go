@@ -33,10 +33,19 @@ type Controller struct {
 	storeOnce sync.Once
 	store     *event.Store
 	authSvc   *iauth.Service
+	// auditor records requests that present the deprecated
+	// CAESIUM_EVENT_INGEST_API_KEY (identity-and-access A6).
+	auditor *iauth.AuditLogger
 }
 
 func New(bus event.Bus) *Controller {
 	return &Controller{bus: bus}
+}
+
+// WithAuditor sets the audit logger of shared-secret use on ingest.
+func (ctrl *Controller) WithAuditor(auditor *iauth.AuditLogger) *Controller {
+	ctrl.auditor = auditor
+	return ctrl
 }
 
 func (ctrl *Controller) WithAuthService(svc *iauth.Service) *Controller {
