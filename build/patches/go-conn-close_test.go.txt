@@ -1,0 +1,104 @@
+// This regression is copied into the pinned Go toolchain's database/sql tests.
+// Package access lets synctest exercise the close boundary without adding a
+// production test hook, changing transaction cancellation, or relying on sleeps.
+package sql
+
+import (
+	"database/sql/driver"
+	"sync/atomic"
+	"testing"
+	"testing/synctest"
+)
+
+func TestCaesiumConnRawCloseRace(t *testing.T) {
+	for _, discard := range []bool{false, true} {
+		name := "return-to-pool"
+		if discard {
+			name = "discard-physical-connection"
+		}
+		t.Run(name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				db := newTestDB(t, "")
+				conn, err := db.Conn(t.Context())
+				if err != nil {
+					t.Fatal(err)
+				}
+				physical := getFakeConn(conn.dc.ci)
+				defer conn.Close()
+
+				// Raw must pass its fast done check and wait at RLock before
+				// close marks done. The mutex and its Cond are inside the bubble,
+				// so Wait proves the contender is durably blocked there.
+				conn.closemu.Lock()
+				locked := true
+				defer func() {
+					if locked {
+						conn.closemu.Unlock()
+					}
+				}()
+				var called atomic.Bool
+				rawResult := make(chan error, 1)
+				go func() {
+					rawResult <- conn.Raw(func(any) error {
+						called.Store(true)
+						return nil
+					})
+				}()
+				synctest.Wait()
+				if conn.done.Load() {
+					t.Fatal("connection closed before the close contender started")
+				}
+
+				closeResult := make(chan error, 1)
+				go func() {
+					if discard {
+						closeResult <- conn.close(driver.ErrBadConn)
+					} else {
+						closeResult <- conn.Close()
+					}
+				}()
+				synctest.Wait()
+				if !conn.done.Load() {
+					t.Fatal("close did not mark the connection done before waiting for its lock")
+				}
+				conn.closemu.Unlock()
+				locked = false
+				synctest.Wait()
+
+				if err := <-rawResult; err != ErrConnDone {
+					t.Fatalf("Raw error = %v, want ErrConnDone", err)
+				}
+				if called.Load() {
+					t.Fatal("Raw callback used a connection after close marked it done")
+				}
+				wantCloseErr := error(nil)
+				if discard {
+					wantCloseErr = driver.ErrBadConn
+				}
+				if err := <-closeResult; err != wantCloseErr {
+					t.Fatalf("close error = %v, want %v", err, wantCloseErr)
+				}
+				if (physical.db == nil) != discard {
+					t.Fatalf("physical connection closed = %v, want %v", physical.db == nil, discard)
+				}
+
+				// A returned connection remains reusable; a discarded one must
+				// be replaced, and a late operation on the old handle stays inert.
+				replacement, err := db.Conn(t.Context())
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer replacement.Close()
+				if (getFakeConn(replacement.dc.ci) == physical) == discard {
+					t.Fatal("replacement physical identity does not match close disposition")
+				}
+				if err := conn.Raw(func(any) error {
+					t.Error("late Raw reached a returned or discarded connection")
+					return nil
+				}); err != ErrConnDone {
+					t.Fatalf("late Raw error = %v, want ErrConnDone", err)
+				}
+			})
+		})
+	}
+}
