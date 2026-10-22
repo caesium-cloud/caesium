@@ -183,9 +183,13 @@ func requireOpenLDAPDenial(t *testing.T, err error, reason string) {
 
 func openLDAPAdmin(t *testing.T, endpoint string) *gldap.Conn {
 	t.Helper()
+	// Bound the dial (including the LDAPS handshake) and every later request so
+	// a fixture that stops answering fails the test instead of hanging it.
 	conn, err := gldap.DialURL("ldaps://"+endpoint,
-		gldap.DialWithTLSConfig(&tls.Config{InsecureSkipVerify: true})) //nolint:gosec // fixture cert is generated per container.
+		gldap.DialWithTLSConfig(&tls.Config{InsecureSkipVerify: true}), //nolint:gosec // fixture cert is generated per container.
+		gldap.DialWithDialer(&net.Dialer{Timeout: 10 * time.Second}))
 	require.NoError(t, err)
+	conn.SetTimeout(10 * time.Second)
 	t.Cleanup(func() { _ = conn.Close() })
 	require.NoError(t, conn.Bind(openLDAPAdminDN, openLDAPAdminPass))
 	return conn
