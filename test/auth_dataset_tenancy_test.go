@@ -462,3 +462,68 @@ func (s *IntegrationTestSuite) TestAuthDatasetConsumedInputsStayWithTheirRun() {
 	s.Contains(out, dataset)
 	s.NotContains(out, source, "neither the list nor the detail names finance's input")
 }
+
+// TestAuthDatasetConfinedProducerChecks: the producer checks behind a
+// confined caller's dataset reads and writes, through the real server with no
+// policy file and no catalog connection (so the coverage auth lane runs it):
+// a marketing viewer reads its producer's decisions and a finance viewer is
+// refused them; a marketing operator's manual advance is re-checked against
+// the producers inside the write and lands, a finance operator's is refused,
+// and the cluster admin advances as before.
+func (s *IntegrationTestSuite) TestAuthDatasetConfinedProducerChecks() {
+	s.requireAuthLane()
+	s.requireFreshnessLane()
+	f := &nsRoutesFixture{stamp: time.Now().UnixNano()}
+	defer func() {
+		for _, id := range f.jobs {
+			status, body := s.requestWithKey(http.MethodDelete, "/v1/jobs/"+id, s.authAPIKey, nil)
+			s.Contains([]int{http.StatusAccepted, http.StatusNotFound}, status, "deleting job %s: %s", id, body)
+		}
+	}()
+	dataset := fmt.Sprintf("b6.checks.%d", f.stamp)
+	alias := fmt.Sprintf("b6-checks-%d", f.stamp)
+	s.applyTenancyJob(f, alias, namespacedProducerManifest(alias, "marketing", dataset))
+	mktViewer := s.mintNamespacedKey("viewer", "marketing").Plaintext
+	finViewer := s.mintNamespacedKey("viewer", "finance").Plaintext
+	mktOperator := s.mintNamespacedKey("operator", "marketing").Plaintext
+	finOperator := s.mintNamespacedKey("operator", "finance").Plaintext
+
+	derivations := "/v1/datasets/_/" + dataset + "/derivations"
+	status, body := s.nsRequest(http.MethodGet, derivations, mktViewer, "", nil)
+	s.Require().Equal(http.StatusOK, status, body)
+	var page struct {
+		Derivations []json.RawMessage `json:"derivations"`
+	}
+	s.Require().NoError(json.Unmarshal([]byte(body), &page), body)
+	status, body = s.nsRequest(http.MethodGet, derivations, finViewer, "", nil)
+	s.Require().Equal(http.StatusForbidden, status, body)
+
+	advance := func(token, watermark string) (int, string) {
+		return s.nsRequest(http.MethodPost, "/v1/datasets/_/"+dataset+"/advance", token, fmt.Sprintf(`{"watermark":%q}`, watermark), nil)
+	}
+	status, body = advance(finOperator, "2026-10-14")
+	s.Require().Equal(http.StatusForbidden, status, body)
+	status, body = advance(mktOperator, "2026-10-15")
+	s.Require().Equal(http.StatusOK, status, body)
+	var advanced struct {
+		State struct {
+			Name      string `json:"name"`
+			Watermark string `json:"watermark"`
+		} `json:"state"`
+	}
+	s.Require().NoError(json.Unmarshal([]byte(body), &advanced), body)
+	s.Equal(dataset, advanced.State.Name)
+	s.Equal("2026-10-15", advanced.State.Watermark)
+	status, body = advance(s.authAPIKey, "2026-10-16")
+	s.Require().Equal(http.StatusOK, status, body)
+
+	out, errOut, err := s.datasetCLI(mktViewer, "status", dataset, "--json")
+	s.Require().NoError(err, errOut)
+	var detail struct {
+		State struct {
+			Watermark string `json:"watermark"`
+		} `json:"state"`
+	}
+	s.Require().NoError(json.Unmarshal([]byte(out), &detail), "stdout must be clean JSON: %s", out)
+	s.Equal("2026-10-16", detail.State.Watermark)
+}

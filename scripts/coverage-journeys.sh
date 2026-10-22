@@ -1791,6 +1791,10 @@ PY
   # only, which needs no policy file (this server mounts none) nor a catalog
   # connection.
   auth_pattern="${auth_pattern%)}|TestAuthJobdefApplyLateRefusalRollsBack|TestAuthLegacyJobCreateConfined|TestAuthTriggerTenancyWebhookPathRace|TestAuthTriggerPatchRechecksTenancy)"
+  # Confined dataset reads and writes (identity-and-access B6): the producer
+  # checks behind a confined viewer's derivations and a confined manual
+  # advance. Rule 1 only, no catalog connection.
+  auth_pattern="${auth_pattern%)}|TestAuthDatasetConfinedProducerChecks)"
 
   local -a local_named_passes=(
     TestCaesiumWhyExplainsHitAndMiss
@@ -1846,6 +1850,7 @@ PY
     TestAuthLegacyJobCreateConfined
     TestAuthTriggerTenancyWebhookPathRace
     TestAuthTriggerPatchRechecksTenancy
+    TestAuthDatasetConfinedProducerChecks
   )
   local -a distributed_named_passes=(
     TestNodeWorkersRoute
