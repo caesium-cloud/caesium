@@ -30,7 +30,7 @@ var invalidateCmd = &cobra.Command{
 			url = fmt.Sprintf("%s/%s", url, invalidateTask)
 		}
 
-		body, status, readErr := clihttp.Exchange(cmd.Context(), http.DefaultClient, http.MethodDelete, url, nil, make(http.Header))
+		body, status, readErr := clihttp.Exchange(cmd.Context(), http.DefaultClient, http.MethodDelete, url, nil, authHeaders(cmd))
 		if err := clihttp.ResponseError("cache invalidate", status, body, readErr); err != nil {
 			return err
 		}

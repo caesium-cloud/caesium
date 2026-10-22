@@ -154,6 +154,10 @@ var routesAddedAfterMaster = map[string]RoutePolicy{
 	"POST /v1/auth/users/:id/enable":          {Role: models.RoleAdmin, Class: RouteClassCluster},
 	"POST /v1/auth/users/:id/sessions/revoke": {Role: models.RoleAdmin, Class: RouteClassCluster},
 	"GET /v1/auth/sessions":                   {Role: models.RoleAdmin, Class: RouteClassCluster},
+
+	// CLI login confirmation (E5).
+	"GET /auth/cli/finish":     {Role: models.RoleViewer, Class: RouteClassIdentity},
+	"POST /auth/cli/authorize": {Role: models.RoleViewer, Class: RouteClassIdentity},
 }
 
 // TestRoutePolicyRolesMatchMaster pins every route's role to master's: route
@@ -195,9 +199,11 @@ func TestRoutePoliciesAreWellFormed(t *testing.T) {
 		}
 	}
 	require.Equal(t, map[string]bool{
-		"GET /auth/whoami":        true,
-		"POST /auth/logout":       true,
-		"GET /v1/system/features": true,
+		"GET /auth/whoami":         true,
+		"POST /auth/logout":        true,
+		"GET /v1/system/features":  true,
+		"GET /auth/cli/finish":     true,
+		"POST /auth/cli/authorize": true,
 	}, identity, "identity routes are exactly the caller's own (design §8.1)")
 	require.False(t, RouteClass("tenant").Valid())
 	require.False(t, RouteClass("").Valid())

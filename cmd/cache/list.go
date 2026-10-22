@@ -27,7 +27,7 @@ var listCmd = &cobra.Command{
 		server := strings.TrimSuffix(listServer, "/")
 		url := fmt.Sprintf("%s/v1/jobs/%s/cache", server, listJobID)
 
-		body, status, readErr := clihttp.Exchange(cmd.Context(), http.DefaultClient, http.MethodGet, url, nil, make(http.Header))
+		body, status, readErr := clihttp.Exchange(cmd.Context(), http.DefaultClient, http.MethodGet, url, nil, authHeaders(cmd))
 		if err := clihttp.ResponseError("cache list", status, body, readErr); err != nil {
 			return err
 		}

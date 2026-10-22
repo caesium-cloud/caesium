@@ -1336,7 +1336,7 @@ server-brokered `caesium login` flow that works for every provider.
       bearer revoke exactly that key (tested with bearer + cookie: only the bearer
       dies) and wire the key service into `SSOController`; until then logout does
       not revoke a user-bound key.)
-- [ ] E5. `caesium login`, `logout`, `whoami`: server routes `GET /auth/cli/start`
+- [x] E5. `caesium login`, `logout`, `whoami`: server routes `GET /auth/cli/start`
       (public; stores a login transaction — `state`, loopback port, PKCE-style
       `challenge`, hostname hint, 5m expiry), `GET /auth/cli/finish` (identity class;
       **mints nothing** — renders a session-bound confirmation page),
@@ -1369,6 +1369,12 @@ server-brokered `caesium login` flow that works for every provider.
       `cmd/execute.go`, `cmd/why/why.go`, `cmd/blame/blame.go`, `cmd/run/diff.go`,
       `cmd/auth/auth.go`, new `test/cli_login_test.go`.
       Depends on: E4.
+      (W6-ζ: the key is minted at `exchange`, not `authorize` — authorize records the
+      user, its disable generation and a code hash; exchange mints through the shared
+      `mintUserBoundKeyTx` core fenced on that generation, so no key material rests on
+      the server (§13.1 step 3 amended, pending sign-off). One `cmd/login` package;
+      backfill, cache, receipt get and verify now resolve credentials too; the
+      resolver finds the stored login by the command's own `--server`.)
 
 ### Stream F — Console: grants, switcher, chips, quota label, Access page
 

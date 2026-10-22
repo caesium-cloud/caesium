@@ -1791,6 +1791,13 @@ PY
   # only, which needs no policy file (this server mounts none) nor a catalog
   # connection.
   auth_pattern="${auth_pattern%)}|TestAuthJobdefApplyLateRefusalRollsBack|TestAuthLegacyJobCreateConfined|TestAuthTriggerTenancyWebhookPathRace|TestAuthTriggerPatchRechecksTenancy)"
+  # CLI login (identity-and-access E5): `caesium login --no-browser`/`--code`
+  # and the --no-open loopback flow through the live /auth/cli/* routes, the
+  # stored credential driving whoami and cache list, and `caesium logout`'s
+  # self-revocation. Grants are compared with the user's own session, so the
+  # scenarios need no policy file; the refusal scenario spends two limiter
+  # windows and runs on the agent lane only.
+  auth_pattern="${auth_pattern%)}|TestAuthCLILoginManualCodeFlow|TestAuthCLILoginLoopbackFlow)"
 
   local -a local_named_passes=(
     TestCaesiumWhyExplainsHitAndMiss
@@ -1846,6 +1853,8 @@ PY
     TestAuthLegacyJobCreateConfined
     TestAuthTriggerTenancyWebhookPathRace
     TestAuthTriggerPatchRechecksTenancy
+    TestAuthCLILoginManualCodeFlow
+    TestAuthCLILoginLoopbackFlow
   )
   local -a distributed_named_passes=(
     TestNodeWorkersRoute

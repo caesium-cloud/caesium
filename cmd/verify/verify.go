@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"github.com/caesium-cloud/caesium/cmd/cliutil"
 	"net/http"
 	"os"
 	"strings"
@@ -52,6 +53,7 @@ var Cmd = &cobra.Command{
 		}
 
 		headers := make(http.Header)
+		cliutil.SetAuthorization(cmd, headers, verifyAPIKey)
 		headers.Set("Content-Type", "application/json")
 		body, status, readErr := clihttp.Exchange(cmd.Context(), http.DefaultClient, http.MethodPost, url, bytes.NewReader(payload), headers)
 		if err := clihttp.ResponseError("verify", status, body, readErr); err != nil {
@@ -141,7 +143,10 @@ func shortDigest(d string) string {
 	return d[:16] + "…"
 }
 
+var verifyAPIKey string
+
 func init() {
 	Cmd.Flags().StringVar(&verifyServer, "server", "http://localhost:8080", "Caesium server base URL")
+	Cmd.Flags().StringVar(&verifyAPIKey, "api-key", "", cliutil.APIKeyFlagUsage)
 	Cmd.Flags().BoolVar(&verifyJSON, "json", false, "Emit the full machine-readable verify result as JSON")
 }
