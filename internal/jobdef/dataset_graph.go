@@ -53,9 +53,12 @@ func ValidateDatasetGraph(ctx context.Context, conn *gorm.DB, defs []schema.Defi
 }
 
 // existingDatasetDeclarations loads persisted declarations for live jobs,
-// excluding any job whose alias (or job id) appears in the incoming set — those
+// excluding the stored job each incoming alias names exactly — those
 // declarations are being replaced by this apply and must not double-count as a
-// second producer or a stale edge, mirroring the trigger-chain exclusion.
+// second producer or a stale edge, mirroring the trigger-chain exclusion. The
+// match is by job id: a declaration stores its job's alias trimmed, so a
+// legacy job whose alias carries surrounding whitespace is a different job
+// that only looks like the incoming one (identity-and-access W7-ε).
 func existingDatasetDeclarations(ctx context.Context, conn *gorm.DB, incomingAliases map[string]struct{}) ([]models.DatasetDeclaration, error) {
 	if conn == nil {
 		return nil, nil
@@ -84,9 +87,6 @@ func existingDatasetDeclarations(ctx context.Context, conn *gorm.DB, incomingAli
 	out := make([]models.DatasetDeclaration, 0, len(rows))
 	for idx := range rows {
 		row := rows[idx]
-		if _, replaced := incomingAliases[strings.TrimSpace(row.JobAlias)]; replaced {
-			continue
-		}
 		if _, replaced := incomingJobIDSet[row.JobID]; replaced {
 			continue
 		}

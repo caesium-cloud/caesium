@@ -506,7 +506,7 @@ integration-test-distributed: integration-runner
         --network=container:{{ it_container }} \
         -w {{ bld_dir }} \
         {{ integration_runner_image }} \
-        sh -c 'sh scripts/integration-test.sh -test.run "TestIntegrationTestSuite/(TestRunConcurrencyStrategies|TestPriorityRunStartSurfacesAndCronDefault|TestFanOut|TestPlainFailure|TestSecretLogs|TestHaltPolicy|TestReplaceCancel|TestRetryAfterApplyExecutesRegisteredCommand|TestRetryValidatesAgainstTheRegisteredOutputSchema|TestDataAssertionsMetricsPersisted|TestResourceStats|TestCacheNamespaceMove|TestNamespaceLegacyPost|TestNamespaceQuotaRefusesReplayAtCap)"' 2>&1; echo $? >"$log.rc"; } | tee "$log"; \
+        sh -c 'sh scripts/integration-test.sh -test.run "TestIntegrationTestSuite/(TestRunConcurrencyStrategies|TestPriorityRunStartSurfacesAndCronDefault|TestFanOut|TestPlainFailure|TestSecretLogs|TestHaltPolicy|TestReplaceCancel|TestRetryAfterApplyExecutesRegisteredCommand|TestRetryValidatesAgainstTheRegisteredOutputSchema|TestDataAssertionsMetricsPersisted|TestResourceStats|TestCacheNamespaceMove|TestNamespaceLegacyPost|TestNamespaceQuotaRefusesReplayAtCap|TestReplayIntoMovedNamespaceDropsOldFreshnessViews)"' 2>&1; echo $? >"$log.rc"; } | tee "$log"; \
     rc=$(cat "$log.rc"); \
     passes=$(grep -cE '^[[:space:]]*--- PASS: TestIntegrationTestSuite/' "$log" 2>/dev/null || true); \
     passes=${passes:-0}; \
@@ -888,6 +888,26 @@ integration-up-owner-memory: build-stress build-test
         -e CAESIUM_FANOUT_MAX_PARTITIONS=8 \
         -e CAESIUM_CANCEL_RECONCILE_INTERVAL=2s \
         {{ local_image_ref }}:{{ tag }}-test start
+
+# Isolation-context lane (identity-and-access C2): a four-node distributed
+# cluster on its own Docker network — an owner serving the policy fixture whose
+# worker withdraws the capability, a capable worker serving NO policy file, a
+# worker with CAESIUM_WORKER_ISOLATION_V1_DISABLED=true, and a pull-only node
+# (no run owner, no worker) serving a writable policy copy — so an isolated
+# task can only land on the capable worker, under the owner's rules, and a
+# reload that isolates a namespace fences its pull-lane rows. Two scenarios,
+# TestDistributedIsolationContextReachesCapableWorker and
+# TestDistributedIsolationReloadFencesPullLaneRows; they skip on every other
+# lane. See scripts/integration-test-isolation.sh.
+integration-test-isolation: integration-runner build-test
+    @CONTAINER_CLI={{ container_cli }} \
+    PLATFORM={{ platform }} \
+    TEST_IMAGE={{ local_image_ref }}:{{ tag }}-test \
+    RUNNER_IMAGE={{ integration_runner_image }} \
+    SOCK={{ sock }} \
+    REPO_DIR={{ repo_dir }} \
+    BLD_DIR={{ bld_dir }} \
+    bash scripts/integration-test-isolation.sh
 
 # The infra lane runs its own server so it can coexist with the default lane,
 # and it builds the reagent images the TestInfra scenarios mount. Those

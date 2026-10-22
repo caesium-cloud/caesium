@@ -14,6 +14,10 @@
 # - marketing carries secret rules and a run quota of one; finance carries no
 #   settings. Every namespace an integration scenario uses must be declared
 #   here: undeclared namespaces are rejected while a policy file is loaded.
+# - isolated maps a Kubernetes namespace and service account and nothing else:
+#   the isolation-context lane (just integration-test-isolation) runs a Docker
+#   task in it to prove the owner's mapping reaches the worker. No scenario runs
+#   a Kubernetes task in it.
 apiVersion: v1
 kind: AccessPolicy
 namespaces:
@@ -25,6 +29,10 @@ namespaces:
     quotas:
       maxConcurrentRuns: 1
   finance: {}
+  isolated:
+    kubernetes:
+      namespace: caesium-isolated
+      serviceAccountName: caesium-isolated-runner
 bindings:
   - subjects:
       groups: ["iaa-reload-viewers"]

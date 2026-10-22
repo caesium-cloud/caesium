@@ -29,6 +29,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/caesium-cloud/caesium/internal/auth/policy"
+	jobdefruntime "github.com/caesium-cloud/caesium/internal/jobdef/runtime"
 	"github.com/caesium-cloud/caesium/internal/metrics"
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/caesium-cloud/caesium/internal/run"
@@ -75,7 +77,46 @@ const (
 	// dispatch loop backs the task off only for this one, so a task rejected
 	// for any other reason is still retried on the very next tick.
 	ReasonNoCapacity = "no_capacity"
+	// ReasonTooLarge rejects an envelope over MaxDispatchBodyBytes. It is
+	// answered before anything is claimed, and never by truncating the body.
+	ReasonTooLarge = "too_large"
+	// ReasonNoIsolationPolicy refuses an isolation re-check on a node that
+	// serves no access policy file: it cannot vouch for any secret rule.
+	ReasonNoIsolationPolicy = "no_isolation_policy"
 )
+
+// CapabilityIsolationV1 is the capability a worker advertises in GET
+// /internal/capabilities when it executes a dispatched task under the
+// isolation context the owner carries (identity-and-access design §10.1). An
+// owner dispatches a task whose context is non-default only to a peer that
+// advertises it; CAESIUM_WORKER_ISOLATION_V1_DISABLED=true withdraws it, which can only
+// narrow where isolated tasks run.
+const CapabilityIsolationV1 = "isolation_v1"
+
+// isolationWorkerNodePrefix tags DispatchRequest.WorkerNode for a task whose
+// isolation context is non-default. A worker built before the context checks
+// WorkerNode against its own node id before claiming anything, so it answers a
+// tagged envelope with 409 wrong_worker instead of running the task without
+// the owner's rules — whatever the owner's capability cache believed.
+const isolationWorkerNodePrefix = CapabilityIsolationV1 + "/"
+
+// IsolationWorkerNode is the WorkerNode an owner sends nodeID for a dispatch
+// whose isolation context is non-default.
+func IsolationWorkerNode(nodeID string) string {
+	return isolationWorkerNodePrefix + nodeID
+}
+
+// MaxDispatchBodyBytes bounds a /internal/dispatch envelope and an
+// /internal/isolation answer. A context carries one namespace's settings,
+// which a valid policy bounds as encoded JSON (policy.MaxEncodedNamespaceBytes,
+// checked after YAML alias expansion); the fixed part keeps the envelope's
+// historical 64 KiB for everything else. A sender refuses a larger body and a
+// receiver rejects one (413 too_large) — neither ever truncates.
+const MaxDispatchBodyBytes = 1<<16 + policy.MaxEncodedNamespaceBytes
+
+// ErrDispatchTooLarge is returned by PostDispatch for an envelope over
+// MaxDispatchBodyBytes; nothing is sent.
+var ErrDispatchTooLarge = errors.New("dispatch: envelope exceeds the internal size limit")
 
 // ErrNoCapacity is the sentinel a WorkerSubmitter returns when it has no free
 // execution slot for a dispatched task.  It lives here rather than in the
@@ -129,9 +170,8 @@ func (c *CapabilitiesResponse) Supports(name string) bool {
 // internal-protocol features it supports, surfaced via GET
 // /internal/capabilities.  The WORKER is meant to be the honest source: the
 // handler only routes, while the worker is what would actually execute
-// whatever the capability describes.  No production type implements this
-// today — it exists so a future protocol feature that needs a peer's
-// pre-flight assent has somewhere to plug in without adding a new endpoint.
+// whatever the capability describes.  *worker.Worker implements it and
+// advertises CapabilityIsolationV1.
 type CapabilityAdvertiser interface {
 	Capabilities() []string
 }
@@ -227,6 +267,11 @@ type DispatchRequest struct {
 	// loop from the owner's node address + API port.
 	OwnerBaseURL string    `json:"owner_base_url"`
 	Deadline     time.Time `json:"deadline"`
+	// Isolation is the run namespace's isolation context, resolved by the
+	// owner from its policy file for this dispatch (identity-and-access design
+	// §10.1). Absent when the owner serves no policy file — the envelope is
+	// then byte-identical to before — and from owners built before it.
+	Isolation *jobdefruntime.IsolationContext `json:"isolation,omitempty"`
 }
 
 // CompleteRequest is the envelope sent by a worker back to the owner when a
@@ -278,6 +323,10 @@ type InboundDispatch struct {
 	OwnerGeneration int64
 	Attempt         int
 	WorkerNode      string
+	// Isolation is the owner's isolation context for the task, or nil (no
+	// owner policy file, or an owner built before it): the worker then
+	// resolves the namespace's settings in-process, as before.
+	Isolation *jobdefruntime.IsolationContext
 }
 
 // WorkerSubmitter is the seam the dispatch handler uses to hand an accepted
@@ -370,7 +419,7 @@ func (h *Handler) capabilities() []string {
 
 // HandleCapabilities handles GET /internal/capabilities: reports this node's
 // internal-protocol version and the optional feature set it advertises via
-// CapabilityAdvertiser (empty today — no capability currently gates on it).
+// CapabilityAdvertiser (CapabilityIsolationV1 from a current worker).
 // It is deliberately a plain read with no side effects, guarded by the same
 // bearer token as the other internal endpoints.
 func (h *Handler) HandleCapabilities(w http.ResponseWriter, r *http.Request) {
@@ -414,7 +463,14 @@ func (h *Handler) HandleDispatch(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req DispatchRequest
-	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<16))
+	body, err := io.ReadAll(io.LimitReader(r.Body, MaxDispatchBodyBytes+1))
+	if err == nil && len(body) > MaxDispatchBodyBytes {
+		writeJSON(w, http.StatusRequestEntityTooLarge, ErrorResponse{
+			Code:    ReasonTooLarge,
+			Message: fmt.Sprintf("dispatch request exceeds %d bytes", MaxDispatchBodyBytes),
+		})
+		return
+	}
 	if err != nil || json.Unmarshal(body, &req) != nil {
 		writeJSON(w, http.StatusBadRequest, ErrorResponse{
 			Code:    ReasonMalformed,
@@ -423,11 +479,28 @@ func (h *Handler) HandleDispatch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Validate that this node is the intended recipient.
-	if req.WorkerNode != h.nodeID {
+	// Validate that this node is the intended recipient. A task whose
+	// isolation context is non-default arrives tagged (IsolationWorkerNode) and
+	// only with that context; an untagged envelope carries no context or a
+	// default one. Anything else is refused before the claim.
+	expectedNode := h.nodeID
+	if !req.Isolation.Default() {
+		// A node that does not advertise the capability (no worker, or
+		// CAESIUM_WORKER_ISOLATION_V1_DISABLED=true) never takes an isolated
+		// task, however the envelope is addressed.
+		if !slices.Contains(h.capabilities(), CapabilityIsolationV1) {
+			writeJSON(w, http.StatusConflict, ErrorResponse{
+				Code:    ReasonWrongWorker,
+				Message: fmt.Sprintf("this node %q does not advertise %s", h.nodeID, CapabilityIsolationV1),
+			})
+			return
+		}
+		expectedNode = IsolationWorkerNode(h.nodeID)
+	}
+	if req.WorkerNode != expectedNode {
 		writeJSON(w, http.StatusConflict, ErrorResponse{
 			Code:    ReasonWrongWorker,
-			Message: fmt.Sprintf("this node is %q, dispatch addressed to %q", h.nodeID, req.WorkerNode),
+			Message: fmt.Sprintf("this node is %q, dispatch addressed to %q", expectedNode, req.WorkerNode),
 		})
 		return
 	}
@@ -532,6 +605,7 @@ func (h *Handler) HandleDispatch(w http.ResponseWriter, r *http.Request) {
 		OwnerGeneration: req.OwnerGeneration,
 		Attempt:         req.Attempt,
 		WorkerNode:      h.nodeID,
+		Isolation:       req.Isolation,
 	}); submitErr != nil {
 		h.rollbackClaim(req)
 		log.Warn("dispatch: worker could not accept task; rolled back claim",
@@ -943,6 +1017,9 @@ func PostDispatch(ctx context.Context, targetURL, token string, req DispatchRequ
 	if err != nil {
 		return false, "", fmt.Errorf("dispatch: marshal: %w", err)
 	}
+	if len(body) > MaxDispatchBodyBytes {
+		return false, "", ErrDispatchTooLarge
+	}
 
 	// Fail fast on an unreachable peer: a dispatch is cheap to retry on the next
 	// tick (to a different peer), so a dead node in the round-robin must not hang
@@ -1093,4 +1170,100 @@ func WarnIfNoToken(token string) {
 			"run-owner dispatch will be silently inert. " +
 			"Set CAESIUM_INTERNAL_WAKEUP_TOKEN on every node to enable dispatch.",
 	)
+}
+
+// IsolationRequest is the body of POST /internal/isolation: a worker executing
+// a dispatched task asks the task's owner for the run's isolation context as
+// the owner's policy states it now.
+type IsolationRequest struct {
+	RunID uuid.UUID `json:"run_id"`
+}
+
+// HandleIsolation handles POST /internal/isolation. The owner resolves the
+// run's isolation context from the run's persisted namespace and its current
+// policy, exactly as it does for a dispatch, so a worker re-checking a task's
+// secret references (before the cache lookup, before resolution, and for replay
+// verification) applies a rule the owner revoked since the dispatch. It is
+// guarded by the same bearer token (and, on the internal listener, mTLS) as
+// /internal/dispatch. 503 while the owner's configured policy is not loaded,
+// and 409 when the owner serves no policy file at all: the worker denies.
+func (h *Handler) HandleIsolation(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !h.authorized(r) {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	var req IsolationRequest
+	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<12))
+	if err != nil || json.Unmarshal(body, &req) != nil || req.RunID == uuid.Nil {
+		writeJSON(w, http.StatusBadRequest, ErrorResponse{Code: ReasonMalformed, Message: "failed to decode isolation request"})
+		return
+	}
+	namespace, _, err := h.store.RunIsolationInfo(r.Context(), req.RunID)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			writeJSON(w, http.StatusNotFound, ErrorResponse{Code: ReasonMissingRun, Message: "run not found"})
+			return
+		}
+		log.Warn("isolation: run namespace lookup failed", "run_id", req.RunID, "error", err)
+		writeJSON(w, http.StatusServiceUnavailable, ErrorResponse{Code: ReasonContention, Message: "run namespace unavailable"})
+		return
+	}
+	isolation, carry, ready := jobdefruntime.ResolveIsolationContext(namespace)
+	if !ready {
+		writeJSON(w, http.StatusServiceUnavailable, ErrorResponse{Code: ReasonOwnerNotReady, Message: "access policy not loaded"})
+		return
+	}
+	if !carry {
+		// This node serves no policy file (an owner restarted without
+		// CAESIUM_AUTH_POLICY_FILE after it dispatched the task). Its empty
+		// context would read as "no rules" and allow every secret the task
+		// names; it cannot vouch for any rule, so the worker denies. Only a
+		// worker that received a policy-backed context ever asks.
+		writeJSON(w, http.StatusConflict, ErrorResponse{Code: ReasonNoIsolationPolicy, Message: "this node serves no access policy file"})
+		return
+	}
+	isolation.Namespace = namespace
+	writeJSON(w, http.StatusOK, isolation)
+}
+
+// FetchIsolation asks the owner at ownerBaseURL for runID's current isolation
+// context (POST /internal/isolation). Every failure - an unreachable owner, a
+// non-200 answer, an oversized or malformed body - is an error; callers deny.
+func FetchIsolation(ctx context.Context, ownerBaseURL, token string, runID uuid.UUID) (*jobdefruntime.IsolationContext, error) {
+	body, err := json.Marshal(IsolationRequest{RunID: runID})
+	if err != nil {
+		return nil, fmt.Errorf("isolation: marshal: %w", err)
+	}
+	fetchCtx, cancel := context.WithTimeout(ctx, dispatchPostTimeout)
+	defer cancel()
+	httpReq, err := http.NewRequestWithContext(fetchCtx, http.MethodPost, strings.TrimRight(ownerBaseURL, "/")+"/internal/isolation", bytes.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("isolation: new request: %w", err)
+	}
+	httpReq.Header.Set("Authorization", "Bearer "+token)
+	httpReq.Header.Set("Content-Type", "application/json")
+	resp, err := internalClient.Do(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("isolation: http: %w: %w", ErrPeerUnreachable, err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, MaxDispatchBodyBytes+1))
+	if err != nil {
+		return nil, fmt.Errorf("isolation: read: %w", err)
+	}
+	if len(respBody) > MaxDispatchBodyBytes {
+		return nil, fmt.Errorf("isolation: answer exceeds %d bytes", MaxDispatchBodyBytes)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("isolation: owner returned status %d", resp.StatusCode)
+	}
+	var out jobdefruntime.IsolationContext
+	if err := json.Unmarshal(respBody, &out); err != nil {
+		return nil, fmt.Errorf("isolation: decode: %w", err)
+	}
+	return &out, nil
 }

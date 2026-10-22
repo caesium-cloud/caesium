@@ -14,6 +14,7 @@ import (
 	"github.com/caesium-cloud/caesium/internal/atom"
 	"github.com/caesium-cloud/caesium/internal/cache"
 	"github.com/caesium-cloud/caesium/internal/event"
+	"github.com/caesium-cloud/caesium/internal/freshness"
 	jobdefruntime "github.com/caesium-cloud/caesium/internal/jobdef/runtime"
 	"github.com/caesium-cloud/caesium/internal/jobdef/secret"
 	"github.com/caesium-cloud/caesium/internal/models"
@@ -249,9 +250,24 @@ func (c *Constructor) Prepare(ctx context.Context, req Request) (*PreparedReplay
 		return nil, fmt.Errorf("%w: %s", ErrBaselineNotTerminal, baseline.Status)
 	}
 
+	var currentJob models.Job
+	if err := c.store.DB().WithContext(ctx).Select("namespace").First(&currentJob, "id = ?", baseline.JobID).Error; err != nil {
+		return nil, err
+	}
+	namespace := models.NamespaceOrDefault(currentJob.Namespace)
+	// Effective hashes can alias an equal-output prior from another namespace.
+	// Ownership changes therefore force execution independently of hash equality.
+	namespaceChanged := namespace != models.NamespaceOrDefault(baseline.Namespace)
+
 	baseParams, err := decodeParams(baseline.Params)
 	if err != nil {
 		return nil, err
+	}
+	if namespaceChanged {
+		// The baseline's freshness views were read from the old namespace's
+		// datasets; they are not carried onto a run of the new one
+		// (identity-and-access W7-ε).
+		baseParams = freshness.WithoutNamespaceDerivedParams(baseParams)
 	}
 	replayParams := maps.Clone(baseParams)
 	if replayParams == nil {
@@ -265,20 +281,21 @@ func (c *Constructor) Prepare(ctx context.Context, req Request) (*PreparedReplay
 		replayParams[k] = v
 	}
 
-	var currentJob models.Job
-	if err := c.store.DB().WithContext(ctx).Select("namespace").First(&currentJob, "id = ?", baseline.JobID).Error; err != nil {
-		return nil, err
-	}
-	namespace := models.NamespaceOrDefault(currentJob.Namespace)
-	// Effective hashes can alias an equal-output prior from another namespace.
-	// Ownership changes therefore force execution independently of hash equality.
-	namespaceChanged := namespace != models.NamespaceOrDefault(baseline.Namespace)
 	plans, err := c.planTasks(ctx, groups, replayParams, paramsChanged || namespaceChanged, namespace)
 	if err != nil {
 		if namespaceChanged && errors.Is(err, ErrReplayUnsafe) {
 			return nil, fmt.Errorf("replay: job namespace changed from %q to %q and requires re-execution: %w", models.NamespaceOrDefault(baseline.Namespace), namespace, err)
 		}
 		return nil, err
+	}
+	if namespaceChanged {
+		// Each replay TaskRun stores its baseline descriptor as the audit
+		// reference for what was replayed, and the descriptor endpoint serves
+		// it to the new namespace's readers. Its provenance stays the
+		// baseline's; the run params it froze lose the same views.
+		for i := range plans {
+			plans[i].descriptor.Run.Params = freshness.WithoutNamespaceDerivedParams(plans[i].descriptor.Run.Params)
+		}
 	}
 
 	return &PreparedReplay{
@@ -1383,6 +1400,16 @@ func (c *Constructor) materialize(ctx context.Context, baseline models.JobRun, p
 			return err
 		}
 		if len(records) > 0 {
+			// Only a worker able to honour the namespace's isolation
+			// context may pull a row (run.IsolationSelectorKey): the mark
+			// is reconciled with the policy as it is now, inside the
+			// insert's transaction.
+			for i := range records {
+				records[i].NodeSelector = run.WithIsolationSelector(records[i].NodeSelector, namespace)
+			}
+			if materializeHook != nil {
+				materializeHook()
+			}
 			if err := tx.Create(&records).Error; err != nil {
 				return err
 			}
@@ -1404,9 +1431,16 @@ func (c *Constructor) materialize(ctx context.Context, baseline models.JobRun, p
 		// answer, not a deferral (api/rest/service/replay).
 		return uuid.Nil, err
 	}
+	// A reload whose fence sweep read the table before this commit never saw
+	// the replay's rows.
+	c.store.FenceRunAfterCommit(ctx, replayID)
 	c.store.PublishEvents(pendingEvents...)
 	return replayID, nil
 }
+
+// materializeHook is a test hook run inside the materialization transaction
+// after the rows' isolation marks are computed and before they are inserted.
+var materializeHook func()
 
 func taskRunRecord(replayID uuid.UUID, plan plannedTask, now time.Time, priority int) (models.TaskRun, error) {
 	desc := plan.descriptor

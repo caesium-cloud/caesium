@@ -34,7 +34,8 @@ This guide covers runtime configuration, rollout, and troubleshooting for parall
 | `CAESIUM_INTERNAL_WAKEUP_TOKEN` | `""` | Shared bearer token required for cross-node wakeups via `POST /internal/wakeup`. |
 | `CAESIUM_WAKEUP_FANOUT_MODE` | `full` | Wakeup fanout strategy: `full` for every peer, or `gossip` for large clusters. |
 | `CAESIUM_NODE_ADDRESS` | `127.0.0.1:9001` | Logical node identity written to `task_runs.claimed_by`. |
-| `CAESIUM_NODE_LABELS` | `""` | Optional node labels (`k=v,k2=v2`) for task `nodeSelector` affinity. |
+| `CAESIUM_NODE_LABELS` | `""` | Optional node labels (`k=v,k2=v2`) for task `nodeSelector` affinity. The key `caesium.io/isolation` is reserved and ignored here (see [Isolation context](#isolation-context)). |
+| `CAESIUM_WORKER_ISOLATION_V1_DISABLED` | `false` | When `true`, this worker withdraws the `isolation_v1` capability: owners never dispatch it a task whose isolation context is non-default and it never pulls one. It can only narrow where isolated tasks run. See [Isolation context](#isolation-context). |
 | `CAESIUM_RUN_OWNER_ENABLED` | `false` | Enables Phase 2 run-owner coordination mode (experimental). When `false` (default), the system behaves identically to Phase 1. |
 | `CAESIUM_RUN_LEASE_TTL` | `30s` | How long a run-owner lease is valid before another node may take over. Only relevant when `CAESIUM_RUN_OWNER_ENABLED=true`. |
 | `CAESIUM_RUN_OWNER_DISPATCH_PROGRESS_DEADLINE` | `10m` | How long a ready task may keep being refused for worker capacity before the owner surfaces it as a stall (warn log + `caesium_dispatch_stalled_total`). Never cancels or fails the task. |
@@ -105,8 +106,68 @@ Finished completion reports keep their worker claim registered for renewal and c
 - `caesium_complete_rejected_total{reason}` — counts `/internal/complete` rejections by fence violation type.
   `reason="terminal_run"` is a permanent refusal after a run reaches a terminal state, including a cancellation that beats a completion. It is distinct from `task_not_running`, which the worker treats as a completion application error. An unreadable lease or run status returns retryable `503 owner_not_ready` and increments `caesium_complete_retryable_total{reason="owner_not_ready"}` instead of a fence-rejection counter.
 - `caesium_dispatch_stalled_total{reason}` — counts tasks that passed the dispatch progress deadline without any worker ever accepting them.
+- `caesium_dispatch_incompatible_worker_total` — counts peers an owner skipped for a task whose isolation context is non-default because they do not advertise `isolation_v1` (quarantined replays are not counted). A steady increase means isolated tasks are waiting for a capable worker.
 - `caesium_run_lease_renewals_total` — counts batched run-lease renewal statements.
 - `caesium_run_leases_owned` — current number of run leases held by this node.
+
+### Isolation context
+
+An owner that serves an access policy file (`CAESIUM_AUTH_POLICY_FILE`, see
+[Identity and access](identity-and-access.md#kubernetes-target-per-namespace))
+resolves each run namespace's **isolation context** — its Kubernetes target,
+its secret rules, the policy revision, and the owner's effective defaults (pod
+namespace, relative `secret://k8s` read namespace) — and carries it in every
+`POST /internal/dispatch`. A worker that receives a context never reads its own
+policy file: the pod target, the cache identity, the recorded descriptor and
+the first secret allow-check come from the context, and the re-checks right
+before the cache lookup, before secret resolution and during replay
+verification ask the owner for its current rules (`POST /internal/isolation`,
+same token and mTLS as dispatch). An owner that cannot be asked denies every
+secret reference. An owner with no policy file sends no context: its dispatch
+is byte-identical to before.
+
+A context is **non-default** when the namespace maps a Kubernetes target, has
+any secret rule, or is not declared by the file. Such a task is dispatched
+only to a peer whose `GET /internal/capabilities` lists `isolation_v1` (every
+current worker unless `CAESIUM_WORKER_ISOLATION_V1_DISABLED=true`), with a
+tagged `worker_node` that a worker built before the context refuses before
+claiming anything; other peers are skipped and counted in
+`caesium_dispatch_incompatible_worker_total`, and with no capable peer the task
+waits. Its `task_runs` rows carry the reserved node selector
+`caesium.io/isolation: v1-<digest of the namespace's isolation settings>`, so
+the `ClaimNext` pull lane never hands them to an older worker, one without a
+policy file, or one with the capability withdrawn, and a capable worker pulls
+one (recovery after an owner's lease lapses, or a cluster without run owners)
+only when its file gives the namespace the same isolation settings (an edit
+elsewhere in the file does not matter). Every node serving the file, with or
+without a run owner, marks the unmarked unfinished rows of the namespaces it
+isolates at startup, after each reload that changes the file, and every
+`CAESIUM_AUTH_POLICY_RELOAD_INTERVAL`, so a reload that isolates a namespace
+fences rows registered before it; a registration, replay or retry also fences
+its run's rows right after it commits, and any other row made schedulable
+under the previous revision is fenced within one interval. That sweep only
+adds marks (a node with a stale file never rebinds or removes one); an owner
+rebinds the rows of the runs it dispatches when its policy changes their
+settings, and a row whose settings changed while it had no owner waits for an
+operator to retry or cancel the run. A retry or a replay reconciles the rows
+it resets with the retrying node's file: it marks them, rebinds them, or (when
+the file declares the namespace without a mapping or secret rules) drops the
+mark so the pull lane can run them again; a node serving no file keeps a mark
+it cannot judge. The re-check endpoint answers only while the owner serves a
+policy file: an owner restarted without one refuses it
+(`409 no_isolation_policy`) and the worker denies. A node serving no policy
+file that owns such a run (owner-memory lease takeover, or a run another
+node's sweep marked later; it reads the marks again every 2 s while it finds
+none) holds it rather than dispatch it unisolated. A node with `CAESIUM_WORKER_ENABLED=false`
+does not renew the leases of the runs it owns (run-lease renewal runs on the
+worker loop), so give owner nodes a worker — with
+`CAESIUM_WORKER_ISOLATION_V1_DISABLED=true` if they must not execute isolated
+tasks.
+
+**Upgrade order:** upgrade workers first, then owners. An older owner sends no
+context and a new worker then runs its tasks exactly as before (reading its own
+policy file). Nodes that create runs (API, triggers) must serve the policy file;
+workers need not.
 
 ## Dqlite Topology
 
@@ -202,6 +263,26 @@ Execution events are marked with `bus_dispatch_pending=true` before commit. Norm
 - Confirm workers are running on nodes (`launching distributed worker` log line).
 - Check `GET /v1/nodes/:address/workers` for active claims.
 - Verify pending tasks have `outstanding_predecessors=0`.
+- A pending row whose `node_selector` carries `caesium.io/isolation` is pulled
+  only by a worker that advertises `isolation_v1`, serves a policy file, and
+  gives the namespace the settings the mark was made under (see
+  [Isolation context](#isolation-context)). The isolation fence only adds marks
+  and never removes one. So while nodes serve different policy revisions, a
+  node still serving the stricter file re-marks rows that a retry on an updated
+  node unmarked, and those rows stay marked after the file reaches every node.
+  The run then waits; it never runs without isolation. Run owners still
+  dispatch the rows of runs they own. In a cluster without run owners there is
+  no way yet to clear the marks of a run that is still running:
+  `caesium run retry` refuses a run that is not terminal, and enabling a run
+  owner later does not adopt the run (owners take over only runs whose lease
+  expired, and a run started without an owner has no lease). Roll the file out
+  to every node first. A job with `metadata.runTimeout` then fails the waiting
+  run at its deadline (its unfinished tasks fail with it), and
+  `caesium run retry` resets those tasks and reconciles their marks under the
+  current file. Otherwise start a new run, which registers its rows under the
+  current file. The waiting run stays `running` and still counts toward the
+  job's concurrency limit and the namespace's run quota. Clearing stale marks
+  on a running run is a tracked follow-up.
 
 ### High claim contention
 

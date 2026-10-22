@@ -47,6 +47,9 @@ func All(g *echo.Group, bus internal_event.Bus, authSvc *auth.Service, auditor *
 
 	protected := g.Group("")
 	vars := env.Variables()
+	// The static shared secrets are deprecated (identity-and-access A6):
+	// warn once per process, naming the replacement, never the value.
+	auth.WarnLegacySharedSecrets(vars.ManualTriggerAPIKey, vars.EventIngestAPIKey)
 	if vars.AuthMode == "api-key" || vars.SSOEnabled() {
 		protected.Use(authmw.Auth(authmw.AuthDeps{
 			Service:    authSvc,
@@ -87,7 +90,7 @@ func Protected(g *echo.Group, bus internal_event.Bus, auditor *auth.AuditLogger,
 	}
 	// events
 	{
-		ctrl := event.New(bus)
+		ctrl := event.New(bus).WithAuditor(auditor)
 		g.GET("/events", ctrl.Stream)
 		g.POST("/events", ctrl.Ingest)
 		g.GET("/events/ingested", ctrl.ListIngested)
@@ -198,7 +201,7 @@ func Protected(g *echo.Group, bus internal_event.Bus, auditor *auth.AuditLogger,
 		g.GET("/triggers/:id/events", trigger.Events)
 		g.GET("/triggers/:id", trigger.Get)
 		g.PATCH("/triggers/:id", trigger.Patch)
-		g.POST("/triggers/:id/fire", trigger.Fire)
+		g.POST("/triggers/:id/fire", trigger.FireWith(auditor))
 	}
 
 	// stats

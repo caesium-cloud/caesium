@@ -310,7 +310,7 @@ fi
                      "TestAuthDagSnapshotsFollowNamespaceMoves",
                      "TestAuthDatasetConfinedProducerChecks",
                      "TestAuthAggregateRedactionConfinedToOwnNamespaces",
-                     "TestAuthCLILoginManualCodeFlow", "TestAuthCLILoginLoopbackFlow",
+                     "TestAuthCLILoginManualCodeFlow", "TestAuthCLILoginLoopbackFlow", "TestAuthLegacySecretAudited",
                      "TestAuthLDAPLoginNoBindingBody", "TestAuthLDAPGroupRefreshFollowsDirectory",
                      "TestAuthLDAPDisabledEntryRevokesCredentials", "TestAuthStaleGroupsRefusedUntilRelogin"},
         }
@@ -341,7 +341,7 @@ fi
                         "TestAuthDagSnapshotsFollowNamespaceMoves",
                         "TestAuthDatasetConfinedProducerChecks",
                         "TestAuthAggregateRedactionConfinedToOwnNamespaces",
-                        "TestAuthCLILoginManualCodeFlow", "TestAuthCLILoginLoopbackFlow",
+                        "TestAuthCLILoginManualCodeFlow", "TestAuthCLILoginLoopbackFlow", "TestAuthLegacySecretAudited",
                         "TestAuthLDAPLoginNoBindingBody", "TestAuthLDAPGroupRefreshFollowsDirectory",
                         "TestAuthLDAPDisabledEntryRevokesCredentials", "TestAuthStaleGroupsRefusedUntilRelogin"]}
         for lane, names in new.items():

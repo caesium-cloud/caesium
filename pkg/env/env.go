@@ -297,6 +297,7 @@ type Environment struct {
 	WorkerLeaseTTL                 time.Duration `default:"5m" split_words:"true"`
 	WorkerLeaseRenewInterval       time.Duration `default:"0" split_words:"true"`
 	WorkerPoolSize                 int           `default:"4" split_words:"true"`
+	WorkerIsolationV1Disabled      bool          `envconfig:"WORKER_ISOLATION_V1_DISABLED" default:"false"`
 	ShutdownGracePeriod            time.Duration `envconfig:"SHUTDOWN_GRACE_PERIOD" default:"30s"`
 	InternalWakeupToken            string        `default:"" split_words:"true"`
 	WakeupFanoutMode               string        `default:"full" split_words:"true"`

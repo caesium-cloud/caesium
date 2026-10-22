@@ -4,6 +4,7 @@ package policy
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -160,6 +161,9 @@ func (p *AccessPolicy) Validate() error {
 					return fmt.Errorf("namespaces[%q].secrets.allow[%d]: %w", name, i, err)
 				}
 			}
+		}
+		if encoded, err := json.Marshal(ns); err != nil || len(encoded) > MaxEncodedNamespaceBytes {
+			return fmt.Errorf("namespaces[%q]: settings exceed %d bytes once expanded", name, MaxEncodedNamespaceBytes)
 		}
 	}
 	for i, binding := range p.Bindings {

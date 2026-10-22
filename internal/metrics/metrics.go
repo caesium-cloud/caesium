@@ -698,6 +698,17 @@ var (
 		},
 	)
 
+	// DispatchIncompatibleWorkerTotal counts peers an owner skipped for a task
+	// whose isolation context is non-default because the peer answered GET
+	// /internal/capabilities without isolation_v1 (identity-and-access §10.1).
+	// The task waits for a capable peer instead. Quarantined replays never count.
+	DispatchIncompatibleWorkerTotal = prometheus.NewCounter(
+		prometheus.CounterOpts{
+			Name: "caesium_dispatch_incompatible_worker_total",
+			Help: "Total peers skipped for an isolated task because they do not advertise the isolation_v1 capability.",
+		},
+	)
+
 	// CompleteReportFailedTotal counts the worker-side failures to report a
 	// dispatched task's completion back to the owner via /internal/complete.
 	// This is the run-owner counterpart to a lost completion: the task ran but
@@ -860,6 +871,7 @@ func Register() {
 			DispatchRejectedTotal,
 			DispatchStalledTotal,
 			DispatchSentTotal,
+			DispatchIncompatibleWorkerTotal,
 			CompleteReportFailedTotal,
 			CompleteRetryableTotal,
 			IncidentsTotal,
