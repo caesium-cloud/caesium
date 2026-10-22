@@ -627,6 +627,23 @@ compatibility); undeclared namespaces are rejected only when a policy file is
 loaded. Amended in identity-and-access W4 (orchestrator decision, pending
 maintainer sign-off).
 
+**Canonical aliases.** Job aliases are matched exactly and are case-sensitive.
+Every writer (apply, the legacy `POST /v1/jobs`, git sync, `caesium dev`, lint)
+refuses an alias with leading or trailing whitespace, Unicode spaces included,
+with `400 metadata.alias "payroll " must not have leading or trailing
+whitespace`, so a second job differing only by whitespace can no longer be
+created. Git sync skips such a manifest on its own (reported with reason
+`alias_not_canonical`) and syncs the rest; the alias stays protected from the
+source's prune. A job stored under a non-canonical alias before this rule is
+not migrated: re-applying its manifest is refused and changes nothing. To
+recover, retire the old job first with `DELETE /v1/jobs/:id` (its own ID, from
+`GET /v1/jobs`), then apply the corrected manifest: it updates a job that
+already holds the canonical alias, if one exists, and creates it otherwise.
+Retire first because dataset and contract validation compare aliases with
+whitespace trimmed, so while both are active they cannot tell the two jobs
+apart. A git source holding both spellings fails its sync as a duplicate
+alias, as it did before this rule.
+
 - Runs, backfills and incidents carry a copy of the job's namespace when they
   are created, so global lists can filter without a join. Triggers, task runs,
   events and lineage rows derive it through their job. Run-scoped data
@@ -663,6 +680,15 @@ maintainer sign-off).
   on run reads, the event stream, lifecycle event history, an incident list's
   `last_error`, and a fanned step's `why` group (`firstFailure.error` and
   `summary`).
+- DAG snapshots (the topology history behind `caesium blame`,
+  `GET /v1/jobs/:id/topology` and `topology/history`) record the namespace
+  they were written in. A move writes a fresh snapshot in the new namespace
+  even when the topology is unchanged, so the new owner's topology and blame
+  start at the move and the old owner's history stays with it. Snapshots
+  written before this release record no namespace and are shown only to
+  unconfined callers; the first apply of each existing job after the upgrade
+  writes one namespaced snapshot (same content) so its current owner sees its
+  topology.
 
 ### Git sync allowlist
 
@@ -698,8 +724,8 @@ is unrestricted and writes no such row.
 A principal confined to some namespaces, and a job-scoped API key (even one
 holding its role at `*`), can create, apply, move and prune jobs only within
 its reach. A job-scoped key writes only the exact aliases its scope lists (an
-alias with leading or trailing whitespace, Unicode spaces included, is a
-different job and is refused with 403). In detail:
+alias with leading or trailing whitespace is refused with 400 for every writer,
+see [Canonical aliases](#namespaces-on-jobs)). In detail:
 
 - **Apply** (`caesium job apply`, `POST /v1/jobdefs/apply`) needs operator in
   every definition's namespace and in the stored namespace of every alias it
@@ -909,7 +935,6 @@ that makes it namespace-aware lands (unconfined principals are unaffected):
 | --- | --- |
 | A6 | `POST /v1/events` |
 | A8 | `/v1/agent/incidents/*`, incident detail `GET /v1/incidents/:id`, approval approve |
-| B7 | `GET /v1/jobs/:id/blame`, `topology` and `topology/history` (DAG snapshots record no namespace yet) |
 | B5 | `GET /v1/lineage/impact`, `GET /v1/contracts/graph` |
 
 Every namespace denial is `403 insufficient permissions` and is audited as
@@ -1016,7 +1041,13 @@ History under a job (`/v1/jobs/:id/...`) is authorised on the job's current
 namespace and then filtered by each row's persisted namespace: runs (and the
 `X-Caesium-Total-Count` header), the latest run on a job read, backfills, cache
 entries (by the run that filled them), and the baseline `why` compares against
-(none when the only candidate is unreadable). A fanned step's group explanation
+(none when the only candidate is unreadable). Blame, topology and topology
+history are computed over the DAG snapshots written in a namespace the caller
+may read (legacy snapshots with no namespace only for unconfined callers): an
+element is attributed to the first readable snapshot that introduces it, the
+latest topology is the newest readable snapshot, and a `commit`, `snapshot`,
+`from` or `to` that only an unreadable snapshot carries answers like one that
+does not exist. A fanned step's group explanation
 withholds that same pre-upgrade baseline text from `firstFailure.error` and
 `summary`. A run diff needs viewer in both
 runs' namespaces. A trigger's event history shows only deliveries whose every

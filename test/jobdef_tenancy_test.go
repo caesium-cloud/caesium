@@ -341,10 +341,11 @@ func (s *IntegrationTestSuite) TestAuthJobdefApplyRepairsLegacySharedTrigger() {
 // TestAuthJobScopedKeyRefusesNonCanonicalAlias: a key scoped to one alias
 // cannot apply or legacy-create that alias with an ASCII or Unicode space
 // around it (a distinct stored job the trimming key-scope check would take
-// for its own) through either route: 403, and no job is created (PR #668
-// review). When that non-canonical job exists and is running, the apply's
-// refusal is the same 403, body for body, as while it is idle: the scope is
-// decided before any running check, so it is no oracle on a job outside the
+// for its own) through either route, and no job is created (PR #668 review).
+// Since W6-α every writer gets Validate's 400 naming the alias (a syntactic
+// refusal that discloses nothing stored). When a non-canonical job stored
+// before the rule exists and is running, the apply's refusal is the same,
+// body for body, as while it is idle, so it is no oracle on a job outside the
 // key's scope (PR #668 review r6). A namespace-confined operator's
 // apply-with-prune of a variant is refused too, applying and pruning nothing
 // (review r7). The exact alias still applies.
@@ -372,17 +373,18 @@ func (s *IntegrationTestSuite) TestAuthJobScopedKeyRefusesNonCanonicalAlias() {
 		def := s.b9Def(alias, "default", "")
 		def.Metadata.Alias = variant
 		status, body := s.b9Apply(scoped.Plaintext, false, def)
-		s.Equal(http.StatusForbidden, status, "apply %q: %s", variant, body)
-		s.Contains(body, "insufficient permissions")
+		s.Equal(http.StatusBadRequest, status, "apply %q: %s", variant, body)
+		s.Contains(body, "must not have leading or trailing whitespace")
 		status, body = s.nsRequest(http.MethodPost, "/v1/jobs", scoped.Plaintext, legacyBody(variant), nil)
-		s.Equal(http.StatusForbidden, status, "legacy create %q: %s", variant, body)
+		s.Equal(http.StatusBadRequest, status, "legacy create %q: %s", variant, body)
+		s.Contains(body, "must not have leading or trailing whitespace")
 		s.Nil(s.b9Job(variant), "no job %q was created", variant)
 	}
 	s.Nil(s.b9Job(alias))
 
 	// A namespace-confined operator without a key alias scope is held to the
 	// canonical alias too (PR #668 review r7): its apply-with-prune of a
-	// variant is 403 and applies and prunes nothing (its own marketing job
+	// variant is refused and applies and prunes nothing (its own marketing job
 	// stays). Before, the apply stored the variant and the prune, protecting
 	// only the trimmed alias, retired it and the operator's other jobs.
 	mktOperator := s.mintNamespacedKey("operator", "marketing")
@@ -396,26 +398,39 @@ func (s *IntegrationTestSuite) TestAuthJobScopedKeyRefusesNonCanonicalAlias() {
 		def := s.b9Def(mktAlias, "marketing", "")
 		def.Metadata.Alias = variant
 		status, body = s.b9Apply(mktOperator.Plaintext, true, def)
-		s.Equal(http.StatusForbidden, status, "apply-with-prune %q: %s", variant, body)
-		s.Contains(body, "insufficient permissions")
+		s.Equal(http.StatusBadRequest, status, "apply-with-prune %q: %s", variant, body)
+		s.Contains(body, "must not have leading or trailing whitespace")
 		s.Nil(s.b9Job(variant), "no job %q was applied", variant)
 		s.NotNil(s.b9Job(kept), "nothing was pruned")
 	}
 
-	// An existing non-canonical job, created by the admin through the real
-	// apply and run through the real run route: idle and running, the scoped
-	// key's apply of it is the same 403.
+	// An existing non-canonical job, stored before the rule (the admin's
+	// apply of it is now refused too, so the legacy row is produced by
+	// renaming a canonical job in the catalog) and run through the real run
+	// route: idle and running, the scoped key's apply of it is the same 400.
 	held := variants[0]
 	existing := s.b9Def(alias, "default", "")
 	existing.Metadata.Alias = held
+	status, body = s.b9Apply(s.authAPIKey, false, existing)
+	s.Require().Equal(http.StatusBadRequest, status, body)
+	seed := fmt.Sprintf("b9-exact-seed-%d", stamp)
+	s.b9Cleanup(seed)
+	existing = s.b9Def(seed, "default", "")
 	existing.Steps[0].Command = []string{"sh", "-c", "sleep 20"}
 	status, body = s.b9Apply(s.authAPIKey, false, existing)
 	s.Require().Equal(http.StatusOK, status, body)
+	catalog := s.openIntegrationCatalogDB()
+	defer func() { s.NoError(catalog.Close()) }()
+	result, err := catalog.ExecContext(s.T().Context(), "UPDATE jobs SET alias = ? WHERE alias = ?", held, seed)
+	s.Require().NoError(err)
+	affected, err := result.RowsAffected()
+	s.Require().NoError(err)
+	s.Require().Equal(int64(1), affected)
 	heldJob := s.b9RequireJob(held)
 	probe := s.b9Def(alias, "default", "")
 	probe.Metadata.Alias = held
 	idleStatus, idleBody := s.b9Apply(scoped.Plaintext, false, probe)
-	s.Equal(http.StatusForbidden, idleStatus, idleBody)
+	s.Equal(http.StatusBadRequest, idleStatus, idleBody)
 	runID := s.triggerRun(heldJob.ID)
 	s.Require().Eventually(func() bool {
 		var run runResponse
@@ -690,8 +705,8 @@ func (s *IntegrationTestSuite) TestAuthJobdefApplyRedactsForeignContractFindings
 
 // TestAuthJobdefApplyWithholdsFindingOfWhitespaceTwin: contract findings
 // carry trimmed aliases, so a retired marketing job "consumer" must not
-// authorise a finding about a live finance job "consumer " (which unrestricted
-// writers may still create) consuming a marketing producer. The marketing
+// authorise a finding about a live finance job "consumer " (stored before W6-α
+// refused new non-canonical aliases) consuming a marketing producer. The marketing
 // operator's breaking apply answers 409 with the finding withheld and no
 // finance text (PR #668 review r8); the cluster admin's 409 still names it.
 func (s *IntegrationTestSuite) TestAuthJobdefApplyWithholdsFindingOfWhitespaceTwin() {
@@ -720,10 +735,24 @@ func (s *IntegrationTestSuite) TestAuthJobdefApplyWithholdsFindingOfWhitespaceTw
 	s.Require().Nil(s.b9Job(consumer), "the marketing job is retired")
 
 	// The finance consumer of the marketing producer, under the twin alias.
+	// Every writer now refuses a non-canonical alias (W6-α), so the twin is
+	// a job stored before the rule: applied under a seed alias and renamed in
+	// the catalog (the precondition only).
 	consumerDef := s.parseContractManifest(dir, consumer)
 	consumerDef.Metadata.Alias = twin
 	status, body = s.b9Apply(s.authAPIKey, false, s.parseContractManifest(dir, producer), consumerDef)
+	s.Require().Equal(http.StatusBadRequest, status, body)
+	seed := fmt.Sprintf("b9-twin-seed-%d", stamp)
+	s.b9Cleanup(seed)
+	consumerDef.Metadata.Alias = seed
+	status, body = s.b9Apply(s.authAPIKey, false, s.parseContractManifest(dir, producer), consumerDef)
 	s.Require().Equal(http.StatusOK, status, body)
+	catalog := s.openIntegrationCatalogDB()
+	defer func() { s.NoError(catalog.Close()) }()
+	for _, query := range []string{"UPDATE jobs SET alias = ? WHERE alias = ?", "UPDATE dataset_declarations SET job_alias = ? WHERE job_alias = ?"} {
+		_, err := catalog.ExecContext(s.T().Context(), query, twin, seed)
+		s.Require().NoError(err, query)
+	}
 	s.Require().NotNil(s.b9Job(twin))
 
 	broken := s.writeContractManifests(map[string]string{

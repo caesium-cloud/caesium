@@ -72,9 +72,9 @@ var namespaceResolvers = map[string]namespaceResolver{
 	"GET /v1/jobs/:id/queue":            resolveJobByID,
 	"GET /v1/jobs/:id/runs":             resolveJobByID,
 	"GET /v1/jobs/:id/runs/diff":        resolveJobRunPair,
-	"GET /v1/jobs/:id/blame":            resolveJobByID, // pending B7
-	"GET /v1/jobs/:id/topology":         resolveJobByID, // pending B7
-	"GET /v1/jobs/:id/topology/history": resolveJobByID, // pending B7
+	"GET /v1/jobs/:id/blame":            resolveJobByID,
+	"GET /v1/jobs/:id/topology":         resolveJobByID,
+	"GET /v1/jobs/:id/topology/history": resolveJobByID,
 	"GET /v1/jobs/:id/cache":            resolveJobByID,
 	"GET /v1/jobs/:id/backfills":        resolveJobByID,
 	"DELETE /v1/jobs/:id":               resolveJobByID,

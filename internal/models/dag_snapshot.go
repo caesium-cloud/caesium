@@ -8,8 +8,9 @@ import (
 )
 
 // DagSnapshot is an append-only record of a job's full topology (tasks + edges)
-// at a point in time. One row is written per apply when the topology changes;
-// unchanged topology reuses the existing row (dedup by ContentHash).
+// at a point in time. One row is written per apply when the topology or the
+// job's namespace changes; otherwise the existing row is reused (dedup by
+// ContentHash and Namespace against the latest row).
 //
 // This is the persistence layer for Component 3 (Version DAG topology) from
 // docs/design/data-plane-memory.md. The live graph in task_edges still drives
@@ -20,10 +21,19 @@ type DagSnapshot struct {
 
 	// JobID links this snapshot to its job. Rows are cascade-deleted when the
 	// job is hard-deleted; soft-deleted jobs retain their snapshots.
-	// Part of the composite dedup index (job_id, content_hash) and the
-	// query-by-recency index (job_id, created_at).
-	JobID uuid.UUID `gorm:"type:uuid;not null;index:idx_dag_snapshot_job_hash;index:idx_dag_snapshot_job_created" json:"job_id"`
+	// Part of the composite dedup index (job_id, content_hash), the
+	// query-by-recency index (job_id, created_at) and the namespace index
+	// (job_id, namespace).
+	JobID uuid.UUID `gorm:"type:uuid;not null;index:idx_dag_snapshot_job_hash;index:idx_dag_snapshot_job_created;index:idx_dag_snapshot_job_namespace,priority:1" json:"job_id"`
 	Job   Job       `gorm:"constraint:OnDelete:CASCADE" json:"-"`
+
+	// Namespace is the namespace the job was in when this snapshot was written
+	// (identity-and-access B7). A move writes a fresh snapshot in the new
+	// namespace, so each owner's topology history stays with it. NULL marks a
+	// legacy row written before the column existed: its owner cannot be
+	// recovered, so it is shown only to unrestricted callers and never
+	// back-filled. Not serialised, so unrestricted responses keep their shape.
+	Namespace *string `gorm:"type:text;index:idx_dag_snapshot_job_namespace,priority:2" json:"-"`
 
 	// ContentHash is a SHA-256 hex digest of the canonical topology (sorted
 	// task names each with image+command, plus sorted from→to edge pairs).

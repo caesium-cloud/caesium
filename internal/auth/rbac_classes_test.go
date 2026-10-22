@@ -245,10 +245,10 @@ func TestRoutePolicyClassesPinned(t *testing.T) {
 		"POST /v1/jobs/:id/backfill":            {Role: models.RoleRunner, Class: RouteClassNamespaced},
 		"GET /v1/jobs/:id/backfills/:id":        {Role: models.RoleViewer, Class: RouteClassNamespaced},
 		"PUT /v1/jobs/:id/backfills/:id/cancel": {Role: models.RoleOperator, Class: RouteClassNamespaced},
-		// DAG snapshots record no namespace (B7).
-		"GET /v1/jobs/:id/blame":            {Role: models.RoleViewer, Class: RouteClassNamespaced, PendingItem: "B7"},
-		"GET /v1/jobs/:id/topology":         {Role: models.RoleViewer, Class: RouteClassNamespaced, PendingItem: "B7"},
-		"GET /v1/jobs/:id/topology/history": {Role: models.RoleViewer, Class: RouteClassNamespaced, PendingItem: "B7"},
+		// DAG snapshots are filtered by the namespace they were written in (B7).
+		"GET /v1/jobs/:id/blame":            {Role: models.RoleViewer, Class: RouteClassNamespaced},
+		"GET /v1/jobs/:id/topology":         {Role: models.RoleViewer, Class: RouteClassNamespaced},
+		"GET /v1/jobs/:id/topology/history": {Role: models.RoleViewer, Class: RouteClassNamespaced},
 		// Shared objects resolve to the object's namespace, and runtime
 		// matching and profile resolution are namespace-aware (D4).
 		"DELETE /v1/agentprofiles/:id":          {Role: models.RoleOperator, Class: RouteClassNamespaced},

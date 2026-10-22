@@ -21,7 +21,7 @@ This document is generated from the job definition Go structs (`pkg/jobdef`). It
 
 | Field | Type | Required | Notes |
 |-------|------|----------|-------|
-| `alias` | string | required | Unique identifier used across APIs and web UI. |
+| `alias` | string | required | Unique identifier used across APIs and web UI. Case-sensitive; must not have leading or trailing whitespace. |
 | `namespace` | string | optional | Tenancy namespace. Defaults to `default`; DNS label (1-63 lowercase letters, digits or hyphens). New runs inherit it; moving a job preserves history and invalidates cached outputs. |
 | `labels` | map[string]string | optional | Attach metadata for filtering. |
 | `annotations` | map[string]string | optional | Free-form metadata surfaced to clients. |

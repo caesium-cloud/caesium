@@ -298,13 +298,15 @@ fi
                       "TestJobSchemaNamespaceDocumentation", "TestCacheNamespaceMove",
                       "TestNamespaceQuotaHoldsSecondPolicyFreeRun", "TestNamespaceQuotaRefusesRetryAtCap",
                       "TestNamespaceQuotaBackfillWaitsAndCompletes",
-                      "TestJobQueueCancelEndpointDeletesUnclaimedRowOnly"},
+                      "TestJobQueueCancelEndpointDeletesUnclaimedRowOnly",
+                      "TestJobApplyRejectsNonCanonicalAlias"},
             "auth": {"TestPublicListingsOrderByAndRefuseInvalidTerms", "TestIncidentNamespaceLifecycle",
                      "TestAuthPolicyShowAndReloadSurface", "TestAuthUserAdministrationLifecycle",
                      "TestAuthUserAdministrationDeniesNonClusterAdmins",
                      "TestAuthUserBoundKeyLifecycle", "TestAuthNamespacesRoute",
                      "TestAuthJobdefApplyLateRefusalRollsBack", "TestAuthLegacyJobCreateConfined",
                      "TestAuthTriggerTenancyWebhookPathRace", "TestAuthTriggerPatchRechecksTenancy",
+                     "TestAuthDagSnapshotsFollowNamespaceMoves",
                      "TestAuthDatasetConfinedProducerChecks"},
         }
         for lane, original in (("local", original_local), ("auth", original_auth)):
@@ -322,13 +324,15 @@ fi
                          "TestJobSchemaNamespaceDocumentation", "TestCacheNamespaceMove",
                          "TestNamespaceQuotaHoldsSecondPolicyFreeRun", "TestNamespaceQuotaRefusesRetryAtCap",
                          "TestNamespaceQuotaBackfillWaitsAndCompletes",
-                         "TestJobQueueCancelEndpointDeletesUnclaimedRowOnly"],
+                         "TestJobQueueCancelEndpointDeletesUnclaimedRowOnly",
+                         "TestJobApplyRejectsNonCanonicalAlias"],
                "auth": ["TestPublicListingsOrderByAndRefuseInvalidTerms", "TestIncidentNamespaceLifecycle",
                         "TestAuthPolicyShowAndReloadSurface", "TestAuthUserAdministrationLifecycle",
                         "TestAuthUserAdministrationDeniesNonClusterAdmins",
                         "TestAuthUserBoundKeyLifecycle", "TestAuthNamespacesRoute",
                         "TestAuthJobdefApplyLateRefusalRollsBack", "TestAuthLegacyJobCreateConfined",
                         "TestAuthTriggerTenancyWebhookPathRace", "TestAuthTriggerPatchRechecksTenancy",
+                        "TestAuthDagSnapshotsFollowNamespaceMoves",
                         "TestAuthDatasetConfinedProducerChecks"]}
         for lane, names in new.items():
             required = lanes[lane]["names"]

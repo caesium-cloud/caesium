@@ -49,7 +49,7 @@ For the auth management CLI, supply credentials through `CAESIUM_API_KEY`. The
 | `GET /jobs`, `POST /jobs`, `GET /jobs/:id`, `DELETE /jobs/:id` | List, create, read, delete jobs. The list includes each job's recent runs. |
 | `GET /jobs/:id/manifest` | The job's YAML as the server holds it. For a namespace-confined or job-scoped reader, a trigger the job shares with a job it cannot read has its configuration replaced by a `redacted` marker ([identity-and-access.md](identity-and-access.md#confined-job-writes-and-trigger-tenancy)). |
 | `GET /jobs/:id/tasks`, `GET /jobs/:id/dag` | Persisted task definitions and the DAG's nodes and edges. |
-| `GET /jobs/:id/topology`, `GET /jobs/:id/topology/history` | The current DAG snapshot and its append-only history. |
+| `GET /jobs/:id/topology`, `GET /jobs/:id/topology/history` | The current DAG snapshot and its append-only history. A namespace-confined reader sees only snapshots written in namespaces it may read ([identity-and-access.md](identity-and-access.md#collections-and-history-under-a-job)). |
 | `POST /jobs/:id/run` | Start a run. The `202` body's `outcome` is `created`, `queued`, or `skipped`; an `Idempotency-Key` header makes retries safe. A start parked by its namespace's run quota is `queued` with `reason: namespace_quota`. See [job-definitions.md](job-definitions.md#starting-runs-from-other-systems-outcomes-and-idempotency) and [identity-and-access.md](identity-and-access.md#run-quotas). |
 | `PUT /jobs/:id/pause`, `PUT /jobs/:id/unpause` | Suspend or resume scheduling without deleting the job. |
 | `GET /jobs/:id/queue`, `DELETE /jobs/:id/queue/:queue_id` | Inspect or drop queued runs: under a `queue` concurrency strategy, or parked by the namespace run quota (`held_reason: namespace_quota`). A confined caller sees only rows queued in namespaces it may read, and drops one only with `operator` in the namespace it was queued in. |
@@ -85,7 +85,7 @@ These back the investigation verbs described in
 | Endpoint | Purpose |
 | --- | --- |
 | `GET /jobs/:id/runs/:run_id/why` | Why a task ran, was skipped, or failed (`caesium why`). |
-| `GET /jobs/:id/blame` | Which change broke the job (`caesium blame`). |
+| `GET /jobs/:id/blame` | Which change broke the job (`caesium blame`), computed over the DAG snapshots the caller may read. |
 | `GET /jobs/:id/runs/diff` | Compare two runs (`caesium run diff`). |
 | `POST /jobs/:id/runs/:run_id/replay` | Start a quarantined replay (`caesium run replay`). Refused with 422 when the job namespace's `secrets.allow` rules deny a step's `secret://` reference, and with `409 namespace_quota` (`Retry-After`) when a replay that would execute finds its namespace at its run quota. |
 | `GET /jobs/:id/runs/:run_id/tasks/:task/descriptor` | The recorded execution descriptor `caesium reproduce` rebuilds from. |
