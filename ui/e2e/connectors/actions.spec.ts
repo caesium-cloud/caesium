@@ -71,10 +71,35 @@ function updates(events: JournalEvent[], receipt: Receipt): JournalEvent[] {
   return events.filter(event => event.kind === "update_rpc" && event.update_id === receipt.external_update_id);
 }
 async function queryState(request: APIRequestContext, workflow: FixtureWorkflow, key: string): Promise<PublicationState> {
+  const startedAt = Date.now();
   const response = await request.post(`/v1${detailPath(workflow)}/queries/publication_status`, {
     headers: authHeaders(key), data: { binding_name: "publication", binding_version: "1" },
   });
-  expect(response.ok(), "explicit declared Query must reach the actual worker").toBe(true);
+  let category = "unrecognized_response";
+  if (!response.ok()) {
+    try {
+      const body = await response.body();
+      if (body.byteLength <= 1024) {
+        const value: unknown = JSON.parse(body.toString("utf8"));
+        if (value && typeof value === "object" && "message" in value && typeof value.message === "string") {
+          // Only fixed API messages become diagnostics; never echo arbitrary bodies or credentials.
+          category = new Map([
+            ["connector unavailable", "connector_unavailable"],
+            ["connector read budget exhausted", "connector_budget_exhausted"],
+            ["connector binding, request or operation revision conflicts", "connector_conflict"],
+            ["invalid connector message body", "invalid_message"],
+            ["invalid connector read request", "invalid_reference"],
+            ["invalid connector action input", "invalid_input"],
+            ["connector metadata budget exceeded", "metadata_budget_exceeded"],
+            ["connector operation retention budget exceeded", "retention_budget_exceeded"],
+            ["too many failed authentication attempts", "authentication_rate_limited"],
+            ["Forbidden", "forbidden"], ["Unauthorized", "unauthorized"], ["Not Found", "not_found"],
+          ]).get(value.message) ?? category;
+        }
+      }
+    } catch { /* An unreadable error body must not conceal the failed HTTP response. */ }
+  }
+  expect(response.ok(), `explicit declared Query must reach the actual worker: HTTP ${response.status()}, category=${category}, elapsed_ms=${Date.now() - startedAt}, workflow_id=${workflow.workflow_id}, run_id=${workflow.run_id}`).toBe(true);
   return (await response.json() as { result: PublicationState }).result;
 }
 async function startPublication(request: APIRequestContext, name: string, eligible: boolean, jobs?: [Job, Job]): Promise<FixtureWorkflow> {

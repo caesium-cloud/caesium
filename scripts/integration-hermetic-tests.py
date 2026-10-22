@@ -11,7 +11,11 @@ import sys
 
 TESTS = {'./test/connectors/fixture': ['TestFixtureConfigMatchesPublicationState',
                                     'TestFixtureVersionsRejectUnqualifiedObservations',
-                                    'TestFixtureJournalRecordsEveryEffectExecution'],
+                                    'TestFixtureJournalRecordsEveryEffectExecution',
+                                    'TestFixtureProxyRecordsSanitizedTerminalReadOutcome',
+                                    'TestFixtureProxyReadDiagnosticsPreserveOutageAndMalformedRequest',
+                                    'TestFixtureProxyQueryRejectionAndUndecodableResponses',
+                                    'TestFixtureReadDiagnosticsIgnoreOtherRPCsAndAbsentDeadline'],
  './test/robustness': ['TestSoakStartIncompleteBodyReconcilesOnlyWithSameKey',
                        'TestNoKeyHealReadErrorPreservesPossibleIdentityAndStatus',
                        'TestHealThroughInterposerIncompleteResponseNeverBlindRetries',
