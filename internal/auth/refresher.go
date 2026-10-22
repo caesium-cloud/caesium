@@ -220,6 +220,32 @@ func (s *GroupRefreshService) Wait() {
 	s.wg.Wait()
 }
 
+// afterOutcome runs bounded follow-up work for a recorded outcome (its audit
+// row) without holding the flight open: on its own goroutine, joined by
+// Wait, under a fresh persistence budget. Once Wait has begun it runs
+// inline instead, so shutdown still writes it before the catalog closes.
+func (s *GroupRefreshService) afterOutcome(fn func(ctx context.Context)) {
+	run := func() {
+		ctx, cancel := s.persistContext()
+		defer cancel()
+		fn(ctx)
+	}
+	s.mu.Lock()
+	tracked := !s.closed
+	if tracked {
+		s.wg.Add(1)
+	}
+	s.mu.Unlock()
+	if !tracked {
+		run()
+		return
+	}
+	go func() {
+		defer s.wg.Done()
+		run()
+	}()
+}
+
 // goTracked runs fn on its own goroutine, joined by Wait. Once Wait has
 // begun nothing new is tracked (a WaitGroup must not grow during Wait):
 // fn then runs untracked when untrackedOK, and not at all otherwise.
@@ -654,7 +680,10 @@ func (s *GroupRefreshService) redeem(ctx context.Context, row *models.User, vers
 		if !applied {
 			return false, false
 		}
-		s.auditGroupsChanged(persist, row, result.Groups, label, trigger)
+		// The groups are committed: release the waiting requests now. The
+		// audit row is written after, on its own bounded budget, so a slow
+		// audit insert never turns this success into stale_groups.
+		s.afterOutcome(func(ctx context.Context) { s.auditGroupsChanged(ctx, row, result.Groups, label, trigger) })
 		return true, true
 
 	case RefreshTransient:
@@ -684,7 +713,7 @@ func (s *GroupRefreshService) redeem(ctx context.Context, row *models.User, vers
 		log.Info("identity provider refused a group refresh", "user_id", userID.String(), "provider", label,
 			"reason", refreshReason(rerr), "revoked", res.Outcome == DefinitiveRevoked)
 		if res.Outcome == DefinitiveRevoked {
-			s.auditRevoked(persist, row, label, res)
+			s.afterOutcome(func(ctx context.Context) { s.auditRevoked(ctx, row, label, res) })
 		}
 		return false, applied
 	}

@@ -991,8 +991,9 @@ func TestCancelledRequestAfterSynchronousSuccessIsRefused(t *testing.T) {
 }
 
 // TestBlockedAuditWriteIsBoundedByThePersistenceBudget: the audit row a
-// refresh writes is bounded like the outcome it records, so a stuck audit
-// insert neither holds the flight past its budget nor blocks Wait.
+// refresh writes neither delays the request the refresh admits (the groups
+// are committed before it is written) nor outlives its own bounded budget,
+// so a stuck audit insert cannot block Wait.
 func TestBlockedAuditWriteIsBoundedByThePersistenceBudget(t *testing.T) {
 	fake := newFakeRefresher("eng", "ops")
 	f := newFreshnessFixture(t, fake)
@@ -1001,7 +1002,9 @@ func TestBlockedAuditWriteIsBoundedByThePersistenceBudget(t *testing.T) {
 	release := make(chan struct{})
 	t.Cleanup(func() { close(release) })
 	var blocked atomic.Int32
-	require.NoError(t, f.db.Callback().Create().Before("gorm:create").Register("test:block-audit", func(tx *gorm.DB) {
+	// Block before the insert's transaction begins, so the stalled audit
+	// write holds no connection (the test database has exactly one).
+	require.NoError(t, f.db.Callback().Create().Before("gorm:begin_transaction").Register("test:block-audit", func(tx *gorm.DB) {
 		if tx.Statement.Schema == nil || tx.Statement.Schema.Name != "AuditLog" {
 			return
 		}
@@ -1017,7 +1020,11 @@ func TestBlockedAuditWriteIsBoundedByThePersistenceBudget(t *testing.T) {
 	token, _, err := sessions.Create(t.Context(), CreateSessionRequest{UserID: user.ID, AuthMethod: "oidc", DisableGeneration: f.row(t, user.ID).DisableGeneration})
 	require.NoError(t, err)
 	f.clock.Advance(testMaxStale + time.Minute)
-	_, _, _ = sessions.Validate(t.Context(), token)
+	_, admitted, err := sessions.Validate(t.Context(), token)
+	require.NoError(t, err, "a successful synchronous refresh admits even while its audit write stalls")
+	var groups []string
+	require.NoError(t, json.Unmarshal(admitted.Groups, &groups))
+	require.ElementsMatch(t, []string{"eng", "ops"}, groups)
 	require.Eventually(t, func() bool { return blocked.Load() == 1 }, 5*time.Second, 5*time.Millisecond, "the groups changed, so the refresh audits")
 
 	cancel()
@@ -1026,11 +1033,8 @@ func TestBlockedAuditWriteIsBoundedByThePersistenceBudget(t *testing.T) {
 	select {
 	case <-waited:
 	case <-time.After(5 * time.Second):
-		t.Fatal("a blocked audit write held the refresh flight past its persistence budget")
+		t.Fatal("a blocked audit write outlived its persistence budget")
 	}
-	// (The audit runs only after the success CAS applied. The cancelled
-	// insert discards the in-memory SQLite connection, so the catalog is
-	// not read again here.)
 }
 
 // TestQueuedRefreshSkipsGroupsALoginConfirmed: a refresh queued from a row
