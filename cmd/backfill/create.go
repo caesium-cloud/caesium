@@ -68,7 +68,7 @@ Reprocess policies:
 		server := strings.TrimSuffix(createServer, "/")
 		url := fmt.Sprintf("%s/v1/jobs/%s/backfill", server, createJobID)
 
-		headers := make(http.Header)
+		headers := authHeaders(cmd)
 		headers.Set("Content-Type", "application/json")
 		respBody, status, readErr := clihttp.Exchange(cmd.Context(), http.DefaultClient, http.MethodPost, url, bytes.NewReader(payload), headers)
 		if err := clihttp.ResponseError("backfill create", status, respBody, readErr); err != nil {

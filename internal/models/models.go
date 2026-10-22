@@ -93,4 +93,7 @@ var All = []any{
 	&ExternalExecutionCorrelation{},
 	&ConnectorOperation{},
 	&ConnectorConfiguration{},
+	// cli_login_transactions holds `caesium login` attempts (identity-and-access
+	// E5): short-lived, low-volume catalog rows with no foreign keys.
+	&CLILoginTransaction{},
 }

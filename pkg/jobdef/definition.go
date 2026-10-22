@@ -1136,6 +1136,20 @@ func Parse(data []byte) (*Definition, error) {
 	return &def, nil
 }
 
+// ValidateAlias refuses a job alias that is not canonical: one with leading or
+// trailing whitespace (Unicode spaces included). Job aliases are stored and
+// looked up exactly, but several paths (key scopes, route middleware, prune
+// sets) compare trimmed aliases, so "payroll " would be a second job that some
+// checks mistake for "payroll". Refusing it for every writer means the twin
+// can never be created. Case is significant and left alone: every lookup and
+// the unique index compare it exactly. An empty alias is not checked here.
+func ValidateAlias(alias string) error {
+	if alias != strings.TrimSpace(alias) {
+		return fmt.Errorf("metadata.alias %q must not have leading or trailing whitespace", alias)
+	}
+	return nil
+}
+
 // Validate performs semantic validation on the definition.
 func (d *Definition) Validate() error {
 	if d.APIVersion != APIVersionV1 {
@@ -1146,6 +1160,9 @@ func (d *Definition) Validate() error {
 	}
 	if strings.TrimSpace(d.Metadata.Alias) == "" {
 		return fmt.Errorf("metadata.alias is required")
+	}
+	if err := ValidateAlias(d.Metadata.Alias); err != nil {
+		return err
 	}
 
 	if err := ValidateNamespace(d.Metadata.Namespace); err != nil {

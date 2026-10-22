@@ -348,8 +348,8 @@ func TestCollectionGuardCatchesUnfilteredHandler(t *testing.T) {
 	require.NoError(t, err, "the guard is test-only")
 }
 
-// TestDatasetReadResolverUsesAnyMode exercises the any-of mode B6 will switch
-// on for the dataset reads (still pending today) and the every-of mode the
+// TestDatasetReadResolverUsesAnyMode exercises the any-of mode B6 switched
+// on for the dataset reads and the every-of mode the
 // live writes use, on the same two-owner dataset.
 func TestDatasetReadResolverUsesAnyMode(t *testing.T) {
 	db := testutil.OpenTestDB(t)
@@ -369,19 +369,19 @@ func TestDatasetReadResolverUsesAnyMode(t *testing.T) {
 	marketing := &auth.Principal{Grants: policy.Grants{"marketing": models.RoleRunner}}
 	both := &auth.Principal{Grants: policy.Grants{"marketing": models.RoleRunner, "finance": models.RoleRunner}}
 
-	read := auth.RoutePolicy{Role: models.RoleViewer, Class: auth.RouteClassNamespaced} // as B6 will leave it
+	read := auth.RoutePolicy{Role: models.RoleViewer, Class: auth.RouteClassNamespaced} // the live B6 policy
 	decision, err := authorizeRoute(routeContext(http.MethodGet, "/v1/datasets/:ns/:name", ""), svc, marketing, "GET /v1/datasets/:id/:id", read)
 	require.NoError(t, err, "a read needs viewer in any owner namespace")
 	require.Equal(t, []string{"finance", "marketing"}, decision.Namespaces)
 	require.Equal(t, "*", decision.AuditNamespace())
 
-	// The hold release (pending B6 today) resolves the held dataset's
+	// The hold release resolves the held dataset's
 	// producers and needs the role in every one.
 	holdID := uuid.New()
 	key := "orders/" + holdID.String()
 	require.NoError(t, db.Create(&models.DatasetHold{ID: holdID, Name: "orders", Status: models.DatasetHoldStatusActive, ActiveKey: &key,
 		HeldByJobID: uuid.New(), OpenedAt: now, CreatedAt: now, UpdatedAt: now}).Error)
-	release := auth.RoutePolicy{Role: models.RoleOperator, Class: auth.RouteClassNamespaced} // as B6 will leave it
+	release := auth.RoutePolicy{Role: models.RoleOperator, Class: auth.RouteClassNamespaced} // the live B6 policy
 	releaseCtx := func(id string) *echo.Context {
 		c := routeContext(http.MethodPost, "/v1/datasets/holds/:id/release", "")
 		pv := echo.PathValues{{Name: "id", Value: id}}
@@ -400,7 +400,7 @@ func TestDatasetReadResolverUsesAnyMode(t *testing.T) {
 	_, err = authorizeRoute(releaseCtx("not-a-hold"), svc, operatorBoth, "POST /v1/datasets/holds/:id/release", release)
 	require.Equal(t, http.StatusBadRequest, echo.StatusCode(err))
 
-	advance := auth.RoutePolicy{Role: models.RoleRunner, Class: auth.RouteClassNamespaced} // as B6 will leave it
+	advance := auth.RoutePolicy{Role: models.RoleRunner, Class: auth.RouteClassNamespaced} // the live B6 policy
 	_, err = authorizeRoute(routeContext(http.MethodPost, "/v1/datasets/:ns/:name/advance", ""), svc, marketing, "POST /v1/datasets/:id/:id/advance", advance)
 	require.IsType(t, &routeDenial{}, err, "a write needs the role in every owner namespace")
 	_, err = authorizeRoute(routeContext(http.MethodPost, "/v1/datasets/:ns/:name/advance", ""), svc, both, "POST /v1/datasets/:id/:id/advance", advance)
@@ -584,7 +584,7 @@ func TestDatasetTenancyIsDeclaredProducersOnly(t *testing.T) {
 	declare(mkt, "mkt", "external", models.DatasetDirectionSource)
 	declare(mkt, "mkt", "consumed-only", models.DatasetDirectionConsumes)
 
-	advance := auth.RoutePolicy{Role: models.RoleRunner, Class: auth.RouteClassNamespaced} // as B6 will leave it
+	advance := auth.RoutePolicy{Role: models.RoleRunner, Class: auth.RouteClassNamespaced} // the live B6 policy
 	runner := &auth.Principal{Grants: policy.Grants{"marketing": models.RoleRunner}}
 	try := func(name string) error {
 		c := routeContext(http.MethodPost, "/v1/datasets/:ns/:name/advance", "")

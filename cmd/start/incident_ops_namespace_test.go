@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/caesium-cloud/caesium/internal/auth/policy"
+	"github.com/caesium-cloud/caesium/internal/incident"
 	internaljobdef "github.com/caesium-cloud/caesium/internal/jobdef"
 	"github.com/caesium-cloud/caesium/internal/jobdef/testutil"
 	"github.com/caesium-cloud/caesium/internal/models"
@@ -60,20 +61,39 @@ func TestApplyJobdefPatchRefusesUndeclaredNamespaceOnBothRoutes(t *testing.T) {
 		return raw
 	}
 
-	_, dryRunErr := ops.ApplyJobdefPatch(ctx, job.ID, patch("sales"), true)
+	_, dryRunErr := ops.ApplyJobdefPatch(ctx, job.ID, "marketing", patch("sales"), true)
 	require.ErrorIs(t, dryRunErr, internaljobdef.ErrNamespaceNotDeclared, "the git-synced route must not escalate an undeclared namespace")
 	require.Contains(t, dryRunErr.Error(), `metadata.namespace "sales" of job "git-synced-ingest" is not declared`)
-	_, directErr := ops.ApplyJobdefPatch(ctx, job.ID, patch("sales"), false)
+	_, directErr := ops.ApplyJobdefPatch(ctx, job.ID, "marketing", patch("sales"), false)
 	require.ErrorIs(t, directErr, internaljobdef.ErrNamespaceNotDeclared)
 	require.Equal(t, dryRunErr.Error(), directErr.Error(), "both provenance routes refuse with the same error")
 
-	rendered, err := ops.ApplyJobdefPatch(ctx, job.ID, patch("finance"), true)
-	require.NoError(t, err, "a declared namespace still renders for escalation")
+	rendered, err := ops.ApplyJobdefPatch(ctx, job.ID, "marketing", patch("marketing"), true)
+	require.NoError(t, err, "a patch that keeps the incident's namespace still renders for escalation")
 	require.Contains(t, string(rendered), alias)
 	require.NoError(t, db.First(&job, "id = ?", job.ID).Error)
 	require.Equal(t, "marketing", job.Namespace, "a dry run writes nothing")
 
+	// A declared namespace other than the incident's is a move (A8), refused
+	// on the git-synced (dry-run) and the direct route alike.
+	for _, dryRun := range []bool{true, false} {
+		_, err = ops.ApplyJobdefPatch(ctx, job.ID, "marketing", patch("finance"), dryRun)
+		require.ErrorIs(t, err, incident.ErrPatchMovesNamespace, "dryRun=%v", dryRun)
+	}
+	require.NoError(t, db.First(&job, "id = ?", job.ID).Error)
+	require.Equal(t, "marketing", job.Namespace, "a refused move writes nothing")
+
 	policy.SetProcessHolder(nil)
-	_, err = ops.ApplyJobdefPatch(ctx, job.ID, patch("sales"), true)
-	require.NoError(t, err, "with no policy file every valid namespace is accepted")
+	_, err = ops.ApplyJobdefPatch(ctx, job.ID, "marketing", patch("sales"), true)
+	require.ErrorIs(t, err, incident.ErrPatchMovesNamespace, "with no policy file the namespace is declared but still a move")
+
+	// A job that moved out of the incident's namespace is refused on both
+	// routes, even by a patch that keeps it where it now lives (A8).
+	for _, dryRun := range []bool{true, false} {
+		_, err = ops.ApplyJobdefPatch(ctx, job.ID, "finance", patch("marketing"), dryRun)
+		require.ErrorIs(t, err, incident.ErrNamespaceMoved, "dryRun=%v", dryRun)
+	}
+	// The direct route still applies a patch that stays in the namespace.
+	_, err = ops.ApplyJobdefPatch(ctx, job.ID, "marketing", patch("marketing"), false)
+	require.NoError(t, err)
 }

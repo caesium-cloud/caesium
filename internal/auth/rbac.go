@@ -142,6 +142,10 @@ var endpointPolicy = map[string]RoutePolicy{
 	"POST /auth/logout":       identityRoute(viewer),
 	"GET /v1/system/features": identityRoute(viewer),
 
+	// `caesium login` confirmation (E5): the signed-in user's own sign-in.
+	"GET /auth/cli/finish":     identityRoute(viewer),
+	"POST /auth/cli/authorize": identityRoute(viewer),
+
 	// The Prometheus registry is global and its series carry job aliases and
 	// task names, so a namespace-confined principal must not scrape it.
 	"GET /metrics": clusterRoute(viewer),
@@ -166,9 +170,9 @@ var endpointPolicy = map[string]RoutePolicy{
 	// why baselines, cache entries and backfills) are authorised on the job's
 	// current namespace and then filtered by each row's persisted namespace
 	// (B4), so a moved job's old history stays with its old owner. Blame and
-	// topology read the job's DAG snapshots, which record no namespace: under
-	// a moved job the old owner's topology history would reach the new owner
-	// (B7 makes snapshots namespace-aware).
+	// topology read the job's DAG snapshots, filtered by the namespace each
+	// snapshot was written in; a legacy snapshot recording none is shown only
+	// to unconfined callers (B7).
 	"GET /v1/jobs":           collectionRoute(viewer),
 	"GET /v1/jobs/:id":       namespacedRoute(viewer),
 	"GET /v1/jobs/:id/tasks": namespacedRoute(viewer),
@@ -181,9 +185,9 @@ var endpointPolicy = map[string]RoutePolicy{
 	"GET /v1/jobs/:id/queue":            namespacedRoute(viewer),
 	"GET /v1/jobs/:id/runs":             namespacedRoute(viewer),
 	"GET /v1/jobs/:id/runs/diff":        namespacedRoute(viewer),
-	"GET /v1/jobs/:id/blame":            namespacedRoute(viewer).pendingOn("B7"),
-	"GET /v1/jobs/:id/topology":         namespacedRoute(viewer).pendingOn("B7"),
-	"GET /v1/jobs/:id/topology/history": namespacedRoute(viewer).pendingOn("B7"),
+	"GET /v1/jobs/:id/blame":            namespacedRoute(viewer),
+	"GET /v1/jobs/:id/topology":         namespacedRoute(viewer),
+	"GET /v1/jobs/:id/topology/history": namespacedRoute(viewer),
 	// Cache entries are filtered by the namespace of the run that filled them.
 	"GET /v1/jobs/:id/cache":     namespacedRoute(viewer),
 	"GET /v1/jobs/:id/backfills": namespacedRoute(viewer),
@@ -221,9 +225,10 @@ var endpointPolicy = map[string]RoutePolicy{
 	"GET /v1/atoms/:id":         clusterRoute(viewer),
 	"GET /v1/nodes/:id/workers": clusterRoute(viewer),
 
-	// Global cross-job graphs (B5 redacts them at the boundary).
-	"GET /v1/contracts/graph": collectionRoute(viewer).pendingOn("B5"),
-	"GET /v1/lineage/impact":  collectionRoute(viewer).pendingOn("B5"),
+	// Global cross-job graphs, computed whole and redacted at the boundary
+	// for confined principals (B5, internal/authz/redact.go).
+	"GET /v1/contracts/graph": collectionRoute(viewer),
+	"GET /v1/lineage/impact":  collectionRoute(viewer),
 
 	// Triggers resolve to the namespaces of every job they serve. A trigger's
 	// event history shows a confined caller only deliveries whose every
@@ -248,26 +253,29 @@ var endpointPolicy = map[string]RoutePolicy{
 	"POST /v1/jobdefs/lint": namespacedRoute(viewer),
 	"POST /v1/jobdefs/diff": namespacedRoute(viewer),
 
-	// Incident operator read API (agent-in-the-loop D2). The detail carries
-	// the incident's frozen agent allowlist, which a lineage walk fills with
-	// downstream job aliases from any namespace (A8 confines it).
+	// Incident operator read API (agent-in-the-loop D2). An incident belongs
+	// to its failing run's namespace. Its frozen agent allowlist names only
+	// jobs in that namespace, and for a confined reader the detail also drops
+	// jobs that moved out and withholds what a pre-A8 agent session wrote
+	// (A8).
 	"GET /v1/incidents":     collectionRoute(viewer),
-	"GET /v1/incidents/:id": namespacedRoute(viewer).pendingOn("A8"),
+	"GET /v1/incidents/:id": namespacedRoute(viewer),
 
 	// Dataset freshness operator surface (freshness-scheduling E1). A dataset
 	// resolves to the namespaces of its declared producers: any of them for a
-	// read, every one for a write. The reads stay pending until B6 filters
-	// derivations and metrics by the producing run's namespace.
-	"GET /v1/datasets":                     collectionRoute(viewer).pendingOn("B6"),
-	"GET /v1/datasets/holds":               collectionRoute(viewer).pendingOn("B6"),
-	"GET /v1/datasets/:id/:id/metrics":     namespacedRoute(viewer).pendingOn("B6"),
-	"GET /v1/datasets/:id/:id":             namespacedRoute(viewer).pendingOn("B6"),
-	"GET /v1/datasets/:id/:id/derivations": namespacedRoute(viewer).pendingOn("B6"),
-	// The manual watermark advance is a data-plane write at runner. Its
-	// response is the persisted dataset state, whose last run and consumed
-	// watermarks can predate a producer's move from another namespace (B6
-	// filters them by the producing run's namespace).
-	"POST /v1/datasets/:id/:id/advance": namespacedRoute(runner).pendingOn("B6"),
+	// read, every one for a write. The lists hold only datasets with a
+	// producer the caller may read, and every body is shaped by owner (B6:
+	// derivations by their stamped namespace, metrics and a state's last run
+	// by the run's persisted namespace; api/rest/service/dataset/tenancy.go).
+	"GET /v1/datasets":                     collectionRoute(viewer),
+	"GET /v1/datasets/holds":               collectionRoute(viewer),
+	"GET /v1/datasets/:id/:id/metrics":     namespacedRoute(viewer),
+	"GET /v1/datasets/:id/:id":             namespacedRoute(viewer),
+	"GET /v1/datasets/:id/:id/derivations": namespacedRoute(viewer),
+	// The manual watermark advance is a data-plane write at runner. A
+	// confined caller's producer check is repeated inside the advance
+	// transaction, and the returned state is shaped like a read (B6).
+	"POST /v1/datasets/:id/:id/advance": namespacedRoute(runner),
 
 	// Releasing a dataset hold (data-circuit-breaker C3) is an OPERATOR action,
 	// the same tier as approving a tier-3 remediation: it overrides an automated
@@ -275,10 +283,11 @@ var endpointPolicy = map[string]RoutePolicy{
 	// A runner that can trigger runs must not also be able to switch the breaker
 	// off. The route is only mounted when CAESIUM_DATA_ASSERTIONS_ENABLED is on;
 	// this entry is unconditional, because an unlisted route is denied as
-	// "unknown_route" (403) even to a valid admin key. The response is the
-	// whole hold, whose impact snapshot names downstream consumers in any
-	// namespace (B6 redacts it).
-	"POST /v1/datasets/holds/:id/release": namespacedRoute(operator).pendingOn("B6"),
+	// "unknown_route" (403) even to a valid admin key. A confined operator
+	// needs the role in every producer namespace, re-checked inside the
+	// release transaction; the returned hold drops its impact cone and any
+	// run another namespace owns (B6).
+	"POST /v1/datasets/holds/:id/release": namespacedRoute(operator),
 
 	// Agent tool surface (/v1/agent/*). Reachable by an unscoped operator/admin
 	// AND by an agent-session credential minted at the runner role; the
@@ -286,14 +295,16 @@ var endpointPolicy = map[string]RoutePolicy{
 	// switch (api/middleware/auth_scope.go), which 403s an agent token on any
 	// route outside its own incident. Reads sit at viewer, mutating tool calls
 	// (propose/execute an action, append a note) at runner. MCP multiplexes both
-	// read and write tools over one POST, so it is agent/runner-only. The
-	// bundle, context and MCP handlers return the job's unfiltered run history
-	// and current topology (A8 confines them).
-	"GET /v1/agent/incidents/:id/bundle":    namespacedRoute(viewer).pendingOn("A8"),
-	"GET /v1/agent/incidents/:id/context/*": namespacedRoute(viewer).pendingOn("A8"),
-	"POST /v1/agent/incidents/:id/actions":  namespacedRoute(runner).pendingOn("A8"),
-	"POST /v1/agent/incidents/:id/notes":    namespacedRoute(runner).pendingOn("A8"),
-	"POST /v1/agent/incidents/:id/mcp":      namespacedRoute(runner).pendingOn("A8"),
+	// read and write tools over one POST, so it is agent/runner-only. Every
+	// read is confined to the incident's namespace (A8): allow-listed jobs
+	// that moved out are dropped, history and why baselines are the runs
+	// recorded there, and a job that moved out shows neither its DAG nor its
+	// remediation policy; actions refuse a target outside the namespace.
+	"GET /v1/agent/incidents/:id/bundle":    namespacedRoute(viewer),
+	"GET /v1/agent/incidents/:id/context/*": namespacedRoute(viewer),
+	"POST /v1/agent/incidents/:id/actions":  namespacedRoute(runner),
+	"POST /v1/agent/incidents/:id/notes":    namespacedRoute(runner),
+	"POST /v1/agent/incidents/:id/mcp":      namespacedRoute(runner),
 
 	// Runner
 	"POST /v1/jobs/:id/run":                                     namespacedRoute(runner),
@@ -351,11 +362,12 @@ var endpointPolicy = map[string]RoutePolicy{
 	// Tier-3 approval decisions (agent-in-the-loop D1). Operator-gated; agent
 	// session tokens are additionally rejected outright in authorizeScope.
 	// Approving executes the proposed action against the incident's job (a
-	// jobdef patch, a retry), which may have moved to another namespace since
-	// the incident opened and can touch a trigger shared with other
-	// namespaces; A8 confines execution to its real targets. Rejecting only
+	// jobdef patch, a retry). The executor refuses a job that moved out of the
+	// incident's namespace or a run recorded elsewhere, and confines a jobdef
+	// patch to the namespace, triggers included (A8), so operator in the
+	// incident's namespace covers everything it can touch. Rejecting only
 	// records the decision on the incident.
-	"POST /v1/incidents/:id/approvals/:id/approve": namespacedRoute(operator).pendingOn("A8"),
+	"POST /v1/incidents/:id/approvals/:id/approve": namespacedRoute(operator),
 	"POST /v1/incidents/:id/approvals/:id/reject":  namespacedRoute(operator),
 
 	// Admin

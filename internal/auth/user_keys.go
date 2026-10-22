@@ -85,6 +85,38 @@ func (s *Service) MintUserBoundKey(ctx context.Context, req MintUserKeyRequest) 
 	if req.UserID == uuid.Nil {
 		return nil, ErrUserNotFound
 	}
+	var resp *CreateKeyResponse
+	err := s.keyTransaction(ctx, func(tx *gorm.DB) error {
+		minted, err := s.mintUserBoundKeyTx(tx, req)
+		resp = minted
+		return err
+	})
+	return mintUserKeyResult(resp, err)
+}
+
+// mintUserKeyResult maps a mint transaction's outcome: the fence errors pass
+// through unwrapped, anything else is wrapped.
+func mintUserKeyResult(resp *CreateKeyResponse, err error) (*CreateKeyResponse, error) {
+	switch {
+	case err == nil:
+		return resp, nil
+	case errors.Is(err, ErrUserDisabled), errors.Is(err, ErrUserChanged), errors.Is(err, ErrUserNotFound):
+		return nil, err
+	default:
+		return nil, fmt.Errorf("mint user-bound api key: %w", err)
+	}
+}
+
+// mintUserBoundKeyTx is the one mint path for user-bound keys, on a
+// caller-supplied transaction: MintUserBoundKey runs it in a transaction of
+// its own, and the CLI login exchange (cli_login.go) runs it in the same
+// transaction that consumes the one-time code. It generates a fresh key on
+// every call (a retried transaction never reuses an earlier attempt's key),
+// fences on the user row (lockMintableUser) and inserts the key.
+func (s *Service) mintUserBoundKeyTx(tx *gorm.DB, req MintUserKeyRequest) (*CreateKeyResponse, error) {
+	if req.UserID == uuid.Nil {
+		return nil, ErrUserNotFound
+	}
 	plaintext, prefix, err := GenerateUserKey()
 	if err != nil {
 		return nil, err
@@ -106,23 +138,16 @@ func (s *Service) MintUserBoundKey(ctx context.Context, req MintUserKeyRequest) 
 		ExpiresAt:   &expiresAt,
 		UserID:      &userID,
 	}
-	err = s.keyTransaction(ctx, func(tx *gorm.DB) error {
-		if err := lockMintableUser(tx, req.UserID, req.DisableGeneration); err != nil {
-			return err
-		}
-		if userKeyMintHook != nil {
-			userKeyMintHook()
-		}
-		return tx.Create(key).Error
-	})
-	switch {
-	case err == nil:
-		return &CreateKeyResponse{Plaintext: plaintext, Key: key}, nil
-	case errors.Is(err, ErrUserDisabled), errors.Is(err, ErrUserChanged), errors.Is(err, ErrUserNotFound):
+	if err := lockMintableUser(tx, req.UserID, req.DisableGeneration); err != nil {
 		return nil, err
-	default:
-		return nil, fmt.Errorf("mint user-bound api key: %w", err)
 	}
+	if userKeyMintHook != nil {
+		userKeyMintHook()
+	}
+	if err := tx.Create(key).Error; err != nil {
+		return nil, err
+	}
+	return &CreateKeyResponse{Plaintext: plaintext, Key: key}, nil
 }
 
 // lockMintableUser is the user-row fence of MintUserBoundKey; it mirrors

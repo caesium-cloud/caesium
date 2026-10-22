@@ -2,6 +2,7 @@ package contract
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 	"time"
 
@@ -254,6 +255,94 @@ func TestGORMStoreListContractEvidenceAggregatesBeforeJoining(t *testing.T) {
 	require.Equal(t, "consumer", records[0].ConsumerJobAlias)
 	require.Equal(t, DatasetRef{Namespace: "lake", Name: "customers"}, records[0].Dataset)
 	require.WithinDuration(t, newerConsumerSeen, records[0].LastSeen, time.Second)
+	require.Equal(t, "default", records[0].ProducerNamespace)
+	require.Equal(t, "default", records[0].ConsumerRunNamespace)
+}
+
+// A consumer that moved namespaces between runs yields one evidence record
+// per run namespace, each naming the namespaces it came from, and derivation
+// merges them back into one edge with the unchanged last-seen time and both
+// run namespaces (identity-and-access B5).
+func TestGORMStoreListContractEvidenceSplitsRunNamespaces(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open("file:"+uuid.NewString()+"?mode=memory&cache=shared"), &gorm.Config{})
+	require.NoError(t, err)
+	createContractEvidenceTables(t, db)
+
+	producerJobID := uuid.New()
+	consumerJobID := uuid.New()
+	insertEvidenceJob(t, db, producerJobID, "producer")
+	insertEvidenceJob(t, db, consumerJobID, "consumer")
+	require.NoError(t, db.Exec("UPDATE jobs SET namespace = 'marketing' WHERE id = ?", consumerJobID).Error)
+
+	seen := time.Date(2026, 7, 7, 10, 0, 0, 0, time.UTC)
+	insertEvidenceDatasetInRun(t, db, producerJobID, "default", "lake", "customers", "output", seen.Add(-time.Hour))
+	insertEvidenceDatasetInRun(t, db, consumerJobID, "finance", "lake", "customers", "input", seen)
+	insertEvidenceDatasetInRun(t, db, consumerJobID, "marketing", "lake", "customers", "input", seen.Add(time.Hour))
+
+	records, err := (GORMStore{DB: db}).ListContractEvidence(context.Background())
+	require.NoError(t, err)
+	require.Len(t, records, 2)
+	runNamespaces := []string{records[0].ConsumerRunNamespace, records[1].ConsumerRunNamespace}
+	require.ElementsMatch(t, []string{"finance", "marketing"}, runNamespaces)
+	for _, record := range records {
+		require.Equal(t, "default", record.ProducerNamespace)
+		require.Equal(t, "marketing", record.ConsumerNamespace)
+		require.Equal(t, "default", record.ProducerRunNamespace)
+	}
+
+	graph, err := DeriveGraph(DeriveInput{Evidence: records})
+	require.NoError(t, err)
+	require.Len(t, graph.Edges, 1)
+	edge := graph.Edges[0]
+	require.Equal(t, []string{"default", "finance", "marketing"}, edge.RunNamespaces())
+	require.WithinDuration(t, seen.Add(time.Hour), *edge.LastSeen, time.Second)
+	for _, node := range graph.Nodes {
+		if node.Alias == "consumer" {
+			owner, owned := node.OwnerNamespace()
+			require.True(t, owned)
+			require.Equal(t, "marketing", owner)
+		}
+	}
+	body, err := json.Marshal(graph)
+	require.NoError(t, err)
+	require.NotContains(t, string(body), "marketing", "ownership never reaches the wire")
+	require.NotContains(t, string(body), "finance")
+}
+
+// A job node carries its owner and, separately, the namespaces of the jobs
+// sharing its trigger; a node derived without an owner, or from sources
+// that disagree, is unowned.
+func TestDeriveGraphCarriesOwnershipApartFromTriggerSharing(t *testing.T) {
+	shared := uuid.New()
+	graph, err := DeriveGraph(DeriveInput{
+		Jobs: []Job{
+			{ID: uuid.New(), Alias: "mkt", Namespace: "marketing", TriggerID: shared},
+			{ID: uuid.New(), Alias: "fin", Namespace: "finance", TriggerID: shared},
+			{ID: uuid.New(), Alias: "solo", Namespace: "marketing", TriggerID: uuid.New()},
+			{Alias: "consumer", Namespace: "marketing", Trigger: eventTrigger("ghost", map[string]string{"x": "$.tasks[0].output.x"})},
+		},
+		Evidence: []EvidenceRecord{{
+			ProducerJobAlias: "solo", ProducerNamespace: "finance",
+			ConsumerJobAlias: "mkt", ConsumerNamespace: "marketing",
+			Dataset: DatasetRef{Namespace: "lake", Name: "t"},
+		}},
+	})
+	require.NoError(t, err)
+	byAlias := map[string]Node{}
+	for _, node := range graph.Nodes {
+		if node.Kind == NodeKindJob {
+			byAlias[node.Alias] = node
+		}
+	}
+	owner, owned := byAlias["mkt"].OwnerNamespace()
+	require.True(t, owned)
+	require.Equal(t, "marketing", owner)
+	require.Equal(t, []string{"finance", "marketing"}, byAlias["mkt"].TriggerNamespaces())
+	require.Equal(t, []string{"finance", "marketing"}, byAlias["fin"].TriggerNamespaces())
+	_, owned = byAlias["solo"].OwnerNamespace()
+	require.False(t, owned, "a job row and its evidence disagree on the owner: unowned")
+	_, owned = byAlias["ghost"].OwnerNamespace()
+	require.False(t, owned, "an unknown inferred producer has no owner")
 }
 
 func TestDeriveGraphInferredEdgeResolvesJobIDFilter(t *testing.T) {
@@ -784,8 +873,8 @@ func requireJobNode(t *testing.T, graph Graph, alias string) {
 
 func createContractEvidenceTables(t *testing.T, db *gorm.DB) {
 	t.Helper()
-	require.NoError(t, db.Exec("CREATE TABLE jobs (id text PRIMARY KEY, alias text NOT NULL, deleted_at datetime)").Error)
-	require.NoError(t, db.Exec("CREATE TABLE job_runs (id text PRIMARY KEY, job_id text NOT NULL)").Error)
+	require.NoError(t, db.Exec("CREATE TABLE jobs (id text PRIMARY KEY, alias text NOT NULL, namespace text NOT NULL DEFAULT 'default', deleted_at datetime)").Error)
+	require.NoError(t, db.Exec("CREATE TABLE job_runs (id text PRIMARY KEY, job_id text NOT NULL, namespace text NOT NULL DEFAULT 'default')").Error)
 	require.NoError(t, db.Exec("CREATE TABLE task_runs (id text PRIMARY KEY, job_run_id text NOT NULL)").Error)
 	require.NoError(t, db.Exec("CREATE TABLE lineage_datasets (id text PRIMARY KEY, task_run_id text NOT NULL, namespace text NOT NULL, name text NOT NULL, direction text NOT NULL, created_at datetime NOT NULL)").Error)
 }
@@ -797,9 +886,16 @@ func insertEvidenceJob(t *testing.T, db *gorm.DB, jobID uuid.UUID, alias string)
 
 func insertEvidenceDataset(t *testing.T, db *gorm.DB, jobID uuid.UUID, namespace, name, direction string, createdAt time.Time) {
 	t.Helper()
+	insertEvidenceDatasetInRun(t, db, jobID, "default", namespace, name, direction, createdAt)
+}
+
+// insertEvidenceDatasetInRun records the lineage row from a run persisted in
+// runNamespace.
+func insertEvidenceDatasetInRun(t *testing.T, db *gorm.DB, jobID uuid.UUID, runNamespace, namespace, name, direction string, createdAt time.Time) {
+	t.Helper()
 	jobRunID := uuid.New()
 	taskRunID := uuid.New()
-	require.NoError(t, db.Exec("INSERT INTO job_runs (id, job_id) VALUES (?, ?)", jobRunID, jobID).Error)
+	require.NoError(t, db.Exec("INSERT INTO job_runs (id, job_id, namespace) VALUES (?, ?, ?)", jobRunID, jobID, runNamespace).Error)
 	require.NoError(t, db.Exec("INSERT INTO task_runs (id, job_run_id) VALUES (?, ?)", taskRunID, jobRunID).Error)
 	require.NoError(t, db.Exec(
 		"INSERT INTO lineage_datasets (id, task_run_id, namespace, name, direction, created_at) VALUES (?, ?, ?, ?, ?, ?)",
@@ -814,7 +910,7 @@ func insertEvidenceDataset(t *testing.T, db *gorm.DB, jobID uuid.UUID, namespace
 
 func createContractJobTables(t *testing.T, db *gorm.DB) {
 	t.Helper()
-	require.NoError(t, db.Exec("CREATE TABLE jobs (id text PRIMARY KEY, alias text NOT NULL, trigger_id text NOT NULL, labels json, deleted_at datetime)").Error)
+	require.NoError(t, db.Exec("CREATE TABLE jobs (id text PRIMARY KEY, alias text NOT NULL, namespace text NOT NULL DEFAULT 'default', trigger_id text NOT NULL, labels json, deleted_at datetime)").Error)
 	require.NoError(t, db.Exec("CREATE TABLE triggers (id text PRIMARY KEY, type text NOT NULL, configuration text NOT NULL, deleted_at datetime)").Error)
 	require.NoError(t, db.Exec("CREATE TABLE tasks (id text PRIMARY KEY, job_id text NOT NULL, name text NOT NULL, position integer NOT NULL, output_schema json, deleted_at datetime, created_at datetime)").Error)
 	require.NoError(t, db.Exec("CREATE TABLE dataset_declarations (id text PRIMARY KEY, job_id text NOT NULL, job_alias text NOT NULL, step_name text NOT NULL, name text NOT NULL, direction text NOT NULL, schema_json text, schema_from text, schema_version integer)").Error)

@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/caesium-cloud/caesium/internal/atom"
 	"github.com/caesium-cloud/caesium/internal/jobdef/secret"
 	jobdeftestutil "github.com/caesium-cloud/caesium/internal/jobdef/testutil"
 	"github.com/caesium-cloud/caesium/internal/models"
@@ -620,6 +621,10 @@ type seedTaskConfig struct {
 	secretRefs   []models.TaskExecutionSecretRef
 	image        string
 	command      []string
+	// engine defaults to docker; kubeTarget is the namespace mapping the
+	// baseline execution recorded (nil: none, the legacy default).
+	engine     models.AtomEngine
+	kubeTarget *atom.KubeTarget
 }
 
 func (f replayFixture) seedTask(t *testing.T, cfg seedTaskConfig) uuid.UUID {
@@ -632,6 +637,9 @@ func (f replayFixture) seedTask(t *testing.T, cfg seedTaskConfig) uuid.UUID {
 	}
 	if cfg.spec.Env == nil {
 		cfg.spec.Env = map[string]string{"STEP": cfg.name}
+	}
+	if cfg.engine == "" {
+		cfg.engine = models.AtomEngineDocker
 	}
 	atomID := uuid.New()
 	taskID := uuid.New()
@@ -679,7 +687,8 @@ func (f replayFixture) seedTask(t *testing.T, cfg seedTaskConfig) uuid.UUID {
 		},
 		Run: models.TaskExecutionRun{Params: map[string]string{"mode": "baseline"}},
 		Runtime: models.TaskExecutionRuntime{
-			Engine:                models.AtomEngineDocker,
+			Engine:                cfg.engine,
+			KubernetesTarget:      cfg.kubeTarget,
 			Image:                 cfg.image,
 			ParamEnvInterpolation: true,
 			Command:               cfg.command,
@@ -710,7 +719,7 @@ func (f replayFixture) seedTask(t *testing.T, cfg seedTaskConfig) uuid.UUID {
 		JobRunID:                f.runID,
 		TaskID:                  taskID,
 		AtomID:                  atomID,
-		Engine:                  models.AtomEngineDocker,
+		Engine:                  cfg.engine,
 		Image:                   cfg.image,
 		Command:                 command,
 		Status:                  string(run.TaskStatusSucceeded),

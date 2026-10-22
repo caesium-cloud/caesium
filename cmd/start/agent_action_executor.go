@@ -53,6 +53,8 @@ func (a *agentActionExecutor) ExecuteAgentAction(ctx context.Context, req agents
 		Type:       req.Type,
 		Params:     params,
 		Playbook:   a.playbook(ctx, req.IncidentID),
+		// The author's confinement comes from its credential (A8).
+		NamespaceConfined: req.NamespaceConfined,
 	})
 	if action == nil {
 		return nil, err

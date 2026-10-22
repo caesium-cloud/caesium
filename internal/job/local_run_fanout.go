@@ -298,10 +298,15 @@ func (l *localRun) runFannedGroup(
 		// policy revoked while the group is open must stop the next instance
 		// from consuming its cached result. A denial fails the instance
 		// without retrying.
+		if runner.kubeMappingErr != nil {
+			failIdentity(runner.kubeMappingErr)
+			return
+		}
 		if err := l.checkSecretsAllowed(runner); err != nil {
 			failIdentity(err)
 			return
 		}
+		l.recordKubernetesTarget(taskRunID, runner)
 
 		partEnv := map[string]string{
 			envName: m.partition.Key,

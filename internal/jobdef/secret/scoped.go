@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"strings"
 	"time"
 
@@ -11,6 +12,7 @@ import (
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/caesium-cloud/caesium/pkg/env"
 	jobdefschema "github.com/caesium-cloud/caesium/pkg/jobdef"
+	"k8s.io/client-go/kubernetes"
 )
 
 // ErrSecretDenied is matched (errors.Is) by every denial a ScopedResolver
@@ -63,11 +65,20 @@ type ScopedResolver struct {
 	// when the scope was built; Allow resolves the holder on use.
 	pending     bool
 	kubeDefault string
-	rules       []string
+	// pin, when set, is the Kubernetes namespace relative secret://k8s
+	// references read in for this scope ("" = the resolver's own default),
+	// fixed by the task execution that built it (ForNamespaceTarget) rather
+	// than read from the live policy's mapping.
+	pin   *string
+	rules []string
 	// reload rebuilds the scope from the process policy as it is now. It is set
 	// on process-backed scopes (ForNamespace, ForClientNamespace), so every
 	// Allow, and so every reference of one resolution, reads the current
 	// policy: a reload while one reference is being read applies to the next.
+	// One reference's allow-check and its read or verification use the same
+	// rebuilt scope (snapshot), so the rules that allowed it and the inner
+	// resolver (with the namespace's mapped Kubernetes default) that reads it
+	// come from one policy revision.
 	reload func() *ScopedResolver
 }
 
@@ -110,7 +121,22 @@ func NewScopedResolver(inner Resolver, namespace string, rules *policy.SecretRul
 // references never wait. A client process uses ForClientNamespace instead.
 func ForNamespace(inner Resolver, namespace string) *ScopedResolver {
 	vars := env.Variables()
-	return liveForProcess(inner, namespace, policyFileConfigured(vars), vars.KubernetesNamespace)
+	return liveForProcess(inner, namespace, policyFileConfigured(vars), vars.KubernetesNamespace, nil)
+}
+
+// ForNamespaceTarget is ForNamespace for one task execution whose namespace
+// mapping was resolved once, before its cache identity
+// (jobdefruntime.KubernetesMapping): relative secret://k8s/<secret>/<key>
+// references read in kubeNamespace (the execution's mapped Kubernetes
+// namespace; "" keeps the resolver's CAESIUM_JOBDEF_SECRETS_KUBE_NAMESPACE)
+// for the whole execution, so the pod, its cache identity and the secrets it
+// reads agree even if the policy reloads mid-execution. The secret rules are
+// still read from the live policy at every use: a remap mid-execution makes a
+// relative reference stop matching, never widens it.
+func ForNamespaceTarget(inner Resolver, namespace, kubeNamespace string) *ScopedResolver {
+	vars := env.Variables()
+	pin := kubeNamespace
+	return liveForProcess(inner, namespace, policyFileConfigured(vars), vars.KubernetesNamespace, &pin)
 }
 
 // ForClientNamespace is ForNamespace for a run a client process executes
@@ -122,30 +148,49 @@ func ForNamespace(inner Resolver, namespace string) *ScopedResolver {
 // initialisation (cmd/start) loads that file, so in a client the wait could
 // only stall every secret-bearing step for processHolderWait and then deny.
 func ForClientNamespace(inner Resolver, namespace string) *ScopedResolver {
-	return liveForProcess(inner, namespace, false, env.Variables().KubernetesNamespace)
+	return liveForProcess(inner, namespace, false, env.Variables().KubernetesNamespace, nil)
 }
 
 // liveForProcess is forProcess on the holder installed now, refreshed by every
 // Allow. AllowsAll reports the policy as it was when the scope was built.
-func liveForProcess(inner Resolver, namespace string, fileConfigured bool, kubeDefault string) *ScopedResolver {
+func liveForProcess(inner Resolver, namespace string, fileConfigured bool, kubeDefault string, pin *string) *ScopedResolver {
 	reload := func() *ScopedResolver {
-		return forProcess(inner, namespace, policy.ProcessHolder(), fileConfigured, kubeDefault)
+		return forProcess(inner, namespace, policy.ProcessHolder(), fileConfigured, kubeDefault, pin)
 	}
 	s := reload()
 	s.reload = reload
 	return s
 }
 
-func forProcess(inner Resolver, namespace string, holder *policy.Holder, fileConfigured bool, kubeDefault string) *ScopedResolver {
+func forProcess(inner Resolver, namespace string, holder *policy.Holder, fileConfigured bool, kubeDefault string, pin *string) *ScopedResolver {
 	if holder == nil && fileConfigured {
 		return &ScopedResolver{
 			inner:       inner,
 			namespace:   models.NamespaceOrDefault(namespace),
 			pending:     true,
 			kubeDefault: kubeDefault,
+			pin:         pin,
 		}
 	}
-	return forNamespace(inner, namespace, holder, kubeDefault)
+	return forNamespace(inner, namespace, holder, kubeDefault, pin)
+}
+
+// ServerPolicy returns the access policy this server process enforces for work
+// about to run: the installed holder, waiting up to processHolderWait when a
+// policy file is configured but not installed yet (work launched during
+// startup). A nil holder with ok is the empty policy (no file configured); ok
+// is false when a configured policy file never loaded, and callers deny.
+func ServerPolicy() (holder *policy.Holder, ok bool) {
+	if holder := policy.ProcessHolder(); holder != nil {
+		return holder, true
+	}
+	if !policyFileConfigured(env.Variables()) {
+		return nil, true
+	}
+	if holder := awaitProcessHolder(processHolderWait); holder != nil {
+		return holder, true
+	}
+	return nil, false
 }
 
 // processHolderWait bounds how long a pending scope waits at startup for the
@@ -172,9 +217,20 @@ func awaitProcessHolder(wait time.Duration) *policy.Holder {
 	return nil
 }
 
-func forNamespace(inner Resolver, namespace string, holder *policy.Holder, defaultKubeNamespace string) *ScopedResolver {
+func forNamespace(inner Resolver, namespace string, holder *policy.Holder, defaultKubeNamespace string, pin *string) *ScopedResolver {
 	namespace = models.NamespaceOrDefault(namespace)
 	settings, declared := holder.Namespace(namespace)
+	// Relative secret://k8s references read in the namespace's mapped
+	// Kubernetes namespace (design §10.1): the execution's pinned mapping, else
+	// the live policy's. No mapping keeps the inner resolver unchanged.
+	readNamespace := ""
+	if settings.Kubernetes != nil {
+		readNamespace = settings.Kubernetes.Namespace
+	}
+	if pin != nil {
+		readNamespace = *pin
+	}
+	inner = withKubernetesNamespace(inner, readNamespace)
 	if !declared {
 		if holder.FileBacked() {
 			return &ScopedResolver{inner: inner, namespace: namespace, undeclared: true}
@@ -182,6 +238,92 @@ func forNamespace(inner Resolver, namespace string, holder *policy.Holder, defau
 		return &ScopedResolver{inner: inner, namespace: namespace, allowAll: true}
 	}
 	return NewScopedResolver(inner, namespace, settings.Secrets, mappedKubernetesNamespace(settings, defaultKubeNamespace))
+}
+
+// withKubernetesNamespace returns inner with its Kubernetes provider (both the
+// k8s and kubernetes provider keys) reading relative references in namespace.
+// An empty namespace, or an inner resolver without a Kubernetes provider,
+// returns inner unchanged.
+func withKubernetesNamespace(inner Resolver, namespace string) Resolver {
+	if namespace == "" {
+		return inner
+	}
+	switch r := inner.(type) {
+	case *KubernetesResolver:
+		if r == nil {
+			return inner
+		}
+		return &mappedKubernetesResolver{parent: r, namespace: namespace}
+	case *MultiResolver:
+		if r == nil {
+			return inner
+		}
+		providers := maps.Clone(r.providers)
+		mapped := false
+		for _, key := range []string{providerKubernetes, "kubernetes"} {
+			if kube, ok := providers[key].(*KubernetesResolver); ok && kube != nil {
+				providers[key] = &mappedKubernetesResolver{parent: kube, namespace: namespace}
+				mapped = true
+			}
+		}
+		if !mapped {
+			return inner
+		}
+		return &MultiResolver{providers: providers}
+	}
+	return inner
+}
+
+// mappedKubernetesResolver is a KubernetesResolver whose default namespace for
+// relative references (secret://k8s/<secret>/<key>) is a job namespace's
+// mapped Kubernetes namespace instead of CAESIUM_JOBDEF_SECRETS_KUBE_NAMESPACE.
+// A path namespace or ?namespace= still wins, exactly as for the parent. It
+// shares the parent's client.
+type mappedKubernetesResolver struct {
+	parent    *KubernetesResolver
+	namespace string
+}
+
+func (m *mappedKubernetesResolver) view(client kubernetes.Interface) *KubernetesResolver {
+	return &KubernetesResolver{client: client, config: KubernetesConfig{KubeConfigPath: m.parent.config.KubeConfigPath, Namespace: m.namespace}}
+}
+
+func (m *mappedKubernetesResolver) Resolve(ctx context.Context, ref string) (string, error) {
+	value, _, err := m.ResolveWithIdentity(ctx, ref)
+	return value, err
+}
+
+func (m *mappedKubernetesResolver) ResolveWithIdentity(ctx context.Context, ref string) (string, Identity, error) {
+	client, err := m.parent.clientset()
+	if err != nil {
+		return "", Identity{}, err
+	}
+	return m.view(client).ResolveWithIdentity(ctx, ref)
+}
+
+func (m *mappedKubernetesResolver) CanonicalTarget(ref string) (string, error) {
+	return m.view(nil).CanonicalTarget(ref)
+}
+
+// RelativeKubernetesReference reports whether any value of env is a
+// secret://k8s (or kubernetes) reference without a namespace of its own (two
+// path segments, no ?namespace=): one whose read namespace is the job
+// namespace's mapping. Callers fold that mapping into the cache identity.
+func RelativeKubernetesReference(env map[string]string) bool {
+	for _, value := range env {
+		value = strings.TrimSpace(value)
+		if !strings.HasPrefix(value, scheme+"://") {
+			continue
+		}
+		ref, err := Parse(value)
+		if err != nil || (ref.Provider != providerKubernetes && ref.Provider != "kubernetes") {
+			continue
+		}
+		if len(ref.Segments) == 2 && strings.TrimSpace(ref.Query.Get("namespace")) == "" {
+			return true
+		}
+	}
+	return false
 }
 
 // ScopingActive reports whether any namespace of this process's policy can
@@ -271,16 +413,31 @@ func (s *ScopedResolver) Allow(ref string) error {
 	if s == nil {
 		return &SecretDeniedError{Ref: redactSecretRef(ref), Reason: denyNoScope}
 	}
-	if s.reload != nil {
-		return s.reload().Allow(ref)
+	return s.snapshot().allow(ref)
+}
+
+// snapshot is the scope as of the current policy: a process-backed scope is
+// rebuilt from the installed holder, and a pending one waits for it. One
+// reference's allow-check and its read or verification use one snapshot.
+func (s *ScopedResolver) snapshot() *ScopedResolver {
+	snap := s
+	if snap.reload != nil {
+		snap = snap.reload()
 	}
+	if snap.pending {
+		if holder := awaitProcessHolder(processHolderWait); holder != nil {
+			snap = forNamespace(snap.inner, snap.namespace, holder, snap.kubeDefault, snap.pin)
+		}
+	}
+	return snap
+}
+
+// allow is Allow on a snapshot.
+func (s *ScopedResolver) allow(ref string) error {
 	if s.allowAll {
 		return nil
 	}
 	if s.pending {
-		if holder := awaitProcessHolder(processHolderWait); holder != nil {
-			return forNamespace(s.inner, s.namespace, holder, s.kubeDefault).Allow(ref)
-		}
 		return s.deny(s.redact(ref), denyNotLoaded)
 	}
 	if s.inner == nil {
@@ -325,29 +482,43 @@ func (s *ScopedResolver) Resolve(ctx context.Context, ref string) (string, error
 
 // ResolveWithIdentity implements Resolver: Allow, then the inner resolver.
 func (s *ScopedResolver) ResolveWithIdentity(ctx context.Context, ref string) (string, Identity, error) {
-	if err := s.Allow(ref); err != nil {
+	if s == nil {
+		return "", Identity{}, s.Allow(ref)
+	}
+	snap := s.snapshot()
+	if err := snap.allow(ref); err != nil {
 		return "", Identity{}, err
 	}
-	if s.inner == nil {
+	if snap.inner == nil {
 		return "", Identity{}, errors.New("secret resolver is not configured")
 	}
-	return s.inner.ResolveWithIdentity(ctx, ref)
+	return snap.inner.ResolveWithIdentity(ctx, ref)
 }
 
-// CanonicalTarget implements Resolver by delegating to the inner resolver.
+// CanonicalTarget implements Resolver by delegating to the inner resolver of
+// the current snapshot (so a relative k8s reference canonicalises in the
+// namespace's mapped Kubernetes namespace).
 func (s *ScopedResolver) CanonicalTarget(ref string) (string, error) {
 	if s == nil || s.inner == nil {
 		return "", errors.New("secret resolver is not configured")
 	}
-	return s.inner.CanonicalTarget(ref)
+	snap := s.snapshot()
+	if snap.inner == nil {
+		return "", errors.New("secret resolver is not configured")
+	}
+	return snap.inner.CanonicalTarget(ref)
 }
 
 // VerifyIdentity implements IdentityVerifier: Allow, then the inner verifier.
 func (s *ScopedResolver) VerifyIdentity(ctx context.Context, ref string, expected Identity) (Identity, error) {
-	if err := s.Allow(ref); err != nil {
+	if s == nil {
+		return Identity{}, s.Allow(ref)
+	}
+	snap := s.snapshot()
+	if err := snap.allow(ref); err != nil {
 		return Identity{}, err
 	}
-	verifier, ok := s.inner.(IdentityVerifier)
+	verifier, ok := snap.inner.(IdentityVerifier)
 	if !ok {
 		return Identity{}, fmt.Errorf("secret provider %q does not support baseline identity verification", expected.Provider)
 	}
@@ -357,10 +528,14 @@ func (s *ScopedResolver) VerifyIdentity(ctx context.Context, ref string, expecte
 // VerifyResolvedIdentity implements ResolvedIdentityVerifier: Allow, then the
 // inner verifier. Replay re-verification therefore honours the rules too.
 func (s *ScopedResolver) VerifyResolvedIdentity(ctx context.Context, ref string, expected Identity, resolvedValue string) (Identity, error) {
-	if err := s.Allow(ref); err != nil {
+	if s == nil {
+		return Identity{}, s.Allow(ref)
+	}
+	snap := s.snapshot()
+	if err := snap.allow(ref); err != nil {
 		return Identity{}, err
 	}
-	verifier, ok := s.inner.(ResolvedIdentityVerifier)
+	verifier, ok := snap.inner.(ResolvedIdentityVerifier)
 	if !ok {
 		return Identity{}, fmt.Errorf("secret provider %q does not support resolved baseline identity verification", expected.Provider)
 	}

@@ -1115,6 +1115,7 @@ coverage_journey_server_env() {
     CAESIUM_CACHE_PIN_DIGESTS=true
     CAESIUM_REGISTRY_AUTH=127.0.0.1=secret://env/CAESIUM_IT_REGISTRY_CREDS
     CAESIUM_IT_REGISTRY_CREDS=ci-user:ci-pass
+    MARKETING_IT_TOKEN=it-marketing-token
     CAESIUM_CACHE_ENABLED=true
     CAESIUM_NOTIFICATION_WATCHER_INTERVAL=1s
     CAESIUM_RATE_LIMIT_PRUNER_ENABLED=true
@@ -1770,6 +1771,11 @@ PY
   # scoped to the row's queued namespace): a queue-policy job parks its second
   # run and the scenario cancels the row through the live endpoint.
   local_pattern="${local_pattern%)}|TestJobQueueCancelEndpointDeletesUnclaimedRowOnly)"
+  # Namespace secret scoping end to end (identity-and-access C5): the local
+  # server's fixture gives marketing env/MARKETING_* only, so a FINANCE_
+  # reference is refused by server lint and at run time (config class in
+  # `caesium why`), and the allowed reference resolves.
+  local_pattern="${local_pattern%)}|TestSecretScopeMarketingAllowList)"
   auth_pattern="${auth_pattern%)}|TestIncidentNamespaceLifecycle)"
   # The access policy endpoints (GET/POST /v1/auth/policy): this api-key server
   # mounts no policy file, so the scenario drives the no-file env view and 409.
@@ -1791,6 +1797,28 @@ PY
   # only, which needs no policy file (this server mounts none) nor a catalog
   # connection.
   auth_pattern="${auth_pattern%)}|TestAuthJobdefApplyLateRefusalRollsBack|TestAuthLegacyJobCreateConfined|TestAuthTriggerTenancyWebhookPathRace|TestAuthTriggerPatchRechecksTenancy)"
+  # Namespace-aware DAG snapshots (identity-and-access B7): blame, topology
+  # and topology history of a moved job read by viewers confined to each side.
+  # Needs neither a policy file nor a catalog connection.
+  auth_pattern="${auth_pattern%)}|TestAuthDagSnapshotsFollowNamespaceMoves)"
+  # Canonical job aliases (W6-α): a whitespace alias is refused through
+  # `caesium job apply`, the apply route and the legacy create route.
+  local_pattern="${local_pattern%)}|TestJobApplyRejectsNonCanonicalAlias)"
+  # Confined dataset reads and writes (identity-and-access B6): the producer
+  # checks behind a confined viewer's derivations and a confined manual
+  # advance. Rule 1 only, no catalog connection.
+  auth_pattern="${auth_pattern%)}|TestAuthDatasetConfinedProducerChecks)"
+  # Aggregate redaction (identity-and-access B5): a marketing-confined viewer
+  # reads the lineage impact query and the contract graph over default-
+  # namespace jobs, so the confined redaction path runs. Needs no policy file.
+  auth_pattern="${auth_pattern%)}|TestAuthAggregateRedactionConfinedToOwnNamespaces)"
+  # CLI login (identity-and-access E5): `caesium login --no-browser`/`--code`
+  # and the --no-open loopback flow through the live /auth/cli/* routes, the
+  # stored credential driving whoami and cache list, and `caesium logout`'s
+  # self-revocation. Grants are compared with the user's own session, so the
+  # scenarios need no policy file; the refusal scenario spends two limiter
+  # windows and runs on the agent lane only.
+  auth_pattern="${auth_pattern%)}|TestAuthCLILoginManualCodeFlow|TestAuthCLILoginLoopbackFlow)"
 
   local -a local_named_passes=(
     TestCaesiumWhyExplainsHitAndMiss
@@ -1820,6 +1848,8 @@ PY
     TestNamespaceQuotaRefusesRetryAtCap
     TestNamespaceQuotaBackfillWaitsAndCompletes
     TestJobQueueCancelEndpointDeletesUnclaimedRowOnly
+    TestJobApplyRejectsNonCanonicalAlias
+    TestSecretScopeMarketingAllowList
   )
   local -a auth_named_passes=(
     TestIncidentCLIListJSONStdout
@@ -1846,6 +1876,11 @@ PY
     TestAuthLegacyJobCreateConfined
     TestAuthTriggerTenancyWebhookPathRace
     TestAuthTriggerPatchRechecksTenancy
+    TestAuthDagSnapshotsFollowNamespaceMoves
+    TestAuthDatasetConfinedProducerChecks
+    TestAuthAggregateRedactionConfinedToOwnNamespaces
+    TestAuthCLILoginManualCodeFlow
+    TestAuthCLILoginLoopbackFlow
   )
   local -a distributed_named_passes=(
     TestNodeWorkersRoute

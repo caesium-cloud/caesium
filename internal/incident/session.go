@@ -199,8 +199,10 @@ func (s *Supervisor) reserveWithCaps(ctx context.Context, inc *models.Incident, 
 		ProfileID:  &profile.ID,
 		Engine:     engineType,
 		State:      models.AgentSessionStatePending,
-		CreatedAt:  now,
-		UpdatedAt:  now,
+		// Created under A8: the session reads only its incident namespace.
+		NamespaceConfined: true,
+		CreatedAt:         now,
+		UpdatedAt:         now,
 	}
 
 	capHit, err := s.store.ReserveAgentSession(ctx, session, inc.JobID, s.cfg.MaxConcurrentSessions, s.cfg.PerJobConcurrentSessions)
@@ -265,8 +267,10 @@ func (s *Supervisor) reserve(ctx context.Context, inc *models.Incident, profile 
 		Engine:     engineType,
 		TokenID:    &tokenID,
 		State:      models.AgentSessionStatePending,
-		CreatedAt:  now,
-		UpdatedAt:  now,
+		// Created under A8: the session reads only its incident namespace.
+		NamespaceConfined: true,
+		CreatedAt:         now,
+		UpdatedAt:         now,
 	}
 	if err := s.db.WithContext(ctx).Create(session).Error; err != nil {
 		s.revoke(&tokenID)

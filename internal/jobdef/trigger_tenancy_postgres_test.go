@@ -506,12 +506,9 @@ func TestPostgresConfinedBatchAuthorizesBeforeRunCheck(t *testing.T) {
 	ctx := context.Background()
 	own := f.mustApply("payroll", "default", "")
 	targets := make(map[string]*models.Job, len(nonCanonicalAliases))
-	for _, alias := range nonCanonicalAliases {
-		def := f.def("payroll", "default", "")
-		def.Metadata.Alias = alias
-		job, err := f.importer.ApplyWithOptions(ctx, def, nil)
-		require.NoError(t, err)
-		targets[alias] = job
+	for idx, alias := range nonCanonicalAliases {
+		// Stored before Validate refused non-canonical aliases (W6-α).
+		targets[alias] = f.seedStoredAlias(fmt.Sprintf("payroll-seed-%d", idx), alias, "default")
 	}
 	finance := f.mustApply("payroll-finance", "finance", "")
 	setRunning := func(job *models.Job, running bool) {
@@ -529,6 +526,7 @@ func TestPostgresConfinedBatchAuthorizesBeforeRunCheck(t *testing.T) {
 		target *models.Job
 		scope  *TenancyScope
 		reason string
+		alias  string // non-empty: Validate refuses this alias before any check
 	}
 	var probes []probe
 	for _, name := range []string{"key at *", "namespace-confined"} {
@@ -544,21 +542,25 @@ func TestPostgresConfinedBatchAuthorizesBeforeRunCheck(t *testing.T) {
 			foreign := BatchPlan{Def: def, Opts: opts}
 			exact := BatchPlan{Def: f.def("payroll", "default", ""), Opts: opts}
 			probes = append(probes,
-				probe{fmt.Sprintf("%s %q", name, alias), []BatchPlan{foreign}, targets[alias], scope, NamespaceReasonAliasScope},
-				probe{fmt.Sprintf("%s own then %q", name, alias), []BatchPlan{exact, foreign}, targets[alias], scope, NamespaceReasonAliasScope})
+				probe{fmt.Sprintf("%s %q", name, alias), []BatchPlan{foreign}, targets[alias], scope, "", alias},
+				probe{fmt.Sprintf("%s own then %q", name, alias), []BatchPlan{exact, foreign}, targets[alias], scope, "", alias})
 		}
 	}
 	mkt := &ApplyOptions{NamespaceAllowlist: []string{"marketing"}}
 	probes = append(probes, probe{"marketing operator naming a finance job",
 		[]BatchPlan{{Def: f.def("payroll-finance", "marketing", ""), Opts: mkt}}, finance,
-		NewTenancyScope([]string{"marketing"}, nil), NamespaceReasonStored})
+		NewTenancyScope([]string{"marketing"}, nil), NamespaceReasonStored, ""})
 
 	for _, p := range probes {
 		t.Run(p.name, func(t *testing.T) {
 			refuse := func() error {
 				t.Helper()
 				_, err := f.importer.ApplyConfinedBatch(ctx, p.plans, ConfinedBatchOptions{})
-				requireTenancyRefusal(t, err, p.reason)
+				if p.alias != "" {
+					requireNonCanonicalAlias(t, err, p.alias)
+				} else {
+					requireTenancyRefusal(t, err, p.reason)
+				}
 				require.NotErrorIs(t, err, ErrJobRunning)
 				return err
 			}
@@ -571,11 +573,13 @@ func TestPostgresConfinedBatchAuthorizesBeforeRunCheck(t *testing.T) {
 			setRunning(own, false)
 
 			require.Equal(t, idle.Error(), running.Error(), "the refusal does not depend on the target's run state")
-			idleDenial, _ := WriteRefusal(idle, p.scope)
-			runningDenial, _ := WriteRefusal(running, p.scope)
-			require.NotNil(t, runningDenial)
-			require.Equal(t, idleDenial, runningDenial, "the same 403")
-			require.NotContains(t, runningDenial.Message, p.target.Alias)
+			if p.alias == "" {
+				idleDenial, _ := WriteRefusal(idle, p.scope)
+				runningDenial, _ := WriteRefusal(running, p.scope)
+				require.NotNil(t, runningDenial)
+				require.Equal(t, idleDenial, runningDenial, "the same 403")
+				require.NotContains(t, runningDenial.Message, p.target.Alias)
+			}
 			require.Equal(t, before, f.job(p.target.Alias).UpdatedAt, "the target was not rewritten")
 		})
 	}
@@ -587,7 +591,8 @@ func TestPostgresConfinedBatchAuthorizesBeforeRunCheck(t *testing.T) {
 }
 
 // A namespace-confined apply-with-prune naming a non-canonical alias (PR #668
-// review r7): refused with the generic 403, nothing applied, nothing pruned.
+// review r7): refused (by Validate since W6-α), nothing applied, nothing
+// pruned.
 // Before, the batch stored "payroll " and its prune, whose protected set held
 // the trimmed "payroll", retired it and every other marketing job again and
 // reported success.
@@ -603,10 +608,10 @@ func TestPostgresNamespaceConfinedPruneRefusesNonCanonicalAlias(t *testing.T) {
 		def.Metadata.Alias = alias
 		result, err := f.importer.ApplyConfinedBatch(ctx, []BatchPlan{{Def: def, Opts: opts}},
 			ConfinedBatchOptions{Prune: true, PruneNamespaces: []string{"marketing"}})
-		requireTenancyRefusal(t, err, NamespaceReasonNonCanonicalAlias)
+		requireNonCanonicalAlias(t, err, alias)
 		require.Equal(t, ConfinedBatchResult{}, result)
-		denial, _ := WriteRefusal(err, scope)
-		require.NotNil(t, denial)
+		denial, _ := WriteRefusal(aliasScopeRefusal(alias, "marketing", scope), scope)
+		require.NotNil(t, denial, "the in-transaction refusal stays the second line of defence")
 		require.Equal(t, "insufficient permissions", denial.Message)
 		require.False(t, f.jobExists(alias), "no job %q was written", alias)
 		require.False(t, f.job("keep").DeletedAt.Valid, "nothing was pruned")

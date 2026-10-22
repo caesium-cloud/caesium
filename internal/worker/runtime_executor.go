@@ -258,12 +258,29 @@ func (e *runtimeExecutor) Execute(ctx context.Context, taskRun *models.TaskRun) 
 		atomSpec.Env = interpolatedEnv
 	}
 
+	// The run namespace's Kubernetes mapping (identity-and-access C1), read
+	// once for this execution from this node's policy before its cache
+	// identity and held across its retries: the pod target, the cache key, the
+	// recorded descriptor, the namespace relative secret://k8s references read
+	// in, and the published result all come from this one policy revision. A
+	// Kubernetes task whose target cannot be known fails as a configuration
+	// failure, never retried.
+	kubeMapping, mappingErr := jobdefruntime.KubernetesMapping(runNamespace, taskRun.Engine, false)
+	if mappingErr != nil {
+		log.Error("worker task kubernetes target refused", "task_id", taskRun.TaskID, "run_id", taskRun.JobRunID, "namespace", runNamespace, "error", mappingErr)
+		e.reportInputFailure(ctx, sink, taskRun, mappingErr, timeouts)
+		return
+	}
+	if err := e.store.RecordTaskKubernetesTarget(taskRun.JobRunID, taskRun.ID, kubeMapping, taskRun.ExecutionDescriptor); err != nil {
+		log.Warn("failed to record task kubernetes target on its descriptor", "task_id", taskRun.TaskID, "run_id", taskRun.JobRunID, "error", err)
+	}
+
 	// Namespace secret rules, read from this node's policy for the run's
 	// persisted namespace, are checked before the cache lookup so a reference
 	// the namespace no longer allows is never served from cache (and again
 	// right before the lookup). A denial is a configuration failure: reported
 	// once, never retried.
-	if e.secretsDenied(ctx, sink, taskRun, runNamespace, atomSpec, timeouts) {
+	if e.secretsDenied(ctx, sink, taskRun, runNamespace, kubeMapping, atomSpec, timeouts) {
 		return
 	}
 
@@ -373,24 +390,27 @@ func (e *runtimeExecutor) Execute(ctx context.Context, taskRun *models.TaskRun) 
 			}
 		}
 
+		kubeTarget, kubeSecretNamespace := jobdefruntime.KubernetesIdentity(taskRun.Engine, kubeMapping, mergedEnv)
 		hashInput := cache.HashInput{
-			JobAlias:                cacheJobAlias,
-			Namespace:               runNamespace,
-			TaskName:                taskName,
-			Image:                   taskRun.Image,
-			ResolvedImageDigest:     resolvedImageDigest,
-			UnresolvedImageIdentity: unresolvedImageIdentity,
-			Command:                 parseTaskCommand(taskRun.Command),
-			Env:                     mergedEnv,
-			WorkDir:                 atomSpec.WorkDir,
-			Mounts:                  atomSpec.Mounts,
-			ResolvedVolumeMounts:    atomSpec.ResolvedVolumeMounts,
-			Kubernetes:              atomSpec.Kubernetes,
-			PredecessorHashes:       inputs.Hashes,
-			PredecessorOutputs:      inputs.OutputsByName,
-			RunParams:               runParams,
-			Partition:               taskRun.PartitionValue,
-			PartitionFingerprint:    taskRun.PartitionFingerprint,
+			JobAlias:                  cacheJobAlias,
+			Namespace:                 runNamespace,
+			TaskName:                  taskName,
+			Image:                     taskRun.Image,
+			ResolvedImageDigest:       resolvedImageDigest,
+			UnresolvedImageIdentity:   unresolvedImageIdentity,
+			Command:                   parseTaskCommand(taskRun.Command),
+			Env:                       mergedEnv,
+			WorkDir:                   atomSpec.WorkDir,
+			Mounts:                    atomSpec.Mounts,
+			ResolvedVolumeMounts:      atomSpec.ResolvedVolumeMounts,
+			Kubernetes:                atomSpec.Kubernetes,
+			KubernetesTarget:          kubeTarget,
+			KubernetesSecretNamespace: kubeSecretNamespace,
+			PredecessorHashes:         inputs.Hashes,
+			PredecessorOutputs:        inputs.OutputsByName,
+			RunParams:                 runParams,
+			Partition:                 taskRun.PartitionValue,
+			PartitionFingerprint:      taskRun.PartitionFingerprint,
 			// All three partition fields, exactly as the local lane sets them
 			// (internal/job/job.go). Dropping the attributes here would let the
 			// two lanes disagree about one instance's cache identity, so the same
@@ -451,7 +471,7 @@ func (e *runtimeExecutor) Execute(ctx context.Context, taskRun *models.TaskRun) 
 			// Recheck with a fresh scope right before the lookup: input
 			// acquisition and digest resolution above can block, and a rule
 			// revoked meanwhile must not let the cached result through.
-			if e.secretsDenied(ctx, sink, taskRun, runNamespace, atomSpec, timeouts) {
+			if e.secretsDenied(ctx, sink, taskRun, runNamespace, kubeMapping, atomSpec, timeouts) {
 				return
 			}
 			entry, found, getErr := cacheStore.Get(cacheHash)
@@ -560,7 +580,7 @@ func (e *runtimeExecutor) Execute(ctx context.Context, taskRun *models.TaskRun) 
 
 	var lastErr error
 	for attempt := currentAttempt; attempt <= maxAttempts; attempt++ {
-		emitted, execErr := e.executeTask(ctx, taskRun, sink, atomSpec, runParams, outputEnv, resolveJobAlias(), runNamespace, descriptor, fanOut, resolvedImageDigest, timeouts, attempt >= maxAttempts)
+		emitted, execErr := e.executeTask(ctx, taskRun, sink, atomSpec, runParams, outputEnv, resolveJobAlias(), runNamespace, kubeMapping, descriptor, fanOut, resolvedImageDigest, timeouts, attempt >= maxAttempts)
 		// executeTask performs log parsing, schema checks, and data assertions
 		// after the atom exits. Any of those can return an ordinary error after
 		// the absolute run budget expired. Classify at this central seam before
@@ -673,8 +693,8 @@ func (e *runtimeExecutor) Execute(ctx context.Context, taskRun *models.TaskRun) 
 // in spec with a scope read from this node's policy now, and reports a denial
 // as a terminal input failure (true). It runs before the cache lookup, so a
 // reference the namespace no longer allows is never served from cache.
-func (e *runtimeExecutor) secretsDenied(ctx context.Context, sink CompletionSink, taskRun *models.TaskRun, runNamespace string, spec container.Spec, timeouts executionTimeouts) bool {
-	err := jobdefruntime.CheckContainerSpecSecretsAllowed(secret.ForNamespace(e.secretResolver, runNamespace), spec)
+func (e *runtimeExecutor) secretsDenied(ctx context.Context, sink CompletionSink, taskRun *models.TaskRun, runNamespace string, kubeMapping atom.KubeTarget, spec container.Spec, timeouts executionTimeouts) bool {
+	err := jobdefruntime.CheckContainerSpecSecretsAllowed(secret.ForNamespaceTarget(e.secretResolver, runNamespace, kubeMapping.Namespace), spec)
 	if err == nil {
 		return false
 	}
@@ -906,7 +926,7 @@ func buildRunParamEnv(runID uuid.UUID, jobAlias string, params map[string]string
 // failure is returned to the retry loop and NOTHING is persisted, so the row
 // stays this worker's to reset. A successful result is always reported: success
 // ends the task whatever the attempt budget said.
-func (e *runtimeExecutor) executeTask(ctx context.Context, taskRun *models.TaskRun, sink CompletionSink, atomSpec container.Spec, runParams map[string]string, outputEnv map[string]string, jobAlias, runNamespace string, descriptor *models.TaskExecutionDescriptor, fanOut *jobdefschema.FanOut, resolvedImageDigest string, timeouts executionTimeouts, finalAttempt bool) ([]pkgtask.Partition, error) {
+func (e *runtimeExecutor) executeTask(ctx context.Context, taskRun *models.TaskRun, sink CompletionSink, atomSpec container.Spec, runParams map[string]string, outputEnv map[string]string, jobAlias, runNamespace string, kubeMapping atom.KubeTarget, descriptor *models.TaskExecutionDescriptor, fanOut *jobdefschema.FanOut, resolvedImageDigest string, timeouts executionTimeouts, finalAttempt bool) ([]pkgtask.Partition, error) {
 	taskCtx, cancel := timeouts.attemptContext(ctx, time.Now())
 	defer cancel()
 	if err := context.Cause(taskCtx); err != nil {
@@ -937,12 +957,13 @@ func (e *runtimeExecutor) executeTask(ctx context.Context, taskRun *models.TaskR
 	// Resolution and replay identity verification each read the namespace's
 	// secret rules afresh: a policy reload since the before-cache check — or
 	// during the resolution itself — applies to the next operation.
-	spec, secretIdentities, err := jobdefruntime.ResolveContainerSpecSecretsWithIdentities(taskCtx, secret.ForNamespace(e.secretResolver, runNamespace).Resolver(), atomSpec)
+	secretScope := secret.ForNamespaceTarget(e.secretResolver, runNamespace, kubeMapping.Namespace)
+	spec, secretIdentities, err := jobdefruntime.ResolveContainerSpecSecretsWithIdentities(taskCtx, secretScope.Resolver(), atomSpec)
 	if err != nil {
 		return nil, err
 	}
 	if descriptor != nil && taskRun.Quarantine {
-		if err := replay.VerifyReplaySecretIdentities(taskCtx, secret.ForNamespace(e.secretResolver, runNamespace).Resolver(), descriptor.SecretRefs, secretIdentities, spec.Env); err != nil {
+		if err := replay.VerifyReplaySecretIdentities(taskCtx, secretScope.Resolver(), descriptor.SecretRefs, secretIdentities, spec.Env); err != nil {
 			return nil, err
 		}
 	}
@@ -991,11 +1012,13 @@ func (e *runtimeExecutor) executeTask(ctx context.Context, taskRun *models.TaskR
 		return nil, err
 	}
 
+	podTarget := jobdefruntime.PodTarget(taskRun.Engine, kubeMapping)
 	a, err := engine.Create(&atom.EngineCreateRequest{
 		Name:    atomName,
 		Image:   imagecheck.PinReference(taskRun.Image, resolvedImageDigest),
 		Command: command,
 		Spec:    spec,
+		Target:  podTarget,
 	})
 	if err != nil {
 		return nil, err
@@ -1007,7 +1030,7 @@ func (e *runtimeExecutor) executeTask(ctx context.Context, taskRun *models.TaskR
 		// before abandoning the claim or reporting a permanent error.
 		log.Info("worker task start not persisted; stopping container",
 			"run_id", taskRun.JobRunID, "task_id", taskRun.TaskID, "task_run_id", taskRun.ID, "atom_id", a.ID(), "error", err)
-		if stopErr := engine.Stop(&atom.EngineStopRequest{ID: a.ID(), Force: true}); stopErr != nil {
+		if stopErr := engine.Stop(&atom.EngineStopRequest{ID: a.ID(), Namespace: podTarget.Namespace, Force: true}); stopErr != nil {
 			log.Warn("failed to stop container after task start persistence failed",
 				"run_id", taskRun.JobRunID, "task_id", taskRun.TaskID, "atom_id", a.ID(), "error", stopErr)
 		}
@@ -1027,7 +1050,7 @@ func (e *runtimeExecutor) executeTask(ctx context.Context, taskRun *models.TaskR
 		secretLogResult    <-chan run.SecretLogCaptureResult
 	)
 	if secretBearing {
-		if stream, streamErr := engine.Logs(&atom.EngineLogsRequest{ID: a.ID()}); streamErr != nil {
+		if stream, streamErr := engine.Logs(&atom.EngineLogsRequest{ID: a.ID(), Namespace: podTarget.Namespace}); streamErr != nil {
 			log.Warn("failed to open scrubbed live task log; will retry after completion",
 				"task_id", taskRun.TaskID, "atom_id", a.ID(), "error", streamErr)
 		} else {

@@ -3,6 +3,7 @@ package receipt
 import (
 	"encoding/json"
 	"fmt"
+	"github.com/caesium-cloud/caesium/cmd/cliutil"
 	"net/http"
 	"os"
 	"strings"
@@ -35,7 +36,7 @@ var getCmd = &cobra.Command{
 		server := strings.TrimSuffix(getServer, "/")
 		url := fmt.Sprintf("%s/v1/jobs/%s/runs/%s/receipt", server, getJobID, getRunID)
 
-		body, status, readErr := clihttp.Exchange(cmd.Context(), http.DefaultClient, http.MethodGet, url, nil, make(http.Header))
+		body, status, readErr := clihttp.Exchange(cmd.Context(), http.DefaultClient, http.MethodGet, url, nil, getHeaders(cmd))
 		if err := clihttp.ResponseError("receipt get", status, body, readErr); err != nil {
 			return err
 		}
@@ -109,10 +110,20 @@ func writeOut(cmd *cobra.Command, data []byte) error {
 	return nil
 }
 
+var getAPIKey string
+
+// getHeaders returns request headers carrying the resolved credential.
+func getHeaders(cmd *cobra.Command) http.Header {
+	headers := make(http.Header)
+	cliutil.SetAuthorization(cmd, headers, getAPIKey)
+	return headers
+}
+
 func init() {
 	getCmd.Flags().StringVar(&getJobID, "job-id", "", "Job ID (required)")
 	getCmd.Flags().StringVar(&getRunID, "run-id", "", "Run ID (required)")
 	getCmd.Flags().StringVar(&getServer, "server", "http://localhost:8080", "Caesium server base URL")
+	getCmd.Flags().StringVar(&getAPIKey, "api-key", "", cliutil.APIKeyFlagUsage)
 	getCmd.Flags().StringVarP(&getOutput, "output", "o", "", "Write the receipt to this file (default: stdout)")
 	Cmd.AddCommand(getCmd)
 }

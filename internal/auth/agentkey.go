@@ -48,6 +48,9 @@ func (s *Service) MintAgentSessionKey(incidentID uuid.UUID, allowlist []string, 
 		Agent: &models.AgentClaim{
 			IncidentID: incidentID,
 			Jobs:       normalizeAllowlist(allowlist),
+			// Every session minted now reads only its incident's namespace
+			// (identity-and-access A8).
+			NamespaceConfined: true,
 		},
 	}
 

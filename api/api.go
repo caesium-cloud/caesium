@@ -244,6 +244,7 @@ func registerSSORoutes(e *echo.Echo, vars env.Environment, authSvc *auth.Service
 	})
 	e.GET("/auth/whoami", controller.Whoami, authMiddleware)
 	e.POST("/auth/logout", controller.Logout, authMiddleware)
+	registerCLILoginRoutes(e, vars, controller, authSvc, limiter, authMiddleware, providers)
 	if vars.AuthOIDCEnabled && providers.OIDC != nil {
 		e.GET("/auth/sso/oidc/login", controller.OIDCLogin)
 		e.GET("/auth/sso/oidc/callback", controller.OIDCCallback)
@@ -262,7 +263,57 @@ func registerSSORoutes(e *echo.Echo, vars env.Environment, authSvc *auth.Service
 	}
 }
 
+// registerCLILoginRoutes mounts `caesium login`'s routes (identity-and-access
+// E5, design §13.1). start and exchange are public and go through the IP
+// limiter (a limited address is refused before any work; an exchange refusal
+// and a start over the pending cap count as failures); finish and authorize
+// are identity routes behind the auth middleware, which requires the session
+// cookie's CSRF token on authorize.
+func registerCLILoginRoutes(e *echo.Echo, vars env.Environment, controller *authctrl.SSOController, authSvc *auth.Service, limiter *auth.RateLimiter, authMiddleware echo.MiddlewareFunc, providers SSOProviders) {
+	if authSvc == nil {
+		return
+	}
+	controller.SetKeyService(authSvc)
+	var methods []authctrl.CLISignInMethod
+	if vars.AuthOIDCEnabled && providers.OIDC != nil {
+		methods = append(methods, authctrl.CLISignInMethod{Label: "Sign in with OIDC", LoginURL: "/auth/sso/oidc/login"})
+	}
+	if vars.AuthSAMLEnabled && providers.SAML != nil {
+		methods = append(methods, authctrl.CLISignInMethod{Label: "Sign in with SAML", LoginURL: "/auth/sso/saml/login"})
+	}
+	if vars.AuthLDAPEnabled && providers.LDAP != nil {
+		methods = append(methods, authctrl.CLISignInMethod{Label: "Sign in with LDAP"})
+	}
+	controller.SetCLISignInMethods(methods)
+
+	startMiddleware := []echo.MiddlewareFunc(nil)
+	exchangeMiddleware := []echo.MiddlewareFunc(nil)
+	if limiter != nil {
+		startMiddleware = append(startMiddleware, ipRateLimit(limiter, cliStartRefused))
+		exchangeMiddleware = append(exchangeMiddleware, credentialLoginRateLimit(limiter))
+	}
+	e.GET("/auth/cli/start", controller.CLIStart, startMiddleware...)
+	e.GET("/auth/cli/finish", controller.CLIFinish, controller.CLISignInFallback, authMiddleware)
+	e.POST("/auth/cli/authorize", controller.CLIAuthorize, authMiddleware)
+	e.POST("/auth/cli/exchange", controller.CLIExchange, exchangeMiddleware...)
+}
+
+// cliStartRefused counts a start refused over the per-IP pending cap or for
+// reusing a state as an authentication failure.
+func cliStartRefused(err error, status int) bool {
+	if he, ok := errors.AsType[*echo.HTTPError](err); ok {
+		status = he.Code
+	}
+	return status == http.StatusTooManyRequests || status == http.StatusConflict
+}
+
 func credentialLoginRateLimit(limiter *auth.RateLimiter) echo.MiddlewareFunc {
+	return ipRateLimit(limiter, credentialLoginFailed)
+}
+
+// ipRateLimit refuses an address the auth-failure limiter has limited, and
+// records a failure for every response failed reports.
+func ipRateLimit(limiter *auth.RateLimiter, failed func(err error, status int) bool) echo.MiddlewareFunc {
 	return func(next echo.HandlerFunc) echo.HandlerFunc {
 		return func(c *echo.Context) error {
 			ip := c.RealIP()
@@ -277,7 +328,7 @@ func credentialLoginRateLimit(limiter *auth.RateLimiter) echo.MiddlewareFunc {
 			if resp, unwrapErr := echo.UnwrapResponse(c.Response()); unwrapErr == nil {
 				status = resp.Status
 			}
-			if credentialLoginFailed(err, status) && limiter.RecordFailure(ip) {
+			if failed(err, status) && limiter.RecordFailure(ip) {
 				retryAfter := limiter.RetryAfter(ip)
 				c.Response().Header().Set("Retry-After", fmt.Sprintf("%d", retryAfter))
 				return echo.NewHTTPError(http.StatusTooManyRequests, "too many failed authentication attempts")

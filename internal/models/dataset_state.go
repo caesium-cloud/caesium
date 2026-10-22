@@ -64,6 +64,15 @@ type DatasetState struct {
 	Status string `gorm:"type:text;not null;default:'unknown'" json:"status"`
 	Reason string `gorm:"type:text;not null;default:''" json:"reason,omitempty"`
 
+	// ReasonNamespace is the tenancy namespace of the producer whose
+	// evaluation wrote Reason (identity-and-access B6). The reason is the
+	// evaluator's elaboration for ONE producer and can name that producer's
+	// inputs, so a namespace-confined reader sees it only when this namespace
+	// is one it may read. NULL (rows written before B6, or a producer that
+	// could not be resolved) hides the reason from every confined reader. Not
+	// serialised.
+	ReasonNamespace *string `gorm:"type:text" json:"-"`
+
 	// LastRunID is the run that most recently advanced or verified this dataset.
 	// It is a soft reference (no FK constraint) so run pruning never cascades
 	// into dataset state.
@@ -76,6 +85,16 @@ type DatasetState struct {
 	// consumed dataset name. See internal/freshness.Capturer.consumedForRun for
 	// the three sources of that start-time view.
 	ConsumedWatermarks datatypes.JSON `gorm:"type:json" json:"consumed_watermarks,omitempty"`
+
+	// ConsumedRunID is the run whose start-time view ConsumedWatermarks is
+	// (identity-and-access B6). It usually equals LastRunID, but an accepted
+	// observation with no input snapshot (a manual advance, or a run of a
+	// producer that no longer declares inputs) moves LastRunID and leaves the
+	// snapshot in place, so the snapshot's owner is recorded on its own: a
+	// namespace-confined reader sees the snapshot only when this run is
+	// persisted in a namespace it may read. NULL (written before B6, or by a
+	// run-less writer) hides it from every confined reader. Not serialised.
+	ConsumedRunID *uuid.UUID `gorm:"type:uuid" json:"-"`
 
 	CreatedAt time.Time `gorm:"not null" json:"created_at"`
 	UpdatedAt time.Time `gorm:"not null" json:"updated_at"`

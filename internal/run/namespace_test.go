@@ -69,6 +69,22 @@ func TestStartNamespaceGuardRunsInsideAdmission(t *testing.T) {
 		require.Equal(t, StartOutcomeCreated, allowed.Outcome, job.Alias)
 		require.Equal(t, "finance", allowed.Run.Namespace, job.Alias)
 	}
+
+	// StartWithContext (the freshness evaluator's derived-run path, B6)
+	// honours the guard the same way.
+	moved := &models.Job{ID: uuid.New(), Alias: "guard-derived", Namespace: "finance"}
+	require.NoError(t, db.Create(moved).Error)
+	var seen []string
+	_, err := store.StartWithContext(t.Context(), moved.ID, nil, WithStartNamespaceGuard(func(namespace string) error {
+		seen = append(seen, namespace)
+		return refused
+	}))
+	require.ErrorIs(t, err, refused)
+	require.Equal(t, []string{"finance"}, seen)
+	require.Zero(t, countJobRuns(t, db, moved.ID), "a refused derived start writes no run")
+	started, err := store.StartWithContext(t.Context(), moved.ID, nil, WithStartNamespaceGuard(func(string) error { return nil }))
+	require.NoError(t, err)
+	require.Equal(t, "finance", started.Namespace)
 }
 
 // TestConcurrencyAdmissionStampsNamespace: a job with a concurrency policy is

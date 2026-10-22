@@ -253,6 +253,25 @@ type taskStartedAttempt struct {
 	ClaimAttempt int    `json:"claim_attempt"`
 }
 
+// runtimePodName is the pod name a durable Kubernetes runtime id names. New
+// runtime ids are namespace-qualified, "<namespace>/<pod>"
+// (identity-and-access C1); an id an earlier release recorded is the bare pod
+// name. Recorder events carry only the pod name (a task pod does not know its
+// namespace), so runtime ids are matched to them by pod name; pod names are
+// unique per run (they carry a UUID).
+func runtimePodName(runtimeID string) (string, error) {
+	namespace, name, qualified := strings.Cut(runtimeID, "/")
+	if !qualified {
+		return runtimeID, nil
+	}
+	if namespace == "" || name == "" || strings.Contains(name, "/") {
+		return "", fmt.Errorf("malformed runtime id %q", runtimeID)
+	}
+	return name, nil
+}
+
+// parseTaskStartedAttempts indexes a task's persisted task_started attempts
+// by pod name (runtimePodName).
 func parseTaskStartedAttempts(runID, taskID, durableID string, maxAttempt int, events []eventTuple) (map[string]taskStartedAttempt, error) {
 	byRuntime := map[string]taskStartedAttempt{}
 	for _, event := range events {
@@ -280,17 +299,21 @@ func parseTaskStartedAttempts(runID, taskID, durableID string, maxAttempt int, e
 		if started.Attempt < 1 || started.ClaimAttempt < 1 {
 			return nil, fmt.Errorf("task_started sequence %d lacks positive attempt/claim identity", event.Sequence)
 		}
+		pod, err := runtimePodName(started.RuntimeID)
+		if err != nil {
+			return nil, fmt.Errorf("task_started sequence %d: %w", event.Sequence, err)
+		}
 		prefix := fmt.Sprintf("%s-%s-attempt%d-", taskID, runID, started.ClaimAttempt)
-		if !strings.HasPrefix(started.RuntimeID, prefix) {
+		if !strings.HasPrefix(pod, prefix) {
 			return nil, fmt.Errorf("task_started sequence %d runtime %s does not match task/run/claim", event.Sequence, started.RuntimeID)
 		}
-		if _, err := uuid.Parse(strings.TrimPrefix(started.RuntimeID, prefix)); err != nil {
+		if _, err := uuid.Parse(strings.TrimPrefix(pod, prefix)); err != nil {
 			return nil, fmt.Errorf("task_started sequence %d runtime %s has no pod UUID: %w", event.Sequence, started.RuntimeID, err)
 		}
-		if _, exists := byRuntime[started.RuntimeID]; exists {
+		if _, exists := byRuntime[pod]; exists {
 			return nil, fmt.Errorf("runtime %s has more than one persisted task_started event", started.RuntimeID)
 		}
-		byRuntime[started.RuntimeID] = started
+		byRuntime[pod] = started
 	}
 	if len(byRuntime) == 0 {
 		return nil, fmt.Errorf("run %s task %s has no persisted task_started runtime identity", runID, taskID)
@@ -326,7 +349,11 @@ func verifySeedHeldAttempt(proof clusterTaskProof, rawEvents []recorder.Event, t
 	if err != nil {
 		return err
 	}
-	started, ok := startedByRuntime[proof.RuntimeID]
+	pod, err := runtimePodName(proof.RuntimeID)
+	if err != nil {
+		return err
+	}
+	started, ok := startedByRuntime[pod]
 	if !ok || started.Attempt != proof.Attempt || started.ClaimAttempt != proof.ClaimAttempt {
 		return fmt.Errorf("seed held task %s current runtime %s has no matching persisted task_started attempt/claim", proof.ID, proof.RuntimeID)
 	}
@@ -339,7 +366,7 @@ func verifySeedHeldAttempt(proof clusterTaskProof, rawEvents []recorder.Event, t
 		if err != nil {
 			return err
 		}
-		if raw.PodName == proof.RuntimeID {
+		if raw.PodName == pod {
 			if event.Kind == "complete" {
 				return fmt.Errorf("seed held task %s current runtime already emitted a completion", proof.ID)
 			}
@@ -366,6 +393,10 @@ func verifyQueuedHeldAttempt(run apiRun, wantRunID, wantJobID, wantToken string,
 	if err := verifySeedHeldAttempt(proof, rawEvents, taskEvents); err != nil {
 		return nil, err
 	}
+	pod, err := runtimePodName(proof.RuntimeID)
+	if err != nil {
+		return nil, err
+	}
 	starts := map[string]bool{}
 	for _, event := range rawEvents {
 		if event.RunID != run.ID || event.Step != "hold" || event.Kind != "start" {
@@ -375,7 +406,7 @@ func verifyQueuedHeldAttempt(run apiRun, wantRunID, wantJobID, wantToken string,
 		if err != nil {
 			return nil, err
 		}
-		if raw.PodName == proof.RuntimeID {
+		if raw.PodName == pod {
 			starts[raw.Nonce] = true
 		}
 	}
@@ -449,12 +480,16 @@ func reconcileRetainedAttemptEffects(seed, terminal clusterTaskProof, seedStarts
 			return fmt.Errorf("run %s durable attempt %d has no task_started/pod/raw-start witness", seed.RunID, attempt)
 		}
 	}
+	terminalPod, err := runtimePodName(terminal.RuntimeID)
+	if err != nil {
+		return err
+	}
 	final := byNonce[terminal.RecorderNonce]
 	if final == nil || !final.started || !final.complete || terminal.RecorderPod == "" ||
-		final.pod != terminal.RecorderPod || final.pod != terminal.RuntimeID {
+		final.pod != terminal.RecorderPod || final.pod != terminalPod {
 		return fmt.Errorf("run %s terminal output nonce/pod does not match raw start, completion, and durable runtime_id", seed.RunID)
 	}
-	started := startedByRuntime[terminal.RuntimeID]
+	started := startedByRuntime[terminalPod]
 	if started.Attempt != terminal.Attempt || started.ClaimAttempt != terminal.ClaimAttempt ||
 		started.DurableID != terminal.ID || final.attempt != terminal.Attempt {
 		return fmt.Errorf("run %s terminal runtime does not match durable attempt/claim identity", seed.RunID)
@@ -463,7 +498,8 @@ func reconcileRetainedAttemptEffects(seed, terminal clusterTaskProof, seedStarts
 }
 
 func rawCompletionMatchesTask(runID string, proof clusterTaskProof, events []recorder.Event) bool {
-	if proof.RecorderNonce == "" || proof.RecorderPod == "" || proof.RuntimeID != proof.RecorderPod {
+	pod, err := runtimePodName(proof.RuntimeID)
+	if err != nil || proof.RecorderNonce == "" || proof.RecorderPod == "" || pod != proof.RecorderPod {
 		return false
 	}
 	started, completed := false, false
@@ -472,7 +508,7 @@ func rawCompletionMatchesTask(runID string, proof clusterTaskProof, events []rec
 			continue
 		}
 		raw, err := parseRawAttemptEffect(e)
-		if err != nil || raw.PodName != proof.RuntimeID {
+		if err != nil || raw.PodName != pod {
 			return false
 		}
 		started = started || e.Kind == "start"

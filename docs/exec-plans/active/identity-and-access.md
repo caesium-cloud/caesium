@@ -817,7 +817,7 @@ translated into cluster-wide bindings and behaviour is unchanged.
       Files: new `test/auth_namespace_matrix_test.go`, `test/auth_scoped_test.go`
       (shared helpers).
       Depends on: A3 + A5 + B2 + B4 + B5 + B6 + D4 + H-1.
-- [ ] A8. Confine agent-session allow-lists to the incident's namespace:
+- [x] A8. Confine agent-session allow-lists to the incident's namespace (W6-δ: also why baselines, a moved own job's DAG and remediation, executor refusals incl. git-synced patches, legacy-session content withheld from confined readers):
       `FreezeAllowlist` today walks the global lineage graph, so a frozen job list can
       name jobs in other namespaces. At freeze, keep only jobs in the incident's
       namespace and record foreign downstream jobs as an `external` count in the
@@ -970,7 +970,7 @@ middleware relies on.
       `api/rest/controller/stats/`, `api/rest/controller/event/`,
       `api/rest/service/stats/`, `api/rest/service/event/`.
       Depends on: A3 + B1.
-- [ ] B5. Aggregate redaction: `/v1/lineage/impact` and `/v1/contracts/graph` compute
+- [x] B5. Aggregate redaction: `/v1/lineage/impact` and `/v1/contracts/graph` compute
       over the whole graph then redact at the boundary with a wire-level contract — a
       foreign node becomes `{id: <opaque per-response hash>, kind: "external"}` with
       alias, namespace, producing step and provenance removed; an edge touching a
@@ -984,7 +984,15 @@ middleware relies on.
       `api/rest/controller/contract/`, `internal/lineage/impact.go`,
       `internal/contract/graph.go`, new `internal/authz/redact.go`.
       Depends on: A3.
-- [ ] B6. Dataset tenancy via declared producers: a dataset's namespaces are those of
+      (W6-β: shipped. Ownership rides the derived row (job and persisted run
+      namespaces); impact placeholders keep `depth`; collapsed topology kept;
+      `?dataset=` filters after redaction; a consumer never grants an impact root.)
+- [x] B6. (W6-γ: collections SQL-filtered by producer namespace; reads shaped by
+      owner, incl. the state reason via a new `reason_namespace`; advance and
+      release re-check producers in their transaction under the producers'
+      alias advisory locks; uniform audited 403 for foreign and missing
+      datasets; new derivation columns not serialised.)
+      Dataset tenancy via declared producers: a dataset's namespaces are those of
       the jobs referenced by `DatasetDeclaration.JobID` (a `DatasetDerivation` is a
       scheduling decision, frequently without a run, and is not an ownership record);
       `GET /v1/datasets` and `/datasets/holds` include a dataset when the caller holds
@@ -1003,7 +1011,8 @@ middleware relies on.
       `internal/models/dataset_declaration.go`, `internal/models/dataset_derivation.go`,
       `docs/identity-and-access.md`.
       Depends on: A3 + B1 + N-1.
-- [ ] B7. Namespace-aware DAG snapshots: `dag_snapshots` (written by the importer,
+- [x] B7. (W6-α: `dag_snapshots.namespace` is stamped on every write and deduped with the hash, so a move writes a fresh snapshot; blame, topology and topology history are live for confined viewers over the snapshots they may read, legacy snapshots unconfined-only; every writer refuses a non-canonical alias, git sync skips such a manifest per manifest, and `PruneMissing` matches aliases exactly.)
+      Namespace-aware DAG snapshots: `dag_snapshots` (written by the importer,
       read by `GET /v1/jobs/:id/blame`, `/topology` and `/topology/history`) carries no
       namespace, and an apply that only moves a job writes no new snapshot because
       snapshots dedupe by content hash. Record the job's namespace on every snapshot
@@ -1058,7 +1067,7 @@ policy, the resolved target travels with the dispatch request so workers never r
 the policy file, Helm renders RBAC for each mapped namespace, and a scoped secret
 resolver refuses references outside the namespace's allow-list at lint and at run time.
 
-- [ ] C1. Kubernetes engine resolves the target per request: `KubeTarget{Namespace,
+- [x] C1. Kubernetes engine resolves the target per request: `KubeTarget{Namespace,
       ServiceAccountName}` on `EngineCreateRequest`, and `Namespace` on **every** other
       request type (`EngineGetRequest`, `EngineWaitRequest`, `EngineStopRequest`,
       `EngineLogsRequest`, `EngineListRequest`; Docker/Podman ignore it); the engine
@@ -1078,6 +1087,12 @@ resolver refuses references outside the namespace's allow-list at lint and at ru
       `internal/cache/hash.go`, `internal/run/store.go` (descriptor capture, runtime id),
       `internal/job/job.go`, `internal/worker/runtime_executor.go` (call sites).
       Depends on: B1 + A4.
+      (W6-ε: resolved once per execution before the cache identity and held
+      across retries/fan-out; every new pod id is `<ns>/<pod>`; Docker steps
+      with relative `secret://k8s` refs key on the mapped secret namespace; a
+      replay re-executes a step whose recorded mapping moved; undeclared
+      namespace on a file-backed node fails closed as `config`; no production
+      reaper exists, so List + `KubernetesNamespaces()` ship for one.)
 - [ ] C2. Carry an isolation context through dispatch, fail closed on old workers:
       the owner resolves `IsolationContext{KubeTarget, SecretRules, PolicyRevision}`
       from the run's namespace when building `DispatchRequest`; it travels through
@@ -1147,13 +1162,16 @@ resolver refuses references outside the namespace's allow-list at lint and at ru
       until C2; `why` surfacing of the class is left to C5; client-side runs
       never wait for a server policy; replays check before reusing a step. Live: `TestAuthSecretScope`,
       `TestAuthSecretScopeWebhook`, `TestDevOnceSecretWithAPolicyFileConfigured`.)
-- [ ] C5. Secret-scoping end to end: with the H-1 fixture's `marketing` allow-list, a
+- [x] C5. Secret-scoping end to end: with the H-1 fixture's `marketing` allow-list, a
       manifest referencing `env/FINANCE_*` is rejected by `caesium job lint` (server)
       naming the redacted reference; applied with lint bypassed it fails the task with
       the `config` class visible in `caesium why --json`; the allowed reference resolves
       and the task succeeds.
       Files: new `test/secret_scope_test.go`, `test/testdata/policy/two-namespaces.yaml`.
       Depends on: C4 + H-1.
+      (W6-ε: `TestSecretScopeMarketingAllowList` on the no-auth lane and the
+      local coverage journey; the fixture is unchanged, the servers carry
+      `MARKETING_IT_TOKEN`; `caesium why` gained `failureClass`.)
 
 ### Stream D — Run quota and fairness; namespaced shared objects
 
@@ -1336,7 +1354,7 @@ server-brokered `caesium login` flow that works for every provider.
       bearer revoke exactly that key (tested with bearer + cookie: only the bearer
       dies) and wire the key service into `SSOController`; until then logout does
       not revoke a user-bound key.)
-- [ ] E5. `caesium login`, `logout`, `whoami`: server routes `GET /auth/cli/start`
+- [x] E5. `caesium login`, `logout`, `whoami`: server routes `GET /auth/cli/start`
       (public; stores a login transaction — `state`, loopback port, PKCE-style
       `challenge`, hostname hint, 5m expiry), `GET /auth/cli/finish` (identity class;
       **mints nothing** — renders a session-bound confirmation page),
@@ -1369,6 +1387,12 @@ server-brokered `caesium login` flow that works for every provider.
       `cmd/execute.go`, `cmd/why/why.go`, `cmd/blame/blame.go`, `cmd/run/diff.go`,
       `cmd/auth/auth.go`, new `test/cli_login_test.go`.
       Depends on: E4.
+      (W6-ζ: the key is minted at `exchange`, not `authorize` — authorize records the
+      user, its disable generation and a code hash; exchange mints through the shared
+      `mintUserBoundKeyTx` core fenced on that generation, so no key material rests on
+      the server (§13.1 step 3 amended, pending sign-off). One `cmd/login` package;
+      backfill, cache, receipt get and verify now resolve credentials too; the
+      resolver finds the stored login by the command's own `--server`.)
 
 ### Stream F — Console: grants, switcher, chips, quota label, Access page
 

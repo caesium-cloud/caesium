@@ -60,10 +60,11 @@ func TestResolvePlaybookRefusesProfilesOutsideTheIncidentNamespace(t *testing.T)
 	seedNamespacedProfile(t, db, "shared-profile", models.ClusterNamespace, ActionTypePauseJob)
 
 	inc, _, _ := seedJobIncident(t, db, store, "gate", "")
-	// The incident's persisted namespace is marketing; its job may have moved
-	// since (here: it now lives in finance and names finance's profile).
+	// The incident and its job live in marketing; the job may still name
+	// another namespace's profile (applied before lint refused it). A job that
+	// moved out is covered by TestResolvePlaybookMovedJobIgnoresRemediation.
 	require.NoError(t, db.Model(&models.Incident{}).Where("id = ?", inc.ID).Update("namespace", "marketing").Error)
-	require.NoError(t, db.Model(&models.Job{}).Where("id = ?", inc.JobID).Update("namespace", "finance").Error)
+	require.NoError(t, db.Model(&models.Job{}).Where("id = ?", inc.JobID).Update("namespace", "marketing").Error)
 
 	for _, tc := range []struct {
 		profile string
@@ -96,6 +97,7 @@ func TestResolvePlaybookRefusesADefaultProfileOutsideTheIncidentNamespace(t *tes
 
 	inc, _, _ := seedJobIncident(t, db, store, "gate", "")
 	require.NoError(t, db.Model(&models.Incident{}).Where("id = ?", inc.ID).Update("namespace", "marketing").Error)
+	require.NoError(t, db.Model(&models.Job{}).Where("id = ?", inc.JobID).Update("namespace", "marketing").Error)
 
 	// No remediation block: the deployment default applies, but only when it
 	// is visible from the incident. A namespace that created the configured
@@ -138,6 +140,7 @@ func TestProfileResolutionIgnoresNamespacesWithoutAPolicyFile(t *testing.T) {
 
 	inc, _, _ := seedJobIncident(t, db, store, "gate", "")
 	require.NoError(t, db.Model(&models.Incident{}).Where("id = ?", inc.ID).Update("namespace", "marketing").Error)
+	require.NoError(t, db.Model(&models.Job{}).Where("id = ?", inc.JobID).Update("namespace", "marketing").Error)
 
 	require.Equal(t, decisionExecute, ResolvePlaybook(context.Background(), db, inc.ID, "fin-profile").decide(ActionTypePauseJob, TierGated),
 		"the deployment default resolves by name")
@@ -157,6 +160,7 @@ func TestResolveProfileRefusesProfilesOutsideTheIncidentNamespace(t *testing.T) 
 
 	inc, _, _ := seedJobIncident(t, db, store, "gate", "")
 	require.NoError(t, db.Model(&models.Incident{}).Where("id = ?", inc.ID).Update("namespace", "marketing").Error)
+	require.NoError(t, db.Model(&models.Job{}).Where("id = ?", inc.JobID).Update("namespace", "marketing").Error)
 
 	setJobProfile(t, db, inc.JobID, "fin-profile")
 	require.Nil(t, ResolveProfile(context.Background(), db, inc.ID, ""), "a foreign job-declared profile is not used")

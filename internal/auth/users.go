@@ -682,8 +682,21 @@ type RevokedCredentials struct {
 // revokeUserCredentialsTx revokes every unrevoked session and user-bound key
 // of a user on a caller-supplied handle, so the user lifecycle (disable, the
 // enable sweep, log out everywhere, a definitive group-refresh denial) kills
-// both credential types in one transaction.
+// both credential types in one transaction. It first voids the user's
+// confirmed but unredeemed `caesium login` codes (E5), whose exchange would
+// otherwise mint a fresh key afterwards; doing that before revoking the keys
+// means a concurrent exchange either commits first (and its key is then
+// revoked here) or finds its code void, and a confirmation either commits
+// first (and is voided here) or finds its session revoked.
 func revokeUserCredentialsTx(tx *gorm.DB, userID uuid.UUID, now time.Time) (RevokedCredentials, error) {
+	// The user row lock serialises this with a CLI login's confirmation and
+	// exchange, which take it first too (cli_login.go).
+	if err := lockUserRowTx(tx, userID); err != nil {
+		return RevokedCredentials{}, err
+	}
+	if err := voidUserCLILoginsTx(tx, userID, now); err != nil {
+		return RevokedCredentials{}, err
+	}
 	sessions, err := revokeUserSessionsTx(tx, userID, now)
 	if err != nil {
 		return RevokedCredentials{}, err

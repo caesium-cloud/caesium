@@ -296,11 +296,13 @@ class BackendGuards(unittest.TestCase):
         driver.inputs = {'kind_image_id': BUILDER}
         node_name, node_id = 'owned-worker', 'c' * 64
         driver.nodes = {node_name: {'id': node_id, 'role': 'worker', 'image_digests': []}}
-        task = {'runtime_id': 'task-run-runtime', 'task_id': 'task'}
+        pod_name = 'task-run-runtime'
+        # Kubernetes runtime ids are "<namespace>/<pod>" (identity-and-access C1).
+        task = {'runtime_id': 'owned/' + pod_name, 'task_id': 'task'}
         alias = 'docker.io/library/import-2026-10-04@sha256:' + 'b' * 64
         image = {'id': IMAGE, 'repoTags': ['docker.io/library/alpine:3.23'], 'repoDigests': [alias]}
         native_id = 'd' * 64
-        pod = {'metadata': {'uid': '22345678-1234-4234-8234-123456789012', 'namespace': 'owned', 'name': task['runtime_id']},
+        pod = {'metadata': {'uid': '22345678-1234-4234-8234-123456789012', 'namespace': 'owned', 'name': pod_name},
                'spec': {'nodeName': node_name, 'containers': [{'name': 'atom', 'image': 'alpine:3.23',
                         'env': [{'name': 'COVERAGE_BACKEND_OWNER', 'value': 'owned'}]}]},
                'status': {'phase': 'Running', 'containerStatuses': [{'name': 'atom', 'image': 'docker.io/library/alpine:3.23',
@@ -308,7 +310,7 @@ class BackendGuards(unittest.TestCase):
                           'state': {'running': {'startedAt': '2026-10-04T20:00:22Z'}}}]}}
         native = {'id': native_id, 'metadata': {'name': 'atom', 'attempt': 0}, 'state': 'CONTAINER_RUNNING',
                   'image': {'image': 'docker.io/library/alpine:3.23'}, 'imageRef': alias,
-                  'labels': {'io.kubernetes.pod.uid': pod['metadata']['uid'], 'io.kubernetes.pod.name': task['runtime_id'],
+                  'labels': {'io.kubernetes.pod.uid': pod['metadata']['uid'], 'io.kubernetes.pod.name': pod_name,
                              'io.kubernetes.pod.namespace': 'owned', 'io.kubernetes.container.name': 'atom'}}
         node = {'Id': node_id, 'Image': BUILDER, 'Config': {'Labels': {'io.x-k8s.kind.cluster': 'owned', 'io.x-k8s.kind.role': 'worker'}}}
         state = {'image': image, 'native': native, 'pod': pod, 'node': node, 'unavailable': False,
@@ -332,7 +334,7 @@ class BackendGuards(unittest.TestCase):
             if args[:2] == ('get', 'namespace'):
                 value = {'metadata': {'uid': driver.namespace_uid, 'labels': {'caesium.coverage.backend-owner': 'owned'}}}
             else:
-                self.assertEqual(args, ('-n', 'owned', 'get', 'pod', task['runtime_id'], '-o', 'json'))
+                self.assertEqual(args, ('-n', 'owned', 'get', 'pod', pod_name, '-o', 'json'))
                 state['pod_reads'] += 1
                 value = state['replacement'] if state['replacement'] is not None and state['pod_reads'] > 1 else state['pod']
             return subprocess.CompletedProcess(args, 0, json.dumps(value), '')

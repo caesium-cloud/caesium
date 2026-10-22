@@ -119,6 +119,26 @@ func (s *IntegrationTestSuite) TestIncidentBundleFromRealFailure() {
 	s.Require().Empty(rpc.Error)
 	s.Require().NotEmpty(rpc.Result.Content)
 	assertBundle(rpc.Result.StructuredContent)
+	// The context passthroughs read the same failure: the own job's history is
+	// the failing run (recorded in the incident's namespace), and the why
+	// explanation addresses the failing task.
+	var history struct {
+		Runs []struct {
+			ID     string `json:"id"`
+			Status string `json:"status"`
+		} `json:"runs"`
+	}
+	s.maintenanceJSON("/v1/agent/incidents/"+incidentID+"/context/history", &history)
+	s.Require().Len(history.Runs, 1)
+	s.Require().Equal(runID, history.Runs[0].ID)
+	s.Require().Equal("failed", history.Runs[0].Status)
+	var why struct {
+		RunID    string `json:"runId"`
+		TaskName string `json:"taskName"`
+	}
+	s.maintenanceJSON("/v1/agent/incidents/"+incidentID+"/context/why?task=gate", &why)
+	s.Require().Equal(runID, why.RunID)
+	s.Require().Equal("gate", why.TaskName)
 	status, _ = s.maintenanceHTTP(http.MethodGet, "/v1/agent/incidents/"+uuid.NewString()+"/bundle", nil)
 	s.Require().Equal(http.StatusNotFound, status)
 	var after struct {

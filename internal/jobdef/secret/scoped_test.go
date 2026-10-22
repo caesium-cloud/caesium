@@ -340,37 +340,37 @@ func TestForNamespaceReadsTheHolder(t *testing.T) {
 
 	// default and a declared namespace without rules: allow all.
 	for _, ns := range []string{"", "default", "finance"} {
-		scoped := forNamespace(inner, ns, file, "caesium")
+		scoped := forNamespace(inner, ns, file, "caesium", nil)
 		require.True(t, scoped.AllowsAll(), ns)
 		require.NoError(t, scoped.Allow("secret://env/ANYTHING"), ns)
 	}
-	require.Equal(t, "default", forNamespace(inner, "", file, "caesium").Namespace())
+	require.Equal(t, "default", forNamespace(inner, "", file, "caesium", nil).Namespace())
 
 	// Rules: enforced, with relative k8s rules on the policy's mapping.
-	marketing := forNamespace(inner, "marketing", file, "caesium")
+	marketing := forNamespace(inner, "marketing", file, "caesium", nil)
 	require.False(t, marketing.AllowsAll())
 	require.NoError(t, marketing.Allow("secret://env/MARKETING_TOKEN"))
 	require.NoError(t, marketing.Allow("secret://k8s/marketing-token/token"))
 	require.ErrorIs(t, marketing.Allow("secret://env/FINANCE_TOKEN"), ErrSecretDenied)
 
 	// No mapping: relative rules mean CAESIUM_KUBERNETES_NAMESPACE.
-	unmapped := forNamespace(inner, "unmapped", file, "caesium")
+	unmapped := forNamespace(inner, "unmapped", file, "caesium", nil)
 	require.NoError(t, unmapped.Allow("secret://k8s/caesium/shared-db/password"))
 	require.ErrorIs(t, unmapped.Allow("secret://k8s/caesium-marketing/shared-db/password"), ErrSecretDenied)
-	require.NoError(t, forNamespace(inner, "unmapped", file, "").Allow("secret://k8s/default/shared-db/password"),
+	require.NoError(t, forNamespace(inner, "unmapped", file, "", nil).Allow("secret://k8s/default/shared-db/password"),
 		"an unset engine namespace falls back to default, like the engine")
 
-	require.ErrorIs(t, forNamespace(inner, "locked", file, "caesium").Allow("secret://env/MARKETING_TOKEN"), ErrSecretDenied)
+	require.ErrorIs(t, forNamespace(inner, "locked", file, "caesium", nil).Allow("secret://env/MARKETING_TOKEN"), ErrSecretDenied)
 
 	// Undeclared on a node serving a policy file: deny all, named as such.
-	err := forNamespace(inner, "ghost", file, "caesium").Allow("secret://env/MARKETING_TOKEN")
+	err := forNamespace(inner, "ghost", file, "caesium", nil).Allow("secret://env/MARKETING_TOKEN")
 	require.ErrorIs(t, err, ErrSecretDenied)
 	require.ErrorContains(t, err, "not declared in this node's access policy")
 
 	// No policy file (nil or env-translated holder): allow all everywhere.
 	for _, holder := range []*policy.Holder{nil, policy.NewEnvHolder(nil, "", nil)} {
 		for _, ns := range []string{"", "default", "ghost", "marketing"} {
-			require.True(t, forNamespace(inner, ns, holder, "caesium").AllowsAll(), ns)
+			require.True(t, forNamespace(inner, ns, holder, "caesium", nil).AllowsAll(), ns)
 		}
 	}
 }
@@ -415,11 +415,11 @@ func TestPendingScopeWaitsForTheConfiguredPolicy(t *testing.T) {
 	policy.SetProcessHolder(nil)
 
 	// No policy file configured: a nil holder is the empty policy.
-	require.True(t, forProcess(inner, "marketing", nil, false, "caesium").AllowsAll())
+	require.True(t, forProcess(inner, "marketing", nil, false, "caesium", nil).AllowsAll())
 
 	// Configured but never installed: denied after the wait, never allowed.
 	processHolderWait = 100 * time.Millisecond
-	pending := forProcess(inner, "default", nil, true, "caesium")
+	pending := forProcess(inner, "default", nil, true, "caesium", nil)
 	require.False(t, pending.AllowsAll())
 	err := pending.Allow("secret://env/MARKETING_TOKEN")
 	require.ErrorIs(t, err, ErrSecretDenied)
@@ -429,7 +429,7 @@ func TestPendingScopeWaitsForTheConfiguredPolicy(t *testing.T) {
 	// Installed while waiting: the installed policy decides.
 	processHolderWait = 10 * time.Second
 	file := writeScopedPolicy(t, scopedPolicy)
-	pending = forProcess(inner, "marketing", nil, true, "caesium")
+	pending = forProcess(inner, "marketing", nil, true, "caesium", nil)
 	go func() {
 		time.Sleep(50 * time.Millisecond)
 		policy.SetProcessHolder(file)
@@ -440,7 +440,7 @@ func TestPendingScopeWaitsForTheConfiguredPolicy(t *testing.T) {
 	require.ErrorIs(t, err, ErrSecretDenied)
 
 	// A file-configured process with the holder installed is not pending.
-	require.False(t, forProcess(inner, "marketing", file, true, "caesium").pending)
+	require.False(t, forProcess(inner, "marketing", file, true, "caesium", nil).pending)
 }
 
 // TestClientScopeNeverWaitsForAServerPolicy pins the client-side exemption: a

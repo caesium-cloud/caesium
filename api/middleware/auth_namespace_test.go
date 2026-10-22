@@ -489,25 +489,47 @@ func TestNamespacedTriggerRoutes(t *testing.T) {
 func TestNamespacedIncidentRoutes(t *testing.T) {
 	f := newNSFixture(t)
 	mktOperator := f.key(t, models.RoleOperator, `["marketing"]`)
-	// The detail carries the frozen agent allowlist (downstream aliases from
-	// any namespace): cluster-only until A8.
-	require.Equal(t, http.StatusForbidden, f.do(t, mktOperator, get("/v1/incidents/:id", pv("id", f.mktIncident.String()))).status)
-	requireAuditMetadata(t, f.lastDenial(t), map[string]any{"pending": "A8"})
-	require.Equal(t, "marketing", f.lastDenial(t).Namespace, "a pending denial is still audited against the incident's namespace")
+	mktViewer := f.key(t, models.RoleViewer, `["marketing"]`)
+	// The detail, approvals and the agent tool surface resolve to the
+	// incident's persisted namespace (A8): live in marketing, refused in
+	// finance, with the denial audited against finance and no pending item.
+	for _, call := range []struct {
+		token cred
+		path  string
+		post  bool
+	}{
+		{mktViewer, "/v1/incidents/:id", false},
+		{mktViewer, "/v1/agent/incidents/:id/bundle", false},
+		{mktOperator, "/v1/agent/incidents/:id/notes", true},
+		{mktOperator, "/v1/agent/incidents/:id/actions", true},
+		{mktOperator, "/v1/agent/incidents/:id/mcp", true},
+	} {
+		do := func(incident uuid.UUID) nsResult {
+			if call.post {
+				return f.do(t, call.token, post(call.path, pv("id", incident.String()), "{}"))
+			}
+			return f.do(t, call.token, get(call.path, pv("id", incident.String())))
+		}
+		require.Equal(t, http.StatusOK, do(f.mktIncident).status, call.path)
+		require.Equal(t, http.StatusForbidden, do(f.finIncident).status, call.path)
+		denial := f.lastDenial(t)
+		require.Equal(t, "finance", denial.Namespace, call.path)
+		require.NotContains(t, string(denial.Metadata), "pending", call.path)
+	}
 	decide := func(verb string, incident uuid.UUID) int {
 		return f.do(t, mktOperator, post("/v1/incidents/:id/approvals/:approval_id/"+verb,
 			pv("id", incident.String(), "approval_id", uuid.NewString()), "")).status
 	}
 	require.Equal(t, http.StatusOK, decide("reject", f.mktIncident))
 	require.Equal(t, http.StatusForbidden, decide("reject", f.finIncident))
-	// Approving executes the action against the job, which may have moved:
-	// cluster-only until A8 confines execution.
-	require.Equal(t, http.StatusForbidden, decide("approve", f.mktIncident))
-	requireAuditMetadata(t, f.lastDenial(t), map[string]any{"pending": "A8"})
-	// The agent tool surface stays fail-closed for confined principals (A8).
-	res := f.do(t, mktOperator, get("/v1/agent/incidents/:id/bundle", pv("id", f.mktIncident.String())))
-	require.Equal(t, http.StatusForbidden, res.status)
-	requireAuditMetadata(t, f.lastDenial(t), map[string]any{"pending": "A8"})
+	// Approving executes the action against the job; the executor confines it
+	// to the incident's namespace, so operator there is enough.
+	require.Equal(t, http.StatusOK, decide("approve", f.mktIncident))
+	require.Equal(t, http.StatusForbidden, decide("approve", f.finIncident))
+	// A viewer cannot approve or write to the agent surface.
+	require.Equal(t, http.StatusForbidden, f.do(t, mktViewer, post("/v1/incidents/:id/approvals/:approval_id/approve",
+		pv("id", f.mktIncident.String(), "approval_id", uuid.NewString()), "")).status)
+	require.Equal(t, http.StatusForbidden, f.do(t, mktViewer, post("/v1/agent/incidents/:id/notes", pv("id", f.mktIncident.String()), "{}")).status)
 }
 
 func TestNamespacedSharedObjects(t *testing.T) {
@@ -605,38 +627,49 @@ func TestNamespacedSharedObjects(t *testing.T) {
 func TestNamespacedDatasetRoutes(t *testing.T) {
 	f := newNSFixture(t)
 	mktOperator := f.key(t, models.RoleOperator, `["marketing"]`)
+	finViewer := f.key(t, models.RoleViewer, `["finance"]`)
+	mktViewer := f.key(t, models.RoleViewer, `["marketing"]`)
 	both := f.key(t, models.RoleOperator, `["marketing","finance"]`)
 	advance := func(who cred, name string) int {
 		return f.do(t, who, post("/v1/datasets/:ns/:name/advance", pv("ns", "_", "name", name), `{"watermark":"x"}`)).status
 	}
-	// Every dataset route is cluster-only for confined principals until B6:
-	// the advance answers with the persisted state, whose last run and
-	// consumed watermarks can predate a producer's move. The producer
-	// resolvers are exercised in the internal tests.
-	for _, name := range []string{"sales", "mkt-only", "orphan", "external"} {
+	// B6: a write needs the role in every producer namespace; a dataset with
+	// no declared producer (only a consumer, only source declarations, or
+	// nothing at all) is cluster-only.
+	require.Equal(t, http.StatusOK, advance(both, "sales"))
+	require.Equal(t, http.StatusOK, advance(mktOperator, "mkt-only"), "a consumer in finance owns nothing")
+	require.Equal(t, http.StatusForbidden, advance(mktOperator, "sales"), "finance co-produces sales")
+	requireAuditMetadata(t, f.lastDenial(t), map[string]any{"pending": nil, "namespaces": []any{"finance", "marketing"}})
+	for _, name := range []string{"orphan", "external"} {
 		require.Equal(t, http.StatusForbidden, advance(both, name), name)
-		requireAuditMetadata(t, f.lastDenial(t), map[string]any{"pending": "B6"})
 	}
-	require.Equal(t, http.StatusForbidden, advance(mktOperator, "mkt-only"))
-	require.Equal(t, http.StatusOK, advance(f.key(t, models.RoleRunner, ""), "sales"), "a cluster runner advances exactly as before")
+	require.Equal(t, http.StatusOK, advance(f.key(t, models.RoleRunner, ""), "orphan"), "a cluster runner advances exactly as before")
 
 	release := func(who cred, hold string) int {
 		return f.do(t, who, post("/v1/datasets/holds/:id/release", pv("id", hold), `{"reason":"ok"}`)).status
 	}
-	// The release response is the whole hold, whose impact snapshot names
-	// downstream consumers in any namespace: cluster-only until B6 redacts
-	// it (the producer resolver is exercised in the internal tests).
-	for _, hold := range []string{f.salesHold.String(), f.mktHold.String(), uuid.NewString(), "not-a-hold"} {
-		require.Equal(t, http.StatusForbidden, release(both, hold), hold)
-		requireAuditMetadata(t, f.lastDenial(t), map[string]any{"pending": "B6"})
-	}
-	clusterOperator := f.key(t, models.RoleOperator, "")
-	require.Equal(t, http.StatusOK, release(clusterOperator, f.salesHold.String()))
+	require.Equal(t, http.StatusForbidden, release(mktOperator, f.salesHold.String()))
+	require.Equal(t, http.StatusOK, release(both, f.salesHold.String()))
+	require.Equal(t, http.StatusOK, release(mktOperator, f.mktHold.String()))
+	require.Equal(t, http.StatusNotFound, release(both, uuid.NewString()))
+	require.Equal(t, http.StatusBadRequest, release(both, "not-a-hold"))
+	require.Equal(t, http.StatusOK, release(f.key(t, models.RoleOperator, ""), f.salesHold.String()))
 
-	// The reads stay pending until B6 filters history by producing run.
-	res := f.do(t, both, get("/v1/datasets/:ns/:name", pv("ns", "_", "name", "sales")))
-	require.Equal(t, http.StatusForbidden, res.status)
-	requireAuditMetadata(t, f.lastDenial(t), map[string]any{"pending": "B6"})
+	// Reads need viewer in any producer namespace. A dataset the caller may
+	// not read and one that does not exist answer the same audited 403.
+	for _, route := range []string{"/v1/datasets/:ns/:name", "/v1/datasets/:ns/:name/derivations", "/v1/datasets/:ns/:name/metrics"} {
+		read := func(who cred, name string) nsResult {
+			return f.do(t, who, get(route, pv("ns", "_", "name", name)))
+		}
+		require.Equal(t, http.StatusOK, read(mktViewer, "sales").status, route)
+		require.Equal(t, http.StatusOK, read(finViewer, "sales").status, route)
+		require.Equal(t, http.StatusOK, read(mktViewer, "mkt-only").status, route)
+		foreign, missing := read(finViewer, "mkt-only"), read(finViewer, "no-such-dataset")
+		require.Equal(t, http.StatusForbidden, foreign.status, route)
+		require.Equal(t, foreign.status, missing.status, route)
+		require.Equal(t, foreign.message, missing.message, route)
+		require.Equal(t, http.StatusForbidden, read(mktViewer, "external").status, route)
+	}
 }
 
 func TestNamespacedAuditQuery(t *testing.T) {
@@ -673,18 +706,19 @@ func TestNamespacedClusterAndPendingRoutes(t *testing.T) {
 		call    nsCall
 		pending string
 	}{
-		{get("/v1/jobs/:id/blame", pv("id", f.mktJob.String())), "B7"},
-		{get("/v1/jobs/:id/topology", pv("id", f.mktJob.String())), "B7"},
 		{post("/v1/events", nil, `{}`), "A6"},
-		{get("/v1/lineage/impact", nil), "B5"},
 	} {
 		res := f.do(t, mktAdmin, tc.call)
 		require.Equal(t, http.StatusForbidden, res.status, tc.call.pattern)
 		requireAuditMetadata(t, f.lastDenial(t), map[string]any{"reason": "insufficient_role", "pending": tc.pending})
 	}
-	// A pending job route still audits against the job's namespace.
-	f.do(t, mktAdmin, get("/v1/jobs/:id/topology", pv("id", f.finJob.String())))
-	require.Equal(t, "finance", f.lastDenial(t).Namespace)
+	// Snapshot reads are live for confined principals (B7): allowed in the
+	// job's namespace, and a foreign job's denial audits against its namespace.
+	for _, route := range []string{"/v1/jobs/:id/blame", "/v1/jobs/:id/topology", "/v1/jobs/:id/topology/history"} {
+		require.Equal(t, http.StatusOK, f.do(t, mktAdmin, get(route, pv("id", f.mktJob.String()))).status, route)
+		require.Equal(t, http.StatusForbidden, f.do(t, mktAdmin, get(route, pv("id", f.finJob.String()))).status, route)
+		require.Equal(t, "finance", f.lastDenial(t).Namespace, route)
+	}
 
 	// Identity routes pass any authenticated principal, even with no grants.
 	empty := f.key(t, models.RoleViewer, `[]`)
