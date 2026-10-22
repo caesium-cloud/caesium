@@ -1058,6 +1058,68 @@ func mustGeneratePrivateKey(tb testing.TB) string {
 	return string(pem.EncodeToMemory(blk))
 }
 
+// A manifest whose alias has leading or trailing whitespace is refused by
+// Validate for every writer. Git sync skips it per manifest (reported as
+// alias_not_canonical) so the rest of the source still syncs, and its raw
+// alias stays desired, so a job stored under exactly that alias before the
+// rule existed is neither changed nor pruned.
+func (s *GitSyncSuite) TestSyncSkipsNonCanonicalAliasManifest() {
+	for _, tc := range []struct {
+		name       string
+		namespaces []string
+		twin       bool // the repository also holds the canonical alias
+	}{
+		{"unrestricted", nil, false}, {"allowlisted", []string{"default"}, false},
+		{"unrestricted with canonical twin", nil, true}, {"allowlisted with canonical twin", []string{"default"}, true},
+	} {
+		s.Run(tc.name, func() {
+			repoDir, db, importer := s.allowlistSetup(map[string]string{
+				"jobs/valid.yaml":  allowlistManifest("twin-valid", ""),
+				"jobs/legacy.yaml": allowlistManifest("twin-legacy", ""),
+			})
+			source := Source{URL: repoDir, Ref: "master", Path: "jobs", SourceID: "git-sync", Namespaces: tc.namespaces}
+			_, err := source.SyncWithReport(context.Background(), importer)
+			s.Require().NoError(err)
+			// The legacy state: a job stored under a non-canonical alias.
+			s.Require().NoError(db.Model(&models.Job{}).Where("alias = ?", "twin-legacy").Update("alias", "twin-legacy ").Error)
+			before := s.allowlistJob(db, "twin-legacy ")
+
+			files := map[string]string{
+				"jobs/valid.yaml":  strings.Replace(allowlistManifest("twin-valid", ""), "owner: etl", "owner: analytics", 1),
+				"jobs/legacy.yaml": allowlistManifest(`"twin-legacy "`, ""),
+			}
+			if tc.twin {
+				// "twin-legacy " beside "twin-legacy" is a duplicate (aliases
+				// compare trimmed), fatal as before the alias rule: nothing
+				// applies, so the canonical copy never lands next to the
+				// stored twin.
+				files["jobs/twin.yaml"] = allowlistManifest("twin-legacy", "")
+				s.commit(repoDir, files)
+				_, err := source.SyncWithReport(context.Background(), importer)
+				s.Require().ErrorIs(err, jobdef.ErrDuplicateJob)
+				s.Equal("etl", s.allowlistJob(db, "twin-valid").Annotations["owner"], "nothing from the commit applied")
+				s.True(before.UpdatedAt.Equal(s.allowlistJob(db, "twin-legacy ").UpdatedAt))
+				testutil.AssertCount(s.T(), db, &models.Job{}, 2)
+				return
+			}
+			s.commit(repoDir, files)
+			report, err := source.SyncWithReport(context.Background(), importer)
+			s.Require().NoError(err, "one non-canonical manifest must not fail the whole sync")
+			s.Equal(1, report.Applied)
+			s.Require().Len(report.Violations, 1)
+			s.Equal(ManifestViolation{Path: "jobs/legacy.yaml", Alias: "twin-legacy ", Namespace: "default", Reason: jobdef.NamespaceReasonNonCanonicalAlias}, report.Violations[0])
+			s.Zero(report.Pruned)
+
+			valid := s.allowlistJob(db, "twin-valid")
+			s.Equal("analytics", valid.Annotations["owner"], "the valid manifest's change is applied")
+			after := s.allowlistJob(db, "twin-legacy ")
+			s.False(after.DeletedAt.Valid, "the stored twin is not pruned")
+			s.True(before.UpdatedAt.Equal(after.UpdatedAt), "the stored twin is not changed")
+			testutil.AssertCount(s.T(), db, &models.Job{}, 2)
+		})
+	}
+}
+
 func githubKnownHostEntry() string {
 	return "github.com ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQCj7ndNxQowgcQnjshcLrqPEiiphnt+VTTvDP6mHBL9j1aNUkY4Ue1gvwnGLVlOhGeYrnZaMgRK6+PKCUXaDbC7qtbW8gIkhL7aGCsOr/C56SJMy/BCZfxd1nWzAOxSDPgVsmerOBYfNqltV9/hWCqBywINIR+5dIg6JTJ72pcEpEjcYgXkE2YEFXV1JHnsKgbLWNlhScqb2UmyRkQyytRLtL+38TGxkxCflmO+5Z8CSSNY7GidjMIZ7Q4zMjA2n1nGrlTDkzwDCsw+wqFPGQA179cnfGWOWRVruj16z6XyvxvjJwbz0wQZ75XK5tKSb7FNyeIEs4TT4jk+S4dhPeAUC5y+bDYirYgM4GC7uEnztnZyaVWQ7B381AK4Qdrwt51ZqExKbQpTUNn+EjqoTwvqNj4kqx5QUCI0ThS/YkOxJCXmPUWZbhjpCg56i+2aB6CmK2JGhn57K5mj0MNdBXA4/WnwH6XoPWJzK5Nyu2zB3nAZp+S5hpQs+p1vN1/wsjk="
 }

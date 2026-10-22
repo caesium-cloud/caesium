@@ -7,8 +7,10 @@ import (
 	"errors"
 	"net/http"
 
+	authmw "github.com/caesium-cloud/caesium/api/middleware"
 	blamesvc "github.com/caesium-cloud/caesium/api/rest/service/blame"
 	jsvc "github.com/caesium-cloud/caesium/api/rest/service/job"
+	"github.com/caesium-cloud/caesium/internal/authz"
 	blamequery "github.com/caesium-cloud/caesium/internal/blame"
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v5"
@@ -31,7 +33,10 @@ func Get(c *echo.Context) error {
 		return echo.NewHTTPError(http.StatusInternalServerError, "internal server error").Wrap(err)
 	}
 
-	result, err := blamesvc.New(ctx).Blame(jobID, blamequery.Options{
+	// Blame is computed over the snapshots the caller may read (B7), so an
+	// element is attributed to the first readable snapshot that introduces it
+	// and a commit only an unreadable snapshot carries is not found.
+	result, err := blamesvc.New(authz.WithHistoryScope(ctx, authmw.GetPrincipal(c))).Blame(jobID, blamequery.Options{
 		Task:       c.QueryParam("task"),
 		FromCommit: c.QueryParam("from"),
 		ToCommit:   c.QueryParam("to"),

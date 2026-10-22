@@ -73,7 +73,7 @@ func Markdown() string {
 	b.WriteString("## Metadata\n\n")
 	b.WriteString("| Field | Type | Required | Notes |\n")
 	b.WriteString("|-------|------|----------|-------|\n")
-	b.WriteString("| `alias` | string | required | Unique identifier used across APIs and web UI. |\n")
+	b.WriteString("| `alias` | string | required | Unique identifier used across APIs and web UI. Case-sensitive; must not have leading or trailing whitespace. |\n")
 	b.WriteString("| `namespace` | string | optional | Tenancy namespace. Defaults to `default`; DNS label (1-63 lowercase letters, digits or hyphens). New runs inherit it; moving a job preserves history and invalidates cached outputs. |\n")
 	b.WriteString("| `labels` | map[string]string | optional | Attach metadata for filtering. |\n")
 	b.WriteString("| `annotations` | map[string]string | optional | Free-form metadata surfaced to clients. |\n")

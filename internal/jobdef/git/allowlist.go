@@ -11,6 +11,7 @@ import (
 	"github.com/caesium-cloud/caesium/internal/auth"
 	"github.com/caesium-cloud/caesium/internal/jobdef"
 	"github.com/caesium-cloud/caesium/internal/models"
+	schema "github.com/caesium-cloud/caesium/pkg/jobdef"
 	"github.com/caesium-cloud/caesium/pkg/log"
 )
 
@@ -78,8 +79,9 @@ func (s *Source) applyAtomically(ctx context.Context, importer *jobdef.Importer,
 }
 
 // rejectDuplicateAliases runs over every collected manifest, before any
-// namespace filtering, so a refused copy cannot hide a duplicate. It is fatal,
-// as ValidateBatch makes a duplicate for an unrestricted source.
+// namespace filtering or non-canonical skip, so a refused or skipped copy
+// cannot hide a duplicate (aliases are compared trimmed: "payroll " beside
+// "payroll" is one). It is fatal, as ValidateBatch makes a duplicate.
 func rejectDuplicateAliases(plans []applyFilePlan) error {
 	seen := make(map[string]string, len(plans))
 	for _, plan := range plans {
@@ -93,6 +95,31 @@ func rejectDuplicateAliases(plans []applyFilePlan) error {
 		seen[alias] = plan.path
 	}
 	return nil
+}
+
+// dropNonCanonicalAliases skips, for every source, each manifest whose alias
+// has leading or trailing whitespace: Validate refuses it for every writer, so
+// left in the batch it would fail the whole sync. The manifest is reported
+// (reason alias_not_canonical) and not applied; its raw alias stays desired,
+// so a stored job of exactly that alias (written before the rule) is left as
+// it is rather than pruned.
+func (s *Source) dropNonCanonicalAliases(plans []applyFilePlan, report *SyncReport) []applyFilePlan {
+	kept := make([]applyFilePlan, 0, len(plans))
+	for _, plan := range plans {
+		alias := plan.def.Metadata.Alias
+		if strings.TrimSpace(alias) == "" || schema.ValidateAlias(alias) == nil {
+			kept = append(kept, plan)
+			continue
+		}
+		namespace := models.NamespaceOrDefault(plan.def.Metadata.Namespace)
+		report.Violations = append(report.Violations, ManifestViolation{
+			Path: plan.path, Alias: alias, Namespace: namespace, Reason: jobdef.NamespaceReasonNonCanonicalAlias,
+		})
+		log.Warn("git sync skipped a manifest whose alias has leading or trailing whitespace",
+			"source_id", report.SourceID, "url", report.URL, "commit", report.Commit, "path", plan.path,
+			"alias", fmt.Sprintf("%q", alias), "namespace", namespace)
+	}
+	return kept
 }
 
 // allowedPlans drops every manifest the apply guard would refuse, on its

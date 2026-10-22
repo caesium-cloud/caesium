@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -395,13 +396,23 @@ func snapshotCatalog(t *testing.T) (reader, writer *gorm.DB) {
 func applyDefinitions(t *testing.T, conn *gorm.DB, defs ...schema.Definition) {
 	t.Helper()
 	importer := internaljobdef.NewImporter(conn)
-	for _, def := range defs {
+	for idx, def := range defs {
 		encoded, err := json.Marshal(def)
 		require.NoError(t, err)
 		var decoded schema.Definition
 		require.NoError(t, json.Unmarshal(encoded, &decoded))
-		_, err = importer.Apply(context.Background(), &decoded)
+		// A non-canonical alias can no longer be applied (W6-α); a row
+		// stored before the rule is produced by renaming a seeded job.
+		legacyAlias := ""
+		if schema.ValidateAlias(decoded.Metadata.Alias) != nil {
+			legacyAlias = decoded.Metadata.Alias
+			decoded.Metadata.Alias = fmt.Sprintf("legacy-alias-seed-%d", idx)
+		}
+		job, err := importer.Apply(context.Background(), &decoded)
 		require.NoError(t, err)
+		if legacyAlias != "" {
+			require.NoError(t, conn.Model(&models.Job{}).Where("id = ?", job.ID).Update("alias", legacyAlias).Error)
+		}
 	}
 }
 

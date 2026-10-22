@@ -673,8 +673,6 @@ func TestNamespacedClusterAndPendingRoutes(t *testing.T) {
 		call    nsCall
 		pending string
 	}{
-		{get("/v1/jobs/:id/blame", pv("id", f.mktJob.String())), "B7"},
-		{get("/v1/jobs/:id/topology", pv("id", f.mktJob.String())), "B7"},
 		{post("/v1/events", nil, `{}`), "A6"},
 		{get("/v1/lineage/impact", nil), "B5"},
 	} {
@@ -682,9 +680,13 @@ func TestNamespacedClusterAndPendingRoutes(t *testing.T) {
 		require.Equal(t, http.StatusForbidden, res.status, tc.call.pattern)
 		requireAuditMetadata(t, f.lastDenial(t), map[string]any{"reason": "insufficient_role", "pending": tc.pending})
 	}
-	// A pending job route still audits against the job's namespace.
-	f.do(t, mktAdmin, get("/v1/jobs/:id/topology", pv("id", f.finJob.String())))
-	require.Equal(t, "finance", f.lastDenial(t).Namespace)
+	// Snapshot reads are live for confined principals (B7): allowed in the
+	// job's namespace, and a foreign job's denial audits against its namespace.
+	for _, route := range []string{"/v1/jobs/:id/blame", "/v1/jobs/:id/topology", "/v1/jobs/:id/topology/history"} {
+		require.Equal(t, http.StatusOK, f.do(t, mktAdmin, get(route, pv("id", f.mktJob.String()))).status, route)
+		require.Equal(t, http.StatusForbidden, f.do(t, mktAdmin, get(route, pv("id", f.finJob.String()))).status, route)
+		require.Equal(t, "finance", f.lastDenial(t).Namespace, route)
+	}
 
 	// Identity routes pass any authenticated principal, even with no grants.
 	empty := f.key(t, models.RoleViewer, `[]`)

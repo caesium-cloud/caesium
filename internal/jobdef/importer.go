@@ -456,10 +456,14 @@ func (i *Importer) enforceContractsWithOptionsTx(ctx context.Context, tx *gorm.D
 // PruneMissing retires active jobs that are absent from the desired alias set.
 // When opts.SourceID is set, pruning is scoped to jobs imported by that source.
 func (i *Importer) PruneMissing(ctx context.Context, desiredAliases []string, opts *PruneOptions) (int, error) {
+	// Desired aliases match stored ones exactly, like every other alias
+	// lookup in the importer: a trimmed comparison would let "payroll "
+	// protect (or fail to protect) a different job. Validate refuses
+	// non-canonical aliases for every writer, so a desired alias that differs
+	// from its trimmed form can only name a legacy stored row.
 	desiredSet := make(map[string]struct{}, len(desiredAliases))
 	for _, alias := range desiredAliases {
-		alias = strings.TrimSpace(alias)
-		if alias == "" {
+		if strings.TrimSpace(alias) == "" {
 			continue
 		}
 		desiredSet[alias] = struct{}{}
@@ -1436,13 +1440,18 @@ func dagTopologyHash(steps []schema.Step, successors map[string][]string) string
 	return hex.EncodeToString(h.Sum(nil))
 }
 
-// writeSnapshotTx appends a DagSnapshot row if the topology changed since the
-// last recorded snapshot.  If the latest snapshot for this job already carries
-// the same content hash, no row is written (dedup on unchanged topology).
-// successors must be pre-computed by the caller (avoids a redundant call to
-// DeriveStepSuccessors which performs full validation on every apply).
+// writeSnapshotTx appends a DagSnapshot row if the topology or the job's
+// namespace changed since the last recorded snapshot. If the latest snapshot
+// for this job already carries the same content hash in the job's namespace,
+// no row is written (dedup on unchanged topology). A move (B7) therefore writes
+// a fresh snapshot owned by the new namespace even when the topology is
+// unchanged, and a legacy row (no namespace) is superseded by one namespaced
+// row on the job's next apply. successors must be pre-computed by the caller
+// (avoids a redundant call to DeriveStepSuccessors which performs full
+// validation on every apply).
 func (i *Importer) writeSnapshotTx(tx *gorm.DB, jobModel *models.Job, steps []schema.Step, successors map[string][]string, taskByName map[string]*models.Task, opts *ApplyOptions) error {
 	contentHash := dagTopologyHash(steps, successors)
+	namespace := models.NamespaceOrDefault(jobModel.Namespace)
 
 	// Check whether the most recent snapshot for this job already matches.
 	// The idx_dag_snapshot_job_created index covers this query.
@@ -1454,8 +1463,8 @@ func (i *Importer) writeSnapshotTx(tx *gorm.DB, jobModel *models.Job, steps []sc
 	if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
 		return fmt.Errorf("dag snapshot: query latest: %w", err)
 	}
-	if err == nil && latest.ContentHash == contentHash {
-		// Topology unchanged — no new snapshot needed.
+	if err == nil && latest.ContentHash == contentHash && latest.Namespace != nil && *latest.Namespace == namespace {
+		// Topology and owner unchanged — no new snapshot needed.
 		return nil
 	}
 
@@ -1513,6 +1522,7 @@ func (i *Importer) writeSnapshotTx(tx *gorm.DB, jobModel *models.Job, steps []sc
 	snap := &models.DagSnapshot{
 		ID:          uuid.New(),
 		JobID:       jobModel.ID,
+		Namespace:   &namespace,
 		ContentHash: contentHash,
 		GitCommit:   gitCommit,
 		Tasks:       datatypes.JSON(tasksJSON),

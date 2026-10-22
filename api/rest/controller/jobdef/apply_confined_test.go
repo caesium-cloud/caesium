@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -284,8 +285,10 @@ func TestReadScopeHonoursKeyJobScope(t *testing.T) {
 
 // A job-scoped key applies only the exact aliases its key names (PR #668
 // review): the middleware's scope check trims, the importer stores the raw
-// alias, so "payroll " (ASCII or Unicode space) is refused in the
-// transaction as the key-scope gate would refuse it, and nothing is written.
+// alias, so "payroll " (ASCII or Unicode space) must never be written. Since
+// W6-α Validate refuses a non-canonical alias for every writer with a 400
+// naming it (a syntactic check that discloses nothing stored), before the
+// in-transaction key-scope refusal is reached; nothing is written.
 func TestApplyJobScopedKeyRefusesNonCanonicalAlias(t *testing.T) {
 	conn := freshCatalog(t)
 	for name, grants := range map[string]policy.Grants{
@@ -299,9 +302,9 @@ func TestApplyJobScopedKeyRefusesNonCanonicalAlias(t *testing.T) {
 				def := scopeDefinition("payroll", "default")
 				def.Metadata.Alias = alias
 				_, _, err := callApply(t, scoped, applyBody(false, def))
-				denial := requireDenial(t, err)
-				require.Equal(t, "insufficient_scope", denial.Reason)
-				require.Equal(t, "insufficient permissions", denial.Message)
+				require.Error(t, err)
+				require.Equal(t, http.StatusBadRequest, echo.StatusCode(err))
+				require.Contains(t, err.Error(), "metadata.alias "+strconv.Quote(alias)+" must not have leading or trailing whitespace")
 				_, exists := jobRow(t, conn, alias)
 				require.False(t, exists, "no job %q was written", alias)
 			}

@@ -11,8 +11,10 @@ import (
 	"errors"
 	"net/http"
 
+	authmw "github.com/caesium-cloud/caesium/api/middleware"
 	jsvc "github.com/caesium-cloud/caesium/api/rest/service/job"
 	topsvc "github.com/caesium-cloud/caesium/api/rest/service/topology"
+	"github.com/caesium-cloud/caesium/internal/authz"
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v5"
 	"gorm.io/gorm"
@@ -40,7 +42,10 @@ func Get(c *echo.Context) error {
 		return echo.NewHTTPError(http.StatusInternalServerError, "internal server error").Wrap(err)
 	}
 
-	svc := topsvc.Service(ctx)
+	// Snapshots are filtered by the namespace they were written in (B7): a
+	// confined caller sees the newest snapshot it may read, and a snapshot it
+	// may not read answers like a missing one.
+	svc := topsvc.Service(authz.WithHistoryScope(ctx, authmw.GetPrincipal(c)))
 	var snap any
 
 	switch {
@@ -63,7 +68,7 @@ func Get(c *echo.Context) error {
 }
 
 // History handles GET /v1/jobs/:id/topology/history.
-// Returns all dag_snapshots for the job, newest first.
+// Returns the job's dag_snapshots the caller may read, newest first.
 func History(c *echo.Context) error {
 	ctx := c.Request().Context()
 
@@ -79,7 +84,7 @@ func History(c *echo.Context) error {
 		return echo.NewHTTPError(http.StatusInternalServerError, "internal server error").Wrap(err)
 	}
 
-	snaps, err := topsvc.Service(ctx).List(id)
+	snaps, err := topsvc.Service(authz.WithHistoryScope(ctx, authmw.GetPrincipal(c))).List(id)
 	if err != nil {
 		return echo.NewHTTPError(http.StatusInternalServerError, "internal server error").Wrap(err)
 	}

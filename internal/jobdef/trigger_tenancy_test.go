@@ -3,6 +3,7 @@ package jobdef
 import (
 	"context"
 	"errors"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -435,10 +436,10 @@ func TestValidateTriggerTenancyTracksJobsByIdentity(t *testing.T) {
 	ctx := context.Background()
 	for _, space := range []string{" ", " "} {
 		f := newTenancyFixture(t, false)
-		twin := f.def("a", "finance", "old")
-		twin.Metadata.Alias = "a" + space
-		_, err := f.importer.ApplyWithOptions(ctx, twin, nil)
+		// Stored before Validate refused non-canonical aliases (W6-α).
+		twin, err := f.importer.ApplyWithOptions(ctx, f.def("a-seed", "finance", "old"), nil)
 		require.NoError(t, err)
+		require.NoError(t, f.db.Model(&models.Job{}).Where("id = ?", twin.ID).Update("alias", "a"+space).Error)
 
 		scope := NewTenancyScope([]string{"marketing"}, nil)
 		batch := []schema.Definition{*f.def("a", "marketing", "new"), *f.def("c", "marketing", "old")}
@@ -508,11 +509,29 @@ func TestCheckJobCreateTx(t *testing.T) {
 // the trimmed form a key scope names, but a distinct stored alias.
 var nonCanonicalAliases = []string{"payroll ", "payroll ", " payroll", " payroll"}
 
+// requireNonCanonicalAlias asserts err is Validate's refusal of alias, which
+// every writer meets before any tenancy check (identity-and-access W6-α).
+func requireNonCanonicalAlias(t *testing.T, err error, alias string) {
+	t.Helper()
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "metadata.alias "+strconv.Quote(alias)+" must not have leading or trailing whitespace")
+}
+
+// seedStoredAlias writes a job as seed and renames it to alias directly: the
+// state a writer could leave before Validate refused non-canonical aliases.
+func (f *tenancyFixture) seedStoredAlias(seed, alias, namespace string) *models.Job {
+	f.t.Helper()
+	job := f.mustApply(seed, namespace, "")
+	require.NoError(f.t, f.db.Model(&models.Job{}).Where("id = ?", job.ID).Update("alias", alias).Error)
+	job.Alias = alias
+	return job
+}
+
 // A job-scoped writer writes only the exact aliases its key names (PR #668
-// review): a non-canonical alias is refused inside the transaction on every
-// write path, nothing is written, and the exact alias still applies. Scoped
-// to "*" and namespace-confined alike; a writer without an alias scope is
-// unchanged.
+// review): a non-canonical alias is refused on every write path (by Validate
+// first, and by the tenancy check inside the transaction where no Validate
+// runs), nothing is written, and the exact alias still applies. Scoped to "*"
+// and namespace-confined alike.
 func TestJobScopedWriterNeedsExactAlias(t *testing.T) {
 	ctx := context.Background()
 	for name, namespaces := range map[string][]string{"key at *": nil, "namespace-confined": {"default"}} {
@@ -525,10 +544,11 @@ func TestJobScopedWriterNeedsExactAlias(t *testing.T) {
 				def.Metadata.Alias = alias
 
 				_, err := f.importer.ApplyWithOptions(ctx, def, opts)
-				requireTenancyRefusal(t, err, NamespaceReasonAliasScope)
+				requireNonCanonicalAlias(t, err, alias)
 				_, err = f.importer.ApplyConfinedBatch(ctx, []BatchPlan{{Def: def, Opts: opts}}, ConfinedBatchOptions{})
+				requireNonCanonicalAlias(t, err, alias)
+				err = CheckJobCreateTx(f.db, alias, "default", "cron", nil, scope)
 				requireTenancyRefusal(t, err, NamespaceReasonAliasScope)
-				requireTenancyRefusal(t, CheckJobCreateTx(f.db, alias, "default", "cron", nil, scope), NamespaceReasonAliasScope)
 				require.False(t, f.jobExists(alias), "no job %q was written", alias)
 
 				denial, _ := WriteRefusal(err, scope)
@@ -544,10 +564,7 @@ func TestJobScopedWriterNeedsExactAlias(t *testing.T) {
 
 			// The legacy create's stored-row lookup is by the raw alias.
 			if namespaces != nil {
-				taken := f.def("taken", "finance", "")
-				taken.Metadata.Alias = "taken "
-				_, err := f.importer.ApplyWithOptions(ctx, taken, nil)
-				require.NoError(t, err)
+				f.seedStoredAlias("taken-seed", "taken ", "finance")
 				require.NoError(t, CheckJobCreateTx(f.db, "taken", "default", "cron", nil, NewTenancyScope(namespaces, nil)), "a different stored alias")
 				// A namespace-confined writer may not name it at all (review r7).
 				requireTenancyRefusal(t, CheckJobCreateTx(f.db, "taken ", "default", "cron", nil, NewTenancyScope(namespaces, nil)), NamespaceReasonNonCanonicalAlias)
@@ -555,12 +572,15 @@ func TestJobScopedWriterNeedsExactAlias(t *testing.T) {
 		})
 	}
 
-	// An unrestricted writer is unchanged (no policy file: no check at all).
+	// An unrestricted writer is refused the non-canonical alias by Validate
+	// too (W6-α); the in-transaction tenancy check itself stays scope-only
+	// (no policy file: no check at all).
 	f := newTenancyFixture(t, false)
 	def := f.def("payroll", "default", "")
 	def.Metadata.Alias = "payroll "
 	_, err := f.importer.ApplyWithOptions(ctx, def, nil)
-	require.NoError(t, err)
+	requireNonCanonicalAlias(t, err, "payroll ")
+	require.False(t, f.jobExists("payroll "))
 	require.NoError(t, CheckJobCreateTx(f.db, "other ", "default", "cron", nil, nil))
 }
 
@@ -582,13 +602,16 @@ func TestNamespaceConfinedWriterNeedsCanonicalAlias(t *testing.T) {
 		def.Metadata.Alias = alias
 
 		_, err := f.importer.ApplyWithOptions(ctx, def, opts)
-		requireTenancyRefusal(t, err, NamespaceReasonNonCanonicalAlias)
+		requireNonCanonicalAlias(t, err, alias)
 		for _, prune := range []bool{false, true} {
 			result, err := f.importer.ApplyConfinedBatch(ctx, []BatchPlan{{Def: def, Opts: opts}},
 				ConfinedBatchOptions{Prune: prune, PruneNamespaces: []string{"default"}})
-			requireTenancyRefusal(t, err, NamespaceReasonNonCanonicalAlias)
+			requireNonCanonicalAlias(t, err, alias)
 			require.Equal(t, ConfinedBatchResult{}, result)
 		}
+		// The in-transaction check stays as a second line of defence for
+		// writes that run no Validate.
+		require.NotNil(t, aliasScopeRefusal(alias, "default", scope))
 		err = CheckJobCreateTx(f.db, alias, "default", "cron", nil, scope)
 		requireTenancyRefusal(t, err, NamespaceReasonNonCanonicalAlias)
 		require.False(t, f.jobExists(alias), "no job %q was written", alias)
@@ -617,11 +640,8 @@ func TestConfinedPruneDesiredSetIsExact(t *testing.T) {
 		require.Equal(t, map[string]struct{}{alias: {}}, desiredAliasSet([]string{alias}))
 	}
 	f := newTenancyFixture(t, false)
-	for _, alias := range nonCanonicalAliases {
-		def := f.def("payroll", "default", "")
-		def.Metadata.Alias = alias
-		_, err := f.importer.ApplyWithOptions(context.Background(), def, nil)
-		require.NoError(t, err)
+	for idx, alias := range nonCanonicalAliases {
+		f.seedStoredAlias("payroll-seed-"+strconv.Itoa(idx), alias, "default")
 	}
 	prune := func(desired []string) int {
 		t.Helper()

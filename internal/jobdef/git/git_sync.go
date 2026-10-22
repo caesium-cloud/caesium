@@ -309,10 +309,17 @@ func (s *Source) applyCheckout(ctx context.Context, importer *jobdef.Importer, d
 		}
 	}
 
+	// The duplicate check runs over every collected manifest, for every
+	// source, before non-canonical aliases are skipped: "payroll " beside
+	// "payroll" stays a fatal duplicate, as it was before the alias rule
+	// (ValidateBatch compares trimmed aliases too), rather than letting the
+	// canonical copy apply next to a stored twin that the trimmed dataset and
+	// contract validators cannot tell apart from it.
+	if err := rejectDuplicateAliases(plans); err != nil {
+		return err
+	}
+	plans = s.dropNonCanonicalAliases(plans, report)
 	if s.Namespaces != nil {
-		if err := rejectDuplicateAliases(plans); err != nil {
-			return err
-		}
 		allowed, err := s.allowedPlans(ctx, importer, plans, report)
 		if err != nil {
 			return err

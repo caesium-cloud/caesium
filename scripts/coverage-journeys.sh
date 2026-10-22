@@ -1791,6 +1791,13 @@ PY
   # only, which needs no policy file (this server mounts none) nor a catalog
   # connection.
   auth_pattern="${auth_pattern%)}|TestAuthJobdefApplyLateRefusalRollsBack|TestAuthLegacyJobCreateConfined|TestAuthTriggerTenancyWebhookPathRace|TestAuthTriggerPatchRechecksTenancy)"
+  # Namespace-aware DAG snapshots (identity-and-access B7): blame, topology
+  # and topology history of a moved job read by viewers confined to each side.
+  # Needs neither a policy file nor a catalog connection.
+  auth_pattern="${auth_pattern%)}|TestAuthDagSnapshotsFollowNamespaceMoves)"
+  # Canonical job aliases (W6-α): a whitespace alias is refused through
+  # `caesium job apply`, the apply route and the legacy create route.
+  local_pattern="${local_pattern%)}|TestJobApplyRejectsNonCanonicalAlias)"
 
   local -a local_named_passes=(
     TestCaesiumWhyExplainsHitAndMiss
@@ -1820,6 +1827,7 @@ PY
     TestNamespaceQuotaRefusesRetryAtCap
     TestNamespaceQuotaBackfillWaitsAndCompletes
     TestJobQueueCancelEndpointDeletesUnclaimedRowOnly
+    TestJobApplyRejectsNonCanonicalAlias
   )
   local -a auth_named_passes=(
     TestIncidentCLIListJSONStdout
@@ -1846,6 +1854,7 @@ PY
     TestAuthLegacyJobCreateConfined
     TestAuthTriggerTenancyWebhookPathRace
     TestAuthTriggerPatchRechecksTenancy
+    TestAuthDagSnapshotsFollowNamespaceMoves
   )
   local -a distributed_named_passes=(
     TestNodeWorkersRoute

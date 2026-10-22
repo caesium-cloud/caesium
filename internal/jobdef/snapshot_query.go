@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/caesium-cloud/caesium/internal/authz"
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/google/uuid"
 	"gorm.io/gorm"
@@ -25,11 +26,26 @@ func NewSnapshotQuery(ctx context.Context, conn *gorm.DB) *SnapshotQuery {
 	return &SnapshotQuery{ctx: ctx, db: conn}
 }
 
+// scoped is the base query of every read. Under a history scope
+// (authz.WithHistoryScope, identity-and-access B7) only snapshots written in a
+// namespace the caller may read are returned. A legacy snapshot records no
+// namespace and its owner cannot be recovered, so it is withheld from every
+// confined caller, including one that reads "default" (NamespaceFilter alone
+// would count a NULL namespace as default). Unrestricted contexts are not
+// narrowed, so their queries are unchanged.
+func (q *SnapshotQuery) scoped() *gorm.DB {
+	db := q.db.WithContext(q.ctx)
+	if !authz.Restricted(q.ctx) {
+		return db
+	}
+	return authz.NamespaceFilter(db, "namespace").Where("namespace IS NOT NULL AND namespace <> ''")
+}
+
 // Latest returns the most-recently written snapshot for jobID, or
 // gorm.ErrRecordNotFound when no snapshot exists.
 func (q *SnapshotQuery) Latest(jobID uuid.UUID) (*models.DagSnapshot, error) {
 	var snap models.DagSnapshot
-	err := q.db.WithContext(q.ctx).
+	err := q.scoped().
 		Where("job_id = ?", jobID).
 		Order("created_at desc").
 		Limit(1).
@@ -44,7 +60,7 @@ func (q *SnapshotQuery) Latest(jobID uuid.UUID) (*models.DagSnapshot, error) {
 // gorm.ErrRecordNotFound when none matches.
 func (q *SnapshotQuery) ByContentHash(jobID uuid.UUID, contentHash string) (*models.DagSnapshot, error) {
 	var snap models.DagSnapshot
-	err := q.db.WithContext(q.ctx).
+	err := q.scoped().
 		Where("job_id = ? AND content_hash = ?", jobID, contentHash).
 		Order("created_at desc").
 		Limit(1).
@@ -62,7 +78,7 @@ func (q *SnapshotQuery) ByGitCommit(jobID uuid.UUID, commit string) (*models.Dag
 		return nil, fmt.Errorf("commit must not be empty")
 	}
 	var snap models.DagSnapshot
-	err := q.db.WithContext(q.ctx).
+	err := q.scoped().
 		Where("job_id = ? AND git_commit = ?", jobID, commit).
 		Order("created_at desc").
 		Limit(1).
@@ -77,7 +93,7 @@ func (q *SnapshotQuery) ByGitCommit(jobID uuid.UUID, commit string) (*models.Dag
 // (newest first).
 func (q *SnapshotQuery) List(jobID uuid.UUID) ([]models.DagSnapshot, error) {
 	snaps := make([]models.DagSnapshot, 0)
-	err := q.db.WithContext(q.ctx).
+	err := q.scoped().
 		Where("job_id = ?", jobID).
 		Order("created_at desc").
 		Find(&snaps).Error
