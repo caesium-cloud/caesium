@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	freshnesspkg "github.com/caesium-cloud/caesium/internal/freshness"
 	"github.com/caesium-cloud/caesium/internal/models"
 	triggerevent "github.com/caesium-cloud/caesium/internal/trigger/event"
 	"github.com/caesium-cloud/caesium/pkg/env"
@@ -22,7 +23,7 @@ func TestIngestRoutesEventWithAPIKey(t *testing.T) {
 
 	original := routeEvent
 	originalArrival := observeEventArrival
-	routeEvent = func(_ context.Context, evt *models.IngestedEvent) (*triggerevent.RouteResult, error) {
+	routeEvent = func(_ context.Context, evt *models.IngestedEvent, _ ...triggerevent.RouteOption) (*triggerevent.RouteResult, error) {
 		require.Equal(t, "order.created", evt.Type)
 		require.Equal(t, "integration", evt.Source)
 		require.JSONEq(t, `{"id":"ord-1"}`, string(evt.Data))
@@ -35,7 +36,7 @@ func TestIngestRoutesEventWithAPIKey(t *testing.T) {
 			},
 		}, nil
 	}
-	observeEventArrival = func(context.Context, *models.IngestedEvent) error { return nil }
+	observeEventArrival = func(context.Context, *models.IngestedEvent, ...freshnesspkg.ObserveOption) error { return nil }
 	t.Cleanup(func() {
 		routeEvent = original
 		observeEventArrival = originalArrival
@@ -80,7 +81,7 @@ func TestIngestRejectsOversizedBodyBeforeRouting(t *testing.T) {
 	t.Setenv("CAESIUM_WEBHOOK_MAX_BODY_SIZE", "8B")
 	require.NoError(t, env.Process())
 	original := routeEvent
-	routeEvent = func(context.Context, *models.IngestedEvent) (*triggerevent.RouteResult, error) {
+	routeEvent = func(context.Context, *models.IngestedEvent, ...triggerevent.RouteOption) (*triggerevent.RouteResult, error) {
 		t.Fatal("oversized event reached routing")
 		return nil, nil
 	}

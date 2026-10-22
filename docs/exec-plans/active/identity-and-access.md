@@ -866,7 +866,9 @@ translated into cluster-wide bindings and behaviour is unchanged.
       `api/rest/controller/auth/key_rotate.go`, `api/rest/controller/auth/sso.go`,
       `cmd/auth/key_create.go`, `cmd/auth/key_list.go`, `test/auth_keys_test.go`.
       Depends on: A2 + A3.
-- [ ] A6. Deprecate the static shared secrets: `CAESIUM_MANUAL_TRIGGER_API_KEY` and
+- [x] A6. (W7-α: principal decides, the secret is only audited; ingest, fire,
+      arrivals and the webhook/lifecycle bridges confined at admission.)
+      Deprecate the static shared secrets: `CAESIUM_MANUAL_TRIGGER_API_KEY` and
       `CAESIUM_EVENT_INGEST_API_KEY` still work for one release, log a startup
       deprecation naming the replacement (a runner key confined to a namespace or job
       list), and audit their requests with actors `legacy:manual-trigger` /

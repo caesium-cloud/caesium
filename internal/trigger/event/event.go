@@ -46,6 +46,9 @@ type EventTrigger struct {
 	runJob          func(context.Context, *models.Job, map[string]string) error
 	deferLaunch     bool
 	maxTriggerDepth int
+	// startOptions are added to every run admission (the router's delivery
+	// scope guard, identity-and-access A6).
+	startOptions []runstorage.StartOption
 }
 
 type Option func(*EventTrigger)
@@ -87,6 +90,12 @@ func WithRunJob(fn func(context.Context, *models.Job, map[string]string) error) 
 func WithMaxTriggerDepth(max int) Option {
 	return func(t *EventTrigger) {
 		t.maxTriggerDepth = max
+	}
+}
+
+func withStartOptions(opts ...runstorage.StartOption) Option {
+	return func(t *EventTrigger) {
+		t.startOptions = append(append([]runstorage.StartOption(nil), t.startOptions...), opts...)
 	}
 }
 
@@ -165,7 +174,8 @@ func (t *EventTrigger) FireWithParams(ctx context.Context, params map[string]str
 		}
 
 		runtimeParams := cloneParams(mergedParams)
-		runRecord, err := t.runStoreFactory().StartWithContext(ctx, jobModel.ID, &t.id, runstorage.WithStartParams(runtimeParams))
+		startOpts := append([]runstorage.StartOption{runstorage.WithStartParams(runtimeParams)}, t.startOptions...)
+		runRecord, err := t.runStoreFactory().StartWithContext(ctx, jobModel.ID, &t.id, startOpts...)
 		if err != nil {
 			// The upstream-hold gate reports its own reason: it also returns
 			// ErrRunSkipped (ErrRunHeldUpstream wraps it), and telling an

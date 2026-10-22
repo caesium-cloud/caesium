@@ -1819,6 +1819,10 @@ PY
   # scenarios need no policy file; the refusal scenario spends two limiter
   # windows and runs on the agent lane only.
   auth_pattern="${auth_pattern%)}|TestAuthCLILoginManualCodeFlow|TestAuthCLILoginLoopbackFlow)"
+  # Deprecated shared secrets (identity-and-access A6): a principal presenting
+  # the ingest and fire secrets is audited under the legacy actors and read
+  # back through `caesium auth audit`. Needs no policy file.
+  auth_pattern="${auth_pattern%)}|TestAuthLegacySecretAudited)"
 
   local -a local_named_passes=(
     TestCaesiumWhyExplainsHitAndMiss
@@ -1881,12 +1885,16 @@ PY
     TestAuthAggregateRedactionConfinedToOwnNamespaces
     TestAuthCLILoginManualCodeFlow
     TestAuthCLILoginLoopbackFlow
+    TestAuthLegacySecretAudited
   )
   local -a distributed_named_passes=(
     TestNodeWorkersRoute
     TestAutomaticRetryDelayConstantAndBackoff
+    TestReplayIntoMovedNamespaceDropsOldFreshnessViews
   )
   distributed_pattern='TestIntegrationTestSuite/(TestRunConcurrencyStrategies|TestPriorityRunStartSurfacesAndCronDefault|TestFanOut|TestPlainFailure|TestSecretLogs|TestHaltPolicy|TestReplaceCancel|TestRetryAfterApplyExecutesRegisteredCommand|TestRetryValidatesAgainstTheRegisteredOutputSchema|TestDataAssertionsMetricsPersisted|TestResourceStats|TestNodeWorkersRoute|TestAutomaticRetryDelayConstantAndBackoff)'
+  # identity-and-access W7-ε: a moved-namespace replay re-executes (distributed only).
+  distributed_pattern="${distributed_pattern%)}|TestReplayIntoMovedNamespaceDropsOldFreshnessViews)"
   owner_pattern='TestIntegrationTestSuite/(TestFanOut|TestPlainFailure|TestSecretLogs|TestHaltPolicy|TestResourceStats)'
 
   local local_min_pass=39

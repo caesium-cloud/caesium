@@ -12,6 +12,7 @@ import (
 
 	"github.com/caesium-cloud/caesium/internal/auth/policy"
 	"github.com/caesium-cloud/caesium/internal/models"
+	schema "github.com/caesium-cloud/caesium/pkg/jobdef"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 	"gorm.io/driver/postgres"
@@ -443,10 +444,15 @@ func TestPostgresConfinedRunCheckWithSaturatedWriterPool(t *testing.T) {
 	f := &tenancyFixture{t: t, db: db, importer: NewImporter(db)}
 	alias := uniqueName("contested")
 	f.mustApply(alias, "marketing", "")
-	def := f.def(alias, "marketing", "")
-	opts := &ApplyOptions{NamespaceAllowlist: []string{"marketing"}}
+	// One definition per writer, built here on the test goroutine: Validate
+	// normalises a definition in place, so writers sharing one race.
+	defs := make(chan *schema.Definition, poolSize)
+	for range poolSize {
+		defs <- f.def(alias, "marketing", "")
+	}
 	apply := func() error {
-		_, err := f.importer.ApplyConfinedBatch(context.Background(), []BatchPlan{{Def: def, Opts: opts}}, ConfinedBatchOptions{})
+		opts := &ApplyOptions{NamespaceAllowlist: []string{"marketing"}}
+		_, err := f.importer.ApplyConfinedBatch(context.Background(), []BatchPlan{{Def: <-defs, Opts: opts}}, ConfinedBatchOptions{})
 		return err
 	}
 

@@ -110,13 +110,6 @@ func identityRoute(role models.Role) RoutePolicy {
 	return RoutePolicy{Role: role, Class: RouteClassIdentity}
 }
 
-// pendingOn marks a route fail-closed for confined principals until the named
-// plan item lands (see RoutePolicy.PendingItem).
-func (p RoutePolicy) pendingOn(item string) RoutePolicy {
-	p.PendingItem = item
-	return p
-}
-
 const (
 	viewer   = models.RoleViewer
 	runner   = models.RoleRunner
@@ -132,8 +125,9 @@ const (
 // handler acts on (api/middleware/auth_namespace_resolvers.go holds one
 // resolver per namespaced route); a route whose response can include rows
 // owned by another namespace (directly, via a shared trigger, via run history
-// under a moved job, or via a global graph) is pendingOn the plan item that
-// filters it.
+// under a moved job, or via a global graph) must be filtered by its handler,
+// or carry a RoutePolicy.PendingItem naming the plan item that filters it
+// (none remain since A6).
 var endpointPolicy = map[string]RoutePolicy{
 	// Public — no auth required (handled by skip list, not here)
 
@@ -314,9 +308,11 @@ var endpointPolicy = map[string]RoutePolicy{
 	"POST /v1/jobs/:id/runs/:id/callbacks/retry":                namespacedRoute(runner),
 	// Backfill dates deduplicate against the backfill's own namespace (B4).
 	"POST /v1/jobs/:id/backfill": namespacedRoute(runner),
-	// Ingest routes an event to every matching job (A6 splits delivery by
-	// namespace and reports skips).
-	"POST /v1/events":            namespacedRoute(runner).pendingOn("A6"),
+	// Ingest delivers only to the matching jobs in namespaces where the caller
+	// holds runner (and, for a job-scoped key, to its exact aliases); the
+	// handler reports the rest as skipped (A6). The middleware requires
+	// runner somewhere; the router confines delivery and admission.
+	"POST /v1/events":            namespacedRoute(runner),
 	"POST /v1/triggers/:id/fire": namespacedRoute(runner),
 
 	// Operator

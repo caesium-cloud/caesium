@@ -62,7 +62,7 @@ For the auth management CLI, supply credentials through `CAESIUM_API_KEY`. The
 | `POST /jobs/:id/runs/:run_id/callbacks/retry` | Retry failed callbacks. |
 | `POST /jobdefs/apply`, `POST /jobdefs/diff`, `POST /jobdefs/lint` | Apply, diff, or lint manifests against the server's catalog. With a policy file loaded, lint and apply reject undeclared namespaces. The diff response lists the `namespaces` an apply would touch. Lint and diff answer a namespace-confined caller from its own namespaces only ([identity-and-access.md](identity-and-access.md#route-classes-and-enforcement)). Lint reports, and diff rejects with 400, each `secret://` reference its namespace's `secrets.allow` rules deny, redacted ([Scoped secrets](identity-and-access.md#scoped-secrets)); apply does not check them. A confined writer's apply is one transaction (definitions and prune), prunes only its own namespaces, and gets contract findings about other namespaces' jobs only as `withheld_findings` / `withheld_contract_warnings` counts. Apply, `POST /jobs` and `PATCH /triggers/:id` enforce trigger tenancy: 403 for a confined writer whose trigger or webhook path also serves a job outside its reach, and, with a policy file, 409 when a webhook path would be subscribed from a second namespace ([identity-and-access.md](identity-and-access.md#confined-job-writes-and-trigger-tenancy)); server lint reports both. |
 | `GET /triggers`, `POST /triggers`, `GET /triggers/:id`, `PATCH /triggers/:id` | Manage triggers. |
-| `POST /triggers/:id/fire` | Fire a trigger manually with optional params. |
+| `POST /triggers/:id/fire` | Fire a trigger manually with optional params. Needs runner in every namespace of the trigger's jobs; a confined caller fires only the jobs still in its scope, re-checked at each run's admission ([identity-and-access.md](identity-and-access.md#event-ingest-manual-fire-and-the-shared-secrets)). |
 | `GET /triggers/:id/events` | Events matched by an event trigger. |
 | `GET /atoms`, `POST /atoms`, `GET /atoms/:id`, `DELETE /atoms/:id` | The container specs steps resolve to. |
 
@@ -75,7 +75,7 @@ For the auth management CLI, supply credentials through `CAESIUM_API_KEY`. The
 | `GET /jobs/:id/cache`, `DELETE /jobs/:id/cache`, `DELETE /jobs/:id/cache/:task_name` | Inspect or invalidate a job's task cache. See [job-definitions.md](job-definitions.md#caching). |
 | `POST /cache/prune` | Prune expired cache entries. |
 | `GET /events` | Subscribe to lifecycle events over SSE. A namespace-confined caller receives only run and task events of its namespaces' runs (see [identity-and-access.md](identity-and-access.md#collections-and-history-under-a-job)). |
-| `POST /events`, `GET /events/ingested` | Ingest an external event for event triggers; list ingested events. |
+| `POST /events`, `GET /events/ingested` | Ingest an external event for event triggers; list ingested events. Ingest delivers only to jobs inside the caller's runner scope and reports `delivered`, `skipped` and `skipped_namespaces` ([identity-and-access.md](identity-and-access.md#event-ingest-manual-fire-and-the-shared-secrets)). |
 | `POST /hooks/*` | Webhook receiver for HTTP triggers. |
 
 ## Run queries and receipts

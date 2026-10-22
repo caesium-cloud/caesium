@@ -372,10 +372,16 @@ steps:
 
 ```bash
 curl -X POST "$CAESIUM/v1/events" \
-  -H "Authorization: Bearer $CAESIUM_EVENT_INGEST_API_KEY" \
+  -H "Authorization: Bearer $CAESIUM_API_KEY" \
   -H 'Content-Type: application/json' \
   -d '{"type":"order.closed","source":"temporal","data":{"order_id":"o-123"}}'
 ```
+
+`CAESIUM_API_KEY` is a `runner` key confined to the namespaces (or jobs) the
+workflow may reach. The event goes only to matching jobs inside that scope, and
+the response counts the rest as `skipped`. The older
+`CAESIUM_EVENT_INGEST_API_KEY` shared secret is deprecated (see
+[identity-and-access.md](identity-and-access.md#event-ingest-manual-fire-and-the-shared-secrets)).
 
 The workflow does not need to know which jobs exist; adding a consumer is a
 YAML change on the Caesium side. `POST /v1/events` has no idempotency key, so a

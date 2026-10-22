@@ -17,6 +17,7 @@ import (
 
 	authmw "github.com/caesium-cloud/caesium/api/middleware"
 	jsvc "github.com/caesium-cloud/caesium/api/rest/service/job"
+	freshnesspkg "github.com/caesium-cloud/caesium/internal/freshness"
 	"github.com/caesium-cloud/caesium/internal/metrics"
 	metrictestutil "github.com/caesium-cloud/caesium/internal/metrics/testutil"
 	"github.com/caesium-cloud/caesium/internal/models"
@@ -63,8 +64,10 @@ func stubWebhookRouter(t *testing.T, fn func(context.Context, *models.IngestedEv
 	original := routeWebhookEvent
 	originalArrival := observeWebhookArrival
 	originalRecorder := recordWebhookReceipt
-	routeWebhookEvent = fn
-	observeWebhookArrival = func(context.Context, *models.IngestedEvent) error { return nil }
+	routeWebhookEvent = func(ctx context.Context, evt *models.IngestedEvent, _ ...triggerevent.RouteOption) (*triggerevent.RouteResult, error) {
+		return fn(ctx, evt)
+	}
+	observeWebhookArrival = func(context.Context, *models.IngestedEvent, ...freshnesspkg.ObserveOption) error { return nil }
 	recordWebhookReceipt = func(context.Context, *models.WebhookEvent) error { return nil }
 	t.Cleanup(func() {
 		routeWebhookEvent = original
