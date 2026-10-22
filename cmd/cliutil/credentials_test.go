@@ -50,7 +50,24 @@ func TestCanonicalServer(t *testing.T) {
 		" https://x.example/prefix// ":    "https://x.example/prefix",
 		"https://x.example/a?b=c#d":       "https://x.example/a",
 		"http://127.0.0.1:8080/caesium/":  "http://127.0.0.1:8080/caesium",
-		"https://caesium.example.com:443": "https://caesium.example.com:443",
+		"https://caesium.example.com:443": "https://caesium.example.com",
+		"http://caesium.example.com:80/":  "http://caesium.example.com",
+		"http://caesium.example.com:443":  "http://caesium.example.com:443",
+		"https://caesium.example.com:80":  "https://caesium.example.com:80",
+		"HTTP://[::1]:80/x":               "http://[::1]/x",
+		"http://[::1]:8080":               "http://[::1]:8080",
+		"https://user:pw@host.example/a":  "https://host.example/a",
+		// Escaped path characters stay escaped: decoding them would turn
+		// %23 into a fragment, %3F into a query and %2F into a separator.
+		"https://host/team%23blue":  "https://host/team%23blue",
+		"https://host/team%23blue/": "https://host/team%23blue",
+		"https://host/a%3Fb":        "https://host/a%3Fb",
+		"https://host/a%2Fb/":       "https://host/a%2Fb",
+		"https://host/a%2fb":        "https://host/a%2Fb",
+		"https://host/a%2F/":        "https://host/a%2F",
+		"https://host/My%20Team":    "https://host/My%20Team",
+		"https://host/My Team":      "https://host/My%20Team",
+		"https://HOST/Case/Kept":    "https://host/Case/Kept",
 	} {
 		got, err := CanonicalServer(in)
 		require.NoError(t, err, in)
@@ -210,6 +227,29 @@ func TestResolveAPIKeyPrecedence(t *testing.T) {
 	empty := make(http.Header)
 	SetAuthorization(other, empty, "")
 	require.Empty(t, empty.Get("Authorization"))
+}
+
+// The resolver and the store key a login by the same CanonicalServer, so a
+// login saved under one spelling of an escaped-path server is found under
+// another, and a path that differs only by an escape is a different server.
+func TestResolveAPIKeyMatchesEscapedServerPaths(t *testing.T) {
+	isolateConfig(t)
+	store, err := LoadCredentials()
+	require.NoError(t, err)
+	require.NoError(t, store.Put(StoredCredential{Server: "HTTPS://Host.Example:443/team%23blue/", Key: "team-key", ExpiresAt: time.Now().Add(time.Hour)}))
+	require.NoError(t, store.Save())
+
+	cmd, _ := newResolverCommand("https://host.example/team%23blue")
+	require.Equal(t, "team-key", ResolveAPIKey(cmd, "", APIKeyEnvVar))
+	for _, other := range []string{"https://host.example/team", "https://host.example/team%2Fblue", "https://host.example/team%23blue/x"} {
+		c, _ := newResolverCommand(other)
+		require.Empty(t, ResolveAPIKey(c, "", APIKeyEnvVar), other)
+	}
+	reloaded, err := LoadCredentials()
+	require.NoError(t, err)
+	cred, ok := reloaded.Lookup("https://host.example:443/team%23blue")
+	require.True(t, ok)
+	require.Equal(t, "https://host.example/team%23blue", cred.Server)
 }
 
 func TestResolveAPIKeyIgnoresAnUnsafeCredentialsFile(t *testing.T) {

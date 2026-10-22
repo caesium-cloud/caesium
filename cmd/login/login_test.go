@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -34,6 +36,12 @@ type fakeServer struct {
 }
 
 func newFakeServer(t *testing.T) *fakeServer {
+	return newFakeServerAt(t, "")
+}
+
+// newFakeServerAt serves the fake under the decoded path prefix (e.g.
+// "/team#blue", reached as /team%23blue); requests outside it get 404.
+func newFakeServerAt(t *testing.T, prefix string) *fakeServer {
 	f := &fakeServer{logoutCode: http.StatusNoContent}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/auth/cli/exchange", func(w http.ResponseWriter, r *http.Request) {
@@ -65,7 +73,20 @@ func newFakeServer(t *testing.T) *fakeServer {
 		}
 		_, _ = w.Write([]byte(`{"kind":"user","subject":"mia@example.com","cluster_role":"","grants":{"marketing":"operator"},"namespaces":["marketing"],"is_scoped":false}`))
 	})
-	f.Server = httptest.NewServer(mux)
+	var handler http.Handler = mux
+	if prefix != "" {
+		handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			rest, ok := strings.CutPrefix(r.URL.Path, prefix)
+			if !ok || !strings.HasPrefix(rest, "/") {
+				http.NotFound(w, r)
+				return
+			}
+			r2 := r.Clone(r.Context())
+			r2.URL.Path, r2.URL.RawPath = rest, ""
+			mux.ServeHTTP(w, r2)
+		})
+	}
+	f.Server = httptest.NewServer(handler)
 	t.Cleanup(f.Close)
 	return f
 }
@@ -200,6 +221,86 @@ func TestNoBrowserThenCodeLogsIn(t *testing.T) {
 
 	cmd, _, _ = testCommand()
 	require.ErrorContains(t, runLogin(cmd, nil), "no pending login", "the pending verifier is single use")
+}
+
+// A server mounted under an escaped path keeps its escapes in every request
+// login, whoami and logout send: %23 must not become a fragment that swallows
+// the endpoint.
+func TestLoginWhoamiLogoutUnderAnEscapedServerPath(t *testing.T) {
+	srv := newFakeServerAt(t, "/team#blue")
+	server := srv.URL + "/team%23blue"
+	resetFlags(t, server+"/")
+	loginNoBrowser = true
+	cmd, stdout, _ := testCommand()
+	require.NoError(t, runLogin(cmd, nil))
+	start, err := url.Parse(strings.TrimSpace(stdout.String()))
+	require.NoError(t, err)
+	require.Equal(t, "/team%23blue/auth/cli/start", start.EscapedPath())
+	require.Empty(t, start.Fragment)
+	srv.mu.Lock()
+	srv.challenge = start.Query().Get("challenge")
+	srv.mu.Unlock()
+
+	loginNoBrowser, loginCode = false, testCode
+	cmd, _, stderr := testCommand()
+	require.NoError(t, runLogin(cmd, nil))
+	require.Contains(t, stderr.String(), "Logged in to "+server+" as mia@example.com")
+	key, ok := storedKey(t, server)
+	require.True(t, ok)
+	require.Equal(t, testKey, key)
+
+	cmd, stdout, _ = testCommand()
+	cmd.Flags().String("server", server+"/", "")
+	require.NoError(t, WhoamiCmd.RunE(cmd, nil))
+	require.Contains(t, stdout.String(), "mia@example.com")
+
+	cmd, _, _ = testCommand()
+	require.NoError(t, LogoutCmd.RunE(cmd, nil))
+	require.Equal(t, []string{"Bearer " + testKey}, srv.logouts)
+}
+
+// A key the exchange minted but the CLI could not save is revoked with
+// itself as the bearer, so no active key is left that logout cannot reach;
+// both outcomes are reported, never the key.
+func TestFailedSaveRevokesTheExchangedKey(t *testing.T) {
+	srv := newFakeServer(t)
+	resetFlags(t, srv.URL)
+	// $XDG_CONFIG_HOME/caesium is a regular file: the store cannot be created.
+	xdg := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(xdg, "caesium"), []byte("not a directory"), 0o600))
+	t.Setenv("XDG_CONFIG_HOME", xdg)
+	verifier := "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"
+	srv.mu.Lock()
+	srv.challenge = s256(verifier)
+	srv.mu.Unlock()
+
+	cmd, stdout, stderr := testCommand()
+	err := exchangeAndStore(cmd, srv.URL, testCode, verifier)
+	require.ErrorContains(t, err, "could not save the new key, so it was revoked on the server")
+	require.ErrorContains(t, err, "create credentials directory")
+	require.NotContains(t, err.Error(), testKey, "the key is never printed")
+	require.NotContains(t, stdout.String()+stderr.String(), testKey)
+	require.Equal(t, []string{"Bearer " + testKey}, srv.logouts, "the unsaved key revokes itself")
+
+	srv.logoutCode = http.StatusInternalServerError
+	cmd, stdout, stderr = testCommand()
+	err = exchangeAndStore(cmd, srv.URL, testCode, verifier)
+	require.ErrorContains(t, err, "create credentials directory")
+	require.ErrorContains(t, err, "revoking it on the server also failed")
+	require.ErrorContains(t, err, "logout failed (500)")
+	require.ErrorContains(t, err, testKey[:13]+"…", "the error names the key by its prefix")
+	require.NotContains(t, err.Error(), testKey, "the key is never printed")
+	require.NotContains(t, stdout.String()+stderr.String(), testKey)
+	require.Len(t, srv.logouts, 2)
+
+	// A cancelled command still gets its bounded revoke attempt.
+	srv.logoutCode = http.StatusNoContent
+	ctx, cancel := context.WithCancel(context.Background())
+	cmd, _, _ = testCommand()
+	cmd.SetContext(ctx)
+	cancel()
+	require.NoError(t, revokeUnsavedKey(cmd, srv.URL, testKey))
+	require.Len(t, srv.logouts, 3)
 }
 
 // The confirmation page shows `caesium login --code <c>` without --server:

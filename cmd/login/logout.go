@@ -2,10 +2,8 @@ package login
 
 import (
 	"fmt"
-	"net/http"
 
 	"github.com/caesium-cloud/caesium/cmd/cliutil"
-	"github.com/caesium-cloud/caesium/internal/clihttp"
 	"github.com/spf13/cobra"
 )
 
@@ -34,10 +32,7 @@ var LogoutCmd = &cobra.Command{
 			_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "Not logged in to %s.\n", server)
 			return nil
 		}
-		headers := make(http.Header)
-		headers.Set("Authorization", "Bearer "+cred.Key)
-		body, status, readErr := clihttp.Exchange(cmd.Context(), boundedClient(), http.MethodPost, server+"/auth/logout", nil, headers)
-		revokeErr := clihttp.ResponseError("logout", status, body, readErr)
+		revokeErr := revokeKey(cmd.Context(), server, cred.Key)
 
 		// Remove only the entry this logout revoked, from the file as it is
 		// now (another process may have changed it meanwhile).

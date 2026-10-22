@@ -86,8 +86,12 @@ func CredentialsPath() (string, error) {
 	return filepath.Join(dir, credentialsFileName), nil
 }
 
-// CanonicalServer is the key a server URL is stored under: lower-case scheme
-// and host, no trailing slash, no query or fragment.
+// CanonicalServer is both the key a server URL is stored under and the base
+// URL login, logout and whoami send requests to: lower-case scheme and host,
+// the scheme's default port dropped, the path kept in its escaped form (so
+// `%23`, `%3F` and `%2F` stay inside the path rather than turning into a
+// fragment, a query or a separator) with upper-case percent escapes, no
+// trailing slash, no user info, query or fragment.
 func CanonicalServer(raw string) (string, error) {
 	raw = strings.TrimSpace(raw)
 	u, err := url.Parse(raw)
@@ -98,7 +102,35 @@ func CanonicalServer(raw string) (string, error) {
 	if scheme != "http" && scheme != "https" {
 		return "", fmt.Errorf("server %q must be an absolute http(s) URL", raw)
 	}
-	return scheme + "://" + strings.ToLower(u.Host) + strings.TrimRight(u.Path, "/"), nil
+	host := strings.ToLower(u.Host)
+	if port := u.Port(); (scheme == "http" && port == "80") || (scheme == "https" && port == "443") {
+		host = strings.TrimSuffix(host, ":"+port)
+	}
+	return scheme + "://" + host + upperPercentEscapes(strings.TrimRight(u.EscapedPath(), "/")), nil
+}
+
+// upperPercentEscapes upper-cases the hex digits of every %XX escape in an
+// already-escaped path, so `%2f` and `%2F` canonicalise alike.
+func upperPercentEscapes(path string) string {
+	if !strings.Contains(path, "%") {
+		return path
+	}
+	b := []byte(path)
+	for i := 0; i+2 < len(b); i++ {
+		if b[i] == '%' {
+			b[i+1] = upperHex(b[i+1])
+			b[i+2] = upperHex(b[i+2])
+			i += 2
+		}
+	}
+	return string(b)
+}
+
+func upperHex(c byte) byte {
+	if c >= 'a' && c <= 'f' {
+		return c - 'a' + 'A'
+	}
+	return c
 }
 
 // LoadCredentials reads the credentials file; a missing file is an empty

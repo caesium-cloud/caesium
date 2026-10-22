@@ -293,11 +293,44 @@ func exchangeAndStore(cmd *cobra.Command, server, code, verifier string) error {
 			Subject:   resp.Subject,
 		})
 	}); err != nil {
-		return err
+		// The key is live on the server but nothing local holds it, so
+		// `caesium logout` could never revoke it: revoke it now, with the key
+		// itself as the bearer, and report both outcomes (never the key).
+		if revokeErr := revokeUnsavedKey(cmd, server, resp.Key); revokeErr != nil {
+			return fmt.Errorf("login: could not save the new key (%w); revoking it on the server also failed (%v), so key %s… stays active until it expires at %s or an admin revokes it",
+				err, revokeErr, resp.KeyPrefix, resp.ExpiresAt.Format(time.RFC3339))
+		}
+		return fmt.Errorf("login: could not save the new key, so it was revoked on the server: %w", err)
 	}
 	_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "Logged in to %s as %s (key %s…, expires %s). Saved to %s.\n",
 		server, resp.Subject, resp.KeyPrefix, resp.ExpiresAt.Local().Format(time.RFC1123), path)
 	return nil
+}
+
+// unsavedKeyRevokeTimeout bounds the best-effort revoke of a key login
+// obtained but could not save.
+const unsavedKeyRevokeTimeout = 10 * time.Second
+
+// revokeUnsavedKey revokes key through POST /auth/logout (the key is its own
+// bearer). It runs even when the command's context was cancelled, under its
+// own deadline.
+func revokeUnsavedKey(cmd *cobra.Command, server, key string) error {
+	parent := cmd.Context()
+	if parent == nil {
+		parent = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(parent), unsavedKeyRevokeTimeout)
+	defer cancel()
+	return revokeKey(ctx, server, key)
+}
+
+// revokeKey asks the server to revoke key: POST /auth/logout with key as the
+// bearer.
+func revokeKey(ctx context.Context, server, key string) error {
+	headers := make(http.Header)
+	headers.Set("Authorization", "Bearer "+key)
+	body, status, readErr := clihttp.Exchange(ctx, boundedClient(), http.MethodPost, server+"/auth/logout", nil, headers)
+	return clihttp.ResponseError("logout", status, body, readErr)
 }
 
 // boundedClient is http.DefaultClient (so tests can replace its transport)

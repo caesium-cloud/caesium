@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"net/http"
 	"sort"
-	"strings"
 
 	"github.com/caesium-cloud/caesium/cmd/cliutil"
 	"github.com/caesium-cloud/caesium/internal/clihttp"
@@ -27,7 +26,10 @@ var WhoamiCmd = &cobra.Command{
 		"grants per namespace. Credentials resolve as for every command: --api-key, then " +
 		"CAESIUM_API_KEY, then the credential caesium login stored for --server.",
 	RunE: func(cmd *cobra.Command, _ []string) error {
-		server := strings.TrimRight(strings.TrimSpace(whoamiServer), "/")
+		server, err := cliutil.CanonicalServer(whoamiServer)
+		if err != nil {
+			return err
+		}
 		headers := make(http.Header)
 		cliutil.SetAuthorization(cmd, headers, whoamiAPIKey)
 		body, status, readErr := clihttp.Exchange(cmd.Context(), boundedClient(), http.MethodGet, server+"/auth/whoami", nil, headers)

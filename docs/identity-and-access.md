@@ -1247,8 +1247,13 @@ started yourself.
 
 The key is stored in `$XDG_CONFIG_HOME/caesium/credentials.yaml`
 (`~/.config/caesium/credentials.yaml` when `XDG_CONFIG_HOME` is unset), mode
-`0600` in a `0700` directory, keyed by server URL. The CLI refuses a
-credentials file other users can read. Every command resolves its credential
+`0600` in a `0700` directory, keyed by server URL (lower-case scheme and host,
+the default port dropped, the path kept percent-encoded without a trailing
+slash, no query or fragment). The CLI refuses a credentials file other users
+can read. If the exchange succeeds but the key cannot be saved, the CLI
+revokes that key on the server (`POST /auth/logout` with the key as the
+bearer) and exits non-zero; if that revoke fails too, the error names the key
+by its prefix so an admin can revoke it. Every command resolves its credential
 the same way: `--api-key`, then `CAESIUM_API_KEY`, then the stored login for
 its `--server`; an expired stored login is not sent. `caesium whoami` prints
 the principal and grants (`--json` prints the `/auth/whoami` body on stdout).
