@@ -1063,6 +1063,7 @@ integration-up-agent: build-stress build-test build-triage-agent
         -v {{ repo_dir }}/.tmp/auth-policy:/etc/caesium/policy:ro \
         -e CAESIUM_AUTH_POLICY_FILE=/etc/caesium/policy/policy.yaml \
         -e CAESIUM_AUTH_POLICY_RELOAD_INTERVAL=1s \
+        -e CAESIUM_DATABASE_CONSOLE_ENABLED=true \
         -v "${CAESIUM_CONNECTORS_SERVER_CONFIG:-{{ repo_dir }}/test/fixtures/connectors/connections.yaml}:/etc/caesium/connectors/connections.yaml:ro" \
         -e CAESIUM_CONNECTORS_ENABLED=true \
         -e CAESIUM_CONNECTORS_CONFIG_FILE=/etc/caesium/connectors/connections.yaml \
