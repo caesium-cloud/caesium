@@ -357,7 +357,8 @@ sources unless a precompiled runner is explicitly selected.
 changes
   ├─ ui-test
   ├─ reagents ────────────────────── lint, unit-test (also need builder)
-  ├─ builder ─── connector-fixture-images ── connectors (also needs images, ui-test)
+  ├─ connectors (early browser preparation; validates producer handoff below)
+  ├─ builder ─── connector-fixture-images
   ├─ images ────────────────────┬─ integration (3 Docker shards + agent-auth + keycloak)
   │                              ├─ ui-e2e, ui-e2e-auth, ui-e2e-keycloak (also need ui-test)
   │                              ├─ helm/podman (3 full-suite shards each)
@@ -392,7 +393,7 @@ publish ← tag only, needs the full matrix and ci-ok
 | `ui-e2e-auth` | ubuntu-26.04 | `[ui-test, images]` | 45 | inline `docker run` | inline `docker run --name caesium-server-auth` |
 | `ui-e2e-keycloak` | ubuntu-26.04 | `[ui-test, images]` | 20 | `integration-up-keycloak`, then host Playwright `--project=keycloak` | Keycloak + `caesium-server-keycloak-test` via `integration-up-keycloak` |
 | `connector-fixture-images` | ubuntu-26.04 | `[changes, builder]` | 30 | Bake pinned fixture and retain candidate/image identity | none |
-| `connectors` | ubuntu-26.04 | `[changes, images, connector-fixture-images, ui-test]` | 45 | `integration-test-connectors` (advisory) | `integration-up-connectors` and three persistent Helm members on one kind node |
+| `connectors` | ubuntu-26.04 | `[changes]` | 45 | Producer handoff and `integration-test-connectors` (advisory) | `integration-up-connectors` and three persistent Helm members on one kind node |
 | `helm-integration-test` | ubuntu-26.04 | `[images, helm-lint]` | 60 | kind + `helm install` + `helm test` + full suite in three shards | kind pod via the Helm chart |
 | `helm-pod-replacement-test` | ubuntu-26.04 | `[changes, images, helm-lint]` | 45 | `scripts/helm-pod-replacement.sh` — kind + `helm install` at three replicas with retained PVCs, then replaces every pod and proves it rejoins (issue #493) | three kind pods via the Helm chart |
 | `podman-integration-test` | ubuntu-26.04 | `images` | 45 | inline `docker run` + full suite in three shards | inline `docker run --name caesium-server-podman` |
@@ -2348,11 +2349,14 @@ lanes; the full mutation script is not yet a CI job (G6 owns promotion).
 The `connectors` job runs on the existing broad `go`, `ui` or `ci` selectors
 for pull requests and merge groups; master/tag pushes select it too. Shared
 auth, admission, API and UI changes therefore exercise the lane without a new
-path-filter output. The `connector-fixture-images` job builds the pinned Temporal
-fixture alongside product images and publishes its candidate SHA and immutable
-image ID. The consumer loads that fixture plus product and integration runner
-artifacts, checks the fixture producer candidate and all three expected image
-IDs, installs the existing kind/Helm tools, then runs:
+path-filter output. The job starts after `changes` and prepares the browser on
+its own runner while the image producers work. The `connector-fixture-images`
+job builds the pinned Temporal fixture alongside product images and publishes
+its candidate SHA and immutable image ID. The consumer's owned handoff loads
+that fixture plus product and integration runner artifacts by their exact
+current-run artifact IDs, verifies their digests and candidate receipts, and
+checks all three expected image IDs before starting a server or cluster. With
+the existing kind/Helm tools installed, it runs:
 
 ```sh
 just tag=<candidate-image-tag> integration-test-connectors
@@ -2368,15 +2372,30 @@ the matching/skew/transition/repoint configuration scenario. The config proof
 uses three persistent Caesium replicas on one kind node; it does not claim a
 multi-host deployment. Default/auth Playwright projects remain separate.
 
-The browser hook performs one locked npm install and Chromium installation;
-CI requests its operating-system dependencies there. The loaded-image CI path
-freezes all three producer image IDs before running the independent config
-cluster alongside the HTTP/browser phase. Both owned process groups must finish
-successfully, and the collector compares the cluster's identities with the
-HTTP/browser phase's actual runtime observations before producing a report.
-Any failed phase or interruption stops and joins both groups, including cleanup.
-The local source-build path remains sequential and builds the fixture from the
-candidate. Neither path accepts a retagged image or a partial successful report.
+Browser preparation performs one locked npm install and Chromium installation,
+including its operating-system dependencies on the actual CI consumer runner.
+One foreground supervisor owns preparation, the producer handoff, and the
+fixture/config-cluster groups. Preparation can overlap both image production
+and the Go scenarios; the browser still requires successful preparation and
+all six real Go scenarios before it starts.
+
+The handoff requires `builder` and `ui-test` to succeed. Product and fixture
+artifacts become usable only after each producer's named final regular
+publication step and every preceding regular step succeeded. Cache export and
+other post-job cleanup may then overlap the consumer work. The handoff stays
+active until both complete producer jobs succeed and revalidates the same job,
+run/attempt and artifact identities before sealing success. A late producer
+failure or an inspection failure stops the lane; artifact readiness alone
+cannot release a successful report.
+
+The loaded-image path freezes all three producer image IDs before running the
+independent config cluster alongside the HTTP/browser phase. All owned groups
+must finish successfully, and the collector compares the cluster's identities
+with the HTTP/browser phase's actual runtime observations before producing a
+report. Any failed phase or interruption stops and joins the owned groups,
+including cleanup. The local source-build path remains sequential and builds
+the fixture from the candidate. Neither path accepts a retagged image or a
+partial successful report.
 
 The shared collector reduces retained source/image identities, raw provider
 effects/faults, receipt and configuration observations into `evidence.json`.

@@ -981,18 +981,20 @@ Temporal scenarios and the dedicated `connectors` browser project, requiring
 every selected case to pass once without skips or retries. It then runs the
 existing configuration-equality proof with three persistent Caesium members on
 one isolated kind node. Containers and cluster resources belong to this run.
-The browser hook installs the locked npm dependencies and Chromium once. Install
-the browser's operating-system dependencies separately on a new local host; CI
-explicitly requests Playwright's dependency installation in that hook.
+Browser preparation installs the locked npm dependencies and Chromium once.
+Install the browser's operating-system dependencies separately on a new local
+host; CI explicitly installs them on the runner that executes the browser.
 
-CI prepares the candidate's pinned Temporal fixture in a separate producer job
-alongside product images. The consumer checks the producer candidate and immutable
-fixture, server and runner image IDs before starting either proof. Only this
-loaded-image path may run the independent config cluster alongside the HTTP and
-browser phase. Both phases must finish successfully and their observed image
-identities must agree before evidence is collected. Failure or interruption stops
-both owned process groups and waits for their cleanup. Local source builds retain
-the sequential path above.
+CI starts browser preparation while separate jobs produce the candidate's
+pinned Temporal fixture and product images. The consumer verifies the current
+run's artifact digests, candidate receipts and immutable fixture, server and
+runner image IDs before starting either proof. Only this loaded-image path may
+run the independent config cluster alongside the HTTP and browser phase.
+Producer cache export and cleanup can finish in parallel, but both complete
+producer jobs and both proof phases must succeed before evidence is collected.
+Their observed image identities must agree. Any failure or interruption stops
+and joins the owned preparation, handoff and proof groups, including cleanup.
+Local source builds retain the sequential path above.
 
 Set `CAESIUM_CONNECTORS_ARTIFACTS` to an absolute empty directory to choose where
 the lane retains source/image identities, provider pins and effect journals,

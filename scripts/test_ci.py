@@ -823,7 +823,8 @@ class ConnectorsLaneWiringTests(unittest.TestCase):
         self.assertNotIn("connectors", EVIDENCE_LANES)
         self.assertNotIn("connectors", JOBS["ci-ok"]["needs"])
         self.assertNotIn("connectors", QUALIFICATION["RELEASE_REQUIRED_EVIDENCE"])
-        self.assertEqual(set(job["needs"]), {"changes", "images", "connector-fixture-images", "ui-test"})
+        self.assertEqual(job["needs"], ["changes"])
+        self.assertEqual(job['permissions'], {'contents': 'read', 'actions': 'read'})
 
     def test_connector_job_drives_tracked_recipe_and_uploads_only_public_artifacts(self):
         job = JOBS["connectors"]
@@ -834,23 +835,19 @@ class ConnectorsLaneWiringTests(unittest.TestCase):
                          "caesiumcloud/caesium-integration:${{ env.IMAGE_TAG }}-amd64")
         loaded = {step.get("with", {}).get("name") for step in job["steps"]
                   if step.get("uses") == "./.github/actions/load-docker-images"}
-        self.assertEqual(loaded, {"connector-fixture-amd64", "product-amd64", "integration-runner-amd64"})
+        self.assertEqual(loaded, set())
         run = run_step["run"]
-        self.assertIn("CAESIUM_CONNECTORS_EXPECTED_IMAGE_ID", run)
-        self.assertIn("$(cat .tmp/connectors-image-ids/test.txt)", run)
-        self.assertIn("$(cat .tmp/connectors-image-ids/integration-runner.txt)", run)
-        self.assertIn("CAESIUM_CONNECTORS_EXPECTED_RUNNER_IMAGE_ID", run)
-        self.assertIn("$(cat .tmp/connector-fixture-image-ids/fixture.txt)", run)
-        self.assertIn("$(cat .tmp/connector-fixture-image-ids/candidate-sha.txt)", run)
-        self.assertIn("CAESIUM_CONNECTORS_EXPECTED_FIXTURE_IMAGE_ID", run)
-        self.assertIn("CAESIUM_CONNECTORS_EXPECTED_FIXTURE_CANDIDATE_SHA", run)
-        identities = next(step for step in job["steps"]
-                          if step.get("with", {}).get("name") == "image-ids-amd64")
-        self.assertEqual(identities["with"]["path"], ".tmp/connectors-image-ids")
+        self.assertEqual(job['env']['CAESIUM_CONNECTORS_CI_HANDOFF'], 'true')
+        self.assertEqual(job['env']['CAESIUM_CONNECTORS_CI_HEAD_SHA'],
+                         '${{ github.event.pull_request.head.sha || github.sha }}')
+        self.assertEqual(run_step['env']['GH_TOKEN'], '${{ github.token }}')
+        self.assertFalse(any(step.get('uses') == 'actions/download-artifact@v8' for step in job['steps']))
+        self.assertEqual(job['timeout-minutes'], 45)
         producer = next(step["run"] for step in JOBS["images"]["steps"]
                         if step.get("name") == "Record release image identity")
         self.assertIn('"caesiumcloud/caesium:${{ env.IMAGE_TAG }}-amd64-test" >/tmp/image-ids-amd64/test.txt', producer)
         self.assertIn('"caesiumcloud/caesium-integration:${{ env.IMAGE_TAG }}-amd64" >/tmp/image-ids-amd64/integration-runner.txt', producer)
+        self.assertIn("'${{ github.sha }}' >/tmp/image-ids-amd64/candidate-sha.txt", producer)
         self.assertIn("just tag=${{ env.IMAGE_TAG }}-amd64 integration-test-connectors", run)
         self.assertNotIn("continue-on-error", job)
         uploads = [step for step in job["steps"]
@@ -884,6 +881,112 @@ class ConnectorsLaneWiringTests(unittest.TestCase):
         self.assertFalse(any('npm ci' in step.get('run', '') or 'playwright install' in step.get('run', '')
                              for step in JOBS['connectors']['steps']))
 
+    def test_producer_publication_barriers_are_the_last_regular_steps(self):
+        for name, barrier, artifact in (
+            ('images', 'Publish native amd64 CLI', 'release-cli-amd64'),
+            ('connector-fixture-images', 'Publish connector fixture image identity', 'connector-fixture-image-ids-amd64'),
+        ):
+            with self.subTest(job=name):
+                steps = JOBS[name]['steps']
+                self.assertEqual(sum(step.get('name') == barrier for step in steps), 1)
+                self.assertEqual(steps[-1]['name'], barrier)
+                self.assertEqual(steps[-1]['uses'], 'actions/upload-artifact@v7')
+                self.assertEqual(steps[-1]['with']['name'], artifact)
+                self.assertNotIn('if', steps[-1])
+                self.assertFalse(any('continue-on-error' in step for step in steps))
+
+
+    def connector_recipe_probe(self, handoff=None, supplied_runner=True, runner_exists=False,
+                               override_runtime_platform=False, runner_override=None):
+        """Drive the real just leaf with only test-owned Docker/harness shims."""
+        with tempfile.TemporaryDirectory(prefix='connectors-just-probe-') as temporary:
+            root = Path(temporary)
+            shutil.copyfile(ROOT / 'justfile', root / 'justfile')
+            scripts = root / 'scripts'; scripts.mkdir()
+            calls = root / 'calls.jsonl'
+            docker = root / 'probe-docker'
+            docker.write_text('#!/usr/bin/env python3\n'
+                              'import json,os,sys\n'
+                              'with open(os.environ["PROBE_CALLS"],"a") as out: out.write(json.dumps(sys.argv[1:])+"\\n")\n'
+                              'with open(os.environ["PROBE_ORDER"],"a") as out: out.write("docker:"+sys.argv[1]+(" "+sys.argv[2] if sys.argv[1]=="image" else "")+"\\n")\n'
+                              'if sys.argv[1:3]==["image","inspect"]: raise SystemExit(0 if os.environ["PROBE_RUNNER_EXISTS"]=="true" else 1)\n'
+                              'if sys.argv[1]=="build": raise SystemExit(0)\n'
+                              'raise SystemExit(97)\n')
+            docker.chmod(0o755)
+            forbidden = root / 'forbidden-docker'
+            forbidden.write_text('#!/bin/sh\necho "unresolved runtime override used" >&2\nexit 99\n')
+            forbidden.chmod(0o755)
+            (scripts / 'connectors-test.sh').write_text(
+                'set -eu\n'
+                'printf "harness\\n" >>"$PROBE_ORDER"\n'
+                'if [ "${CAESIUM_CONNECTORS_CI_HANDOFF:-false}" = true ]; then\n'
+                '  python3 scripts/connectors-ci-producers.py\n'
+                'fi\n')
+            (scripts / 'connectors-ci-producers.py').write_text(
+                'import os\n'
+                'with open(os.environ["PROBE_ORDER"],"a") as out: out.write("helper\\n")\n')
+            env = {key: value for key, value in os.environ.items() if not key.startswith('CAESIUM_')}
+            env.update(CAESIUM_CONTAINER_CLI=str(docker), CAESIUM_PODMAN='false', CAESIUM_PLATFORM='linux/amd64',
+                       CANDIDATE_SHA='c'*40, PROBE_CALLS=str(calls), PROBE_ORDER=str(root/'order'),
+                       PROBE_RUNNER_EXISTS='true' if runner_exists else 'false')
+            if supplied_runner:
+                env.update(CAESIUM_INTEGRATION_RUNNER_IMAGE='caesiumcloud/caesium-integration:entrypoint-amd64',
+                           CAESIUM_SKIP_IMAGE_BUILD='true', CAESIUM_CONNECTORS_PREBUILT_FIXTURE='true',
+                           CAESIUM_CONNECTORS_PARALLEL_CLUSTER='true')
+            if handoff is not None: env['CAESIUM_CONNECTORS_CI_HANDOFF'] = handoff
+            command = ['just', 'tag=entrypoint-amd64']
+            if override_runtime_platform:
+                env['CAESIUM_CONTAINER_CLI'] = str(forbidden)
+                command += ['container_cli='+str(docker), 'platform=linux/arm64']
+            if runner_override is not None: command += ['integration_runner_image='+runner_override]
+            result = subprocess.run(command+['integration-test-connectors'], cwd=root,
+                                    env=env, capture_output=True, text=True, timeout=10)
+            observed = [json.loads(line) for line in calls.read_text().splitlines()] if calls.exists() else []
+            order = (root/'order').read_text().splitlines() if (root/'order').exists() else []
+            return result, observed, order
+
+    def test_ci_handoff_just_leaf_reaches_helper_before_runner_is_loaded(self):
+        result, calls, order = self.connector_recipe_probe(handoff='true')
+        self.assertEqual(result.returncode, 0, result.stdout+result.stderr+repr(calls))
+        self.assertEqual(calls, [], 'fresh CI must not inspect or build the runner before handoff')
+        self.assertEqual(order, ['harness', 'helper'])
+
+    def test_manual_preloaded_missing_runner_stops_before_connector_harness(self):
+        for handoff in (None, 'false'):
+            with self.subTest(handoff=handoff):
+                result, calls, order = self.connector_recipe_probe(handoff=handoff)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(calls, [['image', 'inspect', 'caesiumcloud/caesium-integration:entrypoint-amd64']])
+                self.assertEqual(order, ['docker:image inspect'])
+
+    def test_manual_preloaded_runner_is_still_inspected_before_connector_harness(self):
+        result, calls, order = self.connector_recipe_probe(handoff='false', runner_exists=True)
+        self.assertEqual(result.returncode, 0, result.stdout+result.stderr)
+        self.assertEqual(calls, [['image', 'inspect', 'caesiumcloud/caesium-integration:entrypoint-amd64']])
+        self.assertEqual(order, ['docker:image inspect', 'harness'])
+
+    def test_manual_source_build_still_prepares_compiler_before_connector_harness(self):
+        result, calls, order = self.connector_recipe_probe(supplied_runner=False)
+        self.assertEqual(result.returncode, 0, result.stdout+result.stderr)
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(calls[0], ['image', 'inspect', 'caesiumcloud/caesium-builder:entrypoint-amd64-full'])
+        self.assertEqual(calls[1][0], 'build')
+        self.assertIn('builder-full', calls[1])
+        self.assertEqual(calls[1][-3:], ['-f', 'build/Dockerfile.build', '.'])
+        self.assertEqual(order, ['docker:image inspect', 'docker:build', 'harness'])
+
+    def test_connector_recipe_preserves_resolved_runtime_and_platform_overrides(self):
+        result, calls, order = self.connector_recipe_probe(supplied_runner=False, override_runtime_platform=True)
+        self.assertEqual(result.returncode, 0, result.stdout+result.stderr)
+        self.assertEqual(calls[1][calls[1].index('--platform')+1], 'linux/arm64')
+        self.assertEqual(order, ['docker:image inspect', 'docker:build', 'harness'])
+
+    def test_connector_recipe_preserves_resolved_runner_image_override(self):
+        image = 'caesiumcloud/caesium-integration:explicit-runner'
+        result, calls, order = self.connector_recipe_probe(runner_exists=True, runner_override=image)
+        self.assertEqual(result.returncode, 0, result.stdout+result.stderr)
+        self.assertEqual(calls, [['image', 'inspect', image]])
+        self.assertEqual(order, ['docker:image inspect', 'harness'])
 
 class EarlyEvidenceLaneTests(unittest.TestCase):
     """The first persistent three-node lane: selection, wiring and fail-closed."""
@@ -3004,7 +3107,7 @@ class NightlyLaneTests(unittest.TestCase):
                       "qualification", "release-qualification", "connector-fixture-images"}
         # The fixture producer supplies the connector consumer's image cohort;
         # its result is enforced through that lane's selected/advisory status.
-        self.assertIn("connector-fixture-images", JOBS["connectors"]["needs"])
+        self.assertEqual(JOBS["connectors"]["env"]["CAESIUM_CONNECTORS_CI_HANDOFF"], "true")
         self.assertNotIn("connector-fixture-images", JOBS["ci-ok"]["needs"])
         for job in JOBS:
             with self.subTest(job=job):

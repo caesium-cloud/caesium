@@ -2326,7 +2326,11 @@ connectors-fixture-check: integration-runner
         sh scripts/connectors-fixture.sh check
 
 # Advisory connector lane: real Temporal, public HTTP/Console, and isolated config skew.
-integration-test-connectors: integration-runner
+integration-test-connectors: validate-platform
+    @if [ "${CAESIUM_CONNECTORS_CI_HANDOFF:-false}" != "true" ]; then \
+        CAESIUM_CONTAINER_CLI="{{ container_cli }}" CAESIUM_PLATFORM="{{ platform }}" \
+            just tag="{{ tag }}" integration_runner_image="{{ integration_runner_image }}" integration-runner; \
+    fi
     CANDIDATE_SHA={{ candidate_sha }} CAESIUM_CONTAINER_CLI={{ container_cli }} CAESIUM_PLATFORM={{ platform }} \
         CAESIUM_CONNECTORS_TAG={{ tag }} CAESIUM_CONNECTORS_BUILDER_IMAGE={{ local_builder_ref }}:{{ tag }}-full \
         bash scripts/connectors-test.sh
