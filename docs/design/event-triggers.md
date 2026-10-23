@@ -125,6 +125,17 @@ CREATE INDEX idx_event_trigger_matches_trigger ON event_trigger_matches(trigger_
 
 Retention: prune older than `CAESIUM_EVENT_RETENTION` (default 7d). Events are for observability/debugging, not replay — the event-trigger contract is fire-and-forget. `GET /v1/triggers/:id/events` reads the durable `event_trigger_matches` table joined to `ingested_events`; it never recomputes current trigger patterns over historical events, because that would lie after trigger edits.
 
+Internal lifecycle delivery can repeat. For an event with a durable nonzero
+sequence, the lifecycle bridge derives a stable event ID from its job,
+run, type and sequence. Inserting that ID and admitting matching jobs share one
+transaction: a repeated delivery creates no second run, queue entry or match,
+and execution launches only after the first transaction commits. This fence
+lasts while the ingested event is retained; after retention pruning, the same
+delivery can be admitted again. Legacy events without a durable sequence keep
+fresh IDs. Client requests to `POST /v1/events` also keep fresh IDs, so repeating
+an identical request may start another run; client-supplied source or data does
+not enable the internal replay fence.
+
 ### 2.6 Executor integration
 
 Event triggers react to events rather than polling on a timer. Register them as subscribers on the event bus and the ingestion path, dispatched by a singleton **event router**.

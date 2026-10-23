@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -388,6 +389,11 @@ func (s *IntegrationTestSuite) TestWebhookBridgeStaysInNamespace() {
 // one listening for the same job.
 func (s *IntegrationTestSuite) TestLifecycleBridgeStaysInNamespace() {
 	s.requirePolicyFixture()
+	replay := s.a6LifecycleReplayControl()
+	if replay != nil {
+		// Release the publisher before job-deletion cleanups can wait on it.
+		defer replay.disarm(s)
+	}
 	stamp := time.Now().UnixNano()
 	sourceAlias := fmt.Sprintf("a6-life-src-%d", stamp)
 	s.applyDefinition(s.namespacedJobDefinition(sourceAlias, "marketing"))
@@ -401,14 +407,332 @@ func (s *IntegrationTestSuite) TestLifecycleBridgeStaysInNamespace() {
 	mktAlias, finAlias := fmt.Sprintf("a6-life-mkt-%d", stamp), fmt.Sprintf("a6-life-fin-%d", stamp)
 	mkt := s.a6Apply(mktAlias, s.a6EventJobManifest(mktAlias, "marketing", "run_completed", pattern))
 	fin := s.a6Apply(finAlias, s.a6EventJobManifest(finAlias, "finance", "run_completed", pattern))
+	var barrier *jobSummary
+	if replay != nil {
+		// This job cannot match either subscriber's source-alias filter. Its
+		// completion later proves that the bridge consumed the earlier replay.
+		barrierAlias := fmt.Sprintf("a6-life-barrier-%d", stamp)
+		s.applyDefinition(s.namespacedJobDefinition(barrierAlias, "default"))
+		barrier = s.requireJobByAlias(barrierAlias)
+		s.T().Cleanup(func() {
+			if resp, err := s.doRequest(http.MethodDelete, s.caesiumURL+"/v1/jobs/"+barrier.ID, nil); err == nil {
+				_ = resp.Body.Close()
+			}
+		})
+		s.T().Logf("lifecycle replay owned jobs source=%s/%s marketing=%s/%s finance=%s/%s barrier=%s/%s",
+			sourceJob.ID, sourceJob.Alias, mkt.ID, mkt.Alias, fin.ID, fin.Alias, barrier.ID, barrier.Alias)
+		replay.arm(s, "", "run_completed")
+	}
 
 	resp, err := s.doJSONRequest(http.MethodPost, s.caesiumURL+"/v1/jobs/"+sourceJob.ID+"/run", strings.NewReader(`{}`))
 	s.Require().NoError(err)
 	body, _ := io.ReadAll(resp.Body)
 	_ = resp.Body.Close()
 	s.Require().Equal(http.StatusAccepted, resp.StatusCode, string(body))
+	var sourceRun runResponse
+	if replay != nil {
+		s.Require().NoError(json.Unmarshal(body, &sourceRun))
+		s.Require().NotEmpty(sourceRun.ID)
+		replay.arm(s, sourceRun.ID, "run_completed")
+		replay.exercise(s, sourceJob, sourceRun.ID, barrier)
+		replay.closeout(s, sourceJob, sourceRun.ID, mkt, fin)
+	}
 
 	s.Require().Eventually(func() bool { return s.a6RunCount(mkt.ID) == 1 }, 3*time.Minute, time.Second,
 		"the marketing subscriber receives the marketing run's completion")
 	s.Equal(0, s.a6RunCount(fin.ID), "the finance subscriber never sees a marketing run's lifecycle")
+}
+
+// The overlay uses the existing file-based testfault control in a fresh
+// single-server instrumented lane. The runner and server mount the SAME owned
+// directory, and receive the same CAESIUM_RUN_QUEUE_DEQUEUE_INTERVAL. An
+// ordinary integration lane still exercises the case above without a skip.
+const a6LifecycleFaultDirEnv = "CAESIUM_LIFECYCLE_TESTFAULT_DIR"
+
+type a6LifecycleReplay struct {
+	dir      string
+	interval time.Duration
+	sequence uint64
+	eventID  string
+}
+
+type a6LifecycleHook struct {
+	Banner   string `json:"banner"`
+	Phase    string `json:"phase"`
+	Path     string `json:"path"`
+	Type     string `json:"type"`
+	RunID    string `json:"run_id"`
+	Sequence uint64 `json:"sequence"`
+	Reason   string `json:"reason"`
+}
+
+type a6LifecycleEvent struct {
+	ID   string `json:"id"`
+	Data struct {
+		RunID    string `json:"run_id"`
+		JobID    string `json:"job_id"`
+		JobAlias string `json:"job_alias"`
+		Sequence uint64 `json:"sequence"`
+	} `json:"data"`
+}
+
+type a6LifecycleMatch struct {
+	MatchID     string   `json:"match_id"`
+	EventID     string   `json:"event_id"`
+	RunsStarted []string `json:"runs_started"`
+	Skipped     bool     `json:"skipped"`
+	SkipReason  string   `json:"skip_reason"`
+	Error       string   `json:"error"`
+}
+
+func (s *IntegrationTestSuite) a6LifecycleReplayControl() *a6LifecycleReplay {
+	s.T().Helper()
+	dir := os.Getenv(a6LifecycleFaultDirEnv)
+	if dir == "" {
+		s.T().Log("lifecycle replay mode=ordinary (no fault overlay)")
+		return nil
+	}
+	s.requireMarketingQuota()
+	s.Require().True(filepath.IsAbs(dir), "%s must be an absolute shared directory", a6LifecycleFaultDirEnv)
+	info, err := os.Stat(dir)
+	s.Require().NoError(err)
+	s.Require().True(info.IsDir(), "fault control path must be a directory")
+	interval, err := time.ParseDuration(os.Getenv("CAESIUM_RUN_QUEUE_DEQUEUE_INTERVAL"))
+	s.Require().NoError(err, "instrumented runner must receive the server's explicit dequeue interval")
+	s.Require().Greater(interval, time.Duration(0))
+	s.Require().LessOrEqual(interval, time.Second, "bound the ten-interval closeout to ten seconds")
+	path := filepath.Join(dir, "bus-publish-pause.json")
+	// Never take over an already armed directory or remove a foreign control.
+	fh, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	s.Require().NoError(err, "fault directory must have no existing directive")
+	s.T().Cleanup(func() {
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			s.T().Errorf("release owned lifecycle pause: %v", err)
+		}
+	})
+	s.Require().NoError(fh.Close())
+	s.T().Logf("lifecycle replay mode=instrumented dir=%s dequeue_interval=%s", dir, interval)
+	return &a6LifecycleReplay{dir: dir, interval: interval}
+}
+
+func (r *a6LifecycleReplay) arm(s *IntegrationTestSuite, runID, eventType string) {
+	s.T().Helper()
+	raw, err := json.Marshal(map[string]any{
+		"armed": true, "run_id": runID, "types": []string{eventType},
+		"paths": []string{"publish_and_mark"}, "max_hold_ms": 180000,
+	})
+	s.Require().NoError(err)
+	fh, err := os.CreateTemp(r.dir, ".a6-lifecycle-pause-*")
+	s.Require().NoError(err)
+	defer fh.Close()
+	defer os.Remove(fh.Name())
+	_, err = fh.Write(raw)
+	s.Require().NoError(err)
+	s.Require().NoError(fh.Close())
+	// Retarget atomically: an absent/partial directive would release both
+	// events and lose the proof that completion was published before terminal.
+	s.Require().NoError(os.Rename(fh.Name(), filepath.Join(r.dir, "bus-publish-pause.json")))
+}
+
+func (r *a6LifecycleReplay) disarm(s *IntegrationTestSuite) {
+	s.T().Helper()
+	if err := os.Remove(filepath.Join(r.dir, "bus-publish-pause.json")); err != nil && !os.IsNotExist(err) {
+		s.T().Errorf("release owned lifecycle pause: %v", err)
+	}
+}
+
+func (r *a6LifecycleReplay) hooks(s *IntegrationTestSuite, runID, eventType, phase string) []a6LifecycleHook {
+	s.T().Helper()
+	raw, err := os.ReadFile(filepath.Join(r.dir, "bus-publish-hook.log"))
+	if os.IsNotExist(err) {
+		return nil
+	}
+	s.Require().NoError(err)
+	var found []a6LifecycleHook
+	for _, line := range bytes.Split(bytes.TrimSpace(raw), []byte("\n")) {
+		if len(line) == 0 {
+			continue
+		}
+		var entry a6LifecycleHook
+		s.Require().NoError(json.Unmarshal(line, &entry), "invalid hook evidence: %s", line)
+		s.Require().Equal("caesium-testfault-control", entry.Banner)
+		if entry.RunID == runID && entry.Type == eventType && entry.Phase == phase {
+			s.Require().Equal("publish_and_mark", entry.Path)
+			s.Require().NotZero(entry.Sequence)
+			found = append(found, entry)
+		}
+	}
+	return found
+}
+
+func (s *IntegrationTestSuite) a6LifecycleIngestions(runID string) []a6LifecycleEvent {
+	s.T().Helper()
+	var found []a6LifecycleEvent
+	for offset := 0; ; offset += 500 {
+		s.Require().Less(offset, 10000, "bounded lifecycle history read must finish without truncation")
+		var page []a6LifecycleEvent
+		s.getJSON(fmt.Sprintf("/v1/events/ingested?type=run_completed&source=caesium&limit=500&offset=%d", offset), &page)
+		for _, evt := range page {
+			if evt.Data.RunID == runID {
+				found = append(found, evt)
+			}
+		}
+		if len(page) < 500 {
+			return found
+		}
+	}
+}
+
+// Poll on the test goroutine: hook/history validation deliberately fails
+// closed, and require.FailNow must not run in Eventually's worker goroutine.
+func (s *IntegrationTestSuite) a6AwaitLifecycle(bound, interval time.Duration, condition func() bool, message string) {
+	s.T().Helper()
+	deadline := time.Now().Add(bound)
+	for {
+		if condition() {
+			return
+		}
+		if !time.Now().Before(deadline) {
+			s.Require().FailNow(message)
+		}
+		time.Sleep(interval)
+	}
+}
+
+func (s *IntegrationTestSuite) a6LifecycleDrops() float64 {
+	s.T().Helper()
+	resp, err := s.doRequest(http.MethodGet, s.caesiumURL+"/metrics", nil)
+	s.Require().NoError(err)
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	s.Require().NoError(err)
+	s.Require().Equal(http.StatusOK, resp.StatusCode, string(body))
+	// CounterVec emits no series before its first drop. The registered bus
+	// counter's absent run_completed child therefore starts at zero.
+	value, _, err := parsePromLabeledCounter(string(body), "caesium_event_bus_dropped_total", map[string]string{"event_type": "run_completed"})
+	s.Require().NoError(err)
+	return value
+}
+
+func (r *a6LifecycleReplay) exercise(s *IntegrationTestSuite, source *jobSummary, runID string, barrier *jobSummary) {
+	s.T().Helper()
+	s.a6AwaitLifecycle(runTimeout, 50*time.Millisecond, func() bool {
+		entries := r.hooks(s, runID, "run_completed", "enter")
+		if len(entries) == 0 {
+			return false
+		}
+		s.Require().Len(entries, 1)
+		r.sequence = entries[0].Sequence
+		return true
+	}, "source completion never entered the instrumented immediate-publication hook")
+	s.Require().Equal("succeeded", s.awaitRun(source.ID, runID, runTimeout).Status)
+	var initial []a6LifecycleEvent
+	s.a6AwaitLifecycle(30*time.Second, 100*time.Millisecond, func() bool {
+		initial = s.a6LifecycleIngestions(runID)
+		return len(initial) > 0
+	}, "background dispatcher never ingested the held durable completion")
+	s.Require().Empty(r.hooks(s, runID, "run_completed", "release"), "initial ingestion must precede immediate publication")
+	s.Require().Len(initial, 1)
+	s.Require().Equal(r.sequence, initial[0].Data.Sequence)
+	s.Require().Equal(source.ID, initial[0].Data.JobID)
+	s.Require().Equal(source.Alias, initial[0].Data.JobAlias)
+	s.Require().NotEmpty(initial[0].ID)
+	r.eventID = initial[0].ID
+	s.T().Logf("lifecycle replay background delivery run=%s sequence=%d event_id=%s while immediate publication held", runID, r.sequence, r.eventID)
+	dropsBefore := s.a6LifecycleDrops()
+
+	// PublishAndMarkBusDispatched publishes completion, then terminal, in the
+	// same goroutine. Holding terminal proves completion's bus.Publish returned.
+	r.arm(s, runID, "run_terminal")
+	var terminalSequence uint64
+	s.a6AwaitLifecycle(10*time.Second, 50*time.Millisecond, func() bool {
+		entries := r.hooks(s, runID, "run_terminal", "enter")
+		if len(entries) == 0 {
+			return false
+		}
+		s.Require().Len(entries, 1)
+		terminalSequence = entries[0].Sequence
+		return true
+	}, "immediate path did not publish the completion before reaching terminal")
+	completedRelease := r.hooks(s, runID, "run_completed", "release")
+	s.Require().Len(completedRelease, 1)
+	s.Require().Equal(r.sequence, completedRelease[0].Sequence)
+	s.Require().Equal("disarmed", completedRelease[0].Reason)
+	s.Require().Greater(terminalSequence, r.sequence)
+
+	// Bus.Publish synchronously enqueues into the lifecycle subscription, and
+	// RunLifecycleBridge consumes that one channel serially. This later HTTP
+	// run's ingested completion is a watermark AFTER consumption of the replay;
+	// SSE cannot provide this proof because it hides repeated sequences.
+	barrierRunID := s.triggerRun(barrier.ID)
+	s.Require().Equal("succeeded", s.awaitRun(barrier.ID, barrierRunID, runTimeout).Status)
+	s.a6AwaitLifecycle(30*time.Second, 100*time.Millisecond, func() bool {
+		return len(s.a6LifecycleIngestions(barrierRunID)) > 0
+	}, "lifecycle bridge never consumed the post-replay barrier")
+	s.Require().Equal(dropsBefore, s.a6LifecycleDrops(), "a dropped completion would invalidate the FIFO replay proof")
+	s.Require().Empty(r.hooks(s, runID, "run_terminal", "release"), "terminal pause expired before the FIFO barrier")
+	s.Require().NoError(os.Remove(filepath.Join(r.dir, "bus-publish-pause.json")))
+	s.a6AwaitLifecycle(10*time.Second, 50*time.Millisecond, func() bool {
+		entries := r.hooks(s, runID, "run_terminal", "release")
+		if len(entries) == 0 {
+			return false
+		}
+		s.Require().Len(entries, 1)
+		s.Require().Equal(terminalSequence, entries[0].Sequence)
+		s.Require().Equal("disarmed", entries[0].Reason)
+		return true
+	}, "terminal hook never released under test control")
+	s.T().Logf("lifecycle replay immediate delivery consumed run=%s sequence=%d terminal_sequence=%d barrier_run=%s", runID, r.sequence, terminalSequence, barrierRunID)
+}
+
+func (r *a6LifecycleReplay) closeout(s *IntegrationTestSuite, source *jobSummary, runID string, mkt, fin *jobSummary) {
+	s.T().Helper()
+	mktTrigger := stringFromMap(s.jobDetailByAlias(mkt.Alias), "trigger_id")
+	finTrigger := stringFromMap(s.jobDetailByAlias(fin.Alias), "trigger_id")
+	s.Require().NotEmpty(mktTrigger)
+	s.Require().NotEmpty(finTrigger)
+	assertExact := func() {
+		ingested := s.a6LifecycleIngestions(runID)
+		var matches, financeMatches []a6LifecycleMatch
+		s.getJSON("/v1/triggers/"+mktTrigger+"/events?type=run_completed&source=caesium", &matches)
+		s.getJSON("/v1/triggers/"+finTrigger+"/events?type=run_completed&source=caesium", &financeMatches)
+		runs := s.fetchRuns(mkt.ID)
+		queue, financeQueue := s.jobQueueREST(mkt.ID), s.jobQueueREST(fin.ID)
+		s.T().Logf("lifecycle replay exact counts sequence=%d ingested=%d matches=%d marketing_runs=%d marketing_queue=%d finance_matches=%d finance_runs=%d finance_queue=%d",
+			r.sequence, len(ingested), len(matches), len(runs), len(queue), len(financeMatches), s.a6RunCount(fin.ID), len(financeQueue))
+		s.Require().Len(ingested, 1, "replayed durable completion must have one ingested row")
+		s.Require().Equal(r.eventID, ingested[0].ID)
+		s.Require().Equal(r.sequence, ingested[0].Data.Sequence)
+		s.Require().Equal(source.ID, ingested[0].Data.JobID)
+		s.Require().Equal(source.Alias, ingested[0].Data.JobAlias)
+		s.Require().Len(matches, 1, "replay must not record another trigger match")
+		s.Require().NotEmpty(matches[0].MatchID)
+		s.Require().Equal(r.eventID, matches[0].EventID)
+		s.Require().False(matches[0].Skipped)
+		s.Require().Empty(matches[0].SkipReason)
+		s.Require().Empty(matches[0].Error)
+		s.Require().Len(runs, 1, "replay must not admit another marketing run")
+		s.T().Logf("lifecycle replay sole marketing run=%s match=%s", runs[0].ID, matches[0].MatchID)
+		s.Require().Equal([]string{runs[0].ID}, matches[0].RunsStarted)
+		s.Require().Empty(queue, "replay must not leave a quota-held duplicate")
+		s.Require().Empty(financeMatches)
+		s.Require().Zero(s.a6RunCount(fin.ID))
+		s.Require().Empty(financeQueue)
+	}
+	assertExact()
+	runs := s.fetchRuns(mkt.ID)
+	s.Require().Equal("succeeded", s.awaitRun(mkt.ID, runs[0].ID, runTimeout).Status)
+	// The source and subscriber are terminal, so marketing's quota slot is
+	// available. Observe elapsed time covering ten configured drain intervals:
+	// a parked duplicate must not escape the earlier empty-queue/run assertions
+	// by starting afterwards.
+	deadline := time.Now().Add(10 * r.interval)
+	for {
+		assertExact()
+		if !time.Now().Before(deadline) {
+			break
+		}
+		time.Sleep(r.interval / 2)
+	}
+	s.T().Logf("lifecycle replay closeout passed sequence=%d event_id=%s drain_intervals=10 interval=%s", r.sequence, r.eventID, r.interval)
 }

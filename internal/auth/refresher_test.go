@@ -318,12 +318,17 @@ func TestGroupRefreshDueRunsOnceInTheBackground(t *testing.T) {
 // is refreshed through the key's validation alone.
 func TestGroupRefreshCLIOnlyUser(t *testing.T) {
 	fake := newFakeRefresher("finance-eng")
+	gate := make(chan struct{})
+	releaseGate := sync.OnceFunc(func() { close(gate) })
+	defer releaseGate()
+	fake.set(func(f *fakeRefresher) { f.gate = gate })
 	f := newFreshnessFixture(t, fake)
 	user := f.login(t, oidcIdentity("cli", "token-1", "marketing-eng"))
 	key := f.cli(t, user.ID)
 
 	f.clock.Advance(20 * time.Minute)
 	require.Equal(t, []string{"marketing-eng"}, f.keyGroups(t, key))
+	releaseGate()
 	f.waitIdle(t, user.ID)
 	require.Equal(t, 1, fake.Calls())
 	require.Equal(t, []string{"finance-eng"}, f.keyGroups(t, key))

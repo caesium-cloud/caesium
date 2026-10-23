@@ -51,7 +51,16 @@ type RoutedJob struct {
 type RouteOption func(*routeConfig)
 
 type routeConfig struct {
-	scope *jobdef.TenancyScope
+	scope             *jobdef.TenancyScope
+	lifecycleSequence uint64
+}
+
+// Only the internal bridge supplies this option, from the durable Event rather
+// than client-controlled source/data. HTTP ingestion keeps fresh event IDs.
+func withLifecycleReplayDeduplication(sequence uint64) RouteOption {
+	return func(cfg *routeConfig) {
+		cfg.lifecycleSequence = sequence
+	}
 }
 
 // WithDeliveryScope confines a Route call to the jobs inside scope
@@ -257,6 +266,7 @@ func (r *Router) Route(ctx context.Context, evt *models.IngestedEvent, opts ...R
 
 	var launches []func()
 	var metricMatches []TriggerRouteResult
+	var replayed bool
 
 	r.mu.RLock()
 	conn := r.db
@@ -267,12 +277,25 @@ func (r *Router) Route(ctx context.Context, evt *models.IngestedEvent, opts ...R
 
 	err := conn.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		txStore := eventstore.NewIngestStore(tx)
-		if err := txStore.CreateTx(tx, evt); err != nil {
+		inserted := true
+		var err error
+		if cfg.lifecycleSequence != 0 {
+			inserted, err = txStore.CreateIfAbsentTx(tx, evt)
+		} else {
+			err = txStore.CreateTx(tx, evt)
+		}
+		if err != nil {
 			return err
 		}
 		result.EventID = evt.ID
 		result.EventType = evt.Type
 		result.Source = evt.Source
+		if !inserted {
+			// This primary-key fence and the first delivery's admissions share
+			// a transaction. Never fire, enqueue or record another match on replay.
+			replayed = true
+			return nil
+		}
 
 		matchRows := make([]*models.EventTriggerMatch, 0, len(matches))
 		for _, trigger := range matches {
@@ -342,6 +365,10 @@ func (r *Router) Route(ctx context.Context, evt *models.IngestedEvent, opts ...R
 	if err != nil {
 		return nil, err
 	}
+	if replayed {
+		log.Debug("event trigger lifecycle replay ignored", "event_id", result.EventID, "sequence", cfg.lifecycleSequence, "type", result.EventType)
+		return result, nil
+	}
 
 	r.adoptStartedRuns(result)
 	for _, launch := range launches {
@@ -409,6 +436,9 @@ func (r *Router) routeLifecycleEvent(ctx context.Context, evt eventstore.Event) 
 		return
 	}
 	var opts []RouteOption
+	if evt.Sequence != 0 {
+		opts = append(opts, withLifecycleReplayDeduplication(evt.Sequence))
+	}
 	if policy.ProcessHolder().FileBacked() {
 		// While a policy file is loaded, a run's lifecycle event (which
 		// carries its job's alias, status and parameters) is delivered only
@@ -453,10 +483,24 @@ func (r *Router) lifecycleIngestedEvent(ctx context.Context, evt eventstore.Even
 		return nil, err
 	}
 	return &models.IngestedEvent{
+		ID:     lifecycleIngestedEventID(evt),
 		Type:   string(evt.Type),
 		Source: "caesium",
 		Data:   datatypes.JSON(raw),
 	}, nil
+}
+
+func lifecycleIngestedEventID(evt eventstore.Event) uuid.UUID {
+	if evt.Sequence == 0 {
+		// Legacy in-memory events have no durable delivery identity. Do not
+		// collapse separate completions, including a later retry of one run.
+		return uuid.Nil
+	}
+	// Sequences are local to an execution-event table, including hot shards.
+	// The run/job/type tuple and versioned domain isolate those identities and
+	// keep distinct terminal events separate without hashing mutable payloads.
+	identity := fmt.Sprintf("caesium:lifecycle-ingest:v1:%s:%s:%s:%d", evt.JobID, evt.RunID, evt.Type, evt.Sequence)
+	return uuid.NewSHA1(uuid.NameSpaceOID, []byte(identity))
 }
 
 // lookupRunNamespace returns the persisted namespace of a run. A missing run

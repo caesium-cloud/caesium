@@ -12,6 +12,7 @@ import (
 	"github.com/caesium-cloud/caesium/pkg/log"
 	"github.com/google/uuid"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 const defaultIngestRetentionPruneInterval = time.Hour
@@ -39,17 +40,34 @@ func (s *IngestStore) Create(ctx context.Context, evt *models.IngestedEvent) err
 }
 
 func (s *IngestStore) CreateTx(tx *gorm.DB, evt *models.IngestedEvent) error {
+	_, err := s.createTx(tx, evt, false)
+	return err
+}
+
+// CreateIfAbsentTx inserts an event with a caller-supplied stable ID. A false
+// result means that ID already exists; callers must not repeat its routing.
+// The event and its routing outcome must share the transaction, so a rollback
+// leaves the ID available for another delivery. Retention pruning removes this
+// fence along with the event.
+func (s *IngestStore) CreateIfAbsentTx(tx *gorm.DB, evt *models.IngestedEvent) (bool, error) {
+	if evt != nil && evt.ID == uuid.Nil {
+		return false, errors.New("event ingest: deduplicated create requires event ID")
+	}
+	return s.createTx(tx, evt, true)
+}
+
+func (s *IngestStore) createTx(tx *gorm.DB, evt *models.IngestedEvent, ifAbsent bool) (bool, error) {
 	if tx == nil {
-		return errors.New("event ingest: create requires transaction")
+		return false, errors.New("event ingest: create requires transaction")
 	}
 	if evt == nil {
-		return errors.New("event ingest: create requires event")
+		return false, errors.New("event ingest: create requires event")
 	}
 
 	evt.Type = strings.TrimSpace(evt.Type)
 	evt.Source = strings.TrimSpace(evt.Source)
 	if evt.Type == "" {
-		return errors.New("event ingest: type is required")
+		return false, errors.New("event ingest: type is required")
 	}
 	if evt.ID == uuid.Nil {
 		evt.ID = uuid.New()
@@ -61,10 +79,17 @@ func (s *IngestStore) CreateTx(tx *gorm.DB, evt *models.IngestedEvent) error {
 		evt.Data = []byte("{}")
 	}
 	if !json.Valid(evt.Data) {
-		return fmt.Errorf("event ingest: data must be valid JSON")
+		return false, fmt.Errorf("event ingest: data must be valid JSON")
 	}
 
-	return tx.Create(evt).Error
+	if ifAbsent {
+		tx = tx.Clauses(clause.OnConflict{
+			Columns:   []clause.Column{{Name: "id"}},
+			DoNothing: true,
+		})
+	}
+	result := tx.Create(evt)
+	return result.RowsAffected == 1, result.Error
 }
 
 func (s *IngestStore) RecordMatchesTx(tx *gorm.DB, matches []*models.EventTriggerMatch) error {
