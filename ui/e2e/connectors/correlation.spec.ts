@@ -1,7 +1,12 @@
 import { Buffer } from "node:buffer";
 import { expect, test, type APIRequestContext, type Page, type TestInfo } from "@playwright/test";
-import { authHeaders, loginAtUrl } from "../helpers/auth";
+import { authHeaders as bearerHeaders, loginAtUrl } from "../helpers/auth";
 import { fixturePost, requireConnectorBrowserLane, startExternalWorkflow, type ConnectorBrowserLane, type FixtureWorkflow } from "../helpers/connectors";
+import { connectorProbeHeaders } from "./http";
+
+function authHeaders(key: string): Record<string, string> {
+  return connectorProbeHeaders(bearerHeaders(key));
+}
 
 interface Job { id: string; alias: string }
 interface Correlation {

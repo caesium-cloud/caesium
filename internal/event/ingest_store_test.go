@@ -2,6 +2,7 @@ package event
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -75,6 +76,73 @@ func TestIngestStoreRecordMatchesTxValidatesAndDefaults(t *testing.T) {
 	require.Equal(t, row.EventID, stored.EventID)
 	require.Equal(t, row.TriggerID, stored.TriggerID)
 	require.Equal(t, now, stored.MatchedAt)
+}
+
+func TestIngestStoreCreateIfAbsentTxPreservesFirstEvent(t *testing.T) {
+	t.Parallel()
+	db := openIngestStoreTestDB(t)
+	store := NewIngestStore(db)
+	id := uuid.New()
+	first := &models.IngestedEvent{ID: id, Type: "run_completed", Source: "caesium", Data: datatypes.JSON(`{"sequence":389}`)}
+	require.NoError(t, db.Transaction(func(tx *gorm.DB) error {
+		inserted, err := store.CreateIfAbsentTx(tx, first)
+		require.True(t, inserted)
+		return err
+	}))
+	require.NoError(t, db.Transaction(func(tx *gorm.DB) error {
+		inserted, err := store.CreateIfAbsentTx(tx, &models.IngestedEvent{
+			ID: id, Type: "run_completed", Source: "caesium", Data: datatypes.JSON(`{"sequence":389,"changed":true}`),
+		})
+		require.False(t, inserted)
+		return err
+	}))
+	var stored models.IngestedEvent
+	require.NoError(t, db.First(&stored, "id = ?", id).Error)
+	require.JSONEq(t, string(first.Data), string(stored.Data), "replay must not overwrite the original event")
+	require.Equal(t, first.CreatedAt, stored.CreatedAt)
+	require.Error(t, db.Transaction(func(tx *gorm.DB) error {
+		return store.CreateTx(tx, &models.IngestedEvent{ID: id, Type: "run_completed"})
+	}), "ordinary CreateTx must retain its duplicate-ID error")
+}
+
+func TestIngestStoreCreateIfAbsentTxValidatesIdentityAndData(t *testing.T) {
+	t.Parallel()
+	db := openIngestStoreTestDB(t)
+	store := NewIngestStore(db)
+	for _, evt := range []*models.IngestedEvent{
+		nil,
+		{Type: "run_completed"},
+		{ID: uuid.New()},
+		{ID: uuid.New(), Type: "run_completed", Data: datatypes.JSON(`{`)},
+	} {
+		require.Error(t, db.Transaction(func(tx *gorm.DB) error {
+			inserted, err := store.CreateIfAbsentTx(tx, evt)
+			require.False(t, inserted)
+			return err
+		}))
+	}
+	inserted, err := store.CreateIfAbsentTx(nil, &models.IngestedEvent{ID: uuid.New(), Type: "run_completed"})
+	require.False(t, inserted)
+	require.Error(t, err)
+}
+
+func TestIngestStoreCreateIfAbsentTxRollbackReleasesIdentity(t *testing.T) {
+	t.Parallel()
+	db := openIngestStoreTestDB(t)
+	store := NewIngestStore(db)
+	id := uuid.New()
+	rolledBack := errors.New("routing rolled back")
+	require.ErrorIs(t, db.Transaction(func(tx *gorm.DB) error {
+		inserted, err := store.CreateIfAbsentTx(tx, &models.IngestedEvent{ID: id, Type: "run_completed"})
+		require.NoError(t, err)
+		require.True(t, inserted)
+		return rolledBack
+	}), rolledBack)
+	require.NoError(t, db.Transaction(func(tx *gorm.DB) error {
+		inserted, err := store.CreateIfAbsentTx(tx, &models.IngestedEvent{ID: id, Type: "run_completed"})
+		require.True(t, inserted, "a failed routing transaction must not consume the event identity")
+		return err
+	}))
 }
 
 func openIngestStoreTestDB(t *testing.T) *gorm.DB {

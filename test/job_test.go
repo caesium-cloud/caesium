@@ -29,7 +29,12 @@ import (
 )
 
 func (s *IntegrationTestSuite) TestCronJob() {
-	job := s.createJob("test_cron_job", nil)
+	day := time.Now().UTC().AddDate(0, 0, -1)
+	job := s.createJobWithTriggerConfig("test_cron_job", nil, models.TriggerTypeCron, map[string]any{
+		"expression": fmt.Sprintf("0 0 %d %d *", day.Day(), day.Month()),
+		"timezone":   "UTC",
+	})
+	s.cleanupJobAfterTest(job.ID.String(), job.TriggerID.String())
 	assert.NotNil(s.T(), job)
 }
 
@@ -238,7 +243,9 @@ func (s *IntegrationTestSuite) TestJobApplyCommand() {
 }
 
 func (s *IntegrationTestSuite) createJob(alias string, metadata *job.MetadataRequest) *models.Job {
-	return s.createJobWithTrigger(alias, metadata, models.TriggerTypeCron)
+	created := s.createJobWithTrigger(alias, metadata, models.TriggerTypeHTTP)
+	s.cleanupJobAfterTest(created.ID.String(), created.TriggerID.String())
+	return created
 }
 
 func (s *IntegrationTestSuite) unusedJobIDPrefix(length int) string {
