@@ -111,14 +111,25 @@ steps:
             assert task(first, "version")["output"]["version"] == "v1", first
             # Equal-output descendants test D2 as well as direct cache lookup.
             same = 'echo \'##caesium::output {"token":"same"}\''
+            stable = apply("stable", step("stable", "alpine:3.23", same))
+            _, stable_first = run(stable)
+            stable_id, stable_second = run(stable)
+            first_row, second_row = task(stable_first, "stable"), task(stable_second, "stable")
+            assert_executed(first_row)
+            assert first_row.get("resolved_image_digest", "").startswith("sha256:"), first_row
+            assert second_row["status"] == "cached" and second_row["cache_hit"], second_row
+            assert second_row["resolved_image_digest"] == first_row["resolved_image_digest"], second_row
+            assert why(stable, stable_id, "stable")["verdict"] == "CACHE_HIT"
+            # Give the graph stable identity without repeating mutable-tag registry lookups.
+            stable_image = "alpine:3.23@" + first_row["resolved_image_digest"]
             graph = step("source", tag, same, "    next: [middle, values, skipped_middle, values_middle]\n")
-            graph += step("middle", "alpine:3.23", same, "    dependsOn: [source]\n    cache: false\n    next: [leaf]\n")
-            graph += step("leaf", "alpine:3.23", same, "    dependsOn: [middle]\n")
-            graph += step("values", "alpine:3.23", same, "    dependsOn: [source]\n    cache: {pinDigests: true, digestTTL: 0s, chain: values}\n")
-            graph += step("skipped_middle", "alpine:3.23", same, "    dependsOn: [source]\n    triggerRule: all_failed\n    cache: false\n    next: [skipped_leaf]\n")
-            graph += step("skipped_leaf", "alpine:3.23", same, "    dependsOn: [skipped_middle]\n    triggerRule: all_done\n")
-            graph += step("values_middle", "alpine:3.23", same, "    dependsOn: [source]\n    triggerRule: all_failed\n    cache: {chain: values}\n    next: [values_leaf]\n")
-            graph += step("values_leaf", "alpine:3.23", same, "    dependsOn: [values_middle]\n    triggerRule: all_done\n")
+            graph += step("middle", stable_image, same, "    dependsOn: [source]\n    cache: false\n    next: [leaf]\n")
+            graph += step("leaf", stable_image, same, "    dependsOn: [middle]\n")
+            graph += step("values", stable_image, same, "    dependsOn: [source]\n    cache: {pinDigests: true, digestTTL: 0s, chain: values}\n")
+            graph += step("skipped_middle", stable_image, same, "    dependsOn: [source]\n    triggerRule: all_failed\n    cache: false\n    next: [skipped_leaf]\n")
+            graph += step("skipped_leaf", stable_image, same, "    dependsOn: [skipped_middle]\n    triggerRule: all_done\n")
+            graph += step("values_middle", stable_image, same, "    dependsOn: [source]\n    triggerRule: all_failed\n    cache: {chain: values}\n    next: [values_leaf]\n")
+            graph += step("values_leaf", stable_image, same, "    dependsOn: [values_middle]\n    triggerRule: all_done\n")
             chain = apply("chain", graph)
             _, chain_first = run(chain)
             for name in ("source", "middle", "leaf", "values", "skipped_leaf", "values_leaf"):
@@ -151,15 +162,6 @@ steps:
             _, control = run(uncached)
             assert_executed(task(control, "version"))
             assert task(control, "version")["output"]["version"] == "v2", control
-            stable = apply("stable", step("stable", "alpine:3.23", same))
-            _, stable_first = run(stable)
-            stable_id, stable_second = run(stable)
-            first_row, second_row = task(stable_first, "stable"), task(stable_second, "stable")
-            assert_executed(first_row)
-            assert first_row.get("resolved_image_digest", "").startswith("sha256:"), first_row
-            assert second_row["status"] == "cached" and second_row["cache_hit"], second_row
-            assert second_row["resolved_image_digest"] == first_row["resolved_image_digest"], second_row
-            assert why(stable, stable_id, "stable")["verdict"] == "CACHE_HIT"
             observations = {
                 "mutable_v1": observation(first, "version"),
                 "mutable_v2": observation(second, "version"),
