@@ -219,6 +219,8 @@ func (us *UserStore) updateExisting(ctx context.Context, user *models.User, ext 
 		"refresh_lease_owner":   nil,
 		"refresh_lease_until":   nil,
 		"refresh_uncertain":     false,
+		// A login confirms the groups, so it lifts a stale_groups refusal.
+		"stale_refused_at": nil,
 	}
 	// The write is fenced on the row as this login read it: still enabled and
 	// still at the disable generation read above (kept across retries). A
@@ -533,27 +535,30 @@ type DefinitiveResult struct {
 }
 
 // CompleteRefreshDefinitive records a definitive IdP refusal under the lease
-// fence. On an uncertain grant the refusal may be the echo of an earlier
-// redemption, so it only clears the grant; on a certain grant it clears the
-// grant and revokes all the user's sessions and user-bound keys in the same
-// transaction, which is retried as a whole on catalog contention. Nothing is
-// applied when the fence fails.
-func (us *UserStore) CompleteRefreshDefinitive(ctx context.Context, userID uuid.UUID, version int64, owner string, now time.Time) (DefinitiveResult, error) {
+// fence. A DenialOfGrant on an uncertain grant may be the echo of an earlier
+// redemption, so it only clears the grant; any other definitive refusal (a
+// DenialOfGrant on a certain grant, or a DenialOfSubject, which no earlier
+// redemption can cause) clears the grant and revokes all the user's sessions
+// and user-bound keys in the same transaction, which is retried as a whole on
+// catalog contention. Nothing is applied when the fence fails.
+func (us *UserStore) CompleteRefreshDefinitive(ctx context.Context, userID uuid.UUID, version int64, owner string, scope DenialScope, now time.Time) (DefinitiveResult, error) {
 	now = now.UTC()
 	var result DefinitiveResult
 	err := us.transaction(ctx, func(tx *gorm.DB) error {
 		result = DefinitiveResult{}
-		res := fenceRefresh(tx, userID, version, owner).
-			Where("refresh_uncertain = ?", true).
-			Updates(clearGrantUpdates())
-		if res.Error != nil {
-			return res.Error
+		if scope == DenialOfGrant {
+			res := fenceRefresh(tx, userID, version, owner).
+				Where("refresh_uncertain = ?", true).
+				Updates(clearGrantUpdates())
+			if res.Error != nil {
+				return res.Error
+			}
+			if res.RowsAffected == 1 {
+				result.Outcome = DefinitiveGrantCleared
+				return nil
+			}
 		}
-		if res.RowsAffected == 1 {
-			result.Outcome = DefinitiveGrantCleared
-			return nil
-		}
-		res = fenceRefresh(tx, userID, version, owner).Updates(clearGrantUpdates())
+		res := fenceRefresh(tx, userID, version, owner).Updates(clearGrantUpdates())
 		if res.Error != nil {
 			return res.Error
 		}
@@ -572,6 +577,30 @@ func (us *UserStore) CompleteRefreshDefinitive(ctx context.Context, userID uuid.
 		return DefinitiveResult{}, fmt.Errorf("record definitive refresh failure: %w", err)
 	}
 	return result, nil
+}
+
+// MarkStaleRefused records that the user's groups are past the maximum
+// staleness and could not be refreshed: from then on every credential of the
+// user is refused (stale_groups) until a login clears the mark. It is fenced
+// on the grant version the caller read, so a login (or a successful refresh)
+// committed since wins, and on the user still being enabled and unmarked.
+// It reports whether the mark was written.
+func (us *UserStore) MarkStaleRefused(ctx context.Context, userID uuid.UUID, version int64, now time.Time) (bool, error) {
+	var applied bool
+	err := us.statement(ctx, func(db *gorm.DB) error {
+		res := db.Model(&models.User{}).
+			Where("id = ? AND COALESCE(refresh_grant_version, 0) = ? AND stale_refused_at IS NULL AND disabled_at IS NULL", userID, version).
+			Update("stale_refused_at", now.UTC())
+		if res.Error != nil {
+			return res.Error
+		}
+		applied = res.RowsAffected == 1
+		return nil
+	})
+	if err != nil {
+		return false, fmt.Errorf("mark stale groups refused: %w", err)
+	}
+	return applied, nil
 }
 
 // ErrUserNotFound reports an administration request for an unknown user.

@@ -115,6 +115,39 @@ func (s *EnvTestSuite) TestAuthCLIKeyTTLDefaultAndBounds() {
 	s.Contains(err.Error(), "AUTH_CLI_KEY_TTL")
 }
 
+func (s *EnvTestSuite) TestAuthGroupRefreshDefaultsAndBounds() {
+	s.Require().NoError(Process())
+	vars := Variables()
+	s.Equal(15*time.Minute, vars.AuthGroupRefreshInterval)
+	s.Equal(24*time.Hour, vars.AuthGroupMaxStaleness)
+	s.Equal(5*time.Second, vars.AuthGroupRefreshTimeout)
+	s.Equal(8*time.Hour, vars.AuthSAMLSessionAbsoluteTTL)
+	s.Empty(vars.AuthLDAPCAFile)
+
+	for _, bad := range []struct{ name, value, want string }{
+		{"CAESIUM_AUTH_GROUP_REFRESH_INTERVAL", "0s", "CAESIUM_AUTH_GROUP_REFRESH_INTERVAL"},
+		{"CAESIUM_AUTH_GROUP_MAX_STALENESS", "10m", "CAESIUM_AUTH_GROUP_MAX_STALENESS"},
+		{"CAESIUM_AUTH_GROUP_REFRESH_TIMEOUT", "0s", "CAESIUM_AUTH_GROUP_REFRESH_TIMEOUT"},
+		{"CAESIUM_AUTH_GROUP_REFRESH_TIMEOUT", "15m", "CAESIUM_AUTH_GROUP_REFRESH_TIMEOUT"},
+		{"CAESIUM_AUTH_SAML_SESSION_ABSOLUTE_TTL", "-1h", "CAESIUM_AUTH_SAML_SESSION_ABSOLUTE_TTL"},
+	} {
+		s.Run(bad.name+"="+bad.value, func() {
+			s.T().Setenv(bad.name, bad.value)
+			err := Process()
+			s.Require().Error(err)
+			s.Contains(err.Error(), bad.want)
+		})
+	}
+	s.Require().NoError(Process())
+
+	s.T().Setenv("CAESIUM_AUTH_GROUP_REFRESH_INTERVAL", "1m")
+	s.T().Setenv("CAESIUM_AUTH_GROUP_MAX_STALENESS", "1m")
+	s.T().Setenv("CAESIUM_AUTH_GROUP_REFRESH_TIMEOUT", "2s")
+	s.T().Setenv("CAESIUM_AUTH_LDAP_CA_FILE", "/etc/caesium/ldap-ca.pem")
+	s.Require().NoError(Process(), "the bound may equal the interval")
+	s.Equal("/etc/caesium/ldap-ca.pem", Variables().AuthLDAPCAFile)
+}
+
 func (s *EnvTestSuite) TestSSOEnabled() {
 	env := Environment{AuthOIDCEnabled: true}
 	assert.True(s.T(), env.SSOEnabled())

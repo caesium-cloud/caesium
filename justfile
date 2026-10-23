@@ -14,6 +14,10 @@ bld_dir := "/bld/caesium"
 repo_dir := `pwd`
 it_container := "caesium-server-test"
 agent_it_container := "caesium-server-agent-test"
+# The agent auth lane's OpenLDAP fixture (identity-and-access E1b), in the
+# server's network namespace; scripts/ldap-fixture.sh pins the same digest.
+agent_ldap_container := "caesium-ldap-agent-test"
+openldap_image := "osixia/openldap:1.5.0@sha256:18742e9c449c9c1afe129d3f2f3ee15fb34cc43e5f940a20f3399728f41d7c28"
 connectors_it_container := "caesium-server-connectors-test"
 infra_it_container := "caesium-server-infra-test"
 uid := `id -u`
@@ -572,7 +576,9 @@ integration-test-owner-memory: integration-runner
 
 # Run the integration suite against an auth-enabled, remediation-enabled server.
 integration-test-agent: integration-runner
-    just tag={{ tag }} integration-up-agent
+    {{ container_cli }} rm -f {{ agent_ldap_container }} >/dev/null 2>&1 || true
+    bash {{ repo_dir }}/scripts/ldap-fixture.sh tls {{ repo_dir }}/.tmp/ldap-tls
+    CAESIUM_AGENT_LDAP_TLS_DIR={{ repo_dir }}/.tmp/ldap-tls just tag={{ tag }} integration-up-agent
     @cli_dir={{ repo_dir }}/.tmp/caesium-cli; \
     rm -rf "$cli_dir"; \
     mkdir -p "$cli_dir"; \
@@ -588,7 +594,7 @@ integration-test-agent: integration-runner
         if [ "$tries" -gt 30 ]; then \
             echo "Agent auth bootstrap admin key did not appear in server logs"; \
             {{ container_cli }} logs {{ agent_it_container }} || true; \
-            {{ container_cli }} rm -f {{ agent_it_container }} >/dev/null 2>&1 || true; \
+            {{ container_cli }} rm -f {{ agent_ldap_container }} {{ agent_it_container }} >/dev/null 2>&1 || true; \
             exit 1; \
         fi; \
         sleep 1; \
@@ -600,11 +606,17 @@ integration-test-agent: integration-runner
         if [ "$tries" -gt 30 ]; then \
             echo "Agent auth lane did not become ready or seed the default profile"; \
             {{ container_cli }} logs {{ agent_it_container }} || true; \
-            {{ container_cli }} rm -f {{ agent_it_container }} >/dev/null 2>&1 || true; \
+            {{ container_cli }} rm -f {{ agent_ldap_container }} {{ agent_it_container }} >/dev/null 2>&1 || true; \
             exit 1; \
         fi; \
         sleep 1; \
     done; \
+    if ! CAESIUM_LDAP_IMAGE={{ openldap_image }} bash {{ repo_dir }}/scripts/ldap-fixture.sh run {{ container_cli }} {{ agent_ldap_container }} {{ agent_it_container }} {{ repo_dir }}/.tmp/ldap-tls >/dev/null \
+        || ! bash {{ repo_dir }}/scripts/ldap-fixture.sh wait {{ container_cli }} {{ agent_ldap_container }}; then \
+        echo "OpenLDAP fixture for the agent auth lane did not start"; \
+        {{ container_cli }} rm -f {{ agent_ldap_container }} {{ agent_it_container }} >/dev/null 2>&1 || true; \
+        exit 1; \
+    fi; \
     log={{ repo_dir }}/.tmp/integration-test-agent.log; \
     rm -f "$log"; \
     rc=0; \
@@ -618,6 +630,8 @@ integration-test-agent: integration-runner
         -e CAESIUM_AUTH_ADMIN_KEY="$admin_key" \
         -e CAESIUM_API_KEY="$admin_key" \
         -e CAESIUM_AGENT_AUTH_LANE=true \
+        -e CAESIUM_IT_LDAP_URL=ldaps://localhost:636 \
+        -e CAESIUM_IT_LDAP_CA_FILE={{ bld_dir }}/.tmp/ldap-tls/ca.crt \
         -e CAESIUM_AUTH_MODE=api-key \
         -e CAESIUM_AGENT_REMEDIATION_ENABLED=true \
         -e CAESIUM_AUTH_KEY_HASH_SECRET=agent-integration-auth-key-hash-secret-000001 \
@@ -637,23 +651,23 @@ integration-test-agent: integration-runner
     if [ "$rc" -ne 0 ]; then \
       echo "agent auth integration tests failed; caesium server logs:"; \
       {{ container_cli }} logs {{ agent_it_container }} || true; \
-      {{ container_cli }} rm -f {{ agent_it_container }} >/dev/null 2>&1 || true; \
+      {{ container_cli }} rm -f {{ agent_ldap_container }} {{ agent_it_container }} >/dev/null 2>&1 || true; \
       exit 1; \
     fi; \
     if [ "$passes" -lt {{ agent_integration_min_pass }} ]; then \
       echo "agent auth lane executed only $passes scenario(s), expected at least {{ agent_integration_min_pass }}: the lane is hollow (guards skipped every scenario)"; \
       {{ container_cli }} logs {{ agent_it_container }} || true; \
-      {{ container_cli }} rm -f {{ agent_it_container }} >/dev/null 2>&1 || true; \
+      {{ container_cli }} rm -f {{ agent_ldap_container }} {{ agent_it_container }} >/dev/null 2>&1 || true; \
       exit 1; \
     fi; \
     echo "agent auth lane executed $passes scenario(s) (minimum {{ agent_integration_min_pass }})"; \
-    {{ container_cli }} rm -f {{ agent_it_container }} >/dev/null 2>&1 || true
+    {{ container_cli }} rm -f {{ agent_ldap_container }} {{ agent_it_container }} >/dev/null 2>&1 || true
 
 integration-down:
     {{ container_cli }} rm -f {{ it_container }}
 
 integration-down-agent:
-    {{ container_cli }} rm -f {{ agent_it_container }}
+    {{ container_cli }} rm -f {{ agent_ldap_container }} {{ agent_it_container }}
 
 integration-down-infra:
     {{ container_cli }} rm -f {{ infra_it_container }}
@@ -1019,6 +1033,20 @@ integration-up-agent: build-stress build-test build-triage-agent
     if [ -n "${CAESIUM_CONNECTORS_NETWORK_ANCHOR:-}" ]; then \
         set -- "$@" --network="container:$CAESIUM_CONNECTORS_NETWORK_ANCHOR"; \
     else set -- "$@" -p {{ port }}:8080; fi; \
+    if [ -n "${CAESIUM_AGENT_LDAP_TLS_DIR:-}" ]; then \
+        set -- "$@" -v "$CAESIUM_AGENT_LDAP_TLS_DIR:/etc/caesium/ldap-tls:ro" \
+            -e CAESIUM_AUTH_LDAP_ENABLED=true \
+            -e CAESIUM_AUTH_LDAP_URL=ldaps://localhost:636 \
+            -e CAESIUM_AUTH_LDAP_CA_FILE=/etc/caesium/ldap-tls/ca.crt \
+            -e CAESIUM_AUTH_LDAP_BIND_DN=cn=admin,dc=example,dc=org \
+            -e CAESIUM_AUTH_LDAP_BIND_PASSWORD=iaa-ldap-admin-secret \
+            -e CAESIUM_AUTH_LDAP_USER_BASE_DN=ou=people,dc=example,dc=org \
+            -e "CAESIUM_AUTH_LDAP_USER_FILTER=(&(uid={username})(!(description=disabled)))" \
+            -e CAESIUM_AUTH_LDAP_GROUP_BASE_DN=ou=groups,dc=example,dc=org \
+            -e "CAESIUM_AUTH_LDAP_GROUP_FILTER=(member={dn})" \
+            -e CAESIUM_AUTH_LDAP_GROUP_ATTRIBUTE=cn \
+            -e CAESIUM_AUTH_LDAP_TIMEOUT=5s; \
+    fi; \
     {{ container_cli }} "$@" --platform {{ platform }} \
         --name {{ agent_it_container }} \
         --privileged \

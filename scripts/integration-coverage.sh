@@ -22,6 +22,8 @@
 #   CAESIUM_COVERAGE_RATCHET / CAESIUM_COVERAGE_WRITE_BASELINE
 #   CAESIUM_COVERAGE_CHANGED_PATHS / CAESIUM_COVERAGE_DIFF_BASE
 #   CAESIUM_COVERAGE_CONNECTOR_FIXTURE_IMAGE  required immutable prepared provider image
+#   CAESIUM_COVERAGE_LDAP_IMAGE  required ID of the pulled OpenLDAP fixture image
+#                                (scripts/ldap-fixture.sh) for the auth journey
 #   CAESIUM_COVERAGE_SKIP_BUILD=1
 #   CAESIUM_COVERAGE_KEEP=1
 #   Browser evidence is required by collect, check, and merge.

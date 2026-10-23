@@ -454,6 +454,18 @@ var (
 		[]string{"trigger"},
 	)
 
+	// AuthGroupRefreshTotal counts SSO group refresh attempts (identity-and-
+	// access §11.1) by provider (oidc, ldap, other) and outcome (success,
+	// groups_unknown, transient, uncertain, definitive, discarded_cas,
+	// unusable_grant).
+	AuthGroupRefreshTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "caesium_auth_group_refresh_total",
+			Help: "SSO group refresh attempts by provider and outcome.",
+		},
+		[]string{"provider", "outcome"},
+	)
+
 	AuditLogEntriesTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "caesium_audit_log_entries_total",
@@ -837,6 +849,7 @@ func Register() {
 			AuthFailuresTotal,
 			AuthKeyAgeSeconds,
 			AuthPolicyReloadFailuresTotal,
+			AuthGroupRefreshTotal,
 			AuditLogEntriesTotal,
 			SSOLoginsTotal,
 			SSOLoginDurationSeconds,
