@@ -194,11 +194,44 @@ func (s *Service) validateUserKey(ctx context.Context, key *models.APIKey) (*Pri
 	if user.IsDisabled() {
 		return nil, ErrUserDisabled
 	}
-	// E2 hook (identity-and-access §11.1): this is where E2 schedules the
-	// asynchronous group refresh for user (and applies the unconditional
-	// staleness bound) before its grants are resolved. Until E2, a user-bound
-	// key resolves the groups stored at the user's last login.
+	// Group refresh (identity-and-access §11.1, E2): a due refresh is queued,
+	// and past the maximum staleness the key is refused (stale_groups) unless
+	// one synchronous refresh succeeds.
+	if s.groupFreshness != nil {
+		admitted, synced, err := s.groupFreshness.Admit(ctx, &user)
+		if synced {
+			// The request waited: re-check the key on a fresh row (a
+			// definitive refusal or an admin may have revoked it); a
+			// cancelled request is refused, never admitted unchecked.
+			if rerr := syncedRevalidation(ctx, err, func() error { return s.revalidateKey(ctx, key) }); rerr != nil {
+				return nil, rerr
+			}
+		}
+		if err != nil {
+			return nil, err
+		}
+		user = *admitted
+	}
 	return PrincipalFromUserKey(key, &user, s.policySource), nil
+}
+
+// revalidateKey re-reads a user-bound key after a synchronous group refresh.
+func (s *Service) revalidateKey(ctx context.Context, key *models.APIKey) error {
+	var current models.APIKey
+	err := s.db.WithContext(ctx).Where("id = ?", key.ID).Take(&current).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return ErrKeyNotFound
+	}
+	if err != nil {
+		return fmt.Errorf("reload api key: %w", err)
+	}
+	if current.IsRevoked() {
+		return ErrKeyRevoked
+	}
+	if s.isExpired(&current) {
+		return ErrKeyExpired
+	}
+	return nil
 }
 
 // wellFormedUserKey reports whether a user-bound row has exactly the shape

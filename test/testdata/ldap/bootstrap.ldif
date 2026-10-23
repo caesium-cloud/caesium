@@ -1,0 +1,22 @@
+dn: ou=people,dc=example,dc=org
+objectClass: organizationalUnit
+ou: people
+
+dn: ou=groups,dc=example,dc=org
+objectClass: organizationalUnit
+ou: groups
+
+dn: cn=iaa-ldap-marketing,ou=groups,dc=example,dc=org
+objectClass: groupOfNames
+cn: iaa-ldap-marketing
+member: cn=placeholder,dc=example,dc=org
+
+dn: cn=iaa-ldap-finance,ou=groups,dc=example,dc=org
+objectClass: groupOfNames
+cn: iaa-ldap-finance
+member: cn=placeholder,dc=example,dc=org
+
+dn: cn=iaa-ldap-unbound,ou=groups,dc=example,dc=org
+objectClass: groupOfNames
+cn: iaa-ldap-unbound
+member: cn=placeholder,dc=example,dc=org

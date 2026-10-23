@@ -59,6 +59,13 @@ type User struct {
 	// without a recorded outcome; a later invalid_grant then clears the grant
 	// instead of revoking the user's credentials.
 	RefreshUncertain bool `json:"-"`
+	// StaleRefusedAt is set when the user's groups went past
+	// CAESIUM_AUTH_GROUP_MAX_STALENESS and the one synchronous refresh that
+	// followed failed (identity-and-access §11.1). While it is set, every
+	// credential of the user (sessions and user-bound keys) is refused with
+	// stale_groups on every node; only a successful login clears it. NULL
+	// otherwise, and for rows from before E2.
+	StaleRefusedAt *time.Time `json:"-"`
 }
 
 // IsDisabled reports whether the user account has been disabled.

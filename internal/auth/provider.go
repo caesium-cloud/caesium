@@ -39,8 +39,8 @@ type ExternalIdentity struct {
 	// value is untrusted.
 	EmailVerified bool
 	// Refresh is the provider's refresh grant from this login: the OIDC
-	// refresh token. Nil when the provider has none (SAML, LDAP, or an IdP
-	// that issued no refresh token). The login tail seals it
+	// refresh token, or the LDAP user DN. Nil when the provider has none
+	// (SAML, or an IdP that issued no refresh token). The login tail seals it
 	// onto the user row, replacing any earlier grant; its handle redacts
 	// itself in every log, error and JSON form.
 	Refresh *RefreshGrant `json:"-"`
@@ -60,7 +60,7 @@ type CredentialAuthenticator interface {
 }
 
 // GroupRefresher is implemented by providers that can re-read a user's
-// groups from a stored refresh grant without the user present (OIDC).
+// groups from a stored refresh grant without the user present (OIDC, LDAP).
 // The caller owns the user's refresh lease (UserStore.ClaimRefreshLease)
 // before calling, and records the outcome under the same fence.
 //
@@ -105,7 +105,7 @@ type RefreshErrorKind uint8
 const (
 	// RefreshTransient: nothing reached the IdP, or what did consumed nothing
 	// (dial/DNS failure, cancelled before send, provider not configured for
-	// the grant). Keep the grant; retry later.
+	// the grant, an LDAP read that failed). Keep the grant; retry later.
 	RefreshTransient RefreshErrorKind = iota + 1
 	// RefreshUncertain: the request may have reached the IdP and redeemed
 	// (and rotated) the grant, but no definitive answer came back (timeout
@@ -113,10 +113,9 @@ const (
 	// an answer for another identity). Mark the grant uncertain; never revoke
 	// on it.
 	RefreshUncertain
-	// RefreshDefinitive: the IdP definitively refused the grant (OIDC
-	// invalid_grant). A grant that may already have been redeemed is refused
-	// for that reason alone, so on an uncertain grant the refusal only clears
-	// the grant (UserStore.CompleteRefreshDefinitive).
+	// RefreshDefinitive: the IdP definitively refused (OIDC invalid_grant; the
+	// LDAP user entry is gone). See DenialScope for how it interacts with an
+	// uncertain grant.
 	RefreshDefinitive
 )
 
@@ -134,10 +133,26 @@ func (k RefreshErrorKind) String() string {
 	}
 }
 
+// DenialScope says what a definitive refusal is about.
+type DenialScope uint8
+
+const (
+	// DenialOfGrant: the IdP rejected this grant (OIDC invalid_grant). A grant
+	// that may already have been redeemed is rejected for that reason alone,
+	// so on an uncertain grant the refusal only clears the grant.
+	DenialOfGrant DenialScope = iota
+	// DenialOfSubject: the IdP says the user is gone (LDAP entry not found).
+	// No earlier redemption can cause that, so it revokes even when the
+	// grant is uncertain.
+	DenialOfSubject
+)
+
 // RefreshError is a classified redemption failure. Its text never contains
 // the handle, a token or a response body.
 type RefreshError struct {
 	Kind RefreshErrorKind
+	// Scope is meaningful for RefreshDefinitive only.
+	Scope DenialScope
 	// Reason is a short, fixed, token-free code for logs and metrics, such
 	// as "invalid_grant" or "timeout_after_send".
 	Reason string
@@ -148,6 +163,11 @@ type RefreshError struct {
 // NewRefreshError builds a classified failure.
 func NewRefreshError(kind RefreshErrorKind, reason string, cause error) *RefreshError {
 	return &RefreshError{Kind: kind, Reason: reason, Err: cause}
+}
+
+// NewRefreshDenial builds a definitive failure with its scope.
+func NewRefreshDenial(scope DenialScope, reason string) *RefreshError {
+	return &RefreshError{Kind: RefreshDefinitive, Scope: scope, Reason: reason}
 }
 
 func (e *RefreshError) Error() string {

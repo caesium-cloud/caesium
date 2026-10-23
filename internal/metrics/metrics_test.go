@@ -337,6 +337,25 @@ func (s *MetricsSuite) gaugeValue(vec *prometheus.GaugeVec, labels ...string) fl
 	return metrictestutil.GaugeValue(s.T(), gauge)
 }
 
+// TestAuthGroupRefreshTotalRegistered: the group refresh counter
+// (identity-and-access E2) is registered by Register and counts per
+// provider and outcome.
+func (s *MetricsSuite) TestAuthGroupRefreshTotalRegistered() {
+	Register()
+	before := metrictestutil.CounterValue(s.T(), AuthGroupRefreshTotal, "ldap", "success")
+	AuthGroupRefreshTotal.WithLabelValues("ldap", "success").Inc()
+	s.Equal(before+1, metrictestutil.CounterValue(s.T(), AuthGroupRefreshTotal, "ldap", "success"))
+	families, err := prometheus.DefaultGatherer.Gather()
+	s.Require().NoError(err)
+	found := false
+	for _, family := range families {
+		if family.GetName() == "caesium_auth_group_refresh_total" {
+			found = true
+		}
+	}
+	s.True(found, "caesium_auth_group_refresh_total is not registered")
+}
+
 func (s *MetricsSuite) TestResourceFamiliesRegisteredAndObserved() {
 	Register()
 	TaskOOMKillsTotal.WithLabelValues("stats-job", "stats-task", "docker").Inc()

@@ -25,6 +25,8 @@ import (
 	"github.com/docker/docker/client"
 	"github.com/docker/docker/pkg/stdcopy"
 	"github.com/docker/go-connections/nat"
+	gldap "github.com/go-ldap/ldap/v3"
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 )
 
@@ -60,7 +62,7 @@ func TestProviderAuthenticateOpenLDAPFixture(t *testing.T) {
 
 	require.NoError(t, cli.ContainerStart(ctx, containerID, dockercontainer.StartOptions{}))
 	endpoints := openLDAPEndpoints(t, ctx, cli, containerID)
-	identity := waitForOpenLDAPIdentity(t, ctx, cli, containerID, endpoints)
+	identity, provider, endpoint := waitForOpenLDAPIdentity(t, ctx, cli, containerID, endpoints)
 
 	require.Equal(t, ProviderName, identity.Issuer)
 	require.Equal(t, openLDAPUserDN, identity.Subject)
@@ -79,6 +81,118 @@ func TestProviderAuthenticateOpenLDAPFixture(t *testing.T) {
 	grants := mapper.Resolve(identity.Groups, "")
 	require.NotEmpty(t, grants)
 	require.Equal(t, models.RoleOperator, grants.ClusterRole())
+
+	// E1: the login's grant is the user DN, and a refresh re-queries the
+	// directory by DN with the service account alone.
+	require.NotNil(t, identity.Refresh)
+	require.Equal(t, openLDAPUserDN, identity.Refresh.Handle.Reveal())
+	refreshReq := authpkg.RefreshRequest{
+		UserID:  uuid.New(),
+		Issuer:  identity.Issuer,
+		Subject: identity.Subject,
+		Grant:   *identity.Refresh,
+	}
+	refreshed, err := provider.RefreshGroups(ctx, refreshReq)
+	require.NoError(t, err)
+	require.True(t, refreshed.GroupsKnown)
+	require.ElementsMatch(t, identity.Groups, refreshed.Groups)
+	require.Equal(t, openLDAPUserDN, refreshed.Handle.Reveal())
+
+	// A membership change in the directory shows up on the next refresh.
+	admin := openLDAPAdmin(t, endpoint)
+	removeMember := gldap.NewModifyRequest(operatorsGroupDN, nil)
+	// groupOfNames needs a member, so swap alice for another DN.
+	removeMember.Replace("member", []string{openLDAPAdminDN})
+	require.NoError(t, admin.Modify(removeMember))
+	refreshed, err = provider.RefreshGroups(ctx, refreshReq)
+	require.NoError(t, err)
+	require.Equal(t, []string{viewersGroupDN}, refreshed.Groups)
+
+	// A refresh re-applies the login filter, rendered with what the user
+	// typed. Sign in by mail (the username attribute stays uid) through a
+	// filter that excludes disabled accounts: the refresh succeeds while the
+	// filter admits the entry, and is a definitive denial once it does not.
+	gatedCfg := openLDAPProviderConfig(endpoint)
+	gatedCfg.UserFilter = "(&(mail={username})(!(description=disabled)))"
+	gated, err := New(gatedCfg)
+	require.NoError(t, err)
+	gatedIdentity, err := gated.Authenticate(ctx, "alice@example.org", openLDAPUserPass)
+	require.NoError(t, err)
+	require.Equal(t, "alice@example.org", gatedIdentity.Refresh.Login)
+	gatedReq := authpkg.RefreshRequest{
+		UserID:  refreshReq.UserID,
+		Issuer:  gatedIdentity.Issuer,
+		Subject: gatedIdentity.Subject,
+		Grant:   *gatedIdentity.Refresh,
+	}
+	refreshed, err = gated.RefreshGroups(ctx, gatedReq)
+	require.NoError(t, err, "a mail login filter with a uid username attribute must not revoke")
+	require.Equal(t, []string{viewersGroupDN}, refreshed.Groups)
+
+	disable := gldap.NewModifyRequest(openLDAPUserDN, nil)
+	disable.Add("description", []string{"disabled"})
+	require.NoError(t, admin.Modify(disable))
+	_, err = gated.RefreshGroups(ctx, gatedReq)
+	requireOpenLDAPDenial(t, err, "user_not_admitted")
+	_, err = gated.Authenticate(ctx, "alice@example.org", openLDAPUserPass)
+	require.Error(t, err, "login agrees: the filter no longer admits alice")
+	// The ungated provider's filter does not mention description.
+	_, err = provider.RefreshGroups(ctx, refreshReq)
+	require.NoError(t, err)
+
+	// A base narrowed so it no longer contains the user denies as well.
+	narrowedCfg := openLDAPProviderConfig(endpoint)
+	narrowedCfg.UserBaseDN = openLDAPGroupBase
+	narrowed, err := New(narrowedCfg)
+	require.NoError(t, err)
+	_, err = narrowed.RefreshGroups(ctx, refreshReq)
+	requireOpenLDAPDenial(t, err, "user_outside_base")
+
+	// An entry that does not exist is a definitive denial of the subject.
+	for _, ghost := range []string{
+		"uid=ghost," + openLDAPPeopleBase,
+		"uid=ghost,ou=nowhere,dc=example,dc=org",
+	} {
+		ghostReq := refreshReq
+		ghostReq.Subject = ghost
+		ghostReq.Grant.Handle = authpkg.NewRefreshHandle(ghost)
+		_, err = provider.RefreshGroups(ctx, ghostReq)
+		refreshErr, ok := err.(*authpkg.RefreshError)
+		require.Truef(t, ok, "want *RefreshError for %s, got %T: %v", ghost, err, err)
+		require.Equal(t, authpkg.RefreshDefinitive, refreshErr.Kind)
+		require.Equal(t, authpkg.DenialOfSubject, refreshErr.Scope)
+	}
+
+	// Deleting the user's entry turns the user's own refresh definitive.
+	require.NoError(t, admin.Del(gldap.NewDelRequest(openLDAPUserDN, nil)))
+	_, err = provider.RefreshGroups(ctx, refreshReq)
+	refreshErr, ok := err.(*authpkg.RefreshError)
+	require.Truef(t, ok, "want *RefreshError, got %T: %v", err, err)
+	require.Equal(t, authpkg.RefreshDefinitive, refreshErr.Kind)
+	require.Equal(t, "user_not_found", refreshErr.Reason)
+}
+
+func requireOpenLDAPDenial(t *testing.T, err error, reason string) {
+	t.Helper()
+	refreshErr, ok := err.(*authpkg.RefreshError)
+	require.Truef(t, ok, "want *RefreshError, got %T: %v", err, err)
+	require.Equal(t, authpkg.RefreshDefinitive, refreshErr.Kind)
+	require.Equal(t, authpkg.DenialOfSubject, refreshErr.Scope)
+	require.Equal(t, reason, refreshErr.Reason)
+}
+
+func openLDAPAdmin(t *testing.T, endpoint string) *gldap.Conn {
+	t.Helper()
+	// Bound the dial (including the LDAPS handshake) and every later request so
+	// a fixture that stops answering fails the test instead of hanging it.
+	conn, err := gldap.DialURL("ldaps://"+endpoint,
+		gldap.DialWithTLSConfig(&tls.Config{InsecureSkipVerify: true}), //nolint:gosec // fixture cert is generated per container.
+		gldap.DialWithDialer(&net.Dialer{Timeout: 10 * time.Second}))
+	require.NoError(t, err)
+	conn.SetTimeout(10 * time.Second)
+	t.Cleanup(func() { _ = conn.Close() })
+	require.NoError(t, conn.Bind(openLDAPAdminDN, openLDAPAdminPass))
+	return conn
 }
 
 func dockerClientOrSkip(t *testing.T) *client.Client {
@@ -227,7 +341,7 @@ func openLDAPEndpoints(t *testing.T, ctx context.Context, cli *client.Client, co
 	return endpoints
 }
 
-func waitForOpenLDAPIdentity(t *testing.T, ctx context.Context, cli *client.Client, containerID string, endpoints []string) *authpkg.ExternalIdentity {
+func waitForOpenLDAPIdentity(t *testing.T, ctx context.Context, cli *client.Client, containerID string, endpoints []string) (*authpkg.ExternalIdentity, *Provider, string) {
 	t.Helper()
 
 	deadline := time.Now().Add(45 * time.Second)
@@ -252,7 +366,7 @@ OuterLoop:
 			require.NoError(t, err)
 			identity, err := provider.Authenticate(ctx, openLDAPUser, openLDAPUserPass)
 			if err == nil {
-				return identity
+				return identity, provider, endpoint
 			}
 			lastErr = err
 		}
@@ -267,7 +381,7 @@ OuterLoop:
 
 	logs := openLDAPLogs(t, ctx, cli, containerID)
 	require.NoErrorf(t, lastErr, "OpenLDAP fixture did not become ready; endpoints=%s\nlogs:\n%s", strings.Join(endpoints, ", "), logs)
-	return nil
+	return nil, nil, ""
 }
 
 func openLDAPProviderConfig(endpoint string) Config {

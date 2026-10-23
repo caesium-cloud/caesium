@@ -23,6 +23,10 @@ var (
 	ErrSessionRevoked = errors.New("session revoked")
 	ErrSessionExpired = errors.New("session expired")
 	ErrUserDisabled   = errors.New("user disabled")
+	// ErrStaleGroups refuses every credential of a user whose groups are
+	// older than CAESIUM_AUTH_GROUP_MAX_STALENESS and could not be refreshed
+	// (identity-and-access §11.1). Only a new login clears it.
+	ErrStaleGroups = errors.New("stale groups")
 	// ErrUserChanged reports that the user was disabled (and perhaps enabled
 	// again) after the login read it: its disable generation moved. The
 	// login is refused and must be repeated at the IdP.
@@ -42,6 +46,14 @@ type SessionStore struct {
 
 	seenMu sync.RWMutex
 	seen   map[uuid.UUID]time.Time
+
+	// samlAbsoluteTTL, when positive, replaces absoluteTTL for SAML sessions
+	// (CAESIUM_AUTH_SAML_SESSION_ABSOLUTE_TTL): SAML has no refresh grant, so
+	// this is its freshness bound (identity-and-access §11.1).
+	samlAbsoluteTTL time.Duration
+	// freshness, when set, keeps the session user's groups fresh and applies
+	// the maximum staleness (identity-and-access E2).
+	freshness GroupFreshness
 
 	retry dbretry.Policy
 	// beforeMint, when set (tests only), runs inside Create's transaction
@@ -64,6 +76,22 @@ func WithSessionTTLs(idle, absolute time.Duration) SessionStoreOption {
 	return func(s *SessionStore) {
 		s.idleTTL = idle
 		s.absoluteTTL = absolute
+	}
+}
+
+// WithSAMLSessionAbsoluteTTL sets the absolute lifetime of SAML sessions,
+// overriding the general one. Zero keeps the general lifetime.
+func WithSAMLSessionAbsoluteTTL(ttl time.Duration) SessionStoreOption {
+	return func(s *SessionStore) {
+		s.samlAbsoluteTTL = ttl
+	}
+}
+
+// WithSessionGroupFreshness makes Validate admit the session's user through
+// f (group refresh and the maximum staleness, identity-and-access E2).
+func WithSessionGroupFreshness(f GroupFreshness) SessionStoreOption {
+	return func(s *SessionStore) {
+		s.freshness = f
 	}
 }
 
@@ -130,6 +158,10 @@ func (s *SessionStore) Create(ctx context.Context, req CreateSessionRequest) (st
 	}
 
 	now := s.nowUTC()
+	absoluteTTL := s.absoluteTTL
+	if req.AuthMethod == "saml" && s.samlAbsoluteTTL > 0 {
+		absoluteTTL = s.samlAbsoluteTTL
+	}
 	sess := &models.Session{
 		ID:                uuid.New(),
 		UserID:            req.UserID,
@@ -138,7 +170,7 @@ func (s *SessionStore) Create(ctx context.Context, req CreateSessionRequest) (st
 		AuthMethod:        req.AuthMethod,
 		CreatedAt:         now,
 		IdleExpiresAt:     now.Add(s.idleTTL),
-		AbsoluteExpiresAt: now.Add(s.absoluteTTL),
+		AbsoluteExpiresAt: now.Add(absoluteTTL),
 		SourceIP:          req.SourceIP,
 		UserAgent:         req.UserAgent,
 	}
@@ -222,9 +254,62 @@ func (s *SessionStore) Validate(ctx context.Context, plaintext string) (*models.
 	if user.IsDisabled() {
 		return nil, nil, ErrUserDisabled
 	}
+	if s.freshness != nil {
+		admitted, synced, err := s.freshness.Admit(ctx, &user)
+		if synced {
+			// The request waited for a synchronous refresh: a definitive
+			// refusal may have revoked this session meanwhile, and an
+			// admin may have revoked it. Admit re-read the user (and
+			// refuses a disabled one); re-read the session too. A request
+			// cancelled before that re-read cannot prove the session is
+			// still live, so it is refused rather than admitted.
+			if rerr := syncedRevalidation(ctx, err, func() error { return s.revalidate(ctx, &sess) }); rerr != nil {
+				return nil, nil, rerr
+			}
+		}
+		if err != nil {
+			return nil, nil, err
+		}
+		user = *admitted
+	}
 
 	s.recordSeen(sess.ID)
 	return &sess, &user, nil
+}
+
+// syncedRevalidation runs the credential re-check owed after a synchronous
+// group refresh. It never admits on a cancelled request: the re-check could
+// not run, so the refresh outcome (a refusal) is returned if there is one,
+// and otherwise the cancellation itself.
+func syncedRevalidation(ctx context.Context, admitErr error, revalidate func() error) error {
+	if cerr := ctx.Err(); cerr != nil {
+		if admitErr != nil {
+			return admitErr
+		}
+		return fmt.Errorf("revalidate credential after group refresh: %w", cerr)
+	}
+	return revalidate()
+}
+
+// revalidate re-reads a session after a synchronous group refresh and
+// refuses it if it was revoked or reached its absolute expiry meanwhile.
+func (s *SessionStore) revalidate(ctx context.Context, sess *models.Session) error {
+	var current models.Session
+	err := s.db.WithContext(ctx).Where("id = ?", sess.ID).Take(&current).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return ErrSessionInvalid
+	}
+	if err != nil {
+		return fmt.Errorf("reload session: %w", err)
+	}
+	if current.IsRevoked() {
+		return ErrSessionRevoked
+	}
+	if s.nowUTC().After(current.AbsoluteExpiresAt) {
+		return ErrSessionExpired
+	}
+	sess.RevokedAt = current.RevokedAt
+	return nil
 }
 
 // Revoke marks a single session revoked.

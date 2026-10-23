@@ -9,6 +9,8 @@
 # shutdown are merged into the collector's CLI/server profiles.
 
 COVERAGE_JOURNEY_ACTIVE_IDS=()
+# Image identity per ACTIVE_IDS entry (same index); empty means $IMAGE_ID.
+COVERAGE_JOURNEY_ACTIVE_ID_IMAGES=()
 COVERAGE_JOURNEY_BUILDER_IDS=()
 COVERAGE_JOURNEY_PENDING_NAMES=()
 COVERAGE_JOURNEY_PENDING_IMAGES=()
@@ -221,6 +223,7 @@ coverage_journey_fail() {
 coverage_journey_track_id() {
   local id="$1" image="${2:-${IMAGE_ID:-}}"
   COVERAGE_JOURNEY_ACTIVE_IDS+=("$id")
+  COVERAGE_JOURNEY_ACTIVE_ID_IMAGES+=("$image")
   if [[ -n "$COVERAGE_JOURNEY_PARALLEL_ID_LEDGER" ]]; then
     [[ "$id" =~ ^[0-9a-f]{64}$ && "$image" =~ ^sha256:[0-9a-f]{64}$ ]] || return 1
     printf '%s\t%s\n' "$id" "$image" >>"$COVERAGE_JOURNEY_PARALLEL_ID_LEDGER" || return 1
@@ -239,19 +242,36 @@ coverage_journey_track_pending_name() {
 
 coverage_journey_untrack_id() {
   local want="$1"
-  local kept=()
-  local id
+  local kept=() kept_images=()
+  local id index
   if ((${#COVERAGE_JOURNEY_ACTIVE_IDS[@]} == 0)); then
     return
   fi
-  for id in "${COVERAGE_JOURNEY_ACTIVE_IDS[@]}"; do
-    [[ "$id" == "$want" ]] || kept+=("$id")
+  for ((index = 0; index < ${#COVERAGE_JOURNEY_ACTIVE_IDS[@]}; index++)); do
+    id="${COVERAGE_JOURNEY_ACTIVE_IDS[$index]}"
+    [[ "$id" == "$want" ]] && continue
+    kept+=("$id")
+    kept_images+=("${COVERAGE_JOURNEY_ACTIVE_ID_IMAGES[$index]:-}")
   done
   if ((${#kept[@]})); then
     COVERAGE_JOURNEY_ACTIVE_IDS=("${kept[@]}")
+    COVERAGE_JOURNEY_ACTIVE_ID_IMAGES=("${kept_images[@]}")
   else
     COVERAGE_JOURNEY_ACTIVE_IDS=()
+    COVERAGE_JOURNEY_ACTIVE_ID_IMAGES=()
   fi
+}
+
+# The image a tracked container was created from, so removal guards it against
+# that image (the LDAP fixture is not the Caesium image). Empty = $IMAGE_ID.
+coverage_journey_active_image() {
+  local want="$1" index
+  for ((index = 0; index < ${#COVERAGE_JOURNEY_ACTIVE_IDS[@]}; index++)); do
+    if [[ "${COVERAGE_JOURNEY_ACTIVE_IDS[$index]}" == "$want" ]]; then
+      printf '%s' "${COVERAGE_JOURNEY_ACTIVE_ID_IMAGES[$index]:-}"
+      return
+    fi
+  done
 }
 
 coverage_journey_resource() {
@@ -608,8 +628,9 @@ coverage_journey_require_absent() {
 }
 
 coverage_journey_remove_owned() {
-  local id="$1"
-  coverage_journey_resource remove container "$id" >/dev/null || return 1
+  local id="$1" image
+  image="$(coverage_journey_active_image "$id")"
+  coverage_journey_resource remove container "$id" "$image" >/dev/null || return 1
   coverage_journey_untrack_id "$id"
 }
 
@@ -1151,6 +1172,22 @@ coverage_journey_server_env() {
         CAESIUM_AGENT_SESSION_TIMEOUT=45s
         CAESIUM_AGENT_INCIDENT_COOLDOWN=1s
         CAESIUM_AGENT_APPROVAL_REDRIVE_INTERVAL=5s
+        # LDAP sign-in and group refresh (identity-and-access E1b/E2) against
+        # the OpenLDAP fixture this lane starts in the server's network
+        # namespace, verified with the lane's throwaway CA. No policy file
+        # here, so the fixture groups are mapped by env.
+        CAESIUM_AUTH_LDAP_ENABLED=true
+        CAESIUM_AUTH_LDAP_URL=ldaps://localhost:636
+        CAESIUM_AUTH_LDAP_CA_FILE=/etc/caesium/ldap-tls/ca.crt
+        CAESIUM_AUTH_LDAP_BIND_DN=cn=admin,dc=example,dc=org
+        CAESIUM_AUTH_LDAP_BIND_PASSWORD=iaa-ldap-admin-secret
+        CAESIUM_AUTH_LDAP_USER_BASE_DN=ou=people,dc=example,dc=org
+        "CAESIUM_AUTH_LDAP_USER_FILTER=(&(uid={username})(!(description=disabled)))"
+        CAESIUM_AUTH_LDAP_GROUP_BASE_DN=ou=groups,dc=example,dc=org
+        "CAESIUM_AUTH_LDAP_GROUP_FILTER=(member={dn})"
+        CAESIUM_AUTH_LDAP_GROUP_ATTRIBUTE=cn
+        CAESIUM_AUTH_LDAP_TIMEOUT=5s
+        "CAESIUM_AUTH_ROLE_MAPPING=iaa-ldap-marketing=operator;iaa-ldap-finance=viewer"
       )
       ;;
     git-sync)
@@ -1414,6 +1451,8 @@ coverage_journey_run_lane() {
   local fixture_validation="$lane_dir/evidence/collector-validation.json" server_finished_at=""
   local agent_port="" CAESIUM_AGENT_API_EXTERNAL_URL=""
   local cli_raw="$lane_dir/cli" server_raw="$lane_dir/server"
+  local ldap_tls="$lane_dir/ldap-tls" ldap_name="${ID}-journey-${lane}-ldap" ldap_id=""
+  local ldap_image="${CAESIUM_COVERAGE_LDAP_IMAGE:-}"
   local -a server_args runner_args runner_payload_args
 
   coverage_journey_require_absent container "$server_name" || return 1
@@ -1467,8 +1506,16 @@ coverage_journey_run_lane() {
     server_args+=(-p "$agent_port:8080")
   fi
   if [[ "$mode" == "auth" ]]; then
+    # The OpenLDAP fixture (scripts/ldap-fixture.sh) is a pre-pulled, pinned
+    # image: this collector never pulls.
+    [[ "$ldap_image" =~ ^sha256:[0-9a-f]{64}$ ]] \
+      || { coverage_journey_fail "CAESIUM_COVERAGE_LDAP_IMAGE must name the prepared OpenLDAP fixture image by ID"; return 1; }
+    coverage_journey_require_absent container "$ldap_name" || return 1
+    bash "$ROOT/scripts/ldap-fixture.sh" tls "$ldap_tls" \
+      || { coverage_journey_fail "cannot create the LDAP fixture's TLS material"; return 1; }
     server_args+=(
       -v "$ROOT/test/fixtures/connectors/connections.yaml:/etc/caesium/connectors/connections.yaml:ro"
+      -v "$ldap_tls:/etc/caesium/ldap-tls:ro"
     )
   fi
   if [[ "$mode" == "local" ]]; then
@@ -1528,6 +1575,22 @@ coverage_journey_run_lane() {
         COVERAGE_JOURNEY_SECRET_FILES+=("$auth_env")
         printf 'CAESIUM_AUTH_ADMIN_KEY=%s\nCAESIUM_API_KEY=%s\n' "$key" "$key" > "$auth_env"
       fi
+      if [[ -n "$auth_env" ]]; then
+        coverage_journey_track_pending_name "$ldap_name" "$ldap_image" || return 1
+        ldap_id="$(CAESIUM_LDAP_IMAGE="$ldap_image" bash "$ROOT/scripts/ldap-fixture.sh" run "$CONTAINER_CLI" \
+          "$ldap_name" "$server_id" "$ldap_tls" --pull=never --platform "$PLATFORM" \
+          --label "caesium.coverage.owner=$CANDIDATE_SHA" --label "caesium.coverage.run=$ID" \
+          --label "caesium.coverage.lane=$lane-ldap")" || ldap_id=""
+        if [[ "$ldap_id" =~ ^[0-9a-f]{64}$ ]]; then
+          coverage_journey_track_id "$ldap_id" "$ldap_image" || { coverage_journey_fail "cannot retain the LDAP fixture's ownership"; return 1; }
+        fi
+        if [[ ! "$ldap_id" =~ ^[0-9a-f]{64}$ ]] || ! bash "$ROOT/scripts/ldap-fixture.sh" wait "$CONTAINER_CLI" "$ldap_name" >&2; then
+          coverage_journey_fail "auth lane OpenLDAP fixture did not start"
+          rm -f "$auth_env"
+          auth_env=""
+          test_rc=125
+        fi
+      fi
     fi
     if [[ "$test_rc" -ne 125 || "$lane" != "auth" || -n "$auth_env" ]]; then
       # Keep the runner payload separate from lifecycle identity. GitSync uses
@@ -1562,6 +1625,9 @@ coverage_journey_run_lane() {
           -e CAESIUM_AUTH_MODE=api-key
           -e CAESIUM_AGENT_REMEDIATION_ENABLED=true
           -e CAESIUM_AUTH_KEY_HASH_SECRET=agent-integration-auth-key-hash-secret-000001
+          -v "$lane_dir/ldap-tls:/coverage-ldap-tls:ro"
+          -e CAESIUM_IT_LDAP_URL=ldaps://localhost:636
+          -e CAESIUM_IT_LDAP_CA_FILE=/coverage-ldap-tls/ca.crt
         )
       elif [[ "$mode" == "distributed" || "$mode" == "owner-memory" ]]; then
         runner_payload_args+=(-e CAESIUM_EXECUTION_MODE=distributed)
@@ -1627,6 +1693,9 @@ coverage_journey_run_lane() {
     fi
   fi
 
+  if [[ -n "$ldap_id" ]]; then
+    coverage_journey_remove_owned "$ldap_id" || { coverage_journey_fail "cannot remove the LDAP fixture"; return 1; }
+  fi
   coverage_journey_build_named_args "$runner_log" "$@"
   set +e
   python3 "$ROOT/scripts/test_coverage_named_journeys.py" "${COVERAGE_JOURNEY_NAMED_ARGS[@]}" >"$named_result"
@@ -1823,6 +1892,13 @@ PY
   # the ingest and fire secrets is audited under the legacy actors and read
   # back through `caesium auth audit`. Needs no policy file.
   auth_pattern="${auth_pattern%)}|TestAuthLegacySecretAudited)"
+  # LDAP sign-in and SSO group refresh (identity-and-access E1b/E2): the
+  # no_binding refusal, a directory group change reaching a session and a
+  # CLI-only key, a disabled entry revoking both, and stale_groups until a
+  # new sign-in, against the OpenLDAP fixture this lane starts. Groups are
+  # mapped by CAESIUM_AUTH_ROLE_MAPPING (no policy file); one 401 each in
+  # the last two.
+  auth_pattern="${auth_pattern%)}|TestAuthLDAPLoginNoBindingBody|TestAuthLDAPGroupRefreshFollowsDirectory|TestAuthLDAPDisabledEntryRevokesCredentials|TestAuthStaleGroupsRefusedUntilRelogin)"
 
   local -a local_named_passes=(
     TestCaesiumWhyExplainsHitAndMiss
@@ -1886,6 +1962,10 @@ PY
     TestAuthCLILoginManualCodeFlow
     TestAuthCLILoginLoopbackFlow
     TestAuthLegacySecretAudited
+    TestAuthLDAPLoginNoBindingBody
+    TestAuthLDAPGroupRefreshFollowsDirectory
+    TestAuthLDAPDisabledEntryRevokesCredentials
+    TestAuthStaleGroupsRefusedUntilRelogin
   )
   local -a distributed_named_passes=(
     TestNodeWorkersRoute
@@ -2296,6 +2376,7 @@ coverage_journey_run_parallel_worker() {
   # This function itself runs as a background subshell. Each worker owns only
   # its lane's resources and temp files; parent-owned CLI extraction survives.
   COVERAGE_JOURNEY_ACTIVE_IDS=()
+  COVERAGE_JOURNEY_ACTIVE_ID_IMAGES=()
   COVERAGE_JOURNEY_PENDING_NAMES=()
   COVERAGE_JOURNEY_PENDING_IMAGES=()
   COVERAGE_JOURNEY_BUILDER_IDS=()

@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"time"
@@ -96,6 +97,17 @@ const (
 	ActionAuthCLILogin     = "auth.cli_login"
 )
 
+// Group refresh (spec §11.1, identity-and-access E2). ActionAuthGroupsRefreshed
+// is written only when a refresh changed the user's stored groups, with
+// metadata {"provider", "added", "removed", "trigger"}. A definitive IdP
+// refusal that revoked credentials writes ActionSessionsRevoked with reason
+// SessionsRevokedReasonIdPRefreshDenied.
+const (
+	ActionAuthGroupsRefreshed = "auth.groups_refreshed"
+
+	SessionsRevokedReasonIdPRefreshDenied = "idp_refresh_denied"
+)
+
 // AuditLogger writes structured audit log entries to the database.
 type AuditLogger struct {
 	db *gorm.DB
@@ -122,6 +134,12 @@ type AuditEntry struct {
 
 // Log writes an audit entry to the database.
 func (a *AuditLogger) Log(entry AuditEntry) error {
+	return a.LogContext(context.Background(), entry)
+}
+
+// LogContext writes an audit entry bounded by ctx, for writers (the group
+// refresher) whose work must finish within a deadline.
+func (a *AuditLogger) LogContext(ctx context.Context, entry AuditEntry) error {
 	var metaJSON []byte
 	if entry.Metadata != nil {
 		var err error
@@ -144,7 +162,7 @@ func (a *AuditLogger) Log(entry AuditEntry) error {
 		Namespace:    entry.Namespace,
 	}
 
-	if err := a.db.Create(record).Error; err != nil {
+	if err := a.db.WithContext(ctx).Create(record).Error; err != nil {
 		return fmt.Errorf("write audit log: %w", err)
 	}
 	metrics.AuditLogEntriesTotal.WithLabelValues(entry.Action, entry.Outcome).Inc()

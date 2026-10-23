@@ -320,7 +320,21 @@ func (s *IntegrationTestSuite) TestAuthPolicyShowAndReloadSurface() {
 		s.Equal(policy.SourceEnv, view.Source, "no policy file: the env view")
 		s.Empty(view.Revision)
 		s.Empty(view.Path)
-		s.Empty(view.Policy.Bindings, "api-key without SSO translates no role mapping")
+		if strings.TrimSpace(os.Getenv(ldapURLEnv)) == "" {
+			s.Empty(view.Policy.Bindings, "api-key without SSO translates no role mapping")
+		} else {
+			// The coverage journey's server signs LDAP users in (E1b) and
+			// maps the two fixture groups with CAESIUM_AUTH_ROLE_MAPPING.
+			got := map[string]string{}
+			for _, binding := range view.Policy.Bindings {
+				s.Equal([]string{"*"}, binding.Namespaces)
+				for _, group := range binding.Subjects.Groups {
+					got[group] = binding.Role
+				}
+			}
+			s.Equal(map[string]string{ldapGroupMarketing: "operator", ldapGroupFinance: "viewer"}, got,
+				"api-key with LDAP translates exactly the lane's role mapping")
+		}
 		s.Nil(view.LastReload)
 
 		reloadedBefore := len(s.policyAuditRowsAny(iauth.ActionPolicyReloaded))
