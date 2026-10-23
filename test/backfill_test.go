@@ -143,7 +143,11 @@ func (s *IntegrationTestSuite) cancelBackfillRequest(jobID, backfillID string) *
 }
 
 // backfillJobManifest returns a minimal job YAML definition for backfill tests.
-func backfillJobManifest(alias, cronExpr, taskCmd string) string {
+func backfillJobManifest(alias, cronExpr, taskCmd string, timezone ...string) string {
+	timezoneConfig := ""
+	if len(timezone) > 0 {
+		timezoneConfig = fmt.Sprintf("\n    timezone: %q", timezone[0])
+	}
 	return fmt.Sprintf(`
 apiVersion: v1
 kind: Job
@@ -152,12 +156,12 @@ metadata:
 trigger:
   type: cron
   configuration:
-    expression: %q
+    expression: %q%s
 steps:
   - name: run
     image: alpine:3.23
     command: ["sh", "-c", %q]
-`, alias, cronExpr, taskCmd)
+`, alias, cronExpr, timezoneConfig, taskCmd)
 }
 
 // --------------------------------------------------------------------------
@@ -330,21 +334,26 @@ func (s *IntegrationTestSuite) TestBackfillReprocessAll() {
 // it before completion, verifying the status transitions to "cancelled".
 func (s *IntegrationTestSuite) TestBackfillCancel() {
 	alias := fmt.Sprintf("integration-backfill-cancel-%d", time.Now().UnixNano())
+	now := time.Now().UTC()
+	start := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC).AddDate(0, 0, -1)
+	end := start.Add(5 * time.Hour)
+	// The historical day still has 300 per-minute backfill dates, but its
+	// calendar-bound cron cannot admit automatic runs during this test.
+	cronExpr := fmt.Sprintf("* * %d %d *", start.Day(), start.Month())
 	// sleep 30 ensures the first container is still running when we cancel,
 	// so there is definitely at least one in-flight run.
-	dir := s.writeJobManifest(backfillJobManifest(alias, "* * * * *", "sleep 30"))
+	dir := s.writeJobManifest(backfillJobManifest(alias, cronExpr, "sleep 30", "UTC"))
 	defer os.RemoveAll(dir)
 
 	s.runCLI("job", "apply", "--path", dir, "--server", s.caesiumURL)
 	job := s.requireJobByAlias(alias)
+	cleanup := s.cleanupJobAfterTest(job.ID, "")
 
 	// 5-hour window at per-minute schedule → 300 dates; max_concurrent=1
 	// means at most one container at a time, so the backfill cannot complete
 	// within the time we allow before cancelling.
-	start := time.Date(2024, 4, 1, 0, 0, 0, 0, time.UTC)
-	end := time.Date(2024, 4, 1, 5, 0, 0, 0, time.UTC)
-
 	b := s.createBackfill(job.ID, start, end, 1, "none")
+	s.cleanupBackfillAfterTest(cleanup, b.ID)
 	s.Require().Equal("running", b.Status)
 
 	var runsBeforeCancel int
