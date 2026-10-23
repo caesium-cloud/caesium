@@ -32,6 +32,9 @@ tls() {
     local dir="${1:?usage: ldap-fixture.sh tls <dir>}"
     rm -rf "$dir"
     mkdir -p "$dir"
+    # RFC 7919's public FFDHE2048 group avoids random-prime generation at
+    # directory startup. These standard DH parameters contain no private key.
+    cp "$ROOT/test/testdata/ldap/dhparam.pem" "$dir/dhparam.pem"
     local work
     work="$(mktemp -d "${TMPDIR:-/tmp}/caesium-ldap-tls.XXXXXX")"
     trap 'rm -rf "$work"' RETURN
@@ -68,6 +71,7 @@ run() {
         -e LDAP_TLS_CRT_FILENAME=server.crt \
         -e LDAP_TLS_KEY_FILENAME=server.key \
         -e LDAP_TLS_CA_CRT_FILENAME=ca.crt \
+        -e LDAP_TLS_DH_PARAM_FILENAME=dhparam.pem \
         -e LDAP_TLS_VERIFY_CLIENT=never \
         -e LDAP_TLS_ENFORCE=false \
         "${CAESIUM_LDAP_IMAGE:-$DEFAULT_IMAGE}" --copy-service
@@ -78,9 +82,11 @@ wait_ready() {
     # Each probe is bounded inside the container (timeout + LDAP network and
     # server time limits), and the whole wait by an elapsed deadline, so a slapd
     # that accepts and then stalls in TLS, bind or search cannot hang the lane.
+    # This libldap canonicalizes localhost to the container hostname. Use the
+    # loopback IP covered by the certificate SAN for verified readiness.
     local deadline=$((SECONDS + 90))
-    until "$cli" exec -e LDAPTLS_CACERT="$CERT_DIR/ca.crt" "$name" \
-        timeout 5 ldapsearch -o nettimeout=5 -l 5 -x -H ldaps://localhost:636 \
+    until "$cli" exec -e LDAPTLS_CACERT="$CERT_DIR/ca.crt" -e LDAPTLS_REQCERT=demand "$name" \
+        timeout 5 ldapsearch -o nettimeout=5 -l 5 -x -H ldaps://127.0.0.1:636 \
         -D "$ADMIN_DN" -w "$ADMIN_PASSWORD" \
         -b ou=groups,dc=example,dc=org -s base dn >/dev/null 2>&1; do
         if [ "$SECONDS" -ge "$deadline" ]; then
