@@ -185,8 +185,7 @@ test("operator surfaces remain usable at phone, tablet, and desktop widths", asy
   await expect(menu).toBeFocused();
   await menu.click();
   await expect(drawer).toBeVisible();
-  await page.keyboard.press("g");
-  await page.keyboard.press("y");
+  await page.keyboard.type("gy");
   await expect(page).toHaveURL(/\/system$/);
   await expect(drawer).toBeHidden();
   await menu.click();
