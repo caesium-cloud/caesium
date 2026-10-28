@@ -5,7 +5,7 @@ import { afterEach, expect, it, vi } from "vitest";
 import type { Job } from "@/lib/api";
 import type { CaesiumEvent } from "@/lib/events";
 import { resetNamespaceViewForTests, setStoredNamespace } from "@/features/auth/namespaceView";
-import { useJobsView } from "../useJobsView";
+import { boundHeldActivity, useJobsView } from "../useJobsView";
 
 const { handlers, getJobs } = vi.hoisted(() => ({ handlers: new Map<string, (e: CaesiumEvent) => void>(), getJobs: vi.fn() }));
 vi.mock("@/lib/events", () => ({ events: {
@@ -116,20 +116,23 @@ it("does not let held events of other namespaces displace a selected job's throu
   await waitFor(() => expect(result.current.rows.map(row => row.alias)).toEqual(["mkt-job"]));
   phase = "failing";
   let sequence = 0;
-  const fire = async (jobIds: string[]) => {
+  const fire = async (jobIds: string[], namespace?: string) => {
     const before = getJobs.mock.calls.filter(([ns]) => ns === "marketing").length;
     act(() => {
       for (const job_id of jobIds) {
         sequence += 1;
-        handlers.get("run_started")!({ sequence, type: "run_started", job_id, run_id: `run-${sequence}`, timestamp: new Date().toISOString() });
+        const run_id = `run-${sequence}`;
+        const payload = namespace ? { id: run_id, job_id, namespace, status: "running" } : undefined;
+        handlers.get("run_started")!({ sequence, type: "run_started", job_id, run_id, timestamp: new Date().toISOString(), payload });
       }
     });
     await waitFor(() => expect(getJobs.mock.calls.filter(([ns]) => ns === "marketing").length).toBeGreaterThan(before));
     await new Promise(resolve => setTimeout(resolve, 50));
   };
   await fire(["n"]); // run-1, held for the selected namespace
-  await fire(Array.from({ length: 25 }, (_, i) => `foreign-${i}`)); // newer events from elsewhere
-  await fire(["foreign-25"]); // a second failed attempt over the whole held queue
+  // Newer events from elsewhere, past the per-job and the total hold limits.
+  await fire(Array.from({ length: 150 }, (_, i) => `foreign-${i}`), "finance");
+  await fire(["foreign-150"], "finance"); // a second failed attempt over the whole held queue
   expect(result.current.activity).toEqual([]);
   phase = "recovered";
   await fire(["n"]);
@@ -164,4 +167,22 @@ it("does not let the in-flight initial list answer for an event that arrived aft
   await act(async () => { releaseStale([existing]); });
   expect(result.current.activity.map(entry => entry.jobAlias)).toEqual(["new-mkt-job"]);
   unmount(); client.clear();
+});
+
+it("bounds held events per job and in total, dropping other namespaces' first", () => {
+  const held = (jobId: string, n: number, namespace?: string) => ({ jobId, key: `${jobId}:${n}`, namespace });
+  const keys = (entries: Array<{ key: string }>) => entries.map(entry => entry.key);
+
+  const oneJob = Array.from({ length: 25 }, (_, i) => held("a", i, "marketing"));
+  expect(keys(boundHeldActivity(oneJob, "marketing"))).toEqual(keys(oneJob.slice(5)));
+
+  const selected = held("n", 0, "marketing");
+  const untagged = held("u", 0);
+  const foreign = Array.from({ length: 150 }, (_, i) => held(`f${i}`, 0, "finance"));
+  const kept = boundHeldActivity([selected, untagged, ...foreign], "marketing");
+  expect(kept).toHaveLength(100);
+  expect(keys(kept)).toEqual(keys([selected, untagged, ...foreign.slice(52)])); // oldest foreign go first
+
+  const unknown = Array.from({ length: 120 }, (_, i) => held(`u${i}`, 0));
+  expect(keys(boundHeldActivity(unknown, "marketing"))).toEqual(keys(unknown.slice(20))); // then the oldest
 });

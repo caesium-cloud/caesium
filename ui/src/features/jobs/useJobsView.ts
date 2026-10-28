@@ -43,6 +43,7 @@ const STATUS_FILTERS: StatusFilter[] = ["all", "running", "succeeded", "failed",
 const SORT_KEYS: SortKey[] = ["alias", "status", "last_run"];
 const ACTIVITY_LIMIT = 20;
 const ACTIVITY_KEY_LIMIT = 100;
+const HELD_ACTIVITY_LIMIT = 100;
 const RUN_ACTIVITY_EVENTS = ["run_started", "run_retried", "run_completed", "run_failed", "run_cancelled"] as const;
 
 function readUrlParams(): { status: StatusFilter; q: string; sort: SortKey; historyWindow: HistoryWindow } {
@@ -99,6 +100,30 @@ function newestPerJob<T extends { jobId: string }>(entries: T[], limit: number) 
     kept.push(entries[i]);
   }
   return kept.reverse();
+}
+
+// Held events awaiting a membership decision, bounded per job and in total.
+// Over the total, events whose run reported another namespace go first, oldest
+// first: a run keeps the namespace it was created in, so a moved job's earlier
+// runs can still belong and are only demoted, never dropped on sight.
+export function boundHeldActivity<T extends { jobId: string; namespace?: string }>(
+  entries: T[],
+  namespace: string | null,
+): T[] {
+  const kept = newestPerJob(entries, ACTIVITY_LIMIT);
+  let excess = kept.length - HELD_ACTIVITY_LIMIT;
+  if (excess <= 0) return kept;
+  const dropped = new Set<T>();
+  const isForeign = (entry: T) => !!entry.namespace && entry.namespace !== namespace;
+  for (const entry of kept) {
+    if (excess === 0) break;
+    if (isForeign(entry)) { dropped.add(entry); excess--; }
+  }
+  for (const entry of kept) {
+    if (excess === 0) break;
+    if (!dropped.has(entry)) { dropped.add(entry); excess--; }
+  }
+  return kept.filter((entry) => !dropped.has(entry));
 }
 
 export function useJobsView() {
@@ -203,13 +228,20 @@ export function useJobsView() {
     // in-flight one) and SUCCEEDS; entries whose job is then in the list join
     // the activity feed, the rest belong to other namespaces and are dropped.
     // A failed refetch proves nothing, so the batch is kept (and its keys stay
-    // unseen) for the next attempt, capped per job at what the feed can show.
-    // Keys are remembered only once decided.
+    // unseen) for the next attempt, within boundHeldActivity's limits. Keys are
+    // remembered only once decided.
     let disposed = false;
     let settling = false;
     let retryTimer: ReturnType<typeof setTimeout> | undefined;
-    const unknownJobs: Array<PendingActivityEntry & { key: string }> = [];
+    const unknownJobs: Array<PendingActivityEntry & { key: string; namespace?: string }> = [];
     const heldKeys = new Set<string>(); // queued or in flight
+    const boundUnknownJobs = () => {
+      const queued = unknownJobs.splice(0);
+      const kept = boundHeldActivity(queued, namespaceRef.current);
+      const keep = new Set(kept);
+      queued.forEach((held) => keep.has(held) || heldKeys.delete(held.key));
+      unknownJobs.push(...kept);
+    };
     const settleUnknownJobs = async () => {
       if (settling) return;
       settling = true;
@@ -225,10 +257,8 @@ export function useJobsView() {
             await queryClient.cancelQueries({ queryKey: key, exact: true });
             await queryClient.refetchQueries({ queryKey: key, exact: true }, { cancelRefetch: true, throwOnError: true });
           } catch {
-            const kept = newestPerJob(batch, ACTIVITY_LIMIT);
-            const keep = new Set(kept);
-            batch.forEach((held) => keep.has(held) || heldKeys.delete(held.key));
-            unknownJobs.unshift(...kept);
+            unknownJobs.unshift(...batch);
+            boundUnknownJobs();
             if (!disposed && retryTimer === undefined) {
               retryTimer = setTimeout(() => {
                 retryTimer = undefined;
@@ -290,7 +320,10 @@ export function useJobsView() {
             jobId: jobID,
             runId: e.run_id ?? run?.id,
             timestamp: e.timestamp ?? new Date().toISOString(),
+            namespace: run?.namespace,
           });
+          // Events keep arriving while a slow refetch is in flight.
+          if (unknownJobs.length > HELD_ACTIVITY_LIMIT) boundUnknownJobs();
           void settleUnknownJobs();
         }
         return;
