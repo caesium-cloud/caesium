@@ -86,6 +86,21 @@ function rememberActivityKey(keys: Set<string>, key: string) {
   return true;
 }
 
+// The newest `limit` entries of each job, in their original order. A job is
+// wholly in or out of the selected namespace, so capping per job never lets
+// another namespace's events displace the selected one's.
+function newestPerJob<T extends { jobId: string }>(entries: T[], limit: number) {
+  const counts = new Map<string, number>();
+  const kept: T[] = [];
+  for (let i = entries.length - 1; i >= 0; i--) {
+    const count = counts.get(entries[i].jobId) ?? 0;
+    if (count >= limit) continue;
+    counts.set(entries[i].jobId, count + 1);
+    kept.push(entries[i]);
+  }
+  return kept.reverse();
+}
+
 export function useJobsView() {
   const queryClient = useQueryClient();
   const [streamHealthy, setStreamHealthy] = useState(events.isHealthy());
@@ -188,7 +203,8 @@ export function useJobsView() {
     // in-flight one) and SUCCEEDS; entries whose job is then in the list join
     // the activity feed, the rest belong to other namespaces and are dropped.
     // A failed refetch proves nothing, so the batch is kept (and its keys stay
-    // unseen) for the next attempt. Keys are remembered only once decided.
+    // unseen) for the next attempt, capped per job at what the feed can show.
+    // Keys are remembered only once decided.
     let disposed = false;
     let settling = false;
     let retryTimer: ReturnType<typeof setTimeout> | undefined;
@@ -209,8 +225,9 @@ export function useJobsView() {
             await queryClient.cancelQueries({ queryKey: key, exact: true });
             await queryClient.refetchQueries({ queryKey: key, exact: true }, { cancelRefetch: true, throwOnError: true });
           } catch {
-            const kept = batch.slice(-ACTIVITY_LIMIT);
-            batch.forEach((held) => kept.includes(held) || heldKeys.delete(held.key));
+            const kept = newestPerJob(batch, ACTIVITY_LIMIT);
+            const keep = new Set(kept);
+            batch.forEach((held) => keep.has(held) || heldKeys.delete(held.key));
             unknownJobs.unshift(...kept);
             if (!disposed && retryTimer === undefined) {
               retryTimer = setTimeout(() => {

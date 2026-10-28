@@ -97,6 +97,46 @@ it("keeps a held event through a failed refresh and applies it once a refresh su
   unmount(); client.clear();
 });
 
+it("does not let held events of other namespaces displace a selected job's through failed refreshes", async () => {
+  const existing = { id: "m", alias: "mkt-job", namespace: "marketing", paused: false } as Job;
+  const created = { id: "n", alias: "new-mkt-job", namespace: "marketing", paused: false } as Job;
+  const other = { id: "f", alias: "fin-job", namespace: "finance", paused: false } as Job;
+  let phase: "initial" | "failing" | "recovered" = "initial";
+  getJobs.mockReset();
+  getJobs.mockImplementation(async (namespace?: string) => {
+    if (!namespace) return [existing, other, created];
+    if (phase === "failing") throw new Error("list unavailable");
+    return phase === "initial" ? [existing] : [existing, created];
+  });
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const wrapper = ({ children }: { children: ReactNode }) => <QueryClientProvider client={client}>{children}</QueryClientProvider>;
+  resetNamespaceViewForTests();
+  setStoredNamespace("marketing");
+  const { result, unmount } = renderHook(useJobsView, { wrapper });
+  await waitFor(() => expect(result.current.rows.map(row => row.alias)).toEqual(["mkt-job"]));
+  phase = "failing";
+  let sequence = 0;
+  const fire = async (jobIds: string[]) => {
+    const before = getJobs.mock.calls.filter(([ns]) => ns === "marketing").length;
+    act(() => {
+      for (const job_id of jobIds) {
+        sequence += 1;
+        handlers.get("run_started")!({ sequence, type: "run_started", job_id, run_id: `run-${sequence}`, timestamp: new Date().toISOString() });
+      }
+    });
+    await waitFor(() => expect(getJobs.mock.calls.filter(([ns]) => ns === "marketing").length).toBeGreaterThan(before));
+    await new Promise(resolve => setTimeout(resolve, 50));
+  };
+  await fire(["n"]); // run-1, held for the selected namespace
+  await fire(Array.from({ length: 25 }, (_, i) => `foreign-${i}`)); // newer events from elsewhere
+  await fire(["foreign-25"]); // a second failed attempt over the whole held queue
+  expect(result.current.activity).toEqual([]);
+  phase = "recovered";
+  await fire(["n"]);
+  await waitFor(() => expect(result.current.activity.map(entry => entry.runId).sort()).toEqual(["run-1", `run-${sequence}`]));
+  unmount(); client.clear();
+});
+
 it("does not let the in-flight initial list answer for an event that arrived after it started", async () => {
   const existing = { id: "m", alias: "mkt-job", namespace: "marketing", paused: false } as Job;
   const created = { id: "n", alias: "new-mkt-job", namespace: "marketing", paused: false } as Job;
