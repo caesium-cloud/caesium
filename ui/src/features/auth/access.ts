@@ -2,7 +2,7 @@ import { type ApiError } from "@/lib/api";
 import type { PrincipalState } from "@/lib/auth";
 import { roleAtLeast, roleInNamespace, type PrincipalRole } from "@/lib/roles";
 
-function isAnonymous(principal: PrincipalState): boolean {
+export function isAnonymous(principal: Pick<PrincipalState, "role" | "kind" | "subject">): boolean {
   return principal.role === null && principal.kind === null && principal.subject === null;
 }
 
@@ -60,4 +60,9 @@ export function isInsufficientAccessError(error: unknown): error is ApiError {
     (error as { status?: unknown }).status === 403 &&
     (error as { kind?: unknown }).kind === "insufficient_access"
   );
+}
+
+/** react-query `retry` that does not retry a denial: a 403 will not change on retry. */
+export function retryUnlessDenied(failureCount: number, error: unknown): boolean {
+  return !isInsufficientAccessError(error) && failureCount < 3;
 }

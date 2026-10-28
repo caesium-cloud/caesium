@@ -55,8 +55,11 @@ type ListParams struct {
 	Class         string
 	JobID         *uuid.UUID
 	NeedsApproval bool
-	Limit         int
-	Offset        int
+	// Namespace narrows the feed to one namespace within the caller's allowed
+	// set (the ?namespace= view filter); empty applies no narrowing.
+	Namespace string
+	Limit     int
+	Offset    int
 }
 
 // ListResult is the paginated incident feed response.
@@ -123,6 +126,9 @@ func (s *Service) List(p ListParams) (*ListResult, error) {
 	// A namespace-confined caller lists only its namespaces' incidents, and the
 	// total counts only those (B4).
 	q = authz.NamespaceFilter(q, "incidents.namespace")
+	if p.Namespace != "" {
+		q = authz.NarrowToNamespace(q, "incidents.namespace", p.Namespace)
+	}
 
 	var total int64
 	if err := q.Count(&total).Error; err != nil {

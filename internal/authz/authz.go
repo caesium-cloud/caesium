@@ -126,6 +126,36 @@ func namespaceFilter(db *gorm.DB, column string, shared bool) *gorm.DB {
 	return db.Where(fmt.Sprintf("%s IN ?", column), allowed)
 }
 
+// ParseNamespaceNarrow parses the optional ?namespace= view filter of the job,
+// incident and trigger lists. narrow is false when the parameter is omitted or
+// "*" (no narrowing); a present value must be a DNS label with no surrounding
+// space, anything else is an error.
+func ParseNamespaceNarrow(raw string) (namespace string, narrow bool, err error) {
+	namespace, present, err := ParseNamespaceQuery(raw)
+	if err != nil || !present || namespace == models.ClusterNamespace {
+		return "", false, err
+	}
+	return namespace, true, nil
+}
+
+// NarrowToNamespace restricts db to rows whose column is namespace, on top of
+// whatever NamespaceFilter already applied: the result is the rows in namespace
+// within the caller's allowed set, so a namespace the caller cannot read yields
+// no rows (never an error: no existence oracle). It never widens, and an empty
+// or NULL column counts as "default", as in NamespaceFilter.
+func NarrowToNamespace(db *gorm.DB, column, namespace string) *gorm.DB {
+	if db == nil {
+		return nil
+	}
+	if !columnPattern.MatchString(column) {
+		return db.Where("1 = 0")
+	}
+	if namespace == models.DefaultNamespace {
+		return db.Where(fmt.Sprintf("(%[1]s = ? OR %[1]s = '' OR %[1]s IS NULL)", column), namespace)
+	}
+	return db.Where(fmt.Sprintf("%s = ?", column), namespace)
+}
+
 // MarkFiltered records that the handler filtered its rows to the allowed
 // namespaces itself (in memory, or through a query NamespaceFilter cannot
 // express). It is a no-op for an unrestricted request.

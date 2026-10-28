@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	svc "github.com/caesium-cloud/caesium/api/rest/service/incident"
+	"github.com/caesium-cloud/caesium/internal/authz"
 	"github.com/caesium-cloud/caesium/internal/event"
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v5"
@@ -42,6 +43,14 @@ func (ctrl *Controller) List(c *echo.Context) error {
 			return echo.NewHTTPError(http.StatusBadRequest, "invalid job_id")
 		}
 		params.JobID = &jobID
+	}
+	// ?namespace= narrows within the caller's allowed set; omitted or "*" does not.
+	namespace, narrow, err := authz.ParseNamespaceNarrow(c.QueryParam("namespace"))
+	if err != nil {
+		return echo.NewHTTPError(http.StatusBadRequest, "invalid namespace")
+	}
+	if narrow {
+		params.Namespace = namespace
 	}
 	if raw := strings.TrimSpace(c.QueryParam("limit")); raw != "" {
 		n, err := strconv.Atoi(raw)

@@ -41,13 +41,15 @@ import { CacheView } from "./CacheView";
 import { describeCachePolicy, getRunCacheStats, isTerminalRunStatus, mergeTerminalRunUpdate } from "./cache-utils";
 import { DagCounters } from "./DagCounters";
 import { JobDAG } from "./JobDAG";
-import { formatPriority, formatQueueParams, isStaleQueueRow, queuePendingReason } from "./queue-utils";
+import { formatPriority, formatQueueParams, isNamespaceQuotaHeld, isStaleQueueRow, namespaceQuotaHeldLabel, queuePendingReason } from "./queue-utils";
 import { RunCacheSummary } from "./RunCacheSummary";
 import { TaskDetailPanel } from "./TaskDetailPanel";
 import { TaskMetadataPanel } from "./TaskMetadataPanel";
 import { TriggerDialog } from "./TriggerDialog";
 import { useDagHeight } from "@/hooks/useDagHeight";
-import { canActIn, requiresRoleReason } from "@/features/auth/access";
+import { canActIn, isInsufficientAccessError, requiresRoleReason, retryUnlessDenied } from "@/features/auth/access";
+import { JobAccessDenied } from "@/features/auth/JobAccessDenied";
+import { NamespaceChip } from "@/features/auth/NamespaceSwitcher";
 import { usePrincipal } from "@/lib/auth";
 import { ApiError, api, type Atom, type Incident, type Job, type JobRun, type JobTask, type RunQueueItem, type TaskRun, type Trigger } from "@/lib/api";
 import { events, type CaesiumEvent } from "@/lib/events";
@@ -96,9 +98,10 @@ export function JobDetailPage() {
     }
   };
 
-  const { data: job, isLoading: isLoadingJob, dataUpdatedAt: jobUpdatedAt } = useQuery({
+  const { data: job, isLoading: isLoadingJob, dataUpdatedAt: jobUpdatedAt, error: jobError } = useQuery({
     queryKey: ["job", jobId],
     queryFn: () => api.getJob(jobId),
+    retry: retryUnlessDenied,
     // Reconcile latest_run cheaply when another replica produced the event.
     refetchInterval: streamHealthy ? 60000 : 15000,
   });
@@ -200,7 +203,7 @@ export function JobDetailPage() {
         return;
       }
       queryClient.setQueryData(["job", jobId], (old: Job | undefined) => (old ? { ...old, paused: payload.paused } : payload));
-      queryClient.setQueryData(["jobs"], (old: Job[] | undefined) =>
+      queryClient.setQueriesData<Job[]>({ queryKey: ["jobs"] }, (old) =>
         old?.map((entry) => (entry.id === payload.id ? { ...entry, paused: payload.paused } : entry)),
       );
     };
@@ -238,7 +241,7 @@ export function JobDetailPage() {
       paused ? api.pauseJob(currentJobId) : api.unpauseJob(currentJobId),
     onSuccess: (updated, variables) => {
       queryClient.setQueryData(["job", jobId], updated);
-      queryClient.setQueryData(["jobs"], (old: Job[] | undefined) =>
+      queryClient.setQueriesData<Job[]>({ queryKey: ["jobs"] }, (old) =>
         old?.map((entry) => (entry.id === updated.id ? { ...entry, paused: updated.paused } : entry)),
       );
       if (updated.paused) {
@@ -469,6 +472,11 @@ export function JobDetailPage() {
   );
   const triggerConfig = useMemo(() => parseJSONConfig(trigger?.configuration), [trigger?.configuration]);
 
+  // A deep link into a namespace outside the grants: the server answers 403.
+  if (isInsufficientAccessError(jobError)) {
+    return <JobAccessDenied />;
+  }
+
   if (isLoading || (featuredRunId && isLoadingFeaturedRun)) {
     return <div className="p-8">Loading...</div>;
   }
@@ -500,6 +508,7 @@ export function JobDetailPage() {
 
             <div className="flex flex-wrap items-center gap-2.5">
               <h1 className="min-w-0 [overflow-wrap:anywhere] text-2xl font-bold text-text-1">{job.alias}</h1>
+              <NamespaceChip namespace={job.namespace} />
               {job.paused ? <StatusBadge status="paused" size="sm" /> : null}
             </div>
             <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-text-3">
@@ -806,6 +815,15 @@ function RunQueuePanel({
                       className="w-fit text-[11px] text-text-3"
                     >
                       claimed
+                    </Badge>
+                  ) : null}
+                  {isNamespaceQuotaHeld(row) ? (
+                    <Badge
+                      variant="outline"
+                      data-testid="run-queue-quota-badge"
+                      className="w-fit border-gold/35 bg-gold/10 text-[11px] text-gold"
+                    >
+                      {namespaceQuotaHeldLabel}
                     </Badge>
                   ) : null}
                 </div>

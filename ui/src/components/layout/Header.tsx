@@ -9,6 +9,7 @@ import { UTCClock } from "@/components/ui/utc-clock";
 import { logout } from "@/lib/auth";
 import { formatUTCTime } from "@/lib/utils";
 import { NotificationsPopover } from "./NotificationsPopover";
+import { NamespaceSwitcher } from "@/features/auth/NamespaceSwitcher";
 
 interface Crumb {
   label: string;
@@ -81,6 +82,7 @@ export function Header({ onOpenNavigation, navigationButtonRef, atomProps = { vo
       <div className="flex items-center gap-2">
         <Oscillator className="hidden xl:block" />
         <UTCClock className="hidden md:flex" />
+        <NamespaceSwitcher />
         <NotificationsPopover />
         <Button
           variant="ghost"

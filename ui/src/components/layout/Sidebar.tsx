@@ -12,6 +12,7 @@ import { useClusterHealth, type ClusterHealthState } from "@/features/system/use
 import { api } from "@/lib/api";
 import { usePrincipal } from "@/lib/auth";
 import { canReadConnectors } from "@/features/auth/access";
+import { useNamespaceView } from "@/features/auth/namespaceView";
 import { events } from "@/lib/events";
 import { cn } from "@/lib/utils";
 import { Kbd } from "@/components/ui/kbd";
@@ -74,6 +75,7 @@ interface SidebarProps {
 
 export function Sidebar({ className, onNavigate }: SidebarProps) {
   const queryClient = useQueryClient();
+  const namespaceView = useNamespaceView();
   const principal = usePrincipal();
   const counts = useNavCounts();
   const health = useClusterHealth();
@@ -96,8 +98,8 @@ export function Sidebar({ className, onNavigate }: SidebarProps) {
   const contractEnforcementEnabled = features?.contract_enforcement_enabled === true;
 
   const { data: incidentNav } = useQuery({
-    queryKey: ["incidents", "nav"],
-    queryFn: () => api.getIncidents({ limit: 200 }),
+    queryKey: ["incidents", "nav", namespaceView.selection],
+    queryFn: () => api.getIncidents({ namespace: namespaceView.selection ?? undefined, limit: 200 }),
     enabled: incidentsEnabled,
     placeholderData: (previous) => previous,
     refetchInterval: 30_000,

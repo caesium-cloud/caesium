@@ -67,7 +67,7 @@ export function IncidentDetailPage() {
 
   const jobsQuery = useQuery({
     queryKey: ["jobs"],
-    queryFn: api.getJobs,
+    queryFn: () => api.getJobs(),
     enabled: incidentsEnabled,
     staleTime: 30_000,
   });

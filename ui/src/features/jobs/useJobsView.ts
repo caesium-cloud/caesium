@@ -4,6 +4,7 @@ import { api, type Job, type JobRun } from "@/lib/api";
 import { events, type CaesiumEvent } from "@/lib/events";
 import { mergeLatestRun } from "./run-updates";
 import { coalescedRefresh } from "@/lib/coalesced-refresh";
+import { scopedKey, useNamespaceView } from "@/features/auth/namespaceView";
 import type { RunSummary } from "@/components/ui/run-strip";
 
 export type StatusFilter = "all" | "running" | "succeeded" | "failed" | "paused";
@@ -42,6 +43,7 @@ const STATUS_FILTERS: StatusFilter[] = ["all", "running", "succeeded", "failed",
 const SORT_KEYS: SortKey[] = ["alias", "status", "last_run"];
 const ACTIVITY_LIMIT = 20;
 const ACTIVITY_KEY_LIMIT = 100;
+const HELD_ACTIVITY_LIMIT = 100;
 const RUN_ACTIVITY_EVENTS = ["run_started", "run_retried", "run_completed", "run_failed", "run_cancelled"] as const;
 
 function readUrlParams(): { status: StatusFilter; q: string; sort: SortKey; historyWindow: HistoryWindow } {
@@ -85,6 +87,45 @@ function rememberActivityKey(keys: Set<string>, key: string) {
   return true;
 }
 
+// The newest `limit` entries of each job, in their original order. A job is
+// wholly in or out of the selected namespace, so capping per job never lets
+// another namespace's events displace the selected one's.
+function newestPerJob<T extends { jobId: string }>(entries: T[], limit: number) {
+  const counts = new Map<string, number>();
+  const kept: T[] = [];
+  for (let i = entries.length - 1; i >= 0; i--) {
+    const count = counts.get(entries[i].jobId) ?? 0;
+    if (count >= limit) continue;
+    counts.set(entries[i].jobId, count + 1);
+    kept.push(entries[i]);
+  }
+  return kept.reverse();
+}
+
+// Held events awaiting a membership decision, bounded per job and in total.
+// Over the total, events whose run reported another namespace go first, oldest
+// first: a run keeps the namespace it was created in, so a moved job's earlier
+// runs can still belong and are only demoted, never dropped on sight.
+export function boundHeldActivity<T extends { jobId: string; namespace?: string }>(
+  entries: T[],
+  namespace: string | null,
+): T[] {
+  const kept = newestPerJob(entries, ACTIVITY_LIMIT);
+  let excess = kept.length - HELD_ACTIVITY_LIMIT;
+  if (excess <= 0) return kept;
+  const dropped = new Set<T>();
+  const isForeign = (entry: T) => !!entry.namespace && entry.namespace !== namespace;
+  for (const entry of kept) {
+    if (excess === 0) break;
+    if (isForeign(entry)) { dropped.add(entry); excess--; }
+  }
+  for (const entry of kept) {
+    if (excess === 0) break;
+    if (!dropped.has(entry)) { dropped.add(entry); excess--; }
+  }
+  return kept.filter((entry) => !dropped.has(entry));
+}
+
 export function useJobsView() {
   const queryClient = useQueryClient();
   const [streamHealthy, setStreamHealthy] = useState(events.isHealthy());
@@ -98,19 +139,28 @@ export function useJobsView() {
   const activityIdRef = useRef(0);
   const activityKeysRef = useRef(new Set<string>());
   const jobAliasesRef = useRef(new Map<string, string>());
+  const namespaceRef = useRef<string | null>(null);
   const pendingActivityRef = useRef<PendingActivityEntry[]>([]);
 
   const setStatusFilter = useCallback((f: StatusFilter) => setStatusFilterState(f), []);
   const setSearch = useCallback((s: string) => setSearchState(s), []);
   const setSort = useCallback((s: SortKey) => setSortState(s), []);
 
+  // The view filter narrows server-side (GET /v1/jobs?namespace=) within the
+  // caller's grants; with no selection this is the plain ["jobs"] list.
+  const { selection: namespace } = useNamespaceView();
+
+  useEffect(() => {
+    namespaceRef.current = namespace;
+  }, [namespace]);
+
   useEffect(() => {
     writeUrlParams(statusFilter, search, sort, historyWindow);
   }, [statusFilter, search, sort, historyWindow]);
 
   const { data: jobs, isLoading, error } = useQuery({
-    queryKey: ["jobs"],
-    queryFn: api.getJobs,
+    queryKey: scopedKey("jobs", namespace),
+    queryFn: () => api.getJobs(namespace ?? undefined),
     // The bounded list also reconciles events produced on another replica.
     refetchInterval: streamHealthy ? 60000 : 15000,
   });
@@ -173,6 +223,65 @@ export function useJobsView() {
     );
     const refreshHistory = refresh.request;
 
+    // Events for jobs the narrowed list does not hold yet. Each batch waits for
+    // a refetch that starts after its newest event (cancelling a staler
+    // in-flight one) and SUCCEEDS; entries whose job is then in the list join
+    // the activity feed, the rest belong to other namespaces and are dropped.
+    // A failed refetch proves nothing, so the batch is kept (and its keys stay
+    // unseen) for the next attempt, within boundHeldActivity's limits. Keys are
+    // remembered only once decided.
+    let disposed = false;
+    let settling = false;
+    let retryTimer: ReturnType<typeof setTimeout> | undefined;
+    const unknownJobs: Array<PendingActivityEntry & { key: string; namespace?: string }> = [];
+    const heldKeys = new Set<string>(); // queued or in flight
+    const boundUnknownJobs = () => {
+      const queued = unknownJobs.splice(0);
+      const kept = boundHeldActivity(queued, namespaceRef.current);
+      const keep = new Set(kept);
+      queued.forEach((held) => keep.has(held) || heldKeys.delete(held.key));
+      unknownJobs.push(...kept);
+    };
+    const settleUnknownJobs = async () => {
+      if (settling) return;
+      settling = true;
+      try {
+        while (unknownJobs.length > 0 && !disposed) {
+          const batch = unknownJobs.splice(0);
+          const key = scopedKey("jobs", namespaceRef.current);
+          try {
+            // cancelRefetch only cancels when the query already holds data; the
+            // first load would otherwise be reused although it may have read the
+            // list before this event. Cancel explicitly so the request that
+            // answers membership starts after the event.
+            await queryClient.cancelQueries({ queryKey: key, exact: true });
+            await queryClient.refetchQueries({ queryKey: key, exact: true }, { cancelRefetch: true, throwOnError: true });
+          } catch {
+            unknownJobs.unshift(...batch);
+            boundUnknownJobs();
+            if (!disposed && retryTimer === undefined) {
+              retryTimer = setTimeout(() => {
+                retryTimer = undefined;
+                void settleUnknownJobs();
+              }, 5000);
+            }
+            return;
+          }
+          if (disposed) return;
+          const list = queryClient.getQueryData<Job[]>(key) ?? [];
+          const aliases = new Map(list.map((job) => [job.id, job.alias] as const));
+          batch.forEach(({ key: activityId, ...draft }) => {
+            heldKeys.delete(activityId);
+            rememberActivityKey(activityKeysRef.current, activityId);
+            const alias = aliases.get(draft.jobId);
+            if (alias) appendActivity(draft, alias);
+          });
+        }
+      } finally {
+        settling = false;
+      }
+    };
+
     const onRunEvent = (e: CaesiumEvent) => {
       const payload = e.payload as JobRun | undefined;
       const run = payload && payload.id ? payload : undefined;
@@ -183,7 +292,7 @@ export function useJobsView() {
         return;
       }
 
-      queryClient.setQueryData(["jobs"], (old: Job[] | undefined) =>
+      queryClient.setQueriesData<Job[]>({ queryKey: ["jobs"] }, (old) =>
         old?.map((job) =>
           job.id === jobID
             ? { ...job, latest_run: run ? mergeLatestRun(job.latest_run, run) : job.latest_run }
@@ -194,6 +303,30 @@ export function useJobsView() {
         queryClient.setQueryData(["job", jobID], (old: Job | undefined) =>
           old ? { ...old, latest_run: mergeLatestRun(old.latest_run, run) } : old,
         );
+      }
+
+      // Outside the selected namespace the job is not in the narrowed list: keep
+      // it out of the activity feed (the lists were already updated above).
+      // The job may simply be new, or the list may still be loading: hold the
+      // event until a refetch started after it says whether the job belongs.
+      if (namespaceRef.current && !jobAliasesRef.current.has(jobID)) {
+        refreshHistory();
+        const heldKey = activityKey(e, jobID, e.run_id ?? run?.id);
+        if (!activityKeysRef.current.has(heldKey) && !heldKeys.has(heldKey)) {
+          heldKeys.add(heldKey);
+          unknownJobs.push({
+            key: heldKey,
+            type: e.type,
+            jobId: jobID,
+            runId: e.run_id ?? run?.id,
+            timestamp: e.timestamp ?? new Date().toISOString(),
+            namespace: run?.namespace,
+          });
+          // Events keep arriving while a slow refetch is in flight.
+          if (unknownJobs.length > HELD_ACTIVITY_LIMIT) boundUnknownJobs();
+          void settleUnknownJobs();
+        }
+        return;
       }
 
       const payloadAlias = run?.job_alias?.trim();
@@ -231,7 +364,7 @@ export function useJobsView() {
         refreshHistory();
         return;
       }
-      queryClient.setQueryData(["jobs"], (old: Job[] | undefined) =>
+      queryClient.setQueriesData<Job[]>({ queryKey: ["jobs"] }, (old) =>
         old?.map((job) => (job.id === payload.id ? { ...job, paused: payload.paused } : job)),
       );
       queryClient.setQueryData(["job", payload.id], (old: Job | undefined) =>
@@ -244,7 +377,7 @@ export function useJobsView() {
         refreshHistory();
         return;
       }
-      queryClient.setQueryData(["jobs"], (old: Job[] | undefined) =>
+      queryClient.setQueriesData<Job[]>({ queryKey: ["jobs"] }, (old) =>
         old?.map((job) => {
           const lr = job.latest_run;
           if (job.id !== e.job_id || !lr || lr.id !== e.run_id) return job;
@@ -259,6 +392,8 @@ export function useJobsView() {
     events.subscribe("task_cached", onTaskCached);
 
     return () => {
+      disposed = true;
+      if (retryTimer !== undefined) clearTimeout(retryTimer);
       refresh.dispose();
       events.unsubscribeConnection(onConnection);
       RUN_ACTIVITY_EVENTS.forEach((t) => events.unsubscribe(t, onRunEvent));
@@ -266,6 +401,13 @@ export function useJobsView() {
       events.unsubscribe("task_cached", onTaskCached);
     };
   }, [appendActivity, queryClient]);
+
+  // Activity collected before the selection changed may name jobs outside it.
+  const visibleActivity = useMemo(() => {
+    if (!namespace) return activity;
+    const ids = new Set((jobs ?? []).map((job) => job.id));
+    return activity.filter((entry) => ids.has(entry.jobId));
+  }, [activity, jobs, namespace]);
 
   const counts = useMemo<JobCounts>(() => {
     if (!jobs) return { all: 0, running: 0, succeeded: 0, failed: 0, paused: 0 };
@@ -349,7 +491,7 @@ export function useJobsView() {
     setHistoryWindow,
     isLoading,
     error: error as Error | null,
-    activity,
+    activity: visibleActivity,
   };
 }
 

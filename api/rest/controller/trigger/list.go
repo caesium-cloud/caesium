@@ -6,6 +6,7 @@ import (
 
 	"github.com/caesium-cloud/caesium/api/internal/orderby"
 	"github.com/caesium-cloud/caesium/api/rest/service/trigger"
+	"github.com/caesium-cloud/caesium/internal/authz"
 	"github.com/labstack/echo/v5"
 )
 
@@ -48,6 +49,13 @@ func parseListRequest(c *echo.Context) (req *trigger.ListRequest, err error) {
 		if req.OrderBy, err = orderby.Parse(orderBy, triggerListOrderColumns); err != nil {
 			return nil, err
 		}
+	}
+
+	// ?namespace= narrows within the caller's allowed set; omitted or "*" does not.
+	if namespace, narrow, nerr := authz.ParseNamespaceNarrow(c.QueryParam("namespace")); nerr != nil {
+		return nil, nerr
+	} else if narrow {
+		req.Namespace = namespace
 	}
 
 	return

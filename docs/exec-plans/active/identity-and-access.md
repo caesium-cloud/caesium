@@ -1499,7 +1499,7 @@ shapes. Owned separately from the Go streams so it can run on a lighter model.
       `ui/src/features/datasets/HoldPanel.tsx`, `ui/src/lib/api.ts`.
       Depends on: A5.
       (W5-ζ: shipped with a typed `ErrNoBinding` redirect/credential hand-off; every job action is gated by role and namespace.)
-- [ ] F2. Namespace switcher and chips: a header switcher fed by `namespaces` (hidden
+- [x] F2. Namespace switcher and chips: a header switcher fed by `namespaces` (hidden
       with one), selection persisted in `localStorage` as a view filter, list pages send
       `?namespace=`, job list and job detail show a namespace chip, the lineage graph
       renders B5's `external` placeholder. Playwright in the existing auth project:
@@ -1509,6 +1509,7 @@ shapes. Owned separately from the Go streams so it can run on a lighter model.
       `ui/src/features/auth/NamespaceSwitcher.tsx`, `ui/src/features/jobs/`,
       `ui/src/features/jobs/LineageGraph.tsx`, `ui/src/lib/api.ts`, `ui/e2e/`.
       Depends on: F1 + B4 + B5.
+      (W7-δ: shipped with an optional `?namespace=` on `GET /v1/jobs`, `/v1/incidents` and `/v1/triggers` (narrows within the allowed set; an unreadable namespace is an empty 200), always-on chips, 403 deep links rendering `InsufficientAccess`, and leak tests over the real external-node renderers.)
 - [x] F3. Access page at `/access`: my grants; declared namespaces and their settings
       (cluster viewer+); users list with disable / enable / log-out-everywhere (cluster
       admin); policy revision hash and last reload result. Sidebar entry. Playwright
@@ -1517,9 +1518,10 @@ shapes. Owned separately from the Go streams so it can run on a lighter model.
       `ui/src/components/layout/Sidebar.tsx`, `ui/src/lib/api.ts`.
       Depends on: F1 + A4 + E3.
       (W5-ζ: shipped with `GET /v1/auth/namespaces` for cluster viewers; Playwright in the auth project.)
-- [ ] F4. Queue page shows "held by namespace quota" from `held_reason`.
+- [x] F4. Queue page shows "held by namespace quota" from `held_reason`.
       Files: `ui/src/features/jobs/` (queue view), `ui/src/lib/api.ts`.
       Depends on: D2 + F1.
+      (W7-δ: `namespace_quota` rows are labelled in the job detail run queue; the real policy-backed browser journey lands with G2.)
 
 ### Stream G — Keycloak: fixture, CI lane, scenarios, guidance
 
