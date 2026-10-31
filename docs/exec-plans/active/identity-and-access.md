@@ -1210,7 +1210,7 @@ resolver refuses references outside the namespace's allow-list at lint and at ru
       derived from the policy size limit; `CAESIUM_WORKER_ISOLATION_V1_DISABLED`
       withdraws the capability; live proof is the three-node
       `integration-test-isolation` lane.)
-- [ ] C3. Helm multi-namespace RBAC and the kind-lane proof: `jobNamespaces: []` in
+- [x] C3. Helm multi-namespace RBAC and the kind-lane proof: `jobNamespaces: []` in
       values renders a `Role` + `RoleBinding` (pods, pods/log, secrets get,
       persistentvolumeclaims) per namespace; the kind CI values map one namespace and
       the k8s integration scenario asserts a job in it lands its pod, PVC and a
@@ -1219,6 +1219,15 @@ resolver refuses references outside the namespace's allow-list at lint and at ru
       `helm/caesium/templates/rolebinding.yaml`, `helm/caesium/ci/test-values-k8s.yaml`,
       `test/` (k8s lane scenario), `docs/kubernetes-deployment.md`.
       Depends on: C1 + C2.
+      (W8-γ: the mapped release is a second release `c3` in shard 3 from
+      `ci/test-values-k8s-mapped.yaml`, so the suite's release stays
+      policy-free; `accessPolicy.existingConfigMap` mounts the policy
+      read-only; the RBAC renders with the engine disabled too. Recovery now
+      stops the previous attempt's pod through its qualified runtime id on
+      every distributed re-pend path (worker reclaim, owner reap, owner
+      takeover); a local resume stops nothing because a local attempt has no
+      claim to fence it. `TestKubernetesMappedNamespace` proves placement and
+      recovery after a graceful restart and a crash.)
 - [x] C4. Scoped secret resolution: `secret.ScopedResolver{inner, namespace, rules}`
       **canonicalises before matching** — the Kubernetes resolver accepts a
       namespace in the path and `?namespace=`, `?name=`, `?key=` overrides
@@ -1532,7 +1541,7 @@ shapes. Owned separately from the Go streams so it can run on a lighter model.
 - [x] F4. Queue page shows "held by namespace quota" from `held_reason`.
       Files: `ui/src/features/jobs/` (queue view), `ui/src/lib/api.ts`.
       Depends on: D2 + F1.
-      (W7-δ: `namespace_quota` rows are labelled in the job detail run queue; the real policy-backed browser journey lands with G2.)
+      (W7-δ: `namespace_quota` rows are labelled in the job detail run queue. W8-δ: the real policy-backed browser journey, bob's second `marketing` start on the Keycloak lane, is `ui/e2e/keycloak-quota.spec.ts`.)
 
 ### Stream G — Keycloak: fixture, CI lane, scenarios, guidance
 
@@ -1563,7 +1572,7 @@ group refresh, user disable, CLI login) is asserted here against a live Keycloak
       `scripts/integration-test.sh`, `.github/workflows/ci.yml`, `scripts/ci-ok.py`,
       `scripts/test_ci.py`, `docs/ci.md`.
       Depends on: A4 + A5 + H-1.
-- [ ] G2. Playwright project `keycloak`: admin logs in through Keycloak's real login
+- [x] G2. Playwright project `keycloak`: admin logs in through Keycloak's real login
       page and sees both namespaces and the switcher; bob sees only `marketing`, the
       finance job is absent and its deep link renders `InsufficientAccess`; carol is
       denied with `no_binding`; the Access page shows grants and, for admin, the users
@@ -1571,6 +1580,7 @@ group refresh, user disable, CLI login) is asserted here against a live Keycloak
       Files: `ui/playwright.config.ts`, new `ui/e2e/keycloak.spec.ts`,
       `ui/e2e/helpers/auth.ts`.
       Depends on: G1 + F2 + F3.
+      (W8-δ: journeys in `ui/e2e/keycloak.spec.ts` and `keycloak-quota.spec.ts`; each identity signs in on its own browser context; jobs are seeded as the SSO admin over the cookie session + CSRF; `playwright.config.ts` needed no change.)
 - [ ] G3. Go scenarios on the lane (`CAESIUM_KEYCLOAK_LANE=true`): a cookie-jar client
       drives the OIDC code flow through Keycloak's HTML login form; the SSO
       allow/deny matrix; an SSO admin mints a namespaced key (A5's fix); group refresh

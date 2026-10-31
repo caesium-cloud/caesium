@@ -1433,9 +1433,33 @@ are namespace-local, so a step's PVCs are the mapped namespace's, and relative
   ran under a different mapping (a baseline recorded before this release counts
   as unmapped) instead of reusing it.
 - **Permissions.** Caesium's service account needs pods, pods/log, secrets
-  (get) and persistentvolumeclaims in each mapped namespace; pre-create the
-  namespaces and grant that access yourself until the Helm chart renders it
-  (C3).
+  (get) and persistentvolumeclaims in each mapped namespace. The Helm chart's
+  `jobNamespaces` renders that `Role` and `RoleBinding` per namespace and
+  `accessPolicy.existingConfigMap` serves the policy file read-only (see
+  [Namespace isolation](kubernetes-deployment.md#namespace-isolation)); the
+  chart creates neither the namespaces nor the service accounts the policy
+  names, so pre-create them. `secret://k8s` references also need the
+  Kubernetes secret provider enabled (`CAESIUM_JOBDEF_SECRETS_ENABLE_KUBERNETES=true`).
+- **Restarts.** In distributed mode every recovery path that re-pends an
+  in-flight Kubernetes task (a worker's lease-expiry reclaim, the owner's
+  expired-claim reap, owner takeover) stops the previous attempt's pod through
+  the runtime id it read before clearing it, without the policy, so the re-run
+  does not run beside an orphan. The stop is best effort: a failure is logged
+  and recovery proceeds. A graceful shutdown stops its own pods. A local-mode
+  resume stops nothing: a local attempt holds no claim, so nothing proves its
+  executor is dead, and a pod left by a crash runs on beside the re-run.
+  After a restart in distributed mode the task waits for its claim to lapse
+  first: a dispatched claim's first lease is what remains of
+  `CAESIUM_RUN_OWNER_DISPATCH_DEADLINE` (5m by default) when the worker accepts
+  it, and less than 30 s remaining (so a 30 s setting too) falls back to a 5m
+  claim. If you lower it, keep it above `CAESIUM_WORKER_LEASE_TTL / 4`, how
+  often a worker renews, so a live attempt's claim is renewed before it lapses.
+  The re-run finishes the task, not the run: the process that drove the run is
+  gone, so the run stays `running` until the job's next cron tick or webhook
+  adopts it. A manual start (`POST /v1/jobs/:id/run`) creates a new run and
+  adopts nothing, so a job fired only by hand stays `running` indefinitely.
+  With `CAESIUM_RUN_OWNER_IN_MEMORY=true` the run's owner finishes it instead.
+  Docker and Podman containers are left to their host.
 - **Distributed mode.** The run's owner resolves the mapping and carries it to
   the worker with the secret rules (the isolation context), together with its
   own `CAESIUM_KUBERNETES_NAMESPACE` for an unmapped pod and its

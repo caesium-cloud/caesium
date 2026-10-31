@@ -16,3 +16,34 @@ rules:
     resources: ["pods"]
     verbs: ["get"]
 {{- end }}
+{{- range $ns := uniq .Values.jobNamespaces }}
+{{- if not (and (kindIs "string" $ns) (regexMatch "^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$" $ns)) }}
+{{- fail (printf "jobNamespaces entry %v is not a Kubernetes namespace name" $ns) }}
+{{- end }}
+---
+# A namespace the access policy maps tenancy namespaces to (identity-and-access
+# C3): job pods, their logs and stats, the PVCs their volumes bind, and
+# `secret://k8s` reads there. Rendered whether or not the Kubernetes engine is
+# enabled, since relative secret reads from any engine use the mapped namespace.
+# The namespace must already exist; the chart never creates it.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "caesium.fullname" $ }}-jobs
+  namespace: {{ $ns }}
+  labels:
+    {{- include "caesium.labels" $ | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["pods", "pods/log"]
+    verbs: ["create", "get", "list", "watch", "delete"]
+  - apiGroups: ["metrics.k8s.io"]
+    resources: ["pods"]
+    verbs: ["get"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get"]
+  - apiGroups: [""]
+    resources: ["persistentvolumeclaims"]
+    verbs: ["get", "list", "watch"]
+{{- end }}

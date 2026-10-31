@@ -137,6 +137,13 @@ spec:
                   fieldPath: metadata.namespace
               {{- end }}
             {{- end }}
+            {{- if .Values.accessPolicy.existingConfigMap }}
+            {{- if not (regexMatch "^[A-Za-z0-9][A-Za-z0-9._-]*$" (toString .Values.accessPolicy.key)) }}
+            {{- fail "accessPolicy.key must be a ConfigMap key (letters, digits, '.', '_', '-')" }}
+            {{- end }}
+            - name: CAESIUM_AUTH_POLICY_FILE
+              value: {{ printf "/etc/caesium/access-policy/%s" .Values.accessPolicy.key | quote }}
+            {{- end }}
             {{- with .Values.config.extraEnv }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
@@ -178,6 +185,12 @@ spec:
               mountPath: /etc/caesium
             - name: data
               mountPath: /var/lib/caesium/dqlite
+            {{- if .Values.accessPolicy.existingConfigMap }}
+            # The directory, not a subPath, so ConfigMap updates reach the pod.
+            - name: access-policy
+              mountPath: /etc/caesium/access-policy
+              readOnly: true
+            {{- end }}
             {{- with .Values.extraVolumeMounts }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
@@ -188,6 +201,12 @@ spec:
           emptyDir: {}
         {{- with .Values.extraVolumes }}
         {{- toYaml . | nindent 8 }}
+        {{- end }}
+        {{- if .Values.accessPolicy.existingConfigMap }}
+        - name: access-policy
+          configMap:
+            name: {{ .Values.accessPolicy.existingConfigMap | quote }}
+            defaultMode: 0444
         {{- end }}
         - name: peer-discovery-script
           configMap:

@@ -394,7 +394,7 @@ publish ← tag only, needs the full matrix and ci-ok
 | `ui-e2e-keycloak` | ubuntu-26.04 | `[ui-test, images]` | 20 | `integration-up-keycloak`, then host Playwright `--project=keycloak` | Keycloak + `caesium-server-keycloak-test` via `integration-up-keycloak` |
 | `connector-fixture-images` | ubuntu-26.04 | `[changes, builder]` | 30 | Bake pinned fixture and retain candidate/image identity | none |
 | `connectors` | ubuntu-26.04 | `[changes]` | 45 | Producer handoff and `integration-test-connectors` (advisory) | `integration-up-connectors` and three persistent Helm members on one kind node |
-| `helm-integration-test` | ubuntu-26.04 | `[images, helm-lint]` | 60 | kind + `helm install` + `helm test` + full suite in three shards | kind pod via the Helm chart |
+| `helm-integration-test` | ubuntu-26.04 | `[images, helm-lint]` | 60 | kind + `helm install` + `helm test` + full suite in three shards (no policy file); shard 3 then installs release `c3` with a mapped-namespace policy and runs `TestKubernetesMappedNamespace` (`scripts/kind-mapped-namespace.sh`, identity-and-access C3) | kind pod via the Helm chart; `c3` in `caesium-c3` serves `test/testdata/policy/kubernetes-mapped.yaml` |
 | `helm-pod-replacement-test` | ubuntu-26.04 | `[changes, images, helm-lint]` | 45 | `scripts/helm-pod-replacement.sh` — kind + `helm install` at three replicas with retained PVCs, then replaces every pod and proves it rejoins (issue #493) | three kind pods via the Helm chart |
 | `podman-integration-test` | ubuntu-26.04 | `images` | 45 | inline `docker run` + full suite in three shards | inline `docker run --name caesium-server-podman` |
 | `early-evidence` | ubuntu-26.04 | `changes`, `images`, `helm-lint` | 60 | `integration-test-sql-budget`, `robustness-test`, `check-evidence` (kind + Helm, three persistent replicas) | `integration-up`, then three kind pods via the Helm chart |
@@ -672,7 +672,7 @@ browser evidence path, not later multi-node fault coverage.
 
 The only lane that exercises SSO end to end against a real identity provider.
 It is merge-blocking from the start: the Go scenarios are the `keycloak` leg of
-the `integration` matrix, and the browser smoke is the `ui-e2e-keycloak` job;
+the `integration` matrix, and the browser journeys are the `ui-e2e-keycloak` job;
 both sit under `ci-ok` and in `publish.needs`.
 
 - **Topology.** `just integration-up-keycloak` starts
@@ -703,15 +703,24 @@ both sit under `ci-ok` and in `publish.needs`.
   denied with `no_binding` and no session (dave's bound email is unverified),
   erin granted by her verified email. `requireKeycloakLane` fails rather than
   skips on the lane, and the recipe fails below
-  `keycloak_integration_min_pass` Keycloak passes. `ui/e2e/keycloak.spec.ts`
-  signs the admin in through Keycloak's login page and lands in the Console.
+  `keycloak_integration_min_pass` Keycloak passes. The Playwright `keycloak`
+  project (`ui/e2e/keycloak*.spec.ts`, helpers in `ui/e2e/helpers/auth.ts`)
+  signs each identity in through Keycloak's real login page in its own browser
+  context: admin sees both namespaces, chips and the switcher; bob sees only
+  `marketing` and a finance deep link renders `InsufficientAccess`; carol is
+  refused with `no_binding`; the Access page shows grants for admin and bob and
+  the users list for admin only; and `keycloak-quota.spec.ts` starts two real
+  `marketing` jobs as bob (quota 1) and asserts the "Held by namespace quota"
+  label from the live queue response. Jobs are seeded through the real API as
+  the SSO admin (cookie session plus CSRF token) in a throwaway context, so the
+  lane exports no admin key to the browser.
 - **Failure handling.** Each recipe installs its cleanup trap before the first
   container starts. On failure it prints the Caesium and Keycloak logs through
   `scripts/lane-logs.sh`, which redacts `csk_` and `css_` tokens whether or
   not the bootstrap key was captured yet, then removes every lane container
   and exits with the original status.
 - **Run it locally** (under the host lane lock): `just integration-test-keycloak`
-  for the Go scenarios, `just ui-e2e-keycloak` for the browser smoke (host
+  for the Go scenarios, `just ui-e2e-keycloak` for the browser journeys (host
   Node and Playwright). `just integration-up-keycloak` leaves the lane running
   (admin console `http://127.0.0.1:8180/admin/`, fixture-only credentials in
   the justfile); `just integration-down-keycloak` removes it.
@@ -2387,6 +2396,10 @@ active until both complete producer jobs succeed and revalidates the same job,
 run/attempt and artifact identities before sealing success. A late producer
 failure or an inspection failure stops the lane; artifact readiness alone
 cannot release a successful report.
+
+Publication steps come from each producer's exact job-detail endpoint; the
+paginated jobs list can omit them. Detail observations must match the listed
+job, run, attempt and source, and cannot regress previously observed progress.
 
 The loaded-image path freezes all three producer image IDs before running the
 independent config cluster alongside the HTTP/browser phase. All owned groups

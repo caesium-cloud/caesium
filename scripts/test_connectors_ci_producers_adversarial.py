@@ -37,9 +37,13 @@ class TransitionClient(FIXTURES.FakeClient):
         self.jobs_observations = 0
         self.artifact_observations = 0
         self.api_observations = []
+        self.current_jobs = []
 
     def get(self, endpoint):
         self.api_observations.append(endpoint)
+        if '/actions/jobs/' in endpoint:
+            ident = int(endpoint.rsplit('/', 1)[1])
+            return copy.deepcopy(next(job for job in self.current_jobs if job['id'] == ident))
         result = FIXTURES.run()
         # The unqualified endpoint is intentionally the LAST, fresh run view.
         if endpoint.endswith('/runs/456') and self.seal_run:
@@ -55,6 +59,7 @@ class TransitionClient(FIXTURES.FakeClient):
                 self.tail_change(result)
             if self.jobs_observations >= 3 and self.seal_jobs:
                 self.seal_jobs(result)
+            self.current_jobs = copy.deepcopy(result)
             return result
         self.artifact_observations += 1
         result = copy.deepcopy(self.artifacts)

@@ -473,7 +473,7 @@ class HelmDiagnosticsTests(unittest.TestCase):
             root = Path(tmp)
             source, output = root / "source", root / "output"
             source.mkdir()
-            for phase in ("full", "cache-identity", "deadlines"):
+            for phase in ("full", "cache-identity", "deadlines", "mapped"):
                 (source / f"port-forward-{phase}.log").write_text(f"{phase}: original transport error\n")
             kubectl = root / "kubectl"
             kubectl.write_text('#!/bin/sh\necho "probe $* csk_fixture-secret Bearer bearer-secret"\nexit 7\n')

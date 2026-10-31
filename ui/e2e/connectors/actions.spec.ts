@@ -208,7 +208,17 @@ test("real Console approval survives duplicate clicks, advances the second Caesi
   expect(runId).not.toBe(initial.first!.run_id);
   await expect.poll(async () => (await getJSON<{ status: string }>(request, `/v1/jobs/${jobs[1].id}/runs/${runId}`, observer)).status,
     { timeout: 45_000, intervals: [1500, 3000] }).toBe("succeeded");
-  const state = await queryState(request, workflow, observer);
+  // The run can succeed before Temporal records its Activity result. This
+  // observer used one Query above, leaving five within the six/minute budget.
+  let state!: PublicationState;
+  for (let attempt = 0; attempt < 5; attempt++) {
+    state = await queryState(request, workflow, observer);
+    expect(state).toMatchObject({ approved: true, approval_effects: 1, actor: approved.operation.actor });
+    if (state.stage === "published") break;
+    expect(state.stage, "approved publication must await its Activity result or be published").toBe("awaiting_approval");
+    expect(state.second).toBeUndefined();
+    if (attempt < 4) await new Promise(resolve => setTimeout(resolve, Math.min(1500 * 2 ** attempt, 10_000)));
+  }
   expect(state).toMatchObject({ stage: "published", approved: true, approval_effects: 1, second: { job_id: jobs[1].id, run_id: runId }, actor: approved.operation.actor });
   expect(effects(await journal(request), workflow)).toHaveLength(1);
   // A fresh browser principal generates a fresh key and a distinct Update ID

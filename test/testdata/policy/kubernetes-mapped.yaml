@@ -1,0 +1,15 @@
+# The kind lane's mapped-namespace release (identity-and-access C3, served by
+# helm/caesium/ci/test-values-k8s-mapped.yaml through the chart's
+# accessPolicy.existingConfigMap). TestKubernetesMappedNamespace applies jobs in
+# `kubeteam`, whose pods, PVCs and relative `secret://k8s` reads land in the
+# Kubernetes namespace caesium-mapped under the caesium-mapped-runner service
+# account. The lane runs without auth, so the file binds nobody.
+apiVersion: v1
+kind: AccessPolicy
+namespaces:
+  default: {}
+  kubeteam:
+    kubernetes:
+      namespace: caesium-mapped
+      serviceAccountName: caesium-mapped-runner
+bindings: []
