@@ -1521,7 +1521,7 @@ shapes. Owned separately from the Go streams so it can run on a lighter model.
 - [x] F4. Queue page shows "held by namespace quota" from `held_reason`.
       Files: `ui/src/features/jobs/` (queue view), `ui/src/lib/api.ts`.
       Depends on: D2 + F1.
-      (W7-δ: `namespace_quota` rows are labelled in the job detail run queue; the real policy-backed browser journey lands with G2.)
+      (W7-δ: `namespace_quota` rows are labelled in the job detail run queue. W8-δ: the real policy-backed browser journey, bob's second `marketing` start on the Keycloak lane, is `ui/e2e/keycloak-quota.spec.ts`.)
 
 ### Stream G — Keycloak: fixture, CI lane, scenarios, guidance
 
@@ -1552,7 +1552,7 @@ group refresh, user disable, CLI login) is asserted here against a live Keycloak
       `scripts/integration-test.sh`, `.github/workflows/ci.yml`, `scripts/ci-ok.py`,
       `scripts/test_ci.py`, `docs/ci.md`.
       Depends on: A4 + A5 + H-1.
-- [ ] G2. Playwright project `keycloak`: admin logs in through Keycloak's real login
+- [x] G2. Playwright project `keycloak`: admin logs in through Keycloak's real login
       page and sees both namespaces and the switcher; bob sees only `marketing`, the
       finance job is absent and its deep link renders `InsufficientAccess`; carol is
       denied with `no_binding`; the Access page shows grants and, for admin, the users
@@ -1560,6 +1560,7 @@ group refresh, user disable, CLI login) is asserted here against a live Keycloak
       Files: `ui/playwright.config.ts`, new `ui/e2e/keycloak.spec.ts`,
       `ui/e2e/helpers/auth.ts`.
       Depends on: G1 + F2 + F3.
+      (W8-δ: journeys in `ui/e2e/keycloak.spec.ts` and `keycloak-quota.spec.ts`; each identity signs in on its own browser context; jobs are seeded as the SSO admin over the cookie session + CSRF; `playwright.config.ts` needed no change.)
 - [ ] G3. Go scenarios on the lane (`CAESIUM_KEYCLOAK_LANE=true`): a cookie-jar client
       drives the OIDC code flow through Keycloak's HTML login form; the SSO
       allow/deny matrix; an SSO admin mints a namespaced key (A5's fix); group refresh
