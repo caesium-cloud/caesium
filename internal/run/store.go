@@ -299,6 +299,12 @@ type Store struct {
 	// their existing Store completion paths.
 	ownerInMemory bool
 
+	// afterRecoveryRowsRead is an unexported TEST SEAM, nil in production. It
+	// runs inside a recovery reset's transaction between its read and its
+	// UPDATE, the window a renewal or completion lands in on Postgres and that
+	// SQLite cannot interleave.
+	afterRecoveryRowsRead func(tx *gorm.DB)
+
 	// startedMu guards startedRuns.
 	startedMu sync.Mutex
 	// startedRuns tracks run IDs that were started via Start() in this
@@ -5959,21 +5965,46 @@ func (s *Store) recordCancelledRunMetrics(info cancelledRunInfo) {
 // unguarded `WHERE id IN (...)` resurrect a terminal row to pending — the exact
 // class retryTask documents — and delete a succeeded row's legitimate sample.
 //
-// It returns the Kubernetes runtimes of the rows it actually re-pended, read in
-// the same transaction before their runtime_id was cleared, so the caller can
-// stop the previous attempt's pods (StopRecoveredRuntimes) once the reset has
-// fenced them out.
-func (s *Store) ResetInFlightTasks(runID uuid.UUID) ([]RecoveredRuntime, error) {
+// It stops nothing: a local attempt holds no claim or lease, so nothing proves
+// its executor is dead. Owners recover through ResetOwnerInFlightTasks.
+func (s *Store) ResetInFlightTasks(runID uuid.UUID) error {
+	_, err := s.resetInFlightTasks(runID, noRecoveryOwner)
+	return err
+}
+
+// ResetOwnerInFlightTasks is ResetInFlightTasks for the owner recovering a run
+// at ownerGeneration. It also returns the Kubernetes runtimes of the rows it
+// actually re-pended, read in the same transaction before their runtime_id was
+// cleared, so the caller can stop the previous attempts' pods
+// (StopRecoveredRuntimes) once the reset has fenced them out.
+//
+// The reset carries no claim guard: it deliberately takes live claims too, and
+// the claim it clears is what fences those attempts. So the stop needs a fence
+// of its own, the one ClaimTaskForDispatch and ReclaimOwnerExpiredClaims use: a
+// row stamped by a NEWER generation is another owner's attempt, and an owner
+// that lost its lease must not force-stop it.
+func (s *Store) ResetOwnerInFlightTasks(runID uuid.UUID, ownerGeneration int64) ([]RecoveredRuntime, error) {
+	return s.resetInFlightTasks(runID, ownerGeneration)
+}
+
+// noRecoveryOwner is the generation of a reset no owner performs. Row stamps
+// start at 0, so it fences every row out of the stop list.
+const noRecoveryOwner int64 = -1
+
+func (s *Store) resetInFlightTasks(runID uuid.UUID, ownerGeneration int64) ([]RecoveredRuntime, error) {
 	var recovered []RecoveredRuntime
 	err := withStoreBusyRetry(func() error {
 		recovered = nil
 		return s.db.Transaction(func(tx *gorm.DB) error {
 			var inFlight []models.TaskRun
 			if err := tx.Model(&models.TaskRun{}).
-				Select("id", "engine", "runtime_id").
+				Select("id", "engine", "runtime_id", "owner_generation").
 				Where("job_run_id = ? AND status = ?", runID, string(TaskStatusRunning)).
 				Find(&inFlight).Error; err != nil {
 				return err
+			}
+			if s.afterRecoveryRowsRead != nil {
+				s.afterRecoveryRowsRead(tx)
 			}
 			if len(inFlight) == 0 {
 				return nil
@@ -6016,7 +6047,13 @@ func (s *Store) ResetInFlightTasks(runID uuid.UUID) ([]RecoveredRuntime, error) 
 			if err := clearAttemptDatasetMetricsForTaskRunsTx(tx, reset); err != nil {
 				return err
 			}
-			recovered = recoveredRuntimesFrom(inFlight, uuidSet(reset))
+			fenced := make([]models.TaskRun, 0, len(inFlight))
+			for i := range inFlight {
+				if inFlight[i].OwnerGeneration <= ownerGeneration {
+					fenced = append(fenced, inFlight[i])
+				}
+			}
+			recovered = recoveredRuntimesFrom(fenced, uuidSet(reset))
 			return nil
 		})
 	})

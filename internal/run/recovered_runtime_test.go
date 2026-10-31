@@ -101,7 +101,26 @@ func TestRecoveredRuntimesFromKeepsOnlyResetKubernetesRows(t *testing.T) {
 	}
 	got := recoveredRuntimesFrom(rows, uuidSet([]uuid.UUID{kept, docker, blank}))
 	require.Equal(t, []RecoveredRuntime{{TaskRunID: kept, Engine: models.AtomEngineKubernetes, RuntimeID: "ns/a"}}, got)
-	require.Len(t, RecoveredRuntimesFrom(rows), 2)
+	require.Empty(t, recoveredRuntimesFrom(rows, nil), "a stop list never outruns the reset")
+}
+
+// A reset with nothing to stop adds no statement to the reclaim tick.
+func TestRecoveredRuntimesAfterResetSkipsTheReadWithNothingToStop(t *testing.T) {
+	db := testutil.OpenTestDB(t)
+	t.Cleanup(func() { testutil.CloseDB(db) })
+	closed, err := db.DB()
+	require.NoError(t, err)
+	require.NoError(t, closed.Close())
+
+	rows := []models.TaskRun{
+		{ID: uuid.New(), Engine: models.AtomEngineDocker, RuntimeID: "0123abcd"},
+		{ID: uuid.New(), Engine: models.AtomEngineKubernetes},
+	}
+	got, err := RecoveredRuntimesAfterReset(db, rows)
+	require.NoError(t, err, "a closed database proves no statement ran")
+	require.Empty(t, got)
+	_, err = RecoveredRuntimesAfterReset(db, []models.TaskRun{{ID: uuid.New(), Engine: models.AtomEngineKubernetes, RuntimeID: "ns/a"}})
+	require.Error(t, err, "a real stop list reads, and its failure is the transaction's")
 }
 
 // Owner takeover re-pends the dead owner's in-flight rows; the previous
@@ -137,15 +156,89 @@ func TestResetInFlightTasksReportsOnlyTheRowsItReset(t *testing.T) {
 		Where("job_run_id = ? AND task_id = ?", runID, taskB).
 		Updates(map[string]any{"status": string(TaskStatusRunning), "runtime_id": "0123abcd"}).Error)
 
-	recovered, err := store.ResetInFlightTasks(runID)
+	recovered, err := store.ResetOwnerInFlightTasks(runID, 1)
 	require.NoError(t, err)
 	require.Len(t, recovered, 1)
 	require.Equal(t, "caesium-mapped/step-a-1", recovered[0].RuntimeID)
 	require.Equal(t, string(TaskStatusPending), taskRunFor(t, db, runID, taskB).Status)
 
-	again, err := store.ResetInFlightTasks(runID)
+	again, err := store.ResetOwnerInFlightTasks(runID, 1)
 	require.NoError(t, err)
 	require.Empty(t, again, "nothing in flight, nothing to stop")
+}
+
+// The local resume stops nothing: it gets no stop list to act on, whatever the
+// row's generation.
+func TestResetInFlightTasksReturnsNoStopList(t *testing.T) {
+	db := testutil.OpenTestDB(t)
+	t.Cleanup(func() { testutil.CloseDB(db) })
+	store := NewStore(db)
+	runID, taskA, _ := seedTwoTaskRun(t, db, store, "")
+	markKubernetesRow(t, db, runID, taskA, "caesium-mapped/step-a-1", time.Now().UTC().Add(time.Hour))
+
+	recovered, err := store.resetInFlightTasks(runID, noRecoveryOwner)
+	require.NoError(t, err)
+	require.Empty(t, recovered)
+	require.Equal(t, string(TaskStatusPending), taskRunFor(t, db, runID, taskA).Status)
+}
+
+// A completion landing between ResetOwnerInFlightTasks' read and its UPDATE
+// leaves the row terminal, and it stays out of the stop list. The seam commits
+// that write through the reset's own transaction: SQLite cannot interleave a
+// second writer, and on Postgres READ COMMITTED shows the UPDATE the same state.
+func TestOwnerTakeoverSparesARowThatCompletedAfterTheRead(t *testing.T) {
+	db := testutil.OpenTestDB(t)
+	t.Cleanup(func() { testutil.CloseDB(db) })
+	store := NewStore(db)
+	runID, taskA, taskB := seedTwoTaskRun(t, db, store, "")
+	client := useFakeRecoveryCluster(t,
+		recoveryPod("caesium-mapped", "step-a-1"),
+		recoveryPod("caesium-mapped", "step-b-1"),
+	)
+	markKubernetesRow(t, db, runID, taskA, "caesium-mapped/step-a-1", time.Now().UTC().Add(time.Hour))
+	markKubernetesRow(t, db, runID, taskB, "caesium-mapped/step-b-1", time.Now().UTC().Add(time.Hour))
+	store.afterRecoveryRowsRead = func(tx *gorm.DB) {
+		require.NoError(t, tx.Model(&models.TaskRun{}).
+			Where("job_run_id = ? AND task_id = ?", runID, taskA).
+			Update("status", string(TaskStatusSucceeded)).Error)
+	}
+
+	mgr := NewOwnerManager(store, CheckpointConfig{Events: 1, Interval: time.Hour, KeepFulls: 3})
+	_, err := mgr.Recover(runID, 1)
+	require.NoError(t, err)
+
+	require.True(t, podExists(t, client, "caesium-mapped", "step-a-1"), "the completed row was not reset, so its pod is not recovery's to stop")
+	require.False(t, podExists(t, client, "caesium-mapped", "step-b-1"), "the row the reset landed on is stopped")
+	require.Equal(t, string(TaskStatusSucceeded), taskRunFor(t, db, runID, taskA).Status)
+}
+
+// The reset has no claim or generation guard of its own, so the stop carries
+// the generation fence: an owner that lost its lease must not force-stop the
+// attempt of the newer owner holding it, while its own generation's and older
+// rows are stopped.
+func TestOwnerTakeoverNeverStopsANewerGenerationsAttempt(t *testing.T) {
+	db := testutil.OpenTestDB(t)
+	t.Cleanup(func() { testutil.CloseDB(db) })
+	store := NewStore(db)
+	runID, taskA, taskB := seedTwoTaskRun(t, db, store, "")
+	client := useFakeRecoveryCluster(t,
+		recoveryPod("caesium-mapped", "step-a-1"),
+		recoveryPod("caesium-mapped", "step-b-1"),
+	)
+	markKubernetesRow(t, db, runID, taskA, "caesium-mapped/step-a-1", time.Now().UTC().Add(time.Hour))
+	markKubernetesRow(t, db, runID, taskB, "caesium-mapped/step-b-1", time.Now().UTC().Add(time.Hour))
+	for taskID, generation := range map[uuid.UUID]int64{taskA: 2, taskB: 1} {
+		require.NoError(t, db.Model(&models.TaskRun{}).
+			Where("job_run_id = ? AND task_id = ?", runID, taskID).
+			Update("owner_generation", generation).Error)
+	}
+
+	mgr := NewOwnerManager(store, CheckpointConfig{Events: 1, Interval: time.Hour, KeepFulls: 3})
+	_, err := mgr.Recover(runID, 1)
+	require.NoError(t, err)
+
+	require.True(t, podExists(t, client, "caesium-mapped", "step-a-1"), "a newer generation's attempt is never force-stopped")
+	require.False(t, podExists(t, client, "caesium-mapped", "step-b-1"), "this generation's attempt is stopped")
 }
 
 // The owner's reap stops the lapsed attempt's pod and never a live claim's.
@@ -168,4 +261,36 @@ func TestReclaimOwnerExpiredClaimsStopsOnlyTheLapsedAttemptsPod(t *testing.T) {
 	require.False(t, podExists(t, client, "caesium-mapped", "step-a-1"), "the lapsed attempt's pod is stopped")
 	require.True(t, podExists(t, client, "caesium-mapped", "step-b-1"), "a live claim's pod is never stopped")
 	require.Equal(t, string(TaskStatusRunning), taskRunFor(t, db, runID, taskB).Status)
+}
+
+// A renewal landing between the owner reap's read and its guarded UPDATE keeps
+// the claim, so the row stays out of the stop list. See
+// TestOwnerTakeoverSparesARowThatCompletedAfterTheRead for how the seam stands
+// in for the concurrent commit.
+func TestReclaimOwnerExpiredClaimsSparesAClaimRenewedAfterTheRead(t *testing.T) {
+	db := testutil.OpenTestDB(t)
+	t.Cleanup(func() { testutil.CloseDB(db) })
+	store := NewStore(db)
+	runID, taskA, taskB := seedTwoTaskRun(t, db, store, "")
+	client := useFakeRecoveryCluster(t,
+		recoveryPod("caesium-mapped", "step-a-1"),
+		recoveryPod("caesium-mapped", "step-b-1"),
+	)
+	lapsed := time.Now().UTC().Add(-time.Minute)
+	markKubernetesRow(t, db, runID, taskA, "caesium-mapped/step-a-1", lapsed)
+	markKubernetesRow(t, db, runID, taskB, "caesium-mapped/step-b-1", lapsed)
+	store.afterRecoveryRowsRead = func(tx *gorm.DB) {
+		require.NoError(t, tx.Model(&models.TaskRun{}).
+			Where("job_run_id = ? AND task_id = ?", runID, taskA).
+			Update("claim_expires_at", time.Now().UTC().Add(time.Hour)).Error)
+	}
+
+	_, err := store.ReclaimOwnerExpiredClaims(runID, 1)
+	require.NoError(t, err)
+
+	require.True(t, podExists(t, client, "caesium-mapped", "step-a-1"), "a renewed claim's pod is never stopped")
+	renewed := taskRunFor(t, db, runID, taskA)
+	require.Equal(t, string(TaskStatusRunning), renewed.Status)
+	require.Equal(t, "caesium-mapped/step-a-1", renewed.RuntimeID)
+	require.False(t, podExists(t, client, "caesium-mapped", "step-b-1"), "the row the reset landed on is stopped")
 }

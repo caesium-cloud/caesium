@@ -111,8 +111,7 @@ func TestSecretLogReclaimClearsOnlySanitizedSnapshotAndPreservesClaimCount(t *te
 		},
 	}
 	require.NoError(t, db.Create(&rows).Error)
-	_, resetErr := store.ResetInFlightTasks(runID)
-	require.NoError(t, resetErr)
+	require.NoError(t, store.ResetInFlightTasks(runID))
 
 	var scrubbed, ordinary models.TaskRun
 	require.NoError(t, db.First(&scrubbed, "id = ?", rows[0].ID).Error)

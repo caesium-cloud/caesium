@@ -76,6 +76,10 @@ type Claimer struct {
 	leaseTTL          time.Duration
 	busyRetryBackoffs []time.Duration
 	rateLimiter       resourceLimiter
+	// afterExpiredRowsRead is an unexported TEST SEAM, nil in production. It
+	// runs between ReclaimExpired's read and its guarded UPDATE, the window a
+	// renewal lands in on Postgres and that SQLite cannot interleave.
+	afterExpiredRowsRead func(tx *gorm.DB)
 }
 
 type resourceLimiter interface {
@@ -522,6 +526,9 @@ func (c *Claimer) ReclaimExpired(ctx context.Context) error {
 			if err := tx.Where(expiredWhere, expiredArgs...).Find(&expired).Error; err != nil {
 				return err
 			}
+			if c.afterExpiredRowsRead != nil {
+				c.afterExpiredRowsRead(tx)
+			}
 
 			updates := run.TaskResourceResetColumns()
 			maps.Copy(updates, map[string]any{
@@ -539,9 +546,14 @@ func (c *Claimer) ReclaimExpired(ctx context.Context) error {
 			}
 			counts.addTaskRunStatus(int(result.RowsAffected))
 			// The previous attempts' pods, read before the reset cleared their
-			// runtime ids; the UPDATE shares the Find's predicate in this
-			// transaction, so these are exactly the rows it re-pended.
-			attemptRecovered = run.RecoveredRuntimesFrom(expired)
+			// runtime ids. The stop list follows what the UPDATE actually
+			// matched, not what the Find returned: the shared predicate is not
+			// enough off dqlite (Postgres: READ COMMITTED), where a renewal
+			// between the two leaves a live attempt's row in expired.
+			attemptRecovered, err = run.RecoveredRuntimesAfterReset(tx, expired)
+			if err != nil {
+				return err
+			}
 
 			// Batch all lease-expired + task-ready events into a single INSERT.
 			if len(expired) > 0 {

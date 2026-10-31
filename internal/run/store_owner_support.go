@@ -58,6 +58,9 @@ func (s *Store) ReclaimOwnerExpiredClaims(runID uuid.UUID, ownerGeneration int64
 			if err := tx.Where(where, args...).Find(&expired).Error; err != nil {
 				return err
 			}
+			if s.afterRecoveryRowsRead != nil {
+				s.afterRecoveryRowsRead(tx)
+			}
 			if len(expired) == 0 {
 				return nil
 			}

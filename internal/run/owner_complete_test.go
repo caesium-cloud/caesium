@@ -217,8 +217,7 @@ func TestResetInFlightTasks_ClearsClaim(t *testing.T) {
 		Attempt: 1, MaxAttempts: 1, CreatedAt: now, UpdatedAt: now,
 	}).Error)
 
-	_, resetErr := store.ResetInFlightTasks(runID)
-	require.NoError(t, resetErr)
+	require.NoError(t, store.ResetInFlightTasks(runID))
 
 	var tr models.TaskRun
 	require.NoError(t, db.Where("job_run_id = ?", runID).First(&tr).Error)

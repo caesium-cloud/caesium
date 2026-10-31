@@ -10,6 +10,7 @@ import (
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/caesium-cloud/caesium/pkg/log"
 	"github.com/google/uuid"
+	"gorm.io/gorm"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 )
 
@@ -36,42 +37,67 @@ var kubernetesRecoveryEngine = func(ctx context.Context) (atom.Engine, error) {
 // synchronous.
 var launchRecoveredRuntimeStop = func(stop func()) { go stop() }
 
-// recoveredRuntimesFrom keeps the rows a recovery reset whose runtime it stops:
-// Kubernetes rows with a persisted runtime id, among the ids the reset actually
-// matched. Docker and Podman ids name a container on the host that ran it,
-// which a recovering node generally is not, so they are left alone.
+// stoppableRuntime reports whether recovery can stop a row's attempt: Kubernetes
+// rows with a persisted runtime id. Docker and Podman ids name a container on
+// the host that ran it, which a recovering node generally is not.
+func stoppableRuntime(row *models.TaskRun) bool {
+	return row.Engine == models.AtomEngineKubernetes && strings.TrimSpace(row.RuntimeID) != ""
+}
+
+// recoveredRuntimesFrom is the stop list of a recovery reset: the stoppable rows
+// among those the reset actually re-pended. rows is what the recovery read
+// before its UPDATE, and it is NOT that set: on dqlite nothing commits between
+// the two, but Postgres runs them at READ COMMITTED, so a renewal or completion
+// landing between them leaves a row the guarded UPDATE skipped, whose attempt
+// is live or finished. reset names the rows the UPDATE landed on, resolved after
+// it, so a stop can never reach a row the system still counts.
 func recoveredRuntimesFrom(rows []models.TaskRun, reset map[uuid.UUID]struct{}) []RecoveredRuntime {
 	out := make([]RecoveredRuntime, 0, len(rows))
 	for i := range rows {
 		row := &rows[i]
-		if row.Engine != models.AtomEngineKubernetes || strings.TrimSpace(row.RuntimeID) == "" {
+		if !stoppableRuntime(row) {
 			continue
 		}
-		if reset != nil {
-			if _, ok := reset[row.ID]; !ok {
-				continue
-			}
+		if _, ok := reset[row.ID]; !ok {
+			continue
 		}
 		out = append(out, RecoveredRuntime{TaskRunID: row.ID, Engine: row.Engine, RuntimeID: row.RuntimeID})
 	}
 	return out
 }
 
-// RecoveredRuntimesFrom is recoveredRuntimesFrom for the worker's reclaim,
-// whose guarded UPDATE matched exactly the rows it read in the same
-// transaction.
-func RecoveredRuntimesFrom(rows []models.TaskRun) []RecoveredRuntime {
-	return recoveredRuntimesFrom(rows, nil)
+// RecoveredRuntimesAfterReset resolves the stop list for a caller outside this
+// package. Call it inside the reset's transaction, after its UPDATE, with the
+// rows read before it. A reset with nothing to stop issues no statement, so
+// Docker and Podman deployments and idle reclaim ticks pay nothing. A read error
+// is the transaction's own failure, not a failed stop: return it and the
+// recovery retries.
+func RecoveredRuntimesAfterReset(tx *gorm.DB, rows []models.TaskRun) ([]RecoveredRuntime, error) {
+	ids := make([]uuid.UUID, 0, len(rows))
+	for i := range rows {
+		if stoppableRuntime(&rows[i]) {
+			ids = append(ids, rows[i].ID)
+		}
+	}
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	reset, err := taskRunIDsWithStatusTx(tx, ids, TaskStatusPending)
+	if err != nil {
+		return nil, err
+	}
+	return recoveredRuntimesFrom(rows, uuidSet(reset)), nil
 }
 
 // StopRecoveredRuntimes stops the previous attempt's pod for each runtime a
 // recovery path re-pended (identity-and-access design §10.1: the persisted id
 // is namespace-qualified, so recovery finds the pod without the policy; a
-// legacy bare id resolves in CAESIUM_KUBERNETES_NAMESPACE). Callers pass only
-// rows their guarded reset committed: such an attempt has lost its claim — its
-// worker's renewal cancels it and its completion is fenced — so it can never be
-// an attempt the system still counts as live. The stop is best effort: errors
-// are logged and never fail or delay recovery.
+// legacy bare id resolves in CAESIUM_KUBERNETES_NAMESPACE). Callers pass only a
+// stop list from recoveredRuntimesFrom, after their reset committed: such an
+// attempt has lost its claim — its worker's renewal cancels it and its
+// completion is fenced — so it can never be an attempt the system still counts
+// as live. The stop is best effort: errors are logged and never fail or delay
+// recovery.
 func StopRecoveredRuntimes(reason string, runtimes []RecoveredRuntime) {
 	if len(runtimes) == 0 {
 		return

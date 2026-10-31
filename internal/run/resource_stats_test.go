@@ -189,8 +189,7 @@ func TestResourceOutcomeReclaimClearsEvidenceAndAdmitsReplacement(t *testing.T) 
 				require.NoError(t, err)
 				require.Len(t, reset, 1)
 			} else {
-				_, resetErr := store.ResetInFlightTasks(jr.ID)
-				require.NoError(t, resetErr)
+				require.NoError(t, store.ResetInFlightTasks(jr.ID))
 			}
 			var reset models.TaskRun
 			require.NoError(t, db.First(&reset, "id = ?", row.ID).Error)
