@@ -1,6 +1,6 @@
 # Design: Identity and Access — Namespaces, Grants, Policy-as-Code, Corporate SSO
 
-**Status:** Approved design (brainstormed 2026-09-16); exec plan `docs/exec-plans/active/identity-and-access.md`
+**Status:** Shipped (2026-10-31); completed plan `docs/exec-plans/completed/identity-and-access.md`
 **Date:** 2026-09-16
 **Author:** Christopher Ryan
 **Topic:** Multi-tenancy (namespaces), namespace-scoped RBAC, policy-as-code, IdP group freshness, Keycloak, CLI SSO login

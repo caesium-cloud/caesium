@@ -1,6 +1,6 @@
 # Identity and Access — Namespaces, Grants, Policy-as-Code, Corporate SSO
 
-Last updated: 2026-10-21
+Last updated: 2026-10-31
 
 Caesium's authentication is shipped and native (OIDC, SAML, LDAP; `docs/identity-and-access.md`),
 but authorization is a single global role ladder keyed per HTTP route, SSO users cannot be
@@ -71,7 +71,7 @@ fairness was parked by `docs/exec-plans/active/window-scheduling.md` (its §"Glo
 vs. per-job load ceiling"); Stream D of this plan owns the v1 slice (issue #395) and
 window-scheduling's parked note points here.
 
-## Progress (as of 2026-10-22)
+## Progress (as of 2026-10-31)
 
 W1 merged on 2026-10-13: A1 (#624), B1 (#625), the separately authorized DB
 repair (#626) and the W1 plan sync (#622). W2 merged on 2026-10-16: A2 (#638
@@ -92,6 +92,14 @@ new item B9, and B4 added B7 (DAG snapshot namespaces). Every review comment, in
 W6 merged on 2026-10-22 by admin merge at the user's request: B7 (#682 `29d1f175`), B6 (#683
 `41ec13cf`), B5 (#685 `b155ed6f`), A8 (#681 `ce68f819`), C1 with C5 (#679 `dcefc911`) and E5
 (#684 `d59be1cc`). A6 moved from W6 to W7.
+W7 merged from 2026-10-22 to 2026-10-28: the W6 follow-ups (#687 `1f41ca73`), A6 (#688
+`ef5049e4`), C2 (#689 `1a4963df`), E1b with E2 (#691 `36dde0c3`) and F2 with F4 (#690
+`94b4b62d`). The W7 plan sync was not written when the wave merged; the W7 section below
+records it. W8 was dispatched on 2026-10-22, stopped that evening on the weekly usage limit
+and resumed on 2026-10-31: G2 (#697 `234a1b31`), C3 (#699 `c232977a`), the unplanned
+snapshot retry (#701 `b1bd3f79`), A7 (#700 `f40e7393`) and G3 with G4 (#703 `fd1fe7c4`).
+N-2 closes the plan in the same change as this sync. Every acceptance criterion holds;
+see the W8 section for the checks and for what the plan leaves open.
 
 ### Wave 1 — Foundations (2026-10-09)
 
@@ -720,19 +728,96 @@ fan-outs were used.
   (after E2), C3 (after C2), G2 (after F2) and N-2. Confirm each item's `Depends on` at
   dispatch.
 
+### Wave 7 — Legacy secrets, isolation context, group refresh, Console namespaces (2026-10-28)
+
+- **W7-ε / W6 follow-ups:** merged #687 `1f41ca73`. Closes the cross-namespace leaks W6
+  recorded: the lint/diff edge-id collision, receipt snapshot binding, replay's start view,
+  trimmed-alias producer identity, the PostgreSQL advance CAS and the B9 test race.
+- **W7-α / A6:** merged #688 `ef5049e4`. The static shared secrets are deprecated: the
+  principal decides, the secret is only audited, and event ingest is namespaced.
+- **W7-γ / C2:** merged #689 `1a4963df`. The isolation context travels through dispatch and
+  fails closed on a worker without `isolation_v1`.
+- **W7-β / E1b + E2:** merged #691 `36dde0c3`. LDAP refresh is restored from the preserved
+  branch, and the asynchronous refresher serves sessions and user-bound keys.
+- **W7-δ / F2 + F4:** merged #690 `94b4b62d`. The Console gains the namespace switcher, chips
+  and the quota-held label.
+- **W6 follow-ups left after W7:** a reaper that uses the multi-namespace `List` (C1);
+  Windows credential-file locking and an OS keychain (E5); raising or splitting the
+  `coverage-ratchets` timeout (CI).
+- **W7 follow-ups:** contract graph identity and the trigger-chain exclusion still match by
+  trimmed alias; remove the legacy secrets in the release after next; producerless arrival
+  sources for confined credentials await sign-off (A6-D6); a node with
+  `CAESIUM_WORKER_ENABLED=false` never renews its run leases; rows of a namespace whose
+  isolation settings change while the run has no owner wait for an operator; the incidents
+  widgets and the contract graph are not narrowed by the switcher.
+
+### Wave 8 — Allow/deny matrix, Keycloak scenarios, mapped namespace proof (2026-10-31)
+
+- **W8-δ / G2:** merged #697 `234a1b31`. The Playwright `keycloak` project signs each identity
+  in through Keycloak's login page and proves the switcher, chips, `InsufficientAccess`, the
+  Access page and the quota label from a live queue response.
+- **W8-γ / C3:** merged #699 `c232977a`. Per-namespace Helm RBAC and a kind proof of a mapped
+  namespace (`rbac`, `placement`, `graceful_restart`, `crash`). Recovery now stops the prior
+  attempt's pod, only for rows the reset landed on, on all three recovery paths; greptile
+  found the Postgres race that shaped that rule. `owner_takeover` is unit-tested only.
+- **W8-ε / snapshot retry (not a plan item):** merged #701 `b1bd3f79`. The matrix's concurrent
+  reads surfaced `checkpoint in progress` as 500s from read-only catalog snapshots.
+  `db.TransactionOn` takes transaction options, and `jobdiff.ReadSnapshot` and
+  `incident.readSnapshot` retry through it. Stress failures went from 147 of 10,797 (bundle)
+  and 592 of 42,859 (graph) to zero. The audit fixed two closures that were unsafe to re-run;
+  one, `ConfinedImpact`, would have been a confinement leak.
+- **W8-α / A7:** merged #700 `f40e7393`. `TestAuthNamespaceAllowDenyMatrix` is the scenario AC1
+  calls `TestNamespaceAllowDenyMatrix`: 126 routes, 21 principals, 5,859 requests on the
+  agent lane. It fixed two 500s for an unknown id (`GET /v1/atoms/:id`, `GET /v1/triggers/:id`).
+  Review added real methods on unmounted routes, stats numbers checked against the catalog,
+  and controller audit rows. The channel, policy, reload and logout audit expectations were
+  seen passing but not mutation-tested.
+- **W8-β / G3 + G4:** merged #703 `fd1fe7c4`. Thirteen required Keycloak scenarios, including
+  the matrix for SSO principals (104 routes, 22 unmounted, 18 principals, 4,323 requests) and
+  the `caesium login --no-browser` round trip. The recipe requires a pass for every named
+  scenario instead of a minimum count.
+- **Acceptance check on master `fd1fe7c4`:** criteria 1 to 8 hold, and N-2 delivers 9. Two
+  map to names that changed in delivery: AC3's worker "without `kube_target`" is
+  `isolation_v1` in `test/distributed_isolation_test.go`, and AC7's
+  `build-and-integration-test-keycloak` is the `integration (keycloak)` matrix leg, which
+  `ci-ok` requires through `integration`.
+- **Review record:** #697, #701: Codex approved. #699: Codex raised one P2, accepted below. #700: Codex
+  raised three P2s, all fixed; greptile re-reviewed the fix. #703: greptile raised nothing.
+  #700's fix and #703 merged ahead of a Codex round on their final heads, at the user's
+  request, because Codex's account limit had run out.
+- **Follow-ups, with no owner:**
+  - No coverage journey executes the new `engine.Stop` call (C3). The Kubernetes journey runs
+    `local` mode with workers and owners off. Extending it changes a shared gate and would
+    reach only the "pod already gone" branch, so it belongs in its own PR.
+  - In default SQL advancement, a run whose driving process died stays `running` until a cron
+    tick or webhook adopts it, so a manual-only job stays stuck. Proved live on master.
+  - A local-mode crash leaves an orphan pod. An in-memory single node restarting after its run
+    lease expired may wedge the run (read, not reproduced).
+  - On Postgres, rows a reclaim skipped are still reported as reclaimed. A stale owner's reset
+    can clear a newer owner's claim, and the worker then cancels that attempt.
+  - A dispatch deadline under 30s silently becomes a 5-minute claim.
+  - `withSnapshot` closures swallow contended reads: `validate` shows a raw
+    `checkpoint in progress`, and `readScope.resolve` fails closed. This needs a small design.
+  - `DELETE /v1/atoms/:id` answers 202 for an unknown id, and a job delete leaves its
+    `run_queue` row.
+  - The engine namespace's `secrets get` is a hand grant.
+  - `go test` in the runner dirties `go.mod` and `go.sum` through the bind mount.
+- **Sign-offs still open:** mint at exchange (spec §13.1), the depth of §8.3, `failureClass`,
+  namespace-qualified `runtime_id`, and A6-D6.
+
 ### Stream Status
 
 | Stream | Scope | Priority | Status |
 |--------|-------|----------|--------|
-| A | Policy file, grants, principal, route classes, namespace-aware middleware, keys with namespaces, SSO-admin key management | **P0** | A1 #624, A2 #638, A3 #647, A4 #645, A5 #654, A8 #681 merged; A6 in W7; A7 in W8 |
+| A | Policy file, grants, principal, route classes, namespace-aware middleware, keys with namespaces, SSO-admin key management | **P0** | A1 #624, A2 #638, A3 #647, A4 #645, A5 #654, A8 #681, A6 #688, A7 #700 merged — complete |
 | B | `metadata.namespace` on jobs: schema, columns, importer, lint, apply/prune/move, git-sync allowlist, collection filtering, aggregate collapse | **P0** | B1 #625, B2 #657, B3 #639, B4 #661, B9 #668, B7 #682, B6 #683, B5 #685 merged — complete |
-| C | Runtime isolation: per-namespace Kubernetes namespace + service account, scoped secret resolution, Helm RBAC | P1 | C4 #660, C1 + C5 #679 merged; C2 in W7; C3 in W8 |
-| D | Run quota + round-robin fairness (#395 v1 slice); namespaced notification channels, policies, agent profiles | P1 | D1 + D2 #672, D3 #640, D4 #673 merged |
-| E | Identity lifecycle: IdP group refresh, user/session administration, user-bound keys, `caesium login` | P1 | E1 #646, E3 #655, E4 #665, E5 #684 merged; E1b + E2 in W7 |
-| F | Console: grants-aware gating, namespace switcher, namespace chips, quota label, Access page | P1 | F1 + F3 merged #667; F2 + F4 in W7 |
-| G | Keycloak: realm fixture, CI lane, Playwright + Go scenarios, operator guidance | P1 | G1 + G5 merged #666; G3, G4, G2 in W8 |
+| C | Runtime isolation: per-namespace Kubernetes namespace + service account, scoped secret resolution, Helm RBAC | P1 | C4 #660, C1 + C5 #679, C2 #689, C3 #699 merged — complete |
+| D | Run quota + round-robin fairness (#395 v1 slice); namespaced notification channels, policies, agent profiles | P1 | D1 + D2 #672, D3 #640, D4 #673 merged — complete |
+| E | Identity lifecycle: IdP group refresh, user/session administration, user-bound keys, `caesium login` | P1 | E1 #646, E3 #655, E4 #665, E5 #684, E1b + E2 #691 merged — complete |
+| F | Console: grants-aware gating, namespace switcher, namespace chips, quota label, Access page | P1 | F1 + F3 #667, F2 + F4 #690 merged — complete |
+| G | Keycloak: realm fixture, CI lane, Playwright + Go scenarios, operator guidance | P1 | G1 + G5 #666, G2 #697, G3 + G4 #703 merged — complete |
 | H- | Harness: integration server policy fixture, `--json` stdout discipline for new verbs | — | H-1 #657, H-2 #645 merged |
-| N- | Docs: rename + grow the identity-and-access guide; roadmap, README, sovereignty | — | N-1 merged #648; N-2 at close-out |
+| N- | Docs: rename + grow the identity-and-access guide; roadmap, README, sovereignty | — | N-1 #648 merged; N-2 this close-out — complete |
 
 ## Streams
 
@@ -1655,13 +1740,14 @@ group refresh, user disable, CLI login) is asserted here against a live Keycloak
       `docs/README.md`, `docs/roadmap.md`, `docs/sovereignty.md`, `README.md`.
       (Done in W3-delta: the guide documents A4 (#645) and A3 (#647); merges after both.)
       Depends on: A4.
-- [ ] N-2. Close-out: `docs/sovereignty.md` gains a **Multi-tenancy** row; roadmap §3.1
+- [x] N-2. Close-out: `docs/sovereignty.md` gains a **Multi-tenancy** row; roadmap §3.1
       flips to Shipped and §3.3's "read-only vs operator role distinction" line is
       marked shipped; `docs/README.md` moves this plan to the completed list; this
       plan's Progress dashboard matches merged PRs.
       Files: `docs/sovereignty.md`, `docs/roadmap.md`, `docs/README.md`,
-      `docs/exec-plans/active/identity-and-access.md`.
+      `docs/exec-plans/completed/identity-and-access.md`.
       Depends on: every stream's last item.
+      (W8 close-out: the plan moved to `completed/` in the same change.)
 
 ## Sequencing & Dependencies
 
