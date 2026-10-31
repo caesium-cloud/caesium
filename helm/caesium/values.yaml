@@ -109,6 +109,23 @@ kubernetes:
     # -- Namespace in which job pods are created (defaults to the release namespace)
     namespace: ""
 
+# -- Kubernetes namespaces the access policy maps tenancy namespaces to
+# (`namespaces.<ns>.kubernetes.namespace`). Each entry gets a Role and a
+# RoleBinding for the chart's service account: pods, pods/log and metrics for
+# job pods, secrets get for `secret://k8s` reads, and persistentvolumeclaims
+# read. Pre-create the namespaces and any service accounts the policy names;
+# the chart creates neither. Example: [caesium-marketing, caesium-finance]
+jobNamespaces: []
+
+# -- Access policy file (identity-and-access). Name an existing ConfigMap that
+# holds the policy under `key`; the chart mounts it read-only and sets
+# CAESIUM_AUTH_POLICY_FILE. Edits to the ConfigMap reach the pod and are picked
+# up by the reload poll (CAESIUM_AUTH_POLICY_RELOAD_INTERVAL). Empty serves no
+# policy file.
+accessPolicy:
+  existingConfigMap: ""
+  key: policy.yaml
+
 # -- Pod-level security context
 podSecurityContext:
   fsGroup: 10001

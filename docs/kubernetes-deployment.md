@@ -190,6 +190,50 @@ All settings are in `helm/caesium/values.yaml`.
 | `affinity` | Pod affinity/anti-affinity rules | `{}` |
 | `podSecurityContext.fsGroup` | Pod-level fsGroup | `10001` |
 | `securityContext.*` | Container security settings | non-root + read-only rootfs |
+| `kubernetes.engine.enabled` | Run steps as pods; renders the engine Role and RoleBinding | `false` |
+| `kubernetes.engine.namespace` | Where unmapped job pods run (`CAESIUM_KUBERNETES_NAMESPACE`) | release namespace |
+| `jobNamespaces` | Kubernetes namespaces the access policy maps tenancy namespaces to; each gets a Role and RoleBinding (see [Namespace isolation](#namespace-isolation)) | `[]` |
+| `accessPolicy.existingConfigMap` | ConfigMap holding the access policy, mounted read-only; sets `CAESIUM_AUTH_POLICY_FILE` | `""` |
+| `accessPolicy.key` | The policy's key in that ConfigMap | `policy.yaml` |
+
+## Namespace isolation
+
+An access policy can map a tenancy namespace to its own Kubernetes namespace
+and service account (`namespaces.<ns>.kubernetes`, see
+[Kubernetes target](identity-and-access.md#kubernetes-target)). The chart
+serves the policy and grants Caesium what it needs in each mapped namespace:
+
+```yaml
+jobNamespaces:
+  - caesium-marketing
+accessPolicy:
+  existingConfigMap: caesium-access-policy   # key policy.yaml
+config:
+  extraEnv:
+    # Only if steps read secret://k8s references.
+    - name: CAESIUM_JOBDEF_SECRETS_ENABLE_KUBERNETES
+      value: "true"
+```
+
+- **Pre-create** every namespace in `jobNamespaces` and every service account
+  the policy names there, and the policy ConfigMap in the release namespace.
+  The chart creates none of them.
+- For each entry the chart renders a `Role` and a `RoleBinding`
+  (`<release>-caesium-jobs`) binding the chart's service account to: pods and
+  pods/log (create, get, list, watch, delete) and `metrics.k8s.io` pods (get)
+  for job pods; secrets (get) for `secret://k8s` reads; persistentvolumeclaims
+  (get, list, watch). It never grants pods/exec or anything cluster-wide. The
+  grants render whether or not the engine is enabled, since relative
+  `secret://k8s` reads from Docker steps also read in the mapped namespace.
+- The ConfigMap is mounted as a directory, read-only, so an edit reaches the pod
+  and is applied by the policy reload poll without a restart.
+- Restarts and failover: in distributed mode a recovering node stops the
+  previous attempt's pod, best effort, through its namespace-qualified runtime
+  id once the task is re-pended. A local-mode resume stops nothing, so a pod
+  left by a crash runs on beside the re-run
+  ([details](identity-and-access.md)).
+- The engine namespace's Role (`kubernetes.engine.namespace`) has no secrets
+  grant; an unmapped `secret://k8s` read on Helm needs one added by hand.
 
 ## Accessing the API
 

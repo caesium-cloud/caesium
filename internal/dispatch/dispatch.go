@@ -507,7 +507,9 @@ func (h *Handler) HandleDispatch(w http.ResponseWriter, r *http.Request) {
 
 	// Derive the claim TTL from the envelope's deadline so a tight per-task
 	// deadline doesn't leave a stale 5-min claim if execution finishes early.
-	// Floor at 30s so the renewal ticker has room to extend long-running tasks.
+	// Under 30s left is not clamped to 30s: the claim falls back to 5 minutes, so
+	// the renewal ticker has room to extend long-running tasks. The deadline is
+	// already running when it gets here, so a 30s deadline lands on this branch.
 	ttl := time.Until(req.Deadline)
 	if ttl < 30*time.Second {
 		ttl = 5 * time.Minute
