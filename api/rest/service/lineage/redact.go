@@ -37,6 +37,10 @@ type ExternalImpactNode struct {
 func (s *Service) ConfinedImpact(r *authz.Redactor, namespace, name string, maxDepth int) (*RedactedImpactResult, error) {
 	out := &RedactedImpactResult{RootNamespace: namespace, RootName: name, Downstream: []any{}}
 	err := jobdiff.ReadSnapshot(s.context(), s.db, func(tx *gorm.DB) error {
+		// A retry can find the root unreadable, and that path leaves Downstream
+		// alone: it must not still hold the nodes of an attempt whose COMMIT
+		// failed. The caller would be reading a root it may no longer read.
+		out.Downstream = []any{}
 		visible, err := rootVisible(s.context(), tx, r, namespace, name)
 		if err != nil || !visible {
 			return err

@@ -7,6 +7,7 @@ import (
 
 	"github.com/caesium-cloud/caesium/internal/authz"
 	"github.com/caesium-cloud/caesium/internal/models"
+	"github.com/caesium-cloud/caesium/pkg/db"
 	"github.com/google/uuid"
 	"gorm.io/datatypes"
 	"gorm.io/gorm"
@@ -323,12 +324,17 @@ func failedPartitionEntries(rows []models.TaskRun) ([]BundleFailedPartition, boo
 // take a new view per statement). It mirrors the confined diff baseline's
 // internal/jobdef/diff.ReadSnapshot, which this package cannot import (that
 // package's tests import internal/run, which imports this one).
-func readSnapshot(ctx context.Context, db *gorm.DB, fn func(tx *gorm.DB) error) error {
+//
+// It keeps that helper's contract too: the whole snapshot is retried on
+// transient contention, including after fn has returned nil (a failed COMMIT),
+// so fn must keep nothing from an earlier attempt, and conn must not already be
+// a transaction.
+func readSnapshot(ctx context.Context, conn *gorm.DB, fn func(tx *gorm.DB) error) error {
 	options := &sql.TxOptions{ReadOnly: true}
-	if db.Name() == "postgres" {
+	if conn.Name() == "postgres" {
 		options.Isolation = sql.LevelRepeatableRead
 	}
-	return db.WithContext(ctx).Transaction(fn, options)
+	return db.TransactionOn(ctx, conn, fn, options)
 }
 
 func loadJobTopology(ctx context.Context, db *gorm.DB, jobID uuid.UUID) (models.Job, []BundleTask, []BundleDAGEdge, error) {

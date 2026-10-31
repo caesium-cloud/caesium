@@ -20,6 +20,7 @@ import (
 	internaljobdef "github.com/caesium-cloud/caesium/internal/jobdef"
 	"github.com/caesium-cloud/caesium/internal/jobdef/testutil"
 	"github.com/caesium-cloud/caesium/internal/models"
+	dbfaults "github.com/caesium-cloud/caesium/internal/testutil"
 	schema "github.com/caesium-cloud/caesium/pkg/jobdef"
 	"github.com/labstack/echo/v5"
 	"github.com/stretchr/testify/require"
@@ -458,4 +459,66 @@ func TestValidatorErrorRedactedInTheValidationSnapshot(t *testing.T) {
 	require.Contains(t, message, hiddenJob)
 
 	require.Empty(t, validate(newReadScopeFor([]string{"marketing"}, reader, nil)), "after the move the graph is valid")
+}
+
+// A snapshot's COMMIT can fail after its validator reported an error. A retry
+// the validator passes answers "valid": the failed attempt's verdict came from
+// a snapshot nothing else in the response is read from.
+func TestValidateRetryKeepsNoVerdictFromTheFailedAttempt(t *testing.T) {
+	conn, faults := dbfaults.FailCommits(t, scopeCatalog(t), errors.New("checkpoint in progress"), 1)
+
+	attempts := 0
+	message := newReadScopeFor([]string{"marketing"}, conn, nil).validate(context.Background(), conn, func(*gorm.DB) error {
+		attempts++
+		if attempts == 1 {
+			return errors.New("invalid in the failed attempt's snapshot")
+		}
+		return nil
+	})
+
+	require.Equal(t, 2, attempts)
+	require.Equal(t, 2, faults.Begins)
+	require.Empty(t, message)
+}
+
+// A retried snapshot re-decides visibility: a job moved out of the caller's
+// namespace after a failed COMMIT is not shown on a verdict cached from the
+// attempt before the move.
+func TestContractGraphRetryRechecksOwnership(t *testing.T) {
+	t.Setenv("CAESIUM_CONTRACT_ENFORCEMENT", "warn")
+	reader, writer := snapshotCatalog(t)
+	producer := scopeDefinition("retry-schema-producer", "marketing")
+	producer.Steps[0].OutputSchema = map[string]any{
+		"type":       "object",
+		"required":   []any{"row_count"},
+		"properties": map[string]any{"row_count": map[string]any{"type": "integer"}},
+	}
+	consumer := scopeDefinition("retry-schema-consumer", "marketing")
+	consumer.Trigger = schema.Trigger{Type: schema.TriggerEvent, Configuration: map[string]any{
+		"events":       []any{map[string]any{"type": "run_completed", "source": "caesium", "filter": map[string]any{"job_alias": producer.Metadata.Alias}}},
+		"paramMapping": map[string]any{"customer": "$.tasks[0].output.customer_id"},
+	}}
+	applyDefinitions(t, writer, producer, consumer)
+	hasFinding := func(graph internalcontract.Graph) bool {
+		for _, edge := range graph.Edges {
+			if edge.From == internalcontract.JobNodeID(producer.Metadata.Alias) && edge.To == internalcontract.JobNodeID(consumer.Metadata.Alias) {
+				return len(edge.Findings) > 0
+			}
+		}
+		return false
+	}
+	_, before, err := newReadScopeFor([]string{"marketing"}, reader, nil).contractGraph(context.Background(), nil, nil)
+	require.NoError(t, err)
+	require.True(t, hasFinding(before), "the caller reads both jobs before the move: %+v", before.Edges)
+
+	conn, faults := dbfaults.FailCommits(t, reader, errors.New("checkpoint in progress"), 1)
+	faults.AfterRollback = func() {
+		require.NoError(t, writer.Exec(`UPDATE jobs SET namespace = 'finance' WHERE alias = ?`, producer.Metadata.Alias).Error)
+	}
+	scoped, visible, err := newReadScopeFor([]string{"marketing"}, conn, nil).contractGraph(context.Background(), nil, nil)
+
+	require.NoError(t, err)
+	require.Equal(t, 2, faults.Begins)
+	require.True(t, hasFinding(scoped), "the retry derives the graph over every job: %+v", scoped.Edges)
+	require.False(t, hasFinding(visible), "the producer moved out before the retry's snapshot: %+v", visible.Edges)
 }
