@@ -4,10 +4,13 @@ package test
 
 import (
 	"bufio"
+	"cmp"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"slices"
 	"sort"
@@ -423,7 +426,8 @@ func scopeAdmits(p matrixPrincipal, key string, probe matrixProbe) bool {
 type matrixAuditTuple struct {
 	Actor, Action, PolicyKey, Namespace string
 	// Resource is a successful write's resource id, where the audit row
-	// carries one (a job-scoped key's job alias).
+	// carries one: a job-scoped key's job alias, or the object a controller
+	// audited its write on.
 	Resource string
 }
 
@@ -585,9 +589,16 @@ func (s *IntegrationTestSuite) driveNamespaceMatrix(fx *namespaceMatrixFixture, 
 		row := rows[key]
 		probes := row.Probes(fx)
 		s.Require().NotEmptyf(probes, "%s has no probe", key)
+		for i := range probes {
+			if probes[i].Method == "" {
+				probes[i].Method, _, _ = strings.Cut(key, " ")
+			}
+		}
 		if !fx.caps.mounts(row.Surface) {
 			// Not mounted on this lane: the cluster admin is refused or 404,
-			// never the handler; no principal's outcome counts.
+			// never the handler; no principal's outcome counts. The probe is
+			// the row's own, with the row's method: a write route's GET would
+			// answer 405 even if the route were wrongly mounted.
 			unmounted = append(unmounted, key)
 			status, body, err := s.matrixDo(ctx, admin, probes[0])
 			s.NoErrorf(err, "%s unmounted probe", key)
@@ -596,9 +607,6 @@ func (s *IntegrationTestSuite) driveNamespaceMatrix(fx *namespaceMatrixFixture, 
 			continue
 		}
 		for _, probe := range probes {
-			if probe.Method == "" {
-				probe.Method, _, _ = strings.Cut(key, " ")
-			}
 			switch probe.Mode {
 			case modeRead:
 				for _, p := range callers {
@@ -652,6 +660,7 @@ func (s *IntegrationTestSuite) driveNamespaceMatrix(fx *namespaceMatrixFixture, 
 	}
 	close(jobs)
 	wg.Wait()
+	s.assertMatrixStats(fx, rows, callers)
 	s.assertMatrixEventStream(fx, callers)
 	run := func(batch []matrixResult) {
 		for i := range batch {
@@ -702,6 +711,263 @@ func (s *IntegrationTestSuite) assertUnknownIDsAreNotServerErrors(fx *namespaceM
 		status, body, err := s.matrixDo(s.T().Context(), admin, p)
 		if s.NoErrorf(err, "%s with unknown ids", key) {
 			s.Lessf(status, http.StatusInternalServerError, "%s with unknown ids: %s %s\nbody: %s", key, p.Method, p.Path, truncate(body, 300))
+		}
+	}
+}
+
+// matrixStats is every number GET /v1/stats and GET /v1/stats/summary report,
+// by its JSON name.
+type matrixStats struct {
+	Jobs struct {
+		Total              int64   `json:"total"`
+		RecentRuns         int64   `json:"recent_runs"`
+		SuccessRate        float64 `json:"success_rate"`
+		AvgDurationSeconds float64 `json:"avg_duration_seconds"`
+	} `json:"jobs"`
+	TopFailing []struct {
+		JobID        string `json:"job_id"`
+		FailureCount int64  `json:"failure_count"`
+	} `json:"top_failing"`
+	TopFailingAtoms []struct {
+		JobID        string `json:"job_id"`
+		AtomName     string `json:"atom_name"`
+		FailureCount int64  `json:"failure_count"`
+	} `json:"top_failing_atoms"`
+	SlowestJobs []struct {
+		JobID              string  `json:"job_id"`
+		AvgDurationSeconds float64 `json:"avg_duration_seconds"`
+	} `json:"slowest_jobs"`
+	SuccessRateTrend []struct {
+		Date        string  `json:"date"`
+		RunCount    int64   `json:"run_count"`
+		SuccessRate float64 `json:"success_rate"`
+	} `json:"success_rate_trend"`
+}
+
+// matrixStatsRun is one job_runs row inside the seven-day stats window.
+type matrixStatsRun struct {
+	Namespace, JobID, Status, Day string
+	Recent                        bool            // started in the last 24 hours
+	Seconds                       sql.NullFloat64 // a completed run's duration
+}
+
+// matrixStatsAtom is the failed task runs of one task, per run namespace.
+type matrixStatsAtom struct {
+	Namespace, JobID, Name string
+	Failures               int64
+}
+
+// matrixStatsCatalog is the rows the stats are computed from, read directly,
+// so nothing in it has passed through the server's namespace filter.
+type matrixStatsCatalog struct {
+	Jobs  map[string]int64 // live jobs per namespace
+	Runs  []matrixStatsRun
+	Atoms []matrixStatsAtom
+}
+
+func (fx *namespaceMatrixFixture) statsCatalog() matrixStatsCatalog {
+	s := fx.s
+	s.T().Helper()
+	ctx := s.T().Context()
+	now := time.Now().UTC()
+	day, week := now.Add(-24*time.Hour), now.Add(-7*24*time.Hour)
+	catalog := matrixStatsCatalog{Jobs: map[string]int64{}}
+	scan := func(row func(*sql.Rows) error, query string, args ...any) {
+		rows, err := fx.f.catalogDB.QueryContext(ctx, query, args...)
+		s.Require().NoError(err, query)
+		defer func() { _ = rows.Close() }()
+		for rows.Next() {
+			s.Require().NoError(row(rows), query)
+		}
+		s.Require().NoError(rows.Err(), query)
+	}
+	scan(func(rows *sql.Rows) error {
+		var namespace string
+		var total int64
+		err := rows.Scan(&namespace, &total)
+		catalog.Jobs[namespace] += total
+		return err
+	}, `SELECT COALESCE(namespace, ''), COUNT(*) FROM jobs WHERE deleted_at IS NULL GROUP BY 1`)
+	scan(func(rows *sql.Rows) error {
+		var run matrixStatsRun
+		err := rows.Scan(&run.Namespace, &run.JobID, &run.Status, &run.Day, &run.Recent, &run.Seconds)
+		catalog.Runs = append(catalog.Runs, run)
+		return err
+	}, `SELECT COALESCE(namespace, ''), job_id, status, strftime('%Y-%m-%d', started_at, 'utc'), started_at >= ?,
+		CASE WHEN completed_at IS NOT NULL THEN (JULIANDAY(completed_at) - JULIANDAY(started_at)) * 86400 END
+		FROM job_runs WHERE started_at >= ? AND quarantine IS NOT TRUE`, day, week)
+	scan(func(rows *sql.Rows) error {
+		var atom matrixStatsAtom
+		err := rows.Scan(&atom.Namespace, &atom.JobID, &atom.Name, &atom.Failures)
+		catalog.Atoms = append(catalog.Atoms, atom)
+		return err
+	}, `SELECT COALESCE(job_runs.namespace, ''), job_runs.job_id, tasks.name, COUNT(*)
+		FROM task_runs JOIN job_runs ON job_runs.id = task_runs.job_run_id JOIN tasks ON tasks.id = task_runs.task_id
+		WHERE task_runs.status = 'failed' AND job_runs.started_at >= ? AND task_runs.quarantine IS NOT TRUE AND job_runs.quarantine IS NOT TRUE
+		GROUP BY 1, 2, 3`, week)
+	return catalog
+}
+
+// matrixStatsWant is what a caller must be told: the catalog folded over the
+// namespaces it reads. The top lists are kept whole, per job, because a list
+// is cut at five and ties have no fixed order.
+type matrixStatsWant struct {
+	Total, RecentRuns int64
+	SuccessRate       float64
+	AvgDuration       float64
+	Failures          map[string]int64    // failed runs per job
+	AtomFailures      map[string]int64    // failed task runs per job and task
+	JobDurations      map[string]float64  // mean run duration per job
+	Trend             map[string][2]int64 // runs and successes per day
+}
+
+func (c matrixStatsCatalog) want(p matrixPrincipal) matrixStatsWant {
+	w := matrixStatsWant{
+		Failures:     map[string]int64{},
+		AtomFailures: map[string]int64{},
+		JobDurations: map[string]float64{},
+		Trend:        map[string][2]int64{},
+	}
+	for namespace, total := range c.Jobs {
+		if p.sees(namespace, rV) {
+			w.Total += total
+		}
+	}
+	var finished, succeeded, timed int64
+	var seconds float64
+	jobTimed := map[string]int64{}
+	for _, run := range c.Runs {
+		if !p.sees(run.Namespace, rV) {
+			continue
+		}
+		if run.Recent {
+			w.RecentRuns++
+		}
+		if run.Seconds.Valid {
+			timed++
+			seconds += run.Seconds.Float64
+			jobTimed[run.JobID]++
+			w.JobDurations[run.JobID] += run.Seconds.Float64
+		}
+		if run.Status != "succeeded" && run.Status != "failed" {
+			continue
+		}
+		finished++
+		point := w.Trend[run.Day]
+		point[0]++
+		if run.Status == "succeeded" {
+			succeeded++
+			point[1]++
+		} else {
+			w.Failures[run.JobID]++
+		}
+		w.Trend[run.Day] = point
+	}
+	if finished > 0 {
+		w.SuccessRate = float64(succeeded) / float64(finished)
+	}
+	if timed > 0 {
+		w.AvgDuration = seconds / float64(timed)
+	}
+	for job, runs := range jobTimed {
+		w.JobDurations[job] /= float64(runs)
+	}
+	for _, atom := range c.Atoms {
+		if p.sees(atom.Namespace, rV) {
+			w.AtomFailures[atom.JobID+"/"+atom.Name] += atom.Failures
+		}
+	}
+	return w
+}
+
+// diff lists every number of got that differs from w.
+func (w matrixStatsWant) diff(got matrixStats) []string {
+	var out []string
+	count := func(name string, have, want int64) {
+		if have != want {
+			out = append(out, fmt.Sprintf("%s: got %d, want %d", name, have, want))
+		}
+	}
+	float := func(name string, have, want float64) {
+		if math.Abs(have-want) > 1e-6 {
+			out = append(out, fmt.Sprintf("%s: got %g, want %g", name, have, want))
+		}
+	}
+	count("jobs.total", got.Jobs.Total, w.Total)
+	count("jobs.recent_runs", got.Jobs.RecentRuns, w.RecentRuns)
+	float("jobs.success_rate", got.Jobs.SuccessRate, w.SuccessRate)
+	float("jobs.avg_duration_seconds", got.Jobs.AvgDurationSeconds, w.AvgDuration)
+	count("len(top_failing)", int64(len(got.TopFailing)), int64(min(5, len(w.Failures))))
+	for _, entry := range got.TopFailing {
+		count("top_failing "+entry.JobID, entry.FailureCount, w.Failures[entry.JobID])
+	}
+	count("len(top_failing_atoms)", int64(len(got.TopFailingAtoms)), int64(min(5, len(w.AtomFailures))))
+	for _, entry := range got.TopFailingAtoms {
+		count("top_failing_atoms "+entry.JobID+"/"+entry.AtomName, entry.FailureCount, w.AtomFailures[entry.JobID+"/"+entry.AtomName])
+	}
+	count("len(slowest_jobs)", int64(len(got.SlowestJobs)), int64(min(5, len(w.JobDurations))))
+	for _, entry := range got.SlowestJobs {
+		float("slowest_jobs "+entry.JobID, entry.AvgDurationSeconds, w.JobDurations[entry.JobID])
+	}
+	for _, point := range got.SuccessRateTrend {
+		want := w.Trend[point.Date]
+		count("success_rate_trend "+point.Date+" run_count", point.RunCount, want[0])
+		rate := 0.0
+		if want[0] > 0 {
+			rate = float64(want[1]) / float64(want[0])
+		}
+		float("success_rate_trend "+point.Date+" success_rate", point.SuccessRate, rate)
+	}
+	return out
+}
+
+// assertMatrixStats requires every number of both stats routes, as read by
+// each admitted principal, to equal the catalog's rows folded over exactly the
+// namespaces the principal's grants read (design §8.3). The alias markers on
+// the rows cannot do this: a foreign run moves a count or a rate without
+// naming its job.
+//
+// The comparison is a pass of its own, between the concurrent reads and the
+// writes, because it reads the catalog alongside the response: the suite's
+// scenarios run one at a time, but a cron job an earlier scenario left behind
+// can still finish a run between the two reads. So a mismatch is read again.
+// That cannot hide a leak, which stays in every read while foreign rows exist,
+// and the fixture guarantees they do: a confined caller's job and recent-run
+// counts must be positive and below the unrestricted ones.
+func (s *IntegrationTestSuite) assertMatrixStats(fx *namespaceMatrixFixture, rows map[string]matrixRow, callers []matrixPrincipal) {
+	s.T().Helper()
+	const attempts = 5
+	admin := fx.adminPrincipal()
+	catalog := fx.statsCatalog()
+	for _, key := range []string{"GET /v1/stats", "GET /v1/stats/summary"} {
+		probe := rows[key].Probes(fx)[0]
+		probe.Method, _, _ = strings.Cut(key, " ")
+		for _, p := range callers {
+			if matrixExpect(p, key, rows[key], probe).Denied {
+				continue
+			}
+			var diffs []string
+			for attempt := range attempts {
+				if attempt > 0 {
+					time.Sleep(250 * time.Millisecond)
+					catalog = fx.statsCatalog()
+				}
+				status, body, err := s.matrixDo(s.T().Context(), p, probe)
+				s.Require().NoErrorf(err, "%s as %s", key, p.Name)
+				s.Require().Equalf(http.StatusOK, status, "%s as %s: %s", key, p.Name, truncate(body, 300))
+				var got matrixStats
+				s.Require().NoError(json.Unmarshal([]byte(body), &got), body)
+				if diffs = catalog.want(p).diff(got); len(diffs) == 0 {
+					break
+				}
+			}
+			s.Emptyf(diffs, "%s as %s: numbers that differ from the catalog over the namespaces it reads", key, p.Name)
+			if p.clusterRole() == "" {
+				own, all := catalog.want(p), catalog.want(admin)
+				s.Positivef(own.RecentRuns, "%s: the fixture leaves %s no recent run", key, p.Name)
+				s.Lessf(own.RecentRuns, all.RecentRuns, "%s: no foreign run exists for %s, so a leak would not show", key, p.Name)
+				s.Lessf(own.Total, all.Total, "%s: no foreign job exists for %s, so a leak would not show", key, p.Name)
+			}
 		}
 	}
 }
@@ -884,6 +1150,53 @@ var matrixWriteActions = map[string]string{
 	"DELETE /v1/system/nodes/:id":           auth.ActionClusterMemberRemove,
 }
 
+// matrixControllerWrite is the row a handler, not the middleware, audits a
+// successful write with. Resource is the id that row must carry.
+type matrixControllerWrite struct {
+	Action   string
+	Resource func(matrixResult) string
+}
+
+// matrixControllerWrites are the writes on the matrix's routes their
+// controllers audit themselves (api/rest/controller/auth key_*.go, policy.go
+// and sso.go, api/rest/controller/notification). The rest of those routes'
+// probes stop before the audit: an unknown user or connection is a 404.
+var matrixControllerWrites = map[string]matrixControllerWrite{
+	"POST /v1/auth/keys":                    {auth.ActionKeyCreate, resourceInBody},
+	"POST /v1/auth/keys/:id/revoke":         {auth.ActionKeyRevoke, resourceInPath},
+	"POST /v1/auth/keys/:id/rotate":         {auth.ActionKeyRotate, resourceInPath}, // the old key, not its replacement
+	"POST /v1/notifications/channels":       {auth.ActionNotificationChannelCreate, resourceInBody},
+	"PATCH /v1/notifications/channels/:id":  {auth.ActionNotificationChannelUpdate, resourceInPath},
+	"DELETE /v1/notifications/channels/:id": {auth.ActionNotificationChannelDelete, resourceInPath},
+	"POST /v1/notifications/policies":       {auth.ActionNotificationPolicyCreate, resourceInBody},
+	"PATCH /v1/notifications/policies/:id":  {auth.ActionNotificationPolicyUpdate, resourceInPath},
+	"DELETE /v1/notifications/policies/:id": {auth.ActionNotificationPolicyDelete, resourceInPath},
+	"POST /v1/auth/policy/reload":           {auth.ActionPolicyReloaded, resourceInBody},
+	// An API key's logout is an audited no-op. Its row names the caller's own
+	// key or session, an id the matrix does not hold: auditRowTuple drops it.
+	"POST /auth/logout": {auth.ActionAuthLogout, func(matrixResult) string { return "" }},
+}
+
+// resourceInPath is the id the request's path carries in the route's ":id".
+func resourceInPath(r matrixResult) string {
+	_, route, _ := strings.Cut(r.key, " ")
+	return strings.Split(r.probe.Path, "/")[slices.Index(strings.Split(route, "/"), ":id")]
+}
+
+// resourceInBody is the id the response returned: a created object's, a
+// created key's, or the policy revision a reload served.
+func resourceInBody(r matrixResult) string {
+	var out struct {
+		ID       string `json:"id"`
+		Revision string `json:"revision"`
+		APIKey   struct {
+			ID string `json:"id"`
+		} `json:"api_key"`
+	}
+	_ = json.Unmarshal([]byte(r.body), &out)
+	return cmp.Or(out.ID, out.APIKey.ID, out.Revision)
+}
+
 // matrixAuditSnapshot records the audit row ids each audited principal
 // already has, so pre-existing rows are never matched.
 func (s *IntegrationTestSuite) matrixAuditSnapshot(callers []matrixPrincipal) map[string]map[string]bool {
@@ -912,7 +1225,7 @@ func auditRowTuple(row auditRow) matrixAuditTuple {
 		}
 		_ = json.Unmarshal(row.Metadata, &meta)
 		t.PolicyKey = meta.PolicyKey
-	} else {
+	} else if row.Action != auth.ActionAuthLogout {
 		t.Resource = row.ResourceID
 	}
 	return t
@@ -921,8 +1234,10 @@ func auditRowTuple(row auditRow) matrixAuditTuple {
 // assertMatrixAudit requires, per audited principal, that its new auth.denied
 // rows are exactly the denials the oracle predicted (the multiset of
 // actor/action/policy_key/namespace), and that every admitted, audited write
-// left its success row with the decision's namespace. Each audit row id is
-// counted once; rows that existed before the matrix ran are ignored.
+// left its success row with the decision's namespace, whether the middleware
+// wrote it (matrixWriteActions) or a controller did (matrixControllerWrites,
+// which also fixes the row's resource id). Each audit row id is counted once;
+// rows that existed before the matrix ran are ignored.
 func (s *IntegrationTestSuite) assertMatrixAudit(rows map[string]matrixRow, callers []matrixPrincipal, results []matrixResult, before map[string]map[string]bool) {
 	s.T().Helper()
 	wantDenied := map[string]map[matrixAuditTuple]int{}
@@ -939,16 +1254,22 @@ func (s *IntegrationTestSuite) assertMatrixAudit(rows map[string]matrixRow, call
 			wantDenied[actor][matrixAuditTuple{Actor: actor, Action: auth.ActionAuthDenied, PolicyKey: r.key, Namespace: r.want.AuditNS}]++
 			continue
 		}
-		action, ok := matrixWriteActions[r.key]
-		if !ok || r.status < 200 || r.status >= 300 {
+		if r.status < 200 || r.status >= 300 {
+			continue
+		}
+		tuple := matrixAuditTuple{Actor: actor, Namespace: classAuditNamespace(rows[r.key].Class, r.probe.Needs)}
+		if action, ok := matrixWriteActions[r.key]; ok {
+			tuple.Action = action
+			if r.principal.JobScope != nil && len(r.probe.Aliases) > 0 {
+				tuple.Resource = r.probe.Aliases[0]
+			}
+		} else if write, ok := matrixControllerWrites[r.key]; ok {
+			tuple.Action, tuple.Resource = write.Action, write.Resource(r)
+		} else {
 			continue
 		}
 		if wantWrites[actor] == nil {
 			wantWrites[actor] = map[matrixAuditTuple]int{}
-		}
-		tuple := matrixAuditTuple{Actor: actor, Action: action, Namespace: classAuditNamespace(rows[r.key].Class, r.probe.Needs)}
-		if r.principal.JobScope != nil && len(r.probe.Aliases) > 0 {
-			tuple.Resource = r.probe.Aliases[0]
 		}
 		wantWrites[actor][tuple]++
 	}

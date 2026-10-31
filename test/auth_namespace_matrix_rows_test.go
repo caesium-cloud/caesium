@@ -342,6 +342,8 @@ func namespaceMatrixRows() map[string]matrixRow {
 			d, m, f := fx.n(nsDefault), fx.n(nsMarketing), fx.n(nsFinance)
 			return []matrixProbe{probe("ingested", "/v1/events/ingested?limit=500", http.StatusOK).marks(mark(d.EventID, nsDefault), mark(m.EventID, nsMarketing), mark(f.EventID, nsFinance))}
 		}},
+		// The numbers, which name no job, are assertMatrixStats's; these
+		// markers cover what the stats do name.
 		"GET /v1/stats": {auth.RouteClassCollection, rV, surfaceCore, func(fx *namespaceMatrixFixture) []matrixProbe {
 			f := fx.n(nsFinance)
 			return []matrixProbe{probe("stats", "/v1/stats", http.StatusOK).marks(append(fx.failMarks(), optMark(f.alias(), nsFinance))...)}
