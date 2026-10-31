@@ -191,6 +191,48 @@ def validate_run(run, expected):
     return run['workflow_id']
 
 
+def validate_job(job, expected):
+    require(isinstance(job, dict) and positive(job.get('id'))
+            and matches_fields(job, {key: expected[key] for key in ('run_id', 'run_attempt', 'head_sha')}),
+            'producer job source is foreign')
+    status = job.get('status')
+    if status == 'completed':
+        require(job.get('conclusion') == 'success', 'producer job did not succeed: ' + str(job.get('name')))
+        start, end = timestamp(job.get('started_at')), timestamp(job.get('completed_at'))
+        require(start <= end, 'producer job time window is invalid')
+    else:
+        require(status in ('queued', 'in_progress', 'waiting', 'pending'), 'producer job status is invalid')
+    return status
+
+
+def read_jobs(client, expected):
+    prefix = f"repos/{expected['repository']}/actions"
+    rows = client.pages(prefix + f"/runs/{expected['run_id']}/attempts/{expected['run_attempt']}/jobs", 'jobs')
+    for name in BARRIERS:
+        indices = [index for index, row in enumerate(rows) if row.get('name') == name]
+        require(len(indices) <= 1, 'producer job is ambiguous: ' + name)
+        if not indices:
+            continue
+        index = indices[0]
+        listed = rows[index]
+        status = validate_job(listed, expected)
+        # The jobs-list API can omit steps even after completion. Read the
+        # exact job on every poll and final seal; never infer publication from
+        # an empty list or carry old steps into a newer observation.
+        detail = client.get(prefix + f"/jobs/{listed['id']}")
+        require(matches_fields(detail, dict(id=listed['id'], name=name)),
+                'producer job detail identity is foreign')
+        current = validate_job(detail, expected)
+        if status in ('in_progress', 'completed'):
+            require(current in ('in_progress', 'completed'), 'producer job execution changed')
+            require(detail.get('started_at') == listed.get('started_at'), 'producer job start changed')
+        if status == 'completed':
+            require(current == 'completed' and detail.get('completed_at') == listed.get('completed_at'),
+                    'completed producer job changed')
+        rows[index] = detail
+    return select_jobs(rows, expected)
+
+
 def select_jobs(rows, expected):
     selected, ready, finished = {}, True, True
     for name in PRODUCERS:
@@ -203,15 +245,8 @@ def select_jobs(rows, expected):
             ready, finished = False, False
             continue
         job = matches[0]
-        require(matches_fields(job, {key: expected[key] for key in ('run_id', 'run_attempt', 'head_sha')}),
-                'producer job source is foreign')
-        status = job.get('status')
-        if status == 'completed':
-            require(job.get('conclusion') == 'success', 'producer job did not succeed: ' + name)
-            start, end = timestamp(job.get('started_at')), timestamp(job.get('completed_at'))
-            require(start <= end, 'producer job time window is invalid')
-        else:
-            require(status in ('queued', 'in_progress', 'waiting', 'pending'), 'producer job status is invalid')
+        status = validate_job(job, expected)
+        if status != 'completed':
             finished = False
             if status != 'in_progress':
                 ready = False
@@ -354,7 +389,7 @@ def handoff(client, expected, output, invocation, ready_fd):
         observed = validate_run(run, expected)
         require(workflow_id in (None, observed), 'producer workflow changed')
         workflow_id = observed
-        jobs, ready, finished = select_jobs(client.pages(prefix + f"/attempts/{expected['run_attempt']}/jobs", 'jobs'), expected)
+        jobs, ready, finished = read_jobs(client, expected)
         observe(jobs)
         if ready:
             break
@@ -402,13 +437,13 @@ def handoff(client, expected, output, invocation, ready_fd):
         time.sleep(min(5, client.remaining()))
         require(validate_run(client.get(prefix + f"/attempts/{expected['run_attempt']}"), expected) == workflow_id,
                 'producer workflow changed')
-        jobs, ready, finished = select_jobs(client.pages(prefix + f"/attempts/{expected['run_attempt']}/jobs", 'jobs'), expected)
+        jobs, ready, finished = read_jobs(client, expected)
         require(ready, 'producer publication readiness changed')
         observe(jobs)
     # Seal READY against fresh metadata. A deleted/replaced artifact, expired
     # retention, new attempt or changed producer cannot qualify the final lane.
     require(validate_run(client.get(prefix), expected) == workflow_id, 'producer workflow changed at final seal')
-    jobs, ready, finished = select_jobs(client.pages(prefix + f"/attempts/{expected['run_attempt']}/jobs", 'jobs'), expected)
+    jobs, ready, finished = read_jobs(client, expected)
     require(ready and finished, 'producer jobs changed at final seal')
     observe(jobs)
     sealed = select_artifacts(client.pages(prefix + '/artifacts', 'artifacts'), jobs, expected)
