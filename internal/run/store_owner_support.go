@@ -39,10 +39,12 @@ func (s *Store) ReclaimOwnerExpiredClaims(runID uuid.UUID, ownerGeneration int64
 		return nil, fmt.Errorf("run: reclaim owner expired claims: nil store")
 	}
 	var reset []models.TaskRun
+	var recovered []RecoveredRuntime
 	var pendingEvents []event.Event
 	var counts dbWriteCounts
 	err := withStoreBusyRetry(func() error {
 		reset = nil
+		recovered = nil
 		counts.reset()
 		attemptEvents := make([]event.Event, 0, 4)
 		txErr := s.db.Transaction(func(tx *gorm.DB) error {
@@ -55,6 +57,9 @@ func (s *Store) ReclaimOwnerExpiredClaims(runID uuid.UUID, ownerGeneration int64
 			var expired []models.TaskRun
 			if err := tx.Where(where, args...).Find(&expired).Error; err != nil {
 				return err
+			}
+			if s.afterRecoveryRowsRead != nil {
+				s.afterRecoveryRowsRead(tx)
 			}
 			if len(expired) == 0 {
 				return nil
@@ -97,6 +102,9 @@ func (s *Store) ReclaimOwnerExpiredClaims(runID uuid.UUID, ownerGeneration int64
 			if err := clearAttemptDatasetMetricsForTaskRunsTx(tx, reclaimed); err != nil {
 				return err
 			}
+			// The previous attempts' pods, read before the reset cleared their
+			// runtime ids and limited to the rows the guarded UPDATE matched.
+			recovered = recoveredRuntimesFrom(expired, uuidSet(reclaimed))
 
 			if s.eventStore != nil {
 				for i := range expired {
@@ -120,5 +128,6 @@ func (s *Store) ReclaimOwnerExpiredClaims(runID uuid.UUID, ownerGeneration int64
 	}
 	counts.commit()
 	s.publishEvents(pendingEvents...)
+	StopRecoveredRuntimes("owner_expired_claim", recovered)
 	return reset, nil
 }

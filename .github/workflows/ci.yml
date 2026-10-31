@@ -588,6 +588,8 @@ jobs:
         run: helm lint ./helm/caesium
       - name: Helm template
         run: helm template caesium ./helm/caesium --values ./helm/caesium/ci/test-values.yaml
+      - name: Helm job-namespace RBAC and policy mount
+        run: bash scripts/check-helm-job-namespaces.sh
 
   unit-test:
     needs: [changes, builder, reagents]
@@ -1578,6 +1580,17 @@ jobs:
             -w /bld/caesium \
             caesiumcloud/caesium-integration:${{ env.IMAGE_TAG }}-amd64 \
             sh scripts/integration-test.sh
+      # identity-and-access C3: a second release (`c3`, namespace caesium-c3)
+      # serving a policy that maps `kubeteam` to caesium-mapped, with the
+      # chart's per-namespace RBAC; TestKubernetesMappedNamespace proves
+      # placement and recovery across a graceful restart and a crash. The
+      # policy-free release above keeps the lane's no-policy-file proof.
+      - name: Mapped-namespace isolation (shard 3)
+        if: matrix.shard == 3
+        run: |
+          set -euo pipefail
+          kill "$(cat /tmp/port-forward.pid)" 2>/dev/null || true
+          bash scripts/kind-mapped-namespace.sh "${{ env.IMAGE_TAG }}-amd64"
       - name: Download static host CLI for cache identity regression
         if: matrix.shard == 1
         uses: actions/download-artifact@v8

@@ -1199,7 +1199,7 @@ resolver refuses references outside the namespace's allow-list at lint and at ru
       derived from the policy size limit; `CAESIUM_WORKER_ISOLATION_V1_DISABLED`
       withdraws the capability; live proof is the three-node
       `integration-test-isolation` lane.)
-- [ ] C3. Helm multi-namespace RBAC and the kind-lane proof: `jobNamespaces: []` in
+- [x] C3. Helm multi-namespace RBAC and the kind-lane proof: `jobNamespaces: []` in
       values renders a `Role` + `RoleBinding` (pods, pods/log, secrets get,
       persistentvolumeclaims) per namespace; the kind CI values map one namespace and
       the k8s integration scenario asserts a job in it lands its pod, PVC and a
@@ -1208,6 +1208,15 @@ resolver refuses references outside the namespace's allow-list at lint and at ru
       `helm/caesium/templates/rolebinding.yaml`, `helm/caesium/ci/test-values-k8s.yaml`,
       `test/` (k8s lane scenario), `docs/kubernetes-deployment.md`.
       Depends on: C1 + C2.
+      (W8-γ: the mapped release is a second release `c3` in shard 3 from
+      `ci/test-values-k8s-mapped.yaml`, so the suite's release stays
+      policy-free; `accessPolicy.existingConfigMap` mounts the policy
+      read-only; the RBAC renders with the engine disabled too. Recovery now
+      stops the previous attempt's pod through its qualified runtime id on
+      every distributed re-pend path (worker reclaim, owner reap, owner
+      takeover); a local resume stops nothing because a local attempt has no
+      claim to fence it. `TestKubernetesMappedNamespace` proves placement and
+      recovery after a graceful restart and a crash.)
 - [x] C4. Scoped secret resolution: `secret.ScopedResolver{inner, namespace, rules}`
       **canonicalises before matching** — the Kubernetes resolver accepts a
       namespace in the path and `?namespace=`, `?name=`, `?key=` overrides

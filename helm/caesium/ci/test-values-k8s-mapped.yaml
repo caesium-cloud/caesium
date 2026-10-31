@@ -1,0 +1,60 @@
+# The kind lane's mapped-namespace release (identity-and-access C3), layered
+# over test-values-k8s.yaml and installed as release `c3` in namespace
+# caesium-c3 by the helm-integration-test mapped phase. It serves
+# test/testdata/policy/kubernetes-mapped.yaml from the ConfigMap
+# `access-policy`, renders RBAC for caesium-mapped, keeps the database on a PVC
+# so a pod delete is a real restart, and runs one distributed node (owner and
+# worker) so restart recovery takes the lease paths.
+#
+# config.extraEnv REPLACES the base file's list (Helm does not merge lists): the
+# phase runs only TestKubernetesMappedNamespace, which needs none of the suite's
+# feature flags.
+
+config:
+  extraEnv:
+    - name: CAESIUM_EXECUTION_MODE
+      value: distributed
+    - name: CAESIUM_RUN_OWNER_ENABLED
+      value: "true"
+    - name: CAESIUM_WORKER_ENABLED
+      value: "true"
+    - name: CAESIUM_INTERNAL_WAKEUP_TOKEN
+      value: integration-mapped-internal-token
+    - name: CAESIUM_INTERNAL_PORT
+      value: "8443"
+    - name: CAESIUM_RUN_LEASE_TTL
+      value: 30s
+    - name: CAESIUM_RUN_OWNER_DISPATCH_INTERVAL
+      value: 500ms
+    # A dispatched task's first claim lease is this deadline, and the worker
+    # renews it only near expiry, so it bounds how long a dead attempt's claim
+    # holds up recovery. It must stay above 30s: the worker measures what is
+    # left of the deadline on arrival, and anything under 30s (so a 30s setting
+    # too) falls back to a 5m claim, which outlasts the scenario's waits. The
+    # 30s CAESIUM_WORKER_LEASE_TTL below renews a live attempt in time.
+    - name: CAESIUM_RUN_OWNER_DISPATCH_DEADLINE
+      value: 45s
+    - name: CAESIUM_WORKER_POOL_SIZE
+      value: "2"
+    - name: CAESIUM_WORKER_POLL_INTERVAL
+      value: 500ms
+    - name: CAESIUM_WORKER_RECLAIM_INTERVAL
+      value: 500ms
+    - name: CAESIUM_WORKER_LEASE_TTL
+      value: 30s
+    # secret://k8s needs the Kubernetes secret provider enabled.
+    - name: CAESIUM_JOBDEF_SECRETS_ENABLE_KUBERNETES
+      value: "true"
+    - name: CAESIUM_AUTH_POLICY_RELOAD_INTERVAL
+      value: 2s
+
+jobNamespaces:
+  - caesium-mapped
+
+accessPolicy:
+  existingConfigMap: access-policy
+  key: policy.yaml
+
+persistence:
+  enabled: true
+  size: 1Gi

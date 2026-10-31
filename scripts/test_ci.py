@@ -617,6 +617,43 @@ class WorkflowTests(unittest.TestCase):
         self.assertIn(":/tmp/deadline-kubeconfig:ro", runner)
         self.assertIn('tee "$deadline_log"', runner)
 
+    def test_mapped_namespace_phase_follows_the_full_suite_on_its_own_release(self):
+        # identity-and-access C3: shard 3 installs a second, policy-serving
+        # release; the suite's release stays policy-free (B1 compatibility).
+        steps = JOBS["helm-integration-test"]["steps"]
+        phase_index, phase = next((i, step) for i, step in enumerate(steps)
+                                  if step.get("name") == "Mapped-namespace isolation (shard 3)")
+        full_index = next(i for i, step in enumerate(steps)
+                          if "CAESIUM_TEST_SHARD_INDEX=" in step.get("run", ""))
+        self.assertLess(full_index, phase_index)
+        self.assertEqual(phase["if"], "matrix.shard == 3")
+        self.assertFalse(phase.get("continue-on-error", False))
+        self.assertIn('bash scripts/kind-mapped-namespace.sh "${{ env.IMAGE_TAG }}-amd64"', phase["run"])
+        script = (ROOT / "scripts/kind-mapped-namespace.sh").read_text()
+        self.assertIn("set -euo pipefail", script)
+        self.assertIn('--set image.tag="$tag"', script)
+        self.assertIn('CAESIUM_TEST_EXPECTED_IMAGE="caesiumcloud/caesium:$tag"', script)
+        self.assertIn("-testify.m '^TestKubernetesMappedNamespace$'", script)
+        self.assertIn("--- PASS: TestIntegrationTestSuite/TestKubernetesMappedNamespace \\(", script)
+        self.assertIn("--- SKIP: TestIntegrationTestSuite/TestKubernetesMappedNamespace", script)
+        base = yaml.safe_load((ROOT / "helm/caesium/ci/test-values-k8s.yaml").read_text())
+        self.assertNotIn("jobNamespaces", base)
+        self.assertNotIn("accessPolicy", base)
+        self.assertNotIn("CAESIUM_AUTH_POLICY_FILE", {item["name"] for item in base["config"]["extraEnv"]})
+        mapped = yaml.safe_load((ROOT / "helm/caesium/ci/test-values-k8s-mapped.yaml").read_text())
+        self.assertEqual(mapped["jobNamespaces"], ["caesium-mapped"])
+        self.assertEqual(mapped["accessPolicy"]["existingConfigMap"], "access-policy")
+        self.assertTrue(mapped["persistence"]["enabled"])
+        env = {item["name"]: item["value"] for item in mapped["config"]["extraEnv"]}
+        self.assertEqual(env["CAESIUM_JOBDEF_SECRETS_ENABLE_KUBERNETES"], "true")
+        self.assertEqual(env["CAESIUM_EXECUTION_MODE"], "distributed")
+        # Under 30s left on arrival, the worker falls back to a 5m claim
+        # (internal/dispatch/dispatch.go), which outlasts the scenario's waits.
+        self.assertRegex(env["CAESIUM_RUN_OWNER_DISPATCH_DEADLINE"], r"^\d+s$")
+        self.assertGreater(int(env["CAESIUM_RUN_OWNER_DISPATCH_DEADLINE"][:-1]), 30)
+        lint = "\n".join(step.get("run", "") for step in JOBS["helm-lint"]["steps"])
+        self.assertIn("bash scripts/check-helm-job-namespaces.sh", lint)
+
     def test_distributed_deadline_witness_selects_an_ipv4_gateway(self):
         phase = next(step for step in JOBS["helm-integration-test"]["steps"]
                      if step.get("name") == "Distributed Kubernetes deadline regression")
