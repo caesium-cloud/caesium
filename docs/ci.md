@@ -672,7 +672,7 @@ browser evidence path, not later multi-node fault coverage.
 
 The only lane that exercises SSO end to end against a real identity provider.
 It is merge-blocking from the start: the Go scenarios are the `keycloak` leg of
-the `integration` matrix, and the browser smoke is the `ui-e2e-keycloak` job;
+the `integration` matrix, and the browser journeys are the `ui-e2e-keycloak` job;
 both sit under `ci-ok` and in `publish.needs`.
 
 - **Topology.** `just integration-up-keycloak` starts
@@ -703,15 +703,24 @@ both sit under `ci-ok` and in `publish.needs`.
   denied with `no_binding` and no session (dave's bound email is unverified),
   erin granted by her verified email. `requireKeycloakLane` fails rather than
   skips on the lane, and the recipe fails below
-  `keycloak_integration_min_pass` Keycloak passes. `ui/e2e/keycloak.spec.ts`
-  signs the admin in through Keycloak's login page and lands in the Console.
+  `keycloak_integration_min_pass` Keycloak passes. The Playwright `keycloak`
+  project (`ui/e2e/keycloak*.spec.ts`, helpers in `ui/e2e/helpers/auth.ts`)
+  signs each identity in through Keycloak's real login page in its own browser
+  context: admin sees both namespaces, chips and the switcher; bob sees only
+  `marketing` and a finance deep link renders `InsufficientAccess`; carol is
+  refused with `no_binding`; the Access page shows grants for admin and bob and
+  the users list for admin only; and `keycloak-quota.spec.ts` starts two real
+  `marketing` jobs as bob (quota 1) and asserts the "Held by namespace quota"
+  label from the live queue response. Jobs are seeded through the real API as
+  the SSO admin (cookie session plus CSRF token) in a throwaway context, so the
+  lane exports no admin key to the browser.
 - **Failure handling.** Each recipe installs its cleanup trap before the first
   container starts. On failure it prints the Caesium and Keycloak logs through
   `scripts/lane-logs.sh`, which redacts `csk_` and `css_` tokens whether or
   not the bootstrap key was captured yet, then removes every lane container
   and exits with the original status.
 - **Run it locally** (under the host lane lock): `just integration-test-keycloak`
-  for the Go scenarios, `just ui-e2e-keycloak` for the browser smoke (host
+  for the Go scenarios, `just ui-e2e-keycloak` for the browser journeys (host
   Node and Playwright). `just integration-up-keycloak` leaves the lane running
   (admin console `http://127.0.0.1:8180/admin/`, fixture-only credentials in
   the justfile); `just integration-down-keycloak` removes it.

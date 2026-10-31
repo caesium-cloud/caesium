@@ -1,4 +1,7 @@
-import { expect, type APIRequestContext, type Page, type Response } from "@playwright/test";
+import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import { expect, type APIRequestContext, type Browser, type BrowserContext, type Page, type Response } from "@playwright/test";
 
 export type AuthLaneRole = "viewer" | "runner" | "scoped";
 
@@ -209,4 +212,119 @@ function envString(name: string): string | null {
 function stringField(body: object, key: string): string | undefined {
   const value = (body as Record<string, unknown>)[key];
   return typeof value === "string" && value.trim() !== "" ? value : undefined;
+}
+
+// ---------------------------------------------------------------------------
+// Keycloak lane helpers (identity-and-access G2). Used only by the `keycloak`
+// Playwright project, against `just integration-up-keycloak`.
+// ---------------------------------------------------------------------------
+
+const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
+const realmFile = path.join(repoRoot, "test/testdata/keycloak/caesium-realm.json");
+export const keycloakRealmURL = "http://127.0.0.1:8180/realms/caesium/";
+
+export type KeycloakUser = "admin@example.com" | "bob@example.com" | "carol@example.com";
+
+type RealmUser = { username: string; credentials?: { type: string; value: string }[] };
+
+/** The realm fixture is the one source of the lane users' passwords. */
+export function realmPassword(username: string): string {
+  const realm = JSON.parse(fs.readFileSync(realmFile, "utf8")) as { users: RealmUser[] };
+  const password = realm.users
+    .find((user) => user.username === username)
+    ?.credentials?.find((credential) => credential.type === "password")?.value;
+  if (!password) {
+    throw new Error(`${username} has no password in ${realmFile}`);
+  }
+  return password;
+}
+
+/**
+ * Drive Keycloak's real login page for `username`: from the Console login
+ * screen, "Sign in with OIDC", the realm's form, then back to the Console
+ * origin (the callback's redirect). It does not assert what the Console shows
+ * afterwards; the caller does (carol is refused there).
+ */
+export async function ssoLogin(page: Page, username: KeycloakUser, baseURL?: string): Promise<void> {
+  const consoleOrigin = new URL(baseURL ?? "http://127.0.0.1:8080").origin;
+  await page.goto("/");
+  await page.getByRole("button", { name: "Sign in with OIDC" }).click();
+  await page.waitForURL((url) => url.href.startsWith(keycloakRealmURL));
+  await page.locator("#username").fill(username);
+  await page.locator("#password").fill(realmPassword(username));
+  await page.locator("#kc-login").click();
+  await page.waitForURL((url) => url.origin === consoleOrigin);
+}
+
+/** The cookie session's CSRF header, read from GET /auth/whoami (the Console does the same). */
+export async function sessionCsrfHeaders(context: BrowserContext): Promise<Record<string, string>> {
+  const whoami = await context.request.get("/auth/whoami");
+  if (!whoami.ok()) {
+    throw new Error(`whoami for the cookie session failed: ${whoami.status()}`);
+  }
+  const token = ((await whoami.json()) as { csrf_token?: unknown }).csrf_token;
+  if (typeof token !== "string" || token === "") {
+    throw new Error("whoami did not return a csrf_token for the cookie session");
+  }
+  return { "X-CSRF-Token": token };
+}
+
+export type KeycloakJobDefinition = {
+  alias: string;
+  namespace: string;
+  command: string;
+};
+
+/**
+ * Apply jobs as the lane's SSO admin, in a THROWAWAY browser context that no
+ * asserted identity shares (a second login on one context keeps the first
+ * cookie). Returns alias -> job id for every applied alias and every alias in
+ * `lookupAliases`. A mutating request with a wrong CSRF token is a 403, which
+ * counts against the auth-failure limiter, so the token is read fresh from
+ * whoami (an unauthenticated whoami 401 does not count).
+ */
+export async function seedAsKeycloakAdmin(
+  browser: Browser,
+  baseURL: string | undefined,
+  definitions: KeycloakJobDefinition[],
+  lookupAliases: string[] = [],
+): Promise<Record<string, string>> {
+  const context = await browser.newContext({ baseURL });
+  try {
+    const page = await context.newPage();
+    await ssoLogin(page, "admin@example.com", baseURL);
+    if (definitions.length > 0) {
+      const apply = await context.request.post("/v1/jobdefs/apply", {
+        headers: { ...(await sessionCsrfHeaders(context)), "Content-Type": "application/json" },
+        data: {
+          definitions: definitions.map((def) => ({
+            apiVersion: "v1",
+            kind: "Job",
+            metadata: { alias: def.alias, namespace: def.namespace },
+            trigger: { type: "cron", configuration: { cron: "0 0 1 1 *", timezone: "UTC" } },
+            steps: [{ name: "only", engine: "docker", image: "alpine:3.23", command: ["sh", "-c", def.command] }],
+          })),
+        },
+      });
+      if (!apply.ok()) {
+        throw new Error(`failed to apply seeded jobs: ${apply.status()} ${await apply.text()}`);
+      }
+    }
+    const list = await context.request.get("/v1/jobs");
+    if (!list.ok()) {
+      throw new Error(`failed to list jobs as the SSO admin: ${list.status()}`);
+    }
+    const jobs = (await list.json()) as Array<{ id: string; alias: string }>;
+    const ids: Record<string, string> = {};
+    for (const alias of [...definitions.map((def) => def.alias), ...lookupAliases]) {
+      const found = jobs.find((job) => job.alias === alias);
+      if (!found) {
+        throw new Error(`job ${alias} not found after seeding`);
+      }
+      ids[alias] = found.id;
+    }
+    return ids;
+  } finally {
+    await context.close();
+  }
 }
