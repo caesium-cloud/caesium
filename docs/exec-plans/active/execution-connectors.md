@@ -1,6 +1,6 @@
 # Execution Connectors — Temporal Monitoring and Operator Actions
 
-Last updated: 2026-10-21
+Last updated: 2026-10-31
 
 Caesium should let an operator follow a data process across Temporal workflows
 and Caesium jobs, understand the data consequence, and perform a declared
@@ -247,7 +247,7 @@ write. Limits are validated configuration with conservative hard ceilings fixed
 by A1 before dependent work. C1/F3 measure unchanged-poll write count, catalog
 cardinality and closed-workflow Query dispatch count through the live surface.
 
-## Progress (as of 2026-10-21)
+## Progress (as of 2026-10-31)
 
 W1 through W4 have merged, including the W4 dashboard in PR #635.
 W5 C1 is merged in PR #644; dashboard PR #643 records its verified acceptance.
@@ -256,7 +256,8 @@ verified acceptance.
 W7 E2 is merged in PR #658; this dashboard records its verified acceptance.
 W8 E3 is merged in PR #662; this dashboard records its verified acceptance.
 W9 F2 is merged in PR #664; this dashboard records its verified acceptance.
-W10 records F3 acceptance below; F4 and N remain later work. An open PR or a
+W10 records F3 acceptance below; W11/W12 record promotion prerequisites.
+F4 and N remain later work. An open PR or a
 component-only pass is not completion. The SHAs below are the squash merges read from GitHub.
 
 The orchestrator owns this dashboard: PR URLs, exact tested heads/merge SHAs,
@@ -835,6 +836,24 @@ Resume unfinished waves. Do not archive this plan while later items remain.
   selected master runs have strict candidate reports and meet the budget, followed
   by the promoted PR and merge-group proof. N1 remains dependent on F4.
 
+### W12 — Further promotion prerequisites (F4 remains open)
+
+- [PR #677](https://github.com/caesium-cloud/caesium/pull/677) merged connector
+  CI repairs as `59c19937e0e35e493dfc25d4028180e8100a93c8`.
+- [PR #692](https://github.com/caesium-cloud/caesium/pull/692) merged overlapping
+  connector preparation and CI setup repairs as `af1805e348f4065daa8f2f3ed314ddb341df4e9d`.
+- [PR #695](https://github.com/caesium-cloud/caesium/pull/695) merged bounded LDAP
+  fixture startup/readiness as `cb77e8a3b53af20309b7b04ca24bcd463d63eccc`.
+- [PR #694](https://github.com/caesium-cloud/caesium/pull/694) merged lifecycle
+  replay fencing and isolated CI fixtures as `43ef392810e911b619af4cf222b78f650edf03e0`.
+- **Pending:** [PR #696](https://github.com/caesium-cloud/caesium/pull/696), head
+  `e4f5902f13149e1ea4796e137ba95acf88a512b8`, repairs exact producer observations
+  and the browser's wait for workflow publication. It is not merged; its PR
+  description retains the scoped verification and timing boundary.
+- **Acceptance boundary:** The lane remains advisory. F4 still needs ten
+  qualifying selected master runs and promoted PR/merge-group proof. These
+  prerequisite deliveries do not satisfy F4; N1 remains dependent on F4.
+
 ### Stream Status
 
 | Stream | Scope | Priority | Status |
@@ -844,7 +863,7 @@ Resume unfinished waves. Do not archive this plan while later items remain.
 | C | Authenticated REST and composition (2 items) | P0 | Shipped (C1, C2) |
 | D | Verified correlation and action durability (2 items) | P0 | Shipped (D1, D2) |
 | E | Console monitoring, data links and approval (3 items) | P0 | Shipped (E1, E2, E3) |
-| F | Real fixture, CI, qualification and promotion (4 items) | P0 | F1/F2 shipped; F3 accepted in W10; W11 fixes merged, F4 qualification pending |
+| F | Real fixture, CI, qualification and promotion (4 items) | P0 | F1/F2 shipped; F3 accepted in W10; W11/W12 prerequisites merged, further repair open, F4 qualification pending |
 | N | Operator guidance and reconciliation (1 item) | P0 | Not started |
 
 ## Streams
