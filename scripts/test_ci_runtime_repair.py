@@ -518,6 +518,7 @@ class RemediationWorkflowTests(unittest.TestCase):
     def test_native_setup_precedes_all_image_operations_and_consumer_smoke(self):
         jobs = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text())["jobs"]
         for name, action in [("images", "bake-images"), ("images-arm64", "bake-images"),
+                             ("robustness-image", "bake-images"),
                              ("integration", "run-integration"), ("integration-arm64", "run-integration")]:
             steps = jobs[name]["steps"]
             setups = [i for i, step in enumerate(steps) if step.get("run") == "python3 scripts/setup-ci-docker.py"]

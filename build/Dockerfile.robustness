@@ -6,8 +6,8 @@ ARG CAESIUM_IMAGE=caesiumcloud/caesium:latest
 FROM ${BUILDER_IMAGE} AS compile
 WORKDIR /bld/caesium
 COPY . .
+# Keep the builder's prefetched modules; cache only compilation outputs.
 RUN --mount=type=cache,target=/root/.cache/go-build \
-    --mount=type=cache,target=/go/pkg/mod \
     mkdir -p ui/dist /out && touch ui/dist/index.html && \
     CGO_ENABLED=0 go test -tags=integration -c ./test/robustness -o /out/robustness.test
 RUN if ldd /out/robustness.test >/tmp/ldd.out 2>/dev/null; then \
@@ -49,7 +49,6 @@ FROM ${BUILDER_IMAGE} AS instrumented-compile
 WORKDIR /bld/caesium
 COPY . .
 RUN --mount=type=cache,target=/root/.cache/go-build \
-    --mount=type=cache,target=/go/pkg/mod \
     mkdir -p ui/dist /out && touch ui/dist/index.html && \
     go build -tags testfault -trimpath -ldflags="-s -w" -o /out/caesium ./
 # Fail the stage if the tag did not take effect, so an instrumented deployment

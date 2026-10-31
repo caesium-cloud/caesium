@@ -76,8 +76,9 @@ closed. `scripts/test_ci.py` verifies these selectors against the workflow.
 Jobs `ci-ok` evaluates (several may skip on a narrow PR):
 
 - `changes` and `ci-config` (workflow lint and CI regression checks)
-- `builder` / `builder-arm64` / `images` / `images-arm64` / `reagents`
-  (producers, including both native static CLI smoke tests)
+- `builder` / `builder-arm64` / `images` / `robustness-image` / `images-arm64` / `reagents`
+  (producers, including both native static CLI smoke tests; `robustness-image`
+  is `early-evidence`'s runner, with the same `images` selector as `images`)
 - `lint`, `unit-test`, `unit-test-arm64`
 - `ui-test`, `ui-e2e`, `ui-e2e-auth`, `ui-e2e-keycloak`
 - `integration` (all three Docker shards, the agent-auth lane and the Keycloak
@@ -353,6 +354,17 @@ reuses the loaded product images. A missing product or explicitly selected
 integration runner fails instead of rebuilding. Local runs compile current
 sources unless a precompiled runner is explicitly selected.
 
+Static CLI compilation and static-link checks run in `cli-static-build`;
+the `cli-static` target exports only `/cli/caesium` in a scratch image. CI
+extracts that executable at the same path and runs the native bare-host smoke
+test before publishing it.
+
+The amd64 `robustness-image` job bakes the early-evidence runner on its own
+runner, in parallel with `images`. The connector handoff treats `Publish
+native amd64 CLI` as the last regular step of `images`, so that compile stays
+off the connector path. `early-evidence` needs both jobs. This split does not
+by itself meet the fifteen-minute promotion budget.
+
 ```
 changes
   ├─ ui-test
@@ -362,7 +374,7 @@ changes
   ├─ images ────────────────────┬─ integration (3 Docker shards + agent-auth + keycloak)
   │                              ├─ ui-e2e, ui-e2e-auth, ui-e2e-keycloak (also need ui-test)
   │                              ├─ helm/podman (3 full-suite shards each)
-  │                              ├─ early-evidence (also needs helm-lint)
+  │                              ├─ early-evidence (also needs helm-lint and robustness-image)
   │                              └─ integration-extra (also needs reagents)
   ├─ reagents-arm64 ───────────────────┐
   └─ builder-arm64 ─┬─ unit-test-arm64  │
@@ -378,6 +390,7 @@ publish ← tag only, needs the full matrix and ci-ok
 | `builder` | ubuntu-26.04 | `changes` | 30 | `docker/build-push-action` `builder-full` (GHA cache) | none |
 | `builder-arm64` | ubuntu-26.04-arm | `changes` | 30 | arm64 twin of the above | none |
 | `images` | ubuntu-26.04 | `changes` | 30 | `build/ci.docker-bake.hcl` `product`, `build-triage-agent`, `stress-image-test`, CLI smoke | none |
+| `robustness-image` | ubuntu-26.04 | `changes` | 30 | `build/ci.docker-bake.hcl` `robustness` (parallel with `images`; early-evidence only) | none |
 | `images-arm64` | ubuntu-26.04-arm | `builder-arm64` | 30 | arm64 twin of `images` (parallel) | none |
 | `reagents` | ubuntu-26.04 | `changes` | 20 | `build/ci.docker-bake.hcl` `reagents` (parallel with `images`) | none |
 | `reagents-arm64` | ubuntu-26.04-arm | `changes` | 20 | `reagent-roles` bake group (no unused arm64 lint/test toolchain) | none |
@@ -397,7 +410,7 @@ publish ← tag only, needs the full matrix and ci-ok
 | `helm-integration-test` | ubuntu-26.04 | `[images, helm-lint]` | 60 | kind + `helm install` + `helm test` + full suite in three shards (no policy file); shard 3 then installs release `c3` with a mapped-namespace policy and runs `TestKubernetesMappedNamespace` (`scripts/kind-mapped-namespace.sh`, identity-and-access C3) | kind pod via the Helm chart; `c3` in `caesium-c3` serves `test/testdata/policy/kubernetes-mapped.yaml` |
 | `helm-pod-replacement-test` | ubuntu-26.04 | `[changes, images, helm-lint]` | 45 | `scripts/helm-pod-replacement.sh` — kind + `helm install` at three replicas with retained PVCs, then replaces every pod and proves it rejoins (issue #493) | three kind pods via the Helm chart |
 | `podman-integration-test` | ubuntu-26.04 | `images` | 45 | inline `docker run` + full suite in three shards | inline `docker run --name caesium-server-podman` |
-| `early-evidence` | ubuntu-26.04 | `changes`, `images`, `helm-lint` | 60 | `integration-test-sql-budget`, `robustness-test`, `check-evidence` (kind + Helm, three persistent replicas) | `integration-up`, then three kind pods via the Helm chart |
+| `early-evidence` | ubuntu-26.04 | `changes`, `images`, `robustness-image`, `helm-lint` | 60 | `integration-test-sql-budget`, `robustness-test`, `check-evidence` (kind + Helm, three persistent replicas) | `integration-up`, then three kind pods via the Helm chart |
 | `ci-config` | ubuntu-26.04 | — | 15 | actionlint + wildcard `scripts/test_*.py` discovery | none |
 | `build-and-integration-test` / `build-and-integration-test-agent-auth` | ubuntu-26.04 | `changes`, `images`, `integration` | 5 | legacy required-context adapters | none |
 | `ci-ok` | ubuntu-26.04 | see §1 | 5 | `scripts/ci-ok.py` | none |
@@ -838,7 +851,10 @@ cluster and the namespace, which is what lets two instances coexist.
 `caesiumcloud/caesium:<sha>` unless `CANDIDATE_SHA` is exported too.
 `build/Dockerfile.robustness` compiles `go test -tags=integration -c
 ./test/robustness` in the builder image; the root `./test` binary does not
-contain that package, so it has to be built separately. The runner pod executes
+contain that package, so it has to be built separately. Both robustness compile
+stages use the builder's prefetched modules and a separate compilation cache;
+an empty module-cache mount must not hide those version-pinned downloads.
+The runner pod executes
 `/bin/robustness.test -test.v -test.run "$CAESIUM_ROBUSTNESS_RUN" -test.timeout …`.
 `CAESIUM_ROBUSTNESS_RUN` defaults to `^TestOwnerCrash$`. Neither the workflow
 nor `just robustness-test` sets it, so the `early-evidence` lane is unchanged.

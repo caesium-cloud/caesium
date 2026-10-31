@@ -30,14 +30,14 @@ RUN ldd /dist/bin/caesium | tr -s '[:blank:]' '\n' | grep '^/' | \
 # host of the same architecture with no shared libraries at all, which is what
 # the GitHub Release artifacts (caesium-linux-amd64 / caesium-linux-arm64) ship.
 #
-# It reuses the `builder` stage above, so the UI bundle and the Go module cache
-# are already in place and only the link differs. Nothing below this line is
-# reachable from `--target release` or `--target test`: the image build is
-# unchanged.
+# Compilation and validation reuse the `builder` stage above, so the UI bundle
+# and the Go module cache are already in place and only the link differs. The
+# final `cli-static` target exports only the validated executable. Nothing below
+# this line is reachable from `--target release` or `--target test`.
 #
 # Linux only: the toolchain is CGO against musl + a dqlite built in-stage, so
 # there is no darwin target here (macOS users run the container - `just cli`).
-FROM builder AS cli-static
+FROM builder AS cli-static-build
 # The builder stage ends in /dist (it collects the .so closure there).
 WORKDIR /bld/caesium
 
@@ -79,6 +79,11 @@ RUN ! ldd /cli/caesium 2>/dev/null | grep -q '=>' && \
     file /cli/caesium && \
     /cli/caesium --help >/dev/null && \
     echo "OK: /cli/caesium is statically linked"
+
+# Export the CLI without loading the compiler, source and module layers.
+FROM scratch AS cli-static
+COPY --from=cli-static-build /cli/caesium /cli/caesium
+ENTRYPOINT ["/cli/caesium"]
 
 # -------- Release image (no DinD) --------
 FROM alpine:3.23 AS release

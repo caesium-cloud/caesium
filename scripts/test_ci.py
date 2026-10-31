@@ -787,7 +787,16 @@ class WorkflowTests(unittest.TestCase):
         bake = next(step["with"] for step in images["steps"]
                     if step.get("uses") == "./.github/actions/bake-images")
         self.assertEqual(bake["arch"], "amd64")
-        self.assertEqual(set(bake["targets"].split()), {"product", "robustness"})
+        self.assertEqual(set(bake["targets"].split()), {"product"})
+        robustness = JOBS["robustness-image"]
+        self.assertEqual(robustness["needs"], ["changes"])
+        self.assertEqual(robustness["if"], images["if"])
+        robustness_bake = next(step["with"] for step in robustness["steps"]
+                               if step.get("uses") == "./.github/actions/bake-images")
+        self.assertEqual(robustness_bake["targets"], "robustness")
+        self.assertEqual(robustness_bake["cache-group"], "robustness")
+        self.assertIn("robustness-image", JOBS["early-evidence"]["needs"])
+        self.assertNotIn("robustness-image", JOBS["connectors"]["needs"])
         override = (ROOT / "build/ci.docker-bake-cache.hcl").read_text()
         builder = override.split('target "ci-builder"', 1)[1].split('\n}', 1)[0]
         self.assertIn('dockerfile = "build/Dockerfile.build"', builder)
@@ -1098,10 +1107,10 @@ class EarlyEvidenceLaneTests(unittest.TestCase):
         self.assertIn('caesium-release = "target:release"', bake)
         images = JOBS["images"]["steps"]
         bake_step = next(step for step in images if step.get("uses") == "./.github/actions/bake-images")
-        self.assertIn("robustness", bake_step["with"]["targets"].split())
-        saved = [step["with"]["name"] for step in images
+        self.assertNotIn("robustness", bake_step["with"]["targets"].split())
+        saved = [step["with"]["name"] for step in JOBS["robustness-image"]["steps"]
                  if step.get("uses") == "./.github/actions/save-docker-images"]
-        self.assertIn("robustness-amd64", saved)
+        self.assertEqual(saved, ["robustness-amd64"])
 
     def test_lane_consumes_prebuilt_images_and_never_a_compiler(self):
         action = yaml.safe_load((ROOT / ".github/actions/run-integration/action.yml").read_text())

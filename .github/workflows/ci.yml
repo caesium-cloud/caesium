@@ -362,11 +362,10 @@ jobs:
       - uses: ./.github/actions/bake-images
         with:
           arch: amd64
-          # `robustness` layers the compiled ./test/robustness binary onto the
-          # same release target, so it shares this bake's graph.
-          targets: |
-            product
-            robustness
+          # Robustness compiles in the parallel robustness-image job. This
+          # job's last regular step is the connector publication barrier, so
+          # the robustness compile must not sit on that path.
+          targets: product
           cache-group: product
       - name: Build triage-agent
         run: just tag=${{ env.IMAGE_TAG }}-amd64 build-triage-agent
@@ -407,10 +406,6 @@ jobs:
         with:
           name: integration-runner-amd64
           images: caesiumcloud/caesium-integration:${{ env.IMAGE_TAG }}-amd64
-      - uses: ./.github/actions/save-docker-images
-        with:
-          name: robustness-amd64
-          images: caesiumcloud/caesium-robustness:${{ env.IMAGE_TAG }}-amd64
       # distributed-testing G6: the producer records the release image's id at
       # build time, so a consumer that runs a supplied image (lifecycle-standalone)
       # can bind what it qualified to what this job built from this commit.
@@ -440,6 +435,31 @@ jobs:
             /tmp/caesium-linux-amd64.smoke-ok
           retention-days: 1
           compression-level: 0
+
+  # early-evidence's runner. Kept off the images job: that job's last regular
+  # step is the connector publication barrier, and this compile is not an
+  # input to the connector cohort.
+  robustness-image:
+    permissions:
+      contents: read
+      actions: read
+    needs: [changes]
+    if: needs.changes.outputs.images == 'true'
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install qualified native Docker runtime
+        run: python3 scripts/setup-ci-docker.py
+      - uses: ./.github/actions/bake-images
+        with:
+          arch: amd64
+          targets: robustness
+          cache-group: robustness
+      - uses: ./.github/actions/save-docker-images
+        with:
+          name: robustness-amd64
+          images: caesiumcloud/caesium-robustness:${{ env.IMAGE_TAG }}-amd64
 
   images-arm64:
     permissions:
@@ -1806,7 +1826,7 @@ jobs:
   # promotion blocks PR merge. Every existing engine/architecture suite keeps
   # running unchanged and unpromoted.
   early-evidence:
-    needs: [changes, images, helm-lint]
+    needs: [changes, images, robustness-image, helm-lint]
     if: needs.changes.outputs.go == 'true' || needs.changes.outputs.helm == 'true' || needs.changes.outputs.ci == 'true'
     runs-on: ubuntu-26.04
     timeout-minutes: 60
@@ -2676,6 +2696,7 @@ jobs:
       - builder
       - builder-arm64
       - images
+      - robustness-image
       - images-arm64
       - reagents
       - lint
@@ -2778,6 +2799,7 @@ jobs:
             builder \
             builder-arm64 \
             images \
+            robustness-image \
             images-arm64 \
             reagents \
             lint \
