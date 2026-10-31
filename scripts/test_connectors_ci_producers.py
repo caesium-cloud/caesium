@@ -53,9 +53,11 @@ def zip_bytes(files):
 
 
 class FakeClient:
-    def __init__(self, states=None):
+    def __init__(self, states=None, details=None):
         self.states = states or [jobs()]
+        self.details = details
         self.polls = 0
+        self.job_requests = []
         self.loads = []
         self.downloads = []
         self.api_commands = []
@@ -73,7 +75,15 @@ class FakeClient:
                                        workflow_run=dict(id=456, repository_id=123, head_sha=H)))
 
     def remaining(self, maximum=None): return 30
-    def get(self, endpoint): return run()
+    def get(self, endpoint):
+        if '/actions/jobs/' in endpoint:
+            self.job_requests.append(endpoint)
+            index = max(self.polls-1, 0)
+            rows = self.states[min(index, len(self.states)-1)]
+            details = ({row['id']: row for row in rows} if self.details is None else
+                       self.details[min(index, len(self.details)-1)])
+            return copy.deepcopy(details[int(endpoint.rsplit('/', 1)[1])])
+        return run()
     def pages(self, endpoint, key):
         if key == 'jobs':
             value = self.states[min(self.polls, len(self.states)-1)]
@@ -143,6 +153,121 @@ class ProducerHandoffTests(unittest.TestCase):
         with patch.object(MOD.time, 'sleep', side_effect=AssertionError('unexpected poll')):
             output, _ = self.handoff(FakeClient())
         self.assertTrue((output/'status.json').exists())
+
+    def test_sparse_list_steps_use_exact_job_details_through_final_seal(self):
+        for sparse in ('absent', 'empty', 'null'):
+            self.setUp(); rows = jobs()
+            for row in rows:
+                if row['name'] in MOD.BARRIERS:
+                    if sparse == 'absent': row.pop('steps')
+                    else: row['steps'] = [] if sparse == 'empty' else None
+            client = FakeClient([rows], [{row['id']: row for row in jobs()}])
+            with self.subTest(sparse=sparse):
+                output, _ = self.handoff(client)
+                self.assertTrue((output/'status.json').is_file())
+                self.assertEqual(client.job_requests, [
+                    'repos/owner/repo/actions/jobs/101', 'repos/owner/repo/actions/jobs/102'] * 2)
+                self.assertEqual(len(client.downloads), 5)
+
+    def test_detail_can_advance_from_list_in_progress_to_completed(self):
+        client = FakeClient([jobs(True)], [{row['id']: row for row in jobs()}])
+        def unexpected_wait(_): raise AssertionError('current job details are already completed')
+        output, _ = self.handoff(client, unexpected_wait)
+        final = json.loads((output/'status.json').read_text())
+        self.assertTrue(all(row['status'] == 'completed' for row in final['producers'].values()))
+
+    def test_foreign_or_malformed_detail_cannot_replace_list_identity(self):
+        mutations = [(key, value) for key, value in (
+            ('id', 999), ('id', True), ('name', 'foreign'), ('name', None),
+            ('run_id', 999), ('run_id', True), ('run_attempt', 1), ('run_attempt', True), ('head_sha', C))]
+        for key, value in mutations:
+            self.setUp(); details = {row['id']: row for row in jobs()}
+            details[101][key] = value
+            client = FakeClient(details=[details])
+            with self.subTest(key=key, value=value), self.assertRaises(MOD.Invalid): self.handoff(client)
+            self.assertEqual(client.downloads, [])
+        for malformed in (None, [], 'foreign', {}, False):
+            self.setUp(); details = {row['id']: row for row in jobs()}; details[101] = malformed
+            client = FakeClient(details=[details])
+            with self.subTest(malformed=malformed), self.assertRaises(MOD.Invalid): self.handoff(client)
+            self.assertEqual(client.downloads, [])
+
+    def test_foreign_list_source_fails_before_job_detail_request(self):
+        for key, value in (('id', None), ('id', True), ('run_id', 999), ('run_attempt', 1), ('head_sha', C)):
+            self.setUp(); rows = jobs(); rows[1][key] = value
+            client = FakeClient([rows], [{row['id']: row for row in jobs()}])
+            with self.subTest(key=key), self.assertRaises(MOD.Invalid): self.handoff(client)
+            self.assertEqual(client.job_requests, [])
+            self.assertEqual(client.downloads, [])
+
+    def test_sparse_or_failed_detail_never_falls_back_to_complete_list_steps(self):
+        changes = [lambda row: row.pop('steps'), lambda row: row.update(steps=None),
+                   lambda row: row.update(steps={}), lambda row: row.update(steps=[None]),
+                   lambda row: row.update(steps=[]), lambda row: row.update(conclusion='failure'),
+                   lambda row: row['steps'][0].update(conclusion='skipped'),
+                   lambda row: row['steps'][2].update(conclusion='failure'),
+                   lambda row: row['steps'].append(copy.deepcopy(row['steps'][1])),
+                   lambda row: row['steps'].append(dict(name='Regular step', status='queued'))]
+        for change in changes:
+            self.setUp(); details = {row['id']: row for row in jobs()}; change(details[101])
+            client = FakeClient(details=[details])
+            with self.subTest(change=change), self.assertRaises(MOD.Invalid): self.handoff(client)
+            self.assertEqual(client.downloads, [])
+            self.assertFalse((self.root/'handoff/ready.json').exists())
+
+    def test_list_to_detail_cannot_regress_started_or_completed_job(self):
+        for status in ('in_progress', 'completed'):
+            for changed in ('status', 'started_at', 'completed_at'):
+                if status == 'in_progress' and changed == 'completed_at':
+                    continue
+                self.setUp(); rows = jobs(status == 'in_progress')
+                details = {row['id']: copy.deepcopy(row) for row in rows}
+                if changed == 'status':
+                    details[101].update(status='queued' if status == 'in_progress' else 'in_progress',
+                                        conclusion=None, completed_at=None)
+                else:
+                    details[101][changed] = '2026-10-22T12:00:01Z'
+                client = FakeClient([rows], [details])
+                with self.subTest(status=status, changed=changed), self.assertRaises(MOD.Invalid):
+                    self.handoff(client)
+                self.assertEqual(client.downloads, [])
+
+    def test_exact_detail_failure_is_not_hidden_by_successful_list(self):
+        client = FakeClient(); original = client.get
+        def failed(endpoint):
+            if '/actions/jobs/' in endpoint:
+                raise MOD.Invalid('producer API request failed')
+            return original(endpoint)
+        with patch.object(client, 'get', side_effect=failed), self.assertRaisesRegex(MOD.Invalid, 'API request failed'):
+            self.handoff(client)
+        self.assertEqual(client.downloads, [])
+        self.assertFalse((self.root/'handoff/ready.json').exists())
+
+    def test_completed_detail_cannot_regress_on_final_seal_with_stale_list(self):
+        active = {row['id']: row for row in jobs(True)}
+        complete = {row['id']: row for row in jobs()}
+        client = FakeClient([jobs(True)], [complete, active])
+        with self.assertRaisesRegex(MOD.Invalid, 'producer jobs changed at final seal'):
+            self.handoff(client)
+        self.assertTrue((self.root/'handoff/ready.json').is_file())
+        self.assertFalse((self.root/'handoff/status.json').exists())
+
+    def test_detail_barrier_identity_cannot_change_while_list_steps_are_empty(self):
+        for changed in ('removed', 'timestamp', 'queued'):
+            self.setUp(); rows = jobs(True)
+            for row in rows:
+                if row['name'] in MOD.BARRIERS: row['steps'] = []
+            first = {row['id']: row for row in jobs(True)}
+            later = copy.deepcopy(first)
+            if changed == 'removed': later[101]['steps'].pop(1)
+            elif changed == 'timestamp': later[101]['steps'][1]['completed_at'] = '2026-10-22T12:01:01Z'
+            else: later[101]['steps'][1].update(status='queued', conclusion=None)
+            client = FakeClient([rows], [first, later])
+            with self.subTest(changed=changed), self.assertRaisesRegex(
+                    MOD.Invalid, 'producer publication (readiness|identity) changed'):
+                self.handoff(client)
+            self.assertTrue((self.root/'handoff/ready.json').is_file())
+            self.assertFalse((self.root/'handoff/status.json').exists())
 
     def test_regular_steps_must_finish_before_ready(self):
         rows = jobs(True); rows[1]['steps'][1].update(status='queued', conclusion=None)
