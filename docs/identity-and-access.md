@@ -256,7 +256,14 @@ working example of every step below.
    sealed (see [OIDC](#oidc)). Its lifetime is bounded by the realm's *SSO
    Session Idle* and *SSO Session Max*. [Group refresh](#group-refresh)
    redeems it during a session, so those two settings bound how long group
-   changes are picked up before a re-login is required.
+   changes are picked up before a re-login is required. The realm's *Revoke
+   Refresh Token* setting (single-use refresh tokens) is supported: Caesium
+   keeps one grant per user and stores every rotated token, whichever of the
+   user's sessions or CLI keys triggered the refresh; the CI lane runs with it
+   on. Ending a user's Keycloak sessions makes the next refresh fail with
+   `invalid_grant`, which revokes that user's Caesium sessions and user-bound
+   keys; disabling the client is an outage instead (users go `stale_groups`
+   past the maximum staleness).
 5. **Issuer.** Set `CAESIUM_AUTH_OIDC_ISSUER_URL` to the realm URL,
    `https://kc.example.com/realms/<realm>` (no `/auth` prefix unless Keycloak
    sets `http-relative-path`). Caesium reads
