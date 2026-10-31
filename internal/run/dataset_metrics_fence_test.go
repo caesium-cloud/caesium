@@ -196,7 +196,8 @@ func TestEvaluateDataAssertionsClaimed_LateInsertAfterReclaimLeavesOneSampleSet(
 	// A's lease expires while its container is still finishing: the owner
 	// takeover re-pends every in-flight row of the run and clears the samples
 	// of the attempt that is about to run again.
-	require.NoError(t, store.ResetInFlightTasks(runID))
+	_, resetErr := store.ResetInFlightTasks(runID)
+	require.NoError(t, resetErr)
 	require.Empty(t, metricRows(t, db))
 
 	// Worker B claims the same row and re-executes it to completion.

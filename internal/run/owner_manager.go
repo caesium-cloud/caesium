@@ -370,9 +370,13 @@ func (m *OwnerManager) rebuild(runID uuid.UUID, generation int64) (RecoveryResul
 	// "ready". A failed reset must abort recovery before publishing that ready
 	// state: otherwise the loop skips recovery on every later tick and retries
 	// dispatch forever against rows that still hold the dead worker's claim.
-	if rErr := m.store.ResetInFlightTasks(runID); rErr != nil {
+	recovered, rErr := m.store.ResetInFlightTasks(runID)
+	if rErr != nil {
 		return RecoveryResult{}, nil, fmt.Errorf("run owner: reset in-flight tasks for %s: %w", runID, rErr)
 	}
+	// The dead owner's attempts are fenced out by the reset; stop their pods so
+	// the re-dispatch does not run beside an orphan.
+	StopRecoveredRuntimes("owner_takeover", recovered)
 	or := &ownedRun{
 		state:  rs,
 		writer: NewCheckpointWriter(m.store, runID, m.cfg),

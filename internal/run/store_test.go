@@ -511,7 +511,8 @@ func TestStorePersistsRunState(t *testing.T) {
 
 	// Simulate restart and ensure running tasks reset back to pending.
 	secondStore := NewStore(db)
-	require.NoError(t, secondStore.ResetInFlightTasks(runRecord.ID))
+	_, resetErr := secondStore.ResetInFlightTasks(runRecord.ID)
+	require.NoError(t, resetErr)
 
 	// Completing the first task should decrement the successor outstanding count.
 	require.NoError(t, store.CompleteTask(runRecord.ID, taskA.ID, "ok", nil, nil))

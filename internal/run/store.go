@@ -5958,17 +5958,29 @@ func (s *Store) recordCancelledRunMetrics(info cancelledRunInfo) {
 // COMMITTED, where a completion landing mid-transaction would otherwise let an
 // unguarded `WHERE id IN (...)` resurrect a terminal row to pending — the exact
 // class retryTask documents — and delete a succeeded row's legitimate sample.
-func (s *Store) ResetInFlightTasks(runID uuid.UUID) error {
-	return withStoreBusyRetry(func() error {
+//
+// It returns the Kubernetes runtimes of the rows it actually re-pended, read in
+// the same transaction before their runtime_id was cleared, so the caller can
+// stop the previous attempt's pods (StopRecoveredRuntimes) once the reset has
+// fenced them out.
+func (s *Store) ResetInFlightTasks(runID uuid.UUID) ([]RecoveredRuntime, error) {
+	var recovered []RecoveredRuntime
+	err := withStoreBusyRetry(func() error {
+		recovered = nil
 		return s.db.Transaction(func(tx *gorm.DB) error {
-			var ids []uuid.UUID
+			var inFlight []models.TaskRun
 			if err := tx.Model(&models.TaskRun{}).
+				Select("id", "engine", "runtime_id").
 				Where("job_run_id = ? AND status = ?", runID, string(TaskStatusRunning)).
-				Pluck("id", &ids).Error; err != nil {
+				Find(&inFlight).Error; err != nil {
 				return err
 			}
-			if len(ids) == 0 {
+			if len(inFlight) == 0 {
 				return nil
+			}
+			ids := make([]uuid.UUID, 0, len(inFlight))
+			for i := range inFlight {
+				ids = append(ids, inFlight[i].ID)
 			}
 
 			updates := TaskResourceResetColumns()
@@ -6001,9 +6013,25 @@ func (s *Store) ResetInFlightTasks(runID uuid.UUID) error {
 			if err != nil {
 				return err
 			}
-			return clearAttemptDatasetMetricsForTaskRunsTx(tx, reset)
+			if err := clearAttemptDatasetMetricsForTaskRunsTx(tx, reset); err != nil {
+				return err
+			}
+			recovered = recoveredRuntimesFrom(inFlight, uuidSet(reset))
+			return nil
 		})
 	})
+	if err != nil {
+		return nil, err
+	}
+	return recovered, nil
+}
+
+func uuidSet(ids []uuid.UUID) map[uuid.UUID]struct{} {
+	set := make(map[uuid.UUID]struct{}, len(ids))
+	for _, id := range ids {
+		set[id] = struct{}{}
+	}
+	return set
 }
 
 // taskRunIDsWithStatusTx narrows an id list to the rows currently in `status`.

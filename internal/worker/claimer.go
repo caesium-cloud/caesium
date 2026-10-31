@@ -486,6 +486,7 @@ func (c *Claimer) ReclaimExpired(ctx context.Context) error {
 
 	pendingEvents := make([]event.Event, 0, 8)
 	var productionReclaimedCount int64
+	var recovered []run.RecoveredRuntime
 	var counts dbWriteCounts
 	err := withBusyRetry(ctx, c.busyRetryBackoffs, func() error {
 		if err := ctx.Err(); err != nil {
@@ -496,6 +497,7 @@ func (c *Claimer) ReclaimExpired(ctx context.Context) error {
 		counts.reset()
 		attemptEvents := make([]event.Event, 0, 8)
 		var attemptProductionReclaimedCount int64
+		var attemptRecovered []run.RecoveredRuntime
 
 		err := c.store.DB().WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 			runningRunIDs := tx.Model(&models.JobRun{}).
@@ -536,6 +538,10 @@ func (c *Claimer) ReclaimExpired(ctx context.Context) error {
 				return result.Error
 			}
 			counts.addTaskRunStatus(int(result.RowsAffected))
+			// The previous attempts' pods, read before the reset cleared their
+			// runtime ids; the UPDATE shares the Find's predicate in this
+			// transaction, so these are exactly the rows it re-pended.
+			attemptRecovered = run.RecoveredRuntimesFrom(expired)
 
 			// Batch all lease-expired + task-ready events into a single INSERT.
 			if len(expired) > 0 {
@@ -608,11 +614,13 @@ func (c *Claimer) ReclaimExpired(ctx context.Context) error {
 		if err == nil {
 			pendingEvents = attemptEvents
 			productionReclaimedCount = attemptProductionReclaimedCount
+			recovered = attemptRecovered
 		}
 		return err
 	}, c.observeBusyRetry)
 	if err == nil {
 		counts.commit()
+		run.StopRecoveredRuntimes("worker_lease_expired", recovered)
 		if productionReclaimedCount > 0 {
 			metrics.WorkerLeaseExpirationsTotal.WithLabelValues(c.nodeID).Add(float64(productionReclaimedCount))
 		}

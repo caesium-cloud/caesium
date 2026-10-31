@@ -335,7 +335,8 @@ func TestResetInFlightTasks_ClearsTheLostAttemptsSamples(t *testing.T) {
 	_, _, otherRunTaskID, _ := seedTaskRun(t, db, string(TaskStatusRunning), false)
 	seedMetric(t, db, otherRunTaskID, "warehouse/orders", "rowCount", 99, time.Now().Add(-time.Second))
 
-	require.NoError(t, store.ResetInFlightTasks(taskRun.JobRunID))
+	_, resetErr := store.ResetInFlightTasks(taskRun.JobRunID)
+	require.NoError(t, resetErr)
 
 	var reset models.TaskRun
 	require.NoError(t, db.Where("id = ?", taskRunID).First(&reset).Error)

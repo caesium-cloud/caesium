@@ -23,7 +23,7 @@ def collect(source, output):
         "shard": os.environ.get("HELM_SHARD", ""),
         "port_forward": {}, "commands": {},
     }
-    for phase in ("full", "cache-identity", "deadlines"):
+    for phase in ("full", "cache-identity", "deadlines", "mapped"):
         name = f"port-forward-{phase}.log"
         path = source / name
         if path.is_file():
@@ -37,6 +37,10 @@ def collect(source, output):
         "pods.log": ["kubectl", "get", "pods", "-A", "-o", "wide"],
         "describe.log": ["kubectl", "describe", "pods", "-l", "app.kubernetes.io/instance=caesium"],
         "events.log": ["kubectl", "get", "events", "-A", "--sort-by=.metadata.creationTimestamp"],
+        # The mapped-namespace phase's release (identity-and-access C3, shard 3).
+        "mapped-server.log": ["kubectl", "logs", "-n", "caesium-c3", "statefulset/c3-caesium", "-c", "caesium"],
+        "mapped-server-previous.log": ["kubectl", "logs", "-n", "caesium-c3", "statefulset/c3-caesium", "-c", "caesium", "--previous"],
+        "mapped-pods.log": ["kubectl", "get", "pods,pvc", "-n", "caesium-mapped", "-o", "wide"],
     }
     for name, command in commands.items():
         try:

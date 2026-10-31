@@ -1175,7 +1175,11 @@ func (j *job) Run(ctx context.Context) (err error) {
 			if serverShutdown(ctx) {
 				return nil, runlife.ErrServerShutdown
 			}
-			if err := store.ResetInFlightTasks(running.ID); err != nil {
+			// Unlike the distributed recovery paths this stops no pod. A local
+			// attempt holds no claim or lease, so nothing here proves its
+			// executor is dead: a webhook served by another node resumes a run
+			// the node that started it may still be driving.
+			if _, err := store.ResetInFlightTasks(running.ID); err != nil {
 				return nil, err
 			}
 			return store.Get(running.ID)
