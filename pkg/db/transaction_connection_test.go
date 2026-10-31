@@ -246,6 +246,28 @@ func TestCanceledTransactionReleasesPinWithoutExplicitCompletion(t *testing.T) {
 	require.Equal(t, 1, observeSnapshot(t, gdb.WithContext(t.Context())).RowCount)
 }
 
+// A request that ends during a snapshot: cancellation rolls the transaction
+// back behind fn, so COMMIT answers sql.ErrTxDone whatever fn returned. That is
+// neither contention nor a success, so it surfaces once and is not retried.
+func TestCanceledSnapshotSurfacesTxDoneWithoutRetry(t *testing.T) {
+	gdb, _, reader, _ := faultSQLite(t)
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
+	calls := 0
+	err := TransactionOn(ctx, gdb, func(tx *gorm.DB) error {
+		calls++
+		observeSnapshot(t, tx)
+		cancel()
+		require.Eventually(t, func() bool { return reader.Stats().InUse == 0 }, time.Second, time.Millisecond,
+			"the cancellation rollback completes before fn returns")
+		return nil
+	}, &sql.TxOptions{ReadOnly: true})
+
+	require.ErrorIs(t, err, sql.ErrTxDone)
+	require.Equal(t, 1, calls)
+}
+
 func TestUnknownCommitOutcomeIsNotReplayed(t *testing.T) {
 	gdb, _, reader, state := faultSQLite(t)
 	installConnPool(gdb, newRetryConnPool(reader))

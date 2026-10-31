@@ -40,25 +40,27 @@ var BusyRetryBackoffs = []time.Duration{
 // (re-running one statement of a partially-applied transaction would be
 // unsafe), so the entire BEGIN..COMMIT is retried here on the shared
 // BusyRetryBackoffs budget. A rolled-back transaction leaves no state, so
-// re-running fn from the top is safe.
+// re-running fn from the top is safe for the database. COMMIT can fail after fn
+// returned nil, so anything fn left in memory is fn's to reset on the next run.
 func Transaction(ctx context.Context, fn func(tx *gorm.DB) error) error {
 	return transaction(ctx, Connection(), fn)
 }
 
 // TransactionOn is Transaction against conn: the whole transaction is retried
 // on transient contention. Services that hold their own connection (and tests
-// that hand them one) use it for multi-statement writes.
-func TransactionOn(ctx context.Context, conn *gorm.DB, fn func(tx *gorm.DB) error) error {
-	return transaction(ctx, conn, fn)
+// that hand them one) use it for multi-statement writes. opts reach every
+// attempt's BEGIN, which is how a read-only snapshot stays one across retries.
+func TransactionOn(ctx context.Context, conn *gorm.DB, fn func(tx *gorm.DB) error, opts ...*sql.TxOptions) error {
+	return transaction(ctx, conn, fn, opts...)
 }
 
-func transaction(ctx context.Context, conn *gorm.DB, fn func(tx *gorm.DB) error) error {
-	return transactionWithPolicy(ctx, conn, busyRetryPolicy(BusyRetryBackoffs, sleepRetry), fn)
+func transaction(ctx context.Context, conn *gorm.DB, fn func(tx *gorm.DB) error, opts ...*sql.TxOptions) error {
+	return transactionWithPolicy(ctx, conn, busyRetryPolicy(BusyRetryBackoffs, sleepRetry), fn, opts...)
 }
 
-func transactionWithPolicy(ctx context.Context, conn *gorm.DB, policy dbretry.Policy, fn func(tx *gorm.DB) error) error {
+func transactionWithPolicy(ctx context.Context, conn *gorm.DB, policy dbretry.Policy, fn func(tx *gorm.DB) error, opts ...*sql.TxOptions) error {
 	conn = conn.WithContext(ctx)
-	return dbretry.Retry(ctx, policy, func() error { return conn.Transaction(fn) })
+	return dbretry.Retry(ctx, policy, func() error { return conn.Transaction(fn, opts...) })
 }
 
 func busyRetryPolicy(backoffs []time.Duration, wait func(context.Context, time.Duration) error) dbretry.Policy {
