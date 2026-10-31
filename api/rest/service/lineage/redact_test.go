@@ -3,6 +3,7 @@ package lineage
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -11,6 +12,7 @@ import (
 	"github.com/caesium-cloud/caesium/internal/jobdef/testutil"
 	illineage "github.com/caesium-cloud/caesium/internal/lineage"
 	"github.com/caesium-cloud/caesium/internal/models"
+	dbfaults "github.com/caesium-cloud/caesium/internal/testutil"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 	"gorm.io/gorm"
@@ -212,4 +214,53 @@ func TestConfinedImpactDeclaredRootOwnedByDeclaredProducers(t *testing.T) {
 	visible, err = rootVisible(context.Background(), w.db, r, "", "warehouse/decl")
 	require.NoError(t, err)
 	require.False(t, visible)
+}
+
+// The first attempt reads the root and its nodes and its COMMIT fails, so
+// ConfinedImpact runs again. Whatever the retry finds replaces what the failed
+// attempt built.
+func TestConfinedImpactRetryKeepsNothingFromTheFailedAttempt(t *testing.T) {
+	failure := errors.New("checkpoint in progress")
+	world := func(t *testing.T) (*lineageWorld, models.Job) {
+		w := newLineageWorld(t)
+		producer := w.job("retry-producer", "marketing")
+		w.run(producer, "marketing", nil, []string{"retry-root"})
+		w.run(w.job("retry-consumer", "marketing"), "marketing", []string{"retry-root"}, []string{"retry-derived"})
+		return w, producer
+	}
+
+	t.Run("an unchanged root is not doubled", func(t *testing.T) {
+		w, _ := world(t)
+		ctx := confinedTo("marketing")
+		r := authz.NewRedactor(ctx)
+		uncontended, err := NewWithDatabase(ctx, w.db).ConfinedImpact(r, "ol", "retry-root", 0)
+		require.NoError(t, err)
+		require.NotEmpty(t, uncontended.Downstream)
+
+		conn, faults := dbfaults.FailCommits(t, w.db, failure, 1)
+		got, err := NewWithDatabase(ctx, conn).ConfinedImpact(r, "ol", "retry-root", 0)
+
+		require.NoError(t, err)
+		require.Equal(t, 2, faults.Begins)
+		require.Equal(t, uncontended, got)
+	})
+
+	// The no-existence-oracle rule: a root the caller may no longer read
+	// answers as a root nobody recorded, even though an attempt once read it.
+	t.Run("a root that became unreadable keeps no nodes", func(t *testing.T) {
+		w, producer := world(t)
+		conn, faults := dbfaults.FailCommits(t, w.db, failure, 1)
+		faults.AfterRollback = func() {
+			require.NoError(t, w.db.Model(&models.Job{}).Where("id = ?", producer.ID).Update("namespace", "finance").Error)
+		}
+		ctx := confinedTo("marketing")
+
+		got, err := NewWithDatabase(ctx, conn).ConfinedImpact(authz.NewRedactor(ctx), "ol", "retry-root", 0)
+
+		require.NoError(t, err)
+		require.Equal(t, 2, faults.Begins)
+		body, err := json.Marshal(got)
+		require.NoError(t, err)
+		require.Equal(t, `{"root_namespace":"ol","root_name":"retry-root","downstream":[]}`, string(body))
+	})
 }

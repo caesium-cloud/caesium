@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/caesium-cloud/caesium/internal/testutil"
 	"github.com/caesium-cloud/caesium/pkg/dqlite"
 	"github.com/stretchr/testify/require"
 	"gorm.io/driver/sqlite"
@@ -241,6 +242,24 @@ func TestTransactionOnRetriesContentionThenCommits(t *testing.T) {
 		return nil
 	}))
 	require.Equal(t, 2, calls)
+}
+
+// TestTransactionOnCarriesOptionsToEveryAttempt: a retried read-only snapshot
+// stays read-only, so it keeps its read view and never reaches for the writer.
+func TestTransactionOnCarriesOptionsToEveryAttempt(t *testing.T) {
+	gdb, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{SkipDefaultTransaction: true})
+	require.NoError(t, err)
+	conn, faults := testutil.FailCommits(t, gdb, errors.New("checkpoint in progress"), 1)
+	options := sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true}
+
+	calls := 0
+	require.NoError(t, TransactionOn(t.Context(), conn, func(*gorm.DB) error {
+		calls++
+		return nil
+	}, &options))
+
+	require.Equal(t, 2, calls)
+	require.Equal(t, []sql.TxOptions{options, options}, faults.Options)
 }
 
 // TestTransactionDoesNotRetryNonContention proves a non-contention error from

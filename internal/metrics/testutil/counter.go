@@ -18,3 +18,12 @@ func CounterValue(tb testing.TB, vec *prometheus.CounterVec, labels ...string) f
 	require.NoError(tb, counter.(prometheus.Metric).Write(&m))
 	return m.GetCounter().GetValue()
 }
+
+// CounterTotal returns the current value of a Counter with no labels.
+func CounterTotal(tb testing.TB, counter prometheus.Counter) float64 {
+	tb.Helper()
+
+	var m dto.Metric
+	require.NoError(tb, counter.Write(&m))
+	return m.GetCounter().GetValue()
+}

@@ -3,6 +3,7 @@ package contract
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"slices"
 	"strings"
 	"testing"
@@ -12,6 +13,7 @@ import (
 	internalcontract "github.com/caesium-cloud/caesium/internal/contract"
 	"github.com/caesium-cloud/caesium/internal/jobdef/testutil"
 	"github.com/caesium-cloud/caesium/internal/models"
+	dbfaults "github.com/caesium-cloud/caesium/internal/testutil"
 	schema "github.com/caesium-cloud/caesium/pkg/jobdef"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
@@ -300,6 +302,30 @@ func TestConfinedGraphFilterOnForeignDatasetLikeNonexistent(t *testing.T) {
 	t.Setenv(enforcementEnv, "")
 	_, _, err = NewWithDatabase(context.Background(), db).ConfinedGraph(marketingRedactor(t), "")
 	require.ErrorIs(t, err, ErrDisabled)
+}
+
+// A failed COMMIT re-derives the whole graph: the response equals an
+// uncontended read, with no node or edge doubled.
+func TestConfinedGraphRetryEqualsAnUncontendedRead(t *testing.T) {
+	t.Setenv(enforcementEnv, "warn")
+	db := testutil.OpenTestDB(t)
+	t.Cleanup(func() { testutil.CloseDB(db) })
+	producer := seedObservedJob(t, db, "retry-producer", "marketing")
+	consumer := seedObservedJob(t, db, "retry-consumer", "marketing")
+	seedObservedRun(t, db, producer, "marketing", "lake", "orders", "output")
+	seedObservedRun(t, db, consumer, "marketing", "lake", "orders", "input")
+	redactor := marketingRedactor(t)
+	uncontended, _, err := NewWithDatabase(context.Background(), db).ConfinedGraph(redactor, "")
+	require.NoError(t, err)
+	require.NotEmpty(t, uncontended.Edges)
+
+	conn, faults := dbfaults.FailCommits(t, db, errors.New("checkpoint in progress"), 1)
+	got, recorded, err := NewWithDatabase(context.Background(), conn).ConfinedGraph(redactor, "")
+
+	require.NoError(t, err)
+	require.Equal(t, 2, faults.Begins)
+	require.Equal(t, uncontended, got)
+	require.Len(t, recorded.Edges, len(uncontended.Edges))
 }
 
 func seedObservedJob(t *testing.T, db *gorm.DB, alias, namespace string) models.Job {

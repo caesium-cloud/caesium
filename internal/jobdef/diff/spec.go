@@ -18,6 +18,7 @@ import (
 	"github.com/caesium-cloud/caesium/internal/authz"
 	"github.com/caesium-cloud/caesium/internal/jobdef/yamlpath"
 	"github.com/caesium-cloud/caesium/internal/models"
+	"github.com/caesium-cloud/caesium/pkg/db"
 	schema "github.com/caesium-cloud/caesium/pkg/jobdef"
 	"github.com/google/uuid"
 	"gopkg.in/yaml.v3"
@@ -186,7 +187,7 @@ func LoadDatabaseSpecs(ctx context.Context, db *gorm.DB) (map[string]JobSpec, er
 	return specs, nil
 }
 
-// ReadSnapshot runs fn in one read-only transaction on db, so every read fn
+// ReadSnapshot runs fn in one read-only transaction on conn, so every read fn
 // makes through tx sees the same catalog state. It is what a
 // namespace-confined caller's lint and diff read through (the baseline here,
 // the contract graph in api/rest/controller/jobdef).
@@ -195,12 +196,23 @@ func LoadDatabaseSpecs(ctx context.Context, db *gorm.DB) (map[string]JobSpec, er
 // holds the single catalog writer (internal/run PredecessorExecutionInputs uses
 // the same options). SQLite and dqlite keep one read view per transaction;
 // PostgreSQL's READ COMMITTED would take a new one per statement.
-func ReadSnapshot(ctx context.Context, db *gorm.DB, fn func(tx *gorm.DB) error) error {
+//
+// The pool's retry covers neither a transaction's statements nor its COMMIT,
+// so the whole snapshot is retried on transient contention (db.TransactionOn:
+// the shared budget, then the last error surfaces). fn can therefore run more
+// than once, even after returning nil: COMMIT fails after fn has succeeded, so
+// a complete attempt can still be discarded. The next attempt reads a newer
+// snapshot, which may disagree with the last one. fn must keep nothing from an
+// earlier attempt: assign its results whole on every path that returns nil, or
+// reset them first, and never add to anything declared outside it. Only an
+// error fn returns is retried. conn must not already be a transaction: fn's
+// retry belongs to whoever opened that one.
+func ReadSnapshot(ctx context.Context, conn *gorm.DB, fn func(tx *gorm.DB) error) error {
 	options := &sql.TxOptions{ReadOnly: true}
-	if db.Name() == "postgres" {
+	if conn.Name() == "postgres" {
 		options.Isolation = sql.LevelRepeatableRead
 	}
-	return db.WithContext(ctx).Transaction(fn, options)
+	return db.TransactionOn(ctx, conn, fn, options)
 }
 
 // afterBaselineJobsLoaded, when set (tests only), runs between loading the

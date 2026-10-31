@@ -461,6 +461,10 @@ var afterCatalogRead func()
 // can never pair a namespace verdict with data from another moment, in either
 // order. For an unrestricted caller (nil scope), or without a catalog, fn
 // runs on conn exactly as before.
+//
+// A confined caller's snapshot is retried on contention, so fn follows
+// ReadSnapshot's contract (it can run again, even after returning nil). The
+// scope's own state is reset for it: every attempt rebinds, and so re-reads.
 func (s *readScope) withSnapshot(ctx context.Context, conn *gorm.DB, fn func(conn *gorm.DB) error) error {
 	if s == nil || s.db == nil {
 		return fn(conn)
@@ -493,6 +497,9 @@ func (s *readScope) bind(conn *gorm.DB) {
 func (s *readScope) validate(ctx context.Context, conn *gorm.DB, validator func(conn *gorm.DB) error) string {
 	var message string
 	if err := s.withSnapshot(ctx, conn, func(conn *gorm.DB) error {
+		// Set only on failure, so a retry that passes must not keep the verdict
+		// of an attempt whose COMMIT failed.
+		message = ""
 		if err := validator(conn); err != nil {
 			if afterCatalogRead != nil {
 				afterCatalogRead()
