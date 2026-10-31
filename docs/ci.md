@@ -2388,6 +2388,10 @@ run/attempt and artifact identities before sealing success. A late producer
 failure or an inspection failure stops the lane; artifact readiness alone
 cannot release a successful report.
 
+Publication steps come from each producer's exact job-detail endpoint; the
+paginated jobs list can omit them. Detail observations must match the listed
+job, run, attempt and source, and cannot regress previously observed progress.
+
 The loaded-image path freezes all three producer image IDs before running the
 independent config cluster alongside the HTTP/browser phase. All owned groups
 must finish successfully, and the collector compares the cluster's identities
