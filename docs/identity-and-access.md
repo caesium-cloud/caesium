@@ -1907,6 +1907,13 @@ an invalid revision can
 never replace the last good one. An unresolvable target, an empty grant set or a
 failed authorization lookup denies; nothing falls back to an allow.
 
+CI holds this to the route table: the namespace allow/deny matrix
+(`TestAuthNamespaceAllowDenyMatrix`, on the api-key auth lane) drives every route in
+`internal/auth/rbac.go` as a key per role in `default`, `marketing`, `finance` and
+`*`, a job-scoped key and agent-session tokens. It checks each status, that every
+collection lists only rows the caller may read, and that every denial is audited
+against the right namespace. A route added without a matrix row fails that lane.
+
 ## Migration from the env mapping
 
 `CAESIUM_AUTH_ROLE_MAPPING` is deprecated in favour of the policy file but keeps

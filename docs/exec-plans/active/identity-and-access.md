@@ -880,7 +880,7 @@ translated into cluster-wide bindings and behaviour is unchanged.
       `api/rest/controller/event/ingest.go`, `internal/auth/audit.go`,
       `test/event_trigger_test.go`, `docs/identity-and-access.md`.
       Depends on: A3 + A5 + N-1.
-- [ ] A7. The namespace allow/deny matrix: `TestNamespaceAllowDenyMatrix` in `test/`
+- [x] A7. The namespace allow/deny matrix: `TestNamespaceAllowDenyMatrix` in `test/`
       (auth lane, `requireAuthLane`) drives one key per role × namespace (`default`,
       `marketing`, `finance`, `*`) from the H-1 policy fixture through every route
       class against the live api-key server — including a job moved between
@@ -893,6 +893,17 @@ translated into cluster-wide bindings and behaviour is unchanged.
       Files: new `test/auth_namespace_matrix_test.go`, `test/auth_scoped_test.go`
       (shared helpers).
       Depends on: A3 + A5 + B2 + B4 + B5 + B6 + D4 + H-1.
+      (W8-α: the scenario is `TestAuthNamespaceAllowDenyMatrix`, which is what this
+      item and Acceptance Criterion 1 mean by `TestNamespaceAllowDenyMatrix`: only a
+      `TestAuth…` name matches the auth lane's `-run`. The lane-agnostic harness,
+      `runNamespaceMatrix`, the row table and the fixture are
+      `test/auth_namespace_matrix_{harness,rows,fixture}_test.go`; a route with no row
+      fails it. Job-scoped keys and agent tokens stay refused on identity routes (design
+      §8.2 step 4, C1). The moved job's old-run replay proves admission by local mode's
+      409; `TestReplayIntoMovedNamespaceDropsOldFreshnessViews` covers the dispatched
+      path on the distributed lane. The matrix found that `GET /v1/atoms/:id` and
+      `GET /v1/triggers/:id` answered 500 for an unknown id: both now answer 404, and it
+      holds every route that takes an id to no 5xx on unknown ids.)
 - [x] A8. Confine agent-session allow-lists to the incident's namespace (W6-δ: also why baselines, a moved own job's DAG and remediation, executor refusals incl. git-synced patches, legacy-session content withheld from confined readers):
       `FreezeAllowlist` today walks the global lineage graph, so a frozen job list can
       name jobs in other namespaces. At freeze, keep only jobs in the incident's
