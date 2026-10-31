@@ -140,6 +140,10 @@ test("admin's Access page shows grants, namespaces, policy and the users list", 
   await expect(namespaces.getByTestId("access-namespace-row").filter({ hasText: "marketing" })).toHaveCount(1);
   await expect(namespaces.getByTestId("access-namespace-row").filter({ hasText: "finance" })).toHaveCount(1);
   await expect(page.getByTestId("access-policy")).toBeVisible();
+  // The section renders while loading and after a failed request, and shows
+  // "none (no policy file)" when the server has no policy. Only a loaded policy
+  // shows its SHA-256 revision.
+  await expect(page.getByTestId("access-policy-revision")).toHaveText(/^[a-f0-9]{64}$/);
 
   // The users list holds whoever has signed in through SSO: at least the admin.
   const users = page.getByTestId("access-users");
