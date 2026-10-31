@@ -782,9 +782,9 @@ fan-outs were used.
   `build-and-integration-test-keycloak` is the `integration (keycloak)` matrix leg, which
   `ci-ok` requires through `integration`.
 - **Review record:** #697, #701: Codex approved. #699: Codex raised one P2, accepted below. #700: Codex
-  raised three P2s, all fixed; greptile re-reviewed the fix. #703: greptile raised nothing.
-  #700's fix and #703 merged ahead of a Codex round on their final heads, at the user's
-  request, because Codex's account limit had run out.
+  raised three P2s, all fixed. #700's fix and #703 merged ahead of Codex at the user's request,
+  because Codex's account limit had run out; both rounds ran after merge and approved with no
+  findings.
 - **Follow-ups, with no owner:**
   - No coverage journey executes the new `engine.Stop` call (C3). The Kubernetes journey runs
     `local` mode with workers and owners off. Extending it changes a shared gate and would
