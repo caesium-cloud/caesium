@@ -15,6 +15,10 @@
 #                        an unverified OIDC email never satisfies users:
 #     erin@example.com   no group, verified email bound below -> viewer in
 #                        finance (the positive control for dave)
+# - kc-matrix-<role>-<namespace> (namespace "all" = "*"): one group per role and
+#   namespace, so the G3 scenarios can sign in an SSO principal holding any
+#   role in any namespace (users created at runtime through Keycloak's admin
+#   API and joined to these realm groups).
 apiVersion: v1
 kind: AccessPolicy
 namespaces:
@@ -51,3 +55,67 @@ bindings:
       users: ["erin@example.com"]
     role: viewer
     namespaces: ["finance"]
+  - subjects:
+      groups: ["kc-matrix-viewer-default"]
+    role: viewer
+    namespaces: ["default"]
+  - subjects:
+      groups: ["kc-matrix-viewer-marketing"]
+    role: viewer
+    namespaces: ["marketing"]
+  - subjects:
+      groups: ["kc-matrix-viewer-finance"]
+    role: viewer
+    namespaces: ["finance"]
+  - subjects:
+      groups: ["kc-matrix-viewer-all"]
+    role: viewer
+    namespaces: ["*"]
+  - subjects:
+      groups: ["kc-matrix-runner-default"]
+    role: runner
+    namespaces: ["default"]
+  - subjects:
+      groups: ["kc-matrix-runner-marketing"]
+    role: runner
+    namespaces: ["marketing"]
+  - subjects:
+      groups: ["kc-matrix-runner-finance"]
+    role: runner
+    namespaces: ["finance"]
+  - subjects:
+      groups: ["kc-matrix-runner-all"]
+    role: runner
+    namespaces: ["*"]
+  - subjects:
+      groups: ["kc-matrix-operator-default"]
+    role: operator
+    namespaces: ["default"]
+  - subjects:
+      groups: ["kc-matrix-operator-marketing"]
+    role: operator
+    namespaces: ["marketing"]
+  - subjects:
+      groups: ["kc-matrix-operator-finance"]
+    role: operator
+    namespaces: ["finance"]
+  - subjects:
+      groups: ["kc-matrix-operator-all"]
+    role: operator
+    namespaces: ["*"]
+  - subjects:
+      groups: ["kc-matrix-admin-default"]
+    role: admin
+    namespaces: ["default"]
+  - subjects:
+      groups: ["kc-matrix-admin-marketing"]
+    role: admin
+    namespaces: ["marketing"]
+  - subjects:
+      groups: ["kc-matrix-admin-finance"]
+    role: admin
+    namespaces: ["finance"]
+  - subjects:
+      groups: ["kc-matrix-admin-all"]
+    role: admin
+    namespaces: ["*"]

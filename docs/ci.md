@@ -689,7 +689,9 @@ both sit under `ci-ok` and in `publish.needs`.
   document answers, because it reads it at startup.
 - **Fixtures.** `test/testdata/keycloak/caesium-realm.json` (client `caesium`,
   the `groups` scope with a flat Group Membership mapper, users admin, bob,
-  carol, dave with an unverified email, erin), `policy.yaml` (the namespaces
+  carol, dave with an unverified email, erin, one `kc-matrix-<role>-<namespace>`
+  group per role and namespace, and strict refresh-token rotation:
+  `revokeRefreshToken` with no reuse), `policy.yaml` (the namespaces
   of `test/testdata/policy/two-namespaces.yaml` plus the realm's bindings,
   including `caesium-admins`, which the shared fixture must never bind) and
   `jobs/` (one job each in `marketing` and `finance`, applied with the
@@ -701,9 +703,27 @@ both sit under `ci-ok` and in `publish.needs`.
   (`test/keycloak_helpers_test.go`, reusable for G3/G4): admin at `*`, bob
   confined to `marketing` (finance job absent and refused), carol and dave
   denied with `no_binding` and no session (dave's bound email is unverified),
-  erin granted by her verified email. `requireKeycloakLane` fails rather than
-  skips on the lane, and the recipe fails below
-  `keycloak_integration_min_pass` Keycloak passes. The Playwright `keycloak`
+  erin granted by her verified email. G3/G4 add the identity lifecycle with
+  realm users created per scenario through Keycloak's admin REST API (the
+  bootstrap admin, `keycloak_admin_user`): an SSO admin minting a namespaced
+  key, group refresh for a browser session and a CLI-only user with
+  alternating refreshes under strict rotation, `stale_groups` after an IdP
+  outage (the `caesium` client disabled) persisting until re-login,
+  `caesium auth user disable` killing a session and a user-bound key on their
+  next request, an IdP `invalid_grant` revoking both, and the browser-less
+  `caesium login --no-browser` → `--code` → `whoami --json` → `logout` round
+  trip. `TestKeycloakNamespaceAllowDenyMatrix` runs the namespace allow/deny
+  matrix for one SSO session per role and namespace, a runner in two
+  namespaces, and a key an SSO admin minted. For them the lane server alone
+  runs group refresh in seconds
+  (`keycloak_group_refresh_interval` 5s, timeout 3s, maximum staleness 15s;
+  `ui-e2e-keycloak` shares the setting), and the scenarios budget the
+  401s they provoke against the per-IP failure limiter.
+  `requireKeycloakLane` fails rather than skips on the lane, and the recipe
+  requires a top-level `--- PASS` for every scenario named in
+  `keycloak_required_scenarios` and fails on any top-level Keycloak skip (a
+  guardrail keeps that list equal to the `TestKeycloak*` suite methods; subtests
+  never count). The Playwright `keycloak`
   project (`ui/e2e/keycloak*.spec.ts`, helpers in `ui/e2e/helpers/auth.ts`)
   signs each identity in through Keycloak's real login page in its own browser
   context: admin sees both namespaces, chips and the switcher; bob sees only

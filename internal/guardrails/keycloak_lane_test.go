@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/caesium-cloud/caesium/internal/auth/policy"
+	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/caesium-cloud/caesium/pkg/jobdef"
 )
 
@@ -26,6 +27,8 @@ const (
 type keycloakRealmFixture struct {
 	Realm                       string   `json:"realm"`
 	SSLRequired                 string   `json:"sslRequired"`
+	RevokeRefreshToken          bool     `json:"revokeRefreshToken"`
+	RefreshTokenMaxReuse        *int     `json:"refreshTokenMaxReuse"`
 	DefaultDefaultClientScopes  []string `json:"defaultDefaultClientScopes"`
 	DefaultOptionalClientScopes []string `json:"defaultOptionalClientScopes"`
 	ClientScopes                []struct {
@@ -65,6 +68,10 @@ type keycloakRealmFixture struct {
 		} `json:"credentials"`
 	} `json:"users"`
 }
+
+// keycloakMatrixGroup names the realm group bound to role in namespace ns
+// ("all" for every namespace) by the lane policy.
+func keycloakMatrixGroup(role, ns string) string { return "kc-matrix-" + role + "-" + ns }
 
 func readKeycloakRealm(t *testing.T, root string) keycloakRealmFixture {
 	t.Helper()
@@ -123,6 +130,17 @@ func TestKeycloakLanePolicyMatchesTheSharedFixture(t *testing.T) {
 		"group:finance-eng":     {Role: "operator", Namespaces: []string{"finance"}},
 		"user:dave@example.com": {Role: "admin", Namespaces: []string{"*"}},
 		"user:erin@example.com": {Role: "viewer", Namespaces: []string{"finance"}},
+	}
+	// G3: one group per role and namespace for the SSO principals the lane
+	// scenarios sign in (users created at runtime and joined to them).
+	for _, role := range []string{"viewer", "runner", "operator", "admin"} {
+		for _, ns := range []string{"default", "marketing", "finance", "all"} {
+			grant := ns
+			if ns == "all" {
+				grant = "*"
+			}
+			want["group:"+keycloakMatrixGroup(role, ns)] = policy.Binding{Role: models.Role(role), Namespaces: []string{grant}}
+		}
 	}
 	got := map[string]policy.Binding{}
 	for _, b := range lane.Bindings {
@@ -199,9 +217,22 @@ func TestKeycloakRealmFixtureShape(t *testing.T) {
 		}
 	}
 
+	// G3: strict rotation, so a refresh that redeemed a superseded refresh
+	// token fails with invalid_grant instead of passing unnoticed.
+	if !realm.RevokeRefreshToken || realm.RefreshTokenMaxReuse == nil || *realm.RefreshTokenMaxReuse != 0 {
+		t.Error("the realm must revoke refresh tokens on use (revokeRefreshToken true, refreshTokenMaxReuse 0): the G3 rotation scenario relies on it")
+	}
+
 	declared := map[string]bool{}
 	for _, g := range realm.Groups {
 		declared["/"+g.Name] = true
+	}
+	for _, role := range []string{"viewer", "runner", "operator", "admin"} {
+		for _, ns := range []string{"default", "marketing", "finance", "all"} {
+			if !declared["/"+keycloakMatrixGroup(role, ns)] {
+				t.Errorf("the realm must declare group %q (the lane policy binds it)", keycloakMatrixGroup(role, ns))
+			}
+		}
 	}
 	type user struct {
 		verified bool
@@ -323,6 +354,12 @@ func TestKeycloakLaneRecipesMatchTheFixtures(t *testing.T) {
 		"-e CAESIUM_AUTH_OIDC_ISSUER_URL=http://127.0.0.1:{{ keycloak_port }}/realms/" + realm.Realm,
 		"-e CAESIUM_AUTH_OIDC_CLIENT_ID=" + realm.Clients[0].ClientID,
 		"-e CAESIUM_AUTH_OIDC_CLIENT_SECRET=" + realm.Clients[0].Secret,
+		// G3: refresh is due in seconds on this lane only.
+		"-e CAESIUM_AUTH_GROUP_REFRESH_INTERVAL={{ keycloak_group_refresh_interval }}",
+		"-e CAESIUM_AUTH_GROUP_REFRESH_TIMEOUT={{ keycloak_group_refresh_timeout }}",
+		"-e CAESIUM_AUTH_GROUP_MAX_STALENESS={{ keycloak_group_max_staleness }}",
+		"-e KC_BOOTSTRAP_ADMIN_USERNAME={{ keycloak_admin_user }}",
+		"-e KC_BOOTSTRAP_ADMIN_PASSWORD={{ keycloak_admin_password }}",
 		"-v {{ repo_dir }}/test/testdata/keycloak/jobs:/keycloak-jobs:ro",
 		"job apply --path /keycloak-jobs --server http://127.0.0.1:8080",
 	} {
@@ -339,7 +376,13 @@ func TestKeycloakLaneRecipesMatchTheFixtures(t *testing.T) {
 		"-e CAESIUM_KEYCLOAK_REALM=" + realm.Realm,
 		"-e CAESIUM_API_KEY",
 		`-test.run "{{ keycloak_integration_run }}"`,
-		"--- PASS: TestIntegrationTestSuite/TestKeycloak",
+		"-e CAESIUM_KEYCLOAK_ADMIN_USER={{ keycloak_admin_user }}",
+		"-e CAESIUM_KEYCLOAK_ADMIN_PASSWORD={{ keycloak_admin_password }}",
+		"-e CAESIUM_KEYCLOAK_GROUP_REFRESH_INTERVAL={{ keycloak_group_refresh_interval }}",
+		"-e CAESIUM_KEYCLOAK_GROUP_MAX_STALENESS={{ keycloak_group_max_staleness }}",
+		"for scenario in {{ keycloak_required_scenarios }}; do",
+		`--- PASS: TestIntegrationTestSuite/${scenario} \(`,
+		`--- SKIP: TestIntegrationTestSuite/TestKeycloak[A-Za-z0-9_]* \(`,
 	} {
 		if !strings.Contains(test, needle) {
 			t.Errorf("integration-test-keycloak is missing %q", needle)
@@ -373,5 +416,47 @@ func TestKeycloakLaneRecipesMatchTheFixtures(t *testing.T) {
 	}
 	if !strings.Contains(test, `sed -E 's/(csk|css)_[A-Za-z0-9_-]+/[REDACTED_CREDENTIAL]/g' "$log"`) {
 		t.Error("integration-test-keycloak must print the runner log through the credential filter")
+	}
+}
+
+// TestKeycloakRequiredScenariosMatchTheSuite: integration-test-keycloak proves
+// the lane by a top-level PASS per scenario named in
+// keycloak_required_scenarios (G3), so that list must be exactly the
+// TestKeycloak* suite methods in test/: a new scenario left off it would be
+// allowed to skip, a stale name would fail every run.
+func TestKeycloakRequiredScenariosMatchTheSuite(t *testing.T) {
+	root := repoRoot(t)
+	justfileBytes, err := os.ReadFile(filepath.Join(root, "justfile"))
+	if err != nil {
+		t.Fatalf("read justfile: %v", err)
+	}
+	m := regexp.MustCompile(`(?m)^keycloak_required_scenarios := env\("CAESIUM_KEYCLOAK_REQUIRED_SCENARIOS", "([^"]*)"\)$`).FindStringSubmatch(string(justfileBytes))
+	if m == nil {
+		t.Fatal(`justfile must define keycloak_required_scenarios := env("CAESIUM_KEYCLOAK_REQUIRED_SCENARIOS", "<names>")`)
+	}
+	required := strings.Fields(m[1])
+
+	method := regexp.MustCompile(`(?m)^func \(s \*IntegrationTestSuite\) (TestKeycloak[A-Za-z0-9_]*)\(\)`)
+	files, err := filepath.Glob(filepath.Join(root, "test", "*_test.go"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var defined []string
+	for _, file := range files {
+		raw, err := os.ReadFile(file)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, sm := range method.FindAllStringSubmatch(string(raw), -1) {
+			defined = append(defined, sm[1])
+		}
+	}
+	slices.Sort(required)
+	slices.Sort(defined)
+	if len(defined) == 0 {
+		t.Fatal("no TestKeycloak* suite methods found under test/; the scan is broken")
+	}
+	if !slices.Equal(required, defined) {
+		t.Errorf("keycloak_required_scenarios drifted from the suite:\njustfile: %v\ntest/:    %v", required, defined)
 	}
 }

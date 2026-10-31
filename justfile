@@ -91,10 +91,22 @@ keycloak_it_container := "caesium-keycloak-test"
 keycloak_server_container := "caesium-server-keycloak-test"
 keycloak_apply_container := "caesium-keycloak-apply"
 keycloak_runner_container := "caesium-keycloak-runner"
-# Suite-qualified (a bare method name matches nothing), with the same hollow
-# lane floor as the other -run lanes: one PASS per Keycloak scenario.
+# Suite-qualified (a bare method name matches nothing). The lane is not
+# proved by a count: integration-test-keycloak requires a top-level PASS for
+# every scenario named in keycloak_required_scenarios and fails on any
+# top-level Keycloak SKIP (internal/guardrails keeps the list equal to the
+# TestKeycloak* methods in test/). Subtests never count.
 keycloak_integration_run := env("CAESIUM_KEYCLOAK_INTEGRATION_RUN", "TestIntegrationTestSuite/TestKeycloak")
-keycloak_integration_min_pass := env("CAESIUM_KEYCLOAK_INTEGRATION_MIN_PASS", "5")
+keycloak_required_scenarios := env("CAESIUM_KEYCLOAK_REQUIRED_SCENARIOS", "TestKeycloakSSOAdminLogin TestKeycloakSSOConfinedLogin TestKeycloakSSONoBindingDenied TestKeycloakSSOUnverifiedEmailDenied TestKeycloakSSOVerifiedEmailBinding TestKeycloakSSOAdminMintsNamespacedKey TestKeycloakGroupRefreshBrowserSession TestKeycloakGroupRefreshCLIOnlyAndRotation TestKeycloakStaleGroupsAfterIdPOutage TestKeycloakUserDisableKillsCredentials TestKeycloakCLILoginRoundTrip TestKeycloakIdPRevocationRevokesCredentials TestKeycloakNamespaceAllowDenyMatrix")
+# The Keycloak bootstrap admin (master realm). The G3 scenarios drive the
+# realm's admin REST API with it (group moves, user and client changes).
+keycloak_admin_user := "kc-lane-admin"
+keycloak_admin_password := "kc-lane-admin-console-password"
+# G3 (design §11.1): group refresh is made due in seconds, not 15 minutes,
+# on this lane only (the Go scenarios and ui-e2e-keycloak share it).
+keycloak_group_refresh_interval := "5s"
+keycloak_group_refresh_timeout := "3s"
+keycloak_group_max_staleness := "15s"
 
 # Local Docker registry used by `just k8s-distributed` to push freshly-built
 # images into the cluster's containerd. Port 5050 sidesteps the macOS
@@ -1206,8 +1218,8 @@ integration-up-keycloak: build-stress build-test
     {{ container_cli }} run -d --platform {{ platform }} --name {{ keycloak_it_container }} \
         -p 127.0.0.1:8080:8080 -p 127.0.0.1:{{ keycloak_port }}:{{ keycloak_port }} \
         -v {{ repo_dir }}/test/testdata/keycloak/caesium-realm.json:/opt/keycloak/data/import/caesium-realm.json:ro \
-        -e KC_BOOTSTRAP_ADMIN_USERNAME=kc-lane-admin \
-        -e KC_BOOTSTRAP_ADMIN_PASSWORD=kc-lane-admin-console-password \
+        -e KC_BOOTSTRAP_ADMIN_USERNAME={{ keycloak_admin_user }} \
+        -e KC_BOOTSTRAP_ADMIN_PASSWORD={{ keycloak_admin_password }} \
         -e "JAVA_OPTS_KC_HEAP=-Xms256m -Xmx768m" \
         {{ keycloak_image }} start-dev --import-realm --http-port={{ keycloak_port }} --hostname=http://127.0.0.1:{{ keycloak_port }} >/dev/null
     tries=0
@@ -1234,6 +1246,9 @@ integration-up-keycloak: build-stress build-test
         -e CAESIUM_AUTH_OIDC_ISSUER_URL=http://127.0.0.1:{{ keycloak_port }}/realms/caesium \
         -e CAESIUM_AUTH_OIDC_CLIENT_ID=caesium \
         -e CAESIUM_AUTH_OIDC_CLIENT_SECRET=caesium-keycloak-lane-client-secret \
+        -e CAESIUM_AUTH_GROUP_REFRESH_INTERVAL={{ keycloak_group_refresh_interval }} \
+        -e CAESIUM_AUTH_GROUP_REFRESH_TIMEOUT={{ keycloak_group_refresh_timeout }} \
+        -e CAESIUM_AUTH_GROUP_MAX_STALENESS={{ keycloak_group_max_staleness }} \
         -e CAESIUM_MANUAL_TRIGGER_API_KEY=integration-test-key \
         -e CAESIUM_EVENT_INGEST_API_KEY={{ event_ingest_api_key }} \
         -e CAESIUM_LOG_LEVEL=debug \
@@ -1289,8 +1304,8 @@ integration-up-keycloak: build-stress build-test
 # Runs the TestKeycloak* scenarios against integration-up-keycloak. The trap
 # is installed before startup: on failure it prints redacted logs first, then
 # (always) removes every lane container, and the recipe exits with the
-# original status. A run that executes fewer than keycloak_integration_min_pass
-# Keycloak scenarios fails as hollow.
+# original status. A run that lacks a top-level pass for any scenario in
+# keycloak_required_scenarios, or that skips one, fails as hollow.
 integration-test-keycloak: integration-runner
     #!/usr/bin/env bash
     set -euo pipefail
@@ -1332,6 +1347,10 @@ integration-test-keycloak: integration-runner
         -e CAESIUM_KEYCLOAK_LANE=true \
         -e CAESIUM_KEYCLOAK_URL=http://127.0.0.1:{{ keycloak_port }} \
         -e CAESIUM_KEYCLOAK_REALM=caesium \
+        -e CAESIUM_KEYCLOAK_ADMIN_USER={{ keycloak_admin_user }} \
+        -e CAESIUM_KEYCLOAK_ADMIN_PASSWORD={{ keycloak_admin_password }} \
+        -e CAESIUM_KEYCLOAK_GROUP_REFRESH_INTERVAL={{ keycloak_group_refresh_interval }} \
+        -e CAESIUM_KEYCLOAK_GROUP_MAX_STALENESS={{ keycloak_group_max_staleness }} \
         -e CAESIUM_MANUAL_TRIGGER_API_KEY=integration-test-key \
         -e CAESIUM_EVENT_INGEST_API_KEY={{ event_ingest_api_key }} \
         -w {{ bld_dir }} \
@@ -1339,12 +1358,22 @@ integration-test-keycloak: integration-runner
         sh -c 'sh scripts/integration-test.sh -test.run "{{ keycloak_integration_run }}"' >"$log" 2>&1 || rc=$?
     sed -E 's/(csk|css)_[A-Za-z0-9_-]+/[REDACTED_CREDENTIAL]/g' "$log"
     [ "$rc" -eq 0 ] || { echo "Keycloak lane scenarios failed (exit $rc)" >&2; exit "$rc"; }
-    passes="$(grep -cE '^[[:space:]]*--- PASS: TestIntegrationTestSuite/TestKeycloak' "$log" || true)"
-    if [ "${passes:-0}" -lt {{ keycloak_integration_min_pass }} ]; then
-        echo "Keycloak lane executed only ${passes:-0} Keycloak scenario(s), expected at least {{ keycloak_integration_min_pass }}: the lane is hollow" >&2
-        exit 1
+    passes=0
+    hollow=0
+    for scenario in {{ keycloak_required_scenarios }}; do
+        if grep -qE "^[[:space:]]*--- PASS: TestIntegrationTestSuite/${scenario} \(" "$log"; then
+            passes=$((passes + 1))
+        else
+            echo "Keycloak lane: required scenario ${scenario} did not PASS (absent, skipped or failed)" >&2
+            hollow=1
+        fi
+    done
+    if grep -E '^[[:space:]]*--- SKIP: TestIntegrationTestSuite/TestKeycloak[A-Za-z0-9_]* \(' "$log" >&2; then
+        echo "Keycloak lane: a Keycloak scenario skipped on its own lane" >&2
+        hollow=1
     fi
-    echo "Keycloak lane executed $passes Keycloak scenario(s) (minimum {{ keycloak_integration_min_pass }})"
+    [ "$hollow" -eq 0 ] || { echo "Keycloak lane is hollow" >&2; exit 1; }
+    echo "Keycloak lane: all $passes required Keycloak scenarios passed"
 
 integration-down-keycloak:
     @{{ container_cli }} rm -f {{ keycloak_runner_container }} {{ keycloak_apply_container }} {{ keycloak_server_container }} {{ keycloak_it_container }} >/dev/null 2>&1 || true

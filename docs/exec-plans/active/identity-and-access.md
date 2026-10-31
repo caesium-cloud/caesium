@@ -1581,7 +1581,7 @@ group refresh, user disable, CLI login) is asserted here against a live Keycloak
       `ui/e2e/helpers/auth.ts`.
       Depends on: G1 + F2 + F3.
       (W8-δ: journeys in `ui/e2e/keycloak.spec.ts` and `keycloak-quota.spec.ts`; each identity signs in on its own browser context; jobs are seeded as the SSO admin over the cookie session + CSRF; `playwright.config.ts` needed no change.)
-- [ ] G3. Go scenarios on the lane (`CAESIUM_KEYCLOAK_LANE=true`): a cookie-jar client
+- [x] G3. Go scenarios on the lane (`CAESIUM_KEYCLOAK_LANE=true`): a cookie-jar client
       drives the OIDC code flow through Keycloak's HTML login form; the SSO
       allow/deny matrix; an SSO admin mints a namespaced key (A5's fix); group refresh
       (move bob via Keycloak's admin REST API, advance past the interval, grants change
@@ -1590,12 +1590,20 @@ group refresh, user disable, CLI login) is asserted here against a live Keycloak
       Files: new `test/keycloak_lane_test.go`, new `test/keycloak_helpers_test.go`,
       `test/auth_lane_test.go` (lane detection).
       Depends on: G1 + E2 + E3.
-- [ ] G4. CLI login on the lane: `caesium login --no-browser` prints the start URL, the
+      (W8-β: `TestKeycloakNamespaceAllowDenyMatrix` runs A7's harness for 17 SSO sessions
+      plus the key an SSO admin mints; group refresh, rotation, `stale_groups`, disable
+      and `invalid_grant` run on per-scenario realm users, so bob stays as G1 and G2
+      expect. The recipe requires a top-level PASS per scenario by name.)
+- [x] G4. CLI login on the lane: `caesium login --no-browser` prints the start URL, the
       test completes the SSO flow with the cookie-jar client, pastes the code with
       `caesium login --code`, `caesium whoami --json` shows bob's grants, disabling bob
       makes the next call 401, `caesium logout` cleans the credential file.
       Files: `test/keycloak_lane_test.go`.
       Depends on: G1 + E5.
+      (W8-β: `TestKeycloakCLILoginRoundTrip` follows the signed-out finish page's OIDC
+      link, confirms with the CSRF POST and logs out with the key revoked server side;
+      the disable-kills-the-key step runs on a per-scenario realm user in
+      `TestKeycloakUserDisableKillsCredentials`, so bob stays as G1 and G2 expect.)
 - [x] G5. (W5-γ: the guide's Keycloak section and docs/ci.md "Keycloak lane".)
       Keycloak operator guidance in the guide (client, mapper, scopes, refresh
       tokens, issuer URL discovery) and the lane in `docs/ci.md`.
