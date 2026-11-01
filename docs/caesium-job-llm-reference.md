@@ -573,6 +573,7 @@ to executions admitted after all replicas run the upgraded version.
 caesium job lint --path jobs/           # Validate YAML schemas and DAG topology
 caesium job preview --path job.yaml     # ASCII DAG visualization
 caesium dev --once --path job.yaml      # Run job locally against Docker
+caesium dev --once --path job.yaml --param date=2026-09-15  # Override one trigger.defaultParams key; other defaults still apply
 caesium dev --path job.yaml             # Watch mode — re-run on file save
 caesium job diff --path jobs/           # Preview creates/updates vs server (add --prune for deletes)
 caesium job apply --path jobs/          # Deploy definitions to running server
@@ -630,12 +631,16 @@ to `env`, `spec`/node selectors, `retries`, `cache`, schemas, `sla`, or
 
 Use harness scenarios when you want executable assertions instead of schema-only validation. Scenario files should use a `.scenario.yaml` suffix and the `Harness` kind.
 
+A scenario `params` map overrides `trigger.defaultParams` the same way `--param` does for `caesium dev`. Keys you omit keep the manifest default.
+
 ```yaml
 apiVersion: v1
 kind: Harness
 scenarios:
   - name: nightly-etl-smoke
     path: ./nightly-etl.job.yaml
+    params:
+      date: "2026-09-15"
     expect:
       runStatus: succeeded
       tasks:
