@@ -39,11 +39,18 @@ import (
 //     a boot, and a failed read restarts the wait the same way.
 //   - The first write only marks the run. A mark has to pass through the same
 //     writer as the renewals, so its commit proves any stall is over, and any
-//     live peer then has a beat to overwrite it before the final write, which is
-//     a compare-and-swap on the mark.
+//     live peer then has runMarkGrace to overwrite it before the final write,
+//     which is a compare-and-swap on the mark.
+//
+// The database can hold a read or a write for longer than these waits, so the
+// clock must never count a stall as time a peer had to act. A wait therefore
+// STARTS from a reading taken after the operation it depends on returned, and
+// ENDS by a reading taken before the read that shows the value still unchanged,
+// since that read may have seen the row at any moment after it began. Each errs
+// towards waiting longer.
 //
 // That covers a stall on the writer. It cannot cover a live peer that stays cut
-// off from the leader for a TTL and a beat while the sweeper can still write:
+// off from the leader for a TTL and the grace while the sweeper can still write:
 // that peer is indistinguishable from a dead one. Its run is failed though it
 // was healthy, which is why the cost is bounded: nothing is executed twice, the
 // peer's cancel reconciler stops its engine once it can read again, callbacks
@@ -59,6 +66,11 @@ const maxRunAdoptions = 3
 // runDriverBeat is how often a heartbeat is written and runs are swept: a live
 // driver gets several chances to renew inside one TTL.
 func runDriverBeat(ttl time.Duration) time.Duration { return ttl / 3 }
+
+// runMarkGrace is how long a mark stands before the final write. Two beats give
+// a live driver a whole renewal tick after the writer clears even if the first
+// landed just before the mark, and room for one retrying on contention.
+func runMarkGrace(ttl time.Duration) time.Duration { return 2 * runDriverBeat(ttl) }
 
 // StartRunDriverHeartbeat renews the heartbeat of every run this process is
 // driving until ctx is done. The cancel registry already holds exactly that set,
@@ -154,13 +166,14 @@ func StartRunRecovery(ctx context.Context, cfg RunRecoveryConfig) {
 }
 
 func (r *runRecovery) sweep(ctx context.Context) {
-	now := r.now()
+	readAt := r.now()
 	runs, err := r.cfg.Store.RunHeartbeats(ctx)
+	seenAt := r.now()
 	if err != nil {
 		// While nothing can be read, nothing was observed, and renewals may not
 		// be landing either.
 		for _, seen := range r.observed {
-			seen.changedAt, seen.marked = now, false
+			seen.changedAt, seen.marked = seenAt, false
 		}
 		if ctx.Err() == nil {
 			log.Warn("run recovery could not read running runs", "error", err)
@@ -176,21 +189,21 @@ func (r *runRecovery) sweep(ctx context.Context) {
 		running[current.ID] = struct{}{}
 		seen, known := r.observed[current.ID]
 		if !known {
-			r.observed[current.ID] = &runObservation{heartbeat: current.Heartbeat, changedAt: now}
+			r.observed[current.ID] = &runObservation{heartbeat: current.Heartbeat, changedAt: seenAt}
 			continue
 		}
 		if r.driving(current.ID) || !sameHeartbeat(seen.heartbeat, current.Heartbeat) {
-			seen.heartbeat, seen.changedAt, seen.marked = current.Heartbeat, now, false
+			seen.heartbeat, seen.changedAt, seen.marked = current.Heartbeat, seenAt, false
 			continue
 		}
 		wait := r.cfg.TTL
 		if seen.marked {
-			wait = runDriverBeat(r.cfg.TTL)
+			wait = runMarkGrace(r.cfg.TTL)
 		}
-		if ctx.Err() != nil || now.Sub(seen.changedAt) < wait {
+		if ctx.Err() != nil || readAt.Sub(seen.changedAt) < wait {
 			continue
 		}
-		if err := r.advance(ctx, current, seen, now); err != nil {
+		if err := r.advance(ctx, current, seen); err != nil {
 			log.Error("run recovery failed; a later sweep retries",
 				"job_id", current.JobID, "run_id", current.ID, "error", err)
 		}
@@ -212,13 +225,13 @@ func sameHeartbeat(a, b *time.Time) bool {
 // advance takes a run whose heartbeat stopped changing one step closer to an
 // outcome. A swap that loses needs no handling: the next sweep sees the value
 // that beat it and restarts the wait.
-func (r *runRecovery) advance(ctx context.Context, current run.RunHeartbeat, seen *runObservation, now time.Time) error {
+func (r *runRecovery) advance(ctx context.Context, current run.RunHeartbeat, seen *runObservation) error {
 	if !seen.marked {
 		mark, err := r.cfg.Store.ReplaceRunHeartbeat(ctx, current.ID, seen.heartbeat)
 		if err != nil || mark == nil {
 			return err
 		}
-		seen.heartbeat, seen.changedAt, seen.marked = mark, now, true
+		seen.heartbeat, seen.changedAt, seen.marked = mark, r.now(), true
 		return nil
 	}
 
@@ -238,7 +251,7 @@ func (r *runRecovery) advance(ctx context.Context, current run.RunHeartbeat, see
 	if err != nil || claim == nil {
 		return err
 	}
-	seen.heartbeat, seen.changedAt, seen.marked = claim, now, false
+	seen.heartbeat, seen.changedAt, seen.marked = claim, r.now(), false
 	seen.adoptions++
 	log.Warn("adopting a run whose driver stopped", "job_id", current.JobID, "run_id", current.ID, "adoption", seen.adoptions)
 	return r.cfg.Adopt(ctx, current.JobID, current.ID)
@@ -251,7 +264,7 @@ func (r *runRecovery) finalize(ctx context.Context, current run.RunHeartbeat, se
 	}
 	log.Warn("failed a run whose driver stopped before it finished",
 		"job_id", current.JobID, "run_id", current.ID, "adoptions", seen.adoptions)
-	// No engine remains to do this, and only the call that finalized may.
+	// No engine remains to do this.
 	if err := r.cfg.DispatchCallbacks(context.WithoutCancel(ctx), current.JobID, current.ID, run.ErrRunDriverLost); err != nil {
 		log.Error("callback dispatch failure", "job_id", current.JobID, "run_id", current.ID, "error", err)
 	}

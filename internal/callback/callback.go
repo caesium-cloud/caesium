@@ -20,6 +20,7 @@ import (
 	"github.com/caesium-cloud/caesium/pkg/log"
 	"github.com/google/uuid"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 // Handler executes a callback with the provided configuration and metadata.
@@ -156,13 +157,50 @@ func (d *Dispatcher) WithHTTPClient(client *http.Client) {
 }
 
 // Dispatch loads callbacks for the job and executes them sequentially.
+//
+// More than one process can finish the same run: a driver presumed dead that
+// thaws beside the server that recovered or adopted its run, or two processes
+// waiting on a distributed run. So the attempt row is also the claim: the first
+// dispatcher of each callback wins that completion (see completionKey), and the
+// rest skip it without delivering. This has to be per callback, not per run. A
+// claimer that dies partway leaves its undelivered callbacks free for another
+// dispatcher, and losing a callback is worse than sending one twice.
 func (d *Dispatcher) Dispatch(ctx context.Context, jobID, runID uuid.UUID, runErr error) error {
 	dispatchCtx := ensureContext(ctx)
 	meta, callbacks, err := d.prepare(dispatchCtx, jobID, runID, runErr)
 	if err != nil {
 		return err
 	}
-	return d.execute(dispatchCtx, meta, callbacks)
+	key, err := d.completionKey(dispatchCtx, runID)
+	if err != nil {
+		return fmt.Errorf("load run completion: %w", err)
+	}
+	return d.execute(dispatchCtx, meta, callbacks, key)
+}
+
+// completionKey identifies one completion of a run. It is the run's execution
+// window, which every reopen moves (run.Store.readmitRetryTx), so a retried run
+// delivers its callbacks again. It is only ever compared for equality, so clocks
+// do not matter. A row from before the window was recorded uses started_at, as
+// the run deadline does.
+//
+// A run still running has no completion to claim, and gets a nil key. An engine
+// whose completion write failed dispatches anyway, and the claim must stay free
+// for whoever really finalizes that run.
+func (d *Dispatcher) completionKey(ctx context.Context, runID uuid.UUID) (*string, error) {
+	var row models.JobRun
+	if err := d.db.WithContext(ctx).Select("status", "started_at", "timeout_started_at").First(&row, "id = ?", runID).Error; err != nil {
+		return nil, err
+	}
+	if row.Status == string(run.StatusRunning) {
+		return nil, nil
+	}
+	window := row.StartedAt
+	if row.TimeoutStartedAt != nil {
+		window = *row.TimeoutStartedAt
+	}
+	key := window.UTC().Format(time.RFC3339Nano)
+	return &key, nil
 }
 
 // RetryFailed retries callbacks for the supplied run that most recently failed.
@@ -217,7 +255,7 @@ func (d *Dispatcher) RetryFailed(ctx context.Context, runID uuid.UUID) error {
 		return nil
 	}
 
-	return d.execute(dispatchCtx, meta, retryCallbacks)
+	return d.execute(dispatchCtx, meta, retryCallbacks, nil)
 }
 
 func lookupHandler(t models.CallbackType) (Handler, bool) {
@@ -305,14 +343,14 @@ func (d *Dispatcher) prepare(ctx context.Context, jobID, runID uuid.UUID, runErr
 	return meta, callbacks, nil
 }
 
-func (d *Dispatcher) execute(ctx context.Context, meta Metadata, callbacks []models.Callback) error {
+func (d *Dispatcher) execute(ctx context.Context, meta Metadata, callbacks []models.Callback, completion *string) error {
 	if len(callbacks) == 0 {
 		return nil
 	}
 
 	var errs []error
 	for _, cb := range callbacks {
-		if err := d.invokeCallback(ctx, cb, meta); err != nil {
+		if err := d.invokeCallback(ctx, cb, meta, completion); err != nil {
 			errs = append(errs, err)
 		}
 	}
@@ -323,20 +361,26 @@ func (d *Dispatcher) execute(ctx context.Context, meta Metadata, callbacks []mod
 	return nil
 }
 
-func (d *Dispatcher) invokeCallback(ctx context.Context, cb models.Callback, meta Metadata) error {
+func (d *Dispatcher) invokeCallback(ctx context.Context, cb models.Callback, meta Metadata, completion *string) error {
 	started := time.Now().UTC()
 
 	runRecord := &models.CallbackRun{
-		ID:         uuid.New(),
-		CallbackID: cb.ID,
-		JobID:      meta.JobID,
-		JobRunID:   meta.RunID,
-		Status:     models.CallbackRunStatusRunning,
-		StartedAt:  started,
+		ID:            uuid.New(),
+		CallbackID:    cb.ID,
+		JobID:         meta.JobID,
+		JobRunID:      meta.RunID,
+		Status:        models.CallbackRunStatusRunning,
+		StartedAt:     started,
+		CompletionKey: completion,
 	}
 
-	if err := d.createAttempt(ctx, runRecord); err != nil {
+	claimed, err := d.createAttempt(ctx, runRecord)
+	if err != nil {
 		return fmt.Errorf("record callback run: %w", err)
+	}
+	if !claimed {
+		log.Info("callback already dispatched for this run completion", "callback_id", cb.ID, "run_id", meta.RunID)
+		return nil
 	}
 	metrics.DBWritesTotal.WithLabelValues(metrics.DBWriteCategoryCallback).Inc()
 	metrics.DBStatementsTotal.WithLabelValues(metrics.DBWriteCategoryCallback).Inc()
@@ -416,15 +460,21 @@ const attemptOrdinalSQL = "(SELECT COUNT(*) FROM callback_runs WHERE callback_id
 // inside a transaction bypass the connection pool's per-statement retry (see
 // pkg/db/retry.go); a rolled-back attempt leaves no row, so re-running it is
 // safe and re-reads the ordinal.
-func (d *Dispatcher) createAttempt(ctx context.Context, record *models.CallbackRun) error {
+//
+// It reports whether the row was inserted. A record carrying a CompletionKey
+// loses to another dispatcher's row for the same completion, which the unique
+// index decides in this same statement, and the caller must not deliver.
+func (d *Dispatcher) createAttempt(ctx context.Context, record *models.CallbackRun) (bool, error) {
 	now := time.Now().UTC()
 
-	return withAttemptContentionRetry(ctx, func() error {
+	var claimed bool
+	err := withAttemptContentionRetry(ctx, func() error {
 		return d.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+			claimed = false
 			if err := lockCallbackForAttemptTx(tx, record.CallbackID); err != nil {
 				return err
 			}
-			return tx.Model(&models.CallbackRun{}).Create(map[string]any{
+			insert := tx.Model(&models.CallbackRun{}).Clauses(clause.OnConflict{DoNothing: true}).Create(map[string]any{
 				"id":          record.ID,
 				"callback_id": record.CallbackID,
 				"job_id":      record.JobID,
@@ -434,14 +484,18 @@ func (d *Dispatcher) createAttempt(ctx context.Context, record *models.CallbackR
 				"http_status": 0,
 				// Written by completeCallbackRun; the column is NOT NULL, so a
 				// map-based insert has to name it.
-				"response_body": "",
-				"retry_count":   gorm.Expr(attemptOrdinalSQL, record.CallbackID, record.JobRunID),
-				"started_at":    record.StartedAt,
-				"created_at":    now,
-				"updated_at":    now,
-			}).Error
+				"response_body":  "",
+				"retry_count":    gorm.Expr(attemptOrdinalSQL, record.CallbackID, record.JobRunID),
+				"completion_key": record.CompletionKey,
+				"started_at":     record.StartedAt,
+				"created_at":     now,
+				"updated_at":     now,
+			})
+			claimed = insert.Error == nil && insert.RowsAffected == 1
+			return insert.Error
 		})
 	})
+	return claimed, err
 }
 
 // lockCallbackForAttemptTx takes the per-callback allocation lock the dialect

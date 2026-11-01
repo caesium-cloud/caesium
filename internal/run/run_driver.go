@@ -27,7 +27,7 @@ import (
 // still running or already succeeded is not recorded anywhere, so neither a
 // success nor a re-execution can be justified. `caesium run retry` is how an
 // operator accepts the re-execution. The text is persisted on the run and its
-// tasks; CancelledRunIDs and RunDriverLost match it exactly.
+// tasks; CancelledRunIDs matches it exactly.
 var ErrRunDriverLost = errors.New("the server driving this run stopped before it finished; " +
 	"its unfinished tasks were not re-executed, and a container one of them started may still be running")
 
@@ -110,16 +110,6 @@ func (s *Store) FinalizeLostRun(runID uuid.UUID, observed *time.Time) (bool, err
 	return s.completeIfActive(runID, ErrRunDriverLost, func(q *gorm.DB) *gorm.DB {
 		return heartbeatIs(q, observed)
 	})
-}
-
-// RunDriverLost reports whether recovery finalized the run. Recovery dispatches
-// that run's callbacks itself, so a driver presumed dead must not add its own.
-func (s *Store) RunDriverLost(ctx context.Context, runID uuid.UUID) (bool, error) {
-	var count int64
-	err := s.db.WithContext(ctx).Model(&models.JobRun{}).
-		Where("id = ? AND status = ? AND error = ?", runID, string(StatusFailed), ErrRunDriverLost.Error()).
-		Count(&count).Error
-	return count > 0, err
 }
 
 // RunTasksSettled reports whether the run has task rows and all of them are

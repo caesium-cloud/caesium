@@ -179,21 +179,6 @@ func TestFinalizeLostRunSettlesARunStillHoldingTheValue(t *testing.T) {
 	again, err := store.FinalizeLostRun(runID, readHeartbeat(t, db, runID))
 	require.NoError(t, err)
 	require.False(t, again, "a run is finalized once")
-
-	lost, err := store.RunDriverLost(context.Background(), runID)
-	require.NoError(t, err)
-	require.True(t, lost)
-}
-
-func TestRunDriverLostIgnoresOrdinaryFailures(t *testing.T) {
-	store, _ := driverTestStore(t)
-	started, err := store.Start(uuid.New(), nil)
-	require.NoError(t, err)
-	require.NoError(t, store.Complete(started.ID, errors.New("task failed")))
-
-	lost, err := store.RunDriverLost(context.Background(), started.ID)
-	require.NoError(t, err)
-	require.False(t, lost)
 }
 
 func TestRenewRunDriversLeavesOtherRunsAlone(t *testing.T) {

@@ -10,6 +10,7 @@ import (
 	"github.com/caesium-cloud/caesium/internal/run"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
+	"gorm.io/gorm"
 )
 
 type recoveryHarness struct {
@@ -23,8 +24,11 @@ type recoveryHarness struct {
 }
 
 const (
-	recoveryTestTTL  = 30 * time.Second
-	recoveryTestBeat = recoveryTestTTL / 3
+	recoveryTestTTL   = 30 * time.Second
+	recoveryTestBeat  = recoveryTestTTL / 3
+	recoveryTestGrace = 2 * recoveryTestBeat
+	// recoveryTestStall is a writer stall longer than any wait in recovery.
+	recoveryTestStall = 35 * time.Second
 )
 
 func newRecoveryHarness(t *testing.T, mode string) *recoveryHarness {
@@ -72,7 +76,32 @@ func (h *recoveryHarness) recoverAll(t *testing.T) {
 	t.Helper()
 	h.recovery.sweep(t.Context())
 	h.sweepAfter(t, recoveryTestTTL)
-	h.sweepAfter(t, recoveryTestBeat)
+	h.sweepAfter(t, recoveryTestGrace)
+}
+
+// stallNextUpdate holds the next write on the database for d of harness time, as
+// a stalled writer would: the clock moves while the statement waits.
+func (h *recoveryHarness) stallNextUpdate(t *testing.T, d time.Duration) {
+	t.Helper()
+	fired := false
+	require.NoError(t, h.store.DB().Callback().Update().Before("gorm:update").Replace("test:stall-update", func(*gorm.DB) {
+		if !fired {
+			fired = true
+			h.clock = h.clock.Add(d)
+		}
+	}))
+}
+
+// stallNextRead is stallNextUpdate for the next read of the run heartbeats.
+func (h *recoveryHarness) stallNextRead(t *testing.T, d time.Duration) {
+	t.Helper()
+	fired := false
+	require.NoError(t, h.store.DB().Callback().Query().Before("gorm:query").Replace("test:stall-read", func(*gorm.DB) {
+		if !fired {
+			fired = true
+			h.clock = h.clock.Add(d)
+		}
+	}))
 }
 
 func (h *recoveryHarness) renew(t *testing.T, runID uuid.UUID) {
@@ -217,7 +246,7 @@ func TestRecoveryLosesToARenewalThatCommitsAfterItsRead(t *testing.T) {
 			UpdateColumn("driver_heartbeat_at", stampedBeforeItQueued).Error)
 	}
 	h.sweepAfter(t, recoveryTestTTL)
-	h.sweepAfter(t, recoveryTestBeat)
+	h.sweepAfter(t, recoveryTestGrace)
 
 	require.Equal(t, run.StatusRunning, h.status(t, runID), "a healthy run was failed by a slow renewal")
 	require.True(t, h.recovery.observed[runID].heartbeat.Equal(stampedBeforeItQueued), "the sweep must take the new value as a sign of life")
@@ -235,10 +264,86 @@ func TestARenewalBehindTheMarkSavesTheRun(t *testing.T) {
 	require.True(t, h.recovery.observed[runID].marked)
 
 	h.renew(t, runID)
-	h.sweepAfter(t, recoveryTestBeat)
+	h.sweepAfter(t, recoveryTestGrace)
 
 	require.Equal(t, run.StatusRunning, h.status(t, runID))
 	require.Empty(t, h.callbacks)
+}
+
+// The second review's ordering: the mark waited on the stalled writer, and the
+// next sweep arrives BEFORE the healthy driver's renewal could land behind it.
+// The grace has to start when the mark committed, or the stall itself uses it up.
+func TestADelayedMarkStillGivesTheDriverItsGrace(t *testing.T) {
+	h := newRecoveryHarness(t, executionModeLocal)
+	runID := h.startRun(t, run.TaskStatusRunning)
+	h.recovery.sweep(t.Context())
+
+	h.stallNextUpdate(t, recoveryTestStall)
+	h.sweepAfter(t, recoveryTestTTL)
+	require.True(t, h.recovery.observed[runID].marked)
+
+	h.sweepAfter(t, time.Second)
+	require.Equal(t, run.StatusRunning, h.status(t, runID), "the stall used up the grace, so a healthy run failed before its renewal landed")
+	require.Empty(t, h.callbacks)
+
+	h.renew(t, runID)
+	h.sweepAfter(t, recoveryTestGrace)
+	require.Equal(t, run.StatusRunning, h.status(t, runID))
+	require.False(t, h.recovery.observed[runID].marked)
+}
+
+// A slow mark delays recovery of a run that really is dead. It does not stop it.
+func TestADelayedMarkStillRecoversADeadRun(t *testing.T) {
+	h := newRecoveryHarness(t, executionModeLocal)
+	runID := h.startRun(t, run.TaskStatusRunning)
+	h.recovery.sweep(t.Context())
+
+	h.stallNextUpdate(t, recoveryTestStall)
+	h.sweepAfter(t, recoveryTestTTL)
+	h.sweepAfter(t, recoveryTestGrace)
+
+	require.Equal(t, run.StatusFailed, h.status(t, runID))
+}
+
+// The same class on the adoption path: the wait for a new driver's first renewal
+// starts when the claim committed, not when it was attempted.
+func TestADelayedClaimDoesNotReMarkTheAdoptedRun(t *testing.T) {
+	h := newRecoveryHarness(t, executionModeDistributed)
+	runID := h.startRun(t, run.TaskStatusRunning)
+	h.recovery.sweep(t.Context())
+	h.sweepAfter(t, recoveryTestTTL)
+
+	h.stallNextUpdate(t, recoveryTestStall)
+	h.sweepAfter(t, recoveryTestGrace)
+	require.Equal(t, []uuid.UUID{runID}, h.adopted)
+
+	h.sweepAfter(t, time.Second)
+	require.False(t, h.recovery.observed[runID].marked, "the stall was counted as time the new driver had to renew")
+}
+
+// And on the read. The read may have seen the row at any moment after it began,
+// so a stall inside it cannot prove the value stayed unchanged that long.
+func TestAStalledReadIsNotCountedAsUnchangedTime(t *testing.T) {
+	h := newRecoveryHarness(t, executionModeLocal)
+	runID := h.startRun(t, run.TaskStatusRunning)
+	h.recovery.sweep(t.Context())
+
+	h.stallNextRead(t, recoveryTestStall)
+	h.sweepAfter(t, time.Second)
+
+	require.False(t, h.recovery.observed[runID].marked, "the sweep marked a run on the strength of its own stall")
+}
+
+// A run first seen by a stalled read gets its whole TTL from when it was seen.
+func TestAStalledFirstReadStartsTheWaitWhenItReturned(t *testing.T) {
+	h := newRecoveryHarness(t, executionModeLocal)
+	runID := h.startRun(t, run.TaskStatusRunning)
+
+	h.stallNextRead(t, recoveryTestStall)
+	h.recovery.sweep(t.Context())
+	h.sweepAfter(t, time.Second)
+
+	require.False(t, h.recovery.observed[runID].marked)
 }
 
 // A process's own write stall stops its renewals for as long as it lasts, which
@@ -288,7 +393,7 @@ func TestRepeatedlyFailingAdoptionEndsTheRun(t *testing.T) {
 	for range maxRunAdoptions {
 		require.Equal(t, run.StatusRunning, h.status(t, runID))
 		h.sweepAfter(t, recoveryTestTTL)
-		h.sweepAfter(t, recoveryTestBeat)
+		h.sweepAfter(t, recoveryTestGrace)
 	}
 
 	require.Equal(t, maxRunAdoptions, attempts)
@@ -305,7 +410,7 @@ func TestSilentlyAbandonedAdoptionEndsTheRun(t *testing.T) {
 	h.recoverAll(t)
 	for range maxRunAdoptions {
 		h.sweepAfter(t, recoveryTestTTL)
-		h.sweepAfter(t, recoveryTestBeat)
+		h.sweepAfter(t, recoveryTestGrace)
 	}
 
 	require.Len(t, h.adopted, maxRunAdoptions)
@@ -360,28 +465,9 @@ func TestRecoveryForgetsRunsThatEnded(t *testing.T) {
 	require.NotContains(t, h.recovery.observed, runID)
 }
 
-// A frozen driver thaws into a run recovery already finalized and dispatched.
-func TestAnEngineStaysQuietOnARunRecoveryFinalized(t *testing.T) {
-	j, store, _, _ := characterizationJob(t, 1, nil)
-	dispatched := 0
-	j.dispatchRunCallbacks = func(context.Context, uuid.UUID, uuid.UUID, error) error {
-		dispatched++
-		return nil
-	}
-	j.beforeComplete = func(runID uuid.UUID) {
-		finalized, err := store.CompleteIfActive(runID, run.ErrRunDriverLost)
-		require.NoError(t, err)
-		require.True(t, finalized)
-	}
-
-	_ = j.Run(t.Context())
-
-	require.Zero(t, dispatched, "recovery dispatched already; the thawed engine duplicated it")
-}
-
-// This defer is the ONLY dispatcher when something else finalized the run, so
-// the dedupe above must not grow into "skip unless this call finalized": that
-// would silently lose every callback in these two cases.
+// This defer is the ONLY dispatcher when something else finalized the run, so it
+// must not grow a "skip unless this call finalized": that would silently lose
+// every callback in these two cases. Dispatcher.Dispatch drops the duplicates.
 func TestAnEngineStillDispatchesForARunAnotherPathFinalized(t *testing.T) {
 	for name, finalize := range map[string]func(*testing.T, *run.Store, uuid.UUID){
 		"the in-memory owner finalized it": func(t *testing.T, store *run.Store, runID uuid.UUID) {

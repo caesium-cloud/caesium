@@ -9,12 +9,15 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/client"
+	"github.com/google/uuid"
 )
 
 // #553: a run in flight when its server stops. These scenarios stop and restart
@@ -187,6 +190,42 @@ var restartDistributedEnv = []string{
 	"CAESIUM_WORKER_LEASE_TTL=6s",
 }
 
+// runCallbackReceiver counts deliveries per run. The private server shares this
+// process's network namespace, so loopback reaches it.
+type runCallbackReceiver struct {
+	*httptest.Server
+	mu   sync.Mutex
+	runs map[string]int
+}
+
+func newRunCallbackReceiver() *runCallbackReceiver {
+	receiver := &runCallbackReceiver{runs: map[string]int{}}
+	receiver.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer r.Body.Close()
+		var delivery struct {
+			RunID string `json:"run_id"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&delivery); err == nil {
+			receiver.mu.Lock()
+			receiver.runs[delivery.RunID]++
+			receiver.mu.Unlock()
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	return receiver
+}
+
+func (r *runCallbackReceiver) deliveries(runID string) int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.runs[runID]
+}
+
+// withRestartCallback adds a callback to a restart job manifest.
+func withRestartCallback(manifest, url string) string {
+	return strings.Replace(manifest, "steps:\n", fmt.Sprintf("callbacks:\n  - type: notification\n    configuration:\n      url: %q\nsteps:\n", url), 1)
+}
+
 const restartQueueConcurrency = `  concurrency:
     maxRuns: 1
     strategy: queue`
@@ -273,8 +312,10 @@ func (s *IntegrationTestSuite) assertInFlightRunRecovered(alias string, stop fun
 	peer, server := s.startRestartableServer()
 	marker := fmt.Sprintf("caesium-restart-marker-%d", time.Now().UnixNano())
 	defer peer.removeContainersWithMarker(server.cli, marker)
+	receiver := newRunCallbackReceiver()
+	defer receiver.Close()
 
-	peer.applyRestartJob(restartJobManifest(alias, marker, restartQueueConcurrency, "one"))
+	peer.applyRestartJob(withRestartCallback(restartJobManifest(alias, marker, restartQueueConcurrency, "one"), receiver.URL))
 	job := peer.requireJobByAlias(alias)
 	runID := peer.triggerRunWithParams(job.ID, map[string]string{"SLEEP": "300", "TOKEN": "in-flight"})
 	containerID := peer.awaitRunTaskRunning(server.cli, job.ID, runID, marker)
@@ -288,6 +329,8 @@ func (s *IntegrationTestSuite) assertInFlightRunRecovered(alias string, stop fun
 	s.Contains(run.Error, "stopped before it finished")
 	s.Require().Len(run.Tasks, 1)
 	s.Equal("failed", run.Tasks[0].Status)
+	s.Require().Eventually(func() bool { return receiver.deliveries(runID) >= 1 },
+		restartRecoveryBound, 250*time.Millisecond, "no engine remains, so recovery must deliver the run's callback")
 
 	if orphanSurvives {
 		s.Equal([]string{containerID}, peer.containerIDsForRun(server.cli, marker, runID),
@@ -301,7 +344,8 @@ func (s *IntegrationTestSuite) assertInFlightRunRecovered(alias string, stop fun
 	peer.awaitRunWithToken(job.ID, "queued", "succeeded")
 	// The manifest changed, so this reaches the running-run check that used to
 	// refuse it forever.
-	peer.applyRestartJob(restartJobManifest(alias, marker, restartQueueConcurrency, "two"))
+	peer.applyRestartJob(withRestartCallback(restartJobManifest(alias, marker, restartQueueConcurrency, "two"), receiver.URL))
+	s.Equal(1, receiver.deliveries(runID), "one completion, one delivery")
 
 	if orphanSurvives {
 		// Even an operator's retry cannot start a second copy: the orphan holds
@@ -311,6 +355,8 @@ func (s *IntegrationTestSuite) assertInFlightRunRecovered(alias string, stop fun
 		s.Equal("failed", retried.Status)
 		s.Contains(retried.Error, "already in use")
 		s.Equal([]string{containerID}, peer.containerIDsForRun(server.cli, marker, runID))
+		s.Require().Eventually(func() bool { return receiver.deliveries(runID) == 2 }, restartRecoveryBound, 250*time.Millisecond,
+			"a retried run is a new completion, so its callback is delivered again")
 	}
 }
 
@@ -389,4 +435,46 @@ func (s *IntegrationTestSuite) runningRowCount() int {
 		return -1
 	}
 	return health.Checks.ActiveRuns.Count
+}
+
+// The claim on real dqlite: the server delivered a callback, and another process
+// finishing the same run would now insert the same completion. The unit tests
+// prove this on sqlite; this proves the migrated index holds where it matters.
+func (s *IntegrationTestSuite) TestCallbackClaimHoldsOnDqlite() {
+	if s.engineType != "" && s.engineType != "docker" {
+		s.T().Skipf("the callback receiver is only reachable on the docker lanes; engine=%s", s.engineType)
+	}
+	receiver := newRunCallbackReceiver()
+	defer receiver.Close()
+	alias := fmt.Sprintf("callback-claim-%d", time.Now().UnixNano())
+	marker := "caesium-callback-claim"
+	s.applyRestartJob(withRestartCallback(restartJobManifest(alias, marker, "", "one"), receiver.URL))
+	job := s.requireJobByAlias(alias)
+	runID := s.triggerRunWithParams(job.ID, map[string]string{"SLEEP": "0", "TOKEN": "claim"})
+	s.Require().Equal("succeeded", s.awaitRun(job.ID, runID, runTimeout).Status)
+	s.Require().Eventually(func() bool { return receiver.deliveries(runID) == 1 }, runTimeout, 100*time.Millisecond)
+
+	catalog := s.openIntegrationCatalogDB()
+	defer catalog.Close()
+	ctx := s.T().Context()
+	var callbackID, key string
+	s.Require().Eventually(func() bool {
+		return catalog.QueryRowContext(ctx, `SELECT callback_id, completion_key FROM callback_runs
+			WHERE job_run_id = ? AND completion_key IS NOT NULL`, runID).Scan(&callbackID, &key) == nil
+	}, 10*time.Second, 100*time.Millisecond, "the delivery row must carry its completion")
+
+	insert := func(completion any) int64 {
+		now := time.Now().UTC()
+		result, err := catalog.ExecContext(ctx, `INSERT INTO callback_runs
+			(id, callback_id, job_id, job_run_id, status, error, http_status, response_body, retry_count, completion_key, started_at, created_at, updated_at)
+			VALUES (?, ?, ?, ?, 'running', '', 0, '', 1, ?, ?, ?, ?) ON CONFLICT DO NOTHING`,
+			uuid.NewString(), callbackID, job.ID, runID, completion, now, now, now)
+		s.Require().NoError(err)
+		affected, err := result.RowsAffected()
+		s.Require().NoError(err)
+		return affected
+	}
+	s.Equal(int64(0), insert(key), "a second dispatcher for this completion must lose")
+	s.Equal(int64(1), insert(nil), "an operator's re-send carries no completion and is never blocked")
+	s.Equal(int64(1), insert(nil))
 }
