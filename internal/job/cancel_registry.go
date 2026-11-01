@@ -166,6 +166,13 @@ func (r *cancelRegistry) registeredRunIDs() []uuid.UUID {
 	return ids
 }
 
+// drives reports whether this process has an engine registered for runID.
+func (r *cancelRegistry) drives(runID uuid.UUID) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return len(r.runs[runID]) > 0
+}
+
 // defaultCancelRegistry is process-wide on purpose: the goroutine that starts a
 // run (an HTTP controller, the backfill driver, a partition-retry replacement)
 // and the subscriber that observes TypeRunCancelled have no other shared

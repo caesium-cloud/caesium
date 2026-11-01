@@ -5522,6 +5522,12 @@ func (s *Store) Complete(runID uuid.UUID, result error) error {
 // the distinction so a run another path finalized first is not notified
 // twice.
 func (s *Store) CompleteIfActive(runID uuid.UUID, result error) (bool, error) {
+	return s.completeIfActive(runID, result, nil)
+}
+
+// completeIfActive takes an optional guard on the terminal UPDATE: a row the
+// guard excludes is left alone, reported like an already-terminal run.
+func (s *Store) completeIfActive(runID uuid.UUID, result error, guard func(*gorm.DB) *gorm.DB) (bool, error) {
 	if errors.Is(result, runlife.ErrServerShutdown) && !IsRunDeadlineError(result) {
 		// Shutdown relinquishes process ownership, never durable run/task claims.
 		return false, nil
@@ -5568,13 +5574,16 @@ func (s *Store) CompleteIfActive(runID uuid.UUID, result error) (bool, error) {
 			// in-memory mode can finalize a run from the owner (on takeover) and
 			// from the triggering node's waitForRunCompletion; this keeps the
 			// second call a no-op so run_completed/run_failed events fire once.
-			res := tx.Model(&models.JobRun{}).
-				Where("id = ? AND status NOT IN ?", runID, terminalRunStatuses()).
-				Updates(map[string]any{
-					"status":       string(status),
-					"completed_at": now,
-					"error":        errMsg,
-				})
+			finalize := tx.Model(&models.JobRun{}).
+				Where("id = ? AND status NOT IN ?", runID, terminalRunStatuses())
+			if guard != nil {
+				finalize = guard(finalize)
+			}
+			res := finalize.Updates(map[string]any{
+				"status":       string(status),
+				"completed_at": now,
+				"error":        errMsg,
+			})
 			if res.Error != nil {
 				return res.Error
 			}

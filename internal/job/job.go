@@ -1257,12 +1257,15 @@ func (j *job) Run(ctx context.Context) (err error) {
 			}
 			return true
 		}
+		finalized := false
 		complete := func() error {
 			terminationWon()
 			if errors.Is(runErr, runlife.ErrServerShutdown) && !run.IsRunDeadlineError(runErr) {
 				return runlife.ErrServerShutdown
 			}
-			return store.Complete(runID, runErr)
+			done, completeErr := store.CompleteIfActive(runID, runErr)
+			finalized = finalized || done
+			return completeErr
 		}
 		if j.beforeComplete != nil {
 			j.beforeComplete(runID)
@@ -1342,6 +1345,16 @@ func (j *job) Run(ctx context.Context) (err error) {
 			return
 		}
 		dispatchCtx := context.WithoutCancel(ctx)
+		// Not finalizing here is no reason to stay quiet in general: this defer
+		// is the only dispatcher for a run the owner or a cancel finalized. A
+		// run recovery finalized is the one exception, because recovery has
+		// dispatched already and this engine was only presumed dead. A failed
+		// read dispatches: a duplicate beats a lost callback.
+		if !finalized {
+			if lost, lostErr := store.RunDriverLost(dispatchCtx, runID); lostErr == nil && lost {
+				return
+			}
+		}
 		if err := j.dispatchRunCallbacks(dispatchCtx, j.id, runID, runErr); err != nil {
 			log.Error("callback dispatch failure", "job_id", j.id, "run_id", runID, "error", err)
 		}

@@ -30,8 +30,8 @@ const (
 	restartServerName  = "caesium-restart-it"
 	restartServerPort  = "18553"
 	restartNodeAddress = "127.0.0.1:19553"
-	// restartRecoveryBound is one TTL of boot quiet, one TTL of lapse, a sweep
-	// tick, and headroom for a loaded CI host.
+	// restartRecoveryBound is a sweep to first see the run, one TTL unchanged,
+	// a beat behind the mark, and headroom for a loaded CI host.
 	restartRecoveryBound = 60 * time.Second
 )
 
@@ -177,6 +177,16 @@ steps:
 `, alias, marker, concurrency, revision)
 }
 
+// restartDistributedEnv is default SQL advancement on one node.
+var restartDistributedEnv = []string{
+	"CAESIUM_EXECUTION_MODE=distributed",
+	"CAESIUM_WORKER_ENABLED=true",
+	"CAESIUM_WORKER_POOL_SIZE=1",
+	"CAESIUM_WORKER_POLL_INTERVAL=500ms",
+	"CAESIUM_WORKER_RECLAIM_INTERVAL=500ms",
+	"CAESIUM_WORKER_LEASE_TTL=6s",
+}
+
 const restartQueueConcurrency = `  concurrency:
     maxRuns: 1
     strategy: queue`
@@ -320,14 +330,7 @@ func (s *IntegrationTestSuite) TestInFlightRunRecoveredAfterGracefulStop() {
 // finalized the run, so the same recovery adopts the run and lets it succeed.
 // Default SQL advancement on a manual-only job, which used to stay running.
 func (s *IntegrationTestSuite) TestDistributedRunAdoptedAfterServerCrash() {
-	peer, server := s.startRestartableServer(
-		"CAESIUM_EXECUTION_MODE=distributed",
-		"CAESIUM_WORKER_ENABLED=true",
-		"CAESIUM_WORKER_POOL_SIZE=1",
-		"CAESIUM_WORKER_POLL_INTERVAL=500ms",
-		"CAESIUM_WORKER_RECLAIM_INTERVAL=500ms",
-		"CAESIUM_WORKER_LEASE_TTL=6s",
-	)
+	peer, server := s.startRestartableServer(restartDistributedEnv...)
 	marker := fmt.Sprintf("caesium-restart-marker-%d", time.Now().UnixNano())
 	defer peer.removeContainersWithMarker(server.cli, marker)
 
@@ -343,4 +346,47 @@ func (s *IntegrationTestSuite) TestDistributedRunAdoptedAfterServerCrash() {
 	run := peer.awaitRun(job.ID, runID, restartRecoveryBound)
 	s.Equal("succeeded", run.Status, "error: %s", run.Error)
 	peer.applyRestartJob(restartJobManifest(alias, marker, "", "two"))
+}
+
+// Deleting a job with a run in flight is allowed and only soft-deletes it, so the
+// run must still reach an outcome: left running, it would hold a quota slot. The
+// run API answers 404 for a deleted job, so this reads the server's own count of
+// running rows, which is the number that matters.
+func (s *IntegrationTestSuite) TestRunOfDeletedJobAdoptedAfterServerCrash() {
+	peer, server := s.startRestartableServer(restartDistributedEnv...)
+	marker := fmt.Sprintf("caesium-restart-marker-%d", time.Now().UnixNano())
+	defer peer.removeContainersWithMarker(server.cli, marker)
+
+	alias := "restart-deleted-job"
+	peer.applyRestartJob(restartJobManifest(alias, marker, "", "one"))
+	job := peer.requireJobByAlias(alias)
+	runID := peer.triggerRunWithParams(job.ID, map[string]string{"SLEEP": "5", "TOKEN": "in-flight"})
+	peer.awaitRunTaskRunning(server.cli, job.ID, runID, marker)
+	s.Require().Equal(1, peer.runningRowCount(), "the scenario needs a run in flight")
+
+	resp, err := peer.doRequest(http.MethodDelete, fmt.Sprintf("%s/v1/jobs/%s", peer.caesiumURL, job.ID), nil)
+	s.Require().NoError(err)
+	resp.Body.Close()
+	s.Require().Less(resp.StatusCode, 300, "the job could not be deleted")
+
+	server.crash(peer)
+	peer.startRestartServer(server)
+
+	s.Require().Eventually(func() bool { return peer.runningRowCount() == 0 },
+		restartRecoveryBound, 500*time.Millisecond, "a deleted job's run stayed running after the restart")
+}
+
+// runningRowCount is /health's count of running runs, or -1 if it is unreadable.
+func (s *IntegrationTestSuite) runningRowCount() int {
+	var health struct {
+		Checks *struct {
+			ActiveRuns *struct {
+				Count int `json:"count"`
+			} `json:"active_runs"`
+		} `json:"checks"`
+	}
+	if err := s.tryGetJSON("/health", &health); err != nil || health.Checks == nil || health.Checks.ActiveRuns == nil {
+		return -1
+	}
+	return health.Checks.ActiveRuns.Count
 }

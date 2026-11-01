@@ -16,16 +16,21 @@ type recoveryHarness struct {
 	recovery  *runRecovery
 	store     *run.Store
 	jobID     uuid.UUID
+	clock     time.Time
+	driven    map[uuid.UUID]bool
 	adopted   []uuid.UUID
 	callbacks []error
 }
 
-const recoveryTestTTL = 30 * time.Second
+const (
+	recoveryTestTTL  = 30 * time.Second
+	recoveryTestBeat = recoveryTestTTL / 3
+)
 
 func newRecoveryHarness(t *testing.T, mode string) *recoveryHarness {
 	t.Helper()
 	j, store, _, _ := characterizationJob(t, 1, nil)
-	h := &recoveryHarness{store: store, jobID: j.id}
+	h := &recoveryHarness{store: store, jobID: j.id, clock: time.Now(), driven: map[uuid.UUID]bool{}}
 	h.recovery = newRunRecovery(RunRecoveryConfig{
 		Store: store, TTL: recoveryTestTTL, ExecutionMode: mode,
 		Adopt: func(_ context.Context, _, runID uuid.UUID) error {
@@ -37,12 +42,14 @@ func newRecoveryHarness(t *testing.T, mode string) *recoveryHarness {
 			return nil
 		},
 	})
-	h.recovery.quietUntil = time.Time{}
+	h.recovery.now = func() time.Time { return h.clock }
+	h.recovery.driving = func(id uuid.UUID) bool { return h.driven[id] }
 	return h
 }
 
-// startLapsedRun admits a run with one task row per status, its driver gone.
-func (h *recoveryHarness) startLapsedRun(t *testing.T, statuses ...run.TaskStatus) uuid.UUID {
+// startRun admits a run with one task row per status. Nothing drives it, and no
+// sweep has seen it.
+func (h *recoveryHarness) startRun(t *testing.T, statuses ...run.TaskStatus) uuid.UUID {
 	t.Helper()
 	started, err := h.store.Start(h.jobID, nil)
 	require.NoError(t, err)
@@ -50,10 +57,27 @@ func (h *recoveryHarness) startLapsedRun(t *testing.T, statuses ...run.TaskStatu
 		require.NoError(t, h.store.DB().Create(&models.TaskRun{ID: uuid.New(), JobRunID: started.ID, TaskID: uuid.New(),
 			Engine: models.AtomEngineDocker, Status: string(status)}).Error)
 	}
-	stale := time.Now().UTC().Add(-2 * recoveryTestTTL)
-	require.NoError(t, h.store.DB().Model(&models.JobRun{}).Where("id = ?", started.ID).
-		UpdateColumn("driver_heartbeat_at", stale).Error)
 	return started.ID
+}
+
+// sweepAfter advances the clock and sweeps.
+func (h *recoveryHarness) sweepAfter(t *testing.T, d time.Duration) {
+	t.Helper()
+	h.clock = h.clock.Add(d)
+	h.recovery.sweep(t.Context())
+}
+
+// recoverAll sweeps every run from first sight through the mark to the outcome.
+func (h *recoveryHarness) recoverAll(t *testing.T) {
+	t.Helper()
+	h.recovery.sweep(t.Context())
+	h.sweepAfter(t, recoveryTestTTL)
+	h.sweepAfter(t, recoveryTestBeat)
+}
+
+func (h *recoveryHarness) renew(t *testing.T, runID uuid.UUID) {
+	t.Helper()
+	require.NoError(t, h.store.RenewRunDrivers(t.Context(), []uuid.UUID{runID}))
 }
 
 func (h *recoveryHarness) status(t *testing.T, runID uuid.UUID) run.Status {
@@ -70,9 +94,9 @@ func TestRecoveryFailsALocalRunWithUnfinishedTasks(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			h := newRecoveryHarness(t, executionModeLocal)
-			runID := h.startLapsedRun(t, status)
+			runID := h.startRun(t, status)
 
-			h.recovery.sweep(t.Context())
+			h.recoverAll(t)
 
 			current, err := h.store.Get(runID)
 			require.NoError(t, err)
@@ -81,7 +105,7 @@ func TestRecoveryFailsALocalRunWithUnfinishedTasks(t *testing.T) {
 			require.Empty(t, h.adopted, "re-entry could execute the task a second time")
 			require.Equal(t, []error{run.ErrRunDriverLost}, h.callbacks, "no engine remains to dispatch them")
 
-			h.recovery.sweep(t.Context())
+			h.sweepAfter(t, recoveryTestBeat)
 			require.Len(t, h.callbacks, 1, "a run is finalized once")
 		})
 	}
@@ -90,21 +114,34 @@ func TestRecoveryFailsALocalRunWithUnfinishedTasks(t *testing.T) {
 // A run with no task rows cannot have started anything, and recorded nothing.
 func TestRecoveryFailsALocalRunThatNeverRegisteredTasks(t *testing.T) {
 	h := newRecoveryHarness(t, executionModeLocal)
-	runID := h.startLapsedRun(t)
+	runID := h.startRun(t)
 
-	h.recovery.sweep(t.Context())
+	h.recoverAll(t)
 
 	require.Equal(t, run.StatusFailed, h.status(t, runID))
 	require.Empty(t, h.adopted)
+}
+
+// A run from before the column has no heartbeat to change, so it lapses from
+// first sight and its swap has to match NULL.
+func TestRecoveryFailsARunFromBeforeTheColumn(t *testing.T) {
+	h := newRecoveryHarness(t, executionModeLocal)
+	runID := h.startRun(t, run.TaskStatusRunning)
+	require.NoError(t, h.store.DB().Model(&models.JobRun{}).Where("id = ?", runID).
+		UpdateColumn("driver_heartbeat_at", nil).Error)
+
+	h.recoverAll(t)
+
+	require.Equal(t, run.StatusFailed, h.status(t, runID))
 }
 
 // Every outcome is recorded, so the ordinary path derives the run's result from
 // the evidence: recovery neither guesses it nor executes anything.
 func TestRecoveryAdoptsALocalRunWithEveryTaskRecorded(t *testing.T) {
 	h := newRecoveryHarness(t, executionModeLocal)
-	runID := h.startLapsedRun(t, run.TaskStatusSucceeded, run.TaskStatusSkipped)
+	runID := h.startRun(t, run.TaskStatusSucceeded, run.TaskStatusSkipped)
 
-	h.recovery.sweep(t.Context())
+	h.recoverAll(t)
 
 	require.Equal(t, []uuid.UUID{runID}, h.adopted)
 	require.Equal(t, run.StatusRunning, h.status(t, runID), "adoption finalizes the run, recovery does not")
@@ -143,9 +180,9 @@ func TestAdoptingASettledLocalRunExecutesNothing(t *testing.T) {
 // nothing about the lost driver: the run is adopted, never failed.
 func TestRecoveryAdoptsADistributedRunWithTasksInFlight(t *testing.T) {
 	h := newRecoveryHarness(t, executionModeDistributed)
-	runID := h.startLapsedRun(t, run.TaskStatusRunning)
+	runID := h.startRun(t, run.TaskStatusRunning)
 
-	h.recovery.sweep(t.Context())
+	h.recoverAll(t)
 
 	require.Equal(t, []uuid.UUID{runID}, h.adopted)
 	require.Equal(t, run.StatusRunning, h.status(t, runID))
@@ -153,63 +190,234 @@ func TestRecoveryAdoptsADistributedRunWithTasksInFlight(t *testing.T) {
 
 func TestRecoveryLeavesARunWithALiveDriverAlone(t *testing.T) {
 	h := newRecoveryHarness(t, executionModeLocal)
-	started, err := h.store.Start(h.jobID, nil)
-	require.NoError(t, err)
+	runID := h.startRun(t, run.TaskStatusRunning)
 
 	h.recovery.sweep(t.Context())
-
-	require.Equal(t, run.StatusRunning, h.status(t, started.ID))
-	require.Empty(t, h.adopted)
-}
-
-// A claim survives only until its heartbeat lapses: a node that dies after
-// claiming must not take the run's recovery with it.
-func TestRecoveryRetriesAFailedAdoption(t *testing.T) {
-	h := newRecoveryHarness(t, executionModeDistributed)
-	runID := h.startLapsedRun(t, run.TaskStatusRunning)
-	failing := true
-	h.recovery.cfg.Adopt = func(_ context.Context, _, id uuid.UUID) error {
-		if failing {
-			return errors.New("job row unreadable")
-		}
-		h.adopted = append(h.adopted, id)
-		return nil
+	for range 12 {
+		h.renew(t, runID)
+		h.sweepAfter(t, recoveryTestBeat)
 	}
 
-	h.recovery.sweep(t.Context())
+	require.Equal(t, run.StatusRunning, h.status(t, runID))
 	require.Empty(t, h.adopted)
-	h.recovery.sweep(t.Context())
-	require.Empty(t, h.adopted, "the claim fences the next sweep until it lapses")
-
-	failing = false
-	h.recovery.now = func() time.Time { return time.Now().Add(2 * recoveryTestTTL) }
-	h.recovery.sweep(t.Context())
-	require.Equal(t, []uuid.UUID{runID}, h.adopted)
 }
 
-// A heartbeat stops arriving while the database is unreachable too, so an old
-// heartbeat proves a driver dead only after live ones have had a TTL to renew.
+// The ordering the first review found. The sweep has read a value that has been
+// unchanged for a TTL and is about to write when a renewal commits, stamped so
+// long ago that any age test would call it expired. It committed first.
+func TestRecoveryLosesToARenewalThatCommitsAfterItsRead(t *testing.T) {
+	h := newRecoveryHarness(t, executionModeLocal)
+	runID := h.startRun(t, run.TaskStatusRunning)
+	h.recovery.sweep(t.Context())
+
+	stampedBeforeItQueued := time.Now().UTC().Add(-time.Hour)
+	h.recovery.afterRead = func() {
+		h.recovery.afterRead = nil
+		require.NoError(t, h.store.DB().Model(&models.JobRun{}).Where("id = ?", runID).
+			UpdateColumn("driver_heartbeat_at", stampedBeforeItQueued).Error)
+	}
+	h.sweepAfter(t, recoveryTestTTL)
+	h.sweepAfter(t, recoveryTestBeat)
+
+	require.Equal(t, run.StatusRunning, h.status(t, runID), "a healthy run was failed by a slow renewal")
+	require.True(t, h.recovery.observed[runID].heartbeat.Equal(stampedBeforeItQueued), "the sweep must take the new value as a sign of life")
+	require.False(t, h.recovery.observed[runID].marked)
+}
+
+// A write stall holds renewals back longer than the TTL, and a sweep's mark gets
+// through first. The mark only marks: the renewal that lands behind it still
+// saves the run.
+func TestARenewalBehindTheMarkSavesTheRun(t *testing.T) {
+	h := newRecoveryHarness(t, executionModeLocal)
+	runID := h.startRun(t, run.TaskStatusRunning)
+	h.recovery.sweep(t.Context())
+	h.sweepAfter(t, recoveryTestTTL)
+	require.True(t, h.recovery.observed[runID].marked)
+
+	h.renew(t, runID)
+	h.sweepAfter(t, recoveryTestBeat)
+
+	require.Equal(t, run.StatusRunning, h.status(t, runID))
+	require.Empty(t, h.callbacks)
+}
+
+// A process's own write stall stops its renewals for as long as it lasts, which
+// is all a single-node deployment would have to go on. It knows better.
+func TestRecoveryNeverTakesARunThisProcessDrives(t *testing.T) {
+	h := newRecoveryHarness(t, executionModeLocal)
+	runID := h.startRun(t, run.TaskStatusRunning)
+	h.driven[runID] = true
+
+	h.recovery.sweep(t.Context())
+	for range 30 {
+		h.sweepAfter(t, recoveryTestTTL)
+	}
+
+	require.Equal(t, run.StatusRunning, h.status(t, runID))
+	require.Empty(t, h.callbacks)
+	require.False(t, h.recovery.observed[runID].marked, "a mark would be a claim on its own run")
+}
+
+// Greptile's finding on the first round: a non-UTC clock must not make a fresh
+// heartbeat look expired. Time is only ever measured between two readings of
+// this process's own clock, so no zone can reach the database.
+func TestRecoveryIsIndifferentToTheHostTimeZone(t *testing.T) {
+	h := newRecoveryHarness(t, executionModeLocal)
+	h.clock = h.clock.In(time.FixedZone("ahead", 14*60*60))
+	runID := h.startRun(t, run.TaskStatusRunning)
+
+	h.recovery.sweep(t.Context())
+	h.sweepAfter(t, recoveryTestBeat)
+
+	require.Equal(t, run.StatusRunning, h.status(t, runID))
+	require.False(t, h.recovery.observed[runID].marked)
+}
+
+// A failing adoption ends. Its claim changed the value, so each retry waits a
+// full lapse, and after the bound the run fails and frees what it holds.
+func TestRepeatedlyFailingAdoptionEndsTheRun(t *testing.T) {
+	h := newRecoveryHarness(t, executionModeDistributed)
+	runID := h.startRun(t, run.TaskStatusRunning)
+	attempts := 0
+	h.recovery.cfg.Adopt = func(context.Context, uuid.UUID, uuid.UUID) error {
+		attempts++
+		return errors.New("job row unreadable")
+	}
+
+	h.recoverAll(t)
+	for range maxRunAdoptions {
+		require.Equal(t, run.StatusRunning, h.status(t, runID))
+		h.sweepAfter(t, recoveryTestTTL)
+		h.sweepAfter(t, recoveryTestBeat)
+	}
+
+	require.Equal(t, maxRunAdoptions, attempts)
+	require.Equal(t, run.StatusFailed, h.status(t, runID))
+	require.Equal(t, []error{run.ErrRunDriverLost}, h.callbacks)
+}
+
+// The same bound for an adoption that reported no error: job.Run started, gave
+// up before finalizing, and the run lapsed again.
+func TestSilentlyAbandonedAdoptionEndsTheRun(t *testing.T) {
+	h := newRecoveryHarness(t, executionModeLocal)
+	runID := h.startRun(t, run.TaskStatusSucceeded)
+
+	h.recoverAll(t)
+	for range maxRunAdoptions {
+		h.sweepAfter(t, recoveryTestTTL)
+		h.sweepAfter(t, recoveryTestBeat)
+	}
+
+	require.Len(t, h.adopted, maxRunAdoptions)
+	require.Equal(t, run.StatusFailed, h.status(t, runID))
+}
+
+// An adoption that takes hold is not an attempt to count against: it drives the
+// run from then on, however long the run lasts.
+func TestAHealthyAdoptionIsLeftToFinish(t *testing.T) {
+	h := newRecoveryHarness(t, executionModeDistributed)
+	runID := h.startRun(t, run.TaskStatusRunning)
+
+	h.recoverAll(t)
+	h.driven[runID] = true
+	for range 30 {
+		h.sweepAfter(t, recoveryTestTTL)
+	}
+
+	require.Len(t, h.adopted, 1)
+	require.Equal(t, run.StatusRunning, h.status(t, runID))
+}
+
+// A heartbeat stops arriving while the database is unreachable too, so nothing
+// can lapse until live drivers have had a TTL to renew after it comes back.
 func TestRecoveryWaitsATTLAfterBootOrAnOutage(t *testing.T) {
 	h := newRecoveryHarness(t, executionModeLocal)
-	runID := h.startLapsedRun(t, run.TaskStatusRunning)
+	runID := h.startRun(t, run.TaskStatusRunning)
 
-	now := time.Now()
-	h.recovery.now = func() time.Time { return now }
-	h.recovery.quietUntil = now.Add(recoveryTestTTL)
 	h.recovery.sweep(t.Context())
-	require.Equal(t, run.StatusRunning, h.status(t, runID), "a server that just booted gave peers no time to renew")
+	h.sweepAfter(t, recoveryTestTTL-time.Second)
+	require.False(t, h.recovery.observed[runID].marked, "a server that just booted gave peers no time to renew")
 
 	cancelled, cancel := context.WithCancel(t.Context())
 	cancel()
-	now = now.Add(recoveryTestTTL)
+	h.clock = h.clock.Add(time.Second)
 	h.recovery.sweep(cancelled)
-	require.Equal(t, now.Add(recoveryTestTTL), h.recovery.quietUntil, "a failed read restarts the wait")
-	h.recovery.sweep(t.Context())
-	require.Equal(t, run.StatusRunning, h.status(t, runID))
+	h.sweepAfter(t, recoveryTestTTL-time.Second)
+	require.False(t, h.recovery.observed[runID].marked, "a failed read restarts the wait")
 
-	now = now.Add(recoveryTestTTL)
+	h.sweepAfter(t, time.Second)
+	require.True(t, h.recovery.observed[runID].marked)
+}
+
+func TestRecoveryForgetsRunsThatEnded(t *testing.T) {
+	h := newRecoveryHarness(t, executionModeLocal)
+	runID := h.startRun(t)
 	h.recovery.sweep(t.Context())
-	require.Equal(t, run.StatusFailed, h.status(t, runID))
+	require.Contains(t, h.recovery.observed, runID)
+
+	require.NoError(t, h.store.Complete(runID, nil))
+	h.sweepAfter(t, recoveryTestBeat)
+	require.NotContains(t, h.recovery.observed, runID)
+}
+
+// A frozen driver thaws into a run recovery already finalized and dispatched.
+func TestAnEngineStaysQuietOnARunRecoveryFinalized(t *testing.T) {
+	j, store, _, _ := characterizationJob(t, 1, nil)
+	dispatched := 0
+	j.dispatchRunCallbacks = func(context.Context, uuid.UUID, uuid.UUID, error) error {
+		dispatched++
+		return nil
+	}
+	j.beforeComplete = func(runID uuid.UUID) {
+		finalized, err := store.CompleteIfActive(runID, run.ErrRunDriverLost)
+		require.NoError(t, err)
+		require.True(t, finalized)
+	}
+
+	_ = j.Run(t.Context())
+
+	require.Zero(t, dispatched, "recovery dispatched already; the thawed engine duplicated it")
+}
+
+// This defer is the ONLY dispatcher when something else finalized the run, so
+// the dedupe above must not grow into "skip unless this call finalized": that
+// would silently lose every callback in these two cases.
+func TestAnEngineStillDispatchesForARunAnotherPathFinalized(t *testing.T) {
+	for name, finalize := range map[string]func(*testing.T, *run.Store, uuid.UUID){
+		"the in-memory owner finalized it": func(t *testing.T, store *run.Store, runID uuid.UUID) {
+			require.NoError(t, store.Complete(runID, nil))
+		},
+		"a cancel finalized it": func(t *testing.T, store *run.Store, runID uuid.UUID) {
+			require.NoError(t, store.CancelRun(t.Context(), runID))
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			j, store, _, _ := characterizationJob(t, 1, nil)
+			dispatched := 0
+			j.dispatchRunCallbacks = func(context.Context, uuid.UUID, uuid.UUID, error) error {
+				dispatched++
+				return nil
+			}
+			j.beforeComplete = func(runID uuid.UUID) { finalize(t, store, runID) }
+
+			_ = j.Run(t.Context())
+
+			require.Equal(t, 1, dispatched)
+		})
+	}
+}
+
+func TestAnEngineDispatchesOnceForARunItFinalized(t *testing.T) {
+	j, _, _, _ := characterizationJob(t, 1, nil)
+	dispatched := 0
+	j.dispatchRunCallbacks = func(context.Context, uuid.UUID, uuid.UUID, error) error {
+		dispatched++
+		return nil
+	}
+
+	require.NoError(t, j.Run(t.Context()))
+
+	require.Equal(t, 1, dispatched)
 }
 
 func TestHeartbeatRenewsTheRunsThisProcessDrives(t *testing.T) {

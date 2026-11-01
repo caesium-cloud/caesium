@@ -84,80 +84,116 @@ func TestRetryReadmissionStampsTheDriverHeartbeat(t *testing.T) {
 	}
 }
 
-func TestLapsedRunsFindsOnlyRunsWithoutALiveDriver(t *testing.T) {
+func TestRunHeartbeatsListsWhatRecoveryMayWatch(t *testing.T) {
 	store, db := driverTestStore(t)
-	cutoff := time.Now().UTC().Add(-time.Minute)
-	stale := cutoff.Add(-time.Minute)
 	start := func() uuid.UUID {
 		started, err := store.Start(uuid.New(), nil)
 		require.NoError(t, err)
 		return started.ID
 	}
-
 	live := start()
-	lapsed := start()
-	ageHeartbeat(t, db, lapsed, &stale)
 	preColumn := start()
 	ageHeartbeat(t, db, preColumn, nil)
 	terminal := start()
-	ageHeartbeat(t, db, terminal, &stale)
 	require.NoError(t, store.Complete(terminal, nil))
 	quarantined := start()
-	ageHeartbeat(t, db, quarantined, &stale)
 	require.NoError(t, db.Model(&models.JobRun{}).Where("id = ?", quarantined).Update("quarantine", true).Error)
 
-	found, err := store.LapsedRuns(context.Background(), cutoff, 10)
+	got, err := store.RunHeartbeats(context.Background())
 	require.NoError(t, err)
-	ids := make([]uuid.UUID, 0, len(found))
-	for _, r := range found {
-		ids = append(ids, r.ID)
+	byID := map[uuid.UUID]*time.Time{}
+	for _, r := range got {
+		byID[r.ID] = r.Heartbeat
 	}
-	require.ElementsMatch(t, []uuid.UUID{lapsed, preColumn}, ids)
-	require.NotContains(t, ids, live)
+	require.Len(t, byID, 2)
+	require.NotNil(t, byID[live])
+	require.Contains(t, byID, preColumn)
+	require.Nil(t, byID[preColumn], "a run from before the column reads as no heartbeat at all")
 }
 
-// Several nodes sweep the same database: exactly one may recover a run.
-func TestClaimLapsedRunHasOneWinnerAcrossSweepers(t *testing.T) {
-	store, db := driverTestStore(t)
-	started, err := store.Start(uuid.New(), nil)
-	require.NoError(t, err)
-	cutoff := time.Now().UTC().Add(-time.Minute)
-	stale := cutoff.Add(-time.Minute)
-	ageHeartbeat(t, db, started.ID, &stale)
+// Several nodes sweep the same database: exactly one swap may land, on the value
+// as it really reads back, which is what makes this more than a test of Equal.
+func TestReplaceRunHeartbeatHasOneWinnerAcrossSweepers(t *testing.T) {
+	for name, clear := range map[string]bool{"stamped": false, "null": true} {
+		t.Run(name, func(t *testing.T) {
+			store, db := driverTestStore(t)
+			started, err := store.Start(uuid.New(), nil)
+			require.NoError(t, err)
+			if clear {
+				ageHeartbeat(t, db, started.ID, nil)
+			}
+			runs, err := store.RunHeartbeats(context.Background())
+			require.NoError(t, err)
+			require.Len(t, runs, 1)
 
-	var winners, failures atomic.Int32
-	var wg sync.WaitGroup
-	for range 8 {
-		wg.Go(func() {
-			claimed, claimErr := store.ClaimLapsedRun(context.Background(), started.ID, cutoff)
-			if claimErr != nil {
-				failures.Add(1)
+			var winners, failures atomic.Int32
+			var wg sync.WaitGroup
+			for range 8 {
+				wg.Go(func() {
+					replaced, swapErr := store.ReplaceRunHeartbeat(context.Background(), started.ID, runs[0].Heartbeat)
+					if swapErr != nil {
+						failures.Add(1)
+					}
+					if replaced != nil {
+						winners.Add(1)
+					}
+				})
 			}
-			if claimed {
-				winners.Add(1)
-			}
+			wg.Wait()
+			require.Zero(t, failures.Load())
+			require.Equal(t, int32(1), winners.Load())
 		})
 	}
-	wg.Wait()
-	require.Zero(t, failures.Load())
-	require.Equal(t, int32(1), winners.Load())
 }
 
-// The race the conditional UPDATE decides: a driver whose heartbeat lands before
-// the claim keeps its run, however stale the sweep's read of it was.
-func TestClaimLapsedRunLosesToARenewal(t *testing.T) {
+// The #711 finding: a renewal stamped before it queued on the writer commits
+// after the sweep read, carrying a value older than anything a cutoff would
+// spare. It committed first, so it wins: the value changed, whatever it says.
+func TestAnyRenewalBeatsASwapOnTheObservedValue(t *testing.T) {
 	store, db := driverTestStore(t)
 	started, err := store.Start(uuid.New(), nil)
 	require.NoError(t, err)
-	cutoff := time.Now().UTC().Add(-time.Minute)
-	stale := cutoff.Add(-time.Minute)
-	ageHeartbeat(t, db, started.ID, &stale)
+	observed := readHeartbeat(t, db, started.ID)
 
-	require.NoError(t, store.RenewRunDrivers(context.Background(), []uuid.UUID{started.ID}))
+	stampedLongAgo := observed.Add(-time.Hour)
+	ageHeartbeat(t, db, started.ID, &stampedLongAgo)
 
-	claimed, err := store.ClaimLapsedRun(context.Background(), started.ID, cutoff)
+	replaced, err := store.ReplaceRunHeartbeat(context.Background(), started.ID, observed)
 	require.NoError(t, err)
-	require.False(t, claimed, "a live driver's run was taken over")
+	require.Nil(t, replaced, "a swap overrode a renewal that committed after the observation")
+	finalized, err := store.FinalizeLostRun(started.ID, observed)
+	require.NoError(t, err)
+	require.False(t, finalized, "a healthy run was failed")
+	got, err := store.Get(started.ID)
+	require.NoError(t, err)
+	require.Equal(t, StatusRunning, got.Status)
+}
+
+func TestFinalizeLostRunSettlesARunStillHoldingTheValue(t *testing.T) {
+	store, db := driverTestStore(t)
+	runID := runWithTaskRows(t, store, db, TaskStatusRunning)
+
+	finalized, err := store.FinalizeLostRun(runID, readHeartbeat(t, db, runID))
+	require.NoError(t, err)
+	require.True(t, finalized)
+	again, err := store.FinalizeLostRun(runID, readHeartbeat(t, db, runID))
+	require.NoError(t, err)
+	require.False(t, again, "a run is finalized once")
+
+	lost, err := store.RunDriverLost(context.Background(), runID)
+	require.NoError(t, err)
+	require.True(t, lost)
+}
+
+func TestRunDriverLostIgnoresOrdinaryFailures(t *testing.T) {
+	store, _ := driverTestStore(t)
+	started, err := store.Start(uuid.New(), nil)
+	require.NoError(t, err)
+	require.NoError(t, store.Complete(started.ID, errors.New("task failed")))
+
+	lost, err := store.RunDriverLost(context.Background(), started.ID)
+	require.NoError(t, err)
+	require.False(t, lost)
 }
 
 func TestRenewRunDriversLeavesOtherRunsAlone(t *testing.T) {

@@ -121,7 +121,7 @@ func freshnessRunLauncher(store *run.Store) freshness.RunLauncher {
 // whichever server sweeps next.
 func recoveredRunAdopter(store *run.Store) func(context.Context, uuid.UUID, uuid.UUID) error {
 	return func(ctx context.Context, jobID, runID uuid.UUID) error {
-		j, err := jsvc.Service(ctx).Get(jobID)
+		j, err := retainedJob(ctx, store.DB(), jobID)
 		if err != nil {
 			return err
 		}
@@ -143,6 +143,17 @@ func recoveredRunAdopter(store *run.Store) func(context.Context, uuid.UUID, uuid
 		}()
 		return nil
 	}
+}
+
+// retainedJob reads a run's job even if it was deleted. Deleting a job with a
+// run in flight is allowed and only soft-deletes it, leaving its tasks in place,
+// so the run can still finish and free what it holds.
+func retainedJob(ctx context.Context, conn *gorm.DB, jobID uuid.UUID) (*models.Job, error) {
+	var j models.Job
+	if err := conn.WithContext(ctx).Unscoped().First(&j, "id = ?", jobID).Error; err != nil {
+		return nil, err
+	}
+	return &j, nil
 }
 
 // newFreshnessRunLauncher is freshnessRunLauncher with its job lookup and its

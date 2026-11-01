@@ -11,8 +11,9 @@ import (
 )
 
 // A process that drives runs proves it with a heartbeat (run/run_driver.go), and
-// recovery settles every run whose heartbeat lapsed. That is what brings a run
-// to an outcome after its server stopped, whatever triggers its job has.
+// recovery settles every run whose heartbeat stopped changing. That is what
+// brings a run to an outcome after its server stopped, whatever triggers its job
+// has.
 //
 // Recovery never resumes a local run with unfinished tasks. A local attempt has
 // no claim, so a row cannot say whether its container is still running or
@@ -23,12 +24,40 @@ import (
 // through job.Run: a local run with every task recorded executes nothing, and a
 // distributed run's tasks stay governed by worker claims, so its driver only
 // waits for them and finalizes.
+//
+// Failing a live run is the worst thing this can do, so a run must survive three
+// checks, each against a different way a heartbeat can look dead:
+//
+//   - A process never recovers a run it is driving. A node's own write stall
+//     stops its renewals for as long as the stall lasts (#600 records over a
+//     minute), so this is what makes a single node immune to it.
+//   - A sweeper times "this value did not change for a TTL" on its own clock.
+//     Reading a stamp's age could not work: a renewal is stamped before it
+//     queues on dqlite's single writer, so one that commits late reads as
+//     already expired. Any commit changes the value and restarts the wait.
+//     Observing from the sweeper's own start also holds it back a full TTL after
+//     a boot, and a failed read restarts the wait the same way.
+//   - The first write only marks the run. A mark has to pass through the same
+//     writer as the renewals, so its commit proves any stall is over, and any
+//     live peer then has a beat to overwrite it before the final write, which is
+//     a compare-and-swap on the mark.
+//
+// That covers a stall on the writer. It cannot cover a live peer that stays cut
+// off from the leader for a TTL and a beat while the sweeper can still write:
+// that peer is indistinguishable from a dead one. Its run is failed though it
+// was healthy, which is why the cost is bounded: nothing is executed twice, the
+// peer's cancel reconciler stops its engine once it can read again, callbacks
+// fire once, and the run can be retried. Raise CAESIUM_RUN_LEASE_TTL to tolerate
+// longer partitions, at the price of slower recovery.
 
-// runRecoveryBatch bounds one sweep; the next tick takes the rest.
-const runRecoveryBatch = 100
+// maxRunAdoptions bounds re-entries of one run from one process. An adopted run
+// that lapses again left job.Run without finalizing, or never got there, and
+// nothing guarantees the next attempt differs. Counting adoptions rather than
+// adopter errors also catches a job.Run that gives up silently.
+const maxRunAdoptions = 3
 
-// runDriverBeat is how often a heartbeat is written and lapsed runs are swept: a
-// live driver gets several chances to renew inside one TTL.
+// runDriverBeat is how often a heartbeat is written and runs are swept: a live
+// driver gets several chances to renew inside one TTL.
 func runDriverBeat(ttl time.Duration) time.Duration { return ttl / 3 }
 
 // StartRunDriverHeartbeat renews the heartbeat of every run this process is
@@ -59,7 +88,7 @@ func StartRunDriverHeartbeat(ctx context.Context, store *run.Store, ttl time.Dur
 // RunRecoveryConfig configures StartRunRecovery.
 type RunRecoveryConfig struct {
 	Store *run.Store
-	// TTL is how old a heartbeat must be before its driver counts as dead.
+	// TTL is how long a heartbeat must go unchanged before its driver is suspect.
 	TTL           time.Duration
 	ExecutionMode string
 	// Adopt re-enters a run through job.Run on a context carrying its id.
@@ -68,16 +97,27 @@ type RunRecoveryConfig struct {
 	DispatchCallbacks func(ctx context.Context, jobID, runID uuid.UUID, runErr error) error
 }
 
-// runRecovery is deliberately not leader-gated: ClaimLapsedRun is an atomic
-// conditional update, so sweeping on every node settles each run once, and a run
+// runObservation is what this process has seen of one run.
+type runObservation struct {
+	heartbeat *time.Time
+	// changedAt is this process's clock when heartbeat last changed.
+	changedAt time.Time
+	// marked means heartbeat is this process's own mark.
+	marked    bool
+	adoptions int
+}
+
+// runRecovery is deliberately not leader-gated: every write is a compare-and-swap
+// on the heartbeat, so sweeping on every node settles each run once, and a run
 // is recovered as soon as any node can write.
 type runRecovery struct {
-	cfg RunRecoveryConfig
-	now func() time.Time
-	// quietUntil holds recovery back until live drivers have had a full TTL to
-	// renew. A heartbeat also goes stale while the database is unreachable, so
-	// after a boot or a failed read an old heartbeat proves nothing yet.
-	quietUntil time.Time
+	cfg      RunRecoveryConfig
+	now      func() time.Time
+	observed map[uuid.UUID]*runObservation
+	// driving reports whether this process is driving a run.
+	driving func(uuid.UUID) bool
+	// afterRead lets a test land a write between the read and the swap.
+	afterRead func()
 }
 
 func newRunRecovery(cfg RunRecoveryConfig) *runRecovery {
@@ -86,7 +126,10 @@ func newRunRecovery(cfg RunRecoveryConfig) *runRecovery {
 			return callback.Default().Dispatch(ctx, jobID, runID, runErr)
 		}
 	}
-	return &runRecovery{cfg: cfg, now: time.Now, quietUntil: time.Now().Add(cfg.TTL)}
+	return &runRecovery{
+		cfg: cfg, now: time.Now, observed: map[uuid.UUID]*runObservation{},
+		driving: defaultCancelRegistry.drives,
+	}
 }
 
 // StartRunRecovery sweeps for lapsed runs until ctx is done.
@@ -112,57 +155,105 @@ func StartRunRecovery(ctx context.Context, cfg RunRecoveryConfig) {
 
 func (r *runRecovery) sweep(ctx context.Context) {
 	now := r.now()
-	cutoff := now.Add(-r.cfg.TTL)
-	lapsed, err := r.cfg.Store.LapsedRuns(ctx, cutoff, runRecoveryBatch)
+	runs, err := r.cfg.Store.RunHeartbeats(ctx)
 	if err != nil {
-		r.quietUntil = now.Add(r.cfg.TTL)
+		// While nothing can be read, nothing was observed, and renewals may not
+		// be landing either.
+		for _, seen := range r.observed {
+			seen.changedAt, seen.marked = now, false
+		}
 		if ctx.Err() == nil {
 			log.Warn("run recovery could not read running runs", "error", err)
 		}
 		return
 	}
-	if now.Before(r.quietUntil) {
-		return
+	if r.afterRead != nil {
+		r.afterRead()
 	}
-	for _, candidate := range lapsed {
-		if ctx.Err() != nil {
-			return
+
+	running := make(map[uuid.UUID]struct{}, len(runs))
+	for _, current := range runs {
+		running[current.ID] = struct{}{}
+		seen, known := r.observed[current.ID]
+		if !known {
+			r.observed[current.ID] = &runObservation{heartbeat: current.Heartbeat, changedAt: now}
+			continue
 		}
-		if err := r.recoverRun(ctx, candidate, cutoff); err != nil {
-			// The claim's heartbeat lapses in turn, so a later sweep retries.
-			log.Error("run recovery failed; retrying after the heartbeat lapses again",
-				"job_id", candidate.JobID, "run_id", candidate.ID, "error", err)
+		if r.driving(current.ID) || !sameHeartbeat(seen.heartbeat, current.Heartbeat) {
+			seen.heartbeat, seen.changedAt, seen.marked = current.Heartbeat, now, false
+			continue
+		}
+		wait := r.cfg.TTL
+		if seen.marked {
+			wait = runDriverBeat(r.cfg.TTL)
+		}
+		if ctx.Err() != nil || now.Sub(seen.changedAt) < wait {
+			continue
+		}
+		if err := r.advance(ctx, current, seen, now); err != nil {
+			log.Error("run recovery failed; a later sweep retries",
+				"job_id", current.JobID, "run_id", current.ID, "error", err)
+		}
+	}
+	for id := range r.observed {
+		if _, still := running[id]; !still {
+			delete(r.observed, id)
 		}
 	}
 }
 
-func (r *runRecovery) recoverRun(ctx context.Context, candidate run.LapsedRun, cutoff time.Time) error {
-	claimed, err := r.cfg.Store.ClaimLapsedRun(ctx, candidate.ID, cutoff)
-	if err != nil || !claimed {
-		return err
+func sameHeartbeat(a, b *time.Time) bool {
+	if a == nil || b == nil {
+		return a == b
 	}
-	if normalizeExecutionMode(r.cfg.ExecutionMode) == executionModeLocal {
-		settled, err := r.cfg.Store.RunTasksSettled(ctx, candidate.ID)
+	return a.Equal(*b)
+}
+
+// advance takes a run whose heartbeat stopped changing one step closer to an
+// outcome. A swap that loses needs no handling: the next sweep sees the value
+// that beat it and restarts the wait.
+func (r *runRecovery) advance(ctx context.Context, current run.RunHeartbeat, seen *runObservation, now time.Time) error {
+	if !seen.marked {
+		mark, err := r.cfg.Store.ReplaceRunHeartbeat(ctx, current.ID, seen.heartbeat)
+		if err != nil || mark == nil {
+			return err
+		}
+		seen.heartbeat, seen.changedAt, seen.marked = mark, now, true
+		return nil
+	}
+
+	settle := seen.adoptions >= maxRunAdoptions
+	if !settle && normalizeExecutionMode(r.cfg.ExecutionMode) == executionModeLocal {
+		settled, err := r.cfg.Store.RunTasksSettled(ctx, current.ID)
 		if err != nil {
 			return err
 		}
-		if !settled {
-			return r.finalize(ctx, candidate)
-		}
+		settle = !settled
 	}
-	log.Warn("adopting a run whose driver stopped", "job_id", candidate.JobID, "run_id", candidate.ID)
-	return r.cfg.Adopt(ctx, candidate.JobID, candidate.ID)
+	if settle {
+		return r.finalize(ctx, current, seen)
+	}
+
+	claim, err := r.cfg.Store.ReplaceRunHeartbeat(ctx, current.ID, seen.heartbeat)
+	if err != nil || claim == nil {
+		return err
+	}
+	seen.heartbeat, seen.changedAt, seen.marked = claim, now, false
+	seen.adoptions++
+	log.Warn("adopting a run whose driver stopped", "job_id", current.JobID, "run_id", current.ID, "adoption", seen.adoptions)
+	return r.cfg.Adopt(ctx, current.JobID, current.ID)
 }
 
-func (r *runRecovery) finalize(ctx context.Context, candidate run.LapsedRun) error {
-	finalized, err := r.cfg.Store.CompleteIfActive(candidate.ID, run.ErrRunDriverLost)
+func (r *runRecovery) finalize(ctx context.Context, current run.RunHeartbeat, seen *runObservation) error {
+	finalized, err := r.cfg.Store.FinalizeLostRun(current.ID, seen.heartbeat)
 	if err != nil || !finalized {
 		return err
 	}
-	log.Warn("failed a run whose driver stopped with tasks unfinished", "job_id", candidate.JobID, "run_id", candidate.ID)
+	log.Warn("failed a run whose driver stopped before it finished",
+		"job_id", current.JobID, "run_id", current.ID, "adoptions", seen.adoptions)
 	// No engine remains to do this, and only the call that finalized may.
-	if err := r.cfg.DispatchCallbacks(context.WithoutCancel(ctx), candidate.JobID, candidate.ID, run.ErrRunDriverLost); err != nil {
-		log.Error("callback dispatch failure", "job_id", candidate.JobID, "run_id", candidate.ID, "error", err)
+	if err := r.cfg.DispatchCallbacks(context.WithoutCancel(ctx), current.JobID, current.ID, run.ErrRunDriverLost); err != nil {
+		log.Error("callback dispatch failure", "job_id", current.JobID, "run_id", current.ID, "error", err)
 	}
 	return nil
 }
