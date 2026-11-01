@@ -247,7 +247,7 @@ write. Limits are validated configuration with conservative hard ceilings fixed
 by A1 before dependent work. C1/F3 measure unchanged-poll write count, catalog
 cardinality and closed-workflow Query dispatch count through the live surface.
 
-## Progress (as of 2026-10-31)
+## Progress (as of 2026-11-01)
 
 W1 through W4 have merged, including the W4 dashboard in PR #635.
 W5 C1 is merged in PR #644; dashboard PR #643 records its verified acceptance.
@@ -846,12 +846,19 @@ Resume unfinished waves. Do not archive this plan while later items remain.
   fixture startup/readiness as `cb77e8a3b53af20309b7b04ca24bcd463d63eccc`.
 - [PR #694](https://github.com/caesium-cloud/caesium/pull/694) merged lifecycle
   replay fencing and isolated CI fixtures as `43ef392810e911b619af4cf222b78f650edf03e0`.
-- **Pending:** [PR #696](https://github.com/caesium-cloud/caesium/pull/696), head
-  `e4f5902f13149e1ea4796e137ba95acf88a512b8`, repairs exact producer observations
-  and the browser's wait for workflow publication. It is not merged; its PR
-  description retains the scoped verification and timing boundary.
+- [PR #696](https://github.com/caesium-cloud/caesium/pull/696) merged exact
+  producer observations and the browser's wait for workflow publication as
+  `cda1d6639283116ccdd9fc57df7f93ad7906f3b1`.
+- [PR #698](https://github.com/caesium-cloud/caesium/pull/698) merged the
+  qualification-prerequisite record as `4ba38197850fb634a9314c40ea3a1b2617b11416`.
+- [PR #702](https://github.com/caesium-cloud/caesium/pull/702) merged the
+  robustness bake off the connector publication barrier as
+  `376a679d596c45a5f114ec0afe29b64cec88becc`. Pull-request timings are not
+  promotion evidence.
 - **Acceptance boundary:** The lane remains advisory. F4 still needs ten
-  qualifying selected master runs and promoted PR/merge-group proof. These
+  qualifying selected master runs inside fifteen minutes after `changes`, then
+  the promoted pull request and merge-group proof. The master push of
+  `376a679d` is the first post-split candidate and is not admitted. These
   prerequisite deliveries do not satisfy F4; N1 remains dependent on F4.
 
 ### Stream Status
@@ -863,7 +870,7 @@ Resume unfinished waves. Do not archive this plan while later items remain.
 | C | Authenticated REST and composition (2 items) | P0 | Shipped (C1, C2) |
 | D | Verified correlation and action durability (2 items) | P0 | Shipped (D1, D2) |
 | E | Console monitoring, data links and approval (3 items) | P0 | Shipped (E1, E2, E3) |
-| F | Real fixture, CI, qualification and promotion (4 items) | P0 | F1/F2 shipped; F3 accepted in W10; W11/W12 prerequisites merged, further repair open, F4 qualification pending |
+| F | Real fixture, CI, qualification and promotion (4 items) | P0 | F1/F2 shipped; F3 accepted in W10; W11/W12 prerequisites merged through #702; ten-run streak not established; F4 qualification pending |
 | N | Operator guidance and reconciliation (1 item) | P0 | Not started |
 
 ## Streams
