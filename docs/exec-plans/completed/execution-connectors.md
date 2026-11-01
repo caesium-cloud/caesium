@@ -1,6 +1,6 @@
 # Execution Connectors — Temporal Monitoring and Operator Actions
 
-Last updated: 2026-10-31
+Last updated: 2026-11-01
 
 Caesium should let an operator follow a data process across Temporal workflows
 and Caesium jobs, understand the data consequence, and perform a declared
@@ -15,9 +15,11 @@ idempotent Caesium starts, explicit created/queued/skipped/dropped outcomes and
 an operator recipe. W1–W9 have since added the connector contract, catalog,
 Temporal adapter, real development fixture, authenticated HTTP monitoring/actions
 and Console monitoring, verified workflow/run relationships, data links and
-declared approvals with durable receipt recovery and an advisory connector CI
-lane. W10 records release qualification on the merged candidate; promotion
-remains F4. The Console's existing run, dataset, freshness, lineage, receipt and
+declared approvals with durable receipt recovery. The `connectors` CI lane is
+required by `ci-ok`. W10 records release qualification on the merged candidate.
+F4 records the promotion. On 2026-11-01 the maintainer closed the remaining
+ten-run wait after one qualifying master run; that waiver is not ten runs.
+The Console's existing run, dataset, freshness, lineage, receipt and
 incident views provide the local data evidence joined to external process state.
 
 The first release includes one optional Temporal connector, file-configured
@@ -51,14 +53,14 @@ no-Temporal-dependency statement in [temporal.md](../../temporal.md) describes
 shipped behavior. B1 updates both guides in the same PR that introduces the SDK;
 N1 reconciles final acceptance rather than deferring that dependency correction.
 
-The [identity-and-access plan](../completed/identity-and-access.md) owns namespace grants,
+The [identity-and-access plan](identity-and-access.md) owns namespace grants,
 policy reload and tenancy. This plan uses shipped role/scope machinery. The
-[closed-loop arc](closed-loop-arc.md) retains dataset hold/incident/remediation
+[closed-loop arc](../active/closed-loop-arc.md) retains dataset hold/incident/remediation
 ownership; observations do not manufacture watermarks, release holds or add
-remediation policy. [Distributed testing](distributed-testing.md) owns common
+remediation policy. [Distributed testing](../active/distributed-testing.md) owns common
 evidence/gate infrastructure; this plan adds connector-specific scenarios.
-The completed [operator loop](../completed/console-operator-loop-ux.md) and
-[data-plane UI](../completed/data-plane-memory-ui.md) are reused, not duplicated.
+The completed [operator loop](console-operator-loop-ux.md) and
+[data-plane UI](data-plane-memory-ui.md) are reused, not duplicated.
 
 External protocol references checked while drafting:
 [Visibility](https://docs.temporal.io/visibility),
@@ -256,13 +258,15 @@ verified acceptance.
 W7 E2 is merged in PR #658; this dashboard records its verified acceptance.
 W8 E3 is merged in PR #662; this dashboard records its verified acceptance.
 W9 F2 is merged in PR #664; this dashboard records its verified acceptance.
-W10 records F3 acceptance below; W11/W12 record promotion prerequisites.
-F4 and N remain later work. An open PR or a
-component-only pass is not completion. The SHAs below are the squash merges read from GitHub.
+W10 records F3 acceptance below. W11 and W12 record promotion prerequisites.
+F4 and N1 close in this record: the lane is on `ci-ok`, and the guide matches
+the shipped adapter. The ten-run remainder was closed by the maintainer on
+2026-11-01, not by nine further master runs. An open PR or a component-only
+pass is not completion. The SHAs below are the squash merges read from GitHub.
 
 The orchestrator owns this dashboard: PR URLs, exact tested heads/merge SHAs,
 executed scenarios, evidence and blockers. Workers update assigned items/notes.
-Resume unfinished waves. Do not archive this plan while later items remain.
+This record is archived with F4 and N1.
 
 ### W1 — Contract (merged 2026-10-03)
 
@@ -836,7 +840,7 @@ Resume unfinished waves. Do not archive this plan while later items remain.
   selected master runs have strict candidate reports and meet the budget, followed
   by the promoted PR and merge-group proof. N1 remains dependent on F4.
 
-### W12 — Further promotion prerequisites (F4 remains open)
+### W12 — Further promotion prerequisites (closeout)
 
 - [PR #677](https://github.com/caesium-cloud/caesium/pull/677) merged connector
   CI repairs as `59c19937e0e35e493dfc25d4028180e8100a93c8`.
@@ -855,11 +859,11 @@ Resume unfinished waves. Do not archive this plan while later items remain.
   robustness bake off the connector publication barrier as
   `376a679d596c45a5f114ec0afe29b64cec88becc`. Pull-request timings are not
   promotion evidence.
-- **Acceptance boundary:** The lane remains advisory. F4 still needs ten
-  qualifying selected master runs inside fifteen minutes after `changes`, then
-  the promoted pull request and merge-group proof. The master push of
-  `376a679d` is the first post-split candidate and is not admitted. These
-  prerequisite deliveries do not satisfy F4; N1 remains dependent on F4.
+- **Acceptance boundary:** On 2026-11-01 the maintainer closed the remaining
+  ten-run wait. Master run 41334462436 on `10311452` succeeded and finished
+  the lane 810 seconds after `changes`, with a strict report bound to that
+  SHA. That is one qualifying run, not ten. F4 promotes on that decision.
+  N1 lands in the same closeout.
 
 ### Stream Status
 
@@ -870,8 +874,8 @@ Resume unfinished waves. Do not archive this plan while later items remain.
 | C | Authenticated REST and composition (2 items) | P0 | Shipped (C1, C2) |
 | D | Verified correlation and action durability (2 items) | P0 | Shipped (D1, D2) |
 | E | Console monitoring, data links and approval (3 items) | P0 | Shipped (E1, E2, E3) |
-| F | Real fixture, CI, qualification and promotion (4 items) | P0 | F1/F2 shipped; F3 accepted in W10; W11/W12 prerequisites merged through #702; ten-run streak not established; F4 qualification pending |
-| N | Operator guidance and reconciliation (1 item) | P0 | Not started |
+| F | Real fixture, CI, qualification and promotion (4 items) | P0 | Shipped. F4 promoted after the maintainer closed the remaining ten-run wait on 2026-11-01. |
+| N | Operator guidance and reconciliation (1 item) | P0 | Shipped in the F4 closeout. |
 
 ## Streams
 
@@ -1313,40 +1317,42 @@ compiled integration-runner approach; fixture code stays in the root module.
   loss (accepted and rejected), server/worker restart, outage/recovery, distinct
   actors/keys, config skew/transition, bounded polling/storage and continuation
   without retargeting old actions. Also run default-disabled regression gates.
-  Files: `docs/exec-plans/active/execution-connectors.md` (acceptance record only).
+  Files: `docs/exec-plans/completed/execution-connectors.md` (acceptance record only).
   Depends on: F2.
   Verify: record source/image identity, fixture pins, HTTP/browser evidence,
   independent effect counts and receipts. Missing fault proof or unresolved
   identity is inconclusive. Local evidence does not certify Cloud/all releases.
 
-- [ ] F4. Promote the connector lane only after 10 consecutive green selected
-  `master` runs finish within 15 minutes after `changes`, per the CI runbook. Record
-  exact runs, candidate identities, evidence and durations; a local/PR pass is
-  not promotion evidence. In one PR, remove its advisory registration, add the
-  same broad selectors to `SELECTORS`, register gate `connectors` in
-  `EVIDENCE_LANES`, and wire `ci-ok` needs/artifact retrieval/`--lane-evidence`.
-  Reconcile the CI runbook/required-set records named by its promotion procedure;
-  preserve `ci-ok` as the repository's required check without settings changes.
+- [x] F4. Promote the connector lane onto `ci-ok`. On 2026-11-01 the
+  maintainer closed the remaining ten-run wait after master run 41334462436
+  (`1031145204858295511600b3a666f60e8e8c072b`) succeeded and finished the lane
+  810 seconds after `changes`, with a strict report bound to that SHA.
+  Pull-request samples were 732 and 622 seconds. One earlier master run missed
+  the fifteen-minute bound before the robustness bake moved off `images`.
+  That record is one qualifying run, not ten. Remove the advisory registration,
+  add the broad `go`/`ui`/`ci` selectors to `SELECTORS`, register gate
+  `connectors` in `EVIDENCE_LANES`, and wire `ci-ok` needs, artifact retrieval,
+  and `--lane-evidence`. Preserve `ci-ok` as the repository's required check
+  without settings changes.
   Files: `.github/workflows/ci.yml`, `scripts/ci-ok.py`, `scripts/test_ci.py`,
   `docs/ci.md`, `docs/exec-plans/completed/trust-the-substrate.md`
   (required-set record), `docs/connectors.md` (gate status),
-  `docs/exec-plans/active/execution-connectors.md` (promotion record only).
+  `docs/exec-plans/completed/execution-connectors.md` (promotion record only).
   Depends on: F3.
   Verify: replay fail-closed gate cases for selected failed/skipped/missing jobs,
   absent/foreign/hollow reports and failed scenario/fault proof. Unselected skips
   are permitted only by successful broad selectors; shared dependencies select
-  the lane. Promotion proof includes 10 runs and timing, plus actual promoted
-  PR/merge-group evidence. If evidence/budget is unmet, F4 remains open/advisory.
+  the lane.
 
 ### Stream N — Operator guidance and reconciliation
 
-- [ ] N1. Consolidate accepted behavior/tour in the connector guide; reconcile
+- [x] N1. Consolidate accepted behavior/tour in the connector guide; reconcile
   the Temporal recipe and the strategy amendment already included here/B1.
   Update roadmap/navigation only from merged evidence. Preserve at-least-once
   and cancellation limitations, deferred scope and the later second-provider check.
   Files: `docs/connectors.md`, `docs/temporal.md`, `docs/README.md`,
   `docs/roadmap.md`, `docs/design/differentiation-strategy.md`,
-  `docs/exec-plans/active/execution-connectors.md`.
+  `docs/exec-plans/completed/execution-connectors.md`.
   Depends on: F4.
   Verify: documented local tour reproduces actual API/Console inspection and
   approval. Schema/commands match merged code, links resolve and shipped claims
@@ -1455,8 +1461,9 @@ remediation lane.
 CI/recipe changes run actionlint and the existing CI regression suite. Existing
 broad `go`/`ui`/`ci` outputs select the new job on PR and merge-group events;
 push selects it too. F2 validates its report against the shared manifest/checker
-while advisory; only F4 makes result and evidence required by `ci-ok` after the
-10-run/timing promotion proof. Capture Caesium/Temporal/worker logs,
+while advisory; F4 makes result and evidence required by `ci-ok`. The maintainer
+closed the remaining ten-run wait on 2026-11-01 after one qualifying master run
+(see F4). That waiver is not ten runs. Capture Caesium/Temporal/worker logs,
 fault activation, history/effects, receipts, browser reports and candidate/image
 IDs. One owner holds the local Docker/browser lane through cleanup. No production
 account, external message delivery or repository-settings change is required.
@@ -1497,8 +1504,10 @@ Default-disabled tests continue to run without any Temporal process.
    reaches the remote validator/history and spoofing is refused. Proof:
    authenticated HTTP/browser, workflow-principal and secret/audit assertions.
 7. All selected HTTP/browser scenarios actually execute with real servers.
-   Failure/absence/flake/wrong-SHA evidence fails the shared strict checker and,
-   after F4's 10-master-run/budget proof, `ci-ok`; default-disabled gates pass.
+   Failure/absence/flake/wrong-SHA evidence fails the shared strict checker and
+   `ci-ok`. The original ten-run budget was closed by the maintainer on
+   2026-11-01 after one qualifying master run (see F4); that waiver is not ten
+   runs. Default-disabled gates pass.
    Existing default/auth projects exclude connector specs. Proof identifies the
    candidate and fixture pins; Cloud/all-version qualification is outside the claim.
 8. Completion requires verified merged evidence. Progress/docs/status links
@@ -1526,11 +1535,11 @@ Use `$draft-exec-plan` to revise the plan without starting implementation.
 - [Current Temporal recipe](../../temporal.md) and
   [run-start contract](../../job-definitions.md).
 - [Strategy](../../design/differentiation-strategy.md) and [roadmap](../../roadmap.md).
-- [Identity/access](../completed/identity-and-access.md), [arc](closed-loop-arc.md) and
-  [distributed testing](distributed-testing.md).
-- [Console operator loop](../completed/console-operator-loop-ux.md),
-  [data-plane UI](../completed/data-plane-memory-ui.md) and
-  [freshness](../completed/freshness-scheduling.md).
+- [Identity/access](identity-and-access.md), [arc](../active/closed-loop-arc.md) and
+  [distributed testing](../active/distributed-testing.md).
+- [Console operator loop](console-operator-loop-ux.md),
+  [data-plane UI](data-plane-memory-ui.md) and
+  [freshness](freshness-scheduling.md).
 - [CI runbook](../../ci.md) and [docs index](../../README.md).
 - [Draft skill](../../../.codex/skills/draft-exec-plan/SKILL.md) and
   [wave skill](../../../.codex/skills/exec-plan-wave/SKILL.md).
