@@ -1444,7 +1444,11 @@ precedent for it is warn-mode schema validation, which publishes
       `pkg/jobdef` accepts the new class. `BuildBundle` skips failure attribution
       for the class, a guard ahead of F2's `DataQuality` section. Events are not
       guaranteed to reach the leader, so `Subscriber.ReconcileHolds` converges
-      incidents on hold state. Baseline evidence that is not namespace-owned is
+      incidents on hold state; a guard in the open's transaction keeps one incident
+      per hold for the hold's lifetime, and a recovered incident stores the row's
+      verdicts only when the latest breach's run is in the incident's namespace.
+      The allowlist seeds only from runs completed before the hold opened, because
+      a hold does not record every run that breached it. Baseline evidence that is not namespace-owned is
       withheld when the evidence is built; the helper moved to
       `internal/baselineevidence` so `internal/incident` can reach it.
 - [ ] F2. Add `release_hold` to the action catalog and make it executable through

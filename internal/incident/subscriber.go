@@ -63,6 +63,9 @@ type Subscriber struct {
 	// deployments and tests take no autonomous action.
 	executor *Executor
 	rules    *Rules
+	// afterHoldScan, tests only, runs between the reconcile sweep's scan for
+	// uncovered holds and its opens: where the event path interleaves.
+	afterHoldScan func()
 	// eventStore is the durable event store used to persist TypeIncidentOpened
 	// atomically with the incident row that opens it (see SetEventSink and
 	// OpenParams.OnOpen). Nil unless wired, so a subscriber under test still
@@ -386,6 +389,10 @@ func (s *Subscriber) recordIncident(ctx context.Context, params OpenParams) {
 	}
 	if outcome == OutcomeSuppressed {
 		log.Debug("incident: suppressed by cooldown", "job_id", params.JobID, "class", class)
+		return
+	}
+	if outcome == OutcomeRefused {
+		log.Debug("incident: open refused by its guard", "job_id", params.JobID, "class", class)
 		return
 	}
 	metrics.IncidentsTotal.WithLabelValues(string(class), string(inc.Status)).Inc()

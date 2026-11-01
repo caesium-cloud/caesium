@@ -10,6 +10,7 @@ import (
 	"github.com/caesium-cloud/caesium/pkg/env"
 	"github.com/caesium-cloud/caesium/pkg/log"
 	"github.com/google/uuid"
+	"gorm.io/gorm"
 )
 
 // Hold reconciliation. The incident subscriber is leader-gated, but each node
@@ -22,7 +23,11 @@ import (
 //
 // Ordinary failure events have the same gap, with no row to converge on.
 
-const defaultHoldReconcileInterval = 30 * time.Second
+const (
+	defaultHoldReconcileInterval = 30 * time.Second
+	// holdReconcileBatch bounds every query a sweep makes.
+	holdReconcileBatch = 100
+)
 
 // holdIDFromDedupeKey reads the hold id back out of a hold incident's dedupe key,
 // where the subject is the last segment.
@@ -61,10 +66,10 @@ func (s *Subscriber) RunHoldReconciler(ctx context.Context, interval time.Durati
 }
 
 // ReconcileHolds closes the incident of every hold that is no longer active and
-// opens the missing incident of every active hold opened more than grace ago.
-// grace leaves a fresh hold to its dataset_held event. It is leader-gated like
-// the subscriber, and idempotent: the hold id in the dedupe key means a hold has
-// one incident, and a hold whose incident has closed is not opened again.
+// opens the missing incident of active holds opened more than grace ago. grace
+// leaves a fresh hold to its dataset_held event. It is leader-gated like the
+// subscriber, and idempotent: holdOpenGuard gives a hold one incident for its
+// lifetime, so a hold whose incident has closed is not opened again.
 func (s *Subscriber) ReconcileHolds(ctx context.Context, grace time.Duration) error {
 	if !s.isLeader(ctx) {
 		return nil
@@ -75,17 +80,35 @@ func (s *Subscriber) ReconcileHolds(ctx context.Context, grace time.Duration) er
 	)
 }
 
+// closeIncidentsOfEndedHolds pages through the open hold incidents by id. Each
+// page is bounded, and paging cannot starve an incident behind ones whose holds
+// are still active.
 func (s *Subscriber) closeIncidentsOfEndedHolds(ctx context.Context) error {
-	var incidents []models.Incident
-	if err := s.db.WithContext(ctx).
-		Select("id", "job_id", "class", "task_name", "dedupe_key", "opened_at").
-		Where("class = ? AND active_dedupe_key IS NOT NULL", string(ClassDataQualityHold)).
-		Find(&incidents).Error; err != nil {
-		return err
+	after := uuid.Nil
+	for {
+		var incidents []models.Incident
+		if err := s.db.WithContext(ctx).
+			Select("id", "job_id", "class", "task_name", "dedupe_key", "opened_at").
+			Where("class = ? AND active_dedupe_key IS NOT NULL AND id > ?", string(ClassDataQualityHold), after).
+			Order("id ASC").
+			Limit(holdReconcileBatch).
+			Find(&incidents).Error; err != nil {
+			return err
+		}
+		if len(incidents) == 0 {
+			return nil
+		}
+		if err := s.closeEndedPage(ctx, incidents); err != nil {
+			return err
+		}
+		if len(incidents) < holdReconcileBatch {
+			return nil
+		}
+		after = incidents[len(incidents)-1].ID
 	}
-	if len(incidents) == 0 {
-		return nil
-	}
+}
+
+func (s *Subscriber) closeEndedPage(ctx context.Context, incidents []models.Incident) error {
 	ids := make([]uuid.UUID, 0, len(incidents))
 	for i := range incidents {
 		if id, ok := holdIDFromDedupeKey(incidents[i].DedupeKey); ok {
@@ -120,80 +143,92 @@ func (s *Subscriber) closeIncidentsOfEndedHolds(ctx context.Context) error {
 	return nil
 }
 
+// openIncidentsOfUncoveredHolds opens at most holdReconcileBatch incidents, oldest
+// hold first; the next sweep takes the rest. The anti-join is why that cannot
+// starve: a covered hold never occupies a place in the page. Every incident
+// status counts, so a hold whose incident closed stays closed.
 func (s *Subscriber) openIncidentsOfUncoveredHolds(ctx context.Context, openedBefore time.Time) error {
 	if !env.Variables().DataAssertionsEnabled {
 		return nil
 	}
-	var active []models.DatasetHold
+	var uncovered []uuid.UUID
 	if err := s.db.WithContext(ctx).
-		Select("id", "held_by_job_id").
+		Model(&models.DatasetHold{}).
 		Where("status = ? AND opened_at < ?", models.DatasetHoldStatusActive, openedBefore).
-		Find(&active).Error; err != nil {
+		Where(`NOT EXISTS (SELECT 1 FROM incidents
+			WHERE incidents.job_id = dataset_holds.held_by_job_id AND incidents.class = ?
+			AND incidents.dedupe_key LIKE '%|' || ? || CAST(dataset_holds.id AS TEXT))`,
+			string(ClassDataQualityHold), holdSubjectPrefix).
+		Order("opened_at ASC").
+		Limit(holdReconcileBatch).
+		Pluck("id", &uncovered).Error; err != nil {
 		return err
 	}
-	if len(active) == 0 {
-		return nil
+	if s.afterHoldScan != nil {
+		s.afterHoldScan()
 	}
-	jobIDs := make([]uuid.UUID, 0, len(active))
-	for i := range active {
-		jobIDs = append(jobIDs, active[i].HeldByJobID)
-	}
-	// Every status counts: a hold whose incident closed stays closed.
-	var keys []string
-	if err := s.db.WithContext(ctx).
-		Model(&models.Incident{}).
-		Where("class = ? AND job_id IN ?", string(ClassDataQualityHold), jobIDs).
-		Pluck("dedupe_key", &keys).Error; err != nil {
-		return err
-	}
-	covered := make(map[uuid.UUID]struct{}, len(keys))
-	for _, key := range keys {
-		if id, ok := holdIDFromDedupeKey(key); ok {
-			covered[id] = struct{}{}
-		}
-	}
-	var missing []uuid.UUID
-	for i := range active {
-		if _, ok := covered[active[i].ID]; !ok {
-			missing = append(missing, active[i].ID)
-		}
-	}
-	if len(missing) == 0 {
+	if len(uncovered) == 0 {
 		return nil
 	}
 	var holds []models.DatasetHold
-	if err := s.db.WithContext(ctx).Where("id IN ?", missing).Find(&holds).Error; err != nil {
+	if err := s.db.WithContext(ctx).Where("id IN ?", uncovered).Find(&holds).Error; err != nil {
 		return err
 	}
 	for i := range holds {
 		log.Info("incident: opening a hold's incident whose dataset_held was not delivered", "hold_id", holds[i].ID)
-		s.openIncidentFromHold(ctx, &holds[i])
+		if err := s.openIncidentFromHold(ctx, &holds[i]); err != nil {
+			return err
+		}
 	}
 	return nil
 }
 
-// openIncidentFromHold opens a hold's incident from its row. The row's verdicts
-// are the latest breach's, and any later breach's run is as untrusted as the
-// opening one.
-func (s *Subscriber) openIncidentFromHold(ctx context.Context, hold *models.DatasetHold) {
-	held := holdEvent{
-		HoldID:     hold.ID,
-		Namespace:  hold.Namespace,
-		Dataset:    hold.Name,
-		Reason:     hold.Reason,
-		JobAlias:   hold.HeldByJobAlias,
-		Step:       hold.HeldByStepName,
-		TaskID:     hold.HeldByTaskID,
-		TaskRunID:  hold.HeldByTaskRunID,
-		Violations: []byte(hold.Violations),
-	}
+// openIncidentFromHold opens a hold's incident from its row. Unlike the event,
+// the row's verdicts are the latest breach's, and that breach can belong to
+// another producer of the dataset in another namespace: its observations and its
+// baseline, however well scoped, are then not this incident's to store. They are
+// left out on the rule shapeHolds applies to a read: verdicts are served only
+// when the run that wrote them is attributable to the reader's namespace.
+func (s *Subscriber) openIncidentFromHold(ctx context.Context, hold *models.DatasetHold) error {
 	var runID uuid.UUID
 	if hold.HeldByRunID != nil {
 		runID = *hold.HeldByRunID
 	}
-	var untrusted []uuid.UUID
-	if hold.LastBreachRunID != nil {
-		untrusted = append(untrusted, *hold.LastBreachRunID)
+	scope := s.holdScope(ctx, hold.HeldByJobID, runID)
+	held := holdEvent{
+		HoldID:    hold.ID,
+		Namespace: hold.Namespace,
+		Dataset:   hold.Name,
+		Reason:    hold.Reason,
+		JobAlias:  hold.HeldByJobAlias,
+		Step:      hold.HeldByStepName,
+		TaskID:    hold.HeldByTaskID,
+		TaskRunID: hold.HeldByTaskRunID,
 	}
-	s.openHoldIncident(ctx, hold.HeldByJobID, runID, held, hold.Impact, untrusted...)
+	owned, err := s.runInNamespace(ctx, hold.LatestBreachRunID(), scope.namespace)
+	if err != nil {
+		return err
+	}
+	if owned {
+		held.Violations = []byte(hold.Violations)
+	}
+	s.openHoldIncident(ctx, hold.HeldByJobID, runID, scope, held, hold.Impact, hold.OpenedAt)
+	return nil
+}
+
+// runInNamespace reports whether the run is attributable to namespace. No run,
+// or one that no longer exists, is attributable to nobody.
+func (s *Subscriber) runInNamespace(ctx context.Context, runID *uuid.UUID, namespace string) (bool, error) {
+	if runID == nil {
+		return false, nil
+	}
+	var run models.JobRun
+	err := s.db.WithContext(ctx).Select("id", "namespace").First(&run, "id = ?", *runID).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return models.NamespaceOrDefault(run.Namespace) == namespace, nil
 }

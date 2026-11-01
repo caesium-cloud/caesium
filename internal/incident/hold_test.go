@@ -51,12 +51,19 @@ func newHoldWorld(t *testing.T, namespace string, cooldown time.Duration) *holdW
 	return w
 }
 
-// greenRun records a run whose "load" task succeeded.
+// greenRun records a run whose "load" task has just succeeded.
 func (w *holdWorld) greenRun(namespace string) (runID, taskRunID uuid.UUID) {
 	w.t.Helper()
 	now := time.Now().UTC()
+	return w.runCompleted(namespace, &now)
+}
+
+// runCompleted records a green run finishing at completedAt; nil is still running.
+func (w *holdWorld) runCompleted(namespace string, completedAt *time.Time) (runID, taskRunID uuid.UUID) {
+	w.t.Helper()
+	now := time.Now().UTC()
 	runID, taskRunID = uuid.New(), uuid.New()
-	require.NoError(w.t, w.db.Create(&models.JobRun{ID: runID, JobID: w.jobID, Namespace: namespace, Status: "succeeded", StartedAt: now, CreatedAt: now, UpdatedAt: now}).Error)
+	require.NoError(w.t, w.db.Create(&models.JobRun{ID: runID, JobID: w.jobID, Namespace: namespace, Status: "succeeded", StartedAt: now, CompletedAt: completedAt, CreatedAt: now, UpdatedAt: now}).Error)
 	require.NoError(w.t, w.db.Create(&models.TaskRun{
 		ID: taskRunID, JobRunID: runID, TaskID: w.taskID, AtomID: uuid.New(),
 		Engine: models.AtomEngineDocker, Image: "busybox:1.36.1", Command: "sh",
@@ -302,9 +309,13 @@ func TestHoldEventRedeliveryChangesNothing(t *testing.T) {
 	w.sub.handle(ctx, evt)
 	require.Equal(t, 1, w.only().OccurrenceCount, "a redelivery is not a second breach")
 
-	// Past the hold row's lifetime too: only the incident can say it was opened.
+	// Closing the incident frees its active key, and the hold is still active:
+	// only the guard's lifetime check stands between this and a second incident.
 	_, err := w.sub.store.Remediate(ctx, w.only().ID, "closed")
 	require.NoError(t, err)
+	w.sub.handle(ctx, evt)
+	require.Equal(t, models.IncidentStatusClosed, w.only().Status)
+
 	require.NoError(t, w.db.Delete(&models.DatasetHold{}, "id = ?", holdID).Error)
 	w.sub.handle(ctx, evt)
 	require.Equal(t, models.IncidentStatusClosed, w.only().Status)
@@ -320,6 +331,24 @@ func TestHoldReleasedBeforeItsEventOpensNoIncident(t *testing.T) {
 	w.sub.handle(t.Context(), w.heldEvent(holdID, "orders"))
 
 	require.Empty(t, w.incidents())
+}
+
+// The event is immutable and written by the opening breach, so a delayed one
+// carries the opener's verdicts whatever a later breach wrote to the row.
+func TestHeldEventKeepsTheOpeningVerdictsAfterAForeignBreach(t *testing.T) {
+	w := newHoldWorld(t, "finance", 0)
+	foreignRun, _ := w.greenRun("marketing")
+	holdID := w.hold("orders", nil)
+	require.NoError(t, w.db.Model(&models.DatasetHold{}).Where("id = ?", holdID).Updates(map[string]any{
+		"last_breach_run_id": foreignRun,
+		"violations":         datatypes.JSON(`[{"dataset":"orders","assertion":"min","observed":77,"baseline_median":31337}]`),
+	}).Error)
+
+	w.sub.handle(t.Context(), w.heldEvent(holdID, "orders"))
+
+	evidence := string(w.only().Evidence)
+	require.NotContains(t, evidence, "31337")
+	require.Contains(t, evidence, `"baseline_median":5000`)
 }
 
 func TestHoldEvidenceCollapsesForeignNodes(t *testing.T) {

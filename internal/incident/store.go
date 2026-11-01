@@ -32,6 +32,9 @@ func NewStore(db *gorm.DB) *Store {
 // DB exposes the underlying handle for read APIs built on top of the store.
 func (s *Store) DB() *gorm.DB { return s.db }
 
+// ErrOpenRefused is returned by an OpenParams.Guard to refuse the open.
+var ErrOpenRefused = errors.New("incident: open refused")
+
 // OpenParams describes a failure the subscriber wants to record as an incident.
 type OpenParams struct {
 	Namespace string
@@ -44,12 +47,19 @@ type OpenParams struct {
 	// not identify the incident: a step that produces two datasets can hold both,
 	// and each hold is its own incident. Empty for a failure.
 	Subject string
-	// UntrustedRunIDs are runs besides RunID whose outputs must not seed the
-	// allowlist: a hold can have been breached by more than its opening run.
-	UntrustedRunIDs []uuid.UUID
-	LastError       string
-	Evidence        datatypes.JSON
-	BackfillID      *uuid.UUID
+	// TrustedBefore, when set, limits the allowlist's seeds to runs that
+	// completed before it. A hold can be breached by any number of runs besides
+	// RunID, every one of them green and only the first and last on record, and
+	// a run that had not finished when the hold opened may be among them.
+	TrustedBefore time.Time
+	// Guard, when set, runs first inside the transaction of every open attempt.
+	// ErrOpenRefused from it opens nothing and is reported as OutcomeRefused; any
+	// other error aborts the open. It is what makes a precondition on other rows
+	// atomic with the insert, which a check before OpenOrAppend cannot be.
+	Guard      func(tx *gorm.DB) error
+	LastError  string
+	Evidence   datatypes.JSON
+	BackfillID *uuid.UUID
 	// RemediationTargetRunID is the run whose later success would close this
 	// incident as remediated.
 	RemediationTargetRunID *uuid.UUID
@@ -83,6 +93,9 @@ const (
 	// OutcomeSuppressed: skipped because a same-key incident closed within the
 	// cooldown window.
 	OutcomeSuppressed OpenOutcome = "suppressed"
+	// OutcomeRefused: OpenParams.Guard refused the open, and no incident is
+	// returned.
+	OutcomeRefused OpenOutcome = "refused"
 )
 
 // OpenOrAppend opens exactly one incident per dedupe key or folds the failure
@@ -135,7 +148,7 @@ func (s *Store) OpenOrAppend(ctx context.Context, p OpenParams) (*models.Inciden
 	// frozen value; the value computed here is only persisted when this insert
 	// wins the atomic conditional create below, so the allowlist is truly frozen
 	// at FIRST open. Best-effort: an empty result degrades to the job's own alias.
-	frozen, external := FreezeAllowlist(ctx, s.db, p.JobID, p.RunID, p.Namespace, p.UntrustedRunIDs...)
+	frozen, external := freezeAllowlist(ctx, s.db, p.JobID, p.RunID, p.TrustedBefore, p.Namespace)
 	allowedJobs := marshalAllowlist(frozen)
 
 	activeKey := key
@@ -180,6 +193,11 @@ func (s *Store) OpenOrAppend(ctx context.Context, p OpenParams) (*models.Inciden
 		var outcome OpenOutcome
 		var result *models.Incident
 		txErr := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+			if p.Guard != nil {
+				if err := p.Guard(tx); err != nil {
+					return err
+				}
+			}
 			res := tx.Clauses(clause.OnConflict{
 				Columns:   []clause.Column{{Name: "active_dedupe_key"}},
 				DoNothing: true,
@@ -206,6 +224,9 @@ func (s *Store) OpenOrAppend(ctx context.Context, p OpenParams) (*models.Inciden
 			return nil
 		})
 		if txErr != nil {
+			if errors.Is(txErr, ErrOpenRefused) {
+				return nil, OutcomeRefused, nil
+			}
 			if errors.Is(txErr, gorm.ErrRecordNotFound) {
 				// The twin closed between the conflict and the append; the dedupe
 				// key is free now — retry the insert.
@@ -346,9 +367,7 @@ func (s *Store) OpenForJobTask(ctx context.Context, jobID uuid.UUID, taskName, n
 // event does not carry.
 func (s *Store) incidentForHold(ctx context.Context, jobID, holdID uuid.UUID) (*models.Incident, error) {
 	var inc models.Incident
-	err := s.db.WithContext(ctx).
-		Where("job_id = ? AND class = ? AND dedupe_key LIKE ?", jobID, string(ClassDataQualityHold), "%|"+holdSubject(holdID)).
-		First(&inc).Error
+	err := holdIncidents(s.db.WithContext(ctx), jobID, holdID).First(&inc).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return nil, nil
 	}
@@ -356,6 +375,11 @@ func (s *Store) incidentForHold(ctx context.Context, jobID, holdID uuid.UUID) (*
 		return nil, err
 	}
 	return &inc, nil
+}
+
+func holdIncidents(db *gorm.DB, jobID, holdID uuid.UUID) *gorm.DB {
+	return db.Model(&models.Incident{}).
+		Where("job_id = ? AND class = ? AND dedupe_key LIKE ?", jobID, string(ClassDataQualityHold), "%|"+holdSubject(holdID))
 }
 
 // Get returns a single incident by id.

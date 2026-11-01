@@ -164,7 +164,8 @@ func (s *IntegrationTestSuite) TestHoldOpensDataQualityHoldIncident() {
 	s.Equal("load", first.TaskName)
 	s.Equal(1, first.OccurrenceCount)
 	s.Contains(first.LastError, dataset)
-	s.NotContains(first.AllowedJobs, foreignConsumer, "the cone is evidence, not authorization")
+	s.Contains(first.AllowedJobs, ownConsumer, "the clean runs' recorded output finished before the hold, so it stays trusted")
+	s.NotContains(first.AllowedJobs, foreignConsumer, "the allowlist stops at the incident's namespace")
 
 	var evidence holdIncidentEvidence
 	s.Require().NoError(json.Unmarshal(first.Evidence, &evidence), string(first.Evidence))

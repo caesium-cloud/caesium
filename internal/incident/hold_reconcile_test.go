@@ -3,6 +3,7 @@ package incident
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"testing"
 	"time"
 
@@ -177,24 +178,159 @@ func TestReconcileOpensNothingWithDataAssertionsOff(t *testing.T) {
 	require.Empty(t, w.incidents())
 }
 
-// A later breach's run is as untrusted as the opening run: the sweep can open
-// long after both, when a poisoned output has already reached the lineage graph.
-func TestReconcileAllowlistExcludesEveryKnownBreachingRun(t *testing.T) {
+// A hold records its first and last breach, not the ones between, and all of them
+// are green, so only a run finished before the hold existed is known not to have
+// breached it. R2 here is the one no list could name; the run still in flight
+// when the hold opened could be one too.
+func TestReconcileAllowlistTrustsOnlyRunsFinishedBeforeTheHold(t *testing.T) {
 	w := newHoldWorld(t, "finance", 0)
-	_, trustedTask := w.greenRun("finance")
-	laterRun, laterTask := w.greenRun("finance")
-	w.lineageRow(w.taskRunID, "opening-poison", "output")
-	w.lineageRow(laterTask, "later-poison", "output")
-	w.lineageRow(trustedTask, "trusted", "output")
-	w.consumer("reached-by-opening", "opening-poison")
-	w.consumer("reached-by-later", "later-poison")
-	w.consumer("reached-by-trusted", "trusted")
-	hold := w.heldRow("orders", time.Now().UTC().Add(-time.Hour))
-	require.NoError(t, w.db.Model(hold).Update("last_breach_run_id", laterRun).Error)
+	openedAt := time.Now().UTC().Add(-time.Hour)
+	at := func(offset time.Duration) *time.Time {
+		moment := openedAt.Add(offset)
+		return &moment
+	}
+	_, trusted := w.runCompleted("finance", at(-time.Minute))
+	_, r2 := w.runCompleted("finance", at(time.Minute))
+	r3, r3Task := w.runCompleted("finance", at(2*time.Minute))
+	_, unfinished := w.runCompleted("finance", nil)
+	for dataset, taskRun := range map[string]uuid.UUID{
+		"opening": w.taskRunID, "intermediate": r2, "latest": r3Task, "unfinished": unfinished, "trusted": trusted,
+	} {
+		w.lineageRow(taskRun, dataset, "output")
+		w.consumer("reached-by-"+dataset, dataset)
+	}
+	hold := w.heldRow("orders", openedAt)
+	require.NoError(t, w.db.Model(hold).Update("last_breach_run_id", r3).Error)
 
 	require.NoError(t, w.sub.ReconcileHolds(t.Context(), 0))
 
 	require.ElementsMatch(t, []string{w.alias, "reached-by-trusted"}, unmarshalAllowlist(w.only().AllowedJobs))
+}
+
+// The event path can run just as late: a dataset_held behind a bus backlog or
+// redelivered by the dispatcher.
+func TestDelayedHeldEventTrustsOnlyRunsFinishedBeforeTheHold(t *testing.T) {
+	w := newHoldWorld(t, "finance", 0)
+	holdID := w.hold("orders", nil)
+	later := time.Now().UTC().Add(time.Minute)
+	_, intermediate := w.runCompleted("finance", &later)
+	w.lineageRow(intermediate, "intermediate", "output")
+	w.consumer("reached-by-intermediate", "intermediate")
+
+	w.sub.handle(t.Context(), w.heldEvent(holdID, "orders"))
+
+	require.Equal(t, []string{w.alias}, unmarshalAllowlist(w.only().AllowedJobs))
+}
+
+// The row's verdicts are the latest breach's, and a producer in another namespace
+// can write them. Recovery must not store them in the opener's incident, on the
+// rule the dataset routes apply to a read.
+func TestRecoveryStoresVerdictsOnlyFromTheIncidentsNamespace(t *testing.T) {
+	const foreign = `[{"dataset":"orders","metric":"rowCount","assertion":"deltaFromBaseline","observed":77,"bound":15668.5,` +
+		`"baseline_median":31337,"baseline_samples":9,"baseline_scope":"namespace","message":"observed 77 deviates from median 31337"}]`
+	cases := []struct {
+		name  string
+		setup func(w *holdWorld, hold *models.DatasetHold) map[string]any
+		kept  bool
+	}{
+		{"another namespace", func(w *holdWorld, _ *models.DatasetHold) map[string]any {
+			run, _ := w.greenRun("marketing")
+			return map[string]any{"last_breach_run_id": run}
+		}, false},
+		{"run no longer exists", func(*holdWorld, *models.DatasetHold) map[string]any {
+			return map[string]any{"last_breach_run_id": uuid.New()}
+		}, false},
+		{"the incident's namespace", func(w *holdWorld, _ *models.DatasetHold) map[string]any {
+			run, _ := w.greenRun("finance")
+			return map[string]any{"last_breach_run_id": run}
+		}, true},
+		{"predates the column", func(*holdWorld, *models.DatasetHold) map[string]any {
+			return map[string]any{"last_breach_run_id": nil}
+		}, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			w := newHoldWorld(t, "finance", 0)
+			hold := w.heldRow("orders", time.Now().UTC().Add(-time.Hour))
+			updates := tc.setup(w, hold)
+			updates["violations"] = datatypes.JSON(foreign)
+			require.NoError(t, w.db.Model(hold).Updates(updates).Error)
+
+			require.NoError(t, w.sub.ReconcileHolds(t.Context(), 0))
+
+			inc := w.only()
+			require.Equal(t, "finance", inc.Namespace)
+			if tc.kept {
+				require.Contains(t, string(inc.Evidence), "31337")
+				return
+			}
+			require.NotContains(t, string(inc.Evidence), "31337")
+			require.NotContains(t, string(inc.Evidence), "violations")
+			require.NotContains(t, inc.LastError, "31337")
+			require.Equal(t, `dataset "orders" held: min`, inc.LastError)
+		})
+	}
+}
+
+// The interleaving Codex reproduced: between the sweep's scan and its open, the
+// event path opens the incident and it closes. Closing frees the active key, so
+// without the guard the sweep opens a second incident for the same hold.
+func TestReconcileRaceWithTheEventPathOpensOneIncident(t *testing.T) {
+	cases := []struct {
+		name     string
+		interval func(w *holdWorld, ctx context.Context, hold *models.DatasetHold)
+	}{
+		{"released meanwhile", func(w *holdWorld, ctx context.Context, hold *models.DatasetHold) {
+			w.release(ctx, hold.ID)
+		}},
+		{"closed while still active", func(w *holdWorld, ctx context.Context, _ *models.DatasetHold) {
+			_, err := w.sub.store.Remediate(ctx, w.only().ID, "closed by hand")
+			require.NoError(w.t, err)
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			w := newHoldWorld(t, "finance", 0)
+			ctx := t.Context()
+			w.sub.SetEventSink(event.NewStore(w.db))
+			hold := w.heldRow("orders", time.Now().UTC().Add(-time.Hour))
+			w.sub.afterHoldScan = func() {
+				w.sub.handle(ctx, w.heldEvent(hold.ID, "orders"))
+				tc.interval(w, ctx, hold)
+			}
+
+			require.NoError(t, w.sub.ReconcileHolds(ctx, 0))
+
+			require.Equal(t, models.IncidentStatusClosed, w.only().Status, "exactly one incident per hold")
+			var opened int64
+			require.NoError(t, w.db.Model(&models.ExecutionEvent{}).Where("type = ?", string(event.TypeIncidentOpened)).Count(&opened).Error)
+			require.EqualValues(t, 1, opened)
+		})
+	}
+}
+
+// Every query is bounded, and a page of healthy rows must not hide the rest.
+func TestReconcilePagesThroughMoreHoldsThanABatch(t *testing.T) {
+	w := newHoldWorld(t, "finance", 0)
+	ctx := t.Context()
+	total := holdReconcileBatch + 5
+	holds := make([]*models.DatasetHold, 0, total)
+	for i := range total {
+		holds = append(holds, w.heldRow(fmt.Sprintf("dataset-%d", i), time.Now().UTC().Add(-time.Hour)))
+	}
+
+	require.NoError(t, w.sub.ReconcileHolds(ctx, 0))
+	require.Len(t, w.incidents(), holdReconcileBatch, "one sweep opens one batch")
+	require.NoError(t, w.sub.ReconcileHolds(ctx, 0))
+	require.Len(t, w.incidents(), total, "a covered hold does not hold a place in the next")
+
+	for _, hold := range holds {
+		w.releaseUnseen(hold.ID)
+	}
+	require.NoError(t, w.sub.ReconcileHolds(ctx, 0))
+	for _, inc := range w.incidents() {
+		require.Equal(t, models.IncidentStatusClosed, inc.Status)
+	}
 }
 
 // greptile on #710: an operator rejecting the last approval between a status

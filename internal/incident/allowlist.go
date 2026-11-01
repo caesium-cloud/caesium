@@ -4,6 +4,7 @@ import (
 	"context"
 	"maps"
 	"slices"
+	"time"
 
 	"github.com/caesium-cloud/caesium/internal/lineage"
 	"github.com/caesium-cloud/caesium/internal/models"
@@ -36,20 +37,19 @@ import (
 // enter the allowlist, the incident's own job included (identity-and-access
 // A8); every other job found is counted in external and never named. Jobs are
 // matched by id, never by alias.
-//
-// alsoUntrusted names further runs excluded from the seeds exactly as
-// failingRunID is, for an incident with more than one breaching run.
-func FreezeAllowlist(ctx context.Context, db *gorm.DB, jobID uuid.UUID, failingRunID *uuid.UUID, namespace string, alsoUntrusted ...uuid.UUID) (allowed []string, external int) {
+func FreezeAllowlist(ctx context.Context, db *gorm.DB, jobID uuid.UUID, failingRunID *uuid.UUID, namespace string) (allowed []string, external int) {
+	return freezeAllowlist(ctx, db, jobID, failingRunID, time.Time{}, namespace)
+}
+
+// freezeAllowlist is FreezeAllowlist seeded, when trustedBefore is set, only from
+// runs that completed before it. See OpenParams.TrustedBefore.
+func freezeAllowlist(ctx context.Context, db *gorm.DB, jobID uuid.UUID, failingRunID *uuid.UUID, trustedBefore time.Time, namespace string) (allowed []string, external int) {
 	namespace = models.NamespaceOrDefault(namespace)
 	candidates := map[uuid.UUID]struct{}{jobID: {}}
 
 	// Seed the impact walk from the failing job's TRUSTED output datasets —
 	// every output row for the job EXCEPT those produced by the failing run.
-	untrusted := slices.Clone(alsoUntrusted)
-	if failingRunID != nil {
-		untrusted = append(untrusted, *failingRunID)
-	}
-	seeds, err := trustedOutputDatasets(ctx, db, jobID, untrusted)
+	seeds, err := trustedOutputDatasets(ctx, db, jobID, failingRunID, trustedBefore)
 	if err != nil {
 		// Lineage tables may be absent/empty when OpenLineage is disabled; degrade
 		// to the job's own alias rather than blocking incident open.
@@ -95,9 +95,9 @@ type datasetSeed struct {
 }
 
 // trustedOutputDatasets returns the distinct (namespace, name) output datasets
-// the job has produced across its runs, EXCLUDING any produced by an untrusted
-// run.
-func trustedOutputDatasets(ctx context.Context, db *gorm.DB, jobID uuid.UUID, untrusted []uuid.UUID) ([]datasetSeed, error) {
+// the job has produced across its runs, EXCLUDING any produced by failingRunID
+// and, when trustedBefore is set, by a run that had not completed by then.
+func trustedOutputDatasets(ctx context.Context, db *gorm.DB, jobID uuid.UUID, failingRunID *uuid.UUID, trustedBefore time.Time) ([]datasetSeed, error) {
 	type row struct {
 		Namespace string
 		Name      string
@@ -110,8 +110,11 @@ func trustedOutputDatasets(ctx context.Context, db *gorm.DB, jobID uuid.UUID, un
 		Joins("JOIN task_runs tr ON tr.id = ld.task_run_id").
 		Joins("JOIN job_runs jr ON jr.id = tr.job_run_id").
 		Where("jr.job_id = ? AND ld.direction = ?", jobID, "output")
-	if len(untrusted) > 0 {
-		q = q.Where("jr.id NOT IN ?", untrusted)
+	if failingRunID != nil {
+		q = q.Where("jr.id <> ?", *failingRunID)
+	}
+	if !trustedBefore.IsZero() {
+		q = q.Where("jr.completed_at < ?", trustedBefore.UTC())
 	}
 	if err := q.Scan(&rows).Error; err != nil {
 		return nil, err

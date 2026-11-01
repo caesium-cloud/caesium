@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/caesium-cloud/caesium/internal/authz"
 	"github.com/caesium-cloud/caesium/internal/baselineevidence"
@@ -16,6 +17,7 @@ import (
 	"github.com/google/uuid"
 	"gorm.io/datatypes"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 // data_quality_hold incidents (data-circuit-breaker F1). Every other incident
@@ -82,7 +84,9 @@ func decodeHoldEvent(evt event.Event) (holdEvent, bool) {
 // handleHold opens the incident for a dataset hold. Everything but the impact
 // cone comes from the event, so the task and the run are the producing ones
 // named there, and the failed-instance attribution in resolveContext never
-// applies: the task succeeded.
+// applies: the task succeeded. The event is immutable and written by the opening
+// breach, so its verdicts are the opening run's whatever has since been folded
+// into the hold, and that run's namespace is the incident's.
 func (s *Subscriber) handleHold(ctx context.Context, evt event.Event) {
 	if !env.Variables().DataAssertionsEnabled {
 		return
@@ -92,40 +96,67 @@ func (s *Subscriber) handleHold(ctx context.Context, evt event.Event) {
 		return
 	}
 
-	// A redelivered dataset_held must not count as an occurrence, and once the
-	// incident has closed it must not open a second one. The unique active key
-	// backstops the first case if this read fails.
-	if existing, err := s.store.incidentForHold(ctx, evt.JobID, held.HoldID); err != nil {
-		log.Warn("incident: could not check for a hold's incident; opening", "hold_id", held.HoldID, "error", err)
-	} else if existing != nil {
-		log.Debug("incident: dataset hold already has an incident", "hold_id", held.HoldID, "incident_id", existing.ID)
+	// holdOpenGuard is the authority on whether this opens anything. This read
+	// fetches the cone and spares a redelivery the work when the hold is over.
+	var hold models.DatasetHold
+	if err := s.db.WithContext(ctx).Select("id", "status", "impact", "opened_at").First(&hold, "id = ?", held.HoldID).Error; err != nil {
+		if !errors.Is(err, gorm.ErrRecordNotFound) {
+			log.Warn("incident: could not read a dataset hold; leaving it to the reconcile sweep", "hold_id", held.HoldID, "error", err)
+		}
 		return
 	}
-
-	// A hold released before this event arrived (a delayed redelivery) needs no
-	// remediation, and its release may already have been handled, which would
-	// leave the incident open for good.
-	impact, released := s.holdImpact(ctx, held.HoldID)
-	if released {
+	if hold.Status != models.DatasetHoldStatusActive {
 		log.Info("incident: dataset hold released before its incident opened; skipping", "hold_id", held.HoldID)
 		return
 	}
 
-	s.openHoldIncident(ctx, evt.JobID, evt.RunID, held, impact)
+	s.openHoldIncident(ctx, evt.JobID, evt.RunID, s.holdScope(ctx, evt.JobID, evt.RunID), held, hold.Impact, hold.OpenedAt)
 }
 
-// openHoldIncident opens the incident for a hold, from its event or from its row.
-// untrusted names breaching runs other than runID.
-func (s *Subscriber) openHoldIncident(ctx context.Context, jobID, runID uuid.UUID, held holdEvent, impact datatypes.JSON, untrusted ...uuid.UUID) {
-	// Run-level on purpose: with a TaskID, resolveContext would classify from
-	// the task's rows. A hold whose run is gone falls back to the job's
-	// namespace, which is also what Store.OpenOrAppend does with no run.
+// holdScope resolves the tenant of a hold's incident: the opening run's
+// namespace. Run-level on purpose: with a TaskID, resolveContext would classify
+// from the task's rows. A hold whose run is gone falls back to the job's
+// namespace, which is also what Store.OpenOrAppend does with no run.
+func (s *Subscriber) holdScope(ctx context.Context, jobID, runID uuid.UUID) failureContext {
 	fc := s.resolveContext(ctx, event.Event{JobID: jobID, RunID: runID})
 	if fc.namespace == "" {
 		fc.namespace = s.resolveContext(ctx, event.Event{JobID: jobID}).namespace
 	}
-	namespace := models.NamespaceOrDefault(fc.namespace)
+	fc.namespace = models.NamespaceOrDefault(fc.namespace)
+	return fc
+}
 
+// holdOpenGuard makes a hold's incident one per hold for the hold's lifetime. It
+// runs in the open's own transaction, under the hold's row lock, so opens of one
+// hold and its release serialize, and the event path and the reconcile sweep
+// cannot both pass: closing an incident frees its active dedupe key, so the
+// unique index alone would admit a second incident for a released hold.
+func holdOpenGuard(jobID, holdID uuid.UUID) func(tx *gorm.DB) error {
+	return func(tx *gorm.DB) error {
+		var hold models.DatasetHold
+		err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Select("id", "status").First(&hold, "id = ?", holdID).Error
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return ErrOpenRefused
+		}
+		if err != nil {
+			return err
+		}
+		if hold.Status != models.DatasetHoldStatusActive {
+			return ErrOpenRefused
+		}
+		var existing int64
+		if err := holdIncidents(tx, jobID, holdID).Count(&existing).Error; err != nil {
+			return err
+		}
+		if existing > 0 {
+			return ErrOpenRefused
+		}
+		return nil
+	}
+}
+
+// openHoldIncident opens the incident for a hold, from its event or from its row.
+func (s *Subscriber) openHoldIncident(ctx context.Context, jobID, runID uuid.UUID, scope failureContext, held holdEvent, impact datatypes.JSON, openedAt time.Time) {
 	var runRef *uuid.UUID
 	if runID != uuid.Nil {
 		runRef = &runID
@@ -134,39 +165,26 @@ func (s *Subscriber) openHoldIncident(ctx context.Context, jobID, runID uuid.UUI
 	class := s.classifier.Classify(Signal{EventType: string(event.TypeDatasetHeld)})
 	violations, summary := shapeHoldVerdict(held)
 	s.recordIncident(ctx, OpenParams{
-		Namespace: namespace,
+		Namespace: scope.namespace,
 		JobID:     jobID,
-		// The breaching run: FreezeAllowlist excludes its outputs from the seeds
-		// of the impact walk, so a poisoned run cannot widen the allowlist.
+		Guard:     holdOpenGuard(jobID, held.HoldID),
+		// The opening run: FreezeAllowlist excludes its outputs from the seeds of
+		// the impact walk. TrustedBefore excludes every other run that could have
+		// breached the hold, recorded or not: only a run finished before the hold
+		// existed cannot have. So a poisoned run cannot widen the allowlist,
+		// however late this opens. The clocks may differ by node; see
+		// run.releasableHold on why NTP-scale skew is acceptable here too.
 		RunID:                  runRef,
-		UntrustedRunIDs:        untrusted,
+		TrustedBefore:          openedAt,
 		TaskID:                 held.TaskID,
 		TaskName:               held.Step,
 		Class:                  class,
 		Subject:                holdSubject(held.HoldID),
 		LastError:              summary,
-		Evidence:               buildHoldEvidence(ctx, class, namespace, held, violations, impact),
-		BackfillID:             fc.backfillID,
+		Evidence:               buildHoldEvidence(ctx, class, scope.namespace, held, violations, impact),
+		BackfillID:             scope.backfillID,
 		RemediationTargetRunID: runRef,
 	})
-}
-
-// holdImpact reads the impact cone frozen on the hold when it opened, and
-// whether the hold has been released. The cone does not travel in the event
-// because the event is served to /v1/events and notification channels, and the
-// cone names other namespaces' datasets; it does not change after open, so this
-// read cannot see a moved value. Best-effort: a hold with no readable cone is
-// still a hold, so the incident opens without one.
-func (s *Subscriber) holdImpact(ctx context.Context, holdID uuid.UUID) (datatypes.JSON, bool) {
-	var hold models.DatasetHold
-	err := s.db.WithContext(ctx).Select("id", "status", "impact").First(&hold, "id = ?", holdID).Error
-	if err != nil {
-		if !errors.Is(err, gorm.ErrRecordNotFound) {
-			log.Warn("incident: could not read a dataset hold's impact cone", "hold_id", holdID, "error", err)
-		}
-		return nil, false
-	}
-	return hold.Impact, hold.Status == models.DatasetHoldStatusReleased
 }
 
 // shapeHoldVerdict returns the verdicts and the summary as an incident may store

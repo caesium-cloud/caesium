@@ -210,11 +210,7 @@ func (s *Service) shapeHolds(v viewer, holds []*models.DatasetHold) error {
 		return err
 	}
 	for _, hold := range holds {
-		breachRun := hold.LastBreachRunID
-		if breachRun == nil {
-			breachRun = hold.HeldByRunID
-		}
-		if !runVisible(v, owners, breachRun) {
+		if !runVisible(v, owners, hold.LatestBreachRunID()) {
 			hold.LastBreachRunID = nil
 			hold.Violations = nil
 		}
