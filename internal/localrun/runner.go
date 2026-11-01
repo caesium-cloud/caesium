@@ -64,8 +64,14 @@ type TaskResult struct {
 	// Partition is set for each materialized instance of a fanned step (one
 	// TaskResult per partition, Name rendered as "step[partition]"); empty for
 	// unfanned steps.
-	Partition        string
-	Status           string
+	Partition string
+	Status    string
+	// Attempt is the 1-based task-run attempt. Zero means the row never
+	// recorded one.
+	Attempt int
+	// ExitCode is the raw process exit code when the engine reported one.
+	// Nil when the task failed before a code existed. Zero is a real code.
+	ExitCode         *int
 	Output           map[string]string
 	SchemaViolations []pkgtask.SchemaViolation
 	LogText          string
@@ -80,10 +86,12 @@ func New(cfg Config) *Runner {
 	return &Runner{cfg: cfg}
 }
 
-// Run parses, imports, and executes the definition.
+// Run parses, imports, and executes the definition. On failure the returned
+// error adds each failed step's name, attempt, exit code, and a bounded log
+// tail. RunWithResult keeps the executor error harness checks match.
 func (r *Runner) Run(ctx context.Context, def *schema.Definition) error {
-	_, err := r.RunWithResult(ctx, def)
-	return err
+	result, err := r.RunWithResult(ctx, def)
+	return formatRunFailure(err, result)
 }
 
 // RunWithResult parses, imports, executes, and returns the persisted run result.
@@ -277,6 +285,8 @@ func collectRunResult(store *run.Store, db *gorm.DB, jobModel *models.Job) (*Run
 					Name:             fmt.Sprintf("%s[%s]", taskModel.Name, inst.PartitionValue),
 					Partition:        inst.PartitionValue,
 					Status:           string(inst.Status),
+					Attempt:          inst.Attempt,
+					ExitCode:         inst.ExitCode,
 					Output:           inst.Output,
 					SchemaViolations: inst.SchemaViolations,
 					CacheHit:         inst.CacheHit,
@@ -300,6 +310,8 @@ func collectRunResult(store *run.Store, db *gorm.DB, jobModel *models.Job) (*Run
 			TaskID:           taskModel.ID,
 			Name:             taskModel.Name,
 			Status:           string(taskRun.Status),
+			Attempt:          taskRun.Attempt,
+			ExitCode:         taskRun.ExitCode,
 			Output:           taskRun.Output,
 			SchemaViolations: taskRun.SchemaViolations,
 			CacheHit:         taskRun.CacheHit,
