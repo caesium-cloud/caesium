@@ -139,14 +139,26 @@ const startViewNamespaceParam = "_consumed_watermarks_start_namespace"
 
 // startViewInputs reports the consumed inputs a start view covers and whether
 // the job produces anything (the only case completion records a view for).
+//
+// A metadata.datasets.sources row is a consumed input, the same edge the
+// freshness snapshot indexes. A cron job that declares its input only that way
+// still has to freeze the source watermark at start and record it at
+// completion, or the next tick treats the snapshot as missing and runs again.
+// A dataset declared both as a source and as a step-level consumes is one name.
 func startViewInputs(decls []models.DatasetDeclaration) (consumedNames []string, produces bool) {
+	seen := make(map[string]struct{}, len(decls))
 	consumedNames = make([]string, 0, len(decls))
 	for i := range decls {
 		switch decls[i].Direction {
 		case models.DatasetDirectionProduces:
 			produces = true
-		case models.DatasetDirectionConsumes:
-			consumedNames = append(consumedNames, decls[i].Name)
+		case models.DatasetDirectionConsumes, models.DatasetDirectionSource:
+			name := decls[i].Name
+			if _, ok := seen[name]; ok {
+				continue
+			}
+			seen[name] = struct{}{}
+			consumedNames = append(consumedNames, name)
 		}
 	}
 	return consumedNames, produces
