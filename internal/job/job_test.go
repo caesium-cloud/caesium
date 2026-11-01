@@ -403,7 +403,7 @@ func TestRunLocalFailedAtomResultFailsRun(t *testing.T) {
 	atomID := uuid.New()
 
 	taskSvc := &fakeTaskService{tasks: models.Tasks{
-		{ID: taskID, JobID: jobID, AtomID: atomID},
+		{ID: taskID, JobID: jobID, AtomID: atomID, Name: "extract"},
 	}}
 	persistGraph(t, db, taskSvc.tasks, nil)
 	atomSvc := &fakeAtomService{atoms: map[uuid.UUID]*models.Atom{
@@ -421,6 +421,7 @@ func TestRunLocalFailedAtomResultFailsRun(t *testing.T) {
 	err := New(&models.Job{ID: jobID}, opts...).Run(context.Background())
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "failed with result")
+	require.Contains(t, err.Error(), "extract")
 
 	snapshot := latestRunSnapshot(t, store, jobID)
 	require.Equal(t, run.StatusFailed, snapshot.Status)

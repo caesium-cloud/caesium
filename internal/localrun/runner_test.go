@@ -21,14 +21,15 @@ import (
 // resolving every atom immediately so the run completes synchronously.
 
 type fakeLocalAtom struct {
-	id     string
-	result atom.Result
+	id       string
+	result   atom.Result
+	exitCode *int
 }
 
 func (f *fakeLocalAtom) ID() string           { return f.id }
 func (f *fakeLocalAtom) State() atom.State    { return atom.Stopped }
 func (f *fakeLocalAtom) Result() atom.Result  { return f.result }
-func (f *fakeLocalAtom) ExitCode() *int       { return nil }
+func (f *fakeLocalAtom) ExitCode() *int       { return f.exitCode }
 func (f *fakeLocalAtom) CreatedAt() time.Time { return time.Now() }
 func (f *fakeLocalAtom) StartedAt() time.Time { return time.Now() }
 func (f *fakeLocalAtom) StoppedAt() time.Time { return time.Now() }
@@ -41,18 +42,20 @@ func (f *fakeLocalAtom) Engine() atom.Engine  { return nil }
 type fakeLocalEngine struct {
 	mu sync.Mutex
 
-	resultByPartition map[string]atom.Result
-	logsByPartition   map[string]string
-	partitionByAtomID map[string]string
+	resultByPartition   map[string]atom.Result
+	logsByPartition     map[string]string
+	exitCodeByPartition map[string]*int
+	partitionByAtomID   map[string]string
 }
 
 const defaultKey = "__unfanned__"
 
 func newFakeLocalEngine() *fakeLocalEngine {
 	return &fakeLocalEngine{
-		resultByPartition: map[string]atom.Result{},
-		logsByPartition:   map[string]string{},
-		partitionByAtomID: map[string]string{},
+		resultByPartition:   map[string]atom.Result{},
+		logsByPartition:     map[string]string{},
+		exitCodeByPartition: map[string]*int{},
+		partitionByAtomID:   map[string]string{},
 	}
 }
 
@@ -103,7 +106,7 @@ func (e *fakeLocalEngine) resolveLocked(id string) atom.Atom {
 	if result == "" {
 		result = atom.Success
 	}
-	return &fakeLocalAtom{id: id, result: result}
+	return &fakeLocalAtom{id: id, result: result, exitCode: e.exitCodeByPartition[partition]}
 }
 
 // --- fixture ------------------------------------------------------------------
@@ -202,6 +205,15 @@ func TestLocalRunFannedGroupOrderedByPartitionIndexEachInstanceDistinct(t *testi
 
 	require.Equal(t, "succeeded", instances[2].Status)
 	require.Equal(t, "log for partition c", instances[2].LogText)
+
+	// Runner.Run is what `caesium dev` prints. It must name the failed
+	// partition and show that instance's log, not a sibling's.
+	wrapped := formatRunFailure(err, result)
+	require.Error(t, wrapped)
+	require.Contains(t, wrapped.Error(), "step process[b] attempt 1")
+	require.Contains(t, wrapped.Error(), "log for partition b: boom")
+	require.NotContains(t, wrapped.Error(), "log for partition a")
+	require.NotContains(t, wrapped.Error(), "log for partition c")
 }
 
 // simpleDefinition builds a minimal one-step job declaring the given engine
@@ -253,4 +265,52 @@ func TestLocalRunEngineFactoryOverridesEveryEngineKind(t *testing.T) {
 
 func (e *fakeLocalEngine) Stats(*atom.EngineStatsRequest) (atom.ResourceStats, error) {
 	return atom.ResourceStats{}, atom.ErrStatsUnavailable
+}
+
+// TestRunFailureIncludesStepAttemptExitCodeAndLogTail is the dev-failure
+// contract: Runner.Run (what `caesium dev` prints) names the step, the
+// attempt, the raw exit code, and the captured stdout/stderr markers.
+// RunWithResult keeps the executor error and returns the structured result.
+func TestRunFailureIncludesStepAttemptExitCodeAndLogTail(t *testing.T) {
+	const (
+		step         = "extract"
+		stdoutMarker = "DX_STDOUT_MISSING_COLUMN"
+		stderrMarker = "DX_STDERR_CUSTOMER_ID_REQUIRED"
+	)
+	engine := newFakeLocalEngine()
+	exitCode := 7
+	engine.resultByPartition[defaultKey] = atom.Unknown
+	engine.exitCodeByPartition[defaultKey] = &exitCode
+	engine.logsByPartition[defaultKey] = stdoutMarker + "\n" + stderrMarker + "\n"
+
+	runner := New(Config{
+		EngineFactory: func(context.Context) atom.Engine { return engine },
+	})
+	def := simpleDefinition("dx-failure", "docker")
+	def.Steps[0].Name = step
+
+	result, err := runner.RunWithResult(context.Background(), def)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), `failed with result "unknown"`)
+	require.Contains(t, err.Error(), step)
+	require.NotContains(t, err.Error(), stdoutMarker)
+	require.NotContains(t, err.Error(), stderrMarker)
+	require.NotNil(t, result)
+	require.Len(t, result.Tasks, 1)
+	require.Equal(t, step, result.Tasks[0].Name)
+	require.Equal(t, stdoutMarker+"\n"+stderrMarker+"\n", result.Tasks[0].LogText)
+	require.NotNil(t, result.Tasks[0].ExitCode)
+	require.Equal(t, 7, *result.Tasks[0].ExitCode)
+	require.Equal(t, 1, result.Tasks[0].Attempt)
+	require.Equal(t, "failed", result.Tasks[0].Status)
+
+	runErr := runner.Run(context.Background(), def)
+	require.Error(t, runErr)
+	msg := runErr.Error()
+	require.Contains(t, msg, step)
+	require.Contains(t, msg, "attempt 1")
+	require.Contains(t, msg, "exit 7")
+	require.Contains(t, msg, stdoutMarker)
+	require.Contains(t, msg, stderrMarker)
+	require.Contains(t, msg, `failed with result "unknown"`)
 }
