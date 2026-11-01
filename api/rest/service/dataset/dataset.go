@@ -154,7 +154,13 @@ func (s *Service) List(p ListParams) (*ListResult, error) {
 	limit, offset := normalizePagination(p.Limit, p.Offset)
 	status := strings.TrimSpace(p.Status)
 
-	if status != "" && status != models.DatasetStatusUnknown {
+	// Declared-but-unobserved datasets (no state row) are merged in for the
+	// unfiltered feed and for `unknown`; for `held` too while the circuit breaker
+	// is on, because a hold can outlive - or precede - the state row indefinitely
+	// (assertions on, freshness scheduling off: nothing ever creates one).
+	mergeDeclared := status == "" || status == models.DatasetStatusUnknown ||
+		(status == models.DatasetStatusHeld && env.Variables().DataAssertionsEnabled)
+	if !mergeDeclared {
 		rows, total, err := s.observedStates(status, limit, offset)
 		if err != nil {
 			return nil, err
@@ -430,6 +436,11 @@ func (s *Service) declarationOnlyStates(status string, limit int) ([]models.Data
 		Model(&models.DatasetDeclaration{}).
 		Where("direction IN ?", declarationDirections).
 		Where("NOT EXISTS (SELECT 1 FROM dataset_states ds WHERE ds.name = dataset_declarations.name AND ds.namespace = COALESCE(dataset_declarations.namespace, ''))")
+	if status == models.DatasetStatusHeld {
+		// Only the declared datasets an active hold is on (List calls this for
+		// `held` only with the circuit breaker on).
+		q = q.Where(fmt.Sprintf(activeHoldExists, "COALESCE(dataset_declarations.namespace, '')", "dataset_declarations.name"))
+	}
 	if status == models.DatasetStatusUnknown && env.Variables().DataAssertionsEnabled {
 		// A declared dataset with an active hold but no state row yet (the hold
 		// opens before the producing run's watermark is captured) reports held,

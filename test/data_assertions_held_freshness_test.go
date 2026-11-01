@@ -68,13 +68,17 @@ steps:
 // job that consumes `dataset` and produces `output` with a 1s SLO, so it is
 // stale the moment its input is observed and would derive a run immediately
 // unless the input is held.
-func heldFreshnessConsumerManifest(alias, dataset, output string) string {
+func heldFreshnessConsumerManifest(alias, dataset, output, onUpstreamHold string) string {
+	policy := ""
+	if onUpstreamHold != "" {
+		policy = "\n  onUpstreamHold: " + onUpstreamHold
+	}
 	return fmt.Sprintf(`
 apiVersion: v1
 kind: Job
 metadata:
   alias: %s
-  cache: false
+  cache: false%s
 trigger:
   type: freshness
   configuration: {}
@@ -88,7 +92,7 @@ steps:
       produces:
         - name: %s
           freshness: 1s
-`, alias, metricsFixtureImage, dataset, output)
+`, alias, policy, metricsFixtureImage, dataset, output)
 }
 
 func (s *IntegrationTestSuite) fetchDatasetDetail(dataset string) datasetsvc.Detail {
@@ -138,7 +142,11 @@ func (s *IntegrationTestSuite) TestDataAssertionsHeldDatasetIsNotFreshAndBlocksD
 	breachStep, err := metricsProducerStepForDataset("load", dataset, map[string]any{"rowCount": 12})
 	s.Require().NoError(err)
 	producer := s.applyHeldFreshnessJob(producerAlias, heldFreshnessProducerManifest(producerAlias, dataset, breachStep))
-	consumer := s.applyHeldFreshnessJob(consumerAlias, heldFreshnessConsumerManifest(consumerAlias, dataset, output))
+	consumer := s.applyHeldFreshnessJob(consumerAlias, heldFreshnessConsumerManifest(consumerAlias, dataset, output, ""))
+	// A monitoring consumer opts out of the gate: it is meant to run on held data.
+	monitorAlias := fmt.Sprintf("integration-held-fresh-monitor-%d", suffix)
+	monitorOutput := fmt.Sprintf("integration.held.fresh.monitor.%d", suffix)
+	monitor := s.applyHeldFreshnessJob(monitorAlias, heldFreshnessConsumerManifest(monitorAlias, dataset, monitorOutput, "run"))
 	s.runProducer(producer)
 
 	// 2. The dataset reports held, not fresh.
@@ -184,6 +192,15 @@ func (s *IntegrationTestSuite) TestDataAssertionsHeldDatasetIsNotFreshAndBlocksD
 		}
 		return false
 	}, 90*time.Second, time.Second, "the evaluator must refuse to derive off a held input and say why")
+	// ...and the opted-out monitor is derived and runs, on the held input.
+	s.Require().Eventually(func() bool {
+		for _, run := range s.fetchRuns(monitor.ID) {
+			if run.Status == "succeeded" && run.SkipReason == "" {
+				return true
+			}
+		}
+		return false
+	}, 90*time.Second, time.Second, "metadata.onUpstreamHold: run must let a freshness-triggered job derive off a held input")
 	s.Empty(s.fetchRuns(consumer.ID), "a freshness job downstream of a held dataset must not run - not even as a hold-skipped row")
 	outDetail := s.fetchDatasetDetail(output)
 	s.Equal("stale-upstream", outDetail.State.Status, "the consumer's own data is not poisoned; it is behind a held input")

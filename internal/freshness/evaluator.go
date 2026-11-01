@@ -17,6 +17,7 @@ import (
 	"github.com/caesium-cloud/caesium/internal/models"
 	runstorage "github.com/caesium-cloud/caesium/internal/run"
 	"github.com/caesium-cloud/caesium/pkg/env"
+	"github.com/caesium-cloud/caesium/pkg/jobdef"
 	"github.com/caesium-cloud/caesium/pkg/log"
 	"github.com/google/uuid"
 	"gorm.io/datatypes"
@@ -357,14 +358,37 @@ func (e *Evaluator) evaluateProducedDataset(ctx context.Context, graph registryS
 	if pass != nil {
 		holds = pass.holds
 	}
-	upstreamReady, consumed, upstreamReason, err := e.upstreamReady(ctx, state, consumes, holds)
+	// metadata.onUpstreamHold: run opts the job out of the breaker's gate: it is
+	// meant to run on held data (a monitoring job). The admission gate honours
+	// that, so readiness must too, or the evaluator would refuse to derive a run
+	// the gate would have admitted. Read only when an input really is held.
+	inputHolds := holds
+	if len(heldInputs(holds, consumes)) > 0 {
+		optOut, err := e.jobRunsOnUpstreamHold(ctx, decl.JobID)
+		if err != nil {
+			return err
+		}
+		if optOut {
+			inputHolds = nil
+		}
+	}
+	upstreamReady, consumed, upstreamReason, err := e.upstreamReady(ctx, state, consumes, inputHolds)
 	if err != nil {
 		return err
 	}
 
 	held := holdFor(holds, decl)
 	status, reason, staleness, seen := e.statusFor(decl, state, now, freshness, maxStaleness, upstreamReady, upstreamReason, held)
-	if status != models.DatasetStatusUnknown && status != models.DatasetStatusQuarantined {
+	switch {
+	case status != models.DatasetStatusUnknown && status != models.DatasetStatusQuarantined:
+		if err := e.updateStatus(ctx, decl, status, reason); err != nil {
+			return err
+		}
+	case status == models.DatasetStatusUnknown && exists && state.Status == models.DatasetStatusHeld:
+		// A hold can be persisted before the dataset has any observation (a later
+		// task failed, so nothing was captured). Once it is released the computed
+		// status is unknown again, and the stale "held" status and the released
+		// hold's reason must not outlive it.
 		if err := e.updateStatus(ctx, decl, status, reason); err != nil {
 			return err
 		}
@@ -431,6 +455,17 @@ func (e *Evaluator) evaluateProducedDataset(ctx context.Context, graph registryS
 // CAESIUM_DATA_ASSERTIONS_ENABLED is off (activeHolds returns nothing then).
 // A quarantined dataset stays quarantined: that is a replay-run disposition, not
 // a data-quality one, and the evaluator does not write it.
+// jobRunsOnUpstreamHold reports whether the job persisted
+// metadata.onUpstreamHold: run - the same column the admission gate reads.
+func (e *Evaluator) jobRunsOnUpstreamHold(ctx context.Context, jobID uuid.UUID) (bool, error) {
+	var job models.Job
+	res := e.db.WithContext(ctx).Select("id", "on_upstream_hold").Where("id = ?", jobID).Limit(1).Find(&job)
+	if res.Error != nil {
+		return false, res.Error
+	}
+	return res.RowsAffected > 0 && strings.TrimSpace(job.OnUpstreamHold) == jobdef.OnUpstreamHoldRun, nil
+}
+
 func (e *Evaluator) statusFor(decl models.DatasetDeclaration, state models.DatasetState, now time.Time, freshness, maxStaleness time.Duration, upstreamReady bool, upstreamReason string, held *heldDataset) (string, string, time.Duration, bool) {
 	status, reason, staleness, seen := e.computedStatus(decl, state, now, freshness, maxStaleness, upstreamReady, upstreamReason)
 	if held != nil && status != models.DatasetStatusQuarantined {
