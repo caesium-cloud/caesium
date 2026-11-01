@@ -187,9 +187,11 @@ test("authenticated console observes the owner crash and converges on the durabl
 
   await loginAtUrl(page, `${ownerOrigin}/jobs/${job.id}`, authKeys.viewer);
   await expect(page.getByRole("heading", { name: alias })).toBeVisible();
-  await page.getByRole("button", { name: "Trigger job" }).click();
-  await page.getByRole("button", { name: "Confirm Trigger" }).click();
-  await expect(page.getByText(/Failed to trigger job: insufficient permissions/)).toBeVisible();
+  // The console gates the action on the viewer's grants, so the server's refusal
+  // has to be proven through the API: the disabled button proves only the UI.
+  await expect(page.getByRole("button", { name: "Trigger job" })).toBeDisabled();
+  const deniedTrigger = await apiSend(ownerOrigin, authKeys.viewer, "POST", `/v1/jobs/${job.id}/run`, {});
+  expect(deniedTrigger.status).toBe(403);
   const deniedRuns = await apiSend(ownerOrigin, adminKey, "GET", `/v1/jobs/${job.id}/runs`);
   expect(runsFromList(deniedRuns.body)).toEqual([]);
 
