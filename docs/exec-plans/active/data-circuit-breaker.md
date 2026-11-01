@@ -1,6 +1,6 @@
 # Data Circuit Breaker — Dataset Holds & Statistical Assertions
 
-Last updated: 2026-09-08
+Last updated: 2026-11-01
 
 **Plan 1 of [`closed-loop-arc.md`](closed-loop-arc.md) — the data loop.** The arc
 closes a loop over the memory Caesium already keeps; this plan builds the data
@@ -171,7 +171,7 @@ decided.
 > plan reads the same `consumes` edges for its compatibility graph but does not
 > define registry structure.
 
-## Progress (as of 2026-09-09)
+## Progress (as of 2026-11-01)
 
 Three waves have shipped: Wave 1 (Stream A, H-1, N-2), Wave 2 (Stream B) and
 Wave 3 (Stream C) — the observe → assert → hold half of the loop is live behind
@@ -180,12 +180,12 @@ scope-aware integration gate on its exact final head before merge (lint + unit
 + the default, agent, owner-memory and distributed lanes), and — the review bot
 having reviewed none of them — every code PR got a substitute Opus adversarial
 review plus a scoped re-review of each fix commit; the reviews found one P1 per
-PR (see the wave entries), all fixed before merge. Wave 4's Stream D merged in
-#442 (`995ae8b3`) on 2026-09-09. Stream E is implemented in draft #445 alongside Plan 2
-Stream A under the arc's explicit overlap allowance. Live verification remains
-pending. F follows in its dependency-ordered waves, then N-1. Wave 4 is not complete until E ships.
+PR (see the wave entries), all fixed before merge. Wave 4 merged on 2026-09-09:
+Stream D in #442 (`995ae8b3`) and Stream E in #445 (`c97208f1`), except E2's rows for
+passing assertions. Stream F runs in its dependency-ordered waves: W5 (F1 + F4), W6 (F2),
+W7 (F3 + F5), then the rest of E2 and N-1.
 
-### Wave 4 — Dataset operator surface (D merged; E in draft review)
+### Wave 4 — Dataset operator surface (2026-09-09; E2 partial)
 
 - **α / D1–D2** — [#442](https://github.com/caesium-cloud/caesium/pull/442),
   **merged as `995ae8b3`** on 2026-09-09. Dataset list/detail retain their freshness projection and
@@ -241,7 +241,10 @@ pending. F follows in its dependency-ordered waves, then N-1. Wave 4 is not comp
   F4 owns the freshness
   status change; N-1 retains final docs, roadmap, and tour closeout.
 
-- **β / E1–E2** — [draft #445](https://github.com/caesium-cloud/caesium/pull/445),
+- **β / E1 and most of E2** — [#445](https://github.com/caesium-cloud/caesium/pull/445), **merged as
+  `c97208f1`** on 2026-09-09. `ui/e2e/holds.spec.ts` runs in the required `ui-e2e` lane and
+  `ui/e2e/auth/holds.spec.ts` in `ui-e2e-auth`, which supersedes the pending-verification
+  wording below. Recorded on 2026-11-01. Original entry, candidate as drafted:
   candidate `88462db6`. Console holds, exact-identity lineage badges and impact
   shading, skipped-run deep links, recorded assertion evidence and baseline
   sparklines, and authenticated operator release with a required reason and
@@ -407,7 +410,7 @@ and the fixture from master instead of carrying a temporary justfile edit.
 | B | Assertion evaluator — `run.EvaluateDataAssertions` with rolling baselines, cold-start warn-only, `warn`/`fail` dispatch, `DataViolation` persistence, factored pure `evaluate(...)` (Phase 1) | **P0** | **Shipped** (W2, #436) |
 | C | Circuit breaker — `DatasetHold` model + partial-unique guard, hold-open path, downstream admission gate, release (clean-run + fail-closed ack), bus events + alert-once (Phase 2) | **P0** | **Shipped** (W3, #439) |
 | D | Operator surface — `GET /v1/datasets/holds*` + `/metrics` reads + `caesium dataset holds/release/metrics` CLI | P1 | **Shipped** (W4-α, #442, `995ae8b3`) |
-| E | Console UI — hold badges on the lineage graph, ack/release panel + baseline sparkline, nav active-holds count | P1 | **Draft review** (W4-β, #445; live verification pending) |
+| E | Console UI — hold badges on the lineage graph, ack/release panel + baseline sparkline, nav active-holds count | P1 | **Mostly shipped** (W4-β, #445, `c97208f1`); E2's passing-assertion rows remain |
 | F | Agent & freshness integration (closes the loop) — `data_quality_hold` incident class, `release_hold` action, the Git-PR provenance route of `apply_jobdef_patch`, held ⇒ not-fresh, `why` provenance (former Phase 3) | **P0** | Not started |
 | H-1 | Integration harness — `CAESIUM_DATA_ASSERTIONS_ENABLED=true` on the default lane **and every self-server lane**, auth-lane scenarios, metrics-emitting script image | — | **Shipped** (W1, #433) |
 | N-1 | Docs — roadmap Phase-4 flip, design banner, schema references + examples, README index, `docs/tour-data-loop.md`, arc dashboard row | — | Not started |
@@ -1329,7 +1332,7 @@ status to that existing response** rather than creating the route.
 The web surface. UI-gated by the `Features` flag A5 exposes. All UI changes run
 the `ui/**` conditional gate.
 
-- [ ] E1. Mark held dataset nodes on the lineage graph
+- [x] E1. Mark held dataset nodes on the lineage graph
       (`ui/src/features/jobs/LineageGraph.tsx`) — distinct from run-status colors
       and replay-quarantine styling — and shade the downstream cone (the blast
       radius at a glance). Join the active-holds count to the nav badges
@@ -1351,6 +1354,11 @@ the `ui/**` conditional gate.
       `ui/src/features/jobs/RunDetailPage.tsx`,
       `ui/src/features/jobs/TaskDetailPanel.tsx`, `ui/src/lib/api.ts`.
       Depends on: D1 + C3 (release) + E1 (shared api.ts additions).
+      **Still open (2026-11-01):** #445 shipped the hold panel, Release, and violation
+      rows with sparklines. It did not ship per-assertion results for assertions that
+      PASS: `DataAssertionsPanel` renders only `data_violations` and returns null for a
+      clean task, and no passing result is persisted to render. Closing this needs a
+      backend read as well as the UI, and N-1 depends on it.
 
 ### Stream F — Agent & freshness integration (closes the loop)
 
