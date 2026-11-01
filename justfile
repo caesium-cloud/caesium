@@ -474,6 +474,7 @@ integration-test: integration-runner
         -e CAESIUM_TEST_SHARD_COUNT \
         -e CAESIUM_EVENT_INGEST_API_KEY={{ event_ingest_api_key }} \
         -e CAESIUM_IT_POLICY_FIXTURE=two-namespaces \
+        -e CAESIUM_IT_RESTART_TEMPLATE={{ it_container }} \
         -e DOCKER_HOST=unix:///var/run/docker.sock \
         --network=container:{{ it_container }} \
         -w {{ bld_dir }} \

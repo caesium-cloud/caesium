@@ -1172,17 +1172,13 @@ func (j *job) Run(ctx context.Context) (err error) {
 				return store.Get(running.ID)
 			}
 
-			if serverShutdown(ctx) {
-				return nil, runlife.ErrServerShutdown
-			}
-			// Unlike the distributed recovery paths this stops no pod. A local
-			// attempt holds no claim or lease, so nothing here proves its
-			// executor is dead: a webhook served by another node resumes a run
-			// the node that started it may still be driving.
-			if err := store.ResetInFlightTasks(running.ID); err != nil {
-				return nil, err
-			}
-			return store.Get(running.ID)
+			// A local attempt holds no claim, so re-pending this run's tasks
+			// here would execute them beside a container that may still be
+			// running, whether under a live driver or an orphan of a dead one.
+			// A live driver finishes the run; a dead one's run is finalized by
+			// recovery (run_recovery.go). Either way this start has no work.
+			log.Info("trigger start skipped: the job already has a run in flight", "job_id", j.id, "run_id", running.ID)
+			return nil, run.ErrRunSkipped
 		}
 
 		started, err := store.Start(j.id, j.triggerID, startOpts...)

@@ -272,6 +272,10 @@ type CancelledRunLookup interface {
 //     admission gate. It never starts an engine, so it can never have a
 //     registered context to cancel.
 //
+// The one exception is a `failed` run carrying run.ErrRunDriverLost. Recovery
+// wrote it, not the engine, so an engine still registered here was presumed dead
+// while frozen past the TTL and must stop (run_recovery.go).
+//
 // The sweep cancels through cancelLive, not cancel, so it acts on — and reports
 // — only contexts that nothing else has already stopped. Entries linger in the
 // registry until their engine releases them, so a run the EVENT cancelled is

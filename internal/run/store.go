@@ -1123,6 +1123,11 @@ func (s *Store) ClaimedTaskRunIDs(ctx context.Context, nodeID string, ids []uuid
 // finalize the run when the row already reads terminal — cancelling on those
 // would abort a correct completion rather than rescue a lost one. `skipped`
 // runs never start an engine, so they can never have a registered context.
+//
+// The one `failed` row it does select is ErrRunDriverLost: recovery wrote that,
+// not the engine's completion defer, so a driver still registered here was
+// wrongly presumed dead (a process frozen past the TTL) and must stop executing
+// a run that is already final.
 func (s *Store) CancelledRunIDs(ctx context.Context, ids []uuid.UUID) ([]uuid.UUID, error) {
 	if len(ids) == 0 {
 		return nil, nil
@@ -1130,7 +1135,8 @@ func (s *Store) CancelledRunIDs(ctx context.Context, ids []uuid.UUID) ([]uuid.UU
 	var cancelled []uuid.UUID
 	if err := s.db.WithContext(ctx).
 		Model(&models.JobRun{}).
-		Where("id IN ? AND status = ?", ids, string(StatusCancelled)).
+		Where("id IN ? AND (status = ? OR (status = ? AND error = ?))",
+			ids, string(StatusCancelled), string(StatusFailed), ErrRunDriverLost.Error()).
 		Pluck("id", &cancelled).Error; err != nil {
 		return nil, err
 	}
@@ -1384,8 +1390,11 @@ func newStartRunModel(req startRunRequest) (*models.JobRun, error) {
 		Status:           string(StatusRunning),
 		StartedAt:        now,
 		TimeoutStartedAt: &now,
-		CreatedAt:        now,
-		UpdatedAt:        now,
+		// Stamped by the admission itself: no window exists in which a run
+		// that just became running reads as having no driver.
+		DriverHeartbeatAt: &now,
+		CreatedAt:         now,
+		UpdatedAt:         now,
 	}
 	if req.triggerID != nil {
 		model.TriggerID = *req.triggerID
@@ -1681,9 +1690,9 @@ func (s *Store) insertRunIfSlotTx(tx *gorm.DB, model *models.JobRun, maxRuns int
 	result := tx.Exec(`
 INSERT INTO job_runs (
 	namespace, id, job_id, backfill_id, trigger_id, status, priority, params, quarantine,
-	started_at, created_at, updated_at
+	started_at, driver_heartbeat_at, created_at, updated_at
 )
-SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
 WHERE (
 	SELECT count(*)
 	FROM job_runs
@@ -1702,6 +1711,7 @@ WHERE (
 		params,
 		model.Quarantine,
 		model.StartedAt,
+		model.DriverHeartbeatAt,
 		model.CreatedAt,
 		model.UpdatedAt,
 		model.JobID,
@@ -5522,7 +5532,7 @@ func (s *Store) CompleteIfActive(runID uuid.UUID, result error) (bool, error) {
 	// An authoritative owner cancellation must settle its unfinished tasks too.
 	// Workers abandon canceled contexts without publishing a stale completion,
 	// and a terminal parent excludes those rows from lease recovery.
-	terminateUnfinished := IsRunDeadlineError(result) || IsRunCancellationError(result)
+	terminateUnfinished := IsRunDeadlineError(result) || IsRunCancellationError(result) || errors.Is(result, ErrRunDriverLost)
 	if result != nil {
 		status = StatusFailed
 		errMsg = result.Error()
@@ -5946,7 +5956,7 @@ func (s *Store) recordCancelledRunMetrics(info cancelledRunInfo) {
 }
 
 // ResetInFlightTasks re-pends every running row of a run so a new owner can
-// re-claim and re-execute it (owner takeover, run resumption after a restart).
+// re-claim and re-execute it.
 //
 // It is now a MULTI-STATEMENT transaction (its callers' error handling is
 // unchanged): the rows are re-EXECUTED, so the previous attempt's dataset
@@ -7438,10 +7448,11 @@ func (s *Store) readmitRetryTx(tx *gorm.DB, jobRun *models.JobRun, admit bool) e
 	now := time.Now().UTC()
 	unconditional := func() error {
 		return tx.Model(jobRun).Updates(map[string]any{
-			"status":             string(StatusRunning),
-			"timeout_started_at": now,
-			"completed_at":       nil,
-			"error":              "",
+			"status":              string(StatusRunning),
+			"timeout_started_at":  now,
+			"driver_heartbeat_at": now,
+			"completed_at":        nil,
+			"error":               "",
 		}).Error
 	}
 	if !admit || jobRun.Quarantine {
@@ -7461,7 +7472,7 @@ func (s *Store) readmitRetryTx(tx *gorm.DB, jobRun *models.JobRun, admit bool) e
 	// the same slot definition as new runs.
 	res := tx.Exec(`
 UPDATE job_runs
-SET status = ?, timeout_started_at = ?, completed_at = NULL, error = ''
+SET status = ?, timeout_started_at = ?, driver_heartbeat_at = ?, completed_at = NULL, error = ''
 WHERE id = ?
 	AND status IN (?, ?)
 	AND (
@@ -7474,6 +7485,7 @@ WHERE id = ?
 			AND id <> ?
 	) < ?`,
 		string(StatusRunning),
+		now,
 		now,
 		jobRun.ID,
 		string(StatusFailed), string(StatusSucceeded),

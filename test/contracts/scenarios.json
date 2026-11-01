@@ -1495,8 +1495,8 @@
           "description": "The serving container runs the candidate image."
         },
         {
-          "id": "recorded-in-flight-run-after-upgrade",
-          "description": "The run in flight at stop is recorded (recorded outcome, #553)."
+          "id": "in-flight-run-finalized-after-upgrade",
+          "description": "The candidate fails the run in flight at stop, without re-executing it."
         },
         {
           "id": "candidate-never-exited-nonzero",
