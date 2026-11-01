@@ -84,10 +84,10 @@ Jobs `ci-ok` evaluates (several may skip on a narrow PR):
 - `integration` (all three Docker shards, the agent-auth lane and the Keycloak
   lane; see "Keycloak lane" in §4)
 - `helm-lint` and `early-evidence` (distributed-testing G5; see §4)
-- `lifecycle-standalone`, `generated-fuzz`, `generated-oracles` and
-  `coverage-ratchets` (distributed-testing G6, W9; each uploads lane evidence
-  that `ci-ok` re-validates the same way — see "Promoted system suites and the
-  nightly set" in §4)
+- `lifecycle-standalone`, `generated-fuzz`, `generated-oracles`,
+  `coverage-ratchets` and `connectors` (each uploads lane evidence that
+  `ci-ok` re-validates; `connectors` is execution-connectors F4 and is not a
+  new branch-protection context — see §4)
 
 `early-evidence` is not satisfied by a green job result. `ci-ok` downloads the
 evidence report that lane uploaded and `scripts/ci-ok.py` re-validates it
@@ -362,8 +362,9 @@ test before publishing it.
 The amd64 `robustness-image` job bakes the early-evidence runner on its own
 runner, in parallel with `images`. The connector handoff treats `Publish
 native amd64 CLI` as the last regular step of `images`, so that compile stays
-off the connector path. `early-evidence` needs both jobs. This split does not
-by itself meet the fifteen-minute promotion budget.
+off the connector path. `early-evidence` needs both jobs. The maintainer
+closed the remaining ten-run wait on 2026-11-01 after master run 41334462436
+finished the lane 810 seconds after `changes`. That one run is not ten runs.
 
 ```
 changes
@@ -406,7 +407,7 @@ publish ← tag only, needs the full matrix and ci-ok
 | `ui-e2e-auth` | ubuntu-26.04 | `[ui-test, images]` | 45 | inline `docker run` | inline `docker run --name caesium-server-auth` |
 | `ui-e2e-keycloak` | ubuntu-26.04 | `[ui-test, images]` | 20 | `integration-up-keycloak`, then host Playwright `--project=keycloak` | Keycloak + `caesium-server-keycloak-test` via `integration-up-keycloak` |
 | `connector-fixture-images` | ubuntu-26.04 | `[changes, builder]` | 30 | Bake pinned fixture and retain candidate/image identity | none |
-| `connectors` | ubuntu-26.04 | `[changes]` | 45 | Producer handoff and `integration-test-connectors` (advisory) | `integration-up-connectors` and three persistent Helm members on one kind node |
+| `connectors` | ubuntu-26.04 | `[changes]` | 45 | Producer handoff and `integration-test-connectors` (`ci-ok` re-validates `connectors-evidence`) | `integration-up-connectors` and three persistent Helm members on one kind node |
 | `helm-integration-test` | ubuntu-26.04 | `[images, helm-lint]` | 60 | kind + `helm install` + `helm test` + full suite in three shards (no policy file); shard 3 then installs release `c3` with a mapped-namespace policy and runs `TestKubernetesMappedNamespace` (`scripts/kind-mapped-namespace.sh`, identity-and-access C3) | kind pod via the Helm chart; `c3` in `caesium-c3` serves `test/testdata/policy/kubernetes-mapped.yaml` |
 | `helm-pod-replacement-test` | ubuntu-26.04 | `[changes, images, helm-lint]` | 45 | `scripts/helm-pod-replacement.sh` — kind + `helm install` at three replicas with retained PVCs, then replaces every pod and proves it rejoins (issue #493) | three kind pods via the Helm chart |
 | `podman-integration-test` | ubuntu-26.04 | `images` | 45 | inline `docker run` + full suite in three shards | inline `docker run --name caesium-server-podman` |
@@ -2389,7 +2390,7 @@ candidate. The merged C3 head passed the candidate probes and all eight
 mutation rejections. Its ordinary Go/Python probes run in existing unit/config
 lanes; the full mutation script is not yet a CI job (G6 owns promotion).
 
-### Advisory connector lane (execution-connectors F2)
+### Connector lane (execution-connectors F4)
 
 The `connectors` job runs on the existing broad `go`, `ui` or `ci` selectors
 for pull requests and merge groups; master/tag pushes select it too. Shared
@@ -2461,14 +2462,19 @@ missing observations/artifacts or a foreign candidate fail the lane. CI uploads
 `connectors-artifacts`; private TLS/control files, kubeconfigs and raw browser
 traces/HTML are excluded. Local raw artifacts stay in the selected directory.
 
-This job is registered in `UNPROMOTED_LANES`. It is advisory to `ci-ok` and
-release qualification: a successful aggregate is not a connector-lane pass.
-F3 records release acceptance after merge. F4 alone can promote this lane,
-after ten consecutive green selected master runs finish within fifteen minutes
-after `changes`, with candidate-bound evidence and actual promoted PR/merge-group
-proof. This change adds no required check or repository setting.
-The preparation and concurrency changes require fresh hosted timing; they do
-not establish that the fifteen-minute budget or ten-run streak has been met.
+`ci-ok` needs this job and re-validates `connectors-evidence` with
+`--lane-evidence` under the `connectors` gate. A selected failure, skip, or
+absent, foreign, or hollow report fails the merge gate. The lane is not a
+release-qualification input and it is not a new GitHub required status check.
+`ci-ok` remains that check. On 2026-11-01 the maintainer closed the remaining
+ten-run wait after master run
+[41334462436](https://github.com/caesium-cloud/caesium/actions/runs/41334462436)
+(`1031145204858295511600b3a666f60e8e8c072b`): the whole run succeeded and the
+lane finished 810 seconds after `changes`, with a strict report bound to that
+SHA. Pull-request samples were 732 seconds and 622 seconds. One earlier master
+run, before the robustness bake moved off `images`, missed the fifteen-minute
+bound. Those runs are the recorded evidence. They are not ten consecutive
+master runs.
 
 ### Promoted system suites and the nightly set (distributed-testing W9/G6)
 

@@ -16,9 +16,9 @@ Declared authenticated status Queries, approval submissions and durable operatio
 receipts are also available through that guide. The Console Connections pages
 provide monitoring, history, typed workflow relationships and verified links to
 local run evidence, declared approvals and durable server-backed operation
-receipts. Release qualification and connector CI-lane promotion remain in the
-[execution-connectors plan](exec-plans/active/execution-connectors.md).
-That plan is not complete. The patterns below are the unchanged REST recipe.
+receipts. The connector CI lane is required by `ci-ok`. The completed plan
+is [execution-connectors](exec-plans/completed/execution-connectors.md).
+The patterns below are the unchanged REST recipe.
 
 [Temporal](https://temporal.io) and Caesium sit at different layers, and they
 work best together, not as substitutes:

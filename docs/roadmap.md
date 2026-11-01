@@ -95,7 +95,7 @@ These features widen the gap between Caesium and alternatives in areas where Cae
 
 ### 2.2 Composable Task Templates & Registry
 
-**Status**: Parked (2026-09-05) — see the [closed-loop arc § Parked](exec-plans/active/closed-loop-arc.md#parked-archived-filed). DX breadth outside the arc's thesis and the strategy doc's "do not build connector/plugin breadth" line; the door is left open.
+**Status**: Parked (2026-09-05) — see the [closed-loop arc § Parked](exec-plans/active/closed-loop-arc.md#parked-archived-filed). DX breadth outside the arc's thesis and the strategy doc's "do not build connector/plugin breadth" line; the door is left open. The separate Temporal execution connector shipped in 2026-11-01 and does not reopen this registry.
 
 **Current state**: Every step is defined inline in the job YAML. Common patterns (dbt-run, spark-submit, s3-sync, pg-dump) are copy-pasted across jobs.
 
