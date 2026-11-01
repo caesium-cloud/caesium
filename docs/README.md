@@ -29,7 +29,7 @@ is and what is still in flight; they are not operator documentation.
 | [kubernetes-deployment.md](kubernetes-deployment.md) | The Helm chart, three-node Raft clusters, Kueue delegation, backup and member replacement, air-gapped notes. |
 | [sovereignty.md](sovereignty.md) | The air-gapped quickstart and the free-versus-paywalled comparison with other orchestrators. |
 | [open-lineage.md](open-lineage.md) | OpenLineage event emission, facets, and transports. |
-| [connectors.md](connectors.md) | Execution connectors. In progress, not shipped: records the frozen configuration contract. |
+| [connectors.md](connectors.md) | Optional Temporal monitoring and declared operator actions. Off unless `CAESIUM_CONNECTORS_ENABLED=true`. |
 | [upgrade-notes.md](upgrade-notes.md) | Behavior changes to read before upgrading. |
 | [ci.md](ci.md) | The CI runbook: required-to-merge checks, the job matrix, per-lane server env parity, and the release procedure. |
 
@@ -76,9 +76,9 @@ is and what is still in flight; they are not operator documentation.
 | [backtesting.md](exec-plans/active/backtesting.md) | Plan 3, the proof loop: backtest proposals against recorded runs. |
 | [window-scheduling.md](exec-plans/active/window-scheduling.md) | Plan 4, the time loop. Optional tail of the arc. |
 | [distributed-testing.md](exec-plans/active/distributed-testing.md) | Cross-cutting: make a green `ci-ok` mean the distributed guarantees hold. 30 of 31 items done; F3 open on product findings. |
-| [execution-connectors.md](exec-plans/active/execution-connectors.md) | Temporal monitoring and declared operator actions. Planning only. |
 
 Completed plans live in [exec-plans/completed/](exec-plans/completed/); the most recent are
+[execution-connectors.md](exec-plans/completed/execution-connectors.md) (one optional Temporal adapter and the `connectors` CI lane),
 [identity-and-access.md](exec-plans/completed/identity-and-access.md) (namespaces, grants, policy file, Keycloak lane, `caesium login`),
 [trust-the-substrate.md](exec-plans/completed/trust-the-substrate.md) (Plan 0, cut `v0.1.0`),
 [infra-deploy.md](exec-plans/completed/infra-deploy.md), and

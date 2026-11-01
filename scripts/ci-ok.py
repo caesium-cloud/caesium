@@ -102,6 +102,8 @@ SELECTORS = {
     "generated-fuzz": ("go", "ci"),
     "generated-oracles": ("go", "ci"),
     "coverage-ratchets": ("go", "ui", "ci"),
+    # execution-connectors F4. Same broad selectors as the job's own `if`.
+    "connectors": ("go", "ui", "ci"),
 }
 
 # The first promoted lane and the manifest gate its evidence must satisfy
@@ -118,6 +120,7 @@ EVIDENCE_LANES = {
     "generated-fuzz": "generated-fuzz",
     "generated-oracles": "generated-oracles",
     "coverage-ratchets": "coverage",
+    "connectors": "connectors",
 }
 
 # Lanes that exist (since G4 in .github/workflows/qualification-lanes.yml,
@@ -126,8 +129,6 @@ EVIDENCE_LANES = {
 # merge evidence. scripts/qualification-gate.py says which of them are
 # required to PUBLISH (F2, D3, B3 core) and which stay advisory.
 UNPROMOTED_LANES = {
-    "connectors": "execution-connectors F2: real Temporal HTTP/browser and configuration equality; "
-                  "advisory until F4's ten-master-run and timing qualification",
     "lifecycle-cluster": "nightly set (W8 decision record): F2 cluster lifecycle qualification; "
                          "required to publish",
     "console-recovery": "nightly set (W8 decision record): D3 console cluster-recovery journey; "
