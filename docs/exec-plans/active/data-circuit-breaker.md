@@ -1579,6 +1579,12 @@ precedent for it is warn-mode schema validation, which publishes
       does), and `?status=held` merges declaration-only datasets that an active
       hold is on (no state row) before counting and paging. A persisted `held`
       returns to `unknown` (reason cleared) when released before any observation.
+      Persisted `held` rows with no active hold and no freshness SLO to evaluate
+      (SLO dropped while held, declaration gone, or the breaker switched off) are
+      reconciled to `unknown` with an empty reason on every evaluator pass,
+      including the `dataset_released` reactive one. Dataset feeds order by one
+      total key `(updated_at DESC, namespace, name)` in every source query and
+      the final merge, so tied timestamps page without skips or repeats.
 - [ ] F5. **Why-provenance** (arc convention 3 — this plan's single explainability
       item). Make the hold decisions answerable by the shipped **task-scoped**
       explainer: `caesium why <run-id> --task <task> --job-id <job-id>` and

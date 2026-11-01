@@ -373,8 +373,14 @@ func (s *Service) observedStates(status string, limit, offset int) ([]models.Dat
 	}
 
 	var rows []models.DatasetState
+	// ONE total order (updated_at, namespace, name) everywhere a feed is cut:
+	// here, in declarationOnlyStates and in sortStates. Ordering by updated_at
+	// alone leaves ties to the engine, so a page cut here and a merge that breaks
+	// ties by identity can skip or repeat a row.
 	if err := q.
-		Order("updated_at DESC").
+		Order("dataset_states.updated_at DESC").
+		Order("dataset_states.namespace ASC").
+		Order("dataset_states.name ASC").
 		Limit(limit).
 		Offset(offset).
 		Find(&rows).Error; err != nil {
@@ -448,8 +454,12 @@ func (s *Service) declarationOnlyStates(status string, limit int) ([]models.Data
 		q = q.Where("NOT " + fmt.Sprintf(activeHoldExists, "COALESCE(dataset_declarations.namespace, '')", "dataset_declarations.name"))
 	}
 	q = s.producerVisible(q, "dataset_declarations.namespace", "dataset_declarations.name")
+	// Same total order as observedStates / sortStates; the declaration's namespace
+	// is nullable and a NULL means "" everywhere else, hence the COALESCE.
 	if err := q.
-		Order("updated_at DESC").
+		Order("dataset_declarations.updated_at DESC").
+		Order("COALESCE(dataset_declarations.namespace, '') ASC").
+		Order("dataset_declarations.name ASC").
 		Find(&decls).Error; err != nil {
 		return nil, 0, err
 	}

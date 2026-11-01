@@ -313,6 +313,11 @@ func (e *Evaluator) evaluateWithSnapshot(ctx context.Context, graph registrySnap
 		return err
 	}
 	pass := &evaluationPass{budget: e.maxDerivationsPerTick, launched: map[derivationKey]uuid.UUID{}, holds: holds}
+	// First, so a failure evaluating one dataset cannot leave a stale `held`
+	// behind for another.
+	if err := e.reconcileHeldRows(ctx, graph, holds); err != nil {
+		return err
+	}
 	for _, decl := range graph.produced {
 		id := declarationIdentity(decl)
 		if len(targets) > 0 {

@@ -42,6 +42,12 @@ func (s *IntegrationTestSuite) applyHeldFreshnessJob(alias, manifest string) *jo
 // heldFreshnessProducerManifest is a cron producer of `dataset` with a freshness
 // SLO (so the evaluator tracks it) and a rowCount floor under onViolation: hold.
 func heldFreshnessProducerManifest(alias, dataset, step string) string {
+	return heldProducerManifestWithSLO(alias, dataset, step, "          freshness: 1h\n")
+}
+
+// heldProducerManifestWithSLO takes the produces entry's freshness line
+// verbatim ("" drops the SLO).
+func heldProducerManifestWithSLO(alias, dataset, step, freshnessLine string) string {
 	return fmt.Sprintf(`
 apiVersion: v1
 kind: Job
@@ -56,12 +62,11 @@ steps:
 %s    datasets:
       produces:
         - name: %s
-          freshness: 1h
-          assertions:
+%s          assertions:
             rowCount: {min: 1000}
           onViolation: hold
           release: auto
-`, alias, step, dataset)
+`, alias, step, dataset, freshnessLine)
 }
 
 // heldFreshnessConsumerManifest is a purely data-derived (freshness-triggered)
@@ -231,4 +236,48 @@ func (s *IntegrationTestSuite) TestDataAssertionsHeldDatasetIsNotFreshAndBlocksD
 		}
 		return false
 	}, 120*time.Second, time.Second, "once the hold is released the downstream freshness job derives")
+}
+
+// TestDataAssertionsReleaseAfterDroppingTheSLOLeavesHeld proves a dataset does
+// not stay `held` after its hold is released just because the producer stopped
+// declaring a freshness SLO while it was held (per-dataset evaluation skips
+// datasets with no SLO, so the evaluator's reconcile pass has to clear it).
+func (s *IntegrationTestSuite) TestDataAssertionsReleaseAfterDroppingTheSLOLeavesHeld() {
+	s.requireDataAssertionsLane()
+	s.requireFreshnessLane()
+
+	suffix := time.Now().UnixNano()
+	alias := fmt.Sprintf("integration-held-noslo-%d", suffix)
+	dataset := fmt.Sprintf("integration.held.noslo.%d", suffix)
+
+	breachStep, err := metricsProducerStepForDataset("load", dataset, map[string]any{"rowCount": 12})
+	s.Require().NoError(err)
+	producer := s.applyHeldFreshnessJob(alias, heldFreshnessProducerManifest(alias, dataset, breachStep))
+	s.runProducer(producer)
+
+	// include_hold=false skips the live-hold overlay, so this waits for the
+	// evaluator to have PERSISTED `held` - the state a stale row would keep.
+	s.Require().Eventually(func() bool {
+		var persisted datasetsvc.Detail
+		s.fetchDatasetOperatorJSON(datasetOperatorPath(dataset)+"?include_hold=false", &persisted)
+		return persisted.State.Status == "held"
+	}, 60*time.Second, 500*time.Millisecond, "the evaluator must persist held for an SLO-tracked dataset")
+
+	// The producer drops its SLO and runs clean: the hold auto-releases.
+	cleanStep, err := metricsProducerStepForDataset("load", dataset, map[string]any{"rowCount": 5000})
+	s.Require().NoError(err)
+	producer = s.applyHeldFreshnessJob(alias, heldProducerManifestWithSLO(alias, dataset, cleanStep, ""))
+	clean := s.runProducer(producer)
+	s.Empty(s.requireRunTaskByName(producer.ID, clean, "load").DataViolations)
+
+	s.Require().Eventually(func() bool {
+		var persisted datasetsvc.Detail
+		s.fetchDatasetOperatorJSON(datasetOperatorPath(dataset)+"?include_hold=false", &persisted)
+		return persisted.State.Status != "held"
+	}, 90*time.Second, 500*time.Millisecond, "a released dataset with no SLO must leave held")
+	detail := s.fetchDatasetDetail(dataset)
+	s.Equal("unknown", detail.State.Status)
+	s.NotContains(detail.State.Reason, "dataset_hold")
+	s.Empty(detail.HoldStatus)
+	s.False(s.datasetListContains("held", dataset), "?status=held must not list a released dataset")
 }
