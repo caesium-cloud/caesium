@@ -1,20 +1,12 @@
 # Execution connectors
 
-> Status: In progress. This guide records the provider-neutral contract and
-> configuration file frozen for review. The catalog store persists identities,
-> direct snapshots, relations, the configuration epoch, and operation receipts.
-> Startup joins or activates the configuration epoch after migration. Temporal
-> clients connect on demand after checking that epoch.
-> The adapter implements binding-declared JSON Queries and Updates, trusted
-> activity correlation against existing Caesium admissions, and durable receipt
-> admission with lookup-only component recovery. Authenticated HTTP monitoring
-> exposes discovery, detail, history, relationships and verified local run links.
-> Declared HTTP Queries/actions and operation receipts compose those services.
-> Console monitoring exposes configured connections and exact external runs,
-> typed workflow relationships and verified links to existing Caesium runs.
-> The Console also exposes declared approval forms and server-backed receipts;
-> release qualification and CI-lane promotion remain in progress.
-> Job-definition YAML is unchanged.
+> Status: Shipped. The gate defaults off. One Temporal adapter is the only
+> provider. A second provider, a connector catalog, and hot reload are not
+> part of this contract. Cancellation before dispatch returns `not_dispatched`
+> and does not issue the Update RPC. A completed remote failure stays
+> `unknown` until independent proof distinguishes rejection from an effectful
+> failure. The `connectors` CI lane is required by `ci-ok`; it is not a
+> separate branch-protection check. Job-definition YAML is unchanged.
 
 An execution connector lets Caesium inspect an external workflow system and
 submit one declared operator action. The first provider name the
@@ -283,9 +275,9 @@ so the same snippet sets `TEMPORAL_TOKEN` from a Secret. Without that
 variable every replica exits because the env var is unset.
 
 See [kubernetes-deployment.md](kubernetes-deployment.md) for the Helm chart and
-[temporal.md](temporal.md) for the current REST-only way to call Caesium from
-Temporal. The plan that tracks the unshipped work is
-`exec-plans/active/execution-connectors.md`.
+[temporal.md](temporal.md) for driving Caesium jobs from a Temporal workflow
+over REST. The completed plan is
+[execution-connectors](exec-plans/completed/execution-connectors.md).
 
 ## Storage and retention
 
@@ -420,8 +412,8 @@ Temporal fixture and three Caesium members with retained PVCs. Its selected
 RPC, a guarded epoch transition, stale-node refusal and connection repointing.
 Run it serially with other container/cluster lanes. Candidate, image, provider,
 topology and fault evidence stays in the reported artifact directory. The
-authenticated HTTP/browser CI lane also runs this proof; the lane remains
-advisory until its separate promotion qualification.
+authenticated HTTP/browser CI lane also runs this proof. `ci-ok` requires
+that lane. It is not a separate branch-protection check.
 
 The existing G2 coverage cohort uses the same pinned Temporal fixture for a
 real publication, authenticated monitoring, verified delegation and reverse
@@ -1011,11 +1003,11 @@ Wrong candidate identities, missing artifacts/prerequisites, an empty or skipped
 selection and failed first browser attempts fail this command. CI uploads the
 report and a sanitized public artifact allowlist; raw browser traces, TLS keys,
 control credentials and kubeconfigs stay outside that upload. See the
-[CI runbook](ci.md#advisory-connector-lane-execution-connectors-f2) for selectors
-and the promotion procedure. The lane remains advisory to `ci-ok`; F3 records
-first-release acceptance, while F4 still requires ten qualifying master runs and
-actual promotion evidence. Preparation and concurrency changes alone do not
-establish the fifteen-minute budget.
+[CI runbook](ci.md#connector-lane-execution-connectors-f4) for selectors and
+how `ci-ok` re-validates the report. The lane is required by `ci-ok`. It is
+not a release-qualification input and it is not a new GitHub required status
+check. On 2026-11-01 the maintainer closed the remaining ten-run wait after
+one qualifying master run. That waiver is not ten runs.
 
 ## Real Temporal development fixture
 
