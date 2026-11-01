@@ -9,7 +9,7 @@ import (
 
 // Dataset freshness status values. The state store (internal/freshness) sets a
 // neutral default; the leader-gated evaluator (Stream C) owns the transitions
-// between fresh/stale/stale-upstream/violated/quarantined.
+// between fresh/stale/stale-upstream/violated/quarantined/held.
 const (
 	DatasetStatusUnknown       = "unknown"
 	DatasetStatusFresh         = "fresh"
@@ -17,6 +17,19 @@ const (
 	DatasetStatusStaleUpstream = "stale-upstream"
 	DatasetStatusViolated      = "violated"
 	DatasetStatusQuarantined   = "quarantined"
+	// DatasetStatusHeld means the data circuit breaker has an ACTIVE DatasetHold
+	// on the dataset: its latest partition broke a declared assertion, so it is
+	// recent but untrustworthy and must never satisfy a freshness trigger or
+	// advance downstream scheduling (docs/design/data-circuit-breaker.md,
+	// "Interplay"). It is its own value rather than an overload of an existing
+	// one: Violated means a freshness SLO breach (and fires the violation
+	// notification), Stale invites a derivation, StaleUpstream describes a
+	// CONSUMER waiting on a held input, Unknown means "never observed", and
+	// Quarantined means a non-authoritative replay run. The evaluator sets it
+	// only while CAESIUM_DATA_ASSERTIONS_ENABLED is on; the reason names the
+	// hold ("dataset_hold:<namespace>/<name> hold=<id>"), and the next
+	// evaluation after release restores the computed status.
+	DatasetStatusHeld = "held"
 )
 
 // DatasetState is the durable truth every scheduling decision reads: one row per

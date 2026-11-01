@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/caesium-cloud/caesium/internal/authz"
+	"github.com/caesium-cloud/caesium/internal/freshness"
 	"github.com/caesium-cloud/caesium/internal/models"
 	runstore "github.com/caesium-cloud/caesium/internal/run"
 	"github.com/caesium-cloud/caesium/pkg/env"
@@ -13,8 +14,12 @@ import (
 	"gorm.io/gorm"
 )
 
-// State extends the existing freshness row without changing its status semantics.
-// Hold fields are omitted when assertions are disabled or no active hold exists.
+// State extends the existing freshness row. Hold fields are omitted when
+// assertions are disabled or no active hold exists. While an active hold exists
+// the embedded Status is "held" and Reason names the hold (held => not fresh):
+// the evaluator persists that on its next pass, and this overlay makes the read
+// honest in the meantime, and for a dataset the evaluator does not track (no
+// freshness SLO).
 type State struct {
 	models.DatasetState
 	HoldStatus string       `json:"hold_status,omitempty"`
@@ -66,6 +71,8 @@ func (s *Service) withHolds(rows []models.DatasetState) ([]State, error) {
 		if hold := byIdentity[[2]string{states[i].Namespace, states[i].Name}]; hold != nil {
 			states[i].HoldStatus = hold.Status
 			states[i].Hold = hold
+			states[i].Status = models.DatasetStatusHeld
+			states[i].Reason = freshness.HeldReason(states[i].Namespace, states[i].Name, hold.ID)
 		}
 	}
 	return states, nil

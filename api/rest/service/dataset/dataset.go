@@ -6,6 +6,7 @@ import (
 	"cmp"
 	"context"
 	"errors"
+	"fmt"
 	"slices"
 	"strings"
 	"time"
@@ -176,7 +177,7 @@ func (s *Service) List(p ListParams) (*ListResult, error) {
 		return nil, err
 	}
 
-	declRows, declTotal, err := s.declarationOnlyStates(fetchLimit)
+	declRows, declTotal, err := s.declarationOnlyStates(status, fetchLimit)
 	if err != nil {
 		return nil, err
 	}
@@ -245,6 +246,10 @@ func (s *Service) GetWithOptions(namespace, name string, options GetOptions) (*D
 				return nil, err
 			}
 			detail.HoldStatus, detail.Hold = hold.Status, &hold
+			// held => not fresh: the freshness status itself reports the hold, not
+			// just the adjacent badge.
+			detail.State.Status = models.DatasetStatusHeld
+			detail.State.Reason = freshness.HeldReason(state.Namespace, state.Name, hold.ID)
 		}
 	}
 	if foundDecl {
@@ -353,9 +358,7 @@ func (s *Service) Advance(p AdvanceParams) (*AdvanceResult, error) {
 
 func (s *Service) observedStates(status string, limit, offset int) ([]models.DatasetState, int64, error) {
 	q := s.db.WithContext(s.ctx).Model(&models.DatasetState{})
-	if status != "" {
-		q = q.Where("status = ?", status)
-	}
+	q = withEffectiveStatus(q, status)
 	q = s.producerVisible(q, "dataset_states.namespace", "dataset_states.name")
 
 	var total int64
@@ -374,6 +377,34 @@ func (s *Service) observedStates(status string, limit, offset int) ([]models.Dat
 	return rows, total, nil
 }
 
+// activeHoldExists is a correlated EXISTS over the circuit breaker's active
+// holds, matched on the exact (namespace, name) pair of the outer row.
+const activeHoldExists = "EXISTS (SELECT 1 FROM dataset_holds WHERE dataset_holds.status = '" +
+	models.DatasetHoldStatusActive + "' AND dataset_holds.namespace = %[1]s AND dataset_holds.name = %[2]s)"
+
+// withEffectiveStatus applies the `status` filter to dataset_states against the
+// status List reports, which is "held" for a dataset with an active hold (see
+// State). With the data circuit breaker off no hold counts, so the filter is the
+// persisted column alone.
+//
+//   - held: an active hold, or a row the evaluator already persisted as held;
+//   - any other value: persisted AND no active hold, so a held dataset does not
+//     list as fresh (or unknown) from a stale persisted row while its hold is
+//     open.
+func withEffectiveStatus(q *gorm.DB, status string) *gorm.DB {
+	if status == "" {
+		return q
+	}
+	if !env.Variables().DataAssertionsEnabled {
+		return q.Where("status = ?", status)
+	}
+	exists := fmt.Sprintf(activeHoldExists, "dataset_states.namespace", "dataset_states.name")
+	if status == models.DatasetStatusHeld {
+		return q.Where("(status = ? OR "+exists+")", status)
+	}
+	return q.Where("status = ?", status).Where("NOT " + exists)
+}
+
 func normalizePagination(rawLimit, rawOffset int) (int, int) {
 	limit := rawLimit
 	if limit <= 0 {
@@ -386,7 +417,7 @@ func normalizePagination(rawLimit, rawOffset int) (int, int) {
 	return limit, offset
 }
 
-func (s *Service) declarationOnlyStates(limit int) ([]models.DatasetState, int64, error) {
+func (s *Service) declarationOnlyStates(status string, limit int) ([]models.DatasetState, int64, error) {
 	// A dataset is commonly declared by multiple jobs; we want distinct
 	// (namespace, name) datasets so the LIMIT and total reflect datasets rather
 	// than raw declaration rows. We dedup in Go rather than via a SQL GROUP BY:
@@ -399,6 +430,12 @@ func (s *Service) declarationOnlyStates(limit int) ([]models.DatasetState, int64
 		Model(&models.DatasetDeclaration{}).
 		Where("direction IN ?", declarationDirections).
 		Where("NOT EXISTS (SELECT 1 FROM dataset_states ds WHERE ds.name = dataset_declarations.name AND ds.namespace = COALESCE(dataset_declarations.namespace, ''))")
+	if status == models.DatasetStatusUnknown && env.Variables().DataAssertionsEnabled {
+		// A declared dataset with an active hold but no state row yet (the hold
+		// opens before the producing run's watermark is captured) reports held,
+		// so it does not satisfy a `status=unknown` filter.
+		q = q.Where("NOT " + fmt.Sprintf(activeHoldExists, "COALESCE(dataset_declarations.namespace, '')", "dataset_declarations.name"))
+	}
 	q = s.producerVisible(q, "dataset_declarations.namespace", "dataset_declarations.name")
 	if err := q.
 		Order("updated_at DESC").
