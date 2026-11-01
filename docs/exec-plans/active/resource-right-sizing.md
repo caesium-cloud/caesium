@@ -1,6 +1,6 @@
 # Resource Right-Sizing — The Compute Loop
 
-Last updated: 2026-09-05
+Last updated: 2026-11-01
 
 > **Plan 2 of [`closed-loop-arc.md`](closed-loop-arc.md)** — *the compute loop*.
 > Re-cut on 2026-09-05 against the arc: Stream E recast as an incident action,
@@ -158,16 +158,16 @@ identity in [`internal/cache/hash.go`](../../../internal/cache/hash.go); because
 the hash exclusion (Stream B) is load-bearing and the schema wins on any
 field-name disagreement.
 
-## Progress (as of 2026-09-09)
+## Progress (as of 2026-11-01)
 
-No implementation waves have shipped yet. Wave 1 implements A1 → A2 → A3
-with H-1 in one combined candidate, in parallel with Plan 1 E under the arc's
-explicit D/E overlap allowance. Plan 1 F does not run in this wave. The design
+Wave 1 shipped on 2026-10-01: A1 → A2 → A3 with H-1 in #449 (`f1092a59`). The design
 banner and roadmap remain pending N-1; later streams retain their dependencies.
 
 ### Wave 1 — Runtime observations and the shared stress harness
 
-- **α / A1–A3 + H-1** — [draft #449](https://github.com/caesium-cloud/caesium/pull/449),
+- **α / A1–A3 + H-1** — [#449](https://github.com/caesium-cloud/caesium/pull/449), **merged as
+  `f1092a59`** on 2026-10-01 with `ci-ok` green, which supersedes the pending-verification
+  wording below. Recorded on 2026-11-01. Original entry, candidate as drafted:
   candidate `546ef3f9`. Implementation complete; live verification pending.
   Six `TaskRun` columns, gated runtime OOM evidence and incident classification,
   per-instance persistence, cancel-and-join sampling in both executors, and
@@ -304,13 +304,13 @@ against `master` on the date above.
 
 | Stream | Scope | Priority | Status |
 |--------|-------|----------|--------|
-| A | Phase 0 substrate — `TaskRun` stats columns (per-partition for free), `Stats()` on the engine interface + sampling, honest OOM reclassification to `ResourceFailure` **and to `ClassOOM`**, Prometheus families | **P0** | **Draft review** (W1-α, #449; live verification pending) |
+| A | Phase 0 substrate — `TaskRun` stats columns (per-partition for free), `Stats()` on the engine interface + sampling, honest OOM reclassification to `ResourceFailure` **and to `ClassOOM`**, Prometheus families | **P0** | **Shipped** (W1-α, #449, `f1092a59`) |
 | B | Phase 1 — `resources:` block through all three engines, lint validation, cache-identity exclusion + test, descriptor schema bump, distributed flow | **P0** | Not started |
 | C | Phase 2 — `onOOM` escalation ladder in both executors, local-loop retryability fix, persisted escalation state, **`why` provenance (C3)** | P1 | Not started |
 | D | Phase 3 — shared `HistorySource` reader + compute-on-read recommendation engine (p99 across fan-out partitions) + `GET /v1/jobs/:id/resources` + `GET /v1/stats/resources` + `caesium job resources` CLI | P2 | Not started |
 | E | Phase 4 — `propose_resources` incident action → `apply_jobdef_patch` proposal through the Plan 0/Plan 1 pipeline; `mode: auto`; conservative downsizing | P3 | Not started |
 | F | UI — JobDetail Resources panel, attempt-trail badges, RunDetail anomaly ribbon, stats reclaim view | P2 | Not started |
-| H-1 | Integration harness — `build/` stress image, feature envs on **every self-server lane** | — | **Draft review** (W1-α, #449; live verification pending) |
+| H-1 | Integration harness — `build/` stress image, feature envs on **every self-server lane** | — | **Shipped** (W1-α, #449, `f1092a59`) |
 | H-2 | Kubernetes kind lane — pod OOM reason, requests/limits, `metrics.k8s.io` stats (arc convention 2) | — | Not started |
 | N-1 | Docs — design banner, roadmap, generated schema reference, examples, README, **`docs/tour-compute-loop.md`**, arc dashboard | — | Not started |
 
@@ -328,7 +328,7 @@ classifier), so it merges first. Gate the new behavior behind
 `CAESIUM_RESOURCE_STATS_ENABLED` (default `false`) so enabling it is the only
 thing that changes OOM classification (release-noted).
 
-- [ ] A1. Add the Phase 0 `TaskRun` columns, their run-store persistence, the
+- [x] A1. Add the Phase 0 `TaskRun` columns, their run-store persistence, the
       Prometheus families, and the `CAESIUM_RESOURCE_STATS_ENABLED` /
       `..._SAMPLE_INTERVAL` (default 10s) env gate. Columns:
       `PeakMemoryBytes *int64`, `CPUSeconds *float64`,
@@ -367,7 +367,7 @@ thing that changes OOM classification (release-noted).
       sites, not query shapes.
       Files: `internal/models/run.go`, `internal/run/store.go`,
       `internal/metrics/metrics.go` (+ `metrics_test.go`), `pkg/env/env.go`.
-- [ ] A2. Reclassify OOM kills to `atom.ResourceFailure` per engine, at the
+- [x] A2. Reclassify OOM kills to `atom.ResourceFailure` per engine, at the
       inspect each engine already performs, and capture the exit code onto the
       result. Docker: consult `InspectResponse.State.OOMKilled` in
       `(*Atom).Result()` (`internal/atom/docker/atom.go`) **before** the
@@ -421,7 +421,7 @@ thing that changes OOM classification (release-noted).
       `internal/job/job.go`, `internal/worker/runtime_executor.go`,
       `internal/run/store.go` (the A1 setter's call sites only).
       Depends on: A1.
-- [ ] A3. Add `Stats()` to the `atom.Engine` interface and a sampling loop in
+- [x] A3. Add `Stats()` to the `atom.Engine` interface and a sampling loop in
       both executors, writing `PeakMemoryBytes`/`CPUSeconds`/`StatsSource`.
       Docker/Podman sample `ContainerStats` (cgroup v2 dropped
       `max_usage_in_bytes`, so peak = max of samples; under-reports sub-interval
@@ -982,7 +982,7 @@ Surfaces the backend through the jobs feature, gated on the `RightSizing`
 
 ## Harness Strengthening
 
-- [ ] H-1. Make **every self-server lane** exercise the real resource path
+- [x] H-1. Make **every self-server lane** exercise the real resource path
       ([arc convention 2](closed-loop-arc.md#shared-conventions-do-not-restate-these-in-child-plans--link-here)
       — rationale there, not repeated here). Add a small `build/` stress image
       (`build/Dockerfile.stress`, published as a `caesiumcloud/…` tag alongside
