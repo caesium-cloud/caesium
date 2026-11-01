@@ -27,7 +27,12 @@ type Config struct {
 	TaskTimeout time.Duration
 	RunTimeout  time.Duration
 	Env         map[string]string // extra env vars injected into every task
-	OnPrepared  func(store *run.Store, db *gorm.DB, jobModel *models.Job) error
+	// Params are explicit run parameters. They override trigger defaults;
+	// omitted keys come from trigger.defaultParams, or from
+	// trigger.configuration.defaultParams when the top-level map is empty.
+	// Nil applies only those defaults, the same as an empty trigger POST.
+	Params     map[string]string
+	OnPrepared func(store *run.Store, db *gorm.DB, jobModel *models.Job) error
 	// EngineFactory overrides EVERY engine kind (docker, kubernetes, podman)
 	// job.New dispatches steps through — a step's declared `engine:` picks
 	// which of job.WithDockerEngineFactory/WithKubernetesEngineFactory/
@@ -91,6 +96,10 @@ func (r *Runner) RunWithResult(ctx context.Context, def *schema.Definition) (*Ru
 	if err := def.Validate(); err != nil {
 		return nil, fmt.Errorf("validation: %w", err)
 	}
+	params, err := mergeRunParams(def, r.cfg.Params)
+	if err != nil {
+		return nil, fmt.Errorf("run params: %w", err)
+	}
 
 	db, cleanup, err := OpenEphemeralDB()
 	if err != nil {
@@ -139,6 +148,9 @@ func (r *Runner) RunWithResult(ctx context.Context, def *schema.Definition) (*Ru
 			}),
 			job.WithPodmanEngineFactory(factory),
 		)
+	}
+	if len(params) > 0 {
+		opts = append(opts, job.WithParams(params))
 	}
 
 	if r.cfg.TaskTimeout > 0 {

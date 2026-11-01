@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/caesium-cloud/caesium/internal/atom"
 	"github.com/caesium-cloud/caesium/internal/event"
 	"github.com/caesium-cloud/caesium/internal/lineage"
 	"github.com/caesium-cloud/caesium/internal/localrun"
@@ -46,6 +47,10 @@ func (r *Result) Passed() bool {
 	return len(r.Failures) == 0
 }
 
+// testEngineFactory, when set, replaces the container runtime. Production
+// leaves it nil. Tests set it so a scenario can run without a daemon.
+var testEngineFactory func(context.Context) atom.Engine
+
 // Execute runs one scenario and evaluates its expectations.
 func Execute(ctx context.Context, scenario ResolvedScenario) (*Result, error) {
 	def, err := scenario.Definition()
@@ -60,9 +65,11 @@ func Execute(ctx context.Context, scenario ResolvedScenario) (*Result, error) {
 	obs := &observabilityCapture{}
 
 	runner := localrun.New(localrun.Config{
-		MaxParallel: scenario.Scenario.MaxParallel,
-		TaskTimeout: scenario.Scenario.TaskTimeout,
-		RunTimeout:  scenario.Scenario.RunTimeout,
+		MaxParallel:   scenario.Scenario.MaxParallel,
+		TaskTimeout:   scenario.Scenario.TaskTimeout,
+		RunTimeout:    scenario.Scenario.RunTimeout,
+		Params:        scenario.Scenario.Params,
+		EngineFactory: testEngineFactory,
 		OnPrepared: func(store *run.Store, db *gorm.DB, jobModel *models.Job) error {
 			state.JobID = jobModel.ID
 

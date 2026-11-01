@@ -19,11 +19,13 @@ import (
 )
 
 var (
-	devPaths    []string
-	taskTimeout time.Duration
-	runTimeout  time.Duration
-	maxParallel int
-	runOnce     bool
+	devPaths     []string
+	devParamArgs []string
+	devParams    map[string]string
+	taskTimeout  time.Duration
+	runTimeout   time.Duration
+	maxParallel  int
+	runOnce      bool
 )
 
 // Cmd is the top-level dev command.
@@ -41,9 +43,16 @@ func init() {
 	Cmd.Flags().DurationVar(&runTimeout, "run-timeout", 0, "Total run timeout (e.g. 30m)")
 	Cmd.Flags().IntVar(&maxParallel, "max-parallel", 0, "Maximum parallel tasks (default: CPU count)")
 	Cmd.Flags().BoolVar(&runOnce, "once", false, "Run once and exit (no file watching)")
+	Cmd.Flags().StringArrayVar(&devParamArgs, "param", nil, "Run parameter as key=value (repeatable; overrides trigger.defaultParams, other keys keep the manifest default). Values may contain commas")
 }
 
 func runDev(cmd *cobra.Command, _ []string) error {
+	params, err := parseDevParams(devParamArgs)
+	if err != nil {
+		return err
+	}
+	devParams = params
+
 	paths := devPaths
 	if len(paths) == 0 {
 		paths = []string{"."}
@@ -511,6 +520,26 @@ func absoluteWatchPath(path string) (string, error) {
 	return filepath.Clean(abs), nil
 }
 
+// parseDevParams accepts repeatable key=value flags. The key is trimmed;
+// the value is not, so an explicit empty string can override a default.
+// A value may contain commas and additional '=' characters. The last
+// assignment for a key wins.
+func parseDevParams(values []string) (map[string]string, error) {
+	if len(values) == 0 {
+		return nil, nil
+	}
+	params := make(map[string]string, len(values))
+	for _, raw := range values {
+		key, value, ok := strings.Cut(raw, "=")
+		key = strings.TrimSpace(key)
+		if !ok || key == "" {
+			return nil, fmt.Errorf("--param must be key=value; got %q", raw)
+		}
+		params[key] = value
+	}
+	return params, nil
+}
+
 func executeRun(ctx context.Context, w io.Writer, paths []string) error {
 	defs, err := jobdef.CollectDefinitions(paths, true)
 	if err != nil {
@@ -524,6 +553,7 @@ func executeRun(ctx context.Context, w io.Writer, paths []string) error {
 		MaxParallel: maxParallel,
 		TaskTimeout: taskTimeout,
 		RunTimeout:  runTimeout,
+		Params:      devParams,
 	})
 
 	for i := range defs {
