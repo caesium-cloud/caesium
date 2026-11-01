@@ -1,9 +1,7 @@
 # Identity and Access
 
 > Status: Current operator guide for authentication, authorization, and tenancy.
-> Paragraphs marked **Planned** name the item in
-> [the identity-and-access plan](exec-plans/active/identity-and-access.md) that
-> delivers them; they are not available yet.
+> Delivered by [the identity-and-access plan](exec-plans/completed/identity-and-access.md).
 
 Caesium supports API keys for machines and optional browser SSO for interactive
 users. SSO is additive: keep `CAESIUM_AUTH_MODE=api-key` enabled and turn on one

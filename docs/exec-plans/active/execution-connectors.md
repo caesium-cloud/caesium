@@ -51,7 +51,7 @@ no-Temporal-dependency statement in [temporal.md](../../temporal.md) describes
 shipped behavior. B1 updates both guides in the same PR that introduces the SDK;
 N1 reconciles final acceptance rather than deferring that dependency correction.
 
-The [identity-and-access plan](identity-and-access.md) owns namespace grants,
+The [identity-and-access plan](../completed/identity-and-access.md) owns namespace grants,
 policy reload and tenancy. This plan uses shipped role/scope machinery. The
 [closed-loop arc](closed-loop-arc.md) retains dataset hold/incident/remediation
 ownership; observations do not manufacture watermarks, release holds or add
@@ -1519,7 +1519,7 @@ Use `$draft-exec-plan` to revise the plan without starting implementation.
 - [Current Temporal recipe](../../temporal.md) and
   [run-start contract](../../job-definitions.md).
 - [Strategy](../../design/differentiation-strategy.md) and [roadmap](../../roadmap.md).
-- [Identity/access](identity-and-access.md), [arc](closed-loop-arc.md) and
+- [Identity/access](../completed/identity-and-access.md), [arc](closed-loop-arc.md) and
   [distributed testing](distributed-testing.md).
 - [Console operator loop](../completed/console-operator-loop-ux.md),
   [data-plane UI](../completed/data-plane-memory-ui.md) and

@@ -64,7 +64,7 @@ is and what is still in flight; they are not operator documentation.
 | [window-scheduling.md](design/window-scheduling.md) | Active, Plan 4 (optional). Deadline windows instead of cron guesses. |
 | [2026-05-29-volumes-and-workload-identity-design.md](design/2026-05-29-volumes-and-workload-identity-design.md) | Shipped spec. Named volumes and Kubernetes workload identity. |
 | [2026-08-25-dag-native-infrastructure-deployment-design.md](design/2026-08-25-dag-native-infrastructure-deployment-design.md) | Shipped spec. The unit-pipeline pattern behind infrastructure-deployment.md. |
-| [2026-09-16-identity-and-access-design.md](design/2026-09-16-identity-and-access-design.md) | Active spec. Namespaces, grants, policy-as-code, corporate SSO. |
+| [2026-09-16-identity-and-access-design.md](design/2026-09-16-identity-and-access-design.md) | Shipped design. Namespaces, grants, policy-as-code, corporate SSO. |
 
 ### Active execution plans
 
@@ -76,10 +76,10 @@ is and what is still in flight; they are not operator documentation.
 | [backtesting.md](exec-plans/active/backtesting.md) | Plan 3, the proof loop: backtest proposals against recorded runs. |
 | [window-scheduling.md](exec-plans/active/window-scheduling.md) | Plan 4, the time loop. Optional tail of the arc. |
 | [distributed-testing.md](exec-plans/active/distributed-testing.md) | Cross-cutting: make a green `ci-ok` mean the distributed guarantees hold. 30 of 31 items done; F3 open on product findings. |
-| [identity-and-access.md](exec-plans/active/identity-and-access.md) | Namespaces, grants, policy file, Keycloak lane, `caesium login`. |
 | [execution-connectors.md](exec-plans/active/execution-connectors.md) | Temporal monitoring and declared operator actions. Planning only. |
 
 Completed plans live in [exec-plans/completed/](exec-plans/completed/); the most recent are
+[identity-and-access.md](exec-plans/completed/identity-and-access.md) (namespaces, grants, policy file, Keycloak lane, `caesium login`),
 [trust-the-substrate.md](exec-plans/completed/trust-the-substrate.md) (Plan 0, cut `v0.1.0`),
 [infra-deploy.md](exec-plans/completed/infra-deploy.md), and
 [go-maintenance.md](exec-plans/completed/go-maintenance.md).

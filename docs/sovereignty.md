@@ -17,6 +17,7 @@ The following table compares Caesium against the open-core data orchestrators en
 |---|---|---|---|---|---|
 | **High availability / multi-node** | Free (RAFT via dqlite, `replicaCount=3`) | Dagster+ (paid) | Enterprise (paid) | Prefect Cloud or self-host w/ Postgres+Redis | Free (but requires Postgres + Celery/K8s executor) |
 | **RBAC** | Free (shipped) | Dagster+ (paid) | Enterprise (paid) | Free (limited) / Prefect Cloud (full) | Free (but community-maintained; limited) |
+| **Multi-tenancy (namespaces, per-namespace grants)** | Free (shipped; `metadata.namespace`, `role @ namespace` grants, policy file) | Dagster+ (paid) | Enterprise (paid) | Prefect Cloud (paid) | Experimental (multi-team) |
 | **SSO (OIDC / SAML / LDAP)** | Free (shipped; all three native) | Dagster+ (paid) | Enterprise (paid) | Prefect Cloud (paid tier) | Free (but requires third-party proxy or custom plugin) |
 | **Audit log** | Free (shipped) | Dagster+ (paid) | Enterprise (paid) | Prefect Cloud (paid) | Free (but no structured audit trail out of the box) |
 | **Kubernetes execution** | Free (shipped; Helm chart) | Free (OSS) | Enterprise (paid) | Free (Kubernetes work pool) | Free (K8s executor) |

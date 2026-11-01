@@ -146,11 +146,9 @@ These features open Caesium to new use cases and larger organizations.
 
 ### 3.1 Multi-Tenancy & Namespace Isolation
 
-**Status**: Planned — active exec plan [`exec-plans/active/identity-and-access.md`](exec-plans/active/identity-and-access.md); design of record [`design/2026-09-16-identity-and-access-design.md`](design/2026-09-16-identity-and-access-design.md) (drafted 2026-09-16).
+**Status**: Shipped — completed exec plan [`exec-plans/completed/identity-and-access.md`](exec-plans/completed/identity-and-access.md); design of record [`design/2026-09-16-identity-and-access-design.md`](design/2026-09-16-identity-and-access-design.md); operator guide [`identity-and-access.md`](identity-and-access.md).
 
-**Current state**: Single-tenant. All jobs, runs, and resources share a flat namespace; authorization is a global four-role ladder keyed per route; SSO users cannot be scoped; SSO admins cannot manage API keys; users have no lifecycle; no SSO path has end-to-end coverage.
-
-**Target state**: A flat `metadata.namespace` declared on every job and carried by every job-owned resource; namespace-scoped grants (`role @ namespace`, `*` cluster-wide) for SSO users and API keys, resolved per request from one policy-as-code file that also declares each namespace's Kubernetes target, secret allow-list and run quota; bounded-staleness IdP group refresh; user administration; a Keycloak CI lane; a namespace switcher and Access page in the Console; and `caesium login` for an SSO-backed CLI credential. The seven-step sketch that lived here is superseded by the spec; the audit log it asked for shipped with SSO and gains a namespace column.
+**Current state**: A flat `metadata.namespace` declared on every job and carried by every job-owned resource; namespace-scoped grants (`role @ namespace`, `*` cluster-wide) for SSO users and API keys, resolved per request from one policy-as-code file that also declares each namespace's Kubernetes target, secret allow-list and run quota; bounded-staleness IdP group refresh; user administration; a Keycloak CI lane; a namespace switcher and Access page in the Console; and `caesium login` for an SSO-backed CLI credential. The audit log carries a namespace column.
 
 ### 3.2 Approval Gates & Human-in-the-Loop
 
@@ -191,7 +189,7 @@ steps:
 2. UI form generator that renders appropriate inputs per parameter type
 3. Shareable trigger URLs: `GET /ui/jobs/:alias/trigger` renders the form
 4. Slack integration: slash command `/caesium run <alias>`, status notifications via webhook callbacks
-5. Read-only vs. operator role distinction (view runs vs. trigger runs vs. edit definitions) — shipped as the `viewer < runner < operator < admin` ladder; per-namespace grants are §3.1's plan
+5. Read-only vs. operator role distinction (view runs vs. trigger runs vs. edit definitions) — shipped as the `viewer < runner < operator < admin` ladder, with per-namespace grants from §3.1
 
 ### 3.4 Live DAG Debugging & Run Diff
 
@@ -277,7 +275,7 @@ Plan 4 runs only if the arc still has momentum after Plan 3 and is explicitly no
 | **P2** | 2.3 SLA management | Genuinely unique. No orchestrator does this well. *Parked 2026-09-05 (see §2.3); breach detection shipped, ETA folds into Phase 5 Plan 4.* |
 | **P2** | 2.4 UI refresh | Visual identity + primitive consolidation. Phased so foundations land first and propagate automatically. |
 | **P2** | 2.5 Cost tracking | FinOps for pipelines. Large scope but high value. |
-| **P3** | 3.1 Multi-tenancy | Required for larger orgs. Large scope, touches every layer. **Planned** — exec plan `exec-plans/active/identity-and-access.md` (2026-09-16). |
+| **P3** | 3.1 Multi-tenancy | Required for larger orgs. Large scope, touches every layer. **Shipped** — exec plan `exec-plans/completed/identity-and-access.md`. |
 | **P3** | 3.2 Approval gates | Niche but important for compliance-heavy teams. |
 | **P3** | 3.3 Self-serve triggers | Expands the user base beyond engineers. |
 | **P3** | 3.4 Live DAG debugging | High wow-factor. Mostly UI work. |
