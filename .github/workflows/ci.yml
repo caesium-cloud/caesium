@@ -1267,8 +1267,8 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
-  # execution-connectors F2: validate the lane's own candidate-bound evidence,
-  # but keep it outside ci-ok until the separate F4 promotion criteria hold.
+  # execution-connectors F4: ci-ok re-validates this lane's report. The job
+  # still starts from `changes` alone and does not wait on the image jobs.
   connectors:
     # Start same-host browser preparation while the independent producers run.
     # The foreground harness authenticates exact-attempt publication before
@@ -2713,6 +2713,7 @@ jobs:
       - generated-fuzz
       - generated-oracles
       - coverage-ratchets
+      - connectors
     runs-on: ubuntu-26.04
     timeout-minutes: 5
     steps:
@@ -2749,6 +2750,12 @@ jobs:
         with:
           name: coverage-ratchets-evidence
           path: .tmp/lane-evidence/coverage-ratchets
+      - name: Download connectors report
+        if: needs.connectors.result == 'success'
+        uses: actions/download-artifact@v8
+        with:
+          name: connectors-evidence
+          path: .tmp/lane-evidence/connectors
       # Q6/G7 staleness input: master's actual tip at evaluation time, read
       # fresh rather than trusted from any earlier step. A transient failure
       # here must not hard-fail the job -- ci-ok.py's own fail-closed logic
@@ -2788,6 +2795,7 @@ jobs:
             --lane-evidence generated-fuzz=.tmp/lane-evidence/generated-fuzz/evidence.json \
             --lane-evidence generated-oracles=.tmp/lane-evidence/generated-oracles/evidence.json \
             --lane-evidence coverage-ratchets=.tmp/lane-evidence/coverage-ratchets/evidence.json \
+            --lane-evidence connectors=.tmp/lane-evidence/connectors/evidence.json \
             --candidate-sha "${{ github.sha }}" \
             --event-name "${{ github.event_name }}" \
             --base-sha "${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || (github.event_name == 'merge_group' && github.event.merge_group.base_sha) || '' }}" \
@@ -2815,7 +2823,8 @@ jobs:
             lifecycle-standalone \
             generated-fuzz \
             generated-oracles \
-            coverage-ratchets
+            coverage-ratchets \
+            connectors
 
   # distributed-testing G4: same-SHA release qualification in the actual
   # publish chain, fail-closed. `publish` needs this job, so a failed, missing,

@@ -2273,7 +2273,9 @@ The plan is done when **all** of these hold:
 4. **Stream D — CI gates merges:** `gh api repos/caesium-cloud/caesium/branches/master/protection --jq .required_status_checks.checks`
    lists exactly D2's list, byte-identical: `lint`, `unit-test`,
    `unit-test-arm64`, `ui-test`, `ui-e2e`, `ui-e2e-auth`,
-   `build-and-integration-test`, `build-and-integration-test-agent-auth`;
+   `build-and-integration-test`, `build-and-integration-test-agent-auth`.
+   Later lanes, including execution-connectors `connectors`, join that gate
+   only as members of `ci-ok`. They are not added to this branch-protection list.
    `docs/ci.md` exists, is indexed, and records the command + list + lane
    matrix + the required-to-merge vs. required-to-publish distinction
    (`publish.needs` is wider); the last 5 master runs after D1/H-2 have no failure in the four

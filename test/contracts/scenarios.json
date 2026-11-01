@@ -1880,7 +1880,7 @@
       "gates": [
         "connectors"
       ],
-      "notes": "Executed by just integration-test-connectors. The workflow lane is advisory until F4 promotion; registration does not certify F3 first-release acceptance. The shared collector derives observations and fault activation from retained raw artifacts, then the existing strict checker validates this contract. F2 reuses the source-built or producer-bound fixture images in the cluster and records the actual member images and validated CRI import identities; a standalone manual cluster run may build its own candidate images.",
+      "notes": "Executed by just integration-test-connectors. The workflow lane is required by ci-ok under the connectors gate. Registration does not certify a release. The shared collector derives observations and fault activation from retained raw artifacts, then the existing strict checker validates this contract. F2 reuses the source-built or producer-bound fixture images in the cluster and records the actual member images and validated CRI import identities; a standalone manual cluster run may build its own candidate images.",
       "topology": {
         "kind": "docker-connectors-fixture",
         "replicas": 1,
@@ -1958,7 +1958,7 @@
       "gates": [
         "connectors"
       ],
-      "notes": "Executed by just integration-test-connectors. The workflow lane is advisory until F4 promotion; registration does not certify F3 first-release acceptance. The shared collector derives observations and fault activation from retained raw artifacts, then the existing strict checker validates this contract. F2 reuses the source-built or producer-bound fixture images in the cluster and records the actual member images and validated CRI import identities; a standalone manual cluster run may build its own candidate images.",
+      "notes": "Executed by just integration-test-connectors. The workflow lane is required by ci-ok under the connectors gate. Registration does not certify a release. The shared collector derives observations and fault activation from retained raw artifacts, then the existing strict checker validates this contract. F2 reuses the source-built or producer-bound fixture images in the cluster and records the actual member images and validated CRI import identities; a standalone manual cluster run may build its own candidate images.",
       "topology": {
         "kind": "docker-connectors-fixture",
         "replicas": 1,
@@ -2019,7 +2019,7 @@
       "gates": [
         "connectors"
       ],
-      "notes": "Executed by just integration-test-connectors. The workflow lane is advisory until F4 promotion; registration does not certify F3 first-release acceptance. The shared collector derives observations and fault activation from retained raw artifacts, then the existing strict checker validates this contract. F2 reuses the source-built or producer-bound fixture images in the cluster and records the actual member images and validated CRI import identities; a standalone manual cluster run may build its own candidate images.",
+      "notes": "Executed by just integration-test-connectors. The workflow lane is required by ci-ok under the connectors gate. Registration does not certify a release. The shared collector derives observations and fault activation from retained raw artifacts, then the existing strict checker validates this contract. F2 reuses the source-built or producer-bound fixture images in the cluster and records the actual member images and validated CRI import identities; a standalone manual cluster run may build its own candidate images.",
       "topology": {
         "kind": "kind-helm-statefulset",
         "replicas": 3,

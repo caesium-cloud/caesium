@@ -94,16 +94,14 @@ activities because it is the platform they have. Two things follow:
   default false, the process dials no Temporal server, starts no worker, and
   needs no Temporal credentials.
 
-**Proposed scope amendment (2026-10-01; the initiative is not complete).**
-The execution-connectors plan adds one optional Temporal monitoring/action
-adapter that joins external workflow state to Caesium run and data evidence.
-Build only the small shared execution identity, observation, capability,
-relationship and operation contracts needed by that adapter now. A test-only
-adapter checks that these contracts do not embed Temporal fields; a second real
-provider must justify further generalization. This authorizes neither a provider
-catalog nor a dynamic plugin system. B1 adds the compiled SDK in this change.
-A default-disabled runtime still requires no Temporal service, worker, or
-credentials. The active plan is `../exec-plans/active/execution-connectors.md`.
+**Scope amendment (shipped 2026-11-01).**
+One optional Temporal monitoring/action adapter joins external workflow state
+to Caesium run and data evidence. The shared contracts stay limited to that
+adapter. A test-only adapter checks that they do not embed Temporal fields.
+A second real provider would have to justify further generalization. This is
+not a provider catalog or a dynamic plugin system. The runtime still dials no
+Temporal service when `CAESIUM_CONNECTORS_ENABLED` is left false. The completed
+plan is `../exec-plans/completed/execution-connectors.md`.
 
 ## Positioning statement
 
@@ -122,7 +120,7 @@ Use the words a frustrated engineer actually types into a search bar: *"lightwei
 
 - **Generic priority / quotas / fair-share / preemption / GPU / gang / topology scheduling** — Kueue owns this on every axis a single binary structurally loses. Delegate, don't compete.
 - **Out-UI-ing Kestra** — its in-browser editor is its product and years ahead. Win on a different axis.
-- **Connector / plugin breadth** — Airflow has 1,500+ providers, Kestra 1,200+ plugins. "The image *is* the integration." Any connector-catalog framing loses instantly. The narrow proposed execution-observation amendment above permits one Temporal adapter and its necessary shared contracts; it does not reopen this catalog.
+- **Connector / plugin breadth** — Airflow has 1,500+ providers, Kestra 1,200+ plugins. "The image *is* the integration." Any connector-catalog framing loses instantly. The shipped execution-observation amendment above permits one Temporal adapter and its necessary shared contracts; it does not reopen this catalog.
 - **Generic caching / cost dashboards / dataset-event triggers as headlines** — me-too unless tied to *data* (cost-per-dataset, cost wasted on cold re-runs the cache would have skipped).
 - **Container-native + YAML as *the* pitch** — table stakes (Argo, Kestra). Always lead with what runs on top.
 

@@ -848,7 +848,7 @@ def job_selectors(name):
 
 
 class ConnectorsLaneWiringTests(unittest.TestCase):
-    def test_connector_lane_runs_for_shared_dependencies_and_stays_advisory(self):
+    def test_connector_lane_runs_for_shared_dependencies_and_blocks_ci_ok(self):
         job = JOBS["connectors"]
         selectors = job_selectors("connectors")
         self.assertEqual(selectors, {"go", "ui", "ci"})
@@ -864,10 +864,10 @@ class ConnectorsLaneWiringTests(unittest.TestCase):
             with self.subTest(path=path):
                 self.assertTrue(selected_groups(path) & selectors)
         self.assertFalse(selected_groups("docs/connectors.md") & selectors)
-        self.assertIn("connectors", UNPROMOTED_LANES)
-        self.assertNotIn("connectors", SELECTORS)
-        self.assertNotIn("connectors", EVIDENCE_LANES)
-        self.assertNotIn("connectors", JOBS["ci-ok"]["needs"])
+        self.assertNotIn("connectors", UNPROMOTED_LANES)
+        self.assertEqual(SELECTORS["connectors"], ("go", "ui", "ci"))
+        self.assertEqual(EVIDENCE_LANES["connectors"], "connectors")
+        self.assertIn("connectors", JOBS["ci-ok"]["needs"])
         self.assertNotIn("connectors", QUALIFICATION["RELEASE_REQUIRED_EVIDENCE"])
         self.assertEqual(job["needs"], ["changes"])
         self.assertEqual(job['permissions'], {'contents': 'read', 'actions': 'read'})
@@ -1973,6 +1973,7 @@ class SystemSuiteLaneWiringTests(unittest.TestCase):
         "generated-fuzz": ("generated-fuzz", {"builder-amd64"}),
         "generated-oracles": ("generated-oracles", {"builder-amd64"}),
         "coverage-ratchets": ("coverage-ratchets", {"builder-amd64"}),
+        "connectors": ("integration-test-connectors", set()),
     }
 
     def gate_argv(self):
@@ -2004,8 +2005,12 @@ class SystemSuiteLaneWiringTests(unittest.TestCase):
                     self.assertEqual(row["status"], "proven", row["id"])
                 # The recipe validates the SAME gate ci-ok re-validates.
                 body = recipe_body(self.LANES[job][0].split()[0])
+                if job == "connectors":
+                    body += (ROOT / "scripts/connectors-test.sh").read_text()
+                    self.assertIn("collect-lane-evidence.py connectors", body)
+                else:
+                    self.assertIn(f"--gate {gate}", body)
                 self.assertIn(f"--require {gate} --strict", body)
-                self.assertIn(f"--gate {gate}", body)
 
     def test_lane_runs_its_recipe_off_loaded_images_and_never_a_compile_job(self):
         for job, (invocation, artifacts) in self.LANES.items():
@@ -2027,7 +2032,8 @@ class SystemSuiteLaneWiringTests(unittest.TestCase):
                 self.assertEqual(report["uses"], "actions/upload-artifact@v7")
                 self.assertEqual(report["if"], "always()")
                 self.assertEqual(report["with"]["if-no-files-found"], "error")
-                self.assertEqual(report["with"]["path"], f".tmp/lane-evidence/{job}/*.json")
+                expected = f".tmp/lane-evidence/{job}/evidence.json" if job == "connectors" else f".tmp/lane-evidence/{job}/*.json"
+                self.assertEqual(report["with"]["path"], expected)
 
     def test_ci_ok_downloads_and_revalidates_every_lane_report(self):
         steps = JOBS["ci-ok"]["steps"]
@@ -2072,6 +2078,9 @@ class SystemSuiteLaneWiringTests(unittest.TestCase):
             "coverage-ratchets": [("ui/src/main.tsx", "browser journey"),
                                   ("scripts/coverage-ratchet.json", "ratchet"),
                                   ("build/Dockerfile.coverage", "coverage image")],
+            "connectors": [("scripts/connectors-test.sh", "lane runner"),
+                           ("test/connectors_actions_test.go", "lane test code"),
+                           ("ui/src/features/jobs/RunDetailPage.tsx", "console")],
         }
         for job in G6_LANES:
             selectors = job_selectors(job)
@@ -2829,11 +2838,10 @@ class SystemSuiteLaneGateTests(unittest.TestCase):
 
     def test_deselected_lane_owes_no_report(self):
         needs = results(selected_outputs(("ui",)))
-        reports = self.lanes(**{job: None for job in G6_LANES if job != "coverage-ratchets"})
+        deselected = [job for job in G6_LANES if "ui" not in SELECTORS[job]]
+        reports = self.lanes(**{job: None for job in deselected})
         output = self.run_gate(0, needs=needs, lane_reports=reports, enabled=("ui",))
-        for job in G6_LANES:
-            if job == "coverage-ratchets":
-                continue
+        for job in deselected:
             self.assertIn(f"ci-ok: {job} was deselected by the path filters", output)
 
     def test_absent_foreign_or_hollow_report_fails_closed(self):
@@ -3151,8 +3159,8 @@ class NightlyLaneTests(unittest.TestCase):
         }
         structural = {"ci-ok", "publish", "build-and-integration-test", "build-and-integration-test-agent-auth",
                       "qualification", "release-qualification", "connector-fixture-images"}
-        # The fixture producer supplies the connector consumer's image cohort;
-        # its result is enforced through that lane's selected/advisory status.
+        # The fixture producer supplies the connector consumer's image cohort.
+        # Its result is enforced through the promoted connector lane.
         self.assertEqual(JOBS["connectors"]["env"]["CAESIUM_CONNECTORS_CI_HANDOFF"], "true")
         self.assertNotIn("connector-fixture-images", JOBS["ci-ok"]["needs"])
         for job in JOBS:
@@ -3164,9 +3172,9 @@ class NightlyLaneTests(unittest.TestCase):
                 )
         # The connector lane runs on broad PR/push selectors in CI itself;
         # the other advisory lanes belong to the reusable nightly workflow.
-        self.assertEqual(set(UNPROMOTED_LANES), set(QUAL_LANES) | {"connectors"})
-        self.assertIn("connectors", JOBS)
-        for job in set(UNPROMOTED_LANES) - {"connectors"}:
+        self.assertEqual(set(UNPROMOTED_LANES), set(QUAL_LANES))
+        self.assertIn("connectors", JOBS["ci-ok"]["needs"])
+        for job in UNPROMOTED_LANES:
             self.assertIn(job, LANE_JOBS)
 
 
