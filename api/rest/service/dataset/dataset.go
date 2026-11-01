@@ -239,6 +239,9 @@ func (s *Service) GetWithOptions(namespace, name string, options GetOptions) (*D
 	}
 
 	detail := &Detail{State: state}
+	if !env.Variables().DataAssertionsEnabled {
+		unstrandHeld(&detail.State)
+	}
 	if options.IncludeHold && env.Variables().DataAssertionsEnabled {
 		var hold models.DatasetHold
 		err := s.db.WithContext(s.ctx).
@@ -408,6 +411,14 @@ func withEffectiveStatus(q *gorm.DB, status string) *gorm.DB {
 		return q
 	}
 	if !env.Variables().DataAssertionsEnabled {
+		// No hold counts with the breaker off, so a `held` row persisted while it
+		// was on is stranded: it reads as unknown (see unstrandHeld), never held.
+		switch status {
+		case models.DatasetStatusHeld:
+			return q.Where("1 = 0")
+		case models.DatasetStatusUnknown:
+			return q.Where("status IN ?", []string{models.DatasetStatusUnknown, models.DatasetStatusHeld})
+		}
 		return q.Where("status = ?", status)
 	}
 	exists := fmt.Sprintf(activeHoldExists, "dataset_states.namespace", "dataset_states.name")

@@ -102,67 +102,6 @@ func heldInputs(holds map[datasetIdentity]heldDataset, consumes []models.Dataset
 	return out
 }
 
-// reconcileHeldRows corrects persisted `held` rows that no longer have an active
-// hold and that the per-dataset evaluation will never revisit: the dataset has
-// no freshness SLO any more (a producer dropped it while the dataset was held),
-// its declaration is gone, or the circuit breaker is switched off. Evaluation
-// rewrites the status of every dataset that still has an SLO, so those rows are
-// left to it; this closes the rest, and runs on every pass - a tick, and the
-// dataset_released / dataset_held reactive passes alike.
-//
-// With no SLO there is nothing to compute freshness from, so the row takes the
-// neutral status the state store itself leaves for a dataset the evaluator does
-// not own: `unknown`, with an empty reason. (The API still overlays `held` for as
-// long as an active hold exists, so this never hides a live hold.)
-//
-// The UPDATE re-checks, inside the statement, that the row is still `held` and
-// has no active hold, so a hold opened after this pass read its snapshot is not
-// clobbered.
-func (e *Evaluator) reconcileHeldRows(ctx context.Context, graph registrySnapshot, holds map[datasetIdentity]heldDataset) error {
-	var rows []models.DatasetState
-	if err := e.db.WithContext(ctx).
-		Select("namespace", "name").
-		Where("status = ?", models.DatasetStatusHeld).
-		Find(&rows).Error; err != nil {
-		return err
-	}
-	if len(rows) == 0 {
-		return nil
-	}
-	evaluated := make(map[datasetIdentity]struct{}, len(graph.produced))
-	for _, decl := range graph.produced {
-		if strings.TrimSpace(decl.Freshness) != "" {
-			evaluated[declarationIdentity(decl)] = struct{}{}
-		}
-	}
-	gateOn := runstorage.DataAssertionsEnabled()
-	now := e.now().UTC()
-	for _, row := range rows {
-		id := datasetIdentity{namespace: row.Namespace, name: strings.TrimSpace(row.Name)}
-		if _, owned := evaluated[id]; owned {
-			continue
-		}
-		if _, held := holds[id]; held {
-			continue
-		}
-		q := e.db.WithContext(ctx).Model(&models.DatasetState{}).
-			Where("namespace = ? AND name = ? AND status = ?", row.Namespace, row.Name, models.DatasetStatusHeld)
-		if gateOn {
-			q = q.Where("NOT EXISTS (SELECT 1 FROM dataset_holds WHERE dataset_holds.status = ? AND dataset_holds.namespace = ? AND dataset_holds.name = ?)",
-				models.DatasetHoldStatusActive, row.Namespace, row.Name)
-		}
-		if err := q.Updates(map[string]any{
-			"status":           models.DatasetStatusUnknown,
-			"reason":           "",
-			"reason_namespace": nil,
-			"updated_at":       now,
-		}).Error; err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
 // HeldReason is the status reason a held dataset reports, for readers outside
 // the evaluator (the dataset read API overlays it on a dataset it finds an
 // active hold for, so list/detail are honest before the next evaluation).

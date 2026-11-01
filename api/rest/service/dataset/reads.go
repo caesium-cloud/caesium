@@ -45,7 +45,13 @@ func (s *Service) withHolds(rows []models.DatasetState) ([]State, error) {
 	for i, row := range rows {
 		states[i].DatasetState = row
 	}
-	if !env.Variables().DataAssertionsEnabled || len(rows) == 0 {
+	if !env.Variables().DataAssertionsEnabled {
+		for i := range states {
+			unstrandHeld(&states[i].DatasetState)
+		}
+		return states, nil
+	}
+	if len(rows) == 0 {
 		return states, nil
 	}
 	identity := s.db.Where("namespace = ? AND name = ?", rows[0].Namespace, rows[0].Name)
@@ -76,6 +82,17 @@ func (s *Service) withHolds(rows []models.DatasetState) ([]State, error) {
 		}
 	}
 	return states, nil
+}
+
+// unstrandHeld reports a persisted `held` as unknown while the data circuit
+// breaker is off. The evaluator writes `held` only for an active hold and the
+// release transaction clears it, but an operator can switch the breaker off with
+// holds still active; nothing then evaluates or releases them, and "held" would
+// otherwise be reported for as long as the flag stays off.
+func unstrandHeld(state *models.DatasetState) {
+	if state.Status == models.DatasetStatusHeld {
+		state.Status, state.Reason = models.DatasetStatusUnknown, ""
+	}
 }
 
 // ErrHoldStatus identifies an unsupported hold feed filter.

@@ -1579,10 +1579,13 @@ precedent for it is warn-mode schema validation, which publishes
       does), and `?status=held` merges declaration-only datasets that an active
       hold is on (no state row) before counting and paging. A persisted `held`
       returns to `unknown` (reason cleared) when released before any observation.
-      Persisted `held` rows with no active hold and no freshness SLO to evaluate
-      (SLO dropped while held, declaration gone, or the breaker switched off) are
-      reconciled to `unknown` with an empty reason on every evaluator pass,
-      including the `dataset_released` reactive one. Dataset feeds order by one
+      The persisted `held` is cleared where the hold is released:
+      `releaseDatasetHoldTx` resets the matching `dataset_states` row (exact
+      namespace/name, only if `held`) to `unknown` with an empty reason in the
+      release transaction, so it cannot outlive the hold with freshness
+      scheduling off, no SLO, or the declaration gone. With the breaker switched
+      off while holds are active, the dataset reads treat a persisted `held` as
+      `unknown`. Dataset feeds order by one
       total key `(updated_at DESC, namespace, name)` in every source query and
       the final merge, so tied timestamps page without skips or repeats.
 - [ ] F5. **Why-provenance** (arc convention 3 — this plan's single explainability

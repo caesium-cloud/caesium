@@ -241,7 +241,7 @@ func (s *IntegrationTestSuite) TestDataAssertionsHeldDatasetIsNotFreshAndBlocksD
 // TestDataAssertionsReleaseAfterDroppingTheSLOLeavesHeld proves a dataset does
 // not stay `held` after its hold is released just because the producer stopped
 // declaring a freshness SLO while it was held (per-dataset evaluation skips
-// datasets with no SLO, so the evaluator's reconcile pass has to clear it).
+// datasets with no SLO, so the release transaction itself has to clear it).
 func (s *IntegrationTestSuite) TestDataAssertionsReleaseAfterDroppingTheSLOLeavesHeld() {
 	s.requireDataAssertionsLane()
 	s.requireFreshnessLane()
