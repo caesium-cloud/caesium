@@ -7,6 +7,7 @@ import (
 	"fmt"
 
 	"github.com/caesium-cloud/caesium/internal/authz"
+	"github.com/caesium-cloud/caesium/internal/baselineevidence"
 	"github.com/caesium-cloud/caesium/internal/event"
 	"github.com/caesium-cloud/caesium/internal/lineage"
 	"github.com/caesium-cloud/caesium/internal/models"
@@ -31,6 +32,9 @@ import (
 //     green runs.
 //   - dataset_held is emitted once per hold, so a repeat breach does not reach
 //     here: the occurrence count lives on the hold.
+//   - Neither event is guaranteed to reach this subscriber, so ReconcileHolds
+//     (hold_reconcile.go) converges incidents on hold state. The events are the
+//     fast path; the hold row decides.
 
 // evidenceImpactCap bounds the cone embedded in an incident's evidence. The cone
 // has a node per lineage row, so it grows with the history of every downstream
@@ -55,9 +59,11 @@ type holdEvent struct {
 	ReleasedBy       string          `json:"released_by"`
 }
 
+const holdSubjectPrefix = "hold:"
+
 // holdSubject is the OpenParams.Subject of a hold's incident.
 func holdSubject(holdID uuid.UUID) string {
-	return "hold:" + holdID.String()
+	return holdSubjectPrefix + holdID.String()
 }
 
 func decodeHoldEvent(evt event.Event) (holdEvent, bool) {
@@ -105,36 +111,43 @@ func (s *Subscriber) handleHold(ctx context.Context, evt event.Event) {
 		return
 	}
 
+	s.openHoldIncident(ctx, evt.JobID, evt.RunID, held, impact)
+}
+
+// openHoldIncident opens the incident for a hold, from its event or from its row.
+// untrusted names breaching runs other than runID.
+func (s *Subscriber) openHoldIncident(ctx context.Context, jobID, runID uuid.UUID, held holdEvent, impact datatypes.JSON, untrusted ...uuid.UUID) {
 	// Run-level on purpose: with a TaskID, resolveContext would classify from
 	// the task's rows. A hold whose run is gone falls back to the job's
 	// namespace, which is also what Store.OpenOrAppend does with no run.
-	fc := s.resolveContext(ctx, event.Event{JobID: evt.JobID, RunID: evt.RunID})
+	fc := s.resolveContext(ctx, event.Event{JobID: jobID, RunID: runID})
 	if fc.namespace == "" {
-		fc.namespace = s.resolveContext(ctx, event.Event{JobID: evt.JobID}).namespace
+		fc.namespace = s.resolveContext(ctx, event.Event{JobID: jobID}).namespace
 	}
 	namespace := models.NamespaceOrDefault(fc.namespace)
 
-	var runID *uuid.UUID
-	if evt.RunID != uuid.Nil {
-		r := evt.RunID
-		runID = &r
+	var runRef *uuid.UUID
+	if runID != uuid.Nil {
+		runRef = &runID
 	}
 
-	class := s.classifier.Classify(Signal{EventType: string(evt.Type)})
+	class := s.classifier.Classify(Signal{EventType: string(event.TypeDatasetHeld)})
+	violations, summary := shapeHoldVerdict(held)
 	s.recordIncident(ctx, OpenParams{
 		Namespace: namespace,
-		JobID:     evt.JobID,
+		JobID:     jobID,
 		// The breaching run: FreezeAllowlist excludes its outputs from the seeds
 		// of the impact walk, so a poisoned run cannot widen the allowlist.
-		RunID:                  runID,
+		RunID:                  runRef,
+		UntrustedRunIDs:        untrusted,
 		TaskID:                 held.TaskID,
 		TaskName:               held.Step,
 		Class:                  class,
 		Subject:                holdSubject(held.HoldID),
-		LastError:              holdSummary(held),
-		Evidence:               buildHoldEvidence(ctx, class, namespace, held, impact),
+		LastError:              summary,
+		Evidence:               buildHoldEvidence(ctx, class, namespace, held, violations, impact),
 		BackfillID:             fc.backfillID,
-		RemediationTargetRunID: runID,
+		RemediationTargetRunID: runRef,
 	})
 }
 
@@ -154,6 +167,22 @@ func (s *Subscriber) holdImpact(ctx context.Context, holdID uuid.UUID) (datatype
 		return nil, false
 	}
 	return hold.Impact, hold.Status == models.DatasetHoldStatusReleased
+}
+
+// shapeHoldVerdict returns the verdicts and the summary as an incident may store
+// them. An incident's evidence is served as stored to every reader of it and to
+// its agent, so a verdict with an unowned baseline (one recorded before baselines
+// were namespace-owned, still pending or on the hold row) loses its baseline
+// evidence here rather than on read. Verdicts that do not decode are left out.
+func shapeHoldVerdict(held holdEvent) (any, string) {
+	payload := map[string]any{"error": holdSummary(held)}
+	var violations any
+	if err := json.Unmarshal(held.Violations, &violations); err == nil {
+		payload["data_violations"] = violations
+	}
+	baselineevidence.WithholdJSON(payload)
+	summary, _ := payload["error"].(string)
+	return payload["data_violations"], summary
 }
 
 // holdSummary renders the first violation for the incident feed, in the shape
@@ -178,10 +207,9 @@ func holdSummary(held holdEvent) string {
 }
 
 // buildHoldEvidence renders the incident's evidence: what broke, by how much,
-// against what baseline, and how far it reaches. Violations pass through as the
-// evaluator wrote them. The dataset's namespace is a data axis, unrelated to the
-// tenant namespace the incident belongs to.
-func buildHoldEvidence(ctx context.Context, class FailureClass, namespace string, held holdEvent, impact datatypes.JSON) datatypes.JSON {
+// against what baseline, and how far it reaches. The dataset's namespace is a
+// data axis, unrelated to the tenant namespace the incident belongs to.
+func buildHoldEvidence(ctx context.Context, class FailureClass, namespace string, held holdEvent, violations any, impact datatypes.JSON) datatypes.JSON {
 	m := map[string]any{
 		"class":             string(class),
 		"hold_id":           held.HoldID.String(),
@@ -193,11 +221,14 @@ func buildHoldEvidence(ctx context.Context, class FailureClass, namespace string
 	if held.TaskRunID != nil {
 		m["task_run_id"] = held.TaskRunID.String()
 	}
-	if len(held.Violations) > 0 {
-		m["violations"] = held.Violations
+	if violations != nil {
+		m["violations"] = violations
 	}
 	if cone := redactedHoldImpact(ctx, namespace, impact); cone != nil {
 		m["impact"] = cone
+		if held.ImpactedDatasets == 0 {
+			m["impacted_datasets"] = cone.DownstreamTotal
+		}
 	}
 	b, err := json.Marshal(m)
 	if err != nil {
@@ -237,9 +268,7 @@ func redactedHoldImpact(ctx context.Context, namespace string, impact datatypes.
 	return out
 }
 
-// handleHoldRelease closes a hold's incident. An escalated incident has handed
-// the problem to a human and cannot be remediated, but the problem is gone, so
-// it closes without one.
+// handleHoldRelease closes a hold's incident.
 func (s *Subscriber) handleHoldRelease(ctx context.Context, evt event.Event) {
 	held, ok := decodeHoldEvent(evt)
 	if !ok {
@@ -253,12 +282,25 @@ func (s *Subscriber) handleHoldRelease(ctx context.Context, evt event.Event) {
 	if inc == nil || inc.Status.IsTerminal() {
 		return
 	}
-	summary := fmt.Sprintf("dataset hold released: %s by %s", held.ReleaseReason, held.ReleasedBy)
-	if inc.Status == models.IncidentStatusEscalated {
-		if _, err := s.store.Transition(ctx, inc.ID, models.IncidentStatusClosed, summary); err != nil {
-			log.Warn("incident: could not close an escalated hold incident", "incident_id", inc.ID, "error", err)
-		}
-		return
+	s.closeHoldIncident(ctx, inc, holdReleaseSummary(held.ReleaseReason, held.ReleasedBy))
+}
+
+func holdReleaseSummary(reason, by string) string {
+	return fmt.Sprintf("dataset hold released: %s by %s", reason, by)
+}
+
+// closeHoldIncident closes an incident whose hold is over. An escalated incident
+// has handed the problem to a human and cannot be remediated, but the problem is
+// gone, so it closes without being remediated. The status is not read first: an
+// operator can reject the last approval between such a read and the write, so
+// the status machine decides, under the row lock each transition takes. An
+// incident that is already terminal refuses both, which is the idempotent case.
+func (s *Subscriber) closeHoldIncident(ctx context.Context, inc *models.Incident, summary string) {
+	err := s.remediate(ctx, inc, summary)
+	if errors.Is(err, ErrInvalidTransition) {
+		_, err = s.store.Transition(ctx, inc.ID, models.IncidentStatusClosed, summary)
 	}
-	s.remediate(ctx, inc, summary)
+	if err != nil && !errors.Is(err, ErrInvalidTransition) {
+		log.Warn("incident: could not close a hold's incident", "incident_id", inc.ID, "error", err)
+	}
 }

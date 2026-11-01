@@ -43,10 +43,13 @@ type OpenParams struct {
 	// Subject narrows the dedupe key to one object when (job, task, class) does
 	// not identify the incident: a step that produces two datasets can hold both,
 	// and each hold is its own incident. Empty for a failure.
-	Subject    string
-	LastError  string
-	Evidence   datatypes.JSON
-	BackfillID *uuid.UUID
+	Subject string
+	// UntrustedRunIDs are runs besides RunID whose outputs must not seed the
+	// allowlist: a hold can have been breached by more than its opening run.
+	UntrustedRunIDs []uuid.UUID
+	LastError       string
+	Evidence        datatypes.JSON
+	BackfillID      *uuid.UUID
 	// RemediationTargetRunID is the run whose later success would close this
 	// incident as remediated.
 	RemediationTargetRunID *uuid.UUID
@@ -132,7 +135,7 @@ func (s *Store) OpenOrAppend(ctx context.Context, p OpenParams) (*models.Inciden
 	// frozen value; the value computed here is only persisted when this insert
 	// wins the atomic conditional create below, so the allowlist is truly frozen
 	// at FIRST open. Best-effort: an empty result degrades to the job's own alias.
-	frozen, external := FreezeAllowlist(ctx, s.db, p.JobID, p.RunID, p.Namespace)
+	frozen, external := FreezeAllowlist(ctx, s.db, p.JobID, p.RunID, p.Namespace, p.UntrustedRunIDs...)
 	allowedJobs := marshalAllowlist(frozen)
 
 	activeKey := key

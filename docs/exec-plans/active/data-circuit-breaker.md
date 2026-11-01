@@ -1434,7 +1434,11 @@ precedent for it is warn-mode schema validation, which publishes
       `internal/lineage` so REST and the incident share it; evidence is redacted
       for the incident's own namespace and capped at 100 nodes.
       `pkg/jobdef` accepts the new class. `BuildBundle` skips failure attribution
-      for the class, a guard ahead of F2's `DataQuality` section.
+      for the class, a guard ahead of F2's `DataQuality` section. Events are not
+      guaranteed to reach the leader, so `Subscriber.ReconcileHolds` converges
+      incidents on hold state. Baseline evidence that is not namespace-owned is
+      withheld when the evidence is built; the helper moved to
+      `internal/baselineevidence` so `internal/incident` can reach it.
 - [ ] F2. Add `release_hold` to the action catalog and make it executable through
       the approval pipeline. (a) **Catalog:** `ActionTypeReleaseHold =
       "release_hold"` in `internal/incident/actions.go`, registered in

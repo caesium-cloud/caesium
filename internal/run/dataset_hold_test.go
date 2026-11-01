@@ -234,6 +234,71 @@ func TestHoldEventOpensIncident(t *testing.T) {
 	}, 3*time.Second, 10*time.Millisecond, "dataset_released must close the incident")
 }
 
+// TestHoldEventsConsumedByAFollowerStillReachTheIncident is the cluster gap the
+// reconciliation closes. The bus is per-node: the store publishes on the node that
+// did the work, a follower's subscriber drops the event at its leader check, and
+// the row is marked dispatched all the same, so the leader's dispatcher has
+// nothing to deliver. Two subscribers over one database, each with its own bus,
+// are that topology.
+func TestHoldEventsConsumedByAFollowerStillReachTheIncident(t *testing.T) {
+	setDataAssertions(t, true)
+	db := testutil.OpenTestDB(t)
+	t.Cleanup(func() { testutil.CloseDB(db) })
+	followerBus, leaderBus := event.New(), event.New()
+	store := NewStore(db)
+	store.SetBus(followerBus)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	follower := incident.NewSubscriber(followerBus, db, func(context.Context) (bool, error) { return false, nil }, 0)
+	leader := incident.NewSubscriber(leaderBus, db, nil, 0)
+	for _, sub := range []*incident.Subscriber{follower, leader} {
+		ready := make(chan struct{})
+		go func() { _ = sub.StartWithReady(ctx, ready) }()
+		<-ready
+	}
+	dispatcher := event.NewBusDispatcher(event.NewStore(db), leaderBus)
+
+	incidents := func() []models.Incident {
+		var rows []models.Incident
+		require.NoError(t, db.Find(&rows).Error)
+		return rows
+	}
+
+	jobID, taskID, taskRunID, stepName := seedTaskRun(t, db, string(TaskStatusRunning), false)
+	declareProducesHold(t, db, jobID, stepName, "warehouse/orders", jobdef.DatasetReleaseManual)
+	require.NoError(t, emitSamples(t, store, db, taskID, taskRunID,
+		pkgtask.DatasetMetricSample{Dataset: "warehouse/orders", Metric: "rowCount", Value: 12}))
+	holds := activeHolds(t, db, "warehouse/orders")
+	require.Len(t, holds, 1)
+
+	// dataset_held went to the follower, and nothing is left to dispatch.
+	require.NoError(t, dispatcher.DispatchOnce(ctx))
+	time.Sleep(100 * time.Millisecond)
+	require.Empty(t, incidents(), "the leader never heard of this hold")
+	require.NoError(t, leader.ReconcileHolds(ctx, 0))
+	require.Len(t, incidents(), 1, "the sweep opens the missing incident")
+	opened := incidents()[0]
+	assert.Equal(t, string(incident.ClassDataQualityHold), opened.Class)
+	assert.Equal(t, models.IncidentStatusOpen, opened.Status)
+	assert.Contains(t, string(opened.Evidence), holds[0].ID.String())
+
+	// So did dataset_released.
+	_, err := store.ReleaseHold(ctx, holds[0].ID, ReleaseHoldParams{ReleasedBy: "user:ada"})
+	require.NoError(t, err)
+	require.NoError(t, dispatcher.DispatchOnce(ctx))
+	time.Sleep(100 * time.Millisecond)
+	require.Equal(t, models.IncidentStatusOpen, incidents()[0].Status,
+		"the leader's subscriber never received the release")
+
+	require.NoError(t, leader.ReconcileHolds(ctx, 0))
+
+	require.Len(t, incidents(), 1)
+	closed := incidents()[0]
+	assert.Equal(t, models.IncidentStatusClosed, closed.Status)
+	assert.Contains(t, closed.ResolutionSummary, models.DatasetHoldReleaseManualAck)
+}
+
 // TestCleanRunReleasesAutoHoldOnly covers both halves of the release policy:
 // `release: auto` (the default) clears on the holder's next clean run, and
 // `release: manual` stays held — which is what makes A3's field mean something.

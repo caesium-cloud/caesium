@@ -10,6 +10,9 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	"github.com/caesium-cloud/caesium/internal/incident"
+	"github.com/google/uuid"
 )
 
 type holdIncident struct {
@@ -32,9 +35,12 @@ type holdIncidentEvidence struct {
 	DatasetNamespace string `json:"dataset_namespace"`
 	Dataset          string `json:"dataset"`
 	Violations       []struct {
-		Assertion string   `json:"assertion"`
-		Observed  *float64 `json:"observed"`
-		Bound     *float64 `json:"bound"`
+		Assertion       string   `json:"assertion"`
+		Observed        *float64 `json:"observed"`
+		Bound           *float64 `json:"bound"`
+		BaselineMedian  *float64 `json:"baseline_median"`
+		BaselineSamples int      `json:"baseline_samples"`
+		BaselineScope   string   `json:"baseline_scope"`
 	} `json:"violations"`
 	Impact struct {
 		Downstream []redactedImpactNode `json:"downstream"`
@@ -93,13 +99,19 @@ func (s *IntegrationTestSuite) incidentSubscriberFence(alias string) {
 	s.awaitIncidentStatus(fence.ID, "closed", 60*time.Second)
 }
 
-// holdProducerIn is holdProducerManifest in a tenant namespace.
+// holdBaselineSamples is CAESIUM_BASELINE_MIN_SAMPLES's default: fewer clean
+// samples and deltaFromBaseline only seeds.
+const holdBaselineSamples = 5
+
+// holdProducerIn is holdProducerManifest in a tenant namespace, with a
+// deltaFromBaseline assertion beside its absolute floor.
 func (s *IntegrationTestSuite) holdProducerIn(namespace, alias, dataset string, rowCount float64) *jobSummary {
 	s.T().Helper()
 	step, err := metricsProducerStepForDataset("load", dataset, map[string]any{"rowCount": rowCount})
 	s.Require().NoError(err)
-	manifest := strings.Replace(holdProducerManifest(alias, dataset, step, "manual"),
-		"  cache: false", "  namespace: "+namespace+"\n  cache: false", 1)
+	manifest := holdProducerManifest(alias, dataset, step, "manual")
+	manifest = strings.Replace(manifest, "  cache: false", "  namespace: "+namespace+"\n  cache: false", 1)
+	manifest = strings.Replace(manifest, "rowCount: {min: 1000}", "rowCount: {min: 1000, deltaFromBaseline: 50%}", 1)
 	return s.applyAssertionsJob(alias, manifest)
 }
 
@@ -107,8 +119,9 @@ func (s *IntegrationTestSuite) holdProducerIn(namespace, alias, dataset string, 
 // the real surface: a real container emits a bad metric, the run goes green, the
 // dataset is held, and exactly one incident opens. It survives a green rerun of
 // the same job, closes on the release and not before, and the next hold on the
-// same dataset opens a second incident. Its evidence names the producer's
-// tenant, and a downstream node of another tenant only as a placeholder.
+// same dataset opens a second incident. Its evidence carries the real baseline
+// the breach was judged against and names a downstream node of another tenant
+// only as a placeholder, and the agent reads the same through its scoped bundle.
 func (s *IntegrationTestSuite) TestHoldOpensDataQualityHoldIncident() {
 	s.requireAuthLane()
 	s.requirePolicyFixture()
@@ -126,7 +139,9 @@ func (s *IntegrationTestSuite) TestHoldOpensDataQualityHoldIncident() {
 	// The lineage the cone reads has to exist before the hold opens: a clean
 	// producer run, then one consumer in the producer's tenant and one outside.
 	producer := s.holdProducerIn("finance", producerAlias, dataset, 5000)
-	s.runProducer(producer)
+	for range holdBaselineSamples {
+		s.runProducer(producer)
+	}
 	s.applyDefinition(s.namespacedJobDefinition(ownConsumer, "finance"))
 	s.applyDefinition(s.namespacedJobDefinition(foreignConsumer, "marketing"))
 	s.runToSuccess(ownConsumer)
@@ -156,12 +171,8 @@ func (s *IntegrationTestSuite) TestHoldOpensDataQualityHoldIncident() {
 	s.Equal("", evidence.DatasetNamespace, "the dataset's namespace is a data axis, not the tenant")
 	s.Equal(dataset, evidence.Dataset)
 	s.Require().NotEmpty(evidence.HoldID)
-	s.Require().Len(evidence.Violations, 1)
-	s.Equal("min", evidence.Violations[0].Assertion)
-	s.Require().NotNil(evidence.Violations[0].Observed)
-	s.InDelta(12, *evidence.Violations[0].Observed, 0.001)
-	s.Require().NotNil(evidence.Violations[0].Bound)
-	s.InDelta(1000, *evidence.Violations[0].Bound, 0.001)
+	s.Require().Len(evidence.Violations, 2)
+	s.assertHoldVerdicts(evidence)
 
 	// The hold's own cone names the foreign consumer, or the assertions below
 	// would pass on a fixture that never reached it.
@@ -186,6 +197,34 @@ func (s *IntegrationTestSuite) TestHoldOpensDataQualityHoldIncident() {
 	}
 	s.Contains(names, ownOutput, "a node in the producer's tenant is shown whole")
 	s.Contains(kinds, "external", "a foreign node stays in the cone as a placeholder")
+
+	// The agent reads all of it through its own scoped surface.
+	token := s.mintAgentSessionToken(first.ID, producerAlias)
+	status, raw := s.requestWithKey(http.MethodGet, "/v1/agent/incidents/"+first.ID+"/bundle", token, nil)
+	s.Require().Equal(http.StatusOK, status, raw)
+	var bundle incident.Bundle
+	s.Require().NoError(json.Unmarshal([]byte(raw), &bundle), raw)
+	s.Equal(first.ID, bundle.Incident.ID.String())
+	s.Equal("data_quality_hold", bundle.Classification.Class)
+	var bundled holdIncidentEvidence
+	s.Require().NoError(json.Unmarshal(bundle.Classification.Evidence, &bundled), raw)
+	s.Equal(evidence.HoldID, bundled.HoldID)
+	s.assertHoldVerdicts(bundled)
+	var bundledNames, bundledKinds []string
+	for _, node := range bundled.Impact.Downstream {
+		bundledNames = append(bundledNames, node.DatasetName)
+		bundledKinds = append(bundledKinds, node.Kind)
+	}
+	s.Contains(bundledNames, ownOutput)
+	s.Contains(bundledKinds, "external")
+	s.NotContains(raw, foreignOutput, "the bundle must not name another tenant's dataset")
+	s.NotContains(raw, foreignConsumer, "the bundle must not name another tenant's job")
+	// The task succeeded: nothing of it may read as the failure.
+	s.Contains(bundle.Failure.Error, dataset, "the failure text is the verdict")
+	s.Empty(bundle.Failure.LogTail)
+	s.Empty(bundle.Failure.Result)
+	s.Nil(bundle.Failure.ExitCode)
+	s.Empty(bundle.Failure.Image)
 
 	// A green rerun of a release: manual hold changes nothing. The producing
 	// run's own task_succeeded and run_completed are behind the same fence.
@@ -219,4 +258,74 @@ func (s *IntegrationTestSuite) TestHoldOpensDataQualityHoldIncident() {
 	s.NotEqual(first.ID, incidents[1].ID)
 	s.Equal("open", incidents[1].Status)
 	s.Equal(second.ID, incidents[1].RunID)
+}
+
+// assertHoldVerdicts checks the breach of rowCount 12 against both assertions:
+// the absolute floor, and the delta from the five real samples of 5000 before it.
+func (s *IntegrationTestSuite) assertHoldVerdicts(evidence holdIncidentEvidence) {
+	s.T().Helper()
+	var sawMin, sawDelta bool
+	for _, violation := range evidence.Violations {
+		s.Require().NotNil(violation.Observed)
+		s.InDelta(12, *violation.Observed, 0.001)
+		s.Require().NotNil(violation.Bound)
+		switch violation.Assertion {
+		case "min":
+			sawMin = true
+			s.InDelta(1000, *violation.Bound, 0.001)
+		case "deltaFromBaseline":
+			sawDelta = true
+			s.Require().NotNil(violation.BaselineMedian, "a real baseline must reach the evidence")
+			s.InDelta(5000, *violation.BaselineMedian, 0.001)
+			s.GreaterOrEqual(violation.BaselineSamples, holdBaselineSamples)
+			s.Equal("namespace", violation.BaselineScope)
+		}
+	}
+	s.True(sawMin, "%+v", evidence.Violations)
+	s.True(sawDelta, "%+v", evidence.Violations)
+}
+
+// TestHoldIncidentFollowsHoldStateWithoutEvents is the leader's sweep on a live
+// server. A follower consuming the hold's events is not reproducible on this
+// single-node lane, so the scenario writes the hold row directly, which publishes
+// nothing: to the subscriber that is what a lost event looks like. The sweep must
+// open the incident, leave it open, and close it when the row is released.
+func (s *IntegrationTestSuite) TestHoldIncidentFollowsHoldStateWithoutEvents() {
+	s.requireAuthLane()
+	s.requirePolicyFixture()
+	s.requireDataAssertionsLane()
+
+	stamp := time.Now().UnixNano()
+	alias := fmt.Sprintf("f1-sweep-producer-%d", stamp)
+	dataset := fmt.Sprintf("f1.sweep.%d", stamp)
+	s.cleanupInOrder(alias)
+	producer := s.holdProducerIn("finance", alias, dataset, 5000)
+	run := s.runProducer(producer)
+
+	catalog := s.openIntegrationCatalogDB()
+	defer func() { s.NoError(catalog.Close()) }()
+	holdID := uuid.NewString()
+	opened := time.Now().UTC().Add(-time.Hour)
+	_, err := catalog.ExecContext(s.T().Context(),
+		`INSERT INTO dataset_holds (id, namespace, name, status, active_key, reason, held_by_job_id, held_by_job_alias, held_by_run_id, held_by_step_name, violations, occurrence_count, opened_at, created_at, updated_at)
+		 VALUES (?, '', ?, 'active', ?, 'min', ?, ?, ?, 'load', ?, 1, ?, ?, ?)`,
+		holdID, dataset, "/"+dataset, producer.ID, alias, run.ID,
+		`[{"dataset":"`+dataset+`","metric":"rowCount","assertion":"min","observed":12,"bound":1000,"message":"rowCount 12 is below min 1000"}]`,
+		opened, opened, opened)
+	s.Require().NoError(err)
+
+	found := s.awaitHoldIncidents(producer.ID, 1)[0]
+	s.Equal("open", found.Status)
+	s.Equal("finance", found.Namespace)
+	s.Equal(run.ID, found.RunID)
+	s.Contains(string(found.Evidence), holdID)
+
+	_, err = catalog.ExecContext(s.T().Context(),
+		`UPDATE dataset_holds SET status = 'released', active_key = NULL, released_by = 'system', release_reason = 'clean_run' WHERE id = ?`, holdID)
+	s.Require().NoError(err)
+
+	s.awaitIncidentStatus(found.ID, "closed", 60*time.Second)
+	closed := s.holdIncidents(producer.ID)
+	s.Require().Len(closed, 1, "a hold has one incident, and an ended hold opens none")
+	s.Contains(closed[0].ResolutionSummary, "clean_run")
 }

@@ -120,6 +120,30 @@ func (w *holdWorld) only() models.Incident {
 	return rows[0]
 }
 
+func (w *holdWorld) lineageRow(taskRunID uuid.UUID, name, direction string) {
+	w.t.Helper()
+	require.NoError(w.t, w.db.Create(&models.LineageDataset{
+		ID: uuid.New(), TaskRunID: taskRunID, Namespace: "ol", Name: name, Direction: direction, CreatedAt: time.Now().UTC(),
+	}).Error)
+}
+
+// consumer records a job in the world's namespace that read input and wrote
+// <alias>-out.
+func (w *holdWorld) consumer(alias, input string) {
+	w.t.Helper()
+	jobID, runID, taskRunID := uuid.New(), uuid.New(), uuid.New()
+	now := time.Now().UTC()
+	require.NoError(w.t, w.db.Create(&models.Job{ID: jobID, Alias: alias, Namespace: "finance"}).Error)
+	require.NoError(w.t, w.db.Create(&models.JobRun{ID: runID, JobID: jobID, Namespace: "finance", Status: "succeeded", StartedAt: now, CreatedAt: now, UpdatedAt: now}).Error)
+	require.NoError(w.t, w.db.Create(&models.TaskRun{ID: taskRunID, JobRunID: runID, TaskID: uuid.New(), AtomID: uuid.New(), Engine: models.AtomEngineDocker, Image: "busybox:1.36.1", Command: "sh", Status: "succeeded"}).Error)
+	w.lineageRow(taskRunID, input, "input")
+	w.lineageRow(taskRunID, alias+"-out", "output")
+}
+
+func coneNode(namespace, dataset string) lineage.ImpactNode {
+	return lineage.ImpactNode{DatasetName: dataset, JobAlias: dataset + "-job", JobNamespace: namespace, RunNamespace: namespace}
+}
+
 func storedCone(t *testing.T, nodes ...lineage.ImpactNode) datatypes.JSON {
 	t.Helper()
 	raw, err := lineage.EncodeStoredImpact(&lineage.ImpactResult{RootName: "orders", Downstream: nodes})
@@ -381,25 +405,10 @@ func TestHoldAllowlistExcludesTheBreachingRun(t *testing.T) {
 	ctx := t.Context()
 	_, trustedTask := w.greenRun("finance")
 
-	lineageRow := func(taskRunID uuid.UUID, name, direction string) {
-		require.NoError(t, w.db.Create(&models.LineageDataset{
-			ID: uuid.New(), TaskRunID: taskRunID, Namespace: "ol", Name: name, Direction: direction, CreatedAt: time.Now().UTC(),
-		}).Error)
-	}
-	downstream := func(alias, input string) {
-		jobID := uuid.New()
-		require.NoError(t, w.db.Create(&models.Job{ID: jobID, Alias: alias, Namespace: "finance"}).Error)
-		runID, taskRunID := uuid.New(), uuid.New()
-		now := time.Now().UTC()
-		require.NoError(t, w.db.Create(&models.JobRun{ID: runID, JobID: jobID, Namespace: "finance", Status: "succeeded", StartedAt: now, CreatedAt: now, UpdatedAt: now}).Error)
-		require.NoError(t, w.db.Create(&models.TaskRun{ID: taskRunID, JobRunID: runID, TaskID: uuid.New(), AtomID: uuid.New(), Engine: models.AtomEngineDocker, Image: "busybox:1.36.1", Command: "sh", Status: "succeeded"}).Error)
-		lineageRow(taskRunID, input, "input")
-		lineageRow(taskRunID, alias+"-out", "output")
-	}
-	lineageRow(w.taskRunID, "poisoned", "output")
-	lineageRow(trustedTask, "trusted", "output")
-	downstream("reached-by-trusted", "trusted")
-	downstream("reached-by-poison", "poisoned")
+	w.lineageRow(w.taskRunID, "poisoned", "output")
+	w.lineageRow(trustedTask, "trusted", "output")
+	w.consumer("reached-by-trusted", "trusted")
+	w.consumer("reached-by-poison", "poisoned")
 
 	cone := storedCone(t, lineage.ImpactNode{DatasetName: "reached-by-poison-out", JobAlias: "reached-by-poison", JobNamespace: "finance", RunNamespace: "finance"})
 	w.sub.handle(ctx, w.heldEvent(w.hold("orders", cone), "orders"))

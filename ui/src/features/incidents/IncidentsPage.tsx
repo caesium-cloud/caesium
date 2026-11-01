@@ -38,6 +38,7 @@ const CLASS_OPTIONS = [
   "auth_failure",
   "oom",
   "quota",
+  "data_quality_hold",
   "unknown",
 ];
 

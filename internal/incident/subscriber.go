@@ -473,24 +473,26 @@ func (s *Subscriber) handleSuccess(ctx context.Context, evt event.Event) {
 		return
 	}
 	for i := range incidents {
-		s.remediate(ctx, &incidents[i], "subsequent run succeeded")
+		// A concurrent transition or an incident not in a remediable state is
+		// non-fatal — just skip it.
+		if err := s.remediate(ctx, &incidents[i], "subsequent run succeeded"); err != nil {
+			log.Debug("incident: could not remediate on success", "incident_id", incidents[i].ID, "error", err)
+		}
 	}
 }
 
 // remediate closes an incident as remediated and records its resolution time.
-func (s *Subscriber) remediate(ctx context.Context, inc *models.Incident, summary string) {
+func (s *Subscriber) remediate(ctx context.Context, inc *models.Incident, summary string) error {
 	remediated, err := s.store.Remediate(ctx, inc.ID, summary)
 	if err != nil {
-		// A concurrent transition or an incident not in a remediable state is
-		// non-fatal — just skip it.
-		log.Debug("incident: could not remediate", "incident_id", inc.ID, "error", err)
-		return
+		return err
 	}
 	metrics.IncidentsTotal.WithLabelValues(remediated.Class, string(models.IncidentStatusRemediated)).Inc()
 	if !inc.OpenedAt.IsZero() {
 		metrics.IncidentResolutionSeconds.WithLabelValues(remediated.Class).Observe(time.Since(inc.OpenedAt).Seconds())
 	}
 	log.Info("incident remediated", "incident_id", inc.ID, "job_id", inc.JobID, "task", inc.TaskName)
+	return nil
 }
 
 // evidencePartitionListCap bounds the partition list embedded in an incident's
