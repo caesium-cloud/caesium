@@ -8,20 +8,19 @@ import (
 	"github.com/labstack/echo/v5"
 )
 
+// triggerGetService builds the service Get reads; handler tests swap it for
+// one over a test database.
+var triggerGetService = trigger.Service
+
 func Get(c *echo.Context) error {
 	id, err := uuid.Parse(c.Param("id"))
 	if err != nil {
 		return echo.NewHTTPError(http.StatusBadRequest, "bad request").Wrap(err)
 	}
 
-	t, err := trigger.Service(c.Request().Context()).Get(id)
-
-	switch {
-	case err != nil:
-		return echo.NewHTTPError(http.StatusInternalServerError, "internal server error").Wrap(err)
-	case t == nil:
-		return echo.ErrNotFound
-	default:
-		return c.JSON(http.StatusOK, t)
+	t, err := triggerGetService(c.Request().Context()).Get(id)
+	if err != nil {
+		return triggerServiceError(err)
 	}
+	return c.JSON(http.StatusOK, t)
 }

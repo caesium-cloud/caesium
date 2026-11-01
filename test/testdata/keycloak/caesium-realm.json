@@ -10,6 +10,8 @@
   "resetPasswordAllowed": false,
   "editUsernameAllowed": false,
   "bruteForceProtected": false,
+  "revokeRefreshToken": true,
+  "refreshTokenMaxReuse": 0,
   "defaultDefaultClientScopes": ["basic", "profile", "email"],
   "defaultOptionalClientScopes": ["groups"],
   "clientScopes": [
@@ -209,7 +211,23 @@
   "groups": [
     { "name": "caesium-admins" },
     { "name": "marketing-eng" },
-    { "name": "finance-eng" }
+    { "name": "finance-eng" },
+    { "name": "kc-matrix-viewer-default" },
+    { "name": "kc-matrix-viewer-marketing" },
+    { "name": "kc-matrix-viewer-finance" },
+    { "name": "kc-matrix-viewer-all" },
+    { "name": "kc-matrix-runner-default" },
+    { "name": "kc-matrix-runner-marketing" },
+    { "name": "kc-matrix-runner-finance" },
+    { "name": "kc-matrix-runner-all" },
+    { "name": "kc-matrix-operator-default" },
+    { "name": "kc-matrix-operator-marketing" },
+    { "name": "kc-matrix-operator-finance" },
+    { "name": "kc-matrix-operator-all" },
+    { "name": "kc-matrix-admin-default" },
+    { "name": "kc-matrix-admin-marketing" },
+    { "name": "kc-matrix-admin-finance" },
+    { "name": "kc-matrix-admin-all" }
   ],
   "users": [
     {

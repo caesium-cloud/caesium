@@ -880,7 +880,7 @@ translated into cluster-wide bindings and behaviour is unchanged.
       `api/rest/controller/event/ingest.go`, `internal/auth/audit.go`,
       `test/event_trigger_test.go`, `docs/identity-and-access.md`.
       Depends on: A3 + A5 + N-1.
-- [ ] A7. The namespace allow/deny matrix: `TestNamespaceAllowDenyMatrix` in `test/`
+- [x] A7. The namespace allow/deny matrix: `TestNamespaceAllowDenyMatrix` in `test/`
       (auth lane, `requireAuthLane`) drives one key per role × namespace (`default`,
       `marketing`, `finance`, `*`) from the H-1 policy fixture through every route
       class against the live api-key server — including a job moved between
@@ -893,6 +893,17 @@ translated into cluster-wide bindings and behaviour is unchanged.
       Files: new `test/auth_namespace_matrix_test.go`, `test/auth_scoped_test.go`
       (shared helpers).
       Depends on: A3 + A5 + B2 + B4 + B5 + B6 + D4 + H-1.
+      (W8-α: the scenario is `TestAuthNamespaceAllowDenyMatrix`, which is what this
+      item and Acceptance Criterion 1 mean by `TestNamespaceAllowDenyMatrix`: only a
+      `TestAuth…` name matches the auth lane's `-run`. The lane-agnostic harness,
+      `runNamespaceMatrix`, the row table and the fixture are
+      `test/auth_namespace_matrix_{harness,rows,fixture}_test.go`; a route with no row
+      fails it. Job-scoped keys and agent tokens stay refused on identity routes (design
+      §8.2 step 4, C1). The moved job's old-run replay proves admission by local mode's
+      409; `TestReplayIntoMovedNamespaceDropsOldFreshnessViews` covers the dispatched
+      path on the distributed lane. The matrix found that `GET /v1/atoms/:id` and
+      `GET /v1/triggers/:id` answered 500 for an unknown id: both now answer 404, and it
+      holds every route that takes an id to no 5xx on unknown ids.)
 - [x] A8. Confine agent-session allow-lists to the incident's namespace (W6-δ: also why baselines, a moved own job's DAG and remediation, executor refusals incl. git-synced patches, legacy-session content withheld from confined readers):
       `FreezeAllowlist` today walks the global lineage graph, so a frozen job list can
       name jobs in other namespaces. At freeze, keep only jobs in the incident's
@@ -1570,7 +1581,7 @@ group refresh, user disable, CLI login) is asserted here against a live Keycloak
       `ui/e2e/helpers/auth.ts`.
       Depends on: G1 + F2 + F3.
       (W8-δ: journeys in `ui/e2e/keycloak.spec.ts` and `keycloak-quota.spec.ts`; each identity signs in on its own browser context; jobs are seeded as the SSO admin over the cookie session + CSRF; `playwright.config.ts` needed no change.)
-- [ ] G3. Go scenarios on the lane (`CAESIUM_KEYCLOAK_LANE=true`): a cookie-jar client
+- [x] G3. Go scenarios on the lane (`CAESIUM_KEYCLOAK_LANE=true`): a cookie-jar client
       drives the OIDC code flow through Keycloak's HTML login form; the SSO
       allow/deny matrix; an SSO admin mints a namespaced key (A5's fix); group refresh
       (move bob via Keycloak's admin REST API, advance past the interval, grants change
@@ -1579,12 +1590,20 @@ group refresh, user disable, CLI login) is asserted here against a live Keycloak
       Files: new `test/keycloak_lane_test.go`, new `test/keycloak_helpers_test.go`,
       `test/auth_lane_test.go` (lane detection).
       Depends on: G1 + E2 + E3.
-- [ ] G4. CLI login on the lane: `caesium login --no-browser` prints the start URL, the
+      (W8-β: `TestKeycloakNamespaceAllowDenyMatrix` runs A7's harness for 17 SSO sessions
+      plus the key an SSO admin mints; group refresh, rotation, `stale_groups`, disable
+      and `invalid_grant` run on per-scenario realm users, so bob stays as G1 and G2
+      expect. The recipe requires a top-level PASS per scenario by name.)
+- [x] G4. CLI login on the lane: `caesium login --no-browser` prints the start URL, the
       test completes the SSO flow with the cookie-jar client, pastes the code with
       `caesium login --code`, `caesium whoami --json` shows bob's grants, disabling bob
       makes the next call 401, `caesium logout` cleans the credential file.
       Files: `test/keycloak_lane_test.go`.
       Depends on: G1 + E5.
+      (W8-β: `TestKeycloakCLILoginRoundTrip` follows the signed-out finish page's OIDC
+      link, confirms with the CSRF POST and logs out with the key revoked server side;
+      the disable-kills-the-key step runs on a per-scenario realm user in
+      `TestKeycloakUserDisableKillsCredentials`, so bob stays as G1 and G2 expect.)
 - [x] G5. (W5-γ: the guide's Keycloak section and docs/ci.md "Keycloak lane".)
       Keycloak operator guidance in the guide (client, mapper, scopes, refresh
       tokens, issuer URL discovery) and the lane in `docs/ci.md`.

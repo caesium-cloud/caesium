@@ -545,6 +545,8 @@ type auditRow struct {
 	Outcome   string          `json:"outcome"`
 	Namespace string          `json:"namespace"`
 	Metadata  json.RawMessage `json:"metadata"`
+	// ResourceID is the row's resource, when the action names one.
+	ResourceID string `json:"resource_id"`
 }
 
 // auditCLI runs `caesium auth audit` (it always prints JSON) with stdout
