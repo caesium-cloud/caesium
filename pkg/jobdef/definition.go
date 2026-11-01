@@ -649,6 +649,7 @@ const (
 	RemediationClassAuthFailure     = "auth_failure"
 	RemediationClassOOM             = "oom"
 	RemediationClassQuota           = "quota"
+	RemediationClassDataQualityHold = "data_quality_hold"
 	RemediationClassUnknown         = "unknown"
 )
 
@@ -661,6 +662,7 @@ var remediationClasses = map[string]struct{}{
 	RemediationClassAuthFailure:     {},
 	RemediationClassOOM:             {},
 	RemediationClassQuota:           {},
+	RemediationClassDataQualityHold: {},
 	RemediationClassUnknown:         {},
 }
 

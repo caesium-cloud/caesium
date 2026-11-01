@@ -1389,7 +1389,7 @@ precedent for it is warn-mode schema validation, which publishes
 `schema_violation_recorded` from `internal/run/schema_validation.go`
 (`publishSchemaViolationEvent`) precisely because the task did not fail.
 
-- [ ] F1. Open a `data_quality_hold` incident when a hold opens. (a) Add
+- [x] F1. Open a `data_quality_hold` incident when a hold opens. (a) Add
       `ClassDataQualityHold FailureClass = "data_quality_hold"` to
       `internal/incident/classifier.go` (the const block beside `ClassOOM` /
       `ClassSchemaViolation`) and a `Classify` branch: the `dataset_held` bus event
@@ -1419,6 +1419,22 @@ precedent for it is warn-mode schema validation, which publishes
       not runnable until [`trust-the-substrate.md`](../completed/trust-the-substrate.md) **H-1**
       makes that lane real — see `## Sequencing & Dependencies` § Cross-PLAN order.
       Depends on: C1 + C4.
+      *Note (W5-α, 2026-11-01):* shipped in `internal/incident/hold.go`, with these
+      deviations from the text above. A hold's incident dedupes on the hold id, not
+      on (job, task, class), so cooldown never applies: two datasets held by one
+      step stay two incidents, and a new hold after a release is a new incident.
+      `dataset_held` fires once per hold, so no occurrence is ever appended; the
+      occurrence count lives on the hold. `dataset_released` closes the incident,
+      and `Store.OpenForJobTask` skips the class so a green run cannot. The event
+      gained `task_id` and `task_run_id` but not the cone, because the payload
+      reaches `/v1/events` and notification channels: the subscriber reads the
+      frozen `Impact` column. `ImpactNode` drops its owners when marshalled, and a
+      blank owner reads as `default`, so `DatasetHold.Impact` now persists them
+      (`lineage.EncodeStoredImpact`). `redactImpactNodes` moved to
+      `internal/lineage` so REST and the incident share it; evidence is redacted
+      for the incident's own namespace and capped at 100 nodes.
+      `pkg/jobdef` accepts the new class. `BuildBundle` skips failure attribution
+      for the class, a guard ahead of F2's `DataQuality` section.
 - [ ] F2. Add `release_hold` to the action catalog and make it executable through
       the approval pipeline. (a) **Catalog:** `ActionTypeReleaseHold =
       "release_hold"` in `internal/incident/actions.go`, registered in

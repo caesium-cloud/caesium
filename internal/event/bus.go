@@ -79,8 +79,9 @@ const (
 	// notification layer has to de-duplicate.
 	//
 	// The payload carries the dataset (namespace, name), the hold id, the
-	// violated assertion and the observed/bound/baseline triple, so Stream F's
-	// incident entry point needs no second read.
+	// violated assertion and the observed/bound/baseline triple, so the
+	// incident subscriber reads the verdict from here rather than from a hold
+	// that may have moved on.
 	TypeDatasetHeld Type = "dataset_held"
 	// TypeDatasetReleased is emitted when an active hold is closed — either by
 	// the holder's next clean producer run (release_reason: clean_run, only for

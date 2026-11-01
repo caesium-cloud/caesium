@@ -34,12 +34,16 @@ func (s *Store) DB() *gorm.DB { return s.db }
 
 // OpenParams describes a failure the subscriber wants to record as an incident.
 type OpenParams struct {
-	Namespace  string
-	JobID      uuid.UUID
-	RunID      *uuid.UUID
-	TaskID     *uuid.UUID
-	TaskName   string
-	Class      FailureClass
+	Namespace string
+	JobID     uuid.UUID
+	RunID     *uuid.UUID
+	TaskID    *uuid.UUID
+	TaskName  string
+	Class     FailureClass
+	// Subject narrows the dedupe key to one object when (job, task, class) does
+	// not identify the incident: a step that produces two datasets can hold both,
+	// and each hold is its own incident. Empty for a failure.
+	Subject    string
 	LastError  string
 	Evidence   datatypes.JSON
 	BackfillID *uuid.UUID
@@ -102,6 +106,9 @@ func (s *Store) OpenOrAppend(ctx context.Context, p OpenParams) (*models.Inciden
 	}
 	p.Namespace = models.NamespaceOrDefault(p.Namespace)
 	key := DedupeKey(p.Namespace, p.JobID, p.TaskName, p.Class)
+	if p.Subject != "" {
+		key += "|" + p.Subject
+	}
 	now := time.Now().UTC()
 
 	// Cooldown: skip if a same-key incident closed within the window.
@@ -309,7 +316,9 @@ func (s *Store) Remediate(ctx context.Context, id uuid.UUID, summary string) (*m
 }
 
 // OpenForJobTask returns the open (non-terminal) incidents for a job whose task
-// name matches. Used by the terminal-verification success path.
+// name matches. Used by the terminal-verification success path, so a
+// data_quality_hold incident is left out: the task it names succeeded when the
+// hold opened, and a green run says nothing about a hold that is still active.
 func (s *Store) OpenForJobTask(ctx context.Context, jobID uuid.UUID, taskName, namespace string) ([]models.Incident, error) {
 	var incidents []models.Incident
 	// Match task_name EXACTLY, including the empty string: a run-level success
@@ -319,11 +328,31 @@ func (s *Store) OpenForJobTask(ctx context.Context, jobID uuid.UUID, taskName, n
 	// name and remediates that task's incidents. This mirrors the (job, task,
 	// class) dedupe correlation key.
 	q := s.db.WithContext(ctx).
-		Where("job_id = ? AND task_name = ? AND namespace = ? AND active_dedupe_key IS NOT NULL", jobID, taskName, models.NamespaceOrDefault(namespace))
+		Where("job_id = ? AND task_name = ? AND namespace = ? AND class <> ? AND active_dedupe_key IS NOT NULL",
+			jobID, taskName, models.NamespaceOrDefault(namespace), string(ClassDataQualityHold))
 	if err := q.Find(&incidents).Error; err != nil {
 		return nil, err
 	}
 	return incidents, nil
+}
+
+// incidentForHold returns the incident opened for a dataset hold, in any status,
+// or nil when there is none. The hold id is the last segment of the dedupe key
+// (holdSubject); matching it directly keeps the lookup independent of the
+// namespace and task name the key was built from, which a dataset_released
+// event does not carry.
+func (s *Store) incidentForHold(ctx context.Context, jobID, holdID uuid.UUID) (*models.Incident, error) {
+	var inc models.Incident
+	err := s.db.WithContext(ctx).
+		Where("job_id = ? AND class = ? AND dedupe_key LIKE ?", jobID, string(ClassDataQualityHold), "%|"+holdSubject(holdID)).
+		First(&inc).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &inc, nil
 }
 
 // Get returns a single incident by id.
