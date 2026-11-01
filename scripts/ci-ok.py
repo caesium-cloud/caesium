@@ -76,6 +76,9 @@ SELECTORS = {
     "builder": ("images",),
     "builder-arm64": ("images",),
     "images": ("images",),
+    # early-evidence's runner image. Same selector as `images`, so a bake
+    # failure reports as this job rather than as a skipped consumer.
+    "robustness-image": ("images",),
     "images-arm64": ("images",),
     "reagents": ("go", "reagents", "ci"),
     "reagents-arm64": ("go", "reagents", "ci"),
