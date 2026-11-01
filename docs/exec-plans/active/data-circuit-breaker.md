@@ -1573,9 +1573,12 @@ precedent for it is warn-mode schema validation, which publishes
       dataset with an active hold, and `?status=` filters against that effective
       status, so datasets with no freshness SLO (never evaluated) are honest too.
       With `CAESIUM_DATA_ASSERTIONS_ENABLED` off nothing reads holds. A manual
-      advance never touches status, so it cannot lift a hold. Not covered: a hold
-      on a dataset with no state row yet is absent from `?status=held` until its
-      watermark is captured (it still reports held in the unfiltered list).
+      advance never touches status, so it cannot lift a hold. A job with
+      `metadata.onUpstreamHold: run` is exempt from the held-input readiness
+      block (the evaluator reads the same persisted column the admission gate
+      does), and `?status=held` merges declaration-only datasets that an active
+      hold is on (no state row) before counting and paging. A persisted `held`
+      returns to `unknown` (reason cleared) when released before any observation.
 - [ ] F5. **Why-provenance** (arc convention 3 — this plan's single explainability
       item). Make the hold decisions answerable by the shipped **task-scoped**
       explainer: `caesium why <run-id> --task <task> --job-id <job-id>` and
