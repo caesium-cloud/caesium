@@ -540,86 +540,24 @@ class RemediationWorkflowTests(unittest.TestCase):
         self.assertIn("bash build/stress/smoke.sh docker", inner[smoke]["run"])
         self.assertNotIn("continue-on-error", inner[smoke])
 
-    def test_coverage_pins_runtime_before_preserving_store_configuration_and_loading_images(self):
+    def test_coverage_pins_runtime_before_loading_images_without_reconfiguring_daemon(self):
         steps = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text())["jobs"]["coverage-ratchets"]["steps"]
         setups = [i for i, step in enumerate(steps) if step.get("run") == "python3 scripts/setup-ci-docker.py"]
         self.assertEqual(len(setups), 1)
         setup = setups[0]
-        configure = next(i for i, step in enumerate(steps) if 'jq \'.features["containerd-snapshotter"] = true\'' in step.get("run", ""))
         load = next(i for i, step in enumerate(steps) if step.get("uses") == "./.github/actions/load-docker-images")
-        self.assertLess(setup, configure)
-        self.assertLess(configure, load)
+        self.assertLess(setup, load)
         self.assertNotIn("if", steps[setup])
         self.assertFalse(steps[setup].get("continue-on-error", False))
-        command = steps[configure]["run"]
-        self.assertIn('if [ -s "$conf" ]; then current="$(sudo cat "$conf")"', command)
-        self.assertIn('printf \'%s\' "$current" | jq', command)
-        self.assertIn("sudo systemctl restart docker", command)
-        self.assertNotIn("need=29.0", command)
-        self.assertNotIn("apt-get", command)
-        # Execute the workflow's real JSON transform. A replacement object here
-        # would silently discard the cgroup driver before the coverage restart.
-        expressions = re.findall(r"\bjq '([^']+)'", command)
-        self.assertEqual(len(expressions), 1)
-        config = RUNTIME.merged_docker_config(json.dumps({
-            "features": {"unrelated": False}, "log-driver": "local",
-            "exec-opts": ["native.cgroupdriver=systemd", "native.other=preserved"],
-        }))
-        transformed = subprocess.run(["jq", expressions[0]], input=json.dumps(config),
-                                     capture_output=True, text=True, check=True, timeout=5)
-        observed = json.loads(transformed.stdout)
-        self.assertEqual(observed, {**config, "features": {"unrelated": False, "containerd-snapshotter": True}})
-        self.assertIn("native.cgroupdriver=cgroupfs", observed["exec-opts"])
-
-    def test_coverage_store_restart_clears_start_limit_and_preserves_failures(self):
-        steps = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text())["jobs"]["coverage-ratchets"]["steps"]
-        command = next(step["run"] for step in steps if step.get("name") == "Docker containerd image store")
-        for failure in ("", "reset", "restart", "version"):
-            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as temporary:
-                root = Path(temporary); binary = root / "bin"; binary.mkdir()
-                conf, calls, state = root / "daemon.json", root / "calls", root / "state"
-                config = {"features": {"unrelated": False}, "exec-opts": ["native.cgroupdriver=cgroupfs"]}
-                conf.write_text(json.dumps(config))
-                programs = {
-                    "sudo": '#!/bin/sh\nexec "$@"\n',
-                    "systemctl": '''#!/bin/sh
-printf 'systemctl %s %s\\n' "$1" "$2" >> "$COVERAGE_PROBE_CALLS"
-case "$1 $2" in
-  'reset-failed docker.service')
-    [ "$COVERAGE_PROBE_FAILURE" != reset ] || exit 31
-    printf reset > "$COVERAGE_PROBE_STATE" ;;
-  'restart docker')
-    [ "$COVERAGE_PROBE_FAILURE" != restart ] || exit 32
-    [ -f "$COVERAGE_PROBE_STATE" ] || exit 33 ;;
-  *) exit 34 ;;
-esac
-''',
-                    "docker": '''#!/bin/sh
-printf 'docker %s\\n' "$1" >> "$COVERAGE_PROBE_CALLS"
-case "$1" in
-  version) [ "$COVERAGE_PROBE_FAILURE" != version ] || exit 35 ;;
-  info) ;;
-  *) exit 36 ;;
-esac
-''',
-                }
-                for name, body in programs.items():
-                    path = binary / name; path.write_text(body); path.chmod(0o755)
-                self.assertEqual(command.count("conf=/etc/docker/daemon.json"), 1)
-                candidate = command.replace("conf=/etc/docker/daemon.json", "conf=" + shlex.quote(str(conf)))
-                env = {**os.environ, "PATH": str(binary) + os.pathsep + os.environ["PATH"],
-                       "COVERAGE_PROBE_CALLS": str(calls), "COVERAGE_PROBE_STATE": str(state),
-                       "COVERAGE_PROBE_FAILURE": failure}
-                result = subprocess.run(["bash", "-c", candidate], env=env, text=True,
-                                        capture_output=True, timeout=10)
-                expected = ["systemctl reset-failed docker.service"]
-                if failure != "reset": expected.append("systemctl restart docker")
-                if failure not in ("reset", "restart"): expected.append("docker version")
-                if not failure: expected.append("docker info")
-                self.assertEqual(calls.read_text().splitlines() if calls.exists() else [], expected)
-                self.assertEqual(result.returncode, {"": 0, "reset": 31, "restart": 32, "version": 35}[failure], result.stderr)
-                self.assertEqual(json.loads(conf.read_text()),
-                                 {**config, "features": {"unrelated": False, "containerd-snapshotter": True}})
+        # Coverage now uses a verified local builder tag for FROM. No second
+        # daemon configuration/restart should override the qualified installer's
+        # cgroup driver or require a particular image store (#606).
+        for step in steps:
+            command = step.get("run", "")
+            self.assertNotIn("/etc/docker/daemon.json", command)
+            self.assertNotIn("systemctl restart docker", command)
+            self.assertNotIn("containerd-snapshotter", command)
+            self.assertNotIn("apt-get", command)
 
     def test_same_attempt_diagnostics_are_uploaded_before_cleanup_even_on_failure(self):
         steps = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text())["jobs"]["helm-integration-test"]["steps"]
