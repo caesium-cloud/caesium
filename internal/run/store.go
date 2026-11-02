@@ -2044,9 +2044,6 @@ func (s *Store) mutateTaskExecutionDescriptor(runID, taskRef uuid.UUID, mutate f
 }
 
 func mergeDescriptorSecretRefs(existing, updates []models.TaskExecutionSecretRef) []models.TaskExecutionSecretRef {
-	if len(existing) == 0 {
-		return append([]models.TaskExecutionSecretRef(nil), updates...)
-	}
 	merged := append([]models.TaskExecutionSecretRef(nil), existing...)
 	index := make(map[string]int, len(merged))
 	for i, ref := range merged {

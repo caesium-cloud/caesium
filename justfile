@@ -1896,8 +1896,7 @@ lifecycle-standalone: lane-candidate-check
 
 # C2 native fuzz targets in short mode (CAESIUM_FUZZ_SECONDS per target,
 # default 10s) plus the -race renewal repeat matrix, inside builder-full.
-# scripts/fuzz-tests.sh runs `caesium-builder:latest-full`; a CI tag is
-# retagged to that name first so the script uses the loaded image.
+# Pass the loaded builder explicitly; never retag a shared latest-full image.
 generated-fuzz: lane-candidate-check builder-full
     #!/usr/bin/env bash
     set -euo pipefail
@@ -1906,9 +1905,6 @@ generated-fuzz: lane-candidate-check builder-full
     rm -rf "$lane"
     mkdir -p "$lane/fuzz"
     builder="{{ local_builder_ref }}:{{ tag }}-full"
-    if [ "{{ tag }}" != "latest" ]; then
-        {{ container_cli }} tag "$builder" "{{ local_builder_ref }}:latest-full"
-    fi
     builder_id="$({{ container_cli }} image inspect --format '{{ "{{.Id}}" }}' "$builder")"
     echo "{{ candidate_sha }}" >"$lane/fuzz/candidate-sha.txt"
     # CAESIUM_FUZZ_GOCACHE names a Go build/fuzz cache kept between runs (CI
@@ -1920,6 +1916,7 @@ generated-fuzz: lane-candidate-check builder-full
         mv "$seed" "$lane/fuzz/gocache"
     fi
     status=0
+    CAESIUM_BUILDER_IMAGE="$builder_id" \
     CAESIUM_FUZZ_SECONDS="{{ fuzz_seconds }}" \
     CAESIUM_FUZZ_ARTIFACT_DIR="$lane/fuzz" \
         sh scripts/fuzz-tests.sh || status=$?

@@ -351,7 +351,10 @@ resolve_builder_image() {
     && ! "$builder_name" =~ ^sha256:[0-9a-f]{64}$ \
     && ! "$builder_name" =~ ^[0-9a-f]{64}$ ]] \
     || die "builder image must have a valid named reference"
-  BUILDER_BUILD_IMAGE="$builder_name@$BUILDER_RUN_IMAGE"
+  # A config ID after @ is not a registry manifest digest on classic Docker.
+  # Give the inspected image a content-addressed local tag for Dockerfile FROM.
+  BUILDER_BUILD_IMAGE="caesium-coverage-builder:sha256-${BUILDER_RUN_IMAGE#sha256:}"
+  "$CONTAINER_CLI" tag "$BUILDER_RUN_IMAGE" "$BUILDER_BUILD_IMAGE"
   canonical_id="$("$CONTAINER_CLI" image inspect --format '{{.Id}}' "$BUILDER_BUILD_IMAGE")" \
     || die "pinned canonical builder reference is unavailable: $BUILDER_BUILD_IMAGE"
   [[ "$canonical_id" == "$BUILDER_RUN_IMAGE" ]] \

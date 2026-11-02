@@ -453,7 +453,10 @@ which can remove the cgroup before containerd reads its OOM status. The runtime
 configuration remains a compatibility candidate until the unchanged native
 stress smoke qualifies it. Each selected integration consumer also smokes its
 loaded candidate image. Exit 137 still requires positive native OOM metadata.
-The coverage collector retains its containerd image store setting.
+The coverage collector and its prepared Temporal fixture give the configured
+builder image ID a verified local tag for Dockerfile `FROM`. The collector
+resolves its builder through `CAESIUM_BUILDER_IMAGE`. It does not
+require the containerd image store to resolve a config ID as a digest.
 
 Native smoke steps also log bounded host observations from
 `scripts/collect-stress-host-diagnostics.py`. The root-owned observer retains
@@ -1592,9 +1595,11 @@ container's stats from outside via the runtime API.
 Eight fuzz targets across four packages, each asserting a property beyond
 "didn't panic" (schema-compat reflexivity, differential agreement between
 independent decode paths, descriptor round-trip, secret-ref merge
-idempotence, checkpoint/recovery agreement). There is no justfile recipe
-(G6 owns later lane recipes). The script re-execs itself inside the same
-`caesium-builder:latest-full` image `just unit-test` uses:
+idempotence, checkpoint/recovery agreement). `just generated-fuzz` passes its
+loaded builder image to the script through `CAESIUM_BUILDER_IMAGE`, without
+retagging `latest-full`. Standalone usage defaults to building and using the
+same `caesium-builder:latest-full` image as `just unit-test`; setting
+`CAESIUM_BUILDER_IMAGE` uses that existing local image and skips the build:
 
 ```sh
 scripts/fuzz-tests.sh
