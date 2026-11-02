@@ -343,13 +343,17 @@ func readSnapshot(ctx context.Context, conn *gorm.DB, fn func(tx *gorm.DB) error
 
 // loadJobTopology reads the job row Unscoped: an incident outlives its job, and
 // a soft-deleted job still names the namespace the bundle is gated on and its
-// alias. Deleting a job soft-deletes its tasks and removes its edges, so the
-// task and edge reads below come back empty and the bundle shows no DAG. A job
-// with no row at all is still not found.
+// alias. Such a job shows no DAG, whatever rows are left: deleting a job over
+// REST leaves its tasks and edges in place, while the importer's prune removes
+// them, and a deleted job has no DAG to act on either way. A job with no row at
+// all is still not found.
 func loadJobTopology(ctx context.Context, db *gorm.DB, jobID uuid.UUID) (models.Job, []BundleTask, []BundleDAGEdge, error) {
 	var job models.Job
 	if err := db.WithContext(ctx).Unscoped().First(&job, "id = ?", jobID).Error; err != nil {
 		return job, nil, nil, err
+	}
+	if job.DeletedAt.Valid {
+		return job, []BundleTask{}, []BundleDAGEdge{}, nil
 	}
 
 	var taskRows []models.Task

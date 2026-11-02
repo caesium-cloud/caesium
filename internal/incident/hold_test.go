@@ -546,7 +546,6 @@ func TestHoldWhoseRunIsGoneAndJobSoftDeletedOpensUnderTheJobsNamespace(t *testin
 	ctx := t.Context()
 	w.heldRow("orders", time.Now().UTC().Add(-time.Hour))
 	require.NoError(t, w.db.Delete(&models.JobRun{}, "id = ?", w.runID).Error)
-	require.NoError(t, w.db.Delete(&models.Task{}, "job_id = ?", w.jobID).Error)
 	require.NoError(t, w.db.Delete(&models.Job{}, "id = ?", w.jobID).Error)
 
 	require.NoError(t, w.sub.ReconcileHolds(ctx, 0))

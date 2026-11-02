@@ -158,9 +158,10 @@ func TestBundleForConfinedReaderWithholdsLegacyNotes(t *testing.T) {
 	require.Empty(t, b.Notes)
 }
 
-// An incident outlives its job. Deleting a job soft-deletes the job and its
-// tasks, and the bundle read must still serve the incident the incident reads
-// show, not a not-found, with no DAG and its namespace gating intact.
+// An incident outlives its job. The job is soft-deleted and its tasks stay, as
+// they do after DELETE /v1/jobs/:id, and the bundle read must still serve the
+// incident the incident reads show, not a not-found, with no DAG and its
+// namespace gating intact.
 func TestBundleOfAnIncidentWhoseJobWasSoftDeleted(t *testing.T) {
 	db := testutil.OpenTestDB(t)
 	t.Cleanup(func() { testutil.CloseDB(db) })
@@ -176,8 +177,11 @@ func TestBundleOfAnIncidentWhoseJobWasSoftDeleted(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, live.Job.Tasks, 1)
 
-	require.NoError(t, db.Delete(&models.Task{}, "id = ?", taskID).Error)
+	// As DELETE /v1/jobs/:id does: the job goes, its tasks and edges stay.
 	require.NoError(t, db.Delete(&models.Job{}, "id = ?", jobID).Error)
+	var surviving int64
+	require.NoError(t, db.Model(&models.Task{}).Where("job_id = ?", jobID).Count(&surviving).Error)
+	require.EqualValues(t, 1, surviving)
 
 	for _, reader := range []iincident.ReaderConfinement{iincident.ReaderUnrestricted, iincident.ReaderConfined} {
 		b, err := svc.ForReader(reader).Bundle(inc.ID)
