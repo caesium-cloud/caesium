@@ -501,7 +501,7 @@ func (e *Executor) dispatchGitSyncedPatch(ctx context.Context, inc *models.Incid
 	if err != nil {
 		return nil, err
 	}
-	diff := patchDiffText(rendered, params.Definition)
+	diff := newPatchDiff(job.Alias, rendered, params.Definition)
 	manifest, renderErr := renderManifest(params.Definition)
 	plan, degrade := e.provenance.plan(job, namespace, action.ID)
 	if degrade == nil && renderErr != nil {
@@ -522,7 +522,7 @@ func (e *Executor) dispatchGitSyncedPatch(ctx context.Context, inc *models.Incid
 		})
 		if err == nil {
 			if pr.Diff != "" {
-				diff = pr.Diff
+				diff.Empty, diff.Diff = false, boundText(pr.Diff, maxDiffBytes)
 			}
 			return patchPullRequestResult(job, plan, pr, diff), nil
 		}
@@ -535,7 +535,7 @@ func (e *Executor) dispatchGitSyncedPatch(ctx context.Context, inc *models.Incid
 	return e.escalatePatch(ctx, inc, job, action, params, diff, degrade)
 }
 
-func patchPullRequestResult(job *models.Job, plan *patchPlan, pr *patchPullRequest, diff string) map[string]any {
+func patchPullRequestResult(job *models.Job, plan *patchPlan, pr *patchPullRequest, diff patchDiff) map[string]any {
 	out := map[string]any{
 		"job_id":    job.ID.String(),
 		"job_alias": job.Alias,
@@ -549,7 +549,7 @@ func patchPullRequestResult(job *models.Job, plan *patchPlan, pr *patchPullReque
 		"base":      plan.base,
 		"path":      plan.path,
 		"baseline":  plan.baseline,
-		"diff":      boundText(diff, maxDiffBytes),
+		"diff":      diff,
 	}
 	if pr.Existing {
 		out["pr_existing"] = true
@@ -564,7 +564,7 @@ func patchPullRequestResult(job *models.Job, plan *patchPlan, pr *patchPullReque
 // The action row keeps the diff as the incident's readers may read it. The
 // escalation goes further, to the event stream, the server log and whatever
 // channels a policy names, so its copy is the outbound one.
-func (e *Executor) escalatePatch(ctx context.Context, inc *models.Incident, job *models.Job, action *models.AgentAction, params ActionParams, diff string, degrade *patchDegrade) (map[string]any, error) {
+func (e *Executor) escalatePatch(ctx context.Context, inc *models.Incident, job *models.Job, action *models.AgentAction, params ActionParams, diff patchDiff, degrade *patchDegrade) (map[string]any, error) {
 	log.Warn("incident: jobdef patch degraded to escalate",
 		"incident_id", inc.ID, "job_alias", job.Alias, "degrade", degrade.Code)
 	summary := params.Summary
@@ -573,7 +573,7 @@ func (e *Executor) escalatePatch(ctx context.Context, inc *models.Incident, job 
 	}
 	escalateCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), escalateTimeout)
 	defer cancel()
-	routed, err := e.ops.Escalate(escalateCtx, inc.ID, params.Channel, summary+"\n"+degrade.Reason+"\n"+outboundDiff(diff))
+	routed, err := e.ops.Escalate(escalateCtx, inc.ID, params.Channel, summary+"\n"+degrade.Reason+"\n"+outboundDiff(diff.Diff))
 	if err != nil {
 		return nil, err
 	}
@@ -585,7 +585,7 @@ func (e *Executor) escalatePatch(ctx context.Context, inc *models.Incident, job 
 		"routed":    routed,
 		"degrade":   degrade.Code,
 		"reason":    degrade.Reason,
-		"diff":      boundText(diff, maxDiffBytes),
+		"diff":      diff,
 	}
 	if degrade.Branch != "" {
 		out["pr_branch"] = degrade.Branch
@@ -690,6 +690,19 @@ func (e *Executor) loadPatchJob(ctx context.Context, inc *models.Incident, param
 }
 
 const noPatchChanges = "no changes: the proposed definition is identical to the current one"
+
+// patchDiff is the `diff` of an executed patch's result. Its text is bounded.
+type patchDiff struct {
+	Alias string `json:"alias"`
+	// Empty says the proposed definition is identical to the current one.
+	Empty bool   `json:"empty"`
+	Diff  string `json:"diff"`
+}
+
+func newPatchDiff(alias string, rendered, definition json.RawMessage) patchDiff {
+	text := patchDiffText(rendered, definition)
+	return patchDiff{Alias: alias, Empty: text == noPatchChanges, Diff: boundText(text, maxDiffBytes)}
+}
 
 // patchDiffText is the readable form of ActionOps.ApplyJobdefPatch's result. It
 // says "no changes" only on the render's own word that the definitions are

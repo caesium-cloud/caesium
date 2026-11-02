@@ -638,7 +638,7 @@ func (e *Executor) dispatchApplyJobdefPatch(ctx context.Context, inc *models.Inc
 		"route":     routeDirect,
 		"applied":   true,
 	}
-	out["diff"] = boundText(patchDiffText(diff, params.Definition), maxDiffBytes)
+	out["diff"] = newPatchDiff(job.Alias, diff, params.Definition)
 	return out, nil
 }
 

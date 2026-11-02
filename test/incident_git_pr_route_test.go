@@ -119,8 +119,11 @@ func (s *IntegrationTestSuite) TestIncidentGitProvenancePatchDegradesToEscalate(
 		Applied bool   `json:"applied"`
 		Degrade string `json:"degrade"`
 		Reason  string `json:"reason"`
-		Diff    string `json:"diff"`
-		PRURL   string `json:"pr_url"`
+		Diff    struct {
+			Empty bool   `json:"empty"`
+			Text  string `json:"diff"`
+		} `json:"diff"`
+		PRURL string `json:"pr_url"`
 	}
 	s.Require().NoError(json.Unmarshal(executed.Result, &result))
 	s.False(result.Preview, "the executed result replaces the preview")
@@ -128,8 +131,9 @@ func (s *IntegrationTestSuite) TestIncidentGitProvenancePatchDegradesToEscalate(
 	s.False(result.Applied)
 	s.Equal("no_write_credential", result.Degrade)
 	s.Contains(result.Reason, "CAESIUM_GIT_WRITE_CREDENTIALS")
-	s.Contains(result.Diff, "git-pr-degrade-patched", "the degrade carries the rendered diff")
-	s.Contains(result.Diff, "PATCH_REGION: git-pr-env-proposed", "the degrade's diff is the whole change")
+	s.False(result.Diff.Empty)
+	s.Contains(result.Diff.Text, "git-pr-degrade-patched", "the degrade carries the rendered diff")
+	s.Contains(result.Diff.Text, "PATCH_REGION: git-pr-env-proposed", "the degrade's diff is the whole change")
 	s.Empty(result.PRURL)
 
 	// The escalation a human receives names why and carries the same diff.

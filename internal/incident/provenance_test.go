@@ -628,10 +628,25 @@ func TestDirectRouteIsUnchangedForAJobWithNoProvenance(t *testing.T) {
 	_, result := f.approveAndExecute(t, patchJSON(t, patchedDefinition))
 	require.Equal(t, routeDirect, result["route"])
 	require.Equal(t, true, result["applied"])
-	require.Equal(t, "the rendered diff", result["diff"], "every route records the diff as text")
+	require.Equal(t, map[string]any{"alias": testAlias, "empty": false, "diff": "the rendered diff"}, result["diff"],
+		"the result's `diff` stays an object whose `empty` a reader can test")
 	require.Zero(t, f.forge.hits())
 	require.Empty(t, f.ops.escalate)
 	require.False(t, f.ops.applyPatch[len(f.ops.applyPatch)-1].dryRun)
+}
+
+// The direct route's result follows the same rule as the preview: with no diff to
+// record, it records the whole proposal.
+func TestDirectRouteRecordsTheProposalWhenNoDiffExists(t *testing.T) {
+	f := newRouteFixture(t, manifestFile)
+	for _, column := range []string{"provenance_repo", "provenance_ref", "provenance_commit", "provenance_path", "provenance_source_id"} {
+		f.updateJob(t, column, "")
+	}
+	_, result := f.approveAndExecute(t, patchJSON(t, patchedDefinition))
+	require.Equal(t, routeDirect, result["route"])
+	text := resultDiff(t, result)
+	require.Contains(t, text, "no diff could be produced")
+	require.Contains(t, text, "exit 0")
 }
 
 // A forge outage must not become a direct server-side edit: git sync would
@@ -1239,6 +1254,14 @@ var richEdits = []struct {
 	},
 }
 
+// resultDiff is the text of an executed result's `diff`.
+func resultDiff(t *testing.T, result map[string]any) string {
+	t.Helper()
+	diff, ok := result["diff"].(map[string]any)
+	require.True(t, ok, "result: %v", result)
+	return diff["diff"].(string)
+}
+
 // diffSection cuts the description's rendered diff out of the rest of the body.
 func diffSection(t *testing.T, body string) string {
 	t.Helper()
@@ -1265,7 +1288,7 @@ func TestPullRequestBodyShowsEveryEdit(t *testing.T) {
 			require.Contains(t, body, "--- current\n+++ proposed\n@@ ")
 			for _, expected := range tc.expected {
 				require.Contains(t, body, expected)
-				require.Contains(t, result["diff"], expected)
+				require.Contains(t, resultDiff(t, result), expected)
 			}
 		})
 	}
@@ -1282,7 +1305,7 @@ func TestPullRequestBodyComparesTheFileNotTheServersCopy(t *testing.T) {
 	body := openPull(t, f.forge)["body"].(string)
 	require.Contains(t, body, "-        REGION: only-in-the-file")
 	require.NotContains(t, body, "from the server's copy")
-	require.Contains(t, result["diff"], "only-in-the-file")
+	require.Contains(t, resultDiff(t, result), "only-in-the-file")
 }
 
 // The description carries a value a credential-named key holds only as a mask,
@@ -1296,7 +1319,7 @@ func TestPullRequestBodyMasksCredentialValues(t *testing.T) {
 	body := openPull(t, f.forge)["body"].(string)
 	require.Contains(t, body, "+        DB_PASSWORD: "+Redacted)
 	require.NotContains(t, body, "hunter2hunter2")
-	require.Contains(t, result["diff"], "hunter2hunter2", "the action row keeps what the incident's readers may read")
+	require.Contains(t, resultDiff(t, result), "hunter2hunter2", "the action row keeps what the incident's readers may read")
 }
 
 func TestPatchDiffTextOnlySaysNoChangesWhenTheRenderDoes(t *testing.T) {
@@ -1318,6 +1341,10 @@ func TestPatchDiffTextOnlySaysNoChangesWhenTheRenderDoes(t *testing.T) {
 	require.Equal(t, noPatchChanges, patchDiffText(json.RawMessage(`{"empty":true}`), definition))
 	require.Equal(t, "the diff", patchDiffText(json.RawMessage(`{"empty":false,"diff":"the diff"}`), definition))
 	require.Equal(t, "the diff", patchDiffText(json.RawMessage(`{"empty":true,"diff":"the diff"}`), definition), "text beats the flag")
+
+	require.True(t, newPatchDiff("x", json.RawMessage(`{"empty":true}`), definition).Empty)
+	require.False(t, newPatchDiff("x", json.RawMessage(`{"empty":false,"diff":"d"}`), definition).Empty)
+	require.False(t, newPatchDiff("x", json.RawMessage(`{"empty":false}`), definition).Empty, "no diff is not no change")
 }
 
 func TestDocumentDiffTextFallsBackToTheProposal(t *testing.T) {
@@ -1355,7 +1382,7 @@ func TestDiffIsBoundedOnEverySurface(t *testing.T) {
 	approveAction(t, f.db, action.ID, "operator@example.com", "")
 	executed, err := f.exec.ExecuteApproved(context.Background(), action.ID)
 	require.NoError(t, err)
-	result := patchResult(t, executed)["diff"].(string)
+	result := resultDiff(t, patchResult(t, executed))
 	require.Less(t, len(result), maxDiffBytes+len(trailer)+8)
 	require.True(t, strings.HasSuffix(result, trailer))
 	require.Len(t, f.ops.escalate, 1)
@@ -1382,7 +1409,7 @@ func TestEscalationMasksCredentialValues(t *testing.T) {
 	require.NotContains(t, summary, "newvalue")
 	require.NotContains(t, summary, forgeTestToken)
 	require.Contains(t, summary, "STORE: secret://env/STORE_URL", "a reference names a secret without holding it")
-	require.Contains(t, result["diff"], "newvalue", "the action row keeps what the incident's readers may read")
+	require.Contains(t, resultDiff(t, result), "newvalue", "the action row keeps what the incident's readers may read")
 }
 
 func TestOutboundDiffMasksByKey(t *testing.T) {

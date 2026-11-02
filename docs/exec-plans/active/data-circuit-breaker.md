@@ -1639,7 +1639,8 @@ precedent for it is warn-mode schema validation, which publishes
       names it in `pr_branch`; the branch is `caesium/patch-<action id>`, so a repeat
       converges. Review round 1 changed two things. Every surface now renders one
       diff of the whole documents (`internal/jobdef/docdiff`), not the
-      reduced `JobSpec` comparison, so the action result's `diff` is text. The
+      reduced `JobSpec` comparison; the action result's `diff` keeps `alias` and
+      `empty`, and its `updates` become the `diff` text. The
       proposal records its provenance as a baseline on the action, and the manifest
       is held to the proposal's commit, not the one the job carries at execution.
       The direct route has the same gap and still applies a stale proposal.
