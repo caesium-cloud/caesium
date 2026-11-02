@@ -63,6 +63,11 @@ type holdEvent struct {
 
 const holdSubjectPrefix = "hold:"
 
+// errHoldOwnerUnknown is holdScope's answer when neither the opening run nor the
+// job still has a row. Nothing says which tenant owns the hold, and "default" is
+// a tenant like any other, so no incident opens.
+var errHoldOwnerUnknown = errors.New("incident: neither the dataset hold's run nor its job exists, so no tenant owns it")
+
 // holdSubject is the OpenParams.Subject of a hold's incident.
 func holdSubject(holdID uuid.UUID) string {
 	return holdSubjectPrefix + holdID.String()
@@ -117,6 +122,10 @@ func (s *Subscriber) handleHold(ctx context.Context, evt event.Event) {
 	}
 
 	scope, err := s.holdScope(ctx, evt.JobID, evt.RunID)
+	if errors.Is(err, errHoldOwnerUnknown) {
+		log.Warn("incident: a dataset hold's run and job no longer exist; opening no incident", "hold_id", held.HoldID)
+		return
+	}
 	if err != nil {
 		log.Warn("incident: could not resolve a dataset hold's tenant; leaving it to the reconcile sweep", "hold_id", held.HoldID, "error", err)
 		return
@@ -133,10 +142,12 @@ func (s *Subscriber) handleHold(ctx context.Context, evt event.Event) {
 // leaves Store.OpenOrAppend too. Everything shaped for the tenant, and the stored
 // row, read this one answer. namespaceFromRun records which it was: the job's
 // namespace may differ from the run's, so only the sweep, which stores nothing
-// the row cannot attribute, may open on the fallback. A failed read stops the
-// open rather than falling back, because the job may have moved: the fallback
-// would shape evidence for a namespace that does not own the incident. The sweep
-// retries.
+// the row cannot attribute, may open on the fallback. A soft-deleted job still
+// answers with its own namespace. When neither the run nor the job exists no
+// tenant owns the hold, and a blank owner would read as "default", so it returns
+// errHoldOwnerUnknown rather than guess. A failed read stops the open rather than
+// falling back, because the job may have moved: the fallback would shape evidence
+// for a namespace that does not own the incident. The sweep retries.
 func (s *Subscriber) holdScope(ctx context.Context, jobID, runID uuid.UUID) (failureContext, error) {
 	scope := failureContext{jobID: jobID}
 	if runID != uuid.Nil {
@@ -152,9 +163,13 @@ func (s *Subscriber) holdScope(ctx context.Context, jobID, runID uuid.UUID) (fai
 			return scope, err
 		}
 	}
+	// Unscoped: a soft-deleted job still has the namespace it was deleted in.
 	var job models.Job
-	err := s.db.WithContext(ctx).Select("id", "namespace").First(&job, "id = ?", jobID).Error
-	if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+	err := s.db.WithContext(ctx).Unscoped().Select("id", "namespace").First(&job, "id = ?", jobID).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return scope, errHoldOwnerUnknown
+	}
+	if err != nil {
 		return scope, err
 	}
 	scope.namespace = models.NamespaceOrDefault(job.Namespace)

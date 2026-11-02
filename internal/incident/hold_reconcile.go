@@ -28,6 +28,8 @@ const (
 	defaultHoldReconcileInterval = 30 * time.Second
 	// holdReconcileBatch bounds every query a sweep makes.
 	holdReconcileBatch = 100
+	// unownedHoldsCap bounds the set of holds already logged as ownerless.
+	unownedHoldsCap = 1000
 )
 
 // holdIDFromDedupeKey reads the hold id back out of a hold incident's dedupe key,
@@ -201,6 +203,10 @@ func (s *Subscriber) openIncidentFromHold(ctx context.Context, hold *models.Data
 		runID = *hold.HeldByRunID
 	}
 	scope, err := s.holdScope(ctx, hold.HeldByJobID, runID)
+	if errors.Is(err, errHoldOwnerUnknown) {
+		s.noteUnownedHold(hold.ID)
+		return nil
+	}
 	if err != nil {
 		return err
 	}
@@ -209,10 +215,19 @@ func (s *Subscriber) openIncidentFromHold(ctx context.Context, hold *models.Data
 		Namespace: hold.Namespace,
 		Dataset:   hold.Name,
 		Reason:    hold.Reason,
-		JobAlias:  hold.HeldByJobAlias,
-		Step:      hold.HeldByStepName,
-		TaskID:    hold.HeldByTaskID,
-		TaskRunID: hold.HeldByTaskRunID,
+	}
+	if scope.namespaceFromRun {
+		held.JobAlias = hold.HeldByJobAlias
+		held.Step = hold.HeldByStepName
+		held.TaskID = hold.HeldByTaskID
+		held.TaskRunID = hold.HeldByTaskRunID
+	} else {
+		// The tenant is the job's, not the run's, and the job may have moved since
+		// the run: the step and its task rows cannot be attributed to it. Reason
+		// is a bounded assertion kind, not tenant data, so it stays. The run id
+		// names a row that is gone, so it identifies nothing and would only
+		// mislead a remediation that targets it.
+		runID = uuid.Nil
 	}
 	owned, err := s.runInNamespace(ctx, hold.LatestBreachRunID(), scope.namespace)
 	if err != nil {
@@ -223,6 +238,20 @@ func (s *Subscriber) openIncidentFromHold(ctx context.Context, hold *models.Data
 	}
 	s.openHoldIncident(ctx, hold.HeldByJobID, runID, scope, held, hold.Impact, hold.OpenedAt)
 	return nil
+}
+
+// noteUnownedHold records that a hold has no tenant to open an incident for. It
+// stays active and uncovered, so every sweep meets it again; the first sighting
+// is logged and the rest are silent, and it counts as no failure.
+func (s *Subscriber) noteUnownedHold(holdID uuid.UUID) {
+	if _, seen := s.unownedHolds[holdID]; seen {
+		return
+	}
+	if s.unownedHolds == nil || len(s.unownedHolds) >= unownedHoldsCap {
+		s.unownedHolds = make(map[uuid.UUID]struct{})
+	}
+	s.unownedHolds[holdID] = struct{}{}
+	log.Warn("incident: leaving a dataset hold without an incident: its run and job no longer exist, so no tenant owns it", "hold_id", holdID)
 }
 
 // runInNamespace reports whether the run is attributable to namespace. No run,

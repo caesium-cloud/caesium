@@ -67,6 +67,9 @@ type Subscriber struct {
 	// starts after. It is in memory and owned by the one sweeping goroutine: a
 	// restart or a new leader starts from the beginning, which is harmless.
 	holdScanAfter uuid.UUID
+	// unownedHolds are the holds the sweep has already logged as having no
+	// owning tenant. Only the sweep, one goroutine, reads or writes it.
+	unownedHolds map[uuid.UUID]struct{}
 	// afterHoldScan, tests only, runs between the reconcile sweep's scan for
 	// uncovered holds and its opens: where the event path interleaves.
 	afterHoldScan func()

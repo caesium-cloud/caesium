@@ -1449,6 +1449,10 @@ precedent for it is warn-mode schema validation, which publishes
       read stops the open, an event whose run is gone (or that names none) opens
       nothing and is left to the sweep, and a recovered incident stores the row's
       verdicts only when the latest breach's run is in the incident's namespace.
+      A sweep that opens without the run row (the job's namespace stands in) also
+      leaves out the step, task, task-run and run ids. A hold whose run and job
+      rows are both gone has no owning tenant, so it keeps no incident; it stays
+      active until released.
       The allowlist seeds only from runs completed before the hold opened, because
       a hold does not record every run that breached it. Baseline evidence that is not namespace-owned is
       withheld when the evidence is built; the helper moved to

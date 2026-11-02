@@ -515,6 +515,85 @@ func TestHoldWhoseRunIsGoneIsOpenedByTheSweepWithoutTheEventsContent(t *testing.
 			require.NotContains(t, text, foreign)
 		}
 	}
+
+	// The opening step and its task rows belong to the run's tenant, and the job
+	// has moved since: none of them is stored, and every reader copes without.
+	require.Nil(t, inc.RunID)
+	require.Nil(t, inc.TaskID)
+	require.Nil(t, inc.RemediationTargetRunID)
+	require.Empty(t, inc.TaskName)
+	require.NotContains(t, evidence, "task_run_id")
+	bundle, err := BuildBundle(ctx, w.db, inc.ID, nil)
+	require.NoError(t, err)
+	rawBundle, err := json.Marshal(bundle)
+	require.NoError(t, err)
+	for _, text := range []string{string(inc.Evidence), inc.LastError, inc.DedupeKey, string(rawBundle)} {
+		require.NotContains(t, text, w.taskID.String())
+		require.NotContains(t, text, w.taskRunID.String())
+		require.NotContains(t, text, w.runID.String())
+		require.NotContains(t, text, `"task_name":"load"`)
+		require.NotContains(t, text, "|load|")
+	}
+	require.Equal(t, string(ClassDataQualityHold), bundle.Classification.Class)
+	require.Empty(t, bundle.Failure.LogTail)
+	require.NotPanics(t, func() { ResolvePlaybook(ctx, w.db, inc.ID, "") })
+}
+
+// A soft-deleted producer still has the namespace it was deleted in. The sweep
+// must open under it, not under the "default" a blank owner reads as.
+func TestHoldWhoseRunIsGoneAndJobSoftDeletedOpensUnderTheJobsNamespace(t *testing.T) {
+	w := newHoldWorld(t, "finance", 0)
+	ctx := t.Context()
+	w.heldRow("orders", time.Now().UTC().Add(-time.Hour))
+	require.NoError(t, w.db.Delete(&models.JobRun{}, "id = ?", w.runID).Error)
+	require.NoError(t, w.db.Delete(&models.Job{}, "id = ?", w.jobID).Error)
+
+	require.NoError(t, w.sub.ReconcileHolds(ctx, 0))
+
+	inc := w.only()
+	require.Equal(t, "finance", inc.Namespace)
+	require.Nil(t, inc.TaskID)
+	require.Empty(t, inc.TaskName)
+}
+
+// With neither the run nor the job there is no tenant to own the hold. The sweep
+// opens nothing for it, does not count that as a failure, and carries on to the
+// holds behind it.
+func TestHoldWithNoRunAndNoJobIsSkippedBySweepWithoutStarvingOthers(t *testing.T) {
+	w := newHoldWorld(t, "finance", 0)
+	ctx := t.Context()
+	orphan := w.heldRow("orders", time.Now().UTC().Add(-time.Hour))
+	require.NoError(t, w.db.Delete(&models.JobRun{}, "id = ?", w.runID).Error)
+	require.NoError(t, w.db.Unscoped().Delete(&models.Job{}, "id = ?", w.jobID).Error)
+
+	healthyJob := uuid.New()
+	require.NoError(t, w.db.Create(&models.Job{ID: healthyJob, Alias: "healthy-" + uuid.NewString()[:8], Namespace: "finance"}).Error)
+	key := models.DatasetHoldKey("", "healthy")
+	healthy := &models.DatasetHold{
+		ID: uuid.New(), Name: "healthy", Status: models.DatasetHoldStatusActive, ActiveKey: &key, Reason: "min",
+		HeldByJobID: healthyJob, OccurrenceCount: 1, OpenedAt: time.Now().UTC().Add(-time.Hour),
+	}
+	require.NoError(t, w.db.Create(healthy).Error)
+
+	for sweep := 1; sweep <= 2; sweep++ {
+		require.NoError(t, w.sub.ReconcileHolds(ctx, 0), "sweep %d: an ownerless hold is skipped, not failed", sweep)
+	}
+
+	var all []models.Incident
+	require.NoError(t, w.db.Find(&all).Error)
+	require.Len(t, all, 1, "only the healthy hold opens")
+	require.Equal(t, healthyJob, all[0].JobID)
+	require.Equal(t, "finance", all[0].Namespace)
+	require.Equal(t, healthy.ID.String(), mustHoldID(t, all[0]))
+	var held models.DatasetHold
+	require.NoError(t, w.db.First(&held, "id = ?", orphan.ID).Error)
+	require.Equal(t, models.DatasetHoldStatusActive, held.Status, "the hold itself is untouched")
+	require.Len(t, w.sub.unownedHolds, 1, "it is logged once and remembered")
+
+	// The event path reaches the same answer.
+	w.sub.handle(ctx, w.heldEvent(orphan.ID, "orders"))
+	require.NoError(t, w.db.Find(&all).Error)
+	require.Len(t, all, 1)
 }
 
 func TestHoldIncidentNeedsDataAssertionsEnabled(t *testing.T) {
