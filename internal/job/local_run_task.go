@@ -17,6 +17,15 @@ import (
 	"github.com/google/uuid"
 )
 
+// taskFailureSubject names the step when the catalog row has one. The task
+// id stays in the message so callers that already match the UUID still do.
+func taskFailureSubject(name string, taskID uuid.UUID) string {
+	if name == "" {
+		return taskID.String()
+	}
+	return name + " (" + taskID.String() + ")"
+}
+
 func (l *localRun) runTask(taskID uuid.UUID) ([]uuid.UUID, error) {
 	ctx := l.ctx
 	if cause := runlife.CancellationCause(ctx); cause != nil {
@@ -241,7 +250,7 @@ func (l *localRun) runTask(taskID uuid.UUID) ([]uuid.UUID, error) {
 					skipped = cacheResult.SkippedTaskIDs
 				}
 				if !run.IsSuccessfulTaskResult(entry.Result) {
-					return skipped, fmt.Errorf("task %s failed with cached result %q", taskID, entry.Result)
+					return skipped, fmt.Errorf("task %s failed with cached result %q", taskFailureSubject(taskName, taskID), entry.Result)
 				}
 				return skipped, nil
 			}
@@ -406,7 +415,11 @@ func (l *localRun) runTask(taskID uuid.UUID) ([]uuid.UUID, error) {
 				skipped = completeResult.SkippedTaskIDs
 			}
 			if !run.IsSuccessfulTaskResult(result) {
-				return skipped, fmt.Errorf("task %s failed with result %q", taskID, result)
+				name := ""
+				if taskModel != nil {
+					name = taskModel.Name
+				}
+				return skipped, fmt.Errorf("task %s failed with result %q", taskFailureSubject(name, taskID), result)
 			}
 			return skipped, nil
 		}

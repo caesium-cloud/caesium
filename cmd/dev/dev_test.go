@@ -1,6 +1,8 @@
 package dev
 
 import (
+	"bytes"
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -9,9 +11,82 @@ import (
 
 	"github.com/caesium-cloud/caesium/internal/jobdef"
 	"github.com/fsnotify/fsnotify"
+	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestParseDevParams(t *testing.T) {
+	got, err := parseDevParams([]string{"date=2026-09-15", "note=a,b", " date=2026-09-16", "empty=", "eq=a=b"})
+	require.NoError(t, err)
+	require.Equal(t, map[string]string{
+		"date":  "2026-09-16",
+		"note":  "a,b",
+		"empty": "",
+		"eq":    "a=b",
+	}, got)
+
+	_, err = parseDevParams([]string{"not-a-pair"})
+	require.EqualError(t, err, `--param must be key=value; got "not-a-pair"`)
+	_, err = parseDevParams([]string{"=value"})
+	require.Error(t, err)
+	_, err = parseDevParams([]string{"  =value"})
+	require.Error(t, err)
+
+	got, err = parseDevParams(nil)
+	require.NoError(t, err)
+	require.Nil(t, got)
+}
+
+func TestDevParamFlagIsRepeatableStringArray(t *testing.T) {
+	flag := Cmd.Flags().Lookup("param")
+	require.NotNil(t, flag)
+	require.Equal(t, "stringArray", flag.Value.Type())
+}
+
+func TestRunDevRejectsMalformedParamBeforeSelectingJobs(t *testing.T) {
+	restoreDevFlags(t)
+	devParamArgs = []string{"not-a-pair"}
+	devPaths = []string{t.TempDir()}
+	runOnce = true
+
+	cmd := &cobra.Command{}
+	var buf bytes.Buffer
+	cmd.SetOut(&buf)
+	err := runDev(cmd, nil)
+	require.EqualError(t, err, `--param must be key=value; got "not-a-pair"`)
+	require.NotContains(t, buf.String(), "Run failed")
+	require.NotContains(t, buf.String(), "FAIL")
+}
+
+func TestRunDevStoresParamsForTheLocalRun(t *testing.T) {
+	restoreDevFlags(t)
+	devParamArgs = []string{"date=2026-09-15", "note=a,b"}
+	devPaths = []string{t.TempDir()}
+	runOnce = true
+
+	cmd := &cobra.Command{}
+	cmd.SetContext(context.Background())
+	var buf bytes.Buffer
+	cmd.SetOut(&buf)
+	err := runDev(cmd, nil)
+	require.ErrorContains(t, err, "no job definitions selected")
+	require.Equal(t, map[string]string{"date": "2026-09-15", "note": "a,b"}, devParams)
+}
+
+func restoreDevFlags(t *testing.T) {
+	t.Helper()
+	origArgs := append([]string(nil), devParamArgs...)
+	origParams := devParams
+	origPaths := append([]string(nil), devPaths...)
+	origOnce := runOnce
+	t.Cleanup(func() {
+		devParamArgs = origArgs
+		devParams = origParams
+		devPaths = origPaths
+		runOnce = origOnce
+	})
+}
 
 // testManifest returns a minimal valid job manifest with the given alias,
 // shared by every test in this file that needs a real, parseable definition.

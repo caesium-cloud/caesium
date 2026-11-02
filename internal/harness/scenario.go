@@ -53,7 +53,11 @@ type Scenario struct {
 	MaxParallel int           `yaml:"maxParallel,omitempty"`
 	TaskTimeout time.Duration `yaml:"taskTimeout,omitempty"`
 	RunTimeout  time.Duration `yaml:"runTimeout,omitempty"`
-	Expect      Expectation   `yaml:"expect"`
+	// Params override the job's trigger defaults for this scenario. Missing
+	// keys still come from trigger.defaultParams (including defaults that
+	// live only in trigger.configuration).
+	Params map[string]string `yaml:"params,omitempty"`
+	Expect Expectation       `yaml:"expect"`
 }
 
 // Expectation describes the asserted outcome of a scenario run.
