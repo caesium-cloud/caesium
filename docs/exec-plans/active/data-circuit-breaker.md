@@ -1,6 +1,6 @@
 # Data Circuit Breaker — Dataset Holds & Statistical Assertions
 
-Last updated: 2026-11-01
+Last updated: 2026-11-02
 
 **Plan 1 of [`closed-loop-arc.md`](closed-loop-arc.md) — the data loop.** The arc
 closes a loop over the memory Caesium already keeps; this plan builds the data
@@ -171,7 +171,7 @@ decided.
 > plan reads the same `consumes` edges for its compatibility graph but does not
 > define registry structure.
 
-## Progress (as of 2026-11-01)
+## Progress (as of 2026-11-02)
 
 Three waves have shipped: Wave 1 (Stream A, H-1, N-2), Wave 2 (Stream B) and
 Wave 3 (Stream C) — the observe → assert → hold half of the loop is live behind
@@ -182,8 +182,60 @@ having reviewed none of them — every code PR got a substitute Opus adversarial
 review plus a scoped re-review of each fix commit; the reviews found one P1 per
 PR (see the wave entries), all fixed before merge. Wave 4 merged on 2026-09-09:
 Stream D in #442 (`995ae8b3`) and Stream E in #445 (`c97208f1`), except E2's rows for
-passing assertions. Stream F runs in its dependency-ordered waves: W5 (F1 + F4), W6 (F2),
-W7 (F3 + F5), then the rest of E2 and N-1.
+passing assertions. Wave 5 (F1 + F4) and Wave 6 (F2) merged on 2026-11-02. W7 (F3 + F5)
+is in progress, then the rest of E2 and N-1. From W5 on, reviews are by Codex, with
+Greptile alongside.
+
+### Wave 6 — `release_hold` (2026-11-02)
+
+- **α / F2** — [#719](https://github.com/caesium-cloud/caesium/pull/719), **merged as
+  `ff50ae08`**. `release_hold` is `TierGated`, and a request carrying tolerance windows
+  is tier 3 on its row, so Open Question 2 needed no second gate. The action calls the
+  same release service as REST. A hold must belong to a dataset produced by the
+  incident's job, every producer of that dataset must be in the incident's namespace,
+  and the check runs at proposal, at dispatch and inside the release transaction.
+  The executor writes no incident status: the subscriber or the sweep closes the
+  incident on `dataset_released`. The bundle gained `DataQuality`, and `get_context`
+  serves the metric series for the incident's own dataset only.
+  **Review:** Codex round 1 and Greptile reported one P1: a job moved between the
+  namespace check and the live hold read showed the new owner's occurrence count. It
+  was fixed by reading both in one snapshot, and round 2, run after merge on `7be517ad`,
+  approved.
+  **Limits:** tolerances stay advisory because C3 enforces nothing, and the action
+  result says so. A sibling hold of the same job can be released from another hold's
+  incident, as F2's wording allows. The `TestTriageAgent*` tests skip in CI because
+  the builder image has no `jq`. PostgreSQL's `FOR SHARE` paths ran only on SQLite and
+  dqlite.
+
+### Wave 5 — Hold incidents and held ⇒ not fresh (2026-11-02)
+
+- **α / F1** — [#710](https://github.com/caesium-cloud/caesium/pull/710), **merged as
+  `a421e2f7`**. Each hold opens one `data_quality_hold` incident in the producing job's
+  tenant namespace, with evidence redacted for that namespace. A green run does not
+  close it; `dataset_released` does. Because each node has its own bus and a follower
+  drops these events, a reconciliation sweep converges incidents on the hold rows.
+  `DatasetHold.Impact` now stores node owners, and the redactor moved to
+  `internal/lineage`.
+  **Review:** eight Codex rounds. The real findings were tenant confinement, a poison
+  hold wedging the sweep, a hold outliving its run or job, and `GET
+  /v1/agent/incidents/:id/bundle` returning 404 for a soft-deleted job. A deleted job's
+  bundle now shows its alias and no DAG on both delete paths. Round 8 approved.
+  **Limits:** no real follower/leader run. First boot opens at most 100 incidents per
+  sweep, without notifications. A hold with no run and no job stays active with no
+  incident and one warning per process. An ordinary failure incident has the same
+  follower gap with no row to converge on.
+- **β / F4** — [#708](https://github.com/caesium-cloud/caesium/pull/708), **merged as
+  `a9a0d6c1`**. A dataset with an active hold reports `held` (Open Question 3), never
+  satisfies a freshness trigger, and derives no consumer unless the consumer sets
+  `onUpstreamHold: run`. The `held` write is fenced on the hold still being active, with
+  a row lock on PostgreSQL, and a persisted `held` with no active hold reads as
+  `unknown`.
+  **Review:** six Codex rounds plus one Greptile finding, then a real PostgreSQL 16 run
+  of the race tests. No CI lane sets `CAESIUM_TEST_POSTGRES_DSN`, and the lock test was
+  not mutation-checked.
+  **Judgment call:** a held dataset that is stale or violated still derives its own
+  producer, against F4's literal text, because otherwise a freshness-triggered clean run
+  could never satisfy `release: auto`.
 
 ### Wave 4 — Dataset operator surface (2026-09-09; E2 partial)
 
@@ -411,7 +463,7 @@ and the fixture from master instead of carrying a temporary justfile edit.
 | C | Circuit breaker — `DatasetHold` model + partial-unique guard, hold-open path, downstream admission gate, release (clean-run + fail-closed ack), bus events + alert-once (Phase 2) | **P0** | **Shipped** (W3, #439) |
 | D | Operator surface — `GET /v1/datasets/holds*` + `/metrics` reads + `caesium dataset holds/release/metrics` CLI | P1 | **Shipped** (W4-α, #442, `995ae8b3`) |
 | E | Console UI — hold badges on the lineage graph, ack/release panel + baseline sparkline, nav active-holds count | P1 | **Mostly shipped** (W4-β, #445, `c97208f1`); E2's passing-assertion rows remain |
-| F | Agent & freshness integration (closes the loop) — `data_quality_hold` incident class, `release_hold` action, the Git-PR provenance route of `apply_jobdef_patch`, held ⇒ not-fresh, `why` provenance (former Phase 3) | **P0** | Not started |
+| F | Agent & freshness integration (closes the loop) — `data_quality_hold` incident class, `release_hold` action, the Git-PR provenance route of `apply_jobdef_patch`, held ⇒ not-fresh, `why` provenance (former Phase 3) | **P0** | **In progress** — F1 + F4 (W5, #710, #708) and F2 (W6, #719) shipped; F3 + F5 are W7 |
 | H-1 | Integration harness — `CAESIUM_DATA_ASSERTIONS_ENABLED=true` on the default lane **and every self-server lane**, auth-lane scenarios, metrics-emitting script image | — | **Shipped** (W1, #433) |
 | N-1 | Docs — roadmap Phase-4 flip, design banner, schema references + examples, README index, `docs/tour-data-loop.md`, arc dashboard row | — | Not started |
 | N-2 | Design amendment — add `CAESIUM_GIT_WRITE_CREDENTIALS` + the Git-PR provenance route to the design docs **before** F3 lands (Source-Of-Truth Note deviation) | — | **Shipped** (W1, #432) |
