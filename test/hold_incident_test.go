@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/caesium-cloud/caesium/internal/incident"
+	schema "github.com/caesium-cloud/caesium/pkg/jobdef"
 	"github.com/google/uuid"
 )
 
@@ -259,6 +260,87 @@ func (s *IntegrationTestSuite) TestHoldOpensDataQualityHoldIncident() {
 	s.NotEqual(first.ID, incidents[1].ID)
 	s.Equal("open", incidents[1].Status)
 	s.Equal(second.ID, incidents[1].RunID)
+}
+
+// TestHoldIncidentCollapsesForeignImpactForConfinedReader reads a hold's incident
+// as a viewer confined to the producer's namespace, with a consumer of the dataset
+// in another namespace. The lineage is real, from real runs, and the scenario needs
+// no policy file and no catalog connection, so it also runs on the coverage auth
+// lane: a hold with no recorded downstream never reaches the stored-cone code.
+func (s *IntegrationTestSuite) TestHoldIncidentCollapsesForeignImpactForConfinedReader() {
+	s.requireAuthLane()
+	s.requireDataAssertionsLane()
+
+	stamp := time.Now().UnixNano()
+	producerAlias := fmt.Sprintf("f1-cone-producer-%d", stamp)
+	ownConsumer := fmt.Sprintf("f1-cone-own-consumer-%d", stamp)
+	foreignConsumer := fmt.Sprintf("f1-cone-other-consumer-%d", stamp)
+	dataset := fmt.Sprintf("f1.cone.%d", stamp)
+	ownOutput := fmt.Sprintf("f1-cone-own-rollup-%d", stamp)
+	foreignOutput := fmt.Sprintf("f1-cone-other-rollup-%d", stamp)
+	s.cleanupInOrder(foreignConsumer, ownConsumer, producerAlias)
+	viewer := s.mintNamespacedKey("viewer", "finance")
+	outsider := s.mintNamespacedKey("viewer", "marketing")
+
+	// The cone is frozen when the hold opens, so the lineage comes first: a clean
+	// producer run, then a run of each consumer.
+	producer := s.holdProducerIn("finance", producerAlias, dataset, 5000)
+	s.runProducer(producer)
+	consumes := []schema.ConsumedDataset{{Name: dataset}}
+	s.applyDefinition(s.datasetJob(ownConsumer, "finance", consumes, []schema.ProducedDataset{{Name: ownOutput}}))
+	s.applyDefinition(s.datasetJob(foreignConsumer, "marketing", consumes, []schema.ProducedDataset{{Name: foreignOutput}}))
+	s.runToSuccess(ownConsumer)
+	s.runToSuccess(foreignConsumer)
+	s.Require().Eventually(func() bool {
+		var whole redactedImpact
+		if s.tryGetJSON(impactPath(dataset), &whole) != nil {
+			return false
+		}
+		seen := map[string]bool{}
+		for _, node := range whole.Downstream {
+			seen[node.DatasetName] = true
+		}
+		return seen[ownOutput] && seen[foreignOutput]
+	}, 60*time.Second, 500*time.Millisecond, "lineage never linked %s to both consumers", dataset)
+
+	producer = s.holdProducerIn("finance", producerAlias, dataset, 12)
+	s.runProducer(producer)
+	found := s.awaitHoldIncidents(producer.ID, 1)[0]
+
+	// The hold's own cone names the foreign consumer, or the assertions below
+	// would pass on a fixture that never reached it.
+	var holds struct {
+		Holds []struct {
+			Impact json.RawMessage `json:"impact"`
+		} `json:"holds"`
+	}
+	s.getJSON("/v1/datasets/holds?name="+url.QueryEscape(dataset), &holds)
+	s.Require().Len(holds.Holds, 1)
+	s.Require().Contains(string(holds.Holds[0].Impact), foreignOutput)
+	s.Require().Contains(string(holds.Holds[0].Impact), foreignConsumer)
+
+	status, _, body := s.nsGet("/v1/incidents/"+found.ID, viewer.Plaintext)
+	s.Require().Equal(http.StatusOK, status, body)
+	var detail struct {
+		Incident holdIncident `json:"incident"`
+	}
+	s.Require().NoError(json.Unmarshal([]byte(body), &detail), body)
+	s.Equal("finance", detail.Incident.Namespace)
+	var evidence holdIncidentEvidence
+	s.Require().NoError(json.Unmarshal(detail.Incident.Evidence, &evidence), body)
+	var names, kinds []string
+	for _, node := range evidence.Impact.Downstream {
+		names = append(names, node.DatasetName)
+		kinds = append(kinds, node.Kind)
+	}
+	s.Contains(names, ownOutput, "a node in the reader's namespace is shown whole: %s", body)
+	s.Contains(kinds, "external", "the foreign node stays in the cone as a placeholder: %s", body)
+	s.NotContains(body, foreignOutput, "the reader must not see another namespace's dataset")
+	s.NotContains(body, foreignConsumer, "the reader must not see another namespace's job")
+	s.NotContains(body, "marketing", "the reader must not see another namespace's name")
+
+	status, _, body = s.nsGet("/v1/incidents/"+found.ID, outsider.Plaintext)
+	s.Equal(http.StatusForbidden, status, "the incident belongs to the producer's namespace: %s", body)
 }
 
 // assertHoldVerdicts checks the breach of rowCount 12 against both assertions:
