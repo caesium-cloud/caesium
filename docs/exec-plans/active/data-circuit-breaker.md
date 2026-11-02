@@ -1446,7 +1446,8 @@ precedent for it is warn-mode schema validation, which publishes
       guaranteed to reach the leader, so `Subscriber.ReconcileHolds` converges
       incidents on hold state; a guard in the open's transaction keeps one incident
       per hold for the hold's lifetime, the tenant is resolved once and a failed
-      read stops the open, and a recovered incident stores the row's
+      read stops the open, an event whose run is gone (or that names none) opens
+      nothing and is left to the sweep, and a recovered incident stores the row's
       verdicts only when the latest breach's run is in the incident's namespace.
       The allowlist seeds only from runs completed before the hold opened, because
       a hold does not record every run that breached it. Baseline evidence that is not namespace-owned is

@@ -447,7 +447,9 @@ func TestHoldAllowlistExcludesTheBreachingRun(t *testing.T) {
 	require.Contains(t, string(inc.Evidence), "reached-by-poison", "the cone itself is still evidence")
 }
 
-func TestHoldWithoutRunOrTaskOpensOnTheJob(t *testing.T) {
+// An event that names no run has no tenant of its own, so it opens nothing; the
+// sweep opens the hold from its row, on the job.
+func TestHoldWithoutRunOrTaskIsOpenedByTheSweepOnTheJob(t *testing.T) {
 	w := newHoldWorld(t, "finance", 0)
 	ctx := t.Context()
 	holdID := w.hold("orders", nil)
@@ -455,6 +457,9 @@ func TestHoldWithoutRunOrTaskOpensOnTheJob(t *testing.T) {
 	require.NoError(t, err)
 
 	w.sub.handle(ctx, event.Event{Type: event.TypeDatasetHeld, JobID: w.jobID, Payload: payload})
+	require.Empty(t, w.incidents(), "an event with no run opens nothing")
+
+	require.NoError(t, w.sub.ReconcileHolds(ctx, 0))
 
 	inc := w.only()
 	require.Nil(t, inc.RunID)
@@ -466,15 +471,50 @@ func TestHoldWithoutRunOrTaskOpensOnTheJob(t *testing.T) {
 }
 
 // HeldByRunID is a soft reference: a pruned run must not move the incident to
-// the default namespace.
-func TestHoldWhoseRunIsGoneKeepsTheJobNamespace(t *testing.T) {
+// the default namespace, and the job may have moved since, so the event's content
+// is not stored under the job's namespace either. The sweep opens the hold from
+// its row, which attributes nothing to a run that is gone.
+func TestHoldWhoseRunIsGoneIsOpenedByTheSweepWithoutTheEventsContent(t *testing.T) {
+	const (
+		observed = 7717
+		median   = 31337
+		impacted = 424242
+	)
 	w := newHoldWorld(t, "finance", 0)
-	evt := w.heldEvent(w.hold("orders", nil), "orders")
+	ctx := t.Context()
+	hold := w.heldRow("orders", time.Now().UTC().Add(-time.Hour))
+	payload, err := json.Marshal(map[string]any{
+		"hold_id": hold.ID, "namespace": "", "dataset": "orders", "status": "active", "reason": "min",
+		"job_alias": w.alias, "step": "load", "task_id": w.taskID, "task_run_id": w.taskRunID,
+		"impacted_datasets": impacted,
+		"violations": []map[string]any{{
+			"dataset": "orders", "metric": "rowCount", "assertion": "deltaFromBaseline", "observed": observed, "bound": 15668.5,
+			"baseline_median": median, "baseline_samples": 9, "baseline_scope": "namespace",
+			"message": "observed 7717 deviates from median 31337",
+		}},
+	})
+	require.NoError(t, err)
+	evt := event.Event{Type: event.TypeDatasetHeld, JobID: w.jobID, RunID: w.runID, Payload: payload}
 	require.NoError(t, w.db.Delete(&models.JobRun{}, "id = ?", w.runID).Error)
+	require.NoError(t, w.db.Model(&models.Job{}).Where("id = ?", w.jobID).Update("namespace", "marketing").Error)
 
-	w.sub.handle(t.Context(), evt)
+	w.sub.handle(ctx, evt)
+	require.Empty(t, w.incidents(), "an event whose run is gone opens nothing")
 
-	require.Equal(t, "finance", w.only().Namespace)
+	require.NoError(t, w.sub.ReconcileHolds(ctx, 0))
+
+	inc := w.only()
+	require.Equal(t, "marketing", inc.Namespace)
+	require.Equal(t, `dataset "orders" held: min`, inc.LastError)
+	var evidence map[string]any
+	require.NoError(t, json.Unmarshal(inc.Evidence, &evidence))
+	require.NotContains(t, evidence, "violations")
+	require.NotEqualValues(t, impacted, evidence["impacted_datasets"])
+	for _, text := range []string{string(inc.Evidence), inc.LastError} {
+		for _, foreign := range []string{"7717", "31337", "15668", "424242", "baseline_median", "baseline_scope"} {
+			require.NotContains(t, text, foreign)
+		}
+	}
 }
 
 func TestHoldIncidentNeedsDataAssertionsEnabled(t *testing.T) {

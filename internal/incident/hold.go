@@ -87,6 +87,12 @@ func decodeHoldEvent(evt event.Event) (holdEvent, bool) {
 // applies: the task succeeded. The event is immutable and written by the opening
 // breach, so its verdicts are the opening run's whatever has since been folded
 // into the hold, and that run's namespace is the incident's.
+//
+// Without that run the event opens nothing. Its content belongs to the run's
+// tenant, and the job may have moved since: storing it under the job's current
+// namespace would show one tenant's verdicts and baselines to another. This also
+// covers an event that names no run. The reconcile sweep opens such a hold from
+// its row after its grace, withholding what the row cannot attribute.
 func (s *Subscriber) handleHold(ctx context.Context, evt event.Event) {
 	if !env.Variables().DataAssertionsEnabled {
 		return
@@ -115,15 +121,22 @@ func (s *Subscriber) handleHold(ctx context.Context, evt event.Event) {
 		log.Warn("incident: could not resolve a dataset hold's tenant; leaving it to the reconcile sweep", "hold_id", held.HoldID, "error", err)
 		return
 	}
+	if !scope.namespaceFromRun {
+		log.Warn("incident: a dataset hold event's run was not found; leaving it to the reconcile sweep", "hold_id", held.HoldID, "run_id", evt.RunID)
+		return
+	}
 	s.openHoldIncident(ctx, evt.JobID, evt.RunID, scope, held, hold.Impact, hold.OpenedAt)
 }
 
 // holdScope resolves the tenant of a hold's incident, once: the opening run's
 // namespace, or the job's when no such run exists, which is where a missing run
 // leaves Store.OpenOrAppend too. Everything shaped for the tenant, and the stored
-// row, read this one answer. A failed read stops the open rather than falling
-// back, because the job may have moved: the fallback would shape evidence for a
-// namespace that does not own the incident. The sweep retries.
+// row, read this one answer. namespaceFromRun records which it was: the job's
+// namespace may differ from the run's, so only the sweep, which stores nothing
+// the row cannot attribute, may open on the fallback. A failed read stops the
+// open rather than falling back, because the job may have moved: the fallback
+// would shape evidence for a namespace that does not own the incident. The sweep
+// retries.
 func (s *Subscriber) holdScope(ctx context.Context, jobID, runID uuid.UUID) (failureContext, error) {
 	scope := failureContext{jobID: jobID}
 	if runID != uuid.Nil {
@@ -132,6 +145,7 @@ func (s *Subscriber) holdScope(ctx context.Context, jobID, runID uuid.UUID) (fai
 		if err == nil {
 			scope.namespace = models.NamespaceOrDefault(run.Namespace)
 			scope.backfillID = run.BackfillID
+			scope.namespaceFromRun = true
 			return scope, nil
 		}
 		if !errors.Is(err, gorm.ErrRecordNotFound) {

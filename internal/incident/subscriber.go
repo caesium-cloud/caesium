@@ -183,6 +183,9 @@ type failureContext struct {
 	// task is fanned; nil for an unfanned task.
 	failedPartitions []string
 	backfillID       *uuid.UUID
+	// namespaceFromRun is set by holdScope when the namespace is the opening
+	// run's, rather than the job's fallback for a run that no longer exists.
+	namespaceFromRun bool
 }
 
 // resolveContext fills in job id, task name, task-run detail, and backfill id
