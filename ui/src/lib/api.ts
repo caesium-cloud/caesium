@@ -904,6 +904,7 @@ export type DatasetStatus =
   | "stale-upstream"
   | "violated"
   | "quarantined"
+  | "held"
   | string;
 
 export type DatasetDeclarationDirection =

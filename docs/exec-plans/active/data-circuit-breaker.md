@@ -1524,7 +1524,7 @@ precedent for it is warn-mode schema validation, which publishes
       **C4 + C7** — the pipeline and the *direct* `apply_jobdef_patch` route this
       one branches beside. See `## Sequencing & Dependencies` § Cross-PLAN order.
       Depends on: F2 + N-2.
-- [ ] F4. Make **held ⇒ not fresh**. A poisoned-but-recent partition must never
+- [x] F4. Make **held ⇒ not fresh**. A poisoned-but-recent partition must never
       satisfy a freshness trigger or advance downstream scheduling. In
       `internal/freshness/evaluator.go`, `statusFor(...)` computes the dataset's
       status from state + SLO + upstream readiness; add an active-`DatasetHold`
@@ -1545,6 +1545,51 @@ precedent for it is warn-mode schema validation, which publishes
       `test/` (a scenario asserting a held dataset reports not-fresh and does not
       derive).
       Depends on: C1 + D1.
+      *Shipped W5 (β).* **New value `DatasetStatusHeld = "held"`** (no existing
+      value fits: `violated` is a `maxStaleness` breach and fires the violation
+      notification, `stale` invites a derivation, `stale-upstream` describes a
+      *consumer* behind a held input, `unknown` means never observed, and
+      `quarantined` is the replay disposition the design forbids overloading).
+      Only `internal/freshness` and the dataset read API consume status values;
+      the Console gained a `held` tone, filter option and stale-like treatment.
+      `statusFor` (the one place both callers use: `evaluateProducedDataset` and
+      `shouldSkipCronRun`) is now `computedStatus` + a hold override; active holds
+      come from **one** `activeHolds` read per evaluation pass / cron decision
+      (no per-dataset query), keyed on the exact `(namespace, name)` struct, never
+      the concatenated `ns/name` key. Reason: `dataset_hold:<ns>/<name> hold=<id>`.
+      **Deviations from the plan text, code wins:** (1) the held output's *own*
+      producer still derives when its SLO is genuinely stale, because that re-run
+      is the only way a freshness-triggered producer's clean run can release a
+      `release: auto` hold; a held dataset that is computed-fresh derives nothing
+      and records `skipped_admission` (never `skipped_fresh`). Downstream
+      derivation is what is blocked: `upstreamReady` reports a held input as not
+      ready, so the consumer's output is `stale-upstream` (its own data is not
+      poisoned) with a reason naming the hold, and no run row is created (the
+      admission gate would otherwise have written a hold-skipped one). (2) the
+      evaluator is now reactive to `dataset_held`/`dataset_released` as well as
+      `dataset_advanced`, and `datasetIdentityFromPayload` reads their `dataset`
+      key, so the status follows a hold opening or closing without a watermark
+      move. (3) the dataset read API overlays `held` (and the hold reason) on any
+      dataset with an active hold, and `?status=` filters against that effective
+      status, so datasets with no freshness SLO (never evaluated) are honest too.
+      With `CAESIUM_DATA_ASSERTIONS_ENABLED` off nothing reads holds. A manual
+      advance never touches status, so it cannot lift a hold. A job with
+      `metadata.onUpstreamHold: run` is exempt from the held-input readiness
+      block (the evaluator reads the same persisted column the admission gate
+      does), and `?status=held` merges declaration-only datasets that an active
+      hold is on (no state row) before counting and paging. A persisted `held`
+      returns to `unknown` (reason cleared) when released before any observation.
+      The persisted `held` is cleared where the hold is released:
+      `releaseDatasetHoldTx` resets the matching `dataset_states` row (exact
+      namespace/name, only if `held`) to `unknown` with an empty reason in the
+      release transaction, so it cannot outlive the hold with freshness
+      scheduling off, no SLO, or the declaration gone. With the breaker switched
+      off while holds are active, or a `held` write that raced a release, the
+      dataset reads treat a persisted `held` with no active hold as `unknown`
+      (list, detail and both filters); the evaluator's `held` write re-checks
+      that the hold is still active in the same transaction. Dataset feeds order by one
+      total key `(updated_at DESC, namespace, name)` in every source query and
+      the final merge, so tied timestamps page without skips or repeats.
 - [ ] F5. **Why-provenance** (arc convention 3 — this plan's single explainability
       item). Make the hold decisions answerable by the shipped **task-scoped**
       explainer: `caesium why <run-id> --task <task> --job-id <job-id>` and

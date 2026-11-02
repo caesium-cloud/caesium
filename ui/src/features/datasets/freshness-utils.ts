@@ -7,7 +7,8 @@ export type DatasetStatusFilter =
   | "stale"
   | "stale-upstream"
   | "violated"
-  | "quarantined";
+  | "quarantined"
+  | "held";
 
 export const DATASET_STATUS_FILTERS: Array<{ key: DatasetStatusFilter; label: string }> = [
   { key: "all", label: "All" },
@@ -17,6 +18,7 @@ export const DATASET_STATUS_FILTERS: Array<{ key: DatasetStatusFilter; label: st
   { key: "violated", label: "Violated" },
   { key: "unknown", label: "Unknown" },
   { key: "quarantined", label: "Quarantined" },
+  { key: "held", label: "Held" },
 ];
 
 export interface FreshnessTone {
@@ -136,6 +138,10 @@ export function freshnessTone(status: DatasetStatus | undefined, inheritedStale 
       return DANGER_TONE;
     case "quarantined":
       return { ...DANGER_TONE, label: "quarantined" };
+    case "held":
+      // The data circuit breaker holds the dataset: recent but untrustworthy,
+      // so it is never "fresh" and never satisfies a freshness trigger.
+      return { ...DANGER_TONE, label: "held" };
     case "unknown":
     default:
       return NEUTRAL_TONE;
@@ -143,7 +149,13 @@ export function freshnessTone(status: DatasetStatus | undefined, inheritedStale 
 }
 
 export function isStaleLike(status: DatasetStatus | undefined): boolean {
-  return status === "stale" || status === "stale-upstream" || status === "violated" || status === "quarantined";
+  return (
+    status === "stale" ||
+    status === "stale-upstream" ||
+    status === "violated" ||
+    status === "quarantined" ||
+    status === "held"
+  );
 }
 
 export function isDeclaredBeforeRun(status: DatasetStatus | undefined): boolean {

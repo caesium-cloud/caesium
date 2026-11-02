@@ -17,6 +17,7 @@ import (
 	"github.com/caesium-cloud/caesium/internal/models"
 	runstorage "github.com/caesium-cloud/caesium/internal/run"
 	"github.com/caesium-cloud/caesium/pkg/env"
+	"github.com/caesium-cloud/caesium/pkg/jobdef"
 	"github.com/caesium-cloud/caesium/pkg/log"
 	"github.com/google/uuid"
 	"gorm.io/datatypes"
@@ -129,7 +130,12 @@ func NewEvaluator(cfg Config) *Evaluator {
 		// arrival observer), NOT run_completed: the latter races the capturer's own
 		// Advance, so the evaluator could read pre-advance state and derive a
 		// redundant producer run. The timer loop remains the correctness backstop.
-		reactiveTypes = []event.Type{event.TypeDatasetAdvanced}
+		//
+		// dataset_held / dataset_released are reactive too: a hold opens or closes
+		// without any watermark moving (a breach whose advance was dropped, an
+		// operator ack), and the reported status - held, then the restored
+		// computed freshness - must follow the event, not wait out a tick.
+		reactiveTypes = []event.Type{event.TypeDatasetAdvanced, event.TypeDatasetHeld, event.TypeDatasetReleased}
 	}
 	return &Evaluator{
 		db:                    cfg.DB,
@@ -260,11 +266,17 @@ func datasetIdentityFromPayload(payload json.RawMessage) (datasetIdentity, bool)
 	var p struct {
 		Namespace string `json:"namespace"`
 		Name      string `json:"name"`
+		// Dataset is the name key on dataset_held / dataset_released payloads
+		// (run.DatasetHoldEvent); dataset_advanced uses Name.
+		Dataset string `json:"dataset"`
 	}
 	if err := json.Unmarshal(payload, &p); err != nil {
 		return datasetIdentity{}, false
 	}
 	name := strings.TrimSpace(p.Name)
+	if name == "" {
+		name = strings.TrimSpace(p.Dataset)
+	}
 	if name == "" {
 		return datasetIdentity{}, false
 	}
@@ -293,7 +305,17 @@ func (e *Evaluator) evaluate(ctx context.Context, targets map[datasetIdentity]st
 }
 
 func (e *Evaluator) evaluateWithSnapshot(ctx context.Context, graph registrySnapshot, targets map[datasetIdentity]struct{}, triggerDepth int) error {
-	pass := &evaluationPass{budget: e.maxDerivationsPerTick, launched: map[derivationKey]uuid.UUID{}}
+	// Active holds are read ONCE per pass (a single indexed query), not per
+	// dataset: statusFor and upstreamReady consult this map. A failed read aborts
+	// the pass rather than evaluating as if nothing were held - fail closed.
+	holds, err := activeHolds(ctx, e.db)
+	if err != nil {
+		return err
+	}
+	if afterHoldsSnapshot != nil {
+		afterHoldsSnapshot()
+	}
+	pass := &evaluationPass{budget: e.maxDerivationsPerTick, launched: map[derivationKey]uuid.UUID{}, holds: holds}
 	for _, decl := range graph.produced {
 		id := declarationIdentity(decl)
 		if len(targets) > 0 {
@@ -335,13 +357,41 @@ func (e *Evaluator) evaluateProducedDataset(ctx context.Context, graph registryS
 	}
 
 	consumes := graph.consumesByJob[decl.JobID]
-	upstreamReady, consumed, upstreamReason, err := e.upstreamReady(ctx, state, consumes)
+	var holds map[datasetIdentity]heldDataset
+	if pass != nil {
+		holds = pass.holds
+	}
+	// metadata.onUpstreamHold: run opts the job out of the breaker's gate: it is
+	// meant to run on held data (a monitoring job). The admission gate honours
+	// that, so readiness must too, or the evaluator would refuse to derive a run
+	// the gate would have admitted. Read only when an input really is held.
+	inputHolds := holds
+	if len(heldInputs(holds, consumes)) > 0 {
+		optOut, err := e.jobRunsOnUpstreamHold(ctx, decl.JobID)
+		if err != nil {
+			return err
+		}
+		if optOut {
+			inputHolds = nil
+		}
+	}
+	upstreamReady, consumed, upstreamReason, err := e.upstreamReady(ctx, state, consumes, inputHolds)
 	if err != nil {
 		return err
 	}
 
-	status, reason, staleness, seen := e.statusFor(decl, state, now, freshness, maxStaleness, upstreamReady, upstreamReason)
-	if status != models.DatasetStatusUnknown && status != models.DatasetStatusQuarantined {
+	held := holdFor(holds, decl)
+	status, reason, staleness, seen := e.statusFor(decl, state, now, freshness, maxStaleness, upstreamReady, upstreamReason, held)
+	switch {
+	case status != models.DatasetStatusUnknown && status != models.DatasetStatusQuarantined:
+		if err := e.updateStatus(ctx, decl, status, reason); err != nil {
+			return err
+		}
+	case status == models.DatasetStatusUnknown && exists && state.Status == models.DatasetStatusHeld:
+		// A hold can be persisted before the dataset has any observation (a later
+		// task failed, so nothing was captured). Once it is released the computed
+		// status is unknown again, and the stale "held" status and the released
+		// hold's reason must not outlive it.
 		if err := e.updateStatus(ctx, decl, status, reason); err != nil {
 			return err
 		}
@@ -350,33 +400,91 @@ func (e *Evaluator) evaluateProducedDataset(ctx context.Context, graph registryS
 		metrics.DatasetStalenessSeconds.WithLabelValues(datasetParamName(decl.Namespace, decl.Name)).Set(staleness.Seconds())
 	}
 
-	switch status {
+	// A held dataset REPORTS held, but what the evaluator does about it is driven
+	// by the freshness the dataset would have without the hold:
+	//   - computed fresh: nothing to derive, and the decision must not claim
+	//     "skipped_fresh" for a dataset that is not fresh;
+	//   - computed stale / violated: the SLO really is breached, so the
+	//     producer is still derived - re-producing the dataset is the only way a
+	//     freshness-triggered producer's clean run can release an auto-release
+	//     hold, and a hold on a stale dataset must not deadlock its own repair.
+	// Downstream scheduling off a held dataset is blocked in upstreamReady, which
+	// reports a held input as not ready, so no consumer is derived from it.
+	driving, drivingReason := status, reason
+	heldReason := ""
+	if status == models.DatasetStatusHeld {
+		heldReason = reason
+		driving, drivingReason, _, _ = e.computedStatus(decl, state, now, freshness, maxStaleness, upstreamReady, upstreamReason)
+	}
+
+	switch driving {
 	case models.DatasetStatusFresh:
+		if heldReason != "" {
+			return e.recordDerivation(ctx, decl, models.DatasetDecisionSkippedAdmission, heldReason, consumed, nil)
+		}
 		return e.recordDerivation(ctx, decl, models.DatasetDecisionSkippedFresh, reason, consumed, nil)
 	case models.DatasetStatusStaleUpstream:
-		if err := e.publishAtRiskOncePerWindow(ctx, decl, status, reason, staleness, freshness, now); err != nil {
+		if err := e.publishAtRiskOncePerWindow(ctx, decl, driving, drivingReason, staleness, freshness, now); err != nil {
 			return err
 		}
-		return e.recordDerivation(ctx, decl, models.DatasetDecisionSkippedUpstream, reason, consumed, nil)
+		return e.recordDerivation(ctx, decl, models.DatasetDecisionSkippedUpstream, drivingReason, consumed, nil)
 	case models.DatasetStatusViolated:
-		e.publishFreshnessViolation(decl, status, reason, staleness, freshness, maxStaleness, now)
+		e.publishFreshnessViolation(decl, driving, drivingReason, staleness, freshness, maxStaleness, now)
 		if !upstreamReady {
-			return e.recordDerivation(ctx, decl, models.DatasetDecisionSkippedUpstream, reason, consumed, nil)
+			return e.recordDerivation(ctx, decl, models.DatasetDecisionSkippedUpstream, drivingReason, consumed, nil)
 		}
-		return e.deriveIfFreshnessTriggered(ctx, decl, state, reason, consumed, triggerDepth, pass)
+		return e.deriveIfFreshnessTriggered(ctx, decl, state, drivingReason, consumed, triggerDepth, pass)
 	case models.DatasetStatusStale:
-		return e.deriveIfFreshnessTriggered(ctx, decl, state, reason, consumed, triggerDepth, pass)
+		return e.deriveIfFreshnessTriggered(ctx, decl, state, drivingReason, consumed, triggerDepth, pass)
 	case models.DatasetStatusQuarantined:
 		return e.recordDerivation(ctx, decl, models.DatasetDecisionSkippedAdmission, "dataset quarantined", consumed, nil)
 	default:
 		if !seen {
+			if heldReason != "" {
+				// A hold opened before the first observation: record why nothing
+				// derives rather than claiming "waiting for first observation".
+				return e.recordDerivation(ctx, decl, models.DatasetDecisionSkippedAdmission, heldReason, consumed, nil)
+			}
 			return e.recordDerivation(ctx, decl, models.DatasetDecisionSkippedFresh, unknownFreshnessReason, consumed, nil)
 		}
 		return nil
 	}
 }
 
-func (e *Evaluator) statusFor(decl models.DatasetDeclaration, state models.DatasetState, now time.Time, freshness, maxStaleness time.Duration, upstreamReady bool, upstreamReason string) (string, string, time.Duration, bool) {
+// statusFor is the one place a dataset's reported freshness status is decided,
+// shared by the evaluator and the cron skip-when-fresh path. It is computedStatus
+// (state + SLO + upstream readiness) with the data circuit breaker applied on
+// top: a dataset with an ACTIVE hold is never fresh, whatever its watermark
+// says, so a poisoned-but-recent partition cannot satisfy a freshness trigger or
+// let a cron tick skip. The hold overrides the status and the reason; staleness
+// and seen still describe the computed freshness (they feed the staleness gauge).
+//
+// held is nil when the dataset has no active hold OR when
+// CAESIUM_DATA_ASSERTIONS_ENABLED is off (activeHolds returns nothing then).
+// A quarantined dataset stays quarantined: that is a replay-run disposition, not
+// a data-quality one, and the evaluator does not write it.
+// jobRunsOnUpstreamHold reports whether the job persisted
+// metadata.onUpstreamHold: run - the same column the admission gate reads.
+func (e *Evaluator) jobRunsOnUpstreamHold(ctx context.Context, jobID uuid.UUID) (bool, error) {
+	var job models.Job
+	res := e.db.WithContext(ctx).Select("id", "on_upstream_hold").Where("id = ?", jobID).Limit(1).Find(&job)
+	if res.Error != nil {
+		return false, res.Error
+	}
+	return res.RowsAffected > 0 && strings.TrimSpace(job.OnUpstreamHold) == jobdef.OnUpstreamHoldRun, nil
+}
+
+func (e *Evaluator) statusFor(decl models.DatasetDeclaration, state models.DatasetState, now time.Time, freshness, maxStaleness time.Duration, upstreamReady bool, upstreamReason string, held *heldDataset) (string, string, time.Duration, bool) {
+	status, reason, staleness, seen := e.computedStatus(decl, state, now, freshness, maxStaleness, upstreamReady, upstreamReason)
+	if held != nil && status != models.DatasetStatusQuarantined {
+		return models.DatasetStatusHeld, held.reason(), staleness, seen
+	}
+	return status, reason, staleness, seen
+}
+
+// computedStatus is the freshness a dataset has on its own merits, ignoring any
+// hold. See statusFor.
+func (e *Evaluator) computedStatus(decl models.DatasetDeclaration, state models.DatasetState, now time.Time, freshness, maxStaleness time.Duration, upstreamReady bool, upstreamReason string) (string, string, time.Duration, bool) {
 	if state.Status == models.DatasetStatusQuarantined {
 		return models.DatasetStatusQuarantined, "dataset quarantined", 0, false
 	}
@@ -457,18 +565,71 @@ func (e *Evaluator) updateStatusTx(ctx context.Context, db *gorm.DB, decl models
 	// One upsert carrying the real status/reason: insert the row on first
 	// observation, otherwise update the evaluator-owned columns in place. dqlite
 	// accepts ON CONFLICT DO UPDATE for plain column assignments.
-	return db.WithContext(ctx).Clauses(clause.OnConflict{
-		Columns: []clause.Column{{Name: "namespace"}, {Name: "name"}},
-		DoUpdates: clause.Assignments(map[string]any{
-			"status":           status,
-			"reason":           reason,
-			"reason_namespace": reasonNamespace,
-			"updated_at":       e.now().UTC(),
-		}),
-	}).Create(&row).Error
+	upsert := func(tx *gorm.DB) error {
+		return tx.WithContext(ctx).Clauses(clause.OnConflict{
+			Columns: []clause.Column{{Name: "namespace"}, {Name: "name"}},
+			DoUpdates: clause.Assignments(map[string]any{
+				"status":           status,
+				"reason":           reason,
+				"reason_namespace": reasonNamespace,
+				"updated_at":       e.now().UTC(),
+			}),
+		}).Create(&row).Error
+	}
+	if status != models.DatasetStatusHeld {
+		return upsert(db)
+	}
+	// `held` is written only while the hold is STILL active, decided here at write
+	// time and not from the pass's snapshot: a release (which clears `held` in its
+	// own transaction) can land between the snapshot and this write, and writing
+	// the stale verdict afterwards would strand `held` on a dataset that may have
+	// no SLO left for any later pass to correct.
+	//
+	// The guarantee differs by backend. PostgreSQL (READ COMMITTED): the check is a
+	// locked read (SELECT ... FOR UPDATE) of the active hold row, so a concurrent
+	// release - whose guarded UPDATE of the same row is its first write - either
+	// commits before the check (no row, no write) or waits on that row lock until
+	// this transaction commits, and then resets the state row afterwards. dqlite /
+	// SQLite drop the locking clause: every write goes through the single writer,
+	// which already serialises the check and the upsert against the release.
+	//
+	// Lock order is hold, then state, on both sides: releaseDatasetHoldTx (the one
+	// chokepoint of the manual-ack and clean-run releases) updates dataset_holds
+	// before it resets dataset_states, so the two cannot deadlock.
+	return db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		active, err := lockActiveHold(tx, row.Namespace, row.Name)
+		if err != nil {
+			return err
+		}
+		if !active {
+			return nil
+		}
+		if afterHeldHoldLocked != nil {
+			afterHeldHoldLocked()
+		}
+		return upsert(tx)
+	})
 }
 
-func (e *Evaluator) upstreamReady(ctx context.Context, outputState models.DatasetState, consumes []models.DatasetDeclaration) (bool, map[string]string, string, error) {
+// lockActiveHold reports whether an active hold exists on the exact (namespace,
+// name), taking a row lock on it for the rest of the caller's transaction.
+func lockActiveHold(tx *gorm.DB, namespace, name string) (bool, error) {
+	var ids []uuid.UUID
+	if err := tx.Model(&models.DatasetHold{}).
+		Clauses(clause.Locking{Strength: "UPDATE"}).
+		Where("namespace = ? AND name = ? AND status = ?", namespace, name, models.DatasetHoldStatusActive).
+		Limit(1).
+		Pluck("id", &ids).Error; err != nil {
+		return false, err
+	}
+	return len(ids) > 0, nil
+}
+
+// afterHeldHoldLocked, when set (tests only), runs after a `held` write has
+// locked its active hold and before it upserts: where a release interleaves.
+var afterHeldHoldLocked func()
+
+func (e *Evaluator) upstreamReady(ctx context.Context, outputState models.DatasetState, consumes []models.DatasetDeclaration, holds map[datasetIdentity]heldDataset) (bool, map[string]string, string, error) {
 	if len(consumes) == 0 {
 		return true, map[string]string{}, "", nil
 	}
@@ -518,6 +679,19 @@ func (e *Evaluator) upstreamReady(ctx context.Context, outputState models.Datase
 		if !watermarkAdvancedPast(previous, watermark) {
 			waiting = append(waiting, key)
 		}
+	}
+	// A held input is NEVER ready, whatever its watermark did: the hold says the
+	// partition that moved it is poisoned, so a consumer must not be derived from
+	// it (the admission gate would only turn the derivation into a skipped run
+	// row). The consumer reports stale-upstream - it is itself unpoisoned, just
+	// behind a held input - and the reason names the hold.
+	if held := heldInputs(holds, consumes); len(held) > 0 {
+		reason := "waiting on held upstream dataset " + strings.Join(held, ",")
+		if len(waiting) > 0 {
+			sort.Strings(waiting)
+			reason += "; waiting on upstream dataset " + strings.Join(waiting, ",")
+		}
+		return false, current, reason, nil
 	}
 	if len(waiting) > 0 {
 		sort.Strings(waiting)
@@ -899,6 +1073,9 @@ type derivationKey struct {
 type evaluationPass struct {
 	budget   int
 	launched map[derivationKey]uuid.UUID
+	// holds is the pass's snapshot of active dataset holds (nil when none, or
+	// when the data circuit breaker is off), read once at the top of the pass.
+	holds map[datasetIdentity]heldDataset
 }
 
 func (p *evaluationPass) launchedRun(key derivationKey) (uuid.UUID, bool) {
@@ -1004,6 +1181,10 @@ var errProducerMovedSinceSnapshot = errors.New("producer moved to another namesp
 // evaluation read its declaration snapshot: where an apply that moves a
 // producer interleaves.
 var afterRegistrySnapshot func()
+
+// afterHoldsSnapshot, when set (tests only), runs right after a pass read its
+// active-holds snapshot: where a release interleaves with a pending `held` write.
+var afterHoldsSnapshot func()
 
 func (e *Evaluator) recordDerivation(ctx context.Context, decl models.DatasetDeclaration, decision, reason string, consumed map[string]string, runID *uuid.UUID) error {
 	return e.recordDerivationTx(ctx, e.db, decl, decision, reason, consumed, runID)

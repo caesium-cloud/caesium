@@ -432,10 +432,27 @@ func (s *Store) releaseDatasetHoldTx(tx *gorm.DB, id uuid.UUID, req datasetHoldR
 	if res.RowsAffected == 0 {
 		return false, nil
 	}
-	if out != nil {
-		if err := tx.First(out, "id = ?", id).Error; err != nil {
-			return false, err
-		}
+	var released models.DatasetHold
+	if out == nil {
+		out = &released
+	}
+	if err := tx.First(out, "id = ?", id).Error; err != nil {
+		return false, err
+	}
+	// The freshness evaluator persists "held" on the dataset's state row while a
+	// hold is active. Clear it HERE, in the release transaction, so the status can
+	// never outlive the hold whichever features happen to be running: freshness
+	// scheduling off, no freshness SLO, a producer that no longer declares the
+	// dataset. A later evaluation recomputes the real status.
+	if err := tx.Model(&models.DatasetState{}).
+		Where("namespace = ? AND name = ? AND status = ?", out.Namespace, out.Name, models.DatasetStatusHeld).
+		Updates(map[string]any{
+			"status":           models.DatasetStatusUnknown,
+			"reason":           "",
+			"reason_namespace": nil,
+			"updated_at":       now,
+		}).Error; err != nil {
+		return false, err
 	}
 	return true, nil
 }
