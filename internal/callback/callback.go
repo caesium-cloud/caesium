@@ -167,40 +167,34 @@ func (d *Dispatcher) WithHTTPClient(client *http.Client) {
 // dispatcher, and losing a callback is worse than sending one twice.
 func (d *Dispatcher) Dispatch(ctx context.Context, jobID, runID uuid.UUID, runErr error) error {
 	dispatchCtx := ensureContext(ctx)
-	meta, callbacks, err := d.prepare(dispatchCtx, jobID, runID, runErr)
+	meta, callbacks, key, err := d.prepare(dispatchCtx, jobID, runID, runErr)
 	if err != nil {
 		return err
-	}
-	key, err := d.completionKey(dispatchCtx, runID)
-	if err != nil {
-		return fmt.Errorf("load run completion: %w", err)
 	}
 	return d.execute(dispatchCtx, meta, callbacks, key)
 }
 
-// completionKey identifies one completion of a run. It is the run's execution
-// window, which every reopen moves (run.Store.readmitRetryTx), so a retried run
-// delivers its callbacks again. It is only ever compared for equality, so clocks
-// do not matter. A row from before the window was recorded uses started_at, as
-// the run deadline does.
+// completionKey identifies the completion a run record describes. It must come
+// from the same record as the payload: a key read separately could belong to a
+// retry that finished in between, and this dispatcher would spend that retry's
+// claim on the old result. The key is the run's execution window, which every
+// reopen moves, so a retried run delivers again. It is only compared for
+// equality, so clocks do not matter. A row from before the window was recorded
+// uses started_at, as the run deadline does.
 //
 // A run still running has no completion to claim, and gets a nil key. An engine
 // whose completion write failed dispatches anyway, and the claim must stay free
 // for whoever really finalizes that run.
-func (d *Dispatcher) completionKey(ctx context.Context, runID uuid.UUID) (*string, error) {
-	var row models.JobRun
-	if err := d.db.WithContext(ctx).Select("status", "started_at", "timeout_started_at").First(&row, "id = ?", runID).Error; err != nil {
-		return nil, err
+func completionKey(state *run.JobRun) *string {
+	if state.Status == run.StatusRunning {
+		return nil
 	}
-	if row.Status == string(run.StatusRunning) {
-		return nil, nil
-	}
-	window := row.StartedAt
-	if row.TimeoutStartedAt != nil {
-		window = *row.TimeoutStartedAt
+	window := state.StartedAt
+	if state.TimeoutStartedAt != nil {
+		window = *state.TimeoutStartedAt
 	}
 	key := window.UTC().Format(time.RFC3339Nano)
-	return &key, nil
+	return &key
 }
 
 // RetryFailed retries callbacks for the supplied run that most recently failed.
@@ -213,7 +207,7 @@ func (d *Dispatcher) RetryFailed(ctx context.Context, runID uuid.UUID) error {
 		return fmt.Errorf("load run: %w", err)
 	}
 
-	meta, _, err := d.prepare(dispatchCtx, runState.JobID, runID, nil)
+	meta, _, _, err := d.prepare(dispatchCtx, runState.JobID, runID, nil)
 	if err != nil {
 		return err
 	}
@@ -277,16 +271,16 @@ func ensureContext(ctx context.Context) context.Context {
 	return context.WithoutCancel(ctx)
 }
 
-func (d *Dispatcher) prepare(ctx context.Context, jobID, runID uuid.UUID, runErr error) (Metadata, []models.Callback, error) {
+func (d *Dispatcher) prepare(ctx context.Context, jobID, runID uuid.UUID, runErr error) (Metadata, []models.Callback, *string, error) {
 	var job models.Job
 	if err := d.db.WithContext(ctx).Unscoped().First(&job, "id = ?", jobID).Error; err != nil {
-		return Metadata{}, nil, fmt.Errorf("load job: %w", err)
+		return Metadata{}, nil, nil, fmt.Errorf("load job: %w", err)
 	}
 
 	runStore := run.NewStore(d.db)
 	runState, err := runStore.Get(runID)
 	if err != nil {
-		return Metadata{}, nil, fmt.Errorf("load run: %w", err)
+		return Metadata{}, nil, nil, fmt.Errorf("load run: %w", err)
 	}
 
 	var callbacks []models.Callback
@@ -295,7 +289,7 @@ func (d *Dispatcher) prepare(ctx context.Context, jobID, runID uuid.UUID, runErr
 		Order("position asc").
 		Order("created_at asc").
 		Find(&callbacks).Error; err != nil {
-		return Metadata{}, nil, fmt.Errorf("load callbacks: %w", err)
+		return Metadata{}, nil, nil, fmt.Errorf("load callbacks: %w", err)
 	}
 
 	meta := Metadata{
@@ -340,7 +334,7 @@ func (d *Dispatcher) prepare(ctx context.Context, jobID, runID uuid.UUID, runErr
 		meta.Tasks = append(meta.Tasks, taskState)
 	}
 
-	return meta, callbacks, nil
+	return meta, callbacks, completionKey(runState), nil
 }
 
 func (d *Dispatcher) execute(ctx context.Context, meta Metadata, callbacks []models.Callback, completion *string) error {

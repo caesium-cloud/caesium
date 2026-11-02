@@ -274,10 +274,13 @@ type JobRun struct {
 	Params       map[string]string `json:"params,omitempty"`
 	Quarantine   bool              `json:"quarantine"`
 	StartedAt    time.Time         `json:"started_at"`
-	CompletedAt  *time.Time        `json:"completed_at,omitempty"`
-	CreatedAt    time.Time         `json:"created_at"`
-	UpdatedAt    time.Time         `json:"updated_at"`
-	Error        string            `json:"error,omitempty"`
+	// TimeoutStartedAt anchors the run's current execution window; every reopen
+	// moves it. See models.JobRun.
+	TimeoutStartedAt *time.Time `json:"-"`
+	CompletedAt      *time.Time `json:"completed_at,omitempty"`
+	CreatedAt        time.Time  `json:"created_at"`
+	UpdatedAt        time.Time  `json:"updated_at"`
+	Error            string     `json:"error,omitempty"`
 	// SkipReason explains a terminal `skipped` run — today only
 	// "dataset_hold:<namespace>/<name>" from the data circuit breaker's
 	// admission gate. Empty on every other run.
@@ -6610,18 +6613,19 @@ func (s *Store) convertRunModelWithDB(conn *gorm.DB, model *models.JobRun) (*Job
 	}
 
 	runValue := &JobRun{
-		Namespace:  models.NamespaceOrDefault(model.Namespace),
-		ID:         model.ID,
-		JobID:      model.JobID,
-		BackfillID: model.BackfillID,
-		Status:     Status(model.Status),
-		Priority:   model.Priority,
-		Quarantine: model.Quarantine,
-		StartedAt:  model.StartedAt,
-		CreatedAt:  model.CreatedAt,
-		UpdatedAt:  model.UpdatedAt,
-		Error:      model.Error,
-		SkipReason: model.SkipReason,
+		Namespace:        models.NamespaceOrDefault(model.Namespace),
+		ID:               model.ID,
+		JobID:            model.JobID,
+		BackfillID:       model.BackfillID,
+		Status:           Status(model.Status),
+		Priority:         model.Priority,
+		Quarantine:       model.Quarantine,
+		StartedAt:        model.StartedAt,
+		TimeoutStartedAt: model.TimeoutStartedAt,
+		CreatedAt:        model.CreatedAt,
+		UpdatedAt:        model.UpdatedAt,
+		Error:            model.Error,
+		SkipReason:       model.SkipReason,
 	}
 
 	if len(model.Params) > 0 {

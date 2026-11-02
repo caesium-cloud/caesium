@@ -2,6 +2,7 @@ package callback
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -131,6 +132,52 @@ func TestARetriedRunDeliversAgain(t *testing.T) {
 	require.Equal(t, int32(2), target.hits.Load(), "one delivery per completion")
 }
 
+// A retry reopens and finishes the run just after a slower dispatcher read it.
+// That dispatcher holds the old result, so it must claim the old completion: if
+// its key came from a later read it would spend the retry's claim on the old
+// payload, and the retry's real result would never go out.
+func TestAStaleDispatcherCannotSpendARetrysClaim(t *testing.T) {
+	dbA, dbB := openConcurrentTestDBs(t)
+	var mu sync.Mutex
+	var delivered []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer func() { _ = r.Body.Close() }()
+		var meta Metadata
+		if err := json.NewDecoder(r.Body).Decode(&meta); err == nil {
+			mu.Lock()
+			delivered = append(delivered, meta.Status)
+			mu.Unlock()
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	jobID, runID := seedCallbackRun(t, dbA, server.URL)
+	require.NoError(t, dbA.Model(&models.JobRun{}).Where("id = ?", runID).Update("status", string(run.StatusFailed)).Error)
+	stale, retry := NewDispatcher(dbA), NewDispatcher(dbB)
+	stale.WithHTTPClient(server.Client())
+	retry.WithHTTPClient(server.Client())
+	store := run.NewStore(dbB)
+
+	fired := false
+	require.NoError(t, dbA.Callback().Query().After("gorm:query").Register("test:retry-after-run-read", func(tx *gorm.DB) {
+		if fired || tx.Statement.Table != "job_runs" {
+			return
+		}
+		fired = true
+		_, err := store.RetryFromFailure(runID)
+		require.NoError(t, err)
+		require.NoError(t, store.Complete(runID, nil))
+	}))
+
+	require.NoError(t, stale.Dispatch(context.Background(), jobID, runID, nil))
+	require.True(t, fired)
+	require.NoError(t, retry.Dispatch(context.Background(), jobID, runID, nil))
+
+	require.Equal(t, []string{string(run.StatusFailed), string(run.StatusSucceeded)}, delivered,
+		"each completion must report its own result")
+}
+
 // A claimer can die partway through a job's callbacks, and handlers can take a
 // full timeout each. What it never attempted must still go out: a per-run claim
 // would lose those, and a lost callback is worse than a duplicate.
@@ -144,12 +191,11 @@ func TestADeadClaimersUnattemptedCallbacksStillGoOut(t *testing.T) {
 	second := &models.Callback{ID: uuid.New(), JobID: jobID, Type: models.CallbackTypeNotification, Configuration: delivered.Configuration}
 	require.NoError(t, dbA.Create(second).Error)
 
-	dead := dispatcherFor(dbA, target)
-	key, err := dead.completionKey(context.Background(), runID)
+	state, err := run.NewStore(dbA).Get(runID)
 	require.NoError(t, err)
-	claimed, err := dead.createAttempt(context.Background(), &models.CallbackRun{
+	claimed, err := dispatcherFor(dbA, target).createAttempt(context.Background(), &models.CallbackRun{
 		ID: uuid.New(), CallbackID: delivered.ID, JobID: jobID, JobRunID: runID,
-		Status: models.CallbackRunStatusRunning, CompletionKey: key,
+		Status: models.CallbackRunStatusRunning, CompletionKey: completionKey(state),
 	})
 	require.NoError(t, err)
 	require.True(t, claimed)
