@@ -1331,8 +1331,10 @@ at `runner` cluster-wide and bound to the one incident:
   when its timer fires. An `apply_jobdef_patch` may not change
   `metadata.namespace`, on the direct and the git-synced route alike, and a
   direct apply is confined to the incident's namespace, triggers and webhook
-  paths included. Approving an action therefore needs `operator` only in the
-  incident's namespace.
+  paths included. A pull request needs a `CAESIUM_GIT_WRITE_CREDENTIALS` entry
+  that lists the incident's namespace, and the refusal does not say whether an
+  entry exists for another one. Approving an action therefore needs `operator`
+  only in the incident's namespace.
 - **Release.** A `release_hold` names a hold of a dataset the incident's job
   still produces, opened by that job in the incident's namespace, and no other
   producer of the dataset may live outside the namespace. Each is read from the

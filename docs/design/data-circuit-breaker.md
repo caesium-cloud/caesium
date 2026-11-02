@@ -337,8 +337,12 @@ claim fence on `run.EvaluateDataAssertionsClaimed`).
   (`pkg/env/jobdef.go` `GitSources`/`GitSourceConfig`/`GitBasicAuth`, a
   JSON-decoded `envconfig.Decoder`): a JSON array keyed by repo URL or
   `source_id`, each entry carrying a forge kind (`github` first, the forge
-  interface admits others), an API base URL, and a token — direct or a
-  `secret://` ref, matching `GitBasicAuth`'s `PasswordRef` pattern.
+  interface admits others), an API base URL, a token — direct or a
+  `secret://` ref, matching `GitBasicAuth`'s `PasswordRef` pattern — and a
+  required `namespaces` list. *Amended by F3:* each entry names the tenancy
+  namespaces that may use it, because a job's provenance fields can be asserted
+  through the REST apply. A credential with no `namespaces` is refused at
+  startup, and `*` is not accepted.
   **Write credentials are a separate grant from `CAESIUM_JOBDEF_GIT_SOURCES`'s
   read-only sync credentials** — a source configured for sync is not
   automatically writable, and vice versa. With no matching entry for a job's

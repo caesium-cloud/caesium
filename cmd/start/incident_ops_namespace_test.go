@@ -97,3 +97,37 @@ func TestApplyJobdefPatchRefusesUndeclaredNamespaceOnBothRoutes(t *testing.T) {
 	_, err = ops.ApplyJobdefPatch(ctx, job.ID, "marketing", patch("marketing"), false)
 	require.NoError(t, err)
 }
+
+// TestApplyJobdefPatchRendersOnlyWhatGitSyncWouldAccept: the batch validation
+// runs on a render too. Merged, a pull request that fails it would stall the
+// source's sync, so the git-synced routes refuse what the direct route refuses.
+func TestApplyJobdefPatchRendersOnlyWhatGitSyncWouldAccept(t *testing.T) {
+	db := testutil.OpenTestDB(t)
+	t.Cleanup(func() { testutil.CloseDB(db) })
+	ctx := context.Background()
+
+	const alias, producer, dataset = "git-synced-ingest", "git-synced-producer", "orders"
+	produces := &schema.StepDatasets{Produces: []schema.ProducedDataset{{Name: dataset}}}
+	importer := internaljobdef.NewImporter(db)
+	apply := func(def schema.Definition) {
+		encoded, err := json.Marshal(def)
+		require.NoError(t, err)
+		var decoded schema.Definition
+		require.NoError(t, json.Unmarshal(encoded, &decoded))
+		_, err = importer.Apply(ctx, &decoded)
+		require.NoError(t, err)
+	}
+	apply(patchDefinition(alias, ""))
+	other := patchDefinition(producer, "")
+	other.Steps[0].Datasets = produces
+	apply(other)
+	var job models.Job
+	require.NoError(t, db.Where("alias = ?", alias).First(&job).Error)
+
+	conflicting := patchDefinition(alias, "")
+	conflicting.Steps[0].Datasets = produces
+	raw, err := json.Marshal(conflicting)
+	require.NoError(t, err)
+	_, err = newIncidentActionOps(db, nil, nil).ApplyJobdefPatch(ctx, job.ID, models.DefaultNamespace, raw, true)
+	require.ErrorContains(t, err, "failed server-side validation")
+}

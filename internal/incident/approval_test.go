@@ -271,8 +271,9 @@ func TestExecuteApprovedAppliesJobdefPatchDirectly(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, models.AgentActionStatusExecuted, executed.Status)
 
-	require.Len(t, ops.applyPatch, 1)
-	require.False(t, ops.applyPatch[0].dryRun, "the direct route applies, it does not merely render")
+	require.Len(t, ops.applyPatch, 2)
+	require.True(t, ops.applyPatch[0].dryRun, "the proposal renders a preview")
+	require.False(t, ops.applyPatch[1].dryRun, "the direct route applies, it does not merely render")
 	require.Empty(t, ops.escalate, "a non-git job must not escalate")
 
 	var result map[string]any
@@ -301,8 +302,9 @@ func TestExecuteApprovedJobdefPatchEscalatesForGitSyncedJob(t *testing.T) {
 	executed, err := exec.ExecuteApproved(context.Background(), action.ID)
 	require.NoError(t, err)
 
-	require.Len(t, ops.applyPatch, 1)
+	require.Len(t, ops.applyPatch, 2, "the preview and the dispatch")
 	require.True(t, ops.applyPatch[0].dryRun, "a git-synced job may only RENDER the patch, never apply it")
+	require.True(t, ops.applyPatch[1].dryRun, "a git-synced job may only RENDER the patch, never apply it")
 	require.Len(t, ops.escalate, 1, "the approved patch must escalate with the diff")
 	require.Contains(t, ops.escalate[0].summary, "alias")
 
@@ -595,5 +597,6 @@ func TestApplyJobdefPatchAllowsAnUnchangedPolicy(t *testing.T) {
 
 	_, err = exec.ExecuteApproved(context.Background(), action.ID)
 	require.NoError(t, err)
-	require.Len(t, ops.applyPatch, 1, "an unchanged policy must not block a legitimate patch")
+	require.Len(t, ops.applyPatch, 2, "an unchanged policy must not block a legitimate patch")
+	require.False(t, ops.applyPatch[1].dryRun)
 }

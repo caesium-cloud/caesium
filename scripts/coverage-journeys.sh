@@ -1912,6 +1912,10 @@ PY
   # hold's bundle, metric series and boundary refusal over REST and MCP, then the
   # approved release. Needs no policy file.
   auth_pattern="${auth_pattern%)}|TestHoldReleaseActionRunsThroughApproval)"
+  # apply_jobdef_patch on a job with git provenance and no write credential
+  # (data-circuit-breaker F3): the approval preview, then the degrade to escalate.
+  # Reaches no forge. Needs no policy file.
+  auth_pattern="${auth_pattern%)}|TestIncidentGitProvenancePatchDegradesToEscalate)"
 
   local -a local_named_passes=(
     TestCaesiumWhyExplainsHitAndMiss
@@ -1982,6 +1986,7 @@ PY
     TestAuthListNamespaceNarrow
     TestHoldIncidentCollapsesForeignImpactForConfinedReader
     TestHoldReleaseActionRunsThroughApproval
+    TestIncidentGitProvenancePatchDegradesToEscalate
   )
   local -a distributed_named_passes=(
     TestNodeWorkersRoute

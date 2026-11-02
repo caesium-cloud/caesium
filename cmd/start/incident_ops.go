@@ -344,13 +344,15 @@ func (o *incidentActionOps) OverrideSchemaGateOnce(ctx context.Context, runID uu
 //
 // The provenance route is NOT decided here — Executor.dispatchApplyJobdefPatch
 // derives it from the job's git fields and calls this with dryRun accordingly.
-// This method only ever sees "render" or "render and apply".
+// This method only ever sees "render" or "render and apply". A render runs every
+// validation the apply does, including the batch validation git sync runs: on the
+// Git-PR route a manifest that fails it would stall the source's sync once merged.
 //
 // namespace is the incident's namespace (identity-and-access A8): the job must
 // still live there, the proposed definition must keep it there, and the apply
 // is confined to it, so the patch cannot touch a trigger or webhook path that
 // also serves another namespace's jobs (B9 trigger tenancy). Both ownership
-// checks run before the dry-run return, so the git-synced route refuses the
+// checks run before the dry-run return, so the git-synced routes refuse the
 // same patches as the direct one.
 func (o *incidentActionOps) ApplyJobdefPatch(ctx context.Context, jobID uuid.UUID, namespace string, definition json.RawMessage, dryRun bool) (json.RawMessage, error) {
 	var job models.Job
@@ -399,9 +401,6 @@ func (o *incidentActionOps) ApplyJobdefPatch(ctx context.Context, jobID uuid.UUI
 	if models.NamespaceOrDefault(current.Namespace) != namespace {
 		return nil, fmt.Errorf("%w: job %q", incident.ErrNamespaceMoved, job.Alias)
 	}
-	if dryRun {
-		return rendered, nil
-	}
 
 	importer := internaljobdef.NewImporter(o.db)
 	// The error is recorded on the incident's action timeline, which readers
@@ -409,6 +408,9 @@ func (o *incidentActionOps) ApplyJobdefPatch(ctx context.Context, jobID uuid.UUI
 	// datasets and contract findings are redacted from it (A8).
 	if err := importer.ValidateBatch(ctx, []schema.Definition{def}); err != nil {
 		return nil, patchErrorf(ctx, o.db, namespace, job.Alias, "incident: proposed job definition failed server-side validation", err)
+	}
+	if dryRun {
+		return rendered, nil
 	}
 	opts := &internaljobdef.ApplyOptions{
 		NamespaceAllowlist: []string{namespace},

@@ -1,0 +1,1203 @@
+package incident
+
+import (
+	"context"
+	"crypto/sha1" //nolint:gosec // git blob ids in a test fake
+	"encoding/base64"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"regexp"
+	"strings"
+	"sync"
+	"testing"
+
+	"github.com/caesium-cloud/caesium/internal/incident/forge"
+	"github.com/caesium-cloud/caesium/internal/models"
+	"github.com/caesium-cloud/caesium/pkg/env"
+	schema "github.com/caesium-cloud/caesium/pkg/jobdef"
+	"github.com/google/uuid"
+	"github.com/stretchr/testify/require"
+	"gorm.io/gorm"
+)
+
+const (
+	forgeTestToken  = "ghs_3kF9xQ2mZ7vB1nT8wR4yL6pD"
+	testManifest    = "pipelines/orders.job.yaml"
+	testAlias       = "orders-daily"
+	testSiblingText = "alias: orders-hourly  # keep this comment"
+)
+
+var (
+	syncedCommit = strings.Repeat("a", 40)
+	headCommit   = strings.Repeat("b", 40)
+)
+
+// manifestFile is a multi-document manifest: a sibling job and comments that a
+// patch of orders-daily must leave byte for byte.
+const manifestFile = `# Owned by data-eng.
+---
+# The daily rollup.
+apiVersion: v1
+kind: Job
+metadata:
+  alias: orders-daily
+trigger:
+  type: cron
+  configuration:
+    cron: "0 6 * * *"
+steps:
+  - name: load
+    image: busybox:1.36.1
+    command: ["true"]
+---
+apiVersion: v1
+kind: Job
+metadata:
+  alias: orders-hourly  # keep this comment
+trigger:
+  type: cron
+  configuration:
+    cron: "0 * * * *"
+steps:
+  - name: load
+    image: busybox:1.36.1
+    command: ["true"]
+`
+
+const patchedDefinition = `apiVersion: v1
+kind: Job
+metadata:
+  alias: orders-daily
+trigger:
+  type: cron
+  configuration:
+    cron: "0 6 * * *"
+steps:
+  - name: load
+    image: busybox:1.36.1
+    command: ["sh", "-c", "exit 0"]
+`
+
+func patchJSON(t *testing.T, manifest string) json.RawMessage {
+	t.Helper()
+	def, err := schema.Parse([]byte(manifest))
+	require.NoError(t, err)
+	encoded, err := json.Marshal(def)
+	require.NoError(t, err)
+	return encoded
+}
+
+// fakeGitHub speaks the GitHub REST shapes the client uses, against an in-memory
+// repository, so a test exercises URL building, headers and error mapping.
+type fakeGitHub struct {
+	mu       sync.Mutex
+	t        *testing.T
+	srv      *httptest.Server
+	heads    map[string]string
+	files    map[string][]byte // "<ref>\x00<path>"
+	pulls    []map[string]any
+	requests []string
+	nextPull int
+	// failOn answers the next request containing it with failStatus and
+	// failMessage, then clears.
+	failOn      string
+	failStatus  int
+	failMessage string
+	redirectTo  string
+	// hidePullsOnce makes the next pull request list come back empty.
+	hidePullsOnce bool
+	// onRequest runs as a request arrives.
+	onRequest func()
+}
+
+func newFakeGitHub(t *testing.T, content string) *fakeGitHub {
+	t.Helper()
+	f := &fakeGitHub{
+		t:        t,
+		heads:    map[string]string{"main": headCommit},
+		files:    map[string][]byte{},
+		nextPull: 40,
+	}
+	f.put(syncedCommit, testManifest, []byte(content))
+	f.put(headCommit, testManifest, []byte(content))
+	f.srv = httptest.NewServer(http.HandlerFunc(f.serve))
+	t.Cleanup(f.srv.Close)
+	return f
+}
+
+func (f *fakeGitHub) put(ref, filePath string, content []byte) {
+	f.files[ref+"\x00"+filePath] = content
+}
+
+func (f *fakeGitHub) get(ref, filePath string) ([]byte, bool) {
+	content, ok := f.files[ref+"\x00"+filePath]
+	return content, ok
+}
+
+func (f *fakeGitHub) requestCount(match string) int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	count := 0
+	for _, request := range f.requests {
+		if strings.Contains(request, match) {
+			count++
+		}
+	}
+	return count
+}
+
+func (f *fakeGitHub) hits() int { return f.requestCount("") }
+
+func (f *fakeGitHub) failNext(match string, status int, message string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.failOn, f.failStatus, f.failMessage = match, status, message
+}
+
+func blobSHA(content []byte) string {
+	sum := sha1.Sum(content) //nolint:gosec // git blob ids in a test fake
+	return hex.EncodeToString(sum[:])
+}
+
+func writeJSON(w http.ResponseWriter, status int, body any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(body)
+}
+
+func (f *fakeGitHub) serve(w http.ResponseWriter, r *http.Request) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	request := r.Method + " " + r.URL.EscapedPath()
+	f.requests = append(f.requests, request)
+	if f.onRequest != nil {
+		f.onRequest()
+	}
+	if r.Header.Get("Authorization") != "Bearer "+forgeTestToken {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"message": "Bad credentials"})
+		return
+	}
+	if f.redirectTo != "" {
+		http.Redirect(w, r, f.redirectTo, http.StatusFound)
+		return
+	}
+	if f.failOn != "" && strings.Contains(request, f.failOn) {
+		status, message := f.failStatus, f.failMessage
+		f.failOn = ""
+		writeJSON(w, status, map[string]any{"message": message})
+		return
+	}
+	const root = "/repos/acme/jobs/"
+	resource, ok := strings.CutPrefix(r.URL.Path, root)
+	if !ok {
+		writeJSON(w, http.StatusNotFound, map[string]any{"message": "Not Found"})
+		return
+	}
+	switch {
+	case strings.HasPrefix(resource, "git/ref/heads/") && r.Method == http.MethodGet:
+		branch := strings.TrimPrefix(resource, "git/ref/heads/")
+		sha, ok := f.heads[branch]
+		if !ok {
+			writeJSON(w, http.StatusNotFound, map[string]any{"message": "Not Found"})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ref": "refs/heads/" + branch, "object": map[string]any{"sha": sha}})
+	case resource == "git/refs" && r.Method == http.MethodPost:
+		var body struct{ Ref, SHA string }
+		require.NoError(f.t, json.NewDecoder(r.Body).Decode(&body))
+		branch := strings.TrimPrefix(body.Ref, "refs/heads/")
+		if _, exists := f.heads[branch]; exists {
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]any{"message": "Reference already exists"})
+			return
+		}
+		f.heads[branch] = body.SHA
+		for key, content := range f.files {
+			if ref, filePath, _ := strings.Cut(key, "\x00"); ref == body.SHA {
+				f.put(branch, filePath, content)
+			}
+		}
+		writeJSON(w, http.StatusCreated, map[string]any{"ref": body.Ref})
+	case strings.HasPrefix(resource, "contents/") && r.Method == http.MethodGet:
+		content, ok := f.get(r.URL.Query().Get("ref"), strings.TrimPrefix(resource, "contents/"))
+		if !ok {
+			writeJSON(w, http.StatusNotFound, map[string]any{"message": "Not Found"})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"type": "file", "encoding": "base64", "sha": blobSHA(content),
+			"content": base64.StdEncoding.EncodeToString(content),
+		})
+	case strings.HasPrefix(resource, "contents/") && r.Method == http.MethodPut:
+		var body struct{ Message, Content, SHA, Branch string }
+		require.NoError(f.t, json.NewDecoder(r.Body).Decode(&body))
+		filePath := strings.TrimPrefix(resource, "contents/")
+		current, ok := f.get(body.Branch, filePath)
+		if !ok || blobSHA(current) != body.SHA {
+			writeJSON(w, http.StatusConflict, map[string]any{"message": "stale blob"})
+			return
+		}
+		decoded, err := base64.StdEncoding.DecodeString(body.Content)
+		require.NoError(f.t, err)
+		f.put(body.Branch, filePath, decoded)
+		writeJSON(w, http.StatusOK, map[string]any{})
+	case resource == "pulls" && r.Method == http.MethodGet:
+		out := []map[string]any{}
+		if f.hidePullsOnce {
+			f.hidePullsOnce = false
+			writeJSON(w, http.StatusOK, out)
+			return
+		}
+		for _, pull := range f.pulls {
+			if "acme:"+pull["head"].(map[string]any)["ref"].(string) == r.URL.Query().Get("head") {
+				out = append(out, pull)
+			}
+		}
+		writeJSON(w, http.StatusOK, out)
+	case resource == "pulls" && r.Method == http.MethodPost:
+		var body struct{ Title, Body, Head, Base string }
+		require.NoError(f.t, json.NewDecoder(r.Body).Decode(&body))
+		for _, pull := range f.pulls {
+			if pull["head"].(map[string]any)["ref"] == body.Head {
+				writeJSON(w, http.StatusUnprocessableEntity, map[string]any{
+					"message": "Validation Failed",
+					"errors":  []map[string]string{{"message": "A pull request already exists for acme:" + body.Head}},
+				})
+				return
+			}
+		}
+		f.nextPull++
+		pull := map[string]any{
+			"number": f.nextPull, "html_url": fmt.Sprintf("%s/acme/jobs/pull/%d", f.srv.URL, f.nextPull), "state": "open",
+			"title": body.Title, "body": body.Body, "base": map[string]any{"ref": body.Base},
+			"head": map[string]any{"ref": body.Head, "repo": map[string]any{"full_name": "acme/jobs"}},
+		}
+		f.pulls = append(f.pulls, pull)
+		writeJSON(w, http.StatusCreated, pull)
+	default:
+		writeJSON(w, http.StatusNotFound, map[string]any{"message": "Not Found"})
+	}
+}
+
+func (f *fakeGitHub) repoURL() string { return f.srv.URL + "/acme/jobs.git" }
+
+// routeFixture is a job with verified provenance, a source and a credential that
+// all agree. A test breaks one of them.
+type routeFixture struct {
+	db     *gorm.DB
+	ops    *fakeOps
+	exec   *Executor
+	inc    *models.Incident
+	forge  *fakeGitHub
+	config ProvenanceConfig
+}
+
+func (f *routeFixture) install() { f.exec.SetProvenanceRouter(NewProvenanceRouter(f.config)) }
+
+func newRouteFixture(t *testing.T, content string) *routeFixture {
+	t.Helper()
+	enableAuthMode(t)
+	db, store, ops, exec := newExecutorTest(t)
+	inc, _, _ := seedJobIncident(t, db, store, "load", "orders-source")
+	github := newFakeGitHub(t, content)
+	require.NoError(t, db.Model(&models.Job{}).Where("id = ?", inc.JobID).Updates(map[string]any{
+		"alias":                testAlias,
+		"provenance_repo":      github.repoURL(),
+		"provenance_ref":       "main",
+		"provenance_commit":    syncedCommit,
+		"provenance_path":      testManifest,
+		"provenance_source_id": "orders-source",
+	}).Error)
+	fixture := &routeFixture{
+		db: db, ops: ops, exec: exec, inc: inc, forge: github,
+		config: ProvenanceConfig{
+			GitSyncEnabled: true,
+			Sources: env.GitSources{{
+				URL: github.repoURL(), Ref: "main", SourceID: "orders-source", Path: "pipelines",
+				Globs: []string{"*.job.yaml"},
+			}},
+			Credentials: env.GitWriteCredentials{{
+				SourceID: "orders-source", Forge: env.GitForgeGitHub, APIBaseURL: github.srv.URL,
+				Token: forgeTestToken, Namespaces: []string{models.DefaultNamespace},
+			}},
+		},
+	}
+	fixture.install()
+	return fixture
+}
+
+func (f *routeFixture) updateJob(t *testing.T, column string, value any) {
+	t.Helper()
+	require.NoError(t, f.db.Model(&models.Job{}).Where("id = ?", f.inc.JobID).Update(column, value).Error)
+}
+
+func (f *routeFixture) propose(t *testing.T, definition json.RawMessage) *models.AgentAction {
+	t.Helper()
+	action, err := f.exec.Execute(context.Background(), ActionRequest{
+		IncidentID: f.inc.ID,
+		Type:       ActionTypeApplyJobdefPatch,
+		Params:     ActionParams{Definition: definition},
+	})
+	require.NoError(t, err)
+	return action
+}
+
+// approveAndExecute drives one proposal through approval.
+func (f *routeFixture) approveAndExecute(t *testing.T, definition json.RawMessage) (*models.AgentAction, map[string]any) {
+	t.Helper()
+	action := f.propose(t, definition)
+	approveAction(t, f.db, action.ID, "operator@example.com", "")
+	executed, err := f.exec.ExecuteApproved(context.Background(), action.ID)
+	require.NoError(t, err)
+	return executed, patchResult(t, executed)
+}
+
+func patchResult(t *testing.T, action *models.AgentAction) map[string]any {
+	t.Helper()
+	var result map[string]any
+	require.NoError(t, json.Unmarshal(action.Result, &result))
+	return result
+}
+
+func requireDegraded(t *testing.T, f *routeFixture, result map[string]any, code string) {
+	t.Helper()
+	require.Equal(t, routeEscalate, result["route"], "result: %v", result)
+	require.Equal(t, code, result["degrade"], "result: %v", result)
+	require.Equal(t, false, result["applied"])
+	require.NotEmpty(t, result["reason"])
+	require.NotEmpty(t, result["diff"], "a degrade carries the rendered diff")
+	require.Len(t, f.ops.escalate, 1)
+	require.Contains(t, f.ops.escalate[0].summary, "alias", "the escalation carries the diff")
+	for _, call := range f.ops.applyPatch {
+		require.True(t, call.dryRun, "a job with provenance is never applied directly")
+	}
+}
+
+func openPull(t *testing.T, github *fakeGitHub) map[string]any {
+	t.Helper()
+	require.Len(t, github.pulls, 1)
+	return github.pulls[0]
+}
+
+// TestGitPRRouteOpensAPullRequest is the live path: the patch lands as a pull
+// request from a deterministic branch, the file changes only in the target
+// document, and the result records the URL.
+func TestGitPRRouteOpensAPullRequest(t *testing.T) {
+	f := newRouteFixture(t, manifestFile)
+
+	executed, result := f.approveAndExecute(t, patchJSON(t, patchedDefinition))
+
+	require.Equal(t, models.AgentActionStatusExecuted, executed.Status)
+	require.Equal(t, routeGitPR, result["route"])
+	require.Equal(t, false, result["applied"])
+	branch := forge.BranchForAction(executed.ID)
+	require.Equal(t, branch, result["pr_branch"])
+	require.Equal(t, "acme/jobs", result["repo"])
+	require.Equal(t, "main", result["base"])
+	require.Equal(t, testManifest, result["path"])
+	require.NotEmpty(t, result["diff"])
+	require.Equal(t, "operator@example.com", result["approved_by"])
+	require.Empty(t, f.ops.escalate, "a pull request is not an escalation")
+
+	pull := openPull(t, f.forge)
+	require.Equal(t, result["pr_url"], pull["html_url"])
+	require.EqualValues(t, pull["number"], result["pr_number"])
+	require.Equal(t, branch, pull["head"].(map[string]any)["ref"])
+	require.Equal(t, "main", pull["base"].(map[string]any)["ref"])
+	require.Contains(t, pull["title"], testAlias)
+	require.Contains(t, pull["body"], f.inc.ID.String())
+
+	written, ok := f.forge.get(branch, testManifest)
+	require.True(t, ok)
+	text := string(written)
+	require.Contains(t, text, "# Owned by data-eng.", "the file header stays")
+	require.Contains(t, text, "# The daily rollup.", "the document's header comment stays")
+	require.Contains(t, text, testSiblingText, "a sibling job stays byte for byte")
+	require.Contains(t, text, "exit 0", "the patch is in the file")
+	original, _ := f.forge.get(headCommit, testManifest)
+	require.Equal(t, manifestFile, string(original), "the base branch is never written")
+	require.Equal(t, 1, f.forge.requestCount("PUT /repos/acme/jobs/contents/"+testManifest), "one write")
+
+	defs, err := decodeManifest(written)
+	require.NoError(t, err)
+	require.Len(t, defs, 2)
+	require.Equal(t, testAlias, defs[0].Metadata.Alias)
+	require.Equal(t, []string{"sh", "-c", "exit 0"}, defs[0].Steps[0].Command)
+	require.Equal(t, "orders-hourly", defs[1].Metadata.Alias)
+}
+
+// TestGitPRRouteUsesTheSourceURLNotTheJobs: job data only has to agree with the
+// source; the repository the token writes to is the configured one, whatever
+// form the job's URL takes.
+func TestGitPRRouteUsesTheSourceURLNotTheJobs(t *testing.T) {
+	f := newRouteFixture(t, manifestFile)
+	f.updateJob(t, "provenance_repo", f.forge.srv.URL+"/acme/jobs")
+
+	_, result := f.approveAndExecute(t, patchJSON(t, patchedDefinition))
+	require.Equal(t, routeGitPR, result["route"])
+}
+
+func TestGitPRRouteResolvesATokenRefAtUse(t *testing.T) {
+	f := newRouteFixture(t, manifestFile)
+	f.config.Credentials[0].Token = ""
+	f.config.Credentials[0].TokenRef = "secret://env/FORGE_TOKEN"
+	resolver := &countingResolver{value: forgeTestToken}
+	f.config.Resolver = resolver
+	f.install()
+
+	action := f.propose(t, patchJSON(t, patchedDefinition))
+	require.Zero(t, resolver.calls, "a preview touches no secret")
+	approveAction(t, f.db, action.ID, "operator@example.com", "")
+	executed, err := f.exec.ExecuteApproved(context.Background(), action.ID)
+	require.NoError(t, err)
+	require.Equal(t, routeGitPR, patchResult(t, executed)["route"])
+	require.Equal(t, 1, resolver.calls)
+	require.Equal(t, "secret://env/FORGE_TOKEN", resolver.ref)
+}
+
+type countingResolver struct {
+	value string
+	err   error
+	calls int
+	ref   string
+}
+
+func (r *countingResolver) Resolve(_ context.Context, ref string) (string, error) {
+	r.calls++
+	r.ref = ref
+	return r.value, r.err
+}
+
+func TestGitPRRouteDegradesWhenTheTokenCannotBeResolved(t *testing.T) {
+	for name, resolver := range map[string]SecretResolver{
+		"resolver error": &countingResolver{err: errors.New("vault sealed")},
+		"empty secret":   &countingResolver{value: "  "},
+		"no resolver":    nil,
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := newRouteFixture(t, manifestFile)
+			f.config.Credentials[0].Token = ""
+			f.config.Credentials[0].TokenRef = "secret://env/FORGE_TOKEN"
+			f.config.Resolver = resolver
+			f.install()
+
+			_, result := f.approveAndExecute(t, patchJSON(t, patchedDefinition))
+			requireDegraded(t, f, result, degradeCredentialUnavailable)
+			require.NotContains(t, result["reason"], "vault sealed")
+			require.Zero(t, f.forge.hits())
+		})
+	}
+}
+
+// TestGitPRRouteRefusesWhatProvenanceCannotProve: each case breaks one link of
+// the trust chain, and the server neither contacts the forge nor applies.
+func TestGitPRRouteRefusesWhatProvenanceCannotProve(t *testing.T) {
+	cases := map[string]struct {
+		code    string
+		corrupt func(t *testing.T, f *routeFixture)
+	}{
+		"no credential at all": {degradeNoCredential, func(_ *testing.T, f *routeFixture) {
+			f.config.Credentials = nil
+		}},
+		"credential for another source": {degradeNoCredential, func(_ *testing.T, f *routeFixture) {
+			f.config.Credentials[0].SourceID = "other-source"
+		}},
+		"credential for another repo": {degradeNoCredential, func(_ *testing.T, f *routeFixture) {
+			f.config.Credentials[0].SourceID = ""
+			f.config.Credentials[0].Repo = f.forge.srv.URL + "/acme/other.git"
+		}},
+		"credential for another namespace": {degradeNoCredential, func(_ *testing.T, f *routeFixture) {
+			f.config.Credentials[0].Namespaces = []string{"marketing"}
+		}},
+		"source sync disabled": {degradeUntrustedProvenance, func(_ *testing.T, f *routeFixture) {
+			f.config.GitSyncEnabled = false
+		}},
+		"no configured source": {degradeUntrustedProvenance, func(_ *testing.T, f *routeFixture) {
+			f.config.Sources = nil
+		}},
+		"asserted source id": {degradeUntrustedProvenance, func(t *testing.T, f *routeFixture) {
+			f.config.Credentials[0].SourceID = ""
+			f.config.Credentials[0].Repo = f.forge.repoURL()
+			f.updateJob(t, "provenance_source_id", "asserted")
+		}},
+		"asserted repository": {degradeUntrustedProvenance, func(t *testing.T, f *routeFixture) {
+			f.updateJob(t, "provenance_repo", f.forge.srv.URL+"/victim/secrets.git")
+		}},
+		"asserted ref": {degradeUntrustedProvenance, func(t *testing.T, f *routeFixture) {
+			f.updateJob(t, "provenance_ref", "release")
+		}},
+		"source excludes the namespace": {degradeUntrustedProvenance, func(_ *testing.T, f *routeFixture) {
+			f.config.Sources[0].Namespaces = []string{"marketing"}
+		}},
+		"tag source": {degradeInvalidProvenance, func(t *testing.T, f *routeFixture) {
+			f.config.Sources[0].Ref = "refs/tags/v1"
+			f.updateJob(t, "provenance_ref", "refs/tags/v1")
+		}},
+		"ref injection": {degradeInvalidProvenance, func(t *testing.T, f *routeFixture) {
+			f.config.Sources[0].Ref = "main..evil"
+			f.updateJob(t, "provenance_ref", "main..evil")
+		}},
+		"path traversal": {degradeInvalidProvenance, func(t *testing.T, f *routeFixture) {
+			f.updateJob(t, "provenance_path", "pipelines/../../secrets.job.yaml")
+		}},
+		"path traversal on an open source": {degradeInvalidProvenance, func(t *testing.T, f *routeFixture) {
+			f.config.Sources[0].Path, f.config.Sources[0].Globs = "", nil
+			f.updateJob(t, "provenance_path", "pipelines/../../secrets.job.yaml")
+		}},
+		"absolute path": {degradeInvalidProvenance, func(t *testing.T, f *routeFixture) {
+			f.updateJob(t, "provenance_path", "/etc/orders.job.yaml")
+		}},
+		"path outside the source": {degradeInvalidProvenance, func(t *testing.T, f *routeFixture) {
+			f.updateJob(t, "provenance_path", "elsewhere/orders.job.yaml")
+		}},
+		"path outside the globs": {degradeInvalidProvenance, func(t *testing.T, f *routeFixture) {
+			f.updateJob(t, "provenance_path", "pipelines/orders.yaml")
+		}},
+		"no commit": {degradeInvalidProvenance, func(t *testing.T, f *routeFixture) {
+			f.updateJob(t, "provenance_commit", "")
+		}},
+		"malformed commit": {degradeInvalidProvenance, func(t *testing.T, f *routeFixture) {
+			f.updateJob(t, "provenance_commit", "main")
+		}},
+		"unnamed job against a named source": {degradeUntrustedProvenance, func(t *testing.T, f *routeFixture) {
+			f.config.Credentials[0].SourceID = ""
+			f.config.Credentials[0].Repo = f.forge.repoURL()
+			f.updateJob(t, "provenance_source_id", "")
+		}},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			f := newRouteFixture(t, manifestFile)
+			tc.corrupt(t, f)
+			f.install()
+
+			executed, result := f.approveAndExecute(t, patchJSON(t, patchedDefinition))
+			require.Equal(t, models.AgentActionStatusExecuted, executed.Status)
+			requireDegraded(t, f, result, tc.code)
+			require.Zero(t, f.forge.hits(), "an unproven job never reaches the forge")
+		})
+	}
+}
+
+// A tenant must not learn which repositories hold a write grant from the refusal.
+func TestNoCredentialReasonDoesNotRevealAGrant(t *testing.T) {
+	reason := func(mutate func(*routeFixture)) any {
+		f := newRouteFixture(t, manifestFile)
+		mutate(f)
+		f.install()
+		_, result := f.approveAndExecute(t, patchJSON(t, patchedDefinition))
+		return result["reason"]
+	}
+	require.Equal(t,
+		reason(func(f *routeFixture) { f.config.Credentials = nil }),
+		reason(func(f *routeFixture) { f.config.Credentials[0].Namespaces = []string{"marketing"} }))
+}
+
+func TestUnnamedSourceMatchesOnlyAJobWithNoSourceID(t *testing.T) {
+	f := newRouteFixture(t, manifestFile)
+	f.config.Sources[0].SourceID = ""
+	f.config.Credentials[0].SourceID = ""
+	f.config.Credentials[0].Repo = f.forge.repoURL()
+	f.updateJob(t, "provenance_source_id", "")
+	f.install()
+
+	_, result := f.approveAndExecute(t, patchJSON(t, patchedDefinition))
+	require.Equal(t, routeGitPR, result["route"])
+}
+
+func TestGitPRRouteWithoutARouterDegrades(t *testing.T) {
+	f := newRouteFixture(t, manifestFile)
+	f.exec.SetProvenanceRouter(nil)
+
+	_, result := f.approveAndExecute(t, patchJSON(t, patchedDefinition))
+	requireDegraded(t, f, result, degradeNoCredential)
+}
+
+// TestDirectRouteIsUnchangedForAJobWithNoProvenance: no forge, no escalation.
+func TestDirectRouteIsUnchangedForAJobWithNoProvenance(t *testing.T) {
+	f := newRouteFixture(t, manifestFile)
+	for _, column := range []string{"provenance_repo", "provenance_ref", "provenance_commit", "provenance_path", "provenance_source_id"} {
+		f.updateJob(t, column, "")
+	}
+	_, result := f.approveAndExecute(t, patchJSON(t, patchedDefinition))
+	require.Equal(t, routeDirect, result["route"])
+	require.Equal(t, true, result["applied"])
+	require.Zero(t, f.forge.hits())
+	require.Empty(t, f.ops.escalate)
+	require.False(t, f.ops.applyPatch[len(f.ops.applyPatch)-1].dryRun)
+}
+
+// A forge outage must not become a direct server-side edit: git sync would
+// revert it, and the human who approved a pull request would get something else.
+func TestForgeOutageNeverFallsBackToADirectApply(t *testing.T) {
+	f := newRouteFixture(t, manifestFile)
+	f.forge.srv.Close()
+
+	_, result := f.approveAndExecute(t, patchJSON(t, patchedDefinition))
+	requireDegraded(t, f, result, degradeForgeError)
+}
+
+func TestForgeServerErrorDegradesBeforeAnyBranchExists(t *testing.T) {
+	f := newRouteFixture(t, manifestFile)
+	f.forge.failNext("GET /repos/acme/jobs/git/ref/heads/main", http.StatusBadGateway, "upstream down")
+
+	_, result := f.approveAndExecute(t, patchJSON(t, patchedDefinition))
+	requireDegraded(t, f, result, degradeForgeError)
+	require.Contains(t, result["reason"], "upstream down")
+	require.NotContains(t, result, "pr_branch")
+}
+
+// TestForgeErrorCarryingTheTokenIsScrubbed reads every place a token could land.
+func TestForgeErrorCarryingTheTokenIsScrubbed(t *testing.T) {
+	f := newRouteFixture(t, manifestFile)
+	f.forge.failNext("POST /repos/acme/jobs/pulls", http.StatusInternalServerError, "denied for "+forgeTestToken)
+
+	executed, result := f.approveAndExecute(t, patchJSON(t, patchedDefinition))
+	requireDegraded(t, f, result, degradeForgeError)
+	require.Contains(t, result["reason"], forge.Redacted)
+
+	require.NotContains(t, string(executed.Result), forgeTestToken)
+	require.NotContains(t, f.ops.escalate[0].summary, forgeTestToken)
+
+	var audits []models.AuditLog
+	require.NoError(t, f.db.Find(&audits).Error)
+	require.NotEmpty(t, audits)
+	for i := range audits {
+		require.NotContains(t, string(audits[i].Metadata), forgeTestToken)
+	}
+	var rows []models.AgentAction
+	require.NoError(t, f.db.Find(&rows).Error)
+	for i := range rows {
+		require.NotContains(t, string(rows[i].Result), forgeTestToken)
+		require.NotContains(t, string(rows[i].Params), forgeTestToken)
+	}
+	var persisted models.Incident
+	require.NoError(t, f.db.First(&persisted, "id = ?", f.inc.ID).Error)
+	require.NotContains(t, string(persisted.Evidence), forgeTestToken)
+	for _, pull := range f.forge.pulls {
+		require.NotContains(t, pull["body"], forgeTestToken)
+	}
+}
+
+func TestRedirectingForgeDegradesAndTheTargetSeesNothing(t *testing.T) {
+	f := newRouteFixture(t, manifestFile)
+	var stolen []string
+	thief := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		stolen = append(stolen, r.Header.Get("Authorization"))
+	}))
+	t.Cleanup(thief.Close)
+	f.forge.redirectTo = thief.URL + "/capture"
+
+	_, result := f.approveAndExecute(t, patchJSON(t, patchedDefinition))
+	requireDegraded(t, f, result, degradeForgeError)
+	require.Empty(t, stolen)
+}
+
+// TestRepeatedExecutionOpensOnePullRequest: the claim makes a second dispatch
+// unreachable today; the route is still idempotent on its own, so a redrive
+// cannot open a second pull request.
+func TestRepeatedExecutionOpensOnePullRequest(t *testing.T) {
+	f := newRouteFixture(t, manifestFile)
+	executed, first := f.approveAndExecute(t, patchJSON(t, patchedDefinition))
+	require.Equal(t, routeGitPR, first["route"])
+
+	require.NoError(t, f.db.Model(&models.AgentAction{}).Where("id = ?", executed.ID).
+		Update("status", models.AgentActionStatusApproved).Error)
+	again, err := f.exec.ExecuteApproved(context.Background(), executed.ID)
+	require.NoError(t, err)
+
+	second := patchResult(t, again)
+	require.Equal(t, routeGitPR, second["route"])
+	require.Equal(t, first["pr_url"], second["pr_url"])
+	require.Equal(t, true, second["pr_existing"])
+	require.Len(t, f.forge.pulls, 1)
+	require.Equal(t, 1, f.forge.requestCount("POST /repos/acme/jobs/pulls"))
+}
+
+// TestRetryConvergesAfterThePullRequestCallFails: the branch and the commit stay
+// from the first attempt, the result says so, and a retry finishes without a
+// second write.
+func TestRetryConvergesAfterThePullRequestCallFails(t *testing.T) {
+	f := newRouteFixture(t, manifestFile)
+	f.forge.failNext("POST /repos/acme/jobs/pulls", http.StatusBadGateway, "try later")
+
+	executed, first := f.approveAndExecute(t, patchJSON(t, patchedDefinition))
+	requireDegraded(t, f, first, degradeForgeError)
+	branch := forge.BranchForAction(executed.ID)
+	require.Equal(t, branch, first["pr_branch"], "the result names what the failure left behind")
+	require.Empty(t, f.forge.pulls)
+
+	require.NoError(t, f.db.Model(&models.AgentAction{}).Where("id = ?", executed.ID).
+		Update("status", models.AgentActionStatusApproved).Error)
+	retried, err := f.exec.ExecuteApproved(context.Background(), executed.ID)
+	require.NoError(t, err)
+
+	second := patchResult(t, retried)
+	require.Equal(t, routeGitPR, second["route"])
+	require.NotContains(t, second, "pr_existing")
+	require.Len(t, f.forge.pulls, 1)
+	require.Equal(t, 1, f.forge.requestCount("PUT /repos/acme/jobs/contents/"), "the commit is not repeated")
+}
+
+// A branch left with a file write missing is finished by the retry.
+func TestRetryConvergesAfterTheWriteFails(t *testing.T) {
+	f := newRouteFixture(t, manifestFile)
+	f.forge.failNext("PUT /repos/acme/jobs/contents/", http.StatusBadGateway, "try later")
+
+	executed, first := f.approveAndExecute(t, patchJSON(t, patchedDefinition))
+	requireDegraded(t, f, first, degradeForgeError)
+	require.Equal(t, forge.BranchForAction(executed.ID), first["pr_branch"])
+
+	require.NoError(t, f.db.Model(&models.AgentAction{}).Where("id = ?", executed.ID).
+		Update("status", models.AgentActionStatusApproved).Error)
+	retried, err := f.exec.ExecuteApproved(context.Background(), executed.ID)
+	require.NoError(t, err)
+	require.Equal(t, routeGitPR, patchResult(t, retried)["route"])
+	written, _ := f.forge.get(forge.BranchForAction(executed.ID), testManifest)
+	require.Contains(t, string(written), "exit 0")
+}
+
+// The pull request exists although the lookup did not see it (a race, or a
+// lagging read): the 422 is a lookup, not a failure.
+func TestAnExistingPullRequestAtOpenIsALookup(t *testing.T) {
+	f := newRouteFixture(t, manifestFile)
+	action := f.propose(t, patchJSON(t, patchedDefinition))
+	approveAction(t, f.db, action.ID, "operator@example.com", "")
+	branch := forge.BranchForAction(action.ID)
+	f.forge.pulls = append(f.forge.pulls, map[string]any{
+		"number": 9, "html_url": "https://forge.example/9", "state": "open",
+		"head": map[string]any{"ref": branch, "repo": map[string]any{"full_name": "acme/jobs"}},
+	})
+	// The first lookup answers with an empty list.
+	f.forge.hidePullsOnce = true
+
+	executed, err := f.exec.ExecuteApproved(context.Background(), action.ID)
+	require.NoError(t, err)
+	result := patchResult(t, executed)
+	require.Equal(t, routeGitPR, result["route"])
+	require.Equal(t, "https://forge.example/9", result["pr_url"])
+	require.Equal(t, true, result["pr_existing"])
+}
+
+// TestNewerManifestIsNotOverwritten: the file moved since the job was synced, so
+// the patch was reviewed against something else. Nothing is written.
+func TestNewerManifestIsNotOverwritten(t *testing.T) {
+	f := newRouteFixture(t, manifestFile)
+	f.forge.put(headCommit, testManifest, []byte(strings.Replace(manifestFile, "0 6 * * *", "0 7 * * *", 1)))
+
+	_, result := f.approveAndExecute(t, patchJSON(t, patchedDefinition))
+	requireDegraded(t, f, result, degradeManifestChanged)
+	require.Zero(t, f.forge.requestCount("POST /repos/acme/jobs/git/refs"), "no branch is created")
+	require.Zero(t, f.forge.requestCount("PUT "))
+	require.Empty(t, f.forge.pulls)
+}
+
+func TestManifestMissingAtTheSyncedCommitDegrades(t *testing.T) {
+	f := newRouteFixture(t, manifestFile)
+	delete(f.forge.files, syncedCommit+"\x00"+testManifest)
+
+	_, result := f.approveAndExecute(t, patchJSON(t, patchedDefinition))
+	requireDegraded(t, f, result, degradeManifestChanged)
+}
+
+// TestStaleBlobAtWriteDoesNotOverwrite: the file moved between the read and the
+// write, so the forge refuses the blob sha and the action says so.
+func TestStaleBlobAtWriteDoesNotOverwrite(t *testing.T) {
+	f := newRouteFixture(t, manifestFile)
+	f.forge.failNext("PUT /repos/acme/jobs/contents/", http.StatusConflict, "does not match")
+
+	executed, result := f.approveAndExecute(t, patchJSON(t, patchedDefinition))
+	requireDegraded(t, f, result, degradeManifestChanged)
+	require.Equal(t, forge.BranchForAction(executed.ID), result["pr_branch"])
+	require.Empty(t, f.forge.pulls)
+}
+
+// A branch holding someone else's commit is not overwritten by the retry.
+func TestForeignChangeOnTheBranchIsNotOverwritten(t *testing.T) {
+	f := newRouteFixture(t, manifestFile)
+	action := f.propose(t, patchJSON(t, patchedDefinition))
+	approveAction(t, f.db, action.ID, "operator@example.com", "")
+	branch := forge.BranchForAction(action.ID)
+	f.forge.heads[branch] = headCommit
+	f.forge.put(branch, testManifest, []byte(manifestFile+"# edited by hand\n"))
+
+	executed, err := f.exec.ExecuteApproved(context.Background(), action.ID)
+	require.NoError(t, err)
+	requireDegraded(t, f, patchResult(t, executed), degradeManifestChanged)
+	require.Zero(t, f.forge.requestCount("PUT "))
+}
+
+func TestManifestProofIsRequired(t *testing.T) {
+	cases := map[string]struct {
+		content string
+		code    string
+		reason  string
+	}{
+		"the file does not declare the job": {
+			strings.ReplaceAll(manifestFile, "alias: orders-daily", "alias: orders-weekly"), degradeManifestUnsafe, "does not declare this job",
+		},
+		"the file declares it in another namespace": {
+			strings.Replace(manifestFile, "alias: orders-daily", "alias: orders-daily\n  namespace: finance", 1), degradeManifestUnsafe, "another namespace",
+		},
+		"the file declares it twice": {
+			strings.ReplaceAll(manifestFile, "alias: orders-hourly  # keep this comment", "alias: orders-daily"), degradeManifestUnsafe, "more than once",
+		},
+		"the file is not a manifest": {"not: [a, job\n", degradeManifestUnsafe, "does not parse"},
+		"the file uses a directive":  {"%YAML 1.2\n" + manifestFile, degradeManifestUnsafe, "unsupported document syntax"},
+		"the file ends a document":   {manifestFile + "...\n", degradeManifestUnsafe, "unsupported document syntax"},
+		"a marker carries content":   {manifestFile + "--- {apiVersion: v1}\n", degradeManifestUnsafe, "unsupported document syntax"},
+		"the patch changes nothing":  {patchedDefinition, degradeManifestUnchanged, "already declares"},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			f := newRouteFixture(t, tc.content)
+			_, result := f.approveAndExecute(t, patchJSON(t, patchedDefinition))
+			requireDegraded(t, f, result, tc.code)
+			require.Contains(t, result["reason"], tc.reason)
+			require.Zero(t, f.forge.requestCount("POST /repos/acme/jobs/git/refs"))
+			require.Zero(t, f.forge.requestCount("PUT "))
+		})
+	}
+}
+
+// TestFileRemediationIsAlsoProtected: the job's stored block may have drifted
+// from the file (a --force apply). The policy in the repository is what governs
+// after the merge, so a patch may not change it there either.
+func TestFileRemediationIsAlsoProtected(t *testing.T) {
+	governed := strings.Replace(manifestFile, "alias: orders-daily", `alias: orders-daily
+  remediation:
+    profile: triage-only
+    classes: [unknown]`, 1)
+	f := newRouteFixture(t, governed)
+	action := f.propose(t, patchJSON(t, patchedDefinition))
+	approveAction(t, f.db, action.ID, "operator@example.com", "")
+
+	executed, err := f.exec.ExecuteApproved(context.Background(), action.ID)
+	require.ErrorIs(t, err, ErrPatchAltersRemediation)
+	require.Equal(t, models.AgentActionStatusFailed, executed.Status)
+	require.Empty(t, f.ops.escalate, "a policy edit is refused, not escalated")
+	require.Zero(t, f.forge.requestCount("PUT "))
+	require.Empty(t, f.forge.pulls)
+}
+
+// The stored policy check runs ahead of the router, on the Git-PR route as on
+// the others.
+func TestStoredRemediationRefusalPrecedesTheRoute(t *testing.T) {
+	f := newRouteFixture(t, manifestFile)
+	require.NoError(t, f.db.Model(&models.Job{}).Where("id = ?", f.inc.JobID).
+		Update("remediation", `{"profile":"triage-only","classes":["unknown"]}`).Error)
+	action := f.propose(t, patchJSON(t, patchedDefinition))
+	approveAction(t, f.db, action.ID, "operator@example.com", "")
+
+	_, err := f.exec.ExecuteApproved(context.Background(), action.ID)
+	require.ErrorIs(t, err, ErrPatchAltersRemediation)
+	require.Zero(t, f.forge.hits())
+}
+
+func TestGitPRRouteIsRefusedWithoutAnAuthMode(t *testing.T) {
+	f := newRouteFixture(t, manifestFile)
+	action := f.propose(t, patchJSON(t, patchedDefinition))
+	approveAction(t, f.db, action.ID, "operator@example.com", "")
+
+	t.Setenv("CAESIUM_AUTH_MODE", "none")
+	require.NoError(t, env.Process())
+	executed, err := f.exec.ExecuteApproved(context.Background(), action.ID)
+	require.ErrorIs(t, err, ErrAuthModeNone)
+	require.Equal(t, models.AgentActionStatusFailed, executed.Status)
+	require.Zero(t, f.forge.hits())
+}
+
+func TestJobMovedOutIsRefusedBeforeTheRoute(t *testing.T) {
+	f := newRouteFixture(t, manifestFile)
+	action := f.propose(t, patchJSON(t, patchedDefinition))
+	approveAction(t, f.db, action.ID, "operator@example.com", "")
+	f.updateJob(t, "namespace", "finance")
+
+	_, err := f.exec.ExecuteApproved(context.Background(), action.ID)
+	require.ErrorIs(t, err, ErrNamespaceMoved)
+	require.Zero(t, f.forge.hits())
+}
+
+// The approving request can go away part-way through the forge calls. The route
+// stops, the human is told, and the row still reaches a terminal state.
+func TestCancelledRouteEndsTruthfully(t *testing.T) {
+	f := newRouteFixture(t, manifestFile)
+	action := f.propose(t, patchJSON(t, patchedDefinition))
+	approveAction(t, f.db, action.ID, "operator@example.com", "")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	f.forge.onRequest = cancel
+
+	executed, err := f.exec.ExecuteApproved(ctx, action.ID)
+	require.NoError(t, err)
+	requireDegraded(t, f, patchResult(t, executed), degradeForgeError)
+
+	var row models.AgentAction
+	require.NoError(t, f.db.First(&row, "id = ?", action.ID).Error)
+	require.Equal(t, models.AgentActionStatusExecuted, row.Status)
+}
+
+// TestPreviewShowsTheApproverTheRoute: the proposal records what approving will
+// do, without touching the forge or a secret. The Console's approval card renders
+// the string `diff`.
+func TestPreviewShowsTheApproverTheRoute(t *testing.T) {
+	f := newRouteFixture(t, manifestFile)
+	action := f.propose(t, patchJSON(t, patchedDefinition))
+	require.Equal(t, models.AgentActionStatusProposed, action.Status)
+
+	var row models.AgentAction
+	require.NoError(t, f.db.First(&row, "id = ?", action.ID).Error)
+	preview := patchResult(t, &row)
+	require.Equal(t, true, preview["preview"])
+	require.Equal(t, routeGitPR, preview["route"])
+	require.Equal(t, "acme/jobs", preview["repo"])
+	require.Equal(t, "main", preview["base"])
+	require.Equal(t, testManifest, preview["path"])
+	require.Equal(t, forge.BranchForAction(action.ID), preview["pr_branch"])
+	require.Contains(t, preview["diff"], "pull request against acme/jobs")
+	require.Zero(t, f.forge.hits(), "a preview makes no forge call")
+	require.Len(t, f.ops.applyPatch, 1)
+	require.True(t, f.ops.applyPatch[0].dryRun)
+}
+
+func TestPreviewShowsADegrade(t *testing.T) {
+	f := newRouteFixture(t, manifestFile)
+	f.config.Credentials = nil
+	f.install()
+	action := f.propose(t, patchJSON(t, patchedDefinition))
+
+	preview := patchResult(t, action)
+	require.Equal(t, routeEscalate, preview["route"])
+	require.Equal(t, degradeNoCredential, preview["degrade"])
+	require.Contains(t, preview["diff"], "escalate")
+	require.NotContains(t, preview, "pr_branch")
+}
+
+func TestPreviewShowsTheDirectRoute(t *testing.T) {
+	f := newRouteFixture(t, manifestFile)
+	for _, column := range []string{"provenance_repo", "provenance_ref", "provenance_commit", "provenance_path", "provenance_source_id"} {
+		f.updateJob(t, column, "")
+	}
+	require.Equal(t, routeDirect, patchResult(t, f.propose(t, patchJSON(t, patchedDefinition)))["route"])
+}
+
+// A proposal naming another job gets no preview: its provenance is not the
+// incident's to show, and the boundary refuses it at dispatch anyway.
+func TestPreviewRespectsTheIncidentBoundary(t *testing.T) {
+	f := newRouteFixture(t, manifestFile)
+	other, _, _ := seedJobIncident(t, f.db, NewStore(f.db), "other", "other-source")
+	action, err := f.exec.Execute(context.Background(), ActionRequest{
+		IncidentID: f.inc.ID,
+		Type:       ActionTypeApplyJobdefPatch,
+		Params:     ActionParams{Definition: patchJSON(t, patchedDefinition), JobID: &other.JobID},
+	})
+	require.NoError(t, err)
+	require.Nil(t, action.Result)
+	require.Empty(t, f.ops.applyPatch)
+}
+
+func TestPreviewRecordsNothingForARefusedPatch(t *testing.T) {
+	f := newRouteFixture(t, manifestFile)
+	require.NoError(t, f.db.Model(&models.Job{}).Where("id = ?", f.inc.JobID).
+		Update("remediation", `{"profile":"triage-only","classes":["unknown"]}`).Error)
+	require.Nil(t, f.propose(t, patchJSON(t, patchedDefinition)).Result)
+	require.Empty(t, f.ops.applyPatch)
+}
+
+// TestPullRequestBodyCarriesTheEvidence is the plan's body contract: the incident
+// id, the violated assertion, the observed/bound/baseline triple and the diff.
+func TestPullRequestBodyCarriesTheEvidence(t *testing.T) {
+	f := newRouteFixture(t, manifestFile)
+	require.NoError(t, f.db.Model(&models.Incident{}).Where("id = ?", f.inc.ID).Updates(map[string]any{
+		"class": string(ClassDataQualityHold),
+		"evidence": `{"dataset_namespace":"warehouse","dataset":"orders","reason":"rowCount breach",
+			"violations":[{"metric":"rowCount","kind":"delta_from_baseline","observed":3,"bound":100,"baseline":{"median":1000}}]}`,
+	}).Error)
+
+	_, result := f.approveAndExecute(t, patchJSON(t, patchedDefinition))
+	require.Equal(t, routeGitPR, result["route"])
+	body := openPull(t, f.forge)["body"].(string)
+	require.Contains(t, body, f.inc.ID.String())
+	require.Contains(t, body, "rowCount")
+	require.Contains(t, body, `"observed": 3`)
+	require.Contains(t, body, `"bound": 100`)
+	require.Contains(t, body, `"median": 1000`)
+	require.Contains(t, body, "alias", "the rendered diff")
+}
+
+var fenceLine = regexp.MustCompile("^`{3,}$")
+
+// outsideFences returns the body's text that a forge would render as Markdown.
+func outsideFences(body string) string {
+	var rendered []string
+	fence := ""
+	for line := range strings.SplitSeq(body, "\n") {
+		switch {
+		case fence == "" && fenceLine.MatchString(line):
+			fence = line
+		case fence != "" && line == fence:
+			fence = ""
+		case fence == "":
+			rendered = append(rendered, line)
+		}
+	}
+	return strings.Join(rendered, "\n")
+}
+
+// TestPullRequestBodyIsSafeForUntrustedValues: job and data values may mention a
+// team, link an issue, or close the fence. None of that may render.
+func TestPullRequestBodyIsSafeForUntrustedValues(t *testing.T) {
+	f := newRouteFixture(t, manifestFile)
+	hostile := "@acme/owners\n```\n# Injected #1 [x](http://evil.example) ![i](http://evil.example/i.png)"
+	encoded, err := json.Marshal(hostile)
+	require.NoError(t, err)
+	require.NoError(t, f.db.Model(&models.Incident{}).Where("id = ?", f.inc.ID).Updates(map[string]any{
+		"class":    string(ClassDataQualityHold),
+		"evidence": `{"dataset":` + string(encoded) + `,"reason":` + string(encoded) + `,"violations":[{"metric":` + string(encoded) + `}]}`,
+	}).Error)
+	f.ops.patchDiff = json.RawMessage(`{"alias":"x","empty":false,"updates":[{"alias":"x","diff":` + string(encoded) + `}]}`)
+
+	_, result := f.approveAndExecute(t, patchJSON(t, patchedDefinition))
+	require.Equal(t, routeGitPR, result["route"])
+
+	pull := openPull(t, f.forge)
+	body := pull["body"].(string)
+	require.Contains(t, body, "@acme/owners", "the value is shown")
+	rendered := outsideFences(body)
+	for _, marker := range []string{"@", "Injected", "http://", "#1", "![", "evil"} {
+		require.NotContains(t, rendered, marker)
+	}
+	require.NotContains(t, pull["title"], "@")
+}
+
+func TestPatchTitleCannotMentionOrLink(t *testing.T) {
+	require.Equal(t, "Patch job acme-owners-1 for incident 00000000", patchTitle("@acme/owners #1", uuid.Nil))
+	require.NotContains(t, patchCommitMessage("@acme [x](y)", uuid.Nil, uuid.Nil), "@")
+}
+
+func TestFencedTextCannotCloseItsFence(t *testing.T) {
+	block := fenced("a ```` b")
+	require.True(t, strings.HasPrefix(block, "`````\n"))
+	require.True(t, strings.HasSuffix(block, "\n`````"))
+}
+
+func TestBoundedSectionTruncatesAndScrubs(t *testing.T) {
+	section := boundedSection(strings.Repeat("é", 100), 51)
+	require.True(t, strings.HasSuffix(section, "truncated; the incident holds the full text"))
+	require.NotContains(t, section, "�")
+	require.Contains(t, boundedSection("key "+forgeTestToken, 1000), Redacted)
+}
+
+func TestSpliceKeepsSiblingBytes(t *testing.T) {
+	rendered, err := renderManifest(patchJSON(t, patchedDefinition))
+	require.NoError(t, err)
+	updated, err := spliceManifest([]byte(manifestFile), rendered, testAlias, models.DefaultNamespace)
+	require.NoError(t, err)
+
+	sibling := manifestFile[strings.LastIndex(manifestFile, "---\n"):]
+	require.True(t, strings.HasSuffix(string(updated), sibling))
+	require.True(t, strings.HasPrefix(string(updated), "# Owned by data-eng.\n---\n# The daily rollup.\n"))
+}
+
+func TestSplicePatchesASingleDocumentFile(t *testing.T) {
+	file := strings.TrimPrefix(manifestFile[:strings.LastIndex(manifestFile, "---\n")], "# Owned by data-eng.\n---\n")
+	rendered, err := renderManifest(patchJSON(t, patchedDefinition))
+	require.NoError(t, err)
+	updated, err := spliceManifest([]byte(file), rendered, testAlias, models.DefaultNamespace)
+	require.NoError(t, err)
+	defs, err := decodeManifest(updated)
+	require.NoError(t, err)
+	require.Len(t, defs, 1)
+	require.Equal(t, []string{"sh", "-c", "exit 0"}, defs[0].Steps[0].Command)
+}
+
+func TestSpliceHandlesCRLFMarkers(t *testing.T) {
+	file := strings.ReplaceAll(manifestFile, "\n", "\r\n")
+	rendered, err := renderManifest(patchJSON(t, patchedDefinition))
+	require.NoError(t, err)
+	updated, err := spliceManifest([]byte(file), rendered, testAlias, models.DefaultNamespace)
+	require.NoError(t, err)
+	require.Contains(t, string(updated), "alias: orders-hourly  # keep this comment\r\n")
+}
+
+// TestSpliceAcceptsANamespaceWrittenOutOrDefaulted: a manifest that omits the
+// namespace declares `default`.
+func TestSpliceAcceptsANamespaceWrittenOutOrDefaulted(t *testing.T) {
+	explicit := strings.Replace(manifestFile, "alias: orders-daily", "alias: orders-daily\n  namespace: default", 1)
+	rendered, err := renderManifest(patchJSON(t, patchedDefinition))
+	require.NoError(t, err)
+	_, err = spliceManifest([]byte(explicit), rendered, testAlias, models.DefaultNamespace)
+	require.NoError(t, err)
+}
+
+func TestRenderManifestRefusesAnInvalidDefinition(t *testing.T) {
+	_, err := renderManifest(json.RawMessage(`{"apiVersion":"v1"}`))
+	require.Error(t, err)
+	_, err = renderManifest(json.RawMessage(`[`))
+	require.Error(t, err)
+}
+
+// TestRenderedExamplesRoundTrip runs every shipped example through JSON (the
+// proposal shape), the renderer and the real parser.
+func TestRenderedExamplesRoundTrip(t *testing.T) {
+	paths, err := filepath.Glob("../../docs/examples/*.job.yaml")
+	require.NoError(t, err)
+	require.NotEmpty(t, paths)
+	for _, file := range paths {
+		raw, err := os.ReadFile(file)
+		require.NoError(t, err)
+		defs, err := decodeManifest(raw)
+		require.NoError(t, err, file)
+		for i := range defs {
+			encoded, err := json.Marshal(&defs[i])
+			require.NoError(t, err, file)
+			rendered, err := renderManifest(encoded)
+			require.NoError(t, err, file)
+			require.True(t, sameJob(&defs[i], rendered.Definition), file)
+		}
+	}
+}
+
+func TestSourceCovers(t *testing.T) {
+	cases := []struct {
+		source env.GitSourceConfig
+		path   string
+		want   bool
+	}{
+		{env.GitSourceConfig{}, "a.yaml", true},
+		{env.GitSourceConfig{}, "a.txt", false},
+		{env.GitSourceConfig{Path: "/jobs/"}, "jobs/a.yml", true},
+		{env.GitSourceConfig{Path: "jobs"}, "jobsuffix/a.yaml", false},
+		{env.GitSourceConfig{Path: "."}, "a.yaml", true},
+		{env.GitSourceConfig{Globs: []string{"**/*.job.yaml"}}, "x/y/a.job.yaml", true},
+		{env.GitSourceConfig{Path: "jobs", Globs: []string{"*.job.yaml"}}, "jobs/a.job.yaml", true},
+		{env.GitSourceConfig{Path: "jobs", Globs: []string{"*.job.yaml"}}, "jobs/x/a.job.yaml", false},
+	}
+	for _, tc := range cases {
+		require.Equal(t, tc.want, sourceCovers(&tc.source, tc.path), "%+v %s", tc.source, tc.path)
+	}
+}
+
+func TestSyncBranch(t *testing.T) {
+	branch, err := syncBranch("")
+	require.NoError(t, err)
+	require.Equal(t, "main", branch, "git sync reads an empty ref as main")
+	branch, err = syncBranch("refs/heads/release/1")
+	require.NoError(t, err)
+	require.Equal(t, "release/1", branch)
+	_, err = syncBranch("refs/tags/v1")
+	require.Error(t, err)
+}
+
+func TestSameRepoIgnoresTheURLForm(t *testing.T) {
+	require.True(t, sameRepo("https://user:pw@github.com/a/b.git", "git@github.com:a/b.git"))
+	require.False(t, sameRepo("https://github.com/a/b", "https://github.com/a/c"))
+	require.False(t, sameRepo("https://github.com/a/b", "https://gitlab.com/a/b"))
+	require.False(t, sameRepo("not a url", "not a url"))
+}

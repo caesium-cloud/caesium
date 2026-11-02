@@ -258,6 +258,9 @@ func (e *Executor) ExecuteApproved(ctx context.Context, actionID uuid.UUID) (*mo
 	// allowlist governs what the AGENT may do autonomously; an operator who
 	// approved this exact action has already answered that question.
 	result, execErr := e.dispatch(ctx, action.Type, inc, &action, params, Playbook{})
+	// The approving request may have gone away during a long dispatch. What the
+	// dispatch did must still reach the row, or it strands in `executing`.
+	ctx = context.WithoutCancel(ctx)
 	if execErr != nil {
 		e.finishAs(ctx, &action, models.AgentActionStatusFailed, map[string]any{
 			"error":       execErr.Error(),

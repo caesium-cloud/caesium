@@ -201,7 +201,9 @@ type ActionOps interface {
 	// These three are reachable ONLY from Executor.ExecuteApproved, i.e. after a
 	// human decision recorded on an ApprovalRequest. dispatch() is shared with
 	// the autonomous path, but Playbook.decide routes every tier-3 type to
-	// decisionApprove, so Execute() can never reach them.
+	// decisionApprove, so Execute() can never reach them. The one exception is a
+	// dry-run ApplyJobdefPatch at proposal time, which renders the approver's
+	// preview and changes nothing.
 
 	// SkipTask marks a task in a run skipped. The adapter goes through the
 	// shipped run.Store.SkipTask, whose skipTaskAndDescendantsTx honours the
@@ -544,7 +546,7 @@ func (e *Executor) dispatch(ctx context.Context, actionType string, inc *models.
 		}, nil
 
 	case ActionTypeApplyJobdefPatch:
-		return e.dispatchApplyJobdefPatch(ctx, inc, params)
+		return e.dispatchApplyJobdefPatch(ctx, inc, action, params)
 
 	case ActionTypeReleaseHold:
 		return e.dispatchReleaseHold(ctx, inc, action, params)
@@ -582,34 +584,29 @@ var ErrPatchDefinitionRequired = errors.New("incident: apply_jobdef_patch requir
 // plus a permissive `metadata.remediation`, and a human approving what looks
 // like a no-op hands the agent a wider allowlist for every later proposal.
 //
-// The refusal is unconditional and covers BOTH provenance routes, so it holds
-// whether the patch is applied directly or (for a git-synced job) rendered and
-// escalated. A human editing the block through `caesium job apply` is unaffected;
-// only the agent's own action surface is refused.
+// The refusal is unconditional and covers EVERY provenance route, so it holds
+// whether the patch is applied directly or (for a git-synced job) opened as a
+// pull request or escalated. The Git-PR route also compares the block in the
+// manifest file. A human editing the block through `caesium job apply` is
+// unaffected; only the agent's own action surface is refused.
 var ErrPatchAltersRemediation = errors.New("incident: apply_jobdef_patch may not change metadata.remediation: an agent may not edit the policy that governs it")
 
 // ErrPatchMovesNamespace refuses a proposed definition whose metadata.namespace
 // is not the incident's namespace: a remediation acts inside its incident's
 // namespace and may not move the job to another one (identity-and-access A8).
-// ActionOps.ApplyJobdefPatch returns it on both provenance routes, before the
+// ActionOps.ApplyJobdefPatch returns it on every provenance route, before the
 // dry-run render, after the declared-namespace check.
 var ErrPatchMovesNamespace = errors.New("incident: apply_jobdef_patch may not change metadata.namespace: the job must stay in the incident's namespace")
 
 // dispatchApplyJobdefPatch is the provenance router for the tier-3 jobdef patch.
 //
-// It is enforced SERVER-SIDE and the agent cannot choose the route: for a job
-// with authoritative git provenance a direct database apply is refused (the next
-// sync cycle would silently revert it and leave Git and the database in
-// disagreement), so the approved patch degrades to `escalate` with the rendered
-// diff attached. Only a job with no git provenance takes the direct
-// diff + apply path.
-//
-// The Git-PR route (open a PR against the source repo using
-// CAESIUM_GIT_WRITE_CREDENTIALS, internal/incident/provenance.go) is
-// deliberately NOT here: it belongs to data-circuit-breaker.md Stream F in the
-// closed-loop arc. Until it lands, a git-synced job escalates with the diff,
-// which is the completed plan's documented no-credentials behaviour.
-func (e *Executor) dispatchApplyJobdefPatch(ctx context.Context, inc *models.Incident, params ActionParams) (map[string]any, error) {
+// It is enforced SERVER-SIDE and the agent cannot choose the route. A job with
+// any git provenance is never applied directly: the next sync cycle would
+// silently revert the edit and leave Git and the database in disagreement. Such
+// a job takes the Git-PR route (provenance.go), which degrades to `escalate` with
+// the rendered diff when it cannot proceed. Only a job with no git provenance
+// takes the direct diff + apply path.
+func (e *Executor) dispatchApplyJobdefPatch(ctx context.Context, inc *models.Incident, action *models.AgentAction, params ActionParams) (map[string]any, error) {
 	if !authModeActive() {
 		return nil, ErrAuthModeNone
 	}
@@ -620,59 +617,21 @@ func (e *Executor) dispatchApplyJobdefPatch(ctx context.Context, inc *models.Inc
 		return nil, errNoOps
 	}
 
-	jobID := resolveJobID(inc, params)
-	var job models.Job
-	if err := e.store.DB().WithContext(ctx).First(&job, "id = ?", jobID).Error; err != nil {
-		return nil, fmt.Errorf("incident: load job for jobdef patch: %w", err)
-	}
-	// The remediation compared (and quoted) below belongs to the job's owner.
-	// dispatch's namespace check ran on an earlier read, so a move committed
-	// since then is caught on THIS row before its remediation is inspected:
-	// another namespace's policy never reaches the incident's timeline
-	// (identity-and-access A8).
-	if models.NamespaceOrDefault(job.Namespace) != IncidentNamespace(inc) {
-		return nil, fmt.Errorf("%w: job %s", ErrNamespaceMoved, job.ID)
-	}
-
-	// Refuse a self-modifying patch BEFORE the provenance router, so neither the
-	// direct route nor the escalate route can carry a policy edit.
-	if err := refuseRemediationEdit(job.Remediation, params.Definition); err != nil {
+	job, err := e.loadPatchJob(ctx, inc, params)
+	if err != nil {
 		return nil, err
 	}
 
-	if gitSynced(&job) {
-		diff, err := e.ops.ApplyJobdefPatch(ctx, jobID, IncidentNamespace(inc), params.Definition, true)
-		if err != nil {
-			return nil, err
-		}
-		summary := params.Summary
-		if summary == "" {
-			summary = fmt.Sprintf("approved jobdef patch for git-synced job %q cannot be applied directly; apply it in the source repository", job.Alias)
-		}
-		routed, err := e.ops.Escalate(ctx, inc.ID, params.Channel, summary+"\n"+string(diff))
-		if err != nil {
-			return nil, err
-		}
-		out := map[string]any{
-			"job_id":    jobID.String(),
-			"job_alias": job.Alias,
-			"route":     routeEscalate,
-			"applied":   false,
-			"routed":    routed,
-			"reason":    "job has authoritative git provenance; a direct apply would be reverted by the next sync",
-		}
-		if len(diff) > 0 {
-			out["diff"] = diff
-		}
-		return out, nil
+	if gitSynced(job) {
+		return e.dispatchGitSyncedPatch(ctx, inc, action, job, params)
 	}
 
-	diff, err := e.ops.ApplyJobdefPatch(ctx, jobID, IncidentNamespace(inc), params.Definition, false)
+	diff, err := e.ops.ApplyJobdefPatch(ctx, job.ID, IncidentNamespace(inc), params.Definition, false)
 	if err != nil {
 		return nil, err
 	}
 	out := map[string]any{
-		"job_id":    jobID.String(),
+		"job_id":    job.ID.String(),
 		"job_alias": job.Alias,
 		"route":     routeDirect,
 		"applied":   true,

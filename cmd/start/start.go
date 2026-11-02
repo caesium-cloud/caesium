@@ -867,6 +867,11 @@ func start(cmd *cobra.Command, args []string) error {
 		})
 	}
 
+	resolver, err := runtime.BuildSecretResolver(vars)
+	if err != nil {
+		log.Fatal("secret resolver configuration failure", "error", err)
+	}
+
 	// --- Agent-in-the-Loop Remediation (Phase 0 incident substrate) ---
 	//
 	// The whole feature is gated behind CAESIUM_AGENT_REMEDIATION_ENABLED; a
@@ -890,6 +895,14 @@ func start(cmd *cobra.Command, args []string) error {
 		// The approval/execution lifecycle rides the shared event stream, persisted
 		// first so approval_requested / agent_action_executed survive a restart.
 		incExecutor.SetEventSink(bus, incEventStore)
+		// The Git-PR route of apply_jobdef_patch. With no write credential
+		// configured it is inert: a git-synced patch degrades to escalate.
+		incExecutor.SetProvenanceRouter(incident.NewProvenanceRouter(incident.ProvenanceConfig{
+			GitSyncEnabled: vars.JobdefGitEnabled,
+			Sources:        vars.JobdefGitSources,
+			Credentials:    vars.GitWriteCredentials,
+			Resolver:       resolver,
+		}))
 
 		// --- Tier-3 approval pipeline, both ends (trust-the-substrate C4 + C7) ---
 		//
@@ -971,10 +984,6 @@ func start(cmd *cobra.Command, args []string) error {
 	}
 
 	importer := jobdef.NewImporter(db.Connection())
-	resolver, err := runtime.BuildSecretResolver(vars)
-	if err != nil {
-		log.Fatal("secret resolver configuration failure", "error", err)
-	}
 	var connectorRuntime *connectorsvc.Runtime
 	if vars.ConnectorsEnabled {
 		cfg, fingerprint, _ := connectorcore.Current()

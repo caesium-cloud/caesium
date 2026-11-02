@@ -877,3 +877,38 @@ A source with `namespaces` may only apply manifests whose `metadata.namespace` (
 - **Audit.** Each sync of the source writes one audit row: actor `system:git-sync`, action `jobdef.git_sync`, resource `git_source` / the `source_id`. Its outcome is `success`, `denied` (a manifest was skipped or a job was left unpruned) or `error`, and its metadata holds the source URL (credentials, query and fragment removed), ref, commit, `namespaces`, `applied`, `violations`, `pruned` and `prune_skipped`. Read it with `caesium auth audit --action jobdef.git_sync` (needs an auth mode). Unrestricted sources write no audit row.
 - **Startup checks.** With git sync enabled, the server refuses to start (`git sync configuration failure`) when `namespaces` is `[]` or holds `""`, `*` or an entry that is not a DNS label, or when a source with `namespaces` lacks a non-empty `source_id` or shares it with another source (ownership and pruning follow `source_id`). A `namespaces` value of `null`, a singular `namespace` key, or two case variants of `namespaces` in one entry are rejected while the environment is parsed (`environment failure`), so they fail every `caesium` command, even with git sync disabled. Neither error echoes the `CAESIUM_JOBDEF_GIT_SOURCES` value, which can hold inline credentials.
 - Entries are checked for syntax only, not against declared namespaces.
+
+### Pull requests for agent patches
+
+`CAESIUM_GIT_WRITE_CREDENTIALS` lets an approved `apply_jobdef_patch` land as a pull request against the repository a job was synced from. It is a separate grant: a source's sync credentials are never used to write. Without a matching entry the approved patch escalates with the rendered diff.
+
+```json
+[
+  {
+    "source_id": "orders",
+    "forge": "github",
+    "api_base_url": "https://api.github.com",
+    "token_ref": "secret://env/ORDERS_FORGE_TOKEN",
+    "namespaces": ["marketing"]
+  }
+]
+```
+
+| Key | Meaning |
+| --- | --- |
+| `source_id`, `repo` | Which jobs the entry serves: a `CAESIUM_JOBDEF_GIT_SOURCES` `source_id`, a repository URL, or both. At least one is required, and each one set must match. |
+| `forge` | `github` (GitHub or GitHub Enterprise). |
+| `api_base_url` | The API root, such as `https://ghe.example.com/api/v3`. It must use `https`, or `http` on a loopback host, and its host must serve the repository. The token is sent nowhere else, and redirects are refused. |
+| `token`, `token_ref` | The token, or a `secret://` reference resolved each time it is used. Exactly one is required. |
+| `namespaces` | The tenancy namespaces whose jobs may use the entry. Required; `*` is not accepted. |
+
+An entry that breaks these rules fails every `caesium` command while the environment is parsed, and the error never echoes the value. An unknown key is refused too.
+
+A job takes the route only when all of this holds, and otherwise the patch escalates with `degrade` and `reason` on the action result:
+
+- git sync is on, and a configured source has the job's `source_id`, repository and ref, and admits its namespace;
+- the job's manifest path is one that source syncs, and the ref is a branch;
+- the file declares the job's alias in the job's namespace, exactly once;
+- the file is the same blob it was at the commit the job was synced from.
+
+The pull request comes from the branch `caesium/patch-<action id>`. It replaces only the job's document: sibling jobs and the comments above the document stay byte for byte, while comments inside the document are lost. Job and data values appear in the description only inside code blocks, so they cannot mention anyone. A job with provenance is never edited on the server, even when the forge is down, because the next sync would revert the edit. The hold stays until the merged change is synced and a clean run releases it.

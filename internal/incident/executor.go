@@ -45,6 +45,10 @@ type Executor struct {
 	// /v1/events rather than existing only as an in-memory fan-out.
 	bus        event.Bus
 	eventStore *event.Store
+
+	// provenance is the Git-PR route of apply_jobdef_patch; nil degrades every
+	// git-synced patch to escalate.
+	provenance *ProvenanceRouter
 }
 
 // SetEventSink wires the process event bus and the durable event store onto the
@@ -364,6 +368,9 @@ func (e *Executor) Execute(ctx context.Context, req ActionRequest) (*models.Agen
 			if settled, err := e.settleReleaseProposal(ctx, inc, action, req.Params); settled {
 				return action, err
 			}
+		}
+		if req.Type == ActionTypeApplyJobdefPatch {
+			e.recordPatchPreview(ctx, inc, action, req.Params)
 		}
 		e.observe(action)
 		e.mirrorAudit(ctx, action, "proposed", "")

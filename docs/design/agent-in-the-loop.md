@@ -12,11 +12,11 @@
 > `ApprovalRequest` and parks the incident in `awaiting_approval`, an approved
 > action is executed by `incident.Executor.ExecuteApproved` under the decider's
 > identity, and `skip_task`/`override_schema_gate`/`apply_jobdef_patch` all
-> dispatch. **Caveat:** `apply_jobdef_patch` ships the **direct** route only
-> (jobs with no git provenance); a git-synced job's approved patch degrades to
-> `escalate` with the rendered diff, and the **Git-PR route
-> (`CAESIUM_GIT_WRITE_CREDENTIALS`, `internal/incident/provenance.go`) is
-> data-circuit-breaker.md Stream F's**, not shipped here. Exec plan:
+> dispatch. `apply_jobdef_patch` patches a job with no git provenance directly;
+> a git-synced job's approved patch opens a pull request through the **Git-PR
+> route** (`CAESIUM_GIT_WRITE_CREDENTIALS`, `internal/incident/provenance.go`,
+> shipped by data-circuit-breaker.md F3) and otherwise degrades to `escalate`
+> with the rendered diff. Exec plan:
 > [`agent-in-the-loop-remediation.md`](../exec-plans/completed/agent-in-the-loop-remediation.md);
 > the `metadata.remediation` surface is documented in
 > [`job-schema-reference.md`](../job-schema-reference.md#remediation). Companion
@@ -443,21 +443,34 @@ F builds the second one as new work.
   outright — `ErrPatchAltersRemediation` — if the proposed definition would
   change the job's own `metadata.remediation` block; an agent may not edit
   the policy that governs it.
-- **The Git-PR route is not yet shipped** —
+- **The Git-PR route** —
   [`data-circuit-breaker.md`](../exec-plans/active/data-circuit-breaker.md)
-  Stream F item **F3**. For a job with non-empty `ProvenanceRepo`, a new
-  `internal/incident/provenance.go` router branches from `ProvenanceRef`,
-  writes the rendered manifest at `ProvenancePath`, and opens a pull request
-  (GitHub first; the forge interface admits others) whose body carries the
+  Stream F item **F3**. For a job with non-empty `ProvenanceRepo`,
+  `internal/incident/provenance.go` branches from the source's ref, patches the
+  job's document in the manifest at `ProvenancePath`, and opens a pull request
+  (GitHub first; `internal/incident/forge` admits others) whose body carries the
   incident id, the violated assertion, the observed/bound/baseline triple,
   and the rendered diff. Credentials come from `CAESIUM_GIT_WRITE_CREDENTIALS`
   (see [`data-circuit-breaker.md`](data-circuit-breaker.md)
   § "Events, notifications, REST, env") — a grant separate from read-only
-  sync credentials. Until F3 lands, and whenever no credential entry matches
-  the job's repo once it has, a git-synced job's approved patch **degrades to
-  `escalate`** with the rendered diff attached — the behavior already shipped
-  today, which becomes the fallback rather than the only outcome once F3
-  merges.
+  sync credentials.
+
+  A job's provenance is client-asserted when it came through the REST apply, so
+  the route trusts none of it alone. The job needs a credential that lists its
+  namespace, a configured git source (with git sync on) that agrees on id,
+  repository and ref, admits the namespace and scopes the path, and a manifest
+  that declares its alias in its namespace and has not changed since the synced
+  commit. The repository written to comes from the source's configuration. Only
+  that document of the file changes: sibling jobs stay byte for byte, and the
+  blob sha guards the write. The branch derives from the action id, so a repeat
+  finds the same branch and pull request.
+
+  Anything short of that **degrades to `escalate`** with the rendered diff, and
+  the action result records why (`degrade`, `reason`). A forge outage degrades
+  the same way: a job with provenance never falls back to a direct edit. The
+  token goes only to the entry's API base URL, over no redirect, and is scrubbed
+  from every error. The proposal records a preview of the route, from
+  configuration alone, so the approver sees the outcome before deciding.
 
 ### Declarative policy
 
@@ -717,9 +730,9 @@ matching the data-plane-memory-ui precedent.
   Builds trust and a labeled corpus of (incident → good action).
 - **Phase 2 — Bounded autonomy (agent in the loop).** Tier 1/2 autonomous
   execution per playbook, tier-3 approval flow, budgets, loop guards,
-  take-over. `apply_jobdef_patch` ships here for jobs *without* git
-  provenance only; on git-synced jobs the provenance router degrades it to
-  escalate-with-diff until the Git-PR route exists in Phase 3. This is the
+  take-over. `apply_jobdef_patch` shipped here for jobs *without* git
+  provenance only; on git-synced jobs the provenance router degraded it to
+  escalate-with-diff until the Git-PR route landed in Phase 3. This is the
   headline release.
 - **Phase 3 — Learning and reach.** Jobdef patches as Git PRs on git-synced
   jobs (completing the provenance router); recurring-pattern proposals (cron

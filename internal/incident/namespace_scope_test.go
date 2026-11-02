@@ -332,6 +332,7 @@ func TestExecuteApprovedRefusesJobMovedOutOfIncidentNamespace(t *testing.T) {
 	require.NoError(t, err)
 	approveAction(t, db, action.ID, "carol@example.com", "")
 	setJobNamespace(t, db, inc.JobID, "finance")
+	ops.applyPatch = nil // the proposal's preview
 
 	executed, err := exec.ExecuteApproved(context.Background(), action.ID)
 	require.ErrorIs(t, err, ErrNamespaceMoved)
@@ -429,6 +430,7 @@ func TestApplyJobdefPatchRefusalNeverQuotesAMovedJobsPolicy(t *testing.T) {
 	})
 	require.NoError(t, err)
 	approveAction(t, db, action.ID, "erin@example.com", "")
+	ops.applyPatch = nil // the proposal's preview
 
 	// The boundary check reads only the job's namespace; the move lands right
 	// after it, replacing the remediation with finance's.

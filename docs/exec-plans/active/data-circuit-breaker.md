@@ -1523,7 +1523,7 @@ precedent for it is warn-mode schema validation, which publishes
       `incidentJobAlias` is `Unscoped()`, and `History` keeps the incident's job id
       for its own alias. `build/triage-agent.sh` accepts an empty DAG and proposes
       nothing on it.
-- [ ] F3. Build the **Git-PR provenance route** of `apply_jobdef_patch` — B4's
+- [x] F3. Build the **Git-PR provenance route** of `apply_jobdef_patch` — B4's
       unbuilt half — so a producer patch proposed from a hold lands as a pull
       request instead of a silent server-side edit. (a) **Credentials:** add a new
       `CAESIUM_GIT_WRITE_CREDENTIALS` field to the `Environment` struct in
@@ -1574,6 +1574,29 @@ precedent for it is warn-mode schema validation, which publishes
       **C4 + C7** — the pipeline and the *direct* `apply_jobdef_patch` route this
       one branches beside. See `## Sequencing & Dependencies` § Cross-PLAN order.
       Depends on: F2 + N-2.
+      *Note (W7-α, 2026-11-02):* shipped in `internal/incident/provenance.go`,
+      `internal/incident/provenance_manifest.go`, `internal/incident/forge/` and
+      `pkg/env/git_write.go`. Job provenance can be asserted through the REST apply,
+      so it proves nothing alone. A job needs a credential listing its namespace, a
+      configured source (with git sync on) agreeing on id, repository and ref,
+      admitting the namespace and scoping the path, and a manifest that declares its
+      alias in its namespace and is the same blob as at the synced commit. The
+      repository written to comes from the source, not the job. Decisions beyond the
+      text above: `namespaces` is required on a credential, because neither design
+      doc scoped one, and a refusal does not say whether another namespace's entry
+      exists. "Empty `ProvenanceRepo` ⇒ direct" stays narrower than written: a job
+      with any provenance field never takes the direct route, so partial provenance
+      escalates (`gitSynced`, unchanged). There was no proposal-time dry-run to build
+      on, so the proposal now records a route preview from configuration alone, plus
+      the diff, as the `proposed` row's `result`; the executed result overwrites it.
+      The dry-run now runs `ValidateBatch`, so a manifest that would stall git sync
+      once merged is refused on every route. A failed route leaves its branch and
+      names it in `pr_branch`; the branch is `caesium/patch-<action id>`, so a repeat
+      converges. `ExecuteApproved` writes its terminal status on a context detached
+      from the request. Only the patched document changes, so comments inside it are
+      lost; a sibling's or a header's are kept. The Console shows the preview through
+      the approval card's `diff` string and the result through the timeline's JSON;
+      `pr_url` is not yet a link.
 - [x] F4. Make **held ⇒ not fresh**. A poisoned-but-recent partition must never
       satisfy a freshness trigger or advance downstream scheduling. In
       `internal/freshness/evaluator.go`, `statusFor(...)` computes the dataset's
@@ -2278,6 +2301,12 @@ question, not a fact). Each must be answered *in the PR that first touches it*.
    an integration test cannot open a real PR, so the honest bar is a unit test
    against a fake forge client plus an integration test of the degrade-to-escalate
    path. Confirm that bar in F3 rather than claiming end-to-end PR coverage.
+   **Answered 2026-11-02 (F3, W7-α): that bar stands.** GitHub and GitHub
+   Enterprise ship; `forge.Client` admits others. The live pull request path is
+   unit-tested against an `httptest` server speaking the GitHub API shapes, with the
+   real client, so URL building, headers and error mapping run. The agent lane and
+   the coverage journey drive only the no-credential degrade, so the forge client
+   has no integration coverage and nothing in CI talks to a real forge.
 6. **Multi-producer release (design open question 2).** Does a clean run of
    producer B release a hold opened by producer A? The design proposes "no — only
    the holder's clean run". C3 must implement one answer explicitly; record it.
