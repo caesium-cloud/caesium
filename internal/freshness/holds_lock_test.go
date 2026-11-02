@@ -58,7 +58,9 @@ func TestHeldWriteHoldCheckTakesARowLockOnPostgres(t *testing.T) {
 // lock, then reset the row, so `held` never survives the release.
 func TestPostgresReleaseBetweenHoldCheckAndHeldWriteDoesNotStrandHeld(t *testing.T) {
 	db, monitor := openStatePostgres(t)
-	require.NoError(t, db.AutoMigrate(&models.DatasetHold{}))
+	// The run store appends dataset_released to execution_events in the release
+	// transaction, so that table must exist too.
+	require.NoError(t, db.AutoMigrate(&models.DatasetHold{}, &models.ExecutionEvent{}))
 	setDataAssertions(t, true)
 	ctx := context.Background()
 

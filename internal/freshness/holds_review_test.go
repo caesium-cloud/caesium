@@ -54,6 +54,36 @@ func TestEvaluatorHonoursOnUpstreamHoldRun(t *testing.T) {
 	}
 }
 
+// A hold opened before the dataset's first observation, still inside its SLO,
+// records an admission skip that names the hold - not skipped_fresh "waiting for
+// first observation". (The held write itself is covered above.)
+func TestEvaluatorHeldBeforeFirstObservationRecordsAdmissionSkip(t *testing.T) {
+	setDataAssertions(t, true)
+	db := openRegistryDB(t)
+	jobID := seedFreshnessJob(t, db, "unobserved-decision")
+	decl := produceDecl(jobID, "out", "24h", "")
+	seedDeclarations(t, db, decl)
+	now := decl.CreatedAt.Add(time.Minute)
+	hold := seedActiveHold(t, db, "", "out")
+
+	starter := &fakeRunStarter{t: t, db: db}
+	if err := newHoldEvaluator(db, starter, now).EvaluateOnce(context.Background()); err != nil {
+		t.Fatalf("evaluate: %v", err)
+	}
+	if starter.calls != 0 {
+		t.Fatalf("started %d runs, want 0", starter.calls)
+	}
+	assertDerivationCount(t, db, models.DatasetDecisionSkippedFresh, 0)
+	assertDerivationCount(t, db, models.DatasetDecisionSkippedAdmission, 1)
+	var derivation models.DatasetDerivation
+	if err := db.Where("decision = ?", models.DatasetDecisionSkippedAdmission).Take(&derivation).Error; err != nil {
+		t.Fatalf("load derivation: %v", err)
+	}
+	if want := "dataset_hold:/out hold=" + hold.ID.String(); derivation.Reason != want {
+		t.Fatalf("reason = %q, want %q", derivation.Reason, want)
+	}
+}
+
 // A hold persisted before any observation must not leave "held" (and the
 // released hold's reason) behind once it is released.
 func TestEvaluatorReleaseBeforeFirstWatermarkClearsHeld(t *testing.T) {

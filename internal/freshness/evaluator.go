@@ -440,6 +440,11 @@ func (e *Evaluator) evaluateProducedDataset(ctx context.Context, graph registryS
 		return e.recordDerivation(ctx, decl, models.DatasetDecisionSkippedAdmission, "dataset quarantined", consumed, nil)
 	default:
 		if !seen {
+			if heldReason != "" {
+				// A hold opened before the first observation: record why nothing
+				// derives rather than claiming "waiting for first observation".
+				return e.recordDerivation(ctx, decl, models.DatasetDecisionSkippedAdmission, heldReason, consumed, nil)
+			}
 			return e.recordDerivation(ctx, decl, models.DatasetDecisionSkippedFresh, unknownFreshnessReason, consumed, nil)
 		}
 		return nil
