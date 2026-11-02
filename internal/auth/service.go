@@ -199,6 +199,10 @@ func (s *Service) recordLastUsed(id uuid.UUID) {
 // ValidateKey looks up a plaintext API key, verifies it is active (for a
 // user-bound key, that its user is too; see AuthenticateKey), and returns the
 // key record. On success it asynchronously updates last_used_at.
+//
+// The lookup uses context.Background(). Callers that must abort when the
+// store has no leader (the HTTP middleware) call AuthenticateKey with a
+// deadline of their own. The signature stays fixed for the other callers.
 func (s *Service) ValidateKey(plaintext string) (*models.APIKey, error) {
 	key, _, err := s.AuthenticateKey(context.Background(), plaintext)
 	return key, err
@@ -208,9 +212,11 @@ func (s *Service) ValidateKey(plaintext string) (*models.APIKey, error) {
 // principal it authenticates. The stored row decides the kind, never the
 // token's prefix: a row without user_id is a plain key (PrincipalFromKey); a
 // row with one is user-bound and authenticates its user, resolved afresh on
-// every call (validateUserKey). Every refusal is one of the validation
-// sentinels and is padded to the same minimum latency, so a caller cannot
-// tell a disabled user from a revoked key. On success it asynchronously
+// every call (validateUserKey). Every credential refusal is one of the
+// validation sentinels and is padded to the same minimum latency, so a caller
+// cannot tell a disabled user from a revoked key. A cancelled or expired ctx
+// aborts the lookup and is returned as that context error, unpadded: it is
+// store unavailability, not a bad credential. On success it asynchronously
 // updates last_used_at.
 func (s *Service) AuthenticateKey(ctx context.Context, plaintext string) (_ *models.APIKey, _ *Principal, retErr error) {
 	startedAt := s.now()
@@ -224,7 +230,11 @@ func (s *Service) AuthenticateKey(ctx context.Context, plaintext string) (_ *mod
 	}
 
 	var key models.APIKey
-	if err := s.db.Where("key_hash = ?", hash).First(&key).Error; err != nil {
+	// WithContext is required. dqlite retries leader discovery until the
+	// context is done; a lookup on the background context hangs for as long
+	// as the cluster has no leader. The user row re-read in validateUserKey
+	// already carries ctx.
+	if err := s.db.WithContext(ctx).Where("key_hash = ?", hash).First(&key).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, nil, ErrKeyNotFound
 		}
@@ -652,6 +662,9 @@ func (s *Service) applyFailureLatency(startedAt time.Time, err error) {
 	}
 }
 
+// isValidationFailure reports a credential refusal. A cancelled or expired
+// lookup is store unavailability, not one of these, and must not be padded
+// to the failure-latency floor.
 func isValidationFailure(err error) bool {
 	return errors.Is(err, ErrKeyNotFound) || errors.Is(err, ErrKeyRevoked) || errors.Is(err, ErrKeyExpired) ||
 		errors.Is(err, ErrUserDisabled) || errors.Is(err, ErrStaleGroups)

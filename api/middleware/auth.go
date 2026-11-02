@@ -1,6 +1,7 @@
 package middleware
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net/http"
@@ -22,6 +23,15 @@ const ContextKeyAuth = "auth"
 
 // ContextKeyPrincipal stores the unified authenticated identity for the request.
 const ContextKeyPrincipal = "auth.principal"
+
+// apiKeyLookupTimeout bounds the database read behind bearer authentication.
+//
+// dqlite retries leader discovery until its context is done. Without a
+// deadline that read blocks for as long as the cluster has no leader, which
+// hangs every authenticated route. The bound matches nodeEnrichmentTimeout
+// (900ms) in api/rest/service/system. A sooner request deadline still wins:
+// context.WithTimeout keeps the earlier of the two.
+const apiKeyLookupTimeout = 900 * time.Millisecond
 
 // uuidPattern matches UUID path segments for route normalisation.
 var uuidPattern = regexp.MustCompile(`[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}`)
@@ -101,8 +111,13 @@ func Auth(d AuthDeps) echo.MiddlewareFunc {
 			}
 
 			if token != "" {
-				validKey, keyPrincipal, err := d.Service.AuthenticateKey(c.Request().Context(), token)
+				lookupCtx, cancelLookup := context.WithTimeout(c.Request().Context(), apiKeyLookupTimeout)
+				validKey, keyPrincipal, err := d.Service.AuthenticateKey(lookupCtx, token)
+				cancelLookup()
 				if err != nil {
+					if authStoreUnavailable(err) {
+						return echo.NewHTTPError(http.StatusServiceUnavailable, "authentication store is unavailable").Wrap(err)
+					}
 					reason := classifyAuthError(err)
 					if recordCredentialFailure(c, d, ip, tokenPrefix(token), reason) {
 						return rateLimitError(c, d.Limiter, ip)
@@ -273,6 +288,13 @@ func tokenPrefix(token string) string {
 		return token[:13]
 	}
 	return token
+}
+
+// authStoreUnavailable reports a key lookup that ended because its context
+// was cancelled or its deadline passed. That is not a bad credential: the
+// caller must not answer 401 or burn the auth-failure limiter.
+func authStoreUnavailable(err error) bool {
+	return errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled)
 }
 
 // classifyAuthError maps validation errors to metric label values.
