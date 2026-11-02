@@ -3,13 +3,17 @@ package incident
 import (
 	"context"
 	"encoding/json"
+	"path/filepath"
 	"testing"
 	"time"
 
+	"github.com/caesium-cloud/caesium/internal/jobdef/testutil"
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 	"gorm.io/datatypes"
+	"gorm.io/driver/sqlite"
+	"gorm.io/gorm"
 )
 
 // metricSample records one rowCount sample of dataset from a new run in namespace.
@@ -189,6 +193,82 @@ func TestBundleDataQualityWithheldWhenTheJobMoved(t *testing.T) {
 	require.NotEmpty(t, section.Violations)
 
 	_, err := HoldMetricSeries(ctx, w.db, &inc, "", ContextMetricSeriesLimit)
+	require.ErrorIs(t, err, ErrNamespaceMoved)
+}
+
+// openConcurrentDB is a file database in WAL mode with more than one connection,
+// so a write can commit while a read snapshot is open, which the shared in-memory
+// test database cannot do.
+func openConcurrentDB(t *testing.T) *gorm.DB {
+	t.Helper()
+	dsn := "file:" + filepath.Join(t.TempDir(), "catalog.db") + "?_journal_mode=WAL&_busy_timeout=5000"
+	db, err := gorm.Open(sqlite.Open(dsn), &gorm.Config{})
+	require.NoError(t, err)
+	t.Cleanup(func() { testutil.CloseDB(db) })
+	require.NoError(t, db.AutoMigrate(models.All...))
+	return db
+}
+
+func interleaveAfterJobNamespaceRead(t *testing.T, fn func()) {
+	t.Helper()
+	fired := false
+	afterJobNamespaceRead = func() {
+		if !fired {
+			fired = true
+			fn()
+		}
+	}
+	t.Cleanup(func() { afterJobNamespaceRead = nil })
+}
+
+// A repeat breach keeps the hold's job, so only the namespace in the same snapshot
+// can tell the new owner's occurrence from the incident's. Here the job moves and
+// breaches again after the bundle read the job row: the bundle must describe the
+// world that row belongs to, not the new owner's hold.
+func TestBundleDataQualityLiveStateSharesTheJobSnapshot(t *testing.T) {
+	w := newHoldWorldOn(t, openConcurrentDB(t), "finance", time.Hour)
+	ctx := context.Background()
+	id := w.hold(releaseDataset, nil)
+	w.sub.handle(ctx, w.heldEvent(id, releaseDataset))
+	inc := w.only()
+
+	interleaveAfterJobNamespaceRead(t, func() {
+		require.NoError(t, w.db.Model(&models.Job{}).Where("id = ?", w.jobID).Update("namespace", "marketing").Error)
+		require.NoError(t, w.db.Model(&models.DatasetHold{}).Where("id = ?", id).Update("occurrence_count", 5).Error)
+	})
+
+	b := bundleOf(t, w, inc.ID, ReaderConfined)
+	require.False(t, b.Job.NamespaceMoved, "the snapshot predates the move")
+	require.False(t, b.DataQuality.NamespaceMoved, "the section and the job agree")
+	require.Equal(t, 1, b.DataQuality.OccurrenceCount, "the new owner's breach must not reach the old namespace")
+
+	again := bundleOf(t, w, inc.ID, ReaderConfined)
+	require.True(t, again.Job.NamespaceMoved)
+	require.True(t, again.DataQuality.NamespaceMoved)
+	require.Zero(t, again.DataQuality.OccurrenceCount)
+}
+
+// The series reads inside the snapshot of its gate too. Its rows are filtered by
+// run namespace, so no foreign sample could reach it; this pins the agreement.
+func TestHoldMetricSeriesSharesTheJobSnapshot(t *testing.T) {
+	w := newHoldWorldOn(t, openConcurrentDB(t), "finance", time.Hour)
+	ctx := context.Background()
+	id := w.hold(releaseDataset, nil)
+	base := time.Now().UTC().Add(-time.Hour)
+	w.metricSample("finance", releaseDataset, "rowCount", 1, false, base)
+	w.sub.handle(ctx, w.heldEvent(id, releaseDataset))
+	inc := w.only()
+
+	interleaveAfterJobNamespaceRead(t, func() {
+		require.NoError(t, w.db.Model(&models.Job{}).Where("id = ?", w.jobID).Update("namespace", "marketing").Error)
+		w.metricSample("finance", releaseDataset, "rowCount", 2, false, base.Add(time.Minute))
+	})
+
+	series, err := HoldMetricSeries(ctx, w.db, &inc, "", ContextMetricSeriesLimit)
+	require.NoError(t, err)
+	require.Len(t, series[0].Samples, 1, "nothing committed after the gate's snapshot")
+
+	_, err = HoldMetricSeries(ctx, w.db, &inc, "", ContextMetricSeriesLimit)
 	require.ErrorIs(t, err, ErrNamespaceMoved)
 }
 

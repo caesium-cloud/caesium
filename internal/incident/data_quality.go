@@ -20,7 +20,9 @@ import (
 // collapsed and unowned baselines withheld, while the row's cone is unredacted and
 // its verdicts are the latest breach's, which can be another tenant's. Only the
 // status and the occurrence count are read live, and those and the metric series
-// are withheld once the job has moved out of the incident's namespace.
+// are withheld once the job has moved out of the incident's namespace. Every live
+// read shares a snapshot with the job row that gates it: a check made earlier
+// would let a move and a repeat breach land in between.
 
 const (
 	// bundleMetricSeriesLimit bounds the samples per metric in a bundle.
@@ -30,6 +32,10 @@ const (
 	// metricSeriesCap bounds the metrics a series is read for.
 	metricSeriesCap = 10
 )
+
+// afterJobNamespaceRead, when set (tests only), runs inside a snapshot right after
+// the job row that gates its live reads: where a concurrent move interleaves.
+var afterJobNamespaceRead func()
 
 // ErrNoDatasetHold is returned for a metric series on an incident that has no
 // dataset hold to scope it to.
@@ -117,8 +123,10 @@ func (e storedHoldEvidence) violatedMetrics() []string {
 	return metrics
 }
 
-// loadDataQuality builds the bundle section. It returns nil for an incident whose
-// dedupe key names no hold, which only a row written outside the subscriber has.
+// loadDataQuality builds the bundle section. moved must come from a job row read
+// through db, which must be the same snapshot. It returns nil for an incident
+// whose dedupe key names no hold, which only a row written outside the subscriber
+// has.
 func loadDataQuality(ctx context.Context, db *gorm.DB, inc *models.Incident, moved bool) (*BundleDataQuality, error) {
 	holdID, ok := holdIDFromDedupeKey(inc.DedupeKey)
 	if !ok {
@@ -166,16 +174,6 @@ func HoldMetricSeries(ctx context.Context, db *gorm.DB, inc *models.Incident, me
 	if FailureClass(inc.Class) != ClassDataQualityHold {
 		return nil, ErrNoDatasetHold
 	}
-	var job models.Job
-	err := db.WithContext(ctx).Unscoped().Select("id", "namespace").First(&job, "id = ?", inc.JobID).Error
-	switch {
-	case err == nil:
-		if movedOutOfIncident(inc, &job) {
-			return nil, ErrNamespaceMoved
-		}
-	case !errors.Is(err, gorm.ErrRecordNotFound):
-		return nil, err
-	}
 	evidence := decodeHoldEvidence(inc)
 	if evidence.Dataset == "" {
 		return nil, ErrNoDatasetHold
@@ -184,7 +182,28 @@ func HoldMetricSeries(ctx context.Context, db *gorm.DB, inc *models.Incident, me
 	if metric != "" {
 		metrics = []string{metric}
 	}
-	return metricSeries(ctx, db, inc, evidence, metrics, limit)
+	var series []BundleMetricSeries
+	err := readSnapshot(ctx, db, func(tx *gorm.DB) error {
+		var job models.Job
+		err := tx.WithContext(ctx).Unscoped().Select("id", "namespace").First(&job, "id = ?", inc.JobID).Error
+		switch {
+		case err == nil:
+			if movedOutOfIncident(inc, &job) {
+				return ErrNamespaceMoved
+			}
+		case !errors.Is(err, gorm.ErrRecordNotFound):
+			return err
+		}
+		if afterJobNamespaceRead != nil {
+			afterJobNamespaceRead()
+		}
+		series, err = metricSeries(ctx, tx, inc, evidence, metrics, limit)
+		return err
+	})
+	if err != nil {
+		return nil, err
+	}
+	return series, nil
 }
 
 func metricSeries(ctx context.Context, db *gorm.DB, inc *models.Incident, evidence storedHoldEvidence, metrics []string, limit int) ([]BundleMetricSeries, error) {

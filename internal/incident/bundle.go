@@ -257,19 +257,33 @@ func BuildBundleFor(ctx context.Context, db *gorm.DB, incidentID uuid.UUID, play
 	// Job + DAG topology, read in one snapshot: a move commits the job's new
 	// namespace and its new DAG together, so the namespace checked below is
 	// the owner of exactly the tasks and edges read with it, however many
-	// moves commit during the read (identity-and-access A8).
+	// moves commit during the read (identity-and-access A8). A hold's live state
+	// and metric series are read in the same snapshot, so the namespace that
+	// gates them cannot be older than they are: a repeat breach keeps the hold's
+	// job, so nothing on the hold row tells a new owner's breach from the old's.
 	var (
-		job   models.Job
-		tasks []BundleTask
-		edges []BundleDAGEdge
+		job     models.Job
+		tasks   []BundleTask
+		edges   []BundleDAGEdge
+		quality *BundleDataQuality
 	)
 	if err := readSnapshot(ctx, db, func(tx *gorm.DB) error {
 		var err error
 		job, tasks, edges, err = loadJobTopology(ctx, tx, inc.JobID)
+		if err != nil {
+			return err
+		}
+		if afterJobNamespaceRead != nil {
+			afterJobNamespaceRead()
+		}
+		if FailureClass(inc.Class) == ClassDataQualityHold {
+			quality, err = loadDataQuality(ctx, tx, &inc, movedOutOfIncident(&inc, &job))
+		}
 		return err
 	}); err != nil {
 		return nil, err
 	}
+	b.DataQuality = quality
 	b.Job = BundleJob{
 		Alias:            job.Alias,
 		Paused:           job.Paused,
@@ -282,13 +296,6 @@ func BuildBundleFor(ctx context.Context, db *gorm.DB, incidentID uuid.UUID, play
 		b.Job.Tasks = []BundleTask{}
 		b.Job.Edges = []BundleDAGEdge{}
 		b.Job.NamespaceMoved = true
-	}
-
-	if FailureClass(inc.Class) == ClassDataQualityHold {
-		b.DataQuality, err = loadDataQuality(ctx, db, &inc, b.Job.NamespaceMoved)
-		if err != nil {
-			return nil, err
-		}
 	}
 
 	// Recent run history + durations, recorded in the incident's namespace.
