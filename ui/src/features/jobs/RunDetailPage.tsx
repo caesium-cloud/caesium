@@ -21,7 +21,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { StatusBadge } from "@/components/ui/status-badge";
 import { Kbd } from "@/components/ui/kbd";
 import { RunAssertionPanels } from "@/features/datasets/DataAssertionsPanel";
-import { invalidateRunAssertions } from "@/features/datasets/useDataAssertions";
+import { useSyncRunAssertions } from "@/features/datasets/useDataAssertions";
 import { HoldSkipReason } from "@/features/datasets/HoldSkipReason";
 import { IncidentRibbon } from "@/features/incidents/IncidentRibbon";
 import { RunDataEvidence, RunExternalExecutions } from "@/features/connectors/RelationshipsPanel";
@@ -78,6 +78,10 @@ export function RunDetailPage() {
     // A denied run (a moved job's history in a namespace outside the grants) never changes.
     refetchInterval: (query) => (isInsufficientAccessError(query.state.error) ? false : streamHealthy ? 5000 : 3000),
   });
+
+  // The recorded assertion results follow whatever the run's tasks show,
+  // whether an event or a poll delivered it.
+  useSyncRunAssertions(jobId, runId, run?.tasks);
 
   const receiptQuery = useQuery({
     queryKey: ["job", jobId, "runs", runId, "receipt"],
@@ -222,10 +226,6 @@ export function RunDetailPage() {
 
         return old;
       });
-      // Results are written as each task finishes and cleared by a retry.
-      if (e.type !== "task_started" && e.type !== "run_started") {
-        void invalidateRunAssertions(queryClient, jobId, runId);
-      }
       if (e.type === "run_retried") {
         queryClient.invalidateQueries({ queryKey: ["job", jobId, "runs", runId], exact: true });
         queryClient.invalidateQueries({ queryKey: ["job", jobId, "runs", runId, "receipt"] });

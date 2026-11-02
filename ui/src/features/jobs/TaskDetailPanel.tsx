@@ -22,7 +22,6 @@ import { Badge } from "@/components/ui/badge";
 import { StatusGlyph, StatusBadge } from "@/components/ui/status-badge";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { DataAssertionsPanel } from "@/features/datasets/DataAssertionsPanel";
-import { invalidateRunAssertions } from "@/features/datasets/useDataAssertions";
 import { HoldSkipReason } from "@/features/datasets/HoldSkipReason";
 import { IncidentRibbon } from "@/features/incidents/IncidentRibbon";
 import { canActIn, requiresRoleReason } from "@/features/auth/access";
@@ -661,7 +660,6 @@ function PartitionTable({
       queryClient.invalidateQueries({ queryKey: ["job", jobId, "runs", runId], exact: true });
       queryClient.invalidateQueries({ queryKey: ["job", jobId, "runs", runId, "receipt"] });
       queryClient.invalidateQueries({ queryKey: ["job", jobId, "runs", runId, "why"] });
-      void invalidateRunAssertions(queryClient, jobId, runId);
       queryClient.invalidateQueries({ queryKey: ["job", jobId, "runs"], exact: true });
       queryClient.invalidateQueries({ queryKey: ["job", jobId], exact: true });
       queryClient.invalidateQueries({ queryKey: ["jobs"] });
