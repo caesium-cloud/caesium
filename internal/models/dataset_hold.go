@@ -22,8 +22,9 @@ const (
 	// re-produced the dataset and every declared assertion passed. Only applies
 	// to a dataset declared `release: auto` (the default).
 	DatasetHoldReleaseCleanRun = "clean_run"
-	// DatasetHoldReleaseManualAck is a human acknowledgement through
-	// POST /v1/datasets/holds/:id/release.
+	// DatasetHoldReleaseManualAck is an acknowledgement through
+	// POST /v1/datasets/holds/:id/release, or through a release_hold incident
+	// action, which calls the same service.
 	DatasetHoldReleaseManualAck = "manual_ack"
 )
 
@@ -152,8 +153,9 @@ type DatasetHold struct {
 
 	// Released* are set exactly once, by whichever release path wins.
 	// ReleasedBy always records an AUTHENTICATED principal for a manual ack (the
-	// endpoint is refused outright when no auth mode is active) or the literal
-	// "system" for a clean-run release.
+	// path is refused outright when no auth mode is active): the operator, the
+	// approver of a release_hold action, or the agent session a playbook let
+	// release alone. A clean-run release records the literal "system".
 	ReleasedAt    *time.Time `json:"released_at,omitempty"`
 	ReleasedBy    string     `gorm:"type:text;not null;default:''" json:"released_by,omitempty"`
 	ReleaseReason string     `gorm:"type:text;not null;default:''" json:"release_reason,omitempty"`

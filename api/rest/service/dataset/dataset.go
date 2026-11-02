@@ -14,6 +14,7 @@ import (
 	"github.com/caesium-cloud/caesium/internal/authz"
 	"github.com/caesium-cloud/caesium/internal/freshness"
 	"github.com/caesium-cloud/caesium/internal/models"
+	runstore "github.com/caesium-cloud/caesium/internal/run"
 	"github.com/caesium-cloud/caesium/pkg/db"
 	"github.com/caesium-cloud/caesium/pkg/env"
 	"github.com/google/uuid"
@@ -34,6 +35,9 @@ var declarationDirections = []string{
 type Service struct {
 	ctx context.Context
 	db  *gorm.DB
+	// store overrides the run store an unconfined release writes through; nil
+	// means the default store.
+	store *runstore.Store
 }
 
 // New creates a Service backed by the default DB connection.
@@ -51,7 +55,13 @@ func (s *Service) WithDatabase(conn *gorm.DB) *Service {
 	if conn == nil {
 		return s
 	}
-	return &Service{ctx: s.ctx, db: conn}
+	return &Service{ctx: s.ctx, db: conn, store: s.store}
+}
+
+// WithStore returns a copy of the Service releasing through store; nil keeps the
+// default store.
+func (s *Service) WithStore(store *runstore.Store) *Service {
+	return &Service{ctx: s.ctx, db: s.db, store: store}
 }
 
 // NamespaceFromPath maps the REST path convention "_" to the v1 empty

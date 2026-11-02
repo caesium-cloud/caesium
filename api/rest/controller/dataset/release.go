@@ -3,17 +3,14 @@ package dataset
 import (
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"net/http"
 	"strings"
-	"time"
 
 	authmw "github.com/caesium-cloud/caesium/api/middleware"
 	svc "github.com/caesium-cloud/caesium/api/rest/service/dataset"
 	"github.com/caesium-cloud/caesium/internal/authz"
 	runstore "github.com/caesium-cloud/caesium/internal/run"
-	"github.com/caesium-cloud/caesium/pkg/env"
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v5"
 	"gorm.io/gorm"
@@ -36,46 +33,6 @@ type releaseRequest struct {
 	Tolerate map[string]string `json:"tolerate,omitempty"`
 }
 
-// toleranceAssertions is the bounded set of assertion kinds a tolerance window
-// may name — the enforceable subset of the enum DataViolation.Assertion
-// carries. `unavailable` is deliberately absent: it never opens a hold (the
-// marker stream was lost, which is evidence of nothing), so there is nothing to
-// snooze and accepting it would promise suppression of a verdict that already
-// suppresses itself.
-var toleranceAssertions = map[string]struct{}{
-	runstore.AssertionMin:               {},
-	runstore.AssertionMax:               {},
-	runstore.AssertionDeltaFromBaseline: {},
-	runstore.AssertionMaxLag:            {},
-	runstore.AssertionMissing:           {},
-}
-
-// validateTolerances checks the `--tolerate` grammar: a known assertion kind
-// mapped to a positive Go duration. An unparseable entry is a 400 rather than a
-// row nobody will be able to interpret later.
-func validateTolerances(raw map[string]string) (map[string]string, error) {
-	if len(raw) == 0 {
-		return nil, nil
-	}
-	out := make(map[string]string, len(raw))
-	for assertion, window := range raw {
-		assertion = strings.TrimSpace(assertion)
-		if _, ok := toleranceAssertions[assertion]; !ok {
-			return nil, fmt.Errorf("tolerate: %q is not an assertion kind (one of min, max, deltaFromBaseline, maxLag, missing)", assertion)
-		}
-		window = strings.TrimSpace(window)
-		d, err := time.ParseDuration(window)
-		if err != nil {
-			return nil, fmt.Errorf("tolerate[%s]: %q is not a duration (e.g. 24h)", assertion, window)
-		}
-		if d <= 0 {
-			return nil, fmt.Errorf("tolerate[%s]: %q must be a positive duration", assertion, window)
-		}
-		out[assertion] = window
-	}
-	return out, nil
-}
-
 // Release handles POST /v1/datasets/holds/:id/release — the human ack that
 // clears a dataset hold the breaker opened.
 //
@@ -92,8 +49,7 @@ func (ctrl *Controller) Release(c *echo.Context) error {
 		return echo.NewHTTPError(http.StatusBadRequest, "bad request").Wrap(err)
 	}
 
-	vars := env.Variables()
-	if vars.AuthMode != "api-key" && !vars.SSOEnabled() {
+	if !svc.ReleaseAuthenticated() {
 		return echo.NewHTTPError(http.StatusForbidden,
 			"releasing a dataset hold requires an authenticated principal: set CAESIUM_AUTH_MODE=api-key or enable SSO")
 	}
@@ -109,7 +65,7 @@ func (ctrl *Controller) Release(c *echo.Context) error {
 		return echo.NewHTTPError(http.StatusBadRequest, "reason is required")
 	}
 
-	tolerances, err := validateTolerances(body.Tolerate)
+	tolerances, err := svc.ValidateTolerances(body.Tolerate)
 	if err != nil {
 		return echo.NewHTTPError(http.StatusBadRequest, err.Error())
 	}

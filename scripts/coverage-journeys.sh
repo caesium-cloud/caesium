@@ -1908,6 +1908,10 @@ PY
   # the stored impact cone stays empty. This one reads the incident as a confined
   # viewer. Real lineage, so it needs no policy file nor a catalog connection.
   auth_pattern="${auth_pattern%)}|TestHoldIncidentCollapsesForeignImpactForConfinedReader)"
+  # release_hold through the approval pipeline (data-circuit-breaker F2): a real
+  # hold's bundle, metric series and boundary refusal over REST and MCP, then the
+  # approved release. Needs no policy file.
+  auth_pattern="${auth_pattern%)}|TestHoldReleaseActionRunsThroughApproval)"
 
   local -a local_named_passes=(
     TestCaesiumWhyExplainsHitAndMiss
@@ -1977,6 +1981,7 @@ PY
     TestAuthStaleGroupsRefusedUntilRelogin
     TestAuthListNamespaceNarrow
     TestHoldIncidentCollapsesForeignImpactForConfinedReader
+    TestHoldReleaseActionRunsThroughApproval
   )
   local -a distributed_named_passes=(
     TestNodeWorkersRoute

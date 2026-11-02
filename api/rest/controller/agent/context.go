@@ -7,6 +7,7 @@ import (
 
 	authmw "github.com/caesium-cloud/caesium/api/middleware"
 	agentsvc "github.com/caesium-cloud/caesium/api/rest/service/agent"
+	iincident "github.com/caesium-cloud/caesium/internal/incident"
 	runstorage "github.com/caesium-cloud/caesium/internal/run"
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v5"
@@ -14,7 +15,7 @@ import (
 )
 
 // Context handles GET /v1/agent/incidents/:id/context/* — the read-only
-// passthroughs (logs, why, run history) scoped to the incident's frozen job
+// passthroughs (logs, why, run history, a held dataset's metrics) scoped to the incident's frozen job
 // allowlist. The wildcard subpath selects the passthrough. Cross-job reads are
 // gated against the allowlist injected by the auth middleware.
 func Context(c *echo.Context) error {
@@ -61,6 +62,13 @@ func Context(c *echo.Context) error {
 		}
 		return c.JSON(http.StatusOK, explanation)
 
+	case "metrics":
+		series, err := svc.MetricSeries(inc, strings.TrimSpace(c.QueryParam("metric")))
+		if err != nil {
+			return mapContextError(err)
+		}
+		return c.JSON(http.StatusOK, map[string]any{"series": series})
+
 	default:
 		return echo.NewHTTPError(http.StatusNotFound, "unknown context passthrough")
 	}
@@ -70,7 +78,9 @@ func mapContextError(err error) error {
 	switch {
 	case errors.Is(err, agentsvc.ErrForbiddenJob):
 		return echo.NewHTTPError(http.StatusForbidden, agentsvc.ErrForbiddenJob.Error())
-	case errors.Is(err, agentsvc.ErrNoFailingRun), errors.Is(err, gorm.ErrRecordNotFound), errors.Is(err, runstorage.ErrTaskRunNotFound):
+	case errors.Is(err, iincident.ErrNamespaceMoved):
+		return echo.NewHTTPError(http.StatusForbidden, iincident.ErrNamespaceMoved.Error())
+	case errors.Is(err, agentsvc.ErrNoFailingRun), errors.Is(err, iincident.ErrNoDatasetHold), errors.Is(err, gorm.ErrRecordNotFound), errors.Is(err, runstorage.ErrTaskRunNotFound):
 		return echo.ErrNotFound
 	default:
 		return echo.NewHTTPError(http.StatusInternalServerError, "internal server error").Wrap(err)

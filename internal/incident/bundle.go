@@ -22,15 +22,18 @@ import (
 // allowlist, and the effective playbook. All attacker-influenced free text
 // (the log tail) is scrubbed before it enters the bundle.
 type Bundle struct {
-	Incident       BundleIncident   `json:"incident"`
-	Classification BundleClass      `json:"classification"`
-	Failure        BundleFailure    `json:"failure"`
-	Job            BundleJob        `json:"job"`
-	RunHistory     []BundleRun      `json:"run_history"`
-	LineageImpact  BundleImpact     `json:"lineage_impact"`
-	Playbook       datatypes.JSON   `json:"playbook,omitempty"`
-	Notes          []BundleNoteHint `json:"notes,omitempty"`
-	GeneratedAt    time.Time        `json:"generated_at"`
+	Incident       BundleIncident `json:"incident"`
+	Classification BundleClass    `json:"classification"`
+	Failure        BundleFailure  `json:"failure"`
+	// DataQuality describes the hold of a data_quality_hold incident; absent for
+	// every other class.
+	DataQuality   *BundleDataQuality `json:"data_quality,omitempty"`
+	Job           BundleJob          `json:"job"`
+	RunHistory    []BundleRun        `json:"run_history"`
+	LineageImpact BundleImpact       `json:"lineage_impact"`
+	Playbook      datatypes.JSON     `json:"playbook,omitempty"`
+	Notes         []BundleNoteHint   `json:"notes,omitempty"`
+	GeneratedAt   time.Time          `json:"generated_at"`
 }
 
 // BundleIncident is the incident header the agent triages.
@@ -220,7 +223,7 @@ func BuildBundleFor(ctx context.Context, db *gorm.DB, incidentID uuid.UUID, play
 	//
 	// A data_quality_hold incident names a task that SUCCEEDED, so it has no
 	// failure to describe: attributionTaskRun would present a green instance as
-	// one. The hold's evidence is in Classification.
+	// one. The hold is described by DataQuality.
 	if inc.RunID != nil && inc.TaskID != nil && FailureClass(inc.Class) != ClassDataQualityHold {
 		var rows []models.TaskRun
 		if err := db.WithContext(ctx).
@@ -279,6 +282,13 @@ func BuildBundleFor(ctx context.Context, db *gorm.DB, incidentID uuid.UUID, play
 		b.Job.Tasks = []BundleTask{}
 		b.Job.Edges = []BundleDAGEdge{}
 		b.Job.NamespaceMoved = true
+	}
+
+	if FailureClass(inc.Class) == ClassDataQualityHold {
+		b.DataQuality, err = loadDataQuality(ctx, db, &inc, b.Job.NamespaceMoved)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	// Recent run history + durations, recorded in the incident's namespace.

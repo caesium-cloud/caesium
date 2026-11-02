@@ -1457,7 +1457,7 @@ precedent for it is warn-mode schema validation, which publishes
       a hold does not record every run that breached it. Baseline evidence that is not namespace-owned is
       withheld when the evidence is built; the helper moved to
       `internal/baselineevidence` so `internal/incident` can reach it.
-- [ ] F2. Add `release_hold` to the action catalog and make it executable through
+- [x] F2. Add `release_hold` to the action catalog and make it executable through
       the approval pipeline. (a) **Catalog:** `ActionTypeReleaseHold =
       "release_hold"` in `internal/incident/actions.go`, registered in
       `actionCatalog`. Tier per the design (*"`release_hold` joins the action
@@ -1503,6 +1503,26 @@ precedent for it is warn-mode schema validation, which publishes
       unwired today — see the stream preamble) and its **H-1** (the real auth lane
       the scenario runs on). See `## Sequencing & Dependencies` § Cross-PLAN order.
       Depends on: F1 + C3.
+      *Note (W6-α, 2026-11-02):* shipped in `internal/incident/release_hold.go` and
+      `internal/incident/data_quality.go`. The tier is per request (`requestTier`):
+      `TierGated` in the catalog, tier 3 on the row when `tolerate` is set, so no
+      second gate exists. Deviations from the text above: `ActionOps.ReleaseHold`
+      takes a `HoldRelease` carrying the principal, the audit namespace and a guard,
+      and tolerances stay strings, the form C3 stores. `HoldID` is the only hold
+      identity; a `data_quality_hold` incident defaults to its own hold, read from
+      the dedupe key. Beyond the job, the boundary refuses a dataset the job no
+      longer produces or that has a producer outside the incident's namespace, and
+      runs at the proposal, at dispatch and in the release transaction; a hold on
+      another dataset of the same job is in reach, as written above. A proposal that
+      fails it reaches no human. `Reason` is required, as on REST. Tolerance keys
+      must name an assertion the hold breached and are bounded at 30 days; they stay
+      advisory, so the action result carries a caveat. A release of an ended hold is
+      a no-op success with `already_released`. The executor writes no incident
+      status: `dataset_released` closes the incident through the subscriber or the
+      sweep, so the final status is `closed`. `get_context` gained `kind: metrics`.
+      `incidentJobAlias` is `Unscoped()`, and `History` keeps the incident's job id
+      for its own alias. `build/triage-agent.sh` accepts an empty DAG and proposes
+      nothing on it.
 - [ ] F3. Build the **Git-PR provenance route** of `apply_jobdef_patch` — B4's
       unbuilt half — so a producer patch proposed from a hold lands as a pull
       request instead of a silent server-side edit. (a) **Credentials:** add a new

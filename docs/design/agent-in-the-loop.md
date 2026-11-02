@@ -322,6 +322,11 @@ things to the container:
    - the job definition and DAG topology, recent run history + durations
    - lineage impact for the task's output datasets
      (`internal/lineage/impact.go` `QueryImpact`)
+   - for a `data_quality_hold` incident, a `data_quality` section: the hold id
+     and live occurrence count, the violated assertion with observed, bound and
+     baseline, the impact cone, and the last 30 samples of each violated metric.
+     Everything but the live state and the samples comes from the incident's
+     evidence, shaped for its namespace when it opened.
    - the effective playbook: exactly which actions are allowed, which need
      approval, and remaining budgets — so the agent plans within policy
      instead of discovering rejections by trial.
@@ -342,8 +347,9 @@ things to the container:
 3. **The tool surface.** New route group:
    - `GET  /v1/agent/incidents/:id/bundle` — refreshed bundle
    - `GET  /v1/agent/incidents/:id/context/*` — read-only passthroughs
-     (logs, why, run diff, receipt, run history) scoped to the incident's
-     job allowlist frozen at incident open
+     (logs, why, run diff, receipt, run history, and `metrics`, the series of
+     the incident's own held dataset) scoped to the incident's job allowlist
+     frozen at incident open
    - `POST /v1/agent/incidents/:id/actions` — propose/execute a typed action
      (below)
    - `POST /v1/agent/incidents/:id/notes` — append findings to the timeline
@@ -379,6 +385,7 @@ machinery that already exists:
 | `clear_cache_entry` | 2 | existing cache DELETE endpoints |
 | `suppress_downstream_alerts` (while incident open) | 2 | notification policy interplay |
 | `extend_sla_once` | 2 | durable per-run SLA override (new — the watcher's miss-dedupe is per-process memory, so an in-memory extension would still page from other nodes) |
+| `release_hold` (release a dataset hold; default target is the hold a `data_quality_hold` incident was opened for) | 2, 3 with tolerance windows | the service behind `POST /v1/datasets/holds/:id/release` |
 | `skip_task` (mark failed task skipped, honor trigger rules) | 3 | new store op |
 | `override_schema_gate` (one run) | 3 | schema-validation bypass, recorded |
 | `apply_jobdef_patch` (schema/image/cron change) | 3 | routed by provenance: Git PR for git-synced jobs, `jobdefs/diff` + `apply` otherwise (see below) |
@@ -387,6 +394,8 @@ machinery that already exists:
 Tier semantics come from the playbook: tier 1 defaults to autonomous, tier 2
 autonomous only if explicitly allowed, tier 3 always produces an
 `ApprovalRequest` (never auto-executed in v1, regardless of config).
+`release_hold` is the one action whose tier depends on its params: tolerance
+windows make that request tier 3, recorded on its row.
 `quarantine_replay` deserves emphasis — and honest limits. It is the agent's
 **experiment harness**: the quarantine invariants (no production cache
 writes, no authoritative lineage, no callbacks, no stats pollution; see

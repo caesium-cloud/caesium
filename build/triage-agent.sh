@@ -40,7 +40,7 @@ jq -e --arg incident_id "$incident_id" '
   (.classification.class | type == "string" and length > 0) and
   (.failure.log_tail_scrubbed | type == "boolean") and
   (.job.alias | type == "string" and length > 0) and
-  (.job.tasks | type == "array" and length > 0) and
+  (.job.tasks | type == "array") and
   (.run_history | type == "array") and
   (.lineage_impact.allowed_jobs | type == "array") and
   (.lineage_impact.frozen == true) and
@@ -78,6 +78,12 @@ note_payload="$(jq -nc --arg task_name "$task_name" \
 post_json "${api_url}/v1/agent/incidents/${incident_id}/notes" "$note_payload" "$note_file"
 jq -e '.id and .type == "note" and .status == "executed"' "$note_file" >/dev/null ||
   fail "note response shape assertion failed"
+
+# A deleted or moved job has no DAG in the bundle, so there is no task to act on.
+if [ "$(jq -r '.job.tasks | length' "$bundle_file")" -eq 0 ]; then
+  echo "triage-agent: bundle for incident ${incident_id} has no tasks; proposing no task action"
+  exit 0
+fi
 
 action_payload="$(jq -nc --arg task_name "$task_name" \
   '{type: "skip_task", params: {task_name: $task_name}}')"
