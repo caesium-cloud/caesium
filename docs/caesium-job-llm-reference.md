@@ -592,8 +592,15 @@ caesium test --scenario harness/ --json # Version-1 harness report: scenarios, t
 `caesium job lint --json` without `--server` writes that offline report and exits
 nonzero when validation fails; stdout stays the JSON document and human
 diagnostics go to stderr. `caesium test --json` uses the same report for a
-schema/path check and for `--scenario` execution. `caesium dev --once --json`
-prints the execution report for the local run. Watch mode does not stream JSON.
+schema/path check and for `--scenario` execution. A directory `--scenario`
+still names the failing scenario file on each diagnostic. Failed metric checks
+put the label set in the assertion name (`metric <name> {label=value} value`
+or `delta`) so two checks of one metric stay distinct. A lineage impact
+mismatch sets `actual` to the observed dataset names; a query error is a
+separate assertion, not an empty name list. `caesium dev --once --json`
+prints the execution report for the local run, including when a path is
+missing or unreadable, and exits nonzero on failure. Watch mode does not
+stream JSON.
 
 All local manifest commands reject unknown structural fields and report the
 source file, YAML path, and line before validation, execution, or apply. This

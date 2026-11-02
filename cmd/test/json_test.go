@@ -64,6 +64,33 @@ steps: []
 	})
 }
 
+func TestScenarioJSONUnknownFieldNamesTheFile(t *testing.T) {
+	dir := t.TempDir()
+	bad := filepath.Join(dir, "bad.scenario.yaml")
+	require.NoError(t, os.WriteFile(bad, []byte(`apiVersion: v1
+kind: Harness
+scenarios:
+  - name: typo
+    path: ./job.job.yaml
+    notAField: true
+    expect:
+      runStatus: succeeded
+`), 0o644))
+
+	stdout, stderr, err := executeTest(t, "--json", "--scenario", dir)
+	require.Error(t, err)
+	require.NotContains(t, stderr, `"version"`)
+	require.Contains(t, stderr, "bad.scenario.yaml")
+	report := decodeTestReport(t, stdout)
+	require.False(t, report.OK)
+	require.NotEmpty(t, report.Diagnostics)
+	require.Equal(t, bad, report.Diagnostics[0].File)
+	require.NotEqual(t, dir, report.Diagnostics[0].File)
+	require.Equal(t, "scenarios[0].notAField", report.Diagnostics[0].Path)
+	require.NotZero(t, report.Diagnostics[0].Line)
+	require.Contains(t, report.Diagnostics[0].Message, `unknown field "notAField"`)
+}
+
 func TestScenarioJSONReportsPassAndAssertionFailure(t *testing.T) {
 	dir := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "job.job.yaml"), []byte(testJobYAML("harness-json")), 0o644))

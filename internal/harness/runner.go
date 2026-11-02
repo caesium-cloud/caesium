@@ -355,15 +355,19 @@ func evaluateScenario(
 
 	for i, expectedMetric := range expect.Metrics {
 		observation := metricObservations[i]
+		labels := observation.Labels
+		if len(labels) == 0 {
+			labels = expectedMetric.Labels
+		}
 		if expectedMetric.Value != nil && !floatEquals(observation.Value, *expectedMetric.Value) {
 			fail(CheckedAssertion{
-				Name:     fmt.Sprintf("metric %s value", expectedMetric.Name),
+				Name:     metricAssertionName(expectedMetric.Name, "value", labels),
 				Expected: *expectedMetric.Value,
 				Actual:   observation.Value,
 				Message: fmt.Sprintf(
 					"metric %s %s value: expected %.6f, got %.6f",
 					expectedMetric.Name,
-					formatMetricLabels(observation.Labels),
+					formatMetricLabels(labels),
 					*expectedMetric.Value,
 					observation.Value,
 				),
@@ -371,13 +375,13 @@ func evaluateScenario(
 		}
 		if expectedMetric.Delta != nil && !floatEquals(observation.Delta, *expectedMetric.Delta) {
 			fail(CheckedAssertion{
-				Name:     fmt.Sprintf("metric %s delta", expectedMetric.Name),
+				Name:     metricAssertionName(expectedMetric.Name, "delta", labels),
 				Expected: *expectedMetric.Delta,
 				Actual:   observation.Delta,
 				Message: fmt.Sprintf(
 					"metric %s %s delta: expected %.6f, got %.6f",
 					expectedMetric.Name,
-					formatMetricLabels(observation.Labels),
+					formatMetricLabels(labels),
 					*expectedMetric.Delta,
 					observation.Delta,
 				),
@@ -437,14 +441,28 @@ func evaluateScenario(
 
 		// Impact assertions query the PERSISTED dataset graph (what
 		// /lineage/impact reads), proving datasets are not just emitted but
-		// stored and linked.
+		// stored and linked. A query error is not a set mismatch: Actual is
+		// the observed dataset names only when the query succeeded.
 		for _, imp := range expect.Lineage.Impact {
-			for _, message := range evaluateImpact(ctx, db, imp) {
+			observed, queryErr := evaluateImpact(ctx, db, imp)
+			if queryErr != nil {
+				fail(CheckedAssertion{
+					Name:     "lineage impact[" + imp.Dataset + "] query",
+					Expected: "ok",
+					Actual:   queryErr.Error(),
+					Message:  queryErr.Error(),
+				})
+				continue
+			}
+			if missing := missingDownstream(imp.Downstream, observed); len(missing) > 0 {
 				fail(CheckedAssertion{
 					Name:     "lineage impact[" + imp.Dataset + "]",
-					Expected: imp.Downstream,
-					Actual:   message,
-					Message:  message,
+					Expected: append([]string(nil), imp.Downstream...),
+					Actual:   observed,
+					Message: fmt.Sprintf(
+						"lineage impact[%s]: expected downstream %v, got %v",
+						imp.Dataset, imp.Downstream, observed,
+					),
 				})
 			}
 		}
@@ -453,11 +471,13 @@ func evaluateScenario(
 	return failures, assertions
 }
 
-// evaluateImpact runs the cross-job impact query for one expectation and reports
-// any expected downstream dataset that is missing from the result.
-func evaluateImpact(ctx context.Context, db *gorm.DB, imp ImpactExpectation) []string {
+// evaluateImpact runs the cross-job impact query for one expectation.
+// observed is the dataset names the query returned (empty, not nil, when the
+// query succeeds and nothing is downstream). err is set only when the query
+// cannot run; a missing expected dataset is not an error here.
+func evaluateImpact(ctx context.Context, db *gorm.DB, imp ImpactExpectation) ([]string, error) {
 	if db == nil {
-		return []string{fmt.Sprintf("lineage impact[%s]: no database available (is lineage enabled?)", imp.Dataset)}
+		return nil, fmt.Errorf("lineage impact[%s]: no database available (is lineage enabled?)", imp.Dataset)
 	}
 	ns := imp.Namespace
 	if ns == "" {
@@ -465,23 +485,32 @@ func evaluateImpact(ctx context.Context, db *gorm.DB, imp ImpactExpectation) []s
 	}
 	res, err := lineage.QueryImpact(ctx, db, ns, imp.Dataset, imp.MaxDepth)
 	if err != nil {
-		return []string{fmt.Sprintf("lineage impact[%s]: query failed: %v", imp.Dataset, err)}
+		return nil, fmt.Errorf("lineage impact[%s]: query failed: %v", imp.Dataset, err)
 	}
-	got := make(map[string]struct{}, len(res.Downstream))
+	seen := make(map[string]struct{}, len(res.Downstream))
+	observed := make([]string, 0, len(res.Downstream))
 	for _, node := range res.Downstream {
-		got[node.DatasetName] = struct{}{}
+		if _, ok := seen[node.DatasetName]; ok {
+			continue
+		}
+		seen[node.DatasetName] = struct{}{}
+		observed = append(observed, node.DatasetName)
 	}
-	var failures []string
-	for _, want := range imp.Downstream {
-		if _, ok := got[want]; !ok {
-			names := make([]string, 0, len(res.Downstream))
-			for _, node := range res.Downstream {
-				names = append(names, node.DatasetName)
-			}
-			failures = append(failures, fmt.Sprintf("lineage impact[%s]: expected downstream %q, got %v", imp.Dataset, want, names))
+	return observed, nil
+}
+
+func missingDownstream(want, got []string) []string {
+	have := make(map[string]struct{}, len(got))
+	for _, name := range got {
+		have[name] = struct{}{}
+	}
+	var missing []string
+	for _, name := range want {
+		if _, ok := have[name]; !ok {
+			missing = append(missing, name)
 		}
 	}
-	return failures
+	return missing
 }
 
 func captureMetricBaselines(expectations []MetricExpectation, state placeholderState) (map[int]float64, error) {
@@ -788,6 +817,16 @@ func waitForLineageEvents(transport *recordingTransport, target int, timeout tim
 
 func floatEquals(a, b float64) bool {
 	return math.Abs(a-b) <= 1e-9
+}
+
+// metricAssertionName includes the label set so two checks of one metric
+// stay distinct in the JSON report. Message is not copied onto that report,
+// and the scenario diagnostic keeps only the first failure.
+func metricAssertionName(metric, kind string, labels map[string]string) string {
+	if len(labels) == 0 {
+		return fmt.Sprintf("metric %s %s", metric, kind)
+	}
+	return fmt.Sprintf("metric %s %s %s", metric, formatMetricLabels(labels), kind)
 }
 
 func formatMetricLabels(labels map[string]string) string {

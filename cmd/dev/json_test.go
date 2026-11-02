@@ -52,6 +52,73 @@ func TestDevOnceJSONReportsTheLocalRun(t *testing.T) {
 	require.NotEmpty(t, report.Runs[0].Tasks[0].TaskID)
 }
 
+func TestDevOnceJSONPathFailurePrintsReport(t *testing.T) {
+	t.Run("missing", func(t *testing.T) {
+		missing := filepath.Join(t.TempDir(), "missing.job.yaml")
+		stdout, stderr, err := executeDev(t, "--once", "--json", "--path", missing)
+		require.Error(t, err)
+		require.NotContains(t, stderr, `"version"`)
+		require.NotContains(t, stdout, "Run failed")
+		report := decodeDevReport(t, stdout)
+		require.Equal(t, 1, report.Version)
+		require.Equal(t, "dev", report.Command)
+		require.False(t, report.OK)
+		require.NotEmpty(t, report.Diagnostics)
+		require.Equal(t, missing, report.Diagnostics[0].File)
+		require.NotEmpty(t, report.Diagnostics[0].Message)
+	})
+
+	t.Run("unreadable", func(t *testing.T) {
+		parent := t.TempDir()
+		blocked := filepath.Join(parent, "blocked")
+		require.NoError(t, os.Mkdir(blocked, 0o755))
+		target := filepath.Join(blocked, "job.job.yaml")
+		require.NoError(t, os.WriteFile(target, []byte(testManifest("hidden")), 0o644))
+		require.NoError(t, os.Chmod(blocked, 0))
+		t.Cleanup(func() { _ = os.Chmod(blocked, 0o755) })
+		if f, openErr := os.Open(target); openErr == nil {
+			_ = f.Close()
+			// Root still reads mode 000. A symlink cycle fails Stat for every uid.
+			require.NoError(t, os.Chmod(blocked, 0o755))
+			left := filepath.Join(parent, "left")
+			target = filepath.Join(parent, "cycle.job.yaml")
+			require.NoError(t, os.Symlink(target, left))
+			require.NoError(t, os.Symlink(left, target))
+		}
+		_, statErr := os.Stat(target)
+		require.Error(t, statErr)
+
+		stdout, stderr, err := executeDev(t, "--once", "--json", "--path", target)
+		require.Error(t, err)
+		require.NotContains(t, stderr, `"version"`)
+		report := decodeDevReport(t, stdout)
+		require.False(t, report.OK)
+		require.NotEmpty(t, report.Diagnostics)
+		require.Equal(t, target, report.Diagnostics[0].File)
+	})
+}
+
+func TestDevOnceJSONResolvesDirectorySymlink(t *testing.T) {
+	root := t.TempDir()
+	real := filepath.Join(root, "real")
+	require.NoError(t, os.Mkdir(real, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(real, "job.job.yaml"), []byte(testManifest("via-link")), 0o644))
+	link := filepath.Join(root, "jobs")
+	if err := os.Symlink(real, link); err != nil {
+		t.Skipf("symlinks not supported: %v", err)
+	}
+	testEngineFactory = func(context.Context) atom.Engine { return &devJSONEngine{} }
+	t.Cleanup(func() { testEngineFactory = nil })
+
+	stdout, stderr, err := executeDev(t, "--once", "--json", "--path", link)
+	require.NoError(t, err)
+	require.NotContains(t, stderr, `"version"`)
+	report := decodeDevReport(t, stdout)
+	require.True(t, report.OK)
+	require.Equal(t, 1, report.Scope.Executed)
+	require.Equal(t, []string{"via-link"}, report.Scope.Aliases)
+}
+
 func TestDevOnceJSONValidationFailureStaysJSON(t *testing.T) {
 	dir := t.TempDir()
 	job := filepath.Join(dir, "bad.job.yaml")

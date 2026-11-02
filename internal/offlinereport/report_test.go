@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -19,6 +20,20 @@ func TestDiagnosticsFromErrorSplitsYAMLPaths(t *testing.T) {
 	require.Equal(t, `unknown field "schemaValidaton"`, diags[0].Message)
 	require.Equal(t, 12, diags[1].Line)
 	require.NotContains(t, diags[0].Human(), "{")
+}
+
+func TestDiagnosticsFromErrorKeepsWrappedScenarioFile(t *testing.T) {
+	dir := t.TempDir()
+	bad := filepath.Join(dir, "bad.scenario.yaml")
+	err := errors.New(bad + ": unknown YAML fields:\n  YAML path scenarios[0].notAField (line 6): unknown field \"notAField\"")
+	diags := DiagnosticsFromError(dir, err)
+	require.Len(t, diags, 1)
+	require.Equal(t, bad, diags[0].File)
+	require.NotEqual(t, dir, diags[0].File)
+	require.Equal(t, "scenarios[0].notAField", diags[0].Path)
+	require.Equal(t, 6, diags[0].Line)
+	require.Equal(t, `unknown field "notAField"`, diags[0].Message)
+	require.NotContains(t, diags[0].Message, bad)
 }
 
 func TestWriteKeepsEmptyActualAndSkipsNotesOnStderr(t *testing.T) {

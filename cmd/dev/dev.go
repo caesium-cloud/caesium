@@ -74,6 +74,14 @@ func runDev(cmd *cobra.Command, _ []string) error {
 		paths = []string{"."}
 	}
 
+	// Path failures must still print the version-1 report. resolveSymlinks
+	// aborts before runDevJSON, which used to leave stdout empty.
+	if devJSON {
+		ctx, stop := signal.NotifyContext(cmd.Context(), syscall.SIGINT, syscall.SIGTERM)
+		defer stop()
+		return runDevJSON(ctx, cmd, resolveDevJSONPaths(paths))
+	}
+
 	// Resolve every DIRECTORY path to its real, symlink-free form ONCE, up
 	// front, before discovery or watching ever sees it. jobdef.CollectDefinitions
 	// and jobdef.ResolveYAMLFiles both os.Stat then filepath.WalkDir a
@@ -297,6 +305,33 @@ func resolveSymlinks(paths []string) ([]string, error) {
 		}
 	}
 	return resolved, nil
+}
+
+// resolveDevJSONPaths resolves directory symlinks the same way resolveSymlinks
+// does. A missing or unreadable path is left unchanged so runDevJSON can put
+// that failure on the version-1 report instead of exiting with empty stdout.
+// Explicit file arguments stay unresolved, matching resolveSymlinks.
+func resolveDevJSONPaths(paths []string) []string {
+	resolved := make([]string, len(paths))
+	for i, p := range paths {
+		info, err := os.Stat(p)
+		if err != nil || !info.IsDir() {
+			resolved[i] = p
+			continue
+		}
+		real, err := filepath.EvalSymlinks(p)
+		if err != nil {
+			resolved[i] = p
+			continue
+		}
+		canon, err := canonicalWatchDir(real)
+		if err != nil {
+			resolved[i] = p
+			continue
+		}
+		resolved[i] = canon
+	}
+	return resolved
 }
 
 // dirRoots is setupWatches' bookkeeping specific to DIRECTORY --path

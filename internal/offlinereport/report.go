@@ -218,17 +218,17 @@ var (
 )
 
 // DiagnosticsFromError splits a manifest error into located diagnostics.
-// file is attached when the caller knows the source; a leading "file: " prefix
-// is removed from fallback text so the path is not repeated in the message.
+// file is attached when the caller knows the source. When err is wrapped as
+// "<path>: <message>" and that path is a different file (CollectScenarios
+// includes the failing scenario file, while --scenario may name its
+// directory), the wrapped path is kept. A leading "file: " prefix is removed
+// from fallback text so the path is not repeated in the message.
 func DiagnosticsFromError(file string, err error) []Diagnostic {
 	if err == nil {
 		return nil
 	}
 	text := err.Error()
-	body := text
-	if file != "" {
-		body = strings.TrimPrefix(text, file+": ")
-	}
+	file, body := diagnosticSource(file, text)
 	var found []Diagnostic
 	for _, line := range strings.Split(body, "\n") {
 		line = strings.TrimSpace(line)
@@ -264,4 +264,29 @@ func DiagnosticsFromError(file string, err error) []Diagnostic {
 		File:     file,
 		Message:  body,
 	}}
+}
+
+// diagnosticSource prefers a failing file named at the start of a wrapped
+// manifest error over a caller path that is only the directory that contained it.
+func diagnosticSource(file, text string) (string, string) {
+	body := text
+	if file != "" && strings.HasPrefix(text, file+": ") {
+		body = strings.TrimPrefix(text, file+": ")
+	}
+	prefix, rest, ok := strings.Cut(text, ": ")
+	if !ok || prefix == file || !isDiagnosticPath(prefix) {
+		return file, body
+	}
+	return prefix, rest
+}
+
+// isDiagnosticPath reports whether prefix is a source path rather than the
+// start of a sentence. "stat /path" and "line 5" both contain a space and
+// must not replace the caller-supplied file.
+func isDiagnosticPath(prefix string) bool {
+	if prefix == "" || strings.ContainsAny(prefix, " \t\r\n") {
+		return false
+	}
+	return strings.Contains(prefix, "/") || strings.Contains(prefix, `\`) ||
+		strings.HasSuffix(prefix, ".yaml") || strings.HasSuffix(prefix, ".yml")
 }
