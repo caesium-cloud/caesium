@@ -578,22 +578,51 @@ func (e *Evaluator) updateStatusTx(ctx context.Context, db *gorm.DB, decl models
 	// time and not from the pass's snapshot: a release (which clears `held` in its
 	// own transaction) can land between the snapshot and this write, and writing
 	// the stale verdict afterwards would strand `held` on a dataset that may have
-	// no SLO left for any later pass to correct. The check and the upsert share a
-	// transaction, and writes serialise through the single writer, so the release
-	// cannot interleave between them.
+	// no SLO left for any later pass to correct.
+	//
+	// The guarantee differs by backend. PostgreSQL (READ COMMITTED): the check is a
+	// locked read (SELECT ... FOR UPDATE) of the active hold row, so a concurrent
+	// release - whose guarded UPDATE of the same row is its first write - either
+	// commits before the check (no row, no write) or waits on that row lock until
+	// this transaction commits, and then resets the state row afterwards. dqlite /
+	// SQLite drop the locking clause: every write goes through the single writer,
+	// which already serialises the check and the upsert against the release.
+	//
+	// Lock order is hold, then state, on both sides: releaseDatasetHoldTx (the one
+	// chokepoint of the manual-ack and clean-run releases) updates dataset_holds
+	// before it resets dataset_states, so the two cannot deadlock.
 	return db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		var active int64
-		if err := tx.Model(&models.DatasetHold{}).
-			Where("namespace = ? AND name = ? AND status = ?", row.Namespace, row.Name, models.DatasetHoldStatusActive).
-			Count(&active).Error; err != nil {
+		active, err := lockActiveHold(tx, row.Namespace, row.Name)
+		if err != nil {
 			return err
 		}
-		if active == 0 {
+		if !active {
 			return nil
+		}
+		if afterHeldHoldLocked != nil {
+			afterHeldHoldLocked()
 		}
 		return upsert(tx)
 	})
 }
+
+// lockActiveHold reports whether an active hold exists on the exact (namespace,
+// name), taking a row lock on it for the rest of the caller's transaction.
+func lockActiveHold(tx *gorm.DB, namespace, name string) (bool, error) {
+	var ids []uuid.UUID
+	if err := tx.Model(&models.DatasetHold{}).
+		Clauses(clause.Locking{Strength: "UPDATE"}).
+		Where("namespace = ? AND name = ? AND status = ?", namespace, name, models.DatasetHoldStatusActive).
+		Limit(1).
+		Pluck("id", &ids).Error; err != nil {
+		return false, err
+	}
+	return len(ids) > 0, nil
+}
+
+// afterHeldHoldLocked, when set (tests only), runs after a `held` write has
+// locked its active hold and before it upserts: where a release interleaves.
+var afterHeldHoldLocked func()
 
 func (e *Evaluator) upstreamReady(ctx context.Context, outputState models.DatasetState, consumes []models.DatasetDeclaration, holds map[datasetIdentity]heldDataset) (bool, map[string]string, string, error) {
 	if len(consumes) == 0 {
