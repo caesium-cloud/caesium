@@ -4,8 +4,13 @@
 package docdiff
 
 import (
+	"crypto/hmac"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"regexp"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -33,11 +38,31 @@ var ErrDocumentsTooLarge = errors.New("the documents differ over too many lines 
 // every line that differs is in the output. Comments, quoting and key order are
 // not data, so they neither appear nor count as a change.
 func Documents(current, proposed []byte) (string, error) {
-	before, err := canonicalDocument(current)
+	return documents(current, proposed, func(data any) any { return data })
+}
+
+// MaskedDocuments is Documents for readers who may not read a credential: every
+// value under a credential-named key is masked (see masker) before the documents
+// are compared. Masking the data rather than the rendered lines is what makes it
+// hold. A multi-line value collapses to one masked line, and no hunk can show a
+// line of a value without its key.
+func MaskedDocuments(current, proposed []byte) (string, error) {
+	mask := newMasker()
+	return documents(current, proposed, func(data any) any { return mask.walk(data, false) })
+}
+
+// MaskedDocument is one document, masked as MaskedDocuments masks it.
+func MaskedDocument(document []byte) (string, error) {
+	mask := newMasker()
+	return canonicalDocument(document, func(data any) any { return mask.walk(data, false) })
+}
+
+func documents(current, proposed []byte, transform func(any) any) (string, error) {
+	before, err := canonicalDocument(current, transform)
 	if err != nil {
 		return "", fmt.Errorf("read the current document: %w", err)
 	}
-	after, err := canonicalDocument(proposed)
+	after, err := canonicalDocument(proposed, transform)
 	if err != nil {
 		return "", fmt.Errorf("read the proposed document: %w", err)
 	}
@@ -51,16 +76,77 @@ func Documents(current, proposed []byte) (string, error) {
 	return renderUnified(script), nil
 }
 
-func canonicalDocument(document []byte) (string, error) {
+func canonicalDocument(document []byte, transform func(any) any) (string, error) {
 	var data any
 	if err := yaml.Unmarshal(document, &data); err != nil {
 		return "", err
 	}
-	encoded, err := yaml.Marshal(data)
+	encoded, err := yaml.Marshal(transform(data))
 	if err != nil {
 		return "", err
 	}
 	return strings.TrimRight(string(encoded), "\n"), nil
+}
+
+// credentialKey matches a key that names a credential.
+var credentialKey = regexp.MustCompile(`(?i)secret|token|passw|pwd|credential|authorization|api[-_]?key|private[-_]?key`)
+
+// masker replaces credential values with a digest under a key that is thrown away
+// with the render. Equal values mask alike and different ones do not, so a changed
+// value still reads as a change. The key stays with the render, so a reader cannot
+// test a guess against the digest, which a plain hash of a short password would
+// allow.
+type masker struct {
+	key [32]byte
+}
+
+func newMasker() *masker {
+	mask := &masker{}
+	_, _ = rand.Read(mask.key[:]) // crypto/rand.Read does not fail
+	return mask
+}
+
+// walk masks every value at or under a credential-named key. A secret:// reference
+// names a secret without holding it, and a boolean or a null holds nothing.
+func (m *masker) walk(node any, credential bool) any {
+	switch value := node.(type) {
+	case map[string]any:
+		out := make(map[string]any, len(value))
+		for key, item := range value {
+			out[key] = m.walk(item, credential || credentialKey.MatchString(key))
+		}
+		return out
+	case map[any]any:
+		out := make(map[any]any, len(value))
+		for key, item := range value {
+			out[key] = m.walk(item, credential || credentialKey.MatchString(fmt.Sprint(key)))
+		}
+		return out
+	case []any:
+		out := make([]any, len(value))
+		for i, item := range value {
+			out[i] = m.walk(item, credential)
+		}
+		return out
+	case nil, bool:
+		return value
+	case string:
+		if !credential || strings.HasPrefix(strings.TrimSpace(value), "secret://") {
+			return value
+		}
+		return m.digest(value)
+	default:
+		if !credential {
+			return value
+		}
+		return m.digest(fmt.Sprint(value))
+	}
+}
+
+func (m *masker) digest(value string) string {
+	mac := hmac.New(sha256.New, m.key[:])
+	mac.Write([]byte(value))
+	return "[REDACTED] " + hex.EncodeToString(mac.Sum(nil))[:8]
 }
 
 // lineEdit is one line of an edit script: ' ' kept, '-' removed, '+' added.

@@ -428,6 +428,9 @@ func (o *incidentActionOps) ApplyJobdefPatch(ctx context.Context, jobID uuid.UUI
 // a patch writes shows, whichever field that is. The result's `diff` is empty in
 // two cases, told apart by `empty`: true when the two definitions are identical,
 // false when no diff could be produced, and the caller then shows the proposal.
+// `outbound_diff` is the same change with credential values masked, for readers
+// outside the incident. It has to be rendered here, from the definitions: a mask
+// applied to finished text misses the lines of a multi-line value.
 //
 // The current definition is read as a reader confined to the incident's
 // namespace (identity-and-access A8): one snapshot, with the configuration of a
@@ -447,9 +450,9 @@ func (o *incidentActionOps) renderJobdefDiff(ctx context.Context, def *schema.De
 	if errors.Is(err, incident.ErrNamespaceMoved) {
 		return nil, fmt.Errorf("%w: job %q", incident.ErrNamespaceMoved, alias)
 	}
-	var text string
+	var text, outbound string
 	if err == nil {
-		text, err = definitionDiff(current, def)
+		text, outbound, err = definitionDiffs(current, def)
 	}
 	if err != nil {
 		log.Warn("incident: could not diff the proposed job definition", "job_alias", alias, "error", err)
@@ -457,20 +460,28 @@ func (o *incidentActionOps) renderJobdefDiff(ctx context.Context, def *schema.De
 	payload := map[string]any{"alias": alias, "empty": err == nil && text == ""}
 	if text != "" {
 		payload["diff"] = text
+		payload["outbound_diff"] = outbound
 	}
 	return json.Marshal(payload)
 }
 
-func definitionDiff(current, proposed *schema.Definition) (string, error) {
+// definitionDiffs renders the complete diff and its masked form.
+func definitionDiffs(current, proposed *schema.Definition) (text, outbound string, err error) {
 	before, err := decodedDocument(current)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	after, err := decodedDocument(proposed)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
-	return docdiff.Documents(before, after)
+	if text, err = docdiff.Documents(before, after); err != nil {
+		return "", "", err
+	}
+	if outbound, err = docdiff.MaskedDocuments(before, after); err != nil {
+		return "", "", err
+	}
+	return text, outbound, nil
 }
 
 // decodedDocument renders a definition as the manifest decoder reads it. The

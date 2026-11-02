@@ -1308,18 +1308,25 @@ func TestPullRequestBodyComparesTheFileNotTheServersCopy(t *testing.T) {
 	require.Contains(t, resultDiff(t, result), "only-in-the-file")
 }
 
-// The description carries a value a credential-named key holds only as a mask,
-// and a reference as itself. The line stays, so the change still shows.
+// The description carries a credential value only as a mask, and a reference as
+// itself. A multi-line value is the hard case: no line of it may appear, even
+// when the changed line sits too far below its key for a hunk to show the key.
 func TestPullRequestBodyMasksCredentialValues(t *testing.T) {
-	f := newRouteFixture(t, richManifest)
-	proposed := strings.Replace(richManifest, "REGION: eu", "DB_PASSWORD: hunter2hunter2\n      REGION: eu", 1)
+	const multiline = "      DB_PASSWORD: |\n" +
+		"        short-line-one\n        short-line-two\n        short-line-three\n" +
+		"        short-line-four\n        short-line-five\n        short-line-six\n"
+	file := strings.Replace(richManifest, "      REGION: eu\n", multiline+"      REGION: eu\n", 1)
+	proposed := strings.Replace(file, "short-line-five", "short-line-changed", 1)
+	f := newRouteFixture(t, file)
 
 	_, result := f.approveAndExecute(t, patchJSON(t, proposed))
 	require.Equal(t, routeGitPR, result["route"], "result: %v", result)
 	body := openPull(t, f.forge)["body"].(string)
-	require.Contains(t, body, "+        DB_PASSWORD: "+Redacted)
-	require.NotContains(t, body, "hunter2hunter2")
-	require.Contains(t, resultDiff(t, result), "hunter2hunter2", "the action row keeps what the incident's readers may read")
+	require.NotContains(t, body, "short-line")
+	require.Regexp(t, `(?m)^-\s+DB_PASSWORD: .\[REDACTED\] [0-9a-f]{8}`, body, "the masked line shows the change")
+	require.Regexp(t, `(?m)^\+\s+DB_PASSWORD: .\[REDACTED\] [0-9a-f]{8}`, body)
+	require.Contains(t, body, "STORE: secret://env/STORE_URL", "a reference names a secret without holding it")
+	require.Contains(t, resultDiff(t, result), "short-line-changed", "the action row keeps what the incident's readers may read")
 }
 
 func TestPatchDiffTextOnlySaysNoChangesWhenTheRenderDoes(t *testing.T) {
@@ -1373,7 +1380,7 @@ func TestDiffIsBoundedOnEverySurface(t *testing.T) {
 	f := newRouteFixture(t, manifestFile)
 	f.config.Credentials = nil
 	f.install()
-	f.ops.patchDiff = json.RawMessage(`{"alias":"orders-daily","empty":false,"diff":` + string(huge) + `}`)
+	f.ops.patchDiff = json.RawMessage(`{"alias":"orders-daily","empty":false,"diff":` + string(huge) + `,"outbound_diff":` + string(huge) + `}`)
 	action := f.propose(t, patchJSON(t, patchedDefinition))
 	preview := patchResult(t, action)["diff"].(string)
 	require.Less(t, len(preview), maxDiffBytes+len(trailer)+8)
@@ -1390,44 +1397,54 @@ func TestDiffIsBoundedOnEverySurface(t *testing.T) {
 	require.True(t, strings.HasSuffix(f.ops.escalate[0].summary, trailer))
 }
 
-// The escalation leaves the incident, so its copy of the diff is the outbound one.
-func TestEscalationMasksCredentialValues(t *testing.T) {
+// The escalation leaves the incident, so it carries the render's masked form, and
+// the action row keeps the complete one.
+func TestEscalationCarriesTheMaskedDiff(t *testing.T) {
 	f := newRouteFixture(t, manifestFile)
 	f.config.Credentials = nil
 	f.install()
-	encoded, err := json.Marshal("-        API_TOKEN: oldvalue\n+        API_TOKEN: newvalue\n         STORE: secret://env/STORE_URL\n" +
-		"+        URL: https://example.com/" + forgeTestToken)
-	require.NoError(t, err)
-	f.ops.patchDiff = json.RawMessage(`{"alias":"orders-daily","empty":false,"diff":` + string(encoded) + `}`)
+	f.ops.patchDiff = json.RawMessage(`{"alias":"orders-daily","empty":false,"diff":"+ complete-text","outbound_diff":"+ masked-text"}`)
 
 	_, result := f.approveAndExecute(t, patchJSON(t, patchedDefinition))
 	require.Equal(t, routeEscalate, result["route"])
-	summary := f.ops.escalate[0].summary
-	require.Contains(t, summary, "-        API_TOKEN: "+Redacted)
-	require.Contains(t, summary, "+        API_TOKEN: "+Redacted)
-	require.NotContains(t, summary, "oldvalue")
-	require.NotContains(t, summary, "newvalue")
-	require.NotContains(t, summary, forgeTestToken)
-	require.Contains(t, summary, "STORE: secret://env/STORE_URL", "a reference names a secret without holding it")
-	require.Contains(t, resultDiff(t, result), "newvalue", "the action row keeps what the incident's readers may read")
+	require.Contains(t, f.ops.escalate[0].summary, "masked-text")
+	require.NotContains(t, f.ops.escalate[0].summary, "complete-text")
+	require.Equal(t, "+ complete-text", resultDiff(t, result))
+	require.NotContains(t, string(mustJSON(t, result)), "masked-text", "the masked form stays off the result")
 }
 
-func TestOutboundDiffMasksByKey(t *testing.T) {
-	for line, want := range map[string]string{
-		"+      PASSWORD: abc":                 "+      PASSWORD: " + Redacted,
-		"-      db_passwd: abc":                "-      db_passwd: " + Redacted,
-		"       AWS_SECRET_ACCESS_KEY: abc":    "       AWS_SECRET_ACCESS_KEY: " + Redacted,
-		"+    secret: abc":                     "+    secret: " + Redacted,
-		"+        Authorization: Bearer abc":   "+        Authorization: " + Redacted,
-		"+  - api-key: abc":                    "+  - api-key: " + Redacted,
-		"+      TOKEN: secret://env/TOKEN":     "+      TOKEN: secret://env/TOKEN",
-		"+      TOKEN: \"secret://env/TOKEN\"": "+      TOKEN: \"secret://env/TOKEN\"",
-		"+      REGION: eu":                    "+      REGION: eu",
-		"+    image: busybox:1.36.1":           "+    image: busybox:1.36.1",
-		"@@ -1,3 +1,3 @@":                      "@@ -1,3 +1,3 @@",
-	} {
-		require.Equal(t, want, outboundDiff(line), line)
-	}
+// With no masked diff from the render, the escalation falls back to the proposal,
+// masked: never to the complete text.
+func TestEscalationWithoutAMaskedDiffMasksTheProposal(t *testing.T) {
+	f := newRouteFixture(t, manifestFile)
+	f.config.Credentials = nil
+	f.install()
+	f.ops.patchDiff = json.RawMessage(`{"alias":"orders-daily","empty":false}`)
+	proposed := strings.Replace(richManifest, "REGION: eu", "DB_PASSWORD: |\n        short-line-one\n        short-line-two", 1)
+
+	_, result := f.approveAndExecute(t, patchJSON(t, proposed))
+	require.Equal(t, routeEscalate, result["route"])
+	summary := f.ops.escalate[0].summary
+	require.Contains(t, summary, "no diff could be produced")
+	require.NotContains(t, summary, "short-line")
+	require.Contains(t, summary, "STORE: secret://env/STORE_URL")
+	require.Contains(t, resultDiff(t, result), "short-line-one")
+}
+
+func TestOutboundTextWithholdsAProposalItCannotMask(t *testing.T) {
+	require.Equal(t, "no diff could be produced; the proposed definition is on the incident's action",
+		outboundProposalText([]byte("password: [unterminated")))
+	text := outboundDocumentDiff([]byte("a: [unterminated"), []byte("DB_PASSWORD: short-value\n"))
+	require.Contains(t, text, "no diff could be produced")
+	require.NotContains(t, text, "short-value")
+	require.Equal(t, noPatchChanges, outboundDocumentDiff([]byte("a: 1"), []byte("a: 1")))
+}
+
+func mustJSON(t *testing.T, value any) []byte {
+	t.Helper()
+	encoded, err := json.Marshal(value)
+	require.NoError(t, err)
+	return encoded
 }
 
 var fenceLine = regexp.MustCompile("^`{3,}$")

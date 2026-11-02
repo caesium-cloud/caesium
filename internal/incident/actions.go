@@ -218,8 +218,9 @@ type ActionOps interface {
 	// diff and, unless dryRun, applies it through the shipped jobdefs importer
 	// (the same in-process entry point POST /v1/jobdefs/apply uses). It returns
 	// JSON whose `diff` is a unified diff of the complete current and proposed
-	// definitions and whose `empty` says the two are identical; with neither, no
-	// diff could be produced (see patchDiffText). Provenance routing is NOT its
+	// definitions, whose `outbound_diff` is that diff with credential values
+	// masked, and whose `empty` says the two are identical; with neither `diff` nor
+	// `empty`, no diff could be produced (see patchDiffText). Provenance routing is NOT its
 	// decision — the executor derives the route and calls it with dryRun
 	// accordingly.
 	ApplyJobdefPatch(ctx context.Context, jobID uuid.UUID, namespace string, definition json.RawMessage, dryRun bool) (json.RawMessage, error)

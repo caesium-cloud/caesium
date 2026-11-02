@@ -239,6 +239,48 @@ func TestRenderRedactsATriggerSharedOutsideTheNamespace(t *testing.T) {
 	require.Contains(t, preview["diff"], jobdiff.RedactedTriggerConfiguration["redacted"])
 }
 
+// TestEscalationHoldsNoLineOfACredential drives Greptile's multi-line case through
+// the real render: the escalation event, and so the log and every channel, holds
+// no line of the value, while the change still shows and the action row, for the
+// incident's readers, keeps it.
+func TestEscalationHoldsNoLineOfACredential(t *testing.T) {
+	const multiline = "      DB_PASSWORD: |\n" +
+		"        short-line-one\n        short-line-two\n        short-line-three\n" +
+		"        short-line-four\n        short-line-five\n        short-line-six\n"
+	manifest := strings.Replace(patchedJob, "      REGION: eu\n", multiline+"      REGION: eu\n", 1)
+	rig := newPreviewRig(t, manifest)
+	bus := &recordingBus{}
+	rig.ops.bus = bus
+	require.NoError(t, rig.db.Model(&models.Job{}).Where("id = ?", rig.job.ID).
+		Update("provenance_source_id", "orders").Error)
+
+	action, err := rig.exec.Execute(context.Background(), incident.ActionRequest{
+		IncidentID: rig.inc.ID,
+		Type:       incident.ActionTypeApplyJobdefPatch,
+		Params:     patchParams(t, strings.Replace(manifest, "short-line-five", "short-line-changed", 1)),
+	})
+	require.NoError(t, err)
+	now := time.Now().UTC()
+	require.NoError(t, rig.db.Model(&models.ApprovalRequest{}).Where("action_id = ?", action.ID).Updates(map[string]any{
+		"decision": models.ApprovalDecisionApproved, "decider": "operator@example.com", "decided_at": now, "updated_at": now,
+	}).Error)
+	require.NoError(t, rig.db.Model(&models.AgentAction{}).Where("id = ?", action.ID).
+		Update("status", models.AgentActionStatusApproved).Error)
+
+	executed, err := rig.exec.ExecuteApproved(context.Background(), action.ID)
+	require.NoError(t, err)
+	require.Len(t, bus.published, 1)
+	var payload struct {
+		Summary string `json:"summary"`
+	}
+	require.NoError(t, json.Unmarshal(bus.published[0].Payload, &payload))
+	require.NotContains(t, payload.Summary, "short-line")
+	require.Regexp(t, `(?m)^-\s+DB_PASSWORD: .\[REDACTED\] [0-9a-f]{8}`, payload.Summary)
+	require.Regexp(t, `(?m)^\+\s+DB_PASSWORD: .\[REDACTED\] [0-9a-f]{8}`, payload.Summary)
+	require.Contains(t, string(executed.Result), "short-line-changed", "the action row keeps the complete diff")
+	require.NotContains(t, string(executed.Result), "outbound_diff")
+}
+
 // TestAgentDoesNotReceiveThePreview: the preview quotes the current definition,
 // which an agent token cannot read, so the answer to a proposal withholds it. The
 // row keeps it for the human.

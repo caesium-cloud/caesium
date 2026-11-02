@@ -325,7 +325,8 @@ func sourceCovers(source *env.GitSourceConfig, filePath string) bool {
 }
 
 // patchChange is the content of one pull request. The description quotes the diff
-// of the document the file really holds, so it is built once that is read.
+// of the document the file really holds, so it is built once that is read, and
+// takes the masked form of that diff.
 type patchChange struct {
 	rendered   *renderedManifest
 	definition json.RawMessage
@@ -413,6 +414,7 @@ func (r *ProvenanceRouter) open(ctx context.Context, plan *patchPlan, change *pa
 	}
 	updated := spliced.File
 	diff := documentDiffText(spliced.Original, change.rendered.Document, change.definition)
+	outbound := outboundDocumentDiff(spliced.Original, change.rendered.Document)
 
 	created, err := client.CreateBranch(ctx, plan.branch, head)
 	if err != nil {
@@ -446,7 +448,7 @@ func (r *ProvenanceRouter) open(ctx context.Context, plan *patchPlan, change *pa
 
 	opened, err := client.OpenPullRequest(ctx, forge.NewPullRequest{
 		Title: change.title,
-		Body:  change.body(diff),
+		Body:  change.body(outbound),
 		Head:  plan.branch,
 		Base:  plan.base,
 	})
@@ -563,7 +565,7 @@ func patchPullRequestResult(job *models.Job, plan *patchPlan, pr *patchPullReque
 //
 // The action row keeps the diff as the incident's readers may read it. The
 // escalation goes further, to the event stream, the server log and whatever
-// channels a policy names, so its copy is the outbound one.
+// channels a policy names, so it carries the masked form.
 func (e *Executor) escalatePatch(ctx context.Context, inc *models.Incident, job *models.Job, action *models.AgentAction, params ActionParams, diff patchDiff, degrade *patchDegrade) (map[string]any, error) {
 	log.Warn("incident: jobdef patch degraded to escalate",
 		"incident_id", inc.ID, "job_alias", job.Alias, "degrade", degrade.Code)
@@ -573,7 +575,7 @@ func (e *Executor) escalatePatch(ctx context.Context, inc *models.Incident, job 
 	}
 	escalateCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), escalateTimeout)
 	defer cancel()
-	routed, err := e.ops.Escalate(escalateCtx, inc.ID, params.Channel, summary+"\n"+degrade.Reason+"\n"+outboundDiff(diff.Diff))
+	routed, err := e.ops.Escalate(escalateCtx, inc.ID, params.Channel, summary+"\n"+degrade.Reason+"\n"+diff.outbound)
 	if err != nil {
 		return nil, err
 	}
@@ -697,11 +699,34 @@ type patchDiff struct {
 	// Empty says the proposed definition is identical to the current one.
 	Empty bool   `json:"empty"`
 	Diff  string `json:"diff"`
+	// outbound is the form for readers outside the incident. It stays off the
+	// result, which has Diff.
+	outbound string
 }
 
 func newPatchDiff(alias string, rendered, definition json.RawMessage) patchDiff {
 	text := patchDiffText(rendered, definition)
-	return patchDiff{Alias: alias, Empty: text == noPatchChanges, Diff: boundText(text, maxDiffBytes)}
+	return patchDiff{
+		Alias:    alias,
+		Empty:    text == noPatchChanges,
+		Diff:     boundText(text, maxDiffBytes),
+		outbound: outboundPatchDiff(rendered, definition, text),
+	}
+}
+
+// outboundPatchDiff is the render's masked diff. With none, it falls back as the
+// complete text does, to the proposal, masked.
+func outboundPatchDiff(rendered, definition json.RawMessage, text string) string {
+	if text == noPatchChanges {
+		return noPatchChanges
+	}
+	var parsed struct {
+		Outbound string `json:"outbound_diff"`
+	}
+	if err := json.Unmarshal(rendered, &parsed); err == nil && parsed.Outbound != "" {
+		return boundedSection(parsed.Outbound, maxDiffBytes)
+	}
+	return outboundProposalText(proposalDocument(definition))
 }
 
 // patchDiffText is the readable form of ActionOps.ApplyJobdefPatch's result. It
@@ -735,17 +760,45 @@ func documentDiffText(current, proposed []byte, definition json.RawMessage) stri
 	return text
 }
 
+// outboundDocumentDiff is documentDiffText for readers outside the incident.
+func outboundDocumentDiff(current, proposed []byte) string {
+	text, err := docdiff.MaskedDocuments(current, proposed)
+	switch {
+	case err != nil:
+		return outboundProposalText(proposed)
+	case text == "":
+		return noPatchChanges
+	}
+	return boundedSection(text, maxDiffBytes)
+}
+
+const noDiffHeading = "no diff could be produced; the complete proposed definition follows\n\n"
+
 // fullProposalText stands in for a diff that could not be produced: the reader
 // cannot see what changes, so they see all of what would be written.
 func fullProposalText(definition json.RawMessage) string {
-	const heading = "no diff could be produced; the complete proposed definition follows\n\n"
+	return noDiffHeading + string(proposalDocument(definition))
+}
+
+// outboundProposalText is fullProposalText for readers outside the incident. A
+// document that cannot be masked is withheld.
+func outboundProposalText(document []byte) string {
+	masked, err := docdiff.MaskedDocument(document)
+	if err != nil {
+		return "no diff could be produced; the proposed definition is on the incident's action"
+	}
+	return boundedSection(noDiffHeading+masked, maxDiffBytes)
+}
+
+// proposalDocument is the proposal as YAML, or as it arrived if it will not decode.
+func proposalDocument(definition json.RawMessage) []byte {
 	var proposed schema.Definition
 	if err := json.Unmarshal(definition, &proposed); err == nil {
 		if document, err := yaml.Marshal(&proposed); err == nil {
-			return heading + string(document)
+			return document
 		}
 	}
-	return heading + string(definition)
+	return definition
 }
 
 var unsafeForgeText = regexp.MustCompile(`[^A-Za-z0-9._-]+`)
@@ -777,8 +830,8 @@ func patchBody(inc *models.Incident, actionID uuid.UUID, alias string, plan *pat
 	b.WriteString("\n\n### Violated assertion\n\n")
 	b.WriteString(fenced(boundedSection(patchEvidence(inc), maxBodyEvidenceBytes)))
 	b.WriteString("\n\n### Rendered diff\n\n")
-	b.WriteString("The job's document in the file against its replacement, as data, with keys sorted.\n\n")
-	b.WriteString(fenced(outboundDiff(diff)))
+	b.WriteString("The job's document in the file against its replacement, as data, with keys sorted. Credential values are masked; equal masks mean equal values.\n\n")
+	b.WriteString(fenced(diff))
 	b.WriteString("\n")
 	return b.String()
 }
@@ -800,26 +853,6 @@ func patchEvidence(inc *models.Incident) string {
 		return "the hold's evidence could not be rendered"
 	}
 	return string(encoded)
-}
-
-// sensitiveLine matches a rendered YAML `key: value` line whose key names a
-// credential, with or without a diff's leading marker.
-var sensitiveLine = regexp.MustCompile(`(?i)^([-+ ]?\s*(?:- )*[^\s:]*(?:secret|token|passw|pwd|credential|authorization|api[-_]?key|private[-_]?key)[^\s:]*:[ \t]+)(.+)$`)
-
-// outboundDiff is a diff for readers who are not the incident's: a value under a
-// credential-named key is masked, unless it is a secret:// reference, which names
-// a secret without holding it. The masked line still shows, so a changed value
-// still reads as a change. Then the scrubber takes whatever else looks like a
-// token. Unchanged lines are masked too, since they frame the change.
-func outboundDiff(diff string) string {
-	lines := strings.Split(diff, "\n")
-	for i, line := range lines {
-		match := sensitiveLine.FindStringSubmatch(line)
-		if match != nil && !strings.HasPrefix(strings.Trim(match[2], `"'`), "secret://") {
-			lines[i] = match[1] + Redacted
-		}
-	}
-	return boundedSection(strings.Join(lines, "\n"), maxDiffBytes)
 }
 
 // boundedSection scrubs and bounds one untrusted section. The pull request goes

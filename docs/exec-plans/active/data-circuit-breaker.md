@@ -1643,7 +1643,10 @@ precedent for it is warn-mode schema validation, which publishes
       `empty`, and its `updates` become the `diff` text. The
       proposal records its provenance as a baseline on the action, and the manifest
       is held to the proposal's commit, not the one the job carries at execution.
-      The direct route has the same gap and still applies a stale proposal.
+      The pull request description and the escalation carry a form with credential
+      values masked in the data, before the diff is built, so no line of a
+      multi-line value escapes. The direct route has the same gap and still applies
+      a stale proposal.
       `ExecuteApproved` writes its terminal status on a context detached
       from the request. Only the patched document changes, so comments inside it are
       lost; a sibling's or a header's are kept. The Console shows the preview through
