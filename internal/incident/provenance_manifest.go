@@ -9,15 +9,14 @@ import (
 	"regexp"
 	"strings"
 
-	jobdiff "github.com/caesium-cloud/caesium/internal/jobdef/diff"
 	"github.com/caesium-cloud/caesium/internal/models"
 	schema "github.com/caesium-cloud/caesium/pkg/jobdef"
 	"gopkg.in/yaml.v3"
 )
 
 // renderedManifest is a proposed definition as one YAML document that the real
-// parser has accepted. Definition is that parse, so it carries the parser's
-// defaults; a stored manifest is compared against it on equal terms.
+// parser has accepted. Definition is that decode, so a stored manifest is
+// compared against it on equal terms.
 type renderedManifest struct {
 	Definition *schema.Definition
 	Document   []byte
@@ -34,12 +33,12 @@ func renderManifest(definition json.RawMessage) (*renderedManifest, error) {
 	if err != nil {
 		return nil, fmt.Errorf("render definition: %w", err)
 	}
-	var parsed schema.Definition
-	if err := yaml.Unmarshal(document, &parsed); err != nil {
+	if _, err := schema.Parse(document); err != nil {
 		return nil, fmt.Errorf("parse rendered definition: %w", err)
 	}
-	if err := parsed.Validate(); err != nil {
-		return nil, fmt.Errorf("validate rendered definition: %w", err)
+	var parsed schema.Definition
+	if err := yaml.Unmarshal(document, &parsed); err != nil {
+		return nil, fmt.Errorf("decode rendered definition: %w", err)
 	}
 	if !sameJob(&proposed, &parsed) {
 		return nil, errors.New("the rendered document does not read back as the proposed definition")
@@ -47,13 +46,18 @@ func renderManifest(definition json.RawMessage) (*renderedManifest, error) {
 	return &renderedManifest{Definition: &parsed, Document: document}, nil
 }
 
-// sameJob compares what the server would treat as the job.
+// sameJob compares two definitions field for field through their JSON form, the
+// form a proposal arrives in. A blank namespace is `default`.
 func sameJob(a, b *schema.Definition) bool {
-	alias := a.Metadata.Alias
-	return jobdiff.Compare(
-		map[string]jobdiff.JobSpec{alias: jobdiff.FromDefinition(a)},
-		map[string]jobdiff.JobSpec{alias: jobdiff.FromDefinition(b)},
-	).Empty()
+	left, right := *a, *b
+	left.Metadata.Namespace = models.NamespaceOrDefault(left.Metadata.Namespace)
+	right.Metadata.Namespace = models.NamespaceOrDefault(right.Metadata.Namespace)
+	leftJSON, err := json.Marshal(&left)
+	if err != nil {
+		return false
+	}
+	rightJSON, err := json.Marshal(&right)
+	return err == nil && bytes.Equal(leftJSON, rightJSON)
 }
 
 // documentMarker is a `---` line: an optional comment may follow, content may not.

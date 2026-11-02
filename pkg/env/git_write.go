@@ -7,14 +7,17 @@ import (
 	"fmt"
 	"net"
 	"net/url"
+	"regexp"
 	"slices"
 	"strings"
-
-	jobdefschema "github.com/caesium-cloud/caesium/pkg/jobdef"
 )
 
 // GitForgeGitHub is the forge kind of a GitHub or GitHub Enterprise API.
 const GitForgeGitHub = "github"
+
+// gitWriteNamespace is pkg/jobdef's namespace syntax: a DNS label. pkg/jobdef's
+// tests reach this package, so it cannot be imported here.
+var gitWriteNamespace = regexp.MustCompile(`^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$`)
 
 // GitWriteCredentials are the forge write grants of the Git-PR route of
 // apply_jobdef_patch, parsed from CAESIUM_GIT_WRITE_CREDENTIALS (a JSON array of
@@ -87,9 +90,7 @@ func (c GitWriteCredential) validate() error {
 	if len(c.Namespaces) == 0 {
 		return errors.New("namespaces must list at least one namespace")
 	}
-	if slices.ContainsFunc(c.Namespaces, func(ns string) bool {
-		return ns == "" || jobdefschema.ValidateNamespace(ns) != nil
-	}) {
+	if slices.ContainsFunc(c.Namespaces, func(ns string) bool { return !gitWriteNamespace.MatchString(ns) }) {
 		return errors.New("namespaces entries must be DNS labels; a wildcard is not accepted")
 	}
 	return nil
