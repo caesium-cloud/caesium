@@ -24,15 +24,6 @@ const ContextKeyAuth = "auth"
 // ContextKeyPrincipal stores the unified authenticated identity for the request.
 const ContextKeyPrincipal = "auth.principal"
 
-// apiKeyLookupTimeout bounds the database read behind bearer authentication.
-//
-// dqlite retries leader discovery until its context is done. Without a
-// deadline that read blocks for as long as the cluster has no leader, which
-// hangs every authenticated route. The bound matches nodeEnrichmentTimeout
-// (900ms) in api/rest/service/system. A sooner request deadline still wins:
-// context.WithTimeout keeps the earlier of the two.
-const apiKeyLookupTimeout = 900 * time.Millisecond
-
 // uuidPattern matches UUID path segments for route normalisation.
 var uuidPattern = regexp.MustCompile(`[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}`)
 var namedParamPattern = regexp.MustCompile(`:[^/]+`)
@@ -111,9 +102,11 @@ func Auth(d AuthDeps) echo.MiddlewareFunc {
 			}
 
 			if token != "" {
-				lookupCtx, cancelLookup := context.WithTimeout(c.Request().Context(), apiKeyLookupTimeout)
-				validKey, keyPrincipal, err := d.Service.AuthenticateKey(lookupCtx, token)
-				cancelLookup()
+				// Database reads inside AuthenticateKey carry their own 900ms
+				// bound. The request context is passed through so a group
+				// refresh keeps the caller's deadline (AuthGroupRefreshTimeout
+				// is 5s) instead of being cut off with the lookup.
+				validKey, keyPrincipal, err := d.Service.AuthenticateKey(c.Request().Context(), token)
 				if err != nil {
 					if authStoreUnavailable(err) {
 						return echo.NewHTTPError(http.StatusServiceUnavailable, "authentication store is unavailable").Wrap(err)
@@ -290,9 +283,12 @@ func tokenPrefix(token string) string {
 	return token
 }
 
-// authStoreUnavailable reports a key lookup that ended because its context
-// was cancelled or its deadline passed. That is not a bad credential: the
-// caller must not answer 401 or burn the auth-failure limiter.
+// authStoreUnavailable reports a key lookup whose database read ended
+// because its context was cancelled or its deadline passed. That is not a
+// bad credential: the caller must not answer 401, burn the auth-failure
+// limiter, write an auth-denied audit row, or pad the failure latency.
+// The 900ms bound sits on those reads inside auth.AuthenticateKey, not
+// around the whole call.
 func authStoreUnavailable(err error) bool {
 	return errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled)
 }

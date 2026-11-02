@@ -196,13 +196,27 @@ func (s *Service) recordLastUsed(id uuid.UUID) {
 	s.lastUsedMu.Unlock()
 }
 
+// apiKeyLookupTimeout bounds one database read on the API-key
+// authentication path: the hash lookup, the user load in validateUserKey,
+// and the post-refresh re-read in revalidateKey.
+//
+// dqlite retries leader discovery until its context is done. Without a
+// deadline that read blocks for as long as the cluster has no leader, which
+// hangs every authenticated route. The bound matches nodeEnrichmentTimeout
+// (900ms) in api/rest/service/system. A sooner caller deadline still wins:
+// context.WithTimeout keeps the earlier of the two.
+//
+// groupFreshness.Admit keeps the caller context. This bound must not wrap
+// that identity-provider wait; AuthGroupRefreshTimeout defaults to 5s.
+const apiKeyLookupTimeout = 900 * time.Millisecond
+
 // ValidateKey looks up a plaintext API key, verifies it is active (for a
 // user-bound key, that its user is too; see AuthenticateKey), and returns the
 // key record. On success it asynchronously updates last_used_at.
 //
-// The lookup uses context.Background(). Callers that must abort when the
-// store has no leader (the HTTP middleware) call AuthenticateKey with a
-// deadline of their own. The signature stays fixed for the other callers.
+// The call uses context.Background(). Each database read inside
+// AuthenticateKey is still bounded by apiKeyLookupTimeout, and a sooner
+// deadline passed to AuthenticateKey wins. The signature stays fixed.
 func (s *Service) ValidateKey(plaintext string) (*models.APIKey, error) {
 	key, _, err := s.AuthenticateKey(context.Background(), plaintext)
 	return key, err
@@ -214,10 +228,11 @@ func (s *Service) ValidateKey(plaintext string) (*models.APIKey, error) {
 // row with one is user-bound and authenticates its user, resolved afresh on
 // every call (validateUserKey). Every credential refusal is one of the
 // validation sentinels and is padded to the same minimum latency, so a caller
-// cannot tell a disabled user from a revoked key. A cancelled or expired ctx
-// aborts the lookup and is returned as that context error, unpadded: it is
-// store unavailability, not a bad credential. On success it asynchronously
-// updates last_used_at.
+// cannot tell a disabled user from a revoked key. A cancelled or expired
+// database read is returned as that context error, unpadded: it is store
+// unavailability, not a bad credential. Those reads are bounded by
+// apiKeyLookupTimeout; groupFreshness.Admit keeps ctx. On success it
+// asynchronously updates last_used_at.
 func (s *Service) AuthenticateKey(ctx context.Context, plaintext string) (_ *models.APIKey, _ *Principal, retErr error) {
 	startedAt := s.now()
 	defer func() {
@@ -230,11 +245,12 @@ func (s *Service) AuthenticateKey(ctx context.Context, plaintext string) (_ *mod
 	}
 
 	var key models.APIKey
-	// WithContext is required. dqlite retries leader discovery until the
-	// context is done; a lookup on the background context hangs for as long
-	// as the cluster has no leader. The user row re-read in validateUserKey
-	// already carries ctx.
-	if err := s.db.WithContext(ctx).Where("key_hash = ?", hash).First(&key).Error; err != nil {
+	// Bound only this read. validateUserKey bounds its own reads and passes
+	// ctx, not this child, to group refresh.
+	readCtx, cancelRead := context.WithTimeout(ctx, apiKeyLookupTimeout)
+	err = s.db.WithContext(readCtx).Where("key_hash = ?", hash).First(&key).Error
+	cancelRead()
+	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, nil, ErrKeyNotFound
 		}
