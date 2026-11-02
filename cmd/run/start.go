@@ -16,6 +16,7 @@ import (
 
 var (
 	startJobID          string
+	startAlias          string
 	startServer         string
 	startAPIKey         string
 	startParams         []string
@@ -43,9 +44,11 @@ type startResponse struct {
 }
 
 var startCmd = &cobra.Command{
-	Use:   "start --job-id <job-id> [--params k=v] [--priority high|normal|low] [--idempotency-key <key>]",
+	Use:   "start (--job-id <job-id> | --alias <alias>) [--params k=v] [--priority high|normal|low] [--idempotency-key <key>]",
 	Short: "Start a job run",
 	Long: "Start a job run and print its run ID on stdout.\n\n" +
+		"Pass --job-id, or --alias to resolve the job through GET /v1/jobs?alias=. " +
+		"Do not pass both.\n\n" +
 		"With --idempotency-key, retrying the same command returns the original start's outcome " +
 		"instead of starting another run. A start the job's concurrency policy queues prints nothing " +
 		"on stdout; rerun with the same key to get its run ID once it starts. A start that is skipped " +
@@ -55,9 +58,10 @@ var startCmd = &cobra.Command{
 }
 
 func runStart(cmd *cobra.Command, args []string) error {
-	jobID := strings.TrimSpace(startJobID)
-	if jobID == "" {
-		return fmt.Errorf("--job-id is required")
+	apiKey := resolveRunDiffAPIKey(cmd, startAPIKey)
+	jobID, err := resolveStartJobID(cmd, apiKey)
+	if err != nil {
+		return err
 	}
 
 	params, err := parseRunStartParams(startParams)
@@ -73,7 +77,7 @@ func runStart(cmd *cobra.Command, args []string) error {
 	}
 
 	key := strings.TrimSpace(startIdempotencyKey)
-	resp, err := postStart(cmd, jobID, key, startRequest{
+	resp, err := postStart(cmd, jobID, apiKey, key, startRequest{
 		Params:   params,
 		Priority: priority,
 	})
@@ -81,6 +85,21 @@ func runStart(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	return reportStart(cmd, key, resp)
+}
+
+func resolveStartJobID(cmd *cobra.Command, apiKey string) (string, error) {
+	jobID := strings.TrimSpace(startJobID)
+	alias := strings.TrimSpace(startAlias)
+	switch {
+	case jobID == "" && alias == "":
+		return "", fmt.Errorf("--job-id or --alias is required")
+	case jobID != "" && alias != "":
+		return "", fmt.Errorf("pass only one of --job-id or --alias")
+	case jobID != "":
+		return jobID, nil
+	default:
+		return lookupJobIDByAlias(cmd, startHTTPClient, startServer, apiKey, alias)
+	}
 }
 
 // reportStart keeps stdout to the run ID alone, so `RUN=$(caesium run start
@@ -137,7 +156,7 @@ func parseRunStartParams(values []string) (map[string]string, error) {
 	return params, nil
 }
 
-func postStart(cmd *cobra.Command, jobID, idempotencyKey string, payload startRequest) (*startResponse, error) {
+func postStart(cmd *cobra.Command, jobID, apiKey, idempotencyKey string, payload startRequest) (*startResponse, error) {
 	body, err := json.Marshal(payload)
 	if err != nil {
 		return nil, err
@@ -153,7 +172,7 @@ func postStart(cmd *cobra.Command, jobID, idempotencyKey string, payload startRe
 	if idempotencyKey != "" {
 		req.Header.Set("Idempotency-Key", idempotencyKey)
 	}
-	if apiKey := resolveRunDiffAPIKey(cmd, startAPIKey); apiKey != "" {
+	if apiKey != "" {
 		req.Header.Set("Authorization", "Bearer "+apiKey)
 	}
 
@@ -182,13 +201,13 @@ func postStart(cmd *cobra.Command, jobID, idempotencyKey string, payload startRe
 }
 
 func init() {
-	startCmd.Flags().StringVar(&startJobID, "job-id", "", "Job ID to start (required)")
+	startCmd.Flags().StringVar(&startJobID, "job-id", "", "Job ID to start (required unless --alias is set)")
+	startCmd.Flags().StringVar(&startAlias, "alias", "", "Job alias to start; resolved with GET /v1/jobs?alias= (instead of --job-id)")
 	startCmd.Flags().StringVar(&startServer, "server", "http://localhost:8080", "Caesium server base URL")
 	startCmd.Flags().StringVar(&startAPIKey, "api-key", "", "API key for authentication (prefer "+runDiffAPIKeyEnvVar+"; --api-key is visible in process listings)")
 	startCmd.Flags().StringArrayVar(&startParams, "params", nil, "Run parameter as k=v (repeatable)")
 	startCmd.Flags().StringVar(&startPriority, "priority", "", "Run priority override: high, normal, or low")
 	startCmd.Flags().StringVar(&startIdempotencyKey, "idempotency-key", "", "Make the start idempotent: a retry with the same key returns the original start instead of starting another run")
-	startCmd.MarkFlagRequired("job-id") //nolint:errcheck
 
 	Cmd.AddCommand(startCmd)
 }

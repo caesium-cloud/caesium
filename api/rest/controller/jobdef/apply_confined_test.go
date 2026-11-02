@@ -20,6 +20,7 @@ import (
 	"github.com/caesium-cloud/caesium/internal/jobdef/testutil"
 	"github.com/caesium-cloud/caesium/internal/models"
 	schema "github.com/caesium-cloud/caesium/pkg/jobdef"
+	"github.com/google/uuid"
 	"github.com/labstack/echo/v5"
 	"github.com/stretchr/testify/require"
 	"gorm.io/gorm"
@@ -101,6 +102,32 @@ func clusterOperator() *auth.Principal {
 	return confined(policy.Grants{"*": models.RoleOperator})
 }
 
+// requireApplyJobs checks the apply counts and that each applied job's id is
+// the row the importer stored for that alias.
+func requireApplyJobs(t *testing.T, conn *gorm.DB, body string, applied, pruned int, aliases ...string) {
+	t.Helper()
+	var resp struct {
+		Applied int `json:"applied"`
+		Pruned  int `json:"pruned"`
+		Jobs    []struct {
+			Alias string `json:"alias"`
+			ID    string `json:"id"`
+		} `json:"jobs"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(body), &resp))
+	require.Equal(t, applied, resp.Applied)
+	require.Equal(t, pruned, resp.Pruned)
+	require.Len(t, resp.Jobs, len(aliases))
+	for i, alias := range aliases {
+		require.Equal(t, alias, resp.Jobs[i].Alias)
+		id, err := uuid.Parse(resp.Jobs[i].ID)
+		require.NoError(t, err)
+		row, ok := jobRow(t, conn, alias)
+		require.True(t, ok)
+		require.Equal(t, id, row.ID)
+	}
+}
+
 // An unrestricted caller (auth off, or operator at "*" with an unscoped key)
 // keeps the per-definition flow and its response, prune included.
 func TestApplyUnrestrictedFlowUnchanged(t *testing.T) {
@@ -110,7 +137,7 @@ func TestApplyUnrestrictedFlowUnchanged(t *testing.T) {
 			status, body, err := callApply(t, principal, applyBody(true, scopeDefinition("a", "marketing"), scopeDefinition("b", "finance")))
 			require.NoError(t, err)
 			require.Equal(t, http.StatusOK, status)
-			require.JSONEq(t, `{"applied":2,"pruned":1}`, body)
+			requireApplyJobs(t, conn, body, 2, 1, "a", "b")
 			stale, _ := jobRow(t, conn, "stale")
 			require.True(t, stale.DeletedAt.Valid)
 		})
@@ -163,7 +190,7 @@ func TestApplyConfinedPruneStaysInItsNamespaces(t *testing.T) {
 	status, body, err := callApply(t, mktOperator, applyBody(true, scopeDefinition("keep", "marketing")))
 	require.NoError(t, err)
 	require.Equal(t, http.StatusOK, status)
-	require.JSONEq(t, `{"applied":1,"pruned":1}`, body)
+	requireApplyJobs(t, conn, body, 1, 1, "keep")
 	gone, _ := jobRow(t, conn, "gone")
 	fin, _ := jobRow(t, conn, "fin")
 	require.True(t, gone.DeletedAt.Valid)
