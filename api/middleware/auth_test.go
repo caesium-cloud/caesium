@@ -176,6 +176,49 @@ func TestMiddlewareRejectsInvalidToken(t *testing.T) {
 	require.Equal(t, http.StatusUnauthorized, he.Code)
 }
 
+func TestMiddlewareKeyLookupDeadlineIsServiceUnavailable(t *testing.T) {
+	_, svc, auditor, _, key := setupAuth(t)
+	// Two counted failures would exceed this limit. Store-unavailable lookups
+	// must not count, so a later wrong key is still 401 rather than 429.
+	limiter := auth.NewRateLimiter(1, time.Minute)
+	const ip = "203.0.113.50"
+	route := &echo.RouteInfo{Path: "/v1/jobs", Method: http.MethodGet}
+
+	for range 2 {
+		ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Millisecond))
+		req := httptest.NewRequestWithContext(ctx, http.MethodGet, "/v1/jobs", nil)
+		req.RemoteAddr = ip + ":1234"
+		req.Header.Set("Authorization", "Bearer "+key)
+		_, err := callMiddleware(t, svc, auditor, limiter, req, route, nil, nil)
+		cancel()
+		require.Error(t, err)
+
+		he, ok := err.(*echo.HTTPError)
+		require.True(t, ok)
+		require.Equal(t, http.StatusServiceUnavailable, he.Code)
+		require.Equal(t, "authentication store is unavailable", he.Message)
+		require.ErrorIs(t, err, context.DeadlineExceeded)
+	}
+	require.False(t, limiter.IsLimited(ip))
+
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/jobs", nil)
+	req.RemoteAddr = ip + ":1234"
+	req.Header.Set("Authorization", "Bearer csk_live_invalid123")
+	_, err := callMiddleware(t, svc, auditor, limiter, req, route, nil, nil)
+	require.Error(t, err)
+
+	he, ok := err.(*echo.HTTPError)
+	require.True(t, ok)
+	require.Equal(t, http.StatusUnauthorized, he.Code)
+	require.Equal(t, "invalid or expired api key", he.Message)
+	require.False(t, limiter.IsLimited(ip))
+
+	entries, err := auditor.Query(&auth.AuditQueryRequest{Action: auth.ActionAuthDenied, Limit: 10})
+	require.NoError(t, err)
+	require.Len(t, entries, 1)
+	requireAuditReason(t, entries[0], "invalid")
+}
+
 func TestMiddlewareAcceptsValidToken(t *testing.T) {
 	_, svc, auditor, limiter, key := setupAuth(t)
 
