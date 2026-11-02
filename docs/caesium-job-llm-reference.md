@@ -571,18 +571,29 @@ to executions admitted after all replicas run the upgraded version.
 
 ```sh
 caesium job lint --path jobs/           # Validate YAML schemas and DAG topology
+caesium job lint --path jobs/ --json    # Offline version-1 JSON report on stdout (files, counts, diagnostics, summary)
+caesium job lint --server --json        # Unchanged server lint document; --json with --server does not use the offline report
 caesium job preview --path job.yaml     # ASCII DAG visualization
 caesium dev --once --path job.yaml      # Run job locally against Docker
+caesium dev --once --path job.yaml --json  # One-shot version-1 execution report; --json without --once is an error
 caesium dev --once --path job.yaml --param date=2026-09-15  # Override one trigger.defaultParams key; other defaults still apply
-caesium dev --path job.yaml             # Watch mode — re-run on file save
+caesium dev --path job.yaml             # Watch mode — re-run on file save; does not stream JSON
 caesium job diff --path jobs/           # Preview creates/updates vs server (add --prune for deletes)
 caesium job apply --path jobs/          # Deploy definitions to running server
 caesium job export <alias|job-id>       # Round-trip a live job back to YAML on stdout (-o writes a file)
 caesium blame <job-id-or-alias>          # Attribute topology/image/command changes to commits/snapshots
 caesium test --path jobs/               # Full validation suite
+caesium test --path jobs/ --json        # Version-1 schema/DAG report on stdout
 caesium test --path jobs/ --check-images # Strict gate for Docker-backed images
 caesium test --scenario harness/        # Execute harness scenarios against the local runtime
+caesium test --scenario harness/ --json # Version-1 harness report: scenarios, tasks, run/task ids, expected/actual
 ```
+
+`caesium job lint --json` without `--server` writes that offline report and exits
+nonzero when validation fails; stdout stays the JSON document and human
+diagnostics go to stderr. `caesium test --json` uses the same report for a
+schema/path check and for `--scenario` execution. `caesium dev --once --json`
+prints the execution report for the local run. Watch mode does not stream JSON.
 
 All local manifest commands reject unknown structural fields and report the
 source file, YAML path, and line before validation, execution, or apply. This
