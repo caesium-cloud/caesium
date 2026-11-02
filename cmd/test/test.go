@@ -20,6 +20,7 @@ var (
 	scenarioPaths []string
 	checkImages   bool
 	verboseOutput bool
+	jsonOutput    bool
 )
 
 // Cmd is the top-level test command.
@@ -36,6 +37,7 @@ func init() {
 	Cmd.Flags().StringSliceVar(&scenarioPaths, "scenario", nil, "Paths to harness scenario files or directories")
 	Cmd.Flags().BoolVar(&checkImages, "check-images", false, "Require every referenced image in the local Docker daemon (no pull or remote-runtime check)")
 	Cmd.Flags().BoolVarP(&verboseOutput, "verbose", "v", false, "Show detailed DAG analysis")
+	Cmd.Flags().BoolVar(&jsonOutput, "json", false, "Print a version-1 report on stdout for schema checks or --scenario execution")
 }
 
 func runTest(cmd *cobra.Command, _ []string) error {
@@ -43,7 +45,13 @@ func runTest(cmd *cobra.Command, _ []string) error {
 		if checkImages {
 			return fmt.Errorf("--check-images cannot be combined with --scenario")
 		}
+		if jsonOutput {
+			return runScenariosJSON(cmd)
+		}
 		return runScenarios(cmd)
+	}
+	if jsonOutput {
+		return runSchemaJSON(cmd)
 	}
 
 	// Don't validate during collection — we validate per-definition below

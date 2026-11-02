@@ -37,12 +37,13 @@ var errDatasetHoldRace = errors.New("run: dataset hold race; retry")
 
 // DatasetHoldEvent is the payload of dataset_held and dataset_released.
 //
-// It is deliberately self-contained: Stream F's incident entry point keys off
-// dataset_held and must be able to open an incident from the event alone,
-// without a second read that could observe a moved baseline or an
-// already-released hold. So the violated assertion, the observed value, the
-// breached bound AND the baseline snapshot all travel here, inside the
-// DataViolation objects the evaluator produced.
+// The incident subscriber opens a data_quality_hold incident from it, and
+// internal/incident mirrors the fields it reads (it cannot import this package;
+// TestHoldEventOpensIncident pins the two together). The violated assertion,
+// the observed value, the breached bound AND the baseline snapshot all travel
+// here, inside the DataViolation objects the evaluator produced, so no second
+// read can observe a moved baseline. The one thing read back is the impact cone
+// (see ImpactedDatasets), which is frozen at open.
 type DatasetHoldEvent struct {
 	HoldID    uuid.UUID `json:"hold_id"`
 	Namespace string    `json:"namespace,omitempty"`
@@ -53,11 +54,17 @@ type DatasetHoldEvent struct {
 	OccurrenceCount int    `json:"occurrence_count,omitempty"`
 	JobAlias        string `json:"job_alias,omitempty"`
 	Step            string `json:"step,omitempty"`
+	// TaskID and TaskRunID name the producing task. Either can be absent, like
+	// the hold's HeldBy* columns they copy.
+	TaskID    *uuid.UUID `json:"task_id,omitempty"`
+	TaskRunID *uuid.UUID `json:"task_run_id,omitempty"`
 	// Violations carries observed / bound / baseline_median / baseline_samples
 	// per breached assertion.
 	Violations []DataViolation `json:"violations,omitempty"`
 	// ImpactedDatasets is how many datasets the observed lineage graph put
 	// downstream of this one when the hold opened (0 when lineage records none).
+	// The cone itself stays on the hold row: this payload reaches /v1/events
+	// and notification channels, and the cone names other namespaces' datasets.
 	ImpactedDatasets int `json:"impacted_datasets,omitempty"`
 	// Release* are set only on dataset_released.
 	ReleaseReason string `json:"release_reason,omitempty"`
@@ -293,7 +300,7 @@ func (s *Store) datasetHoldImpact(ctx context.Context, namespace, name string) (
 	if result == nil || len(result.Downstream) == 0 {
 		return nil, 0
 	}
-	encoded, err := json.Marshal(result)
+	encoded, err := lineage.EncodeStoredImpact(result)
 	if err != nil {
 		log.Warn("failed to encode blast radius for a dataset hold", "dataset", name, "error", err)
 		return nil, 0
@@ -432,10 +439,27 @@ func (s *Store) releaseDatasetHoldTx(tx *gorm.DB, id uuid.UUID, req datasetHoldR
 	if res.RowsAffected == 0 {
 		return false, nil
 	}
-	if out != nil {
-		if err := tx.First(out, "id = ?", id).Error; err != nil {
-			return false, err
-		}
+	var released models.DatasetHold
+	if out == nil {
+		out = &released
+	}
+	if err := tx.First(out, "id = ?", id).Error; err != nil {
+		return false, err
+	}
+	// The freshness evaluator persists "held" on the dataset's state row while a
+	// hold is active. Clear it HERE, in the release transaction, so the status can
+	// never outlive the hold whichever features happen to be running: freshness
+	// scheduling off, no freshness SLO, a producer that no longer declares the
+	// dataset. A later evaluation recomputes the real status.
+	if err := tx.Model(&models.DatasetState{}).
+		Where("namespace = ? AND name = ? AND status = ?", out.Namespace, out.Name, models.DatasetStatusHeld).
+		Updates(map[string]any{
+			"status":           models.DatasetStatusUnknown,
+			"reason":           "",
+			"reason_namespace": nil,
+			"updated_at":       now,
+		}).Error; err != nil {
+		return false, err
 	}
 	return true, nil
 }
@@ -468,6 +492,8 @@ func (s *Store) appendDatasetHoldEventTx(
 		OccurrenceCount:  hold.OccurrenceCount,
 		JobAlias:         hold.HeldByJobAlias,
 		Step:             hold.HeldByStepName,
+		TaskID:           hold.HeldByTaskID,
+		TaskRunID:        hold.HeldByTaskRunID,
 		Violations:       violations,
 		ImpactedDatasets: impacted,
 		ReleaseReason:    hold.ReleaseReason,

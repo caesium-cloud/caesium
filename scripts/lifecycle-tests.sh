@@ -4014,7 +4014,7 @@ assert4-event-replay-from-explicit-cursor
 assert5-queued-row-reaches-a-started-run
 assert6-export-relints-and-diffs-clean
 assert7-serving-build-is-the-candidate
-recorded-in-flight-run-after-upgrade
+in-flight-run-finalized-after-upgrade
 candidate-never-exited-nonzero
 supported-candidate-readdress
 unsupported-previous-release-readdress

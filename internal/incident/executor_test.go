@@ -36,12 +36,18 @@ type fakeOps struct {
 	skipTask       []skipTaskCall
 	overrideGate   []uuid.UUID
 	applyPatch     []applyPatchCall
+	releaseHold    []HoldRelease
 
 	retryErr error
 	rerunID  uuid.UUID
 	// applyPatchErr forces the jobdef apply to fail so the approved-action
 	// failure path is exercised.
 	applyPatchErr error
+	// releaseHoldErr forces the release to fail.
+	releaseHoldErr error
+	// releaseDB, when set, runs the release's Guard on it, as the release
+	// transaction would.
+	releaseDB *gorm.DB
 }
 
 type skipTaskCall struct {
@@ -120,6 +126,15 @@ func (f *fakeOps) SuppressDownstreamAlerts(_ context.Context, _ uuid.UUID, until
 func (f *fakeOps) ExtendSLAOnce(_ context.Context, runID uuid.UUID, extend time.Duration) error {
 	f.extendSLA = append(f.extendSLA, extendCall{runID: runID, extend: extend})
 	return nil
+}
+func (f *fakeOps) ReleaseHold(_ context.Context, release HoldRelease) error {
+	f.releaseHold = append(f.releaseHold, release)
+	if f.releaseDB != nil {
+		if err := release.Guard(f.releaseDB); err != nil {
+			return err
+		}
+	}
+	return f.releaseHoldErr
 }
 func (f *fakeOps) SkipTask(_ context.Context, runID, taskID uuid.UUID, reason string) error {
 	f.skipTask = append(f.skipTask, skipTaskCall{runID: runID, taskID: taskID, reason: reason})

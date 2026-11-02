@@ -289,8 +289,17 @@ Per produced dataset with an SLO, the state machine:
   event bus (alongside `sla_missed`, `internal/event/bus.go:45`), routed to
   notification policies and — when agent-in-the-loop lands — opening a
   `freshness_violation` incident class with the diagnosis pre-attached.
-- `quarantined` — set by the data circuit breaker; never `fresh`, never
-  advances consumers, suppresses derivation of runs that would consume it.
+- `quarantined` — a non-authoritative replay run's dataset; never `fresh`,
+  never advances consumers, suppresses derivation of runs that would consume
+  it.
+- `held` — the data circuit breaker has an **active hold** on the dataset (only
+  with `CAESIUM_DATA_ASSERTIONS_ENABLED`). The partition is recent but
+  poisoned, so it is never `fresh`, whatever its watermark; the reason is
+  `dataset_hold:<ns>/<name> hold=<id>`. A consumer of a held dataset is not
+  derived from it and reports `stale-upstream` naming the hold. The hold clears
+  from the status on the next evaluation after a clean-run release or an ack
+  (the evaluator also reacts to `dataset_held`/`dataset_released`). See
+  [`data-circuit-breaker.md`](data-circuit-breaker.md) "Interplay".
 
 ### Derivation to run starts
 

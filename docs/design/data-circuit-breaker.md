@@ -393,6 +393,10 @@ via `runCLIStdout`, never the stream-merging capture.
   bundle carries the violation, baseline, and impact graph; `release_hold`
   joins the action catalog at tier 2 (tier 3 with tolerance windows);
   `suppress_downstream_alerts` becomes largely unnecessary for this class.
+  As shipped, a release through an incident is the operator release: the same
+  service, audit row and `manual_ack` reason, with the approver or the agent
+  session as `released_by`. Tolerance keys are assertion kinds that the hold
+  breached, and like every tolerance in v1 they are recorded, not enforced.
 - **[`backtesting.md`](backtesting.md)** — assertions evaluate
   in backtests too, over metrics historical runs emitted: free regression
   signal ("this change would have tripped the breaker on 3 of the last 30

@@ -10,6 +10,7 @@ import (
 
 	authmw "github.com/caesium-cloud/caesium/api/middleware"
 	agentsvc "github.com/caesium-cloud/caesium/api/rest/service/agent"
+	iincident "github.com/caesium-cloud/caesium/internal/incident"
 	"github.com/caesium-cloud/caesium/internal/mcp"
 	"github.com/caesium-cloud/caesium/internal/models"
 	runstorage "github.com/caesium-cloud/caesium/internal/run"
@@ -55,9 +56,10 @@ func MCP(c *echo.Context) error {
 }
 
 type getContextArgs struct {
-	Kind string `json:"kind"`
-	Job  string `json:"job,omitempty"`
-	Task string `json:"task,omitempty"`
+	Kind   string `json:"kind"`
+	Job    string `json:"job,omitempty"`
+	Task   string `json:"task,omitempty"`
+	Metric string `json:"metric,omitempty"`
 }
 
 type proposeActionArgs struct {
@@ -110,6 +112,12 @@ func callMCPAgentTool(svc *agentsvc.Service, inc *models.Incident, allowed []str
 				return nil, mapMCPAgentError(err)
 			}
 			return explanation, nil
+		case "metrics":
+			series, err := svc.MetricSeries(inc, strings.TrimSpace(args.Metric))
+			if err != nil {
+				return nil, mapMCPAgentError(err)
+			}
+			return map[string]any{"series": series}, nil
 		default:
 			return nil, mcp.InvalidParams("unknown context kind")
 		}
@@ -188,7 +196,9 @@ func mapMCPAgentError(err error) *mcp.Error {
 		return mcp.InvalidParams(err.Error())
 	case errors.Is(err, agentsvc.ErrForbiddenJob):
 		return mcp.Forbidden(agentsvc.ErrForbiddenJob.Error())
-	case errors.Is(err, agentsvc.ErrIncidentNotFound), errors.Is(err, agentsvc.ErrNoFailingRun), errors.Is(err, gorm.ErrRecordNotFound), errors.Is(err, runstorage.ErrTaskRunNotFound):
+	case errors.Is(err, iincident.ErrNamespaceMoved):
+		return mcp.Forbidden(iincident.ErrNamespaceMoved.Error())
+	case errors.Is(err, agentsvc.ErrIncidentNotFound), errors.Is(err, agentsvc.ErrNoFailingRun), errors.Is(err, iincident.ErrNoDatasetHold), errors.Is(err, gorm.ErrRecordNotFound), errors.Is(err, runstorage.ErrTaskRunNotFound):
 		return mcp.NotFound("not found")
 	default:
 		return mcp.InternalError()

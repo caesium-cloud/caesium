@@ -372,8 +372,8 @@ trigger:
 ```
 
 - `profile` (required) names a server-side `AgentProfile`; offline lint emits a scope note, server-side lint/apply verify it exists in the job's namespace or the cluster-shared `*` (the same applies to `escalation.channel`). The built-in `triage-only` profile is in `*`, so any namespace may reference it.
-- `classes` (≥1): `transient_infra`, `schema_violation`, `sla_risk`, `data_unavailable`, `auth_failure`, `oom`, `quota`, `unknown`.
-- Action names for `allow` / `perClass[].allow` / `perClass[].requireApproval` / `requireApproval`: `auto_retry_backoff`, `snooze_until_cron`, `snooze_retry`, `retry_from_failure`, `retry_callbacks`, `notify`, `quarantine_replay`, `rerun_with_params`, `pause_job`, `unpause_job`, `clear_cache_entry`, `suppress_downstream_alerts`, `extend_sla_once`, `skip_task`, `override_schema_gate`, `apply_jobdef_patch`, `escalate`. A tier-3 action always creates an ApprovalRequest regardless of `allow`. See the [generated reference](job-schema-reference.md#remediation).
+- `classes` (≥1): `transient_infra`, `schema_violation`, `sla_risk`, `data_unavailable`, `auth_failure`, `oom`, `quota`, `data_quality_hold`, `unknown`.
+- Action names for `allow` / `perClass[].allow` / `perClass[].requireApproval` / `requireApproval`: `auto_retry_backoff`, `snooze_until_cron`, `snooze_retry`, `retry_from_failure`, `retry_callbacks`, `notify`, `quarantine_replay`, `rerun_with_params`, `pause_job`, `unpause_job`, `clear_cache_entry`, `suppress_downstream_alerts`, `extend_sla_once`, `release_hold`, `skip_task`, `override_schema_gate`, `apply_jobdef_patch`, `escalate`. A tier-3 action always creates an ApprovalRequest regardless of `allow`. `release_hold` is tier 2, and tier 3 when it carries tolerance windows. See the [generated reference](job-schema-reference.md#remediation).
 - `perClass.<class>` (keys must be known failure classes) only ever NARROWS: `allow` intersects with the surrounding allow-list, `requireApproval` unions with it, `paramOverrides` keeps only the keys and values both permit. It cannot grant an action the job or its profile withholds; a class with no entry inherits the surrounding policy.
 
 ---
@@ -571,18 +571,36 @@ to executions admitted after all replicas run the upgraded version.
 
 ```sh
 caesium job lint --path jobs/           # Validate YAML schemas and DAG topology
+caesium job lint --path jobs/ --json    # Offline version-1 JSON report on stdout (files, counts, diagnostics, summary)
+caesium job lint --server --json        # Unchanged server lint document; --json with --server does not use the offline report
 caesium job preview --path job.yaml     # ASCII DAG visualization
 caesium dev --once --path job.yaml      # Run job locally against Docker
+caesium dev --once --path job.yaml --json  # One-shot version-1 execution report; --json without --once is an error
 caesium dev --once --path job.yaml --param date=2026-09-15  # Override one trigger.defaultParams key; other defaults still apply
-caesium dev --path job.yaml             # Watch mode — re-run on file save
+caesium dev --path job.yaml             # Watch mode — re-run on file save; does not stream JSON
 caesium job diff --path jobs/           # Preview creates/updates vs server (add --prune for deletes)
 caesium job apply --path jobs/          # Deploy definitions to running server
 caesium job export <alias|job-id>       # Round-trip a live job back to YAML on stdout (-o writes a file)
 caesium blame <job-id-or-alias>          # Attribute topology/image/command changes to commits/snapshots
 caesium test --path jobs/               # Full validation suite
+caesium test --path jobs/ --json        # Version-1 schema/DAG report on stdout
 caesium test --path jobs/ --check-images # Strict gate for Docker-backed images
 caesium test --scenario harness/        # Execute harness scenarios against the local runtime
+caesium test --scenario harness/ --json # Version-1 harness report: scenarios, tasks, run/task ids, expected/actual
 ```
+
+`caesium job lint --json` without `--server` writes that offline report and exits
+nonzero when validation fails; stdout stays the JSON document and human
+diagnostics go to stderr. `caesium test --json` uses the same report for a
+schema/path check and for `--scenario` execution. A directory `--scenario`
+still names the failing scenario file on each diagnostic. Failed metric checks
+put the label set in the assertion name (`metric <name> {label=value} value`
+or `delta`) so two checks of one metric stay distinct. A lineage impact
+mismatch sets `actual` to the observed dataset names; a query error is a
+separate assertion, not an empty name list. `caesium dev --once --json`
+prints the execution report for the local run, including when a path is
+missing or unreadable, and exits nonzero on failure. Watch mode does not
+stream JSON.
 
 All local manifest commands reject unknown structural fields and report the
 source file, YAML path, and line before validation, execution, or apply. This

@@ -569,6 +569,12 @@ type Environment struct {
 	// the synchronous dispatch that normally follows a decision; it must
 	// comfortably exceed one dispatch. Default 2m.
 	AgentApprovalRedriveGrace time.Duration `envconfig:"AGENT_APPROVAL_REDRIVE_GRACE" default:"2m"`
+	// CAESIUM_AGENT_HOLD_RECONCILE_INTERVAL is how often the leader converges
+	// data_quality_hold incidents on hold state, for a dataset_held or
+	// dataset_released this node never handled. A hold must also have been open
+	// this long before the sweep opens its incident, so the sweep does not race
+	// the event. Default 30s.
+	AgentHoldReconcileInterval time.Duration `envconfig:"AGENT_HOLD_RECONCILE_INTERVAL" default:"30s"`
 
 	// Execution connectors are off unless CAESIUM_CONNECTORS_ENABLED=true.
 	// An unset or false gate ignores CAESIUM_CONNECTORS_CONFIG_FILE.

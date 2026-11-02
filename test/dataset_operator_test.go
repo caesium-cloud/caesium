@@ -95,7 +95,15 @@ func (s *IntegrationTestSuite) TestDataAssertionsDatasetOperatorReads() {
 	s.fetchDatasetOperatorJSON(datasetOperatorPath(dataset)+"?include_hold=false", &metadata)
 	s.Nil(metadata.Hold)
 	s.Empty(metadata.HoldStatus)
-	s.Equal(detail.State, metadata.State)
+	// Held => not fresh: the hold-aware detail reports held with a reason that
+	// names the hold. The include_hold=false opt-out skips the hold lookup, so it
+	// serves the persisted projection - every other field must be identical.
+	s.Equal("held", detail.State.Status)
+	s.Contains(detail.State.Reason, "dataset_hold:/"+dataset)
+	s.NotEqual("fresh", metadata.State.Status)
+	withoutOverlay := detail.State
+	withoutOverlay.Status, withoutOverlay.Reason = metadata.State.Status, metadata.State.Reason
+	s.Equal(withoutOverlay, metadata.State)
 	var listed datasetsvc.ListResult
 	s.fetchDatasetOperatorJSON("/v1/datasets?limit=200", &listed)
 	found := false
@@ -105,7 +113,7 @@ func (s *IntegrationTestSuite) TestDataAssertionsDatasetOperatorReads() {
 			s.Require().NotNil(row.Hold)
 			s.Equal(hold.ID, row.Hold.ID)
 			s.Equal("active", row.HoldStatus)
-			s.Equal(detail.State.Status, row.Status, "hold enrichment preserves the existing freshness projection")
+			s.Equal(detail.State.Status, row.Status, "the list row and the detail agree on the held status")
 		}
 	}
 	s.True(found, "the dataset must remain in the existing registry feed")

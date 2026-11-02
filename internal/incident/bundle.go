@@ -22,15 +22,18 @@ import (
 // allowlist, and the effective playbook. All attacker-influenced free text
 // (the log tail) is scrubbed before it enters the bundle.
 type Bundle struct {
-	Incident       BundleIncident   `json:"incident"`
-	Classification BundleClass      `json:"classification"`
-	Failure        BundleFailure    `json:"failure"`
-	Job            BundleJob        `json:"job"`
-	RunHistory     []BundleRun      `json:"run_history"`
-	LineageImpact  BundleImpact     `json:"lineage_impact"`
-	Playbook       datatypes.JSON   `json:"playbook,omitempty"`
-	Notes          []BundleNoteHint `json:"notes,omitempty"`
-	GeneratedAt    time.Time        `json:"generated_at"`
+	Incident       BundleIncident `json:"incident"`
+	Classification BundleClass    `json:"classification"`
+	Failure        BundleFailure  `json:"failure"`
+	// DataQuality describes the hold of a data_quality_hold incident; absent for
+	// every other class.
+	DataQuality   *BundleDataQuality `json:"data_quality,omitempty"`
+	Job           BundleJob          `json:"job"`
+	RunHistory    []BundleRun        `json:"run_history"`
+	LineageImpact BundleImpact       `json:"lineage_impact"`
+	Playbook      datatypes.JSON     `json:"playbook,omitempty"`
+	Notes         []BundleNoteHint   `json:"notes,omitempty"`
+	GeneratedAt   time.Time          `json:"generated_at"`
 }
 
 // BundleIncident is the incident header the agent triages.
@@ -217,7 +220,11 @@ func BuildBundleFor(ctx context.Context, db *gorm.DB, incidentID uuid.UUID, play
 	// predicate could hand the agent a SUCCEEDED instance's empty log as "the
 	// failure". Load the whole group in partition order, describe the first
 	// FAILED instance, and enumerate the rest of the failed siblings.
-	if inc.RunID != nil && inc.TaskID != nil {
+	//
+	// A data_quality_hold incident names a task that SUCCEEDED, so it has no
+	// failure to describe: attributionTaskRun would present a green instance as
+	// one. The hold is described by DataQuality.
+	if inc.RunID != nil && inc.TaskID != nil && FailureClass(inc.Class) != ClassDataQualityHold {
 		var rows []models.TaskRun
 		if err := db.WithContext(ctx).
 			Where("job_run_id = ? AND task_id = ?", *inc.RunID, *inc.TaskID).
@@ -250,19 +257,33 @@ func BuildBundleFor(ctx context.Context, db *gorm.DB, incidentID uuid.UUID, play
 	// Job + DAG topology, read in one snapshot: a move commits the job's new
 	// namespace and its new DAG together, so the namespace checked below is
 	// the owner of exactly the tasks and edges read with it, however many
-	// moves commit during the read (identity-and-access A8).
+	// moves commit during the read (identity-and-access A8). A hold's live state
+	// and metric series are read in the same snapshot, so the namespace that
+	// gates them cannot be older than they are: a repeat breach keeps the hold's
+	// job, so nothing on the hold row tells a new owner's breach from the old's.
 	var (
-		job   models.Job
-		tasks []BundleTask
-		edges []BundleDAGEdge
+		job     models.Job
+		tasks   []BundleTask
+		edges   []BundleDAGEdge
+		quality *BundleDataQuality
 	)
 	if err := readSnapshot(ctx, db, func(tx *gorm.DB) error {
 		var err error
 		job, tasks, edges, err = loadJobTopology(ctx, tx, inc.JobID)
+		if err != nil {
+			return err
+		}
+		if afterJobNamespaceRead != nil {
+			afterJobNamespaceRead()
+		}
+		if FailureClass(inc.Class) == ClassDataQualityHold {
+			quality, err = loadDataQuality(ctx, tx, &inc, movedOutOfIncident(&inc, &job))
+		}
 		return err
 	}); err != nil {
 		return nil, err
 	}
+	b.DataQuality = quality
 	b.Job = BundleJob{
 		Alias:            job.Alias,
 		Paused:           job.Paused,
@@ -337,10 +358,19 @@ func readSnapshot(ctx context.Context, conn *gorm.DB, fn func(tx *gorm.DB) error
 	return db.TransactionOn(ctx, conn, fn, options)
 }
 
+// loadJobTopology reads the job row Unscoped: an incident outlives its job, and
+// a soft-deleted job still names the namespace the bundle is gated on and its
+// alias. Such a job shows no DAG, whatever rows are left: deleting a job over
+// REST leaves its tasks and edges in place, while the importer's prune removes
+// them, and a deleted job has no DAG to act on either way. A job with no row at
+// all is still not found.
 func loadJobTopology(ctx context.Context, db *gorm.DB, jobID uuid.UUID) (models.Job, []BundleTask, []BundleDAGEdge, error) {
 	var job models.Job
-	if err := db.WithContext(ctx).First(&job, "id = ?", jobID).Error; err != nil {
+	if err := db.WithContext(ctx).Unscoped().First(&job, "id = ?", jobID).Error; err != nil {
 		return job, nil, nil, err
+	}
+	if job.DeletedAt.Valid {
+		return job, []BundleTask{}, []BundleDAGEdge{}, nil
 	}
 
 	var taskRows []models.Task

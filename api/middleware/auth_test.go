@@ -3,9 +3,11 @@ package middleware_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -174,6 +176,236 @@ func TestMiddlewareRejectsInvalidToken(t *testing.T) {
 	he, ok := err.(*echo.HTTPError)
 	require.True(t, ok)
 	require.Equal(t, http.StatusUnauthorized, he.Code)
+}
+
+func TestMiddlewareKeyLookupDeadlineIsServiceUnavailable(t *testing.T) {
+	_, svc, auditor, _, key := setupAuth(t)
+	// Two counted failures would exceed this limit. Store-unavailable lookups
+	// must not count, so a later wrong key is still 401 rather than 429.
+	limiter := auth.NewRateLimiter(1, time.Minute)
+	const ip = "203.0.113.50"
+	route := &echo.RouteInfo{Path: "/v1/jobs", Method: http.MethodGet}
+
+	for range 2 {
+		ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Millisecond))
+		req := httptest.NewRequestWithContext(ctx, http.MethodGet, "/v1/jobs", nil)
+		req.RemoteAddr = ip + ":1234"
+		req.Header.Set("Authorization", "Bearer "+key)
+		_, err := callMiddleware(t, svc, auditor, limiter, req, route, nil, nil)
+		cancel()
+		require.Error(t, err)
+
+		he, ok := err.(*echo.HTTPError)
+		require.True(t, ok)
+		require.Equal(t, http.StatusServiceUnavailable, he.Code)
+		require.Equal(t, "authentication store is unavailable", he.Message)
+		require.ErrorIs(t, err, context.DeadlineExceeded)
+	}
+	require.False(t, limiter.IsLimited(ip))
+
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/jobs", nil)
+	req.RemoteAddr = ip + ":1234"
+	req.Header.Set("Authorization", "Bearer csk_live_invalid123")
+	_, err := callMiddleware(t, svc, auditor, limiter, req, route, nil, nil)
+	require.Error(t, err)
+
+	he, ok := err.(*echo.HTTPError)
+	require.True(t, ok)
+	require.Equal(t, http.StatusUnauthorized, he.Code)
+	require.Equal(t, "invalid or expired api key", he.Message)
+	require.False(t, limiter.IsLimited(ip))
+
+	entries, err := auditor.Query(&auth.AuditQueryRequest{Action: auth.ActionAuthDenied, Limit: 10})
+	require.NoError(t, err)
+	require.Len(t, entries, 1)
+	requireAuditReason(t, entries[0], "invalid")
+}
+
+// TestMiddlewareLiveKeyLookupDeadlineIsServiceUnavailable is the live-request
+// case the already-expired context does not prove: the caller context has no
+// deadline, and the lookup itself must still end near 900ms. The callback
+// stands in for dqlite retrying leader discovery until the statement context
+// ends. A deleted bound would wait here until the test ceiling, not return
+// 503 on its own.
+func TestMiddlewareLiveKeyLookupDeadlineIsServiceUnavailable(t *testing.T) {
+	db := testutil.OpenTestDB(t)
+	t.Cleanup(func() { testutil.CloseDB(db) })
+
+	var sleeps []time.Duration
+	svc := auth.NewService(db,
+		auth.WithValidationFailureMinLatency(5*time.Second),
+		auth.WithSleep(func(d time.Duration) { sleeps = append(sleeps, d) }),
+	)
+	auditor := auth.NewAuditLogger(db)
+	// One counted failure fills this limiter. Store unavailability must not.
+	limiter := auth.NewRateLimiter(1, time.Minute)
+	key := createKey(t, svc, models.RoleAdmin, nil)
+
+	release := make(chan struct{})
+	var stopOnce sync.Once
+	stop := func() { stopOnce.Do(func() { close(release) }) }
+	t.Cleanup(stop)
+
+	const callbackName = "middleware-test:block-key-lookup-until-context"
+	var hit bool
+	block := func(tx *gorm.DB) {
+		if tx.Statement == nil {
+			return
+		}
+		if _, ok := tx.Statement.Dest.(*models.APIKey); !ok {
+			return
+		}
+		ctx := tx.Statement.Context
+		if ctx == nil {
+			_ = tx.AddError(errors.New("api key lookup has no statement context"))
+			return
+		}
+		hit = true
+		select {
+		case <-ctx.Done():
+			_ = tx.AddError(ctx.Err())
+		case <-release:
+			if err := ctx.Err(); err != nil {
+				_ = tx.AddError(err)
+			} else {
+				_ = tx.AddError(context.DeadlineExceeded)
+			}
+		}
+	}
+	require.NoError(t, db.Callback().Query().Before("gorm:query").Register(callbackName, block))
+	removed := false
+	remove := func() {
+		if removed {
+			return
+		}
+		removed = true
+		_ = db.Callback().Query().Remove(callbackName)
+	}
+	t.Cleanup(remove)
+
+	const ip = "203.0.113.51"
+	route := &echo.RouteInfo{Path: "/v1/jobs", Method: http.MethodGet}
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/jobs", nil)
+	req.RemoteAddr = ip + ":1234"
+	req.Header.Set("Authorization", "Bearer "+key)
+
+	started := time.Now()
+	done := make(chan error, 1)
+	go func() {
+		_, err := callMiddleware(t, svc, auditor, limiter, req, route, nil, nil)
+		done <- err
+	}()
+
+	const ceiling = 2500 * time.Millisecond
+	var err error
+	select {
+	case err = <-done:
+	case <-time.After(ceiling):
+		stop()
+		<-done
+		t.Fatal("live key lookup exceeded 2.5s; database reads must stay near 900ms and must not wait out the 5s group-refresh timeout")
+	}
+	elapsed := time.Since(started)
+
+	require.True(t, hit, "the key lookup did not reach the statement-context hook")
+	require.Error(t, err)
+	he, ok := err.(*echo.HTTPError)
+	require.True(t, ok)
+	require.Equal(t, http.StatusServiceUnavailable, he.Code)
+	require.Equal(t, "authentication store is unavailable", he.Message)
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+	require.GreaterOrEqual(t, elapsed, 750*time.Millisecond, "a live request must wait out the database-read bound, not an already-expired context")
+	require.Less(t, elapsed, ceiling, "lookup waited %s, near the 5s group-refresh timeout", elapsed)
+	require.False(t, limiter.IsLimited(ip))
+	require.Empty(t, sleeps, "a timed-out lookup must not be padded to the failure-latency floor")
+
+	remove()
+
+	entries, err := auditor.Query(&auth.AuditQueryRequest{Action: auth.ActionAuthDenied, Limit: 10})
+	require.NoError(t, err)
+	require.Empty(t, entries, "store unavailability must not write an auth-denied audit row")
+
+	bad := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/jobs", nil)
+	bad.RemoteAddr = ip + ":1234"
+	bad.Header.Set("Authorization", "Bearer csk_live_invalid123")
+	_, err = callMiddleware(t, svc, auditor, limiter, bad, route, nil, nil)
+	require.Error(t, err)
+	he, ok = err.(*echo.HTTPError)
+	require.True(t, ok)
+	require.Equal(t, http.StatusUnauthorized, he.Code)
+	require.Equal(t, "invalid or expired api key", he.Message)
+	require.False(t, limiter.IsLimited(ip))
+	require.NotEmpty(t, sleeps, "a wrong key stays padded")
+
+	entries, err = auditor.Query(&auth.AuditQueryRequest{Action: auth.ActionAuthDenied, Limit: 10})
+	require.NoError(t, err)
+	require.Len(t, entries, 1)
+	requireAuditReason(t, entries[0], "invalid")
+}
+
+// slowGroupFreshness admits a user after waiting on the caller context.
+// synced is true so the key is re-read once the wait returns; that re-read
+// must not be using a context that already died at 900ms.
+type slowGroupFreshness struct {
+	delay       time.Duration
+	seen        context.Context
+	hasDeadline bool
+	remaining   time.Duration
+	done        bool
+}
+
+func (s *slowGroupFreshness) Admit(ctx context.Context, user *models.User) (*models.User, bool, error) {
+	s.seen = ctx
+	if deadline, ok := ctx.Deadline(); ok {
+		s.hasDeadline = true
+		s.remaining = time.Until(deadline)
+	}
+	timer := time.NewTimer(s.delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		s.done = true
+		return nil, true, ctx.Err()
+	case <-timer.C:
+	}
+	if err := ctx.Err(); err != nil {
+		s.done = true
+		return nil, true, err
+	}
+	return user, true, nil
+}
+
+// TestMiddlewareGroupRefreshIsNotCutOffByKeyLookupDeadline: a user-bound
+// key whose database reads are instant and whose group admission waits 1500ms
+// (between the 900ms read bound and the 5s AuthGroupRefreshTimeout) still
+// authenticates when the caller context has no deadline. Admit must see that
+// caller context, not a child whose deadline is ~900ms.
+func TestMiddlewareGroupRefreshIsNotCutOffByKeyLookupDeadline(t *testing.T) {
+	const admitDelay = 1500 * time.Millisecond
+	src := mustRoleMapper(t, "viewers=viewer")
+	f := newSessionFixture(t, src, &models.User{
+		Email:         "nia@example.com",
+		EmailVerified: true,
+		Groups:        datatypes.JSON(`["viewers"]`),
+		Role:          models.RoleViewer,
+	})
+	freshness := &slowGroupFreshness{delay: admitDelay}
+	f.deps.Service = auth.NewService(f.db, auth.WithPolicySource(src), auth.WithGroupFreshness(freshness))
+	key := mintUserKey(t, f)
+
+	started := time.Now()
+	got := doBearer(t, f.deps, key.Plaintext, http.MethodGet, "/v1/jobs")
+	elapsed := time.Since(started)
+
+	require.NotNil(t, freshness.seen, "group refresh was not asked to admit the user")
+	require.False(t, freshness.hasDeadline, "Admit saw a child deadline (%s remaining); a caller with no deadline must not be wrapped in the 900ms database-read bound", freshness.remaining.Round(time.Millisecond))
+	require.False(t, freshness.done, "Admit's context ended during a %s refresh", admitDelay)
+	require.NoError(t, freshness.seen.Err())
+	require.Equal(t, http.StatusOK, got.status)
+	require.NotNil(t, got.principal)
+	require.Equal(t, auth.PrincipalUser, got.principal.Kind)
+	require.GreaterOrEqual(t, elapsed, admitDelay-100*time.Millisecond, "refresh returned in %s, as if cut off near 900ms", elapsed)
+	require.Less(t, elapsed, 4*time.Second, "refresh took %s", elapsed)
 }
 
 func TestMiddlewareAcceptsValidToken(t *testing.T) {

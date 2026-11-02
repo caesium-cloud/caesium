@@ -1319,7 +1319,12 @@ at `runner` cluster-wide and bound to the one incident:
   incident's own job has moved out, the bundle shows neither its current DAG
   (`job.namespace_moved: true`, no tasks or edges) nor its remediation block:
   the playbook and the session profile resolve as for a job that declares no
-  remediation.
+  remediation. A `data_quality_hold` bundle's `data_quality` section comes from
+  the evidence shaped for the incident's namespace. Its metric series, and
+  `context/metrics`, hold only samples of runs recorded in that namespace, for the
+  incident's own dataset; no parameter names a dataset. When the job has moved
+  out, the series and the hold's live state are withheld (`namespace_moved: true`
+  in the section, and 403 or an MCP error from `context/metrics`).
 - **Act.** An action on the job or one of its runs is refused, and recorded
   `failed` with `namespace_moved`, when the job has moved out of the incident's
   namespace or the run was recorded in another one. A snoozed retry checks again
@@ -1328,6 +1333,12 @@ at `runner` cluster-wide and bound to the one incident:
   direct apply is confined to the incident's namespace, triggers and webhook
   paths included. Approving an action therefore needs `operator` only in the
   incident's namespace.
+- **Release.** A `release_hold` names a hold of a dataset the incident's job
+  still produces, opened by that job in the incident's namespace, and no other
+  producer of the dataset may live outside the namespace. Each is read from the
+  hold row and the live declarations, at the proposal, at dispatch and again
+  inside the release transaction. Anything else is recorded `failed`, in the same
+  words whether or not the hold exists, and a human is never asked.
 - **Earlier sessions.** A session started before this confinement could read
   other namespaces' jobs. For a namespace-confined reader, the incident detail
   withholds such a session's transcript (`session_log_withheld: true`) and the
@@ -1450,20 +1461,15 @@ are namespace-local, so a step's PVCs are the mapped namespace's, and relative
   expired-claim reap, owner takeover) stops the previous attempt's pod through
   the runtime id it read before clearing it, without the policy, so the re-run
   does not run beside an orphan. The stop is best effort: a failure is logged
-  and recovery proceeds. A graceful shutdown stops its own pods. A local-mode
-  resume stops nothing: a local attempt holds no claim, so nothing proves its
-  executor is dead, and a pod left by a crash runs on beside the re-run.
+  and recovery proceeds. A graceful shutdown stops its own pods. Local mode
+  re-runs nothing after a restart, so a pod left by a crash runs on alone (see
+  [When a server stops](distributed-execution.md#when-a-server-stops)).
   After a restart in distributed mode the task waits for its claim to lapse
   first: a dispatched claim's first lease is what remains of
   `CAESIUM_RUN_OWNER_DISPATCH_DEADLINE` (5m by default) when the worker accepts
   it, and less than 30 s remaining (so a 30 s setting too) falls back to a 5m
   claim. If you lower it, keep it above `CAESIUM_WORKER_LEASE_TTL / 4`, how
   often a worker renews, so a live attempt's claim is renewed before it lapses.
-  The re-run finishes the task, not the run: the process that drove the run is
-  gone, so the run stays `running` until the job's next cron tick or webhook
-  adopts it. A manual start (`POST /v1/jobs/:id/run`) creates a new run and
-  adopts nothing, so a job fired only by hand stays `running` indefinitely.
-  With `CAESIUM_RUN_OWNER_IN_MEMORY=true` the run's owner finishes it instead.
   Docker and Podman containers are left to their host.
 - **Distributed mode.** The run's owner resolves the mapping and carries it to
   the worker with the secret rules (the isolation context), together with its

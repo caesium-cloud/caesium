@@ -61,6 +61,14 @@ func (e *Evaluator) shouldSkipCronRun(ctx context.Context, jobID uuid.UUID) (Cro
 		return CronSkipDecision{Reason: "job declares no produced datasets"}, nil
 	}
 
+	// One active-holds read for the whole decision. A held produced dataset is
+	// never fresh, so the tick runs: that is also what lets the holder's next
+	// clean run release an auto-release hold.
+	holds, err := activeHolds(ctx, e.db)
+	if err != nil {
+		return CronSkipDecision{}, err
+	}
+
 	records := make([]cronSkipRecord, 0, len(produced))
 	datasets := make([]string, 0, len(produced))
 	for _, decl := range produced {
@@ -87,7 +95,7 @@ func (e *Evaluator) shouldSkipCronRun(ctx context.Context, jobID uuid.UUID) (Cro
 			return CronSkipDecision{Reason: fmt.Sprintf("produced dataset %s has no state", datasetParamName(decl.Namespace, decl.Name))}, nil
 		}
 
-		status, reason, _, seen := e.statusFor(decl, state, e.now().UTC(), freshness, maxStaleness, true, "")
+		status, reason, _, seen := e.statusFor(decl, state, e.now().UTC(), freshness, maxStaleness, true, "", holdFor(holds, decl))
 		if !seen || status != models.DatasetStatusFresh {
 			if reason == "" {
 				reason = fmt.Sprintf("produced dataset %s is not fresh", datasetParamName(decl.Namespace, decl.Name))

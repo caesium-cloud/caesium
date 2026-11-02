@@ -77,20 +77,24 @@ func (s *Service) History(inc *models.Incident, jobAlias string, allowed []strin
 		if err != nil {
 			return nil, err
 		}
-		if jobAlias != ownAlias && !jobInAllowlist(jobAlias, allowed) {
-			return nil, ErrForbiddenJob
-		}
-		var job models.Job
-		if err := s.db.WithContext(s.ctx).Select("id", "namespace").First(&job, "alias = ?", jobAlias).Error; err != nil {
-			if errors.Is(err, gorm.ErrRecordNotFound) {
+		// Own alias means the incident's job id, not a lookup: that job may be
+		// soft-deleted, and its alias then taken by a live job.
+		if jobAlias != ownAlias {
+			if !jobInAllowlist(jobAlias, allowed) {
 				return nil, ErrForbiddenJob
 			}
-			return nil, err
+			var job models.Job
+			if err := s.db.WithContext(s.ctx).Select("id", "namespace").First(&job, "alias = ?", jobAlias).Error; err != nil {
+				if errors.Is(err, gorm.ErrRecordNotFound) {
+					return nil, ErrForbiddenJob
+				}
+				return nil, err
+			}
+			if models.NamespaceOrDefault(job.Namespace) != iincident.IncidentNamespace(inc) {
+				return nil, ErrForbiddenJob
+			}
+			jobID = job.ID
 		}
-		if jobAlias != ownAlias && models.NamespaceOrDefault(job.Namespace) != iincident.IncidentNamespace(inc) {
-			return nil, ErrForbiddenJob
-		}
-		jobID = job.ID
 	}
 
 	var runs []models.JobRun
@@ -126,6 +130,12 @@ func (s *Service) History(inc *models.Incident, jobAlias string, allowed []strin
 	return out, nil
 }
 
+// MetricSeries returns the recent samples of the incident's held dataset, of one
+// metric or of every violated one. No parameter names the dataset.
+func (s *Service) MetricSeries(inc *models.Incident, metric string) ([]iincident.BundleMetricSeries, error) {
+	return iincident.HoldMetricSeries(s.ctx, s.db, inc, metric, iincident.ContextMetricSeriesLimit)
+}
+
 // Why returns the causal explanation for a task in the incident's failing run.
 func (s *Service) Why(inc *models.Incident, task string) (*runstorage.WhyExplanation, error) {
 	if inc.RunID == nil {
@@ -137,10 +147,11 @@ func (s *Service) Why(inc *models.Incident, task string) (*runstorage.WhyExplana
 }
 
 // incidentJobAlias resolves the alias of the incident's own job (always readable
-// through the context passthroughs regardless of the frozen allowlist).
+// through the context passthroughs regardless of the frozen allowlist). Unscoped,
+// like loadJobTopology in internal/incident: an incident outlives its job.
 func (s *Service) incidentJobAlias(jobID uuid.UUID) (string, error) {
 	var job models.Job
-	if err := s.db.WithContext(s.ctx).Select("alias").First(&job, "id = ?", jobID).Error; err != nil {
+	if err := s.db.WithContext(s.ctx).Unscoped().Select("alias").First(&job, "id = ?", jobID).Error; err != nil {
 		return "", err
 	}
 	return job.Alias, nil

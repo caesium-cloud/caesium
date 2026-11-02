@@ -437,7 +437,7 @@ function ReasonCell({ status, reason }: { status: DatasetStatus; reason: string 
   }
   const tone = freshnessTone(status);
   return (
-    <div className={cn("truncate text-xs", status === "stale-upstream" ? tone.textClass : "text-text-3")} title={reason}>
+    <div className={cn("truncate text-xs", status === "stale-upstream" || status === "held" ? tone.textClass : "text-text-3")} title={reason}>
       {reason}
     </div>
   );

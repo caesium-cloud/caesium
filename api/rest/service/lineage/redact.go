@@ -11,24 +11,11 @@ import (
 )
 
 // RedactedImpactResult is GET /v1/lineage/impact for a namespace-confined
-// caller (identity-and-access design §8.3, plan item B5). Downstream holds
-// each node the caller may read exactly as an unrestricted caller sees it
-// (an illineage.ImpactNode), and every other node as an ExternalImpactNode.
-type RedactedImpactResult struct {
-	RootNamespace string `json:"root_namespace"`
-	RootName      string `json:"root_name"`
-	Downstream    []any  `json:"downstream"`
-}
+// caller (identity-and-access design §8.3, plan item B5).
+type RedactedImpactResult = illineage.RedactedImpactResult
 
-// ExternalImpactNode is a downstream node collapsed for a confined caller:
-// alias, namespace, dataset, job id, producing step, provenance and last-seen
-// time removed. Depth is kept: it is the only structure an impact list has,
-// and the collapsed topology already implies it.
-type ExternalImpactNode struct {
-	ID    string `json:"id"`
-	Kind  string `json:"kind"`
-	Depth int    `json:"depth"`
-}
+// ExternalImpactNode is a downstream node collapsed for a confined caller.
+type ExternalImpactNode = illineage.ExternalImpactNode
 
 // ConfinedImpact is Impact computed over the whole lineage graph and then
 // redacted for r's caller. A root the caller may not read answers exactly as a
@@ -49,7 +36,7 @@ func (s *Service) ConfinedImpact(r *authz.Redactor, namespace, name string, maxD
 		if err != nil {
 			return err
 		}
-		out.Downstream = redactImpactNodes(r, result.Downstream)
+		out.Downstream = illineage.RedactImpactNodes(r, result.Downstream)
 		return nil
 	})
 	if err != nil {
@@ -63,32 +50,6 @@ func (s *Service) context() context.Context {
 		return context.Background()
 	}
 	return s.ctx
-}
-
-// redactImpactNodes keeps each node whose producing job's current namespace
-// and whose run's persisted namespace are both readable, and collapses every
-// other node. Placeholders are de-duplicated response-wide by (id, depth):
-// repeat runs of one foreign producer are one node, not a run count.
-func redactImpactNodes(r *authz.Redactor, nodes []illineage.ImpactNode) []any {
-	out := make([]any, 0, len(nodes))
-	seen := map[ExternalImpactNode]struct{}{}
-	for _, node := range nodes {
-		if r.Visible(node.JobNamespace, node.RunNamespace) {
-			out = append(out, node)
-			continue
-		}
-		placeholder := ExternalImpactNode{
-			ID:    r.ExternalID("impact\x00" + node.DatasetNamespace + "\x00" + node.DatasetName + "\x00" + node.JobID.String()),
-			Kind:  authz.ExternalKind,
-			Depth: node.Depth,
-		}
-		if _, dup := seen[placeholder]; dup {
-			continue
-		}
-		seen[placeholder] = struct{}{}
-		out = append(out, placeholder)
-	}
-	return out
 }
 
 // rootVisible reports whether the caller may read the impact root. A consumer

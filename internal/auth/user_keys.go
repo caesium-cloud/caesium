@@ -183,8 +183,12 @@ func (s *Service) validateUserKey(ctx context.Context, key *models.APIKey) (*Pri
 		log.Warn("user-bound api key row is malformed; refusing it", "key_prefix", key.KeyPrefix)
 		return nil, ErrKeyNotFound
 	}
+	// Bound the user read only. Admit below keeps ctx, so a group refresh
+	// is not cut off at apiKeyLookupTimeout.
 	var user models.User
-	err := s.db.WithContext(ctx).Where("id = ?", *key.UserID).Take(&user).Error
+	readCtx, cancelRead := context.WithTimeout(ctx, apiKeyLookupTimeout)
+	err := s.db.WithContext(readCtx).Where("id = ?", *key.UserID).Take(&user).Error
+	cancelRead()
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return nil, ErrKeyNotFound
 	}
@@ -216,9 +220,13 @@ func (s *Service) validateUserKey(ctx context.Context, key *models.APIKey) (*Pri
 }
 
 // revalidateKey re-reads a user-bound key after a synchronous group refresh.
+// The read is bounded like the hash lookup. ctx is the caller context Admit
+// waited on, not a 900ms child of that wait.
 func (s *Service) revalidateKey(ctx context.Context, key *models.APIKey) error {
+	readCtx, cancelRead := context.WithTimeout(ctx, apiKeyLookupTimeout)
+	defer cancelRead()
 	var current models.APIKey
-	err := s.db.WithContext(ctx).Where("id = ?", key.ID).Take(&current).Error
+	err := s.db.WithContext(readCtx).Where("id = ?", key.ID).Take(&current).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return ErrKeyNotFound
 	}

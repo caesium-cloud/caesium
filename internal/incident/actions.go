@@ -39,6 +39,9 @@ const (
 	ActionTypeClearCacheEntry          = "clear_cache_entry"
 	ActionTypeSuppressDownstreamAlerts = "suppress_downstream_alerts"
 	ActionTypeExtendSLAOnce            = "extend_sla_once"
+	// ActionTypeReleaseHold is tier 2, and tier 3 when its params carry tolerance
+	// windows (see requestTier).
+	ActionTypeReleaseHold = "release_hold"
 
 	// Tier 3 — always approval-gated, never auto-executed. Execute() routes them
 	// to an ApprovalRequest; ExecuteApproved() is the only path that dispatches
@@ -66,6 +69,7 @@ var actionCatalog = map[string]int{
 	ActionTypeClearCacheEntry:          TierGated,
 	ActionTypeSuppressDownstreamAlerts: TierGated,
 	ActionTypeExtendSLAOnce:            TierGated,
+	ActionTypeReleaseHold:              TierGated,
 	ActionTypeSkipTask:                 TierApproval,
 	ActionTypeOverrideSchemaGate:       TierApproval,
 	ActionTypeApplyJobdefPatch:         TierApproval,
@@ -75,6 +79,18 @@ var actionCatalog = map[string]int{
 // catalog.
 func ActionTier(actionType string) (int, bool) {
 	tier, ok := actionCatalog[actionType]
+	return tier, ok
+}
+
+// requestTier is the tier of one request: the catalog's, except that a
+// release_hold carrying tolerance windows is tier 3. A tolerance is a durable
+// statement about an assertion, so it ends at a human whatever the playbook
+// allows. The row records this tier, so the existing gate does the rest.
+func requestTier(actionType string, params ActionParams) (int, bool) {
+	tier, ok := ActionTier(actionType)
+	if ok && actionType == ActionTypeReleaseHold && len(params.Tolerate) > 0 {
+		return TierApproval, true
+	}
 	return tier, ok
 }
 
@@ -104,8 +120,15 @@ type ActionParams struct {
 	// ExtendSeconds extends a per-run SLA once (extend_sla_once).
 	ExtendSeconds int64 `json:"extend_seconds,omitempty"`
 	// Reason is the operator-facing justification recorded on a skip_task (it
-	// becomes the skipped task row's error text, so the DAG explains itself).
+	// becomes the skipped task row's error text, so the DAG explains itself) and
+	// on a release_hold (where, as on the REST release, it is required).
 	Reason string `json:"reason,omitempty"`
+	// HoldID names the dataset hold of a release_hold. Defaults to the hold a
+	// data_quality_hold incident was opened for when unset.
+	HoldID *uuid.UUID `json:"hold_id,omitempty"`
+	// Tolerate carries a release_hold's tolerance windows, assertion kind →
+	// duration. Any entry makes the action tier 3.
+	Tolerate map[string]string `json:"tolerate,omitempty"`
 	// Definition carries the FULL desired job definition for apply_jobdef_patch,
 	// in the same schema `caesium job apply` sends (pkg/jobdef.Definition). A
 	// whole-document proposal rather than a field patch is deliberate: it is what
@@ -167,6 +190,11 @@ type ActionOps interface {
 	SuppressDownstreamAlerts(ctx context.Context, incidentID uuid.UUID, until time.Time) error
 	// ExtendSLAOnce writes a durable per-run SLA override.
 	ExtendSLAOnce(ctx context.Context, runID uuid.UUID, extend time.Duration) error
+	// ReleaseHold releases a dataset hold through the service behind
+	// POST /v1/datasets/holds/:id/release, so its audit row and its refusal
+	// without an auth mode are that endpoint's. It returns ErrHoldNotActive when
+	// the hold had already ended.
+	ReleaseHold(ctx context.Context, release HoldRelease) error
 
 	// --- Tier 3, approval-gated (trust-the-substrate C7) ---------------------
 	//
@@ -203,7 +231,7 @@ var errNoOps = errors.New("incident: no action ops configured")
 // playbook allows that action type. Recorded as a failed AgentAction.
 var ErrCrossBoundaryTarget = errors.New("incident: action target crosses the incident boundary")
 
-// verifyActionBoundary rejects any explicit run/job target that does not belong
+// verifyActionBoundary rejects any explicit run/job/hold target that does not belong
 // to the incident's job. It runs before every dispatch. Empty targets are
 // in-boundary by construction (resolveRunID/resolveJobID fall back to the
 // incident's own run/job). Namespace is not yet a column on Job/JobRun (it lands
@@ -226,6 +254,11 @@ func (e *Executor) verifyActionBoundary(ctx context.Context, inc *models.Inciden
 		}
 		if jr.JobID != inc.JobID {
 			return fmt.Errorf("%w: run %s belongs to job %s, not incident job %s", ErrCrossBoundaryTarget, *params.RunID, jr.JobID, inc.JobID)
+		}
+	}
+	if params.HoldID != nil && *params.HoldID != uuid.Nil {
+		if _, err := verifyHoldBoundary(ctx, e.store.DB(), inc, *params.HoldID); err != nil {
+			return err
 		}
 	}
 	return nil
@@ -512,6 +545,9 @@ func (e *Executor) dispatch(ctx context.Context, actionType string, inc *models.
 
 	case ActionTypeApplyJobdefPatch:
 		return e.dispatchApplyJobdefPatch(ctx, inc, params)
+
+	case ActionTypeReleaseHold:
+		return e.dispatchReleaseHold(ctx, inc, action, params)
 
 	default:
 		// An action type in the catalog with no dispatch arm. Every tier-3 type

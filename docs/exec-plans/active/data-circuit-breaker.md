@@ -1397,7 +1397,7 @@ precedent for it is warn-mode schema validation, which publishes
 `schema_violation_recorded` from `internal/run/schema_validation.go`
 (`publishSchemaViolationEvent`) precisely because the task did not fail.
 
-- [ ] F1. Open a `data_quality_hold` incident when a hold opens. (a) Add
+- [x] F1. Open a `data_quality_hold` incident when a hold opens. (a) Add
       `ClassDataQualityHold FailureClass = "data_quality_hold"` to
       `internal/incident/classifier.go` (the const block beside `ClassOOM` /
       `ClassSchemaViolation`) and a `Classify` branch: the `dataset_held` bus event
@@ -1427,7 +1427,37 @@ precedent for it is warn-mode schema validation, which publishes
       not runnable until [`trust-the-substrate.md`](../completed/trust-the-substrate.md) **H-1**
       makes that lane real — see `## Sequencing & Dependencies` § Cross-PLAN order.
       Depends on: C1 + C4.
-- [ ] F2. Add `release_hold` to the action catalog and make it executable through
+      *Note (W5-α, 2026-11-01):* shipped in `internal/incident/hold.go`, with these
+      deviations from the text above. A hold's incident dedupes on the hold id, not
+      on (job, task, class), so cooldown never applies: two datasets held by one
+      step stay two incidents, and a new hold after a release is a new incident.
+      `dataset_held` fires once per hold, so no occurrence is ever appended; the
+      occurrence count lives on the hold. `dataset_released` closes the incident,
+      and `Store.OpenForJobTask` skips the class so a green run cannot. The event
+      gained `task_id` and `task_run_id` but not the cone, because the payload
+      reaches `/v1/events` and notification channels: the subscriber reads the
+      frozen `Impact` column. `ImpactNode` drops its owners when marshalled, and a
+      blank owner reads as `default`, so `DatasetHold.Impact` now persists them
+      (`lineage.EncodeStoredImpact`). `redactImpactNodes` moved to
+      `internal/lineage` so REST and the incident share it; evidence is redacted
+      for the incident's own namespace and capped at 100 nodes.
+      `pkg/jobdef` accepts the new class. `BuildBundle` skips failure attribution
+      for the class, a guard ahead of F2's `DataQuality` section. Events are not
+      guaranteed to reach the leader, so `Subscriber.ReconcileHolds` converges
+      incidents on hold state; a guard in the open's transaction keeps one incident
+      per hold for the hold's lifetime, the tenant is resolved once and a failed
+      read stops the open, an event whose run is gone (or that names none) opens
+      nothing and is left to the sweep, and a recovered incident stores the row's
+      verdicts only when the latest breach's run is in the incident's namespace.
+      A sweep that opens without the run row (the job's namespace stands in) also
+      leaves out the step, task, task-run and run ids. A hold whose run and job
+      rows are both gone has no owning tenant, so it keeps no incident; it stays
+      active until released.
+      The allowlist seeds only from runs completed before the hold opened, because
+      a hold does not record every run that breached it. Baseline evidence that is not namespace-owned is
+      withheld when the evidence is built; the helper moved to
+      `internal/baselineevidence` so `internal/incident` can reach it.
+- [x] F2. Add `release_hold` to the action catalog and make it executable through
       the approval pipeline. (a) **Catalog:** `ActionTypeReleaseHold =
       "release_hold"` in `internal/incident/actions.go`, registered in
       `actionCatalog`. Tier per the design (*"`release_hold` joins the action
@@ -1473,6 +1503,26 @@ precedent for it is warn-mode schema validation, which publishes
       unwired today — see the stream preamble) and its **H-1** (the real auth lane
       the scenario runs on). See `## Sequencing & Dependencies` § Cross-PLAN order.
       Depends on: F1 + C3.
+      *Note (W6-α, 2026-11-02):* shipped in `internal/incident/release_hold.go` and
+      `internal/incident/data_quality.go`. The tier is per request (`requestTier`):
+      `TierGated` in the catalog, tier 3 on the row when `tolerate` is set, so no
+      second gate exists. Deviations from the text above: `ActionOps.ReleaseHold`
+      takes a `HoldRelease` carrying the principal, the audit namespace and a guard,
+      and tolerances stay strings, the form C3 stores. `HoldID` is the only hold
+      identity; a `data_quality_hold` incident defaults to its own hold, read from
+      the dedupe key. Beyond the job, the boundary refuses a dataset the job no
+      longer produces or that has a producer outside the incident's namespace, and
+      runs at the proposal, at dispatch and in the release transaction; a hold on
+      another dataset of the same job is in reach, as written above. A proposal that
+      fails it reaches no human. `Reason` is required, as on REST. Tolerance keys
+      must name an assertion the hold breached and are bounded at 30 days; they stay
+      advisory, so the action result carries a caveat. A release of an ended hold is
+      a no-op success with `already_released`. The executor writes no incident
+      status: `dataset_released` closes the incident through the subscriber or the
+      sweep, so the final status is `closed`. `get_context` gained `kind: metrics`.
+      `incidentJobAlias` is `Unscoped()`, and `History` keeps the incident's job id
+      for its own alias. `build/triage-agent.sh` accepts an empty DAG and proposes
+      nothing on it.
 - [ ] F3. Build the **Git-PR provenance route** of `apply_jobdef_patch` — B4's
       unbuilt half — so a producer patch proposed from a hold lands as a pull
       request instead of a silent server-side edit. (a) **Credentials:** add a new
@@ -1524,7 +1574,7 @@ precedent for it is warn-mode schema validation, which publishes
       **C4 + C7** — the pipeline and the *direct* `apply_jobdef_patch` route this
       one branches beside. See `## Sequencing & Dependencies` § Cross-PLAN order.
       Depends on: F2 + N-2.
-- [ ] F4. Make **held ⇒ not fresh**. A poisoned-but-recent partition must never
+- [x] F4. Make **held ⇒ not fresh**. A poisoned-but-recent partition must never
       satisfy a freshness trigger or advance downstream scheduling. In
       `internal/freshness/evaluator.go`, `statusFor(...)` computes the dataset's
       status from state + SLO + upstream readiness; add an active-`DatasetHold`
@@ -1545,6 +1595,51 @@ precedent for it is warn-mode schema validation, which publishes
       `test/` (a scenario asserting a held dataset reports not-fresh and does not
       derive).
       Depends on: C1 + D1.
+      *Shipped W5 (β).* **New value `DatasetStatusHeld = "held"`** (no existing
+      value fits: `violated` is a `maxStaleness` breach and fires the violation
+      notification, `stale` invites a derivation, `stale-upstream` describes a
+      *consumer* behind a held input, `unknown` means never observed, and
+      `quarantined` is the replay disposition the design forbids overloading).
+      Only `internal/freshness` and the dataset read API consume status values;
+      the Console gained a `held` tone, filter option and stale-like treatment.
+      `statusFor` (the one place both callers use: `evaluateProducedDataset` and
+      `shouldSkipCronRun`) is now `computedStatus` + a hold override; active holds
+      come from **one** `activeHolds` read per evaluation pass / cron decision
+      (no per-dataset query), keyed on the exact `(namespace, name)` struct, never
+      the concatenated `ns/name` key. Reason: `dataset_hold:<ns>/<name> hold=<id>`.
+      **Deviations from the plan text, code wins:** (1) the held output's *own*
+      producer still derives when its SLO is genuinely stale, because that re-run
+      is the only way a freshness-triggered producer's clean run can release a
+      `release: auto` hold; a held dataset that is computed-fresh derives nothing
+      and records `skipped_admission` (never `skipped_fresh`). Downstream
+      derivation is what is blocked: `upstreamReady` reports a held input as not
+      ready, so the consumer's output is `stale-upstream` (its own data is not
+      poisoned) with a reason naming the hold, and no run row is created (the
+      admission gate would otherwise have written a hold-skipped one). (2) the
+      evaluator is now reactive to `dataset_held`/`dataset_released` as well as
+      `dataset_advanced`, and `datasetIdentityFromPayload` reads their `dataset`
+      key, so the status follows a hold opening or closing without a watermark
+      move. (3) the dataset read API overlays `held` (and the hold reason) on any
+      dataset with an active hold, and `?status=` filters against that effective
+      status, so datasets with no freshness SLO (never evaluated) are honest too.
+      With `CAESIUM_DATA_ASSERTIONS_ENABLED` off nothing reads holds. A manual
+      advance never touches status, so it cannot lift a hold. A job with
+      `metadata.onUpstreamHold: run` is exempt from the held-input readiness
+      block (the evaluator reads the same persisted column the admission gate
+      does), and `?status=held` merges declaration-only datasets that an active
+      hold is on (no state row) before counting and paging. A persisted `held`
+      returns to `unknown` (reason cleared) when released before any observation.
+      The persisted `held` is cleared where the hold is released:
+      `releaseDatasetHoldTx` resets the matching `dataset_states` row (exact
+      namespace/name, only if `held`) to `unknown` with an empty reason in the
+      release transaction, so it cannot outlive the hold with freshness
+      scheduling off, no SLO, or the declaration gone. With the breaker switched
+      off while holds are active, or a `held` write that raced a release, the
+      dataset reads treat a persisted `held` with no active hold as `unknown`
+      (list, detail and both filters); the evaluator's `held` write re-checks
+      that the hold is still active in the same transaction. Dataset feeds order by one
+      total key `(updated_at DESC, namespace, name)` in every source query and
+      the final merge, so tied timestamps page without skips or repeats.
 - [ ] F5. **Why-provenance** (arc convention 3 — this plan's single explainability
       item). Make the hold decisions answerable by the shipped **task-scoped**
       explainer: `caesium why <run-id> --task <task> --job-id <job-id>` and

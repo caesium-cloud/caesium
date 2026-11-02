@@ -3,6 +3,7 @@ package dataset
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 
@@ -10,6 +11,7 @@ import (
 	"github.com/caesium-cloud/caesium/internal/metrics"
 	"github.com/caesium-cloud/caesium/internal/models"
 	runstore "github.com/caesium-cloud/caesium/internal/run"
+	"github.com/caesium-cloud/caesium/pkg/env"
 	"github.com/caesium-cloud/caesium/pkg/log"
 	"github.com/google/uuid"
 	"gorm.io/datatypes"
@@ -24,7 +26,56 @@ import (
 var ErrHoldReleaseUnauthenticated = errors.New(
 	"dataset: releasing a hold requires an authenticated principal; set CAESIUM_AUTH_MODE=api-key or enable SSO")
 
-// ReleaseHoldParams is one human acknowledgement of a dataset hold.
+// ReleaseAuthenticated reports whether an auth mode is active. A release is
+// attributable only then, so every caller of ReleaseHold checks it first: the
+// REST controller and the incident action's adapter.
+func ReleaseAuthenticated() bool {
+	vars := env.Variables()
+	return vars.AuthMode == "api-key" || vars.SSOEnabled()
+}
+
+// toleranceAssertions is the bounded set of assertion kinds a tolerance window
+// may name — the enforceable subset of the enum DataViolation.Assertion
+// carries. `unavailable` is deliberately absent: it never opens a hold (the
+// marker stream was lost, which is evidence of nothing), so there is nothing to
+// snooze and accepting it would promise suppression of a verdict that already
+// suppresses itself.
+var toleranceAssertions = map[string]struct{}{
+	runstore.AssertionMin:               {},
+	runstore.AssertionMax:               {},
+	runstore.AssertionDeltaFromBaseline: {},
+	runstore.AssertionMaxLag:            {},
+	runstore.AssertionMissing:           {},
+}
+
+// ValidateTolerances checks the `--tolerate` grammar: a known assertion kind
+// mapped to a positive Go duration. An unparseable entry is refused rather than
+// stored as a row nobody will be able to interpret later.
+func ValidateTolerances(raw map[string]string) (map[string]string, error) {
+	if len(raw) == 0 {
+		return nil, nil
+	}
+	out := make(map[string]string, len(raw))
+	for assertion, window := range raw {
+		assertion = strings.TrimSpace(assertion)
+		if _, ok := toleranceAssertions[assertion]; !ok {
+			return nil, fmt.Errorf("tolerate: %q is not an assertion kind (one of min, max, deltaFromBaseline, maxLag, missing)", assertion)
+		}
+		window = strings.TrimSpace(window)
+		d, err := time.ParseDuration(window)
+		if err != nil {
+			return nil, fmt.Errorf("tolerate[%s]: %q is not a duration (e.g. 24h)", assertion, window)
+		}
+		if d <= 0 {
+			return nil, fmt.Errorf("tolerate[%s]: %q must be a positive duration", assertion, window)
+		}
+		out[assertion] = window
+	}
+	return out, nil
+}
+
+// ReleaseHoldParams is one acknowledgement of a dataset hold: a human's, or an
+// approved or playbook-permitted incident action's.
 type ReleaseHoldParams struct {
 	// HoldID is the hold to release.
 	HoldID uuid.UUID
@@ -48,6 +99,9 @@ type ReleaseHoldParams struct {
 	// namespace-confined operator is re-checked inside the release
 	// transaction (B6), and the returned hold is shaped for what it may read.
 	Caller *auth.Principal
+	// Guard, when set, runs inside the release transaction and aborts it on
+	// error. An incident action re-checks its boundary here.
+	Guard func(tx *gorm.DB) error
 }
 
 // ReleaseHoldResult is the response shape for POST /v1/datasets/holds/:id/release.
@@ -83,11 +137,12 @@ func (s *Service) ReleaseHold(params ReleaseHoldParams) (*ReleaseHoldResult, err
 	if confined(params.Caller, ReleaseRole) {
 		hold, err = s.releaseConfined(params, principal, entry)
 	} else {
-		hold, err = runstore.Default().ReleaseHold(s.ctx, params.HoldID, runstore.ReleaseHoldParams{
+		hold, err = s.holdStore().ReleaseHold(s.ctx, params.HoldID, runstore.ReleaseHoldParams{
 			ReleasedBy: principal,
 			Note:       strings.TrimSpace(params.Reason),
 			Tolerances: params.Tolerances,
 			Audit:      entry,
+			Guard:      params.Guard,
 		})
 	}
 	if err != nil {
@@ -104,6 +159,15 @@ func (s *Service) ReleaseHold(params ReleaseHoldParams) (*ReleaseHoldResult, err
 		return nil, err
 	}
 	return &ReleaseHoldResult{Hold: hold}, nil
+}
+
+// holdStore is the run store an unconfined release writes through: the default
+// store, whose bus delivers dataset_released, unless the Service was built on one.
+func (s *Service) holdStore() *runstore.Store {
+	if s.store != nil {
+		return s.store
+	}
+	return runstore.Default()
 }
 
 // storeFor is the run store a confined release writes through: a store on
@@ -131,7 +195,15 @@ func (s *Service) releaseConfined(params ReleaseHoldParams, principal string, en
 			Note:       strings.TrimSpace(params.Reason),
 			Tolerances: params.Tolerances,
 			Audit:      entry,
-			Guard:      guard,
+			Guard: func(tx *gorm.DB) error {
+				if err := guard(tx); err != nil {
+					return err
+				}
+				if params.Guard != nil {
+					return params.Guard(tx)
+				}
+				return nil
+			},
 		})
 		hold = released
 		return err

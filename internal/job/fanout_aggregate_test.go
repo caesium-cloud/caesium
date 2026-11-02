@@ -79,7 +79,7 @@ func TestFanOutRetriedGroupRebuildsFullAggregateAndHash(t *testing.T) {
 	require.NoError(t, retryErr)
 
 	opts := withTestDeps(f.store, defaultFanOutVars(), f.taskSvc, f.atomSvc, f.edgeSvc, f.engine)
-	require.NoError(t, New(&models.Job{ID: f.jobID}, opts...).Run(context.Background()))
+	require.NoError(t, New(&models.Job{ID: f.jobID}, opts...).Run(run.WithContext(context.Background(), jobRun.ID)))
 
 	rows := f.instanceRowsFor(t, jobRun.ID)
 	require.Len(t, rows, 3)

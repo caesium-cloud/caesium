@@ -229,8 +229,8 @@ config:
   and is applied by the policy reload poll without a restart.
 - Restarts and failover: in distributed mode a recovering node stops the
   previous attempt's pod, best effort, through its namespace-qualified runtime
-  id once the task is re-pended. A local-mode resume stops nothing, so a pod
-  left by a crash runs on beside the re-run
+  id once the task is re-pended. Local mode re-runs nothing after a restart, so
+  a pod left by a crash runs on alone
   ([details](identity-and-access.md)).
 - The engine namespace's Role (`kubernetes.engine.namespace`) has no secrets
   grant; an unmapped `secret://k8s` read on Helm needs one added by hand.

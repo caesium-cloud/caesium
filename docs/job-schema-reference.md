@@ -236,7 +236,7 @@ Operator reads: `caesium contract graph [--dataset ns/name] [--json]`, `caesium 
 | Field | Type | Required | Notes |
 |-------|------|----------|-------|
 | `profile` | string | required | Names a server-side `AgentProfile` (managed via `/v1/agentprofiles`). Offline `caesium job lint` cannot verify the reference and emits a scope note; server-side lint (`POST /v1/jobdefs/lint`) and the apply transaction verify it. |
-| `classes` | array[string] | required | Failure classes this policy applies to (at least one). One or more of `transient_infra`, `schema_violation`, `sla_risk`, `data_unavailable`, `auth_failure`, `oom`, `quota`, `unknown`. |
+| `classes` | array[string] | required | Failure classes this policy applies to (at least one). One or more of `transient_infra`, `schema_violation`, `sla_risk`, `data_unavailable`, `auth_failure`, `oom`, `quota`, `data_quality_hold`, `unknown`. |
 | `maxAttempts` | integer | optional | Bounds remediation attempts before an incident force-escalates. Must be `>= 0`. |
 | `autonomy` | object | optional | Tiered-autonomy policy (below). |
 | `escalation` | object | optional | Forced hand-off when remediation does not resolve the incident in time. |
@@ -249,7 +249,7 @@ Operator reads: `caesium contract graph [--dataset ns/name] [--json]`, `caesium 
 | `perClass` | map[string]object | optional | Narrows this policy for one failure class. Keys are failure-class names; each value takes `allow`, `paramOverrides`, and `requireApproval`. |
 | `requireApproval` | array[string] | optional | Actions that must create an ApprovalRequest for this job even when their default tier would otherwise permit autonomous execution. |
 
-Remediation action names accepted in `allow`, `perClass[].allow`, `perClass[].requireApproval`, and `requireApproval`: `auto_retry_backoff`, `snooze_until_cron`, `snooze_retry`, `retry_from_failure`, `retry_callbacks`, `notify`, `quarantine_replay`, `rerun_with_params`, `pause_job`, `unpause_job`, `clear_cache_entry`, `suppress_downstream_alerts`, `extend_sla_once`, `skip_task`, `override_schema_gate`, `apply_jobdef_patch`, `escalate`.
+Remediation action names accepted in `allow`, `perClass[].allow`, `perClass[].requireApproval`, and `requireApproval`: `auto_retry_backoff`, `snooze_until_cron`, `snooze_retry`, `retry_from_failure`, `retry_callbacks`, `notify`, `quarantine_replay`, `rerun_with_params`, `pause_job`, `unpause_job`, `clear_cache_entry`, `suppress_downstream_alerts`, `extend_sla_once`, `release_hold`, `skip_task`, `override_schema_gate`, `apply_jobdef_patch`, `escalate`.
 
 ### Per-class narrowing (`metadata.remediation.autonomy.perClass.<class>`)
 A per-class block is a CONSTRAINT, never a grant: the server merges it over the resolved policy (the job block over its AgentProfile playbook) before deciding an action's tier, and it may only remove permissions relative to both. Merge rule:

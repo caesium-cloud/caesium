@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"time"
 
+	datasetsvc "github.com/caesium-cloud/caesium/api/rest/service/dataset"
 	"github.com/caesium-cloud/caesium/internal/authz"
 	"github.com/caesium-cloud/caesium/internal/event"
 	"github.com/caesium-cloud/caesium/internal/incident"
@@ -47,8 +48,9 @@ var errPatchAliasMismatch = errors.New("incident: jobdef patch alias does not ma
 // auto_retry_backoff rule with the admit-aware retry entry point
 // (run.Store.RetryFromFailureAdmitted — the retry safety valves), and the three
 // tier-3 operations (skip_task, override_schema_gate, apply_jobdef_patch) that
-// only ever run after a human approval, through Executor.ExecuteApproved. The
-// remaining tier-1/2 methods are unreachable until their surface is wired and
+// only ever run after a human approval, through Executor.ExecuteApproved, and
+// release_hold, onto the REST release service. The remaining tier-1/2 methods are
+// unreachable until their surface is wired and
 // return errIncidentOpNotWired.
 type incidentActionOps struct {
 	db       *gorm.DB
@@ -58,6 +60,9 @@ type incidentActionOps struct {
 	// pretending it escalated when it has no way to reach anyone.
 	bus        event.Bus
 	eventStore *event.Store
+	// holdStore overrides the store a release writes through; nil, as in
+	// production, is the default store the REST release uses.
+	holdStore *run.Store
 }
 
 func newIncidentActionOps(conn *gorm.DB, bus event.Bus, eventStore *event.Store) *incidentActionOps {
@@ -220,6 +225,32 @@ func (o *incidentActionOps) SetJobPaused(_ context.Context, _ uuid.UUID, _ bool)
 
 func (o *incidentActionOps) ClearCacheEntry(_ context.Context, _ uuid.UUID, _ string) error {
 	return errIncidentOpNotWired
+}
+
+// ReleaseHold goes through the service behind POST /v1/datasets/holds/:id/release,
+// with that endpoint's preconditions in the same order, so there is one release
+// path and one audit trail. The caller is left nil because the action's boundary
+// is the incident's, enforced by release.Guard in the release transaction.
+func (o *incidentActionOps) ReleaseHold(ctx context.Context, release incident.HoldRelease) error {
+	if !datasetsvc.ReleaseAuthenticated() {
+		return datasetsvc.ErrHoldReleaseUnauthenticated
+	}
+	tolerances, err := datasetsvc.ValidateTolerances(release.Tolerate)
+	if err != nil {
+		return err
+	}
+	_, err = datasetsvc.NewWithDatabase(ctx, o.db).WithStore(o.holdStore).ReleaseHold(datasetsvc.ReleaseHoldParams{
+		HoldID:         release.HoldID,
+		Principal:      release.Principal,
+		Reason:         release.Reason,
+		Tolerances:     tolerances,
+		AuditNamespace: release.Namespace,
+		Guard:          release.Guard,
+	})
+	if errors.Is(err, run.ErrDatasetHoldNotActive) {
+		return fmt.Errorf("%w: %w", incident.ErrHoldNotActive, err)
+	}
+	return err
 }
 
 func (o *incidentActionOps) SuppressDownstreamAlerts(_ context.Context, _ uuid.UUID, _ time.Time) error {

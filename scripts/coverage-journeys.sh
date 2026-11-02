@@ -1873,6 +1873,9 @@ PY
   # Canonical job aliases (W6-α): a whitespace alias is refused through
   # `caesium job apply`, the apply route and the legacy create route.
   local_pattern="${local_pattern%)}|TestJobApplyRejectsNonCanonicalAlias)"
+  # Offline JSON (issue 511): job lint --json, test --json, and dev --once --json
+  # exercise the report writers. Unit tests do not count toward this profile.
+  local_pattern="${local_pattern%)}|TestJobLintJSONReportsFailingLocalManifest|TestTestJSONReportsSchemaFailureAndHarnessScenario|TestDevOnceJSONRunsLocalJob)"
   # run get/wait/logs (issue #510). fetch.go has no init of its own, so this
   # journey is what covers it on the instrumented CLI.
   local_pattern="${local_pattern%)}|TestRunCLIVerifyLoop)"
@@ -1906,6 +1909,15 @@ PY
   # trigger and incident lists as a marketing-confined viewer, so the narrowing
   # branches of the three list services run. Needs no policy file.
   auth_pattern="${auth_pattern%)}|TestAuthListNamespaceNarrow)"
+  # A dataset hold with recorded downstream consumers (data-circuit-breaker F1):
+  # TestHoldDatasetCLIReleaseReopensTheGate holds a dataset nothing consumes, so
+  # the stored impact cone stays empty. This one reads the incident as a confined
+  # viewer. Real lineage, so it needs no policy file nor a catalog connection.
+  auth_pattern="${auth_pattern%)}|TestHoldIncidentCollapsesForeignImpactForConfinedReader)"
+  # release_hold through the approval pipeline (data-circuit-breaker F2): a real
+  # hold's bundle, metric series and boundary refusal over REST and MCP, then the
+  # approved release. Needs no policy file.
+  auth_pattern="${auth_pattern%)}|TestHoldReleaseActionRunsThroughApproval)"
 
   local -a local_named_passes=(
     TestCaesiumWhyExplainsHitAndMiss
@@ -1974,6 +1986,8 @@ PY
     TestAuthLDAPDisabledEntryRevokesCredentials
     TestAuthStaleGroupsRefusedUntilRelogin
     TestAuthListNamespaceNarrow
+    TestHoldIncidentCollapsesForeignImpactForConfinedReader
+    TestHoldReleaseActionRunsThroughApproval
   )
   local -a distributed_named_passes=(
     TestNodeWorkersRoute
@@ -2106,7 +2120,7 @@ if shutdown.get("task_image_id") != record.get("task_image_id"):
 if (shutdown.get("initial_run_status"), shutdown.get("initial_task_status")) != ("running", "running"):
     raise SystemExit("SSO shutdown did not observe its exact run/task running before termination")
 expected_hold_command = ("while [ ! -e /caesium-shutdown-control/release ]; do sleep 0.1; done; "
-                        "echo '##caesium::output {\"shutdown\":\"resumed-" + collector_run_id + "\"}'")
+                        "echo '##caesium::output {\"shutdown\":\"retried-" + collector_run_id + "\"}'")
 expected_hold_digest = hashlib.sha256(expected_hold_command.encode()).hexdigest()
 if (shutdown.get("hold_strategy") != "read-only-host-release-marker"
         or shutdown.get("hold_command_sha256") != expected_hold_digest
@@ -2115,15 +2129,15 @@ if (shutdown.get("hold_strategy") != "read-only-host-release-marker"
     raise SystemExit("SSO shutdown did not hold the exact task behind an unreleased host marker")
 if shutdown.get("native_runtime_removed") is not True or shutdown.get("verified_after_generation") != 2:
     raise SystemExit("SSO shutdown did not prove native cleanup and same-database restart")
-expected_resumption_path = "/hooks/coverage-shutdown-" + collector_run_id
-if (shutdown.get("resumption_mode") != "explicit-public-http-trigger-existing-run"
-        or shutdown.get("resumption_path") != expected_resumption_path
+expected_trigger_path = "/hooks/coverage-shutdown-" + collector_run_id
+if (shutdown.get("recovery_mode") != "lost-driver-failure-then-explicit-cli-retry"
+        or shutdown.get("inflight_trigger_path") != expected_trigger_path
         or shutdown.get("retained_after_generation") != 2
-        or shutdown.get("generation2_automatic_takeover") is not False
+        or shutdown.get("generation2_automatic_reexecution") is not False
         or (shutdown.get("retained_run_status"), shutdown.get("retained_task_status")) != ("running", "running")
         or shutdown.get("retained_task_run_id") != shutdown.get("task_run_id")
         or shutdown.get("retained_runtime_id") != shutdown.get("runtime_id")):
-    raise SystemExit("SSO generation 2 did not retain the original durable run/task before explicit resumption")
+    raise SystemExit("SSO generation 2 did not retain the original durable run/task before recovery")
 attempt_before_signal = shutdown.get("attempt_before_signal")
 retained_attempt = shutdown.get("retained_attempt")
 final_attempt = shutdown.get("final_attempt")
@@ -2131,15 +2145,37 @@ if (not isinstance(attempt_before_signal, int) or isinstance(attempt_before_sign
         or not isinstance(retained_attempt, int) or isinstance(retained_attempt, bool)
         or not isinstance(final_attempt, int) or isinstance(final_attempt, bool)
         or retained_attempt != attempt_before_signal or final_attempt != attempt_before_signal):
-    raise SystemExit("SSO explicit local resumption changed or omitted the original TaskRun attempt")
-webhook = shutdown.get("resumption_webhook")
+    raise SystemExit("SSO operator retry changed or omitted the original TaskRun attempt")
+webhook = shutdown.get("inflight_webhook")
 if (not isinstance(webhook, dict) or webhook.get("status") != 202
-        or webhook.get("path") != expected_resumption_path or webhook.get("http_triggers_accepted") != 1
+        or webhook.get("path") != expected_trigger_path or webhook.get("http_triggers_accepted") != 1
         or webhook.get("http_runs_started") != 1
         or not isinstance(webhook.get("receipt_id"), str)
         or not re.fullmatch(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", webhook["receipt_id"])):
-    raise SystemExit("SSO explicit public webhook resumption receipt is incomplete")
-running = shutdown.get("resumption_runtime_running")
+    raise SystemExit("SSO public webhook receipt for the in-flight run is incomplete")
+inflight = shutdown.get("inflight_trigger")
+if (not isinstance(inflight, dict) or inflight.get("skip_log_lines") != 1
+        or inflight.get("run_ids") != [shutdown.get("run_id")] or inflight.get("task_containers") != []):
+    raise SystemExit("SSO generation 2 did not prove the in-flight trigger started nothing")
+lease_ttl = shutdown.get("run_lease_ttl_seconds")
+recovery = shutdown.get("recovery")
+if (not isinstance(lease_ttl, int) or isinstance(lease_ttl, bool) or lease_ttl <= 0
+        or not isinstance(recovery, dict) or recovery.get("lease_ttl_seconds") != lease_ttl
+        or recovery.get("floor_seconds") != 2 * lease_ttl or recovery.get("ceiling_seconds") != 4 * lease_ttl
+        or (recovery.get("run_status"), recovery.get("task_status"), recovery.get("task_run_status")) != ("failed", "failed", "failed")
+        or recovery.get("error") != ("the server driving this run stopped before it finished; "
+                                     "its unfinished tasks were not re-executed, and a container one of them started may still be running")
+        or recovery.get("task_run_id") != shutdown.get("task_run_id")
+        or recovery.get("attempt") != shutdown.get("attempt_before_signal")
+        or recovery.get("runtime_id") != shutdown.get("runtime_id")
+        or recovery.get("run_ids") != [shutdown.get("run_id")] or recovery.get("task_containers") != []
+        or recovery.get("release_marker_absent") is not True):
+    raise SystemExit("SSO recovery did not fail the exact run and TaskRun with the lost-driver error")
+retry = shutdown.get("retry_cli")
+if (not isinstance(retry, dict) or retry.get("lane") != "shutdown-retry" or retry.get("accepted") is not True
+        or retry.get("output") != "Retrying run " + shutdown["run_id"] + " (job " + shutdown["job_id"] + ")"):
+    raise SystemExit("SSO operator retry was not confirmed by the candidate CLI")
+running = shutdown.get("retry_runtime_running")
 if (not isinstance(running, dict) or running.get("runtime_id") == shutdown.get("runtime_id")
         or running.get("runtime_id") != shutdown.get("final_runtime_id")
         or not isinstance(running.get("runtime_id"), str)
@@ -2164,23 +2200,22 @@ if (not isinstance(running_native, dict) or running_native.get("runtime_id") != 
     raise SystemExit("SSO replacement TaskRun lacks an exact native-running witness")
 if shutdown.get("release_marker_after_running_observation") is not True:
     raise SystemExit("SSO release marker preceded the positively observed Gen2 runtime")
-expected_output = {"shutdown": "resumed-" + collector_run_id}
-if shutdown.get("resumption_output") != expected_output:
-    raise SystemExit("SSO resumed TaskRun did not persist the expected structured output")
+expected_output = {"shutdown": "retried-" + collector_run_id}
+if shutdown.get("retry_output") != expected_output:
+    raise SystemExit("SSO retried TaskRun did not persist the expected structured output")
 release = shutdown.get("release_marker")
 if (not isinstance(release, dict)
         or release.get("strategy") != "read-only-host-release-marker"
         or release.get("written") is not True
         or release.get("sha256") != hashlib.sha256(b"release-v1\n").hexdigest()):
-    raise SystemExit("SSO explicit resumption lacks the controlled task-release marker")
-if (shutdown.get("resumption_mode") != "explicit-public-http-trigger-existing-run"
-        or (shutdown.get("final_run_status"), shutdown.get("final_task_status"), shutdown.get("final_task_run_status")) != ("succeeded", "succeeded", "succeeded")
+    raise SystemExit("SSO operator retry lacks the controlled task-release marker")
+if ((shutdown.get("final_run_status"), shutdown.get("final_task_status"), shutdown.get("final_task_run_status")) != ("succeeded", "succeeded", "succeeded")
         or shutdown.get("final_task_run_id") != shutdown.get("task_run_id")):
-    raise SystemExit("SSO explicit resumption did not complete the exact original run/task/TaskRun IDs")
+    raise SystemExit("SSO operator retry did not complete the exact original run/task/TaskRun IDs")
 if (not isinstance(shutdown.get("final_runtime_id"), str)
         or not re.fullmatch(r"[0-9a-f]{64}", shutdown["final_runtime_id"])
         or shutdown["final_runtime_id"] == shutdown["runtime_id"]):
-    raise SystemExit("SSO explicit resumption did not bind a new native runtime identity")
+    raise SystemExit("SSO operator retry did not bind a new native runtime identity")
 native = shutdown.get("native_before_signal")
 native_initial = shutdown.get("native_initial_running")
 if (not isinstance(native, dict) or not isinstance(native_initial, dict) or native.get("running") is not True
@@ -2212,28 +2247,33 @@ def timestamp(value):
     return result
 original_finish = timestamp(generations[0].get("finished_at"))
 timestamp(generations[1].get("finished_at"))
+generation2_started = timestamp(recovery.get("generation2_started_at"))
+recovered = timestamp(recovery.get("completed_at"))
+if (generation2_started <= original_finish
+        or not (2 * lease_ttl <= (recovered - generation2_started).total_seconds() <= 4 * lease_ttl)):
+    raise SystemExit("SSO recovery finalized the run outside its lease-derived bound")
 task_started = timestamp(shutdown.get("task_started_at"))
 run_completed = timestamp(shutdown.get("run_completed_at"))
 task_completed = timestamp(shutdown.get("task_completed_at"))
 release_written = timestamp(release.get("written_at"))
 running_observed = timestamp(running.get("observed_at"))
 running_started = timestamp(running.get("task_started_at"))
-if (task_started <= original_finish or running_started <= original_finish
+if (task_started <= recovered or running_started <= recovered
         or running_started > running_observed or release_written <= running_observed
-        or task_started < running_started or run_completed <= max(original_finish, release_written)
+        or task_started < running_started or run_completed <= max(recovered, release_written)
         or task_completed <= max(task_started, release_written)):
-    raise SystemExit("SSO original TaskRun did not resume and complete after generation-1 shutdown")
+    raise SystemExit("SSO original TaskRun did not execute and complete after recovery and the operator's retry")
 if shutdown.get("native_runtime_absent_after_generation") != 2 or shutdown.get("native_runtime_absent_generations") != [1, 2]:
     raise SystemExit("SSO native runtime absence was not verified after both server generations")
 if shutdown.get("native_runtime_absent_ids_by_generation") != {"1": shutdown.get("runtime_id"), "2": running.get("runtime_id")}:
     raise SystemExit("SSO generation 1 and 2 runtime absences do not bind their exact native identities")
-if shutdown.get("resumption_runtime_absent_after_completion") is not True:
+if shutdown.get("retry_runtime_absent_after_completion") is not True:
     raise SystemExit("SSO replacement native runtime was not verified absent after TaskRun completion")
 cleanup_absences = shutdown.get("native_runtime_cleanup_absences")
 if (not isinstance(cleanup_absences, list) or len(cleanup_absences) != 2
         or [item.get("runtime_id") for item in cleanup_absences] != [shutdown.get("runtime_id"), shutdown.get("final_runtime_id")]
         or not all(item.get("absent") is True for item in cleanup_absences)):
-    raise SystemExit("SSO original and resumed native runtimes lack exact cleanup absence proof")
+    raise SystemExit("SSO original and retried native runtimes lack exact cleanup absence proof")
 elapsed = shutdown.get("replay_restart_elapsed_seconds")
 if not isinstance(elapsed, (int, float)) or isinstance(elapsed, bool) or not (0 <= elapsed < 55):
     raise SystemExit("SSO shutdown/restart exceeded the existing replay-age budget")
@@ -2294,10 +2334,10 @@ def validate_process(process, source, lane):
     return raw_rel
 
 cli_processes = record.get("cli_processes")
-if not isinstance(cli_processes, list) or [p.get("lane") for p in cli_processes if isinstance(p, dict)] != ["shutdown-apply", "shutdown-start"]:
-    raise SystemExit("SSO shutdown apply/start CLI process inventory is incomplete")
+if not isinstance(cli_processes, list) or [p.get("lane") for p in cli_processes if isinstance(p, dict)] != ["shutdown-apply", "shutdown-start", "shutdown-retry"]:
+    raise SystemExit("SSO shutdown apply/start/retry CLI process inventory is incomplete")
 cli_dirs = [validate_process(item, "cli", item["lane"]) for item in cli_processes]
-if len(set(cli_dirs)) != 2:
+if len(set(cli_dirs)) != 3:
     raise SystemExit("SSO shutdown CLI processes reused a GOCOVERDIR")
 server_dirs = []
 for generation, item in enumerate(generations, start=1):

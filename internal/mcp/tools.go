@@ -78,12 +78,12 @@ var AgentTools = []Tool{
 	},
 	{
 		Name:        "get_context",
-		Description: "Fetch scoped incident context: failing logs, run history, or why output.",
+		Description: "Fetch scoped incident context: failing logs, run history, why output, or a held dataset's metric series.",
 		InputSchema: objectSchema(map[string]any{
 			"kind": map[string]any{
 				"type":        "string",
 				"description": "Context kind to fetch.",
-				"enum":        []string{"logs", "history", "why"},
+				"enum":        []string{"logs", "history", "why", "metrics"},
 			},
 			"job": map[string]any{
 				"type":        "string",
@@ -92,6 +92,10 @@ var AgentTools = []Tool{
 			"task": map[string]any{
 				"type":        "string",
 				"description": "Task name for why context.",
+			},
+			"metric": map[string]any{
+				"type":        "string",
+				"description": "Metric name for metrics context; omit for every violated metric. Always the incident's own held dataset.",
 			},
 		}, []string{"kind"}),
 	},
