@@ -71,15 +71,22 @@ func TestConcurrentDispatchersHaveOneWinner(t *testing.T) {
 	target := newCountingTarget(t)
 	jobID, runID := seedCallbackRun(t, dbA, target.URL)
 
-	var failures atomic.Int32
-	var wg sync.WaitGroup
-	for i := range 8 {
+	// Built first: WithHTTPClient writes the process-wide handler, which a
+	// dispatcher already delivering reads.
+	dispatchers := make([]*Dispatcher, 8)
+	for i := range dispatchers {
 		conn := dbA
 		if i%2 == 1 {
 			conn = dbB
 		}
+		dispatchers[i] = dispatcherFor(conn, target)
+	}
+
+	var failures atomic.Int32
+	var wg sync.WaitGroup
+	for _, dispatcher := range dispatchers {
 		wg.Go(func() {
-			if err := dispatcherFor(conn, target).Dispatch(context.Background(), jobID, runID, nil); err != nil {
+			if err := dispatcher.Dispatch(context.Background(), jobID, runID, nil); err != nil {
 				failures.Add(1)
 			}
 		})
