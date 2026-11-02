@@ -94,6 +94,9 @@ func (s *IntegrationTestSuite) TestWhyExplainsHoldSkippedRun() {
 	producerAlias := fmt.Sprintf("integration-why-hold-producer-%d", suffix)
 	consumerAlias := fmt.Sprintf("integration-why-hold-consumer-%d", suffix)
 	dataset := fmt.Sprintf("integration.why.hold.%d", suffix)
+	// The consumer goes first: a producer deleted under a live consumer would
+	// fail every later apply's dataset-graph check.
+	s.cleanupInOrder(consumerAlias, producerAlias)
 
 	producer := s.applyHoldProducer(producerAlias, dataset, "auto", 12)
 	opener := s.runProducer(producer)
@@ -168,13 +171,19 @@ func (s *IntegrationTestSuite) TestWhyExplainsSeveralHeldDatasetsAndAdmissionPas
 	suffix := time.Now().UnixNano()
 	first := fmt.Sprintf("integration.why.multi.a.%d", suffix)
 	second := fmt.Sprintf("integration.why.multi.b.%d", suffix)
-	firstProducer := s.applyHoldProducer(fmt.Sprintf("integration-why-multi-a-%d", suffix), first, "auto", 12)
+	firstAlias := fmt.Sprintf("integration-why-multi-a-%d", suffix)
+	secondAlias := fmt.Sprintf("integration-why-multi-b-%d", suffix)
+	consumerAlias := fmt.Sprintf("integration-why-multi-consumer-%d", suffix)
+	optOutAlias := fmt.Sprintf("integration-why-optout-consumer-%d", suffix)
+	// Every consumer before the producers it reads.
+	s.cleanupInOrder(optOutAlias, consumerAlias, firstAlias, secondAlias)
+
+	firstProducer := s.applyHoldProducer(firstAlias, first, "auto", 12)
 	firstRun := s.runProducer(firstProducer)
-	secondProducer := s.applyHoldProducer(fmt.Sprintf("integration-why-multi-b-%d", suffix), second, "auto", 3)
+	secondProducer := s.applyHoldProducer(secondAlias, second, "auto", 3)
 	s.runProducer(secondProducer)
 	firstHold, secondHold := s.activeHoldID(first), s.activeHoldID(second)
 
-	consumerAlias := fmt.Sprintf("integration-why-multi-consumer-%d", suffix)
 	manifest := strings.Replace(holdConsumerManifest(consumerAlias, first, ""),
 		fmt.Sprintf("        - %s\n", first), fmt.Sprintf("        - %s\n        - %s\n", first, second), 1)
 	s.Require().Contains(manifest, second, "the consumer must declare both datasets")
@@ -192,7 +201,6 @@ func (s *IntegrationTestSuite) TestWhyExplainsSeveralHeldDatasetsAndAdmissionPas
 	s.Equal(second, exp.Trigger.Hold.Holds[1].Dataset)
 
 	// An opted-out consumer runs, and `why` says it ran on held data.
-	optOutAlias := fmt.Sprintf("integration-why-optout-consumer-%d", suffix)
 	optOut := s.applyAssertionsJob(optOutAlias, holdConsumerManifest(optOutAlias, first, "run"))
 	runID := s.triggerRun(optOut.ID)
 	s.Equal("succeeded", s.awaitRun(optOut.ID, runID, runTimeout).Status)
@@ -211,6 +219,7 @@ func (s *IntegrationTestSuite) TestWhyExplainsSeveralHeldDatasetsAndAdmissionPas
 // to read UNKNOWN.
 func (s *IntegrationTestSuite) TestWhyExplainsTriggerRuleSkip() {
 	alias := fmt.Sprintf("integration-why-skip-%d", time.Now().UnixNano())
+	s.cleanupInOrder(alias)
 	manifest := fmt.Sprintf(`apiVersion: v1
 kind: Job
 metadata:
