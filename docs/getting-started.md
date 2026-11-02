@@ -157,21 +157,40 @@ caesium dev --once --path nightly-etl.job.yaml --param date=2026-09-15
 caesium job apply --path nightly-etl.job.yaml --server http://localhost:8080
 ```
 
-## 5. Trigger a run
+Stdout keeps the line `Applied N job definition(s)`, then one `<alias> <id>`
+line per applied job. `caesium job apply --json` prints only that result as
+JSON on stdout (ids, aliases, the applied count, and warnings). Warnings stay
+on stderr either way.
 
-Look up the job's ID (`job apply` doesn't print it back), then start a run:
+## 5. Trigger a run and read it back
 
 ```bash
-JOB_ID=$(curl -s http://localhost:8080/v1/jobs | jq -r '.[] | select(.alias=="nightly-etl") | .id')
+JOB_ID=$(caesium job apply --path nightly-etl.job.yaml --json --server http://localhost:8080 | jq -r '.jobs[0].id')
 RUN_ID=$(caesium run start --job-id "$JOB_ID" --server http://localhost:8080)
 echo "job $JOB_ID run $RUN_ID"
 ```
 
-`nightly-etl`'s steps finish in a couple of seconds; poll until the run is
-done before asking about it:
+`--alias` resolves the job through the jobs API when you do not have the id
+yet. Do not pass `--job-id` and `--alias` together:
 
 ```bash
-until [ "$(curl -s http://localhost:8080/v1/jobs/$JOB_ID/runs/$RUN_ID | jq -r .status)" != "running" ]; do sleep 1; done
+RUN_ID=$(caesium run start --alias nightly-etl --server http://localhost:8080)
+```
+
+`nightly-etl`'s steps finish in a couple of seconds. `run wait` polls until
+the run is terminal and prints that status. It exits 0 when the run succeeded,
+and non-zero when the run or a task failed or `--timeout` elapsed (the default
+is 5m). `run get` is the status read — there is no separate `run status`
+command — and prints the status, the job alias or id, and a task summary.
+`run logs` prints each task's logs, including partition instances when the API
+lists them, and stops after a bounded amount of output. It prints the text the
+API returned, redaction included. Add `--json` to any of the three for
+machine-readable stdout; diagnostics stay on stderr.
+
+```bash
+caesium run wait --run-id "$RUN_ID" --job-id "$JOB_ID" --timeout 30s --server http://localhost:8080
+caesium run get --run-id "$RUN_ID" --job-id "$JOB_ID" --server http://localhost:8080
+caesium run logs --run-id "$RUN_ID" --job-id "$JOB_ID" --server http://localhost:8080
 ```
 
 ## 6. Ask Caesium why
