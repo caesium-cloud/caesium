@@ -103,6 +103,25 @@ steps:
 	s.Contains(getOut, alias)
 	s.Contains(getOut, jobID)
 
+	getJSON, getJSONErr, err := s.runCLISeparate("run", "get", "--run-id", runID, "--job-id", jobID, "--json", "--server", s.caesiumURL)
+	s.Require().NoError(err, "run get --json failed: %s", getJSONErr)
+	s.Require().True(json.Valid([]byte(getJSON)), "run get --json stdout was not JSON:\n%s", getJSON)
+	s.NotContains(getJSON, "status:")
+	s.NotContains(getJSONErr, getJSON)
+	var got struct {
+		ID       string `json:"id"`
+		JobID    string `json:"job_id"`
+		JobAlias string `json:"job_alias"`
+		Status   string `json:"status"`
+		TimedOut bool   `json:"timed_out"`
+	}
+	s.Require().NoError(json.Unmarshal([]byte(getJSON), &got))
+	s.Equal(runID, got.ID)
+	s.Equal(jobID, got.JobID)
+	s.Equal(alias, got.JobAlias)
+	s.Equal("succeeded", got.Status)
+	s.False(got.TimedOut)
+
 	var logsOut, logsErr string
 	deadline := time.Now().Add(15 * time.Second)
 	for {
