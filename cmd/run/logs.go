@@ -3,6 +3,7 @@ package run
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -197,6 +198,14 @@ func fetchTaskLog(cmd *cobra.Command, apiKey, jobID, runID, taskID, taskRunID st
 	}
 	resp, err := inspectHTTPClient.Do(req)
 	if err != nil {
+		// A running task can stay quiet. The API holds the status line until
+		// the first log byte, so this deadline expires inside Do. Failing
+		// here would drop logs already collected from other tasks.
+		if cmd.Context().Err() == nil &&
+			(errors.Is(err, context.DeadlineExceeded) || errors.Is(ctx.Err(), context.DeadlineExceeded)) {
+			_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "note: task %s produced no log bytes before the fetch deadline\n", taskID)
+			return quietLogEntry(task, taskID, taskRunID), nil, true, nil
+		}
 		return logEntry{}, nil, false, err
 	}
 	defer func() { _ = resp.Body.Close() }()
@@ -246,6 +255,22 @@ func fetchTaskLog(cmd *cobra.Command, apiKey, jobID, runID, taskID, taskRunID st
 		Text:      text,
 	}
 	return entry, nil, cut, nil
+}
+
+// quietLogEntry is the record for a task whose fetch deadline expired before
+// any log byte arrived. A selected partition leaves status empty so the caller
+// can fill the instance status instead of the group's.
+func quietLogEntry(task taskView, taskID, taskRunID string) logEntry {
+	status := task.Status
+	if taskRunID != "" {
+		status = ""
+	}
+	return logEntry{
+		TaskID:    taskID,
+		TaskRunID: taskRunID,
+		Status:    status,
+		Truncated: true,
+	}
 }
 
 func readBounded(r io.Reader, maxBytes int) (string, bool, error) {

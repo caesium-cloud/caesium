@@ -255,6 +255,85 @@ func TestRunLogsPrintsTasksPartitionsAndBounds(t *testing.T) {
 		require.Equal(t, "p-ok", byRun["tr-ok"].Partition)
 	})
 
+	t.Run("quiet task keeps the other logs", func(t *testing.T) {
+		logsFetchTimeout = 50 * time.Millisecond
+		server := inspectServer(t, func(w http.ResponseWriter, r *http.Request) {
+			if !strings.Contains(r.URL.Path, "/logs") {
+				writeRun(w, "running", `[{"id":"task-loud","status":"succeeded"},{"id":"task-quiet","status":"running"},{"id":"task-after","status":"succeeded"}]`)
+				return
+			}
+			switch r.URL.Query().Get("task_id") {
+			case "task-loud":
+				_, _ = w.Write([]byte("kept\n"))
+			case "task-after":
+				_, _ = w.Write([]byte("still here\n"))
+			case "task-quiet":
+				<-r.Context().Done()
+			default:
+				http.Error(w, "unknown task", http.StatusNotFound)
+			}
+		})
+		logsJobID, logsRunID, logsServer, logsJSON = "job-1", "run-1", server.URL, true
+		stdout, stderr, err := execInspect(t, runLogs)
+		require.NoError(t, err)
+		require.Contains(t, stderr, "task task-quiet produced no log bytes")
+		require.Contains(t, stderr, "truncated")
+		require.NotContains(t, stdout, "produced no log bytes")
+		var doc logsDocument
+		require.NoError(t, json.Unmarshal([]byte(stdout), &doc))
+		require.True(t, doc.Truncated)
+		require.Len(t, doc.Entries, 3)
+		require.Contains(t, doc.Entries[0].Text, "kept")
+		require.Equal(t, "task-quiet", doc.Entries[1].TaskID)
+		require.Empty(t, doc.Entries[1].Text)
+		require.True(t, doc.Entries[1].Truncated)
+		require.Equal(t, "running", doc.Entries[1].Status)
+		require.Contains(t, doc.Entries[2].Text, "still here")
+	})
+
+	t.Run("cancelled command is not an empty log", func(t *testing.T) {
+		logsFetchTimeout = time.Second
+		started := make(chan struct{})
+		server := inspectServer(t, func(w http.ResponseWriter, r *http.Request) {
+			if !strings.Contains(r.URL.Path, "/logs") {
+				writeRun(w, "running", `[{"id":"task-1","status":"running"}]`)
+				return
+			}
+			close(started)
+			<-r.Context().Done()
+		})
+		logsJobID, logsRunID, logsServer = "job-1", "run-1", server.URL
+		ctx, cancel := context.WithCancel(context.Background())
+		cmd := &cobra.Command{Use: "test"}
+		cmd.SetContext(ctx)
+		var stdout, stderr bytes.Buffer
+		cmd.SetOut(&stdout)
+		cmd.SetErr(&stderr)
+		done := make(chan error, 1)
+		go func() {
+			done <- runLogs(cmd, nil)
+		}()
+		select {
+		case <-started:
+			cancel()
+		case err := <-done:
+			cancel()
+			require.NoError(t, err, "log fetch ended before the command was cancelled")
+			return
+		case <-time.After(2 * time.Second):
+			cancel()
+			t.Fatal("log fetch did not start")
+		}
+		select {
+		case err := <-done:
+			require.Error(t, err)
+			require.NotContains(t, stderr.String(), "produced no log bytes")
+			require.NotContains(t, stdout.String(), "task-1")
+		case <-time.After(2 * time.Second):
+			t.Fatal("cancelled log fetch did not return")
+		}
+	})
+
 	t.Run("byte cap", func(t *testing.T) {
 		logsMaxBytes = 4
 		server := inspectServer(t, func(w http.ResponseWriter, r *http.Request) {
