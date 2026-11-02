@@ -38,11 +38,16 @@ var ErrOpenRefused = errors.New("incident: open refused")
 // OpenParams describes a failure the subscriber wants to record as an incident.
 type OpenParams struct {
 	Namespace string
-	JobID     uuid.UUID
-	RunID     *uuid.UUID
-	TaskID    *uuid.UUID
-	TaskName  string
-	Class     FailureClass
+	// NamespaceResolved says Namespace is already the incident's tenant, so
+	// OpenOrAppend must not resolve it again. A caller that shapes anything for
+	// the tenant needs this: two reads can disagree, and what was shaped for one
+	// namespace would be stored in another. Unset, the run or job decides.
+	NamespaceResolved bool
+	JobID             uuid.UUID
+	RunID             *uuid.UUID
+	TaskID            *uuid.UUID
+	TaskName          string
+	Class             FailureClass
 	// Subject narrows the dedupe key to one object when (job, task, class) does
 	// not identify the incident: a step that produces two datasets can hold both,
 	// and each hold is its own incident. Empty for a failure.
@@ -105,14 +110,16 @@ const (
 // open twins. A recently-closed same-key incident within Cooldown suppresses a
 // fresh open.
 func (s *Store) OpenOrAppend(ctx context.Context, p OpenParams) (*models.Incident, OpenOutcome, error) {
-	if p.RunID != nil {
+	switch {
+	case p.NamespaceResolved:
+	case p.RunID != nil:
 		var run models.JobRun
 		if err := s.db.WithContext(ctx).Select("namespace").First(&run, "id = ?", *p.RunID).Error; err == nil {
 			p.Namespace = run.Namespace
 		} else if !errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, "", err
 		}
-	} else {
+	default:
 		var job models.Job
 		if err := s.db.WithContext(ctx).Select("namespace").First(&job, "id = ?", p.JobID).Error; err == nil {
 			p.Namespace = job.Namespace

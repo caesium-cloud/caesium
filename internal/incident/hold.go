@@ -110,20 +110,41 @@ func (s *Subscriber) handleHold(ctx context.Context, evt event.Event) {
 		return
 	}
 
-	s.openHoldIncident(ctx, evt.JobID, evt.RunID, s.holdScope(ctx, evt.JobID, evt.RunID), held, hold.Impact, hold.OpenedAt)
+	scope, err := s.holdScope(ctx, evt.JobID, evt.RunID)
+	if err != nil {
+		log.Warn("incident: could not resolve a dataset hold's tenant; leaving it to the reconcile sweep", "hold_id", held.HoldID, "error", err)
+		return
+	}
+	s.openHoldIncident(ctx, evt.JobID, evt.RunID, scope, held, hold.Impact, hold.OpenedAt)
 }
 
-// holdScope resolves the tenant of a hold's incident: the opening run's
-// namespace. Run-level on purpose: with a TaskID, resolveContext would classify
-// from the task's rows. A hold whose run is gone falls back to the job's
-// namespace, which is also what Store.OpenOrAppend does with no run.
-func (s *Subscriber) holdScope(ctx context.Context, jobID, runID uuid.UUID) failureContext {
-	fc := s.resolveContext(ctx, event.Event{JobID: jobID, RunID: runID})
-	if fc.namespace == "" {
-		fc.namespace = s.resolveContext(ctx, event.Event{JobID: jobID}).namespace
+// holdScope resolves the tenant of a hold's incident, once: the opening run's
+// namespace, or the job's when no such run exists, which is where a missing run
+// leaves Store.OpenOrAppend too. Everything shaped for the tenant, and the stored
+// row, read this one answer. A failed read stops the open rather than falling
+// back, because the job may have moved: the fallback would shape evidence for a
+// namespace that does not own the incident. The sweep retries.
+func (s *Subscriber) holdScope(ctx context.Context, jobID, runID uuid.UUID) (failureContext, error) {
+	scope := failureContext{jobID: jobID}
+	if runID != uuid.Nil {
+		var run models.JobRun
+		err := s.db.WithContext(ctx).Select("id", "namespace", "backfill_id").First(&run, "id = ?", runID).Error
+		if err == nil {
+			scope.namespace = models.NamespaceOrDefault(run.Namespace)
+			scope.backfillID = run.BackfillID
+			return scope, nil
+		}
+		if !errors.Is(err, gorm.ErrRecordNotFound) {
+			return scope, err
+		}
 	}
-	fc.namespace = models.NamespaceOrDefault(fc.namespace)
-	return fc
+	var job models.Job
+	err := s.db.WithContext(ctx).Select("id", "namespace").First(&job, "id = ?", jobID).Error
+	if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+		return scope, err
+	}
+	scope.namespace = models.NamespaceOrDefault(job.Namespace)
+	return scope, nil
 }
 
 // holdOpenGuard makes a hold's incident one per hold for the hold's lifetime. It
@@ -165,9 +186,10 @@ func (s *Subscriber) openHoldIncident(ctx context.Context, jobID, runID uuid.UUI
 	class := s.classifier.Classify(Signal{EventType: string(event.TypeDatasetHeld)})
 	violations, summary := shapeHoldVerdict(held)
 	s.recordIncident(ctx, OpenParams{
-		Namespace: scope.namespace,
-		JobID:     jobID,
-		Guard:     holdOpenGuard(jobID, held.HoldID),
+		Namespace:         scope.namespace,
+		NamespaceResolved: true,
+		JobID:             jobID,
+		Guard:             holdOpenGuard(jobID, held.HoldID),
 		// The opening run: FreezeAllowlist excludes its outputs from the seeds of
 		// the impact walk. TrustedBefore excludes every other run that could have
 		// breached the hold, recorded or not: only a run finished before the hold

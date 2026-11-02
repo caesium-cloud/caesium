@@ -63,6 +63,10 @@ type Subscriber struct {
 	// deployments and tests take no autonomous action.
 	executor *Executor
 	rules    *Rules
+	// holdScanAfter is the id the reconcile sweep's next page of uncovered holds
+	// starts after. It is in memory and owned by the one sweeping goroutine: a
+	// restart or a new leader starts from the beginning, which is harmless.
+	holdScanAfter uuid.UUID
 	// afterHoldScan, tests only, runs between the reconcile sweep's scan for
 	// uncovered holds and its opens: where the event path interleaves.
 	afterHoldScan func()

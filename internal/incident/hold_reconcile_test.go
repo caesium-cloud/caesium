@@ -3,16 +3,21 @@ package incident
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"slices"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/caesium-cloud/caesium/internal/event"
 	"github.com/caesium-cloud/caesium/internal/models"
+	fixturejson "github.com/caesium-cloud/caesium/internal/testutil"
 	"github.com/caesium-cloud/caesium/pkg/env"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 	"gorm.io/datatypes"
+	"gorm.io/gorm"
 )
 
 // heldRow records an active hold the subscriber never heard about: the row a
@@ -307,6 +312,190 @@ func TestReconcileRaceWithTheEventPathOpensOneIncident(t *testing.T) {
 			require.EqualValues(t, 1, opened)
 		})
 	}
+}
+
+// A finance run's job has moved to marketing, and the first read of the run fails.
+// Falling back to the job's namespace would shape evidence for marketing, and the
+// store's own later read would file it under finance.
+func TestFailedTenantLookupStopsTheOpenInsteadOfFallingBack(t *testing.T) {
+	marketingCone := func(t *testing.T) datatypes.JSON {
+		return storedCone(t, coneNode("marketing", "secret-marketing"), coneNode("finance", "own-rollup"))
+	}
+	check := func(t *testing.T, w *holdWorld) {
+		t.Helper()
+		inc := w.only()
+		require.Equal(t, "finance", inc.Namespace, "the run decides, not the job's new namespace")
+		require.Contains(t, inc.DedupeKey, "finance|")
+		require.Contains(t, string(inc.Evidence), "own-rollup")
+		require.NotContains(t, string(inc.Evidence), "secret-marketing")
+	}
+	moved := func(t *testing.T) *holdWorld {
+		w := newHoldWorld(t, "finance", 0)
+		require.NoError(t, w.db.Model(&models.Job{}).Where("id = ?", w.jobID).Update("namespace", "marketing").Error)
+		return w
+	}
+
+	t.Run("event", func(t *testing.T) {
+		w := moved(t)
+		ctx := t.Context()
+		hold := w.heldRow("orders", time.Now().UTC().Add(-time.Hour))
+		require.NoError(t, w.db.Model(hold).Update("impact", marketingCone(t)).Error)
+
+		fixturejson.FailJobRunReads(t, w.db, 1)
+		w.sub.handle(ctx, w.heldEvent(hold.ID, "orders"))
+		require.Empty(t, w.incidents(), "a failed read stops the open")
+
+		require.NoError(t, w.sub.ReconcileHolds(ctx, 0))
+		check(t, w)
+	})
+
+	t.Run("sweep", func(t *testing.T) {
+		w := moved(t)
+		ctx := t.Context()
+		hold := w.heldRow("orders", time.Now().UTC().Add(-time.Hour))
+		require.NoError(t, w.db.Model(hold).Update("impact", marketingCone(t)).Error)
+
+		fixturejson.FailJobRunReads(t, w.db, 1)
+		require.Error(t, w.sub.ReconcileHolds(ctx, 0))
+		require.Empty(t, w.incidents(), "a failed read stops the open")
+
+		require.NoError(t, w.sub.ReconcileHolds(ctx, 0))
+		check(t, w)
+	})
+
+	// The ownership check reads the latest breach's run after the tenant: a
+	// failure there stops the open too, rather than dropping or keeping verdicts.
+	t.Run("ownership read", func(t *testing.T) {
+		w := moved(t)
+		ctx := t.Context()
+		hold := w.heldRow("orders", time.Now().UTC().Add(-time.Hour))
+		require.NoError(t, w.db.Model(hold).Update("impact", marketingCone(t)).Error)
+
+		failNthRunRead(t, w.db, 2)
+		require.Error(t, w.sub.ReconcileHolds(ctx, 0))
+		require.Empty(t, w.incidents())
+
+		require.NoError(t, w.sub.ReconcileHolds(ctx, 0))
+		check(t, w)
+		require.Contains(t, string(w.only().Evidence), "rowCount")
+	})
+
+	// The event path reads the run once: a second read, the one the store used
+	// to make for itself, has nothing to fail.
+	t.Run("one read", func(t *testing.T) {
+		w := moved(t)
+		hold := w.heldRow("orders", time.Now().UTC().Add(-time.Hour))
+		require.NoError(t, w.db.Model(hold).Update("impact", marketingCone(t)).Error)
+
+		failNthRunRead(t, w.db, 2)
+		w.sub.handle(t.Context(), w.heldEvent(hold.ID, "orders"))
+
+		check(t, w)
+	})
+}
+
+// failNthRunRead fails the nth job_runs read and lets every other through.
+func failNthRunRead(t *testing.T, db *gorm.DB, nth int) {
+	t.Helper()
+	const name = "test:fail_nth_run_read"
+	reads := 0
+	require.NoError(t, db.Callback().Query().Before("gorm:query").Register(name, func(tx *gorm.DB) {
+		table := tx.Statement.Table
+		if table == "" && tx.Statement.Schema != nil {
+			table = tx.Statement.Schema.Table
+		}
+		if table != "job_runs" {
+			return
+		}
+		reads++
+		if reads == nth {
+			_ = tx.AddError(errors.New("database is locked"))
+		}
+	}))
+	t.Cleanup(func() { _ = db.Callback().Query().Remove(name) })
+}
+
+// The hold open trusts the tenant it was handed; a failure incident still asks the
+// run, whatever it was passed.
+func TestOpenOrAppendResolvesTheTenantUnlessToldItIsResolved(t *testing.T) {
+	w := newHoldWorld(t, "finance", 0)
+	ctx := t.Context()
+
+	resolved, _, err := w.sub.store.OpenOrAppend(ctx, OpenParams{
+		Namespace: "marketing", NamespaceResolved: true, JobID: w.jobID, RunID: &w.runID, TaskName: "resolved", Class: ClassUnknown,
+	})
+	require.NoError(t, err)
+	require.Equal(t, "marketing", resolved.Namespace)
+
+	asked, _, err := w.sub.store.OpenOrAppend(ctx, OpenParams{
+		Namespace: "marketing", JobID: w.jobID, RunID: &w.runID, TaskName: "asked", Class: ClassUnknown,
+	})
+	require.NoError(t, err)
+	require.Equal(t, "finance", asked.Namespace)
+}
+
+// A dataset_held can overtake its hold row's visibility, or the read can fail.
+// Neither loses the incident: the row is what the sweep goes by.
+func TestHeldEventWhoseHoldIsNotReadableIsOpenedByTheSweep(t *testing.T) {
+	w := newHoldWorld(t, "finance", 0)
+	ctx := t.Context()
+	holdID := uuid.New()
+	w.sub.handle(ctx, w.heldEvent(holdID, "orders"))
+	require.Empty(t, w.incidents())
+
+	key := models.DatasetHoldKey("", "orders")
+	require.NoError(t, w.db.Create(&models.DatasetHold{
+		ID: holdID, Name: "orders", Status: models.DatasetHoldStatusActive, ActiveKey: &key, Reason: "min",
+		HeldByJobID: w.jobID, HeldByRunID: &w.runID, LastBreachRunID: &w.runID, OccurrenceCount: 1,
+		OpenedAt: time.Now().UTC().Add(-time.Hour),
+	}).Error)
+
+	require.NoError(t, w.sub.ReconcileHolds(ctx, time.Minute))
+
+	require.Equal(t, holdID.String(), mustHoldID(t, w.only()))
+}
+
+// One hold that can never open must not stop the others, in its page or behind
+// it. held_by_run_id here does not scan, so reading that row always fails.
+func TestAPoisonHoldCannotStarveTheSweep(t *testing.T) {
+	poison := func(t *testing.T, w *holdWorld, hold *models.DatasetHold) {
+		t.Helper()
+		require.NoError(t, w.db.Exec(`UPDATE dataset_holds SET held_by_run_id = 'not-a-uuid' WHERE id = ?`, hold.ID).Error)
+	}
+	long := time.Now().UTC().Add(-time.Hour)
+
+	t.Run("same page", func(t *testing.T) {
+		w := newHoldWorld(t, "finance", 0)
+		poison(t, w, w.heldRow("poison", long))
+		healthy := w.heldRow("orders", long)
+
+		require.Error(t, w.sub.ReconcileHolds(t.Context(), 0), "the failure is reported")
+
+		require.Equal(t, healthy.ID.String(), mustHoldID(t, w.only()))
+	})
+
+	t.Run("a whole page of them", func(t *testing.T) {
+		w := newHoldWorld(t, "finance", 0)
+		ctx := t.Context()
+		holds := make([]*models.DatasetHold, 0, holdReconcileBatch+1)
+		for i := range holdReconcileBatch + 1 {
+			holds = append(holds, w.heldRow(fmt.Sprintf("dataset-%d", i), long))
+		}
+		// Whichever id sorts last is the healthy one, so it is behind every
+		// other hold on the first page.
+		slices.SortFunc(holds, func(a, b *models.DatasetHold) int { return strings.Compare(a.ID.String(), b.ID.String()) })
+		for _, hold := range holds[:holdReconcileBatch] {
+			poison(t, w, hold)
+		}
+
+		require.Error(t, w.sub.ReconcileHolds(ctx, 0))
+		require.Empty(t, w.incidents(), "the first page is all poison")
+
+		require.NoError(t, w.sub.ReconcileHolds(ctx, 0))
+		require.Equal(t, holds[holdReconcileBatch].ID.String(), mustHoldID(t, w.only()))
+
+		require.Error(t, w.sub.ReconcileHolds(ctx, 0), "the sweep comes back round to retry")
+	})
 }
 
 // Every query is bounded, and a page of healthy rows must not hide the rest.

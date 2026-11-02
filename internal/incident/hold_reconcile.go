@@ -3,6 +3,7 @@ package incident
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 
@@ -143,9 +144,11 @@ func (s *Subscriber) closeEndedPage(ctx context.Context, incidents []models.Inci
 	return nil
 }
 
-// openIncidentsOfUncoveredHolds opens at most holdReconcileBatch incidents, oldest
-// hold first; the next sweep takes the rest. The anti-join is why that cannot
-// starve: a covered hold never occupies a place in the page. Every incident
+// openIncidentsOfUncoveredHolds opens at most holdReconcileBatch incidents per
+// sweep. The anti-join keeps a covered hold out of the page, and holdScanAfter
+// moves the page on each sweep, so an uncovered hold whose open keeps failing
+// takes its turn and cannot hold a place at the head. Each hold is read and opened
+// on its own for the same reason: one bad row fails only itself. Every incident
 // status counts, so a hold whose incident closed stays closed.
 func (s *Subscriber) openIncidentsOfUncoveredHolds(ctx context.Context, openedBefore time.Time) error {
 	if !env.Variables().DataAssertionsEnabled {
@@ -154,33 +157,36 @@ func (s *Subscriber) openIncidentsOfUncoveredHolds(ctx context.Context, openedBe
 	var uncovered []uuid.UUID
 	if err := s.db.WithContext(ctx).
 		Model(&models.DatasetHold{}).
-		Where("status = ? AND opened_at < ?", models.DatasetHoldStatusActive, openedBefore).
+		Where("status = ? AND opened_at < ? AND id > ?", models.DatasetHoldStatusActive, openedBefore, s.holdScanAfter).
 		Where(`NOT EXISTS (SELECT 1 FROM incidents
 			WHERE incidents.job_id = dataset_holds.held_by_job_id AND incidents.class = ?
 			AND incidents.dedupe_key LIKE '%|' || ? || CAST(dataset_holds.id AS TEXT))`,
 			string(ClassDataQualityHold), holdSubjectPrefix).
-		Order("opened_at ASC").
+		Order("id ASC").
 		Limit(holdReconcileBatch).
 		Pluck("id", &uncovered).Error; err != nil {
 		return err
 	}
+	s.holdScanAfter = uuid.Nil
+	if len(uncovered) == holdReconcileBatch {
+		s.holdScanAfter = uncovered[len(uncovered)-1]
+	}
 	if s.afterHoldScan != nil {
 		s.afterHoldScan()
 	}
-	if len(uncovered) == 0 {
-		return nil
-	}
-	var holds []models.DatasetHold
-	if err := s.db.WithContext(ctx).Where("id IN ?", uncovered).Find(&holds).Error; err != nil {
-		return err
-	}
-	for i := range holds {
-		log.Info("incident: opening a hold's incident whose dataset_held was not delivered", "hold_id", holds[i].ID)
-		if err := s.openIncidentFromHold(ctx, &holds[i]); err != nil {
-			return err
+	var failures []error
+	for _, id := range uncovered {
+		var hold models.DatasetHold
+		err := s.db.WithContext(ctx).First(&hold, "id = ?", id).Error
+		if err == nil {
+			log.Info("incident: opening a hold's incident whose dataset_held was not delivered", "hold_id", id)
+			err = s.openIncidentFromHold(ctx, &hold)
+		}
+		if err != nil {
+			failures = append(failures, fmt.Errorf("hold %s: %w", id, err))
 		}
 	}
-	return nil
+	return errors.Join(failures...)
 }
 
 // openIncidentFromHold opens a hold's incident from its row. Unlike the event,
@@ -194,7 +200,10 @@ func (s *Subscriber) openIncidentFromHold(ctx context.Context, hold *models.Data
 	if hold.HeldByRunID != nil {
 		runID = *hold.HeldByRunID
 	}
-	scope := s.holdScope(ctx, hold.HeldByJobID, runID)
+	scope, err := s.holdScope(ctx, hold.HeldByJobID, runID)
+	if err != nil {
+		return err
+	}
 	held := holdEvent{
 		HoldID:    hold.ID,
 		Namespace: hold.Namespace,
