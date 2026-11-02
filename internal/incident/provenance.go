@@ -13,11 +13,14 @@ import (
 
 	"github.com/bmatcuk/doublestar/v4"
 	"github.com/caesium-cloud/caesium/internal/incident/forge"
+	"github.com/caesium-cloud/caesium/internal/jobdef/docdiff"
 	"github.com/caesium-cloud/caesium/internal/jobdef/yamlpath"
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/caesium-cloud/caesium/pkg/env"
+	schema "github.com/caesium-cloud/caesium/pkg/jobdef"
 	"github.com/caesium-cloud/caesium/pkg/log"
 	"github.com/google/uuid"
+	"gopkg.in/yaml.v3"
 )
 
 // provenance.go is the Git-PR half of apply_jobdef_patch's provenance router: an
@@ -32,7 +35,7 @@ import (
 //   - a configured git source has its source id, repository and ref, admits its
 //     namespace, and scopes its manifest path;
 //   - the file at that path, read from the forge, declares its alias in its
-//     namespace, and is the blob it held at the synced commit.
+//     namespace, and is the blob it held at the commit the proposal recorded.
 //
 // The repository owner and name come from the source's configuration; job data
 // only has to agree with it. Anything short of that degrades to `escalate` with
@@ -46,6 +49,7 @@ const (
 	degradeInvalidProvenance     = "invalid_provenance"
 	degradeCredentialUnavailable = "credential_unavailable"
 	degradeManifestChanged       = "manifest_changed"
+	degradeNoBaseline            = "no_baseline"
 	degradeManifestUnsafe        = "manifest_unsafe"
 	degradeManifestUnchanged     = "manifest_unchanged"
 	degradeForgeError            = "forge_error"
@@ -59,7 +63,8 @@ const (
 	// an action cancelled mid-route still reaches a human.
 	escalateTimeout = 10 * time.Second
 
-	maxBodyDiffBytes     = 30_000
+	// maxDiffBytes bounds a rendered diff on every surface that carries one.
+	maxDiffBytes         = 30_000
 	maxBodyEvidenceBytes = 8_000
 	defaultSyncBranch    = "main"
 )
@@ -117,6 +122,65 @@ type patchPlan struct {
 	branch     string
 	alias      string
 	namespace  string
+	// baseline is what the proposal recorded, set once it is bound to the plan.
+	baseline *patchBaseline
+}
+
+// patchBaseline is the provenance a proposal was reviewed against. The proposal
+// records it on the action, in the preview, because everything else moves: git
+// sync can stamp a newer commit on the job between the proposal and the approval,
+// and the definition is a whole document written against this baseline.
+type patchBaseline struct {
+	SourceID string `json:"source_id,omitempty"`
+	Repo     string `json:"repo,omitempty"`
+	Ref      string `json:"ref,omitempty"`
+	Commit   string `json:"commit,omitempty"`
+	Path     string `json:"path,omitempty"`
+}
+
+func jobBaseline(job *models.Job) patchBaseline {
+	return patchBaseline{
+		SourceID: strings.TrimSpace(job.ProvenanceSourceID),
+		Repo:     strings.TrimSpace(job.ProvenanceRepo),
+		Ref:      strings.TrimSpace(job.ProvenanceRef),
+		Commit:   strings.TrimSpace(job.ProvenanceCommit),
+		Path:     strings.TrimSpace(job.ProvenancePath),
+	}
+}
+
+// proposalBaseline reads the baseline the proposal recorded. Only the server
+// writes an action's result, so an agent cannot supply one. The preview holds it
+// first, and each outcome of the route copies it forward, so a repeat of the route
+// is held to the same commit. nil means none was recorded.
+func proposalBaseline(action *models.AgentAction) *patchBaseline {
+	var recorded struct {
+		Baseline *patchBaseline `json:"baseline"`
+	}
+	if err := json.Unmarshal(action.Result, &recorded); err != nil {
+		return nil
+	}
+	return recorded.Baseline
+}
+
+// bindBaseline ties a plan to the proposal: the commit open compares the manifest
+// against becomes the one the proposal recorded, not the one the job carries now.
+// With no baseline there is nothing to tell a stale proposal from a fresh one, so
+// the patch does not reach the forge.
+func bindBaseline(plan *patchPlan, job *models.Job, action *models.AgentAction) *patchDegrade {
+	baseline := proposalBaseline(action)
+	if baseline == nil || !forge.ValidCommit(baseline.Commit) {
+		return &patchDegrade{Code: degradeNoBaseline,
+			Reason: "the proposal recorded no synced commit, so nothing shows the manifest is still the one it was reviewed against"}
+	}
+	now := jobBaseline(job)
+	if baseline.SourceID != now.SourceID || !sameRepo(baseline.Repo, now.Repo) ||
+		baseline.Ref != now.Ref || baseline.Path != now.Path {
+		return &patchDegrade{Code: degradeManifestChanged,
+			Reason: "the job's git source or manifest path changed since this patch was proposed"}
+	}
+	plan.baseline = baseline
+	plan.commit = baseline.Commit
+	return nil
 }
 
 // plan decides the route from the job and server configuration alone: no network
@@ -260,12 +324,14 @@ func sourceCovers(source *env.GitSourceConfig, filePath string) bool {
 	})
 }
 
-// patchChange is the content of one pull request.
+// patchChange is the content of one pull request. The description quotes the diff
+// of the document the file really holds, so it is built once that is read.
 type patchChange struct {
-	rendered *renderedManifest
-	title    string
-	body     string
-	message  string
+	rendered   *renderedManifest
+	definition json.RawMessage
+	title      string
+	body       func(diff string) string
+	message    string
 }
 
 // patchPullRequest is a route that ended at a pull request.
@@ -273,6 +339,9 @@ type patchPullRequest struct {
 	forge.PullRequest
 	// Existing is true when an earlier execution had already opened it.
 	Existing bool
+	// Diff is the diff of the manifest document this run wrote. It is empty when
+	// the run found an existing pull request and read no document.
+	Diff string
 }
 
 // open turns a plan into a pull request. Every step is safe to repeat: a retry
@@ -333,15 +402,17 @@ func (r *ProvenanceRouter) open(ctx context.Context, plan *patchPlan, change *pa
 	}
 	if current.SHA != synced.SHA {
 		return nil, &patchDegrade{Code: degradeManifestChanged,
-			Reason: "the manifest changed on the branch since the commit this job was synced from"}
+			Reason: fmt.Sprintf("the manifest changed on the branch since commit %s, the one this patch was proposed against; propose it again", plan.commit)}
 	}
-	updated, err := spliceManifest(current.Content, change.rendered, plan.alias, plan.namespace)
+	spliced, err := spliceManifest(current.Content, change.rendered, plan.alias, plan.namespace)
 	if err != nil {
 		if unsafe, ok := errors.AsType[*patchDegrade](err); ok {
 			return nil, unsafe
 		}
 		return nil, err
 	}
+	updated := spliced.File
+	diff := documentDiffText(spliced.Original, change.rendered.Document, change.definition)
 
 	created, err := client.CreateBranch(ctx, plan.branch, head)
 	if err != nil {
@@ -375,7 +446,7 @@ func (r *ProvenanceRouter) open(ctx context.Context, plan *patchPlan, change *pa
 
 	opened, err := client.OpenPullRequest(ctx, forge.NewPullRequest{
 		Title: change.title,
-		Body:  change.body,
+		Body:  change.body(diff),
 		Head:  plan.branch,
 		Base:  plan.base,
 	})
@@ -385,7 +456,7 @@ func (r *ProvenanceRouter) open(ctx context.Context, plan *patchPlan, change *pa
 			return nil, withBranch(fail(findErr))
 		}
 		if found != nil {
-			return &patchPullRequest{PullRequest: *found, Existing: true}, nil
+			return &patchPullRequest{PullRequest: *found, Existing: true, Diff: diff}, nil
 		}
 	}
 	if err != nil {
@@ -393,7 +464,7 @@ func (r *ProvenanceRouter) open(ctx context.Context, plan *patchPlan, change *pa
 		degrade.Code = degradeForgeError
 		return nil, withBranch(degrade)
 	}
-	return &patchPullRequest{PullRequest: *opened}, nil
+	return &patchPullRequest{PullRequest: *opened, Diff: diff}, nil
 }
 
 // resolveToken reads the token at use time, as git sync reads its credentials.
@@ -426,23 +497,33 @@ func scrubToken(text, token string) string {
 // the rendered diff. It never applies to the database.
 func (e *Executor) dispatchGitSyncedPatch(ctx context.Context, inc *models.Incident, action *models.AgentAction, job *models.Job, params ActionParams) (map[string]any, error) {
 	namespace := IncidentNamespace(inc)
-	diff, err := e.ops.ApplyJobdefPatch(ctx, job.ID, namespace, params.Definition, true)
+	rendered, err := e.ops.ApplyJobdefPatch(ctx, job.ID, namespace, params.Definition, true)
 	if err != nil {
 		return nil, err
 	}
-	rendered, renderErr := renderManifest(params.Definition)
+	diff := patchDiffText(rendered, params.Definition)
+	manifest, renderErr := renderManifest(params.Definition)
 	plan, degrade := e.provenance.plan(job, namespace, action.ID)
 	if degrade == nil && renderErr != nil {
 		degrade = &patchDegrade{Code: degradeManifestUnsafe, Reason: "the proposed definition does not survive the manifest parser: " + renderErr.Error()}
 	}
 	if degrade == nil {
+		degrade = bindBaseline(plan, job, action)
+	}
+	if degrade == nil {
 		pr, err := e.provenance.open(ctx, plan, &patchChange{
-			rendered: rendered,
-			title:    patchTitle(job.Alias, inc.ID),
-			body:     patchBody(inc, action.ID, job.Alias, plan, diff),
-			message:  patchCommitMessage(job.Alias, inc.ID, action.ID),
+			rendered:   manifest,
+			definition: params.Definition,
+			title:      patchTitle(job.Alias, inc.ID),
+			body: func(text string) string {
+				return patchBody(inc, action.ID, job.Alias, plan, text)
+			},
+			message: patchCommitMessage(job.Alias, inc.ID, action.ID),
 		})
 		if err == nil {
+			if pr.Diff != "" {
+				diff = pr.Diff
+			}
 			return patchPullRequestResult(job, plan, pr, diff), nil
 		}
 		routed, ok := errors.AsType[*patchDegrade](err)
@@ -451,10 +532,10 @@ func (e *Executor) dispatchGitSyncedPatch(ctx context.Context, inc *models.Incid
 		}
 		degrade = routed
 	}
-	return e.escalatePatch(ctx, inc, job, params, diff, degrade)
+	return e.escalatePatch(ctx, inc, job, action, params, diff, degrade)
 }
 
-func patchPullRequestResult(job *models.Job, plan *patchPlan, pr *patchPullRequest, diff json.RawMessage) map[string]any {
+func patchPullRequestResult(job *models.Job, plan *patchPlan, pr *patchPullRequest, diff string) map[string]any {
 	out := map[string]any{
 		"job_id":    job.ID.String(),
 		"job_alias": job.Alias,
@@ -467,12 +548,11 @@ func patchPullRequestResult(job *models.Job, plan *patchPlan, pr *patchPullReque
 		"repo":      plan.repo.String(),
 		"base":      plan.base,
 		"path":      plan.path,
+		"baseline":  plan.baseline,
+		"diff":      boundText(diff, maxDiffBytes),
 	}
 	if pr.Existing {
 		out["pr_existing"] = true
-	}
-	if len(diff) > 0 {
-		out["diff"] = diff
 	}
 	return out
 }
@@ -480,7 +560,11 @@ func patchPullRequestResult(job *models.Job, plan *patchPlan, pr *patchPullReque
 // escalatePatch raises the degrade to a human with the rendered diff. It runs
 // detached from ctx: a route cancelled part-way still owes that human the truth,
 // and the escalation is local.
-func (e *Executor) escalatePatch(ctx context.Context, inc *models.Incident, job *models.Job, params ActionParams, diff json.RawMessage, degrade *patchDegrade) (map[string]any, error) {
+//
+// The action row keeps the diff as the incident's readers may read it. The
+// escalation goes further, to the event stream, the server log and whatever
+// channels a policy names, so its copy is the outbound one.
+func (e *Executor) escalatePatch(ctx context.Context, inc *models.Incident, job *models.Job, action *models.AgentAction, params ActionParams, diff string, degrade *patchDegrade) (map[string]any, error) {
 	log.Warn("incident: jobdef patch degraded to escalate",
 		"incident_id", inc.ID, "job_alias", job.Alias, "degrade", degrade.Code)
 	summary := params.Summary
@@ -489,7 +573,7 @@ func (e *Executor) escalatePatch(ctx context.Context, inc *models.Incident, job 
 	}
 	escalateCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), escalateTimeout)
 	defer cancel()
-	routed, err := e.ops.Escalate(escalateCtx, inc.ID, params.Channel, summary+"\n"+degrade.Reason+"\n"+string(diff))
+	routed, err := e.ops.Escalate(escalateCtx, inc.ID, params.Channel, summary+"\n"+degrade.Reason+"\n"+outboundDiff(diff))
 	if err != nil {
 		return nil, err
 	}
@@ -501,12 +585,13 @@ func (e *Executor) escalatePatch(ctx context.Context, inc *models.Incident, job 
 		"routed":    routed,
 		"degrade":   degrade.Code,
 		"reason":    degrade.Reason,
+		"diff":      boundText(diff, maxDiffBytes),
 	}
 	if degrade.Branch != "" {
 		out["pr_branch"] = degrade.Branch
 	}
-	if len(diff) > 0 {
-		out["diff"] = diff
+	if baseline := proposalBaseline(action); baseline != nil {
+		out["baseline"] = baseline
 	}
 	return out, nil
 }
@@ -518,6 +603,12 @@ func (e *Executor) escalatePatch(ctx context.Context, inc *models.Incident, job 
 // checks first, since at this point nothing else has confined the proposal.
 //
 // The result's `diff` is a string, the shape the Console's approval card renders.
+// It is not scrubbed: its readers are the incident's, who can read the proposal
+// on the same row and the job's manifest. The agent gets none of it
+// (cmd/start withoutPreview), and a redaction here could hide the edit a human is
+// deciding on. For a job with provenance the preview also records the baseline
+// the dispatch holds the file to, and the diff compares the server's copy of the
+// job: it uses no token, so it cannot read the file.
 func (e *Executor) recordPatchPreview(ctx context.Context, inc *models.Incident, action *models.AgentAction, params ActionParams) {
 	if e.ops == nil || len(params.Definition) == 0 || !authModeActive() {
 		return
@@ -545,6 +636,8 @@ func (e *Executor) recordPatchPreview(ctx context.Context, inc *models.Incident,
 		preview["route"] = routeDirect
 		headline = "route: direct apply to the server"
 	} else {
+		baseline := jobBaseline(job)
+		preview["baseline"] = baseline
 		plan, degrade := e.provenance.plan(job, namespace, action.ID)
 		if degrade != nil {
 			preview["route"] = routeEscalate
@@ -557,11 +650,11 @@ func (e *Executor) recordPatchPreview(ctx context.Context, inc *models.Incident,
 			preview["base"] = plan.base
 			preview["path"] = plan.path
 			preview["pr_branch"] = plan.branch
-			headline = fmt.Sprintf("route: pull request against %s (%s, %s); escalates instead if the manifest cannot be patched safely",
-				plan.repo, plan.base, plan.path)
+			headline = fmt.Sprintf("route: pull request against %s (%s, %s); escalates instead if the manifest cannot be patched safely or has changed since commit %s",
+				plan.repo, plan.base, plan.path, baseline.Commit)
 		}
 	}
-	preview["diff"] = headline + "\n\n" + patchDiffText(diff)
+	preview["diff"] = boundText(headline+"\n\n"+patchDiffText(diff, params.Definition), maxDiffBytes)
 
 	encoded := encodeJSON(preview)
 	if err := e.store.DB().WithContext(ctx).Model(&models.AgentAction{}).
@@ -596,25 +689,50 @@ func (e *Executor) loadPatchJob(ctx context.Context, inc *models.Incident, param
 	return &job, nil
 }
 
-// patchDiffText is the readable form of ActionOps.ApplyJobdefPatch's result.
-func patchDiffText(diff json.RawMessage) string {
+const noPatchChanges = "no changes: the proposed definition is identical to the current one"
+
+// patchDiffText is the readable form of ActionOps.ApplyJobdefPatch's result. It
+// says "no changes" only on the render's own word that the definitions are
+// identical. When there is no diff to show, it shows the whole proposal.
+func patchDiffText(diff, definition json.RawMessage) string {
 	var rendered struct {
-		Empty   bool `json:"empty"`
-		Updates []struct {
-			Diff string `json:"diff"`
-		} `json:"updates"`
+		Empty bool   `json:"empty"`
+		Diff  string `json:"diff"`
 	}
-	if err := json.Unmarshal(diff, &rendered); err != nil || (len(rendered.Updates) == 0 && !rendered.Empty) {
-		return string(diff)
+	if err := json.Unmarshal(diff, &rendered); err == nil {
+		switch {
+		case rendered.Diff != "":
+			return rendered.Diff
+		case rendered.Empty:
+			return noPatchChanges
+		}
 	}
-	if rendered.Empty {
-		return "no changes"
+	return fullProposalText(definition)
+}
+
+// documentDiffText diffs two job documents, falling back to the whole proposal.
+func documentDiffText(current, proposed []byte, definition json.RawMessage) string {
+	text, err := docdiff.Documents(current, proposed)
+	if err != nil {
+		return fullProposalText(definition)
 	}
-	parts := make([]string, 0, len(rendered.Updates))
-	for i := range rendered.Updates {
-		parts = append(parts, rendered.Updates[i].Diff)
+	if text == "" {
+		return noPatchChanges
 	}
-	return strings.Join(parts, "\n")
+	return text
+}
+
+// fullProposalText stands in for a diff that could not be produced: the reader
+// cannot see what changes, so they see all of what would be written.
+func fullProposalText(definition json.RawMessage) string {
+	const heading = "no diff could be produced; the complete proposed definition follows\n\n"
+	var proposed schema.Definition
+	if err := json.Unmarshal(definition, &proposed); err == nil {
+		if document, err := yaml.Marshal(&proposed); err == nil {
+			return heading + string(document)
+		}
+	}
+	return heading + string(definition)
 }
 
 var unsafeForgeText = regexp.MustCompile(`[^A-Za-z0-9._-]+`)
@@ -636,17 +754,18 @@ func patchCommitMessage(alias string, incidentID, actionID uuid.UUID) string {
 // patchBody renders the pull request description. Job and data values are
 // untrusted, so they appear only inside fenced code blocks, where a forge renders
 // no Markdown, mention or link. Only ids generated here sit outside one.
-func patchBody(inc *models.Incident, actionID uuid.UUID, alias string, plan *patchPlan, diff json.RawMessage) string {
+func patchBody(inc *models.Incident, actionID uuid.UUID, alias string, plan *patchPlan, diff string) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "Caesium opened this pull request for an approved `apply_jobdef_patch` action.\n\n")
 	fmt.Fprintf(&b, "- Incident: `%s`\n- Action: `%s`\n\n", inc.ID, actionID)
 	b.WriteString("Merging it lets git sync apply the change. Comments inside the patched job's document are not preserved.\n\n")
 	b.WriteString("### Job\n\n")
-	b.WriteString(fenced(fmt.Sprintf("alias: %s\nnamespace: %s\nmanifest: %s\nsynced commit: %s", alias, plan.namespace, plan.path, plan.commit)))
+	b.WriteString(fenced(fmt.Sprintf("alias: %s\nnamespace: %s\nmanifest: %s\nbaseline commit: %s", alias, plan.namespace, plan.path, plan.commit)))
 	b.WriteString("\n\n### Violated assertion\n\n")
 	b.WriteString(fenced(boundedSection(patchEvidence(inc), maxBodyEvidenceBytes)))
 	b.WriteString("\n\n### Rendered diff\n\n")
-	b.WriteString(fenced(boundedSection(patchDiffText(diff), maxBodyDiffBytes)))
+	b.WriteString("The job's document in the file against its replacement, as data, with keys sorted.\n\n")
+	b.WriteString(fenced(outboundDiff(diff)))
 	b.WriteString("\n")
 	return b.String()
 }
@@ -670,11 +789,35 @@ func patchEvidence(inc *models.Incident) string {
 	return string(encoded)
 }
 
+// sensitiveLine matches a rendered YAML `key: value` line whose key names a
+// credential, with or without a diff's leading marker.
+var sensitiveLine = regexp.MustCompile(`(?i)^([-+ ]?\s*(?:- )*[^\s:]*(?:secret|token|passw|pwd|credential|authorization|api[-_]?key|private[-_]?key)[^\s:]*:[ \t]+)(.+)$`)
+
+// outboundDiff is a diff for readers who are not the incident's: a value under a
+// credential-named key is masked, unless it is a secret:// reference, which names
+// a secret without holding it. The masked line still shows, so a changed value
+// still reads as a change. Then the scrubber takes whatever else looks like a
+// token. Unchanged lines are masked too, since they frame the change.
+func outboundDiff(diff string) string {
+	lines := strings.Split(diff, "\n")
+	for i, line := range lines {
+		match := sensitiveLine.FindStringSubmatch(line)
+		if match != nil && !strings.HasPrefix(strings.Trim(match[2], `"'`), "secret://") {
+			lines[i] = match[1] + Redacted
+		}
+	}
+	return boundedSection(strings.Join(lines, "\n"), maxDiffBytes)
+}
+
 // boundedSection scrubs and bounds one untrusted section. The pull request goes
 // to a repository whose readers are not the incident's, so credential-shaped
 // strings stay behind.
 func boundedSection(text string, limit int) string {
-	text = NewScrubber(nil).Scrub(text)
+	return boundText(NewScrubber(nil).Scrub(text), limit)
+}
+
+// boundText cuts text at limit bytes and says so.
+func boundText(text string, limit int) string {
 	if len(text) <= limit {
 		return text
 	}

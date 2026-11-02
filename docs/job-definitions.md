@@ -927,6 +927,12 @@ A job takes the route only when all of this holds, and otherwise the patch escal
 - git sync is on, and a configured source has the job's `source_id`, repository and ref, and admits its namespace;
 - the job's manifest path is one that source syncs, and the ref is a branch;
 - the file declares the job's alias in the job's namespace, exactly once;
-- the file is the same blob it was at the commit the job was synced from.
+- the proposal recorded the commit the job was synced from, and the file is still the blob it was at that commit.
+
+The commit is the one the job held when the agent proposed the patch. A proposal is a whole document, so if a sync brings in a change to the file before the approval, writing it would revert that change. The patch escalates instead (`manifest_changed`), and someone proposes it again. A sync that leaves the file alone changes nothing. A proposal that recorded no commit escalates (`no_baseline`).
 
 The pull request comes from the branch `caesium/patch-<action id>`. It replaces only the job's document: sibling jobs and the comments above the document stay byte for byte, while comments inside the document are lost. Job and data values appear in the description only inside code blocks, so they cannot mention anyone. A job with provenance is never edited on the server, even when the forge is down, because the next sync would revert the edit. The hold stays until the merged change is synced and a clean run releases it.
+
+Every rendered diff is a unified diff of the whole documents, compared as data with keys sorted, so it shows every field a patch changes and no reformatting. The approver's preview compares the proposal with the server's copy of the job, because a preview uses no token. The pull request description compares it with the job's document in the file. When no diff can be produced, the surface shows the complete proposal, and "no changes" appears only when the two definitions are identical. A diff stops at 30,000 bytes and says so; the action's `params` hold the whole proposal.
+
+Readers differ by surface. The preview and the action's `result` are for the incident's readers, who can read the job's manifest, and they show values as they stand. The agent that proposed the patch does not receive the preview. The pull request description and the escalation go further, so a value under a credential-named key is masked unless it is a `secret://` reference, and token-shaped text is scrubbed.

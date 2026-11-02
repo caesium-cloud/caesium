@@ -20,7 +20,9 @@ import (
 // CAESIUM_GIT_WRITE_CREDENTIALS, so an approved patch of a job with git provenance
 // cannot open a pull request. It must not half-succeed and must not fall back to
 // a direct edit: the human is told, with the diff, and the job stays as it was.
-// The approver sees that outcome before deciding.
+// The approver sees that outcome before deciding, and the diff compares the whole
+// definitions: an env edit shows beside the command edit. The agent that proposed
+// the patch reads none of the job's current env from the answer.
 //
 // The live pull request path is unit-tested against a fake forge
 // (internal/incident/provenance_test.go); an integration test cannot open a real
@@ -31,6 +33,7 @@ func (s *IntegrationTestSuite) TestIncidentGitProvenancePatchDegradesToEscalate(
 	alias := fmt.Sprintf("git-pr-degrade-%d", time.Now().UnixNano())
 	def := failingJobDefinition(alias, s.engineType)
 	def.Metadata.Remediation = &schema.MetadataRemediation{Profile: "triage-only", Classes: []string{"unknown"}}
+	def.Steps[0].Env = map[string]string{"PATCH_REGION": "git-pr-env-current", "PATCH_DROPPED": "git-pr-env-dropped"}
 
 	payload, err := json.Marshal(map[string]any{
 		"definitions": []schema.Definition{def},
@@ -58,6 +61,7 @@ func (s *IntegrationTestSuite) TestIncidentGitProvenancePatchDegradesToEscalate(
 	patched := def
 	step := def.Steps[0]
 	step.Command = []string{"sh", "-c", "echo git-pr-degrade-patched"}
+	step.Env = map[string]string{"PATCH_REGION": "git-pr-env-proposed"}
 	patched.Steps = []schema.Step{step}
 	patch, err := json.Marshal(patched)
 	s.Require().NoError(err)
@@ -74,6 +78,8 @@ func (s *IntegrationTestSuite) TestIncidentGitProvenancePatchDegradesToEscalate(
 		Action approvalAction `json:"action"`
 	}
 	s.Require().NoError(json.Unmarshal(proposed, &proposal))
+	s.NotContains(string(proposed), "git-pr-env-current", "an agent token cannot read the job's env, so the answer does not quote it")
+	s.NotContains(string(proposed), `\"preview\"`)
 
 	// The approver reads the outcome before deciding, from the same row.
 	detail := s.awaitIncidentStatus(incident.ID, "awaiting_approval", 30*time.Second)
@@ -88,6 +94,10 @@ func (s *IntegrationTestSuite) TestIncidentGitProvenancePatchDegradesToEscalate(
 	s.Require().Equal("escalate", preview.Route)
 	s.Require().Equal("no_write_credential", preview.Degrade)
 	s.Require().Contains(preview.Diff, "git-pr-degrade-patched", "the approval surface shows the change")
+	for _, edit := range []string{"PATCH_REGION: git-pr-env-current", "PATCH_REGION: git-pr-env-proposed", "PATCH_DROPPED: git-pr-env-dropped"} {
+		s.Require().Contains(preview.Diff, edit, "an env edit shows in the preview")
+	}
+	s.Require().NotContains(preview.Diff, "no changes")
 
 	var pending string
 	for _, a := range detail.Approvals {
@@ -104,13 +114,13 @@ func (s *IntegrationTestSuite) TestIncidentGitProvenancePatchDegradesToEscalate(
 	executed := requireActionByID(s, s.incidentDetail(incident.ID), proposal.Action.ID)
 	s.Require().Equal("executed", executed.Status, string(executed.Result))
 	var result struct {
-		Preview bool            `json:"preview"`
-		Route   string          `json:"route"`
-		Applied bool            `json:"applied"`
-		Degrade string          `json:"degrade"`
-		Reason  string          `json:"reason"`
-		Diff    json.RawMessage `json:"diff"`
-		PRURL   string          `json:"pr_url"`
+		Preview bool   `json:"preview"`
+		Route   string `json:"route"`
+		Applied bool   `json:"applied"`
+		Degrade string `json:"degrade"`
+		Reason  string `json:"reason"`
+		Diff    string `json:"diff"`
+		PRURL   string `json:"pr_url"`
 	}
 	s.Require().NoError(json.Unmarshal(executed.Result, &result))
 	s.False(result.Preview, "the executed result replaces the preview")
@@ -118,7 +128,8 @@ func (s *IntegrationTestSuite) TestIncidentGitProvenancePatchDegradesToEscalate(
 	s.False(result.Applied)
 	s.Equal("no_write_credential", result.Degrade)
 	s.Contains(result.Reason, "CAESIUM_GIT_WRITE_CREDENTIALS")
-	s.Contains(string(result.Diff), "git-pr-degrade-patched", "the degrade carries the rendered diff")
+	s.Contains(result.Diff, "git-pr-degrade-patched", "the degrade carries the rendered diff")
+	s.Contains(result.Diff, "PATCH_REGION: git-pr-env-proposed", "the degrade's diff is the whole change")
 	s.Empty(result.PRURL)
 
 	// The escalation a human receives names why and carries the same diff.
@@ -133,11 +144,12 @@ func (s *IntegrationTestSuite) TestIncidentGitProvenancePatchDegradesToEscalate(
 			}
 			if payload.IncidentID == incident.ID {
 				return strings.Contains(payload.Summary, "CAESIUM_GIT_WRITE_CREDENTIALS") &&
-					strings.Contains(payload.Summary, "git-pr-degrade-patched")
+					strings.Contains(payload.Summary, "git-pr-degrade-patched") &&
+					strings.Contains(payload.Summary, "PATCH_REGION: git-pr-env-proposed")
 			}
 		}
 		return false
-	}, 30*time.Second, time.Second, "no incident_escalated event carried the reason and the diff")
+	}, 30*time.Second, time.Second, "no incident_escalated event carried the reason and the whole diff")
 
 	// No silent server-side edit: the stored job still runs the old command.
 	manifest := s.requireNSStatus(http.StatusOK, http.MethodGet, "/v1/jobs/"+job.ID+"/manifest", s.authAPIKey, "")

@@ -133,12 +133,20 @@ func unsafeManifest(format string, args ...any) *patchDegrade {
 	return &patchDegrade{Code: degradeManifestUnsafe, Reason: "the manifest cannot be patched safely: " + fmt.Sprintf(format, args...)}
 }
 
+// splicedManifest is a manifest stream with one job's document replaced.
+type splicedManifest struct {
+	// File is the whole stream to write.
+	File []byte
+	// Original is the job's document as the file held it.
+	Original []byte
+}
+
 // spliceManifest replaces one job's document in a manifest stream and leaves
 // every other byte alone. The file must declare the job in the job's namespace:
 // that read, from the repository itself, is what ties the job to this file. It
 // returns a *patchDegrade when the change cannot be made safely, and
 // ErrPatchAltersRemediation when it would change the policy stored in the file.
-func spliceManifest(raw []byte, rendered *renderedManifest, alias, namespace string) ([]byte, error) {
+func spliceManifest(raw []byte, rendered *renderedManifest, alias, namespace string) (*splicedManifest, error) {
 	sections, err := splitManifest(raw)
 	if err != nil {
 		return nil, unsafeManifest("%v", err)
@@ -211,7 +219,7 @@ func spliceManifest(raw []byte, rendered *renderedManifest, alias, namespace str
 			return nil, unsafeManifest("a sibling job would change")
 		}
 	}
-	return updated, nil
+	return &splicedManifest{File: updated, Original: sections[target]}, nil
 }
 
 // sameDefinition compares two parsed documents field for field.

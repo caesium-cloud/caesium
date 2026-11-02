@@ -459,8 +459,10 @@ F builds the second one as new work.
   the route trusts none of it alone. The job needs a credential that lists its
   namespace, a configured git source (with git sync on) that agrees on id,
   repository and ref, admits the namespace and scopes the path, and a manifest
-  that declares its alias in its namespace and has not changed since the synced
-  commit. The repository written to comes from the source's configuration. Only
+  that declares its alias in its namespace and has not changed since the commit
+  the proposal recorded. That commit is held on the action: a proposal is a whole
+  document, so a sync that changes the file before the approval must not be
+  reverted by it. The repository written to comes from the source's configuration. Only
   that document of the file changes: sibling jobs stay byte for byte, and the
   blob sha guards the write. The branch derives from the action id, so a repeat
   finds the same branch and pull request.
@@ -470,7 +472,11 @@ F builds the second one as new work.
   the same way: a job with provenance never falls back to a direct edit. The
   token goes only to the entry's API base URL, over no redirect, and is scrubbed
   from every error. The proposal records a preview of the route, from
-  configuration alone, so the approver sees the outcome before deciding.
+  configuration alone, so the approver sees the outcome before deciding. Every
+  diff compares the whole documents rather than `jobdiff`'s reduced spec, so an
+  env or mount edit cannot read as "no changes": the preview against the server's
+  copy of the job, the pull request against the file. The agent does not receive
+  the preview, which quotes the job's current definition.
 
 ### Declarative policy
 

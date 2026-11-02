@@ -1637,7 +1637,13 @@ precedent for it is warn-mode schema validation, which publishes
       The dry-run now runs `ValidateBatch`, so a manifest that would stall git sync
       once merged is refused on every route. A failed route leaves its branch and
       names it in `pr_branch`; the branch is `caesium/patch-<action id>`, so a repeat
-      converges. `ExecuteApproved` writes its terminal status on a context detached
+      converges. Review round 1 changed two things. Every surface now renders one
+      diff of the whole documents (`internal/jobdef/docdiff`), not the
+      reduced `JobSpec` comparison, so the action result's `diff` is text. The
+      proposal records its provenance as a baseline on the action, and the manifest
+      is held to the proposal's commit, not the one the job carries at execution.
+      The direct route has the same gap and still applies a stale proposal.
+      `ExecuteApproved` writes its terminal status on a context detached
       from the request. Only the patched document changes, so comments inside it are
       lost; a sibling's or a header's are kept. The Console shows the preview through
       the approval card's `diff` string and the result through the timeline's JSON;

@@ -719,6 +719,27 @@ func TestRepeatedExecutionOpensOnePullRequest(t *testing.T) {
 	require.Equal(t, 1, f.forge.requestCount("POST /repos/acme/jobs/pulls"))
 }
 
+// A repeat is held to the proposal's commit too: the first outcome replaced the
+// preview, and a sync can land between the two attempts.
+func TestRetryKeepsTheProposalsBaseline(t *testing.T) {
+	f := newRouteFixture(t, manifestFile)
+	f.forge.failNext("POST /repos/acme/jobs/git/refs", http.StatusBadGateway, "try later")
+
+	executed, first := f.approveAndExecute(t, patchJSON(t, patchedDefinition))
+	requireDegraded(t, f, first, degradeForgeError)
+	f.syncToHead(t, strings.Replace(manifestFile, "0 6 * * *", "0 7 * * *", 1))
+
+	require.NoError(t, f.db.Model(&models.AgentAction{}).Where("id = ?", executed.ID).
+		Update("status", models.AgentActionStatusApproved).Error)
+	retried, err := f.exec.ExecuteApproved(context.Background(), executed.ID)
+	require.NoError(t, err)
+	second := patchResult(t, retried)
+	require.Equal(t, routeEscalate, second["route"], "result: %v", second)
+	require.Equal(t, degradeManifestChanged, second["degrade"])
+	require.Zero(t, f.forge.requestCount("PUT "))
+	require.Empty(t, f.forge.pulls)
+}
+
 // TestRetryConvergesAfterThePullRequestCallFails: the branch and the commit stay
 // from the first attempt, the result says so, and a retry finishes without a
 // second write.
@@ -782,6 +803,110 @@ func TestAnExistingPullRequestAtOpenIsALookup(t *testing.T) {
 	require.Equal(t, routeGitPR, result["route"])
 	require.Equal(t, "https://forge.example/9", result["pr_url"])
 	require.Equal(t, true, result["pr_existing"])
+}
+
+// sync moves the job to headCommit, as a git sync does between a proposal and its
+// approval. A commit that changed the manifest changes it at the head too.
+func (f *routeFixture) syncToHead(t *testing.T, manifest string) {
+	t.Helper()
+	f.updateJob(t, "provenance_commit", headCommit)
+	f.forge.put(headCommit, testManifest, []byte(manifest))
+}
+
+// TestSyncBeforeApprovalIsNotReverted is the proposal's baseline guard. Git sync
+// imports a schedule change between the proposal and the approval, so the job,
+// the head and the file at the job's commit all agree on it. The proposal was a
+// whole document written before it. Writing that document would revert the
+// change, while the preview the human approved describes the older file.
+func TestSyncBeforeApprovalIsNotReverted(t *testing.T) {
+	f := newRouteFixture(t, manifestFile)
+	action := f.propose(t, patchJSON(t, patchedDefinition))
+	f.syncToHead(t, strings.Replace(manifestFile, "0 6 * * *", "0 7 * * *", 1))
+	approveAction(t, f.db, action.ID, "operator@example.com", "")
+
+	executed, err := f.exec.ExecuteApproved(context.Background(), action.ID)
+	require.NoError(t, err)
+	result := patchResult(t, executed)
+	requireDegraded(t, f, result, degradeManifestChanged)
+	require.Contains(t, result["reason"], syncedCommit, "the reason names the commit the patch was proposed against")
+	require.Contains(t, f.ops.escalate[0].summary, syncedCommit)
+	require.Zero(t, f.forge.requestCount("POST /repos/acme/jobs/git/refs"), "no branch is created")
+	require.Zero(t, f.forge.requestCount("PUT "))
+	require.Empty(t, f.forge.pulls)
+}
+
+// A new commit that leaves this manifest alone is no reason to refuse: the file
+// is the one the human reviewed, and every sync of a busy repository stamps its
+// jobs with a new commit. The preview, the result and the pull request all name
+// the proposal's commit.
+func TestSyncThatLeavesTheManifestAloneStillOpensAPullRequest(t *testing.T) {
+	f := newRouteFixture(t, manifestFile)
+	action := f.propose(t, patchJSON(t, patchedDefinition))
+	f.syncToHead(t, manifestFile)
+	approveAction(t, f.db, action.ID, "operator@example.com", "")
+
+	executed, err := f.exec.ExecuteApproved(context.Background(), action.ID)
+	require.NoError(t, err)
+	result := patchResult(t, executed)
+	require.Equal(t, routeGitPR, result["route"], "result: %v", result)
+	require.Equal(t, syncedCommit, result["baseline"].(map[string]any)["commit"])
+	body := openPull(t, f.forge)["body"].(string)
+	require.Contains(t, body, "baseline commit: "+syncedCommit)
+	require.NotContains(t, body, headCommit)
+}
+
+// A proposal with no baseline cannot prove it is not stale, so it never reaches
+// the forge, whatever made it miss one.
+func TestProposalWithoutABaselineFailsClosed(t *testing.T) {
+	for name, stored := range map[string]any{
+		"no result":      nil,
+		"no baseline":    `{"preview":true}`,
+		"empty commit":   `{"preview":true,"baseline":{"commit":""}}`,
+		"invalid commit": `{"preview":true,"baseline":{"commit":"main"}}`,
+		"unreadable":     `[]`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := newRouteFixture(t, manifestFile)
+			action := f.propose(t, patchJSON(t, patchedDefinition))
+			require.NoError(t, f.db.Model(&models.AgentAction{}).Where("id = ?", action.ID).Update("result", stored).Error)
+			approveAction(t, f.db, action.ID, "operator@example.com", "")
+
+			executed, err := f.exec.ExecuteApproved(context.Background(), action.ID)
+			require.NoError(t, err)
+			requireDegraded(t, f, patchResult(t, executed), degradeNoBaseline)
+			require.Zero(t, f.forge.hits(), "nothing reaches the forge")
+		})
+	}
+}
+
+// The baseline is the provenance the human reviewed, not only its commit.
+func TestBaselineAlsoHoldsTheManifestPathAndSource(t *testing.T) {
+	const moved = "pipelines/moved.job.yaml"
+	for name, change := range map[string][2]string{
+		"path":      {"provenance_path", moved},
+		"source id": {"provenance_source_id", "orders-source-2"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := newRouteFixture(t, manifestFile)
+			f.config.Sources = append(f.config.Sources, f.config.Sources[0])
+			f.config.Sources[1].SourceID = "orders-source-2"
+			f.config.Credentials[0].SourceID = ""
+			f.config.Credentials[0].Repo = f.forge.repoURL()
+			f.install()
+			f.forge.put(syncedCommit, moved, []byte(manifestFile))
+			f.forge.put(headCommit, moved, []byte(manifestFile))
+			action := f.propose(t, patchJSON(t, patchedDefinition))
+			f.updateJob(t, change[0], change[1])
+			approveAction(t, f.db, action.ID, "operator@example.com", "")
+
+			executed, err := f.exec.ExecuteApproved(context.Background(), action.ID)
+			require.NoError(t, err)
+			result := patchResult(t, executed)
+			requireDegraded(t, f, result, degradeManifestChanged)
+			require.Contains(t, result["reason"], "since this patch was proposed")
+			require.Zero(t, f.forge.hits())
+		})
+	}
 }
 
 // TestNewerManifestIsNotOverwritten: the file moved since the job was synced, so
@@ -961,6 +1086,11 @@ func TestPreviewShowsTheApproverTheRoute(t *testing.T) {
 	require.Equal(t, testManifest, preview["path"])
 	require.Equal(t, forge.BranchForAction(action.ID), preview["pr_branch"])
 	require.Contains(t, preview["diff"], "pull request against acme/jobs")
+	require.Contains(t, preview["diff"], "changed since commit "+syncedCommit)
+	require.Equal(t, map[string]any{
+		"source_id": "orders-source", "repo": f.forge.repoURL(), "ref": "main",
+		"commit": syncedCommit, "path": testManifest,
+	}, preview["baseline"])
 	require.Zero(t, f.forge.hits(), "a preview makes no forge call")
 	require.Len(t, f.ops.applyPatch, 1)
 	require.True(t, f.ops.applyPatch[0].dryRun)
@@ -977,6 +1107,24 @@ func TestPreviewShowsADegrade(t *testing.T) {
 	require.Equal(t, degradeNoCredential, preview["degrade"])
 	require.Contains(t, preview["diff"], "escalate")
 	require.NotContains(t, preview, "pr_branch")
+}
+
+// A degraded preview records the baseline too: a credential added before the
+// approval sends the patch to the forge, held to the commit the human reviewed.
+func TestDegradedPreviewStillRecordsTheBaseline(t *testing.T) {
+	f := newRouteFixture(t, manifestFile)
+	credentials := f.config.Credentials
+	f.config.Credentials = nil
+	f.install()
+	action := f.propose(t, patchJSON(t, patchedDefinition))
+	f.config.Credentials = credentials
+	f.install()
+	f.syncToHead(t, strings.Replace(manifestFile, "0 6 * * *", "0 7 * * *", 1))
+	approveAction(t, f.db, action.ID, "operator@example.com", "")
+
+	executed, err := f.exec.ExecuteApproved(context.Background(), action.ID)
+	require.NoError(t, err)
+	requireDegraded(t, f, patchResult(t, executed), degradeManifestChanged)
 }
 
 func TestPreviewShowsTheDirectRoute(t *testing.T) {
@@ -1031,6 +1179,228 @@ func TestPullRequestBodyCarriesTheEvidence(t *testing.T) {
 	require.Contains(t, body, "alias", "the rendered diff")
 }
 
+// richManifest holds the fields the reduced JobSpec leaves out, in one document.
+const richManifest = `apiVersion: v1
+kind: Job
+metadata:
+  alias: orders-daily
+trigger:
+  type: cron
+  configuration:
+    cron: "0 6 * * *"
+steps:
+  - name: load
+    image: busybox:1.36.1
+    command: ["true"]
+    env:
+      REGION: eu
+      STORE: secret://env/STORE_URL
+    mounts:
+      - type: bind
+        source: /data
+        target: /in
+    next: [publish]
+  - name: publish
+    image: busybox:1.36.1
+    command: ["true"]
+`
+
+// richEdits are edits only a comparison of the whole documents can see, alone and
+// with one the reduced JobSpec does see.
+var richEdits = []struct {
+	name     string
+	edit     func(string) string
+	expected []string
+}{
+	{
+		name:     "env only",
+		edit:     func(m string) string { return strings.Replace(m, "REGION: eu", "REGION: us", 1) },
+		expected: []string{"-", "REGION: eu", "+", "REGION: us"},
+	},
+	{
+		name:     "mount only",
+		edit:     func(m string) string { return strings.Replace(m, "target: /in", "target: /elsewhere", 1) },
+		expected: []string{"target: /in", "target: /elsewhere"},
+	},
+	{
+		name: "mixed",
+		edit: func(m string) string {
+			edited := strings.Replace(m, `command: ["true"]`, `command: ["sh", "-c", "exit 0"]`, 1)
+			return strings.Replace(edited, "target: /in", "target: /elsewhere", 1)
+		},
+		expected: []string{"exit 0", "target: /in", "target: /elsewhere"},
+	},
+	{
+		name:     "edge",
+		edit:     func(m string) string { return strings.Replace(m, "    next: [publish]\n", "", 1) },
+		expected: []string{"next:", "publish"},
+	},
+}
+
+// diffSection cuts the description's rendered diff out of the rest of the body.
+func diffSection(t *testing.T, body string) string {
+	t.Helper()
+	_, section, found := strings.Cut(body, "### Rendered diff")
+	require.True(t, found, "body: %s", body)
+	return section
+}
+
+// TestPullRequestBodyShowsEveryEdit: the description quotes the change the commit
+// makes, read from the file and its replacement, so an edit outside the reduced
+// JobSpec cannot read as "no changes". The result records the same diff.
+func TestPullRequestBodyShowsEveryEdit(t *testing.T) {
+	for _, tc := range richEdits {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newRouteFixture(t, richManifest)
+			// The render the server returned is not the source of the diff here: the
+			// file is, so a fake that reports no change must not suppress it.
+			f.ops.patchDiff = json.RawMessage(`{"alias":"orders-daily","empty":true}`)
+
+			_, result := f.approveAndExecute(t, patchJSON(t, tc.edit(richManifest)))
+			require.Equal(t, routeGitPR, result["route"], "result: %v", result)
+			body := diffSection(t, openPull(t, f.forge)["body"].(string))
+			require.NotContains(t, body, "no changes")
+			require.Contains(t, body, "--- current\n+++ proposed\n@@ ")
+			for _, expected := range tc.expected {
+				require.Contains(t, body, expected)
+				require.Contains(t, result["diff"], expected)
+			}
+		})
+	}
+}
+
+// The diff reads the manifest's own document, so a difference between the file
+// and the server's copy shows too.
+func TestPullRequestBodyComparesTheFileNotTheServersCopy(t *testing.T) {
+	f := newRouteFixture(t, strings.Replace(richManifest, "REGION: eu", "REGION: only-in-the-file", 1))
+	f.ops.patchDiff = json.RawMessage(`{"alias":"orders-daily","empty":false,"diff":"from the server's copy"}`)
+
+	_, result := f.approveAndExecute(t, patchJSON(t, richManifest))
+	require.Equal(t, routeGitPR, result["route"], "result: %v", result)
+	body := openPull(t, f.forge)["body"].(string)
+	require.Contains(t, body, "-        REGION: only-in-the-file")
+	require.NotContains(t, body, "from the server's copy")
+	require.Contains(t, result["diff"], "only-in-the-file")
+}
+
+// The description carries a value a credential-named key holds only as a mask,
+// and a reference as itself. The line stays, so the change still shows.
+func TestPullRequestBodyMasksCredentialValues(t *testing.T) {
+	f := newRouteFixture(t, richManifest)
+	proposed := strings.Replace(richManifest, "REGION: eu", "DB_PASSWORD: hunter2hunter2\n      REGION: eu", 1)
+
+	_, result := f.approveAndExecute(t, patchJSON(t, proposed))
+	require.Equal(t, routeGitPR, result["route"], "result: %v", result)
+	body := openPull(t, f.forge)["body"].(string)
+	require.Contains(t, body, "+        DB_PASSWORD: "+Redacted)
+	require.NotContains(t, body, "hunter2hunter2")
+	require.Contains(t, result["diff"], "hunter2hunter2", "the action row keeps what the incident's readers may read")
+}
+
+func TestPatchDiffTextOnlySaysNoChangesWhenTheRenderDoes(t *testing.T) {
+	definition := patchJSON(t, patchedDefinition)
+	for name, rendered := range map[string]string{
+		"no diff":           `{"alias":"x","empty":false}`,
+		"reduced diff only": `{"alias":"x","empty":false,"updates":[{"alias":"x","diff":"part of it"}]}`,
+		"not json":          `oops`,
+		"nothing":           ``,
+		"wrong type":        `{"empty":"yes"}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			text := patchDiffText(json.RawMessage(rendered), definition)
+			require.NotContains(t, text, "no changes")
+			require.Contains(t, text, "no diff could be produced")
+			require.Contains(t, text, "exit 0", "the whole proposal shows instead")
+		})
+	}
+	require.Equal(t, noPatchChanges, patchDiffText(json.RawMessage(`{"empty":true}`), definition))
+	require.Equal(t, "the diff", patchDiffText(json.RawMessage(`{"empty":false,"diff":"the diff"}`), definition))
+	require.Equal(t, "the diff", patchDiffText(json.RawMessage(`{"empty":true,"diff":"the diff"}`), definition), "text beats the flag")
+}
+
+func TestDocumentDiffTextFallsBackToTheProposal(t *testing.T) {
+	definition := patchJSON(t, patchedDefinition)
+	text := documentDiffText([]byte("a: [unterminated"), []byte("a: 1"), definition)
+	require.Contains(t, text, "no diff could be produced")
+	require.Contains(t, text, "exit 0")
+	require.Equal(t, noPatchChanges, documentDiffText([]byte("a: 1"), []byte("a: 1"), definition))
+}
+
+// With no diff to show, the approver reads the whole proposal, not a claim.
+func TestPreviewShowsTheProposalWhenNoDiffExists(t *testing.T) {
+	f := newRouteFixture(t, manifestFile)
+	preview := patchResult(t, f.propose(t, patchJSON(t, patchedDefinition)))
+	require.Contains(t, preview["diff"], "no diff could be produced")
+	require.Contains(t, preview["diff"], "exit 0")
+	require.NotContains(t, preview["diff"], "no changes")
+}
+
+// Every surface that carries a diff bounds it and says it did.
+func TestDiffIsBoundedOnEverySurface(t *testing.T) {
+	huge, err := json.Marshal(strings.Repeat("+ line\n", maxDiffBytes))
+	require.NoError(t, err)
+	const trailer = "truncated; the incident holds the full text"
+
+	f := newRouteFixture(t, manifestFile)
+	f.config.Credentials = nil
+	f.install()
+	f.ops.patchDiff = json.RawMessage(`{"alias":"orders-daily","empty":false,"diff":` + string(huge) + `}`)
+	action := f.propose(t, patchJSON(t, patchedDefinition))
+	preview := patchResult(t, action)["diff"].(string)
+	require.Less(t, len(preview), maxDiffBytes+len(trailer)+8)
+	require.True(t, strings.HasSuffix(preview, trailer))
+
+	approveAction(t, f.db, action.ID, "operator@example.com", "")
+	executed, err := f.exec.ExecuteApproved(context.Background(), action.ID)
+	require.NoError(t, err)
+	result := patchResult(t, executed)["diff"].(string)
+	require.Less(t, len(result), maxDiffBytes+len(trailer)+8)
+	require.True(t, strings.HasSuffix(result, trailer))
+	require.Len(t, f.ops.escalate, 1)
+	require.Less(t, len(f.ops.escalate[0].summary), maxDiffBytes+1024)
+	require.True(t, strings.HasSuffix(f.ops.escalate[0].summary, trailer))
+}
+
+// The escalation leaves the incident, so its copy of the diff is the outbound one.
+func TestEscalationMasksCredentialValues(t *testing.T) {
+	f := newRouteFixture(t, manifestFile)
+	f.config.Credentials = nil
+	f.install()
+	encoded, err := json.Marshal("-        API_TOKEN: oldvalue\n+        API_TOKEN: newvalue\n         STORE: secret://env/STORE_URL\n" +
+		"+        URL: https://example.com/" + forgeTestToken)
+	require.NoError(t, err)
+	f.ops.patchDiff = json.RawMessage(`{"alias":"orders-daily","empty":false,"diff":` + string(encoded) + `}`)
+
+	_, result := f.approveAndExecute(t, patchJSON(t, patchedDefinition))
+	require.Equal(t, routeEscalate, result["route"])
+	summary := f.ops.escalate[0].summary
+	require.Contains(t, summary, "-        API_TOKEN: "+Redacted)
+	require.Contains(t, summary, "+        API_TOKEN: "+Redacted)
+	require.NotContains(t, summary, "oldvalue")
+	require.NotContains(t, summary, "newvalue")
+	require.NotContains(t, summary, forgeTestToken)
+	require.Contains(t, summary, "STORE: secret://env/STORE_URL", "a reference names a secret without holding it")
+	require.Contains(t, result["diff"], "newvalue", "the action row keeps what the incident's readers may read")
+}
+
+func TestOutboundDiffMasksByKey(t *testing.T) {
+	for line, want := range map[string]string{
+		"+      PASSWORD: abc":                 "+      PASSWORD: " + Redacted,
+		"-      db_passwd: abc":                "-      db_passwd: " + Redacted,
+		"       AWS_SECRET_ACCESS_KEY: abc":    "       AWS_SECRET_ACCESS_KEY: " + Redacted,
+		"+    secret: abc":                     "+    secret: " + Redacted,
+		"+        Authorization: Bearer abc":   "+        Authorization: " + Redacted,
+		"+  - api-key: abc":                    "+  - api-key: " + Redacted,
+		"+      TOKEN: secret://env/TOKEN":     "+      TOKEN: secret://env/TOKEN",
+		"+      TOKEN: \"secret://env/TOKEN\"": "+      TOKEN: \"secret://env/TOKEN\"",
+		"+      REGION: eu":                    "+      REGION: eu",
+		"+    image: busybox:1.36.1":           "+    image: busybox:1.36.1",
+		"@@ -1,3 +1,3 @@":                      "@@ -1,3 +1,3 @@",
+	} {
+		require.Equal(t, want, outboundDiff(line), line)
+	}
+}
+
 var fenceLine = regexp.MustCompile("^`{3,}$")
 
 // outsideFences returns the body's text that a forge would render as Markdown.
@@ -1061,14 +1431,19 @@ func TestPullRequestBodyIsSafeForUntrustedValues(t *testing.T) {
 		"class":    string(ClassDataQualityHold),
 		"evidence": `{"dataset":` + string(encoded) + `,"reason":` + string(encoded) + `,"violations":[{"metric":` + string(encoded) + `}]}`,
 	}).Error)
-	f.ops.patchDiff = json.RawMessage(`{"alias":"x","empty":false,"updates":[{"alias":"x","diff":` + string(encoded) + `}]}`)
+	definition, err := schema.Parse([]byte(patchedDefinition))
+	require.NoError(t, err)
+	definition.Steps[0].Command = []string{"sh", "-c", "echo keep; " + hostile}
+	patch, err := json.Marshal(definition)
+	require.NoError(t, err)
 
-	_, result := f.approveAndExecute(t, patchJSON(t, patchedDefinition))
+	_, result := f.approveAndExecute(t, patch)
 	require.Equal(t, routeGitPR, result["route"])
 
 	pull := openPull(t, f.forge)
 	body := pull["body"].(string)
 	require.Contains(t, body, "@acme/owners", "the value is shown")
+	require.Contains(t, body, "echo keep", "the value reaches the diff")
 	rendered := outsideFences(body)
 	for _, marker := range []string{"@", "Injected", "http://", "#1", "![", "evil"} {
 		require.NotContains(t, rendered, marker)
@@ -1097,21 +1472,24 @@ func TestBoundedSectionTruncatesAndScrubs(t *testing.T) {
 func TestSpliceKeepsSiblingBytes(t *testing.T) {
 	rendered, err := renderManifest(patchJSON(t, patchedDefinition))
 	require.NoError(t, err)
-	updated, err := spliceManifest([]byte(manifestFile), rendered, testAlias, models.DefaultNamespace)
+	spliced, err := spliceManifest([]byte(manifestFile), rendered, testAlias, models.DefaultNamespace)
 	require.NoError(t, err)
 
 	sibling := manifestFile[strings.LastIndex(manifestFile, "---\n"):]
-	require.True(t, strings.HasSuffix(string(updated), sibling))
-	require.True(t, strings.HasPrefix(string(updated), "# Owned by data-eng.\n---\n# The daily rollup.\n"))
+	require.True(t, strings.HasSuffix(string(spliced.File), sibling))
+	require.True(t, strings.HasPrefix(string(spliced.File), "# Owned by data-eng.\n---\n# The daily rollup.\n"))
+	require.Contains(t, string(spliced.Original), "alias: orders-daily")
+	require.Contains(t, string(spliced.Original), `command: ["true"]`, "the job's document as the file held it")
+	require.NotContains(t, string(spliced.Original), "orders-hourly")
 }
 
 func TestSplicePatchesASingleDocumentFile(t *testing.T) {
 	file := strings.TrimPrefix(manifestFile[:strings.LastIndex(manifestFile, "---\n")], "# Owned by data-eng.\n---\n")
 	rendered, err := renderManifest(patchJSON(t, patchedDefinition))
 	require.NoError(t, err)
-	updated, err := spliceManifest([]byte(file), rendered, testAlias, models.DefaultNamespace)
+	spliced, err := spliceManifest([]byte(file), rendered, testAlias, models.DefaultNamespace)
 	require.NoError(t, err)
-	defs, err := decodeManifest(updated)
+	defs, err := decodeManifest(spliced.File)
 	require.NoError(t, err)
 	require.Len(t, defs, 1)
 	require.Equal(t, []string{"sh", "-c", "exit 0"}, defs[0].Steps[0].Command)
@@ -1121,9 +1499,9 @@ func TestSpliceHandlesCRLFMarkers(t *testing.T) {
 	file := strings.ReplaceAll(manifestFile, "\n", "\r\n")
 	rendered, err := renderManifest(patchJSON(t, patchedDefinition))
 	require.NoError(t, err)
-	updated, err := spliceManifest([]byte(file), rendered, testAlias, models.DefaultNamespace)
+	spliced, err := spliceManifest([]byte(file), rendered, testAlias, models.DefaultNamespace)
 	require.NoError(t, err)
-	require.Contains(t, string(updated), "alias: orders-hourly  # keep this comment\r\n")
+	require.Contains(t, string(spliced.File), "alias: orders-hourly  # keep this comment\r\n")
 }
 
 // TestSpliceAcceptsANamespaceWrittenOutOrDefaulted: a manifest that omits the
