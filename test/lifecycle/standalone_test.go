@@ -1556,36 +1556,20 @@ func TestLifecycleUpgradeToCandidate(t *testing.T) {
 				"the behavioural cross-check of build identity failed (features: %v)", matrix.Previous.Release, features)
 	})
 
-	// Retained in-flight work: recorded, not judged. A run that was executing
-	// when the previous release stopped is not finalized by the candidate — local
-	// execution mode has no restart recovery — so its post-upgrade state is
-	// evidence about retained state, not a pass/fail contract.
-	func() {
-		start := time.Now()
-		got, err := c.run(ctx, fx.InFlightRun.JobID, fx.InFlightRun.ID)
-		if err != nil {
-			blockf(t, "recorded-in-flight-run-after-upgrade",
-				"the run that was in flight at shutdown (%s) is not readable after the upgrade: %v",
-				fx.InFlightRun.ID, err)
+	// Retained in-flight work. The previous release wrote no driver heartbeat
+	// and its process is gone, so the candidate must settle the run by itself,
+	// without re-executing the task whose container the stop may have left.
+	runCase(t, "in-flight-run-finalized-after-upgrade", func(t *testing.T) {
+		got, err := c.awaitRunStatus(ctx, fx.InFlightRun.JobID, fx.InFlightRun.ID,
+			func(r apiRun) bool { return isTerminal(r.Status) }, 2*time.Minute)
+		require.NoErrorf(t, err, "the run in flight at shutdown (%s) never reached an outcome on the candidate", fx.InFlightRun.ID)
+		require.Equalf(t, "failed", got.Status, "run %s has no evidence of success (error %q)", got.ID, got.Error)
+		require.Containsf(t, got.Error, "stopped before it finished", "run %s does not say what happened", got.ID)
+		require.Lenf(t, got.Tasks, len(fx.InFlightRun.Tasks), "run %s changed its task rows", got.ID)
+		for _, task := range got.Tasks {
+			require.Equalf(t, "failed", task.Status, "task %s of run %s", task.ID, got.ID)
 		}
-		writeCase(t, caseRecord{
-			Name:            "recorded-in-flight-run-after-upgrade",
-			Status:          statusRecorded,
-			DurationSeconds: time.Since(start).Seconds(),
-			Detail: fmt.Sprintf(
-				"run %s was %q when the previous release stopped and is %q on the candidate (error %q); "+
-					"nothing in local execution mode finalizes a run whose process exited",
-				got.ID, fx.InFlightRun.Status, got.Status, got.Error),
-			Observations: map[string]any{
-				"run_id":                got.ID,
-				"status_before_restart": fx.InFlightRun.Status,
-				"status_after_upgrade":  got.Status,
-				"task_statuses_before":  fx.InFlightRun.Tasks,
-				"task_row_count_after":  len(got.Tasks),
-				"no_expectation_set":    true,
-			},
-		})
-	}()
+	})
 }
 
 func jobIDFor(fx fixture, alias string) string {
@@ -1725,12 +1709,10 @@ func TestLifecycleCandidateAddressChange(t *testing.T) {
 			require.Equal(t, job.ID, id)
 		}
 
-		// The in-flight run is NOT asserted to have any particular status: local
-		// execution mode has no restart recovery, so it can legitimately still be
-		// "running" after a server stop (#553), and now it has also survived a
-		// second restart at a different node address. What must hold regardless
-		// of outcome is that the run and its recorded task rows are still
-		// readable and identifiable — nothing about the address change may make
+		// Its outcome is judged by in-flight-run-finalized-after-upgrade. What
+		// this asserts is that it survived a second restart at a different node
+		// address: the run and its recorded task rows are still readable and
+		// identifiable, because nothing about the address change may make
 		// pre-upgrade state unreachable.
 		inflight, err := c.run(ctx, fx.InFlightRun.JobID, fx.InFlightRun.ID)
 		require.NoErrorf(t, err, "the in-flight run %s is not readable after the address change", fx.InFlightRun.ID)
@@ -1745,8 +1727,7 @@ func TestLifecycleCandidateAddressChange(t *testing.T) {
 		require.ElementsMatchf(t, wantTaskIDs, gotTaskIDs,
 			"the in-flight run %s's recorded task identities changed across the address change (before: %v, after: %v)",
 			fx.InFlightRun.ID, wantTaskIDs, gotTaskIDs)
-		t.Logf("in-flight run %s is %q after the address change (no outcome expected; see #553)",
-			inflight.ID, inflight.Status)
+		t.Logf("in-flight run %s is %q after the address change", inflight.ID, inflight.Status)
 
 		writeJSON(t, filepath.Join("observations", "readdress.json"), map[string]any{
 			"expected_address":       want,
@@ -1792,8 +1773,7 @@ type probeRecord struct {
 	IdentitiesMissing []string       `json:"identities_missing"`
 	// IdentitiesChanged lists a job or task UUID that resolved to something
 	// OTHER than what the fixture recorded — never a run's status, which is
-	// explicitly not judged here (the in-flight run in particular has no
-	// expected outcome; see TestLifecycleTransitionOutcomes). An empty
+	// explicitly not judged here. An empty
 	// IdentitiesMissing is not by itself proof every identity read back
 	// correctly; this is the field that would catch a UUID silently changing
 	// underneath an unsupported transition.
@@ -1884,8 +1864,7 @@ func TestLifecycleProbe(t *testing.T) {
 			// F1 defines the rollback/shard-count outcomes as "record whether
 			// it starts and whether EVERY pre-upgrade identity reads back" —
 			// all four runs the fixture recorded, not just the two terminal
-			// history ones. The in-flight run's STATUS is still never judged
-			// (#553); only its job/task UUIDs are compared here.
+			// history ones. Only job/task UUIDs are compared here, never status.
 			for _, label := range []string{"succeeded_run", "failed_run", "predecessor_run", "in_flight_run"} {
 				var recorded runFixture
 				switch label {

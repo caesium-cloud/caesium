@@ -108,6 +108,9 @@ var retryCmd = &cobra.Command{
 		}
 
 		store := runstorage.Default()
+		// This process is the run's driver, so it owes the same heartbeat a
+		// server does, or a server sharing this database recovers the run.
+		job.StartRunDriverHeartbeat(ctx, store, env.Variables().RunLeaseTTL)
 		_, err = startLocalWholeRunRetry(ctx, j, runID, runEntry, store.RetryFromFailure, store.CompleteIfActive, launchLocalWholeRunRetry)
 		if err != nil {
 			return fmt.Errorf("failed to retry run: %w", err)

@@ -44,6 +44,19 @@ KEY_RE = re.compile(r"csk_[A-Za-z0-9_-]+")
 DIGEST_RE = re.compile(r"[0-9a-f]{64}")
 UUID_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 MAX_PROTOCOL_LINE = 64 * 1024
+# The journey server's run lease, pinned rather than inherited from the binary's
+# default because every recovery bound below is derived from it.
+RUN_LEASE_TTL_SECONDS = 30
+# Recovery's first sweep sees the run a beat (a third of a TTL) after boot, the
+# heartbeat must then stand unchanged for a TTL, and the mark for two beats.
+RUN_RECOVERY_FLOOR_SECONDS = 2 * RUN_LEASE_TTL_SECONDS
+# Each of those two waits can slip one more beat on tick alignment, which is 8/3
+# of a TTL from the sweeper's start. The rest is boot time and a loaded CI host.
+RUN_RECOVERY_CEILING_SECONDS = 4 * RUN_LEASE_TTL_SECONDS
+# run.ErrRunDriverLost, persisted verbatim on the run and its tasks.
+RUN_DRIVER_LOST_ERROR = ("the server driving this run stopped before it finished; "
+                         "its unfinished tasks were not re-executed, and a container one of them started may still be running")
+TRIGGER_SKIPPED_LOG = "trigger start skipped: the job already has a run in flight"
 COUNT_KEYS = ("oidc_users", "saml_users", "oidc_sessions", "saml_sessions", "assertions")
 EXPECTED_CHECKS = (
     "readiness",
@@ -1414,6 +1427,7 @@ class Collector:
             "CAESIUM_DATABASE_PATH": "/var/lib/caesium/dqlite",
             "DOCKER_HOST": "unix:///var/run/docker.sock",
             "CAESIUM_LOG_LEVEL": "info",
+            "CAESIUM_RUN_LEASE_TTL": f"{RUN_LEASE_TTL_SECONDS}s",
             "GOCOVERDIR": "/var/lib/caesium/coverage",
         }
 
@@ -1756,8 +1770,9 @@ class Collector:
                     "initial_task_status": "running",
                     "hold_strategy": "read-only-host-release-marker",
                     "hold_command_sha256": hashlib.sha256(command.encode()).hexdigest(),
-                    "resumption_mode": "explicit-public-http-trigger-existing-run",
-                    "resumption_path": "/hooks/coverage-shutdown-" + self.run_id,
+                    "recovery_mode": "lost-driver-failure-then-explicit-cli-retry",
+                    "inflight_trigger_path": "/hooks/coverage-shutdown-" + self.run_id,
+                    "run_lease_ttl_seconds": RUN_LEASE_TTL_SECONDS,
                     "control_mount_source_sha256": self.shutdown_control_mount_source_sha256,
                 }
                 break
@@ -1772,7 +1787,7 @@ class Collector:
 
     def shutdown_command(self) -> str:
         return (f"while [ ! -e /caesium-shutdown-control/release ]; do sleep 0.1; done; "
-                f"echo '##caesium::output {{\"shutdown\":\"resumed-{self.run_id}\"}}'")
+                f"echo '##caesium::output {{\"shutdown\":\"retried-{self.run_id}\"}}'")
 
     def shutdown_release_marker_absent(self) -> bool:
         path = self.shutdown_release_path
@@ -1786,11 +1801,13 @@ class Collector:
         return True
 
     def release_shutdown_task(self) -> dict[str, Any]:
-        proof = self.shutdown_job.get("resumption_runtime_running") if isinstance(self.shutdown_job, dict) else None
-        webhook = self.shutdown_job.get("resumption_webhook") if isinstance(self.shutdown_job, dict) else None
+        proof = self.shutdown_job.get("retry_runtime_running") if isinstance(self.shutdown_job, dict) else None
+        recovery = self.shutdown_job.get("recovery") if isinstance(self.shutdown_job, dict) else None
+        retry = self.shutdown_job.get("retry_cli") if isinstance(self.shutdown_job, dict) else None
         native_proof = proof.get("native") if isinstance(proof, dict) else None
         expected_command_sha = hashlib.sha256(self.shutdown_command().encode()).hexdigest()
-        if (not isinstance(webhook, dict) or webhook.get("status") != 202
+        if (not isinstance(recovery, dict) or recovery.get("run_status") != "failed"
+                or not isinstance(retry, dict) or retry.get("accepted") is not True
                 or not isinstance(proof, dict) or proof.get("release_marker_absent") is not True
                 or proof.get("running") is not True
                 or proof.get("runtime_id") == self.shutdown_job.get("runtime_id")
@@ -1810,14 +1827,15 @@ class Collector:
                 or native_proof.get("control_mount_destination") != "/caesium-shutdown-control"
                 or native_proof.get("control_mount_read_only") is not True
                 or native_proof.get("running") is not True):
-            raise JourneyError("shutdown task cannot be released before the accepted webhook and replacement runtime proof")
+            raise JourneyError("shutdown task cannot be released before recovery, the accepted retry and replacement runtime proof")
         server_generations = getattr(self, "server_generations", [])
         if not server_generations:
             raise JourneyError("shutdown task release lacks generation-1 shutdown evidence")
         original_finish = self.timestamp(server_generations[0].get("finished_at"))
+        recovered = self.timestamp(recovery.get("completed_at"))
         task_started = self.timestamp(proof.get("task_started_at"))
         observed = self.timestamp(proof.get("observed_at"))
-        if task_started <= original_finish or task_started > observed:
+        if recovered <= original_finish or task_started <= recovered or task_started > observed:
             raise JourneyError("shutdown task release proof has invalid replacement runtime timing")
         if not self.shutdown_release_marker_absent():
             raise JourneyError("shutdown task release marker already exists")
@@ -1958,262 +1976,61 @@ class Collector:
         if is_original_runtime:
             self.shutdown_job["native_runtime_removed"] = True
         else:
-            self.shutdown_job.setdefault("resumption_runtime_removed_ids", []).append(runtime_id)
+            self.shutdown_job.setdefault("retry_runtime_removed_ids", []).append(runtime_id)
         self.shutdown_job.setdefault("native_runtime_absent_ids_by_generation", {})[str(generation)] = runtime_id
         if generation not in self.native_runtime_absent_generations:
             self.native_runtime_absent_generations.append(generation)
 
-    def verify_shutdown_task_resumption_running(self, server_id: str) -> dict[str, Any]:
-        """Hold the one-shot release until Gen2 is executing the original TaskRun."""
-        if self.shutdown_job is None or self.shutdown_job.get("resumption_webhook", {}).get("status") != 202:
-            raise JourneyError("explicit shutdown resumption webhook was not accepted")
-        original_finish = self.timestamp(self.server_generations[0].get("finished_at"))
-        path = f"/v1/jobs/{self.shutdown_job['job_id']}/runs/{self.shutdown_job['run_id']}"
-        deadline = time.monotonic() + 90
-        pending_replacement_runtime: str | None = None
-        while time.monotonic() < deadline:
-            if not self.shutdown_release_marker_absent():
-                raise JourneyError("shutdown release marker appeared before replacement runtime observation")
-            record = self.api_json(server_id, path)
-            tasks = record.get("tasks") if isinstance(record, dict) else None
-            if not isinstance(record, dict) or record.get("id") != self.shutdown_job["run_id"]:
-                raise JourneyError("run identity changed before replacement runtime observation")
-            if not isinstance(tasks, list) or len(tasks) != 1 or not isinstance(tasks[0], dict):
-                raise JourneyError("replacement runtime observation lacks the exact task catalog row")
-            task = tasks[0]
-            instances = self.api_json(
-                server_id,
-                f"/v1/jobs/{self.shutdown_job['job_id']}/runs/{self.shutdown_job['run_id']}/tasks/{self.shutdown_job['task_id']}/partitions?limit=2",
-            )
-            rows = instances.get("partitions") if isinstance(instances, dict) else None
-            if (not isinstance(instances, dict) or instances.get("total") != 1 or not isinstance(rows, list)
-                    or len(rows) != 1 or not isinstance(rows[0], dict)):
-                raise JourneyError("replacement runtime observation lacks the exact TaskRun row")
-            instance = rows[0]
-            if (task.get("task_id") != self.shutdown_job["task_id"]
-                    or instance.get("task_run_id") != self.shutdown_job["task_run_id"]
-                    or instance.get("attempt") != self.shutdown_job["attempt_before_signal"]):
-                raise JourneyError("explicit resumption changed the original task or TaskRun identity")
-            if record.get("status") == "failed" or task.get("status") == "failed" or instance.get("status") == "failed":
-                raise JourneyError("explicitly resumed shutdown run/task failed before release")
-            if record.get("status") == "running" and task.get("status") == "running" and instance.get("status") == "running":
-                task_runtime = task.get("runtime_id")
-                row_runtime = instance.get("runtime_id")
-                if task_runtime != row_runtime:
-                    coherent_transition = (
-                        isinstance(task_runtime, str) and re.fullmatch(r"[0-9a-f]{64}", task_runtime)
-                        and isinstance(row_runtime, str) and re.fullmatch(r"[0-9a-f]{64}", row_runtime)
-                        and self.shutdown_job["runtime_id"] in (task_runtime, row_runtime)
-                        and task_runtime != row_runtime
-                        and not record.get("completed_at") and not task.get("completed_at")
-                        and not instance.get("completed_at")
-                        and record.get("error") in (None, "") and task.get("error") in (None, "")
-                        and instance.get("error") in (None, "") and task.get("output") in (None, {})
-                    )
-                    if coherent_transition:
-                        # Run detail and partitions are separate reads. Allow
-                        # only a split snapshot straddling the known old→new
-                        # runtime update; the next poll must be coherent.
-                        replacement_runtime = row_runtime if task_runtime == self.shutdown_job["runtime_id"] else task_runtime
-                        if (pending_replacement_runtime is not None
-                                and pending_replacement_runtime != replacement_runtime):
-                            raise JourneyError("split runtime snapshot changed its replacement identity")
-                        pending_replacement_runtime = replacement_runtime
-                        time.sleep(0.25)
-                        continue
-                    raise JourneyError("run detail and TaskRun runtime identities diverged outside the owned transition")
-                runtime = instance.get("runtime_id")
-                if (not isinstance(runtime, str) or not re.fullmatch(r"[0-9a-f]{64}", runtime)
-                        or task.get("runtime_id") != runtime
-                        or record.get("completed_at") or task.get("completed_at") or instance.get("completed_at")
-                        or record.get("error") not in (None, "") or task.get("error") not in (None, "")
-                        or instance.get("error") not in (None, "")
-                        or task.get("output") not in (None, {})):
-                    raise JourneyError("resumption state is not the exact active original TaskRun")
-                if runtime == self.shutdown_job["runtime_id"]:
-                    # The explicit trigger can be accepted before its local
-                    # dispatcher has reset/restarted the retained row. Permit
-                    # only that exact unchanged running identity while the
-                    # marker remains absent, then keep polling for a new runtime.
-                    if (record.get("id") != self.shutdown_job["run_id"]
-                            or task.get("task_id") != self.shutdown_job["task_id"]
-                            or instance.get("task_run_id") != self.shutdown_job["task_run_id"]
-                            or instance.get("attempt") != self.shutdown_job["attempt_before_signal"]):
-                        raise JourneyError("pre-dispatch retained runtime changed the original durable identity")
-                    time.sleep(0.25)
-                    continue
-                if pending_replacement_runtime is not None and runtime != pending_replacement_runtime:
-                    raise JourneyError("coherent run detail changed the split-snapshot replacement identity")
-                pending_replacement_runtime = runtime
-                started_at = self.timestamp(instance.get("started_at"))
-                observed_at = datetime.datetime.now(datetime.timezone.utc)
-                if started_at <= original_finish or started_at > observed_at:
-                    raise JourneyError("replacement TaskRun start time is not after shutdown and before observation")
-                native = self.native_running(runtime)
-                if (native.get("runtime_id") != runtime or native.get("running") is not True
-                        or native.get("run_id") != self.shutdown_job["run_id"]
-                        or native.get("task_id") != self.shutdown_job["task_id"]
-                        or native.get("docker_image_id") != self.task_docker_image_id
-                        or native.get("task_config_id") != self.task_image_id
-                        or native.get("command_sha256") != hashlib.sha256(self.shutdown_command().encode()).hexdigest()
-                        or native.get("control_mount_source_sha256") != self.shutdown_job.get("control_mount_source_sha256")
-                        or native.get("control_mount_destination") != "/caesium-shutdown-control"
-                        or native.get("control_mount_read_only") is not True):
-                    raise JourneyError("replacement native runtime is not positively observed running")
-                if not self.shutdown_release_marker_absent():
-                    raise JourneyError("shutdown release marker appeared during replacement runtime observation")
-                receipt = {
-                    "runtime_id": runtime,
-                    "task_run_id": instance["task_run_id"],
-                    "attempt": instance["attempt"],
-                    "task_started_at": instance["started_at"],
-                    "observed_at": observed_at.isoformat().replace("+00:00", "Z"),
-                    "release_marker_absent": True,
-                    "running": True,
-                    "native": native,
-                }
-                self.shutdown_job["resumption_runtime_running"] = receipt
-                return receipt
-            if record.get("status") in ("succeeded", "cancelled", "skipped") or task.get("status") in ("succeeded", "cancelled", "skipped") or instance.get("status") in ("succeeded", "cancelled", "skipped"):
-                raise JourneyError("resumed shutdown TaskRun terminated before the release marker")
-            time.sleep(0.25)
-        raise JourneyError("Gen2 did not start the original TaskRun on a new native runtime before timeout")
-
-    def verify_shutdown_job_explicitly_resumed(self, server_id: str) -> None:
-        if self.shutdown_job is None or 1 not in self.native_runtime_absent_generations:
-            raise JourneyError("shutdown resumption was not preceded by generation-1 native runtime cleanup")
-        self.verify_shutdown_job_retained(server_id)
-        self.shutdown_job["resumption_webhook"] = self.fire_shutdown_webhook(server_id)
-        resumption_running = self.verify_shutdown_task_resumption_running(server_id)
-        self.shutdown_job["release_marker"] = self.release_shutdown_task()
-        path = f"/v1/jobs/{self.shutdown_job['job_id']}/runs/{self.shutdown_job['run_id']}"
-        deadline = time.monotonic() + 90
-        while time.monotonic() < deadline:
-            record = self.api_json(server_id, path)
-            tasks = record.get("tasks") if isinstance(record, dict) else None
-            if not isinstance(record, dict) or record.get("id") != self.shutdown_job["run_id"]:
-                raise JourneyError("run identity changed across server restart")
-            if not isinstance(tasks, list) or len(tasks) != 1 or not isinstance(tasks[0], dict):
-                raise JourneyError("same-database restart did not expose the exact shutdown task")
-            task = tasks[0]
-            if task.get("task_id") != self.shutdown_job["task_id"]:
-                raise JourneyError("task catalog identity changed across server restart")
-            instances = self.api_json(
-                server_id,
-                f"/v1/jobs/{self.shutdown_job['job_id']}/runs/{self.shutdown_job['run_id']}/tasks/{self.shutdown_job['task_id']}/partitions?limit=2",
-            )
-            rows = instances.get("partitions") if isinstance(instances, dict) else None
-            if (
-                not isinstance(instances, dict)
-                or
-                instances.get("total") != 1
-                or not isinstance(rows, list)
-                or len(rows) != 1
-                or not isinstance(rows[0], dict)
-                or rows[0].get("task_run_id") != self.shutdown_job["task_run_id"]
-                or not isinstance(rows[0].get("attempt"), int)
-                or isinstance(rows[0].get("attempt"), bool)
-                or rows[0].get("attempt") != self.shutdown_job["attempt_before_signal"]
-            ):
-                raise JourneyError("same-database restart did not preserve the concrete TaskRun identity and attempt")
-            instance = rows[0]
-            attempt = instance.get("attempt")
-            if not isinstance(attempt, int) or isinstance(attempt, bool) or attempt != self.shutdown_job["attempt_before_signal"]:
-                raise JourneyError("explicit local resumption changed the original TaskRun attempt")
-            if record.get("status") == "failed" or task.get("status") == "failed" or instance.get("status") == "failed":
-                raise JourneyError("explicitly resumed shutdown run/task failed instead of completing")
-            if record.get("status") == "succeeded" and task.get("status") == "succeeded" and instance.get("status") == "succeeded":
-                runtime_id = instance.get("runtime_id")
-                if not isinstance(runtime_id, str) or not re.fullmatch(r"[0-9a-f]{64}", runtime_id) or runtime_id == self.shutdown_job["runtime_id"]:
-                    raise JourneyError("explicit webhook resumption did not execute the same TaskRun with a new native runtime identity")
-                if runtime_id != resumption_running.get("runtime_id"):
-                    raise JourneyError("completed TaskRun runtime differs from the positively observed replacement runtime")
-                if (task.get("runtime_id") != runtime_id or record.get("error") not in (None, "")
-                        or task.get("error") not in (None, "") or instance.get("error") not in (None, "")
-                        or not record.get("completed_at") or not instance.get("completed_at") or not instance.get("started_at")
-                        or task.get("output") != {"shutdown": "resumed-" + self.run_id}):
-                    raise JourneyError("explicitly resumed run/task lacks matching native identity or timestamps")
-                original_finish = self.timestamp(self.server_generations[0].get("finished_at"))
-                task_started = self.timestamp(instance["started_at"])
-                run_completed = self.timestamp(record["completed_at"])
-                task_completed = self.timestamp(instance["completed_at"])
-                runtime_observed = self.timestamp(resumption_running["observed_at"])
-                observed_task_started = self.timestamp(resumption_running["task_started_at"])
-                marker_written = self.timestamp(self.shutdown_job["release_marker"]["written_at"])
-                if (task_started <= original_finish or run_completed <= max(original_finish, marker_written)
-                        or task_completed <= max(task_started, marker_written)
-                        or task_started < observed_task_started
-                        or marker_written <= runtime_observed):
-                    raise JourneyError("same TaskRun did not execute and complete after generation-1 shutdown and explicit webhook resumption")
-                self.verify_runtime_absent(2, runtime_id)
-                self.shutdown_job.update(
-                    final_run_status=record["status"],
-                    final_task_status=task["status"],
-                    final_task_run_id=instance["task_run_id"],
-                    final_attempt=attempt,
-                    final_task_run_status=instance["status"],
-                    final_runtime_id=runtime_id,
-                    run_completed_at=record["completed_at"],
-                    task_started_at=instance["started_at"],
-                    task_completed_at=instance["completed_at"],
-                    release_marker_written_at=self.shutdown_job["release_marker"]["written_at"],
-                    release_marker_after_running_observation=True,
-                    resumption_runtime_absent_after_completion=True,
-                    resumption_output=task["output"],
-                    verified_after_generation=2,
-                )
-                return
-            if record.get("status") in ("succeeded", "cancelled", "skipped") or task.get("status") in ("succeeded", "cancelled", "skipped") or instance.get("status") in ("succeeded", "cancelled", "skipped"):
-                raise JourneyError("persisted shutdown run/task has an unexpected terminal status")
-            time.sleep(0.25)
-        raise JourneyError("explicit webhook resumption did not complete the original shutdown run/task")
-
-    def verify_shutdown_job_retained(self, server_id: str) -> None:
-        """Prove Gen2 retained the original active rows before explicit HTTP resumption."""
+    def shutdown_rows(self, server_id: str) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+        """Read the run, task and TaskRun rows, refusing any change of identity."""
         if self.shutdown_job is None:
             raise JourneyError("shutdown job identity is unavailable after restart")
-        record = self.api_json(
-            server_id, f"/v1/jobs/{self.shutdown_job['job_id']}/runs/{self.shutdown_job['run_id']}")
+        path = f"/v1/jobs/{self.shutdown_job['job_id']}/runs/{self.shutdown_job['run_id']}"
+        record = self.api_json(server_id, path)
         tasks = record.get("tasks") if isinstance(record, dict) else None
-        if (not isinstance(record, dict) or record.get("id") != self.shutdown_job["run_id"]
-                or record.get("status") != "running" or not isinstance(tasks, list) or len(tasks) != 1
-                or not isinstance(tasks[0], dict) or tasks[0].get("task_id") != self.shutdown_job["task_id"]
-                or tasks[0].get("status") != "running" or tasks[0].get("runtime_id") != self.shutdown_job["runtime_id"]):
-            raise JourneyError("generation 2 did not retain the exact durable running run/task before resumption")
-        instances = self.api_json(
-            server_id,
-            f"/v1/jobs/{self.shutdown_job['job_id']}/runs/{self.shutdown_job['run_id']}/tasks/{self.shutdown_job['task_id']}/partitions?limit=2",
-        )
+        if not isinstance(record, dict) or record.get("id") != self.shutdown_job["run_id"]:
+            raise JourneyError("run identity changed across server restart")
+        if (not isinstance(tasks, list) or len(tasks) != 1 or not isinstance(tasks[0], dict)
+                or tasks[0].get("task_id") != self.shutdown_job["task_id"]):
+            raise JourneyError("same-database restart did not expose the exact shutdown task")
+        instances = self.api_json(server_id, f"{path}/tasks/{self.shutdown_job['task_id']}/partitions?limit=2")
         rows = instances.get("partitions") if isinstance(instances, dict) else None
         if (not isinstance(instances, dict) or instances.get("total") != 1 or not isinstance(rows, list)
                 or len(rows) != 1 or not isinstance(rows[0], dict)
                 or rows[0].get("task_run_id") != self.shutdown_job["task_run_id"]
-                or not isinstance(rows[0].get("attempt"), int)
-                or isinstance(rows[0].get("attempt"), bool)
-                or rows[0].get("attempt") != self.shutdown_job["attempt_before_signal"]
-                or rows[0].get("status") != "running"
-                or rows[0].get("runtime_id") != self.shutdown_job["runtime_id"]
-                or rows[0].get("completed_at")):
-            raise JourneyError("generation 2 did not retain the exact original active TaskRun row")
+                or not isinstance(rows[0].get("attempt"), int) or isinstance(rows[0].get("attempt"), bool)
+                or rows[0].get("attempt") != self.shutdown_job["attempt_before_signal"]):
+            raise JourneyError("same-database restart did not preserve the concrete TaskRun identity and attempt")
+        return record, tasks[0], rows[0]
+
+    def verify_shutdown_job_retained(self, server_id: str) -> None:
+        """Prove Gen2 still shows the original active rows before recovery runs."""
+        if self.shutdown_job is None:
+            raise JourneyError("shutdown job identity is unavailable after restart")
+        record, task, instance = self.shutdown_rows(server_id)
+        runtime_id = self.shutdown_job["runtime_id"]
+        if (record.get("status") != "running" or task.get("status") != "running" or task.get("runtime_id") != runtime_id
+                or instance.get("status") != "running" or instance.get("runtime_id") != runtime_id
+                or instance.get("completed_at")):
+            raise JourneyError("generation 2 did not retain the exact original active run, task and TaskRun rows")
         if not self.shutdown_release_marker_absent():
-            raise JourneyError("shutdown task release marker existed before the explicit generation-2 webhook")
+            raise JourneyError("shutdown task release marker existed before the generation-2 webhook")
         self.shutdown_job.update(
             retained_after_generation=2,
-            generation2_automatic_takeover=False,
             release_marker_absent_before_webhook=True,
             retained_run_status=record["status"],
-            retained_task_status=tasks[0]["status"],
-            retained_task_run_id=rows[0]["task_run_id"],
-            retained_attempt=rows[0]["attempt"],
-            retained_runtime_id=rows[0]["runtime_id"],
+            retained_task_status=task["status"],
+            retained_task_run_id=instance["task_run_id"],
+            retained_attempt=instance["attempt"],
+            retained_runtime_id=instance["runtime_id"],
         )
 
     def fire_shutdown_webhook(self, server_id: str) -> dict[str, Any]:
         if self.shutdown_job is None:
-            raise JourneyError("shutdown job identity is unavailable for public resumption")
+            raise JourneyError("shutdown job identity is unavailable for the public trigger")
         expected_path = "/hooks/coverage-shutdown-" + self.run_id
-        if self.shutdown_job.get("resumption_path") != expected_path:
-            raise JourneyError("shutdown resumption path differs from the owned HTTP trigger")
+        if self.shutdown_job.get("inflight_trigger_path") != expected_path:
+            raise JourneyError("shutdown trigger path differs from the owned HTTP trigger")
         request = Request(
             self.host_api_base(server_id) + "/v1" + expected_path,
             data=b"{}",
@@ -2223,14 +2040,16 @@ class Collector:
         try:
             with urlopen(request, timeout=10) as response:
                 if response.status != 202:
-                    raise JourneyError("public shutdown resumption trigger was not accepted")
+                    raise JourneyError("public shutdown trigger was not accepted")
                 payload = complete_response_bytes(response, 64 * 1024)
         except (HTTPError, URLError, TimeoutError) as exc:
-            raise JourneyError("public shutdown resumption trigger request failed") from exc
+            raise JourneyError("public shutdown trigger request failed") from exc
         try:
             receipt = json.loads(payload)
         except (json.JSONDecodeError, UnicodeDecodeError) as exc:
-            raise JourneyError("public shutdown resumption trigger returned invalid JSON") from exc
+            raise JourneyError("public shutdown trigger returned invalid JSON") from exc
+        # http_runs_started counts starts handed to the job, not rows: a start that
+        # then skips still counts. What it did is judged from the rows and runtimes.
         if (
             not isinstance(receipt, dict)
             or receipt.get("path") != expected_path.removeprefix("/hooks/")
@@ -2239,9 +2058,252 @@ class Collector:
             or not isinstance(receipt.get("receipt_id"), str)
             or not UUID_RE.fullmatch(receipt["receipt_id"])
         ):
-            raise JourneyError("public webhook receipt did not admit exactly one existing-run resumption")
+            raise JourneyError("public webhook receipt did not admit exactly one trigger start")
         return {"status": 202, "path": expected_path, "http_triggers_accepted": 1,
                 "http_runs_started": 1, "receipt_id": receipt["receipt_id"]}
+
+    def trigger_skip_log_lines(self, server_id: str) -> int:
+        """Count this server's reports of skipping a start for the exact run."""
+        if self.shutdown_job is None:
+            raise JourneyError("shutdown job identity is unavailable for the trigger witness")
+        count = 0
+        for line in self.docker_stdout("container", "logs", server_id).splitlines():
+            try:
+                entry = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if (isinstance(entry, dict) and entry.get("msg") == TRIGGER_SKIPPED_LOG
+                    and entry.get("job_id") == self.shutdown_job["job_id"]
+                    and entry.get("run_id") == self.shutdown_job["run_id"]):
+                count += 1
+        return count
+
+    def shutdown_task_containers(self) -> list[str]:
+        """List every container of the shutdown task, on any run, in any state."""
+        if self.shutdown_job is None:
+            raise JourneyError("shutdown task identity is unavailable")
+        result = self.docker_run(
+            "container", "ls", "-a", "--no-trunc", "--filter", "name=" + self.shutdown_job["task_id"],
+            "--format", "{{.ID}}", check=False,
+        )
+        if result.returncode != 0:
+            raise JourneyError("Docker could not list the shutdown task's containers")
+        return [line for line in result.stdout.splitlines() if line]
+
+    def require_nothing_reexecuted(self, server_id: str) -> None:
+        """Refuse a second run, any runtime of the task, or an early release."""
+        if self.shutdown_job is None:
+            raise JourneyError("shutdown job identity is unavailable after restart")
+        runs = self.api_json(server_id, f"/v1/jobs/{self.shutdown_job['job_id']}/runs?limit=2")
+        if not isinstance(runs, list) or not all(isinstance(item, dict) for item in runs):
+            raise JourneyError("SSO run list response is not a JSON array of runs")
+        if [item.get("id") for item in runs] != [self.shutdown_job["run_id"]]:
+            raise JourneyError("generation 2 started a second run of the shutdown job")
+        if self.shutdown_task_containers():
+            raise JourneyError("generation 2 started a new runtime for the shutdown task")
+        if not self.shutdown_release_marker_absent():
+            raise JourneyError("shutdown release marker appeared before the operator's retry")
+
+    def verify_inflight_trigger_started_nothing(self, server_id: str) -> None:
+        """Prove a trigger start for the in-flight run re-executes nothing."""
+        if self.shutdown_job is None or 1 not in self.native_runtime_absent_generations:
+            raise JourneyError("the in-flight trigger was not preceded by generation-1 native runtime cleanup")
+        self.verify_shutdown_job_retained(server_id)
+        self.shutdown_job["inflight_webhook"] = self.fire_shutdown_webhook(server_id)
+        # The webhook answers before its start runs, so the rows prove nothing
+        # until the server reports that the start is over.
+        deadline = time.monotonic() + 30
+        while (skipped := self.trigger_skip_log_lines(server_id)) != 1:
+            if time.monotonic() >= deadline:
+                raise JourneyError("generation 2 did not report skipping exactly one in-flight trigger start")
+            time.sleep(0.25)
+        self.verify_shutdown_job_retained(server_id)
+        self.require_nothing_reexecuted(server_id)
+        self.shutdown_job["inflight_trigger"] = {
+            "skip_log_lines": skipped,
+            "run_ids": [self.shutdown_job["run_id"]],
+            "task_containers": [],
+        }
+
+    def verify_shutdown_job_recovered(self, server_id: str) -> None:
+        """Prove recovery failed this exact run by itself, on time, running nothing."""
+        if self.shutdown_job is None or not isinstance(self.shutdown_job.get("inflight_trigger"), dict):
+            raise JourneyError("recovery was not preceded by the in-flight trigger proof")
+        booted_at = (self.inspect_container(server_id).get("State") or {}).get("StartedAt")
+        booted = self.timestamp(booted_at)
+        waited = (datetime.datetime.now(datetime.timezone.utc) - booted).total_seconds()
+        deadline = time.monotonic() + RUN_RECOVERY_CEILING_SECONDS - waited
+        runtime_id = self.shutdown_job["runtime_id"]
+        while True:
+            self.require_nothing_reexecuted(server_id)
+            record, task, instance = self.shutdown_rows(server_id)
+            statuses = {record.get("status"), task.get("status"), instance.get("status")}
+            if statuses == {"failed"}:
+                break
+            if statuses - {"running", "failed"}:
+                raise JourneyError("recovery left the shutdown run in an unexpected state")
+            if task.get("runtime_id") != runtime_id or instance.get("runtime_id") != runtime_id:
+                raise JourneyError("the shutdown task changed runtime while awaiting recovery")
+            if time.monotonic() >= deadline:
+                raise JourneyError("recovery did not finalize the shutdown run within its lease-derived bound")
+            time.sleep(1)
+        if (record.get("error") != RUN_DRIVER_LOST_ERROR or task.get("error") != RUN_DRIVER_LOST_ERROR
+                or instance.get("error") != RUN_DRIVER_LOST_ERROR
+                or not record.get("completed_at") or not instance.get("completed_at")
+                or task.get("runtime_id") != runtime_id or instance.get("runtime_id") != runtime_id
+                or task.get("output") not in (None, {})):
+            raise JourneyError("recovery did not fail the exact run and TaskRun with the lost-driver error")
+        elapsed = (self.timestamp(record["completed_at"]) - booted).total_seconds()
+        if not RUN_RECOVERY_FLOOR_SECONDS <= elapsed <= RUN_RECOVERY_CEILING_SECONDS:
+            raise JourneyError("recovery finalized the shutdown run outside its lease-derived bound")
+        self.require_nothing_reexecuted(server_id)
+        self.shutdown_job.update(
+            generation2_automatic_reexecution=False,
+            recovery={
+                "lease_ttl_seconds": RUN_LEASE_TTL_SECONDS,
+                "floor_seconds": RUN_RECOVERY_FLOOR_SECONDS,
+                "ceiling_seconds": RUN_RECOVERY_CEILING_SECONDS,
+                "generation2_started_at": booted_at,
+                "completed_at": record["completed_at"],
+                "elapsed_seconds": round(elapsed, 3),
+                "run_status": record["status"],
+                "task_status": task["status"],
+                "task_run_status": instance["status"],
+                "task_run_id": instance["task_run_id"],
+                "attempt": instance["attempt"],
+                "runtime_id": instance["runtime_id"],
+                "error": record["error"],
+                "run_ids": [self.shutdown_job["run_id"]],
+                "task_containers": [],
+                "release_marker_absent": True,
+            },
+        )
+
+    def verify_shutdown_task_retry_running(self, server_id: str) -> dict[str, Any]:
+        """Hold the one-shot release until Gen2 is executing the retried TaskRun."""
+        if self.shutdown_job is None or not isinstance(self.shutdown_job.get("retry_cli"), dict):
+            raise JourneyError("shutdown retry was not accepted")
+        recovered = self.timestamp(self.shutdown_job["recovery"]["completed_at"])
+        deadline = time.monotonic() + 90
+        while time.monotonic() < deadline:
+            if not self.shutdown_release_marker_absent():
+                raise JourneyError("shutdown release marker appeared before replacement runtime observation")
+            record, task, instance = self.shutdown_rows(server_id)
+            statuses = {record.get("status"), task.get("status"), instance.get("status")}
+            if "failed" in statuses:
+                raise JourneyError("retried shutdown run/task failed before release")
+            if statuses & {"succeeded", "cancelled", "skipped"}:
+                raise JourneyError("retried shutdown TaskRun terminated before the release marker")
+            task_runtime, runtime = task.get("runtime_id"), instance.get("runtime_id")
+            if self.shutdown_job["runtime_id"] in (task_runtime, runtime):
+                raise JourneyError("retry did not clear the lost runtime from the original TaskRun")
+            if statuses != {"running"} or not task_runtime or not runtime:
+                # Run detail and partitions are separate reads, so one can show
+                # the started row while the other still shows the reset one.
+                time.sleep(0.25)
+                continue
+            if (task_runtime != runtime or not isinstance(runtime, str) or not re.fullmatch(r"[0-9a-f]{64}", runtime)
+                    or record.get("completed_at") or task.get("completed_at") or instance.get("completed_at")
+                    or record.get("error") not in (None, "") or task.get("error") not in (None, "")
+                    or instance.get("error") not in (None, "")
+                    or task.get("output") not in (None, {})):
+                raise JourneyError("retried state is not the exact active original TaskRun")
+            started_at = self.timestamp(instance.get("started_at"))
+            observed_at = datetime.datetime.now(datetime.timezone.utc)
+            if started_at <= recovered or started_at > observed_at:
+                raise JourneyError("replacement TaskRun start time is not after recovery and before observation")
+            native = self.native_running(runtime)
+            if (native.get("runtime_id") != runtime or native.get("running") is not True
+                    or native.get("run_id") != self.shutdown_job["run_id"]
+                    or native.get("task_id") != self.shutdown_job["task_id"]
+                    or native.get("docker_image_id") != self.task_docker_image_id
+                    or native.get("task_config_id") != self.task_image_id
+                    or native.get("command_sha256") != hashlib.sha256(self.shutdown_command().encode()).hexdigest()
+                    or native.get("control_mount_source_sha256") != self.shutdown_job.get("control_mount_source_sha256")
+                    or native.get("control_mount_destination") != "/caesium-shutdown-control"
+                    or native.get("control_mount_read_only") is not True):
+                raise JourneyError("replacement native runtime is not positively observed running")
+            if not self.shutdown_release_marker_absent():
+                raise JourneyError("shutdown release marker appeared during replacement runtime observation")
+            receipt = {
+                "runtime_id": runtime,
+                "task_run_id": instance["task_run_id"],
+                "attempt": instance["attempt"],
+                "task_started_at": instance["started_at"],
+                "observed_at": observed_at.isoformat().replace("+00:00", "Z"),
+                "release_marker_absent": True,
+                "running": True,
+                "native": native,
+            }
+            self.shutdown_job["retry_runtime_running"] = receipt
+            return receipt
+        raise JourneyError("Gen2 did not start the retried TaskRun on a new native runtime before timeout")
+
+    def verify_shutdown_run_retried(self, server_id: str) -> None:
+        """Prove an operator's retry finishes the same TaskRun on a new runtime."""
+        if self.shutdown_job is None or not isinstance(self.shutdown_job.get("recovery"), dict):
+            raise JourneyError("shutdown retry was not preceded by recovery")
+        job_id, run_id = self.shutdown_job["job_id"], self.shutdown_job["run_id"]
+        if not self.shutdown_release_marker_absent():
+            raise JourneyError("shutdown release marker existed before the operator's retry")
+        output = self.candidate_cli("shutdown-retry", "run", "retry", "--job-id", job_id, "--run-id", run_id,
+                                    "--server", self.sp_base, timeout=90)
+        if output != f"Retrying run {run_id} (job {job_id})":
+            raise JourneyError("SSO candidate CLI did not confirm the shutdown run retry")
+        self.shutdown_job["retry_cli"] = {"lane": "shutdown-retry", "accepted": True, "output": output}
+        retry_running = self.verify_shutdown_task_retry_running(server_id)
+        self.shutdown_job["release_marker"] = self.release_shutdown_task()
+        deadline = time.monotonic() + 90
+        while time.monotonic() < deadline:
+            record, task, instance = self.shutdown_rows(server_id)
+            statuses = {record.get("status"), task.get("status"), instance.get("status")}
+            if "failed" in statuses:
+                raise JourneyError("retried shutdown run/task failed instead of completing")
+            if statuses == {"succeeded"}:
+                runtime_id = instance.get("runtime_id")
+                if not isinstance(runtime_id, str) or not re.fullmatch(r"[0-9a-f]{64}", runtime_id) or runtime_id == self.shutdown_job["runtime_id"]:
+                    raise JourneyError("retry did not execute the same TaskRun with a new native runtime identity")
+                if runtime_id != retry_running.get("runtime_id"):
+                    raise JourneyError("completed TaskRun runtime differs from the positively observed replacement runtime")
+                if (task.get("runtime_id") != runtime_id or record.get("error") not in (None, "")
+                        or task.get("error") not in (None, "") or instance.get("error") not in (None, "")
+                        or not record.get("completed_at") or not instance.get("completed_at") or not instance.get("started_at")
+                        or task.get("output") != {"shutdown": "retried-" + self.run_id}):
+                    raise JourneyError("retried run/task lacks matching native identity or timestamps")
+                recovered = self.timestamp(self.shutdown_job["recovery"]["completed_at"])
+                task_started = self.timestamp(instance["started_at"])
+                run_completed = self.timestamp(record["completed_at"])
+                task_completed = self.timestamp(instance["completed_at"])
+                runtime_observed = self.timestamp(retry_running["observed_at"])
+                observed_task_started = self.timestamp(retry_running["task_started_at"])
+                marker_written = self.timestamp(self.shutdown_job["release_marker"]["written_at"])
+                if (task_started <= recovered or run_completed <= max(recovered, marker_written)
+                        or task_completed <= max(task_started, marker_written)
+                        or task_started < observed_task_started
+                        or marker_written <= runtime_observed):
+                    raise JourneyError("same TaskRun did not execute and complete after recovery and the operator's retry")
+                self.verify_runtime_absent(2, runtime_id)
+                self.shutdown_job.update(
+                    final_run_status=record["status"],
+                    final_task_status=task["status"],
+                    final_task_run_id=instance["task_run_id"],
+                    final_attempt=instance["attempt"],
+                    final_task_run_status=instance["status"],
+                    final_runtime_id=runtime_id,
+                    run_completed_at=record["completed_at"],
+                    task_started_at=instance["started_at"],
+                    task_completed_at=instance["completed_at"],
+                    release_marker_written_at=self.shutdown_job["release_marker"]["written_at"],
+                    release_marker_after_running_observation=True,
+                    retry_runtime_absent_after_completion=True,
+                    retry_output=task["output"],
+                    verified_after_generation=2,
+                )
+                return
+            if statuses & {"cancelled", "skipped"}:
+                raise JourneyError("persisted shutdown run/task has an unexpected terminal status")
+            time.sleep(0.25)
+        raise JourneyError("the operator's retry did not complete the original shutdown run/task")
 
     def await_server(self, container_id: str) -> None:
         deadline = time.monotonic() + 120
@@ -2651,13 +2713,11 @@ class Collector:
         second_id = self.start_server(2)
         if first_id == second_id:
             raise JourneyError("SSO server restart reused the original container identity")
-        self.verify_shutdown_job_explicitly_resumed(second_id)
+        self.verify_inflight_trigger_started_nothing(second_id)
         replay_restart_elapsed = time.monotonic() - barrier_started
         if replay_restart_elapsed >= 55:
             raise JourneyError("SSO server shutdown/restart exceeded the existing replay-age budget")
         assert self.shutdown_job is not None
-        self.shutdown_job["native_runtime_absent_after_generation"] = 2
-        self.shutdown_job["native_runtime_absent_generations"] = list(self.native_runtime_absent_generations)
         self.shutdown_job["replay_restart_elapsed_seconds"] = round(replay_restart_elapsed, 3)
         self.send_restarted(process)
 
@@ -2688,6 +2748,12 @@ class Collector:
         progress_evidence = [item["evidence"] for item in self.protocol_events if item.get("event") == "check"]
         if progress_evidence != final["evidence"]:
             raise JourneyError("SSO progress evidence differs from the final sanitized evidence")
+        # Recovery takes longer than a signed assertion stays replayable, so the
+        # replay above must not wait for it.
+        self.verify_shutdown_job_recovered(second_id)
+        self.verify_shutdown_run_retried(second_id)
+        self.shutdown_job["native_runtime_absent_after_generation"] = 2
+        self.shutdown_job["native_runtime_absent_generations"] = list(self.native_runtime_absent_generations)
         self.stop_server(second_id, 2)
         return final
 
