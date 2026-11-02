@@ -21,6 +21,7 @@
 #   CAESIUM_FUZZ_ARTIFACT_DIR        host directory for corpus/logs/gocache (default: <repo>/.fuzz-artifacts)
 #   CAESIUM_CONTAINER_CLI            docker (default) or podman
 #   CAESIUM_PODMAN                   "true" to use podman + localhost-prefixed image refs
+#   CAESIUM_BUILDER_IMAGE            existing builder ref; skips building when set
 #   CAESIUM_PLATFORM                 container platform (default: linux/<host arch>)
 set -eu
 
@@ -57,14 +58,14 @@ if [ "${CAESIUM_FUZZ_IN_CONTAINER:-}" != "1" ]; then
     *) DOCKER_ARCH="$ARCH" ;;
   esac
   PLATFORM="${CAESIUM_PLATFORM:-linux/${DOCKER_ARCH}}"
-  BUILDER_REF="${LOCAL_BUILDER_REF}:${TAG}-full"
-
-  # Same image `unit-test`/`lint` depend on; building it here (instead of
-  # duplicating the Dockerfile invocation) keeps the build itself owned by
-  # the justfile, per this stream's "no justfile edit" scope — this script
-  # only adds its OWN new recipe-shaped entry point, it does not fork the
-  # image build logic.
-  just builder-full
+  if [ -n "${CAESIUM_BUILDER_IMAGE:-}" ]; then
+    BUILDER_REF="$CAESIUM_BUILDER_IMAGE"
+  else
+    just builder-full
+    BUILDER_REF="${LOCAL_BUILDER_REF}:${TAG}-full"
+  fi
+  # Run the inspected local image even if its tag moves during the campaign.
+  BUILDER_REF="$("$CONTAINER_CLI" image inspect --format '{{.Id}}' "$BUILDER_REF")"
 
   ARTIFACT_DIR="${CAESIUM_FUZZ_ARTIFACT_DIR:-$REPO_DIR/.fuzz-artifacts}"
   mkdir -p "$ARTIFACT_DIR/corpus" "$ARTIFACT_DIR/logs" "$ARTIFACT_DIR/gocache"

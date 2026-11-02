@@ -213,19 +213,9 @@ func FuzzTaskExecutionDescriptorRoundTrip(f *testing.F) {
 //     applying it once, because a repeat delivery of the same descriptor
 //     mutation must not keep perturbing the stored envelope forever. This is
 //     checked for arbitrary existing/updates input, including inputs that
-//     already carry a duplicate (envKey, ref) key — which this fuzz target
-//     found the function does NOT itself clean up in either merge path (the
-//     len(existing)==0 fast path additionally fails to dedupe duplicate keys
-//     WITHIN updates; filed as
-//     https://github.com/caesium-cloud/caesium/issues/549, currently
-//     unreachable in production since both real callers build updates by
-//     ranging over a map[string]string keyed by EnvKey). "No duplicate keys
-//     in the output" is therefore NOT asserted here — it is not a property
-//     this function actually guarantees for arbitrary input — but idempotence
-//     provably still holds regardless: each update key resolves to a stable
-//     index on the first application (the general path's index always
-//     tracks the LAST occurrence of a repeated key), and reapplying the same
-//     updates re-targets that same index with the same value.
+//     already carry a duplicate (envKey, ref) key. Existing duplicates are
+//     preserved; updates are last-write-wins at the last existing position.
+//   - Unique existing keys remain unique, including when existing is empty.
 func FuzzMergeDescriptorSecretRefs(f *testing.F) {
 	seed := func(existing, updates []models.TaskExecutionSecretRef) []byte {
 		b, err := json.Marshal([2][]models.TaskExecutionSecretRef{existing, updates})
@@ -260,8 +250,19 @@ func FuzzMergeDescriptorSecretRefs(f *testing.F) {
 
 		key := func(r models.TaskExecutionSecretRef) string { return r.EnvKey + "\x00" + r.Ref }
 
+		existingKeys := make(map[string]bool, len(existing))
+		uniqueExisting := true
+		for _, r := range existing {
+			if existingKeys[key(r)] {
+				uniqueExisting = false
+			}
+			existingKeys[key(r)] = true
+		}
 		seen := make(map[string]bool, len(merged))
 		for _, r := range merged {
+			if uniqueExisting && seen[key(r)] {
+				t.Fatal("merge introduced a duplicate secret-ref key")
+			}
 			seen[key(r)] = true
 		}
 
