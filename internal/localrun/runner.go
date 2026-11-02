@@ -27,7 +27,12 @@ type Config struct {
 	TaskTimeout time.Duration
 	RunTimeout  time.Duration
 	Env         map[string]string // extra env vars injected into every task
-	OnPrepared  func(store *run.Store, db *gorm.DB, jobModel *models.Job) error
+	// Params are explicit run parameters. They override trigger defaults;
+	// omitted keys come from trigger.defaultParams, or from
+	// trigger.configuration.defaultParams when the top-level map is empty.
+	// Nil applies only those defaults, the same as an empty trigger POST.
+	Params     map[string]string
+	OnPrepared func(store *run.Store, db *gorm.DB, jobModel *models.Job) error
 	// EngineFactory overrides EVERY engine kind (docker, kubernetes, podman)
 	// job.New dispatches steps through — a step's declared `engine:` picks
 	// which of job.WithDockerEngineFactory/WithKubernetesEngineFactory/
@@ -64,8 +69,14 @@ type TaskResult struct {
 	// Partition is set for each materialized instance of a fanned step (one
 	// TaskResult per partition, Name rendered as "step[partition]"); empty for
 	// unfanned steps.
-	Partition        string
-	Status           string
+	Partition string
+	Status    string
+	// Attempt is the 1-based task-run attempt. Zero means the row never
+	// recorded one.
+	Attempt int
+	// ExitCode is the raw process exit code when the engine reported one.
+	// Nil when the task failed before a code existed. Zero is a real code.
+	ExitCode         *int
 	Output           map[string]string
 	SchemaViolations []pkgtask.SchemaViolation
 	LogText          string
@@ -80,16 +91,22 @@ func New(cfg Config) *Runner {
 	return &Runner{cfg: cfg}
 }
 
-// Run parses, imports, and executes the definition.
+// Run parses, imports, and executes the definition. On failure the returned
+// error adds each failed step's name, attempt, exit code, and a bounded log
+// tail. RunWithResult keeps the executor error harness checks match.
 func (r *Runner) Run(ctx context.Context, def *schema.Definition) error {
-	_, err := r.RunWithResult(ctx, def)
-	return err
+	result, err := r.RunWithResult(ctx, def)
+	return formatRunFailure(err, result)
 }
 
 // RunWithResult parses, imports, executes, and returns the persisted run result.
 func (r *Runner) RunWithResult(ctx context.Context, def *schema.Definition) (*RunResult, error) {
 	if err := def.Validate(); err != nil {
 		return nil, fmt.Errorf("validation: %w", err)
+	}
+	params, err := mergeRunParams(def, r.cfg.Params)
+	if err != nil {
+		return nil, fmt.Errorf("run params: %w", err)
 	}
 
 	db, cleanup, err := OpenEphemeralDB()
@@ -139,6 +156,9 @@ func (r *Runner) RunWithResult(ctx context.Context, def *schema.Definition) (*Ru
 			}),
 			job.WithPodmanEngineFactory(factory),
 		)
+	}
+	if len(params) > 0 {
+		opts = append(opts, job.WithParams(params))
 	}
 
 	if r.cfg.TaskTimeout > 0 {
@@ -277,6 +297,8 @@ func collectRunResult(store *run.Store, db *gorm.DB, jobModel *models.Job) (*Run
 					Name:             fmt.Sprintf("%s[%s]", taskModel.Name, inst.PartitionValue),
 					Partition:        inst.PartitionValue,
 					Status:           string(inst.Status),
+					Attempt:          inst.Attempt,
+					ExitCode:         inst.ExitCode,
 					Output:           inst.Output,
 					SchemaViolations: inst.SchemaViolations,
 					CacheHit:         inst.CacheHit,
@@ -300,6 +322,8 @@ func collectRunResult(store *run.Store, db *gorm.DB, jobModel *models.Job) (*Run
 			TaskID:           taskModel.ID,
 			Name:             taskModel.Name,
 			Status:           string(taskRun.Status),
+			Attempt:          taskRun.Attempt,
+			ExitCode:         taskRun.ExitCode,
 			Output:           taskRun.Output,
 			SchemaViolations: taskRun.SchemaViolations,
 			CacheHit:         taskRun.CacheHit,

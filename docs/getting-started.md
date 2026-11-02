@@ -143,6 +143,14 @@ caesium dev --once --path nightly-etl.job.yaml
 
 `caesium dev` without `--once` watches the file and re-runs on save.
 
+Repeat `--param key=value` when a step reads `${CAESIUM_PARAM_...}`. Each flag
+overrides one `trigger.defaultParams` entry; keys you omit keep the manifest
+default, including defaults written only under `trigger.configuration`:
+
+```bash
+caesium dev --once --path nightly-etl.job.yaml --param date=2026-09-15
+```
+
 ## 4. Apply it to the server
 
 ```bash
