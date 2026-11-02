@@ -217,7 +217,11 @@ func BuildBundleFor(ctx context.Context, db *gorm.DB, incidentID uuid.UUID, play
 	// predicate could hand the agent a SUCCEEDED instance's empty log as "the
 	// failure". Load the whole group in partition order, describe the first
 	// FAILED instance, and enumerate the rest of the failed siblings.
-	if inc.RunID != nil && inc.TaskID != nil {
+	//
+	// A data_quality_hold incident names a task that SUCCEEDED, so it has no
+	// failure to describe: attributionTaskRun would present a green instance as
+	// one. The hold's evidence is in Classification.
+	if inc.RunID != nil && inc.TaskID != nil && FailureClass(inc.Class) != ClassDataQualityHold {
 		var rows []models.TaskRun
 		if err := db.WithContext(ctx).
 			Where("job_run_id = ? AND task_id = ?", *inc.RunID, *inc.TaskID).
@@ -337,10 +341,19 @@ func readSnapshot(ctx context.Context, conn *gorm.DB, fn func(tx *gorm.DB) error
 	return db.TransactionOn(ctx, conn, fn, options)
 }
 
+// loadJobTopology reads the job row Unscoped: an incident outlives its job, and
+// a soft-deleted job still names the namespace the bundle is gated on and its
+// alias. Such a job shows no DAG, whatever rows are left: deleting a job over
+// REST leaves its tasks and edges in place, while the importer's prune removes
+// them, and a deleted job has no DAG to act on either way. A job with no row at
+// all is still not found.
 func loadJobTopology(ctx context.Context, db *gorm.DB, jobID uuid.UUID) (models.Job, []BundleTask, []BundleDAGEdge, error) {
 	var job models.Job
-	if err := db.WithContext(ctx).First(&job, "id = ?", jobID).Error; err != nil {
+	if err := db.WithContext(ctx).Unscoped().First(&job, "id = ?", jobID).Error; err != nil {
 		return job, nil, nil, err
+	}
+	if job.DeletedAt.Valid {
+		return job, []BundleTask{}, []BundleDAGEdge{}, nil
 	}
 
 	var taskRows []models.Task

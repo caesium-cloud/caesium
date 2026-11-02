@@ -1903,6 +1903,11 @@ PY
   # trigger and incident lists as a marketing-confined viewer, so the narrowing
   # branches of the three list services run. Needs no policy file.
   auth_pattern="${auth_pattern%)}|TestAuthListNamespaceNarrow)"
+  # A dataset hold with recorded downstream consumers (data-circuit-breaker F1):
+  # TestHoldDatasetCLIReleaseReopensTheGate holds a dataset nothing consumes, so
+  # the stored impact cone stays empty. This one reads the incident as a confined
+  # viewer. Real lineage, so it needs no policy file nor a catalog connection.
+  auth_pattern="${auth_pattern%)}|TestHoldIncidentCollapsesForeignImpactForConfinedReader)"
 
   local -a local_named_passes=(
     TestCaesiumWhyExplainsHitAndMiss
@@ -1971,6 +1976,7 @@ PY
     TestAuthLDAPDisabledEntryRevokesCredentials
     TestAuthStaleGroupsRefusedUntilRelogin
     TestAuthListNamespaceNarrow
+    TestHoldIncidentCollapsesForeignImpactForConfinedReader
   )
   local -a distributed_named_passes=(
     TestNodeWorkersRoute

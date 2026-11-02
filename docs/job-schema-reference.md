@@ -236,7 +236,7 @@ Operator reads: `caesium contract graph [--dataset ns/name] [--json]`, `caesium 
 | Field | Type | Required | Notes |
 |-------|------|----------|-------|
 | `profile` | string | required | Names a server-side `AgentProfile` (managed via `/v1/agentprofiles`). Offline `caesium job lint` cannot verify the reference and emits a scope note; server-side lint (`POST /v1/jobdefs/lint`) and the apply transaction verify it. |
-| `classes` | array[string] | required | Failure classes this policy applies to (at least one). One or more of `transient_infra`, `schema_violation`, `sla_risk`, `data_unavailable`, `auth_failure`, `oom`, `quota`, `unknown`. |
+| `classes` | array[string] | required | Failure classes this policy applies to (at least one). One or more of `transient_infra`, `schema_violation`, `sla_risk`, `data_unavailable`, `auth_failure`, `oom`, `quota`, `data_quality_hold`, `unknown`. |
 | `maxAttempts` | integer | optional | Bounds remediation attempts before an incident force-escalates. Must be `>= 0`. |
 | `autonomy` | object | optional | Tiered-autonomy policy (below). |
 | `escalation` | object | optional | Forced hand-off when remediation does not resolve the incident in time. |

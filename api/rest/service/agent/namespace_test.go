@@ -157,3 +157,46 @@ func TestBundleForConfinedReaderWithholdsLegacyNotes(t *testing.T) {
 	require.NoError(t, err)
 	require.Empty(t, b.Notes)
 }
+
+// An incident outlives its job. The job is soft-deleted and its tasks stay, as
+// they do after DELETE /v1/jobs/:id, and the bundle read must still serve the
+// incident the incident reads show, not a not-found, with no DAG and its
+// namespace gating intact.
+func TestBundleOfAnIncidentWhoseJobWasSoftDeleted(t *testing.T) {
+	db := testutil.OpenTestDB(t)
+	t.Cleanup(func() { testutil.CloseDB(db) })
+	jobID := seedJob(t, db, "deleted-later")
+	require.NoError(t, db.Model(&models.Job{}).Where("id = ?", jobID).Update("namespace", "finance").Error)
+	taskID := uuid.New()
+	require.NoError(t, db.Create(&models.Task{ID: taskID, JobID: jobID, AtomID: uuid.New(), Name: "extract"}).Error)
+	inc := seedIncident(t, db, jobID)
+	require.Equal(t, "finance", inc.Namespace)
+
+	svc := &Service{ctx: context.Background(), db: db}
+	live, err := svc.Bundle(inc.ID)
+	require.NoError(t, err)
+	require.Len(t, live.Job.Tasks, 1)
+
+	// As DELETE /v1/jobs/:id does: the job goes, its tasks and edges stay.
+	require.NoError(t, db.Delete(&models.Job{}, "id = ?", jobID).Error)
+	var surviving int64
+	require.NoError(t, db.Model(&models.Task{}).Where("job_id = ?", jobID).Count(&surviving).Error)
+	require.EqualValues(t, 1, surviving)
+
+	for _, reader := range []iincident.ReaderConfinement{iincident.ReaderUnrestricted, iincident.ReaderConfined} {
+		b, err := svc.ForReader(reader).Bundle(inc.ID)
+		require.NoError(t, err, "a deleted job is no reason to refuse the bundle")
+		require.Equal(t, "deleted-later", b.Job.Alias)
+		require.Empty(t, b.Job.Tasks)
+		require.Empty(t, b.Job.Edges)
+		require.False(t, b.Job.NamespaceMoved)
+	}
+
+	// A job that moved out of the incident's namespace before it was deleted is
+	// still gated: no DAG is shown and the move is flagged.
+	require.NoError(t, db.Unscoped().Model(&models.Job{}).Where("id = ?", jobID).Update("namespace", "marketing").Error)
+	b, err := svc.ForReader(iincident.ReaderConfined).Bundle(inc.ID)
+	require.NoError(t, err)
+	require.True(t, b.Job.NamespaceMoved)
+	require.Empty(t, b.Job.Tasks)
+}

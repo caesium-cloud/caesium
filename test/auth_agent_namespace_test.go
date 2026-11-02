@@ -34,6 +34,7 @@ type a8Bundle struct {
 	Job struct {
 		Alias          string            `json:"alias"`
 		Tasks          []json.RawMessage `json:"tasks"`
+		Edges          []json.RawMessage `json:"edges"`
 		NamespaceMoved bool              `json:"namespace_moved"`
 	} `json:"job"`
 	RunHistory []struct {
