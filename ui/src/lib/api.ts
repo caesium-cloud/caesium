@@ -704,6 +704,34 @@ export interface WhyTrigger {
   alias?: string;
   params?: Record<string, string>;
   firedAt?: string;
+  hold?: WhyHoldDecision;
+}
+
+/**
+ * WhyHoldDecision is the data circuit breaker's admission decision for the run
+ * an explanation is about: the holds that gated it ("skipped") or that it was
+ * run past under `onUpstreamHold: run` ("admitted"). Violations are absent for a
+ * reader who may not see the breaching run's namespace (`detail: "withheld"`).
+ */
+export interface WhyHoldDecision {
+  disposition: "skipped" | "admitted";
+  holds: WhyHold[];
+}
+
+export interface WhyHold {
+  holdId?: string;
+  datasetNamespace: string;
+  dataset: string;
+  openedAt?: string;
+  heldSinceRunId?: string;
+  violations?: Array<{
+    metric: string;
+    assertion: string;
+    observed?: number;
+    bound?: number;
+    boundWithheld?: boolean;
+  }>;
+  detail: "recorded" | "withheld" | "unrecorded";
 }
 
 export interface BlobDiff {
@@ -774,7 +802,12 @@ export interface WhyBaseline {
   startedAt?: string;
 }
 
-export type WhyVerdict = "CACHE_HIT" | "CACHE_MISS" | "CACHE_DISABLED" | "UNKNOWN";
+export type WhyVerdict =
+  | "CACHE_HIT"
+  | "CACHE_MISS"
+  | "CACHE_DISABLED"
+  | "SKIPPED"
+  | "UNKNOWN";
 
 /**
  * WhyGroup is the aggregate answer the server returns for a FANNED step
@@ -797,6 +830,8 @@ export interface WhyExplanation {
   taskRunId: string;
   verdict: WhyVerdict;
   status: string;
+  /** Why a SKIPPED task did not run (an unsatisfied trigger rule, a dataset hold, ...). */
+  skipReason?: string;
   cacheEnabled: boolean;
   hash?: string;
   summary: string;

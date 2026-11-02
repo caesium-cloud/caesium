@@ -1920,6 +1920,12 @@ PY
   # Reaches no forge. Needs no policy file.
   auth_pattern="${auth_pattern%)}|TestIncidentGitProvenancePatchDegradesToEscalate)"
 
+  # `caesium why` on a hold-skipped run (data-circuit-breaker F5): a real
+  # breach, a refused consumer, the exact summary, a repeat breach and a
+  # release. It reaches the admission snapshot, the explainer and the CLI's
+  # hold rendering, none of which the other journeys touch.
+  local_pattern="${local_pattern%)}|TestWhyExplainsHoldSkippedRun)"
+
   local -a local_named_passes=(
     TestCaesiumWhyExplainsHitAndMiss
     TestRunDiffAttributesChangedField
@@ -1950,6 +1956,7 @@ PY
     TestJobQueueCancelEndpointDeletesUnclaimedRowOnly
     TestJobApplyRejectsNonCanonicalAlias
     TestSecretScopeMarketingAllowList
+    TestWhyExplainsHoldSkippedRun
   )
   local -a auth_named_passes=(
     TestIncidentCLIListJSONStdout

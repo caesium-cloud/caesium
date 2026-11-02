@@ -20,6 +20,7 @@ import (
 	"net/http"
 	"net/url"
 	"slices"
+	"strconv"
 	"strings"
 	"text/tabwriter"
 
@@ -53,12 +54,16 @@ type explanation struct {
 	Status    string `json:"status"`
 	// FailureClass is the failed task's incident class; absent otherwise.
 	FailureClass string `json:"failureClass"`
-	Hash         string `json:"hash"`
-	Summary      string `json:"summary"`
-	Trigger      struct {
+	// SkipReason is why a SKIPPED task did not run; absent otherwise.
+	SkipReason string `json:"skipReason"`
+	Hash       string `json:"hash"`
+	Summary    string `json:"summary"`
+	Trigger    struct {
 		Type   string            `json:"type"`
 		Alias  string            `json:"alias"`
 		Params map[string]string `json:"params"`
+		// Hold is the data circuit breaker's admission decision for the run.
+		Hold *holdDecision `json:"hold"`
 	} `json:"trigger"`
 	Baseline struct {
 		Kind  string `json:"kind"`
@@ -86,6 +91,27 @@ type explanation struct {
 			Note     string `json:"note"`
 		} `json:"changes"`
 	} `json:"diff"`
+}
+
+// holdDecision mirrors run.WhyHoldDecision: the datasets whose holds gated the
+// run, or that it was admitted past, as the explanation shows them to this
+// reader.
+type holdDecision struct {
+	Disposition string `json:"disposition"`
+	Holds       []struct {
+		HoldID           string `json:"holdId"`
+		DatasetNamespace string `json:"datasetNamespace"`
+		Dataset          string `json:"dataset"`
+		HeldSinceRunID   string `json:"heldSinceRunId"`
+		Detail           string `json:"detail"`
+		Violations       []struct {
+			Metric        string   `json:"metric"`
+			Assertion     string   `json:"assertion"`
+			Observed      *float64 `json:"observed"`
+			Bound         *float64 `json:"bound"`
+			BoundWithheld bool     `json:"boundWithheld"`
+		} `json:"violations"`
+	} `json:"holds"`
 }
 
 // groupSummary mirrors run.WhyGroup: the aggregate answer the server returns for
@@ -241,6 +267,9 @@ func renderTable(cmd *cobra.Command, exp *explanation) {
 	if exp.FailureClass != "" {
 		_, _ = fmt.Fprintf(tw, "FAILURE-CLASS\t%s\n", exp.FailureClass)
 	}
+	if exp.SkipReason != "" {
+		_, _ = fmt.Fprintf(tw, "SKIP-REASON\t%s\n", exp.SkipReason)
+	}
 	if exp.Hash != "" {
 		_, _ = fmt.Fprintf(tw, "HASH\t%s\n", exp.Hash)
 	}
@@ -277,6 +306,10 @@ func renderTable(cmd *cobra.Command, exp *explanation) {
 	// skip_task produces. Hiding the decider behind a `return` would leave the
 	// human decision — the actual cause — off the answer.
 	renderRemediation(out, exp.Remediation)
+
+	// Likewise for the hold decision: a hold-skipped task has no diff, and which
+	// datasets gated its run is the whole answer.
+	renderHolds(out, exp.Trigger.Hold)
 
 	if exp.Group != nil {
 		renderGroup(out, exp.Group)
@@ -363,6 +396,38 @@ func renderRemediation(out io.Writer, entries []remediation) {
 		)
 	}
 	_ = rw.Flush()
+}
+
+// renderHolds prints every hold the run's admission met, one row each, with the
+// assertions recorded for it. A column the reader may not see (or the run never
+// recorded) prints as "-"; DETAIL says which.
+func renderHolds(out io.Writer, d *holdDecision) {
+	if d == nil || len(d.Holds) == 0 {
+		return
+	}
+	_, _ = fmt.Fprintln(out)
+	_, _ = fmt.Fprintf(out, "Dataset holds (%s, %d):\n", d.Disposition, len(d.Holds))
+	hw := tabwriter.NewWriter(out, 0, 4, 2, ' ', 0)
+	_, _ = fmt.Fprintln(hw, "DATASET\tHOLD\tHELD-SINCE-RUN\tASSERTIONS\tDETAIL")
+	for _, h := range d.Holds {
+		assertions := make([]string, 0, len(h.Violations))
+		for _, v := range h.Violations {
+			observed, bound := "none", "none"
+			if v.Observed != nil {
+				observed = strconv.FormatFloat(*v.Observed, 'g', -1, 64)
+			}
+			if v.BoundWithheld {
+				bound = "withheld"
+			} else if v.Bound != nil {
+				bound = strconv.FormatFloat(*v.Bound, 'g', -1, 64)
+			}
+			assertions = append(assertions, fmt.Sprintf("%s.%s observed %s vs bound %s", v.Metric, v.Assertion, observed, bound))
+		}
+		_, _ = fmt.Fprintf(hw, "%s/%s\t%s\t%s\t%s\t%s\n",
+			h.DatasetNamespace, h.Dataset, dashIfEmpty(h.HoldID), dashIfEmpty(h.HeldSinceRunID),
+			dashIfEmpty(strings.Join(assertions, "; ")), dashIfEmpty(h.Detail))
+	}
+	_ = hw.Flush()
 }
 
 // renderGroup prints the fanned-step aggregate: the status histogram, the

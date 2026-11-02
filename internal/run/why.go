@@ -54,6 +54,11 @@ const (
 	// VerdictUnknown — the task run is not in a terminal/decided state (e.g. still
 	// pending or running), so no cache verdict can be given yet.
 	VerdictUnknown WhyVerdict = "UNKNOWN"
+	// VerdictSkipped — the task's status is `skipped`: it never ran, so there is
+	// no cache outcome to attribute. WhyExplanation.SkipReason carries why (its
+	// trigger rule was unsatisfied, a hold gated the run, an approved skip_task
+	// removed it), and a hold-gated run adds the hold on WhyTrigger.Hold.
+	VerdictSkipped WhyVerdict = "SKIPPED"
 )
 
 // WhyTrigger captures the trigger-side causation for the run, read from the
@@ -70,6 +75,12 @@ type WhyTrigger struct {
 	Params map[string]string `json:"params,omitempty"`
 	// FiredAt is the run's start time.
 	FiredAt time.Time `json:"firedAt"`
+	// Hold is the data circuit breaker's admission decision for this run: the
+	// holds that gated it, or that it was admitted past under
+	// metadata.onUpstreamHold: run. It is read from what admission recorded on
+	// the run, never from the live hold, and shaped for the reader (see
+	// whyHoldDecision). Omitted on a run no hold touched.
+	Hold *WhyHoldDecision `json:"hold,omitempty"`
 }
 
 // WhyBaseline describes which run/entry the subject was diffed against, so the
@@ -105,6 +116,12 @@ type WhyExplanation struct {
 
 	Verdict WhyVerdict `json:"verdict"`
 	Status  string     `json:"status"`
+	// SkipReason is the skipped task row's recorded reason, set when the verdict
+	// is SKIPPED (for a fanned group, the first instance's).
+	SkipReason string `json:"skipReason,omitempty"`
+	// holdSkipped marks a skip that the run's hold decision explains, so the
+	// summary names the hold rather than echoing the row's raw reason.
+	holdSkipped bool
 	// FailureClass is the incident classifier's failure class of a failed task
 	// (config, oom, schema_violation, …), from the same task-run signal the
 	// incident subscriber classifies, so it is present whether or not agent
@@ -293,6 +310,7 @@ func (s *Store) WhyTaskPartition(ctx context.Context, runID uuid.UUID, taskRef, 
 	if subject == nil {
 		exp := newWhyGroupExplanation(runID, jobRun.JobID, taskID, taskName, instances)
 		exp.Trigger = s.loadTrigger(ctx, &jobRun)
+		explainSkip(ctx, exp, &jobRun, instances)
 		exp.Remediation = s.loadRemediation(ctx, &jobRun, taskID)
 		exp.Summary = summarize(exp)
 		return exp, nil
@@ -314,7 +332,16 @@ func (s *Store) WhyTaskPartition(ctx context.Context, runID uuid.UUID, taskRef, 
 	}
 
 	exp.Trigger = s.loadTrigger(ctx, &jobRun)
+	explainSkip(ctx, exp, &jobRun, []models.TaskRun{*subject})
 	exp.Remediation = s.loadRemediation(ctx, &jobRun, subject.TaskID)
+
+	// A skipped task never hashed or executed, so a diff against an earlier run
+	// would compare inputs that were not used.
+	if exp.Verdict == VerdictSkipped {
+		exp.Baseline = WhyBaseline{Kind: "none"}
+		exp.Summary = summarize(exp)
+		return exp, nil
+	}
 
 	baselineBlob, baseline, err := s.resolveBaseline(ctx, subject, jobRun.JobID, jobRun.StartedAt)
 	if err != nil {
@@ -531,6 +558,8 @@ func classifyGroupVerdict(cacheEnabled, allTerminal, allCached bool) WhyVerdict 
 
 func classifyVerdict(tr *models.TaskRun) WhyVerdict {
 	switch TaskStatus(tr.Status) {
+	case TaskStatusSkipped:
+		return VerdictSkipped
 	case TaskStatusCached:
 		return VerdictCacheHit
 	case TaskStatusSucceeded, TaskStatusFailed:
@@ -541,6 +570,39 @@ func classifyVerdict(tr *models.TaskRun) WhyVerdict {
 	default:
 		return VerdictUnknown
 	}
+}
+
+// explainSkip attaches the run's hold decision and, for a skipped task or
+// fanned group, the reason it was skipped. Both come from rows written when the
+// skip was decided; nothing is re-derived from a live hold.
+//
+// A fanned group is SKIPPED only when every instance is, so a group that ran
+// some partitions keeps its cache verdict and status histogram. A hold-skipped
+// fanned step is one unexpanded template row (see insertHeldRunTx), which the
+// explainer treats as an unfanned task.
+func explainSkip(ctx context.Context, exp *WhyExplanation, jobRun *models.JobRun, rows []models.TaskRun) {
+	var reason string
+	allSkipped := len(rows) > 0
+	for i := range rows {
+		if rows[i].Status != string(TaskStatusSkipped) {
+			allSkipped = false
+			continue
+		}
+		if reason == "" {
+			reason = rows[i].Error
+		}
+	}
+	exp.Trigger.Hold = whyHoldDecision(ctx, jobRun, reason)
+	if exp.Group != nil && allSkipped {
+		exp.Verdict = VerdictSkipped
+	}
+	if exp.Verdict != VerdictSkipped {
+		return
+	}
+	exp.SkipReason = reason
+	exp.holdSkipped = exp.Trigger.Hold != nil &&
+		exp.Trigger.Hold.Disposition == HoldDispositionSkipped &&
+		jobRun.SkipReason != "" && strings.HasPrefix(reason, jobRun.SkipReason)
 }
 
 func (s *Store) loadTrigger(ctx context.Context, jobRun *models.JobRun) WhyTrigger {
@@ -696,7 +758,7 @@ func (s *Store) resolveBaseline(ctx context.Context, subject *models.TaskRun, jo
 // explanation: the headline discriminating field for a miss, or the
 // identical-inputs proof for a hit.
 func summarize(exp *WhyExplanation) string {
-	if exp.Group != nil {
+	if exp.Group != nil && exp.Verdict != VerdictSkipped {
 		return withNotes(exp, summarizeGroup(exp))
 	}
 	return withNotes(exp, summarizeVerdict(exp))
@@ -718,6 +780,11 @@ func withNotes(exp *WhyExplanation, summary string) string {
 	// and every cache-diff clause after it is secondary.
 	if prov := summarizeRemediation(exp.Remediation); prov != "" {
 		summary += "; " + prov
+	}
+	// A run admitted onto held data by its own declaration is the answer to
+	// "why did this run on a poisoned input", ahead of the cache detail.
+	if admitted := summarizeHoldAdmission(exp.Trigger.Hold); admitted != "" {
+		summary += "; " + admitted
 	}
 	notes := explanationNotes(exp)
 	if len(notes) == 0 {
@@ -750,8 +817,23 @@ func explanationNotes(exp *WhyExplanation) []string {
 	return notes
 }
 
+// summarizeSkipped explains a task that did not run: the data circuit breaker's
+// hold when that is what skipped its run, otherwise the reason recorded on the
+// row (an unsatisfied trigger rule, an approved skip_task).
+func summarizeSkipped(exp *WhyExplanation) string {
+	if exp.holdSkipped && len(exp.Trigger.Hold.Holds) > 0 {
+		return summarizeHoldSkip(exp.Trigger.Hold)
+	}
+	if reason := strings.TrimSpace(exp.SkipReason); reason != "" {
+		return "SKIPPED — " + reason
+	}
+	return fmt.Sprintf("SKIPPED — task %q was skipped and no reason was recorded", exp.TaskName)
+}
+
 func summarizeVerdict(exp *WhyExplanation) string {
 	switch exp.Verdict {
+	case VerdictSkipped:
+		return summarizeSkipped(exp)
 	case VerdictCacheHit:
 		if exp.Diff != nil && exp.Diff.HashEqual {
 			return fmt.Sprintf("CACHE HIT — every hashed input identical to the cached run; the prior result was reused (task %q did not execute)", exp.TaskName)
