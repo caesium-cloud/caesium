@@ -112,7 +112,7 @@ steps:
 			break
 		}
 		if time.Now().After(deadline) {
-			s.Failf("run logs missing marker", "stdout:\n%s\nstderr:\n%s", logsOut, logsErr)
+			s.Require().Failf("run logs missing marker", "stdout:\n%s\nstderr:\n%s", logsOut, logsErr)
 		}
 		time.Sleep(500 * time.Millisecond)
 	}

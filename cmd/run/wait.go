@@ -1,12 +1,18 @@
 package run
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
 )
+
+// errWaitDeadline is the wait loop's own deadline, distinct from a cancelled
+// command context and from the shared HTTP client's timeout.
+var errWaitDeadline = errors.New("wait deadline exceeded")
 
 var (
 	waitRunID   string
@@ -42,36 +48,89 @@ func runWait(cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("--timeout must be greater than zero")
 	}
 	apiKey := resolveRunDiffAPIKey(cmd, waitAPIKey)
-
-	deadline := time.NewTimer(waitTimeout)
-	defer deadline.Stop()
+	deadline := time.Now().Add(waitTimeout)
 
 	var last *runView
 	next := time.Duration(0)
 	for {
-		timer := time.NewTimer(next)
-		select {
-		case <-cmd.Context().Done():
-			timer.Stop()
-			return cmd.Context().Err()
-		case <-deadline.C:
-			timer.Stop()
+		if err := sleepBeforePoll(cmd.Context(), next, deadline); err != nil {
+			if errors.Is(err, errWaitDeadline) {
+				return finishWait(cmd, last, true)
+			}
+			return err
+		}
+		// Remaining time until the original deadline, not a fresh client
+		// timeout. The shared client's Timeout would otherwise let one GET
+		// ignore --timeout and return success after the deadline.
+		view, err := fetchRunBeforeDeadline(cmd, deadline, apiKey)
+		if errors.Is(err, errWaitDeadline) {
+			if view != nil {
+				last = view
+			}
 			return finishWait(cmd, last, true)
-		case <-timer.C:
-			view, err := fetchRun(cmd, inspectHTTPClient, waitServer, apiKey, waitJobID, waitRunID)
-			if err != nil {
-				return err
-			}
-			last = view
-			if runStatusTerminal(view.Status) {
-				return finishWait(cmd, view, false)
-			}
-			next = waitPollInterval
-			if next <= 0 {
-				next = 250 * time.Millisecond
-			}
+		}
+		if err != nil {
+			return err
+		}
+		last = view
+		if runStatusTerminal(view.Status) {
+			return finishWait(cmd, view, false)
+		}
+		next = waitPollInterval
+		if next <= 0 {
+			next = 250 * time.Millisecond
 		}
 	}
+}
+
+// sleepBeforePoll waits for the poll interval, but not past deadline.
+func sleepBeforePoll(ctx context.Context, delay time.Duration, deadline time.Time) error {
+	remaining := time.Until(deadline)
+	if remaining <= 0 {
+		return errWaitDeadline
+	}
+	if delay <= 0 {
+		return nil
+	}
+	if delay > remaining {
+		delay = remaining
+	}
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		if !time.Now().Before(deadline) {
+			return errWaitDeadline
+		}
+		return nil
+	}
+}
+
+// fetchRunBeforeDeadline cancels the GET when the wait deadline is reached.
+// A body that arrives after that deadline is returned with errWaitDeadline
+// so the caller prints it and still exits non-zero.
+func fetchRunBeforeDeadline(cmd *cobra.Command, deadline time.Time, apiKey string) (*runView, error) {
+	if !time.Now().Before(deadline) {
+		return nil, errWaitDeadline
+	}
+	ctx, cancel := context.WithDeadline(cmd.Context(), deadline)
+	defer cancel()
+	view, err := fetchRunContext(ctx, inspectHTTPClient, waitServer, apiKey, waitJobID, waitRunID)
+	if err != nil {
+		if cmd.Context().Err() != nil {
+			return nil, cmd.Context().Err()
+		}
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) || !time.Now().Before(deadline) {
+			return nil, errWaitDeadline
+		}
+		return nil, err
+	}
+	if !time.Now().Before(deadline) {
+		return view, errWaitDeadline
+	}
+	return view, nil
 }
 
 func finishWait(cmd *cobra.Command, view *runView, timedOut bool) error {

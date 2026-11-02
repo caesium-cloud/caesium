@@ -1,6 +1,7 @@
 package run
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -77,7 +78,7 @@ func lookupJobIDByAlias(cmd *cobra.Command, client *http.Client, server, apiKey,
 	query := url.Values{}
 	query.Set("alias", alias)
 	rawURL := serverBase(server) + "/v1/jobs?" + query.Encode()
-	body, status, err := getJSON(cmd, client, rawURL, apiKey)
+	body, status, err := getJSON(cmd.Context(), client, rawURL, apiKey)
 	if err != nil {
 		return "", err
 	}
@@ -108,8 +109,12 @@ func lookupJobIDByAlias(cmd *cobra.Command, client *http.Client, server, apiKey,
 }
 
 func fetchRun(cmd *cobra.Command, client *http.Client, server, apiKey, jobID, runID string) (*runView, error) {
+	return fetchRunContext(cmd.Context(), client, server, apiKey, jobID, runID)
+}
+
+func fetchRunContext(ctx context.Context, client *http.Client, server, apiKey, jobID, runID string) (*runView, error) {
 	rawURL := fmt.Sprintf("%s/v1/jobs/%s/runs/%s", serverBase(server), url.PathEscape(strings.TrimSpace(jobID)), url.PathEscape(strings.TrimSpace(runID)))
-	body, status, err := getJSON(cmd, client, rawURL, apiKey)
+	body, status, err := getJSON(ctx, client, rawURL, apiKey)
 	if err != nil {
 		return nil, err
 	}
@@ -126,11 +131,14 @@ func fetchRun(cmd *cobra.Command, client *http.Client, server, apiKey, jobID, ru
 	return &view, nil
 }
 
-func getJSON(cmd *cobra.Command, client *http.Client, rawURL, apiKey string) ([]byte, int, error) {
+func getJSON(ctx context.Context, client *http.Client, rawURL, apiKey string) ([]byte, int, error) {
 	if client == nil {
 		client = inspectHTTPClient
 	}
-	req, err := http.NewRequestWithContext(cmd.Context(), http.MethodGet, rawURL, nil)
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 	if err != nil {
 		return nil, 0, err
 	}

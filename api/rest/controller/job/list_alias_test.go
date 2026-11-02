@@ -76,14 +76,14 @@ func TestListAliasNarrowsWithinAllowedSet(t *testing.T) {
 
 func newListContext(t *testing.T, target string) *echo.Context {
 	t.Helper()
-	req := httptest.NewRequest(http.MethodGet, target, nil)
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, target, nil)
 	return echo.New().NewContext(req, httptest.NewRecorder())
 }
 
 func serveList(t *testing.T, fake *aliasListFake, target string, allowed []string) *httptest.ResponseRecorder {
 	t.Helper()
 	require.NotNil(t, fake)
-	req := httptest.NewRequest(http.MethodGet, target, nil)
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, target, nil)
 	rec := httptest.NewRecorder()
 	c := echo.New().NewContext(req, rec)
 	if allowed != nil {

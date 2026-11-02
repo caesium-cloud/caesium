@@ -1873,6 +1873,9 @@ PY
   # Canonical job aliases (W6-α): a whitespace alias is refused through
   # `caesium job apply`, the apply route and the legacy create route.
   local_pattern="${local_pattern%)}|TestJobApplyRejectsNonCanonicalAlias)"
+  # run get/wait/logs (issue #510). fetch.go has no init of its own, so this
+  # journey is what covers it on the instrumented CLI.
+  local_pattern="${local_pattern%)}|TestRunCLIVerifyLoop)"
   # Confined dataset reads and writes (identity-and-access B6): the producer
   # checks behind a confined viewer's derivations and a confined manual
   # advance. Rule 1 only, no catalog connection.

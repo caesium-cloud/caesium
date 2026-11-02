@@ -120,6 +120,30 @@ func TestRunWaitSuccessFailureAndTimeout(t *testing.T) {
 		require.True(t, doc.TimedOut)
 		require.NotContains(t, stdout, "timed out")
 	})
+
+	t.Run("in-flight deadline", func(t *testing.T) {
+		waitPollInterval = time.Hour
+		server := inspectServer(t, func(w http.ResponseWriter, r *http.Request) {
+			timer := time.NewTimer(1500 * time.Millisecond)
+			defer timer.Stop()
+			select {
+			case <-r.Context().Done():
+				return
+			case <-timer.C:
+				writeRun(w, "succeeded", `[{"id":"task-1","status":"succeeded"}]`)
+			}
+		})
+		waitJobID, waitRunID, waitServer, waitTimeout, waitJSON = "job-1", "run-1", server.URL, 80*time.Millisecond, true
+		started := time.Now()
+		stdout, stderr, err := execInspect(t, runWait)
+		require.Error(t, err)
+		require.ErrorContains(t, err, "timed out")
+		require.Less(t, time.Since(started), time.Second)
+		require.NotContains(t, stderr, "{")
+		doc := decodeStatus(t, stdout)
+		require.True(t, doc.TimedOut)
+		require.NotEqual(t, "succeeded", doc.Status)
+	})
 }
 
 func TestRunLogsPrintsTasksPartitionsAndBounds(t *testing.T) {
@@ -187,6 +211,48 @@ func TestRunLogsPrintsTasksPartitionsAndBounds(t *testing.T) {
 		require.Equal(t, "tr-a", doc.Entries[0].TaskRunID)
 		require.Contains(t, doc.Entries[0].Text, "[REDACTED]")
 		require.NotContains(t, doc.Entries[0].Text, "partition=b")
+	})
+
+	t.Run("partition statuses", func(t *testing.T) {
+		logsMaxBytes = defaultLogsMaxBytes
+		logsMaxInstances = defaultLogsMaxInstances
+		server := inspectServer(t, func(w http.ResponseWriter, r *http.Request) {
+			if !strings.Contains(r.URL.Path, "/logs") {
+				writeRun(w, "failed", `[{"id":"task-fan","status":"failed","partition_count":2}]`)
+				return
+			}
+			if r.URL.Query().Get("task_run_id") == "" {
+				w.WriteHeader(http.StatusBadRequest)
+				_, _ = w.Write([]byte(`{"message":"select one","instances":[{"task_run_id":"tr-fail","partition":"p-fail","status":"failed"},{"task_run_id":"tr-ok","partition":"p-ok","status":"succeeded"}]}`))
+				return
+			}
+			id := r.URL.Query().Get("task_run_id")
+			w.Header().Set("X-Caesium-Task-Run-ID", id)
+			switch id {
+			case "tr-fail":
+				w.Header().Set("X-Caesium-Partition", "p-fail")
+				_, _ = w.Write([]byte("boom\n"))
+			case "tr-ok":
+				w.Header().Set("X-Caesium-Partition", "p-ok")
+				_, _ = w.Write([]byte("ok\n"))
+			default:
+				http.Error(w, "unknown partition", http.StatusNotFound)
+			}
+		})
+		logsJobID, logsRunID, logsServer, logsJSON = "job-1", "run-1", server.URL, true
+		stdout, _, err := execInspect(t, runLogs)
+		require.NoError(t, err)
+		var doc logsDocument
+		require.NoError(t, json.Unmarshal([]byte(stdout), &doc))
+		require.Len(t, doc.Entries, 2)
+		byRun := map[string]logEntry{}
+		for _, entry := range doc.Entries {
+			byRun[entry.TaskRunID] = entry
+		}
+		require.Equal(t, "failed", byRun["tr-fail"].Status)
+		require.Equal(t, "p-fail", byRun["tr-fail"].Partition)
+		require.Equal(t, "succeeded", byRun["tr-ok"].Status)
+		require.Equal(t, "p-ok", byRun["tr-ok"].Partition)
 	})
 
 	t.Run("byte cap", func(t *testing.T) {

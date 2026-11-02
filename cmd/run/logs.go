@@ -161,9 +161,9 @@ func collectTaskLogs(cmd *cobra.Command, apiKey, jobID, runID string, task taskV
 		if got.TaskRunID == "" {
 			got.TaskRunID = inst.TaskRunID
 		}
-		if got.Status == "" {
-			got.Status = inst.Status
-		}
+		// The group status is one value for every partition. A mixed group
+		// would otherwise mark the successful partition failed.
+		got.Status = inst.Status
 		entries = append(entries, got)
 		cut = cut || instTrunc
 	}
@@ -231,11 +231,15 @@ func fetchTaskLog(cmd *cobra.Command, apiKey, jobID, runID, taskID, taskRunID st
 	if strings.EqualFold(resp.Header.Get("X-Caesium-Log-Truncated"), "true") {
 		cut = true
 	}
+	status := task.Status
+	if taskRunID != "" {
+		status = ""
+	}
 	entry := logEntry{
 		TaskID:    taskID,
 		TaskRunID: firstNonEmpty(resp.Header.Get("X-Caesium-Task-Run-ID"), taskRunID),
 		Partition: resp.Header.Get("X-Caesium-Partition"),
-		Status:    task.Status,
+		Status:    status,
 		State:     resp.Header.Get("X-Caesium-Log-State"),
 		Source:    resp.Header.Get("X-Caesium-Log-Source"),
 		Truncated: cut,
