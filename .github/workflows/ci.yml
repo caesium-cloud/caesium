@@ -2053,22 +2053,9 @@ jobs:
         run: |
           npm ci --prefer-offline
           npx playwright install --with-deps chromium
-      # Keep the engine and containerd pair identical to the native image
-      # producers. Coverage also needs the containerd image store: the immutable
-      # builder reference in integration-coverage.sh must resolve locally.
+      # Keep the engine pair identical to the native image producers.
       - name: Install qualified native Docker runtime
         run: python3 scripts/setup-ci-docker.py
-      - name: Docker containerd image store
-        run: |
-          set -euo pipefail
-          conf=/etc/docker/daemon.json
-          if [ -s "$conf" ]; then current="$(sudo cat "$conf")"; else current='{}'; fi
-          printf '%s' "$current" | jq '.features["containerd-snapshotter"] = true' | sudo tee "$conf" >/dev/null
-          # Installation already restarted Docker; allow this configuration restart.
-          sudo systemctl reset-failed docker.service
-          sudo systemctl restart docker
-          docker version --format 'docker client {{.Client.Version}} server {{.Server.Version}}'
-          docker info --format '{{json .DriverStatus}}'
       - uses: ./.github/actions/load-docker-images
         with:
           name: builder-amd64
