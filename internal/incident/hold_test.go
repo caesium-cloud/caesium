@@ -546,6 +546,7 @@ func TestHoldWhoseRunIsGoneAndJobSoftDeletedOpensUnderTheJobsNamespace(t *testin
 	ctx := t.Context()
 	w.heldRow("orders", time.Now().UTC().Add(-time.Hour))
 	require.NoError(t, w.db.Delete(&models.JobRun{}, "id = ?", w.runID).Error)
+	require.NoError(t, w.db.Delete(&models.Task{}, "job_id = ?", w.jobID).Error)
 	require.NoError(t, w.db.Delete(&models.Job{}, "id = ?", w.jobID).Error)
 
 	require.NoError(t, w.sub.ReconcileHolds(ctx, 0))
@@ -554,6 +555,14 @@ func TestHoldWhoseRunIsGoneAndJobSoftDeletedOpensUnderTheJobsNamespace(t *testin
 	require.Equal(t, "finance", inc.Namespace)
 	require.Nil(t, inc.TaskID)
 	require.Empty(t, inc.TaskName)
+
+	// The incident is served by its bundle read too, which loads the job.
+	bundle, err := BuildBundleFor(ctx, w.db, inc.ID, nil, ReaderConfined)
+	require.NoError(t, err)
+	require.Equal(t, w.alias, bundle.Job.Alias)
+	require.False(t, bundle.Job.NamespaceMoved)
+	require.Empty(t, bundle.Job.Tasks)
+	require.Equal(t, string(ClassDataQualityHold), bundle.Classification.Class)
 }
 
 // With neither the run nor the job there is no tenant to own the hold. The sweep
