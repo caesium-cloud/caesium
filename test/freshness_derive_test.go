@@ -404,6 +404,111 @@ steps:
 `, alias, metadataExtra, source, eventType, outputWatermark, source, produced)
 }
 
+// TestFreshnessSourceOnlyJobDerivesOnceOnArrival is issue #537. The step
+// produces but does not consume; the only input is metadata.datasets.sources.
+// That job must not run on the evaluator timer, then execute exactly once
+// after the source arrives.
+func (s *IntegrationTestSuite) TestFreshnessSourceOnlyJobDerivesOnceOnArrival() {
+	s.requireFreshnessLane()
+
+	suffix := time.Now().UnixNano()
+	alias := fmt.Sprintf("integration-freshness-sources-%d", suffix)
+	source := fmt.Sprintf("integration.sources.src.%d", suffix)
+	produced := fmt.Sprintf("integration.sources.out.%d", suffix)
+	eventType := fmt.Sprintf("sources.integration.%d", suffix)
+	arrivalWatermark := fmt.Sprintf("vendor/orders/%d.json", suffix)
+	outputWatermark := fmt.Sprintf("out-%d", suffix)
+
+	dir := s.writeJobManifest(freshnessSourceOnlyManifest(alias, source, produced, eventType, outputWatermark))
+	defer os.RemoveAll(dir)
+	s.runCLIWithFreshness("job", "apply", "--path", dir, "--server", s.caesiumURL)
+
+	job := s.requireJobByAlias(alias)
+	s.Require().NotNil(job)
+	s.Require().Empty(s.fetchRuns(job.ID), "a source-only freshness job must not run before its source arrives")
+
+	// The produced dataset's SLO is 1s. Wait until a timer tick has actually
+	// evaluated it — a skipped-upstream row — so "no run yet" is not just "the
+	// evaluator has not looked". A run appearing here is the bug.
+	s.Require().Eventually(func() bool {
+		if runs := s.fetchRuns(job.ID); len(runs) > 0 {
+			s.T().Fatalf("source-only freshness job ran before its source arrived: %+v", runs)
+		}
+		var derivations datasetDerivationsTypedResponse
+		if err := s.tryGetJSON("/v1/datasets/_/"+produced+"/derivations", &derivations); err != nil {
+			return false
+		}
+		for _, d := range derivations.Derivations {
+			if d.Decision == "skipped_upstream" {
+				return true
+			}
+		}
+		return false
+	}, 90*time.Second, time.Second, "source-only freshness job should sit at skipped-upstream until the source arrives")
+
+	s.postEvent(fmt.Sprintf(`{
+		"type":%q,
+		"source":"ignored-by-arrival",
+		"data":{"detail":{"kind":"orders","objects":[{"key":%q}]}}
+	}`, eventType, arrivalWatermark))
+
+	derived := s.awaitFreshnessDerivedRun(job.ID, produced, 4*time.Minute)
+	s.Require().Equal("succeeded", derived.Status,
+		"source-only freshness run %s did not succeed (error: %s)", derived.ID, derived.Error)
+	s.Require().NotEmpty(derived.Tasks,
+		"source-only freshness run %s has zero task rows: it was admitted but never executed", derived.ID)
+
+	var emitted bool
+	for _, task := range derived.Tasks {
+		s.Equal("succeeded", task.Status, "derived run task %s did not succeed: %s", task.ID, task.Error)
+		if task.Output["wm"] == outputWatermark {
+			emitted = true
+		}
+	}
+	s.True(emitted, "derived run task output should carry the emitted watermark %q: %+v", outputWatermark, derived.Tasks)
+
+	runs := s.fetchRuns(job.ID)
+	s.Require().Len(runs, 1,
+		"a source arrival must derive exactly one run, not one per timer tick: %+v", runs)
+}
+
+// freshnessSourceOnlyManifest is freshnessDerivationManifest without the
+// step-level consumes line: the input exists only as metadata.datasets.sources.
+// freshness is 1s, matching the other derivation scenarios, so the output is
+// stale before the arrival without waiting out a long SLO.
+func freshnessSourceOnlyManifest(alias, source, produced, eventType, outputWatermark string) string {
+	return fmt.Sprintf(`
+apiVersion: v1
+kind: Job
+metadata:
+  alias: %s
+  datasets:
+    sources:
+      - name: %s
+        expectedEvery: 24h
+        external: true
+        arrival:
+          event:
+            type: %s
+            filter:
+              detail.kind: orders
+          watermark: "$.detail.objects[0].key"
+trigger:
+  type: freshness
+  configuration: {}
+steps:
+  - name: refresh
+    image: alpine:3.23
+    command: ["sh", "-c", "echo '##caesium::output {\"wm\":\"%s\"}'"]
+    datasets:
+      produces:
+        - name: %s
+          freshness: 1s
+          watermark:
+            key: wm
+`, alias, source, eventType, outputWatermark, produced)
+}
+
 // freshnessTwoOutputManifest declares one freshness-triggered job producing TWO
 // datasets from a single arrival-bound source, each with its own watermark key,
 // so a single run refreshes both.

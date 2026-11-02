@@ -1193,6 +1193,209 @@ func TestArrivalAdvanceTriggersReactiveEvaluation(t *testing.T) {
 	assertDerivationCount(t, db, models.DatasetDecisionDerived, 1)
 }
 
+// TestEvaluatorSourceOnlyInputWaitsUntilArrivalThenDerivesOnce is issue #537:
+// a freshness job whose only consumed input is metadata.datasets.sources must
+// sit at skipped-upstream until that source advances, then derive once. A
+// later tick for the same watermark must not derive again.
+func TestEvaluatorSourceOnlyInputWaitsUntilArrivalThenDerivesOnce(t *testing.T) {
+	db := openRegistryDB(t)
+	ctx := context.Background()
+	now := t0.Add(3 * time.Hour)
+	jobID := seedFreshnessJob(t, db, "sources-only")
+	seedDeclarations(t, db,
+		produceDecl(jobID, "mart.vendor_x", "1h", ""),
+		sourceDecl(jobID, "raw.vendor_x"),
+	)
+	seedState(t, db, "mart.vendor_x", "100", now.Add(-2*time.Hour), nil)
+
+	starter := &fakeRunStarter{t: t, db: db}
+	eval := NewEvaluator(Config{
+		DB:                    db,
+		RunStore:              starter,
+		LaunchRun:             starter.launch,
+		MaxDerivationsPerTick: 50,
+		Now:                   func() time.Time { return now },
+	})
+
+	for tick := 1; tick <= 2; tick++ {
+		if err := eval.EvaluateOnce(ctx); err != nil {
+			t.Fatalf("evaluate before arrival (tick %d): %v", tick, err)
+		}
+		if starter.calls != 0 {
+			t.Fatalf("tick %d derived %d runs before the source arrived", tick, starter.calls)
+		}
+	}
+	assertDerivationCount(t, db, models.DatasetDecisionSkippedUpstream, 2)
+	assertDerivationCount(t, db, models.DatasetDecisionDerived, 0)
+	assertSkippedUpstreamOnce(t, db, "raw.vendor_x", "")
+
+	if _, err := NewStore(db).Advance(ctx, AdvanceInput{
+		Name: "raw.vendor_x", Watermark: "v1", RunID: uuid.New(), CompletedAt: now.Add(-time.Minute),
+	}); err != nil {
+		t.Fatalf("advance source: %v", err)
+	}
+	if err := eval.EvaluateOnce(ctx); err != nil {
+		t.Fatalf("evaluate after arrival: %v", err)
+	}
+	if starter.calls != 1 {
+		t.Fatalf("after arrival derived %d runs, want 1", starter.calls)
+	}
+	assertDerivationCount(t, db, models.DatasetDecisionDerived, 1)
+
+	if err := eval.EvaluateOnce(ctx); err != nil {
+		t.Fatalf("evaluate again for the same source watermark: %v", err)
+	}
+	if starter.calls != 1 {
+		t.Fatalf("same watermark derived %d runs, want 1", starter.calls)
+	}
+	assertDerivationCount(t, db, models.DatasetDecisionDerived, 1)
+	assertDerivationCount(t, db, models.DatasetDecisionSkippedActiveRun, 1)
+}
+
+// TestEvaluatorCollapsesSourceAndConsumesToOneEdge proves a dataset declared
+// both as a source and as a step-level consumes is one consumed edge. Two rows
+// would list the dataset twice in the waiting reason and the audit snapshot.
+func TestEvaluatorCollapsesSourceAndConsumesToOneEdge(t *testing.T) {
+	jobID := uuid.New()
+	other := uuid.New()
+	ns := "team"
+	produced := produceDecl(jobID, "mart.vendor_x", "1h", "")
+	source := sourceDecl(jobID, "raw.vendor_x")
+	source.Namespace = &ns
+	consume := consumeDecl(jobID, "raw.vendor_x")
+	consume.Namespace = &ns
+	otherInput := sourceDecl(jobID, "raw.other")
+	neighbor := consumeDecl(other, "raw.vendor_x")
+	neighbor.Namespace = &ns
+
+	orders := [][]models.DatasetDeclaration{
+		{source, produced, consume, otherInput, neighbor},
+		{consume, source, produced, neighbor, otherInput},
+	}
+	wantID := datasetIdentity{namespace: ns, name: "raw.vendor_x"}
+	for i, decls := range orders {
+		graph := newRegistrySnapshot(decls)
+		got := graph.consumesByJob[jobID]
+		if len(got) != 2 {
+			t.Fatalf("order %d consumes = %d, want 2 (raw.vendor_x once, raw.other once): %+v", i, len(got), got)
+		}
+		seen := map[datasetIdentity]int{}
+		for _, decl := range got {
+			seen[declarationIdentity(decl)]++
+		}
+		if seen[wantID] != 1 || seen[datasetIdentity{name: "raw.other"}] != 1 {
+			t.Fatalf("order %d identities = %v", i, seen)
+		}
+		consumers := graph.consumersByID[wantID]
+		if len(consumers) != 2 || consumers[0] != jobID || consumers[1] != other {
+			t.Fatalf("order %d consumers = %v, want [%s %s]", i, consumers, jobID, other)
+		}
+		down := graph.downstreamOf([]datasetIdentity{wantID})
+		if len(down) != 1 || down[0] != (datasetIdentity{name: "mart.vendor_x"}) {
+			t.Fatalf("order %d downstream = %+v, want mart.vendor_x", i, down)
+		}
+	}
+
+	db := openRegistryDB(t)
+	ctx := context.Background()
+	now := t0.Add(3 * time.Hour)
+	freshnessJob := seedFreshnessJob(t, db, "both-ways")
+	both := []models.DatasetDeclaration{
+		produceDecl(freshnessJob, "mart.vendor_x", "1h", ""),
+		sourceDecl(freshnessJob, "raw.vendor_x"),
+		consumeDecl(freshnessJob, "raw.vendor_x"),
+	}
+	seedDeclarations(t, db, both...)
+	seedState(t, db, "mart.vendor_x", "100", now.Add(-2*time.Hour), nil)
+
+	starter := &fakeRunStarter{t: t, db: db}
+	eval := NewEvaluator(Config{
+		DB:                    db,
+		RunStore:              starter,
+		LaunchRun:             starter.launch,
+		MaxDerivationsPerTick: 50,
+		Now:                   func() time.Time { return now },
+	})
+	if err := eval.EvaluateOnce(ctx); err != nil {
+		t.Fatalf("evaluate: %v", err)
+	}
+	if starter.calls != 0 {
+		t.Fatalf("both-ways declaration derived %d runs before the source arrived", starter.calls)
+	}
+	assertSkippedUpstreamOnce(t, db, "raw.vendor_x", "")
+}
+
+// TestEvaluateEventReachesSourceOnlyDownstream proves a dataset_advanced on a
+// source wakes the job that declares that source, even when no step consumes it.
+func TestEvaluateEventReachesSourceOnlyDownstream(t *testing.T) {
+	db := openRegistryDB(t)
+	ctx := context.Background()
+	now := t0.Add(3 * time.Hour)
+	jobID := seedFreshnessJob(t, db, "sources-only-reactive")
+	seedDeclarations(t, db,
+		produceDecl(jobID, "mart.vendor_x", "1h", ""),
+		sourceDecl(jobID, "raw.vendor_x"),
+	)
+	seedState(t, db, "mart.vendor_x", "100", now.Add(-2*time.Hour), nil)
+	if _, err := NewStore(db).Advance(ctx, AdvanceInput{
+		Name: "raw.vendor_x", Watermark: "v1", RunID: uuid.New(), CompletedAt: now.Add(-time.Minute),
+	}); err != nil {
+		t.Fatalf("advance source: %v", err)
+	}
+
+	decls, err := NewRegistry(db).ListAll(ctx)
+	if err != nil {
+		t.Fatalf("list declarations: %v", err)
+	}
+	down := newRegistrySnapshot(decls).downstreamOf([]datasetIdentity{{name: "raw.vendor_x"}})
+	if len(down) != 1 || down[0].name != "mart.vendor_x" {
+		t.Fatalf("downstreamOf(source) = %+v, want mart.vendor_x", down)
+	}
+
+	starter := &fakeRunStarter{t: t, db: db}
+	eval := NewEvaluator(Config{
+		DB:                    db,
+		RunStore:              starter,
+		LaunchRun:             starter.launch,
+		MaxDerivationsPerTick: 50,
+		Now:                   func() time.Time { return now },
+	})
+	if err := eval.EvaluateEvent(ctx, datasetAdvancedEvent(t, "", "unrelated", uuid.Nil)); err != nil {
+		t.Fatalf("evaluate unrelated: %v", err)
+	}
+	if starter.calls != 0 {
+		t.Fatalf("unrelated advance derived %d runs", starter.calls)
+	}
+	if err := eval.EvaluateEvent(ctx, datasetAdvancedEvent(t, "", "raw.vendor_x", uuid.Nil)); err != nil {
+		t.Fatalf("evaluate source advance: %v", err)
+	}
+	if starter.calls != 1 {
+		t.Fatalf("source advance derived %d runs, want 1", starter.calls)
+	}
+	assertDerivationCount(t, db, models.DatasetDecisionDerived, 1)
+}
+
+func assertSkippedUpstreamOnce(t *testing.T, db *gorm.DB, dataset, watermark string) {
+	t.Helper()
+	var rows []models.DatasetDerivation
+	if err := db.Where("decision = ?", models.DatasetDecisionSkippedUpstream).Find(&rows).Error; err != nil {
+		t.Fatalf("load skipped-upstream derivations: %v", err)
+	}
+	if len(rows) == 0 {
+		t.Fatal("no skipped-upstream derivation")
+	}
+	wantConsumed := `{"` + dataset + `":"` + watermark + `"}`
+	wantReason := "waiting on upstream dataset " + dataset
+	for _, row := range rows {
+		if row.Reason != wantReason {
+			t.Fatalf("reason = %q, want %q", row.Reason, wantReason)
+		}
+		if got := string(row.ConsumedWatermarks); got != wantConsumed {
+			t.Fatalf("consumed watermarks = %s, want %s", got, wantConsumed)
+		}
+	}
+}
+
 func datasetAdvancedEvent(t *testing.T, namespace, name string, runID uuid.UUID) event.Event {
 	t.Helper()
 	payload, err := json.Marshal(map[string]any{"namespace": namespace, "name": name})
@@ -1300,6 +1503,16 @@ func consumeDecl(jobID uuid.UUID, name string) models.DatasetDeclaration {
 		CreatedAt: now,
 		UpdatedAt: now,
 	}
+}
+
+func sourceDecl(jobID uuid.UUID, name string) models.DatasetDeclaration {
+	decl := consumeDecl(jobID, name)
+	decl.ID = uuid.New()
+	decl.StepName = ""
+	decl.Direction = models.DatasetDirectionSource
+	decl.External = true
+	decl.ExpectedEvery = "24h"
+	return decl
 }
 
 func seedState(t *testing.T, db *gorm.DB, name, watermark string, freshAt time.Time, consumed map[string]string) {
