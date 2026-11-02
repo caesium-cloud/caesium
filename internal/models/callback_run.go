@@ -17,10 +17,10 @@ const (
 
 type CallbackRun struct {
 	ID         uuid.UUID         `gorm:"type:uuid;primaryKey"`
-	CallbackID uuid.UUID         `gorm:"type:uuid;index;not null"`
+	CallbackID uuid.UUID         `gorm:"type:uuid;index;not null;uniqueIndex:idx_callback_runs_completion,priority:1"`
 	Callback   Callback          `gorm:"constraint:OnDelete:CASCADE" json:"-"`
 	JobID      uuid.UUID         `gorm:"type:uuid;index;not null"`
-	JobRunID   uuid.UUID         `gorm:"type:uuid;index;not null"`
+	JobRunID   uuid.UUID         `gorm:"type:uuid;index;not null;uniqueIndex:idx_callback_runs_completion,priority:2"`
 	JobRun     JobRun            `gorm:"constraint:OnDelete:CASCADE" json:"-"`
 	Status     CallbackRunStatus `gorm:"type:text;index;not null"`
 	Error      string            `gorm:"type:text"`
@@ -39,11 +39,16 @@ type CallbackRun struct {
 	// `retry-callbacks` retry of the same callback on the same run, and so on.
 	// It is per (callback, job run), so it survives being read back out of a
 	// single row without joining the callback's other attempts.
-	RetryCount  int       `gorm:"not null;default:0"`
-	StartedAt   time.Time `gorm:"not null"`
-	CompletedAt *time.Time
-	CreatedAt   time.Time `gorm:"not null"`
-	UpdatedAt   time.Time `gorm:"not null"`
+	RetryCount int `gorm:"not null;default:0"`
+	// CompletionKey names the run completion this row delivered for, so the
+	// unique index lets one callback be delivered once per completion however
+	// many processes finish the same run. It is NULL on an operator's re-send
+	// and on rows from before the column, which the index never conflicts on.
+	CompletionKey *string   `gorm:"type:text;uniqueIndex:idx_callback_runs_completion,priority:3"`
+	StartedAt     time.Time `gorm:"not null"`
+	CompletedAt   *time.Time
+	CreatedAt     time.Time `gorm:"not null"`
+	UpdatedAt     time.Time `gorm:"not null"`
 }
 
 type CallbackRuns []*CallbackRun

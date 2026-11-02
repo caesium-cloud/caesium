@@ -1459,7 +1459,7 @@ func TestFanOutRehydratesGroupOnRetriedRun(t *testing.T) {
 	require.NoError(t, retryErr)
 
 	opts := withTestDeps(f.store, defaultFanOutVars(), f.taskSvc, f.atomSvc, f.edgeSvc, f.engine)
-	require.NoError(t, New(&models.Job{ID: f.jobID}, opts...).Run(context.Background()),
+	require.NoError(t, New(&models.Job{ID: f.jobID}, opts...).Run(run.WithContext(context.Background(), jobRun.ID)),
 		"the retried run must re-enter the already-expanded group")
 
 	after := f.instanceRows(t)

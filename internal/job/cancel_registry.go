@@ -166,6 +166,13 @@ func (r *cancelRegistry) registeredRunIDs() []uuid.UUID {
 	return ids
 }
 
+// drives reports whether this process has an engine registered for runID.
+func (r *cancelRegistry) drives(runID uuid.UUID) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return len(r.runs[runID]) > 0
+}
+
 // defaultCancelRegistry is process-wide on purpose: the goroutine that starts a
 // run (an HTTP controller, the backfill driver, a partition-retry replacement)
 // and the subscriber that observes TypeRunCancelled have no other shared
@@ -271,6 +278,10 @@ type CancelledRunLookup interface {
 //   - `skipped` is a run created terminal on arrival by the dataset-hold
 //     admission gate. It never starts an engine, so it can never have a
 //     registered context to cancel.
+//
+// The one exception is a `failed` run carrying run.ErrRunDriverLost. Recovery
+// wrote it, not the engine, so an engine still registered here was presumed dead
+// while frozen past the TTL and must stop (run_recovery.go).
 //
 // The sweep cancels through cancelLive, not cancel, so it acts on — and reports
 // — only contexts that nothing else has already stopped. Entries linger in the

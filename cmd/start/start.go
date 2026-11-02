@@ -114,6 +114,48 @@ func freshnessRunLauncher(store *run.Store) freshness.RunLauncher {
 	)
 }
 
+// recoveredRunAdopter re-enters a run whose driver stopped. The run is admitted
+// and its row may be all that remains, so this takes the same execution
+// reservation and cancel registration every other kickoff does. A refused
+// reservation means this server is stopping; the run's heartbeat then lapses for
+// whichever server sweeps next.
+func recoveredRunAdopter(store *run.Store) func(context.Context, uuid.UUID, uuid.UUID) error {
+	return func(ctx context.Context, jobID, runID uuid.UUID) error {
+		j, err := retainedJob(ctx, store.DB(), jobID)
+		if err != nil {
+			return err
+		}
+		recorded, err := store.Get(runID)
+		if err != nil {
+			return err
+		}
+		workCtx, release, err := runlife.FromContext(ctx).Reserve(ctx)
+		if err != nil {
+			return err
+		}
+		cancelCtx, releaseCancel := job.RegisterRunCancel(workCtx, runID)
+		go func() {
+			defer release()
+			defer releaseCancel()
+			if err := job.New(j, job.WithTriggerID(nil), job.WithParams(recorded.Params)).Run(run.WithContext(cancelCtx, runID)); err != nil {
+				log.Error("adopted run failure", "job_id", jobID, "run_id", runID, "error", err)
+			}
+		}()
+		return nil
+	}
+}
+
+// retainedJob reads a run's job even if it was deleted. Deleting a job with a
+// run in flight is allowed and only soft-deletes it, leaving its tasks in place,
+// so the run can still finish and free what it holds.
+func retainedJob(ctx context.Context, conn *gorm.DB, jobID uuid.UUID) (*models.Job, error) {
+	var j models.Job
+	if err := conn.WithContext(ctx).Unscoped().First(&j, "id = ?", jobID).Error; err != nil {
+		return nil, err
+	}
+	return &j, nil
+}
+
 // newFreshnessRunLauncher is freshnessRunLauncher with its job lookup and its
 // executor injected, so the post-admission failure path is testable without a
 // container runtime or the global database handle.
@@ -484,6 +526,15 @@ func start(cmd *cobra.Command, args []string) error {
 	// reconciler re-derives the answer from the run rows on a timer, so a lost
 	// event costs one interval instead of the whole run.
 	job.StartRunCancelReconciler(ctx, runStore, vars.CancelReconcileInterval)
+	// Bring a run whose server stopped to an outcome, whatever triggers its job
+	// has. It needs nothing above the store, so it starts with the executors.
+	job.StartRunDriverHeartbeat(ctx, runStore, vars.RunLeaseTTL)
+	job.StartRunRecovery(ctx, job.RunRecoveryConfig{
+		Store:         runStore,
+		TTL:           vars.RunLeaseTTL,
+		ExecutionMode: vars.ExecutionMode,
+		Adopt:         recoveredRunAdopter(runStore),
+	})
 	// A namespace run quota parks trigger starts in run_queue whatever the
 	// queue flags say, so a configured access policy file (the only source of
 	// quotas; an invalid one is fatal in initAuth) always starts the
