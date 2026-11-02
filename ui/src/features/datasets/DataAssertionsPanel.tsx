@@ -109,11 +109,16 @@ function InstanceResults({ instance }: { instance: AssertionInstance }) {
   }
   if (!instance.results?.length) {
     return (
-      <p className="text-xs text-text-3" data-testid="assertion-legacy">
-        {instance.verdict === "violated"
-          ? "Violations were recorded before per-assertion results existed; which checks held was not recorded."
-          : "No per-assertion results were recorded."}
-      </p>
+      <div className="space-y-2" data-testid="assertion-legacy">
+        <p className="text-xs text-text-3">
+          {instance.verdict === "violated"
+            ? "Violations were recorded before per-assertion results existed; which checks held was not recorded."
+            : "No per-assertion results were recorded for this partition."}
+        </p>
+        {instance.violations?.length ? (
+          <Violations violations={instance.violations} />
+        ) : null}
+      </div>
     );
   }
   return (
@@ -135,9 +140,9 @@ function RecordedResults({
   const single = !recorded.fanned && recorded.instances.length === 1;
   if (single) {
     const only = recorded.instances[0];
-    // A row recorded before per-check results existed keeps showing the
-    // violations the run payload carries; it never claims anything passed.
-    if (!only.results?.length && fallback?.length)
+    // A row recorded before per-check results existed keeps showing its own
+    // violations (or the run payload's); it never claims anything passed.
+    if (!only.results?.length && !only.violations?.length && fallback?.length)
       return <Violations violations={fallback} />;
     return <InstanceResults instance={only} />;
   }

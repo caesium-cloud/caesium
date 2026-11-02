@@ -107,15 +107,24 @@ func (s *Store) SetTaskResourceOutcome(runID, taskRef uuid.UUID, outcome TaskRes
 // discarded. Retry and reclaim callers merge these columns into their existing
 // guarded UPDATE so observation cleanup cannot race a terminal completion.
 // Reclaim preserves scheduling attempt counters; it still creates a new runtime.
+//
+// The data-assertion outcome (violations and per-check results) is that
+// runtime's evidence too, so it is cleared HERE, once, for every reset that
+// re-executes a row: the retries, the owner-side failover resets and the
+// worker's lease reaper (Claimer.ReclaimExpired). A reset that listed these
+// columns by hand would let the next one forget them, and a replacement would
+// then report the lost attempt's checks as its own.
 func TaskResourceResetColumns() map[string]any {
 	return map[string]any{
-		"exit_code":         nil,
-		"peak_memory_bytes": nil,
-		"cpu_seconds":       nil,
-		"stats_source":      "",
-		"oom_known":         false,
-		"oom_killed":        false,
-		"applied_resources": nil,
-		"escalation_level":  0,
+		"data_violations":        nil,
+		"data_assertion_results": nil,
+		"exit_code":              nil,
+		"peak_memory_bytes":      nil,
+		"cpu_seconds":            nil,
+		"stats_source":           "",
+		"oom_known":              false,
+		"oom_killed":             false,
+		"applied_resources":      nil,
+		"escalation_level":       0,
 	}
 }

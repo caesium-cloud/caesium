@@ -31,6 +31,20 @@ func outcomeColumns(t *testing.T, db *gorm.DB, taskRunID uuid.UUID) (violations,
 	return len(row.DataViolations), len(row.DataAssertionResults)
 }
 
+// TestEveryReexecutionResetClearsTheAssertionOutcome pins the one shared list:
+// all four re-execution resets (the retries, ResetInFlightTasks,
+// ReclaimOwnerExpiredClaims and the worker's Claimer.ReclaimExpired) start from
+// TaskResourceResetColumns, so a column named there cannot be forgotten by one.
+func TestEveryReexecutionResetClearsTheAssertionOutcome(t *testing.T) {
+	for _, columns := range []map[string]any{TaskResourceResetColumns(), retryResetColumns()} {
+		for _, column := range []string{"data_violations", "data_assertion_results"} {
+			value, ok := columns[column]
+			assert.True(t, ok, column)
+			assert.Nil(t, value, column)
+		}
+	}
+}
+
 // TestReclaimOwnerExpiredClaims_ClearsTheLostAttemptsAssertionOutcome: the
 // re-executed attempt is judged alone. Without this, a clean re-run would sit
 // beside the violations (and results) of the attempt it replaced.

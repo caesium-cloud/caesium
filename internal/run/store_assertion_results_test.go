@@ -88,6 +88,29 @@ func TestEvaluateDataAssertions_RecordsPassesBesideTheViolationInOneWrite(t *tes
 	assert.True(t, resultFor(t, results, "dedup_ratio", AssertionMax).Clean())
 }
 
+// TestEvaluateDataAssertions_CleanEvaluationReplacesEarlierViolations: a row
+// never reads as clean and broken at once, whichever reset path was or was not
+// taken before the re-evaluation.
+func TestEvaluateDataAssertions_CleanEvaluationReplacesEarlierViolations(t *testing.T) {
+	setDataAssertions(t, true)
+	db := testutil.OpenTestDB(t)
+	t.Cleanup(func() { testutil.CloseDB(db) })
+	store := NewStore(db)
+
+	jobID, taskID, taskRunID, stepName := seedTaskRun(t, db, string(TaskStatusRunning), false)
+	declareProducesWithAssertions(t, db, jobID, stepName, "warehouse/orders",
+		jobdef.DatasetAssertions{RowCount: &jobdef.AssertionSpec{Min: ptrOf(1000)}}, jobdef.DatasetOnViolationWarn)
+
+	evalOne(t, db, store, taskID, taskRunID, nil, rowCountSample(12))
+	require.Len(t, dataViolationsOf(t, db, taskRunID), 1)
+
+	evalOne(t, db, store, taskID, taskRunID, nil, rowCountSample(1500))
+	assert.Nil(t, dataViolationsOf(t, db, taskRunID), "the clean evaluation replaces the earlier breach")
+	results := resultsOf(t, db, taskRunID)
+	require.Len(t, results, 1)
+	assert.True(t, results[0].Clean())
+}
+
 // TestEvaluateDataAssertions_WritesNothingForATaskWithoutAContract pins the
 // hot-path cost: no assertions declared means no write, so the column stays
 // NULL and "no record" cannot be read as "everything passed".
@@ -452,6 +475,105 @@ func TestRunAssertions_CapsAGroupButCountsEveryInstance(t *testing.T) {
 	assert.Equal(t, map[string]int{VerdictPassed: total - 1, VerdictViolated: 1}, task.VerdictCounts)
 	assert.Equal(t, VerdictViolated, task.Instances[len(task.Instances)-1].Verdict,
 		"the one breach survives the cap, and the list is back in partition order")
+}
+
+// TestRunAssertions_UncheckedSiblingsAreCountedNotOmitted: once one partition
+// has evidence, a running, skipped or reset sibling is accounted for as
+// not_recorded, so the counts add up to instance_count.
+func TestRunAssertions_UncheckedSiblingsAreCountedNotOmitted(t *testing.T) {
+	setDataAssertions(t, true)
+	db := testutil.OpenTestDB(t)
+	t.Cleanup(func() { testutil.CloseDB(db) })
+	store := NewStore(db)
+
+	jobID, taskID, first, stepName := seedTaskRun(t, db, string(TaskStatusRunning), false)
+	declareProducesWithAssertions(t, db, jobID, stepName, "warehouse/orders",
+		jobdef.DatasetAssertions{RowCount: &jobdef.AssertionSpec{Min: ptrOf(1000)}}, jobdef.DatasetOnViolationWarn)
+	setPartition(t, db, first, "a", 0)
+	running := addInstance(t, db, first, "b", 1, func(r *models.TaskRun) { r.Status = string(TaskStatusRunning) })
+	skipped := addInstance(t, db, first, "c", 2, func(r *models.TaskRun) { r.Status = string(TaskStatusSkipped) })
+	evalOne(t, db, store, taskID, first, nil, rowCountSample(1500))
+
+	job, runID := runIDOf(t, db, first)
+	got, err := store.RunAssertions(context.Background(), job, runID)
+	require.NoError(t, err)
+	require.Len(t, got.Tasks, 1)
+	task := got.Tasks[0]
+	assert.Equal(t, 3, task.InstanceCount)
+	assert.Equal(t, map[string]int{VerdictPassed: 1, VerdictNotRecorded: 2}, task.VerdictCounts)
+	sum := 0
+	for _, n := range task.VerdictCounts {
+		sum += n
+	}
+	assert.Equal(t, task.InstanceCount, sum, "every partition is accounted for")
+	require.Len(t, task.Instances, 3)
+	byID := map[uuid.UUID]AssertionInstance{}
+	for _, in := range task.Instances {
+		byID[in.TaskRunID] = in
+	}
+	assert.Equal(t, VerdictNotRecorded, byID[running].Verdict)
+	assert.Equal(t, VerdictNotRecorded, byID[skipped].Verdict)
+	assert.Equal(t, TaskStatusRunning, byID[running].Status)
+	assert.Empty(t, byID[running].Results, "an unchecked sibling is never shown as passed")
+
+	// A group with no evidence anywhere is still absent.
+	_, _, bare, _ := seedTaskRun(t, db, string(TaskStatusRunning), false)
+	job2, run2 := runIDOf(t, db, bare)
+	none, err := store.RunAssertions(context.Background(), job2, run2)
+	require.NoError(t, err)
+	assert.Empty(t, none.Tasks)
+}
+
+// TestRunAssertions_LegacyFanOutInstancesCarryTheirOwnViolations: a run recorded
+// before per-check results existed keeps each partition's own breach, and a
+// confined reader receives it under the same baseline rule as the run read.
+func TestRunAssertions_LegacyFanOutInstancesCarryTheirOwnViolations(t *testing.T) {
+	db := testutil.OpenTestDB(t)
+	t.Cleanup(func() { testutil.CloseDB(db) })
+	store := NewStore(db)
+
+	_, _, first, _ := seedTaskRun(t, db, string(TaskStatusSucceeded), false)
+	setPartition(t, db, first, "eu", 0)
+	second := addInstance(t, db, first, "us", 1, nil)
+	median := 777.0
+	require.NoError(t, store.SaveDataViolations(runIDFor(t, db, first), first, []DataViolation{
+		{Dataset: "d", Metric: "rowCount", Assertion: AssertionMin, Observed: ptrOf(1), Bound: ptrOf(1000), Message: "eu is short"},
+	}))
+	require.NoError(t, store.SaveDataViolations(runIDFor(t, db, first), second, []DataViolation{
+		{Dataset: "d", Metric: "nullRate", Assertion: AssertionDeltaFromBaseline, Observed: ptrOf(0.9), Bound: ptrOf(0.1),
+			BaselineMedian: &median, BaselineSamples: 6, Message: "us drifted from median 777"},
+	}))
+
+	job, runID := runIDOf(t, db, first)
+	got, err := store.RunAssertions(context.Background(), job, runID)
+	require.NoError(t, err)
+	task := got.Tasks[0]
+	assert.Equal(t, map[string]int{VerdictViolated: 2}, task.VerdictCounts)
+	byID := map[uuid.UUID]AssertionInstance{}
+	for _, in := range task.Instances {
+		byID[in.TaskRunID] = in
+		assert.Empty(t, in.Results)
+	}
+	require.Len(t, byID[first].Violations, 1)
+	assert.Equal(t, "eu is short", byID[first].Violations[0].Message)
+	require.Len(t, byID[second].Violations, 1, "the partition the collapsed run row would not show")
+	require.NotNil(t, byID[second].Violations[0].BaselineMedian)
+	assert.InDelta(t, 777, *byID[second].Violations[0].BaselineMedian, 0.001)
+
+	confined := authz.WithAllowedNamespaces(context.Background(), []string{"default"})
+	shaped, err := store.RunAssertions(confined, job, runID)
+	require.NoError(t, err)
+	for _, in := range shaped.Tasks[0].Instances {
+		if in.TaskRunID == first {
+			assert.Equal(t, "eu is short", in.Violations[0].Message, "an absolute bound is the manifest's")
+			continue
+		}
+		v := in.Violations[0]
+		assert.Nil(t, v.BaselineMedian, "baseline evidence of an unowned verdict is not served")
+		assert.Zero(t, v.BaselineSamples)
+		assert.Nil(t, v.Bound)
+		assert.Equal(t, BaselineEvidenceWithheld, v.Message)
+	}
 }
 
 // TestSaveDataAssertionOutcomeClaimed_FenceIsInTheUpdateItself pins the write's

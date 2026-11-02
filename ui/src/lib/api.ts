@@ -1016,6 +1016,8 @@ export interface AssertionInstance {
   verdict: AssertionVerdict;
   /** Absent for a cache hit and for violations recorded before per-check results existed. */
   results?: AssertionResult[];
+  /** This instance's own recorded violations when it predates per-check results. */
+  violations?: DataViolation[];
 }
 
 export interface TaskAssertions {

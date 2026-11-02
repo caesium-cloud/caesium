@@ -3682,6 +3682,10 @@ func (s *Store) saveDataAssertionOutcomeClaimed(ctx context.Context, taskRunID u
 			return false, err
 		}
 		updates["data_violations"] = datatypes.JSON(b)
+	} else if len(results) > 0 {
+		// A clean evaluation replaces any violations an earlier evaluation of
+		// this row left, so a row never reads as clean and broken at once.
+		updates["data_violations"] = nil
 	}
 	if len(results) > 0 {
 		b, err := json.Marshal(results)
@@ -6084,12 +6088,6 @@ func (s *Store) resetInFlightTasks(runID uuid.UUID, ownerGeneration int64) ([]Re
 				"cache_origin_run_id":    nil,
 				"cache_created_at":       nil,
 				"cache_expires_at":       nil,
-				// The previous attempt's data-assertion outcome goes with its
-				// samples (clearAttemptDatasetMetricsForTaskRunsTx): a clean
-				// re-run would otherwise sit beside the violations of the
-				// attempt it replaced.
-				"data_violations":        nil,
-				"data_assertion_results": nil,
 			})
 			for _, chunk := range chunkTaskRunIDs(ids) {
 				if err := tx.Model(&models.TaskRun{}).
@@ -7639,8 +7637,6 @@ func retryResetColumns() map[string]any {
 		"log_truncated":           false,
 		"log_generation":          "",
 		"schema_violations":       nil,
-		"data_violations":         nil,
-		"data_assertion_results":  nil,
 		"rate_limit_retry_after":  nil,
 		"partition_retry_pending": false,
 	})

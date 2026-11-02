@@ -2,6 +2,7 @@ package run
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"slices"
 
@@ -30,11 +31,17 @@ type AssertionInstance struct {
 	Attempt  int  `json:"attempt"`
 	CacheHit bool `json:"cache_hit"`
 	// Verdict is VerdictOf(Results), or VerdictNotEvaluated for a cache hit
-	// (no assertion ran for this execution), or VerdictViolated with no
-	// Results for an instance whose violations were recorded before per-check
-	// results existed.
+	// (no assertion ran for this execution), or VerdictViolated with
+	// Violations and no Results for an instance whose violations were recorded
+	// before per-check results existed, or VerdictNotRecorded for a sibling of
+	// an instance that has evidence but has none of its own (still running,
+	// skipped, failed before evaluating, or reset).
 	Verdict string            `json:"verdict"`
 	Results []AssertionResult `json:"results,omitempty"`
+	// Violations are this instance's OWN recorded violations when it predates
+	// per-check results (Results empty). A fanned group's collapsed run row
+	// carries only one partition's, so this is where the others are read.
+	Violations []DataViolation `json:"violations,omitempty"`
 }
 
 // TaskAssertions is one step's recorded outcomes across its instances.
@@ -140,19 +147,25 @@ func (s *Store) RunAssertions(ctx context.Context, jobID, runID uuid.UUID) (*Run
 			VerdictCounts: make(map[string]int, 4),
 		}
 		var instances []AssertionInstance
+		evidence := false
 		for _, row := range group {
 			instance, ok := assertionInstance(row, declares)
-			if !ok {
-				continue
-			}
+			evidence = evidence || ok
 			if restricted {
 				WithholdUnownedBaselineEvidenceFromResults(instance.Results)
+				WithholdUnownedBaselineEvidenceFromViolations(instance.Violations)
 			}
-			task.VerdictCounts[instance.Verdict]++
 			instances = append(instances, instance)
 		}
-		if len(instances) == 0 {
+		if !evidence {
 			continue
+		}
+		// Once any instance of the group has evidence, every instance is
+		// accounted for: a sibling with none is not_recorded, never omitted,
+		// so the counts add up to instance_count. The cap below is applied
+		// after counting.
+		for _, instance := range instances {
+			task.VerdictCounts[instance.Verdict]++
 		}
 		if len(instances) > MaxAssertionInstances {
 			// The most worrying first, then back into partition order.
@@ -171,8 +184,9 @@ func (s *Store) RunAssertions(ctx context.Context, jobID, runID uuid.UUID) (*Run
 	return out, nil
 }
 
-// assertionInstance projects one row, or reports that the row has nothing to
-// say (no contract, or a task that did not get as far as evaluating it).
+// assertionInstance projects one row and reports whether the row itself has
+// assertion evidence. A row without any is returned as VerdictNotRecorded: the
+// caller decides whether its group has evidence to make that worth reporting.
 func assertionInstance(row assertionRow, declares map[uuid.UUID]string) (AssertionInstance, bool) {
 	instance := AssertionInstance{
 		TaskRunID:      row.ID,
@@ -191,12 +205,17 @@ func assertionInstance(row assertionRow, declares map[uuid.UUID]string) (Asserti
 		// A cache hit executes nothing, so no assertion ran. Whatever verdict
 		// the original execution earned belongs to that run.
 		if _, declared := declares[row.TaskID]; !declared {
+			instance.Verdict = VerdictNotRecorded
 			return instance, false
 		}
 		instance.Verdict = VerdictNotEvaluated
 	case len(row.DataViolations) > 0:
 		instance.Verdict = VerdictViolated
+		// Unreadable evidence is still a recorded breach; it just has no
+		// detail to show.
+		_ = json.Unmarshal(row.DataViolations, &instance.Violations)
 	default:
+		instance.Verdict = VerdictNotRecorded
 		return instance, false
 	}
 	return instance, true

@@ -298,6 +298,99 @@ describe("fan-out groups", () => {
   });
 });
 
+describe("fan-out accounting and historical detail", () => {
+  it("lists a sibling that recorded nothing as having no results, not as passed", async () => {
+    enable(
+      true,
+      recordedFor({
+        fanned: true,
+        instance_count: 3,
+        verdict_counts: { passed: 1, not_recorded: 2 },
+        instances: [
+          instance([passMin], {
+            task_run_id: "a",
+            partition_value: "eu",
+            partition_index: 0,
+          }),
+          instance(undefined, {
+            task_run_id: "b",
+            partition_value: "us",
+            partition_index: 1,
+            status: "running",
+            verdict: "not_recorded",
+          }),
+          instance(undefined, {
+            task_run_id: "c",
+            partition_value: "ap",
+            partition_index: 2,
+            status: "skipped",
+            verdict: "not_recorded",
+          }),
+        ],
+      }),
+    );
+    panel({ partition_count: 3 });
+    expect(await screen.findByTestId("assertion-group-summary")).toHaveTextContent(
+      "3 partitions: 1 passed, 2 no results recorded",
+    );
+    const rows = screen.getAllByTestId("assertion-instance");
+    expect(rows).toHaveLength(3);
+    expect(rows[1]).toHaveTextContent("us: no results recorded");
+    expect(within(rows[1]).queryByText(/Passed/)).toBeNull();
+  });
+
+  it("renders each historical partition's own violations inside that partition", async () => {
+    const own = (partition: string, message: string) => ({
+      dataset,
+      metric: "rowCount",
+      assertion: "min",
+      observed: 1,
+      bound: 1000,
+      message,
+      partition,
+    });
+    enable(
+      true,
+      recordedFor({
+        fanned: true,
+        instance_count: 2,
+        verdict_counts: { violated: 2 },
+        instances: [
+          instance(undefined, {
+            task_run_id: "a",
+            partition_value: "eu",
+            partition_index: 0,
+            verdict: "violated",
+            violations: [own("eu", "eu breach")],
+          }),
+          instance(undefined, {
+            task_run_id: "b",
+            partition_value: "us",
+            partition_index: 1,
+            verdict: "violated",
+            violations: [own("us", "us breach")],
+          }),
+        ],
+      }),
+    );
+    panel({
+      partition_count: 2,
+      data_violations: [
+        { dataset, metric: "rowCount", assertion: "min", message: "head breach" },
+      ],
+    });
+    const rows = await screen.findAllByTestId("assertion-instance");
+    expect(within(rows[0]).getByTestId("assertion-evidence")).toHaveTextContent(
+      "eu breach",
+    );
+    expect(within(rows[1]).getByTestId("assertion-evidence")).toHaveTextContent(
+      "us breach",
+    );
+    expect(within(rows[1]).queryByText("eu breach")).toBeNull();
+    expect(screen.queryByText("head breach")).toBeNull();
+  });
+});
+
 describe("old rows, the gate and unrelated tasks", () => {
   it("still shows violations recorded before results existed and claims nothing passed", async () => {
     enable(true, { run_id: "run-1", job_id: "job-1", tasks: [] });
