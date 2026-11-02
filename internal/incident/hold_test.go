@@ -41,9 +41,14 @@ type holdWorld struct {
 
 func newHoldWorld(t *testing.T, namespace string, cooldown time.Duration) *holdWorld {
 	t.Helper()
-	enableDataAssertions(t)
 	db := testutil.OpenTestDB(t)
 	t.Cleanup(func() { testutil.CloseDB(db) })
+	return newHoldWorldOn(t, db, namespace, cooldown)
+}
+
+func newHoldWorldOn(t *testing.T, db *gorm.DB, namespace string, cooldown time.Duration) *holdWorld {
+	t.Helper()
+	enableDataAssertions(t)
 	w := &holdWorld{t: t, db: db, sub: NewSubscriber(nil, db, nil, cooldown), jobID: uuid.New(), alias: "orders-" + uuid.NewString()[:8], taskID: uuid.New()}
 	require.NoError(t, db.Create(&models.Job{ID: w.jobID, Alias: w.alias, Namespace: namespace}).Error)
 	require.NoError(t, db.Create(&models.Task{ID: w.taskID, JobID: w.jobID, AtomID: uuid.New(), Name: "load"}).Error)

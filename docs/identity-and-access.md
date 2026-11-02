@@ -1319,7 +1319,12 @@ at `runner` cluster-wide and bound to the one incident:
   incident's own job has moved out, the bundle shows neither its current DAG
   (`job.namespace_moved: true`, no tasks or edges) nor its remediation block:
   the playbook and the session profile resolve as for a job that declares no
-  remediation.
+  remediation. A `data_quality_hold` bundle's `data_quality` section comes from
+  the evidence shaped for the incident's namespace. Its metric series, and
+  `context/metrics`, hold only samples of runs recorded in that namespace, for the
+  incident's own dataset; no parameter names a dataset. When the job has moved
+  out, the series and the hold's live state are withheld (`namespace_moved: true`
+  in the section, and 403 or an MCP error from `context/metrics`).
 - **Act.** An action on the job or one of its runs is refused, and recorded
   `failed` with `namespace_moved`, when the job has moved out of the incident's
   namespace or the run was recorded in another one. A snoozed retry checks again
@@ -1328,6 +1333,12 @@ at `runner` cluster-wide and bound to the one incident:
   direct apply is confined to the incident's namespace, triggers and webhook
   paths included. Approving an action therefore needs `operator` only in the
   incident's namespace.
+- **Release.** A `release_hold` names a hold of a dataset the incident's job
+  still produces, opened by that job in the incident's namespace, and no other
+  producer of the dataset may live outside the namespace. Each is read from the
+  hold row and the live declarations, at the proposal, at dispatch and again
+  inside the release transaction. Anything else is recorded `failed`, in the same
+  words whether or not the hold exists, and a human is never asked.
 - **Earlier sessions.** A session started before this confinement could read
   other namespaces' jobs. For a namespace-confined reader, the incident detail
   withholds such a session's transcript (`session_log_withheld: true`) and the

@@ -49,4 +49,14 @@ func (s *IntegrationTestSuite) TestIncidentBundleSurvivesRESTJobDeletion() {
 	s.Empty(deleted.Job.Tasks, "a deleted job has no DAG to act on")
 	s.Empty(deleted.Job.Edges)
 	s.False(deleted.Job.NamespaceMoved)
+
+	// So is its history, by the alias the bundle gave the agent.
+	historyPath := "/v1/agent/incidents/" + incident.ID + "/context/history?job=" + f.mktAlias
+	var history struct {
+		Runs []struct {
+			ID string `json:"id"`
+		} `json:"runs"`
+	}
+	s.Require().NoError(json.Unmarshal([]byte(s.requireNSStatus(http.StatusOK, http.MethodGet, historyPath, token, "")), &history))
+	s.NotEmpty(history.Runs, "a deleted job's history outlives it")
 }

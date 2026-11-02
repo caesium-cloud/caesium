@@ -22,15 +22,18 @@ import (
 // allowlist, and the effective playbook. All attacker-influenced free text
 // (the log tail) is scrubbed before it enters the bundle.
 type Bundle struct {
-	Incident       BundleIncident   `json:"incident"`
-	Classification BundleClass      `json:"classification"`
-	Failure        BundleFailure    `json:"failure"`
-	Job            BundleJob        `json:"job"`
-	RunHistory     []BundleRun      `json:"run_history"`
-	LineageImpact  BundleImpact     `json:"lineage_impact"`
-	Playbook       datatypes.JSON   `json:"playbook,omitempty"`
-	Notes          []BundleNoteHint `json:"notes,omitempty"`
-	GeneratedAt    time.Time        `json:"generated_at"`
+	Incident       BundleIncident `json:"incident"`
+	Classification BundleClass    `json:"classification"`
+	Failure        BundleFailure  `json:"failure"`
+	// DataQuality describes the hold of a data_quality_hold incident; absent for
+	// every other class.
+	DataQuality   *BundleDataQuality `json:"data_quality,omitempty"`
+	Job           BundleJob          `json:"job"`
+	RunHistory    []BundleRun        `json:"run_history"`
+	LineageImpact BundleImpact       `json:"lineage_impact"`
+	Playbook      datatypes.JSON     `json:"playbook,omitempty"`
+	Notes         []BundleNoteHint   `json:"notes,omitempty"`
+	GeneratedAt   time.Time          `json:"generated_at"`
 }
 
 // BundleIncident is the incident header the agent triages.
@@ -220,7 +223,7 @@ func BuildBundleFor(ctx context.Context, db *gorm.DB, incidentID uuid.UUID, play
 	//
 	// A data_quality_hold incident names a task that SUCCEEDED, so it has no
 	// failure to describe: attributionTaskRun would present a green instance as
-	// one. The hold's evidence is in Classification.
+	// one. The hold is described by DataQuality.
 	if inc.RunID != nil && inc.TaskID != nil && FailureClass(inc.Class) != ClassDataQualityHold {
 		var rows []models.TaskRun
 		if err := db.WithContext(ctx).
@@ -254,19 +257,33 @@ func BuildBundleFor(ctx context.Context, db *gorm.DB, incidentID uuid.UUID, play
 	// Job + DAG topology, read in one snapshot: a move commits the job's new
 	// namespace and its new DAG together, so the namespace checked below is
 	// the owner of exactly the tasks and edges read with it, however many
-	// moves commit during the read (identity-and-access A8).
+	// moves commit during the read (identity-and-access A8). A hold's live state
+	// and metric series are read in the same snapshot, so the namespace that
+	// gates them cannot be older than they are: a repeat breach keeps the hold's
+	// job, so nothing on the hold row tells a new owner's breach from the old's.
 	var (
-		job   models.Job
-		tasks []BundleTask
-		edges []BundleDAGEdge
+		job     models.Job
+		tasks   []BundleTask
+		edges   []BundleDAGEdge
+		quality *BundleDataQuality
 	)
 	if err := readSnapshot(ctx, db, func(tx *gorm.DB) error {
 		var err error
 		job, tasks, edges, err = loadJobTopology(ctx, tx, inc.JobID)
+		if err != nil {
+			return err
+		}
+		if afterJobNamespaceRead != nil {
+			afterJobNamespaceRead()
+		}
+		if FailureClass(inc.Class) == ClassDataQualityHold {
+			quality, err = loadDataQuality(ctx, tx, &inc, movedOutOfIncident(&inc, &job))
+		}
 		return err
 	}); err != nil {
 		return nil, err
 	}
+	b.DataQuality = quality
 	b.Job = BundleJob{
 		Alias:            job.Alias,
 		Paused:           job.Paused,

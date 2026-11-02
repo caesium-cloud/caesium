@@ -686,6 +686,7 @@ const (
 	RemediationActionClearCacheEntry          = "clear_cache_entry"
 	RemediationActionSuppressDownstreamAlerts = "suppress_downstream_alerts"
 	RemediationActionExtendSLAOnce            = "extend_sla_once"
+	RemediationActionReleaseHold              = "release_hold"
 	RemediationActionSkipTask                 = "skip_task"
 	RemediationActionOverrideSchemaGate       = "override_schema_gate"
 	RemediationActionApplyJobdefPatch         = "apply_jobdef_patch"
@@ -707,6 +708,7 @@ var remediationActions = map[string]struct{}{
 	RemediationActionClearCacheEntry:          {},
 	RemediationActionSuppressDownstreamAlerts: {},
 	RemediationActionExtendSLAOnce:            {},
+	RemediationActionReleaseHold:              {},
 	RemediationActionSkipTask:                 {},
 	RemediationActionOverrideSchemaGate:       {},
 	RemediationActionApplyJobdefPatch:         {},

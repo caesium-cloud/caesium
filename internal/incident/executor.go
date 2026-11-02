@@ -317,7 +317,7 @@ type ActionRequest struct {
 // recorded as proposed (awaiting approval) without executing; playbook-denied
 // actions are recorded as rejected and return ErrActionNotPermitted.
 func (e *Executor) Execute(ctx context.Context, req ActionRequest) (*models.AgentAction, error) {
-	tier, ok := ActionTier(req.Type)
+	tier, ok := requestTier(req.Type, req.Params)
 	if !ok {
 		return nil, fmt.Errorf("%w: %q", ErrUnknownAction, req.Type)
 	}
@@ -360,6 +360,11 @@ func (e *Executor) Execute(ctx context.Context, req ActionRequest) (*models.Agen
 		// awaiting_approval, and end the agent session so no container idles while
 		// a human thinks. NOTHING executes here — ExecuteApproved is the only path
 		// that dispatches a tier-3 action, and only after a recorded decision.
+		if req.Type == ActionTypeReleaseHold {
+			if settled, err := e.settleReleaseProposal(ctx, inc, action, req.Params); settled {
+				return action, err
+			}
+		}
 		e.observe(action)
 		e.mirrorAudit(ctx, action, "proposed", "")
 		approval, err := e.requestApproval(ctx, inc, action)
@@ -390,7 +395,7 @@ func (e *Executor) Execute(ctx context.Context, req ActionRequest) (*models.Agen
 // deterministic) below TierApproval and no agent session, but the same audit recording, metric, and
 // dispatch path. Used by the Phase-0 deterministic rules (rules.go).
 func (e *Executor) ExecutePolicy(ctx context.Context, incidentID uuid.UUID, actionType string, params ActionParams) (*models.AgentAction, error) {
-	tier, ok := ActionTier(actionType)
+	tier, ok := requestTier(actionType, params)
 	if !ok {
 		return nil, fmt.Errorf("%w: %q", ErrUnknownAction, actionType)
 	}
