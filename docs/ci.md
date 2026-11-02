@@ -2494,7 +2494,7 @@ Unpromoted lanes are listed on every `ci-ok` run.
 | `lifecycle-standalone` | `just lifecycle-standalone` (F4) | merge-blocking | 3:31–4:46 |
 | `generated-fuzz` | `just generated-fuzz` (C2, 10 s per target, warm Go cache) | merge-blocking | 3:16–4:03 warm, 12:09 cold |
 | `generated-oracles` | `just generated-oracles` (C3 mutation validator) | merge-blocking | 1:15–1:40 |
-| `coverage-ratchets` | `just coverage-ratchets` (G2) | merge-blocking | 37:58 on source `261307c7`, run `37782134074`; older 4:58–5:42 estimate superseded |
+| `coverage-ratchets` | `just coverage-ratchets` (G2) | merge-blocking | 33–45 minutes on master and PRs in November 2026, against a 60-minute job timeout |
 | `core-robustness-nightly` | `just core-robustness nightly-core` (B3, instrumented) | nightly | 14:12 |
 | `lifecycle-cluster` | `just lifecycle-cluster` (F2) | nightly | 27:26 |
 | `console-recovery` | `just console-recovery` (D3) | nightly | 16:47 |

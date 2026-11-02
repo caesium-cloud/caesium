@@ -2036,7 +2036,7 @@ jobs:
     needs: [changes, builder]
     if: needs.changes.outputs.go == 'true' || needs.changes.outputs.ui == 'true' || needs.changes.outputs.ci == 'true'
     runs-on: ubuntu-26.04
-    timeout-minutes: 45
+    timeout-minutes: 60
     env:
       CANDIDATE_SHA: ${{ github.sha }}
       CAESIUM_SKIP_IMAGE_BUILD: "true"
