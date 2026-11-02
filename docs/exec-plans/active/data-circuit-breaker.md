@@ -1584,8 +1584,10 @@ precedent for it is warn-mode schema validation, which publishes
       namespace/name, only if `held`) to `unknown` with an empty reason in the
       release transaction, so it cannot outlive the hold with freshness
       scheduling off, no SLO, or the declaration gone. With the breaker switched
-      off while holds are active, the dataset reads treat a persisted `held` as
-      `unknown`. Dataset feeds order by one
+      off while holds are active, or a `held` write that raced a release, the
+      dataset reads treat a persisted `held` with no active hold as `unknown`
+      (list, detail and both filters); the evaluator's `held` write re-checks
+      that the hold is still active in the same transaction. Dataset feeds order by one
       total key `(updated_at DESC, namespace, name)` in every source query and
       the final merge, so tied timestamps page without skips or repeats.
 - [ ] F5. **Why-provenance** (arc convention 3 — this plan's single explainability

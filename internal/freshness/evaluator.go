@@ -312,6 +312,9 @@ func (e *Evaluator) evaluateWithSnapshot(ctx context.Context, graph registrySnap
 	if err != nil {
 		return err
 	}
+	if afterHoldsSnapshot != nil {
+		afterHoldsSnapshot()
+	}
 	pass := &evaluationPass{budget: e.maxDerivationsPerTick, launched: map[derivationKey]uuid.UUID{}, holds: holds}
 	for _, decl := range graph.produced {
 		id := declarationIdentity(decl)
@@ -557,15 +560,39 @@ func (e *Evaluator) updateStatusTx(ctx context.Context, db *gorm.DB, decl models
 	// One upsert carrying the real status/reason: insert the row on first
 	// observation, otherwise update the evaluator-owned columns in place. dqlite
 	// accepts ON CONFLICT DO UPDATE for plain column assignments.
-	return db.WithContext(ctx).Clauses(clause.OnConflict{
-		Columns: []clause.Column{{Name: "namespace"}, {Name: "name"}},
-		DoUpdates: clause.Assignments(map[string]any{
-			"status":           status,
-			"reason":           reason,
-			"reason_namespace": reasonNamespace,
-			"updated_at":       e.now().UTC(),
-		}),
-	}).Create(&row).Error
+	upsert := func(tx *gorm.DB) error {
+		return tx.WithContext(ctx).Clauses(clause.OnConflict{
+			Columns: []clause.Column{{Name: "namespace"}, {Name: "name"}},
+			DoUpdates: clause.Assignments(map[string]any{
+				"status":           status,
+				"reason":           reason,
+				"reason_namespace": reasonNamespace,
+				"updated_at":       e.now().UTC(),
+			}),
+		}).Create(&row).Error
+	}
+	if status != models.DatasetStatusHeld {
+		return upsert(db)
+	}
+	// `held` is written only while the hold is STILL active, decided here at write
+	// time and not from the pass's snapshot: a release (which clears `held` in its
+	// own transaction) can land between the snapshot and this write, and writing
+	// the stale verdict afterwards would strand `held` on a dataset that may have
+	// no SLO left for any later pass to correct. The check and the upsert share a
+	// transaction, and writes serialise through the single writer, so the release
+	// cannot interleave between them.
+	return db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var active int64
+		if err := tx.Model(&models.DatasetHold{}).
+			Where("namespace = ? AND name = ? AND status = ?", row.Namespace, row.Name, models.DatasetHoldStatusActive).
+			Count(&active).Error; err != nil {
+			return err
+		}
+		if active == 0 {
+			return nil
+		}
+		return upsert(tx)
+	})
 }
 
 func (e *Evaluator) upstreamReady(ctx context.Context, outputState models.DatasetState, consumes []models.DatasetDeclaration, holds map[datasetIdentity]heldDataset) (bool, map[string]string, string, error) {
@@ -1120,6 +1147,10 @@ var errProducerMovedSinceSnapshot = errors.New("producer moved to another namesp
 // evaluation read its declaration snapshot: where an apply that moves a
 // producer interleaves.
 var afterRegistrySnapshot func()
+
+// afterHoldsSnapshot, when set (tests only), runs right after a pass read its
+// active-holds snapshot: where a release interleaves with a pending `held` write.
+var afterHoldsSnapshot func()
 
 func (e *Evaluator) recordDerivation(ctx context.Context, decl models.DatasetDeclaration, decision, reason string, consumed map[string]string, runID *uuid.UUID) error {
 	return e.recordDerivationTx(ctx, e.db, decl, decision, reason, consumed, runID)

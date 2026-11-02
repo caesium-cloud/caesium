@@ -250,6 +250,10 @@ func (s *Service) GetWithOptions(namespace, name string, options GetOptions) (*D
 		if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, err
 		}
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			// A persisted `held` with no active hold is stale.
+			unstrandHeld(&detail.State)
+		}
 		if err == nil {
 			if err := s.shapeHolds(v, []*models.DatasetHold{&hold}); err != nil {
 				return nil, err
@@ -398,32 +402,35 @@ const activeHoldExists = "EXISTS (SELECT 1 FROM dataset_holds WHERE dataset_hold
 	models.DatasetHoldStatusActive + "' AND dataset_holds.namespace = %[1]s AND dataset_holds.name = %[2]s)"
 
 // withEffectiveStatus applies the `status` filter to dataset_states against the
-// status List reports, which is "held" for a dataset with an active hold (see
-// State). With the data circuit breaker off no hold counts, so the filter is the
-// persisted column alone.
+// status the reads report. A dataset is `held` exactly while an ACTIVE hold exists
+// on it (the circuit breaker on); a persisted `held` with no active hold is stale
+// and reads as `unknown` (see unstrandHeld), so it never matches `held` and does
+// match `unknown`. With the breaker off no hold counts at all.
 //
-//   - held: an active hold, or a row the evaluator already persisted as held;
+//   - held: an active hold;
+//   - unknown: persisted unknown or stale held, with no active hold;
 //   - any other value: persisted AND no active hold, so a held dataset does not
-//     list as fresh (or unknown) from a stale persisted row while its hold is
-//     open.
+//     list as fresh from a stale persisted row while its hold is open.
 func withEffectiveStatus(q *gorm.DB, status string) *gorm.DB {
 	if status == "" {
 		return q
 	}
+	unknownLike := []string{models.DatasetStatusUnknown, models.DatasetStatusHeld}
 	if !env.Variables().DataAssertionsEnabled {
-		// No hold counts with the breaker off, so a `held` row persisted while it
-		// was on is stranded: it reads as unknown (see unstrandHeld), never held.
 		switch status {
 		case models.DatasetStatusHeld:
 			return q.Where("1 = 0")
 		case models.DatasetStatusUnknown:
-			return q.Where("status IN ?", []string{models.DatasetStatusUnknown, models.DatasetStatusHeld})
+			return q.Where("status IN ?", unknownLike)
 		}
 		return q.Where("status = ?", status)
 	}
 	exists := fmt.Sprintf(activeHoldExists, "dataset_states.namespace", "dataset_states.name")
-	if status == models.DatasetStatusHeld {
-		return q.Where("(status = ? OR "+exists+")", status)
+	switch status {
+	case models.DatasetStatusHeld:
+		return q.Where(exists)
+	case models.DatasetStatusUnknown:
+		return q.Where("status IN ?", unknownLike).Where("NOT " + exists)
 	}
 	return q.Where("status = ?", status).Where("NOT " + exists)
 }

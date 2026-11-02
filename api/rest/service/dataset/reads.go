@@ -79,16 +79,20 @@ func (s *Service) withHolds(rows []models.DatasetState) ([]State, error) {
 			states[i].Hold = hold
 			states[i].Status = models.DatasetStatusHeld
 			states[i].Reason = freshness.HeldReason(states[i].Namespace, states[i].Name, hold.ID)
+		} else {
+			// A persisted `held` with no active hold is stale (released, or the
+			// evaluator raced the release): report what is actually known.
+			unstrandHeld(&states[i].DatasetState)
 		}
 	}
 	return states, nil
 }
 
-// unstrandHeld reports a persisted `held` as unknown while the data circuit
-// breaker is off. The evaluator writes `held` only for an active hold and the
-// release transaction clears it, but an operator can switch the breaker off with
-// holds still active; nothing then evaluates or releases them, and "held" would
-// otherwise be reported for as long as the flag stays off.
+// unstrandHeld reports a persisted `held` that has no active hold as unknown.
+// The evaluator writes `held` only for an active hold and the release
+// transaction clears it, but a stale row can still be read: the breaker switched
+// off with holds still active (nothing then evaluates or releases them), or a
+// write that raced a release. "Held" is only ever reported for a live hold.
 func unstrandHeld(state *models.DatasetState) {
 	if state.Status == models.DatasetStatusHeld {
 		state.Status, state.Reason = models.DatasetStatusUnknown, ""
