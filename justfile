@@ -474,6 +474,7 @@ integration-test: integration-runner
         -e CAESIUM_TEST_SHARD_COUNT \
         -e CAESIUM_EVENT_INGEST_API_KEY={{ event_ingest_api_key }} \
         -e CAESIUM_IT_POLICY_FIXTURE=two-namespaces \
+        -e CAESIUM_IT_RESTART_TEMPLATE={{ it_container }} \
         -e DOCKER_HOST=unix:///var/run/docker.sock \
         --network=container:{{ it_container }} \
         -w {{ bld_dir }} \
@@ -1086,6 +1087,7 @@ integration-up-agent: build-stress build-test build-triage-agent
         -e CAESIUM_AGENT_SESSION_TIMEOUT=45s \
         -e CAESIUM_AGENT_INCIDENT_COOLDOWN=1s \
         -e CAESIUM_AGENT_APPROVAL_REDRIVE_INTERVAL=5s \
+        -e CAESIUM_AGENT_HOLD_RECONCILE_INTERVAL=1s \
         -e CAESIUM_API_EXTERNAL_URL={{ agent_api_external_url }} \
         -e CAESIUM_OPEN_LINEAGE_ENABLED=true \
         -e CAESIUM_OPEN_LINEAGE_TRANSPORT=console \

@@ -1103,10 +1103,10 @@ cleanup_coverage_journeys
             self.assertEqual(b.main(), 1)
         self.assertNotIn('published', events)
 
-    def test_resumption_posts_to_versioned_public_webhook_and_requires_receipt(self):
+    def test_inflight_trigger_posts_to_versioned_public_webhook_and_requires_receipt(self):
         c = self.collector()
         c.run_id = 'owned'
-        c.shutdown_job = {'resumption_path': '/hooks/coverage-shutdown-owned'}
+        c.shutdown_job = {'inflight_trigger_path': '/hooks/coverage-shutdown-owned'}
         c.host_api_base = lambda _: 'http://127.0.0.1:8080'
         receipt = {'path': 'coverage-shutdown-owned', 'http_triggers_accepted': 1,
                    'http_runs_started': 1, 'receipt_id': RUN}
@@ -1139,90 +1139,255 @@ cleanup_coverage_journeys
                 with self.assertRaises(b.JourneyError):
                     c.fire_shutdown_webhook('owned-server')
 
-    def test_same_durable_rows_are_retained_then_explicitly_resumed_to_success(self):
+    def restart_collector(self, label):
+        """A collector at generation 2's boot, with the shutdown task's identity."""
         c = self.collector()
         c.task_image_id, c.task_docker_image_id, c.task_image_ref = CONFIG, INDEX, 'alpine:3.23'
-        c.shutdown_control_dir = self.tmp / 'shutdown-control'
+        c.shutdown_control_dir = self.tmp / label
         c.shutdown_control_dir.mkdir()
         c.shutdown_release_path = c.shutdown_control_dir / 'release'
         c.shutdown_control_mount_source_sha256 = hashlib.sha256(str(c.shutdown_control_dir.resolve()).encode()).hexdigest()
         c.shutdown_job = {'job_id': RUN, 'run_id': RUN, 'task_id': TASK, 'task_run_id': TASK, 'runtime_id': CID,
                           'attempt_before_signal': 1,
-                          'resumption_mode': 'explicit-public-http-trigger-existing-run',
-                          'resumption_path': '/hooks/coverage-shutdown-owned',
+                          'recovery_mode': 'lost-driver-failure-then-explicit-cli-retry',
+                          'inflight_trigger_path': '/hooks/coverage-shutdown-owned',
+                          'run_lease_ttl_seconds': b.RUN_LEASE_TTL_SECONDS,
                           'control_mount_source_sha256': c.shutdown_control_mount_source_sha256}
         c.run_id = 'owned'
         c.native_runtime_absent_generations = [1]
-        removed = []
-        c.verify_runtime_absent = lambda generation, runtime_id=None: removed.append((generation, runtime_id))
         c.server_generations = [{'finished_at': '2026-10-08T12:00:02.600Z'}]
-        new_runtime = 'f' * 64
-        retained_run = {'id': RUN, 'status': 'running', 'tasks': [{'task_id': TASK, 'status': 'running', 'runtime_id': CID}]}
-        retained_row = {'task_run_id': TASK, 'runtime_id': CID, 'status': 'running', 'attempt': 1}
-        delayed_dispatch_run = copy.deepcopy(retained_run)
-        delayed_dispatch_row = copy.deepcopy(retained_row)
-        split_snapshot_run = copy.deepcopy(retained_run)
-        running_run = {'id': RUN, 'status': 'running', 'tasks': [{'task_id': TASK, 'status': 'running', 'runtime_id': new_runtime}]}
-        running_row = {'task_run_id': TASK, 'runtime_id': new_runtime, 'status': 'running', 'attempt': 1,
-                       'started_at': '2026-10-08T12:00:02.800Z'}
-        final_run = {'id': RUN, 'status': 'succeeded', 'completed_at': '2026-10-08T12:00:03.900Z',
-                     'tasks': [{'task_id': TASK, 'status': 'succeeded', 'runtime_id': new_runtime,
-                                'output': {'shutdown': 'resumed-owned'}}]}
-        final_row = {'task_run_id': TASK, 'runtime_id': new_runtime, 'status': 'succeeded',
-                     'attempt': 1, 'started_at': '2026-10-08T12:00:02.800Z', 'completed_at': '2026-10-08T12:00:03.800Z'}
-        records = [retained_run, delayed_dispatch_run, split_snapshot_run, running_run, final_run]
-        partitions = [retained_row, delayed_dispatch_row, running_row, running_row, final_row]
+        c.host_runs = [{'id': RUN}]
+        c.task_containers = ''
+        return c
+
+    def serve_rows(self, c, states):
+        """Answer public reads from (run, TaskRun) states, holding on the last."""
+        reads = {'records': [state[0] for state in states], 'rows': [state[1] for state in states]}
+        def next_state(name):
+            return reads[name].pop(0) if len(reads[name]) > 1 else reads[name][0]
         def api_json(_, path):
+            if path.endswith('/runs?limit=2'):
+                return c.host_runs
             if '/partitions' in path:
-                return {'total': 1, 'partitions': [partitions.pop(0)]}
-            return records.pop(0)
+                return {'total': 1, 'partitions': [next_state('rows')]}
+            return next_state('records')
         c.api_json = api_json
-        order = []
-        def native_running(runtime_id=None):
-            self.assertTrue(c.shutdown_release_marker_absent(), 'release must remain held during native runtime proof')
-            self.assertEqual(runtime_id, new_runtime)
-            order.append('native-running')
-            return {'runtime_id': new_runtime, 'run_id': RUN, 'task_id': TASK,
-                    'docker_image_id': INDEX, 'task_config_id': CONFIG,
-                    'command_sha256': hashlib.sha256(c.shutdown_command().encode()).hexdigest(),
-                    'control_mount_source_sha256': c.shutdown_control_mount_source_sha256,
-                    'control_mount_destination': '/caesium-shutdown-control', 'control_mount_read_only': True,
-                    'running': True}
-        c.native_running = native_running
-        c.fire_shutdown_webhook = lambda _: {'status': 202, 'path': c.shutdown_job['resumption_path'],
-                                              'http_triggers_accepted': 1, 'http_runs_started': 1,
-                                              'receipt_id': '12345678-1234-4234-8234-123456789abc'}
-        original_fire = c.fire_shutdown_webhook
-        def fire(_):
-            order.append('webhook-accepted')
-            return original_fire(_)
-        c.fire_shutdown_webhook = fire
-        original_release = c.release_shutdown_task
-        def release():
-            self.assertEqual(order[-1], 'native-running')
-            order.append('release')
-            return original_release()
-        c.release_shutdown_task = release
+        c.docker_run = lambda *args, **kwargs: subprocess.CompletedProcess(args, 0, c.task_containers, '')
+
+    @staticmethod
+    def original_rows(status='running', **task):
+        run = {'id': RUN, 'status': status, 'tasks': [dict({'task_id': TASK, 'status': status, 'runtime_id': CID}, **task)]}
+        row = {'task_run_id': TASK, 'runtime_id': CID, 'status': status, 'attempt': 1}
+        return run, row
+
+    def lost_rows(self, completed_at):
+        run, row = self.original_rows('failed', error=b.RUN_DRIVER_LOST_ERROR)
+        run.update(error=b.RUN_DRIVER_LOST_ERROR, completed_at=completed_at)
+        row.update(error=b.RUN_DRIVER_LOST_ERROR, completed_at=completed_at)
+        return run, row
+
+    def test_inflight_trigger_is_accepted_and_starts_nothing(self):
+        skip_line = json.dumps({'msg': b.TRIGGER_SKIPPED_LOG, 'job_id': RUN, 'run_id': RUN})
+        foreign_line = json.dumps({'msg': b.TRIGGER_SKIPPED_LOG, 'job_id': RUN, 'run_id': TASK})
+        accepted = {'status': 202, 'path': '/hooks/coverage-shutdown-owned', 'http_triggers_accepted': 1,
+                    'http_runs_started': 1, 'receipt_id': '12345678-1234-4234-8234-123456789abc'}
+        for fault in (None, 'no-g1-cleanup', 'second-run', 'new-runtime', 'never-skipped', 'skipped-twice',
+                      'already-failed', 'marker', 'other-task-run', 'changed-attempt'):
+            with self.subTest(fault=fault):
+                c = self.restart_collector('trigger-' + str(fault))
+                run, row = self.original_rows()
+                after_run, after_row = copy.deepcopy(run), copy.deepcopy(row)
+                if fault == 'already-failed':
+                    after_run, after_row = self.lost_rows('2026-10-08T12:01:00Z')
+                if fault == 'other-task-run':
+                    after_row['task_run_id'] = RUN
+                if fault == 'changed-attempt':
+                    after_row['attempt'] = 2
+                self.serve_rows(c, [(run, row), (after_run, after_row)])
+                if fault == 'no-g1-cleanup':
+                    c.native_runtime_absent_generations = []
+                if fault == 'second-run':
+                    c.host_runs = [{'id': 'new-run'}, {'id': RUN}]
+                if fault == 'new-runtime':
+                    c.task_containers = 'f' * 64 + '\n'
+                if fault == 'marker':
+                    c.shutdown_release_path.write_bytes(b'x')
+                logs = iter(['not json\n' + foreign_line])
+                c.fire_shutdown_webhook = lambda _: accepted
+                def docker_stdout(*args, **kwargs):
+                    self.assertEqual(args[:2], ('container', 'logs'))
+                    if fault == 'never-skipped':
+                        return foreign_line
+                    if fault == 'skipped-twice':
+                        return skip_line + '\n' + skip_line
+                    return next(logs, 'not json\n' + foreign_line + '\n' + skip_line)
+                c.docker_stdout = docker_stdout
+                clock = iter(range(0, 100000, 10))
+                with patch.object(b.time, 'sleep'), patch.object(b.time, 'monotonic', lambda: next(clock)):
+                    if fault is None:
+                        c.verify_inflight_trigger_started_nothing('owned-server')
+                    else:
+                        with self.assertRaises(b.JourneyError):
+                            c.verify_inflight_trigger_started_nothing('owned-server')
+                        continue
+                self.assertEqual(c.shutdown_job['inflight_webhook'], accepted)
+                self.assertEqual(c.shutdown_job['inflight_trigger'],
+                                 {'skip_log_lines': 1, 'run_ids': [RUN], 'task_containers': []})
+                self.assertEqual(c.shutdown_job['retained_task_run_id'], TASK)
+                self.assertEqual(c.shutdown_job['retained_attempt'], 1)
+                self.assertEqual(c.shutdown_job['retained_runtime_id'], CID)
+                self.assertTrue(c.shutdown_job['release_marker_absent_before_webhook'])
+                self.assertNotIn('generation2_automatic_reexecution', c.shutdown_job)
+
+    def test_recovery_fails_the_exact_run_within_its_lease_bound(self):
+        floor, ceiling = b.RUN_RECOVERY_FLOOR_SECONDS, b.RUN_RECOVERY_CEILING_SECONDS
+        self.assertEqual((floor, ceiling), (2 * b.RUN_LEASE_TTL_SECONDS, 4 * b.RUN_LEASE_TTL_SECONDS))
+        for fault in (None, 'no-trigger-proof', 'before-floor', 'after-ceiling', 'never', 'wrong-error',
+                      'task-error', 'row-error', 'other-task-run', 'changed-attempt', 'new-runtime-row',
+                      'succeeded', 'pending', 'second-run', 'task-container', 'marker', 'output'):
+            with self.subTest(fault=fault):
+                c = self.restart_collector('recovery-' + str(fault))
+                c.shutdown_job['inflight_trigger'] = {'skip_log_lines': 1, 'run_ids': [RUN], 'task_containers': []}
+                if fault == 'no-trigger-proof':
+                    del c.shutdown_job['inflight_trigger']
+                now = b.datetime.datetime.now(b.datetime.timezone.utc)
+                booted = now - b.datetime.timedelta(seconds=20)
+                offset = {'before-floor': floor - 1, 'after-ceiling': ceiling + 1}.get(fault, floor + 10)
+                completed = (booted + b.datetime.timedelta(seconds=offset)).isoformat().replace('+00:00', 'Z')
+                c.inspect_container = lambda _: {'State': {'StartedAt': booted.isoformat().replace('+00:00', 'Z')}}
+                run, row = self.original_rows()
+                lost_run, lost_row = self.lost_rows(completed)
+                if fault == 'wrong-error':
+                    lost_run['error'] = 'some other failure'
+                if fault == 'task-error':
+                    lost_run['tasks'][0]['error'] = 'some other failure'
+                if fault == 'row-error':
+                    lost_row['error'] = 'some other failure'
+                if fault == 'other-task-run':
+                    lost_row['task_run_id'] = RUN
+                if fault == 'changed-attempt':
+                    lost_row['attempt'] = 2
+                if fault == 'output':
+                    lost_run['tasks'][0]['output'] = {'shutdown': 'lost'}
+                states = [(run, row), (lost_run, lost_row)]
+                if fault == 'never':
+                    states = [(run, row)]
+                if fault == 'new-runtime-row':
+                    moved_run, moved_row = self.original_rows()
+                    moved_row['runtime_id'] = 'f' * 64
+                    states = [(run, row), (moved_run, moved_row)]
+                if fault == 'succeeded':
+                    states = [(run, row), self.original_rows('succeeded')]
+                if fault == 'pending':
+                    states = [(run, row), self.original_rows('pending')]
+                self.serve_rows(c, states)
+                if fault == 'second-run':
+                    c.host_runs = [{'id': 'new-run'}, {'id': RUN}]
+                if fault == 'task-container':
+                    c.task_containers = 'f' * 64 + '\n'
+                if fault == 'marker':
+                    c.shutdown_release_path.write_bytes(b'x')
+                clock = iter(range(0, 100000, 40))
+                with patch.object(b.time, 'sleep'), patch.object(b.time, 'monotonic', lambda: next(clock)):
+                    if fault is None:
+                        c.verify_shutdown_job_recovered('owned-server')
+                    else:
+                        with self.assertRaises(b.JourneyError):
+                            c.verify_shutdown_job_recovered('owned-server')
+                        self.assertNotIn('recovery', c.shutdown_job)
+                        continue
+                recovery = c.shutdown_job['recovery']
+                self.assertIs(c.shutdown_job['generation2_automatic_reexecution'], False)
+                self.assertEqual((recovery['run_status'], recovery['task_status'], recovery['task_run_status']),
+                                 ('failed', 'failed', 'failed'))
+                self.assertEqual(recovery['error'], b.RUN_DRIVER_LOST_ERROR)
+                self.assertEqual((recovery['task_run_id'], recovery['attempt'], recovery['runtime_id']), (TASK, 1, CID))
+                self.assertEqual((recovery['floor_seconds'], recovery['ceiling_seconds']), (floor, ceiling))
+                self.assertEqual(recovery['elapsed_seconds'], floor + 10)
+
+    def retried_collector(self, label, new_runtime='f' * 64):
+        """A collector past recovery, with its retry's CLI and native witnesses."""
+        c = self.restart_collector(label)
+        c.shutdown_job.update(
+            generation2_automatic_reexecution=False,
+            recovery={'run_status': 'failed', 'completed_at': '2026-10-08T12:00:02.700Z'})
+        c.verify_runtime_absent = lambda generation, runtime_id=None: None
+        c.candidate_cli_calls = []
+        def candidate_cli(lane, *args, timeout=60):
+            c.candidate_cli_calls.append((lane, args, timeout))
+            return f'Retrying run {RUN} (job {RUN})'
+        c.candidate_cli = candidate_cli
+        c.native_running = lambda runtime_id=None: {'runtime_id': runtime_id, 'run_id': RUN, 'task_id': TASK,
+            'docker_image_id': INDEX, 'task_config_id': CONFIG,
+            'command_sha256': hashlib.sha256(c.shutdown_command().encode()).hexdigest(),
+            'control_mount_source_sha256': c.shutdown_control_mount_source_sha256,
+            'control_mount_destination': '/caesium-shutdown-control', 'control_mount_read_only': True,
+            'running': True}
+        return c
+
+    @staticmethod
+    def retried_rows(runtime='f' * 64):
+        """The reset, running and succeeded rows of one retry on a new runtime."""
+        reset_run = {'id': RUN, 'status': 'running', 'tasks': [{'task_id': TASK, 'status': 'pending'}]}
+        reset_row = {'task_run_id': TASK, 'status': 'pending', 'attempt': 1}
+        split_run = {'id': RUN, 'status': 'running', 'tasks': [{'task_id': TASK, 'status': 'pending'}]}
+        split_row = {'task_run_id': TASK, 'runtime_id': runtime, 'status': 'running', 'attempt': 1,
+                     'started_at': '2026-10-08T12:00:02.800Z'}
+        running_run = {'id': RUN, 'status': 'running', 'tasks': [{'task_id': TASK, 'status': 'running', 'runtime_id': runtime}]}
+        running_row = copy.deepcopy(split_row)
+        final_run = {'id': RUN, 'status': 'succeeded', 'completed_at': '2026-10-08T12:00:03.900Z',
+                     'tasks': [{'task_id': TASK, 'status': 'succeeded', 'runtime_id': runtime,
+                                'output': {'shutdown': 'retried-owned'}}]}
+        final_row = {'task_run_id': TASK, 'runtime_id': runtime, 'status': 'succeeded', 'attempt': 1,
+                     'started_at': '2026-10-08T12:00:02.800Z', 'completed_at': '2026-10-08T12:00:03.800Z'}
+        return [(reset_run, reset_row), (split_run, split_row), (running_run, running_row), (final_run, final_row)]
+
+    def retry_clock(self):
         original_datetime = b.datetime.datetime
         observations = iter(('2026-10-08T12:00:03.100Z', '2026-10-08T12:00:03.200Z'))
         class Clock(original_datetime):
             @classmethod
             def now(cls, tz=None):
                 return cls.fromisoformat(next(observations).replace('Z', '+00:00'))
-        with patch.object(b.datetime, 'datetime', Clock):
-            c.verify_shutdown_job_explicitly_resumed('owned-server')
-        self.assertEqual(order, ['webhook-accepted', 'native-running', 'release'])
-        self.assertIs(c.shutdown_job['generation2_automatic_takeover'], False)
-        self.assertEqual(c.shutdown_job['retained_task_run_id'], TASK)
-        self.assertEqual(c.shutdown_job['retained_attempt'], 1)
-        self.assertEqual(c.shutdown_job['retained_runtime_id'], CID)
+        return patch.object(b.datetime, 'datetime', Clock)
+
+    def test_operator_retry_finishes_the_same_taskrun_on_a_new_runtime(self):
+        c = self.retried_collector('retry')
+        new_runtime = 'f' * 64
+        removed = []
+        c.verify_runtime_absent = lambda generation, runtime_id=None: removed.append((generation, runtime_id))
+        self.serve_rows(c, self.retried_rows(new_runtime))
+        order = []
+        original_cli, original_native = c.candidate_cli, c.native_running
+        def candidate_cli(lane, *args, timeout=60):
+            self.assertTrue(c.shutdown_release_marker_absent(), 'release must remain held across the retry')
+            order.append('retry-accepted')
+            return original_cli(lane, *args, timeout=timeout)
+        def native_running(runtime_id=None):
+            self.assertTrue(c.shutdown_release_marker_absent(), 'release must remain held during native runtime proof')
+            self.assertEqual(runtime_id, new_runtime)
+            order.append('native-running')
+            return original_native(runtime_id)
+        original_release = c.release_shutdown_task
+        def release():
+            self.assertEqual(order[-1], 'native-running')
+            order.append('release')
+            return original_release()
+        c.candidate_cli, c.native_running, c.release_shutdown_task = candidate_cli, native_running, release
+        with self.retry_clock(), patch.object(b.time, 'sleep'):
+            c.verify_shutdown_run_retried('owned-server')
+        self.assertEqual(order, ['retry-accepted', 'native-running', 'release'])
+        self.assertEqual(c.candidate_cli_calls, [('shutdown-retry', ('run', 'retry', '--job-id', RUN, '--run-id', RUN,
+                                                                     '--server', c.sp_base), 90)])
+        self.assertEqual(c.shutdown_job['retry_cli'], {'lane': 'shutdown-retry', 'accepted': True,
+                                                       'output': f'Retrying run {RUN} (job {RUN})'})
         self.assertEqual(c.shutdown_job['final_task_run_id'], TASK)
         self.assertEqual(c.shutdown_job['final_attempt'], 1)
         self.assertEqual(c.shutdown_job['final_runtime_id'], new_runtime)
         self.assertEqual(removed, [(2, new_runtime)])
-        self.assertEqual(c.shutdown_job['resumption_output'], {'shutdown': 'resumed-owned'})
+        self.assertEqual(c.shutdown_job['retry_output'], {'shutdown': 'retried-owned'})
         self.assertTrue(c.shutdown_job['release_marker_after_running_observation'])
-        self.assertTrue(c.shutdown_job['resumption_runtime_absent_after_completion'])
+        self.assertTrue(c.shutdown_job['retry_runtime_absent_after_completion'])
 
     def test_release_marker_is_one_shot_and_uses_expected_bytes(self):
         c = self.collector()
@@ -1239,8 +1404,7 @@ cleanup_coverage_journeys
             c.release_shutdown_task()
         c.server_generations = [{'finished_at': '2026-10-04T12:00:02Z'}]
         observed_at = b.datetime.datetime.now(b.datetime.timezone.utc).isoformat().replace('+00:00', 'Z')
-        c.shutdown_job['resumption_webhook'] = {'status': 202}
-        c.shutdown_job['resumption_runtime_running'] = {
+        c.shutdown_job['retry_runtime_running'] = {
             'runtime_id': 'f' * 64, 'task_run_id': TASK, 'attempt': 1,
             'task_started_at': '2026-10-07T12:00:03Z', 'observed_at': observed_at,
             'release_marker_absent': True, 'running': True,
@@ -1251,6 +1415,16 @@ cleanup_coverage_journeys
                        'control_mount_destination': '/caesium-shutdown-control', 'control_mount_read_only': True,
                        'running': True},
         }
+        with self.assertRaises(b.JourneyError):
+            c.release_shutdown_task()
+        c.shutdown_job['recovery'] = {'run_status': 'failed', 'completed_at': '2026-10-07T12:00:02Z'}
+        with self.assertRaises(b.JourneyError):
+            c.release_shutdown_task()
+        c.shutdown_job['retry_cli'] = {'accepted': True}
+        c.shutdown_job['recovery']['completed_at'] = '2026-10-07T12:00:04Z'
+        with self.assertRaises(b.JourneyError):
+            c.release_shutdown_task()
+        c.shutdown_job['recovery']['completed_at'] = '2026-10-07T12:00:02Z'
         self.assertTrue(c.shutdown_release_marker_absent())
         marker = c.release_shutdown_task()
         self.assertFalse(c.shutdown_release_marker_absent())
@@ -1259,69 +1433,65 @@ cleanup_coverage_journeys
         with self.assertRaises(b.JourneyError):
             c.release_shutdown_task()
 
-    def test_resumption_refuses_changed_ids_same_runtime_failed_or_pre_shutdown_completion(self):
-        for fault in ('run-id', 'task-id', 'task-run-id', 'same-runtime', 'failed', 'early', 'retained-attempt', 'final-attempt', 'missing-attempt', 'wrong-output', 'runtime-changed-after-observation', 'split-runtime-change'):
+    def test_retry_refuses_changed_ids_same_runtime_failed_or_pre_recovery_completion(self):
+        for fault in ('no-recovery', 'marker-before-retry', 'unconfirmed-cli', 'run-id', 'task-id', 'task-run-id',
+                      'same-runtime', 'lost-runtime-survives', 'failed-before-release', 'failed', 'early', 'pre-recovery-start',
+                      'final-attempt', 'missing-attempt', 'wrong-output', 'runtime-changed-after-observation',
+                      'diverged-runtime'):
             with self.subTest(fault=fault):
-                c = self.collector()
-                c.task_image_id, c.task_docker_image_id, c.task_image_ref = CONFIG, INDEX, 'alpine:3.23'
-                c.shutdown_control_dir = self.tmp / ('shutdown-control-' + fault)
-                c.shutdown_control_dir.mkdir()
-                c.shutdown_release_path = c.shutdown_control_dir / 'release'
-                c.shutdown_control_mount_source_sha256 = hashlib.sha256(str(c.shutdown_control_dir.resolve()).encode()).hexdigest()
-                c.shutdown_job = {'job_id': RUN, 'run_id': RUN, 'task_id': TASK, 'task_run_id': TASK, 'runtime_id': CID,
-                                  'attempt_before_signal': 1,
-                                  'resumption_mode': 'explicit-public-http-trigger-existing-run',
-                                  'resumption_path': '/hooks/coverage-shutdown-owned',
-                                  'control_mount_source_sha256': c.shutdown_control_mount_source_sha256}
-                c.run_id = 'owned'
-                c.native_runtime_absent_generations = [1]
-                c.verify_runtime_absent = lambda generation, runtime_id=None: None
-                c.server_generations = [{'finished_at': '2026-10-04T12:00:02Z'}]
                 new_runtime = CID if fault == 'same-runtime' else 'f' * 64
-                retained_run = {'id': RUN, 'status': 'running', 'tasks': [{'task_id': TASK, 'status': 'running', 'runtime_id': CID}]}
-                retained_row = {'task_run_id': TASK, 'runtime_id': CID, 'status': 'running',
-                                'attempt': 2 if fault == 'retained-attempt' else 1}
-                delayed_dispatch_run = copy.deepcopy(retained_run)
-                delayed_dispatch_row = copy.deepcopy(retained_row)
-                observed_runtime = new_runtime
-                final_runtime = 'e' * 64 if fault == 'runtime-changed-after-observation' else new_runtime
-                running_run = {'id': RUN, 'status': 'running', 'tasks': [{'task_id': TASK, 'status': 'running', 'runtime_id': observed_runtime}]}
-                running_row = {'task_run_id': TASK, 'runtime_id': observed_runtime, 'status': 'running',
-                               'attempt': 1, 'started_at': '2026-10-07T12:00:03Z'}
-                split_snapshot_run = copy.deepcopy(retained_run)
-                split_snapshot_row = copy.deepcopy(running_row)
-                if fault == 'split-runtime-change':
-                    split_snapshot_row['runtime_id'] = '0' * 64
-                run_id = '99999999-9999-4999-8999-999999999999' if fault == 'run-id' else RUN
-                task_id = '88888888-8888-4888-8888-888888888888' if fault == 'task-id' else TASK
-                task_run_id = '77777777-7777-4777-8777-777777777777' if fault == 'task-run-id' else TASK
-                completion = '2026-10-04T12:00:01Z' if fault == 'early' else '2030-01-01T00:00:05Z'
-                status = 'failed' if fault == 'failed' else 'succeeded'
-                final_run = {'id': run_id, 'status': status, 'completed_at': completion,
-                             'tasks': [{'task_id': task_id, 'status': status, 'runtime_id': final_runtime,
-                                        'output': {} if fault == 'wrong-output' else {'shutdown': 'resumed-owned'}}]}
-                final_row = {'task_run_id': task_run_id, 'runtime_id': final_runtime, 'status': status,
-                             'attempt': (2 if fault == 'final-attempt' else 1),
-                             'started_at': '2026-10-07T12:00:03Z', 'completed_at': completion}
+                c = self.retried_collector('retry-' + fault, new_runtime)
+                states = copy.deepcopy(self.retried_rows(new_runtime))
+                running_run, running_row = states[2]
+                final_run, final_row = states[3]
+                if fault == 'no-recovery':
+                    del c.shutdown_job['recovery']
+                if fault == 'marker-before-retry':
+                    c.shutdown_release_path.write_bytes(b'x')
+                if fault == 'unconfirmed-cli':
+                    c.candidate_cli = lambda *args, **kwargs: 'Retried nothing'
+                if fault == 'run-id':
+                    final_run['id'] = '99999999-9999-4999-8999-999999999999'
+                if fault == 'task-id':
+                    final_run['tasks'][0]['task_id'] = '88888888-8888-4888-8888-888888888888'
+                if fault == 'task-run-id':
+                    final_row['task_run_id'] = '77777777-7777-4777-8777-777777777777'
+                if fault == 'lost-runtime-survives':
+                    states[0][1]['runtime_id'] = CID
+                if fault == 'failed-before-release':
+                    states[1][1]['status'] = 'failed'
+                if fault == 'failed':
+                    final_run['status'] = final_run['tasks'][0]['status'] = final_row['status'] = 'failed'
+                if fault == 'early':
+                    final_run['completed_at'] = final_row['completed_at'] = '2026-10-08T12:00:01Z'
+                if fault == 'pre-recovery-start':
+                    running_row['started_at'] = states[1][1]['started_at'] = '2026-10-08T12:00:02.650Z'
+                if fault == 'final-attempt':
+                    final_row['attempt'] = 2
                 if fault == 'missing-attempt':
                     final_row.pop('attempt')
-                records, partitions = [retained_run, delayed_dispatch_run, split_snapshot_run, running_run, final_run], [retained_row, delayed_dispatch_row, split_snapshot_row, running_row, final_row]
-                def api_json(_, path):
-                    if '/partitions' in path:
-                        return {'total': 1, 'partitions': [partitions.pop(0)]}
-                    return records.pop(0)
-                c.api_json = api_json
-                c.native_running = lambda runtime_id=None: {'runtime_id': runtime_id, 'run_id': RUN,
-                    'task_id': TASK, 'docker_image_id': INDEX, 'task_config_id': CONFIG,
-                    'command_sha256': hashlib.sha256(c.shutdown_command().encode()).hexdigest(),
-                    'control_mount_source_sha256': c.shutdown_control_mount_source_sha256,
-                    'control_mount_destination': '/caesium-shutdown-control', 'control_mount_read_only': True,
-                    'running': True}
-                c.fire_shutdown_webhook = lambda _: {'status': 202, 'path': c.shutdown_job['resumption_path'],
-                                                      'http_triggers_accepted': 1, 'http_runs_started': 1,
-                                                      'receipt_id': '12345678-1234-4234-8234-123456789abc'}
-                with self.assertRaises(b.JourneyError):
-                    c.verify_shutdown_job_explicitly_resumed('owned-server')
+                if fault == 'wrong-output':
+                    final_run['tasks'][0]['output'] = {}
+                if fault == 'runtime-changed-after-observation':
+                    final_run['tasks'][0]['runtime_id'] = final_row['runtime_id'] = 'e' * 64
+                if fault == 'diverged-runtime':
+                    running_run['tasks'][0]['runtime_id'] = '0' * 64
+                self.serve_rows(c, states)
+                with self.retry_clock(), patch.object(b.time, 'sleep'):
+                    with self.assertRaises(b.JourneyError):
+                        c.verify_shutdown_run_retried('owned-server')
+
+    def test_journey_constants_match_the_go_source(self):
+        driver = (ROOT / 'internal/run/run_driver.go').read_text()
+        declared = re.search(r'var ErrRunDriverLost = errors\.New\((.*?)\)\n', driver, re.S).group(1)
+        self.assertEqual(''.join(re.findall(r'"([^"]*)"', declared)), b.RUN_DRIVER_LOST_ERROR)
+        self.assertIn(json.dumps(b.TRIGGER_SKIPPED_LOG), (ROOT / 'internal/job/job.go').read_text())
+
+    def test_server_pins_the_lease_its_recovery_bounds_derive_from(self):
+        c = self.collector()
+        c.server_env_file = self.tmp / 'server.env'
+        c.server_env_file.write_text('CAESIUM_AUTH_OIDC_CLIENT_SECRET=client\nCAESIUM_AUTH_KEY_HASH_SECRET=hash\n')
+        self.assertEqual(c.server_environment()['CAESIUM_RUN_LEASE_TTL'], f'{b.RUN_LEASE_TTL_SECONDS}s')
 
     def test_public_read_never_promotes_partial_valid_json_or_cap_plus_one(self):
         class Stream:
@@ -1386,7 +1556,8 @@ if cleanup_coverage_journeys; then exit 9; fi
     def test_saved_sso_receipt_requires_original_native_and_timestamp_evidence(self):
         raw = self.tmp / "raw"; raw.mkdir()
         processes = []
-        for source, lane in (("cli", "shutdown-apply"), ("cli", "shutdown-start"), ("server", "sso-server-g1"), ("server", "sso-server-g2")):
+        for source, lane in (("cli", "shutdown-apply"), ("cli", "shutdown-start"), ("cli", "shutdown-retry"),
+                             ("server", "sso-server-g1"), ("server", "sso-server-g2")):
             directory = raw / lane; directory.mkdir()
             (directory / "covmeta.actual").write_bytes(b"original metadata")
             (directory / "covcounters.actual").write_bytes(b"original counters")
@@ -1396,7 +1567,7 @@ if cleanup_coverage_journeys; then exit 9; fi
                 "container_id": (str(len(processes) + 1) * 64), "raw_dir": lane, "files": b.raw_files(directory),
                 "provenance_path": lane + ".json", "flush": "process-exit", "signal": None, "stop_rc": None, "flush_rc": None}
             if source == "server":
-                process.update(generation=len(processes) - 1, flush="sigusr2", signal="SIGTERM", stop_rc=0, flush_rc=0,
+                process.update(generation=len(processes) - 2, flush="sigusr2", signal="SIGTERM", stop_rc=0, flush_rc=0,
                     database_mount_sha256="same-db", server_environment_sha256="same-env", finished_at="2026-10-04T12:00:02Z")
             processes.append(process)
         recovered_runtime = "f" * 64
@@ -1414,15 +1585,23 @@ if cleanup_coverage_journeys; then exit 9; fi
             "attempt_before_signal": 1, "retained_attempt": 1, "final_attempt": 1,
             "native_runtime_removed": True, "verified_after_generation": 2,
             "native_runtime_absent_ids_by_generation": {"1": CID, "2": recovered_runtime},
-            "resumption_runtime_absent_after_completion": True,
-            "resumption_mode": "explicit-public-http-trigger-existing-run", "resumption_path": "/hooks/coverage-shutdown-" + collector_run_id,
+            "retry_runtime_absent_after_completion": True,
+            "recovery_mode": "lost-driver-failure-then-explicit-cli-retry", "inflight_trigger_path": "/hooks/coverage-shutdown-" + collector_run_id,
+            "run_lease_ttl_seconds": 30,
             "retained_after_generation": 2, "retained_run_status": "running", "retained_task_status": "running",
-            "generation2_automatic_takeover": False,
+            "generation2_automatic_reexecution": False,
             "retained_task_run_id": TASK, "retained_runtime_id": CID,
-            "resumption_webhook": {"status": 202, "path": "/hooks/coverage-shutdown-" + collector_run_id,
+            "inflight_webhook": {"status": 202, "path": "/hooks/coverage-shutdown-" + collector_run_id,
                 "http_triggers_accepted": 1, "http_runs_started": 1, "receipt_id": "12345678-1234-4234-8234-123456789abc"},
-            "resumption_runtime_running": {"runtime_id": recovered_runtime, "task_run_id": TASK, "attempt": 1,
-                "task_started_at": "2026-10-04T12:00:03Z", "observed_at": "2026-10-04T12:00:03.500000Z",
+            "inflight_trigger": {"skip_log_lines": 1, "run_ids": [RUN], "task_containers": []},
+            "recovery": {"lease_ttl_seconds": 30, "floor_seconds": 60, "ceiling_seconds": 120,
+                "generation2_started_at": "2026-10-04T12:00:03Z", "completed_at": "2026-10-04T12:01:13Z",
+                "elapsed_seconds": 70, "run_status": "failed", "task_status": "failed", "task_run_status": "failed",
+                "task_run_id": TASK, "attempt": 1, "runtime_id": CID, "error": b.RUN_DRIVER_LOST_ERROR,
+                "run_ids": [RUN], "task_containers": [], "release_marker_absent": True},
+            "retry_cli": {"lane": "shutdown-retry", "accepted": True, "output": f"Retrying run {RUN} (job {RUN})"},
+            "retry_runtime_running": {"runtime_id": recovered_runtime, "task_run_id": TASK, "attempt": 1,
+                "task_started_at": "2026-10-04T12:01:14Z", "observed_at": "2026-10-04T12:01:14.500000Z",
                 "release_marker_absent": True, "running": True,
                 "native": {"runtime_id": recovered_runtime, "run_id": RUN, "task_id": TASK,
                     "docker_image_id": INDEX, "task_config_id": CONFIG, "command_sha256": hold_digest,
@@ -1430,13 +1609,13 @@ if cleanup_coverage_journeys; then exit 9; fi
                     "control_mount_destination": "/caesium-shutdown-control", "control_mount_read_only": True,
                     "running": True}},
             "release_marker_after_running_observation": True,
-            "resumption_output": {"shutdown": "resumed-" + collector_run_id},
+            "retry_output": {"shutdown": "retried-" + collector_run_id},
             "release_marker": {"strategy": "read-only-host-release-marker", "written": True,
-                "sha256": hashlib.sha256(b"release-v1\n").hexdigest(), "written_at": "2026-10-04T12:00:04Z"},
+                "sha256": hashlib.sha256(b"release-v1\n").hexdigest(), "written_at": "2026-10-04T12:01:15Z"},
             "final_run_status": "succeeded", "final_task_status": "succeeded", "final_task_run_id": TASK,
             "final_task_run_status": "succeeded", "final_runtime_id": recovered_runtime,
-            "run_completed_at": "2026-10-04T12:00:05Z", "task_started_at": "2026-10-04T12:00:03Z",
-            "task_completed_at": "2026-10-04T12:00:05Z",
+            "run_completed_at": "2026-10-04T12:01:16Z", "task_started_at": "2026-10-04T12:01:14Z",
+            "task_completed_at": "2026-10-04T12:01:16Z",
             "native_runtime_absent_after_generation": 2, "native_runtime_absent_generations": [1, 2],
             "native_runtime_cleanup_absences": [{"runtime_id": CID, "absent": True},
                 {"runtime_id": recovered_runtime, "absent": True}],
@@ -1451,7 +1630,7 @@ if cleanup_coverage_journeys; then exit 9; fi
         original = {"complete": True, "missing": False, "killed": False, "candidate_sha": OWNER, "image_id": IMAGE,
             "collector_run_id": collector_run_id,
             "task_image_id": CONFIG, "task_docker_image_id": INDEX, "task_image_ref": "alpine:3.23",
-            "server_generations": processes[2:], "cli_processes": processes[:2], "shutdown_cancellation": shutdown}
+            "server_generations": processes[3:], "cli_processes": processes[:3], "shutdown_cancellation": shutdown}
         inputs = self.tmp / "inputs.json"
         inputs.write_text(json.dumps({"task_image_id": CONFIG, "task_docker_image_id": INDEX, "task_image_ref": "alpine:3.23"}))
         digest = hashlib.sha256(inputs.read_bytes()).hexdigest(); original["backend_inputs_sha256"] = digest
@@ -1461,7 +1640,8 @@ if cleanup_coverage_journeys; then exit 9; fi
         record = self.tmp / "record.json"
         env = {**os.environ, "SSO_RECORD_RAW_ROOT": str(raw.resolve()), "SSO_RECORD_SHA": OWNER,
                "SSO_RECORD_IMAGE_ID": IMAGE, "SSO_RECORD_RUN_ID": collector_run_id, "SSO_RECORD_INPUTS_SHA256": digest}
-        for fault in (None, "native", "timestamp", "exit", "flush", "wrong-uuid", "resumption", "same-runtime", "cleanup", "attempt", "auto-takeover", "durable-path", "early-release", "not-running-observed", "marker-before-running", "wrong-output", "wrong-absence-identity", "writable-mount"):
+        for fault in (None, "native", "timestamp", "exit", "flush", "wrong-uuid", "webhook-receipt", "same-runtime", "cleanup", "attempt", "auto-reexecution", "durable-path", "early-release", "not-running-observed", "marker-before-running", "wrong-output", "wrong-absence-identity", "writable-mount",
+                      "second-run", "task-container", "no-skip-witness", "recovery-early", "recovery-late", "recovery-wrong-error", "recovery-other-task-run", "recovery-other-runtime", "recovery-ttl-mismatch", "retry-unconfirmed", "retry-before-recovery", "missing-retry-cli-process"):
             value = copy.deepcopy(original)
             if fault == "wrong-uuid":
                 value["shutdown_cancellation"]["final_task_run_id"] = RUN
@@ -1469,20 +1649,34 @@ if cleanup_coverage_journeys; then exit 9; fi
             if fault == "timestamp": value["shutdown_cancellation"]["task_started_at"] = "2026-10-04T12:00:01Z"
             if fault == "exit": value["server_generations"][0]["exit_code"] = 143
             if fault == "flush": value["server_generations"][0]["flush_rc"] = 1
-            if fault == "resumption": value["shutdown_cancellation"]["resumption_webhook"]["http_runs_started"] = 0
+            if fault == "webhook-receipt": value["shutdown_cancellation"]["inflight_webhook"]["http_runs_started"] = 0
             if fault == "same-runtime": value["shutdown_cancellation"]["final_runtime_id"] = CID
             if fault == "cleanup": value["shutdown_cancellation"]["native_runtime_cleanup_absences"][1]["absent"] = False
             if fault == "attempt": value["shutdown_cancellation"]["final_attempt"] = 2
-            if fault == "auto-takeover": value["shutdown_cancellation"]["generation2_automatic_takeover"] = True
+            if fault == "auto-reexecution": value["shutdown_cancellation"]["generation2_automatic_reexecution"] = True
             if fault == "durable-path":
-                value["shutdown_cancellation"]["resumption_path"] = "/hooks/coverage-shutdown-" + RUN
-                value["shutdown_cancellation"]["resumption_webhook"]["path"] = "/hooks/coverage-shutdown-" + RUN
-            if fault == "early-release": value["shutdown_cancellation"]["release_marker"]["written_at"] = "2026-10-04T12:00:06Z"
-            if fault == "not-running-observed": value["shutdown_cancellation"]["resumption_runtime_running"]["native"]["running"] = False
-            if fault == "marker-before-running": value["shutdown_cancellation"]["release_marker"]["written_at"] = "2026-10-04T12:00:03Z"
-            if fault == "wrong-output": value["shutdown_cancellation"]["resumption_output"] = {"shutdown": "wrong-run"}
+                value["shutdown_cancellation"]["inflight_trigger_path"] = "/hooks/coverage-shutdown-" + RUN
+                value["shutdown_cancellation"]["inflight_webhook"]["path"] = "/hooks/coverage-shutdown-" + RUN
+            if fault == "early-release": value["shutdown_cancellation"]["release_marker"]["written_at"] = "2026-10-04T12:01:17Z"
+            if fault == "not-running-observed": value["shutdown_cancellation"]["retry_runtime_running"]["native"]["running"] = False
+            if fault == "marker-before-running": value["shutdown_cancellation"]["release_marker"]["written_at"] = "2026-10-04T12:01:14Z"
+            if fault == "wrong-output": value["shutdown_cancellation"]["retry_output"] = {"shutdown": "wrong-run"}
             if fault == "wrong-absence-identity": value["shutdown_cancellation"]["native_runtime_absent_ids_by_generation"]["2"] = CID
-            if fault == "writable-mount": value["shutdown_cancellation"]["resumption_runtime_running"]["native"]["control_mount_read_only"] = False
+            if fault == "writable-mount": value["shutdown_cancellation"]["retry_runtime_running"]["native"]["control_mount_read_only"] = False
+            if fault == "second-run": value["shutdown_cancellation"]["inflight_trigger"]["run_ids"] = [TASK, RUN]
+            if fault == "task-container": value["shutdown_cancellation"]["recovery"]["task_containers"] = [recovered_runtime]
+            if fault == "no-skip-witness": value["shutdown_cancellation"]["inflight_trigger"]["skip_log_lines"] = 0
+            if fault == "recovery-early": value["shutdown_cancellation"]["recovery"]["completed_at"] = "2026-10-04T12:01:02Z"
+            if fault == "recovery-late":
+                value["shutdown_cancellation"]["recovery"]["generation2_started_at"] = "2026-10-04T11:59:00Z"
+                value["server_generations"][0]["finished_at"] = "2026-10-04T11:58:00Z"
+            if fault == "recovery-wrong-error": value["shutdown_cancellation"]["recovery"]["error"] = "some other failure"
+            if fault == "recovery-other-task-run": value["shutdown_cancellation"]["recovery"]["task_run_id"] = RUN
+            if fault == "recovery-other-runtime": value["shutdown_cancellation"]["recovery"]["runtime_id"] = recovered_runtime
+            if fault == "recovery-ttl-mismatch": value["shutdown_cancellation"]["recovery"]["lease_ttl_seconds"] = 60
+            if fault == "retry-unconfirmed": value["shutdown_cancellation"]["retry_cli"]["accepted"] = False
+            if fault == "retry-before-recovery": value["shutdown_cancellation"]["retry_runtime_running"]["task_started_at"] = "2026-10-04T12:01:12Z"
+            if fault == "missing-retry-cli-process": value["cli_processes"] = value["cli_processes"][:2]
             for process in value["cli_processes"] + value["server_generations"]:
                 (raw / process["provenance_path"]).write_text(json.dumps(process))
             record.write_text(json.dumps(value))
@@ -1492,7 +1686,7 @@ if cleanup_coverage_journeys; then exit 9; fi
                 env=env, capture_output=True)
             if fault is None:
                 self.assertEqual(result.returncode, 0, result.stderr)
-                self.assertEqual(cli_list.read_text().splitlines(), ["shutdown-apply", "shutdown-start"])
+                self.assertEqual(cli_list.read_text().splitlines(), ["shutdown-apply", "shutdown-start", "shutdown-retry"])
             else:
                 self.assertNotEqual(result.returncode, 0, fault)
                 self.assertFalse(cli_list.exists(), fault)

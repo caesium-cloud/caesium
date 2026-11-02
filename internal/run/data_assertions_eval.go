@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/caesium-cloud/caesium/internal/baselineevidence"
 	"github.com/caesium-cloud/caesium/pkg/env"
 	"github.com/caesium-cloud/caesium/pkg/jobdef"
 	pkgtask "github.com/caesium-cloud/caesium/pkg/task"
@@ -31,7 +32,7 @@ const (
 	AssertionMax = "max"
 	// AssertionDeltaFromBaseline compares the observed value against the
 	// rolling median of the last N clean samples.
-	AssertionDeltaFromBaseline = "deltaFromBaseline"
+	AssertionDeltaFromBaseline = baselineevidence.AssertionDelta
 	// AssertionMaxLag is the freshness assertion: how far the emitted watermark
 	// may trail the evaluation time.
 	AssertionMaxLag = "maxLag"
@@ -185,21 +186,11 @@ func unavailableMessage(metric, reason string) string {
 
 // BaselineScopeNamespace is DataViolation.BaselineScope for a baseline computed
 // over the evaluated run's own tenancy namespace only.
-const BaselineScopeNamespace = "namespace"
+const BaselineScopeNamespace = baselineevidence.ScopeNamespace
 
 // BaselineEvidenceWithheld replaces the message of a verdict whose baseline
 // evidence a namespace-confined reader does not receive.
-const BaselineEvidenceWithheld = "baseline evidence withheld: recorded before namespace-owned baselines"
-
-// withholdsBaselineEvidence reports whether v carries baseline evidence (the
-// median, the sample count, the bound derived from them and the message that
-// renders them) that was not computed over the evaluated run's own namespace.
-func withholdsBaselineEvidence(scope, assertion string, hasMedian, hasSamples bool) bool {
-	if scope == BaselineScopeNamespace {
-		return false
-	}
-	return hasMedian || hasSamples || assertion == AssertionDeltaFromBaseline
-}
+const BaselineEvidenceWithheld = baselineevidence.Withheld
 
 // WithholdUnownedBaselineEvidence is what a namespace-confined reader receives
 // of a run's data-assertion verdicts (identity-and-access B4): a verdict
@@ -219,7 +210,7 @@ func (r *JobRun) WithholdUnownedBaselineEvidence() {
 		var own []string
 		for i := range task.DataViolations {
 			v := &task.DataViolations[i]
-			if !withholdsBaselineEvidence(v.BaselineScope, v.Assertion, v.BaselineMedian != nil, v.BaselineSamples != 0) {
+			if !baselineevidence.Withholds(v.BaselineScope, v.Assertion, v.BaselineMedian != nil, v.BaselineSamples != 0) {
 				continue
 			}
 			own = append(own, v.Message)
@@ -228,10 +219,10 @@ func (r *JobRun) WithholdUnownedBaselineEvidence() {
 				v.Bound = nil
 			}
 		}
-		task.Error = withholdMessages(task.Error, own)
+		task.Error = baselineevidence.ReplaceMessages(task.Error, own)
 		withheld = append(withheld, own...)
 	}
-	r.Error = withholdMessages(r.Error, withheld)
+	r.Error = baselineevidence.ReplaceMessages(r.Error, withheld)
 }
 
 // WithholdUnownedBaselineEvidenceJSON applies WithholdUnownedBaselineEvidence
@@ -239,68 +230,7 @@ func (r *JobRun) WithholdUnownedBaselineEvidence() {
 // event data): its own data_violations and error, and each tasks[] entry's. A
 // data_violations value that is not a list is dropped.
 func WithholdUnownedBaselineEvidenceJSON(payload map[string]any) {
-	var withheld []string
-	if tasks, ok := payload["tasks"].([]any); ok {
-		for _, task := range tasks {
-			if fields, ok := task.(map[string]any); ok {
-				withheld = append(withheld, withholdViolationsJSON(fields)...)
-			}
-		}
-	}
-	withheld = append(withheld, withholdViolationsJSON(payload)...)
-	if raw, ok := payload["error"].(string); ok {
-		payload["error"] = withholdMessages(raw, withheld)
-	}
-}
-
-func withholdViolationsJSON(fields map[string]any) []string {
-	raw, present := fields["data_violations"]
-	if !present || raw == nil {
-		return nil
-	}
-	list, ok := raw.([]any)
-	if !ok {
-		delete(fields, "data_violations")
-		return nil
-	}
-	var withheld []string
-	for i, item := range list {
-		v, ok := item.(map[string]any)
-		if !ok {
-			list[i] = nil
-			continue
-		}
-		scope, _ := v["baseline_scope"].(string)
-		assertion, _ := v["assertion"].(string)
-		_, hasMedian := v["baseline_median"]
-		_, hasSamples := v["baseline_samples"]
-		if !withholdsBaselineEvidence(scope, assertion, hasMedian, hasSamples) {
-			continue
-		}
-		if message, ok := v["message"].(string); ok {
-			withheld = append(withheld, message)
-		}
-		delete(v, "baseline_median")
-		delete(v, "baseline_samples")
-		if assertion == AssertionDeltaFromBaseline {
-			delete(v, "bound")
-		}
-		v["message"] = BaselineEvidenceWithheld
-	}
-	if raw, ok := fields["error"].(string); ok {
-		fields["error"] = withholdMessages(raw, withheld)
-	}
-	return withheld
-}
-
-// withholdMessages replaces every withheld verdict message quoted in text.
-func withholdMessages(text string, messages []string) string {
-	for _, message := range messages {
-		if message != "" && message != BaselineEvidenceWithheld {
-			text = strings.ReplaceAll(text, message, BaselineEvidenceWithheld)
-		}
-	}
-	return text
+	baselineevidence.WithholdJSON(payload)
 }
 
 // WithholdQuotedBaselineEvidence replaces, in text, every message of a
@@ -321,12 +251,12 @@ func WithholdQuotedBaselineEvidence(text string, violationsJSON []byte) string {
 	messages := make([]string, 0, len(violations))
 	for i := range violations {
 		v := &violations[i]
-		if !withholdsBaselineEvidence(v.BaselineScope, v.Assertion, v.BaselineMedian != nil, v.BaselineSamples != 0) {
+		if !baselineevidence.Withholds(v.BaselineScope, v.Assertion, v.BaselineMedian != nil, v.BaselineSamples != 0) {
 			continue
 		}
 		messages = append(messages, v.Message)
 	}
-	return withholdMessages(text, messages)
+	return baselineevidence.ReplaceMessages(text, messages)
 }
 
 // String renders the violation for a task failure message: it names the

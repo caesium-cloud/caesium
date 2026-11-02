@@ -68,13 +68,18 @@ type JobRun struct {
 	// budget without rewriting run history. Existing rows fall back to
 	// StartedAt when this nullable migration field is absent.
 	TimeoutStartedAt *time.Time `json:"-"`
-	CompletedAt      *time.Time `json:"completed_at,omitempty"`
-	CreatedAt        time.Time  `gorm:"not null" json:"created_at"`
-	UpdatedAt        time.Time  `gorm:"not null" json:"updated_at"`
-	Tasks            []*TaskRun `gorm:"foreignKey:JobRunID;constraint:OnDelete:CASCADE" json:"tasks,omitempty"`
-	CacheHits        int        `gorm:"-" json:"cache_hits"`
-	ExecutedTasks    int        `gorm:"-" json:"executed_tasks"`
-	TotalTasks       int        `gorm:"-" json:"total_tasks"`
+	// DriverHeartbeatAt is when the process driving this run last proved it was
+	// alive (internal/run/run_driver.go). Always UTC: recovery compares it in
+	// SQL, which updated_at cannot support because GORM writes that one in the
+	// host's zone. NULL on a row from before the column means no heartbeat.
+	DriverHeartbeatAt *time.Time `json:"-"`
+	CompletedAt       *time.Time `json:"completed_at,omitempty"`
+	CreatedAt         time.Time  `gorm:"not null" json:"created_at"`
+	UpdatedAt         time.Time  `gorm:"not null" json:"updated_at"`
+	Tasks             []*TaskRun `gorm:"foreignKey:JobRunID;constraint:OnDelete:CASCADE" json:"tasks,omitempty"`
+	CacheHits         int        `gorm:"-" json:"cache_hits"`
+	ExecutedTasks     int        `gorm:"-" json:"executed_tasks"`
+	TotalTasks        int        `gorm:"-" json:"total_tasks"`
 }
 
 type TaskRun struct {

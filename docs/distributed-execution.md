@@ -37,7 +37,7 @@ This guide covers runtime configuration, rollout, and troubleshooting for parall
 | `CAESIUM_NODE_LABELS` | `""` | Optional node labels (`k=v,k2=v2`) for task `nodeSelector` affinity. The key `caesium.io/isolation` is reserved and ignored here (see [Isolation context](#isolation-context)). |
 | `CAESIUM_WORKER_ISOLATION_V1_DISABLED` | `false` | When `true`, this worker withdraws the `isolation_v1` capability: owners never dispatch it a task whose isolation context is non-default and it never pulls one. It can only narrow where isolated tasks run. See [Isolation context](#isolation-context). |
 | `CAESIUM_RUN_OWNER_ENABLED` | `false` | Enables Phase 2 run-owner coordination mode (experimental). When `false` (default), the system behaves identically to Phase 1. |
-| `CAESIUM_RUN_LEASE_TTL` | `30s` | How long a run-owner lease is valid before another node may take over. Only relevant when `CAESIUM_RUN_OWNER_ENABLED=true`. |
+| `CAESIUM_RUN_LEASE_TTL` | `30s` | How long a run-owner lease is valid before another node may take over, and in every execution mode how long a run's driver heartbeat may go unrenewed before the run is recovered. See [When a server stops](#when-a-server-stops). A non-positive value disables recovery. |
 | `CAESIUM_RUN_OWNER_DISPATCH_PROGRESS_DEADLINE` | `10m` | How long a ready task may keep being refused for worker capacity before the owner surfaces it as a stall (warn log + `caesium_dispatch_stalled_total`). Never cancels or fails the task. |
 
 Job metadata can override the server task timeout with `taskTimeout` and set a
@@ -50,6 +50,21 @@ completion can publish successors.
 Kubernetes cleanup requests a one-second termination grace period. The pod
 remains visible while kubelet terminates it; Caesium does not use zero-grace API
 deletion as evidence that a container has stopped.
+
+## When a Server Stops
+
+Whatever drives a run lives in a server process, so a run can outlive its driver. Every process driving a run rewrites a heartbeat on it, three times per `CAESIUM_RUN_LEASE_TTL`. Every server watches those values, and recovers a run whose value has not changed for that TTL by its own clock. It never recovers a run it is driving itself. The first write only marks the run, and a live driver's next renewal overwrites the mark. Two-thirds of a TTL later a compare-and-swap on the mark picks one server to finish recovery, so recovery takes about two TTLs. Recovery needs no trigger: a job with no cron or webhook recovers the same way, its queue drains, and `caesium job apply` works again.
+
+- **Local mode, with unfinished tasks.** The run fails, with its unfinished tasks, and the error says so. Nothing is re-executed: a local task holds no claim, so its row cannot say whether its container is still running or has already succeeded, and running it again could run the step twice. Docker and Podman containers from a crash are left on their host. To run the work again, remove any such container and use `caesium run retry`. A retry beside one fails with a Docker name conflict, running or exited, which is what stops two copies running.
+- **Local mode, with every task recorded.** The server stopped before finalizing the run. It is adopted, executes nothing, and ends with the outcome its tasks recorded.
+- **Adoption that does not finish.** A server adopts a run at most three times. If the run lapses again it fails, so a run that cannot be adopted still frees its slot. A run whose job was deleted is adopted from the retained job record.
+- **Distributed mode.** The run is adopted and finishes normally. Workers own its tasks through claims, and only the process waiting to finalize it was lost. One exception: with `CAESIUM_RUN_OWNER_IN_MEMORY=true`, a sole node that returns after its run lease expired cannot take that lease back, so the run stays `running`. A live peer takes the lease over instead.
+
+In local mode a trigger that fires while its job has a run in flight, with no `metadata.concurrency` policy, starts nothing. It used to re-execute the run's in-flight tasks.
+
+A write stall does not fail a healthy run, because a commit of any age counts as a renewal and a mark has to get through the same stall. A live node cut off from the leader for longer than the TTL while a peer can still write looks exactly like a dead one, so its run fails. Nothing is executed twice, and the node stops that run's engine when it can read again. Raise `CAESIUM_RUN_LEASE_TTL` to tolerate longer partitions, at the price of slower recovery.
+
+A node in a mixed-version local-mode cluster that predates the heartbeat renews nothing, so a newer node fails that node's runs after one TTL. Finish a rolling upgrade before relying on local-mode runs that span it.
 
 ## Cancelling a Run Reaches the Container
 

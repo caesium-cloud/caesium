@@ -360,8 +360,7 @@ def standalone_record(**overrides):
     manifest = json.loads(MANIFEST.read_text())
     row = next(item for item in manifest["scenarios"] if item["id"] == "f4-standalone-lifecycle")
     expected = [item["id"] for item in row["expected_observations"]]
-    recorded = {"recorded-in-flight-run-after-upgrade", "recorded-rollback-previous-release-on-migrated-volume",
-                "recorded-shard-count-change"}
+    recorded = {"recorded-rollback-previous-release-on-migrated-volume", "recorded-shard-count-change"}
     record = {
         "schema_version": 1,
         "kind": "caesium-lifecycle-qualification",
