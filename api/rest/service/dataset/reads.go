@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/caesium-cloud/caesium/internal/authz"
+	"github.com/caesium-cloud/caesium/internal/freshness"
 	"github.com/caesium-cloud/caesium/internal/models"
 	runstore "github.com/caesium-cloud/caesium/internal/run"
 	"github.com/caesium-cloud/caesium/pkg/env"
@@ -13,8 +14,12 @@ import (
 	"gorm.io/gorm"
 )
 
-// State extends the existing freshness row without changing its status semantics.
-// Hold fields are omitted when assertions are disabled or no active hold exists.
+// State extends the existing freshness row. Hold fields are omitted when
+// assertions are disabled or no active hold exists. While an active hold exists
+// the embedded Status is "held" and Reason names the hold (held => not fresh):
+// the evaluator persists that on its next pass, and this overlay makes the read
+// honest in the meantime, and for a dataset the evaluator does not track (no
+// freshness SLO).
 type State struct {
 	models.DatasetState
 	HoldStatus string       `json:"hold_status,omitempty"`
@@ -40,7 +45,13 @@ func (s *Service) withHolds(rows []models.DatasetState) ([]State, error) {
 	for i, row := range rows {
 		states[i].DatasetState = row
 	}
-	if !env.Variables().DataAssertionsEnabled || len(rows) == 0 {
+	if !env.Variables().DataAssertionsEnabled {
+		for i := range states {
+			unstrandHeld(&states[i].DatasetState)
+		}
+		return states, nil
+	}
+	if len(rows) == 0 {
 		return states, nil
 	}
 	identity := s.db.Where("namespace = ? AND name = ?", rows[0].Namespace, rows[0].Name)
@@ -66,9 +77,26 @@ func (s *Service) withHolds(rows []models.DatasetState) ([]State, error) {
 		if hold := byIdentity[[2]string{states[i].Namespace, states[i].Name}]; hold != nil {
 			states[i].HoldStatus = hold.Status
 			states[i].Hold = hold
+			states[i].Status = models.DatasetStatusHeld
+			states[i].Reason = freshness.HeldReason(states[i].Namespace, states[i].Name, hold.ID)
+		} else {
+			// A persisted `held` with no active hold is stale (released, or the
+			// evaluator raced the release): report what is actually known.
+			unstrandHeld(&states[i].DatasetState)
 		}
 	}
 	return states, nil
+}
+
+// unstrandHeld reports a persisted `held` that has no active hold as unknown.
+// The evaluator writes `held` only for an active hold and the release
+// transaction clears it, but a stale row can still be read: the breaker switched
+// off with holds still active (nothing then evaluates or releases them), or a
+// write that raced a release. "Held" is only ever reported for a live hold.
+func unstrandHeld(state *models.DatasetState) {
+	if state.Status == models.DatasetStatusHeld {
+		state.Status, state.Reason = models.DatasetStatusUnknown, ""
+	}
 }
 
 // ErrHoldStatus identifies an unsupported hold feed filter.

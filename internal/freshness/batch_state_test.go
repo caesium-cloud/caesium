@@ -108,11 +108,11 @@ func TestBatchedReadinessKeepsObservationAndFatalErrors(t *testing.T) {
 	require.NoError(t, conn.Create(&models.DatasetState{ID: uuid.New(), Name: "observed", VerifiedAt: &t0}).Error)
 	e := &Evaluator{store: store}
 	declarations := []models.DatasetDeclaration{{Name: "observed"}, {Name: " observed "}}
-	ready, current, _, err := e.upstreamReady(context.Background(), models.DatasetState{}, declarations)
+	ready, current, _, err := e.upstreamReady(context.Background(), models.DatasetState{}, declarations, nil)
 	require.NoError(t, err)
 	require.True(t, ready)
 	require.Equal(t, map[string]string{"observed": ""}, current)
-	ready, _, _, err = e.upstreamReady(context.Background(), models.DatasetState{}, []models.DatasetDeclaration{{Name: "missing"}})
+	ready, _, _, err = e.upstreamReady(context.Background(), models.DatasetState{}, []models.DatasetDeclaration{{Name: "missing"}}, nil)
 	require.NoError(t, err)
 	require.False(t, ready)
 	fault := errors.New("consumed state unavailable")
@@ -121,7 +121,7 @@ func TestBatchedReadinessKeepsObservationAndFatalErrors(t *testing.T) {
 			tx.AddError(fault)
 		}
 	}))
-	ready, current, _, err = e.upstreamReady(context.Background(), models.DatasetState{}, declarations)
+	ready, current, _, err = e.upstreamReady(context.Background(), models.DatasetState{}, declarations, nil)
 	require.ErrorIs(t, err, fault)
 	require.False(t, ready)
 	require.Nil(t, current)

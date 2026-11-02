@@ -6,6 +6,7 @@ import (
 	"cmp"
 	"context"
 	"errors"
+	"fmt"
 	"slices"
 	"strings"
 	"time"
@@ -153,7 +154,13 @@ func (s *Service) List(p ListParams) (*ListResult, error) {
 	limit, offset := normalizePagination(p.Limit, p.Offset)
 	status := strings.TrimSpace(p.Status)
 
-	if status != "" && status != models.DatasetStatusUnknown {
+	// Declared-but-unobserved datasets (no state row) are merged in for the
+	// unfiltered feed and for `unknown`; for `held` too while the circuit breaker
+	// is on, because a hold can outlive - or precede - the state row indefinitely
+	// (assertions on, freshness scheduling off: nothing ever creates one).
+	mergeDeclared := status == "" || status == models.DatasetStatusUnknown ||
+		(status == models.DatasetStatusHeld && env.Variables().DataAssertionsEnabled)
+	if !mergeDeclared {
 		rows, total, err := s.observedStates(status, limit, offset)
 		if err != nil {
 			return nil, err
@@ -176,7 +183,7 @@ func (s *Service) List(p ListParams) (*ListResult, error) {
 		return nil, err
 	}
 
-	declRows, declTotal, err := s.declarationOnlyStates(fetchLimit)
+	declRows, declTotal, err := s.declarationOnlyStates(status, fetchLimit)
 	if err != nil {
 		return nil, err
 	}
@@ -232,6 +239,9 @@ func (s *Service) GetWithOptions(namespace, name string, options GetOptions) (*D
 	}
 
 	detail := &Detail{State: state}
+	if !env.Variables().DataAssertionsEnabled {
+		unstrandHeld(&detail.State)
+	}
 	if options.IncludeHold && env.Variables().DataAssertionsEnabled {
 		var hold models.DatasetHold
 		err := s.db.WithContext(s.ctx).
@@ -240,11 +250,19 @@ func (s *Service) GetWithOptions(namespace, name string, options GetOptions) (*D
 		if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, err
 		}
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			// A persisted `held` with no active hold is stale.
+			unstrandHeld(&detail.State)
+		}
 		if err == nil {
 			if err := s.shapeHolds(v, []*models.DatasetHold{&hold}); err != nil {
 				return nil, err
 			}
 			detail.HoldStatus, detail.Hold = hold.Status, &hold
+			// held => not fresh: the freshness status itself reports the hold, not
+			// just the adjacent badge.
+			detail.State.Status = models.DatasetStatusHeld
+			detail.State.Reason = freshness.HeldReason(state.Namespace, state.Name, hold.ID)
 		}
 	}
 	if foundDecl {
@@ -353,9 +371,7 @@ func (s *Service) Advance(p AdvanceParams) (*AdvanceResult, error) {
 
 func (s *Service) observedStates(status string, limit, offset int) ([]models.DatasetState, int64, error) {
 	q := s.db.WithContext(s.ctx).Model(&models.DatasetState{})
-	if status != "" {
-		q = q.Where("status = ?", status)
-	}
+	q = withEffectiveStatus(q, status)
 	q = s.producerVisible(q, "dataset_states.namespace", "dataset_states.name")
 
 	var total int64
@@ -364,14 +380,59 @@ func (s *Service) observedStates(status string, limit, offset int) ([]models.Dat
 	}
 
 	var rows []models.DatasetState
+	// ONE total order (updated_at, namespace, name) everywhere a feed is cut:
+	// here, in declarationOnlyStates and in sortStates. Ordering by updated_at
+	// alone leaves ties to the engine, so a page cut here and a merge that breaks
+	// ties by identity can skip or repeat a row.
 	if err := q.
-		Order("updated_at DESC").
+		Order("dataset_states.updated_at DESC").
+		Order("dataset_states.namespace ASC").
+		Order("dataset_states.name ASC").
 		Limit(limit).
 		Offset(offset).
 		Find(&rows).Error; err != nil {
 		return nil, 0, err
 	}
 	return rows, total, nil
+}
+
+// activeHoldExists is a correlated EXISTS over the circuit breaker's active
+// holds, matched on the exact (namespace, name) pair of the outer row.
+const activeHoldExists = "EXISTS (SELECT 1 FROM dataset_holds WHERE dataset_holds.status = '" +
+	models.DatasetHoldStatusActive + "' AND dataset_holds.namespace = %[1]s AND dataset_holds.name = %[2]s)"
+
+// withEffectiveStatus applies the `status` filter to dataset_states against the
+// status the reads report. A dataset is `held` exactly while an ACTIVE hold exists
+// on it (the circuit breaker on); a persisted `held` with no active hold is stale
+// and reads as `unknown` (see unstrandHeld), so it never matches `held` and does
+// match `unknown`. With the breaker off no hold counts at all.
+//
+//   - held: an active hold;
+//   - unknown: persisted unknown or stale held, with no active hold;
+//   - any other value: persisted AND no active hold, so a held dataset does not
+//     list as fresh from a stale persisted row while its hold is open.
+func withEffectiveStatus(q *gorm.DB, status string) *gorm.DB {
+	if status == "" {
+		return q
+	}
+	unknownLike := []string{models.DatasetStatusUnknown, models.DatasetStatusHeld}
+	if !env.Variables().DataAssertionsEnabled {
+		switch status {
+		case models.DatasetStatusHeld:
+			return q.Where("1 = 0")
+		case models.DatasetStatusUnknown:
+			return q.Where("status IN ?", unknownLike)
+		}
+		return q.Where("status = ?", status)
+	}
+	exists := fmt.Sprintf(activeHoldExists, "dataset_states.namespace", "dataset_states.name")
+	switch status {
+	case models.DatasetStatusHeld:
+		return q.Where(exists)
+	case models.DatasetStatusUnknown:
+		return q.Where("status IN ?", unknownLike).Where("NOT " + exists)
+	}
+	return q.Where("status = ?", status).Where("NOT " + exists)
 }
 
 func normalizePagination(rawLimit, rawOffset int) (int, int) {
@@ -386,7 +447,7 @@ func normalizePagination(rawLimit, rawOffset int) (int, int) {
 	return limit, offset
 }
 
-func (s *Service) declarationOnlyStates(limit int) ([]models.DatasetState, int64, error) {
+func (s *Service) declarationOnlyStates(status string, limit int) ([]models.DatasetState, int64, error) {
 	// A dataset is commonly declared by multiple jobs; we want distinct
 	// (namespace, name) datasets so the LIMIT and total reflect datasets rather
 	// than raw declaration rows. We dedup in Go rather than via a SQL GROUP BY:
@@ -399,9 +460,24 @@ func (s *Service) declarationOnlyStates(limit int) ([]models.DatasetState, int64
 		Model(&models.DatasetDeclaration{}).
 		Where("direction IN ?", declarationDirections).
 		Where("NOT EXISTS (SELECT 1 FROM dataset_states ds WHERE ds.name = dataset_declarations.name AND ds.namespace = COALESCE(dataset_declarations.namespace, ''))")
+	if status == models.DatasetStatusHeld {
+		// Only the declared datasets an active hold is on (List calls this for
+		// `held` only with the circuit breaker on).
+		q = q.Where(fmt.Sprintf(activeHoldExists, "COALESCE(dataset_declarations.namespace, '')", "dataset_declarations.name"))
+	}
+	if status == models.DatasetStatusUnknown && env.Variables().DataAssertionsEnabled {
+		// A declared dataset with an active hold but no state row yet (the hold
+		// opens before the producing run's watermark is captured) reports held,
+		// so it does not satisfy a `status=unknown` filter.
+		q = q.Where("NOT " + fmt.Sprintf(activeHoldExists, "COALESCE(dataset_declarations.namespace, '')", "dataset_declarations.name"))
+	}
 	q = s.producerVisible(q, "dataset_declarations.namespace", "dataset_declarations.name")
+	// Same total order as observedStates / sortStates; the declaration's namespace
+	// is nullable and a NULL means "" everywhere else, hence the COALESCE.
 	if err := q.
-		Order("updated_at DESC").
+		Order("dataset_declarations.updated_at DESC").
+		Order("COALESCE(dataset_declarations.namespace, '') ASC").
+		Order("dataset_declarations.name ASC").
 		Find(&decls).Error; err != nil {
 		return nil, 0, err
 	}

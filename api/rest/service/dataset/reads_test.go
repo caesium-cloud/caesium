@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/caesium-cloud/caesium/internal/freshness"
 	"github.com/caesium-cloud/caesium/internal/jobdef/testutil"
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/caesium-cloud/caesium/pkg/env"
@@ -16,7 +17,7 @@ import (
 	"gorm.io/gorm"
 )
 
-func TestDatasetHoldFieldsAreFlagGatedAndPreserveFreshness(t *testing.T) {
+func TestDatasetHoldFieldsAreFlagGatedAndHeldIsNotFresh(t *testing.T) {
 	conn := testutil.OpenTestDB(t)
 	t.Cleanup(func() { testutil.CloseDB(conn) })
 	svc := &Service{ctx: context.Background(), db: conn}
@@ -37,12 +38,25 @@ func TestDatasetHoldFieldsAreFlagGatedAndPreserveFreshness(t *testing.T) {
 	t.Setenv("CAESIUM_DATA_ASSERTIONS_ENABLED", "true")
 	require.NoError(t, env.Process())
 	t.Cleanup(func() { t.Setenv("CAESIUM_DATA_ASSERTIONS_ENABLED", "false"); require.NoError(t, env.Process()) })
-	list, err := svc.List(ListParams{Status: models.DatasetStatusFresh})
+	// Held => not fresh: the persisted row still says fresh (the evaluator has not
+	// run), but the read reports - and the status filter agrees - that an active
+	// hold makes the dataset held, never fresh.
+	fresh, err := svc.List(ListParams{Status: models.DatasetStatusFresh})
+	require.NoError(t, err)
+	require.Empty(t, fresh.Datasets)
+	require.EqualValues(t, 0, fresh.Total)
+	list, err := svc.List(ListParams{Status: models.DatasetStatusHeld})
 	require.NoError(t, err)
 	require.Len(t, list.Datasets, 1)
-	require.Equal(t, models.DatasetStatusFresh, list.Datasets[0].Status)
+	require.Equal(t, models.DatasetStatusHeld, list.Datasets[0].Status)
+	require.Equal(t, freshness.HeldReason("", state.Name, hold.ID), list.Datasets[0].Reason)
+	require.Contains(t, list.Datasets[0].Reason, "dataset_hold:/warehouse/orders")
 	require.Equal(t, hold.ID, list.Datasets[0].Hold.ID)
-	require.Len(t, holdQueries, 1)
+	all, err := svc.List(ListParams{})
+	require.NoError(t, err)
+	require.Len(t, all.Datasets, 1)
+	require.Equal(t, models.DatasetStatusHeld, all.Datasets[0].Status)
+	require.NotEmpty(t, holdQueries)
 	require.Contains(t, holdQueries[0], "SELECT `namespace`,`name`,`id`,`status`,`reason`,`opened_at`,`occurrence_count` FROM `dataset_holds`")
 	encoded, err := json.Marshal(list.Datasets[0].Hold)
 	require.NoError(t, err)
@@ -55,6 +69,8 @@ func TestDatasetHoldFieldsAreFlagGatedAndPreserveFreshness(t *testing.T) {
 	detail, err := svc.Get("", state.Name)
 	require.NoError(t, err)
 	require.Equal(t, "active", detail.HoldStatus)
+	require.Equal(t, models.DatasetStatusHeld, detail.State.Status)
+	require.Contains(t, detail.State.Reason, "dataset_hold:/warehouse/orders")
 	require.Equal(t, hold.Violations, detail.Hold.Violations)
 	require.Equal(t, hold.Impact, detail.Hold.Impact)
 	feed, err := svc.Holds(HoldsParams{})
@@ -72,6 +88,12 @@ func TestDatasetHoldFieldsAreFlagGatedAndPreserveFreshness(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, list.Datasets, 1)
 	require.Nil(t, list.Datasets[0].Hold)
+	// With the gate off a stale active hold row changes nothing: the status is
+	// the persisted one, and the filter does not touch the (dropped) holds table.
+	require.Equal(t, models.DatasetStatusFresh, list.Datasets[0].Status)
+	byStatus, err := svc.List(ListParams{Status: models.DatasetStatusFresh})
+	require.NoError(t, err)
+	require.Len(t, byStatus.Datasets, 1)
 	detail, err = svc.Get("", state.Name)
 	require.NoError(t, err)
 	for _, result := range []any{list, detail} {
