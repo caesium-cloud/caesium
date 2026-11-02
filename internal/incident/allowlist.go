@@ -4,6 +4,7 @@ import (
 	"context"
 	"maps"
 	"slices"
+	"time"
 
 	"github.com/caesium-cloud/caesium/internal/lineage"
 	"github.com/caesium-cloud/caesium/internal/models"
@@ -37,12 +38,18 @@ import (
 // A8); every other job found is counted in external and never named. Jobs are
 // matched by id, never by alias.
 func FreezeAllowlist(ctx context.Context, db *gorm.DB, jobID uuid.UUID, failingRunID *uuid.UUID, namespace string) (allowed []string, external int) {
+	return freezeAllowlist(ctx, db, jobID, failingRunID, time.Time{}, namespace)
+}
+
+// freezeAllowlist is FreezeAllowlist seeded, when trustedBefore is set, only from
+// runs that completed before it. See OpenParams.TrustedBefore.
+func freezeAllowlist(ctx context.Context, db *gorm.DB, jobID uuid.UUID, failingRunID *uuid.UUID, trustedBefore time.Time, namespace string) (allowed []string, external int) {
 	namespace = models.NamespaceOrDefault(namespace)
 	candidates := map[uuid.UUID]struct{}{jobID: {}}
 
 	// Seed the impact walk from the failing job's TRUSTED output datasets —
 	// every output row for the job EXCEPT those produced by the failing run.
-	seeds, err := trustedOutputDatasets(ctx, db, jobID, failingRunID)
+	seeds, err := trustedOutputDatasets(ctx, db, jobID, failingRunID, trustedBefore)
 	if err != nil {
 		// Lineage tables may be absent/empty when OpenLineage is disabled; degrade
 		// to the job's own alias rather than blocking incident open.
@@ -88,8 +95,9 @@ type datasetSeed struct {
 }
 
 // trustedOutputDatasets returns the distinct (namespace, name) output datasets
-// the job has produced across its runs, EXCLUDING any produced by failingRunID.
-func trustedOutputDatasets(ctx context.Context, db *gorm.DB, jobID uuid.UUID, failingRunID *uuid.UUID) ([]datasetSeed, error) {
+// the job has produced across its runs, EXCLUDING any produced by failingRunID
+// and, when trustedBefore is set, by a run that had not completed by then.
+func trustedOutputDatasets(ctx context.Context, db *gorm.DB, jobID uuid.UUID, failingRunID *uuid.UUID, trustedBefore time.Time) ([]datasetSeed, error) {
 	type row struct {
 		Namespace string
 		Name      string
@@ -104,6 +112,9 @@ func trustedOutputDatasets(ctx context.Context, db *gorm.DB, jobID uuid.UUID, fa
 		Where("jr.job_id = ? AND ld.direction = ?", jobID, "output")
 	if failingRunID != nil {
 		q = q.Where("jr.id <> ?", *failingRunID)
+	}
+	if !trustedBefore.IsZero() {
+		q = q.Where("jr.completed_at < ?", trustedBefore.UTC())
 	}
 	if err := q.Scan(&rows).Error; err != nil {
 		return nil, err

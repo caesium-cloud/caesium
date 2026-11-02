@@ -32,14 +32,36 @@ func NewStore(db *gorm.DB) *Store {
 // DB exposes the underlying handle for read APIs built on top of the store.
 func (s *Store) DB() *gorm.DB { return s.db }
 
+// ErrOpenRefused is returned by an OpenParams.Guard to refuse the open.
+var ErrOpenRefused = errors.New("incident: open refused")
+
 // OpenParams describes a failure the subscriber wants to record as an incident.
 type OpenParams struct {
-	Namespace  string
-	JobID      uuid.UUID
-	RunID      *uuid.UUID
-	TaskID     *uuid.UUID
-	TaskName   string
-	Class      FailureClass
+	Namespace string
+	// NamespaceResolved says Namespace is already the incident's tenant, so
+	// OpenOrAppend must not resolve it again. A caller that shapes anything for
+	// the tenant needs this: two reads can disagree, and what was shaped for one
+	// namespace would be stored in another. Unset, the run or job decides.
+	NamespaceResolved bool
+	JobID             uuid.UUID
+	RunID             *uuid.UUID
+	TaskID            *uuid.UUID
+	TaskName          string
+	Class             FailureClass
+	// Subject narrows the dedupe key to one object when (job, task, class) does
+	// not identify the incident: a step that produces two datasets can hold both,
+	// and each hold is its own incident. Empty for a failure.
+	Subject string
+	// TrustedBefore, when set, limits the allowlist's seeds to runs that
+	// completed before it. A hold can be breached by any number of runs besides
+	// RunID, every one of them green and only the first and last on record, and
+	// a run that had not finished when the hold opened may be among them.
+	TrustedBefore time.Time
+	// Guard, when set, runs first inside the transaction of every open attempt.
+	// ErrOpenRefused from it opens nothing and is reported as OutcomeRefused; any
+	// other error aborts the open. It is what makes a precondition on other rows
+	// atomic with the insert, which a check before OpenOrAppend cannot be.
+	Guard      func(tx *gorm.DB) error
 	LastError  string
 	Evidence   datatypes.JSON
 	BackfillID *uuid.UUID
@@ -76,6 +98,9 @@ const (
 	// OutcomeSuppressed: skipped because a same-key incident closed within the
 	// cooldown window.
 	OutcomeSuppressed OpenOutcome = "suppressed"
+	// OutcomeRefused: OpenParams.Guard refused the open, and no incident is
+	// returned.
+	OutcomeRefused OpenOutcome = "refused"
 )
 
 // OpenOrAppend opens exactly one incident per dedupe key or folds the failure
@@ -85,14 +110,16 @@ const (
 // open twins. A recently-closed same-key incident within Cooldown suppresses a
 // fresh open.
 func (s *Store) OpenOrAppend(ctx context.Context, p OpenParams) (*models.Incident, OpenOutcome, error) {
-	if p.RunID != nil {
+	switch {
+	case p.NamespaceResolved:
+	case p.RunID != nil:
 		var run models.JobRun
 		if err := s.db.WithContext(ctx).Select("namespace").First(&run, "id = ?", *p.RunID).Error; err == nil {
 			p.Namespace = run.Namespace
 		} else if !errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, "", err
 		}
-	} else {
+	default:
 		var job models.Job
 		if err := s.db.WithContext(ctx).Select("namespace").First(&job, "id = ?", p.JobID).Error; err == nil {
 			p.Namespace = job.Namespace
@@ -102,6 +129,9 @@ func (s *Store) OpenOrAppend(ctx context.Context, p OpenParams) (*models.Inciden
 	}
 	p.Namespace = models.NamespaceOrDefault(p.Namespace)
 	key := DedupeKey(p.Namespace, p.JobID, p.TaskName, p.Class)
+	if p.Subject != "" {
+		key += "|" + p.Subject
+	}
 	now := time.Now().UTC()
 
 	// Cooldown: skip if a same-key incident closed within the window.
@@ -125,7 +155,7 @@ func (s *Store) OpenOrAppend(ctx context.Context, p OpenParams) (*models.Inciden
 	// frozen value; the value computed here is only persisted when this insert
 	// wins the atomic conditional create below, so the allowlist is truly frozen
 	// at FIRST open. Best-effort: an empty result degrades to the job's own alias.
-	frozen, external := FreezeAllowlist(ctx, s.db, p.JobID, p.RunID, p.Namespace)
+	frozen, external := freezeAllowlist(ctx, s.db, p.JobID, p.RunID, p.TrustedBefore, p.Namespace)
 	allowedJobs := marshalAllowlist(frozen)
 
 	activeKey := key
@@ -170,6 +200,11 @@ func (s *Store) OpenOrAppend(ctx context.Context, p OpenParams) (*models.Inciden
 		var outcome OpenOutcome
 		var result *models.Incident
 		txErr := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+			if p.Guard != nil {
+				if err := p.Guard(tx); err != nil {
+					return err
+				}
+			}
 			res := tx.Clauses(clause.OnConflict{
 				Columns:   []clause.Column{{Name: "active_dedupe_key"}},
 				DoNothing: true,
@@ -196,6 +231,9 @@ func (s *Store) OpenOrAppend(ctx context.Context, p OpenParams) (*models.Inciden
 			return nil
 		})
 		if txErr != nil {
+			if errors.Is(txErr, ErrOpenRefused) {
+				return nil, OutcomeRefused, nil
+			}
 			if errors.Is(txErr, gorm.ErrRecordNotFound) {
 				// The twin closed between the conflict and the append; the dedupe
 				// key is free now — retry the insert.
@@ -309,7 +347,9 @@ func (s *Store) Remediate(ctx context.Context, id uuid.UUID, summary string) (*m
 }
 
 // OpenForJobTask returns the open (non-terminal) incidents for a job whose task
-// name matches. Used by the terminal-verification success path.
+// name matches. Used by the terminal-verification success path, so a
+// data_quality_hold incident is left out: the task it names succeeded when the
+// hold opened, and a green run says nothing about a hold that is still active.
 func (s *Store) OpenForJobTask(ctx context.Context, jobID uuid.UUID, taskName, namespace string) ([]models.Incident, error) {
 	var incidents []models.Incident
 	// Match task_name EXACTLY, including the empty string: a run-level success
@@ -319,11 +359,34 @@ func (s *Store) OpenForJobTask(ctx context.Context, jobID uuid.UUID, taskName, n
 	// name and remediates that task's incidents. This mirrors the (job, task,
 	// class) dedupe correlation key.
 	q := s.db.WithContext(ctx).
-		Where("job_id = ? AND task_name = ? AND namespace = ? AND active_dedupe_key IS NOT NULL", jobID, taskName, models.NamespaceOrDefault(namespace))
+		Where("job_id = ? AND task_name = ? AND namespace = ? AND class <> ? AND active_dedupe_key IS NOT NULL",
+			jobID, taskName, models.NamespaceOrDefault(namespace), string(ClassDataQualityHold))
 	if err := q.Find(&incidents).Error; err != nil {
 		return nil, err
 	}
 	return incidents, nil
+}
+
+// incidentForHold returns the incident opened for a dataset hold, in any status,
+// or nil when there is none. The hold id is the last segment of the dedupe key
+// (holdSubject); matching it directly keeps the lookup independent of the
+// namespace and task name the key was built from, which a dataset_released
+// event does not carry.
+func (s *Store) incidentForHold(ctx context.Context, jobID, holdID uuid.UUID) (*models.Incident, error) {
+	var inc models.Incident
+	err := holdIncidents(s.db.WithContext(ctx), jobID, holdID).First(&inc).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &inc, nil
+}
+
+func holdIncidents(db *gorm.DB, jobID, holdID uuid.UUID) *gorm.DB {
+	return db.Model(&models.Incident{}).
+		Where("job_id = ? AND class = ? AND dedupe_key LIKE ?", jobID, string(ClassDataQualityHold), "%|"+holdSubject(holdID))
 }
 
 // Get returns a single incident by id.

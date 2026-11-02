@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/caesium-cloud/caesium/internal/event"
+	"github.com/caesium-cloud/caesium/internal/incident"
 	"github.com/caesium-cloud/caesium/internal/jobdef/testutil"
 	"github.com/caesium-cloud/caesium/internal/metrics"
 	metricstestutil "github.com/caesium-cloud/caesium/internal/metrics/testutil"
@@ -173,6 +174,129 @@ func TestHoldOpensOnceAndAppendsOccurrences(t *testing.T) {
 	require.NoError(t, db.Model(&models.ExecutionEvent{}).
 		Where("type = ?", string(event.TypeDatasetHeld)).Count(&stored).Error)
 	assert.Equal(t, int64(1), stored)
+}
+
+// TestHoldEventOpensIncident pins DatasetHoldEvent to the mirror internal/incident
+// decodes, through the real seam: a breach opens a hold, the incident subscriber
+// consumes the event the store published, and a release closes the incident.
+func TestHoldEventOpensIncident(t *testing.T) {
+	setDataAssertions(t, true)
+	db := testutil.OpenTestDB(t)
+	t.Cleanup(func() { testutil.CloseDB(db) })
+	store := NewStore(db)
+	bus := event.New()
+	store.SetBus(bus)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	subscriber := incident.NewSubscriber(bus, db, nil, 0)
+	ready := make(chan struct{})
+	go func() { _ = subscriber.StartWithReady(ctx, ready) }()
+	<-ready
+
+	jobID, taskID, taskRunID, stepName := seedTaskRun(t, db, string(TaskStatusRunning), false)
+	declareProducesHold(t, db, jobID, stepName, "warehouse/orders", jobdef.DatasetReleaseManual)
+	require.NoError(t, emitSamples(t, store, db, taskID, taskRunID,
+		pkgtask.DatasetMetricSample{Dataset: "warehouse/orders", Metric: "rowCount", Value: 12}))
+	holds := activeHolds(t, db, "warehouse/orders")
+	require.Len(t, holds, 1)
+
+	var inc models.Incident
+	require.Eventually(t, func() bool {
+		return db.Where("job_id = ?", jobID).First(&inc).Error == nil
+	}, 3*time.Second, 10*time.Millisecond, "dataset_held must open an incident")
+	assert.Equal(t, string(incident.ClassDataQualityHold), inc.Class)
+	require.NotNil(t, inc.RunID)
+	assert.Equal(t, *holds[0].HeldByRunID, *inc.RunID)
+	require.NotNil(t, inc.TaskID)
+	assert.Equal(t, taskID, *inc.TaskID)
+	assert.Equal(t, stepName, inc.TaskName)
+
+	var evidence struct {
+		HoldID     string          `json:"hold_id"`
+		Dataset    string          `json:"dataset"`
+		TaskRunID  string          `json:"task_run_id"`
+		Violations []DataViolation `json:"violations"`
+	}
+	require.NoError(t, json.Unmarshal(inc.Evidence, &evidence))
+	assert.Equal(t, holds[0].ID.String(), evidence.HoldID)
+	assert.Equal(t, "warehouse/orders", evidence.Dataset)
+	assert.Equal(t, taskRunID.String(), evidence.TaskRunID)
+	require.Len(t, evidence.Violations, 1)
+	assert.Equal(t, AssertionMin, evidence.Violations[0].Assertion)
+	assert.Contains(t, inc.LastError, evidence.Violations[0].Message, "the feed quotes the verdict, so a confined read can withhold it")
+
+	_, err := store.ReleaseHold(ctx, holds[0].ID, ReleaseHoldParams{ReleasedBy: "user:ada"})
+	require.NoError(t, err)
+	require.Eventually(t, func() bool {
+		var closed models.Incident
+		return db.First(&closed, "id = ?", inc.ID).Error == nil && closed.Status == models.IncidentStatusClosed
+	}, 3*time.Second, 10*time.Millisecond, "dataset_released must close the incident")
+}
+
+// TestHoldEventsConsumedByAFollowerStillReachTheIncident is the cluster gap the
+// reconciliation closes. The bus is per-node: the store publishes on the node that
+// did the work, a follower's subscriber drops the event at its leader check, and
+// the row is marked dispatched all the same, so the leader's dispatcher has
+// nothing to deliver. Two subscribers over one database, each with its own bus,
+// are that topology.
+func TestHoldEventsConsumedByAFollowerStillReachTheIncident(t *testing.T) {
+	setDataAssertions(t, true)
+	db := testutil.OpenTestDB(t)
+	t.Cleanup(func() { testutil.CloseDB(db) })
+	followerBus, leaderBus := event.New(), event.New()
+	store := NewStore(db)
+	store.SetBus(followerBus)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	follower := incident.NewSubscriber(followerBus, db, func(context.Context) (bool, error) { return false, nil }, 0)
+	leader := incident.NewSubscriber(leaderBus, db, nil, 0)
+	for _, sub := range []*incident.Subscriber{follower, leader} {
+		ready := make(chan struct{})
+		go func() { _ = sub.StartWithReady(ctx, ready) }()
+		<-ready
+	}
+	dispatcher := event.NewBusDispatcher(event.NewStore(db), leaderBus)
+
+	incidents := func() []models.Incident {
+		var rows []models.Incident
+		require.NoError(t, db.Find(&rows).Error)
+		return rows
+	}
+
+	jobID, taskID, taskRunID, stepName := seedTaskRun(t, db, string(TaskStatusRunning), false)
+	declareProducesHold(t, db, jobID, stepName, "warehouse/orders", jobdef.DatasetReleaseManual)
+	require.NoError(t, emitSamples(t, store, db, taskID, taskRunID,
+		pkgtask.DatasetMetricSample{Dataset: "warehouse/orders", Metric: "rowCount", Value: 12}))
+	holds := activeHolds(t, db, "warehouse/orders")
+	require.Len(t, holds, 1)
+
+	// dataset_held went to the follower, and nothing is left to dispatch.
+	require.NoError(t, dispatcher.DispatchOnce(ctx))
+	time.Sleep(100 * time.Millisecond)
+	require.Empty(t, incidents(), "the leader never heard of this hold")
+	require.NoError(t, leader.ReconcileHolds(ctx, 0))
+	require.Len(t, incidents(), 1, "the sweep opens the missing incident")
+	opened := incidents()[0]
+	assert.Equal(t, string(incident.ClassDataQualityHold), opened.Class)
+	assert.Equal(t, models.IncidentStatusOpen, opened.Status)
+	assert.Contains(t, string(opened.Evidence), holds[0].ID.String())
+
+	// So did dataset_released.
+	_, err := store.ReleaseHold(ctx, holds[0].ID, ReleaseHoldParams{ReleasedBy: "user:ada"})
+	require.NoError(t, err)
+	require.NoError(t, dispatcher.DispatchOnce(ctx))
+	time.Sleep(100 * time.Millisecond)
+	require.Equal(t, models.IncidentStatusOpen, incidents()[0].Status,
+		"the leader's subscriber never received the release")
+
+	require.NoError(t, leader.ReconcileHolds(ctx, 0))
+
+	require.Len(t, incidents(), 1)
+	closed := incidents()[0]
+	assert.Equal(t, models.IncidentStatusClosed, closed.Status)
+	assert.Contains(t, closed.ResolutionSummary, models.DatasetHoldReleaseManualAck)
 }
 
 // TestCleanRunReleasesAutoHoldOnly covers both halves of the release policy:

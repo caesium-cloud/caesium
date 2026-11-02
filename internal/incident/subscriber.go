@@ -21,13 +21,15 @@ import (
 // incident per failure. A nil LeaderCheck means "always act" (single-node).
 type LeaderCheck func(context.Context) (bool, error)
 
-// classifierFailureTypes are the failure events that can open/append incidents.
+// classifierFailureTypes are the events that can open/append incidents. All but
+// dataset_held are failures; a held dataset's producing task succeeded.
 var classifierFailureTypes = []event.Type{
 	event.TypeTaskFailed,
 	event.TypeRunFailed,
 	event.TypeRunTimedOut,
 	event.TypeSLAMissed,
 	event.TypeSchemaViolationRecorded,
+	event.TypeDatasetHeld,
 }
 
 // successTypes are the events that verify a remediation actually worked: an
@@ -36,6 +38,12 @@ var classifierFailureTypes = []event.Type{
 var successTypes = []event.Type{
 	event.TypeTaskSucceeded,
 	event.TypeRunCompleted,
+}
+
+// holdReleaseTypes close a data_quality_hold incident, which successTypes never
+// do.
+var holdReleaseTypes = []event.Type{
+	event.TypeDatasetReleased,
 }
 
 // Subscriber is the leader-gated incident manager. It consumes failure events,
@@ -55,6 +63,13 @@ type Subscriber struct {
 	// deployments and tests take no autonomous action.
 	executor *Executor
 	rules    *Rules
+	// holdScanAfter is the id the reconcile sweep's next page of uncovered holds
+	// starts after. It is in memory and owned by the one sweeping goroutine: a
+	// restart or a new leader starts from the beginning, which is harmless.
+	holdScanAfter uuid.UUID
+	// afterHoldScan, tests only, runs between the reconcile sweep's scan for
+	// uncovered holds and its opens: where the event path interleaves.
+	afterHoldScan func()
 	// eventStore is the durable event store used to persist TypeIncidentOpened
 	// atomically with the incident row that opens it (see SetEventSink and
 	// OpenParams.OnOpen). Nil unless wired, so a subscriber under test still
@@ -103,8 +118,8 @@ func (s *Subscriber) SetRemediator(executor *Executor, rules *Rules) {
 	s.rules = rules
 }
 
-// Start subscribes to the failure and success event types and processes them
-// until ctx is cancelled.
+// Start subscribes to the failure, success and hold-release event types and
+// processes them until ctx is cancelled.
 func (s *Subscriber) Start(ctx context.Context) error {
 	return s.StartWithReady(ctx, nil)
 }
@@ -112,7 +127,7 @@ func (s *Subscriber) Start(ctx context.Context) error {
 // StartWithReady subscribes and signals readiness once the subscription is live
 // (used by tests to avoid a publish race).
 func (s *Subscriber) StartWithReady(ctx context.Context, ready chan<- struct{}) error {
-	types := append(append([]event.Type{}, classifierFailureTypes...), successTypes...)
+	types := append(append(append([]event.Type{}, classifierFailureTypes...), successTypes...), holdReleaseTypes...)
 	return event.RunSubscription(ctx, s.bus, event.Filter{Types: types}, ready, func(evt event.Event) {
 		s.handle(ctx, evt)
 	}, nil)
@@ -141,6 +156,10 @@ func (s *Subscriber) handle(ctx context.Context, evt event.Event) {
 	switch evt.Type {
 	case event.TypeTaskSucceeded, event.TypeRunCompleted:
 		s.handleSuccess(ctx, evt)
+	case event.TypeDatasetHeld:
+		s.handleHold(ctx, evt)
+	case event.TypeDatasetReleased:
+		s.handleHoldRelease(ctx, evt)
 	default:
 		s.handleFailure(ctx, evt)
 	}
@@ -259,6 +278,9 @@ func failedPartitionValues(rows []models.TaskRun) []string {
 // task terminal event (internal/run/owner_manager.go) — so the task-attributed
 // incident is already committed and visible by the time run_failed is processed.
 //
+// A data_quality_hold incident does not count: it names a task that succeeded,
+// so it says nothing about why the run failed.
+//
 // On a query error it FAILS OPEN (returns false → the run-level incident opens):
 // a rare transient error yielding a rare duplicate is a safer degradation than a
 // rare missed incident.
@@ -266,7 +288,7 @@ func (s *Subscriber) runHasTaskAttributedIncident(ctx context.Context, runID uui
 	var n int64
 	if err := s.db.WithContext(ctx).
 		Model(&models.Incident{}).
-		Where("run_id = ? AND task_id IS NOT NULL", runID).
+		Where("run_id = ? AND task_id IS NOT NULL AND class <> ?", runID, string(ClassDataQualityHold)).
 		Count(&n).Error; err != nil {
 		log.Warn("incident: could not check for task-attributed incident; opening run-level incident", "run_id", runID, "error", err)
 		return false
@@ -335,6 +357,15 @@ func (s *Subscriber) handleFailure(ctx context.Context, evt event.Event) {
 		Cooldown:               s.cooldown,
 	}
 
+	s.recordIncident(ctx, params)
+}
+
+// recordIncident opens the incident or folds it into its open twin, then runs
+// everything that follows a fresh open: incident_opened and the deterministic
+// rule for the class.
+func (s *Subscriber) recordIncident(ctx context.Context, params OpenParams) {
+	class := params.Class
+
 	// Build (and, when an event store is wired, durably persist) the
 	// incident_opened event INSIDE the same transaction OpenOrAppend uses to
 	// insert a freshly opened incident row. OnOpen only runs on the winning
@@ -357,18 +388,22 @@ func (s *Subscriber) handleFailure(ctx context.Context, evt event.Event) {
 
 	inc, outcome, err := s.store.OpenOrAppend(ctx, params)
 	if err != nil {
-		log.Error("incident: failed to open/append incident", "job_id", fc.jobID, "class", class, "error", err)
+		log.Error("incident: failed to open/append incident", "job_id", params.JobID, "class", class, "error", err)
 		return
 	}
 	if outcome == OutcomeSuppressed {
-		log.Debug("incident: suppressed by cooldown", "job_id", fc.jobID, "class", class)
+		log.Debug("incident: suppressed by cooldown", "job_id", params.JobID, "class", class)
+		return
+	}
+	if outcome == OutcomeRefused {
+		log.Debug("incident: open refused by its guard", "job_id", params.JobID, "class", class)
 		return
 	}
 	metrics.IncidentsTotal.WithLabelValues(string(class), string(inc.Status)).Inc()
 	log.Info("incident recorded",
 		"incident_id", inc.ID,
-		"job_id", fc.jobID,
-		"task", fc.taskName,
+		"job_id", params.JobID,
+		"task", params.TaskName,
 		"class", class,
 		"outcome", outcome,
 		"occurrences", inc.OccurrenceCount,
@@ -449,20 +484,26 @@ func (s *Subscriber) handleSuccess(ctx context.Context, evt event.Event) {
 		return
 	}
 	for i := range incidents {
-		inc := &incidents[i]
-		remediated, err := s.store.Remediate(ctx, inc.ID, "subsequent run succeeded")
-		if err != nil {
-			// A concurrent transition or an incident not in a remediable state is
-			// non-fatal — just skip it.
-			log.Debug("incident: could not remediate on success", "incident_id", inc.ID, "error", err)
-			continue
+		// A concurrent transition or an incident not in a remediable state is
+		// non-fatal — just skip it.
+		if err := s.remediate(ctx, &incidents[i], "subsequent run succeeded"); err != nil {
+			log.Debug("incident: could not remediate on success", "incident_id", incidents[i].ID, "error", err)
 		}
-		metrics.IncidentsTotal.WithLabelValues(remediated.Class, string(models.IncidentStatusRemediated)).Inc()
-		if !inc.OpenedAt.IsZero() {
-			metrics.IncidentResolutionSeconds.WithLabelValues(remediated.Class).Observe(time.Since(inc.OpenedAt).Seconds())
-		}
-		log.Info("incident remediated", "incident_id", inc.ID, "job_id", jobID, "task", taskName)
 	}
+}
+
+// remediate closes an incident as remediated and records its resolution time.
+func (s *Subscriber) remediate(ctx context.Context, inc *models.Incident, summary string) error {
+	remediated, err := s.store.Remediate(ctx, inc.ID, summary)
+	if err != nil {
+		return err
+	}
+	metrics.IncidentsTotal.WithLabelValues(remediated.Class, string(models.IncidentStatusRemediated)).Inc()
+	if !inc.OpenedAt.IsZero() {
+		metrics.IncidentResolutionSeconds.WithLabelValues(remediated.Class).Observe(time.Since(inc.OpenedAt).Seconds())
+	}
+	log.Info("incident remediated", "incident_id", inc.ID, "job_id", inc.JobID, "task", inc.TaskName)
+	return nil
 }
 
 // evidencePartitionListCap bounds the partition list embedded in an incident's

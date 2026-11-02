@@ -169,6 +169,18 @@ type DatasetHold struct {
 	UpdatedAt time.Time `gorm:"not null" json:"updated_at"`
 }
 
+// LatestBreachRunID is the run that wrote Violations. A later breach replaces
+// them and can come from another producer of the dataset, in another namespace,
+// so whoever serves them must check that run's namespace rather than the
+// opener's. NULL LastBreachRunID means the row predates the column, when the
+// opening run is the only breach this version can prove.
+func (h *DatasetHold) LatestBreachRunID() *uuid.UUID {
+	if h.LastBreachRunID != nil {
+		return h.LastBreachRunID
+	}
+	return h.HeldByRunID
+}
+
 // DatasetHoldKey renders the active-hold uniqueness key for a dataset. It is
 // also the human-readable identity in a skipped run's SkipReason
 // ("dataset_hold:<ns>/<name>"), so both sides read one function.

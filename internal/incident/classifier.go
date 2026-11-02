@@ -38,6 +38,10 @@ const (
 	ClassOOM FailureClass = "oom"
 	// ClassQuota covers rate limits / quota exhaustion.
 	ClassQuota FailureClass = "quota"
+	// ClassDataQualityHold covers a dataset held by the data circuit breaker.
+	// The producing task SUCCEEDED, so such an incident has no failed TaskRun,
+	// and a green run does not close it: its hold's release does.
+	ClassDataQualityHold FailureClass = "data_quality_hold"
 	// ClassConfig covers a task refused by configuration rather than by a
 	// runtime fault — today a secret reference its namespace's secret rules
 	// do not allow. Retrying cannot clear it, so no deterministic rule retries
@@ -169,18 +173,21 @@ func (c *Classifier) WithLogRule(pattern string, class FailureClass) (*Classifie
 //
 //  1. run_timed_out / sla_missed          → sla_risk
 //  2. schema_violation event / violations → schema_violation
-//  3. Runtime OOMKilled evidence          → oom; known false suppresses 137 fallback
-//  4. Error carries the secret denial     → config (Error only, never LogTail)
-//  5. StartupFailure / ResourceFailure    → transient_infra
-//  6. log-tail regex table                → data_unavailable|auth_failure|oom|quota
-//  7. exit-code table                     → (default 137 → oom)
-//  8. fallback                            → unknown
+//  3. dataset_held                        → data_quality_hold
+//  4. Runtime OOMKilled evidence          → oom; known false suppresses 137 fallback
+//  5. Error carries the secret denial     → config (Error only, never LogTail)
+//  6. StartupFailure / ResourceFailure    → transient_infra
+//  7. log-tail regex table                → data_unavailable|auth_failure|oom|quota
+//  8. exit-code table                     → (default 137 → oom)
+//  9. fallback                            → unknown
 func (c *Classifier) Classify(sig Signal) FailureClass {
 	switch event.Type(sig.EventType) {
 	case event.TypeRunTimedOut, event.TypeSLAMissed:
 		return ClassSLARisk
 	case event.TypeSchemaViolationRecorded:
 		return ClassSchemaViolation
+	case event.TypeDatasetHeld:
+		return ClassDataQualityHold
 	}
 
 	if sig.HasSchemaViolations {

@@ -217,7 +217,11 @@ func BuildBundleFor(ctx context.Context, db *gorm.DB, incidentID uuid.UUID, play
 	// predicate could hand the agent a SUCCEEDED instance's empty log as "the
 	// failure". Load the whole group in partition order, describe the first
 	// FAILED instance, and enumerate the rest of the failed siblings.
-	if inc.RunID != nil && inc.TaskID != nil {
+	//
+	// A data_quality_hold incident names a task that SUCCEEDED, so it has no
+	// failure to describe: attributionTaskRun would present a green instance as
+	// one. The hold's evidence is in Classification.
+	if inc.RunID != nil && inc.TaskID != nil && FailureClass(inc.Class) != ClassDataQualityHold {
 		var rows []models.TaskRun
 		if err := db.WithContext(ctx).
 			Where("job_run_id = ? AND task_id = ?", *inc.RunID, *inc.TaskID).

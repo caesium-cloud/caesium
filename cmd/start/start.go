@@ -863,6 +863,16 @@ func start(cmd *cobra.Command, args []string) error {
 				log.Error("incident subscriber exited", "error", err)
 			}
 		})
+		// The subscriber is leader-gated but the bus is per-node: an event
+		// published on a follower is marked dispatched without reaching the
+		// leader. For a hold that would strand its incident, so the leader also
+		// converges incidents on hold state.
+		if vars.DataAssertionsEnabled {
+			runAsync(func() {
+				log.Info("launching dataset hold incident reconciler", "interval", vars.AgentHoldReconcileInterval)
+				incidentSub.RunHoldReconciler(ctx, vars.AgentHoldReconcileInterval)
+			})
+		}
 
 		timerSweeper := incident.NewTimerSupervisor(incConn, dqlite.IsLocalLeader, 0)
 		incExecutor.RegisterTimerHandlers(timerSweeper)
