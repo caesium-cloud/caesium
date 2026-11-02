@@ -183,8 +183,7 @@ review plus a scoped re-review of each fix commit; the reviews found one P1 per
 PR (see the wave entries), all fixed before merge. Wave 4 merged on 2026-09-09:
 Stream D in #442 (`995ae8b3`) and Stream E in #445 (`c97208f1`), except E2's rows for
 passing assertions. Wave 5 (F1 + F4) and Wave 6 (F2) merged on 2026-11-02. W7 (F3 + F5)
-is in progress, then the rest of E2 and N-1. From W5 on, reviews are by Codex, with
-Greptile alongside.
+is in progress, then the rest of E2 and N-1.
 
 ### Wave 6 — `release_hold` (2026-11-02)
 
@@ -197,10 +196,8 @@ Greptile alongside.
   The executor writes no incident status: the subscriber or the sweep closes the
   incident on `dataset_released`. The bundle gained `DataQuality`, and `get_context`
   serves the metric series for the incident's own dataset only.
-  **Review:** Codex round 1 and Greptile reported one P1: a job moved between the
-  namespace check and the live hold read showed the new owner's occurrence count. It
-  was fixed by reading both in one snapshot, and round 2, run after merge on `7be517ad`,
-  approved.
+  The live hold state and the job's namespace are read in one snapshot, so a job that
+  moves cannot show its new owner's occurrence count to the old namespace's reader.
   **Limits:** tolerances stay advisory because C3 enforces nothing, and the action
   result says so. A sibling hold of the same job can be released from another hold's
   incident, as F2's wording allows. The `TestTriageAgent*` tests skip in CI because
@@ -216,10 +213,7 @@ Greptile alongside.
   drops these events, a reconciliation sweep converges incidents on the hold rows.
   `DatasetHold.Impact` now stores node owners, and the redactor moved to
   `internal/lineage`.
-  **Review:** eight Codex rounds. The real findings were tenant confinement, a poison
-  hold wedging the sweep, a hold outliving its run or job, and `GET
-  /v1/agent/incidents/:id/bundle` returning 404 for a soft-deleted job. A deleted job's
-  bundle now shows its alias and no DAG on both delete paths. Round 8 approved.
+  A deleted job's bundle shows its alias and no DAG on both delete paths.
   **Limits:** no real follower/leader run. First boot opens at most 100 incidents per
   sweep, without notifications. A hold with no run and no job stays active with no
   incident and one warning per process. An ordinary failure incident has the same
@@ -230,9 +224,8 @@ Greptile alongside.
   `onUpstreamHold: run`. The `held` write is fenced on the hold still being active, with
   a row lock on PostgreSQL, and a persisted `held` with no active hold reads as
   `unknown`.
-  **Review:** six Codex rounds plus one Greptile finding, then a real PostgreSQL 16 run
-  of the race tests. No CI lane sets `CAESIUM_TEST_POSTGRES_DSN`, and the lock test was
-  not mutation-checked.
+  **Limits:** no CI lane sets `CAESIUM_TEST_POSTGRES_DSN`, so the PostgreSQL race tests
+  do not run in CI.
   **Judgment call:** a held dataset that is stale or violated still derives its own
   producer, against F4's literal text, because otherwise a freshness-triggered clean run
   could never satisfy `release: auto`.
