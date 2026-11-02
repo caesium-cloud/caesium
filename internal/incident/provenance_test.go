@@ -624,9 +624,11 @@ func TestDirectRouteIsUnchangedForAJobWithNoProvenance(t *testing.T) {
 	for _, column := range []string{"provenance_repo", "provenance_ref", "provenance_commit", "provenance_path", "provenance_source_id"} {
 		f.updateJob(t, column, "")
 	}
+	f.ops.patchDiff = json.RawMessage(`{"alias":"orders-daily","empty":false,"diff":"the rendered diff"}`)
 	_, result := f.approveAndExecute(t, patchJSON(t, patchedDefinition))
 	require.Equal(t, routeDirect, result["route"])
 	require.Equal(t, true, result["applied"])
+	require.Equal(t, "the rendered diff", result["diff"], "every route records the diff as text")
 	require.Zero(t, f.forge.hits())
 	require.Empty(t, f.ops.escalate)
 	require.False(t, f.ops.applyPatch[len(f.ops.applyPatch)-1].dryRun)
