@@ -182,6 +182,17 @@ type ApplyOptions struct {
 	// ContractWarningsWithheld, when set, counts the warnings ContractAudience
 	// withheld.
 	ContractWarningsWithheld *int
+	// RecordedJobs, when set, receives each job applyTx persisted, in call
+	// order. A retried confined batch truncates the slice back to the length
+	// it had when the attempt started, the same way contract warnings are reset.
+	RecordedJobs *[]RecordedJob
+}
+
+// RecordedJob is the identity applyTx just stored. The apply response echoes
+// it so clients do not look the job up again.
+type RecordedJob struct {
+	ID    uuid.UUID
+	Alias string
 }
 
 // tenancyScope is the writer scope trigger tenancy confines the apply to.
@@ -316,7 +327,15 @@ func (i *Importer) applyTx(ctx context.Context, tx *gorm.DB, def *schema.Definit
 	if err := i.softDeleteAtomsTx(tx, retiredAtomIDs); err != nil {
 		return nil, err
 	}
+	recordAppliedJob(opts, jobModel)
 	return jobModel, nil
+}
+
+func recordAppliedJob(opts *ApplyOptions, job *models.Job) {
+	if opts == nil || opts.RecordedJobs == nil || job == nil {
+		return
+	}
+	*opts.RecordedJobs = append(*opts.RecordedJobs, RecordedJob{ID: job.ID, Alias: job.Alias})
 }
 
 // BatchPlan is one definition of an ApplyBatchWithOptions call.
@@ -726,12 +745,16 @@ func (i *Importer) ApplyConfinedBatch(ctx context.Context, plans []BatchPlan, op
 	// not leave its warnings behind.
 	warningBase := make(map[*[]contractenforce.ContractWarning]int)
 	withheldBase := make(map[*int]int)
+	recordedBase := make(map[*[]RecordedJob]int)
 	for _, plan := range plans {
 		if plan.Opts != nil && plan.Opts.ContractWarnings != nil {
 			warningBase[plan.Opts.ContractWarnings] = len(*plan.Opts.ContractWarnings)
 		}
 		if plan.Opts != nil && plan.Opts.ContractWarningsWithheld != nil {
 			withheldBase[plan.Opts.ContractWarningsWithheld] = *plan.Opts.ContractWarningsWithheld
+		}
+		if plan.Opts != nil && plan.Opts.RecordedJobs != nil {
+			recordedBase[plan.Opts.RecordedJobs] = len(*plan.Opts.RecordedJobs)
 		}
 	}
 
@@ -742,6 +765,9 @@ func (i *Importer) ApplyConfinedBatch(ctx context.Context, plans []BatchPlan, op
 		}
 		for withheld, base := range withheldBase {
 			*withheld = base
+		}
+		for recorded, base := range recordedBase {
+			*recorded = (*recorded)[:base]
 		}
 		if beforeConfinedBatchTx != nil {
 			beforeConfinedBatchTx()
