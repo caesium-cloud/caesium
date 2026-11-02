@@ -453,8 +453,9 @@ which can remove the cgroup before containerd reads its OOM status. The runtime
 configuration remains a compatibility candidate until the unchanged native
 stress smoke qualifies it. Each selected integration consumer also smokes its
 loaded candidate image. Exit 137 still requires positive native OOM metadata.
-The coverage collector resolves `CAESIUM_BUILDER_IMAGE` locally and gives its
-inspected image ID a verified local tag for Dockerfile `FROM`. It does not
+The coverage collector and its prepared Temporal fixture give the configured
+builder image ID a verified local tag for Dockerfile `FROM`. The collector
+resolves its builder through `CAESIUM_BUILDER_IMAGE`. It does not
 require the containerd image store to resolve a config ID as a digest.
 
 Native smoke steps also log bounded host observations from

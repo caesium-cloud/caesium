@@ -559,6 +559,50 @@ class RemediationWorkflowTests(unittest.TestCase):
             self.assertNotIn("containerd-snapshotter", command)
             self.assertNotIn("apt-get", command)
 
+    def test_temporal_fixture_build_supports_classic_store_and_refuses_bad_pin(self):
+        steps = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text())["jobs"]["coverage-ratchets"]["steps"]
+        command = next(step["run"] for step in steps if step.get("name") == "Prepare pinned Temporal fixture for existing coverage cohort")
+        command = command.replace("${{ env.IMAGE_TAG }}", "candidate")
+        engine = r'''#!/usr/bin/env python3
+import json, os, sys
+args = sys.argv[1:]
+with open(os.environ['CALLS'], 'a') as out: out.write(json.dumps(args)+'\n')
+builder = 'sha256:'+'b'*64
+local_tag = 'caesium-coverage-builder:sha256-'+'b'*64
+if args[:2] == ['image', 'inspect']:
+    ref = args[-1]
+    if ref.startswith('caesiumcloud/caesium-connectors-fixture:'): print('sha256:'+'f'*64)
+    elif ref == local_tag and os.environ['MODE'] == 'mismatch': print('sha256:'+'c'*64)
+    else: print(builder)
+elif args[0] == 'tag':
+    assert args[1:] == [builder, local_tag], args
+    if os.environ['MODE'] == 'tag-failure': sys.exit(31)
+elif args[0] == 'build':
+    value = next(arg for arg in args if arg.startswith('BUILDER_IMAGE='))
+    # Classic Docker cannot resolve a config ID as a manifest digest.
+    assert '@sha256:' not in value, args
+    assert value == 'BUILDER_IMAGE='+local_tag, args
+    assert 'caesium.coverage.builder='+builder in args, args
+    assert args[args.index('--platform')+1] == 'linux/amd64', args
+else: sys.exit(99)
+'''
+        for mode in ('success', 'tag-failure', 'mismatch'):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                docker = root / 'docker'; docker.write_text(engine); docker.chmod(0o755)
+                calls, github_env = root / 'calls', root / 'github-env'
+                env = {**os.environ, 'PATH': str(root)+os.pathsep+os.environ['PATH'],
+                       'CALLS': str(calls), 'MODE': mode, 'GITHUB_ENV': str(github_env),
+                       'CANDIDATE_SHA': 'a'*40}
+                result = subprocess.run(['bash', '-c', command], env=env, capture_output=True, text=True, timeout=10)
+                self.assertEqual(result.returncode, {'success': 0, 'tag-failure': 31, 'mismatch': 1}[mode], result.stderr + calls.read_text())
+                observed = [json.loads(line) for line in calls.read_text().splitlines()]
+                self.assertEqual(sum(call[0] == 'build' for call in observed), 1 if mode == 'success' else 0)
+                if mode == 'success':
+                    self.assertEqual(github_env.read_text().strip(), 'CAESIUM_COVERAGE_CONNECTOR_FIXTURE_IMAGE=sha256:'+'f'*64)
+                else:
+                    self.assertFalse(github_env.exists())
+
     def test_same_attempt_diagnostics_are_uploaded_before_cleanup_even_on_failure(self):
         steps = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text())["jobs"]["helm-integration-test"]["steps"]
         collect = next(i for i, step in enumerate(steps) if step.get("name") == "Collect Helm integration diagnostics")

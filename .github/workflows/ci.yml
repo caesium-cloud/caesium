@@ -2433,9 +2433,13 @@ jobs:
           builder="caesiumcloud/caesium-builder:${{ env.IMAGE_TAG }}-amd64"
           builder_id="$(docker image inspect --format '{{.Id}}' "$builder")"
           [[ "$builder_id" =~ ^sha256:[0-9a-f]{64}$ ]]
+          # Dockerfile FROM needs a local tag, not a config ID after @.
+          builder_tag="caesium-coverage-builder:sha256-${builder_id#sha256:}"
+          docker tag "$builder_id" "$builder_tag"
+          [[ "$(docker image inspect --format '{{.Id}}' "$builder_tag")" == "$builder_id" ]] || exit 1
           fixture="caesiumcloud/caesium-connectors-fixture:${{ env.IMAGE_TAG }}-coverage-amd64"
           docker build --platform linux/amd64 \
-            --build-arg BUILDER_IMAGE="$builder@$builder_id" \
+            --build-arg BUILDER_IMAGE="$builder_tag" \
             --label "org.opencontainers.image.revision=$CANDIDATE_SHA" \
             --label "caesium.coverage.builder=$builder_id" \
             -f build/Dockerfile.connector-fixture -t "$fixture" .
