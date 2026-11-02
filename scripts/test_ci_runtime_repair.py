@@ -540,86 +540,68 @@ class RemediationWorkflowTests(unittest.TestCase):
         self.assertIn("bash build/stress/smoke.sh docker", inner[smoke]["run"])
         self.assertNotIn("continue-on-error", inner[smoke])
 
-    def test_coverage_pins_runtime_before_preserving_store_configuration_and_loading_images(self):
+    def test_coverage_pins_runtime_before_loading_images_without_reconfiguring_daemon(self):
         steps = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text())["jobs"]["coverage-ratchets"]["steps"]
         setups = [i for i, step in enumerate(steps) if step.get("run") == "python3 scripts/setup-ci-docker.py"]
         self.assertEqual(len(setups), 1)
         setup = setups[0]
-        configure = next(i for i, step in enumerate(steps) if 'jq \'.features["containerd-snapshotter"] = true\'' in step.get("run", ""))
         load = next(i for i, step in enumerate(steps) if step.get("uses") == "./.github/actions/load-docker-images")
-        self.assertLess(setup, configure)
-        self.assertLess(configure, load)
+        self.assertLess(setup, load)
         self.assertNotIn("if", steps[setup])
         self.assertFalse(steps[setup].get("continue-on-error", False))
-        command = steps[configure]["run"]
-        self.assertIn('if [ -s "$conf" ]; then current="$(sudo cat "$conf")"', command)
-        self.assertIn('printf \'%s\' "$current" | jq', command)
-        self.assertIn("sudo systemctl restart docker", command)
-        self.assertNotIn("need=29.0", command)
-        self.assertNotIn("apt-get", command)
-        # Execute the workflow's real JSON transform. A replacement object here
-        # would silently discard the cgroup driver before the coverage restart.
-        expressions = re.findall(r"\bjq '([^']+)'", command)
-        self.assertEqual(len(expressions), 1)
-        config = RUNTIME.merged_docker_config(json.dumps({
-            "features": {"unrelated": False}, "log-driver": "local",
-            "exec-opts": ["native.cgroupdriver=systemd", "native.other=preserved"],
-        }))
-        transformed = subprocess.run(["jq", expressions[0]], input=json.dumps(config),
-                                     capture_output=True, text=True, check=True, timeout=5)
-        observed = json.loads(transformed.stdout)
-        self.assertEqual(observed, {**config, "features": {"unrelated": False, "containerd-snapshotter": True}})
-        self.assertIn("native.cgroupdriver=cgroupfs", observed["exec-opts"])
+        # Coverage now uses a verified local builder tag for FROM. No second
+        # daemon configuration/restart should override the qualified installer's
+        # cgroup driver or require a particular image store (#606).
+        for step in steps:
+            command = step.get("run", "")
+            self.assertNotIn("/etc/docker/daemon.json", command)
+            self.assertNotIn("systemctl restart docker", command)
+            self.assertNotIn("containerd-snapshotter", command)
+            self.assertNotIn("apt-get", command)
 
-    def test_coverage_store_restart_clears_start_limit_and_preserves_failures(self):
+    def test_temporal_fixture_build_supports_classic_store_and_refuses_bad_pin(self):
         steps = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text())["jobs"]["coverage-ratchets"]["steps"]
-        command = next(step["run"] for step in steps if step.get("name") == "Docker containerd image store")
-        for failure in ("", "reset", "restart", "version"):
-            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as temporary:
-                root = Path(temporary); binary = root / "bin"; binary.mkdir()
-                conf, calls, state = root / "daemon.json", root / "calls", root / "state"
-                config = {"features": {"unrelated": False}, "exec-opts": ["native.cgroupdriver=cgroupfs"]}
-                conf.write_text(json.dumps(config))
-                programs = {
-                    "sudo": '#!/bin/sh\nexec "$@"\n',
-                    "systemctl": '''#!/bin/sh
-printf 'systemctl %s %s\\n' "$1" "$2" >> "$COVERAGE_PROBE_CALLS"
-case "$1 $2" in
-  'reset-failed docker.service')
-    [ "$COVERAGE_PROBE_FAILURE" != reset ] || exit 31
-    printf reset > "$COVERAGE_PROBE_STATE" ;;
-  'restart docker')
-    [ "$COVERAGE_PROBE_FAILURE" != restart ] || exit 32
-    [ -f "$COVERAGE_PROBE_STATE" ] || exit 33 ;;
-  *) exit 34 ;;
-esac
-''',
-                    "docker": '''#!/bin/sh
-printf 'docker %s\\n' "$1" >> "$COVERAGE_PROBE_CALLS"
-case "$1" in
-  version) [ "$COVERAGE_PROBE_FAILURE" != version ] || exit 35 ;;
-  info) ;;
-  *) exit 36 ;;
-esac
-''',
-                }
-                for name, body in programs.items():
-                    path = binary / name; path.write_text(body); path.chmod(0o755)
-                self.assertEqual(command.count("conf=/etc/docker/daemon.json"), 1)
-                candidate = command.replace("conf=/etc/docker/daemon.json", "conf=" + shlex.quote(str(conf)))
-                env = {**os.environ, "PATH": str(binary) + os.pathsep + os.environ["PATH"],
-                       "COVERAGE_PROBE_CALLS": str(calls), "COVERAGE_PROBE_STATE": str(state),
-                       "COVERAGE_PROBE_FAILURE": failure}
-                result = subprocess.run(["bash", "-c", candidate], env=env, text=True,
-                                        capture_output=True, timeout=10)
-                expected = ["systemctl reset-failed docker.service"]
-                if failure != "reset": expected.append("systemctl restart docker")
-                if failure not in ("reset", "restart"): expected.append("docker version")
-                if not failure: expected.append("docker info")
-                self.assertEqual(calls.read_text().splitlines() if calls.exists() else [], expected)
-                self.assertEqual(result.returncode, {"": 0, "reset": 31, "restart": 32, "version": 35}[failure], result.stderr)
-                self.assertEqual(json.loads(conf.read_text()),
-                                 {**config, "features": {"unrelated": False, "containerd-snapshotter": True}})
+        command = next(step["run"] for step in steps if step.get("name") == "Prepare pinned Temporal fixture for existing coverage cohort")
+        command = command.replace("${{ env.IMAGE_TAG }}", "candidate")
+        engine = r'''#!/usr/bin/env python3
+import json, os, sys
+args = sys.argv[1:]
+with open(os.environ['CALLS'], 'a') as out: out.write(json.dumps(args)+'\n')
+builder = 'sha256:'+'b'*64
+local_tag = 'caesium-coverage-builder:sha256-'+'b'*64
+if args[:2] == ['image', 'inspect']:
+    ref = args[-1]
+    if ref.startswith('caesiumcloud/caesium-connectors-fixture:'): print('sha256:'+'f'*64)
+    elif ref == local_tag and os.environ['MODE'] == 'mismatch': print('sha256:'+'c'*64)
+    else: print(builder)
+elif args[0] == 'tag':
+    assert args[1:] == [builder, local_tag], args
+    if os.environ['MODE'] == 'tag-failure': sys.exit(31)
+elif args[0] == 'build':
+    value = next(arg for arg in args if arg.startswith('BUILDER_IMAGE='))
+    # Classic Docker cannot resolve a config ID as a manifest digest.
+    assert '@sha256:' not in value, args
+    assert value == 'BUILDER_IMAGE='+local_tag, args
+    assert 'caesium.coverage.builder='+builder in args, args
+    assert args[args.index('--platform')+1] == 'linux/amd64', args
+else: sys.exit(99)
+'''
+        for mode in ('success', 'tag-failure', 'mismatch'):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                docker = root / 'docker'; docker.write_text(engine); docker.chmod(0o755)
+                calls, github_env = root / 'calls', root / 'github-env'
+                env = {**os.environ, 'PATH': str(root)+os.pathsep+os.environ['PATH'],
+                       'CALLS': str(calls), 'MODE': mode, 'GITHUB_ENV': str(github_env),
+                       'CANDIDATE_SHA': 'a'*40}
+                result = subprocess.run(['bash', '-c', command], env=env, capture_output=True, text=True, timeout=10)
+                self.assertEqual(result.returncode, {'success': 0, 'tag-failure': 31, 'mismatch': 1}[mode], result.stderr + calls.read_text())
+                observed = [json.loads(line) for line in calls.read_text().splitlines()]
+                self.assertEqual(sum(call[0] == 'build' for call in observed), 1 if mode == 'success' else 0)
+                if mode == 'success':
+                    self.assertEqual(github_env.read_text().strip(), 'CAESIUM_COVERAGE_CONNECTOR_FIXTURE_IMAGE=sha256:'+'f'*64)
+                else:
+                    self.assertFalse(github_env.exists())
 
     def test_same_attempt_diagnostics_are_uploaded_before_cleanup_even_on_failure(self):
         steps = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text())["jobs"]["helm-integration-test"]["steps"]

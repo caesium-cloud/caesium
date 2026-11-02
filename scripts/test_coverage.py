@@ -1178,7 +1178,7 @@ else:
     if args[:2] == ["image", "inspect"]:
         reference = args[-1]
         image_id = "sha256:"+("9" if reference == "sha256:"+"9"*64 else "b" if "builder" in reference else "c")*64
-        if "builder" in reference and "@" in reference and scenario == "builder-mismatch": image_id="sha256:"+"d"*64
+        if "builder" in reference and reference.startswith("caesium-coverage-builder:") and scenario == "builder-mismatch": image_id="sha256:"+"d"*64
         if reference == "caesiumcloud/caesium-coverage:latest" and (root/"retagged").exists(): image_id="sha256:"+"d"*64
         fmt = value("--format")
         if fmt: print("a"*40 if "revision" in fmt else "linux" if ".Os" in fmt else "amd64" if ".Architecture" in fmt else image_id)
@@ -1507,7 +1507,7 @@ raise SystemExit(module.main())
         calls = [json.loads(line) for line in (self.art / "container-args.jsonl").read_text().splitlines()]
         builds = [args for args in calls if args[0] == "build"]
         self.assertEqual(len(builds), 1)
-        self.assertIn("BUILDER_IMAGE=caesiumcloud/caesium-builder:latest@sha256:" + "b" * 64, builds[0])
+        self.assertIn("BUILDER_IMAGE=caesium-coverage-builder:sha256-" + "b" * 64, builds[0])
         launches = [args for args in calls if args[0] in ("run", "create")]
         self.assertGreater(len(launches), 7)
         for args in launches:
@@ -1537,7 +1537,7 @@ raise SystemExit(module.main())
         self.assertEqual(result.returncode, 0, output(result))
         calls = [json.loads(line) for line in (self.art / "container-args.jsonl").read_text().splitlines()]
         builds = [args for args in calls if args[0] == "build"]
-        self.assertIn("BUILDER_IMAGE=caesiumcloud/caesium-builder:latest@sha256:" + "b" * 64, builds[0])
+        self.assertIn("BUILDER_IMAGE=caesium-coverage-builder:sha256-" + "b" * 64, builds[0])
 
     def test_failed_journey_or_killed_server_cannot_collect_or_recheck_success(self):
         for scenario in ("journey-failed", "killed"):
