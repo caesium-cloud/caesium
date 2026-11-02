@@ -1,6 +1,7 @@
 package auth_test
 
 import (
+	"context"
 	"strings"
 	"sync"
 	"testing"
@@ -148,6 +149,33 @@ func TestValidateKeyAppliesLatencyToFailurePaths(t *testing.T) {
 	_, err = svc.ValidateKey(valid.Plaintext)
 	require.NoError(t, err)
 	require.Empty(t, sleeps)
+}
+
+func TestAuthenticateKeyCancelledContextIsNotACredentialFailure(t *testing.T) {
+	db := testutil.OpenTestDB(t)
+	defer testutil.CloseDB(db)
+
+	const floor = 500 * time.Millisecond
+	var sleeps []time.Duration
+	svc := auth.NewService(
+		db,
+		auth.WithValidationFailureMinLatency(floor),
+		auth.WithSleep(func(d time.Duration) {
+			sleeps = append(sleeps, d)
+		}),
+	)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	started := time.Now()
+	_, _, err := svc.AuthenticateKey(ctx, "csk_live_doesnotexist")
+	elapsed := time.Since(started)
+
+	require.ErrorIs(t, err, context.Canceled)
+	require.NotErrorIs(t, err, auth.ErrKeyNotFound)
+	require.Empty(t, sleeps)
+	require.Less(t, elapsed, floor, "a cancelled lookup must not wait out the failure-latency floor")
 }
 
 func TestCreateKeyWithScope(t *testing.T) {

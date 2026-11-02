@@ -1,6 +1,7 @@
 package middleware
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net/http"
@@ -101,8 +102,15 @@ func Auth(d AuthDeps) echo.MiddlewareFunc {
 			}
 
 			if token != "" {
+				// Database reads inside AuthenticateKey carry their own 900ms
+				// bound. The request context is passed through so a group
+				// refresh keeps the caller's deadline (AuthGroupRefreshTimeout
+				// is 5s) instead of being cut off with the lookup.
 				validKey, keyPrincipal, err := d.Service.AuthenticateKey(c.Request().Context(), token)
 				if err != nil {
+					if authStoreUnavailable(err) {
+						return echo.NewHTTPError(http.StatusServiceUnavailable, "authentication store is unavailable").Wrap(err)
+					}
 					reason := classifyAuthError(err)
 					if recordCredentialFailure(c, d, ip, tokenPrefix(token), reason) {
 						return rateLimitError(c, d.Limiter, ip)
@@ -273,6 +281,16 @@ func tokenPrefix(token string) string {
 		return token[:13]
 	}
 	return token
+}
+
+// authStoreUnavailable reports a key lookup whose database read ended
+// because its context was cancelled or its deadline passed. That is not a
+// bad credential: the caller must not answer 401, burn the auth-failure
+// limiter, write an auth-denied audit row, or pad the failure latency.
+// The 900ms bound sits on those reads inside auth.AuthenticateKey, not
+// around the whole call.
+func authStoreUnavailable(err error) bool {
+	return errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled)
 }
 
 // classifyAuthError maps validation errors to metric label values.
