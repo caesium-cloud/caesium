@@ -42,9 +42,22 @@ type JobRun struct {
 	// The concurrency `skip` strategy deliberately does NOT write here: it
 	// creates no JobRun row at all (insertRunIfSlotTx simply does not insert),
 	// and that behaviour is unchanged.
-	SkipReason string         `gorm:"type:text;not null;default:''" json:"skip_reason,omitempty"`
-	Params     datatypes.JSON `gorm:"type:json" json:"params,omitempty"`
-	Quarantine bool           `gorm:"not null;default:false;index" json:"quarantine"`
+	SkipReason string `gorm:"type:text;not null;default:''" json:"skip_reason,omitempty"`
+	// HoldDecision snapshots, at the moment admission decided it, which active
+	// dataset holds gated this run (a hold-skipped run) or were run past by
+	// metadata.onUpstreamHold: run (an admitted one): each hold's id, dataset,
+	// opener, latest breach and verdicts as they stood then. `caesium why`
+	// reads it instead of the hold row, which a repeat breach rewrites and a
+	// release closes, so an old run keeps the reason it was actually given. It
+	// also records the tenancy namespace of the runs that produced the verdicts,
+	// which is what decides what a confined reader of the explanation may see.
+	//
+	// json:"-": it names assertions and values owned by the producer's tenant,
+	// so no run endpoint serves it raw. NULL on every run that no hold touched
+	// and on a hold-skipped run recorded before the column existed.
+	HoldDecision datatypes.JSON `gorm:"type:json" json:"-"`
+	Params       datatypes.JSON `gorm:"type:json" json:"params,omitempty"`
+	Quarantine   bool           `gorm:"not null;default:false;index" json:"quarantine"`
 	// ReplayFingerprint is the scoped, server-derived idempotency fingerprint
 	// for quarantined replay creation. It is nullable so ordinary runs do not
 	// participate in the unique index.

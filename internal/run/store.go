@@ -1683,6 +1683,13 @@ func (s *Store) insertRunIfSlotTx(tx *gorm.DB, model *models.JobRun, maxRuns int
 	if len(model.Params) > 0 {
 		params = string(model.Params)
 	}
+	// The hold decision rides along: a run admitted past a hold by
+	// metadata.onUpstreamHold: run reaches this statement under a concurrency
+	// policy, and its explanation is recorded on the row it inserts.
+	holdDecision := any(nil)
+	if len(model.HoldDecision) > 0 {
+		holdDecision = string(model.HoldDecision)
+	}
 	// This must remain one conditional INSERT statement: dqlite serializes the
 	// statement through Raft, so concurrent nodes derive admission from
 	// RowsAffected instead of racing through CountActive-then-Create. Backfill
@@ -1693,9 +1700,9 @@ func (s *Store) insertRunIfSlotTx(tx *gorm.DB, model *models.JobRun, maxRuns int
 	result := tx.Exec(`
 INSERT INTO job_runs (
 	namespace, id, job_id, backfill_id, trigger_id, status, priority, params, quarantine,
-	started_at, driver_heartbeat_at, created_at, updated_at
+	started_at, driver_heartbeat_at, created_at, updated_at, hold_decision
 )
-SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
 WHERE (
 	SELECT count(*)
 	FROM job_runs
@@ -1717,6 +1724,7 @@ WHERE (
 		model.DriverHeartbeatAt,
 		model.CreatedAt,
 		model.UpdatedAt,
+		holdDecision,
 		model.JobID,
 		string(StatusRunning),
 		maxRuns,

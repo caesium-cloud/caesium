@@ -555,8 +555,11 @@ func SyncDatasetHoldsActive(ctx context.Context, conn *gorm.DB) {
 	(&Store{db: conn}).syncDatasetHoldsActiveGauge(ctx)
 }
 
-// activeHoldForConsumerTx resolves the FIRST active hold on any dataset the job
-// declares under `datasets.consumes`, inside the caller's transaction.
+// activeHoldsForConsumerTx resolves every active hold on a dataset the job
+// declares under `datasets.consumes`, oldest first, inside the caller's
+// transaction. The first is the hold the gate names in the run's skip reason;
+// the rest ride on the run's recorded hold decision so `caesium why` can say a
+// run was blocked by more than one dataset.
 //
 // Doing the lookup in the SAME transaction that inserts the run is the whole
 // point: a hold opened between a pre-check and the insert would otherwise admit
@@ -565,24 +568,32 @@ func SyncDatasetHoldsActive(ctx context.Context, conn *gorm.DB) {
 //
 // COALESCE on the declaration side is required because DatasetDeclaration
 // carries a NULLABLE namespace (reserved, empty in v1) while DatasetHold's is
-// NOT NULL — the two must compare equal for an unnamespaced dataset.
-func activeHoldForConsumerTx(tx *gorm.DB, jobID uuid.UUID) (*models.DatasetHold, error) {
-	var hold models.DatasetHold
+// NOT NULL — the two must compare equal for an unnamespaced dataset. A job that
+// declares the same dataset twice matches twice; the result is de-duplicated.
+func activeHoldsForConsumerTx(tx *gorm.DB, jobID uuid.UUID) ([]models.DatasetHold, error) {
+	var rows []models.DatasetHold
 	err := tx.Model(&models.DatasetHold{}).
+		Select("dataset_holds.*").
 		Joins(`JOIN dataset_declarations ON dataset_declarations.name = dataset_holds.name`+
 			` AND COALESCE(dataset_declarations.namespace, '') = dataset_holds.namespace`).
 		Where("dataset_declarations.job_id = ?", jobID).
 		Where("dataset_declarations.direction = ?", models.DatasetDirectionConsumes).
 		Where("dataset_holds.status = ?", models.DatasetHoldStatusActive).
-		Order("dataset_holds.opened_at ASC").
-		First(&hold).Error
+		Order("dataset_holds.opened_at ASC, dataset_holds.id ASC").
+		Find(&rows).Error
 	if err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return nil, nil
-		}
 		return nil, err
 	}
-	return &hold, nil
+	seen := make(map[uuid.UUID]struct{}, len(rows))
+	holds := rows[:0]
+	for _, row := range rows {
+		if _, dup := seen[row.ID]; dup {
+			continue
+		}
+		seen[row.ID] = struct{}{}
+		holds = append(holds, row)
+	}
+	return holds, nil
 }
 
 // releasableHold decides whether ONE clean verdict may close ONE active hold.

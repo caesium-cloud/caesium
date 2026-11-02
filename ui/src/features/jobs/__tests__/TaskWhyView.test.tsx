@@ -138,4 +138,25 @@ describe("TaskWhyView chain exclusion", () => {
     );
     expect(screen.queryByTestId("task-why-chain-exclusion")).toBeNull();
   });
+
+  it("renders a SKIPPED verdict with the server's hold summary", async () => {
+    const summary =
+      "SKIPPED — dataset /orders held since run run-9 (assertion rowCount.min: observed 12 vs bound 1000; hold hold-1)";
+    mockFetch.mockResolvedValue(
+      jsonResponse({
+        ...valuesModeHit,
+        verdict: "SKIPPED",
+        status: "skipped",
+        skipReason: "dataset_hold:/orders hold=hold-1",
+        summary,
+        diff: undefined,
+        baseline: { kind: "none" },
+      }),
+    );
+
+    renderView(<TaskWhyView jobId="job-1" runId="run-1" taskName="mid" />);
+
+    expect((await screen.findAllByText(summary)).length).toBeGreaterThan(0);
+    expect(screen.getByText("SKIPPED")).toBeTruthy();
+  });
 });

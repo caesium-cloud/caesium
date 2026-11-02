@@ -1685,7 +1685,7 @@ precedent for it is warn-mode schema validation, which publishes
       that the hold is still active in the same transaction. Dataset feeds order by one
       total key `(updated_at DESC, namespace, name)` in every source query and
       the final merge, so tied timestamps page without skips or repeats.
-- [ ] F5. **Why-provenance** (arc convention 3 — this plan's single explainability
+- [x] F5. **Why-provenance** (arc convention 3 — this plan's single explainability
       item). Make the hold decisions answerable by the shipped **task-scoped**
       explainer: `caesium why <run-id> --task <task> --job-id <job-id>` and
       `GET /v1/jobs/:id/runs/:run_id/why`. (a) Persist enough provenance on the
@@ -1716,6 +1716,35 @@ precedent for it is warn-mode schema validation, which publishes
       Files: `internal/run/why.go`, `cmd/why/why.go`,
       `api/rest/controller/why/why.go`, `test/`.
       Depends on: C2 + C4.
+      *Shipped W7 (β).* **Provenance lives on the run row, not in the events.**
+      Admission writes `job_runs.hold_decision` (`json:"-"`) in the transaction
+      that decides: every active hold on a consumed dataset (oldest first), each
+      with its id, dataset, opener run, latest-breach run, the verdicts it
+      carried then, and the *tenancy* namespace of those two runs read once at
+      admission. `dataset_held`/`dataset_released` already carry the verdicts and
+      hold id, and `run_held_upstream` gains nothing: all three reach `/v1/events`
+      and notification channels, which is exactly where another tenant's
+      assertion values must not travel. CLI and REST read the one column.
+      **Tenant rule** (same as `GET /v1/datasets/holds`): dataset name and hold id
+      are shown to any reader of the run (the job declares the dataset; its task
+      rows carry both); the opener's run id only if that run's namespace is
+      readable; assertion/observed/bound only if the latest-breach run's is, and
+      a delta bound from an unowned baseline never; an unattributable run counts
+      as foreign. A confined reader gets
+      `SKIPPED — dataset <ns>/<name> held (assertion detail withheld; hold <id>)`.
+      **Judgment calls:** the dataset namespace is empty in v1, so the line reads
+      `dataset /orders`; assertion name is `<metric>.<kind>`; several holds name
+      the oldest in full plus `; also held: …`, all in `trigger.hold.holds`;
+      `onUpstreamHold: run` appends `admitted by metadata.onUpstreamHold: run on
+      …` and records `disposition: admitted` (including on the concurrency
+      policy's raw INSERT); a pre-F5 hold-skipped run degrades to
+      `dataset /orders held (no assertion detail was recorded for this run; hold
+      <id>)`; a skipped task has no diff (`baseline.kind: none`); a fanned group
+      is `SKIPPED` only when every instance is. F4's `skipped_admission` for a
+      held dataset creates no run, so there is nothing for the run-scoped
+      explainer to say; when a run does exist it is the same hold-skipped run.
+      A hold released since is deliberately not reflected: the answer is the
+      one the run was given.
 
 ## Harness Strengthening
 

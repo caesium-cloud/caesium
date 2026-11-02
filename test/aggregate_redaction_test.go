@@ -5,6 +5,7 @@ package test
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"strings"
@@ -82,8 +83,13 @@ func (s *IntegrationTestSuite) cleanupInOrder(aliases ...string) {
 	s.T().Cleanup(func() {
 		for _, alias := range aliases {
 			if job := s.b9Job(alias); job != nil {
-				status, body := s.requestWithKey(http.MethodDelete, "/v1/jobs/"+job.ID, s.authAPIKey, nil)
-				s.Contains([]int{http.StatusAccepted, http.StatusNotFound}, status, "delete %s: %s", alias, body)
+				// doRequest carries the lane's admin key when there is one and
+				// nothing on a no-auth lane, so the helper works on both.
+				resp, err := s.doRequest(http.MethodDelete, s.caesiumURL+"/v1/jobs/"+job.ID, nil)
+				s.Require().NoError(err)
+				body, _ := io.ReadAll(resp.Body)
+				_ = resp.Body.Close()
+				s.Contains([]int{http.StatusAccepted, http.StatusNotFound}, resp.StatusCode, "delete %s: %s", alias, body)
 			}
 		}
 	})

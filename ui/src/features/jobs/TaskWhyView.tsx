@@ -490,6 +490,7 @@ function verdictBadgeVariant(
     case "CACHE_MISS":
       return "outline";
     case "CACHE_DISABLED":
+    case "SKIPPED":
       return "secondary";
     case "UNKNOWN":
       return "default";
