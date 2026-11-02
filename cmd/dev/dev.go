@@ -12,6 +12,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/caesium-cloud/caesium/internal/atom"
 	"github.com/caesium-cloud/caesium/internal/jobdef"
 	"github.com/caesium-cloud/caesium/internal/localrun"
 	"github.com/fsnotify/fsnotify"
@@ -26,7 +27,12 @@ var (
 	runTimeout   time.Duration
 	maxParallel  int
 	runOnce      bool
+	devJSON      bool
 )
+
+// testEngineFactory, when set, replaces the container runtime for dev runs
+// started from tests. Production leaves it nil, which keeps the real runtime.
+var testEngineFactory func(context.Context) atom.Engine
 
 // Cmd is the top-level dev command.
 var Cmd = &cobra.Command{
@@ -43,6 +49,7 @@ func init() {
 	Cmd.Flags().DurationVar(&runTimeout, "run-timeout", 0, "Total run timeout (e.g. 30m)")
 	Cmd.Flags().IntVar(&maxParallel, "max-parallel", 0, "Maximum parallel tasks (default: CPU count)")
 	Cmd.Flags().BoolVar(&runOnce, "once", false, "Run once and exit (no file watching)")
+	Cmd.Flags().BoolVar(&devJSON, "json", false, "With --once, print a version-1 execution report on stdout. Rejected without --once")
 	Cmd.Flags().StringArrayVar(&devParamArgs, "param", nil, "Run parameter as key=value (repeatable; overrides trigger.defaultParams, other keys keep the manifest default). Values may contain commas")
 }
 
@@ -53,9 +60,26 @@ func runDev(cmd *cobra.Command, _ []string) error {
 	}
 	devParams = params
 
+	if devJSON {
+		// Usage text would share stdout with the report. Watch mode never
+		// streams JSON, so reject it before path resolution.
+		cmd.SilenceUsage = true
+		if !runOnce {
+			return fmt.Errorf("--json requires --once; watch mode does not stream JSON")
+		}
+	}
+
 	paths := devPaths
 	if len(paths) == 0 {
 		paths = []string{"."}
+	}
+
+	// Path failures must still print the version-1 report. resolveSymlinks
+	// aborts before runDevJSON, which used to leave stdout empty.
+	if devJSON {
+		ctx, stop := signal.NotifyContext(cmd.Context(), syscall.SIGINT, syscall.SIGTERM)
+		defer stop()
+		return runDevJSON(ctx, cmd, resolveDevJSONPaths(paths))
 	}
 
 	// Resolve every DIRECTORY path to its real, symlink-free form ONCE, up
@@ -93,6 +117,10 @@ func runDev(cmd *cobra.Command, _ []string) error {
 	// graceful-cancellation behaviour watch mode's re-run loop already had.
 	ctx, stop := signal.NotifyContext(cmd.Context(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+
+	if devJSON {
+		return runDevJSON(ctx, cmd, paths)
+	}
 
 	// Initial run.
 	if err := executeRun(ctx, w, paths); err != nil {
@@ -277,6 +305,33 @@ func resolveSymlinks(paths []string) ([]string, error) {
 		}
 	}
 	return resolved, nil
+}
+
+// resolveDevJSONPaths resolves directory symlinks the same way resolveSymlinks
+// does. A missing or unreadable path is left unchanged so runDevJSON can put
+// that failure on the version-1 report instead of exiting with empty stdout.
+// Explicit file arguments stay unresolved, matching resolveSymlinks.
+func resolveDevJSONPaths(paths []string) []string {
+	resolved := make([]string, len(paths))
+	for i, p := range paths {
+		info, err := os.Stat(p)
+		if err != nil || !info.IsDir() {
+			resolved[i] = p
+			continue
+		}
+		real, err := filepath.EvalSymlinks(p)
+		if err != nil {
+			resolved[i] = p
+			continue
+		}
+		canon, err := canonicalWatchDir(real)
+		if err != nil {
+			resolved[i] = p
+			continue
+		}
+		resolved[i] = canon
+	}
+	return resolved
 }
 
 // dirRoots is setupWatches' bookkeeping specific to DIRECTORY --path
