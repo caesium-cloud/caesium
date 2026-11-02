@@ -48,19 +48,21 @@ func (s *Store) admitDataHoldTx(tx *gorm.DB, model *models.JobRun) (*admissionRe
 	// path expects to receive.
 	model.Status = string(StatusRunning)
 	model.SkipReason = ""
+	model.HoldDecision = nil
 	model.CompletedAt = nil
 
 	if !DataAssertionsEnabled() {
 		return nil, nil
 	}
 
-	hold, err := activeHoldForConsumerTx(tx, model.JobID)
+	holds, err := activeHoldsForConsumerTx(tx, model.JobID)
 	if err != nil {
 		return nil, err
 	}
-	if hold == nil {
+	if len(holds) == 0 {
 		return nil, nil
 	}
+	hold := &holds[0]
 
 	var job models.Job
 	jobFound := true
@@ -79,6 +81,13 @@ func (s *Store) admitDataHoldTx(tx *gorm.DB, model *models.JobRun) (*admissionRe
 	if strings.TrimSpace(job.OnUpstreamHold) == jobdef.OnUpstreamHoldRun {
 		log.Warn("job runs on held upstream data by declaration (metadata.onUpstreamHold: run)",
 			"job_id", model.JobID, "job_alias", job.Alias, "dataset", hold.Name, "hold_id", hold.ID)
+		// The run goes on to be inserted by the ordinary admission path; what
+		// it ran past is recorded on it so `caesium why` can say so.
+		decision, err := holdDecisionTx(tx, HoldDispositionAdmitted, holds)
+		if err != nil {
+			return nil, err
+		}
+		model.HoldDecision = decision
 		return nil, nil
 	}
 
@@ -86,7 +95,7 @@ func (s *Store) admitDataHoldTx(tx *gorm.DB, model *models.JobRun) (*admissionRe
 	// "only act if a concurrency policy has something to say"; the breaker
 	// always has something to say, and its answer is a real, recorded decision
 	// rather than a policy probe.
-	events, skipped, err := s.insertHeldRunTx(tx, model, job, jobFound, hold)
+	events, skipped, err := s.insertHeldRunTx(tx, model, job, jobFound, holds)
 	if err != nil {
 		return nil, err
 	}
@@ -141,11 +150,17 @@ func (s *Store) insertHeldRunTx(
 	model *models.JobRun,
 	job models.Job,
 	jobFound bool,
-	hold *models.DatasetHold,
+	holds []models.DatasetHold,
 ) ([]event.Event, int, error) {
+	hold := &holds[0]
+	decision, err := holdDecisionTx(tx, HoldDispositionSkipped, holds)
+	if err != nil {
+		return nil, 0, err
+	}
 	now := time.Now().UTC()
 	model.Status = string(StatusSkipped)
 	model.SkipReason = DatasetHoldSkipReason(hold.Namespace, hold.Name)
+	model.HoldDecision = decision
 	model.CompletedAt = &now
 	model.UpdatedAt = now
 
