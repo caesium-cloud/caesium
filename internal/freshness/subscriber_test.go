@@ -73,6 +73,122 @@ func seedProducingRunRaw(t *testing.T, db *gorm.DB, jobID, runID uuid.UUID, rawO
 	}).Error)
 }
 
+// seedSourceOnlyCronRun is seedProducingRun for a cron job whose only input is
+// a metadata source. The produced row's consumed snapshot must come from
+// completing the run, not from a seeded watermark blob.
+func seedSourceOnlyCronRun(t *testing.T, db *gorm.DB, jobID, runID uuid.UUID, output map[string]string) {
+	t.Helper()
+	outBlob, err := json.Marshal(output)
+	if err != nil {
+		t.Fatalf("marshal output: %v", err)
+	}
+	taskID := uuid.New()
+	completed := t0.Add(time.Hour)
+	must := func(err error) {
+		t.Helper()
+		if err != nil {
+			t.Fatalf("seed: %v", err)
+		}
+	}
+	triggerID := uuid.New()
+	must(db.Create(&models.Trigger{ID: triggerID, Type: models.TriggerTypeCron}).Error)
+	must(db.Create(&models.Job{ID: jobID, Alias: "source-cron-" + jobID.String()[:8], TriggerID: triggerID}).Error)
+	must(db.Create(&models.Task{ID: taskID, JobID: jobID, AtomID: uuid.New(), Name: "refresh"}).Error)
+	must(db.Create(&models.TaskRun{
+		ID: uuid.New(), JobRunID: runID, TaskID: taskID, AtomID: uuid.New(),
+		Engine: "docker", Image: "etl:1.4", Command: "run", Status: taskRunTerminalSucceeded,
+		CacheHit: false, Output: datatypes.JSON(outBlob), CreatedAt: completed, UpdatedAt: completed,
+	}).Error)
+	must(db.Create(&models.JobRun{
+		ID: runID, JobID: jobID, TriggerID: triggerID, Status: "succeeded",
+		StartedAt: t0, CompletedAt: &completed, CreatedAt: t0, UpdatedAt: completed,
+	}).Error)
+	produced := produceDecl(jobID, "mart.orders", "8h", "")
+	produced.StepName = "refresh"
+	produced.WatermarkKey = "wm"
+	source := sourceDecl(jobID, "raw.orders")
+	must(db.Create(&produced).Error)
+	must(db.Create(&source).Error)
+}
+
+// TestCompletedCronRunSnapshotsSourceInput proves a source-only cron job records
+// the source watermark by completing a run. The produced snapshot is not seeded.
+// The next tick skips while that source is unchanged, and runs again once it
+// advances. A source that moves mid-run stays at the creation-time view.
+func TestCompletedCronRunSnapshotsSourceInput(t *testing.T) {
+	complete := func(t *testing.T, sourceAtStart, sourceAtCompletion string) (jobID uuid.UUID, db *gorm.DB) {
+		t.Helper()
+		db = openRegistryDB(t)
+		c := NewCapturer(event.New(), db)
+		ctx := context.Background()
+		if _, err := c.store.Advance(ctx, AdvanceInput{
+			Name: "raw.orders", Watermark: sourceAtStart, RunID: uuid.New(), CompletedAt: t0,
+		}); err != nil {
+			t.Fatalf("seed source: %v", err)
+		}
+		jobID, runID := uuid.New(), uuid.New()
+		seedSourceOnlyCronRun(t, db, jobID, runID, map[string]string{"wm": "100"})
+
+		enriched, err := EnrichStartParams(ctx, db, jobID, nil, false)
+		if err != nil {
+			t.Fatalf("enrich start params: %v", err)
+		}
+		if got := enriched[ConsumedWatermarksStartParam]; got != `{"raw.orders":"`+sourceAtStart+`"}` {
+			t.Fatalf("start view = %q, want the source watermark frozen at creation", got)
+		}
+		setRunParams(t, db, runID, enriched)
+		if sourceAtCompletion != sourceAtStart {
+			if _, err := c.store.Advance(ctx, AdvanceInput{
+				Name: "raw.orders", Watermark: sourceAtCompletion, RunID: uuid.New(),
+				RunOrder: t0.Add(time.Minute), CompletedAt: t0.Add(time.Minute),
+			}); err != nil {
+				t.Fatalf("advance source mid-run: %v", err)
+			}
+		}
+		c.handleRunCompleted(ctx, event.Event{Type: event.TypeRunCompleted, JobID: jobID, RunID: runID})
+		if consumed := consumedSnapshotOf(t, c, "mart.orders"); consumed["raw.orders"] != sourceAtStart {
+			t.Fatalf("consumed snapshot = %v, want creation-time source watermark %s", consumed, sourceAtStart)
+		}
+		return jobID, db
+	}
+
+	t.Run("unchanged source skips the next tick", func(t *testing.T) {
+		jobID, db := complete(t, "42", "42")
+		decision, err := ShouldSkipCronRun(context.Background(), db, jobID, t0.Add(time.Hour+10*time.Minute))
+		if err != nil {
+			t.Fatalf("skip decision: %v", err)
+		}
+		if !decision.Skip {
+			t.Fatalf("skip = false, reason = %q; a fresh source-only cron output must not run again", decision.Reason)
+		}
+	})
+
+	t.Run("advanced source runs again", func(t *testing.T) {
+		jobID, db := complete(t, "42", "42")
+		c := NewCapturer(event.New(), db)
+		if _, err := c.store.Advance(context.Background(), AdvanceInput{
+			Name: "raw.orders", Watermark: "43", RunID: uuid.New(),
+			RunOrder: t0.Add(time.Hour), CompletedAt: t0.Add(time.Hour),
+		}); err != nil {
+			t.Fatalf("advance source after the run: %v", err)
+		}
+		decision, err := ShouldSkipCronRun(context.Background(), db, jobID, t0.Add(time.Hour+20*time.Minute))
+		if err != nil {
+			t.Fatalf("skip decision: %v", err)
+		}
+		if decision.Skip {
+			t.Fatal("skip = true, want false once the source watermark advanced")
+		}
+		if decision.Reason != "consumed watermark advanced for raw.orders" {
+			t.Fatalf("reason = %q, want consumed watermark advanced", decision.Reason)
+		}
+	})
+
+	t.Run("mid-run advance stays on the start view", func(t *testing.T) {
+		complete(t, "42", "43")
+	})
+}
+
 func TestCapturerAdvancesAndSnapshotsConsumed(t *testing.T) {
 	db := openRegistryDB(t)
 	c := NewCapturer(event.New(), db)

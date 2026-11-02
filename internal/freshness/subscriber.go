@@ -103,15 +103,13 @@ func (c *Capturer) handleRunCompleted(ctx context.Context, evt event.Event) {
 	}
 
 	produced := make([]models.DatasetDeclaration, 0, len(decls))
-	consumedNames := make([]string, 0, len(decls))
 	for i := range decls {
-		switch decls[i].Direction {
-		case models.DatasetDirectionProduces:
+		if decls[i].Direction == models.DatasetDirectionProduces {
 			produced = append(produced, decls[i])
-		case models.DatasetDirectionConsumes:
-			consumedNames = append(consumedNames, decls[i].Name)
 		}
 	}
+	// Same consumed set the start view froze, including source declarations.
+	consumedNames, _ := startViewInputs(decls)
 	if len(produced) == 0 {
 		return
 	}

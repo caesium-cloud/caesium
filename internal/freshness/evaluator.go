@@ -1155,6 +1155,15 @@ type registrySnapshot struct {
 	consumersByID map[datasetIdentity][]uuid.UUID
 }
 
+// consumedEdge is one (job, dataset identity) input. A dataset declared both
+// as metadata.datasets.sources and as a step-level consumes is one edge:
+// upstreamReady keys on the identity, but a second row would repeat it in the
+// waiting list and in the consumed-watermark audit.
+type consumedEdge struct {
+	jobID   uuid.UUID
+	dataset datasetIdentity
+}
+
 func newRegistrySnapshot(decls []models.DatasetDeclaration) registrySnapshot {
 	out := registrySnapshot{
 		produced:      make([]models.DatasetDeclaration, 0),
@@ -1162,14 +1171,25 @@ func newRegistrySnapshot(decls []models.DatasetDeclaration) registrySnapshot {
 		producesByJob: make(map[uuid.UUID][]models.DatasetDeclaration),
 		consumersByID: make(map[datasetIdentity][]uuid.UUID),
 	}
+	// First declaration wins. BuildDeclarations emits sources before step
+	// consumes; either row carries the same identity the callers read.
+	seenConsumed := make(map[consumedEdge]struct{})
 	for _, decl := range decls {
 		switch decl.Direction {
 		case models.DatasetDirectionProduces:
 			out.produced = append(out.produced, decl)
 			out.producesByJob[decl.JobID] = append(out.producesByJob[decl.JobID], decl)
-		case models.DatasetDirectionConsumes:
-			out.consumesByJob[decl.JobID] = append(out.consumesByJob[decl.JobID], decl)
+		case models.DatasetDirectionConsumes, models.DatasetDirectionSource:
+			// A source is a consumed input (pkg/jobdef accepts it as the only
+			// one). Dropping it made upstreamReady treat the job as ready and
+			// left downstreamOf with no consumer to wake.
 			id := declarationIdentity(decl)
+			edge := consumedEdge{jobID: decl.JobID, dataset: id}
+			if _, ok := seenConsumed[edge]; ok {
+				continue
+			}
+			seenConsumed[edge] = struct{}{}
+			out.consumesByJob[decl.JobID] = append(out.consumesByJob[decl.JobID], decl)
 			out.consumersByID[id] = append(out.consumersByID[id], decl.JobID)
 		}
 	}

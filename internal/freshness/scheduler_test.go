@@ -74,6 +74,80 @@ func TestShouldSkipCronRunRunsWhenConsumedWatermarkAdvanced(t *testing.T) {
 	}
 }
 
+func TestShouldSkipCronRunComparesSourceOnlyInput(t *testing.T) {
+	now := t0.Add(2 * time.Hour)
+
+	t.Run("unchanged", func(t *testing.T) {
+		db := openRegistryDB(t)
+		jobID := seedFreshnessJobWithTriggerType(t, db, "cron-source", models.TriggerTypeCron)
+		seedDeclarations(t, db,
+			produceDecl(jobID, "mart.orders", "1h", ""),
+			sourceDecl(jobID, "raw.orders"),
+		)
+		seedState(t, db, "mart.orders", "100", now.Add(-10*time.Minute), map[string]string{"raw.orders": "42"})
+		seedState(t, db, "raw.orders", "42", now.Add(-5*time.Minute), nil)
+
+		decision, err := ShouldSkipCronRun(context.Background(), db, jobID, now)
+		if err != nil {
+			t.Fatalf("skip decision: %v", err)
+		}
+		if !decision.Skip {
+			t.Fatalf("skip = false, reason = %q", decision.Reason)
+		}
+		var derivation models.DatasetDerivation
+		if err := db.Where("name = ? AND decision = ?", "mart.orders", models.DatasetDecisionSkippedFresh).Take(&derivation).Error; err != nil {
+			t.Fatalf("load skipped derivation: %v", err)
+		}
+		if got := string(derivation.ConsumedWatermarks); got != `{"raw.orders":"42"}` {
+			t.Fatalf("consumed watermarks = %s, want the source snapshot", got)
+		}
+	})
+
+	t.Run("advanced", func(t *testing.T) {
+		db := openRegistryDB(t)
+		jobID := seedFreshnessJobWithTriggerType(t, db, "cron-source-advanced", models.TriggerTypeCron)
+		seedDeclarations(t, db,
+			produceDecl(jobID, "mart.orders", "1h", ""),
+			sourceDecl(jobID, "raw.orders"),
+		)
+		seedState(t, db, "mart.orders", "100", now.Add(-10*time.Minute), map[string]string{"raw.orders": "42"})
+		seedState(t, db, "raw.orders", "43", now.Add(-5*time.Minute), nil)
+
+		decision, err := ShouldSkipCronRun(context.Background(), db, jobID, now)
+		if err != nil {
+			t.Fatalf("skip decision: %v", err)
+		}
+		if decision.Skip {
+			t.Fatal("skip = true, want false when the source watermark advanced")
+		}
+		if decision.Reason != "consumed watermark advanced for raw.orders" {
+			t.Fatalf("reason = %q, want consumed watermark advanced", decision.Reason)
+		}
+	})
+
+	t.Run("missing snapshot", func(t *testing.T) {
+		db := openRegistryDB(t)
+		jobID := seedFreshnessJobWithTriggerType(t, db, "cron-source-missing", models.TriggerTypeCron)
+		seedDeclarations(t, db,
+			produceDecl(jobID, "mart.orders", "1h", ""),
+			sourceDecl(jobID, "raw.orders"),
+		)
+		seedState(t, db, "mart.orders", "100", now.Add(-10*time.Minute), nil)
+		seedState(t, db, "raw.orders", "42", now.Add(-5*time.Minute), nil)
+
+		decision, err := ShouldSkipCronRun(context.Background(), db, jobID, now)
+		if err != nil {
+			t.Fatalf("skip decision: %v", err)
+		}
+		if decision.Skip {
+			t.Fatal("skip = true, want false when the source was never snapshotted")
+		}
+		if decision.Reason != "missing consumed watermark snapshot for raw.orders" {
+			t.Fatalf("reason = %q, want missing source snapshot", decision.Reason)
+		}
+	})
+}
+
 func TestShouldSkipCronRunHonorsSkipWhenFreshOptOut(t *testing.T) {
 	db := openRegistryDB(t)
 	ctx := context.Background()
