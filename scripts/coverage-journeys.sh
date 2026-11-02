@@ -1873,6 +1873,9 @@ PY
   # Canonical job aliases (W6-α): a whitespace alias is refused through
   # `caesium job apply`, the apply route and the legacy create route.
   local_pattern="${local_pattern%)}|TestJobApplyRejectsNonCanonicalAlias)"
+  # Offline JSON (issue 511): job lint --json, test --json, and dev --once --json
+  # exercise the report writers. Unit tests do not count toward this profile.
+  local_pattern="${local_pattern%)}|TestJobLintJSONReportsFailingLocalManifest|TestTestJSONReportsSchemaFailureAndHarnessScenario|TestDevOnceJSONRunsLocalJob)"
   # Confined dataset reads and writes (identity-and-access B6): the producer
   # checks behind a confined viewer's derivations and a confined manual
   # advance. Rule 1 only, no catalog connection.

@@ -57,29 +57,41 @@ func seedImpactGraph(t *testing.T, ns string) *gorm.DB {
 
 func TestEvaluateImpactPassesWhenDownstreamPresent(t *testing.T) {
 	db := seedImpactGraph(t, harnessNamespace)
-	failures := evaluateImpact(context.Background(), db, ImpactExpectation{
+	observed, err := evaluateImpact(context.Background(), db, ImpactExpectation{
 		Dataset:    "harness-job.extract.output",
 		Downstream: []string{"harness-job.transform.output"},
 	})
-	require.Empty(t, failures, "expected the downstream consumer to be found")
+	require.NoError(t, err)
+	require.Equal(t, []string{"harness-job.transform.output"}, observed)
 }
 
 func TestEvaluateImpactFailsWhenDownstreamMissing(t *testing.T) {
 	db := seedImpactGraph(t, harnessNamespace)
-	failures := evaluateImpact(context.Background(), db, ImpactExpectation{
+	observed, err := evaluateImpact(context.Background(), db, ImpactExpectation{
 		Dataset:    "harness-job.extract.output",
 		Downstream: []string{"harness-job.nonexistent.output"},
 	})
-	require.Len(t, failures, 1)
-	require.Contains(t, failures[0], "expected downstream")
-	require.Contains(t, failures[0], "harness-job.transform.output", "failure should list what WAS found")
+	require.NoError(t, err, "a missing dataset is a set mismatch, not a query error")
+	require.Equal(t, []string{"harness-job.transform.output"}, observed, "observed names are the query result, not a sentence")
+	require.NotContains(t, observed, "harness-job.nonexistent.output")
 }
 
 func TestEvaluateImpactFailsWithoutDatabase(t *testing.T) {
-	failures := evaluateImpact(context.Background(), nil, ImpactExpectation{
+	observed, err := evaluateImpact(context.Background(), nil, ImpactExpectation{
 		Dataset:    "x",
 		Downstream: []string{"y"},
 	})
-	require.Len(t, failures, 1)
-	require.Contains(t, failures[0], "no database available")
+	require.Nil(t, observed, "a query error must not look like an empty downstream set")
+	require.ErrorContains(t, err, "no database available")
+}
+
+func TestEvaluateImpactQueryErrorIsNotAMismatch(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open("file:"+uuid.NewString()+"?mode=memory&cache=shared"), &gorm.Config{})
+	require.NoError(t, err)
+	observed, queryErr := evaluateImpact(context.Background(), db, ImpactExpectation{
+		Dataset:    "missing.output",
+		Downstream: []string{"child"},
+	})
+	require.Nil(t, observed)
+	require.ErrorContains(t, queryErr, "query failed")
 }

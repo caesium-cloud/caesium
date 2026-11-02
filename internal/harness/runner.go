@@ -32,6 +32,19 @@ type Result struct {
 	MetricObservations []MetricObservation
 	LineageEvents      []lineage.RunEvent
 	Failures           []string
+	// Assertions records failed expectations with the values the prose line
+	// compares. Passing checks are omitted. Failures stays the prose list.
+	Assertions []CheckedAssertion
+}
+
+// CheckedAssertion is one failed expectation. Expected and Actual are the
+// compared values; Message is the prose line also stored in Result.Failures.
+type CheckedAssertion struct {
+	Name     string
+	Passed   bool
+	Expected any
+	Actual   any
+	Message  string
 }
 
 // MetricObservation is the measured value for one asserted metric.
@@ -50,6 +63,12 @@ func (r *Result) Passed() bool {
 // testEngineFactory, when set, replaces the container runtime. Production
 // leaves it nil. Tests set it so a scenario can run without a daemon.
 var testEngineFactory func(context.Context) atom.Engine
+
+// SetTestEngineFactory replaces the container runtime for the next Execute
+// calls. Production code does not call it. Pass nil to restore the real runtime.
+func SetTestEngineFactory(factory func(context.Context) atom.Engine) {
+	testEngineFactory = factory
+}
 
 // Execute runs one scenario and evaluates its expectations.
 func Execute(ctx context.Context, scenario ResolvedScenario) (*Result, error) {
@@ -137,7 +156,7 @@ func Execute(ctx context.Context, scenario ResolvedScenario) (*Result, error) {
 		MetricObservations: metricObservations,
 		LineageEvents:      lineageEvents,
 	}
-	result.Failures = evaluateScenario(ctx, obs.db, scenario, runResult, execErr, metricObservations, lineageEvents, lineageErr)
+	result.Failures, result.Assertions = evaluateScenario(ctx, obs.db, scenario, runResult, execErr, metricObservations, lineageEvents, lineageErr)
 	return result, nil
 }
 
@@ -219,22 +238,43 @@ func evaluateScenario(
 	metricObservations []MetricObservation,
 	lineageEvents []lineage.RunEvent,
 	lineageErr error,
-) []string {
+) ([]string, []CheckedAssertion) {
 	if runResult == nil {
-		return []string{"scenario did not produce a run result"}
+		message := "scenario did not produce a run result"
+		return []string{message}, []CheckedAssertion{{
+			Name:     "run result",
+			Expected: "present",
+			Actual:   "absent",
+			Message:  message,
+		}}
 	}
 
-	failures := make([]string, 0)
+	var failures []string
+	var assertions []CheckedAssertion
+	fail := func(a CheckedAssertion) {
+		failures = append(failures, a.Message)
+		assertions = append(assertions, a)
+	}
 	expect := scenario.Scenario.Expect
 
 	if expect.RunStatus != "" && runResult.Status != expect.RunStatus {
-		failures = append(failures, fmt.Sprintf("run status: expected %s, got %s", expect.RunStatus, runResult.Status))
+		fail(CheckedAssertion{
+			Name:     "run status",
+			Expected: expect.RunStatus,
+			Actual:   runResult.Status,
+			Message:  fmt.Sprintf("run status: expected %s, got %s", expect.RunStatus, runResult.Status),
+		})
 	}
 
 	if expect.ErrorContains != "" {
 		actualError := combinedError(runResult.Error, execErr)
 		if !strings.Contains(actualError, expect.ErrorContains) {
-			failures = append(failures, fmt.Sprintf("run error: expected substring %q, got %q", expect.ErrorContains, actualError))
+			fail(CheckedAssertion{
+				Name:     "run error",
+				Expected: expect.ErrorContains,
+				Actual:   actualError,
+				Message:  fmt.Sprintf("run error: expected substring %q, got %q", expect.ErrorContains, actualError),
+			})
 		}
 	}
 
@@ -246,66 +286,127 @@ func evaluateScenario(
 	for _, expectedTask := range expect.Tasks {
 		task, ok := taskByName[expectedTask.Name]
 		if !ok {
-			failures = append(failures, fmt.Sprintf("task %s: not found in run result", expectedTask.Name))
+			fail(CheckedAssertion{
+				Name:     "task " + expectedTask.Name,
+				Expected: expectedTask.Name,
+				Actual:   "not found",
+				Message:  fmt.Sprintf("task %s: not found in run result", expectedTask.Name),
+			})
 			continue
 		}
 
 		if expectedTask.Status != "" && task.Status != expectedTask.Status {
-			failures = append(failures, fmt.Sprintf("task %s status: expected %s, got %s", expectedTask.Name, expectedTask.Status, task.Status))
+			fail(CheckedAssertion{
+				Name:     fmt.Sprintf("task %s status", expectedTask.Name),
+				Expected: expectedTask.Status,
+				Actual:   task.Status,
+				Message:  fmt.Sprintf("task %s status: expected %s, got %s", expectedTask.Name, expectedTask.Status, task.Status),
+			})
 		}
 		if expectedTask.CacheHit != nil && task.CacheHit != *expectedTask.CacheHit {
-			failures = append(failures, fmt.Sprintf("task %s cacheHit: expected %t, got %t", expectedTask.Name, *expectedTask.CacheHit, task.CacheHit))
+			fail(CheckedAssertion{
+				Name:     fmt.Sprintf("task %s cacheHit", expectedTask.Name),
+				Expected: *expectedTask.CacheHit,
+				Actual:   task.CacheHit,
+				Message:  fmt.Sprintf("task %s cacheHit: expected %t, got %t", expectedTask.Name, *expectedTask.CacheHit, task.CacheHit),
+			})
 		}
 		if expectedTask.SchemaViolationCount != nil && len(task.SchemaViolations) != *expectedTask.SchemaViolationCount {
-			failures = append(failures, fmt.Sprintf("task %s schemaViolationCount: expected %d, got %d", expectedTask.Name, *expectedTask.SchemaViolationCount, len(task.SchemaViolations)))
+			fail(CheckedAssertion{
+				Name:     fmt.Sprintf("task %s schemaViolationCount", expectedTask.Name),
+				Expected: *expectedTask.SchemaViolationCount,
+				Actual:   len(task.SchemaViolations),
+				Message:  fmt.Sprintf("task %s schemaViolationCount: expected %d, got %d", expectedTask.Name, *expectedTask.SchemaViolationCount, len(task.SchemaViolations)),
+			})
 		}
 		if expectedTask.ErrorContains != "" && !strings.Contains(task.Error, expectedTask.ErrorContains) {
-			failures = append(failures, fmt.Sprintf("task %s error: expected substring %q, got %q", expectedTask.Name, expectedTask.ErrorContains, task.Error))
+			fail(CheckedAssertion{
+				Name:     fmt.Sprintf("task %s error", expectedTask.Name),
+				Expected: expectedTask.ErrorContains,
+				Actual:   task.Error,
+				Message:  fmt.Sprintf("task %s error: expected substring %q, got %q", expectedTask.Name, expectedTask.ErrorContains, task.Error),
+			})
 		}
 
-		for key, want := range expectedTask.Output {
+		for _, key := range slices.Sorted(maps.Keys(expectedTask.Output)) {
+			want := expectedTask.Output[key]
 			got := task.Output[key]
 			if got != want {
-				failures = append(failures, fmt.Sprintf("task %s output[%s]: expected %q, got %q", expectedTask.Name, key, want, got))
+				fail(CheckedAssertion{
+					Name:     fmt.Sprintf("task %s output[%s]", expectedTask.Name, key),
+					Expected: want,
+					Actual:   got,
+					Message:  fmt.Sprintf("task %s output[%s]: expected %q, got %q", expectedTask.Name, key, want, got),
+				})
 			}
 		}
 
 		for _, fragment := range expectedTask.LogContains {
 			if !strings.Contains(task.LogText, fragment) {
-				failures = append(failures, fmt.Sprintf("task %s log: expected substring %q", expectedTask.Name, fragment))
+				fail(CheckedAssertion{
+					Name:     fmt.Sprintf("task %s log", expectedTask.Name),
+					Expected: fragment,
+					Actual:   false,
+					Message:  fmt.Sprintf("task %s log: expected substring %q", expectedTask.Name, fragment),
+				})
 			}
 		}
 	}
 
 	for i, expectedMetric := range expect.Metrics {
 		observation := metricObservations[i]
+		labels := observation.Labels
+		if len(labels) == 0 {
+			labels = expectedMetric.Labels
+		}
 		if expectedMetric.Value != nil && !floatEquals(observation.Value, *expectedMetric.Value) {
-			failures = append(failures, fmt.Sprintf(
-				"metric %s %s value: expected %.6f, got %.6f",
-				expectedMetric.Name,
-				formatMetricLabels(observation.Labels),
-				*expectedMetric.Value,
-				observation.Value,
-			))
+			fail(CheckedAssertion{
+				Name:     metricAssertionName(expectedMetric.Name, "value", labels),
+				Expected: *expectedMetric.Value,
+				Actual:   observation.Value,
+				Message: fmt.Sprintf(
+					"metric %s %s value: expected %.6f, got %.6f",
+					expectedMetric.Name,
+					formatMetricLabels(labels),
+					*expectedMetric.Value,
+					observation.Value,
+				),
+			})
 		}
 		if expectedMetric.Delta != nil && !floatEquals(observation.Delta, *expectedMetric.Delta) {
-			failures = append(failures, fmt.Sprintf(
-				"metric %s %s delta: expected %.6f, got %.6f",
-				expectedMetric.Name,
-				formatMetricLabels(observation.Labels),
-				*expectedMetric.Delta,
-				observation.Delta,
-			))
+			fail(CheckedAssertion{
+				Name:     metricAssertionName(expectedMetric.Name, "delta", labels),
+				Expected: *expectedMetric.Delta,
+				Actual:   observation.Delta,
+				Message: fmt.Sprintf(
+					"metric %s %s delta: expected %.6f, got %.6f",
+					expectedMetric.Name,
+					formatMetricLabels(labels),
+					*expectedMetric.Delta,
+					observation.Delta,
+				),
+			})
 		}
 	}
 
 	if expect.Lineage != nil {
 		if lineageErr != nil {
-			failures = append(failures, fmt.Sprintf("lineage subscriber: %v", lineageErr))
+			message := fmt.Sprintf("lineage subscriber: %v", lineageErr)
+			fail(CheckedAssertion{
+				Name:     "lineage subscriber",
+				Expected: nil,
+				Actual:   lineageErr.Error(),
+				Message:  message,
+			})
 		}
 
 		if expect.Lineage.TotalEvents != nil && len(lineageEvents) != *expect.Lineage.TotalEvents {
-			failures = append(failures, fmt.Sprintf("lineage totalEvents: expected %d, got %d", *expect.Lineage.TotalEvents, len(lineageEvents)))
+			fail(CheckedAssertion{
+				Name:     "lineage totalEvents",
+				Expected: *expect.Lineage.TotalEvents,
+				Actual:   len(lineageEvents),
+				Message:  fmt.Sprintf("lineage totalEvents: expected %d, got %d", *expect.Lineage.TotalEvents, len(lineageEvents)),
+			})
 		}
 
 		eventTypeCounts := make(map[string]int, len(lineageEvents))
@@ -318,32 +419,65 @@ func evaluateScenario(
 		for eventType, want := range expect.Lineage.EventTypes {
 			got := eventTypeCounts[eventType]
 			if got != want {
-				failures = append(failures, fmt.Sprintf("lineage eventTypes[%s]: expected %d, got %d", eventType, want, got))
+				fail(CheckedAssertion{
+					Name:     "lineage eventTypes[" + eventType + "]",
+					Expected: want,
+					Actual:   got,
+					Message:  fmt.Sprintf("lineage eventTypes[%s]: expected %d, got %d", eventType, want, got),
+				})
 			}
 		}
 
 		for _, jobName := range expect.Lineage.JobNames {
 			if _, ok := jobNames[jobName]; !ok {
-				failures = append(failures, fmt.Sprintf("lineage jobNames: expected %q to appear", jobName))
+				fail(CheckedAssertion{
+					Name:     "lineage jobNames",
+					Expected: jobName,
+					Actual:   "absent",
+					Message:  fmt.Sprintf("lineage jobNames: expected %q to appear", jobName),
+				})
 			}
 		}
 
 		// Impact assertions query the PERSISTED dataset graph (what
 		// /lineage/impact reads), proving datasets are not just emitted but
-		// stored and linked.
+		// stored and linked. A query error is not a set mismatch: Actual is
+		// the observed dataset names only when the query succeeded.
 		for _, imp := range expect.Lineage.Impact {
-			failures = append(failures, evaluateImpact(ctx, db, imp)...)
+			observed, queryErr := evaluateImpact(ctx, db, imp)
+			if queryErr != nil {
+				fail(CheckedAssertion{
+					Name:     "lineage impact[" + imp.Dataset + "] query",
+					Expected: "ok",
+					Actual:   queryErr.Error(),
+					Message:  queryErr.Error(),
+				})
+				continue
+			}
+			if missing := missingDownstream(imp.Downstream, observed); len(missing) > 0 {
+				fail(CheckedAssertion{
+					Name:     "lineage impact[" + imp.Dataset + "]",
+					Expected: append([]string(nil), imp.Downstream...),
+					Actual:   observed,
+					Message: fmt.Sprintf(
+						"lineage impact[%s]: expected downstream %v, got %v",
+						imp.Dataset, imp.Downstream, observed,
+					),
+				})
+			}
 		}
 	}
 
-	return failures
+	return failures, assertions
 }
 
-// evaluateImpact runs the cross-job impact query for one expectation and reports
-// any expected downstream dataset that is missing from the result.
-func evaluateImpact(ctx context.Context, db *gorm.DB, imp ImpactExpectation) []string {
+// evaluateImpact runs the cross-job impact query for one expectation.
+// observed is the dataset names the query returned (empty, not nil, when the
+// query succeeds and nothing is downstream). err is set only when the query
+// cannot run; a missing expected dataset is not an error here.
+func evaluateImpact(ctx context.Context, db *gorm.DB, imp ImpactExpectation) ([]string, error) {
 	if db == nil {
-		return []string{fmt.Sprintf("lineage impact[%s]: no database available (is lineage enabled?)", imp.Dataset)}
+		return nil, fmt.Errorf("lineage impact[%s]: no database available (is lineage enabled?)", imp.Dataset)
 	}
 	ns := imp.Namespace
 	if ns == "" {
@@ -351,23 +485,32 @@ func evaluateImpact(ctx context.Context, db *gorm.DB, imp ImpactExpectation) []s
 	}
 	res, err := lineage.QueryImpact(ctx, db, ns, imp.Dataset, imp.MaxDepth)
 	if err != nil {
-		return []string{fmt.Sprintf("lineage impact[%s]: query failed: %v", imp.Dataset, err)}
+		return nil, fmt.Errorf("lineage impact[%s]: query failed: %v", imp.Dataset, err)
 	}
-	got := make(map[string]struct{}, len(res.Downstream))
+	seen := make(map[string]struct{}, len(res.Downstream))
+	observed := make([]string, 0, len(res.Downstream))
 	for _, node := range res.Downstream {
-		got[node.DatasetName] = struct{}{}
+		if _, ok := seen[node.DatasetName]; ok {
+			continue
+		}
+		seen[node.DatasetName] = struct{}{}
+		observed = append(observed, node.DatasetName)
 	}
-	var failures []string
-	for _, want := range imp.Downstream {
-		if _, ok := got[want]; !ok {
-			names := make([]string, 0, len(res.Downstream))
-			for _, node := range res.Downstream {
-				names = append(names, node.DatasetName)
-			}
-			failures = append(failures, fmt.Sprintf("lineage impact[%s]: expected downstream %q, got %v", imp.Dataset, want, names))
+	return observed, nil
+}
+
+func missingDownstream(want, got []string) []string {
+	have := make(map[string]struct{}, len(got))
+	for _, name := range got {
+		have[name] = struct{}{}
+	}
+	var missing []string
+	for _, name := range want {
+		if _, ok := have[name]; !ok {
+			missing = append(missing, name)
 		}
 	}
-	return failures
+	return missing
 }
 
 func captureMetricBaselines(expectations []MetricExpectation, state placeholderState) (map[int]float64, error) {
@@ -674,6 +817,16 @@ func waitForLineageEvents(transport *recordingTransport, target int, timeout tim
 
 func floatEquals(a, b float64) bool {
 	return math.Abs(a-b) <= 1e-9
+}
+
+// metricAssertionName includes the label set so two checks of one metric
+// stay distinct in the JSON report. Message is not copied onto that report,
+// and the scenario diagnostic keeps only the first failure.
+func metricAssertionName(metric, kind string, labels map[string]string) string {
+	if len(labels) == 0 {
+		return fmt.Sprintf("metric %s %s", metric, kind)
+	}
+	return fmt.Sprintf("metric %s %s %s", metric, formatMetricLabels(labels), kind)
 }
 
 func formatMetricLabels(labels map[string]string) string {
