@@ -51,13 +51,13 @@ var lintCmd = &cobra.Command{
 	Short: "Validate job definition manifests",
 	Args:  resolveLintServerArgs,
 	RunE: func(cmd *cobra.Command, args []string) error {
+		serverMode := cmd.Flags().Changed("server")
+		if lintJSON && !serverMode {
+			return runOfflineLint(cmd)
+		}
 		defs, err := collectDefinitions(lintPaths)
 		if err != nil {
 			return err
-		}
-		serverMode := cmd.Flags().Changed("server")
-		if lintJSON && !serverMode {
-			return fmt.Errorf("--json is only supported with --server")
 		}
 		if len(defs) == 0 {
 			return fmt.Errorf("no job definitions selected")
@@ -160,7 +160,7 @@ func init() {
 		return defaultUsage(cmd)
 	})
 	lintCmd.Flags().StringVar(&lintAPIKey, "api-key", "", "API key for authentication (prefer "+cliutil.APIKeyEnvVar+"; --api-key is visible in process listings)")
-	lintCmd.Flags().BoolVar(&lintJSON, "json", false, "Print server lint JSON (requires --server)")
+	lintCmd.Flags().BoolVar(&lintJSON, "json", false, "Print JSON. Without --server, write a version-1 offline report to stdout; with --server, print the server lint document")
 
 	Cmd.AddCommand(lintCmd)
 }
