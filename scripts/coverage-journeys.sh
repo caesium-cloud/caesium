@@ -1876,6 +1876,9 @@ PY
   # Offline JSON (issue 511): job lint --json, test --json, and dev --once --json
   # exercise the report writers. Unit tests do not count toward this profile.
   local_pattern="${local_pattern%)}|TestJobLintJSONReportsFailingLocalManifest|TestTestJSONReportsSchemaFailureAndHarnessScenario|TestDevOnceJSONRunsLocalJob)"
+  # run get/wait/logs (issue #510). fetch.go has no init of its own, so this
+  # journey is what covers it on the instrumented CLI.
+  local_pattern="${local_pattern%)}|TestRunCLIVerifyLoop)"
   # Confined dataset reads and writes (identity-and-access B6): the producer
   # checks behind a confined viewer's derivations and a confined manual
   # advance. Rule 1 only, no catalog connection.

@@ -10,6 +10,7 @@ import (
 	contractenforce "github.com/caesium-cloud/caesium/internal/contract"
 	internaljobdef "github.com/caesium-cloud/caesium/internal/jobdef"
 	"github.com/caesium-cloud/caesium/internal/models"
+	"github.com/google/uuid"
 	"github.com/labstack/echo/v5"
 	"gorm.io/gorm"
 )
@@ -47,6 +48,7 @@ func Apply(c *echo.Context) error {
 		ContractAck:      contractAck,
 		ContractWarnings: &contractWarnings,
 	}
+	jobs := make([]jobdefsvc.AppliedJob, 0, len(req.Definitions))
 	// A confined writer (namespace-confined, or a job-scoped key) applies
 	// atomically (B9); everyone else keeps the per-definition flow below.
 	scope, err := writerScope(c)
@@ -67,7 +69,8 @@ func Apply(c *echo.Context) error {
 		}
 
 		aliases = append(aliases, def.Metadata.Alias)
-		if _, err := importer.ApplyWithOptions(ctx, def, opts); err != nil {
+		saved, err := importer.ApplyWithOptions(ctx, def, opts)
+		if err != nil {
 			if errors.Is(err, internaljobdef.ErrContractBreak) {
 				if payload, ok := internaljobdef.ContractBreakResponse(err); ok {
 					return c.JSON(http.StatusConflict, payload)
@@ -83,6 +86,7 @@ func Apply(c *echo.Context) error {
 			}
 			return echo.NewHTTPError(http.StatusInternalServerError, "internal server error").Wrap(err)
 		}
+		jobs = append(jobs, appliedJob(saved, def.Metadata.Alias))
 		applied++
 	}
 
@@ -98,7 +102,21 @@ func Apply(c *echo.Context) error {
 		pruned = count
 	}
 
-	return c.JSON(http.StatusOK, ApplyResponse{Applied: applied, Pruned: pruned, ContractWarnings: contractWarnings})
+	return c.JSON(http.StatusOK, ApplyResponse{Applied: applied, Pruned: pruned, Jobs: jobs, ContractWarnings: contractWarnings})
+}
+
+func appliedJob(saved *models.Job, alias string) jobdefsvc.AppliedJob {
+	if saved == nil {
+		return jobdefsvc.AppliedJob{Alias: alias}
+	}
+	if strings.TrimSpace(saved.Alias) != "" {
+		alias = saved.Alias
+	}
+	id := ""
+	if saved.ID != uuid.Nil {
+		id = saved.ID.String()
+	}
+	return jobdefsvc.AppliedJob{Alias: alias, ID: id}
 }
 
 // writerScope is the tenancy scope of the request's principal for a job
@@ -138,10 +156,12 @@ func applyConfined(c *echo.Context, importer *internaljobdef.Importer, req *Appl
 	}
 
 	withheld := 0
+	recorded := make([]internaljobdef.RecordedJob, 0, len(req.Definitions))
 	opts.NamespaceAllowlist = scope.Namespaces
 	opts.JobAliasScope = scope.JobAliases
 	opts.ContractAudience = view.contractAudience(ctx)
 	opts.ContractWarningsWithheld = &withheld
+	opts.RecordedJobs = &recorded
 	plans := make([]internaljobdef.BatchPlan, 0, len(req.Definitions))
 	for i := range req.Definitions {
 		plans = append(plans, internaljobdef.BatchPlan{Def: &req.Definitions[i], Opts: opts})
@@ -155,9 +175,14 @@ func applyConfined(c *echo.Context, importer *internaljobdef.Importer, req *Appl
 		}
 		return confinedApplyError(err, scope)
 	}
+	jobs := make([]jobdefsvc.AppliedJob, 0, len(recorded))
+	for _, job := range recorded {
+		jobs = append(jobs, appliedJob(&models.Job{ID: job.ID, Alias: job.Alias}, job.Alias))
+	}
 	return c.JSON(http.StatusOK, ApplyResponse{
 		Applied:                  result.Applied,
 		Pruned:                   result.Pruned,
+		Jobs:                     jobs,
 		ContractWarnings:         *opts.ContractWarnings,
 		WithheldContractWarnings: withheld,
 	})

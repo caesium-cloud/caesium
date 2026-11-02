@@ -30,13 +30,21 @@ var (
 	applyProvenancePath     string
 	applyAllowBreaking      string
 	applyReason             string
+	applyJSON               bool
 )
 
 var applyCmd = &cobra.Command{
 	Use:   "apply",
 	Args:  cobra.NoArgs,
 	Short: "Apply job definitions via the REST API",
+	Long: "Apply job definitions via the REST API.\n\n" +
+		"On success, stdout keeps the line `Applied N job definition(s)` and then prints one " +
+		"`<alias> <id>` line per applied job. With --json, stdout is only that result as JSON " +
+		"(ids, aliases, applied count, warnings). Warnings and other diagnostics stay on stderr.",
 	RunE: func(cmd *cobra.Command, args []string) error {
+		if applyJSON {
+			cmd.SilenceUsage = true
+		}
 		defs, err := collectDefinitions(applyPaths)
 		if err != nil {
 			return err
@@ -55,16 +63,7 @@ var applyCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
-		for _, warning := range resp.ContractWarnings {
-			if _, err := fmt.Fprintf(cmd.ErrOrStderr(), "Warning: %s\n", warning.Message); err != nil {
-				return err
-			}
-		}
-
-		if _, err := fmt.Fprintf(cmd.OutOrStdout(), "Applied %d job definition(s)\n", len(defs)); err != nil {
-			return err
-		}
-		return nil
+		return reportApply(cmd, len(defs), resp)
 	},
 }
 
@@ -81,7 +80,64 @@ func init() {
 	applyCmd.Flags().StringVar(&applyProvenancePath, "provenance-path", "", "Record the manifest path that produced the applied definitions")
 	applyCmd.Flags().StringVar(&applyAllowBreaking, "allow-breaking", "", "Acknowledge an intentional breaking contract change (grammar: dataset=<name>)")
 	applyCmd.Flags().StringVar(&applyReason, "reason", "", "Reason recorded with --allow-breaking")
+	applyCmd.Flags().BoolVar(&applyJSON, "json", false, "Print the apply result as JSON on stdout; warnings stay on stderr")
 	Cmd.AddCommand(applyCmd)
+}
+
+func reportApply(cmd *cobra.Command, definitionCount int, resp *jobdefsvc.ApplyResponse) error {
+	if resp == nil {
+		resp = &jobdefsvc.ApplyResponse{}
+	}
+	for _, warning := range resp.ContractWarnings {
+		if _, err := fmt.Fprintf(cmd.ErrOrStderr(), "Warning: %s\n", warning.Message); err != nil {
+			return err
+		}
+	}
+	if applyJSON {
+		return writeApplyJSON(cmd, resp)
+	}
+	if _, err := fmt.Fprintf(cmd.OutOrStdout(), "Applied %d job definition(s)\n", definitionCount); err != nil {
+		return err
+	}
+	for _, job := range resp.Jobs {
+		if _, err := fmt.Fprintf(cmd.OutOrStdout(), "%s %s\n", job.Alias, job.ID); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func writeApplyJSON(cmd *cobra.Command, resp *jobdefsvc.ApplyResponse) error {
+	jobs := resp.Jobs
+	if jobs == nil {
+		jobs = []jobdefsvc.AppliedJob{}
+	}
+	warnings := resp.ContractWarnings
+	rawWarnings, err := json.Marshal(warnings)
+	if err != nil {
+		return err
+	}
+	if warnings == nil {
+		rawWarnings = []byte("[]")
+	}
+	payload := struct {
+		Applied                  int                    `json:"applied"`
+		Pruned                   int                    `json:"pruned,omitempty"`
+		Jobs                     []jobdefsvc.AppliedJob `json:"jobs"`
+		ContractWarnings         json.RawMessage        `json:"contract_warnings"`
+		WithheldContractWarnings int                    `json:"withheld_contract_warnings,omitempty"`
+	}{
+		Applied:                  resp.Applied,
+		Pruned:                   resp.Pruned,
+		Jobs:                     jobs,
+		ContractWarnings:         rawWarnings,
+		WithheldContractWarnings: resp.WithheldContractWarnings,
+	}
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+	return cliutil.WritePrettyJSON(cmd, encoded, "apply response")
 }
 
 func collectDefinitions(paths []string) ([]schema.Definition, error) {
