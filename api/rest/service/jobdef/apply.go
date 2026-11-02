@@ -31,9 +31,17 @@ type ApplyProvenance struct {
 	Path     string `json:"path,omitempty"`
 }
 
+// AppliedJob is one job an apply persisted, in request order. The id is the
+// stored job id, so a client can start a run without listing the catalog.
+type AppliedJob struct {
+	Alias string `json:"alias"`
+	ID    string `json:"id"`
+}
+
 type ApplyResponse struct {
 	Applied          int                               `json:"applied"`
 	Pruned           int                               `json:"pruned,omitempty"`
+	Jobs             []AppliedJob                      `json:"jobs"`
 	ContractWarnings []contractenforce.ContractWarning `json:"contract_warnings,omitempty"`
 	// WithheldContractWarnings counts the contract warnings withheld from a
 	// namespace-confined caller because they concern a job outside its

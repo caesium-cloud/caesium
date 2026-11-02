@@ -3,6 +3,7 @@ package job
 import (
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/caesium-cloud/caesium/api/internal/orderby"
 	"github.com/caesium-cloud/caesium/api/middleware"
@@ -36,9 +37,14 @@ func List(c *echo.Context) error {
 	if err != nil {
 		return echo.NewHTTPError(http.StatusBadRequest, "bad request").Wrap(err)
 	}
-	if aliases := middleware.GetAllowedJobAliases(c); len(aliases) > 0 {
-		req.Aliases = aliases
+	// ?alias= narrows inside the caller's allowlist. It must not replace that
+	// allowlist with a wider set, and an alias outside it is an empty list:
+	// an empty Aliases slice means "no alias predicate".
+	aliases, empty := narrowJobListAliases(middleware.GetAllowedJobAliases(c), req.Aliases)
+	if empty {
+		return c.JSON(http.StatusOK, []*ListJobResponse{})
 	}
+	req.Aliases = aliases
 
 	svc := jobListService(c.Request().Context())
 	jobs, err := svc.List(req)
@@ -106,7 +112,40 @@ func parseListRequest(c *echo.Context) (req *job.ListRequest, err error) {
 		req.Namespace = namespace
 	}
 
+	if alias := strings.TrimSpace(c.QueryParam("alias")); alias != "" {
+		req.Aliases = []string{alias}
+	}
+
 	return
+}
+
+// narrowJobListAliases intersects ?alias= with the caller's job-alias
+// allowlist. An empty request keeps the allowlist (or no alias predicate).
+// empty is true when every requested alias is outside the allowlist.
+func narrowJobListAliases(allowed, requested []string) (aliases []string, empty bool) {
+	if len(requested) == 0 {
+		if len(allowed) == 0 {
+			return nil, false
+		}
+		return allowed, false
+	}
+	if len(allowed) == 0 {
+		return requested, false
+	}
+	allow := make(map[string]struct{}, len(allowed))
+	for _, alias := range allowed {
+		allow[alias] = struct{}{}
+	}
+	matched := make([]string, 0, len(requested))
+	for _, alias := range requested {
+		if _, ok := allow[alias]; ok {
+			matched = append(matched, alias)
+		}
+	}
+	if len(matched) == 0 {
+		return nil, true
+	}
+	return matched, false
 }
 
 // jobListService builds the job service for a list request; a seam for the

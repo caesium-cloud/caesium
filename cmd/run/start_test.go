@@ -35,6 +35,7 @@ func TestRunStartPostsPriorityAndPrintsRunID(t *testing.T) {
 	defer server.Close()
 
 	startJobID = jobID
+	startAlias = ""
 	startServer = server.URL
 	startAPIKey = "secret-key"
 	startParams = []string{"branch=main"}
@@ -66,6 +67,7 @@ func TestParseRunStartParamsRejectsMalformedValues(t *testing.T) {
 func restoreStartTestGlobals(t *testing.T) {
 	t.Helper()
 	originalJobID := startJobID
+	originalAlias := startAlias
 	originalServer := startServer
 	originalAPIKey := startAPIKey
 	originalParams := startParams
@@ -74,6 +76,7 @@ func restoreStartTestGlobals(t *testing.T) {
 	originalClient := startHTTPClient
 	t.Cleanup(func() {
 		startJobID = originalJobID
+		startAlias = originalAlias
 		startServer = originalServer
 		startAPIKey = originalAPIKey
 		startParams = originalParams
@@ -101,6 +104,7 @@ func runStartAgainst(t *testing.T, key string, status int, headers map[string]st
 	t.Cleanup(server.Close)
 
 	startJobID = "job-1"
+	startAlias = ""
 	startServer = server.URL
 	startAPIKey = ""
 	startParams = nil
@@ -160,6 +164,89 @@ func TestRunStartToleratesEmptyAcceptedBody(t *testing.T) {
 	require.NoError(t, err)
 	require.Empty(t, stdout)
 	require.Contains(t, stderr, "without creating a run")
+}
+
+func TestRunStartResolvesAlias(t *testing.T) {
+	restoreStartTestGlobals(t)
+
+	const (
+		alias = "nightly-etl"
+		jobID = "job-1"
+		runID = "run-1"
+	)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/jobs":
+			require.Equal(t, http.MethodGet, r.Method)
+			require.Equal(t, alias, r.URL.Query().Get("alias"))
+			require.Equal(t, "Bearer secret-key", r.Header.Get("Authorization"))
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`[{"id":"other","alias":"other"},{"id":"` + jobID + `","alias":"` + alias + `"}]`))
+		case "/v1/jobs/" + jobID + "/run":
+			require.Equal(t, http.MethodPost, r.Method)
+			w.WriteHeader(http.StatusAccepted)
+			_, _ = w.Write([]byte(`{"id":"` + runID + `","outcome":"created"}`))
+		default:
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.String())
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(server.Close)
+
+	startJobID = ""
+	startAlias = alias
+	startServer = server.URL
+	startAPIKey = "secret-key"
+	startParams = nil
+	startPriority = ""
+	startIdempotencyKey = ""
+
+	cmd := &cobra.Command{Use: "test"}
+	cmd.SetContext(context.Background())
+	var stdout, stderr bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
+	require.NoError(t, runStart(cmd, nil))
+	require.Equal(t, runID+"\n", stdout.String())
+}
+
+func TestRunStartRejectsMissingOrBothJobSelectors(t *testing.T) {
+	restoreStartTestGlobals(t)
+	startJobID = ""
+	startAlias = ""
+	cmd := &cobra.Command{Use: "test"}
+	cmd.SetContext(context.Background())
+	require.ErrorContains(t, runStart(cmd, nil), "--job-id or --alias is required")
+
+	startJobID = "job-1"
+	startAlias = "nightly"
+	require.ErrorContains(t, runStart(cmd, nil), "only one of --job-id or --alias")
+}
+
+func TestRunStartAliasMissFailsBeforeStarting(t *testing.T) {
+	restoreStartTestGlobals(t)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.Equal(t, "/v1/jobs", r.URL.Path)
+		_, _ = w.Write([]byte(`[{"id":"job-1","alias":"other"}]`))
+	}))
+	t.Cleanup(server.Close)
+
+	startJobID = ""
+	startAlias = "nightly"
+	startServer = server.URL
+	startAPIKey = ""
+	startParams = nil
+	startPriority = ""
+	startIdempotencyKey = ""
+
+	cmd := &cobra.Command{Use: "test"}
+	cmd.SetContext(context.Background())
+	var stdout bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&bytes.Buffer{})
+	err := runStart(cmd, nil)
+	require.ErrorContains(t, err, `no job with alias "nightly"`)
+	require.Empty(t, stdout.String())
 }
 
 func TestRunStartReportsReusedKey(t *testing.T) {
