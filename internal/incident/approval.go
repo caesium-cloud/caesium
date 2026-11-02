@@ -228,16 +228,21 @@ func (e *Executor) ExecuteApproved(ctx context.Context, actionID uuid.UUID) (*mo
 	}
 	action.Status = models.AgentActionStatusExecuting
 
-	// From here the claim is held, so every exit MUST leave a terminal status —
-	// returning early would strand the row in `executing` with nothing dispatched.
+	// The claim is held, so every exit MUST leave a terminal status. Final
+	// writes use a context that ignores cancellation of the approving
+	// request, starting now: a cancel during the incident load would
+	// otherwise fail finishAs too and leave the row in executing. dispatch
+	// below keeps ctx, so a cancelled approval still stops the forge calls.
+	persistCtx := context.WithoutCancel(ctx)
+
 	inc, err := e.store.Get(ctx, action.IncidentID)
 	if err != nil {
-		e.finishAs(ctx, &action, models.AgentActionStatusFailed,
+		e.finishAs(persistCtx, &action, models.AgentActionStatusFailed,
 			map[string]any{"error": "load incident for approved action: " + err.Error()}, "")
 		return &action, fmt.Errorf("incident: load incident for approved action: %w", err)
 	}
 	if inc == nil {
-		e.finishAs(ctx, &action, models.AgentActionStatusFailed,
+		e.finishAs(persistCtx, &action, models.AgentActionStatusFailed,
 			map[string]any{"error": "incident not found for approved action"}, "")
 		return &action, errors.New("incident: incident not found for approved action")
 	}
@@ -245,7 +250,7 @@ func (e *Executor) ExecuteApproved(ctx context.Context, actionID uuid.UUID) (*mo
 	var params ActionParams
 	if len(action.Params) > 0 {
 		if err := json.Unmarshal(action.Params, &params); err != nil {
-			e.finishAs(ctx, &action, models.AgentActionStatusFailed,
+			e.finishAs(persistCtx, &action, models.AgentActionStatusFailed,
 				map[string]any{"error": "decode action params: " + err.Error()}, "")
 			return &action, fmt.Errorf("incident: decode approved action params: %w", err)
 		}
@@ -258,15 +263,12 @@ func (e *Executor) ExecuteApproved(ctx context.Context, actionID uuid.UUID) (*mo
 	// allowlist governs what the AGENT may do autonomously; an operator who
 	// approved this exact action has already answered that question.
 	result, execErr := e.dispatch(ctx, action.Type, inc, &action, params, Playbook{})
-	// The approving request may have gone away during a long dispatch. What the
-	// dispatch did must still reach the row, or it strands in `executing`.
-	ctx = context.WithoutCancel(ctx)
 	if execErr != nil {
-		e.finishAs(ctx, &action, models.AgentActionStatusFailed, map[string]any{
+		e.finishAs(persistCtx, &action, models.AgentActionStatusFailed, map[string]any{
 			"error":       execErr.Error(),
 			"approved_by": decider,
 		}, auditActor)
-		e.publishActionExecuted(ctx, inc, &action, decider, decidedAt, false)
+		e.publishActionExecuted(persistCtx, inc, &action, decider, decidedAt, false)
 		return &action, execErr
 	}
 
@@ -278,8 +280,8 @@ func (e *Executor) ExecuteApproved(ctx context.Context, actionID uuid.UUID) (*mo
 		result["approved_at"] = decidedAt.UTC().Format(time.RFC3339)
 	}
 	result["executed_at"] = time.Now().UTC().Format(time.RFC3339)
-	e.finishAs(ctx, &action, models.AgentActionStatusExecuted, result, auditActor)
-	e.publishActionExecuted(ctx, inc, &action, decider, decidedAt, true)
+	e.finishAs(persistCtx, &action, models.AgentActionStatusExecuted, result, auditActor)
+	e.publishActionExecuted(persistCtx, inc, &action, decider, decidedAt, true)
 	return &action, nil
 }
 

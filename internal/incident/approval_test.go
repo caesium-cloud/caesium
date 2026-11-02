@@ -204,6 +204,47 @@ func TestExecuteApprovedRunsSkipTask(t *testing.T) {
 	require.Len(t, ops.skipTask, 1)
 }
 
+// TestCancelledLoadAfterClaimStillFinishes cancels the approving request
+// after the claim and before the incident load. The row must still leave
+// executing, and the forge call must not run.
+func TestCancelledLoadAfterClaimStillFinishes(t *testing.T) {
+	db, store, ops, exec := newExecutorTest(t)
+	inc, _, _ := seedJobIncident(t, db, store, "extract", "")
+
+	action, err := exec.Execute(context.Background(), ActionRequest{
+		IncidentID: inc.ID,
+		Type:       ActionTypeSkipTask,
+		Params:     ActionParams{TaskName: "extract"},
+	})
+	require.NoError(t, err)
+	approveAction(t, db, action.ID, "alice@example.com", "")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	require.NoError(t, db.Callback().Query().Before("gorm:query").Register("test:cancel-incident-get", func(tx *gorm.DB) {
+		if tx.Statement == nil {
+			return
+		}
+		table := tx.Statement.Table
+		if table == "" && tx.Statement.Schema != nil {
+			table = tx.Statement.Schema.Table
+		}
+		if table == "incidents" {
+			cancel()
+		}
+	}))
+	t.Cleanup(func() { db.Callback().Query().Remove("test:cancel-incident-get") })
+
+	executed, err := exec.ExecuteApproved(ctx, action.ID)
+	require.Error(t, err)
+	require.Empty(t, ops.skipTask)
+	require.Equal(t, models.AgentActionStatusFailed, executed.Status)
+
+	var row models.AgentAction
+	require.NoError(t, db.First(&row, "id = ?", action.ID).Error)
+	require.Equal(t, models.AgentActionStatusFailed, row.Status)
+}
+
 // TestExecuteApprovedRefusesUnapprovedAction pins the guard that makes the
 // approval gate load-bearing: a merely-proposed (or rejected) action can never
 // be dispatched, even by a direct call.
