@@ -71,6 +71,10 @@ func (s *Store) ReclaimOwnerExpiredClaims(runID uuid.UUID, ownerGeneration int64
 				"claim_expires_at": nil,
 				"runtime_id":       "",
 				"started_at":       nil,
+				// The previous attempt's data-assertion outcome goes with its
+				// samples, so the re-execution is judged alone.
+				"data_violations":        nil,
+				"data_assertion_results": nil,
 			})
 			res := tx.Model(&models.TaskRun{}).
 				Where(where, args...).

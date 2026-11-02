@@ -3655,10 +3655,6 @@ func (s *Store) saveDataViolationsClaimed(ctx context.Context, runID, taskRef uu
 	if len(violations) == 0 {
 		return true, nil
 	}
-	b, err := json.Marshal(violations)
-	if err != nil {
-		return false, err
-	}
 	row, err := loadTaskRunByIDOrUnique(s.db.WithContext(ctx), runID, taskRef)
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -3666,11 +3662,42 @@ func (s *Store) saveDataViolationsClaimed(ctx context.Context, runID, taskRef uu
 		}
 		return false, err
 	}
-	q := s.db.WithContext(ctx).Model(&models.TaskRun{}).Where("id = ?", row.ID)
+	return s.saveDataAssertionOutcomeClaimed(ctx, row.ID, claim, violations, nil)
+}
+
+// saveDataAssertionOutcomeClaimed records what the evaluator decided for one
+// TaskRun instance — its violations and its per-check results — in a SINGLE
+// UPDATE addressed by the instance's own primary key, so a fanned sibling can
+// never receive another instance's outcome. Only the columns with something to
+// say are written: a clean task stores results alone, a task that broke stores
+// both, and a task with neither writes nothing at all.
+//
+// The claim fence is the UPDATE's predicate (see saveDataViolationsClaimed); it
+// reports whether the write landed.
+func (s *Store) saveDataAssertionOutcomeClaimed(ctx context.Context, taskRunID uuid.UUID, claim *TaskClaim, violations []DataViolation, results []AssertionResult) (bool, error) {
+	updates := make(map[string]any, 2)
+	if len(violations) > 0 {
+		b, err := json.Marshal(violations)
+		if err != nil {
+			return false, err
+		}
+		updates["data_violations"] = datatypes.JSON(b)
+	}
+	if len(results) > 0 {
+		b, err := json.Marshal(results)
+		if err != nil {
+			return false, err
+		}
+		updates["data_assertion_results"] = datatypes.JSON(b)
+	}
+	if len(updates) == 0 {
+		return true, nil
+	}
+	q := s.db.WithContext(ctx).Model(&models.TaskRun{}).Where("id = ?", taskRunID)
 	if claim != nil {
 		q = q.Where("claimed_by = ? AND claim_attempt = ?", claim.ClaimedBy, claim.ClaimAttempt)
 	}
-	res := q.Update("data_violations", datatypes.JSON(b))
+	res := q.Updates(updates)
 	if res.Error != nil {
 		return false, res.Error
 	}
@@ -6057,6 +6084,12 @@ func (s *Store) resetInFlightTasks(runID uuid.UUID, ownerGeneration int64) ([]Re
 				"cache_origin_run_id":    nil,
 				"cache_created_at":       nil,
 				"cache_expires_at":       nil,
+				// The previous attempt's data-assertion outcome goes with its
+				// samples (clearAttemptDatasetMetricsForTaskRunsTx): a clean
+				// re-run would otherwise sit beside the violations of the
+				// attempt it replaced.
+				"data_violations":        nil,
+				"data_assertion_results": nil,
 			})
 			for _, chunk := range chunkTaskRunIDs(ids) {
 				if err := tx.Model(&models.TaskRun{}).
@@ -7607,6 +7640,7 @@ func retryResetColumns() map[string]any {
 		"log_generation":          "",
 		"schema_violations":       nil,
 		"data_violations":         nil,
+		"data_assertion_results":  nil,
 		"rate_limit_retry_after":  nil,
 		"partition_retry_pending": false,
 	})

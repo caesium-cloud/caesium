@@ -191,6 +191,8 @@ func Protected(g *echo.Group, bus internal_event.Bus, auditor *auth.AuditLogger,
 			g.GET("/datasets/holds", dc.Holds)
 			g.GET("/datasets/:ns/:name/metrics", dc.Metrics)
 			g.POST("/datasets/holds/:id/release", dc.Release)
+			// A run's per-assertion results, passes included.
+			g.GET("/jobs/:id/runs/:run_id/assertions", run.Assertions)
 		}
 	}
 

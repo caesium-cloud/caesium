@@ -20,7 +20,7 @@ import {
 import { Skeleton } from "@/components/ui/skeleton";
 import { StatusBadge } from "@/components/ui/status-badge";
 import { Kbd } from "@/components/ui/kbd";
-import { DataAssertionsPanel } from "@/features/datasets/DataAssertionsPanel";
+import { RunAssertionPanels } from "@/features/datasets/DataAssertionsPanel";
 import { HoldSkipReason } from "@/features/datasets/HoldSkipReason";
 import { IncidentRibbon } from "@/features/incidents/IncidentRibbon";
 import { RunDataEvidence, RunExternalExecutions } from "@/features/connectors/RelationshipsPanel";
@@ -520,7 +520,7 @@ export function RunDetailPage() {
       <HoldSkipReason reason={run.tasks?.find((task) => task.error?.startsWith("dataset_hold:"))?.error ?? run.skip_reason} />
       <RunDataEvidence jobId={jobId} freshnessEnabled={features?.freshness_enabled === true} onOpenReceipt={() => setReproducibilityOpen(true)} />
       <RunExternalExecutions jobId={jobId} runId={runId} />
-      {run.tasks?.filter((task) => task.data_violations?.length || task.schema_violations?.length).map((task) => <DataAssertionsPanel key={task.id} task={task} />)}
+      <RunAssertionPanels jobId={jobId} runId={runId} tasks={run.tasks ?? []} live={isLive} />
       {/* Cache summary */}
       <div className="flex items-center gap-4">
         <RunCacheSummary run={run} />

@@ -276,6 +276,9 @@ type declaredContract struct {
 type datasetVerdict struct {
 	contract   declaredContract
 	violations []DataViolation
+	// results is every declared check's outcome, passes included — the record
+	// persisted beside the violations (DescribeAssertions).
+	results []AssertionResult
 }
 
 // declaredContracts decodes the assertion spec off each produced declaration.
@@ -340,7 +343,9 @@ func evaluateContracts(
 		for i := range violations {
 			violations[i].Namespace = contract.namespace
 		}
-		verdicts = append(verdicts, datasetVerdict{contract: contract, violations: violations})
+		results := DescribeAssertions(contract.name, contract.namespace, contract.assertions,
+			observed[contract.name], baselines[contract.name], minSamples, violations, contract.onViolation)
+		verdicts = append(verdicts, datasetVerdict{contract: contract, violations: violations, results: results})
 	}
 	return verdicts
 }
@@ -870,6 +875,7 @@ func dispatchDataAssertions(
 
 	var (
 		recorded   []DataViolation
+		results    []AssertionResult
 		enforced   []DataViolation
 		datasets   []string
 		holdError  error
@@ -878,6 +884,7 @@ func dispatchDataAssertions(
 
 	for _, verdict := range verdicts {
 		contract := verdict.contract
+		results = append(results, verdict.results...)
 		if len(verdict.violations) == 0 {
 			metrics.DataAssertionsTotal.WithLabelValues(assertionResultPass).Inc()
 			continue
@@ -886,32 +893,19 @@ func dispatchDataAssertions(
 		datasets = append(datasets, contract.name)
 		var breaking []DataViolation
 		for _, violation := range verdict.violations {
-			escalates := violation.Enforceable() && contract.onViolation == jobdef.DatasetOnViolationFail
-			holds := violation.Enforceable() && contract.onViolation == jobdef.DatasetOnViolationHold
-			switch {
-			case violation.Assertion == AssertionUnavailable:
-				// The marker stream was lost, so this metric's absence is
-				// evidence of nothing. It is recorded and surfaced — an
-				// operator should see that an observation went missing — but it
-				// never fails a task and never opens a hold.
-				metrics.DataAssertionsTotal.WithLabelValues(assertionResultUnavailable).Inc()
-			case !violation.Enforceable():
-				// A seeding verdict never holds, whatever onViolation says: the
-				// baseline it was judged against was too short to trust, and
-				// breaking the circuit on it would stop a pipeline on a guess.
-				metrics.DataAssertionsTotal.WithLabelValues(assertionResultSeeding).Inc()
-			case escalates:
-				metrics.DataAssertionsTotal.WithLabelValues(assertionResultFail).Inc()
-			case holds:
-				metrics.DataAssertionsTotal.WithLabelValues(assertionResultHold).Inc()
-			default:
-				metrics.DataAssertionsTotal.WithLabelValues(assertionResultWarn).Inc()
-			}
+			// The applied disposition, from the one definition the recorded
+			// results share. An unavailable verdict is recorded and surfaced
+			// but never fails a task and never opens a hold (the marker stream
+			// was lost, so the metric's absence is evidence of nothing); a
+			// seeding verdict never holds whatever onViolation says (its
+			// baseline was too short to trust).
+			disposition := violationDisposition(violation, contract.onViolation)
+			metrics.DataAssertionsTotal.WithLabelValues(disposition).Inc()
 			recorded = append(recorded, violation)
-			if escalates {
+			switch disposition {
+			case assertionResultFail:
 				enforced = append(enforced, violation)
-			}
-			if holds {
+			case assertionResultHold:
 				breaking = append(breaking, violation)
 			}
 		}
@@ -943,13 +937,12 @@ func dispatchDataAssertions(
 		return nil
 	}
 
-	if len(recorded) == 0 {
-		return nil
-	}
-
-	written, err := store.saveDataViolationsClaimed(ctx, runID, row.ID, claim, recorded)
+	// ONE fenced UPDATE records both the breaches and the full per-check
+	// results, so a task with a contract costs a single write whether or not
+	// anything broke. A task without one never reaches this seam.
+	written, err := store.saveDataAssertionOutcomeClaimed(ctx, row.ID, claim, recorded, results)
 	if err != nil {
-		log.Warn("failed to persist data violations", "run_id", runID, "task_id", taskID, "error", err)
+		log.Warn("failed to persist data assertion outcome", "run_id", runID, "task_id", taskID, "error", err)
 	}
 	if claim != nil && err == nil && !written {
 		// The UPDATE matched no row: the claim went stale between the hold
@@ -959,6 +952,9 @@ func dispatchDataAssertions(
 		// is a row that vanished mid-seam, which was never treated as a reason
 		// to withhold the event.
 		logStaleAssertionDispatch(runID, taskID, row.ID, claim)
+		return nil
+	}
+	if len(recorded) == 0 {
 		return nil
 	}
 

@@ -1388,7 +1388,7 @@ the `ui/**` conditional gate.
       `ui/src/features/jobs/useNavCounts.ts`, `ui/src/lib/api.ts`,
       `ui/src/router.tsx`.
       Depends on: D1 (the reads it renders).
-- [ ] E2. Add the hold ack/release flow and assertion display: a hold panel
+- [x] E2. Add the hold ack/release flow and assertion display: a hold panel
       (violated assertion, observed vs bound, producing-run link, occurrence count)
       with a Release action (reason required, optional tolerance picker); and
       per-assertion results on `RunDetailPage`/`TaskDetailPanel` beside today's
@@ -1399,11 +1399,18 @@ the `ui/**` conditional gate.
       `ui/src/features/jobs/RunDetailPage.tsx`,
       `ui/src/features/jobs/TaskDetailPanel.tsx`, `ui/src/lib/api.ts`.
       Depends on: D1 + C3 (release) + E1 (shared api.ts additions).
-      **Still open (2026-11-01):** #445 shipped the hold panel, Release, and violation
-      rows with sparklines. It did not ship per-assertion results for assertions that
-      PASS: `DataAssertionsPanel` renders only `data_violations` and returns null for a
-      clean task, and no passing result is persisted to render. Closing this needs a
-      backend read as well as the UI, and N-1 depends on it.
+      **Closed (W8-α):** #445 shipped the hold panel, Release, and violation rows with
+      sparklines; W8-α adds the per-assertion results for checks that PASS. The
+      evaluator now records its decision on every declared check in a nullable JSON
+      column on the instance's `task_runs` row (`data_assertion_results`), written in
+      the same fenced UPDATE as `data_violations` and only for a task that declares
+      assertions, so it adds no table, no retention job and no statement to a task
+      without a contract. `GET /v1/jobs/:id/runs/:run_id/assertions` (mounted with the
+      other circuit-breaker routes) serves it per instance; `DataAssertionsPanel` renders
+      outcome, observed value and bound for each check beside the violations, a passing
+      `deltaFromBaseline` row keeps its sparkline, and a cold-start pass, an abstained
+      delta, a lost metric stream and a cache hit each read as what they are rather than
+      as a clean pass.
 
 ### Stream F — Agent & freshness integration (closes the loop)
 
