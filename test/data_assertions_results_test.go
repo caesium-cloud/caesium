@@ -191,6 +191,13 @@ func (s *IntegrationTestSuite) TestRunAssertionsCacheHitRanNoAssertions() {
 	s.True(cached.CacheHit)
 	s.Equal("not_evaluated", cached.Verdict)
 	s.Empty(cached.Results, "a cache hit carries no results, not a copied pass")
+
+	// The fact was recorded when the cache hit happened: removing the step's
+	// assertions from the job afterwards does not change what that run shows.
+	s.applyAssertionsJob(alias, assertionsSeederManifest(alias, dataset, step))
+	again := s.runAssertions(job.ID, second)
+	s.Require().Len(again.Tasks, 1, "a later edit to the job does not erase what the run recorded")
+	s.Equal("not_evaluated", again.Tasks[0].Instances[0].Verdict)
 }
 
 // TestRunAssertionsFanOutVerdictsBelongToTheirInstance: a fanned producer is

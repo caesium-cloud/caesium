@@ -3387,6 +3387,16 @@ func (s *Store) cacheHitTask(runID, taskRef uuid.UUID, source CacheHitSource, re
 				return encodeErr
 			}
 			maps.Copy(updates, fields)
+			// A cache hit checks nothing. When its step declares assertions the
+			// row says so itself, in this same claim-fenced UPDATE, so no read
+			// ever has to guess it from today's declarations.
+			notEvaluated, notEvaluatedErr := cacheHitAssertionResultsTx(tx, catalogTaskID, taskRun.Quarantine)
+			if notEvaluatedErr != nil {
+				return notEvaluatedErr
+			}
+			if notEvaluated != nil {
+				updates["data_assertion_results"] = notEvaluated
+			}
 
 			resultUpdate := updateQuery.Updates(updates)
 			if resultUpdate.Error != nil {

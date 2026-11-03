@@ -3,6 +3,7 @@ package run
 import (
 	"encoding/json"
 	"math"
+	"slices"
 	"strings"
 	"time"
 
@@ -28,7 +29,15 @@ const (
 	AssertionOutcomeViolated    = "violated"
 	AssertionOutcomeUnavailable = "unavailable"
 	AssertionOutcomeUndecided   = "undecided"
+	// AssertionOutcomeNotEvaluated is recorded on a task served from cache
+	// whose step declared assertions: it executed nothing, so nothing was
+	// checked. It is written when the cache hit happens, from the contract of
+	// that moment, and is the only result such an instance carries.
+	AssertionOutcomeNotEvaluated = "not_evaluated"
 )
+
+// ReasonCacheHit is the Reason of a not_evaluated result.
+const ReasonCacheHit = "cache_hit"
 
 // Reasons carried on an `undecided` result.
 const (
@@ -277,6 +286,11 @@ const (
 func VerdictOf(results []AssertionResult) string {
 	if len(results) == 0 {
 		return VerdictNotRecorded
+	}
+	if slices.IndexFunc(results, func(r AssertionResult) bool {
+		return r.Outcome != AssertionOutcomeNotEvaluated
+	}) < 0 {
+		return VerdictNotEvaluated
 	}
 	verdict := VerdictPassed
 	for _, r := range results {

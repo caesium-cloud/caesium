@@ -201,6 +201,9 @@ func TestVerdictOf(t *testing.T) {
 	assert.Equal(t, VerdictUndecided, VerdictOf([]AssertionResult{seeding, undecided}))
 	assert.Equal(t, VerdictUndecided, VerdictOf([]AssertionResult{passed, unavailable}))
 	assert.Equal(t, VerdictViolated, VerdictOf([]AssertionResult{passed, undecided, violated}))
+	notEvaluated := AssertionResult{Outcome: AssertionOutcomeNotEvaluated, Reason: ReasonCacheHit}
+	assert.Equal(t, VerdictNotEvaluated, VerdictOf([]AssertionResult{notEvaluated, notEvaluated}),
+		"a cache hit ran nothing, which is neither a pass nor a lack of record")
 }
 
 func TestWithholdUnownedBaselineEvidenceFromResults(t *testing.T) {

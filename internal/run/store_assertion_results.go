@@ -10,6 +10,7 @@ import (
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/google/uuid"
 	"gorm.io/datatypes"
+	"gorm.io/gorm"
 )
 
 // MaxAssertionInstances bounds how many instances of ONE fanned step a
@@ -81,9 +82,10 @@ type assertionRow struct {
 // RunAssertions reads what the post-task evaluator recorded for every task
 // instance of a run: the outcome of each declared check, as decided at the time
 // (never recomputed from today's manifest or baseline). A step appears when an
-// instance recorded results or violations, or when it was served from cache
-// while declaring assertions — in which case the instance says no assertion
-// ran, rather than saying nothing.
+// instance recorded results or violations. A task served from cache carries its
+// own not_evaluated record, written when the cache hit happened, so the read
+// says no assertion ran without consulting today's declarations; a cached row
+// with no such record has no evidence and is absent.
 //
 // A reader confined to some namespaces (authz.Restricted(ctx)) receives the
 // results under the rule violations follow: baseline evidence not computed over
@@ -114,26 +116,11 @@ func (s *Store) RunAssertions(ctx context.Context, jobID, runID uuid.UUID) (*Run
 
 	groups := make(map[uuid.UUID][]assertionRow)
 	var order []uuid.UUID
-	needsDeclared := false
 	for _, row := range rows {
 		if _, ok := groups[row.TaskID]; !ok {
 			order = append(order, row.TaskID)
 		}
 		groups[row.TaskID] = append(groups[row.TaskID], row)
-		if (row.CacheHit || TaskStatus(row.Status) == TaskStatusCached) && len(row.AssertionResults) == 0 {
-			needsDeclared = true
-		}
-	}
-
-	// Whether a cache-hit step declares assertions is read off the registry,
-	// and only when a cache hit makes the answer matter: a step that declares
-	// none has nothing to say about not having run them.
-	var declares map[uuid.UUID]string
-	if needsDeclared {
-		var err error
-		if declares, err = s.stepsDeclaringAssertions(ctx, jobID, order); err != nil {
-			return nil, err
-		}
 	}
 
 	restricted := authz.Restricted(ctx)
@@ -149,7 +136,7 @@ func (s *Store) RunAssertions(ctx context.Context, jobID, runID uuid.UUID) (*Run
 		var instances []AssertionInstance
 		evidence := false
 		for _, row := range group {
-			instance, ok := assertionInstance(row, declares)
+			instance, ok := assertionInstance(row)
 			evidence = evidence || ok
 			if restricted {
 				WithholdUnownedBaselineEvidenceFromResults(instance.Results)
@@ -187,7 +174,12 @@ func (s *Store) RunAssertions(ctx context.Context, jobID, runID uuid.UUID) (*Run
 // assertionInstance projects one row and reports whether the row itself has
 // assertion evidence. A row without any is returned as VerdictNotRecorded: the
 // caller decides whether its group has evidence to make that worth reporting.
-func assertionInstance(row assertionRow, declares map[uuid.UUID]string) (AssertionInstance, bool) {
+//
+// The stored row decides everything. A task served from cache carries its own
+// not_evaluated record, written when the cache hit happened, so what the read
+// says never depends on what the job declares today; a cached row without one
+// has no evidence and claims nothing.
+func assertionInstance(row assertionRow) (AssertionInstance, bool) {
 	instance := AssertionInstance{
 		TaskRunID:      row.ID,
 		PartitionValue: row.PartitionValue,
@@ -199,16 +191,10 @@ func assertionInstance(row assertionRow, declares map[uuid.UUID]string) (Asserti
 	results := decodeAssertionResults(row.AssertionResults)
 	switch {
 	case len(results) > 0:
-		instance.Results = results
 		instance.Verdict = VerdictOf(results)
-	case instance.CacheHit:
-		// A cache hit executes nothing, so no assertion ran. Whatever verdict
-		// the original execution earned belongs to that run.
-		if _, declared := declares[row.TaskID]; !declared {
-			instance.Verdict = VerdictNotRecorded
-			return instance, false
+		if instance.Verdict != VerdictNotEvaluated {
+			instance.Results = results
 		}
-		instance.Verdict = VerdictNotEvaluated
 	case len(row.DataViolations) > 0:
 		instance.Verdict = VerdictViolated
 		// Unreadable evidence is still a recorded breach; it just has no
@@ -237,31 +223,42 @@ func verdictRank(verdict string) int {
 	}
 }
 
-// stepsDeclaringAssertions maps each of taskIDs whose step declares assertions
-// on a produced dataset to that step's name.
-func (s *Store) stepsDeclaringAssertions(ctx context.Context, jobID uuid.UUID, taskIDs []uuid.UUID) (map[uuid.UUID]string, error) {
-	conn := s.db.WithContext(ctx)
-	var declared []string
-	if err := conn.Model(&models.DatasetDeclaration{}).
-		Where("job_id = ? AND direction = ? AND assertions_json IS NOT NULL AND assertions_json <> ''",
-			jobID, models.DatasetDirectionProduces).
-		Distinct().Pluck("step_name", &declared).Error; err != nil {
+// cacheHitAssertionResultsTx is what a task served from cache records: one
+// not_evaluated result per dataset its step declares assertions on, read from
+// the registry as it stands at the cache hit. It returns nil, and the caller
+// writes nothing, when the feature is off, when the run is a quarantined
+// replay (the evaluator never touches those either) or when the step declares
+// no assertions. With the feature on it is one read per cache hit; the result
+// rides the cache hit's own UPDATE.
+func cacheHitAssertionResultsTx(tx *gorm.DB, taskID uuid.UUID, quarantine bool) (datatypes.JSON, error) {
+	if quarantine || !DataAssertionsEnabled() {
+		return nil, nil
+	}
+	var declared []struct {
+		Name      string
+		Namespace *string
+	}
+	if err := tx.Raw(`SELECT d.name AS name, d.namespace AS namespace
+FROM dataset_declarations d
+JOIN tasks t ON t.job_id = d.job_id AND t.name = d.step_name
+WHERE t.id = ? AND d.direction = ? AND d.assertions_json IS NOT NULL AND d.assertions_json <> ''
+ORDER BY d.name ASC`, taskID, models.DatasetDirectionProduces).Scan(&declared).Error; err != nil {
 		return nil, err
 	}
-	out := make(map[uuid.UUID]string)
 	if len(declared) == 0 {
-		return out, nil
+		return nil, nil
 	}
-	for _, chunk := range chunkTaskRunIDs(taskIDs) {
-		var tasks []models.Task
-		if err := conn.Unscoped().Select("id", "name").Where("id IN ?", chunk).Find(&tasks).Error; err != nil {
-			return nil, err
+	results := make([]AssertionResult, 0, len(declared))
+	for _, d := range declared {
+		r := AssertionResult{Dataset: d.Name, Outcome: AssertionOutcomeNotEvaluated, Reason: ReasonCacheHit}
+		if d.Namespace != nil {
+			r.Namespace = *d.Namespace
 		}
-		for _, task := range tasks {
-			if slices.Contains(declared, task.Name) {
-				out[task.ID] = task.Name
-			}
-		}
+		results = append(results, r)
 	}
-	return out, nil
+	b, err := json.Marshal(results)
+	if err != nil {
+		return nil, err
+	}
+	return datatypes.JSON(b), nil
 }

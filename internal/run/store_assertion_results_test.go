@@ -319,33 +319,154 @@ func TestRunAssertions_RetriedInstanceReportsOnlyItsLatestAttempt(t *testing.T) 
 	assert.Nil(t, dataViolationsOf(t, db, taskRunID), "the first attempt's violation is gone with it")
 }
 
-func TestRunAssertions_CacheHitRunsNoAssertionsAndSaysSo(t *testing.T) {
+// cacheHit serves one seeded running task from cache through the real store
+// path, the way the executors do.
+func cacheHit(t *testing.T, store *Store, db *gorm.DB, taskRunID uuid.UUID) {
+	t.Helper()
+	var row models.TaskRun
+	require.NoError(t, db.Where("id = ?", taskRunID).First(&row).Error)
+	_, err := store.CacheHitTask(row.JobRunID, taskRunID, CacheHitSource{RunID: uuid.New()}, "success", nil, nil)
+	require.NoError(t, err)
+}
+
+func storedResults(t *testing.T, db *gorm.DB, taskRunID uuid.UUID) []AssertionResult {
+	t.Helper()
+	return resultsOf(t, db, taskRunID)
+}
+
+// TestCacheHit_RecordsNotEvaluatedWhenTheStepDeclaresAssertions: a task served
+// from cache checks nothing, and its own row says so when the cache hit happens.
+func TestCacheHit_RecordsNotEvaluatedWhenTheStepDeclaresAssertions(t *testing.T) {
 	setDataAssertions(t, true)
 	db := testutil.OpenTestDB(t)
 	t.Cleanup(func() { testutil.CloseDB(db) })
 	store := NewStore(db)
 
-	// Declares a contract, served from cache: no assertion ran.
-	jobID, _, cached, stepName := seedTaskRun(t, db, string(TaskStatusCached), false)
+	jobID, _, cached, stepName := seedTaskRun(t, db, string(TaskStatusRunning), false)
 	declareProducesWithAssertions(t, db, jobID, stepName, "warehouse/orders",
 		jobdef.DatasetAssertions{RowCount: &jobdef.AssertionSpec{Min: ptrOf(1000)}}, jobdef.DatasetOnViolationWarn)
-	require.NoError(t, db.Model(&models.TaskRun{}).Where("id = ?", cached).Update("cache_hit", true).Error)
+	cacheHit(t, store, db, cached)
+
+	stored := storedResults(t, db, cached)
+	require.Len(t, stored, 1)
+	assert.Equal(t, AssertionOutcomeNotEvaluated, stored[0].Outcome)
+	assert.Equal(t, ReasonCacheHit, stored[0].Reason)
+	assert.Equal(t, "warehouse/orders", stored[0].Dataset)
 
 	job, runID := runIDOf(t, db, cached)
 	got, err := store.RunAssertions(context.Background(), job, runID)
 	require.NoError(t, err)
 	require.Len(t, got.Tasks, 1)
-	assert.Equal(t, VerdictNotEvaluated, got.Tasks[0].Instances[0].Verdict)
-	assert.True(t, got.Tasks[0].Instances[0].CacheHit)
-	assert.Empty(t, got.Tasks[0].Instances[0].Results)
+	instance := got.Tasks[0].Instances[0]
+	assert.Equal(t, VerdictNotEvaluated, instance.Verdict)
+	assert.True(t, instance.CacheHit)
+	assert.Empty(t, instance.Results, "the read reports that nothing ran, not a check list")
+	assert.Equal(t, map[string]int{VerdictNotEvaluated: 1}, got.Tasks[0].VerdictCounts)
+}
 
-	// A cache hit on a step with no contract has nothing to report.
-	noContractJob, _, noContract, _ := seedTaskRun(t, db, string(TaskStatusCached), false)
-	job2, run2 := runIDOf(t, db, noContract)
-	assert.Equal(t, noContractJob, job2)
-	none, err := store.RunAssertions(context.Background(), job2, run2)
+// TestCacheHit_KeepsNotEvaluatedAfterTheAssertionsAreRemoved: the read shows
+// what happened then, not what the job declares now.
+func TestCacheHit_KeepsNotEvaluatedAfterTheAssertionsAreRemoved(t *testing.T) {
+	setDataAssertions(t, true)
+	db := testutil.OpenTestDB(t)
+	t.Cleanup(func() { testutil.CloseDB(db) })
+	store := NewStore(db)
+
+	jobID, _, cached, stepName := seedTaskRun(t, db, string(TaskStatusRunning), false)
+	declareProducesWithAssertions(t, db, jobID, stepName, "warehouse/orders",
+		jobdef.DatasetAssertions{RowCount: &jobdef.AssertionSpec{Min: ptrOf(1000)}}, jobdef.DatasetOnViolationWarn)
+	cacheHit(t, store, db, cached)
+
+	require.NoError(t, db.Where("job_id = ?", jobID).Delete(&models.DatasetDeclaration{}).Error)
+
+	job, runID := runIDOf(t, db, cached)
+	got, err := store.RunAssertions(context.Background(), job, runID)
 	require.NoError(t, err)
-	assert.Empty(t, none.Tasks)
+	require.Len(t, got.Tasks, 1, "editing the job later does not erase what the run recorded")
+	assert.Equal(t, VerdictNotEvaluated, got.Tasks[0].Instances[0].Verdict)
+}
+
+// TestCacheHit_OlderCachedRunShowsNothingAfterAssertionsAreAdded: a cached row
+// recorded without a not_evaluated result has no evidence, and adding
+// assertions to the job later does not give it any.
+func TestCacheHit_OlderCachedRunShowsNothingAfterAssertionsAreAdded(t *testing.T) {
+	setDataAssertions(t, true)
+	db := testutil.OpenTestDB(t)
+	t.Cleanup(func() { testutil.CloseDB(db) })
+	store := NewStore(db)
+
+	jobID, _, cached, stepName := seedTaskRun(t, db, string(TaskStatusCached), false)
+	require.NoError(t, db.Model(&models.TaskRun{}).Where("id = ?", cached).Update("cache_hit", true).Error)
+	declareProducesWithAssertions(t, db, jobID, stepName, "warehouse/orders",
+		jobdef.DatasetAssertions{RowCount: &jobdef.AssertionSpec{Min: ptrOf(1000)}}, jobdef.DatasetOnViolationWarn)
+
+	job, runID := runIDOf(t, db, cached)
+	got, err := store.RunAssertions(context.Background(), job, runID)
+	require.NoError(t, err)
+	assert.Empty(t, got.Tasks, "no record then, so no claim now")
+}
+
+// TestCacheHit_WritesNothingWithoutAContractOrWhenQuarantinedOrOff: the cache
+// hit's own UPDATE carries no result column unless there is something to say.
+func TestCacheHit_WritesNothingWithoutAContractOrWhenQuarantinedOrOff(t *testing.T) {
+	setDataAssertions(t, true)
+	db := testutil.OpenTestDB(t)
+	t.Cleanup(func() { testutil.CloseDB(db) })
+	store := NewStore(db)
+
+	// No contract: only a dataset without assertions.
+	jobID, _, plain, stepName := seedTaskRun(t, db, string(TaskStatusRunning), false)
+	declareProduces(t, db, jobID, stepName, "warehouse/orders")
+	cacheHit(t, store, db, plain)
+	var row models.TaskRun
+	require.NoError(t, db.Where("id = ?", plain).First(&row).Error)
+	assert.Equal(t, string(TaskStatusCached), row.Status)
+	assert.Empty(t, row.DataAssertionResults)
+
+	// A contract, but the run is a quarantined replay (the evaluator never
+	// touches those either). A replayed cache hit needs an execution
+	// descriptor to complete, so the decision is asserted where it is made.
+	jobID, replayTask, _, stepName := seedTaskRun(t, db, string(TaskStatusRunning), true)
+	declareProducesWithAssertions(t, db, jobID, stepName, "warehouse/orders",
+		jobdef.DatasetAssertions{RowCount: &jobdef.AssertionSpec{Min: ptrOf(1000)}}, jobdef.DatasetOnViolationWarn)
+	recorded, err := cacheHitAssertionResultsTx(db, replayTask, false)
+	require.NoError(t, err)
+	assert.NotNil(t, recorded, "the same step records outside a replay")
+	quarantined, err := cacheHitAssertionResultsTx(db, replayTask, true)
+	require.NoError(t, err)
+	assert.Nil(t, quarantined)
+
+	// A contract, but the feature is off.
+	setDataAssertions(t, false)
+	jobID, _, off, stepName := seedTaskRun(t, db, string(TaskStatusRunning), false)
+	declareProducesWithAssertions(t, db, jobID, stepName, "warehouse/orders",
+		jobdef.DatasetAssertions{RowCount: &jobdef.AssertionSpec{Min: ptrOf(1000)}}, jobdef.DatasetOnViolationWarn)
+	cacheHit(t, store, db, off)
+	assert.Nil(t, storedResults(t, db, off))
+}
+
+// TestCacheHit_EachFannedInstanceRecordsItsOwnOutcome: a cached partition and
+// an executed partition of one group each carry their own record.
+func TestCacheHit_EachFannedInstanceRecordsItsOwnOutcome(t *testing.T) {
+	setDataAssertions(t, true)
+	db := testutil.OpenTestDB(t)
+	t.Cleanup(func() { testutil.CloseDB(db) })
+	store := NewStore(db)
+
+	jobID, taskID, first, stepName := seedTaskRun(t, db, string(TaskStatusRunning), false)
+	declareProducesWithAssertions(t, db, jobID, stepName, "warehouse/orders",
+		jobdef.DatasetAssertions{RowCount: &jobdef.AssertionSpec{Min: ptrOf(1000)}}, jobdef.DatasetOnViolationWarn)
+	setPartition(t, db, first, "a", 0)
+	second := addInstance(t, db, first, "b", 1, func(r *models.TaskRun) { r.Status = string(TaskStatusRunning) })
+
+	cacheHit(t, store, db, first)
+	evalOne(t, db, store, taskID, second, nil, rowCountSample(1500))
+
+	job, runID := runIDOf(t, db, first)
+	got, err := store.RunAssertions(context.Background(), job, runID)
+	require.NoError(t, err)
+	require.Len(t, got.Tasks, 1)
+	assert.Equal(t, map[string]int{VerdictNotEvaluated: 1, VerdictPassed: 1}, got.Tasks[0].VerdictCounts)
 }
 
 // TestRunAssertions_OldRowsClaimNothingPassed: a row recorded before results
