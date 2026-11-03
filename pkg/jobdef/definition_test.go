@@ -179,6 +179,9 @@ func TestParseValidDefinitions(t *testing.T) {
 }
 
 func TestParseRepositoryExamples(t *testing.T) {
+	// docs/examples/data-circuit-breaker.job.yaml declares the gated assertion
+	// surface, which Validate refuses unless the master gate is on.
+	t.Setenv("CAESIUM_DATA_ASSERTIONS_ENABLED", "true")
 	_, file, _, ok := runtime.Caller(0)
 	require.True(t, ok)
 	repoRoot := filepath.Clean(filepath.Join(filepath.Dir(file), "..", ".."))

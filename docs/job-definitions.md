@@ -486,6 +486,101 @@ Operator surfaces:
 
 Enforcement is scoped to the incoming apply. A pre-existing broken contract between other jobs does not block an unrelated manifest apply, and a coordinated producer plus consumer migration applied in the same batch passes without an acknowledgement because the new consumer schema is the comparison target. The read surfaces (`caesium job lint --server`, `caesium contract check`, `POST /v1/jobdefs/lint`) apply the same scope: graph derivation still unions the posted definitions with every persisted job, but the reported `contracts` section only covers edges touching one of the posted aliases.
 
+## Data Assertions & the Circuit Breaker
+
+Schema validation catches the wrong *shape*. It does not catch a truncated feed, a join key that went 40% null, or a watermark stuck on yesterday, and a successful task that emits those feeds poison to every job downstream. The circuit breaker works on the **dataset**, not the run: a step reports what it observed, declared assertions judge it against absolute bounds and a rolling baseline, and a violating dataset is *held*. Jobs that consume a held dataset are skipped with a reason instead of running on it, one alert fires at the source, and the hold ends on a human decision or the next clean run. [`tour-data-loop.md`](tour-data-loop.md) runs the whole loop in ten minutes; [`examples/data-circuit-breaker.job.yaml`](examples/data-circuit-breaker.job.yaml) is the manifest it uses.
+
+The whole surface is off by default. Set `CAESIUM_DATA_ASSERTIONS_ENABLED=true` on the server **and** in the shell of `caesium job lint` and `caesium job apply`: with it unset, a manifest that declares `assertions`, `onViolation`, `release`, or `metadata.onUpstreamHold` is refused with a message naming the variable, and the REST routes below return 404. Everything here is post-task or admission metadata and never enters the cache identity hash.
+
+```yaml
+metadata:
+  alias: orders-load
+  cache: false                       # a cache hit runs no assertion and records no sample
+steps:
+  - name: load-orders
+    image: alpine:3.23
+    command: ["sh", "-c", "... && echo '##caesium::metrics {\"dataset\":\"warehouse/orders\",\"rowCount\":10400,\"max_event_time\":\"2026-07-03T01:12:00Z\"}'"]
+    datasets:
+      produces:
+        - name: warehouse/orders
+          assertions:
+            rowCount: {min: 1000, deltaFromBaseline: "50%"}
+            freshness: {watermark: max_event_time, maxLag: 26h}
+          onViolation: hold          # warn (default) | fail | hold
+          release: manual            # auto (default) | manual
+---
+metadata:
+  alias: orders-report
+  onUpstreamHold: skip               # skip (default) | run
+steps:
+  - name: build-report
+    image: alpine:3.23
+    datasets:
+      consumes: [warehouse/orders]
+```
+
+### The `##caesium::metrics` marker
+
+A step self-reports with one stdout line, the same zero-SDK contract as `##caesium::output`:
+
+```sh
+echo '##caesium::metrics {"dataset":"warehouse/orders","rowCount":10400,"null_rate_customer_id":0.001,"max_event_time":"2026-07-03T01:12:00Z"}'
+```
+
+- `dataset` selects the declared dataset the line describes. Omit it when the step declares exactly one produced dataset; on a step that declares none or several, a line without it is dropped and logged.
+- Every other key is a metric. A value is a JSON number, or an RFC3339 timestamp stored as epoch seconds so a watermark compares with a lag bound. Booleans, nulls, objects and other strings are dropped.
+- Several lines merge, the last write winning per dataset and metric. A malformed line is skipped without failing the task. Samples are capped at 16 KiB per task, separately from the 64 KiB `##caesium::output` budget, so a chatty emitter cannot evict real outputs; an overflow drops the samples that do not fit.
+- Samples are recorded for undeclared metrics too, which gives an assertion added later a baseline to start from. Caesium never reads the data, so the breaker catches accidents, not an image that prints flattering numbers.
+
+### Assertions
+
+`steps[].datasets.produces[].assertions` takes any of these. Each `rowCount`, `nullRate`, and `custom[]` entry must declare at least one of `min`, `max`, `deltaFromBaseline`, and `min` may not exceed `max`.
+
+| Assertion | Reads | Fields |
+| --- | --- | --- |
+| `rowCount` | metric `rowCount`, or `metric` | `metric`, `min`, `max`, `deltaFromBaseline` |
+| `nullRate` | metric `nullRate`, or `metric` | `metric`, `min`, `max`, `deltaFromBaseline` |
+| `freshness` | the RFC3339 metric named by `watermark` | `watermark`, `maxLag` (both required; `maxLag` a positive Go duration) |
+| `custom[]` | any scalar metric | `metric` (required), `min`, `max`, `deltaFromBaseline` |
+
+- **Bounds.** `min` and `max` are absolute and enforce from the first run. `deltaFromBaseline: "50%"` allows the value to differ from the median of the last `CAESIUM_BASELINE_WINDOW` (default 20) clean samples by at most half the median. Clean means succeeded, not held, not quarantined. Below `CAESIUM_BASELINE_MIN_SAMPLES` (default 5) clean samples it is recorded as `seeding` and never fails a task or opens a hold, so turning assertions on is safe.
+- **A missing metric is a violation.** A declared metric the step never emitted is recorded as `assertion: missing`, so an assertion cannot be disabled by not reporting. When the evidence itself was lost (an unreadable log, or the 16 KiB cap) the result is the warn-only `unavailable` with a `reason`, never a hold.
+- **One metric, one assertion.** Two assertions on the same dataset that read the same metric are rejected. Give one an explicit `metric`.
+- **Fan-out.** A fanned producer records and evaluates one sample per partition; the verdicts collapse into the dataset's single hold. An assertion over a group total is not expressible; emit the aggregate from a fan-in step.
+- **Replay.** A quarantined replay records nothing, opens no hold, and releases none.
+- **Results.** `data_violations` on a task lists what broke; [Reading a run's assertion results](#reading-a-runs-assertion-results) lists every check, passes included.
+
+### `onViolation` and `release`
+
+`onViolation` is `warn` (the default), `fail`, or `hold`, and requires `assertions`. `warn` persists the violation and emits `data_violation_recorded`, like `metadata.schemaValidation: warn`. `fail` fails the task like `schemaValidation: fail`. `hold` lets the task **succeed**, because the work is done and a retry would reproduce the same data, and holds the dataset.
+
+A dataset has at most one active hold. A repeat violation adds to its occurrence count and does not alert again; `dataset_held` fires once per hold. A hold ends three ways:
+
+- **A clean run.** With `release: auto` (the default) the next run of the *holding job* whose assertions all pass releases it. Another producer's clean run does not. `release: manual` turns this off.
+- **A human.** `caesium dataset release <name> --reason "..."` or `POST /v1/datasets/holds/:id/release`, recorded with the principal and an audit row. It is disabled under `CAESIUM_AUTH_MODE=none` because an unauthenticated release would let anyone clear the gate. `--tolerate <assertion>=<duration>` records an advisory window; Caesium does not enforce it, and a new breach inside it holds again.
+- **An approved agent action.** With `CAESIUM_AGENT_REMEDIATION_ENABLED=true`, each hold opens a `data_quality_hold` incident in the producing job's namespace carrying the violation, its baseline, and the impact cone. An agent can propose `release_hold`; it is tier 2, and tier 3 (a human approves) when it carries tolerance windows or the job's policy requires approval. An approved release is the same operator release: same service, same audit row. The incident closes on the release, not on a green run.
+
+Release is level-triggered. Runs that were skipped stay skipped; retry them if you want them. See [Agent-in-the-Loop Remediation](#agent-in-the-loop-remediation) for the policy block and [Pull requests for agent patches](#pull-requests-for-agent-patches) for the producer-fix route.
+
+### Consumers
+
+A job is gated on the datasets named in `steps[].datasets.consumes`. A run admitted while one is held is created in terminal `skipped` with reason `dataset_hold:<namespace>/<name>`, one skipped task per step, and a non-paging `run_held_upstream` event. This happens at admission, in the transaction that creates the run, for cron, event, HTTP, manual, and queued starts and for backfill dates. `caesium run start` exits non-zero on such a start and names the skipped run. `metadata.onUpstreamHold: run` opts a job out; `why` then says it was admitted past the hold. A run already running when a hold lands is not interrupted.
+
+A held dataset also reads `held` (not fresh) to [freshness scheduling](#freshness-driven-scheduling), so it never satisfies a `freshness` trigger, and it derives no consumer run unless that consumer sets `onUpstreamHold: run`.
+
+### Operating it
+
+| Command | What it does |
+| --- | --- |
+| `caesium dataset holds [--status active\|released\|all] [--all-namespaces] [--json]` | List holds, newest first, with the reason, occurrence count, and hold id. |
+| `caesium dataset metrics <name> --metric <metric> [--json]` | Recent samples of one metric beside the clean rolling baseline; each point says whether it was in the baseline. |
+| `caesium dataset release <name> --reason "..." [--tolerate <assertion>=<duration>]` | Release the active hold on a dataset. |
+| `caesium why <run-id> --job-id <id> --task <name>` | For a skipped run: the held dataset, the violated assertion, the observed value against its bound, and the hold id. See [Explaining a skipped task](#explaining-a-skipped-task). |
+| `caesium incident list`, `caesium incident get <id>` | The `data_quality_hold` incident a hold opened, with its evidence and timeline. |
+| `caesium incident approve <id> --approval <approval-id>` | Approve a proposed `release_hold`. |
+
+The server exposes `GET /v1/datasets/holds`, `GET /v1/datasets/:ns/:name/metrics`, `POST /v1/datasets/holds/:id/release`, and `GET /v1/jobs/:id/runs/:run_id/assertions` ([REST reference](rest-api.md#datasets-incidents-and-the-agent-runtime)); the Console shows holds, a badge on held datasets in the lineage graph with the downstream cone shaded, and per-assertion results with a baseline sparkline. `GET /v1/system/features` reports `data_assertions_enabled`. Prometheus: `caesium_dataset_holds_total{reason}`, `caesium_dataset_holds_active`, `caesium_data_assertions_total{result}`, `caesium_runs_held_upstream_total`. Tuning: `CAESIUM_BASELINE_WINDOW`, `CAESIUM_BASELINE_MIN_SAMPLES`, and `CAESIUM_DATASET_METRIC_RETENTION` (default `2160h`); the design is [`design/data-circuit-breaker.md`](design/data-circuit-breaker.md).
+
 ## Agent-in-the-Loop Remediation
 
 `metadata.remediation` opts a job into autonomous incident remediation: when a run fails, Caesium opens an incident, classifies the failure, and lets a bounded, server-enforced policy retry, snooze, patch, or escalate — with tier-3 actions always gated behind a human approval, and a container-native agent driving the diagnosis over Caesium's causal primitives (`why`, run diff, receipts, lineage impact, quarantined replay). The block is policy metadata enforced server-side; it never enters the cache identity hash. Enable it with `CAESIUM_AGENT_REMEDIATION_ENABLED=true` and an active auth mode.
@@ -808,6 +903,7 @@ In this manifest, `fetch-data` inherits the job-level 24-hour TTL, `transform` o
   - Freshness fan-in cascade — two upstreams joined into a mart, then a rollup derived down the lineage (`freshness-fanin-cascade.job.yaml`).
   - Cross-job contract enforcement with a producer `schemaFrom: output` dataset and a consumer `consumes[].schema` requirement (`contract-enforcement.job.yaml`).
   - Agent-in-the-loop remediation policy with tiered autonomy and escalation (`agent-remediation.job.yaml`).
+  - Data circuit breaker: a producer with `##caesium::metrics` and assertions that hold its dataset, and a consumer that is skipped while it is held (`data-circuit-breaker.job.yaml`).
   - Dependency-ordered Terraform deployment via the unit-pipeline pattern, with `cache.chain: values` breaking the checkout's identity-hash chain per stack (`infra-deploy.job.yaml`).
   - Mandatory scheduled drift detection over the stacks `infra-deploy.job.yaml` manages (`infra-drift.job.yaml`).
 

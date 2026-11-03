@@ -1,8 +1,10 @@
 # Data Circuit Breaker — Dataset Holds & Statistical Assertions
 
-Last updated: 2026-11-02
+Last updated: 2026-11-03
 
-**Plan 1 of [`closed-loop-arc.md`](closed-loop-arc.md) — the data loop.** The arc
+> Status: **COMPLETE — Plan 1 of [`closed-loop-arc.md`](../active/closed-loop-arc.md).** Waves 1–8 shipped (#432–#725), and N-1 closed the plan out on 2026-11-03: the roadmap, design banner, schema references, example and [`docs/tour-data-loop.md`](../../tour-data-loop.md) reflect what shipped. Archived here from `active/`.
+
+**Plan 1 of [`closed-loop-arc.md`](../active/closed-loop-arc.md) — the data loop.** The arc
 closes a loop over the memory Caesium already keeps; this plan builds the data
 half of it end to end: **observe** (a step self-reports what it produced via a
 new `##caesium::metrics` marker) → **assert** (a post-task evaluator compares the
@@ -85,14 +87,14 @@ this Source-Of-Truth Note.
 `CAESIUM_BASELINE_MIN_SAMPLES`, `CAESIUM_DATASET_METRIC_RETENTION` (verified
 2026-09-05) — and explicitly says "(No release-auth toggle…)". F3's
 `CAESIUM_GIT_WRITE_CREDENTIALS` is therefore a **new config knob beyond the
-design**, authorized in scope by [`closed-loop-arc.md`](closed-loop-arc.md)
+design**, authorized in scope by [`closed-loop-arc.md`](../active/closed-loop-arc.md)
 § Synergies (the row that assigns the Git-PR route of `apply_jobdef_patch` to this
 plan's Stream F). Per the rule above, the design docs must be amended **before**
 F3 lands: **N-2 below does that, and F3 depends on N-2.** No other item may add a
 knob without the same treatment.
 
 **On cross-plan ordering and on *why* something is in
-scope, [`closed-loop-arc.md`](closed-loop-arc.md) wins** — it is the program-level
+scope, [`closed-loop-arc.md`](../active/closed-loop-arc.md) wins** — it is the program-level
 source of truth for the four-plan arc, and Stream F below exists because the arc's
 Synergies table assigns the deferred Phase 3 to this plan. Strategic
 priority/status is tracked in [`docs/roadmap.md`](../../roadmap.md) — the Phase-4
@@ -106,7 +108,7 @@ the shipped `steps[].datasets.produces` / `steps[].datasets.consumes` surface
 `CAESIUM_DATA_ASSERTIONS_ENABLED=false`.
 
 **Arc conventions apply by reference, not by restatement.** This plan inherits
-[`closed-loop-arc.md`](closed-loop-arc.md) `## Shared conventions` **1** (one
+[`closed-loop-arc.md`](../active/closed-loop-arc.md) `## Shared conventions` **1** (one
 feature gate on `Environment` + `Features`, gating startup wiring, route mounting,
 and jobdef validation), **2** (harness: every self-server lane gets the flag; auth
 paths run on the auth lane), **3** (explainability: one persisted event + one item
@@ -118,9 +120,9 @@ hygiene). Where an item below contradicts one of those, it says so explicitly.
 
 ### Resolved (2026-09-05) — the shared `DatasetDeclaration` registry race
 
-[`freshness-scheduling.md`](../completed/freshness-scheduling.md) **shipped**
+[`freshness-scheduling.md`](freshness-scheduling.md) **shipped**
 (Streams A–G + H-1 + N-1, PRs [#277](https://github.com/caesium-cloud/caesium/pull/277)–[#299](https://github.com/caesium-cloud/caesium/pull/299)),
-and [`contract-enforcement.md`](../completed/contract-enforcement.md) has
+and [`contract-enforcement.md`](contract-enforcement.md) has
 **shipped** too and has since extended the same jobdef structs. Verified in the
 current tree:
 
@@ -157,8 +159,8 @@ decided.
 > model is **`DatasetDeclaration`** in `internal/models/dataset_declaration.go`
 > (table `dataset_declarations`), and the jobdef `produces`/`consumes` entries key
 > the dataset identity on **`name`** (not `dataset`) — matching
-> [`freshness-scheduling.md`](../completed/freshness-scheduling.md) Stream A and the
-> [`contract-enforcement.md`](../completed/contract-enforcement.md) plan, both of which use
+> [`freshness-scheduling.md`](freshness-scheduling.md) Stream A and the
+> [`contract-enforcement.md`](contract-enforcement.md) plan, both of which use
 > `name`. The freshness plan's Stream A owns the `dataset_declarations` registry
 > model + the `Metadata.Datasets` jobdef block; this plan's Stream A owns the
 > assertion/`consumes` half of the same registry. **Neither ships a private copy of
@@ -167,23 +169,74 @@ decided.
 > model + jobdef `produces` scaffold; the second plan's item extends it (adds
 > columns / fields) rather than redefining it. If a Stream-A item here finds the
 > base registry already merged by freshness, it **extends** — see the Sequencing
-> section's cross-plan note. The [`contract-enforcement`](../completed/contract-enforcement.md)
+> section's cross-plan note. The [`contract-enforcement`](contract-enforcement.md)
 > plan reads the same `consumes` edges for its compatibility graph but does not
 > define registry structure.
 
-## Progress (as of 2026-11-02)
+## Progress (as of 2026-11-03)
 
-Three waves have shipped: Wave 1 (Stream A, H-1, N-2), Wave 2 (Stream B) and
-Wave 3 (Stream C) — the observe → assert → hold half of the loop is live behind
-`CAESIUM_DATA_ASSERTIONS_ENABLED`. Every code PR passed the orchestrator's
+All eight waves have shipped: Wave 1 (Stream A, H-1, N-2), Wave 2 (Stream B),
+Wave 3 (Stream C), Wave 4 (Streams D and E), Waves 5–7 (Stream F) and Wave 8 (the
+rest of E2, then N-1). The whole loop is live behind
+`CAESIUM_DATA_ASSERTIONS_ENABLED`: observe → assert → hold → incident → proposal →
+approval → release, with each step why-explainable. Every code PR passed the orchestrator's
 scope-aware integration gate on its exact final head before merge (lint + unit
 + the default, agent, owner-memory and distributed lanes), and — the review bot
 having reviewed none of them — every code PR got a substitute Opus adversarial
 review plus a scoped re-review of each fix commit; the reviews found one P1 per
 PR (see the wave entries), all fixed before merge. Wave 4 merged on 2026-09-09:
 Stream D in #442 (`995ae8b3`) and Stream E in #445 (`c97208f1`), except E2's rows for
-passing assertions. Wave 5 (F1 + F4) and Wave 6 (F2) merged on 2026-11-02. W7 (F3 + F5)
-is in progress, then the rest of E2 and N-1.
+passing assertions. Wave 5 (F1 + F4) and Wave 6 (F2) merged on 2026-11-02. Wave 7 (F3 + F5) merged
+on 2026-11-02 and 2026-11-03, and Wave 8 (the rest of E2, then N-1) on
+2026-11-03.
+
+### Wave 8 — Assertion results and close-out (2026-11-03)
+
+- **α / E2** — [#725](https://github.com/caesium-cloud/caesium/pull/725), **merged as
+  `9def4828`**. Per-assertion results, passes included, are stored in
+  `task_runs.data_assertion_results` in the claim-fenced UPDATE and served by
+  `GET /v1/jobs/:id/runs/:run_id/assertions`, gated on
+  `CAESIUM_DATA_ASSERTIONS_ENABLED`. Cache hits record `not_evaluated` at the time.
+  Fan-out counts every partition. Every re-execution reset now clears both assertion
+  columns.
+  **Limits:** `Claimer.ReclaimExpired` still does not clear dataset metrics the way
+  the owner-side resets do.
+- **β / N-1** — the docs close-out. `docs/roadmap.md` flips the data circuit breaker
+  to Shipped; the design record's `> Status:` banner reads shipped per phase. The
+  `##caesium::metrics` marker and the `produces` / `assertions` / `consumes` /
+  `onViolation` / `release` / `onUpstreamHold` fields are documented in
+  `docs/job-definitions.md` and `docs/caesium-job-llm-reference.md`, and in
+  `docs/job-schema-reference.md` by way of `internal/jobdef/report/report.go`
+  (regenerated, not hand-edited). `docs/examples/data-circuit-breaker.job.yaml`
+  is the example, `docs/tour-data-loop.md` the walkthrough. The arc dashboard row is
+  ticked and this plan moved to `completed/`.
+  **Judgment calls:** the example declares the gated assertion surface, so the
+  repository example test sets `CAESIUM_DATA_ASSERTIONS_ENABLED`, the example lint
+  scenario passes it to the CLI, and `just hydrate` and `just run` carry it.
+  `docs/README.md` indexes this plan in link form, which its guardrail now expects,
+  rather than the backtick form this item's text asked for.
+
+### Wave 7 — Git pull-request route and hold provenance (2026-11-02/03)
+
+- **α / F3** — [#724](https://github.com/caesium-cloud/caesium/pull/724), **merged as
+  `91a7b527`**. An approved `apply_jobdef_patch` on a Git-synced job opens a pull
+  request (GitHub only, `CAESIUM_GIT_WRITE_CREDENTIALS`). The trust chain is a
+  credential listing the namespace, git sync on, and a configured source agreeing on
+  id, repo and ref, admitting the namespace and scoping the path. The file declares
+  the alias once and matches the blob at the proposal's baseline commit, and the patch
+  passes the trigger tenancy rules git sync will apply. A proposal-time preview is
+  stored on the `proposed` row. Nothing read from the repository or forge reaches the
+  incident. A found PR must target the base and hold the approved manifest, and a
+  merged one must have landed. Otherwise the action escalates with fixed-text reasons,
+  never a direct edit.
+  **Limits:** masking goes by key name. An accepted PR's other files are not compared.
+  No live-forge test (Open Question 5). The direct route still overwrites a
+  `caesium job apply` made between proposal and approval.
+- **β / F5** — [#721](https://github.com/caesium-cloud/caesium/pull/721), **merged as
+  `bc1214eb`**. `caesium why` and `GET /v1/jobs/:id/runs/:run_id/why` explain hold
+  decisions from a snapshot stored at admission in `job_runs.hold_decision`.
+  Trigger-rule and halt skips read `SKIPPED`. A confined reader gets the dataset and
+  hold id, with detail withheld.
 
 ### Wave 6 — `release_hold` (2026-11-02)
 
@@ -455,10 +508,10 @@ and the fixture from master instead of carrying a temporary justfile edit.
 | B | Assertion evaluator — `run.EvaluateDataAssertions` with rolling baselines, cold-start warn-only, `warn`/`fail` dispatch, `DataViolation` persistence, factored pure `evaluate(...)` (Phase 1) | **P0** | **Shipped** (W2, #436) |
 | C | Circuit breaker — `DatasetHold` model + partial-unique guard, hold-open path, downstream admission gate, release (clean-run + fail-closed ack), bus events + alert-once (Phase 2) | **P0** | **Shipped** (W3, #439) |
 | D | Operator surface — `GET /v1/datasets/holds*` + `/metrics` reads + `caesium dataset holds/release/metrics` CLI | P1 | **Shipped** (W4-α, #442, `995ae8b3`) |
-| E | Console UI — hold badges on the lineage graph, ack/release panel + baseline sparkline, nav active-holds count | P1 | **Mostly shipped** (W4-β, #445, `c97208f1`); E2's passing-assertion rows remain |
-| F | Agent & freshness integration (closes the loop) — `data_quality_hold` incident class, `release_hold` action, the Git-PR provenance route of `apply_jobdef_patch`, held ⇒ not-fresh, `why` provenance (former Phase 3) | **P0** | **In progress** — F1 + F4 (W5, #710, #708) and F2 (W6, #719) shipped; F3 + F5 are W7 |
+| E | Console UI — hold badges on the lineage graph, ack/release panel + baseline sparkline, nav active-holds count | P1 | **Shipped** (W4-β, #445, `c97208f1`; E2's passing-assertion rows W8-α, #725, `9def4828`) |
+| F | Agent & freshness integration (closes the loop) — `data_quality_hold` incident class, `release_hold` action, the Git-PR provenance route of `apply_jobdef_patch`, held ⇒ not-fresh, `why` provenance (former Phase 3) | **P0** | **Shipped** — F1 + F4 (W5, #710, #708), F2 (W6, #719), F3 + F5 (W7, #724, #721) |
 | H-1 | Integration harness — `CAESIUM_DATA_ASSERTIONS_ENABLED=true` on the default lane **and every self-server lane**, auth-lane scenarios, metrics-emitting script image | — | **Shipped** (W1, #433) |
-| N-1 | Docs — roadmap Phase-4 flip, design banner, schema references + examples, README index, `docs/tour-data-loop.md`, arc dashboard row | — | Not started |
+| N-1 | Docs — roadmap Phase-4 flip, design banner, schema references + examples, README index, `docs/tour-data-loop.md`, arc dashboard row | — | **Shipped** (W8) |
 | N-2 | Design amendment — add `CAESIUM_GIT_WRITE_CREDENTIALS` + the Git-PR provenance route to the design docs **before** F3 lands (Source-Of-Truth Note deviation) | — | **Shipped** (W1, #432) |
 | (parked) | `park` run disposition + release-drain | — | **Parked** at the arc level (see `closed-loop-arc.md` § Parked, archived, filed) |
 
@@ -713,7 +766,7 @@ reviewed.
       baseline read API — median + p10/p90 computed on read over the last
       `CAESIUM_BASELINE_WINDOW` (default `20`) clean (non-held, non-quarantined,
       succeeded) `DatasetMetric` rows per metric; no materialized baseline table.
-      **Sibling-driven shape requirement (Plan 3 [`backtesting.md`](backtesting.md)
+      **Sibling-driven shape requirement (Plan 3 [`backtesting.md`](../active/backtesting.md)
       Stream F item **F3** — "Add the assertion-threshold backtest — pure metric
       replay"; that plan's F2 is the unrelated "Link a backtest to an
       `apply_jobdef_patch` proposal" — depends on this):** the compute-on-read helper in `internal/run/baseline.go`
@@ -777,7 +830,7 @@ executors), so it never re-touches the executor call sites.
       `warn` mode it publishes a dedicated `schema_violation_recorded` event via
       `publishSchemaViolationEvent` so the leader-gated incident subscriber can see
       a non-failing violation. Follow that pattern for warn-mode data violations.
-      **Sibling-driven shape requirement (Plan 3 [`backtesting.md`](backtesting.md)
+      **Sibling-driven shape requirement (Plan 3 [`backtesting.md`](../active/backtesting.md)
       Stream F item **F3**, the assertion-threshold backtest — not that plan's F2 —
       depends on this):** factor the evaluation core so a **side-effect-free**
       `evaluate(spec, sample, baseline) []Violation` is exported and callable
@@ -1033,7 +1086,7 @@ evaluator (adds the `hold` disposition) and gates run admission in the store.
       after review, twice: the first wording left the run task-less; the second
       cited an update-only helper for rows that did not yet exist and left the
       fan-out shape undefined.)
-      **Depends inline on [`trust-the-substrate.md`](../completed/trust-the-substrate.md) Stream A**
+      **Depends inline on [`trust-the-substrate.md`](trust-the-substrate.md) Stream A**
       (the tolerant-rule stranding fix): until a failed plain task's successors
       advance correctly in the SQL lane, "downstream skipped because held" is not
       distinguishable from "downstream never dispatched", and the gate's integration
@@ -1109,7 +1162,7 @@ evaluator (adds the `hold` disposition) and gates run admission in the store.
       path; `ReleasedBy` then always records an authenticated principal. Emit
       `dataset_released`.
       The `/v1/datasets/holds/:id/release` route extends the base dataset REST
-      package owned by [`freshness-scheduling.md`](../completed/freshness-scheduling.md) Stream E
+      package owned by [`freshness-scheduling.md`](freshness-scheduling.md) Stream E
       — see Stream D's cross-plan ownership note; this item adds a handler file and
       appends one route line, it does not create the package.
       **Mount it conditionally (arc convention 1 — "off means no routes").** The
@@ -1272,7 +1325,7 @@ evaluator (adds the `hold` disposition) and gates run admission in the store.
   rationale is unchanged: the dequeuer is concurrency-driven today and hold-release
   draining needs its own leader-gated wiring. No checkbox here.
 - **Backtest evaluation of assertions moved to Plan 3**,
-  [`backtesting.md`](backtesting.md) **Stream F item F3** — "Add the
+  [`backtesting.md`](../active/backtesting.md) **Stream F item F3** — "Add the
   assertion-threshold backtest — pure metric replay, no re-execution"
   (`caesium backtest assertions` over `DatasetMetric` history with an `asOf`-cut
   baseline). **It is F3, not F2** (verified 2026-09-05: that plan's F1 is
@@ -1289,7 +1342,7 @@ that drives all four endpoints.
 **Cross-plan ownership (base `cmd/dataset/` + `/v1/datasets` package):** the base
 `caesium dataset` Cobra group, the `api/rest/controller/dataset/` +
 `api/rest/service/dataset/` package, and the base `/v1/datasets` route family are
-owned by [`freshness-scheduling.md`](../completed/freshness-scheduling.md) **Stream E**. The
+owned by [`freshness-scheduling.md`](freshness-scheduling.md) **Stream E**. The
 items below (and C3's release route) **extend** that package — adding
 hold/metrics/release handlers and the `/v1/datasets/holds*` +
 `/v1/datasets/:ns/:name/metrics` routes and the `holds`/`release`/`metrics`
@@ -1414,7 +1467,7 @@ the `ui/**` conditional gate.
 
 ### Stream F — Agent & freshness integration (closes the loop)
 
-The former Phase 3, pulled into scope by [`closed-loop-arc.md`](closed-loop-arc.md)
+The former Phase 3, pulled into scope by [`closed-loop-arc.md`](../active/closed-loop-arc.md)
 (§ Synergies, row "Circuit-breaker Phase 3 was deferred"). Without F, the data loop
 observes and holds but never *acts durably*: a hold sits waiting for a human to
 notice it in a UI. With F, a hold is an incident, an incident yields a proposal, a
@@ -1423,7 +1476,7 @@ against the producer's job definition — and every one of those steps is
 `why`-explainable.
 
 **Cross-plan dependency, stated once and repeated per item.** F depends on
-[`trust-the-substrate.md`](../completed/trust-the-substrate.md) **C4** (proposal →
+[`trust-the-substrate.md`](trust-the-substrate.md) **C4** (proposal →
 `ApprovalRequest` + `awaiting_approval`) and **C7** (approve → execute, plus the
 *direct* `apply_jobdef_patch` route) and on its **H-1** (the de-hollowed, widened
 auth lane). Verified in the current tree (2026-09-05), that pipeline is **not
@@ -1476,7 +1529,7 @@ precedent for it is warn-mode schema validation, which publishes
       `internal/incident/store.go` (if `OpenParams` needs a non-failure shape),
       `test/` (auth-lane scenario). **Cross-plan blocker (documented inline, not in
       `Depends on:` per the draft-exec-plan PLAYBOOK):** the auth-lane scenario is
-      not runnable until [`trust-the-substrate.md`](../completed/trust-the-substrate.md) **H-1**
+      not runnable until [`trust-the-substrate.md`](trust-the-substrate.md) **H-1**
       makes that lane real — see `## Sequencing & Dependencies` § Cross-PLAN order.
       Depends on: C1 + C4.
       *Note (W5-α, 2026-11-01):* shipped in `internal/incident/hold.go`, with these
@@ -1550,7 +1603,7 @@ precedent for it is warn-mode schema validation, which publishes
       `get_context` needs a new `kind`), `api/rest/controller/agent/` (context
       handler), `cmd/start/start.go` (ops adapter), `test/` (auth-lane scenario).
       **Cross-plan blockers (documented inline, not in `Depends on:` per the
-      draft-exec-plan PLAYBOOK):** [`trust-the-substrate.md`](../completed/trust-the-substrate.md)
+      draft-exec-plan PLAYBOOK):** [`trust-the-substrate.md`](trust-the-substrate.md)
       **C4 + C7** (the proposal → `ApprovalRequest` → approve → execute pipeline,
       unwired today — see the stream preamble) and its **H-1** (the real auth lane
       the scenario runs on). See `## Sequencing & Dependencies` § Cross-PLAN order.
@@ -1604,7 +1657,7 @@ precedent for it is warn-mode schema validation, which publishes
       as arc convention 4 specifies, and the `AgentAction` result records why. (e)
       Refused under `CAESIUM_AUTH_MODE=none` like every other tier-3 action.
       **Plans 2-E and 3-F reuse this route and add nothing to it.** Verified
-      2026-09-05: [`resource-right-sizing.md`](resource-right-sizing.md) Stream E
+      2026-09-05: [`resource-right-sizing.md`](../active/resource-right-sizing.md) Stream E
       **has already been recast** — its *Design history* subsection records "**Why
       the design's `POST /v1/jobs/:id/resources/apply` provenance router is NOT
       built**… **So the endpoint is dropped**, not front-ended", it lists the
@@ -1622,7 +1675,7 @@ precedent for it is warn-mode schema validation, which publishes
       no-credential degrade-to-escalate path; the live-PR path is unit-tested
       against a fake forge — see Open Questions).
       **Cross-plan blocker (documented inline, not in `Depends on:` per the
-      draft-exec-plan PLAYBOOK):** [`trust-the-substrate.md`](../completed/trust-the-substrate.md)
+      draft-exec-plan PLAYBOOK):** [`trust-the-substrate.md`](trust-the-substrate.md)
       **C4 + C7** — the pipeline and the *direct* `apply_jobdef_patch` route this
       one branches beside. See `## Sequencing & Dependencies` § Cross-PLAN order.
       Depends on: F2 + N-2.
@@ -1870,7 +1923,7 @@ precedent for it is warn-mode schema validation, which publishes
       the hold actually releases). **That lane runs in LOCAL execution mode**, so
       design these scenarios around cache-served / dry-run paths and never around a
       re-executing quarantined replay. **Depends inline on
-      [`trust-the-substrate.md`](../completed/trust-the-substrate.md) H-1**, which first makes
+      [`trust-the-substrate.md`](trust-the-substrate.md) H-1**, which first makes
       that lane real (today its test runner never receives `CAESIUM_AUTH_MODE`, so
       both scenarios skip and the recipe passes in 0.068s) and widens its `-run`
       pattern to include `TestHold*`/`TestIncident*` with a minimum `--- PASS`
@@ -1912,7 +1965,7 @@ precedent for it is warn-mode schema validation, which publishes
 
 ## Navigational / Organizational Improvements
 
-- [ ] N-1. Flip the `docs/roadmap.md` Phase-4 Data-Plane Differentiators entry for
+- [x] N-1. Flip the `docs/roadmap.md` Phase-4 Data-Plane Differentiators entry for
       "Data circuit breaker" to Shipped (and update the Execution-Priority /
       Completed-Features rows as appropriate); update the
       [`design/data-circuit-breaker.md`](../../design/data-circuit-breaker.md)
@@ -1938,7 +1991,7 @@ precedent for it is warn-mode schema validation, which publishes
       the hold at each step. Index it in `docs/README.md` (backtick form for the
       exec-plan path; a top-level `docs/*.md` may be a link).
       (c) **Tick the arc dashboard row** for "1 data-circuit-breaker" in
-      [`closed-loop-arc.md`](closed-loop-arc.md) (waves shipped, last PR) in this
+      [`closed-loop-arc.md`](../active/closed-loop-arc.md) (waves shipped, last PR) in this
       same PR, and move this plan to `docs/exec-plans/completed/` repointing the
       arc's links — the arc dashboard is the single place status lives.
       (d) Any example manifest must use a **canonically pinned image**
@@ -1960,6 +2013,11 @@ precedent for it is warn-mode schema validation, which publishes
       currently failing, because the generator's output did not change); (b)
       `ui/src/lib/api.ts`'s `SystemFeatures` type needs the new
       `data_assertions_enabled` field once Stream E renders a gated surface.
+      **Done:** all four files and the example landed, `docs/tour-data-loop.md` is
+      published, the arc dashboard row is ticked, and the plan is archived to
+      `completed/` with every link to it repointed. The generator rows were added to
+      `internal/jobdef/report/report.go` and the reference regenerated; the
+      `SystemFeatures.data_assertions_enabled` field had already landed with Stream E.
 - [x] N-2. **Amend the design docs for `CAESIUM_GIT_WRITE_CREDENTIALS` and the
       Git-PR provenance route, before F3 lands.** The Source-Of-Truth Note forbids
       adding a config knob the design does not enumerate without amending the
@@ -1976,7 +2034,7 @@ precedent for it is warn-mode schema validation, which publishes
       [`docs/design/agent-in-the-loop.md`](../../design/agent-in-the-loop.md)
       where the `apply_jobdef_patch` action and its provenance routes are
       described, so the Git-PR route stops being an undocumented half of B4. This
-      is the pattern [`backtesting.md`](backtesting.md) uses for its own divergence
+      is the pattern [`backtesting.md`](../active/backtesting.md) uses for its own divergence
       ("this divergence is only legal once the design says so: **N-2 amends
       `docs/design/backtesting.md` first**"). Docs-only, no code.
       Files: `docs/design/data-circuit-breaker.md`,
@@ -2028,11 +2086,11 @@ precedent for it is warn-mode schema validation, which publishes
   (the Source-Of-Truth Note's recorded deviation). Land it in any wave up to and
   including the one before F3's.
 
-**Cross-PLAN order.** [`closed-loop-arc.md`](closed-loop-arc.md) is authoritative
+**Cross-PLAN order.** [`closed-loop-arc.md`](../active/closed-loop-arc.md) is authoritative
 here; the ordering it fixes and this plan honors:
 
 - **Plan 0 → Plan 1.** C3's 403-under-`AUTH_MODE=none` scenario and all of Stream F
-  need [`trust-the-substrate.md`](../completed/trust-the-substrate.md) **H-1** (real, widened
+  need [`trust-the-substrate.md`](trust-the-substrate.md) **H-1** (real, widened
   auth lane) and **C4/C7** (proposal → `ApprovalRequest` → approve → execute, plus
   the direct `apply_jobdef_patch` route). F3 builds the **Git-PR** route on top of
   C7's direct route; it does not rebuild the pipeline.
@@ -2045,7 +2103,7 @@ here; the ordering it fixes and this plan honors:
   `cmd/start/start.go`. Sequential by plan — **never in the same wave**.
 - **Plan 1 → Plan 3 F3 (shape contract).** A5 ships the `asOf`-cut baseline helper
   and B1 ships the pure `evaluate(spec, sample, baseline) []Violation`;
-  [`backtesting.md`](backtesting.md) Stream F item **F3** ("Add the
+  [`backtesting.md`](../active/backtesting.md) Stream F item **F3** ("Add the
   assertion-threshold backtest — pure metric replay") calls both, and that plan's
   own preamble records "**F3** needs Plan 1 A2 … A5". Ship them in that
   shape in the first place.
@@ -2061,7 +2119,7 @@ here; the ordering it fixes and this plan honors:
 > *Superseded (2026-09-05) — the two cross-plan coordination blocks the original
 > plan carried, kept for rationale.* **Shared `DatasetDeclaration` registry:** the
 > base declared-registry table + jobdef `produces` scaffold is shared with
-> [`freshness-scheduling`](../completed/freshness-scheduling.md) Stream A; whichever
+> [`freshness-scheduling`](freshness-scheduling.md) Stream A; whichever
 > plan's Stream-A registry item merged first **creates** the registry model, the
 > second **extends** it, and the two must not be in flight in the same wave.
 > **Shared `cmd/dataset/` group + `/v1/datasets` package:** this plan's C3/D1/D2 add
@@ -2281,7 +2339,7 @@ The plan is done when **all** of these hold:
    `docs/caesium-job-llm-reference.md`, a working `docs/examples/` manifest with a
    canonically pinned image, **`docs/tour-data-loop.md`** published, this plan
    indexed in `docs/README.md` (backtick form), and the
-   [`closed-loop-arc.md`](closed-loop-arc.md) dashboard row for plan 1 ticked.
+   [`closed-loop-arc.md`](../active/closed-loop-arc.md) dashboard row for plan 1 ticked.
    **N-2** has amended `docs/design/data-circuit-breaker.md` (and
    `docs/design/agent-in-the-loop.md`) with `CAESIUM_GIT_WRITE_CREDENTIALS` and the
    Git-PR provenance route **before F3 merged**, so no shipped config knob is
@@ -2301,14 +2359,14 @@ The plan is done when **all** of these hold:
 
 ## How To Pick Up Work
 
-1. Read [`closed-loop-arc.md`](closed-loop-arc.md) first (it is the program-level
+1. Read [`closed-loop-arc.md`](../active/closed-loop-arc.md) first (it is the program-level
    source of truth and defines the shared conventions this plan links to), then
    this file end-to-end, so you understand the streams, their interdependencies,
    and which acceptance criterion the item closes.
 2. Pick an unchecked item under `## Streams` whose `Depends on:` line is satisfied
    (consult `## Sequencing & Dependencies`), including its **cross-plan**
    dependencies — Stream F and the auth-lane half of H-1 are not eligible until
-   [`trust-the-substrate.md`](../completed/trust-the-substrate.md) H-1 and C4/C7 have merged.
+   [`trust-the-substrate.md`](trust-the-substrate.md) H-1 and C4/C7 have merged.
 3. Re-grep before you edit. Every citation here is a **symbol**, not a line
    number, and the tree moves; if a symbol has moved or changed shape, fix the
    plan's citation in the same PR.
@@ -2325,15 +2383,15 @@ The plan is done when **all** of these hold:
 
 ## Cross-References
 
-- [`closed-loop-arc.md`](closed-loop-arc.md) — **the umbrella arc; this is Plan 1.**
+- [`closed-loop-arc.md`](../active/closed-loop-arc.md) — **the umbrella arc; this is Plan 1.**
   Shared conventions 1–8, the cross-plan file-conflict table, the Synergies row that
   puts Stream F in scope, and the parking decisions (`park` disposition) all live
   there. It wins on cross-plan ordering and on why something is in scope.
-- [`trust-the-substrate.md`](../completed/trust-the-substrate.md) — **Plan 0.** Stream A (the
+- [`trust-the-substrate.md`](trust-the-substrate.md) — **Plan 0.** Stream A (the
   stranding fix C2's skip semantics depend on), C4/C7 (the approval pipeline and
   the direct `apply_jobdef_patch` route Stream F extends), H-1 (the real, widened
   auth lane every F scenario runs on).
-- [`backtesting.md`](backtesting.md) **Stream F, item F3** — "Add the
+- [`backtesting.md`](../active/backtesting.md) **Stream F, item F3** — "Add the
   assertion-threshold backtest — pure metric replay, no re-execution", where
   assertion backtesting lives (moved out of this plan's Phase 3). It calls B1's
   pure `evaluate(spec, sample, baseline)` and A5's `asOf`-cut
@@ -2345,7 +2403,7 @@ The plan is done when **all** of these hold:
   review claimed backtesting.md carries two items numbered F3 — it does not;
   `grep -n '^- \[ \] F[0-9]\.'` returns six distinct ids. No renumber is needed
   there.)
-- [`resource-right-sizing.md`](resource-right-sizing.md) **Stream E** — the compute
+- [`resource-right-sizing.md`](../active/resource-right-sizing.md) **Stream E** — the compute
   loop's durable action (`propose_resources` → an `apply_jobdef_patch` proposal).
   Per the arc's Synergies table it **reuses** the provenance route F3 builds and
   adds nothing to it. **Verified 2026-09-05: Plan 2's Stream E has already been
@@ -2358,18 +2416,18 @@ The plan is done when **all** of these hold:
 - [`docs/design/data-circuit-breaker.md`](../../design/data-circuit-breaker.md) —
   the design of record. Source of truth for intent and scope.
 - [`docs/design/agent-in-the-loop.md`](../../design/agent-in-the-loop.md) and
-  [`agent-in-the-loop-remediation.md`](../completed/agent-in-the-loop-remediation.md) —
+  [`agent-in-the-loop-remediation.md`](agent-in-the-loop-remediation.md) —
   the shipped incident runtime Stream F extends: incident classes, the typed action
   catalog + tiers, the approval gate, and the MCP tool surface. `dataset_held`
   becomes the `data_quality_hold` class; `release_hold` joins the catalog.
 - [`docs/roadmap.md`](../../roadmap.md) Phase 4 Data-Plane Differentiators — the
   "Data circuit breaker" entry this plan closes.
-- [`freshness-scheduling.md`](../completed/freshness-scheduling.md) — **shipped**
+- [`freshness-scheduling.md`](freshness-scheduling.md) — **shipped**
   (#277–#299); owns the `DatasetDeclaration` registry, the jobdef
   `steps[].datasets` block, the `cmd/dataset` group, and the `/v1/datasets` REST
   package this plan **extends**. Stream F4 makes its freshness evaluator
   hold-aware.
-- [`contract-enforcement.md`](../completed/contract-enforcement.md) — **shipped**;
+- [`contract-enforcement.md`](contract-enforcement.md) — **shipped**;
   the static/PR-time half of the contract story; reads the same `consumes` edges and already extended
   `ProducedDataset`/`ConsumedDataset` with `Schema`/`SchemaFrom`/`Version`. This
   plan is the runtime breaker for what static analysis cannot see (the *values*).

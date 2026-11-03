@@ -675,7 +675,7 @@ plan's acceptance criteria.
 The arc's "prove" column, made concrete: the backtest report gets a consumer
 other than a human reading a PR. An `apply_jobdef_patch` proposal — whether it
 comes from a `data_quality_hold` incident (Plan 1
-[`data-circuit-breaker.md`](data-circuit-breaker.md) Stream F) or an `oom`
+[`data-circuit-breaker.md`](../completed/data-circuit-breaker.md) Stream F) or an `oom`
 incident (Plan 2 [`resource-right-sizing.md`](resource-right-sizing.md)
 Stream E) — can carry a backtest, and the approval surfaces show its verdict;
 an assertion threshold can be backtested against `DatasetMetric` history before
@@ -1451,7 +1451,7 @@ The plan is done when **all** of these hold:
   `agent_integration_run` filter to
   `TestIntegrationTestSuite/(TestAgent|TestAuth|TestIncident|TestScoped|TestHold)`
   so F2's scenario is selected.
-- [`data-circuit-breaker.md`](data-circuit-breaker.md) — Plan 1; Stream F (the
+- [`data-circuit-breaker.md`](../completed/data-circuit-breaker.md) — Plan 1; Stream F (the
   Git-PR route of `apply_jobdef_patch` behind `CAESIUM_GIT_WRITE_CREDENTIALS`, and
   the `data_quality_hold` class) is F2's producer, A2/A5/B1 (`DatasetMetric`,
   baseline read, evaluator) are F3's substrate.

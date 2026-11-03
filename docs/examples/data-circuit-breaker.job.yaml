@@ -1,0 +1,87 @@
+# Data circuit breaker: a producer that self-reports what it loaded, assertions
+# that judge it, and a downstream job that is not allowed to consume poison.
+# This file holds two jobs. docs/tour-data-loop.md walks through it.
+#
+# Everything below is inert unless CAESIUM_DATA_ASSERTIONS_ENABLED=true is set
+# on the server AND in the shell that runs `caesium job lint` / `job apply`
+# (the CLI validates the manifest before it posts it).
+apiVersion: v1
+kind: Job
+metadata:
+  alias: orders-load
+  labels:
+    team: data-platform
+  annotations:
+    owner: oncall
+    purpose: load the warehouse orders table and hold it when the load looks wrong
+  # A task served from cache runs no assertion and records no sample, so a
+  # producer you want judged on every run keeps the cache off.
+  cache: false
+trigger:
+  type: cron
+  configuration:
+    cron: "0 2 * * *"
+    timezone: UTC
+steps:
+  - name: load-orders
+    engine: docker
+    image: alpine:3.23
+    command:
+      - sh
+      - -c
+      - |
+        # Read the row count from the run parameter `rows`. The tour starts a run
+        # with --params rows=12 to simulate a truncated load.
+        rows="${CAESIUM_PARAM_ROWS:-10400}"
+        echo "loading ${rows} orders"
+        # The step reports what it observed. `dataset` selects the declared
+        # dataset below; every other key is a metric. The timestamp is an
+        # RFC3339 metric, stored as epoch seconds, that the freshness
+        # assertion measures lag from.
+        echo "##caesium::metrics {\"dataset\":\"warehouse/orders\",\"rowCount\":${rows},\"null_rate_customer_id\":0.001,\"max_event_time\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"}"
+    datasets:
+      produces:
+        - name: warehouse/orders
+          assertions:
+            # min and max are absolute bounds that enforce from the first run.
+            # deltaFromBaseline is a share of the median of the last clean
+            # samples, and only warns until CAESIUM_BASELINE_MIN_SAMPLES exist.
+            rowCount: {min: 1000, deltaFromBaseline: "50%"}
+            nullRate: {metric: null_rate_customer_id, max: 0.02}
+            freshness: {watermark: max_event_time, maxLag: 26h}
+            # Any other scalar the step emits can be asserted too:
+            #   custom:
+            #     - {metric: dedup_ratio, max: 0.05}
+          # warn records the violation, fail fails the task, hold lets the task
+          # succeed and holds the dataset so consumers skip instead of eating it.
+          onViolation: hold
+          # manual: only a human, or an approved release_hold action, releases
+          # the hold. The default, auto, also releases it on the next clean run.
+          release: manual
+---
+apiVersion: v1
+kind: Job
+metadata:
+  alias: orders-report
+  labels:
+    team: data-platform
+  annotations:
+    purpose: report on warehouse/orders; skipped while that dataset is held
+  cache: false
+  # skip (the default) admits a run straight to a terminal skipped state while
+  # a dataset it consumes is held. run opts this job out, for a monitor that
+  # wants to look at the held data.
+  onUpstreamHold: skip
+trigger:
+  type: cron
+  configuration:
+    cron: "30 2 * * *"
+    timezone: UTC
+steps:
+  - name: build-report
+    engine: docker
+    image: alpine:3.23
+    command: ["sh", "-c", "echo building the orders report"]
+    datasets:
+      consumes:
+        - warehouse/orders

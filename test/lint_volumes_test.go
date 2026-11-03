@@ -208,8 +208,11 @@ func (s *IntegrationTestSuite) TestLintVolumesWarnsOnRawMountTypeVolume() {
 // physical store, shared only between DAG-ordered writers — not by aliasing
 // one store under two names to hide it from the check.
 func (s *IntegrationTestSuite) TestLintVolumesExamplesProduceNoWarning() {
-	stdout, err := s.runCLIStdout("job", "lint", "--path", filepath.Join(s.projectRoot, "docs", "examples"))
-	s.Require().NoError(err)
+	// data-circuit-breaker.job.yaml declares the gated assertion surface, which
+	// the CLI refuses unless the shell that lints it sets the master gate.
+	stdout, stderr, err := s.runCLIWithEnv([]string{"CAESIUM_DATA_ASSERTIONS_ENABLED=true"},
+		"job", "lint", "--path", filepath.Join(s.projectRoot, "docs", "examples"))
+	s.Require().NoError(err, "stdout:\n%s\nstderr:\n%s", stdout, stderr)
 	s.NotContains(stdout, "Warnings:")
 }
 
