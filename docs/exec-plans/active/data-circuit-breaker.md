@@ -1658,7 +1658,15 @@ precedent for it is warn-mode schema validation, which publishes
       on a pull request, and reasons and errors carry fixed text, not the file's
       lines, its remediation block, or the forge's error text. If the server's copy
       matches the proposal, the result names the pull request instead of "no
-      changes". `baseline.repo` is an identity, not the source URL.
+      changes". `baseline.repo` is an identity, not the source URL. Review round 3
+      made every forge failure's summary the call plus a fixed category, because a
+      transport error can quote a header the forge sent. It also stopped taking a
+      pull request found on the route's branch on trust: the preview names the
+      branch, so one is accepted only if it targets the plan's base and the
+      manifest at its head is the approved replacement, byte for byte, spliced from
+      the file at the proposal's commit. Anything else escalates as
+      `pull_request_mismatch`. The check reads only the manifest, so other files
+      changed on the branch go unchecked.
       `ExecuteApproved` writes its terminal status on a context detached
       from the request. Only the patched document changes, so comments inside it are
       lost; a sibling's or a header's are kept. The Console shows the preview through
