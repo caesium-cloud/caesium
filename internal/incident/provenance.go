@@ -1,6 +1,7 @@
 package incident
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -60,6 +61,7 @@ const (
 	degradeManifestUnsafe        = "manifest_unsafe"
 	degradeManifestUnchanged     = "manifest_unchanged"
 	degradeForgeError            = "forge_error"
+	degradePullRequestMismatch   = "pull_request_mismatch"
 
 	// routeGitPR is the third value of the result's route field.
 	routeGitPR = "git_pr"
@@ -395,12 +397,37 @@ func (r *ProvenanceRouter) open(ctx context.Context, plan *patchPlan, change *pa
 		return degrade
 	}
 
+	// The replacement is spliced from the file at the proposal's commit first, so a
+	// pull request already on the branch can be held to it. The new pull request
+	// below writes it only once the branch's head still holds that same file.
+	synced, err := client.GetFile(ctx, plan.path, plan.commit)
+	if err != nil {
+		return nil, fail(err)
+	}
+	spliced, err := spliceManifest(synced.Content, change.rendered, plan.alias, plan.namespace)
+	if err != nil {
+		if unsafe, ok := errors.AsType[*patchDegrade](err); ok {
+			return nil, unsafe
+		}
+		return nil, err
+	}
+	updated := spliced.File
+	// accept takes a pull request found on the branch only if it is this change:
+	// the branch name is in the preview, so anyone who can push to the repository
+	// can open one from it, with another edit or against another base.
+	accept := func(found *forge.PullRequest) (*patchPullRequest, error) {
+		if degrade := verifyPullRequest(ctx, client, plan, found, updated, fail); degrade != nil {
+			return nil, withBranch(degrade)
+		}
+		return &patchPullRequest{PullRequest: *found, Existing: true}, nil
+	}
+
 	existing, err := client.FindPullRequest(ctx, plan.branch)
 	if err != nil {
 		return nil, fail(err)
 	}
 	if existing != nil {
-		return &patchPullRequest{PullRequest: *existing, Existing: true}, nil
+		return accept(existing)
 	}
 
 	head, err := client.BranchHead(ctx, plan.base)
@@ -411,22 +438,10 @@ func (r *ProvenanceRouter) open(ctx context.Context, plan *patchPlan, change *pa
 	if err != nil {
 		return nil, fail(err)
 	}
-	synced, err := client.GetFile(ctx, plan.path, plan.commit)
-	if err != nil {
-		return nil, fail(err)
-	}
-	if current.SHA != synced.SHA {
+	if current.SHA != synced.SHA || !bytes.Equal(current.Content, synced.Content) {
 		return nil, &patchDegrade{Code: degradeManifestChanged,
 			Reason: fmt.Sprintf("the manifest changed on the branch since commit %s, the one this patch was proposed against; propose it again", plan.commit)}
 	}
-	spliced, err := spliceManifest(current.Content, change.rendered, plan.alias, plan.namespace)
-	if err != nil {
-		if unsafe, ok := errors.AsType[*patchDegrade](err); ok {
-			return nil, unsafe
-		}
-		return nil, err
-	}
-	updated := spliced.File
 	outbound := outboundDocumentDiff(spliced.Original, change.rendered.Document)
 
 	created, err := client.CreateBranch(ctx, plan.branch, head)
@@ -471,7 +486,7 @@ func (r *ProvenanceRouter) open(ctx context.Context, plan *patchPlan, change *pa
 			return nil, withBranch(fail(findErr))
 		}
 		if found != nil {
-			return &patchPullRequest{PullRequest: *found, Existing: true}, nil
+			return accept(found)
 		}
 	}
 	if err != nil {
@@ -480,6 +495,33 @@ func (r *ProvenanceRouter) open(ctx context.Context, plan *patchPlan, change *pa
 		return nil, withBranch(degrade)
 	}
 	return &patchPullRequest{PullRequest: *opened}, nil
+}
+
+// verifyPullRequest holds a pull request found on the route's branch to the
+// approved change: it targets the plan's base, and the manifest at its head is
+// byte for byte the replacement the route would write. Anything else is not the
+// change the human approved, so it degrades with fixed text and is never recorded
+// as this action's pull request.
+func verifyPullRequest(ctx context.Context, client forge.Client, plan *patchPlan, found *forge.PullRequest, updated []byte, fail func(error) *patchDegrade) *patchDegrade {
+	if found.Base != plan.base {
+		return &patchDegrade{Code: degradePullRequestMismatch,
+			Reason: fmt.Sprintf("a pull request from branch %s already exists and does not target %s; it is not the approved change", plan.branch, plan.base)}
+	}
+	mismatch := &patchDegrade{Code: degradePullRequestMismatch,
+		Reason: fmt.Sprintf("a pull request from branch %s already exists and its manifest is not the approved change", plan.branch)}
+	if !forge.ValidCommit(found.HeadSHA) {
+		return mismatch
+	}
+	onHead, err := client.GetFile(ctx, plan.path, found.HeadSHA)
+	switch {
+	case errors.Is(err, forge.ErrNotFound), errors.Is(err, forge.ErrFileNotEditable):
+		return mismatch
+	case err != nil:
+		return fail(err)
+	case !bytes.Equal(onHead.Content, updated):
+		return mismatch
+	}
+	return nil
 }
 
 // resolveToken reads the token at use time, as git sync reads its credentials.

@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -21,6 +22,7 @@ import (
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/caesium-cloud/caesium/pkg/env"
 	schema "github.com/caesium-cloud/caesium/pkg/jobdef"
+	pkglog "github.com/caesium-cloud/caesium/pkg/log"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 	"gorm.io/gorm"
@@ -110,6 +112,8 @@ type fakeGitHub struct {
 	failStatus  int
 	failMessage string
 	redirectTo  string
+	// badLocation answers every request with a redirect to this Location.
+	badLocation string
 	// hidePullsOnce makes the next pull request list come back empty.
 	hidePullsOnce bool
 	// onRequest runs as a request arrives.
@@ -187,6 +191,12 @@ func (f *fakeGitHub) serve(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, f.redirectTo, http.StatusFound)
 		return
 	}
+	if f.badLocation != "" {
+		// Set as sent, unlike http.Redirect, which would clean it.
+		w.Header()["Location"] = []string{f.badLocation}
+		w.WriteHeader(http.StatusFound)
+		return
+	}
 	if f.failOn != "" && strings.Contains(request, f.failOn) {
 		status, message := f.failStatus, f.failMessage
 		f.failOn = ""
@@ -245,6 +255,10 @@ func (f *fakeGitHub) serve(w http.ResponseWriter, r *http.Request) {
 		decoded, err := base64.StdEncoding.DecodeString(body.Content)
 		require.NoError(f.t, err)
 		f.put(body.Branch, filePath, decoded)
+		// The write is a new commit at the branch's head.
+		commit := blobSHA([]byte(body.Branch + "\x00" + string(decoded)))
+		f.heads[body.Branch] = commit
+		f.put(commit, filePath, decoded)
 		writeJSON(w, http.StatusOK, map[string]any{})
 	case resource == "pulls" && r.Method == http.MethodGet:
 		out := []map[string]any{}
@@ -254,9 +268,18 @@ func (f *fakeGitHub) serve(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		for _, pull := range f.pulls {
-			if "acme:"+pull["head"].(map[string]any)["ref"].(string) == r.URL.Query().Get("head") {
-				out = append(out, pull)
+			head := pull["head"].(map[string]any)
+			ref := head["ref"].(string)
+			if "acme:"+ref != r.URL.Query().Get("head") {
+				continue
 			}
+			// A pull request's head is its branch's head, unless the test pinned one.
+			listed := maps.Clone(pull)
+			listed["head"] = maps.Clone(head)
+			if _, pinned := head["sha"]; !pinned {
+				listed["head"].(map[string]any)["sha"] = f.heads[ref]
+			}
+			out = append(out, listed)
 		}
 		writeJSON(w, http.StatusOK, out)
 	case resource == "pulls" && r.Method == http.MethodPost:
@@ -682,6 +705,50 @@ func TestForgeErrorTextStaysOffTheIncident(t *testing.T) {
 	require.NotContains(t, f.ops.escalate[0].summary, "quoted-from-the-file")
 }
 
+// A transport error can quote the forge too: Go's client fails on a Location it
+// cannot parse before CheckRedirect runs, and quotes the whole header. The reason
+// is the call and a fixed category.
+func TestForgeTransportErrorTextStaysOffTheIncident(t *testing.T) {
+	const marker = "finance-webhook-secret"
+	f := newRouteFixture(t, manifestFile)
+	f.forge.badLocation = "/" + marker + "%zz"
+	logged := lastLogSequence()
+
+	executed, result := f.approveAndExecute(t, patchJSON(t, patchedDefinition))
+	requireDegraded(t, f, result, degradeForgeError)
+	require.Equal(t, "forge: request: transport error", result["reason"])
+	require.NotContains(t, string(executed.Result), marker)
+	require.NotContains(t, f.ops.escalate[0].summary, marker)
+	var rows []models.AgentAction
+	require.NoError(t, f.db.Find(&rows).Error)
+	for i := range rows {
+		require.NotContains(t, string(rows[i].Result), marker)
+	}
+	entries := logsSince(logged)
+	require.NotEmpty(t, entries, "the degrade is logged")
+	for _, entry := range entries {
+		require.NotContains(t, entry.Message+string(entry.Fields), marker)
+	}
+}
+
+func lastLogSequence() uint64 {
+	entries := pkglog.Buffer().Snapshot()
+	if len(entries) == 0 {
+		return 0
+	}
+	return entries[len(entries)-1].Sequence
+}
+
+func logsSince(sequence uint64) []pkglog.LogEntry {
+	var out []pkglog.LogEntry
+	for _, entry := range pkglog.Buffer().Snapshot() {
+		if entry.Sequence > sequence {
+			out = append(out, entry)
+		}
+	}
+	return out
+}
+
 // A refusal of the file's syntax names the rule, not the line that broke it.
 func TestManifestRefusalQuotesNoLineOfTheFile(t *testing.T) {
 	for name, line := range map[string]string{
@@ -831,25 +898,156 @@ func TestRetryConvergesAfterTheWriteFails(t *testing.T) {
 }
 
 // The pull request exists although the lookup did not see it (a race, or a
-// lagging read): the 422 is a lookup, not a failure.
+// lagging read): the 422 is a lookup, not a failure, and the pull request it
+// finds is held to the approved change like any other.
 func TestAnExistingPullRequestAtOpenIsALookup(t *testing.T) {
+	for name, tc := range map[string]struct {
+		base string
+		// headFile pins the pull request's head to a commit holding this file;
+		// empty means the branch's head, which the route has just written.
+		headFile string
+		code     string
+	}{
+		"the approved change": {base: "main"},
+		"another base":        {base: "release", code: degradePullRequestMismatch},
+		"another edit":        {base: "main", headFile: manifestFile + "# another edit\n", code: degradePullRequestMismatch},
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := newRouteFixture(t, manifestFile)
+			action := f.propose(t, patchJSON(t, patchedDefinition))
+			approveAction(t, f.db, action.ID, "operator@example.com", "")
+			branch := forge.BranchForAction(action.ID)
+			head := map[string]any{"ref": branch, "repo": map[string]any{"full_name": "acme/jobs"}}
+			if tc.headFile != "" {
+				pinned := strings.Repeat("c", 40)
+				f.forge.put(pinned, testManifest, []byte(tc.headFile))
+				head["sha"] = pinned
+			}
+			f.forge.pulls = append(f.forge.pulls, map[string]any{
+				"number": 9, "html_url": "https://forge.example/9", "state": "open",
+				"base": map[string]any{"ref": tc.base}, "head": head,
+			})
+			// The first lookup answers with an empty list.
+			f.forge.hidePullsOnce = true
+
+			executed, err := f.exec.ExecuteApproved(context.Background(), action.ID)
+			require.NoError(t, err)
+			result := patchResult(t, executed)
+			require.Equal(t, 1, f.forge.requestCount("POST /repos/acme/jobs/pulls"), "the route tried to open one")
+			if tc.code == "" {
+				require.Equal(t, routeGitPR, result["route"], "result: %v", result)
+				require.Equal(t, "https://forge.example/9", result["pr_url"])
+				require.Equal(t, true, result["pr_existing"])
+				return
+			}
+			requireDegraded(t, f, result, tc.code)
+			requirePullRequestRefused(t, f, executed, result, branch)
+		})
+	}
+}
+
+// requirePullRequestRefused checks a degrade over a pull request that is not the
+// approved change: fixed text naming the branch, and no trace of that pull request.
+func requirePullRequestRefused(t *testing.T, f *routeFixture, executed *models.AgentAction, result map[string]any, branch string) {
+	t.Helper()
+	require.Equal(t, branch, result["pr_branch"])
+	require.Contains(t, result["reason"], branch)
+	require.NotContains(t, result, "pr_url")
+	require.NotContains(t, string(executed.Result), "forge.example/9")
+	require.NotContains(t, string(executed.Result), "another edit")
+	require.NotContains(t, f.ops.escalate[0].summary, "another edit")
+}
+
+// TestAnExistingPullRequestIsHeldToTheApprovedChange: the preview names the
+// branch, so anyone who can push to the repository can open a pull request from
+// it while approval is pending. One that targets another base, or whose manifest
+// is not the approved replacement, is not this action's pull request.
+func TestAnExistingPullRequestIsHeldToTheApprovedChange(t *testing.T) {
+	approvedFile := func(t *testing.T) []byte {
+		t.Helper()
+		rendered, err := renderManifest(patchJSON(t, patchedDefinition))
+		require.NoError(t, err)
+		spliced, err := spliceManifest([]byte(manifestFile), rendered, testAlias, models.DefaultNamespace)
+		require.NoError(t, err)
+		return spliced.File
+	}
+	for name, tc := range map[string]struct {
+		base string
+		file func(t *testing.T) []byte
+		sha  string
+		code string
+	}{
+		"the approved change": {base: "main", file: approvedFile},
+		"another edit": {base: "main", file: func(*testing.T) []byte {
+			return []byte(strings.Replace(manifestFile, `["true"]`, `["sh", "-c", "another edit"]`, 1))
+		}},
+		"the approved change plus a byte": {base: "main", file: func(t *testing.T) []byte {
+			return append(approvedFile(t), '\n')
+		}},
+		"another base":       {base: "release", file: approvedFile},
+		"no manifest":        {base: "main"},
+		"no head commit":     {base: "main", file: approvedFile, sha: "not-a-commit"},
+		"the unpatched file": {base: "main", file: func(*testing.T) []byte { return []byte(manifestFile) }},
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := newRouteFixture(t, manifestFile)
+			action := f.propose(t, patchJSON(t, patchedDefinition))
+			branch := forge.BranchForAction(action.ID)
+			sha := tc.sha
+			if sha == "" {
+				sha = strings.Repeat("d", 40)
+			}
+			if tc.file != nil {
+				f.forge.put(sha, testManifest, tc.file(t))
+			}
+			f.forge.pulls = append(f.forge.pulls, map[string]any{
+				"number": 9, "html_url": "https://forge.example/9", "state": "open",
+				"base": map[string]any{"ref": tc.base},
+				"head": map[string]any{"ref": branch, "sha": sha, "repo": map[string]any{"full_name": "acme/jobs"}},
+			})
+			approveAction(t, f.db, action.ID, "operator@example.com", "")
+
+			executed, err := f.exec.ExecuteApproved(context.Background(), action.ID)
+			require.NoError(t, err)
+			result := patchResult(t, executed)
+			require.Zero(t, f.forge.requestCount("PUT "), "the route writes nothing over a pull request")
+			require.Zero(t, f.forge.requestCount("POST /repos/acme/jobs/pulls"))
+			if name == "the approved change" {
+				require.Equal(t, routeGitPR, result["route"], "result: %v", result)
+				require.Equal(t, "https://forge.example/9", result["pr_url"])
+				require.Equal(t, true, result["pr_existing"])
+				return
+			}
+			requireDegraded(t, f, result, degradePullRequestMismatch)
+			requirePullRequestRefused(t, f, executed, result, branch)
+		})
+	}
+}
+
+// An empty confined render on a pull request someone else opened must not claim
+// the change is there: it degrades before any result names the pull request.
+func TestEmptyRenderDoesNotVouchForAnotherPullRequest(t *testing.T) {
 	f := newRouteFixture(t, manifestFile)
+	f.ops.patchDiff = json.RawMessage(`{"alias":"orders-daily","empty":true}`)
 	action := f.propose(t, patchJSON(t, patchedDefinition))
-	approveAction(t, f.db, action.ID, "operator@example.com", "")
 	branch := forge.BranchForAction(action.ID)
+	sha := strings.Repeat("d", 40)
+	f.forge.put(sha, testManifest, []byte(manifestFile+"# another edit\n"))
 	f.forge.pulls = append(f.forge.pulls, map[string]any{
 		"number": 9, "html_url": "https://forge.example/9", "state": "open",
-		"head": map[string]any{"ref": branch, "repo": map[string]any{"full_name": "acme/jobs"}},
+		"base": map[string]any{"ref": "main"},
+		"head": map[string]any{"ref": branch, "sha": sha, "repo": map[string]any{"full_name": "acme/jobs"}},
 	})
-	// The first lookup answers with an empty list.
-	f.forge.hidePullsOnce = true
+	approveAction(t, f.db, action.ID, "operator@example.com", "")
 
 	executed, err := f.exec.ExecuteApproved(context.Background(), action.ID)
 	require.NoError(t, err)
 	result := patchResult(t, executed)
-	require.Equal(t, routeGitPR, result["route"])
-	require.Equal(t, "https://forge.example/9", result["pr_url"])
-	require.Equal(t, true, result["pr_existing"])
+	require.Equal(t, routeEscalate, result["route"], "result: %v", result)
+	require.Equal(t, degradePullRequestMismatch, result["degrade"])
+	require.NotContains(t, result, "pr_url")
+	require.NotContains(t, result["diff"].(map[string]any)["diff"], "in the pull request")
+	require.NotContains(t, string(executed.Result), "forge.example/9")
 }
 
 // sync moves the job to headCommit, as a git sync does between a proposal and its

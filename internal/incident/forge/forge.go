@@ -79,11 +79,15 @@ type NewPullRequest struct {
 	Base  string
 }
 
-// PullRequest is a pull request as the route records it.
+// PullRequest is a pull request as the route records it. Base and HeadSHA let the
+// route check that a pull request it finds holds the change it would open: anyone
+// who can push to the repository can open one from the route's branch.
 type PullRequest struct {
-	Number int
-	URL    string
-	State  string
+	Number  int
+	URL     string
+	State   string
+	Base    string
+	HeadSHA string
 }
 
 // Client is the forge surface the route needs. Each method is bound to one
@@ -300,13 +304,13 @@ func (g *github) call(ctx context.Context, method, apiPath string, query url.Val
 	if payload != nil {
 		encoded, err := json.Marshal(payload)
 		if err != nil {
-			return nil, g.failure("encode request", err, nil)
+			return nil, g.failure("encode request", categoryInvalidRequest, err, nil)
 		}
 		body = bytes.NewReader(encoded)
 	}
 	req, err := http.NewRequestWithContext(ctx, method, endpoint, body)
 	if err != nil {
-		return nil, g.failure("build request", err, nil)
+		return nil, g.failure("build request", categoryInvalidRequest, err, nil)
 	}
 	req.Header.Set("Authorization", "Bearer "+g.token)
 	req.Header.Set("Accept", "application/vnd.github+json")
@@ -317,18 +321,21 @@ func (g *github) call(ctx context.Context, method, apiPath string, query url.Val
 	}
 	resp, err := g.http.Do(req)
 	if err != nil {
-		return nil, g.failure("request", err, ctx.Err())
+		// A transport error can quote what the forge sent: an unparsable Location
+		// header fails here, quoted whole, before CheckRedirect runs.
+		return nil, g.failure("request", transportCategory(ctx, err), err, ctx.Err())
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode >= 300 && resp.StatusCode < 400 {
-		return nil, g.failure("request", fmt.Errorf("refused a redirect (status %d)", resp.StatusCode), nil)
+		return nil, g.failure("request", fmt.Sprintf("redirect refused, status %d", resp.StatusCode),
+			fmt.Errorf("refused a redirect (status %d)", resp.StatusCode), nil)
 	}
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes+1))
 	if err != nil {
-		return nil, g.failure("read response", err, ctx.Err())
+		return nil, g.failure("read response", transportCategory(ctx, err), err, ctx.Err())
 	}
 	if len(raw) > maxResponseBytes {
-		return nil, g.failure("read response", errors.New("response exceeds the size limit"), nil)
+		return nil, g.failure("read response", categoryTooLarge, errors.New("response exceeds the size limit"), nil)
 	}
 	out := &response{status: resp.StatusCode, body: raw}
 	if !out.ok() {
@@ -355,12 +362,42 @@ func truncate(value string, limit int) string {
 	return strings.ToValidUTF8(value[:limit], "")
 }
 
+// The categories a failure's Summary may carry. Each is fixed text: nothing the
+// forge sent, and nothing a transport or parser error quoted from it.
+const (
+	categoryInvalidRequest = "invalid request"
+	categoryTransport      = "transport error"
+	categoryTimeout        = "timeout"
+	categoryCancelled      = "cancelled"
+	categoryTooLarge       = "response too large"
+	categoryDecode         = "decode error"
+	categoryNotEditable    = "not an editable file"
+)
+
+// transportCategory names a failed exchange without its error text.
+func transportCategory(ctx context.Context, err error) string {
+	var timeout interface{ Timeout() bool }
+	switch {
+	case errors.Is(ctx.Err(), context.Canceled):
+		return categoryCancelled
+	case errors.Is(err, context.DeadlineExceeded), errors.Is(ctx.Err(), context.DeadlineExceeded),
+		errors.As(err, &timeout) && timeout.Timeout():
+		return categoryTimeout
+	default:
+		return categoryTransport
+	}
+}
+
 // failure is the only way an error leaves this client: the text is scrubbed and
 // the original chain dropped, so errors.Unwrap cannot reach an unscrubbed value.
-// Only the sentinel in kind stays matchable.
-func (g *github) failure(op string, err, kind error) error {
-	text := "forge: " + op + ": " + g.scrub(err.Error())
-	return &clientError{text: text, summary: text, kind: kind}
+// Only the sentinel in kind stays matchable. The text keeps err's detail, which
+// can quote the forge, so Summary gets the fixed category instead.
+func (g *github) failure(op, category string, err, kind error) error {
+	return &clientError{
+		text:    "forge: " + op + ": " + g.scrub(err.Error()),
+		summary: "forge: " + op + ": " + category,
+		kind:    kind,
+	}
 }
 
 func (g *github) status(op string, resp *response, kind error) error {
@@ -385,10 +422,11 @@ type clientError struct {
 func (e *clientError) Error() string { return e.text }
 func (e *clientError) Unwrap() error { return e.kind }
 
-// Summary is what failed, and the status, without anything the forge wrote. A
-// forge's error text can quote what was sent to it (a pre-receive hook's output
-// is the plain case), so it stays away from any reader who may not read the
-// repository.
+// Summary is what failed, and its status or a fixed category, without anything
+// the forge wrote. A forge's error text can quote what was sent to it (a
+// pre-receive hook's output is the plain case), and a transport error can quote a
+// header the forge sent, so neither reaches a reader who may not read the
+// repository. Error() keeps that detail, so it never goes where Summary goes.
 func Summary(err error) string {
 	if failure, ok := errors.AsType[*clientError](err); ok {
 		return failure.summary
@@ -413,7 +451,7 @@ func (g *github) scrub(text string) string {
 func (g *github) BranchHead(ctx context.Context, branch string) (string, error) {
 	const op = "read branch"
 	if err := ValidateBranch(branch); err != nil {
-		return "", g.failure(op, err, nil)
+		return "", g.failure(op, categoryInvalidRequest, err, nil)
 	}
 	resp, err := g.call(ctx, http.MethodGet, g.repoPath("git/ref/heads", branch), nil, nil)
 	if err != nil {
@@ -432,10 +470,10 @@ func (g *github) BranchHead(ctx context.Context, branch string) (string, error) 
 		} `json:"object"`
 	}
 	if err := json.Unmarshal(resp.body, &ref); err != nil {
-		return "", g.failure(op, errors.New("unexpected response"), nil)
+		return "", g.failure(op, categoryDecode, errors.New("unexpected response"), nil)
 	}
 	if ref.Ref != "refs/heads/"+branch || !ValidCommit(ref.Object.SHA) {
-		return "", g.failure(op, errors.New("unexpected response"), nil)
+		return "", g.failure(op, categoryDecode, errors.New("unexpected response"), nil)
 	}
 	return ref.Object.SHA, nil
 }
@@ -443,7 +481,7 @@ func (g *github) BranchHead(ctx context.Context, branch string) (string, error) 
 func (g *github) GetFile(ctx context.Context, filePath, ref string) (*File, error) {
 	const op = "read file"
 	if err := ValidatePath(filePath); err != nil {
-		return nil, g.failure(op, err, nil)
+		return nil, g.failure(op, categoryInvalidRequest, err, nil)
 	}
 	resp, err := g.call(ctx, http.MethodGet, g.repoPath("contents", filePath), url.Values{"ref": {ref}}, nil)
 	if err != nil {
@@ -463,17 +501,17 @@ func (g *github) GetFile(ctx context.Context, filePath, ref string) (*File, erro
 	}
 	if err := json.Unmarshal(resp.body, &file); err != nil {
 		// A directory answers with an array.
-		return nil, g.failure(op, errors.New("path is not a file"), ErrFileNotEditable)
+		return nil, g.failure(op, categoryNotEditable, errors.New("path is not a file"), ErrFileNotEditable)
 	}
 	if file.Type != "file" || file.Encoding != "base64" {
-		return nil, g.failure(op, errors.New("path is not an inline file"), ErrFileNotEditable)
+		return nil, g.failure(op, categoryNotEditable, errors.New("path is not an inline file"), ErrFileNotEditable)
 	}
 	content, err := base64.StdEncoding.DecodeString(strings.ReplaceAll(file.Content, "\n", ""))
 	if err != nil {
-		return nil, g.failure(op, errors.New("undecodable content"), ErrFileNotEditable)
+		return nil, g.failure(op, categoryNotEditable, errors.New("undecodable content"), ErrFileNotEditable)
 	}
 	if file.SHA == "" {
-		return nil, g.failure(op, errors.New("unexpected response"), nil)
+		return nil, g.failure(op, categoryDecode, errors.New("unexpected response"), nil)
 	}
 	return &File{SHA: file.SHA, Content: content}, nil
 }
@@ -481,7 +519,7 @@ func (g *github) GetFile(ctx context.Context, filePath, ref string) (*File, erro
 func (g *github) CreateBranch(ctx context.Context, branch, sha string) (bool, error) {
 	const op = "create branch"
 	if err := ValidateBranch(branch); err != nil {
-		return false, g.failure(op, err, nil)
+		return false, g.failure(op, categoryInvalidRequest, err, nil)
 	}
 	resp, err := g.call(ctx, http.MethodPost, g.repoPath("git/refs"), nil, map[string]string{
 		"ref": "refs/heads/" + branch,
@@ -503,10 +541,10 @@ func (g *github) CreateBranch(ctx context.Context, branch, sha string) (bool, er
 func (g *github) PutFile(ctx context.Context, file PutFile) error {
 	const op = "write file"
 	if err := ValidatePath(file.Path); err != nil {
-		return g.failure(op, err, nil)
+		return g.failure(op, categoryInvalidRequest, err, nil)
 	}
 	if err := ValidateBranch(file.Branch); err != nil {
-		return g.failure(op, err, nil)
+		return g.failure(op, categoryInvalidRequest, err, nil)
 	}
 	resp, err := g.call(ctx, http.MethodPut, g.repoPath("contents", file.Path), nil, map[string]string{
 		"message": file.Message,
@@ -532,8 +570,12 @@ type pullRequest struct {
 	Number  int    `json:"number"`
 	HTMLURL string `json:"html_url"`
 	State   string `json:"state"`
-	Head    struct {
+	Base    struct {
+		Ref string `json:"ref"`
+	} `json:"base"`
+	Head struct {
 		Ref  string `json:"ref"`
+		SHA  string `json:"sha"`
 		Repo *struct {
 			FullName string `json:"full_name"`
 		} `json:"repo"`
@@ -541,13 +583,13 @@ type pullRequest struct {
 }
 
 func (p *pullRequest) record() *PullRequest {
-	return &PullRequest{Number: p.Number, URL: p.HTMLURL, State: p.State}
+	return &PullRequest{Number: p.Number, URL: p.HTMLURL, State: p.State, Base: p.Base.Ref, HeadSHA: p.Head.SHA}
 }
 
 func (g *github) FindPullRequest(ctx context.Context, branch string) (*PullRequest, error) {
 	const op = "list pull requests"
 	if err := ValidateBranch(branch); err != nil {
-		return nil, g.failure(op, err, nil)
+		return nil, g.failure(op, categoryInvalidRequest, err, nil)
 	}
 	query := url.Values{"state": {"all"}, "head": {g.repo.Owner + ":" + branch}, "per_page": {"100"}}
 	resp, err := g.call(ctx, http.MethodGet, g.repoPath("pulls"), query, nil)
@@ -559,7 +601,7 @@ func (g *github) FindPullRequest(ctx context.Context, branch string) (*PullReque
 	}
 	var pulls []pullRequest
 	if err := json.Unmarshal(resp.body, &pulls); err != nil {
-		return nil, g.failure(op, errors.New("unexpected response"), nil)
+		return nil, g.failure(op, categoryDecode, errors.New("unexpected response"), nil)
 	}
 	// The API ignores a head filter it cannot parse and returns everything, so
 	// the head is checked here: another pull request must not read as this one's.
@@ -592,7 +634,7 @@ func (g *github) OpenPullRequest(ctx context.Context, pr NewPullRequest) (*PullR
 	}
 	var opened pullRequest
 	if err := json.Unmarshal(resp.body, &opened); err != nil || opened.Number == 0 {
-		return nil, g.failure(op, errors.New("unexpected response"), nil)
+		return nil, g.failure(op, categoryDecode, errors.New("unexpected response"), nil)
 	}
 	return opened.record(), nil
 }

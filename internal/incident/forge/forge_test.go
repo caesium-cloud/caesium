@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
@@ -398,4 +399,106 @@ func TestSummaryHoldsNothingTheForgeWrote(t *testing.T) {
 	require.ErrorContains(t, err, "quoted-from-the-file", "the error itself keeps the detail")
 	require.Equal(t, "forge: read branch: status 422", Summary(err))
 	require.Equal(t, "forge: request failed", Summary(errors.New("quoted-from-the-file")))
+}
+
+// A transport error can quote the forge as well: Go's client fails on a Location
+// header it cannot parse before CheckRedirect runs, and quotes the whole value.
+// Summary carries the call and a fixed category.
+func TestSummaryOfATransportErrorQuotesNothing(t *testing.T) {
+	const marker = "finance-webhook-secret"
+	client := newClient(t, serve(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.Header()["Location"] = []string{"/" + marker + "%zz"}
+		w.WriteHeader(http.StatusFound)
+	}))
+	_, err := client.BranchHead(context.Background(), "main")
+	require.ErrorContains(t, err, marker, "the transport error quotes the header")
+	require.Equal(t, "forge: request: transport error", Summary(err))
+}
+
+// Every failure that is not a status has a fixed summary.
+func TestEveryFailureSummaryIsFixedText(t *testing.T) {
+	const marker = "quoted-by-the-forge"
+	release := make(chan struct{})
+	t.Cleanup(func() { close(release) })
+	cases := map[string]struct {
+		handler http.HandlerFunc
+		ctx     func() (context.Context, context.CancelFunc)
+		call    func(Client, context.Context) error
+		summary string
+	}{
+		"redirect": {
+			handler: func(w http.ResponseWriter, r *http.Request) {
+				http.Redirect(w, r, "https://elsewhere.example/"+marker, http.StatusTemporaryRedirect)
+			},
+			summary: "forge: request: redirect refused, status 307",
+		},
+		"timeout": {
+			handler: func(w http.ResponseWriter, r *http.Request) {
+				select {
+				case <-release:
+				case <-r.Context().Done():
+				}
+			},
+			ctx: func() (context.Context, context.CancelFunc) {
+				return context.WithTimeout(context.Background(), 50*time.Millisecond)
+			},
+			summary: "forge: request: timeout",
+		},
+		"cancelled": {
+			handler: func(http.ResponseWriter, *http.Request) {},
+			ctx: func() (context.Context, context.CancelFunc) {
+				ctx, cancel := context.WithCancel(context.Background())
+				cancel()
+				return ctx, cancel
+			},
+			summary: "forge: request: cancelled",
+		},
+		"too large": {
+			handler: func(w http.ResponseWriter, _ *http.Request) {
+				_, _ = w.Write([]byte(marker + strings.Repeat(" ", maxResponseBytes)))
+			},
+			summary: "forge: read response: response too large",
+		},
+		"decode": {
+			handler: func(w http.ResponseWriter, _ *http.Request) { _, _ = io.WriteString(w, `{"ref":"`+marker+`"}`) },
+			summary: "forge: read branch: decode error",
+		},
+		"not editable": {
+			handler: func(w http.ResponseWriter, _ *http.Request) {
+				_, _ = io.WriteString(w, `{"type":"symlink","target":"`+marker+`","sha":"b"}`)
+			},
+			call: func(c Client, ctx context.Context) error {
+				_, err := c.GetFile(ctx, "a.yaml", "main")
+				return err
+			},
+			summary: "forge: read file: not an editable file",
+		},
+		"invalid request": {
+			handler: func(http.ResponseWriter, *http.Request) {},
+			call: func(c Client, ctx context.Context) error {
+				_, err := c.GetFile(ctx, "../"+marker, "main")
+				return err
+			},
+			summary: "forge: read file: invalid request",
+		},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			ctx, cancel := context.Background(), context.CancelFunc(func() {})
+			if tc.ctx != nil {
+				ctx, cancel = tc.ctx()
+			}
+			defer cancel()
+			call := tc.call
+			if call == nil {
+				call = func(c Client, ctx context.Context) error {
+					_, err := c.BranchHead(ctx, "main")
+					return err
+				}
+			}
+			err := call(newClient(t, serve(t, tc.handler)), ctx)
+			require.Error(t, err)
+			require.Equal(t, tc.summary, Summary(err))
+		})
+	}
 }

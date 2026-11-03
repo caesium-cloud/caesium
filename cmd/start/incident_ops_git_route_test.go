@@ -18,6 +18,7 @@ import (
 	"github.com/caesium-cloud/caesium/internal/incident"
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/caesium-cloud/caesium/pkg/env"
+	pkglog "github.com/caesium-cloud/caesium/pkg/log"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 )
@@ -40,6 +41,12 @@ type stubForge struct {
 	message string
 	written string
 	pullURL string
+	// location, when set, answers every request with a redirect to it, as sent.
+	location string
+	// pulls is what the pull request list returns.
+	pulls []any
+	// opened counts pull requests opened.
+	opened int
 }
 
 func newStubForge(t *testing.T, file string) *stubForge {
@@ -58,10 +65,15 @@ func (f *stubForge) serve(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(status)
 		_ = json.NewEncoder(w).Encode(body)
 	}
+	if f.location != "" {
+		w.Header()["Location"] = []string{f.location}
+		w.WriteHeader(http.StatusFound)
+		return
+	}
 	resource := strings.TrimPrefix(r.URL.Path, "/repos/acme/jobs/")
 	switch {
 	case resource == "pulls" && r.Method == http.MethodGet:
-		reply(http.StatusOK, []any{})
+		reply(http.StatusOK, append([]any{}, f.pulls...))
 	case resource == "git/ref/heads/main":
 		reply(http.StatusOK, map[string]any{"ref": "refs/heads/main", "object": map[string]any{"sha": forgeHeadCommit}})
 	case strings.HasPrefix(resource, "contents/") && r.Method == http.MethodGet:
@@ -83,6 +95,7 @@ func (f *stubForge) serve(w http.ResponseWriter, r *http.Request) {
 		var pull struct{ Title, Body, Head, Base string }
 		require.NoError(f.t, json.NewDecoder(r.Body).Decode(&pull))
 		f.body = pull.Body
+		f.opened++
 		f.pullURL = f.srv.URL + "/acme/jobs/pull/7"
 		reply(http.StatusCreated, map[string]any{
 			"number": 7, "html_url": f.pullURL, "state": "open",
@@ -141,6 +154,138 @@ func (r *previewRig) approve(t *testing.T, manifest string) *models.AgentAction 
 	return executed
 }
 
+// incidentSurfaces collects everything a reader of the incident, or of its
+// escalation, can read: the stored result, the incident read confined and not,
+// and the published and persisted events, which notifications render from.
+func (r *previewRig) incidentSurfaces(t *testing.T, bus *recordingBus, executed *models.AgentAction) map[string]string {
+	t.Helper()
+	surfaces := map[string]string{"stored result": string(executed.Result)}
+	for _, confined := range []bool{true, false} {
+		detail, err := incidentsvc.NewWithDatabase(context.Background(), r.db).GetForReader(r.inc.ID, confined)
+		require.NoError(t, err)
+		encoded, err := json.Marshal(detail)
+		require.NoError(t, err)
+		surfaces["incident read"] += string(encoded)
+	}
+	require.NotEmpty(t, bus.published)
+	for _, published := range bus.published {
+		surfaces["published events"] += string(published.Payload)
+	}
+	var persisted []models.ExecutionEvent
+	require.NoError(t, r.db.Find(&persisted).Error)
+	require.NotEmpty(t, persisted)
+	for i := range persisted {
+		surfaces["persisted events"] += string(persisted[i].Payload)
+	}
+	return surfaces
+}
+
+// TestTransportErrorFromTheForgeStaysOffTheIncident is Codex's round 3 finding
+// through the real client and executor. The forge answers with a Location header
+// Go's client cannot parse, and the client's error quotes it whole before
+// CheckRedirect runs. Only the call and a fixed category may reach the incident,
+// its events and the server log.
+func TestTransportErrorFromTheForgeStaysOffTheIncident(t *testing.T) {
+	const marker = "finance-webhook-secret"
+	rig := newPreviewRig(t, patchedJob)
+	stub := newStubForge(t, patchedJob)
+	stub.location = "/" + marker + "%zz"
+	bus := rig.routed(t, stub)
+	logged := lastLogSequence()
+
+	executed := rig.approve(t, strings.Replace(patchedJob, "REGION: eu", "REGION: us", 1))
+
+	var result struct {
+		Route   string `json:"route"`
+		Degrade string `json:"degrade"`
+		Reason  string `json:"reason"`
+	}
+	require.NoError(t, json.Unmarshal(executed.Result, &result), string(executed.Result))
+	require.Equal(t, "escalate", result.Route, string(executed.Result))
+	require.Equal(t, "forge_error", result.Degrade)
+	require.Equal(t, "forge: request: transport error", result.Reason)
+
+	surfaces := rig.incidentSurfaces(t, bus, executed)
+	entries := logsSince(logged)
+	require.NotEmpty(t, entries, "the degrade is logged")
+	for _, entry := range entries {
+		surfaces["server log"] += entry.Message + string(entry.Fields)
+	}
+	for name, text := range surfaces {
+		require.NotContains(t, text, marker, name)
+	}
+	require.Contains(t, surfaces["published events"], "forge: request: transport error", "the escalation says what failed")
+}
+
+// TestPullRequestSomeoneElseOpenedIsNotRecordedAsTheRoutes: the preview names the
+// branch, so a maintainer can open a pull request from it with another edit while
+// approval is pending. The route checks the manifest at that pull request's head
+// against the approved replacement, and escalates instead of claiming it.
+func TestPullRequestSomeoneElseOpenedIsNotRecordedAsTheRoutes(t *testing.T) {
+	rig := newPreviewRig(t, patchedJob)
+	stub := newStubForge(t, patchedJob)
+	bus := rig.routed(t, stub)
+	action, err := rig.exec.Execute(context.Background(), incident.ActionRequest{
+		IncidentID: rig.inc.ID,
+		Type:       incident.ActionTypeApplyJobdefPatch,
+		Params:     patchParams(t, strings.Replace(patchedJob, "REGION: eu", "REGION: us", 1)),
+	})
+	require.NoError(t, err)
+	branch := "caesium/patch-" + action.ID.String()
+	// The stub serves the unpatched file at every ref, so the head holds another
+	// change than the approved one.
+	stub.pulls = []any{map[string]any{
+		"number": 9, "html_url": stub.srv.URL + "/acme/jobs/pull/9", "state": "open",
+		"base": map[string]any{"ref": "main"},
+		"head": map[string]any{"ref": branch, "sha": forgeHeadCommit, "repo": map[string]any{"full_name": "acme/jobs"}},
+	}}
+	now := time.Now().UTC()
+	require.NoError(t, rig.db.Model(&models.ApprovalRequest{}).Where("action_id = ?", action.ID).Updates(map[string]any{
+		"decision": models.ApprovalDecisionApproved, "decider": "operator@example.com", "decided_at": now, "updated_at": now,
+	}).Error)
+	require.NoError(t, rig.db.Model(&models.AgentAction{}).Where("id = ?", action.ID).
+		Update("status", models.AgentActionStatusApproved).Error)
+	executed, err := rig.exec.ExecuteApproved(context.Background(), action.ID)
+	require.NoError(t, err)
+
+	var result struct {
+		Route    string `json:"route"`
+		Degrade  string `json:"degrade"`
+		Reason   string `json:"reason"`
+		PRBranch string `json:"pr_branch"`
+		PRURL    string `json:"pr_url"`
+	}
+	require.NoError(t, json.Unmarshal(executed.Result, &result), string(executed.Result))
+	require.Equal(t, "escalate", result.Route, string(executed.Result))
+	require.Equal(t, "pull_request_mismatch", result.Degrade)
+	require.Equal(t, branch, result.PRBranch)
+	require.Contains(t, result.Reason, branch)
+	require.Empty(t, result.PRURL)
+	require.Zero(t, stub.opened, "the route opens no second pull request")
+	require.Empty(t, stub.written, "the route writes nothing over it")
+	for name, text := range rig.incidentSurfaces(t, bus, executed) {
+		require.NotContains(t, text, "/acme/jobs/pull/9", name)
+	}
+}
+
+func lastLogSequence() uint64 {
+	entries := pkglog.Buffer().Snapshot()
+	if len(entries) == 0 {
+		return 0
+	}
+	return entries[len(entries)-1].Sequence
+}
+
+func logsSince(sequence uint64) []pkglog.LogEntry {
+	var out []pkglog.LogEntry
+	for _, entry := range pkglog.Buffer().Snapshot() {
+		if entry.Sequence > sequence {
+			out = append(out, entry)
+		}
+	}
+	return out
+}
+
 // TestPullRequestKeepsASharedTriggersSecretFromTheIncident is Codex's round 2
 // finding through the real surface. Marketing's job shares an HTTP trigger with a
 // finance job, so the confined render withholds its webhook secret from marketing's
@@ -185,28 +330,7 @@ func TestPullRequestKeepsASharedTriggersSecretFromTheIncident(t *testing.T) {
 	require.False(t, result.Diff.Empty)
 	require.Contains(t, result.Diff.Diff, "/hooks/marketing", "the result shows the proposal against the confined copy")
 
-	surfaces := map[string]string{"stored result": string(executed.Result)}
-
-	for _, confined := range []bool{true, false} {
-		detail, err := incidentsvc.NewWithDatabase(context.Background(), rig.db).GetForReader(rig.inc.ID, confined)
-		require.NoError(t, err)
-		encoded, err := json.Marshal(detail)
-		require.NoError(t, err)
-		surfaces["incident read"] += string(encoded)
-	}
-
-	require.NotEmpty(t, bus.published)
-	for _, published := range bus.published {
-		surfaces["published events"] += string(published.Payload)
-	}
-	var persisted []models.ExecutionEvent
-	require.NoError(t, rig.db.Find(&persisted).Error)
-	require.NotEmpty(t, persisted)
-	for i := range persisted {
-		surfaces["persisted events"] += string(persisted[i].Payload)
-	}
-
-	for name, text := range surfaces {
+	for name, text := range rig.incidentSurfaces(t, bus, executed) {
 		require.NotContains(t, text, secret, name)
 		require.NotContains(t, text, fileOnly, name)
 	}
