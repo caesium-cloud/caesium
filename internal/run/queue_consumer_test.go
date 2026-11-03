@@ -1,6 +1,7 @@
 package run
 
 import (
+	"context"
 	"encoding/json"
 	"testing"
 	"time"
@@ -11,6 +12,7 @@ import (
 	"github.com/caesium-cloud/caesium/pkg/jobdef"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
+	"gorm.io/gorm"
 )
 
 func TestQueueOverflowRefusedWhenConsumerDisabled(t *testing.T) {
@@ -68,6 +70,9 @@ func TestQueueOverflowRefusedWhenConsumerDisabled(t *testing.T) {
 	require.Equal(t, "after-slot", again.Params["token"])
 }
 
+// TestQueueOverflowRefusalReplaysRecordedIdempotentStart covers only the
+// up-front lookup. The post-admission re-read is
+// TestQueueOverflowRefusalRechecksKeyAfterLookupMiss.
 func TestQueueOverflowRefusalReplaysRecordedIdempotentStart(t *testing.T) {
 	db := testutil.OpenTestDB(t)
 	t.Cleanup(func() { testutil.CloseDB(db) })
@@ -97,6 +102,64 @@ func TestQueueOverflowRefusalReplaysRecordedIdempotentStart(t *testing.T) {
 	var runs int64
 	require.NoError(t, db.Model(&models.JobRun{}).Where("job_id = ?", job.ID).Count(&runs).Error)
 	require.Equal(t, int64(1), runs)
+}
+
+// TestQueueOverflowRefusalRechecksKeyAfterLookupMiss is the window the up-front
+// lookup cannot see. The enricher runs after that lookup misses and before
+// admission, and commits the concurrent winner there. A disabled-queue refusal
+// inserts nothing, so deleting the post-admission re-read fails this test.
+func TestQueueOverflowRefusalRechecksKeyAfterLookupMiss(t *testing.T) {
+	t.Run("matching request replays the winner", func(t *testing.T) {
+		assertQueueDisabledKeyRace(t, "queue-race-match", nil, startRequestHash(nil, ""), false)
+	})
+	t.Run("different request is a reused key", func(t *testing.T) {
+		assertQueueDisabledKeyRace(t, "queue-race-reuse", map[string]string{"token": "caller"}, startRequestHash(map[string]string{"token": "winner"}, ""), true)
+	})
+}
+
+func assertQueueDisabledKeyRace(t *testing.T, alias string, callerParams map[string]string, recordedHash string, wantReuse bool) {
+	t.Helper()
+	db, store := openIdempotencyStore(t)
+	job := createConcurrencyJob(t, db, alias, jobdef.ConcurrencyStrategyQueue, 1)
+	t.Cleanup(env.SetRunQueueConsumerEnabled(false))
+
+	var (
+		winnerID uuid.UUID
+		raced    bool
+	)
+	SetStartParamsEnricher(func(_ context.Context, conn *gorm.DB, jobID uuid.UUID, params map[string]string, _ bool) (map[string]string, error) {
+		// The winner's own start runs this enricher too; only race once.
+		if raced {
+			return params, nil
+		}
+		raced = true
+		winner, err := store.StartWithResult(context.Background(), jobID, nil)
+		require.NoError(t, err)
+		winnerID = winner.Run.ID
+		require.NoError(t, conn.Create(&models.RunStartIdempotency{
+			ID:             uuid.New(),
+			JobID:          jobID,
+			IdempotencyKey: "raced",
+			RequestHash:    recordedHash,
+			Outcome:        string(StartOutcomeCreated),
+			RunID:          &winnerID,
+		}).Error)
+		return params, nil
+	})
+	t.Cleanup(func() { SetStartParamsEnricher(nil) })
+
+	got, err := store.StartWithResult(t.Context(), job.ID, nil, WithStartParams(callerParams), WithStartIdempotencyKey("raced"))
+	require.True(t, raced)
+	if wantReuse {
+		require.ErrorIs(t, err, ErrIdempotencyKeyReused)
+		require.NotErrorIs(t, err, ErrRunQueueConsumerDisabled)
+	} else {
+		require.NoError(t, err)
+		require.True(t, got.Replayed)
+		require.NotNil(t, got.Run)
+		require.Equal(t, winnerID, got.Run.ID)
+	}
+	require.Equal(t, int64(1), countJobRuns(t, db, job.ID))
 }
 
 func TestQueueOverflowParksParamsWhenConsumerEnabled(t *testing.T) {
