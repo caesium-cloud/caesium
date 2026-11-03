@@ -2661,6 +2661,13 @@ evidence until those are fixed (G4, #610, runs it nightly in advisory mode throu
 `just soak-tests nightly advisory`; it sits in `UNPROMOTED_LANES` and has no
 manifest row).
 
+The SSE deadline finding (#602) has since been corrected: each streaming
+chunk renews the bounded 30-second write deadline, and the 15-second heartbeat
+keeps quiet subscribers alive. `TestSSEStreamSurvivesIdleMinute` holds one real
+`/v1/events` subscription idle for 60 seconds, then starts a run over HTTP and
+requires its event on the original response body. The historical soak failures
+above remain failed evidence; F3 still requires fresh soak qualification.
+
 ### Nightly qualification schedule and the release gate (distributed-testing W9/G4)
 
 W9-ζ (#610) scheduled the nightly set and made publication depend on

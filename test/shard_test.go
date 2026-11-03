@@ -21,6 +21,7 @@ import (
 
 // Milliseconds, using the maximum observed across Docker amd64/arm64, Podman,
 // and Kubernetes in https://github.com/caesium-cloud/caesium/actions/runs/34236365746.
+// The minute-idle SSE scenario uses its fixed wait as an initial estimate.
 // These are scheduling hints, never an allowlist. New scenarios get a positive
 // default cost; deleted scenarios are ignored. See docs/ci.md for refreshing.
 //
