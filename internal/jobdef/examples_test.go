@@ -23,6 +23,9 @@ func TestExamplesSuite(t *testing.T) {
 }
 
 func (s *ExamplesSuite) TestExampleManifestsConformToSchema() {
+	// docs/examples/data-circuit-breaker.job.yaml declares the gated assertion
+	// surface, which Validate refuses unless the master gate is on.
+	s.T().Setenv("CAESIUM_DATA_ASSERTIONS_ENABLED", "true")
 	roots := []string{
 		filepath.Join("..", "..", "docs", "examples"),
 		filepath.Join("..", "..", "docs", "examples-k8s"),

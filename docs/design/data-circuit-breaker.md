@@ -1,14 +1,22 @@
 # Design: Data Circuit Breaker — Dataset Holds & Statistical Assertions
 
-> Status: Brainstorm/Design — proposal for runtime data-quality assertions and
-> dataset-level circuit breaking ("holds"). No implementation yet. Companions:
-> [`contract-enforcement.md`](contract-enforcement.md) (static
+> Status: Shipped. Plan 1 of the closed-loop arc closed out on 2026-11-03; the
+> plan is [`../exec-plans/completed/data-circuit-breaker.md`](../exec-plans/completed/data-circuit-breaker.md)
+> (umbrella [`../exec-plans/active/closed-loop-arc.md`](../exec-plans/active/closed-loop-arc.md)).
+> By phase: **Phase 0 Observe**, **Phase 1 Assert**, and **Phase 2 Break the circuit**
+> shipped (#434, #436, #439); the operator surface (CLI, REST, Console) shipped
+> (#442, #445, #725); **Phase 3** shipped in part: the `data_quality_hold`
+> incident, the `release_hold` action, held ⇒ not fresh, `why` provenance, and the
+> Git pull-request route of `apply_jobdef_patch` (#710, #708, #719, #721, #724).
+> Not built: the `park` run disposition (parked at the arc level) and assertion
+> backtests (Plan 3, [`backtesting.md`](backtesting.md)). Where this record and the
+> code disagree, the code wins; the operator guide is
+> [`../job-definitions.md`](../job-definitions.md#data-assertions--the-circuit-breaker),
+> the walkthrough [`../tour-data-loop.md`](../tour-data-loop.md).
+> Companions: [`contract-enforcement.md`](contract-enforcement.md) (static
 > half of the contract story), [`freshness-scheduling.md`](freshness-scheduling.md)
 > (shared declared-dataset registry), [`agent-in-the-loop.md`](agent-in-the-loop.md)
 > (holds become an incident class and a gated action).
-> → **active — Plan 1 of the closed-loop arc** (see
-> [`../exec-plans/active/data-circuit-breaker.md`](../exec-plans/active/data-circuit-breaker.md);
-> umbrella [`../exec-plans/active/closed-loop-arc.md`](../exec-plans/active/closed-loop-arc.md)).
 
 ## Problem
 
@@ -108,22 +116,29 @@ holds; neither design ships a private copy.
 steps:
   - name: load-transactions
     image: etl/load:1.4
-    produces:
-      - dataset: warehouse/transactions_daily  # registry identity
-        assertions:
-          # min is an absolute floor (always on); deltaFromBaseline means
-          # |value − median(last N clean runs)| must be ≤ 50% of the median.
-          rowCount: {min: 1000, deltaFromBaseline: 50%}
-          nullRate: {metric: null_rate_customer_id, max: 0.02}
-          freshness: {watermark: max_event_time, maxLag: 26h}  # RFC3339 metric
-          custom:
-            - {metric: dedup_ratio, max: 0.05}  # any scalar the step emits
-        onViolation: hold                       # hold | warn | fail
+    datasets:
+      produces:
+        - name: warehouse/transactions_daily  # registry identity
+          assertions:
+            # min is an absolute floor (always on); deltaFromBaseline means
+            # |value − median(last N clean runs)| must be ≤ 50% of the median.
+            rowCount: {min: 1000, deltaFromBaseline: "50%"}
+            nullRate: {metric: null_rate_customer_id, max: 0.02}
+            freshness: {watermark: max_event_time, maxLag: 26h}  # RFC3339 metric
+            custom:
+              - {metric: dedup_ratio, max: 0.05}  # any scalar the step emits
+          onViolation: hold                       # hold | warn | fail
+          release: auto                           # auto (default) | manual
   - name: publish-report
     image: etl/report:2.0
-    consumes:
-      - dataset: warehouse/transactions_daily  # admission gate input
+    datasets:
+      consumes:
+        - warehouse/transactions_daily  # admission gate input
 ```
+
+*As shipped, the identity key is `name` and the block lives under
+`steps[].datasets`, matching the freshness registry; the sketch above was
+`dataset:` directly under the step in the first draft.*
 
 The step self-reports on stdout (one line, JSON, same parse pass as the other
 markers in `pkg/task/output.go` `parseMarkers`):
@@ -350,7 +365,7 @@ claim fence on `run.EvaluateDataAssertionsClaimed`).
   rendered diff rather than half-succeeding, and — like every tier-3 action —
   it is refused outright under `CAESIUM_AUTH_MODE=none`. This knob is a
   recorded deviation from this section's original four-knob enumeration; see
-  [`../exec-plans/active/data-circuit-breaker.md`](../exec-plans/active/data-circuit-breaker.md)
+  [`../exec-plans/completed/data-circuit-breaker.md`](../exec-plans/completed/data-circuit-breaker.md)
   § Source-Of-Truth Note for the authorization
   ([`closed-loop-arc.md`](../exec-plans/active/closed-loop-arc.md) § Synergies
   assigns the Git-PR route to this plan's Stream F) and item **N-2** for this
@@ -360,9 +375,9 @@ claim fence on `run.EvaluateDataAssertionsClaimed`).
 
 ```
 caesium dataset list                                  # registry + status
-caesium dataset holds [--status active] [--json]
-caesium dataset release <ns>/<name> [--reason ...] [--tolerate <assertion>=<dur>]
-caesium dataset metrics <ns>/<name> --metric rowCount [--json]
+caesium dataset holds [--status active|released|all] [--all-namespaces] [--json]
+caesium dataset release <name> --reason ... [--tolerate <assertion>=<dur>] [--namespace <ns>]
+caesium dataset metrics <name> --metric rowCount [--json] [--namespace <ns>]
 ```
 
 `--json` goes to stdout, clean and parseable — asserted by integration tests
@@ -426,13 +441,17 @@ their own scenarios.
 
 - **Phase 0 — Observe.** Marker parsing, `DatasetMetric` persistence,
   registry table, baseline read API, metrics CLI/UI sparkline. No
-  enforcement; seeds baselines while the rest is reviewed.
+  enforcement; seeds baselines while the rest is reviewed. *Shipped.*
 - **Phase 1 — Assert.** Evaluator with `warn|fail`, violations persisted,
-  lint. Feature-complete for teams that only want red runs.
+  lint. Feature-complete for teams that only want red runs. *Shipped.*
 - **Phase 2 — Break the circuit.** `DatasetHold`, admission gate, release
   (ack + clean-run), events/notifications, holds CLI/UI. The headline drop.
+  *Shipped.*
 - **Phase 3 — Ergonomics & reach.** `park` disposition with release-drain,
   agent actions + incident class, freshness integration, backtest evaluation.
+  *Shipped:* the incident class, `release_hold`, the Git pull-request route,
+  freshness integration, `why` provenance, and per-assertion run results.
+  *Not built:* `park` (parked at the arc level) and backtest evaluation (Plan 3).
 
 ## Non-goals (v1)
 

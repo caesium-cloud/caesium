@@ -2101,6 +2101,9 @@ func TestRenderManifestRefusesAnInvalidDefinition(t *testing.T) {
 // TestRenderedExamplesRoundTrip runs every shipped example through JSON (the
 // proposal shape), the renderer and the real parser.
 func TestRenderedExamplesRoundTrip(t *testing.T) {
+	// docs/examples/data-circuit-breaker.job.yaml declares the gated assertion
+	// surface, which the real parser refuses unless the master gate is on.
+	t.Setenv("CAESIUM_DATA_ASSERTIONS_ENABLED", "true")
 	paths, err := filepath.Glob("../../docs/examples/*.job.yaml")
 	require.NoError(t, err)
 	require.NotEmpty(t, paths)

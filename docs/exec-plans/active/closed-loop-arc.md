@@ -1,6 +1,6 @@
 # Closed-Loop Orchestration — The Arc
 
-Last updated: 2026-11-02
+Last updated: 2026-11-03
 
 > Status: **Umbrella arc (active).** This document is the program-level source
 > of truth for the next several execution plans. It is **not** itself a wave
@@ -91,7 +91,7 @@ siblings (`freshness-scheduling` ≈ 4 waves / 11 PRs; `reproduce` ≈ 5 waves).
 | # | Plan | Slug | Loop | Size | Status |
 |---|---|---|---|---|---|
 | 0 | **Trust the substrate** — fix the six ledger bugs, **close the approval loop** (proposal → `ApprovalRequest` → approve → execute, with the direct `apply_jobdef_patch` route), de-hollow and widen the auth-enabled integration lane, make CI gate merges, cut `v0.1.0` with a downloadable CLI, name the shipped verbs in the README, ship `docs/getting-started.md`, delete dead scaffolding, file the unfiled follow-ups | [`trust-the-substrate.md`](../completed/trust-the-substrate.md) | foundation | M–L (2–3 waves) | Shipped (W1+W2, `v0.1.0` released 2026-09-07) |
-| 1 | **The data loop** — data circuit breaker **plus** its previously-deferred Phase 3: `data_quality_hold` incidents, `release_hold` action, held ⇒ not-fresh, `why` provenance | [`data-circuit-breaker.md`](data-circuit-breaker.md) | data | XL (~4 waves) | In progress — W1–W6 merged (A–E bar part of E2, F1, F2, F4); F3, F5 and N-1 remain |
+| 1 | **The data loop** — data circuit breaker **plus** its previously-deferred Phase 3: `data_quality_hold` incidents, `release_hold` action, held ⇒ not-fresh, `why` provenance | [`data-circuit-breaker.md`](../completed/data-circuit-breaker.md) | data | XL (~4 waves) | Shipped — W1–W8 merged, plan archived to `completed/` |
 | 2 | **The compute loop** — resource right-sizing with Stream E recast as an incident action, k8s paths exercised in the kind lane, fan-out partition stats, `why` provenance for escalations | [`resource-right-sizing.md`](resource-right-sizing.md) | compute | XL (~4 waves) | In progress — W1 shipped (A, H-1); B onward remain |
 | 3 | **The proof loop** — backtesting, after a design refresh (`internal/outputdiff` reuse; reconcile with the fan-out-aware replay core), **plus** proposal verification in the approval flow and assertion-threshold backtests | [`backtesting.md`](backtesting.md) | proof | XL (~4–5 waves) | Not started |
 | 4 | **The time loop** *(optional tail)* — window scheduling re-cut to P0 over the shared stats substrate; cost/carbon signals parked | [`window-scheduling.md`](window-scheduling.md) | time | L (~2–3 waves) | Not started — optional |
@@ -110,7 +110,7 @@ Updated by each child plan's close-out (the plan's N-1 item ticks its row here).
 | Plan | Waves shipped | Last PR | Notes |
 |---|---|---|---|
 | 0 trust-the-substrate | 2 | #428 (`8146b45`) | W1: Streams A, B, C, F, H-1 shipped (#386–#393); W2: D, E1–E3, H-2 floor, N-1, N-2 shipped (#421–#428) + required status checks applied; E4: `v0.1.0` released 2026-09-07 — https://github.com/caesium-cloud/caesium/releases/tag/v0.1.0 (image digests in `docs/ci.md` § v0.1.0); N-4 closed out, plan archived to `completed/` |
-| 1 data-circuit-breaker | 5 complete; W4 merged bar E2's passing-assertion rows | #719 (`ff50ae08`) | W1: Stream A (A1–A5), H-1, N-2 shipped (#432–#434); W2: Stream B (#436); W3: Stream C (#439); W4-α: Stream D reads/CLI (#442); W4-β: Stream E Console (#445); W5: F1 (#710), F4 (#708); W6: F2 (#719). Next: W7 (F3 + F5), then the rest of E2 and N-1. |
+| 1 data-circuit-breaker | 8 | #731 (N-1; last runtime PR #724 `91a7b527`) | W1: Stream A (A1–A5), H-1, N-2 shipped (#432–#434); W2: Stream B (#436); W3: Stream C (#439); W4-α: Stream D reads/CLI (#442); W4-β: Stream E Console (#445); W5: F1 (#710), F4 (#708); W6: F2 (#719); W7: F3 (#724), F5 (#721); W8: the rest of E2 (#725), then N-1 (#731, the docs close-out and `docs/tour-data-loop.md`); plan archived to `completed/data-circuit-breaker.md`. |
 | 2 resource-right-sizing | 1 | #449 (`f1092a59`) | W1: Stream A (A1–A3) and H-1 shipped 2026-10-01 with `ci-ok` green. B onward and H-2 retain their dependencies. |
 | 3 backtesting | 0 | — | |
 | 4 window-scheduling | 0 | — | optional |
@@ -370,7 +370,7 @@ Explicit decisions so they don't rot as prose inside archived plans:
   positioning this arc extends (see its 2026-09 status update).
 - [`docs/roadmap.md`](../../roadmap.md) Phase 5 — the roadmap entry for this arc.
 - [`trust-the-substrate.md`](../completed/trust-the-substrate.md) — Plan 0.
-- [`data-circuit-breaker.md`](data-circuit-breaker.md) — Plan 1; design of
+- [`data-circuit-breaker.md`](../completed/data-circuit-breaker.md) — Plan 1; design of
   record [`docs/design/data-circuit-breaker.md`](../../design/data-circuit-breaker.md).
 - [`resource-right-sizing.md`](resource-right-sizing.md) — Plan 2; design of
   record [`docs/design/resource-right-sizing.md`](../../design/resource-right-sizing.md).

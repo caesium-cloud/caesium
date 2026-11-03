@@ -13,6 +13,7 @@ is and what is still in flight; they are not operator documentation.
 | [job-definitions.md](job-definitions.md) | The authoring reference: DAG wiring, branching, dynamic fan-out, scheduling controls, caching, contracts, freshness, volumes, secrets, Git sync, lint / diff / apply. |
 | [job-schema-reference.md](job-schema-reference.md) | Field-by-field schema generated from `pkg/jobdef` by `caesium job schema --doc`. Do not edit by hand. |
 | [caesium-job-llm-reference.md](caesium-job-llm-reference.md) | Compact authoring reference for coding assistants, plus the executable harness scenario format. |
+| [tour-data-loop.md](tour-data-loop.md) | A ten-minute walkthrough of the data circuit breaker: assert on a dataset, hold it on a bad load, watch the consumer skip, approve the release. |
 | [backfill.md](backfill.md) | Backfills over cron intervals through the API, CLI, and console. |
 | [reproduce.md](reproduce.md) | `caesium reproduce`: rebuild one historical task on your own Docker daemon. |
 | [temporal.md](temporal.md) | Driving Caesium jobs from Temporal workflows over the REST API. |
@@ -58,7 +59,7 @@ is and what is still in flight; they are not operator documentation.
 | [freshness-scheduling.md](design/freshness-scheduling.md) | Shipped. Datasets, freshness SLOs, schedule on arrival. |
 | [contract-enforcement.md](design/contract-enforcement.md) | Shipped. Cross-job schema contracts checked at lint / diff / apply. |
 | [agent-in-the-loop.md](design/agent-in-the-loop.md) | Shipped runtime. Incident triage and approval-gated remediation. |
-| [data-circuit-breaker.md](design/data-circuit-breaker.md) | Active, Plan 1 of the closed-loop arc. Statistical assertions and dataset holds. |
+| [data-circuit-breaker.md](design/data-circuit-breaker.md) | Shipped, Plan 1 of the closed-loop arc. Statistical assertions and dataset holds. |
 | [resource-right-sizing.md](design/resource-right-sizing.md) | Active, Plan 2. Learned requests and OOM retry escalation. |
 | [backtesting.md](design/backtesting.md) | Active, Plan 3. Replay a change over recorded production runs before merge. |
 | [window-scheduling.md](design/window-scheduling.md) | Active, Plan 4 (optional). Deadline windows instead of cron guesses. |
@@ -71,13 +72,13 @@ is and what is still in flight; they are not operator documentation.
 | Plan | Scope |
 | --- | --- |
 | [closed-loop-arc.md](exec-plans/active/closed-loop-arc.md) | Umbrella for Plans 0 to 4. Owns cross-plan ordering and shared conventions; not itself a wave target. |
-| [data-circuit-breaker.md](exec-plans/active/data-circuit-breaker.md) | Plan 1, the data loop: `##caesium::metrics`, assertions, holds, incidents. |
 | [resource-right-sizing.md](exec-plans/active/resource-right-sizing.md) | Plan 2, the compute loop: stats substrate, recommendations, OOM escalation. |
 | [backtesting.md](exec-plans/active/backtesting.md) | Plan 3, the proof loop: backtest proposals against recorded runs. |
 | [window-scheduling.md](exec-plans/active/window-scheduling.md) | Plan 4, the time loop. Optional tail of the arc. |
 | [distributed-testing.md](exec-plans/active/distributed-testing.md) | Cross-cutting: make a green `ci-ok` mean the distributed guarantees hold. 30 of 31 items done; F3 open on product findings. |
 
 Completed plans live in [exec-plans/completed/](exec-plans/completed/); the most recent are
+[data-circuit-breaker.md](exec-plans/completed/data-circuit-breaker.md) (Plan 1: `##caesium::metrics`, assertions, dataset holds, incidents, `release_hold`),
 [execution-connectors.md](exec-plans/completed/execution-connectors.md) (one optional Temporal adapter and the `connectors` CI lane),
 [identity-and-access.md](exec-plans/completed/identity-and-access.md) (namespaces, grants, policy file, Keycloak lane, `caesium login`),
 [trust-the-substrate.md](exec-plans/completed/trust-the-substrate.md) (Plan 0, cut `v0.1.0`),

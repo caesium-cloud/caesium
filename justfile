@@ -440,6 +440,7 @@ run: build
         -e DOCKER_HOST=unix:///var/run/docker.sock \
         -e CAESIUM_AUTH_MODE={{ auth_mode }} \
         -e CAESIUM_AUTH_REQUIRE_TLS=false \
+        -e CAESIUM_DATA_ASSERTIONS_ENABLED=true \
         --user 0:0 \
         {{ local_image_ref }}:{{ tag }} start
 
@@ -750,6 +751,7 @@ hydrate:
     {{ container_cli }} run --platform {{ platform }} \
         --rm \
         --network=host \
+        -e CAESIUM_DATA_ASSERTIONS_ENABLED=true \
         -v {{ repo_dir }}/docs/examples:/examples:ro \
         {{ local_image_ref }}:{{ tag }} job apply --server http://127.0.0.1:{{ port }} --path /examples
 

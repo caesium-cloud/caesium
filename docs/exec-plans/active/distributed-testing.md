@@ -1960,7 +1960,7 @@ hook or clock-seam file is allowed.
   predictor semantics. Test existing queue/priority behavior without promising
   starvation freedom or new deadline behavior. New window scenarios await that
   plan's merged contracts.
-- [Data circuit breaker](data-circuit-breaker.md) owns its operator UI and
+- [Data circuit breaker](../completed/data-circuit-breaker.md) owns its operator UI and
   incident/freshness integration. Refresh PR #442 and subsequent wave status
   at the execution base; reuse merged scenarios rather than recreating them.
   B2's event hook and any sibling event/metrics, UI shared-file, or CI writer
@@ -2149,7 +2149,7 @@ Use `$draft-exec-plan` to revise the plan without starting implementation.
   [job-definition reference](../../caesium-job-llm-reference.md): developer-journey
   and fixture contracts.
 - [Trust the Substrate](../completed/trust-the-substrate.md),
-  [closed-loop arc](closed-loop-arc.md), [data circuit breaker](data-circuit-breaker.md),
+  [closed-loop arc](closed-loop-arc.md), [data circuit breaker](../completed/data-circuit-breaker.md),
   [resource right-sizing](resource-right-sizing.md), [backtesting](backtesting.md),
   and [window scheduling](window-scheduling.md): prior work and sibling ownership.
 - [Native drafting skill](../../../.codex/skills/draft-exec-plan/SKILL.md) and

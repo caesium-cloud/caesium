@@ -238,7 +238,7 @@ against `master` on the date above.
    `apply_jobdef_patch` route through the shipped jobdefs diff/apply service),
    plus Plan 1 **F3** (the **Git-PR provenance route** of `apply_jobdef_patch`,
    the item that also adds `CAESIUM_GIT_WRITE_CREDENTIALS` to `Environment`;
-   [`data-circuit-breaker.md`](data-circuit-breaker.md) § Stream F is drafted,
+   [`data-circuit-breaker.md`](../completed/data-circuit-breaker.md) § Stream F is drafted,
    F1–F5). **Stream E consumes that
    pipeline; it does not build any of it.**
 8. **Fan-out instances are their own `TaskRun` rows.** `internal/models/run.go`
@@ -831,7 +831,7 @@ client-side (E1(c)).
       [`trust-the-substrate.md`](../completed/trust-the-substrate.md) **C4 + C7** — the
       proposal → `ApprovalRequest` → approve → execute pipeline and the
       **direct** `apply_jobdef_patch` route — and
-      [`data-circuit-breaker.md`](data-circuit-breaker.md) **F3**, the **Git-PR
+      [`data-circuit-breaker.md`](../completed/data-circuit-breaker.md) **F3**, the **Git-PR
       provenance route** of `apply_jobdef_patch` (the item that also adds
       `CAESIUM_GIT_WRITE_CREDENTIALS` to `Environment`). Never in the same wave
       as Plan 1 Stream F or Plan 3 Stream F (shared `internal/incident/` files
@@ -1019,7 +1019,7 @@ Surfaces the backend through the jobs feature, gated on the `RightSizing`
       and wide (its own Recon Ledger records why; do not re-derive it here) and
       **C4 + C7** wire the approval pipeline the scenario asserts; the Git-PR
       half additionally needs
-      [`data-circuit-breaker.md`](data-circuit-breaker.md) **F3**. Land
+      [`data-circuit-breaker.md`](../completed/data-circuit-breaker.md) **F3**. Land
       this item in the first wave so Stream A's end-to-end gate has a stress
       image + enabled stats to drive; the E scenario lands with E1.
       Files: new `build/Dockerfile.stress`, `justfile`,
@@ -1144,7 +1144,7 @@ the lane the note calls hypothetical already exists in `ci.yml`.
 
 **Cross-plan order (the arc wins).** This plan runs **after Plan 0
 ([`trust-the-substrate.md`](../completed/trust-the-substrate.md)) and Plan 1
-([`data-circuit-breaker.md`](data-circuit-breaker.md))**. Two hard edges:
+([`data-circuit-breaker.md`](../completed/data-circuit-breaker.md))**. Two hard edges:
 
 - **Stream E after Plan 0 C4/C7 and after Plan 1 F3.** E1 depends on the
   approval pipeline *existing* (C4 proposal → `ApprovalRequest`; C7 approve →
@@ -1481,7 +1481,7 @@ The plan is done when **all** of these hold:
   route) and **H-1** (the de-hollowed, widened auth lane) are hard prerequisites
   for Stream E. Its Recon Ledger is the verified bug list this plan does not
   re-litigate.
-- [`data-circuit-breaker.md`](data-circuit-breaker.md) — **Plan 1.** Its
+- [`data-circuit-breaker.md`](../completed/data-circuit-breaker.md) — **Plan 1.** Its
   **F3** (in the drafted § "Stream F — Agent & freshness integration", items
   F1–F5) builds the **Git-PR provenance route** of `apply_jobdef_patch` and
   adds `CAESIUM_GIT_WRITE_CREDENTIALS` to `Environment` — the route Stream E's

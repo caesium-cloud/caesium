@@ -433,7 +433,7 @@ direct `jobdefs/diff` + `apply` path. The agent cannot choose the route; the
 executor derives it from provenance.
 
 *Amended 2026-09-07 (Plan 1 N-2):* naming the two routes precisely, since
-[`data-circuit-breaker.md`](../exec-plans/active/data-circuit-breaker.md) Stream
+[`data-circuit-breaker.md`](../exec-plans/completed/data-circuit-breaker.md) Stream
 F builds the second one as new work.
 
 - **The direct route ships today** (trust-the-substrate C7,
@@ -444,7 +444,7 @@ F builds the second one as new work.
   change the job's own `metadata.remediation` block; an agent may not edit
   the policy that governs it.
 - **The Git-PR route** —
-  [`data-circuit-breaker.md`](../exec-plans/active/data-circuit-breaker.md)
+  [`data-circuit-breaker.md`](../exec-plans/completed/data-circuit-breaker.md)
   Stream F item **F3**. For a job with non-empty `ProvenanceRepo`,
   `internal/incident/provenance.go` branches from the source's ref, patches the
   job's document in the manifest at `ProvenancePath`, and opens a pull request

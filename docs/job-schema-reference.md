@@ -38,6 +38,7 @@ This document is generated from the job definition Go structs (`pkg/jobdef`). It
 | `podAnnotations` | map[string]string | optional | Default annotations applied to Kubernetes step pods. |
 | `automountServiceAccountToken` | boolean | optional | Default Kubernetes pod service-account token setting. |
 | `datasets` | object | optional | Freshness-driven scheduling surface: external `sources` the job's steps consume plus the `skipWhenFresh` control. See [Datasets & Freshness](#datasets--freshness). Feature-gated behind `CAESIUM_FRESHNESS_ENABLED`; scheduling metadata excluded from the cache identity hash. |
+| `onUpstreamHold` | string | optional | What a run does when it is admitted while a dataset one of its steps consumes is held by the data circuit breaker: `skip` (default) admits the run straight to terminal `skipped` with reason `dataset_hold:<namespace>/<name>`; `run` proceeds on the held data. See [Data Assertions & the Circuit Breaker](#data-assertions--the-circuit-breaker). Requires `CAESIUM_DATA_ASSERTIONS_ENABLED=true`; admission metadata excluded from the cache identity hash. |
 | `remediation` | object | optional | Opt-in to agent-in-the-loop incident remediation: `profile`, `classes`, `maxAttempts`, `autonomy`, `escalation`. See [Remediation](#remediation). Feature-gated behind `CAESIUM_AGENT_REMEDIATION_ENABLED`; policy metadata excluded from the cache identity hash. |
 
 ## Trigger
@@ -128,7 +129,7 @@ Each step represents a DAG node backed by a task/atom pair. Steps default to the
 | `triggerRule` | string | optional | Upstream completion policy such as `all_success`, `all_done`, or `one_success`. |
 | `outputSchema` | object | optional | JSON Schema fragment describing this step's emitted outputs. |
 | `inputSchema` | map[string]object | optional | Required output keys per predecessor step for contract validation. |
-| `datasets` | object | optional | Per-step dataset surface: `consumes` (legacy dataset names or objects with `name`/`schema`) and `produces` (datasets with freshness SLOs and optional contract schemas). See [Datasets & Freshness](#datasets--freshness). Scheduling and apply-time contract metadata are excluded from the cache identity hash. |
+| `datasets` | object | optional | Per-step dataset surface: `consumes` (legacy dataset names or objects with `name`/`schema`) and `produces` (datasets with freshness SLOs, optional contract schemas, and optional `assertions` / `onViolation` / `release` for the data circuit breaker). See [Datasets & Freshness](#datasets--freshness). Scheduling and apply-time contract metadata are excluded from the cache identity hash. |
 | `cache` | boolean or object | optional | Enable task caching; accepts `true`, `false`, `{ttl: "12h"}`, `{ttl: "12h", version: 2}`, `{ttl: "never"}`, `{chain: "values"}`, `{pinDigests: true}`, or `{pinDigests: true, digestTTL: 0}`. |
 
 ### Cache
@@ -204,6 +205,33 @@ Freshness-driven scheduling lets a job declare the datasets its steps produce an
 | `produces[].freshness` | duration | optional | Target staleness SLO as a Go duration (e.g. `6h`) — how stale consumers tolerate this dataset being. |
 | `produces[].maxStaleness` | duration | optional | Hard bound; a breach emits `freshness_violated`. |
 | `produces[].watermark` | object | optional | `{key: <output-key>}` names the `##caesium::output` key this step emits to advance the dataset's watermark. It is an output key on the existing zero-SDK output contract, not a JSONPath. |
+| `produces[].assertions` | object | optional | Data-quality checks on the metrics this step self-reports with `##caesium::metrics`: `rowCount`, `nullRate`, `freshness`, and `custom[]`. See [Data Assertions & the Circuit Breaker](#data-assertions--the-circuit-breaker). Requires `CAESIUM_DATA_ASSERTIONS_ENABLED=true`. |
+| `produces[].onViolation` | string | optional | What a violated assertion does: `warn` (default; record it), `fail` (fail the task), or `hold` (let the task succeed and hold the dataset). Rejected unless `assertions` is declared. |
+| `produces[].release` | string | optional | How an active hold on this dataset ends: `auto` (default; the next clean run of the holding job releases it) or `manual` (only a human or an approved `release_hold` action does). |
+
+### Data Assertions & the Circuit Breaker
+Caesium cannot count rows: a step reports what it observed by printing one `##caesium::metrics` line on stdout, a flat JSON object, and the post-task evaluator checks it against the assertions declared on the produced dataset. The reserved key `dataset` selects the declared dataset the other keys describe; omit it when the step declares exactly one produced dataset. Every other key is a metric, and its value must be a JSON number or an RFC3339 timestamp (stored as epoch seconds); other values are dropped. Several lines merge, the last write winning per dataset and metric, and a malformed line is skipped. Samples are capped at 16 KiB per task, separately from `##caesium::output`.
+
+```sh
+echo '##caesium::metrics {"dataset":"warehouse/orders","rowCount":10400,"null_rate_customer_id":0.001,"max_event_time":"2026-07-03T01:12:00Z"}'
+```
+
+| Assertion | Reads | Fields |
+|-----------|-------|--------|
+| `assertions.rowCount` | The metric `rowCount`, or `metric` when set. | `metric`, `min`, `max`, `deltaFromBaseline` |
+| `assertions.nullRate` | The metric `nullRate`, or `metric` when set. | `metric`, `min`, `max`, `deltaFromBaseline` |
+| `assertions.freshness` | An RFC3339 metric named by `watermark`; the lag is the evaluation time minus that value. | `watermark` (required), `maxLag` (required, a positive Go duration) |
+| `assertions.custom[]` | Any scalar metric the step emits. | `metric` (required), `min`, `max`, `deltaFromBaseline` |
+
+Each `rowCount`, `nullRate`, and `custom[]` entry needs at least one of `min`, `max`, `deltaFromBaseline`; `min` may not exceed `max`. `min` and `max` are absolute bounds and enforce from the first run. `deltaFromBaseline` is a percentage string such as `"50%"`: the value may differ from the median of the last `CAESIUM_BASELINE_WINDOW` (default 20) clean samples by at most that share of the median. Below `CAESIUM_BASELINE_MIN_SAMPLES` (default 5) clean samples it is recorded as `seeding` and never fails or holds. Two assertions on one dataset may not read the same metric. A declared metric the step does not emit is itself a violation (`missing`); when the marker stream was lost (unreadable log, or more than 16 KiB of samples) the result is the warn-only `unavailable` instead.
+
+`onViolation` chooses what a violation does. `warn` records it on the task and emits `data_violation_recorded`. `fail` fails the task, as `metadata.schemaValidation: fail` does. `hold` lets the task succeed and opens a hold on the dataset: one active hold per dataset, one `dataset_held` event and one alert for the whole hold, with later violations adding to its occurrence count. While a dataset is held, a run of any job that consumes it (`steps[].datasets.consumes`) is admitted straight to terminal `skipped` with reason `dataset_hold:<namespace>/<name>`, unless that job sets `metadata.onUpstreamHold: run`. The hold also reports the dataset as `held` (not fresh) to freshness scheduling, and opens a `data_quality_hold` incident when `CAESIUM_AGENT_REMEDIATION_ENABLED` is on.
+
+A hold ends in one of three ways. With `release: auto` (the default) the next run of the holding job whose assertions all pass releases it. A human releases it with `caesium dataset release <name> --reason ...` or `POST /v1/datasets/holds/:id/release`, which are refused under `CAESIUM_AUTH_MODE=none`. An approved `release_hold` remediation action does the same through the incident pipeline. `release: manual` removes the first. Release is level-triggered: runs already skipped are not re-run.
+
+Replay-quarantined runs never record metrics, open a hold, or release one. A fanned step is evaluated per partition, and the partitions' verdicts collapse into the one hold. The whole surface is inert, and a manifest that declares it is refused with a message naming the variable, unless `CAESIUM_DATA_ASSERTIONS_ENABLED=true` is set in the server's environment and in the shell of `caesium job lint` and `caesium job apply`. It is post-task metadata and never enters the cache identity hash; a task served from cache evaluates nothing.
+
+Operator reads: `caesium dataset holds`, `caesium dataset metrics <name> --metric <metric>`, `caesium dataset release`, `caesium why <run-id> --job-id <id> --task <name>` (names the hold behind a skipped run), `GET /v1/datasets/holds`, `GET /v1/datasets/:ns/:name/metrics`, and `GET /v1/jobs/:id/runs/:run_id/assertions` (every check's outcome, passes included). A runnable example is `docs/examples/data-circuit-breaker.job.yaml`; the walkthrough is `docs/tour-data-loop.md`.
 
 ### Source Datasets (`metadata.datasets.sources`)
 External datasets nobody in Caesium produces — the upstreams a consuming step depends on. A late arrival surfaces as stale-upstream rather than a failed run.
@@ -273,3 +301,4 @@ An omitted list and an explicitly empty one are DIFFERENT policies, at both leve
 ## Secret References
 
 Use `secret://` URIs for sensitive values. Supported providers: `env`, `k8s`, `vault`. See `docs/job-definitions.md` for details.
+

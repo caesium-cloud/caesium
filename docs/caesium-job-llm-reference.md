@@ -56,7 +56,7 @@ steps:
 ### Structure at a glance
 
 - `apiVersion: v1` and `kind: Job` (both required)
-- `metadata` (required): `alias` (required, unique) · `labels` · `annotations` · `maxParallelTasks` · `taskTimeout` · `runTimeout` · `priority` (`high` | `normal` | `low`) · `concurrency` (`maxRuns` + `strategy`) · `rateLimits` · `schemaValidation` (`""` | `"warn"` | `"fail"`) · `replaySafe` · `cache` · Kubernetes defaults (`serviceAccountName`, `podAnnotations`, `automountServiceAccountToken`)
+- `metadata` (required): `alias` (required, unique) · `labels` · `annotations` · `maxParallelTasks` · `taskTimeout` · `runTimeout` · `priority` (`high` | `normal` | `low`) · `concurrency` (`maxRuns` + `strategy`) · `rateLimits` · `schemaValidation` (`""` | `"warn"` | `"fail"`) · `replaySafe` · `cache` · `onUpstreamHold` (`skip` | `run`; data circuit breaker, [below](#data-assertions--the-circuit-breaker-server-gated)) · Kubernetes defaults (`serviceAccountName`, `podAnnotations`, `automountServiceAccountToken`)
 - `trigger` (required): `type` (`cron` | `http` | `event`) + `configuration` + optional `defaultParams` — see the snippets below
 - `volumes` (optional): named BYO storage sources mounted by steps
 - `steps` (required, ≥1): see the step quick-reference below
@@ -180,7 +180,7 @@ steps:
 | `retries` / `retryDelay` / `retryBackoff` | int / duration / bool | no | Retry policy |
 | `triggerRule` | string | no | `all_success` (default), `all_done`, `all_failed`, `one_success`, `always`. A failure-tolerant rule (`all_done`/`always`/`one_success`/`all_failed`) runs the step regardless of the server's failure policy: under the default `CAESIUM_TASK_FAILURE_POLICY=halt` a failure skips every not-yet-started `all_success` step (`run halted after task "<name>" failed`) but still runs tolerant cleanup/notify steps whose rule is satisfied. |
 | `outputSchema` / `inputSchema` | object / map | no | Data contracts (see [Data Contracts](#data-contracts-outputinput-schemas)) |
-| `datasets` | object | no | Freshness and contract surface: `consumes` (dataset names or `{name, schema}` objects) and `produces` (datasets with `freshness`/`maxStaleness`/`watermark` SLOs plus optional `schema`/`schemaFrom`/`version`). Excluded from the cache hash. See [Datasets & Freshness](#datasets--freshness-opt-in) |
+| `datasets` | object | no | Freshness and contract surface: `consumes` (dataset names or `{name, schema}` objects) and `produces` (datasets with `freshness`/`maxStaleness`/`watermark` SLOs plus optional `schema`/`schemaFrom`/`version` and the circuit-breaker fields `assertions`/`onViolation`/`release`). Excluded from the cache hash. See [Datasets & Freshness](#datasets--freshness-opt-in) and [Data Assertions & the Circuit Breaker](#data-assertions--the-circuit-breaker-server-gated) |
 | `replaySafe` | bool | no | Durable mark that allows this step to be re-executed by quarantined what-if replay. Job-level `metadata.replaySafe: true` marks all steps; step-level `replaySafe: true` marks one. Recorded on the baseline task run; excluded from the cache hash |
 | `rateLimit` | object | no | Consume units from a job-level `metadata.rateLimits` resource: `{resource, units}`. Excluded from the cache hash |
 | `fanOut` | object | no | Materialize N parallel instances from a predecessor's `##caesium::partitions` marker: `{from, env?, maxPartitions, maxParallel?, onEmpty?, failurePolicy?}`. Scheduling metadata — excluded from the cache hash. Each instance gets `$CAESIUM_PARTITION` and `$CAESIUM_PARTITION_JSON`. `dependsOn` on a partition object is a scheduling instruction, not data. |
@@ -347,6 +347,46 @@ Operator loop:
 - `caesium contract graph [--dataset ns/name] [--json]`, `GET /v1/contracts/graph`, and the Console `/contracts` route show the derived graph.
 - `POST /v1/jobdefs/diff` returns per-job `contractFindings`; the Console JobDefs diff tab shows compatible/unknown/breaking badges with named consumers and teams.
 - Intentional breaks use `caesium job apply --allow-breaking dataset=<name> --reason ...`. The acknowledgement is digest-scoped; producer and consumer applies warn during the deprecation window, then re-block after expiry because the window is evaluated at check time. The Console apply flow requires an ack reason before sending that request.
+
+### Data Assertions & the Circuit Breaker (server-gated)
+
+A step reports what it produced with `##caesium::metrics`; assertions on the produced dataset judge it; a violating dataset is **held**, and jobs that consume it are skipped instead of running on poison. Everything below is **refused at lint/apply unless `CAESIUM_DATA_ASSERTIONS_ENABLED=true`** is set in the server's environment and in the shell running `caesium job lint` / `job apply`. It is excluded from the cache hash. Full guide: [`job-definitions.md`](job-definitions.md#data-assertions--the-circuit-breaker); walkthrough: [`tour-data-loop.md`](tour-data-loop.md); manifest: [`examples/data-circuit-breaker.job.yaml`](examples/data-circuit-breaker.job.yaml).
+
+```yaml
+metadata:
+  alias: orders-load
+  cache: false                      # a cache hit evaluates nothing
+steps:
+  - name: load-orders
+    image: alpine:3.23
+    command: ["sh", "-c", "... && echo '##caesium::metrics {\"dataset\":\"warehouse/orders\",\"rowCount\":10400,\"max_event_time\":\"2026-07-03T01:12:00Z\"}'"]
+    datasets:
+      produces:
+        - name: warehouse/orders
+          assertions:
+            rowCount: {min: 1000, deltaFromBaseline: "50%"}
+            nullRate: {metric: null_rate_customer_id, max: 0.02}
+            freshness: {watermark: max_event_time, maxLag: 26h}
+            custom: [{metric: dedup_ratio, max: 0.05}]
+          onViolation: hold         # warn (default) | fail | hold
+          release: manual           # auto (default) | manual
+---
+metadata:
+  alias: orders-report
+  onUpstreamHold: skip              # skip (default) | run
+steps:
+  - name: build-report
+    image: alpine:3.23
+    datasets:
+      consumes: [warehouse/orders]  # the admission gate reads this
+```
+
+- **Marker.** One stdout line, a flat JSON object: `echo '##caesium::metrics {"dataset":"<name>","rowCount":123}'`. `dataset` may be omitted only when the step declares exactly one produced dataset. Values are JSON numbers or RFC3339 strings (stored as epoch seconds); anything else is dropped. Lines merge last-write-wins; 16 KiB cap, separate from `##caesium::output`.
+- **Assertions.** `rowCount` and `nullRate` (metrics `rowCount` / `nullRate`, or set `metric`), `custom[]` (`metric` required), each with at least one of `min` / `max` / `deltaFromBaseline` (a percentage string like `"50%"` of the median of the last clean samples); `freshness` takes a required `watermark` (an RFC3339 metric) and `maxLag` (positive duration). `min`/`max` enforce from run one; `deltaFromBaseline` is warn-only (`seeding`) until `CAESIUM_BASELINE_MIN_SAMPLES` (default 5) clean samples exist. A declared metric the step does not emit is a violation. Two assertions may not read the same metric on one dataset.
+- **`onViolation`** (needs `assertions`): `warn` records, `fail` fails the task, `hold` lets the task succeed and holds the dataset. Do not emit `onViolation` without `assertions`.
+- **`release`:** `auto` lets the holding job's next fully clean run release the hold; `manual` leaves it to `caesium dataset release <name> --reason ...` (auth required; refused under `CAESIUM_AUTH_MODE=none`) or an approved `release_hold` incident action.
+- **`metadata.onUpstreamHold`:** `skip` (default) admits a run that consumes a held dataset straight to `skipped` with reason `dataset_hold:<ns>/<name>`; `run` opts the job out.
+- **Reads:** `caesium dataset holds|metrics|release`, `caesium why <run-id> --job-id <id> --task <name>` (names the hold behind a skipped run), `GET /v1/jobs/:id/runs/:run_id/assertions` (every check, passes included).
 
 ### Remediation (opt-in)
 
@@ -827,6 +867,7 @@ When generating a Caesium job definition, verify:
 - [ ] `outputSchema`/`inputSchema` use valid JSON Schema types
 - [ ] `inputSchema` keys reference actual predecessor step names
 - [ ] Cross-job contract schemas use `produces[].schema` or `schemaFrom: output`; consumer requirements use `consumes[].schema` object entries when enforcement should compare fields
+- [ ] Assertions (`assertions` / `onViolation` / `release` / `onUpstreamHold`) appear only when the server and CLI run with `CAESIUM_DATA_ASSERTIONS_ENABLED=true`; a producer that declares `assertions` also prints a `##caesium::metrics` line for each metric asserted
 - [ ] Secrets use `secret://` URIs, never hardcoded values
 - [ ] Durations use Go format: `30s`, `5m`, `1h`
 - [ ] File is saved with `.job.yaml` extension for Git sync glob matching
