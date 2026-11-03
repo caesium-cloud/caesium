@@ -5,10 +5,12 @@ import (
 	"database/sql"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/caesium-cloud/caesium/internal/authz"
 	"github.com/caesium-cloud/caesium/internal/models"
 	schema "github.com/caesium-cloud/caesium/pkg/jobdef"
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
@@ -115,9 +117,10 @@ func (p *recordingPool) BeginTx(ctx context.Context, opts *sql.TxOptions) (*sql.
 	return p.DB.BeginTx(ctx, opts)
 }
 
-// TestLoadDatabaseSpecsConfinedSnapshotIsReadOnly: the snapshot is begun
-// read-only, which is what routes it to the read pool of the catalog's
-// read/write split (pkg/db TestRWSplitReadOnlyTransactionDoesNotWaitForSerializedWriter)
+// TestLoadDatabaseSpecsConfinedSnapshotIsReadOnly: each baseline, unrestricted
+// or confined, begins one read-only snapshot. Read-only is what routes it to
+// the read pool of the catalog's read/write split
+// (pkg/db TestRWSplitReadOnlyTransactionDoesNotWaitForSerializedWriter)
 // instead of holding the single writer for the whole baseline.
 func TestLoadDatabaseSpecsConfinedSnapshotIsReadOnly(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "catalog.db")
@@ -131,11 +134,100 @@ func TestLoadDatabaseSpecsConfinedSnapshotIsReadOnly(t *testing.T) {
 
 	_, err = LoadDatabaseSpecs(context.Background(), db)
 	require.NoError(t, err)
-	require.Empty(t, pool.begun, "an unrestricted baseline opens no transaction")
+	require.Len(t, pool.begun, 1, "an unrestricted baseline begins one transaction")
+	require.NotNil(t, pool.begun[0])
+	require.True(t, pool.begun[0].ReadOnly)
 
 	_, err = LoadDatabaseSpecs(authz.WithAllowedNamespaces(context.Background(), []string{"marketing"}), db)
 	require.NoError(t, err)
-	require.Len(t, pool.begun, 1)
-	require.NotNil(t, pool.begun[0])
-	require.True(t, pool.begun[0].ReadOnly)
+	require.Len(t, pool.begun, 2, "a confined baseline begins one more transaction")
+	require.NotNil(t, pool.begun[1])
+	require.True(t, pool.begun[1].ReadOnly)
+}
+
+// TestLoadDatabaseSpecsEdgeReadSharesTheStepSnapshot: an unrestricted load
+// reads steps and edges in one snapshot. A second connection that commits a
+// new task and an edge to it between those reads must not fail the load, and
+// the returned spec must not contain that edge without its step.
+func TestLoadDatabaseSpecsEdgeReadSharesTheStepSnapshot(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "catalog.db")
+	dsn := "file:" + path + "?_journal_mode=WAL&_busy_timeout=5000"
+	reader, err := gorm.Open(sqlite.Open(dsn), &gorm.Config{})
+	require.NoError(t, err)
+	defer closeDiffTestDB(reader)
+	require.NoError(t, reader.AutoMigrate(&models.Trigger{}, &models.Job{}, &models.Atom{}, &models.Task{}, &models.Callback{}, &models.TaskEdge{}, &models.DatasetDeclaration{}))
+	writer, err := gorm.Open(sqlite.Open(dsn), &gorm.Config{})
+	require.NoError(t, err)
+	defer closeDiffTestDB(writer)
+
+	insertDiffDefinition(t, reader, schema.Definition{
+		Metadata: schema.Metadata{Alias: "pipeline"},
+		Trigger:  schema.Trigger{Type: schema.TriggerHTTP, Configuration: map[string]any{"path": "/hooks/pipeline"}},
+		Steps: []schema.Step{
+			{Name: "a", Engine: schema.EngineDocker, Image: "alpine:3.23", Command: []string{"true"}, Next: []string{"b"}},
+			{Name: "b", Engine: schema.EngineDocker, Image: "alpine:3.23", Command: []string{"true"}},
+		},
+	})
+	var job models.Job
+	require.NoError(t, reader.Where("alias = ?", "pipeline").First(&job).Error)
+	var from models.Task
+	require.NoError(t, reader.Where("job_id = ? AND name = ?", job.ID, "a").First(&from).Error)
+
+	inserted := false
+	afterBaselineStepsLoaded = func() {
+		if inserted {
+			return
+		}
+		inserted = true
+		now := time.Now().UTC()
+		atomID := uuid.New()
+		require.NoError(t, writer.Create(&models.Atom{
+			ID:        atomID,
+			Engine:    models.AtomEngineDocker,
+			Image:     "alpine:3.23",
+			Command:   `["true"]`,
+			CreatedAt: now,
+			UpdatedAt: now,
+		}).Error)
+		taskID := uuid.New()
+		require.NoError(t, writer.Create(&models.Task{
+			ID:          taskID,
+			JobID:       job.ID,
+			AtomID:      atomID,
+			Name:        "c",
+			Position:    2,
+			Type:        schema.StepTypeTask,
+			TriggerRule: schema.TriggerRuleAllSuccess,
+			CreatedAt:   now,
+			UpdatedAt:   now,
+		}).Error)
+		require.NoError(t, writer.Create(&models.TaskEdge{
+			ID:         uuid.New(),
+			JobID:      job.ID,
+			FromTaskID: from.ID,
+			ToTaskID:   taskID,
+			CreatedAt:  now,
+			UpdatedAt:  now,
+		}).Error)
+	}
+	t.Cleanup(func() { afterBaselineStepsLoaded = nil })
+
+	specs, err := LoadDatabaseSpecs(context.Background(), reader)
+	require.NoError(t, err)
+	require.True(t, inserted, "the concurrent apply ran between the step and edge reads")
+	spec, ok := specs["pipeline"]
+	require.True(t, ok)
+	names := make([]string, 0, len(spec.Steps))
+	present := make(map[string]struct{}, len(spec.Steps))
+	for _, step := range spec.Steps {
+		names = append(names, step.Name)
+		present[step.Name] = struct{}{}
+	}
+	require.ElementsMatch(t, []string{"a", "b"}, names)
+	require.Equal(t, []EdgeSpec{{From: "a", To: "b"}}, spec.Edges)
+	for _, edge := range spec.Edges {
+		_, fromOK := present[edge.From]
+		_, toOK := present[edge.To]
+		require.Truef(t, fromOK && toOK, "edge %s -> %s has no step in this snapshot", edge.From, edge.To)
+	}
 }

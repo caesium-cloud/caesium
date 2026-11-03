@@ -200,16 +200,15 @@ var RedactedTriggerConfiguration = map[string]any{"redacted": "the trigger also 
 // only jobs in those namespaces are loaded and the configuration of a trigger
 // shared with a job outside them is replaced by RedactedTriggerConfiguration.
 //
-// The restricted baseline is read in one read-only snapshot transaction, so
-// which jobs it holds, which triggers they share, and the trigger
-// configurations it returns all come from the same catalog state: a
-// concurrent apply that moves a job out of the caller's namespaces (and
-// rewrites its trigger in place) can never pair a namespace check from before
-// the move with a configuration from after it.
+// Every baseline, restricted or not, is one read-only snapshot, so steps,
+// edges, declarations, and trigger configuration come from the same catalog
+// state. A concurrent apply that commits a new step and an edge to it between
+// those reads cannot fail the diff or return the edge without the step. A
+// concurrent apply that moves a job out of a confined caller's namespaces and
+// rewrites its trigger in place cannot pair a namespace check from before the
+// move with a configuration from after it. Read-only, so the read/write split
+// serves the snapshot from the read pool and it does not hold the catalog writer.
 func LoadDatabaseSpecs(ctx context.Context, db *gorm.DB) (map[string]JobSpec, error) {
-	if _, restricted := authz.AllowedNamespaces(ctx); !restricted {
-		return loadDatabaseSpecs(ctx, db)
-	}
 	var specs map[string]JobSpec
 	err := ReadSnapshot(ctx, db, func(tx *gorm.DB) error {
 		var err error
@@ -223,9 +222,9 @@ func LoadDatabaseSpecs(ctx context.Context, db *gorm.DB) (map[string]JobSpec, er
 }
 
 // ReadSnapshot runs fn in one read-only transaction on conn, so every read fn
-// makes through tx sees the same catalog state. It is what a
-// namespace-confined caller's lint and diff read through (the baseline here,
-// the contract graph in api/rest/controller/jobdef).
+// makes through tx sees the same catalog state. Every diff baseline
+// (LoadDatabaseSpecs) and a namespace-confined caller's lint read through it
+// (the baseline here, the contract graph in api/rest/controller/jobdef).
 //
 // Read-only, so the read/write split serves it from the read pool and it never
 // holds the single catalog writer (internal/run PredecessorExecutionInputs uses
@@ -254,6 +253,11 @@ func ReadSnapshot(ctx context.Context, conn *gorm.DB, fn func(tx *gorm.DB) error
 // baseline's jobs and reading their triggers, where a concurrent apply would
 // interleave.
 var afterBaselineJobsLoaded func()
+
+// afterBaselineStepsLoaded, when set (tests only), runs after the baseline's
+// steps are read and before its edges, where a concurrent apply would commit
+// a new step and an edge to it.
+var afterBaselineStepsLoaded func()
 
 func loadDatabaseSpecs(ctx context.Context, db *gorm.DB) (map[string]JobSpec, error) {
 	var jobs []models.Job
@@ -361,6 +365,9 @@ func buildJobSpec(ctx context.Context, db *gorm.DB, job *models.Job) (JobSpec, e
 		return JobSpec{}, err
 	}
 	spec.Steps = steps
+	if afterBaselineStepsLoaded != nil {
+		afterBaselineStepsLoaded()
+	}
 	edges, err := loadEdges(ctx, db, job.ID, names)
 	if err != nil {
 		return JobSpec{}, err
