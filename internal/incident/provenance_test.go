@@ -348,6 +348,8 @@ func newRouteFixture(t *testing.T, content string) *routeFixture {
 				SourceID: "orders-source", Forge: env.GitForgeGitHub, APIBaseURL: github.srv.URL,
 				Token: forgeTestToken, Namespaces: []string{models.DefaultNamespace},
 			}},
+			// cmd/start supplies the real check; these tests drive the route around it.
+			SyncTenancy: func(context.Context, *schema.Definition, []string) (bool, error) { return true, nil },
 		},
 	}
 	fixture.install()
@@ -747,6 +749,64 @@ func logsSince(sequence uint64) []pkglog.LogEntry {
 		}
 	}
 	return out
+}
+
+// The route refuses, before any forge call, a patch the sync that imports the
+// merged pull request would refuse, and when that cannot be checked. The reason
+// is fixed text.
+func TestSyncTenancyIsCheckedBeforeAnyForgeCall(t *testing.T) {
+	refused := errors.New("trigger tenancy conflict: shared with finance-hook-owner")
+	for name, check := range map[string]SyncTenancyCheck{
+		"refused": func(context.Context, *schema.Definition, []string) (bool, error) { return false, nil },
+		"unknown": func(context.Context, *schema.Definition, []string) (bool, error) { return false, refused },
+		"missing": nil,
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := newRouteFixture(t, manifestFile)
+			f.config.SyncTenancy = check
+			f.install()
+
+			executed, result := f.approveAndExecute(t, patchJSON(t, patchedDefinition))
+			requireDegraded(t, f, result, degradeTriggerTenancy)
+			require.Zero(t, f.forge.hits(), "no forge call")
+			require.NotContains(t, result, "pr_branch")
+			require.NotContains(t, string(executed.Result), "finance-hook-owner")
+			require.NotContains(t, f.ops.escalate[0].summary, "finance-hook-owner")
+		})
+	}
+}
+
+// The check gets the source's allowlist as configured, nil for an unrestricted
+// source, and the definition the pull request would write.
+func TestSyncTenancyGetsTheSourcesScope(t *testing.T) {
+	for name, namespaces := range map[string][]string{
+		"unrestricted": nil,
+		"allowlisted":  {models.DefaultNamespace, "finance"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := newRouteFixture(t, manifestFile)
+			f.config.Sources[0].Namespaces = namespaces
+			var (
+				calls int
+				got   []string
+				def   *schema.Definition
+			)
+			f.config.SyncTenancy = func(_ context.Context, d *schema.Definition, sourceNamespaces []string) (bool, error) {
+				calls++
+				got, def = sourceNamespaces, d
+				return true, nil
+			}
+			f.install()
+
+			_, result := f.approveAndExecute(t, patchJSON(t, patchedDefinition))
+			require.Equal(t, routeGitPR, result["route"], "result: %v", result)
+			require.Equal(t, 1, calls)
+			require.Equal(t, namespaces, got)
+			require.Equal(t, namespaces == nil, got == nil, "nil means unrestricted")
+			require.Equal(t, testAlias, def.Metadata.Alias)
+			require.Equal(t, []string{"sh", "-c", "exit 0"}, def.Steps[0].Command, "the patched definition")
+		})
+	}
 }
 
 // A refusal of the file's syntax names the rule, not the line that broke it.

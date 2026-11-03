@@ -36,7 +36,9 @@ import (
 //   - a configured git source has its source id, repository and ref, admits its
 //     namespace, and scopes its manifest path;
 //   - the file at that path, read from the forge, declares its alias in its
-//     namespace, and is the blob it held at the commit the proposal recorded.
+//     namespace, and is the blob it held at the commit the proposal recorded;
+//   - the patched definition passes the trigger tenancy that source's sync
+//     applies, so the merged pull request would import.
 //
 // The repository owner and name come from the source's configuration; job data
 // only has to agree with it. Anything short of that degrades to `escalate` with
@@ -62,6 +64,7 @@ const (
 	degradeManifestUnchanged     = "manifest_unchanged"
 	degradeForgeError            = "forge_error"
 	degradePullRequestMismatch   = "pull_request_mismatch"
+	degradeTriggerTenancy        = "trigger_tenancy"
 
 	// routeGitPR is the third value of the result's route field.
 	routeGitPR = "git_pr"
@@ -83,12 +86,22 @@ type SecretResolver interface {
 	Resolve(ctx context.Context, ref string) (string, error)
 }
 
+// SyncTenancyCheck previews the trigger tenancy (B9) git sync applies to one
+// definition from a source configured with sourceNamespaces (nil, unrestricted).
+// allowed is false for a definition that sync would refuse. An error means the
+// check could not decide. cmd/start supplies it, since internal/jobdef imports
+// this package.
+type SyncTenancyCheck func(ctx context.Context, def *schema.Definition, sourceNamespaces []string) (allowed bool, err error)
+
 // ProvenanceConfig is what the router needs from the server's configuration.
 type ProvenanceConfig struct {
 	GitSyncEnabled bool
 	Sources        env.GitSources
 	Credentials    env.GitWriteCredentials
 	Resolver       SecretResolver
+	// SyncTenancy checks a patch against the sync that will import the merged
+	// pull request. Without it the route opens no pull request.
+	SyncTenancy SyncTenancyCheck
 }
 
 // ProvenanceRouter decides and carries out the Git-PR route.
@@ -131,6 +144,8 @@ type patchPlan struct {
 	branch     string
 	alias      string
 	namespace  string
+	// sourceNamespaces is the source's configured allowlist, nil if unrestricted.
+	sourceNamespaces []string
 	// baseline is what the proposal recorded, set once it is bound to the plan.
 	baseline *patchBaseline
 }
@@ -256,7 +271,33 @@ func (r *ProvenanceRouter) plan(job *models.Job, namespace string, actionID uuid
 		branch:     branch,
 		alias:      job.Alias,
 		namespace:  namespace,
+		// Cloned so a nil allowlist stays nil: nil is "unrestricted".
+		sourceNamespaces: slices.Clone(source.Namespaces),
 	}, nil
+}
+
+// checkSyncTenancy refuses, before any forge call, a patch the sync that imports
+// the merged pull request would refuse: one moving the job onto a trigger or
+// webhook path its source may not write, or, under a policy file, one sharing a
+// path across namespaces. Merged, it would leave the remediation unapplied, or,
+// for an unrestricted source under a policy file, fail the whole source's sync.
+// The scope is the source's, not the incident's, because sync never uses the
+// incident's. The reason is fixed text: it names no other namespace, job or path.
+func (r *ProvenanceRouter) checkSyncTenancy(ctx context.Context, plan *patchPlan, manifest *renderedManifest) *patchDegrade {
+	unchecked := &patchDegrade{Code: degradeTriggerTenancy,
+		Reason: "the trigger tenancy git sync applies to this job's source could not be checked, so no pull request was opened"}
+	if r.cfg.SyncTenancy == nil {
+		return unchecked
+	}
+	allowed, err := r.cfg.SyncTenancy(ctx, manifest.Definition, plan.sourceNamespaces)
+	switch {
+	case err != nil:
+		return unchecked
+	case !allowed:
+		return &patchDegrade{Code: degradeTriggerTenancy,
+			Reason: "git sync would refuse this definition's trigger for this job's source, so a merged pull request would not apply; no pull request was opened"}
+	}
+	return nil
 }
 
 // credentialFor returns the first entry whose every set key matches the job and
@@ -566,6 +607,9 @@ func (e *Executor) dispatchGitSyncedPatch(ctx context.Context, inc *models.Incid
 	}
 	if degrade == nil {
 		degrade = bindBaseline(plan, job, action)
+	}
+	if degrade == nil {
+		degrade = e.provenance.checkSyncTenancy(ctx, plan, manifest)
 	}
 	if degrade == nil {
 		pr, err := e.provenance.open(ctx, plan, &patchChange{

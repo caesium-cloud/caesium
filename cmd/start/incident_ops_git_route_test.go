@@ -8,16 +8,21 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	incidentsvc "github.com/caesium-cloud/caesium/api/rest/service/incident"
+	"github.com/caesium-cloud/caesium/internal/auth/policy"
 	"github.com/caesium-cloud/caesium/internal/event"
 	"github.com/caesium-cloud/caesium/internal/incident"
+	internaljobdef "github.com/caesium-cloud/caesium/internal/jobdef"
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/caesium-cloud/caesium/pkg/env"
+	schema "github.com/caesium-cloud/caesium/pkg/jobdef"
 	pkglog "github.com/caesium-cloud/caesium/pkg/log"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
@@ -47,6 +52,8 @@ type stubForge struct {
 	pulls []any
 	// opened counts pull requests opened.
 	opened int
+	// requests counts every request.
+	requests int
 }
 
 func newStubForge(t *testing.T, file string) *stubForge {
@@ -60,6 +67,7 @@ func newStubForge(t *testing.T, file string) *stubForge {
 func (f *stubForge) serve(w http.ResponseWriter, r *http.Request) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.requests++
 	reply := func(status int, body any) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(status)
@@ -110,6 +118,13 @@ func (f *stubForge) serve(w http.ResponseWriter, r *http.Request) {
 // and records every event.
 func (r *previewRig) routed(t *testing.T, stub *stubForge) *recordingBus {
 	t.Helper()
+	return r.routedWith(t, stub, nil)
+}
+
+// routedWith is routed for a source confined to sourceNamespaces (nil,
+// unrestricted), with the real sync tenancy check.
+func (r *previewRig) routedWith(t *testing.T, stub *stubForge, sourceNamespaces []string) *recordingBus {
+	t.Helper()
 	repo := stub.srv.URL + "/acme/jobs.git"
 	require.NoError(t, r.db.Model(&models.Job{}).Where("id = ?", r.job.ID).Updates(map[string]any{
 		"provenance_repo":      repo,
@@ -122,11 +137,13 @@ func (r *previewRig) routed(t *testing.T, stub *stubForge) *recordingBus {
 		GitSyncEnabled: true,
 		Sources: env.GitSources{{
 			URL: repo, Ref: "main", SourceID: "orders", Path: "pipelines", Globs: []string{"*.job.yaml"},
+			Namespaces: sourceNamespaces,
 		}},
 		Credentials: env.GitWriteCredentials{{
 			SourceID: "orders", Forge: env.GitForgeGitHub, APIBaseURL: stub.srv.URL,
 			Token: "ghs_stubforgetoken", Namespaces: []string{"marketing"},
 		}},
+		SyncTenancy: newSyncTenancyCheck(r.db),
 	}))
 	bus := &recordingBus{}
 	r.ops.bus = bus
@@ -266,6 +283,78 @@ func TestPullRequestSomeoneElseOpenedIsNotRecordedAsTheRoutes(t *testing.T) {
 	for name, text := range rig.incidentSurfaces(t, bus, executed) {
 		require.NotContains(t, text, "/acme/jobs/pull/9", name)
 	}
+}
+
+// TestGitRouteRefusesATriggerSyncWouldRefuse is Greptile's round 3 finding
+// through the real surface. The proposal moves marketing's HTTP trigger onto the
+// webhook path a finance job serves. The sync that imports the merged pull
+// request refuses that for a source confined to marketing, and for an
+// unrestricted source under a policy file it would fail the whole source's sync.
+// So the route escalates before any forge call. An unrestricted source without a
+// policy file imports it, so the route opens the pull request.
+func TestGitRouteRefusesATriggerSyncWouldRefuse(t *testing.T) {
+	for name, tc := range map[string]struct {
+		sourceNamespaces []string
+		policyFile       bool
+		refused          bool
+	}{
+		"allowlisted source":                      {sourceNamespaces: []string{"marketing"}, refused: true},
+		"unrestricted source under a policy file": {policyFile: true, refused: true},
+		"unrestricted source with no policy file": {},
+	} {
+		t.Run(name, func(t *testing.T) {
+			const other = "finance-hook-owner"
+			stored := strings.NewReplacer("type: cron", "type: http", `cron: "0 6 * * *"`, "path: /hooks/marketing").Replace(patchedJob)
+			rig := newPreviewRig(t, stored)
+			def, err := schema.Parse([]byte(strings.NewReplacer(
+				"alias: orders-daily", "alias: "+other,
+				"namespace: marketing", "namespace: finance",
+				"path: /hooks/marketing", "path: /hooks/finance",
+			).Replace(stored)))
+			require.NoError(t, err)
+			_, err = internaljobdef.NewImporter(rig.db).Apply(context.Background(), def)
+			require.NoError(t, err)
+			if tc.policyFile {
+				withPolicyFile(t, "apiVersion: v1\nkind: AccessPolicy\nnamespaces:\n  marketing: {}\n  finance: {}\n")
+			}
+			stub := newStubForge(t, stored)
+			bus := rig.routedWith(t, stub, tc.sourceNamespaces)
+
+			executed := rig.approve(t, strings.Replace(stored, "path: /hooks/marketing", "path: /hooks/finance", 1))
+			var result struct {
+				Route   string `json:"route"`
+				Degrade string `json:"degrade"`
+				Reason  string `json:"reason"`
+			}
+			require.NoError(t, json.Unmarshal(executed.Result, &result), string(executed.Result))
+			if !tc.refused {
+				require.Equal(t, "git_pr", result.Route, string(executed.Result))
+				require.Equal(t, 1, stub.opened)
+				require.Contains(t, stub.written, "path: /hooks/finance")
+				return
+			}
+			require.Equal(t, "escalate", result.Route, string(executed.Result))
+			require.Equal(t, "trigger_tenancy", result.Degrade)
+			require.Zero(t, stub.requests, "no forge call")
+			for surface, text := range rig.incidentSurfaces(t, bus, executed) {
+				require.NotContains(t, text, other, surface)
+			}
+			require.NotContains(t, result.Reason, "finance")
+		})
+	}
+}
+
+// withPolicyFile loads an access policy file for the test, as the server does
+// at start, so the trigger tenancy invariant is enforced.
+func withPolicyFile(t *testing.T, content string) {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "policy.yaml")
+	require.NoError(t, os.WriteFile(path, []byte(content), 0o600))
+	holder, err := policy.LoadFile(t.Context(), policy.HolderOptions{Path: path})
+	require.NoError(t, err)
+	previous := policy.ProcessHolder()
+	t.Cleanup(func() { policy.SetProcessHolder(previous) })
+	policy.SetProcessHolder(holder)
 }
 
 func lastLogSequence() uint64 {

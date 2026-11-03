@@ -902,6 +902,7 @@ func start(cmd *cobra.Command, args []string) error {
 			Sources:        vars.JobdefGitSources,
 			Credentials:    vars.GitWriteCredentials,
 			Resolver:       resolver,
+			SyncTenancy:    newSyncTenancyCheck(incConn),
 		}))
 
 		// --- Tier-3 approval pipeline, both ends (trust-the-substrate C4 + C7) ---

@@ -227,6 +227,14 @@ func (s *Source) cloneRepo(ctx context.Context) (string, string, func(), error) 
 	return dir, hash, cleanup, nil
 }
 
+// SourceApplyOptions are the options git sync applies a source's manifests with:
+// its namespace allowlist (nil, unrestricted) and the file's provenance. The
+// Git-PR route of apply_jobdef_patch previews a patch's trigger tenancy with the
+// scope these give (cmd/start), so it refuses what this sync would refuse.
+func SourceApplyOptions(namespaces []string, prov *jobdef.Provenance) *jobdef.ApplyOptions {
+	return &jobdef.ApplyOptions{Provenance: prov, NamespaceAllowlist: namespaces}
+}
+
 // applyDir applies one checkout. A source with Namespaces records one audit
 // row per call, whatever the outcome; namespace violations and prune skips are
 // reported, never returned (a returned error stops the server).
@@ -296,7 +304,7 @@ func (s *Source) applyCheckout(ctx context.Context, importer *jobdef.Importer, d
 			Path:     filepath.ToSlash(relToRepo),
 		}
 
-		opts := &jobdef.ApplyOptions{Provenance: prov, NamespaceAllowlist: s.Namespaces}
+		opts := SourceApplyOptions(s.Namespaces, prov)
 		fileDefs, err := collectFileDefinitions(path)
 		if err != nil {
 			return err
