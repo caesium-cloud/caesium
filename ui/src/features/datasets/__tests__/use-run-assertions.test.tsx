@@ -270,6 +270,47 @@ describe("taskEvidenceSignature", () => {
   });
 });
 
+describe("a first read still in flight when the run changes", () => {
+  it("is replaced, not reused, so the older response never stays on screen", async () => {
+    enable();
+    let answerFirst: (value: RunAssertions) => void = () => undefined;
+    const read = vi
+      .spyOn(api, "getRunAssertions")
+      .mockImplementationOnce(
+        () => new Promise<RunAssertions>((resolve) => (answerFirst = resolve)),
+      )
+      .mockResolvedValue(resultsOf("passed"));
+    const { wrapper } = setup();
+
+    // The page opens on a running run and asks for its results; the request
+    // is slow, and there is no cached data to fall back on.
+    const { result, rerender } = renderHook(
+      ({ tasks, live }) => usePage("run-1", tasks, live),
+      {
+        wrapper,
+        initialProps: {
+          tasks: [task({ status: "running", completed_at: undefined })],
+          live: true,
+        },
+      },
+    );
+    await waitFor(() => expect(read).toHaveBeenCalledTimes(1));
+
+    // The run finishes while that request is open: polling stops with it.
+    rerender({ tasks: [task({ status: "succeeded" })], live: false });
+    await waitFor(() => expect(read).toHaveBeenCalledTimes(2));
+    await waitFor(() =>
+      expect(result.current.data?.tasks[0].instances[0].verdict).toBe("passed"),
+    );
+
+    // The older request answers last, with what was true before the change.
+    answerFirst(resultsOf("violated"));
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(result.current.data?.tasks[0].instances[0].verdict).toBe("passed");
+    expect(read).toHaveBeenCalledTimes(2);
+  });
+});
+
 describe("invalidateRunAssertions", () => {
   it("marks only that run's results stale", async () => {
     enable();

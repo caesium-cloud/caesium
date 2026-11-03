@@ -50,6 +50,7 @@ import { useDagHeight } from "@/hooks/useDagHeight";
 import { canActIn, isInsufficientAccessError, requiresRoleReason, retryUnlessDenied } from "@/features/auth/access";
 import { JobAccessDenied } from "@/features/auth/JobAccessDenied";
 import { NamespaceChip } from "@/features/auth/NamespaceSwitcher";
+import { useSyncRunAssertions } from "@/features/datasets/useDataAssertions";
 import { usePrincipal } from "@/lib/auth";
 import { ApiError, api, type Atom, type Incident, type Job, type JobRun, type JobTask, type RunQueueItem, type TaskRun, type Trigger } from "@/lib/api";
 import { events, type CaesiumEvent } from "@/lib/events";
@@ -463,6 +464,10 @@ export function JobDetailPage() {
   }, [features?.agent_remediation_enabled, jobId, queryClient]);
 
   const activeRun = featuredRun ? (featuredRun.status === "running" ? featuredRun : undefined) : activeRunSummary;
+  // TaskDetailPanel reads the featured run's assertion results here as it does
+  // on the run page; this keeps them in step with the tasks, however a change
+  // arrives (an event, a poll, a retry between two polls).
+  useSyncRunAssertions(jobId, featuredRunId, featuredRun?.tasks);
   const featuredRunTasks = useMemo(() => buildTaskRunMap(featuredRun?.tasks), [featuredRun?.tasks]);
   const taskMetadata = useMemo(() => buildTaskStatusMap(featuredRun?.tasks), [featuredRun?.tasks]);
   const taskStatus = useMemo(() => buildTaskStatusLookup(featuredRun?.tasks), [featuredRun?.tasks]);

@@ -13,13 +13,21 @@ export function useDataAssertionsEnabled() {
   );
 }
 
-/** Marks a run's recorded results stale so the next render reads them again. */
-export function invalidateRunAssertions(
+/**
+ * Makes a run's recorded results be read again from now. A read already in
+ * flight started before the change that called for this one, so it is
+ * cancelled first: invalidating alone reuses an in-flight read when the query
+ * holds no data yet (query-core's cancelRefetch applies only once data exists),
+ * and that older response would clear the stale mark and stay on screen.
+ */
+export async function invalidateRunAssertions(
   client: QueryClient,
   jobId: string | undefined,
   runId: string | undefined,
 ) {
-  return client.invalidateQueries({ queryKey: ["run-assertions", jobId, runId] });
+  const queryKey = ["run-assertions", jobId, runId];
+  await client.cancelQueries({ queryKey });
+  await client.invalidateQueries({ queryKey });
 }
 
 /**
