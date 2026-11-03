@@ -153,10 +153,14 @@ func (s *IntegrationTestSuite) TestSSEStream() {
 // one subscription open beyond two server write-timeout intervals, then start
 // a run through HTTP and require its event on that same response body.
 func (s *IntegrationTestSuite) TestSSEStreamSurvivesIdleMinute() {
-	alias := "sse-idle-" + uuid.NewString()
-	job := s.createJobWithTriggerConfig(alias, nil, models.TriggerTypeHTTP, nil)
 	client := newSSEHTTPClient(s.T())
 	defer client.CloseIdleConnections()
+	trace := &sseHTTPTraceLog{}
+	defer trace.dump(s.T())
+	//nolint:bodyclose // The sender factory transfers response ownership to the job helper, which closes it.
+	sendJSON := s.sseJSONSender(client, trace)
+	alias := "sse-idle-" + uuid.NewString()
+	job := s.createJobWithTriggerConfigUsingRequest(alias, nil, models.TriggerTypeHTTP, nil, sendJSON)
 	ctx, cancel := context.WithTimeout(s.T().Context(), 90*time.Second)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
@@ -180,7 +184,7 @@ func (s *IntegrationTestSuite) TestSSEStreamSurvivesIdleMinute() {
 	case err := <-errors:
 		s.T().Fatalf("SSE subscription failed during idle: %v", err)
 	case evt := <-events:
-		s.T().Fatalf("manual-only job emitted an unexpected event before its run: %+v", evt)
+		s.T().Fatalf("unexpected %s event for job %s run %s before the manual trigger", evt.Type, evt.JobID, evt.RunID)
 	case <-ctx.Done():
 		s.T().Fatal("SSE subscription timed out during idle")
 	case <-idle.C:
