@@ -1575,7 +1575,7 @@ precedent for it is warn-mode schema validation, which publishes
       `incidentJobAlias` is `Unscoped()`, and `History` keeps the incident's job id
       for its own alias. `build/triage-agent.sh` accepts an empty DAG and proposes
       nothing on it.
-- [ ] F3. Build the **Git-PR provenance route** of `apply_jobdef_patch` — B4's
+- [x] F3. Build the **Git-PR provenance route** of `apply_jobdef_patch` — B4's
       unbuilt half — so a producer patch proposed from a hold lands as a pull
       request instead of a silent server-side edit. (a) **Credentials:** add a new
       `CAESIUM_GIT_WRITE_CREDENTIALS` field to the `Environment` struct in
@@ -1626,6 +1626,77 @@ precedent for it is warn-mode schema validation, which publishes
       **C4 + C7** — the pipeline and the *direct* `apply_jobdef_patch` route this
       one branches beside. See `## Sequencing & Dependencies` § Cross-PLAN order.
       Depends on: F2 + N-2.
+      *Note (W7-α, 2026-11-02):* shipped in `internal/incident/provenance.go`,
+      `internal/incident/provenance_manifest.go`, `internal/incident/forge/` and
+      `pkg/env/git_write.go`. Job provenance can be asserted through the REST apply,
+      so it proves nothing alone. A job needs a credential listing its namespace, a
+      configured source (with git sync on) agreeing on id, repository and ref,
+      admitting the namespace and scoping the path, and a manifest that declares its
+      alias in its namespace and is the same blob as at the synced commit. The
+      repository written to comes from the source, not the job. Decisions beyond the
+      text above: `namespaces` is required on a credential, because neither design
+      doc scoped one, and a refusal does not say whether another namespace's entry
+      exists. "Empty `ProvenanceRepo` ⇒ direct" stays narrower than written: a job
+      with any provenance field never takes the direct route, so partial provenance
+      escalates (`gitSynced`, unchanged). There was no proposal-time dry-run to build
+      on, so the proposal now records a route preview from configuration alone, plus
+      the diff, as the `proposed` row's `result`; the executed result overwrites it.
+      The dry-run now runs `ValidateBatch`, so a manifest that would stall git sync
+      once merged is refused on every route. A failed route leaves its branch and
+      names it in `pr_branch`; the branch is `caesium/patch-<action id>`, so a repeat
+      converges. Review round 1 changed two things. Every surface now renders one
+      diff of the whole documents (`internal/jobdef/docdiff`), not the
+      reduced `JobSpec` comparison; the action result's `diff` keeps `alias` and
+      `empty`, and its `updates` become the `diff` text. The
+      proposal records its provenance as a baseline on the action, and the manifest
+      is held to the proposal's commit, not the one the job carries at execution.
+      The pull request description and the escalation carry a form with credential
+      values masked in the data, before the diff is built, so no line of a
+      multi-line value escapes. The direct route has the same gap and still applies
+      a stale proposal. Review round 2 set the rule that nothing read from the
+      repository reaches the incident: the result stays the confined render, even
+      on a pull request, and reasons and errors carry fixed text, not the file's
+      lines, its remediation block, or the forge's error text. If the server's copy
+      matches the proposal, the result names the pull request instead of "no
+      changes". `baseline.repo` is an identity, not the source URL. Review round 3
+      made every forge failure's summary the call plus a fixed category, because a
+      transport error can quote a header the forge sent. It also stopped taking a
+      pull request found on the route's branch on trust: the preview names the
+      branch, so one is accepted only if it targets the plan's base and the
+      manifest at its head is the approved replacement, byte for byte, spliced from
+      the file at the proposal's commit. Anything else escalates as
+      `pull_request_mismatch`. The check reads only the manifest, so other files
+      changed on the branch go unchecked. The route also runs, before any forge
+      call, the trigger tenancy check that the sync importing the merged pull
+      request applies, with that source's scope (its `namespaces` allowlist, or nil
+      so a policy file's invariant decides). It does not use the incident's
+      namespace, which sync never uses. A violation escalates as
+      `trigger_tenancy`. The preview's route decision stays configuration-only, so
+      the preview can say `git_pr` and execution can still degrade for this
+      reason. The scope comes from git sync's own functions
+      (`runtime.GitSourceNamespaces`, `git.SourceApplyOptions`,
+      `ApplyOptions.TenancyScope`). The check is injected from `cmd/start`,
+      because `internal/jobdef` imports `internal/incident`. Review round 4 put
+      every pull request the route returns through that one check, including the
+      one it has just opened, since the branch can move between the write and the
+      open. It also made the check read the pull request's state: an open one is
+      verified, a merged one that matches is success (`pr_merged`), and a closed,
+      unmerged one escalates as `pull_request_closed` without being reopened or
+      replaced on the same branch. If several share the branch, an open one wins,
+      then a merged one. Review round 5 holds a merged pull request to the base
+      as well: it counts only if the manifest at the base's current head is the
+      replacement, since an `ours` merge marks a pull request merged without its
+      change. Otherwise the patch escalates as `pull_request_merged_without_change`.
+      The lookup now takes the base and reads every page before choosing: the
+      open list first, where an open pull request into the base wins, then the
+      closed list, where a merged one into the base wins. Each list is bounded at
+      ten pages of 100, and reaching the bound without a decision escalates
+      instead of choosing from a partial list.
+      `ExecuteApproved` writes its terminal status on a context detached
+      from the request. Only the patched document changes, so comments inside it are
+      lost; a sibling's or a header's are kept. The Console shows the preview through
+      the approval card's `diff` string and the result through the timeline's JSON;
+      `pr_url` is not yet a link.
 - [x] F4. Make **held ⇒ not fresh**. A poisoned-but-recent partition must never
       satisfy a freshness trigger or advance downstream scheduling. In
       `internal/freshness/evaluator.go`, `statusFor(...)` computes the dataset's
@@ -2359,6 +2430,12 @@ question, not a fact). Each must be answered *in the PR that first touches it*.
    an integration test cannot open a real PR, so the honest bar is a unit test
    against a fake forge client plus an integration test of the degrade-to-escalate
    path. Confirm that bar in F3 rather than claiming end-to-end PR coverage.
+   **Answered 2026-11-02 (F3, W7-α): that bar stands.** GitHub and GitHub
+   Enterprise ship; `forge.Client` admits others. The live pull request path is
+   unit-tested against an `httptest` server speaking the GitHub API shapes, with the
+   real client, so URL building, headers and error mapping run. The agent lane and
+   the coverage journey drive only the no-credential degrade, so the forge client
+   has no integration coverage and nothing in CI talks to a real forge.
 6. **Multi-producer release (design open question 2).** Does a clean run of
    producer B release a hold opened by producer A? The design proposes "no — only
    the holder's clean run". C3 must implement one answer explicitly; record it.

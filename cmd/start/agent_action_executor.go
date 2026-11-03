@@ -67,9 +67,23 @@ func (a *agentActionExecutor) ExecuteAgentAction(ctx context.Context, req agents
 			"incident_id", req.IncidentID, "type", req.Type, "error", err)
 	}
 	return &agentsvc.ActionResult{
-		Action:      action,
+		Action:      withoutPreview(action),
 		Disposition: disposition(action),
 	}, nil
+}
+
+// withoutPreview withholds a proposal's preview from the agent that made it. The
+// preview's diff quotes the job's current definition, env values included, for
+// the human who decides. An agent token reads only its incident's /v1/agent/*
+// routes, none of which serve a definition, so returning it here would let a
+// proposal read what the token cannot.
+func withoutPreview(action *models.AgentAction) *models.AgentAction {
+	if action.Status != models.AgentActionStatusProposed {
+		return action
+	}
+	withheld := *action
+	withheld.Result = nil
+	return &withheld
 }
 
 // disposition maps the recorded row onto the coarse label the endpoint returns.

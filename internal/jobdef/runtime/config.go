@@ -65,7 +65,7 @@ func BuildGitWatches(vars env.Environment, resolver secret.Resolver) ([]Watch, e
 			return nil, fmt.Errorf("jobdef git source %d: %w", idx, err)
 		}
 
-		namespaces, err := gitSourceNamespaces(cfg.Namespaces)
+		namespaces, err := GitSourceNamespaces(cfg.Namespaces)
 		if err != nil {
 			return nil, fmt.Errorf("jobdef git source %d: %w", idx, err)
 		}
@@ -121,11 +121,11 @@ func BuildGitWatches(vars env.Environment, resolver secret.Resolver) ([]Watch, e
 	return watches, nil
 }
 
-// gitSourceNamespaces validates a source's namespace allowlist. nil means the
+// GitSourceNamespaces validates a source's namespace allowlist. nil means the
 // source is unrestricted; any other value must name at least one valid
 // namespace and comes back sorted, de-duplicated and non-nil.
 // B2: also reject namespaces the policy file does not declare.
-func gitSourceNamespaces(namespaces []string) ([]string, error) {
+func GitSourceNamespaces(namespaces []string) ([]string, error) {
 	if namespaces == nil {
 		return nil, nil
 	}

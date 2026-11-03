@@ -195,8 +195,9 @@ type RecordedJob struct {
 	Alias string
 }
 
-// tenancyScope is the writer scope trigger tenancy confines the apply to.
-func (o *ApplyOptions) tenancyScope() *TenancyScope {
+// TenancyScope is the writer scope trigger tenancy confines the apply to. Git
+// sync's scope for a source comes from here, through git.SourceApplyOptions.
+func (o *ApplyOptions) TenancyScope() *TenancyScope {
 	if o == nil {
 		return nil
 	}
@@ -288,7 +289,7 @@ func (i *Importer) applyTx(ctx context.Context, tx *gorm.DB, def *schema.Definit
 	}
 	// Trigger tenancy (B9) on the state the definition proposes, before any
 	// write, so a refusal the allowlisted sync skips leaves every row as it was.
-	verdict, err := checkApplyTenancyTx(tx, existing, def, opts.tenancyScope(), TenancyInvariantEnforced(), true)
+	verdict, err := checkApplyTenancyTx(tx, existing, def, opts.TenancyScope(), TenancyInvariantEnforced(), true)
 	if err != nil {
 		return nil, err
 	}
@@ -985,7 +986,7 @@ func (i *Importer) guardJobMutationTx(tx *gorm.DB, jobModel *models.Job, def *sc
 func authorizeJobWrite(jobModel *models.Job, def *schema.Definition, opts *ApplyOptions) error {
 	// A job-scoped writer writes only the exact aliases its key names (the
 	// row jobModel was looked up by that same raw alias).
-	if refusal := aliasScopeRefusal(def.Metadata.Alias, def.Metadata.Namespace, opts.tenancyScope()); refusal != nil {
+	if refusal := aliasScopeRefusal(def.Metadata.Alias, def.Metadata.Namespace, opts.TenancyScope()); refusal != nil {
 		return refusal
 	}
 	// The allowlist runs next: Force must not bypass it, and a foreign-owned

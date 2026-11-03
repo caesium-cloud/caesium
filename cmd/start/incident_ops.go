@@ -8,17 +8,18 @@ import (
 	"time"
 
 	datasetsvc "github.com/caesium-cloud/caesium/api/rest/service/dataset"
-	"github.com/caesium-cloud/caesium/internal/authz"
 	"github.com/caesium-cloud/caesium/internal/event"
 	"github.com/caesium-cloud/caesium/internal/incident"
 	internaljobdef "github.com/caesium-cloud/caesium/internal/jobdef"
 	jobdiff "github.com/caesium-cloud/caesium/internal/jobdef/diff"
+	"github.com/caesium-cloud/caesium/internal/jobdef/docdiff"
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/caesium-cloud/caesium/internal/notification"
 	"github.com/caesium-cloud/caesium/internal/run"
 	schema "github.com/caesium-cloud/caesium/pkg/jobdef"
 	"github.com/caesium-cloud/caesium/pkg/log"
 	"github.com/google/uuid"
+	"gopkg.in/yaml.v3"
 	"gorm.io/gorm"
 )
 
@@ -344,13 +345,15 @@ func (o *incidentActionOps) OverrideSchemaGateOnce(ctx context.Context, runID uu
 //
 // The provenance route is NOT decided here — Executor.dispatchApplyJobdefPatch
 // derives it from the job's git fields and calls this with dryRun accordingly.
-// This method only ever sees "render" or "render and apply".
+// This method only ever sees "render" or "render and apply". A render runs every
+// validation the apply does, including the batch validation git sync runs: on the
+// Git-PR route a manifest that fails it would stall the source's sync once merged.
 //
 // namespace is the incident's namespace (identity-and-access A8): the job must
 // still live there, the proposed definition must keep it there, and the apply
 // is confined to it, so the patch cannot touch a trigger or webhook path that
 // also serves another namespace's jobs (B9 trigger tenancy). Both ownership
-// checks run before the dry-run return, so the git-synced route refuses the
+// checks run before the dry-run return, so the git-synced routes refuse the
 // same patches as the direct one.
 func (o *incidentActionOps) ApplyJobdefPatch(ctx context.Context, jobID uuid.UUID, namespace string, definition json.RawMessage, dryRun bool) (json.RawMessage, error) {
 	var job models.Job
@@ -384,7 +387,7 @@ func (o *incidentActionOps) ApplyJobdefPatch(ctx context.Context, jobID uuid.UUI
 		return nil, fmt.Errorf("%w (incident namespace %q)", incident.ErrPatchMovesNamespace, namespace)
 	}
 
-	rendered, err := o.renderJobdefDiff(ctx, &def, job.Alias, namespace)
+	rendered, err := o.renderJobdefDiff(ctx, &def, job.ID, job.Alias, namespace)
 	if err != nil {
 		return nil, err
 	}
@@ -399,9 +402,6 @@ func (o *incidentActionOps) ApplyJobdefPatch(ctx context.Context, jobID uuid.UUI
 	if models.NamespaceOrDefault(current.Namespace) != namespace {
 		return nil, fmt.Errorf("%w: job %q", incident.ErrNamespaceMoved, job.Alias)
 	}
-	if dryRun {
-		return rendered, nil
-	}
 
 	importer := internaljobdef.NewImporter(o.db)
 	// The error is recorded on the incident's action timeline, which readers
@@ -409,6 +409,9 @@ func (o *incidentActionOps) ApplyJobdefPatch(ctx context.Context, jobID uuid.UUI
 	// datasets and contract findings are redacted from it (A8).
 	if err := importer.ValidateBatch(ctx, []schema.Definition{def}); err != nil {
 		return nil, patchErrorf(ctx, o.db, namespace, job.Alias, "incident: proposed job definition failed server-side validation", err)
+	}
+	if dryRun {
+		return rendered, nil
 	}
 	opts := &internaljobdef.ApplyOptions{
 		NamespaceAllowlist: []string{namespace},
@@ -420,38 +423,78 @@ func (o *incidentActionOps) ApplyJobdefPatch(ctx context.Context, jobID uuid.UUI
 	return rendered, nil
 }
 
-// renderJobdefDiff produces the human-readable diff between the proposed
-// definition and the job as it stands, SCOPED to the target alias so unrelated
-// jobs never appear as deletions (Compare treats every actual spec the desired
-// map omits as a delete).
+// renderJobdefDiff renders the change the proposal makes to the job: a unified
+// diff of the job's complete definition against the proposed one, so every field
+// a patch writes shows, whichever field that is. The result's `diff` is empty in
+// two cases, told apart by `empty`: true when the two definitions are identical,
+// false when no diff could be produced, and the caller then shows the proposal.
+// `outbound_diff` is the same change with credential values masked, for readers
+// outside the incident. It has to be rendered here, from the definitions: a mask
+// applied to finished text misses the lines of a multi-line value.
 //
-// The baseline is read as a reader confined to the incident's namespace
-// (identity-and-access A8): one snapshot of that namespace's jobs only, with
-// the configuration of a trigger that also serves another namespace's job
-// redacted, because the diff lands on the incident's timeline. A job that is
-// not in that snapshot has moved out and is refused.
-func (o *incidentActionOps) renderJobdefDiff(ctx context.Context, def *schema.Definition, alias, namespace string) (json.RawMessage, error) {
-	actual, err := jobdiff.LoadDatabaseSpecs(authz.WithAllowedNamespaces(ctx, []string{namespace}), o.db)
-	if err != nil {
-		return nil, fmt.Errorf("incident: load current job specs for diff: %w", err)
-	}
-	spec, ok := actual[alias]
-	if !ok {
+// The current definition is read as a reader confined to the incident's
+// namespace (identity-and-access A8): one snapshot, with the configuration of a
+// trigger that also serves another namespace's job redacted, because the diff
+// lands on the incident's timeline. A job outside that namespace has moved out
+// and is refused.
+func (o *incidentActionOps) renderJobdefDiff(ctx context.Context, def *schema.Definition, jobID uuid.UUID, alias, namespace string) (json.RawMessage, error) {
+	var current *schema.Definition
+	scope := internaljobdef.NewTenancyScope([]string{namespace}, nil)
+	err := jobdiff.ReadSnapshot(ctx, o.db, func(tx *gorm.DB) error {
+		var err error
+		current, err = internaljobdef.ExportConfinedTx(tx, jobID.String(), scope, jobdiff.RedactedTriggerConfiguration, func(*models.Job) error {
+			return incident.ErrNamespaceMoved
+		})
+		return err
+	})
+	if errors.Is(err, incident.ErrNamespaceMoved) {
 		return nil, fmt.Errorf("%w: job %q", incident.ErrNamespaceMoved, alias)
 	}
-	scoped := map[string]jobdiff.JobSpec{alias: spec}
-	result := jobdiff.Compare(map[string]jobdiff.JobSpec{alias: jobdiff.FromDefinition(def)}, scoped)
+	var text, outbound string
+	if err == nil {
+		text, outbound, err = definitionDiffs(current, def)
+	}
+	if err != nil {
+		log.Warn("incident: could not diff the proposed job definition", "job_alias", alias, "error", err)
+	}
+	payload := map[string]any{"alias": alias, "empty": err == nil && text == ""}
+	if text != "" {
+		payload["diff"] = text
+		payload["outbound_diff"] = outbound
+	}
+	return json.Marshal(payload)
+}
 
-	payload := map[string]any{"alias": alias, "empty": result.Empty()}
-	if len(result.Updates) > 0 {
-		payload["updates"] = result.Updates
+// definitionDiffs renders the complete diff and its masked form.
+func definitionDiffs(current, proposed *schema.Definition) (text, outbound string, err error) {
+	before, err := decodedDocument(current)
+	if err != nil {
+		return "", "", err
 	}
-	if len(result.Creates) > 0 {
-		payload["creates"] = result.Creates
+	after, err := decodedDocument(proposed)
+	if err != nil {
+		return "", "", err
 	}
-	out, err := json.Marshal(payload)
+	if text, err = docdiff.Documents(before, after); err != nil {
+		return "", "", err
+	}
+	if outbound, err = docdiff.MaskedDocuments(before, after); err != nil {
+		return "", "", err
+	}
+	return text, outbound, nil
+}
+
+// decodedDocument renders a definition as the manifest decoder reads it. The
+// decoder fills step defaults that an exported definition leaves out, and a
+// default is not an edit.
+func decodedDocument(def *schema.Definition) ([]byte, error) {
+	encoded, err := yaml.Marshal(def)
 	if err != nil {
 		return nil, err
 	}
-	return out, nil
+	var decoded schema.Definition
+	if err := yaml.Unmarshal(encoded, &decoded); err != nil {
+		return nil, err
+	}
+	return yaml.Marshal(&decoded)
 }

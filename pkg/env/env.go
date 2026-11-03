@@ -23,11 +23,12 @@ func Process() error {
 
 	if err := envconfig.Process("caesium", next); err != nil {
 		// envconfig's ParseError echoes the offending value. The registry
-		// credential mapping may hold a literal credential by mistake, and a
-		// git source may carry inline auth (password, SSH key, passphrase), so
-		// for both report the key and cause without the value.
+		// credential mapping may hold a literal credential by mistake, a git
+		// source may carry inline auth (password, SSH key, passphrase), and a
+		// git write credential may carry its token, so for these report the key
+		// and cause without the value.
 		perr, ok := errors.AsType[*envconfig.ParseError](err)
-		if ok && (perr.KeyName == "CAESIUM_REGISTRY_AUTH" || perr.KeyName == "CAESIUM_JOBDEF_GIT_SOURCES") {
+		if ok && (perr.KeyName == "CAESIUM_REGISTRY_AUTH" || perr.KeyName == "CAESIUM_JOBDEF_GIT_SOURCES" || perr.KeyName == "CAESIUM_GIT_WRITE_CREDENTIALS") {
 			return fmt.Errorf("failed to process environment variables: %s: %w", perr.KeyName, perr.Err)
 		}
 		return fmt.Errorf("failed to process environment variables: %w", err)
@@ -116,6 +117,9 @@ func validate() error {
 	}
 
 	if err := validateAuthGroupRefresh(); err != nil {
+		return err
+	}
+	if err := variables.GitWriteCredentials.Validate(); err != nil {
 		return err
 	}
 
@@ -390,6 +394,10 @@ type Environment struct {
 	// seconds rather than minutes. Set it to 0 to disable the sweep and go back
 	// to trusting the event alone.
 	CancelReconcileInterval time.Duration `envconfig:"CANCEL_RECONCILE_INTERVAL" default:"15s"`
+
+	// GitWriteCredentials backs the Git-PR route of apply_jobdef_patch. It is a
+	// separate grant from JobdefGitSources' read-only sync credentials.
+	GitWriteCredentials GitWriteCredentials `envconfig:"GIT_WRITE_CREDENTIALS"`
 
 	// Data circuit breaker (docs/design/data-circuit-breaker.md).
 	// DataAssertionsEnabled is the ONE master gate for the whole feature: off

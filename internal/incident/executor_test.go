@@ -40,6 +40,8 @@ type fakeOps struct {
 
 	retryErr error
 	rerunID  uuid.UUID
+	// patchDiff overrides the rendered diff.
+	patchDiff json.RawMessage
 	// applyPatchErr forces the jobdef apply to fail so the approved-action
 	// failure path is exercised.
 	applyPatchErr error
@@ -148,6 +150,9 @@ func (f *fakeOps) ApplyJobdefPatch(_ context.Context, jobID uuid.UUID, _ string,
 	f.applyPatch = append(f.applyPatch, applyPatchCall{jobID: jobID, definition: definition, dryRun: dryRun})
 	if f.applyPatchErr != nil {
 		return nil, f.applyPatchErr
+	}
+	if f.patchDiff != nil {
+		return f.patchDiff, nil
 	}
 	return json.RawMessage(`{"alias":"demo","empty":false}`), nil
 }

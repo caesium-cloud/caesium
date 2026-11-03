@@ -204,6 +204,47 @@ func TestExecuteApprovedRunsSkipTask(t *testing.T) {
 	require.Len(t, ops.skipTask, 1)
 }
 
+// TestCancelledLoadAfterClaimStillFinishes cancels the approving request
+// after the claim and before the incident load. The row must still leave
+// executing, and the forge call must not run.
+func TestCancelledLoadAfterClaimStillFinishes(t *testing.T) {
+	db, store, ops, exec := newExecutorTest(t)
+	inc, _, _ := seedJobIncident(t, db, store, "extract", "")
+
+	action, err := exec.Execute(context.Background(), ActionRequest{
+		IncidentID: inc.ID,
+		Type:       ActionTypeSkipTask,
+		Params:     ActionParams{TaskName: "extract"},
+	})
+	require.NoError(t, err)
+	approveAction(t, db, action.ID, "alice@example.com", "")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	require.NoError(t, db.Callback().Query().Before("gorm:query").Register("test:cancel-incident-get", func(tx *gorm.DB) {
+		if tx.Statement == nil {
+			return
+		}
+		table := tx.Statement.Table
+		if table == "" && tx.Statement.Schema != nil {
+			table = tx.Statement.Schema.Table
+		}
+		if table == "incidents" {
+			cancel()
+		}
+	}))
+	t.Cleanup(func() { db.Callback().Query().Remove("test:cancel-incident-get") })
+
+	executed, err := exec.ExecuteApproved(ctx, action.ID)
+	require.Error(t, err)
+	require.Empty(t, ops.skipTask)
+	require.Equal(t, models.AgentActionStatusFailed, executed.Status)
+
+	var row models.AgentAction
+	require.NoError(t, db.First(&row, "id = ?", action.ID).Error)
+	require.Equal(t, models.AgentActionStatusFailed, row.Status)
+}
+
 // TestExecuteApprovedRefusesUnapprovedAction pins the guard that makes the
 // approval gate load-bearing: a merely-proposed (or rejected) action can never
 // be dispatched, even by a direct call.
@@ -271,8 +312,9 @@ func TestExecuteApprovedAppliesJobdefPatchDirectly(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, models.AgentActionStatusExecuted, executed.Status)
 
-	require.Len(t, ops.applyPatch, 1)
-	require.False(t, ops.applyPatch[0].dryRun, "the direct route applies, it does not merely render")
+	require.Len(t, ops.applyPatch, 2)
+	require.True(t, ops.applyPatch[0].dryRun, "the proposal renders a preview")
+	require.False(t, ops.applyPatch[1].dryRun, "the direct route applies, it does not merely render")
 	require.Empty(t, ops.escalate, "a non-git job must not escalate")
 
 	var result map[string]any
@@ -301,8 +343,9 @@ func TestExecuteApprovedJobdefPatchEscalatesForGitSyncedJob(t *testing.T) {
 	executed, err := exec.ExecuteApproved(context.Background(), action.ID)
 	require.NoError(t, err)
 
-	require.Len(t, ops.applyPatch, 1)
+	require.Len(t, ops.applyPatch, 2, "the preview and the dispatch")
 	require.True(t, ops.applyPatch[0].dryRun, "a git-synced job may only RENDER the patch, never apply it")
+	require.True(t, ops.applyPatch[1].dryRun, "a git-synced job may only RENDER the patch, never apply it")
 	require.Len(t, ops.escalate, 1, "the approved patch must escalate with the diff")
 	require.Contains(t, ops.escalate[0].summary, "alias")
 
@@ -595,5 +638,6 @@ func TestApplyJobdefPatchAllowsAnUnchangedPolicy(t *testing.T) {
 
 	_, err = exec.ExecuteApproved(context.Background(), action.ID)
 	require.NoError(t, err)
-	require.Len(t, ops.applyPatch, 1, "an unchanged policy must not block a legitimate patch")
+	require.Len(t, ops.applyPatch, 2, "an unchanged policy must not block a legitimate patch")
+	require.False(t, ops.applyPatch[1].dryRun)
 }

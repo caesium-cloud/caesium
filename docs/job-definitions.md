@@ -917,3 +917,45 @@ A source with `namespaces` may only apply manifests whose `metadata.namespace` (
 - **Audit.** Each sync of the source writes one audit row: actor `system:git-sync`, action `jobdef.git_sync`, resource `git_source` / the `source_id`. Its outcome is `success`, `denied` (a manifest was skipped or a job was left unpruned) or `error`, and its metadata holds the source URL (credentials, query and fragment removed), ref, commit, `namespaces`, `applied`, `violations`, `pruned` and `prune_skipped`. Read it with `caesium auth audit --action jobdef.git_sync` (needs an auth mode). Unrestricted sources write no audit row.
 - **Startup checks.** With git sync enabled, the server refuses to start (`git sync configuration failure`) when `namespaces` is `[]` or holds `""`, `*` or an entry that is not a DNS label, or when a source with `namespaces` lacks a non-empty `source_id` or shares it with another source (ownership and pruning follow `source_id`). A `namespaces` value of `null`, a singular `namespace` key, or two case variants of `namespaces` in one entry are rejected while the environment is parsed (`environment failure`), so they fail every `caesium` command, even with git sync disabled. Neither error echoes the `CAESIUM_JOBDEF_GIT_SOURCES` value, which can hold inline credentials.
 - Entries are checked for syntax only, not against declared namespaces.
+
+### Pull requests for agent patches
+
+`CAESIUM_GIT_WRITE_CREDENTIALS` lets an approved `apply_jobdef_patch` land as a pull request against the repository a job was synced from. It is a separate grant: a source's sync credentials are never used to write. Without a matching entry the approved patch escalates with the rendered diff.
+
+```json
+[
+  {
+    "source_id": "orders",
+    "forge": "github",
+    "api_base_url": "https://api.github.com",
+    "token_ref": "secret://env/ORDERS_FORGE_TOKEN",
+    "namespaces": ["marketing"]
+  }
+]
+```
+
+| Key | Meaning |
+| --- | --- |
+| `source_id`, `repo` | Which jobs the entry serves: a `CAESIUM_JOBDEF_GIT_SOURCES` `source_id`, a repository URL, or both. At least one is required, and each one set must match. |
+| `forge` | `github` (GitHub or GitHub Enterprise). |
+| `api_base_url` | The API root, such as `https://ghe.example.com/api/v3`. It must use `https`, or `http` on a loopback host, and its host must serve the repository. The token is sent nowhere else, and redirects are refused. |
+| `token`, `token_ref` | The token, or a `secret://` reference resolved each time it is used. Exactly one is required. |
+| `namespaces` | The tenancy namespaces whose jobs may use the entry. Required; `*` is not accepted. |
+
+An entry that breaks these rules fails every `caesium` command while the environment is parsed, and the error never echoes the value. An unknown key is refused too.
+
+A job takes the route only when all of this holds, and otherwise the patch escalates with `degrade` and `reason` on the action result:
+
+- git sync is on, and a configured source has the job's `source_id`, repository and ref, and admits its namespace;
+- the job's manifest path is one that source syncs, and the ref is a branch;
+- the file declares the job's alias in the job's namespace, exactly once;
+- the proposal recorded the commit the job was synced from, and the file is still the blob it was at that commit;
+- the patched definition passes the trigger tenancy that the source's sync applies when it imports the merged change: the source's `namespaces` allowlist, or, for an unrestricted source under a policy file, one namespace per trigger and webhook path. Otherwise the patch escalates (`trigger_tenancy`) before any forge call, because sync would refuse the merged job, or fail the whole source's sync. The approver's preview decides the route from configuration alone, so it can show a pull request while execution escalates for this reason.
+
+The commit is the one the job held when the agent proposed the patch. A proposal is a whole document, so if a sync brings in a change to the file before the approval, writing it would revert that change. The patch escalates instead (`manifest_changed`), and someone proposes it again. A sync that leaves the file alone changes nothing. A proposal that recorded no commit escalates (`no_baseline`).
+
+The pull request comes from the branch `caesium/patch-<action id>`. The approver's preview names that branch, so anyone who can push to the repository can open a pull request from it before the approval. Any pull request on that branch, including the one the route has just opened, counts as this patch's only when it targets the source's branch and the manifest at its head is byte for byte the replacement the route would write. Otherwise the patch escalates (`pull_request_mismatch`) and the result names the branch, not the pull request. The route reads the branch's open pull requests first and takes the one into the source's branch. Only without one does it read the closed ones, preferring a merged one into the source's branch. Each list is read to its end, up to ten pages of 100, and a branch with more escalates (`forge_error`) rather than choosing from part of a list. A merged pull request counts only when the source's branch holds the change now, byte for byte. GitHub also marks a pull request merged when its commits reach the base some other way, such as an `ours` merge that keeps the old manifest. So a merged pull request without the change escalates (`pull_request_merged_without_change`), and one with it is success, with `pr_merged: true` in the result. A pull request closed without being merged was rejected, so the patch escalates (`pull_request_closed`), and the route neither reopens it nor opens another on the branch. The replacement replaces only the job's document: sibling jobs and the comments above the document stay byte for byte, while comments inside the document are lost. Job and data values appear in the description only inside code blocks, so they cannot mention anyone. A job with provenance is never edited on the server, even when the forge is down, because the next sync would revert the edit. The hold stays until the merged change is synced and a clean run releases it.
+
+Every rendered diff is a unified diff of the whole documents, compared as data with keys sorted, so it shows every field a patch changes and no reformatting. The approver's preview and the action's `result` compare the proposal with the server's copy of the job, read as a reader confined to the incident's namespace. The pull request description compares it with the job's document in the file. Nothing read from the repository reaches the incident: its reasons and errors quote no line of the file and no text from the forge, only which call failed and its status or a fixed category such as `transport error` or `timeout`. If the server's copy already matches the proposal, the result of a pull request says the change is there and links it. When no diff can be produced, the surface shows the complete proposal, and "no changes" appears only when the two definitions are identical. A diff stops at 30,000 bytes and says so; the action's `params` hold the whole proposal.
+
+Readers differ by surface. The preview and the action's `result` are for the incident's readers, who can read the job's manifest, and they show values as they stand. The agent that proposed the patch does not receive the preview. The pull request description and the escalation go further, so the value under a credential-named key is masked before the diff is built, all of its lines, unless it is a `secret://` reference. Each mask is a digest under a key that is discarded with the render, so a changed value still reads as a change and a digest cannot confirm a guess. Token-shaped text is then scrubbed. The mask goes by key name, so a credential under an ordinary name goes out unless it looks like a token: keep credentials in `secret://` references.
