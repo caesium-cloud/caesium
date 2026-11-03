@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -336,53 +337,161 @@ func TestFindPullRequestChecksTheHead(t *testing.T) {
 	}
 	srv := serve(t, func(w http.ResponseWriter, r *http.Request) {
 		require.Equal(t, "acme:caesium/patch-1", r.URL.Query().Get("head"))
-		require.Equal(t, "all", r.URL.Query().Get("state"))
+		require.Contains(t, []string{"open", "closed"}, r.URL.Query().Get("state"))
 		_ = json.NewEncoder(w).Encode([]map[string]any{
 			{"number": 1, "html_url": "https://x/1", "state": "open", "head": head("other", "acme/jobs")},
 			{"number": 2, "html_url": "https://x/2", "state": "open", "head": head("caesium/patch-1", "fork/jobs")},
 			{"number": 3, "html_url": "https://x/3", "state": "closed", "head": head("caesium/patch-1", "acme/jobs")},
 		})
 	})
-	found, err := newClient(t, srv).FindPullRequest(context.Background(), "caesium/patch-1")
+	found, err := newClient(t, srv).FindPullRequest(context.Background(), "caesium/patch-1", "main")
 	require.NoError(t, err)
 	require.Equal(t, &PullRequest{Number: 3, URL: "https://x/3", State: "closed"}, found)
 }
 
-// Several pull requests can share the branch: an open one wins, then a merged
-// one. merged_at tells a merged pull request from a rejected one; the forge
-// reports both as closed.
-func TestFindPullRequestPrefersOpenThenMerged(t *testing.T) {
-	pull := func(number int, state string, mergedAt any) map[string]any {
-		return map[string]any{
-			"number": number, "html_url": "https://x/" + strconv.Itoa(number), "state": state, "merged_at": mergedAt,
-			"base": map[string]any{"ref": "main"},
-			"head": map[string]any{"ref": "caesium/patch-1", "sha": strings.Repeat("a", 40), "repo": map[string]any{"full_name": "acme/jobs"}},
-		}
+// listedPull is a pull request on the branch caesium/patch-1 as the list endpoint
+// returns it.
+func listedPull(number int, state string, mergedAt any, base string) map[string]any {
+	return map[string]any{
+		"number": number, "html_url": "https://x/" + strconv.Itoa(number), "state": state, "merged_at": mergedAt,
+		"base": map[string]any{"ref": base},
+		"head": map[string]any{"ref": "caesium/patch-1", "sha": strings.Repeat("a", 40), "repo": map[string]any{"full_name": "acme/jobs"}},
 	}
-	rejected, merged, open := pull(1, "closed", nil), pull(2, "closed", "2026-11-01T12:00:00Z"), pull(3, "open", nil)
+}
+
+// pagingForge serves pulls as the list endpoint does, per_page at a time. With
+// honorState false it ignores the state filter, as it does a head filter it
+// cannot parse, so the client's own state check is what holds. lists counts the
+// requests by state.
+func pagingForge(t *testing.T, pulls []map[string]any, honorState bool) (Client, map[string]int) {
+	t.Helper()
+	var mu sync.Mutex
+	lists := map[string]int{}
+	srv := serve(t, func(w http.ResponseWriter, r *http.Request) {
+		query := r.URL.Query()
+		mu.Lock()
+		lists[query.Get("state")]++
+		mu.Unlock()
+		var matched []map[string]any
+		for _, pull := range pulls {
+			if !honorState || (pull["state"] == "open") == (query.Get("state") == "open") {
+				matched = append(matched, pull)
+			}
+		}
+		perPage, _ := strconv.Atoi(query.Get("per_page"))
+		page, _ := strconv.Atoi(query.Get("page"))
+		require.Equal(t, 100, perPage)
+		start := min((page-1)*perPage, len(matched))
+		out := matched[start:min(start+perPage, len(matched))]
+		if out == nil {
+			out = []map[string]any{}
+		}
+		_ = json.NewEncoder(w).Encode(out)
+	})
+	return newClient(t, srv), lists
+}
+
+func closedPulls(from, count int, base string) []map[string]any {
+	out := make([]map[string]any, 0, count)
+	for i := range count {
+		out = append(out, listedPull(from+i, "closed", nil, base))
+	}
+	return out
+}
+
+// Several pull requests can share the branch: an open one into the base wins,
+// then a merged one into it, then any merged one, then an open one into another
+// base, then a closed one. merged_at tells a merged pull request from a rejected
+// one; the forge reports both as closed.
+func TestFindPullRequestPrefersOpenThenMerged(t *testing.T) {
+	const at = "2026-11-01T12:00:00Z"
+	rejected, merged, open := listedPull(1, "closed", nil, "main"), listedPull(2, "closed", at, "main"), listedPull(3, "open", nil, "main")
+	openElsewhere, mergedElsewhere := listedPull(4, "open", nil, "release"), listedPull(5, "closed", at, "release")
 	for name, tc := range map[string]struct {
 		listed []map[string]any
-		want   PullRequest
+		want   int
 	}{
-		"open over merged and rejected": {listed: []map[string]any{rejected, merged, open},
-			want: PullRequest{Number: 3, URL: "https://x/3", State: "open", Base: "main", HeadSHA: strings.Repeat("a", 40)}},
-		"merged over rejected": {listed: []map[string]any{rejected, merged},
-			want: PullRequest{Number: 2, URL: "https://x/2", State: "closed", Merged: true, Base: "main", HeadSHA: strings.Repeat("a", 40)}},
-		"rejected alone": {listed: []map[string]any{rejected},
-			want: PullRequest{Number: 1, URL: "https://x/1", State: "closed", Base: "main", HeadSHA: strings.Repeat("a", 40)}},
+		"open over merged and rejected":        {listed: []map[string]any{rejected, merged, open}, want: 3},
+		"open into the base over another base": {listed: []map[string]any{openElsewhere, open}, want: 3},
+		"merged over rejected":                 {listed: []map[string]any{rejected, merged}, want: 2},
+		"merged into the base over elsewhere":  {listed: []map[string]any{mergedElsewhere, merged}, want: 2},
+		"merged elsewhere over open elsewhere": {listed: []map[string]any{openElsewhere, mergedElsewhere}, want: 5},
+		"open elsewhere over rejected":         {listed: []map[string]any{rejected, openElsewhere}, want: 4},
+		"rejected alone":                       {listed: []map[string]any{rejected}, want: 1},
 	} {
 		t.Run(name, func(t *testing.T) {
-			srv := serve(t, func(w http.ResponseWriter, _ *http.Request) { _ = json.NewEncoder(w).Encode(tc.listed) })
-			found, err := newClient(t, srv).FindPullRequest(context.Background(), "caesium/patch-1")
+			for _, honorState := range []bool{true, false} {
+				client, _ := pagingForge(t, tc.listed, honorState)
+				found, err := client.FindPullRequest(context.Background(), "caesium/patch-1", "main")
+				require.NoError(t, err)
+				require.NotNil(t, found)
+				require.Equal(t, tc.want, found.Number, "honorState=%v", honorState)
+			}
+		})
+	}
+	client, _ := pagingForge(t, []map[string]any{merged}, true)
+	found, err := client.FindPullRequest(context.Background(), "caesium/patch-1", "main")
+	require.NoError(t, err)
+	require.Equal(t, &PullRequest{Number: 2, URL: "https://x/2", State: "closed", Merged: true, Base: "main", HeadSHA: strings.Repeat("a", 40)}, found)
+}
+
+// Every page is read before a choice: the list is newest first, so an open pull
+// request or a merged one can sit behind a page of closed ones.
+func TestFindPullRequestReadsEveryPage(t *testing.T) {
+	const at = "2026-11-01T12:00:00Z"
+	for name, tc := range map[string]struct {
+		listed     []map[string]any
+		honorState bool
+		want       int
+	}{
+		"open behind a page of closed ones": {
+			listed: append(closedPulls(1, 150, "release"), listedPull(900, "open", nil, "main")), want: 900},
+		"merged behind a page of rejected ones": {
+			listed: append(closedPulls(1, 150, "main"), listedPull(900, "closed", at, "main")), honorState: true, want: 900},
+		"merged into the base behind one elsewhere": {
+			listed: append(append([]map[string]any{listedPull(800, "closed", at, "release")}, closedPulls(1, 150, "main")...),
+				listedPull(900, "closed", at, "main")), honorState: true, want: 900},
+	} {
+		t.Run(name, func(t *testing.T) {
+			client, _ := pagingForge(t, tc.listed, tc.honorState)
+			found, err := client.FindPullRequest(context.Background(), "caesium/patch-1", "main")
 			require.NoError(t, err)
-			require.Equal(t, &tc.want, found)
+			require.NotNil(t, found)
+			require.Equal(t, tc.want, found.Number)
 		})
 	}
 }
 
+// A list longer than the bound is never chosen from: what lies past it could
+// change the answer. A pull request nothing could beat ends the read early.
+func TestFindPullRequestFailsClosedAtTheBound(t *testing.T) {
+	const at = "2026-11-01T12:00:00Z"
+	beyond := maxPullPages*pullsPerPage + 1
+
+	client, lists := pagingForge(t, closedPulls(1, beyond, "main"), true)
+	_, err := client.FindPullRequest(context.Background(), "caesium/patch-1", "main")
+	require.ErrorIs(t, err, ErrTooManyPullRequests)
+	require.Equal(t, "forge: list pull requests: too many pull requests", Summary(err))
+	require.Equal(t, maxPullPages, lists["closed"], "it reads to the bound and no further")
+
+	open := make([]map[string]any, 0, beyond)
+	for i := range beyond {
+		open = append(open, listedPull(i+1, "open", nil, "release"))
+	}
+	client, _ = pagingForge(t, open, true)
+	_, err = client.FindPullRequest(context.Background(), "caesium/patch-1", "main")
+	require.ErrorIs(t, err, ErrTooManyPullRequests, "the open list is bounded too")
+
+	client, lists = pagingForge(t, append([]map[string]any{listedPull(1, "closed", at, "main")}, closedPulls(2, beyond, "main")...), true)
+	found, err := client.FindPullRequest(context.Background(), "caesium/patch-1", "main")
+	require.NoError(t, err)
+	require.Equal(t, 1, found.Number)
+	require.Equal(t, 1, lists["closed"], "a merged pull request into the base ends the read")
+}
+
 func TestFindPullRequestFindsNothing(t *testing.T) {
 	srv := serve(t, func(w http.ResponseWriter, r *http.Request) { _, _ = io.WriteString(w, `[]`) })
-	found, err := newClient(t, srv).FindPullRequest(context.Background(), "caesium/patch-1")
+	found, err := newClient(t, srv).FindPullRequest(context.Background(), "caesium/patch-1", "main")
 	require.NoError(t, err)
 	require.Nil(t, found)
 }

@@ -20,6 +20,7 @@ import (
 	"net/url"
 	"path"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -43,6 +44,9 @@ var (
 	// ErrFileNotEditable reports a path the contents API cannot round-trip: a
 	// directory, or a file too large to be returned inline.
 	ErrFileNotEditable = errors.New("forge: path is not an editable file")
+	// ErrTooManyPullRequests reports a pull request lookup that reached its page
+	// bound before it could choose.
+	ErrTooManyPullRequests = errors.New("forge: too many pull requests")
 )
 
 // Repo names a repository on a forge. Host keeps a non-default http(s) port.
@@ -104,9 +108,9 @@ type Client interface {
 	// CreateBranch reports false when the branch already exists.
 	CreateBranch(ctx context.Context, branch, sha string) (bool, error)
 	PutFile(ctx context.Context, file PutFile) error
-	// FindPullRequest returns the pull request whose head is branch, in any
-	// state, or nil.
-	FindPullRequest(ctx context.Context, branch string) (*PullRequest, error)
+	// FindPullRequest returns the pull request whose head is branch, or nil: an
+	// open one into base, else a merged one, else any other (see the method).
+	FindPullRequest(ctx context.Context, branch, base string) (*PullRequest, error)
 	OpenPullRequest(ctx context.Context, pr NewPullRequest) (*PullRequest, error)
 }
 
@@ -378,6 +382,7 @@ const (
 	categoryTooLarge       = "response too large"
 	categoryDecode         = "decode error"
 	categoryNotEditable    = "not an editable file"
+	categoryTooMany        = "too many pull requests"
 )
 
 // transportCategory names a failed exchange without its error text.
@@ -599,50 +604,103 @@ func (p *pullRequest) record() *PullRequest {
 	}
 }
 
-// rank orders pull requests on one branch: an open one first, then a merged one,
-// then any other.
-func (p *PullRequest) rank() int {
-	switch {
-	case p.Open():
-		return 0
-	case p.Merged:
-		return 1
-	default:
-		return 2
-	}
-}
+const (
+	pullsPerPage = 100
+	// maxPullPages bounds each pull request listing. A lookup that reaches it
+	// without a decision fails rather than choosing from a partial list.
+	maxPullPages = 10
+)
 
-func (g *github) FindPullRequest(ctx context.Context, branch string) (*PullRequest, error) {
+// FindPullRequest reads the open pull requests from branch first: the forge
+// allows one per head and base, so the list is short, and an open one into base
+// is the answer. Without one it reads the closed ones and prefers a merged one,
+// into base first. An open one into another base comes next, then a closed one,
+// into base first. Every list is read to its end, page by page, before anything
+// is chosen from it, except where nothing later could be preferred.
+func (g *github) FindPullRequest(ctx context.Context, branch, base string) (*PullRequest, error) {
 	const op = "list pull requests"
 	if err := ValidateBranch(branch); err != nil {
 		return nil, g.failure(op, categoryInvalidRequest, err, nil)
 	}
-	query := url.Values{"state": {"all"}, "head": {g.repo.Owner + ":" + branch}, "per_page": {"100"}}
-	resp, err := g.call(ctx, http.MethodGet, g.repoPath("pulls"), query, nil)
+	intoBase := func(p *PullRequest) bool { return p.Base == base }
+	open, err := g.listPulls(ctx, op, branch, "open", intoBase)
 	if err != nil {
 		return nil, err
 	}
-	if !resp.ok() {
-		return nil, g.status(op, resp, nil)
+	if found := firstOf(open, intoBase); found != nil {
+		return found, nil
 	}
-	var pulls []pullRequest
-	if err := json.Unmarshal(resp.body, &pulls); err != nil {
-		return nil, g.failure(op, categoryDecode, errors.New("unexpected response"), nil)
+	closed, err := g.listPulls(ctx, op, branch, "closed", func(p *PullRequest) bool { return p.Merged && intoBase(p) })
+	if err != nil {
+		return nil, err
 	}
-	// The API ignores a head filter it cannot parse and returns everything, so
-	// the head is checked here: another pull request must not read as this one's.
-	// Several can share the branch; an open one wins, then a merged one.
-	var best *PullRequest
-	for i := range pulls {
-		head := &pulls[i].Head
-		if head.Ref != branch || (head.Repo != nil && !strings.EqualFold(head.Repo.FullName, g.repo.String())) {
-			continue
-		}
-		if found := pulls[i].record(); best == nil || found.rank() < best.rank() {
-			best = found
+	for _, choice := range []*PullRequest{
+		firstOf(closed, func(p *PullRequest) bool { return p.Merged && intoBase(p) }),
+		firstOf(closed, func(p *PullRequest) bool { return p.Merged }),
+		firstOf(open, func(*PullRequest) bool { return true }),
+		firstOf(closed, intoBase),
+		firstOf(closed, func(*PullRequest) bool { return true }),
+	} {
+		if choice != nil {
+			return choice, nil
 		}
 	}
-	return best, nil
+	return nil, nil
+}
+
+func firstOf(pulls []*PullRequest, match func(*PullRequest) bool) *PullRequest {
+	for _, p := range pulls {
+		if match(p) {
+			return p
+		}
+	}
+	return nil
+}
+
+// listPulls reads the pull requests from branch in state ("open" or "closed"),
+// a page at a time, to the end of the list. done ends the read early at a pull
+// request nothing later could be preferred to. A list longer than maxPullPages
+// is ErrTooManyPullRequests: what lies past the bound could change the answer.
+func (g *github) listPulls(ctx context.Context, op, branch, state string, done func(*PullRequest) bool) ([]*PullRequest, error) {
+	var out []*PullRequest
+	for page := 1; page <= maxPullPages; page++ {
+		query := url.Values{
+			"state": {state}, "head": {g.repo.Owner + ":" + branch},
+			"per_page": {strconv.Itoa(pullsPerPage)}, "page": {strconv.Itoa(page)},
+		}
+		resp, err := g.call(ctx, http.MethodGet, g.repoPath("pulls"), query, nil)
+		if err != nil {
+			return nil, err
+		}
+		if !resp.ok() {
+			return nil, g.status(op, resp, nil)
+		}
+		var pulls []pullRequest
+		if err := json.Unmarshal(resp.body, &pulls); err != nil {
+			return nil, g.failure(op, categoryDecode, errors.New("unexpected response"), nil)
+		}
+		for i := range pulls {
+			// The API ignores a head filter it cannot parse and returns everything,
+			// so the head and the state are checked here: another pull request must
+			// not read as this one's.
+			head := &pulls[i].Head
+			if head.Ref != branch || (head.Repo != nil && !strings.EqualFold(head.Repo.FullName, g.repo.String())) {
+				continue
+			}
+			found := pulls[i].record()
+			if found.Open() != (state == "open") {
+				continue
+			}
+			out = append(out, found)
+			if done(found) {
+				return out, nil
+			}
+		}
+		if len(pulls) < pullsPerPage {
+			return out, nil
+		}
+	}
+	return nil, g.failure(op, categoryTooMany, errors.New("the pull request list exceeds the lookup bound"), ErrTooManyPullRequests)
 }
 
 func (g *github) OpenPullRequest(ctx context.Context, pr NewPullRequest) (*PullRequest, error) {

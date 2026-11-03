@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -114,8 +115,9 @@ type fakeGitHub struct {
 	redirectTo  string
 	// badLocation answers every request with a redirect to this Location.
 	badLocation string
-	// hidePullsOnce makes the next pull request list come back empty.
-	hidePullsOnce bool
+	// hidePullsUntilOpen makes pull request lists come back empty until the route
+	// tries to open one, as a lookup lagging behind the forge would.
+	hidePullsUntilOpen bool
 	// onRequest runs as a request arrives.
 	onRequest func()
 }
@@ -262,15 +264,18 @@ func (f *fakeGitHub) serve(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{})
 	case resource == "pulls" && r.Method == http.MethodGet:
 		out := []map[string]any{}
-		if f.hidePullsOnce {
-			f.hidePullsOnce = false
+		if f.hidePullsUntilOpen {
 			writeJSON(w, http.StatusOK, out)
 			return
 		}
+		query := r.URL.Query()
 		for _, pull := range f.pulls {
 			head := pull["head"].(map[string]any)
 			ref := head["ref"].(string)
-			if "acme:"+ref != r.URL.Query().Get("head") {
+			if "acme:"+ref != query.Get("head") {
+				continue
+			}
+			if state := query.Get("state"); state != "all" && (pull["state"] == "open") != (state == "open") {
 				continue
 			}
 			// A pull request's head is its branch's head, unless the test pinned one.
@@ -281,8 +286,16 @@ func (f *fakeGitHub) serve(w http.ResponseWriter, r *http.Request) {
 			}
 			out = append(out, listed)
 		}
+		// Pages as the API does: per_page at a time, page counted from one.
+		perPage, _ := strconv.Atoi(query.Get("per_page"))
+		page, _ := strconv.Atoi(query.Get("page"))
+		if perPage > 0 {
+			start := min(max(page-1, 0)*perPage, len(out))
+			out = out[start:min(start+perPage, len(out))]
+		}
 		writeJSON(w, http.StatusOK, out)
 	case resource == "pulls" && r.Method == http.MethodPost:
+		f.hidePullsUntilOpen = false
 		var body struct{ Title, Body, Head, Base string }
 		require.NoError(f.t, json.NewDecoder(r.Body).Decode(&body))
 		for _, pull := range f.pulls {
@@ -991,7 +1004,7 @@ func TestAnExistingPullRequestAtOpenIsALookup(t *testing.T) {
 				"base": map[string]any{"ref": tc.base}, "head": head,
 			})
 			// The first lookup answers with an empty list.
-			f.forge.hidePullsOnce = true
+			f.forge.hidePullsUntilOpen = true
 
 			executed, err := f.exec.ExecuteApproved(context.Background(), action.ID)
 			require.NoError(t, err)
@@ -1131,35 +1144,58 @@ func TestANewPullRequestIsHeldToTheApprovedChange(t *testing.T) {
 
 // TestPullRequestStateDecidesAcceptance: the lookup asks for every state, and the
 // forge reports a merged pull request and a rejected one alike as closed. An open
-// one holding the approved change is accepted, a merged one is the change already
-// landed, and a closed, unmerged one was rejected: the route degrades, reopens
-// nothing and opens no second pull request on the branch. Both lookups, the first
-// and the one after a 422 at open, are held to this.
+// one holding the approved change is accepted. A merged one is the change already
+// landed only if the base holds it now: an `ours` merge marks the pull request
+// merged and keeps the old manifest. A closed, unmerged one was rejected. On a
+// refusal the route degrades, reopens nothing and opens no second pull request on
+// the branch. Both lookups, the first and the one after a 422 at open, are held
+// to this.
 func TestPullRequestStateDecidesAcceptance(t *testing.T) {
 	merged := "2026-11-01T12:00:00Z"
 	for _, lookup := range []string{"first lookup", "after a 422"} {
 		for name, tc := range map[string]struct {
 			state    string
 			mergedAt any
-			code     string
+			// landed puts the approved manifest at the base's head before the
+			// lookup that finds the pull request.
+			landed bool
+			code   string
 		}{
-			"open":            {state: "open"},
-			"merged":          {state: "closed", mergedAt: merged},
-			"closed unmerged": {state: "closed", code: degradePullRequestClosed},
+			"open":                    {state: "open"},
+			"merged and landed":       {state: "closed", mergedAt: merged, landed: true},
+			"merged without the edit": {state: "closed", mergedAt: merged, code: degradePullRequestMergedWithoutChange},
+			"closed unmerged":         {state: "closed", code: degradePullRequestClosed},
 		} {
 			t.Run(lookup+"/"+name, func(t *testing.T) {
 				f := newRouteFixture(t, manifestFile)
 				action := f.propose(t, patchJSON(t, patchedDefinition))
 				branch := forge.BranchForAction(action.ID)
 				sha := strings.Repeat("d", 40)
-				f.forge.put(sha, testManifest, approvedManifest(t))
+				approved := approvedManifest(t)
+				f.forge.put(sha, testManifest, approved)
 				f.forge.pulls = append(f.forge.pulls, map[string]any{
 					"number": 9, "html_url": "https://forge.example/9", "state": tc.state, "merged_at": tc.mergedAt,
 					"base": map[string]any{"ref": "main"},
 					"head": map[string]any{"ref": branch, "sha": sha, "repo": map[string]any{"full_name": "acme/jobs"}},
 				})
+				land := func() {
+					// The merge commit, holding the approved manifest.
+					mergeCommit := strings.Repeat("f", 40)
+					f.forge.put(mergeCommit, testManifest, approved)
+					f.forge.heads["main"] = mergeCommit
+				}
 				if lookup == "after a 422" {
-					f.forge.hidePullsOnce = true
+					f.forge.hidePullsUntilOpen = true
+					if tc.landed {
+						// It lands after the route checked the base, before it opens.
+						f.forge.onRequest = func() {
+							if f.forge.requests[len(f.forge.requests)-1] == "POST /repos/acme/jobs/pulls" {
+								land()
+							}
+						}
+					}
+				} else if tc.landed {
+					land()
 				}
 				approveAction(t, f.db, action.ID, "operator@example.com", "")
 
@@ -1185,6 +1221,7 @@ func TestPullRequestStateDecidesAcceptance(t *testing.T) {
 				require.Equal(t, true, result["pr_existing"])
 				require.Equal(t, tc.state, result["pr_state"])
 				if tc.mergedAt != nil {
+					require.True(t, tc.landed)
 					require.Equal(t, true, result["pr_merged"], "a merged pull request says so")
 				} else {
 					require.NotContains(t, result, "pr_merged")
@@ -1193,6 +1230,31 @@ func TestPullRequestStateDecidesAcceptance(t *testing.T) {
 			})
 		}
 	}
+}
+
+// A branch with more pull requests than the lookup reads is never chosen from: the
+// route escalates with fixed text, and writes and opens nothing.
+func TestPullRequestLookupPastItsBoundEscalates(t *testing.T) {
+	f := newRouteFixture(t, manifestFile)
+	action := f.propose(t, patchJSON(t, patchedDefinition))
+	branch := forge.BranchForAction(action.ID)
+	for i := range 10*100 + 1 {
+		f.forge.pulls = append(f.forge.pulls, map[string]any{
+			"number": i + 1, "html_url": fmt.Sprintf("https://forge.example/%d", i+1), "state": "closed", "merged_at": nil,
+			"base": map[string]any{"ref": "main"},
+			"head": map[string]any{"ref": branch, "sha": strings.Repeat("d", 40), "repo": map[string]any{"full_name": "acme/jobs"}},
+		})
+	}
+	approveAction(t, f.db, action.ID, "operator@example.com", "")
+
+	executed, err := f.exec.ExecuteApproved(context.Background(), action.ID)
+	require.NoError(t, err)
+	result := patchResult(t, executed)
+	requireDegraded(t, f, result, degradeForgeError)
+	require.Equal(t, "forge: list pull requests: too many pull requests", result["reason"])
+	require.Zero(t, f.forge.requestCount("PUT "))
+	require.Zero(t, f.forge.requestCount("POST /repos/acme/jobs/pulls"))
+	require.NotContains(t, string(executed.Result), "forge.example")
 }
 
 // An empty confined render on a pull request someone else opened must not claim

@@ -65,7 +65,10 @@ const (
 	degradeForgeError            = "forge_error"
 	degradePullRequestMismatch   = "pull_request_mismatch"
 	degradePullRequestClosed     = "pull_request_closed"
-	degradeTriggerTenancy        = "trigger_tenancy"
+	// degradePullRequestMergedWithoutChange is a merged pull request whose base
+	// does not hold the change, as after an `ours` merge.
+	degradePullRequestMergedWithoutChange = "pull_request_merged_without_change"
+	degradeTriggerTenancy                 = "trigger_tenancy"
 
 	// routeGitPR is the third value of the result's route field.
 	routeGitPR = "git_pr"
@@ -465,7 +468,7 @@ func (r *ProvenanceRouter) open(ctx context.Context, plan *patchPlan, change *pa
 		return &patchPullRequest{PullRequest: *pr, Existing: existing}, nil
 	}
 
-	existing, err := client.FindPullRequest(ctx, plan.branch)
+	existing, err := client.FindPullRequest(ctx, plan.branch, plan.base)
 	if err != nil {
 		return nil, fail(err)
 	}
@@ -524,7 +527,7 @@ func (r *ProvenanceRouter) open(ctx context.Context, plan *patchPlan, change *pa
 		Base:  plan.base,
 	})
 	if errors.Is(err, forge.ErrConflict) {
-		found, findErr := client.FindPullRequest(ctx, plan.branch)
+		found, findErr := client.FindPullRequest(ctx, plan.branch, plan.base)
 		if findErr != nil {
 			return nil, withBranch(fail(findErr))
 		}
@@ -544,10 +547,12 @@ func (r *ProvenanceRouter) open(ctx context.Context, plan *patchPlan, change *pa
 // change. A closed one that was not merged was rejected, so it is not a change
 // anyone will review or sync, and it is never reopened or replaced on the same
 // branch. Otherwise it must target the plan's base, and the manifest at its head
-// must be byte for byte the replacement the route would write. A merged one that
-// passes is the change already landed. Anything else is not the change the human
-// approved, so it degrades with fixed text and is never recorded as this action's
-// pull request.
+// must be byte for byte the replacement the route would write. A merged one also
+// has to have landed: the forge marks a pull request merged when its head reaches
+// the base by any route, an `ours` merge that kept the old manifest included, so
+// the manifest at the base's current head must be the replacement too. Anything
+// else is not the change the human approved, so it degrades with fixed text and
+// is never recorded as this action's pull request.
 func verifyPullRequest(ctx context.Context, client forge.Client, plan *patchPlan, found *forge.PullRequest, updated []byte, fail func(error) *patchDegrade) *patchDegrade {
 	if !found.Open() && !found.Merged {
 		return &patchDegrade{Code: degradePullRequestClosed,
@@ -570,6 +575,29 @@ func verifyPullRequest(ctx context.Context, client forge.Client, plan *patchPlan
 		return fail(err)
 	case !bytes.Equal(onHead.Content, updated):
 		return mismatch
+	}
+	if found.Merged {
+		return verifyLanded(ctx, client, plan, updated, fail)
+	}
+	return nil
+}
+
+// verifyLanded holds a merged pull request to what the base holds now.
+func verifyLanded(ctx context.Context, client forge.Client, plan *patchPlan, updated []byte, fail func(error) *patchDegrade) *patchDegrade {
+	notLanded := &patchDegrade{Code: degradePullRequestMergedWithoutChange,
+		Reason: fmt.Sprintf("the pull request from branch %s is marked merged, but %s does not hold the approved change to the manifest; propose the patch again", plan.branch, plan.base)}
+	head, err := client.BranchHead(ctx, plan.base)
+	if err != nil {
+		return fail(err)
+	}
+	landed, err := client.GetFile(ctx, plan.path, head)
+	switch {
+	case errors.Is(err, forge.ErrNotFound), errors.Is(err, forge.ErrFileNotEditable):
+		return notLanded
+	case err != nil:
+		return fail(err)
+	case !bytes.Equal(landed.Content, updated):
+		return notLanded
 	}
 	return nil
 }
