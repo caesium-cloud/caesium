@@ -68,6 +68,37 @@ func TestQueueOverflowRefusedWhenConsumerDisabled(t *testing.T) {
 	require.Equal(t, "after-slot", again.Params["token"])
 }
 
+func TestQueueOverflowRefusalReplaysRecordedIdempotentStart(t *testing.T) {
+	db := testutil.OpenTestDB(t)
+	t.Cleanup(func() { testutil.CloseDB(db) })
+	store := NewStore(db)
+	job := createConcurrencyJob(t, db, "queue-disabled-idem", jobdef.ConcurrencyStrategyQueue, 1)
+	t.Cleanup(env.SetRunQueueConsumerEnabled(false))
+
+	params := map[string]string{"token": "holder"}
+	first, err := store.StartWithResult(t.Context(), job.ID, nil, WithStartParams(params), WithStartIdempotencyKey("same"))
+	require.NoError(t, err)
+	require.Equal(t, StartOutcomeCreated, first.Outcome)
+	require.NotNil(t, first.Run)
+
+	again, err := store.StartWithResult(t.Context(), job.ID, nil, WithStartParams(params), WithStartIdempotencyKey("same"))
+	require.NoError(t, err)
+	require.True(t, again.Replayed)
+	require.NotNil(t, again.Run)
+	require.Equal(t, first.Run.ID, again.Run.ID)
+
+	_, err = store.StartWithResult(t.Context(), job.ID, nil, WithStartParams(map[string]string{"token": "other"}), WithStartIdempotencyKey("same"))
+	require.ErrorIs(t, err, ErrIdempotencyKeyReused)
+	require.NotErrorIs(t, err, ErrRunQueueConsumerDisabled)
+
+	_, err = store.StartWithResult(t.Context(), job.ID, nil, WithStartParams(map[string]string{"token": "new"}), WithStartIdempotencyKey("other-key"))
+	require.ErrorIs(t, err, ErrRunQueueConsumerDisabled)
+
+	var runs int64
+	require.NoError(t, db.Model(&models.JobRun{}).Where("job_id = ?", job.ID).Count(&runs).Error)
+	require.Equal(t, int64(1), runs)
+}
+
 func TestQueueOverflowParksParamsWhenConsumerEnabled(t *testing.T) {
 	db := testutil.OpenTestDB(t)
 	t.Cleanup(func() { testutil.CloseDB(db) })

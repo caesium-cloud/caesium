@@ -1870,10 +1870,12 @@ func (s *Store) startRun(req startRunRequest) (*JobRun, error) {
 		}
 		return err
 	}); err != nil {
-		if req.idempotencyKey != "" && sqlerr.IsUniqueConstraint(err) {
+		if req.idempotencyKey != "" && (sqlerr.IsUniqueConstraint(err) || errors.Is(err, ErrRunQueueConsumerDisabled)) {
 			// A concurrent start with the same key committed first; this
 			// transaction (including anything admission did) rolled back.
-			// Answer with the winner's outcome.
+			// A disabled-queue refusal inserts nothing, so it never collides
+			// with that key's row the way a created or queued start does.
+			// Answer with the winner's outcome, including a mismatched request.
 			if existing, loadErr := findStartIdempotency(conn, req.jobID, req.idempotencyKey); loadErr == nil {
 				return s.replayIdempotentStart(conn, existing, startRequestHash(req.requestParams, req.priorityOverride), req.replayGuard, req.result)
 			}
