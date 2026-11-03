@@ -2,12 +2,18 @@ package diff
 
 import (
 	"context"
+	"encoding/json"
+	"slices"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/caesium-cloud/caesium/internal/freshness"
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/caesium-cloud/caesium/internal/testutil"
 	schema "github.com/caesium-cloud/caesium/pkg/jobdef"
+	"github.com/caesium-cloud/caesium/pkg/jsonmap"
+	"github.com/caesium-cloud/caesium/pkg/jsonutil"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 	"gorm.io/datatypes"
@@ -149,6 +155,7 @@ func openDiffTestDB(t *testing.T) *gorm.DB {
 		&models.Atom{},
 		&models.Task{},
 		&models.Callback{},
+		&models.TaskEdge{},
 		// The declared registry carries the per-dataset assertion policy the
 		// spec now diffs (data-circuit-breaker A3).
 		&models.DatasetDeclaration{},
@@ -165,59 +172,169 @@ func closeDiffTestDB(db *gorm.DB) {
 	}
 }
 
+// insertDiffDefinition writes the rows job apply would persist for def.
+// Step type, engine, and triggerRule defaults are spelled out here rather than
+// calling prepareSteps, so a bug in that helper still fails the round trip.
 func insertDiffDefinition(t *testing.T, db *gorm.DB, def schema.Definition) {
 	t.Helper()
 	now := time.Now().UTC()
 	triggerID := uuid.New()
 	jobID := uuid.New()
+
+	cfg := map[string]any{}
+	for key, value := range def.Trigger.Configuration {
+		cfg[key] = value
+	}
+	if len(def.Trigger.DefaultParams) > 0 {
+		params := make(map[string]string, len(def.Trigger.DefaultParams))
+		for key, value := range def.Trigger.DefaultParams {
+			params[key] = value
+		}
+		cfg["defaultParams"] = params
+	}
 	require.NoError(t, db.Create(&models.Trigger{
 		ID:            triggerID,
+		Alias:         def.Metadata.Alias,
 		Type:          models.TriggerType(def.Trigger.Type),
-		Configuration: mustJSONString(t, def.Trigger.Configuration),
+		Configuration: mustJSONString(t, cfg),
 		CreatedAt:     now,
 		UpdatedAt:     now,
 	}).Error)
-	require.NoError(t, db.Create(&models.Job{
-		ID:          jobID,
-		Alias:       def.Metadata.Alias,
-		Namespace:   models.NamespaceOrDefault(def.Metadata.Namespace),
-		TriggerID:   triggerID,
-		Labels:      stringMapToJSONMap(def.Metadata.Labels),
-		Annotations: stringMapToJSONMap(def.Metadata.Annotations),
-		CreatedAt:   now,
-		UpdatedAt:   now,
-	}).Error)
 
-	for idx, step := range def.Steps {
+	job := models.Job{
+		ID:               jobID,
+		Alias:            def.Metadata.Alias,
+		Namespace:        models.NamespaceOrDefault(def.Metadata.Namespace),
+		TriggerID:        triggerID,
+		Labels:           stringMapToJSONMap(def.Metadata.Labels),
+		Annotations:      stringMapToJSONMap(def.Metadata.Annotations),
+		MaxParallelTasks: def.Metadata.MaxParallelTasks,
+		TaskTimeout:      def.Metadata.TaskTimeout,
+		RunTimeout:       def.Metadata.RunTimeout,
+		Priority:         def.Metadata.Priority,
+		SchemaValidation: def.Metadata.SchemaValidation,
+		OnUpstreamHold:   def.Metadata.OnUpstreamHold,
+		ReplaySafe:       def.Metadata.ReplaySafe,
+		CreatedAt:        now,
+		UpdatedAt:        now,
+	}
+	if def.Metadata.Concurrency != nil {
+		job.Concurrency = mustOptionalJSON(t, def.Metadata.Concurrency)
+	}
+	if len(def.Metadata.RateLimits) > 0 {
+		job.RateLimits = mustOptionalJSON(t, def.Metadata.RateLimits)
+	}
+	if def.Metadata.SLA != nil && def.Metadata.SLA.HasSLA() {
+		job.SLA = mustOptionalJSON(t, def.Metadata.SLA)
+	}
+	if def.Metadata.Cache != nil {
+		job.CacheConfig = mustOptionalJSON(t, def.Metadata.Cache)
+	}
+	if def.Metadata.Remediation != nil {
+		job.Remediation = mustOptionalJSON(t, def.Metadata.Remediation)
+	}
+	require.NoError(t, db.Create(&job).Error)
+
+	steps := slices.Clone(def.Steps)
+	for i := range steps {
+		stepType := strings.TrimSpace(steps[i].Type)
+		if stepType == "" {
+			stepType = schema.StepTypeTask
+		}
+		steps[i].Type = stepType
+		if steps[i].Engine == "" {
+			steps[i].Engine = schema.EngineDocker
+		}
+		rule := strings.TrimSpace(steps[i].TriggerRule)
+		if rule == "" {
+			rule = schema.TriggerRuleAllSuccess
+		}
+		steps[i].TriggerRule = rule
+	}
+	successors, err := schema.DeriveStepSuccessors(steps)
+	require.NoError(t, err)
+
+	taskIDByName := make(map[string]uuid.UUID, len(steps))
+	for idx := range steps {
+		step := &steps[idx]
+		runtime, err := def.RuntimeSpecForStep(step)
+		require.NoError(t, err)
+		specJSON, err := json.Marshal(runtime)
+		require.NoError(t, err)
+		command, err := jsonutil.MarshalSliceString(step.Command)
+		require.NoError(t, err)
+		replaySafe := def.EffectiveReplaySafeForStep(step)
+
 		atomID := uuid.New()
 		require.NoError(t, db.Create(&models.Atom{
-			ID:        atomID,
-			Engine:    models.AtomEngine(step.Engine),
-			Image:     step.Image,
-			Command:   mustJSONString(t, step.Command),
-			CreatedAt: now,
-			UpdatedAt: now,
+			ID:         atomID,
+			Engine:     models.AtomEngine(step.Engine),
+			Image:      step.Image,
+			Command:    command,
+			Spec:       datatypes.JSON(specJSON),
+			ReplaySafe: replaySafe,
+			CreatedAt:  now,
+			UpdatedAt:  now,
 		}).Error)
-		require.NoError(t, db.Create(&models.Task{
-			ID:           uuid.New(),
+
+		taskID := uuid.New()
+		taskIDByName[step.Name] = taskID
+		task := models.Task{
+			ID:           taskID,
 			JobID:        jobID,
 			AtomID:       atomID,
 			Name:         step.Name,
 			Position:     idx,
-			Type:         schema.StepTypeTask,
-			TriggerRule:  schema.TriggerRuleAllSuccess,
+			Type:         step.Type,
+			NodeSelector: jsonmap.FromStringMap(step.NodeSelector),
+			Retries:      step.Retries,
+			RetryDelay:   step.RetryDelay,
+			RetryBackoff: step.RetryBackoff,
+			TriggerRule:  step.TriggerRule,
+			ReplaySafe:   replaySafe,
+			CacheConfig:  mustOptionalJSON(t, step.Cache),
 			OutputSchema: mustOptionalJSON(t, step.OutputSchema),
+			InputSchema:  mustOptionalJSON(t, step.InputSchema),
 			CreatedAt:    now.Add(time.Duration(idx) * time.Millisecond),
 			UpdatedAt:    now.Add(time.Duration(idx) * time.Millisecond),
-		}).Error)
+		}
+		if step.RateLimit != nil {
+			task.RateLimitResource = strings.TrimSpace(step.RateLimit.Resource)
+			task.RateLimitUnits = step.RateLimit.Units
+		}
+		if step.FanOut != nil {
+			task.FanOutConfig = mustOptionalJSON(t, step.FanOut)
+		}
+		require.NoError(t, db.Create(&task).Error)
+	}
+
+	for from, tos := range successors {
+		for _, to := range tos {
+			require.NoError(t, db.Create(&models.TaskEdge{
+				ID:         uuid.New(),
+				JobID:      jobID,
+				FromTaskID: taskIDByName[from],
+				ToTaskID:   taskIDByName[to],
+				CreatedAt:  now,
+				UpdatedAt:  now,
+			}).Error)
+		}
+	}
+
+	decls, err := freshness.BuildDeclarations(&def, jobID, def.Metadata.Alias)
+	require.NoError(t, err)
+	if len(decls) > 0 {
+		require.NoError(t, db.Create(&decls).Error)
 	}
 
 	for idx, callback := range def.Callbacks {
+		configuration, err := jsonutil.MarshalMapString(callback.Configuration)
+		require.NoError(t, err)
 		require.NoError(t, db.Create(&models.Callback{
 			ID:            uuid.New(),
 			JobID:         jobID,
 			Type:          models.CallbackType(callback.Type),
-			Configuration: mustJSONString(t, callback.Configuration),
+			Configuration: configuration,
 			Position:      idx,
 			CreatedAt:     now.Add(time.Duration(idx) * time.Millisecond),
 			UpdatedAt:     now.Add(time.Duration(idx) * time.Millisecond),

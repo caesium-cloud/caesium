@@ -67,7 +67,7 @@ func TestLoadDatabaseSpecsConfinedBaselineIsOneSnapshot(t *testing.T) {
 	reader, err := gorm.Open(sqlite.Open(dsn), &gorm.Config{})
 	require.NoError(t, err)
 	defer closeDiffTestDB(reader)
-	require.NoError(t, reader.AutoMigrate(&models.Trigger{}, &models.Job{}, &models.Atom{}, &models.Task{}, &models.Callback{}, &models.DatasetDeclaration{}))
+	require.NoError(t, reader.AutoMigrate(&models.Trigger{}, &models.Job{}, &models.Atom{}, &models.Task{}, &models.Callback{}, &models.TaskEdge{}, &models.DatasetDeclaration{}))
 	writer, err := gorm.Open(sqlite.Open(dsn), &gorm.Config{})
 	require.NoError(t, err)
 	defer closeDiffTestDB(writer)
@@ -127,7 +127,7 @@ func TestLoadDatabaseSpecsConfinedSnapshotIsReadOnly(t *testing.T) {
 	pool := &recordingPool{DB: raw}
 	db, err := gorm.Open(sqlite.Dialector{Conn: pool}, &gorm.Config{SkipDefaultTransaction: true})
 	require.NoError(t, err)
-	require.NoError(t, db.AutoMigrate(&models.Trigger{}, &models.Job{}, &models.Atom{}, &models.Task{}, &models.Callback{}, &models.DatasetDeclaration{}))
+	require.NoError(t, db.AutoMigrate(&models.Trigger{}, &models.Job{}, &models.Atom{}, &models.Task{}, &models.Callback{}, &models.TaskEdge{}, &models.DatasetDeclaration{}))
 
 	_, err = LoadDatabaseSpecs(context.Background(), db)
 	require.NoError(t, err)

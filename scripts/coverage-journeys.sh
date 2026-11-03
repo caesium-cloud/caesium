@@ -1879,6 +1879,9 @@ PY
   # run get/wait/logs (issue #510). fetch.go has no init of its own, so this
   # journey is what covers it on the instrumented CLI.
   local_pattern="${local_pattern%)}|TestRunCLIVerifyLoop)"
+  # Saved-field job diff (issue #544): schemaValidation, retries, an edge
+  # rewire, and a redacted env change through caesium job diff --server.
+  local_pattern="${local_pattern%)}|TestJobDiffCLIReportsSavedFields)"
   # Confined dataset reads and writes (identity-and-access B6): the producer
   # checks behind a confined viewer's derivations and a confined manual
   # advance. Rule 1 only, no catalog connection.

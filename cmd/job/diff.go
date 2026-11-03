@@ -42,12 +42,17 @@ var diffCmd = &cobra.Command{
 	Long: `Compare job definition manifests against a Caesium server via POST /v1/jobdefs/diff,
 using the same --server / --api-key authentication as job apply.
 
-The comparison uses the fields the server JobSpec projection compares, not a
-byte-equal apply. Creates and updates therefore reflect in-scope changes in
-those diffed fields only (for example metadata.schemaValidation, timeouts,
-dependsOn/next, and retries can change without appearing here).
+The comparison covers every field job apply persists. It is not a byte-for-byte
+manifest compare: apply fills defaults (step type task, engine docker,
+triggerRule all_success, inherited replaySafe, and sequential edges when no
+step declares next or dependsOn), durations compare as the stored length, and
+a literal environment value is reported as a key change without the value
+(a secret:// reference is shown). Provenance, row identity, the derived HTTP
+trigger path, step and callback position, and append-only DAG snapshots are
+excluded. A volume's unused per-engine sources and its accessMode are not
+stored, so they are not compared.
 
-By default the output is what a non-pruning apply would do for those fields:
+By default the output is what a non-pruning apply would do:
 creates and updates for jobs in --path. Jobs present on the server but missing
 from --path are prune candidates. They are listed as deletes only with --prune;
 without --prune they appear under "Would delete if --prune" and do not fail
@@ -56,7 +61,7 @@ the command.
 --json writes versioned JSON to stdout (logs stay on stderr).
 
 Exit status:
-  0  no in-scope changes in the diffed fields (creates/updates, and deletes only when --prune is set)
+  0  no in-scope persisted changes (creates/updates, and deletes only when --prune is set)
   1  in-scope changes, or a parse / validation / request error`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		cmd.SilenceUsage = true

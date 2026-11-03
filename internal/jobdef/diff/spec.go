@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/caesium-cloud/caesium/internal/authz"
 	"github.com/caesium-cloud/caesium/internal/jobdef/yamlpath"
@@ -26,7 +27,9 @@ import (
 	"gorm.io/gorm"
 )
 
-// JobSpec captures the fields that participate in diffing.
+// JobSpec is the diff projection of one job. It covers every column job apply
+// persists. Columns left out, and why, are listed in saved_columns_test.go.
+// Literal environment values are never stored here: see EnvValue.
 type JobSpec struct {
 	Alias       string            `json:"alias"`
 	Namespace   string            `json:"namespace"`
@@ -42,10 +45,22 @@ type JobSpec struct {
 	// ENFORCED admission policy (skip vs run when a consumed dataset is held),
 	// so a flip that rendered as "no changes" would hide exactly the edit an
 	// approver most needs to see.
-	OnUpstreamHold string         `json:"onUpstreamHold,omitempty"`
-	Trigger        TriggerSpec    `json:"trigger"`
-	Callbacks      []CallbackSpec `json:"callbacks"`
-	Steps          []StepSpec     `json:"steps"`
+	OnUpstreamHold   string              `json:"onUpstreamHold,omitempty"`
+	MaxParallelTasks int                 `json:"maxParallelTasks,omitempty"`
+	TaskTimeout      time.Duration       `json:"taskTimeout,omitempty"`
+	RunTimeout       time.Duration       `json:"runTimeout,omitempty"`
+	Priority         string              `json:"priority,omitempty"`
+	Concurrency      *schema.Concurrency `json:"concurrency,omitempty"`
+	RateLimits       []schema.RateLimit  `json:"rateLimits,omitempty"`
+	SLA              *schema.SLAConfig   `json:"sla,omitempty"`
+	SchemaValidation string              `json:"schemaValidation,omitempty"`
+	ReplaySafe       bool                `json:"replaySafe,omitempty"`
+	Cache            any                 `json:"cache,omitempty"`
+	Trigger          TriggerSpec         `json:"trigger"`
+	Callbacks        []CallbackSpec      `json:"callbacks"`
+	Steps            []StepSpec          `json:"steps"`
+	Edges            []EdgeSpec          `json:"edges,omitempty"`
+	Declarations     []DeclarationSpec   `json:"declarations,omitempty"`
 }
 
 type TriggerSpec struct {
@@ -59,10 +74,24 @@ type CallbackSpec struct {
 }
 
 type StepSpec struct {
-	Engine       string         `json:"engine"`
-	Image        string         `json:"image"`
-	Command      []string       `json:"command"`
-	OutputSchema map[string]any `json:"outputSchema"`
+	Name         string            `json:"name"`
+	Type         string            `json:"type,omitempty"`
+	Engine       string            `json:"engine"`
+	Image        string            `json:"image"`
+	Command      []string          `json:"command"`
+	NodeSelector map[string]string `json:"nodeSelector,omitempty"`
+	Retries      int               `json:"retries,omitempty"`
+	RetryDelay   time.Duration     `json:"retryDelay,omitempty"`
+	RetryBackoff bool              `json:"retryBackoff,omitempty"`
+	TriggerRule  string            `json:"triggerRule,omitempty"`
+	ReplaySafe   bool              `json:"replaySafe,omitempty"`
+	RateLimit    RateLimitSpec     `json:"rateLimit,omitempty"`
+	FanOut       *schema.FanOut    `json:"fanOut,omitempty"`
+	Cache        any               `json:"cache,omitempty"`
+	// OutputSchema keeps this Go name so a schema-only diff still says OutputSchema.
+	OutputSchema any         `json:"outputSchema"`
+	InputSchema  any         `json:"inputSchema,omitempty"`
+	Runtime      RuntimeSpec `json:"runtime,omitempty"`
 	// Produces carries the data circuit breaker's ENFORCED per-dataset policy.
 	// `onViolation: warn → hold` is the difference between a logged note and a
 	// broken circuit that skips every downstream consumer; leaving it out of the
@@ -113,21 +142,27 @@ func producedDatasetSpecs(datasets *schema.StepDatasets) []ProducedDatasetSpec {
 	return out
 }
 
-// FromDefinition normalises a job definition into a JobSpec.
+// FromDefinition normalises a job definition into a JobSpec. Apply's defaults
+// (type, engine, triggerRule, inherited replaySafe, sequential edges) are
+// filled here so an unchanged manifest compares empty. A projection error is
+// reported as an annotation rather than dropped, which would hide the change.
 func FromDefinition(def *schema.Definition) JobSpec {
+	spec, err := projectDefinition(def)
+	if err == nil {
+		return spec
+	}
+	alias := ""
+	namespace := ""
+	if def != nil {
+		alias = def.Metadata.Alias
+		namespace = models.NamespaceOrDefault(def.Metadata.Namespace)
+	}
 	return JobSpec{
-		Alias:          def.Metadata.Alias,
-		Namespace:      models.NamespaceOrDefault(def.Metadata.Namespace),
-		Labels:         cloneMap(def.Metadata.Labels),
-		Annotations:    cloneMap(def.Metadata.Annotations),
-		Remediation:    def.Metadata.Remediation,
-		OnUpstreamHold: def.Metadata.OnUpstreamHold,
-		Trigger: TriggerSpec{
-			Type:          def.Trigger.Type,
-			Configuration: cloneMap(def.Trigger.Configuration),
+		Alias:     alias,
+		Namespace: namespace,
+		Annotations: map[string]string{
+			"caesium.dev/diff-projection-error": err.Error(),
 		},
-		Callbacks: copyCallbacks(def.Callbacks),
-		Steps:     copySteps(def.Steps),
 	}
 }
 
@@ -288,6 +323,9 @@ func buildJobSpec(ctx context.Context, db *gorm.DB, job *models.Job) (JobSpec, e
 		}
 		spec.Remediation = &remediation
 	}
+	if err := applyStoredJobColumns(&spec, job); err != nil {
+		return JobSpec{}, err
+	}
 
 	var trigger models.Trigger
 	if err := db.WithContext(ctx).Where("id = ?", job.TriggerID).First(&trigger).Error; err != nil {
@@ -318,11 +356,21 @@ func buildJobSpec(ctx context.Context, db *gorm.DB, job *models.Job) (JobSpec, e
 		})
 	}
 
-	steps, err := loadSteps(ctx, db, job.ID)
+	steps, names, err := loadSteps(ctx, db, job.ID)
 	if err != nil {
 		return JobSpec{}, err
 	}
 	spec.Steps = steps
+	edges, err := loadEdges(ctx, db, job.ID, names)
+	if err != nil {
+		return JobSpec{}, err
+	}
+	spec.Edges = edges
+	decls, err := loadDeclarations(ctx, db, job.ID)
+	if err != nil {
+		return JobSpec{}, err
+	}
+	spec.Declarations = decls
 
 	return spec, nil
 }
@@ -363,17 +411,17 @@ func loadProducedDatasetSpecs(ctx context.Context, db *gorm.DB, jobID uuid.UUID)
 	return byStep, nil
 }
 
-func loadSteps(ctx context.Context, db *gorm.DB, jobID uuid.UUID) ([]StepSpec, error) {
+func loadSteps(ctx context.Context, db *gorm.DB, jobID uuid.UUID) ([]StepSpec, map[uuid.UUID]string, error) {
 	var tasks []models.Task
 	if err := db.WithContext(ctx).
 		Where("job_id = ?", jobID).
 		Order("position asc").
 		Order("created_at asc").
 		Find(&tasks).Error; err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if len(tasks) == 0 {
-		return nil, nil
+		return nil, nil, nil
 	}
 
 	atomIDs := make([]uuid.UUID, 0, len(tasks))
@@ -385,7 +433,7 @@ func loadSteps(ctx context.Context, db *gorm.DB, jobID uuid.UUID) ([]StepSpec, e
 	if err := db.WithContext(ctx).
 		Where("id IN ?", atomIDs).
 		Find(&atoms).Error; err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	atomByID := make(map[uuid.UUID]*models.Atom, len(atoms))
 	for i := range atoms {
@@ -395,28 +443,25 @@ func loadSteps(ctx context.Context, db *gorm.DB, jobID uuid.UUID) ([]StepSpec, e
 
 	producesByStep, err := loadProducedDatasetSpecs(ctx, db, jobID)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	steps := make([]StepSpec, 0, len(tasks))
-	for _, task := range tasks {
+	names := make(map[uuid.UUID]string, len(tasks))
+	for i := range tasks {
+		task := &tasks[i]
 		atom := atomByID[task.AtomID]
 		if atom == nil {
-			return nil, fmt.Errorf("atom %s not found", task.AtomID)
+			return nil, nil, fmt.Errorf("atom %s not found", task.AtomID)
 		}
-		outputSchema, err := parseJSONConfigBytes(task.OutputSchema)
+		step, err := stepFromStored(task, atom, producesByStep[task.Name])
 		if err != nil {
-			return nil, fmt.Errorf("task %s output_schema: %w", task.ID, err)
+			return nil, nil, err
 		}
-		steps = append(steps, StepSpec{
-			Engine:       string(atom.Engine),
-			Image:        atom.Image,
-			Command:      slices.Clone(atom.Cmd()),
-			OutputSchema: outputSchema,
-			Produces:     producesByStep[task.Name],
-		})
+		names[task.ID] = task.Name
+		steps = append(steps, step)
 	}
-	return steps, nil
+	return steps, names, nil
 }
 
 func collectPath(path string, fn func(*schema.Definition) error) error {
@@ -476,37 +521,6 @@ func cloneMap[K comparable, V any](in map[K]V) map[K]V {
 		return map[K]V{}
 	}
 	return maps.Clone(in)
-}
-
-func copyCallbacks(cbs []schema.Callback) []CallbackSpec {
-	if len(cbs) == 0 {
-		return nil
-	}
-	result := make([]CallbackSpec, 0, len(cbs))
-	for _, cb := range cbs {
-		result = append(result, CallbackSpec{
-			Type:          cb.Type,
-			Configuration: cloneMap(cb.Configuration),
-		})
-	}
-	return result
-}
-
-func copySteps(steps []schema.Step) []StepSpec {
-	if len(steps) == 0 {
-		return nil
-	}
-	result := make([]StepSpec, 0, len(steps))
-	for _, step := range steps {
-		result = append(result, StepSpec{
-			Engine:       step.Engine,
-			Image:        step.Image,
-			Command:      slices.Clone(step.Command),
-			OutputSchema: cloneMap(step.OutputSchema),
-			Produces:     producedDatasetSpecs(step.Datasets),
-		})
-	}
-	return result
 }
 
 func parseJSONConfig(raw string) (map[string]any, error) {
