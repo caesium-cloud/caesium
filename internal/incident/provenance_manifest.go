@@ -66,7 +66,8 @@ var documentMarker = regexp.MustCompile(`^---[ \t]*(#.*)?\r?$`)
 // splitManifest cuts a stream at its `---` lines, each section keeping its own
 // marker line, and joins back byte for byte. YAML forbids a marker at column zero
 // inside a scalar, so this cannot split a value. Anything this does not model
-// (directives, `...`, content on a marker line) is refused, not guessed at.
+// (directives, `...`, content on a marker line) is refused, not guessed at. The
+// refusal quotes no line of the file: it reaches the incident.
 func splitManifest(raw []byte) ([][]byte, error) {
 	var sections [][]byte
 	start := 0
@@ -81,7 +82,7 @@ func splitManifest(raw []byte) ([][]byte, error) {
 			}
 			start = offset
 		case strings.HasPrefix(text, "---"), strings.HasPrefix(text, "..."), strings.HasPrefix(text, "%"):
-			return nil, fmt.Errorf("unsupported document syntax %q", truncateLine(text))
+			return nil, errors.New("unsupported document syntax")
 		}
 		offset += len(line)
 	}
@@ -89,13 +90,6 @@ func splitManifest(raw []byte) ([][]byte, error) {
 		sections = append(sections, raw[start:offset])
 	}
 	return sections, nil
-}
-
-func truncateLine(text string) string {
-	if len(text) > 40 {
-		return text[:40]
-	}
-	return text
 }
 
 // decodeManifest reads every document of a stream exactly as git sync does.
@@ -234,19 +228,20 @@ func sameDefinition(a, b *schema.Definition) bool {
 
 // refuseManifestRemediationEdit extends refuseRemediationEdit to the file: the
 // policy that governs the agent is the one in the repository, and a patch must
-// not change it there either, whatever the stored job holds.
+// not change it there either, whatever the stored job holds. Unlike the stored
+// check, the refusal quotes neither block: it reaches the incident, and one of them
+// comes from the file.
 func refuseManifestRemediationEdit(stored, proposed *schema.Definition) error {
 	current, err := canonicalRemediation(marshalRemediation(stored.Metadata.Remediation))
 	if err != nil {
-		return fmt.Errorf("incident: decode the manifest's remediation policy: %w", err)
+		return errors.New("incident: the manifest's remediation policy could not be read")
 	}
 	next, err := canonicalRemediation(marshalRemediation(proposed.Metadata.Remediation))
 	if err != nil {
 		return fmt.Errorf("incident: encode proposed remediation policy: %w", err)
 	}
 	if !bytes.Equal(current, next) {
-		return fmt.Errorf("%w (current %s, proposed %s)",
-			ErrPatchAltersRemediation, remediationForMessage(current), remediationForMessage(next))
+		return fmt.Errorf("%w (the manifest's block differs from the proposal's)", ErrPatchAltersRemediation)
 	}
 	return nil
 }

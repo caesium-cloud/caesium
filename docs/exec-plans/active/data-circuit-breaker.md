@@ -1646,7 +1646,12 @@ precedent for it is warn-mode schema validation, which publishes
       The pull request description and the escalation carry a form with credential
       values masked in the data, before the diff is built, so no line of a
       multi-line value escapes. The direct route has the same gap and still applies
-      a stale proposal.
+      a stale proposal. Review round 2 set the rule that nothing read from the
+      repository reaches the incident: the result stays the confined render, even
+      on a pull request, and reasons and errors carry fixed text, not the file's
+      lines, its remediation block, or the forge's error text. If the server's copy
+      matches the proposal, the result names the pull request instead of "no
+      changes". `baseline.repo` is an identity, not the source URL.
       `ExecuteApproved` writes its terminal status on a context detached
       from the request. Only the patched document changes, so comments inside it are
       lost; a sibling's or a header's are kept. The Console shows the preview through

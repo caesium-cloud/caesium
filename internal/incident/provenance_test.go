@@ -665,8 +665,38 @@ func TestForgeServerErrorDegradesBeforeAnyBranchExists(t *testing.T) {
 
 	_, result := f.approveAndExecute(t, patchJSON(t, patchedDefinition))
 	requireDegraded(t, f, result, degradeForgeError)
-	require.Contains(t, result["reason"], "upstream down")
+	require.Contains(t, result["reason"], "status 502")
 	require.NotContains(t, result, "pr_branch")
+}
+
+// A forge's error text can quote the file, as a pre-receive hook's output does, so
+// the reason, the result and the escalation say which call failed and its status.
+func TestForgeErrorTextStaysOffTheIncident(t *testing.T) {
+	f := newRouteFixture(t, manifestFile)
+	f.forge.failNext("PUT /repos/acme/jobs/contents/", http.StatusUnprocessableEntity, "hook declined: DB_PASSWORD=quoted-from-the-file")
+
+	executed, result := f.approveAndExecute(t, patchJSON(t, patchedDefinition))
+	requireDegraded(t, f, result, degradeManifestChanged)
+	require.Contains(t, result["reason"], "status 422")
+	require.NotContains(t, string(executed.Result), "quoted-from-the-file")
+	require.NotContains(t, f.ops.escalate[0].summary, "quoted-from-the-file")
+}
+
+// A refusal of the file's syntax names the rule, not the line that broke it.
+func TestManifestRefusalQuotesNoLineOfTheFile(t *testing.T) {
+	for name, line := range map[string]string{
+		"directive":           "%quoted-from-the-file\n",
+		"content on a marker": "--- quoted-from-the-file\n",
+		"document end":        "... quoted-from-the-file\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := newRouteFixture(t, line+manifestFile)
+			executed, result := f.approveAndExecute(t, patchJSON(t, patchedDefinition))
+			requireDegraded(t, f, result, degradeManifestUnsafe)
+			require.NotContains(t, string(executed.Result), "quoted-from-the-file")
+			require.NotContains(t, f.ops.escalate[0].summary, "quoted-from-the-file")
+		})
+	}
 }
 
 // TestForgeErrorCarryingTheTokenIsScrubbed reads every place a token could land.
@@ -676,7 +706,7 @@ func TestForgeErrorCarryingTheTokenIsScrubbed(t *testing.T) {
 
 	executed, result := f.approveAndExecute(t, patchJSON(t, patchedDefinition))
 	requireDegraded(t, f, result, degradeForgeError)
-	require.Contains(t, result["reason"], forge.Redacted)
+	require.Contains(t, result["reason"], "status 500")
 
 	require.NotContains(t, string(executed.Result), forgeTestToken)
 	require.NotContains(t, f.ops.escalate[0].summary, forgeTestToken)
@@ -830,6 +860,8 @@ func (f *routeFixture) syncToHead(t *testing.T, manifest string) {
 	f.forge.put(headCommit, testManifest, []byte(manifest))
 }
 
+func (f *routeFixture) otherRepoURL() string { return f.forge.srv.URL + "/acme/other.git" }
+
 // TestSyncBeforeApprovalIsNotReverted is the proposal's baseline guard. Git sync
 // imports a schedule change between the proposal and the approval, so the job,
 // the head and the file at the job's commit all agree on it. The proposal was a
@@ -899,21 +931,25 @@ func TestProposalWithoutABaselineFailsClosed(t *testing.T) {
 // The baseline is the provenance the human reviewed, not only its commit.
 func TestBaselineAlsoHoldsTheManifestPathAndSource(t *testing.T) {
 	const moved = "pipelines/moved.job.yaml"
-	for name, change := range map[string][2]string{
-		"path":      {"provenance_path", moved},
-		"source id": {"provenance_source_id", "orders-source-2"},
+	for name, change := range map[string]struct {
+		column string
+		value  func(*routeFixture) string
+	}{
+		"path":       {"provenance_path", func(*routeFixture) string { return moved }},
+		"source id":  {"provenance_source_id", func(*routeFixture) string { return "orders-source-2" }},
+		"repository": {"provenance_repo", (*routeFixture).otherRepoURL},
 	} {
 		t.Run(name, func(t *testing.T) {
 			f := newRouteFixture(t, manifestFile)
-			f.config.Sources = append(f.config.Sources, f.config.Sources[0])
+			f.config.Sources = append(f.config.Sources, f.config.Sources[0], f.config.Sources[0])
 			f.config.Sources[1].SourceID = "orders-source-2"
+			f.config.Sources[2].URL = f.otherRepoURL()
 			f.config.Credentials[0].SourceID = ""
-			f.config.Credentials[0].Repo = f.forge.repoURL()
 			f.install()
 			f.forge.put(syncedCommit, moved, []byte(manifestFile))
 			f.forge.put(headCommit, moved, []byte(manifestFile))
 			action := f.propose(t, patchJSON(t, patchedDefinition))
-			f.updateJob(t, change[0], change[1])
+			f.updateJob(t, change.column, change.value(f))
 			approveAction(t, f.db, action.ID, "operator@example.com", "")
 
 			executed, err := f.exec.ExecuteApproved(context.Background(), action.ID)
@@ -1013,7 +1049,7 @@ func TestManifestProofIsRequired(t *testing.T) {
 func TestFileRemediationIsAlsoProtected(t *testing.T) {
 	governed := strings.Replace(manifestFile, "alias: orders-daily", `alias: orders-daily
   remediation:
-    profile: triage-only
+    profile: quoted-from-the-file
     classes: [unknown]`, 1)
 	f := newRouteFixture(t, governed)
 	action := f.propose(t, patchJSON(t, patchedDefinition))
@@ -1022,6 +1058,8 @@ func TestFileRemediationIsAlsoProtected(t *testing.T) {
 	executed, err := f.exec.ExecuteApproved(context.Background(), action.ID)
 	require.ErrorIs(t, err, ErrPatchAltersRemediation)
 	require.Equal(t, models.AgentActionStatusFailed, executed.Status)
+	require.NotContains(t, err.Error(), "quoted-from-the-file", "the refusal quotes no block from the file")
+	require.NotContains(t, string(executed.Result), "quoted-from-the-file")
 	require.Empty(t, f.ops.escalate, "a policy edit is refused, not escalated")
 	require.Zero(t, f.forge.requestCount("PUT "))
 	require.Empty(t, f.forge.pulls)
@@ -1105,7 +1143,7 @@ func TestPreviewShowsTheApproverTheRoute(t *testing.T) {
 	require.Contains(t, preview["diff"], "pull request against acme/jobs")
 	require.Contains(t, preview["diff"], "changed since commit "+syncedCommit)
 	require.Equal(t, map[string]any{
-		"source_id": "orders-source", "repo": f.forge.repoURL(), "ref": "main",
+		"source_id": "orders-source", "repo": repoIdentity(f.forge.repoURL()), "ref": "main",
 		"commit": syncedCommit, "path": testManifest,
 	}, preview["baseline"])
 	require.Zero(t, f.forge.hits(), "a preview makes no forge call")
@@ -1272,13 +1310,13 @@ func diffSection(t *testing.T, body string) string {
 
 // TestPullRequestBodyShowsEveryEdit: the description quotes the change the commit
 // makes, read from the file and its replacement, so an edit outside the reduced
-// JobSpec cannot read as "no changes". The result records the same diff.
+// JobSpec cannot read as "no changes".
 func TestPullRequestBodyShowsEveryEdit(t *testing.T) {
 	for _, tc := range richEdits {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newRouteFixture(t, richManifest)
-			// The render the server returned is not the source of the diff here: the
-			// file is, so a fake that reports no change must not suppress it.
+			// The file is the description's source, so a render that reports no change
+			// must not suppress it.
 			f.ops.patchDiff = json.RawMessage(`{"alias":"orders-daily","empty":true}`)
 
 			_, result := f.approveAndExecute(t, patchJSON(t, tc.edit(richManifest)))
@@ -1288,7 +1326,6 @@ func TestPullRequestBodyShowsEveryEdit(t *testing.T) {
 			require.Contains(t, body, "--- current\n+++ proposed\n@@ ")
 			for _, expected := range tc.expected {
 				require.Contains(t, body, expected)
-				require.Contains(t, resultDiff(t, result), expected)
 			}
 		})
 	}
@@ -1305,7 +1342,77 @@ func TestPullRequestBodyComparesTheFileNotTheServersCopy(t *testing.T) {
 	body := openPull(t, f.forge)["body"].(string)
 	require.Contains(t, body, "-        REGION: only-in-the-file")
 	require.NotContains(t, body, "from the server's copy")
-	require.Contains(t, resultDiff(t, result), "only-in-the-file")
+}
+
+// The result carries the confined render, never the file's own text: the file can
+// hold what the incident's readers may not read. cmd/start drives the real render.
+func TestPullRequestResultCarriesNothingFromTheFile(t *testing.T) {
+	f := newRouteFixture(t, strings.Replace(richManifest, "REGION: eu", "REGION: only-in-the-file", 1))
+	f.ops.patchDiff = json.RawMessage(`{"alias":"orders-daily","empty":false,"diff":"from the server's copy"}`)
+
+	executed, result := f.approveAndExecute(t, patchJSON(t, richManifest))
+	require.Equal(t, routeGitPR, result["route"], "result: %v", result)
+	require.Equal(t, map[string]any{"alias": testAlias, "empty": false, "diff": "from the server's copy"}, result["diff"])
+	require.NotContains(t, string(executed.Result), "only-in-the-file")
+}
+
+// A pull request is a change even when the server's copy shows none, so its result
+// does not say "no changes": it says where the change is.
+func TestEmptyRenderOnASuccessfulRouteNamesThePullRequest(t *testing.T) {
+	f := newRouteFixture(t, richManifest)
+	f.ops.patchDiff = json.RawMessage(`{"alias":"orders-daily","empty":true}`)
+
+	_, result := f.approveAndExecute(t, patchJSON(t, strings.Replace(richManifest, "REGION: eu", "REGION: us", 1)))
+	require.Equal(t, routeGitPR, result["route"], "result: %v", result)
+	diff := result["diff"].(map[string]any)
+	require.Equal(t, false, diff["empty"])
+	require.NotContains(t, diff["diff"], "no changes")
+	require.Contains(t, diff["diff"], "in the pull request")
+	require.Contains(t, diff["diff"], result["pr_url"])
+}
+
+// So does the repeat that finds the pull request an earlier run opened.
+func TestEmptyRenderOnAnExistingPullRequestNamesIt(t *testing.T) {
+	f := newRouteFixture(t, richManifest)
+	f.ops.patchDiff = json.RawMessage(`{"alias":"orders-daily","empty":true}`)
+	executed, first := f.approveAndExecute(t, patchJSON(t, strings.Replace(richManifest, "REGION: eu", "REGION: us", 1)))
+	require.Equal(t, routeGitPR, first["route"])
+
+	require.NoError(t, f.db.Model(&models.AgentAction{}).Where("id = ?", executed.ID).
+		Update("status", models.AgentActionStatusApproved).Error)
+	again, err := f.exec.ExecuteApproved(context.Background(), executed.ID)
+	require.NoError(t, err)
+	second := patchResult(t, again)
+	require.Equal(t, true, second["pr_existing"])
+	require.Contains(t, second["diff"].(map[string]any)["diff"], first["pr_url"])
+}
+
+// The preview of a job a file owns cannot read the file, so a match with the
+// server's copy is not a claim about the file.
+func TestPreviewOfAGitJobDoesNotClaimTheFileMatches(t *testing.T) {
+	f := newRouteFixture(t, manifestFile)
+	f.ops.patchDiff = json.RawMessage(`{"alias":"orders-daily","empty":true}`)
+	preview := patchResult(t, f.propose(t, patchJSON(t, patchedDefinition)))
+	require.Contains(t, preview["diff"], "no changes to the server's copy")
+	require.NotContains(t, preview["diff"], "identical")
+}
+
+// A source URL can hold inline credentials, and a baseline is stored on the action.
+func TestBaselineHoldsNoURLCredentials(t *testing.T) {
+	f := newRouteFixture(t, manifestFile)
+	withCredentials := strings.Replace(f.forge.repoURL(), "http://", "http://reader:inline-url-secret@", 1)
+	f.updateJob(t, "provenance_repo", withCredentials)
+	f.config.Sources[0].URL = withCredentials
+	f.install()
+
+	action := f.propose(t, patchJSON(t, patchedDefinition))
+	require.NotContains(t, string(action.Result), "inline-url-secret")
+	require.Equal(t, routeGitPR, patchResult(t, action)["route"])
+	approveAction(t, f.db, action.ID, "operator@example.com", "")
+	executed, err := f.exec.ExecuteApproved(context.Background(), action.ID)
+	require.NoError(t, err)
+	require.NotContains(t, string(executed.Result), "inline-url-secret")
+	require.Equal(t, routeGitPR, patchResult(t, executed)["route"], "the identity matches across the URL's forms")
 }
 
 // The description carries a credential value only as a mask, and a reference as
@@ -1326,7 +1433,8 @@ func TestPullRequestBodyMasksCredentialValues(t *testing.T) {
 	require.Regexp(t, `(?m)^-\s+DB_PASSWORD: .\[REDACTED\] [0-9a-f]{8}`, body, "the masked line shows the change")
 	require.Regexp(t, `(?m)^\+\s+DB_PASSWORD: .\[REDACTED\] [0-9a-f]{8}`, body)
 	require.Contains(t, body, "STORE: secret://env/STORE_URL", "a reference names a secret without holding it")
-	require.Contains(t, resultDiff(t, result), "short-line-changed", "the action row keeps what the incident's readers may read")
+	require.Contains(t, resultDiff(t, result), "short-line-changed", "the result carries the render's text")
+	require.NotContains(t, resultDiff(t, result), "short-line-five", "and nothing the file alone holds")
 }
 
 func TestPatchDiffTextOnlySaysNoChangesWhenTheRenderDoes(t *testing.T) {
@@ -1352,14 +1460,6 @@ func TestPatchDiffTextOnlySaysNoChangesWhenTheRenderDoes(t *testing.T) {
 	require.True(t, newPatchDiff("x", json.RawMessage(`{"empty":true}`), definition).Empty)
 	require.False(t, newPatchDiff("x", json.RawMessage(`{"empty":false,"diff":"d"}`), definition).Empty)
 	require.False(t, newPatchDiff("x", json.RawMessage(`{"empty":false}`), definition).Empty, "no diff is not no change")
-}
-
-func TestDocumentDiffTextFallsBackToTheProposal(t *testing.T) {
-	definition := patchJSON(t, patchedDefinition)
-	text := documentDiffText([]byte("a: [unterminated"), []byte("a: 1"), definition)
-	require.Contains(t, text, "no diff could be produced")
-	require.Contains(t, text, "exit 0")
-	require.Equal(t, noPatchChanges, documentDiffText([]byte("a: 1"), []byte("a: 1"), definition))
 }
 
 // With no diff to show, the approver reads the whole proposal, not a claim.

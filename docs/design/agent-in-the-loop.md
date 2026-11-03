@@ -474,9 +474,12 @@ F builds the second one as new work.
   from every error. The proposal records a preview of the route, from
   configuration alone, so the approver sees the outcome before deciding. Every
   diff compares the whole documents rather than `jobdiff`'s reduced spec, so an
-  env or mount edit cannot read as "no changes": the preview against the server's
-  copy of the job, the pull request against the file. The agent does not receive
-  the preview, which quotes the job's current definition.
+  env or mount edit cannot read as "no changes": the preview and the result
+  against the server's copy of the job, the pull request against the file. Nothing
+  read from the repository reaches the incident, whose readers may not read it: a
+  trigger shared with another namespace keeps its secret from them, and the file
+  holds that secret. The agent does not receive the preview, which quotes the
+  job's current definition.
 
 ### Declarative policy
 

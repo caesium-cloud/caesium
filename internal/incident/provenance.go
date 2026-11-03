@@ -41,6 +41,13 @@ import (
 // only has to agree with it. Anything short of that degrades to `escalate` with
 // the rendered diff. A job with provenance never takes the direct route: git sync
 // would revert the edit, and a forge outage must not become a silent one.
+//
+// Nothing read from the repository reaches the incident. The file can hold what
+// the incident's readers may not read, such as the webhook secret of a trigger
+// shared with another namespace, which the confined render withholds from them.
+// So the action's result, its reasons and its errors carry the confined render
+// and fixed text, and the file's own diff goes only to the pull request, masked,
+// whose readers can read the file.
 
 const (
 	degradeNoCredential          = "no_write_credential"
@@ -141,11 +148,22 @@ type patchBaseline struct {
 func jobBaseline(job *models.Job) patchBaseline {
 	return patchBaseline{
 		SourceID: strings.TrimSpace(job.ProvenanceSourceID),
-		Repo:     strings.TrimSpace(job.ProvenanceRepo),
+		Repo:     repoIdentity(job.ProvenanceRepo),
 		Ref:      strings.TrimSpace(job.ProvenanceRef),
 		Commit:   strings.TrimSpace(job.ProvenanceCommit),
 		Path:     strings.TrimSpace(job.ProvenancePath),
 	}
+}
+
+// repoIdentity names a repository without its URL. A job carries the source's URL
+// as configured, which can hold inline credentials, and a baseline is stored on
+// the action.
+func repoIdentity(raw string) string {
+	repo, err := forge.ParseRepoURL(raw)
+	if err != nil {
+		return ""
+	}
+	return repo.Host + "/" + repo.String()
 }
 
 // proposalBaseline reads the baseline the proposal recorded. Only the server
@@ -173,7 +191,7 @@ func bindBaseline(plan *patchPlan, job *models.Job, action *models.AgentAction) 
 			Reason: "the proposal recorded no synced commit, so nothing shows the manifest is still the one it was reviewed against"}
 	}
 	now := jobBaseline(job)
-	if baseline.SourceID != now.SourceID || !sameRepo(baseline.Repo, now.Repo) ||
+	if baseline.SourceID != now.SourceID || baseline.Repo != now.Repo ||
 		baseline.Ref != now.Ref || baseline.Path != now.Path {
 		return &patchDegrade{Code: degradeManifestChanged,
 			Reason: "the job's git source or manifest path changed since this patch was proposed"}
@@ -328,11 +346,10 @@ func sourceCovers(source *env.GitSourceConfig, filePath string) bool {
 // of the document the file really holds, so it is built once that is read, and
 // takes the masked form of that diff.
 type patchChange struct {
-	rendered   *renderedManifest
-	definition json.RawMessage
-	title      string
-	body       func(diff string) string
-	message    string
+	rendered *renderedManifest
+	title    string
+	body     func(diff string) string
+	message  string
 }
 
 // patchPullRequest is a route that ended at a pull request.
@@ -340,9 +357,6 @@ type patchPullRequest struct {
 	forge.PullRequest
 	// Existing is true when an earlier execution had already opened it.
 	Existing bool
-	// Diff is the diff of the manifest document this run wrote. It is empty when
-	// the run found an existing pull request and read no document.
-	Diff string
 }
 
 // open turns a plan into a pull request. Every step is safe to repeat: a retry
@@ -367,7 +381,7 @@ func (r *ProvenanceRouter) open(ctx context.Context, plan *patchPlan, change *pa
 		return nil, &patchDegrade{Code: degradeInvalidProvenance, Reason: scrubToken(err.Error(), token)}
 	}
 	fail := func(err error) *patchDegrade {
-		degrade := &patchDegrade{Code: degradeForgeError, Reason: scrubToken(err.Error(), token)}
+		degrade := &patchDegrade{Code: degradeForgeError, Reason: scrubToken(forge.Summary(err), token)}
 		switch {
 		case errors.Is(err, forge.ErrNotFound), errors.Is(err, forge.ErrConflict):
 			degrade.Code = degradeManifestChanged
@@ -413,7 +427,6 @@ func (r *ProvenanceRouter) open(ctx context.Context, plan *patchPlan, change *pa
 		return nil, err
 	}
 	updated := spliced.File
-	diff := documentDiffText(spliced.Original, change.rendered.Document, change.definition)
 	outbound := outboundDocumentDiff(spliced.Original, change.rendered.Document)
 
 	created, err := client.CreateBranch(ctx, plan.branch, head)
@@ -458,7 +471,7 @@ func (r *ProvenanceRouter) open(ctx context.Context, plan *patchPlan, change *pa
 			return nil, withBranch(fail(findErr))
 		}
 		if found != nil {
-			return &patchPullRequest{PullRequest: *found, Existing: true, Diff: diff}, nil
+			return &patchPullRequest{PullRequest: *found, Existing: true}, nil
 		}
 	}
 	if err != nil {
@@ -466,7 +479,7 @@ func (r *ProvenanceRouter) open(ctx context.Context, plan *patchPlan, change *pa
 		degrade.Code = degradeForgeError
 		return nil, withBranch(degrade)
 	}
-	return &patchPullRequest{PullRequest: *opened, Diff: diff}, nil
+	return &patchPullRequest{PullRequest: *opened}, nil
 }
 
 // resolveToken reads the token at use time, as git sync reads its credentials.
@@ -514,19 +527,15 @@ func (e *Executor) dispatchGitSyncedPatch(ctx context.Context, inc *models.Incid
 	}
 	if degrade == nil {
 		pr, err := e.provenance.open(ctx, plan, &patchChange{
-			rendered:   manifest,
-			definition: params.Definition,
-			title:      patchTitle(job.Alias, inc.ID),
+			rendered: manifest,
+			title:    patchTitle(job.Alias, inc.ID),
 			body: func(text string) string {
 				return patchBody(inc, action.ID, job.Alias, plan, text)
 			},
 			message: patchCommitMessage(job.Alias, inc.ID, action.ID),
 		})
 		if err == nil {
-			if pr.Diff != "" {
-				diff.Empty, diff.Diff = false, boundText(pr.Diff, maxDiffBytes)
-			}
-			return patchPullRequestResult(job, plan, pr, diff), nil
+			return patchPullRequestResult(job, plan, pr, diff.forPullRequest(pr.URL)), nil
 		}
 		routed, ok := errors.AsType[*patchDegrade](err)
 		if !ok {
@@ -656,7 +665,11 @@ func (e *Executor) recordPatchPreview(ctx context.Context, inc *models.Incident,
 				plan.repo, plan.base, plan.path, baseline.Commit)
 		}
 	}
-	preview["diff"] = boundText(headline+"\n\n"+patchDiffText(diff, params.Definition), maxDiffBytes)
+	text := patchDiffText(diff, params.Definition)
+	if text == noPatchChanges && gitSynced(job) {
+		text = noServerChanges
+	}
+	preview["diff"] = boundText(headline+"\n\n"+text, maxDiffBytes)
 
 	encoded := encodeJSON(preview)
 	if err := e.store.DB().WithContext(ctx).Model(&models.AgentAction{}).
@@ -691,7 +704,12 @@ func (e *Executor) loadPatchJob(ctx context.Context, inc *models.Incident, param
 	return &job, nil
 }
 
-const noPatchChanges = "no changes: the proposed definition is identical to the current one"
+const (
+	noPatchChanges = "no changes: the proposed definition is identical to the current one"
+	// noServerChanges is noPatchChanges for a job a file owns. The preview compares
+	// the server's copy and the route compares the file, which can differ.
+	noServerChanges = "no changes to the server's copy of this job; the route compares the manifest file when it runs"
+)
 
 // patchDiff is the `diff` of an executed patch's result. Its text is bounded.
 type patchDiff struct {
@@ -712,6 +730,20 @@ func newPatchDiff(alias string, rendered, definition json.RawMessage) patchDiff 
 		Diff:     boundText(text, maxDiffBytes),
 		outbound: outboundPatchDiff(rendered, definition, text),
 	}
+}
+
+// forPullRequest is the diff a pull request's result records: the confined render
+// of the server's copy, never the file's (see the note at the top of this file).
+// The route refuses a file that already matches the proposal, so a pull request
+// is always a change, even when the server's copy shows none: a field the server
+// does not persist, or a file that moved ahead of it. Then the result says where
+// the change is.
+func (d patchDiff) forPullRequest(url string) patchDiff {
+	if d.Empty {
+		d.Empty = false
+		d.Diff = "the server's copy of this job matches the proposal; the change to the manifest is in the pull request: " + url
+	}
+	return d
 }
 
 // outboundPatchDiff is the render's masked diff. With none, it falls back as the
@@ -748,19 +780,8 @@ func patchDiffText(diff, definition json.RawMessage) string {
 	return fullProposalText(definition)
 }
 
-// documentDiffText diffs two job documents, falling back to the whole proposal.
-func documentDiffText(current, proposed []byte, definition json.RawMessage) string {
-	text, err := docdiff.Documents(current, proposed)
-	if err != nil {
-		return fullProposalText(definition)
-	}
-	if text == "" {
-		return noPatchChanges
-	}
-	return text
-}
-
-// outboundDocumentDiff is documentDiffText for readers outside the incident.
+// outboundDocumentDiff is the masked diff of two job documents, for a pull request
+// description, falling back to the masked proposal.
 func outboundDocumentDiff(current, proposed []byte) string {
 	text, err := docdiff.MaskedDocuments(current, proposed)
 	switch {

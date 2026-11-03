@@ -359,24 +359,42 @@ func truncate(value string, limit int) string {
 // the original chain dropped, so errors.Unwrap cannot reach an unscrubbed value.
 // Only the sentinel in kind stays matchable.
 func (g *github) failure(op string, err, kind error) error {
-	return &clientError{text: "forge: " + op + ": " + g.scrub(err.Error()), kind: kind}
+	text := "forge: " + op + ": " + g.scrub(err.Error())
+	return &clientError{text: text, summary: text, kind: kind}
 }
 
 func (g *github) status(op string, resp *response, kind error) error {
-	text := fmt.Sprintf("status %d", resp.status)
+	status := fmt.Sprintf("status %d", resp.status)
+	text := status
 	if resp.message != "" {
 		text += ": " + resp.message
 	}
-	return g.failure(op, errors.New(text), kind)
+	return &clientError{
+		text:    "forge: " + op + ": " + g.scrub(text),
+		summary: "forge: " + op + ": " + status,
+		kind:    kind,
+	}
 }
 
 type clientError struct {
-	text string
-	kind error
+	text    string
+	summary string
+	kind    error
 }
 
 func (e *clientError) Error() string { return e.text }
 func (e *clientError) Unwrap() error { return e.kind }
+
+// Summary is what failed, and the status, without anything the forge wrote. A
+// forge's error text can quote what was sent to it (a pre-receive hook's output
+// is the plain case), so it stays away from any reader who may not read the
+// repository.
+func Summary(err error) string {
+	if failure, ok := errors.AsType[*clientError](err); ok {
+		return failure.summary
+	}
+	return "forge: request failed"
+}
 
 // Redacted replaces the token wherever it appears in a forge's text.
 const Redacted = "[REDACTED]"

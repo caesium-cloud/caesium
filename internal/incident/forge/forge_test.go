@@ -387,3 +387,15 @@ func TestForgeErrorMessageIsBounded(t *testing.T) {
 	_, err := newClient(t, srv).BranchHead(context.Background(), "main")
 	require.Less(t, len(err.Error()), 300)
 }
+
+// Summary keeps which call failed and its status, and nothing the forge wrote.
+func TestSummaryHoldsNothingTheForgeWrote(t *testing.T) {
+	client := newClient(t, serve(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusUnprocessableEntity)
+		_, _ = io.WriteString(w, `{"message":"hook declined: quoted-from-the-file"}`)
+	}))
+	_, err := client.BranchHead(context.Background(), "main")
+	require.ErrorContains(t, err, "quoted-from-the-file", "the error itself keeps the detail")
+	require.Equal(t, "forge: read branch: status 422", Summary(err))
+	require.Equal(t, "forge: request failed", Summary(errors.New("quoted-from-the-file")))
+}
