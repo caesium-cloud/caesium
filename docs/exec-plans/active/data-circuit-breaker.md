@@ -1676,7 +1676,14 @@ precedent for it is warn-mode schema validation, which publishes
       reason. The scope comes from git sync's own functions
       (`runtime.GitSourceNamespaces`, `git.SourceApplyOptions`,
       `ApplyOptions.TenancyScope`). The check is injected from `cmd/start`,
-      because `internal/jobdef` imports `internal/incident`.
+      because `internal/jobdef` imports `internal/incident`. Review round 4 put
+      every pull request the route returns through that one check, including the
+      one it has just opened, since the branch can move between the write and the
+      open. It also made the check read the pull request's state: an open one is
+      verified, a merged one that matches is success (`pr_merged`), and a closed,
+      unmerged one escalates as `pull_request_closed` without being reopened or
+      replaced on the same branch. If several share the branch, an open one wins,
+      then a merged one.
       `ExecuteApproved` writes its terminal status on a context detached
       from the request. Only the patched document changes, so comments inside it are
       lost; a sibling's or a header's are kept. The Console shows the preview through
