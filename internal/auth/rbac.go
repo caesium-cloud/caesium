@@ -201,6 +201,10 @@ var endpointPolicy = map[string]RoutePolicy{
 	// prior run of the task); a baseline in a namespace the caller cannot read
 	// is never used.
 	"GET /v1/jobs/:id/runs/:id/why": namespacedRoute(viewer),
+	// A run's per-assertion results. The run is gated like the routes above;
+	// a confined reader gets baseline evidence only when it was computed over
+	// the run's own namespace.
+	"GET /v1/jobs/:id/runs/:id/assertions": namespacedRoute(viewer),
 
 	// A backfill's total_runs deduplicates dates against the job's runs in
 	// the backfill's own persisted namespace only.

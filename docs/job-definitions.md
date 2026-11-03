@@ -203,6 +203,28 @@ and `trigger.hold` carries the same facts as data: `disposition` (`skipped`), an
 - **Runs skipped before this was recorded.** They read `SKIPPED — dataset /orders held (no assertion detail was recorded for this run; hold …)`, built from the skip reason and task row alone. A skip whose reason names no dataset falls back to the row's own text.
 - **Who sees what.** The dataset name and hold id are shown to every reader of the run: its job declares the dataset under `datasets.consumes`, and its task rows carry both. The rest belongs to the tenant that produced the data, so a namespace-confined reader gets it only where it may read that tenant's runs, the same rule `GET /v1/datasets/holds` applies. The run that opened the hold appears (`held since run …`) only if that run's namespace is readable. The assertion, observed value and bound appear only if the namespace of the run whose breach the hold then carried is readable, and a `deltaFromBaseline` bound that came from a baseline not computed over that run's own namespace is withheld (`bound withheld`). A run whose namespace cannot be determined counts as unreadable. What is withheld is omitted from the JSON, `detail` becomes `withheld`, and the summary says so: `SKIPPED — dataset /orders held (assertion detail withheld; hold …)`. An unconfined reader, and a reader of the producing namespace, get the full line.
 
+### Reading a run's assertion results
+
+`data_violations` on a task lists only the checks that broke. With `CAESIUM_DATA_ASSERTIONS_ENABLED=true`, `GET /v1/jobs/:id/runs/:run_id/assertions` returns what the evaluator decided for **every** declared check of every task instance, the ones that held included. The run page and the task panel render it beside the violation rows.
+
+```json
+{"run_id": "…", "job_id": "…", "tasks": [{
+  "task_id": "…", "fanned": false, "instance_count": 1,
+  "verdict_counts": {"violated": 1},
+  "instances": [{
+    "task_run_id": "…", "status": "succeeded", "attempt": 1, "cache_hit": false, "verdict": "violated",
+    "results": [
+      {"dataset": "warehouse/orders", "metric": "rowCount", "assertion": "min", "outcome": "passed", "observed": 1500, "bound": 1000},
+      {"dataset": "warehouse/orders", "metric": "dedup_ratio", "assertion": "max", "outcome": "violated", "disposition": "warn", "observed": 0.31, "bound": 0.05, "message": "…"}
+    ]}]}]}
+```
+
+- **Outcome.** `passed`, `violated` (with `disposition`: `warn`, `hold`, `fail`, or `seeding` when the cold start kept it from being enforced), `unavailable` (the marker stream was lost, `reason` is `log_unreadable` or `marker_stream_truncated`), or `undecided` (a `deltaFromBaseline` check had nothing to compare against, `reason` is `no_baseline` or `zero_median`). A metric that never arrived is one `violated` result with `assertion: missing`, as in `data_violations`. A pass against a baseline shorter than `CAESIUM_BASELINE_MIN_SAMPLES` is `passed` with `seeding: true` and is shown as a cold-start pass, never as a clean one.
+- **Fixed at evaluation time.** The results are written by the post-task evaluator, with the baseline and the contract of that moment, in the same single write that records violations. A later manifest edit or a baseline that has since moved changes none of them. A task with no assertions writes nothing.
+- **Per instance, latest attempt.** Results belong to one task instance (`task_run_id`) and its current attempt; a retry clears them before the new attempt records its own. A fanned step has one verdict per partition, and the group is described by `verdict_counts` (`passed`, `seeding`, `undecided`, `violated`, `not_evaluated`, `not_recorded`), never by one partition's answer. `instances` is capped at 100 per step (`instances_truncated`), violated partitions first; the counts cover all of them.
+- **Cache hits and old rows.** A task served from cache runs no assertion. When its step declares assertions, the cache hit records that on the task's own row at the time (in the same write that marks it cached), so its instance has `cache_hit: true`, `verdict: not_evaluated` and no `results`, and a later edit to the job's assertions does not change it. A cache hit on a step with no assertions, a quarantined replay, and a cached run recorded before this was written record nothing and show no assertions. A run recorded before results existed has none; its violations are still in `data_violations`, an instance with violations and no results reads `verdict: violated`, and nothing is reported as passed.
+- **Who sees what.** The route is mounted only while the circuit breaker is on, and is gated like the run read. A namespace-confined reader gets a result's baseline evidence (`baseline_median`, `baseline_samples`, the `bound` derived from them, and the message) only when it was computed over the run's own namespace; otherwise it is dropped and `bound_withheld: true` says so. This is the rule `data_violations` and `GET /v1/datasets/holds` follow. Results are not carried in task events or the run payload.
+
 ### Explaining, diffing, and replaying a fanned group
 
 Caesium's causal tooling (`why`, logs, receipts, `run diff`, quarantined `replay`) is fan-out aware: a fanned step has N instances with N distinct identity hashes, so each tool either answers about the *group* or requires you to name *which* instance.

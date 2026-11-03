@@ -84,6 +84,7 @@ func TestProtectedGatesDatasetAssertionRoutes(t *testing.T) {
 	Protected(off.Group("/v1"), nil, nil)
 	require.False(t, hasRoute(off, http.MethodPost, "/v1/datasets/holds/:id/release"))
 	require.False(t, hasRoute(off, http.MethodGet, "/v1/datasets/holds"))
+	require.False(t, hasRoute(off, http.MethodGet, "/v1/jobs/:id/runs/:run_id/assertions"))
 	require.False(t, hasRoute(off, http.MethodGet, "/v1/datasets/:ns/:name/metrics"))
 	// The base freshness dataset surface is unconditional and must stay so.
 	require.True(t, hasRoute(off, http.MethodGet, "/v1/datasets"))
@@ -98,6 +99,7 @@ func TestProtectedGatesDatasetAssertionRoutes(t *testing.T) {
 	Protected(on.Group("/v1"), nil, nil)
 	require.True(t, hasRoute(on, http.MethodPost, "/v1/datasets/holds/:id/release"))
 	require.True(t, hasRoute(on, http.MethodGet, "/v1/datasets/holds"))
+	require.True(t, hasRoute(on, http.MethodGet, "/v1/jobs/:id/runs/:run_id/assertions"))
 	require.True(t, hasRoute(on, http.MethodGet, "/v1/datasets/:ns/:name/metrics"))
 }
 

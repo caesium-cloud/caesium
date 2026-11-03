@@ -94,6 +94,7 @@ func TestAuthMiddlewareMountedRoutesHaveRBACPolicy(t *testing.T) {
 		"GET /v1/database/schema",
 		"GET /v1/contracts/graph",
 		"GET /v1/datasets/holds",
+		"GET /v1/jobs/:id/runs/:id/assertions",
 		"GET /v1/datasets/:id/:id/metrics",
 		"POST /v1/datasets/holds/:id/release",
 		"GET /v1/incidents",

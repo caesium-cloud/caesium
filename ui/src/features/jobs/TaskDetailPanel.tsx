@@ -397,7 +397,14 @@ export function TaskDetailPanel({
         {activeTab === "details" ? (
           <ScrollArea className="h-full">
             <div className="p-4 space-y-4">
-              {runTask ? <DataAssertionsPanel task={runTask} /> : null}
+              {runTask ? (
+                <DataAssertionsPanel
+                  task={runTask}
+                  jobId={jobId}
+                  runId={runId}
+                  live={runStatus === "running"}
+                />
+              ) : null}
               <HoldSkipReason reason={runTask?.error} />
               {/* Error banner */}
               {runTask?.error && status === "skipped" ? (

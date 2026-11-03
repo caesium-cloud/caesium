@@ -20,7 +20,8 @@ import {
 import { Skeleton } from "@/components/ui/skeleton";
 import { StatusBadge } from "@/components/ui/status-badge";
 import { Kbd } from "@/components/ui/kbd";
-import { DataAssertionsPanel } from "@/features/datasets/DataAssertionsPanel";
+import { RunAssertionPanels } from "@/features/datasets/DataAssertionsPanel";
+import { useSyncRunAssertions } from "@/features/datasets/useDataAssertions";
 import { HoldSkipReason } from "@/features/datasets/HoldSkipReason";
 import { IncidentRibbon } from "@/features/incidents/IncidentRibbon";
 import { RunDataEvidence, RunExternalExecutions } from "@/features/connectors/RelationshipsPanel";
@@ -77,6 +78,10 @@ export function RunDetailPage() {
     // A denied run (a moved job's history in a namespace outside the grants) never changes.
     refetchInterval: (query) => (isInsufficientAccessError(query.state.error) ? false : streamHealthy ? 5000 : 3000),
   });
+
+  // The recorded assertion results follow whatever the run's tasks show,
+  // whether an event or a poll delivered it.
+  useSyncRunAssertions(jobId, runId, run?.tasks);
 
   const receiptQuery = useQuery({
     queryKey: ["job", jobId, "runs", runId, "receipt"],
@@ -520,7 +525,7 @@ export function RunDetailPage() {
       <HoldSkipReason reason={run.tasks?.find((task) => task.error?.startsWith("dataset_hold:"))?.error ?? run.skip_reason} />
       <RunDataEvidence jobId={jobId} freshnessEnabled={features?.freshness_enabled === true} onOpenReceipt={() => setReproducibilityOpen(true)} />
       <RunExternalExecutions jobId={jobId} runId={runId} />
-      {run.tasks?.filter((task) => task.data_violations?.length || task.schema_violations?.length).map((task) => <DataAssertionsPanel key={task.id} task={task} />)}
+      <RunAssertionPanels jobId={jobId} runId={runId} tasks={run.tasks ?? []} live={isLive} />
       {/* Cache summary */}
       <div className="flex items-center gap-4">
         <RunCacheSummary run={run} />

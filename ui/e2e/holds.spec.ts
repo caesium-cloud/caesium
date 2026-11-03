@@ -26,7 +26,9 @@ test("live held lineage, downstream skip and recorded baseline remain visible wi
   ]);
   const producer = jobs.find((job) => job.alias === alias)!;
   const consumer = jobs.find((job) => job.alias === consumerAlias)!;
-  for (let i = 0; i < 5; i++) await runHoldJob(request, producer.id);
+  const seedRuns = [];
+  for (let i = 0; i < 5; i++)
+    seedRuns.push(await runHoldJob(request, producer.id));
   // Observed lineage must exist before the hold freezes its impact evidence.
   await runHoldJob(request, consumer.id);
   await expect
@@ -114,6 +116,31 @@ test("live held lineage, downstream skip and recorded baseline remain visible wi
     "deltaFromBaseline",
   );
   await expect(page.getByTestId("baseline-sparkline")).toBeVisible();
+  // The breach is listed beside the check that held, each with its outcome.
+  const results = page.getByTestId("assertion-result");
+  await expect(results).toHaveCount(2);
+  await expect(
+    results.filter({ hasText: "rowCount.min: Passed" }),
+  ).toHaveAttribute("data-outcome", "passed");
+  const breach = results.filter({ hasText: "rowCount.deltaFromBaseline" });
+  await expect(breach).toHaveAttribute("data-outcome", "violated");
+  await expect(breach).toHaveAttribute("data-disposition", "hold");
+
+  // The first run had no history to compare against, so the delta check
+  // decided nothing; the fifth passed against four samples of five. Neither
+  // reads as a clean pass.
+  await page.goto(`/jobs/${producer.id}/runs/${seedRuns[0].id}`);
+  await expect(page.getByTestId("data-assertions-panel")).toContainText(
+    "Not decided: no clean baseline yet",
+  );
+  await page.goto(`/jobs/${producer.id}/runs/${seedRuns[4].id}`);
+  const coldStart = page
+    .getByTestId("assertion-result")
+    .filter({ hasText: "rowCount.deltaFromBaseline" });
+  await expect(coldStart).toHaveAttribute("data-outcome", "passed");
+  await expect(coldStart).toHaveAttribute("data-seeding", "true");
+  await expect(coldStart).toContainText("Passed during cold start");
+
   await page.goto(holdURL(hold));
   await expect(page.getByTestId("hold-panel")).toHaveAttribute(
     "data-hold-id",

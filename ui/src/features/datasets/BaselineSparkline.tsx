@@ -1,10 +1,30 @@
 import { RunStrip, RunStripAxis } from "@/components/ui/run-strip";
 import { useQuery } from "@tanstack/react-query";
-import { api, type DataViolation } from "@/lib/api";
+import { api, type AssertionResult, type DataViolation } from "@/lib/api";
 
 const number = (value: number) => Number(value.toPrecision(5)).toLocaleString();
 
-export function BaselineSparkline({ violation }: { violation: DataViolation }) {
+/**
+ * Draws the live clean baseline around one recorded observation. It takes the
+ * evidence a recorded violation or a recorded passing result both carry, so a
+ * `deltaFromBaseline` row keeps its sparkline whether it broke or held.
+ */
+export function BaselineSparkline({
+  violation,
+  when = "breach",
+}: {
+  /** What the recorded range describes: a breach, or a check that held. */
+  when?: "breach" | "check";
+  violation: Pick<
+    DataViolation | AssertionResult,
+    | "namespace"
+    | "dataset"
+    | "metric"
+    | "observed"
+    | "bound"
+    | "baseline_median"
+  >;
+}) {
   const query = useQuery({
     queryKey: [
       "datasets",
@@ -79,7 +99,7 @@ export function BaselineSparkline({ violation }: { violation: DataViolation }) {
             strokeDasharray="2 3"
           >
             <title>
-              Allowed range at breach: {recordedLow}–{recordedHigh}
+              Allowed range at {when}: {recordedLow}–{recordedHigh}
             </title>
           </rect>
         ) : null}
@@ -130,12 +150,12 @@ export function BaselineSparkline({ violation }: { violation: DataViolation }) {
       <figcaption className="text-[11px] text-text-3">
         Current clean baseline, last {values.length}/{query.data.window}{" "}
         samples, p10–p90 band, gold point: recorded observation; dashed gold
-        box: allowed range at breach.
+        box: allowed range at {when}.
         {query.data.seeding
           ? ` Seeding (${values.length}/${query.data.min_samples} samples).`
           : ""}
         <span className="mt-1 block">
-          This live history may differ from the baseline at this breach; the
+          This live history may differ from the baseline at this {when}; the
           recorded verdict below preserves its median and sample count.
         </span>
       </figcaption>
