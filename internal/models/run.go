@@ -189,6 +189,17 @@ type TaskRun struct {
 	// like it, is reset by retryResetColumns so a retried attempt never carries
 	// the previous attempt's verdicts. Struct tags are the schema; no migration.
 	DataViolations datatypes.JSON `gorm:"type:json" json:"data_violations,omitempty"`
+	// DataAssertionResults is what the post-task evaluator decided on EVERY
+	// declared check of this instance (run.AssertionResult entries), the ones
+	// that held as well as the ones that broke, recorded at evaluation time.
+	// Nullable: written only for an instance whose step declares assertions,
+	// so a task without a contract, a cache hit and every row recorded before
+	// this column existed carry NULL — which reads as "no record", never as
+	// "everything passed". Reset by retryResetColumns with data_violations so
+	// each attempt owns its own results, and deleted with the row. Not
+	// serialised (json:"-"): it is served through its own read, which shapes it
+	// for the reader, not by the task payloads and events that embed rows.
+	DataAssertionResults datatypes.JSON `gorm:"type:json" json:"-"`
 	// ExitCode is the raw process exit code the container/pod reported at task
 	// completion. Every engine folds this code into an atom.Result and discards
 	// it today; this column preserves it so the incident classifier can map

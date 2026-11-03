@@ -970,6 +970,71 @@ export interface DataViolation {
   message: string;
 }
 
+/**
+ * The evaluator's decision on one declared check of one task instance,
+ * recorded when it was made. `outcome` is not just pass/fail: a check can also
+ * decide nothing (`unavailable`, `undecided`), and a pass judged against a
+ * baseline shorter than the cold-start floor carries `seeding`.
+ */
+export interface AssertionResult {
+  namespace?: string;
+  dataset: string;
+  metric: string;
+  /** min, max, deltaFromBaseline, maxLag, or missing / unavailable for a metric never judged. */
+  assertion: string;
+  outcome: "passed" | "violated" | "unavailable" | "undecided";
+  /** Violated only: warn, hold, fail, or seeding (not enforced). */
+  disposition?: "warn" | "hold" | "fail" | "seeding";
+  observed?: number;
+  bound?: number;
+  /** The bound was withheld from this reader, as opposed to there being none. */
+  bound_withheld?: boolean;
+  delta_from_baseline?: string;
+  baseline_median?: number;
+  baseline_samples?: number;
+  seeding?: boolean;
+  /** Why an unavailable or undecided check decided nothing. */
+  reason?: string;
+  message?: string;
+}
+
+export type AssertionVerdict =
+  | "passed"
+  | "seeding"
+  | "undecided"
+  | "violated"
+  | "not_evaluated"
+  | "not_recorded";
+
+export interface AssertionInstance {
+  task_run_id: string;
+  partition_value?: string;
+  partition_index?: number;
+  status: string;
+  attempt: number;
+  cache_hit: boolean;
+  verdict: AssertionVerdict;
+  /** Absent for a cache hit and for violations recorded before per-check results existed. */
+  results?: AssertionResult[];
+  /** This instance's own recorded violations when it predates per-check results. */
+  violations?: DataViolation[];
+}
+
+export interface TaskAssertions {
+  task_id: string;
+  fanned: boolean;
+  instance_count: number;
+  verdict_counts: Partial<Record<AssertionVerdict, number>>;
+  instances: AssertionInstance[];
+  instances_truncated?: boolean;
+}
+
+export interface RunAssertions {
+  run_id: string;
+  job_id: string;
+  tasks: TaskAssertions[];
+}
+
 export interface DatasetHoldSummary {
   id: string;
   status: "active" | "released";
@@ -1733,6 +1798,8 @@ export const api = {
     const query = queryString({ ...params });
     return request<DatasetHoldsResponse>(`/datasets/holds${query ? `?${query}` : ""}`);
   },
+  getRunAssertions: (jobId: string, runId: string, signal?: AbortSignal) =>
+    request<RunAssertions>(`/jobs/${encodeURIComponent(jobId)}/runs/${encodeURIComponent(runId)}/assertions`, { signal }),
   getDatasetMetrics: (namespace: string, name: string, metric: string) =>
     request<DatasetMetricsResponse>(`${datasetPath(namespace, name)}/metrics?${queryString({ metric, limit: 200 })}`),
   releaseDatasetHold: (holdId: string, reason: string, tolerate: Record<string, string>) =>

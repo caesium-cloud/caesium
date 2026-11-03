@@ -209,20 +209,38 @@ func (r *JobRun) WithholdUnownedBaselineEvidence() {
 		}
 		var own []string
 		for i := range task.DataViolations {
-			v := &task.DataViolations[i]
-			if !baselineevidence.Withholds(v.BaselineScope, v.Assertion, v.BaselineMedian != nil, v.BaselineSamples != 0) {
-				continue
-			}
-			own = append(own, v.Message)
-			v.BaselineMedian, v.BaselineSamples, v.Message = nil, 0, BaselineEvidenceWithheld
-			if v.Assertion == AssertionDeltaFromBaseline {
-				v.Bound = nil
+			if message, withheld := withholdViolationEvidence(&task.DataViolations[i]); withheld {
+				own = append(own, message)
 			}
 		}
 		task.Error = baselineevidence.ReplaceMessages(task.Error, own)
 		withheld = append(withheld, own...)
 	}
 	r.Error = baselineevidence.ReplaceMessages(r.Error, withheld)
+}
+
+// withholdViolationEvidence applies the confined-reader rule to one verdict in
+// place and returns the message it replaced. It is the single definition shared
+// by the run read and the assertions read.
+func withholdViolationEvidence(v *DataViolation) (string, bool) {
+	if !baselineevidence.Withholds(v.BaselineScope, v.Assertion, v.BaselineMedian != nil, v.BaselineSamples != 0) {
+		return "", false
+	}
+	message := v.Message
+	v.BaselineMedian, v.BaselineSamples, v.Message = nil, 0, BaselineEvidenceWithheld
+	if v.Assertion == AssertionDeltaFromBaseline {
+		v.Bound = nil
+	}
+	return message, true
+}
+
+// WithholdUnownedBaselineEvidenceFromViolations is WithholdUnownedBaselineEvidence
+// for a bare verdict list, such as an instance's pre-results violations in the
+// assertions read.
+func WithholdUnownedBaselineEvidenceFromViolations(violations []DataViolation) {
+	for i := range violations {
+		withholdViolationEvidence(&violations[i])
+	}
 }
 
 // WithholdUnownedBaselineEvidenceJSON applies WithholdUnownedBaselineEvidence

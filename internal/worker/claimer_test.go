@@ -188,6 +188,48 @@ func TestClaimerReclaimExpiredResetsStaleRunningTasks(t *testing.T) {
 	require.GreaterOrEqual(t, metrictestutil.CounterValue(t, metrics.WorkerLeaseExpirationsTotal, "node-a"), float64(1))
 }
 
+// A worker can record its data-assertion outcome and die before reporting
+// completion; the reaper then re-pends the row. The replacement must not inherit
+// the lost attempt's checks or violations, and a live claim must keep its own.
+func TestClaimerReclaimExpiredClearsTheLostAttemptsAssertionOutcome(t *testing.T) {
+	db := jobdeftestutil.OpenTestDB(t)
+	t.Cleanup(func() { jobdeftestutil.CloseDB(db) })
+
+	now := time.Now().UTC()
+	expired := seedTaskRun(t, db, seedTaskRunInput{
+		status:         string(run.TaskStatusRunning),
+		claimedBy:      "node-old",
+		claimExpiresAt: new(now.Add(-time.Minute)),
+		claimAttempt:   1,
+		createdAt:      now.Add(-2 * time.Minute),
+	})
+	live := seedTaskRun(t, db, seedTaskRunInput{
+		status:         string(run.TaskStatusRunning),
+		claimedBy:      "node-live",
+		claimExpiresAt: new(now.Add(2 * time.Minute)),
+		claimAttempt:   1,
+		createdAt:      now.Add(-2 * time.Minute),
+	})
+	for _, id := range []any{expired.ID, live.ID} {
+		require.NoError(t, db.Model(&models.TaskRun{}).Where("id = ?", id).Updates(map[string]any{
+			"data_violations":        []byte(`[{"dataset":"d","metric":"m","assertion":"min","message":"x"}]`),
+			"data_assertion_results": []byte(`[{"dataset":"d","metric":"m","assertion":"min","outcome":"violated"}]`),
+		}).Error)
+	}
+
+	claimer := NewClaimer("node-a", run.NewStore(db), time.Minute)
+	require.NoError(t, claimer.ReclaimExpired(context.Background()))
+
+	var reclaimed, kept models.TaskRun
+	require.NoError(t, db.First(&reclaimed, "id = ?", expired.ID).Error)
+	require.NoError(t, db.First(&kept, "id = ?", live.ID).Error)
+	require.Equal(t, string(run.TaskStatusPending), reclaimed.Status)
+	require.Empty(t, reclaimed.DataViolations, "the replacement does not inherit the lost attempt's violations")
+	require.Empty(t, reclaimed.DataAssertionResults, "or its results")
+	require.NotEmpty(t, kept.DataViolations, "a live claim keeps its own outcome")
+	require.NotEmpty(t, kept.DataAssertionResults)
+}
+
 func TestClaimerClaimNextReturnsNilWhenClaimRaceIsLost(t *testing.T) {
 	db := jobdeftestutil.OpenTestDB(t)
 	t.Cleanup(func() {
