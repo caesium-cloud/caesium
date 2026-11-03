@@ -2,7 +2,7 @@
 
 Last updated: 2026-11-03
 
-> Status: **COMPLETE — Plan 1 of [`closed-loop-arc.md`](../active/closed-loop-arc.md).** Waves 1–8 shipped (#432–#725), and N-1 closed the plan out on 2026-11-03: the roadmap, design banner, schema references, example and [`docs/tour-data-loop.md`](../../tour-data-loop.md) reflect what shipped. Archived here from `active/`.
+> Status: **COMPLETE — Plan 1 of [`closed-loop-arc.md`](../active/closed-loop-arc.md).** Waves 1–8 shipped (#432–#731), and N-1 closed the plan out on 2026-11-03: the roadmap, design banner, schema references, example and [`docs/tour-data-loop.md`](../../tour-data-loop.md) reflect what shipped. Archived here from `active/`.
 
 **Plan 1 of [`closed-loop-arc.md`](../active/closed-loop-arc.md) — the data loop.** The arc
 closes a loop over the memory Caesium already keeps; this plan builds the data
@@ -201,7 +201,7 @@ on 2026-11-02 and 2026-11-03, and Wave 8 (the rest of E2, then N-1) on
   columns.
   **Limits:** `Claimer.ReclaimExpired` still does not clear dataset metrics the way
   the owner-side resets do.
-- **β / N-1** — the docs close-out. `docs/roadmap.md` flips the data circuit breaker
+- **β / N-1** — [#731](https://github.com/caesium-cloud/caesium/pull/731), the docs close-out. `docs/roadmap.md` flips the data circuit breaker
   to Shipped; the design record's `> Status:` banner reads shipped per phase. The
   `##caesium::metrics` marker and the `produces` / `assertions` / `consumes` /
   `onViolation` / `release` / `onUpstreamHold` fields are documented in
@@ -2013,7 +2013,7 @@ precedent for it is warn-mode schema validation, which publishes
       currently failing, because the generator's output did not change); (b)
       `ui/src/lib/api.ts`'s `SystemFeatures` type needs the new
       `data_assertions_enabled` field once Stream E renders a gated surface.
-      **Done:** all four files and the example landed, `docs/tour-data-loop.md` is
+      **Done (#731):** all four files and the example landed, `docs/tour-data-loop.md` is
       published, the arc dashboard row is ticked, and the plan is archived to
       `completed/` with every link to it repointed. The generator rows were added to
       `internal/jobdef/report/report.go` and the reference regenerated; the

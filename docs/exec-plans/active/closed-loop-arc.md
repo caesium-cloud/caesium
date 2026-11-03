@@ -110,7 +110,7 @@ Updated by each child plan's close-out (the plan's N-1 item ticks its row here).
 | Plan | Waves shipped | Last PR | Notes |
 |---|---|---|---|
 | 0 trust-the-substrate | 2 | #428 (`8146b45`) | W1: Streams A, B, C, F, H-1 shipped (#386–#393); W2: D, E1–E3, H-2 floor, N-1, N-2 shipped (#421–#428) + required status checks applied; E4: `v0.1.0` released 2026-09-07 — https://github.com/caesium-cloud/caesium/releases/tag/v0.1.0 (image digests in `docs/ci.md` § v0.1.0); N-4 closed out, plan archived to `completed/` |
-| 1 data-circuit-breaker | 8 | #724 (`91a7b527`) | W1: Stream A (A1–A5), H-1, N-2 shipped (#432–#434); W2: Stream B (#436); W3: Stream C (#439); W4-α: Stream D reads/CLI (#442); W4-β: Stream E Console (#445); W5: F1 (#710), F4 (#708); W6: F2 (#719); W7: F3 (#724), F5 (#721); W8: the rest of E2 (#725), then N-1 (docs close-out, `docs/tour-data-loop.md`); plan archived to `completed/data-circuit-breaker.md`. |
+| 1 data-circuit-breaker | 8 | #731 (N-1; last runtime PR #724 `91a7b527`) | W1: Stream A (A1–A5), H-1, N-2 shipped (#432–#434); W2: Stream B (#436); W3: Stream C (#439); W4-α: Stream D reads/CLI (#442); W4-β: Stream E Console (#445); W5: F1 (#710), F4 (#708); W6: F2 (#719); W7: F3 (#724), F5 (#721); W8: the rest of E2 (#725), then N-1 (#731, the docs close-out and `docs/tour-data-loop.md`); plan archived to `completed/data-circuit-breaker.md`. |
 | 2 resource-right-sizing | 1 | #449 (`f1092a59`) | W1: Stream A (A1–A3) and H-1 shipped 2026-10-01 with `ci-ok` green. B onward and H-2 retain their dependencies. |
 | 3 backtesting | 0 | — | |
 | 4 window-scheduling | 0 | — | optional |
