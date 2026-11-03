@@ -10,6 +10,7 @@ import (
 	"github.com/caesium-cloud/caesium/internal/event"
 	"github.com/caesium-cloud/caesium/internal/jobdef/testutil"
 	"github.com/caesium-cloud/caesium/internal/models"
+	"github.com/caesium-cloud/caesium/pkg/env"
 	"github.com/caesium-cloud/caesium/pkg/jobdef"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
@@ -232,6 +233,9 @@ func TestCancelQueuedRunDeletesOnlyUnclaimedRows(t *testing.T) {
 
 func createConcurrencyJob(t *testing.T, db *gorm.DB, alias, strategy string, maxRuns int) *models.Job {
 	t.Helper()
+	// strategy: queue parks overflow only while a full consumer will drain it.
+	// These tests predate that gate and still expect a parked row.
+	t.Cleanup(env.SetRunQueueConsumerEnabled(true))
 	now := time.Now().UTC()
 	trigger := &models.Trigger{
 		ID:            uuid.New(),

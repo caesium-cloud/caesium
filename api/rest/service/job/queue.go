@@ -34,6 +34,12 @@ type QueueItem struct {
 	// `namespace_quota` when its namespace is at quotas.maxConcurrentRuns
 	// (identity-and-access D2). Omitted otherwise.
 	HeldReason string `json:"held_reason,omitempty"`
+	// PendingReason names a wait that is not a claim and not a quota hold.
+	// Set when the full queue consumer is off, so a row already parked is not
+	// described as waiting for a slot that will never be granted. Omitted on
+	// quota-held rows (the quota-only dequeuer still drains those) and whenever
+	// the consumer is on.
+	PendingReason string `json:"pending_reason,omitempty"`
 }
 
 // Queue lists every queued run for a job, claimed rows included.
@@ -92,6 +98,9 @@ func (j *jobService) Queue(id uuid.UUID) ([]QueueItem, error) {
 		}
 		if rows[idx].HeldReason != nil {
 			item.HeldReason = *rows[idx].HeldReason
+		}
+		if item.HeldReason != models.RunQueueHeldReasonNamespaceQuota && !runstorage.RunQueueConsumerEnabled() {
+			item.PendingReason = runstorage.RunQueueConsumerDisabledMessage
 		}
 		items = append(items, item)
 	}

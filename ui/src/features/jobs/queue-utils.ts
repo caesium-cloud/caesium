@@ -40,6 +40,12 @@ export function isNamespaceQuotaHeld(row: RunQueueItem) {
 }
 
 export function queuePendingReason(row: RunQueueItem) {
+  const explicitReason = row.pending_reason ?? row.wait_reason ?? row.blocked_reason ?? row.reason;
+  // A row parked while the consumer is off will not be granted a slot. Say so
+  // before claim state, which otherwise reads as if a dequeuer is about to start it.
+  if (explicitReason?.includes("run queue consumer is disabled")) {
+    return explicitReason;
+  }
   if (isStaleQueueRow(row)) {
     const holder = row.claimed_by ? ` by ${row.claimed_by}` : "";
     return `Claim${holder} expired: the dequeuer that took this run died mid-drain; the leader will release it`;
@@ -53,7 +59,6 @@ export function queuePendingReason(row: RunQueueItem) {
   if (row.held_reason) {
     return `Held: ${row.held_reason}`;
   }
-  const explicitReason = row.pending_reason ?? row.wait_reason ?? row.blocked_reason ?? row.reason;
   if (row.blocked === true) {
     return explicitReason ? `Blocked: ${explicitReason}` : "Blocked by scheduler policy";
   }

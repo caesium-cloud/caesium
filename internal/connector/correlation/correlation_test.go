@@ -12,6 +12,7 @@ import (
 	"github.com/caesium-cloud/caesium/internal/jobdef/testutil"
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/caesium-cloud/caesium/internal/run"
+	"github.com/caesium-cloud/caesium/pkg/env"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 	"gorm.io/datatypes"
@@ -96,6 +97,7 @@ func TestCorrelationVerifiesRealAdmissionAndCoalescesConcurrentRetries(t *testin
 }
 
 func TestCorrelationPreservesQueueIdentityAcrossPromotionAndReopen(t *testing.T) {
+	t.Cleanup(env.SetRunQueueConsumerEnabled(true))
 	path := filepath.Join(t.TempDir(), "correlation.db")
 	db := openSQLiteFile(t, path)
 	require.NoError(t, db.AutoMigrate(models.All...))

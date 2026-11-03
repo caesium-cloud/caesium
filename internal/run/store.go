@@ -1641,6 +1641,12 @@ func (s *Store) admit(tx *gorm.DB, model *models.JobRun, req startRunRequest) (a
 			result.decision = admissionFailed
 			return result, nil
 		}
+		// Do not park work the operator left with no consumer. A quota-only
+		// dequeuer (policy file, both flags false) drains namespace_quota rows
+		// and never this one, so accepting it would leave it stranded.
+		if !RunQueueConsumerEnabled() {
+			return result, ErrRunQueueConsumerDisabled
+		}
 		queueID, err := s.enqueueRunTx(tx, model.JobID, model.Namespace, model.Params, model.Priority, env.Variables().RunQueueMaxDepth, nil)
 		if err != nil {
 			return result, err

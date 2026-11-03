@@ -904,7 +904,7 @@ func (e *Evaluator) derive(ctx context.Context, decl models.DatasetDeclaration, 
 		if errors.Is(err, errProducerMovedSinceSnapshot) {
 			return e.recordDerivation(ctx, decl, models.DatasetDecisionSkippedAdmission, err.Error(), consumed, nil)
 		}
-		if errors.Is(err, runstorage.ErrRunSkipped) || errors.Is(err, runstorage.ErrRunQueued) || errors.Is(err, runstorage.ErrMaxConcurrentRunsReached) {
+		if errors.Is(err, runstorage.ErrRunSkipped) || errors.Is(err, runstorage.ErrRunQueued) || errors.Is(err, runstorage.ErrMaxConcurrentRunsReached) || errors.Is(err, runstorage.ErrRunQueueConsumerDisabled) {
 			return e.recordDerivation(ctx, decl, models.DatasetDecisionSkippedAdmission, err.Error(), consumed, nil)
 		}
 		// A start can fail AFTER it has committed the run: Store.startRun

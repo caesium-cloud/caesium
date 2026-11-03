@@ -11,6 +11,7 @@ import (
 	jobdeftestutil "github.com/caesium-cloud/caesium/internal/jobdef/testutil"
 	"github.com/caesium-cloud/caesium/internal/models"
 	runstorage "github.com/caesium-cloud/caesium/internal/run"
+	"github.com/caesium-cloud/caesium/pkg/env"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 )
@@ -82,4 +83,48 @@ func TestQueueCarriesHeldReasonAndKeepsItsOwnersRows(t *testing.T) {
 	require.NoError(t, db.Model(&models.RunQueue{}).Where("job_id = ?", job.ID).Count(&remaining).Error)
 	require.Equal(t, int64(3), remaining)
 	require.NoError(t, svc.CancelQueuedRun(job.ID, legacy), "without a check the cancel is unchanged")
+}
+
+func TestQueueNamesDisabledConsumerOnOrdinaryRowsOnly(t *testing.T) {
+	db := jobdeftestutil.OpenTestDB(t)
+	t.Cleanup(func() { jobdeftestutil.CloseDB(db) })
+	svc := &jobService{ctx: context.Background(), db: db}
+	job, err := svc.Create(&CreateRequest{TriggerID: uuid.New(), Alias: "queue-disabled-consumer"})
+	require.NoError(t, err)
+
+	now := time.Now().UTC()
+	quota := models.RunQueueHeldReasonNamespaceQuota
+	ordinary, held := uuid.New(), uuid.New()
+	require.NoError(t, db.Create(&models.RunQueue{
+		ID: ordinary, JobID: job.ID, Priority: 2, CreatedAt: now.Add(-time.Minute),
+	}).Error)
+	require.NoError(t, db.Create(&models.RunQueue{
+		ID: held, JobID: job.ID, Priority: 2, CreatedAt: now, HeldReason: &quota,
+	}).Error)
+
+	byID := func(items []QueueItem) map[uuid.UUID]QueueItem {
+		t.Helper()
+		out := make(map[uuid.UUID]QueueItem, len(items))
+		for _, item := range items {
+			out[item.ID] = item
+		}
+		return out
+	}
+
+	t.Cleanup(env.SetRunQueueConsumerEnabled(false))
+	off, err := svc.Queue(job.ID)
+	require.NoError(t, err)
+	offByID := byID(off)
+	require.Equal(t, runstorage.RunQueueConsumerDisabledMessage, offByID[ordinary].PendingReason)
+	require.Empty(t, offByID[held].PendingReason, "a quota-held row still drains without the full consumer")
+	encoded, err := json.Marshal(offByID[held])
+	require.NoError(t, err)
+	require.NotContains(t, string(encoded), "pending_reason")
+
+	t.Cleanup(env.SetRunQueueConsumerEnabled(true))
+	on, err := svc.Queue(job.ID)
+	require.NoError(t, err)
+	onByID := byID(on)
+	require.Empty(t, onByID[ordinary].PendingReason)
+	require.Empty(t, onByID[held].PendingReason)
 }
