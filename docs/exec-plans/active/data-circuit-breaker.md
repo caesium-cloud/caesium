@@ -1683,7 +1683,15 @@ precedent for it is warn-mode schema validation, which publishes
       verified, a merged one that matches is success (`pr_merged`), and a closed,
       unmerged one escalates as `pull_request_closed` without being reopened or
       replaced on the same branch. If several share the branch, an open one wins,
-      then a merged one.
+      then a merged one. Review round 5 holds a merged pull request to the base
+      as well: it counts only if the manifest at the base's current head is the
+      replacement, since an `ours` merge marks a pull request merged without its
+      change. Otherwise the patch escalates as `pull_request_merged_without_change`.
+      The lookup now takes the base and reads every page before choosing: the
+      open list first, where an open pull request into the base wins, then the
+      closed list, where a merged one into the base wins. Each list is bounded at
+      ten pages of 100, and reaching the bound without a decision escalates
+      instead of choosing from a partial list.
       `ExecuteApproved` writes its terminal status on a context detached
       from the request. Only the patched document changes, so comments inside it are
       lost; a sibling's or a header's are kept. The Console shows the preview through
