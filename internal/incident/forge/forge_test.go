@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -345,6 +346,38 @@ func TestFindPullRequestChecksTheHead(t *testing.T) {
 	found, err := newClient(t, srv).FindPullRequest(context.Background(), "caesium/patch-1")
 	require.NoError(t, err)
 	require.Equal(t, &PullRequest{Number: 3, URL: "https://x/3", State: "closed"}, found)
+}
+
+// Several pull requests can share the branch: an open one wins, then a merged
+// one. merged_at tells a merged pull request from a rejected one; the forge
+// reports both as closed.
+func TestFindPullRequestPrefersOpenThenMerged(t *testing.T) {
+	pull := func(number int, state string, mergedAt any) map[string]any {
+		return map[string]any{
+			"number": number, "html_url": "https://x/" + strconv.Itoa(number), "state": state, "merged_at": mergedAt,
+			"base": map[string]any{"ref": "main"},
+			"head": map[string]any{"ref": "caesium/patch-1", "sha": strings.Repeat("a", 40), "repo": map[string]any{"full_name": "acme/jobs"}},
+		}
+	}
+	rejected, merged, open := pull(1, "closed", nil), pull(2, "closed", "2026-11-01T12:00:00Z"), pull(3, "open", nil)
+	for name, tc := range map[string]struct {
+		listed []map[string]any
+		want   PullRequest
+	}{
+		"open over merged and rejected": {listed: []map[string]any{rejected, merged, open},
+			want: PullRequest{Number: 3, URL: "https://x/3", State: "open", Base: "main", HeadSHA: strings.Repeat("a", 40)}},
+		"merged over rejected": {listed: []map[string]any{rejected, merged},
+			want: PullRequest{Number: 2, URL: "https://x/2", State: "closed", Merged: true, Base: "main", HeadSHA: strings.Repeat("a", 40)}},
+		"rejected alone": {listed: []map[string]any{rejected},
+			want: PullRequest{Number: 1, URL: "https://x/1", State: "closed", Base: "main", HeadSHA: strings.Repeat("a", 40)}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			srv := serve(t, func(w http.ResponseWriter, _ *http.Request) { _ = json.NewEncoder(w).Encode(tc.listed) })
+			found, err := newClient(t, srv).FindPullRequest(context.Background(), "caesium/patch-1")
+			require.NoError(t, err)
+			require.Equal(t, &tc.want, found)
+		})
+	}
 }
 
 func TestFindPullRequestFindsNothing(t *testing.T) {

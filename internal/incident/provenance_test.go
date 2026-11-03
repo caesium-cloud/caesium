@@ -301,7 +301,10 @@ func (f *fakeGitHub) serve(w http.ResponseWriter, r *http.Request) {
 			"head": map[string]any{"ref": body.Head, "repo": map[string]any{"full_name": "acme/jobs"}},
 		}
 		f.pulls = append(f.pulls, pull)
-		writeJSON(w, http.StatusCreated, pull)
+		// The answer carries the branch's head as it is when the pull request opens.
+		created := maps.Clone(pull)
+		created["head"] = map[string]any{"ref": body.Head, "sha": f.heads[body.Head], "repo": map[string]any{"full_name": "acme/jobs"}}
+		writeJSON(w, http.StatusCreated, created)
 	default:
 		writeJSON(w, http.StatusNotFound, map[string]any{"message": "Not Found"})
 	}
@@ -1081,6 +1084,114 @@ func TestAnExistingPullRequestIsHeldToTheApprovedChange(t *testing.T) {
 			requireDegraded(t, f, result, degradePullRequestMismatch)
 			requirePullRequestRefused(t, f, executed, result, branch)
 		})
+	}
+}
+
+// approvedManifest is the file the route writes for patchedDefinition.
+func approvedManifest(t *testing.T) []byte {
+	t.Helper()
+	rendered, err := renderManifest(patchJSON(t, patchedDefinition))
+	require.NoError(t, err)
+	spliced, err := spliceManifest([]byte(manifestFile), rendered, testAlias, models.DefaultNamespace)
+	require.NoError(t, err)
+	return spliced.File
+}
+
+// TestANewPullRequestIsHeldToTheApprovedChange: someone pushes to the branch
+// between the route's write and its pull request, so the pull request GitHub
+// opens has another head. It is not this action's change.
+func TestANewPullRequestIsHeldToTheApprovedChange(t *testing.T) {
+	f := newRouteFixture(t, manifestFile)
+	action := f.propose(t, patchJSON(t, patchedDefinition))
+	branch := forge.BranchForAction(action.ID)
+	pushed := strings.Repeat("e", 40)
+	f.forge.onRequest = func() {
+		// Runs under the fake's lock, as the request arrives.
+		if f.forge.requests[len(f.forge.requests)-1] != "POST /repos/acme/jobs/pulls" {
+			return
+		}
+		other := []byte(manifestFile + "# another edit\n")
+		f.forge.put(pushed, testManifest, other)
+		f.forge.put(branch, testManifest, other)
+		f.forge.heads[branch] = pushed
+	}
+	approveAction(t, f.db, action.ID, "operator@example.com", "")
+
+	executed, err := f.exec.ExecuteApproved(context.Background(), action.ID)
+	require.NoError(t, err)
+	result := patchResult(t, executed)
+	require.Equal(t, 1, f.forge.requestCount("PUT /repos/acme/jobs/contents/"), "the route wrote the approved change")
+	require.Len(t, f.forge.pulls, 1, "and opened a pull request")
+	requireDegraded(t, f, result, degradePullRequestMismatch)
+	require.Equal(t, branch, result["pr_branch"])
+	require.Contains(t, result["reason"], branch)
+	require.NotContains(t, result, "pr_url")
+	require.NotContains(t, string(executed.Result), "another edit")
+}
+
+// TestPullRequestStateDecidesAcceptance: the lookup asks for every state, and the
+// forge reports a merged pull request and a rejected one alike as closed. An open
+// one holding the approved change is accepted, a merged one is the change already
+// landed, and a closed, unmerged one was rejected: the route degrades, reopens
+// nothing and opens no second pull request on the branch. Both lookups, the first
+// and the one after a 422 at open, are held to this.
+func TestPullRequestStateDecidesAcceptance(t *testing.T) {
+	merged := "2026-11-01T12:00:00Z"
+	for _, lookup := range []string{"first lookup", "after a 422"} {
+		for name, tc := range map[string]struct {
+			state    string
+			mergedAt any
+			code     string
+		}{
+			"open":            {state: "open"},
+			"merged":          {state: "closed", mergedAt: merged},
+			"closed unmerged": {state: "closed", code: degradePullRequestClosed},
+		} {
+			t.Run(lookup+"/"+name, func(t *testing.T) {
+				f := newRouteFixture(t, manifestFile)
+				action := f.propose(t, patchJSON(t, patchedDefinition))
+				branch := forge.BranchForAction(action.ID)
+				sha := strings.Repeat("d", 40)
+				f.forge.put(sha, testManifest, approvedManifest(t))
+				f.forge.pulls = append(f.forge.pulls, map[string]any{
+					"number": 9, "html_url": "https://forge.example/9", "state": tc.state, "merged_at": tc.mergedAt,
+					"base": map[string]any{"ref": "main"},
+					"head": map[string]any{"ref": branch, "sha": sha, "repo": map[string]any{"full_name": "acme/jobs"}},
+				})
+				if lookup == "after a 422" {
+					f.forge.hidePullsOnce = true
+				}
+				approveAction(t, f.db, action.ID, "operator@example.com", "")
+
+				executed, err := f.exec.ExecuteApproved(context.Background(), action.ID)
+				require.NoError(t, err)
+				result := patchResult(t, executed)
+				require.Len(t, f.forge.pulls, 1, "no second pull request on the branch")
+				require.Zero(t, f.forge.requestCount("PATCH "), "nothing is reopened")
+				wantPosts := 0
+				if lookup == "after a 422" {
+					wantPosts = 1
+				}
+				require.Equal(t, wantPosts, f.forge.requestCount("POST /repos/acme/jobs/pulls"))
+				if tc.code != "" {
+					requireDegraded(t, f, result, tc.code)
+					require.Equal(t, branch, result["pr_branch"])
+					require.Contains(t, result["reason"], branch)
+					require.NotContains(t, result, "pr_url")
+					return
+				}
+				require.Equal(t, routeGitPR, result["route"], "result: %v", result)
+				require.Equal(t, "https://forge.example/9", result["pr_url"])
+				require.Equal(t, true, result["pr_existing"])
+				require.Equal(t, tc.state, result["pr_state"])
+				if tc.mergedAt != nil {
+					require.Equal(t, true, result["pr_merged"], "a merged pull request says so")
+				} else {
+					require.NotContains(t, result, "pr_merged")
+				}
+				require.Empty(t, f.ops.escalate)
+			})
+		}
 	}
 }
 

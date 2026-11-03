@@ -32,6 +32,8 @@ const (
 	forgeManifestPath = "pipelines/orders.job.yaml"
 	forgeSyncedCommit = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 	forgeHeadCommit   = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	// forgeBranchCommit is the stub's head of the route's branch after its write.
+	forgeBranchCommit = "cccccccccccccccccccccccccccccccccccccccc"
 )
 
 // stubForge answers the GitHub calls the route makes, so these scenarios run the
@@ -85,10 +87,15 @@ func (f *stubForge) serve(w http.ResponseWriter, r *http.Request) {
 	case resource == "git/ref/heads/main":
 		reply(http.StatusOK, map[string]any{"ref": "refs/heads/main", "object": map[string]any{"sha": forgeHeadCommit}})
 	case strings.HasPrefix(resource, "contents/") && r.Method == http.MethodGet:
-		sum := sha256.Sum256(f.file)
+		content := f.file
+		if r.URL.Query().Get("ref") == forgeBranchCommit {
+			// The commit the route's write made on its branch.
+			content = []byte(f.written)
+		}
+		sum := sha256.Sum256(content)
 		reply(http.StatusOK, map[string]any{
 			"type": "file", "encoding": "base64", "sha": hex.EncodeToString(sum[:20]),
-			"content": base64.StdEncoding.EncodeToString(f.file),
+			"content": base64.StdEncoding.EncodeToString(content),
 		})
 	case resource == "git/refs":
 		reply(http.StatusCreated, map[string]any{})
@@ -106,8 +113,9 @@ func (f *stubForge) serve(w http.ResponseWriter, r *http.Request) {
 		f.opened++
 		f.pullURL = f.srv.URL + "/acme/jobs/pull/7"
 		reply(http.StatusCreated, map[string]any{
-			"number": 7, "html_url": f.pullURL, "state": "open",
-			"head": map[string]any{"ref": pull.Head, "repo": map[string]any{"full_name": "acme/jobs"}},
+			"number": 7, "html_url": f.pullURL, "state": "open", "merged_at": nil,
+			"base": map[string]any{"ref": pull.Base},
+			"head": map[string]any{"ref": pull.Head, "sha": forgeBranchCommit, "repo": map[string]any{"full_name": "acme/jobs"}},
 		})
 	default:
 		reply(http.StatusNotFound, map[string]any{"message": "Not Found"})

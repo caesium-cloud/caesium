@@ -81,14 +81,20 @@ type NewPullRequest struct {
 
 // PullRequest is a pull request as the route records it. Base and HeadSHA let the
 // route check that a pull request it finds holds the change it would open: anyone
-// who can push to the repository can open one from the route's branch.
+// who can push to the repository can open one from the route's branch. State is
+// the forge's, "open" or "closed"; Merged tells a merged pull request from a
+// rejected one, which the forge also reports as closed.
 type PullRequest struct {
 	Number  int
 	URL     string
 	State   string
+	Merged  bool
 	Base    string
 	HeadSHA string
 }
+
+// Open reports whether the pull request is still open for review.
+func (p *PullRequest) Open() bool { return p.State == "open" }
 
 // Client is the forge surface the route needs. Each method is bound to one
 // repository; a call cannot name another.
@@ -570,7 +576,10 @@ type pullRequest struct {
 	Number  int    `json:"number"`
 	HTMLURL string `json:"html_url"`
 	State   string `json:"state"`
-	Base    struct {
+	// MergedAt is null unless the pull request was merged; the list endpoint
+	// carries no `merged` flag.
+	MergedAt *string `json:"merged_at"`
+	Base     struct {
 		Ref string `json:"ref"`
 	} `json:"base"`
 	Head struct {
@@ -583,7 +592,24 @@ type pullRequest struct {
 }
 
 func (p *pullRequest) record() *PullRequest {
-	return &PullRequest{Number: p.Number, URL: p.HTMLURL, State: p.State, Base: p.Base.Ref, HeadSHA: p.Head.SHA}
+	return &PullRequest{
+		Number: p.Number, URL: p.HTMLURL, State: p.State,
+		Merged: p.MergedAt != nil && *p.MergedAt != "",
+		Base:   p.Base.Ref, HeadSHA: p.Head.SHA,
+	}
+}
+
+// rank orders pull requests on one branch: an open one first, then a merged one,
+// then any other.
+func (p *PullRequest) rank() int {
+	switch {
+	case p.Open():
+		return 0
+	case p.Merged:
+		return 1
+	default:
+		return 2
+	}
 }
 
 func (g *github) FindPullRequest(ctx context.Context, branch string) (*PullRequest, error) {
@@ -605,13 +631,18 @@ func (g *github) FindPullRequest(ctx context.Context, branch string) (*PullReque
 	}
 	// The API ignores a head filter it cannot parse and returns everything, so
 	// the head is checked here: another pull request must not read as this one's.
+	// Several can share the branch; an open one wins, then a merged one.
+	var best *PullRequest
 	for i := range pulls {
 		head := &pulls[i].Head
-		if head.Ref == branch && (head.Repo == nil || strings.EqualFold(head.Repo.FullName, g.repo.String())) {
-			return pulls[i].record(), nil
+		if head.Ref != branch || (head.Repo != nil && !strings.EqualFold(head.Repo.FullName, g.repo.String())) {
+			continue
+		}
+		if found := pulls[i].record(); best == nil || found.rank() < best.rank() {
+			best = found
 		}
 	}
-	return nil, nil
+	return best, nil
 }
 
 func (g *github) OpenPullRequest(ctx context.Context, pr NewPullRequest) (*PullRequest, error) {

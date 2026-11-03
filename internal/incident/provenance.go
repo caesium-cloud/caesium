@@ -64,6 +64,7 @@ const (
 	degradeManifestUnchanged     = "manifest_unchanged"
 	degradeForgeError            = "forge_error"
 	degradePullRequestMismatch   = "pull_request_mismatch"
+	degradePullRequestClosed     = "pull_request_closed"
 	degradeTriggerTenancy        = "trigger_tenancy"
 
 	// routeGitPR is the third value of the result's route field.
@@ -453,14 +454,15 @@ func (r *ProvenanceRouter) open(ctx context.Context, plan *patchPlan, change *pa
 		return nil, err
 	}
 	updated := spliced.File
-	// accept takes a pull request found on the branch only if it is this change:
-	// the branch name is in the preview, so anyone who can push to the repository
-	// can open one from it, with another edit or against another base.
-	accept := func(found *forge.PullRequest) (*patchPullRequest, error) {
-		if degrade := verifyPullRequest(ctx, client, plan, found, updated, fail); degrade != nil {
+	// accept is the one way a pull request becomes this action's: the one found on
+	// the branch, the one found after a 422, and the one just opened. Anyone who can
+	// push to the repository can open one from the branch the preview names, or
+	// push to it before the pull request opens, so each is held to this change.
+	accept := func(pr *forge.PullRequest, existing bool) (*patchPullRequest, error) {
+		if degrade := verifyPullRequest(ctx, client, plan, pr, updated, fail); degrade != nil {
 			return nil, withBranch(degrade)
 		}
-		return &patchPullRequest{PullRequest: *found, Existing: true}, nil
+		return &patchPullRequest{PullRequest: *pr, Existing: existing}, nil
 	}
 
 	existing, err := client.FindPullRequest(ctx, plan.branch)
@@ -468,7 +470,7 @@ func (r *ProvenanceRouter) open(ctx context.Context, plan *patchPlan, change *pa
 		return nil, fail(err)
 	}
 	if existing != nil {
-		return accept(existing)
+		return accept(existing, true)
 	}
 
 	head, err := client.BranchHead(ctx, plan.base)
@@ -527,7 +529,7 @@ func (r *ProvenanceRouter) open(ctx context.Context, plan *patchPlan, change *pa
 			return nil, withBranch(fail(findErr))
 		}
 		if found != nil {
-			return accept(found)
+			return accept(found, true)
 		}
 	}
 	if err != nil {
@@ -535,21 +537,28 @@ func (r *ProvenanceRouter) open(ctx context.Context, plan *patchPlan, change *pa
 		degrade.Code = degradeForgeError
 		return nil, withBranch(degrade)
 	}
-	return &patchPullRequest{PullRequest: *opened}, nil
+	return accept(opened, false)
 }
 
-// verifyPullRequest holds a pull request found on the route's branch to the
-// approved change: it targets the plan's base, and the manifest at its head is
-// byte for byte the replacement the route would write. Anything else is not the
-// change the human approved, so it degrades with fixed text and is never recorded
-// as this action's pull request.
+// verifyPullRequest holds a pull request on the route's branch to the approved
+// change. A closed one that was not merged was rejected, so it is not a change
+// anyone will review or sync, and it is never reopened or replaced on the same
+// branch. Otherwise it must target the plan's base, and the manifest at its head
+// must be byte for byte the replacement the route would write. A merged one that
+// passes is the change already landed. Anything else is not the change the human
+// approved, so it degrades with fixed text and is never recorded as this action's
+// pull request.
 func verifyPullRequest(ctx context.Context, client forge.Client, plan *patchPlan, found *forge.PullRequest, updated []byte, fail func(error) *patchDegrade) *patchDegrade {
+	if !found.Open() && !found.Merged {
+		return &patchDegrade{Code: degradePullRequestClosed,
+			Reason: fmt.Sprintf("the pull request from branch %s was closed without being merged; propose the patch again", plan.branch)}
+	}
 	if found.Base != plan.base {
 		return &patchDegrade{Code: degradePullRequestMismatch,
-			Reason: fmt.Sprintf("a pull request from branch %s already exists and does not target %s; it is not the approved change", plan.branch, plan.base)}
+			Reason: fmt.Sprintf("the pull request from branch %s does not target %s; it is not the approved change", plan.branch, plan.base)}
 	}
 	mismatch := &patchDegrade{Code: degradePullRequestMismatch,
-		Reason: fmt.Sprintf("a pull request from branch %s already exists and its manifest is not the approved change", plan.branch)}
+		Reason: fmt.Sprintf("the manifest at the head of the pull request from branch %s is not the approved change", plan.branch)}
 	if !forge.ValidCommit(found.HeadSHA) {
 		return mismatch
 	}
@@ -650,6 +659,10 @@ func patchPullRequestResult(job *models.Job, plan *patchPlan, pr *patchPullReque
 	}
 	if pr.Existing {
 		out["pr_existing"] = true
+	}
+	if pr.Merged {
+		// Already merged: nobody needs to wait on a review.
+		out["pr_merged"] = true
 	}
 	return out
 }
