@@ -106,6 +106,12 @@ func (ls *LeaseStore) AcquireLease(ctx context.Context, runID uuid.UUID, ownerNo
 // per-task predecessor counters are stale (the owner advanced the DAG in
 // memory), so ClaimNext recovery does not apply — a peer must take ownership
 // and replay.
+//
+// A lease this node already owns is left alone, even when it has expired.
+// Bumping that generation while this process still tracks the run would fence
+// the in-memory state, which still believes the old generation.  A process
+// that just restarted owns those rows and tracks none of them;
+// AcquireOwnExpiredLeases reclaims that set.
 func (ls *LeaseStore) AcquireExpiredLeases(ctx context.Context, newOwner string, ttl time.Duration) (int64, error) {
 	if ls == nil || ls.db == nil {
 		return 0, nil
@@ -120,6 +126,41 @@ func (ls *LeaseStore) AcquireExpiredLeases(ctx context.Context, newOwner string,
 			"lease_expires_at": now.Add(ttl),
 			"generation":       gorm.Expr("generation + 1"),
 		})
+	if result.Error != nil {
+		return 0, result.Error
+	}
+	return result.RowsAffected, nil
+}
+
+// AcquireOwnExpiredLeases reclaims expired leases this node already owns, for
+// runs it is not driving.  held is the run set OwnerManager is tracking.  An
+// empty held — a process that just restarted — reclaims every expired lease
+// still in this node's name, bumping the generation the same way a peer
+// takeover does so recovery fences the dead process's claims.  A run in held
+// is left expired: that is a live owner whose renewal stalled, and moving its
+// generation would leave the state this process still holds on the old one.
+//
+// Peer leases are not matched.  Those stay on AcquireExpiredLeases.
+func (ls *LeaseStore) AcquireOwnExpiredLeases(ctx context.Context, owner string, ttl time.Duration, held []uuid.UUID) (int64, error) {
+	if ls == nil || ls.db == nil {
+		return 0, nil
+	}
+	now := time.Now().UTC()
+	q := ls.db.WithContext(ctx).
+		Model(&models.RunLease{}).
+		Where("lease_expires_at <= ? AND owner_node = ?", now, owner)
+	if len(held) > 0 {
+		ids := make([]string, len(held))
+		for i, id := range held {
+			ids[i] = id.String()
+		}
+		q = q.Where("run_id NOT IN ?", ids)
+	}
+	result := q.Updates(map[string]any{
+		"acquired_at":      now,
+		"lease_expires_at": now.Add(ttl),
+		"generation":       gorm.Expr("generation + 1"),
+	})
 	if result.Error != nil {
 		return 0, result.Error
 	}

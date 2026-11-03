@@ -71,8 +71,14 @@ type OwnerReader interface {
 	OwnedRunsWithGenerations(ctx context.Context, ownerNode string) (map[uuid.UUID]int64, error)
 	// AcquireExpiredLeases takes over leases whose owner let them expire,
 	// reassigning them to ownerNode with an incremented generation.  Used by the
-	// in-memory failover sweep so a peer recovers a dead owner's runs.
+	// in-memory failover sweep so a peer recovers a dead owner's runs.  Leases
+	// this node already owns are not matched.
 	AcquireExpiredLeases(ctx context.Context, newOwner string, ttl time.Duration) (int64, error)
+	// AcquireOwnExpiredLeases reclaims this node's own expired leases except
+	// the runs in held, which this process is already driving in memory.  An
+	// empty held reclaims every expired lease still in this node's name, which
+	// is a process that restarted after its lease lapsed.
+	AcquireOwnExpiredLeases(ctx context.Context, owner string, ttl time.Duration, held []uuid.UUID) (int64, error)
 }
 
 // peer pairs a peer's canonical node identity (host:dqlitePort — matches the
@@ -324,8 +330,15 @@ func (l *DispatchLoop) tick(ctx context.Context) {
 	//    owner crash causes.  Gating takeover behind it would mean the very event
 	//    that needs failover also blocks it.  In SQL mode, ClaimNext recovery
 	//    handles this instead.
+	//
+	//    A lease this process still owns is included only when the in-memory
+	//    owner is not tracking that run.  That is a restart: the new process
+	//    has the same node id and none of the dead process's state.  A live
+	//    owner whose own renewal stalled still tracks the run, and bumping its
+	//    generation would leave that state on the old one.
 	if l.cfg.OwnerManager != nil {
-		if n, takeErr := l.cfg.LeaseStore.AcquireExpiredLeases(ctx, l.cfg.NodeID, l.cfg.LeaseTTL); takeErr != nil {
+		n, takeErr := l.takeOverExpiredLeases(ctx)
+		if takeErr != nil {
 			if ctx.Err() == nil {
 				log.Warn("dispatch loop: expired-lease takeover failed", "error", takeErr)
 			}
@@ -382,6 +395,25 @@ func (l *DispatchLoop) tick(ctx context.Context) {
 		}
 		l.dispatchRun(ctx, runID, generation, peers)
 	}
+}
+
+// takeOverExpiredLeases sweeps expired run leases for the in-memory owner.
+// Peer leases and this node's own untracked leases are separate updates, so a
+// failure of one leaves the other committed.  The next tick retries whatever
+// is still expired.
+func (l *DispatchLoop) takeOverExpiredLeases(ctx context.Context) (int64, error) {
+	n, err := l.cfg.LeaseStore.AcquireExpiredLeases(ctx, l.cfg.NodeID, l.cfg.LeaseTTL)
+	if err != nil {
+		return 0, err
+	}
+	if l.cfg.OwnerManager == nil {
+		return n, nil
+	}
+	own, ownErr := l.cfg.LeaseStore.AcquireOwnExpiredLeases(ctx, l.cfg.NodeID, l.cfg.LeaseTTL, l.cfg.OwnerManager.HeldRunIDs())
+	if ownErr != nil {
+		return n, ownErr
+	}
+	return n + own, nil
 }
 
 // dispatchRun dispatches up to BatchSize ready tasks for a single owned run.

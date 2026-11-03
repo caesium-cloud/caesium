@@ -190,6 +190,21 @@ var restartDistributedEnv = []string{
 	"CAESIUM_WORKER_LEASE_TTL=6s",
 }
 
+// restartInMemoryOwnerEnv is one node driving runs from memory. The run-lease
+// TTL stays the 6s startRestartableServer already sets.
+var restartInMemoryOwnerEnv = []string{
+	"CAESIUM_EXECUTION_MODE=distributed",
+	"CAESIUM_WORKER_ENABLED=true",
+	"CAESIUM_WORKER_POOL_SIZE=1",
+	"CAESIUM_WORKER_POLL_INTERVAL=500ms",
+	"CAESIUM_WORKER_RECLAIM_INTERVAL=500ms",
+	"CAESIUM_WORKER_LEASE_TTL=6s",
+	"CAESIUM_RUN_OWNER_ENABLED=true",
+	"CAESIUM_RUN_OWNER_IN_MEMORY=true",
+	"CAESIUM_RUN_OWNER_DISPATCH_INTERVAL=500ms",
+	"CAESIUM_INTERNAL_WAKEUP_TOKEN=caesium-restart-in-memory-owner-token",
+}
+
 // runCallbackReceiver counts deliveries per run. The private server shares this
 // process's network namespace, so loopback reaches it.
 type runCallbackReceiver struct {
@@ -392,6 +407,33 @@ func (s *IntegrationTestSuite) TestDistributedRunAdoptedAfterServerCrash() {
 	run := peer.awaitRun(job.ID, runID, restartRecoveryBound)
 	s.Equal("succeeded", run.Status, "error: %s", run.Error)
 	peer.applyRestartJob(restartJobManifest(alias, marker, "", "two"))
+}
+
+// With the in-memory owner, a sole node that returns after its own run lease
+// expired used to leave the run and its task running: the lease sweeps all
+// skip a lease that is both expired and the caller's. A restarted process
+// holds none of that state, so it must take the lease back and finish the run.
+// Staying down past the 6s TTL is the difference from the SQL-advancement case
+// above, which recovers without a lease takeover.
+func (s *IntegrationTestSuite) TestInMemoryOwnerRecoversOwnExpiredLeaseAfterRestart() {
+	peer, server := s.startRestartableServer(restartInMemoryOwnerEnv...)
+	marker := fmt.Sprintf("caesium-restart-marker-%d", time.Now().UnixNano())
+	defer peer.removeContainersWithMarker(server.cli, marker)
+
+	alias := "restart-memory-owner-job"
+	peer.applyRestartJob(restartJobManifest(alias, marker, "", "one"))
+	job := peer.requireJobByAlias(alias)
+	runID := peer.triggerRunWithParams(job.ID, map[string]string{"SLEEP": "5", "TOKEN": "in-flight"})
+	peer.awaitRunTaskRunning(server.cli, job.ID, runID, marker)
+
+	server.crash(peer)
+	time.Sleep(10 * time.Second)
+	peer.startRestartServer(server)
+
+	run := peer.awaitRun(job.ID, runID, restartRecoveryBound)
+	s.Equal("succeeded", run.Status, "error: %s", run.Error)
+	s.Require().Len(run.Tasks, 1)
+	s.Equal("succeeded", run.Tasks[0].Status)
 }
 
 // Deleting a job with a run in flight is allowed and only soft-deletes it, so the

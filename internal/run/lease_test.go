@@ -248,6 +248,77 @@ func TestLeaseStore_RenewOwnedLeases(t *testing.T) {
 	}
 }
 
+// TestLeaseStore_OwnExpiredLeaseReclaimedOnlyWhenUnheld is the #712 predicate.
+// A peer sweep never takes a node's own expired lease. A restarted process,
+// which tracks nothing, reclaims that lease and bumps its generation. A run
+// the process still tracks is left expired, and so is every peer lease.
+func TestLeaseStore_OwnExpiredLeaseReclaimedOnlyWhenUnheld(t *testing.T) {
+	db := testutil.OpenTestDB(t)
+	t.Cleanup(func() { testutil.CloseDB(db) })
+
+	ls := NewLeaseStore(db)
+	ctx := context.Background()
+	const ownerNode = "10.0.0.1:9001"
+	const otherNode = "10.0.0.2:9001"
+
+	unheld := uuid.New()
+	held := uuid.New()
+	foreign := uuid.New()
+	fresh := uuid.New()
+	for _, runID := range []uuid.UUID{unheld, held, fresh} {
+		_, err := ls.AcquireLease(ctx, runID, ownerNode, time.Minute)
+		require.NoError(t, err)
+	}
+	_, err := ls.AcquireLease(ctx, foreign, otherNode, time.Minute)
+	require.NoError(t, err)
+	for _, runID := range []uuid.UUID{unheld, held, foreign} {
+		require.NoError(t, db.Model(&models.RunLease{}).
+			Where("run_id = ?", runID.String()).
+			Update("lease_expires_at", time.Now().UTC().Add(-time.Second)).Error)
+	}
+
+	// The peer sweep is unchanged: it does not match the caller's own rows.
+	n, err := ls.AcquireExpiredLeases(ctx, ownerNode, 30*time.Second)
+	require.NoError(t, err)
+	require.Equal(t, int64(1), n, "only the other node's expired lease is peer takeover")
+	foreignLease, err := ls.GetLease(ctx, foreign)
+	require.NoError(t, err)
+	require.Equal(t, ownerNode, foreignLease.OwnerNode)
+	require.Equal(t, int64(2), foreignLease.Generation)
+
+	n, err = ls.AcquireOwnExpiredLeases(ctx, ownerNode, 30*time.Second, []uuid.UUID{held})
+	require.NoError(t, err)
+	require.Equal(t, int64(1), n, "the untracked expired lease is reclaimed; the tracked one is not")
+
+	reclaimed, err := ls.GetLease(ctx, unheld)
+	require.NoError(t, err)
+	require.Equal(t, ownerNode, reclaimed.OwnerNode)
+	require.Equal(t, int64(2), reclaimed.Generation)
+	require.True(t, reclaimed.LeaseExpiresAt.After(time.Now().UTC().Add(20*time.Second)))
+
+	stillHeld, err := ls.GetLease(ctx, held)
+	require.NoError(t, err)
+	require.Equal(t, int64(1), stillHeld.Generation)
+	require.True(t, stillHeld.LeaseExpiresAt.Before(time.Now().UTC()), "a live owner's expired lease stays put")
+
+	untouched, err := ls.GetLease(ctx, fresh)
+	require.NoError(t, err)
+	require.Equal(t, int64(1), untouched.Generation)
+
+	// A second sweep with nothing tracked reclaims the lease the first left behind.
+	n, err = ls.AcquireOwnExpiredLeases(ctx, ownerNode, 30*time.Second, nil)
+	require.NoError(t, err)
+	require.Equal(t, int64(1), n)
+	stillHeld, err = ls.GetLease(ctx, held)
+	require.NoError(t, err)
+	require.Equal(t, int64(2), stillHeld.Generation)
+
+	var nilStore *LeaseStore
+	n, err = nilStore.AcquireOwnExpiredLeases(ctx, ownerNode, time.Second, nil)
+	require.NoError(t, err)
+	require.Zero(t, n)
+}
+
 // TestLeaseStore_MigrationSafety verifies that an existing task_runs row with
 // owner_generation=0 is mutable.  The OR = 0 predicate in coordination writes
 // is the migration safety net.
