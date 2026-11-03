@@ -949,7 +949,8 @@ A job takes the route only when all of this holds, and otherwise the patch escal
 - git sync is on, and a configured source has the job's `source_id`, repository and ref, and admits its namespace;
 - the job's manifest path is one that source syncs, and the ref is a branch;
 - the file declares the job's alias in the job's namespace, exactly once;
-- the proposal recorded the commit the job was synced from, and the file is still the blob it was at that commit.
+- the proposal recorded the commit the job was synced from, and the file is still the blob it was at that commit;
+- the patched definition passes the trigger tenancy that the source's sync applies when it imports the merged change: the source's `namespaces` allowlist, or, for an unrestricted source under a policy file, one namespace per trigger and webhook path. Otherwise the patch escalates (`trigger_tenancy`) before any forge call, because sync would refuse the merged job, or fail the whole source's sync. The approver's preview decides the route from configuration alone, so it can show a pull request while execution escalates for this reason.
 
 The commit is the one the job held when the agent proposed the patch. A proposal is a whole document, so if a sync brings in a change to the file before the approval, writing it would revert that change. The patch escalates instead (`manifest_changed`), and someone proposes it again. A sync that leaves the file alone changes nothing. A proposal that recorded no commit escalates (`no_baseline`).
 

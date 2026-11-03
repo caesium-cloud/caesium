@@ -1666,7 +1666,17 @@ precedent for it is warn-mode schema validation, which publishes
       manifest at its head is the approved replacement, byte for byte, spliced from
       the file at the proposal's commit. Anything else escalates as
       `pull_request_mismatch`. The check reads only the manifest, so other files
-      changed on the branch go unchecked.
+      changed on the branch go unchecked. The route also runs, before any forge
+      call, the trigger tenancy check that the sync importing the merged pull
+      request applies, with that source's scope (its `namespaces` allowlist, or nil
+      so a policy file's invariant decides). It does not use the incident's
+      namespace, which sync never uses. A violation escalates as
+      `trigger_tenancy`. The preview's route decision stays configuration-only, so
+      the preview can say `git_pr` and execution can still degrade for this
+      reason. The scope comes from git sync's own functions
+      (`runtime.GitSourceNamespaces`, `git.SourceApplyOptions`,
+      `ApplyOptions.TenancyScope`). The check is injected from `cmd/start`,
+      because `internal/jobdef` imports `internal/incident`.
       `ExecuteApproved` writes its terminal status on a context detached
       from the request. Only the patched document changes, so comments inside it are
       lost; a sibling's or a header's are kept. The Console shows the preview through
