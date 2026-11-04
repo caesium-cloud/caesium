@@ -58,7 +58,7 @@ Whatever drives a run lives in a server process, so a run can outlive its driver
 - **Local mode, with unfinished tasks.** The run fails, with its unfinished tasks, and the error says so. Nothing is re-executed: a local task holds no claim, so its row cannot say whether its container is still running or has already succeeded, and running it again could run the step twice. Docker and Podman containers from a crash are left on their host. To run the work again, remove any such container and use `caesium run retry`. A retry beside one fails with a Docker name conflict, running or exited, which is what stops two copies running.
 - **Local mode, with every task recorded.** The server stopped before finalizing the run. It is adopted, executes nothing, and ends with the outcome its tasks recorded.
 - **Adoption that does not finish.** A server adopts a run at most three times. If the run lapses again it fails, so a run that cannot be adopted still frees its slot. A run whose job was deleted is adopted from the retained job record.
-- **Distributed mode.** The run is adopted and finishes normally. Workers own its tasks through claims, and only the process waiting to finalize it was lost. One exception: with `CAESIUM_RUN_OWNER_IN_MEMORY=true`, a sole node that returns after its run lease expired cannot take that lease back, so the run stays `running`. A live peer takes the lease over instead.
+- **Distributed mode.** The run is adopted and finishes normally. Workers own its tasks through claims, and only the process waiting to finalize it was lost.
 
 In local mode a trigger that fires while its job has a run in flight, with no `metadata.concurrency` policy, starts nothing. It used to re-execute the run's in-flight tasks.
 

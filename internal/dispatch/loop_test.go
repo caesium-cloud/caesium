@@ -50,6 +50,10 @@ func (r *testOwnerReader) AcquireExpiredLeases(ctx context.Context, newOwner str
 	return r.ls.AcquireExpiredLeases(ctx, newOwner, ttl)
 }
 
+func (r *testOwnerReader) AcquireOwnExpiredLeases(ctx context.Context, owner string, ttl time.Duration, held []uuid.UUID) (int64, error) {
+	return r.ls.AcquireOwnExpiredLeases(ctx, owner, ttl, held)
+}
+
 // testTaskReader wraps run.Store to satisfy TaskPendingReader.
 type testTaskReader struct {
 	s *run.Store

@@ -391,6 +391,26 @@ func (m *OwnerManager) Owns(runID uuid.UUID) bool {
 	return ok
 }
 
+// HeldRunIDs returns the runs this process is tracking in memory.  The dispatch
+// loop passes the set to AcquireOwnExpiredLeases so a restarted process, which
+// holds nothing, can reclaim its own expired leases, and a live owner does not
+// bump the generation of a run it is still driving.
+func (m *OwnerManager) HeldRunIDs() []uuid.UUID {
+	if m == nil {
+		return nil
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if len(m.runs) == 0 {
+		return nil
+	}
+	ids := make([]uuid.UUID, 0, len(m.runs))
+	for id := range m.runs {
+		ids = append(ids, id)
+	}
+	return ids
+}
+
 // ApplyTerminalRows folds terminal task_runs rows the STORE resolved into this
 // owner's in-memory state — the runStateInvalidator half the halt sweep needs.
 //
