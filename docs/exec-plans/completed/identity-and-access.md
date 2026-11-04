@@ -446,7 +446,7 @@ finisher agents only. The six PRs merged in the order #650 → #655 → #654 →
   - **Decisions for sign-off:**
     - B2-D1: undeclared namespaces are rejected only while a policy file is loaded, so podman,
       kind/helm, coverage-journey lanes and post-upgrade re-applies keep working. Design §5.1
-      and §6.4 carry the amendment, marked pending maintainer sign-off.
+      and §6.4 carry the amendment (signed off 2026-11-04).
     - B2 split: confined writes and trigger tenancy moved to B9.
     - A confined caller linting an undeclared namespace gets 403, not a lint error.
 - **W4-δ / B4 — namespace filtering of collections and history:** merged
@@ -543,7 +543,7 @@ fan-outs were used.
   user-bound key; the key is minted at exchange, not at authorize (design §13.1 amended).
   `POST /auth/logout` revokes the presented user-bound bearer; every CLI command resolves
   credentials through `cmd/cliutil` (`--api-key` > env > stored login).
-- **Decisions awaiting the user's sign-off:** mint at exchange (#684, §13.1); impact
+- **Decisions signed off 2026-11-04:** mint at exchange (#684, §13.1); impact
   placeholders keep `depth` (#685, §8.3); additive `failureClass` in `why --json` (#679);
   namespace-qualified Kubernetes `runtime_id` (#679).
 - **CI:** three PRs first failed the hosted coverage diff ratchet (changed files reached only
@@ -745,8 +745,9 @@ fan-outs were used.
   Windows credential-file locking and an OS keychain (E5); raising or splitting the
   `coverage-ratchets` timeout (CI).
 - **W7 follow-ups:** contract graph identity and the trigger-chain exclusion still match by
-  trimmed alias; remove the legacy secrets in the release after next; producerless arrival
-  sources for confined credentials await sign-off (A6-D6); a node with
+  trimmed alias; remove the legacy secrets in the release after next; a confined credential cannot
+  report an arrival for a producerless (`external: true`) source (A6-D6, signed off 2026-11-04;
+  an owning namespace for external datasets is a follow-up); a node with
   `CAESIUM_WORKER_ENABLED=false` never renews its run leases; rows of a namespace whose
   isolation settings change while the run has no owner wait for an operator; the incidents
   widgets and the contract graph are not narrowed by the switcher.
@@ -802,8 +803,11 @@ fan-outs were used.
     `run_queue` row.
   - The engine namespace's `secrets get` is a hand grant.
   - `go test` in the runner dirties `go.mod` and `go.sum` through the bind mount.
-- **Sign-offs still open:** mint at exchange (spec §13.1), the depth of §8.3, `failureClass`,
-  namespace-qualified `runtime_id`, and A6-D6.
+- **Sign-offs (2026-11-04):** the maintainer approved mint at exchange (spec §13.1), `depth` on
+  redacted impact nodes (§8.3), `failureClass` as a stable field of `why --json`, the
+  namespace-qualified Kubernetes `runtime_id`, A6-D6, the W4 no-policy-file namespace rule
+  (§5.1, §6.4) and confined prune (§9.5). Follow-up: let an `external: true` dataset declare
+  an owning namespace so that namespace's keys can report its arrivals.
 
 ### Stream Status
 
@@ -1587,7 +1591,7 @@ server-brokered `caesium login` flow that works for every provider.
       (W6-ζ: the key is minted at `exchange`, not `authorize` — authorize records the
       user, its disable generation and a code hash; exchange mints through the shared
       `mintUserBoundKeyTx` core fenced on that generation, so no key material rests on
-      the server (§13.1 step 3 amended, pending sign-off). One `cmd/login` package;
+      the server (§13.1 step 3 amended, signed off 2026-11-04). One `cmd/login` package;
       backfill, cache, receipt get and verify now resolve credentials too; the
       resolver finds the stored login by the command's own `--server`.)
 

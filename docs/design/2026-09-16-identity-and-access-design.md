@@ -115,7 +115,7 @@ SAML, and any OIDC issuer.
 - **Declared, not implicit.** The policy file's `namespaces:` map declares every
   namespace and its settings. Server-side lint and apply reject an undeclared
   namespace. `default` is implicitly declared with empty settings.
-  **Amendment (W4):** No policy file: any syntactically valid namespace is accepted (B1 compatibility); undeclared namespaces are rejected only when a policy file is loaded. Amended in identity-and-access W4 (orchestrator decision, pending maintainer sign-off).
+  **Amendment (W4):** No policy file: any syntactically valid namespace is accepted (B1 compatibility); undeclared namespaces are rejected only when a policy file is loaded. Amended in identity-and-access W4; signed off by the maintainer 2026-11-04.
 - **Carried by:** `Job.Namespace` (text, not null, default `'default'`, indexed).
   Denormalised copies on `JobRun.Namespace`, `Backfill.Namespace`,
   `Incident.Namespace` so global lists filter without a join. Triggers, task runs,
@@ -275,7 +275,7 @@ Validation rules (all enforced by `internal/auth/policy` and by
   translated at startup into cluster-wide bindings (`group=role` ⇒
   `{groups:[group], role, namespaces:["*"]}`) and a single `default` namespace.
   Behaviour is byte-for-byte today's.
-  **Amendment (W4):** No policy file: any syntactically valid namespace is accepted (B1 compatibility); undeclared namespaces are rejected only when a policy file is loaded. Amended in identity-and-access W4 (orchestrator decision, pending maintainer sign-off). The env-mapping adapter preserves
+  **Amendment (W4):** No policy file: any syntactically valid namespace is accepted (B1 compatibility); undeclared namespaces are rejected only when a policy file is loaded. Amended in identity-and-access W4; signed off by the maintainer 2026-11-04. The env-mapping adapter preserves
   `RoleMapper`'s trimming of incoming groups; policy-file group matching remains exact.
 - Policy file **and** `CAESIUM_AUTH_ROLE_MAPPING` both set ⇒ fatal startup error
   naming both. The env mapping is documented as deprecated.
@@ -537,8 +537,8 @@ candidates are that server-computed set intersected with the namespaces where th
 caller holds operator, computed inside the apply's transaction (one definition for
 the middleware and the transaction), so jobs in other namespaces are never
 candidates and no 403 discloses them. Job-scoped keys still cannot prune at all.
-Amended in identity-and-access W5 (B9, orchestrator decision, pending maintainer
-sign-off).
+Amended in identity-and-access W5 (B9); signed off by the maintainer
+2026-11-04.
 
 ## 10. Isolation
 
@@ -815,8 +815,8 @@ sign-off).
    that consumes the code, fenced on the recorded generation, and audited
    `auth.cli_login`, so no key material ever rests on the server between the
    two steps and an unredeemed confirmation leaves no key behind. (Amended in
-   identity-and-access W6, E5, orchestrator decision, pending maintainer
-   sign-off; the original text minted at this step.)
+   identity-and-access W6, E5, and signed off by the maintainer 2026-11-04;
+   the original text minted at this step.)
    A GET that arrives with an unknown or consumed `state` shows an error, never a
    key. This closes the ambient-cookie mint: an attacker-planted listener cannot
    obtain a key without the signed-in user clicking the confirmation.
