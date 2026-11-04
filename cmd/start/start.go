@@ -1111,6 +1111,17 @@ func start(cmd *cobra.Command, args []string) error {
 		)
 	}
 
+	// A run owner with no worker still holds the lease of every run it starts
+	// or takes over, and the worker is what renews run leases. Renew them here
+	// instead, or each lease lapses one CAESIUM_RUN_LEASE_TTL in.
+	if distributedWorker == nil && vars.RunOwnerEnabled && runStore.LeaseStore() != nil {
+		leases := runStore.LeaseStore()
+		runAsync(func() {
+			log.Info("launching run lease renewal without a worker", "node_address", vars.NodeAddress, "run_lease_ttl", vars.RunLeaseTTL)
+			worker.RenewRunLeases(ctx, leases, vars.RunLeaseTTL, vars.NodeAddress)
+		})
+	}
+
 	// Run-owner coordination endpoints live on a dedicated mutually
 	// authenticated TLS listener, separate from the public API.  Start it after
 	// the worker submitter is wired into the handler (above) so a dispatch can

@@ -204,6 +204,19 @@ func (w *Worker) WithRunLeaseRenewal(renewer RunLeaseRenewer, leaseTTL time.Dura
 	return w
 }
 
+// RenewRunLeases runs run-lease renewal on its own until ctx is done, for a
+// run-owner node that runs no worker (CAESIUM_WORKER_ENABLED=false). Such a
+// node still takes the lease of every run it starts and drives those runs, so
+// it must renew them exactly as WithRunLeaseRenewal's worker goroutine does,
+// or each lease lapses one TTL after the start and a peer takes the run over.
+func RenewRunLeases(ctx context.Context, renewer RunLeaseRenewer, leaseTTL time.Duration, nodeID string) {
+	if renewer == nil || leaseTTL <= 0 || nodeID == "" {
+		return
+	}
+	w := &Worker{runLeaseRenewer: renewer, runLeaseTTL: leaseTTL, runLeaseNodeID: nodeID}
+	w.runRunLeaseRenewal(ctx)
+}
+
 // WithInboundDispatch enables the Phase 2 run-owner push path: the worker
 // accepts dispatched tasks via SubmitDispatched and drains them onto the same
 // execution pool as ClaimNext'd tasks.  completionToken is the bearer token the

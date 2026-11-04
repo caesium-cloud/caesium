@@ -395,3 +395,31 @@ func TestRunLeaseRenewalTickCancelsLostClaim(t *testing.T) {
 // disable claim-loss detection instead of failing the build. This makes it fail
 // the build.
 var _ ClaimInspector = (*run.Store)(nil)
+
+// RenewRunLeases is the renewal a run-owner node with no worker runs on its
+// own: it renews on the leaseTTL/4 cadence and stops with its context.
+func TestRenewRunLeasesWithoutAWorker(t *testing.T) {
+	renewer := &mockRunLeaseRenewer{ownedCount: 1}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		RenewRunLeases(ctx, renewer, 40*time.Millisecond, "10.0.0.1:9001")
+	}()
+	require.Eventually(t, func() bool {
+		renewer.mu.Lock()
+		defer renewer.mu.Unlock()
+		return renewer.renewCalls >= 2
+	}, 10*time.Second, 10*time.Millisecond, "the cadence is leaseTTL/4, at least 1s")
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("RenewRunLeases did not return after its context was cancelled")
+	}
+
+	// A misconfigured renewal returns at once instead of spinning.
+	RenewRunLeases(context.Background(), renewer, 0, "10.0.0.1:9001")
+	RenewRunLeases(context.Background(), renewer, time.Second, "")
+	RenewRunLeases(context.Background(), nil, time.Second, "10.0.0.1:9001")
+}

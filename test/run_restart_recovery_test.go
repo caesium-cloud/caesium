@@ -205,6 +205,16 @@ var restartInMemoryOwnerEnv = []string{
 	"CAESIUM_INTERNAL_WAKEUP_TOKEN=caesium-restart-in-memory-owner-token",
 }
 
+// restartOwnerOnlyEnv is a run owner that runs no worker: a control-plane node
+// that drives runs and dispatches their tasks to its peers.
+var restartOwnerOnlyEnv = []string{
+	"CAESIUM_EXECUTION_MODE=distributed",
+	"CAESIUM_WORKER_ENABLED=false",
+	"CAESIUM_RUN_OWNER_ENABLED=true",
+	"CAESIUM_RUN_OWNER_DISPATCH_INTERVAL=500ms",
+	"CAESIUM_INTERNAL_WAKEUP_TOKEN=caesium-restart-owner-only-token",
+}
+
 // runCallbackReceiver counts deliveries per run. The private server shares this
 // process's network namespace, so loopback reaches it.
 type runCallbackReceiver struct {
@@ -434,6 +444,32 @@ func (s *IntegrationTestSuite) TestInMemoryOwnerRecoversOwnExpiredLeaseAfterRest
 	s.Equal("succeeded", run.Status, "error: %s", run.Error)
 	s.Require().Len(run.Tasks, 1)
 	s.Equal("succeeded", run.Tasks[0].Status)
+}
+
+// A run owner with CAESIUM_WORKER_ENABLED=false takes the lease of every run it
+// starts, but run-lease renewal used to live only in the worker, so the lease
+// lapsed one CAESIUM_RUN_LEASE_TTL after the start and a peer took the run
+// over. This node has no worker and no peer, so its run stays in flight; after
+// several TTLs the node must still be renewing that run's lease, which is what
+// caesium_run_leases_owned counts on every renewal.
+func (s *IntegrationTestSuite) TestOwnerWithoutWorkerRenewsItsRunLeases() {
+	peer, server := s.startRestartableServer(restartOwnerOnlyEnv...)
+	marker := fmt.Sprintf("caesium-restart-marker-%d", time.Now().UnixNano())
+	defer peer.removeContainersWithMarker(server.cli, marker)
+
+	alias := "restart-owner-only-job"
+	peer.applyRestartJob(restartJobManifest(alias, marker, "", "one"))
+	job := peer.requireJobByAlias(alias)
+	runID := peer.triggerRunWithParams(job.ID, map[string]string{"SLEEP": "0", "TOKEN": "owner-only"})
+
+	// Three of the private server's 6s lease TTLs.
+	time.Sleep(18 * time.Second)
+	var run runResponse
+	s.Require().NoError(peer.tryGetJSON(fmt.Sprintf("/v1/jobs/%s/runs/%s", job.ID, runID), &run))
+	s.Require().Equal("running", run.Status, "with no worker anywhere the run must still be in flight")
+	s.Require().Eventually(func() bool {
+		return peer.scrapeCounter("caesium_run_leases_owned", nil) == 1
+	}, 10*time.Second, 500*time.Millisecond, "the owner stopped renewing its run's lease")
 }
 
 // Deleting a job with a run in flight is allowed and only soft-deletes it, so the
