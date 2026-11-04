@@ -3,6 +3,7 @@ package run
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -13,6 +14,7 @@ import (
 	jobdeftestutil "github.com/caesium-cloud/caesium/internal/jobdef/testutil"
 	"github.com/caesium-cloud/caesium/internal/models"
 	runstorage "github.com/caesium-cloud/caesium/internal/run"
+	"github.com/caesium-cloud/caesium/pkg/env"
 	"github.com/caesium-cloud/caesium/pkg/jobdef"
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v5"
@@ -153,6 +155,7 @@ func TestPostRunRejectsInvalidIdempotencyKey(t *testing.T) {
 }
 
 func TestPostRunReportsQueuedAndSkippedOutcomes(t *testing.T) {
+	t.Cleanup(env.SetRunQueueConsumerEnabled(true))
 	f := newPostFixture(t)
 
 	queueJob := f.job(t, jobdef.ConcurrencyStrategyQueue)
@@ -180,6 +183,34 @@ func TestPostRunReportsQueuedAndSkippedOutcomes(t *testing.T) {
 	require.NoError(t, err)
 	_, err = f.post(t, failJob, "", "")
 	requireHTTPStatus(t, err, http.StatusConflict)
+}
+
+func TestPostRunRejectsQueueOverflowWhenConsumerDisabled(t *testing.T) {
+	t.Cleanup(env.SetRunQueueConsumerEnabled(false))
+	f := newPostFixture(t)
+	jobID := f.job(t, jobdef.ConcurrencyStrategyQueue)
+
+	first, err := f.post(t, jobID, "", "")
+	require.NoError(t, err)
+	require.Equal(t, http.StatusAccepted, first.status)
+	require.NotEmpty(t, first.body["id"])
+
+	_, err = f.post(t, jobID, "", `{"params":{"token":"stranded"}}`)
+	var httpErr *echo.HTTPError
+	require.ErrorAs(t, err, &httpErr)
+	require.Equal(t, http.StatusConflict, httpErr.Code)
+	message := fmt.Sprint(httpErr.Message)
+	require.Contains(t, message, "CAESIUM_RUN_QUEUE_ENABLED")
+	require.Contains(t, message, "CAESIUM_RUN_QUEUE_DEQUEUER_ENABLED")
+	require.Contains(t, message, "disabled")
+	require.NotContains(t, message, "max concurrent runs reached")
+
+	var queued int64
+	require.NoError(t, f.db.Model(&models.RunQueue{}).Where("job_id = ?", jobID).Count(&queued).Error)
+	require.Zero(t, queued)
+	var runs int64
+	require.NoError(t, f.db.Model(&models.JobRun{}).Where("job_id = ?", jobID).Count(&runs).Error)
+	require.Equal(t, int64(1), runs)
 }
 
 func TestPostRunPausedJobStillAnswersRecordedKey(t *testing.T) {

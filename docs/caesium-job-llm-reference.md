@@ -148,6 +148,8 @@ metadata:
     strategy: skip              # queue, replace, skip, or fail
 ```
 
+`strategy: queue` parks overflow only when `CAESIUM_RUN_QUEUE_ENABLED` or `CAESIUM_RUN_QUEUE_DEQUEUER_ENABLED` is true. Both default to false. With both false, an overflow start is refused and the error names the disabled queue consumer; a start that fits in `maxRuns` still runs.
+
 Use `metadata.rateLimits` to declare shared resource budgets and `steps[].rateLimit` to consume units from one of those resources:
 
 ```yaml

@@ -10,6 +10,7 @@ import (
 
 	eventstore "github.com/caesium-cloud/caesium/internal/event"
 	"github.com/caesium-cloud/caesium/internal/models"
+	"github.com/caesium-cloud/caesium/pkg/env"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 	"gorm.io/datatypes"
@@ -138,6 +139,7 @@ func TestLifecycleReplayRollbackDoesNotConsumeAdmission(t *testing.T) {
 }
 
 func TestLifecycleReplayDoesNotEnqueueTwice(t *testing.T) {
+	t.Cleanup(env.SetRunQueueConsumerEnabled(true))
 	f := newLifecycleReplayFixture(t)
 	require.NoError(t, f.db.Model(f.listener).Update("concurrency", datatypes.JSON(`{"maxRuns":1,"strategy":"queue"}`)).Error)
 	now := time.Now().UTC()

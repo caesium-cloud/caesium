@@ -1385,9 +1385,11 @@ run it creates, a skip, or a run held upstream), and only while the dequeuer
 still holds the row's claim; drops and releases are fenced by the claim too.
 So a node whose claim went stale and was taken over by another (on PostgreSQL
 every node drains) decides nothing for that request. When a policy
-file is configured the dequeuer always runs: with `CAESIUM_RUN_QUEUE_ENABLED`
+file is configured the dequeuer always runs. With `CAESIUM_RUN_QUEUE_ENABLED`
 and `CAESIUM_RUN_QUEUE_DEQUEUER_ENABLED` both off it drains only quota-held
-runs and leaves rows a job's own queue policy parked untouched. A quota added
+runs. A job's own `strategy: queue` does not park new overflow while those
+flags are off; admission refuses it. Rows already parked by a job's queue
+policy stay listed and are not promoted until a full dequeuer is enabled. A quota added
 by a reload applies to the next admission. During server startup, until the
 configured policy file is loaded, no run is admitted and the dequeuer promotes
 nothing, so a restart cannot start queued runs past their quota. If the policy

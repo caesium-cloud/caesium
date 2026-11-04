@@ -31,15 +31,16 @@ type queueJobSummary struct {
 }
 
 type queueItem struct {
-	ID         string            `json:"id"`
-	Position   int               `json:"position"`
-	Priority   int               `json:"priority"`
-	Params     map[string]string `json:"params,omitempty"`
-	EnqueuedAt time.Time         `json:"enqueued_at"`
-	ClaimState string            `json:"claim_state"`
-	Stale      bool              `json:"stale"`
-	ClaimedBy  string            `json:"claimed_by,omitempty"`
-	HeldReason string            `json:"held_reason,omitempty"`
+	ID            string            `json:"id"`
+	Position      int               `json:"position"`
+	Priority      int               `json:"priority"`
+	Params        map[string]string `json:"params,omitempty"`
+	EnqueuedAt    time.Time         `json:"enqueued_at"`
+	ClaimState    string            `json:"claim_state"`
+	Stale         bool              `json:"stale"`
+	ClaimedBy     string            `json:"claimed_by,omitempty"`
+	HeldReason    string            `json:"held_reason,omitempty"`
+	PendingReason string            `json:"pending_reason,omitempty"`
 }
 
 // queueHeldReasonNamespaceQuota is the held_reason of a row waiting on its
@@ -153,12 +154,16 @@ func renderQueueTable(cmd *cobra.Command, rows []queueItem) {
 	_, _ = fmt.Fprintln(tw, "POSITION\tPRIORITY\tSTATE\tREASON\tENQUEUED_AT\tPARAMS")
 	stale := make([]string, 0, len(rows))
 	quotaHeld := 0
+	disabledConsumer := false
 	for _, row := range rows {
 		if row.Stale {
 			stale = append(stale, fmt.Sprintf("#%d held by %s", row.Position, formatQueueClaimHolder(row)))
 		}
 		if strings.TrimSpace(row.HeldReason) == queueHeldReasonNamespaceQuota {
 			quotaHeld++
+		}
+		if strings.Contains(row.PendingReason, "run queue consumer is disabled") {
+			disabledConsumer = true
 		}
 		_, _ = fmt.Fprintf(
 			tw,
@@ -180,6 +185,10 @@ func renderQueueTable(cmd *cobra.Command, rows []queueItem) {
 				"they start as runs in the namespace finish, whatever this job's own concurrency allows.\n",
 			quotaHeld,
 		)
+	}
+
+	if disabledConsumer {
+		_, _ = fmt.Fprintf(out, "\n%s\n", runstorage.RunQueueConsumerDisabledMessage)
 	}
 
 	if len(stale) > 0 {

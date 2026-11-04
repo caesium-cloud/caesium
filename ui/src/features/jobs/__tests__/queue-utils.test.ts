@@ -63,6 +63,20 @@ describe("queuePendingReason", () => {
       "expired",
     );
   });
+
+  it("names a disabled queue consumer instead of a slot that will not be granted", () => {
+    const reason =
+      "run queue consumer is disabled (CAESIUM_RUN_QUEUE_ENABLED and CAESIUM_RUN_QUEUE_DEQUEUER_ENABLED are both false); this run will not start";
+    for (const extra of [
+      { claim_state: "pending" as const },
+      { claim_state: "stale" as const, stale: true, claimed_by: "node-a/dead" },
+      { claim_state: "claimed" as const, claimed_by: "node-b/live" },
+    ]) {
+      const text = queuePendingReason(row({ ...extra, pending_reason: reason, priority: 2, position: 2 }));
+      expect(text).toBe(reason);
+      expect(text).not.toContain("Waiting for a run slot");
+    }
+  });
 });
 
 describe("formatPriority", () => {

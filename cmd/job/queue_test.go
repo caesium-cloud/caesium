@@ -79,6 +79,21 @@ func TestRenderQueueTableNamesTheNamespaceQuotaHold(t *testing.T) {
 	require.NotContains(t, plain, "concurrent-run quota")
 }
 
+func TestRenderQueueTableNamesDisabledConsumerWithoutChangingColumns(t *testing.T) {
+	enqueued := time.Date(2026, 11, 2, 12, 0, 0, 0, time.UTC)
+	reason := "run queue consumer is disabled (CAESIUM_RUN_QUEUE_ENABLED and CAESIUM_RUN_QUEUE_DEQUEUER_ENABLED are both false); this run will not start"
+	out := renderQueue(t, []queueItem{
+		{Position: 1, Priority: 2, EnqueuedAt: enqueued, ClaimState: "pending", PendingReason: reason},
+		{Position: 2, Priority: 2, EnqueuedAt: enqueued, ClaimState: "stale", Stale: true, ClaimedBy: "node-a/dead", PendingReason: reason},
+	})
+	lines := strings.Split(strings.TrimSpace(out), "\n")
+	require.GreaterOrEqual(t, len(lines), 3)
+	require.Equal(t, []string{"1", "normal", "pending", "-", "2026-11-02T12:00:00Z", "-"}, strings.Fields(lines[1]))
+	require.Equal(t, []string{"2", "normal", "stale", "-", "2026-11-02T12:00:00Z", "-"}, strings.Fields(lines[2]))
+	require.Equal(t, 1, strings.Count(out, reason))
+	require.NotContains(t, out, "Waiting for a run slot")
+}
+
 func TestRenderQueueTableEmpty(t *testing.T) {
 	require.Equal(t, "No queued runs.\n", renderQueue(t, nil))
 }

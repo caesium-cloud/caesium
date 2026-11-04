@@ -194,6 +194,8 @@ func startError(err error) error {
 		return echo.NewHTTPError(http.StatusBadRequest, "bad request").Wrap(err)
 	case errors.Is(err, runstorage.ErrIdempotencyKeyReused):
 		return echo.NewHTTPError(http.StatusUnprocessableEntity, "idempotency key was already used for a different request").Wrap(err)
+	case errors.Is(err, runstorage.ErrRunQueueConsumerDisabled):
+		return echo.NewHTTPError(http.StatusConflict, runstorage.RunQueueConsumerDisabledMessage).Wrap(err)
 	case errors.Is(err, runstorage.ErrMaxConcurrentRunsReached):
 		return echo.NewHTTPError(http.StatusConflict, "max concurrent runs reached").Wrap(err)
 	default:

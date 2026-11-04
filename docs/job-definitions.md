@@ -325,16 +325,24 @@ Valid priorities are `high`, `normal`, and `low`. Valid concurrency strategies a
 ### Inspecting the run queue
 
 `strategy: queue` parks overflow runs in a durable run queue that a leader-gated
-dequeuer drains priority-first. Inspect it with `caesium job queue <alias>`
-(add `--json` for machine-readable output) or `GET /v1/jobs/:id/queue`; the
-job-detail page shows the same rows in its run-queue panel.
+dequeuer drains priority-first, when `CAESIUM_RUN_QUEUE_ENABLED` or
+`CAESIUM_RUN_QUEUE_DEQUEUER_ENABLED` is true. Both default to false. A start
+that still fits in `maxRuns` runs either way. With both flags false, an overflow
+start is refused with `409` and nothing is written; the message names those
+flags and the disabled queue consumer. A dequeuer that is running only to drain
+namespace-quota rows does not drain a job's own queue, so that refusal still
+applies. Rows already parked stay listed. While both flags are false, `caesium
+job queue` and the job-detail panel say the queue consumer is disabled instead
+of "Waiting for a run slot". Inspect a queue that is actually draining with
+`caesium job queue <alias>` (add `--json` for machine-readable output) or
+`GET /v1/jobs/:id/queue`; the job-detail page shows the same rows.
 
 Every row carries a `claim_state`, because a queued run is claimed by exactly
 one dequeuer at a time and that claim is a **lease**:
 
 | `claim_state` | `stale` | Meaning |
 |---------------|---------|---------|
-| `pending`     | `false` | Unclaimed — genuinely waiting for a run slot. |
+| `pending`     | `false` | Unclaimed. With a full dequeuer running, it is waiting for a run slot. With both queue flags false, `pending_reason` names the disabled consumer. |
 | `claimed`     | `false` | A dequeuer holds a live claim and is starting the run. Normally a sub-second state. |
 | `stale`       | `true`  | The claim outlived its lease: the dequeuer that took the row died mid-drain. The row waits on the leader's reaper, not on capacity. |
 
@@ -368,7 +376,10 @@ decided:
 | `skipped` | `{outcome, job_id, reason, run_id?}` | Nothing will execute. `reason` is `max_concurrency` (`strategy: skip`) or `dataset_hold` (a consumed dataset is held; `run_id` names the terminal `skipped` run the hold recorded). |
 | `dropped` | `{outcome, job_id, queue_id}` | Only on an idempotent retry: the start was queued, but its queue entry was cancelled or evicted before it ran. |
 
-`strategy: fail` still refuses with `409`, and a paused job with `409`.
+`strategy: fail` still refuses with `409`, and a paused job with `409`. Overflow
+under `strategy: queue` also refuses with `409` when both queue flags are false;
+the message names `CAESIUM_RUN_QUEUE_ENABLED` and
+`CAESIUM_RUN_QUEUE_DEQUEUER_ENABLED`. A `409` records nothing.
 
 A caller that retries (an orchestrator activity, a CI job, anything
 at-least-once) should send an `Idempotency-Key` header, up to 255 bytes, scoped

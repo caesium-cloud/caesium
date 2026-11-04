@@ -1641,6 +1641,12 @@ func (s *Store) admit(tx *gorm.DB, model *models.JobRun, req startRunRequest) (a
 			result.decision = admissionFailed
 			return result, nil
 		}
+		// Do not park work the operator left with no consumer. A quota-only
+		// dequeuer (policy file, both flags false) drains namespace_quota rows
+		// and never this one, so accepting it would leave it stranded.
+		if !RunQueueConsumerEnabled() {
+			return result, ErrRunQueueConsumerDisabled
+		}
 		queueID, err := s.enqueueRunTx(tx, model.JobID, model.Namespace, model.Params, model.Priority, env.Variables().RunQueueMaxDepth, nil)
 		if err != nil {
 			return result, err
@@ -1864,10 +1870,12 @@ func (s *Store) startRun(req startRunRequest) (*JobRun, error) {
 		}
 		return err
 	}); err != nil {
-		if req.idempotencyKey != "" && sqlerr.IsUniqueConstraint(err) {
+		if req.idempotencyKey != "" && (sqlerr.IsUniqueConstraint(err) || errors.Is(err, ErrRunQueueConsumerDisabled)) {
 			// A concurrent start with the same key committed first; this
 			// transaction (including anything admission did) rolled back.
-			// Answer with the winner's outcome.
+			// A disabled-queue refusal inserts nothing, so it never collides
+			// with that key's row the way a created or queued start does.
+			// Answer with the winner's outcome, including a mismatched request.
 			if existing, loadErr := findStartIdempotency(conn, req.jobID, req.idempotencyKey); loadErr == nil {
 				return s.replayIdempotentStart(conn, existing, startRequestHash(req.requestParams, req.priorityOverride), req.replayGuard, req.result)
 			}
