@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/caesium-cloud/caesium/test/internal/metricsutil"
+	"github.com/google/uuid"
 )
 
 // Outcome labels for a mutating request. Quorum-loss and lost-response
@@ -161,6 +162,45 @@ func ClassifyQuorumLossMutation(status int, body []byte, transportErr error) str
 		return OutcomeAccepted
 	}
 	return OutcomePossiblyCommitted
+}
+
+// Post-heal identities for a minority mutation sent under a client-assigned
+// Idempotency-Key. Only the first two reconcile an attempt (DT-QUORUM-01).
+const (
+	IdentityCommitted    = "committed"
+	IdentityNotCommitted = "not_committed"
+	IdentityUnresolved   = "unknown_possibly_committed"
+)
+
+// ReconcileKeyedAttempt classifies the post-heal replay of a minority mutation
+// that was originally sent with the same Idempotency-Key. The server answers
+// a key it already recorded with Idempotent-Replayed: true and the original
+// outcome, and admits a fresh run otherwise, so:
+//   - replayed 202 naming a run uuid: the original committed to that run.
+//   - non-replayed 202 naming a run uuid: no start was recorded under the key,
+//     so the original did not commit (the replay is the only run).
+//   - anything else (transport error, non-202, a replay with no run id): the
+//     attempt stays unresolved. Never guessed.
+func ReconcileKeyedAttempt(status int, replayed bool, body []byte, err error) (identity, runID string) {
+	if err != nil || status != 202 {
+		return IdentityUnresolved, ""
+	}
+	id := runIDFromBody(body)
+	if id == "" {
+		var parsed struct {
+			RunID string `json:"run_id"`
+		}
+		if json.Unmarshal(body, &parsed) == nil {
+			id = strings.TrimSpace(parsed.RunID)
+		}
+	}
+	if _, perr := uuid.Parse(id); perr != nil {
+		return IdentityUnresolved, ""
+	}
+	if replayed {
+		return IdentityCommitted, id
+	}
+	return IdentityNotCommitted, id
 }
 
 // ClassifyLostResponse is the commit-before-response-loss oracle: if the

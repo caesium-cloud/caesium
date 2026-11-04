@@ -624,15 +624,19 @@ func runQuorumLoss(t *testing.T, fe *faultEnv) {
 		Err      string
 		Outcome  string
 		RunID    string
+		// IdempotencyKey is client-assigned per attempt so the attempt can be
+		// reconciled after heal even though a timed-out request has no body.
+		IdempotencyKey string
 	}
 	var attempts []attempt
 	minJob, _ := applyFaultFixture(t, fe, majority, "quorum-min", 2)
 	for _, d := range []time.Duration{5 * time.Second, 15 * time.Second} {
 		client := fe.httpAPI.WithTimeout(d)
 		reqCtx, cancel := context.WithTimeout(ctx, d+2*time.Second)
-		status, raw, terr := client.TriggerRunRaw(reqCtx, minority.HTTPBase(), minJob.ID)
+		key := "quorum-loss-" + uuid.NewString()
+		status, _, raw, terr := client.TriggerRunKeyed(reqCtx, minority.HTTPBase(), minJob.ID, key)
 		cancel()
-		a := attempt{Deadline: d, Status: status, Body: string(raw)}
+		a := attempt{Deadline: d, Status: status, Body: string(raw), IdempotencyKey: key}
 		if terr != nil {
 			a.Err = terr.Error()
 		}
@@ -653,19 +657,39 @@ func runQuorumLoss(t *testing.T, fe *faultEnv) {
 	iso.heal(t, fe)
 	waitMembership(t, fe, 3*time.Minute)
 
+	// Reconcile each attempt by replaying its Idempotency-Key against the
+	// healed cluster (the product's POST /v1/jobs/:id/run key): a replayed
+	// answer names the run the timed-out request committed; a fresh admission
+	// proves it did not commit. Anything ambiguous stays unresolved.
 	var reconciled []map[string]any
-	for _, a := range attempts {
-		entry := map[string]any{"deadline": a.Deadline.String(), "outcome": a.Outcome, "status": a.Status}
-		if a.RunID != "" {
-			got, gerr := fe.httpAPI.GetRun(ctx, majority.HTTPBase(), minJob.ID, a.RunID)
+	for i := range attempts {
+		a := &attempts[i]
+		entry := map[string]any{
+			"deadline":        a.Deadline.String(),
+			"outcome":         a.Outcome,
+			"status":          a.Status,
+			"idempotency_key": a.IdempotencyKey,
+		}
+		reconCtx, reconCancel := context.WithTimeout(ctx, 30*time.Second)
+		rstatus, replayed, rraw, rerr := fe.httpAPI.TriggerRunKeyed(reconCtx, majority.HTTPBase(), minJob.ID, a.IdempotencyKey)
+		reconCancel()
+		identity, runID := ReconcileKeyedAttempt(rstatus, replayed, rraw, rerr)
+		entry["identity"] = identity
+		entry["replayed"] = replayed
+		entry["replay_status"] = rstatus
+		if identity != IdentityUnresolved {
+			got, gerr := fe.httpAPI.GetRun(ctx, majority.HTTPBase(), minJob.ID, runID)
 			if gerr != nil {
-				t.Fatalf("accepted/identified minority run %s missing after heal: %v", a.RunID, gerr)
+				t.Fatalf("reconciled run %s (%s) missing after heal: %v", runID, identity, gerr)
 			}
+			entry["run_id"] = runID
 			entry["present"] = true
 			entry["status_after_heal"] = got.Status
-		} else {
-			entry["identity"] = "unknown_possibly_committed"
+			if identity == IdentityCommitted {
+				a.RunID = runID
+			}
 		}
+		t.Logf("minority attempt deadline=%s key=%s reconciled=%s run=%s", a.Deadline, a.IdempotencyKey, identity, runID)
 		reconciled = append(reconciled, entry)
 	}
 

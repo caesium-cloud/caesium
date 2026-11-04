@@ -155,19 +155,35 @@ def _timeouts_possibly_committed(record):
     return bool(transport) and all(a.get("Outcome") == "possibly_committed" for a in transport)
 
 
-# What runQuorumLoss records for a minority mutation whose timed-out trigger
-# returned no run id: still possibly committed, but never reconciled.
+# What runQuorumLoss records for a minority mutation whose idempotency-key
+# replay was ambiguous: still possibly committed, but never reconciled.
 UNRESOLVED_IDENTITY = "unknown_possibly_committed"
+COMMITTED_IDENTITY = "committed"
+NOT_COMMITTED_IDENTITY = "not_committed"
 
 
 def _identity_reconciled(attempt, entry):
-    """A run id recorded during the fault and read back after healing."""
-    return (
-        _nonempty(attempt.get("RunID"))
-        and entry.get("identity") != UNRESOLVED_IDENTITY
-        and entry.get("present") is True
-        and _nonempty(entry.get("status_after_heal"))
-    )
+    """A client-assigned idempotency key replayed against the healed cluster.
+
+    The timed-out attempt has no response body, so its identity is the key it
+    sent. After healing the harness replays that key: the server either answers
+    from the recorded start (`committed`, the run the timeout produced) or admits
+    a fresh run because nothing was recorded (`not_committed`). Both are
+    deterministic; `unknown_possibly_committed` and any entry whose evidence
+    disagrees with the attempt are not reconciliations.
+    """
+    key = attempt.get("IdempotencyKey")
+    if not _nonempty(key) or entry.get("idempotency_key") != key:
+        return False
+    if not (entry.get("present") is True and _nonempty(entry.get("run_id"))
+            and _nonempty(entry.get("status_after_heal"))):
+        return False
+    identity = entry.get("identity")
+    if identity == COMMITTED_IDENTITY:
+        return entry.get("replayed") is True and attempt.get("RunID") == entry.get("run_id")
+    if identity == NOT_COMMITTED_IDENTITY:
+        return entry.get("replayed") is False and not _nonempty(attempt.get("RunID"))
+    return False
 
 
 def _reconciliation(record):
@@ -202,6 +218,8 @@ def _reconciliation_summary(record):
         "identities": identities,
         "reconciled": sum(1 for _, _, ok in pairs if ok),
         "unresolved": sum(1 for _, _, ok in pairs if not ok),
+        "committed": sum(1 for _, e, ok in pairs if ok and e.get("identity") == COMMITTED_IDENTITY),
+        "not_committed": sum(1 for _, e, ok in pairs if ok and e.get("identity") == NOT_COMMITTED_IDENTITY),
     }
 
 
@@ -428,8 +446,8 @@ CORE_ROWS = (
         "post_heal_identity_reconciliation": lambda r, s: _post_heal_reconciled(r),
     }, fault=("minority-isolation", {
         "two_voters_unreachable": lambda r, s: _minority_isolated(r, s),
-        # Identified means the run id the fault-time attempt recorded is the
-        # one read back after healing, not merely that a request was sent.
+        # Identified means the attempt's idempotency key was replayed after
+        # healing and resolved to a committed run or a proven non-commit.
         "identified_mutation_sent_during_fault": lambda r, s: _post_heal_reconciled(r),
         "fault_healed_before_final_read": lambda r, s: _post_heal_reconciled(r),
     }), reconciles=True),

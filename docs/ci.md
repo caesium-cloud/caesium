@@ -2518,11 +2518,17 @@ performance,core-robustness` or `all`; such a dispatch deselects the PR matrix)
 and were proven once together in run 36468082335. Manifest rows registered:
 `f4-standalone-lifecycle`, `c2-native-fuzz`, `c3-oracle-mutations`,
 `g2-coverage-ratchets`, `f2-cluster-lifecycle`, `e4-performance-gate`
-(unproven, ungated while advisory) and the remaining `b3-*` rows; after the
-review round, `b3-quorum-loss-uncertain-write` and `b3-split-heal-2-1` are
-`unproven` and outside `nightly-core` because unresolved
-`unknown_possibly_committed` identities no longer count as reconciled and the
-runner cannot yet record an identity for a timed-out minority mutation (#605).
+(unproven, ungated while advisory) and the remaining `b3-*` rows. After the
+review round `b3-quorum-loss-uncertain-write` and `b3-split-heal-2-1` were
+briefly outside `nightly-core`, because unresolved `unknown_possibly_committed`
+identities no longer count as reconciled and a timed-out minority mutation has
+no response body to take an identity from. #605 re-gated them: `runQuorumLoss`
+sends each minority trigger with a client-assigned `Idempotency-Key` and, after
+heal, replays every key against the majority. An `Idempotent-Replayed` answer
+names the committed run; a fresh admission proves nothing was recorded
+(`not_committed`); anything else stays `unknown_possibly_committed` and the
+collector keeps both rows `inconclusive`, so the gate holds only when every
+attempt is reconciled. The first nightly after #605 is the live proof.
 
 **Limits.** E4 hosted recalibration did not happen: three same-code A/A runs
 landed on three CPU models (AMD EPYC 7763, Intel Xeon Platinum 8573C, AMD EPYC
