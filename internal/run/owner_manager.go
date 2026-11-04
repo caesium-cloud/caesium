@@ -683,7 +683,22 @@ func (m *OwnerManager) CompleteInstance(runID, taskID, taskRunID uuid.UUID, stat
 			// `identity` names the row that ran. A fanned instance's catalog id
 			// resolves to N rows, and the resulting ErrAmbiguousTaskRun would be
 			// read below as the task having failed.
-			exp, planErr := m.store.PlanFanOutExpansionForRow(runID, taskID, identity, partitions)
+			// Planning reads sit outside CompleteTaskOwner's retried transaction.
+			// A transient "checkpoint in progress" here used to be copied into
+			// the terminal error and committed, so the task and run failed
+			// with no fault. Retry the plan on the shared contention budget.
+			// A blip that outlasts it fails the completion write (the worker
+			// re-sends); it is not the task's result. Any other planning
+			// error still fails the task — hiding it would record success.
+			var exp *FanOutExpansion
+			planErr := withStoreBusyRetry(func() error {
+				planned, err := m.store.PlanFanOutExpansionForRow(runID, taskID, identity, partitions)
+				if err != nil {
+					return err
+				}
+				exp = planned
+				return nil
+			})
 			switch {
 			case planErr == nil:
 				if exp != nil && len(exp.Groups) > 0 {
@@ -706,6 +721,10 @@ func (m *OwnerManager) CompleteInstance(runID, taskID, taskRunID uuid.UUID, stat
 					return CompleteResult{Owned: true}, err
 				}
 			default:
+				if isStoreContentionErr(planErr) {
+					or.mu.Unlock()
+					return CompleteResult{Owned: true}, planErr
+				}
 				status = TaskStatusFailed
 				if errMsg == "" {
 					errMsg = planErr.Error()
