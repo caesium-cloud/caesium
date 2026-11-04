@@ -245,6 +245,49 @@ restart_faulted_node() {
   fi
 }
 
+# Wait until $1 reports Ready, is not cordoned, carries no NoSchedule/NoExecute
+# taint, and its node Lease (kube-node-lease/<node>, renewed about every 10s)
+# was renewed at or after epoch $2, so a stale pre-stop state does not count and
+# an already-healthy kubelet passes within one renewal. (The Ready condition's
+# lastHeartbeatTime only moves about every 5 minutes, so it is not used.)
+# Bounded by $3 seconds: expiry is checked before every query and each query
+# gets --request-timeout=min(remaining,10)s. Leaves a one-line description of
+# the last observation in NODE_WAIT_DETAIL.
+NODE_WAIT_DETAIL=""
+wait_node_schedulable() {
+  local node="$1" since="$2" bound="$3" deadline remaining rt state="" lease
+  deadline=$(( $(date +%s) + bound ))
+  while :; do
+    remaining=$(( deadline - $(date +%s) ))
+    if (( remaining <= 0 )); then
+      NODE_WAIT_DETAIL="node $node last observation: ${state:-none}"
+      return 1
+    fi
+    rt=$(( remaining < 10 ? remaining : 10 ))
+    state="$(kc --request-timeout="${rt}s" get node "$node" -o json 2>&1 | jq -r '
+      (.status.conditions // [] | map(select(.type=="Ready")) | .[0]) as $r
+      | [ "ready=" + ($r.status // "unknown"),
+          "unschedulable=" + ((.spec.unschedulable // false) | tostring),
+          "blocking_taints=" + ([.spec.taints // [] | .[] | select(.effect=="NoSchedule" or .effect=="NoExecute") | .key] | join("|")) ]
+      | join(" ")' 2>&1)" || state="node query failed: $state"
+    remaining=$(( deadline - $(date +%s) ))
+    if (( remaining > 0 )); then
+      rt=$(( remaining < 10 ? remaining : 10 ))
+      lease="$(kc --request-timeout="${rt}s" -n kube-node-lease get lease "$node" -o json 2>&1 | jq -r --argjson since "$since" '
+        "lease_fresh=" + ((((.spec.renewTime // "1970-01-01T00:00:00Z") | sub("\\.[0-9]+";"")) | fromdateiso8601) >= $since | tostring)' 2>&1)" || lease="lease query failed: $lease"
+    else
+      lease="lease not queried: bound reached"
+    fi
+    state="$state $lease"
+    NODE_WAIT_DETAIL="$state"
+    if [[ "$state" == "ready=True unschedulable=false blocking_taints= lease_fresh=true" ]]; then
+      NODE_WAIT_DETAIL="node $node ready: $state"
+      return 0
+    fi
+    sleep 2
+  done
+}
+
 # Chain name for one partition tag. Derived from the tag exactly as
 # test/robustness/faults.PartitionPlan.OpenChain does, so install and heal agree.
 open_chain() {
@@ -1326,10 +1369,19 @@ PY
       ;;
     restart)
       [[ -n "$node" ]] || { write_ack "$request_id" "$action" "failed" "" "missing owner_kind_node"; LAST_REQUEST_ID="$request_id"; return 0; }
+      restart_started_epoch="$(date +%s)"
       docker exec "$node" systemctl start kubelet
       kc uncordon "$node" || true
       rm -f "$FAULTED_NODE_FILE" "$CORDONED_NODE_FILE"
-      write_ack "$request_id" "$action" "ok" "started kubelet and uncordoned $node"
+      # Do not ack until the node is genuinely back: otherwise the next
+      # scenario admits a run whose task pod can bind to a node whose kubelet
+      # or containerd is not serving yet, and its start never arrives (#611).
+      if ! wait_node_schedulable "$node" "$restart_started_epoch" 75; then
+        write_ack "$request_id" "$action" "failed" "$NODE_WAIT_DETAIL" "node $node not Ready and schedulable within 75s of kubelet restart"
+        LAST_REQUEST_ID="$request_id"
+        return 0
+      fi
+      write_ack "$request_id" "$action" "ok" "started kubelet and uncordoned $node; $NODE_WAIT_DETAIL"
       ;;
     task-state)
       if ! known_node "$p_node"; then

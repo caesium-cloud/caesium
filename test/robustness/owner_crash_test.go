@@ -372,7 +372,10 @@ func runOwnerCrash(t *testing.T, kube *kubernetes.Clientset, httpAPI *cluster.HT
 		t.Fatalf("public terminal task states: %v", err)
 	}
 
-	restartCtx, restartCancel := context.WithTimeout(ctx, 60*time.Second)
+	// The host waits (bounded at 75s) for the node to be Ready, heartbeating
+	// and schedulable before it acks, so the next scenario cannot bind its
+	// task pod to a node whose kubelet is not serving yet (#611).
+	restartCtx, restartCancel := context.WithTimeout(ctx, 120*time.Second)
 	defer restartCancel()
 	restartAck, err := cluster.RequestHost(restartCtx, kube, env.Namespace, cluster.HostRequest{
 		RequestID:     uuid.NewString(),
