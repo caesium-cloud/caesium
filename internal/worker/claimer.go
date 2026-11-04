@@ -22,6 +22,7 @@ import (
 	"github.com/caesium-cloud/caesium/pkg/ptr"
 	"github.com/google/uuid"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 const defaultLeaseTTL = 5 * time.Minute
@@ -522,8 +523,17 @@ func (c *Claimer) ReclaimExpired(ctx context.Context) error {
 			expiredArgs := []any{runningRunIDs, string(run.TaskStatusRunning), now}
 			expiredArgs = append(expiredArgs, liveLeaseArgs...)
 
+			// The read locks the rows it returns (FOR UPDATE on PostgreSQL; the
+			// SQLite and dqlite dialects drop the clause, their write
+			// transactions being serialised), in id order so two reclaiming
+			// nodes take them in the same order. Off dqlite a renewal, a
+			// completion or another node's reclaim could otherwise commit
+			// between this read and the UPDATE, which then skips the row while
+			// the events below still reported it reclaimed. Locked, the UPDATE
+			// matches exactly the rows read.
 			var expired []models.TaskRun
-			if err := tx.Where(expiredWhere, expiredArgs...).Find(&expired).Error; err != nil {
+			if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+				Where(expiredWhere, expiredArgs...).Order("id").Find(&expired).Error; err != nil {
 				return err
 			}
 			if c.afterExpiredRowsRead != nil {

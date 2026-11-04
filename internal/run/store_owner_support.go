@@ -9,6 +9,7 @@ import (
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/google/uuid"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 // ReclaimOwnerExpiredClaims returns this run's in-flight rows whose worker claim
@@ -54,8 +55,17 @@ func (s *Store) ReclaimOwnerExpiredClaims(runID uuid.UUID, ownerGeneration int64
 			where := "job_run_id = ? AND status = ? AND claim_expires_at IS NOT NULL AND claim_expires_at < ? AND owner_generation <= ?"
 			args := []any{runID, string(TaskStatusRunning), now, ownerGeneration}
 
+			// The read locks the rows it returns (FOR UPDATE on PostgreSQL; the
+			// SQLite and dqlite dialects drop the clause, their write
+			// transactions being serialised). Off dqlite a worker's renewal or
+			// completion could otherwise commit between this read and the
+			// guarded UPDATE, which then skips the row, and the row would still
+			// be reported, requeued by the owner and given a lease-expiry
+			// event. Locked, the UPDATE matches exactly what was read, and the
+			// renewal waits for the commit and finds the claim gone.
 			var expired []models.TaskRun
-			if err := tx.Where(where, args...).Find(&expired).Error; err != nil {
+			if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+				Where(where, args...).Order("id").Find(&expired).Error; err != nil {
 				return err
 			}
 			if s.afterRecoveryRowsRead != nil {
@@ -106,16 +116,24 @@ func (s *Store) ReclaimOwnerExpiredClaims(runID uuid.UUID, ownerGeneration int64
 			// runtime ids and limited to the rows the guarded UPDATE matched.
 			recovered = recoveredRuntimesFrom(expired, uuidSet(reclaimed))
 
+			// Report, and record an event for, only those same rows.
+			matched := uuidSet(reclaimed)
+			landed := make([]models.TaskRun, 0, len(reclaimed))
+			for i := range expired {
+				if _, ok := matched[expired[i].ID]; ok {
+					landed = append(landed, expired[i])
+				}
+			}
 			if s.eventStore != nil {
-				for i := range expired {
-					evt, evtErr := s.recordTaskRunEventTx(tx, event.TypeTaskLeaseExpired, runID, &expired[i], &counts)
+				for i := range landed {
+					evt, evtErr := s.recordTaskRunEventTx(tx, event.TypeTaskLeaseExpired, runID, &landed[i], &counts)
 					if evtErr != nil {
 						return evtErr
 					}
 					attemptEvents = append(attemptEvents, *evt)
 				}
 			}
-			reset = expired
+			reset = landed
 			return nil
 		})
 		if txErr == nil {

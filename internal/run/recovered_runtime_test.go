@@ -212,10 +212,8 @@ func TestOwnerTakeoverSparesARowThatCompletedAfterTheRead(t *testing.T) {
 	require.Equal(t, string(TaskStatusSucceeded), taskRunFor(t, db, runID, taskA).Status)
 }
 
-// The reset has no claim or generation guard of its own, so the stop carries
-// the generation fence: an owner that lost its lease must not force-stop the
-// attempt of the newer owner holding it, while its own generation's and older
-// rows are stopped.
+// An owner that lost its lease must not force-stop the attempt of the newer
+// owner holding it, while its own generation's and older rows are stopped.
 func TestOwnerTakeoverNeverStopsANewerGenerationsAttempt(t *testing.T) {
 	db := testutil.OpenTestDB(t)
 	t.Cleanup(func() { testutil.CloseDB(db) })
@@ -239,6 +237,46 @@ func TestOwnerTakeoverNeverStopsANewerGenerationsAttempt(t *testing.T) {
 
 	require.True(t, podExists(t, client, "caesium-mapped", "step-a-1"), "a newer generation's attempt is never force-stopped")
 	require.False(t, podExists(t, client, "caesium-mapped", "step-b-1"), "this generation's attempt is stopped")
+}
+
+// A stale owner's takeover reset must leave a newer owner's attempt alone. The
+// worker running that attempt checks every renewal tick whether it still holds
+// the claim (Store.ClaimedTaskRunIDs) and cancels the task when it does not, so
+// a reset that blanked the newer generation's claim killed a live attempt.
+func TestStaleOwnerResetKeepsANewerGenerationsClaim(t *testing.T) {
+	db := testutil.OpenTestDB(t)
+	t.Cleanup(func() { testutil.CloseDB(db) })
+	store := NewStore(db)
+	runID, taskA, taskB := seedTwoTaskRun(t, db, store, "")
+	live := time.Now().UTC().Add(time.Hour)
+	for taskID, stamp := range map[uuid.UUID]struct {
+		worker     string
+		generation int64
+	}{taskA: {"worker-new", 2}, taskB: {"worker-old", 1}} {
+		require.NoError(t, db.Model(&models.TaskRun{}).
+			Where("job_run_id = ? AND task_id = ?", runID, taskID).
+			Updates(map[string]any{
+				"status":           string(TaskStatusRunning),
+				"claimed_by":       stamp.worker,
+				"claim_expires_at": live,
+				"owner_generation": stamp.generation,
+			}).Error)
+	}
+
+	mgr := NewOwnerManager(store, CheckpointConfig{Events: 1, Interval: time.Hour, KeepFulls: 3})
+	_, err := mgr.Recover(runID, 1)
+	require.NoError(t, err)
+
+	newer := taskRunFor(t, db, runID, taskA)
+	require.Equal(t, string(TaskStatusRunning), newer.Status, "a newer generation's row is not re-pended")
+	require.Equal(t, "worker-new", newer.ClaimedBy, "a newer generation's claim is not cleared")
+	held, err := store.ClaimedTaskRunIDs(context.Background(), "worker-new", []uuid.UUID{newer.ID})
+	require.NoError(t, err)
+	require.Equal(t, []uuid.UUID{newer.ID}, held, "the newer owner's worker still holds its claim, so it does not cancel the attempt")
+
+	own := taskRunFor(t, db, runID, taskB)
+	require.Equal(t, string(TaskStatusPending), own.Status, "this generation's row is re-pended")
+	require.Empty(t, own.ClaimedBy)
 }
 
 // The owner's reap stops the lapsed attempt's pod and never a live claim's.
