@@ -111,15 +111,28 @@ func (h *HTTP) Metrics(ctx context.Context, base string) (string, error) {
 
 // TriggerRunRaw posts a trigger without treating a non-202 as a hard error.
 func (h *HTTP) TriggerRunRaw(ctx context.Context, base, jobID string) (status int, raw []byte, err error) {
-	id, err := uuid.Parse(jobID)
-	if err != nil {
-		return 0, nil, fmt.Errorf("job id is not a uuid: %w", err)
+	status, _, raw, err = h.TriggerRunKeyed(ctx, base, jobID, "")
+	return status, raw, err
+}
+
+// TriggerRunKeyed posts a trigger under a client-assigned Idempotency-Key (the
+// product's POST /v1/jobs/:id/run header). replayed reports the server's
+// Idempotent-Replayed answer: true means the key matched an earlier admission
+// instead of creating a run. An empty key sends no header.
+func (h *HTTP) TriggerRunKeyed(ctx context.Context, base, jobID, key string) (status int, replayed bool, raw []byte, err error) {
+	id, perr := uuid.Parse(jobID)
+	if perr != nil {
+		return 0, false, nil, fmt.Errorf("job id is not a uuid: %w", perr)
 	}
-	status, raw, err = h.Do(ctx, http.MethodPost, strings.TrimRight(base, "/")+"/v1/jobs/"+id.String()+"/run", map[string]any{})
+	var headers map[string]string
+	if key != "" {
+		headers = map[string]string{"Idempotency-Key": key}
+	}
+	status, hdr, raw, err := h.DoWithHeaders(ctx, http.MethodPost, strings.TrimRight(base, "/")+"/v1/jobs/"+id.String()+"/run", map[string]any{}, headers)
 	if err != nil {
 		err = uncertainExchange("trigger", status, err)
 	}
-	return status, raw, err
+	return status, hdr.Get("Idempotent-Replayed") == "true", raw, err
 }
 
 // WithTimeout returns a shallow copy using a client with the given timeout.

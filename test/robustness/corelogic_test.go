@@ -290,3 +290,35 @@ func TestPromCounterSkipsMalformedAndTrimsLaterMatchingSample(t *testing.T) {
 		t.Fatalf("absence: %v %t", value, ok)
 	}
 }
+
+func TestReconcileKeyedAttempt(t *testing.T) {
+	const id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+	created := []byte(`{"id":"` + id + `","outcome":"created"}`)
+	cases := []struct {
+		name     string
+		status   int
+		replayed bool
+		body     []byte
+		err      error
+		identity string
+		runID    string
+	}{
+		{"replay of a committed start", 202, true, created, nil, IdentityCommitted, id},
+		{"replayed skipped outcome with run id", 202, true, []byte(`{"outcome":"skipped","run_id":"` + id + `"}`), nil, IdentityCommitted, id},
+		{"fresh admission proves no commit", 202, false, created, nil, IdentityNotCommitted, id},
+		{"replay without a run id stays unresolved", 202, true, []byte(`{"outcome":"queued"}`), nil, IdentityUnresolved, ""},
+		{"replay with a non-uuid id stays unresolved", 202, true, []byte(`{"id":"nope"}`), nil, IdentityUnresolved, ""},
+		{"bare 202 stays unresolved", 202, false, nil, nil, IdentityUnresolved, ""},
+		{"transport error stays unresolved", 0, false, nil, errString("deadline"), IdentityUnresolved, ""},
+		{"5xx stays unresolved", 503, false, []byte(`{}`), nil, IdentityUnresolved, ""},
+		{"key reuse 422 stays unresolved", 422, false, []byte(`{}`), nil, IdentityUnresolved, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			identity, runID := ReconcileKeyedAttempt(tc.status, tc.replayed, tc.body, tc.err)
+			if identity != tc.identity || runID != tc.runID {
+				t.Fatalf("got (%s, %q), want (%s, %q)", identity, runID, tc.identity, tc.runID)
+			}
+		})
+	}
+}

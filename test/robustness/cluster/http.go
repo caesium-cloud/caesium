@@ -76,17 +76,23 @@ type Lease struct {
 }
 
 func (h *HTTP) Do(ctx context.Context, method, url string, body any) (status int, raw []byte, err error) {
+	status, _, raw, err = h.DoWithHeaders(ctx, method, url, body, nil)
+	return status, raw, err
+}
+
+// DoWithHeaders is Do with extra request headers and the response headers.
+func (h *HTTP) DoWithHeaders(ctx context.Context, method, url string, body any, headers map[string]string) (status int, respHeader http.Header, raw []byte, err error) {
 	var rdr io.Reader
 	if body != nil {
 		b, err := json.Marshal(body)
 		if err != nil {
-			return 0, nil, err
+			return 0, nil, nil, err
 		}
 		rdr = bytes.NewReader(b)
 	}
 	req, err := http.NewRequestWithContext(ctx, method, url, rdr)
 	if err != nil {
-		return 0, nil, err
+		return 0, nil, nil, err
 	}
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
@@ -94,13 +100,16 @@ func (h *HTTP) Do(ctx context.Context, method, url string, body any) (status int
 	if strings.TrimSpace(h.ManualKey) != "" {
 		req.Header.Set("X-Caesium-Manual-Trigger-Key", h.ManualKey)
 	}
+	for k, v := range headers {
+		req.Header.Set(k, v)
+	}
 	resp, err := h.Client.Do(req)
 	if err != nil {
-		return 0, nil, &transportFailure{err}
+		return 0, nil, nil, &transportFailure{err}
 	}
 	defer func() { _ = resp.Body.Close() }()
 	raw, err = bodylimit.Read(resp.Body, 4<<20)
-	return resp.StatusCode, raw, err
+	return resp.StatusCode, resp.Header, raw, err
 }
 
 func (h *HTTP) Health(ctx context.Context, base string) error {
