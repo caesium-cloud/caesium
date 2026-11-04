@@ -194,6 +194,7 @@
   "TestRunRetryCallbacksCLI": 790,
   "TestRunTimeout": 15400,
   "TestSSEStream": 5540,
+  "TestSSEStreamSurvivesIdleMinute": 60000,
   "TestScopedKeyAllowDenyMatrix": 100,
   "TestScopedKeyWhoamiAllowed": 100,
   "TestTaskOutputDAGInjection": 7830,

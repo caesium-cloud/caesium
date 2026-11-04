@@ -23,9 +23,12 @@ import (
 	"github.com/caesium-cloud/caesium/api/rest/service/atom"
 	"github.com/caesium-cloud/caesium/api/rest/service/trigger"
 	"github.com/caesium-cloud/caesium/internal/models"
+	"github.com/caesium-cloud/caesium/pkg/jobdef"
 	"github.com/google/uuid"
+	"github.com/robfig/cron"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"gopkg.in/yaml.v3"
 )
 
 func (s *IntegrationTestSuite) TestCronJob() {
@@ -206,19 +209,27 @@ func (s *IntegrationTestSuite) TestJobDeleteRemovesJob() {
 }
 
 func (s *IntegrationTestSuite) TestJobApplyCommand() {
-	cmd := exec.CommandContext(s.T().Context(), s.cliPath, "job", "apply", "--path", filepath.Join("test", "definitions"), "--server", s.caesiumURL)
+	suffix := "-apply-" + uuid.NewString()
+	dir := stageApplyCommandDefinitions(s.T(), s.projectRoot, suffix, time.Now().UTC())
+	cmd := exec.CommandContext(s.T().Context(), s.cliPath, "job", "apply", "--path", dir, "--server", s.caesiumURL)
 	cmd.Dir = s.projectRoot
 	output, err := cmd.CombinedOutput()
-	assert.Nil(s.T(), err, string(output))
+	s.Require().NoError(err, string(output))
+	for _, alias := range []string{"integration-job-one", "integration-job-two", "integration-job-dag"} {
+		created := s.requireJobByAlias(alias + suffix)
+		var owned models.Job
+		s.getJSON("/v1/jobs/"+created.ID, &owned)
+		s.cleanupJobAfterTest(owned.ID.String(), owned.TriggerID.String())
+	}
 
-	detail := s.jobDetailByAlias("integration-job-one")
+	detail := s.jobDetailByAlias("integration-job-one" + suffix)
 	labels := mapFromMap(detail, "labels")
 	assert.Equal(s.T(), "test", labels["env"])
 
 	tasks := s.jobTasks(stringFromMap(detail, "id"))
 	assert.Len(s.T(), tasks, 2)
 
-	dagDetail := s.jobDetailByAlias("integration-job-two")
+	dagDetail := s.jobDetailByAlias("integration-job-two" + suffix)
 	dagID := stringFromMap(dagDetail, "id")
 	dagTasks := s.jobTasks(dagID)
 	assert.Len(s.T(), dagTasks, 3)
@@ -229,7 +240,7 @@ func (s *IntegrationTestSuite) TestJobApplyCommand() {
 	}
 	assert.Equal(s.T(), expectedLinear, s.describeDAG(dagID))
 
-	branchDetail := s.jobDetailByAlias("integration-job-dag")
+	branchDetail := s.jobDetailByAlias("integration-job-dag" + suffix)
 	branchID := stringFromMap(branchDetail, "id")
 	branchTasks := s.jobTasks(branchID)
 	assert.Len(s.T(), branchTasks, 4)
@@ -240,6 +251,59 @@ func (s *IntegrationTestSuite) TestJobApplyCommand() {
 		"join":     []string{},
 	}
 	assert.Equal(s.T(), expectedBranch, s.describeDAG(branchID))
+}
+
+// The apply command checks persisted definitions and DAG topology. It needs
+// no scheduled runs, and must not leave periodic work on the shared metrics
+// server after returning. Keep the source fixtures intact for offline CLI tests.
+func stageApplyCommandDefinitions(t *testing.T, root, suffix string, now time.Time) string {
+	t.Helper()
+	dir := t.TempDir()
+	past := now.UTC().AddDate(0, 0, -1)
+	for _, filename := range []string{"job_one.yaml", "job_two.yaml", "job_dag.yaml"} {
+		data, err := os.ReadFile(filepath.Join(root, "test", "definitions", filename))
+		require.NoError(t, err)
+		var definition jobdef.Definition
+		require.NoError(t, yaml.Unmarshal(data, &definition))
+		definition.Metadata.Alias += suffix
+		switch definition.Trigger.Type {
+		case "cron":
+			definition.Trigger.Configuration["expression"] = fmt.Sprintf("0 0 %d %d *", past.Day(), past.Month())
+			definition.Trigger.Configuration["timezone"] = "UTC"
+		case "http":
+			definition.Trigger.Configuration["path"] = "/hooks/" + definition.Metadata.Alias
+		}
+		data, err = yaml.Marshal(definition)
+		require.NoError(t, err)
+		require.NoError(t, os.WriteFile(filepath.Join(dir, filename), data, 0o600))
+	}
+	return dir
+}
+
+func TestApplyCommandDefinitionsCannotScheduleBackgroundWork(t *testing.T) {
+	// Include midnight, month/year rollover, and leap-day boundaries.
+	for _, instant := range []string{"2026-11-03T03:39:55Z", "2026-01-01T00:00:00Z", "2028-03-01T00:00:00Z"} {
+		t.Run(instant, func(t *testing.T) {
+			now, err := time.Parse(time.RFC3339, instant)
+			require.NoError(t, err)
+			dir := stageApplyCommandDefinitions(t, "..", "-owned", now)
+			for _, filename := range []string{"job_one.yaml", "job_two.yaml", "job_dag.yaml"} {
+				data, err := os.ReadFile(filepath.Join(dir, filename))
+				require.NoError(t, err)
+				var definition jobdef.Definition
+				require.NoError(t, yaml.Unmarshal(data, &definition))
+				require.True(t, strings.HasSuffix(definition.Metadata.Alias, "-owned"))
+				if definition.Trigger.Type == "cron" {
+					schedule, err := cron.NewParser(cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow).Parse(definition.Trigger.Configuration["expression"].(string))
+					require.NoError(t, err)
+					require.Equal(t, "UTC", definition.Trigger.Configuration["timezone"])
+					require.True(t, schedule.Next(now).After(now.Add(24*time.Hour)), "fixture may run during the suite")
+				} else {
+					require.Equal(t, "/hooks/"+definition.Metadata.Alias, definition.Trigger.Configuration["path"])
+				}
+			}
+		})
+	}
 }
 
 func (s *IntegrationTestSuite) createJob(alias string, metadata *job.MetadataRequest) *models.Job {

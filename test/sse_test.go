@@ -149,6 +149,75 @@ func (s *IntegrationTestSuite) TestSSEStream() {
 	}
 }
 
+// TestSSEStreamSurvivesIdleMinute qualifies #602 through the live API. Keep
+// one subscription open beyond two server write-timeout intervals, then start
+// a run through HTTP and require its event on that same response body.
+func (s *IntegrationTestSuite) TestSSEStreamSurvivesIdleMinute() {
+	client := newSSEHTTPClient(s.T())
+	defer client.CloseIdleConnections()
+	trace := &sseHTTPTraceLog{}
+	defer trace.dump(s.T())
+	//nolint:bodyclose // The sender factory transfers response ownership to the job helper, which closes it.
+	sendJSON := s.sseJSONSender(client, trace)
+	alias := "sse-idle-" + uuid.NewString()
+	job := s.createJobWithTriggerConfigUsingRequest(alias, nil, models.TriggerTypeHTTP, nil, sendJSON)
+	s.cleanupJobAfterTest(job.ID.String(), job.TriggerID.String())
+	ctx, cancel := context.WithTimeout(s.T().Context(), 90*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
+		fmt.Sprintf("%s/v1/events?job_id=%s&types=run_started", s.caesiumURL, job.ID), nil)
+	s.Require().NoError(err)
+	req.Header.Set("Accept", "text/event-stream")
+	s.authorize(req)
+	resp, err := client.Do(req)
+	s.Require().NoError(err)
+	defer resp.Body.Close()
+	s.Require().Equal(http.StatusOK, resp.StatusCode)
+	s.Require().Contains(resp.Header.Get("Content-Type"), "text/event-stream")
+	events, errors, stopReader := startSSEReader(ctx, resp.Body)
+	defer stopReader()
+
+	// No application events belong to this manual-only job yet. The server's
+	// heartbeats must keep this original connection alive throughout the idle.
+	idle := time.NewTimer(time.Minute)
+	defer idle.Stop()
+	select {
+	case err := <-errors:
+		s.T().Fatalf("SSE subscription failed during idle: %v", err)
+	case evt := <-events:
+		s.T().Fatalf("unexpected %s event for job %s run %s before the manual trigger", evt.Type, evt.JobID, evt.RunID)
+	case <-ctx.Done():
+		s.T().Fatal("SSE subscription timed out during idle")
+	case <-idle.C:
+	}
+
+	// There is deliberately no reconnect or Last-Event-ID lookup here.
+	startReq, err := http.NewRequestWithContext(ctx, http.MethodPost,
+		fmt.Sprintf("%s/v1/jobs/%s/run", s.caesiumURL, job.ID), nil)
+	s.Require().NoError(err)
+	s.authorize(startReq)
+	startResp, err := client.Do(startReq)
+	s.Require().NoError(err)
+	var run runResponse
+	decodeErr := json.NewDecoder(startResp.Body).Decode(&run)
+	closeErr := startResp.Body.Close()
+	s.Require().Equal(http.StatusAccepted, startResp.StatusCode)
+	s.Require().NoError(decodeErr)
+	s.Require().NoError(closeErr)
+	runID, err := uuid.Parse(run.ID)
+	s.Require().NoError(err)
+	select {
+	case evt := <-events:
+		s.Require().Equal(event.TypeRunStarted, evt.Type)
+		s.Require().Equal(job.ID, evt.JobID)
+		s.Require().Equal(runID, evt.RunID)
+	case err := <-errors:
+		s.T().Fatalf("SSE subscription failed after idle: %v", err)
+	case <-ctx.Done():
+		s.T().Fatal("original SSE subscription did not deliver the run_started event after idle")
+	}
+}
+
 // Own the whole SSE test's connection pool. A new Client without a Transport
 // still shares DefaultTransport with earlier integration tests.
 func newSSEHTTPClient(t *testing.T) *http.Client {
