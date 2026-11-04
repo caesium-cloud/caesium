@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"time"
 
+	"github.com/caesium-cloud/caesium/internal/dbretry"
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/caesium-cloud/caesium/pkg/dqlite"
 	"github.com/caesium-cloud/caesium/pkg/env"
@@ -244,8 +246,64 @@ func configureConnectionPool(sqlDB *sql.DB, maxOpen, maxIdle int) {
 	sqlDB.SetMaxIdleConns(maxIdle)
 }
 
-func Migrate() (err error) {
-	router := DefaultRouter()
+func Migrate() error {
+	return migrateRouter(context.Background(), DefaultRouter(), migrateRetryBackoffs, sleepRetry)
+}
+
+// migrateRouter runs the startup migration against router under the bounded
+// transient-error retry. A persistent failure is returned after the final
+// attempt, wrapped so the log shows how many attempts were made.
+func migrateRouter(ctx context.Context, router *Router, backoffs []time.Duration, wait func(context.Context, time.Duration) error) error {
+	attempts := 0
+	err := migrateWithRetry(ctx, func() error {
+		attempts++
+		return migrateOnce(router)
+	}, backoffs, wait)
+	if err != nil && isTransientMigrationError(err) {
+		return fmt.Errorf("db: migration still failing after %d attempts: %w", attempts, err)
+	}
+	return err
+}
+
+// migrateRetryBackoffs bounds startup-migration retries (~31s total). Members
+// restarted or replaced under load race the leader's writes: AutoMigrate can
+// hit "database is locked", or lose a check-then-create race on a GORM index
+// and see "already exists". Both are transient because the migration is
+// idempotent and the re-run observes the other node's work.
+var migrateRetryBackoffs = []time.Duration{
+	250 * time.Millisecond, 500 * time.Millisecond, time.Second, 2 * time.Second,
+	4 * time.Second, 8 * time.Second, 15 * time.Second,
+}
+
+// isTransientMigrationError reports whether a migration failure is safe to
+// retry: lock/busy contention, or an object another node created concurrently.
+func isTransientMigrationError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if dqlite.IsContentionError(err) {
+		return true
+	}
+	msg := strings.ToLower(err.Error())
+	return (strings.Contains(msg, "index") || strings.Contains(msg, "table")) &&
+		strings.Contains(msg, "already exists")
+}
+
+func migrateWithRetry(ctx context.Context, fn func() error, backoffs []time.Duration, wait func(context.Context, time.Duration) error) error {
+	attempt := 0
+	return dbretry.Retry(ctx, dbretry.Policy{
+		Backoffs:  backoffs,
+		Retryable: isTransientMigrationError,
+		Wait:      wait,
+		OnRetry: func(err error) {
+			attempt++
+			log.Warn("database migration hit a transient error; retrying",
+				"attempt", attempt, "max_retries", len(backoffs), "error", err)
+		},
+	}, fn)
+}
+
+func migrateOnce(router *Router) (err error) {
 	if err = MigrateNamespaceDefaults(router.Catalog()); err != nil {
 		return err
 	}
