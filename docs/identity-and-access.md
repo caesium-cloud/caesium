@@ -653,8 +653,8 @@ non-fatal). Offline `caesium job lint` checks syntax only.
 
 No policy file: any syntactically valid namespace is accepted (B1
 compatibility); undeclared namespaces are rejected only when a policy file is
-loaded. Amended in identity-and-access W4 (orchestrator decision, pending
-maintainer sign-off).
+loaded. Amended in identity-and-access W4 and signed off by the maintainer
+(2026-11-04).
 
 **Canonical aliases.** Job aliases are matched exactly and are case-sensitive.
 Every writer (apply, the legacy `POST /v1/jobs`, git sync, `caesium dev`, lint)
