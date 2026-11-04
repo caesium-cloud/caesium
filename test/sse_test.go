@@ -161,6 +161,7 @@ func (s *IntegrationTestSuite) TestSSEStreamSurvivesIdleMinute() {
 	sendJSON := s.sseJSONSender(client, trace)
 	alias := "sse-idle-" + uuid.NewString()
 	job := s.createJobWithTriggerConfigUsingRequest(alias, nil, models.TriggerTypeHTTP, nil, sendJSON)
+	s.cleanupJobAfterTest(job.ID.String(), job.TriggerID.String())
 	ctx, cancel := context.WithTimeout(s.T().Context(), 90*time.Second)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
