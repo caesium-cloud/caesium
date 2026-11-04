@@ -59,6 +59,7 @@ type LineageNodeData = {
   name: string;
   jobId?: string;
   jobAlias?: string;
+  runId?: string;
   producingStep?: string;
   lastSeen?: string;
   depth?: number;
@@ -235,10 +236,18 @@ export function LineageGraph({
       if (node.data.kind !== "downstream" || !node.data.jobId) {
         return;
       }
-      void navigate({
-        to: "/jobs/$jobId",
-        params: { jobId: node.data.jobId },
-      });
+      const target = impactNodeTarget(node.data);
+      if (target?.runId) {
+        void navigate({
+          to: "/jobs/$jobId/runs/$runId",
+          params: { jobId: target.jobId, runId: target.runId },
+        });
+      } else if (target) {
+        void navigate({
+          to: "/jobs/$jobId",
+          params: { jobId: target.jobId },
+        });
+      }
     },
     [navigate],
   );
@@ -340,6 +349,20 @@ export function LineageGraph({
       ) : null}
     </div>
   );
+}
+
+/**
+ * Where clicking a downstream node goes: the run that produced the dataset when
+ * the server named one, else the job. Undefined for nodes that name no job.
+ */
+// eslint-disable-next-line react-refresh/only-export-components
+export function impactNodeTarget(
+  data: Pick<LineageNodeData, "jobId" | "runId">,
+): { jobId: string; runId?: string } | undefined {
+  if (!data.jobId) {
+    return undefined;
+  }
+  return data.runId ? { jobId: data.jobId, runId: data.runId } : { jobId: data.jobId };
 }
 
 function lineageImpactNodeTestId(namespace: string, name: string, jobId?: string) {
@@ -560,6 +583,7 @@ export function buildLineageImpactGraph(
         name: node.dataset_name,
         jobId: node.job_id,
         jobAlias: node.job_alias,
+        runId: node.run_id,
         producingStep: node.producing_step,
         lastSeen: node.last_seen,
         depth: node.depth,
@@ -671,7 +695,7 @@ const LineageDatasetNode = memo(({ data }: NodeProps<LineageNodeData>) => {
   const testId = isRoot ? "lineage-root-node" : lineageImpactNodeTestId(data.namespace, data.name, data.jobId);
   const hop = typeof data.depth === "number" ? data.depth + 1 : undefined;
   const displayJob = jobLabel(data.jobAlias);
-  const jobTitle = data.jobId ? `Open job ${displayJob}` : displayJob;
+  const jobTitle = data.runId ? `Open run ${data.runId} of ${displayJob}` : data.jobId ? `Open job ${displayJob}` : displayJob;
   const hasFreshnessOverlay = Boolean(data.freshnessStatus || data.freshnessInherited);
   const tone = freshnessTone(data.freshnessStatus, data.freshnessInherited);
 
@@ -683,6 +707,7 @@ const LineageDatasetNode = memo(({ data }: NodeProps<LineageNodeData>) => {
       data-dataset-name={data.name}
       data-job-id={data.jobId}
       data-job-alias={data.jobAlias}
+      data-run-id={data.runId}
       data-hold-status={data.hold ? "active" : undefined}
       data-hold-affected={data.holdAffected ? "true" : undefined}
       className={cn(

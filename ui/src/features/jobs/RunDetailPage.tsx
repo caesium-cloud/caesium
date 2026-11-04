@@ -39,6 +39,7 @@ import { CallbackRunsSection } from "./CallbackRunsSection";
 import { DagCounters } from "./DagCounters";
 import { JobDAG } from "./JobDAG";
 import { ReceiptPanel } from "./ReceiptPanel";
+import { RunLineageDatasets } from "./RunLineageDatasets";
 import { ReplayDialog } from "./ReplayDialog";
 import { RunCacheSummary } from "./RunCacheSummary";
 import { RunProposalSummary } from "./RunProposalSummary";
@@ -525,6 +526,7 @@ export function RunDetailPage() {
       <HoldSkipReason reason={run.tasks?.find((task) => task.error?.startsWith("dataset_hold:"))?.error ?? run.skip_reason} />
       <RunDataEvidence jobId={jobId} freshnessEnabled={features?.freshness_enabled === true} onOpenReceipt={() => setReproducibilityOpen(true)} />
       <RunExternalExecutions jobId={jobId} runId={runId} />
+      <RunLineageDatasets jobId={jobId} runId={runId} runStatus={run.status} />
       <RunAssertionPanels jobId={jobId} runId={runId} tasks={run.tasks ?? []} live={isLive} />
       {/* Cache summary */}
       <div className="flex items-center gap-4">

@@ -134,8 +134,10 @@ func TestConfinedImpactDedupesPlaceholdersResponseWide(t *testing.T) {
 
 	whole, err := NewWithDatabase(context.Background(), w.db).Impact("ol", "d-root", 0)
 	require.NoError(t, err)
-	require.Len(t, whole.Downstream, 3)
-	require.Equal(t, []string{"d-a", "d-b", "d-a"}, []string{whole.Downstream[0].DatasetName, whole.Downstream[1].DatasetName, whole.Downstream[2].DatasetName})
+	// Repeat runs of one producer are collapsed at the query layer: one node
+	// per (dataset, job), the latest run first.
+	require.Len(t, whole.Downstream, 2)
+	require.ElementsMatch(t, []string{"d-a", "d-b"}, []string{whole.Downstream[0].DatasetName, whole.Downstream[1].DatasetName})
 
 	got, _ := w.confined(confinedTo("marketing"), "ol", "d-root")
 	require.Len(t, got.Downstream, 2)

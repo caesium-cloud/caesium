@@ -1197,6 +1197,21 @@ export interface DatasetDerivationsResponse {
   offset: number;
 }
 
+export interface RunDataset {
+  namespace: string;
+  name: string;
+  direction: "input" | "output" | string;
+  task_name?: string;
+  task_run_id: string;
+  observed_at: string;
+}
+
+export interface RunDatasets {
+  run_id: string;
+  job_id: string;
+  datasets: RunDataset[];
+}
+
 export interface LineageImpactQuery {
   namespace: string;
   name: string;
@@ -1210,6 +1225,8 @@ export interface ImpactNode {
   producing_step?: string;
   job_id: string;
   job_alias: string;
+  /** The job run that most recently wrote this dataset; absent on older servers. */
+  run_id?: string;
   provenance_commit?: string;
   provenance_repo?: string;
   last_seen: string;
@@ -1927,6 +1944,8 @@ export const api = {
   deleteAtom: (id: string) => request<void>(`/atoms/${id}`, { method: "DELETE" }),
   getStats: () => request<StatsResponse>("/stats"),
   getStatsSummary: (window: string = "7d") => request<StatsResponse>(`/stats/summary?window=${window}`),
+  getRunDatasets: (jobId: string, runId: string) =>
+    request<RunDatasets>(`/jobs/${encodeURIComponent(jobId)}/runs/${encodeURIComponent(runId)}/datasets`),
   getLineageImpact: (query: LineageImpactQuery) =>
     request<ImpactResult>(
       `/lineage/impact?${queryString({

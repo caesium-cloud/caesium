@@ -1211,6 +1211,10 @@ else:
             if url.endswith("/v1/jobs"): print(json.dumps([{"id":"other","alias":"other"},{"id":"11111111-1111-4111-8111-111111111111","alias":"coverage-write-read"}]))
             elif "/logs?task_id=" in url:
                 if scenario != "logs-empty": print("coverage-task-log")
+            elif url.endswith("/datasets"):
+                datasets=[] if scenario == "datasets-empty" else [{"namespace":"caesium","name":"coverage-write-read.sample.output","direction":"output","task_name":"sample","task_run_id":"t1","observed_at":"2026-10-04T12:00:00Z"}]
+                print(json.dumps({"run_id":"22222222-2222-4222-8222-222222222222","job_id":"11111111-1111-4111-8111-111111111111","datasets":datasets}))
+            elif "/v1/lineage/impact?" in url: print(json.dumps({"root_namespace":"caesium","root_name":"x","downstream":[]}))
             elif "/runs/" in url:
                 polls=root/"run-polls"; count=int(polls.read_text()) if polls.exists() else 0; polls.write_text(str(count+1))
                 print(json.dumps({"id":url.rsplit("/",1)[-1],"status":"running" if count==0 else "succeeded","tasks":[task]}))
@@ -1398,6 +1402,11 @@ raise SystemExit(module.main())
         self.assertEqual(len(polls), 2, "the journey must keep reading the run until it is terminal")
         logs = [args for args in calls if any("/logs?task_id=t1" in a for a in args)]
         self.assertEqual(len(logs), 1, "the journey must read the executed task's retained log")
+        self.assertIn("CAESIUM_OPEN_LINEAGE_ENABLED=true", server)
+        run_datasets = [args for args in calls if any(a.endswith("/runs/22222222-2222-4222-8222-222222222222/datasets") for a in args)]
+        self.assertEqual(len(run_datasets), 1, "the journey must read the run's persisted lineage datasets")
+        impact = [args for args in calls if any("/v1/lineage/impact?namespace=caesium&name=coverage-write-read.sample.output" in a for a in args)]
+        self.assertEqual(len(impact), 1, "the journey must query impact from a dataset the run listed")
         partitions = [args for args in calls if "partitions" in args]
         self.assertEqual(len(partitions), 1)
         self.assertIn("22222222-2222-4222-8222-222222222222", partitions[0])
@@ -1487,6 +1496,13 @@ raise SystemExit(module.main())
         result = self.collect("logs-empty")
         self.assertNotEqual(result.returncode, 0, output(result))
         self.assertIn("retained log did not contain its actual output", output(result))
+        report = json.loads((self.art / "report.json").read_text())
+        self.assertNotEqual(report["verdict"], "pass")
+
+    def test_run_that_never_lists_lineage_datasets_fails_the_journey(self):
+        result = self.collect("datasets-empty")
+        self.assertNotEqual(result.returncode, 0, output(result))
+        self.assertIn("never listed a persisted lineage output dataset", output(result))
         report = json.loads((self.art / "report.json").read_text())
         self.assertNotEqual(report["verdict"], "pass")
 

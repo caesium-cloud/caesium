@@ -488,6 +488,9 @@ func namespaceMatrixRows() map[string]matrixRow {
 		"GET /v1/jobs/:id/runs/:id/assertions": {auth.RouteClassNamespaced, rV, surfaceDataAssertions, func(fx *namespaceMatrixFixture) []matrixProbe {
 			return runRoute(fx, rV, "/assertions", http.StatusOK)
 		}},
+		"GET /v1/jobs/:id/runs/:id/datasets": {auth.RouteClassNamespaced, rV, surfaceCore, func(fx *namespaceMatrixFixture) []matrixProbe {
+			return runRoute(fx, rV, "/datasets", http.StatusOK)
+		}},
 		"GET /v1/jobs/:id/runs/:id/why": {auth.RouteClassNamespaced, rV, surfaceCore, func(fx *namespaceMatrixFixture) []matrixProbe {
 			return runRoute(fx, rV, "/why?task=ok", http.StatusOK)
 		}},

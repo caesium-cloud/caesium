@@ -205,6 +205,8 @@ var endpointPolicy = map[string]RoutePolicy{
 	// a confined reader gets baseline evidence only when it was computed over
 	// the run's own namespace.
 	"GET /v1/jobs/:id/runs/:id/assertions": namespacedRoute(viewer),
+	// A run's persisted lineage dataset identities, gated like the run read.
+	"GET /v1/jobs/:id/runs/:id/datasets": namespacedRoute(viewer),
 
 	// A backfill's total_runs deduplicates dates against the job's runs in
 	// the backfill's own persisted namespace only.

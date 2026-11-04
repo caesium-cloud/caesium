@@ -3,6 +3,8 @@ package lineage
 import (
 	"context"
 
+	"github.com/google/uuid"
+
 	illineage "github.com/caesium-cloud/caesium/internal/lineage"
 	"github.com/caesium-cloud/caesium/pkg/db"
 	"gorm.io/gorm"
@@ -35,4 +37,9 @@ func (s *Service) WithDatabase(conn *gorm.DB) *Service {
 // internal/lineage.QueryImpact for traversal semantics.
 func (s *Service) Impact(namespace, name string, maxDepth int) (*illineage.ImpactResult, error) {
 	return illineage.QueryImpact(s.ctx, s.db, namespace, name, maxDepth)
+}
+
+// RunDatasets returns the lineage dataset identities persisted for a run.
+func (s *Service) RunDatasets(jobID, runID uuid.UUID) (*illineage.RunDatasets, error) {
+	return illineage.QueryRunDatasets(s.ctx, s.db, jobID, runID)
 }
