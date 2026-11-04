@@ -47,9 +47,11 @@ func TestDiffHelpDescribesServerNotDatabase(t *testing.T) {
 	require.Contains(t, diffCmd.Long, "--prune")
 	require.Contains(t, diffCmd.Long, "--json")
 	require.Contains(t, diffCmd.Long, "Exit status")
-	require.Contains(t, diffCmd.Long, "diffed fields")
-	require.Contains(t, diffCmd.Long, "JobSpec")
-	require.Contains(t, diffCmd.Long, "byte-equal apply")
+	require.Contains(t, diffCmd.Long, "every field job apply persists")
+	require.Contains(t, diffCmd.Long, "not a byte-for-byte")
+	require.Contains(t, diffCmd.Long, "secret://")
+	require.NotContains(t, diffCmd.Long, "diffed fields only")
+	require.NotContains(t, diffCmd.Long, "omitted from the projection")
 }
 
 func TestRejectDuplicateAliases(t *testing.T) {

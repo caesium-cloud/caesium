@@ -176,6 +176,124 @@ func (s *IntegrationTestSuite) TestJobDiffCLIPrintsBreakingContractFindings() {
 		"modified producer %s must carry a breaking verdict: %+v", producer, parsed.Modified)
 }
 
+// TestJobDiffCLIReportsSavedFields is the CLI-surface proof for issue #544:
+// a change to a field job apply persists (and the old projection ignored)
+// exits 1, and --json names the alias. An unchanged manifest stays exit 0.
+// Literal env values must not appear on either stream.
+func (s *IntegrationTestSuite) TestJobDiffCLIReportsSavedFields() {
+	alias := fmt.Sprintf("job-diff-saved-%d", time.Now().UnixNano())
+	const (
+		plain    = "literal-one"
+		plainAlt = "literal-two"
+		secret   = "secret://env/TOKEN"
+		secretV2 = "secret://env/TOKEN_V2"
+	)
+	base := jobDiffSavedFieldsManifest(alias, "warn", 1, "all_success", plain, secret, "b", "c")
+	dir := s.writeJobManifest(base)
+	defer os.RemoveAll(dir)
+	s.runCLI("job", "apply", "--path", dir, "--server", s.caesiumURL)
+
+	stdout, stderr, err := s.runCLISeparate("job", "diff", "--path", dir, "--server", s.caesiumURL)
+	s.Require().NoError(err, "unchanged manifest must exit 0\nstdout:\n%s\nstderr:\n%s", stdout, stderr)
+	s.Contains(stdout, "No changes detected.")
+	s.NotContains(stdout, plain)
+	s.NotContains(stderr, plain)
+	s.NotContains(stdout, `"level":"`)
+
+	assertChanged := func(manifest, field string) {
+		s.T().Helper()
+		s.rewriteJobManifest(dir, manifest)
+		plainOut, plainErr, plainCmdErr := s.runCLISeparate("job", "diff", "--path", dir, "--server", s.caesiumURL)
+		s.Require().Error(plainCmdErr, "%s change must exit 1\nstdout:\n%s\nstderr:\n%s", field, plainOut, plainErr)
+		s.Equal(1, jobDiffCLIExitCode(plainCmdErr))
+		s.NotContains(plainOut, plain)
+		s.NotContains(plainErr, plain)
+		s.NotContains(plainOut, plainAlt)
+		s.NotContains(plainErr, plainAlt)
+
+		jsonOut, jsonErr, jsonCmdErr := s.runCLISeparate("job", "diff", "--path", dir, "--json", "--server", s.caesiumURL)
+		s.Require().Error(jsonCmdErr, "%s --json must exit 1\nstdout:\n%s\nstderr:\n%s", field, jsonOut, jsonErr)
+		s.Equal(1, jobDiffCLIExitCode(jsonCmdErr))
+		s.Require().True(json.Valid([]byte(strings.TrimSpace(jsonOut))), "--json stdout must be valid JSON:\n%s", jsonOut)
+		s.NotContains(jsonOut, `"level":"`)
+		s.NotContains(jsonOut, plain)
+		s.NotContains(jsonErr, plain)
+		s.NotContains(jsonOut, plainAlt)
+		s.NotContains(jsonErr, plainAlt)
+		parsed := parseJobDiffCLIJSON(s, jsonOut)
+		s.Contains(jobDiffCLIAliases(parsed.Modified), alias)
+		s.Contains(jsonOut, field)
+	}
+
+	assertChanged(jobDiffSavedFieldsManifest(alias, "fail", 1, "all_success", plain, secret, "b", "c"), "SchemaValidation")
+	assertChanged(jobDiffSavedFieldsManifest(alias, "warn", 3, "all_success", plain, secret, "b", "c"), "Retries")
+	assertChanged(jobDiffSavedFieldsManifest(alias, "warn", 1, "one_success", plain, secret, "b", "c"), "TriggerRule")
+	assertChanged(jobDiffSavedFieldsManifest(alias, "warn", 1, "all_success", plain, secret, "c", ""), "Edges")
+
+	s.rewriteJobManifest(dir, jobDiffSavedFieldsManifest(alias, "warn", 1, "all_success", plainAlt, secretV2, "b", "c"))
+	jsonOut, jsonErr, jsonCmdErr := s.runCLISeparate("job", "diff", "--path", dir, "--json", "--server", s.caesiumURL)
+	s.Require().Error(jsonCmdErr, "env change must exit 1\nstdout:\n%s\nstderr:\n%s", jsonOut, jsonErr)
+	s.Equal(1, jobDiffCLIExitCode(jsonCmdErr))
+	s.Require().True(json.Valid([]byte(strings.TrimSpace(jsonOut))), jsonOut)
+	s.Contains(jobDiffCLIAliases(parseJobDiffCLIJSON(s, jsonOut).Modified), alias)
+	s.NotContains(jsonOut, plain)
+	s.NotContains(jsonOut, plainAlt)
+	s.NotContains(jsonErr, plain)
+	s.NotContains(jsonErr, plainAlt)
+	s.Contains(jsonOut, secretV2)
+	s.NotContains(jsonOut, `"level":"`)
+
+	s.rewriteJobManifest(dir, base)
+	stdout, stderr, err = s.runCLISeparate("job", "diff", "--path", dir, "--server", s.caesiumURL)
+	s.Require().NoError(err, "restored manifest must exit 0\nstdout:\n%s\nstderr:\n%s", stdout, stderr)
+	s.NotContains(stdout, plain)
+	s.NotContains(stderr, plain)
+
+	s.runCLI("job", "apply", "--path", dir, "--server", s.caesiumURL)
+	stdout, stderr, err = s.runCLISeparate("job", "diff", "--path", dir, "--json", "--server", s.caesiumURL)
+	s.Require().NoError(err, "re-applied unchanged manifest must exit 0\nstdout:\n%s\nstderr:\n%s", stdout, stderr)
+	s.Require().True(json.Valid([]byte(strings.TrimSpace(stdout))), stdout)
+	unchanged := parseJobDiffCLIJSON(s, stdout)
+	s.Empty(unchanged.Modified)
+	s.NotContains(stdout, plain)
+	s.NotContains(stderr, plain)
+}
+
+func jobDiffSavedFieldsManifest(alias, schemaValidation string, retries int, triggerRule, plain, token, aNext, bNext string) string {
+	bEdge := ""
+	if bNext != "" {
+		bEdge = fmt.Sprintf("\n    next: [%q]", bNext)
+	}
+	return fmt.Sprintf(`apiVersion: v1
+kind: Job
+metadata:
+  alias: %s
+  schemaValidation: %s
+trigger:
+  type: cron
+  configuration:
+    cron: "0 0 1 1 *"
+steps:
+  - name: a
+    image: alpine:3.23
+    command: ["sh", "-c", "echo a"]
+    retries: %d
+    triggerRule: %s
+    env:
+      PLAIN: %q
+      TOKEN: %q
+    next: [%q]
+  - name: b
+    image: alpine:3.23
+    command: ["sh", "-c", "echo b"]
+    triggerRule: all_success%s
+  - name: c
+    image: alpine:3.23
+    command: ["sh", "-c", "echo c"]
+    triggerRule: all_success
+`, alias, schemaValidation, retries, triggerRule, plain, token, aNext, bEdge)
+}
+
 func jobDiffCLIManifest(alias, command string) string {
 	return fmt.Sprintf(`apiVersion: v1
 kind: Job
