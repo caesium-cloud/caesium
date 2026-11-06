@@ -36,6 +36,33 @@ func injectFirstIndexFailure(t *testing.T, conn *gorm.DB, failure string) *int {
 	return &fired
 }
 
+// TestMigrateRetriesInjectedFirstAttemptFailure goes through exported Migrate,
+// not migrateRouter. A change that makes Migrate call migrateOnce would leave
+// the router-level tests green while dropping startup retries.
+func TestMigrateRetriesInjectedFirstAttemptFailure(t *testing.T) {
+	for _, failure := range []string{
+		"index idx_triggers_normalized_path already exists",
+		"database is locked",
+	} {
+		t.Run(failure, func(t *testing.T) {
+			conn := openMigrationTestDB(t)
+			fired := injectFirstIndexFailure(t, conn, failure)
+			router, err := NewRouter(conn, nil, nil)
+			require.NoError(t, err)
+
+			// DefaultRouter is a sync.Once around the process database. Claim
+			// it for this connection so Migrate does not open one, and assign
+			// again in case an earlier test already fired the once.
+			routerOnce.Do(func() { defaultRouter = router })
+			defaultRouter = router
+
+			require.NoError(t, Migrate())
+			assert.Equal(t, 1, *fired, "the injected failure must have hit the first attempt")
+			assert.True(t, conn.Migrator().HasIndex(&models.Trigger{}, "idx_triggers_normalized_path"))
+		})
+	}
+}
+
 func TestMigrateRouterRecoversFromInjectedMigrationFailure(t *testing.T) {
 	for _, failure := range []string{
 		"index idx_triggers_normalized_path already exists",
