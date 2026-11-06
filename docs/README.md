@@ -76,6 +76,7 @@ is and what is still in flight; they are not operator documentation.
 | [backtesting.md](exec-plans/active/backtesting.md) | Plan 3, the proof loop: backtest proposals against recorded runs. |
 | [window-scheduling.md](exec-plans/active/window-scheduling.md) | Plan 4, the time loop. Optional tail of the arc. |
 | [distributed-testing.md](exec-plans/active/distributed-testing.md) | Cross-cutting: make a green `ci-ok` mean the distributed guarantees hold. 30 of 31 items done; F3 open on product findings. |
+| [event-trigger-ui.md](exec-plans/active/event-trigger-ui.md) | Console surface for event triggers: delivery log on the Triggers page, trigger node in the job DAG, and the backend gaps they need. |
 
 Completed plans live in [exec-plans/completed/](exec-plans/completed/); the most recent are
 [data-circuit-breaker.md](exec-plans/completed/data-circuit-breaker.md) (Plan 1: `##caesium::metrics`, assertions, dataset holds, incidents, `release_hold`),

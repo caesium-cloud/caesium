@@ -42,6 +42,8 @@ These features address the most common reasons a team would choose an alternativ
 
 **Plan**: [Event-Driven Trigger Routing](exec-plans/completed/event-trigger-routing.md)
 
+**Console follow-on**: the web UI surface (delivery log, trigger node in the DAG) is planned in [Event-Trigger UI](exec-plans/active/event-trigger-ui.md).
+
 ### 1.3 Concurrency Strategies & Rate Limiting
 
 **Status**: Shipped. Jobs declare a `metadata.concurrency` block (`maxRuns` + `strategy` ∈ `queue`/`replace`/`skip`/`fail`) that gates a new run when the job is already at `maxRuns` — admission is a single atomic conditional insert (no cross-node TOCTOU), `replace` cancels the oldest active run, and `queue` parks overflow in a durable `run_queue` drained by a leader-gated dequeuer. Resource rate limiting (`metadata.rateLimits` / step `rateLimit`) throttles tasks against a named shared resource via a durable atomic sliding-window limiter, re-queuing (not blocking) over-limit tasks. Operator surface: `caesium job queue <alias>` + a run-queue panel on the job-detail page. Per-namespace fairness remains deferred to §3.1.
