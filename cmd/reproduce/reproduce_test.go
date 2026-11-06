@@ -240,8 +240,11 @@ func TestDockerCreateReturnsEvenWhenSweepBlocks(t *testing.T) {
 		return "", ctx.Err()
 	}
 	release := make(chan struct{})
-	defer close(release)
-	sweepFn = func(context.Context, string) { <-release } // ignores its ctx: a wedged daemon
+	finished := make(chan struct{})
+	sweepFn = func(context.Context, string) {
+		<-release // ignores its ctx: a wedged daemon
+		close(finished)
+	}
 
 	start := time.Now()
 	if _, err := dockerCreate(context.Background(), "sess", "create", "img"); err == nil {
@@ -249,6 +252,12 @@ func TestDockerCreateReturnsEvenWhenSweepBlocks(t *testing.T) {
 	}
 	if elapsed := time.Since(start); elapsed > 5*time.Second {
 		t.Fatalf("dockerCreate took %s, want about create+sweep bounds", elapsed)
+	}
+	close(release)
+	select {
+	case <-finished:
+	case <-time.After(2 * time.Second):
+		t.Fatal("sweep did not return after release")
 	}
 }
 

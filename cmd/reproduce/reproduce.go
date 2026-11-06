@@ -618,10 +618,13 @@ var (
 func sweepSession(ctx context.Context, session string) {
 	sctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), sweepTimeout)
 	defer cancel()
+	// Snapshot the func. On timeout this returns while cleanup may still be
+	// running, and tests replace sweepFn as soon as dockerCreate returns.
+	sweep := sweepFn
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		sweepFn(sctx, session)
+		sweep(sctx, session)
 	}()
 	select {
 	case <-done:
