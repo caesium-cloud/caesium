@@ -159,7 +159,7 @@ export function BlameView({ jobId, search }: { jobId: string; search: BlameSearc
         >
 
           <span>
-            Coverage caveat: topology, image, and command are tracked. env/spec/retries/cache/schema/sla/triggerRules are intentionally untracked.
+            Coverage caveat: topology, image, command, and step-level behavior (env digests, node selectors, retries, triggerRule, cache, schemas, volumes) are tracked. Job-level taskTimeout/runTimeout/sla are untracked.
           </span>
         </div>
       </div>
@@ -434,8 +434,8 @@ function buildSearch(from: string, to: string, task: string): BlameSearch {
 }
 
 function formatCoverage(coverage: string): string {
-  if (coverage === "topology+image+command") {
-    return "Topology, image, and command";
+  if (coverage === "topology+image+command+step-spec") {
+    return "Topology, image, command, and step spec";
   }
   return coverage;
 }

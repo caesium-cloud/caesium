@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"sort"
 	"strings"
 	"text/tabwriter"
 
@@ -18,7 +19,7 @@ import (
 
 const (
 	apiKeyEnvVar = "CAESIUM_API_KEY"
-	coverageNote = "Coverage: topology + image + command only. env/spec/retries/cache/schema/sla/triggerRules changes are not tracked."
+	coverageNote = "Coverage: topology, image, command and step-level behavior (env digests, node selectors, retries, triggerRule, cache, schemas, volumes and the sources behind mounted volumes). Job-level taskTimeout/runTimeout/sla changes are not tracked."
 )
 
 var (
@@ -43,18 +44,23 @@ type taskAttribution struct {
 	Element           taskElement `json:"element"`
 	IntroducingCommit string      `json:"introducing_commit"`
 	SnapshotID        string      `json:"snapshot_id"`
+	Author            string      `json:"author,omitempty"`
+	Ref               string      `json:"ref,omitempty"`
 }
 
 type taskElement struct {
-	Name    string   `json:"name"`
-	Image   string   `json:"image"`
-	Command []string `json:"command,omitempty"`
+	Name     string          `json:"name"`
+	Image    string          `json:"image"`
+	Command  []string        `json:"command,omitempty"`
+	Behavior json.RawMessage `json:"behavior,omitempty"`
 }
 
 type edgeAttribution struct {
 	Element           edgeElement `json:"element"`
 	IntroducingCommit string      `json:"introducing_commit"`
 	SnapshotID        string      `json:"snapshot_id"`
+	Author            string      `json:"author,omitempty"`
+	Ref               string      `json:"ref,omitempty"`
 	ProvenanceCommit  string      `json:"provenance_commit,omitempty"`
 }
 
@@ -180,26 +186,50 @@ func renderTable(cmd *cobra.Command, res *result) {
 	_, _ = fmt.Fprintln(out)
 
 	tw := tabwriter.NewWriter(out, 0, 4, 2, ' ', 0)
-	_, _ = fmt.Fprintln(tw, "TYPE\tELEMENT\tIMAGE/COMMAND\tINTRODUCING COMMIT\tSNAPSHOT\tPROVENANCE")
+	_, _ = fmt.Fprintln(tw, "TYPE\tELEMENT\tIMAGE/COMMAND\tSPEC\tINTRODUCING COMMIT\tSNAPSHOT\tAUTHOR\tREF\tPROVENANCE")
 	for _, task := range res.Tasks {
-		_, _ = fmt.Fprintf(tw, "task\t%s\t%s %s\t%s\t%s\t-\n",
+		_, _ = fmt.Fprintf(tw, "task\t%s\t%s %s\t%s\t%s\t%s\t%s\t%s\t-\n",
 			task.Element.Name,
 			dashIfEmpty(task.Element.Image),
 			commandString(task.Element.Command),
+			behaviorFields(task.Element.Behavior),
 			dashIfEmpty(task.IntroducingCommit),
 			task.SnapshotID,
+			dashIfEmpty(task.Author),
+			dashIfEmpty(task.Ref),
 		)
 	}
 	for _, edge := range res.Edges {
-		_, _ = fmt.Fprintf(tw, "edge\t%s -> %s\t-\t%s\t%s\t%s\n",
+		_, _ = fmt.Fprintf(tw, "edge\t%s -> %s\t-\t-\t%s\t%s\t%s\t%s\t%s\n",
 			edge.Element.From,
 			edge.Element.To,
 			dashIfEmpty(edge.IntroducingCommit),
 			edge.SnapshotID,
+			dashIfEmpty(edge.Author),
+			dashIfEmpty(edge.Ref),
 			dashIfEmpty(edge.ProvenanceCommit),
 		)
 	}
 	_ = tw.Flush()
+}
+
+// behaviorFields lists the top-level behavior keys a task records, e.g.
+// "env,retries"; "-" for none, "?" for a snapshot written before behavior was
+// recorded (unknown, not empty).
+func behaviorFields(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return "?"
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &fields); err != nil || len(fields) == 0 {
+		return "-"
+	}
+	keys := make([]string, 0, len(fields))
+	for k := range fields {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return strings.Join(keys, ",")
 }
 
 func commandString(command []string) string {

@@ -177,6 +177,9 @@ func savedColumnDecisions() map[string]map[string]columnDecision {
 			"tasks":        excludedColumn("append-only derived history; live tasks are compared"),
 			"edges":        excludedColumn("append-only derived history; live task_edges are compared"),
 			"created_at":   excludedColumn("append-only derived history; live tasks and task_edges are compared"),
+			"sequence":     excludedColumn("append-only derived history; insertion ordinal of a snapshot"),
+			"author":       excludedColumn("append-only derived history; who applied a snapshot"),
+			"ref":          excludedColumn("append-only derived history; git ref of a snapshot"),
 		},
 	}
 }

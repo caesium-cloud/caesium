@@ -47,6 +47,7 @@ func Apply(c *echo.Context) error {
 		Provenance:       prov,
 		ContractAck:      contractAck,
 		ContractWarnings: &contractWarnings,
+		Author:           snapshotAuthor(c),
 	}
 	jobs := make([]jobdefsvc.AppliedJob, 0, len(req.Definitions))
 	// A confined writer (namespace-confined, or a job-scoped key) applies
@@ -248,6 +249,16 @@ func allowBreakingFromRequest(req *jobdefsvc.AllowBreakingRequest, actor string)
 		Reason:  strings.TrimSpace(req.Reason),
 		Actor:   actor,
 	}, nil
+}
+
+// snapshotAuthor is the authenticated principal recorded as the author of the
+// dag_snapshot an apply writes. With auth off (no principal) it is empty, which
+// the snapshot stores as NULL rather than a fabricated "anonymous".
+func snapshotAuthor(c *echo.Context) string {
+	if principal := authmw.GetPrincipal(c); principal != nil {
+		return strings.TrimSpace(principal.Subject)
+	}
+	return ""
 }
 
 func applyActor(c *echo.Context) string {

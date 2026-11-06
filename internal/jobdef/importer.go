@@ -185,6 +185,11 @@ type ApplyOptions struct {
 	// RecordedJobs, when set, receives each job applyTx persisted, in call
 	// order. A retried confined batch truncates the slice back to the length
 	// it had when the attempt started, the same way contract warnings are reset.
+	// Author names who is applying: the authenticated principal for an API
+	// apply, "git-source:<id>" for a git sync. It is stamped onto the
+	// DagSnapshot a changed topology writes (blame attribution); empty records
+	// NULL. Forward-only: historical snapshots never get one.
+	Author       string
 	RecordedJobs *[]RecordedJob
 }
 
@@ -313,7 +318,7 @@ func (i *Importer) applyTx(ctx context.Context, tx *gorm.DB, def *schema.Definit
 	if err := i.reconcileEdgesTx(tx, jobModel, def.Steps, successors, taskByName, opts); err != nil {
 		return nil, err
 	}
-	if err := i.writeSnapshotTx(tx, jobModel, def.Steps, successors, taskByName, opts); err != nil {
+	if err := i.writeSnapshotTx(tx, jobModel, def.Steps, def.Volumes, successors, taskByName, opts); err != nil {
 		return nil, err
 	}
 	if err := i.reconcileCallbacksTx(tx, jobModel.ID, def.Callbacks); err != nil {
@@ -1445,11 +1450,15 @@ func (i *Importer) reconcileEdgesTx(tx *gorm.DB, jobModel *models.Job, steps []s
 }
 
 // dagTopologyHash computes a stable SHA-256 content hash from the DAG topology:
-// sorted task names each with image+command, plus sorted from→to edge pairs.
-// Folding image and command into the hash ensures that changing a step's image
-// or command produces a new snapshot even when the graph structure is unchanged.
+// sorted task names each with image, command and the canonical behavior blob
+// (stepBehaviorJSON: env digests, retries, cache, schemas, ...), plus sorted
+// from→to edge pairs. Folding the full step spec into the hash ensures that
+// changing any behavior-affecting step field produces a new snapshot even when
+// the graph structure is unchanged. Broadening the hash (data-plane-memory
+// follow-up, #404) means the first apply after upgrade writes one extra
+// snapshot per job; blame treats that boundary as "no change".
 // successors must be pre-computed by the caller (avoids redundant validation).
-func dagTopologyHash(steps []schema.Step, successors map[string][]string) string {
+func dagTopologyHash(steps []schema.Step, successors map[string][]string, volumes []schema.Volume) string {
 	// Build a name→step lookup for stable, sorted iteration.
 	stepByName := make(map[string]*schema.Step, len(steps))
 	taskNames := make([]string, 0, len(steps))
@@ -1477,7 +1486,12 @@ func dagTopologyHash(steps []schema.Step, successors map[string][]string) string
 	h := sha256.New()
 	for _, name := range taskNames {
 		s := stepByName[name]
-		_, _ = fmt.Fprintf(h, "task:%s image:%s command:%v\n", name, s.Image, s.Command)
+		behavior, berr := stepBehaviorJSON(*s, volumes)
+		if berr != nil {
+			// Unreachable for YAML/JSON-decoded steps; keep the hash total anyway.
+			behavior = []byte(fmt.Sprintf("%+v", *s))
+		}
+		_, _ = fmt.Fprintf(h, "task:%s image:%s command:%v behavior:%s\n", name, s.Image, s.Command, behavior)
 	}
 	for _, p := range pairs {
 		_, _ = fmt.Fprintf(h, "edge:%s->%s\n", p.from, p.to)
@@ -1494,15 +1508,15 @@ func dagTopologyHash(steps []schema.Step, successors map[string][]string) string
 // row on the job's next apply. successors must be pre-computed by the caller
 // (avoids a redundant call to DeriveStepSuccessors which performs full
 // validation on every apply).
-func (i *Importer) writeSnapshotTx(tx *gorm.DB, jobModel *models.Job, steps []schema.Step, successors map[string][]string, taskByName map[string]*models.Task, opts *ApplyOptions) error {
-	contentHash := dagTopologyHash(steps, successors)
+func (i *Importer) writeSnapshotTx(tx *gorm.DB, jobModel *models.Job, steps []schema.Step, volumes []schema.Volume, successors map[string][]string, taskByName map[string]*models.Task, opts *ApplyOptions) error {
+	contentHash := dagTopologyHash(steps, successors, volumes)
 	namespace := models.NamespaceOrDefault(jobModel.Namespace)
 
 	// Check whether the most recent snapshot for this job already matches.
 	// The idx_dag_snapshot_job_created index covers this query.
 	var latest models.DagSnapshot
 	err := tx.Where("job_id = ?", jobModel.ID).
-		Order("created_at desc").
+		Order("sequence desc, created_at desc").
 		Limit(1).
 		First(&latest).Error
 	if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
@@ -1517,10 +1531,15 @@ func (i *Importer) writeSnapshotTx(tx *gorm.DB, jobModel *models.Job, steps []sc
 	// argument boundaries (no lossy space-joining).
 	taskDescs := make([]models.DagSnapshotTask, 0, len(steps))
 	for _, step := range steps {
+		behavior, berr := stepBehaviorJSON(step, volumes)
+		if berr != nil {
+			return fmt.Errorf("dag snapshot: marshal step %s behavior: %w", step.Name, berr)
+		}
 		taskDescs = append(taskDescs, models.DagSnapshotTask{
-			Name:    step.Name,
-			Image:   step.Image,
-			Command: step.Command,
+			Name:     step.Name,
+			Image:    step.Image,
+			Command:  step.Command,
+			Behavior: behavior,
 		})
 	}
 	tasksJSON, err := json.Marshal(taskDescs)
@@ -1564,10 +1583,33 @@ func (i *Importer) writeSnapshotTx(tx *gorm.DB, jobModel *models.Job, steps []sc
 		gitCommit = opts.Provenance.Commit
 	}
 
+	// Per-job insertion ordinal: max+1 inside the apply transaction (see
+	// DagSnapshot.Sequence). Legacy rows the backfill has not reached count as 0.
+	var maxSeq int64
+	if err := tx.Model(&models.DagSnapshot{}).Where("job_id = ?", jobModel.ID).
+		Select("COALESCE(MAX(sequence), 0)").Scan(&maxSeq).Error; err != nil {
+		return fmt.Errorf("dag snapshot: next sequence: %w", err)
+	}
+
+	var author, ref *string
+	if opts != nil {
+		if a := strings.TrimSpace(opts.Author); a != "" {
+			author = &a
+		}
+		if opts.Provenance != nil {
+			if r := strings.TrimSpace(opts.Provenance.Ref); r != "" {
+				ref = &r
+			}
+		}
+	}
+
 	snap := &models.DagSnapshot{
 		ID:          uuid.New(),
 		JobID:       jobModel.ID,
 		Namespace:   &namespace,
+		Sequence:    maxSeq + 1,
+		Author:      author,
+		Ref:         ref,
 		ContentHash: contentHash,
 		GitCommit:   gitCommit,
 		Tasks:       datatypes.JSON(tasksJSON),

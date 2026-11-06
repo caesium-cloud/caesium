@@ -69,9 +69,9 @@ test("operator can inspect blame attribution for provenance-backed applies", asy
   await page.goto(`/jobs/${job.id}/blame`);
 
   await expect(page.getByTestId("blame-container")).toBeVisible({ timeout: 30_000 });
-  await expect(page.getByTestId("blame-coverage")).toContainText("Topology, image, and command");
+  await expect(page.getByTestId("blame-coverage")).toContainText("Topology, image, command, and step spec");
   await expect(page.getByTestId("blame-coverage-caveat")).toContainText(
-    "env/spec/retries/cache/schema/sla/triggerRules are intentionally untracked",
+    "Job-level taskTimeout/runTimeout/sla are untracked",
   );
 
   const changedTask = page.getByTestId("blame-task-row").filter({ hasText: "transform" });

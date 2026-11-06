@@ -1,6 +1,7 @@
 package models
 
 import (
+	"encoding/json"
 	"time"
 
 	"github.com/google/uuid"
@@ -24,7 +25,7 @@ type DagSnapshot struct {
 	// Part of the composite dedup index (job_id, content_hash), the
 	// query-by-recency index (job_id, created_at) and the namespace index
 	// (job_id, namespace).
-	JobID uuid.UUID `gorm:"type:uuid;not null;index:idx_dag_snapshot_job_hash;index:idx_dag_snapshot_job_created;index:idx_dag_snapshot_job_namespace,priority:1" json:"job_id"`
+	JobID uuid.UUID `gorm:"type:uuid;not null;index:idx_dag_snapshot_job_hash;index:idx_dag_snapshot_job_created;index:idx_dag_snapshot_job_namespace,priority:1;index:idx_dag_snapshot_job_sequence,priority:1" json:"job_id"`
 	Job   Job       `gorm:"constraint:OnDelete:CASCADE" json:"-"`
 
 	// Namespace is the namespace the job was in when this snapshot was written
@@ -46,7 +47,28 @@ type DagSnapshot struct {
 	// identify "when did this topology first appear and from which commit."
 	GitCommit string `gorm:"type:text;not null;default:''" json:"git_commit"`
 
-	// Tasks is a JSON array of task descriptors (name, image, command) captured
+	// Sequence is a per-job monotonic insertion ordinal (1, 2, ...) assigned
+	// inside the apply transaction as max(sequence)+1, so it totals the order of
+	// snapshots even when two share a CreatedAt (or the clock steps backwards).
+	// Dqlite serialises writes through one Raft leader and the apply runs in a
+	// transaction, so two concurrent applies cannot read the same maximum. Rows
+	// written before the column existed are backfilled in (created_at, id) order
+	// by db.MigrateDagSnapshotSequence; 0 means "not yet assigned" and sorts
+	// before every assigned value. Nullable with no default tag on purpose
+	// (dqlite re-tightens default-tagged columns on every AutoMigrate).
+	Sequence int64 `gorm:"type:integer;index:idx_dag_snapshot_job_sequence,priority:2" json:"sequence"`
+
+	// Author is the authenticated principal that applied this topology (API
+	// applies) or the git source that synced it ("git-source:<id>"). NULL on
+	// rows written before the column existed and on applies with no known actor:
+	// historical authorship is unrecoverable and is never back-filled.
+	Author *string `gorm:"type:text" json:"author,omitempty"`
+
+	// Ref is the git ref (branch or tag) from the apply's provenance. NULL when
+	// the apply carried none and on legacy rows (forward-only).
+	Ref *string `gorm:"type:text" json:"ref,omitempty"`
+
+	// Tasks is a JSON array of task descriptors (name, image, command, behavior) captured
 	// at snapshot time. It is informational — the live task_runs rows remain
 	// authoritative for execution.
 	Tasks datatypes.JSON `gorm:"type:json;not null" json:"tasks"`
@@ -67,6 +89,15 @@ type DagSnapshotTask struct {
 	Name    string   `json:"name"`
 	Image   string   `json:"image"`
 	Command []string `json:"command,omitempty"`
+	// Behavior is the canonical JSON of every other behavior-affecting step
+	// field (env, nodeSelector, retries, triggerRule, cache, inputSchema,
+	// outputSchema, volumeMounts, kueue, rateLimit, fanOut, ...). It is nil on
+	// rows written before the descriptor was broadened; every newly written row
+	// carries it (at least "{}"), which is how blame tells "legacy row, fields
+	// unknown" from "field unset". Env values are never stored in the clear: a
+	// secret:// reference is kept verbatim and a literal is replaced by a
+	// "sha256:<prefix>" digest.
+	Behavior json.RawMessage `json:"behavior,omitempty"`
 }
 
 // DagSnapshotEdge is the per-edge descriptor stored inside DagSnapshot.Edges.

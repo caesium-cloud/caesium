@@ -48,12 +48,15 @@ type blameTaskResult struct {
 	Element           blameTaskElement `json:"element"`
 	IntroducingCommit string           `json:"introducing_commit"`
 	SnapshotID        string           `json:"snapshot_id"`
+	Author            string           `json:"author,omitempty"`
+	Ref               string           `json:"ref,omitempty"`
 }
 
 type blameTaskElement struct {
-	Name    string   `json:"name"`
-	Image   string   `json:"image"`
-	Command []string `json:"command,omitempty"`
+	Name     string         `json:"name"`
+	Image    string         `json:"image"`
+	Command  []string       `json:"command,omitempty"`
+	Behavior map[string]any `json:"behavior,omitempty"`
 }
 
 type blameEdgeResult struct {
@@ -76,6 +79,7 @@ type topologySnapshot struct {
 	ID        string                 `json:"id"`
 	JobID     string                 `json:"job_id"`
 	GitCommit string                 `json:"git_commit"`
+	Sequence  int64                  `json:"sequence"`
 	Tasks     []topologySnapshotTask `json:"tasks"`
 }
 
@@ -155,7 +159,7 @@ func (s *IntegrationTestSuite) TestBlameRESTEndpointCoversHTTPSurface() {
 	var result blameRESTResponse
 	s.getJSON(fmt.Sprintf("/v1/jobs/%s/blame", job.ID), &result)
 	s.Equal(job.ID, result.JobID)
-	s.Equal("topology+image+command", result.Coverage)
+	s.Equal("topology+image+command+step-spec", result.Coverage)
 	s.False(hasBlameTask(result.Tasks, "foreign-only"), "blame response should be scoped to the path job")
 
 	publish := requireBlameTask(s, result.Tasks, "publish")

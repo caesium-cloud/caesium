@@ -100,7 +100,7 @@ describe("data verb api methods", () => {
       call: () => api.getBlame("job-1", { from: "abc123", to: "def456" }),
       response: {
         job_id: "job-1",
-        coverage: "topology+image+command",
+        coverage: "topology+image+command+step-spec",
         from_commit: "abc123",
         to_commit: "def456",
         tasks: [],
