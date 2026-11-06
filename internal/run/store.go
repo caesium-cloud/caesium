@@ -6055,16 +6055,17 @@ func (s *Store) ResetInFlightTasks(runID uuid.UUID) error {
 // (StopRecoveredRuntimes) once the reset has fenced them out.
 //
 // The reset carries no claim guard: it deliberately takes live claims too, and
-// the claim it clears is what fences those attempts. So the stop needs a fence
-// of its own, the one ClaimTaskForDispatch and ReclaimOwnerExpiredClaims use: a
-// row stamped by a NEWER generation is another owner's attempt, and an owner
-// that lost its lease must not force-stop it.
+// the claim it clears is what fences those attempts. It carries the generation
+// fence ClaimTaskForDispatch and ReclaimOwnerExpiredClaims use instead: a row
+// stamped by a NEWER generation is another owner's attempt, and an owner that
+// lost its lease must neither re-pend it, which blanks the claim its worker
+// checks every renewal tick and so cancels the attempt, nor force-stop its pod.
 func (s *Store) ResetOwnerInFlightTasks(runID uuid.UUID, ownerGeneration int64) ([]RecoveredRuntime, error) {
 	return s.resetInFlightTasks(runID, ownerGeneration)
 }
 
-// noRecoveryOwner is the generation of a reset no owner performs. Row stamps
-// start at 0, so it fences every row out of the stop list.
+// noRecoveryOwner is the generation of a reset no owner performs. It resets
+// rows of every generation and stops none of them.
 const noRecoveryOwner int64 = -1
 
 func (s *Store) resetInFlightTasks(runID uuid.UUID, ownerGeneration int64) ([]RecoveredRuntime, error) {
@@ -6072,11 +6073,14 @@ func (s *Store) resetInFlightTasks(runID uuid.UUID, ownerGeneration int64) ([]Re
 	err := withStoreBusyRetry(func() error {
 		recovered = nil
 		return s.db.Transaction(func(tx *gorm.DB) error {
-			var inFlight []models.TaskRun
-			if err := tx.Model(&models.TaskRun{}).
+			read := tx.Model(&models.TaskRun{}).
 				Select("id", "engine", "runtime_id", "owner_generation").
-				Where("job_run_id = ? AND status = ?", runID, string(TaskStatusRunning)).
-				Find(&inFlight).Error; err != nil {
+				Where("job_run_id = ? AND status = ?", runID, string(TaskStatusRunning))
+			if ownerGeneration != noRecoveryOwner {
+				read = read.Where("owner_generation <= ?", ownerGeneration)
+			}
+			var inFlight []models.TaskRun
+			if err := read.Find(&inFlight).Error; err != nil {
 				return err
 			}
 			if s.afterRecoveryRowsRead != nil {
@@ -6105,10 +6109,14 @@ func (s *Store) resetInFlightTasks(runID uuid.UUID, ownerGeneration int64) ([]Re
 				"cache_expires_at":       nil,
 			})
 			for _, chunk := range chunkTaskRunIDs(ids) {
-				if err := tx.Model(&models.TaskRun{}).
+				update := tx.Model(&models.TaskRun{}).
 					// A row that completed since the pluck stays terminal.
-					Where("id IN ? AND status = ?", chunk, string(TaskStatusRunning)).
-					Updates(WithInvalidatedSecretLogSnapshot(updates)).Error; err != nil {
+					Where("id IN ? AND status = ?", chunk, string(TaskStatusRunning))
+				if ownerGeneration != noRecoveryOwner {
+					// And one a newer owner took since stays its.
+					update = update.Where("owner_generation <= ?", ownerGeneration)
+				}
+				if err := update.Updates(WithInvalidatedSecretLogSnapshot(updates)).Error; err != nil {
 					return err
 				}
 			}
