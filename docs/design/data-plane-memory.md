@@ -82,7 +82,7 @@ Caesium uniquely computes a transitive content hash that folds in the **typed da
 | Reproducibility receipt / `verify` | **C1 first**, then C2 | **Shipped** (C1+C2 landed): `caesium receipt get` / `caesium verify` re-derive a content-addressed receipt and flag drift. An unpinned-tag task is marked **degraded/unverifiable** and never attested as reproducible — the silent-failure mode is surfaced, not suppressed. |
 | Quarantined what-if replay | C1, C2 (+ C5 for data-diff) | **Shipped**: replay is quarantined and baseline-scoped; local-mode no-override replays complete via cache hits, side-effect/observability surfaces are suppressed, and re-executing replay remains fail-closed locally until the distributed tier runs it. |
 | `caesium run diff` (causal) | C2 | **Shipped**: cache-bust attribution only; hand off value diffs to dbt/Datafold |
-| `caesium blame` (topology attribution) | C3 | **Shipped**: commit/snapshot blame over `dag_snapshot` for topology + image + command only; `env`/`spec`/`retries`/`cache`/schema/`sla`/`triggerRules` edits are intentionally untracked until the snapshot descriptor expands. |
+| `caesium blame` (topology attribution) | C3 | **Shipped**: commit/snapshot blame over `dag_snapshot` for topology, image, command and the step-level behavior fields (`env` digests, node selectors, `retries`, `triggerRule`, `cache`, schemas, volumes), ordered by a per-job `sequence`, with the introducing snapshot's author and ref (#404). Job-level `taskTimeout`/`runTimeout`/`sla` are not tracked. |
 | Value-verified skip ("Bazel for data") | C5 (+ C1) | Metadata-only skip exists today (shipped cache); value-verification needs C5 |
 | Cross-job impact analysis | C4 (+ C3) | Intra-DAG only until lineage datasets are populated |
 

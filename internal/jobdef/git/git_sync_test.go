@@ -198,6 +198,15 @@ func (s *GitSyncSuite) TestSyncRecordsProvenance() {
 	s.Equal(hash, job.ProvenanceCommit)
 	s.Equal("jobs/sample.yaml", job.ProvenancePath)
 
+	// The topology snapshot records the git ref and the sync source as author (#404).
+	var snap models.DagSnapshot
+	s.Require().NoError(db.Where("job_id = ?", job.ID).First(&snap).Error)
+	s.Require().NotNil(snap.Ref)
+	s.Equal("master", *snap.Ref)
+	s.Require().NotNil(snap.Author)
+	s.Equal("git-source:git-sync", *snap.Author)
+	s.Equal(hash, snap.GitCommit)
+
 	var trigger models.Trigger
 	s.Require().NoError(db.Where("alias = ?", "csv-to-parquet").First(&trigger).Error)
 	s.Equal("git-sync", trigger.ProvenanceSourceID)

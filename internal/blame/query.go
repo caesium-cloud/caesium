@@ -17,7 +17,18 @@ import (
 	"gorm.io/gorm"
 )
 
-const CoverageTopologyImageCommand = "topology+image+command"
+const (
+	// CoverageTopologyImageCommand is the coverage of snapshots written before
+	// the descriptor carried behavior. Blame no longer reports it; it is kept so
+	// callers comparing against the historical value still compile.
+	CoverageTopologyImageCommand = "topology+image+command"
+	// CoverageStepSpec is the coverage Blame reports: topology, image, command
+	// and every other step-level behavior field (env digests, nodeSelector,
+	// retries, triggerRule, cache, input/output schemas, volumes, ...).
+	// Job-level settings (taskTimeout, runTimeout, sla) are not step fields and
+	// are not covered.
+	CoverageStepSpec = "topology+image+command+step-spec"
+)
 
 var (
 	ErrCommitNotFound = errors.New("blame: commit not found")
@@ -51,6 +62,10 @@ type TaskAttribution struct {
 	Element           models.DagSnapshotTask `json:"element"`
 	IntroducingCommit string                 `json:"introducing_commit"`
 	SnapshotID        uuid.UUID              `json:"snapshot_id"`
+	// Author and Ref are the introducing snapshot's recorded author and git
+	// ref. Empty for snapshots written before they were captured.
+	Author string `json:"author,omitempty"`
+	Ref    string `json:"ref,omitempty"`
 }
 
 type EdgeElement struct {
@@ -62,19 +77,21 @@ type EdgeAttribution struct {
 	Element           EdgeElement `json:"element"`
 	IntroducingCommit string      `json:"introducing_commit"`
 	SnapshotID        uuid.UUID   `json:"snapshot_id"`
+	Author            string      `json:"author,omitempty"`
+	Ref               string      `json:"ref,omitempty"`
 	// ProvenanceCommit is the edge's provenance_commit as recorded at its
 	// *introducing* snapshot. provenance_commit is excluded from the snapshot
 	// ContentHash, so a later apply can change an edge's provenance without
 	// writing a new snapshot row; when that happens this reflects the
 	// introducing snapshot's value, not the current one — the same honest
-	// limitation as the topology+image+command coverage caveat.
+	// limitation as the step-spec coverage caveat.
 	ProvenanceCommit string `json:"provenance_commit,omitempty"`
 }
 
 func (q *Query) Blame(ctx context.Context, jobID uuid.UUID, opts Options) (*Result, error) {
 	result := &Result{
 		JobID:      jobID,
-		Coverage:   CoverageTopologyImageCommand,
+		Coverage:   CoverageStepSpec,
 		FromCommit: opts.FromCommit,
 		ToCommit:   opts.ToCommit,
 		Tasks:      []TaskAttribution{},
@@ -108,9 +125,9 @@ func (q *Query) Blame(ctx context.Context, jobID uuid.UUID, opts Options) (*Resu
 		return nil, err
 	}
 
-	taskIntroductions := make(map[taskKey]introduction)
+	taskIntroductions := make(map[string]introduction)
 	edgeIntroductions := make(map[edgeKey]introduction)
-	prevTasks := map[taskKey]struct{}{}
+	prevTasks := map[string]models.DagSnapshotTask{}
 	prevEdges := map[edgeKey]models.DagSnapshotEdge{}
 
 	var currentTasks []models.DagSnapshotTask
@@ -126,13 +143,12 @@ func (q *Query) Blame(ctx context.Context, jobID uuid.UUID, opts Options) (*Resu
 			return nil, err
 		}
 
-		taskSet := make(map[taskKey]struct{}, len(tasks))
+		taskSet := make(map[string]models.DagSnapshotTask, len(tasks))
 		for _, task := range tasks {
-			key := newTaskKey(task)
-			taskSet[key] = struct{}{}
+			taskSet[task.Name] = task
 			if i >= fromIdx {
-				if _, ok := prevTasks[key]; !ok {
-					taskIntroductions[key] = newIntroduction(snaps[i], "")
+				if prev, ok := prevTasks[task.Name]; !ok || !sameTaskDescriptor(prev, task) {
+					taskIntroductions[task.Name] = newIntroduction(snaps[i], "")
 				}
 			}
 		}
@@ -160,7 +176,7 @@ func (q *Query) Blame(ctx context.Context, jobID uuid.UUID, opts Options) (*Resu
 		if opts.Task != "" && task.Name != opts.Task {
 			continue
 		}
-		intro, ok := taskIntroductions[newTaskKey(task)]
+		intro, ok := taskIntroductions[task.Name]
 		if !ok {
 			continue
 		}
@@ -168,6 +184,8 @@ func (q *Query) Blame(ctx context.Context, jobID uuid.UUID, opts Options) (*Resu
 			Element:           task,
 			IntroducingCommit: intro.commit,
 			SnapshotID:        intro.snapshotID,
+			Author:            intro.author,
+			Ref:               intro.ref,
 		})
 	}
 
@@ -186,6 +204,8 @@ func (q *Query) Blame(ctx context.Context, jobID uuid.UUID, opts Options) (*Resu
 			},
 			IntroducingCommit: intro.commit,
 			SnapshotID:        intro.snapshotID,
+			Author:            intro.author,
+			Ref:               intro.ref,
 			ProvenanceCommit:  intro.provenanceCommit,
 		})
 	}
@@ -196,6 +216,8 @@ func (q *Query) Blame(ctx context.Context, jobID uuid.UUID, opts Options) (*Resu
 type introduction struct {
 	snapshotID       uuid.UUID
 	commit           string
+	author           string
+	ref              string
 	provenanceCommit string
 }
 
@@ -203,23 +225,50 @@ func newIntroduction(snap models.DagSnapshot, provenanceCommit string) introduct
 	return introduction{
 		snapshotID:       snap.ID,
 		commit:           snap.GitCommit,
+		author:           derefString(snap.Author),
+		ref:              derefString(snap.Ref),
 		provenanceCommit: provenanceCommit,
 	}
 }
 
-type taskKey struct {
-	name    string
-	image   string
-	command string
+func derefString(s *string) string {
+	if s == nil {
+		return ""
+	}
+	return *s
 }
 
-func newTaskKey(task models.DagSnapshotTask) taskKey {
-	command, _ := json.Marshal(task.Command)
-	return taskKey{
-		name:    task.Name,
-		image:   task.Image,
-		command: string(command),
+// sameTaskDescriptor reports whether two descriptors of the same-named task are
+// the same for attribution. Name, image and command always compare. Behavior
+// compares only when BOTH sides recorded it: a descriptor written before the
+// snapshot was broadened (nil Behavior) has unknown, not empty, behavior, so
+// the legacy-to-broadened boundary (the first apply after upgrade writes one
+// new snapshot per job with identical topology) is never reported as a change,
+// and attribution stays with the snapshot that introduced the unchanged
+// fields. Behavior changes are attributed from the first snapshot that records
+// behavior onwards.
+func sameTaskDescriptor(a, b models.DagSnapshotTask) bool {
+	if a.Name != b.Name || a.Image != b.Image || !slices.Equal(a.Command, b.Command) {
+		return false
 	}
+	if len(a.Behavior) == 0 || len(b.Behavior) == 0 {
+		return true
+	}
+	return canonicalJSON(a.Behavior) == canonicalJSON(b.Behavior)
+}
+
+// canonicalJSON re-encodes raw with sorted keys and no insignificant
+// whitespace, so a store that reformats JSON cannot fake a change.
+func canonicalJSON(raw json.RawMessage) string {
+	var v any
+	if err := json.Unmarshal(raw, &v); err != nil {
+		return string(raw)
+	}
+	out, err := json.Marshal(v)
+	if err != nil {
+		return string(raw)
+	}
+	return string(out)
 }
 
 type edgeKey struct {
@@ -232,16 +281,18 @@ func newEdgeKey(edge models.DagSnapshotEdge) edgeKey {
 }
 
 // sortSnapshotsAscending orders snapshots oldest-first so the walk attributes
-// each element to the first snapshot that contains its descriptor. DagSnapshot
-// has no monotonic sequence column, so CreatedAt is the only temporal key; on
-// an exact CreatedAt collision the tiebreak is the (stable but not
-// insertion-faithful) snapshot ID. Two transition-bearing snapshots written at
-// the same wall-clock instant could therefore be ordered arbitrarily — a rare
-// edge case for a read-only diagnostic. An insertion-faithful tiebreak would
-// require an additive monotonic column on dag_snapshot (deferred substrate
-// enhancement, tracked with the broader full-descriptor blame work).
+// each element to the first snapshot that contains its descriptor. The key is
+// the per-job insertion Sequence, then CreatedAt, then ID: Sequence is assigned
+// in the apply transaction (max+1) so it is insertion-faithful even when two
+// snapshots share a CreatedAt or the wall clock stepped backwards. Rows written
+// before the column existed are backfilled in (created_at, id) order; an
+// unassigned row (Sequence 0, e.g. the backfill has not run) sorts before every
+// assigned one and falls back to CreatedAt then ID among its peers.
 func sortSnapshotsAscending(snaps []models.DagSnapshot) {
-	sort.Slice(snaps, func(i, j int) bool {
+	sort.SliceStable(snaps, func(i, j int) bool {
+		if snaps[i].Sequence != snaps[j].Sequence {
+			return snaps[i].Sequence < snaps[j].Sequence
+		}
 		if !snaps[i].CreatedAt.Equal(snaps[j].CreatedAt) {
 			return snaps[i].CreatedAt.Before(snaps[j].CreatedAt)
 		}

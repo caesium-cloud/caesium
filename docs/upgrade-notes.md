@@ -1,5 +1,20 @@
 # Upgrade notes
 
+## Unreleased: `caesium blame` covers step behavior
+
+The DAG snapshot descriptor now records every step-level behavior field (`env`
+as digests, node selectors, `retries`, `triggerRule`, `cache`, schemas, volumes,
+...) and the snapshot content hash includes them, so `caesium blame` attributes
+those edits and reports `coverage: "topology+image+command+step-spec"`. Because
+the hash changed, the first apply of each job after upgrading writes one extra
+snapshot with an unchanged topology. Blame does not report it as a change;
+snapshots written before the upgrade carry no behavior data and compare as
+unknown. Startup adds `sequence`, `author` and `ref` columns to `dag_snapshots`
+and numbers existing rows per job in `(created_at, id)` order. `author` and
+`ref` are recorded from the first apply after upgrading; older snapshots show
+them empty. Job-level `taskTimeout`, `runTimeout` and `sla` are still not
+tracked.
+
 ## Unreleased: run start outcomes and idempotency keys
 
 `POST /v1/jobs/:id/run` still answers every accepted start with `202`, but the

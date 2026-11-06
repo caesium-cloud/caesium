@@ -47,7 +47,7 @@ func (q *SnapshotQuery) Latest(jobID uuid.UUID) (*models.DagSnapshot, error) {
 	var snap models.DagSnapshot
 	err := q.scoped().
 		Where("job_id = ?", jobID).
-		Order("created_at desc").
+		Order("sequence desc, created_at desc, id desc").
 		Limit(1).
 		First(&snap).Error
 	if err != nil {
@@ -62,7 +62,7 @@ func (q *SnapshotQuery) ByContentHash(jobID uuid.UUID, contentHash string) (*mod
 	var snap models.DagSnapshot
 	err := q.scoped().
 		Where("job_id = ? AND content_hash = ?", jobID, contentHash).
-		Order("created_at desc").
+		Order("sequence desc, created_at desc, id desc").
 		Limit(1).
 		First(&snap).Error
 	if err != nil {
@@ -80,7 +80,7 @@ func (q *SnapshotQuery) ByGitCommit(jobID uuid.UUID, commit string) (*models.Dag
 	var snap models.DagSnapshot
 	err := q.scoped().
 		Where("job_id = ? AND git_commit = ?", jobID, commit).
-		Order("created_at desc").
+		Order("sequence desc, created_at desc, id desc").
 		Limit(1).
 		First(&snap).Error
 	if err != nil {
@@ -89,13 +89,13 @@ func (q *SnapshotQuery) ByGitCommit(jobID uuid.UUID, commit string) (*models.Dag
 	return &snap, nil
 }
 
-// List returns all snapshots for jobID ordered by created_at descending
+// List returns all snapshots for jobID ordered by sequence then created_at descending
 // (newest first).
 func (q *SnapshotQuery) List(jobID uuid.UUID) ([]models.DagSnapshot, error) {
 	snaps := make([]models.DagSnapshot, 0)
 	err := q.scoped().
 		Where("job_id = ?", jobID).
-		Order("created_at desc").
+		Order("sequence desc, created_at desc, id desc").
 		Find(&snaps).Error
 	if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
 		return nil, err

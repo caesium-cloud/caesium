@@ -851,12 +851,15 @@ export interface BlameTaskElement {
   name: string;
   image: string;
   command?: string[];
+  behavior?: Record<string, unknown>;
 }
 
 export interface BlameTaskAttribution {
   element: BlameTaskElement;
   introducing_commit: string;
   snapshot_id: string;
+  author?: string;
+  ref?: string;
 }
 
 export interface BlameEdgeElement {
@@ -868,6 +871,8 @@ export interface BlameEdgeAttribution {
   element: BlameEdgeElement;
   introducing_commit: string;
   snapshot_id: string;
+  author?: string;
+  ref?: string;
   provenance_commit?: string;
 }
 

@@ -1,11 +1,13 @@
 package db
 
 import (
+	"context"
 	"fmt"
 	"strings"
 
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/caesium-cloud/caesium/pkg/log"
+	"github.com/google/uuid"
 	"gorm.io/gorm"
 )
 
@@ -211,6 +213,65 @@ func ensureNamespaceConstraint(conn *gorm.DB, model any) error {
 		}
 		if nullable, known := column.Nullable(); known && nullable {
 			return conn.Migrator().AlterColumn(model, "Namespace")
+		}
+	}
+	return nil
+}
+
+// MigrateDagSnapshotSequence backfills dag_snapshots.sequence, the per-job
+// monotonic insertion ordinal added after the table shipped, for rows written
+// before the column existed. It runs after AutoMigrate has added the column.
+//
+// For every job holding an unassigned row (NULL or 0) it renumbers that job's
+// snapshots 1..n in (existing sequence, created_at, id) order: assigned rows
+// keep their relative order and sort after unassigned legacy rows, and legacy
+// rows are ordered by the only temporal keys they have (created_at, then the
+// snapshot id as a stable tiebreak, which cannot be improved for rows written
+// before the column existed). A job whose rows are already numbered is not
+// touched, so the migration is idempotent and a no-op on a fresh database. It
+// runs in one transaction per job, so a crash cannot leave a job half-numbered.
+func MigrateDagSnapshotSequence(conn *gorm.DB) error {
+	if conn == nil {
+		return nil
+	}
+	if !conn.Migrator().HasTable(&models.DagSnapshot{}) || !conn.Migrator().HasColumn(&models.DagSnapshot{}, "Sequence") {
+		return nil
+	}
+	var jobIDs []uuid.UUID
+	if err := conn.Model(&models.DagSnapshot{}).
+		Where("sequence IS NULL OR sequence = 0").
+		Distinct().
+		Pluck("job_id", &jobIDs).Error; err != nil {
+		return fmt.Errorf("db: find unsequenced dag snapshots: %w", err)
+	}
+	for _, jobID := range jobIDs {
+		// The whole per-job transaction is retried on transient contention: on
+		// native dqlite a read-first transaction cannot upgrade to the writer
+		// if another node committed in between (SQLITE_BUSY), and the renumber
+		// is idempotent, so re-running it from the top is safe.
+		err := TransactionOn(context.Background(), conn, func(tx *gorm.DB) error {
+			var rows []models.DagSnapshot
+			if err := tx.Select("id", "sequence", "created_at").
+				Where("job_id = ?", jobID).
+				Order("COALESCE(sequence, 0) asc, created_at asc, id asc").
+				Find(&rows).Error; err != nil {
+				return err
+			}
+			for idx := range rows {
+				want := int64(idx + 1)
+				if rows[idx].Sequence == want {
+					continue
+				}
+				if err := tx.Model(&models.DagSnapshot{}).
+					Where("id = ?", rows[idx].ID).
+					UpdateColumn("sequence", want).Error; err != nil {
+					return err
+				}
+			}
+			return nil
+		})
+		if err != nil {
+			return fmt.Errorf("db: backfill dag snapshot sequence for job %s: %w", jobID, err)
 		}
 	}
 	return nil

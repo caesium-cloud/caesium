@@ -680,10 +680,25 @@ never persisted and so cannot come back: a volume's alternative per-engine
 `podAnnotations` / `automountServiceAccountToken`, which return on each
 Kubernetes step instead (equivalent, since step-level overrides job-level).
 
-`caesium blame` is intentionally scoped to the data stored in `dag_snapshot`:
-topology, step image, and step command. It does not track behavior-only changes
-to `env`, `spec`/node selectors, `retries`, `cache`, schemas, `sla`, or
-`triggerRules`, so do not describe it as full behavior blame.
+`caesium blame` is scoped to the data stored in `dag_snapshot` and reports
+`coverage: "topology+image+command+step-spec"`: topology, step image and
+command, and every other step-level behavior field (`env`, node selectors and
+other Kubernetes step fields, `retries`, `triggerRule`, `cache`, `inputSchema` /
+`outputSchema`, volumes plus the source of each mounted volume, and so on). `env` values are recorded as a
+`sha256:` digest, or verbatim for a `secret://` reference, so blame detects an
+edit without revealing a literal value. Mounted volume sources are recorded as a kind (plus the claim name for a PVC) and a `sha256:` digest of the source body, because a raw Kubernetes `volumeSource` can carry credentials; a source edit is detected but its values are never stored. Job-level settings (`taskTimeout`,
+`runTimeout`, `sla`) are not step fields and are not tracked. Each row also
+carries the introducing snapshot's `author` (the applying principal, or
+`git-source:<id>` for git sync) and `ref` (the provenance git ref); both are
+empty for snapshots written before they were captured.
+
+Snapshots written before the step spec was recorded have no behavior data.
+Blame treats such a task's behavior as unknown, not empty: the first apply after
+upgrade writes one extra snapshot per job (the broadened content hash differs),
+and that snapshot is never reported as a change. Behavior edits are attributed
+from the first snapshot that records behavior onwards. Snapshots are ordered by
+a per-job insertion `sequence`, so two applies in the same instant stay in
+order.
 
 ---
 

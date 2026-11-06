@@ -807,6 +807,148 @@ steps:
 	s.NotEqual(snaps[0].ContentHash, snaps[1].ContentHash)
 }
 
+const behaviorSnapshotJob = `
+apiVersion: v1
+kind: Job
+metadata:
+  alias: behavior-snapshot-job
+trigger:
+  type: cron
+  configuration:
+    cron: "* * * * *"
+steps:
+  - name: extract
+    image: repo/extract:v1
+    retries: 1
+    env:
+      LITERAL_TOKEN: hunter2-do-not-leak
+      REF_TOKEN: secret://env/API_TOKEN
+`
+
+// TestDagSnapshotBehaviorChangeWritesSnapshotAndNeverStoresSecrets pins #404:
+// a behavior-only edit (retries) writes a new snapshot with a monotonic
+// sequence, the descriptor carries the behavior, and a literal env value never
+// reaches the stored JSON while a secret:// reference is kept as the reference.
+func (s *ImporterTestSuite) TestDagSnapshotBehaviorChangeWritesSnapshotAndNeverStoresSecrets() {
+	ctx := context.Background()
+	def, err := schema.Parse([]byte(behaviorSnapshotJob))
+	s.Require().NoError(err)
+	job, err := s.importer.ApplyWithOptions(ctx, def, &ApplyOptions{
+		Author:     "alice",
+		Provenance: &Provenance{SourceID: "src", Repo: "r", Ref: "refs/heads/main", Commit: "c1", Path: "p"},
+	})
+	s.Require().NoError(err)
+
+	// Unchanged re-apply dedups (the descriptor is deterministic).
+	def, err = schema.Parse([]byte(behaviorSnapshotJob))
+	s.Require().NoError(err)
+	_, err = s.importer.ApplyWithOptions(ctx, def, &ApplyOptions{Provenance: &Provenance{SourceID: "src", Ref: "refs/heads/main", Commit: "c1b"}})
+	s.Require().NoError(err)
+
+	updated := strings.Replace(behaviorSnapshotJob, "retries: 1", "retries: 3", 1)
+	def2, err := schema.Parse([]byte(updated))
+	s.Require().NoError(err)
+	_, err = s.importer.ApplyWithOptions(ctx, def2, &ApplyOptions{Provenance: &Provenance{SourceID: "src", Ref: "refs/heads/other", Commit: "c2"}})
+	s.Require().NoError(err)
+
+	var snaps []models.DagSnapshot
+	s.Require().NoError(s.db.Where("job_id = ?", job.ID).Order("sequence asc").Find(&snaps).Error)
+	s.Require().Len(snaps, 2, "a retries-only edit must write exactly one new snapshot")
+	s.Equal(int64(1), snaps[0].Sequence)
+	s.Equal(int64(2), snaps[1].Sequence)
+	s.Require().NotNil(snaps[0].Author)
+	s.Equal("alice", *snaps[0].Author)
+	s.Require().NotNil(snaps[0].Ref)
+	s.Equal("refs/heads/main", *snaps[0].Ref)
+	s.Nil(snaps[1].Author, "no actor recorded means NULL, not a fabricated value")
+
+	raw := string(snaps[0].Tasks)
+	s.NotContains(raw, "hunter2-do-not-leak", "a literal env value must never reach the descriptor")
+	s.Contains(raw, "secret://env/API_TOKEN", "a secret reference is a pointer and is kept")
+	s.Contains(raw, "sha256:")
+	var tasks []models.DagSnapshotTask
+	s.Require().NoError(json.Unmarshal(snaps[0].Tasks, &tasks))
+	s.Require().Len(tasks, 1)
+	s.Contains(string(tasks[0].Behavior), `"retries":1`)
+	s.Contains(string(snaps[1].Tasks), `"retries":3`)
+}
+
+// TestDagTopologyHashCoversBehavior pins that every behavior-affecting step
+// field moves the content hash, and that a derived field does not.
+func TestDagTopologyHashCoversBehavior(t *testing.T) {
+	base := func() schema.Step {
+		return schema.Step{Name: "a", Image: "img", Engine: schema.EngineDocker, Type: schema.StepTypeTask}
+	}
+	hash := func(step schema.Step) string {
+		steps := []schema.Step{step}
+		successors, err := schema.DeriveStepSuccessors(steps)
+		require.NoError(t, err)
+		return dagTopologyHash(steps, successors, nil)
+	}
+	h0 := hash(base())
+
+	for name, mutate := range map[string]func(*schema.Step){
+		"env":          func(s *schema.Step) { s.Env = map[string]string{"K": "v"} },
+		"nodeSelector": func(s *schema.Step) { s.NodeSelector = map[string]string{"disk": "ssd"} },
+		"retries":      func(s *schema.Step) { s.Retries = 2 },
+		"triggerRule":  func(s *schema.Step) { s.TriggerRule = "all_done" },
+		"cache":        func(s *schema.Step) { s.Cache = map[string]any{"enabled": true} },
+		"outputSchema": func(s *schema.Step) { s.OutputSchema = map[string]any{"type": "object"} },
+		"inputSchema":  func(s *schema.Step) { s.InputSchema = map[string]map[string]any{"x": {"type": "object"}} },
+	} {
+		step := base()
+		mutate(&step)
+		require.NotEqual(t, h0, hash(step), "%s must move the content hash", name)
+	}
+
+	derived := base()
+	derived.Kubernetes = &container.KubernetesSpec{}
+	require.Equal(t, h0, hash(derived), "derived runtime state must not move the hash")
+
+	// A job-level volume source edit moves the hash of a step that mounts it,
+	// but not of a step that does not.
+	mounting := base()
+	mounting.VolumeMounts = []schema.VolumeMount{{Volume: "data", Path: "/data"}}
+	hashVols := func(step schema.Step, vols []schema.Volume) string {
+		steps := []schema.Step{step}
+		successors, err := schema.DeriveStepSuccessors(steps)
+		require.NoError(t, err)
+		return dagTopologyHash(steps, successors, vols)
+	}
+	pvc := func(claim string) []schema.Volume {
+		return []schema.Volume{{Name: "data", Sources: map[string]schema.VolumeSource{"kubernetes": {PVC: claim}}}}
+	}
+	require.NotEqual(t, hashVols(mounting, pvc("claim-a")), hashVols(mounting, pvc("claim-b")), "a PVC claim edit must move the hash")
+	require.Equal(t, hashVols(base(), pvc("claim-a")), hashVols(base(), pvc("claim-b")), "an unmounted volume must not")
+
+	// A credential inside a raw volumeSource is digested, not stored, yet
+	// editing it still moves the hash.
+	flex := func(pw string) []schema.Volume {
+		return []schema.Volume{{Name: "data", Sources: map[string]schema.VolumeSource{"kubernetes": {
+			VolumeSource: map[string]any{"flexVolume": map[string]any{"options": map[string]any{"password": pw}}},
+		}}}}
+	}
+	require.NotEqual(t, hashVols(mounting, flex("pw-one")), hashVols(mounting, flex("pw-two")))
+	blob, err := stepBehaviorJSON(mounting, flex("pw-one"))
+	require.NoError(t, err)
+	require.NotContains(t, string(blob), "pw-one")
+	require.NotContains(t, string(blob), "flexVolume")
+	require.Contains(t, string(blob), "volumeSource")
+	require.Contains(t, string(blob), "sha256:")
+	pvcBlob, err := stepBehaviorJSON(mounting, pvc("claim-a"))
+	require.NoError(t, err)
+	require.Contains(t, string(pvcBlob), "claim-a", "the pvc claim name is non-sensitive identity kept in clear")
+
+	// An env value edit changes the hash without the value being stored.
+	a, b := base(), base()
+	a.Env = map[string]string{"K": "one"}
+	b.Env = map[string]string{"K": "two"}
+	require.NotEqual(t, hash(a), hash(b))
+	raw, err := stepBehaviorJSON(a, nil)
+	require.NoError(t, err)
+	require.NotContains(t, string(raw), "one")
+}
+
 // TestDagTopologyHash verifies that the content hash is stable for the same
 // topology and differs when the topology changes — including image/command changes
 // that do not alter graph structure.
@@ -818,18 +960,18 @@ func TestDagTopologyHash(t *testing.T) {
 	successors, err := schema.DeriveStepSuccessors(steps)
 	require.NoError(t, err)
 
-	h1 := dagTopologyHash(steps, successors)
+	h1 := dagTopologyHash(steps, successors, nil)
 	require.NotEmpty(t, h1)
 
 	// Same topology → same hash.
-	h2 := dagTopologyHash(steps, successors)
+	h2 := dagTopologyHash(steps, successors, nil)
 	require.Equal(t, h1, h2)
 
 	// Add a step → different hash.
 	stepsPlus := append(steps, schema.Step{Name: "c", Image: "img-c", Engine: schema.EngineDocker, Type: schema.StepTypeTask, DependsOn: []string{"b"}})
 	successorsPlus, err := schema.DeriveStepSuccessors(stepsPlus)
 	require.NoError(t, err)
-	h3 := dagTopologyHash(stepsPlus, successorsPlus)
+	h3 := dagTopologyHash(stepsPlus, successorsPlus, nil)
 	require.NotEqual(t, h1, h3)
 
 	// Image change on same graph structure → different hash.
@@ -837,7 +979,7 @@ func TestDagTopologyHash(t *testing.T) {
 		{Name: "a", Image: "img-a-v2", Engine: schema.EngineDocker, Type: schema.StepTypeTask},
 		{Name: "b", Image: "img-b", Engine: schema.EngineDocker, Type: schema.StepTypeTask, DependsOn: []string{"a"}},
 	}
-	h4 := dagTopologyHash(stepsNewImage, successors)
+	h4 := dagTopologyHash(stepsNewImage, successors, nil)
 	require.NotEqual(t, h1, h4, "image change must produce a different hash")
 
 	// Command change on same graph structure → different hash.
@@ -845,7 +987,7 @@ func TestDagTopologyHash(t *testing.T) {
 		{Name: "a", Image: "img-a", Command: []string{"sh", "-c", "echo changed"}, Engine: schema.EngineDocker, Type: schema.StepTypeTask},
 		{Name: "b", Image: "img-b", Engine: schema.EngineDocker, Type: schema.StepTypeTask, DependsOn: []string{"a"}},
 	}
-	h5 := dagTopologyHash(stepsNewCmd, successors)
+	h5 := dagTopologyHash(stepsNewCmd, successors, nil)
 	require.NotEqual(t, h1, h5, "command change must produce a different hash")
 }
 

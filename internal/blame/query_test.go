@@ -43,7 +43,7 @@ func TestBlameAttributesOrdinaryIntroductions(t *testing.T) {
 
 	result, err := New(db).Blame(context.Background(), jobID, Options{})
 	require.NoError(t, err)
-	require.Equal(t, CoverageTopologyImageCommand, result.Coverage)
+	require.Equal(t, CoverageStepSpec, result.Coverage)
 	require.Len(t, result.Tasks, 3)
 	require.Len(t, result.Edges, 2)
 
@@ -77,7 +77,7 @@ func TestBlameKeysTasksByFullDescriptor(t *testing.T) {
 
 	result, err := New(db).Blame(context.Background(), jobID, Options{Task: "extract"})
 	require.NoError(t, err)
-	require.Equal(t, CoverageTopologyImageCommand, result.Coverage)
+	require.Equal(t, CoverageStepSpec, result.Coverage)
 	require.Len(t, result.Tasks, 1)
 	requireTaskIntro(t, result, "extract", "repo/extract:v2", "commit-2", mutating.ID)
 }
@@ -111,7 +111,7 @@ func TestBlameAttributesDeleteAndReaddToReaddingSnapshot(t *testing.T) {
 
 	result, err := New(db).Blame(context.Background(), jobID, Options{})
 	require.NoError(t, err)
-	require.Equal(t, CoverageTopologyImageCommand, result.Coverage)
+	require.Equal(t, CoverageStepSpec, result.Coverage)
 	require.Len(t, result.Tasks, 2)
 	require.Len(t, result.Edges, 1)
 	// The continuously-present "extract" survivor stays attributed to its
@@ -151,7 +151,7 @@ func TestBlameRangeStartsAfterOriginalIntroduction(t *testing.T) {
 		ToCommit:   "commit-2",
 	})
 	require.NoError(t, err)
-	require.Equal(t, CoverageTopologyImageCommand, result.Coverage)
+	require.Equal(t, CoverageStepSpec, result.Coverage)
 	require.Len(t, result.Tasks, 1)
 	require.Len(t, result.Edges, 1)
 	requireTaskIntro(t, result, "publish", "repo/publish:v1", "commit-2", second.ID)

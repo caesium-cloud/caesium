@@ -305,6 +305,10 @@ func (s *Source) applyCheckout(ctx context.Context, importer *jobdef.Importer, d
 		}
 
 		opts := SourceApplyOptions(s.Namespaces, prov)
+		if prov.SourceID != "" {
+			// Git sync has no human principal; the source is the actor.
+			opts.Author = "git-source:" + prov.SourceID
+		}
 		fileDefs, err := collectFileDefinitions(path)
 		if err != nil {
 			return err

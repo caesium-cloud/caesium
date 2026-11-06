@@ -339,6 +339,11 @@ func migrateOnce(router *Router) (err error) {
 	if err = migrateModels(router.Catalog(), models.All...); err != nil {
 		return err
 	}
+	// AutoMigrate has just added dag_snapshots.sequence; number the rows that
+	// predate it (idempotent, no-op once every row is sequenced).
+	if err = MigrateDagSnapshotSequence(router.Catalog()); err != nil {
+		return err
+	}
 	if router.ShardCount() > 1 {
 		for _, shard := range router.HotShards() {
 			if err = migrateModels(shard, hotPathModels()...); err != nil {

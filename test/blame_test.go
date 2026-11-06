@@ -14,7 +14,6 @@ func (s *IntegrationTestSuite) TestBlameCLIAttributionAndCommitRanges() {
 	const (
 		commit1 = "blame-cli-commit-1"
 		commit2 = "blame-cli-commit-2"
-		commit3 = "blame-cli-commit-3"
 		commit4 = "blame-cli-commit-4"
 		commit5 = "blame-cli-commit-5"
 		commit6 = "blame-cli-commit-6"
@@ -28,7 +27,7 @@ func (s *IntegrationTestSuite) TestBlameCLIAttributionAndCommitRanges() {
 
 	full := s.runBlameJSON(alias)
 	s.Equal(jobID, full.JobID)
-	s.Equal("topology+image+command", full.Coverage)
+	s.Equal("topology+image+command+step-spec", full.Coverage)
 	s.Equal(commit1, requireBlameTask(s, full.Tasks, "extract").IntroducingCommit)
 	s.Equal(commit1, requireBlameTask(s, full.Tasks, "load").IntroducingCommit)
 	s.Equal(commit2, requireBlameTask(s, full.Tasks, "publish").IntroducingCommit)
@@ -45,21 +44,6 @@ func (s *IntegrationTestSuite) TestBlameCLIAttributionAndCommitRanges() {
 	s.False(hasBlameTask(laterOnly.Tasks, "load"), "range covering only commit2 should exclude unchanged commit1 task")
 	s.True(hasBlameEdge(laterOnly.Edges, "load", "publish"), "range covering only commit2 should include the added edge")
 	s.False(hasBlameEdge(laterOnly.Edges, "extract", "load"), "range covering only commit2 should exclude unchanged commit1 edge")
-
-	// Behavior-only edits are outside blame coverage. They update live runtime
-	// behavior but must not write a dag_snapshot or silently move attribution.
-	beforeBehaviorOnly := len(history.Snapshots)
-	s.applyBlameManifestWithCommit(alias, blameCLIBehaviorOnly(alias), commit3)
-	afterBehaviorOnly := s.blameTopologyHistory(jobID)
-	s.Len(afterBehaviorOnly.Snapshots, beforeBehaviorOnly, "env-only change must not write a dag_snapshot")
-	afterBehavior := s.runBlameJSON(alias)
-	s.Equal("topology+image+command", afterBehavior.Coverage)
-	s.Equal(commit1, requireBlameTask(s, afterBehavior.Tasks, "extract").IntroducingCommit)
-	s.Equal(commit2, requireBlameTask(s, afterBehavior.Tasks, "publish").IntroducingCommit)
-	table, err := s.runCLIStdout("blame", alias, "--server", s.caesiumURL)
-	s.Require().NoError(err, "caesium blame table failed:\n%s", table)
-	s.Contains(table, "Coverage: topology + image + command only")
-	s.Contains(table, "env/spec/retries/cache/schema/sla/triggerRules changes are not tracked")
 
 	// Delete-and-readd: the current descriptor is blamed on the re-adding
 	// snapshot, not its earliest-ever appearance.
@@ -174,31 +158,6 @@ trigger: { type: cron, configuration: { cron: "0 2 * * *" } }
 steps:
   - name: extract
     image: alpine:3.23
-    command: ["sh","-c","echo extract"]
-    next: load
-  - name: load
-    image: alpine:3.23
-    command: ["sh","-c","echo load"]
-    dependsOn: extract
-    next: publish
-  - name: publish
-    image: alpine:3.23
-    command: ["sh","-c","echo publish"]
-    dependsOn: load
-`, alias)
-}
-
-func blameCLIBehaviorOnly(alias string) string {
-	return fmt.Sprintf(`apiVersion: v1
-kind: Job
-metadata:
-  alias: %s
-trigger: { type: cron, configuration: { cron: "0 2 * * *" } }
-steps:
-  - name: extract
-    image: alpine:3.23
-    env:
-      BLAME_BEHAVIOR_ONLY: changed
     command: ["sh","-c","echo extract"]
     next: load
   - name: load
