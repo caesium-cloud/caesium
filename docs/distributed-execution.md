@@ -173,11 +173,9 @@ policy file: an owner restarted without one refuses it
 (`409 no_isolation_policy`) and the worker denies. A node serving no policy
 file that owns such a run (owner-memory lease takeover, or a run another
 node's sweep marked later; it reads the marks again every 2 s while it finds
-none) holds it rather than dispatch it unisolated. A node with `CAESIUM_WORKER_ENABLED=false`
-does not renew the leases of the runs it owns (run-lease renewal runs on the
-worker loop), so give owner nodes a worker — with
-`CAESIUM_WORKER_ISOLATION_V1_DISABLED=true` if they must not execute isolated
-tasks.
+none) holds it rather than dispatch it unisolated. An owner node does not need a
+worker: with `CAESIUM_WORKER_ENABLED=false` it renews the leases of the runs it
+owns on its own and dispatches their tasks to its peers' workers.
 
 **Upgrade order:** upgrade workers first, then owners. An older owner sends no
 context and a new worker then runs its tasks exactly as before (reading its own
