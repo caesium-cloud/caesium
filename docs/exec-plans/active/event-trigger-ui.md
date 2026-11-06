@@ -270,16 +270,30 @@ No new route: the card is the "trigger detail".
       event, open `/triggers`, expand the card, assert the matched delivery row
       shows type / source / `started`, the payload JSON contains the pushed
       value, the non-matching event is absent, the type filter narrows, and a
-      second push appears without reload (A3). Also cover the **mixed-outcome**
-      case on the live server: apply two jobs sharing one event trigger (same
-      trigger configuration, so both reference one trigger; confirm at pickup how
-      apply shares a trigger across aliases, and fall back to pausing one job
-      after apply), pause one, push a matching event, and assert the row renders
-      `partial` (one run started, a "job paused" reason), not `started`.
+      second push appears without reload (A3).
       Stubbing is allowed only for the failure-state case (a 500 from the events
-      call).
+      call). The mixed-outcome row is not part of this Playwright spec: apply
+      cannot produce it (see A7b).
       Files: `ui/e2e/trigger-events.spec.ts`.
       Depends on: A1-A4, H2.
+- [ ] A7b. Mixed-outcome delivery, integration test, not Playwright. Apply does
+      not share a trigger. `upsertTriggerTx` (`internal/jobdef/importer.go`)
+      allocates `uuid.New()` for every new job, and
+      `internal/jobdef/trigger_tenancy.go` records that no API path makes two
+      jobs share a row. Two applied jobs with identical event configuration
+      therefore get two trigger ids and two delivery rows (one started, one
+      skipped), never one `partial` row.
+      Seed a legacy shared row the way
+      `TestAuthJobdefNamespaceDiffBaselineIsConfined` does: apply both jobs,
+      then `UPDATE jobs SET trigger_id = ?` so the second job points at the
+      first job's trigger (`openIntegrationCatalogDB`). Before pushing the
+      event, read both jobs and assert their `trigger_id` values are equal.
+      Pause one, push one matching event, and assert a single delivery row
+      with a non-empty `runs_started` and a "job paused" reason (`skipped`
+      stays false). Pausing one of two separately-applied jobs does not
+      satisfy this.
+      Files: `test/` (extend the trigger-events integration scenarios).
+      Depends on: H2.
 - [ ] A8. Auth-lane e2e: a viewer sees the log; a confined viewer sees the A5
       note, asserted against the real API through the browser session.
       API-level assertions for scoped keys (they cannot UI-login).
@@ -372,7 +386,7 @@ split-stream `--json` assertion (`caesium trigger events`).
   `getTrigger` / `getJobs`. B1 is independent backend work and can land in Wave 1
   in parallel with H1; A6's linked form waits on it. B2 is optional and
   gated on a demonstrated need. N-1 runs last.
-- **Within-stream:** A1, then A2 / A3 / A4 / A5 / A6, then A7 / A8. C1 and C2,
+- **Within-stream:** A1, then A2 / A3 / A4 / A5 / A6, then A7 / A7b / A8. C1 and C2,
   then C3. H1, then H2, then H3.
 - **Cross-stream file conflicts:** A and C2 both edit `TriggersPage.tsx`
   (sequence A before C2). H1 and B1 both define the delivery-row shape (`api.ts`
@@ -414,10 +428,11 @@ The plan is done when **all** of these hold:
    auth-lane decision (H3) is recorded and its scenario is green, or its
    API-level substitute is in `test/`.
 2. **Stream A:** `ui/e2e/trigger-events.spec.ts` is green in `just ui-e2e`
-   against the live server, covering matched row, payload, filter, a
-   live-appearing delivery, and a mixed-outcome (`partial`) delivery from a
-   shared trigger; the confined-viewer note (A5) is asserted in the auth
-   lane.
+   against the live server, covering matched row, payload, filter, and a
+   live-appearing delivery. The mixed-outcome (`partial`) delivery is green
+   in a `test/` integration scenario that seeds one shared `trigger_id`
+   (A7b) and asserts that equality before the push. The confined-viewer note
+   (A5) is asserted in the auth lane.
 3. **Stream B:** B1 is merged with an integration scenario asserting the new
    fields from the real endpoint (and the CLI JSON if changed); B2 is
    either merged with a scenario or recorded in this plan as dropped, with the
