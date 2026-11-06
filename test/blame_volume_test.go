@@ -49,11 +49,15 @@ volumes:
     sources:
       docker:
         volume: blame-data
+      podman:
+        volume: blame-data
       kubernetes:
         pvc: %s
   - name: creds
     sources:
       docker:
+        volume: blame-creds
+      podman:
         volume: blame-creds
       kubernetes:
         volumeSource:
