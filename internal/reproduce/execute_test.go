@@ -280,8 +280,33 @@ func TestExecuteShellDistrolessGuidance(t *testing.T) {
 		t.Fatal("ExecuteShell() error = nil, want shell unavailable guidance")
 	}
 	msg := err.Error()
-	if !strings.Contains(msg, "--shell-image") || !strings.Contains(msg, "deferred") || !strings.Contains(msg, "distroless") {
-		t.Fatalf("shell unavailable error = %q, want distroless deferred --shell-image guidance", msg)
+	if !strings.Contains(msg, "--shell-image") || strings.Contains(msg, "deferred") || !strings.Contains(msg, "distroless") {
+		t.Fatalf("shell unavailable error = %q, want distroless --shell-image guidance", msg)
+	}
+
+	failed := (&ShellUnavailableError{Image: env.Image, Shell: DefaultShell, ShellImage: DefaultShellImage, Err: errors.New("boom")}).Error()
+	if !strings.Contains(failed, DefaultShellImage) || !strings.Contains(failed, "fallback") || !strings.Contains(failed, "boom") {
+		t.Fatalf("fallback-failed error = %q", failed)
+	}
+}
+
+func TestExecuteShellPassesShellImageAndTTYToRunner(t *testing.T) {
+	desc := basicDescriptor("alpine:3.23")
+	env, err := Reconstruct(context.Background(), desc, ReconstructOptions{})
+	if err != nil {
+		t.Fatalf("Reconstruct() error = %v", err)
+	}
+	runner := &fakeShellRunner{}
+	if _, err := ExecuteShell(context.Background(), env, ShellExecuteOptions{
+		Puller:      &fakePuller{},
+		ShellRunner: runner,
+		ShellImage:  " " + DefaultShellImage + " ",
+		TTY:         true,
+	}); err != nil {
+		t.Fatalf("ExecuteShell() error = %v", err)
+	}
+	if runner.req.ShellImage != DefaultShellImage || !runner.req.TTY {
+		t.Fatalf("shell request = %#v, want shell image and TTY propagated", runner.req)
 	}
 }
 

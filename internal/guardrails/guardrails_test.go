@@ -51,6 +51,10 @@ var exemptPatterns = []*regexp.Regexp{
 	regexp.MustCompile(`mcr\.microsoft`),
 	regexp.MustCompile(`BUILDER_TAG`),
 	regexp.MustCompile(`VARIANT`),
+	// The musl variant of the pinned busybox is the statically linked one that
+	// `caesium reproduce --shell-image` copies into shell-less containers; the
+	// default (glibc) variant is dynamically linked and cannot be injected.
+	regexp.MustCompile(`busybox:1\.36\.1-musl`),
 }
 
 func TestPinnedContainerImageVersionsAreConsistent(t *testing.T) {

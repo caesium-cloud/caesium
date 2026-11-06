@@ -3,13 +3,18 @@
 package test
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
+	"strings"
+	"syscall"
 	"time"
 
 	"github.com/google/uuid"
@@ -155,6 +160,125 @@ func (s *IntegrationTestSuite) TestReproduceCLIDryRunAndRunMode() {
 	s.Require().NotNil(mismatch.OutputDiff)
 	s.True(reproduceDiffHasChanged(mismatch.OutputDiff, "flavor", "vanilla", "chocolate"),
 		"output diff = %+v", mismatch.OutputDiff)
+}
+
+// TestReproduceCLIShellImageFallbackOnShelllessImage drives `reproduce --shell`
+// against a FROM-scratch image (no /bin/sh) and proves the --shell-image
+// fallback injects BusyBox with the task's reconstructed env, non-interactively.
+func (s *IntegrationTestSuite) TestReproduceCLIShellImageFallbackOnShelllessImage() {
+	if s.engineType != "" && s.engineType != "docker" {
+		s.T().Skipf("reproduce --shell executes on the harness Docker daemon; skipped under CAESIUM_TEST_ENGINE=%s", s.engineType)
+	}
+	jobID, runID, _ := s.createReproduceCLIFixture()
+
+	tag := s.buildShelllessImage()
+
+	run := func(shellImage string) (string, string, error) {
+		cmd := exec.CommandContext(s.T().Context(), s.cliPath,
+			"reproduce", runID, "--job-id", jobID, "--task", "transform",
+			"--shell", "--image", tag, "--shell-image", shellImage, "--server", s.caesiumURL)
+		cmd.Dir = s.projectRoot
+		cmd.Env = os.Environ()
+		cmd.Stdin = strings.NewReader("echo env=$LITERAL_ENV; cat /marker; exit 5\n")
+		var stdout, stderr bytes.Buffer
+		cmd.Stdout = &stdout
+		cmd.Stderr = &stderr
+		err := cmd.Run()
+		return stdout.String(), stderr.String(), err
+	}
+
+	stdout, stderr, err := run("busybox:1.36.1-musl")
+	s.Equal(5, reproduceExitCode(err), "shell exit code must propagate; stderr: %s", stderr)
+	s.Contains(stdout, "env=fixture-literal")
+	s.Contains(stdout, "scratch-marker")
+	s.Contains(stderr, "injecting a static BusyBox")
+
+	// Disabling the fallback restores the guidance error (exit 2).
+	_, stderr, err = run("")
+	s.Equal(2, reproduceExitCode(err), "stderr: %s", stderr)
+	s.Contains(stderr, "--shell-image")
+}
+
+// buildShelllessImage builds a FROM-scratch image (no /bin/sh) holding /marker
+// and removes it when the test ends.
+func (s *IntegrationTestSuite) buildShelllessImage() string {
+	s.T().Helper()
+	dir := s.T().TempDir()
+	s.Require().NoError(os.WriteFile(dir+"/marker", []byte("scratch-marker\n"), 0o644))
+	s.Require().NoError(os.WriteFile(dir+"/Dockerfile", []byte("FROM scratch\nCOPY marker /marker\n"), 0o644))
+	tag := fmt.Sprintf("caesium-reproduce-shellless:%d", time.Now().UnixNano())
+	out, err := exec.CommandContext(s.T().Context(), "docker", "build", "-q", "-t", tag, dir).CombinedOutput()
+	s.Require().NoError(err, "build scratch image: %s", out)
+	s.T().Cleanup(func() {
+		_ = exec.CommandContext(context.WithoutCancel(s.T().Context()), "docker", "rmi", "-f", tag).Run()
+	})
+	return tag
+}
+
+func (s *IntegrationTestSuite) leftoverShellContainers() string {
+	s.T().Helper()
+	out, err := exec.CommandContext(s.T().Context(), "docker", "ps", "-aq", "--filter", "label=caesium.reproduce.shell").Output()
+	s.Require().NoError(err)
+	return strings.TrimSpace(string(out))
+}
+
+// TestReproduceCLIShellSignalCleansUpContainers interrupts a live
+// `reproduce --shell` fallback session and proves no labelled container (which
+// would carry the reconstructed env, secrets included) survives the process.
+func (s *IntegrationTestSuite) TestReproduceCLIShellSignalCleansUpContainers() {
+	if s.engineType != "" && s.engineType != "docker" {
+		s.T().Skipf("reproduce --shell executes on the harness Docker daemon; skipped under CAESIUM_TEST_ENGINE=%s", s.engineType)
+	}
+	jobID, runID, _ := s.createReproduceCLIFixture()
+	tag := s.buildShelllessImage()
+	s.Require().Empty(s.leftoverShellContainers(), "precondition: no stale labelled containers")
+
+	for _, sig := range []os.Signal{os.Interrupt, syscall.SIGTERM} {
+		cmd := exec.CommandContext(s.T().Context(), s.cliPath,
+			"reproduce", runID, "--job-id", jobID, "--task", "transform",
+			"--shell", "--image", tag, "--shell-image", "busybox:1.36.1-musl", "--server", s.caesiumURL)
+		cmd.Dir = s.projectRoot
+		cmd.Env = os.Environ()
+		stdin, err := cmd.StdinPipe()
+		s.Require().NoError(err)
+		stdoutR, err := cmd.StdoutPipe()
+		s.Require().NoError(err)
+		s.Require().NoError(cmd.Start())
+
+		// The shell is live once it echoes; stdin stays open so it blocks.
+		_, err = stdin.Write([]byte("echo shell-ready\n"))
+		s.Require().NoError(err)
+		ready := make(chan struct{})
+		go func() {
+			sc := bufio.NewScanner(stdoutR)
+			for sc.Scan() {
+				if strings.Contains(sc.Text(), "shell-ready") {
+					close(ready)
+					break
+				}
+			}
+			_, _ = io.Copy(io.Discard, stdoutR)
+		}()
+		select {
+		case <-ready:
+		case <-time.After(60 * time.Second):
+			_ = cmd.Process.Kill()
+			s.FailNow("shell never became ready")
+		}
+		s.NotEmpty(s.leftoverShellContainers(), "labelled containers must exist during the session")
+
+		s.Require().NoError(cmd.Process.Signal(sig))
+		done := make(chan error, 1)
+		go func() { done <- cmd.Wait() }()
+		select {
+		case err = <-done:
+			s.Error(err, "interrupted run must not exit 0")
+		case <-time.After(60 * time.Second):
+			_ = cmd.Process.Kill()
+			s.FailNow("CLI did not exit after signal")
+		}
+		s.Empty(s.leftoverShellContainers(), "signal %v must not leave labelled containers behind", sig)
+	}
 }
 
 func (s *IntegrationTestSuite) createReproduceCLIFixture() (jobID, runID, taskRunID string) {

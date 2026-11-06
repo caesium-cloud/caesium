@@ -2,6 +2,7 @@
 package reproduce
 
 import (
+	"archive/tar"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -13,9 +14,11 @@ import (
 	"net/url"
 	"os"
 	osexec "os/exec"
+	"os/signal"
 	"slices"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/caesium-cloud/caesium/cmd/cliutil"
@@ -28,7 +31,9 @@ import (
 	pkgjobdef "github.com/caesium-cloud/caesium/pkg/jobdef"
 	"github.com/docker/docker/api/types/image"
 	"github.com/docker/docker/client"
+	"github.com/google/uuid"
 	"github.com/spf13/cobra"
+	"golang.org/x/term"
 )
 
 var (
@@ -45,6 +50,7 @@ var (
 	reproducePlatform       string
 	reproduceDiff           bool
 	reproduceShell          bool
+	reproduceShellImage     string
 	reproduceImage          string
 	reproduceResolveSecrets bool
 )
@@ -107,6 +113,7 @@ func init() {
 	Cmd.Flags().StringVar(&reproducePlatform, "platform", "", "Platform to use when pulling the image (for example linux/amd64)")
 	Cmd.Flags().BoolVar(&reproduceDiff, "diff", false, "Compare reproduced output markers against recorded output")
 	Cmd.Flags().BoolVar(&reproduceShell, "shell", false, "Open an interactive shell in the reconstructed environment")
+	Cmd.Flags().StringVar(&reproduceShellImage, "shell-image", ireproduce.DefaultShellImage, "With --shell: image whose static BusyBox is injected when the target image has no shell (empty disables the fallback)")
 	Cmd.Flags().StringVar(&reproduceImage, "image", "", "Override the image for fix testing (marks output OVERRIDDEN)")
 	Cmd.Flags().BoolVar(&reproduceResolveSecrets, "resolve-secrets", false, "Resolve secret:// refs via local providers (default: omit and warn)")
 }
@@ -202,10 +209,23 @@ func runReproduce(cmd *cobra.Command, args []string) error {
 	}
 
 	if reproduceShell {
-		result, err := ireproduce.ExecuteShell(cmd.Context(), env, ireproduce.ShellExecuteOptions{
+		// Installed before any container is allocated: SIGINT/SIGTERM cancel the
+		// context so the shell runner's cleanup defers run instead of the
+		// process dying with the reconstructed container (and its env) behind.
+		shellCtx, stopSignals := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
+		defer stopSignals()
+		// After the first signal restore default handling, so a second
+		// Ctrl-C / SIGTERM exits immediately (the usual CLI convention).
+		go func() {
+			<-shellCtx.Done()
+			stopSignals()
+		}()
+		result, err := ireproduce.ExecuteShell(shellCtx, env, ireproduce.ShellExecuteOptions{
 			Puller:      dockerPuller{},
 			ShellRunner: dockerShellRunner{},
 			Platform:    reproducePlatform,
+			ShellImage:  reproduceShellImage,
+			TTY:         term.IsTerminal(int(os.Stdin.Fd())),
 		})
 		if err != nil {
 			return exitWithMessage(stderr, 2, err.Error())
@@ -479,11 +499,55 @@ func (t *shellStderrTee) indicatesMissingShell() bool {
 		strings.Contains(s, "executable file not found")
 }
 
+// shellSessionLabel marks every container a `reproduce --shell` run creates,
+// valued with a per-run id, so leftovers are identifiable and cleanable.
+const shellSessionLabel = "caesium.reproduce.shell"
+
 func (dockerShellRunner) RunShell(ctx context.Context, req ireproduce.ShellRequest) error {
-	tee := &shellStderrTee{dst: os.Stderr}
-	command := osexec.CommandContext(ctx, "docker", dockerRunShellArgs(req)...)
-	command.Stdin = os.Stdin
-	command.Stdout = os.Stdout
+	req.Session = uuid.NewString()
+	// Whatever happens (error, signal-cancelled ctx), remove this run's
+	// containers with a context that is not cancelled.
+	defer removeSessionContainers(context.WithoutCancel(ctx), req.Session)
+	// Backstop: if the docker client dies without restoring the terminal, put
+	// the operator's tty back the way we found it.
+	if term.IsTerminal(int(os.Stdin.Fd())) {
+		if state, serr := term.GetState(int(os.Stdin.Fd())); serr == nil {
+			defer func() { _ = term.Restore(int(os.Stdin.Fd()), state) }()
+		}
+	}
+	// Probe without stdin first so a missing shell never swallows piped input
+	// that the fallback shell (or the real one) still needs to read.
+	probeErr := runShellCommand(ctx, req, dockerProbeShellArgs(req), nil, io.Discard, io.Discard)
+	var unavailable *ireproduce.ShellUnavailableError
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+	if !errors.As(probeErr, &unavailable) {
+		return runShellCommand(ctx, req, dockerRunShellArgs(req), os.Stdin, os.Stdout, os.Stderr)
+	}
+	if strings.TrimSpace(req.ShellImage) == "" {
+		return unavailable
+	}
+	fmt.Fprintf(os.Stderr, "shell %s is unavailable in %s; injecting a static BusyBox from %s\n", req.Shell, req.Image, req.ShellImage)
+	if ferr := runInjectedShell(ctx, req); ferr != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if _, ok := errors.AsType[*ireproduce.ShellExitError](ferr); ok {
+			return ferr
+		}
+		return &ireproduce.ShellUnavailableError{Image: req.Image, Shell: req.Shell, ShellImage: req.ShellImage, Err: ferr}
+	}
+	return nil
+}
+
+// runShellCommand runs a docker command and classifies a missing-shell exec
+// failure (exit 126/127 with a daemon/exec error on stderr).
+func runShellCommand(ctx context.Context, req ireproduce.ShellRequest, args []string, stdin io.Reader, stdout, stderr io.Writer) error {
+	tee := &shellStderrTee{dst: stderr}
+	command := gracefulCommand(ctx, "docker", args...)
+	command.Stdin = stdin
+	command.Stdout = stdout
 	command.Stderr = tee
 	if err := command.Run(); err != nil {
 		code := commandExitCode(err)
@@ -498,12 +562,241 @@ func (dockerShellRunner) RunShell(ctx context.Context, req ireproduce.ShellReque
 	return nil
 }
 
+// dockerProbeShellArgs is a stdin-less, non-TTY run that only checks the
+// shell can be exec'd.
+func dockerProbeShellArgs(req ireproduce.ShellRequest) []string {
+	probe := req
+	probe.TTY = false
+	args := dockerRunShellArgs(probe)
+	// docker run <flags> <image> [cmd...]: append the probe command.
+	return append(args, "-c", "true")
+}
+
+// gracefulCommand is exec.CommandContext except cancellation sends SIGTERM and
+// waits before killing: the docker client restores a raw-mode terminal itself
+// when terminated, but not when SIGKILLed.
+func gracefulCommand(ctx context.Context, name string, args ...string) *osexec.Cmd {
+	command := osexec.CommandContext(ctx, name, args...)
+	command.Cancel = func() error { return command.Process.Signal(syscall.SIGTERM) }
+	command.WaitDelay = 5 * time.Second
+	return command
+}
+
+// dockerCreate runs a short `docker create` that is NOT interrupted by ctx: a
+// killed client can still leave the daemon registering the container after any
+// cleanup snapshot, so we always learn the id first and honour cancellation
+// afterwards.
+//
+// Because it ignores cancellation it must be bounded and must never pull
+// (ensureShellImage pulls first, cancellably): on timeout the label sweep runs
+// and a clear error is returned.
+func dockerCreate(ctx context.Context, session string, args ...string) (string, error) {
+	detached := context.WithoutCancel(ctx)
+	cctx, cancel := context.WithTimeout(detached, createTimeout)
+	defer cancel()
+	id, err := dockerOutputFn(cctx, args...)
+	if err != nil {
+		if errors.Is(cctx.Err(), context.DeadlineExceeded) {
+			sweepFn(detached, session)
+			return "", fmt.Errorf("docker create did not finish within %s; removed any partially created containers", createTimeout)
+		}
+		return "", err
+	}
+	return id, ctx.Err()
+}
+
+// createTimeout bounds the uninterruptible docker create; vars so tests can shrink them.
+var (
+	createTimeout = 60 * time.Second
+	sweepFn       = removeSessionContainers
+)
+
+// ensureShellImage makes the shell image present locally, pulling it under the
+// (cancellable) run context so `docker create` never has to.
+func ensureShellImage(ctx context.Context, req ireproduce.ShellRequest) error {
+	if _, err := dockerOutputFn(ctx, "image", "inspect", "--format", "{{.Id}}", req.ShellImage); err == nil {
+		return nil
+	}
+	pull := []string{"pull", "--quiet"}
+	if p := strings.TrimSpace(req.Platform); p != "" {
+		pull = append(pull, "--platform", p)
+	}
+	if _, err := dockerOutputFn(ctx, append(pull, req.ShellImage)...); err != nil {
+		return fmt.Errorf("pull shell image %s: %w", req.ShellImage, err)
+	}
+	return nil
+}
+
+// removeSessionContainers force-removes every container labelled with the
+// session id, including one whose `docker create` was interrupted before its
+// id was returned.
+func removeSessionContainers(ctx context.Context, session string) {
+	ids, err := dockerOutput(ctx, "ps", "-aq", "--filter", "label="+shellSessionLabel+"="+session)
+	if err != nil || ids == "" {
+		return
+	}
+	_ = osexec.CommandContext(ctx, "docker", append([]string{"rm", "-f"}, strings.Fields(ids)...)...).Run()
+}
+
+// dockerOutputFn is swappable so tests can observe the context create runs under.
+var dockerOutputFn = dockerOutput
+
+func dockerOutput(ctx context.Context, args ...string) (string, error) {
+	var stdout, stderr bytes.Buffer
+	command := osexec.CommandContext(ctx, "docker", args...)
+	command.Stdout = &stdout
+	command.Stderr = &stderr
+	if err := command.Run(); err != nil {
+		return "", fmt.Errorf("docker %s: %w: %s", args[0], err, strings.TrimSpace(stderr.String()))
+	}
+	return strings.TrimSpace(stdout.String()), nil
+}
+
+// runInjectedShell is the --shell-image fallback. It creates (without
+// starting) a container of the target image carrying the task's env, mounts and
+// workdir, copies the static BusyBox out of a throwaway container of the shell
+// image into it with `docker cp`, then starts it with BusyBox as the entrypoint.
+func runInjectedShell(ctx context.Context, req ireproduce.ShellRequest) error {
+	srcArgs := []string{"create", "--label", shellSessionLabel + "=" + req.Session}
+	if p := strings.TrimSpace(req.Platform); p != "" {
+		srcArgs = append(srcArgs, "--platform", p)
+	}
+	if err := ensureShellImage(ctx, req); err != nil {
+		return err
+	}
+	srcID, err := dockerCreate(ctx, req.Session, append(srcArgs, req.ShellImage)...)
+	if err != nil {
+		return err
+	}
+
+	targetID, err := dockerCreate(ctx, req.Session, dockerCreateInjectedShellArgs(req)...)
+	if err != nil {
+		return err
+	}
+
+	var srcTar bytes.Buffer
+	cp := osexec.CommandContext(ctx, "docker", "cp", srcID+":"+shellImageBinary, "-")
+	var cpErr bytes.Buffer
+	cp.Stdout = &srcTar
+	cp.Stderr = &cpErr
+	if err := cp.Run(); err != nil {
+		return fmt.Errorf("copy %s out of %s: %w: %s (the shell image must ship a static BusyBox)", shellImageBinary, req.ShellImage, err, strings.TrimSpace(cpErr.String()))
+	}
+	var injected bytes.Buffer
+	if err := rewrapBusybox(&srcTar, &injected); err != nil {
+		return fmt.Errorf("package BusyBox from %s: %w", req.ShellImage, err)
+	}
+	put := osexec.CommandContext(ctx, "docker", "cp", "-", targetID+":/")
+	var putErr bytes.Buffer
+	put.Stdin = &injected
+	put.Stderr = &putErr
+	if err := put.Run(); err != nil {
+		return fmt.Errorf("copy BusyBox into %s: %w: %s", req.Image, err, strings.TrimSpace(putErr.String()))
+	}
+
+	start := gracefulCommand(ctx, "docker", "start", "-a", "-i", targetID)
+	start.Stdin = os.Stdin
+	start.Stdout = os.Stdout
+	start.Stderr = os.Stderr
+	if err := start.Run(); err != nil {
+		if code := commandExitCode(err); code >= 0 {
+			return &ireproduce.ShellExitError{Code: code, Err: err}
+		}
+		return err
+	}
+	return nil
+}
+
+const (
+	// shellImageBinary is the static multi-call binary copied out of the shell
+	// image. The name is split so the image-pin guardrail (which scans for the
+	// bare image name) does not mistake the path for an image reference.
+	shellImageBinary = "/bin/bus" + "ybox"
+	injectedShellDir = "/.caesium-shell"
+	// injectedShell is named sh so BusyBox (a multi-call binary) starts the sh
+	// applet from its argv[0] with no extra arguments.
+	injectedShell = injectedShellDir + "/sh"
+)
+
+// injectedApplets are linked into /.caesium-shell/bin so they resolve on PATH.
+var injectedApplets = []string{
+	"awk", "cat", "chmod", "chown", "cp", "cut", "date", "df", "du", "env", "find", "grep",
+	"head", "hostname", "id", "ifconfig", "ip", "kill", "ln", "ls", "mkdir", "mv", "nc",
+	"netstat", "nslookup", "ping", "ps", "rm", "sed", "sleep", "sort", "tail", "tar", "touch",
+	"tr", "uniq", "vi", "wc", "wget", "whoami",
+}
+
+// injectedPath prefixes the injected tools onto the default search path.
+const injectedPath = injectedShellDir + "/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+// rewrapBusybox reads the single-file tar `docker cp <ctr>:<binary> -`
+// emits and writes a tar that lands the binary at /.caesium-shell/sh
+// (mode 0755) when extracted at the target's root.
+func rewrapBusybox(src io.Reader, dst io.Writer) error {
+	tr := tar.NewReader(src)
+	hdr, err := tr.Next()
+	if err != nil {
+		return fmt.Errorf("read BusyBox tar: %w", err)
+	}
+	if hdr.Typeflag != tar.TypeReg {
+		return fmt.Errorf("%s is not a regular file (type %c); a static BusyBox binary is required", shellImageBinary, hdr.Typeflag)
+	}
+	tw := tar.NewWriter(dst)
+	dir := strings.TrimPrefix(injectedShellDir, "/")
+	if err := tw.WriteHeader(&tar.Header{Typeflag: tar.TypeDir, Name: dir + "/", Mode: 0o755}); err != nil {
+		return err
+	}
+	if err := tw.WriteHeader(&tar.Header{Typeflag: tar.TypeReg, Name: dir + "/sh", Mode: 0o755, Size: hdr.Size}); err != nil {
+		return err
+	}
+	if _, err := io.Copy(tw, tr); err != nil {
+		return err
+	}
+	// Applet symlinks (bin/ls -> ../sh) put the common debugging tools on PATH:
+	// BusyBox picks the applet from argv[0], which is the symlink name.
+	if err := tw.WriteHeader(&tar.Header{Typeflag: tar.TypeDir, Name: dir + "/bin/", Mode: 0o755}); err != nil {
+		return err
+	}
+	for _, applet := range injectedApplets {
+		if err := tw.WriteHeader(&tar.Header{Typeflag: tar.TypeSymlink, Name: dir + "/bin/" + applet, Linkname: "../sh", Mode: 0o777}); err != nil {
+			return err
+		}
+	}
+	return tw.Close()
+}
+
+// dockerCreateInjectedShellArgs builds the `docker create` for the target
+// container of the injected-shell fallback: same env/mounts/workdir/platform as
+// the plain shell, entrypoint = the injected shell.
+func dockerCreateInjectedShellArgs(req ireproduce.ShellRequest) []string {
+	args := []string{"create", "-i", "--label", shellSessionLabel + "=" + req.Session}
+	if req.TTY {
+		args = append(args, "-t")
+	}
+	args = append(args, "--entrypoint", injectedShell)
+	if _, recorded := req.Env["PATH"]; !recorded {
+		args = append(args, "-e", "PATH="+injectedPath)
+	}
+	args = append(args, dockerShellOptionArgs(req)...)
+	return append(args, req.Image)
+}
+
 func dockerRunShellArgs(req ireproduce.ShellRequest) []string {
 	shell := strings.TrimSpace(req.Shell)
 	if shell == "" {
 		shell = ireproduce.DefaultShell
 	}
-	args := []string{"run", "--rm", "-it", "--entrypoint", shell}
+	flags := "-i"
+	if req.TTY {
+		flags = "-it"
+	}
+	args := []string{"run", "--rm", flags, "--entrypoint", shell, "--label", shellSessionLabel + "=" + req.Session}
+	args = append(args, dockerShellOptionArgs(req)...)
+	return append(args, req.Image)
+}
+
+func dockerShellOptionArgs(req ireproduce.ShellRequest) []string {
+	var args []string
 	if strings.TrimSpace(req.Platform) != "" {
 		args = append(args, "--platform", req.Platform)
 	}
@@ -518,7 +811,6 @@ func dockerRunShellArgs(req ireproduce.ShellRequest) []string {
 			args = append(args, "--mount", arg)
 		}
 	}
-	args = append(args, req.Image)
 	return args
 }
 

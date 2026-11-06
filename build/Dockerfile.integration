@@ -11,7 +11,7 @@ RUN ldd /out/caesium-integration.test | tr -s '[:blank:]' '\n' | grep '^/' | \
     xargs -I % sh -c 'mkdir -p /runtime$(dirname %); cp % /runtime%'
 
 FROM alpine:3.23 AS integration-runner
-RUN apk add --no-cache ca-certificates git tzdata libuv lz4-libs sqlite-libs gpgme
+RUN apk add --no-cache ca-certificates git tzdata libuv lz4-libs sqlite-libs gpgme docker-cli
 COPY --from=compile /runtime/ /
 COPY --from=compile /out/caesium-integration.test /usr/local/bin/
 ENV CAESIUM_INTEGRATION_TEST_BINARY=/usr/local/bin/caesium-integration.test

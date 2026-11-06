@@ -63,5 +63,6 @@ FROM builder AS builder-full
 # at runtime. node_modules is discarded; only /root/.npm (tarballs) is kept.
 COPY ui/package.json ui/package-lock.json ./ui/
 RUN npm ci --prefix ./ui && rm -rf ./ui/node_modules
-RUN apk add --no-cache curl && \
+# docker-cli: integration tests that drive `caesium reproduce --shell` shell out to docker.
+RUN apk add --no-cache curl docker-cli && \
     curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/HEAD/install.sh | sh -s -- -b $(go env GOPATH)/bin v2.13.2
