@@ -66,6 +66,22 @@ A bounded summary of each task's dataset graph is also persisted in dqlite via t
 
 `GET /v1/lineage/impact` is a global cross-job traversal over that persisted graph. In v1, job-scoped API keys are denied on this endpoint; use an unscoped API key with viewer-or-higher role until alias-filtered impact traversal is implemented. A key confined to namespaces gets the traversal with other namespaces' nodes collapsed to placeholders (see [Cross-namespace aggregates](identity-and-access.md#cross-namespace-aggregates)).
 
+Each impact node also carries `run_id`: the job run whose task run wrote that node's dataset row (the most recent producer: repeated runs of a job collapse to one node per dataset and job, keeping the latest observation). The console uses it to open the producing run rather than only the job.
+
+To enter the impact view from a run, `GET /v1/jobs/:id/runs/:run_id/datasets` returns the dataset identities the run persisted:
+
+```json
+{
+  "run_id": "…",
+  "job_id": "…",
+  "datasets": [
+    {"namespace": "caesium", "name": "my-job.extract.output", "direction": "output", "task_name": "extract", "task_run_id": "…", "observed_at": "…"}
+  ]
+}
+```
+
+Datasets are de-duplicated per (namespace, name, direction, step) and ordered inputs first. The list is empty (not 404) for a run that persisted no lineage, including every run while `CAESIUM_OPEN_LINEAGE_ENABLED` is off; an unknown run, or one belonging to another job, is 404. The route is a viewer-role, namespaced read gated like the other single-run reads. The run detail page lists these datasets with a "View impact" link into `/lineage?namespace=…&name=…`.
+
 ## Configuration
 
 The integration is controlled entirely via environment variables. It is disabled by default.

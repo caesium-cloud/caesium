@@ -108,6 +108,7 @@ var namespaceResolvers = map[string]namespaceResolver{
 	"GET /v1/jobs/:id/runs/:id/logs":                            resolveJobRun,
 	"GET /v1/jobs/:id/runs/:id/why":                             resolveJobRun,
 	"GET /v1/jobs/:id/runs/:id/assertions":                      resolveJobRun,
+	"GET /v1/jobs/:id/runs/:id/datasets":                        resolveJobRun,
 	"GET /v1/jobs/:id/runs/:id/receipt":                         resolveJobRun,
 	"POST /v1/jobs/:id/runs/:id/receipt/verify":                 resolveJobRun,
 	"GET /v1/jobs/:id/runs/:id/tasks/:id/descriptor":            resolveJobRun,

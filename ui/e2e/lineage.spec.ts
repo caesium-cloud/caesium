@@ -20,6 +20,7 @@ type LineageImpactResult = {
     producing_step?: string;
     job_id: string;
     job_alias: string;
+    run_id?: string;
     last_seen: string;
     depth: number;
   }>;
@@ -71,6 +72,8 @@ test("operator can inspect a dataset-keyed downstream lineage graph", async ({ p
 
   expect(transform?.job_id).toBe(job.id);
   expect(transform?.job_alias).toBe(alias);
+  expect(transform?.run_id).toBe(run.id);
+  expect(publish?.run_id).toBe(run.id);
   expect(transform?.depth).toBe(0);
   expect(publish?.job_id).toBe(job.id);
   expect(publish?.job_alias).toBe(alias);
@@ -101,9 +104,18 @@ test("operator can inspect a dataset-keyed downstream lineage graph", async ({ p
   await expect(page.getByTestId(lineageImpactEdgeTestId(rootName, transformName, 0))).toContainText("downstream");
   await expect(page.getByTestId(lineageImpactEdgeTestId(transformName, publishName, 1))).toContainText("depth 2");
 
+  // Run-level click-through: the node links to the run that produced it.
   await transformNode.click();
-  await page.waitForURL(new RegExp(`/jobs/${job.id}$`));
-  await expect(page.getByRole("heading", { name: alias, exact: true })).toBeVisible();
+  await page.waitForURL(new RegExp(`/jobs/${job.id}/runs/${run.id}$`));
+
+  // Entering the lineage view from the run: the run's persisted dataset
+  // identities pre-fill the impact view.
+  const entry = page.getByTestId("run-lineage-dataset").filter({ hasText: rootName }).first().getByTestId("run-lineage-impact-link");
+  await expect(entry).toBeVisible();
+  await entry.click();
+  await page.waitForURL(/\/lineage\?/);
+  await expect(page.getByTestId("lineage-name-input")).toHaveValue(rootName);
+  await expect(page.getByTestId(lineageImpactNodeTestId("caesium", transformName, job.id))).toBeVisible();
 
   await page.goto(`/lineage?namespace=caesium&name=${encodeURIComponent(`${alias}.empty.output`)}`);
   await expect(page.getByTestId("lineage-empty-state")).toBeVisible();

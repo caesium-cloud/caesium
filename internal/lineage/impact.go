@@ -33,6 +33,12 @@ type ImpactNode struct {
 	JobID    uuid.UUID `json:"job_id"`
 	JobAlias string    `json:"job_alias"`
 
+	// RunID is the job run whose task run wrote this lineage_dataset row —
+	// the run that most recently produced the dataset for this (dataset, job)
+	// node, since rows are ordered latest-first and de-duplicated per row.
+	// Empty when the run could not be resolved.
+	RunID string `json:"run_id,omitempty"`
+
 	// ProvenanceCommit and ProvenanceRepo carry git provenance from the job
 	// at the time the dataset row was last written.
 	ProvenanceCommit string `json:"provenance_commit,omitempty"`
@@ -181,6 +187,7 @@ func findConsumers(ctx context.Context, db *gorm.DB, frontier []datasetRef) ([]I
 		FacetSummary     []byte
 		JobID            string
 		JobAlias         string
+		RunID            string
 		JobNamespace     string
 		RunNamespace     string
 		ProvenanceCommit string
@@ -217,7 +224,7 @@ func findConsumers(ctx context.Context, db *gorm.DB, frontier []datasetRef) ([]I
 			Table("lineage_datasets ld").
 			Select(
 				"ld.id, ld.namespace, ld.name, ld.facet_summary, ld.created_at,"+
-					" j.id as job_id, j.alias as job_alias,"+
+					" j.id as job_id, j.alias as job_alias, tr.job_run_id as run_id,"+
 					" j.namespace as job_namespace, jr.namespace as run_namespace,"+
 					" j.provenance_commit, j.provenance_repo",
 			).
@@ -247,7 +254,17 @@ func findConsumers(ctx context.Context, db *gorm.DB, frontier []datasetRef) ([]I
 	})
 
 	nodes := make([]ImpactNode, 0, len(outputRows))
+	// One node per (dataset namespace, name, job): repeated runs of a job
+	// write one lineage row each, and outputRows is ordered latest-first, so
+	// the first row seen for an identity is its latest observation (RunID,
+	// LastSeen and the producing step all describe that run).
+	collapsed := make(map[[3]string]struct{}, len(outputRows))
 	for _, row := range outputRows {
+		identity := [3]string{row.Namespace, row.Name, row.JobID}
+		if _, dup := collapsed[identity]; dup {
+			continue
+		}
+		collapsed[identity] = struct{}{}
 		jobID, err := uuid.Parse(row.JobID)
 		if err != nil {
 			// A zero UUID signals to callers that provenance attribution
@@ -262,6 +279,7 @@ func findConsumers(ctx context.Context, db *gorm.DB, frontier []datasetRef) ([]I
 			ProducingStep:    stepNameFromFacet(row.FacetSummary),
 			JobID:            jobID,
 			JobAlias:         row.JobAlias,
+			RunID:            row.RunID,
 			JobNamespace:     row.JobNamespace,
 			RunNamespace:     row.RunNamespace,
 			ProvenanceCommit: row.ProvenanceCommit,

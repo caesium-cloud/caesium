@@ -414,7 +414,8 @@ trigger:
 steps:
   - name: sample
     image: alpine:3.23
-    command: ["sh", "-c", "sleep 2; echo coverage-task-log"]
+    outputSchema: { type: object, properties: { rows: { type: string } } }
+    command: ["sh", "-c", "sleep 2; echo coverage-task-log; echo '##caesium::output {\"rows\": \"1\"}'"]
 YAML
 }
 
@@ -770,6 +771,8 @@ SERVER_ID="$("$CONTAINER_CLI" run -d \
   -e DOCKER_HOST=unix:///var/run/docker.sock \
   -e CAESIUM_RESOURCE_STATS_ENABLED=true \
   -e CAESIUM_RESOURCE_STATS_SAMPLE_INTERVAL=100ms \
+  -e CAESIUM_OPEN_LINEAGE_ENABLED=true \
+  -e CAESIUM_OPEN_LINEAGE_TRANSPORT=console \
   -v "$SOCK:/var/run/docker.sock" \
   -v "$RAW/server:/var/lib/caesium/coverage" \
   "$IMAGE_ID" start)"
@@ -1122,6 +1125,40 @@ if [[ "$cli_rc" -eq 0 ]]; then
     log "task's retained log did not contain its actual output"
     cli_rc=1
   fi
+fi
+
+# Lineage (#410): the run above persisted its dataset identities through the
+# event subscriber (asynchronously), so poll GET /v1/jobs/:id/runs/:run_id/datasets
+# until it lists the step's output, then require /v1/lineage/impact on that
+# dataset to answer 200. A run that never lists a dataset fails the journey
+# rather than letting the unreached endpoint pass as coverage.
+if [[ "$cli_rc" -eq 0 ]]; then
+  log "reading the run's persisted lineage datasets"
+  datasets_ok=0
+  for _ in $(seq 1 60); do
+    if server_get "/v1/jobs/$job_id/runs/$run_id/datasets" >"$ARTIFACTS/run-datasets.json" 2>/dev/null \
+        && python3 -c 'import json,sys
+d = json.load(open(sys.argv[1]))
+ok = d.get("run_id") == sys.argv[2] and any(x.get("direction") == "output" and x.get("name") for x in d.get("datasets") or [])
+sys.exit(0 if ok else 1)' "$ARTIFACTS/run-datasets.json" "$run_id"; then
+      datasets_ok=1
+      break
+    fi
+    sleep 1
+  done
+  if [[ "$datasets_ok" -ne 1 ]]; then
+    log "run $run_id never listed a persisted lineage output dataset"
+    cli_rc=1
+  fi
+fi
+if [[ "$cli_rc" -eq 0 ]]; then
+  impact_query="$(python3 -c 'import json,sys,urllib.parse
+d = json.load(open(sys.argv[1]))
+x = next(x for x in d["datasets"] if x["direction"] == "output")
+print(urllib.parse.urlencode({"namespace": x["namespace"], "name": x["name"]}))' "$ARTIFACTS/run-datasets.json")" || cli_rc=1
+fi
+if [[ "$cli_rc" -eq 0 ]]; then
+  server_get "/v1/lineage/impact?$impact_query" >"$ARTIFACTS/lineage-impact.json" || cli_rc=1
 fi
 
 # H1 operator surface on the same single-node server, read-only by design:

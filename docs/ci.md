@@ -2150,6 +2150,14 @@ zero-uncovered diff floor for any PR that touches them. The covered-statement
 floors were kept (`api/middleware` 34) or raised (`pkg/dqlite` 341 → 390). Only
 the two percentage floors were lowered, to 7.6 and 37.5.
 
+**Lineage run links (#410).** The coverage server also runs with
+`CAESIUM_OPEN_LINEAGE_ENABLED=true` (console transport) and the fixture step
+declares an `outputSchema` and emits an output marker. After the run the
+journey polls `GET /v1/jobs/:id/runs/:run_id/datasets` until it lists an output
+dataset, then queries `/v1/lineage/impact` for that dataset; a run that never
+lists one fails the journey. This is what covers the run-datasets controller and
+query under the max-zero diff ratchet.
+
 **Post-W9 repair (#614).** After #449 (resource-right-sizing W1-α) merged on
 top of the promoted lanes, the max-zero diff ratchet refused 18 changed paths
 that the journey could not reach because the feature is off by default. The

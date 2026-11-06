@@ -271,6 +271,7 @@ func Protected(g *echo.Group, bus internal_event.Bus, auditor *auth.AuditLogger,
 	// lineage impact (data-plane-memory C2)
 	{
 		g.GET("/lineage/impact", lineagectrl.Impact)
+		g.GET("/jobs/:id/runs/:run_id/datasets", lineagectrl.RunDatasets)
 	}
 
 	// incidents — operator read API + tier-3 approval decisions

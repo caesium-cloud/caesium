@@ -82,3 +82,22 @@ func TestRedactStoredImpactRefusesACorruptCone(t *testing.T) {
 	_, err := RedactStoredImpact(confinedRedactor(t, "default"), []byte("{"))
 	require.Error(t, err)
 }
+
+// Repeat nodes of one foreign producer collapse to a single placeholder per
+// (id, depth): the query layer no longer emits an A,B,A sequence, so the
+// redaction step is driven directly to keep that dedup covered.
+func TestRedactImpactNodesDedupesRepeatedForeignNodes(t *testing.T) {
+	foreign := func(name string, job uuid.UUID) ImpactNode {
+		return ImpactNode{DatasetNamespace: "ol", DatasetName: name, JobID: job, JobNamespace: "finance", RunNamespace: "finance"}
+	}
+	jobA, jobB := uuid.New(), uuid.New()
+	nodes := []ImpactNode{foreign("d-a", jobA), foreign("d-b", jobB), foreign("d-a", jobA)}
+
+	got := RedactImpactNodes(confinedRedactor(t, "marketing"), nodes)
+	require.Len(t, got, 2)
+	first, ok := got[0].(ExternalImpactNode)
+	require.True(t, ok)
+	second, ok := got[1].(ExternalImpactNode)
+	require.True(t, ok)
+	require.NotEqual(t, first.ID, second.ID)
+}
