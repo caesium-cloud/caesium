@@ -208,7 +208,11 @@ func TestDockerCreateIsBoundedAndSweepsOnStall(t *testing.T) {
 		return "", ctx.Err()
 	}
 	var swept string
-	sweepFn = func(_ context.Context, session string) { swept = session }
+	sweepFn = func(ctx context.Context, session string) {
+		if ctx.Err() == nil {
+			swept = session
+		}
+	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // parent cancelled; create must still be bounded, not hang
@@ -222,6 +226,29 @@ func TestDockerCreateIsBoundedAndSweepsOnStall(t *testing.T) {
 	}
 	if swept != "sess-9" {
 		t.Fatalf("sweep session = %q, want sess-9", swept)
+	}
+}
+
+func TestDockerCreateReturnsEvenWhenSweepBlocks(t *testing.T) {
+	origOut, origTimeout, origSweep, origSweepTimeout := dockerOutputFn, createTimeout, sweepFn, sweepTimeout
+	defer func() {
+		dockerOutputFn, createTimeout, sweepFn, sweepTimeout = origOut, origTimeout, origSweep, origSweepTimeout
+	}()
+	createTimeout, sweepTimeout = 50*time.Millisecond, 100*time.Millisecond
+	dockerOutputFn = func(ctx context.Context, args ...string) (string, error) {
+		<-ctx.Done()
+		return "", ctx.Err()
+	}
+	release := make(chan struct{})
+	defer close(release)
+	sweepFn = func(context.Context, string) { <-release } // ignores its ctx: a wedged daemon
+
+	start := time.Now()
+	if _, err := dockerCreate(context.Background(), "sess", "create", "img"); err == nil {
+		t.Fatal("want timeout error")
+	}
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Fatalf("dockerCreate took %s, want about create+sweep bounds", elapsed)
 	}
 }
 

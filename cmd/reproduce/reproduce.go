@@ -507,7 +507,7 @@ func (dockerShellRunner) RunShell(ctx context.Context, req ireproduce.ShellReque
 	req.Session = uuid.NewString()
 	// Whatever happens (error, signal-cancelled ctx), remove this run's
 	// containers with a context that is not cancelled.
-	defer removeSessionContainers(context.WithoutCancel(ctx), req.Session)
+	defer sweepSession(ctx, req.Session)
 	// Backstop: if the docker client dies without restoring the terminal, put
 	// the operator's tty back the way we found it.
 	if term.IsTerminal(int(os.Stdin.Fd())) {
@@ -597,7 +597,7 @@ func dockerCreate(ctx context.Context, session string, args ...string) (string, 
 	id, err := dockerOutputFn(cctx, args...)
 	if err != nil {
 		if errors.Is(cctx.Err(), context.DeadlineExceeded) {
-			sweepFn(detached, session)
+			sweepSession(ctx, session)
 			return "", fmt.Errorf("docker create did not finish within %s; removed any partially created containers", createTimeout)
 		}
 		return "", err
@@ -609,7 +609,26 @@ func dockerCreate(ctx context.Context, session string, args ...string) (string, 
 var (
 	createTimeout = 60 * time.Second
 	sweepFn       = removeSessionContainers
+	sweepTimeout  = 30 * time.Second
 )
+
+// sweepSession runs the label sweep under its own finite deadline (detached
+// from ctx's cancellation, which is usually why we are cleaning up). If the
+// daemon is unresponsive it warns with the manual command and returns.
+func sweepSession(ctx context.Context, session string) {
+	sctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), sweepTimeout)
+	defer cancel()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		sweepFn(sctx, session)
+	}()
+	select {
+	case <-done:
+	case <-sctx.Done():
+		fmt.Fprintf(os.Stderr, "warning: cleanup of reproduce containers timed out after %s; remove leftovers with: docker rm -f $(docker ps -aq --filter label=%s=%s)\n", sweepTimeout, shellSessionLabel, session)
+	}
+}
 
 // ensureShellImage makes the shell image present locally, pulling it under the
 // (cancellable) run context so `docker create` never has to.
