@@ -17,6 +17,10 @@ import (
 
 const DefaultShell = "/bin/sh"
 
+// DefaultShellImage is the image whose static BusyBox is injected when the
+// target image has no usable shell (see --shell-image).
+const DefaultShellImage = "busybox:1.36.1-musl"
+
 // Puller pulls the image reference selected for local reproduction.
 type Puller interface {
 	Pull(ctx context.Context, imageRef, platform string) error
@@ -70,6 +74,10 @@ type ShellExecuteOptions struct {
 	Puller      Puller
 	ShellRunner ShellRunner
 	Platform    string
+	// ShellImage is the --shell-image fallback source; empty disables it.
+	ShellImage string
+	// TTY is true when the operator's stdin is a terminal.
+	TTY bool
 }
 
 // ExecutionResult is the machine-readable result for run mode.
@@ -98,6 +106,14 @@ type ShellRequest struct {
 	Mounts   []container.Mount `json:"mounts,omitempty"`
 	WorkDir  string            `json:"workdir,omitempty"`
 	Platform string            `json:"platform,omitempty"`
+	// ShellImage, when non-empty, is the image a static BusyBox is copied from
+	// if the target image has no usable Shell. Empty disables the fallback.
+	ShellImage string `json:"shell_image,omitempty"`
+	// Session labels the containers created for this run so they can be
+	// cleaned up (set by the runner).
+	Session string `json:"-"`
+	// TTY requests a pseudo-terminal; false runs the shell with piped stdin.
+	TTY bool `json:"tty,omitempty"`
 }
 
 // ShellResult reports the interactive shell process outcome.
@@ -139,14 +155,26 @@ func (e *PullError) Unwrap() error {
 type ShellUnavailableError struct {
 	Image string
 	Shell string
-	Err   error
+	// ShellImage is the fallback image that was tried, if any.
+	ShellImage string
+	Err        error
 }
 
 func (e *ShellUnavailableError) Error() string {
+	if strings.TrimSpace(e.ShellImage) == "" {
+		return fmt.Sprintf(
+			"shell %s is unavailable in image %s; distroless images often omit a shell. Re-run with --shell-image (for example --shell-image %s) to inject a static BusyBox shell, use run mode, or rebuild an image with a shell",
+			e.Shell,
+			e.Image,
+			DefaultShellImage,
+		)
+	}
 	return fmt.Sprintf(
-		"shell %s is unavailable in image %s; distroless images often omit a shell. The --shell-image sidecar fallback is deferred (design Open Question #4); use run mode or rebuild an image with a shell for interactive debugging",
+		"shell %s is unavailable in image %s and the --shell-image fallback (%s) failed: %v",
 		e.Shell,
 		e.Image,
+		e.ShellImage,
+		e.Err,
 	)
 }
 
@@ -272,6 +300,8 @@ func ExecuteShell(ctx context.Context, env *Envelope, opts ShellExecuteOptions) 
 	}
 
 	req := BuildShellRequest(env, platform)
+	req.ShellImage = strings.TrimSpace(opts.ShellImage)
+	req.TTY = opts.TTY
 	result := &ShellResult{
 		Task:            env.TaskName,
 		Image:           env.Image,

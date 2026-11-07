@@ -61,6 +61,7 @@ caesium reproduce <run-id> --job-id <job-id> --task <task> [flags]
 | `--platform string` | none | no | Platform to use when pulling the image, for example `linux/amd64`. |
 | `--diff` | `false` | no | Compare reproduced output markers against recorded output. |
 | `--shell` | `false` | no | Open an interactive `/bin/sh` shell in the reconstructed environment. |
+| `--shell-image ref` | `busybox:1.36.1-musl` | no | With `--shell`: image whose static BusyBox is injected when the target image has no `/bin/sh`. Empty disables the fallback. |
 | `--image ref` | none | no | Override the image for fix testing. Marks the output `OVERRIDDEN`. |
 | `--resolve-secrets` | `false` | no | Resolve `secret://` refs via local providers. Default is omit and warn. |
 
@@ -87,6 +88,12 @@ Environment reconstruction order is: recorded literal `ContainerSpec.Env`, recor
 | `3` | The local task succeeded, `--diff` ran, and reproduced output differed from recorded output. |
 
 Registry pull failures include the registry host and `docker login <host>` guidance. If the selected image is already present in the local Docker daemon, reproduce uses it without pulling.
+
+### Shells on distroless images
+
+`--shell` first runs `/bin/sh` in the reconstructed image. If the image has no shell (the docker run fails with an exec error, exit 126/127), reproduce falls back to `--shell-image`: it creates a container of the target image with the recorded env, mounts, workdir, and platform; copies the shell image's static BusyBox binary out of a throwaway container into it at `/.caesium-shell/sh` with `docker cp`; and starts that container with it as the entrypoint (BusyBox runs its `sh` applet). Both containers are removed on exit. A shell-image failure exits `2`; `--shell-image ""` restores the plain guidance error.
+
+Limits: the shell image must ship a static BusyBox binary (the default does); only BusyBox applets (the common ones are linked into `/.caesium-shell/bin`, which is prepended to `PATH` unless the recorded env sets `PATH`) are available, not the target's tooling; the recorded entrypoint/command is not run (as in plain `--shell`); and the injected file exists only in the throwaway container, never in the image. When stdin is not a terminal the shell runs without a TTY, so `echo 'ls /' | caesium reproduce ... --shell` works in scripts. The fallback shells out to the `docker` CLI, so it applies to Podman through a docker-compatible CLI; reproduce always runs locally, so there is no Kubernetes path.
 
 In `--shell` mode, a successful shell exits `0`. If the interactive shell process exits non-zero, reproduce propagates that shell exit code; setup and shell-unavailable errors still exit `2`.
 

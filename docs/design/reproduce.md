@@ -325,9 +325,9 @@ the real surface — no unit-test-on-the-handler substitute:
 3. **Attempt semantics.** Reproduce runs exactly once — should recorded
    retry/backoff config be applied, or is single-shot the right debug-loop
    default (current lean)?
-4. **`--shell` on distroless images.** Fail with guidance, or offer a
-   `--shell-image` sidecar-style fallback that mounts the env into a
-   busybox:1.36.1 container?
+4. **`--shell` on distroless images.** *Resolved:* `--shell-image`
+   (default `busybox:1.36.1`) injects a static BusyBox into a created copy of
+   the target container; see [`../reproduce.md`](../reproduce.md).
 5. **Explain integration.** Should the endpoint also return the redacted
    `HashInputBlob` so the CLI can print "which field differs from the previous
    run" inline (a mini-`why`), or is that scope creep past the debug loop?
