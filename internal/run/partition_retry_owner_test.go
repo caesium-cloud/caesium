@@ -102,3 +102,82 @@ func TestAbandonPartitionRetriesDropsOwnerReadyQueue(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, StatusFailed, got.Status)
 }
+
+// TestAbandonPartitionRetriesSerializesWithOwnerCompletion is the window after
+// the skip commits and before the owner fold. A completion that clones the
+// pre-skip state there stamps the same terminal_sequence and checkpoints with
+// the abandoned instance still pending. Recovery then filters the skip out
+// (terminal_sequence is not greater than the checkpoint) and puts it back on
+// the ready queue.
+func TestAbandonPartitionRetriesSerializesWithOwnerCompletion(t *testing.T) {
+	f := newFanOutFixture(t, &jobdefschema.FanOut{
+		From: "discover", MaxPartitions: 16, FailurePolicy: jobdefschema.FanOutFailureContinue,
+	})
+	_, err := f.expand(t, strParts("abandon", "complete"))
+	require.NoError(t, err)
+	rows := finishFannedRun(t, f, TaskStatusFailed, TaskStatusFailed)
+	abandonID := rows[0].ID
+	completeID := rows[1].ID
+
+	_, _, err = f.store.RetryPartition(context.Background(), f.runID, abandonID)
+	require.NoError(t, err)
+	_, _, err = f.store.RetryPartition(context.Background(), f.runID, completeID)
+	require.NoError(t, err)
+
+	require.NoError(t, f.db.Model(&models.TaskRun{}).Where("id = ?", f.producerRow(t).ID).
+		Update("terminal_sequence", 1).Error)
+	require.NoError(t, f.db.Model(&models.TaskRun{}).Where("id IN ?", []uuid.UUID{abandonID, completeID}).
+		Update("terminal_sequence", 0).Error)
+
+	mgr := NewOwnerManager(f.store, CheckpointConfig{Events: 1, Interval: time.Hour, KeepFulls: 3})
+	_, err = mgr.Recover(f.runID, 1)
+	require.NoError(t, err)
+	ready := dispatchIDs(mgr.ReadyForDispatch(f.runID))
+	require.Contains(t, ready, abandonID)
+	require.Contains(t, ready, completeID)
+
+	finished := make(chan error, 1)
+	f.store.afterAbandonRowsRead = func() {
+		go func() {
+			_, callErr := mgr.CompleteInstance(f.runID, f.consumer.ID, completeID, TaskStatusSucceeded, "success", "", "", nil, nil, nil)
+			finished <- callErr
+		}()
+		select {
+		case callErr := <-finished:
+			t.Errorf("owner completion ran before abandonment folded the skip: %v", callErr)
+			finished <- callErr
+		case <-time.After(50 * time.Millisecond):
+		}
+	}
+
+	reason := "partition retry abandoned: the replacement engine could not dispatch the reset instance"
+	resolved, err := f.store.AbandonPartitionRetries(f.runID, []uuid.UUID{abandonID}, reason)
+	require.NoError(t, err)
+	require.Equal(t, 1, resolved)
+
+	select {
+	case callErr := <-finished:
+		require.NoError(t, callErr)
+	case <-time.After(5 * time.Second):
+		t.Fatal("owner completion did not finish after abandonment released the lock")
+	}
+
+	var abandoned, completed models.TaskRun
+	require.NoError(t, f.db.First(&abandoned, "id = ?", abandonID).Error)
+	require.NoError(t, f.db.First(&completed, "id = ?", completeID).Error)
+	require.Equal(t, string(TaskStatusSkipped), abandoned.Status)
+	require.Equal(t, string(TaskStatusSucceeded), completed.Status)
+	require.Greater(t, abandoned.TerminalSequence, int64(0))
+	require.Greater(t, completed.TerminalSequence, int64(0))
+	require.NotEqual(t, abandoned.TerminalSequence, completed.TerminalSequence,
+		"the completion must not reuse the sequence the skip just allocated")
+
+	require.NoError(t, mgr.Release(f.runID))
+	_, err = mgr.Recover(f.runID, 1)
+	require.NoError(t, err)
+	recovered := dispatchIDs(mgr.ReadyForDispatch(f.runID))
+	require.NotContains(t, recovered, abandonID,
+		"recovery must not re-queue a skipped row whose sequence the checkpoint already covers")
+	require.NotContains(t, recovered, completeID)
+	require.False(t, mgr.Dispatchable(f.runID, abandonID))
+}

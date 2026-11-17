@@ -445,7 +445,41 @@ func (m *OwnerManager) ApplyTerminalRows(runID uuid.UUID, rows []models.TaskRun)
 		return
 	}
 	or.mu.Lock()
-	applied := 0
+	applied, complete, hasFailures := m.foldTerminalRows(or, rows)
+	or.mu.Unlock()
+	m.finalizeFoldedRun(runID, applied, complete, hasFailures)
+}
+
+// LockRun runs fn while this run's owner lock is held — the same lock
+// CompleteInstance holds across its in-memory stamp, durable write, and
+// checkpoint. apply folds rows and checkpoints before that lock is released,
+// so a completion cannot stamp the sequence the store just allocated or
+// checkpoint a snapshot that still has the row pending. A run this node does
+// not own runs fn with a no-op apply; recovery rebuilds from the rows.
+func (m *OwnerManager) LockRun(runID uuid.UUID, fn func(apply func(rows []models.TaskRun))) {
+	if fn == nil {
+		return
+	}
+	or, ok := m.get(runID)
+	if !ok {
+		fn(func([]models.TaskRun) {})
+		return
+	}
+	or.mu.Lock()
+	var applied int
+	var complete, hasFailures bool
+	fn(func(rows []models.TaskRun) {
+		if len(rows) == 0 {
+			return
+		}
+		applied, complete, hasFailures = m.foldTerminalRows(or, rows)
+	})
+	or.mu.Unlock()
+	m.finalizeFoldedRun(runID, applied, complete, hasFailures)
+}
+
+// foldTerminalRows applies store-resolved terminal rows. or.mu must be held.
+func (m *OwnerManager) foldTerminalRows(or *ownedRun, rows []models.TaskRun) (applied int, complete, hasFailures bool) {
 	for i := range rows {
 		row := &rows[i]
 		if !IsTerminal(TaskStatus(row.Status)) {
@@ -464,14 +498,16 @@ func (m *OwnerManager) ApplyTerminalRows(runID uuid.UUID, rows []models.TaskRun)
 		applied++
 	}
 	if applied == 0 {
-		or.mu.Unlock()
-		return
+		return 0, false, false
 	}
 	or.checkpointMaybe()
-	complete := or.state.IsComplete()
-	hasFailures := or.state.HasFailures()
-	or.mu.Unlock()
+	return applied, or.state.IsComplete(), or.state.HasFailures()
+}
 
+func (m *OwnerManager) finalizeFoldedRun(runID uuid.UUID, applied int, complete, hasFailures bool) {
+	if applied == 0 {
+		return
+	}
 	log.Info("owner manager: folded store-resolved terminal rows into run state",
 		"run_id", runID, "rows", applied, "complete", complete)
 
