@@ -416,22 +416,26 @@ func (m *OwnerManager) HeldRunIDs() []uuid.UUID {
 //
 // Every other terminal transition on the in-memory lane originates HERE
 // (CompleteInstance stages it, persists it, then publishes it), so the state
-// and the rows never disagree. The halt sweep is the one writer that goes the
-// other way: it resolves rows in SQL from a worker or the run-completion
-// waiter, and this state consumes neither task_skipped events nor the row
-// scalar. Without this the halted step stayed on the ready queue (every
-// dispatch of it refused, the row already skipped) and the cleanup the sweep
-// released never entered the queue — a run the waiter kept alive forever for a
-// step nobody would dispatch.
+// and the rows never disagree. Two writers go the other way: the halt sweep,
+// and partition-retry abandonment. Both resolve rows in SQL, and this state
+// consumes neither task_skipped events nor the row scalar. Without this fold
+// the resolved step stayed on the ready queue (every dispatch of it refused,
+// the row already skipped) — the halt sweep's cleanup never entered the queue,
+// and an abandoned retry was re-posted until the suite timed out.
 //
 // Rows are applied in terminal_sequence order through ApplyTerminalRow, the
 // same transition recovery replays persisted terminal rows with: the stored
 // sequence is adopted (not re-stamped), successors whose rule is now satisfied
 // are pushed ready, and unsatisfied ones are left alone because the sweep
 // persisted their skips as rows of their own, which arrive in this same
-// batch. If the fold completes the DAG the run is finalized exactly as a
-// completion that completes it would be. A run this node does not own is a
-// no-op: a takeover rebuilds from the rows, which already carry the sweep.
+// batch. If the fold completes the DAG and any task failed, the run is
+// finalized exactly as a completion that completes it would be, then dropped.
+// A failure-free completion is left to the caller. Abandonment skips the last
+// pending instance after its failed attempt was reset, so this state holds a
+// skip rather than a failure, and the engine then fails the run with the
+// abandon reason — Complete(nil) here would make that write a no-op. A run
+// this node does not own is a no-op: a takeover rebuilds from the rows, which
+// already carry the sweep.
 func (m *OwnerManager) ApplyTerminalRows(runID uuid.UUID, rows []models.TaskRun) {
 	if len(rows) == 0 {
 		return
@@ -441,7 +445,41 @@ func (m *OwnerManager) ApplyTerminalRows(runID uuid.UUID, rows []models.TaskRun)
 		return
 	}
 	or.mu.Lock()
-	applied := 0
+	applied, complete, hasFailures := m.foldTerminalRows(or, rows)
+	or.mu.Unlock()
+	m.finalizeFoldedRun(runID, applied, complete, hasFailures)
+}
+
+// LockRun runs fn while this run's owner lock is held — the same lock
+// CompleteInstance holds across its in-memory stamp, durable write, and
+// checkpoint. apply folds rows and checkpoints before that lock is released,
+// so a completion cannot stamp the sequence the store just allocated or
+// checkpoint a snapshot that still has the row pending. A run this node does
+// not own runs fn with a no-op apply; recovery rebuilds from the rows.
+func (m *OwnerManager) LockRun(runID uuid.UUID, fn func(apply func(rows []models.TaskRun))) {
+	if fn == nil {
+		return
+	}
+	or, ok := m.get(runID)
+	if !ok {
+		fn(func([]models.TaskRun) {})
+		return
+	}
+	or.mu.Lock()
+	var applied int
+	var complete, hasFailures bool
+	fn(func(rows []models.TaskRun) {
+		if len(rows) == 0 {
+			return
+		}
+		applied, complete, hasFailures = m.foldTerminalRows(or, rows)
+	})
+	or.mu.Unlock()
+	m.finalizeFoldedRun(runID, applied, complete, hasFailures)
+}
+
+// foldTerminalRows applies store-resolved terminal rows. or.mu must be held.
+func (m *OwnerManager) foldTerminalRows(or *ownedRun, rows []models.TaskRun) (applied int, complete, hasFailures bool) {
 	for i := range rows {
 		row := &rows[i]
 		if !IsTerminal(TaskStatus(row.Status)) {
@@ -460,35 +498,41 @@ func (m *OwnerManager) ApplyTerminalRows(runID uuid.UUID, rows []models.TaskRun)
 		applied++
 	}
 	if applied == 0 {
-		or.mu.Unlock()
-		return
+		return 0, false, false
 	}
 	or.checkpointMaybe()
-	complete := or.state.IsComplete()
-	hasFailures := or.state.HasFailures()
-	or.mu.Unlock()
+	return applied, or.state.IsComplete(), or.state.HasFailures()
+}
 
+func (m *OwnerManager) finalizeFoldedRun(runID uuid.UUID, applied int, complete, hasFailures bool) {
+	if applied == 0 {
+		return
+	}
 	log.Info("owner manager: folded store-resolved terminal rows into run state",
 		"run_id", runID, "rows", applied, "complete", complete)
 
-	if complete {
-		var runErr error
-		if hasFailures {
-			runErr = fmt.Errorf("run %s completed with failed task(s)", runID)
-		}
-		if cErr := m.store.Complete(runID, runErr); errors.Is(cErr, ErrRunHasPendingWork) {
-			// Same reasoning as CompleteInstance: a partition retry reopened
-			// work this state never saw, so release without a checkpoint and
-			// let recovery rebuild from the rows.
-			if rErr := m.Release(runID); rErr != nil {
-				log.Error("owner manager: failed to discard checkpoints after a refused completion", "run_id", runID, "error", rErr)
-			}
-			return
-		} else if cErr != nil {
-			log.Error("owner manager: run finalize failed", "run_id", runID, "error", cErr)
-		}
-		m.Drop(runID)
+	if !complete || !hasFailures {
+		// The ready queue already dropped the folded rows. Finalize only when
+		// the DAG is finished and a task failed (the halt sweep). A
+		// failure-free completion — abandonment of the last pending instance,
+		// whose failed attempt was reset before the skip — belongs to the
+		// caller: Complete(nil) here would record a success ahead of the
+		// engine's abandon reason, and that later write is a no-op.
+		return
 	}
+	runErr := fmt.Errorf("run %s completed with failed task(s)", runID)
+	if cErr := m.store.Complete(runID, runErr); errors.Is(cErr, ErrRunHasPendingWork) {
+		// Same reasoning as CompleteInstance: a partition retry reopened
+		// work this state never saw, so release without a checkpoint and
+		// let recovery rebuild from the rows.
+		if rErr := m.Release(runID); rErr != nil {
+			log.Error("owner manager: failed to discard checkpoints after a refused completion", "run_id", runID, "error", rErr)
+		}
+		return
+	} else if cErr != nil {
+		log.Error("owner manager: run finalize failed", "run_id", runID, "error", cErr)
+	}
+	m.Drop(runID)
 }
 
 // Ready returns the run's current ready queue in dispatch order, or nil if the
