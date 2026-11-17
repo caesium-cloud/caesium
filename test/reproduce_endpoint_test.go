@@ -148,7 +148,7 @@ steps:
 		"descriptor should include predecessor source output, got %+v", desc.DAG.PredecessorOutputs)
 	s.Equal(fmt.Sprintf("/v1/jobs/%s/runs/%s/logs?task_id=%s", job.ID, runID, desc.Baseline.TaskID), resp.LogExcerpt.Path)
 	s.Require().NotEmpty(resp.HashInputBlob, "cached task should persist a hash input blob")
-	s.NotContains(string(resp.HashInputBlob), "fixture-literal", "literal env must be redacted in the hash input blob")
+	s.requireRedactedHashInputEnv(resp.HashInputBlob, "LITERAL_ENV", "fixture-literal")
 	s.Require().NotNil(resp.MiniWhy)
 	s.Equal("none", resp.MiniWhy.BaselineKind)
 	s.Contains(resp.MiniWhy.Summary, "no prior run")
@@ -168,7 +168,7 @@ steps:
 	s.Equal("changed", flavor.Change)
 	s.Equal("vanilla", flavor.Before)
 	s.Equal("chocolate", flavor.After)
-	s.NotContains(string(second.HashInputBlob), "fixture-literal")
+	s.requireRedactedHashInputEnv(second.HashInputBlob, "LITERAL_ENV", "fixture-literal")
 
 	uuidStatus, uuidBody := s.getReproduceDescriptor(job.ID, runID, desc.Baseline.TaskID)
 	s.Require().Equal(http.StatusOK, uuidStatus, string(uuidBody))

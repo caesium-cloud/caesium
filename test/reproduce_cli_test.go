@@ -57,7 +57,7 @@ func (s *IntegrationTestSuite) TestReproduceCLIDryRunAndRunMode() {
 		s.True(reproduceHasWarning(envelope.Warnings, "secret_omitted"), "warnings = %+v", envelope.Warnings)
 	}
 	s.Require().NotEmpty(envelope.HashInputBlob, "dry-run JSON should include the redacted hash input blob")
-	s.NotContains(string(envelope.HashInputBlob), "fixture-literal")
+	s.requireRedactedHashInputEnv(envelope.HashInputBlob, "LITERAL_ENV", "fixture-literal")
 	s.NotContains(string(envelope.HashInputBlob), reproduceCLISecretValue)
 	s.Require().NotNil(envelope.MiniWhy)
 	s.Equal("none", envelope.MiniWhy.BaselineKind)
@@ -94,7 +94,7 @@ func (s *IntegrationTestSuite) TestReproduceCLIDryRunAndRunMode() {
 	s.Require().NoError(err, "stderr: %s", secondErr)
 	var secondEnv reproduceCLIEnvelope
 	s.Require().NoError(json.Unmarshal([]byte(secondOut), &secondEnv), "stdout: %s", secondOut)
-	s.NotContains(string(secondEnv.HashInputBlob), "fixture-literal")
+	s.requireRedactedHashInputEnv(secondEnv.HashInputBlob, "LITERAL_ENV", "fixture-literal")
 	s.NotContains(string(secondEnv.HashInputBlob), reproduceCLISecretValue)
 	s.Require().NotNil(secondEnv.MiniWhy)
 	s.Equal("prior_run", secondEnv.MiniWhy.BaselineKind)
@@ -151,7 +151,7 @@ func (s *IntegrationTestSuite) TestReproduceCLIDryRunAndRunMode() {
 	s.Require().NotNil(result.Fidelity)
 	s.True(reproduceHasFidelity(result.Fidelity, "image_content", "faithful"), "fidelity = %+v", result.Fidelity)
 	s.True(reproduceHasFidelity(result.Fidelity, "wall_clock_time", "not_reproduced"), "fidelity = %+v", result.Fidelity)
-	s.NotContains(string(result.HashInputBlob), "fixture-literal")
+	s.requireRedactedHashInputEnv(result.HashInputBlob, "LITERAL_ENV", "fixture-literal")
 	s.NotContains(string(result.HashInputBlob), reproduceCLISecretValue)
 	s.Require().NotNil(result.MiniWhy)
 	s.Equal("none", result.MiniWhy.BaselineKind)
@@ -317,6 +317,30 @@ func (s *IntegrationTestSuite) TestReproduceCLIShellSignalCleansUpContainers() {
 		}
 		s.Empty(s.leftoverShellContainers(), "signal %v must not leave labelled containers behind", sig)
 	}
+}
+
+// requireRedactedHashInputEnv checks that a literal env value is stored as a
+// sha256 digest. The step command stays verbatim, so a command that compares
+// against the same literal still contains that text.
+func (s *IntegrationTestSuite) requireRedactedHashInputEnv(blob []byte, name, plaintext string) {
+	s.T().Helper()
+	var decoded struct {
+		Env map[string]struct {
+			Secret   string `json:"secret"`
+			Redacted *struct {
+				Digest   string `json:"digest"`
+				Redacted bool   `json:"redacted"`
+			} `json:"redacted"`
+		} `json:"env"`
+	}
+	s.Require().NoError(json.Unmarshal(blob, &decoded), "hash input blob: %s", blob)
+	entry, ok := decoded.Env[name]
+	s.Require().True(ok, "hash input env missing %s", name)
+	s.Empty(entry.Secret)
+	s.Require().NotNil(entry.Redacted, "env %s should be a digest", name)
+	s.True(entry.Redacted.Redacted)
+	s.True(strings.HasPrefix(entry.Redacted.Digest, "sha256:"), "digest=%q", entry.Redacted.Digest)
+	s.NotContains(entry.Redacted.Digest, plaintext)
 }
 
 func (s *IntegrationTestSuite) createReproduceCLIFixture() (jobID, runID, taskRunID string) {
