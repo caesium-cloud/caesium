@@ -229,7 +229,9 @@ config:
   and is applied by the policy reload poll without a restart.
 - Restarts and failover: in distributed mode a recovering node stops the
   previous attempt's pod, best effort, through its namespace-qualified runtime
-  id once the task is re-pended. Local mode re-runs nothing after a restart, so
+  id once the task is re-pended, and deletes a terminal attempt's leftover pod
+  when its worker is gone. A running attempt with an unexpired claim stays.
+  Local mode re-runs nothing after a restart, so
   a pod left by a crash runs on alone
   ([details](identity-and-access.md)).
 - The engine namespace's Role (`kubernetes.engine.namespace`) has no secrets

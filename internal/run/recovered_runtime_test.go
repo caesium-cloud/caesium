@@ -183,10 +183,12 @@ func TestResetInFlightTasksReturnsNoStopList(t *testing.T) {
 }
 
 // A completion landing between ResetOwnerInFlightTasks' read and its UPDATE
-// leaves the row terminal, and it stays out of the stop list. The seam commits
+// leaves the row terminal, so the reset does not re-pend it. The seam commits
 // that write through the reset's own transaction: SQLite cannot interleave a
 // second writer, and on Postgres READ COMMITTED shows the UPDATE the same state.
-func TestOwnerTakeoverSparesARowThatCompletedAfterTheRead(t *testing.T) {
+// The executor stops the pod before that terminal write. A pod that is still
+// here belongs to a worker that will not delete it, and takeover reaps it.
+func TestOwnerTakeoverReapsAPodWhoseRowCompletedAfterTheRead(t *testing.T) {
 	db := testutil.OpenTestDB(t)
 	t.Cleanup(func() { testutil.CloseDB(db) })
 	store := NewStore(db)
@@ -207,9 +209,11 @@ func TestOwnerTakeoverSparesARowThatCompletedAfterTheRead(t *testing.T) {
 	_, err := mgr.Recover(runID, 1)
 	require.NoError(t, err)
 
-	require.True(t, podExists(t, client, "caesium-mapped", "step-a-1"), "the completed row was not reset, so its pod is not recovery's to stop")
+	require.False(t, podExists(t, client, "caesium-mapped", "step-a-1"), "a terminal row's leftover pod is reaped")
 	require.False(t, podExists(t, client, "caesium-mapped", "step-b-1"), "the row the reset landed on is stopped")
-	require.Equal(t, string(TaskStatusSucceeded), taskRunFor(t, db, runID, taskA).Status)
+	finished := taskRunFor(t, db, runID, taskA)
+	require.Equal(t, string(TaskStatusSucceeded), finished.Status, "the completed row is not re-pended")
+	require.Empty(t, finished.RuntimeID)
 }
 
 // An owner that lost its lease must not force-stop the attempt of the newer
@@ -303,8 +307,8 @@ func TestReclaimOwnerExpiredClaimsStopsOnlyTheLapsedAttemptsPod(t *testing.T) {
 
 // A renewal landing between the owner reap's read and its guarded UPDATE keeps
 // the claim, so the row stays out of the stop list. See
-// TestOwnerTakeoverSparesARowThatCompletedAfterTheRead for how the seam stands
-// in for the concurrent commit.
+// TestOwnerTakeoverReapsAPodWhoseRowCompletedAfterTheRead for how the seam
+// stands in for the concurrent commit.
 func TestReclaimOwnerExpiredClaimsSparesAClaimRenewedAfterTheRead(t *testing.T) {
 	db := testutil.OpenTestDB(t)
 	t.Cleanup(func() { testutil.CloseDB(db) })

@@ -116,3 +116,82 @@ func TestClaimerReclaimExpiredSparesAClaimRenewedAfterTheRead(t *testing.T) {
 	_, err = client.CoreV1().Pods("caesium-mapped").Get(context.Background(), "step-lapsed", metav1.GetOptions{})
 	require.Error(t, err, "the row the reset landed on is stopped")
 }
+
+// A worker killed after its pod reached Succeeded or Failed never runs Stop.
+// The row is already terminal, so the lease reset does not re-pend it, and the
+// reclaim tick still deletes that pod. A live worker's in-flight pod, including
+// one that belongs to another run, stays.
+func TestClaimerReclaimExpiredReapsADeadWorkersFinishedPod(t *testing.T) {
+	db := jobdeftestutil.OpenTestDB(t)
+	t.Cleanup(func() { jobdeftestutil.CloseDB(db) })
+
+	client := fake.NewClientset(
+		&corev1.Pod{ObjectMeta: metav1.ObjectMeta{Namespace: "caesium-mapped", Name: "dead-succeeded"}, Status: corev1.PodStatus{Phase: corev1.PodSucceeded}},
+		&corev1.Pod{ObjectMeta: metav1.ObjectMeta{Namespace: "caesium-mapped", Name: "dead-failed"}, Status: corev1.PodStatus{Phase: corev1.PodFailed}},
+		&corev1.Pod{ObjectMeta: metav1.ObjectMeta{Namespace: "caesium-mapped", Name: "live-attempt"}, Status: corev1.PodStatus{Phase: corev1.PodRunning}},
+		&corev1.Pod{ObjectMeta: metav1.ObjectMeta{Namespace: "caesium-other", Name: "untouched"}, Status: corev1.PodStatus{Phase: corev1.PodSucceeded}},
+	)
+	t.Cleanup(run.SetRecoveryEngineForTesting(func(ctx context.Context) (atom.Engine, error) {
+		return kubernetes.NewEngine(ctx, client.CoreV1())
+	}))
+
+	now := time.Now().UTC()
+	succeeded := seedTaskRun(t, db, seedTaskRunInput{
+		status:         string(run.TaskStatusSucceeded),
+		claimedBy:      "node-dead",
+		claimExpiresAt: new(now.Add(time.Hour)),
+		claimAttempt:   1,
+		jobRunStatus:   string(run.StatusSucceeded),
+		createdAt:      now.Add(-2 * time.Minute),
+	})
+	failed := seedTaskRun(t, db, seedTaskRunInput{
+		status:         string(run.TaskStatusFailed),
+		claimedBy:      "node-dead",
+		claimExpiresAt: new(now.Add(-time.Minute)),
+		claimAttempt:   1,
+		jobRunStatus:   string(run.StatusFailed),
+		createdAt:      now.Add(-2 * time.Minute),
+	})
+	live := seedTaskRun(t, db, seedTaskRunInput{
+		status:         string(run.TaskStatusRunning),
+		claimedBy:      "node-live",
+		claimExpiresAt: new(now.Add(time.Hour)),
+		claimAttempt:   1,
+		jobRunStatus:   string(run.StatusRunning),
+		createdAt:      now.Add(-2 * time.Minute),
+	})
+	require.NotEqual(t, succeeded.JobRunID, live.JobRunID)
+	require.NoError(t, db.Model(&models.TaskRun{}).Where("id = ?", succeeded.ID).Updates(map[string]any{
+		"engine": string(models.AtomEngineKubernetes), "runtime_id": "caesium-mapped/dead-succeeded", "log_text": "attempt1 done",
+	}).Error)
+	require.NoError(t, db.Model(&models.TaskRun{}).Where("id = ?", failed.ID).Updates(map[string]any{
+		"engine": string(models.AtomEngineKubernetes), "runtime_id": "caesium-mapped/dead-failed",
+	}).Error)
+	require.NoError(t, db.Model(&models.TaskRun{}).Where("id = ?", live.ID).Updates(map[string]any{
+		"engine": string(models.AtomEngineKubernetes), "runtime_id": "caesium-mapped/live-attempt",
+	}).Error)
+
+	claimer := NewClaimer("node-a", run.NewStore(db), time.Minute)
+	require.NoError(t, claimer.ReclaimExpired(context.Background()))
+
+	_, err := client.CoreV1().Pods("caesium-mapped").Get(context.Background(), "dead-succeeded", metav1.GetOptions{})
+	require.Error(t, err, "a Succeeded pod whose worker is gone is deleted")
+	_, err = client.CoreV1().Pods("caesium-mapped").Get(context.Background(), "dead-failed", metav1.GetOptions{})
+	require.Error(t, err, "a Failed pod whose worker is gone is deleted")
+	_, err = client.CoreV1().Pods("caesium-mapped").Get(context.Background(), "live-attempt", metav1.GetOptions{})
+	require.NoError(t, err, "a live worker's in-flight pod is kept")
+	_, err = client.CoreV1().Pods("caesium-other").Get(context.Background(), "untouched", metav1.GetOptions{})
+	require.NoError(t, err, "a pod that belongs to no reaped attempt is kept")
+
+	var finished models.TaskRun
+	require.NoError(t, db.First(&finished, "id = ?", succeeded.ID).Error)
+	require.Equal(t, string(run.TaskStatusSucceeded), finished.Status, "the finished attempt is not re-pended")
+	require.Empty(t, finished.RuntimeID)
+	require.Equal(t, "attempt1 done", finished.LogText)
+
+	var stillRunning models.TaskRun
+	require.NoError(t, db.First(&stillRunning, "id = ?", live.ID).Error)
+	require.Equal(t, string(run.TaskStatusRunning), stillRunning.Status)
+	require.Equal(t, "caesium-mapped/live-attempt", stillRunning.RuntimeID)
+	require.Equal(t, "node-live", stillRunning.ClaimedBy)
+}
