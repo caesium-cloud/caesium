@@ -12,6 +12,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -36,7 +37,26 @@ type reproduceDescriptorResponse struct {
 	LogExcerpt struct {
 		Path string `json:"path"`
 	} `json:"log_excerpt"`
-	Descriptor json.RawMessage `json:"descriptor"`
+	Descriptor    json.RawMessage   `json:"descriptor"`
+	HashInputBlob json.RawMessage   `json:"hash_input_blob"`
+	MiniWhy       *reproduceMiniWhy `json:"mini_why"`
+}
+
+type reproduceMiniWhy struct {
+	BaselineKind    string                  `json:"baseline_kind"`
+	ComparedToRunID string                  `json:"compared_to_run_id"`
+	HashEqual       bool                    `json:"hash_equal"`
+	Summary         string                  `json:"summary"`
+	Fields          []reproduceMiniWhyField `json:"fields"`
+	Degraded        string                  `json:"degraded"`
+}
+
+type reproduceMiniWhyField struct {
+	Field    string `json:"field"`
+	Change   string `json:"change"`
+	Before   string `json:"before"`
+	After    string `json:"after"`
+	Redacted bool   `json:"redacted"`
 }
 
 type reproduceDescriptorPayload struct {
@@ -127,6 +147,28 @@ steps:
 	s.True(hasPredecessorOutput(desc.DAG.PredecessorOutputs, "source", "raw"),
 		"descriptor should include predecessor source output, got %+v", desc.DAG.PredecessorOutputs)
 	s.Equal(fmt.Sprintf("/v1/jobs/%s/runs/%s/logs?task_id=%s", job.ID, runID, desc.Baseline.TaskID), resp.LogExcerpt.Path)
+	s.Require().NotEmpty(resp.HashInputBlob, "cached task should persist a hash input blob")
+	s.requireRedactedHashInputEnv(resp.HashInputBlob, "LITERAL_ENV", "fixture-literal")
+	s.Require().NotNil(resp.MiniWhy)
+	s.Equal("none", resp.MiniWhy.BaselineKind)
+	s.Contains(resp.MiniWhy.Summary, "no prior run")
+
+	secondRunID := s.triggerRunWithParams(job.ID, map[string]string{"flavor": "chocolate"})
+	s.Require().Equal("succeeded", s.awaitRun(job.ID, secondRunID, runTimeout).Status)
+	secondStatus, secondBody := s.getReproduceDescriptor(job.ID, secondRunID, "transform")
+	s.Require().Equal(http.StatusOK, secondStatus, string(secondBody))
+	var second reproduceDescriptorResponse
+	s.Require().NoError(json.Unmarshal(secondBody, &second))
+	s.Require().NotNil(second.MiniWhy)
+	s.Equal("prior_run", second.MiniWhy.BaselineKind)
+	s.Equal(runID, second.MiniWhy.ComparedToRunID)
+	s.False(second.MiniWhy.HashEqual)
+	flavor := reproduceMiniWhyFieldByName(second.MiniWhy, "runParams.flavor")
+	s.Require().NotNil(flavor, "mini-why fields = %+v summary=%s", second.MiniWhy.Fields, second.MiniWhy.Summary)
+	s.Equal("changed", flavor.Change)
+	s.Equal("vanilla", flavor.Before)
+	s.Equal("chocolate", flavor.After)
+	s.requireRedactedHashInputEnv(second.HashInputBlob, "LITERAL_ENV", "fixture-literal")
 
 	uuidStatus, uuidBody := s.getReproduceDescriptor(job.ID, runID, desc.Baseline.TaskID)
 	s.Require().Equal(http.StatusOK, uuidStatus, string(uuidBody))
@@ -142,6 +184,22 @@ steps:
 
 	catalogDB := s.openIntegrationCatalogDB()
 	defer func() { s.Require().NoError(catalogDB.Close()) }()
+
+	const planted = "reproduce-planted-secret"
+	s.Require().NoError(plantSecretInHashInputBlob(s.T().Context(), catalogDB, second.TaskRunID, planted))
+	poisonStatus, poisonBody := s.getReproduceDescriptor(job.ID, secondRunID, "transform")
+	s.Require().Equal(http.StatusOK, poisonStatus, string(poisonBody))
+	s.NotContains(string(poisonBody), planted, "descriptor response leaked a planted credential")
+	var poisoned reproduceDescriptorResponse
+	s.Require().NoError(json.Unmarshal(poisonBody, &poisoned))
+	s.Require().NotNil(poisoned.MiniWhy)
+	plantedField := reproduceMiniWhyFieldByName(poisoned.MiniWhy, "env.PASSWORD")
+	s.Require().NotNil(plantedField, "mini-why = %+v", poisoned.MiniWhy)
+	s.True(plantedField.Redacted)
+	s.Empty(plantedField.Before)
+	s.Empty(plantedField.After)
+	s.NotContains(poisoned.MiniWhy.Summary, planted)
+
 	s.Require().NoError(clearTaskExecutionDescriptor(s.T().Context(), catalogDB, resp.TaskRunID))
 
 	missingStatus, missingBody := s.getReproduceDescriptor(job.ID, runID, "transform")
@@ -202,6 +260,50 @@ func hasPredecessorOutput(outputs map[string]map[string]string, key, value strin
 
 func clearTaskExecutionDescriptor(ctx context.Context, conn *sql.DB, taskRunID string) error {
 	_, err := conn.ExecContext(ctx, `UPDATE task_runs SET execution_descriptor = NULL WHERE id = ?`, taskRunID)
+	return err
+}
+
+func reproduceMiniWhyFieldByName(why *reproduceMiniWhy, name string) *reproduceMiniWhyField {
+	if why == nil {
+		return nil
+	}
+	for i := range why.Fields {
+		if why.Fields[i].Field == name {
+			return &why.Fields[i]
+		}
+	}
+	return nil
+}
+
+func plantSecretInHashInputBlob(ctx context.Context, conn *sql.DB, taskRunID, secret string) error {
+	var raw sql.NullString
+	if err := conn.QueryRowContext(ctx, `SELECT hash_input_blob FROM task_runs WHERE id = ?`, taskRunID).Scan(&raw); err != nil {
+		return err
+	}
+	if !raw.Valid || strings.TrimSpace(raw.String) == "" {
+		return fmt.Errorf("task run %s has no hash input blob to plant into", taskRunID)
+	}
+	var blob map[string]any
+	if err := json.Unmarshal([]byte(raw.String), &blob); err != nil {
+		return err
+	}
+	env, _ := blob["env"].(map[string]any)
+	if env == nil {
+		env = map[string]any{}
+		blob["env"] = env
+	}
+	env["PASSWORD"] = secret
+	params, _ := blob["runParams"].(map[string]any)
+	if params == nil {
+		params = map[string]any{}
+		blob["runParams"] = params
+	}
+	params["api_token"] = secret
+	updated, err := json.Marshal(blob)
+	if err != nil {
+		return err
+	}
+	_, err = conn.ExecContext(ctx, `UPDATE task_runs SET hash_input_blob = ? WHERE id = ?`, string(updated), taskRunID)
 	return err
 }
 

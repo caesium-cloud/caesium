@@ -78,6 +78,12 @@ Environment reconstruction order is: recorded literal `ContainerSpec.Env`, recor
 
 `--dry-run` and `--json` write machine-readable JSON to stdout. Warnings, progress, and fetch/setup messages go to stderr.
 
+### Inline mini-why
+
+The descriptor includes `hash_input_blob`, the task's persisted secret-redacted hash input, and `mini_why`, a field diff against the most recent earlier run of the same task. `caesium reproduce` copies both into `--dry-run` and `--json` stdout and prints one stderr line naming which fields differ, so a separate `caesium why` call is not required to see that.
+
+Literal env values in the blob are `sha256:` digests. `secret://` references are kept as references, never resolved values. Fields whose names look like passwords, tokens, or other credentials omit their before/after values in `mini_why` (the line says `(redacted)`). A first run, or a task that never recorded a blob, says there is nothing to compare. The diff is the previous run's inputs, not a cache-origin proof; `caesium why` remains the full explanation.
+
 ## Exit Codes
 
 | Code | Meaning |

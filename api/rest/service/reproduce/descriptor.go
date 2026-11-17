@@ -54,6 +54,39 @@ type DescriptorResponse struct {
 	ReplaySafe bool                `json:"replay_safe"`
 	LogExcerpt LogExcerptReference `json:"log_excerpt"`
 	Descriptor json.RawMessage     `json:"descriptor"`
+	// HashInputBlob is the task's persisted, secret-redacted hash-input
+	// decomposition. Literal env values are digests; secret:// references are
+	// kept as references. Omitted when the run never recorded one.
+	HashInputBlob json.RawMessage `json:"hash_input_blob,omitempty"`
+	// MiniWhy names which hash-input fields differ from the previous run of
+	// this task, so the CLI can print that without a separate caesium why call.
+	MiniWhy *MiniWhy `json:"mini_why,omitempty"`
+}
+
+// MiniWhy is the inline field diff of this task's redacted HashInputBlob
+// against the most recent earlier run of the same task.
+type MiniWhy struct {
+	// BaselineKind is "prior_run" or "none".
+	BaselineKind string `json:"baseline_kind"`
+	// ComparedToRunID is the prior run, when BaselineKind is prior_run.
+	ComparedToRunID string `json:"compared_to_run_id,omitempty"`
+	// HashEqual is true when the two blobs carry the same identity hash.
+	HashEqual bool `json:"hash_equal"`
+	// Summary is a one-line explanation. It never includes a raw secret.
+	Summary string `json:"summary,omitempty"`
+	// Fields are the discriminating inputs. Redacted entries omit before/after.
+	Fields []MiniWhyField `json:"fields,omitempty"`
+	// Degraded is set when a field-level diff was not possible.
+	Degraded string `json:"degraded,omitempty"`
+}
+
+// MiniWhyField is one input that differs from the prior run.
+type MiniWhyField struct {
+	Field    string `json:"field"`
+	Change   string `json:"change"`
+	Before   string `json:"before,omitempty"`
+	After    string `json:"after,omitempty"`
+	Redacted bool   `json:"redacted,omitempty"`
 }
 
 // LogExcerptReference points callers at the existing task-log endpoint instead
@@ -73,6 +106,7 @@ type taskDescriptorRow struct {
 	PartitionValue      string
 	PartitionCount      int
 	ExecutionDescriptor datatypes.JSON
+	HashInputBlob       datatypes.JSON
 }
 
 // New creates a Service with the default DB connection.
@@ -114,7 +148,7 @@ func (s *Service) Descriptor(runID uuid.UUID, taskRef string) (*DescriptorRespon
 	// The raw stored bytes are returned verbatim — deliberately NO typed decode
 	// or schema-version gate here: a future schemaVersion bump must not hide a
 	// perfectly readable descriptor from the CLI (which owns version handling).
-	return &DescriptorResponse{
+	resp := &DescriptorResponse{
 		JobID:      row.JobID,
 		TaskRunID:  row.ID,
 		Status:     row.Status,
@@ -125,7 +159,11 @@ func (s *Service) Descriptor(runID uuid.UUID, taskRef string) (*DescriptorRespon
 			Path: fmt.Sprintf("/v1/jobs/%s/runs/%s/logs?task_id=%s", row.JobID, runID, row.TaskID),
 		},
 		Descriptor: cloneRawJSON(row.ExecutionDescriptor),
-	}, nil
+	}
+	if err := s.attachMiniWhy(resp, row, runID); err != nil {
+		return nil, err
+	}
+	return resp, nil
 }
 
 func (s *Service) resolveTaskRun(taskRef string, runID uuid.UUID) (*taskDescriptorRow, error) {
@@ -216,7 +254,8 @@ func (s *Service) baseDescriptorQuery(runID uuid.UUID) *gorm.DB {
 				"task_runs.replay_safe AS replay_safe, "+
 				"task_runs.partition_value AS partition_value, "+
 				"task_runs.partition_count AS partition_count, "+
-				"task_runs.execution_descriptor AS execution_descriptor",
+				"task_runs.execution_descriptor AS execution_descriptor, "+
+				"task_runs.hash_input_blob AS hash_input_blob",
 		).
 		Joins("JOIN job_runs ON job_runs.id = task_runs.job_run_id").
 		Joins("JOIN tasks ON tasks.id = task_runs.task_id").

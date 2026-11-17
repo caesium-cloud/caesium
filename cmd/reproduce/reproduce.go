@@ -76,16 +76,38 @@ type descriptorResponse struct {
 	LogExcerpt struct {
 		Path string `json:"path"`
 	} `json:"log_excerpt"`
-	Descriptor json.RawMessage `json:"descriptor"`
+	Descriptor    json.RawMessage `json:"descriptor"`
+	HashInputBlob json.RawMessage `json:"hash_input_blob,omitempty"`
+	MiniWhy       *miniWhy        `json:"mini_why,omitempty"`
+}
+
+// miniWhy is the server's redacted field diff against the previous run.
+type miniWhy struct {
+	BaselineKind    string         `json:"baseline_kind"`
+	ComparedToRunID string         `json:"compared_to_run_id,omitempty"`
+	HashEqual       bool           `json:"hash_equal"`
+	Summary         string         `json:"summary,omitempty"`
+	Fields          []miniWhyField `json:"fields,omitempty"`
+	Degraded        string         `json:"degraded,omitempty"`
+}
+
+type miniWhyField struct {
+	Field    string `json:"field"`
+	Change   string `json:"change"`
+	Before   string `json:"before,omitempty"`
+	After    string `json:"after,omitempty"`
+	Redacted bool   `json:"redacted,omitempty"`
 }
 
 type dryRunEnvelope struct {
-	RunID      string `json:"run_id"`
-	JobID      string `json:"job_id"`
-	TaskRunID  string `json:"task_run_id,omitempty"`
-	Status     string `json:"recorded_status,omitempty"`
-	Result     string `json:"recorded_result,omitempty"`
-	LogExcerpt string `json:"log_excerpt,omitempty"`
+	RunID         string          `json:"run_id"`
+	JobID         string          `json:"job_id"`
+	TaskRunID     string          `json:"task_run_id,omitempty"`
+	Status        string          `json:"recorded_status,omitempty"`
+	Result        string          `json:"recorded_result,omitempty"`
+	LogExcerpt    string          `json:"log_excerpt,omitempty"`
+	HashInputBlob json.RawMessage `json:"hash_input_blob,omitempty"`
+	MiniWhy       *miniWhy        `json:"mini_why,omitempty"`
 	*ireproduce.Envelope
 }
 
@@ -96,6 +118,8 @@ type runJSONResult struct {
 	RecordedStatus string          `json:"recorded_status,omitempty"`
 	RecordedResult string          `json:"recorded_result,omitempty"`
 	RecordedOutput json.RawMessage `json:"recorded_output,omitempty"`
+	HashInputBlob  json.RawMessage `json:"hash_input_blob,omitempty"`
+	MiniWhy        *miniWhy        `json:"mini_why,omitempty"`
 	*ireproduce.ExecutionResult
 }
 
@@ -183,6 +207,9 @@ func runReproduce(cmd *cobra.Command, args []string) error {
 		return exitWithMessage(stderr, 2, err.Error())
 	}
 	printWarnings(stderr, env.Warnings)
+	if line := formatMiniWhy(resp.MiniWhy); line != "" {
+		_, _ = fmt.Fprintln(stderr, line)
+	}
 
 	var recordedOutput map[string]string
 	if reproduceDiff {
@@ -193,13 +220,15 @@ func runReproduce(cmd *cobra.Command, args []string) error {
 	}
 
 	envelopeOut := dryRunEnvelope{
-		RunID:      runID,
-		JobID:      reproduceJobID,
-		TaskRunID:  resp.TaskRunID,
-		Status:     resp.Status,
-		Result:     resp.Result,
-		LogExcerpt: resp.LogExcerpt.Path,
-		Envelope:   env,
+		RunID:         runID,
+		JobID:         reproduceJobID,
+		TaskRunID:     resp.TaskRunID,
+		Status:        resp.Status,
+		Result:        resp.Result,
+		LogExcerpt:    resp.LogExcerpt.Path,
+		HashInputBlob: resp.HashInputBlob,
+		MiniWhy:       resp.MiniWhy,
+		Envelope:      env,
 	}
 	if reproduceDryRun {
 		if err := writeJSON(cmd, envelopeOut); err != nil {
@@ -267,6 +296,8 @@ func runReproduce(cmd *cobra.Command, args []string) error {
 			RecordedStatus:  resp.Status,
 			RecordedResult:  resp.Result,
 			RecordedOutput:  resp.Output,
+			HashInputBlob:   resp.HashInputBlob,
+			MiniWhy:         resp.MiniWhy,
 			ExecutionResult: result,
 		}); err != nil {
 			return exitWithMessage(stderr, 2, err.Error())

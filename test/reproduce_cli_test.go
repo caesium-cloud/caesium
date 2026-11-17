@@ -56,6 +56,12 @@ func (s *IntegrationTestSuite) TestReproduceCLIDryRunAndRunMode() {
 		s.True(reproduceHasOmittedSecret(envelope.OmittedSecrets, "SECRET_ENV"), "omitted secrets = %+v", envelope.OmittedSecrets)
 		s.True(reproduceHasWarning(envelope.Warnings, "secret_omitted"), "warnings = %+v", envelope.Warnings)
 	}
+	s.Require().NotEmpty(envelope.HashInputBlob, "dry-run JSON should include the redacted hash input blob")
+	s.requireRedactedHashInputEnv(envelope.HashInputBlob, "LITERAL_ENV", "fixture-literal")
+	s.NotContains(string(envelope.HashInputBlob), reproduceCLISecretValue)
+	s.Require().NotNil(envelope.MiniWhy)
+	s.Equal("none", envelope.MiniWhy.BaselineKind)
+	s.NotContains(envelope.MiniWhy.Summary, reproduceCLISecretValue)
 	if secretAssertionEnabled {
 		resolveOut, err := s.runCLIStdout(
 			"reproduce", runID,
@@ -72,7 +78,34 @@ func (s *IntegrationTestSuite) TestReproduceCLIDryRunAndRunMode() {
 		s.Equal(reproduceCLISecretValue, resolvedEnvelope.Env["SECRET_ENV"])
 		s.False(reproduceHasOmittedSecret(resolvedEnvelope.OmittedSecrets, "SECRET_ENV"), "omitted secrets = %+v", resolvedEnvelope.OmittedSecrets)
 		s.True(reproduceHasResolvedSecret(resolvedEnvelope.ResolvedSecrets, "SECRET_ENV"), "resolved secrets = %+v", resolvedEnvelope.ResolvedSecrets)
+		s.NotContains(string(resolvedEnvelope.HashInputBlob), reproduceCLISecretValue)
 	}
+
+	secondRunID := s.triggerRunWithParams(jobID, map[string]string{"flavor": "chocolate"})
+	s.Require().Equal("succeeded", s.awaitRun(jobID, secondRunID, runTimeout).Status)
+	secondOut, secondErr, err := s.runCLISeparate(
+		"reproduce", secondRunID,
+		"--job-id", jobID,
+		"--task", "transform",
+		"--dry-run",
+		"--json",
+		"--server", s.caesiumURL,
+	)
+	s.Require().NoError(err, "stderr: %s", secondErr)
+	var secondEnv reproduceCLIEnvelope
+	s.Require().NoError(json.Unmarshal([]byte(secondOut), &secondEnv), "stdout: %s", secondOut)
+	s.requireRedactedHashInputEnv(secondEnv.HashInputBlob, "LITERAL_ENV", "fixture-literal")
+	s.NotContains(string(secondEnv.HashInputBlob), reproduceCLISecretValue)
+	s.Require().NotNil(secondEnv.MiniWhy)
+	s.Equal("prior_run", secondEnv.MiniWhy.BaselineKind)
+	s.Equal(runID, secondEnv.MiniWhy.ComparedToRunID)
+	flavor := reproduceMiniWhyFieldByName(secondEnv.MiniWhy, "runParams.flavor")
+	s.Require().NotNil(flavor, "mini-why = %+v stderr=%s", secondEnv.MiniWhy, secondErr)
+	s.Equal("vanilla", flavor.Before)
+	s.Equal("chocolate", flavor.After)
+	s.Contains(secondErr, "runParams.flavor changed vanilla→chocolate")
+	s.NotContains(secondErr, reproduceCLISecretValue)
+	s.NotContains(secondOut, reproduceCLISecretValue)
 
 	// The missing-descriptor exit-2 leg is daemon-free — run it on every lane
 	// before the docker-gated run-mode leg below.
@@ -118,6 +151,11 @@ func (s *IntegrationTestSuite) TestReproduceCLIDryRunAndRunMode() {
 	s.Require().NotNil(result.Fidelity)
 	s.True(reproduceHasFidelity(result.Fidelity, "image_content", "faithful"), "fidelity = %+v", result.Fidelity)
 	s.True(reproduceHasFidelity(result.Fidelity, "wall_clock_time", "not_reproduced"), "fidelity = %+v", result.Fidelity)
+	s.requireRedactedHashInputEnv(result.HashInputBlob, "LITERAL_ENV", "fixture-literal")
+	s.NotContains(string(result.HashInputBlob), reproduceCLISecretValue)
+	s.Require().NotNil(result.MiniWhy)
+	s.Equal("none", result.MiniWhy.BaselineKind)
+	s.NotContains(runErrOut, reproduceCLISecretValue)
 
 	overrideOut, overrideErrOut, overrideErr := s.runCLISeparate(
 		"reproduce", runID,
@@ -281,6 +319,30 @@ func (s *IntegrationTestSuite) TestReproduceCLIShellSignalCleansUpContainers() {
 	}
 }
 
+// requireRedactedHashInputEnv checks that a literal env value is stored as a
+// sha256 digest. The step command stays verbatim, so a command that compares
+// against the same literal still contains that text.
+func (s *IntegrationTestSuite) requireRedactedHashInputEnv(blob []byte, name, plaintext string) {
+	s.T().Helper()
+	var decoded struct {
+		Env map[string]struct {
+			Secret   string `json:"secret"`
+			Redacted *struct {
+				Digest   string `json:"digest"`
+				Redacted bool   `json:"redacted"`
+			} `json:"redacted"`
+		} `json:"env"`
+	}
+	s.Require().NoError(json.Unmarshal(blob, &decoded), "hash input blob: %s", blob)
+	entry, ok := decoded.Env[name]
+	s.Require().True(ok, "hash input env missing %s", name)
+	s.Empty(entry.Secret)
+	s.Require().NotNil(entry.Redacted, "env %s should be a digest", name)
+	s.True(entry.Redacted.Redacted)
+	s.True(strings.HasPrefix(entry.Redacted.Digest, "sha256:"), "digest=%q", entry.Redacted.Digest)
+	s.NotContains(entry.Redacted.Digest, plaintext)
+}
+
 func (s *IntegrationTestSuite) createReproduceCLIFixture() (jobID, runID, taskRunID string) {
 	alias := fmt.Sprintf("e2e-reproduce-cli-%d", time.Now().UnixNano())
 	manifest := fmt.Sprintf(`apiVersion: v1
@@ -338,6 +400,8 @@ type reproduceCLIEnvelope struct {
 		Code    string `json:"code"`
 		Message string `json:"message"`
 	} `json:"warnings"`
+	HashInputBlob json.RawMessage   `json:"hash_input_blob"`
+	MiniWhy       *reproduceMiniWhy `json:"mini_why"`
 }
 
 type reproduceCLIRunResult struct {
@@ -348,6 +412,8 @@ type reproduceCLIRunResult struct {
 	Output          map[string]string       `json:"output"`
 	OutputDiff      *reproduceCLIOutputDiff `json:"output_diff"`
 	Fidelity        *reproduceCLIFidelity   `json:"fidelity"`
+	HashInputBlob   json.RawMessage         `json:"hash_input_blob"`
+	MiniWhy         *reproduceMiniWhy       `json:"mini_why"`
 }
 
 type reproduceCLIOutputDiff struct {

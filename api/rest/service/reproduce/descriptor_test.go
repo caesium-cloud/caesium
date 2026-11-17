@@ -2,6 +2,7 @@ package reproduce
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 	"time"
 
@@ -134,6 +135,107 @@ func TestDescriptor_MultiPartitionExpansionIsAmbiguous(t *testing.T) {
 
 // TestDescriptor_NotFound keeps the not-found contract distinct from the
 // fanned-ambiguous one.
+func TestDescriptor_MiniWhyNamesChangedFieldAndRedactsSecrets(t *testing.T) {
+	db := testutil.OpenTestDB(t)
+	t.Cleanup(func() { testutil.CloseDB(db) })
+
+	const (
+		password = "super-secret-value"
+		token    = "sk-live-secret"
+	)
+	literalDigest := "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+
+	jobID := uuid.New()
+	taskID := seedDescriptorTask(t, db, jobID, "transform")
+	earlier := time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC)
+	later := earlier.Add(time.Hour)
+	priorRun := seedDescriptorJobRun(t, db, jobID)
+	subjectRun := seedDescriptorJobRun(t, db, jobID)
+	require.NoError(t, db.Model(&models.JobRun{}).Where("id = ?", priorRun).Update("started_at", earlier).Error)
+	require.NoError(t, db.Model(&models.JobRun{}).Where("id = ?", subjectRun).Update("started_at", later).Error)
+
+	priorID := seedDescriptorTaskRun(t, db, priorRun, taskID, "", 0, 0)
+	subjectID := seedDescriptorTaskRun(t, db, subjectRun, taskID, "", 0, 0)
+	require.NoError(t, db.Model(&models.TaskRun{}).Where("id = ?", priorID).Update("hash_input_blob", datatypes.JSON(`{
+		"blobVersion": 1,
+		"hash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		"image": "alpine:3.23",
+		"env": {
+			"LITERAL_ENV": {"redacted": {"digest": "`+literalDigest+`", "redacted": true}},
+			"SECRET_ENV": {"secret": "secret://env/CAESIUM_REPRODUCE_CLI_SECRET_ENV"}
+		},
+		"runParams": {"flavor": "vanilla"},
+		"cacheVersion": 0
+	}`)).Error)
+	require.NoError(t, db.Model(&models.TaskRun{}).Where("id = ?", subjectID).Update("hash_input_blob", datatypes.JSON(`{
+		"blobVersion": 1,
+		"hash": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+		"image": "alpine:3.23",
+		"env": {
+			"LITERAL_ENV": {"redacted": {"digest": "`+literalDigest+`", "redacted": true}},
+			"SECRET_ENV": {"secret": "secret://env/CAESIUM_REPRODUCE_CLI_SECRET_ENV"},
+			"PASSWORD": "`+password+`",
+			"LEAKED": {"secret": "`+password+`"}
+		},
+		"runParams": {"flavor": "chocolate", "api_token": "`+token+`"},
+		"predecessorOutputs": {"extract": {"row_count": "7", "password": "`+password+`"}},
+		"cacheVersion": 0
+	}`)).Error)
+
+	svc := NewWithDatabase(context.Background(), db)
+	got, err := svc.Descriptor(subjectRun, "transform")
+	require.NoError(t, err)
+	require.NotNil(t, got.MiniWhy)
+	assert.Equal(t, "prior_run", got.MiniWhy.BaselineKind)
+	assert.Equal(t, priorRun.String(), got.MiniWhy.ComparedToRunID)
+	assert.False(t, got.MiniWhy.HashEqual)
+
+	flavor := miniWhyFieldByName(t, got.MiniWhy, "runParams.flavor")
+	assert.Equal(t, "changed", flavor.Change)
+	assert.Equal(t, "vanilla", flavor.Before)
+	assert.Equal(t, "chocolate", flavor.After)
+	assert.False(t, flavor.Redacted)
+
+	passwordField := miniWhyFieldByName(t, got.MiniWhy, "env.PASSWORD")
+	assert.True(t, passwordField.Redacted)
+	assert.Empty(t, passwordField.Before)
+	assert.Empty(t, passwordField.After)
+
+	tokenField := miniWhyFieldByName(t, got.MiniWhy, "runParams.api_token")
+	assert.True(t, tokenField.Redacted)
+	assert.Empty(t, tokenField.Before)
+	assert.Empty(t, tokenField.After)
+
+	encoded, err := json.Marshal(got)
+	require.NoError(t, err)
+	body := string(encoded)
+	assert.NotContains(t, body, password)
+	assert.NotContains(t, body, token)
+	assert.Contains(t, body, literalDigest)
+	assert.Contains(t, body, "secret://env/CAESIUM_REPRODUCE_CLI_SECRET_ENV")
+	assert.NotContains(t, got.MiniWhy.Summary, password)
+	assert.NotContains(t, got.MiniWhy.Summary, token)
+	assert.Contains(t, got.MiniWhy.Summary, "runParams.flavor changed vanilla→chocolate")
+
+	first, err := svc.Descriptor(priorRun, "transform")
+	require.NoError(t, err)
+	require.NotNil(t, first.MiniWhy)
+	assert.Equal(t, "none", first.MiniWhy.BaselineKind)
+	assert.NotContains(t, string(first.HashInputBlob), "vanilla-is-not-a-secret")
+	assert.Contains(t, string(first.HashInputBlob), literalDigest)
+}
+
+func miniWhyFieldByName(t *testing.T, why *MiniWhy, name string) MiniWhyField {
+	t.Helper()
+	for _, field := range why.Fields {
+		if field.Field == name {
+			return field
+		}
+	}
+	t.Fatalf("mini-why fields missing %s: %+v", name, why.Fields)
+	return MiniWhyField{}
+}
+
 func TestDescriptor_NotFound(t *testing.T) {
 	db := testutil.OpenTestDB(t)
 	t.Cleanup(func() { testutil.CloseDB(db) })
