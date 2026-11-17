@@ -18,6 +18,17 @@ const (
 	// does not match the committed one. It is always accompanied by one or more
 	// of the specific drifts below explaining why.
 	DriftReceiptDigest DriftKind = "receipt_digest_mismatch"
+	// DriftImage means the literal image reference on the completed run's task
+	// row differs from the committed receipt. Distinct from DriftImageDigest,
+	// which is the resolved content digest. A job re-apply writes a new
+	// snapshot and does not mutate task_runs, so this fires only when the
+	// run's task row itself differs.
+	DriftImage DriftKind = "image_changed"
+	// DriftCommand means the command on the completed run's task row differs
+	// from the command the committed receipt recorded. Receipts that predate
+	// the field (empty Command) are not compared. The command is not part of
+	// the receipt digest; Match is still false when a recorded command differs.
+	DriftCommand DriftKind = "command_changed"
 	// DriftImageDigest means a task's resolved image digest changed — the tag
 	// was mutated to point at new content (e.g. a re-pushed :latest). This is
 	// the headline reproducibility failure the receipt exists to catch.
@@ -59,11 +70,14 @@ type VerifyResult struct {
 	// RunID echoes the run that was re-derived.
 	RunID uuid.UUID `json:"run_id"`
 
-	// Match is true iff the re-derived receipt digest equals the committed one
-	// AND the run is not degraded. A degraded run never reports a clean
+	// Match is true iff the re-derived receipt digest equals the committed one,
+	// the run is not degraded, AND no recorded image reference or command
+	// differs from the run's task row. A degraded run never reports a clean
 	// reproducibility match even when the digests are equal, because an
 	// unpinned tag could have moved without changing the (tag-only) digest —
-	// the very condition the receipt cannot attest against.
+	// the very condition the receipt cannot attest against. Command is not
+	// folded into the digest, so a command-only task-row change fails the
+	// match even when the digests are equal.
 	Match bool `json:"match"`
 
 	// Degraded is true iff the re-derived receipt is degraded (any task ran on
@@ -115,10 +129,13 @@ func Verify(ctx context.Context, db *gorm.DB, committed *Receipt) (*VerifyResult
 
 	result.Drifts = diff(committed, rederived)
 
-	// A clean match requires equal digests AND a non-degraded run. The degraded
-	// case is the design's correctness rule: an unpinned tag may have moved
-	// without changing the tag-only digest, so we must not claim a match.
-	result.Match = committed.ReceiptDigest == rederived.ReceiptDigest && !rederived.Degraded
+	// A clean match requires equal digests, a non-degraded run, and no
+	// image/command field drift read off the task rows. The degraded case is
+	// the design's correctness rule: an unpinned tag may have moved without
+	// changing the tag-only digest, so we must not claim a match. Command is
+	// attested beside the digest, so a task-row command change fails the match
+	// even when the digests are equal.
+	result.Match = committed.ReceiptDigest == rederived.ReceiptDigest && !rederived.Degraded && !hasTaskFieldDrift(result.Drifts)
 
 	return result, nil
 }
@@ -212,7 +229,26 @@ func diffTasks(committed, rederived *Receipt) []Drift {
 				Detail: "task present in the current run state is absent from the committed receipt",
 			})
 		default:
-			// Present on both sides — compare identity.
+			// Present on both sides — compare the task row's image and command
+			// first, then the digest and identity hash those rows also carry.
+			if c.Image != r.Image {
+				drifts = append(drifts, Drift{
+					Kind:     DriftImage,
+					Task:     name,
+					Expected: c.Image,
+					Actual:   r.Image,
+					Detail:   "task image reference on the completed run differs from the committed receipt",
+				})
+			}
+			if c.Command != "" && c.Command != r.Command {
+				drifts = append(drifts, Drift{
+					Kind:     DriftCommand,
+					Task:     name,
+					Expected: c.Command,
+					Actual:   r.Command,
+					Detail:   "task command on the completed run differs from the committed receipt",
+				})
+			}
 			if c.ResolvedImageDigest != r.ResolvedImageDigest {
 				drifts = append(drifts, Drift{
 					Kind:     DriftImageDigest,
@@ -235,6 +271,18 @@ func diffTasks(committed, rederived *Receipt) []Drift {
 	}
 
 	return drifts
+}
+
+// hasTaskFieldDrift reports whether diff found an image-reference or command
+// mismatch. Those are read from the run's task rows; a changed job definition
+// does not produce them.
+func hasTaskFieldDrift(drifts []Drift) bool {
+	for _, d := range drifts {
+		if d.Kind == DriftImage || d.Kind == DriftCommand {
+			return true
+		}
+	}
+	return false
 }
 
 // indexByKey maps task entries by INSTANCE key (name + partition). Keying on the

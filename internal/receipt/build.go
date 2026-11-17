@@ -99,6 +99,7 @@ func Build(ctx context.Context, db *gorm.DB, runID uuid.UUID) (*Receipt, error) 
 			Partition:           tr.PartitionValue,
 			IdentityHash:        tr.Hash,
 			Image:               tr.Image,
+			Command:             tr.Command,
 			ResolvedImageDigest: tr.ResolvedImageDigest,
 		}
 		markDegraded(&entry)

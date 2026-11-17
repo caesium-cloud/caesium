@@ -889,6 +889,8 @@ export interface ReceiptTaskEntry {
   task_name: string;
   identity_hash: string;
   image: string;
+  /** Argv JSON recorded on the run's task row. Absent on receipts committed before it was recorded. */
+  command?: string;
   resolved_image_digest?: string;
   digest_pinned: boolean;
   degraded: boolean;
@@ -910,6 +912,8 @@ export interface Receipt {
 
 export type ReceiptDriftKind =
   | "receipt_digest_mismatch"
+  | "image_changed"
+  | "command_changed"
   | "image_digest_mismatch"
   | "identity_hash_mismatch"
   | "manifest_changed"

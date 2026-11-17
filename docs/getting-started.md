@@ -209,7 +209,15 @@ caesium receipt get --job-id "$JOB_ID" --run-id "$RUN_ID" --server http://localh
 ```
 
 Commit the receipt into git next to the pipeline and `caesium verify
-<receipt-file>` can later prove exactly what ran.
+<receipt-file>` can later prove exactly what ran. Verify re-derives the
+receipt from the run's persisted task rows. It reports `image_changed` and
+`command_changed` when those rows' image reference or command differ from the
+committed receipt — distinct from `image_digest_mismatch`, which is a moved
+content digest. Re-applying a job definition does not rewrite a completed
+run's task rows, so that alone does not produce image or command drift. Each
+task on a newly built receipt records its `command`; the field is not part of
+the receipt digest, and a receipt committed before commands were recorded
+still verifies without a false command drift.
 
 ## Where next
 

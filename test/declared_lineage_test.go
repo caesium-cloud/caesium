@@ -50,13 +50,27 @@ steps:
 		}
 		for _, node := range graph.Downstream {
 			if node.DatasetNamespace == "" && node.DatasetName == downstream && node.JobID.String() == consumer.ID {
-				return node.ProducingStep == "transform"
+				return node.ProducingStep == "transform" && node.RunID == consumerRun
 			}
 		}
 		return false
 	}, 30*time.Second, 250*time.Millisecond, "declared consumer never appeared in the held dataset's graph")
 	s.Equal("", graph.RootNamespace)
 	s.Equal(root, graph.RootName)
+	var runDatasets struct {
+		Datasets []struct {
+			Name      string `json:"name"`
+			Direction string `json:"direction"`
+		} `json:"datasets"`
+	}
+	s.getJSON(fmt.Sprintf("/v1/jobs/%s/runs/%s/datasets", consumer.ID, consumerRun), &runDatasets)
+	foundDataset := false
+	for _, dataset := range runDatasets.Datasets {
+		if dataset.Name == downstream && dataset.Direction == "output" {
+			foundDataset = true
+		}
+	}
+	s.True(foundDataset, "the consumer run must list its declared output, got %+v", runDatasets.Datasets)
 	producer = s.applyHoldProducer(producerAlias, root, "manual", 12)
 	s.runProducer(producer)
 	holds := s.fetchDatasetOperatorHolds(root, "active")
