@@ -20,15 +20,35 @@ import (
 // errEmptyDatasetName guards every state write: a dataset must be named.
 var errEmptyDatasetName = errors.New("freshness: dataset name is required")
 
+// wholeDatasetPartition is the natural-key partition of the dataset-level
+// watermark. A named partition is a different row of the same dataset. The
+// empty string, not NULL, is the absent key: SQLite UNIQUE treats NULLs as
+// distinct, which would allow duplicate "absent" rows.
+const wholeDatasetPartition = ""
+
 // nsValue maps a nil (unset) namespace to the empty string, matching the
 // DatasetState.Namespace NOT-NULL-default-” column. Every state query and write
-// keys on this value so the (namespace, name) UNIQUE index is reliable — SQLite
-// treats NULLs as distinct, so a nullable namespace would defeat the index.
+// keys on this value so the (namespace, name, partition) UNIQUE index is
+// reliable — SQLite treats NULLs as distinct, so a nullable namespace would
+// defeat the index.
 func nsValue(namespace *string) string {
 	if namespace == nil {
 		return ""
 	}
 	return strings.TrimSpace(*namespace)
+}
+
+// partitionValue maps a blank partition to the whole-dataset key. Trimmed
+// whitespace is absent, not a distinct named partition.
+func partitionValue(partition string) string {
+	return strings.TrimSpace(partition)
+}
+
+// datasetStateKeyColumns is the ON CONFLICT target for the watermark natural
+// key. It must match idx_dataset_state_identity exactly: a narrower target
+// fails once partition is part of that index.
+func datasetStateKeyColumns() []clause.Column {
+	return []clause.Column{{Name: "namespace"}, {Name: "name"}, {Name: "partition"}}
 }
 
 // Outcome is the result of an Advance/Verify decision — the observable record of
@@ -57,9 +77,12 @@ const (
 
 // AdvanceInput carries one producing observation of a dataset's watermark.
 type AdvanceInput struct {
-	// Namespace is nullable and unused in v1; Name is the dataset identity.
+	// Namespace is the dataset namespace (nil is the empty namespace). Name is
+	// the dataset. Partition is the dynamic-fanout partition; empty is the
+	// whole-dataset watermark and does not collide with a named partition.
 	Namespace *string
 	Name      string
+	Partition string
 
 	// Watermark is the emitted value. Empty means the producing step declared no
 	// watermark key (or emitted none): degraded mode, which refreshes verified_at
@@ -130,14 +153,18 @@ func NewStore(db *gorm.DB) *Store {
 //   - An opaque-string watermark advances only when the producing run is newer
 //     than the one that set the current value; an out-of-order write is dropped.
 //
-// Freshness is later evaluated against max(advanced_at, verified_at). The whole
-// decision runs in one transaction against the (namespace, name) natural key.
+// Freshness of the whole-dataset row is later evaluated against
+// max(advanced_at, verified_at). The decision runs in one transaction against
+// the (namespace, name, partition) natural key. Advance and the verify outcome
+// it records share that key: a partition verifies only itself, and an empty
+// partition verifies only the whole-dataset row.
 func (s *Store) Advance(ctx context.Context, in AdvanceInput) (AdvanceResult, error) {
 	name := strings.TrimSpace(in.Name)
 	if name == "" {
 		return AdvanceResult{}, errEmptyDatasetName
 	}
 	in.Name = name
+	in.Partition = partitionValue(in.Partition)
 
 	completed := in.CompletedAt
 	if completed.IsZero() {
@@ -180,7 +207,7 @@ func (s *Store) Advance(ctx context.Context, in AdvanceInput) (AdvanceResult, er
 //     moves the watermark FORWARD, so re-deciding against a newer value would
 //     still drop.
 //  3. An advance/verify must write. We first `INSERT ... ON CONFLICT DO NOTHING`
-//     (fresh id, so only the (namespace,name) unique index can conflict). If the
+//     (fresh id, so only the (namespace, name, partition) unique index can conflict). If the
 //     insert created the row we are the first observation and are done. If it
 //     CONFLICTED, the row already exists (pre-existing, or a concurrent
 //     first-writer), so we re-SELECT the authoritative row FOR UPDATE, re-run
@@ -203,7 +230,7 @@ func (s *Store) advanceTx(ctx context.Context, in AdvanceInput) (AdvanceResult, 
 				return err
 			}
 		}
-		current, existed, err := loadState(tx, in.Namespace, in.Name)
+		current, existed, err := loadState(tx, in.Namespace, in.Name, in.Partition)
 		if err != nil {
 			return err
 		}
@@ -214,6 +241,7 @@ func (s *Store) advanceTx(ctx context.Context, in AdvanceInput) (AdvanceResult, 
 				ID:        uuid.New(),
 				Namespace: nsValue(in.Namespace),
 				Name:      in.Name,
+				Partition: in.Partition,
 				Status:    models.DatasetStatusUnknown,
 			}
 		}
@@ -232,15 +260,16 @@ func (s *Store) advanceTx(ctx context.Context, in AdvanceInput) (AdvanceResult, 
 		consumedBlob, hasConsumed := consumedJSON(in.Consumed)
 
 		// Write path. Attempt an atomic create; a fresh id ensures only the
-		// (namespace,name) unique index can be the conflict target.
+		// (namespace, name, partition) unique index can be the conflict target.
 		insert := base
 		insert.ID = uuid.New()
+		insert.Partition = in.Partition
 		if hasConsumed {
 			insert.ConsumedWatermarks = consumedBlob
 			insert.ConsumedRunID = nonNilRun(in.RunID)
 		}
 		created := tx.Clauses(clause.OnConflict{
-			Columns:   []clause.Column{{Name: "namespace"}, {Name: "name"}},
+			Columns:   datasetStateKeyColumns(),
 			DoNothing: true,
 		}).Create(&insert)
 		if created.Error != nil {
@@ -254,7 +283,7 @@ func (s *Store) advanceTx(ctx context.Context, in AdvanceInput) (AdvanceResult, 
 
 		// Conflict: the row exists. Re-read the authoritative row under a row
 		// lock (PostgreSQL's DO NOTHING took none) and re-decide.
-		authoritative, ok, err := loadState(tx.Clauses(clause.Locking{Strength: "UPDATE"}), in.Namespace, in.Name)
+		authoritative, ok, err := loadState(tx.Clauses(clause.Locking{Strength: "UPDATE"}), in.Namespace, in.Name, in.Partition)
 		if err != nil {
 			return err
 		}
@@ -445,15 +474,15 @@ func parseRFC3339(v string) (time.Time, error) {
 	return time.Parse(time.RFC3339, v)
 }
 
-// loadState loads the state row for a dataset on its natural key, reporting
-// whether it existed. The nil namespace is mapped to ” so the query keys on the
-// same value the NOT-NULL column stores.
-func loadState(tx *gorm.DB, namespace *string, name string) (models.DatasetState, bool, error) {
-	ns := nsValue(namespace)
+// loadState loads the state row for one (namespace, name, partition) on its
+// natural key, reporting whether it existed. The nil namespace and a blank
+// partition are mapped to ” so the query keys on the same values the NOT NULL
+// columns store. An empty partition does not match a named one.
+func loadState(tx *gorm.DB, namespace *string, name, partition string) (models.DatasetState, bool, error) {
 	var state models.DatasetState
 	// Find (not Take/First) so a miss is RowsAffected==0, not an error-logged
 	// ErrRecordNotFound — the "unknown dataset" case is the common path.
-	res := tx.Where("namespace = ? AND name = ?", ns, name).Limit(1).Find(&state)
+	res := tx.Where("namespace = ? AND name = ? AND partition = ?", nsValue(namespace), name, partitionValue(partition)).Limit(1).Find(&state)
 	if res.Error != nil {
 		return models.DatasetState{}, false, res.Error
 	}
@@ -493,7 +522,7 @@ func (s *Store) RecordConsumed(ctx context.Context, namespace *string, name stri
 		return err
 	}
 	return s.db.WithContext(ctx).Model(&models.DatasetState{}).
-		Where("namespace = ? AND name = ?", nsValue(namespace), name).
+		Where("namespace = ? AND name = ? AND partition = ?", nsValue(namespace), name, wholeDatasetPartition).
 		Update("consumed_watermarks", datatypes.JSON(blob)).Error
 }
 
@@ -503,9 +532,14 @@ type datasetIdentity struct {
 }
 
 // getMany keeps namespace presence and observation timestamps while bounding
-// SQLite bind parameters. Missing rows are absent keys, never synthetic state.
+// SQLite bind parameters. It reads the whole-dataset watermark only (empty
+// partition). Named partitions are a separate grain and must not overwrite the
+// dataset row scheduling compares. Missing rows are absent keys, never
+// synthetic state.
 func (s *Store) getMany(ctx context.Context, ids []datasetIdentity) (map[datasetIdentity]models.DatasetState, error) {
-	const namesPerChunk = 400
+	// namespace + partition + names stays within the 401-bind pin the batch test
+	// checks. 399 names leaves room for those two fixed keys.
+	const namesPerChunk = 399
 	seen := make(map[datasetIdentity]struct{}, len(ids))
 	namesByNamespace := make(map[string][]string)
 	for _, id := range ids {
@@ -531,7 +565,7 @@ func (s *Store) getMany(ctx context.Context, ids []datasetIdentity) (map[dataset
 		for start := 0; start < len(names); start += namesPerChunk {
 			chunk := names[start:min(start+namesPerChunk, len(names))]
 			var rows []models.DatasetState
-			if err := s.db.WithContext(ctx).Where("namespace = ? AND name IN ?", namespace, chunk).Find(&rows).Error; err != nil {
+			if err := s.db.WithContext(ctx).Where("namespace = ? AND partition = ? AND name IN ?", namespace, wholeDatasetPartition, chunk).Find(&rows).Error; err != nil {
 				return nil, err
 			}
 			for _, row := range rows {
@@ -545,13 +579,21 @@ func (s *Store) getMany(ctx context.Context, ids []datasetIdentity) (map[dataset
 	return result, nil
 }
 
-// Get returns the state row for a dataset, or (zero, false, nil) when none
-// exists yet (an unknown dataset the evaluator serves before any run).
+// Get returns the whole-dataset watermark (empty partition), or (zero, false,
+// nil) when none exists yet (an unknown dataset the evaluator serves before
+// any run). It does not return a named partition of the same dataset.
 func (s *Store) Get(ctx context.Context, namespace *string, name string) (models.DatasetState, bool, error) {
+	return s.GetPartition(ctx, namespace, name, wholeDatasetPartition)
+}
+
+// GetPartition returns the watermark row for one partition of a dataset. An
+// empty partition is the whole-dataset row Get returns. A named partition is a
+// different row and is not found here when it was never advanced.
+func (s *Store) GetPartition(ctx context.Context, namespace *string, name, partition string) (models.DatasetState, bool, error) {
 	name = strings.TrimSpace(name)
 	var state models.DatasetState
 	res := s.db.WithContext(ctx).
-		Where("namespace = ? AND name = ?", nsValue(namespace), name).
+		Where("namespace = ? AND name = ? AND partition = ?", nsValue(namespace), name, partitionValue(partition)).
 		Limit(1).Find(&state)
 	if res.Error != nil {
 		return models.DatasetState{}, false, res.Error

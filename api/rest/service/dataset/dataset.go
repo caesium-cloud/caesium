@@ -380,7 +380,10 @@ func (s *Service) Advance(p AdvanceParams) (*AdvanceResult, error) {
 }
 
 func (s *Service) observedStates(status string, limit, offset int) ([]models.DatasetState, int64, error) {
-	q := s.db.WithContext(s.ctx).Model(&models.DatasetState{})
+	// The board is one row per dataset: the whole-dataset watermark. Named
+	// partitions are a separate grain and must not show up as extra datasets.
+	q := s.db.WithContext(s.ctx).Model(&models.DatasetState{}).
+		Where("dataset_states.partition = ?", "")
 	q = withEffectiveStatus(q, status)
 	q = s.producerVisible(q, "dataset_states.namespace", "dataset_states.name")
 
@@ -469,7 +472,7 @@ func (s *Service) declarationOnlyStates(status string, limit int) ([]models.Data
 	q := s.db.WithContext(s.ctx).
 		Model(&models.DatasetDeclaration{}).
 		Where("direction IN ?", declarationDirections).
-		Where("NOT EXISTS (SELECT 1 FROM dataset_states ds WHERE ds.name = dataset_declarations.name AND ds.namespace = COALESCE(dataset_declarations.namespace, ''))")
+		Where("NOT EXISTS (SELECT 1 FROM dataset_states ds WHERE ds.name = dataset_declarations.name AND ds.namespace = COALESCE(dataset_declarations.namespace, '') AND ds.partition = '')")
 	if status == models.DatasetStatusHeld {
 		// Only the declared datasets an active hold is on (List calls this for
 		// `held` only with the circuit breaker on).
@@ -513,7 +516,7 @@ func (s *Service) declarationOnlyStates(status string, limit int) ([]models.Data
 func (s *Service) getState(namespace, name string) (models.DatasetState, bool, error) {
 	var state models.DatasetState
 	res := s.db.WithContext(s.ctx).
-		Where("namespace = ? AND name = ?", strings.TrimSpace(namespace), strings.TrimSpace(name)).
+		Where("namespace = ? AND name = ? AND partition = ?", strings.TrimSpace(namespace), strings.TrimSpace(name), "").
 		Limit(1).
 		Find(&state)
 	if res.Error != nil {

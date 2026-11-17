@@ -138,57 +138,64 @@ func (c *Capturer) handleRunCompleted(ctx context.Context, evt event.Event) {
 
 	for i := range produced {
 		p := &produced[i]
-		step, ok := steps[p.StepName]
-		if !ok || !step.succeededNonCached {
-			// The producing step didn't run non-cached to success (cache hit,
-			// skipped, or a different step): its state is already correct.
-			continue
-		}
-		watermark := ""
-		if p.WatermarkKey != "" {
-			val, emitted := step.output[p.WatermarkKey]
-			// A declared watermark key that is absent OR emitted as an empty
-			// value means the run did not produce its required output. This is
-			// NOT degraded mode (that is only for datasets with no declared
-			// key) — refreshing verified_at here would mark a stale value fresh.
-			// Leave state untouched and record the miss.
-			if !emitted || strings.TrimSpace(val) == "" {
-				log.Warn("freshness: producing step omitted its declared watermark output",
-					"dataset", p.Name, "step", p.StepName, "watermark_key", p.WatermarkKey, "run_id", evt.RunID)
+		for _, step := range steps[p.StepName] {
+			if !step.succeededNonCached {
+				// The producing step didn't run non-cached to success (cache hit,
+				// skipped, or a different step): its state is already correct.
 				continue
 			}
-			watermark = val
-		}
-		// Consumed rides the Advance transaction (AdvanceInput.Consumed) so the
-		// snapshot is written atomically with — and tied to — the accepted
-		// advance/verify. A separate follow-up write could let an overlapping
-		// run's later snapshot land on top of another run's winning watermark;
-		// folding it in means a run that loses the watermark race also does not
-		// write its input snapshot.
-		res, err := c.store.Advance(ctx, AdvanceInput{
-			Namespace:   p.Namespace,
-			Name:        p.Name,
-			Watermark:   watermark,
-			RunID:       evt.RunID,
-			RunOrder:    completedAt,
-			CompletedAt: completedAt,
-			Backfill:    backfill,
-			Consumed:    consumed,
-		})
-		if err != nil {
-			log.Error("freshness: advance failed", "dataset", p.Name, "run_id", evt.RunID, "error", err)
-			continue
-		}
-		switch res.Outcome {
-		case OutcomeRegressionDropped, OutcomeOutOfOrderDropped:
-			log.Warn("freshness: watermark write dropped",
-				"dataset", p.Name, "outcome", string(res.Outcome), "run_id", evt.RunID, "watermark", watermark)
-		case OutcomeAdvanced, OutcomeVerified:
-			// Publish AFTER the Advance commits so the evaluator reacting to this
-			// event reads post-advance state. RunID feeds the evaluator's
-			// _trigger_depth propagation. Regression/out-of-order/backfill drops
-			// leave state unchanged, so they must not wake a reactive derivation.
-			c.publishDatasetAdvanced(p.Namespace, p.Name, evt.JobID, evt.RunID)
+			watermark := ""
+			if p.WatermarkKey != "" {
+				val, emitted := step.output[p.WatermarkKey]
+				// A declared watermark key that is absent OR emitted as an empty
+				// value means the run did not produce its required output. This is
+				// NOT degraded mode (that is only for datasets with no declared
+				// key) — refreshing verified_at here would mark a stale value fresh.
+				// Leave state untouched and record the miss.
+				if !emitted || strings.TrimSpace(val) == "" {
+					log.Warn("freshness: producing step omitted its declared watermark output",
+						"dataset", p.Name, "partition", step.partition, "step", p.StepName, "watermark_key", p.WatermarkKey, "run_id", evt.RunID)
+					continue
+				}
+				watermark = val
+			}
+			// Consumed rides the Advance transaction (AdvanceInput.Consumed) so the
+			// snapshot is written atomically with — and tied to — the accepted
+			// advance/verify. A separate follow-up write could let an overlapping
+			// run's later snapshot land on top of another run's winning watermark;
+			// folding it in means a run that loses the watermark race also does not
+			// write its input snapshot. A fanned task advances only its own
+			// partition; the empty partition stays the whole-dataset row.
+			res, err := c.store.Advance(ctx, AdvanceInput{
+				Namespace:   p.Namespace,
+				Name:        p.Name,
+				Partition:   step.partition,
+				Watermark:   watermark,
+				RunID:       evt.RunID,
+				RunOrder:    completedAt,
+				CompletedAt: completedAt,
+				Backfill:    backfill,
+				Consumed:    consumed,
+			})
+			if err != nil {
+				log.Error("freshness: advance failed", "dataset", p.Name, "partition", step.partition, "run_id", evt.RunID, "error", err)
+				continue
+			}
+			switch res.Outcome {
+			case OutcomeRegressionDropped, OutcomeOutOfOrderDropped:
+				log.Warn("freshness: watermark write dropped",
+					"dataset", p.Name, "partition", step.partition, "outcome", string(res.Outcome), "run_id", evt.RunID, "watermark", watermark)
+			case OutcomeAdvanced, OutcomeVerified:
+				// Publish AFTER the Advance commits so the evaluator reacting to this
+				// event reads post-advance state. RunID feeds the evaluator's
+				// _trigger_depth propagation. Regression/out-of-order/backfill drops
+				// leave state unchanged, so they must not wake a reactive derivation.
+				// A named partition does not publish: scheduling still reads the
+				// whole-dataset watermark.
+				if step.partition == "" {
+					c.publishDatasetAdvanced(p.Namespace, p.Name, evt.JobID, evt.RunID)
+				}
+			}
 		}
 	}
 }
@@ -315,46 +322,63 @@ func decodeConsumedParam(params map[string]string, param string) (map[string]str
 }
 
 type stepOutput struct {
+	partition          string
 	succeededNonCached bool
 	output             map[string]string
 }
 
-// stepOutputs maps each step name in the run to its terminal non-cached success
-// output (the ##caesium::output key/value pairs). A step present but only as a
-// cache hit is recorded with succeededNonCached=false.
-func (c *Capturer) stepOutputs(ctx context.Context, runID uuid.UUID) (map[string]stepOutput, error) {
+// stepOutputs maps each step name in the run to one observation per partition.
+// An empty partition is the unfanned task and advances the whole-dataset
+// watermark. A named partition advances only that partition's row. Within one
+// partition a non-cached success wins over a cache hit, matching the previous
+// per-step rule. A step present but only as a cache hit is recorded with
+// succeededNonCached=false.
+func (c *Capturer) stepOutputs(ctx context.Context, runID uuid.UUID) (map[string][]stepOutput, error) {
 	var rows []struct {
-		TaskName string
-		Status   string
-		CacheHit bool
-		Output   datatypes.JSON
+		TaskName       string
+		Status         string
+		CacheHit       bool
+		Output         datatypes.JSON
+		PartitionValue string
 	}
 	if err := c.db.WithContext(ctx).Table("task_runs").
-		Select("tasks.name as task_name, task_runs.status, task_runs.cache_hit, task_runs.output").
+		Select("tasks.name as task_name, task_runs.status, task_runs.cache_hit, task_runs.output, task_runs.partition_value").
 		Joins("join tasks on tasks.id = task_runs.task_id").
 		Where("task_runs.job_run_id = ?", runID).
 		Scan(&rows).Error; err != nil {
 		return nil, err
 	}
 
-	out := make(map[string]stepOutput, len(rows))
+	out := make(map[string][]stepOutput, len(rows))
+	index := make(map[string]map[string]int, len(rows))
 	for i := range rows {
 		r := &rows[i]
 		if r.Status != taskRunTerminalSucceeded {
 			continue
 		}
-		// A non-cached success wins over any prior cache-hit row for the step.
-		cur, seen := out[r.TaskName]
-		if seen && cur.succeededNonCached {
+		partition := partitionValue(r.PartitionValue)
+		byPartition := index[r.TaskName]
+		if byPartition == nil {
+			byPartition = map[string]int{}
+			index[r.TaskName] = byPartition
+		}
+		// A non-cached success wins over any prior cache-hit row for the partition.
+		idx, seen := byPartition[partition]
+		if seen && out[r.TaskName][idx].succeededNonCached {
 			continue
 		}
-		so := stepOutput{succeededNonCached: !r.CacheHit}
+		so := stepOutput{partition: partition, succeededNonCached: !r.CacheHit}
 		if !r.CacheHit {
 			so.output = decodeOutput(r.Output)
 		} else if !seen {
 			so.output = decodeOutput(r.Output)
 		}
-		out[r.TaskName] = so
+		if seen {
+			out[r.TaskName][idx] = so
+		} else {
+			byPartition[partition] = len(out[r.TaskName])
+			out[r.TaskName] = append(out[r.TaskName], so)
+		}
 	}
 	return out, nil
 }

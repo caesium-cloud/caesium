@@ -168,7 +168,7 @@ func readPersistedDatasetState(ctx context.Context, db *sql.DB, dataset string) 
 	err := db.QueryRowContext(ctx, `
 SELECT status, reason, watermark, consumed_watermarks
 FROM dataset_states
-WHERE namespace = '' AND name = ?
+WHERE namespace = '' AND name = ? AND partition = ''
 `, dataset).Scan(&state.Status, &state.Reason, &watermark, &consumed)
 	if err == sql.ErrNoRows {
 		return persistedDatasetState{}, false, nil

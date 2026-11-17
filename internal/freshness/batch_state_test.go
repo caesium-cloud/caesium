@@ -73,7 +73,7 @@ func TestGetManyBoundsChunksAndDiscardsPartialReads(t *testing.T) {
 			}))
 			require.NoError(t, conn.Callback().Query().After("gorm:query").Register("test:chunk-limit", func(tx *gorm.DB) {
 				if _, ok := tx.Statement.Dest.(*[]models.DatasetState); ok && tx.Error == nil {
-					require.LessOrEqual(t, len(tx.Statement.Vars), 401, "namespace plus at most 400 names")
+					require.LessOrEqual(t, len(tx.Statement.Vars), 401, "namespace, partition, and at most 399 names")
 				}
 			}))
 			got, err := store.getMany(context.Background(), append(ids, ids[0]))

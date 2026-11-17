@@ -118,6 +118,93 @@ func indexIsUniqueOverPartitionIndex(definition string) bool {
 	return strings.Contains(lowered, "unique") && strings.Contains(lowered, "partition_index")
 }
 
+// datasetStateIdentityIndexName is the natural key of dataset_states. The name
+// is unchanged from the pre-partition (namespace, name) index; AutoMigrate
+// will not widen an index whose name already exists, so an existing deployment
+// would refuse a second partition of the same dataset forever.
+const datasetStateIdentityIndexName = "idx_dataset_state_identity"
+
+// MigrateDatasetStatePartitionIndex adds dataset_states.partition (NOT NULL
+// default ”) and drops a pre-partition idx_dataset_state_identity so
+// AutoMigrate can recreate it UNIQUE over (namespace, name, partition).
+//
+// The column is added here, before the drop, so existing rows land on the
+// whole-dataset key. Empty string, not NULL: SQLite UNIQUE treats NULLs as
+// distinct, which would allow duplicate absent partitions. A named partition
+// is then a different key and does not collide with those rows.
+//
+// A database with no dataset_states table is a no-op; AutoMigrate creates the
+// column and the index together. An index that is already UNIQUE and already
+// covers partition is left alone.
+func MigrateDatasetStatePartitionIndex(conn *gorm.DB) error {
+	if conn == nil || !conn.Migrator().HasTable(&models.DatasetState{}) {
+		return nil
+	}
+	if !conn.Migrator().HasColumn(&models.DatasetState{}, "Partition") {
+		if err := addDatasetStatePartitionColumn(conn); err != nil {
+			return err
+		}
+	}
+	definition, found, err := datasetStateIdentityIndexDefinition(conn)
+	if err != nil {
+		return err
+	}
+	if !found || indexCoversDatasetPartition(definition) {
+		return nil
+	}
+	log.Info("migrating dataset_states identity index to UNIQUE (namespace, name, partition)",
+		"index", datasetStateIdentityIndexName)
+	if err := conn.Exec(fmt.Sprintf("DROP INDEX IF EXISTS %s", datasetStateIdentityIndexName)).Error; err != nil {
+		return fmt.Errorf("db: drop stale %s: %w", datasetStateIdentityIndexName, err)
+	}
+	return nil
+}
+
+func addDatasetStatePartitionColumn(conn *gorm.DB) error {
+	stmt := "ALTER TABLE dataset_states ADD COLUMN partition text NOT NULL DEFAULT ''"
+	if err := conn.Exec(stmt).Error; err != nil {
+		return fmt.Errorf("db: add dataset_states.partition: %w", err)
+	}
+	return nil
+}
+
+func datasetStateIdentityIndexDefinition(conn *gorm.DB) (string, bool, error) {
+	var (
+		definition string
+		query      string
+		args       []any
+	)
+	switch strings.ToLower(conn.Name()) {
+	case "postgres":
+		query = "SELECT COALESCE(indexdef, '') FROM pg_indexes WHERE tablename = 'dataset_states' AND indexname = ?"
+		args = []any{datasetStateIdentityIndexName}
+	default:
+		query = "SELECT COALESCE(sql, '') FROM sqlite_master WHERE type = 'index' AND name = ?"
+		args = []any{datasetStateIdentityIndexName}
+	}
+	rows, err := conn.Raw(query, args...).Rows()
+	if err != nil {
+		return "", false, fmt.Errorf("db: inspect %s: %w", datasetStateIdentityIndexName, err)
+	}
+	defer func() { _ = rows.Close() }()
+	if !rows.Next() {
+		return "", false, rows.Err()
+	}
+	if err := rows.Scan(&definition); err != nil {
+		return "", false, fmt.Errorf("db: scan %s definition: %w", datasetStateIdentityIndexName, err)
+	}
+	return definition, true, rows.Err()
+}
+
+// indexCoversDatasetPartition reports whether the identity index already
+// includes the partition column. An empty definition (SQLite reports NULL sql
+// for an implicit table constraint) does not match, so it is dropped and
+// rebuilt from the struct tags.
+func indexCoversDatasetPartition(definition string) bool {
+	lowered := strings.ToLower(definition)
+	return strings.Contains(lowered, "unique") && strings.Contains(lowered, "partition")
+}
+
 // MigrateNamespaceDefaults repairs legacy NULL/empty ownership before
 // AutoMigrate tightens the columns. It never derives historical ownership from
 // the mutable job: old rows belong to default; explicit namespaces are retained.

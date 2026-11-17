@@ -336,7 +336,7 @@ steps:
 
 - `steps[].datasets.consumes` / `produces[]` — a consumed name may resolve to a dataset produced by another job; `produces[].name` is required, `freshness`/`maxStaleness` are Go durations, `watermark.key` names the emitted output key.
 - Contract schemas: producers use `produces[].schema` for an inline JSON Schema or `produces[].schemaFrom: output` to reuse the step `outputSchema`; `produces[].version` is bumped for intentional breaking changes. Consumers may use the object form `consumes: [{name, schema}]` for the subset they require. Scalar consumes remain valid and create name-level edges only.
-- `metadata.datasets.sources[]` — external upstreams; `arrival.watermark` is a JSONPath into the event payload; `external: true` tells cross-job lint not to demand a producing job.
+- `metadata.datasets.sources[]` — external upstreams; `arrival.watermark` is a JSONPath into the event payload; optional `arrival.partition` is a JSONPath naming the partition that event advances (omit it for the whole-dataset watermark; a resolved partition does not move the dataset-level row); `external: true` tells cross-job lint not to demand a producing job. Freshness scheduling still reads the dataset-level watermark. A fanned producing task records its watermark on that task's partition, not on the dataset, when the partition is set.
 - A purely data-derived job can drop cron with `trigger: {type: freshness}` (needs at least one consumed dataset and one produced dataset with `freshness`; declare it on the job, not via the trigger API). See the [generated reference](job-schema-reference.md#datasets--freshness).
 
 ### Cross-Job Contract Enforcement (server-gated)

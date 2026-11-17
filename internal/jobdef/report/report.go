@@ -263,7 +263,8 @@ func Markdown() string {
 	b.WriteString("| `arrival` | object | optional | Binds an ingested event to a source-dataset watermark advance. |\n")
 	b.WriteString("| `arrival.event.type` | string | required with `arrival.event` | Event type to match (mirrors the shipped event-trigger matcher). |\n")
 	b.WriteString("| `arrival.event.filter` | map[string]string | optional | Content filter over event data. |\n")
-	b.WriteString("| `arrival.watermark` | string (JSONPath) | optional | JSONPath into the event payload extracted as the new watermark value. |\n\n")
+	b.WriteString("| `arrival.watermark` | string (JSONPath) | optional | JSONPath into the event payload extracted as the new watermark value. |\n")
+	b.WriteString("| `arrival.partition` | string (JSONPath) | optional | JSONPath into the event payload naming the partition this event advances. Omit it to advance the whole-dataset watermark. A resolved partition is its own watermark row and does not move the dataset-level row. |\n\n")
 	b.WriteString("`metadata.datasets.skipWhenFresh` (boolean) controls P1 cron skipping: when a cron-triggered job's outputs are already fresh and its consumed watermarks are unchanged, the scheduled run is recorded as `skipped_fresh` instead of executing. It defaults to `true` whenever a job declares datasets. For a purely data-derived job, drop cron and declare `trigger: {type: freshness}` (see [Freshness Trigger](#freshness-trigger)); the evaluator owns the cadence.\n\n")
 
 	b.WriteString("### Contract Enforcement (`CAESIUM_CONTRACT_*`)\n")

@@ -32,28 +32,31 @@ const (
 	DatasetStatusHeld = "held"
 )
 
-// DatasetState is the durable truth every scheduling decision reads: one row per
-// dataset (natural key namespace+name). It distinguishes "a run succeeded" from
-// "the output advanced" — Watermark/AdvancedAt move only on a real watermark
-// change (see internal/freshness.Store.Advance), while VerifiedAt records a
-// successful run that merely confirmed the current value. Freshness is evaluated
-// against max(AdvancedAt, VerifiedAt).
-//
-// Namespace is nullable and unused in v1 (mirrors DatasetDeclaration); dataset
-// identity keys on Name today. This is NOT a hot per-run table: it is written at
-// run completion and by the evaluator, not on the per-task hot path.
+// DatasetState is one watermark row. The natural key is namespace + name +
+// partition. An empty Partition is the whole-dataset watermark scheduling
+// reads; a named partition is a distinct row of the same dataset and never
+// shares that watermark. The row distinguishes "a run succeeded" from "the
+// output advanced" — Watermark/AdvancedAt move only on a real watermark change
+// (see internal/freshness.Store.Advance), while VerifiedAt records a successful
+// run that merely confirmed the current value. Freshness of the dataset-level
+// row is evaluated against max(AdvancedAt, VerifiedAt). This is NOT a hot
+// per-run table: it is written at run completion and by the evaluator, not on
+// the per-task hot path.
 type DatasetState struct {
 	ID uuid.UUID `gorm:"type:uuid;primaryKey" json:"id"`
 
-	// Namespace is reserved for cross-instance datasets (unused in v1) and Name
-	// is the dataset identity the whole feature keys on. Together they are the
-	// natural key, enforced by a real UNIQUE index — Namespace is NOT NULL with a
-	// '' default (rather than nullable) precisely so the unique index is reliable
-	// under SQLite, which treats NULLs as distinct in a UNIQUE index and would
-	// otherwise let two rows share one dataset identity. The store maps a nil
-	// namespace to '' on every query.
+	// Namespace and Name identify the dataset. Partition is the dynamic-fanout
+	// partition key; empty is the whole-dataset watermark. Together they are the
+	// natural key, enforced by a real UNIQUE index. Namespace and Partition are
+	// NOT NULL with a '' default (rather than nullable) so the unique index is
+	// reliable under SQLite, which treats NULLs as distinct and would otherwise
+	// let two "absent" rows share one identity — and would let an absent
+	// partition collide with itself while a named partition stayed a different
+	// row. The store maps a nil namespace and a blank partition to '' on every
+	// query.
 	Namespace string `gorm:"type:text;not null;default:'';uniqueIndex:idx_dataset_state_identity,priority:1" json:"namespace,omitempty"`
 	Name      string `gorm:"type:text;not null;uniqueIndex:idx_dataset_state_identity,priority:2" json:"name"`
+	Partition string `gorm:"type:text;not null;default:'';uniqueIndex:idx_dataset_state_identity,priority:3" json:"partition,omitempty"`
 
 	// Watermark is the current high-water value emitted by the producing step
 	// (or an arrival binding). Empty until the dataset first advances.

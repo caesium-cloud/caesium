@@ -245,6 +245,7 @@ External datasets nobody in Caesium produces — the upstreams a consuming step 
 | `arrival.event.type` | string | required with `arrival.event` | Event type to match (mirrors the shipped event-trigger matcher). |
 | `arrival.event.filter` | map[string]string | optional | Content filter over event data. |
 | `arrival.watermark` | string (JSONPath) | optional | JSONPath into the event payload extracted as the new watermark value. |
+| `arrival.partition` | string (JSONPath) | optional | JSONPath into the event payload naming the partition this event advances. Omit it to advance the whole-dataset watermark. A resolved partition is its own watermark row and does not move the dataset-level row. |
 
 `metadata.datasets.skipWhenFresh` (boolean) controls P1 cron skipping: when a cron-triggered job's outputs are already fresh and its consumed watermarks are unchanged, the scheduled run is recorded as `skipped_fresh` instead of executing. It defaults to `true` whenever a job declares datasets. For a purely data-derived job, drop cron and declare `trigger: {type: freshness}` (see [Freshness Trigger](#freshness-trigger)); the evaluator owns the cadence.
 

@@ -558,16 +558,19 @@ func (e *Evaluator) updateStatusTx(ctx context.Context, db *gorm.DB, decl models
 		ID:              uuid.New(),
 		Namespace:       nsValue(decl.Namespace),
 		Name:            name,
+		Partition:       wholeDatasetPartition,
 		Status:          status,
 		Reason:          reason,
 		ReasonNamespace: reasonNamespace,
 	}
 	// One upsert carrying the real status/reason: insert the row on first
-	// observation, otherwise update the evaluator-owned columns in place. dqlite
-	// accepts ON CONFLICT DO UPDATE for plain column assignments.
+	// observation, otherwise update the evaluator-owned columns in place. The
+	// conflict target is the whole-dataset key (empty partition). A named
+	// partition is a different watermark and must not absorb this status.
+	// dqlite accepts ON CONFLICT DO UPDATE for plain column assignments.
 	upsert := func(tx *gorm.DB) error {
 		return tx.WithContext(ctx).Clauses(clause.OnConflict{
-			Columns: []clause.Column{{Name: "namespace"}, {Name: "name"}},
+			Columns: datasetStateKeyColumns(),
 			DoUpdates: clause.Assignments(map[string]any{
 				"status":           status,
 				"reason":           reason,

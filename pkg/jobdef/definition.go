@@ -600,10 +600,14 @@ type ArrivalEvent struct {
 
 // Arrival binds an external event to a source dataset advance: when an ingested
 // event matches Event, Watermark (a JSONPath into the event payload) is
-// extracted as the new watermark value.
+// extracted as the new watermark value. Partition, also a JSONPath, selects
+// the dynamic-fanout partition that watermark belongs to. Omit it to advance
+// the whole-dataset watermark. A resolved partition is a separate watermark of
+// the same dataset and does not move the dataset-level row.
 type Arrival struct {
 	Event     *ArrivalEvent `yaml:"event,omitempty" json:"event,omitempty"`
 	Watermark string        `yaml:"watermark,omitempty" json:"watermark,omitempty"`
+	Partition string        `yaml:"partition,omitempty" json:"partition,omitempty"`
 }
 
 // SourceDataset declares an external dataset nobody in Caesium produces — the
@@ -1454,6 +1458,11 @@ func validateDatasets(d *Definition) error {
 				if wm := strings.TrimSpace(src.Arrival.Watermark); wm != "" {
 					if err := validateSimpleJSONPath(wm); err != nil {
 						return fmt.Errorf("metadata.datasets.sources[%d].arrival.watermark: %w", i, err)
+					}
+				}
+				if part := strings.TrimSpace(src.Arrival.Partition); part != "" {
+					if err := validateSimpleJSONPath(part); err != nil {
+						return fmt.Errorf("metadata.datasets.sources[%d].arrival.partition: %w", i, err)
 					}
 				}
 			}
