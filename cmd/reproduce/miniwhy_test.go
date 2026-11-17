@@ -56,6 +56,41 @@ func TestFormatMiniWhyOmitsSecretValues(t *testing.T) {
 	}
 }
 
+func TestFormatMiniWhyOmitsUppercaseCredentialNames(t *testing.T) {
+	const token = "review-only-credential"
+	const password = "plaintext-secret"
+	const apiKey = "uppercase-api-key"
+	const authorization = "uppercase-authorization"
+	line := formatMiniWhy(&miniWhy{
+		BaselineKind: "prior_run",
+		Fields: []miniWhyField{
+			{Field: "runParams.API_TOKEN", Change: "added", After: token},
+			{Field: "runParams.API_KEY", Change: "added", After: apiKey},
+			{Field: "predecessorOutputs.extract.PASSWORD", Change: "changed", Before: password, After: "next-secret"},
+			{Field: "predecessorOutputs.extract.AUTHORIZATION", Change: "added", After: authorization},
+			{Field: "env.dbPassword", Change: "added", After: "camel-secret"},
+			{Field: "runParams.flavor", Change: "changed", Before: "vanilla", After: "chocolate"},
+		},
+	})
+	for _, secret := range []string{token, password, "next-secret", apiKey, authorization, "camel-secret"} {
+		if strings.Contains(line, secret) {
+			t.Fatalf("mini-why leaked %q: %s", secret, line)
+		}
+	}
+	for _, want := range []string{
+		"runParams.API_TOKEN added (redacted)",
+		"runParams.API_KEY added (redacted)",
+		"predecessorOutputs.extract.PASSWORD changed (redacted)",
+		"predecessorOutputs.extract.AUTHORIZATION added (redacted)",
+		"env.dbPassword added (redacted)",
+		"runParams.flavor changed vanilla→chocolate",
+	} {
+		if !strings.Contains(line, want) {
+			t.Fatalf("mini-why %q missing %q", line, want)
+		}
+	}
+}
+
 func TestFormatMiniWhyNoPriorRun(t *testing.T) {
 	if got := formatMiniWhy(&miniWhy{BaselineKind: "none"}); got != "mini-why: no prior run to compare against" {
 		t.Fatalf("got %q", got)

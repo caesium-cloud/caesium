@@ -183,14 +183,15 @@ func sensitiveField(field string) bool {
 	return sensitiveKey.MatchString(camelBoundaries(last))
 }
 
+// camelBoundaries inserts a word break only at a lowercase-to-uppercase
+// boundary (dbPassword -> db_Password). Splitting every capital letter turns
+// PASSWORD into P_A_S_S_W_O_R_D, which no longer matches sensitiveKey, so an
+// uppercase credential would be copied into the descriptor in plaintext.
 func camelBoundaries(s string) string {
 	var b strings.Builder
 	for i, r := range s {
-		if i > 0 && r >= 'A' && r <= 'Z' {
-			prev := rune(s[i-1])
-			if prev != '_' && prev != '-' {
-				b.WriteByte('_')
-			}
+		if i > 0 && r >= 'A' && r <= 'Z' && s[i-1] >= 'a' && s[i-1] <= 'z' {
+			b.WriteByte('_')
 		}
 		b.WriteRune(r)
 	}
