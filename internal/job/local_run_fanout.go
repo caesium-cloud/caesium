@@ -59,7 +59,9 @@ func (l *localRun) rehydrateFanOutGroups() {
 		}
 		instances := byTask[tid]
 		g := run.ExpandedGroup{TaskID: tid, Dependents: map[string][]string{}}
-		if t := tasksByID[tid]; t != nil {
+		if runner := l.runners[tid]; runner != nil && runner.replay != nil && runner.replay.Baseline.TaskName != "" {
+			g.TaskName = runner.replay.Baseline.TaskName
+		} else if t := tasksByID[tid]; t != nil {
 			g.TaskName = t.Name
 		}
 		for _, row := range instances {

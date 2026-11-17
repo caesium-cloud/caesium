@@ -60,7 +60,9 @@ func (l *localRun) runTask(taskID uuid.UUID) ([]uuid.UUID, error) {
 		if outputs, ok := l.taskOutput(predID); ok && len(outputs) > 0 {
 			predOutputsByID[predID] = outputs
 			stepName := ""
-			if t := tasksByID[predID]; t != nil {
+			if pred := runners[predID]; pred != nil && pred.replay != nil && pred.replay.Baseline.TaskName != "" {
+				stepName = pred.replay.Baseline.TaskName
+			} else if t := tasksByID[predID]; t != nil {
 				stepName = t.Name
 			}
 			if stepName == "" {
@@ -437,8 +439,8 @@ func (l *localRun) runTask(taskID uuid.UUID) ([]uuid.UUID, error) {
 			break
 		}
 
-		// Compute retry delay.
-		delay := computeRetryDelay(taskModel, attempt)
+		// Compute retry delay from the frozen descriptor when it recorded one.
+		delay := replayAwareRetryDelay(runner, taskModel, attempt)
 
 		log.Info("retrying task", "job_id", j.id, "task_id", taskID, "attempt", attempt, "next_attempt", attempt+1, "delay", delay, "error", lastErr)
 

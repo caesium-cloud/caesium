@@ -69,10 +69,6 @@ type taskResult struct {
 	skippedByBranch []uuid.UUID
 }
 
-// ErrLocalQuarantinedReplayUnsupported is returned when a quarantined replay
-// reaches the in-process executor, which is not descriptor-aware.
-var ErrLocalQuarantinedReplayUnsupported = errors.New("replay requires the descriptor-aware executor")
-
 // retryOnContention runs fn, retrying only on transient dqlite contention.
 //
 // The global connection-pool retry (pkg/db) covers a contended statement at
@@ -450,6 +446,21 @@ type atomRunner struct {
 	// fails on it at once; each fan-out instance fails on it through its own
 	// instance row.
 	kubeMappingErr error
+	// replay is the baseline execution descriptor a quarantined local task
+	// reconstructs from. Nil on an ordinary run, which keeps the live atom
+	// spec. The distributed worker loads the same descriptor in
+	// runtimeExecutor.Execute; both lanes then share its env, mounts, retry
+	// delay, secret refs, job alias, and task name.
+	replay *models.TaskExecutionDescriptor
+}
+
+// interpolateStepEnv reports whether ${CAESIUM_PARAM_*} in the step env is
+// expanded before hashing and container create. A nil descriptor is an
+// ordinary run and always expands. A replay descriptor expands only when the
+// baseline captured the capability bit; descriptors from before that feature
+// omit it and keep their literal env.
+func (r *atomRunner) interpolateStepEnv() bool {
+	return r == nil || r.replay == nil || r.replay.Runtime.ParamEnvInterpolation
 }
 
 const (
@@ -902,11 +913,14 @@ func pendingGroupIndegree(store *run.Store, runID, taskID uuid.UUID) (int, bool)
 // evidence columns only — so those four come from currentRun.Tasks, which is
 // the same set the distributed worker reads off taskRun.
 //
-// The container spec (env, workDir, mounts, kubernetes) is NOT on the row; the
-// distributed worker resolves it live via loadAtomSpec(taskRun.AtomID), and so
-// does this, keyed on the row's FROZEN AtomID rather than the live task's.
-// atomsByTask supplies the atom already read for RegisterTasks whenever it is
-// the same one, so the common path issues no extra query.
+// The container spec (env, workDir, mounts, kubernetes) is NOT a column on the
+// row. An ordinary run resolves it live via the row's FROZEN AtomID, matching
+// the worker's loadAtomSpec. A quarantined replay does not: it copies
+// ContainerSpec (and KubernetesSpec, when the container spec omitted it) off
+// the baseline execution descriptor, the same reconstruction
+// runtimeExecutor.Execute uses. atomsByTask supplies the atom already read
+// for RegisterTasks whenever it is the same one, so the common path issues
+// no extra query.
 //
 // currentRun.Tasks is the collapsed view (one entry per catalog task, carrying
 // the first instance's frozen columns), which is what the runner map wants:
@@ -915,6 +929,7 @@ func buildLocalRunners(
 	ctx context.Context,
 	j *job,
 	svc asvc.Atom,
+	store *run.Store,
 	currentRun *run.JobRun,
 	defaultTaskTimeout time.Duration,
 	atomsByTask map[uuid.UUID]*models.Atom,
@@ -927,31 +942,46 @@ func buildLocalRunners(
 		}
 		taskID := taskState.TaskID
 
-		spec, ok := specByAtom[taskState.AtomID]
-		if !ok {
-			if cached := atomsByTask[taskID]; cached != nil && cached.ID == taskState.AtomID {
-				spec = cached.ContainerSpec()
-			} else {
-				// A row whose atom the catalog no longer resolves — a run being
-				// retried after its step was retired, whose atom `job apply`
-				// soft-deleted. Leaving the runner unbuilt keeps the failure
-				// exactly where it was before this map was built from the rows:
-				// scheduling THAT task reports "missing runner", while a retry
-				// whose retired task already succeeded still completes.
-				frozenAtom, err := retryOnContentionDo(ctx, func() (*models.Atom, error) {
-					return svc.Get(taskState.AtomID)
-				})
-				if err != nil {
-					if !errors.Is(err, gorm.ErrRecordNotFound) {
-						return err
-					}
-					log.Warn("no catalog atom for registered task; task is not runnable",
-						"job_id", j.id, "task_id", taskID, "atom_id", taskState.AtomID, "error", err)
-					continue
-				}
-				spec = frozenAtom.ContainerSpec()
+		var spec container.Spec
+		var replayDesc *models.TaskExecutionDescriptor
+		if currentRun.Quarantine || taskState.Quarantine {
+			// Per task, not per atom. Sibling steps can share an atom id and
+			// still carry different frozen specs, and a fanned group's
+			// collapsed view has overwritten its row id with the catalog task
+			// id, so the descriptor is loaded from one instance row.
+			var err error
+			spec, replayDesc, err = quarantinedReplaySpec(ctx, store, currentRun.ID, taskID)
+			if err != nil {
+				return err
 			}
-			specByAtom[taskState.AtomID] = spec
+		} else {
+			var ok bool
+			spec, ok = specByAtom[taskState.AtomID]
+			if !ok {
+				if cached := atomsByTask[taskID]; cached != nil && cached.ID == taskState.AtomID {
+					spec = cached.ContainerSpec()
+				} else {
+					// A row whose atom the catalog no longer resolves — a run being
+					// retried after its step was retired, whose atom `job apply`
+					// soft-deleted. Leaving the runner unbuilt keeps the failure
+					// exactly where it was before this map was built from the rows:
+					// scheduling THAT task reports "missing runner", while a retry
+					// whose retired task already succeeded still completes.
+					frozenAtom, err := retryOnContentionDo(ctx, func() (*models.Atom, error) {
+						return svc.Get(taskState.AtomID)
+					})
+					if err != nil {
+						if !errors.Is(err, gorm.ErrRecordNotFound) {
+							return err
+						}
+						log.Warn("no catalog atom for registered task; task is not runnable",
+							"job_id", j.id, "task_id", taskID, "atom_id", taskState.AtomID, "error", err)
+						continue
+					}
+					spec = frozenAtom.ContainerSpec()
+				}
+				specByAtom[taskState.AtomID] = spec
+			}
 		}
 
 		runner := &atomRunner{
@@ -976,6 +1006,7 @@ func buildLocalRunners(
 			outputSchema:     slices.Clone(taskState.OutputSchema),
 			schemaValidation: taskState.SchemaValidation,
 			spec:             spec,
+			replay:           replayDesc,
 		}
 		if runner.maxAttempts < 1 {
 			runner.maxAttempts = 1
@@ -1004,10 +1035,161 @@ func buildLocalRunners(
 	return nil
 }
 
+// quarantinedReplaySpec loads the container spec the distributed worker would
+// execute for one quarantined catalog task. Every instance row must be replay
+// safe. The spec comes from the first instance's descriptor: fanned siblings
+// share the template recipe, and the partition identity lives on the row.
+func quarantinedReplaySpec(ctx context.Context, store *run.Store, runID, taskID uuid.UUID) (container.Spec, *models.TaskExecutionDescriptor, error) {
+	rows, err := retryOnContentionDo(ctx, func() ([]models.TaskRun, error) {
+		return store.TaskRunsForTask(runID, taskID)
+	})
+	if err != nil {
+		return container.Spec{}, nil, err
+	}
+	if len(rows) == 0 {
+		return container.Spec{}, nil, fmt.Errorf("quarantined replay task %s has no task rows to reconstruct", taskID)
+	}
+	for i := range rows {
+		if !rows[i].ReplaySafe {
+			return container.Spec{}, nil, fmt.Errorf("quarantined replay task is not replay safe: task %s", taskID)
+		}
+	}
+	descriptor, err := retryOnContentionDo(ctx, func() (*models.TaskExecutionDescriptor, error) {
+		return store.TaskExecutionDescriptor(ctx, runID, rows[0].ID)
+	})
+	if err != nil {
+		return container.Spec{}, nil, fmt.Errorf("replay descriptor unavailable for quarantined task: %w", err)
+	}
+	spec := descriptor.ContainerSpec
+	if spec.Kubernetes == nil && descriptor.KubernetesSpec != nil {
+		spec.Kubernetes = descriptor.KubernetesSpec
+	}
+	return spec, descriptor, nil
+}
+
+// prepareQuarantinedLocalGraph builds the in-memory DAG for a local
+// quarantined replay from the frozen descriptors, not the live catalog.
+// Replay materialize already inserted the task rows; RegisterTasks would
+// admit a step added by a later apply. A run with no rows fails closed.
+func prepareQuarantinedLocalGraph(
+	ctx context.Context,
+	j *job,
+	store *run.Store,
+	runID uuid.UUID,
+) (
+	tasks models.Tasks,
+	taskOrder map[uuid.UUID]int,
+	atomsByTask map[uuid.UUID]*models.Atom,
+	tasksByID map[uuid.UUID]*models.Task,
+	triggerRuleByTask map[uuid.UUID]string,
+	adjacency map[uuid.UUID][]uuid.UUID,
+	predecessors map[uuid.UUID][]uuid.UUID,
+	indegree map[uuid.UUID]int,
+	err error,
+) {
+	current, err := retryOnContentionDo(ctx, func() (*run.JobRun, error) {
+		return store.Get(runID)
+	})
+	if err != nil {
+		return nil, nil, nil, nil, nil, nil, nil, nil, err
+	}
+	if current == nil || len(current.Tasks) == 0 {
+		return nil, nil, nil, nil, nil, nil, nil, nil, fmt.Errorf("quarantined replay run %s has no task rows to reconstruct", runID)
+	}
+
+	topo, err := retryOnContentionDo(ctx, func() (run.RunTopology, error) {
+		return store.LoadRunTopology(runID)
+	})
+	if err != nil {
+		return nil, nil, nil, nil, nil, nil, nil, nil, err
+	}
+	if len(topo.Order) == 0 {
+		return nil, nil, nil, nil, nil, nil, nil, nil, fmt.Errorf("quarantined replay run %s has no descriptor topology", runID)
+	}
+
+	live, err := retryOnContentionDo(ctx, func() (models.Tasks, error) {
+		return j.taskServiceFactory(ctx).List(&task.ListRequest{
+			JobID:   j.id.String(),
+			OrderBy: []string{"position", "created_at"},
+		})
+	})
+	if err != nil {
+		return nil, nil, nil, nil, nil, nil, nil, nil, err
+	}
+	liveByID := make(map[uuid.UUID]*models.Task, len(live))
+	for _, liveTask := range live {
+		if liveTask != nil {
+			liveByID[liveTask.ID] = liveTask
+		}
+	}
+
+	ordered := make([]uuid.UUID, 0, len(topo.Order))
+	for id := range topo.Order {
+		ordered = append(ordered, id)
+	}
+	slices.SortFunc(ordered, func(a, b uuid.UUID) int {
+		return topo.Order[a] - topo.Order[b]
+	})
+
+	tasks = make(models.Tasks, 0, len(ordered))
+	taskOrder = make(map[uuid.UUID]int, len(ordered))
+	tasksByID = make(map[uuid.UUID]*models.Task, len(ordered))
+	triggerRuleByTask = make(map[uuid.UUID]string, len(ordered))
+	adjacency = make(map[uuid.UUID][]uuid.UUID, len(ordered))
+	predecessors = make(map[uuid.UUID][]uuid.UUID, len(ordered))
+	indegree = make(map[uuid.UUID]int, len(ordered))
+	atomsByTask = map[uuid.UUID]*models.Atom{}
+
+	for idx, id := range ordered {
+		model := liveByID[id]
+		if model == nil {
+			// The catalog step was deleted after the baseline. Fan-out config
+			// then stays empty, which is also what the worker does when the
+			// task row is gone. The name falls back to the id; the descriptor
+			// baseline name is applied later, where the hash is built.
+			model = &models.Task{ID: id, JobID: j.id, Name: id.String()}
+		}
+		tasks = append(tasks, model)
+		taskOrder[id] = idx
+		tasksByID[id] = model
+		rule := topo.TriggerRule[id]
+		if rule == "" {
+			rule = jobdefschema.TriggerRuleAllSuccess
+		}
+		triggerRuleByTask[id] = rule
+		adjacency[id] = append([]uuid.UUID(nil), topo.Adjacency[id]...)
+		predecessors[id] = append([]uuid.UUID(nil), topo.Predecessors[id]...)
+		indegree[id] = len(predecessors[id])
+	}
+	return tasks, taskOrder, atomsByTask, tasksByID, triggerRuleByTask, adjacency, predecessors, indegree, nil
+}
+
 // buildParamEnv returns a map of environment variables derived from params.
 // It also injects CAESIUM_RUN_ID and CAESIUM_JOB_ALIAS.
 func buildParamEnv(runID uuid.UUID, jobAlias string, params map[string]string) map[string]string {
 	return jobdefruntime.BuildRunParamEnv(runID, jobAlias, params)
+}
+
+// quarantinedBaselineAlias picks the baseline job alias from the earliest
+// reconstructed task. Map iteration is random, so task order is the tie break.
+// An empty baseline falls back to the live alias.
+func quarantinedBaselineAlias(runners map[uuid.UUID]*atomRunner, taskOrder map[uuid.UUID]int, fallback string) string {
+	best := -1
+	alias := fallback
+	for id, runner := range runners {
+		if runner == nil || runner.replay == nil || runner.replay.Baseline.JobAlias == "" {
+			continue
+		}
+		order, ok := taskOrder[id]
+		if !ok {
+			continue
+		}
+		if best < 0 || order < best {
+			best = order
+			alias = runner.replay.Baseline.JobAlias
+		}
+	}
+	return alias
 }
 
 // taskHashInputArgs is the shared cache identity input for local execution.
@@ -1356,126 +1538,143 @@ func (j *job) Run(ctx context.Context) (err error) {
 		ctx, runCancel = context.WithDeadlineCause(ctx, runTimeoutStartedAt.Add(runTimeout), run.NewRunDeadlineError(runTimeout))
 		defer runCancel()
 	}
-	if runQuarantined && executionMode != executionModeDistributed {
-		runErr = ErrLocalQuarantinedReplayUnsupported
-		return runErr
-	}
-
-	tasks, err := retryOnContentionDo(ctx, func() (models.Tasks, error) {
-		return j.taskServiceFactory(ctx).List(&task.ListRequest{
-			JobID:   j.id.String(),
-			OrderBy: []string{"position", "created_at"},
-		})
-	})
-	if err != nil {
-		runErr = err
-		return err
-	}
-
-	if len(tasks) == 0 {
-		runErr = fmt.Errorf("job %s has no tasks", j.id)
-		return runErr
-	}
-
-	log.Info("running job tasks", "job_id", j.id, "count", len(tasks))
-
 	svc := j.atomServiceFactory(ctx)
 
-	taskOrder := make(map[uuid.UUID]int, len(tasks))
-	atomsByTask := make(map[uuid.UUID]*models.Atom, len(tasks))
-	tasksByID := make(map[uuid.UUID]*models.Task, len(tasks))
-	runners := make(map[uuid.UUID]*atomRunner, len(tasks))
-	triggerRuleByTask := make(map[uuid.UUID]string, len(tasks))
-
-	for idx, t := range tasks {
-		taskOrder[t.ID] = idx
-		tasksByID[t.ID] = t
-
-		rule := t.TriggerRule
-		if rule == "" {
-			rule = jobdefschema.TriggerRuleAllSuccess
+	var (
+		tasks             models.Tasks
+		taskOrder         map[uuid.UUID]int
+		atomsByTask       map[uuid.UUID]*models.Atom
+		tasksByID         map[uuid.UUID]*models.Task
+		runners           map[uuid.UUID]*atomRunner
+		triggerRuleByTask map[uuid.UUID]string
+		adjacency         map[uuid.UUID][]uuid.UUID
+		predecessors      map[uuid.UUID][]uuid.UUID
+		indegree          map[uuid.UUID]int
+	)
+	if runQuarantined && executionMode != executionModeDistributed {
+		var prepErr error
+		tasks, taskOrder, atomsByTask, tasksByID, triggerRuleByTask, adjacency, predecessors, indegree, prepErr = prepareQuarantinedLocalGraph(ctx, j, store, runID)
+		if prepErr != nil {
+			runErr = prepErr
+			return prepErr
 		}
-		triggerRuleByTask[t.ID] = rule
-
-		modelAtom, err := retryOnContentionDo(ctx, func() (*models.Atom, error) {
-			return svc.Get(t.AtomID)
+		runners = make(map[uuid.UUID]*atomRunner, len(tasks))
+		log.Info("running quarantined replay from baseline descriptors", "job_id", j.id, "run_id", runID, "count", len(tasks))
+	} else {
+		listed, listErr := retryOnContentionDo(ctx, func() (models.Tasks, error) {
+			return j.taskServiceFactory(ctx).List(&task.ListRequest{
+				JobID:   j.id.String(),
+				OrderBy: []string{"position", "created_at"},
+			})
 		})
-		if err != nil {
+		if listErr != nil {
+			runErr = listErr
+			return listErr
+		}
+		if len(listed) == 0 {
+			runErr = fmt.Errorf("job %s has no tasks", j.id)
+			return runErr
+		}
+		tasks = listed
+
+		log.Info("running job tasks", "job_id", j.id, "count", len(tasks))
+
+		taskOrder = make(map[uuid.UUID]int, len(tasks))
+		atomsByTask = make(map[uuid.UUID]*models.Atom, len(tasks))
+		tasksByID = make(map[uuid.UUID]*models.Task, len(tasks))
+		runners = make(map[uuid.UUID]*atomRunner, len(tasks))
+		triggerRuleByTask = make(map[uuid.UUID]string, len(tasks))
+
+		for idx, t := range tasks {
+			taskOrder[t.ID] = idx
+			tasksByID[t.ID] = t
+
+			rule := t.TriggerRule
+			if rule == "" {
+				rule = jobdefschema.TriggerRuleAllSuccess
+			}
+			triggerRuleByTask[t.ID] = rule
+
+			modelAtom, atomErr := retryOnContentionDo(ctx, func() (*models.Atom, error) {
+				return svc.Get(t.AtomID)
+			})
+			if atomErr != nil {
+				runErr = atomErr
+				return atomErr
+			}
+
+			atomsByTask[t.ID] = modelAtom
+		}
+
+		edges, edgeErr := retryOnContentionDo(ctx, func() (models.TaskEdges, error) {
+			return j.taskEdgeServiceFactory(ctx).List(&taskedge.ListRequest{
+				JobID:   j.id.String(),
+				OrderBy: []string{"created_at"},
+			})
+		})
+		if edgeErr != nil {
+			runErr = edgeErr
+			return edgeErr
+		}
+
+		adjacency = make(map[uuid.UUID][]uuid.UUID, len(tasks))
+		predecessors = make(map[uuid.UUID][]uuid.UUID, len(tasks))
+		indegree = make(map[uuid.UUID]int, len(tasks))
+		edgeSet := make(map[uuid.UUID]map[uuid.UUID]struct{}, len(tasks))
+
+		for _, t := range tasks {
+			adjacency[t.ID] = []uuid.UUID{}
+			predecessors[t.ID] = []uuid.UUID{}
+			indegree[t.ID] = 0
+		}
+
+		addEdge := func(from, to uuid.UUID) {
+			if _, ok := adjacency[from]; !ok {
+				return
+			}
+			if _, ok := adjacency[to]; !ok {
+				return
+			}
+			targets, ok := edgeSet[from]
+			if !ok {
+				targets = make(map[uuid.UUID]struct{})
+				edgeSet[from] = targets
+			}
+			if _, exists := targets[to]; exists {
+				return
+			}
+			adjacency[from] = append(adjacency[from], to)
+			predecessors[to] = append(predecessors[to], from)
+			indegree[to]++
+			targets[to] = struct{}{}
+		}
+
+		addedEdges := 0
+		for _, edge := range edges {
+			addEdge(edge.FromTaskID, edge.ToTaskID)
+			addedEdges++
+		}
+
+		if addedEdges == 0 && len(tasks) > 1 {
+			// No explicit edges; fall back to sequential creation order.
+			for idx := 0; idx < len(tasks)-1; idx++ {
+				addEdge(tasks[idx].ID, tasks[idx+1].ID)
+			}
+		}
+
+		registerInputs := make([]run.RegisterTaskInput, 0, len(tasks))
+		for _, t := range tasks {
+			atomModel := atomsByTask[t.ID]
+			registerInputs = append(registerInputs, run.RegisterTaskInput{
+				Task:                    t,
+				Atom:                    atomModel,
+				OutstandingPredecessors: indegree[t.ID],
+			})
+		}
+		if err := store.RegisterTasks(runID, registerInputs); err != nil {
 			runErr = err
 			return err
 		}
-
-		atomsByTask[t.ID] = modelAtom
-	}
-
-	edges, err := retryOnContentionDo(ctx, func() (models.TaskEdges, error) {
-		return j.taskEdgeServiceFactory(ctx).List(&taskedge.ListRequest{
-			JobID:   j.id.String(),
-			OrderBy: []string{"created_at"},
-		})
-	})
-	if err != nil {
-		runErr = err
-		return err
-	}
-
-	adjacency := make(map[uuid.UUID][]uuid.UUID, len(tasks))
-	predecessors := make(map[uuid.UUID][]uuid.UUID, len(tasks))
-	indegree := make(map[uuid.UUID]int, len(tasks))
-	edgeSet := make(map[uuid.UUID]map[uuid.UUID]struct{}, len(tasks))
-
-	for _, t := range tasks {
-		adjacency[t.ID] = []uuid.UUID{}
-		predecessors[t.ID] = []uuid.UUID{}
-		indegree[t.ID] = 0
-	}
-
-	addEdge := func(from, to uuid.UUID) {
-		if _, ok := adjacency[from]; !ok {
-			return
-		}
-		if _, ok := adjacency[to]; !ok {
-			return
-		}
-		targets, ok := edgeSet[from]
-		if !ok {
-			targets = make(map[uuid.UUID]struct{})
-			edgeSet[from] = targets
-		}
-		if _, exists := targets[to]; exists {
-			return
-		}
-		adjacency[from] = append(adjacency[from], to)
-		predecessors[to] = append(predecessors[to], from)
-		indegree[to]++
-		targets[to] = struct{}{}
-	}
-
-	addedEdges := 0
-	for _, edge := range edges {
-		addEdge(edge.FromTaskID, edge.ToTaskID)
-		addedEdges++
-	}
-
-	if addedEdges == 0 && len(tasks) > 1 {
-		// No explicit edges; fall back to sequential creation order.
-		for idx := 0; idx < len(tasks)-1; idx++ {
-			addEdge(tasks[idx].ID, tasks[idx+1].ID)
-		}
-	}
-
-	registerInputs := make([]run.RegisterTaskInput, 0, len(tasks))
-	for _, t := range tasks {
-		atomModel := atomsByTask[t.ID]
-		registerInputs = append(registerInputs, run.RegisterTaskInput{
-			Task:                    t,
-			Atom:                    atomModel,
-			OutstandingPredecessors: indegree[t.ID],
-		})
-	}
-	if err := store.RegisterTasks(runID, registerInputs); err != nil {
-		runErr = err
-		return err
 	}
 
 	currentRun, err := retryOnContentionDo(ctx, func() (*run.JobRun, error) {
@@ -1501,7 +1700,7 @@ func (j *job) Run(ctx context.Context) (err error) {
 	// (internal/worker/runtime_executor.go, which reads taskRun.Engine,
 	// taskRun.Image and parseTaskCommand(taskRun.Command)) replayed the OLD one.
 	// To pick up a definition change, trigger a new run.
-	if err := buildLocalRunners(ctx, j, svc, currentRun, vars.TaskTimeout, atomsByTask, runners); err != nil {
+	if err := buildLocalRunners(ctx, j, svc, store, currentRun, vars.TaskTimeout, atomsByTask, runners); err != nil {
 		runErr = err
 		return err
 	}

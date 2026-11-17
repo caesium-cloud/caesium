@@ -41,7 +41,7 @@ func TestReplayNamespaceGuardRunsBeforeResume(t *testing.T) {
 		CreatedAt: now, UpdatedAt: now}).Error)
 
 	dispatcher := &recordingDispatcher{}
-	svc := &Service{ctx: replayTestContext(t), store: store, dispatcher: dispatcher, executionMode: func() string { return "distributed" }}
+	svc := &Service{ctx: replayTestContext(t), store: store, dispatcher: dispatcher}
 	refused := errors.New("no runner in finance")
 	var seen []string
 	_, err = svc.Replay(Request{

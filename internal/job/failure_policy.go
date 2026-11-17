@@ -28,6 +28,16 @@ func computeRetryDelay(task *models.Task, attempt int) time.Duration {
 	return run.ComputeRetryDelay(task.RetryDelay, task.RetryBackoff, attempt)
 }
 
+// replayAwareRetryDelay matches workerRetryDelay: a positive delay frozen on
+// the baseline descriptor wins, and a legacy or ordinary task falls back to
+// the live task model.
+func replayAwareRetryDelay(runner *atomRunner, task *models.Task, attempt int) time.Duration {
+	if runner != nil && runner.replay != nil && runner.replay.Runtime.RetryDelay > 0 {
+		return run.ComputeRetryDelay(runner.replay.Runtime.RetryDelay, runner.replay.Runtime.RetryBackoff, attempt)
+	}
+	return computeRetryDelay(task, attempt)
+}
+
 func collectDescendants(adjacency map[uuid.UUID][]uuid.UUID, start uuid.UUID) []uuid.UUID {
 	queue := append([]uuid.UUID(nil), adjacency[start]...)
 	seen := make(map[uuid.UUID]struct{}, len(queue))

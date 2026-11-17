@@ -13,6 +13,7 @@ import (
 	"github.com/caesium-cloud/caesium/internal/incident"
 	jobdefruntime "github.com/caesium-cloud/caesium/internal/jobdef/runtime"
 	"github.com/caesium-cloud/caesium/internal/models"
+	"github.com/caesium-cloud/caesium/internal/replay"
 	"github.com/caesium-cloud/caesium/internal/run"
 	"github.com/caesium-cloud/caesium/pkg/env"
 	"github.com/caesium-cloud/caesium/pkg/log"
@@ -73,14 +74,19 @@ func (l *localRun) executeAtom(taskCtx context.Context, taskID, instanceID uuid.
 
 	spec := runner.spec
 	taskQuarantined := taskQuarantine[taskID] || runQuarantined
-	if taskQuarantined {
-		return "", nil, nil, nil, run.MetricsCapture{}, nil, ErrLocalQuarantinedReplayUnsupported
+	// Same capability bit the worker honors: a descriptor captured before
+	// param interpolation omits it and must keep the literal env.
+	if runner.interpolateStepEnv() {
+		interpolated, err := jobdefruntime.InterpolateParamRefs(spec.Env, snapshot.Params)
+		if err != nil {
+			return "", nil, nil, nil, run.MetricsCapture{}, nil, err
+		}
+		spec.Env = interpolated
+	} else {
+		// Secret resolution writes resolved values into the env map. Clone so
+		// that write cannot mutate the runner's frozen baseline env.
+		spec.Env = maps.Clone(spec.Env)
 	}
-	interpolated, err := jobdefruntime.InterpolateParamRefs(spec.Env, snapshot.Params)
-	if err != nil {
-		return "", nil, nil, nil, run.MetricsCapture{}, nil, err
-	}
-	spec.Env = interpolated
 	rawSecretEnv := spec.Env
 	// A fresh namespace scope per attempt: a policy reload since the
 	// before-cache check applies here, and a denial is terminal (no retry).
@@ -88,10 +94,17 @@ func (l *localRun) executeAtom(taskCtx context.Context, taskID, instanceID uuid.
 	if err != nil {
 		return "", nil, nil, nil, run.MetricsCapture{}, nil, err
 	}
+	// Quarantine verifies the baseline identities and does not rewrite them.
+	// The distributed worker does the same in runtimeExecutor.executeTask.
+	if taskQuarantined && runner.replay != nil {
+		if err := replay.VerifyReplaySecretIdentities(taskCtx, l.secretScope(runner).Resolver(), runner.replay.SecretRefs, secretIdentities, spec.Env); err != nil {
+			return "", nil, nil, nil, run.MetricsCapture{}, nil, err
+		}
+	}
 	secretValues := incident.SecretValuesFromEnv(rawSecretEnv, spec.Env)
 	secretBearing := len(secretIdentities) > 0
 	secretLogFence := run.SecretLogFence{Attempt: attempt, Generation: uuid.NewString()}
-	if len(secretIdentities) > 0 {
+	if len(secretIdentities) > 0 && !taskQuarantined {
 		refs := make([]models.TaskExecutionSecretRef, 0, len(secretIdentities))
 		for _, resolved := range secretIdentities {
 			refs = append(refs, run.SecretIdentityDescriptorRef(resolved.EnvKey, resolved.Ref, resolved.Identity))

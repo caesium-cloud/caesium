@@ -47,19 +47,37 @@ func (l *localRun) resolveTaskCacheIdentity(
 	cacheCfg := runner.cacheCfg
 	predHashByID := make(map[uuid.UUID]string)
 
+	jobAlias := j.alias
 	taskName := ""
 	if taskModel != nil {
 		taskName = taskModel.Name
+	}
+	// A quarantined replay hashes the baseline's job alias and task name.
+	// The live catalog may have been renamed after the baseline ran.
+	if runner.replay != nil {
+		if runner.replay.Baseline.JobAlias != "" {
+			jobAlias = runner.replay.Baseline.JobAlias
+		}
+		if runner.replay.Baseline.TaskName != "" {
+			taskName = runner.replay.Baseline.TaskName
+		}
 	}
 
 	// Volatile per-run env (CAESIUM_RUN_ID, the injected partition, …) is
 	// deliberately excluded: only the step's declared env (after
 	// ${CAESIUM_PARAM_*} substitution) and the resolved predecessor outputs
 	// are identity. Interpolation happens here, before Compute, so two runs
-	// with different params cannot cache-hit on a shared token.
-	interpolatedEnv, err := jobdefruntime.InterpolateParamRefs(runner.spec.Env, snapshot.Params)
-	if err != nil {
-		return cacheCfg, taskHashInputArgs{}, nil, err
+	// with different params cannot cache-hit on a shared token. A replay
+	// descriptor that omits ParamEnvInterpolation keeps the literal env.
+	var interpolatedEnv map[string]string
+	if runner.interpolateStepEnv() {
+		var err error
+		interpolatedEnv, err = jobdefruntime.InterpolateParamRefs(runner.spec.Env, snapshot.Params)
+		if err != nil {
+			return cacheCfg, taskHashInputArgs{}, nil, err
+		}
+	} else {
+		interpolatedEnv = runner.spec.Env
 	}
 	mergedEnv := make(map[string]string, len(interpolatedEnv)+len(outputEnv))
 	maps.Copy(mergedEnv, interpolatedEnv)
@@ -82,21 +100,27 @@ func (l *localRun) resolveTaskCacheIdentity(
 	// there is no key to protect and the registry round-trip would be pure
 	// cost on every task.
 	var resolvedImageDigest, unresolvedImageIdentity string
-	if cacheCfg.Enabled && cacheCfg.PinDigests {
-		// The engine the ROW froze, matching the distributed lane's
-		// imagecheck.Resolve(ctx, taskRun.Engine, taskRun.Image, ...) — the
-		// digest is folded into the cache key, so the two lanes must resolve
-		// it against the same engine or one unit of work hashes differently
-		// depending on which executor ran it.
-		engineKind := runner.engineKind
-		if engineKind == "" {
-			engineKind = models.AtomEngineDocker
-		}
-		if digest, derr := j.digestResolver().Resolve(ctx, engineKind, runner.image, cacheCfg.DigestTTL); derr == nil {
-			resolvedImageDigest = digest
-		} else {
-			unresolvedImageIdentity = uuid.NewString()
-			log.Warn("cache bypassed: requested image digest could not be resolved", "task", taskName, "image", runner.image, "error", derr)
+	if cacheCfg.Enabled {
+		// A recorded digest wins, including when pinning is off. The worker
+		// uses the same rule so a replay does not re-resolve a moved tag.
+		if runner.replay != nil && runner.replay.Runtime.ResolvedImageDigest != "" {
+			resolvedImageDigest = runner.replay.Runtime.ResolvedImageDigest
+		} else if cacheCfg.PinDigests {
+			// The engine the ROW froze, matching the distributed lane's
+			// imagecheck.Resolve(ctx, taskRun.Engine, taskRun.Image, ...) — the
+			// digest is folded into the cache key, so the two lanes must resolve
+			// it against the same engine or one unit of work hashes differently
+			// depending on which executor ran it.
+			engineKind := runner.engineKind
+			if engineKind == "" {
+				engineKind = models.AtomEngineDocker
+			}
+			if digest, derr := j.digestResolver().Resolve(ctx, engineKind, runner.image, cacheCfg.DigestTTL); derr == nil {
+				resolvedImageDigest = digest
+			} else {
+				unresolvedImageIdentity = uuid.NewString()
+				log.Warn("cache bypassed: requested image digest could not be resolved", "task", taskName, "image", runner.image, "error", derr)
+			}
 		}
 	}
 	if imageIdentityChecksRequired && cacheCfg.Chain != cache.ChainValues && unresolvedImageIdentity == "" {
@@ -113,7 +137,7 @@ func (l *localRun) resolveTaskCacheIdentity(
 	kubeTarget, kubeSecretNamespace := jobdefruntime.KubernetesIdentity(runner.engineKind, runner.kubeMapping, mergedEnv)
 
 	return cacheCfg, taskHashInputArgs{
-		JobAlias:                  j.alias,
+		JobAlias:                  jobAlias,
 		Namespace:                 snapshot.Namespace,
 		TaskName:                  taskName,
 		Image:                     runner.image,
