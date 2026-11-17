@@ -5,7 +5,9 @@ import (
 	"errors"
 	"net/http"
 
+	authmw "github.com/caesium-cloud/caesium/api/middleware"
 	rsvc "github.com/caesium-cloud/caesium/api/rest/service/reproduce"
+	"github.com/caesium-cloud/caesium/internal/authz"
 	runstorage "github.com/caesium-cloud/caesium/internal/run"
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v5"
@@ -30,7 +32,10 @@ func Get(c *echo.Context) error {
 		return echo.NewHTTPError(http.StatusBadRequest, "bad request")
 	}
 
-	resp, err := rsvc.New(c.Request().Context()).Descriptor(runID, task)
+	// The prior-run blob the mini-why diffs against is history: a moved job's
+	// old runs stay with their old owner, same as caesium why.
+	ctx := authz.WithHistoryScope(c.Request().Context(), authmw.GetPrincipal(c))
+	resp, err := rsvc.New(ctx).Descriptor(runID, task)
 	if err != nil {
 		switch {
 		case errors.Is(err, rsvc.ErrDescriptorUnavailable):

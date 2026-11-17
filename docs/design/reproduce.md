@@ -328,6 +328,7 @@ the real surface — no unit-test-on-the-handler substitute:
 4. **`--shell` on distroless images.** *Resolved:* `--shell-image`
    (default `busybox:1.36.1`) injects a static BusyBox into a created copy of
    the target container; see [`../reproduce.md`](../reproduce.md).
-5. **Explain integration.** Should the endpoint also return the redacted
-   `HashInputBlob` so the CLI can print "which field differs from the previous
-   run" inline (a mini-`why`), or is that scope creep past the debug loop?
+5. **Explain integration.** *Resolved:* the descriptor returns the redacted
+   `hash_input_blob` and a `mini_why` naming which fields differ from the
+   previous run of the same task. The CLI prints that inline. See
+   [`../reproduce.md`](../reproduce.md). Raw secret values are not returned.
