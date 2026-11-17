@@ -348,7 +348,8 @@ type runStateInvalidator interface {
 	// not the owner — into the cached state, in terminal_sequence order, so
 	// the owner's ready queue stops carrying a row that is already skipped
 	// and starts carrying the successors that resolution released. The halt
-	// sweep is the writer that needs it (HaltUnstartedTasks). A run this
+	// sweep (HaltUnstartedTasks) and partition-retry abandonment
+	// (AbandonPartitionRetries) are the writers that need it. A run this
 	// node does not own is a no-op.
 	ApplyTerminalRows(runID uuid.UUID, rows []models.TaskRun)
 }
@@ -8131,44 +8132,73 @@ func (s *Store) PendingPartitionRetries(runID uuid.UUID) ([]models.TaskRun, erro
 // running instance would clear its provenance and let the run finalize under a
 // container that keeps producing side effects. Returns the number of instances
 // actually resolved.
+//
+// The skip goes through markInstanceSkippedWhereTx — its own terminal_sequence
+// and task_skipped event — and is then folded into the live run owner. A raw
+// UPDATE left terminal_sequence at 0, and invalidateRunState (the re-open
+// seam) discarded the in-memory state afterwards. Recovery replays only
+// terminal_sequence > 0, so the skipped instance came back pending on the
+// ready queue and the dispatch loop re-posted it until the worker rejected
+// every claim with task_not_running.
 func (s *Store) AbandonPartitionRetries(runID uuid.UUID, taskRunIDs []uuid.UUID, reason string) (int, error) {
 	if len(taskRunIDs) == 0 {
 		return 0, nil
 	}
-	now := time.Now().UTC()
-	resolved := 0
-	var counts dbWriteCounts
+	var (
+		pendingEvents []event.Event
+		resolvedIDs   []uuid.UUID
+		counts        dbWriteCounts
+	)
 	err := withStoreBusyRetry(func() error {
 		counts.reset()
-		resolved = 0
-		return s.db.Transaction(func(tx *gorm.DB) error {
-			result := tx.Model(&models.TaskRun{}).
-				Where("job_run_id = ? AND id IN ? AND status = ? AND started_at IS NULL AND partition_retry_pending = ?",
-					runID, taskRunIDs, string(TaskStatusPending), true).
-				Updates(map[string]any{
-					"status":                  string(TaskStatusSkipped),
-					"error":                   reason,
-					"completed_at":            now,
-					"partition_retry_pending": false,
-				})
-			if result.Error != nil {
-				return result.Error
+		attemptEvents := make([]event.Event, 0, len(taskRunIDs))
+		var marked []uuid.UUID
+		txErr := s.db.Transaction(func(tx *gorm.DB) error {
+			var rows []models.TaskRun
+			if err := tx.Where("job_run_id = ? AND id IN ? AND status = ? AND started_at IS NULL AND partition_retry_pending = ?",
+				runID, taskRunIDs, string(TaskStatusPending), true).
+				Order("partition_index ASC, id ASC").
+				Find(&rows).Error; err != nil {
+				return err
 			}
-			resolved = int(result.RowsAffected)
-			if result.RowsAffected > 0 {
-				counts.addTaskRunStatus(int(result.RowsAffected))
+			for i := range rows {
+				// The same predicate as the read, inside the UPDATE: a start
+				// that lands between them matches zero rows and is left alone.
+				ok, err := s.markInstanceSkippedWhereTx(tx, runID, &rows[i], reason,
+					"status = ? AND started_at IS NULL AND partition_retry_pending = ?",
+					[]any{string(TaskStatusPending), true},
+					nil, &attemptEvents, &counts)
+				if err != nil {
+					return err
+				}
+				if ok {
+					marked = append(marked, rows[i].ID)
+				}
 			}
 			return nil
 		})
+		if txErr == nil {
+			pendingEvents = attemptEvents
+			resolvedIDs = marked
+		}
+		return txErr
 	})
 	if err != nil {
 		return 0, err
 	}
 	counts.commit()
-	if resolved > 0 {
-		s.invalidateRunState(runID)
+	s.publishEvents(pendingEvents...)
+	if len(resolvedIDs) > 0 {
+		var rows []models.TaskRun
+		if err := s.db.Where("job_run_id = ? AND id IN ?", runID, resolvedIDs).
+			Order("terminal_sequence ASC").
+			Find(&rows).Error; err != nil {
+			log.Warn("partition retry: could not load abandoned rows for the in-memory run owner", "run_id", runID, "error", err)
+		} else {
+			s.syncRunStateTerminalRows(runID, rows)
+		}
 	}
-	return resolved, nil
+	return len(resolvedIDs), nil
 }
 
 // AbandonPendingPartitionRetries is AbandonPartitionRetries over every
