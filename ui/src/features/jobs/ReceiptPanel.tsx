@@ -88,7 +88,7 @@ export function ReceiptPanel({ jobId, runId }: ReceiptPanelProps) {
               Reproducibility Receipt
             </CardTitle>
             <p className="mt-1 max-w-3xl text-xs text-text-3">
-              Verify checks a committed receipt you provide against the server's freshly re-derived state for this run. It is not a self-check of the receipt displayed here.
+              Verify checks a committed receipt you provide against this run&apos;s persisted task rows. Image and command drift are reported only when those rows differ from the receipt; re-applying the job definition does not change them. It is not a self-check of the receipt displayed here.
             </p>
           </div>
           {receiptQuery.data ? <ReceiptStatus receipt={receiptQuery.data} /> : null}
@@ -250,6 +250,14 @@ function ReceiptContent({ receipt }: { receipt: Receipt }) {
                   value={task.resolved_image_digest ?? ""}
                   mono
                 />
+                {task.command ? (
+                  <MetadataCell
+                    testId="receipt-task-command"
+                    label="command"
+                    value={task.command}
+                    mono
+                  />
+                ) : null}
                 <MetadataCell
                   testId="receipt-task-digest-pinned"
                   label="digest_pinned"
@@ -621,6 +629,7 @@ function normalizeReceiptTaskEntry(value: unknown): ReceiptTaskEntry | null {
     typeof value.task_name === "string" &&
     typeof value.identity_hash === "string" &&
     typeof value.image === "string" &&
+    isOptionalString(value.command) &&
     isOptionalString(value.resolved_image_digest) &&
     typeof value.digest_pinned === "boolean" &&
     isOptionalBoolean(value.degraded) &&
@@ -630,6 +639,7 @@ function normalizeReceiptTaskEntry(value: unknown): ReceiptTaskEntry | null {
       task_name: value.task_name,
       identity_hash: value.identity_hash,
       image: value.image,
+      command: value.command ?? undefined,
       resolved_image_digest: value.resolved_image_digest ?? undefined,
       digest_pinned: value.digest_pinned,
       degraded: value.degraded ?? false,

@@ -62,9 +62,11 @@ func Get(c *echo.Context) error {
 // The request body is a previously-emitted (committed) receipt. The handler
 // re-derives the receipt from the run's current persisted state and returns a
 // drift report: whether the run still matches, and if not, every divergence
-// ("image tag mutated: digest mismatch", "manifest changed", …). A run whose
-// tasks were not digest-pinned is reported as degraded and never as a clean
-// match.
+// ("image tag mutated: digest mismatch", "manifest changed", image_changed,
+// command_changed, …). Image and command drift compare the committed receipt
+// with the completed run's task rows; a definition re-apply does not rewrite
+// those rows. A run whose tasks were not digest-pinned is reported as
+// degraded and never as a clean match.
 func Verify(c *echo.Context) error {
 	// Parse and validate BOTH path params up-front (see Get) so the ownership
 	// cross-check below cannot be bypassed by a malformed `id`.

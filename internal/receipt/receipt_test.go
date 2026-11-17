@@ -140,6 +140,7 @@ func (s *ReceiptSuite) TestBuildPinnedNotDegraded() {
 	s.Require().Len(r.Tasks, 2)
 	s.Equal("extract", r.Tasks[0].TaskName)
 	s.Equal("load", r.Tasks[1].TaskName)
+	s.Equal("[]", r.Tasks[0].Command, "the receipt records the task row's command")
 	s.True(r.Tasks[0].DigestPinned)
 	s.True(r.Tasks[1].DigestPinned)
 }
@@ -248,6 +249,88 @@ func (s *ReceiptSuite) TestVerifyDigestDrift() {
 	s.True(s.hasDrift(result, DriftImageDigest, "load"))
 	s.True(s.hasDrift(result, DriftIdentityHash, "load"))
 	s.True(s.hasDrift(result, DriftReceiptDigest, ""))
+}
+
+// TestVerifyCommandDriftReadsTaskRow: changing the completed run's task command
+// is reported as command_changed even though the command is not in the digest.
+// The job definition is not touched — verify reads the task row.
+func (s *ReceiptSuite) TestVerifyCommandDriftReadsTaskRow() {
+	runID := s.seedRun("etl", "commit-1", "manifest-1", pinnedSpecs())
+	s.Require().NoError(s.db.Model(&models.TaskRun{}).
+		Where("job_run_id = ? AND image = ?", runID, "alpine:3.23").
+		Update("command", `["sh","-c","echo original"]`).Error)
+
+	committed, err := Build(s.ctx, s.db, runID)
+	s.Require().NoError(err)
+	s.Equal(`["sh","-c","echo original"]`, committed.Tasks[s.indexOf(committed, "extract")].Command)
+
+	s.Require().NoError(s.db.Model(&models.TaskRun{}).
+		Where("job_run_id = ? AND image = ?", runID, "alpine:3.23").
+		Update("command", `["sh","-c","echo drifted"]`).Error)
+
+	result, err := Verify(s.ctx, s.db, committed)
+	s.Require().NoError(err)
+
+	s.False(result.Match, "a changed task-row command must fail verification")
+	s.False(result.Degraded)
+	s.Equal(committed.ReceiptDigest, result.ActualDigest, "command is not part of the receipt digest")
+	s.True(s.hasDrift(result, DriftCommand, "extract"))
+	s.False(s.hasDrift(result, DriftImage, "extract"))
+	s.False(s.hasDrift(result, DriftImageDigest, "extract"))
+	s.False(s.hasDrift(result, DriftReceiptDigest, ""))
+	for _, d := range result.Drifts {
+		if d.Kind == DriftCommand && d.Task == "extract" {
+			s.Equal(`["sh","-c","echo original"]`, d.Expected)
+			s.Equal(`["sh","-c","echo drifted"]`, d.Actual)
+		}
+	}
+}
+
+// TestVerifyImageDriftReadsTaskRow: changing the completed run's image reference
+// is image_changed, distinct from a resolved-digest mismatch. The resolved
+// digest and identity hash are left alone.
+func (s *ReceiptSuite) TestVerifyImageDriftReadsTaskRow() {
+	runID := s.seedRun("etl", "commit-1", "manifest-1", pinnedSpecs())
+	committed, err := Build(s.ctx, s.db, runID)
+	s.Require().NoError(err)
+
+	s.Require().NoError(s.db.Model(&models.TaskRun{}).
+		Where("job_run_id = ? AND image = ?", runID, "alpine:3.23").
+		Update("image", "busybox:1.36.1").Error)
+
+	result, err := Verify(s.ctx, s.db, committed)
+	s.Require().NoError(err)
+
+	s.False(result.Match)
+	s.False(result.Degraded)
+	s.True(s.hasDrift(result, DriftImage, "extract"))
+	s.False(s.hasDrift(result, DriftImageDigest, "extract"), "the resolved digest was not changed")
+	s.False(s.hasDrift(result, DriftCommand, "extract"))
+	s.True(s.hasDrift(result, DriftReceiptDigest, ""), "the image reference is part of the digest")
+	for _, d := range result.Drifts {
+		if d.Kind == DriftImage && d.Task == "extract" {
+			s.Equal("alpine:3.23", d.Expected)
+			s.Equal("busybox:1.36.1", d.Actual)
+		}
+	}
+}
+
+// TestVerifyLegacyReceiptOmitsCommand: a committed receipt from before commands
+// were recorded (empty command) still matches when nothing else changed.
+func (s *ReceiptSuite) TestVerifyLegacyReceiptOmitsCommand() {
+	runID := s.seedRun("etl", "commit-1", "manifest-1", pinnedSpecs())
+	committed, err := Build(s.ctx, s.db, runID)
+	s.Require().NoError(err)
+	for i := range committed.Tasks {
+		committed.Tasks[i].Command = ""
+	}
+
+	result, err := Verify(s.ctx, s.db, committed)
+	s.Require().NoError(err)
+
+	s.True(result.Match, "an older receipt that did not record commands must still verify")
+	s.Empty(result.Drifts)
+	s.False(s.hasDrift(result, DriftCommand, "extract"))
 }
 
 // TestVerifyManifestDrift: the manifest content hash changed since the receipt

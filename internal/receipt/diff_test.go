@@ -90,6 +90,39 @@ func TestDiffVersionMismatch(t *testing.T) {
 	require.True(t, hasDrift(drifts, DriftVersion, ""))
 }
 
+// TestDiffImageAndCommandFields: the literal image reference and the recorded
+// command are attributed on their own. Command is not part of the digest, and
+// a receipt that never recorded a command does not false-report command drift.
+func TestDiffImageAndCommandFields(t *testing.T) {
+	base := pinnedEntry("extract", "h", "sha256:a")
+	base.Command = `["echo","old"]`
+	committed := makeReceipt("g", "m", []TaskEntry{base})
+
+	changed := base
+	changed.Image = "busybox:1.36.1"
+	changed.Command = `["echo","new"]`
+	rederived := makeReceipt("g", "m", []TaskEntry{changed})
+	drifts := diff(committed, rederived)
+	require.True(t, hasDrift(drifts, DriftImage, "extract"))
+	require.True(t, hasDrift(drifts, DriftCommand, "extract"))
+	require.True(t, hasDrift(drifts, DriftReceiptDigest, ""))
+	require.False(t, hasDrift(drifts, DriftImageDigest, "extract"), "the resolved digest did not move")
+
+	cmdOnly := base
+	cmdOnly.Command = `["echo","new"]`
+	onlyCmd := makeReceipt("g", "m", []TaskEntry{cmdOnly})
+	require.Equal(t, committed.ReceiptDigest, onlyCmd.ReceiptDigest, "command is not part of the receipt digest")
+	drifts = diff(committed, onlyCmd)
+	require.True(t, hasDrift(drifts, DriftCommand, "extract"))
+	require.False(t, hasDrift(drifts, DriftImage, "extract"))
+	require.False(t, hasDrift(drifts, DriftReceiptDigest, ""))
+
+	legacy := base
+	legacy.Command = ""
+	drifts = diff(makeReceipt("g", "m", []TaskEntry{legacy}), committed)
+	require.False(t, hasDrift(drifts, DriftCommand, "extract"), "a receipt that did not record a command must not report command drift")
+}
+
 // TestDiffCleanNoDrift: identical receipts produce no drift.
 func TestDiffCleanNoDrift(t *testing.T) {
 	a := makeReceipt("g", "m", []TaskEntry{

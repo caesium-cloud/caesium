@@ -13,9 +13,12 @@
 // docs/design/data-plane-memory.md): a small, deterministic, commit-into-git
 // artifact that attests *what ran*. `caesium verify` re-derives the receipt
 // from the run's persisted state and flags DRIFT — e.g. a `:latest` tag that
-// moved to new content (digest mismatch) or a changed manifest. It does NOT
-// resurrect deleted source data; it re-derives the signature and proves what
-// the system recorded as having run.
+// moved to new content (digest mismatch), a changed manifest, or an image
+// reference or command on the completed run's task rows that differs from the
+// committed receipt. Command is recorded on the receipt but not folded into
+// the digest, so older receipts still verify. It does NOT resurrect deleted
+// source data; it re-derives the signature and proves what the system recorded
+// as having run.
 //
 // # Correctness rule (from the design)
 //
@@ -75,8 +78,15 @@ type TaskEntry struct {
 
 	// Image is the literal image reference (tag) the task ran with, recorded
 	// for human readability and as the fallback identity when no digest was
-	// resolved.
+	// resolved. It is the task row's image, not the job definition's.
 	Image string `json:"image"`
+
+	// Command is the argv JSON recorded on the task row (models.TaskRun.Command).
+	// It is omitted from the canonical digest — receipts committed before this
+	// field existed keep the same digest and Version stays 1. Verify still
+	// compares it, when the committed receipt recorded one, against the run's
+	// current task row. A job re-apply does not rewrite that row.
+	Command string `json:"command,omitempty"`
 
 	// ResolvedImageDigest is the content digest (sha256:...) the tag resolved
 	// to when digest pinning was on. Empty when pinning was off or a

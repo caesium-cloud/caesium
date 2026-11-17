@@ -29,8 +29,11 @@ var Cmd = &cobra.Command{
 	Short: "Verify a committed reproducibility receipt against a run's state",
 	Long: "Re-derive the reproducibility receipt named by <receipt-file> from the " +
 		"run's persisted state and report drift: a moved image tag (digest " +
-		"mismatch), a changed manifest, a changed input. It does NOT resurrect " +
-		"deleted source data — it re-derives the signature and proves what ran.\n\n" +
+		"mismatch), a changed image reference or command on the run's task rows " +
+		"(image_changed, command_changed), a changed manifest, a changed input. " +
+		"Image and command drift are read from the completed run's task rows; " +
+		"re-applying the job definition does not rewrite those rows. It does NOT " +
+		"resurrect deleted source data — it re-derives the signature and proves what ran.\n\n" +
 		"The job and run IDs are read from the receipt file. Exits non-zero when " +
 		"the run drifted from the receipt OR cannot be soundly verified (it ran " +
 		"on an unpinned, mutable image tag).",

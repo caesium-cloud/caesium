@@ -6,6 +6,8 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -211,6 +213,91 @@ steps:
 	} else {
 		s.Contains(vout, "OK", "verify of a pinned run should report a match:\n%s", vout)
 	}
+
+	// Field-level image/command drift is read from the completed run's task
+	// rows. A definition re-apply does not mutate those rows, so this updates
+	// the row directly and posts the original receipt to the verify endpoint.
+	s.assertReceiptTaskFieldDrift(job.ID, runID, receipt)
+}
+
+// assertReceiptTaskFieldDrift updates the run's task image and command in the
+// catalog and asserts POST /receipt/verify reports image_changed and
+// command_changed against the receipt captured before the update. Kubernetes
+// lanes cannot open the catalog; the unit tests cover the comparison there.
+func (s *IntegrationTestSuite) assertReceiptTaskFieldDrift(jobID, runID, receipt string) {
+	s.T().Helper()
+	if s.engineType == "kubernetes" {
+		return
+	}
+
+	var committed struct {
+		Tasks []struct {
+			TaskName string `json:"task_name"`
+			Image    string `json:"image"`
+			Command  string `json:"command"`
+		} `json:"tasks"`
+	}
+	s.Require().NoError(json.Unmarshal([]byte(receipt), &committed))
+	s.Require().NotEmpty(committed.Tasks)
+	original := committed.Tasks[0]
+	s.Equal("produce", original.TaskName)
+	s.Equal("alpine:3.23", original.Image)
+	s.NotEmpty(original.Command, "a new receipt must record the task row's command")
+
+	const driftedImage = "busybox:1.36.1"
+	const driftedCommand = `["sh","-c","echo drifted"]`
+	s.NotEqual(driftedCommand, original.Command)
+
+	db := s.openIntegrationCatalogDB()
+	defer db.Close()
+	res, err := db.ExecContext(s.T().Context(),
+		`UPDATE task_runs SET image = ?, command = ? WHERE job_run_id = ?`,
+		driftedImage, driftedCommand, runID)
+	s.Require().NoError(err)
+	n, err := res.RowsAffected()
+	s.Require().NoError(err)
+	s.Equal(int64(1), n, "the completed run has one task row to mutate")
+
+	resp, err := s.doJSONRequest(http.MethodPost,
+		fmt.Sprintf("%s/v1/jobs/%s/runs/%s/receipt/verify", s.caesiumURL, jobID, runID),
+		bytes.NewReader([]byte(receipt)))
+	s.Require().NoError(err)
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	s.Require().NoError(err)
+	s.Require().Equal(http.StatusOK, resp.StatusCode, string(body))
+
+	var result struct {
+		Match  bool `json:"match"`
+		Drifts []struct {
+			Kind     string `json:"kind"`
+			Task     string `json:"task"`
+			Expected string `json:"expected"`
+			Actual   string `json:"actual"`
+		} `json:"drifts"`
+	}
+	s.Require().NoError(json.Unmarshal(body, &result), string(body))
+	s.False(result.Match, "task-row image and command drift must fail verification: %s", body)
+
+	var image, command bool
+	for _, d := range result.Drifts {
+		switch d.Kind {
+		case "image_changed":
+			image = true
+			s.Equal("produce", d.Task)
+			s.Equal(original.Image, d.Expected)
+			s.Equal(driftedImage, d.Actual)
+		case "command_changed":
+			command = true
+			s.Equal("produce", d.Task)
+			s.Equal(original.Command, d.Expected)
+			s.Equal(driftedCommand, d.Actual)
+		case "image_digest_mismatch":
+			s.Fail("image reference drift must not be reported as a resolved-digest mismatch")
+		}
+	}
+	s.True(image, "verify must report image_changed from the task row, got %+v", result.Drifts)
+	s.True(command, "verify must report command_changed from the task row, got %+v", result.Drifts)
 }
 
 type impactResult struct {
@@ -221,6 +308,10 @@ type impactResult struct {
 		// summary flat while the impact query read it nested — asserted here so a
 		// re-divergence is caught on the real HTTP surface, not just in a unit test.
 		ProducingStep string `json:"producing_step"`
+		// RunID is the job run whose task row wrote the dataset. JobID is the
+		// producing job. Both are required for run-level click-through.
+		RunID string `json:"run_id"`
+		JobID string `json:"job_id"`
 	} `json:"downstream"`
 }
 
@@ -300,4 +391,39 @@ steps:
 	// reconciled it was always "" on every real deployment.
 	s.Equal("transform", producingStep,
 		"producing_step must resolve from the persisted facet summary, got %+v", res.Downstream)
+	for _, n := range res.Downstream {
+		if n.DatasetName == wantName {
+			s.Equal(runID, n.RunID, "impact node must name the run that produced the dataset")
+			s.Equal(job.ID, n.JobID)
+		}
+	}
+
+	// The run lists the dataset identities it persisted, so the console can
+	// open lineage without the operator typing namespace and name. An unknown
+	// run is 404. A run that persisted nothing returns an empty list, not a
+	// fabricated dataset.
+	var datasets struct {
+		RunID    string `json:"run_id"`
+		JobID    string `json:"job_id"`
+		Datasets []struct {
+			Namespace string `json:"namespace"`
+			Name      string `json:"name"`
+			Direction string `json:"direction"`
+			TaskName  string `json:"task_name"`
+		} `json:"datasets"`
+	}
+	s.getJSON(fmt.Sprintf("/v1/jobs/%s/runs/%s/datasets", job.ID, runID), &datasets)
+	s.Equal(runID, datasets.RunID)
+	s.Equal(job.ID, datasets.JobID)
+	s.Require().NotNil(datasets.Datasets)
+	seen := map[string]string{}
+	for _, d := range datasets.Datasets {
+		s.Equal("caesium", d.Namespace)
+		s.NotEmpty(d.TaskName)
+		seen[d.Direction+":"+d.Name] = d.TaskName
+	}
+	s.Equal("extract", seen["output:"+rootName])
+	s.Equal("transform", seen["input:"+rootName])
+	s.Equal("transform", seen["output:"+wantName])
+	s.assertGetStatus(fmt.Sprintf("/v1/jobs/%s/runs/%s/datasets", job.ID, "00000000-0000-0000-0000-000000000001"), http.StatusNotFound)
 }
