@@ -18,6 +18,7 @@ import (
 	"github.com/caesium-cloud/caesium/api/rest/service/task"
 	"github.com/caesium-cloud/caesium/api/rest/service/taskedge"
 	"github.com/caesium-cloud/caesium/internal/atom"
+	"github.com/caesium-cloud/caesium/internal/jobdef/secret"
 	jobdeftestutil "github.com/caesium-cloud/caesium/internal/jobdef/testutil"
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/caesium-cloud/caesium/internal/run"
@@ -525,6 +526,114 @@ func TestRunLocalReconstructsQuarantinedReplay(t *testing.T) {
 		require.Equal(t, run.StatusFailed, snapshot.Status)
 		require.Contains(t, snapshot.Error, "not replay safe")
 	})
+}
+
+func TestRunLocalQuarantinedFanOutUsesEachInstanceDescriptor(t *testing.T) {
+	db, store, engine, jobID, runID := seedQuarantinedLocalJob(t)
+	taskID := uuid.New()
+	atomID := uuid.New()
+	now := time.Now().UTC()
+	tasks := models.Tasks{{ID: taskID, JobID: jobID, AtomID: atomID, Name: "process-live", CreatedAt: now, UpdatedAt: now}}
+	persistGraph(t, db, tasks, nil)
+
+	const (
+		digestA = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+		digestB = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+		refA    = "secret://env/TOKEN_A"
+		refB    = "secret://env/TOKEN_B"
+	)
+	rowA := quarantinedPartitionTaskRun(t, runID, taskID, atomID, "a", 0, digestA, refA, "v-a")
+	rowB := quarantinedPartitionTaskRun(t, runID, taskID, atomID, "b", 1, digestB, refB, "v-b")
+	require.NoError(t, db.Create(rowA).Error)
+	require.NoError(t, db.Create(rowB).Error)
+
+	opts := withTestDeps(store, env.Environment{
+		MaxParallelTasks:  2,
+		TaskFailurePolicy: taskFailurePolicyHalt,
+		ExecutionMode:     executionModeLocal,
+	}, &fakeTaskService{tasks: tasks}, &fakeAtomService{atoms: map[uuid.UUID]*models.Atom{
+		atomID: {ID: atomID, Engine: models.AtomEngineDocker, Image: "current/image:latest", Command: `["echo","current"]`},
+	}}, &fakeTaskEdgeService{}, engine)
+	opts = append(opts, WithSecretResolver(versionedSecretResolver{
+		refA: {value: "secret-a", version: "v-a"},
+		refB: {value: "secret-b", version: "v-b"},
+	}))
+	err := New(&models.Job{ID: jobID, Alias: "renamed-alias"}, opts...).Run(run.WithContext(context.Background(), runID))
+	require.NoError(t, err)
+
+	created := engine.createRequestsForTask(taskID)
+	require.Len(t, created, 2)
+	byInstance := map[string]atom.EngineCreateRequest{}
+	for _, req := range created {
+		switch {
+		case strings.Contains(req.Name, rowA.ID.String()):
+			byInstance["a"] = req
+		case strings.Contains(req.Name, rowB.ID.String()):
+			byInstance["b"] = req
+		}
+	}
+	require.Equal(t, "baseline/image:pinned@"+digestA, byInstance["a"].Image)
+	require.Equal(t, "baseline/image:pinned@"+digestB, byInstance["b"].Image)
+	require.Equal(t, "secret-a", byInstance["a"].Spec.Env["TOKEN"])
+	require.Equal(t, "secret-b", byInstance["b"].Spec.Env["TOKEN"])
+	require.Equal(t, []string{"sh", "-c", "echo a"}, byInstance["a"].Command)
+	require.Equal(t, []string{"sh", "-c", "echo b"}, byInstance["b"].Command)
+
+	var savedA, savedB models.TaskRun
+	require.NoError(t, db.First(&savedA, "id = ?", rowA.ID).Error)
+	require.NoError(t, db.First(&savedB, "id = ?", rowB.ID).Error)
+	require.Equal(t, digestA, savedA.ResolvedImageDigest)
+	require.Equal(t, digestB, savedB.ResolvedImageDigest)
+}
+
+func quarantinedPartitionTaskRun(t *testing.T, runID, taskID, atomID uuid.UUID, partition string, index int, digest, secretRef, version string) *models.TaskRun {
+	t.Helper()
+	row := quarantinedBaselineTaskRun(t, runID, taskID, atomID, true)
+	var desc models.TaskExecutionDescriptor
+	require.NoError(t, json.Unmarshal(row.ExecutionDescriptor, &desc))
+	desc.Runtime.ResolvedImageDigest = digest
+	desc.Runtime.Command = []string{"sh", "-c", "echo " + partition}
+	desc.ContainerSpec.Env = map[string]string{"TOKEN": secretRef}
+	desc.SecretRefs = []models.TaskExecutionSecretRef{{
+		Ref:        secretRef,
+		EnvKey:     "TOKEN",
+		Provider:   "env",
+		Verifiable: true,
+		Identity:   datatypes.JSONMap{"version": version},
+	}}
+	raw, err := json.Marshal(desc)
+	require.NoError(t, err)
+	row.ExecutionDescriptor = datatypes.JSON(raw)
+	row.Command = fmt.Sprintf(`["sh","-c","echo %s"]`, partition)
+	row.PartitionValue = partition
+	row.PartitionIndex = index
+	row.PartitionCount = 2
+	row.CacheEnabled = true
+	return row
+}
+
+type versionedSecret struct {
+	value   string
+	version string
+}
+
+type versionedSecretResolver map[string]versionedSecret
+
+func (r versionedSecretResolver) Resolve(ctx context.Context, ref string) (string, error) {
+	value, _, err := r.ResolveWithIdentity(ctx, ref)
+	return value, err
+}
+
+func (r versionedSecretResolver) ResolveWithIdentity(_ context.Context, ref string) (string, secret.Identity, error) {
+	item, ok := r[ref]
+	if !ok {
+		return "", secret.Identity{}, fmt.Errorf("unknown secret %s", ref)
+	}
+	return item.value, secret.Identity{Provider: "env", Ref: ref, Version: item.version, Verifiable: true}, nil
+}
+
+func (r versionedSecretResolver) CanonicalTarget(ref string) (string, error) {
+	return ref, nil
 }
 
 func seedQuarantinedLocalJob(t *testing.T) (*gorm.DB, *run.Store, *fakeEngine, uuid.UUID, uuid.UUID) {

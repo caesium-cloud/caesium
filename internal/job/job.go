@@ -923,8 +923,10 @@ func pendingGroupIndegree(store *run.Store, runID, taskID uuid.UUID) (int, bool)
 // no extra query.
 //
 // currentRun.Tasks is the collapsed view (one entry per catalog task, carrying
-// the first instance's frozen columns), which is what the runner map wants:
-// fan-out siblings copy the template row's recipe.
+// the first instance's frozen columns). That is the unfanned recipe and the
+// fan-out template. A quarantined group's instances do not execute that
+// template: runFannedGroup loads each TaskRun's own descriptor, because
+// siblings can record different image digests and secret versions.
 func buildLocalRunners(
 	ctx context.Context,
 	j *job,
@@ -1035,10 +1037,11 @@ func buildLocalRunners(
 	return nil
 }
 
-// quarantinedReplaySpec loads the container spec the distributed worker would
-// execute for one quarantined catalog task. Every instance row must be replay
-// safe. The spec comes from the first instance's descriptor: fanned siblings
-// share the template recipe, and the partition identity lives on the row.
+// quarantinedReplaySpec loads the template spec for one quarantined catalog
+// task. Every instance row must be replay safe. The template is the first
+// instance's descriptor. An unfanned task has only that row, so this is the
+// spec it executes. A fanned group does not: each instance is reconstructed
+// from its own descriptor in runFannedGroup.
 func quarantinedReplaySpec(ctx context.Context, store *run.Store, runID, taskID uuid.UUID) (container.Spec, *models.TaskExecutionDescriptor, error) {
 	rows, err := retryOnContentionDo(ctx, func() ([]models.TaskRun, error) {
 		return store.TaskRunsForTask(runID, taskID)
