@@ -37,6 +37,7 @@ type ArrivalObserver struct {
 type ArrivalAdvance struct {
 	EventID   uuid.UUID
 	Dataset   string
+	Partition string
 	Watermark string
 	Outcome   Outcome
 }
@@ -172,9 +173,24 @@ func (o *ArrivalObserver) Observe(ctx context.Context, evt *models.IngestedEvent
 			watermark = value
 		}
 
+		// A declared partition path that does not resolve must not fall through
+		// onto the whole-dataset row: that would collide an absent partition
+		// with a named one, or with the dataset grain the binding did not name.
+		partition := ""
+		if binding.partitionPath != "" {
+			value, ok := eventmatch.ResolveJSONPathBytes(evt.Data, binding.partitionPath)
+			if !ok || partitionValue(value) == "" {
+				log.Warn("freshness: arrival partition path did not resolve",
+					"dataset", binding.name, "event_id", evt.ID, "partition_path", binding.partitionPath)
+				continue
+			}
+			partition = partitionValue(value)
+		}
+
 		res, err := o.store.Advance(ctx, AdvanceInput{
 			Namespace:   binding.namespace,
 			Name:        binding.name,
+			Partition:   partition,
 			Watermark:   watermark,
 			RunID:       uuid.Nil,
 			RunOrder:    eventTime,
@@ -195,21 +211,26 @@ func (o *ArrivalObserver) Observe(ctx context.Context, evt *models.IngestedEvent
 		result.Advances = append(result.Advances, ArrivalAdvance{
 			EventID:   evt.ID,
 			Dataset:   binding.name,
+			Partition: partition,
 			Watermark: watermark,
 			Outcome:   res.Outcome,
 		})
 		log.Info("freshness: arrival matched dataset",
-			"dataset", binding.name, "event_id", evt.ID, "outcome", string(res.Outcome), "watermark", watermark)
+			"dataset", binding.name, "partition", partition, "event_id", evt.ID, "outcome", string(res.Outcome), "watermark", watermark)
 		switch res.Outcome {
 		case OutcomeRegressionDropped, OutcomeOutOfOrderDropped:
 			log.Warn("freshness: arrival watermark write dropped",
-				"dataset", binding.name, "event_id", evt.ID, "outcome", string(res.Outcome), "watermark", watermark)
+				"dataset", binding.name, "partition", partition, "event_id", evt.ID, "outcome", string(res.Outcome), "watermark", watermark)
 		case OutcomeAdvanced, OutcomeVerified:
 			// An external event just advanced a source dataset. Publish
 			// dataset_advanced (RunID nil — no producing run) so the evaluator
 			// derives downstream immediately, removing the up-to-a-full-tick
-			// latency the timer-only path would otherwise impose.
-			o.publishDatasetAdvanced(binding.namespace, binding.name)
+			// latency the timer-only path would otherwise impose. A named
+			// partition does not publish: scheduling still reads the
+			// whole-dataset watermark, and waking it would not change the decision.
+			if partition == "" {
+				o.publishDatasetAdvanced(binding.namespace, binding.name)
+			}
 		}
 	}
 
@@ -236,6 +257,7 @@ type arrivalBinding struct {
 	name          string
 	pattern       eventmatch.EventPattern
 	watermarkPath string
+	partitionPath string
 }
 
 func (o *ArrivalObserver) arrivalBindings(ctx context.Context) ([]arrivalBinding, error) {
@@ -271,6 +293,7 @@ func (o *ArrivalObserver) arrivalBindings(ctx context.Context) ([]arrivalBinding
 				Filter: arrival.Event.Filter,
 			},
 			watermarkPath: strings.TrimSpace(arrival.Watermark),
+			partitionPath: strings.TrimSpace(arrival.Partition),
 		})
 	}
 	return bindings, nil

@@ -450,9 +450,11 @@ func (s *Store) releaseDatasetHoldTx(tx *gorm.DB, id uuid.UUID, req datasetHoldR
 	// hold is active. Clear it HERE, in the release transaction, so the status can
 	// never outlive the hold whichever features happen to be running: freshness
 	// scheduling off, no freshness SLO, a producer that no longer declares the
-	// dataset. A later evaluation recomputes the real status.
+	// dataset. A later evaluation recomputes the real status. Only the
+	// dataset-level row (empty partition) carries that status; a named partition
+	// watermark is a different row and is not the hold.
 	if err := tx.Model(&models.DatasetState{}).
-		Where("namespace = ? AND name = ? AND status = ?", out.Namespace, out.Name, models.DatasetStatusHeld).
+		Where("namespace = ? AND name = ? AND partition = ? AND status = ?", out.Namespace, out.Name, "", models.DatasetStatusHeld).
 		Updates(map[string]any{
 			"status":           models.DatasetStatusUnknown,
 			"reason":           "",

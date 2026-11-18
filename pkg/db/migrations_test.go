@@ -91,6 +91,109 @@ func TestMigrateTaskRunUniquePartitionIndexIsIdempotent(t *testing.T) {
 	assertPartitionUniquenessEnforced(t, conn)
 }
 
+func TestMigrateDatasetStatePartitionIndexAddsColumnAndWidensKey(t *testing.T) {
+	conn := openMigrationTestDB(t)
+	// Start from the real pre-partition table (every other column present) so
+	// AutoMigrate only has to recreate the identity index. A thinner table makes
+	// the sqlite migrator rebuild it and drop NOT NULL values on the way.
+	require.NoError(t, conn.AutoMigrate(&models.DatasetState{}))
+	require.NoError(t, conn.Exec("DROP INDEX IF EXISTS idx_dataset_state_identity").Error)
+	require.NoError(t, conn.Exec("ALTER TABLE dataset_states DROP COLUMN partition").Error)
+	require.NoError(t, conn.Exec("CREATE UNIQUE INDEX idx_dataset_state_identity ON dataset_states(namespace, name)").Error)
+	require.False(t, conn.Migrator().HasColumn(&models.DatasetState{}, "Partition"))
+	now := time.Now().UTC()
+	require.NoError(t, conn.Exec(
+		`INSERT INTO dataset_states (id, namespace, name, watermark, status, reason, created_at, updated_at) VALUES (?, '', 'orders', '1', 'fresh', '', ?, ?)`,
+		uuid.NewString(), now, now,
+	).Error)
+
+	require.NoError(t, MigrateDatasetStatePartitionIndex(conn))
+	def, found, err := datasetStateIdentityIndexDefinition(conn)
+	require.NoError(t, err)
+	assert.False(t, found, "legacy index should be dropped before AutoMigrate recreates it, got %q", def)
+	require.True(t, conn.Migrator().HasColumn(&models.DatasetState{}, "Partition"))
+
+	require.NoError(t, conn.AutoMigrate(&models.DatasetState{}))
+	def, found, err = datasetStateIdentityIndexDefinition(conn)
+	require.NoError(t, err)
+	require.True(t, found)
+	assert.True(t, indexCoversDatasetPartition(def), "got %q", def)
+
+	var row models.DatasetState
+	require.NoError(t, conn.Where("name = ? AND partition = ?", "orders", "").Take(&row).Error)
+	assert.Equal(t, "1", row.Watermark)
+	assert.Equal(t, "", row.Partition)
+	assertDatasetPartitionUniqueness(t, conn, now)
+}
+
+func TestMigrateDatasetStatePartitionIndexDropsLegacyIndexWhenColumnExists(t *testing.T) {
+	conn := openMigrationTestDB(t)
+	require.NoError(t, conn.AutoMigrate(&models.DatasetState{}))
+	require.NoError(t, conn.Exec("DROP INDEX IF EXISTS idx_dataset_state_identity").Error)
+	require.NoError(t, conn.Exec("CREATE UNIQUE INDEX idx_dataset_state_identity ON dataset_states(namespace, name)").Error)
+	now := time.Now().UTC()
+	require.NoError(t, conn.Create(&models.DatasetState{
+		ID: uuid.New(), Name: "orders", Watermark: "1", Status: "fresh", CreatedAt: now, UpdatedAt: now,
+	}).Error)
+
+	legacy, found, err := datasetStateIdentityIndexDefinition(conn)
+	require.NoError(t, err)
+	require.True(t, found)
+	require.False(t, indexCoversDatasetPartition(legacy), "fixture must start on the legacy index, got %q", legacy)
+	err = conn.Create(&models.DatasetState{
+		ID: uuid.New(), Name: "orders", Partition: "east", Watermark: "e", Status: "unknown", CreatedAt: now, UpdatedAt: now,
+	}).Error
+	require.Error(t, err, "the legacy (namespace, name) unique index must reject a second partition")
+
+	require.NoError(t, MigrateDatasetStatePartitionIndex(conn))
+	require.NoError(t, conn.AutoMigrate(&models.DatasetState{}))
+	def, found, err := datasetStateIdentityIndexDefinition(conn)
+	require.NoError(t, err)
+	require.True(t, found)
+	assert.True(t, indexCoversDatasetPartition(def), "got %q", def)
+	assertDatasetPartitionUniqueness(t, conn, now)
+}
+
+func TestMigrateDatasetStatePartitionIndexIsIdempotent(t *testing.T) {
+	conn := openMigrationTestDB(t)
+	require.NoError(t, conn.AutoMigrate(&models.DatasetState{}))
+	before, found, err := datasetStateIdentityIndexDefinition(conn)
+	require.NoError(t, err)
+	require.True(t, found)
+	require.True(t, indexCoversDatasetPartition(before), "a fresh AutoMigrate already covers partition, got %q", before)
+
+	for range 3 {
+		require.NoError(t, MigrateDatasetStatePartitionIndex(conn))
+		require.NoError(t, conn.AutoMigrate(&models.DatasetState{}))
+	}
+	after, found, err := datasetStateIdentityIndexDefinition(conn)
+	require.NoError(t, err)
+	require.True(t, found)
+	assert.Equal(t, before, after)
+}
+
+func TestMigrateDatasetStatePartitionIndexNoTableIsNoOp(t *testing.T) {
+	conn := openMigrationTestDB(t)
+	require.NoError(t, MigrateDatasetStatePartitionIndex(conn))
+	_, found, err := datasetStateIdentityIndexDefinition(conn)
+	require.NoError(t, err)
+	assert.False(t, found)
+}
+
+func assertDatasetPartitionUniqueness(t *testing.T, conn *gorm.DB, now time.Time) {
+	t.Helper()
+	require.NoError(t, conn.Create(&models.DatasetState{
+		ID: uuid.New(), Name: "orders", Partition: "east", Watermark: "e", Status: "unknown", CreatedAt: now, UpdatedAt: now,
+	}).Error)
+	require.NoError(t, conn.Create(&models.DatasetState{
+		ID: uuid.New(), Name: "orders", Partition: "west", Watermark: "w", Status: "unknown", CreatedAt: now, UpdatedAt: now,
+	}).Error)
+	err := conn.Create(&models.DatasetState{
+		ID: uuid.New(), Name: "orders", Partition: "", Watermark: "again", Status: "unknown", CreatedAt: now, UpdatedAt: now,
+	}).Error
+	require.Error(t, err, "the empty partition is the one dataset-level row")
+}
+
 func TestMigrateTaskRunUniquePartitionIndexNoTableIsNoOp(t *testing.T) {
 	conn := openMigrationTestDB(t)
 	// No task_runs table at all — a brand new database. Nothing to inspect and

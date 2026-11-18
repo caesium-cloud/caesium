@@ -325,6 +325,64 @@ steps:
 	}
 }
 
+func TestValidateDatasetsRejectsBadArrivalPartitionPath(t *testing.T) {
+	y := `
+apiVersion: v1
+kind: Job
+metadata:
+  alias: j
+  datasets:
+    sources:
+      - name: raw.x
+        arrival:
+          watermark: "$.detail.key"
+          partition: "not a jsonpath"
+trigger:
+  type: cron
+  configuration: {expression: "0 * * * *"}
+steps:
+  - name: s
+    image: etl:1
+`
+	_, err := Parse([]byte(y))
+	if err == nil || !strings.Contains(err.Error(), "arrival.partition") {
+		t.Fatalf("expected arrival.partition error, got %v", err)
+	}
+}
+
+func TestParseDatasetsArrivalPartition(t *testing.T) {
+	y := `
+apiVersion: v1
+kind: Job
+metadata:
+  alias: j
+  datasets:
+    sources:
+      - name: raw.x
+        external: true
+        arrival:
+          event: {type: "webhook.s3"}
+          watermark: "$.object.key"
+          partition: "$.object.partition"
+trigger:
+  type: cron
+  configuration: {expression: "0 * * * *"}
+steps:
+  - name: s
+    image: etl:1
+    datasets:
+      consumes: [raw.x]
+`
+	def, err := Parse([]byte(y))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	src := def.Metadata.Datasets.Sources[0]
+	if src.Arrival == nil || src.Arrival.Partition != "$.object.partition" {
+		t.Fatalf("arrival partition = %+v", src.Arrival)
+	}
+}
+
 // TestValidateDatasetsAllowsCrossJobConsume asserts the single-definition
 // validator does NOT reject a consumes name that resolves to no dataset in this
 // job — cross-job resolution is the batch validator's responsibility (A3).

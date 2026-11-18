@@ -618,3 +618,79 @@ func TestCapturerNonScalarDeclaredWatermarkSkips(t *testing.T) {
 		})
 	}
 }
+
+// TestCapturerAdvancesEachPartition records one watermark per fanned task and
+// verifies a repeat of the same value in place. The whole-dataset row is not
+// written, and dataset_advanced is not published, because scheduling still
+// reads the empty partition.
+func TestCapturerAdvancesEachPartition(t *testing.T) {
+	db := openRegistryDB(t)
+	ctx := context.Background()
+	bus := event.New()
+	events, err := bus.Subscribe(ctx, event.Filter{Types: []event.Type{event.TypeDatasetAdvanced}})
+	if err != nil {
+		t.Fatalf("subscribe: %v", err)
+	}
+	c := NewCapturer(bus, db)
+
+	jobID, runID := uuid.New(), uuid.New()
+	seedProducingRun(t, db, jobID, runID, map[string]string{"max_order_ts": "e1"}, nil, "max_order_ts")
+	var seeded models.TaskRun
+	if err := db.Where("job_run_id = ?", runID).Take(&seeded).Error; err != nil {
+		t.Fatalf("seeded task run: %v", err)
+	}
+	if err := db.Model(&seeded).Updates(map[string]any{
+		"partition_value": "east",
+		"partition_index": 0,
+		"partition_count": 2,
+	}).Error; err != nil {
+		t.Fatalf("retarget east: %v", err)
+	}
+	westOut, _ := json.Marshal(map[string]string{"max_order_ts": "w1"})
+	if err := db.Create(&models.TaskRun{
+		ID: uuid.New(), JobRunID: runID, TaskID: seeded.TaskID, AtomID: uuid.New(),
+		Engine: "docker", Image: "etl:1.4", Command: "run", Status: taskRunTerminalSucceeded,
+		CacheHit: false, Output: datatypes.JSON(westOut),
+		PartitionValue: "west", PartitionIndex: 1, PartitionCount: 2,
+		CreatedAt: seeded.CreatedAt, UpdatedAt: seeded.UpdatedAt,
+	}).Error; err != nil {
+		t.Fatalf("seed west: %v", err)
+	}
+
+	completed := event.Event{Type: event.TypeRunCompleted, JobID: jobID, RunID: runID}
+	c.handleRunCompleted(ctx, completed)
+
+	east, ok, err := c.store.GetPartition(ctx, nil, "staging.orders", "east")
+	if err != nil || !ok || east.Watermark != "e1" {
+		t.Fatalf("east = %+v ok=%v err=%v", east, ok, err)
+	}
+	west, ok, err := c.store.GetPartition(ctx, nil, "staging.orders", "west")
+	if err != nil || !ok || west.Watermark != "w1" {
+		t.Fatalf("west = %+v ok=%v err=%v", west, ok, err)
+	}
+	if _, ok, err := c.store.Get(ctx, nil, "staging.orders"); err != nil || ok {
+		t.Fatalf("partition output wrote the dataset row (ok=%v err=%v)", ok, err)
+	}
+
+	c.handleRunCompleted(ctx, completed)
+	eastAfter, ok, err := c.store.GetPartition(ctx, nil, "staging.orders", "east")
+	if err != nil || !ok {
+		t.Fatalf("east after verify: ok=%v err=%v", ok, err)
+	}
+	if east.AdvancedAt == nil || eastAfter.AdvancedAt == nil || !eastAfter.AdvancedAt.Equal(*east.AdvancedAt) {
+		t.Fatalf("repeat moved east advanced_at from %v to %v", east.AdvancedAt, eastAfter.AdvancedAt)
+	}
+	if eastAfter.VerifiedAt == nil {
+		t.Fatal("repeat did not verify the partition")
+	}
+	westAfter, ok, err := c.store.GetPartition(ctx, nil, "staging.orders", "west")
+	if err != nil || !ok || westAfter.Watermark != "w1" {
+		t.Fatalf("west changed on east verify: %+v ok=%v err=%v", westAfter, ok, err)
+	}
+
+	select {
+	case got := <-events:
+		t.Fatalf("partition capture published %s", got.Type)
+	default:
+	}
+}

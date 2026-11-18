@@ -336,6 +336,12 @@ func migrateOnce(router *Router) (err error) {
 		}
 	}
 
+	// dataset_states is catalog-only. Drop a pre-partition identity index before
+	// AutoMigrate so the recreated unique key is (namespace, name, partition);
+	// an index whose name already exists is otherwise left unchanged.
+	if err = MigrateDatasetStatePartitionIndex(router.Catalog()); err != nil {
+		return err
+	}
 	if err = migrateModels(router.Catalog(), models.All...); err != nil {
 		return err
 	}

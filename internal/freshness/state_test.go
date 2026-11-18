@@ -254,6 +254,107 @@ func TestAdvancePersistsAndVerifies(t *testing.T) {
 	if count != 1 {
 		t.Fatalf("row count = %d, want 1", count)
 	}
+	if got.Partition != "" {
+		t.Fatalf("whole-dataset partition = %q, want empty", got.Partition)
+	}
+}
+
+// TestAdvancePartitionDoesNotCollideWithDataset proves a named partition is a
+// separate watermark from the whole-dataset row and from every other partition.
+// An absent partition (empty or whitespace) stays on the dataset row. Verify
+// refreshes only the partition it names.
+func TestAdvancePartitionDoesNotCollideWithDataset(t *testing.T) {
+	db := openRegistryDB(t)
+	s := NewStore(db)
+	ctx := context.Background()
+	ns := "warehouse"
+
+	dataset, err := s.Advance(ctx, AdvanceInput{Name: "orders", Watermark: "d1", RunID: uuid.New(), CompletedAt: t0})
+	if err != nil {
+		t.Fatalf("dataset advance: %v", err)
+	}
+	if dataset.Outcome != OutcomeAdvanced {
+		t.Fatalf("dataset outcome = %q, want advanced", dataset.Outcome)
+	}
+	// Whitespace is absent, so it verifies the whole-dataset row rather than
+	// opening a second one.
+	blank, err := s.Advance(ctx, AdvanceInput{Name: "orders", Partition: "  ", Watermark: "d1", RunID: uuid.New(), CompletedAt: t0.Add(time.Minute)})
+	if err != nil {
+		t.Fatalf("blank partition: %v", err)
+	}
+	if blank.Outcome != OutcomeVerified || blank.State.Partition != "" {
+		t.Fatalf("blank partition = %+v, want verify of the dataset row", blank)
+	}
+
+	east, err := s.Advance(ctx, AdvanceInput{Name: "orders", Partition: "east", Watermark: "e1", RunID: uuid.New(), CompletedAt: t0.Add(2 * time.Minute)})
+	if err != nil {
+		t.Fatalf("east advance: %v", err)
+	}
+	if east.Outcome != OutcomeAdvanced || east.State.Partition != "east" || east.State.Watermark != "e1" {
+		t.Fatalf("east = %+v, want advanced e1", east)
+	}
+	west, err := s.Advance(ctx, AdvanceInput{Name: "orders", Partition: " west ", Watermark: "w1", RunID: uuid.New(), CompletedAt: t0.Add(3 * time.Minute)})
+	if err != nil {
+		t.Fatalf("west advance: %v", err)
+	}
+	if west.Outcome != OutcomeAdvanced || west.State.Partition != "west" || west.State.Watermark != "w1" {
+		t.Fatalf("west = %+v, want advanced w1", west)
+	}
+	named, err := s.Advance(ctx, AdvanceInput{Namespace: &ns, Name: "orders", Partition: "east", Watermark: "n1", RunID: uuid.New(), CompletedAt: t0.Add(4 * time.Minute)})
+	if err != nil {
+		t.Fatalf("namespaced advance: %v", err)
+	}
+	if named.Outcome != OutcomeAdvanced || named.State.Namespace != ns || named.State.Watermark != "n1" {
+		t.Fatalf("namespaced = %+v, want namespace %s watermark n1", named, ns)
+	}
+
+	// Same value verifies east only: advanced_at stays, and the other rows
+	// keep the watermarks this call did not name.
+	eastAdvanced := east.State.AdvancedAt
+	verified, err := s.Advance(ctx, AdvanceInput{Name: "orders", Partition: "east", Watermark: "e1", RunID: uuid.New(), CompletedAt: t0.Add(5 * time.Minute)})
+	if err != nil {
+		t.Fatalf("east verify: %v", err)
+	}
+	if verified.Outcome != OutcomeVerified {
+		t.Fatalf("east verify outcome = %q, want verified", verified.Outcome)
+	}
+	if verified.State.AdvancedAt == nil || eastAdvanced == nil || !verified.State.AdvancedAt.Equal(*eastAdvanced) {
+		t.Fatalf("east advanced_at moved on verify: got %v want %v", verified.State.AdvancedAt, eastAdvanced)
+	}
+	if verified.State.VerifiedAt == nil || !verified.State.VerifiedAt.Equal(t0.Add(5*time.Minute)) {
+		t.Fatalf("east verified_at = %v", verified.State.VerifiedAt)
+	}
+
+	gotDataset, ok, err := s.Get(ctx, nil, "orders")
+	if err != nil || !ok || gotDataset.Watermark != "d1" || gotDataset.Partition != "" {
+		t.Fatalf("dataset row = %+v ok=%v err=%v, want watermark d1", gotDataset, ok, err)
+	}
+	gotEast, ok, err := s.GetPartition(ctx, nil, "orders", "east")
+	if err != nil || !ok || gotEast.Watermark != "e1" {
+		t.Fatalf("east row = %+v ok=%v err=%v", gotEast, ok, err)
+	}
+	gotWest, ok, err := s.GetPartition(ctx, nil, "orders", "west")
+	if err != nil || !ok || gotWest.Watermark != "w1" {
+		t.Fatalf("west row = %+v ok=%v err=%v", gotWest, ok, err)
+	}
+	gotNS, ok, err := s.GetPartition(ctx, &ns, "orders", "east")
+	if err != nil || !ok || gotNS.Watermark != "n1" {
+		t.Fatalf("namespaced row = %+v ok=%v err=%v", gotNS, ok, err)
+	}
+	if _, ok, err := s.GetPartition(ctx, nil, "orders", "east"); err != nil || !ok {
+		t.Fatalf("empty-namespace east missing: ok=%v err=%v", ok, err)
+	}
+	if _, ok, err := s.Get(ctx, nil, "orders"); err != nil || !ok {
+		t.Fatalf("Get must stay on the dataset row: ok=%v err=%v", ok, err)
+	}
+
+	var count int64
+	if err := db.Model(&models.DatasetState{}).Where("name = ?", "orders").Count(&count).Error; err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if count != 4 {
+		t.Fatalf("row count = %d, want dataset + east + west + namespaced east", count)
+	}
 }
 
 // TestAdvanceConcurrentSingleRow proves two concurrent Advance calls for the
