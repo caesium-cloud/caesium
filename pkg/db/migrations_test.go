@@ -100,6 +100,21 @@ func TestMigrateTaskRunUniquePartitionIndexNoTableIsNoOp(t *testing.T) {
 	assert.False(t, found)
 }
 
+func TestMigrateUnreapedKubernetesPodIndexIsIdempotent(t *testing.T) {
+	conn := openMigrationTestDB(t)
+	require.NoError(t, MigrateUnreapedKubernetesPodIndex(conn))
+	require.NoError(t, conn.AutoMigrate(&models.TaskRun{}))
+	require.NoError(t, MigrateUnreapedKubernetesPodIndex(conn))
+	require.NoError(t, MigrateUnreapedKubernetesPodIndex(conn))
+
+	var name string
+	require.NoError(t, conn.Raw(
+		"SELECT name FROM sqlite_master WHERE type = 'index' AND name = ?",
+		unreapedKubernetesPodIndexName,
+	).Scan(&name).Error)
+	require.Equal(t, unreapedKubernetesPodIndexName, name)
+}
+
 // assertPartitionUniquenessEnforced proves the migrated index actually
 // constrains the data, not just that its DDL string looks right: two instances
 // of one (run, task) at DIFFERENT partition indexes are allowed, and a duplicate

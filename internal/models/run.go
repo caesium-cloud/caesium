@@ -228,9 +228,17 @@ type TaskRun struct {
 	// LogGeneration is a per-runtime UUID. Sanitized snapshot writes carry it
 	// in their ownership predicate so a collector from an invalidated runtime
 	// cannot write into a replacement that happens to reuse the same attempt.
-	LogGeneration           string `gorm:"type:text;not null;default:''" json:"-"`
-	Error                   string `json:"error,omitempty"`
-	RuntimeID               string `json:"runtime_id,omitempty"`
+	LogGeneration string `gorm:"type:text;not null;default:''" json:"-"`
+	Error         string `json:"error,omitempty"`
+	RuntimeID     string `json:"runtime_id,omitempty"`
+	// ReapedRuntimeID is the runtime id whose Kubernetes pod has already been
+	// deleted by recovery. When it equals RuntimeID the reclaim scan skips the
+	// row, so a finished attempt's history leaves the candidate set while
+	// RuntimeID stays as the record of which pod ran. A later attempt that
+	// writes a different RuntimeID no longer matches and is eligible again.
+	// Empty on every row written before this column existed, which is what
+	// makes those rows candidates exactly once.
+	ReapedRuntimeID         string `gorm:"type:text;not null;default:''" json:"-"`
 	OutstandingPredecessors int    `gorm:"not null;index:idx_taskrun_claim_priority,priority:2" json:"outstanding_predecessors"`
 	// OwnerGeneration is set to the RunLease.Generation of the owning node when
 	// run-owner mode is active.  Every coordination write by the owner

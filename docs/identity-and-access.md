@@ -1467,7 +1467,11 @@ are namespace-local, so a step's PVCs are the mapped namespace's, and relative
   does not run beside an orphan. Those paths, and the leader's reclaim tick
   after the run has finished, also delete a terminal attempt's pod when the
   row still names it: the pod reached Succeeded or Failed and its worker was
-  gone before it could delete the pod. The row stays terminal. A running
+  gone before it could delete the pod. The row stays terminal and keeps
+  `runtime_id`. A successful delete records that same id in
+  `reaped_runtime_id`, and later reclaim ticks leave the matching row out of
+  the candidate scan. A later attempt that stores a different runtime id is
+  eligible again. A running
   attempt whose claim is still unexpired stays, including one that belongs to
   another run. The stop is best effort: a failure is logged
   and recovery proceeds. A graceful shutdown stops its own pods. Local mode

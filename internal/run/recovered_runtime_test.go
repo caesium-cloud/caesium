@@ -214,6 +214,48 @@ func TestOwnerTakeoverReapsAPodWhoseRowCompletedAfterTheRead(t *testing.T) {
 	finished := taskRunFor(t, db, runID, taskA)
 	require.Equal(t, string(TaskStatusSucceeded), finished.Status, "the completed row is not re-pended")
 	require.Equal(t, "caesium-mapped/step-a-1", finished.RuntimeID, "a finished attempt keeps the pod it ran")
+	require.Equal(t, finished.RuntimeID, finished.ReapedRuntimeID, "a reaped terminal row leaves the next scan")
+}
+
+// A recorded reap is durable. Recreating the same pod must not put the
+// finished row back on the candidate scan, and a later attempt's different
+// runtime id must.
+func TestReapedTerminalPodLeavesTheCandidateScan(t *testing.T) {
+	db := testutil.OpenTestDB(t)
+	t.Cleanup(func() { testutil.CloseDB(db) })
+	store := NewStore(db)
+	runID, taskA, _ := seedTwoTaskRun(t, db, store, "")
+	client := useFakeRecoveryCluster(t, recoveryPod("caesium-mapped", "step-a-1"))
+	require.NoError(t, db.Model(&models.TaskRun{}).
+		Where("job_run_id = ? AND task_id = ?", runID, taskA).
+		Updates(map[string]any{
+			"status":     string(TaskStatusSucceeded),
+			"engine":     string(models.AtomEngineKubernetes),
+			"runtime_id": "caesium-mapped/step-a-1",
+		}).Error)
+
+	store.ReapAbandonedKubernetesPods(runID)
+	require.False(t, podExists(t, client, "caesium-mapped", "step-a-1"))
+	reaped := taskRunFor(t, db, runID, taskA)
+	require.Equal(t, "caesium-mapped/step-a-1", reaped.RuntimeID)
+	require.Equal(t, reaped.RuntimeID, reaped.ReapedRuntimeID)
+
+	_, err := client.CoreV1().Pods("caesium-mapped").Create(context.Background(), recoveryPod("caesium-mapped", "step-a-1"), metav1.CreateOptions{})
+	require.NoError(t, err)
+	store.ReapAbandonedKubernetesPods(uuid.Nil)
+	require.True(t, podExists(t, client, "caesium-mapped", "step-a-1"), "a recorded reap stays out of the scan")
+
+	_, err = client.CoreV1().Pods("caesium-mapped").Create(context.Background(), recoveryPod("caesium-mapped", "step-a-2"), metav1.CreateOptions{})
+	require.NoError(t, err)
+	require.NoError(t, db.Model(&models.TaskRun{}).
+		Where("id = ?", reaped.ID).
+		Update("runtime_id", "caesium-mapped/step-a-2").Error)
+	store.ReapAbandonedKubernetesPods(uuid.Nil)
+	require.False(t, podExists(t, client, "caesium-mapped", "step-a-2"), "a new runtime id is eligible again")
+	require.True(t, podExists(t, client, "caesium-mapped", "step-a-1"), "the previously reaped pod is not selected")
+	again := taskRunFor(t, db, runID, taskA)
+	require.Equal(t, "caesium-mapped/step-a-2", again.RuntimeID)
+	require.Equal(t, again.RuntimeID, again.ReapedRuntimeID)
 }
 
 // An owner that lost its lease must not force-stop the attempt of the newer

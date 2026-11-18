@@ -314,12 +314,6 @@ type Store struct {
 	// A completion started here must block until the fold checkpoints.
 	afterAbandonRowsRead func()
 
-	// reapedPodIDs remembers pods this process already deleted, keyed by task
-	// run id, valued by the runtime id that was stopped. A finished row keeps
-	// that runtime id so a later read can still name the pod; the map stops
-	// the next reclaim tick from stopping it again.
-	reapedPodIDs sync.Map
-
 	// startedMu guards startedRuns.
 	startedMu sync.Mutex
 	// startedRuns tracks run IDs that were started via Start() in this
