@@ -1,6 +1,6 @@
 # Design: Volumes & Workload-Identity Passthrough (BYO storage + identity)
 
-**Status:** Shipped (PRs #207/#208, 2026-06-18/19): volumes, PVC/claimTemplate/bind/tmpfs mounts, serviceAccountName passthrough, and the Component 0 executor fix; node-affinity/co-location for RWO volumes in distributed mode remains open (to be filed as an issue by Plan 0 N-3 of the closed-loop arc — `../exec-plans/active/closed-loop-arc.md` § Parked, archived, filed)
+**Status:** Shipped (PRs #207/#208, 2026-06-18/19): volumes, PVC/claimTemplate/bind/tmpfs mounts, serviceAccountName passthrough, and the Component 0 executor fix. Shared ReadWriteOnce co-location for Docker and Podman workers shipped with #412: run-owner dispatch places those steps on the worker that already holds the volume and fails the task if that worker has left the cluster. Kubernetes pod nodeAffinity is not set.
 **Date:** 2026-05-29
 **Author:** Christopher Ryan
 **Topic:** Inter-step file handoff via bring-your-own shared storage, and bring-your-own
@@ -93,7 +93,8 @@ zero-dependency, self-hosted, container-native identity of the project.
 
 5. **No node-affinity primitive.** `internal/dispatch/dispatch.go` round-robins a task to
    whatever worker accepts it; there is no affinity/anti-affinity. This bounds the Volumes
-   design in distributed mode (see §7).
+   design in distributed mode (see §7). Docker and Podman worker co-location for a shared
+   `ReadWriteOnce` volume shipped later (#412); Kubernetes pod `nodeAffinity` is still unset.
 
 ## 3. Goals / Non-goals
 
@@ -117,8 +118,9 @@ zero-dependency, self-hosted, container-native identity of the project.
   Workload identity is the platform's; Caesium only attaches it.
 - **No object-storage handoff convention** (push/pull to S3/GCS). Strong roadmap item
   (§9), designed separately.
-- **No node-affinity / co-location scheduler primitive.** Documented limitation (§7);
-  roadmap item.
+- **No node-affinity / co-location scheduler primitive.** Documented limitation of this
+  spec (§7). Docker and Podman worker co-location for a shared `ReadWriteOnce` volume
+  shipped later (#412). Kubernetes pod placement is unchanged.
 - **No Caesium-provisioned storage.** Backing storage is always BYO; for ephemeral volumes
   Caesium manages only the *claim object* lifecycle, never the storage itself.
 - **No new container privileges** (privileged, securityContext, resource limits) — out of
@@ -316,16 +318,16 @@ steps:
   cache pruner pattern). Name ephemeral resources deterministically by run id for reliable GC.
   (The manual-lifecycle + reaper machinery is therefore docker/podman-only, not k8s.)
 - **Distributed-mode constraint on ephemeral docker/podman volumes (important):** a named
-  docker/podman volume lives on a single daemon's local host. With no node-affinity (§7), a
-  run-owner that creates a per-run named volume cannot share it with a co-mounting step
-  dispatched to a *different* worker — that worker would silently auto-create an empty
-  local volume of the same name, losing data. Therefore **ephemeral named docker/podman
-  volumes are single-node-only**; validation rejects them when execution mode is distributed.
-  Cross-node sharing on docker/podman requires an **external** `bind` source pointing at a
-  shared network filesystem (NFS/CephFS) mounted on every worker (which Caesium mounts but
-  does not manage). On k8s, inline ephemeral claims are per-pod (per-step) and so never
-  cross-node-shared by construction; cross-step shared scratch uses a pre-provisioned **RWX**
-  `pvc` (RWO has the single-mounter limitation — see §7).
+  docker/podman volume lives on a single daemon's local host. Run-owner dispatch places a
+  later step that mounts the same `ReadWriteOnce` volume on that daemon, and fails the task
+  if the daemon has left the cluster (§7, #412). A step that does not share the volume can
+  still land elsewhere and auto-create an empty volume of the same name. Cross-node sharing
+  on docker/podman requires an **external** `bind` source pointing at a shared network
+  filesystem (NFS/CephFS) mounted on every worker (which Caesium mounts but does not manage).
+  On k8s, inline ephemeral claims are per-pod (per-step) and so never cross-node-shared by
+  construction; cross-step shared scratch uses a pre-provisioned **RWX** `pvc`. A
+  ReadWriteOnce PVC stays a single-mounter: worker co-location does not set pod nodeAffinity
+  (§7).
 
 ### 6.5 File handoff via existing contracts (no new subsystem)
 
@@ -341,27 +343,29 @@ key); ephemeral scratch is fresh per run regardless.
 ## 7. Distributed-mode behavior & the RWX-only limitation
 
 A shared volume only works where it is reachable by the worker that runs each co-mounting
-step. Because the dispatcher has **no node-affinity primitive** (§2.2.5):
+step. This spec shipped without a placement primitive (§2.2.5). Current behavior:
 
 - **ReadWriteMany** storage (NFS, CephFS, EFS via CSI; or a host NFS mounted on every Docker
   worker) — any node can co-mount. **Fully supported; this is the recommended mode for
-  fan-out/fan-in DAGs in distributed deployments.**
-- **ReadWriteOnce** PVCs / per-run scratch — only one node can mount at a time. Co-locating
-  the co-mounting steps **is not expressible today**. For v1 this is a **documented
-  limitation**: RWO volumes are safe only when the DAG segment sharing them is effectively
-  serial on one node, which Caesium cannot currently guarantee in distributed mode.
-  Single-node (Docker/Podman, or a single-worker cluster) is unaffected.
+  fan-out/fan-in DAGs in distributed deployments.** Dispatch leaves it on round-robin.
+- **ReadWriteOnce, Docker and Podman workers.** Run-owner dispatch places every later step
+  that mounts the same named volume on the worker that already ran an earlier step mounting
+  it, and fails that task if the worker has left the cluster. A volume only one step mounts
+  stays on round-robin. One local daemon does not place tasks. The bytes are still host-local:
+  co-location keeps the steps on the daemon that has them, and does not make a named volume
+  visible to a second daemon.
+- **ReadWriteOnce PVCs.** The same worker pin applies, and it does **not** set pod
+  `nodeAffinity`. Two Kubernetes steps can still be scheduled onto different nodes, so a
+  ReadWriteOnce PVC shared across steps remains unsafe. Use ReadWriteMany for that.
 - **Docker/Podman named (and ephemeral) volumes are node-local — never shareable across
   workers.** Unlike a k8s RWX PVC, there is no cross-node docker/podman volume. In a
   multi-worker docker/podman deployment, the only way to share a volume between steps that
   may land on different workers is an **external `bind` source backed by a shared network
-  filesystem** (NFS/CephFS) mounted at the same path on every worker. Named/ephemeral
-  docker/podman volumes are therefore validated as **single-node-only** (§6.4).
+  filesystem** (NFS/CephFS) mounted at the same path on every worker, or the ReadWriteOnce
+  co-location above when every co-mounting step must stay on one daemon.
 
-A node-affinity primitive (to make RWO co-location safe) and an object-storage handoff path
-(node-agnostic, no co-location needed) are the two roadmap items that lift this limitation
-(§9). The spec does **not** attempt either here; it ships the RWX-correct behavior and names
-the boundary honestly.
+An object-storage handoff path (node-agnostic, no co-location needed) remains the roadmap
+item that lifts the Kubernetes RWO boundary (§9).
 
 ## 8. Component 2 — Workload-identity passthrough (BYO cloud identity)
 
@@ -431,7 +435,9 @@ Each is dual-purpose — framed data-engineering-first, with CI/CD as the bonus:
   Caesium never touches the bytes. This is the node-agnostic alternative to RWO volumes and
   the cross-cluster handoff path. *(Reject s3fs/gcsfuse mounting — non-POSIX trap; reject a
   Caesium-run stager — puts bytes in Caesium's path.)*
-- **Node-affinity / co-location primitive** — unblocks RWO volumes in distributed mode.
+- **Node-affinity / co-location primitive** — Docker and Podman worker co-location for a
+  shared `ReadWriteOnce` volume shipped with #412. Kubernetes pod `nodeAffinity` is still
+  unset, so a ReadWriteOnce PVC shared by pods on different nodes stays unsupported.
 - **Digest-pinned cache keys** — the cache hashes the image **tag** string, not the resolved
   digest (`internal/cache/hash.go`); a mutable `:latest` can serve stale cached outputs. A
   correctness fix that benefits every workload.
@@ -461,10 +467,11 @@ Each is dual-purpose — framed data-engineering-first, with CI/CD as the bonus:
 
 ## 11. Risks & open items
 
-- **RWO/distributed limitation (§7)** is a real ergonomic boundary; mitigated by clear docs
-  + the RWX recommendation, lifted later by node-affinity / object-storage handoff. The
-  docker/podman analogue is sharper — named/ephemeral volumes are node-local and validated
-  single-node-only; distributed docker/podman sharing requires a shared-network-FS `bind`.
+- **RWO/distributed limitation (§7)** is lifted for Docker and Podman workers that share a
+  `ReadWriteOnce` volume: run-owner dispatch co-locates them and fails the task if that
+  worker has left the cluster (#412). A ReadWriteOnce PVC is still not pinned to one
+  Kubernetes node. Named/ephemeral docker/podman volumes stay node-local; sharing them
+  across workers still requires a shared-network-FS `bind` or that co-location.
 - **Ephemeral-volume leak risk (docker/podman only)** if cleanup is not crash-safe → the
   orphan reaper is mandatory there. k8s avoids this entirely via inline ephemeral claims, whose
   PVC the kubelet GCs with the pod (§6.4).

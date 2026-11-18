@@ -456,6 +456,7 @@ func stepRuntimeSpecs(records *JobRecords) ([]container.Spec, error) {
 func buildVolumes(records *JobRecords, specs []container.Spec) []schema.Volume {
 	order := make([]string, 0)
 	byName := make(map[string]map[string]schema.VolumeSource)
+	accessMode := make(map[string]string)
 
 	for i := range records.Tasks {
 		engine := stepEngine(records, i)
@@ -477,6 +478,11 @@ func buildVolumes(records *JobRecords, specs []container.Spec) []schema.Volume {
 			if _, exists := sources[engine]; !exists {
 				sources[engine] = source
 			}
+			if mode := strings.TrimSpace(mount.AccessMode); mode != "" {
+				if _, exists := accessMode[name]; !exists {
+					accessMode[name] = mode
+				}
+			}
 		}
 	}
 
@@ -487,7 +493,7 @@ func buildVolumes(records *JobRecords, specs []container.Spec) []schema.Volume {
 	volumes := make([]schema.Volume, 0, len(order))
 	for _, name := range order {
 		sources := byName[name]
-		volume := schema.Volume{Name: name}
+		volume := schema.Volume{Name: name, AccessMode: accessMode[name]}
 		if len(sources) == 1 {
 			for _, source := range sources {
 				volume.Source = ptr.Of(source)

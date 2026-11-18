@@ -101,6 +101,14 @@ If a task is still being refused for capacity `CAESIUM_RUN_OWNER_DISPATCH_PROGRE
 
 Backoff state is per-owner and in-memory only; it is dropped when the run finishes or its lease moves to another node, so a new owner starts a task with a clean schedule.
 
+## Shared ReadWriteOnce volumes
+
+Run-owner dispatch places a task on the worker that already holds a `ReadWriteOnce` volume an earlier step of the same run mounted. The match is the volume name, and only when at least one other step mounts it. A volume only one step mounts, `ReadWriteMany`, `ReadOnlyMany`, `ReadWriteOncePod`, and an empty access mode stay on the round-robin. Per-step scratch (`tmpfs`, `claimTemplate`, `emptyDir`, `ephemeral`) is not treated as shared.
+
+The first ready step that mounts the volume takes the next round-robin peer and later steps follow that worker, including steps selected later in the same tick. If that worker is no longer a cluster member, the task fails with `worker <id> is not in the cluster; refusing to place the task elsewhere`. A benched peer is still a member, so the task waits for it instead of moving. One local daemon never reaches this placement. The pin is the Caesium worker: it does not set a Kubernetes pod `nodeAffinity`.
+
+With run-owner mode off, workers pull tasks themselves and this placement does not apply.
+
 ## Run-Owner Mode (Phase 2 Phase A, experimental)
 
 Run-owner mode assigns each in-flight job run to a single owner node. The owner writes a `run_leases` row in the catalog DB on run creation and pushes ready tasks to worker nodes via `POST /internal/dispatch` instead of relying on workers to poll via `ClaimNext`. Workers POST results back to the owner via `POST /internal/complete`.

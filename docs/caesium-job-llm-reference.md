@@ -676,9 +676,13 @@ manifest server-side from the stored job (the inverse of the apply importer) and
 answers `application/yaml` — or the same `Definition` as JSON with
 `?format=json`. Stdout carries the manifest and nothing else. Two details were
 never persisted and so cannot come back: a volume's alternative per-engine
-`sources` (and its `accessMode`), and job-level `serviceAccountName` /
+`sources`, and job-level `serviceAccountName` /
 `podAnnotations` / `automountServiceAccountToken`, which return on each
 Kubernetes step instead (equivalent, since step-level overrides job-level).
+A volume's `accessMode` is stored on the resolved mount and is restored on
+the volume. In distributed run-owner mode, steps that share one
+`ReadWriteOnce` volume are placed on the same worker; the task fails if that
+worker has left the cluster.
 
 `caesium blame` is scoped to the data stored in `dag_snapshot` and reports
 `coverage: "topology+image+command+step-spec"`: topology, step image and

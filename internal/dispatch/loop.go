@@ -226,6 +226,19 @@ type DispatchLoop struct {
 	// iso holds the isolation-context bookkeeping (isolation.go): per-run
 	// namespaces, peer capability probes and rate-limited wait warnings.
 	iso *isolationState
+
+	// rwoPinned remembers, per run, which worker opened each shared
+	// ReadWriteOnce volume. A claim is cleared when the task is reclaimed, so
+	// the catalog alone would let the next placement move the volume. The map
+	// is this process's memory of a choice it already made.
+	rwoMu     sync.Mutex
+	rwoPinned map[uuid.UUID]map[string]string
+
+	// memberPeers is the last full membership, including peers healthyPeers
+	// has benched. A shared volume stays on a benched peer; only a peer that
+	// has left the cluster is treated as gone.
+	memberMu    sync.Mutex
+	memberPeers []peer
 }
 
 // ownerReclaimInterval is the floor between expired-claim sweeps for one run in
@@ -297,6 +310,7 @@ func NewDispatchLoop(cfg DispatchLoopConfig) *DispatchLoop {
 		capacityBackoffBase: capacityBackoffBase,
 		capacityBackoffMax:  capacityBackoffMax,
 		iso:                 newIsolationState(),
+		rwoPinned:           make(map[uuid.UUID]map[string]string),
 	}
 	// Reuse the same nodeAddr→baseURL logic the peer list uses so the owner's
 	// own base URL is built identically (and honors the PeerBaseURL test hook).
@@ -361,8 +375,11 @@ func (l *DispatchLoop) tick(ctx context.Context) {
 		return
 	}
 	// Normalise peers to {nodeID, baseURL} pairs; include self in the rotation.
-	peers := l.buildPeers(rawPeers)
-	if len(peers) == 0 {
+	// Snapshot membership before the healthy filter. A benched peer is still a
+	// member, and a shared ReadWriteOnce volume must not move off it.
+	members := l.buildPeers(rawPeers)
+	l.setMemberPeers(members)
+	if len(members) == 0 {
 		// This run-set-wide control-plane metric has no per-task quarantine context.
 		metrics.DispatchRejectedTotal.WithLabelValues(DispatchReasonNoPeers).Inc()
 		return
@@ -371,7 +388,7 @@ func (l *DispatchLoop) tick(ctx context.Context) {
 	// round-robin doesn't keep selecting a node that has left the cluster but
 	// still lingers in dqlite membership.  Falls back to the full list if every
 	// peer is benched, so a cluster-wide blip never starves dispatch entirely.
-	peers = l.healthyPeers(peers)
+	peers := l.healthyPeers(members)
 
 	// 2. Find runs this node owns AND their current generation in one query
 	//    (avoids the N+1 GetLease pattern as the owned set grows).
@@ -558,6 +575,17 @@ func (l *DispatchLoop) dispatchCandidates(ctx context.Context, runID uuid.UUID, 
 	if isolated {
 		l.probeCapabilities(ctx, peers)
 	}
+	// Shared ReadWriteOnce volumes are host-local. Placement is decided here,
+	// before any post, so two steps selected in one tick cannot land apart.
+	// A store that cannot see atom specs returns no bindings and the loop
+	// stays on round-robin, which is what every test double does.
+	bindings, bindErr := l.rwoBindings(ctx, runID)
+	if bindErr != nil {
+		if ctx.Err() == nil {
+			log.Warn("dispatch loop: ReadWriteOnce placement lookup failed", "run_id", runID, "error", bindErr)
+		}
+		return
+	}
 	const maxConcurrent = 16
 	sem := make(chan struct{}, min(len(candidates), maxConcurrent))
 	var wg sync.WaitGroup
@@ -565,32 +593,71 @@ func (l *DispatchLoop) dispatchCandidates(ctx context.Context, runID uuid.UUID, 
 		if ctx.Err() != nil {
 			break
 		}
+		binding := bindings[candidate.executionRef]
+		pinnedWorker, conflict := l.bindingWorker(runID, binding)
+		// Advance the rotation even when this task is pinned, so a later
+		// task with no shared volume keeps today's round-robin position.
 		idx := l.counter.Add(1) - 1
-		p := peers[idx%uint64(len(peers))]
-		workerNode := p.nodeID
-		if isolated {
-			// Never dispatch an isolated task to a peer that does not
-			// advertise isolation_v1: take the first capable peer from the
-			// round-robin position, counting each one that answered without
-			// it; with none, the task waits for the next tick.
-			quarantined := candidate.quarantine || runQuarantined
-			found := false
-			for k := range uint64(len(peers)) {
-				next := peers[(idx+k)%uint64(len(peers))]
-				capability := l.peerCapabilityOf(next.nodeID)
-				if capability.isolation {
-					p, found = next, true
-					break
-				}
-				if capability.answered && !quarantined {
-					metrics.DispatchIncompatibleWorkerTotal.Inc()
-				}
-			}
-			if !found {
-				l.warnNoCapablePeer(runID, candidate.executionRef, isolation.Namespace)
+		if conflict != "" {
+			l.failColocatedTask(ctx, runID, candidate, errors.New(conflict))
+			continue
+		}
+		var p peer
+		var workerNode string
+		if pinnedWorker != "" {
+			found, present := l.findMemberPeer(pinnedWorker, peers)
+			if !present {
+				l.failColocatedTask(ctx, runID, candidate, missingRWOWorkerError(pinnedWorker, binding.volumes))
 				continue
 			}
-			workerNode = IsolationWorkerNode(p.nodeID)
+			if isolated {
+				// The volume is already on this peer. A peer that has not
+				// advertised isolation_v1 cannot take the task, and moving it
+				// would open the volume on another node, so the task waits.
+				quarantined := candidate.quarantine || runQuarantined
+				capability := l.peerCapabilityOf(found.nodeID)
+				if !capability.isolation {
+					if capability.answered && !quarantined {
+						metrics.DispatchIncompatibleWorkerTotal.Inc()
+					}
+					l.warnNoCapablePeer(runID, candidate.executionRef, isolation.Namespace)
+					continue
+				}
+				workerNode = IsolationWorkerNode(found.nodeID)
+			} else {
+				workerNode = found.nodeID
+			}
+			p = found
+		} else {
+			p = peers[idx%uint64(len(peers))]
+			workerNode = p.nodeID
+			if isolated {
+				// Never dispatch an isolated task to a peer that does not
+				// advertise isolation_v1: take the first capable peer from the
+				// round-robin position, counting each one that answered without
+				// it; with none, the task waits for the next tick.
+				quarantined := candidate.quarantine || runQuarantined
+				found := false
+				for k := range uint64(len(peers)) {
+					next := peers[(idx+k)%uint64(len(peers))]
+					capability := l.peerCapabilityOf(next.nodeID)
+					if capability.isolation {
+						p, found = next, true
+						break
+					}
+					if capability.answered && !quarantined {
+						metrics.DispatchIncompatibleWorkerTotal.Inc()
+					}
+				}
+				if !found {
+					l.warnNoCapablePeer(runID, candidate.executionRef, isolation.Namespace)
+					continue
+				}
+				workerNode = IsolationWorkerNode(p.nodeID)
+			}
+		}
+		if len(binding.volumes) > 0 {
+			l.rememberRWO(runID, binding.volumes, p.nodeID)
 		}
 		req := DispatchRequest{RunID: runID, TaskID: candidate.taskID, TaskRunID: candidate.taskRunID, OwnerGeneration: generation, Attempt: candidate.attempt, WorkerNode: workerNode, OwnerBaseURL: l.ownerBaseURL, Deadline: time.Now().UTC().Add(l.cfg.Deadline), Isolation: isolation}
 		wg.Add(1)
@@ -676,6 +743,7 @@ func (l *DispatchLoop) forgetUnownedRuns(owned map[uuid.UUID]int64) {
 	l.rateLimitDelayMu.Unlock()
 
 	l.forgetIsolation(owned)
+	l.forgetRWO(owned)
 }
 
 // acquireRateLimit resolves and consumes the task's declared rate-limit budget.

@@ -845,6 +845,7 @@ trigger:
   configuration: {cron: "0 * * * *"}
 volumes:
   - name: work
+    accessMode: ReadWriteOnce
     sources:
       docker: {bind: /mnt/shared/work}
       kubernetes: {pvc: ci-shared-rwx}
@@ -871,6 +872,7 @@ steps:
 	require.Len(t, localSpec.ResolvedVolumeMounts, 1)
 	require.Equal(t, container.VolumeMountTypeBind, localSpec.ResolvedVolumeMounts[0].Type)
 	require.Equal(t, "/mnt/shared/work", localSpec.ResolvedVolumeMounts[0].Source)
+	require.Equal(t, "ReadWriteOnce", localSpec.ResolvedVolumeMounts[0].AccessMode)
 	require.Nil(t, localSpec.Kubernetes)
 
 	def.Metadata.AutomountServiceAccountToken = &automount
@@ -879,6 +881,7 @@ steps:
 	require.Len(t, clusterSpec.ResolvedVolumeMounts, 1)
 	require.Equal(t, container.VolumeMountTypePVC, clusterSpec.ResolvedVolumeMounts[0].Type)
 	require.Equal(t, "ci-shared-rwx", clusterSpec.ResolvedVolumeMounts[0].Source)
+	require.Equal(t, "ReadWriteOnce", clusterSpec.ResolvedVolumeMounts[0].AccessMode)
 	require.True(t, clusterSpec.ResolvedVolumeMounts[0].ReadOnly)
 	require.Equal(t, "plans", clusterSpec.ResolvedVolumeMounts[0].SubPath)
 	require.NotNil(t, clusterSpec.Kubernetes)
