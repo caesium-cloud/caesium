@@ -300,7 +300,14 @@ func (l *localRun) execute(initialCompletionErr error) (returnErr error, complet
 		return runErr, runErr
 	}
 
-	l.paramEnv = buildParamEnv(snapshot.ID, j.alias, snapshot.Params)
+	// CAESIUM_JOB_ALIAS is excluded from the cache hash, but a quarantined
+	// replay still injects the baseline alias. The distributed worker reads
+	// the same field off the descriptor before it builds param env.
+	jobAlias := j.alias
+	if l.runQuarantined {
+		jobAlias = quarantinedBaselineAlias(l.runners, l.taskOrder, j.alias)
+	}
+	l.paramEnv = buildParamEnv(snapshot.ID, jobAlias, snapshot.Params)
 
 	l.fanOutGroups = make(map[uuid.UUID]run.ExpandedGroup)
 	// fanOutGroups is written from whichever worker goroutine completes a

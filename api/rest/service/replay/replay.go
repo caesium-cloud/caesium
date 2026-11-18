@@ -62,20 +62,18 @@ type Result struct {
 
 // Service owns REST replay idempotency and delegates materialization to B3.
 type Service struct {
-	ctx           context.Context
-	store         *runstorage.Store
-	dispatcher    replaycore.Dispatcher
-	executionMode func() string
+	ctx        context.Context
+	store      *runstorage.Store
+	dispatcher replaycore.Dispatcher
 }
 
 // New returns a replay service backed by the default run store.
 func New(ctx context.Context) *Service {
 	store := runstorage.Default()
 	return &Service{
-		ctx:           ctx,
-		store:         store,
-		dispatcher:    NewAsyncDispatcher(store),
-		executionMode: func() string { return env.Variables().ExecutionMode },
+		ctx:        ctx,
+		store:      store,
+		dispatcher: NewAsyncDispatcher(store),
 	}
 }
 
@@ -110,11 +108,15 @@ func (s *Service) WithDispatcher(dispatcher replaycore.Dispatcher) *Service {
 	return &next
 }
 
-// WithExecutionMode returns a copy of the service using mode for replay
-// dispatch preflight. It is intended for tests and for explicit callers.
-func (s *Service) WithExecutionMode(mode string) *Service {
+// WithExecutionMode returns a copy of the service. mode is ignored: local and
+// distributed execution both reconstruct a quarantined replay from the
+// baseline descriptor, so the old distributed-only preflight is gone. The
+// method stays so existing callers keep compiling.
+func (s *Service) WithExecutionMode(string) *Service {
+	if s == nil {
+		return nil
+	}
 	next := *s
-	next.executionMode = func() string { return mode }
 	return &next
 }
 
@@ -200,10 +202,6 @@ func (s *Service) replay(req Request) (*Result, error) {
 			return nil, err
 		}
 	}
-	if prepared.RequiresDispatch() && !s.isDistributedExecutionMode() {
-		return nil, ErrReplayRequiresDistributedMode
-	}
-
 	result, err := constructor.Materialize(s.ctx, prepared)
 	if err == nil {
 		return &Result{Run: result.Run, Fingerprint: fingerprint}, nil
@@ -305,9 +303,6 @@ func (s *Service) resumePending(runID, expectedJobID uuid.UUID) error {
 	if pendingCount == 0 {
 		return nil
 	}
-	if !s.isDistributedExecutionMode() {
-		return ErrReplayRequiresDistributedMode
-	}
 	// Pending work is not a metadata-only retry: preserve supervised admission
 	// when an existing reservation must be dispatched again.
 	s, release, err := s.reserveWork()
@@ -316,16 +311,6 @@ func (s *Service) resumePending(runID, expectedJobID uuid.UUID) error {
 	}
 	defer release()
 	return s.dispatcher.DispatchReplay(s.ctx, runID)
-}
-
-func (s *Service) isDistributedExecutionMode() bool {
-	mode := ""
-	if s != nil && s.executionMode != nil {
-		mode = s.executionMode()
-	} else {
-		mode = env.Variables().ExecutionMode
-	}
-	return strings.EqualFold(strings.TrimSpace(mode), "distributed")
 }
 
 type fingerprintPayload struct {
@@ -398,8 +383,8 @@ func isUniqueReplayFingerprintError(err error) bool {
 }
 
 // AsyncDispatcher resumes a materialized replay run through the existing job
-// execution surface. Local mode fails closed inside job.Run for quarantined
-// replays; distributed mode lets workers reconstruct from task descriptors.
+// execution surface. Local mode reconstructs each task from its baseline
+// execution descriptor inside job.Run, the same way a distributed worker does.
 type AsyncDispatcher struct {
 	store *runstorage.Store
 }

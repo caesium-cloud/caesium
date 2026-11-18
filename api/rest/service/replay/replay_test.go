@@ -155,9 +155,6 @@ func TestReplayResumesPendingReservation(t *testing.T) {
 		ctx:        replayTestContext(t),
 		store:      store,
 		dispatcher: dispatcher,
-		executionMode: func() string {
-			return "distributed"
-		},
 	}).Replay(Request{
 		JobID:          jobID,
 		BaselineRunID:  baselineRunID,
@@ -275,32 +272,46 @@ func TestReplayRetryResumesAfterDispatchFailure(t *testing.T) {
 	require.EqualValues(t, 1, replayRuns)
 }
 
-func TestReplayRefusesLocalModeWhenReplayWouldReexecute(t *testing.T) {
+func TestReplayLocalModeDispatchesReexecution(t *testing.T) {
 	f := newServiceReplayFixture(t)
 	f.seedTask(t, true, "success")
 	overrides := map[string]string{"mode": "what-if"}
 	key := "local-reexecute"
 	dispatcher := &recordingDispatcher{}
-
-	_, err := (&Service{
-		ctx:        replayTestContext(t),
-		store:      f.store,
-		dispatcher: dispatcher,
-	}).WithExecutionMode("local").Replay(Request{
+	req := Request{
 		JobID:          f.jobID,
 		BaselineRunID:  f.runID,
 		Set:            overrides,
 		IdempotencyKey: key,
 		Principal:      f.principal,
-	})
-	require.ErrorIs(t, err, ErrReplayRequiresDistributedMode)
-	require.Empty(t, dispatcher.calls)
+	}
+
+	first, err := (&Service{
+		ctx:        replayTestContext(t),
+		store:      f.store,
+		dispatcher: dispatcher,
+	}).WithExecutionMode("local").Replay(req)
+	require.NoError(t, err)
+	require.NotNil(t, first)
+	require.False(t, first.Existing)
+	require.Equal(t, []uuid.UUID{first.Run.ID}, dispatcher.calls)
+	require.Equal(t, runstorage.StatusRunning, first.Run.Status)
 
 	fingerprint, err := Fingerprint(f.jobID, f.runID, f.principal, overrides, key)
 	require.NoError(t, err)
 	var replayRuns int64
 	require.NoError(t, f.db.Model(&models.JobRun{}).Where("replay_fingerprint = ?", fingerprint).Count(&replayRuns).Error)
-	require.Zero(t, replayRuns)
+	require.EqualValues(t, 1, replayRuns)
+
+	second, err := (&Service{
+		ctx:        replayTestContext(t),
+		store:      f.store,
+		dispatcher: dispatcher,
+	}).WithExecutionMode("local").Replay(req)
+	require.NoError(t, err)
+	require.True(t, second.Existing)
+	require.Equal(t, first.Run.ID, second.Run.ID)
+	require.Equal(t, []uuid.UUID{first.Run.ID, first.Run.ID}, dispatcher.calls)
 }
 
 func TestReplayExistingUnexpectedNonTerminalStatusIsCorrupt(t *testing.T) {

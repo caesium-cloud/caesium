@@ -73,7 +73,7 @@ func (s *IntegrationTestSuite) TestRunReplayCLIJSONStdoutIdempotencyAndDiff() {
 	s.NotEmpty(diff.Tasks)
 }
 
-func (s *IntegrationTestSuite) TestRunReplayCLIRequiresJobIDAndRefusesLocalReexec() {
+func (s *IntegrationTestSuite) TestRunReplayCLIReexecutesQuarantinedLocal() {
 	alias := fmt.Sprintf("e2e-replay-cli-refusal-%d", time.Now().UnixNano())
 	dir := s.writeJobManifest(replayManifest(alias, true))
 	defer os.RemoveAll(dir)
@@ -90,10 +90,19 @@ func (s *IntegrationTestSuite) TestRunReplayCLIRequiresJobIDAndRefusesLocalReexe
 	s.Contains(stderr, "--job-id is required")
 	s.NotContains(stderr, "replay idempotency key", "validation must fail before minting a replay key")
 
-	refusalKey := "replay-cli-refusal-" + time.Now().Format("150405.000000000")
-	stdout, stderr, err = s.runCLISeparate("run", "replay", baselineRunID, "--job-id", job.ID, "--set", "mode=what-if", "--idempotency-key", refusalKey, "--json", "--server", s.caesiumURL)
-	s.Require().Error(err)
-	s.Empty(strings.TrimSpace(stdout), "replay refusal must leave stdout clean")
-	s.Contains(stderr, "replay refused (409)")
-	s.Contains(stderr, "distributed execution mode")
+	reexecKey := "replay-cli-reexec-" + time.Now().Format("150405.000000000")
+	stdout, stderr, err = s.runCLISeparate("run", "replay", baselineRunID, "--job-id", job.ID, "--set", "mode=what-if", "--idempotency-key", reexecKey, "--diff", "--json", "--server", s.caesiumURL)
+	s.Require().NoError(err, "local what-if replay failed:\nstdout=%s\nstderr=%s", stdout, stderr)
+	s.Require().True(json.Valid([]byte(stdout)), "replay --diff --json stdout was not clean JSON:\n%s", stdout)
+	s.Contains(stderr, "awaiting replay run ")
+	s.NotContains(stdout, "awaiting replay run")
+	s.NotContains(stderr, "distributed execution mode")
+	var diff runDiffRESTResponse
+	s.Require().NoError(json.Unmarshal([]byte(stdout), &diff))
+	s.Equal(job.ID, diff.JobID)
+	s.Equal(baselineRunID, diff.LeftRunID)
+	s.NotEmpty(diff.RightRunID)
+	replayRun := s.awaitRun(job.ID, diff.RightRunID, runTimeout)
+	s.Equal("succeeded", replayRun.Status, "local what-if replay failed: %s", replayRun.Error)
+	s.Equal("succeeded", s.taskStatusesByName(job.ID, replayRun)["deploy"])
 }

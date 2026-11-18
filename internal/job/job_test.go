@@ -18,6 +18,7 @@ import (
 	"github.com/caesium-cloud/caesium/api/rest/service/task"
 	"github.com/caesium-cloud/caesium/api/rest/service/taskedge"
 	"github.com/caesium-cloud/caesium/internal/atom"
+	"github.com/caesium-cloud/caesium/internal/jobdef/secret"
 	jobdeftestutil "github.com/caesium-cloud/caesium/internal/jobdef/testutil"
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/caesium-cloud/caesium/internal/run"
@@ -430,53 +431,380 @@ func TestRunLocalFailedAtomResultFailsRun(t *testing.T) {
 	require.Equal(t, run.TaskStatusFailed, status[taskID])
 }
 
-func TestRunLocalRefusesQuarantinedReplay(t *testing.T) {
-	db := jobdeftestutil.OpenTestDB(t)
-	t.Cleanup(func() { jobdeftestutil.CloseDB(db) })
+func TestRunLocalReconstructsQuarantinedReplay(t *testing.T) {
+	t.Run("no task rows", func(t *testing.T) {
+		db, store, engine, jobID, runID := seedQuarantinedLocalJob(t)
+		_ = db
+		taskID := uuid.New()
+		atomID := uuid.New()
+		taskSvc := &fakeTaskService{tasks: models.Tasks{{ID: taskID, JobID: jobID, AtomID: atomID, Name: "extract-live"}}}
+		atomSvc := &fakeAtomService{atoms: map[uuid.UUID]*models.Atom{
+			atomID: {ID: atomID, Engine: models.AtomEngineDocker, Image: "current/image:latest", Command: `["sh","-c","echo current"]`},
+		}}
+		err := runQuarantinedLocal(t, store, engine, jobID, runID, taskSvc, atomSvc, &fakeTaskEdgeService{}, nil)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "no task rows")
+		require.Zero(t, engine.maxConcurrent())
+		snapshot := latestRunSnapshot(t, store, jobID)
+		require.Equal(t, run.StatusFailed, snapshot.Status)
+		require.Contains(t, snapshot.Error, "no task rows")
+	})
 
-	store := run.NewStore(db)
-	engine := newFakeEngine()
+	t.Run("baseline descriptor", func(t *testing.T) {
+		db, store, engine, jobID, runID := seedQuarantinedLocalJob(t)
+		taskID := uuid.New()
+		addedID := uuid.New()
+		atomID := uuid.New()
+		addedAtom := uuid.New()
+		now := time.Now().UTC()
+		tasks := models.Tasks{
+			{ID: taskID, JobID: jobID, AtomID: atomID, Name: "extract-live", CreatedAt: now, UpdatedAt: now},
+			{ID: addedID, JobID: jobID, AtomID: addedAtom, Name: "added-later", CreatedAt: now, UpdatedAt: now},
+		}
+		edges := models.TaskEdges{{ID: uuid.New(), JobID: jobID, FromTaskID: taskID, ToTaskID: addedID, CreatedAt: now, UpdatedAt: now}}
+		persistGraph(t, db, tasks, edges)
+		require.NoError(t, db.Create(quarantinedBaselineTaskRun(t, runID, taskID, atomID, true)).Error)
+
+		var callbacks int
+		err := runQuarantinedLocal(t, store, engine, jobID, runID,
+			&fakeTaskService{tasks: tasks},
+			&fakeAtomService{atoms: map[uuid.UUID]*models.Atom{
+				atomID:    {ID: atomID, Engine: models.AtomEngineDocker, Image: "current/image:latest", Command: `["sh","-c","echo current"]`},
+				addedAtom: {ID: addedAtom, Engine: models.AtomEngineDocker, Image: "current/added:latest", Command: `["echo","added"]`},
+			}},
+			&fakeTaskEdgeService{edges: edges},
+			&callbacks,
+		)
+		require.NoError(t, err)
+		require.Zero(t, callbacks)
+
+		created := engine.createRequestsForTask(taskID)
+		require.Len(t, created, 1)
+		require.Empty(t, engine.createRequestsForTask(addedID))
+		require.Equal(t, "baseline/image:pinned", created[0].Image)
+		require.Equal(t, []string{"sh", "-c", "echo baseline"}, created[0].Command)
+		require.Equal(t, "${CAESIUM_PARAM_MODE}", created[0].Spec.Env["STEP"])
+		require.Equal(t, "what-if", created[0].Spec.Env["CAESIUM_PARAM_MODE"])
+		require.Equal(t, "baseline-alias", created[0].Spec.Env["CAESIUM_JOB_ALIAS"])
+		require.Equal(t, "/baseline-work", created[0].Spec.WorkDir)
+		require.Equal(t, []container.Mount{{
+			Type: container.MountTypeBind, Source: "/baseline", Target: "/data", ReadOnly: true,
+		}}, created[0].Spec.Mounts)
+
+		var addedRows int64
+		require.NoError(t, db.Model(&models.TaskRun{}).Where("task_id = ?", addedID).Count(&addedRows).Error)
+		require.Zero(t, addedRows)
+		var caches int64
+		require.NoError(t, db.Model(&models.TaskCache{}).Count(&caches).Error)
+		require.Zero(t, caches)
+
+		snapshot := latestRunSnapshot(t, store, jobID)
+		require.Equal(t, run.StatusSucceeded, snapshot.Status)
+	})
+
+	t.Run("not replay safe", func(t *testing.T) {
+		db, store, engine, jobID, runID := seedQuarantinedLocalJob(t)
+		taskID := uuid.New()
+		atomID := uuid.New()
+		now := time.Now().UTC()
+		tasks := models.Tasks{{ID: taskID, JobID: jobID, AtomID: atomID, Name: "extract-live", CreatedAt: now, UpdatedAt: now}}
+		persistGraph(t, db, tasks, nil)
+		require.NoError(t, db.Create(quarantinedBaselineTaskRun(t, runID, taskID, atomID, false)).Error)
+
+		err := runQuarantinedLocal(t, store, engine, jobID, runID,
+			&fakeTaskService{tasks: tasks},
+			&fakeAtomService{atoms: map[uuid.UUID]*models.Atom{
+				atomID: {ID: atomID, Engine: models.AtomEngineDocker, Image: "current/image:latest", Command: `["echo","current"]`},
+			}},
+			&fakeTaskEdgeService{},
+			nil,
+		)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "not replay safe")
+		require.Empty(t, engine.createRequestsForTask(taskID))
+		snapshot := latestRunSnapshot(t, store, jobID)
+		require.Equal(t, run.StatusFailed, snapshot.Status)
+		require.Contains(t, snapshot.Error, "not replay safe")
+	})
+}
+
+func TestRunLocalQuarantinedCacheHitSkipsReplaySafeGate(t *testing.T) {
+	db, store, engine, jobID, runID := seedQuarantinedLocalJob(t)
+	reusedID := uuid.New()
+	rerunID := uuid.New()
+	reusedAtom := uuid.New()
+	rerunAtom := uuid.New()
 	now := time.Now().UTC()
+	tasks := models.Tasks{
+		{ID: reusedID, JobID: jobID, AtomID: reusedAtom, Name: "extract-live", CreatedAt: now, UpdatedAt: now},
+		{ID: rerunID, JobID: jobID, AtomID: rerunAtom, Name: "publish-live", CreatedAt: now.Add(time.Second), UpdatedAt: now},
+	}
+	edges := models.TaskEdges{{
+		ID: uuid.New(), JobID: jobID, FromTaskID: reusedID, ToTaskID: rerunID, CreatedAt: now, UpdatedAt: now,
+	}}
+	persistGraph(t, db, tasks, edges)
 
-	jobID := uuid.New()
-	runID := uuid.New()
+	reused := quarantinedBaselineTaskRun(t, runID, reusedID, reusedAtom, false)
+	reused.Status = string(run.TaskStatusCached)
+	reused.CacheHit = true
+	reused.Result = "success"
+	reused.CompletedAt = &now
+	origin := uuid.New()
+	reused.CacheOriginRunID = &origin
+	reused.CacheCreatedAt = &now
+	overlayQuarantinedDescriptor(t, reused, func(desc *models.TaskExecutionDescriptor) {
+		desc.Baseline.TaskName = "extract-baseline"
+		desc.DAG.TaskPosition = 0
+		desc.DAG.Successors = []models.TaskExecutionEdgeRef{{TaskID: rerunID, TaskName: "publish-baseline"}}
+	})
+
+	// Outstanding predecessors counts only steps that will re-execute. The
+	// constructor writes 0 here because the predecessor is already a cache hit.
+	rerun := quarantinedBaselineTaskRun(t, runID, rerunID, rerunAtom, true)
+	rerun.Image = "baseline/publish:pinned"
+	rerun.Command = `["sh","-c","echo publish"]`
+	rerun.OutstandingPredecessors = 0
+	rerun.CacheEnabled = false
+	overlayQuarantinedDescriptor(t, rerun, func(desc *models.TaskExecutionDescriptor) {
+		desc.Baseline.TaskName = "publish-baseline"
+		desc.Runtime.Image = "baseline/publish:pinned"
+		desc.Runtime.Command = []string{"sh", "-c", "echo publish"}
+		desc.Cache.Enabled = false
+		desc.DAG.TaskPosition = 1
+		desc.DAG.Predecessors = []models.TaskExecutionEdgeRef{{TaskID: reusedID, TaskName: "extract-baseline"}}
+		desc.DAG.OutstandingPredecessors = 0
+	})
+	require.NoError(t, db.Create(reused).Error)
+	require.NoError(t, db.Create(rerun).Error)
+
+	err := runQuarantinedLocal(t, store, engine, jobID, runID,
+		&fakeTaskService{tasks: tasks},
+		&fakeAtomService{atoms: map[uuid.UUID]*models.Atom{
+			reusedAtom: {ID: reusedAtom, Engine: models.AtomEngineDocker, Image: "current/extract:latest", Command: `["echo","current-extract"]`},
+			rerunAtom:  {ID: rerunAtom, Engine: models.AtomEngineDocker, Image: "current/publish:latest", Command: `["echo","current-publish"]`},
+		}},
+		&fakeTaskEdgeService{edges: edges},
+		nil,
+	)
+	require.NoError(t, err)
+	require.Empty(t, engine.createRequestsForTask(reusedID), "a reused cache hit must not execute")
+	created := engine.createRequestsForTask(rerunID)
+	require.Len(t, created, 1)
+	require.Equal(t, "baseline/publish:pinned", created[0].Image)
+	require.Equal(t, []string{"sh", "-c", "echo publish"}, created[0].Command)
+
+	snapshot := latestRunSnapshot(t, store, jobID)
+	require.Equal(t, run.StatusSucceeded, snapshot.Status)
+	status := taskStatusByID(snapshot)
+	require.Equal(t, run.TaskStatusCached, status[reusedID])
+	require.Equal(t, run.TaskStatusSucceeded, status[rerunID])
+	require.False(t, taskRunByID(snapshot, reusedID).ReplaySafe)
+}
+
+func overlayQuarantinedDescriptor(t *testing.T, row *models.TaskRun, mutate func(*models.TaskExecutionDescriptor)) {
+	t.Helper()
+	var desc models.TaskExecutionDescriptor
+	require.NoError(t, json.Unmarshal(row.ExecutionDescriptor, &desc))
+	mutate(&desc)
+	raw, err := json.Marshal(desc)
+	require.NoError(t, err)
+	row.ExecutionDescriptor = datatypes.JSON(raw)
+}
+
+func TestRunLocalQuarantinedFanOutUsesEachInstanceDescriptor(t *testing.T) {
+	db, store, engine, jobID, runID := seedQuarantinedLocalJob(t)
 	taskID := uuid.New()
 	atomID := uuid.New()
-	require.NoError(t, db.Create(&models.Job{ID: jobID, Alias: "quarantined-local", CreatedAt: now, UpdatedAt: now}).Error)
+	now := time.Now().UTC()
+	tasks := models.Tasks{{ID: taskID, JobID: jobID, AtomID: atomID, Name: "process-live", CreatedAt: now, UpdatedAt: now}}
+	persistGraph(t, db, tasks, nil)
+
+	const (
+		digestA = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+		digestB = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+		refA    = "secret://env/TOKEN_A"
+		refB    = "secret://env/TOKEN_B"
+	)
+	rowA := quarantinedPartitionTaskRun(t, runID, taskID, atomID, "a", 0, digestA, refA, "v-a")
+	rowB := quarantinedPartitionTaskRun(t, runID, taskID, atomID, "b", 1, digestB, refB, "v-b")
+	require.NoError(t, db.Create(rowA).Error)
+	require.NoError(t, db.Create(rowB).Error)
+
+	opts := withTestDeps(store, env.Environment{
+		MaxParallelTasks:  2,
+		TaskFailurePolicy: taskFailurePolicyHalt,
+		ExecutionMode:     executionModeLocal,
+	}, &fakeTaskService{tasks: tasks}, &fakeAtomService{atoms: map[uuid.UUID]*models.Atom{
+		atomID: {ID: atomID, Engine: models.AtomEngineDocker, Image: "current/image:latest", Command: `["echo","current"]`},
+	}}, &fakeTaskEdgeService{}, engine)
+	opts = append(opts, WithSecretResolver(versionedSecretResolver{
+		refA: {value: "secret-a", version: "v-a"},
+		refB: {value: "secret-b", version: "v-b"},
+	}))
+	err := New(&models.Job{ID: jobID, Alias: "renamed-alias"}, opts...).Run(run.WithContext(context.Background(), runID))
+	require.NoError(t, err)
+
+	created := engine.createRequestsForTask(taskID)
+	require.Len(t, created, 2)
+	byInstance := map[string]atom.EngineCreateRequest{}
+	for _, req := range created {
+		switch {
+		case strings.Contains(req.Name, rowA.ID.String()):
+			byInstance["a"] = req
+		case strings.Contains(req.Name, rowB.ID.String()):
+			byInstance["b"] = req
+		}
+	}
+	require.Equal(t, "baseline/image:pinned@"+digestA, byInstance["a"].Image)
+	require.Equal(t, "baseline/image:pinned@"+digestB, byInstance["b"].Image)
+	require.Equal(t, "secret-a", byInstance["a"].Spec.Env["TOKEN"])
+	require.Equal(t, "secret-b", byInstance["b"].Spec.Env["TOKEN"])
+	require.Equal(t, []string{"sh", "-c", "echo a"}, byInstance["a"].Command)
+	require.Equal(t, []string{"sh", "-c", "echo b"}, byInstance["b"].Command)
+
+	var savedA, savedB models.TaskRun
+	require.NoError(t, db.First(&savedA, "id = ?", rowA.ID).Error)
+	require.NoError(t, db.First(&savedB, "id = ?", rowB.ID).Error)
+	require.Equal(t, digestA, savedA.ResolvedImageDigest)
+	require.Equal(t, digestB, savedB.ResolvedImageDigest)
+}
+
+func quarantinedPartitionTaskRun(t *testing.T, runID, taskID, atomID uuid.UUID, partition string, index int, digest, secretRef, version string) *models.TaskRun {
+	t.Helper()
+	row := quarantinedBaselineTaskRun(t, runID, taskID, atomID, true)
+	var desc models.TaskExecutionDescriptor
+	require.NoError(t, json.Unmarshal(row.ExecutionDescriptor, &desc))
+	desc.Runtime.ResolvedImageDigest = digest
+	desc.Runtime.Command = []string{"sh", "-c", "echo " + partition}
+	desc.ContainerSpec.Env = map[string]string{"TOKEN": secretRef}
+	desc.SecretRefs = []models.TaskExecutionSecretRef{{
+		Ref:        secretRef,
+		EnvKey:     "TOKEN",
+		Provider:   "env",
+		Verifiable: true,
+		Identity:   datatypes.JSONMap{"version": version},
+	}}
+	raw, err := json.Marshal(desc)
+	require.NoError(t, err)
+	row.ExecutionDescriptor = datatypes.JSON(raw)
+	row.Command = fmt.Sprintf(`["sh","-c","echo %s"]`, partition)
+	row.PartitionValue = partition
+	row.PartitionIndex = index
+	row.PartitionCount = 2
+	row.CacheEnabled = true
+	return row
+}
+
+type versionedSecret struct {
+	value   string
+	version string
+}
+
+type versionedSecretResolver map[string]versionedSecret
+
+func (r versionedSecretResolver) Resolve(ctx context.Context, ref string) (string, error) {
+	value, _, err := r.ResolveWithIdentity(ctx, ref)
+	return value, err
+}
+
+func (r versionedSecretResolver) ResolveWithIdentity(_ context.Context, ref string) (string, secret.Identity, error) {
+	item, ok := r[ref]
+	if !ok {
+		return "", secret.Identity{}, fmt.Errorf("unknown secret %s", ref)
+	}
+	return item.value, secret.Identity{Provider: "env", Ref: ref, Version: item.version, Verifiable: true}, nil
+}
+
+func (r versionedSecretResolver) CanonicalTarget(ref string) (string, error) {
+	return ref, nil
+}
+
+func seedQuarantinedLocalJob(t *testing.T) (*gorm.DB, *run.Store, *fakeEngine, uuid.UUID, uuid.UUID) {
+	t.Helper()
+	db := jobdeftestutil.OpenTestDB(t)
+	t.Cleanup(func() { jobdeftestutil.CloseDB(db) })
+	store := run.NewStore(db)
+	now := time.Now().UTC()
+	jobID := uuid.New()
+	runID := uuid.New()
+	require.NoError(t, db.Create(&models.Job{ID: jobID, Alias: "renamed-alias", CreatedAt: now, UpdatedAt: now}).Error)
 	require.NoError(t, db.Create(&models.JobRun{
 		ID:         runID,
 		JobID:      jobID,
 		Status:     string(run.StatusRunning),
 		Quarantine: true,
+		Params:     datatypes.JSON([]byte(`{"MODE":"what-if"}`)),
 		StartedAt:  now,
 		CreatedAt:  now,
 		UpdatedAt:  now,
 	}).Error)
+	return db, store, newFakeEngine(), jobID, runID
+}
 
-	taskSvc := &fakeTaskService{tasks: models.Tasks{
-		{ID: taskID, JobID: jobID, AtomID: atomID},
-	}}
-	atomSvc := &fakeAtomService{atoms: map[uuid.UUID]*models.Atom{
-		atomID: {
-			ID:      atomID,
-			Engine:  models.AtomEngineDocker,
-			Image:   "current/image:latest",
-			Command: `["sh","-c","echo current"]`,
+func quarantinedBaselineTaskRun(t *testing.T, runID, taskID, atomID uuid.UUID, replaySafe bool) *models.TaskRun {
+	t.Helper()
+	now := time.Now().UTC()
+	desc := models.TaskExecutionDescriptor{
+		SchemaVersion: models.TaskExecutionDescriptorSchemaVersion,
+		Baseline: models.TaskExecutionBaseline{
+			JobAlias:   "baseline-alias",
+			TaskName:   "extract-baseline",
+			TaskID:     taskID,
+			AtomID:     atomID,
+			ReplaySafe: replaySafe,
 		},
-	}}
+		DAG: models.TaskExecutionDAG{TriggerRule: schema.TriggerRuleAllSuccess},
+		Runtime: models.TaskExecutionRuntime{
+			Engine:                models.AtomEngineDocker,
+			Image:                 "baseline/image:pinned",
+			Command:               []string{"sh", "-c", "echo baseline"},
+			ParamEnvInterpolation: false,
+		},
+		ContainerSpec: container.Spec{
+			Env:     map[string]string{"STEP": "${CAESIUM_PARAM_MODE}"},
+			WorkDir: "/baseline-work",
+			Mounts: []container.Mount{{
+				Type: container.MountTypeBind, Source: "/baseline", Target: "/data", ReadOnly: true,
+			}},
+		},
+	}
+	raw, err := json.Marshal(desc)
+	require.NoError(t, err)
+	return &models.TaskRun{
+		ID:                  uuid.New(),
+		JobRunID:            runID,
+		TaskID:              taskID,
+		AtomID:              atomID,
+		Engine:              models.AtomEngineDocker,
+		Image:               "baseline/image:pinned",
+		Command:             `["sh","-c","echo baseline"]`,
+		Status:              string(run.TaskStatusPending),
+		Attempt:             1,
+		MaxAttempts:         1,
+		Quarantine:          true,
+		ReplaySafe:          replaySafe,
+		CacheEnabled:        true,
+		CacheTTL:            time.Hour,
+		ExecutionDescriptor: datatypes.JSON(raw),
+		CreatedAt:           now,
+		UpdatedAt:           now,
+	}
+}
+
+func runQuarantinedLocal(t *testing.T, store *run.Store, engine *fakeEngine, jobID, runID uuid.UUID, taskSvc task.Task, atomSvc asvc.Atom, edgeSvc taskedge.TaskEdge, callbacks *int) error {
+	t.Helper()
 	opts := withTestDeps(store, env.Environment{
 		MaxParallelTasks:  1,
 		TaskFailurePolicy: taskFailurePolicyHalt,
 		ExecutionMode:     executionModeLocal,
-	}, taskSvc, atomSvc, &fakeTaskEdgeService{}, engine)
-
-	err := New(&models.Job{ID: jobID, Alias: "quarantined-local"}, opts...).Run(run.WithContext(context.Background(), runID))
-	require.ErrorIs(t, err, ErrLocalQuarantinedReplayUnsupported)
-	require.Zero(t, engine.maxConcurrent(), "local quarantined replay must not create a container from live rows")
-
-	snapshot := latestRunSnapshot(t, store, jobID)
-	require.Equal(t, run.StatusFailed, snapshot.Status)
-	require.Contains(t, snapshot.Error, ErrLocalQuarantinedReplayUnsupported.Error())
+	}, taskSvc, atomSvc, edgeSvc, engine)
+	opts = append(opts, WithDispatchRunCallbacks(func(context.Context, uuid.UUID, uuid.UUID, error) error {
+		if callbacks != nil {
+			*callbacks++
+		}
+		return nil
+	}))
+	return New(&models.Job{ID: jobID, Alias: "renamed-alias"}, opts...).Run(run.WithContext(context.Background(), runID))
 }
 
 func TestRunLocalUsesJobLevelOverrides(t *testing.T) {

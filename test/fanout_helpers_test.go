@@ -152,10 +152,9 @@ func shellCommandBlock(script string, indent int) string {
 // distributed execution mode (the plain distributed lane and the run-owner
 // in-memory lane both set it; the local lane leaves it empty).
 //
-// Some surfaces are still lane-dependent (quarantined replay that would
-// re-execute is refused in local mode). A test for such a surface must assert
-// the RIGHT answer for its lane; branching on whichever answer arrived would
-// pass just as happily if the two lanes swapped behavior.
+// A test for a lane-dependent surface must assert the right answer for its
+// lane. Branching on whichever answer arrived would pass just as happily if
+// the two lanes swapped behavior. Quarantined replay re-executes on both.
 func distributedLane() bool {
 	return strings.EqualFold(strings.TrimSpace(os.Getenv("CAESIUM_EXECUTION_MODE")), "distributed")
 }

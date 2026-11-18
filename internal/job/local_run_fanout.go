@@ -6,7 +6,9 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"slices"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/caesium-cloud/caesium/internal/cache"
@@ -59,7 +61,9 @@ func (l *localRun) rehydrateFanOutGroups() {
 		}
 		instances := byTask[tid]
 		g := run.ExpandedGroup{TaskID: tid, Dependents: map[string][]string{}}
-		if t := tasksByID[tid]; t != nil {
+		if runner := l.runners[tid]; runner != nil && runner.replay != nil && runner.replay.Baseline.TaskName != "" {
+			g.TaskName = runner.replay.Baseline.TaskName
+		} else if t := tasksByID[tid]; t != nil {
 			g.TaskName = t.Name
 		}
 		for _, row := range instances {
@@ -121,6 +125,37 @@ func (l *localRun) lookupFanOutGroup(taskID uuid.UUID) (run.ExpandedGroup, bool)
 	defer fanOutGroupsMu.Unlock()
 	g, ok := fanOutGroups[taskID]
 	return g, ok
+}
+
+// runnerForQuarantinedInstance copies the shared template runner and overlays
+// one TaskRun's execution descriptor. Fan-out siblings are not interchangeable:
+// each baseline worker can pin a different image digest and a different secret
+// version, and those live on that instance's descriptor. The copy is the
+// runner hashing and Create use, so one partition cannot publish its digest
+// onto a sibling through the shared template.
+func runnerForQuarantinedInstance(base *atomRunner, desc *models.TaskExecutionDescriptor) *atomRunner {
+	cp := *base
+	cp.command = slices.Clone(base.command)
+	spec := desc.ContainerSpec
+	if spec.Kubernetes == nil && desc.KubernetesSpec != nil {
+		spec.Kubernetes = desc.KubernetesSpec
+	}
+	cp.spec = spec
+	cp.replay = desc
+	cp.resolvedImageDigest = ""
+	if image := strings.TrimSpace(desc.Runtime.Image); image != "" {
+		cp.image = image
+	}
+	if len(desc.Runtime.Command) > 0 {
+		cp.command = slices.Clone(desc.Runtime.Command)
+	}
+	if desc.Runtime.Engine != "" {
+		cp.engineKind = desc.Runtime.Engine
+	}
+	if desc.Timing.TaskTimeout > 0 {
+		cp.taskTimeout = desc.Timing.TaskTimeout
+	}
+	return &cp
 }
 
 // runFannedGroup executes one expanded fan-out group.
@@ -292,21 +327,44 @@ func (l *localRun) runFannedGroup(
 			}
 			results <- instanceResult{taskRunID: taskRunID, partition: m.partition.Key, err: cause, abort: persistErr != nil}
 		}
+		// The shared runner is the group's template. A quarantined instance
+		// executes its own descriptor: digest, secret refs, image and command
+		// are per TaskRun, matching runtimeExecutor.Execute.
+		active := runner
+		activeCache := cacheCfg
+		activeHash := hashArgs
+		activePred := predHashByID
+		if taskQuarantined {
+			desc, descErr := retryOnContentionDo(ctx, func() (*models.TaskExecutionDescriptor, error) {
+				return store.TaskExecutionDescriptor(ctx, runID, taskRunID)
+			})
+			if descErr != nil {
+				failIdentity(fmt.Errorf("replay descriptor unavailable for quarantined partition: %w", descErr))
+				return
+			}
+			active = runnerForQuarantinedInstance(runner, desc)
+			var idErr error
+			activeCache, activeHash, activePred, idErr = l.resolveTaskCacheIdentity(taskID, taskModel, active, outputEnv, predOutputs)
+			if idErr != nil {
+				failIdentity(idErr)
+				return
+			}
+		}
 		// Each instance (and each re-entered attempt) checks the namespace
 		// secret rules right before its own cache lookup: instances wait on
 		// parallelism, predecessors and rate limits independently, so a
 		// policy revoked while the group is open must stop the next instance
 		// from consuming its cached result. A denial fails the instance
 		// without retrying.
-		if runner.kubeMappingErr != nil {
-			failIdentity(runner.kubeMappingErr)
+		if active.kubeMappingErr != nil {
+			failIdentity(active.kubeMappingErr)
 			return
 		}
-		if err := l.checkSecretsAllowed(runner); err != nil {
+		if err := l.checkSecretsAllowed(active); err != nil {
 			failIdentity(err)
 			return
 		}
-		l.recordKubernetesTarget(taskRunID, runner)
+		l.recordKubernetesTarget(taskRunID, active)
 
 		partEnv := map[string]string{
 			envName: m.partition.Key,
@@ -328,7 +386,7 @@ func (l *localRun) runFannedGroup(
 		// receipt get`, `caesium why --partition` and `run retry
 		// --partition`. Caching is only one consumer of it, and gates just
 		// the lookup and the publish below.
-		args := hashArgs
+		args := activeHash
 		args.Partition = m.partition.Key
 		args.PartitionFingerprint = m.partition.Fingerprint
 		args.PartitionAttributes = m.partition.Attributes
@@ -354,7 +412,7 @@ func (l *localRun) runFannedGroup(
 			}
 			log.Warn("failed to persist partition hash", "task", taskName, "partition", m.partition.Key, "error", err)
 		}
-		if err := store.UpdateTaskExecutionDescriptorInputs(runID, taskRunID, predOutputsByID, predHashByID, inputHash, args.ResolvedImageDigest, hashInputBlob); err != nil {
+		if err := store.UpdateTaskExecutionDescriptorInputs(runID, taskRunID, predOutputsByID, activePred, inputHash, args.ResolvedImageDigest, hashInputBlob); err != nil {
 			if args.UnresolvedImageIdentity != "" {
 				failIdentity(fmt.Errorf("persist unresolved image execution descriptor: %w", err))
 				return
@@ -375,7 +433,7 @@ func (l *localRun) runFannedGroup(
 		// and there is no downstream group this hit could silently collapse.
 		// If chained fan-out is ever allowed, this invariant breaks and this
 		// site needs the same gate.
-		if cacheCfg.Enabled && hashArgs.UnresolvedImageIdentity == "" {
+		if activeCache.Enabled && activeHash.UnresolvedImageIdentity == "" {
 			if attempt == 1 {
 				if entry, found, err := l.getCacheStore().Get(inputHash); err != nil {
 					log.Warn("cache lookup failed", "task", taskName, "partition", m.partition.Key, "error", err)
@@ -418,7 +476,7 @@ func (l *localRun) runFannedGroup(
 		if taskTimeout > 0 {
 			taskCtx, cancel = context.WithTimeout(ctx, taskTimeout)
 		}
-		result, output, branches, _, metricsCapture, logSnapshot, execErr := l.executeAtom(taskCtx, taskID, taskRunID, attempt, taskTimeout, runner, extra)
+		result, output, branches, _, metricsCapture, logSnapshot, execErr := l.executeAtom(taskCtx, taskID, taskRunID, attempt, taskTimeout, active, extra)
 		cancel()
 		if cause := runlife.CancellationCause(ctx); cause != nil {
 			execErr = cause
@@ -438,7 +496,7 @@ func (l *localRun) runFannedGroup(
 			// the row itself names, so no live-task lookup is needed and a
 			// vanished catalog task can no longer skip validation the run was
 			// registered to perform.
-			if err := run.ValidateTaskOutputSchemaInstance(store, runID, taskID, taskRunID, output, runner.outputSchema, runner.schemaValidation); err != nil {
+			if err := run.ValidateTaskOutputSchemaInstance(store, runID, taskID, taskRunID, output, active.outputSchema, active.schemaValidation); err != nil {
 				execErr = err
 			}
 		}
@@ -517,11 +575,11 @@ func (l *localRun) runFannedGroup(
 
 		// Publish the successful result so a later run of the same partition
 		// set is a hit. Quarantined replays never publish.
-		if cacheCfg.Enabled && hashArgs.UnresolvedImageIdentity == "" && inputHash != "" {
+		if activeCache.Enabled && activeHash.UnresolvedImageIdentity == "" && inputHash != "" {
 			if taskQuarantined {
 				log.Info("quarantined partition skipped cache publication", "task", taskName, "partition", m.partition.Key)
 			} else {
-				expiresAt := cache.EntryExpiry(time.Now(), cacheCfg.TTL, cacheCfg.TTLNever)
+				expiresAt := cache.EntryExpiry(time.Now(), activeCache.TTL, activeCache.TTLNever)
 				if putErr := l.getCacheStore().Put(&cache.Entry{
 					Hash:                inputHash,
 					JobID:               j.id,
@@ -531,7 +589,7 @@ func (l *localRun) runFannedGroup(
 					BranchSelections:    branches,
 					RunID:               runID,
 					TaskRunID:           taskRunID,
-					ResolvedImageDigest: hashArgs.ResolvedImageDigest,
+					ResolvedImageDigest: activeHash.ResolvedImageDigest,
 					HashInputBlob:       hashInputBlob,
 					CreatedAt:           time.Now(),
 					ExpiresAt:           expiresAt,

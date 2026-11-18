@@ -52,9 +52,13 @@ func (s *IntegrationTestSuite) TestReplayRESTEndpointIdempotencyAndSafety() {
 	s.True(thirdRun.Quarantine)
 
 	overrideKey := key + "-override-local"
-	overrideBody := s.postReplay(jobA.ID, runA, &overrideKey, `{"set":{"mode":"what-if"}}`)
-	s.Contains([]int{http.StatusConflict, http.StatusUnprocessableEntity}, overrideBody.status, overrideBody.body)
-	s.Contains(overrideBody.body, "distributed execution mode")
+	override := s.mustPostReplay(jobA.ID, runA, &overrideKey, `{"set":{"mode":"what-if"}}`)
+	s.True(override.Quarantine)
+	overrideRun := s.awaitRun(jobA.ID, override.RunID, runTimeout)
+	s.Equal("succeeded", overrideRun.Status, "local what-if replay failed: %s", overrideRun.Error)
+	s.True(overrideRun.Quarantine)
+	s.Equal("succeeded", s.taskStatusesByName(jobA.ID, overrideRun)["deploy"],
+		"a param override changes identity, so deploy re-executes from the baseline descriptor instead of caching")
 
 	missingBody := s.postReplay(jobA.ID, runA, nil, `{"set":{}}`)
 	s.Equal(http.StatusBadRequest, missingBody.status, missingBody.body)

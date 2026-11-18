@@ -4,9 +4,7 @@ package test
 
 import (
 	"fmt"
-	"net/http"
 	"os"
-	"strings"
 	"time"
 )
 
@@ -14,12 +12,9 @@ import (
 // Quarantined replay of a baseline containing a fan-out group.
 //
 // The scenarios are named TestFanOut* deliberately: the distributed lane's
-// `-run` filter selects `TestIntegrationTestSuite/(…|TestFanOut)`, and replay's
-// re-execution path only exists in distributed mode (the local server refuses a
-// replay that would re-execute with 409 "distributed execution mode"). Naming
-// them for the replay surface alone would leave the executor half of this
-// feature with no coverage at all — which is exactly how fanned replay came to
-// need this change.
+// `-run` filter selects `TestIntegrationTestSuite/(…|TestFanOut)`. Local and
+// distributed execution reconstruct the same recorded group, so the re-exec
+// assertions below run on both lanes.
 // ---------------------------------------------------------------------------
 
 // replayFanOutManifest is a producer → fanned group → fan-in job that is
@@ -146,25 +141,13 @@ func (s *IntegrationTestSuite) TestFanOutReplayReExpandsGroupFromRecordedPartiti
 // partitions would be reproducing a different run than the one under
 // investigation.
 //
-// Lane-dependent by design. Re-execution needs a dispatcher, so the local
-// server refuses it with 409 "distributed execution mode" — and that refusal is
-// itself worth asserting: reaching the dispatch-mode gate proves the fanned
-// baseline was ACCEPTED for replay rather than refused for being fanned.
+// Local and distributed execution share this path: both reconstruct the
+// recorded group from the baseline descriptor and re-execute it in quarantine.
 func (s *IntegrationTestSuite) TestFanOutReplayOverrideReexecutesRecordedGroup() {
 	alias := fmt.Sprintf("fanout-replay-override-%d", time.Now().UnixNano())
 	job, baseline := s.replayFanOutBaseline(alias)
 
 	key := "fanout-replay-override-" + time.Now().Format("150405.000000000")
-	if !distributedLane() {
-		observed := s.postReplay(job.ID, baseline.ID, &key, `{"set":{"mode":"what-if"}}`)
-		s.Require().Contains([]int{http.StatusConflict, http.StatusUnprocessableEntity}, observed.status, observed.body)
-		s.Contains(observed.body, "distributed execution mode",
-			"a fanned baseline must reach the dispatch-mode gate, not a fan-out refusal: %s", observed.body)
-		s.NotContains(strings.ToLower(observed.body), "fan-out group",
-			"the fan-out refusal must no longer fire for a baseline whose producer recorded its list")
-		return
-	}
-
 	replay := s.mustPostReplay(job.ID, baseline.ID, &key, `{"set":{"mode":"what-if"}}`)
 	s.Require().NotEmpty(replay.RunID)
 

@@ -615,29 +615,28 @@ Hard aborts before TaskRun creation:
 
 ## Distributed Parity
 
-Replay quarantine must hold in local and distributed execution.
+Replay quarantine holds in local and distributed execution. `caesium dev` and
+local Docker or Podman do not need Kubernetes.
 
-The local path in `internal/job/job.go` builds `cache.HashInput`, performs
-`cacheStore.Get`, records cache hits/misses, retries tasks, performs
-value-verified short-circuits, and calls `cacheStore.Put` after success. It also
-dispatches callbacks after run completion today.
+A local quarantined replay reconstructs each step from the immutable baseline
+execution descriptor, the same way `internal/worker/runtime_executor.go` does.
+That covers the container spec (env, workdir, mounts, Kubernetes settings), the
+command copied onto the task row, the env-interpolation bit, retry delay, cache
+config, schema, and the DAG's trigger rules and edges. A later `job apply` does
+not change what that replay runs. The run fails closed, with no live-catalog
+execution, when the replay has no task rows, a descriptor is missing or uses an
+unsupported schema version, or a task is not replay safe.
 
-The distributed worker path in `internal/worker/runtime_executor.go` independently
-loads the task spec and run params, rebuilds `cache.HashInput`, calls
-`SetTaskHashWithBlob`, reads cache with `cacheStore.Get`, records cache-hit and
-retry metrics, and calls `storeCacheEntry` -> `cacheStore.Put` after success. That
-means fixing only `internal/job/job.go` is insufficient; a worker could otherwise
-write authoritative cache entries for a replay run.
+Both lanes suppress the same side effects when `TaskRun.Quarantine` is set:
+cache publication, callbacks, lineage, and production cache and retry metrics.
+Secret identity is verified against the baseline and the recorded secret refs
+are not rewritten.
 
-The existing scheduler-to-worker channel is the persisted `TaskRun` row plus
-store-derived predecessor context. `TaskRun` already snapshots cache config,
-schema validation, output schema, image/digest/hash fields, retry attempts, and
-claim/owner fields; the worker reconstructs predecessor hashes/outputs from the
-run store rather than from local scheduler memory. `TaskRun.Quarantine` must ride
-that same durable path. B6 must test both propagation (replay materializes every
-`TaskRun` with `Quarantine=true`) and honor (the worker suppresses cache writes,
-lineage, callbacks/notifications, and production metrics for an already-marked
-task).
+The scheduler-to-worker channel is the persisted `TaskRun` row plus
+store-derived predecessor context. `TaskRun` snapshots cache config, schema
+validation, output schema, image, command, and retry attempts. The worker and
+the local executor both rebuild predecessor hashes and outputs from the run
+store. Replay materializes every `TaskRun` with `Quarantine=true`.
 
 ## Non-Goals & Deferred
 

@@ -505,15 +505,15 @@ func namespaceMatrixRows() map[string]matrixRow {
 				probes = append(probes, fx.settled(probe(n.Name+" run", n.runPath("/replay"), http.StatusAccepted, needEvery(rR, n.Name), needEvery(rV, n.Name)).alias(n.alias()).once().idempotencyKey()))
 			}
 			// Replay of the moved job's old run: viewer where the baseline
-			// ran, runner where the replay runs. A move forces re-execution,
-			// which a local-mode server refuses after the namespace guard and
-			// before anything is written, so this 409 proves admission. The
-			// dispatched replay is TestReplayIntoMovedNamespaceDropsOldFreshnessViews
-			// on the distributed lane.
-			return append(probes, probe("moved job's old run", fx.movedPath("/runs/"+fx.OldRun+"/replay"), http.StatusConflict,
-				needEvery(rR, nsMarketing), needEvery(rV, nsFinance)).alias(fx.MovedDef.Metadata.Alias).idem().idempotencyKey().withCheck(func(_ matrixPrincipal, body string) {
-				fx.s.Contains(body, "replay requires distributed execution mode")
-			}))
+			// ran, runner where the replay runs. A move forces re-execution.
+			// Local mode reconstructs that replay from the baseline descriptor
+			// and accepts it (202). settled waits until marketing is idle, and
+			// once admits a single principal so the quota of one is not spent
+			// twice. The cross-namespace freshness behavior stays
+			// TestReplayIntoMovedNamespaceDropsOldFreshnessViews on the
+			// distributed lane.
+			return append(probes, fx.settled(probe("moved job's old run", fx.movedPath("/runs/"+fx.OldRun+"/replay"), http.StatusAccepted,
+				needEvery(rR, nsMarketing), needEvery(rV, nsFinance)).alias(fx.MovedDef.Metadata.Alias).once().idempotencyKey()))
 		}},
 		"POST /v1/jobs/:id/runs/:id/retry": {auth.RouteClassNamespaced, rR, surfaceCore, func(fx *namespaceMatrixFixture) []matrixProbe {
 			// Retrying a run starts a new one (any outcome), so once per run.
