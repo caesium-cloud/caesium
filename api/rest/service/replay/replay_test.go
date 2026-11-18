@@ -492,7 +492,7 @@ func (f serviceReplayFixture) seedTask(t *testing.T, replaySafe bool, result str
 	t.Helper()
 	atomID := uuid.New()
 	taskID := uuid.New()
-	command := []string{"sh", "-c", "echo deploy"}
+	command := []string{"sh", "-c", "echo deploy ${CAESIUM_PARAM_MODE}"}
 	commandJSON := serviceJSONString(t, command)
 	spec := container.Spec{Env: map[string]string{"STEP": "deploy"}}
 	require.NoError(t, f.db.Create(&models.Atom{

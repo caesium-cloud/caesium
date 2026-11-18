@@ -273,15 +273,17 @@ func (c *Constructor) Prepare(ctx context.Context, req Request) (*PreparedReplay
 	if replayParams == nil {
 		replayParams = make(map[string]string)
 	}
-	paramsChanged := false
 	for k, v := range req.Set {
-		if replayParams[k] != v {
-			paramsChanged = true
-		}
 		replayParams[k] = v
 	}
 
-	plans, err := c.planTasks(ctx, groups, replayParams, paramsChanged || namespaceChanged, namespace)
+	// Param overrides are not a force. cache.HashInput keeps only the run
+	// params a task's hashed fields reference, so an override re-executes the
+	// steps that name it (and dependents, whose predecessor identity changes)
+	// and leaves the rest as cache hits. Forcing every task here would hide
+	// that distinction. A namespace change still forces execution: effective
+	// hashes can alias an equal-output prior from another namespace.
+	plans, err := c.planTasks(ctx, groups, replayParams, namespaceChanged, namespace)
 	if err != nil {
 		if namespaceChanged && errors.Is(err, ErrReplayUnsafe) {
 			return nil, fmt.Errorf("replay: job namespace changed from %q to %q and requires re-execution: %w", models.NamespaceOrDefault(baseline.Namespace), namespace, err)

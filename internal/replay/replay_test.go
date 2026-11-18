@@ -221,7 +221,7 @@ func TestReplayMaterializesDescriptorInsteadOfLiveRows(t *testing.T) {
 			Mounts:  []container.Mount{{Type: container.MountTypeBind, Source: "/baseline/in", Target: "/in", ReadOnly: true}},
 		},
 		image:   "baseline/image@sha256:aaaa",
-		command: []string{"sh", "-c", "echo baseline"},
+		command: []string{"sh", "-c", "echo baseline ${CAESIUM_PARAM_MODE}"},
 	})
 
 	require.NoError(t, f.db.Model(&models.Atom{}).Where("id IN (SELECT atom_id FROM tasks WHERE id = ?)", taskID).
@@ -242,7 +242,7 @@ func TestReplayMaterializesDescriptorInsteadOfLiveRows(t *testing.T) {
 	var replayTask models.TaskRun
 	require.NoError(t, f.db.First(&replayTask, "job_run_id = ? AND task_id = ?", result.Run.ID, taskID).Error)
 	require.Equal(t, "baseline/image@sha256:aaaa", replayTask.Image)
-	require.JSONEq(t, `["sh","-c","echo baseline"]`, replayTask.Command)
+	require.JSONEq(t, `["sh","-c","echo baseline ${CAESIUM_PARAM_MODE}"]`, replayTask.Command)
 	require.True(t, replayTask.Quarantine)
 	require.True(t, replayTask.ReplaySafe)
 
@@ -396,7 +396,7 @@ func TestReplayQuarantinesRunAndTaskRows(t *testing.T) {
 	require.True(t, replayTask.Quarantine)
 }
 
-func TestReplayOverrideRerunsFullDAGNoOverrideCacheHits(t *testing.T) {
+func TestReplayOverrideRerunsOnlyStepsThatReferenceTheParam(t *testing.T) {
 	f := newReplayFixture(t)
 	extractID := f.seedTask(t, seedTaskConfig{
 		name:       "extract",
@@ -404,12 +404,16 @@ func TestReplayOverrideRerunsFullDAGNoOverrideCacheHits(t *testing.T) {
 		result:     "success",
 		output:     map[string]string{"artifact": "one"},
 		position:   0,
+		command:    []string{"sh", "-c", "echo extract"},
+		spec:       container.Spec{Env: map[string]string{"STEP": "extract"}},
 	})
 	loadID := f.seedTask(t, seedTaskConfig{
 		name:       "load",
 		replaySafe: true,
 		result:     "success",
 		position:   1,
+		command:    []string{"sh", "-c", "echo load"},
+		spec:       container.Spec{Env: map[string]string{"MODE": "${CAESIUM_PARAM_MODE}"}},
 		predecessors: []models.TaskExecutionEdgeRef{{
 			TaskID:   extractID,
 			TaskName: "extract",
@@ -435,14 +439,22 @@ func TestReplayOverrideRerunsFullDAGNoOverrideCacheHits(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, withOverrideDispatcher.calls, 1)
 	require.Len(t, withOverride.Decisions, 2)
+	byName := make(map[string]TaskDecision, len(withOverride.Decisions))
 	for _, decision := range withOverride.Decisions {
-		require.False(t, decision.CacheHit, decision.TaskName)
-		require.True(t, decision.Reexecute, decision.TaskName)
+		byName[decision.TaskName] = decision
 	}
+	require.True(t, byName["extract"].CacheHit)
+	require.False(t, byName["extract"].Reexecute)
+	require.False(t, byName["load"].CacheHit)
+	require.True(t, byName["load"].Reexecute)
 
-	var loadTask models.TaskRun
+	var extractTask, loadTask models.TaskRun
+	require.NoError(t, f.db.First(&extractTask, "job_run_id = ? AND task_id = ?", withOverride.Run.ID, extractID).Error)
 	require.NoError(t, f.db.First(&loadTask, "job_run_id = ? AND task_id = ?", withOverride.Run.ID, loadID).Error)
-	require.Equal(t, 1, loadTask.OutstandingPredecessors)
+	require.Equal(t, string(run.TaskStatusCached), extractTask.Status)
+	require.Equal(t, string(run.TaskStatusPending), loadTask.Status)
+	// extract resolved from cache, so load is not waiting on it.
+	require.Equal(t, 0, loadTask.OutstandingPredecessors)
 }
 
 func TestReplayPlansDescriptorDAGTopologicallyWhenYAMLOrderReversed(t *testing.T) {
@@ -633,7 +645,10 @@ func (f replayFixture) seedTask(t *testing.T, cfg seedTaskConfig) uuid.UUID {
 		cfg.image = "alpine:3.23"
 	}
 	if len(cfg.command) == 0 {
-		cfg.command = []string{"sh", "-c", "echo " + cfg.name}
+		// The default command names mode so tests that pass --set mode=...
+		// still re-execute. A step that must stay a cache hit under that
+		// override passes its own command and env with no param reference.
+		cfg.command = []string{"sh", "-c", "echo " + cfg.name + " ${CAESIUM_PARAM_MODE}"}
 	}
 	if cfg.spec.Env == nil {
 		cfg.spec.Env = map[string]string{"STEP": cfg.name}

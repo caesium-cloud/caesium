@@ -69,9 +69,9 @@ type WhyTrigger struct {
 	Type string `json:"type,omitempty"`
 	// Alias is the trigger alias, when set.
 	Alias string `json:"alias,omitempty"`
-	// Params are the run parameters captured at trigger time; these feed into the
-	// HashInput (RunParams), so a changed param is also a possible miss cause and
-	// will appear in the diff under "runParams.<key>".
+	// Params are the run parameters captured at trigger time. A param enters a
+	// task hash only when that task's hashed fields reference it, so a changed
+	// referenced param is a possible miss cause under "runParams.<key>".
 	Params map[string]string `json:"params,omitempty"`
 	// FiredAt is the run's start time.
 	FiredAt time.Time `json:"firedAt"`

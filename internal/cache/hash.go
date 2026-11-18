@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"hash"
 	"maps"
+	"regexp"
 	"slices"
 	"sort"
 	"strings"
@@ -112,7 +113,11 @@ type HashInputBlob struct {
 	KubernetesSecretNamespace string                       `json:"kubernetesSecretNamespace,omitempty"`
 	PredecessorHashes         []string                     `json:"predecessorHashes,omitempty"`
 	PredecessorOutputs        map[string]map[string]string `json:"predecessorOutputs,omitempty"`
-	RunParams                 map[string]string            `json:"runParams,omitempty"`
+	// RunParams is the subset that entered the digest: keys named by
+	// ${CAESIUM_PARAM_*} or $CAESIUM_PARAM_* in a hashed field. Unreferenced
+	// params are omitted so a reader does not attribute a miss to a param the
+	// task did not depend on.
+	RunParams map[string]string `json:"runParams,omitempty"`
 
 	// Chain records the cache chain mode ONLY when it is ChainValues; the
 	// default transitive mode writes nothing, so every blob produced before this
@@ -228,7 +233,7 @@ func (h HashInput) CanonicalJSON(precomputed string) ([]byte, error) {
 		KubernetesSecretNamespace: h.KubernetesSecretNamespace,
 		PredecessorHashes:         sortedCopy(h.PredecessorHashes),
 		PredecessorOutputs:        h.PredecessorOutputs,
-		RunParams:                 h.RunParams,
+		RunParams:                 h.identityRunParams(),
 		Partition:                 h.Partition,
 		PartitionFingerprint:      h.PartitionFingerprint,
 		PartitionAttributes:       h.PartitionAttributes,
@@ -377,7 +382,13 @@ type HashInput struct {
 	KubernetesSecretNamespace string
 	PredecessorHashes         []string
 	PredecessorOutputs        map[string]map[string]string
-	RunParams                 map[string]string
+	// RunParams is the full run-parameter map callers pass in. Compute and
+	// CanonicalJSON keep only keys a hashed field references
+	// (${CAESIUM_PARAM_NAME} or $CAESIUM_PARAM_NAME). Filtering here, rather
+	// than at each construction site, is what keeps live execution and replay
+	// on the same subset. An unreferenced override does not enter the key; a
+	// referenced one is never dropped, including when its value is empty.
+	RunParams map[string]string
 	// Partition is the instance key. Hashed only when non-empty so unfanned
 	// tasks and pre-fan-out hashes stay byte-identical (no CacheVersion bump).
 	Partition string
@@ -570,10 +581,16 @@ func (h HashInput) Compute() string {
 		}
 	}
 
-	// Sorted run params
-	paramKeys := slices.Sorted(maps.Keys(h.RunParams))
-	for _, k := range paramKeys {
-		w(digest, "param:%s=%s\n", k, h.RunParams[k])
+	// Run params the task actually depends on, in sorted-key order. The line
+	// form is unchanged. Keys no hashed field names are omitted: a step that
+	// references nothing keeps a key that does not move when an unrelated
+	// param changes, and that retarget is intentional (no CacheVersion bump —
+	// a bump would also invalidate steps whose referenced set did not change).
+	// Referenced keys stay, so an override is not hidden by dropping RunParams
+	// outright. Live runs and replay both pass the full map and land here.
+	params := h.identityRunParams()
+	for _, k := range slices.Sorted(maps.Keys(params)) {
+		w(digest, "param:%s=%s\n", k, params[k])
 	}
 
 	// Partition identity is folded in as ONE framed record, not as three
@@ -674,4 +691,155 @@ func hashableKubernetes(k *container.KubernetesSpec) *container.KubernetesSpec {
 	out := *k
 	out.QueueName = ""
 	return &out
+}
+
+// paramRefBraced is ${CAESIUM_PARAM_NAME}, the only form
+// jobdefruntime.InterpolateParamRefs expands. Duplicated because internal/cache
+// cannot import internal/jobdef/runtime: that package imports pkg/jobdef, and
+// pkg/jobdef's tests (package jobdef) import internal/cache.
+// TestParamRefBracedPatternMatchesInterpolator pins the two spellings.
+// Shell operators such as ${CAESIUM_PARAM_NAME:-default} stay out of this
+// pattern: the interpolator leaves them as literal env text.
+var paramRefBraced = regexp.MustCompile(`\$\{CAESIUM_PARAM_([A-Za-z_][A-Za-z0-9_]*)\}`)
+
+// paramRefBracedShell matches a shell parameter expansion of an injected
+// CAESIUM_PARAM_* variable in command text, where `sh` expands the braced
+// form the interpolator does not rewrite. The name is the reference,
+// including ${CAESIUM_PARAM_NAME:-default}, ${NAME-default}, ${NAME:+alt},
+// ${NAME#pat}, ${NAME%pat}, ${NAME:offset}, and ${#CAESIUM_PARAM_NAME}.
+// An empty value still selects different text than a non-empty one for
+// `:-`, so the value stays in the key. This is not applied to env values.
+var paramRefBracedShell = regexp.MustCompile(`\$\{#?CAESIUM_PARAM_([A-Za-z_][A-Za-z0-9_]*)`)
+
+// paramRefUnbraced is the shell form of the injected CAESIUM_PARAM_* variable.
+// `$` followed by `{` does not match, so the braced forms are handled above.
+// $CAESIUM_PARAM_NAME:-default is a reference: the shell expands the variable
+// and treats ":-default" as literal text.
+var paramRefUnbraced = regexp.MustCompile(`\$CAESIUM_PARAM_([A-Za-z_][A-Za-z0-9_]*)`)
+
+// identityRunParams is the subset of RunParams folded into the digest and the
+// persisted blob. A reference to a key that is not in the map adds nothing and
+// does not fail: missing-param failure stays in InterpolateParamRefs. Both
+// stored keys that fold to the same name are kept, in the caller's spelling,
+// so a SHA/sha collision cannot disappear from the key.
+func (h HashInput) identityRunParams() map[string]string {
+	if len(h.RunParams) == 0 {
+		return nil
+	}
+	refs := h.referencedParamNames()
+	if len(refs) == 0 {
+		return nil
+	}
+	out := make(map[string]string)
+	for k, v := range h.RunParams {
+		if _, ok := refs[strings.ToUpper(k)]; ok {
+			out[k] = v
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// referencedParamNames is the uppercased set of CAESIUM_PARAM names that appear
+// in fields Compute folds in. RunParams values are not scanned (a param value
+// that itself contains a reference must not pull further keys in). QueueName
+// is not scanned: it is scheduling metadata and is not part of the identity.
+// Predecessor hashes are scanned only in transitive mode, where they enter the
+// digest. Each string is scanned on its own so a token split across two fields
+// cannot be forged into a reference.
+func (h HashInput) referencedParamNames() map[string]struct{} {
+	refs := make(map[string]struct{})
+	note := func(s string) { noteParamRefs(refs, s) }
+	if namespace := h.nonDefaultNamespace(); namespace != "" {
+		note(namespace)
+	}
+	note(h.JobAlias)
+	note(h.TaskName)
+	note(h.Image)
+	note(h.ResolvedImageDigest)
+	note(h.UnresolvedImageIdentity)
+	for _, arg := range h.Command {
+		noteCommandParamRefs(refs, arg)
+	}
+	for k, v := range h.Env {
+		note(k)
+		note(v)
+	}
+	note(h.WorkDir)
+	for _, m := range h.Mounts {
+		note(string(m.Type))
+		note(m.Source)
+		note(m.Target)
+	}
+	for _, m := range h.ResolvedVolumeMounts {
+		note(m.Name)
+		note(string(m.Type))
+		note(m.Source)
+		note(m.Target)
+		note(m.SubPath)
+		note(canonicalJSON(m.Tmpfs))
+		note(canonicalJSON(m.ClaimTemplate))
+		note(canonicalJSON(m.VolumeSource))
+	}
+	if h.Kubernetes.HasIdentityFields() {
+		note(h.Kubernetes.ServiceAccountName)
+		for k, v := range h.Kubernetes.PodAnnotations {
+			note(k)
+			note(v)
+		}
+	}
+	if target := h.kubernetesTarget(); target != nil {
+		note(target.Namespace)
+		note(target.ServiceAccountName)
+	}
+	note(h.KubernetesSecretNamespace)
+	if !h.excludesPredecessorHashes() {
+		for _, ph := range h.PredecessorHashes {
+			note(ph)
+		}
+	}
+	for name, outputs := range h.PredecessorOutputs {
+		note(name)
+		for k, v := range outputs {
+			note(k)
+			note(v)
+		}
+	}
+	note(h.Partition)
+	note(h.PartitionFingerprint)
+	for k, v := range h.PartitionAttributes {
+		note(k)
+		note(v)
+	}
+	return refs
+}
+
+func noteParamRefs(dst map[string]struct{}, s string) {
+	if s == "" || !strings.Contains(s, "CAESIUM_PARAM_") {
+		return
+	}
+	for _, sub := range paramRefBraced.FindAllStringSubmatch(s, -1) {
+		dst[strings.ToUpper(sub[1])] = struct{}{}
+	}
+	for _, sub := range paramRefUnbraced.FindAllStringSubmatch(s, -1) {
+		dst[strings.ToUpper(sub[1])] = struct{}{}
+	}
+}
+
+// noteCommandParamRefs records param references in one command argument.
+// Braced shell operators count here because the executor injects every run
+// param into the container environment and a shell command expands them.
+// Env values stay on noteParamRefs: InterpolateParamRefs leaves
+// ${CAESIUM_PARAM_NAME:-default} as literal text, and the engine does not
+// expand it.
+func noteCommandParamRefs(dst map[string]struct{}, s string) {
+	noteParamRefs(dst, s)
+	if s == "" || !strings.Contains(s, "CAESIUM_PARAM_") {
+		return
+	}
+	for _, sub := range paramRefBracedShell.FindAllStringSubmatch(s, -1) {
+		dst[strings.ToUpper(sub[1])] = struct{}{}
+	}
 }

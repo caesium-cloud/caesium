@@ -41,6 +41,7 @@ steps:
       - sh
       - -c
       - |
+        echo "mode=$CAESIUM_PARAM_MODE"
         echo '##caesium::partitions [{"key":"alpha","fingerprint":"%s"},{"key":"bravo","fingerprint":"%s"},{"key":"charlie","dependsOn":["alpha"]}]'
     next: [process]
   - name: process
@@ -49,6 +50,7 @@ steps:
       - sh
       - -c
       - |
+        echo "mode=$CAESIUM_PARAM_MODE"
         echo "partition=$CAESIUM_PARTITION"
         echo "##caesium::output {\"ROWS\":\"$CAESIUM_PARTITION\"}"
     dependsOn: [list]
@@ -62,6 +64,7 @@ steps:
       - sh
       - -c
       - |
+        echo "mode=$CAESIUM_PARAM_MODE"
         echo "count=$CAESIUM_OUTPUT_PROCESS_PARTITION_COUNT"
     dependsOn: [process]
 `, alias, fingerprintA, fingerprintB)
@@ -134,12 +137,12 @@ func (s *IntegrationTestSuite) TestFanOutReplayReExpandsGroupFromRecordedPartiti
 
 // TestFanOutReplayOverrideReexecutesRecordedGroup drives the re-execution half.
 //
-// A param override changes every identity, so nothing can be served from cache
-// and the whole DAG must actually run in quarantine — producer included. The
-// group it runs is still the RECORDED one: replay never re-expands from the
-// producer it just re-executed, because a replay that discovered its own
-// partitions would be reproducing a different run than the one under
-// investigation.
+// Every step's command references mode, so this override changes every identity
+// and nothing can be served from cache — producer included. A step that did
+// not reference mode would stay a cache hit. The group it runs is still the
+// RECORDED one: replay never re-expands from the producer it just re-executed,
+// because a replay that discovered its own partitions would be reproducing a
+// different run than the one under investigation.
 //
 // Local and distributed execution share this path: both reconstruct the
 // recorded group from the baseline descriptor and re-execute it in quarantine.

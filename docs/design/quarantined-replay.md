@@ -159,14 +159,22 @@ normal runs:
 - cache version
 
 Current source injects every run param as `CAESIUM_PARAM_<KEY>` for every task
-(`internal/job/job.go`, `internal/worker/runtime_executor.go`) and folds the full
-run params map into `HashInput.RunParams` (`internal/cache/hash.go`). Therefore
-v1 must be conservative: a task is "unchanged" only when its full reconstructed
-`HashInput` is byte-identical after overrides and predecessor/effective-hash
-substitution. Do not hide an override from `HashInput` to force selective hits.
-If a future version wants narrower per-step param dependencies, it needs an
-explicit schema/API/test contract; command or script inspection is not a safe
-dependency analysis.
+(`internal/job/job.go`, `internal/worker/runtime_executor.go`). The cache key
+does not fold that whole map. `HashInput.Compute` and `CanonicalJSON` keep only
+the keys a hashed field references, via `${CAESIUM_PARAM_<NAME>}` (the form env
+interpolation expands) or `$CAESIUM_PARAM_<NAME>` (the shell form of the
+injected variable). `${CAESIUM_PARAM_<NAME>:-default}` is not a reference.
+Callers still pass the full map; filtering happens inside the hash so live
+execution and replay cannot diverge. A task is "unchanged" when that
+reconstructed identity matches the baseline after overrides and
+predecessor/effective-hash substitution.
+
+Do not hide an override by dropping `RunParams` from the hash entirely. A
+referenced key is part of the digest, including when its value is empty. A
+reference to a missing param still fails closed in env interpolation; the hash
+itself does not fail. This is not general script inspection: a step that reads
+a param through a file, or through an expansion that does not contain the
+token, does not name that param and will not re-execute for it.
 
 Replay uses this decision procedure per task:
 
@@ -182,27 +190,29 @@ Replay uses this decision procedure per task:
 6. If any required unchanged-task baseline cache/result is absent or expired,
    abort the replay. Do not silently re-execute an "unchanged" task.
 
-### Consequence: any override re-runs the full DAG in v1
+### Consequence: an override re-runs the tasks that reference it
 
-`internal/cache/hash.go` folds the entire global `RunParams` map into every
-task's hash (the sorted `param:<k>=<v>` lines, hash.go ~384-392), and both
-executors inject every run param as `CAESIUM_PARAM_<KEY>` into every task. So any
-`--set` override changes every task's identity:
+`internal/cache/hash.go` folds sorted `param:<k>=<v>` lines for the referenced
+subset only. Both executors still inject every run param as `CAESIUM_PARAM_<KEY>`,
+which is why a command that expands `$CAESIUM_PARAM_<KEY>` is a reference even
+though those injected variables are not themselves hashed as env. Env
+interpolation substitutes `${CAESIUM_PARAM_<KEY>}` before the hash, so an
+env-only reference changes the key through the substituted value.
 
-- v1 replay re-executes the FULL DAG whenever any param is overridden — the
-  cache-hit path (step 4) is reached only for a no-override replay (or an override
-  re-resolving to byte-identical params, e.g. `--set k=<existing value>`). There
-  is no "re-run only the affected task while the rest cache-hit" under wholesale
-  `RunParams` hashing.
-- Selective per-task re-run requires a future per-step param-dependency contract
-  (an explicit schema/API declaring which params each step consumes, so unaffected
-  steps keep their hash). That is out of v1 scope. v1 must NOT hide an override
-  from `HashInput` to manufacture selective hits — command/script inspection is
-  not a safe dependency analysis and a hidden override is a false-hit bug.
+- A `--set` override re-executes a task when one of its hashed fields names
+  that param, and re-executes dependents because their predecessor identity
+  changes (or because a pending predecessor cannot be skipped). A task that
+  does not reference the overridden param, and whose predecessors are
+  unchanged, stays a cache hit. `--set k=<existing value>` is still a no-op.
+- `Constructor.Prepare` does not force every task when params differ. A
+  namespace change still forces execution, independently of hash equality.
+- Dropping `RunParams` from the hash entirely would hide an override on a
+  command that only names the param as `$CAESIUM_PARAM_*` or a leftover
+  `${CAESIUM_PARAM_*}` token. That remains a false-hit bug.
 
-This is why the plan's Stream B intro and B6 acceptance assertion are scoped to
-the honest v1 behavior: a no-override replay cache-hits all unchanged tasks; any
-`--set` param override re-runs the full DAG.
+A no-override replay still cache-hits every unchanged task. The completed
+data-plane-memory-ii plan records the earlier wholesale-hash behavior; this
+section is the current contract.
 
 ## `--diff` Contract
 

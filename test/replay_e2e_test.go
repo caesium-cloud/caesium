@@ -111,6 +111,51 @@ func (s *IntegrationTestSuite) TestReplayRESTEndpointIdempotencyAndSafety() {
 	s.Len(s.fetchRuns(jobUnsafe.ID), 1, "unsafe replay refusal must not materialize a replay run")
 }
 
+func (s *IntegrationTestSuite) TestReplayRESTSelectiveParamOverride() {
+	alias := fmt.Sprintf("e2e-replay-selective-%d", time.Now().UnixNano())
+	dir := s.writeJobManifest(fmt.Sprintf(`apiVersion: v1
+kind: Job
+metadata:
+  alias: %s
+  replaySafe: true
+  cache:
+    ttl: "1h"
+trigger: { type: cron, configuration: { cron: "0 2 * * *" } }
+steps:
+  - name: extract
+    image: alpine:3.23
+    command: ["sh","-c","echo extract"]
+    next: [load]
+  - name: load
+    image: alpine:3.23
+    env:
+      MODE: "${CAESIUM_PARAM_MODE}"
+    command: ["sh","-c","echo load"]
+    dependsOn: [extract]
+    next: [publish]
+  - name: publish
+    image: alpine:3.23
+    command: ["sh","-c","echo publish"]
+    dependsOn: [load]
+`, alias))
+	defer os.RemoveAll(dir)
+	s.runCLI("job", "apply", "--path", dir, "--server", s.caesiumURL)
+	job := s.requireJobByAlias(alias)
+	s.Require().NotNil(job)
+
+	baselineID := s.triggerRunWithParams(job.ID, map[string]string{"mode": "baseline"})
+	s.Require().Equal("succeeded", s.awaitRun(job.ID, baselineID, runTimeout).Status)
+
+	key := "replay-selective-" + time.Now().Format("150405.000000000")
+	replay := s.mustPostReplay(job.ID, baselineID, &key, `{"set":{"mode":"what-if"}}`)
+	replayRun := s.awaitRun(job.ID, replay.RunID, runTimeout)
+	s.Require().Equal("succeeded", replayRun.Status, "selective replay failed: %s", replayRun.Error)
+	statuses := s.taskStatusesByName(job.ID, replayRun)
+	s.Equal("cached", statuses["extract"], "a step that does not reference the overridden param stays a cache hit: %v", statuses)
+	s.Equal("succeeded", statuses["load"], "the step that interpolates the overridden param re-executes: %v", statuses)
+	s.Equal("succeeded", statuses["publish"], "a dependent re-executes because its predecessor identity changed: %v", statuses)
+}
+
 func (s *IntegrationTestSuite) TestReplayRESTEndpointConcurrentIdempotency() {
 	alias := fmt.Sprintf("e2e-replay-concurrent-%d", time.Now().UnixNano())
 	dir := s.writeJobManifest(replayManifest(alias, true))
@@ -277,6 +322,6 @@ trigger: { type: cron, configuration: { cron: "0 2 * * *" } }
 steps:
   - name: deploy
     image: alpine:3.23
-    command: ["sh","-c","echo deploy"]
+    command: ["sh","-c","echo deploy ${CAESIUM_PARAM_MODE}"]
 `, alias, replaySafeLine)
 }

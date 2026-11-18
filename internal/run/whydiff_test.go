@@ -149,11 +149,13 @@ func TestDiff_SecretRefShownVerbatim(t *testing.T) {
 func TestDiff_AddedAndRemovedFields(t *testing.T) {
 	base := cache.HashInput{
 		TaskName:  "t",
+		Command:   []string{"echo", "${CAESIUM_PARAM_REGION}", "${CAESIUM_PARAM_TIER}"},
 		Env:       map[string]string{"KEEP": "x", "GONE": "y"},
 		RunParams: map[string]string{"region": "us"},
 	}
 	subject := cache.HashInput{
 		TaskName:  "t",
+		Command:   []string{"echo", "${CAESIUM_PARAM_REGION}", "${CAESIUM_PARAM_TIER}"},
 		Env:       map[string]string{"KEEP": "x", "NEW": "z"},
 		RunParams: map[string]string{"region": "us", "tier": "gold"},
 	}

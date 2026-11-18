@@ -539,12 +539,13 @@ design:
       inputs). Wire the higher-privilege **override capability** check in the
       backtest controller (code overrides require it; the params-only path is
       unchanged) behind a `CAESIUM_BACKTEST_OVERRIDE_API_KEY` (or capability) env,
-      with bounded override sizes. Param `--set` overrides reuse the existing
-      mechanism unchanged, with the known v1 cost: `RunParams` is hashed wholesale
-      into every task, so any param override re-runs the **full DAG** of every
-      baseline run — the cost is printed before dispatch.
-      **Refresh (2026-09-05):** the full-DAG cost is `Constructor.Prepare`'s
-      `paramsChanged` → `planTasks(..., forceReexecute=true)`; a `--path` delta
+      with bounded override sizes. Param `--set` overrides reuse the replay hash:
+      a task re-executes when its hashed fields reference the overridden param,
+      and dependents re-execute with it. Tasks that reference none of the
+      overridden params stay cache hits. The cost is printed before dispatch.
+      **Refresh (2026-11-18):** `Constructor.Prepare` no longer ORs a
+      `paramsChanged` flag into `planTasks`'s force bit. A namespace change
+      still forces execution. A `--path` delta
       that changes a step's `fanOut` block or a fan-out producer's image/command
       is a structural change under rules 2–3 and is rejected with the same
       guidance. Under `CAESIUM_AUTH_MODE=api-key` prefer a capability on the API

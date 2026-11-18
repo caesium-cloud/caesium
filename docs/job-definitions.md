@@ -252,7 +252,7 @@ Caesium's causal tooling (`why`, logs, receipts, `run diff`, quarantined `replay
 
 - **`caesium run diff <left-run> <right-run> --job-id <job-id>`** aligns fanned instances by partition **value**, never index, so a producer that reorders its list doesn't spuriously report every partition as both added and removed. The table gains a `PARTITION` column whenever any compared row has one, `Partitions added:`/`Partitions removed:` lines summarize the headline change, and each instance's field-change block is headed `process-file[bravo] changes`. `--json` carries `partition` on each task row plus top-level `partitionsAdded`/`partitionsRemoved`.
 
-- **`caesium run replay`** re-executes changed steps from the immutable baseline execution descriptor in both local Docker or Podman mode and distributed mode. Quarantine suppresses cache publication, callbacks, lineage, and production metrics on either executor. It replays a fanned baseline by **re-expanding the group from the partition list recorded on its producer's execution descriptor** — never by re-running the producer to rediscover it, which would reproduce a different run than the one under investigation. The replayed group comes back at the recorded width with the recorded keys, fingerprints, attributes and `dependsOn` ordering, so each instance keeps its own per-partition identity and can resolve from its own cache entry. Under a param override every instance re-executes in quarantine, in the recorded order, and the producer re-runs but its freshly emitted list is ignored. Replay still refuses (`409`) the cases it genuinely cannot reconstruct: a baseline recorded before descriptors captured partition lists, a recorded list that disagrees with the instances the baseline materialized, or a reused producer cache entry whose own recorded list disagrees with the baseline's. The CLI's error names the offending step and points at `caesium run partitions <run-id> --task <name>` to inspect the group.
+- **`caesium run replay`** re-executes changed steps from the immutable baseline execution descriptor in both local Docker or Podman mode and distributed mode. Quarantine suppresses cache publication, callbacks, lineage, and production metrics on either executor. It replays a fanned baseline by **re-expanding the group from the partition list recorded on its producer's execution descriptor** — never by re-running the producer to rediscover it, which would reproduce a different run than the one under investigation. The replayed group comes back at the recorded width with the recorded keys, fingerprints, attributes and `dependsOn` ordering, so each instance keeps its own per-partition identity and can resolve from its own cache entry. A param override re-executes an instance when that instance's hashed fields reference the overridden parameter, or when a predecessor it depends on re-executes. An instance that references none of the overridden parameters, and whose predecessors are unchanged, stays a cache hit. The producer re-runs when it references the override; its freshly emitted list is ignored either way. Replay still refuses (`409`) the cases it genuinely cannot reconstruct: a baseline recorded before descriptors captured partition lists, a recorded list that disagrees with the instances the baseline materialized, or a reused producer cache entry whose own recorded list disagrees with the baseline's. The CLI's error names the offending step and points at `caesium run partitions <run-id> --task <name>` to inspect the group.
 
 See `docs/examples/dynamic-fanout.job.yaml` for a runnable three-step example — a producer, a fanned step whose partitions carry fingerprints and one `dependsOn` edge, and a fan-in publish step — and the [generated schema reference](job-schema-reference.md#fan-out) for the authoritative field table.
 
@@ -682,9 +682,9 @@ Workload identity is also bring-your-own. For Kubernetes, create and secure the 
 
 ## Caching
 
-Caesium supports Smart Incremental Execution through step-level caching. When enabled, a completed task's output is stored and reused on subsequent runs if the task's inputs have not changed. Cache entries are keyed by a SHA-256 hash of the task's identity: image, command, environment variables (after `${CAESIUM_PARAM_*}` substitution), mounts, predecessor outputs, run parameters, and cache version.
+Caesium supports Smart Incremental Execution through step-level caching. When enabled, a completed task's output is stored and reused on subsequent runs if the task's inputs have not changed. Cache entries are keyed by a SHA-256 hash of the task's identity: image, command, environment variables (after `${CAESIUM_PARAM_*}` substitution), mounts, predecessor outputs, the run parameters that identity references, and cache version. A run parameter enters a task's key only when a hashed field contains `${CAESIUM_PARAM_<NAME>}` or the shell form `$CAESIUM_PARAM_<NAME>`. `${CAESIUM_PARAM_<NAME>:-default}` is not a reference. Live runs and replay hash that same subset, so a replay cannot hit a live entry that was keyed differently. A parameter no field references does not move that task's key.
 
-For cron-triggered jobs, Caesium automatically injects `logical_date` into run parameters on every scheduled fire. That means a run scheduled for `2026-03-31T06:00:00Z` and the next run scheduled for `2026-04-01T06:00:00Z` do not share the same cache key unless you intentionally normalize that date yourself. In practice, scheduled runs cache within the same logical slot, while cross-day or cross-window reuse requires an explicit job design.
+For cron-triggered jobs, Caesium automatically injects `logical_date` into run parameters on every scheduled fire. A step whose command or env references `${CAESIUM_PARAM_LOGICAL_DATE}` or `$CAESIUM_PARAM_LOGICAL_DATE` does not share a cache key between a run scheduled for `2026-03-31T06:00:00Z` and the next run scheduled for `2026-04-01T06:00:00Z`. A step that does not reference `logical_date` can still hit across those slots. Scheduled runs of a referencing step cache within the same logical slot; cross-day reuse of that step requires an explicit job design.
 
 ### Enabling Cache
 
@@ -762,18 +762,18 @@ Caching is appropriate for idempotent, side-effect-free tasks such as data trans
 
 ### Cache Behavior
 
-- A cache hit requires the full task identity to match, including run parameters, upstream outputs, mounts, volumes, and Kubernetes identity settings.
+- A cache hit requires the task identity to match, including the run parameters that task references, upstream outputs, mounts, volumes, and Kubernetes identity settings.
 - Shared-volume file contents are not content-addressed by Caesium. If a downstream cache must change when a file changes, emit the file path and a content hash as normal `##caesium::output` values.
-- Scheduled cron runs now always include `logical_date`, so the scheduler naturally invalidates cache across distinct cron slots.
-- Manual reruns hit cache only when they use the same effective parameters as the original run.
-- Backfills also carry `logical_date`, so each replayed slot gets its own cache namespace.
+- Scheduled cron runs inject `logical_date`. That parameter invalidates cache across distinct cron slots for steps that reference it.
+- Manual reruns hit cache only when they use the same effective parameters as the original run, for steps that reference those parameters.
+- Backfills also carry `logical_date`, so each replayed slot gets its own cache key on steps that reference it.
 - Expired entries are ignored even if the hash still matches. `ttl: never` writes a null expiry, so the entry is valid until it is invalidated or pruned.
 - Bumping `cache.version` forces a miss without changing the rest of the manifest.
 - Under `chain: values` a predecessor's identity hash is not part of the key, so a predecessor re-run with unchanged outputs is a hit; a changed predecessor **output** is still a miss. The chain mode itself is part of the identity, so switching a step between `transitive` and `values` invalidates its existing entries.
 
 ### Best Practices
 
-- Model the business date explicitly. For scheduled work, read `CAESIUM_PARAM_LOGICAL_DATE` instead of relying on wall-clock time inside the script.
+- Model the business date explicitly. For scheduled work, read `CAESIUM_PARAM_LOGICAL_DATE` instead of relying on wall-clock time inside the script. Referencing it — `${CAESIUM_PARAM_LOGICAL_DATE}` in env, or `$CAESIUM_PARAM_LOGICAL_DATE` in the command — is what puts the slot in that step's cache key.
 - Cache only deterministic steps whose outputs are fully explained by declared inputs, params, env, and upstream outputs.
 - Keep side effects out of cached steps. Notifications, webhooks, external writes, and mutable API mutations should usually set `cache: false`.
 - Use `cache.version` when you change step semantics but want a clean invalidation boundary.
