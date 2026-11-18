@@ -92,11 +92,21 @@ test("operator can launch cache-hit replay and sees typed refusals inline", asyn
   await page.getByTestId("replay-set-key-0").fill("mode");
   await page.getByTestId("replay-set-value-0").fill("what-if");
   await page.getByTestId("replay-submit").click();
-  await expect(page.getByTestId("replay-inline-error")).toContainText(
-    "This replay re-executes tasks, which requires distributed execution mode.",
-    { timeout: 30_000 },
-  );
-  await expect(page.getByTestId("replay-result")).toHaveCount(0);
+  const overrideResult = page.getByTestId("replay-result");
+  await expect(overrideResult).toContainText("Quarantine", { timeout: 30_000 });
+  await expect(page.getByTestId("replay-result-status")).toContainText("succeeded");
+  const overrideRunId = (await page.getByTestId("replay-result-run-id").innerText()).trim();
+  expect(overrideRunId).not.toBe(replayRunId);
+  await expect.poll(async () => {
+    const replayRun = await getRun(request, job.id, overrideRunId);
+    return `${replayRun.status}:${String(replayRun.quarantine)}`;
+  }, {
+    timeout: 30_000,
+    intervals: [500, 1_000, 2_000],
+  }).toBe("succeeded:true");
+  const runsAfterOverride = await listRuns(request, job.id);
+  expect(runsAfterOverride.map((run) => run.id)).toContain(baseline.id);
+  expect(runsAfterOverride.map((run) => run.id)).not.toContain(overrideRunId);
 
   const unsafeAlias = `replay-ui-unsafe-${Date.now().toString(36)}`;
   await applyDefinitions(request, buildReplayDefinition(unsafeAlias, false, "unsafe-step"));
