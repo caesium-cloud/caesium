@@ -1963,6 +1963,7 @@ PY
     TestNamespaceQuotaRefusesRetryAtCap
     TestNamespaceQuotaBackfillWaitsAndCompletes
     TestJobQueueCancelEndpointDeletesUnclaimedRowOnly
+    TestOperatorCancelStopsOneRunAndLeavesAnother
     TestJobApplyRejectsNonCanonicalAlias
     TestSecretScopeMarketingAllowList
     TestWhyExplainsHoldSkippedRun
