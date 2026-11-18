@@ -131,9 +131,10 @@ func TestCompute_DifferentEnv(t *testing.T) {
 }
 
 // TestCompute_SubstitutedParamEnvIsHashed is the #363 cache-identity contract:
-// ${CAESIUM_PARAM_*} must be folded AFTER substitution. Hashing the token would
-// let two runs that only differ in the referenced param share a key on Env
-// (RunParams still differ today, but Env is what the container actually saw).
+// ${CAESIUM_PARAM_*} in env is folded AFTER substitution. Hashing the token
+// would let two runs that only differ in the referenced param share a key.
+// Once the token is gone, the substituted env value is the dependency; the
+// param line is not also required for that env-only reference.
 func TestCompute_SubstitutedParamEnvIsHashed(t *testing.T) {
 	token := HashInput{Env: map[string]string{"GIT_REF": "${CAESIUM_PARAM_SHA}"}}
 	aaa := HashInput{Env: map[string]string{"GIT_REF": "aaa"}}
@@ -172,10 +173,106 @@ func TestCompute_DifferentPredecessorHashes(t *testing.T) {
 }
 
 func TestCompute_DifferentRunParams(t *testing.T) {
+	// baseInput's param1 is unreferenced. Changing it must not move the key:
+	// steps that name no param retarget off the wholesale fold, and that cut
+	// is intentional.
 	a := baseInput()
 	b := baseInput()
 	b.RunParams = map[string]string{"param1": "changed"}
-	assert.NotEqual(t, a.Compute(), b.Compute())
+	assert.Equal(t, a.Compute(), b.Compute(), "an unreferenced param must not change the key")
+
+	referenced := baseInput()
+	referenced.Command = []string{"echo", "${CAESIUM_PARAM_PARAM1}"}
+	changed := referenced
+	changed.RunParams = map[string]string{"param1": "changed"}
+	assert.NotEqual(t, referenced.Compute(), changed.Compute(), "a referenced param value is part of the key")
+
+	extra := referenced
+	extra.RunParams = map[string]string{"param1": "value1", "unused": "nope"}
+	assert.Equal(t, referenced.Compute(), extra.Compute(), "an unrelated param must not change the key of a step that names another")
+
+	reordered := referenced
+	reordered.RunParams = map[string]string{"unused": "nope", "param1": "value1"}
+	assert.Equal(t, extra.Compute(), reordered.Compute(), "param key order must not affect the hash")
+
+	// Case-insensitive: the stored key "sha" satisfies ${CAESIUM_PARAM_SHA}.
+	shaA := HashInput{Command: []string{"echo", "${CAESIUM_PARAM_SHA}"}, RunParams: map[string]string{"sha": "abc"}}
+	shaB := HashInput{Command: []string{"echo", "${CAESIUM_PARAM_SHA}"}, RunParams: map[string]string{"sha": "def"}}
+	assert.NotEqual(t, shaA.Compute(), shaB.Compute())
+	both := HashInput{Command: []string{"echo", "${CAESIUM_PARAM_SHA}"}, RunParams: map[string]string{"SHA": "abc", "sha": "abc"}}
+	only := HashInput{Command: []string{"echo", "${CAESIUM_PARAM_SHA}"}, RunParams: map[string]string{"sha": "abc"}}
+	assert.NotEqual(t, both.Compute(), only.Compute(), "colliding SHA and sha keys are both included")
+
+	bare := HashInput{Command: []string{"sh", "-c", "echo param=$CAESIUM_PARAM_ENV"}, RunParams: map[string]string{"env": "staging"}}
+	bareChanged := bare
+	bareChanged.RunParams = map[string]string{"env": "production"}
+	assert.NotEqual(t, bare.Compute(), bareChanged.Compute(), "an unbraced $CAESIUM_PARAM_* command reference must not hide the override")
+
+	// ${CAESIUM_PARAM_SHA:-default} matches neither pattern, matching the
+	// interpolator, which leaves that token unchanged.
+	withDefault := HashInput{Command: []string{"echo", "${CAESIUM_PARAM_SHA:-default}"}, RunParams: map[string]string{"SHA": "abc"}}
+	withDefaultChanged := withDefault
+	withDefaultChanged.RunParams = map[string]string{"SHA": "xyz"}
+	assert.Equal(t, withDefault.Compute(), withDefaultChanged.Compute())
+
+	// $CAESIUM_PARAM_SHA:-default is the variable plus literal text.
+	bareDefault := HashInput{Command: []string{"echo", "$CAESIUM_PARAM_SHA:-default"}, RunParams: map[string]string{"SHA": "abc"}}
+	bareDefaultChanged := bareDefault
+	bareDefaultChanged.RunParams = map[string]string{"SHA": "xyz"}
+	assert.NotEqual(t, bareDefault.Compute(), bareDefaultChanged.Compute())
+
+	missing := HashInput{Command: []string{"echo", "${CAESIUM_PARAM_SHA}"}}
+	missingOther := missing
+	missingOther.RunParams = map[string]string{"other": "x"}
+	assert.Equal(t, missing.Compute(), missingOther.Compute(), "a reference to a missing param adds no line and does not fail")
+
+	empty := HashInput{Command: []string{"echo", "${CAESIUM_PARAM_SHA}"}, RunParams: map[string]string{"SHA": ""}}
+	nonEmpty := HashInput{Command: []string{"echo", "${CAESIUM_PARAM_SHA}"}, RunParams: map[string]string{"SHA": "x"}}
+	assert.NotEqual(t, empty.Compute(), nonEmpty.Compute(), "an empty referenced value is still part of the key")
+
+	blobInput := HashInput{
+		Command:   []string{"echo", "${CAESIUM_PARAM_SHA}"},
+		RunParams: map[string]string{"sha": "abc", "unused": "no"},
+	}
+	blob, err := blobInput.CanonicalJSON(blobInput.Compute())
+	require.NoError(t, err)
+	assert.Equal(t, map[string]string{"sha": "abc"}, unmarshalBlob(t, blob).RunParams)
+
+	// QueueName is scheduling metadata. A token there is not a dependency.
+	queued := HashInput{
+		Kubernetes: &container.KubernetesSpec{QueueName: "${CAESIUM_PARAM_SHA}"},
+		RunParams:  map[string]string{"SHA": "abc"},
+	}
+	queuedChanged := queued
+	queuedChanged.RunParams = map[string]string{"SHA": "def"}
+	assert.Equal(t, queued.Compute(), queuedChanged.Compute())
+
+	// A leftover env token (legacy descriptors, interpolation off) still names
+	// the param, so the value stays in the key after the token itself is hashed.
+	legacy := HashInput{Env: map[string]string{"GIT_REF": "${CAESIUM_PARAM_SHA}"}, RunParams: map[string]string{"sha": "abc"}}
+	legacyChanged := legacy
+	legacyChanged.RunParams = map[string]string{"sha": "def"}
+	assert.NotEqual(t, legacy.Compute(), legacyChanged.Compute())
+
+	// Predecessor hashes enter the digest only in transitive mode.
+	values := HashInput{
+		Chain:             ChainValues,
+		PredecessorHashes: []string{"$CAESIUM_PARAM_SHA"},
+		RunParams:         map[string]string{"SHA": "abc"},
+	}
+	valuesChanged := values
+	valuesChanged.RunParams = map[string]string{"SHA": "zzz"}
+	assert.Equal(t, values.Compute(), valuesChanged.Compute())
+	transitive := values
+	transitive.Chain = ""
+	transitiveChanged := transitive
+	transitiveChanged.RunParams = map[string]string{"SHA": "zzz"}
+	assert.NotEqual(t, transitive.Compute(), transitiveChanged.Compute())
+}
+
+func TestParamRefBracedPatternMatchesInterpolator(t *testing.T) {
+	assert.Equal(t, `\$\{CAESIUM_PARAM_([A-Za-z_][A-Za-z0-9_]*)\}`, paramRefBraced.String())
+	assert.Equal(t, `\$CAESIUM_PARAM_([A-Za-z_][A-Za-z0-9_]*)`, paramRefUnbraced.String())
 }
 
 func TestCompute_DifferentCacheVersion(t *testing.T) {
@@ -796,10 +893,12 @@ func TestCanonicalJSON_KueueQueueOnlyOmitsKubernetes(t *testing.T) {
 	assert.Nil(t, blob.Kubernetes, "a queue-only KubernetesSpec must not appear in the blob")
 }
 
-// Frozen 2026-08-26 against the pre-partition HashInput of baseInput().
-// omit-when-empty partition fields must not change this digest, and
-// CacheVersion is unchanged.
-const goldenStringFormHash = "5d6290009f017f6307aa5e20a383b88b81c7197322018b7c148f45d65bb95007"
+// Retargeted 2026-11-18 when unreferenced run params stopped entering the key
+// (issue 399). baseInput's param1 is unreferenced, so this digest no longer
+// carries param:param1=value1. CacheVersion stays 1: a bump would also
+// invalidate steps whose referenced param set did not change. omit-when-empty
+// partition fields must not move this digest.
+const goldenStringFormHash = "3969c7a38b435842329b6a9899a5f5f0763204126d701b5d690b451f483481f4"
 
 func TestCompute_StringFormPartitionKeepsLegacyHash(t *testing.T) {
 	legacy := baseInput()
@@ -1220,12 +1319,11 @@ func TestCompute_ValuesChainFramingStillDeterministic(t *testing.T) {
 	}
 }
 
-// Frozen 2026-08-28 against the values-mode framing of baseInput() (greptile
-// 3881714384). Values mode ships in this release, so unlike the transitive
-// golden this digest pins a NEW encoding rather than preserving an old one — but
-// from here on it is the compatibility contract for every `chain: values` cache
-// entry, and any change to the values-mode fold needs a CacheVersion bump.
-const goldenValuesChainHash = "76215b46b4601fe23eb95294e8ce99f25f9168ee2e9430299328d5a1a9fbd9e3"
+// Retargeted 2026-11-18 with goldenStringFormHash: baseInput's unreferenced
+// param1 left the values-mode key as well. The framing itself is unchanged.
+// Further changes to that framing still need a CacheVersion bump; dropping
+// unreferenced params does not, for the same reason as the transitive golden.
+const goldenValuesChainHash = "48af9f69fc1b00ddf1205a5d2789d9d668db327c3b0358d662f74d29ab1337ec"
 
 func TestCompute_GoldenValuesChainFraming(t *testing.T) {
 	in := baseInput()

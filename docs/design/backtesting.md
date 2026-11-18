@@ -174,11 +174,11 @@ Rules:
   override set — the API never trusts a whole jobdef. Structural changes (steps
   added/removed, edges changed) are **rejected** toward `caesium job diff` +
   `dev --once`: a new step has no recorded baseline inputs.
-- **Param overrides (`--set`)** reuse the existing mechanism unchanged, with its
-  known v1 cost: `RunParams` is hashed wholesale into every task, so any param
-  override re-runs the **full DAG** of every baseline run
-  (`planTasks(..., forceReexecute=true)`, replay.go:186-190/443). The CLI prints
-  this cost difference before dispatch.
+- **Param overrides (`--set`)** reuse the replay hash. A task re-executes when
+  its hashed fields reference the overridden param (`${CAESIUM_PARAM_*}` or
+  `$CAESIUM_PARAM_*`); dependents re-execute because that predecessor's
+  identity changes. A task that references none of the overridden params stays
+  a cache hit. `Prepare` does not force the whole DAG on a param change.
 
 **New safety implication:** shipped replay executes code that already ran in
 production once; `replaySafe` attested that code. A backtest executes
@@ -225,8 +225,10 @@ DAG = never".
   41 cache-hit` above); `caesium backtest --dry-run` prints the full plan
   *without dispatching anything*, so the PR Action can post cost before anyone
   approves execution.
-- **Param override:** full-DAG per run (wholesale `RunParams` hashing, above).
-  Honest and loud.
+- **Param override:** per run, the tasks that reference the overridden param
+  and their dependents. Upstream tasks that do not reference it stay cache
+  hits. The report should print that split the same way it prints an
+  image-override split.
 - **Retention bounds backtest depth.** Verified reality: `JobRun`/`TaskRun` rows
   (with their descriptors and outputs) are **not pruned today** — no run pruner
   exists. But `TaskCache` entries expire (`CacheExpiresAt` +

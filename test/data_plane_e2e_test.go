@@ -83,7 +83,7 @@ trigger: { type: cron, configuration: { cron: "0 2 * * *" } }
 steps:
   - name: produce
     image: alpine:3.23
-    command: ["sh","-c","echo '##caesium::output {\"rows\": \"100\"}'"]
+    command: ["sh","-c","echo scenario=$CAESIUM_PARAM_SCENARIO; echo '##caesium::output {\"rows\": \"100\"}'"]
 `, alias)
 	dir := s.writeJobManifest(manifest)
 	defer os.RemoveAll(dir)

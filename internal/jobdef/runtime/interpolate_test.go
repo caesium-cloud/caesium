@@ -8,6 +8,10 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestParamRefPatternIsTheCacheIdentityForm(t *testing.T) {
+	assert.Equal(t, `\$\{CAESIUM_PARAM_([A-Za-z_][A-Za-z0-9_]*)\}`, paramRefPattern.String())
+}
+
 func TestInterpolateParamRefs_SubstitutesBracedForm(t *testing.T) {
 	got, err := InterpolateParamRefs(map[string]string{
 		"GIT_REF": "${CAESIUM_PARAM_SHA}",

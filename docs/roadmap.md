@@ -260,7 +260,7 @@ Plans run in this order; each is a normal `exec-plan-wave` target with its own s
 | 4 | The time loop *(optional tail)* — window scheduling re-cut to P0 over the shared stats substrate; cost/carbon signals parked | time | [`window-scheduling.md`](exec-plans/active/window-scheduling.md) |
 | ✦ | Tell it — README rewritten around the loop, strategy doc refreshed, onboarding tour, `v0.2.0` | narrative | drafted as `exec-plans/active/tell-it.md` when Plan 3 enters its final wave |
 
-Plan 4 runs only if the arc still has momentum after Plan 3 and is explicitly not an arc gate. The arc's § Parked records what was set aside so it does not rot inside archived plans: §2.2 task templates and §2.3 SLA management (above), window-scheduling P1/P2 signal sources, the `park` run disposition, per-partition freshness watermarks, and selective per-task re-run for quarantined replay.
+Plan 4 runs only if the arc still has momentum after Plan 3 and is explicitly not an arc gate. The arc's § Parked records what was set aside so it does not rot inside archived plans: §2.2 task templates and §2.3 SLA management (above), window-scheduling P1/P2 signal sources, the `park` run disposition, and per-partition freshness watermarks. Selective per-task re-run for quarantined replay shipped with the cache key: a task hashes only the run params its fields reference.
 
 ---
 

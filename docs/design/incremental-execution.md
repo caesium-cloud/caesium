@@ -40,12 +40,12 @@ TaskIdentityHash = SHA-256(
     job_alias, task_name, image, command, env, workdir, mounts,
     predecessor_hashes,       # sorted; transitive upstream invalidation
     predecessor_outputs,      # sorted by step, then by key
-    run_params,               # sorted CAESIUM_PARAM_* values
+    run_params,               # sorted; only params a hashed field references
     cache_version,            # user-settable, forces invalidation
 )
 ```
 
-Key decisions: **image tags are literal** — `etl:latest` re-hashes only when the tag string changes; use digest refs (`etl@sha256:…`) for content-addressed correctness (resolving digests at hash time would add network latency to every check). **Predecessor hashes are included**, so any upstream change transitively invalidates downstream even if the upstream output is identical. **Run params are included** (`date=2026-03-20` ≠ `date=2026-03-21`). **Only step-defined env** is hashed; system vars (`CAESIUM_RUN_ID`, etc.) are excluded.
+Key decisions: **image tags are literal** — `etl:latest` re-hashes only when the tag string changes; use digest refs (`etl@sha256:…`) for content-addressed correctness (resolving digests at hash time would add network latency to every check). **Predecessor hashes are included**, so any upstream change transitively invalidates downstream even if the upstream output is identical. **Run params a task references are included** (`date=2026-03-20` ≠ `date=2026-03-21` when the task's command, env, or another hashed field names `${CAESIUM_PARAM_DATE}` or `$CAESIUM_PARAM_DATE`). A param no field references does not enter that task's key. **Only step-defined env** is hashed; system vars (`CAESIUM_RUN_ID`, etc.) are excluded. The injected `CAESIUM_PARAM_*` variables themselves are not hashed as env; a command that expands `$CAESIUM_PARAM_*` still names the param, and the value is folded in as a `param:` line.
 
 ### Chain mode (`cache.chain`)
 

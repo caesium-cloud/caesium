@@ -384,6 +384,9 @@ func TestFanOutHashInputMatchesUnfannedPath(t *testing.T) {
 	f.engine.logsByName[f.producer.String()] += "##caesium::output {\"k\":\"v\"}\n"
 	opts := withTestDeps(f.store, defaultFanOutVars(), f.taskSvc, f.atomSvc, f.edgeSvc, f.engine)
 	opts = append(opts, WithParams(map[string]string{"p": "q"}))
+	// p enters the hash only because this command references it. Both paths
+	// must persist that same subset.
+	f.atomSvc.atoms[f.taskSvc.tasks[1].AtomID].Command = `["sh","-c","echo $CAESIUM_PARAM_P"]`
 	model := &models.Job{ID: f.jobID, Alias: "hash-parity"}
 	require.NoError(t, New(model, opts...).Run(t.Context()))
 	fannedRows := f.instanceRows(t)

@@ -330,7 +330,7 @@ Explicit decisions so they don't rot as prose inside archived plans:
   (runs only with arc momentum) and P2 (cost/carbon signal sources, run-history
   window bar, weighted scoring — parked outright); `park` run disposition with
   release-drain (circuit-breaker Phase 3 leftover); per-partition freshness
-  watermarks; selective per-task re-run for quarantined replay; a run-level
+  watermarks; a run-level
   `caesium why` verb (today's is task-scoped).
 - **Removed designs (deleted 2026-09-06; recover from git history with
   `git show 2459109:docs/<file>`; their entries dropped from the

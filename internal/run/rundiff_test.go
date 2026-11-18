@@ -26,8 +26,8 @@ func TestDiffRuns_RunParamChangeSurfacesOnTask(t *testing.T) {
 	leftRunID := seedRunDiffRun(t, db, jobID, time.Now().UTC(), "cron", "nightly", map[string]string{"region": "us"})
 	rightRunID := seedRunDiffRun(t, db, jobID, time.Now().UTC().Add(time.Hour), "cron", "nightly", map[string]string{"region": "eu"})
 
-	leftHI := cache.HashInput{TaskName: "load", Image: "alpine:3.23", RunParams: map[string]string{"region": "us"}}
-	rightHI := cache.HashInput{TaskName: "load", Image: "alpine:3.23", RunParams: map[string]string{"region": "eu"}}
+	leftHI := cache.HashInput{TaskName: "load", Image: "alpine:3.23", Command: []string{"echo", "${CAESIUM_PARAM_REGION}"}, RunParams: map[string]string{"region": "us"}}
+	rightHI := cache.HashInput{TaskName: "load", Image: "alpine:3.23", Command: []string{"echo", "${CAESIUM_PARAM_REGION}"}, RunParams: map[string]string{"region": "eu"}}
 	seedRunDiffTaskRun(t, db, leftRunID, taskID, 1, leftHI, string(TaskStatusSucceeded), nil)
 	seedRunDiffTaskRun(t, db, rightRunID, taskID, 1, rightHI, string(TaskStatusSucceeded), nil)
 

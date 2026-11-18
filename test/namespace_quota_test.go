@@ -530,7 +530,7 @@ func (s *IntegrationTestSuite) TestNamespaceQuotaRefusesReplayAtCap() {
 		s.T().Skip("a re-executing replay needs the distributed lane (just integration-test-distributed)")
 	}
 	suffix := time.Now().UnixNano()
-	def := s.quotaDefinition(fmt.Sprintf("quota-replay-%d", suffix), "marketing", "echo replay")
+	def := s.quotaDefinition(fmt.Sprintf("quota-replay-%d", suffix), "marketing", "echo replay ${CAESIUM_PARAM_MODE}")
 	def.Metadata.ReplaySafe = true
 	s.applyDefinition(def)
 	job := s.requireJobByAlias(def.Metadata.Alias)

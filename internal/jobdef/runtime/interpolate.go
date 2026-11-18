@@ -14,6 +14,11 @@ import (
 // against run-param keys (buildParamEnv uppercases the same way). This is not a
 // general expander: bare $CAESIUM_PARAM_*, ${CAESIUM_OUTPUT_*}, ${FOO}, and
 // ${CAESIUM_PARAM_SHA:-default} are left unchanged.
+//
+// internal/cache duplicates this pattern (paramRefBraced) to decide which run
+// params enter a task hash. The cache package cannot import this one. Keep the
+// two spellings identical; TestParamRefPatternIsTheCacheIdentityForm and
+// cache.TestParamRefBracedPatternMatchesInterpolator pin them.
 var paramRefPattern = regexp.MustCompile(`\$\{CAESIUM_PARAM_([A-Za-z_][A-Za-z0-9_]*)\}`)
 
 // InterpolateParamRefs substitutes ${CAESIUM_PARAM_<NAME>} in env values from
