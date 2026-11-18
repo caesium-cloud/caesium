@@ -208,12 +208,29 @@ func TestCompute_DifferentRunParams(t *testing.T) {
 	bareChanged.RunParams = map[string]string{"env": "production"}
 	assert.NotEqual(t, bare.Compute(), bareChanged.Compute(), "an unbraced $CAESIUM_PARAM_* command reference must not hide the override")
 
-	// ${CAESIUM_PARAM_SHA:-default} matches neither pattern, matching the
-	// interpolator, which leaves that token unchanged.
-	withDefault := HashInput{Command: []string{"echo", "${CAESIUM_PARAM_SHA:-default}"}, RunParams: map[string]string{"SHA": "abc"}}
-	withDefaultChanged := withDefault
-	withDefaultChanged.RunParams = map[string]string{"SHA": "xyz"}
-	assert.Equal(t, withDefault.Compute(), withDefaultChanged.Compute())
+	// A shell expands ${CAESIUM_PARAM_SHA:-default} from the injected variable.
+	// The interpolator leaves that token unchanged in env values; command
+	// text still has to follow the shell.
+	for _, script := range []string{
+		"echo ${CAESIUM_PARAM_SHA:-default}",
+		"echo ${CAESIUM_PARAM_SHA-default}",
+		"echo ${CAESIUM_PARAM_SHA:+alt}",
+		"echo ${CAESIUM_PARAM_SHA#pre}",
+		"echo ${CAESIUM_PARAM_SHA%suf}",
+		"echo ${#CAESIUM_PARAM_SHA}",
+	} {
+		withDefault := HashInput{Command: []string{"sh", "-c", script}, RunParams: map[string]string{"SHA": "abc"}}
+		withDefaultChanged := withDefault
+		withDefaultChanged.RunParams = map[string]string{"SHA": "xyz"}
+		assert.NotEqual(t, withDefault.Compute(), withDefaultChanged.Compute(), script)
+		empty := HashInput{Command: []string{"sh", "-c", script}, RunParams: map[string]string{"SHA": ""}}
+		assert.NotEqual(t, withDefault.Compute(), empty.Compute(), script+" empty")
+	}
+	// The same token in an env value is literal text, not a shell expansion.
+	envDefault := HashInput{Env: map[string]string{"GIT_REF": "${CAESIUM_PARAM_SHA:-main}"}, RunParams: map[string]string{"SHA": "abc"}}
+	envDefaultChanged := envDefault
+	envDefaultChanged.RunParams = map[string]string{"SHA": "xyz"}
+	assert.Equal(t, envDefault.Compute(), envDefaultChanged.Compute(), "an env value keeps the interpolator's exact token")
 
 	// $CAESIUM_PARAM_SHA:-default is the variable plus literal text.
 	bareDefault := HashInput{Command: []string{"echo", "$CAESIUM_PARAM_SHA:-default"}, RunParams: map[string]string{"SHA": "abc"}}

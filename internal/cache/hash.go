@@ -693,13 +693,23 @@ func hashableKubernetes(k *container.KubernetesSpec) *container.KubernetesSpec {
 // cannot import internal/jobdef/runtime: that package imports pkg/jobdef, and
 // pkg/jobdef's tests (package jobdef) import internal/cache.
 // TestParamRefBracedPatternMatchesInterpolator pins the two spellings.
+// Shell operators such as ${CAESIUM_PARAM_NAME:-default} stay out of this
+// pattern: the interpolator leaves them as literal env text.
 var paramRefBraced = regexp.MustCompile(`\$\{CAESIUM_PARAM_([A-Za-z_][A-Za-z0-9_]*)\}`)
 
+// paramRefBracedShell matches a shell parameter expansion of an injected
+// CAESIUM_PARAM_* variable in command text, where `sh` expands the braced
+// form the interpolator does not rewrite. The name is the reference,
+// including ${CAESIUM_PARAM_NAME:-default}, ${NAME-default}, ${NAME:+alt},
+// ${NAME#pat}, ${NAME%pat}, ${NAME:offset}, and ${#CAESIUM_PARAM_NAME}.
+// An empty value still selects different text than a non-empty one for
+// `:-`, so the value stays in the key. This is not applied to env values.
+var paramRefBracedShell = regexp.MustCompile(`\$\{#?CAESIUM_PARAM_([A-Za-z_][A-Za-z0-9_]*)`)
+
 // paramRefUnbraced is the shell form of the injected CAESIUM_PARAM_* variable.
-// `$` followed by `{` does not match, so ${CAESIUM_PARAM_NAME} and
-// ${CAESIUM_PARAM_NAME:-default} (which the interpolator also leaves unchanged)
-// are not unbraced references. $CAESIUM_PARAM_NAME:-default is a reference:
-// the shell expands the variable and treats ":-default" as literal text.
+// `$` followed by `{` does not match, so the braced forms are handled above.
+// $CAESIUM_PARAM_NAME:-default is a reference: the shell expands the variable
+// and treats ":-default" as literal text.
 var paramRefUnbraced = regexp.MustCompile(`\$CAESIUM_PARAM_([A-Za-z_][A-Za-z0-9_]*)`)
 
 // identityRunParams is the subset of RunParams folded into the digest and the
@@ -746,7 +756,7 @@ func (h HashInput) referencedParamNames() map[string]struct{} {
 	note(h.ResolvedImageDigest)
 	note(h.UnresolvedImageIdentity)
 	for _, arg := range h.Command {
-		note(arg)
+		noteCommandParamRefs(refs, arg)
 	}
 	for k, v := range h.Env {
 		note(k)
@@ -809,6 +819,22 @@ func noteParamRefs(dst map[string]struct{}, s string) {
 		dst[strings.ToUpper(sub[1])] = struct{}{}
 	}
 	for _, sub := range paramRefUnbraced.FindAllStringSubmatch(s, -1) {
+		dst[strings.ToUpper(sub[1])] = struct{}{}
+	}
+}
+
+// noteCommandParamRefs records param references in one command argument.
+// Braced shell operators count here because the executor injects every run
+// param into the container environment and a shell command expands them.
+// Env values stay on noteParamRefs: InterpolateParamRefs leaves
+// ${CAESIUM_PARAM_NAME:-default} as literal text, and the engine does not
+// expand it.
+func noteCommandParamRefs(dst map[string]struct{}, s string) {
+	noteParamRefs(dst, s)
+	if s == "" || !strings.Contains(s, "CAESIUM_PARAM_") {
+		return
+	}
+	for _, sub := range paramRefBracedShell.FindAllStringSubmatch(s, -1) {
 		dst[strings.ToUpper(sub[1])] = struct{}{}
 	}
 }
