@@ -137,7 +137,7 @@ func Markdown() string {
 	b.WriteString("| `name` | string | required | Unique volume name referenced by steps. |\n")
 	b.WriteString("| `source` | object | optional | Single-engine shorthand. Exactly one of `source` or `sources` is required. |\n")
 	b.WriteString("| `sources` | map[string]object | optional | Engine-keyed sources for portable manifests. Keys are `docker`, `podman`, or `kubernetes`. |\n")
-	b.WriteString("| `accessMode` | string | optional | Advisory access mode; supported values are Kubernetes access modes. |\n\n")
+	b.WriteString("| `accessMode` | string | optional | Kubernetes access mode (`ReadWriteOnce`, `ReadOnlyMany`, `ReadWriteMany`, `ReadWriteOncePod`). Distributed dispatch places steps that share one `ReadWriteOnce` volume on the same worker and fails the task if that worker has left the cluster. |\n\n")
 	b.WriteString("Docker/Podman source kinds: `bind`, `volume`, `tmpfs`.\n")
 	b.WriteString("Kubernetes source kinds: `pvc`, `claimTemplate`, `volumeSource`.\n\n")
 

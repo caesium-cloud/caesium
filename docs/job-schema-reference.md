@@ -93,7 +93,7 @@ Volumes are declared once at the job level and mounted by steps with `volumeMoun
 | `name` | string | required | Unique volume name referenced by steps. |
 | `source` | object | optional | Single-engine shorthand. Exactly one of `source` or `sources` is required. |
 | `sources` | map[string]object | optional | Engine-keyed sources for portable manifests. Keys are `docker`, `podman`, or `kubernetes`. |
-| `accessMode` | string | optional | Advisory access mode; supported values are Kubernetes access modes. |
+| `accessMode` | string | optional | Kubernetes access mode (`ReadWriteOnce`, `ReadOnlyMany`, `ReadWriteMany`, `ReadWriteOncePod`). Distributed dispatch places steps that share one `ReadWriteOnce` volume on the same worker and fails the task if that worker has left the cluster. |
 
 Docker/Podman source kinds: `bind`, `volume`, `tmpfs`.
 Kubernetes source kinds: `pvc`, `claimTemplate`, `volumeSource`.

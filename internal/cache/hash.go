@@ -321,6 +321,11 @@ func sortedVolumeMounts(mounts []container.VolumeMount) []container.VolumeMount 
 	}
 	out := make([]container.VolumeMount, len(mounts))
 	copy(out, mounts)
+	for i := range out {
+		// AccessMode places a shared ReadWriteOnce volume. It is not an
+		// execution input, so the digest and the why-blob both ignore it.
+		out[i].AccessMode = ""
+	}
 	sort.Slice(out, func(i, j int) bool {
 		return volumeMountSortKey(out[i]) < volumeMountSortKey(out[j])
 	})

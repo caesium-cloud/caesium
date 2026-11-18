@@ -2290,7 +2290,7 @@ func (d *Definition) RuntimeSpecForStep(step *Step) (container.Spec, error) {
 		if err != nil {
 			return container.Spec{}, fmt.Errorf("step %s volume %s: %w", step.Name, volume.Name, err)
 		}
-		resolved, err := resolveVolumeMount(volume.Name, source, mount)
+		resolved, err := resolveVolumeMount(volume.Name, volume.AccessMode, source, mount)
 		if err != nil {
 			return container.Spec{}, fmt.Errorf("step %s volume %s: %w", step.Name, volume.Name, err)
 		}
@@ -2326,16 +2326,17 @@ func (d *Definition) RuntimeSpecForStep(step *Step) (container.Spec, error) {
 	return spec, nil
 }
 
-func resolveVolumeMount(name string, source VolumeSource, mount VolumeMount) (container.VolumeMount, error) {
+func resolveVolumeMount(name, accessMode string, source VolumeSource, mount VolumeMount) (container.VolumeMount, error) {
 	kind, err := sourceKind(source)
 	if err != nil {
 		return container.VolumeMount{}, err
 	}
 	resolved := container.VolumeMount{
-		Name:     strings.TrimSpace(name),
-		Target:   strings.TrimSpace(mount.Path),
-		ReadOnly: mount.ReadOnly,
-		SubPath:  strings.TrimSpace(mount.SubPath),
+		Name:       strings.TrimSpace(name),
+		AccessMode: strings.TrimSpace(accessMode),
+		Target:     strings.TrimSpace(mount.Path),
+		ReadOnly:   mount.ReadOnly,
+		SubPath:    strings.TrimSpace(mount.SubPath),
 	}
 	switch kind {
 	case "bind":
