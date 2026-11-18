@@ -150,7 +150,11 @@ function buildReplayDefinition(alias: string, replaySafe: boolean, stepName: str
         name: stepName,
         engine: "docker",
         image: shellImage,
-        command: ["sh", "-c", "echo '##caesium::output {\"rows\": \"42\"}'"],
+        command: [
+          "sh",
+          "-c",
+          "echo \"mode=$CAESIUM_PARAM_MODE\"; echo '##caesium::output {\"rows\": \"42\"}'",
+        ],
         next: [`${stepName}-load`],
       },
       {

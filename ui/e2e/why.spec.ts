@@ -11,6 +11,7 @@ import {
 } from "./helpers/fixtures";
 
 type CacheableFixtureDefinition = FixtureDefinition & {
+  steps: Array<{ command: string[] }>;
   metadata?: FixtureDefinition["metadata"] & {
     cache?: {
       enabled: boolean;
@@ -79,6 +80,7 @@ async function loadCacheableFixture(): Promise<CacheableFixtureDefinition> {
     ...(definition.metadata ?? {}),
     cache: { enabled: true },
   };
+  definition.steps[0].command = ["sh", "-c", "echo \"scenario=$CAESIUM_PARAM_SCENARIO\""];
   return definition;
 }
 
