@@ -1841,6 +1841,8 @@ PY
   # scoped to the row's queued namespace): a queue-policy job parks its second
   # run and the scenario cancels the row through the live endpoint.
   local_pattern="${local_pattern%)}|TestJobQueueCancelEndpointDeletesUnclaimedRowOnly)"
+  # Exercise the running-run cancel endpoint via the CLI on the live server.
+  local_pattern="${local_pattern%)}|TestOperatorCancelStopsOneRunAndLeavesAnother)"
   # Namespace secret scoping end to end (identity-and-access C5): the local
   # server's fixture gives marketing env/MARKETING_* only, so a FINANCE_
   # reference is refused by server lint and at run time (config class in
