@@ -10,6 +10,14 @@ import { toast } from "sonner";
 import { NotFoundState } from "@/components/not-found-state";
 import { Duration } from "@/components/duration";
 import { Button } from "@/components/ui/button";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import {
   DropdownMenu,
@@ -46,8 +54,21 @@ import { RunProposalSummary } from "./RunProposalSummary";
 import { RunTimeline } from "./RunTimeline";
 import { TaskDetailPanel } from "./TaskDetailPanel";
 
+function cancelRoleReason(jobNamespace?: string, runNamespace?: string): string {
+  if (jobNamespace && runNamespace && jobNamespace !== runNamespace) {
+    return `Requires operator role in ${jobNamespace} and ${runNamespace}`;
+  }
+  return requiresRoleReason("operator", runNamespace || jobNamespace);
+}
+
 const COMPARE_RUN_PICKER_LIMIT = 50;
 const EMPTY_ATOMS: Record<string, Atom> = {};
+
+// Cancel is not a task failure: unfinished tasks, including cleanup steps a
+// tolerant trigger rule would run after a failure, are cancelled with the run.
+// The failure policy is unchanged. Already-recorded logs and outcomes stay.
+const cancelRunExplanation =
+  "This cancels only this run. Cancellation is not a task failure. Tasks that have not finished are cancelled with the run, including cleanup steps that would run under a tolerant trigger rule (all_done, always, one_success, or all_failed) after a failure. The failure policy is unchanged. Logs and outcomes already recorded stay on the finished tasks.";
 
 export function RunDetailPage() {
   const { jobId, runId } = useParams({ strict: false }) as { jobId: string; runId: string };
@@ -58,6 +79,7 @@ export function RunDetailPage() {
   const [timelineOpen, setTimelineOpen] = useState(true);
   const [reproducibilityOpen, setReproducibilityOpen] = useState(false);
   const [replayDialogOpen, setReplayDialogOpen] = useState(false);
+  const [cancelDialogOpen, setCancelDialogOpen] = useState(false);
   const [compareOpen, setCompareOpen] = useState(false);
   const principal = usePrincipal();
   // Atom metadata is global, requiring the same cluster authority as connector
@@ -153,11 +175,11 @@ export function RunDetailPage() {
       queryClient.setQueryData(["job", jobId, "runs", runId], (old: JobRun | undefined) => {
         if (!old) return old;
 
-        if (e.type === "run_completed" || e.type === "run_succeeded" || e.type === "run_terminal") {
+        if (e.type === "run_completed" || e.type === "run_succeeded" || e.type === "run_terminal" || e.type === "run_cancelled") {
           const finalRun = e.payload as JobRun;
           if (finalRun?.tasks) return mergeTerminalRunUpdate(old, finalRun);
           if (finalRun?.id && finalRun.id !== old.id) return old;
-          return { ...old, ...finalRun, status: finalRun?.status ?? (e.type === "run_terminal" ? old.status : "succeeded") };
+          return { ...old, ...finalRun, status: finalRun?.status ?? (e.type === "run_terminal" || e.type === "run_cancelled" ? old.status : "succeeded") };
         }
 
         if (e.type === "run_failed") {
@@ -235,13 +257,13 @@ export function RunDetailPage() {
     };
 
     events.subscribeConnection(onConnection);
-    ["run_started", "run_retried", "run_completed", "run_failed", "run_terminal", "task_started", "task_succeeded", "task_failed", "task_skipped", "task_retrying", "task_cached"].forEach(
+    ["run_started", "run_retried", "run_completed", "run_failed", "run_terminal", "run_cancelled", "task_started", "task_succeeded", "task_failed", "task_skipped", "task_retrying", "task_cached"].forEach(
       (type) => events.subscribe(type, onEvent),
     );
 
     return () => {
       events.unsubscribeConnection(onConnection);
-      ["run_started", "run_retried", "run_completed", "run_failed", "run_terminal", "task_started", "task_succeeded", "task_failed", "task_skipped", "task_retrying", "task_cached"].forEach(
+      ["run_started", "run_retried", "run_completed", "run_failed", "run_terminal", "run_cancelled", "task_started", "task_succeeded", "task_failed", "task_skipped", "task_retrying", "task_cached"].forEach(
         (type) => events.unsubscribe(type, onEvent),
       );
     };
@@ -322,6 +344,20 @@ export function RunDetailPage() {
     onError: (err: Error) => toast.error(`Failed to trigger: ${err.message}`),
   });
 
+  const cancelMutation = useMutation({
+    mutationFn: () => api.cancelRun(jobId, runId),
+    onSuccess: (cancelled) => {
+      toast.success("Run cancelled");
+      queryClient.setQueryData(["job", jobId, "runs", runId], (old: JobRun | undefined) => {
+        if (!old) return cancelled;
+        return { ...old, ...cancelled, tasks: cancelled.tasks?.length ? cancelled.tasks : old.tasks };
+      });
+      queryClient.invalidateQueries({ queryKey: ["job", jobId, "runs", runId] });
+      setCancelDialogOpen(false);
+    },
+    onError: (err: Error) => toast.error(err.message || "Failed to cancel run"),
+  });
+
   useEffect(() => {
     const shortcuts: Record<string, string> = { c: '[data-testid="run-compare-trigger"]', a: '[data-testid="all-runs-link"]', p: '[data-testid="run-replay-trigger"]', r: '[data-testid="run-rerun-trigger"]' };
     const onKey = (event: KeyboardEvent) => {
@@ -378,6 +414,8 @@ export function RunDetailPage() {
   const canLaunchReplay = canReplayRuns(principal, job?.namespace) && canActIn(principal, "viewer", run.namespace);
   const replayGateReason = canLaunchReplay ? undefined : requiresRoleReason("runner", job?.namespace);
   const canRerun = canActIn(principal, "runner", job?.namespace);
+  const canCancel = canActIn(principal, "operator", job?.namespace, run.namespace);
+  const cancelGateReason = canCancel ? undefined : cancelRoleReason(job?.namespace, run.namespace);
   const compareDisabledReason = isLoadingJobRuns
     ? "Loading runs to compare"
     : compareRuns.length === 0
@@ -497,21 +535,70 @@ export function RunDetailPage() {
           >
             {triggerMutation.isPending ? "Re-running…" : "Re-run"} <Kbd>Alt R</Kbd>
           </Button>
-          {isLive && (
+          {isLive && (canCancel ? (
             <Button
               variant="outline"
               size="sm"
               className="h-8 text-xs border-danger/30 text-danger hover:bg-danger/10"
-              disabled
-              title="Cancel not yet implemented"
+              onClick={() => setCancelDialogOpen(true)}
+              data-testid="run-cancel-trigger"
+              title="Cancel this running run"
             >
-
               Cancel
             </Button>
-          )}
+          ) : (
+            <span className="inline-flex" title={cancelGateReason}>
+              <Button
+                variant="outline"
+                size="sm"
+                className="h-8 text-xs border-danger/30 text-danger hover:bg-danger/10"
+                disabled
+                title={cancelGateReason}
+                aria-describedby="run-cancel-gate-reason"
+                data-testid="run-cancel-trigger"
+              >
+                Cancel
+              </Button>
+              <span id="run-cancel-gate-reason" className="sr-only" data-testid="run-cancel-gate-reason">
+                {cancelGateReason}
+              </span>
+            </span>
+          ))}
           </div>
         </div>
       </div>
+
+      {cancelDialogOpen ? (
+        <Dialog open={cancelDialogOpen} onOpenChange={setCancelDialogOpen}>
+          <DialogContent data-testid="run-cancel-dialog">
+            <DialogHeader>
+              <DialogTitle>Cancel this run?</DialogTitle>
+              <DialogDescription>{cancelRunExplanation}</DialogDescription>
+            </DialogHeader>
+            <DialogFooter>
+              <Button
+                variant="outline"
+                size="sm"
+                className="h-8 text-xs"
+                onClick={() => setCancelDialogOpen(false)}
+                data-testid="run-cancel-dismiss"
+              >
+                Keep running
+              </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                className="h-8 text-xs border-danger/30 text-danger hover:bg-danger/10"
+                disabled={cancelMutation.isPending}
+                onClick={() => cancelMutation.mutate()}
+                data-testid="run-cancel-confirm"
+              >
+                {cancelMutation.isPending ? "Cancelling…" : "Cancel run"}
+              </Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
+      ) : null}
 
       {replayDialogOpen ? (
         <ReplayDialog

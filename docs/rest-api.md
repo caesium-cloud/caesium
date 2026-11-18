@@ -63,6 +63,7 @@ again (see [group refresh](identity-and-access.md#group-refresh)).
 | `GET /jobs/:id/runs`, `GET /jobs/:id/runs/:run_id` | List runs; read one run with its tasks. |
 | `GET /jobs/:id/runs/:run_id/logs?task_id=<task-id>` | Stream or fetch task logs. |
 | `POST /jobs/:id/runs/:run_id/retry` | Retry a failed run, preserving succeeded and cached tasks. A run left in a namespace its job has since moved out of answers `409` with `error: namespace_moved`, `run_namespace` and `job_namespace`; replay it instead. At the namespace's run quota it answers `409 namespace_quota` with `Retry-After`. |
+| `POST /jobs/:id/runs/:run_id/cancel` | Cancel one running run (`caesium run cancel`). Needs `operator` in the job's current namespace and the run's persisted namespace. `200` returns the run, now `cancelled`. A run that is not running answers `409` with `error: run_not_running` and is left unchanged. A run that is not this job's is `404`. Finished tasks keep their logs and outcomes; unfinished tasks, including cleanup steps a tolerant trigger rule would run after a failure, are cancelled with the run. `CAESIUM_TASK_FAILURE_POLICY` is unchanged. |
 | `POST /jobs/:id/runs/:run_id/tasks/:task_id/partitions/:index/retry` | Retry one partition of a fanned-out task. Refused with the same `409 namespace_moved` and `409 namespace_quota` as a run retry. |
 | `GET /jobs/:id/runs/:run_id/tasks/:task_id/partitions` | List a fanned-out task's partitions. |
 | `POST /jobs/:id/runs/:run_id/callbacks/retry` | Retry failed callbacks. |

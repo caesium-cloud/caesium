@@ -1805,7 +1805,7 @@ grants are known not to allow it.
 - **Gating.** `roleIn(namespace)` is the higher of the `*` grant and the grant
   for that namespace. Every job action uses the job's namespace and the role its
   route requires: trigger, re-run, replay, backfill and partition retry need
-  `runner`; pause, resume, queue cancel, backfill cancel and cache invalidation
+  `runner`; pause, resume, queue cancel, run cancel, backfill cancel and cache invalidation
   need `operator`. A mutation on a historical run or backfill also needs the role
   in that object's persisted namespace, as the server does. Until the job is
   loaded, the cluster role decides, so a confined principal sees fewer controls,

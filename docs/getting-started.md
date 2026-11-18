@@ -191,7 +191,10 @@ machine-readable stdout; diagnostics stay on stderr.
 caesium run wait --run-id "$RUN_ID" --job-id "$JOB_ID" --timeout 30s --server http://localhost:8080
 caesium run get --run-id "$RUN_ID" --job-id "$JOB_ID" --server http://localhost:8080
 caesium run logs --run-id "$RUN_ID" --job-id "$JOB_ID" --server http://localhost:8080
+caesium run cancel --run-id "$RUN_ID" --job-id "$JOB_ID" --server http://localhost:8080
 ```
+
+`run cancel` stops one running run. A run that has already finished is left unchanged and the command exits non-zero. `--json` prints only that run on stdout.
 
 ## 6. Ask Caesium why
 

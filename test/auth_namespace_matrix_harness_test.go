@@ -1141,6 +1141,7 @@ var matrixWriteActions = map[string]string{
 	"POST /v1/jobs/:id/run":                 auth.ActionRunTrigger,
 	"DELETE /v1/jobs/:id/queue/:id":         auth.ActionRunQueueCancel,
 	"POST /v1/jobs/:id/runs/:id/retry":      auth.ActionRunRetry,
+	"POST /v1/jobs/:id/runs/:id/cancel":     auth.ActionRunCancel,
 	"POST /v1/jobs/:id/backfill":            auth.ActionBackfill,
 	"PUT /v1/jobs/:id/backfills/:id/cancel": auth.ActionBackfill,
 	"POST /v1/jobdefs/apply":                auth.ActionJobdefApply,

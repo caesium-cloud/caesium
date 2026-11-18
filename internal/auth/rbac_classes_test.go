@@ -148,6 +148,7 @@ var routesAddedAfterMaster = map[string]RoutePolicy{
 	"GET /v1/jobs/:id/runs/:id/external-executions":       {Role: models.RoleViewer, Class: RouteClassNamespaced},
 	"GET /v1/jobs/:id/runs/:id/assertions":                {Role: models.RoleViewer, Class: RouteClassNamespaced},
 	"GET /v1/jobs/:id/runs/:id/datasets":                  {Role: models.RoleViewer, Class: RouteClassNamespaced},
+	"POST /v1/jobs/:id/runs/:id/cancel":                   {Role: models.RoleOperator, Class: RouteClassNamespaced},
 
 	// User and session administration (E3).
 	"GET /v1/auth/users":                      {Role: models.RoleAdmin, Class: RouteClassCluster},

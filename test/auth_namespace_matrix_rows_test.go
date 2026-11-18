@@ -515,6 +515,14 @@ func namespaceMatrixRows() map[string]matrixRow {
 			return append(probes, fx.settled(probe("moved job's old run", fx.movedPath("/runs/"+fx.OldRun+"/replay"), http.StatusAccepted,
 				needEvery(rR, nsMarketing), needEvery(rV, nsFinance)).alias(fx.MovedDef.Metadata.Alias).once().idempotencyKey()))
 		}},
+		"POST /v1/jobs/:id/runs/:id/cancel": {auth.RouteClassNamespaced, rO, surfaceCore, func(fx *namespaceMatrixFixture) []matrixProbe {
+			// Fixture runs are already terminal, so cancel is a 409 and changes nothing.
+			return each(runRoute(fx, rO, "/cancel", http.StatusConflict), func(p matrixProbe) matrixProbe {
+				return p.idem().withCheck(func(_ matrixPrincipal, body string) {
+					fx.s.Contains(body, "run_not_running")
+				})
+			})
+		}},
 		"POST /v1/jobs/:id/runs/:id/retry": {auth.RouteClassNamespaced, rR, surfaceCore, func(fx *namespaceMatrixFixture) []matrixProbe {
 			// Retrying a run starts a new one (any outcome), so once per run.
 			probes := each(each(mainRunRoute(fx, rR, "/retry", http.StatusAccepted), matrixProbe.once), fx.settled)

@@ -115,6 +115,7 @@ var namespaceResolvers = map[string]namespaceResolver{
 	"GET /v1/jobs/:id/runs/:id/tasks/:id/partitions":            resolveJobRun,
 	"GET /v1/jobs/:id/runs/:id/external-executions":             resolveJobRun,
 	"POST /v1/jobs/:id/runs/:id/retry":                          resolveJobRun,
+	"POST /v1/jobs/:id/runs/:id/cancel":                         resolveJobRun,
 	"POST /v1/jobs/:id/runs/:id/tasks/:id/partitions/:id/retry": resolveJobRun,
 	"POST /v1/jobs/:id/runs/:id/callbacks/retry":                resolveJobRun,
 	// Replay executes in the job's current namespace (runner there) from a
