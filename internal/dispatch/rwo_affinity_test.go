@@ -26,11 +26,15 @@ const (
 // orders PendingTasksForDispatch, which is what makes the round-robin
 // position of an unpinned step deterministic.
 type affinityStep struct {
-	name      string
-	mounts    []container.VolumeMount
-	status    string
-	claimedBy string
-	createdAt time.Time
+	name           string
+	mounts         []container.VolumeMount
+	status         string
+	claimedBy      string
+	createdAt      time.Time
+	catalogKey     string
+	partitionIndex int
+	partitionCount int
+	partitionValue string
 }
 
 func volumeMount(name, accessMode string) container.VolumeMount {
@@ -64,6 +68,7 @@ func seedAffinityRun(t *testing.T, store *run.Store, steps []affinityStep) (uuid
 	require.NoError(t, db.Create(jobRun).Error)
 
 	taskIDs := make([]uuid.UUID, 0, len(steps))
+	catalogByKey := map[string]uuid.UUID{}
 	for i, step := range steps {
 		raw, err := json.Marshal(container.Spec{ResolvedVolumeMounts: step.mounts})
 		require.NoError(t, err)
@@ -75,11 +80,21 @@ func seedAffinityRun(t *testing.T, store *run.Store, steps []affinityStep) (uuid
 		require.NoError(t, db.Create(atom).Error)
 
 		taskID := uuid.New()
-		task := &models.Task{
-			ID: taskID, JobID: job.ID, AtomID: atom.ID, Name: step.name,
-			CreatedAt: now, UpdatedAt: now,
+		if step.catalogKey != "" {
+			if existing, ok := catalogByKey[step.catalogKey]; ok {
+				taskID = existing
+			}
 		}
-		require.NoError(t, db.Create(task).Error)
+		if _, reused := catalogByKey[step.catalogKey]; step.catalogKey == "" || !reused {
+			task := &models.Task{
+				ID: taskID, JobID: job.ID, AtomID: atom.ID, Name: step.name,
+				CreatedAt: now, UpdatedAt: now,
+			}
+			require.NoError(t, db.Create(task).Error)
+			if step.catalogKey != "" {
+				catalogByKey[step.catalogKey] = taskID
+			}
+		}
 
 		status := step.status
 		if status == "" {
@@ -94,7 +109,9 @@ func seedAffinityRun(t *testing.T, store *run.Store, steps []affinityStep) (uuid
 			Engine: models.AtomEngineDocker, Image: "busybox:1.36.1",
 			Command: `["sh","-c","echo hi"]`, Status: status, ClaimedBy: step.claimedBy,
 			Attempt: 1, MaxAttempts: 1, OutstandingPredecessors: 0,
-			CreatedAt: created, UpdatedAt: created,
+			PartitionIndex: step.partitionIndex, PartitionCount: step.partitionCount,
+			PartitionValue: step.partitionValue,
+			CreatedAt:      created, UpdatedAt: created,
 		}
 		require.NoError(t, db.Create(tr).Error)
 		taskIDs = append(taskIDs, taskID)
@@ -164,6 +181,63 @@ func TestDispatchRun_SharedReadWriteOnceStepsShareOnePeer(t *testing.T) {
 	require.Equal(t, rwoPeerA, placed[writer])
 	require.Equal(t, placed[writer], placed[reader], "steps that share a ReadWriteOnce volume land on one worker")
 	require.NotEqual(t, placed[other], placed[writer])
+}
+
+func TestDispatchRun_FanOutSiblingClaimAnchorsTheSharedVolume(t *testing.T) {
+	db := testutil.OpenTestDB(t)
+	t.Cleanup(func() { testutil.CloseDB(db) })
+	ls := run.NewLeaseStore(db)
+	store := run.NewStore(db).WithLeaseStore(ls)
+
+	base := time.Now().UTC().Add(-time.Minute)
+	work := []container.VolumeMount{volumeMount("work", accessModeReadWriteOnce)}
+	runID, taskIDs := seedAffinityRun(t, store, []affinityStep{
+		{
+			name: "map", catalogKey: "map", createdAt: base,
+			status: string(run.TaskStatusSucceeded), claimedBy: rwoPeerA,
+			partitionIndex: 0, partitionCount: 2, partitionValue: "a",
+			mounts: work,
+		},
+		{
+			name: "map", catalogKey: "map", createdAt: base.Add(time.Second),
+			partitionIndex: 1, partitionCount: 2, partitionValue: "b",
+			mounts: work,
+		},
+		{
+			name: "join", createdAt: base.Add(2 * time.Second),
+			mounts: work,
+		},
+	})
+	_, err := ls.AcquireLease(context.Background(), runID, rwoPeerA, 30*time.Second)
+	require.NoError(t, err)
+
+	peerA, peerB := newPeerStub(t), newPeerStub(t)
+	rwoLoop(t, store, ls, peerA, peerB).tick(context.Background())
+
+	placed := map[uuid.UUID]string{}
+	for _, req := range append(peerA.requests(), peerB.requests()...) {
+		placed[req.TaskRunID] = req.WorkerNode
+	}
+	var rows []models.TaskRun
+	require.NoError(t, db.Where("job_run_id = ?", runID).Find(&rows).Error)
+	byPartition := map[string]models.TaskRun{}
+	var join models.TaskRun
+	for _, row := range rows {
+		switch {
+		case row.TaskID == taskIDs[0] && row.PartitionValue == "a":
+			byPartition["a"] = row
+		case row.TaskID == taskIDs[0] && row.PartitionValue == "b":
+			byPartition["b"] = row
+		case row.TaskID == taskIDs[2]:
+			join = row
+		}
+	}
+	require.Equal(t, rwoPeerA, byPartition["a"].ClaimedBy)
+	require.Equal(t, string(run.TaskStatusSucceeded), byPartition["a"].Status)
+	require.Equal(t, rwoPeerA, placed[byPartition["b"].ID], "a pending sibling follows the instance that already holds the volume")
+	require.Equal(t, rwoPeerA, placed[join.ID], "the other step that mounts the volume follows that same worker")
+	require.NotEqual(t, string(run.TaskStatusFailed), join.Status)
+	require.NotEqual(t, string(run.TaskStatusFailed), byPartition["b"].Status)
 }
 
 func TestDispatchRun_MissingReadWriteOncePeerFailsTask(t *testing.T) {

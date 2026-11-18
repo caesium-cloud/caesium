@@ -101,7 +101,11 @@ func (l *DispatchLoop) rwoBindings(ctx context.Context, runID uuid.UUID) (map[uu
 		workers := make(map[string]struct{})
 		for _, name := range shared {
 			for _, other := range mountedRows {
-				if other.row.TaskID == m.row.TaskID {
+				// A fan-out sibling is another row of this catalog task. Its
+				// claim is where the volume was opened. Skipping every row
+				// with this task id hides that worker, and the next instance
+				// round-robins onto a different one.
+				if other.row.ID == m.row.ID {
 					continue
 				}
 				if !containsString(other.volumes, name) {
@@ -230,8 +234,9 @@ func containsString(values []string, want string) bool {
 }
 
 // bindingWorker combines the durable claim with workers this process already
-// chose for the same volumes. A claim wins over memory when both are set and
-// differ: the claim is where the volume was actually opened.
+// chose for the same volumes. They have to name the same worker. A
+// disagreement means the volume was opened in two places, so the task fails
+// instead of picking one.
 func (l *DispatchLoop) bindingWorker(runID uuid.UUID, binding rwoBinding) (string, string) {
 	if binding.conflict != "" {
 		return "", binding.conflict
