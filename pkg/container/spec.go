@@ -53,7 +53,12 @@ type KubernetesClaimTemplate struct {
 // form. Engines map the type-specific fields into native Docker, Podman, or
 // Kubernetes mount structures.
 type VolumeMount struct {
-	Name          string                   `json:"name,omitempty" yaml:"name,omitempty"`
+	Name string `json:"name,omitempty" yaml:"name,omitempty"`
+	// AccessMode is the job-level volume access mode (ReadWriteOnce and the
+	// other Kubernetes modes). The distributed dispatcher co-locates tasks
+	// that share a ReadWriteOnce volume. It is scheduling metadata and is
+	// excluded from the cache identity hash.
+	AccessMode    string                   `json:"accessMode,omitempty" yaml:"accessMode,omitempty"`
 	Type          VolumeMountType          `json:"type" yaml:"type"`
 	Source        string                   `json:"source,omitempty" yaml:"source,omitempty"`
 	Target        string                   `json:"target" yaml:"target"`

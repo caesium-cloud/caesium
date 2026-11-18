@@ -351,6 +351,7 @@ func (s *ExporterTestSuite) assertVolumes(volumes []schema.Volume) {
 	// `shared` is mounted by a docker step and a kubernetes step, so both
 	// per-engine sources survive as a `sources` map.
 	s.Equal("shared", volumes[0].Name)
+	s.Equal("ReadWriteMany", volumes[0].AccessMode)
 	s.Nil(volumes[0].Source)
 	s.Equal(map[string]schema.VolumeSource{
 		schema.EngineDocker:     {Volume: "caesium-export-shared"},

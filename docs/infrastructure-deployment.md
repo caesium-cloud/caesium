@@ -824,9 +824,12 @@ The shared provider mirror (`tfcache`) is the strictest case: it is a
 warm-once, read-many volume — one `warm-cache` step holds the only read-write
 mount, every other step mounts it `readOnly: true` — and a `filesystem_mirror`
 shared by parallel `init` calls across pods on different nodes cannot live on
-`ReadWriteOnce` storage. `ReadWriteOnce` support is **deferred** until a
-node-affinity / co-location primitive lands (design §12), which would let every
-step in a run schedule onto the same node as the volume.
+`ReadWriteOnce` storage. Docker and Podman workers do co-locate steps that
+share a `ReadWriteOnce` volume, and fail the task if that worker has left the
+cluster. That pin is the Caesium worker, not a Kubernetes node: dispatch does
+not set pod `nodeAffinity`, so `plan` and `apply` pods can still land on
+different nodes. Keep `ReadWriteMany` on every volume more than one Kubernetes
+step mounts.
 
 `src` (the staged source tree) is shared across every step in the run — nine
 steps in the reference manifest (materialize through every plan/apply). **Use
@@ -1017,7 +1020,7 @@ Ordered by damage:
 | **Sensitive values in dqlite** | The two `tf-runner` requirements above — typed field access, not `jq`. |
 | **`chain: values` surprise** | Documented here and surfaced by `caesium why`. |
 | **Warm volume recreated** | `tf-warm` always runs and self-checks its marker — self-healing by construction. |
-| **RWX unavailable** | Runtime mount failure with a clear message; RWO remains unsupported until node affinity lands. |
+| **RWX unavailable** | Runtime mount failure with a clear message. Docker and Podman workers co-locate steps that share a ReadWriteOnce volume; a Kubernetes ReadWriteOnce PVC is still not pinned to one node. |
 | **Two read-write mounts on one volume** | `internal/jobdef/lint`'s multi-writer warning (design §8), which flags writers that can run CONCURRENTLY — a pair cooperating through a `dependsOn` edge, like this pattern's own `prepare`/`checkout` and `plan`/`apply` handoffs, is legitimate and stays silent. See [Volumes](#the-multi-writer-lint-design-8). |
 | **`subPath` relied on for isolation** | Docker now honours `VolumeMount.SubPath` (#361; before the fix a "partitioned" shared volume was actually one shared directory there), and the multi-writer lint follows each resolved source's adapter behavior. The reference named volumes/PVCs apply `subPath`; Podman binds do not and are treated as whole-source mounts. The manifests still use one volume per stack — simpler, with no Docker API-version dependency ([Volumes](#one-logical-volume-per-physical-store)). |
 | **A newly created `subPath` sub-directory unwritable by a non-root docker step** | On docker only: Caesium's own root-running helper container creates the sub-directory, so — unlike the reagent-image row above — no step image's baked ownership reaches it. The helper `chmod 0777`s it, but only when it actually creates it; a pre-existing sub-directory is untouched. See [`subPath` sub-directories](#subpath-sub-directories-caesiums-own-helper-is-the-first-toucher). |

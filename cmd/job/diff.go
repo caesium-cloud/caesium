@@ -49,8 +49,9 @@ step declares next or dependsOn), durations compare as the stored length, and
 a literal environment value is reported as a key change without the value
 (a secret:// reference is shown). Provenance, row identity, the derived HTTP
 trigger path, step and callback position, and append-only DAG snapshots are
-excluded. A volume's unused per-engine sources and its accessMode are not
-stored, so they are not compared.
+excluded. A volume's unused per-engine sources are not stored, so they are
+not compared. accessMode is stored on each step's resolved mount and is
+compared.
 
 By default the output is what a non-pruning apply would do:
 creates and updates for jobs in --path. Jobs present on the server but missing
