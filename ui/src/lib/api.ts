@@ -680,7 +680,8 @@ export type ApiErrorKind =
   | "replay_request_too_large"
   | "replay_safe_refusal"
   | "replay_refused"
-  | "queue_cancel_conflict";
+  | "queue_cancel_conflict"
+  | "run_cancel_conflict";
 
 export interface FieldChange {
   field: string;
@@ -1540,6 +1541,10 @@ function queueCancelErrorKind(status: number): ApiErrorKind | undefined {
   return status === 409 ? "queue_cancel_conflict" : undefined;
 }
 
+function runCancelErrorKind(status: number): ApiErrorKind | undefined {
+  return status === 409 ? "run_cancel_conflict" : undefined;
+}
+
 function queryString(params: Record<string, string | number | boolean | undefined>): string {
   const query = new URLSearchParams();
   Object.entries(params).forEach(([key, value]) => {
@@ -1758,6 +1763,12 @@ export const api = {
       `/jobs/${encodeURIComponent(jobId)}/queue/${encodeURIComponent(queueId)}`,
       { method: "DELETE" },
       queueCancelErrorKind,
+    ),
+  cancelRun: (jobId: string, runId: string) =>
+    request<JobRun>(
+      `/jobs/${encodeURIComponent(jobId)}/runs/${encodeURIComponent(runId)}/cancel`,
+      { method: "POST" },
+      runCancelErrorKind,
     ),
   getJobRun: (jobId: string, runId: string) => request<JobRun>(`/jobs/${jobId}/runs/${runId}`),
   getRunDiff: (jobId: string, left: string, right: string) =>

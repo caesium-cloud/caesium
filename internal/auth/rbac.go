@@ -326,13 +326,17 @@ var endpointPolicy = map[string]RoutePolicy{
 	// namespace of every existing alias; for a confined writer the handler
 	// re-checks both, trigger tenancy (the rows and webhook paths a write
 	// touches) and the prune set inside one transaction (B9).
-	"POST /v1/jobs":                         namespacedRoute(operator),
-	"DELETE /v1/jobs/:id":                   namespacedRoute(operator),
-	"PUT /v1/jobs/:id/pause":                namespacedRoute(operator),
-	"PUT /v1/jobs/:id/unpause":              namespacedRoute(operator),
-	"POST /v1/jobdefs/apply":                namespacedRoute(operator),
-	"POST /v1/cache/prune":                  clusterRoute(operator),
-	"DELETE /v1/jobs/:id/queue/:id":         namespacedRoute(operator),
+	"POST /v1/jobs":                 namespacedRoute(operator),
+	"DELETE /v1/jobs/:id":           namespacedRoute(operator),
+	"PUT /v1/jobs/:id/pause":        namespacedRoute(operator),
+	"PUT /v1/jobs/:id/unpause":      namespacedRoute(operator),
+	"POST /v1/jobdefs/apply":        namespacedRoute(operator),
+	"POST /v1/cache/prune":          clusterRoute(operator),
+	"DELETE /v1/jobs/:id/queue/:id": namespacedRoute(operator),
+	// Cancel one running run. The resolver requires operator in the job's
+	// current namespace and the run's persisted namespace. A run that is not
+	// running answers 409; a run that is not this job's answers 404.
+	"POST /v1/jobs/:id/runs/:id/cancel":     namespacedRoute(operator),
 	"DELETE /v1/jobs/:id/cache":             namespacedRoute(operator),
 	"DELETE /v1/jobs/:id/cache/:id":         namespacedRoute(operator),
 	"PUT /v1/jobs/:id/backfills/:id/cancel": namespacedRoute(operator),

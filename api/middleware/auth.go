@@ -568,6 +568,8 @@ func auditActionForRoute(method, routePath string) string {
 		return auth.ActionRunQueueCancel
 	case "POST /v1/jobs/:id/runs/:id/retry":
 		return auth.ActionRunRetry
+	case "POST /v1/jobs/:id/runs/:id/cancel":
+		return auth.ActionRunCancel
 	case "POST /v1/jobs/:id/backfill":
 		return auth.ActionBackfill
 	case "PUT /v1/jobs/:id/backfills/:id/cancel":

@@ -5882,7 +5882,29 @@ func (s *Store) failUnfinishedTasksForRunTerminationTx(tx *gorm.DB, runID uuid.U
 	return transitioned, nil
 }
 
+// OperatorCancelReason is the error recorded when an operator cancels one
+// running run. Concurrency replacement keeps its own reason.
+const OperatorCancelReason = "cancelled by operator"
+
+// ErrRunNotRunning is returned by CancelRunningRun when the run is missing or
+// not running. The row is left unchanged, including when a concurrent cancel
+// already moved it off running.
+var ErrRunNotRunning = errors.New("run: only a running run can be cancelled")
+
 func (s *Store) CancelRun(ctx context.Context, runID uuid.UUID) error {
+	_, err := s.cancelRun(ctx, runID, "cancelled by concurrency replacement", false)
+	return err
+}
+
+// CancelRunningRun cancels one running run through the same transaction as
+// CancelRun (cancelRunTx: status gate, non-terminal tasks, lease, run_cancelled
+// and run_terminal). A run that is not running returns ErrRunNotRunning.
+func (s *Store) CancelRunningRun(ctx context.Context, runID uuid.UUID) error {
+	_, err := s.cancelRun(ctx, runID, OperatorCancelReason, true)
+	return err
+}
+
+func (s *Store) cancelRun(ctx context.Context, runID uuid.UUID, reason string, requireRunning bool) (*cancelledRunInfo, error) {
 	var (
 		pendingEvents []event.Event
 		cancelled     *cancelledRunInfo
@@ -5891,9 +5913,12 @@ func (s *Store) CancelRun(ctx context.Context, runID uuid.UUID) error {
 		attemptEvents := make([]event.Event, 0, 2)
 		var attemptCancelled *cancelledRunInfo
 		err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-			info, events, err := s.cancelRunTx(tx, runID, "cancelled by concurrency replacement")
+			info, events, err := s.cancelRunTx(tx, runID, reason)
 			if err != nil {
 				return err
+			}
+			if info == nil && requireRunning {
+				return ErrRunNotRunning
 			}
 			attemptCancelled = info
 			attemptEvents = events
@@ -5905,13 +5930,13 @@ func (s *Store) CancelRun(ctx context.Context, runID uuid.UUID) error {
 		}
 		return err
 	}); err != nil {
-		return err
+		return nil, err
 	}
 	s.publishEvents(pendingEvents...)
 	if cancelled != nil {
 		s.recordCancelledRunMetrics(*cancelled)
 	}
-	return nil
+	return cancelled, nil
 }
 
 func (s *Store) cancelOldestActiveRunTx(tx *gorm.DB, jobID uuid.UUID) (*cancelledRunInfo, []event.Event, error) {

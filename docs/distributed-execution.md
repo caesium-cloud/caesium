@@ -68,7 +68,7 @@ A node in a mixed-version local-mode cluster that predates the heartbeat renews 
 
 ## Cancelling a Run Reaches the Container
 
-Cancelling a run — `POST /v1/jobs/:id/run` under a `replace` concurrency policy, or any other path through `CancelRun` — writes every non-terminal task row `cancelled` and publishes a `run_cancelled` event. Each execution mode turns that into a stopped container differently:
+Cancelling a run — `POST /v1/jobs/:id/runs/:run_id/cancel` (an operator cancelling one running run; `caesium run cancel` calls that route), `POST /v1/jobs/:id/run` under a `replace` concurrency policy, or any other path through `cancelRunTx` — writes every non-terminal task row `cancelled` and publishes a `run_cancelled` event. Each execution mode turns that into a stopped container the same way: the local executor and a distributed worker both call `engine.Stop` with force. On Kubernetes that stop is a pod delete with a one-second grace, not a separate pod killer.
 
 - **local** — an in-process subscriber cancels the run's registered execution context and the executor force-stops the atom.
 - **distributed** — the cancel blanks `claimed_by`, the owning worker sees the claim disappear on its next liveness check, and force-stops the atom.

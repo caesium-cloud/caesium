@@ -38,6 +38,7 @@ type runResponse struct {
 
 type runTaskResponse struct {
 	ID               string                    `json:"id"`
+	TaskID           string                    `json:"task_id"`
 	Status           string                    `json:"status"`
 	RuntimeID        string                    `json:"runtime_id,omitempty"`
 	ClaimedBy        string                    `json:"claimed_by,omitempty"`
