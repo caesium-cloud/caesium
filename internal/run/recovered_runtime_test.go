@@ -213,7 +213,7 @@ func TestOwnerTakeoverReapsAPodWhoseRowCompletedAfterTheRead(t *testing.T) {
 	require.False(t, podExists(t, client, "caesium-mapped", "step-b-1"), "the row the reset landed on is stopped")
 	finished := taskRunFor(t, db, runID, taskA)
 	require.Equal(t, string(TaskStatusSucceeded), finished.Status, "the completed row is not re-pended")
-	require.Empty(t, finished.RuntimeID)
+	require.Equal(t, "caesium-mapped/step-a-1", finished.RuntimeID, "a finished attempt keeps the pod it ran")
 }
 
 // An owner that lost its lease must not force-stop the attempt of the newer

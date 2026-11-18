@@ -186,7 +186,7 @@ func TestClaimerReclaimExpiredReapsADeadWorkersFinishedPod(t *testing.T) {
 	var finished models.TaskRun
 	require.NoError(t, db.First(&finished, "id = ?", succeeded.ID).Error)
 	require.Equal(t, string(run.TaskStatusSucceeded), finished.Status, "the finished attempt is not re-pended")
-	require.Empty(t, finished.RuntimeID)
+	require.Equal(t, "caesium-mapped/dead-succeeded", finished.RuntimeID, "a finished attempt keeps the pod it ran")
 	require.Equal(t, "attempt1 done", finished.LogText)
 
 	var stillRunning models.TaskRun

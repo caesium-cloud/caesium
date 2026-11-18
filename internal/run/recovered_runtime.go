@@ -143,12 +143,13 @@ func stopKubernetesRuntimes(reason string, runtimes []RecoveredRuntime) []Recove
 // gone and will not delete them. A terminal row still naming a runtime is the
 // attempt that reached Succeeded or Failed and lost its worker before that
 // worker's Stop; the executor already snapshotted logs before the terminal
-// write, and this path does not read them again. A running row is reaped only
-// when its claim has lapsed and its run is no longer running, so no owner
-// reclaim will fence and stop it. A running attempt with an unexpired claim
-// stays, including one that belongs to another run. runID limits the scan to
-// one run; uuid.Nil scans every run. The leader's reclaim tick passes Nil so
-// a finished run is still swept.
+// write, and this path does not read them again. The runtime id stays on that
+// row: it is the record of which pod ran. A running row is reaped only when
+// its claim has lapsed and its run is no longer running, so no owner reclaim
+// will fence and stop it, and that reset still clears the runtime id. A
+// running attempt with an unexpired claim stays, including one that belongs
+// to another run. runID limits the scan to one run; uuid.Nil scans every run.
+// The leader's reclaim tick passes Nil so a finished run is still swept.
 func (s *Store) ReapAbandonedKubernetesPods(runID uuid.UUID) {
 	if s == nil || s.db == nil {
 		return
@@ -167,6 +168,9 @@ func (s *Store) ReapAbandonedKubernetesPods(runID uuid.UUID) {
 		targets := make([]RecoveredRuntime, 0, len(pending))
 		confirmed := time.Now().UTC()
 		for i := range pending {
+			if remembered, ok := s.reapedPodIDs.Load(pending[i].ID); ok && remembered == pending[i].RuntimeID {
+				continue
+			}
 			current, ok := s.confirmAbandonedKubernetesPod(pending[i], confirmed)
 			if !ok {
 				continue
@@ -234,25 +238,24 @@ func (s *Store) confirmAbandonedKubernetesPod(row models.TaskRun, now time.Time)
 	return current, true
 }
 
-// forgetReapedRuntimeIDs clears the runtime id once its pod is gone, so a
-// later tick does not revisit the row. The predicate matches the one that
-// allowed the delete: a row that became a live attempt keeps its id.
+// forgetReapedRuntimeIDs remembers a deleted pod so the next tick does not
+// stop it again. A terminal row keeps its runtime id: that is which pod ran.
+// Only a lapsed running attempt, whose row is being reset, has the id cleared.
 func (s *Store) forgetReapedRuntimeIDs(gone []RecoveredRuntime, now time.Time) {
 	if s == nil || s.db == nil || len(gone) == 0 {
 		return
 	}
 	for _, rt := range gone {
 		err := s.db.Model(&models.TaskRun{}).
-			Where("id = ? AND runtime_id = ?", rt.TaskRunID, rt.RuntimeID).
-			Where(
-				s.db.Where("status IN ?", terminalStatusStrings()).
-					Or("status = ? AND claim_expires_at IS NOT NULL AND claim_expires_at < ? AND EXISTS (SELECT 1 FROM job_runs WHERE job_runs.id = task_runs.job_run_id AND job_runs.status <> ?)",
-						string(TaskStatusRunning), now, string(StatusRunning)),
-			).
+			Where("id = ? AND runtime_id = ? AND status NOT IN ?", rt.TaskRunID, rt.RuntimeID, terminalStatusStrings()).
+			Where("status = ? AND claim_expires_at IS NOT NULL AND claim_expires_at < ? AND EXISTS (SELECT 1 FROM job_runs WHERE job_runs.id = task_runs.job_run_id AND job_runs.status <> ?)",
+				string(TaskStatusRunning), now, string(StatusRunning)).
 			Update("runtime_id", "").Error
 		if err != nil {
 			log.Warn("recovery: failed to clear a reaped runtime id", "task_run_id", rt.TaskRunID, "runtime_id", rt.RuntimeID, "error", err)
+			continue
 		}
+		s.reapedPodIDs.Store(rt.TaskRunID, rt.RuntimeID)
 	}
 }
 
