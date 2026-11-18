@@ -375,8 +375,10 @@ func (m *OwnerManager) rebuild(runID uuid.UUID, generation int64) (RecoveryResul
 		return RecoveryResult{}, nil, fmt.Errorf("run owner: reset in-flight tasks for %s: %w", runID, rErr)
 	}
 	// The dead owner's attempts are fenced out by the reset; stop their pods so
-	// the re-dispatch does not run beside an orphan.
+	// the re-dispatch does not run beside an orphan. The reset's stop list
+	// skips a row that already finished; reap deletes that leftover pod too.
 	StopRecoveredRuntimes("owner_takeover", recovered)
+	m.store.ReapAbandonedKubernetesPods(runID)
 	or := &ownedRun{
 		state:  rs,
 		writer: NewCheckpointWriter(m.store, runID, m.cfg),

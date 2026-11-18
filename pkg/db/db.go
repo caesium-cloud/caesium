@@ -345,6 +345,13 @@ func migrateOnce(router *Router) (err error) {
 	if err = migrateModels(router.Catalog(), models.All...); err != nil {
 		return err
 	}
+	// AutoMigrate has just added task_runs.reaped_runtime_id. The partial
+	// index that keeps the reclaim scan off already-deleted pods needs that
+	// column, so it runs after the model migration on every connection that
+	// carries task_runs.
+	if err = MigrateUnreapedKubernetesPodIndex(router.Catalog()); err != nil {
+		return err
+	}
 	// AutoMigrate has just added dag_snapshots.sequence; number the rows that
 	// predate it (idempotent, no-op once every row is sequenced).
 	if err = MigrateDagSnapshotSequence(router.Catalog()); err != nil {
@@ -355,8 +362,14 @@ func migrateOnce(router *Router) (err error) {
 			if err = migrateModels(shard, hotPathModels()...); err != nil {
 				return err
 			}
+			if err = MigrateUnreapedKubernetesPodIndex(shard); err != nil {
+				return err
+			}
 		}
 		if err = migrateModels(router.Cold(), hotPathModels()...); err != nil {
+			return err
+		}
+		if err = MigrateUnreapedKubernetesPodIndex(router.Cold()); err != nil {
 			return err
 		}
 	}

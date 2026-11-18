@@ -50,7 +50,9 @@ func stoppableRuntime(row *models.TaskRun) bool {
 // the two, but Postgres runs them at READ COMMITTED, so a renewal or completion
 // landing between them leaves a row the guarded UPDATE skipped, whose attempt
 // is live or finished. reset names the rows the UPDATE landed on, resolved after
-// it, so a stop can never reach a row the system still counts.
+// it, so a stop can never reach a row the system still counts. A finished row
+// stays out of this list; ReapAbandonedKubernetesPods deletes a pod that row
+// still names, without re-pending it.
 func recoveredRuntimesFrom(rows []models.TaskRun, reset map[uuid.UUID]struct{}) []RecoveredRuntime {
 	out := make([]RecoveredRuntime, 0, len(rows))
 	for i := range rows {
@@ -104,23 +106,170 @@ func StopRecoveredRuntimes(reason string, runtimes []RecoveredRuntime) {
 	}
 	pending := append([]RecoveredRuntime(nil), runtimes...)
 	launchRecoveredRuntimeStop(func() {
-		engine, err := kubernetesRecoveryEngine(context.Background())
-		if err != nil {
-			log.Warn("recovery: cannot stop the previous attempt's pods", "reason", reason, "count", len(pending), "error", err)
-			return
-		}
-		for _, rt := range pending {
-			stopErr := engine.Stop(&atom.EngineStopRequest{ID: rt.RuntimeID, Force: true, Timeout: recoveredRuntimeStopTimeout})
-			switch {
-			case stopErr == nil:
-				log.Info("recovery: stopped the previous attempt's pod", "reason", reason, "task_run_id", rt.TaskRunID, "runtime_id", rt.RuntimeID)
-			case apierrors.IsNotFound(stopErr):
-				log.Debug("recovery: previous attempt's pod already gone", "reason", reason, "task_run_id", rt.TaskRunID, "runtime_id", rt.RuntimeID)
-			default:
-				log.Warn("recovery: failed to stop the previous attempt's pod", "reason", reason, "task_run_id", rt.TaskRunID, "runtime_id", rt.RuntimeID, "error", stopErr)
-			}
-		}
+		stopKubernetesRuntimes(reason, pending)
 	})
+}
+
+// stopKubernetesRuntimes stops each pod and returns the runtimes whose pod is
+// gone (deleted, or already absent). A failed stop stays out of the result so
+// the caller can retry it on a later tick.
+func stopKubernetesRuntimes(reason string, runtimes []RecoveredRuntime) []RecoveredRuntime {
+	if len(runtimes) == 0 {
+		return nil
+	}
+	engine, err := kubernetesRecoveryEngine(context.Background())
+	if err != nil {
+		log.Warn("recovery: cannot stop the previous attempt's pods", "reason", reason, "count", len(runtimes), "error", err)
+		return nil
+	}
+	gone := make([]RecoveredRuntime, 0, len(runtimes))
+	for _, rt := range runtimes {
+		stopErr := engine.Stop(&atom.EngineStopRequest{ID: rt.RuntimeID, Force: true, Timeout: recoveredRuntimeStopTimeout})
+		switch {
+		case stopErr == nil:
+			log.Info("recovery: stopped the previous attempt's pod", "reason", reason, "task_run_id", rt.TaskRunID, "runtime_id", rt.RuntimeID)
+			gone = append(gone, rt)
+		case apierrors.IsNotFound(stopErr):
+			log.Debug("recovery: previous attempt's pod already gone", "reason", reason, "task_run_id", rt.TaskRunID, "runtime_id", rt.RuntimeID)
+			gone = append(gone, rt)
+		default:
+			log.Warn("recovery: failed to stop the previous attempt's pod", "reason", reason, "task_run_id", rt.TaskRunID, "runtime_id", rt.RuntimeID, "error", stopErr)
+		}
+	}
+	return gone
+}
+
+// ReapAbandonedKubernetesPods deletes Kubernetes task pods whose worker is
+// gone and will not delete them. A terminal row still naming a runtime is the
+// attempt that reached Succeeded or Failed and lost its worker before that
+// worker's Stop; the executor already snapshotted logs before the terminal
+// write, and this path does not read them again. The runtime id stays on that
+// row: it is the record of which pod ran. A running row is reaped only when
+// its claim has lapsed and its run is no longer running, so no owner reclaim
+// will fence and stop it, and that reset still clears the runtime id. A
+// running attempt with an unexpired claim stays, including one that belongs
+// to another run. runID limits the scan to one run; uuid.Nil scans every run.
+// The leader's reclaim tick passes Nil so a finished run is still swept.
+func (s *Store) ReapAbandonedKubernetesPods(runID uuid.UUID) {
+	if s == nil || s.db == nil {
+		return
+	}
+	now := time.Now().UTC()
+	rows, err := s.abandonedKubernetesPods(runID, now)
+	if err != nil {
+		log.Warn("recovery: abandoned pod scan failed", "run_id", runID, "error", err)
+		return
+	}
+	if len(rows) == 0 {
+		return
+	}
+	pending := append([]models.TaskRun(nil), rows...)
+	launchRecoveredRuntimeStop(func() {
+		targets := make([]RecoveredRuntime, 0, len(pending))
+		confirmed := time.Now().UTC()
+		for i := range pending {
+			current, ok := s.confirmAbandonedKubernetesPod(pending[i], confirmed)
+			if !ok {
+				continue
+			}
+			targets = append(targets, RecoveredRuntime{
+				TaskRunID: current.ID,
+				Engine:    current.Engine,
+				RuntimeID: current.RuntimeID,
+			})
+		}
+		gone := stopKubernetesRuntimes("abandoned_task_pod", targets)
+		s.forgetReapedRuntimeIDs(gone, time.Now().UTC())
+	})
+}
+
+// abandonedKubernetesPods is the candidate scan for ReapAbandonedKubernetesPods.
+// confirmAbandonedKubernetesPod is the same predicate, re-read before the delete.
+func (s *Store) abandonedKubernetesPods(runID uuid.UUID, now time.Time) ([]models.TaskRun, error) {
+	q := s.db.Model(&models.TaskRun{}).
+		Select("id", "job_run_id", "engine", "runtime_id", "status", "claim_expires_at").
+		Where("engine = ?", models.AtomEngineKubernetes).
+		Where("runtime_id <> ''").
+		// A reaped terminal row keeps its runtime id and records that same id
+		// in reaped_runtime_id. Excluding the match is what lets finished
+		// history leave this scan; a new attempt's different runtime id does
+		// not match and comes back.
+		Where("reaped_runtime_id <> runtime_id").
+		Where(
+			s.db.Where("status IN ?", terminalStatusStrings()).
+				Or("status = ? AND claim_expires_at IS NOT NULL AND claim_expires_at < ? AND EXISTS (SELECT 1 FROM job_runs WHERE job_runs.id = task_runs.job_run_id AND job_runs.status <> ?)",
+					string(TaskStatusRunning), now, string(StatusRunning)),
+		)
+	if runID != uuid.Nil {
+		q = q.Where("job_run_id = ?", runID)
+	}
+	var rows []models.TaskRun
+	err := q.Find(&rows).Error
+	return rows, err
+}
+
+// confirmAbandonedKubernetesPod reports whether row still names a pod its
+// worker will not delete. A claim renewed since the scan, or a runtime id
+// replaced by a live attempt, is no longer this pod's to stop.
+func (s *Store) confirmAbandonedKubernetesPod(row models.TaskRun, now time.Time) (models.TaskRun, bool) {
+	var current models.TaskRun
+	err := s.db.Select("id", "job_run_id", "engine", "runtime_id", "status", "claim_expires_at").
+		First(&current, "id = ?", row.ID).Error
+	if err != nil {
+		return models.TaskRun{}, false
+	}
+	if current.Engine != models.AtomEngineKubernetes || strings.TrimSpace(current.RuntimeID) == "" {
+		return models.TaskRun{}, false
+	}
+	if current.RuntimeID != row.RuntimeID {
+		return models.TaskRun{}, false
+	}
+	if IsTerminal(TaskStatus(current.Status)) {
+		return current, true
+	}
+	if current.Status != string(TaskStatusRunning) || current.ClaimExpiresAt == nil || !current.ClaimExpiresAt.Before(now) {
+		return models.TaskRun{}, false
+	}
+	var runStatus string
+	if err := s.db.Model(&models.JobRun{}).Select("status").Where("id = ?", current.JobRunID).Scan(&runStatus).Error; err != nil {
+		return models.TaskRun{}, false
+	}
+	if runStatus == string(StatusRunning) || runStatus == "" {
+		return models.TaskRun{}, false
+	}
+	return current, true
+}
+
+// forgetReapedRuntimeIDs records a deleted pod so the next tick does not
+// select it. A terminal row keeps its runtime id and stores the same value
+// in reaped_runtime_id: that is which pod ran, and the equality is what
+// drops the row from abandonedKubernetesPods. Only a lapsed running attempt,
+// whose row is being reset, has the runtime id cleared. A row that no longer
+// matches either predicate changed under us; the next scan re-reads it.
+func (s *Store) forgetReapedRuntimeIDs(gone []RecoveredRuntime, now time.Time) {
+	if s == nil || s.db == nil || len(gone) == 0 {
+		return
+	}
+	for _, rt := range gone {
+		marked := s.db.Model(&models.TaskRun{}).
+			Where("id = ? AND runtime_id = ? AND status IN ?", rt.TaskRunID, rt.RuntimeID, terminalStatusStrings()).
+			Update("reaped_runtime_id", rt.RuntimeID)
+		if marked.Error != nil {
+			log.Warn("recovery: failed to record a reaped runtime id", "task_run_id", rt.TaskRunID, "runtime_id", rt.RuntimeID, "error", marked.Error)
+			continue
+		}
+		if marked.RowsAffected > 0 {
+			continue
+		}
+		err := s.db.Model(&models.TaskRun{}).
+			Where("id = ? AND runtime_id = ? AND status NOT IN ?", rt.TaskRunID, rt.RuntimeID, terminalStatusStrings()).
+			Where("status = ? AND claim_expires_at IS NOT NULL AND claim_expires_at < ? AND EXISTS (SELECT 1 FROM job_runs WHERE job_runs.id = task_runs.job_run_id AND job_runs.status <> ?)",
+				string(TaskStatusRunning), now, string(StatusRunning)).
+			Update("runtime_id", "").Error
+		if err != nil {
+			log.Warn("recovery: failed to clear a reaped runtime id", "task_run_id", rt.TaskRunID, "runtime_id", rt.RuntimeID, "error", err)
+		}
+	}
 }
 
 // SetRecoveryEngineForTesting replaces the engine recovery stops pods with and

@@ -643,6 +643,9 @@ func (c *Claimer) ReclaimExpired(ctx context.Context) error {
 	if err == nil {
 		counts.commit()
 		run.StopRecoveredRuntimes("worker_lease_expired", recovered)
+		// Finished runs are outside the reset above. A terminal pod whose
+		// worker died before deleting it is still named by its row.
+		c.store.ReapAbandonedKubernetesPods(uuid.Nil)
 		if productionReclaimedCount > 0 {
 			metrics.WorkerLeaseExpirationsTotal.WithLabelValues(c.nodeID).Add(float64(productionReclaimedCount))
 		}

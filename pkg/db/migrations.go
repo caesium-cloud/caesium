@@ -363,3 +363,28 @@ func MigrateDagSnapshotSequence(conn *gorm.DB) error {
 	}
 	return nil
 }
+
+// unreapedKubernetesPodIndexName is the partial index that keeps the leader's
+// reclaim scan on pods that have not been deleted yet.
+const unreapedKubernetesPodIndexName = "idx_taskrun_unreaped_k8s"
+
+// MigrateUnreapedKubernetesPodIndex creates the partial index behind
+// Store.abandonedKubernetesPods. The scan is engine = kubernetes, a non-empty
+// runtime id, and reaped_runtime_id <> runtime_id. Without the partial index
+// that predicate still returns only unreaped rows, but the leader's reclaim
+// tick would read every historical Kubernetes task to do it. The index runs
+// after AutoMigrate has added reaped_runtime_id. It is idempotent.
+func MigrateUnreapedKubernetesPodIndex(conn *gorm.DB) error {
+	if conn == nil {
+		return nil
+	}
+	if !conn.Migrator().HasTable(&models.TaskRun{}) || !conn.Migrator().HasColumn(&models.TaskRun{}, "ReapedRuntimeID") {
+		return nil
+	}
+	stmt := `CREATE INDEX IF NOT EXISTS ` + unreapedKubernetesPodIndexName +
+		` ON task_runs (id) WHERE engine = 'kubernetes' AND runtime_id <> '' AND reaped_runtime_id <> runtime_id`
+	if err := conn.Exec(stmt).Error; err != nil {
+		return fmt.Errorf("db: create unreaped kubernetes pod index: %w", err)
+	}
+	return nil
+}

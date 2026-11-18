@@ -147,5 +147,9 @@ func (s *Store) ReclaimOwnerExpiredClaims(runID uuid.UUID, ownerGeneration int64
 	counts.commit()
 	s.publishEvents(pendingEvents...)
 	StopRecoveredRuntimes("owner_expired_claim", recovered)
+	// Terminal pods of this run are not in recovered: the reset only re-pends
+	// running rows. A finished attempt whose worker died before Stop still
+	// names its pod.
+	s.ReapAbandonedKubernetesPods(runID)
 	return reset, nil
 }

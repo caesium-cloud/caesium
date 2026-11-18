@@ -183,10 +183,12 @@ func TestResetInFlightTasksReturnsNoStopList(t *testing.T) {
 }
 
 // A completion landing between ResetOwnerInFlightTasks' read and its UPDATE
-// leaves the row terminal, and it stays out of the stop list. The seam commits
+// leaves the row terminal, so the reset does not re-pend it. The seam commits
 // that write through the reset's own transaction: SQLite cannot interleave a
 // second writer, and on Postgres READ COMMITTED shows the UPDATE the same state.
-func TestOwnerTakeoverSparesARowThatCompletedAfterTheRead(t *testing.T) {
+// The executor stops the pod before that terminal write. A pod that is still
+// here belongs to a worker that will not delete it, and takeover reaps it.
+func TestOwnerTakeoverReapsAPodWhoseRowCompletedAfterTheRead(t *testing.T) {
 	db := testutil.OpenTestDB(t)
 	t.Cleanup(func() { testutil.CloseDB(db) })
 	store := NewStore(db)
@@ -207,9 +209,53 @@ func TestOwnerTakeoverSparesARowThatCompletedAfterTheRead(t *testing.T) {
 	_, err := mgr.Recover(runID, 1)
 	require.NoError(t, err)
 
-	require.True(t, podExists(t, client, "caesium-mapped", "step-a-1"), "the completed row was not reset, so its pod is not recovery's to stop")
+	require.False(t, podExists(t, client, "caesium-mapped", "step-a-1"), "a terminal row's leftover pod is reaped")
 	require.False(t, podExists(t, client, "caesium-mapped", "step-b-1"), "the row the reset landed on is stopped")
-	require.Equal(t, string(TaskStatusSucceeded), taskRunFor(t, db, runID, taskA).Status)
+	finished := taskRunFor(t, db, runID, taskA)
+	require.Equal(t, string(TaskStatusSucceeded), finished.Status, "the completed row is not re-pended")
+	require.Equal(t, "caesium-mapped/step-a-1", finished.RuntimeID, "a finished attempt keeps the pod it ran")
+	require.Equal(t, finished.RuntimeID, finished.ReapedRuntimeID, "a reaped terminal row leaves the next scan")
+}
+
+// A recorded reap is durable. Recreating the same pod must not put the
+// finished row back on the candidate scan, and a later attempt's different
+// runtime id must.
+func TestReapedTerminalPodLeavesTheCandidateScan(t *testing.T) {
+	db := testutil.OpenTestDB(t)
+	t.Cleanup(func() { testutil.CloseDB(db) })
+	store := NewStore(db)
+	runID, taskA, _ := seedTwoTaskRun(t, db, store, "")
+	client := useFakeRecoveryCluster(t, recoveryPod("caesium-mapped", "step-a-1"))
+	require.NoError(t, db.Model(&models.TaskRun{}).
+		Where("job_run_id = ? AND task_id = ?", runID, taskA).
+		Updates(map[string]any{
+			"status":     string(TaskStatusSucceeded),
+			"engine":     string(models.AtomEngineKubernetes),
+			"runtime_id": "caesium-mapped/step-a-1",
+		}).Error)
+
+	store.ReapAbandonedKubernetesPods(runID)
+	require.False(t, podExists(t, client, "caesium-mapped", "step-a-1"))
+	reaped := taskRunFor(t, db, runID, taskA)
+	require.Equal(t, "caesium-mapped/step-a-1", reaped.RuntimeID)
+	require.Equal(t, reaped.RuntimeID, reaped.ReapedRuntimeID)
+
+	_, err := client.CoreV1().Pods("caesium-mapped").Create(context.Background(), recoveryPod("caesium-mapped", "step-a-1"), metav1.CreateOptions{})
+	require.NoError(t, err)
+	store.ReapAbandonedKubernetesPods(uuid.Nil)
+	require.True(t, podExists(t, client, "caesium-mapped", "step-a-1"), "a recorded reap stays out of the scan")
+
+	_, err = client.CoreV1().Pods("caesium-mapped").Create(context.Background(), recoveryPod("caesium-mapped", "step-a-2"), metav1.CreateOptions{})
+	require.NoError(t, err)
+	require.NoError(t, db.Model(&models.TaskRun{}).
+		Where("id = ?", reaped.ID).
+		Update("runtime_id", "caesium-mapped/step-a-2").Error)
+	store.ReapAbandonedKubernetesPods(uuid.Nil)
+	require.False(t, podExists(t, client, "caesium-mapped", "step-a-2"), "a new runtime id is eligible again")
+	require.True(t, podExists(t, client, "caesium-mapped", "step-a-1"), "the previously reaped pod is not selected")
+	again := taskRunFor(t, db, runID, taskA)
+	require.Equal(t, "caesium-mapped/step-a-2", again.RuntimeID)
+	require.Equal(t, again.RuntimeID, again.ReapedRuntimeID)
 }
 
 // An owner that lost its lease must not force-stop the attempt of the newer
@@ -303,8 +349,8 @@ func TestReclaimOwnerExpiredClaimsStopsOnlyTheLapsedAttemptsPod(t *testing.T) {
 
 // A renewal landing between the owner reap's read and its guarded UPDATE keeps
 // the claim, so the row stays out of the stop list. See
-// TestOwnerTakeoverSparesARowThatCompletedAfterTheRead for how the seam stands
-// in for the concurrent commit.
+// TestOwnerTakeoverReapsAPodWhoseRowCompletedAfterTheRead for how the seam
+// stands in for the concurrent commit.
 func TestReclaimOwnerExpiredClaimsSparesAClaimRenewedAfterTheRead(t *testing.T) {
 	db := testutil.OpenTestDB(t)
 	t.Cleanup(func() { testutil.CloseDB(db) })
