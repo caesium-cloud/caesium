@@ -255,7 +255,7 @@ func cancelContext(t *testing.T, jobID, runID uuid.UUID, principal *auth.Princip
 	t.Helper()
 	e := echo.New()
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodPost, "/cancel", nil)
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/cancel", nil)
 	c := e.NewContext(req, rec)
 	runValue := runID.String()
 	if runID == uuid.Nil {
