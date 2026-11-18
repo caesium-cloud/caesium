@@ -1038,10 +1038,16 @@ func buildLocalRunners(
 }
 
 // quarantinedReplaySpec loads the template spec for one quarantined catalog
-// task. Every instance row must be replay safe. The template is the first
-// instance's descriptor. An unfanned task has only that row, so this is the
-// spec it executes. A fanned group does not: each instance is reconstructed
-// from its own descriptor in runFannedGroup.
+// task. Replay safety is an execution gate, matching runtimeExecutor.Execute,
+// which checks it only for a task it is about to run. A row the constructor
+// already reused (status cached) or that is otherwise terminal stays in the
+// frozen graph and is not checked: an unchanged step that was not recorded
+// replay-safe is allowed to keep its recorded result, and must not reject a
+// sibling step that still has to execute. A row that will execute must be
+// replay safe. The template is the first instance's descriptor. An unfanned
+// task has only that row, so this is the spec it executes. A fanned group
+// does not: each instance is reconstructed from its own descriptor in
+// runFannedGroup.
 func quarantinedReplaySpec(ctx context.Context, store *run.Store, runID, taskID uuid.UUID) (container.Spec, *models.TaskExecutionDescriptor, error) {
 	rows, err := retryOnContentionDo(ctx, func() ([]models.TaskRun, error) {
 		return store.TaskRunsForTask(runID, taskID)
@@ -1053,6 +1059,9 @@ func quarantinedReplaySpec(ctx context.Context, store *run.Store, runID, taskID 
 		return container.Spec{}, nil, fmt.Errorf("quarantined replay task %s has no task rows to reconstruct", taskID)
 	}
 	for i := range rows {
+		if run.IsTerminal(run.TaskStatus(rows[i].Status)) {
+			continue
+		}
 		if !rows[i].ReplaySafe {
 			return container.Spec{}, nil, fmt.Errorf("quarantined replay task is not replay safe: task %s", taskID)
 		}

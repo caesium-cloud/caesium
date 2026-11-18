@@ -528,6 +528,89 @@ func TestRunLocalReconstructsQuarantinedReplay(t *testing.T) {
 	})
 }
 
+func TestRunLocalQuarantinedCacheHitSkipsReplaySafeGate(t *testing.T) {
+	db, store, engine, jobID, runID := seedQuarantinedLocalJob(t)
+	reusedID := uuid.New()
+	rerunID := uuid.New()
+	reusedAtom := uuid.New()
+	rerunAtom := uuid.New()
+	now := time.Now().UTC()
+	tasks := models.Tasks{
+		{ID: reusedID, JobID: jobID, AtomID: reusedAtom, Name: "extract-live", CreatedAt: now, UpdatedAt: now},
+		{ID: rerunID, JobID: jobID, AtomID: rerunAtom, Name: "publish-live", CreatedAt: now.Add(time.Second), UpdatedAt: now},
+	}
+	edges := models.TaskEdges{{
+		ID: uuid.New(), JobID: jobID, FromTaskID: reusedID, ToTaskID: rerunID, CreatedAt: now, UpdatedAt: now,
+	}}
+	persistGraph(t, db, tasks, edges)
+
+	reused := quarantinedBaselineTaskRun(t, runID, reusedID, reusedAtom, false)
+	reused.Status = string(run.TaskStatusCached)
+	reused.CacheHit = true
+	reused.Result = "success"
+	reused.CompletedAt = &now
+	origin := uuid.New()
+	reused.CacheOriginRunID = &origin
+	reused.CacheCreatedAt = &now
+	overlayQuarantinedDescriptor(t, reused, func(desc *models.TaskExecutionDescriptor) {
+		desc.Baseline.TaskName = "extract-baseline"
+		desc.DAG.TaskPosition = 0
+		desc.DAG.Successors = []models.TaskExecutionEdgeRef{{TaskID: rerunID, TaskName: "publish-baseline"}}
+	})
+
+	// Outstanding predecessors counts only steps that will re-execute. The
+	// constructor writes 0 here because the predecessor is already a cache hit.
+	rerun := quarantinedBaselineTaskRun(t, runID, rerunID, rerunAtom, true)
+	rerun.Image = "baseline/publish:pinned"
+	rerun.Command = `["sh","-c","echo publish"]`
+	rerun.OutstandingPredecessors = 0
+	rerun.CacheEnabled = false
+	overlayQuarantinedDescriptor(t, rerun, func(desc *models.TaskExecutionDescriptor) {
+		desc.Baseline.TaskName = "publish-baseline"
+		desc.Runtime.Image = "baseline/publish:pinned"
+		desc.Runtime.Command = []string{"sh", "-c", "echo publish"}
+		desc.Cache.Enabled = false
+		desc.DAG.TaskPosition = 1
+		desc.DAG.Predecessors = []models.TaskExecutionEdgeRef{{TaskID: reusedID, TaskName: "extract-baseline"}}
+		desc.DAG.OutstandingPredecessors = 0
+	})
+	require.NoError(t, db.Create(reused).Error)
+	require.NoError(t, db.Create(rerun).Error)
+
+	err := runQuarantinedLocal(t, store, engine, jobID, runID,
+		&fakeTaskService{tasks: tasks},
+		&fakeAtomService{atoms: map[uuid.UUID]*models.Atom{
+			reusedAtom: {ID: reusedAtom, Engine: models.AtomEngineDocker, Image: "current/extract:latest", Command: `["echo","current-extract"]`},
+			rerunAtom:  {ID: rerunAtom, Engine: models.AtomEngineDocker, Image: "current/publish:latest", Command: `["echo","current-publish"]`},
+		}},
+		&fakeTaskEdgeService{edges: edges},
+		nil,
+	)
+	require.NoError(t, err)
+	require.Empty(t, engine.createRequestsForTask(reusedID), "a reused cache hit must not execute")
+	created := engine.createRequestsForTask(rerunID)
+	require.Len(t, created, 1)
+	require.Equal(t, "baseline/publish:pinned", created[0].Image)
+	require.Equal(t, []string{"sh", "-c", "echo publish"}, created[0].Command)
+
+	snapshot := latestRunSnapshot(t, store, jobID)
+	require.Equal(t, run.StatusSucceeded, snapshot.Status)
+	status := taskStatusByID(snapshot)
+	require.Equal(t, run.TaskStatusCached, status[reusedID])
+	require.Equal(t, run.TaskStatusSucceeded, status[rerunID])
+	require.False(t, taskRunByID(snapshot, reusedID).ReplaySafe)
+}
+
+func overlayQuarantinedDescriptor(t *testing.T, row *models.TaskRun, mutate func(*models.TaskExecutionDescriptor)) {
+	t.Helper()
+	var desc models.TaskExecutionDescriptor
+	require.NoError(t, json.Unmarshal(row.ExecutionDescriptor, &desc))
+	mutate(&desc)
+	raw, err := json.Marshal(desc)
+	require.NoError(t, err)
+	row.ExecutionDescriptor = datatypes.JSON(raw)
+}
+
 func TestRunLocalQuarantinedFanOutUsesEachInstanceDescriptor(t *testing.T) {
 	db, store, engine, jobID, runID := seedQuarantinedLocalJob(t)
 	taskID := uuid.New()
