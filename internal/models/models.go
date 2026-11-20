@@ -17,6 +17,7 @@ var All = []any{
 	&Backfill{},
 	&JobRun{},
 	&TaskRun{},
+	&DescriptorTombstone{},
 	&LineageDataset{},
 	&ContractAck{},
 	&TaskCache{},

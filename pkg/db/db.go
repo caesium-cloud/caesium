@@ -410,6 +410,7 @@ func hotPathModels() []any {
 	return []any{
 		&models.JobRun{},
 		&models.TaskRun{},
+		&models.DescriptorTombstone{},
 		&models.CallbackRun{},
 		&models.ExecutionEvent{},
 		// run_checkpoints is per-run and transactionally local to task_runs, so

@@ -1,4 +1,4 @@
-// Package reproduce exposes the read-only execution descriptor surface used by
+// Package reproduce exposes the execution descriptor surface used by
 // the reproduce client feature.
 package reproduce
 
@@ -8,18 +8,25 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
+	"github.com/caesium-cloud/caesium/internal/auth"
+	"github.com/caesium-cloud/caesium/internal/authz"
 	"github.com/caesium-cloud/caesium/internal/models"
 	runstorage "github.com/caesium-cloud/caesium/internal/run"
 	"github.com/caesium-cloud/caesium/pkg/db"
 	"github.com/google/uuid"
 	"gorm.io/datatypes"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 // ErrDescriptorUnavailable is returned when an addressed task run exists but
 // predates execution-descriptor capture or otherwise lacks a stored descriptor.
 var ErrDescriptorUnavailable = errors.New("reproduce: descriptor unavailable")
+
+var ErrDescriptorPruned = errors.New("descriptor pruned")
+var ErrRunActive = errors.New("only completed runs can be pruned")
 
 // ErrFannedTaskAmbiguous is returned when a task reference names a fan-out group
 // rather than one instance. This surface is fail-closed by design: a
@@ -38,8 +45,9 @@ var ErrFannedTaskAmbiguous = errors.New("reproduce: task is a fan-out group; des
 
 // Service loads task execution descriptors for the REST controller.
 type Service struct {
-	ctx context.Context
-	db  *gorm.DB
+	ctx   context.Context
+	db    *gorm.DB
+	jobID *uuid.UUID
 }
 
 // DescriptorResponse is the small response wrapper around the stored raw
@@ -96,6 +104,7 @@ type LogExcerptReference struct {
 }
 
 type taskDescriptorRow struct {
+	TaskName            string
 	ID                  uuid.UUID
 	JobID               uuid.UUID
 	TaskID              uuid.UUID
@@ -121,11 +130,17 @@ func NewWithDatabase(ctx context.Context, conn *gorm.DB) *Service {
 }
 
 // WithDatabase returns a copy of the Service using the supplied connection.
-func (s *Service) WithDatabase(conn *gorm.DB) *Service {
-	if conn == nil {
-		return s
+func (s Service) WithDatabase(conn *gorm.DB) *Service {
+	if conn != nil {
+		s.db = conn
 	}
-	return NewWithDatabase(s.ctx, conn)
+	return &s
+}
+
+// ForJob scopes live and pruned descriptor lookups to the job in the route.
+func (s Service) ForJob(id uuid.UUID) *Service {
+	s.jobID = &id
+	return &s
 }
 
 // Descriptor returns the raw stored descriptor for taskRef in runID. taskRef is
@@ -173,19 +188,87 @@ func (s *Service) resolveTaskRun(taskRef string, runID uuid.UUID) (*taskDescript
 		return nil, err
 	}
 
-	taskID, err := uuid.Parse(taskRef)
-	if err != nil {
-		return nil, runstorage.ErrTaskRunNotFound
-	}
-
-	row, err := s.resolveTaskRunByID(taskID, runID)
-	if err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return nil, runstorage.ErrTaskRunNotFound
-		}
+	// Names take precedence over UUIDs even after their rows have been pruned.
+	if err := s.checkTombstone(runID, "task_name = ?", taskRef); err != nil {
 		return nil, err
 	}
-	return row, nil
+	taskID, err := uuid.Parse(taskRef)
+	if err == nil {
+		row, err := s.resolveTaskRunByID(taskID, runID)
+		if !errors.Is(err, gorm.ErrRecordNotFound) {
+			return row, err
+		}
+		if err := s.checkTombstone(runID, "task_id = ?", taskID); err != nil {
+			return nil, err
+		}
+	}
+	return nil, runstorage.ErrTaskRunNotFound
+}
+
+func (s *Service) checkTombstone(runID uuid.UUID, match string, value any) error {
+	query := s.db.WithContext(s.ctx).Model(&models.DescriptorTombstone{}).
+		Joins("JOIN job_runs ON job_runs.id = descriptor_tombstones.job_run_id").
+		Where("descriptor_tombstones.job_run_id = ?", runID).Where(match, value)
+	if s.jobID != nil {
+		query = query.Where("job_runs.job_id = ?", *s.jobID)
+	}
+	var count int64
+	if err := query.Count(&count).Error; err != nil {
+		return err
+	}
+	if count > 0 {
+		return ErrDescriptorPruned
+	}
+	return nil
+}
+
+// Prune removes one descriptor-bearing task run and records its identity in the same transaction.
+func (s *Service) Prune(jobID, runID uuid.UUID, taskRef string, principal *auth.Principal) error {
+	return s.db.WithContext(s.ctx).Transaction(func(tx *gorm.DB) error {
+		// Hold the ownership and completion snapshot through deletion, including
+		// when a retry races a prune or a job moves to another namespace.
+		var owner struct {
+			JobNamespace, RunNamespace, Alias string
+			CompletedAt                       *time.Time
+		}
+		err := tx.Table("job_runs").Joins("JOIN jobs ON jobs.id = job_runs.job_id").
+			Select("jobs.namespace AS job_namespace, jobs.alias, job_runs.namespace AS run_namespace, job_runs.completed_at").
+			Where("job_runs.id = ? AND jobs.id = ?", runID, jobID).
+			Clauses(clause.Locking{Strength: "UPDATE"}).Take(&owner).Error
+		if err != nil {
+			return err
+		}
+		if principal == nil || !auth.CheckScope(principal.Scope, owner.Alias) {
+			return &authz.Denial{Reason: "insufficient_scope", Required: models.RoleOperator, Message: "insufficient permissions"}
+		}
+		for _, ns := range []string{owner.JobNamespace, owner.RunNamespace} {
+			if err := authz.RequireRoleIn(principal, models.RoleOperator, ns); err != nil {
+				return err
+			}
+		}
+		scoped := s.ForJob(jobID).WithDatabase(tx)
+		row, err := scoped.resolveTaskRun(strings.TrimSpace(taskRef), runID)
+		if errors.Is(err, ErrDescriptorPruned) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if len(row.ExecutionDescriptor) == 0 {
+			return ErrDescriptorUnavailable
+		}
+		if owner.CompletedAt == nil {
+			return ErrRunActive
+		}
+		deleted := tx.Where("id = ? AND execution_descriptor IS NOT NULL", row.ID).Delete(&models.TaskRun{})
+		if deleted.Error != nil {
+			return deleted.Error
+		}
+		if deleted.RowsAffected == 0 {
+			return runstorage.ErrTaskRunNotFound
+		}
+		return tx.Create(&models.DescriptorTombstone{JobRunID: runID, TaskID: row.TaskID, TaskName: row.TaskName, PrunedAt: time.Now().UTC()}).Error
+	})
 }
 
 func (s *Service) resolveTaskRunByName(taskName string, runID uuid.UUID) (*taskDescriptorRow, error) {
@@ -242,10 +325,10 @@ func assertUnfanned(rows []taskDescriptorRow) (*taskDescriptorRow, error) {
 }
 
 func (s *Service) baseDescriptorQuery(runID uuid.UUID) *gorm.DB {
-	return s.db.WithContext(s.ctx).
+	query := s.db.WithContext(s.ctx).
 		Table("task_runs").
 		Select(
-			"task_runs.id AS id, "+
+			"task_runs.id AS id, tasks.name AS task_name, "+
 				"job_runs.job_id AS job_id, "+
 				"task_runs.task_id AS task_id, "+
 				"task_runs.status AS status, "+
@@ -260,6 +343,10 @@ func (s *Service) baseDescriptorQuery(runID uuid.UUID) *gorm.DB {
 		Joins("JOIN job_runs ON job_runs.id = task_runs.job_run_id").
 		Joins("JOIN tasks ON tasks.id = task_runs.task_id").
 		Where("task_runs.job_run_id = ?", runID)
+	if s.jobID != nil {
+		query = query.Where("job_runs.job_id = ?", *s.jobID)
+	}
+	return query
 }
 
 func cloneRawJSON(raw []byte) json.RawMessage {

@@ -123,6 +123,7 @@ func Protected(g *echo.Group, bus internal_event.Bus, auditor *auth.AuditLogger,
 		// causal explainer (data-plane-memory A3): why a task ran/hit cache/re-ran
 		g.GET("/jobs/:id/runs/:run_id/why", whyctrl.Get)
 		g.GET("/jobs/:id/runs/:run_id/tasks/:task/descriptor", reproducectrl.Get)
+		g.DELETE("/jobs/:id/runs/:run_id/tasks/:task/descriptor", reproducectrl.Prune)
 		g.POST("/jobs/:id/runs/:run_id/callbacks/retry", run.RetryCallbacks)
 		g.POST("/jobs/:id/runs/:run_id/replay", replayctrl.Post)
 		g.POST("/jobs/:id/runs/:run_id/retry", run.Retry)

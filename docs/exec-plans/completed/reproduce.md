@@ -423,6 +423,7 @@ on the shared command file — see conflicts).
   **predates descriptors** for better operator messaging) — deferred until a run-
   retention pruner lands (`task_runs` has no pruner today, `pkg/env/env.go`). A1
   returns the generic "descriptor unavailable" → exit 2 for both cases meanwhile.
+  Follow-up #406 resolved this with explicit pruning and distinct exit-2 diagnostics.
 - Design Open Question #4 (`--shell-image` busybox:1.36.1 sidecar for distroless) —
   deferred; C3 fails distroless `--shell` with guidance instead.
 - Design Open Question #5 (return the redacted `HashInputBlob` so the CLI prints an
