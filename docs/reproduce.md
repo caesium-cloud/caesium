@@ -103,6 +103,27 @@ Limits: the shell image must ship a static BusyBox binary (the default does); on
 
 In `--shell` mode, a successful shell exits `0`. If the interactive shell process exits non-zero, reproduce propagates that shell exit code; setup and shell-unavailable errors still exit `2`.
 
+## Descriptor retention
+
+Caesium keeps descriptor-bearing task runs by default. To remove one task-run
+row from a completed run, a signed-in operator can send
+`DELETE /v1/jobs/{job_id}/runs/{run_id}/tasks/{task}/descriptor` using the
+task name or task UUID. The request requires operator access in both the job
+and run namespaces. A successful prune returns 204, including on a repeat
+request. This removes the task run from run history, including its stored output and
+any lineage or dataset metric rows that cascade on deletion. It leaves a tombstone
+containing the run ID, task ID, task name, and prune time. As with descriptor
+reads, a fan-out group cannot be addressed as a single task.
+
+| Descriptor GET outcome | CLI diagnostic (exit 2) |
+| --- | --- |
+| Task run explicitly pruned | `descriptor pruned` |
+| Task run exists with an empty descriptor | `descriptor unavailable` |
+| Unknown run or task | `fetch descriptor failed (404)` with the server's not-found response |
+
+All three reads return HTTP 404. With `--json`, failed reads leave stdout
+empty and write the diagnostic to stderr.
+
 ## Fidelity Contract
 
 The CLI emits a fidelity summary in human output and under `fidelity.dimensions[]` in JSON. Status values are `faithful`, `degraded`, `overridden`, `not_reproduced`, and `listed_not_applied`.

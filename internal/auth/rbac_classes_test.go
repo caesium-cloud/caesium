@@ -131,6 +131,8 @@ var masterEndpointRoles = map[string]models.Role{
 // connector reads master gained after the W3 base (execution-connectors W5,
 // #644, all viewer there).
 var routesAddedAfterMaster = map[string]RoutePolicy{
+	"DELETE /v1/jobs/:id/runs/:id/tasks/:id/descriptor": {Role: models.RoleOperator, Class: RouteClassNamespaced},
+
 	"GET /v1/auth/policy":         {Role: models.RoleAdmin, Class: RouteClassCluster},
 	"POST /v1/auth/policy/reload": {Role: models.RoleAdmin, Class: RouteClassCluster},
 	"GET /v1/auth/namespaces":     {Role: models.RoleViewer, Class: RouteClassCluster},

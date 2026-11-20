@@ -95,6 +95,15 @@ type JobRun struct {
 	TotalTasks        int        `gorm:"-" json:"total_tasks"`
 }
 
+// DescriptorTombstone retains only the identity of an explicitly pruned task run.
+type DescriptorTombstone struct {
+	JobRunID uuid.UUID `gorm:"type:uuid;primaryKey"`
+	JobRun   JobRun    `gorm:"constraint:OnDelete:CASCADE" json:"-"`
+	TaskID   uuid.UUID `gorm:"type:uuid;primaryKey"`
+	TaskName string    `gorm:"not null"`
+	PrunedAt time.Time `gorm:"not null"`
+}
+
 type TaskRun struct {
 	ID             uuid.UUID  `gorm:"type:uuid;primaryKey" json:"id"`
 	JobRunID       uuid.UUID  `gorm:"type:uuid;uniqueIndex:idx_taskrun_jobrun_task;index;index:idx_taskrun_terminal_seq,priority:1;not null" json:"job_run_id"`

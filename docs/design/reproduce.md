@@ -313,11 +313,11 @@ the real surface — no unit-test-on-the-handler substitute:
 
 ## Open Questions
 
-1. **Descriptor retention.** Descriptors ride `task_runs` rows, which have no
-   pruner today (only events/webhook rows expire, `pkg/env/env.go:154`). If a
-   run-retention policy lands, pruned descriptors must yield the clean exit-2
-   error — should the endpoint distinguish "pruned" from "predates descriptors"
-   for better operator messaging?
+1. **Descriptor retention (resolved).** An explicit operator prune leaves an
+   identity tombstone. A descriptor GET returns HTTP 404 with `descriptor pruned`
+   for that task, `descriptor unavailable` for an existing task run with an empty
+   descriptor, and the ordinary not-found response for an unknown run or task.
+   The CLI exits 2 in all three cases.
 2. **Runtime reuse.** Ride `internal/localrun` by synthesizing a one-step
    definition (gets timeouts, marker parsing, log capture for free, at the cost
    of an in-memory SQLite it doesn't need), or call the Docker engine adapter

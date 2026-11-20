@@ -1935,6 +1935,9 @@ PY
   # hold rendering, none of which the other journeys touch.
   local_pattern="${local_pattern%)}|TestWhyExplainsHoldSkippedRun)"
 
+  local_pattern="${local_pattern%)}|TestReproduceDescriptorRetention)"
+  auth_pattern="${auth_pattern%)}|TestReproduceDescriptorRetention)"
+
   local -a local_named_passes=(
     TestCaesiumWhyExplainsHitAndMiss
     TestRunDiffAttributesChangedField

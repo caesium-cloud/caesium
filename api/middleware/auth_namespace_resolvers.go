@@ -111,6 +111,7 @@ var namespaceResolvers = map[string]namespaceResolver{
 	"GET /v1/jobs/:id/runs/:id/datasets":                        resolveJobRun,
 	"GET /v1/jobs/:id/runs/:id/receipt":                         resolveJobRun,
 	"POST /v1/jobs/:id/runs/:id/receipt/verify":                 resolveJobRun,
+	"DELETE /v1/jobs/:id/runs/:id/tasks/:id/descriptor":         resolveJobRun,
 	"GET /v1/jobs/:id/runs/:id/tasks/:id/descriptor":            resolveJobRun,
 	"GET /v1/jobs/:id/runs/:id/tasks/:id/partitions":            resolveJobRun,
 	"GET /v1/jobs/:id/runs/:id/external-executions":             resolveJobRun,

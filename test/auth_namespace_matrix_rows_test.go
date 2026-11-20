@@ -476,6 +476,9 @@ func namespaceMatrixRows() map[string]matrixRow {
 		"POST /v1/jobs/:id/runs/:id/receipt/verify": {auth.RouteClassNamespaced, rV, surfaceCore, func(fx *namespaceMatrixFixture) []matrixProbe {
 			return each(runRoute(fx, rV, "/receipt/verify", http.StatusOK), matrixProbe.idem)
 		}},
+		"DELETE /v1/jobs/:id/runs/:id/tasks/:id/descriptor": {auth.RouteClassNamespaced, rO, surfaceCore, func(fx *namespaceMatrixFixture) []matrixProbe {
+			return each(runRoute(fx, rO, "/tasks/"+missingID+"/descriptor", http.StatusNotFound), matrixProbe.idem)
+		}},
 		"GET /v1/jobs/:id/runs/:id/tasks/:id/descriptor": {auth.RouteClassNamespaced, rV, surfaceCore, func(fx *namespaceMatrixFixture) []matrixProbe {
 			return runRoute(fx, rV, "/tasks/ok/descriptor", http.StatusOK)
 		}},

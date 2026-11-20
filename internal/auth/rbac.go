@@ -194,6 +194,9 @@ var endpointPolicy = map[string]RoutePolicy{
 	"POST /v1/jobs/:id/runs/:id/receipt/verify":      namespacedRoute(viewer),
 	"GET /v1/jobs/:id/runs/:id/tasks/:id/descriptor": namespacedRoute(viewer),
 	"GET /v1/jobs/:id/runs/:id/tasks/:id/partitions": namespacedRoute(viewer),
+	// Pruning destroys a completed task run and requires operator in both namespaces.
+	"DELETE /v1/jobs/:id/runs/:id/tasks/:id/descriptor": namespacedRoute(operator),
+
 	// A run's external executions: the run is gated like the routes above, and
 	// the handler lists links only for a cluster viewer (others get an empty list).
 	"GET /v1/jobs/:id/runs/:id/external-executions": namespacedRoute(viewer),
