@@ -141,33 +141,33 @@ func (s *Service) Query(req QueryRequest) (resp *QueryResponse, err error) {
 
 	sqlDB, err := s.db.DB()
 	if err != nil {
-		return nil, err
+		return nil, withQueryStage(queryStageConnection, err)
 	}
 
 	conn, err := sqlDB.Conn(ctx)
 	if err != nil {
-		return nil, err
+		return nil, withQueryStage(queryStageConnection, err)
 	}
 	defer func() {
 		if closeErr := conn.Close(); err == nil && closeErr != nil {
-			err = closeErr
+			err = withQueryStage(queryStageCleanup, closeErr)
 		}
 	}()
 
 	started := time.Now()
 	rows, cleanup, err := s.queryRows(ctx, conn, query)
 	if err != nil {
-		return nil, err
+		return nil, withQueryStage(queryStageExecute, err)
 	}
 	defer func() {
 		if cleanupErr := cleanup(); err == nil && cleanupErr != nil {
-			err = cleanupErr
+			err = withQueryStage(queryStageCleanup, cleanupErr)
 		}
 	}()
 
 	columnTypes, err := rows.ColumnTypes()
 	if err != nil {
-		return nil, err
+		return nil, withQueryStage(queryStageColumns, err)
 	}
 
 	resp = &QueryResponse{
@@ -200,7 +200,7 @@ func (s *Service) Query(req QueryRequest) (resp *QueryResponse, err error) {
 		}
 
 		if err := rows.Scan(scanTargets...); err != nil {
-			return nil, err
+			return nil, withQueryStage(queryStageScan, err)
 		}
 
 		row := make([]any, len(rawValues))
@@ -211,7 +211,7 @@ func (s *Service) Query(req QueryRequest) (resp *QueryResponse, err error) {
 	}
 
 	if err := rows.Err(); err != nil {
-		return nil, err
+		return nil, withQueryStage(queryStageScan, err)
 	}
 
 	resp.RowCount = len(resp.Rows)
@@ -561,4 +561,65 @@ func scanSQL(query string) (string, []int) {
 	}
 
 	return builder.String(), semicolons
+}
+
+// Query failure stages are a fixed vocabulary. They classify where a read-only
+// inspection failed without copying SQL, row data, DSNs, or driver text into
+// the public message.
+const (
+	queryStageConnection = "connection"
+	queryStageExecute    = "execute"
+	queryStageColumns    = "columns"
+	queryStageScan       = "scan"
+	queryStageCleanup    = "cleanup"
+)
+
+type queryStageError struct {
+	stage string
+	err   error
+}
+
+func (e *queryStageError) Error() string {
+	if e == nil || e.err == nil {
+		return ""
+	}
+	return e.err.Error()
+}
+
+func (e *queryStageError) Unwrap() error { return e.err }
+
+func withQueryStage(stage string, err error) error {
+	if err == nil {
+		return nil
+	}
+	var existing *queryStageError
+	if errors.As(err, &existing) {
+		return err
+	}
+	return &queryStageError{stage: stage, err: err}
+}
+
+// FailedQueryMessage keeps the historical substring and appends only a known
+// stage. Driver text, SQL, and row data stay on the wrapped error.
+func FailedQueryMessage(err error) string {
+	message := "failed to execute query"
+	if stage := QueryStage(err); stage != "" {
+		message += " (" + stage + ")"
+	}
+	return message
+}
+
+// QueryStage reports a known inspection stage. Any other error, including one
+// whose stage is outside the fixed vocabulary, reports an empty stage.
+func QueryStage(err error) string {
+	var staged *queryStageError
+	if !errors.As(err, &staged) || staged == nil {
+		return ""
+	}
+	switch staged.stage {
+	case queryStageConnection, queryStageExecute, queryStageColumns, queryStageScan, queryStageCleanup:
+		return staged.stage
+	default:
+		return ""
+	}
 }

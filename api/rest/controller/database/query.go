@@ -22,7 +22,7 @@ func Query(c *echo.Context) error {
 			errors.Is(err, dbsvc.ErrUnsafeQuery) {
 			return echo.NewHTTPError(http.StatusBadRequest, err.Error())
 		}
-		return echo.NewHTTPError(http.StatusInternalServerError, "failed to execute query").Wrap(err)
+		return echo.NewHTTPError(http.StatusInternalServerError, dbsvc.FailedQueryMessage(err)).Wrap(err)
 	}
 
 	return c.JSON(http.StatusOK, resp)

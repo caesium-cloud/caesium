@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 	"testing"
@@ -15,6 +16,7 @@ import (
 	"github.com/caesium-cloud/caesium/test/robustness/cluster"
 	"github.com/caesium-cloud/caesium/test/robustness/recorder"
 	"github.com/google/uuid"
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/client-go/kubernetes"
 )
 
@@ -152,7 +154,8 @@ func runGracefulTriggerShutdown(t *testing.T, kube *kubernetes.Clientset, api *c
 		for _, candidate := range candidates {
 			rows, err := api.QueryTaskRecipes(ctx, observer, candidate.ID)
 			if err != nil {
-				return false, err
+				return false, fmt.Errorf("sql inspection failed observer=%s url=%s run=%s: %w; member_log=%q",
+					leader.Name, observer, candidate.ID, err, observerLogTail(ctx, kube, env.Namespace, leader.Name))
 			}
 			for _, row := range rows {
 				if row.Status == "running" && row.ClaimedBy != "" && row.ClaimedBy != triggerNode.NodeAddress && len(sink.StartsFor(candidate.ID, cluster.BlockStep)) > 0 {
@@ -353,4 +356,35 @@ func validateGracefulShutdownResult(runID, jobID string, before cluster.TaskReci
 		delete(byNonce, event.Nonce)
 	}
 	return nil
+}
+
+// observerLogTail is fetched once, at the moment SQL inspection fails. It does
+// not retry the query. A log-read failure stays visible and does not replace
+// the inspection error.
+func observerLogTail(parent context.Context, kube *kubernetes.Clientset, namespace, pod string) string {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(parent), 5*time.Second)
+	defer cancel()
+	tail := int64(40)
+	stream, err := kube.CoreV1().Pods(namespace).GetLogs(pod, &corev1.PodLogOptions{
+		Container:  cluster.CaesiumContainer,
+		TailLines:  &tail,
+		Timestamps: true,
+	}).Stream(ctx)
+	if err != nil {
+		return "unavailable: " + oneLine(err.Error(), 300)
+	}
+	defer stream.Close()
+	raw, err := io.ReadAll(io.LimitReader(stream, 2048))
+	if err != nil && len(raw) == 0 {
+		return "unavailable: " + oneLine(err.Error(), 300)
+	}
+	return oneLine(string(raw), 1500)
+}
+
+func oneLine(text string, max int) string {
+	text = strings.Join(strings.Fields(text), " ")
+	if max > 0 && len(text) > max {
+		text = text[len(text)-max:]
+	}
+	return text
 }
