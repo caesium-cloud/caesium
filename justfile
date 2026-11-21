@@ -520,7 +520,7 @@ integration-test-distributed: integration-runner
         --network=container:{{ it_container }} \
         -w {{ bld_dir }} \
         {{ integration_runner_image }} \
-        sh -c 'sh scripts/integration-test.sh -test.run "TestIntegrationTestSuite/(TestRunConcurrencyStrategies|TestPriorityRunStartSurfacesAndCronDefault|TestFanOut|TestPlainFailure|TestSecretLogs|TestHaltPolicy|TestReplaceCancel|TestRetryAfterApplyExecutesRegisteredCommand|TestRetryValidatesAgainstTheRegisteredOutputSchema|TestDataAssertionsMetricsPersisted|TestResourceStats|TestCacheNamespaceMove|TestNamespaceLegacyPost|TestNamespaceQuotaRefusesReplayAtCap|TestReplayIntoMovedNamespaceDropsOldFreshnessViews)"' 2>&1; echo $? >"$log.rc"; } | tee "$log"; \
+        sh -c 'sh scripts/integration-test.sh -test.run "TestIntegrationTestSuite/(TestRunConcurrencyStrategies|TestPriorityRunStartSurfacesAndCronDefault|TestFanOut|TestPlainFailure|TestSecretLogs|TestHaltPolicy|TestReplaceCancel|TestRetryAfterApplyExecutesRegisteredCommand|TestRetryValidatesAgainstTheRegisteredOutputSchema|TestDataAssertionsMetricsPersisted|TestResourceStats|TestCacheNamespaceMove|TestNamespaceLegacyPost|TestNamespaceQuotaRefusesReplayAtCap|TestReplayIntoMovedNamespaceDropsOldFreshnessViews|TestDistributedReplayH4DiffRetryAndLiveGauges)"' 2>&1; echo $? >"$log.rc"; } | tee "$log"; \
     rc=$(cat "$log.rc"); \
     passes=$(grep -cE '^[[:space:]]*--- PASS: TestIntegrationTestSuite/' "$log" 2>/dev/null || true); \
     passes=${passes:-0}; \
@@ -532,6 +532,12 @@ integration-test-distributed: integration-runner
     fi; \
     if [ "$passes" -lt {{ distributed_integration_min_pass }} ]; then \
       echo "distributed integration lane executed only $passes scenario(s), expected at least {{ distributed_integration_min_pass }}: the lane is hollow (guards skipped almost everything)"; \
+      {{ container_cli }} logs {{ it_container }} || true; \
+      {{ container_cli }} rm -f {{ it_container }} >/dev/null 2>&1 || true; \
+      exit 1; \
+    fi; \
+    if ! grep -qE '^[[:space:]]*--- PASS: TestIntegrationTestSuite/TestDistributedReplayH4DiffRetryAndLiveGauges([[:space:]]|$)' "$log"; then \
+      echo "distributed integration lane did not record a PASS for TestDistributedReplayH4DiffRetryAndLiveGauges"; \
       {{ container_cli }} logs {{ it_container }} || true; \
       {{ container_cli }} rm -f {{ it_container }} >/dev/null 2>&1 || true; \
       exit 1; \
