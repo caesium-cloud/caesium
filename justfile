@@ -1444,7 +1444,9 @@ ui-ci: builder-full
         sh -c 'npm ci --prefer-offline && npm run lint && npm test && npm run build:ci'
 
 ui-e2e-stopped-member: build
-    cd ui && npm ci && npx playwright install chromium && CAESIUM_CLUSTER_IMAGE={{ local_image_ref }}:{{ tag }} npm run test:e2e -- --project=stopped-member
+    cd ui && if [ ! -x node_modules/.bin/playwright ] || [ ! node_modules/.package-lock.json -nt package-lock.json ]; then npm ci; fi
+    cd ui && npx playwright install chromium
+    CAESIUM_CONTAINER_CLI={{ container_cli }} CAESIUM_CLUSTER_IMAGE={{ local_image_ref }}:{{ tag }} bash scripts/ui-stopped-member.sh
 
 ui-e2e: build-release
     @{{ container_cli }} rm -f caesium-server >/dev/null 2>&1 || true

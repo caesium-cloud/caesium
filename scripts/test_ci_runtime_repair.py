@@ -166,7 +166,9 @@ class NativeRuntimeTests(unittest.TestCase):
                 configure = next(command for command in args if command[-1] == "--configure-docker-cgroupfs")
                 first_stop = next(command for command in args if "stop" in command and "systemctl" in command)
                 self.assertLess(args.index(configure), args.index(first_stop))
-                self.assertLess(args.index(install), args.index(restart))
+                reset = ("sudo", "systemctl", "reset-failed", "containerd.service", "docker.socket", "docker.service")
+                self.assertLess(args.index(install), args.index(reset))
+                self.assertEqual(args[args.index(restart) - 1], reset)
                 self.assertLess(args.index(restart), args.index(verify))
                 source = next(kwargs["input"] for command, kwargs in commands
                               if command[-1] == "/etc/apt/sources.list.d/docker.list")

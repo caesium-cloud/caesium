@@ -824,11 +824,6 @@ jobs:
         run: |
           npm ci
           npx playwright install --with-deps chromium
-      - name: Check console health across a stopped voter
-        working-directory: ui
-        env:
-          CAESIUM_CLUSTER_IMAGE: caesiumcloud/caesium:${{ env.IMAGE_TAG }}-amd64
-        run: npm run test:e2e -- --project=stopped-member --reporter=line
       - name: Pre-pull job images
         id: job-images
         run: |
@@ -869,6 +864,12 @@ jobs:
             fi
             sleep 1
           done
+      - name: Check console health across a stopped voter
+        id: stopped-member
+        env:
+          CAESIUM_CLUSTER_IMAGE: caesiumcloud/caesium:${{ env.IMAGE_TAG }}-amd64
+          CAESIUM_HEALTH_ARTIFACTS: ${{ github.workspace }}/ui/ci-diagnostics/stopped-member
+        run: bash scripts/ui-stopped-member.sh
       - name: Run Playwright E2E
         id: playwright
         working-directory: ui

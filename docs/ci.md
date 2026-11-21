@@ -604,12 +604,15 @@ than this doc should need to.
 
 ### Browser outcomes and diagnostics (distributed-testing W1/G1)
 
-The `ui-e2e` job first runs the `stopped-member` project from the host against
+The `ui-e2e` job runs the `stopped-member` project from the host against
 three Compose members using the candidate release image. With the console open
 on node1, it kills node3, waits for the page and sidebar to show degraded
 quorum, and restarts node3 to verify recovery through normal polling. Run
 `just ui-e2e-stopped-member` to reproduce locally. The test gives each run a
-unique Compose project and removes it on teardown.
+unique Compose project. The launcher collects member logs on failure and removes
+the cluster when the browser exits or the launcher receives SIGINT or SIGTERM.
+CI retains this project’s reports and diagnostics under `ci-diagnostics/stopped-member/`
+in the browser artifact.
 
 For manual inspection, run
 `docker compose -p health-local -f test/cluster-health/compose.yaml up -d --wait`

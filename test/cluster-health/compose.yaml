@@ -3,7 +3,7 @@ x-member: &member
   entrypoint: ["/bin/sh", "-ec"]
   command:
     - |
-      export CAESIUM_NODE_ADDRESS="$$(hostname -i):9001"
+      export CAESIUM_NODE_ADDRESS="$$(hostname -i | awk '{print $$1; exit}'):9001"
       if [ -n "$${JOIN_MEMBER:-}" ]; then
         seed="$$(getent hosts "$$JOIN_MEMBER" | awk 'NR == 1 {print $$1}')"
         test -n "$$seed"
@@ -11,7 +11,7 @@ x-member: &member
       fi
       exec /bin/caesium start
   healthcheck:
-    test: ["CMD", "wget", "-qO", "/dev/null", "http://127.0.0.1:8080/health/live"]
+    test: ["CMD", "wget", "-qO", "/dev/null", "http://127.0.0.1:8080/health/ready"]
     interval: 2s
     timeout: 2s
     retries: 60

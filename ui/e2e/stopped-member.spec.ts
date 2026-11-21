@@ -1,33 +1,23 @@
 import { execFileSync } from "node:child_process";
-import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { expect, test } from "@playwright/test";
+import { failOnUnexpectedPageErrors } from "./helpers/fixtures";
 
-const project = `caesium-health-${randomUUID()}`;
+failOnUnexpectedPageErrors();
+
 const file = fileURLToPath(new URL("../../test/cluster-health/compose.yaml", import.meta.url));
 function compose(...args: string[]) {
-  return execFileSync("docker", ["compose", "-p", project, "-f", file, ...args], {
+  const project = process.env.CAESIUM_HEALTH_PROJECT;
+  if (!project) throw new Error("Start the cluster with scripts/ui-stopped-member.sh");
+  return execFileSync(process.env.CAESIUM_CONTAINER_CLI || "docker", ["compose", "-p", project, "-f", file, ...args], {
     encoding: "utf8",
     timeout: 180_000,
   }).trim();
 }
 
-test.beforeAll(() => {
-  compose("up", "-d", "--wait", "--wait-timeout", "120");
-});
-
-test.afterAll(() => {
-  const info = test.info();
-  try {
-    if (info.status !== info.expectedStatus) console.error(compose("ps", "--all"));
-  } finally {
-    compose("down", "--volumes");
-  }
-});
-
 test("system health tracks a voter stopping and restarting on the same open page", async ({ page }) => {
   const origin = compose("port", "node1", "8080");
-  const target = compose("exec", "-T", "node3", "hostname", "-i") + ":9001";
+  const target = compose("exec", "-T", "node3", "hostname", "-i").split(/\s+/)[0] + ":9001";
   await page.goto(`http://${origin}/system`);
 
   const row = page.getByTestId("cluster-node-row").and(page.locator(`[data-address="${target}"]`));
@@ -42,7 +32,7 @@ test("system health tracks a voter stopping and restarting on the same open page
     await expect(badge).toHaveText("operational", pollWindow);
     await expect(row).toHaveAttribute("data-reachability", "reachable", pollWindow);
     await expect(sidebar).toHaveText("3/3", pollWindow);
-    await expect(page.getByText("All systems nominal", { exact: true })).toBeVisible();
+    await expect(page.getByText("All systems nominal", { exact: true })).toBeVisible(pollWindow);
   }
 
   await expectHealthy();
@@ -51,9 +41,9 @@ test("system health tracks a voter stopping and restarting on the same open page
   await expect(banner).toHaveAttribute("data-tone", "warn", pollWindow);
   await expect(badge).toHaveText("degraded", pollWindow);
   await expect(row).toHaveAttribute("data-reachability", "unreachable", pollWindow);
-  await expect(row.getByText("Unreachable", { exact: true })).toBeVisible();
+  await expect(row.getByText("Unreachable", { exact: true })).toBeVisible(pollWindow);
   await expect(sidebar).toHaveText("2/3", pollWindow);
-  await expect(page.getByRole("region", { name: "Cluster health" }).getByText(/Serving without full redundancy/)).toBeVisible();
+  await expect(page.getByRole("region", { name: "Cluster health" }).getByText(/Serving without full redundancy/)).toBeVisible(pollWindow);
 
   compose("start", "node3");
   await expectHealthy();
