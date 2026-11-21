@@ -1,0 +1,32 @@
+x-member: &member
+  image: ${CAESIUM_CLUSTER_IMAGE:-caesiumcloud/caesium:latest}
+  entrypoint: ["/bin/sh", "-ec"]
+  command:
+    - |
+      export CAESIUM_NODE_ADDRESS="$$(hostname -i):9001"
+      if [ -n "$${JOIN_MEMBER:-}" ]; then
+        seed="$$(getent hosts "$$JOIN_MEMBER" | awk 'NR == 1 {print $$1}')"
+        test -n "$$seed"
+        export CAESIUM_DATABASE_NODES="$$seed:9001"
+      fi
+      exec /bin/caesium start
+  healthcheck:
+    test: ["CMD", "wget", "-qO", "/dev/null", "http://127.0.0.1:8080/health/live"]
+    interval: 2s
+    timeout: 2s
+    retries: 60
+
+services:
+  node1:
+    <<: *member
+    ports: ["127.0.0.1::8080"]
+  node2:
+    <<: *member
+    depends_on:
+      node1: {condition: service_healthy}
+    environment: {JOIN_MEMBER: node1}
+  node3:
+    <<: *member
+    depends_on:
+      node2: {condition: service_healthy}
+    environment: {JOIN_MEMBER: node1}

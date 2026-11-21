@@ -1443,6 +1443,9 @@ ui-ci: builder-full
         {{ local_builder_ref }}:{{ tag }}-full \
         sh -c 'npm ci --prefer-offline && npm run lint && npm test && npm run build:ci'
 
+ui-e2e-stopped-member: build
+    cd ui && npm ci && npx playwright install chromium && CAESIUM_CLUSTER_IMAGE={{ local_image_ref }}:{{ tag }} npm run test:e2e -- --project=stopped-member
+
 ui-e2e: build-release
     @{{ container_cli }} rm -f caesium-server >/dev/null 2>&1 || true
     bash -lc 'set -euo pipefail; \

@@ -604,7 +604,20 @@ than this doc should need to.
 
 ### Browser outcomes and diagnostics (distributed-testing W1/G1)
 
-The default browser lane selects the `network-recovery` Playwright project.
+The `ui-e2e` job first runs the `stopped-member` project from the host against
+three Compose members using the candidate release image. With the console open
+on node1, it kills node3, waits for the page and sidebar to show degraded
+quorum, and restarts node3 to verify recovery through normal polling. Run
+`just ui-e2e-stopped-member` to reproduce locally. The test gives each run a
+unique Compose project and removes it on teardown.
+
+For manual inspection, run
+`docker compose -p health-local -f test/cluster-health/compose.yaml up -d --wait`
+after `just build`. With the same project and file flags, use `port node1 8080`
+to find the console address, `kill -s SIGKILL node3` and `start node3` to
+exercise the outage, and `down --volumes` to remove the cluster.
+
+The default browser lane then selects the `network-recovery` Playwright project.
 Its `default` dependency runs the ordinary scenarios first; recovery scenarios
 then run in a separate worker and browser, so deliberate offline transitions
 cannot disrupt neighboring tests. Both projects appear in the same report.

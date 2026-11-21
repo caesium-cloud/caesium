@@ -824,6 +824,11 @@ jobs:
         run: |
           npm ci
           npx playwright install --with-deps chromium
+      - name: Check console health across a stopped voter
+        working-directory: ui
+        env:
+          CAESIUM_CLUSTER_IMAGE: caesiumcloud/caesium:${{ env.IMAGE_TAG }}-amd64
+        run: npm run test:e2e -- --project=stopped-member --reporter=line
       - name: Pre-pull job images
         id: job-images
         run: |
