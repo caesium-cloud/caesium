@@ -3,6 +3,7 @@
 package test
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"strings"
@@ -85,15 +86,29 @@ steps:
 	s.Require().Equal("running", live.Tasks[0].Status)
 	s.Equal(before, during, "a running replay must leave production metrics unchanged")
 
+	stdout, stderr, err := s.runCLISeparate(
+		"run", "replay", baselineID,
+		"--job-id", job.ID,
+		"--set", "mode=slow",
+		"--idempotency-key", key,
+		"--diff", "--json",
+		"--server", s.caesiumURL,
+	)
+	s.Require().NoError(err, "replay --diff failed:\nstdout=%s\nstderr=%s", stdout, stderr)
+	s.Require().True(json.Valid([]byte(stdout)), "replay --diff --json stdout was not clean JSON:\n%s", stdout)
+	s.NotContains(stdout, "awaiting replay run")
+	s.NotContains(stderr, "replay idempotency key:")
+	var diff runDiffRESTResponse
+	s.Require().NoError(json.Unmarshal([]byte(stdout), &diff))
+	s.Equal(baselineID, diff.LeftRunID)
+	s.Equal(slow.RunID, diff.RightRunID, "the CLI must reuse the in-flight replay")
+	s.True(hasRunDiffChange(diff.ParamChanges, "params.mode", "baseline", "slow"), "diff: %+v", diff.ParamChanges)
+
 	done := s.awaitRun(job.ID, slow.RunID, runTimeout)
 	s.Require().Equal("succeeded", done.Status, done.Error)
 	s.Require().Len(done.Tasks, 1)
 	s.Equal("succeeded", done.Tasks[0].Status)
 	s.Equal("slow", done.Tasks[0].Output["mode"])
-	diff := s.getRunDiff(job.ID, baselineID, slow.RunID)
-	s.Equal(baselineID, diff.LeftRunID)
-	s.Equal(slow.RunID, diff.RightRunID)
-	s.True(hasRunDiffChange(diff.ParamChanges, "params.mode", "baseline", "slow"), "diff: %+v", diff.ParamChanges)
 	s.Equal(before, s.replayHealthSamples(job.ID, alias), "successful replay finalization")
 
 	key = alias + "-fail"

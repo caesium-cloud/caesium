@@ -536,6 +536,12 @@ integration-test-distributed: integration-runner
       {{ container_cli }} rm -f {{ it_container }} >/dev/null 2>&1 || true; \
       exit 1; \
     fi; \
+    if ! grep -qE '^[[:space:]]*--- PASS: TestIntegrationTestSuite/TestDistributedReplayH4DiffRetryAndLiveGauges([[:space:]]|$)' "$log"; then \
+      echo "distributed integration lane did not record a PASS for TestDistributedReplayH4DiffRetryAndLiveGauges"; \
+      {{ container_cli }} logs {{ it_container }} || true; \
+      {{ container_cli }} rm -f {{ it_container }} >/dev/null 2>&1 || true; \
+      exit 1; \
+    fi; \
     echo "distributed integration lane executed $passes scenario(s) (minimum {{ distributed_integration_min_pass }})"; \
     {{ container_cli }} rm -f {{ it_container }} >/dev/null 2>&1 || true
 
