@@ -73,7 +73,18 @@ test("network recovery selection retains every ordinary browser scenario", () =>
     "keycloak",
     "light",
     "network-recovery",
+    "stopped-member",
   ]);
+
+  const stopped = listedProjects("stopped-member");
+  expect([...stopped.keys()]).toEqual(["stopped-member"]);
+  const scenarios = stopped.get("stopped-member")!;
+  expect(scenarios.size).toBeGreaterThan(0);
+  expect([...scenarios].every(identity => identity.startsWith("stopped-member.spec.ts:"))).toBe(true);
+  expect(scenarios).toEqual(all.get("stopped-member"));
+  for (const [name, tests] of all) {
+    if (name !== "stopped-member") expect(intersection(scenarios, tests)).toEqual(new Set());
+  }
 
   const ordinary = all.get("default") ?? new Set<string>();
   const recovery = all.get("network-recovery") ?? new Set<string>();

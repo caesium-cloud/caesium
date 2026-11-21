@@ -332,6 +332,9 @@ def configure_containerd(architecture, data):
         f"ExecStart={binary_directory / 'containerd'}\n"
         f'Environment="PATH={search_path}"\n'), stdout=subprocess.DEVNULL)
     run("sudo", "systemctl", "daemon-reload")
+    # Package installation can consume the hosted runner's start burst before
+    # our deliberate restart. Clear the old counters after installing the override.
+    run("sudo", "systemctl", "reset-failed", "containerd.service", "docker.socket", "docker.service")
     run("sudo", "systemctl", "restart", "containerd.service", "docker.service")
     daemon = process_probe("daemon", str(binary_directory / "containerd"), hashes["containerd"])
     version = run(str(binary_directory / "containerd-shim-runc-v2"), "--version", capture_output=True).stdout

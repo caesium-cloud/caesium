@@ -864,6 +864,12 @@ jobs:
             fi
             sleep 1
           done
+      - name: Check console health across a stopped voter
+        id: stopped-member
+        env:
+          CAESIUM_CLUSTER_IMAGE: caesiumcloud/caesium:${{ env.IMAGE_TAG }}-amd64
+          CAESIUM_HEALTH_ARTIFACTS: ${{ github.workspace }}/ui/ci-diagnostics/stopped-member
+        run: bash scripts/ui-stopped-member.sh
       - name: Run Playwright E2E
         id: playwright
         working-directory: ui
