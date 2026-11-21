@@ -33,7 +33,7 @@ export default defineConfig({
   projects: [
     {
       name: "default",
-      testIgnore: ["**/auth/**/*.spec.ts", "**/connectors/**/*.spec.ts", "**/network-recovery.spec.ts", "**/cluster-recovery.spec.ts", "**/keycloak*.spec.ts"],
+      testIgnore: ["**/auth/**/*.spec.ts", "**/connectors/**/*.spec.ts", "**/network-recovery.spec.ts", "**/cluster-recovery.spec.ts", "**/stopped-member.spec.ts", "**/keycloak*.spec.ts"],
     },
     {
       name: "light",
@@ -74,6 +74,12 @@ export default defineConfig({
       name: "keycloak",
       testMatch: "**/keycloak*.spec.ts",
       use: { trace: "off", video: "off", screenshot: "only-on-failure" },
+    },
+    {
+      name: "stopped-member",
+      testMatch: "**/stopped-member.spec.ts",
+      timeout: 300_000,
+      retries: 0,
     },
     {
       // Owner-crash console journey. CI selects network-recovery (which pulls
