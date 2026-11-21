@@ -62,8 +62,8 @@ internal state.
 
 ## Progress (as of 2026-07-07)
 
-**Complete.** Shipped in one wave via
-the `exec-plan-wave` skill (codex implementation, orchestrator verify/publish/merge):
+**Complete except for C3.** The operator deferred attribution removal. The
+remaining items shipped in one wave via the `exec-plan-wave` skill (codex implementation, orchestrator verify/publish/merge):
 
 - **A** — run page leads with status + a labeled execution timeline + interactive DAG + per-task logs; the receipt is collapsed below the fold and de-alarmed (neutral styling for not-attested/degraded/digest-pinned-off — red is reserved for real failure or attestation tampering); task rows render in execution order. PR #312.
 - **B** — job-detail header splits view-tabs from actions with Pause/Backfill in an always-reachable "⋯" overflow menu (+ aria-labels); a params+confirm `TriggerDialog` landing on the live run view; DAG counters surface failed + blocked; queue rows show why-pending + age + inspect; secondary views are deep-linkable sub-routes; and a queue Cancel affordance wired to the new endpoint (409 surfaced distinctly). PR #314 (frontend).
@@ -89,6 +89,10 @@ completeness test), a race-safe conditional delete on the unclaimed row with a
 | B | Job-detail page: overflow-safe header, intentional trigger, honest queue & counts, deep-links | **P0** | ✅ Shipped (#314 frontend, #311 B5 backend) |
 | C | DAG canvas & node legibility: task-name-first nodes, trivial-graph fit, on-canvas attribution | P1 | ✅ Shipped (#310); attribution retained |
 | D | Task log drawer: room to breathe, no mid-word wrap, disambiguated state labels | P1 | ✅ Shipped (#313) |
+
+## Attribution decision (2026-11-21)
+
+The project accepted the on-canvas credit as the resolution of [issue #411](https://github.com/caesium-cloud/caesium/issues/411). PR #756 adds browser coverage for that decision.
 
 ## Streams
 
@@ -257,9 +261,9 @@ scan: the node's *largest* text is the image (`alpine:3.23`) while the task name
 — the primary identifier — is small, `shortId`-truncated, and hard-cut mid-word
 ("bootstra", "process-", "emit-liv"). Single-task DAGs waste the whole canvas
 (one node floats in a huge empty grid because auto-fit doesn't scale it up) and
-render dangling input/output handles on nodes with no edges. And a "React Flow"
-attribution watermark shows bottom-right on every DAG, which reads as unbranded
-for a product surface.
+render dangling input/output handles on nodes with no edges. The console keeps
+the React Flow credit in the bottom-right corner and styles it to match the
+canvas theme.
 
 - [x] C1. Promote the task name to the node's primary line — the full task name
       with `text-overflow: ellipsis` + a `title` tooltip — and demote the image
@@ -282,8 +286,8 @@ for a product surface.
 - [x] C3. Keep the visible React Flow link on the DAG canvas. On 2026-07-07
       the operator chose to retain the default attribution. PR #310 shipped
       that choice. The console styles the credit in `ui/src/index.css`.
-      Revisit removal if the project later confirms a Pro subscription or
-      an OSS exception. See [issue #411](https://github.com/caesium-cloud/caesium/issues/411).
+      If the project later confirms a Pro subscription or an OSS exception
+      and wants to remove the credit, track that change in a new issue.
 
 ### Stream D — Task log drawer
 
@@ -403,8 +407,8 @@ Per-stream / per-item gates:
   or with no RBAC policy entry, blocks review.
 - **C1/C2** — `TaskNode.test.tsx` / `JobDAG.test.tsx` assertions: full task
   name is the primary line and single-node graphs fit without dangling handles.
-- **C3** — `ui/e2e/facelift-qa.spec.ts` checks the visible attribution link
-  inside the rendered DAG.
+- **C3 (2026-11-21)** — `ui/e2e/facelift-qa.spec.ts` checks the attribution
+  link’s destination, theme color, contrast, and clickability inside the job DAG.
 - **D1/D2** — `TaskDetailPanel.test.tsx` assertions that the drawer does not
   overlap the selected node and that state labels carry disambiguating tooltips.
 - This plan's checkbox ticked, per-stream `## Progress` bullet appended for the

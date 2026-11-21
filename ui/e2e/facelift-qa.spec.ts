@@ -35,14 +35,31 @@ async function contrast(text: Locator, background: Locator) {
 }
 
 test("job DAG displays the React Flow attribution link on the canvas", async ({ page, request }) => {
+  await page.setViewportSize({ width: 1280, height: 720 });
   const [definition] = await loadFixtureDefinitions("branching.job.yaml");
   await applyDefinitions(request, definition);
   const job = await findJobByAlias(request, String(definition.metadata!.alias));
   await page.goto(`/jobs/${job.id}`);
-  const credit = page.locator(".react-flow").getByRole("link", { name: "React Flow attribution" });
+  const canvas = page.getByTestId("job-dag-canvas");
+  const attribution = canvas.locator(".react-flow__attribution");
+  const credit = attribution.getByRole("link", { name: "React Flow attribution" });
   await expect(credit).toBeVisible();
   await expect(credit).toHaveText("React Flow");
   await expect(credit).toHaveAttribute("href", /^https:\/\/reactflow\.dev\/?$/);
+  await expect(attribution).toHaveCSS("background-color", "rgba(0, 0, 0, 0)");
+  const mutedForeground = await canvas.evaluate(el => {
+    const sample = document.createElement("span");
+    sample.style.color = "hsl(var(--muted-foreground))";
+    el.append(sample);
+    const color = getComputedStyle(sample).color;
+    sample.remove();
+    return color;
+  });
+  await expect(credit).toHaveCSS("color", mutedForeground);
+  expect(await contrast(credit, canvas)).toBeGreaterThanOrEqual(4.5);
+  await credit.click({ trial: true });
+  await page.setViewportSize({ width: 375, height: 812 });
+  await credit.click({ trial: true });
 });
 
 test("ordinary scrolling reaches the receipt without growing the run graph", async ({ page, request }) => {
