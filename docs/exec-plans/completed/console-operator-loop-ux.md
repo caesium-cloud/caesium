@@ -1,11 +1,10 @@
 # Console Operator Loop UX — Job Detail, Run, and DAG Surfaces
 
-Last updated: 2026-07-07
+Last updated: 2026-11-21
 
 > **Status: Complete — shipped 2026-07-07 (Streams A/B/C/D plus the B5 queue-cancel
-> backend) and archived to `docs/exec-plans/completed/`.** The one deferred item is
-> C3 (React Flow watermark removal), kept on the canvas by operator decision pending
-> a Pro subscription / OSS exception.
+> backend) and archived to `docs/exec-plans/completed/`.** The console keeps React Flow's
+> on-canvas attribution by operator decision (C3, #411).
 
 This plan closes the gap between what the Caesium console *shows* and what an
 operator actually needs from the job-detail, run-detail, and DAG surfaces:
@@ -63,13 +62,13 @@ internal state.
 
 ## Progress (as of 2026-07-07)
 
-**Complete** (except C3, deferred by operator decision). Shipped in one wave via
-the `exec-plan-wave` skill (codex implementation, orchestrator verify/publish/merge):
+**Complete except for C3.** The operator deferred attribution removal. The
+remaining items shipped in one wave via the `exec-plan-wave` skill (codex implementation, orchestrator verify/publish/merge):
 
 - **A** — run page leads with status + a labeled execution timeline + interactive DAG + per-task logs; the receipt is collapsed below the fold and de-alarmed (neutral styling for not-attested/degraded/digest-pinned-off — red is reserved for real failure or attestation tampering); task rows render in execution order. PR #312.
 - **B** — job-detail header splits view-tabs from actions with Pause/Backfill in an always-reachable "⋯" overflow menu (+ aria-labels); a params+confirm `TriggerDialog` landing on the live run view; DAG counters surface failed + blocked; queue rows show why-pending + age + inspect; secondary views are deep-linkable sub-routes; and a queue Cancel affordance wired to the new endpoint (409 surfaced distinctly). PR #314 (frontend).
 - **B5** — the queue-cancel backend: `DELETE /v1/jobs/:id/queue/:queue_id`, a race-safe conditional delete on the unclaimed row (409 when already claimed, 404 when absent), an explicit Operator RBAC policy entry + `run_queue.cancel` scope, and a live-server integration test. PR #311 (backend).
-- **C** — DAG nodes lead with the full task name (ellipsis + tooltip) and demote the image; single-node graphs fit tightly with handles hidden on edgeless nodes. **C3 (watermark removal) deferred** — the operator kept the on-canvas React Flow attribution (no Pro/OSS exception). PR #310.
+- **C** — DAG nodes lead with the full task name (ellipsis + tooltip) and demote the image; single-node graphs fit tightly with handles hidden on edgeless nodes. The operator chose to keep the on-canvas React Flow attribution. PR #310.
 - **D** — the task log drawer widens, offsets the host so it no longer occludes the selected node, renders structured logs through a no-wrap scrollable viewer, and disambiguates the log-state labels (Live stream / Retained snapshot / Truncated output). PR #313.
 
 Post-review hardening (404-vs-409 queue semantics, the Cancel-button reset, a structured-log detection threshold, and the e2e reconciliation for the overflow menu + renamed labels) landed in the same PRs.
@@ -88,8 +87,12 @@ completeness test), a race-safe conditional delete on the unclaimed row with a
 |--------|-------|----------|--------|
 | A | Run page: lead with status/timeline/DAG/logs, demote & de-alarm the receipt, order tasks | **P0** | ✅ Shipped (#312) |
 | B | Job-detail page: overflow-safe header, intentional trigger, honest queue & counts, deep-links | **P0** | ✅ Shipped (#314 frontend, #311 B5 backend) |
-| C | DAG canvas & node legibility: task-name-first nodes, trivial-graph fit, no watermark | P1 | ✅ Shipped (#310); C3 deferred (watermark kept) |
+| C | DAG canvas & node legibility: task-name-first nodes, trivial-graph fit, on-canvas attribution | P1 | ✅ Shipped (#310); attribution retained |
 | D | Task log drawer: room to breathe, no mid-word wrap, disambiguated state labels | P1 | ✅ Shipped (#313) |
+
+## Attribution decision (2026-11-21)
+
+The project accepted the on-canvas credit as the resolution of [issue #411](https://github.com/caesium-cloud/caesium/issues/411). PR #756 adds browser coverage for that decision.
 
 ## Streams
 
@@ -258,9 +261,9 @@ scan: the node's *largest* text is the image (`alpine:3.23`) while the task name
 — the primary identifier — is small, `shortId`-truncated, and hard-cut mid-word
 ("bootstra", "process-", "emit-liv"). Single-task DAGs waste the whole canvas
 (one node floats in a huge empty grid because auto-fit doesn't scale it up) and
-render dangling input/output handles on nodes with no edges. And a "React Flow"
-attribution watermark shows bottom-right on every DAG, which reads as unbranded
-for a product surface.
+render dangling input/output handles on nodes with no edges. The console keeps
+the React Flow credit in the bottom-right corner and styles it to match the
+canvas theme.
 
 - [x] C1. Promote the task name to the node's primary line — the full task name
       with `text-overflow: ellipsis` + a `title` tooltip — and demote the image
@@ -280,20 +283,11 @@ for a product surface.
       Note (W1-γ): `JobDAG` passes incoming/outgoing/total edge degree into DAG
       nodes, isolated nodes hide handles, and single-node DAGs use tighter
       `fitViewOptions`.
-- [ ] C3. (Deferred 2026-07-07 — the operator chose to keep the on-canvas watermark; no React Flow Pro subscription / OSS exception is confirmed. C1/C2 shipped without it.) Hide the React Flow attribution watermark on every DAG
-      (`proOptions={{ hideAttribution: true }}` on the `ReactFlow` element) and
-      drop the now-dead `.react-flow__attribution` styling.
-      **Licensing gate**: xyflow's terms ask that you either keep the "React
-      Flow" attribution or hold a Pro subscription / approved OSS exception to
-      remove it (the library is MIT, but `hideAttribution` is governed by their
-      ToS). Before shipping this item, confirm the project's stance; if a
-      subscription/exception isn't in place, the fallback is to keep a
-      lightweight "Powered by React Flow" credit in an About/footer surface
-      rather than the on-canvas watermark, which still de-clutters the DAG.
-      Files: `ui/src/features/jobs/JobDAG.tsx`, `ui/src/index.css`.
-      Note (W1-γ): implemented on-canvas attribution hiding; orchestrator still
-      needs to confirm the Pro/OSS exception stance or add the fallback footer
-      credit before publication.
+- [x] C3. Keep the visible React Flow link on the DAG canvas. On 2026-07-07
+      the operator chose to retain the default attribution. PR #310 shipped
+      that choice. The console styles the credit in `ui/src/index.css`.
+      If the project later confirms a Pro subscription or an OSS exception
+      and wants to remove the credit, track that change in a new issue.
 
 ### Stream D — Task log drawer
 
@@ -411,9 +405,10 @@ Per-stream / per-item gates:
   `TestAuthMiddlewareMountedRoutesHaveRBACPolicy` passes) and scoped-key
   allow/deny/audit coverage. A new `api/rest` endpoint with no `test/` scenario,
   or with no RBAC policy entry, blocks review.
-- **C1/C2/C3** — `TaskNode.test.tsx` / `JobDAG.test.tsx` assertions: full task
-  name is the primary line, single-node graphs fit without dangling handles, and
-  no `.react-flow__attribution` node is present.
+- **C1/C2** — `TaskNode.test.tsx` / `JobDAG.test.tsx` assertions: full task
+  name is the primary line and single-node graphs fit without dangling handles.
+- **C3 (2026-11-21)** — `ui/e2e/facelift-qa.spec.ts` checks the attribution
+  link’s destination, theme color, contrast, and clickability inside the job DAG.
 - **D1/D2** — `TaskDetailPanel.test.tsx` assertions that the drawer does not
   overlap the selected node and that state labels carry disambiguating tooltips.
 - This plan's checkbox ticked, per-stream `## Progress` bullet appended for the
@@ -439,8 +434,7 @@ The plan is done when **all** of these hold:
    routes.
 3. **Stream C — DAG nodes read at a glance**: the node's primary line is the full
    task name (ellipsis + tooltip), single-node DAGs fit tightly with no dangling
-   handles, and no React Flow watermark renders — asserted by
-   `TaskNode.test.tsx` / `JobDAG.test.tsx`.
+   handles, and the canvas displays the React Flow credit.
 4. **Stream D — the log drawer has room and legible state**: the drawer no longer
    occludes its node, structured lines scroll horizontally instead of wrapping
    mid-word, and the state labels are disambiguated — asserted by

@@ -325,7 +325,7 @@ export function JobDAG({ dag, runStartedAt, runStatus, runCompletedAt, atoms, ta
 
   return (
     <>
-      <div className="relative h-full w-full overflow-hidden rounded-lg bg-dag-bg" onKeyDownCapture={(event) => {
+      <div data-testid="job-dag-canvas" className="relative h-full w-full overflow-hidden rounded-lg bg-dag-bg" onKeyDownCapture={(event) => {
         const target = event.target as HTMLElement;
         if ((event.key === "Enter" || event.key === " ") && target.matches(".react-flow__node")) {
           const id = target.dataset.id;
