@@ -326,17 +326,23 @@ def _soak_verdict(record_path, sha):
     return record, None
 
 
-def _performance_verdicts(evidence_dir):
+def _performance_verdicts(evidence_dir, sha):
+    known_verdicts = runpy.run_path(str(SCRIPTS / "compare-performance.py"))["EXIT_BY_OVERALL"]
     verdicts = []
-    for report in sorted(Path(evidence_dir).glob("performance-gate-evidence-*/evidence.json")):
+    for report in sorted(Path(evidence_dir).glob("performance-gate-evidence-*")):
         try:
-            row = json.loads(report.read_text())["scenarios"][0]
-        except (OSError, ValueError, KeyError, IndexError, TypeError):
-            verdicts.append(f"{report.parent.name}: unreadable")
-            continue
-        perf = row.get("performance") or {}
-        verdicts.append(f"{report.parent.name}: row {row.get('status')}, overall {perf.get('overall')}")
-    return verdicts
+            record = json.loads((report / "evidence.json").read_text())
+            row, = record["scenarios"]
+            overall = row["performance"]["overall"]
+            if (record["candidate_sha"] != sha or row["candidate_sha"] != sha or
+                    row["id"] != "e4-performance-gate" or
+                    row["status"] not in ("pass", "fail", "inconclusive") or
+                    overall not in known_verdicts):
+                raise ValueError("invalid performance verdict")
+        except (OSError, ValueError, KeyError, TypeError):
+            return [], f"{report.name}: missing or invalid verdict for candidate {sha}"
+        verdicts.append(f"{report.name}: row {row['status']}, overall {overall}")
+    return verdicts, "" if verdicts else "job succeeded but left no report"
 
 
 def summarize(args, results_raw):
@@ -391,10 +397,10 @@ def summarize(args, results_raw):
                       f"{', '.join(record.get('failed_gates') or []) or 'none'}")
             rows.append((job, f"advisory: {record.get('result')}", detail, reproduce))
             continue
-        verdicts = _performance_verdicts(args.evidence_dir)
-        if not verdicts:
+        verdicts, problem = _performance_verdicts(args.evidence_dir, sha)
+        if problem:
             failing.append(job)
-            rows.append((job, "FAIL", f"{lane.title}: job succeeded but left no report", reproduce))
+            rows.append((job, "FAIL", f"{lane.title}: {problem}", reproduce))
             continue
         rows.append((job, "advisory: recorded", f"{lane.title}: " + "; ".join(verdicts), reproduce))
 
@@ -446,6 +452,7 @@ def cmd_summary(args):
     output = os.environ.get("GITHUB_OUTPUT")
     if output:
         with open(output, "a", encoding="utf-8") as handle:
+            handle.write(f"verdict={'failing' if failing else 'green'}\n")
             handle.write(f"failing={','.join(failing)}\n")
             handle.write(f"triage_owner={args.triage_owner or ''}\n")
     return 0

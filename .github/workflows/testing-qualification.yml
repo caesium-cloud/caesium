@@ -16,8 +16,9 @@ name: Testing qualification
 # Each lane's job is independent (one lane failing never cancels or hides
 # another); `summary` always runs, writes one job summary, and on a SCHEDULED
 # night with a failing lane adds ONE comment to the single open issue titled
-# "Nightly qualification failures" (opening it if none is open). Manual
-# dispatches never touch issues. Triage owner: the CODEOWNERS default owners.
+# "Nightly qualification failures" (opening it if none is open). A green first attempt
+# closes the tracker. Manual dispatches never touch issues. Triage owner: the
+# CODEOWNERS default owners.
 #
 # Nightly results are broader evidence about the scheduled commit (master's
 # tip), never proof for an individual PR, and never merge- or publish-gating:
@@ -124,9 +125,12 @@ jobs:
             --soak-profile "$SOAK_PROFILE" \
             --codeowners .github/CODEOWNERS \
             --markdown-out .tmp/qualification/summary.md
-      # Scheduled nights only: one comment per failing night on one issue.
-      - name: Record a failing night on the triage issue
-        if: github.event_name == 'schedule' && steps.fold.outputs.failing != ''
+      # A rerun of an older green night must never close a newer incident.
+      - name: Update the nightly triage issue
+        if: >-
+          github.event_name == 'schedule' && steps.fold.outcome == 'success' &&
+          (steps.fold.outputs.failing != '' ||
+           (github.run_attempt == '1' && needs.qualification.result == 'success' && steps.fold.outputs.verdict == 'green'))
         env:
           GH_TOKEN: ${{ github.token }}
           FAILING: ${{ steps.fold.outputs.failing }}
@@ -134,8 +138,14 @@ jobs:
         run: |
           set -euo pipefail
           title="Nightly qualification failures"
-          number="$(gh issue list --state open --search "\"$title\" in:title" --json number,title \
+          number="$(gh issue list --author app/github-actions --state open --search "\"$title\" in:title" --json number,title \
             --jq "map(select(.title == \"$title\")) | .[0].number // empty")"
+          if [ -z "$FAILING" ]; then
+            if [ -n "$number" ]; then
+              gh issue close "$number" --comment "Scheduled qualification passed on \`$GITHUB_SHA\`: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+            fi
+            exit 0
+          fi
           {
             echo "Failing lanes: \`$FAILING\` on \`$GITHUB_SHA\`."
             echo ""

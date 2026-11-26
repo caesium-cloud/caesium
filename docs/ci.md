@@ -2721,8 +2721,9 @@ registry and holds both the release gate and the nightly summary.
   re-validates every gated report against the run SHA, writes per-lane
   verdicts with one-command reproductions, and on a failing **scheduled**
   night adds one comment to a single "Nightly qualification failures" issue
-  (triage owner: the CODEOWNERS `*` rule). Manual dispatches never create or
-  comment on issues. Lane classes: release-required F2 `lifecycle-cluster`,
+  (triage owner: the CODEOWNERS `*` rule). A green first-attempt scheduled
+  run closes the Actions-owned tracker with the candidate SHA and run link.
+  Manual dispatches never update issues. Lane classes: release-required F2 `lifecycle-cluster`,
   D3 `console-recovery`, B3 `core-robustness-nightly`; nightly-required
   `fuzz-campaign`; advisory `performance-gate` and `soak` (the soak is
   known-failing on #598–#603, records `soak.json`'s verdict, fails only when
