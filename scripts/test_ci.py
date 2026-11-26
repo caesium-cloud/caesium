@@ -3559,7 +3559,9 @@ class TestingQualificationWorkflowTests(unittest.TestCase):
         self.assertEqual(fold["env"]["LANE_RESULTS_JSON"], "${{ needs.qualification.outputs.results }}")
         self.assertIn("scripts/qualification-gate.py summary", fold["run"])
         issue = next(step for step in steps if "gh issue" in step.get("run", ""))
-        self.assertEqual(issue["if"], "github.event_name == 'schedule' && steps.fold.outputs.failing != ''")
+        self.assertEqual(" ".join(issue["if"].split()), "github.event_name == 'schedule' && steps.fold.outcome == 'success' && "
+                         "(steps.fold.outputs.failing != '' || (github.run_attempt == '1' && "
+                         "needs.qualification.result == 'success' && steps.fold.outputs.verdict == 'green'))")
         self.assertIn('title="Nightly qualification failures"', issue["run"])
         self.assertIn("gh issue comment", issue["run"])
         self.assertIn("gh issue create", issue["run"])
@@ -3574,6 +3576,25 @@ class TestingQualificationWorkflowTests(unittest.TestCase):
         self.assertLess(steps.index(issue), steps.index(fail))
         download = next(step for step in steps if step.get("uses", "").startswith("actions/download-artifact"))
         self.assertEqual(download["with"]["pattern"], "*-evidence*")
+
+    def test_green_tracker_update_closes_only_an_existing_issue_with_run_evidence(self):
+        steps = NIGHTLY_JOBS["summary"]["steps"]
+        command = next(step["run"] for step in steps if "gh issue close" in step.get("run", ""))
+        for number in ("742", ""):
+            with self.subTest(number=number), tempfile.TemporaryDirectory() as tmp:
+                gh = Path(tmp) / "gh"
+                gh.write_text('#!/bin/sh\necho "$*" >> calls\n'
+                              'if [ "$2" = list ]; then echo "$NUMBER"; fi\n')
+                gh.chmod(0o755)
+                env = dict(os.environ, PATH=tmp + os.pathsep + os.environ["PATH"], NUMBER=number,
+                           FAILING="", GITHUB_SHA=CANDIDATE_SHA, GITHUB_RUN_ID="123",
+                           GITHUB_SERVER_URL="https://github.com", GITHUB_REPOSITORY="owner/repo")
+                subprocess.run(["bash", "-c", command], cwd=tmp, env=env, check=True)
+                lookup, *updates = (Path(tmp) / "calls").read_text().splitlines()
+                self.assertIn("issue list --author app/github-actions --state open", lookup)
+                expected = (f"issue close 742 --comment Scheduled qualification passed on `{CANDIDATE_SHA}`: "
+                            "https://github.com/owner/repo/actions/runs/123")
+                self.assertEqual(updates, [expected] if number else [])
 
     def test_results_job_reports_every_lane(self):
         results_job = LANE_JOBS["results"]
@@ -3604,7 +3625,8 @@ class QualificationSummaryTests(unittest.TestCase):
                 path.write_text(json.dumps(evidence_report(sha=sha, gate=lane.gate)))
         perf = evidence / "performance-gate-evidence-1" / "evidence.json"
         perf.parent.mkdir(parents=True)
-        perf.write_text(json.dumps({"scenarios": [{"id": "e4-performance-gate", "status": "fail",
+        perf.write_text(json.dumps({"candidate_sha": sha, "scenarios": [{"candidate_sha": sha,
+                                                   "id": "e4-performance-gate", "status": "fail",
                                                    "performance": {"overall": "inconclusive_unresolved"}}]}))
         soak = evidence / "soak-evidence" / "soak.json"
         soak.parent.mkdir(parents=True)
@@ -3651,6 +3673,22 @@ class QualificationSummaryTests(unittest.TestCase):
                 json.dumps({"candidate_sha": CANDIDATE_SHA, "result": "incomplete"}))
             _, failing = self.fold(self.args(evidence), results)
             self.assertEqual(failing, ["performance-gate", "soak"])
+
+    def test_invalid_performance_report_fails_even_alongside_a_valid_verdict(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            evidence, results = self.honest_night(tmp)
+            valid = json.loads((evidence / "performance-gate-evidence-1/evidence.json").read_text())
+            other = evidence / "performance-gate-evidence-2/evidence.json"
+            other.parent.mkdir()
+            stale = dict(valid, candidate_sha="f" * 40)
+            missing = copy.deepcopy(valid)
+            del missing["scenarios"][0]["performance"]["overall"]
+            for contents in ("truncated", json.dumps(stale), json.dumps(missing)):
+                with self.subTest(contents=contents):
+                    other.write_text(contents)
+                    markdown, failing = self.fold(self.args(evidence), results)
+                    self.assertEqual(failing, ["performance-gate"])
+                    self.assertIn("performance-gate-evidence-2: missing or invalid verdict", markdown)
 
     def test_missing_results_or_a_refused_selection_fail_the_night(self):
         with tempfile.TemporaryDirectory() as tmp:
