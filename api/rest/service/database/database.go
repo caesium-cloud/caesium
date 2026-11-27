@@ -3,6 +3,7 @@ package database
 import (
 	"context"
 	"database/sql"
+	"database/sql/driver"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -160,8 +161,9 @@ func (s *Service) Query(req QueryRequest) (resp *QueryResponse, err error) {
 		return nil, withQueryStage(queryStageExecute, err)
 	}
 	defer func() {
-		if cleanupErr := cleanup(); err == nil && cleanupErr != nil {
-			err = withQueryStage(queryStageCleanup, cleanupErr)
+		if cleanupErr := cleanup(); cleanupErr != nil {
+			resp = nil
+			err = errors.Join(err, withQueryStage(queryStageCleanup, cleanupErr))
 		}
 	}()
 
@@ -245,23 +247,31 @@ func (s *Service) queryRows(ctx context.Context, conn *sql.Conn, query string) (
 		}, nil
 	}
 
+	// A failed PRAGMA can leave the session state uncertain. Discard the
+	// pinned connection before Close can return it to the shared pool.
+	discard := func() { _ = conn.Raw(func(any) error { return driver.ErrBadConn }) }
 	if _, err := conn.ExecContext(ctx, "PRAGMA query_only = ON"); err != nil {
+		discard()
 		return nil, nil, err
+	}
+
+	reset := func() error {
+		resetCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), queryTimeout)
+		defer cancel()
+		_, err := conn.ExecContext(resetCtx, "PRAGMA query_only = OFF")
+		if err != nil {
+			discard()
+		}
+		return err
 	}
 
 	rows, err := conn.QueryContext(ctx, query)
 	if err != nil {
-		_, _ = conn.ExecContext(ctx, "PRAGMA query_only = OFF")
-		return nil, nil, err
+		return nil, nil, errors.Join(err, reset())
 	}
 
 	return rows, func() error {
-		rowsErr := rows.Close()
-		_, pragmaErr := conn.ExecContext(context.Background(), "PRAGMA query_only = OFF")
-		if rowsErr != nil {
-			return rowsErr
-		}
-		return pragmaErr
+		return errors.Join(rows.Close(), reset())
 	}, nil
 }
 
